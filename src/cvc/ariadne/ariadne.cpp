@@ -996,16 +996,24 @@ void Runtime::Impl::emit_container(const Widget &w) {
   if (w.layout.kind == LayoutKind::Grid || w.layout.kind == LayoutKind::Horizontal) {
     const std::string &id = w.id.empty() ? w.label : w.id;
     // §11.4 two-way track edge: a resizable row-split grid persists its dragged pane sizes to
-    // tree.<id>.tracks. Seed the backend from the persisted sizes before opening (apply-once on the
-    // backend side), then write the post-drag sizes back after closing. A plain table has no
-    // draggable rows, so it neither seeds nor persists.
+    // tree.<id>.tracks, and a resizable table its column widths to tree.<id>.columns. Seed the
+    // backend from the persisted sizes before opening (apply-once on the backend side), then write
+    // the post-drag sizes back after closing. A table that is not resizable has nothing to drag,
+    // so it neither seeds nor persists.
     const bool split = w.layout.is_row_split();
-    std::string tracks_path;
+    const bool table = w.layout.resizable && !split;
+    std::string tracks_path, columns_path;
     if (split) {
       tracks_path = resolve("tree." + id + ".tracks");
       const std::vector<float> seed = parse_tracks(read_string(app, tracks_path));
       if (!seed.empty())
         b.seed_grid_tracks(seed);
+    }
+    if (table) {
+      columns_path = resolve("tree." + id + ".columns");
+      const std::vector<float> seed = parse_tracks(read_string(app, columns_path));
+      if (!seed.empty())
+        b.seed_grid_columns(seed);
     }
     if (b.begin_grid(w.layout, id.c_str())) {
       for (const Widget &c : w.children) {
@@ -1028,6 +1036,11 @@ void Runtime::Impl::emit_container(const Widget &w) {
         const std::vector<float> cur = b.grid_tracks();
         if (!cur.empty())
           write<std::string>(app, tracks_path, format_tracks(cur));
+      }
+      if (table) {
+        const std::vector<float> cur = b.grid_columns();
+        if (!cur.empty())
+          write<std::string>(app, columns_path, format_tracks(cur));
       }
     }
   } else {

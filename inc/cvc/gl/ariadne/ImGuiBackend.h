@@ -47,6 +47,8 @@ public:
   void end_grid() override;
   void seed_grid_tracks(const std::vector<float> &sizes) override; // §11.4 (pre begin_grid)
   std::vector<float> grid_tracks() const override;                 // §11.4 (post end_grid)
+  void seed_grid_columns(const std::vector<float> &widths) override; // §11.4 (pre begin_grid)
+  std::vector<float> grid_columns() const override;                  // §11.4 (post end_grid)
   void begin_disabled() override; // §4: ImGui::BeginDisabled (greyed, non-interactive)
   void end_disabled() override;
   void set_tooltip(const char *text) override; // §4: hover tooltip on the last item
@@ -113,7 +115,8 @@ private:
   // vertical split-pane stack with draggable seams (row splitter). Held on a
   // stack so nested grids compose. No ImGui types here (backend-header-clean).
   struct GridState {
-    bool split = false; // split-pane mode vs table mode
+    bool split = false;     // split-pane mode vs table mode
+    bool resizable = false; // table mode: draggable columns, whose widths persist (§11.4)
     int cols = 1;
     int cell = 0;              // cells emitted so far
     std::vector<float> row_px; // resolved row heights (px; 0 = auto/fit)
@@ -138,6 +141,9 @@ private:
   std::vector<float> m_pendingTracks;
   bool m_haveTracks = false;
   std::vector<float> m_lastGridTracks;
+  std::vector<float> m_pendingColumns; // the same, for a resizable table's column widths
+  bool m_haveColumns = false;
+  std::vector<float> m_lastGridColumns;
 
   // Host-registered raw-ImGui draw fns for custom widget types (register_widget).
   std::unordered_map<std::string, CustomDrawFn> m_customWidgets;

@@ -9,8 +9,9 @@ namespace ariadne {
 
 namespace {
 
-constexpr const char *kValueFlags[] = {"--prefix", "--component-path", "--backend", "--fps",
-                                       "--width",  "--height",         "--frames",  "--png"};
+constexpr const char *kValueFlags[] = {"--prefix",   "--component-path", "--backend",  "--fps",
+                                       "--width",    "--height",         "--frames",   "--png",
+                                       "--graphics", "--image",          "--cell-size"};
 constexpr const char *kBoolFlags[] = {"--no-mouse", "--ansi"};
 
 bool is_general_flag(const std::string &a) {
@@ -106,7 +107,31 @@ HostOptions parse_host_args(int argc, const char *const *argv,
       o.backend = value;
     else if (a == "--png")
       o.png = value;
-    else if (a == "--fps")
+    else if (a == "--graphics") {
+      if (value != "auto" && value != "kitty" && value != "sixel" && value != "color" &&
+          value != "mono") {
+        o.error = "--graphics is auto, kitty, sixel, color or mono, not '" + value + "'";
+        return o;
+      }
+      o.graphics = value;
+    } else if (a == "--image") {
+      const std::size_t at = value.find('=');
+      if (at == std::string::npos || at == 0 || at + 1 == value.size()) {
+        o.error = "--image is NAME=FILE, not '" + value + "'";
+        return o;
+      }
+      o.images.emplace_back(value.substr(0, at), value.substr(at + 1));
+    } else if (a == "--cell-size") {
+      const std::size_t x = value.find('x');
+      int w = 0, h = 0;
+      if (x == std::string::npos || !to_int(value.substr(0, x), w) ||
+          !to_int(value.substr(x + 1), h) || w <= 0 || h <= 0) {
+        o.error = "--cell-size is WxH in pixels, not '" + value + "'";
+        return o;
+      }
+      o.cell_w = w;
+      o.cell_h = h;
+    } else if (a == "--fps")
       o.fps = n;
     else if (a == "--width")
       o.width = n;
@@ -129,7 +154,10 @@ std::string host_flags_help() {
          "  --width W, --height H  snapshot size\n"
          "  --frames N             snapshot: frames to run before the capture\n"
          "  --ansi                 snapshot: keep colour escapes\n"
-         "  --png FILE             snapshot: also write a PNG\n";
+         "  --png FILE             snapshot: also write a PNG\n"
+         "  --graphics MODE        images in a terminal: auto, kitty, sixel, color or mono\n"
+         "  --image NAME=FILE      publish FILE's picture as NAME, for image: widgets\n"
+         "  --cell-size WxH        snapshot: a terminal cell's size in pixels\n";
 }
 
 std::string misplaced_flag_note(const std::string &runtime,

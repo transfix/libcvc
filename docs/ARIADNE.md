@@ -231,19 +231,64 @@ Three backends ship:
     bar, click `[x]` to close it, click a menu title to open it.
   - **windows** (`caps.windows = true`) — free, z-ordered, raised on focus, placed from
     `pos:`/`size:` or the persisted `tree.<id>.geometry`; a drag persists back (§11.4).
-  - **graphics** — `draw_image` paints a raster published with `set_image` as half-block
-    cells (two pixels per cell, 24-bit colour; a luminance ramp on a colourless terminal).
+  - **graphics** — `draw_image` paints a raster published with `set_image`, and
+    `set_background` puts one behind everything. Where the terminal speaks a pixel protocol
+    the picture is real pixels (see *Pixel graphics* below); everywhere else it is
+    half-block cells (two pixels per cell, 24-bit colour; a luminance ramp on a colourless
+    terminal).
 
   Commit edges match the ImGui backend: discrete widgets commit on the edit, a
   mouse-dragged slider commits on release (arrow-key steps commit at once), a text field
   commits on Enter or when focus leaves it. Authored px convert to cells by a nominal cell
   size (`Options::cell_px_w/h`, 8 × 16), and reported geometry converts back, so a layout
   persisted under one backend holds under the other. Grid seams drag: a row split's
-  panes and a `resizable` table's columns resize with the mouse, and a row split
-  persists its pane sizes to `tree.<id>.tracks` (§11.4). What a terminal cannot do it
+  panes and a `resizable` table's columns resize with the mouse; a row split persists
+  its pane sizes to `tree.<id>.tracks` and a resizable table its column widths to
+  `tree.<id>.columns` (§11.4; *Grid sizes* in §7.1). What a terminal cannot do it
   degrades: no GLSL, no `view_embed`, no scene (`AppRuntime` drops a `scene:` with a
   warning). `render_to_string` + `feed(TermEvent)` drive it headless (that is how
   `ariadne_ftxui_test` tests it); `run()` owns a real terminal.
+
+  **Pixel graphics** ([`term_graphics.h`](../inc/cvc/ariadne/term_graphics.h)).
+  `Options::image_color` is `Auto`, `Kitty`, `Sixel`, `Color` (half-blocks) or `Mono`.
+  `Auto` takes the best the terminal has, else half-blocks:
+  - **Kitty** (kitty, Ghostty, WezTerm, Konsole). Each image is sent once, out of band,
+    after the frame that first draws it (`a=T,U=1,f=24,q=2`, chunked base64), and is
+    shown through **Unicode placeholder** cells (U+10EEEE with row and column diacritics,
+    in a 24-bit foreground that names the image). The placeholders are ordinary cells, so
+    a window or menu drawn over an image hides exactly the cells it covers, and FTXUI's
+    full repaint redraws them for free. An image is sent again only when its pixels
+    change (a republished identical frame is not), and deleted (`a=d,d=I`) once no frame
+    draws it. A placement addresses 297 rows and columns, so a bigger image goes as tiles.
+  - **Sixel** (xterm -ti vt340, foot, mlterm, WezTerm, Windows Terminal). A bitmap is
+    drawn after each repaint, because the repaint covers it, inside synchronized-output
+    marks (`CSI ? 2026`). It is clipped to the cells nothing covers: the image node draws
+    half-blocks underneath, and a pass after the whole frame keeps the cells still showing
+    them, sent as one bitmap per rectangle. Colours go to a fixed 6 × 7 × 6 cube (fewer
+    where the terminal reports fewer registers) with an ordered dither.
+  - **Detection.** `run()` asks the terminal before FTXUI takes it over, because FTXUI's
+    input parser has no APC case and a late kitty reply would arrive as typed text: on
+    `/dev/tty` in raw mode it sends a kitty query, `CSI 16 t` (the cell size in pixels)
+    and DA1, whose reply ends the exchange. Sixel is DA1's feature 4 (FTXUI's own DA1
+    exchange is merged in), and a Sixel terminal is asked its register count
+    (XTSMGRAPHICS). The cell size comes from `TIOCGWINSZ` where the tty reports pixels,
+    else `CSI 16 t`, and is re-read every frame, so a font-size change follows. A host
+    that probed already, or a headless driver, calls `set_terminal_graphics`.
+  - **Units.** `cell_px_w/h` (8 × 16) stays the layout unit, so persisted geometry stays
+    portable. The real cell size only sets the raster: an image covering `c × r` cells is
+    drawn from `c × cw` by `r × ch` pixels (`image_raster`), and its rows follow the real
+    cell's shape. Kitty images over `max_image_pixels` (default 1 Mi) are sent scaled
+    down, and the terminal scales them back up.
+  - **Headless.** `render_to_string` lays out the placeholders or underlay, and
+    `take_graphics()` returns the bytes `run()` would write after that frame
+    (`release_graphics()`: the deletions it sends on exit).
+  - **Limits.** Hosted mode (the tvision desktop) always draws half-blocks, because
+    tvision owns the output. No probe runs on Windows or in the browser, so `Auto` stays
+    half-blocks there (`Kitty` / `Sixel` can still be asked for). Inside tmux the probe
+    gets no kitty reply, so it falls back too (tmux passthrough is not wired). A Sixel
+    bitmap never covers the screen's last row (a terminal that moves the cursor below a
+    bitmap would scroll), and where its last six-pixel band would reach a covered row it
+    stops short, so up to five pixel rows show the half-blocks.
 - **`cvc::ariadne::TvisionBackend`**
   ([`inc/cvc/ariadne/tvision_backend.h`](../inc/cvc/ariadne/tvision_backend.h)) — the
   native-desktop terminal backend (roadmap §16.5 row 5). Turbo Vision owns the terminal
@@ -675,6 +720,21 @@ Every relative reference in a document is resolved by `resolve_bind(prefix, bind
 Widgets and scene binds use the same rule, which is why a widget `bind:` and a scene
 `visible:` on the same relative path co-resolve to one key.
 
+**Grid sizes (§11.4).** A grid the user can resize keeps its sizes under its id, the way a
+window keeps `tree.<id>.geometry`: a row split's pane heights in `tree.<id>.tracks`, a
+resizable table's column widths in `tree.<id>.columns`. Both are comma-separated px, one
+entry per track. The walk seeds the backend from the key before the grid opens (each
+backend applies it once, so a live drag wins) and writes back what the backend reports after
+it closes; the write is skipped when nothing changed. A `0` entry means "not set": that
+track keeps its authored size. The backends differ in what they report:
+
+- The FTXUI backend reports a track it holds at a size (authored px, seeded, or dragged) and
+  `0` for one it lays out naturally, so a stretch pane or column is never pinned at the size
+  one frame happened to give it. Seeding fixes a track at the persisted width.
+- The ImGui backend reports every pane height and every column's drawn width
+  (`WidthGiven`). Seeding gives a fixed column its width and a stretch column its weight,
+  so stretch columns keep their persisted proportions at another table width.
+
 ### 7.2 Two prefix conventions
 
 - The roadmap-canonical convention roots a document at `ui.docs.<docId>` (its tree under
@@ -812,6 +872,13 @@ general flags every runtime shares, parsed by
 document's (§5.6): `ari run doc.ari --help` prints the document's own usage. A general
 flag written after the document goes to the document, and `ari` points that out.
 
+Three of the general flags are for pictures. `--graphics auto|kitty|sixel|color|mono` sets
+how images draw (see *Pixel graphics* in §4), and `--image NAME=FILE` publishes a picture
+for the document's `image:` widgets with `src: NAME`
+([`terminal_images.ari`](../src/cvc/ariadne/examples/terminal_images.ari) is an example).
+With `--ansi` and `--graphics kitty` or `sixel`, `snapshot` also prints the images, after
+clearing the screen, at the terminal's cell size (`--cell-size WxH` where it can't be asked).
+
 `ari` is its own cvcpkg package (`cvcpkg install ari`, linux for now), built from
 [`cvcpkg/recipes/ari`](../cvcpkg/recipes/ari/recipe.yaml) against the installed libcvc,
 like `cvc-cli`. It is a thin host over `AppRuntime` with no `SceneAdapter`; it routes
@@ -868,9 +935,12 @@ What differs from a real terminal:
 **With a 3D scene (cvcGL).** The terminal backends stay GL-free; cvcGL extends them.
 [`cvc::gl::ariadne::TerminalScene`](../inc/cvc/gl/ariadne/TerminalScene.h) is a `SceneAdapter`
 that realizes the document's `scene:` into an offscreen `SceneRenderer`, renders it every
-frame at the screen's half-block grid (two pixels per cell, supersampled), and hands the
-frame to the backend as its background (`FtxuiBackend::set_background`), so widgets, menus
-and windows draw over the scene the way ImGui draws over the GL canvas. Passed as
+frame at the size the backend draws the screen from (`FtxuiBackend::image_raster`: the
+half-block grid, two pixels per cell, supersampled; or the cells' real pixels on a terminal
+with Kitty or Sixel graphics), and hands the frame to the backend as its background
+(`FtxuiBackend::set_background`), so widgets, menus and windows draw over the scene the way
+ImGui draws over the GL canvas. With pixel graphics a drag maps cells to the frame's own
+pixels, so a map pan keeps the grabbed point under the pointer. Passed as
 `RunOptions::background_input`, its `handle_input` turns background drags into orbit,
 middle-drags into pan and the wheel into zoom. The host is
 [`ariadne_terminal`](../src/cvcGL/examples/ariadne_terminal.cpp), the terminal sibling of
@@ -1022,8 +1092,9 @@ below (G17–G21 in the internal gap report) are tracked for reconciliation.
   `RunOptions` hooks gets FTXUI's default for SIGTERM (restore the terminal, exit).
 - **The libcvc terminal backends render no scene by themselves.** `ari` drops a `scene:`
   with a warning; cvcGL's `TerminalScene` (§9.2) is what draws one, so a scene needs a cvcGL
-  build and a GL that works offscreen (X, EGL or OSMesa). Frames are half-blocks only: Sixel /
-  Kitty graphics are not used yet.
+  build and a GL that works offscreen (X, EGL or OSMesa). On a Kitty terminal a scene that
+  keeps moving sends a frame per change (up to `max_image_pixels`), and on a Sixel one every
+  frame, so a remote session is better off with half-blocks (`--graphics color`).
 - **`load:` `prefix:` / `reload:` and §12.2 sub-scene mounting are not yet parsed** at the
   loader; only sub-UI `load:` is landed ([`loader.cpp`](../src/cvc/ariadne/loader.cpp)).
 - **No DSL-visible future from the pycvc async layer.** Both `register_async_fn` and

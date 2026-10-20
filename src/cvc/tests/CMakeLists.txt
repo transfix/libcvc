@@ -9,6 +9,7 @@ add_executable(ariadne_loader_test ariadne_loader_test.cpp)
 add_executable(ariadne_runtime_test ariadne_runtime_test.cpp)
 add_executable(ariadne_bind_test ariadne_bind_test.cpp)
 add_executable(ariadne_ftxui_test ariadne_ftxui_test.cpp)
+add_executable(ariadne_term_graphics_test ariadne_term_graphics_test.cpp)
 add_executable(ariadne_host_test ariadne_host_test.cpp)
 add_executable(x11_macro_headers_test x11_macro_headers_test.cpp)
 add_executable(net_http_client_test net_http_client_test.cpp)
@@ -225,6 +226,7 @@ set(TEST_TARGETS
   ariadne_runtime_test
   ariadne_bind_test
   ariadne_ftxui_test
+  ariadne_term_graphics_test
   ariadne_host_test
   x11_macro_headers_test
   net_http_client_test
@@ -513,6 +515,13 @@ target_link_libraries(ariadne_runtime_test
 )
 
 target_link_libraries(ariadne_ftxui_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(ariadne_term_graphics_test
   PRIVATE
     cvc
     GTest::gtest
@@ -2043,6 +2052,7 @@ cvc_discover_tests(text_test)
 cvc_discover_tests(ariadne_loader_test)
 cvc_discover_tests(ariadne_runtime_test)
 cvc_discover_tests(ariadne_ftxui_test)
+cvc_discover_tests(ariadne_term_graphics_test)
 cvc_discover_tests(ariadne_host_test)
 cvc_discover_tests(ariadne_bind_test)
 cvc_discover_tests(x11_macro_headers_test)

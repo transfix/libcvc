@@ -811,6 +811,12 @@ add_executable(cvcgl_terminal_scene test/cvcgl_terminal_scene.cpp)
 target_link_libraries(cvcgl_terminal_scene PRIVATE cvcGL)
 add_test(NAME cvcgl_terminal_scene COMMAND cvcgl_terminal_scene)
 
+# ImGuiBackend's table-column persistence (tree.<id>.columns, §11.4) on a bare ImGui context: a
+# resizable table seeds its widths from state and reports them back. No window, no GL.
+add_executable(cvcgl_imgui_table_columns test/cvcgl_imgui_table_columns.cpp)
+target_link_libraries(cvcgl_imgui_table_columns PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_table_columns COMMAND cvcgl_imgui_table_columns)
+
 # Ariadne physics: / body: (WORLD-GEOMETRY-ROADMAP.md, G5): a spec's crate lands where the
 # heightfield node draws the ground. Headless; the dynamics need Jolt.
 add_executable(cvcgl_ariadne_physics test/cvcgl_ariadne_physics.cpp)

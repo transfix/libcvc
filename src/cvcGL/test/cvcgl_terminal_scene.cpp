@@ -8,6 +8,7 @@
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/widget.h>
 #include <cvc/core/app.h>
+#include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/ariadne/TerminalScene.h>
 #include <set>
 #include <string>
@@ -80,6 +81,53 @@ int main() {
   scene.tick();
   const std::string second = backend.render_to_string(rt, 40, 12, /*ansi=*/true);
   chk(second != first, "the orbited frame differs");
+
+  // Pixel graphics: the scene renders at the cells' real pixels, and Kitty shows it through
+  // placeholder cells for an image sent once.
+  using Mode = ari::FtxuiBackend::Options::ImageColor;
+  ari::TermGraphics kitty;
+  kitty.kitty = true;
+  kitty.cell_w = 9;
+  kitty.cell_h = 18;
+  for (const Mode mode : {Mode::Kitty, Mode::Sixel}) {
+    const bool k = mode == Mode::Kitty;
+    ari::FtxuiBackend::Options po;
+    po.image_color = mode;
+    ari::FtxuiBackend pbe(po);
+    pbe.set_terminal_graphics(kitty);
+    cvc::app papp;
+    cvc::gl::ariadne::TerminalScene pscene(papp, pbe);
+    pscene.realize(spec, "term", &warns);
+    ari::Runtime prt(papp, "");
+    prt.set_backend(&pbe);
+    prt.set_root(ari::group({ari::text("hud")}));
+    pbe.set_screen_size(40, 12);
+    pscene.tick();
+    chk(pscene.view().frameWidth() == 40 * 9 && pscene.view().frameHeight() == 12 * 18,
+        k ? "kitty: the scene renders at the cells' real pixels"
+          : "sixel: the scene renders at the cells' real pixels");
+    const std::string pf = pbe.render_to_string(prt, 40, 12);
+    chk(pf.find("hud") != std::string::npos, "the widgets still draw over it");
+    const std::string g = pbe.take_graphics();
+    if (k) {
+      chk(pf.find("\xf4\x8e\xbb\xae") != std::string::npos, "kitty: placeholder cells");
+      chk(g.find("a=T") != std::string::npos &&
+              g.find("s=360,v=216,c=40,r=12") != std::string::npos,
+          "kitty: the frame is sent at its real size");
+      // VTK's second render of a new view can still differ from its first (the clipping range
+      // settles), so let one frame go by; after that the same view renders the same pixels.
+      int resent = 0;
+      for (int f = 0; f < 4; ++f) {
+        pscene.tick();
+        pbe.render_to_string(prt, 40, 12);
+        const bool sent = !pbe.take_graphics().empty();
+        resent += f > 0 && sent ? 1 : 0;
+      }
+      chk(resent == 0, "kitty: an unchanged frame is not sent again");
+    } else {
+      chk(g.find("\x1bP0;1;0q") != std::string::npos, "sixel: the frame goes out as a bitmap");
+    }
+  }
 
   std::printf("%s\n", failures ? "FAILED" : "PASSED");
   return failures ? 1 : 0;

@@ -7,10 +7,12 @@
 //
 // It is a cvc::ariadne::SceneAdapter. Hand it to AppRuntime, and a document's `scene:` is realized
 // into its own SceneGraph and drawn by an OFFSCREEN SceneRenderer (no window, no display: VTK picks
-// X, EGL or OSMesa at run time). Every tick renders a frame at the terminal's half-block pixel grid
-// (two pixels per cell, supersampled), publishes it to the backend as an image, and makes it the
-// backend's background (FtxuiBackend::set_background), so the widgets, menus and windows draw over
-// the scene exactly as ImGui draws over the GL canvas.
+// X, EGL or OSMesa at run time). Every tick renders a frame at the size the backend draws the
+// screen from (FtxuiBackend::image_raster): the half-block grid (two pixels per cell,
+// supersampled), or, on a terminal with Kitty or Sixel graphics, the cells' real pixels. It
+// publishes the frame to the backend as an image and makes it the backend's background
+// (FtxuiBackend::set_background), so the widgets, menus and windows draw over the scene exactly as
+// ImGui draws over the GL canvas.
 //
 // Input: pass handle_input as FtxuiBackend::RunOptions::background_input. A drag on the background
 // orbits the camera, the wheel zooms, and anything else falls through to the document's on_key /
@@ -36,7 +38,8 @@ public:
   static constexpr const char *kImage = "cvcgl.terminal_scene";
 
   // Render for `backend` (it must outlive this). `supersample` renders that many pixels per
-  // half-block pixel each way and lets the backend's box filter smooth them.
+  // half-block pixel each way and lets the backend's box filter smooth them (half-blocks only:
+  // pixel graphics render at the real pixels).
   TerminalScene(cvc::app &app, cvc::ariadne::FtxuiBackend &backend, int supersample = 2,
                 const std::string &state_prefix = "terminal_scene");
   ~TerminalScene() override;
