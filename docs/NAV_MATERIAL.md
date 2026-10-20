@@ -235,6 +235,29 @@ Pinned by `nav_material_ext_test` and the `...WithAnExternalForce` cases of
 `tests/data/material_ext_golden.json` (`NavMaterialExt.Golden`) holds GRL-SNAM's torch twins to
 the three integrators with the force on: the inputs, outputs, coefficient gradients and dL/dF_ext.
 
+### Belief (observed) material
+
+For range-limited sensing, the material planes can be built from what a belief plane has seen
+rather than from the whole map (spec: [`roadmap/NAV-BELIEF-MATERIAL-ROADMAP.md`](roadmap/NAV-BELIEF-MATERIAL-ROADMAP.md)).
+`inc/cvc/nav/belief_material.h`:
+
+* `belief_material_inputs(risk_raw, hard, seen, …, p, risk_out, hard_out)` keeps the truth where
+  `seen` and writes `p.unknown_risk` / `p.unknown_hard` elsewhere (defaults 0 / 0: an unseen cell
+  exerts no force of its own). `material_build` then runs unchanged on the result.
+* `belief_gate_surface(hard_b, occ, seen, …, p, gate_hard_out, clear_m_out)` is the gate's
+  surface: `hard_b | occ | (p.unknown_gate_hard & !seen)` and its metres clearance, the chain
+  `set_material` uses. With `unknown_gate_hard` (the default) a ray through unseen ground never
+  certifies a detour. `witness_gate` runs unchanged on it.
+* The seen mask is the sense ray-cast's field of view. At the default range it is `ever_seen`;
+  `sense_batch` also keeps a shorter material-range mask on request
+  (`belief_planes::material_seen` / `material_changed`, `sense_agents::material_range_m`).
+* `seen_disc` is the optional range-disc rule (`seen_rule::disc`): no occlusion, kept to reproduce
+  a controller trained on a disc mask.
+
+The golden `src/cvc/tests/data/belief_material_golden.json` (`NavBeliefMaterial.Golden`) holds
+GRL-SNAM's numpy twin to all of it, bit for bit: per case, tick and plane, the SHA-256 of every
+raster, and the gate's outputs.
+
 ### Choosing constants
 
 The defaults are the GRL-SNAM sim-frame values, validated behaviorally there
@@ -261,6 +284,7 @@ minimum). Route-level avoidance belongs to the planner: feed
 |---|---|---|
 | `material_build` | **BIT** vs the Python reference | pinned-op-order blur (scipy-`reflect`-equivalent, symmetric padding, sequential tap/normalization sums, f64 through both passes, one f32 store), EDT metres chain, f32 gradients of the f32-stored planes |
 | `witness_gate` (+batch) | **BIT** | float64 end-to-end, embedded direction table, `sqrt(x*x+y*y)` never `hypot` (CPython's hypot is not libm's), batch == serial bytes at any thread count |
+| `belief_material_inputs`, `belief_gate_surface`, `seen_disc`, `sense_batch`'s material mask | **BIT** | a select, an OR plus the `set_material` clearance chain, the numpy-linspace disc (`belief_material.cpp` is built with `-ffp-contract=off`) |
 | `material_sample` | FLOAT (rtol 1e-5) | the proven `sdf_sample` op chain; bit-exact vs torch on x86-64 in practice |
 | `*_material` rollouts | FLOAT (rtol 1e-4 / atol 1e-5) | the `drive_step` tier; null material delegates byte-identically |
 
@@ -272,6 +296,9 @@ f32-stored planes against cross-platform goldens. Do not remove the flag or
 cross-language sweep lives in GRL-SNAM `tests/test_material_parity.py`.
 
 ## pycvc surface
+
+Belief material: `nav_belief_material_inputs`, `nav_belief_gate_surface`, `nav_seen_disc`,
+`nav_sense_batch_material` (the sense plus the material mask).
 
 Field/gate kernels: `nav_material_build`, `nav_witness_gate`,
 `nav_witness_gate_batch`, `nav_material_sample`, `nav_bicycle_rollout_material`,
