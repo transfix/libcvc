@@ -524,6 +524,44 @@ TEST(AriadneFtxui, PersistedTracksSeedTheSplit) {
   EXPECT_EQ(bottom, top + 3) << s;
 }
 
+TEST(AriadneFtxui, ANaturalPaneIsNotPinnedByTheFirstWalk) {
+  REQUIRE_FTXUI();
+  // A row split whose second pane has no authored height lays out naturally. The first walk runs
+  // before FTXUI has laid anything out, so measuring that pane then read a box never laid out (one
+  // cell, 16 px) and persisted it, and the next load pinned the pane at one row.
+  auto make = [] {
+    Widget g = group({text("top"), text("one\ntwo\nthree")});
+    g.id = "split";
+    g.layout.kind = LayoutKind::Grid;
+    g.layout.row_heights = {Track{Unit::Px, 80.0f}, Track{}};
+    g.layout.resizable = true;
+    return g;
+  };
+  Term t(group({make()}));
+  EXPECT_EQ(val(t.app, "tree.split.tracks"), "80,0") << "the natural pane is not set";
+  t.draw();
+  EXPECT_EQ(val(t.app, "tree.split.tracks"), "80,0") << "nor once it has been laid out";
+
+  // A reload from what was persisted keeps the pane natural: all three lines show.
+  cvc::app app;
+  FtxuiBackend be;
+  Runtime rt(app, "");
+  rt.set_backend(&be);
+  cvc::state::instance(app)("tree.split.tracks").value(val(t.app, "tree.split.tracks"));
+  rt.set_root(group({make()}));
+  const std::string s = be.render_to_string(rt, 40, 20);
+  EXPECT_NE(s.find("three"), std::string::npos) << s;
+
+  // Dragging the seam fixes both panes, and both persist.
+  int x = 0, top = 0;
+  ASSERT_TRUE(find_cell(t.screen, "top", x, top)) << t.screen;
+  t.mouse(TermEvent::Mouse::Press, x, top + 5);
+  t.mouse(TermEvent::Mouse::Move, x, top + 4);
+  t.mouse(TermEvent::Mouse::Release, x, top + 4);
+  t.draw();
+  EXPECT_EQ(val(t.app, "tree.split.tracks"), "64,64") << "4 rows and the 3-row pane plus 1";
+}
+
 TEST(AriadneFtxui, ResizableTableColumnSeamDrags) {
   REQUIRE_FTXUI();
   Widget g = group({text("a1"), text("b1"), text("a2"), text("b2")});
@@ -545,6 +583,49 @@ TEST(AriadneFtxui, ResizableTableColumnSeamDrags) {
   EXPECT_EQ(nbx, bx + 4) << t.screen;
   ASSERT_TRUE(find_cell(t.screen, "b2", nbx, nby));
   EXPECT_EQ(nbx, bx + 4) << "every row follows the column\n" << t.screen;
+}
+
+TEST(AriadneFtxui, DraggedTableColumnsPersistAndSeedTheNextLoad) {
+  REQUIRE_FTXUI();
+  auto make = [] {
+    Widget g = group({text("a1"), text("b1"), text("c1"), text("a2"), text("b2"), text("c2")});
+    g.id = "tbl";
+    g.layout.kind = LayoutKind::Grid;
+    g.layout.col_widths = {Track{Unit::Px, 80.0f}, Track{Unit::Px, 80.0f},
+                           Track{Unit::Percent, 50.0f}};
+    g.layout.borders = BorderShow::Inner;
+    g.layout.resizable = true;
+    return g;
+  };
+  Term t(group({make()}));
+  EXPECT_EQ(val(t.app, "tree.tbl.columns"), "80,80,0")
+      << "authored px as written; the stretch column is not set";
+  int ax = 0, ay = 0, bx = 0, by = 0;
+  ASSERT_TRUE(find_cell(t.screen, "a1", ax, ay)) << t.screen;
+  ASSERT_TRUE(find_cell(t.screen, "b1", bx, by)) << t.screen;
+  ASSERT_EQ(bx, ax + 11) << t.screen;
+  t.mouse(TermEvent::Mouse::Press, bx - 1, by); // the seam: 4 cells from column 2 to column 1
+  t.mouse(TermEvent::Mouse::Move, bx + 3, by);
+  t.mouse(TermEvent::Mouse::Release, bx + 3, by);
+  t.draw();
+  EXPECT_EQ(val(t.app, "tree.tbl.columns"), "112,48,0") << "14 and 6 cells, in px";
+
+  // A new load seeds the widths from state: column 2 starts 14 cells (and the seam) in, column 3
+  // 6 cells after that.
+  cvc::app app;
+  FtxuiBackend be;
+  Runtime rt(app, "");
+  rt.set_backend(&be);
+  cvc::state::instance(app)("tree.tbl.columns").value("112,48,0");
+  rt.set_root(group({make()}));
+  const std::string s = be.render_to_string(rt, 80, 10);
+  int cx = 0, cy = 0;
+  ASSERT_TRUE(find_cell(s, "a1", ax, ay)) << s;
+  ASSERT_TRUE(find_cell(s, "b1", bx, by)) << s;
+  ASSERT_TRUE(find_cell(s, "c1", cx, cy)) << s;
+  EXPECT_EQ(bx, ax + 15) << s;
+  EXPECT_EQ(cx, bx + 7) << s;
+  EXPECT_EQ(val(app, "tree.tbl.columns"), "112,48,0") << "and reports them back unchanged";
 }
 
 TEST(AriadneFtxui, ResizableTableWithoutBordersStillHasAGrabbableSeam) {
@@ -811,6 +892,259 @@ TEST(AriadneFtxui, BackgroundImageFillsTheScreenUnderTheWidgets) {
   EXPECT_NE(t.be.render_to_string(t.rt, 20, 4, /*ansi=*/true), before);
 }
 
+// ---- pixel graphics (Kitty / Sixel) ----------------------------------------------------------
+
+namespace {
+
+using ImageColor = FtxuiBackend::Options::ImageColor;
+
+const std::string kPlaceholder = "\xf4\x8e\xbb\xae"; // U+10EEEE
+const std::string kEsc = "\x1b";
+const std::string kSaveCursor = kEsc + "7", kRestoreCursor = kEsc + "8"; // DECSC / DECRC
+
+int count(const std::string &s, const std::string &needle) {
+  int n = 0;
+  for (std::size_t i = 0; (i = s.find(needle, i)) != std::string::npos; i += needle.size())
+    ++n;
+  return n;
+}
+
+cvc::image solid(int w, int h, unsigned char r, unsigned char g, unsigned char b) {
+  std::vector<unsigned char> px(static_cast<std::size_t>(w) * h * 3);
+  for (std::size_t i = 0; i < px.size(); i += 3) {
+    px[i] = r;
+    px[i + 1] = g;
+    px[i + 2] = b;
+  }
+  return cvc::image(w, h, cvc::image::pixel_format::RGB, cvc::image::data_type::u8, px.data());
+}
+
+// A window at (x, y) px of w x h px.
+Widget placed_window(const std::string &title, std::vector<Widget> kids, float x, float y, float w,
+                     float h) {
+  Widget win = window(title, std::move(kids));
+  win.has_pos = true;
+  win.pos_x = x;
+  win.pos_y = y;
+  win.size.w = Extent{Unit::Px, w};
+  win.size.h = Extent{Unit::Px, h};
+  return win;
+}
+
+TermGraphics kitty_term() {
+  TermGraphics g;
+  g.kitty = true;
+  g.cell_w = 10;
+  g.cell_h = 20;
+  g.answered = true;
+  return g;
+}
+
+TermGraphics sixel_term(int cell_h = 12) {
+  TermGraphics g;
+  g.sixel = true;
+  g.cell_w = 8;
+  g.cell_h = cell_h;
+  g.sixel_colors = 256;
+  g.answered = true;
+  return g;
+}
+
+} // namespace
+
+TEST(AriadneFtxuiGraphics, AutoPicksKittyThenSixelThenHalfBlocks) {
+  REQUIRE_FTXUI();
+  FtxuiBackend be;
+  EXPECT_NE(be.image_mode(), ImageColor::Kitty) << "nothing detected: half-blocks";
+  EXPECT_NE(be.image_mode(), ImageColor::Sixel);
+  be.set_terminal_graphics(sixel_term());
+  EXPECT_EQ(be.image_mode(), ImageColor::Sixel);
+  TermGraphics both = sixel_term();
+  both.kitty = true;
+  be.set_terminal_graphics(both);
+  EXPECT_EQ(be.image_mode(), ImageColor::Kitty) << "Kitty is preferred";
+  TermGraphics no_size = sixel_term();
+  no_size.cell_w = no_size.cell_h = 0;
+  be.set_terminal_graphics(no_size);
+  EXPECT_NE(be.image_mode(), ImageColor::Sixel) << "a bitmap needs the real cell size";
+
+  FtxuiBackend::Options forced;
+  forced.image_color = ImageColor::Color;
+  FtxuiBackend color(forced);
+  color.set_terminal_graphics(both);
+  EXPECT_EQ(color.image_mode(), ImageColor::Color) << "an explicit mode wins";
+
+  TvisionBackend tv; // hosted: tvision owns the output, so always half-blocks
+  tv.set_terminal_graphics(both);
+  EXPECT_NE(tv.image_mode(), ImageColor::Kitty);
+  EXPECT_NE(tv.image_mode(), ImageColor::Sixel);
+}
+
+TEST(AriadneFtxuiGraphics, ImageRasterIsTheCellsRealPixels) {
+  REQUIRE_FTXUI();
+  FtxuiBackend::Options o;
+  o.max_image_pixels = 100000;
+  FtxuiBackend be(o);
+  int w = 0, h = 0;
+  be.image_raster(30, 10, w, h);
+  EXPECT_EQ(w, 30) << "half-blocks: a pixel per column";
+  EXPECT_EQ(h, 20) << "and two per row";
+  be.set_terminal_graphics(kitty_term());
+  EXPECT_EQ(be.cell_pixel_width(), 10);
+  EXPECT_EQ(be.cell_pixel_height(), 20);
+  be.image_raster(30, 10, w, h);
+  EXPECT_EQ(w, 300);
+  EXPECT_EQ(h, 200);
+  be.image_raster(100, 50, w, h); // 1000 x 1000 px: scaled to fit max_image_pixels, same shape
+  EXPECT_LE(w * h, 100000);
+  EXPECT_NEAR(double(w) / h, 1.0, 0.01);
+  be.set_terminal_graphics(sixel_term());
+  be.image_raster(100, 50, w, h);
+  EXPECT_EQ(w, 800) << "Sixel is never scaled: the terminal draws it pixel for pixel";
+  EXPECT_EQ(h, 600);
+}
+
+TEST(AriadneFtxuiGraphics, KittyImageIsPlaceholdersAndIsSentOnlyWhenItChanges) {
+  REQUIRE_FTXUI();
+  FtxuiBackend::Options o;
+  o.image_color = ImageColor::Kitty;
+  Term t(group({text("above"), image_widget("pic", "map", 40.0)}), o);
+  t.be.set_terminal_graphics(kitty_term());
+  t.be.set_image("map", solid(10, 8, 200, 30, 30));
+  t.draw();
+  // 40 px = 5 columns; a 10 x 8 picture in 10 x 20 px cells is 2 rows.
+  EXPECT_EQ(count(t.screen, kPlaceholder), 10) << t.screen;
+  int x = 0, y = 0;
+  ASSERT_TRUE(find_cell(t.screen, kPlaceholder, x, y));
+  EXPECT_EQ(x, 0);
+  EXPECT_EQ(y, 1);
+
+  const std::string first = t.be.take_graphics();
+  EXPECT_EQ(count(first, "a=T"), 1) << "sent once";
+  EXPECT_NE(first.find("s=50,v=40,c=5,r=2"), std::string::npos) << "the cells' real pixels";
+  const std::size_t at = first.find(",i=");
+  ASSERT_NE(at, std::string::npos);
+  const std::string id = first.substr(at + 3, first.find(',', at + 3) - at - 3);
+
+  t.draw();
+  EXPECT_EQ(t.be.take_graphics(), "") << "unchanged: nothing to send";
+  t.be.set_image("map", solid(10, 8, 200, 30, 30));
+  t.draw();
+  EXPECT_EQ(t.be.take_graphics(), "") << "the same pixels published again are not re-sent";
+  t.be.set_image("map", solid(10, 8, 30, 30, 200));
+  t.draw();
+  const std::string changed = t.be.take_graphics();
+  EXPECT_EQ(count(changed, "a=T"), 1) << "new pixels are sent";
+  EXPECT_NE(changed.find(",i=" + id + ","), std::string::npos) << "under the same id";
+
+  t.rt.set_root(group({text("gone")}));
+  t.draw();
+  EXPECT_EQ(count(t.screen, kPlaceholder), 0);
+  EXPECT_EQ(t.be.take_graphics(), "\x1b_Ga=d,d=I,i=" + id + ",q=2\x1b\\")
+      << "an image no longer drawn is deleted";
+  EXPECT_EQ(t.be.release_graphics(), "");
+}
+
+TEST(AriadneFtxuiGraphics, KittyBackgroundShowsWhereNothingCoversIt) {
+  REQUIRE_FTXUI();
+  FtxuiBackend::Options o;
+  o.image_color = ImageColor::Kitty;
+  Term t(group({text("hello"), placed_window("W", {text("in a window")}, 80, 32, 120, 48)}), o);
+  t.be.set_terminal_graphics(kitty_term());
+  t.be.set_image("scene", solid(4, 4, 20, 120, 20));
+  t.be.set_background("scene");
+  t.width = 40;
+  t.height = 6;
+  t.draw();
+  int x = 0, y = 0;
+  ASSERT_TRUE(find_cell(t.screen, "in a window", x, y)) << t.screen;
+  ASSERT_TRUE(find_cell(t.screen, "hello", x, y)) << t.screen;
+  // Every cell shows the scene but the five of "hello" and the 15 x 3 window.
+  EXPECT_EQ(count(t.screen, kPlaceholder), 40 * 6 - 5 - 15 * 3) << t.screen;
+  const std::string g = t.be.take_graphics();
+  EXPECT_EQ(count(g, "a=T"), 1);
+  EXPECT_NE(g.find("c=40,r=6"), std::string::npos) << "one placement over the whole screen";
+  // The text over the scene does not keep the colour that names the image.
+  const std::size_t at = g.find(",i=");
+  const unsigned id = static_cast<unsigned>(std::stoul(g.substr(at + 3)));
+  const std::string ansi = t.be.render_to_string(t.rt, 40, 6, /*ansi=*/true);
+  const std::string id_fg = "38;2;" + std::to_string((id >> 16) & 255) + ";" +
+                            std::to_string((id >> 8) & 255) + ";" + std::to_string(id & 255);
+  const std::size_t hello = ansi.find("hello");
+  ASSERT_NE(hello, std::string::npos);
+  const std::size_t sgr = ansi.rfind("\x1b[", hello);
+  EXPECT_EQ(ansi.substr(sgr, hello - sgr).find(id_fg), std::string::npos)
+      << "the text's own colour, not the id's";
+}
+
+TEST(AriadneFtxuiGraphics, KittyTilesAnImageWiderThanAPlacement) {
+  REQUIRE_FTXUI();
+  FtxuiBackend::Options o;
+  o.image_color = ImageColor::Kitty;
+  o.max_image_pixels = 0; // unbounded, so the tiles' pixels are exact
+  Term t(group({}), o);
+  t.be.set_terminal_graphics(kitty_term());
+  t.be.set_image("scene", solid(8, 8, 90, 90, 90));
+  t.be.set_background("scene");
+  t.width = 300;
+  t.height = 3;
+  t.draw();
+  const std::string g = t.be.take_graphics();
+  EXPECT_EQ(count(g, "a=T"), 2) << "297 columns, then 3";
+  EXPECT_NE(g.find("s=2970,v=60,c=297,r=3"), std::string::npos);
+  EXPECT_NE(g.find("s=30,v=60,c=3,r=3"), std::string::npos);
+  EXPECT_EQ(count(t.screen, kPlaceholder), 300 * 3);
+}
+
+TEST(AriadneFtxuiGraphics, SixelIsSentAfterEveryDrawClippedToTheUncoveredCells) {
+  REQUIRE_FTXUI();
+  FtxuiBackend::Options o;
+  o.image_color = ImageColor::Sixel;
+  Term t(group({text("hello")}), o);
+  t.be.set_terminal_graphics(sixel_term(16));
+  t.be.set_image("scene", solid(4, 4, 255, 0, 0));
+  t.be.set_background("scene");
+  t.width = 20;
+  t.height = 5;
+  t.draw();
+  // The underlay is half-blocks, for a terminal that drops the bitmap.
+  EXPECT_EQ(count(t.screen, "\xe2\x96\x80"), 20 * 5 - 5) << t.screen;
+  const std::string g = t.be.take_graphics();
+  // "hello" covers row 0's first five cells and the last row stays half-blocks, so two bitmaps:
+  // row 1 (1-based) from column 6, and rows 2..4 whole. Rows 2..4 are 48 px, whole bands; row 1's
+  // 16 px end in a partial band, which may reach into row 2 (the image shows there), so it is 18.
+  EXPECT_EQ(count(g, "\x1bP"), 2) << g.substr(0, 200);
+  const std::size_t a = g.find(kSaveCursor + "\x1b[2;1H\x1bP0;1;0q\"1;1;160;48");
+  const std::size_t b = g.find(kSaveCursor + "\x1b[1;6H\x1bP0;1;0q\"1;1;120;18");
+  EXPECT_NE(a, std::string::npos);
+  EXPECT_NE(b, std::string::npos);
+  EXPECT_LT(b, a) << "top first: the one reaching into row 2 goes before the one it reaches";
+  EXPECT_EQ(count(g, kRestoreCursor), 2) << "the cursor goes back each time";
+  t.draw();
+  EXPECT_EQ(t.be.take_graphics(), g) << "a repaint covers the bitmap, so it is sent again";
+}
+
+TEST(AriadneFtxuiGraphics, SixelSendsWholeBandsAndSkipsAWindowOverTheImage) {
+  REQUIRE_FTXUI();
+  FtxuiBackend::Options o;
+  o.image_color = ImageColor::Sixel;
+  // An image of 6 x 3 cells at 8 x 16 px, with a window over its right half.
+  Term t(group({image_widget("pic", "map", 48.0), placed_window("W", {text("x")}, 24, 0, 48, 48)}),
+         o);
+  t.be.set_terminal_graphics(sixel_term(16));
+  t.be.set_image("map", solid(12, 12, 0, 0, 255));
+  t.width = 30;
+  t.height = 10;
+  t.draw();
+  const std::string g = t.be.take_graphics();
+  // 48 px = 6 columns; 12 x 12 px at 8 x 16 px cells is round(6 * 8 / 16) = 3 rows. The window's
+  // 6 x 3 cells cover columns 3..8, so the bitmap is the left 3 x 3 cells: 24 x 48 px, and 48 is
+  // whole bands.
+  EXPECT_EQ(count(g, "\x1bP"), 1) << g.substr(0, 200);
+  EXPECT_NE(g.find(kSaveCursor + "\x1b[1;1H\x1bP0;1;0q\"1;1;24;48"), std::string::npos)
+      << g.substr(0, 80);
+}
+
 TEST(AriadneFtxui, AClickOnTheBackgroundIsLeftForTheHost) {
   REQUIRE_FTXUI();
   Term t(group({checkbox("A", "a")}));
@@ -830,6 +1164,32 @@ TEST(AriadneFtxui, EmptyRuntimeRendersSafely) {
   EXPECT_NO_THROW(be.render_to_string(rt, 40, 0));
   EXPECT_NO_THROW(be.feed(rt, TermEvent::key_event("Tab")));
   EXPECT_NO_THROW(be.feed(rt, TermEvent::mouse_event(TermEvent::Mouse::Press, 3, 3)));
+}
+
+TEST(AriadneFtxuiGraphics, TerminalImagesDocumentShowsItsPicture) {
+  REQUIRE_FTXUI();
+  if (!AppRuntime::have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  namespace fs = std::filesystem;
+  const fs::path doc = fs::path(__FILE__).parent_path().parent_path() / "ariadne" / "examples" /
+                       "terminal_images.ari";
+  if (!fs::exists(doc))
+    GTEST_SKIP() << "example not found at " << doc.string();
+  FtxuiBackend::Options o;
+  o.image_color = ImageColor::Kitty;
+  cvc::app app;
+  FtxuiBackend be(o);
+  be.set_terminal_graphics(kitty_term());
+  be.set_image("photo", solid(40, 26, 40, 90, 200)); // what `ari --image photo=FILE` publishes
+  AppRuntime art(app, "ui.docs.images");
+  art.set_backend(be);
+  const std::vector<std::string> warns = art.load(doc.string());
+  EXPECT_TRUE(warns.empty()) << warns.front();
+  art.drain();
+  const std::string s = be.render_to_string(art.runtime(), 100, 30);
+  EXPECT_NE(s.find("drag me over the picture"), std::string::npos) << s;
+  EXPECT_GT(count(s, kPlaceholder), 0) << s;
+  EXPECT_EQ(count(be.take_graphics(), "a=T"), 1);
 }
 
 TEST(AriadneFtxui, TerminalTourDocumentRuns) {

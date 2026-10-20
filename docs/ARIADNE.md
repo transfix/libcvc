@@ -232,19 +232,64 @@ Three backends ship:
     bar, click `[x]` to close it, click a menu title to open it.
   - **windows** (`caps.windows = true`) — free, z-ordered, raised on focus, placed from
     `pos:`/`size:` or the persisted `tree.<id>.geometry`; a drag persists back (§11.4).
-  - **graphics** — `draw_image` paints a raster published with `set_image` as half-block
-    cells (two pixels per cell, 24-bit colour; a luminance ramp on a colourless terminal).
+  - **graphics** — `draw_image` paints a raster published with `set_image`, and
+    `set_background` puts one behind everything. Where the terminal speaks a pixel protocol
+    the picture is real pixels (see *Pixel graphics* below); everywhere else it is
+    half-block cells (two pixels per cell, 24-bit colour; a luminance ramp on a colourless
+    terminal).
 
   Commit edges match the ImGui backend: discrete widgets commit on the edit, a
   mouse-dragged slider commits on release (arrow-key steps commit at once), a text field
   commits on Enter or when focus leaves it. Authored px convert to cells by a nominal cell
   size (`Options::cell_px_w/h`, 8 × 16), and reported geometry converts back, so a layout
   persisted under one backend holds under the other. Grid seams drag: a row split's
-  panes and a `resizable` table's columns resize with the mouse, and a row split
-  persists its pane sizes to `tree.<id>.tracks` (§11.4). What a terminal cannot do it
+  panes and a `resizable` table's columns resize with the mouse; a row split persists
+  its pane sizes to `tree.<id>.tracks` and a resizable table its column widths to
+  `tree.<id>.columns` (§11.4; *Grid sizes* in §7.1). What a terminal cannot do it
   degrades: no GLSL, no `view_embed`, no scene (`AppRuntime` drops a `scene:` with a
   warning). `render_to_string` + `feed(TermEvent)` drive it headless (that is how
   `ariadne_ftxui_test` tests it); `run()` owns a real terminal.
+
+  **Pixel graphics** ([`term_graphics.h`](../inc/cvc/ariadne/term_graphics.h)).
+  `Options::image_color` is `Auto`, `Kitty`, `Sixel`, `Color` (half-blocks) or `Mono`.
+  `Auto` takes the best the terminal has, else half-blocks:
+  - **Kitty** (kitty, Ghostty, WezTerm, Konsole). Each image is sent once, out of band,
+    after the frame that first draws it (`a=T,U=1,f=24,q=2`, chunked base64), and is
+    shown through **Unicode placeholder** cells (U+10EEEE with row and column diacritics,
+    in a 24-bit foreground that names the image). The placeholders are ordinary cells, so
+    a window or menu drawn over an image hides exactly the cells it covers, and FTXUI's
+    full repaint redraws them for free. An image is sent again only when its pixels
+    change (a republished identical frame is not), and deleted (`a=d,d=I`) once no frame
+    draws it. A placement addresses 297 rows and columns, so a bigger image goes as tiles.
+  - **Sixel** (xterm -ti vt340, foot, mlterm, WezTerm, Windows Terminal). A bitmap is
+    drawn after each repaint, because the repaint covers it, inside synchronized-output
+    marks (`CSI ? 2026`). It is clipped to the cells nothing covers: the image node draws
+    half-blocks underneath, and a pass after the whole frame keeps the cells still showing
+    them, sent as one bitmap per rectangle. Colours go to a fixed 6 × 7 × 6 cube (fewer
+    where the terminal reports fewer registers) with an ordered dither.
+  - **Detection.** `run()` asks the terminal before FTXUI takes it over, because FTXUI's
+    input parser has no APC case and a late kitty reply would arrive as typed text: on
+    `/dev/tty` in raw mode it sends a kitty query, `CSI 16 t` (the cell size in pixels)
+    and DA1, whose reply ends the exchange. Sixel is DA1's feature 4 (FTXUI's own DA1
+    exchange is merged in), and a Sixel terminal is asked its register count
+    (XTSMGRAPHICS). The cell size comes from `TIOCGWINSZ` where the tty reports pixels,
+    else `CSI 16 t`, and is re-read every frame, so a font-size change follows. A host
+    that probed already, or a headless driver, calls `set_terminal_graphics`.
+  - **Units.** `cell_px_w/h` (8 × 16) stays the layout unit, so persisted geometry stays
+    portable. The real cell size only sets the raster: an image covering `c × r` cells is
+    drawn from `c × cw` by `r × ch` pixels (`image_raster`), and its rows follow the real
+    cell's shape. Kitty images over `max_image_pixels` (default 1 Mi) are sent scaled
+    down, and the terminal scales them back up.
+  - **Headless.** `render_to_string` lays out the placeholders or underlay, and
+    `take_graphics()` returns the bytes `run()` would write after that frame
+    (`release_graphics()`: the deletions it sends on exit).
+  - **Limits.** Hosted mode (the tvision desktop) always draws half-blocks, because
+    tvision owns the output. No probe runs on Windows or in the browser, so `Auto` stays
+    half-blocks there (`Kitty` / `Sixel` can still be asked for). Inside tmux the probe
+    gets no kitty reply, so it falls back too (tmux passthrough is not wired). A Sixel
+    bitmap never covers the screen's last row (a terminal that moves the cursor below a
+    bitmap would scroll), and where its last six-pixel band would reach a covered row it
+    stops short, so up to five pixel rows show the half-blocks.
 - **`cvc::ariadne::TvisionBackend`**
   ([`inc/cvc/ariadne/tvision_backend.h`](../inc/cvc/ariadne/tvision_backend.h)) — the
   native-desktop terminal backend (roadmap §16.5 row 5). Turbo Vision owns the terminal
@@ -285,7 +330,7 @@ The built-in top-level keys (`is_builtin_block`,
 
 ```
 meta  menubar  windows  overlays  root (alias: children)  scene  customs
-init  on_tick  on_key  on_pointer  on_signal  units  import  channels  lint
+init  on_tick  on_key  on_pointer  on_signal  units  import  channels  lint  args
 ```
 
 Any **other** top-level key is dispatched to a parser registered via
@@ -514,6 +559,65 @@ ordinary live keys the job copies when it starts. The FTXUI backend draws such a
 read-only: its buttons do not fire yet
 ([`ftxui_backend.cpp`](../src/cvc/ariadne/ftxui_backend.cpp)), and it has no scene.
 
+### 5.6 `args:` and `argv` — the document's command line
+
+A runtime takes only its own general flags, before the document path. Everything after the
+path belongs to the document, as with `python script.py args`:
+
+```
+ari run --fps 30 conf.ari --room standup --camera
+```
+
+The runtime publishes it under the document root before `init:` runs
+([`doc_args.h`](../inc/cvc/ariadne/doc_args.h)). All of it is read-only:
+
+- **`argv`**: the strings as given. Its data is a DSL list, `(state-data-get "argv")`; its
+  value is the same strings joined by spaces, for display.
+- **`args.<name>`**: one per argument declared in an `args:` block that was given or has a
+  default. Its value is the canonical text, `(state-get "args.room")`; its data is the typed
+  value (string, bool, int or float).
+- **`args`**: the whole set as one DSL dict of name → typed value.
+
+```yaml
+args:
+  room:   {type: string, default: lobby, help: Room to join}
+  camera: {type: bool, help: Use the real camera}
+  peers:  {type: int, default: 8}
+  file:   {type: string, positional: true}
+  verbose: bool                  # shorthand: just the type
+init: |
+  (state-set "status" (str-concat "joining " (state-get "args.room")))
+```
+
+**Parsing rules:**
+- `--name value` and `--name=value` both work.
+- A bool is `--flag` or `--no-flag` (`--flag=false` works too); a bare flag never consumes
+  the next argument.
+- Declared positionals are taken in order, and `--` ends the options.
+- If an option is repeated, the last one wins.
+- A negative number is a value, not an option.
+
+The load fails on any of:
+- an unknown option;
+- a malformed value;
+- a missing `required:` argument;
+- an extra positional.
+
+The runtime then prints the generated usage and exits 2. `--help` or `-h` prints that
+usage and exits 0. A malformed `args:` block (an unknown type, a default that is not of
+its type, a bool positional, a required positional after an optional one) fails the load
+too, since nobody could pass arguments to it. Without an `args:` block nothing is checked,
+`--help` included: the document gets `argv` and makes of it what it wants. `ari check`
+validates the block but not the arguments, and declared arguments take their defaults.
+
+**Who can see them.** Only the outermost document takes arguments. A `load:`-mounted
+module's own `args:` is ignored with a warning. Programs are chrooted to their own
+subtree (§7), so a module sees neither `argv` nor `args` unless its parent grants a
+read-only hole (§7.4). A hole links one node:
+- `link: {args: {to: args, mode: ro}}` hands the module the dict,
+  `(get-attr (state-data-get "args") "room")`;
+- `link: {room: {to: args.room, mode: ro}}` hands it one argument, `(state-get "room")`.
+
 ---
 
 ## 6. Composition: include / import / load
@@ -616,6 +720,21 @@ Every relative reference in a document is resolved by `resolve_bind(prefix, bind
 
 Widgets and scene binds use the same rule, which is why a widget `bind:` and a scene
 `visible:` on the same relative path co-resolve to one key.
+
+**Grid sizes (§11.4).** A grid the user can resize keeps its sizes under its id, the way a
+window keeps `tree.<id>.geometry`: a row split's pane heights in `tree.<id>.tracks`, a
+resizable table's column widths in `tree.<id>.columns`. Both are comma-separated px, one
+entry per track. The walk seeds the backend from the key before the grid opens (each
+backend applies it once, so a live drag wins) and writes back what the backend reports after
+it closes; the write is skipped when nothing changed. A `0` entry means "not set": that
+track keeps its authored size. The backends differ in what they report:
+
+- The FTXUI backend reports a track it holds at a size (authored px, seeded, or dragged) and
+  `0` for one it lays out naturally, so a stretch pane or column is never pinned at the size
+  one frame happened to give it. Seeding fixes a track at the persisted width.
+- The ImGui backend reports every pane height and every column's drawn width
+  (`WidthGiven`). Seeding gives a fixed column its width and a stretch column its weight,
+  so stretch columns keep their persisted proportions at another table width.
 
 ### 7.2 Two prefix conventions
 
@@ -742,10 +861,24 @@ if (lr.has_channels_block)
 the terminal with no GL, VTK, or ImGui:
 
 ```
-ari run      doc.ari [--backend ftxui|tvision] [--prefix P] [--fps N] [--no-mouse] [--component-path DIR]...
-ari snapshot doc.ari [--width W] [--height H] [--frames N] [--ansi]   # print a frame
-ari check    doc.ari                                                  # load + warnings
+ari run      [flags] doc.ari [document args...]   # take over the terminal
+ari snapshot [flags] doc.ari [document args...]   # print a frame (--width W --height H --frames N --ansi)
+ari check    [flags] doc.ari                      # load + warnings
 ```
+
+Its flags (`--backend ftxui|tvision`, `--prefix P`, `--fps N`, `--no-mouse`,
+`--component-path DIR`, and the snapshot ones) go **before** the document. They are the
+general flags every runtime shares, parsed by
+[`host_cli.h`](../inc/cvc/ariadne/host_cli.h). Whatever follows the document is the
+document's (§5.6): `ari run doc.ari --help` prints the document's own usage. A general
+flag written after the document goes to the document, and `ari` points that out.
+
+Three of the general flags are for pictures. `--graphics auto|kitty|sixel|color|mono` sets
+how images draw (see *Pixel graphics* in §4), and `--image NAME=FILE` publishes a picture
+for the document's `image:` widgets with `src: NAME`
+([`terminal_images.ari`](../src/cvc/ariadne/examples/terminal_images.ari) is an example).
+With `--ansi` and `--graphics kitty` or `sixel`, `snapshot` also prints the images, after
+clearing the screen, at the terminal's cell size (`--cell-size WxH` where it can't be asked).
 
 `ari` is its own cvcpkg package (`cvcpkg install ari`, linux for now), built from
 [`cvcpkg/recipes/ari`](../cvcpkg/recipes/ari/recipe.yaml) against the installed libcvc,
@@ -764,9 +897,14 @@ backend.run(rt);  // owns the terminal; drains every iteration; returns on quit 
 
 To route OS signals as well, install your handlers in `RunOptions::on_start` (it runs after
 FTXUI has installed its own), restore them in `on_stop`, and return pending signal names
-from `take_signal`; [`src/ari/main.cpp`](../src/ari/main.cpp) does exactly this with
-`sigaction`. The handlers are process-wide, which is why they belong to the host and not to
-libcvc.
+from `take_signal`. [`host_signals.h`](../inc/cvc/ariadne/host_signals.h) has the
+`sigaction` traps `ari` uses (`install_signal_traps`, `restore_signal_traps`,
+`take_trapped_signal`, `signal_number`). Signal handlers are process-wide, so libcvc never
+installs them by itself: a host program opts in around its own loop.
+
+Give the document its command line with `rt.set_document_args(args, "myhost run doc.ari")`
+before `load()`. When the arguments don't match its `args:` block, `load()` throws
+`document_args_error`, carrying the usage text and whether `--help` was asked for.
 
 `run()` forwards keys and pointer events the UI did not use to the document's
 `on_key` / `on_pointer`, so document-level input works here today.
@@ -780,7 +918,7 @@ on the module's stdin/stdout, which is all FTXUI's Emscripten screen uses. Serve
 over plain http and open `ari.html`; it is single-threaded and needs no COOP/COEP. A page
 has no argv, so the build bakes in one document, `CVC_ARI_WASM_DOC` (default
 `terminal_tour.ari`), with the component library at `/components`. The same `ari.js`
-runs headless under node: `node ari.js snapshot /terminal_tour.ari`. CI's `ari-wasm`
+runs headless under node: `node ari.js snapshot --width 100 /terminal_tour.ari`. CI's `ari-wasm`
 job does exactly that.
 
 What differs from a real terminal:
@@ -798,9 +936,12 @@ What differs from a real terminal:
 **With a 3D scene (cvcGL).** The terminal backends stay GL-free; cvcGL extends them.
 [`cvc::gl::ariadne::TerminalScene`](../inc/cvc/gl/ariadne/TerminalScene.h) is a `SceneAdapter`
 that realizes the document's `scene:` into an offscreen `SceneRenderer`, renders it every
-frame at the screen's half-block grid (two pixels per cell, supersampled), and hands the
-frame to the backend as its background (`FtxuiBackend::set_background`), so widgets, menus
-and windows draw over the scene the way ImGui draws over the GL canvas. Passed as
+frame at the size the backend draws the screen from (`FtxuiBackend::image_raster`: the
+half-block grid, two pixels per cell, supersampled; or the cells' real pixels on a terminal
+with Kitty or Sixel graphics), and hands the frame to the backend as its background
+(`FtxuiBackend::set_background`), so widgets, menus and windows draw over the scene the way
+ImGui draws over the GL canvas. With pixel graphics a drag maps cells to the frame's own
+pixels, so a map pan keeps the grabbed point under the pointer. Passed as
 `RunOptions::background_input`, its `handle_input` turns background drags into orbit,
 middle-drags into pan and the wheel into zoom. The host is
 [`ariadne_terminal`](../src/cvcGL/examples/ariadne_terminal.cpp), the terminal sibling of
@@ -952,8 +1093,9 @@ below (G17–G21 in the internal gap report) are tracked for reconciliation.
   `RunOptions` hooks gets FTXUI's default for SIGTERM (restore the terminal, exit).
 - **The libcvc terminal backends render no scene by themselves.** `ari` drops a `scene:`
   with a warning; cvcGL's `TerminalScene` (§9.2) is what draws one, so a scene needs a cvcGL
-  build and a GL that works offscreen (X, EGL or OSMesa). Frames are half-blocks only: Sixel /
-  Kitty graphics are not used yet.
+  build and a GL that works offscreen (X, EGL or OSMesa). On a Kitty terminal a scene that
+  keeps moving sends a frame per change (up to `max_image_pixels`), and on a Sixel one every
+  frame, so a remote session is better off with half-blocks (`--graphics color`).
 - **`load:` `prefix:` / `reload:` and §12.2 sub-scene mounting are not yet parsed** at the
   loader; only sub-UI `load:` is landed ([`loader.cpp`](../src/cvc/ariadne/loader.cpp)).
 - **No DSL-visible future from the pycvc async layer.** Both `register_async_fn` and

@@ -89,12 +89,21 @@ target_link_libraries(cvcGL PUBLIC cvc::cvc ${VTK_LIBRARIES})
 # stream_view decode path). Optional at build time — where the prefix has no turbojpeg the codec
 # compiles to a no-op (the "mjpeg" path then yields no video); native builds that need it ship it.
 find_package(libjpeg-turbo CONFIG QUIET)
-if(libjpeg-turbo_FOUND)
-  target_link_libraries(cvcGL PRIVATE libjpeg-turbo::turbojpeg)
+# Shared/native prefixes expose libjpeg-turbo::turbojpeg; static-only prefixes (e.g. the
+# wasm dep closure) expose only libjpeg-turbo::turbojpeg-static. The config being FOUND does
+# not guarantee a particular target exists, so pick whichever one it actually defined.
+set(_cvc_turbojpeg_tgt "")
+if(TARGET libjpeg-turbo::turbojpeg)
+  set(_cvc_turbojpeg_tgt libjpeg-turbo::turbojpeg)
+elseif(TARGET libjpeg-turbo::turbojpeg-static)
+  set(_cvc_turbojpeg_tgt libjpeg-turbo::turbojpeg-static)
+endif()
+if(_cvc_turbojpeg_tgt)
+  target_link_libraries(cvcGL PRIVATE ${_cvc_turbojpeg_tgt})
   target_compile_definitions(cvcGL PRIVATE CVC_HAVE_TURBOJPEG=1)
-  message(STATUS "cvcGL: libjpeg-turbo found -- conference video (mjpeg) enabled")
+  message(STATUS "cvcGL: libjpeg-turbo found (${_cvc_turbojpeg_tgt}) -- conference video (mjpeg) enabled")
 else()
-  message(STATUS "cvcGL: libjpeg-turbo NOT found -- mjpeg video disabled (no-op codec)")
+  message(STATUS "cvcGL: libjpeg-turbo turbojpeg target NOT found -- mjpeg video disabled (no-op codec)")
 endif()
 
 # LowMemoryPolyDataMapper carries a replica of VTK 9.5.0's private low-memory
@@ -358,6 +367,15 @@ if(CVC_SDL_VIA_CONFIG)
   set(CVCGL_SDL_DEP "find_dependency(SDL3 CONFIG)")
 else()
   set(CVCGL_SDL_DEP "")
+endif()
+
+# @CVCGL_TURBOJPEG_DEP@ — a find_dependency(libjpeg-turbo) line iff a STATIC cvcGL linked
+# turbojpeg: its export then names that target ($<LINK_ONLY:...>); a shared cvcGL keeps it private.
+get_target_property(_cvcgl_type cvcGL TYPE)
+if(_cvc_turbojpeg_tgt AND _cvcgl_type STREQUAL "STATIC_LIBRARY")
+  set(CVCGL_TURBOJPEG_DEP "find_dependency(libjpeg-turbo CONFIG)")
+else()
+  set(CVCGL_TURBOJPEG_DEP "")
 endif()
 
 # Substitutes @CVCGL_VTK_COMPONENTS@ (the list cvcGL links) into the config so
@@ -793,12 +811,18 @@ add_executable(cvcgl_terminal_scene test/cvcgl_terminal_scene.cpp)
 target_link_libraries(cvcgl_terminal_scene PRIVATE cvcGL)
 add_test(NAME cvcgl_terminal_scene COMMAND cvcgl_terminal_scene)
 
+# ImGuiBackend's table-column persistence (tree.<id>.columns, §11.4) on a bare ImGui context: a
+# resizable table seeds its widths from state and reports them back. No window, no GL.
+add_executable(cvcgl_imgui_table_columns test/cvcgl_imgui_table_columns.cpp)
+target_link_libraries(cvcgl_imgui_table_columns PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_table_columns COMMAND cvcgl_imgui_table_columns)
+
 # Golden images of the Ariadne ImGui/VTK backend (roadmap §16.6 phase 1): each .ari in
 # test/golden runs through AriRuntime + ImGuiBackend offscreen and its frame is compared with the
-# PNG of the same name (made under Mesa llvmpipe; another rasterizer compares loosely). A mismatch
-# leaves <name>.actual.png + <name>.diff.png in ari_golden/ here; CVC_UPDATE_GOLDEN=1 rewrites the
-# goldens. Adding one: docs/ARIADNE.md, "Golden-image tests". Skips where nothing rasterises unless
-# CVC_REQUIRE_RENDER=1.
+# PNG of the same name (made under Mesa llvmpipe, compared within a tolerance measured across
+# rasterizers). A mismatch leaves <name>.actual.png + <name>.diff.png in ari_golden/ here;
+# CVC_UPDATE_GOLDEN=1 rewrites the goldens. Adding one: docs/ARIADNE.md, "Golden-image tests".
+# Skips where nothing rasterises unless CVC_REQUIRE_RENDER=1.
 if(NOT EMSCRIPTEN)
   add_executable(cvcgl_ari_golden test/cvcgl_ari_golden.cpp)
   target_link_libraries(cvcgl_ari_golden PRIVATE cvcGL)

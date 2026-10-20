@@ -19,11 +19,17 @@
 
 // ari — run an Ariadne (.ari) document in the terminal, through the FTXUI backend. Headless and
 // GL-free: no window, no VTK, no ImGui. A document's scene: block is dropped with a warning (a
-// terminal has no scene renderer); its widgets, menus, windows, state and programs all run.
+// terminal has no scene renderer); its widgets, menus, windows, state and programs all run. arigl
+// is the GL runtime (cvcGL), for a real window or a 3D scene behind the terminal widgets.
 //
-//   ari run      <doc.ari> [--prefix P] [--fps N] [--no-mouse] [--component-path DIR]...
-//   ari snapshot <doc.ari> [--prefix P] [--width W] [--height H] [--frames N] [--ansi]
-//   ari check    <doc.ari> [--prefix P]
+//   ari run      [flags] doc.ari [document args...]
+//   ari snapshot [flags] doc.ari [document args...]
+//   ari check    [flags] doc.ari
+//
+// ari's own flags (host_cli.h) come BEFORE the document path; everything after it belongs to the
+// document (doc_args.h). The document reads it as the read-only list argv, or declares an args:
+// block that ari parses it against: `ari run doc.ari --help` then prints the document's usage,
+// and an argument the block doesn't accept exits 2.
 //
 // run takes over the terminal until a "quit" action (a menu item with `on: quit`, or a program
 // calling (quit)) or Ctrl-C. A document with an on_signal: program gets Ctrl-C as SIGINT and
@@ -32,23 +38,29 @@
 // document doesn't handle ends the run with exit status 128 + the signal number.
 // snapshot drains N frames (default 1) and prints the last one as text — for CI, logs, and docs.
 // check loads the document and prints its warnings; it exits non-zero when the load fails.
+//
+// --graphics picks how images draw: auto (the default: Kitty, else Sixel, where the terminal has
+// them, else half-blocks), kitty, sixel, color (half-blocks) or mono. --image NAME=FILE publishes
+// a picture for the document's `image:` widgets with `src: NAME`. With --ansi and --graphics kitty
+// or sixel, snapshot also prints the images, after clearing the screen, at the terminal's cell size
+// in pixels (--cell-size WxH where it can't be asked).
 
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <cvc/ariadne/app_runtime.h>
+#include <cvc/ariadne/doc_args.h>
 #include <cvc/ariadne/ftxui_backend.h>
+#include <cvc/ariadne/host_cli.h>
+#include <cvc/ariadne/host_signals.h>
 #include <cvc/ariadne/tvision_backend.h>
 #include <cvc/core/app.h>
+#include <cvc/image/image.h>
 #include <exception>
 #include <memory>
 #include <string>
 #include <vector>
 
-#ifndef _WIN32
-#include <csignal>
-#endif
 #ifdef __linux__
 #include <climits>
 #include <sys/stat.h>
@@ -56,56 +68,6 @@
 #endif
 
 namespace {
-
-#ifndef _WIN32
-// OS signals for the document's on_signal:. A handler only sets a flag (all it may safely do); the
-// loop polls them through RunOptions::take_signal. Process-wide state, so it lives here in the
-// host program rather than in libcvc.
-struct Trap {
-  int signo;
-  const char *name;
-};
-constexpr Trap kTraps[] = {{SIGTERM, "SIGTERM"}, {SIGHUP, "SIGHUP"},   {SIGINT, "SIGINT"},
-                           {SIGQUIT, "SIGQUIT"}, {SIGUSR1, "SIGUSR1"}, {SIGUSR2, "SIGUSR2"}};
-constexpr int kTrapCount = static_cast<int>(sizeof(kTraps) / sizeof(kTraps[0]));
-volatile std::sig_atomic_t g_raised[kTrapCount] = {};
-struct sigaction g_previous[kTrapCount];
-
-extern "C" void on_os_signal(int signo) {
-  for (int i = 0; i < kTrapCount; ++i)
-    if (kTraps[i].signo == signo)
-      g_raised[i] = 1;
-}
-
-void install_traps() {
-  struct sigaction sa {};
-  sa.sa_handler = on_os_signal;
-  sigemptyset(&sa.sa_mask);
-  for (int i = 0; i < kTrapCount; ++i)
-    sigaction(kTraps[i].signo, &sa, &g_previous[i]);
-}
-
-void restore_traps() {
-  for (int i = 0; i < kTrapCount; ++i)
-    sigaction(kTraps[i].signo, &g_previous[i], nullptr);
-}
-
-std::string take_trapped() {
-  for (int i = 0; i < kTrapCount; ++i)
-    if (g_raised[i]) {
-      g_raised[i] = 0;
-      return kTraps[i].name;
-    }
-  return {};
-}
-
-int signal_number(const std::string &name) {
-  for (const Trap &t : kTraps)
-    if (name == t.name)
-      return t.signo;
-  return 0;
-}
-#endif
 
 // tvision reads the terminal's description through ncurses. A cvcpkg prefix ships its own terminfo
 // database (share/terminfo), so point ncurses at it, ahead of the system's, unless the user already
@@ -129,96 +91,76 @@ void use_bundled_terminfo() {
 
 int usage(int code) {
   std::fprintf(code ? stderr : stdout,
-               "usage:\n"
-               "  ari run      <doc.ari> [--backend ftxui|tvision] [--prefix P] [--fps N] "
-               "[--no-mouse] [--component-path DIR]...\n"
-               "  ari snapshot <doc.ari> [--prefix P] [--width W] [--height H] [--frames N] "
-               "[--ansi]\n"
-               "  ari check    <doc.ari> [--prefix P]\n");
+               "usage: ari run|snapshot|check [flags] doc.ari [document args...]\n"
+               "\n"
+               "flags (before the document):\n"
+               "%s"
+               "\n"
+               "Everything after the document path is the document's own: it reads it as argv, or\n"
+               "declares an args: block (then `ari run doc.ari --help` shows its options).\n",
+               cvc::ariadne::host_flags_help().c_str());
   return code;
+}
+
+// --graphics MODE -> how images draw (host_cli has checked MODE).
+cvc::ariadne::FtxuiBackend::Options::ImageColor image_mode(const std::string &s) {
+  using Mode = cvc::ariadne::FtxuiBackend::Options::ImageColor;
+  if (s == "kitty")
+    return Mode::Kitty;
+  if (s == "sixel")
+    return Mode::Sixel;
+  if (s == "color")
+    return Mode::Color;
+  if (s == "mono")
+    return Mode::Mono;
+  return Mode::Auto;
 }
 
 } // namespace
 
 int main(int argc, char **argv) {
+  namespace ari = cvc::ariadne;
 #ifdef CVC_ARIADNE_WASM_DOC
   // The browser build (ari.html over xterm.js) has no command line. Run the document baked into
   // MEMFS, with the embedded component library at /components so cvc://components/*.ari resolves
   // (see the EMSCRIPTEN block in src/ari/CMakeLists.txt).
-  const char *baked[] = {"ari", "run", CVC_ARIADNE_WASM_DOC, "--component-path", "/"};
+  const char *baked[] = {"ari", "run", "--component-path", "/", CVC_ARIADNE_WASM_DOC};
   if (argc < 2) {
     argc = static_cast<int>(sizeof baked / sizeof *baked);
     argv = const_cast<char **>(baked);
   }
 #endif
-  if (argc < 2)
-    return usage(2);
-  const std::string cmd = argv[1];
-  if (cmd == "-h" || cmd == "--help" || cmd == "help")
+  const ari::HostOptions o = ari::parse_host_args(argc, argv);
+  if (o.help)
     return usage(0);
+  if (!o.error.empty()) {
+    std::fprintf(stderr, "ari: %s\n", o.error.c_str());
+    return usage(2);
+  }
+  const std::string &cmd = o.command;
   if (cmd != "run" && cmd != "snapshot" && cmd != "check") {
     std::fprintf(stderr, "ari: unknown command '%s'\n", cmd.c_str());
     return usage(2);
   }
-
-  std::string doc;
-  std::string prefix = "ui.docs.ari";
-  std::vector<std::string> componentPaths;
-  int width = 100, height = 0, frames = 1;
-  bool ansi = false;
-  bool tvision = false; // run on the tvision desktop instead of the FTXUI screen
-  cvc::ariadne::FtxuiBackend::RunOptions run;
-  for (int i = 2; i < argc; ++i) {
-    const char *a = argv[i];
-    auto next = [&]() -> const char * {
-      if (i + 1 >= argc) {
-        std::fprintf(stderr, "ari: %s needs a value\n", a);
-        std::exit(2);
-      }
-      return argv[++i];
-    };
-    if (!std::strcmp(a, "--prefix"))
-      prefix = next();
-    else if (!std::strcmp(a, "--component-path"))
-      componentPaths.push_back(next());
-    else if (!std::strcmp(a, "--width"))
-      width = std::atoi(next());
-    else if (!std::strcmp(a, "--height"))
-      height = std::atoi(next());
-    else if (!std::strcmp(a, "--frames"))
-      frames = std::atoi(next());
-    else if (!std::strcmp(a, "--fps"))
-      run.fps = std::atoi(next());
-    else if (!std::strcmp(a, "--no-mouse"))
-      run.mouse = false;
-    else if (!std::strcmp(a, "--ansi"))
-      ansi = true;
-    else if (!std::strcmp(a, "--backend")) {
-      const std::string b = next();
-      if (b != "ftxui" && b != "tvision") {
-        std::fprintf(stderr, "ari: --backend is ftxui or tvision, not '%s'\n", b.c_str());
-        return 2;
-      }
-      tvision = b == "tvision";
-    } else if (a[0] != '-' && doc.empty())
-      doc = a;
-    else {
-      std::fprintf(stderr, "ari: unexpected argument '%s'\n", a);
-      return usage(2);
-    }
+  if (!o.backend.empty() && o.backend != "ftxui" && o.backend != "tvision") {
+    std::fprintf(stderr, "ari: --backend is ftxui or tvision, not '%s'\n", o.backend.c_str());
+    return 2;
   }
-  if (doc.empty())
-    return usage(2);
-  if (!cvc::ariadne::AppRuntime::have_yaml()) {
+  if (!o.png.empty()) {
+    std::fprintf(stderr, "ari: --png needs a renderer; arigl can write one\n");
+    return 2;
+  }
+  if (!ari::AppRuntime::have_yaml()) {
     std::fprintf(stderr, "ari: libcvc was built without yaml-cpp, so it cannot load a .ari\n");
     return 1;
   }
-  if (cmd != "check" && !cvc::ariadne::FtxuiBackend::available()) {
+  if (cmd != "check" && !ari::FtxuiBackend::available()) {
     std::fprintf(stderr, "ari: libcvc was built without FTXUI (no terminal backend)\n");
     return 1;
   }
-  tvision = tvision && cmd == "run"; // snapshot / check always lay out with FTXUI
-  if (tvision && !cvc::ariadne::TvisionBackend::available()) {
+  // snapshot / check always lay out with FTXUI; tvision only changes the interactive chrome.
+  const bool tvision = o.backend == "tvision" && cmd == "run";
+  if (tvision && !ari::TvisionBackend::available()) {
     std::fprintf(stderr, "ari: libcvc was built without tvision (try --backend ftxui)\n");
     return 1;
   }
@@ -226,57 +168,99 @@ int main(int argc, char **argv) {
   cvc::app app;
   // Declared before the AppRuntime, so it outlives it. A TvisionBackend is an FtxuiBackend in
   // hosted mode; its run() is its own (see below).
-  std::unique_ptr<cvc::ariadne::FtxuiBackend> backend =
-      tvision ? std::make_unique<cvc::ariadne::TvisionBackend>()
-              : std::make_unique<cvc::ariadne::FtxuiBackend>();
-  cvc::ariadne::AppRuntime rt(app, prefix);
+  ari::FtxuiBackend::Options look;
+  look.image_color = image_mode(o.graphics);
+  std::unique_ptr<ari::FtxuiBackend> backend = tvision ? std::make_unique<ari::TvisionBackend>(look)
+                                                       : std::make_unique<ari::FtxuiBackend>(look);
+  for (const auto &[name, file] : o.images) {
+    try {
+      backend->set_image(name, cvc::image::load(file));
+    } catch (const std::exception &e) {
+      std::fprintf(stderr, "ari: --image %s: %s\n", file.c_str(), e.what());
+      return 1;
+    }
+  }
+  ari::AppRuntime rt(app, o.prefix.empty() ? "ui.docs.ari" : o.prefix);
   rt.set_backend(*backend);
-  for (const std::string &d : componentPaths)
+  for (const std::string &d : o.component_paths)
     rt.add_component_path(d);
   rt.on("quit", [&] { rt.request_close(); });
   rt.register_verb("quit", [&] { rt.request_close(); }); // (quit), e.g. from an on_signal: program
+  rt.set_document_args(o.doc_args, "ari " + cmd + " " + o.doc, /*validate=*/cmd != "check");
 
   std::vector<std::string> warnings;
   try {
-    warnings = rt.load(doc);
+    warnings = rt.load(o.doc);
+  } catch (const ari::document_args_error &e) {
+    if (e.help) {
+      std::fputs(e.usage.c_str(), stdout);
+      return 0;
+    }
+    std::fprintf(stderr, "ari: %s: %s\n", o.doc.c_str(), e.what());
+    const std::string note = ari::misplaced_flag_note("ari", o.doc_args);
+    if (!note.empty())
+      std::fprintf(stderr, "%s\n", note.c_str());
+    std::fprintf(stderr, "\n%s", e.usage.c_str());
+    return 2;
   } catch (const std::exception &e) {
     std::fprintf(stderr, "ari: %s\n", e.what());
     return 1;
   }
   for (const std::string &w : warnings)
     std::fprintf(stderr, "ari: warning: %s\n", w.c_str());
+  if (!rt.has_args_block()) {
+    const std::string note = ari::misplaced_flag_note("ari", o.doc_args);
+    if (!note.empty())
+      std::fprintf(stderr, "%s\n", note.c_str());
+  }
   if (cmd == "check")
     return 0;
 
   if (cmd == "snapshot") {
+    using Mode = ari::FtxuiBackend::Options::ImageColor;
+    const bool pixels =
+        o.ansi && (look.image_color == Mode::Kitty || look.image_color == Mode::Sixel);
+    if (pixels) { // the cell size the images are drawn at: the terminal's, or --cell-size
+      ari::TermGraphics g = ari::gfx::probe_terminal();
+      if (o.cell_w > 0) {
+        g.cell_w = o.cell_w;
+        g.cell_h = o.cell_h;
+      }
+      backend->set_terminal_graphics(g);
+    }
     std::string frame;
-    for (int f = 0; f < std::max(1, frames); ++f) {
+    for (int f = 0; f < std::max(1, o.frames); ++f) {
       rt.drain();
-      frame = backend->render_to_string(rt.runtime(), std::max(10, width), height, ansi);
+      frame = backend->render_to_string(rt.runtime(), std::max(10, o.width ? o.width : 100),
+                                        o.height, o.ansi);
+    }
+    if (pixels) { // Sixel draws at screen positions, so the frame starts at the top-left
+      const int rows = static_cast<int>(std::count(frame.begin(), frame.end(), '\n')) + 1;
+      frame = "\x1b[H\x1b[2J" + frame + backend->take_graphics() + "\x1b[" +
+              std::to_string(rows + 1) + ";1H";
     }
     std::fputs(frame.c_str(), stdout);
     return 0;
   }
 
-#ifndef _WIN32
-  run.on_start = install_traps;
-  run.on_stop = restore_traps;
-  run.take_signal = take_trapped;
-#endif
-  cvc::ariadne::FtxuiBackend::RunExit how;
+  ari::FtxuiBackend::RunOptions run;
+  if (o.fps > 0)
+    run.fps = o.fps;
+  run.mouse = o.mouse;
+  run.on_start = ari::install_signal_traps;
+  run.on_stop = ari::restore_signal_traps;
+  run.take_signal = ari::take_trapped_signal;
+  ari::FtxuiBackend::RunExit how;
   if (tvision) {
     use_bundled_terminfo();
-    how = static_cast<cvc::ariadne::TvisionBackend &>(*backend).run(rt, run);
+    how = static_cast<ari::TvisionBackend &>(*backend).run(rt, run);
   } else {
     how = backend->run(rt, run);
   }
   // The fullscreen screen is gone; anything the read lane complained about is worth seeing now.
   for (const std::string &w : rt.take_warnings())
     std::fprintf(stderr, "ari: warning: %s\n", w.c_str());
-#ifndef _WIN32
   if (how.from_os) // an OS signal the document didn't handle: report it the way a shell expects
-    return 128 + signal_number(how.signal);
-#endif
-  (void)how;
+    return 128 + ari::signal_number(how.signal);
   return 0;
 }
