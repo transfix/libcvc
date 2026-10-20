@@ -1,0 +1,63 @@
+# conference_roster.ari — the BROWSER (wasm) conference client: control-plane only.
+#
+# A browser build has the WebSocket state transport (cvc::state_transport_ws) but NOT the gRPC media
+# plane, so there is no `room-publish` / `room-subscribe` (those verbs are gRPC-only, unregistered in
+# a wasm build). This scene therefore uses ONLY the core control-plane verbs — `room-join` and
+# `room-roster` — so it joins the room and shows WHO IS PRESENT, syncing both ways with native gRPC
+# clients through the relay's WS<->gRPC bridge. Live video in the browser is the next phase (WebRTC);
+# here each participant shows as a named tile with a "video via native client" placeholder.
+#
+# conf.room / conf.self are set by the host (cyprty.cpp) before this loads.
+
+meta:
+  name: Ariadne conference (browser roster)
+  author: cvc
+  min_libcvc: 3.6.0
+
+menubar:
+  - menu: Room
+    items:
+      - menu_item: Quit
+        on: quit
+
+windows:
+  - window: Room
+    id: room
+    pos: [20, 20]
+    size: [440, 600]
+    children:
+      - text: "you"
+        bind: conf.self
+      - text: "status"
+        bind: (if (= (state-get "joined") "1") "● connected to the room" "connecting…")
+      - separator
+      - text: "in the room"
+        bind: peer.count
+      - separator
+      # One tile per participant (including you): the on_tick lane fills peer.<i>.name with each
+      # roster entry's display name and peer.count with the total, so this group is emitted once per
+      # participant with {i} bound to the slot index. Names re-resolve each frame as people join/leave.
+      - type: group
+        repeat: (state-get "peer.count")
+        children:
+          - text: "name"
+            bind: peer.{i}.name
+          - text: "video"
+            bind: peer.{i}.video
+          - separator
+
+on_tick: |
+  (begin
+    ; ── join the room ONCE (pid derives from the default shard; the WS transport replicates it) ──
+    (if (= (state-get "joined") "1") #f
+      (begin
+        (state-set "joined" "1")
+        (room-join "" (state-get "conf.room") (dict "name" (state-get "conf.self")))))
+    ; ── rebuild the roster tiles every tick from the replicated room roster ──
+    (set idx 0)
+    (for p (room-roster (state-get "conf.room"))
+      (begin
+        (state-set (str-concat "peer." idx ".name") (get-attr p "name"))
+        (state-set (str-concat "peer." idx ".video") "video via native client")
+        (set idx (+ idx 1))))
+    (state-set "peer.count" (str idx)))
