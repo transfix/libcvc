@@ -446,6 +446,11 @@ void state_transport_ws::read_loop(std::shared_ptr<connection> conn) {
     deliver_inbound(conn.get(), bytes.data(), bytes.size());
   }
   conn->alive.store(false);
+  // A peer closed this connection (not a relay shutdown): notify the owner so a relay can retract the
+  // departed participant from the room. _running is cleared by stop(), so this fires only on a real
+  // peer drop, and only when the peer identified itself (sent a Hello).
+  if (_running.load() && _on_conn_closed && !conn->remote_node_id.empty())
+    _on_conn_closed(conn->remote_node_id);
 }
 
 void state_transport_ws::stop() {
@@ -676,6 +681,15 @@ void state_transport_ws::register_shard(state_cluster_shard *shard) {
   std::lock_guard<std::mutex> lk(_shards_mu);
   if (std::find(_shards.begin(), _shards.end(), shard) == _shards.end())
     _shards.push_back(shard);
+  // A CLIENT dials with connect_to_peer() and never start()s, so it has no node id for its Hello —
+  // the relay would then see an empty id on close and could not retract the departed participant.
+  // Adopt the first registered shard's identity so the Hello carries this participant's node id.
+  // start() still wins (it sets _node_id before any shard registers), so this only fills the gap
+  // for a pure client; registration is sequenced before connect_to_peer(), so the Hello sees it.
+  if (_node_id.empty())
+    _node_id = shard->local_node_id();
+  if (_cluster_id.empty())
+    _cluster_id = shard->cluster_id();
 }
 
 void state_transport_ws::unregister_shard(state_cluster_shard *shard) {

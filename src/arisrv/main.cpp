@@ -23,6 +23,7 @@
 #include <csignal>
 #include <cstdio>
 #include <cstring>
+#include <cvc/ariadne/conference/room_intrinsics.h>       // room_leave (retract a departed peer)
 #include <cvc/ariadne/conference/room_media_intrinsics.h> // room_relay_tick
 #include <cvc/ariadne/stream/stream_relay.h>
 #include <cvc/core/app.h>
@@ -32,9 +33,11 @@
 #if CVC_ENABLE_WS
 #include <cvc/state/state_transport_ws.h> // browser (wasm) clients join over WebSocket, bridged to gRPC
 #endif
+#include <mutex>
 #include <set>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace {
 std::atomic<bool> g_stop{false};
@@ -88,6 +91,17 @@ int main(int argc, char **argv) {
   ws_tp.register_shard(&shard);
   state_tp.set_bridge(&ws_tp);
   ws_tp.set_bridge(&state_tp);
+
+  // Presence: when a browser (WS) client closes its tab, retract it from the room so the roster does
+  // not accumulate ghosts of closed tabs. The close fires on a WS reader thread, so just queue the
+  // departed node id here and apply room_leave on the main loop below (where every other room-tree
+  // write happens), then the retraction rides the normal pump + relay forwarding to the others.
+  std::mutex departed_mu;
+  std::vector<std::string> departed;
+  ws_tp.set_on_connection_closed([&](const std::string &node_id) {
+    std::lock_guard<std::mutex> lk(departed_mu);
+    departed.push_back(node_id);
+  });
 #endif
 
   // Media plane: a stream_relay. Constructed BEFORE media_tp.start() (it installs the frame
@@ -111,11 +125,46 @@ int main(int argc, char **argv) {
   std::size_t last = 0;
   int ticks = 0;
   while (!g_stop.load()) {
+#if CVC_ENABLE_WS
+    // Apply any queued departures (a browser tab closed) before pumping, so each retraction goes out
+    // to the remaining clients this tick.
+    {
+      std::vector<std::string> gone;
+      {
+        std::lock_guard<std::mutex> lk(departed_mu);
+        gone.swap(departed);
+      }
+      for (const std::string &nid : gone) {
+        cvc::ariadne::conference::room_leave(app, room, nid);
+        std::printf("[arisrv] participant left: %s\n", nid.c_str());
+      }
+      if (!gone.empty())
+        std::fflush(stdout);
+    }
+#endif
     cvc::ariadne::conference::room_relay_tick(app, room, relay, relayed);
+#if CVC_ENABLE_WS
+    // Fan the relay's OWN room-tree writes — the room_leave retractions queued above and
+    // room_relay_tick's per-stream "ready" markers — out to EVERY client on BOTH transports. The
+    // shard's publish cursor is shared by the two transports, so a plain state_tp.pump_all() would
+    // drain it and the WebSocket side would send nothing (browser rosters would never drop a closed
+    // tab). So drain the local journal ONCE and publish each mutation to both transports: publish()
+    // writes only to its own connections and never crosses the bridge, so each client gets it exactly
+    // once with no echo. drain_local yields only our local writes, never the clients' replicated
+    // mutations (those ride set_relay forwarding), so this cannot loop.
+    {
+      auto pending = shard.drain_local();
+      for (const auto &m : pending) {
+        state_tp.publish(m);
+        ws_tp.publish(m);
+      }
+    }
+#else
     // Publish the relay's own room-tree writes (per-stream "ready" markers from room_relay_tick) to
-    // the connected clients. collect_local pumps only our local writes, never the clients'
-    // replicated mutations (those ride set_relay forwarding), so this cannot echo.
+    // the connected clients. drain_local pumps only our local writes, never the clients' replicated
+    // mutations (those ride set_relay forwarding), so this cannot echo.
     state_tp.pump_all();
+#endif
     const std::size_t n = relay.stream_count();
     const bool heartbeat = (n > 0 && ++ticks % 25 == 0); // ~every 5s while media is live
     if (n != last || heartbeat) {

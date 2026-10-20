@@ -104,6 +104,13 @@ public:
   void set_relay(bool enable) noexcept { _relay.store(enable, std::memory_order_relaxed); }
   bool relay() const noexcept { return _relay.load(std::memory_order_relaxed); }
 
+  // Invoked (on a server reader thread) when a peer CLOSES its connection, with that peer's node id
+  // (from its Hello). A relay uses this to retract the departed participant from the room so the
+  // roster does not accumulate ghosts of closed browser tabs. Not called during stop(), nor for a
+  // connection that never sent a Hello. The handler must be thread-safe.
+  using connection_closed_fn = std::function<void(const std::string &node_id)>;
+  void set_on_connection_closed(connection_closed_fn cb) { _on_conn_closed = std::move(cb); }
+
   // Backfill on connect (default true): replay each registered shard's journaled
   // local-origin mutations to a newly admitted connection BEFORE any live traffic,
   // so a peer that connects after local writes still converges (same rationale as
@@ -187,6 +194,7 @@ private:
 
   std::atomic<bool> _backfill_on_connect{true};
   std::atomic<bool> _relay{false};
+  connection_closed_fn _on_conn_closed; // set by a relay; invoked on a peer close (see above)
 
   std::atomic<std::uint64_t> _published{0};
   std::atomic<std::uint64_t> _sent_frames{0};
