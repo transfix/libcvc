@@ -777,7 +777,7 @@ document path is the document's (§5.6):
 |---|---|---|---|
 | `ari` | libcvc only (FTXUI, optionally tvision) | in the terminal; a `scene:` is dropped | [`src/ari`](../src/ari/main.cpp) |
 | `arigl` | libcvc + cvcGL (VTK, ImGui) | in a real window, or `--terminal` with its scene rendered behind the widgets | [`src/arigl`](../src/arigl/main.cpp) |
-| `arisrv` | libcvc + gRPC | headless, as a server (the conference relay) | the conference work (`ariadne-server` until it lands) |
+| `arisrv` | libcvc + gRPC + WebSocket | headless, as a server (the conference relay + WS↔gRPC bridge) | [`src/arisrv`](../src/arisrv/main.cpp) |
 
 ```
 arigl run      [--terminal] [flags] doc.ari [document args...]

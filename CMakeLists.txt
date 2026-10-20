@@ -213,6 +213,10 @@ option(CVC_BUILD_ARI "Build the ari terminal runner for Ariadne documents" ON)
 # `arigl` (src/arigl) is the GL runtime: a .ari document in a real window, or in the terminal with
 # its scene rendered behind the widgets. It needs cvcGL, so it builds only with CVC_BUILD_CVCGL.
 option(CVC_BUILD_ARIGL "Build the arigl GL runtime for Ariadne documents (needs CVC_BUILD_CVCGL)" ON)
+# `arisrv` (src/arisrv) is the headless Ariadne conference relay (room-state relay + media SFU +
+# WS<->gRPC bridge). It needs a transport, so src/CMakeLists.txt adds it only when CVC_ENABLE_GRPC
+# or CVC_ENABLE_WS is on.
+option(CVC_BUILD_ARISRV "Build the arisrv Ariadne conference relay (needs CVC_ENABLE_GRPC or CVC_ENABLE_WS)" ON)
 option(CVC_ENABLE_COVERAGE "Enable code coverage analysis (requires GCC or Clang)" OFF)
 option(CVC_ENABLE_OPENMP "Enable OpenMP for parallel CPU processing" ON)
 

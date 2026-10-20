@@ -1,6 +1,6 @@
 name: ariadne-conference-windows
 
-# Build the Ariadne conference CLIENT (ariadne_conference) + RELAY (ariadne-server) on Windows.
+# Build the Ariadne conference CLIENT (ariadne_conference) + RELAY (arisrv) on Windows.
 #
 # These are not part of the normal CI matrix: the conference example lives behind CVC_BUILD_EXAMPLES
 # (OFF by default), and this turns gRPC ON on Windows (proven to build in #643 — package-windows /
@@ -23,7 +23,7 @@ on:
       - 'inc/cvc/gl/**'
       - 'src/cvc/ariadne/**'
       - 'inc/cvc/ariadne/**'
-      - 'src/cvc/tools/ariadne_server_main.cpp'
+      - 'src/arisrv/**'
       - 'src/cvc/state/state_transport**'
       - 'src/cvc/state/state_stream_transport**'
       - 'inc/cvc/state/state_transport**'
@@ -92,14 +92,14 @@ jobs:
             -DCVC_ENABLE_CUDA=OFF
 
       # Build ONLY the two conference targets (not every cvcGL example) so an unrelated example's
-      # Windows portability gap can't block the conference. ariadne-server is gated on CVC_ENABLE_GRPC,
+      # Windows portability gap can't block the conference. arisrv is gated on CVC_ENABLE_GRPC (or WS),
       # ariadne_conference on CVC_BUILD_EXAMPLES + CVC_BUILD_CVCGL.
-      - name: Build ariadne_conference + ariadne-server
+      - name: Build ariadne_conference + arisrv
         shell: pwsh
         run: |
           $depsPath = '${{ steps.extradeps.outputs.prefix }}'
           $env:PATH = (Join-Path $depsPath 'bin') + ';' + $env:PATH
-          cmake --build build --config Release --target ariadne_conference ariadne-server --parallel
+          cmake --build build --config Release --target ariadne_conference arisrv --parallel
 
       # Runnable bundle: the exes + EVERY runtime DLL (first-party cvc/cvcGL + all cvcpkg deps:
       # SDL3, VTK, gRPC/protobuf/abseil, turbojpeg, Boost, ...) flat in one dir, so Windows'
@@ -133,7 +133,7 @@ jobs:
             '(default room is "standup"; pass --room NAME to change; omit --camera/--mic for synthetic A/V.)',
             '',
             'Run a relay yourself (headless, no GL needed):',
-            '  ariadne-server.exe --room standup --state-listen 0.0.0.0:7700 --media-listen 0.0.0.0:7701'
+            '  arisrv.exe --room standup --state-listen 0.0.0.0:7700 --media-listen 0.0.0.0:7701'
           )
           Set-Content -Path (Join-Path $out 'README.txt') -Value $readme -Encoding utf8
           $n = (Get-ChildItem $out).Count

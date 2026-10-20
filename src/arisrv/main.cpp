@@ -8,7 +8,7 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-// ariadne-server — the headless Ariadne conference RELAY. Clients connect ONLY to this server, not
+// arisrv — the headless Ariadne conference RELAY. Clients connect ONLY to this server, not
 // to each other, so a conference works across home NAT. It relays:
 //   - the ROOM-TREE control plane — state_transport_grpc::set_relay forwards room-tree updates
 //     (roster + stream descriptors) between all clients, star-topology;
@@ -16,7 +16,7 @@
 //     (ingest the publisher's pushed frames, serve them to every subscriber).
 // Core libcvc + gRPC only — NO cvcGL/VTK/GL — so it runs on a plain headless VM.
 //
-//   ariadne-server --room standup --state-listen 0.0.0.0:7700 --media-listen 0.0.0.0:7701
+//   arisrv --room standup --state-listen 0.0.0.0:7700 --media-listen 0.0.0.0:7701
 
 #include <atomic>
 #include <chrono>
@@ -98,11 +98,11 @@ int main(int argc, char **argv) {
 
   std::signal(SIGINT, on_signal);
   std::signal(SIGTERM, on_signal);
-  std::printf("[ariadne-server] relay up | room='%s' node='%s' | state=%s | media=%s\n",
+  std::printf("[arisrv] relay up | room='%s' node='%s' | state=%s | media=%s\n",
               room.c_str(), nodeId.c_str(), state_tp.listen_address().c_str(),
               media_tp.listen_address().c_str());
 #if CVC_ENABLE_WS
-  std::printf("[ariadne-server] websocket (browser) clients: ws=%s (bridged to the gRPC room)\n",
+  std::printf("[arisrv] websocket (browser) clients: ws=%s (bridged to the gRPC room)\n",
               ws_tp.listen_address().c_str());
 #endif
   std::fflush(stdout);
@@ -120,14 +120,14 @@ int main(int argc, char **argv) {
     const bool heartbeat = (n > 0 && ++ticks % 25 == 0); // ~every 5s while media is live
     if (n != last || heartbeat) {
       last = n;
-      std::printf("[ariadne-server] relaying %zu stream(s); %llu frames forwarded\n", n,
+      std::printf("[arisrv] relaying %zu stream(s); %llu frames forwarded\n", n,
                   static_cast<unsigned long long>(relay.frames_forwarded()));
       std::fflush(stdout);
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
   }
 
-  std::printf("[ariadne-server] shutting down (relayed %zu stream(s), %llu frames forwarded)\n",
+  std::printf("[arisrv] shutting down (relayed %zu stream(s), %llu frames forwarded)\n",
               relay.stream_count(), static_cast<unsigned long long>(relay.frames_forwarded()));
   relay.stop();
   media_tp.stop();

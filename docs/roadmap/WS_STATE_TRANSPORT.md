@@ -66,10 +66,11 @@ wake the blocked `accept()`, then joins.
 ## Phase 2 (after the native MVP is green)
 - ✅ **The WS↔gRPC relay bridge** — done as `state_transport::set_bridge(peer)` (base class) + the
   `on_inbound_*` forward in both back ends; proven by `BridgeWsAndGrpcClientsShareARoom`. The relay
-  server (`arisrv`) still needs to be wired to actually create both a `state_transport_grpc` and a
-  `state_transport_ws` over the same shards and call `set_bridge` both ways + `start` both acceptors
-  (a ~dozen lines in `ariadne_server_main.cpp`; today it starts only the gRPC acceptor). (Cleanest
-  long-term remains a transport-neutral `connection` interface so one relay holds mixed connections.)
+  server (`arisrv`, `src/arisrv/main.cpp`) is now wired: under `CVC_ENABLE_WS` it creates both a
+  `state_transport_grpc` and a `state_transport_ws` over the same shard, calls `set_bridge` both
+  ways, and starts both acceptors (`--ws-listen`, default `0.0.0.0:7702`), so browser (WS) clients
+  share a room with native (gRPC) clients. (Cleanest long-term remains a transport-neutral
+  `connection` interface so one relay holds mixed connections.)
 - **Wasm conference build.** Compile the conference client to wasm (grpc OFF, WS ON) with the
   emscripten client (link `-lwebsocket.js`); the browser dials `wss://` the relay → the
   cyberpcangel.com MVP. This is the remaining end-to-end step and the only one not yet exercised.

@@ -2201,13 +2201,9 @@ if(CVC_BUILD_LSYS_TOOLS)
   endif()
 endif()
 
-# ariadne-server: the headless Ariadne conference RELAY (room-state relay + media SFU). Core cvc +
-# gRPC only (no cvcGL/VTK/GL), so it runs on a plain headless VM. Needs CVC_ENABLE_GRPC.
-if(CVC_ENABLE_GRPC)
-  add_executable(ariadne-server ${CMAKE_CURRENT_SOURCE_DIR}/tools/ariadne_server_main.cpp)
-  target_link_libraries(ariadne-server PRIVATE cvc)
-  target_compile_features(ariadne-server PRIVATE cxx_std_17)
-endif()
+# The Ariadne conference RELAY moved to src/arisrv (the `arisrv` target, wired from
+# src/CMakeLists.txt when CVC_ENABLE_GRPC or CVC_ENABLE_WS is on) — it gained a WebSocket
+# control plane + a WS<->gRPC bridge, so it is no longer gRPC-only.
 
 # Windows-specific batch file
 if(WIN32)
