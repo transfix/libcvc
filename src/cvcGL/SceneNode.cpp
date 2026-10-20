@@ -19,7 +19,16 @@ void SceneNode::setSceneGraph(SceneGraph *sceneGraph) {
     // out — see getSceneGraph().
     m_sceneAlive = sceneGraph ? sceneGraph->aliveToken() : std::weak_ptr<void>();
     m_sceneEvents = sceneGraph ? sceneGraph->eventSink() : std::weak_ptr<SceneEventSink>();
+    // Whoever attaches or detaches the node is who it belongs to while it has no
+    // scene: the scene's owner, which is the only thread that may do either.
+    m_homeThread = std::this_thread::get_id();
   }
+  // What other threads sent while the node had no scene was held for this: run
+  // it now, before the subclass and the children hear of the change. Attaching,
+  // this is the owner thread, so it runs inline -- ahead of whatever the caller
+  // does to the node next, which is what keeps a stale value from landing after
+  // a fresh one.
+  runHeld();
   onSceneGraphChanged();
 
   // Propagate to all children so they marshal through the same pump.
@@ -43,15 +52,41 @@ std::shared_ptr<SceneEventSink> SceneNode::sceneEvents() const {
 }
 
 void SceneNode::runOnMainThread(std::function<void()> func) {
-  // On the owner thread (or not yet attached to a SceneGraph): run inline. The
-  // node is alive and we are on the render/owner thread, so VTK work happens
-  // immediately and in order. This matters for teardown: removing a node runs
-  // its removeFromRenderer() synchronously, pulling its prop from the renderer
-  // *before* the node is destroyed — never leaving a dangling prop behind.
   // Through the LOCKED event sink, never a raw SceneGraph*: the scene may be
   // destroyed by its owner while this thread is between the check and the post.
-  std::shared_ptr<SceneEventSink> events = sceneEvents();
-  if (!events || events->onOwnerThread()) {
+  std::shared_ptr<SceneEventSink> events;
+  bool home = false;
+  {
+    std::lock_guard<std::mutex> lock(m_sceneMutex);
+    if (!m_sceneAlive.expired())
+      events = m_sceneEvents.lock();
+    home = std::this_thread::get_id() == m_homeThread;
+  }
+
+  // No scene, so no queue. On the node's home thread -- the one building it, or
+  // the one that removed it -- run inline, after anything held for it. From any
+  // other thread, hold it: the home thread may be using the node right now.
+  // The publisher's worker is such a thread: addGraphicsChild() constructs a
+  // node, connecting it to its state path, before it attaches it, and a pose
+  // still queued for that path (a removed node of the same name) flushed in
+  // between used to run the new node's handlers on the worker, inside VTK,
+  // while the owner was attaching it.
+  if (!events) {
+    if (home) {
+      runHeld();
+      func();
+    } else {
+      hold(std::move(func));
+    }
+    return;
+  }
+
+  // On the owner thread: run inline. The node is alive and we are on the
+  // render/owner thread, so VTK work happens immediately and in order. This
+  // matters for teardown: removing a node runs its removeFromRenderer()
+  // synchronously, pulling its prop from the renderer *before* the node is
+  // destroyed — never leaving a dangling prop behind.
+  if (events->onOwnerThread()) {
     func();
     return;
   }
@@ -69,10 +104,43 @@ void SceneNode::runOnMainThread(std::function<void()> func) {
   };
   // Refused only once ~SceneGraph has closed the sink -- which it does after
   // dropping its alive token, so this node already has no scene
-  // (getSceneGraph() == nullptr) and its work runs inline on the no-scene path,
-  // as above. tryPost leaves `job` with us when it refuses: no copy of `func`.
-  if (!events->tryPost(job))
-    job();
+  // (getSceneGraph() == nullptr) and its work takes the no-scene path, as above:
+  // inline on the home thread, held from any other. tryPost leaves `job` with us
+  // when it refuses: no copy of `func`.
+  if (!events->tryPost(job)) {
+    if (home) {
+      runHeld();
+      job();
+    } else {
+      hold(std::move(job));
+    }
+  }
+}
+
+void SceneNode::hold(std::function<void()> func) {
+  // Bounded, in case nothing ever drains it: a node removed from its scene and
+  // kept alive by a script, say, whose path another scene's publisher keeps
+  // writing. What is held is almost all state handlers, which read the tree when
+  // they run, so the newest entries carry the current values; the oldest go.
+  constexpr std::size_t kMaxHeld = 4096;
+  std::lock_guard<std::mutex> lock(m_heldMutex);
+  if (m_held.size() >= kMaxHeld)
+    m_held.pop_front();
+  m_held.push_back(std::move(func));
+}
+
+void SceneNode::runHeld() {
+  std::deque<std::function<void()>> held;
+  {
+    std::lock_guard<std::mutex> lock(m_heldMutex);
+    if (m_held.empty())
+      return;
+    held.swap(m_held);
+  }
+  // Each one as if it had just arrived from this thread: inline on the owner or
+  // home thread, which is where the callers run this from.
+  for (auto &job : held)
+    runOnMainThread(std::move(job));
 }
 
 SceneNode::SceneNode(cvc::app &ctx, const std::string &statePath)
