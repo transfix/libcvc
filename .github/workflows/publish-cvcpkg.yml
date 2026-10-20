@@ -1819,9 +1819,10 @@ jobs:
       #      "Remove registry entries for Python 3.12(x64)...
       #       ##[error]Remove-Item : Requested registry access is not allowed."
       #   3. Searching for an existing interpreter found only the MSYS2 one.
-      #      The runner service is LocalSystem, so $env:LOCALAPPDATA is the
-      #      SYSTEM profile: per-user installs, and the user PATH they extend,
-      #      are structurally invisible here. No amount of probing fixes that.
+      #      The runner service runs as NETWORK SERVICE (the runner's default),
+      #      so $env:LOCALAPPDATA is that service's profile: per-user installs,
+      #      and the user PATH they extend, are structurally invisible here. No
+      #      amount of probing fixes that.
       #
       # Hence: look for a usable interpreter, and if there is none, unpack
       # python.org's embeddable zip — no installer, no registry, no admin.
