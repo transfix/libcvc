@@ -289,10 +289,8 @@ void plot_line(unsigned char *dst, int dw, int dh, int x0, int y0, int x1, int y
                unsigned char g, unsigned char b);
 
 // The plant a demo's vehicles drive on unless --plant names another (kinematic, humvee,
-// roboracer). nav's kinematic bicycle for now: on the Jolt plant a Humvee plans with its own
-// limits and size, but the navigator's routes and reactive drive still assume the bicycle's
-// tight turns, and in Austin's streets a Humvee (a 6.7 m turning circle) wedges in corners it
-// cannot turn out of. --plant humvee shows it.
+// roboracer): Humvees on the Jolt physics plant, at their real size and limits, when the build
+// has Jolt; else nav's kinematic bicycle.
 std::string default_plant();
 
 // The plant_host options the demos use: Jolt's job system on a few worker threads natively (a
