@@ -11,6 +11,10 @@
 #include <chrono>
 #include <cvc/ariadne/stream/producer_thread.h>
 
+#if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
+#include <emscripten/html5.h>
+#endif
+
 namespace cvc {
 namespace ariadne {
 namespace stream {
@@ -24,6 +28,59 @@ producer_thread::producer_thread(std::function<bool()> tick, double hz)
     : tick_(std::move(tick)), period_(1.0 / clamp_hz(hz)) {}
 
 producer_thread::~producer_thread() { stop(); }
+
+#if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
+
+// Single-threaded browser build: std::thread would throw, so drive the tick from a browser interval
+// timer. It fires on the main thread during the app's Asyncify yields (emscripten_sleep), so the
+// tick shares the one thread with the frame loop, the WebSocket callbacks and getUserMedia frame
+// delivery — no locking is needed and no frame-loop pump plumbing. A tick returning false (source
+// spent) cancels the timer.
+void producer_thread::em_tick_trampoline(void *self) {
+  auto *p = static_cast<producer_thread *>(self);
+  if (!p->run_.load())
+    return;
+  if (p->tick_ && !p->tick_()) {
+    p->run_.store(false);
+    if (p->interval_id_ >= 0) {
+      emscripten_clear_interval(p->interval_id_);
+      p->interval_id_ = -1;
+    }
+    return;
+  }
+  p->ticks_.fetch_add(1, std::memory_order_relaxed);
+}
+
+void producer_thread::start() {
+  if (interval_id_ >= 0)
+    return; // already running
+  run_.store(true);
+  interval_id_ = emscripten_set_interval(&producer_thread::em_tick_trampoline,
+                                         period_.load() * 1000.0, this);
+}
+
+void producer_thread::stop() {
+  run_.store(false);
+  if (interval_id_ >= 0) {
+    emscripten_clear_interval(interval_id_);
+    interval_id_ = -1;
+  }
+}
+
+void producer_thread::set_rate(double hz) {
+  period_.store(1.0 / clamp_hz(hz));
+  if (interval_id_ >= 0) { // reschedule at the new rate
+    emscripten_clear_interval(interval_id_);
+    interval_id_ = emscripten_set_interval(&producer_thread::em_tick_trampoline,
+                                           period_.load() * 1000.0, this);
+  }
+}
+
+void producer_thread::run() {} // unused in the timer-driven build
+
+#else // native / pthread-wasm: the dedicated worker thread.
+
+void producer_thread::em_tick_trampoline(void *) {} // unused off the single-threaded wasm target
 
 void producer_thread::start() {
   if (thr_.joinable())
@@ -64,6 +121,8 @@ void producer_thread::run() {
     }
   }
 }
+
+#endif
 
 } // namespace stream
 } // namespace ariadne

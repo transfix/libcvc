@@ -62,13 +62,18 @@ public:
 
 private:
   void run();
+  // Single-threaded browser build (non-pthread wasm): there is no worker thread (std::thread would
+  // throw), so the tick is driven by a browser interval timer that fires on the main thread during
+  // the app's Asyncify yields. These are only defined/used on that target.
+  static void em_tick_trampoline(void *self);
 
   std::function<bool()> tick_;
   std::atomic<double> period_;
   std::atomic<bool> run_{false};
   std::atomic<long> ticks_{0};
   std::atomic<long> behind_{0};
-  std::thread thr_;
+  std::thread thr_;    // native / pthread-wasm: the dedicated worker (unused in non-pthread wasm)
+  long interval_id_{-1}; // non-pthread wasm: the emscripten_set_interval id, or -1 when none
 };
 
 } // namespace stream
