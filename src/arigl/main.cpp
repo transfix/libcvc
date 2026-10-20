@@ -65,6 +65,8 @@
 #include <cvc/ariadne/stream/stream_channel.h>  // subscribe / publish_external
 #include <cvc/ariadne/stream/stream_registry.h> // look up the local camera/mic streams by token
 #include <cvc/core/world_clock.h>               // app.world_clock().t() — the common media timestamp
+#include <cvc/gl/capture/audio_source.h>        // list_audio_capture_devices — mic picker
+#include <cvc/gl/capture/camera_source.h>       // list_cameras — camera picker
 #include <cvc/gl/playback/audio_output.h>       // open_audio_output — play each peer's mic
 #include <cvc/media/media_frame.h>              // cvc::media_frame — the canonical media frame
 #include <cvc/state/state.h>                    // cvc::state::instance — conference media state keys
@@ -76,6 +78,7 @@
 #include <cvc/state/state_transport_grpc.h>
 #endif
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <deque>
 #include <map>
@@ -263,8 +266,17 @@ struct ConferenceSession {
     std::deque<std::vector<float>> achunks; // decoded f32 chunks awaiting the mixer
     double last_audio_pts = -1.0; // world-clock stamp of this peer's last audio chunk
     bool has_audio = false;       // once true, video display follows this peer's audio clock
+    // Per-peer LOCAL controls (this client's mix only — never sent to the peer, never change their
+    // capture). Driven by the user-list window; applied in mix_audio / sync_and_show.
+    float volume = 1.0f;      // playback gain in our mix (slider; 1 = unity)
+    bool audio_muted = false; // muted in our mix (we skip their audio)
+    bool video_muted = false; // hidden locally (we stop advancing their video)
+    double talk_until = 0.0;  // wall time until which this peer counts as "talking" (name highlight)
   };
   std::map<std::string, peer_media> peers_; // keyed by origin pid
+  double self_talk_until_ = 0.0;            // wall time until which WE count as "talking"
+  double now_wall_ = 0.0;                   // wall-clock seconds, refreshed once per pump
+  std::vector<std::string> cam_devices_, mic_devices_; // cached device names (index = device index)
 
   // ALL peers' audio is summed into ONE output: SDL/WebAudio multi-stream behaviour in wasm is
   // uncertain and browsers cap AudioContexts, so one mixed sink works for any number of talkers.
@@ -273,6 +285,19 @@ struct ConferenceSession {
   std::unique_ptr<cvc::gl::playback::audio_output> mix_out_;
   int mix_rate_ = 0, mix_ch_ = 0;
   std::size_t mix_frames_ = 0;
+
+  // Voice activity: RMS of an interleaved f32 chunk (~0..1), smoothed + thresholded for the "talking"
+  // name highlight.
+  static double chunk_rms(const float *s, std::size_t n) {
+    double sumsq = 0.0;
+    for (std::size_t i = 0; i < n; ++i)
+      sumsq += static_cast<double>(s[i]) * static_cast<double>(s[i]);
+    return n ? std::sqrt(sumsq / static_cast<double>(n)) : 0.0;
+  }
+  static constexpr double kTalkThreshold = 0.02; // RMS above this = "talking"
+  static constexpr double kTalkHold = 0.60;      // keep "talking" lit this long (s) after the last
+                                                 // loud chunk — bridges brief pauses between words and
+                                                 // jittery delivery (wall time, so frame-rate indep.)
 
   // The state key carrying a peer's video-proxy token, so the .ari can bind that peer's stream_view.
   static std::string media_token_key(const std::string &origin, const std::string &kind) {
@@ -380,10 +405,12 @@ struct ConferenceSession {
     std::vector<std::string> ce;
     ari::run_init(app, prefix,
                   "(state-set \"conf.room\" \"" + room + "\") (state-set \"conf.self\" \"" + self +
-                      "\") (state-set \"cam_synthetic\" \"" + synth + "\")",
+                      "\") (state-set \"cam_synthetic\" \"" + synth + "\") (state-set \"self.pid\" \"" +
+                      nodeId + "\")",
                   &ce);
     for (const std::string &e : ce)
       std::fprintf(stderr, "arigl: conference init: %s\n", e.c_str());
+    enumerate_devices(); // publish camera/mic device lists for the own-camera window's combos
     active = true;
     return true;
   }
@@ -392,11 +419,115 @@ struct ConferenceSession {
       return;
     tp_->pump_all();
     const double stamp = media_clock_now(); // one world-clock reading per pump stamps all we forward
-    forward_streams(stamp);
-    drain_inbox();
-    mix_audio();     // sum all peers' queued audio into the one output
-    sync_and_show(); // advance each peer's video display to match its audio playback clock
+    now_wall_ =                             // wall-clock seconds for the talk-hold (frame-rate indep.)
+        std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    read_peer_controls();                   // pull per-peer volume/mute the user-list window set
+    apply_device_selection();               // map the device combos' picks to cam/mic.want_device
+    forward_streams(stamp);                 // (also measures our own mic level for self "talking")
+    drain_inbox();                          // (also measures each peer's mic level)
+    mix_audio();                            // sum all peers' queued audio (per-peer gain, skip muted)
+    sync_and_show();     // advance each peer's video to its audio clock (skip locally video-muted)
+    publish_activity();  // decay talk levels + publish media.<pid>.talking for the name highlight
   }
+
+  // Pull the per-peer LOCAL controls the user-list window writes — keyed by roster INDEX, which the
+  // .ari maps to a pid in peer.<i>.pid — and apply them to peers_. Reads last frame's on_tick values
+  // (conf.pump runs before the document tick), a negligible one-frame lag. LOCAL only: never sent.
+  void read_peer_controls() {
+    if (!app_)
+      return;
+    auto &st = cvc::state::instance(*app_);
+    auto get = [&](const std::string &k) { return st(prefix_ + "." + k).value(); };
+    int count = 0;
+    try {
+      count = std::stoi(get("peer.count"));
+    } catch (...) {
+      count = 0;
+    }
+    for (int i = 0; i < count; ++i) {
+      const std::string base = "peer." + std::to_string(i);
+      const std::string pid = get(base + ".pid");
+      if (pid.empty() || pid == pid_)
+        continue;
+      auto it = peers_.find(pid);
+      if (it == peers_.end())
+        continue;
+      peer_media &pm = it->second;
+      const std::string vol = get(base + ".vol");
+      if (!vol.empty()) {
+        try {
+          pm.volume = std::max(0.0f, std::stof(vol));
+        } catch (...) {
+        }
+      }
+      // aon/von are "on" checkboxes (default on): muted only when explicitly "0".
+      pm.audio_muted = (get(base + ".aon") == "0");
+      pm.video_muted = (get(base + ".von") == "0");
+    }
+  }
+
+  // Enumerate the camera + mic devices and publish their names (newline-joined) to state so the
+  // own-camera window's combos can list them (the .ari splits on "\n"); default each selection to the
+  // current device (0). Call on the SDL main thread (setup / pump). Browser labels may be generic
+  // until camera/mic permission is granted; switching still works by index.
+  void enumerate_devices() {
+    if (!app_)
+      return;
+    cam_devices_ = cvc::gl::capture::list_cameras();
+    mic_devices_ = cvc::gl::capture::list_audio_capture_devices();
+    auto &st = cvc::state::instance(*app_);
+    auto join = [](const std::vector<std::string> &v) {
+      std::string s;
+      for (std::size_t i = 0; i < v.size(); ++i) {
+        if (i)
+          s += '\n';
+        s += v[i];
+      }
+      return s;
+    };
+    st(prefix_ + ".cam.devices").value(join(cam_devices_));
+    st(prefix_ + ".mic.devices").value(join(mic_devices_));
+    if (st(prefix_ + ".cam.sel").value().empty() && !cam_devices_.empty())
+      st(prefix_ + ".cam.sel").value(cam_devices_[0]);
+    if (st(prefix_ + ".mic.sel").value().empty() && !mic_devices_.empty())
+      st(prefix_ + ".mic.sel").value(mic_devices_[0]);
+  }
+
+  // Map the combo's selected device NAME (cam.sel / mic.sel) to its index and publish it as
+  // cam.want_device / mic.want_device; the .ari re-captures when that index differs from the one it
+  // currently has open (cam.cur_device / mic.cur_device).
+  void apply_device_selection() {
+    if (!app_)
+      return;
+    auto &st = cvc::state::instance(*app_);
+    auto want = [&](const std::vector<std::string> &devs, const char *selkey, const char *wantkey) {
+      const std::string sel = st(prefix_ + "." + selkey).value();
+      if (sel.empty())
+        return;
+      for (std::size_t i = 0; i < devs.size(); ++i)
+        if (devs[i] == sel) {
+          st(prefix_ + "." + wantkey).value(std::to_string(i));
+          return;
+        }
+    };
+    want(cam_devices_, "cam.sel", "cam.want_device");
+    want(mic_devices_, "mic.sel", "mic.want_device");
+  }
+
+  // Publish each participant's boolean "talking" to media.<pid>.talking (self included) — true while
+  // its talk-hold has not expired; the .ari copies it into peer.<i>.talking for the name highlight.
+  void publish_activity() {
+    if (!app_)
+      return;
+    auto &st = cvc::state::instance(*app_);
+    auto set_talk = [&](const std::string &pid, double until) {
+      st(prefix_ + "." + media_token_key(pid, "talking")).value(until > now_wall_ ? "1" : "0");
+    };
+    set_talk(pid_, self_talk_until_);
+    for (auto &kv : peers_)
+      set_talk(kv.first, kv.second.talk_until);
+  }
+
   void stop() {
     peers_.clear(); // close decode proxies before the transport/shard go away
     mix_out_.reset();
@@ -420,14 +551,17 @@ struct ConferenceSession {
       mixed.assign(mix_frames_, 0.0f);
       bool any = false;
       for (auto &kv : peers_) {
-        std::deque<std::vector<float>> &q = kv.second.achunks;
-        if (q.empty())
+        peer_media &pm = kv.second;
+        if (pm.achunks.empty())
           continue;
-        const std::vector<float> &c = q.front();
-        const std::size_t n = std::min(c.size(), mixed.size());
-        for (std::size_t i = 0; i < n; ++i)
-          mixed[i] += c[i];
-        q.pop_front();
+        const std::vector<float> &c = pm.achunks.front();
+        if (!pm.audio_muted && pm.volume > 0.0f) { // locally muted -> consume but do not mix
+          const std::size_t n = std::min(c.size(), mixed.size());
+          const float g = pm.volume; // per-peer local volume (user slider)
+          for (std::size_t i = 0; i < n; ++i)
+            mixed[i] += c[i] * g;
+        }
+        pm.achunks.pop_front(); // always consume, so a muted peer stays in lockstep (queue doesn't grow)
         any = true;
       }
       if (!any)
@@ -479,6 +613,10 @@ struct ConferenceSession {
   }
 
   void forward_frame(publisher &p, const cvc::ariadne::stream::frame &f, double stamp) {
+    // Self voice activity: measure our own forwarded mic so OUR name lights up in the list too.
+    if (p.kind == "mic" && f.format.codec == "f32" && f.data && f.size >= sizeof(float) &&
+        chunk_rms(reinterpret_cast<const float *>(f.data), f.size / sizeof(float)) > kTalkThreshold)
+      self_talk_until_ = now_wall_ + kTalkHold;
     cvc::media_frame mf;
     mf.origin_node_id = pid_;
     mf.stream_id = p.kind;
@@ -507,20 +645,32 @@ struct ConferenceSession {
         continue; // never play/show ourselves as a peer
       peer_media &pm = peers_[m.origin_node_id];
       if (m.stream_id == "mic") {
-        if (!mix_out_ && m.sample_rate > 0 && m.channels > 0) {
-          cvc::gl::playback::audio_output_spec spec;
-          spec.sample_rate = static_cast<int>(m.sample_rate);
-          spec.channels = static_cast<int>(m.channels);
-          cvc::gl::playback::audio_output_open opened = cvc::gl::playback::open_audio_output(spec);
-          mix_out_ = std::move(opened.sink);
-          mix_rate_ = opened.sample_rate;
-          mix_ch_ = opened.channels;
-        }
-        // Decode the f32 chunk and queue it for the mixer (do NOT play per-peer — mix_audio() sums
-        // all peers into mix_out_). Bound the backlog so a stuck mixer can't grow memory unbounded.
         if (!m.payload.empty() && (m.payload.size() % sizeof(float)) == 0) {
           const float *s = reinterpret_cast<const float *>(m.payload.data());
           const std::size_t n = m.payload.size() / sizeof(float);
+          // Voice activity FIRST — a loud chunk holds the peer "talking" for kTalkHold seconds, for
+          // the name highlight. Independent of the audio output below (which can fail to open with no
+          // device), so "talking" works even where playback does not.
+          if (chunk_rms(s, n) > kTalkThreshold)
+            pm.talk_until = now_wall_ + kTalkHold;
+          // Open the ONE mixed output lazily; a failed open (no audio device) just leaves mix_out_
+          // null and the mixer no-ops — talk + roster are unaffected.
+          if (!mix_out_ && m.sample_rate > 0 && m.channels > 0) {
+            try {
+              cvc::gl::playback::audio_output_spec spec;
+              spec.sample_rate = static_cast<int>(m.sample_rate);
+              spec.channels = static_cast<int>(m.channels);
+              cvc::gl::playback::audio_output_open opened =
+                  cvc::gl::playback::open_audio_output(spec);
+              mix_out_ = std::move(opened.sink);
+              mix_rate_ = opened.sample_rate;
+              mix_ch_ = opened.channels;
+            } catch (...) {
+              mix_out_.reset();
+            }
+          }
+          // Queue the chunk for the mixer (do NOT play per-peer — mix_audio() sums all peers). Bound
+          // the backlog so a stuck mixer can't grow memory unbounded.
           pm.achunks.emplace_back(s, s + n);
           if (mix_frames_ == 0)
             mix_frames_ = n;
@@ -565,6 +715,10 @@ struct ConferenceSession {
       peer_media &pm = kv.second;
       if (!pm.video_proxy)
         continue;
+      if (pm.video_muted) { // locally hidden: stop advancing (the tile freezes); drop the backlog
+        pm.vbuf.clear();
+        continue;
+      }
       // This peer's audio latency = what sits in its mixer queue + what is queued in the shared
       // output. Show the video frame whose pts the audio has reached: last_audio_pts minus that.
       double target = 1e18;
@@ -662,6 +816,8 @@ int run_window(const ari::HostOptions &o) {
     rt.set_fixed_clock(true); // reproducible: the scene clock advances 1/30 s a frame
     const int frames = std::max(1, o.frames);
     for (int f = 0; f < frames; ++f) {
+      conf.pump(); // publish this frame's room-tree + media to the relay (run mode does this via the
+                   // input pump, set below; a snapshot of a live conference must pump too)
       rt.frame(1.0 / 30.0);
       if (f + 1 == frames)
         view.writePNG(o.png.c_str()); // renders and writes the last frame

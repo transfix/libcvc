@@ -1,17 +1,23 @@
-# conference_roster.ari — the BROWSER (wasm) conference client: control-plane only.
+# conference_roster.ari — the BROWSER (wasm) conference client.
 #
-# A browser build has the WebSocket state transport (cvc::state_transport_ws) but NOT the gRPC media
-# plane, so there is no `room-publish` / `room-subscribe` (those verbs are gRPC-only, unregistered in
-# a wasm build). This scene therefore uses ONLY the core control-plane verbs — `room-join` and
-# `room-roster` — so it joins the room and shows WHO IS PRESENT, syncing both ways with native gRPC
-# clients through the relay's WS<->gRPC bridge. Live video in the browser is the next phase (WebRTC);
-# here each participant shows as a named tile with a "browser video coming soon" placeholder until
-# the WebSocket media plane lands.
+# Layout (all windows are closable + openable from the View menu):
+#   • My Camera  (id mycam)   — your own camera, a camera + mic device picker, and camera/mic toggles.
+#   • Users      (id users)   — everyone in the room: name (lights up GREEN while talking), per-peer
+#                               LOCAL camera/mic mute + a volume slider, and click a name to raise
+#                               that peer's camera window. These controls are LOCAL — they change only
+#                               what THIS client sees/hears, never the other person's capture.
+#   • cam_<i>    (per peer)    — one window per OTHER participant, titled by their name, showing their
+#                               camera. Repeated over peer.count; opened automatically, closable.
 #
-# conf.room / conf.self are set by the host (cyprty.cpp) before this loads.
+# The host (arigl ConferenceSession) drives the media: it forwards our camera+mic, mixes every peer's
+# audio into one output (per-peer volume + mute from the Users window), measures voice activity
+# (media.<pid>.talking), and publishes the camera/mic device lists (cam.devices / mic.devices) + maps
+# a picked device name to cam.want_device / mic.want_device for the re-capture below.
+#
+# conf.room / conf.self / self.pid / cam_synthetic are set by the host before this loads.
 
 meta:
-  name: Ariadne conference (browser roster)
+  name: Ariadne conference
   author: cvc
   min_libcvc: 3.6.0
 
@@ -20,89 +26,181 @@ menubar:
     items:
       - menu_item: Quit
         on: quit
+  - menu: View
+    items:
+      - menu_item: My Camera
+        bind: tree.mycam.open
+      - menu_item: Users
+        bind: tree.users.open
 
 windows:
-  - window: Room
-    id: room
-    pos: [20, 20]
-    size: [440, 600]
+  # ── My Camera: self-view + device pickers + on/off toggles ──
+  - window: My Camera
+    id: mycam
+    pos: [20, 40]
+    size: [360, 540]
+    closable: true
     children:
-      - text: "you"
-        bind: conf.self
-      - text: "status"
-        bind: (if (= (state-get "joined") "1") "● connected to the room" "connecting…")
-      # Local self-preview: this browser's own CAMERA, rendered in a stream_view. The camera opens via
-      # SDL's emscripten backend (getUserMedia) — the browser prompts for permission on join; until
-      # it is granted the tile stays black (no frames), then live video appears. Frames are MJPEG so
-      # the same stream will fan out to peers once the WS media plane lands.
-      - text: "my video"
       - type: stream_view
         bind: cam_token
-        size: 240
+        size: 320
       - separator
+      # Device pickers (real-device builds only; empty + hidden under ?synthetic=1). Picking a device
+      # updates cam.sel / mic.sel; the host maps it to cam.want_device / mic.want_device and on_tick
+      # re-captures. options come from the host-published, newline-joined device lists.
+      - type: combo
+        label: "Camera"
+        bind: cam.sel
+        options: (string.split (state-get "cam.devices") "\n")
+        visible_when: (not (= (state-get "cam_synthetic") "1"))
+      - type: combo
+        label: "Mic"
+        bind: mic.sel
+        options: (string.split (state-get "mic.devices") "\n")
+        visible_when: (not (= (state-get "cam_synthetic") "1"))
+      - separator
+      # Camera/mic on-off: stream-set-muted blanks the producer at the source (black video / silence)
+      # WITHOUT dropping the publish, so peers stay subscribed and the cadence holds.
+      - type: button
+        label: "camera on/off"
+        on: (begin (state-set "cam_on" (if (= (state-get "cam_on") "1") "0" "1")) (stream-set-muted (state-get "cam_token") (= (state-get "cam_on") "0")))
+      - text: "camera"
+        bind: (if (= (state-get "cam_on") "1") "● on" "muted")
+      - type: button
+        label: "mic on/off"
+        on: (begin (state-set "mic_on" (if (= (state-get "mic_on") "1") "0" "1")) (stream-set-muted (state-get "mic_token") (= (state-get "mic_on") "0")))
+      - text: "mic"
+        bind: (if (= (state-get "mic_on") "1") "● on" "muted")
+
+  # ── Users: the roster with per-peer local controls ──
+  - window: Users
+    id: users
+    pos: [390, 40]
+    size: [380, 540]
+    closable: true
+    children:
       - text: "in the room"
-        bind: peer.count
+        bind: self.count
       - separator
-      # One tile per participant (including you): the on_tick lane fills peer.<i>.name with each
-      # roster entry's display name and peer.count with the total, so this group is emitted once per
-      # participant with {i} bound to the slot index. Names re-resolve each frame as people join/leave.
+      # You (first row): your name lights up GREEN while YOU talk.
+      - text: "you"
+        bind: conf.self
+        visible_when: (not (= (state-get "self.talking") "1"))
+      - text: "you"
+        bind: conf.self
+        color: [0.30, 1.0, 0.40]
+        visible_when: (= (state-get "self.talking") "1")
+      - separator
+      # Everyone else: one row per peer (peer.<i>). The on_tick fills peer.<i>.{pid,name,cam,talking}.
       - type: group
         repeat: (state-get "peer.count")
         children:
-          - text: "name"
+          # Name — click to open + raise this peer's camera window (cam_<i>). Two texts: the GREEN one
+          # shows only while they are talking (text colour is static, so "light up" is a visibility swap).
+          - text: ""
             bind: peer.{i}.name
-          # Each peer's live video: a stream_view bound to that peer's decode-proxy token. The host
-          # (arigl) opens one proxy per peer on the first frame it relays and publishes the token into
-          # "media.<pid>.camera", which the on_tick lane copies into peer.{i}.cam below. Empty until a
-          # peer's frames arrive (and for your own row — your camera is the "my video" tile above), so
-          # the stream_view simply draws nothing then.
-          - type: stream_view
-            bind: peer.{i}.cam
-            size: 180
+            on_click: (begin (state-set "tree.cam_{i}.open" "1") (state-set "tree.cam_{i}.raise" "1"))
+            visible_when: (not (= (state-get "peer.{i}.talking") "1"))
+          - text: ""
+            bind: peer.{i}.name
+            color: [0.30, 1.0, 0.40]
+            on_click: (begin (state-set "tree.cam_{i}.open" "1") (state-set "tree.cam_{i}.raise" "1"))
+            visible_when: (= (state-get "peer.{i}.talking") "1")
+          # Local mute toggles (checked = on). Default on: the host treats von/aon as muted only when
+          # explicitly "0", so an untouched peer is shown + heard.
+          - type: checkbox
+            label: "cam"
+            bind: peer.{i}.von
+            def: true
+          - type: checkbox
+            label: "mic"
+            bind: peer.{i}.aon
+            def: true
+          # Local volume in our mix (1 = unity, up to 2x boost).
+          - type: slider_float
+            label: "vol"
+            bind: peer.{i}.vol
+            lo: 0
+            hi: 2
+            def: 1
           - separator
+
+  # ── One camera window per OTHER participant, titled by their name ──
+  - window: Peer
+    id: cam_{i}
+    bind: peer.{i}.name
+    repeat: (state-get "peer.count")
+    pos: [780, 40]
+    size: [400, 360]
+    closable: true
+    children:
+      - type: stream_view
+        bind: peer.{i}.cam
+        size: 360
 
 on_tick: |
   (begin
-    ; ── join the room ONCE (pid derives from the default shard; the WS transport replicates it) ──
+    ; ── join + open my mic (first, so audio needs no camera) then my camera, ONCE ──
     (if (= (state-get "joined") "1") #f
       (begin
         (state-set "joined" "1")
+        (state-set "cam_on" "1") ; on/off toggles start ON (streams open unmuted)
+        (state-set "mic_on" "1")
         (room-join "" (state-get "conf.room") (dict "name" (state-get "conf.self")))
-        ; Open my MIC stream FIRST (f32 PCM) and drive it from the browser microphone (SDL audio
-        ; device 0 = getUserMedia audio). AUDIO is an independent stream opened BEFORE the camera, so a
-        ; participant with no camera (or who denies video) still captures + forwards their voice — the
-        ; camera path below cannot keep audio from working. ?synthetic=1 captures a hardware-free 440 Hz
-        ; tone instead. subscriber_depth 8 covers the host forwarder's ring subscription; the mic is not
-        ; played back to yourself.
         (set mic (stream-open (dict "id" "mic" "codec" "f32" "rate" 48000 "ch" 1 "frames_per_chunk" 1024
                                     "subscriber_depth" 8 "expected_subscribers" 2)))
         (state-set "mic_token" (get-attr mic "token"))
         (if (= (state-get "cam_synthetic") "1")
-            (stream-capture-audio (get-attr mic "token") (dict "rate" 48000 "ch" 1 "frames" 1024))
             (stream-capture-audio (get-attr mic "token")
-              (dict "device" 0 "rate" 48000 "ch" 1 "frames" 1024)))
-        ; Then open my video stream from the browser CAMERA (device 0, getUserMedia). The producer runs
-        ; on a browser interval timer in this single-threaded wasm build; the "my video" stream_view
-        ; decodes + shows it. A participant with no camera simply sends no video while their audio keeps
-        ; flowing. ?synthetic=1 uses a hardware-free MJPEG test pattern. expected_subscribers >= 2: the
-        ; self-preview tile AND the host forwarder both subscribe to this one stream; 3 gives headroom.
+              (dict "rate" 48000 "ch" 1 "frames" 1024 "tone" (dict "hz" 440)))
+            (begin
+              (stream-capture-audio (get-attr mic "token")
+                (dict "device" 0 "rate" 48000 "ch" 1 "frames" 1024))
+              (state-set "mic.cur_device" "0")))
         (set cam (stream-open (dict "id" "camera" "codec" "mjpeg" "w" 640 "h" 480 "stride" 2560
                                     "expected_subscribers" 3)))
         (state-set "cam_token" (get-attr cam "token"))
         (if (= (state-get "cam_synthetic") "1")
             (stream-capture-camera (get-attr cam "token")
               (dict "synthetic" #t "w" 640 "h" 480 "hz" 30 "jpeg" #t))
-            (stream-capture-camera (get-attr cam "token")
-              (dict "device" 0 "w" 640 "h" 480 "hz" 30 "jpeg" #t)))))
-    ; ── rebuild the roster tiles every tick from the replicated room roster ──
-    ; For each participant, copy that peer's decode-proxy token (the host publishes it at
-    ; "media.<pid>.camera" once their frames start arriving) into peer.<idx>.cam, which the per-peer
-    ; stream_view tile binds to. Empty for peers not yet sending and for your own row.
+            (begin
+              (stream-capture-camera (get-attr cam "token")
+                (dict "device" 0 "w" 640 "h" 480 "hz" 30 "jpeg" #t))
+              (state-set "cam.cur_device" "0")))))
+    ; ── device switch: re-capture when the user picks a different camera / mic (real devices only) ──
+    (if (= (state-get "cam_synthetic") "1") #f
+      (begin
+        (if (and (not (= (state-get "cam.want_device") ""))
+                 (not (= (state-get "cam.want_device") (state-get "cam.cur_device"))))
+            (begin
+              (stream-capture-camera (state-get "cam_token")
+                (dict "device" (int (state-get "cam.want_device")) "w" 640 "h" 480 "hz" 30 "jpeg" #t))
+              (state-set "cam.cur_device" (state-get "cam.want_device")))
+            #f)
+        (if (and (not (= (state-get "mic.want_device") ""))
+                 (not (= (state-get "mic.want_device") (state-get "mic.cur_device"))))
+            (begin
+              (stream-capture-audio (state-get "mic_token")
+                (dict "device" (int (state-get "mic.want_device")) "rate" 48000 "ch" 1 "frames" 1024))
+              (state-set "mic.cur_device" (state-get "mic.want_device")))
+            #f)))
+    ; ── mirror self voice-activity for the (you) row ──
+    (state-set "self.talking" (state-get (str-concat "media." (state-get "self.pid") ".talking")))
+    ; ── rebuild the OTHER-participant slots each tick (self excluded: it has My Camera + the you row) ──
     (set idx 0)
+    (set total 1)
     (for p (room-roster (state-get "conf.room"))
       (begin
-        (state-set (str-concat "peer." idx ".name") (get-attr p "name"))
-        (state-set (str-concat "peer." idx ".cam")
-          (state-get (str-concat "media." (get-attr p "pid") ".camera")))
-        (set idx (+ idx 1))))
-    (state-set "peer.count" (str idx)))
+        (set pid (get-attr p "pid"))
+        (if (= pid (state-get "self.pid")) #f
+          (begin
+            (state-set (str-concat "peer." idx ".pid") pid)
+            (state-set (str-concat "peer." idx ".name") (get-attr p "name"))
+            (state-set (str-concat "peer." idx ".cam")
+              (state-get (str-concat "media." pid ".camera")))
+            (state-set (str-concat "peer." idx ".talking")
+              (state-get (str-concat "media." pid ".talking")))
+            (set idx (+ idx 1))
+            (set total (+ total 1))))))
+    (state-set "peer.count" (str idx))
+    (state-set "self.count" (str total)))

@@ -119,6 +119,12 @@ void ImGuiBackend::end_main_menu_bar() { ui::EndMainMenuBar(); }
 bool ImGuiBackend::begin_menu(const char *label) { return ui::BeginMenu(label); }
 void ImGuiBackend::end_menu() { ui::EndMenu(); }
 
+void ImGuiBackend::focus_next_window() {
+#ifdef CVC_ENABLE_IMGUI
+  ImGui::SetNextWindowFocus(); // applies to the next ImGui::Begin — i.e. the next begin_window
+#endif
+}
+
 bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne::Size &size,
                                 float border, bool *p_open) {
   int pushes = 0;
@@ -406,9 +412,9 @@ void ImGuiBackend::pop_id() { ui::PopId(); }
 
 void ImGuiBackend::text_line(const char *text) { ui::TextLine(text); }
 void ImGuiBackend::text_value(const char *label, const std::string &value) {
-  std::string line = label;
-  line += ": ";
-  line += value;
+  // A non-empty label prefixes "label: value"; an empty label shows just the value (e.g. a roster
+  // name bound with no caption).
+  std::string line = (label && *label) ? (std::string(label) + ": " + value) : value;
   ui::TextLine(line.c_str());
 }
 void ImGuiBackend::text_line_colored(const char *text, const float rgb[3]) {
@@ -416,9 +422,7 @@ void ImGuiBackend::text_line_colored(const char *text, const float rgb[3]) {
 }
 void ImGuiBackend::text_value_colored(const char *label, const std::string &value,
                                       const float rgb[3]) {
-  std::string line = label;
-  line += ": ";
-  line += value;
+  std::string line = (label && *label) ? (std::string(label) + ": " + value) : value;
   ui::TextLineColored(line.c_str(), rgb[0], rgb[1], rgb[2]);
 }
 void ImGuiBackend::separator() { ui::Separator(); }
