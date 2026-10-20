@@ -2959,7 +2959,7 @@ PyObject *nav_material_trainer_create(const char *cvcnm_path, double grad_clip =
 // o0/v0/goal/o_tgt/v_tgt (B,2) f32, C (B,N,2) f32, R (B,N) f32, rollout_patch
 // (B,6,Hp,Wp) f32, rr/d_hat/dt/gamma_o (B,) f32, H (B,) i32. Applies Adam at lr;
 // returns the scalar loss. ext_* is an external force in the rollouts (MaterialExtArgs:
-// cvcdbg's RF/comm force, as the deployed drive_step_material_ext adds it).
+// a caller's own force, as the deployed drive_step_material_ext adds it).
 PyObject *nav_material_trainer_step(PyObject *handle, PyObject *obs_feats, PyObject *obs_mask,
                                     PyObject *goal_feats, PyObject *risk_patch, PyObject *o0,
                                     PyObject *v0, PyObject *goal, PyObject *C, PyObject *R,

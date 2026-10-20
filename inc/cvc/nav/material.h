@@ -232,7 +232,7 @@ void drive_step_material_ext(const field_stack &f, float *o, float *th, float *s
 
 // ── an external force in the material rollouts ───────────────────────────────
 // The deployed drive takes an external force alongside the material one
-// (drive_step_material_ext with an ext_force: cvcdbg's RF/comm force). material_ext puts
+// (drive_step_material_ext with an ext_force, a hook for a caller's own force). material_ext puts
 // the same force in the material trainer's rollouts, so the material heads learn in the
 // presence of the force they face at deploy. Positions are the batch's: the frame and
 // units of o, C and the rollout patch. F_ext joins
@@ -246,7 +246,7 @@ void drive_step_material_ext(const field_stack &f, float *o, float *th, float *s
 //     grid (Hp, Wp, centred on the start), [B*K*2*Hp*Wp], sampled bilinearly at the current
 //     position as the rollout patch's channels are. J = dF/do is the patch's own gradient
 //     (zero along a clamped border). `patch_of_step` [B*steps] picks agent b's patch at step
-//     s (a schedule: jammers switching on and off); null uses patch 0 throughout.
+//     s (a schedule: sources switching on and off); null uses patch 0 throughout.
 //   - `F`: per-step values [B*steps*2], and optionally J [B*steps*4] (dF/do, row-major
 //     (dfx/dox, dfx/doy, dfy/dox, dfy/doy)) for the reverse.
 //   - `sample`: a callback giving F and J at agent b's pose at step s, every `hold` steps

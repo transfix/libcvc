@@ -286,8 +286,8 @@ TEST(NavMaterialTrain, TheLossPartsAddUpToTheLoss) {
   EXPECT_NEAR(pg.eta, eta, 1e-6 * std::fabs(pg.eta));
 }
 
-// The native trainer's golden for GRL-SNAM's torch material trainer (the DBG session's twin of
-// this loss, held to it): with CVC_MATERIAL_TRAIN_GOLDEN_DIR set, writes into that directory
+// The native trainer's golden for GRL-SNAM's torch material trainer (a torch twin of this loss,
+// held to it): with CVC_MATERIAL_TRAIN_GOLDEN_DIR set, writes into that directory
 //   material_train_golden.json: the config, the batch (the 17 arrays), an external force (two
 //     force patches per agent, the odd agents switching at step 1), the parameter index, and
 //     each step's loss, CVaR eta and terms over 3 Adam steps plus the loss after them;

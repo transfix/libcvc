@@ -9,7 +9,7 @@
 */
 
 // nav_material_ext_test: an external force in the material rollouts (material_ext,
-// material.h), for cvcdbg's RF/comm force in material training.
+// material.h), for a caller's external force in material training.
 //
 // - A null channel and a zero force are the rollout without one, bit for bit, forward and
 //   reverse, on all three integrators (surrogate, bicycle, dynamic).

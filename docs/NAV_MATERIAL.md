@@ -206,11 +206,11 @@ training rollout:
 **Sources** (exactly one):
 - **A force patch per agent:** `K` two-channel patches (`fx`, `fy`) on the rollout patch's
   grid, centred on the start and sampled bilinearly at the current position.
-  - A schedule, `patch_of_step`, can switch patches per step, for example jammers switching
+  - A schedule, `patch_of_step`, can switch patches per step, for example sources switching
     on and off.
   - J = dF/do is the patch's own gradient.
-  - This is the form for a force that depends only on the agent's own position (radios and
-    jammers fixed in the scene). It is an array, so it reaches pycvc.
+  - This is the form for a force that depends only on the agent's own position (sources
+    fixed in the scene). It is an array, so it reaches pycvc.
 - **Per-step values** `F`, with an optional `J`.
 - **A C++ callback** `(user, b, s, ox, oy, F, J)`, sampled every `hold` steps and held between,
   as the diff rollout's `bike_ext_fn`.
