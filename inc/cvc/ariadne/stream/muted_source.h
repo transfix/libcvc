@@ -57,6 +57,11 @@ public:
     return pf;
   }
 
+  // Forward the inner source's actual frame size, so a native-aspect camera's real dimensions reach
+  // a self-describing-codec wrapper (jpeg_encode_source) through this decorator.
+  int cur_width() const override { return inner_ ? inner_->cur_width() : 0; }
+  int cur_height() const override { return inner_ ? inner_->cur_height() : 0; }
+
 private:
   std::unique_ptr<frame_source> inner_;
   const std::atomic<bool> &muted_;

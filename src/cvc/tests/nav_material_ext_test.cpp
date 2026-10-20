@@ -401,7 +401,8 @@ void expect_same(const outputs &a, const outputs &b) {
 }
 
 // A callback that samples a Batch's force patch at the pose, as the patch source does, with the
-// schedule; `hold` is the channel's.
+// schedule; `hold` is the channel's. It gives the patch source's F and J bit for bit because this
+// TU, like the rollouts', is built with -ffp-contract=off (tests/CMakeLists.txt).
 void patch_callback(void *user, int b, int s, float ox, float oy, float *f, float *J) {
   const Batch &bt = *static_cast<const Batch *>(user);
   const int k = bt.fsched[(size_t)b * bt.steps + s];

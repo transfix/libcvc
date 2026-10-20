@@ -187,6 +187,25 @@ if(EMSCRIPTEN)
       "--embed-file=${_CVC_ARIADNE_COMPONENTS}@/components")
     list(APPEND _wasm_demos ${_ari}_ari)
   endforeach()
+
+  # cyprty — the browser conference client: arigl (the GL runtime, src/arigl/main.cpp) built to wasm,
+  # dialing the relay over a WebSocket (cvc::state_transport_ws) and rendering conference_roster.ari
+  # (control-plane only: room-join + room-roster). The host page sets CVC_ARIADNE_RELAY=wss://<origin>
+  # and the run args. WS-only (grpc off); the Emscripten WebSocket client needs -lwebsocket.js. It is
+  # an _wasm_extra_demo: built via `wasm-extra-demos` into bin/extra/ and deployed to
+  # cyberpcangel.com/cyprty — NOT a /cvcgl gallery card. (Needs -DCVC_ENABLE_WS=ON; see build-wasm-demo.sh.)
+  add_executable(cyprty ${CMAKE_CURRENT_SOURCE_DIR}/../../arigl/main.cpp)
+  target_link_libraries(cyprty PRIVATE cvcGL ${VTK_LIBRARIES})
+  vtk_module_autoinit(TARGETS cyprty MODULES ${VTK_LIBRARIES})
+  target_link_options(cyprty PRIVATE
+    -lwebsocket.js
+    "--embed-file=${CMAKE_CURRENT_SOURCE_DIR}/conference_roster.ari@/conference_roster.ari")
+  # Relink (re-embed) cyprty whenever the baked document changes; without this a .ari-only edit does
+  # not retrigger the link, so the stale document stays embedded.
+  set_property(TARGET cyprty APPEND PROPERTY LINK_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/conference_roster.ari")
+  list(APPEND _wasm_extra_demos cyprty)
+
   # Optional runtime asset bundle for nav_city_swarm (Austin: terrain.json +
   # buildings.glb + satellite.png). When CVC_WASM_BUNDLE is set to a scene dir,
   # its contents are preloaded to /bundle and, if the sibling shared/Humvee.glb
