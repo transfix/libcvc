@@ -277,6 +277,7 @@ struct ConferenceSession {
   double self_talk_until_ = 0.0;            // wall time until which WE count as "talking"
   double now_wall_ = 0.0;                   // wall-clock seconds, refreshed once per pump
   std::vector<std::string> cam_devices_, mic_devices_; // cached device names (index = device index)
+  bool devices_enumerated_ = false;                    // devices listed yet (deferred past startup)
 
   // ALL peers' audio is summed into ONE output: SDL/WebAudio multi-stream behaviour in wasm is
   // uncertain and browsers cap AudioContexts, so one mixed sink works for any number of talkers.
@@ -410,7 +411,9 @@ struct ConferenceSession {
                   &ce);
     for (const std::string &e : ce)
       std::fprintf(stderr, "arigl: conference init: %s\n", e.c_str());
-    enumerate_devices(); // publish camera/mic device lists for the own-camera window's combos
+    // NOTE: device enumeration is deferred to pump() (see devices_enumerated_), NOT done here —
+    // on single-threaded wasm, SDL camera/audio device queries before the Asyncify event loop runs
+    // block/stall and hang startup.
     active = true;
     return true;
   }
@@ -422,6 +425,15 @@ struct ConferenceSession {
     now_wall_ =                             // wall-clock seconds for the talk-hold (frame-rate indep.)
         std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
     read_peer_controls();                   // pull per-peer volume/mute the user-list window set
+    // Enumerate the camera/mic devices for the pickers LAZILY — once the camera stream is open, so
+    // the SDL audio/camera subsystems are already initialized (enumeration is then a cheap refcount
+    // bump) and the Asyncify event loop is running. Doing this at setup instead STALLS startup on
+    // single-threaded wasm (SDL device queries before the loop runs block / can't resolve).
+    if (!devices_enumerated_ && app_ &&
+        !cvc::state::instance(*app_)(prefix_ + ".cam_token").value().empty()) {
+      enumerate_devices();
+      devices_enumerated_ = true;
+    }
     apply_device_selection();               // map the device combos' picks to cam/mic.want_device
     forward_streams(stamp);                 // (also measures our own mic level for self "talking")
     drain_inbox();                          // (also measures each peer's mic level)
