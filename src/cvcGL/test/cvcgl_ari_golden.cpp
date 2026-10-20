@@ -256,7 +256,6 @@ int main(int argc, char **argv) {
   }
   const fs::path goldenDir = argv[1], outDir = argv[2];
   std::vector<std::string> only(argv + 3, argv + argc);
-  cvcgl_test::disableSwapThrottle();
   // A build with nothing to render skips, except where CVC_REQUIRE_RENDER says this job renders:
   // there a missing ImGui or YAML loader is a failure, never a quiet pass.
   auto skip = [](const std::string &why) {
