@@ -288,18 +288,25 @@ TEST(NavMaterialTrain, TheLossPartsAddUpToTheLoss) {
 
 // The native trainer's golden for GRL-SNAM's torch material trainer (a torch twin of this loss,
 // held to it): with CVC_MATERIAL_TRAIN_GOLDEN_DIR set, writes into that directory
-//   material_train_golden.json: the config, the batch (the 17 arrays), an external force (two
-//     force patches per agent, the odd agents switching at step 1), the parameter index, and
-//     each step's loss, CVaR eta and terms over 3 Adam steps plus the loss after them;
-//   material_train_golden_w0.cvcnm / _w3.cvcnm: the weights before and after the 3 steps;
-//   material_train_golden_grad0.f32: step 0's weight gradients, little-endian float32,
-//     concatenated in the index's order.
-// Not committed: the blobs are 2.5 MB. Without the variable this only runs the trainer.
-TEST(NavMaterialTrain, TorchTrainerGolden) {
-  std::mt19937 rng(2024);
-  const int P = 16;
-  coef_energy_net m = cvc_test::build_test_model(rng, P);
-  const Batch batch = make_batch(rng, /*B=*/16, /*N=*/3, P, /*Hp=*/13, /*Wp=*/13);
+//   <prefix>.json: the config, the batch (the 17 arrays), an external force (two force patches
+//     per agent, the odd agents switching at step 1), the parameter index, and each step's loss,
+//     CVaR eta and terms over 3 Adam steps plus the loss after them;
+//   <prefix>_w0.cvcnm / _w3.cvcnm: the weights before and after the 3 steps;
+//   <prefix>_grad0.f32: step 0's weight gradients, little-endian float32, concatenated in the
+//     index's order.
+// Without the variable this only runs the trainer.
+struct trainer_golden_case {
+  const char *prefix;
+  unsigned seed;
+  int P, B, N, Hp, Wp;
+  cvc_test::test_model_dims dims;
+};
+
+static void run_trainer_golden(const trainer_golden_case &gc) {
+  std::mt19937 rng(gc.seed);
+  const int P = gc.P;
+  coef_energy_net m = cvc_test::build_test_model(rng, P, gc.dims);
+  const Batch batch = make_batch(rng, gc.B, gc.N, P, gc.Hp, gc.Wp);
   material_batch mb = batch.view();
   const int B = batch.B, Hp = batch.Hp, Wp = batch.Wp, K = 2;
   int steps = 0;
@@ -331,7 +338,7 @@ TEST(NavMaterialTrain, TorchTrainerGolden) {
   const char *dir = std::getenv("CVC_MATERIAL_TRAIN_GOLDEN_DIR");
   namespace fs = std::filesystem;
   if (dir)
-    m.save((fs::path(dir) / "material_train_golden_w0.cvcnm").string());
+    m.save((fs::path(dir) / (std::string(gc.prefix) + "_w0.cvcnm")).string());
   cvc::nav::material_adam opt(m, grad_clip);
   std::vector<cvc::nav::material_loss_parts> parts(4);
   coef_energy_net::param_grads g0;
@@ -345,12 +352,12 @@ TEST(NavMaterialTrain, TorchTrainerGolden) {
     if (t < 3)
       opt.step(m, grads, lr);
   }
-  std::printf("[material-train-golden] loss %.6f -> %.6f over 3 steps (eta %.4f)\n", parts[0].L,
-              parts[3].L, parts[0].eta);
+  std::printf("[%s] loss %.6f -> %.6f over 3 steps (eta %.4f)\n", gc.prefix, parts[0].L, parts[3].L,
+              parts[0].eta);
   EXPECT_LT(parts[3].L, parts[0].L);
   if (!dir)
     return;
-  m.save((fs::path(dir) / "material_train_golden_w3.cvcnm").string());
+  m.save((fs::path(dir) / (std::string(gc.prefix) + "_w3.cvcnm")).string());
   const auto num = [](double x) {
     char buf[40];
     std::snprintf(buf, sizeof buf, "%.17g", x);
@@ -362,7 +369,8 @@ TEST(NavMaterialTrain, TorchTrainerGolden) {
       out += (i ? ", " : "") + num((double)v[i]);
     return out + "]";
   };
-  std::ofstream bin((fs::path(dir) / "material_train_golden_grad0.f32").string(), std::ios::binary);
+  std::ofstream bin((fs::path(dir) / (std::string(gc.prefix) + "_grad0.f32")).string(),
+                    std::ios::binary);
   std::ostringstream js;
   js << "{\n \"format\": \"cvc-material-train-golden-1\",\n";
   js << " \"config\": {\"integrator\": \"surrogate\", \"w_traj\": " << num(cfg.w_traj)
@@ -417,7 +425,29 @@ TEST(NavMaterialTrain, TorchTrainerGolden) {
        << ", \"multi\": " << num(q.multi) << "}" << (t < 3 ? "," : "") << "\n";
   }
   js << " ]\n}\n";
-  std::ofstream((fs::path(dir) / "material_train_golden.json").string(), std::ios::binary)
+  std::ofstream((fs::path(dir) / (std::string(gc.prefix) + ".json")).string(), std::ios::binary)
       << js.str();
-  std::printf("  wrote the golden to %s (%ld gradient values)\n", dir, offset);
+  std::printf("  wrote %s to %s (%ld gradient values)\n", gc.prefix, dir, offset);
+}
+
+// The full-width golden (2.5 MB, not committed).
+TEST(NavMaterialTrain, TorchTrainerGolden) {
+  run_trainer_golden({"material_train_golden", 2024, 16, 16, 3, 13, 13, {}});
+}
+
+// The narrowest net (d_tok 16, 2 heads, 1 layer, d_risk 16) on a small batch: under 1 MB, so
+// GRL-SNAM's CI can commit it and hold its torch trainer to it.
+TEST(NavMaterialTrain, TorchTrainerGoldenSmall) {
+  run_trainer_golden({"material_train_golden_small", 2025, 16, 4, 3, 9, 9, {16, 2, 1, 16}});
+}
+
+// The width-generated parameter table is the fixed one at the default widths.
+TEST(NavMaterialTrain, TestModelTableAtDefaultWidths) {
+  const auto &fixed = cvc_test::coef_energy_tensors();
+  const auto gen = cvc_test::coef_energy_tensors(cvc_test::test_model_dims{});
+  ASSERT_EQ(gen.size(), fixed.size());
+  for (std::size_t i = 0; i < gen.size(); ++i) {
+    EXPECT_STREQ(gen[i].name, fixed[i].name) << i;
+    EXPECT_EQ(gen[i].dims, fixed[i].dims) << fixed[i].name;
+  }
 }
