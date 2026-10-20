@@ -80,7 +80,7 @@ void bicycle_start(const material_batch &b, std::vector<float> &th, std::vector<
 // (NaN => compute from J) fixes the detached CVaR quantile.
 double compute_loss(const coef_energy_net &model, const material_batch &b,
                     const material_loss_config &cfg, float frozen_eta, fwd_cache *cache,
-                    bool use_cuda) {
+                    bool use_cuda, material_loss_parts *parts = nullptr) {
   const int B = b.B, N = b.N, P = b.P;
   (void)use_cuda;
 
@@ -119,7 +119,7 @@ double compute_loss(const coef_energy_net &model, const material_batch &b,
         oT.data(), thT.data(), spT.data(), xT.data(), b.goal, b.C, b.R, b.obs_mask, alphas.data(),
         beta.data(), gamma.data(), lam_soft.data(), lam_hard.data(), b.rollout_patch, b.rr, b.d_hat,
         b.dt, b.H, B, N, b.Hp, b.Wp, cfg.rollout, cfg.bicycle, cfg.dynamic, min_clear.data(),
-        cum_risk.data(), hard_count.data(), arc.data(), cfg.num_threads);
+        cum_risk.data(), hard_count.data(), arc.data(), cfg.num_threads, b.ext);
     // vT: the rear axle's world velocity, (vx, vy - lr r) turned by the heading.
     for (int i = 0; i < B; ++i) {
       const float vs = xT[4 * i] - cfg.dynamic.lr * xT[4 * i + 1];
@@ -131,18 +131,18 @@ double compute_loss(const coef_energy_net &model, const material_batch &b,
     bicycle_start(b, th0, sp0);
     thT = th0;
     spT = sp0;
-    integrate_bicycle_material(oT.data(), thT.data(), spT.data(), b.goal, b.C, b.R, b.obs_mask,
-                               alphas.data(), beta.data(), gamma.data(), lam_soft.data(),
-                               lam_hard.data(), b.rollout_patch, b.rr, b.d_hat, b.dt, b.H, B, N,
-                               b.Hp, b.Wp, cfg.rollout, cfg.bicycle, min_clear.data(),
-                               cum_risk.data(), hard_count.data(), arc.data(), cfg.num_threads);
+    integrate_bicycle_material(
+        oT.data(), thT.data(), spT.data(), b.goal, b.C, b.R, b.obs_mask, alphas.data(), beta.data(),
+        gamma.data(), lam_soft.data(), lam_hard.data(), b.rollout_patch, b.rr, b.d_hat, b.dt, b.H,
+        B, N, b.Hp, b.Wp, cfg.rollout, cfg.bicycle, min_clear.data(), cum_risk.data(),
+        hard_count.data(), arc.data(), cfg.num_threads, b.ext);
     for (int i = 0; i < B; ++i) {
       vT[2 * i] = spT[i] * std::cos(thT[i]);
       vT[2 * i + 1] = spT[i] * std::sin(thT[i]);
     }
   } else
 #ifdef CVC_USING_CUDA
-      if (use_cuda && material_rollout_cuda_available())
+      if (use_cuda && !b.ext && material_rollout_cuda_available())
     integrate_surrogate_material_cuda(oT.data(), vT.data(), b.goal, b.C, b.R, b.obs_mask,
                                       alphas.data(), beta.data(), gamma.data(), lam_soft.data(),
                                       lam_hard.data(), b.rollout_patch, b.rr, b.d_hat, b.dt, b.H, B,
@@ -154,7 +154,7 @@ double compute_loss(const coef_energy_net &model, const material_batch &b,
                                  beta.data(), gamma.data(), lam_soft.data(), lam_hard.data(),
                                  b.rollout_patch, b.rr, b.d_hat, b.dt, b.H, B, N, b.Hp, b.Wp,
                                  cfg.rollout, min_clear.data(), cum_risk.data(), hard_count.data(),
-                                 arc.data(), cfg.num_threads);
+                                 arc.data(), cfg.num_threads, b.ext);
 
   // episode cost J and CVaR quantile
   std::vector<double> J(B);
@@ -213,6 +213,18 @@ double compute_loss(const coef_energy_net &model, const material_batch &b,
                                   b.R, b.obs_mask, b.rr, b.d_hat, b.dt, b.H, B, N, mp, nullptr,
                                   nullptr, nullptr, cfg.num_threads);
     L += (double)cfg.w_multi * L_multi;
+    if (parts)
+      parts->multi = L_multi;
+  }
+  if (parts) {
+    parts->L = L;
+    parts->traj = L_traj;
+    parts->vel = L_vel;
+    parts->fric = L_fric;
+    parts->clear = L_clear;
+    parts->nav = L_nav;
+    parts->lreg = L_lreg;
+    parts->eta = eta;
   }
 
   if (cache) {
@@ -243,18 +255,23 @@ double compute_loss(const coef_energy_net &model, const material_batch &b,
 } // namespace
 
 double material_loss(const coef_energy_net &model, const material_batch &b,
-                     const material_loss_config &cfg, float frozen_eta, bool use_cuda) {
-  return compute_loss(model, b, cfg, frozen_eta, nullptr, use_cuda);
+                     const material_loss_config &cfg, float frozen_eta, bool use_cuda,
+                     material_loss_parts *parts) {
+  if (parts)
+    *parts = material_loss_parts{};
+  return compute_loss(model, b, cfg, frozen_eta, nullptr, use_cuda, parts);
 }
 
 double material_loss_and_grad(const coef_energy_net &model, const material_batch &b,
                               const material_loss_config &cfg, coef_energy_net::param_grads &grads,
-                              float *eta_out, bool use_cuda) {
+                              float *eta_out, bool use_cuda, material_loss_parts *parts) {
   const int B = b.B, N = b.N, P = b.P;
   (void)use_cuda;
   fwd_cache c;
+  if (parts)
+    *parts = material_loss_parts{};
   const double L =
-      compute_loss(model, b, cfg, std::numeric_limits<float>::quiet_NaN(), &c, use_cuda);
+      compute_loss(model, b, cfg, std::numeric_limits<float>::quiet_NaN(), &c, use_cuda, parts);
   if (eta_out)
     *eta_out = (float)c.eta;
 
@@ -313,7 +330,7 @@ double material_loss_and_grad(const coef_energy_net &model, const material_batch
         b.rollout_patch, b.rr, b.d_hat, b.dt, b.H, B, N, b.Hp, b.Wp, cfg.rollout, cfg.bicycle,
         cfg.dynamic, g_oT.data(), g_thT.data(), g_vxT.data(), g_xT.data(), g_min_clear.data(),
         g_cum_risk.data(), g_arc.data(), g_alphas.data(), g_beta.data(), g_gamma.data(),
-        g_lam_soft.data(), g_lam_hard.data(), cfg.num_threads);
+        g_lam_soft.data(), g_lam_hard.data(), cfg.num_threads, b.ext);
   } else if (cfg.integrator == material_integrator::bicycle) {
     // vT = sp * (cos th, sin th): carry L_vel's seed back onto the bicycle's state.
     std::vector<float> g_thT(B), g_spT(B);
@@ -327,31 +344,32 @@ double material_loss_and_grad(const coef_energy_net &model, const material_batch
         c.beta.data(), c.gamma.data(), c.lam_soft.data(), c.lam_hard.data(), b.rollout_patch, b.rr,
         b.d_hat, b.dt, b.H, B, N, b.Hp, b.Wp, cfg.rollout, cfg.bicycle, g_oT.data(), g_thT.data(),
         g_spT.data(), g_min_clear.data(), g_cum_risk.data(), g_arc.data(), g_alphas.data(),
-        g_beta.data(), g_gamma.data(), g_lam_soft.data(), g_lam_hard.data(), cfg.num_threads);
+        g_beta.data(), g_gamma.data(), g_lam_soft.data(), g_lam_hard.data(), cfg.num_threads,
+        b.ext);
   } else
 #ifdef CVC_USING_CUDA
-  // The device VJP stores each agent's whole trajectory in per-thread local
-  // memory, so it only accepts max(H) <= material_rollout_cuda_max_horizon() and
-  // THROWS above it. use_cuda is documented as always safe, so check the batch
-  // here and fall back to the (float-equivalent) host adjoint rather than letting
-  // that throw escape. The device FORWARD carries no such cap, so a long-horizon
-  // batch still gets the GPU forward — only this one op degrades.
-  if (use_cuda && material_rollout_cuda_available() &&
-      max_horizon(b) <= material_rollout_cuda_max_horizon())
-    integrate_surrogate_material_vjp_cuda(
-        b.o0, b.v0, b.goal, b.C, b.R, b.obs_mask, c.alphas.data(), c.beta.data(), c.gamma.data(),
-        c.lam_soft.data(), c.lam_hard.data(), b.rollout_patch, b.rr, b.d_hat, b.dt, b.H, B, N, b.Hp,
-        b.Wp, cfg.rollout, g_oT.data(), g_vT.data(), g_min_clear.data(), g_cum_risk.data(),
-        g_arc.data(), g_alphas.data(), g_beta.data(), g_gamma.data(), g_lam_soft.data(),
-        g_lam_hard.data());
-  else
+    // The device VJP stores each agent's whole trajectory in per-thread local
+    // memory, so it only accepts max(H) <= material_rollout_cuda_max_horizon() and
+    // THROWS above it. use_cuda is documented as always safe, so check the batch
+    // here and fall back to the (float-equivalent) host adjoint rather than letting
+    // that throw escape. The device FORWARD carries no such cap, so a long-horizon
+    // batch still gets the GPU forward — only this one op degrades.
+    if (use_cuda && !b.ext && material_rollout_cuda_available() &&
+        max_horizon(b) <= material_rollout_cuda_max_horizon())
+      integrate_surrogate_material_vjp_cuda(
+          b.o0, b.v0, b.goal, b.C, b.R, b.obs_mask, c.alphas.data(), c.beta.data(), c.gamma.data(),
+          c.lam_soft.data(), c.lam_hard.data(), b.rollout_patch, b.rr, b.d_hat, b.dt, b.H, B, N,
+          b.Hp, b.Wp, cfg.rollout, g_oT.data(), g_vT.data(), g_min_clear.data(), g_cum_risk.data(),
+          g_arc.data(), g_alphas.data(), g_beta.data(), g_gamma.data(), g_lam_soft.data(),
+          g_lam_hard.data());
+    else
 #endif
-    integrate_surrogate_material_vjp(
-        b.o0, b.v0, b.goal, b.C, b.R, b.obs_mask, c.alphas.data(), c.beta.data(), c.gamma.data(),
-        c.lam_soft.data(), c.lam_hard.data(), b.rollout_patch, b.rr, b.d_hat, b.dt, b.H, B, N, b.Hp,
-        b.Wp, cfg.rollout, g_oT.data(), g_vT.data(), g_min_clear.data(), g_cum_risk.data(),
-        g_arc.data(), g_alphas.data(), g_beta.data(), g_gamma.data(), g_lam_soft.data(),
-        g_lam_hard.data(), cfg.num_threads);
+      integrate_surrogate_material_vjp(
+          b.o0, b.v0, b.goal, b.C, b.R, b.obs_mask, c.alphas.data(), c.beta.data(), c.gamma.data(),
+          c.lam_soft.data(), c.lam_hard.data(), b.rollout_patch, b.rr, b.d_hat, b.dt, b.H, B, N,
+          b.Hp, b.Wp, cfg.rollout, g_oT.data(), g_vT.data(), g_min_clear.data(), g_cum_risk.data(),
+          g_arc.data(), g_alphas.data(), g_beta.data(), g_gamma.data(), g_lam_soft.data(),
+          g_lam_hard.data(), cfg.num_threads, b.ext);
 
   // add the direct (non-rollout) model-output grads
   for (int i = 0; i < B; ++i) {

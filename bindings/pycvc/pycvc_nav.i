@@ -25,6 +25,7 @@
 #include <cvc/nav/drive.h>
 #include <cvc/nav/grid_nav.h>
 #include <cvc/nav/coef_energy_net.h>
+#include <cvc/nav/detail/material_ext.h>
 #include <cvc/nav/geom_rollout.h>
 #include <cvc/nav/material.h>
 #include <cvc/nav/material_train.h>
@@ -260,6 +261,8 @@ PyObject *pycvc_nav_sense_impl(PyObject *truth, PyObject *positions, PyObject *h
 // The same for the bicycle rollout entry points (nav_integrate_bicycle_material*)
 // and their output helpers.
 %ignore pycvc::BikeRolloutArgs;
+// The external-force arrays of the material entry points (cvc::nav::material_ext).
+%ignore pycvc::MaterialExtArgs;
 %ignore pycvc::pycvc_new_f32;
 %ignore pycvc::pycvc_f32;
 
@@ -2553,6 +2556,85 @@ PyObject *nav_matnet_forward(const char *weights_path, PyObject *obs_feats, PyOb
   return tup;
 }
 
+// The external force of the material entry points (cvc::nav::material_ext): optional
+// arrays, None (or omitted) for none. Either a force patch, ext_patch (B,K,2,Hp,Wp) f32 on
+// the rollout patch's grid with an optional schedule ext_patch_of_step (B,steps) i32, or
+// per-step values ext_F (B,steps,2) f32 with an optional Jacobian ext_J (B,steps,4) f32.
+// ext_steer is ext_force::steer. Everything is checked here, with the GIL held (the
+// rollouts' own check would throw with the GIL released). `steps` is the stride of the
+// per-step arrays; a VJP's g_fext output takes it, max(H) when neither array gives one.
+struct MaterialExtArgs {
+  std::vector<PyArrayObject *> hold;
+  cvc::nav::material_ext e;
+  bool on = false;
+
+  MaterialExtArgs() = default;
+  MaterialExtArgs(const MaterialExtArgs &) = delete;
+  MaterialExtArgs &operator=(const MaterialExtArgs &) = delete;
+  ~MaterialExtArgs() {
+    for (PyArrayObject *h : hold)
+      Py_DECREF(h);
+  }
+  const cvc::nav::material_ext *ptr() const { return on ? &e : nullptr; }
+
+  static bool none(PyObject *o) { return o == nullptr || o == Py_None; }
+
+  void bind(const char *who, int B, int Hp, int Wp, const int *H, PyObject *patch, PyObject *pos,
+            PyObject *F, PyObject *J, int steer) {
+    auto oops = [&](const std::string &msg) {
+      throw std::invalid_argument(std::string("pycvc.") + who + ": " + msg);
+    };
+    auto take = [&](PyObject *o, int typ, int nd, const char *name) -> PyArrayObject * {
+      PyArrayObject *a = reinterpret_cast<PyArrayObject *>(
+          PyArray_FROMANY(o, typ, nd, nd, NPY_ARRAY_C_CONTIGUOUS));
+      if (!a)
+        oops(std::string(name) + " had the wrong dtype/rank");
+      hold.push_back(a);
+      return a;
+    };
+    int max_H = 0;
+    for (int b = 0; b < B; ++b)
+      max_H = std::max(max_H, H[b]);
+    if (none(patch) && none(F)) {
+      if (!none(pos) || !none(J))
+        oops("ext_patch_of_step needs ext_patch, and ext_J needs ext_F");
+      return;
+    }
+    on = true;
+    e.steer = steer;
+    e.steps = max_H;
+    if (!none(patch)) {
+      PyArrayObject *pa = take(patch, NPY_FLOAT, 5, "ext_patch");
+      if (PyArray_DIM(pa, 0) != B || PyArray_DIM(pa, 2) != 2 || PyArray_DIM(pa, 3) != Hp ||
+          PyArray_DIM(pa, 4) != Wp)
+        oops("ext_patch must be (B,K,2,Hp,Wp) on the rollout patch's grid");
+      e.patch = static_cast<const float *>(PyArray_DATA(pa));
+      e.K = static_cast<int>(PyArray_DIM(pa, 1));
+      if (!none(pos)) {
+        PyArrayObject *sa = take(pos, NPY_INT32, 2, "ext_patch_of_step");
+        if (PyArray_DIM(sa, 0) != B)
+          oops("ext_patch_of_step must be (B,steps)");
+        e.patch_of_step = static_cast<const int *>(PyArray_DATA(sa));
+        e.steps = static_cast<int>(PyArray_DIM(sa, 1));
+      }
+    }
+    if (!none(F)) {
+      PyArrayObject *fa = take(F, NPY_FLOAT, 3, "ext_F");
+      if (PyArray_DIM(fa, 0) != B || PyArray_DIM(fa, 2) != 2)
+        oops("ext_F must be (B,steps,2)");
+      e.F = static_cast<const float *>(PyArray_DATA(fa));
+      e.steps = static_cast<int>(PyArray_DIM(fa, 1));
+      if (!none(J)) {
+        PyArrayObject *ja = take(J, NPY_FLOAT, 3, "ext_J");
+        if (PyArray_DIM(ja, 0) != B || PyArray_DIM(ja, 1) != e.steps || PyArray_DIM(ja, 2) != 4)
+          oops("ext_J must be (B,steps,4), its steps ext_F's");
+        e.J = static_cast<const float *>(PyArray_DATA(ja));
+      }
+    }
+    cvc::nav::detail::validate_ext(e, B, max_H, nullptr, (std::string("pycvc.") + who).c_str());
+  }
+};
+
 // Obstacle-list material surrogate rollout (cvc::nav::integrate_surrogate_material).
 // The faithful torch-free integrator of the source material method (per-obstacle
 // IPC barriers + soft/hard material forces + semi-implicit Euler). B agents, N
@@ -2563,7 +2645,9 @@ PyObject *nav_integrate_surrogate_material(
     PyObject *o0, PyObject *v0, PyObject *goal, PyObject *C, PyObject *R, PyObject *mask,
     PyObject *alphas, PyObject *beta, PyObject *gamma, PyObject *lam_soft, PyObject *lam_hard,
     PyObject *rollout_patch, PyObject *rr, PyObject *d_hat, PyObject *dt, PyObject *H,
-    double margin_factor, double mass, double d_hat_sdf, double k_sharp, int num_threads = 0)
+    double margin_factor, double mass, double d_hat_sdf, double k_sharp, int num_threads = 0,
+    PyObject *ext_patch = nullptr, PyObject *ext_patch_of_step = nullptr,
+    PyObject *ext_F = nullptr, PyObject *ext_J = nullptr, int ext_steer = 1)
 {
   std::vector<PyArrayObject *> hold;
   auto fail = [&](const char *msg) {
@@ -2607,6 +2691,14 @@ PyObject *nav_integrate_surrogate_material(
       PyArray_DIM(pa, 0) != B || PyArray_DIM(pa, 1) != 6 || PyArray_DIM(rra, 0) != B ||
       PyArray_DIM(dha, 0) != B || PyArray_DIM(dta, 0) != B || PyArray_DIM(Ha, 0) != B)
     fail("pycvc.nav_integrate_surrogate_material: shape mismatch");
+  MaterialExtArgs ext;
+  try {
+    ext.bind("nav_integrate_surrogate_material", B, Hp, Wp,
+             static_cast<const int *>(PyArray_DATA(Ha)), ext_patch, ext_patch_of_step, ext_F,
+             ext_J, ext_steer);
+  } catch (const std::exception &x) {
+    fail(x.what());
+  }
 
   npy_intp d2[2] = {B, 2}, d1 = B;
   PyObject *oo = PyArray_SimpleNew(2, d2, NPY_FLOAT);
@@ -2645,7 +2737,7 @@ PyObject *nav_integrate_surrogate_material(
       static_cast<const float *>(PyArray_DATA(rra)), static_cast<const float *>(PyArray_DATA(dha)),
       static_cast<const float *>(PyArray_DATA(dta)),
       static_cast<const int *>(PyArray_DATA(Ha)), B, N, Hp, Wp, p, D(mco), D(cro), D(hco), D(alo),
-      num_threads);
+      num_threads, ext.ptr());
   Py_END_ALLOW_THREADS
   for (PyArrayObject *h : hold)
     Py_DECREF(h);
@@ -2773,11 +2865,16 @@ PyObject *nav_integrate_bicycle_material(
     PyObject *lam_hard, PyObject *rollout_patch, PyObject *rr, PyObject *d_hat, PyObject *dt,
     PyObject *H, double margin_factor, double mass, double d_hat_sdf, double k_sharp, double L,
     double delta_max, double a_max, double a_lat_max, double k_steer, double vmax,
-    int allow_reverse, int num_threads = 0) {
+    int allow_reverse, int num_threads = 0, PyObject *ext_patch = nullptr,
+    PyObject *ext_patch_of_step = nullptr, PyObject *ext_F = nullptr, PyObject *ext_J = nullptr,
+    int ext_steer = 1) {
   BikeRolloutArgs a;
   a.bind("nav_integrate_bicycle_material", o0, th0, sp0, goal, C, R, mask, alphas, beta, gamma,
          lam_soft, lam_hard, rollout_patch, rr, d_hat, dt, H, margin_factor, mass, d_hat_sdf,
          k_sharp, L, delta_max, a_max, a_lat_max, k_steer, vmax, allow_reverse);
+  MaterialExtArgs ext;
+  ext.bind("nav_integrate_bicycle_material", a.B, a.Hp, a.Wp, a.H, ext_patch, ext_patch_of_step,
+           ext_F, ext_J, ext_steer);
   npy_intp d2[2] = {a.B, 2}, d1 = a.B;
   PyObject *out[7] = {nullptr};
   try {
@@ -2797,7 +2894,7 @@ PyObject *nav_integrate_bicycle_material(
       pycvc_f32(out[0]), pycvc_f32(out[1]), pycvc_f32(out[2]), a.goal, a.C, a.R, a.mask, a.alphas,
       a.beta, a.gamma, a.lam_soft, a.lam_hard, a.patch, a.rr, a.d_hat, a.dt, a.H, a.B, a.N, a.Hp,
       a.Wp, a.p, a.v, pycvc_f32(out[3]), pycvc_f32(out[4]), pycvc_f32(out[5]), pycvc_f32(out[6]),
-      num_threads);
+      num_threads, ext.ptr());
   Py_END_ALLOW_THREADS
   PyObject *tup = PyTuple_Pack(7, out[0], out[1], out[2], out[3], out[4], out[5], out[6]);
   for (PyObject *o : out)
@@ -2807,7 +2904,8 @@ PyObject *nav_integrate_bicycle_material(
 
 // The VJP: upstream grads g_oT (B,2), g_thT, g_spT, g_min_clear, g_cum_risk,
 // g_arc_length (B,) -> fresh (g_alphas (B,N), g_beta, g_gamma, g_lam_soft,
-// g_lam_hard (B,)) f32. GIL released.
+// g_lam_hard (B,)) f32, and with an external force and want_g_fext a sixth, g_fext
+// (B,steps,2): dL/dF_ext per step. GIL released.
 PyObject *nav_integrate_bicycle_material_vjp(
     PyObject *o0, PyObject *th0, PyObject *sp0, PyObject *goal, PyObject *C, PyObject *R,
     PyObject *mask, PyObject *alphas, PyObject *beta, PyObject *gamma, PyObject *lam_soft,
@@ -2815,12 +2913,18 @@ PyObject *nav_integrate_bicycle_material_vjp(
     PyObject *H, double margin_factor, double mass, double d_hat_sdf, double k_sharp, double L,
     double delta_max, double a_max, double a_lat_max, double k_steer, double vmax,
     int allow_reverse, PyObject *g_oT, PyObject *g_thT, PyObject *g_spT, PyObject *g_min_clear,
-    PyObject *g_cum_risk, PyObject *g_arc_length, int num_threads = 0) {
+    PyObject *g_cum_risk, PyObject *g_arc_length, int num_threads = 0,
+    PyObject *ext_patch = nullptr, PyObject *ext_patch_of_step = nullptr,
+    PyObject *ext_F = nullptr, PyObject *ext_J = nullptr, int ext_steer = 1,
+    int want_g_fext = 0) {
   const char *who = "nav_integrate_bicycle_material_vjp";
   BikeRolloutArgs a;
   a.bind(who, o0, th0, sp0, goal, C, R, mask, alphas, beta, gamma, lam_soft, lam_hard,
          rollout_patch, rr, d_hat, dt, H, margin_factor, mass, d_hat_sdf, k_sharp, L, delta_max,
          a_max, a_lat_max, k_steer, vmax, allow_reverse);
+  MaterialExtArgs ext;
+  ext.bind(who, a.B, a.Hp, a.Wp, a.H, ext_patch, ext_patch_of_step, ext_F, ext_J, ext_steer);
+  const bool gf = want_g_fext && ext.on;
   PyArrayObject *go = a.take(who, g_oT, NPY_FLOAT, 2), *gth = a.take(who, g_thT, NPY_FLOAT, 1),
                 *gsp = a.take(who, g_spT, NPY_FLOAT, 1), *gm = a.take(who, g_min_clear, NPY_FLOAT, 1),
                 *gc = a.take(who, g_cum_risk, NPY_FLOAT, 1),
@@ -2829,12 +2933,14 @@ PyObject *nav_integrate_bicycle_material_vjp(
       PyArray_DIM(gsp, 0) != a.B || PyArray_DIM(gm, 0) != a.B || PyArray_DIM(gc, 0) != a.B ||
       PyArray_DIM(gar, 0) != a.B)
     throw std::invalid_argument(std::string("pycvc.") + who + ": upstream grad shape mismatch");
-  npy_intp dal[2] = {a.B, a.N}, d1 = a.B;
-  PyObject *out[5] = {nullptr};
+  npy_intp dal[2] = {a.B, a.N}, d1 = a.B, dgf[3] = {a.B, ext.e.steps, 2};
+  PyObject *out[6] = {nullptr};
   try {
     out[0] = pycvc_new_f32(2, dal);
     for (int k = 1; k < 5; ++k)
       out[k] = pycvc_new_f32(1, &d1);
+    if (gf)
+      out[5] = pycvc_new_f32(3, dgf);
   } catch (...) {
     for (PyObject *o : out)
       Py_XDECREF(o);
@@ -2843,17 +2949,21 @@ PyObject *nav_integrate_bicycle_material_vjp(
   std::memset(pycvc_f32(out[0]), 0, sizeof(float) * a.B * a.N);
   for (int k = 1; k < 5; ++k)
     std::memset(pycvc_f32(out[k]), 0, sizeof(float) * a.B);
+  if (gf)
+    std::memset(pycvc_f32(out[5]), 0, sizeof(float) * a.B * ext.e.steps * 2);
   auto F = [](PyArrayObject *x) { return static_cast<const float *>(PyArray_DATA(x)); };
   Py_BEGIN_ALLOW_THREADS
   cvc::nav::integrate_bicycle_material_vjp(
       a.o0, a.th0, a.sp0, a.goal, a.C, a.R, a.mask, a.alphas, a.beta, a.gamma, a.lam_soft,
       a.lam_hard, a.patch, a.rr, a.d_hat, a.dt, a.H, a.B, a.N, a.Hp, a.Wp, a.p, a.v, F(go), F(gth),
       F(gsp), F(gm), F(gc), F(gar), pycvc_f32(out[0]), pycvc_f32(out[1]), pycvc_f32(out[2]),
-      pycvc_f32(out[3]), pycvc_f32(out[4]), num_threads);
+      pycvc_f32(out[3]), pycvc_f32(out[4]), num_threads, ext.ptr(),
+      gf ? pycvc_f32(out[5]) : nullptr);
   Py_END_ALLOW_THREADS
-  PyObject *tup = PyTuple_Pack(5, out[0], out[1], out[2], out[3], out[4]);
+  PyObject *tup = gf ? PyTuple_Pack(6, out[0], out[1], out[2], out[3], out[4], out[5])
+                     : PyTuple_Pack(5, out[0], out[1], out[2], out[3], out[4]);
   for (PyObject *o : out)
-    Py_DECREF(o);
+    Py_XDECREF(o);
   return tup;
 }
 
@@ -2898,6 +3008,7 @@ static MaterialTrainer *material_trainer_from(PyObject *cap) {
 struct MaterialBatchArgs {
   std::vector<PyArrayObject *> hold;
   cvc::nav::material_batch b;
+  MaterialExtArgs ext; // the batch's external force, if any (b.ext)
 
   MaterialBatchArgs() = default;
   MaterialBatchArgs(const MaterialBatchArgs &) = delete;
@@ -2983,6 +3094,13 @@ struct MaterialBatchArgs {
     b.v_tgt = FD(vta);
     b.gamma_o = FD(goa);
   }
+
+  // The batch's external force (MaterialExtArgs), after bind().
+  void bind_ext(const char *who, PyObject *patch, PyObject *pos, PyObject *F, PyObject *J,
+                int steer) {
+    ext.bind(who, b.B, b.Hp, b.Wp, b.H, patch, pos, F, J, steer);
+    b.ext = ext.ptr();
+  }
 };
 
 PyObject *nav_material_trainer_create(const char *cvcnm_path, double grad_clip = 5.0,
@@ -3045,17 +3163,24 @@ PyObject *nav_material_trainer_create(const char *cvcnm_path, double grad_clip =
 // (B,N,6) f32, obs_mask (B,N) u8, goal_feats (B,4) f32, risk_patch (B,2,P,P) f32,
 // o0/v0/goal/o_tgt/v_tgt (B,2) f32, C (B,N,2) f32, R (B,N) f32, rollout_patch
 // (B,6,Hp,Wp) f32, rr/d_hat/dt/gamma_o (B,) f32, H (B,) i32. Applies Adam at lr;
-// returns the scalar loss.
+// returns the scalar loss. ext_* is an external force in the rollouts (MaterialExtArgs:
+// a caller's own force, as the deployed drive_step_material_ext adds it).
 PyObject *nav_material_trainer_step(PyObject *handle, PyObject *obs_feats, PyObject *obs_mask,
                                     PyObject *goal_feats, PyObject *risk_patch, PyObject *o0,
                                     PyObject *v0, PyObject *goal, PyObject *C, PyObject *R,
                                     PyObject *rollout_patch, PyObject *rr, PyObject *d_hat,
                                     PyObject *dt, PyObject *H, PyObject *o_tgt, PyObject *v_tgt,
-                                    PyObject *gamma_o, double lr, int num_threads = 0) {
+                                    PyObject *gamma_o, double lr, int num_threads = 0,
+                                    PyObject *ext_patch = nullptr,
+                                    PyObject *ext_patch_of_step = nullptr,
+                                    PyObject *ext_F = nullptr, PyObject *ext_J = nullptr,
+                                    int ext_steer = 1) {
   MaterialTrainer *t = material_trainer_from(handle);
   MaterialBatchArgs ba;
   ba.bind("nav_material_trainer_step", t->model.patch_size(), obs_feats, obs_mask, goal_feats,
           risk_patch, o0, v0, goal, C, R, rollout_patch, rr, d_hat, dt, H, o_tgt, v_tgt, gamma_o);
+  ba.bind_ext("nav_material_trainer_step", ext_patch, ext_patch_of_step, ext_F, ext_J,
+              ext_steer);
   // Per-call, like nav_material_trainer_loss: writing num_threads onto t->cfg
   // would make one threaded call change the default for every later step.
   cvc::nav::material_loss_config cfg = t->cfg;
@@ -3088,11 +3213,17 @@ PyObject *nav_material_trainer_loss(PyObject *handle, PyObject *obs_feats, PyObj
                                     PyObject *v0, PyObject *goal, PyObject *C, PyObject *R,
                                     PyObject *rollout_patch, PyObject *rr, PyObject *d_hat,
                                     PyObject *dt, PyObject *H, PyObject *o_tgt, PyObject *v_tgt,
-                                    PyObject *gamma_o, double frozen_eta, int num_threads = 0) {
+                                    PyObject *gamma_o, double frozen_eta, int num_threads = 0,
+                                    PyObject *ext_patch = nullptr,
+                                    PyObject *ext_patch_of_step = nullptr,
+                                    PyObject *ext_F = nullptr, PyObject *ext_J = nullptr,
+                                    int ext_steer = 1) {
   MaterialTrainer *t = material_trainer_from(handle);
   MaterialBatchArgs ba;
   ba.bind("nav_material_trainer_loss", t->model.patch_size(), obs_feats, obs_mask, goal_feats,
           risk_patch, o0, v0, goal, C, R, rollout_patch, rr, d_hat, dt, H, o_tgt, v_tgt, gamma_o);
+  ba.bind_ext("nav_material_trainer_loss", ext_patch, ext_patch_of_step, ext_F, ext_J,
+              ext_steer);
   cvc::nav::material_loss_config cfg = t->cfg; // don't publish num_threads onto the handle
   cfg.num_threads = num_threads;
 

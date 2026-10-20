@@ -262,9 +262,122 @@ def test_bicycle_integrator():
               f"20 steps {l0:.4f} -> {last:.4f}")
 
 
+def _takes_ext(fn, *args):
+    """Whether a binding takes the trailing external-force args (material_ext): a pycvc without
+    them raises TypeError on the extra argument."""
+    try:
+        fn(*args)
+    except TypeError:
+        return False
+    except Exception:
+        return True
+    return True
+
+
+def test_external_force():
+    """An external force in the material training rollouts (material_ext): a zero force patch is
+    the loss without one, a force patch changes it, training with it descends, malformed arrays
+    are refused before the GIL-free step, and the rollout bindings reproduce libcvc's golden."""
+    with tempfile.TemporaryDirectory() as d:
+        init = os.path.join(d, "init.cvcnm")
+        _write_random_cvcnm(init, patch_size=16, seed=9)
+        h = pycvc.nav_material_trainer_create(init)
+        batch = _synthetic_batch(seed=17)
+        args = _packed(batch)
+        B, Hp, Wp = batch["o0"].shape[0], batch["rollout_patch"].shape[2], batch["rollout_patch"].shape[3]
+        if not _takes_ext(pycvc.nav_material_trainer_loss, h, *args, float("nan"), 0, None):
+            print("  (pycvc lacks the external-force args -- skipping)")
+            return
+        base = pycvc.nav_material_trainer_loss(h, *args, float("nan"), 0)
+        zero = np.zeros((B, 1, 2, Hp, Wp), np.float32)
+        assert pycvc.nav_material_trainer_loss(h, *args, float("nan"), 0, zero) == base, \
+            "a zero force patch moved the loss"
+        yy, xx = np.meshgrid(np.linspace(0, 1, Hp), np.linspace(0, 1, Wp), indexing="ij")
+        one = np.stack([0.3 * np.sin(5 * xx + 2 * yy), 0.3 * np.cos(3 * xx - 4 * yy)]).astype(np.float32)
+        force = np.ascontiguousarray(np.broadcast_to(one, (B, 1, 2, Hp, Wp)))
+        pushed = pycvc.nav_material_trainer_loss(h, *args, float("nan"), 0, force)
+        assert np.isfinite(pushed) and pushed != base, "the force patch did not reach the loss"
+        l0 = pycvc.nav_material_trainer_step(h, *args, 1e-3, 0, force)
+        last = l0
+        for _ in range(20):
+            last = pycvc.nav_material_trainer_step(h, *args, 1e-3, 0, force)
+        assert np.isfinite(last) and last < l0, f"training with the force did not descend ({l0} -> {last})"
+        H = int(batch["H"].max())
+        bad = [
+            ("a patch off the rollout grid", dict(ext_patch=np.zeros((B, 1, 2, Hp + 1, Wp), np.float32))),
+            ("a patch index past K", dict(ext_patch=force, ext_patch_of_step=np.full((B, H), 1, np.int32))),
+            ("too few steps", dict(ext_F=np.zeros((B, H - 1, 2), np.float32))),
+            ("J without F", dict(ext_J=np.zeros((B, H, 4), np.float32))),
+        ]
+        for why, kw in bad:
+            try:
+                pycvc.nav_material_trainer_loss(h, *args, float("nan"), 0, kw.get("ext_patch"),
+                                                kw.get("ext_patch_of_step"), kw.get("ext_F"), kw.get("ext_J"))
+            except (ValueError, TypeError, RuntimeError):
+                pass
+            else:
+                raise AssertionError(f"{why} was accepted")
+
+    # The rollout bindings against libcvc's golden (NavMaterialExt.Golden): the surrogate and the
+    # bicycle with a scheduled force patch; the bicycle VJP's coefficient gradients and dL/dF_ext.
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "src", "cvc", "tests",
+                        "data", "material_ext_golden.json")
+    if not os.path.exists(path):
+        print("  (no material_ext_golden.json beside the sources -- skipping the rollout check)")
+        return
+    import json
+
+    gold = json.load(open(path))
+    worst = 0.0
+
+    def close(a, b, tol=1e-5):
+        a, b = np.asarray(a, np.float64).ravel(), np.asarray(b, np.float64).ravel()
+        r = np.max(np.abs(a - b) / np.maximum(1.0, np.maximum(np.abs(a), np.abs(b)))) if a.size else 0.0
+        assert r <= tol, f"{r:.3e} > {tol}"
+        return r
+
+    for c in gold["cases"]:
+        if c["integrator"] == "dynamic":
+            continue
+        B, N, Hp, Wp, K, steps = c["B"], c["N"], c["Hp"], c["Wp"], c["K"], c["steps"]
+        f32 = lambda k, *shape: np.ascontiguousarray(np.asarray(c[k], np.float32).reshape(*shape))  # noqa: E731
+        common = [f32("goal", B, 2), f32("C", B, N, 2), f32("R", B, N),
+                  np.ascontiguousarray(np.asarray(c["mask"], np.uint8).reshape(B, N)), f32("alphas", B, N),
+                  f32("beta", B), f32("gamma", B), f32("lam_soft", B), f32("lam_hard", B),
+                  f32("rollout_patch", B, 6, Hp, Wp), f32("rr", B), f32("d_hat", B), f32("dt", B),
+                  np.ascontiguousarray(np.asarray(c["H"], np.int32))]
+        p, ext_patch = c["params"], f32("ext_patch", B, K, 2, Hp, Wp)
+        pos = np.ascontiguousarray(np.asarray(c["patch_of_step"], np.int32).reshape(B, steps))
+        if c["integrator"] == "surrogate":
+            out = pycvc.nav_integrate_surrogate_material(
+                f32("o0", B, 2), f32("v0", B, 2), *common, p["margin_factor"], p["mass"], p["d_hat_sdf"],
+                p["k_sharp"], 1, ext_patch, pos)
+            names = ("o", "th", "min_clear", "cum_risk", "hard_count", "arc_length")
+        else:
+            v = c["vehicle"]
+            veh = (p["margin_factor"], p["mass"], p["d_hat_sdf"], p["k_sharp"], v["L"], v["delta_max"],
+                   v["a_max"], v["a_lat_max"], v["k_steer"], v["vmax"], v["allow_reverse"])
+            start = [f32("o0", B, 2), f32("th0", B), f32("sp0", B)]
+            out = pycvc.nav_integrate_bicycle_material(*start, *common, *veh, 1, ext_patch, pos)
+            names = ("o", "th", "sp", "min_clear", "cum_risk", "hard_count", "arc_length")
+            q = c["seeds"]
+            seeds = [np.asarray(q["o"], np.float32).reshape(B, 2)] + [
+                np.asarray(q[k], np.float32) for k in ("th", "sp", "min_clear", "cum_risk", "arc_length")]
+            g = pycvc.nav_integrate_bicycle_material_vjp(*start, *common, *veh, *seeds, 1, ext_patch, pos,
+                                                         None, None, 1, 1)
+            assert len(g) == 6, "want_g_fext did not return g_fext"
+            for k, got in zip(("alphas", "beta", "gamma", "lam_soft", "lam_hard", "fext"), g):
+                worst = max(worst, close(got, c["grad"][k], 1e-4))
+        for k, got in zip(names, out):
+            worst = max(worst, close(got, c["out"][k]))
+    print(f"  external force: zero patch = no force, loss {base:.4f} -> {pushed:.4f} with it, "
+          f"20 steps {l0:.4f} -> {last:.4f}; rollouts vs golden {worst:.2e}")
+
+
 if __name__ == "__main__":
     test_trainer_reduces_loss_and_round_trips()
     test_forward_only_loss_does_not_train()
     test_sampled_multi_start_args()
     test_bicycle_integrator()
+    test_external_force()
     print("pycvc nav material-trainer integration: OK")
