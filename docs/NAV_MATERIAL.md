@@ -229,7 +229,7 @@ Pinned by `nav_material_ext_test` and the `...WithAnExternalForce` cases of
 | Coefficient gradient through a scheduled force patch | worst relative 2.2e-3 / 1.1e-2 / 1.7e-2 (surrogate / bicycle / dynamic) |
 | Coefficient gradient through a callback held for 2 steps | 9.2e-4 / 1.6e-2 (surrogate / bicycle) |
 | dL/dF_ext per step against central differences | 2.6e-4 / 2.5e-5 / 3.0e-5 |
-| A callback giving the patch's own values and J | the patch, bit for bit |
+| A callback giving the patch's own values and J | the patch, bit for bit, with the callback built as the rollouts are (`-ffp-contract=off`) |
 | The full loss-to-weights gradient with the force | directional 2.2e-4 (surrogate), 7.0e-4 (bicycle) |
 
 `tests/data/material_ext_golden.json` (`NavMaterialExt.Golden`) holds GRL-SNAM's torch twins to
