@@ -5,7 +5,8 @@
 # a wasm build). This scene therefore uses ONLY the core control-plane verbs — `room-join` and
 # `room-roster` — so it joins the room and shows WHO IS PRESENT, syncing both ways with native gRPC
 # clients through the relay's WS<->gRPC bridge. Live video in the browser is the next phase (WebRTC);
-# here each participant shows as a named tile with a "video via native client" placeholder.
+# here each participant shows as a named tile with a "browser video coming soon" placeholder until
+# the WebSocket media plane lands.
 #
 # conf.room / conf.self are set by the host (cyprty.cpp) before this loads.
 
@@ -58,6 +59,6 @@ on_tick: |
     (for p (room-roster (state-get "conf.room"))
       (begin
         (state-set (str-concat "peer." idx ".name") (get-attr p "name"))
-        (state-set (str-concat "peer." idx ".video") "video via native client")
+        (state-set (str-concat "peer." idx ".video") "(browser video coming soon)")
         (set idx (+ idx 1))))
     (state-set "peer.count" (str idx)))
