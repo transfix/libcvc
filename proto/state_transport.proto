@@ -128,6 +128,28 @@ message Heartbeat {
   uint64 timestamp_ns = 3; // sender's wall-clock ns (observability)
 }
 
+// Media frame carried over the SAME WebSocket control channel (bring-up media
+// plane, roadmap §"media-over-WebSocket"). Unlike StreamFrame (the dedicated
+// gRPC data plane), this rides the state transport so a BROWSER — which has only
+// the one WebSocket to the relay, no gRPC — can push its camera/mic and receive
+// peers'. It is NOT replicated into any shard and never crosses the WS<->gRPC
+// bridge: a relay simply fans each received MediaFrame to its OTHER connections
+// (SFU full fan-out), and a leaf delivers it to its on_media sink. Self-contained
+// (origin + codec + size) so a consumer can open a decode proxy with no prior
+// descriptor. Payload is one whole frame (JPEG for mjpeg, PCM for f32 audio).
+message MediaFrame {
+  string origin_node_id = 1; // the publishing participant's pid (route per-peer; skip self)
+  string stream_id = 2;      // the stream KIND on that peer: "camera" | "mic"
+  string codec = 3;          // "mjpeg" (video) | "f32" (audio)
+  uint32 width = 4;          // video: frame width  (0 for audio)
+  uint32 height = 5;         // video: frame height (0 for audio)
+  int64 seq = 6;             // monotonic per (origin, stream_id)
+  double pts_seconds = 7;    // producer presentation timestamp
+  bytes payload = 8;         // one whole frame's bytes
+  uint32 sample_rate = 9;    // audio: samples/sec (0 for video)
+  uint32 channels = 10;      // audio: channel count (0 for video)
+}
+
 // Single bidirectional frame envelope. Both client and server write
 // frames; same-cluster routing happens above this layer.
 message Frame {
@@ -140,6 +162,7 @@ message Frame {
     SnapshotRequest snapshot_request = 6;
     SnapshotResponse snapshot_response = 7;
     Heartbeat heartbeat = 8;
+    MediaFrame media = 9;
   }
 }
 

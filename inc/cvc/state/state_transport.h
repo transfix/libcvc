@@ -182,8 +182,26 @@ public:
     return false;
   }
 
+  // -------- Transport bridge (wasm interop) --------
+  //
+  // Link this transport to a sibling of a DIFFERENT backend — e.g. a gRPC transport and a
+  // WebSocket transport running in ONE relay over the same shards. A mutation/message RECEIVED
+  // from a connection is, after the normal same-transport relay, also handed to the bridged peer,
+  // which fans it out to ITS connections. That is how a browser (WebSocket) client and a native
+  // (gRPC) client end up in one room: each backend only knows its own connections, and the bridge
+  // carries frames across the two connection sets.
+  //
+  // The forward uses the peer's publish()/publish_message() (concrete transports call
+  // bridge()->publish(m) from on_inbound_*). Those do NOT re-enter on_inbound, so no relay loop
+  // forms; and because origin_node_id is preserved, the receiving shard's dedup makes the redundant
+  // apply a no-op. Null (the default) = not bridged — a leaf client applies locally and never
+  // forwards.
+  void set_bridge(state_transport *peer) noexcept { _bridge = peer; }
+  state_transport *bridge() const noexcept { return _bridge; }
+
 protected:
   state_peer_registry _peers;
+  state_transport *_bridge = nullptr;
 };
 
 } // namespace cvc

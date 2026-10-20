@@ -154,6 +154,11 @@ public:
   virtual void seed_window_geometry(const WindowGeom &g) { (void)g; }
   virtual WindowGeom window_geometry() const { return {}; }
 
+  // Raise/focus the NEXT window to the front. Called right before begin_window when the core sees a
+  // one-shot raise request at tree.<id>.raise (e.g. "click a user -> bring their camera window
+  // forward"). Default no-op — a backend with no window z-order ignores it.
+  virtual void focus_next_window() {}
+
   virtual void push_id(const char *id) = 0;
   virtual void pop_id() = 0;
 
