@@ -663,8 +663,7 @@ TEST(DynBike, Golden) {
         << "value " << k << " (case " << k / 18 << "): golden " << golden[k] << ", now " << now[k];
 }
 
-// ── The external-force port: the deployed drive's ext_force in the differentiable rollout (for
-// cvcdbg's comm-network trainer) ──
+// ── The external-force port: the deployed drive's ext_force in the differentiable rollout ──
 
 namespace {
 
