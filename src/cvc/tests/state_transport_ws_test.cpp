@@ -12,6 +12,7 @@
 // replicate a room tree, a late joiner converges via backfill, and a relay bridges two pure clients
 // (the browser topology — clients that dial without a local acceptor, as a wasm peer will).
 
+#include <atomic>
 #include <chrono>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
@@ -22,8 +23,10 @@
 #include <cvc/state/state_transport_grpc.h>
 #endif
 #include <gtest/gtest.h>
+#include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace {
 
@@ -165,6 +168,75 @@ TEST(StateTransportWsTest, RelayBridgesTwoClients) {
   EXPECT_TRUE(wait_until([&] { return cvc::state::instance(aB)("relay.k").value() == "hello"; },
                          std::chrono::milliseconds(3000)));
   EXPECT_EQ(cvc::state::instance(aB)("relay.k").value(), "hello");
+
+  tA.stop();
+  tB.stop();
+  S.stop();
+}
+
+// Media plane: a client's MediaFrame reaches the OTHER client through the relay's fan-out (SFU),
+// carrying its origin + codec + size + payload intact, and the publisher does NOT receive its own
+// frame back (the relay skips the origin connection). Media never enters a shard.
+TEST(StateTransportWsTest, RelayFansMediaFrameToOtherClient) {
+  cvc::app aA, aB;
+  cvc::state_transport_ws S, tA, tB;
+  S.start("127.0.0.1:0", "S", "C");
+  S.set_relay(true);
+
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sA.attach();
+  sB.attach();
+  tA.register_shard(&sA);
+  tB.register_shard(&sB);
+
+  std::mutex mu;
+  std::vector<cvc::ws_media_frame> gotB;
+  std::atomic<int> gotA{0};
+  tB.set_on_media([&](const cvc::ws_media_frame &m) {
+    std::lock_guard<std::mutex> lk(mu);
+    gotB.push_back(m);
+  });
+  tA.set_on_media([&](const cvc::ws_media_frame &) { gotA.fetch_add(1); });
+
+  ASSERT_TRUE(tA.connect_to_peer(ws(S.listen_address()), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(tB.connect_to_peer(ws(S.listen_address()), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(
+      wait_until([&] { return S.connection_count() >= 2; }, std::chrono::milliseconds(2000)));
+
+  cvc::ws_media_frame m;
+  m.origin_node_id = "A";
+  m.stream_id = "camera";
+  m.codec = "mjpeg";
+  m.width = 640;
+  m.height = 480;
+  m.seq = 7;
+  m.pts_seconds = 1.5;
+  m.payload = {0xff, 0xd8, 0x01, 0x02, 0x03, 0xff, 0xd9}; // a tiny JPEG-ish blob
+  tA.publish_media_frame(m);
+
+  ASSERT_TRUE(wait_until(
+      [&] {
+        std::lock_guard<std::mutex> lk(mu);
+        return !gotB.empty();
+      },
+      std::chrono::milliseconds(3000)));
+  {
+    std::lock_guard<std::mutex> lk(mu);
+    ASSERT_EQ(gotB.size(), 1u);
+    EXPECT_EQ(gotB[0].origin_node_id, "A");
+    EXPECT_EQ(gotB[0].stream_id, "camera");
+    EXPECT_EQ(gotB[0].codec, "mjpeg");
+    EXPECT_EQ(gotB[0].width, 640u);
+    EXPECT_EQ(gotB[0].height, 480u);
+    EXPECT_EQ(gotB[0].seq, 7);
+    EXPECT_EQ(gotB[0].payload, m.payload);
+  }
+  // The publisher must not receive its own frame back.
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  EXPECT_EQ(gotA.load(), 0);
+  EXPECT_EQ(tB.total_media_received(), 1u);
+  EXPECT_EQ(tA.total_media_sent(), 1u);
 
   tA.stop();
   tB.stop();

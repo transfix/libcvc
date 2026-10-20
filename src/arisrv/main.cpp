@@ -21,6 +21,7 @@
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <cvc/ariadne/conference/room_intrinsics.h>       // room_leave (retract a departed peer)
@@ -124,6 +125,10 @@ int main(int argc, char **argv) {
   std::set<std::string> relayed;
   std::size_t last = 0;
   int ticks = 0;
+#if CVC_ENABLE_WS
+  int wsticks = 0;                 // separate cadence: a browser-only room has no gRPC streams
+  std::uint64_t lastMediaFwd = 0;  // last-logged WS media fan-out count
+#endif
   while (!g_stop.load()) {
 #if CVC_ENABLE_WS
     // Apply any queued departures (a browser tab closed) before pumping, so each retraction goes out
@@ -166,13 +171,27 @@ int main(int argc, char **argv) {
     state_tp.pump_all();
 #endif
     const std::size_t n = relay.stream_count();
-    const bool heartbeat = (n > 0 && ++ticks % 25 == 0); // ~every 5s while media is live
+    const bool heartbeat = (n > 0 && ++ticks % 25 == 0); // ~every 5s while gRPC media is live
     if (n != last || heartbeat) {
       last = n;
       std::printf("[arisrv] relaying %zu stream(s); %llu frames forwarded\n", n,
                   static_cast<unsigned long long>(relay.frames_forwarded()));
       std::fflush(stdout);
     }
+#if CVC_ENABLE_WS
+    // Browser media rides the WS control channel and is fanned peer-to-peer in the transport (SFU), so
+    // it is NOT in the gRPC `relay` stats above. Report it on its own cadence (~every 5s when active).
+    if (++wsticks % 25 == 0) {
+      const std::uint64_t mf = ws_tp.total_media_forwarded();
+      if (mf != lastMediaFwd) {
+        lastMediaFwd = mf;
+        std::printf("[arisrv] ws media: %llu frame(s) fanned to peers (received %llu)\n",
+                    static_cast<unsigned long long>(mf),
+                    static_cast<unsigned long long>(ws_tp.total_media_received()));
+        std::fflush(stdout);
+      }
+    }
+#endif
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
   }
 

@@ -14,13 +14,34 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <cvc/state/state_transport.h>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
 
 namespace cvc {
+
+// A media frame carried over the WebSocket control channel (the MediaFrame in
+// proto/state_transport.proto — the bring-up media plane, so a browser with only
+// its one WebSocket can push its camera/mic and receive peers'). Plain struct so
+// this header stays proto-free. NOT shard state: a relay fans it to its other
+// connections, a leaf delivers it to its on_media sink; it never touches a shard
+// or the WS<->gRPC bridge.
+struct ws_media_frame {
+  std::string origin_node_id; // the publishing participant's pid (route per-peer; skip self)
+  std::string stream_id;      // the KIND on that peer: "camera" | "mic"
+  std::string codec;          // "mjpeg" (video) | "f32" (audio)
+  std::uint32_t width = 0;    // video frame size (0 for audio)
+  std::uint32_t height = 0;
+  std::int64_t seq = 0;
+  double pts_seconds = 0.0;
+  std::uint32_t sample_rate = 0; // audio (0 for video)
+  std::uint32_t channels = 0;
+  std::vector<std::uint8_t> payload; // one whole frame
+};
 
 // ----------------
 // cvc::state_transport_ws
@@ -111,6 +132,24 @@ public:
   using connection_closed_fn = std::function<void(const std::string &node_id)>;
   void set_on_connection_closed(connection_closed_fn cb) { _on_conn_closed = std::move(cb); }
 
+  // ── Media plane (bring-up: media over this WS control channel) ──
+  // Send a MediaFrame to this transport's connections. A browser CLIENT has one
+  // connection (the relay), so this pushes its camera/mic up to the relay; the
+  // relay fans each received frame to the OTHER participants (see set_relay).
+  // Thread-safe; a no-op with no connections. The frame is NOT journaled and
+  // never crosses the WS<->gRPC bridge.
+  void publish_media_frame(const ws_media_frame &m);
+
+  // Invoked (on a reader thread) for each MediaFrame RECEIVED from a peer. A leaf
+  // (browser) sets this to route a peer's frame into a decode proxy / playback; a
+  // relay leaves it unset and just fans. Must be thread-safe and must not block.
+  using media_frame_fn = std::function<void(const ws_media_frame &)>;
+  void set_on_media(media_frame_fn cb) { _on_media = std::move(cb); }
+
+  std::uint64_t total_media_sent() const noexcept { return _media_sent.load(); }
+  std::uint64_t total_media_received() const noexcept { return _media_recv.load(); }
+  std::uint64_t total_media_forwarded() const noexcept { return _media_fwd.load(); }
+
   // Backfill on connect (default true): replay each registered shard's journaled
   // local-origin mutations to a newly admitted connection BEFORE any live traffic,
   // so a peer that connects after local writes still converges (same rationale as
@@ -195,6 +234,11 @@ private:
   std::atomic<bool> _backfill_on_connect{true};
   std::atomic<bool> _relay{false};
   connection_closed_fn _on_conn_closed; // set by a relay; invoked on a peer close (see above)
+  media_frame_fn _on_media;              // set by a leaf to receive peers' media frames
+
+  std::atomic<std::uint64_t> _media_sent{0};  // MediaFrames this transport sent (publish_media_frame)
+  std::atomic<std::uint64_t> _media_recv{0};  // MediaFrames received from peers
+  std::atomic<std::uint64_t> _media_fwd{0};   // MediaFrames a relay fanned to other connections
 
   std::atomic<std::uint64_t> _published{0};
   std::atomic<std::uint64_t> _sent_frames{0};

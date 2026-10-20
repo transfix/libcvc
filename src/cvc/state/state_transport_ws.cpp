@@ -672,6 +672,41 @@ void state_transport_ws::deliver_inbound(connection *c, const void *data, std::s
         }
       }
     }
+  } else if (in.has_media()) {
+    // Media frame (camera/mic) on the control channel. NOT shard state and NEVER bridged: a relay
+    // fans it to its OTHER connections (SFU full fan-out), a leaf hands it to its on_media sink.
+    _media_recv.fetch_add(1, std::memory_order_relaxed);
+    if (_relay.load(std::memory_order_relaxed)) {
+      std::vector<std::shared_ptr<connection>> conns;
+      {
+        std::lock_guard<std::mutex> lk(_conns_mu);
+        conns = _conns;
+      }
+      for (auto &oc : conns) {
+        if (!oc || oc.get() == c || !oc->alive.load() || !oc->can_write())
+          continue;
+        if (oc->write(in)) { // re-send the already-parsed frame verbatim (origin preserved)
+          _sent_frames.fetch_add(1, std::memory_order_relaxed);
+          _media_fwd.fetch_add(1, std::memory_order_relaxed);
+        }
+      }
+    }
+    if (_on_media) {
+      const auto &mf = in.media();
+      ws_media_frame out;
+      out.origin_node_id = mf.origin_node_id();
+      out.stream_id = mf.stream_id();
+      out.codec = mf.codec();
+      out.width = mf.width();
+      out.height = mf.height();
+      out.seq = mf.seq();
+      out.pts_seconds = mf.pts_seconds();
+      out.sample_rate = mf.sample_rate();
+      out.channels = mf.channels();
+      const std::string &p = mf.payload();
+      out.payload.assign(p.begin(), p.end());
+      _on_media(out);
+    }
   }
 }
 
@@ -816,6 +851,38 @@ state_transport::publish_message_stats state_transport_ws::publish_message(const
     }
   }
   return stats;
+}
+
+void state_transport_ws::publish_media_frame(const ws_media_frame &m) {
+  pb::Frame frame;
+  pb::MediaFrame *mf = frame.mutable_media();
+  mf->set_origin_node_id(m.origin_node_id);
+  mf->set_stream_id(m.stream_id);
+  mf->set_codec(m.codec);
+  mf->set_width(m.width);
+  mf->set_height(m.height);
+  mf->set_seq(m.seq);
+  mf->set_pts_seconds(m.pts_seconds);
+  mf->set_sample_rate(m.sample_rate);
+  mf->set_channels(m.channels);
+  mf->set_payload(m.payload.data(), static_cast<int>(m.payload.size()));
+
+  std::vector<std::shared_ptr<connection>> conns;
+  {
+    std::lock_guard<std::mutex> lk(_conns_mu);
+    conns = _conns;
+  }
+  // A browser client has one connection (the relay), which fans the frame to the other participants.
+  // A relay publishing locally (uncommon) would send to all its connections. Media is unreplicated,
+  // unbridged, and not subject to the peer path-filter (it carries no path).
+  for (auto &c : conns) {
+    if (!c || !c->alive.load() || !c->can_write())
+      continue;
+    if (c->write(frame)) {
+      _sent_frames.fetch_add(1, std::memory_order_relaxed);
+      _media_sent.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
 }
 
 std::size_t state_transport_ws::pump_shard(state_cluster_shard &shard) {
