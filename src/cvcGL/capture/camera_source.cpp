@@ -40,6 +40,8 @@ class sdl_camera_source : public st::frame_source {
 public:
   sdl_camera_source(SDL_Camera *cam, int w, int h) : cam_(cam), w_(w), h_(h) {}
   ~sdl_camera_source() override {
+    if (scaled_)
+      SDL_DestroySurface(scaled_);
     if (cam_)
       SDL_CloseCamera(cam_);
     SDL_QuitSubSystem(SDL_INIT_CAMERA); // balances the InitSubSystem open_camera handed to us
@@ -60,39 +62,49 @@ public:
     if (!raw)
       return out; // no new frame yet (warming up, or permission still pending): skip, don't block
 
-    // Convert the camera's native pixel format to byte-order RGBA (no rescale — same w/h), then
-    // copy it densely into the slab (the camera surface's pitch may exceed w*4).
+    // Convert the camera's native pixel format to byte-order RGBA, then (if the delivered size
+    // differs from the negotiated w/h) RESCALE to w_ x h_, then copy densely into the slab (the
+    // surface's pitch may exceed w*4). The rescale makes the source size-robust: a camera (notably a
+    // browser's getUserMedia, whose exact delivered size we cannot know until frames flow) that hands
+    // us anything other than the requested size still fills the fixed-size stream instead of stalling
+    // on the old exact-match guard. The same-size fast path (the common case) does no scaling.
     SDL_Surface *rgba = (raw->format == SDL_PIXELFORMAT_RGBA32)
                             ? raw
                             : SDL_ConvertSurface(raw, SDL_PIXELFORMAT_RGBA32);
-    // Require the converted frame to match the negotiated w/h. A mid-stream resolution change (or a
-    // conversion failure, rgba==null) fails this guard -> a clean skip (bytes=0), never an OOB
-    // copy; the stream then stalls rather than renegotiating (acceptable — reopen to change
-    // resolution).
-    if (rgba && rgba->w == w_ && rgba->h == h_ && rgba->pixels) {
+    SDL_Surface *frame = rgba;
+    if (rgba && (rgba->w != w_ || rgba->h != h_) && w_ > 0 && h_ > 0) {
+      if (!scaled_)
+        scaled_ = SDL_CreateSurface(w_, h_, SDL_PIXELFORMAT_RGBA32);
+      // SDL_BlitSurfaceScaled resamples src -> the whole dst; nullptr rects = full surfaces.
+      frame = (scaled_ && SDL_BlitSurfaceScaled(rgba, nullptr, scaled_, nullptr, SDL_SCALEMODE_LINEAR))
+                  ? scaled_
+                  : nullptr; // scale failed -> skip this frame (bytes=0), never an OOB copy
+    }
+    if (frame && frame->w == w_ && frame->h == h_ && frame->pixels) {
       const int row = w_ * 4;
-      const auto *src = static_cast<const std::uint8_t *>(rgba->pixels);
+      const auto *src = static_cast<const std::uint8_t *>(frame->pixels);
       for (int y = 0; y < h_; ++y)
         std::memcpy(buf + static_cast<std::size_t>(y) * row,
-                    src + static_cast<std::size_t>(y) * rgba->pitch, static_cast<std::size_t>(row));
+                    src + static_cast<std::size_t>(y) * frame->pitch, static_cast<std::size_t>(row));
       out.bytes = need;
       out.pts_seconds = static_cast<double>(ts_ns) / 1.0e9;
     }
     if (rgba && rgba != raw)
       SDL_DestroySurface(rgba);
     SDL_ReleaseCameraFrame(cam_, raw);
-    return out; // bytes stays 0 (skip) if the conversion failed or the size disagreed
+    return out; // bytes stays 0 (skip) if the conversion/scale failed
   }
 
 private:
   SDL_Camera *cam_;
   int w_;
   int h_;
+  SDL_Surface *scaled_ = nullptr; // lazily-created w_ x h_ scratch for rescaling off-size frames
 };
 } // namespace
 #endif // CVC_ENABLE_SDL
 
-camera_open open_camera(int device_index) {
+camera_open open_camera(int device_index, int want_w, int want_h, double want_fps) {
   camera_open result;
 #if CVC_ENABLE_SDL
   if (!SDL_InitSubSystem(SDL_INIT_CAMERA))
@@ -105,15 +117,45 @@ camera_open open_camera(int device_index) {
     const char *nm = SDL_GetCameraName(id);
     std::string name = nm ? nm : std::string();
 
+#if defined(__EMSCRIPTEN__)
+    // Browser camera (getUserMedia). Permission AND the device format resolve ASYNCHRONOUSLY through
+    // the browser event loop, so in a single-threaded wasm build we must NOT block for them: the
+    // event loop cannot run while we spin, so the grant would never arrive and the bounded native
+    // wait below would always time out (and SDL_GetCameraSupportedFormats reports nothing until the
+    // stream is live). So request the desired size, open WITHOUT waiting, and hand back a source
+    // sized to the request immediately. fill() skips (SDL_AcquireCameraFrame returns null) until the
+    // user approves and frames flow, and whatever size getUserMedia actually delivers is rescaled to
+    // the request by fill(); the app's normal per-frame SDL_PumpEvents (pump_events) services the
+    // approval + frame-ready events.
+    const int rw = want_w > 0 ? want_w : 640;
+    const int rh = want_h > 0 ? want_h : 480;
+    SDL_CameraSpec want{};
+    want.format = SDL_PIXELFORMAT_RGBA32; // byte-order RGBA; fill() converts anything else regardless
+    want.width = rw;
+    want.height = rh;
+    if (want_fps > 0.0) {
+      want.framerate_numerator = static_cast<int>(want_fps + 0.5);
+      want.framerate_denominator = 1;
+    }
+    SDL_Camera *cam = SDL_OpenCamera(id, &want);
+    if (cam) {
+      result.width = rw;
+      result.height = rh;
+      result.fps = want_fps > 0.0 ? want_fps : 30.0;
+      result.name = std::move(name);
+      result.source = std::make_unique<sdl_camera_source>(cam, rw, rh);
+      handed_off = true; // the source now owns `cam` and the subsystem ref
+    }
+#else
     // Webcams usually DEFAULT to MJPG (compressed): SDL then hands fill() the raw JPEG bytes in an
     // SDL_PIXELFORMAT_MJPG surface, and SDL_ConvertSurface does NOT decode JPEG — it reinterprets
     // the compressed bytes as pixels (garbage: vertical stripes). SDL also has no built-in camera
     // MJPG decoder here. So enumerate the device's formats and REQUEST an uncompressed one; SDL
     // then delivers raw YUY2/RGB frames that convert cleanly to rgba8. Pick the uncompressed format
     // with the best smoothness×resolution, capping fps at 30 so we don't trade away a lot of
-    // resolution for >30 fps. If the device is compressed-ONLY (no uncompressed format), fall back
-    // to SDL's default (nullptr) — the frames will be unusable, but the open still succeeds (a rare
-    // device).
+    // resolution for >30 fps — but strongly PREFER an exact match for the requested w x h when one is
+    // given (so the caller's stream size is honoured; fill() rescales any residual mismatch). If the
+    // device is compressed-ONLY (no uncompressed format), fall back to SDL's default (nullptr).
     SDL_CameraSpec chosen{};
     bool have_spec = false;
     {
@@ -128,8 +170,10 @@ camera_open open_camera(int device_index) {
             (s.framerate_denominator > 0)
                 ? static_cast<double>(s.framerate_numerator) / s.framerate_denominator
                 : 0.0;
-        const double score = (fps > 30.0 ? 30.0 : fps) * static_cast<double>(s.width) *
-                             static_cast<double>(s.height);
+        double score = (fps > 30.0 ? 30.0 : fps) * static_cast<double>(s.width) *
+                       static_cast<double>(s.height);
+        if (want_w > 0 && want_h > 0 && s.width == want_w && s.height == want_h)
+          score += 1.0e12; // honour the caller's requested size when the device offers it
         if (score > best) {
           best = score;
           chosen = s;
@@ -165,19 +209,24 @@ camera_open open_camera(int device_index) {
       SDL_CameraSpec spec;
       if (SDL_GetCameraPermissionState(cam) == SDL_CAMERA_PERMISSION_STATE_APPROVED &&
           SDL_GetCameraFormat(cam, &spec) && spec.width > 0 && spec.height > 0) {
-        result.width = spec.width;
-        result.height = spec.height;
+        // Honour the caller's requested size when given (fill() rescales the camera frames to it);
+        // otherwise adopt the camera's negotiated size.
+        const int sw = (want_w > 0 ? want_w : spec.width);
+        const int sh = (want_h > 0 ? want_h : spec.height);
+        result.width = sw;
+        result.height = sh;
         result.fps =
             (spec.framerate_denominator > 0)
                 ? static_cast<double>(spec.framerate_numerator) / spec.framerate_denominator
                 : 0.0;
         result.name = std::move(name);
-        result.source = std::make_unique<sdl_camera_source>(cam, spec.width, spec.height);
+        result.source = std::make_unique<sdl_camera_source>(cam, sw, sh);
         handed_off = true; // the source now owns `cam` and the subsystem ref
       } else {
         SDL_CloseCamera(cam);
       }
     }
+#endif // __EMSCRIPTEN__
   }
   if (ids)
     SDL_free(ids);
@@ -185,6 +234,9 @@ camera_open open_camera(int device_index) {
     SDL_QuitSubSystem(SDL_INIT_CAMERA); // nothing took the ref we added above
 #else
   (void)device_index;
+  (void)want_w;
+  (void)want_h;
+  (void)want_fps;
 #endif
   return result;
 }

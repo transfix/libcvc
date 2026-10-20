@@ -31,6 +31,14 @@ windows:
         bind: conf.self
       - text: "status"
         bind: (if (= (state-get "joined") "1") "● connected to the room" "connecting…")
+      # Local self-preview: this browser's own CAMERA, rendered in a stream_view. The camera opens via
+      # SDL's emscripten backend (getUserMedia) — the browser prompts for permission on join; until
+      # it is granted the tile stays black (no frames), then live video appears. Frames are MJPEG so
+      # the same stream will fan out to peers once the WS media plane lands.
+      - text: "my video"
+      - type: stream_view
+        bind: cam_token
+        size: 240
       - separator
       - text: "in the room"
         bind: peer.count
@@ -53,7 +61,17 @@ on_tick: |
     (if (= (state-get "joined") "1") #f
       (begin
         (state-set "joined" "1")
-        (room-join "" (state-get "conf.room") (dict "name" (state-get "conf.self")))))
+        (room-join "" (state-get "conf.room") (dict "name" (state-get "conf.self")))
+        ; Open my own video stream and drive it from the browser CAMERA (device 0). The producer runs
+        ; on a browser interval timer in this single-threaded wasm build, so frames flow without a
+        ; worker thread; the stream_view above decodes + shows them. getUserMedia prompts on this
+        ; call; frames (rescaled to 640x480, MJPEG) start once the user approves. (room-publish to
+        ; share it with peers is the WS media-transport phase.)
+        (set cam (stream-open (dict "id" "camera" "codec" "mjpeg" "w" 640 "h" 480 "stride" 2560
+                                    "expected_subscribers" 1)))
+        (state-set "cam_token" (get-attr cam "token"))
+        (stream-capture-camera (get-attr cam "token")
+          (dict "device" 0 "w" 640 "h" 480 "hz" 30 "jpeg" #t))))
     ; ── rebuild the roster tiles every tick from the replicated room roster ──
     (set idx 0)
     (for p (room-roster (state-get "conf.room"))

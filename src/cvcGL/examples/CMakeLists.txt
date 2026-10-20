@@ -200,6 +200,10 @@ if(EMSCRIPTEN)
   target_link_options(cyprty PRIVATE
     -lwebsocket.js
     "--embed-file=${CMAKE_CURRENT_SOURCE_DIR}/conference_roster.ari@/conference_roster.ari")
+  # Relink (re-embed) cyprty whenever the baked document changes; without this a .ari-only edit does
+  # not retrigger the link, so the stale document stays embedded.
+  set_property(TARGET cyprty APPEND PROPERTY LINK_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/conference_roster.ari")
   list(APPEND _wasm_extra_demos cyprty)
 
   # Optional runtime asset bundle for nav_city_swarm (Austin: terrain.json +

@@ -210,8 +210,11 @@ void register_media_intrinsics() {
             // Device path: open the camera and adopt its frame_source. open_camera() and the
             // resulting stream's teardown touch the SDL camera subsystem on this (owner/action)
             // thread — the same thread stream::close() runs on, so the contract holds.
-            cvc::gl::capture::camera_open cam =
-                cvc::gl::capture::open_camera(static_cast<int>(device));
+            // Request the stream's own w/h/hz: the camera source rescales to it, so the frames match
+            // the slab the stream was opened with (crucial for the browser camera, whose delivered
+            // size we cannot know up front — getUserMedia resolves asynchronously).
+            cvc::gl::capture::camera_open cam = cvc::gl::capture::open_camera(
+                static_cast<int>(device), static_cast<int>(w), static_cast<int>(h), hz);
             if (!cam.source)
               return err("stream-capture-camera: could not open camera device " +
                          std::to_string(device) + " (no such device, or permission not granted)");
