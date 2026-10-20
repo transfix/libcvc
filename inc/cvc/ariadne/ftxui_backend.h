@@ -45,6 +45,7 @@
 #include <cvc/ariadne/backend.h>
 #include <cvc/ariadne/term_graphics.h>
 #include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -177,6 +178,16 @@ public:
   StringEdit input_text(const char *label, const char *key, const std::string &current) override;
   bool draw_image(const char *name, float width) override;
   ColorEdit color(const char *label, const float rgb[3]) override;
+
+  // Custom widgets (§16.1b), the terminal counterpart of cvc::gl::ImGuiBackend::register_widget: a
+  // host registers a draw fn for a custom type, and custom_widget() calls it during the walk, where
+  // it draws with this backend's own primitives (text_line, set_image + draw_image, ...). It gets
+  // the bound value and the Widget and returns the edit; the core owns the cvc::state write. An
+  // unregistered type is not handled, so the core draws a placeholder. TvisionBackend inherits it.
+  // `stream_view` registers this way (register_stream_view_widget, stream/stream_view.h).
+  using CustomDrawFn = std::function<CustomEdit(const std::string &current, const Widget &w)>;
+  void register_widget(std::string custom_type, CustomDrawFn draw);
+  CustomEdit custom_widget(const char *type, const std::string &current, const Widget &w) override;
 
   // Publish (or replace) the image a Kind::Image widget named `name` shows — the terminal
   // counterpart of cvc::gl::ImGuiBackend::set_image. Any pixel format / data type; it is converted
@@ -333,6 +344,7 @@ protected:
 private:
   struct Impl;
   std::unique_ptr<Impl> m_;
+  std::map<std::string, CustomDrawFn> customWidgets_; // register_widget, in both builds
   RunExit run_loop(Runtime &rt, const RunOptions &opts, const std::function<void()> &drain,
                    const std::function<bool()> &should_close,
                    const std::function<void(const TermEvent &)> &unhandled);

@@ -37,9 +37,10 @@
 // window closes, or on Ctrl-C in the terminal. OS signals (SIGTERM, SIGHUP, SIGINT, SIGQUIT,
 // SIGUSR1/2) go to the document's on_signal: in both modes; one it does not handle ends the run
 // with exit status 128 + the signal number.
-// snapshot renders N frames on a fixed clock: in a window, offscreen at --width x --height pixels
-// (default 1024 x 768), writing the last one to --png FILE; with --terminal, the last frame as
-// text (--ansi keeps its colours), plus the rendered scene as --png if given.
+// snapshot renders N frames, paced like run so a live stream delivers into them (a window's scene
+// clock stays fixed, so its frames are reproducible): in a window, offscreen at --width x --height
+// pixels (default 1024 x 768), writing the last one to --png FILE; with --terminal, the last frame
+// as text (--ansi keeps its colours), plus the rendered scene as --png if given.
 // check loads the document as run would, offscreen, and prints its warnings.
 
 #include <algorithm>
@@ -53,6 +54,7 @@
 #include <cvc/ariadne/host_cli.h>
 #include <cvc/ariadne/host_signals.h>
 #include <cvc/ariadne/loader.h> // run_init — seed conf.room / conf.self before the first tick
+#include <cvc/ariadne/stream/stream_view.h>
 #include <cvc/ariadne/tvision_backend.h>
 #include <cvc/core/app.h>
 #if CVC_ENABLE_WS || CVC_ENABLE_GRPC
@@ -100,6 +102,7 @@
 #include <cvc/gl/ariadne/bundles.h>
 #include <cvc/gl/ariadne/scene_panels.h>
 #include <cvc/gl/ariadne/scene_realize.h>
+#include <cvc/gl/ariadne/stream_view_widget.h> // jpeg_frame_decoder
 #include <cvc/image/image.h>
 #include <exception>
 #include <memory>
@@ -194,6 +197,12 @@ template <class Backend> bool publish_images(Backend &backend, const ari::HostOp
     }
   }
   return true;
+}
+
+// A snapshot's frames run at the interactive loop's rate (--fps, else 20 a second), so a live
+// stream's producer has time to deliver frames into them. The window's scene clock stays fixed.
+std::chrono::duration<double> snapshot_period(const ari::HostOptions &o) {
+  return std::chrono::duration<double>(1.0 / (o.fps > 0 ? o.fps : 20));
 }
 
 // The SDL-free cvc::gl::InputEvent, as the runtime's cvc::ariadne::InputEvent.
@@ -882,7 +891,9 @@ int run_window(const ari::HostOptions &o) {
   if (o.command == "snapshot") {
     rt.set_fixed_clock(true); // reproducible: the scene clock advances 1/30 s a frame
     const int frames = std::max(1, o.frames);
+    const auto period = snapshot_period(o);
     for (int f = 0; f < frames; ++f) {
+      const auto start = std::chrono::steady_clock::now();
       conf.pump(); // publish this frame's room-tree + media to the relay (run mode does this via
                    // the input pump, set below; a snapshot of a live conference must pump too)
       rt.frame(1.0 / 30.0);
@@ -890,6 +901,7 @@ int run_window(const ari::HostOptions &o) {
         view.writePNG(o.png.c_str()); // renders and writes the last frame
       else
         rt.render();
+      std::this_thread::sleep_until(start + period);
     }
     print_warnings(rt.take_warnings());
     return 0;
@@ -974,6 +986,10 @@ int run_terminal(const ari::HostOptions &o) {
                                                        : std::make_unique<ari::FtxuiBackend>(look);
   if (!publish_images(*backend, o))
     return 1;
+  // stream_view in the terminal: live frames as the backend's images, JPEG ones decoded by cvcGL.
+  const auto streams = ari::register_stream_view_widget(*backend, app);
+  streams->set_decoder("mjpeg", gla::jpeg_frame_decoder());
+  streams->set_decoder("jpeg", gla::jpeg_frame_decoder());
   CheckedTerminalScene scene(app, *backend);
   ari::AppRuntime rt(app, o.prefix.empty() ? kDefaultPrefix : o.prefix, &scene);
   rt.set_backend(*backend);
@@ -1007,9 +1023,12 @@ int run_terminal(const ari::HostOptions &o) {
     }
     backend->set_screen_size(width, height);
     std::string frame;
+    const auto period = snapshot_period(o);
     for (int f = 0; f < std::max(2, o.frames); ++f) { // the first drain realizes; then a frame
+      const auto start = std::chrono::steady_clock::now();
       rt.drain(); // services and renders the scene, publishing the frame
       frame = backend->render_to_string(rt.runtime(), width, height, o.ansi);
+      std::this_thread::sleep_until(start + period);
     }
     if (pixels) { // Sixel draws at screen positions, so the frame starts at the top-left
       const int rows = static_cast<int>(std::count(frame.begin(), frame.end(), '\n')) + 1;
