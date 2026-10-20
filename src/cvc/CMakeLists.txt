@@ -316,6 +316,7 @@ set(SOURCE_FILES
   nav/coef_mlp.cpp
   nav/coef_train.cpp
   nav/belief_occupancy.cpp
+  nav/belief_material.cpp
   nav/sim_world.cpp
   nav/sim_world_binding.cpp
   nav/sim_thread.cpp
@@ -418,10 +419,10 @@ endforeach()
 # this one gets the explicit flag (the CPU analog of the nav .cu precise-math
 # properties below).
 if(NOT MSVC)
-  set_source_files_properties(nav/material.cpp nav/terrain.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_bike_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp
+  set_source_files_properties(nav/material.cpp nav/terrain.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_bike_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp nav/belief_material.cpp
                               PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 else()
-  set_source_files_properties(nav/material.cpp nav/terrain.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_bike_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp
+  set_source_files_properties(nav/material.cpp nav/terrain.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_bike_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp nav/belief_material.cpp
                               PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
 
@@ -1289,7 +1290,7 @@ list(APPEND INCLUDE_FILES ../../inc/cvc/net/http_client.h)
 # the retained Widget tree, the Runtime + reconcile boundary, and direct
 # cvc::state binding, walking a pluggable Backend. It touches NO VTK/ImGui/GL —
 # the ImGui-over-VTK backend lives in cvcGL (src/cvcGL/ariadne). Roadmap §16.1.
-list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp)
+list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp)
 list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/widget.h
   ../../inc/cvc/ariadne/backend.h
@@ -1313,6 +1314,7 @@ list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/scene.h
   ../../inc/cvc/ariadne/value.h
   ../../inc/cvc/ariadne/ftxui_backend.h
+  ../../inc/cvc/ariadne/term_graphics.h
   ../../inc/cvc/ariadne/tvision_backend.h
 )
 
@@ -1474,6 +1476,18 @@ endif()
 # terminal library — it pulls in NO VTK/GL/ImGui, so the core stays graphics-free.
 find_package(ftxui CONFIG QUIET)
 if(TARGET ftxui::component)
+  # FTXUI's MSVC export puts /utf-8 in each target's INTERFACE_COMPILE_OPTIONS. cvc inherits it for
+  # every source, its CUDA ones too, and nvcc reads a bare /utf-8 as a second input file ("A single
+  # input file is required for a non-link phase"). Scope FTXUI's options to C++, like -openmp:llvm
+  # below.
+  foreach(_ftxui_target ftxui::screen ftxui::dom ftxui::component)
+    get_target_property(_ftxui_opts ${_ftxui_target} INTERFACE_COMPILE_OPTIONS)
+    if(_ftxui_opts)
+      list(TRANSFORM _ftxui_opts PREPEND "$<$<COMPILE_LANGUAGE:CXX>:")
+      list(TRANSFORM _ftxui_opts APPEND ">")
+      set_property(TARGET ${_ftxui_target} PROPERTY INTERFACE_COMPILE_OPTIONS ${_ftxui_opts})
+    endif()
+  endforeach()
   target_compile_definitions(cvc PRIVATE CVC_ARIADNE_FTXUI)
   target_link_libraries(cvc PRIVATE ftxui::component ftxui::dom ftxui::screen)
   list(APPEND CVC_PRIVATE_LINK_PACKAGES ftxui)
@@ -1485,20 +1499,36 @@ endif()
 # Ariadne tvision terminal backend — OPTIONAL (roadmap §16.5 row 5), behind CVC_ARIADNE_TVISION:
 # the feature flag the roadmap keeps for tvision's Borland-derived licensing. tvision draws the
 # native desktop (movable windows, menus, status line) and the FTXUI backend lays the windows'
-# contents out, so it needs FTXUI too. tvision ships as a static, position-independent archive with
-# no CMake package (cvcpkg `tvision`, with `ncurses` for ncursesw + the terminfo database), so it is
-# found by path and linked into libcvc privately, as BUILD-only so no absolute path reaches the
-# exported targets. Shared builds only: a static libcvc would have to export the archive.
+# contents out, so it needs FTXUI too. tvision ships as a static, position-independent archive
+# (cvcpkg `tvision`; on Unix with `ncurses` for ncursesw + the terminfo database, on Windows over
+# the Win32 console with no ncurses), so it is found by path and linked into libcvc privately, as
+# BUILD-only so no absolute path reaches the exported targets. Shared builds only: a static libcvc
+# would have to export the archive.
 option(CVC_ARIADNE_TVISION "Build the Ariadne tvision backend when tvision is found" ON)
 if(CVC_ARIADNE_TVISION AND TARGET ftxui::component AND BUILD_SHARED_LIBS)
   find_path(CVC_TVISION_INCLUDE_DIR tvision/tv.h)
   find_library(CVC_TVISION_LIBRARY tvision)
-  find_library(CVC_NCURSESW_LIBRARY ncursesw)
-  if(CVC_TVISION_INCLUDE_DIR AND CVC_TVISION_LIBRARY AND CVC_NCURSESW_LIBRARY)
+  set(_cvc_tvision_libs ${CVC_TVISION_LIBRARY})
+  if(NOT WIN32)
+    find_library(CVC_NCURSESW_LIBRARY ncursesw)
+    list(APPEND _cvc_tvision_libs ${CVC_NCURSESW_LIBRARY})
+  endif()
+  if(CVC_TVISION_INCLUDE_DIR AND CVC_TVISION_LIBRARY AND (WIN32 OR CVC_NCURSESW_LIBRARY))
     target_compile_definitions(cvc PRIVATE CVC_ARIADNE_TVISION)
     target_include_directories(cvc PRIVATE $<BUILD_INTERFACE:${CVC_TVISION_INCLUDE_DIR}>)
-    target_link_libraries(cvc PRIVATE $<BUILD_INTERFACE:${CVC_TVISION_LIBRARY}>
-                                      $<BUILD_INTERFACE:${CVC_NCURSESW_LIBRARY}>)
+    foreach(_lib IN LISTS _cvc_tvision_libs)
+      target_link_libraries(cvc PRIVATE $<BUILD_INTERFACE:${_lib}>)
+    endforeach()
+    if(MSVC)
+      # tvision's own CMake config makes these PUBLIC; found by path, they must be restated for the
+      # one file that includes its headers. Without /Zc:__cplusplus MSVC reports 199711L, and
+      # tvision/ttypes.h then #defines constexpr, noexcept and thread_local away. (Its _CRT_*
+      # definitions are already global under MSVC, see the top-level CMakeLists.txt.)
+      set_property(
+        SOURCE ariadne/tvision_backend.cpp
+        APPEND
+        PROPERTY COMPILE_OPTIONS /permissive- /Zc:__cplusplus /Zc:externConstexpr /Zc:inline)
+    endif()
     message(STATUS "Ariadne: tvision terminal backend ENABLED (${CVC_TVISION_LIBRARY})")
   else()
     message(STATUS "Ariadne: tvision not found - tvision backend compiles to a stub")

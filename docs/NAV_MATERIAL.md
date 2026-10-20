@@ -18,6 +18,8 @@ surface here.
 - Tests: `src/cvc/tests/nav_material_test.cpp`
 - Demo: [`src/cvcGL/examples/nav_material_demo.cpp`](../src/cvcGL/examples/nav_material_demo.cpp)
   (built with `-DCVC_BUILD_CVCGL=ON -DCVC_BUILD_EXAMPLES=ON`)
+- Belief (observed) material for range-limited sensing, a spec not yet built:
+  [`roadmap/NAV-BELIEF-MATERIAL-ROADMAP.md`](roadmap/NAV-BELIEF-MATERIAL-ROADMAP.md)
 
 ## The executed field
 
@@ -177,6 +179,111 @@ learned-lam reroute) — is pinned by `nav_material_deploy_test`.
 > domain-specific logic stays in that layer, never in this core (as with the
 > domain-neutral base statistics and their extension seam — see `NAV_STATS.md`).
 
+### Training with the external force
+
+The fused deploy path drives the material policy *and* an external force together.
+Training has to see the same thing, or the material heads learn a world without the
+force they will face. `material_ext` (`material.h`) puts that force in every material
+training rollout:
+
+- the surrogate (`integrate_surrogate_material`);
+- the bicycle (`integrate_bicycle_material`);
+- the dynamic vehicle (`integrate_dynamic_material`);
+- their VJPs;
+- the trainer, through `material_batch::ext`.
+
+**How the force joins** is how `drive_step_material_ext` adds `ext_force`:
+- It is added last to the bicycle's and the dynamic vehicle's force sum,
+  `F = F_bar + F_goal + F_mat + F_ext`.
+- With `steer` on, it is also added to their steering bias,
+  `(F_rep + F_mat + F_ext) . left`.
+- The surrogate is a point mass: the force joins its `ftot`, and `steer` has nothing to act on.
+- The bicycle divides its force by `mass` and the deployed drive does not, so the two agree at
+  `mass = 1`, the default.
+- A null channel is the rollout without one, bit for bit. The adds are conditional, as in the
+  deployed drive.
+
+**Sources** (exactly one):
+- **A force patch per agent:** `K` two-channel patches (`fx`, `fy`) on the rollout patch's
+  grid, centred on the start and sampled bilinearly at the current position.
+  - A schedule, `patch_of_step`, can switch patches per step, for example sources switching
+    on and off.
+  - J = dF/do is the patch's own gradient.
+  - This is the form for a force that depends only on the agent's own position (sources
+    fixed in the scene). It is an array, so it reaches pycvc.
+- **Per-step values** `F`, with an optional `J`.
+- **A C++ callback** `(user, b, s, ox, oy, F, J)`, sampled every `hold` steps and held between,
+  as the diff rollout's `bike_ext_fn`.
+
+**The VJPs** chain `J^T dL/dF_ext` into the position adjoint. A held window's sum goes in at the
+step it was sampled. Given `g_fext`, they also return dL/dF_ext per step. `L_multi`'s geometry
+rollouts leave the force out, as they leave out the material forces. With a force, the surrogate
+trains on the CPU: there is no device twin of the channel yet.
+
+Pinned by `nav_material_ext_test` and the `...WithAnExternalForce` cases of
+`nav_material_train_test`:
+
+| check | measured |
+|---|---|
+| Null or zero force | the rollout without one, bit for bit, forward and reverse, all three integrators |
+| Coefficient gradient through a scheduled force patch | worst relative 2.2e-3 / 1.1e-2 / 1.7e-2 (surrogate / bicycle / dynamic) |
+| Coefficient gradient through a callback held for 2 steps | 9.2e-4 / 1.6e-2 (surrogate / bicycle) |
+| dL/dF_ext per step against central differences | 2.6e-4 / 2.5e-5 / 3.0e-5 |
+| A callback giving the patch's own values and J | the patch, bit for bit, with the callback built as the rollouts are (`-ffp-contract=off`) |
+| The full loss-to-weights gradient with the force | directional 2.2e-4 (surrogate), 7.0e-4 (bicycle) |
+
+`tests/data/material_ext_golden.json` (`NavMaterialExt.Golden`) holds GRL-SNAM's torch twins to
+the three integrators with the force on: the inputs, outputs, coefficient gradients and dL/dF_ext.
+
+### Belief (observed) material
+
+For range-limited sensing, the material planes can be built from what a belief plane has seen
+rather than from the whole map (spec: [`roadmap/NAV-BELIEF-MATERIAL-ROADMAP.md`](roadmap/NAV-BELIEF-MATERIAL-ROADMAP.md)).
+`inc/cvc/nav/belief_material.h`:
+
+* `belief_material_inputs(risk_raw, hard, seen, …, p, risk_out, hard_out)` keeps the truth where
+  `seen` and writes `p.unknown_risk` / `p.unknown_hard` elsewhere (defaults 0 / 0: an unseen cell
+  exerts no force of its own). `material_build` then runs unchanged on the result.
+* `belief_gate_surface(hard_b, occ, seen, …, p, gate_hard_out, clear_m_out)` is the gate's
+  surface: `hard_b | occ | (p.unknown_gate_hard & !seen)` and its metres clearance, the chain
+  `set_material` uses. With `unknown_gate_hard` (the default) a ray through unseen ground never
+  certifies a detour. `witness_gate` runs unchanged on it.
+* The seen mask is the sense ray-cast's field of view. At the default range it is `ever_seen`;
+  `sense_batch` also keeps a shorter material-range mask on request
+  (`belief_planes::material_seen` / `material_changed`, `sense_agents::material_range_m`).
+* `seen_disc` is the optional range-disc rule (`seen_rule::disc`): no occlusion, kept to reproduce
+  a controller trained on a disc mask.
+
+On a `sim_world`, `set_material_belief(risk_raw, hard, mc, bp, material_every = 1)` replaces
+`set_material`: the truth is one world plane, and one material + gate plane is kept per belief
+plane from what that plane has seen. Its gate surface uses the plane's own planning raster
+(`belief_occ(m)`), not truth. A plane's planes are re-derived on a sense tick on which its mask
+grew, and its gate surface also when `belief_occ(m)` changed, at most once every `material_every`
+sense ticks. It throws under `freeze_sense` (nothing is ever seen). Read surface: `material_seen(m)`,
+`material_plane_data(m)`, `material_gate_hard(m)`, `material_clear_m(m)` and `material_version(m)`.
+Memory is about 36 bytes per cell per belief plane.
+
+The golden `src/cvc/tests/data/belief_material_golden.json` (`NavBeliefMaterial.Golden`) holds
+GRL-SNAM's numpy twin to all of it, bit for bit: per case, tick and plane, the SHA-256 of every
+raster, and the gate's outputs.
+
+Training on belief planes (B3):
+
+* The model's risk patch has 3 channels, `[r~, hard, seen]`. `material_patch_belief` crops it
+  from the belief planes around an agent: P x P samples over `extent_m`, r~ bilinear, hard and
+  seen from the nearest cell, and the pinned values wherever the nearest cell is unseen or off
+  the map. It is BIT, op order pinned in the header.
+* A 3-channel net is a `.cvcnm` **version 2** file: the version-1 layout plus a belief block
+  after `eps` (`<IIfIIff>`: risk_channels, seen_rule, unknown_risk, unknown_hard,
+  unknown_gate_hard, material_range_m, patch_extent_m). A 2-channel net is still written as
+  version 1, byte for byte, and libcvc 3.7.0 and earlier refuse a version-2 file rather than read
+  its encoder with 2-channel strides. The loader now checks every tensor's shape against the
+  hyperparams and keeps the meta trailer through `serialize()`. `risk_channels()` and
+  `belief_header()` report what a file holds.
+* `material_batch::gate_active` (`[B]` u8, null = ungated) is the witness gate in training: an
+  agent's `lam_soft` enters every rollout times its bit; `L_lreg` reads the head's own value.
+* The CPU and CUDA forward, backward and trainer take `C = risk_channels()` channels.
+
 ### Choosing constants
 
 The defaults are the GRL-SNAM sim-frame values, validated behaviorally there
@@ -203,6 +310,7 @@ minimum). Route-level avoidance belongs to the planner: feed
 |---|---|---|
 | `material_build` | **BIT** vs the Python reference | pinned-op-order blur (scipy-`reflect`-equivalent, symmetric padding, sequential tap/normalization sums, f64 through both passes, one f32 store), EDT metres chain, f32 gradients of the f32-stored planes |
 | `witness_gate` (+batch) | **BIT** | float64 end-to-end, embedded direction table, `sqrt(x*x+y*y)` never `hypot` (CPython's hypot is not libm's), batch == serial bytes at any thread count |
+| `belief_material_inputs`, `belief_gate_surface`, `seen_disc`, `material_patch_belief`, `sense_batch`'s material mask | **BIT** | a select, an OR plus the `set_material` clearance chain, the numpy-linspace disc (`belief_material.cpp` is built with `-ffp-contract=off`) |
 | `material_sample` | FLOAT (rtol 1e-5) | the proven `sdf_sample` op chain; bit-exact vs torch on x86-64 in practice |
 | `*_material` rollouts | FLOAT (rtol 1e-4 / atol 1e-5) | the `drive_step` tier; null material delegates byte-identically |
 
@@ -215,9 +323,17 @@ cross-language sweep lives in GRL-SNAM `tests/test_material_parity.py`.
 
 ## pycvc surface
 
+Belief material: `nav_belief_material_inputs`, `nav_belief_gate_surface`, `nav_seen_disc`,
+`nav_sense_batch_material` (the sense plus the material mask), `nav_material_patch_belief` (the
+model's crop). The trainer's step and loss take a trailing `gate_active`, and
+`nav_material_trainer_risk_channels` reports a handle's channels (and marks a pycvc that takes the
+gate). `nav_matnet_forward` and the trainer take `(B,C,P,P)` risk patches.
+
 Field/gate kernels: `nav_material_build`, `nav_witness_gate`,
 `nav_witness_gate_batch`, `nav_material_sample`, `nav_bicycle_rollout_material`,
 `nav_drive_step_material`.
+
+`sim_world` belief material: `nav_sim_world_set_material_belief`, `nav_sim_world_material_seen`.
 
 `sim_world` material (grouped planes): `nav_sim_world_set_material`,
 `nav_sim_world_clear_material`, `nav_sim_world_material_gate_active`.
@@ -255,6 +371,16 @@ base seed. `ms_semi_implicit` selects GRL-SNAM's integrator (velocity first);
 the default explicit order is the material fork's, which `train_material.py`
 imports. These are trailing args on an existing symbol, so an older pycvc rejects
 them with a `TypeError` rather than through a capability flag.
+
+The external force in training (`material_ext`) is optional trailing arguments on
+`nav_integrate_surrogate_material`, `nav_integrate_bicycle_material`, its `_vjp`, and the trainer's
+`_step` and `_loss`:
+- `ext_patch` (B,K,2,Hp,Wp) f32 with `ext_patch_of_step` (B,steps) i32;
+- or `ext_F` (B,steps,2) f32 with `ext_J` (B,steps,4) f32;
+- and `ext_steer`.
+
+The bicycle VJP returns `g_fext` (B,steps,2) as a sixth value with `want_g_fext=1`. An older pycvc
+rejects these arguments with a `TypeError`. They are checked in the binding, with the GIL held.
 
 Binding gotcha, earned the hard way: a C++ exception thrown while the GIL is
 released (`Py_BEGIN_ALLOW_THREADS`) leaves the GIL unrestored and segfaults —

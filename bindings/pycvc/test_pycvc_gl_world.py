@@ -166,6 +166,9 @@ def test_light_node_wrapped():
     assert light is not None
     light.set_kind("directional")
     assert light.kind_str() == "directional"
+    light.setDirection(135.0, 55.0)
+    d = light.get_direction()
+    assert all(math.isclose(a, b, abs_tol=1e-6) for a, b in zip(d, (135.0, 55.0)))
     light.set_kind("spot")
     assert light.kind_str() == "spot"
     try:

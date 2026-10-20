@@ -100,6 +100,7 @@
 #include <cvc/gl/ariadne/bundles.h>
 #include <cvc/gl/ariadne/scene_panels.h>
 #include <cvc/gl/ariadne/scene_realize.h>
+#include <cvc/image/image.h>
 #include <exception>
 #include <memory>
 #include <string>
@@ -166,6 +167,33 @@ void note_misplaced(const ari::AppRuntime &rt, const ari::HostOptions &o) {
   const std::string note = ari::misplaced_flag_note("arigl", o.doc_args);
   if (!note.empty())
     std::fprintf(stderr, "%s\n", note.c_str());
+}
+
+// --graphics MODE -> how a terminal draws images (host_cli has checked MODE).
+ari::FtxuiBackend::Options::ImageColor image_mode(const std::string &s) {
+  using Mode = ari::FtxuiBackend::Options::ImageColor;
+  if (s == "kitty")
+    return Mode::Kitty;
+  if (s == "sixel")
+    return Mode::Sixel;
+  if (s == "color")
+    return Mode::Color;
+  if (s == "mono")
+    return Mode::Mono;
+  return Mode::Auto;
+}
+
+// --image NAME=FILE: publish each picture for the document's image: widgets. False on a bad file.
+template <class Backend> bool publish_images(Backend &backend, const ari::HostOptions &o) {
+  for (const auto &[name, file] : o.images) {
+    try {
+      backend.set_image(name, cvc::image::load(file));
+    } catch (const std::exception &e) {
+      std::fprintf(stderr, "arigl: --image %s: %s\n", file.c_str(), e.what());
+      return false;
+    }
+  }
+  return true;
 }
 
 // The SDL-free cvc::gl::InputEvent, as the runtime's cvc::ariadne::InputEvent.
@@ -794,6 +822,8 @@ int run_window(const ari::HostOptions &o) {
   gla::register_gl_basics(app);
   gla::register_streaming(app);
   gla::register_window_widgets(rt.backend(), app);
+  if (!publish_images(rt.backend(), o))
+    return 1;
   // Conference mode (no-op unless CVC_ARIADNE_RELAY is set): register the room verbs and dial the
   // relay (WebSocket for ws://|wss://, gRPC for grpc://), so the document (conference_roster.ari)
   // joins a hosted room.
@@ -913,8 +943,12 @@ int run_terminal(const ari::HostOptions &o) {
 
   cvc::app app;
   // Lifetime order: the backend outlives the scene adapter, which outlives the AppRuntime.
-  std::unique_ptr<ari::FtxuiBackend> backend =
-      tvision ? std::make_unique<ari::TvisionBackend>() : std::make_unique<ari::FtxuiBackend>();
+  ari::FtxuiBackend::Options look;
+  look.image_color = image_mode(o.graphics);
+  std::unique_ptr<ari::FtxuiBackend> backend = tvision ? std::make_unique<ari::TvisionBackend>(look)
+                                                       : std::make_unique<ari::FtxuiBackend>(look);
+  if (!publish_images(*backend, o))
+    return 1;
   CheckedTerminalScene scene(app, *backend);
   ari::AppRuntime rt(app, o.prefix.empty() ? kDefaultPrefix : o.prefix, &scene);
   rt.set_backend(*backend);
@@ -935,11 +969,27 @@ int run_terminal(const ari::HostOptions &o) {
   if (o.command == "snapshot") {
     const int width = std::max(10, o.width ? o.width : 100);
     const int height = std::max(4, o.height ? o.height : 30);
+    using Mode = ari::FtxuiBackend::Options::ImageColor;
+    const bool pixels =
+        o.ansi && (look.image_color == Mode::Kitty || look.image_color == Mode::Sixel);
+    if (pixels) { // the cell size images are drawn at: the terminal's, or --cell-size
+      ari::TermGraphics g = ari::gfx::probe_terminal();
+      if (o.cell_w > 0) {
+        g.cell_w = o.cell_w;
+        g.cell_h = o.cell_h;
+      }
+      backend->set_terminal_graphics(g);
+    }
     backend->set_screen_size(width, height);
     std::string frame;
     for (int f = 0; f < std::max(2, o.frames); ++f) { // the first drain realizes; then a frame
       rt.drain(); // services and renders the scene, publishing the frame
       frame = backend->render_to_string(rt.runtime(), width, height, o.ansi);
+    }
+    if (pixels) { // Sixel draws at screen positions, so the frame starts at the top-left
+      const int rows = static_cast<int>(std::count(frame.begin(), frame.end(), '\n')) + 1;
+      frame = "\x1b[H\x1b[2J" + frame + backend->take_graphics() + "\x1b[" +
+              std::to_string(rows + 1) + ";1H";
     }
     std::fputs(frame.c_str(), stdout);
     if (!o.png.empty())
@@ -987,8 +1037,9 @@ int main(int argc, char **argv) {
   }
   const bool terminal =
       std::find(o.extra_flags.begin(), o.extra_flags.end(), "--terminal") != o.extra_flags.end();
-  if (!o.backend.empty() && !terminal) {
-    std::fprintf(stderr, "arigl: --backend picks a terminal backend; add --terminal\n");
+  if (!terminal && (!o.backend.empty() || !o.graphics.empty() || o.cell_w > 0)) {
+    std::fprintf(stderr, "arigl: --backend, --graphics and --cell-size are for a terminal; add "
+                         "--terminal\n");
     return 2;
   }
   if (!ari::AppRuntime::have_yaml()) {

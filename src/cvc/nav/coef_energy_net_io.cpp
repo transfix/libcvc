@@ -11,9 +11,11 @@
 // coef_energy_net.cpp's load_from_memory). Lets a C++-trained CoefEnergyNetMaterial
 // (P5 training) be checkpointed into the same container torch, the CPU forward,
 // and the CUDA forward all read. Byte layout: little-endian, magic "CVNM", u32
-// version, u64 arch_hash, u32 d_tok/nhead/num_layers/d_risk/patch_size, f32
-// lam_soft_max/lam_hard_max/mu_lat_max/eps, u32 n_tensors, then per tensor
-// (u32 name_len, name, u32 ndim, u32 dims..., f32 data...), u32 meta_len.
+// version (1, or 2 for a 3-channel net), u64 arch_hash, u32 d_tok/nhead/num_layers/
+// d_risk/patch_size, f32 lam_soft_max/lam_hard_max/mu_lat_max/eps, [version 2: the belief
+// block, u32 risk_channels, u32 seen_rule, f32 unknown_risk, u32 unknown_hard,
+// u32 unknown_gate_hard, f32 material_range_m, f32 patch_extent_m], u32 n_tensors, then
+// per tensor (u32 name_len, name, u32 ndim, u32 dims..., f32 data...), u32 meta_len, meta.
 
 #include <cstring>
 #include <cvc/nav/coef_energy_net.h>
@@ -44,7 +46,8 @@ void wf(std::vector<unsigned char> &b, float v) {
 std::vector<unsigned char> coef_energy_net::serialize() const {
   std::vector<unsigned char> b;
   b.insert(b.end(), {'C', 'V', 'N', 'M'});
-  w32(b, kFormatVersion);
+  const bool belief = risk_channels() != 2; // a 3-channel net: version 2 + the belief block
+  w32(b, belief ? kFormatVersionBelief : kFormatVersion);
   w64(b, arch_hash_);
   w32(b, static_cast<std::uint32_t>(d_tok_));
   w32(b, static_cast<std::uint32_t>(nhead_));
@@ -55,6 +58,15 @@ std::vector<unsigned char> coef_energy_net::serialize() const {
   wf(b, lam_hard_max_);
   wf(b, mu_lat_max_);
   wf(b, eps_);
+  if (belief) {
+    w32(b, belief_.risk_channels);
+    w32(b, belief_.seen_rule);
+    wf(b, belief_.unknown_risk);
+    w32(b, belief_.unknown_hard);
+    w32(b, belief_.unknown_gate_hard);
+    wf(b, belief_.material_range_m);
+    wf(b, belief_.patch_extent_m);
+  }
   w32(b, static_cast<std::uint32_t>(tensors_.size()));
   for (const auto &kv : tensors_) {
     const std::string &name = kv.first;
@@ -67,7 +79,8 @@ std::vector<unsigned char> coef_energy_net::serialize() const {
     for (float x : tn.data)
       wf(b, x);
   }
-  w32(b, 0); // meta_len
+  w32(b, static_cast<std::uint32_t>(meta_.size())); // the meta trailer, as loaded
+  b.insert(b.end(), meta_.begin(), meta_.end());
   return b;
 }
 

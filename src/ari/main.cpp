@@ -38,6 +38,12 @@
 // document doesn't handle ends the run with exit status 128 + the signal number.
 // snapshot drains N frames (default 1) and prints the last one as text — for CI, logs, and docs.
 // check loads the document and prints its warnings; it exits non-zero when the load fails.
+//
+// --graphics picks how images draw: auto (the default: Kitty, else Sixel, where the terminal has
+// them, else half-blocks), kitty, sixel, color (half-blocks) or mono. --image NAME=FILE publishes
+// a picture for the document's `image:` widgets with `src: NAME`. With --ansi and --graphics kitty
+// or sixel, snapshot also prints the images, after clearing the screen, at the terminal's cell size
+// in pixels (--cell-size WxH where it can't be asked).
 
 #include <algorithm>
 #include <cstdio>
@@ -49,38 +55,13 @@
 #include <cvc/ariadne/host_signals.h>
 #include <cvc/ariadne/tvision_backend.h>
 #include <cvc/core/app.h>
+#include <cvc/image/image.h>
 #include <exception>
 #include <memory>
 #include <string>
 #include <vector>
 
-#ifdef __linux__
-#include <climits>
-#include <sys/stat.h>
-#include <unistd.h>
-#endif
-
 namespace {
-
-// tvision reads the terminal's description through ncurses. A cvcpkg prefix ships its own terminfo
-// database (share/terminfo), so point ncurses at it, ahead of the system's, unless the user already
-// chose. The trailing ':' keeps ncurses' built-in search after it.
-void use_bundled_terminfo() {
-#ifdef __linux__
-  if (std::getenv("TERMINFO_DIRS"))
-    return;
-  char exe[PATH_MAX];
-  const ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
-  if (n <= 0)
-    return;
-  exe[n] = '\0';
-  std::string dir(exe);
-  dir = dir.substr(0, dir.find_last_of('/')) + "/../share/terminfo";
-  struct stat st;
-  if (stat(dir.c_str(), &st) == 0 && S_ISDIR(st.st_mode))
-    setenv("TERMINFO_DIRS", (dir + ":").c_str(), 0);
-#endif
-}
 
 int usage(int code) {
   std::fprintf(code ? stderr : stdout,
@@ -93,6 +74,20 @@ int usage(int code) {
                "declares an args: block (then `ari run doc.ari --help` shows its options).\n",
                cvc::ariadne::host_flags_help().c_str());
   return code;
+}
+
+// --graphics MODE -> how images draw (host_cli has checked MODE).
+cvc::ariadne::FtxuiBackend::Options::ImageColor image_mode(const std::string &s) {
+  using Mode = cvc::ariadne::FtxuiBackend::Options::ImageColor;
+  if (s == "kitty")
+    return Mode::Kitty;
+  if (s == "sixel")
+    return Mode::Sixel;
+  if (s == "color")
+    return Mode::Color;
+  if (s == "mono")
+    return Mode::Mono;
+  return Mode::Auto;
 }
 
 } // namespace
@@ -147,8 +142,18 @@ int main(int argc, char **argv) {
   cvc::app app;
   // Declared before the AppRuntime, so it outlives it. A TvisionBackend is an FtxuiBackend in
   // hosted mode; its run() is its own (see below).
-  std::unique_ptr<ari::FtxuiBackend> backend =
-      tvision ? std::make_unique<ari::TvisionBackend>() : std::make_unique<ari::FtxuiBackend>();
+  ari::FtxuiBackend::Options look;
+  look.image_color = image_mode(o.graphics);
+  std::unique_ptr<ari::FtxuiBackend> backend = tvision ? std::make_unique<ari::TvisionBackend>(look)
+                                                       : std::make_unique<ari::FtxuiBackend>(look);
+  for (const auto &[name, file] : o.images) {
+    try {
+      backend->set_image(name, cvc::image::load(file));
+    } catch (const std::exception &e) {
+      std::fprintf(stderr, "ari: --image %s: %s\n", file.c_str(), e.what());
+      return 1;
+    }
+  }
   ari::AppRuntime rt(app, o.prefix.empty() ? "ui.docs.ari" : o.prefix);
   rt.set_backend(*backend);
   for (const std::string &d : o.component_paths)
@@ -186,11 +191,27 @@ int main(int argc, char **argv) {
     return 0;
 
   if (cmd == "snapshot") {
+    using Mode = ari::FtxuiBackend::Options::ImageColor;
+    const bool pixels =
+        o.ansi && (look.image_color == Mode::Kitty || look.image_color == Mode::Sixel);
+    if (pixels) { // the cell size the images are drawn at: the terminal's, or --cell-size
+      ari::TermGraphics g = ari::gfx::probe_terminal();
+      if (o.cell_w > 0) {
+        g.cell_w = o.cell_w;
+        g.cell_h = o.cell_h;
+      }
+      backend->set_terminal_graphics(g);
+    }
     std::string frame;
     for (int f = 0; f < std::max(1, o.frames); ++f) {
       rt.drain();
       frame = backend->render_to_string(rt.runtime(), std::max(10, o.width ? o.width : 100),
                                         o.height, o.ansi);
+    }
+    if (pixels) { // Sixel draws at screen positions, so the frame starts at the top-left
+      const int rows = static_cast<int>(std::count(frame.begin(), frame.end(), '\n')) + 1;
+      frame = "\x1b[H\x1b[2J" + frame + backend->take_graphics() + "\x1b[" +
+              std::to_string(rows + 1) + ";1H";
     }
     std::fputs(frame.c_str(), stdout);
     return 0;
@@ -205,7 +226,6 @@ int main(int argc, char **argv) {
   run.take_signal = ari::take_trapped_signal;
   ari::FtxuiBackend::RunExit how;
   if (tvision) {
-    use_bundled_terminfo();
     how = static_cast<ari::TvisionBackend &>(*backend).run(rt, run);
   } else {
     how = backend->run(rt, run);

@@ -432,6 +432,14 @@ state node (`ui.docs.<doc>.tree.<id>`, §11.2), propagated one frame behind for 
 > the core owns the `cvc::state` round-trip. MockBackend-driven gtests in `ariadne_runtime_test`.
 > **Still deferred:** `state_exec` track expressions, thicker-than-1px custom-drawlist borders, mixing
 > resizable rows *and* columns in one grid, and *cross-run* durable persistence (decision #4).
+>
+> **✅ Increment 4 (table columns, 2026-10-19).** A resizable table persists its column widths to
+> `tree.<id>.columns` through the same seam (`seed_grid_columns` / `grid_columns`), in px for every
+> column; `0` = not set. ImGui seeds a stretch column's weight from its persisted px (proportions survive
+> another table width) and reads widths back through `imgui_internal` (`Columns[i].WidthGiven`); FTXUI
+> fixes a seeded column and reports only the tracks it holds at a size, which also fixed a row split's
+> first walk persisting a natural pane as 16 px. Tests: `ariadne_runtime_test`, `ariadne_ftxui_test`,
+> `cvcgl_imgui_table_columns`.
 
 Four related sizing knobs — all realized on the same table engine (§3.0.3a) whose flags this build ships
 (`IMGUI_HAS_TABLE`, confirmed).
@@ -4245,7 +4253,16 @@ in beside the native-window and wasm surfaces as a third way to present the same
 > rasterizer (tier 3 below) draws it as the terminal backend's background, with the widgets drawn natively over it by
 > FTXUI or tvision, rather than mirroring the ImGui overlay's pixels. Background drags / the wheel steer the camera.
 > Hosts: `arigl --terminal` (the GL runtime) and the `ariadne_terminal` example; test:
-> `cvcgl_terminal_scene`. Sixel / Kitty and the golden-image harness (1) remain.
+> `cvcgl_terminal_scene`.
+>
+> **Status (2026-10-19): Kitty and Sixel are built (phasing step 3).** `FtxuiBackend` probes the terminal before FTXUI
+> takes it (kitty query, `CSI 16 t`, DA1; `TIOCGWINSZ` for the cell's pixels) and `Options::image_color` `Auto` picks
+> Kitty, else Sixel, else half-blocks. Kitty images are sent once, out of band, and shown through Unicode placeholder
+> cells, so windows hide them cell-exactly and FTXUI's full repaint redraws them; Sixel bitmaps are re-sent after each
+> draw, clipped to the cells nothing covers. Both serve `draw_image` and the background, so `TerminalScene` renders at
+> the cells' real pixels. The encoders are pure functions (`term_graphics.h`, `ariadne_term_graphics_test`). Remaining:
+> tmux passthrough, Windows / wasm detection (`Auto` stays half-blocks there), and the tvision desktop, which keeps
+> half-blocks because tvision owns the output.
 
 **Phasing.** (1) EGL offscreen + `frameRGB` **golden-image test harness** for the ImGui/VTK backend (v1.x —
 the testability win). (2) The half-block-ANSI rasterizer (a pure RGB→bytes function + tests — no GPU needed

@@ -16,9 +16,13 @@
 //   --frames N            snapshot: frames to run before the capture
 //   --ansi                snapshot: keep colour escapes
 //   --png FILE            snapshot: also write a PNG (where the runtime can render one)
+//   --graphics MODE       how images draw in a terminal: auto, kitty, sixel, color or mono
+//   --image NAME=FILE     publish the picture in FILE under NAME, for image: widgets (repeatable)
+//   --cell-size WxH       snapshot: a terminal cell's size in pixels, where it can't be asked
 #pragma once
 
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace cvc {
@@ -36,6 +40,9 @@ struct HostOptions {
   int width = 0, height = 0, frames = 0; // 0 = the runtime's default
   bool ansi = false;
   std::string png;
+  std::string graphics; // empty = auto (FtxuiBackend::Options::ImageColor)
+  std::vector<std::pair<std::string, std::string>> images; // --image NAME=FILE, in order
+  int cell_w = 0, cell_h = 0;                              // --cell-size; 0 = ask the terminal
   std::vector<std::string> extra_flags; // the runtime's own flags that were given
   bool help = false;                    // -h / --help, or `help` as the command
   std::string error;                    // a usage error: print it with the usage and exit 2

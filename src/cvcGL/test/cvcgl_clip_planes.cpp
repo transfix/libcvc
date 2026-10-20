@@ -497,7 +497,6 @@ void testRenderVolRen(cvc::app &app) {
 } // namespace
 
 int main() {
-  disableSwapThrottle();
   installErrorCounter();
   cvc::app app;
   testWiring(app);

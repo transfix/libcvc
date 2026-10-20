@@ -130,6 +130,35 @@ TEST(AriadneHostCli, ExtraFlagsEqualsFormsAndErrors) {
 
 // ── parsing a document's arguments ──────────────────────────────────────────────────────────────
 
+TEST(AriadneHostCli, GraphicsImageAndCellSizeFlags) {
+  const char *a1[] = {"ari",           "snapshot",           "--graphics",  "kitty", "--image",
+                      "photo=a=b.png", "--image=logo=l.png", "--cell-size", "9x17",  "doc.ari"};
+  HostOptions o = parse_host_args(10, a1);
+  ASSERT_TRUE(o.error.empty()) << o.error;
+  EXPECT_EQ(o.graphics, "kitty");
+  ASSERT_EQ(o.images.size(), 2u);
+  EXPECT_EQ(o.images[0].first, "photo");
+  EXPECT_EQ(o.images[0].second, "a=b.png") << "the name ends at the first '='";
+  EXPECT_EQ(o.images[1].first, "logo");
+  EXPECT_EQ(o.cell_w, 9);
+  EXPECT_EQ(o.cell_h, 17);
+  EXPECT_EQ(o.doc, "doc.ari");
+
+  const char *bad_mode[] = {"ari", "run", "--graphics", "iterm", "d.ari"};
+  EXPECT_NE(parse_host_args(5, bad_mode).error.find("--graphics"), std::string::npos);
+  const char *bad_image[] = {"ari", "run", "--image", "photo.png", "d.ari"};
+  EXPECT_NE(parse_host_args(5, bad_image).error.find("NAME=FILE"), std::string::npos);
+  const char *bad_cell[] = {"ari", "snapshot", "--cell-size", "9", "d.ari"};
+  EXPECT_NE(parse_host_args(5, bad_cell).error.find("WxH"), std::string::npos);
+  const char *zero_cell[] = {"ari", "snapshot", "--cell-size", "0x16", "d.ari"};
+  EXPECT_FALSE(parse_host_args(5, zero_cell).error.empty());
+  // After the document they are the document's, and ari says so.
+  const char *after[] = {"ari", "run", "d.ari", "--graphics", "sixel"};
+  o = parse_host_args(5, after);
+  EXPECT_TRUE(o.graphics.empty());
+  EXPECT_NE(misplaced_flag_note("ari", o.doc_args).find("'--graphics'"), std::string::npos);
+}
+
 TEST(AriadneDocArgs, ParsesOptionsBoolsAndPositionals) {
   const DocumentArgs a = parse_document_args(
       conf_spec(), {"--room", "standup", "--camera", "--peers=3", "--scale", "0.5", "notes.txt"});

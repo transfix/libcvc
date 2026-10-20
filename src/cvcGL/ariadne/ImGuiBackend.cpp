@@ -223,7 +223,8 @@ void ImGuiBackend::end_window() {
 bool ImGuiBackend::begin_grid(const ariadne::Layout &layout, const char *id) {
 #ifdef CVC_ENABLE_IMGUI
   const bool haveTrackSeed = m_haveTracks; // §11.4: consumed by this grid whatever its mode
-  m_haveTracks = false;
+  const bool haveColumnSeed = m_haveColumns;
+  m_haveTracks = m_haveColumns = false;
   GridState gs;
   gs.cols = layout.col_widths.empty() ? 1 : static_cast<int>(layout.col_widths.size());
   const ImVec2 avail = ImGui::GetContentRegionAvail();
@@ -286,6 +287,7 @@ bool ImGuiBackend::begin_grid(const ariadne::Layout &layout, const char *id) {
   tid += (id ? id : "");
   const bool open = ImGui::BeginTable(tid.c_str(), gs.cols, flags);
   if (open) {
+    gs.resizable = layout.resizable;
     for (int i = 0; i < gs.cols; ++i) {
       ImGuiTableColumnFlags cf = ImGuiTableColumnFlags_WidthStretch;
       float w = 1.0f;
@@ -302,6 +304,13 @@ bool ImGuiBackend::begin_grid(const ariadne::Layout &layout, const char *id) {
           w = 0.0f; // Auto → fit content
         }
       }
+      // §11.4: a persisted width (seed_grid_columns, px) is the column's create-time init value,
+      // which ImGui applies only when it creates the table, so a live drag wins. A fixed column
+      // takes it as its width; a stretch column as its weight, so the stretch columns keep their
+      // persisted proportions at any table width.
+      if (layout.resizable && haveColumnSeed && i < static_cast<int>(m_pendingColumns.size()) &&
+          m_pendingColumns[static_cast<std::size_t>(i)] > 0.0f)
+        w = m_pendingColumns[static_cast<std::size_t>(i)];
       ImGui::TableSetupColumn("", cf, w);
     }
     m_grids.push_back(std::move(gs));
@@ -312,7 +321,7 @@ bool ImGuiBackend::begin_grid(const ariadne::Layout &layout, const char *id) {
 #else
   (void)layout;
   (void)id;
-  m_haveTracks =
+  m_haveTracks = m_haveColumns =
       false;   // consume the seed even in the inert build (parity with begin_window's #else)
   return true; // stub: emit the children as a plain vertical flow
 #endif
@@ -365,6 +374,7 @@ void ImGuiBackend::end_grid() {
   // §11.4: snapshot the (possibly dragged) pane sizes for the core to persist; clear it for a
   // non-split grid so a stale split's sizes are never reported against it.
   m_lastGridTracks.clear();
+  m_lastGridColumns.clear();
   if (g.split) {
     if (g.cell > 0)
       ImGui::EndChild(); // close the last pane FIRST -> back to the parent window, whose
@@ -373,6 +383,13 @@ void ImGuiBackend::end_grid() {
     for (unsigned int k : g.pane_keys)
       m_lastGridTracks.push_back(store->GetFloat(k));
   } else {
+    // §11.4: a resizable table's column widths (the width each column was given this frame, the
+    // value TableSetupColumn takes back), read before EndTable while the table is current. Not
+    // before its layout is locked (its first row), when the widths are not computed yet.
+    const ImGuiTable *t = ImGui::GetCurrentTable();
+    if (g.resizable && t && t->IsLayoutLocked)
+      for (int i = 0; i < t->ColumnsCount; ++i)
+        m_lastGridColumns.push_back(t->Columns[i].WidthGiven);
     ImGui::EndTable();
     if (g.color_pushes)
       ImGui::PopStyleColor(g.color_pushes);
@@ -386,6 +403,13 @@ void ImGuiBackend::seed_grid_tracks(const std::vector<float> &sizes) {
 }
 
 std::vector<float> ImGuiBackend::grid_tracks() const { return m_lastGridTracks; }
+
+void ImGuiBackend::seed_grid_columns(const std::vector<float> &widths) {
+  m_pendingColumns = widths;
+  m_haveColumns = true;
+}
+
+std::vector<float> ImGuiBackend::grid_columns() const { return m_lastGridColumns; }
 void ImGuiBackend::begin_disabled() {
 #ifdef CVC_ENABLE_IMGUI
   ImGui::BeginDisabled(true); // §4 enabled_when/disabled_when: grey + non-interactive

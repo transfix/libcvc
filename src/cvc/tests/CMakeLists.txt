@@ -9,6 +9,7 @@ add_executable(ariadne_loader_test ariadne_loader_test.cpp)
 add_executable(ariadne_runtime_test ariadne_runtime_test.cpp)
 add_executable(ariadne_bind_test ariadne_bind_test.cpp)
 add_executable(ariadne_ftxui_test ariadne_ftxui_test.cpp)
+add_executable(ariadne_term_graphics_test ariadne_term_graphics_test.cpp)
 add_executable(ariadne_host_test ariadne_host_test.cpp)
 add_executable(x11_macro_headers_test x11_macro_headers_test.cpp)
 add_executable(net_http_client_test net_http_client_test.cpp)
@@ -176,10 +177,13 @@ add_executable(nav_stats_test nav_stats_test.cpp)
 add_executable(nav_material_raster_test nav_material_raster_test.cpp)
 add_executable(nav_clearance_cost_test nav_clearance_cost_test.cpp)
 add_executable(nav_material_test nav_material_test.cpp)
+add_executable(nav_belief_material_test nav_belief_material_test.cpp)
+add_executable(nav_belief_material_net_test nav_belief_material_net_test.cpp)
 add_executable(nav_material_deploy_test nav_material_deploy_test.cpp)
 add_executable(nav_coef_energy_test nav_coef_energy_test.cpp)
 add_executable(nav_material_rollout_grad_test nav_material_rollout_grad_test.cpp)
 add_executable(nav_material_bike_rollout_test nav_material_bike_rollout_test.cpp)
+add_executable(nav_material_ext_test nav_material_ext_test.cpp)
 add_executable(nav_coef_energy_grad_test nav_coef_energy_grad_test.cpp)
 add_executable(nav_material_rollout_cuda_test nav_material_rollout_cuda_test.cpp)
 add_executable(nav_coef_energy_cuda_test nav_coef_energy_cuda_test.cpp)
@@ -228,6 +232,7 @@ set(TEST_TARGETS
   ariadne_runtime_test
   ariadne_bind_test
   ariadne_ftxui_test
+  ariadne_term_graphics_test
   ariadne_host_test
   x11_macro_headers_test
   net_http_client_test
@@ -325,11 +330,14 @@ set(TEST_TARGETS
   nav_stats_test
   nav_clearance_cost_test
   nav_material_test
+  nav_belief_material_test
+  nav_belief_material_net_test
   nav_material_deploy_test
   nav_material_raster_test
   nav_coef_energy_test
   nav_material_rollout_grad_test
   nav_material_bike_rollout_test
+  nav_material_ext_test
   nav_coef_energy_grad_test
   nav_material_train_test
   nav_material_optim_test
@@ -516,6 +524,13 @@ target_link_libraries(ariadne_runtime_test
 )
 
 target_link_libraries(ariadne_ftxui_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(ariadne_term_graphics_test
   PRIVATE
     cvc
     GTest::gtest
@@ -836,6 +851,20 @@ target_link_libraries(nav_material_test
     GTest::gtest_main
 )
 
+target_link_libraries(nav_belief_material_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(nav_belief_material_net_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(nav_material_deploy_test
   PRIVATE
     cvc
@@ -863,6 +892,24 @@ target_link_libraries(nav_material_bike_rollout_test
     GTest::gtest
     GTest::gtest_main
 )
+
+target_link_libraries(nav_material_ext_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+# Its patch_callback samples the force patch with detail/material_rollout.h's inline sampler, and
+# ACallbackGivingThePatchIsThePatch holds it to the patch source bit for bit. The rollouts sample
+# in TUs built with -ffp-contract=off, so this one is too. Under the compiler's default (on for
+# Clang, fast for GCC) the sampler's bilinear sums fuse into FMAs where the ISA has them (aarch64:
+# the macOS arm64 lanes), and the callback's F and J move by an ulp.
+if(NOT MSVC)
+  set_source_files_properties(nav_material_ext_test.cpp
+                              PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+else()
+  set_source_files_properties(nav_material_ext_test.cpp PROPERTIES COMPILE_OPTIONS "/fp:precise")
+endif()
 
 target_link_libraries(nav_coef_energy_grad_test
   PRIVATE
@@ -1790,10 +1837,13 @@ target_compile_features(utility_test PRIVATE cxx_std_17)
 target_compile_features(nav_test PRIVATE cxx_std_17)
 target_compile_features(nav_coef_train_test PRIVATE cxx_std_17)
 target_compile_features(nav_material_test PRIVATE cxx_std_17)
+target_compile_features(nav_belief_material_test PRIVATE cxx_std_17)
+target_compile_features(nav_belief_material_net_test PRIVATE cxx_std_17)
 target_compile_features(nav_material_deploy_test PRIVATE cxx_std_17)
 target_compile_features(nav_coef_energy_test PRIVATE cxx_std_17)
 target_compile_features(nav_material_rollout_grad_test PRIVATE cxx_std_17)
 target_compile_features(nav_material_bike_rollout_test PRIVATE cxx_std_17)
+target_compile_features(nav_material_ext_test PRIVATE cxx_std_17)
 target_compile_features(nav_coef_energy_grad_test PRIVATE cxx_std_17)
 target_compile_features(nav_material_rollout_cuda_test PRIVATE cxx_std_17)
 target_compile_features(nav_coef_energy_cuda_test PRIVATE cxx_std_17)
@@ -2057,6 +2107,7 @@ cvc_discover_tests(text_test)
 cvc_discover_tests(ariadne_loader_test)
 cvc_discover_tests(ariadne_runtime_test)
 cvc_discover_tests(ariadne_ftxui_test)
+cvc_discover_tests(ariadne_term_graphics_test)
 cvc_discover_tests(ariadne_host_test)
 cvc_discover_tests(ariadne_bind_test)
 cvc_discover_tests(x11_macro_headers_test)
@@ -2093,11 +2144,14 @@ cvc_discover_tests(nav_drive_refinements_test)
 cvc_discover_tests(nav_stats_test)
 cvc_discover_tests(nav_clearance_cost_test)
 cvc_discover_tests(nav_material_test)
+cvc_discover_tests(nav_belief_material_test)
+cvc_discover_tests(nav_belief_material_net_test)
 cvc_discover_tests(nav_material_deploy_test)
 cvc_discover_tests(nav_material_raster_test)
 cvc_discover_tests(nav_coef_energy_test)
 cvc_discover_tests(nav_material_rollout_grad_test)
 cvc_discover_tests(nav_material_bike_rollout_test)
+cvc_discover_tests(nav_material_ext_test)
 cvc_discover_tests(nav_coef_energy_grad_test)
 cvc_discover_tests(nav_material_rollout_cuda_test)
 cvc_discover_tests(nav_coef_energy_cuda_test)
