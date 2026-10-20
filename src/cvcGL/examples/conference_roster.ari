@@ -34,13 +34,20 @@ menubar:
         bind: tree.users.open
 
 windows:
-  # ── My Camera: self-view + device pickers + on/off toggles ──
+  # ── My Camera: your name, self-view, device pickers + on/off toggles ──
   - window: My Camera
     id: mycam
     pos: [20, 40]
-    size: [360, 540]
+    size: [360, 560]
     closable: true
     children:
+      # Your display name — the web client launches you in under a random "guest-xxxx"; edit this to
+      # change it. On commit, on_tick re-asserts your room presence so peers see the new name (your
+      # internal id stays fixed, only the shown name changes).
+      - type: input_text
+        label: "Name"
+        bind: conf.self
+      - separator
       - type: stream_view
         bind: cam_token
         size: 320
@@ -147,6 +154,7 @@ on_tick: |
         (state-set "cam_on" "1") ; on/off toggles start ON (streams open unmuted)
         (state-set "mic_on" "1")
         (room-join "" (state-get "conf.room") (dict "name" (state-get "conf.self")))
+        (state-set "joined.name" (state-get "conf.self")) ; remember it for name-change detection
         (set mic (stream-open (dict "id" "mic" "codec" "f32" "rate" 48000 "ch" 1 "frames_per_chunk" 1024
                                     "subscriber_depth" 8 "expected_subscribers" 2)))
         (state-set "mic_token" (get-attr mic "token"))
@@ -167,6 +175,13 @@ on_tick: |
               (stream-capture-camera (get-attr cam "token")
                 (dict "device" 0 "w" 640 "h" 480 "hz" 30 "jpeg" #t))
               (state-set "cam.cur_device" "0")))))
+    ; ── name change: re-assert presence when the user edits their display name (conf.self) ──
+    (if (and (= (state-get "joined") "1")
+             (not (= (state-get "conf.self") (state-get "joined.name"))))
+      (begin
+        (room-join "" (state-get "conf.room") (dict "name" (state-get "conf.self")))
+        (state-set "joined.name" (state-get "conf.self")))
+      #f)
     ; ── device switch: re-capture when the user picks a different camera / mic (real devices only) ──
     (if (= (state-get "cam_synthetic") "1") #f
       (begin
