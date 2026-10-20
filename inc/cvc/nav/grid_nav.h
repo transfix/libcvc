@@ -230,13 +230,23 @@ std::vector<std::vector<std::uint8_t>> inflate_batch(const std::vector<const std
 // call changed any byte of plane k's ever_seen or last_visible, else 0 — the
 // exact FoV-raster dirty flag `version` is not (a FoV moving over open ground
 // flips nothing). Requesting it never changes the planes' contents.
+//
+// `material_seen` (optional, null = not kept) is a second monotonic FoV mask for
+// belief material (belief_material.h): the cells this call's rays touched whose
+// distance from the agent's cell, hypot((r - r0)*cell_h, (c - c0)*cell_w), is at
+// most the agent's material range (sense_agents::material_range_m; null or <= 0
+// => its sense range, so the mask then grows exactly as ever_seen does).
+// `material_changed` (optional) receives, per plane, 1 iff this call changed any
+// byte of that plane's material_seen, else 0. Neither changes any other output.
 struct belief_planes {
   float *logodds = nullptr;             // [K*rows*cols]
   std::uint8_t *last_visible = nullptr; // [K*rows*cols]
   std::uint8_t *ever_seen = nullptr;    // [K*rows*cols]
   std::int32_t *version = nullptr;      // [K]
   int K = 0;
-  std::uint8_t *fov_changed = nullptr; // [K] out, optional
+  std::uint8_t *fov_changed = nullptr;      // [K] out, optional
+  std::uint8_t *material_seen = nullptr;    // [K*rows*cols], optional
+  std::uint8_t *material_changed = nullptr; // [K] out, optional
 };
 
 // Per-agent pose + sensor cone; every array has length n (the adapter broadcasts
@@ -249,6 +259,7 @@ struct sense_agents {
   const std::int32_t *n_rays = nullptr;    // [n]
   const std::int32_t *agent_map = nullptr; // [n] -> plane in [0, K)
   int n = 0;
+  const double *material_range_m = nullptr; // [n] optional; see belief_planes::material_seen
 };
 
 // Sense `ag.n` agents into `planes`, bit-identically to `ag.n` sequential

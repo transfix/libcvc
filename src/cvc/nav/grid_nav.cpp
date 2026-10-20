@@ -770,6 +770,7 @@ struct agent_sense {
   std::vector<int> free_c; // parallel to cells: rays that passed through free
   std::vector<int> occ_c;  // parallel to cells: rays that stopped on a hit
   bool oob = true;
+  int r0 = 0, c0 = 0; // the agent's cell (the material-range mask measures from it)
 };
 
 // Ray-cast one agent (BeliefGrid.sense's DDA, belief.py:118-155) into `out`. No
@@ -793,6 +794,8 @@ void raycast_agent(int i, const std::uint8_t *truth, int rows, int cols, double 
     return;
   }
   out.oob = false;
+  out.r0 = r0;
+  out.c0 = c0;
 
   const long long GEN = S.begin(rows * cols);
   const double rangem = ag.range_m[i], fov = ag.fov_rad[i], head = ag.heading[i];
@@ -877,16 +880,40 @@ void sense_batch(const std::uint8_t *truth, int rows, int cols, double min_x, do
   // agents are ordered. This half is cheap, so shared mode's single-plane serial
   // fold costs almost nothing while its raycast just ran N-way parallel.
   const float clampf = static_cast<float>(l_clamp);
+  const double cell_w = (max_x - min_x) / (cols - 1); // as raycast_agent measures
+  const double cell_h = (max_y - min_y) / (rows - 1);
   parallel_for(pool, planes.K, num_threads, [&](int p) {
     const long base = static_cast<long>(p) * rows * cols;
     const std::vector<int> *last_cells = nullptr; // final non-OOB agent's FoV
     bool seen_grew = false;                       // some ever_seen byte changed (fov_changed)
+    bool mat_grew = false;                        // some material_seen byte changed
     for (int i : by_plane[p]) {
       const agent_sense &a = res[i];
       if (a.oob) {
         flips_out[i] = 0;
         last_cells = nullptr; // an OOB last agent blanks last_visible
         continue;
+      }
+      if (planes.material_seen) {
+        // The material-range mask: every touched cell is within the sense range, so a
+        // material range at or above it (or none) keeps them all, as ever_seen does.
+        const double rs = ag.range_m[i];
+        const double rm =
+            (ag.material_range_m && ag.material_range_m[i] > 0.0) ? ag.material_range_m[i] : rs;
+        std::uint8_t *ms = planes.material_seen + base;
+        for (int k : a.cells) {
+          if (ms[k] == 1)
+            continue;
+          if (rm < rs) {
+            const int rr = k / cols, cc = k % cols;
+            const double dist =
+                std::hypot((double)(rr - a.r0) * cell_h, (double)(cc - a.c0) * cell_w);
+            if (!(dist <= rm))
+              continue;
+          }
+          ms[k] = 1;
+          mat_grew = true;
+        }
       }
       int flips = 0;
       for (std::size_t t = 0; t < a.cells.size(); ++t) {
@@ -936,6 +963,8 @@ void sense_batch(const std::uint8_t *truth, int rows, int cols, double min_x, do
                       std::count_if(lv, lv + hw, [](std::uint8_t b) { return b != 0; })) == n_fov;
       planes.fov_changed[p] = (seen_grew || !lv_same) ? 1 : 0;
     }
+    if (planes.material_changed)
+      planes.material_changed[p] = mat_grew ? 1 : 0;
     if (!lv_same) {
       std::memset(lv, 0, hw);
       if (last_cells)
