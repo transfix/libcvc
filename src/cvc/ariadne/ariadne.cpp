@@ -211,6 +211,12 @@ std::unordered_map<std::string, WidgetEmitFn> &widget_registry() {
   static std::unordered_map<std::string, WidgetEmitFn> r;
   return r;
 }
+// Widget types a BACKEND renders natively (no compositional emit fn) — so the loader does not warn
+// they are unregistered. Guarded by widget_mutex() like widget_registry().
+std::set<std::string> &known_widget_types() {
+  static std::set<std::string> s;
+  return s;
+}
 WidgetEmitFn lookup_widget(const std::string &type) {
   std::lock_guard<std::mutex> lock(widget_mutex());
   auto it = widget_registry().find(type);
@@ -225,9 +231,17 @@ void register_widget_type(const std::string &type, WidgetEmitFn emit) {
   widget_registry()[type] = std::move(emit);
 }
 
+void register_known_widget_type(const std::string &type) {
+  if (type.empty())
+    return;
+  std::lock_guard<std::mutex> lock(widget_mutex());
+  known_widget_types().insert(type);
+}
+
 bool has_widget_type(const std::string &type) {
   std::lock_guard<std::mutex> lock(widget_mutex());
-  return widget_registry().find(type) != widget_registry().end();
+  return widget_registry().find(type) != widget_registry().end() ||
+         known_widget_types().find(type) != known_widget_types().end();
 }
 
 // --- the init: block runner (state_exec) --------------------------------------
