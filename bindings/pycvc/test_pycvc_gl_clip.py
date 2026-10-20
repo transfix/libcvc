@@ -16,11 +16,6 @@ CVC_REQUIRE_RENDER=1. Synthetic data only.
 import os
 import sys
 
-# NVIDIA's GLX throttles swaps of an unmapped (offscreen) window to ~1/s with
-# sync-to-vblank on; set before any GL context exists (Mesa reads vblank_mode).
-os.environ.setdefault("__GL_SYNC_TO_VBLANK", "0")
-os.environ.setdefault("vblank_mode", "0")
-
 import pycvc
 
 app = pycvc.make_app()

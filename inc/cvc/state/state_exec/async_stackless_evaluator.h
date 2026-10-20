@@ -42,6 +42,9 @@ public:
   /// Single step as a coroutine — yields after the step.
   task<bool> step(evaluator_state &state);
 
+  /// Raise `exc` in `state` where it is evaluating (stackless_evaluator::raise).
+  void raise(evaluator_state &state, value_t exc) { inner_.raise(state, std::move(exc)); }
+
   /// Run until done/limits as a coroutine — yields between steps.
   task<value_t> run(evaluator_state &state, std::optional<uint64_t> max_steps = std::nullopt,
                     std::optional<double> timeout_sec = std::nullopt,

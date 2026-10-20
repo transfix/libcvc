@@ -69,6 +69,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/physics/plant_host.h
   ../../inc/cvc/physics/pose_tracker.h
   ../../inc/cvc/physics/nav_plant.h
+  ../../inc/cvc/physics/nav_eval.h
   ../../inc/cvc/state/state_hash_partition.h
   ../../inc/cvc/state/distributed_state_session.h
   ../../inc/cvc/state/state_transport.h
@@ -219,6 +220,7 @@ set(SOURCE_FILES
   state/state_exec/types.cpp
   state/state_exec/parser.cpp
   state/state_exec/builtins.cpp
+  state/state_exec/exceptions.cpp
   state/state_exec/evaluator.cpp
   state/state_exec/stackless_evaluator.cpp
   state/state_exec/async_evaluator.cpp
@@ -253,6 +255,7 @@ set(SOURCE_FILES
   physics/pose_tracker.cpp
   physics/binding_meta.cpp
   physics/nav_plant.cpp
+  physics/nav_eval.cpp
   state/state_change_journal.cpp
   state/state_subscription_router.cpp
   state/state_sync_adapter.cpp
@@ -2156,6 +2159,14 @@ if(CVC_BUILD_LSYS_TOOLS)
     target_include_directories(cvc-lod-bake PRIVATE ${HDF5_INCLUDE_DIRS})
     target_compile_features(cvc-lod-bake PRIVATE cxx_std_17)
   endif()
+endif()
+
+# ariadne-server: the headless Ariadne conference RELAY (room-state relay + media SFU). Core cvc +
+# gRPC only (no cvcGL/VTK/GL), so it runs on a plain headless VM. Needs CVC_ENABLE_GRPC.
+if(CVC_ENABLE_GRPC)
+  add_executable(ariadne-server ${CMAKE_CURRENT_SOURCE_DIR}/tools/ariadne_server_main.cpp)
+  target_link_libraries(ariadne-server PRIVATE cvc)
+  target_compile_features(ariadne-server PRIVATE cxx_std_17)
 endif()
 
 # Windows-specific batch file
