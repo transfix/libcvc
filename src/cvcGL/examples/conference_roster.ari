@@ -51,8 +51,14 @@ windows:
         children:
           - text: "name"
             bind: peer.{i}.name
-          - text: "video"
-            bind: peer.{i}.video
+          # Each peer's live video: a stream_view bound to that peer's decode-proxy token. The host
+          # (arigl) opens one proxy per peer on the first frame it relays and publishes the token into
+          # "media.<pid>.camera", which the on_tick lane copies into peer.{i}.cam below. Empty until a
+          # peer's frames arrive (and for your own row — your camera is the "my video" tile above), so
+          # the stream_view simply draws nothing then.
+          - type: stream_view
+            bind: peer.{i}.cam
+            size: 180
           - separator
 
 on_tick: |
@@ -67,16 +73,29 @@ on_tick: |
         ; worker thread; the stream_view above decodes + shows them. getUserMedia prompts on this
         ; call; frames (rescaled to 640x480, MJPEG) start once the user approves. (room-publish to
         ; share it with peers is the WS media-transport phase.)
+        ; expected_subscribers >= 2: the "my video" self-preview tile AND the host's forwarder (which
+        ; subscribes to relay the frames to peers) both subscribe to this one stream; 3 gives headroom.
         (set cam (stream-open (dict "id" "camera" "codec" "mjpeg" "w" 640 "h" 480 "stride" 2560
-                                    "expected_subscribers" 1)))
+                                    "expected_subscribers" 3)))
         (state-set "cam_token" (get-attr cam "token"))
-        (stream-capture-camera (get-attr cam "token")
-          (dict "device" 0 "w" 640 "h" 480 "hz" 30 "jpeg" #t))))
+        ; Drive the stream from the real browser CAMERA (device 0, getUserMedia). A ?synthetic=1 URL
+        ; param (the host plumbs it to "cam_synthetic") instead uses a hardware-free MJPEG test
+        ; pattern, so the whole conference — including peer video over the relay — can be exercised in
+        ; a browser that has no camera (or won't grant it).
+        (if (= (state-get "cam_synthetic") "1")
+            (stream-capture-camera (get-attr cam "token")
+              (dict "synthetic" #t "w" 640 "h" 480 "hz" 30 "jpeg" #t))
+            (stream-capture-camera (get-attr cam "token")
+              (dict "device" 0 "w" 640 "h" 480 "hz" 30 "jpeg" #t)))))
     ; ── rebuild the roster tiles every tick from the replicated room roster ──
+    ; For each participant, copy that peer's decode-proxy token (the host publishes it at
+    ; "media.<pid>.camera" once their frames start arriving) into peer.<idx>.cam, which the per-peer
+    ; stream_view tile binds to. Empty for peers not yet sending and for your own row.
     (set idx 0)
     (for p (room-roster (state-get "conf.room"))
       (begin
         (state-set (str-concat "peer." idx ".name") (get-attr p "name"))
-        (state-set (str-concat "peer." idx ".video") "(browser video coming soon)")
+        (state-set (str-concat "peer." idx ".cam")
+          (state-get (str-concat "media." (get-attr p "pid") ".camera")))
         (set idx (+ idx 1))))
     (state-set "peer.count" (str idx)))

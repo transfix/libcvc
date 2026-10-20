@@ -59,8 +59,16 @@
 // Conference mode: a WebSocket state transport joins a hosted room. The browser (wasm) build dials
 // wss://<page-origin>/… (set by the host page) and native builds dial ws://host:port; either way
 // register_conference supplies the room verbs and the shard/transport are wired here in the host.
+#include <cvc/ariadne/stream/frame.h>           // frame_ptr — forward the local camera stream's frames
+#include <cvc/ariadne/stream/stream.h>          // stream::open — per-peer decode proxies
+#include <cvc/ariadne/stream/stream_channel.h>  // subscribe / publish_external
+#include <cvc/ariadne/stream/stream_registry.h> // look up the local camera stream by its token
+#include <cvc/state/state.h>                    // cvc::state::instance — conference media state keys
 #include <cvc/state/state_cluster_shard.h>
 #include <cvc/state/state_transport_ws.h>
+#include <cstdint>
+#include <map>
+#include <mutex>
 #endif
 #ifdef __EMSCRIPTEN__
 #include <cvc/gl/state_publisher.h> // single-thread wasm: flush the publisher at frame cadence
@@ -196,6 +204,26 @@ struct ConferenceSession {
   std::unique_ptr<cvc::state_transport_ws> ws;
   bool active = false;
 
+  // ── media plane (browser video over the WS control channel) ──
+  cvc::app *app_ = nullptr;
+  std::string pid_;    // this participant's node id (== the room-join pid; stamps our outgoing frames)
+  std::string prefix_; // the document chroot prefix: host state access must prepend it so it reaches
+                       // the SAME keys the .ari's (state-get/-set) do (which are prefix-relative)
+  // Publish: forward the local camera stream (the .ari puts its token in "cam_token") to the relay.
+  std::string pub_token_;
+  std::shared_ptr<cvc::ariadne::stream::subscription> pub_sub_;
+  std::int64_t pub_last_seq_ = -1;
+  // Consume: peers' frames arrive on the reader thread -> inbox_; pump() routes each into a per-peer
+  // decode proxy (keyed origin|kind) whose token the .ari binds the peer's tile to.
+  std::mutex media_mu_;
+  std::vector<cvc::ws_media_frame> inbox_;
+  std::map<std::string, std::unique_ptr<cvc::ariadne::stream::stream>> proxies_;
+
+  // The state key carrying a peer's decode-proxy token, so the .ari can bind that peer's stream_view.
+  static std::string media_token_key(const std::string &origin, const std::string &kind) {
+    return "media." + origin + "." + kind;
+  }
+
   // Call AFTER the GL bundles and BEFORE load(): register the room verbs, seed conf.room/conf.self,
   // and dial the relay. Returns false (a plain local document) when no relay is configured.
   bool setup(cvc::app &app, const std::string &prefix, cvc::gl::ImGuiBackend &backend) {
@@ -221,13 +249,27 @@ struct ConferenceSession {
     shard->attach(); // also installs this as the default shard; room-join derives the pid from it
     ws = std::make_unique<cvc::state_transport_ws>();
     ws->register_shard(shard.get());
+    app_ = &app;
+    pid_ = nodeId;
+    prefix_ = prefix;
+    // Peers' media arrives on the reader thread: just queue it here (do not touch the stream
+    // registry / app tree off the main thread), and route it in pump() on the main thread.
+    ws->set_on_media([this](const cvc::ws_media_frame &m) {
+      std::lock_guard<std::mutex> lk(media_mu_);
+      inbox_.push_back(m);
+    });
     const bool ok = ws->connect_to_peer(relay, std::chrono::milliseconds(8000));
     std::fprintf(stderr, "arigl: conference: %s %s as '%s' (room '%s')\n",
                  ok ? "connected to" : "could NOT reach relay", relay, self.c_str(), room.c_str());
+    // ?synthetic=1 (the host page sets CVC_ARIADNE_SYNTHETIC_CAM) drives the self-cam from a
+    // hardware-free MJPEG test pattern instead of the real camera, so the conference — peer video
+    // included — can be exercised in a browser with no camera.
+    const char *synthEnv = std::getenv("CVC_ARIADNE_SYNTHETIC_CAM");
+    const std::string synth = (synthEnv && *synthEnv && std::string(synthEnv) != "0") ? "1" : "0";
     std::vector<std::string> ce;
     ari::run_init(app, prefix,
                   "(state-set \"conf.room\" \"" + room + "\") (state-set \"conf.self\" \"" + self +
-                      "\")",
+                      "\") (state-set \"cam_synthetic\" \"" + synth + "\")",
                   &ce);
     for (const std::string &e : ce)
       std::fprintf(stderr, "arigl: conference init: %s\n", e.c_str());
@@ -235,12 +277,93 @@ struct ConferenceSession {
     return true;
   }
   void pump() {
-    if (ws)
-      ws->pump_all();
+    if (!ws)
+      return;
+    ws->pump_all();
+    forward_self_cam();
+    drain_inbox();
   }
   void stop() {
+    proxies_.clear(); // close the decode proxies before the transport/shard go away
+    pub_sub_.reset();
     if (ws)
       ws->stop();
+  }
+
+  // Forward the newest frame of the local camera stream to the relay, which fans it to the other
+  // participants. Latest-mode: we send the freshest frame at pump cadence (dropping intermediates),
+  // which is right for live video and self-rate-limits to the frame loop.
+  void forward_self_cam() {
+    if (!app_)
+      return;
+    const std::string token = cvc::state::instance(*app_)(prefix_ + ".cam_token").value();
+    if (token.empty())
+      return;
+    if (token != pub_token_) { // the .ari (re)opened the camera stream — rebind
+      pub_token_ = token;
+      pub_sub_.reset();
+      pub_last_seq_ = -1;
+    }
+    auto &reg = cvc::ariadne::stream::stream_registry::for_app(*app_);
+    if (!pub_sub_) {
+      cvc::ariadne::stream::stream_channel *ch = reg.lookup(pub_token_);
+      if (!ch)
+        return; // the stream is not open yet
+      pub_sub_ = ch->subscribe(cvc::ariadne::stream::deliver_mode::latest, 1);
+    }
+    cvc::ariadne::stream::frame_ptr f = pub_sub_->latest();
+    if (!f || f->seq <= pub_last_seq_)
+      return;
+    cvc::ws_media_frame mf;
+    mf.origin_node_id = pid_;
+    mf.stream_id = "camera";
+    mf.codec = f->format.codec;
+    mf.width = static_cast<std::uint32_t>(f->format.w);
+    mf.height = static_cast<std::uint32_t>(f->format.h);
+    mf.seq = f->seq;
+    mf.pts_seconds = f->pts_seconds;
+    mf.payload.assign(f->data, f->data + f->size);
+    ws->publish_media_frame(mf);
+    pub_last_seq_ = f->seq;
+  }
+
+  // Route each queued peer frame into its per-(origin,kind) decode proxy (opened lazily on the first
+  // frame), publishing the proxy token so the .ari binds that peer's tile. publish_external injects
+  // the bytes without a pool slab, so the proxy's format is just the descriptor.
+  void drain_inbox() {
+    std::vector<cvc::ws_media_frame> batch;
+    {
+      std::lock_guard<std::mutex> lk(media_mu_);
+      batch.swap(inbox_);
+    }
+    for (cvc::ws_media_frame &m : batch) {
+      if (m.origin_node_id.empty() || m.origin_node_id == pid_)
+        continue; // never render ourselves as a peer
+      const std::string key = m.origin_node_id + "|" + m.stream_id;
+      auto it = proxies_.find(key);
+      if (it == proxies_.end()) {
+        if (m.width == 0 || m.height == 0)
+          continue; // need a size to open the proxy
+        cvc::ariadne::stream::stream_params p;
+        p.id = "peer_" + m.origin_node_id + "_" + m.stream_id; // origin is already a safe node id
+        p.format.kind = cvc::ariadne::stream::frame_kind::video_raw;
+        p.format.codec = m.codec.empty() ? std::string("mjpeg") : m.codec;
+        p.format.w = static_cast<int>(m.width);
+        p.format.h = static_cast<int>(m.height);
+        p.format.stride = static_cast<int>(m.width) * 4; // sizes the descriptor; bytes alias on inject
+        p.expected_subscribers = 1;
+        std::unique_ptr<cvc::ariadne::stream::stream> s =
+            cvc::ariadne::stream::stream::open(*app_, p);
+        if (!s)
+          continue;
+        // Publish the proxy token at the .ari-visible (prefix-relative) key the peer tile binds to.
+        cvc::state::instance(*app_)(prefix_ + "." + media_token_key(m.origin_node_id, m.stream_id))
+            .value(s->token());
+        it = proxies_.emplace(key, std::move(s)).first;
+      }
+      auto buf = std::make_shared<std::vector<std::uint8_t>>(std::move(m.payload));
+      it->second->channel().publish_external(buf->data(), buf->size(), m.pts_seconds, buf);
+    }
   }
 #else
   bool active = false;

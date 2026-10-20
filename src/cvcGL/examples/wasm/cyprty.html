@@ -83,6 +83,9 @@
   // own server automatically; a future build could let the user pick a different one.
   const RELAY = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/cyprty-ws';
   const NAME = 'guest-' + Math.random().toString(36).slice(2, 7);
+  // ?synthetic=1 drives the self-cam from a hardware-free MJPEG test pattern instead of the real
+  // camera, so the conference (peer video included) can be tried in a browser with no camera.
+  const SYNTH = new URLSearchParams(location.search).get('synthetic');
 
   var Module = {
     canvas,
@@ -95,6 +98,7 @@
       try {
         ENV.CVC_ARIADNE_RELAY = RELAY;
         ENV.CVC_ARIADNE_NAME = NAME;
+        if (SYNTH && SYNTH !== '0') ENV.CVC_ARIADNE_SYNTHETIC_CAM = '1';
       } catch (e) { console.warn('cyprty: could not set ENV (no conference):', e); }
     }],
     print: t => { stdoutEl.textContent = t.split('\r').pop(); },
@@ -116,7 +120,7 @@
     },
   };
 
-  const V = 'cyprty1';
+  const V = 'cyprty-pv1'; // bump on every redeploy so caches can't serve a stale wasm/js
   async function boot() {
     try {
       const resp = await fetch(DEMO + '.wasm?v=' + V, {cache: 'no-cache'});
