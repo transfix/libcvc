@@ -8,6 +8,7 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
+#include <cstdint>
 #include <cvc/ariadne/stream/frame.h>
 #include <cvc/ariadne/stream/stream_channel.h>
 #include <cvc/ariadne/stream/stream_registry.h>
@@ -16,11 +17,13 @@
 #include <cvc/core/app.h>
 #include <cvc/gl/ariadne/ImGuiBackend.h>
 #include <cvc/gl/ariadne/stream_view_widget.h>
+#include <cvc/gl/jpeg_codec.h> // decode_jpeg_to_rgba (codec "mjpeg")
 #include <cvc/image/image.h>
 #include <exception>
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace cvc {
 namespace gl {
@@ -41,6 +44,22 @@ bool next_stream_frame_image(sx::subscription &sub, std::int64_t &last_seq, cvc:
     return false;
   }
   last_seq = f->seq;
+  return true;
+}
+
+// The "mjpeg" path: the frame bytes are a JPEG (conference video compression). Decode to rgba8 for
+// display. Advances last_seq on every frame examined (including a decode failure) so a bad frame is
+// not retried every tick.
+bool next_stream_frame_image_jpeg(sx::subscription &sub, std::int64_t &last_seq, cvc::image &out) {
+  const sx::frame_ptr f = sub.latest();
+  if (!f || f->seq == last_seq)
+    return false;
+  last_seq = f->seq;
+  std::vector<std::uint8_t> rgba;
+  int w = 0, h = 0;
+  if (!cvc::gl::decode_jpeg_to_rgba(f->data, f->size, rgba, w, h) || w <= 0 || h <= 0)
+    return false;
+  out = cvc::image(w, h, cvc::image::pixel_format::RGBA, cvc::image::data_type::u8, rgba.data());
   return true;
 }
 
@@ -103,7 +122,14 @@ void register_stream_view_widget(ImGuiBackend &backend, cvc::app &app) {
 
         if (s.sub) {
           cvc::image img;
-          if (next_stream_frame_image(*s.sub, s.last_seq, img))
+          // Decode by the stream's codec: "mjpeg" frames are JPEG (network video compression),
+          // everything else is a directly-aliasable raster (rgba8). s.ch_bound is non-null whenever
+          // s.sub is.
+          const std::string &codec = s.ch_bound->format().codec;
+          const bool is_jpeg = (codec == "mjpeg" || codec == "jpeg");
+          const bool got = is_jpeg ? next_stream_frame_image_jpeg(*s.sub, s.last_seq, img)
+                                   : next_stream_frame_image(*s.sub, s.last_seq, img);
+          if (got)
             backend.set_image(token,
                               img); // publish the new frame under the token (COW + keepalive)
         }

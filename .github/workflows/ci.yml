@@ -406,7 +406,7 @@ jobs:
         if: steps.paths.outputs.run == 'true'
         run: |
           node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
-          "$node" build-wasm/bin/ari.js snapshot /terminal_tour.ari --width 100 --height 24 \
+          "$node" build-wasm/bin/ari.js snapshot --width 100 --height 24 /terminal_tour.ari \
             | tee snapshot.txt
           for want in "Controls" "Status" "Layout" "agents: 64" "Belief: < shared >"; do
             grep -qF "$want" snapshot.txt \

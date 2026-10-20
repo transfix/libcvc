@@ -921,7 +921,8 @@ void GraphicsNode::removeGraphicsChild(std::shared_ptr<GraphicsNode> child) {
 
   // Remove from graphics children
   auto it = std::find(m_graphicsChildren.begin(), m_graphicsChildren.end(), child);
-  if (it != m_graphicsChildren.end()) {
+  const bool wasChild = it != m_graphicsChildren.end();
+  if (wasChild) {
     m_graphicsChildren.erase(it);
     child->m_parent = nullptr;
     child->updateTransform();
@@ -936,6 +937,13 @@ void GraphicsNode::removeGraphicsChild(std::shared_ptr<GraphicsNode> child) {
 
   // Also remove as SceneNode child
   removeChild(child);
+
+  // Leaving the tree leaves the scene, mirroring addGraphicsChild(). Last, so
+  // the prop has already left the renderer through the scene above. The node
+  // used to keep its scene, so a host still holding a removed node published its
+  // poses into the scene it had left and posted its work to that scene's queue.
+  if (wasChild)
+    child->setSceneGraph(nullptr);
 
   // Update this node's bounding box after removing child
   if (m_showBBox) {

@@ -1,7 +1,12 @@
 # terminal_tour.ari — a tour of the Ariadne terminal backend (FTXUI, roadmap §16.4).
 #
 #   ari run src/cvc/ariadne/examples/terminal_tour.ari
-#   ari snapshot src/cvc/ariadne/examples/terminal_tour.ari --width 100 --height 30
+#   ari run src/cvc/ariadne/examples/terminal_tour.ari --agents 128 --name ada
+#   ari run src/cvc/ariadne/examples/terminal_tour.ari --help
+#   ari snapshot --width 100 --height 30 src/cvc/ariadne/examples/terminal_tour.ari
+#
+# ari's own flags go before the document; what follows it is the document's, checked against the
+# args: block below (`--help` lists it).
 #
 # Keys: Tab / Shift-Tab (or Up / Down) move focus, Enter or Space activates, Left / Right step a
 # slider or cycle a combo, F10 opens the menu bar, Esc closes a popup or reverts a text edit.
@@ -16,9 +21,17 @@ meta:
   name: Ariadne terminal tour
   min_libcvc: 3.4.0
 
+# The document's own command line. ari parses it into the read-only args.<name> before init: runs;
+# the raw strings are in argv, (state-data-get "argv").
+args:
+  agents: {type: int, default: 64, help: How many agents to start with}
+  name: {type: string, help: Greet this name at start-up}
+
 init: |
-  (state-set "tour.agents" "64")
-  (state-set "tour.log" "ready")
+  (state-set "tour.agents" (state-get "args.agents"))
+  (if (state-exists "args.name")
+      (state-set "tour.log" (str-concat "hello, " (state-get "args.name")))
+      (state-set "tour.log" "ready"))
 
 # on_signal: takes Ctrl-C (SIGINT) over from the host, the way a POSIX handler would: the first
 # press only asks, the second calls (quit), a verb the ari runner provides. Without this block,

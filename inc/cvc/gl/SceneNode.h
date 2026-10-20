@@ -2,9 +2,11 @@
 #define SCENENODE_H
 
 #include <cvc/state/state_object.h>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <vector>
 #include <vtkSmartPointer.h>
 
@@ -33,6 +35,12 @@ class SceneEventSink;
 //      runOnMainThread(), and every queued callback is guarded by a weak_ptr to
 //      the node — if the node is destroyed before the callback runs it is a
 //      no-op instead of a dangling `this`.
+//
+// A node with no scene has no queue, so it has a home thread instead: the one
+// that constructed it, then whichever attached or detached it last. Work on the
+// home thread runs inline; work from any other thread is held on the node until
+// the home thread next runs work there, or until the node is attached, and then
+// runs on that thread. It never runs on the thread that sent it.
 //
 // SceneNode therefore derives from enable_shared_from_this so runOnMainThread()
 // can weak-reference the node. All nodes are created via std::make_shared (see
@@ -99,10 +107,12 @@ protected:
   // that keep the default for some of their children.
   static void pushVisible(SceneNode &child, bool visible);
 
-  // Run work on the SceneGraph's owner thread. On the owner thread (or with no
-  // SceneGraph attached) it runs inline. From any other thread it is marshalled
-  // through the event queue (drained by processEvents()), guarded by a weak_ptr
-  // to this node so it is skipped if the node is destroyed before it runs.
+  // Run work on the SceneGraph's owner thread. On the owner thread it runs
+  // inline. From any other thread it is marshalled through the event queue
+  // (drained by processEvents()), guarded by a weak_ptr to this node so it is
+  // skipped if the node is destroyed before it runs. With no SceneGraph, it runs
+  // inline on the node's home thread and is held from any other (see the class
+  // comment above).
   void runOnMainThread(std::function<void()> func);
 
   // Called by setSceneGraph() after this node's scene changed (attached to a
@@ -128,9 +138,20 @@ private:
   SceneGraph *m_sceneGraph;
   std::weak_ptr<void> m_sceneAlive; // SceneGraph::aliveToken() of m_sceneGraph
   std::weak_ptr<SceneEventSink> m_sceneEvents; // SceneGraph::eventSink() of m_sceneGraph
-  // Guards the pair above: a producer thread may ask for the scene (to marshal
-  // work onto it) while the owner thread attaches or detaches the node.
+  // The thread a node with no scene belongs to: the one that constructed it,
+  // then whichever attached or detached it last.
+  std::thread::id m_homeThread = std::this_thread::get_id();
+  // Guards the pair above and m_homeThread: a producer thread may ask for the
+  // scene (to marshal work onto it) while the owner thread attaches or detaches
+  // the node.
   mutable std::mutex m_sceneMutex;
+
+  // Work that reached this node from another thread while it had no scene.
+  // Held, oldest first, for the home thread or the attach (runHeld()).
+  std::deque<std::function<void()>> m_held;
+  std::mutex m_heldMutex;
+  void hold(std::function<void()> func);
+  void runHeld();
 };
 
 } // namespace gl

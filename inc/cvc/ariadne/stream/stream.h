@@ -116,6 +116,15 @@ public:
   // thread.
   void start_producer(std::unique_ptr<frame_source> source, double hz);
 
+  // Mute control. A muted stream keeps its producer, descriptor and subscribers live but its frames
+  // are blanked at the source (see muted_source) — the mute is honoured only when the attached
+  // source is wrapped in a muted_source bound to mute_flag(). set_muted() is called on the owner
+  // thread (like start_producer/close); muted() and mute_flag() are read from the producer thread,
+  // so the flag is atomic (release on write, acquire on read).
+  void set_muted(bool m) noexcept { muted_.store(m, std::memory_order_release); }
+  bool muted() const noexcept { return muted_.load(std::memory_order_acquire); }
+  const std::atomic<bool> &mute_flag() const noexcept { return muted_; }
+
   // Idempotent. Stops (joins) the producer if one is running, then closes the channel (unblocking
   // consumers), uninstalls the registry token, and marks the descriptor "closed".
   void close();
@@ -145,6 +154,10 @@ private:
   // spurious "closed"/final-seq onto a live stream's channel.
   bool live_ = false;
   std::atomic<bool> closed_{false};
+  // Mute flag (set_muted/muted/mute_flag). A muted_source wrapping the attached source reads this
+  // on the producer thread and blanks each frame while set; declared before source_ so it outlives
+  // the source that references it (source_ destructs first).
+  std::atomic<bool> muted_{false};
   // An optional attached producer and its source (Phase 3). Declared LAST so they destruct FIRST:
   // ~producer_thread stops+joins the worker before source_/channel_/pool_ (which its tick captures)
   // are destroyed. close() also stops the producer up front, before the channel is closed, so the
