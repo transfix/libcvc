@@ -64,7 +64,9 @@ const double kBackground[3] = {0.09, 0.10, 0.12};
 //   the Agents slider 64 -> 65         232 / 144       (one step of a widget's value)
 //   the Widgets window moved 1 px down 15240 / 12167
 // So +-40 a channel, with at most 0.002% of the pixels (13) beyond it, holds across Mesa versions
-// and GPUs and still fails a one-step value change or a widget moved by a pixel.
+// and GPUs and still fails a one-step value change or a widget moved by a pixel. macOS CI's Apple
+// Software Renderer left 3-6 px beyond 40 on windows / menus / grid but 40 on widgets and 467 on
+// scene (edges and shading), so those two have macOS goldens (<name>.macos.png) instead.
 const Tolerance kTolerance{40, 0.00002};
 
 // A scripted pointer for documents whose interesting state needs one (an open menu, a tooltip).

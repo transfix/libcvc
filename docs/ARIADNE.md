@@ -1137,6 +1137,18 @@ defaults to `macos` on Apple. Each comparison prints its largest channel differe
 pixels differ by more than 0 / 8 / 24 / 40, so a CI log shows a platform's spread even when it
 passes.
 
+Measured in CI (2026-10-20):
+
+- Windows' llvmpipe (mesa-dist-win 26.1.7) is within 1 of the goldens everywhere.
+- macOS CI renders with the Apple Software Renderer, which is deterministic but draws edges and
+  shading a little differently. Against the llvmpipe goldens, windows, menus and grid had 3 to 6
+  pixels beyond 40 (they pass), widgets had 40 and scene 467 (they fail).
+- So `widgets.macos.png` and `scene.macos.png` are macOS goldens, and macOS compares those two
+  against its own renderer.
+
+To make or refresh a macOS golden, take `<name>.actual.png` from the failing macOS job's
+`ari-golden-macOS-<lane>` artifact, look at it, and commit it as `<name>.macos.png`.
+
 **On a failure** the test writes `<name>.actual.png` and `<name>.diff.png` to
 `build/src/cvcGL/ari_golden/`. In the diff, mismatches are red (brighter = larger), differences
 within the tolerance are dark blue, and the golden is a dim grey underneath. The log line gives
@@ -1164,7 +1176,8 @@ that directory as the `ari-golden-<OS>-<lane>` artifact.
    `P`). Writing `<name>.png` from any other renderer is refused. With `CVC_GOLDEN_VARIANT` set,
    the run writes that platform's golden instead.
 4. Commit the `.ari` and the `.png` together. After a deliberate rendering change, regenerate
-   the affected goldens the same way, and review the new pictures in the PR.
+   the affected goldens the same way, and review the new pictures in the PR. A document with a
+   `<name>.macos.png` needs that one refreshed too, from the macOS CI artifact (above).
 
 The test skips in a build without ImGui (`CVC_ENABLE_IMGUI`) or the YAML loader, without a GL
 that rasterises, or where ImGui's GL backend cannot start on VTK's context (VTK's EGL fallback
