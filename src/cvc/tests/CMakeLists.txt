@@ -148,6 +148,9 @@ if(CVC_ENABLE_GRPC)
   add_executable(stream_relay_test stream_relay_test.cpp)
   add_executable(room_media_test room_media_test.cpp)
 endif()
+if(CVC_ENABLE_WS)
+  add_executable(state_transport_ws_test state_transport_ws_test.cpp)
+endif()
 add_executable(voxels_test voxels_test.cpp)
 add_executable(volume_test volume_test.cpp)
 add_executable(volren_math_test volren_math_test.cpp)
@@ -1761,6 +1764,17 @@ if(TARGET state_transport_grpc_test)
   list(APPEND TEST_TARGETS state_transport_grpc_test)
 endif()
 
+if(TARGET state_transport_ws_test)
+  target_link_libraries(state_transport_ws_test
+    PRIVATE
+      cvc
+      GTest::gtest
+      GTest::gtest_main
+  )
+  target_compile_features(state_transport_ws_test PRIVATE cxx_std_17)
+  list(APPEND TEST_TARGETS state_transport_ws_test)
+endif()
+
 if(TARGET state_stream_transport_grpc_test)
   target_link_libraries(state_stream_transport_grpc_test
     PRIVATE
@@ -2416,6 +2430,9 @@ if(NOT WIN32)
 endif()
 if(TARGET state_transport_grpc_test)
   cvc_discover_tests(state_transport_grpc_test)
+endif()
+if(TARGET state_transport_ws_test)
+  cvc_discover_tests(state_transport_ws_test)
 endif()
 if(TARGET state_stream_transport_grpc_test)
   cvc_discover_tests(state_stream_transport_grpc_test)
