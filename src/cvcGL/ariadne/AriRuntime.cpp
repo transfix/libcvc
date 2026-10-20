@@ -25,6 +25,7 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+#include <vtkRenderer.h> // the scene background: a gradient reaches the renderer directly
 
 namespace cvc {
 namespace gl {
@@ -44,6 +45,11 @@ class GlSceneAdapter : public ari::SceneAdapter, public StreamBindingSink {
 public:
   GlSceneAdapter(SceneRenderer &view, CameraController &cam) : view_(&view), cam_(&cam) {}
 
+  // Required scene-node customs (cvcGL's registry) before realizing; a missing one skips the scene.
+  bool verify(const ari::LoadResult &loaded, std::vector<std::string> *errors) override {
+    return verify_scene_customs(loaded, errors);
+  }
+
   void realize(const ari::Scene &scene, const std::string &prefix,
                std::vector<std::string> *warns) override {
     // A reload rebuilds every node, so drop the imperative (gl-bind-stream) bindings now (render
@@ -56,7 +62,26 @@ public:
     const cvc::bounding_box bb = view_->scene().computeGraphicsBounds();
     if (!bb.isNull())
       cam_->frameBounds(bb.minx, bb.miny, bb.minz, bb.maxx, bb.maxy, bb.maxz);
+    // The scene's background (a view property): a solid colour, or a top-to-bottom gradient set on
+    // the renderer (SceneRenderer exposes only a flat setBackground).
+    if (scene.has_background) {
+      const auto &t = scene.background_top;
+      const auto &b = scene.background_bottom;
+      vtkRenderer *r = view_->renderer();
+      if (scene.background_gradient && r) {
+        r->SetGradientBackground(true);
+        r->SetBackground(b[0], b[1], b[2]);  // bottom
+        r->SetBackground2(t[0], t[1], t[2]); // top
+      } else {
+        if (r)
+          r->SetGradientBackground(false);
+        view_->setBackground(t[0], t[1], t[2]);
+      }
+    }
   }
+
+  const RealizedScene *realized() const { return haveScene_ ? &realized_ : nullptr; }
+  void set_tick_dt(double dt) { tick_dt_ = dt; } // < 0: the scene clock measures wall time
 
   void sync_visibility(cvc::app &app) override {
     if (haveScene_)
@@ -64,8 +89,8 @@ public:
   }
 
   void tick() override {
-    if (haveScene_)
-      tick_scene(realized_, view_->renderer()); // declarative stream / volren / volslice service
+    if (haveScene_) // declarative stream / volren / volslice service, and the scene clock
+      tick_scene(realized_, view_->renderer(), tick_dt_);
     // Service the imperative (gl-bind-stream) bindings here, on the render thread, right after the
     // declarative ones. They are NOT in realized_.custom_ticks (that vector is rebuilt wholesale on
     // every realize()); this adapter owns them so they survive across frames and are torn down with
@@ -120,6 +145,7 @@ private:
   RealizedScene
       realized_; // owns StageLighting rigs; outlives the render loop (adapter outlives use)
   bool haveScene_ = false;
+  double tick_dt_ = -1.0;
   // (gl-bind-stream) bindings, keyed by node id (one per node; a rebind replaces). Owned here — a
   // per-document instance member on the scene seam, NOT realized_.custom_ticks (rebuilt on reload)
   // and NOT a process-static table. Destroyed with the adapter on the render thread.
@@ -191,7 +217,10 @@ void AriRuntime::set_root(ari::Widget root) { app_rt_.set_root(std::move(root));
 
 void AriRuntime::frame(double dt_seconds) {
   view_->processUIEvents(); // VTK interactor -> ImGui (widget input + camera nav)
+  if (inputPump_)
+    inputPump_(); // the host's own input, delivered this frame
   cam_->update(dt_seconds);
+  static_cast<GlSceneAdapter *>(scene_.get())->set_tick_dt(fixedClock_ ? dt_seconds : -1.0);
   app_rt_.drain(); // queued Ariadne actions + scheduler slice + (via the adapter) scene sync/tick
 }
 
@@ -221,6 +250,22 @@ void AriRuntime::post_key(bool down, const std::string &key, int mods, bool repe
 void AriRuntime::post_pointer(int kind, double x, double y, double dx, double dy, int button,
                               int clicks) {
   app_rt_.post_pointer(kind, x, y, dx, dy, button, clicks);
+}
+
+void AriRuntime::post_input(const ari::InputEvent &e) { app_rt_.runtime().post_input(e); }
+
+bool AriRuntime::post_signal(const std::string &signal, const std::string &source) {
+  return app_rt_.post_signal(signal, source);
+}
+
+void AriRuntime::set_input_pump(std::function<void()> pump) { inputPump_ = std::move(pump); }
+void AriRuntime::set_fixed_clock(bool fixed) { fixedClock_ = fixed; }
+
+ari::AppRuntime &AriRuntime::app_runtime() { return app_rt_; }
+cvc::gl::ImGuiBackend &AriRuntime::backend() { return backend_; }
+
+const RealizedScene *AriRuntime::realized() const {
+  return static_cast<const GlSceneAdapter *>(scene_.get())->realized();
 }
 
 std::vector<std::string> AriRuntime::take_warnings() { return app_rt_.take_warnings(); }
