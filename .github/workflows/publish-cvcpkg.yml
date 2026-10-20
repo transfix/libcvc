@@ -2096,7 +2096,12 @@ jobs:
           # CVC_USING_XMLRPC: parity with the CPU lane -- libcvc-cuda packs
           # include/xmlrpc/ too, so without it the bundle shipped xmlrpc headers for a
           # library it did not contain.
+          # CVC_MSVC_MP=4: compile up to 4 sources at once (CMake/CvcMsvcParallelCompile.cmake).
+          # Serial, the `cvc` target took 50 min here for v3.7.0. The cap, rather than one
+          # process per CPU (20 on sandipaws), is for memory: the box has 16 GB and also runs
+          # the cvcpkg.org Windows builder (about 4 GB was free when checked on 2026-10-20).
           cmake -B build -G "Visual Studio 17 2022" -A x64 `
+            -DCVC_MSVC_MP=4 `
             -T "cuda=$env:CUDA_PATH" `
             -DCMAKE_BUILD_TYPE="$env:CMAKE_CFG" `
             -DCMAKE_CONFIGURATION_TYPES="$env:CMAKE_CFG" `

@@ -37,6 +37,12 @@ message(STATUS "cvcGL version: ${PROJECT_VERSION}")
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Standalone (the cvcgl recipe, the Windows publish lane), take libcvc's MSVC /MP
+# setting. In-tree it already comes from the top-level CMakeLists.txt.
+if(NOT DEFINED libcvc_VERSION AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../CMake/CvcMsvcParallelCompile.cmake")
+  include("${CMAKE_CURRENT_SOURCE_DIR}/../../CMake/CvcMsvcParallelCompile.cmake")
+endif()
+
 if(NOT TARGET cvc::cvc)
   find_package(cvc CONFIG REQUIRED)
 endif()

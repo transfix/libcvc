@@ -142,6 +142,8 @@ if(MSVC)
   # flags variable. Keep quoting so paths with spaces work.
   set(_CVC_MSVC_FI_HDR "${PROJECT_SOURCE_DIR}/inc/cvc/utility/msvc_compat.h")
   string(APPEND CMAKE_CXX_FLAGS " /FI\"${_CVC_MSVC_FI_HDR}\"")
+  # Compile each target's sources in parallel under the VS generators.
+  include("${PROJECT_SOURCE_DIR}/CMake/CvcMsvcParallelCompile.cmake")
 endif()
 
 # Use modern CMake policies
