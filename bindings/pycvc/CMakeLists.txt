@@ -280,6 +280,8 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_dataprep:test_pycvc_dataprep.py
              pycvc_volslice:test_pycvc_volslice.py
              pycvc_nav_train:test_pycvc_nav_train.py
+             pycvc_nav_belief:test_pycvc_nav_belief.py
+             pycvc_nav_routes:test_pycvc_nav_routes.py
              pycvc_integration:test_pycvc_integration.py
              pycvc_proxy_hooks:test_pycvc_proxy_hooks.py
              pycvc_lod:test_pycvc_lod.py

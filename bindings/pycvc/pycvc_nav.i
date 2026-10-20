@@ -16,20 +16,26 @@
 
 %{
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <cvc/nav/belief_material.h>
 #include <cvc/nav/belief_occupancy.h>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/coef_train.h>
 #include <cvc/nav/drive.h>
 #include <cvc/nav/grid_nav.h>
 #include <cvc/nav/coef_energy_net.h>
+#include <cvc/nav/detail/material_ext.h>
 #include <cvc/nav/geom_rollout.h>
 #include <cvc/nav/material.h>
 #include <cvc/nav/material_train.h>
 #include <cvc/nav/nav_stats.h>
+#include <cvc/nav/route_follower.h>
 #include <cvc/nav/sim_thread.h>
 #include <cvc/nav/sim_world.h>
+#include <cvc/nav/vehicle_plant.h>
+#include <cvc/nav/vehicle_route.h>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -104,6 +110,148 @@ PyObject *pycvc_nav_path_array(const std::vector<int> &p) {
   return arr;
 }
 
+// The batched belief sense behind nav_sense_batch and nav_sense_batch_material.
+// `material_seen` ((M,H,W) numpy-bool, mutated in place) and `material_range_m`
+// ((N,) f64) are optional (null / None = not kept); with a mask, *mchg_out receives a
+// fresh (M,) u8 material_changed (new ref). Returns a fresh (N,) i32 flips.
+PyObject *pycvc_nav_sense_impl(PyObject *truth, PyObject *positions, PyObject *headings,
+                               PyObject *range_m, PyObject *n_rays, PyObject *fov_rad,
+                               PyObject *logodds, PyObject *last_visible, PyObject *ever_seen,
+                               PyObject *version, PyObject *agent_map, PyObject *peer_boxes,
+                               PyObject *mover_boxes, double min_x, double min_y, double max_x,
+                               double max_y, double l_occ, double l_free, double l_clamp,
+                               int num_threads, PyObject *material_seen,
+                               PyObject *material_range_m, PyObject **mchg_out) {
+  // (a) In-place planes: borrow + validate (never copy). All three (M,H,W)
+  // blocks must agree; version is (M,).
+  std::vector<npy_intp> s_lo, s_lv, s_es, s_ver;
+  float *lo = static_cast<float *>(pycvc_nav_writable(logodds, NPY_FLOAT, 3, "logodds", s_lo));
+  std::uint8_t *lv = static_cast<std::uint8_t *>(
+      pycvc_nav_writable(last_visible, NPY_BOOL, 3, "last_visible", s_lv));
+  std::uint8_t *es =
+      static_cast<std::uint8_t *>(pycvc_nav_writable(ever_seen, NPY_BOOL, 3, "ever_seen", s_es));
+  std::int32_t *ver =
+      static_cast<std::int32_t *>(pycvc_nav_writable(version, NPY_INT32, 1, "version", s_ver));
+  const int M = static_cast<int>(s_lo[0]), H = static_cast<int>(s_lo[1]),
+            W = static_cast<int>(s_lo[2]);
+  if (s_lv != s_lo || s_es != s_lo || s_ver[0] != M)
+    throw std::invalid_argument("pycvc.nav_sense_batch: logodds/last_visible/ever_seen must "
+                                "share (M,H,W) and version be (M,)");
+  std::uint8_t *ms = nullptr;
+  if (material_seen && material_seen != Py_None) {
+    std::vector<npy_intp> s_ms;
+    ms = static_cast<std::uint8_t *>(
+        pycvc_nav_writable(material_seen, NPY_BOOL, 3, "material_seen", s_ms));
+    if (s_ms != s_lo)
+      throw std::invalid_argument("pycvc.nav_sense_batch: material_seen must be (M,H,W)");
+  }
+
+  // (b) Read-only inputs: FROMANY contiguous copies, tracked for cleanup.
+  std::vector<PyArrayObject *> hold;
+  auto fail = [&](const char *msg) {
+    for (PyArrayObject *h : hold)
+      Py_DECREF(h);
+    throw std::invalid_argument(msg);
+  };
+  auto take = [&](PyObject *o, int typ, int nd) -> PyArrayObject * {
+    PyArrayObject *a = reinterpret_cast<PyArrayObject *>(
+        PyArray_FROMANY(o, typ, nd, nd, NPY_ARRAY_C_CONTIGUOUS));
+    if (!a)
+      fail("pycvc.nav_sense_batch: an input array had the wrong dtype/rank");
+    hold.push_back(a);
+    return a;
+  };
+  PyArrayObject *tr = take(truth, NPY_UINT8, 2);
+  if (PyArray_DIM(tr, 0) != H || PyArray_DIM(tr, 1) != W)
+    fail("pycvc.nav_sense_batch: truth must be (H,W) matching the belief planes");
+  PyArrayObject *po = take(positions, NPY_DOUBLE, 2);
+  const int N = static_cast<int>(PyArray_DIM(po, 0));
+  if (PyArray_DIM(po, 1) != 2)
+    fail("pycvc.nav_sense_batch: positions must be (N,2)");
+  PyArrayObject *he = take(headings, NPY_DOUBLE, 1);
+  PyArrayObject *rg = take(range_m, NPY_DOUBLE, 1);
+  PyArrayObject *nr = take(n_rays, NPY_INT32, 1);
+  PyArrayObject *fv = take(fov_rad, NPY_DOUBLE, 1);
+  PyArrayObject *am = take(agent_map, NPY_INT32, 1);
+  if (PyArray_DIM(he, 0) != N || PyArray_DIM(rg, 0) != N || PyArray_DIM(nr, 0) != N ||
+      PyArray_DIM(fv, 0) != N || PyArray_DIM(am, 0) != N)
+    fail("pycvc.nav_sense_batch: headings/range_m/n_rays/fov_rad/agent_map must all be length N");
+
+  const std::int32_t *peer = nullptr;
+  int kmax = 0;
+  if (peer_boxes && peer_boxes != Py_None) {
+    PyArrayObject *pb = take(peer_boxes, NPY_INT32, 3);
+    if (PyArray_DIM(pb, 0) != N || PyArray_DIM(pb, 2) != 4)
+      fail("pycvc.nav_sense_batch: peer_boxes must be (N,Kmax,4)");
+    kmax = static_cast<int>(PyArray_DIM(pb, 1));
+    peer = static_cast<const std::int32_t *>(PyArray_DATA(pb));
+  }
+  const std::int32_t *mov = nullptr;
+  int n_movers = 0;
+  if (mover_boxes && mover_boxes != Py_None) {
+    PyArrayObject *mb = take(mover_boxes, NPY_INT32, 2);
+    if (PyArray_DIM(mb, 1) != 4)
+      fail("pycvc.nav_sense_batch: mover_boxes must be (Mv,4)");
+    n_movers = static_cast<int>(PyArray_DIM(mb, 0));
+    mov = static_cast<const std::int32_t *>(PyArray_DATA(mb));
+  }
+  // Validate agent_map range before releasing the GIL (a bad index is OOB write).
+  const std::int32_t *amd = static_cast<const std::int32_t *>(PyArray_DATA(am));
+  for (int i = 0; i < N; ++i)
+    if (amd[i] < 0 || amd[i] >= M)
+      fail("pycvc.nav_sense_batch: agent_map has an out-of-range plane index");
+
+  cvc::nav::sense_agents ag;
+  ag.pos = static_cast<const double *>(PyArray_DATA(po));
+  ag.heading = static_cast<const double *>(PyArray_DATA(he));
+  ag.range_m = static_cast<const double *>(PyArray_DATA(rg));
+  ag.fov_rad = static_cast<const double *>(PyArray_DATA(fv));
+  ag.n_rays = static_cast<const std::int32_t *>(PyArray_DATA(nr));
+  ag.agent_map = amd;
+  ag.n = N;
+  const double *mrange = nullptr;
+  if (material_range_m && material_range_m != Py_None) {
+    PyArrayObject *mr = take(material_range_m, NPY_DOUBLE, 1);
+    if (PyArray_DIM(mr, 0) != N)
+      fail("pycvc.nav_sense_batch: material_range_m must be length N");
+    mrange = static_cast<const double *>(PyArray_DATA(mr));
+  }
+  ag.material_range_m = mrange;
+  cvc::nav::belief_planes pl{lo, lv, es, ver, M};
+  PyObject *mchg = nullptr;
+  if (ms) {
+    npy_intp md = M;
+    mchg = PyArray_SimpleNew(1, &md, NPY_UINT8);
+    if (!mchg)
+      fail("pycvc.nav_sense_batch: material_changed alloc failed");
+    pl.material_seen = ms;
+    pl.material_changed =
+        static_cast<std::uint8_t *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(mchg)));
+  }
+
+  npy_intp fd = N;
+  PyObject *flips = PyArray_SimpleNew(1, &fd, NPY_INT32);
+  if (!flips) {
+    Py_XDECREF(mchg);
+    fail("pycvc.nav_sense_batch: flips alloc failed");
+  }
+  std::int32_t *fo =
+      static_cast<std::int32_t *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(flips)));
+
+  const std::uint8_t *trd = static_cast<const std::uint8_t *>(PyArray_DATA(tr));
+  Py_BEGIN_ALLOW_THREADS cvc::nav::sense_batch(trd, H, W, min_x, min_y, max_x, max_y, ag, peer,
+                                               kmax, mov, n_movers, pl, l_occ, l_free, l_clamp,
+                                               fo, num_threads);
+  Py_END_ALLOW_THREADS
+
+      for (PyArrayObject *h : hold) Py_DECREF(h); // planes/version are borrowed (NOT decref'd)
+  if (mchg_out)
+    *mchg_out = mchg;
+  else
+    Py_XDECREF(mchg);
+  return flips;
+}
+
 } // namespace
 %}
 
@@ -117,8 +265,111 @@ PyObject *pycvc_nav_path_array(const std::vector<int> &p) {
 // The same for the bicycle rollout entry points (nav_integrate_bicycle_material*)
 // and their output helpers.
 %ignore pycvc::BikeRolloutArgs;
+// The external-force arrays of the material entry points (cvc::nav::material_ext).
+%ignore pycvc::MaterialExtArgs;
 %ignore pycvc::pycvc_new_f32;
 %ignore pycvc::pycvc_f32;
+
+// The vehicle-route bindings' option dicts: every key known (a typo is an error), every value
+// a number, absent keys keep the C++ default.
+%{
+namespace pycvc_routes {
+
+inline void check_keys(PyObject *d, const char *what, std::initializer_list<const char *> known) {
+  if (!d || d == Py_None)
+    return;
+  if (!PyDict_Check(d))
+    throw std::invalid_argument(std::string("pycvc.nav: ") + what + " must be a dict");
+  PyObject *k, *v;
+  Py_ssize_t pos = 0;
+  while (PyDict_Next(d, &pos, &k, &v)) {
+    const char *name = PyUnicode_Check(k) ? PyUnicode_AsUTF8(k) : nullptr;
+    bool ok = false;
+    for (const char *kn : known)
+      ok = ok || (name && std::strcmp(name, kn) == 0);
+    if (!ok)
+      throw std::invalid_argument(std::string("pycvc.nav: ") + what + " has an unknown key '" +
+                                  (name ? name : "?") + "'");
+  }
+}
+
+inline double num(PyObject *d, const char *key, double def) {
+  if (!d || d == Py_None)
+    return def;
+  PyObject *v = PyDict_GetItemString(d, key);
+  if (!v)
+    return def;
+  const double x = PyFloat_AsDouble(v);
+  if (x == -1.0 && PyErr_Occurred()) {
+    PyErr_Clear();
+    throw std::invalid_argument(std::string("pycvc.nav: '") + key + "' must be a number");
+  }
+  return x;
+}
+
+inline cvc::nav::route_vehicle vehicle_from(PyObject *d) {
+  check_keys(d, "vehicle", {"min_radius", "disc_offsets", "disc_radius", "reverse",
+                            "reverse_cost", "cusp_cost"});
+  cvc::nav::route_vehicle v;
+  v.min_radius = num(d, "min_radius", v.min_radius);
+  v.disc_radius = num(d, "disc_radius", v.disc_radius);
+  v.reverse = num(d, "reverse", v.reverse ? 1.0 : 0.0) != 0.0;
+  v.reverse_cost = num(d, "reverse_cost", v.reverse_cost);
+  v.cusp_cost = num(d, "cusp_cost", v.cusp_cost);
+  if (d && d != Py_None) {
+    if (PyObject *offs = PyDict_GetItemString(d, "disc_offsets")) {
+      PyObject *seq = PySequence_Fast(offs, "pycvc.nav: 'disc_offsets' must be a sequence");
+      if (!seq)
+        throw std::invalid_argument("pycvc.nav: 'disc_offsets' must be a sequence of numbers");
+      const Py_ssize_t n = PySequence_Fast_GET_SIZE(seq);
+      for (Py_ssize_t i = 0; i < n; ++i) {
+        const double x = PyFloat_AsDouble(PySequence_Fast_GET_ITEM(seq, i));
+        if (x == -1.0 && PyErr_Occurred()) {
+          PyErr_Clear();
+          Py_DECREF(seq);
+          throw std::invalid_argument("pycvc.nav: 'disc_offsets' must hold numbers");
+        }
+        v.disc_offsets.push_back(x);
+      }
+      Py_DECREF(seq);
+    }
+  }
+  return v;
+}
+
+inline cvc::nav::route_options options_from(PyObject *d) {
+  check_keys(d, "options", {"step", "headings", "goal_tolerance", "margin", "comfort",
+                            "comfort_cost", "escape", "heuristic_weight", "max_expansions"});
+  cvc::nav::route_options o;
+  o.step = num(d, "step", o.step);
+  o.headings = static_cast<int>(num(d, "headings", o.headings));
+  o.goal_tolerance = num(d, "goal_tolerance", o.goal_tolerance);
+  o.margin = num(d, "margin", o.margin);
+  o.comfort = num(d, "comfort", o.comfort);
+  o.comfort_cost = num(d, "comfort_cost", o.comfort_cost);
+  o.escape = static_cast<int>(num(d, "escape", o.escape));
+  o.heuristic_weight = num(d, "heuristic_weight", o.heuristic_weight);
+  o.max_expansions = static_cast<int>(num(d, "max_expansions", o.max_expansions));
+  return o;
+}
+
+inline cvc::nav::follower_options follower_from(PyObject *d) {
+  check_keys(d, "follower options", {"wheelbase", "max_steer", "lookahead", "manoeuvre_speed",
+                                     "pursuit_speed", "accel", "stop_speed", "cusp_tolerance"});
+  cvc::nav::follower_options o;
+  o.wheelbase = num(d, "wheelbase", o.wheelbase);
+  o.max_steer = num(d, "max_steer", o.max_steer);
+  o.lookahead = num(d, "lookahead", o.lookahead);
+  o.manoeuvre_speed = num(d, "manoeuvre_speed", o.manoeuvre_speed);
+  o.pursuit_speed = num(d, "pursuit_speed", o.pursuit_speed);
+  o.accel = num(d, "accel", o.accel);
+  o.stop_speed = num(d, "stop_speed", o.stop_speed);
+  o.cusp_tolerance = num(d, "cusp_tolerance", o.cusp_tolerance);
+  return o;
+}
+
+} // namespace pycvc_routes
+%}
 
 %inline %{
   namespace pycvc {
@@ -429,102 +680,36 @@ PyObject *pycvc_nav_path_array(const std::vector<int> &p) {
                             PyObject *mover_boxes, double min_x, double min_y, double max_x,
                             double max_y, double l_occ, double l_free, double l_clamp,
                             int num_threads = 0) {
-    // (a) In-place planes: borrow + validate (never copy). All three (M,H,W)
-    // blocks must agree; version is (M,).
-    std::vector<npy_intp> s_lo, s_lv, s_es, s_ver;
-    float *lo = static_cast<float *>(pycvc_nav_writable(logodds, NPY_FLOAT, 3, "logodds", s_lo));
-    std::uint8_t *lv = static_cast<std::uint8_t *>(
-        pycvc_nav_writable(last_visible, NPY_BOOL, 3, "last_visible", s_lv));
-    std::uint8_t *es =
-        static_cast<std::uint8_t *>(pycvc_nav_writable(ever_seen, NPY_BOOL, 3, "ever_seen", s_es));
-    std::int32_t *ver =
-        static_cast<std::int32_t *>(pycvc_nav_writable(version, NPY_INT32, 1, "version", s_ver));
-    const int M = static_cast<int>(s_lo[0]), H = static_cast<int>(s_lo[1]),
-              W = static_cast<int>(s_lo[2]);
-    if (s_lv != s_lo || s_es != s_lo || s_ver[0] != M)
-      throw std::invalid_argument("pycvc.nav_sense_batch: logodds/last_visible/ever_seen must "
-                                  "share (M,H,W) and version be (M,)");
+    return pycvc_nav_sense_impl(truth, positions, headings, range_m, n_rays, fov_rad, logodds,
+                                last_visible, ever_seen, version, agent_map, peer_boxes,
+                                mover_boxes, min_x, min_y, max_x, max_y, l_occ, l_free, l_clamp,
+                                num_threads, nullptr, nullptr, nullptr);
+  }
 
-    // (b) Read-only inputs: FROMANY contiguous copies, tracked for cleanup.
-    std::vector<PyArrayObject *> hold;
-    auto fail = [&](const char *msg) {
-      for (PyArrayObject *h : hold)
-        Py_DECREF(h);
-      throw std::invalid_argument(msg);
-    };
-    auto take = [&](PyObject *o, int typ, int nd) -> PyArrayObject * {
-      PyArrayObject *a = reinterpret_cast<PyArrayObject *>(
-          PyArray_FROMANY(o, typ, nd, nd, NPY_ARRAY_C_CONTIGUOUS));
-      if (!a)
-        fail("pycvc.nav_sense_batch: an input array had the wrong dtype/rank");
-      hold.push_back(a);
-      return a;
-    };
-    PyArrayObject *tr = take(truth, NPY_UINT8, 2);
-    if (PyArray_DIM(tr, 0) != H || PyArray_DIM(tr, 1) != W)
-      fail("pycvc.nav_sense_batch: truth must be (H,W) matching the belief planes");
-    PyArrayObject *po = take(positions, NPY_DOUBLE, 2);
-    const int N = static_cast<int>(PyArray_DIM(po, 0));
-    if (PyArray_DIM(po, 1) != 2)
-      fail("pycvc.nav_sense_batch: positions must be (N,2)");
-    PyArrayObject *he = take(headings, NPY_DOUBLE, 1);
-    PyArrayObject *rg = take(range_m, NPY_DOUBLE, 1);
-    PyArrayObject *nr = take(n_rays, NPY_INT32, 1);
-    PyArrayObject *fv = take(fov_rad, NPY_DOUBLE, 1);
-    PyArrayObject *am = take(agent_map, NPY_INT32, 1);
-    if (PyArray_DIM(he, 0) != N || PyArray_DIM(rg, 0) != N || PyArray_DIM(nr, 0) != N ||
-        PyArray_DIM(fv, 0) != N || PyArray_DIM(am, 0) != N)
-      fail("pycvc.nav_sense_batch: headings/range_m/n_rays/fov_rad/agent_map must all be length N");
-
-    const std::int32_t *peer = nullptr;
-    int kmax = 0;
-    if (peer_boxes && peer_boxes != Py_None) {
-      PyArrayObject *pb = take(peer_boxes, NPY_INT32, 3);
-      if (PyArray_DIM(pb, 0) != N || PyArray_DIM(pb, 2) != 4)
-        fail("pycvc.nav_sense_batch: peer_boxes must be (N,Kmax,4)");
-      kmax = static_cast<int>(PyArray_DIM(pb, 1));
-      peer = static_cast<const std::int32_t *>(PyArray_DATA(pb));
-    }
-    const std::int32_t *mov = nullptr;
-    int n_movers = 0;
-    if (mover_boxes && mover_boxes != Py_None) {
-      PyArrayObject *mb = take(mover_boxes, NPY_INT32, 2);
-      if (PyArray_DIM(mb, 1) != 4)
-        fail("pycvc.nav_sense_batch: mover_boxes must be (Mv,4)");
-      n_movers = static_cast<int>(PyArray_DIM(mb, 0));
-      mov = static_cast<const std::int32_t *>(PyArray_DATA(mb));
-    }
-    // Validate agent_map range before releasing the GIL (a bad index is OOB write).
-    const std::int32_t *amd = static_cast<const std::int32_t *>(PyArray_DATA(am));
-    for (int i = 0; i < N; ++i)
-      if (amd[i] < 0 || amd[i] >= M)
-        fail("pycvc.nav_sense_batch: agent_map has an out-of-range plane index");
-
-    cvc::nav::sense_agents ag;
-    ag.pos = static_cast<const double *>(PyArray_DATA(po));
-    ag.heading = static_cast<const double *>(PyArray_DATA(he));
-    ag.range_m = static_cast<const double *>(PyArray_DATA(rg));
-    ag.fov_rad = static_cast<const double *>(PyArray_DATA(fv));
-    ag.n_rays = static_cast<const std::int32_t *>(PyArray_DATA(nr));
-    ag.agent_map = amd;
-    ag.n = N;
-    cvc::nav::belief_planes pl{lo, lv, es, ver, M};
-
-    npy_intp fd = N;
-    PyObject *flips = PyArray_SimpleNew(1, &fd, NPY_INT32);
-    if (!flips)
-      fail("pycvc.nav_sense_batch: flips alloc failed");
-    std::int32_t *fo =
-        static_cast<std::int32_t *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(flips)));
-
-    const std::uint8_t *trd = static_cast<const std::uint8_t *>(PyArray_DATA(tr));
-    Py_BEGIN_ALLOW_THREADS cvc::nav::sense_batch(trd, H, W, min_x, min_y, max_x, max_y, ag, peer,
-                                                 kmax, mov, n_movers, pl, l_occ, l_free, l_clamp,
-                                                 fo, num_threads);
-    Py_END_ALLOW_THREADS
-
-        for (PyArrayObject *h : hold) Py_DECREF(h); // planes/version are borrowed (NOT decref'd)
-    return flips;
+  // nav_sense_batch plus the belief-material mask (grid_nav.h belief_planes::material_seen):
+  // `material_seen` (M,H,W numpy-bool) is MUTATED IN PLACE like ever_seen; `material_range_m`
+  // is (N,) f64 or None (None, or an entry <= 0, = that agent's sense range). Returns the
+  // tuple (flips (N,) i32, material_changed (M,) u8). A new symbol: GRL-SNAM can probe it.
+  PyObject *nav_sense_batch_material(PyObject *truth, PyObject *positions, PyObject *headings,
+                                     PyObject *range_m, PyObject *n_rays, PyObject *fov_rad,
+                                     PyObject *logodds, PyObject *last_visible,
+                                     PyObject *ever_seen, PyObject *version, PyObject *agent_map,
+                                     PyObject *peer_boxes, PyObject *mover_boxes,
+                                     PyObject *material_seen, PyObject *material_range_m,
+                                     double min_x, double min_y, double max_x, double max_y,
+                                     double l_occ, double l_free, double l_clamp,
+                                     int num_threads = 0) {
+    if (!material_seen || material_seen == Py_None)
+      throw std::invalid_argument("pycvc.nav_sense_batch_material: material_seen is required");
+    PyObject *mchg = nullptr;
+    PyObject *flips = pycvc_nav_sense_impl(
+        truth, positions, headings, range_m, n_rays, fov_rad, logodds, last_visible, ever_seen,
+        version, agent_map, peer_boxes, mover_boxes, min_x, min_y, max_x, max_y, l_occ, l_free,
+        l_clamp, num_threads, material_seen, material_range_m, &mchg);
+    PyObject *tup = PyTuple_Pack(2, flips, mchg);
+    Py_DECREF(flips);
+    Py_DECREF(mchg);
+    return tup;
   }
 
   // Torch-free bilinear SDF sample (the drive's field read). `field` is (M,3,H,W)
@@ -1177,6 +1362,94 @@ PyObject *pycvc_nav_path_array(const std::vector<int> &p) {
     Py_RETURN_NONE;
   }
 
+  // Belief (observed) material on the sim_world (sim_world::set_material_belief). risk/hard
+  // are ONE (H,W) truth plane; one material + gate plane is kept per belief plane, from what
+  // that plane has seen. seen_rule is "raycast" or "disc". Every precondition set_material_belief
+  // throws on is checked here first, before the GIL is released.
+  PyObject *nav_sim_world_set_material_belief(
+      PyObject *handle, PyObject *risk, PyObject *hard, double lam_soft, double lam_hard,
+      double k_sharp, double d_hat_m, double sigma, int gate_enabled, int primitive_count,
+      int horizon_cells, double hard_margin_m, double improvement_margin, double material_trigger,
+      double progress_slack_cells, double unknown_risk, int unknown_hard, int unknown_gate_hard,
+      const char *seen_rule, double material_range_m, int material_every = 1) {
+    cvc::nav::sim_world *sw = sim_world_from(handle);
+    const char *who = "pycvc.nav_sim_world_set_material_belief: ";
+    cvc::nav::belief_material_params bp;
+    bp.unknown_risk = static_cast<float>(unknown_risk);
+    if (unknown_hard != 0 && unknown_hard != 1)
+      throw std::invalid_argument(std::string(who) + "unknown_hard must be 0 or 1");
+    bp.unknown_hard = static_cast<std::uint8_t>(unknown_hard);
+    bp.unknown_gate_hard = unknown_gate_hard != 0;
+    const std::string rule = seen_rule ? seen_rule : "";
+    if (rule == "raycast")
+      bp.rule = cvc::nav::seen_rule::raycast;
+    else if (rule == "disc")
+      bp.rule = cvc::nav::seen_rule::disc;
+    else
+      throw std::invalid_argument(std::string(who) + "seen_rule must be 'raycast' or 'disc'");
+    bp.material_range_m = material_range_m;
+    cvc::nav::validate(bp);
+    if (sw->current_config().freeze_sense)
+      throw std::invalid_argument(std::string(who) + "freeze_sense is on, so nothing is seen");
+    if (material_range_m > sw->current_config().range_m)
+      throw std::invalid_argument(std::string(who) + "material_range_m exceeds the sense range");
+    if (material_every < 1)
+      throw std::invalid_argument(std::string(who) + "material_every must be >= 1");
+    std::vector<PyArrayObject *> hold;
+    auto fail = [&](const std::string &msg) {
+      for (PyArrayObject *h : hold)
+        Py_DECREF(h);
+      throw std::invalid_argument(msg);
+    };
+    auto take = [&](PyObject *o, int typ) -> PyArrayObject * {
+      PyArrayObject *a = reinterpret_cast<PyArrayObject *>(
+          PyArray_FROMANY(o, typ, 1, 2, NPY_ARRAY_C_CONTIGUOUS));
+      if (!a)
+        fail(std::string(who) + "risk/hard had the wrong dtype/rank");
+      hold.push_back(a);
+      return a;
+    };
+    PyArrayObject *r = take(risk, NPY_FLOAT);
+    PyArrayObject *h = take(hard, NPY_UINT8);
+    const npy_intp want = static_cast<npy_intp>(sw->rows()) * sw->cols();
+    if (PyArray_SIZE(r) != want || PyArray_SIZE(h) != want)
+      fail(std::string(who) + "risk/hard must hold rows*cols elements");
+    cvc::nav::material_config mc;
+    mc.lam_soft = static_cast<float>(lam_soft);
+    mc.lam_hard = static_cast<float>(lam_hard);
+    mc.k_sharp = static_cast<float>(k_sharp);
+    mc.d_hat_m = static_cast<float>(d_hat_m);
+    mc.sigma = sigma;
+    mc.gate_enabled = gate_enabled != 0;
+    mc.gate.primitive_count = primitive_count;
+    mc.gate.horizon_cells = horizon_cells;
+    mc.gate.hard_margin_m = hard_margin_m;
+    mc.gate.improvement_margin = improvement_margin;
+    mc.gate.material_trigger = material_trigger;
+    mc.gate.progress_slack_cells = progress_slack_cells;
+    const float *rd = static_cast<const float *>(PyArray_DATA(r));
+    const std::uint8_t *hd = static_cast<const std::uint8_t *>(PyArray_DATA(h));
+    Py_BEGIN_ALLOW_THREADS sw->set_material_belief(rd, hd, mc, bp, material_every);
+    Py_END_ALLOW_THREADS for (PyArrayObject *a : hold) Py_DECREF(a);
+    Py_RETURN_NONE;
+  }
+
+  // Plane m's material seen mask as a fresh (H,W) numpy-bool array; None without belief
+  // material or for an out-of-range m.
+  PyObject *nav_sim_world_material_seen(PyObject *handle, int m) {
+    cvc::nav::sim_world *sw = sim_world_from(handle);
+    const std::uint8_t *src = sw->material_seen(m);
+    if (!src)
+      Py_RETURN_NONE;
+    npy_intp dims[2] = {sw->rows(), sw->cols()};
+    PyObject *arr = PyArray_SimpleNew(2, dims, NPY_BOOL);
+    if (!arr)
+      throw std::runtime_error("pycvc.nav_sim_world_material_seen: alloc failed");
+    std::memcpy(PyArray_DATA(reinterpret_cast<PyArrayObject *>(arr)), src,
+                static_cast<std::size_t>(dims[0] * dims[1]));
+    return arr;
+  }
+
   PyObject *nav_sim_world_clear_material(PyObject *handle) {
     sim_world_from(handle)->clear_material();
     Py_RETURN_NONE;
@@ -1193,6 +1466,22 @@ PyObject *pycvc_nav_path_array(const std::vector<int> &p) {
   // `planes` argument must satisfy.
   PyObject *nav_sim_world_planes(PyObject *handle) {
     return PyLong_FromLong(sim_world_from(handle)->planes());
+  }
+
+  // A copy of belief plane m's planning raster, (rows, cols) uint8: what the agents of that plane
+  // currently treat as blocked (sim_world::belief_occ). A route planned on it uses only what the
+  // agent knows.
+  PyObject *nav_sim_world_belief_occ(PyObject *handle, int m) {
+    cvc::nav::sim_world *sw = sim_world_from(handle);
+    if (m < 0 || m >= sw->planes())
+      throw std::out_of_range("pycvc.nav_sim_world_belief_occ: plane out of range");
+    npy_intp d[2] = {sw->rows(), sw->cols()};
+    PyObject *out = PyArray_SimpleNew(2, d, NPY_UINT8);
+    if (!out)
+      throw std::runtime_error("pycvc.nav_sim_world_belief_occ: alloc failed");
+    std::memcpy(PyArray_DATA(reinterpret_cast<PyArrayObject *>(out)), sw->belief_occ(m),
+                static_cast<std::size_t>(sw->rows()) * sw->cols());
+    return out;
   }
 
   // [n] int32 per-agent belief/material plane id — the map_id set_material
@@ -1228,6 +1517,217 @@ PyObject *pycvc_nav_path_array(const std::vector<int> &p) {
     std::uint8_t *dst = static_cast<std::uint8_t *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(out)));
     for (int i = 0; i < N; ++i)
       dst[i] = g[i];
+    return out;
+  }
+
+  // ── vehicle routes: plan_vehicle_route + route_follower (the plant's P9 R1/R2) ──
+  // A route for a vehicle with a turning radius (reverse legs and cusps included), and a follower
+  // that drives a sim_world's agents along routes. Lengths are in the occupancy grid's world
+  // units. The follower capsule holds a reference to its sim_world capsule, as sim_thread does.
+
+  // (rows,cols) occupancy, bounds, a start pose (x, y, heading rad) and a goal point -> a dict:
+  // reached, poses (M,4) float64 [x, y, heading, reverse], cusps, length, reverse_length,
+  // expansions. `vehicle` / `options` are dicts of route_vehicle / route_options fields.
+  PyObject *nav_plan_vehicle_route(PyObject *occ, double min_x, double min_y, double max_x,
+                                   double max_y, double start_x, double start_y,
+                                   double start_heading, double goal_x, double goal_y,
+                                   PyObject *vehicle = nullptr, PyObject *options = nullptr) {
+    const cvc::nav::route_vehicle v = pycvc_routes::vehicle_from(vehicle);
+    const cvc::nav::route_options o = pycvc_routes::options_from(options);
+    int rows = 0, cols = 0;
+    PyArrayObject *a = pycvc_nav_as_u8(occ, rows, cols);
+    const std::uint8_t *g = static_cast<const std::uint8_t *>(PyArray_DATA(a));
+    cvc::nav::route_pose start;
+    start.x = start_x;
+    start.y = start_y;
+    start.heading = start_heading;
+    cvc::nav::vehicle_route r;
+    Py_BEGIN_ALLOW_THREADS r = cvc::nav::plan_vehicle_route(g, rows, cols, min_x, min_y, max_x,
+                                                            max_y, v, start, goal_x, goal_y, o);
+    Py_END_ALLOW_THREADS Py_DECREF(a);
+    npy_intp dims[2] = {static_cast<npy_intp>(r.poses.size()), 4};
+    PyObject *poses = PyArray_SimpleNew(2, dims, NPY_DOUBLE);
+    if (!poses)
+      throw std::runtime_error("pycvc.nav_plan_vehicle_route: alloc failed");
+    double *dst = static_cast<double *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(poses)));
+    for (const cvc::nav::route_pose &q : r.poses) {
+      *dst++ = q.x;
+      *dst++ = q.y;
+      *dst++ = q.heading;
+      *dst++ = q.reverse ? 1.0 : 0.0;
+    }
+    PyObject *out = Py_BuildValue("{s:O,s:N,s:i,s:d,s:d,s:i}", "reached",
+                                  r.reached ? Py_True : Py_False, "poses", poses, "cusps", r.cusps,
+                                  "length", r.length, "reverse_length", r.reverse_length,
+                                  "expansions", r.expansions);
+    if (!out)
+      throw std::runtime_error("pycvc.nav_plan_vehicle_route: alloc failed");
+    return out;
+  }
+
+  // How far a pose's discs keep from the walls (world units; negative = inside one).
+  double nav_route_clearance(PyObject *occ, double min_x, double min_y, double max_x, double max_y,
+                             double x, double y, double heading, PyObject *vehicle = nullptr) {
+    const cvc::nav::route_vehicle v = pycvc_routes::vehicle_from(vehicle);
+    int rows = 0, cols = 0;
+    PyArrayObject *a = pycvc_nav_as_u8(occ, rows, cols);
+    cvc::nav::route_pose p;
+    p.x = x;
+    p.y = y;
+    p.heading = heading;
+    const double c =
+        cvc::nav::route_clearance(static_cast<const std::uint8_t *>(PyArray_DATA(a)), rows, cols,
+                                  min_x, min_y, max_x, max_y, v, p);
+    Py_DECREF(a);
+    return c;
+  }
+
+  // Agent i's vehicle for nav_plan_vehicle_route and nav_route_follower_create, from the sim's
+  // plant, in world units: None without a plant, else a dict min_radius (the rear axle's tightest
+  // turn, wheelbase / tan(max steer)), disc_offsets and disc_radius (the body's footprint discs,
+  // when the plant has a size), wheelbase, max_steer, and reach (the sim's reach_tol). The same
+  // derivation a C++ host makes from sim_world::plant() and plant_plan_of.
+  PyObject *nav_sim_world_route_vehicle(PyObject *handle, int i) {
+    cvc::nav::sim_world *sw = sim_world_from(handle);
+    if (i < 0 || i >= sw->size())
+      throw std::out_of_range("pycvc.nav_sim_world_route_vehicle: agent index out of range");
+    if (!sw->plant())
+      Py_RETURN_NONE;
+    const cvc::nav::sim_world::config &cfg = sw->current_config();
+    const double S = cfg.scale;
+    const cvc::nav::plant_limits l = sw->plant()->limits(i);
+    const double wheelbase = (l.wheelbase > 0.0f ? l.wheelbase : cfg.veh.L) / S;
+    const double steer = l.max_steer > 0.0f ? l.max_steer : cfg.veh.delta_max;
+    PyObject *offs = PyList_New(0);
+    double disc_radius = 0.0;
+    cvc::nav::sim_world::plant_plan pp;
+    if (sw->plant_plan_of(i, pp)) {
+      disc_radius = pp.body_rr / S;
+      for (const float off : pp.body_offsets) {
+        PyObject *f = PyFloat_FromDouble(off / S);
+        PyList_Append(offs, f);
+        Py_DECREF(f);
+      }
+    }
+    PyObject *out = Py_BuildValue("{s:d,s:N,s:d,s:d,s:d,s:d}", "min_radius",
+                                  wheelbase / std::tan(steer), "disc_offsets", offs, "disc_radius",
+                                  disc_radius, "wheelbase", wheelbase, "max_steer", steer, "reach",
+                                  cfg.reach_tol / S);
+    if (!out)
+      throw std::runtime_error("pycvc.nav_sim_world_route_vehicle: alloc failed");
+    return out;
+  }
+
+  static const char *kRouteFollowerCapsule = "cvc.nav.route_follower";
+
+  static void route_follower_capsule_dtor(PyObject *cap) {
+    delete static_cast<cvc::nav::route_follower *>(PyCapsule_GetPointer(cap, kRouteFollowerCapsule));
+    Py_XDECREF(static_cast<PyObject *>(PyCapsule_GetContext(cap))); // the world, after the follower
+  }
+
+  static cvc::nav::route_follower *route_follower_from(PyObject *cap) {
+    if (!cap || !PyCapsule_CheckExact(cap))
+      throw std::invalid_argument("pycvc.nav_route_follower_*: not a route_follower handle");
+    auto *f =
+        static_cast<cvc::nav::route_follower *>(PyCapsule_GetPointer(cap, kRouteFollowerCapsule));
+    if (!f)
+      throw std::invalid_argument("pycvc.nav_route_follower_*: null handle");
+    return f;
+  }
+
+  static int route_follower_agents(PyObject *cap) {
+    return sim_world_from(static_cast<PyObject *>(PyCapsule_GetContext(cap)))->size();
+  }
+
+  // A follower for every agent of the sim_world `world_handle`; `options` is a dict of
+  // follower_options fields (world units).
+  PyObject *nav_route_follower_create(PyObject *world_handle, PyObject *options = nullptr) {
+    cvc::nav::sim_world *sw = sim_world_from(world_handle); // validates the handle
+    auto *f = new cvc::nav::route_follower(*sw, pycvc_routes::follower_from(options));
+    PyObject *cap = PyCapsule_New(f, kRouteFollowerCapsule, route_follower_capsule_dtor);
+    if (!cap) {
+      delete f;
+      throw std::runtime_error("pycvc.nav_route_follower_create: capsule alloc failed");
+    }
+    PyCapsule_SetContext(cap, world_handle); // keep the world alive under the follower
+    Py_INCREF(world_handle);
+    return cap;
+  }
+
+  // Agent i follows the route `poses`, (M,3) or (M,4) [x, y, heading(, reverse)] as
+  // nav_plan_vehicle_route returns them; it replaces any route the agent had.
+  void nav_route_follower_set(PyObject *cap, int i, PyObject *poses) {
+    cvc::nav::route_follower *f = route_follower_from(cap);
+    if (i < 0 || i >= route_follower_agents(cap))
+      throw std::out_of_range("pycvc.nav_route_follower_set: agent index out of range");
+    PyArrayObject *a = reinterpret_cast<PyArrayObject *>(
+        PyArray_FROMANY(poses, NPY_DOUBLE, 2, 2, NPY_ARRAY_C_CONTIGUOUS));
+    if (!a)
+      throw std::invalid_argument("pycvc.nav_route_follower_set: poses must be an (M,3|4) array");
+    const npy_intp m = PyArray_DIM(a, 0), w = PyArray_DIM(a, 1);
+    if (w != 3 && w != 4) {
+      Py_DECREF(a);
+      throw std::invalid_argument("pycvc.nav_route_follower_set: poses must be (M,3) or (M,4)");
+    }
+    const double *src = static_cast<const double *>(PyArray_DATA(a));
+    cvc::nav::vehicle_route r;
+    r.reached = true;
+    r.poses.resize(static_cast<std::size_t>(m));
+    for (npy_intp k = 0; k < m; ++k) {
+      cvc::nav::route_pose &q = r.poses[static_cast<std::size_t>(k)];
+      q.x = src[k * w];
+      q.y = src[k * w + 1];
+      q.heading = src[k * w + 2];
+      q.reverse = w == 4 && src[k * w + 3] != 0.0;
+    }
+    Py_DECREF(a);
+    f->set(i, r);
+  }
+
+  void nav_route_follower_clear(PyObject *cap, int i) {
+    cvc::nav::route_follower *f = route_follower_from(cap);
+    if (i < 0 || i >= route_follower_agents(cap))
+      throw std::out_of_range("pycvc.nav_route_follower_clear: agent index out of range");
+    f->clear(i);
+  }
+
+  // Before each nav_sim_world_step: retarget or command every following agent.
+  void nav_route_follower_apply(PyObject *cap) { route_follower_from(cap)->apply(); }
+
+  // Every agent's state: a dict of (N,) arrays following (bool), leg (int32), legs (int32),
+  // reversing (bool), done (bool).
+  PyObject *nav_route_follower_status(PyObject *cap) {
+    cvc::nav::route_follower *f = route_follower_from(cap);
+    const int n = route_follower_agents(cap);
+    npy_intp d1 = n;
+    PyObject *fo = PyArray_SimpleNew(1, &d1, NPY_BOOL), *lg = PyArray_SimpleNew(1, &d1, NPY_INT32),
+             *ls = PyArray_SimpleNew(1, &d1, NPY_INT32), *rv = PyArray_SimpleNew(1, &d1, NPY_BOOL),
+             *dn = PyArray_SimpleNew(1, &d1, NPY_BOOL);
+    if (!fo || !lg || !ls || !rv || !dn) {
+      Py_XDECREF(fo);
+      Py_XDECREF(lg);
+      Py_XDECREF(ls);
+      Py_XDECREF(rv);
+      Py_XDECREF(dn);
+      throw std::runtime_error("pycvc.nav_route_follower_status: alloc failed");
+    }
+    const auto u8 = [](PyObject *o) {
+      return static_cast<std::uint8_t *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(o)));
+    };
+    const auto i32 = [](PyObject *o) {
+      return static_cast<std::int32_t *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(o)));
+    };
+    for (int i = 0; i < n; ++i) {
+      u8(fo)[i] = f->following(i) ? 1 : 0;
+      i32(lg)[i] = f->leg(i);
+      i32(ls)[i] = f->legs(i);
+      u8(rv)[i] = f->reversing(i) ? 1 : 0;
+      u8(dn)[i] = f->done(i) ? 1 : 0;
+    }
+    PyObject *out = Py_BuildValue("{s:N,s:N,s:N,s:N,s:N}", "following", fo, "leg", lg, "legs", ls,
+                                  "reversing", rv, "done", dn);
+    if (!out)
+      throw std::runtime_error("pycvc.nav_route_follower_status: alloc failed");
     return out;
   }
 
@@ -1729,6 +2229,183 @@ PyObject *pycvc_nav_path_array(const std::vector<int> &p) {
     Py_END_ALLOW_THREADS for (PyArrayObject *h : hold) Py_DECREF(h);
     std::vector<float> out = mp.stacked();
     return pycvc_nav_view<float>(std::move(out), {6, (long)rows, (long)cols}, DType::Float32);
+  }
+
+  // ── belief (observed) material (cvc/nav/belief_material.h) ───────────────────
+  // NEW symbols. GRL-SNAM can key a capability off nav_belief_material_inputs.
+
+  // (H,W) f32 risk_raw + (H,W) u8 hard + (H,W) u8/bool seen -> the tuple
+  // (risk_b (H,W) f32, hard_b (H,W) u8): the truth where seen, the pinned values elsewhere.
+  PyObject *nav_belief_material_inputs(PyObject *risk_raw, PyObject *hard, PyObject *seen,
+                                       double unknown_risk, int unknown_hard) {
+    std::vector<PyArrayObject *> hold;
+    auto fail = [&](const char *msg) {
+      for (PyArrayObject *h : hold)
+        Py_DECREF(h);
+      throw std::invalid_argument(msg);
+    };
+    auto take = [&](PyObject *o, int typ, int nd) -> PyArrayObject * {
+      PyArrayObject *a = reinterpret_cast<PyArrayObject *>(
+          PyArray_FROMANY(o, typ, nd, nd, NPY_ARRAY_C_CONTIGUOUS));
+      if (!a)
+        fail("pycvc.nav_belief_material_inputs: an input array had the wrong dtype/rank");
+      hold.push_back(a);
+      return a;
+    };
+    PyArrayObject *ra = take(risk_raw, NPY_FLOAT, 2);
+    PyArrayObject *ha = take(hard, NPY_UINT8, 2);
+    PyArrayObject *sa = take(seen, NPY_UINT8, 2);
+    const int rows = static_cast<int>(PyArray_DIM(ra, 0));
+    const int cols = static_cast<int>(PyArray_DIM(ra, 1));
+    if (PyArray_DIM(ha, 0) != rows || PyArray_DIM(ha, 1) != cols ||
+        PyArray_DIM(sa, 0) != rows || PyArray_DIM(sa, 1) != cols)
+      fail("pycvc.nav_belief_material_inputs: risk_raw/hard/seen shapes differ");
+    if (unknown_hard != 0 && unknown_hard != 1)
+      fail("pycvc.nav_belief_material_inputs: unknown_hard must be 0 or 1");
+    cvc::nav::belief_material_params p;
+    p.unknown_risk = static_cast<float>(unknown_risk);
+    p.unknown_hard = static_cast<std::uint8_t>(unknown_hard);
+    try {
+      cvc::nav::validate(p);
+    } catch (const std::invalid_argument &e) {
+      fail(e.what());
+    }
+    npy_intp dims[2] = {rows, cols};
+    PyObject *rb = PyArray_SimpleNew(2, dims, NPY_FLOAT);
+    PyObject *hb = PyArray_SimpleNew(2, dims, NPY_UINT8);
+    if (!rb || !hb) {
+      Py_XDECREF(rb);
+      Py_XDECREF(hb);
+      fail("pycvc.nav_belief_material_inputs: alloc failed");
+    }
+    cvc::nav::belief_material_inputs(
+        static_cast<const float *>(PyArray_DATA(ra)),
+        static_cast<const std::uint8_t *>(PyArray_DATA(ha)),
+        static_cast<const std::uint8_t *>(PyArray_DATA(sa)), rows, cols, p,
+        static_cast<float *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(rb))),
+        static_cast<std::uint8_t *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(hb))));
+    for (PyArrayObject *h : hold)
+      Py_DECREF(h);
+    PyObject *tup = PyTuple_Pack(2, rb, hb);
+    Py_DECREF(rb);
+    Py_DECREF(hb);
+    return tup;
+  }
+
+  // The gate surface on belief planes: (H,W) u8 hard_b, (H,W) u8 occ or None, (H,W) u8 seen
+  // -> the tuple (gate_hard (H,W) u8, clear_m (H,W) f32), where gate_hard = hard_b | occ |
+  // (unknown_gate_hard & !seen) and clear_m is its metres clearance (MaterialRuntime's chain).
+  PyObject *nav_belief_gate_surface(PyObject *hard_b, PyObject *occ, PyObject *seen,
+                                    double cell_w, int unknown_gate_hard) {
+    std::vector<PyArrayObject *> hold;
+    auto fail = [&](const char *msg) {
+      for (PyArrayObject *h : hold)
+        Py_DECREF(h);
+      throw std::invalid_argument(msg);
+    };
+    auto take = [&](PyObject *o, int typ, int nd) -> PyArrayObject * {
+      PyArrayObject *a = reinterpret_cast<PyArrayObject *>(
+          PyArray_FROMANY(o, typ, nd, nd, NPY_ARRAY_C_CONTIGUOUS));
+      if (!a)
+        fail("pycvc.nav_belief_gate_surface: an input array had the wrong dtype/rank");
+      hold.push_back(a);
+      return a;
+    };
+    PyArrayObject *ha = take(hard_b, NPY_UINT8, 2);
+    PyArrayObject *sa = take(seen, NPY_UINT8, 2);
+    const int rows = static_cast<int>(PyArray_DIM(ha, 0));
+    const int cols = static_cast<int>(PyArray_DIM(ha, 1));
+    if (PyArray_DIM(sa, 0) != rows || PyArray_DIM(sa, 1) != cols)
+      fail("pycvc.nav_belief_gate_surface: hard_b/seen shapes differ");
+    const std::uint8_t *od = nullptr;
+    if (occ && occ != Py_None) {
+      PyArrayObject *oa = take(occ, NPY_UINT8, 2);
+      if (PyArray_DIM(oa, 0) != rows || PyArray_DIM(oa, 1) != cols)
+        fail("pycvc.nav_belief_gate_surface: occ shape differs");
+      od = static_cast<const std::uint8_t *>(PyArray_DATA(oa));
+    }
+    cvc::nav::belief_material_params p;
+    p.unknown_gate_hard = unknown_gate_hard != 0;
+    npy_intp dims[2] = {rows, cols};
+    PyObject *gh = PyArray_SimpleNew(2, dims, NPY_UINT8);
+    PyObject *cl = PyArray_SimpleNew(2, dims, NPY_FLOAT);
+    if (!gh || !cl) {
+      Py_XDECREF(gh);
+      Py_XDECREF(cl);
+      fail("pycvc.nav_belief_gate_surface: alloc failed");
+    }
+    const std::uint8_t *hd = static_cast<const std::uint8_t *>(PyArray_DATA(ha));
+    const std::uint8_t *sd = static_cast<const std::uint8_t *>(PyArray_DATA(sa));
+    std::uint8_t *ghd =
+        static_cast<std::uint8_t *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(gh)));
+    float *cld = static_cast<float *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(cl)));
+    Py_BEGIN_ALLOW_THREADS cvc::nav::belief_gate_surface(hd, od, sd, rows, cols, cell_w, p, ghd,
+                                                         cld);
+    Py_END_ALLOW_THREADS for (PyArrayObject *h : hold) Py_DECREF(h);
+    PyObject *tup = PyTuple_Pack(2, gh, cl);
+    Py_DECREF(gh);
+    Py_DECREF(cl);
+    return tup;
+  }
+
+  // seen_rule::disc for one agent: ORs the disc of radius R around world (px, py) into
+  // `seen` ((H,W) numpy-bool, MUTATED IN PLACE). Returns True iff some cell changed.
+  bool nav_seen_disc(PyObject *seen, double px, double py, double R, double min_x, double min_y,
+                     double max_x, double max_y) {
+    std::vector<npy_intp> shp;
+    std::uint8_t *sd =
+        static_cast<std::uint8_t *>(pycvc_nav_writable(seen, NPY_BOOL, 2, "seen", shp));
+    return cvc::nav::seen_disc(px, py, R, static_cast<int>(shp[0]), static_cast<int>(shp[1]),
+                               min_x, min_y, max_x, max_y, sd);
+  }
+
+  // The model's 3-channel belief risk patch for one agent (belief_material.h
+  // material_patch_belief): (H,W) f32 risk (the belief planes' r~), (H,W) u8 hard_b and seen,
+  // the grid's bounds, the world position, the patch's extent in metres and P -> (3,P,P) f32
+  // [r~ | unknown_risk, hard | unknown_hard, seen].
+  ArrayView nav_material_patch_belief(PyObject *risk, PyObject *hard_b, PyObject *seen,
+                                      double min_x, double min_y, double max_x, double max_y,
+                                      double px, double py, double extent_m, int P,
+                                      double unknown_risk, int unknown_hard) {
+    std::vector<PyArrayObject *> hold;
+    auto fail = [&](const char *msg) {
+      for (PyArrayObject *h : hold)
+        Py_DECREF(h);
+      throw std::invalid_argument(msg);
+    };
+    auto take = [&](PyObject *o, int typ) -> PyArrayObject * {
+      PyArrayObject *a = reinterpret_cast<PyArrayObject *>(
+          PyArray_FROMANY(o, typ, 2, 2, NPY_ARRAY_C_CONTIGUOUS));
+      if (!a)
+        fail("pycvc.nav_material_patch_belief: an input array had the wrong dtype/rank");
+      hold.push_back(a);
+      return a;
+    };
+    PyArrayObject *ra = take(risk, NPY_FLOAT);
+    PyArrayObject *ha = take(hard_b, NPY_UINT8);
+    PyArrayObject *sa = take(seen, NPY_UINT8);
+    const int rows = static_cast<int>(PyArray_DIM(ra, 0)), cols = static_cast<int>(PyArray_DIM(ra, 1));
+    if (PyArray_DIM(ha, 0) != rows || PyArray_DIM(ha, 1) != cols || PyArray_DIM(sa, 0) != rows ||
+        PyArray_DIM(sa, 1) != cols)
+      fail("pycvc.nav_material_patch_belief: risk/hard_b/seen shapes differ");
+    if (unknown_hard != 0 && unknown_hard != 1)
+      fail("pycvc.nav_material_patch_belief: unknown_hard must be 0 or 1");
+    cvc::nav::belief_material_params p;
+    p.unknown_risk = static_cast<float>(unknown_risk);
+    p.unknown_hard = static_cast<std::uint8_t>(unknown_hard);
+    std::vector<float> out(static_cast<std::size_t>(3) * (P > 0 ? P : 0) * (P > 0 ? P : 0));
+    try {
+      cvc::nav::material_patch_belief(
+          static_cast<const float *>(PyArray_DATA(ra)),
+          static_cast<const std::uint8_t *>(PyArray_DATA(ha)),
+          static_cast<const std::uint8_t *>(PyArray_DATA(sa)), rows, cols, min_x, min_y, max_x,
+          max_y, px, py, extent_m, P, p, out.data());
+    } catch (const std::invalid_argument &e) {
+      fail(e.what());
+    }
+    for (PyArrayObject *h : hold)
+      Py_DECREF(h);
+    return pycvc_nav_view<float>(std::move(out), {3, (long)P, (long)P}, DType::Float32);
   }
 
   // Frame-wise feasibility witness (BIT-identical to grl_snam.material.witness_gate).
@@ -2297,10 +2974,9 @@ PyObject *nav_matnet_forward(const char *weights_path, PyObject *obs_feats, PyOb
   const int n = static_cast<int>(PyArray_DIM(gfa, 0));
   const int P = static_cast<int>(PyArray_DIM(rpa, 2));
   if (PyArray_DIM(ofa, 1) != 6 || PyArray_DIM(oma, 0) != total || PyArray_DIM(oo, 0) != n + 1 ||
-      PyArray_DIM(gfa, 1) != 4 || PyArray_DIM(rpa, 0) != n || PyArray_DIM(rpa, 1) != 2 ||
-      PyArray_DIM(rpa, 3) != P)
+      PyArray_DIM(gfa, 1) != 4 || PyArray_DIM(rpa, 0) != n || PyArray_DIM(rpa, 3) != P)
     fail("pycvc.nav_matnet_forward: shape mismatch (obs (T,6) mask (T,) offs (n+1,) goal (n,4) "
-         "patch (n,2,P,P))");
+         "patch (n,C,P,P))");
   const int *offs = static_cast<const int *>(PyArray_DATA(oo));
   if (offs[0] != 0 || offs[n] != total)
     fail("pycvc.nav_matnet_forward: obs_offsets must start at 0 and end at total");
@@ -2308,6 +2984,9 @@ PyObject *nav_matnet_forward(const char *weights_path, PyObject *obs_feats, PyOb
   cvc::nav::coef_energy_net model = cvc::nav::coef_energy_net::load(weights_path);
   if (model.patch_size() != P)
     fail("pycvc.nav_matnet_forward: risk_patch P does not match the model's patch_size");
+  if (PyArray_DIM(rpa, 1) != model.risk_channels())
+    fail("pycvc.nav_matnet_forward: risk_patch channels do not match the model's (2, or 3 for a "
+         "version-2 .cvcnm)");
 
   npy_intp dt = total, dn = n;
   PyObject *al = PyArray_SimpleNew(1, &dt, NPY_FLOAT);
@@ -2348,6 +3027,85 @@ PyObject *nav_matnet_forward(const char *weights_path, PyObject *obs_feats, PyOb
   return tup;
 }
 
+// The external force of the material entry points (cvc::nav::material_ext): optional
+// arrays, None (or omitted) for none. Either a force patch, ext_patch (B,K,2,Hp,Wp) f32 on
+// the rollout patch's grid with an optional schedule ext_patch_of_step (B,steps) i32, or
+// per-step values ext_F (B,steps,2) f32 with an optional Jacobian ext_J (B,steps,4) f32.
+// ext_steer is ext_force::steer. Everything is checked here, with the GIL held (the
+// rollouts' own check would throw with the GIL released). `steps` is the stride of the
+// per-step arrays; a VJP's g_fext output takes it, max(H) when neither array gives one.
+struct MaterialExtArgs {
+  std::vector<PyArrayObject *> hold;
+  cvc::nav::material_ext e;
+  bool on = false;
+
+  MaterialExtArgs() = default;
+  MaterialExtArgs(const MaterialExtArgs &) = delete;
+  MaterialExtArgs &operator=(const MaterialExtArgs &) = delete;
+  ~MaterialExtArgs() {
+    for (PyArrayObject *h : hold)
+      Py_DECREF(h);
+  }
+  const cvc::nav::material_ext *ptr() const { return on ? &e : nullptr; }
+
+  static bool none(PyObject *o) { return o == nullptr || o == Py_None; }
+
+  void bind(const char *who, int B, int Hp, int Wp, const int *H, PyObject *patch, PyObject *pos,
+            PyObject *F, PyObject *J, int steer) {
+    auto oops = [&](const std::string &msg) {
+      throw std::invalid_argument(std::string("pycvc.") + who + ": " + msg);
+    };
+    auto take = [&](PyObject *o, int typ, int nd, const char *name) -> PyArrayObject * {
+      PyArrayObject *a = reinterpret_cast<PyArrayObject *>(
+          PyArray_FROMANY(o, typ, nd, nd, NPY_ARRAY_C_CONTIGUOUS));
+      if (!a)
+        oops(std::string(name) + " had the wrong dtype/rank");
+      hold.push_back(a);
+      return a;
+    };
+    int max_H = 0;
+    for (int b = 0; b < B; ++b)
+      max_H = std::max(max_H, H[b]);
+    if (none(patch) && none(F)) {
+      if (!none(pos) || !none(J))
+        oops("ext_patch_of_step needs ext_patch, and ext_J needs ext_F");
+      return;
+    }
+    on = true;
+    e.steer = steer;
+    e.steps = max_H;
+    if (!none(patch)) {
+      PyArrayObject *pa = take(patch, NPY_FLOAT, 5, "ext_patch");
+      if (PyArray_DIM(pa, 0) != B || PyArray_DIM(pa, 2) != 2 || PyArray_DIM(pa, 3) != Hp ||
+          PyArray_DIM(pa, 4) != Wp)
+        oops("ext_patch must be (B,K,2,Hp,Wp) on the rollout patch's grid");
+      e.patch = static_cast<const float *>(PyArray_DATA(pa));
+      e.K = static_cast<int>(PyArray_DIM(pa, 1));
+      if (!none(pos)) {
+        PyArrayObject *sa = take(pos, NPY_INT32, 2, "ext_patch_of_step");
+        if (PyArray_DIM(sa, 0) != B)
+          oops("ext_patch_of_step must be (B,steps)");
+        e.patch_of_step = static_cast<const int *>(PyArray_DATA(sa));
+        e.steps = static_cast<int>(PyArray_DIM(sa, 1));
+      }
+    }
+    if (!none(F)) {
+      PyArrayObject *fa = take(F, NPY_FLOAT, 3, "ext_F");
+      if (PyArray_DIM(fa, 0) != B || PyArray_DIM(fa, 2) != 2)
+        oops("ext_F must be (B,steps,2)");
+      e.F = static_cast<const float *>(PyArray_DATA(fa));
+      e.steps = static_cast<int>(PyArray_DIM(fa, 1));
+      if (!none(J)) {
+        PyArrayObject *ja = take(J, NPY_FLOAT, 3, "ext_J");
+        if (PyArray_DIM(ja, 0) != B || PyArray_DIM(ja, 1) != e.steps || PyArray_DIM(ja, 2) != 4)
+          oops("ext_J must be (B,steps,4), its steps ext_F's");
+        e.J = static_cast<const float *>(PyArray_DATA(ja));
+      }
+    }
+    cvc::nav::detail::validate_ext(e, B, max_H, nullptr, (std::string("pycvc.") + who).c_str());
+  }
+};
+
 // Obstacle-list material surrogate rollout (cvc::nav::integrate_surrogate_material).
 // The faithful torch-free integrator of the source material method (per-obstacle
 // IPC barriers + soft/hard material forces + semi-implicit Euler). B agents, N
@@ -2358,7 +3116,9 @@ PyObject *nav_integrate_surrogate_material(
     PyObject *o0, PyObject *v0, PyObject *goal, PyObject *C, PyObject *R, PyObject *mask,
     PyObject *alphas, PyObject *beta, PyObject *gamma, PyObject *lam_soft, PyObject *lam_hard,
     PyObject *rollout_patch, PyObject *rr, PyObject *d_hat, PyObject *dt, PyObject *H,
-    double margin_factor, double mass, double d_hat_sdf, double k_sharp, int num_threads = 0)
+    double margin_factor, double mass, double d_hat_sdf, double k_sharp, int num_threads = 0,
+    PyObject *ext_patch = nullptr, PyObject *ext_patch_of_step = nullptr,
+    PyObject *ext_F = nullptr, PyObject *ext_J = nullptr, int ext_steer = 1)
 {
   std::vector<PyArrayObject *> hold;
   auto fail = [&](const char *msg) {
@@ -2402,6 +3162,14 @@ PyObject *nav_integrate_surrogate_material(
       PyArray_DIM(pa, 0) != B || PyArray_DIM(pa, 1) != 6 || PyArray_DIM(rra, 0) != B ||
       PyArray_DIM(dha, 0) != B || PyArray_DIM(dta, 0) != B || PyArray_DIM(Ha, 0) != B)
     fail("pycvc.nav_integrate_surrogate_material: shape mismatch");
+  MaterialExtArgs ext;
+  try {
+    ext.bind("nav_integrate_surrogate_material", B, Hp, Wp,
+             static_cast<const int *>(PyArray_DATA(Ha)), ext_patch, ext_patch_of_step, ext_F,
+             ext_J, ext_steer);
+  } catch (const std::exception &x) {
+    fail(x.what());
+  }
 
   npy_intp d2[2] = {B, 2}, d1 = B;
   PyObject *oo = PyArray_SimpleNew(2, d2, NPY_FLOAT);
@@ -2440,7 +3208,7 @@ PyObject *nav_integrate_surrogate_material(
       static_cast<const float *>(PyArray_DATA(rra)), static_cast<const float *>(PyArray_DATA(dha)),
       static_cast<const float *>(PyArray_DATA(dta)),
       static_cast<const int *>(PyArray_DATA(Ha)), B, N, Hp, Wp, p, D(mco), D(cro), D(hco), D(alo),
-      num_threads);
+      num_threads, ext.ptr());
   Py_END_ALLOW_THREADS
   for (PyArrayObject *h : hold)
     Py_DECREF(h);
@@ -2568,11 +3336,16 @@ PyObject *nav_integrate_bicycle_material(
     PyObject *lam_hard, PyObject *rollout_patch, PyObject *rr, PyObject *d_hat, PyObject *dt,
     PyObject *H, double margin_factor, double mass, double d_hat_sdf, double k_sharp, double L,
     double delta_max, double a_max, double a_lat_max, double k_steer, double vmax,
-    int allow_reverse, int num_threads = 0) {
+    int allow_reverse, int num_threads = 0, PyObject *ext_patch = nullptr,
+    PyObject *ext_patch_of_step = nullptr, PyObject *ext_F = nullptr, PyObject *ext_J = nullptr,
+    int ext_steer = 1) {
   BikeRolloutArgs a;
   a.bind("nav_integrate_bicycle_material", o0, th0, sp0, goal, C, R, mask, alphas, beta, gamma,
          lam_soft, lam_hard, rollout_patch, rr, d_hat, dt, H, margin_factor, mass, d_hat_sdf,
          k_sharp, L, delta_max, a_max, a_lat_max, k_steer, vmax, allow_reverse);
+  MaterialExtArgs ext;
+  ext.bind("nav_integrate_bicycle_material", a.B, a.Hp, a.Wp, a.H, ext_patch, ext_patch_of_step,
+           ext_F, ext_J, ext_steer);
   npy_intp d2[2] = {a.B, 2}, d1 = a.B;
   PyObject *out[7] = {nullptr};
   try {
@@ -2592,7 +3365,7 @@ PyObject *nav_integrate_bicycle_material(
       pycvc_f32(out[0]), pycvc_f32(out[1]), pycvc_f32(out[2]), a.goal, a.C, a.R, a.mask, a.alphas,
       a.beta, a.gamma, a.lam_soft, a.lam_hard, a.patch, a.rr, a.d_hat, a.dt, a.H, a.B, a.N, a.Hp,
       a.Wp, a.p, a.v, pycvc_f32(out[3]), pycvc_f32(out[4]), pycvc_f32(out[5]), pycvc_f32(out[6]),
-      num_threads);
+      num_threads, ext.ptr());
   Py_END_ALLOW_THREADS
   PyObject *tup = PyTuple_Pack(7, out[0], out[1], out[2], out[3], out[4], out[5], out[6]);
   for (PyObject *o : out)
@@ -2602,7 +3375,8 @@ PyObject *nav_integrate_bicycle_material(
 
 // The VJP: upstream grads g_oT (B,2), g_thT, g_spT, g_min_clear, g_cum_risk,
 // g_arc_length (B,) -> fresh (g_alphas (B,N), g_beta, g_gamma, g_lam_soft,
-// g_lam_hard (B,)) f32. GIL released.
+// g_lam_hard (B,)) f32, and with an external force and want_g_fext a sixth, g_fext
+// (B,steps,2): dL/dF_ext per step. GIL released.
 PyObject *nav_integrate_bicycle_material_vjp(
     PyObject *o0, PyObject *th0, PyObject *sp0, PyObject *goal, PyObject *C, PyObject *R,
     PyObject *mask, PyObject *alphas, PyObject *beta, PyObject *gamma, PyObject *lam_soft,
@@ -2610,12 +3384,18 @@ PyObject *nav_integrate_bicycle_material_vjp(
     PyObject *H, double margin_factor, double mass, double d_hat_sdf, double k_sharp, double L,
     double delta_max, double a_max, double a_lat_max, double k_steer, double vmax,
     int allow_reverse, PyObject *g_oT, PyObject *g_thT, PyObject *g_spT, PyObject *g_min_clear,
-    PyObject *g_cum_risk, PyObject *g_arc_length, int num_threads = 0) {
+    PyObject *g_cum_risk, PyObject *g_arc_length, int num_threads = 0,
+    PyObject *ext_patch = nullptr, PyObject *ext_patch_of_step = nullptr,
+    PyObject *ext_F = nullptr, PyObject *ext_J = nullptr, int ext_steer = 1,
+    int want_g_fext = 0) {
   const char *who = "nav_integrate_bicycle_material_vjp";
   BikeRolloutArgs a;
   a.bind(who, o0, th0, sp0, goal, C, R, mask, alphas, beta, gamma, lam_soft, lam_hard,
          rollout_patch, rr, d_hat, dt, H, margin_factor, mass, d_hat_sdf, k_sharp, L, delta_max,
          a_max, a_lat_max, k_steer, vmax, allow_reverse);
+  MaterialExtArgs ext;
+  ext.bind(who, a.B, a.Hp, a.Wp, a.H, ext_patch, ext_patch_of_step, ext_F, ext_J, ext_steer);
+  const bool gf = want_g_fext && ext.on;
   PyArrayObject *go = a.take(who, g_oT, NPY_FLOAT, 2), *gth = a.take(who, g_thT, NPY_FLOAT, 1),
                 *gsp = a.take(who, g_spT, NPY_FLOAT, 1), *gm = a.take(who, g_min_clear, NPY_FLOAT, 1),
                 *gc = a.take(who, g_cum_risk, NPY_FLOAT, 1),
@@ -2624,12 +3404,14 @@ PyObject *nav_integrate_bicycle_material_vjp(
       PyArray_DIM(gsp, 0) != a.B || PyArray_DIM(gm, 0) != a.B || PyArray_DIM(gc, 0) != a.B ||
       PyArray_DIM(gar, 0) != a.B)
     throw std::invalid_argument(std::string("pycvc.") + who + ": upstream grad shape mismatch");
-  npy_intp dal[2] = {a.B, a.N}, d1 = a.B;
-  PyObject *out[5] = {nullptr};
+  npy_intp dal[2] = {a.B, a.N}, d1 = a.B, dgf[3] = {a.B, ext.e.steps, 2};
+  PyObject *out[6] = {nullptr};
   try {
     out[0] = pycvc_new_f32(2, dal);
     for (int k = 1; k < 5; ++k)
       out[k] = pycvc_new_f32(1, &d1);
+    if (gf)
+      out[5] = pycvc_new_f32(3, dgf);
   } catch (...) {
     for (PyObject *o : out)
       Py_XDECREF(o);
@@ -2638,17 +3420,21 @@ PyObject *nav_integrate_bicycle_material_vjp(
   std::memset(pycvc_f32(out[0]), 0, sizeof(float) * a.B * a.N);
   for (int k = 1; k < 5; ++k)
     std::memset(pycvc_f32(out[k]), 0, sizeof(float) * a.B);
+  if (gf)
+    std::memset(pycvc_f32(out[5]), 0, sizeof(float) * a.B * ext.e.steps * 2);
   auto F = [](PyArrayObject *x) { return static_cast<const float *>(PyArray_DATA(x)); };
   Py_BEGIN_ALLOW_THREADS
   cvc::nav::integrate_bicycle_material_vjp(
       a.o0, a.th0, a.sp0, a.goal, a.C, a.R, a.mask, a.alphas, a.beta, a.gamma, a.lam_soft,
       a.lam_hard, a.patch, a.rr, a.d_hat, a.dt, a.H, a.B, a.N, a.Hp, a.Wp, a.p, a.v, F(go), F(gth),
       F(gsp), F(gm), F(gc), F(gar), pycvc_f32(out[0]), pycvc_f32(out[1]), pycvc_f32(out[2]),
-      pycvc_f32(out[3]), pycvc_f32(out[4]), num_threads);
+      pycvc_f32(out[3]), pycvc_f32(out[4]), num_threads, ext.ptr(),
+      gf ? pycvc_f32(out[5]) : nullptr);
   Py_END_ALLOW_THREADS
-  PyObject *tup = PyTuple_Pack(5, out[0], out[1], out[2], out[3], out[4]);
+  PyObject *tup = gf ? PyTuple_Pack(6, out[0], out[1], out[2], out[3], out[4], out[5])
+                     : PyTuple_Pack(5, out[0], out[1], out[2], out[3], out[4]);
   for (PyObject *o : out)
-    Py_DECREF(o);
+    Py_XDECREF(o);
   return tup;
 }
 
@@ -2693,6 +3479,7 @@ static MaterialTrainer *material_trainer_from(PyObject *cap) {
 struct MaterialBatchArgs {
   std::vector<PyArrayObject *> hold;
   cvc::nav::material_batch b;
+  MaterialExtArgs ext; // the batch's external force, if any (b.ext)
 
   MaterialBatchArgs() = default;
   MaterialBatchArgs(const MaterialBatchArgs &) = delete;
@@ -2702,7 +3489,8 @@ struct MaterialBatchArgs {
       Py_DECREF(h);
   }
 
-  void bind(const char *who, int model_patch_size, PyObject *obs_feats, PyObject *obs_mask,
+  void bind(const char *who, int model_patch_size, int model_channels, PyObject *obs_feats,
+            PyObject *obs_mask,
             PyObject *goal_feats, PyObject *risk_patch, PyObject *o0, PyObject *v0, PyObject *goal,
             PyObject *C, PyObject *R, PyObject *rollout_patch, PyObject *rr, PyObject *d_hat,
             PyObject *dt, PyObject *H, PyObject *o_tgt, PyObject *v_tgt, PyObject *gamma_o) {
@@ -2742,7 +3530,8 @@ struct MaterialBatchArgs {
               Wp = static_cast<int>(PyArray_DIM(rlpa, 3));
     if (PyArray_DIM(ofa, 0) != B || PyArray_DIM(ofa, 1) != N || PyArray_DIM(ofa, 2) != 6 ||
         PyArray_DIM(oma, 0) != B || PyArray_DIM(oma, 1) != N || PyArray_DIM(gfa, 0) != B ||
-        PyArray_DIM(gfa, 1) != 4 || PyArray_DIM(rpa, 0) != B || PyArray_DIM(rpa, 1) != 2 ||
+        PyArray_DIM(gfa, 1) != 4 || PyArray_DIM(rpa, 0) != B ||
+        PyArray_DIM(rpa, 1) != model_channels ||
         PyArray_DIM(rpa, 3) != P || PyArray_DIM(o0a, 1) != 2 || PyArray_DIM(v0a, 0) != B ||
         PyArray_DIM(v0a, 1) != 2 || PyArray_DIM(ga, 0) != B || PyArray_DIM(ga, 1) != 2 ||
         PyArray_DIM(Ca, 0) != B || PyArray_DIM(Ca, 2) != 2 || PyArray_DIM(Ra, 0) != B ||
@@ -2777,6 +3566,27 @@ struct MaterialBatchArgs {
     b.o_tgt = FD(ota);
     b.v_tgt = FD(vta);
     b.gamma_o = FD(goa);
+  }
+
+  // The batch's external force (MaterialExtArgs), after bind().
+  void bind_ext(const char *who, PyObject *patch, PyObject *pos, PyObject *F, PyObject *J,
+                int steer) {
+    ext.bind(who, b.B, b.Hp, b.Wp, b.H, patch, pos, F, J, steer);
+    b.ext = ext.ptr();
+  }
+
+  // gate_active (B,) u8 or None: the witness gate in training (material_batch::gate_active).
+  void bind_gate(const char *who, PyObject *gate_active) {
+    if (!gate_active || gate_active == Py_None)
+      return;
+    PyArrayObject *g = reinterpret_cast<PyArrayObject *>(
+        PyArray_FROMANY(gate_active, NPY_UINT8, 1, 1, NPY_ARRAY_C_CONTIGUOUS));
+    if (!g)
+      throw std::invalid_argument(std::string("pycvc.") + who + ": gate_active must be (B,) u8");
+    hold.push_back(g);
+    if (PyArray_DIM(g, 0) != b.B)
+      throw std::invalid_argument(std::string("pycvc.") + who + ": gate_active must be (B,)");
+    b.gate_active = static_cast<const std::uint8_t *>(PyArray_DATA(g));
   }
 };
 
@@ -2837,20 +3647,33 @@ PyObject *nav_material_trainer_create(const char *cvcnm_path, double grad_clip =
 }
 
 // One training step over a padded batch. Arrays (C-contiguous): obs_feats
-// (B,N,6) f32, obs_mask (B,N) u8, goal_feats (B,4) f32, risk_patch (B,2,P,P) f32,
+// (B,N,6) f32, obs_mask (B,N) u8, goal_feats (B,4) f32, risk_patch (B,C,P,P) f32 (C the
+// model's risk channels: 2, or 3 for a belief net),
 // o0/v0/goal/o_tgt/v_tgt (B,2) f32, C (B,N,2) f32, R (B,N) f32, rollout_patch
 // (B,6,Hp,Wp) f32, rr/d_hat/dt/gamma_o (B,) f32, H (B,) i32. Applies Adam at lr;
-// returns the scalar loss.
+// returns the scalar loss. ext_* is an external force in the rollouts (MaterialExtArgs:
+// a caller's own force, as the deployed drive_step_material_ext adds it). gate_active (B,) u8
+// (None = ungated) is the witness gate in training: each agent's lam_soft enters the rollouts
+// times its bit (material_batch::gate_active). nav_material_trainer_risk_channels marks a
+// pycvc that takes it.
 PyObject *nav_material_trainer_step(PyObject *handle, PyObject *obs_feats, PyObject *obs_mask,
                                     PyObject *goal_feats, PyObject *risk_patch, PyObject *o0,
                                     PyObject *v0, PyObject *goal, PyObject *C, PyObject *R,
                                     PyObject *rollout_patch, PyObject *rr, PyObject *d_hat,
                                     PyObject *dt, PyObject *H, PyObject *o_tgt, PyObject *v_tgt,
-                                    PyObject *gamma_o, double lr, int num_threads = 0) {
+                                    PyObject *gamma_o, double lr, int num_threads = 0,
+                                    PyObject *ext_patch = nullptr,
+                                    PyObject *ext_patch_of_step = nullptr,
+                                    PyObject *ext_F = nullptr, PyObject *ext_J = nullptr,
+                                    int ext_steer = 1, PyObject *gate_active = nullptr) {
   MaterialTrainer *t = material_trainer_from(handle);
   MaterialBatchArgs ba;
-  ba.bind("nav_material_trainer_step", t->model.patch_size(), obs_feats, obs_mask, goal_feats,
-          risk_patch, o0, v0, goal, C, R, rollout_patch, rr, d_hat, dt, H, o_tgt, v_tgt, gamma_o);
+  ba.bind("nav_material_trainer_step", t->model.patch_size(), t->model.risk_channels(), obs_feats,
+          obs_mask, goal_feats, risk_patch, o0, v0, goal, C, R, rollout_patch, rr, d_hat, dt, H,
+          o_tgt, v_tgt, gamma_o);
+  ba.bind_ext("nav_material_trainer_step", ext_patch, ext_patch_of_step, ext_F, ext_J,
+              ext_steer);
+  ba.bind_gate("nav_material_trainer_step", gate_active);
   // Per-call, like nav_material_trainer_loss: writing num_threads onto t->cfg
   // would make one threaded call change the default for every later step.
   cvc::nav::material_loss_config cfg = t->cfg;
@@ -2883,11 +3706,19 @@ PyObject *nav_material_trainer_loss(PyObject *handle, PyObject *obs_feats, PyObj
                                     PyObject *v0, PyObject *goal, PyObject *C, PyObject *R,
                                     PyObject *rollout_patch, PyObject *rr, PyObject *d_hat,
                                     PyObject *dt, PyObject *H, PyObject *o_tgt, PyObject *v_tgt,
-                                    PyObject *gamma_o, double frozen_eta, int num_threads = 0) {
+                                    PyObject *gamma_o, double frozen_eta, int num_threads = 0,
+                                    PyObject *ext_patch = nullptr,
+                                    PyObject *ext_patch_of_step = nullptr,
+                                    PyObject *ext_F = nullptr, PyObject *ext_J = nullptr,
+                                    int ext_steer = 1, PyObject *gate_active = nullptr) {
   MaterialTrainer *t = material_trainer_from(handle);
   MaterialBatchArgs ba;
-  ba.bind("nav_material_trainer_loss", t->model.patch_size(), obs_feats, obs_mask, goal_feats,
-          risk_patch, o0, v0, goal, C, R, rollout_patch, rr, d_hat, dt, H, o_tgt, v_tgt, gamma_o);
+  ba.bind("nav_material_trainer_loss", t->model.patch_size(), t->model.risk_channels(), obs_feats,
+          obs_mask, goal_feats, risk_patch, o0, v0, goal, C, R, rollout_patch, rr, d_hat, dt, H,
+          o_tgt, v_tgt, gamma_o);
+  ba.bind_ext("nav_material_trainer_loss", ext_patch, ext_patch_of_step, ext_F, ext_J,
+              ext_steer);
+  ba.bind_gate("nav_material_trainer_loss", gate_active);
   cvc::nav::material_loss_config cfg = t->cfg; // don't publish num_threads onto the handle
   cfg.num_threads = num_threads;
 
@@ -2905,6 +3736,12 @@ PyObject *nav_material_trainer_loss(PyObject *handle, PyObject *obs_feats, PyObj
 // back as nav_material_trainer_loss's frozen_eta to reproduce the finite-
 // difference workflow material_train.h documents (the FD must see the same
 // quantile the analytic gradient did). 0.0 before the first step.
+// The trainer's model's risk-patch channels (2, or 3 for a version-2 .cvcnm). Its presence also
+// marks a pycvc whose nav_material_trainer_step / _loss take the trailing gate_active.
+PyObject *nav_material_trainer_risk_channels(PyObject *handle) {
+  return PyLong_FromLong(material_trainer_from(handle)->model.risk_channels());
+}
+
 PyObject *nav_material_trainer_last_eta(PyObject *handle) {
   return PyFloat_FromDouble(static_cast<double>(material_trainer_from(handle)->last_eta));
 }

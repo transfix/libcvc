@@ -158,7 +158,8 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
   if (lr.scene.any()) {
     if (scene_) {
       std::vector<std::string> warns;
-      scene_->realize(lr.scene, prefix_, &warns);
+      if (scene_->verify(lr, &warns)) // a missing required node custom: no half-built scene
+        scene_->realize(lr.scene, prefix_, &warns);
       for (std::string &w : warns)
         lr.warnings.push_back(std::move(w));
     } else {

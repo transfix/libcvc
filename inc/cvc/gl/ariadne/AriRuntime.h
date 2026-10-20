@@ -29,6 +29,8 @@ class CameraController;
 class ImGuiOverlay;
 namespace ariadne {
 
+struct RealizedScene; // scene_realize.h
+
 class AriRuntime {
 public:
   // App + state prefix are taken from the view's scene, so every layer (Runtime, run_init,
@@ -68,6 +70,23 @@ public:
   // --- input seam (document-level on_key/on_pointer residents; VTK-sourced, never SDL) ---
   void post_key(bool down, const std::string &key, int mods = 0, bool repeat = false);
   void post_pointer(int kind, double x, double y, double dx, double dy, int button, int clicks);
+  void post_input(const cvc::ariadne::InputEvent &e);
+  // Route a signal to the document's on_signal: (AppRuntime::post_signal). False = it declares
+  // none, so the host applies the default.
+  bool post_signal(const std::string &signal, const std::string &source = "host");
+  // A host step frame() runs after the VTK input pump and before the camera update and the drain:
+  // where a host feeds its own input (touch gestures, SDL events, trapped OS signals) so the
+  // document sees it this same frame.
+  void set_input_pump(std::function<void()> pump);
+  // Advance the scene clock by frame()'s dt rather than by wall time, so captured frames are
+  // reproducible. Off by default.
+  void set_fixed_clock(bool fixed);
+
+  // --- the parts a host composes with ---
+  cvc::ariadne::AppRuntime &app_runtime(); // e.g. set_document_args before load()
+  cvc::gl::ImGuiBackend &backend();        // e.g. register_widget for a custom ImGui widget
+  // The last load()'s realized scene (its lighting rigs, ...), or null when it had none.
+  const RealizedScene *realized() const;
 
   // --- diagnostics / capabilities ---
   std::vector<std::string> take_warnings();
@@ -82,6 +101,8 @@ private:
   cvc::gl::ImGuiBackend backend_; // DECLARED BEFORE app_rt_ => the Runtime it points at dies first
   std::unique_ptr<cvc::ariadne::SceneAdapter> scene_; // the GL scene seam; before app_rt_
   cvc::ariadne::AppRuntime app_rt_; // owns the neutral bundling; holds scene_.get()
+  std::function<void()> inputPump_;
+  bool fixedClock_ = false;
 };
 
 } // namespace ariadne
