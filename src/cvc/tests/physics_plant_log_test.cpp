@@ -36,6 +36,7 @@
 #include <iterator>
 #include <random>
 #include <string>
+#include <system_error>
 #include <vector>
 
 using namespace cvc::physics;
@@ -223,8 +224,14 @@ TEST(PlantLog, CutsFlightsAndWritesThemAsNpy) {
   const std::string path =
       (std::filesystem::temp_directory_path() / "cvc_plant_log_test.npy").string();
   write_npy(path, f.data, {f.flights, f.rows, static_cast<std::size_t>(kPlanarWidth)});
-  std::ifstream in(path, std::ios::binary);
-  std::vector<char> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  std::vector<char> bytes;
+  {
+    // Closed before the remove below: Windows refuses to delete an open file.
+    std::ifstream in(path, std::ios::binary);
+    bytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+  }
+  std::error_code ec;
+  std::filesystem::remove(path, ec);
   ASSERT_GT(bytes.size(), 10u);
   EXPECT_EQ(std::memcmp(bytes.data(), "\x93NUMPY\x01\x00", 8), 0);
   const std::size_t hl = static_cast<unsigned char>(bytes[8]) |
@@ -235,7 +242,6 @@ TEST(PlantLog, CutsFlightsAndWritesThemAsNpy) {
   EXPECT_NE(header.find("'shape': (4, 26, 8)"), std::string::npos) << header;
   ASSERT_EQ(bytes.size(), 10 + hl + f.data.size() * sizeof(double));
   EXPECT_EQ(std::memcmp(bytes.data() + 10 + hl, f.data.data(), f.data.size() * 8), 0);
-  std::filesystem::remove(path);
 }
 
 // A Humvee slaloming on flat ground through nav and Jolt, logged at the tick.
