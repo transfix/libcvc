@@ -256,6 +256,9 @@ private:
   std::size_t write_media(const media_frame &m, const void *exclude);
   void send_hello_locked(connection &c);
   void send_backfill_locked(connection &c, const std::vector<state_cluster_shard *> &shards);
+  // Relay-only: push the full CURRENT snapshot of each shard to a newly admitted connection, so a late
+  // joiner sees peers already present (the room tree is all remote-origin, so backfill carries nothing).
+  void send_snapshot_locked(connection &c, const std::vector<state_cluster_shard *> &shards);
 
   struct impl;
   std::unique_ptr<impl> _impl;

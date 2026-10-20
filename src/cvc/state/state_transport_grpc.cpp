@@ -885,8 +885,10 @@ void state_transport_grpc::admit_connection(const std::shared_ptr<connection> &c
   // other path releases _shards_mu before touching a connection's
   // write mutex, and keeping that order here avoids introducing a
   // lock cycle.
+  const bool backfill = _backfill_on_connect.load(std::memory_order_acquire);
+  const bool relay = _relay.load(std::memory_order_relaxed);
   std::vector<state_cluster_shard *> shards;
-  if (_backfill_on_connect.load(std::memory_order_acquire)) {
+  if (backfill || relay) {
     std::lock_guard<std::mutex> lk(_shards_mu);
     shards = _shards;
   }
@@ -899,8 +901,14 @@ void state_transport_grpc::admit_connection(const std::shared_ptr<connection> &c
   std::lock_guard<std::mutex> wlk(conn->write_mu);
   register_connection(conn);
   send_hello_locked(*conn);
-  if (!shards.empty())
+  if (backfill && !shards.empty())
     send_backfill_locked(*conn, shards);
+  // A relay pushes its full current state so a LATE-joining client sees peers already in the room (the
+  // live set_relay forwarding only carries writes that happen AFTER this client connects, and the
+  // relay's room tree is all remote-origin so backfill's replay_local yields nothing). Mirrors the WS
+  // relay's send_snapshot_locked — without it a native gRPC client joining a populated room sees no one.
+  if (relay && !shards.empty())
+    send_snapshot_locked(*conn, shards);
 }
 
 void state_transport_grpc::send_hello_locked(connection &c) {
@@ -928,6 +936,45 @@ void state_transport_grpc::send_backfill_locked(connection &c,
       _sent_frames.fetch_add(1, std::memory_order_relaxed);
       _backfilled.fetch_add(1, std::memory_order_relaxed);
     }
+  }
+}
+
+void state_transport_grpc::send_snapshot_locked(connection &c,
+                                                const std::vector<state_cluster_shard *> &shards) {
+  // Relay-only: push the full CURRENT snapshot of each shard as an unsolicited SnapshotResponse
+  // (request_id 0), so a late joiner bootstraps the peers already present. replay_local() cannot do
+  // this on a relay because the room tree it holds is all remote-origin (forwarded from clients). The
+  // receiver applies each entry via on_inbound_snapshot_response's no-waiter path (ingest_snapshot_
+  // entry, a bulk initial load). Mirrors state_transport_ws::send_snapshot_locked.
+  for (auto *s : shards) {
+    if (s == nullptr)
+      continue;
+    const auto snap = s->snapshot();
+    if (snap.empty())
+      continue;
+    pb::Frame f;
+    auto *rsp = f.mutable_snapshot_response();
+    rsp->set_request_id(0);
+    rsp->set_final(true);
+    for (const auto &e : snap) {
+      auto *pe = rsp->add_entries();
+      pe->set_path(e.path);
+      pe->set_string_value(e.string_value);
+      pe->set_comment(e.comment);
+      pe->set_hidden(e.hidden);
+      pe->set_read_only(e.read_only);
+      for (const auto &p : e.properties)
+        (*pe->mutable_properties())[p.first] = p.second;
+      pe->set_type_name(e.type_name);
+      pe->set_origin_node_id(e.origin_node_id);
+      pe->set_sequence(e.sequence);
+      pe->set_data_type_name(e.data_type_name);
+      if (e.data_payload.kind != state_payload_kind::none)
+        set_pb_payload(pe->mutable_data_payload(), e.data_payload);
+    }
+    if (!c.write_locked(f))
+      return; // stream died mid-snapshot; the reader will reap it
+    _sent_frames.fetch_add(1, std::memory_order_relaxed);
   }
 }
 
@@ -1136,10 +1183,12 @@ void state_transport_grpc::on_inbound_snapshot_request(connection *conn,
 void state_transport_grpc::on_inbound_snapshot_response(std::uint64_t request_id,
                                                         const std::vector<snapshot_entry> &entries,
                                                         bool final) {
+  bool matched = false;
   {
     std::lock_guard<std::mutex> lk(_snap_waiters_mu);
     auto it = _snap_waiters.find(request_id);
     if (it != _snap_waiters.end()) {
+      matched = true;
       for (const auto &e : entries)
         it->second->entries.push_back(e);
       if (final)
@@ -1148,6 +1197,33 @@ void state_transport_grpc::on_inbound_snapshot_response(std::uint64_t request_id
   }
   if (final)
     _snap_waiters_cv.notify_all();
+  // An UNSOLICITED snapshot (no pending request — a relay's request_id 0 push to a late joiner, see
+  // send_snapshot_locked) is applied to the local shards as an initial-sync bootstrap, mirroring the
+  // WS relay path, so a native client joining a populated room sees the peers already present. Applied
+  // defensively: a relay snapshot carries its whole shard, including per-client read-only ariadne
+  // ui.docs.* state the joiner already owns, which the local tree is EXPECTED to reject.
+  if (!matched && !entries.empty()) {
+    std::vector<state_cluster_shard *> shards;
+    {
+      std::lock_guard<std::mutex> lk(_shards_mu);
+      shards = _shards;
+    }
+    for (const auto &e : entries)
+      for (auto *s : shards) {
+        if (s == nullptr)
+          continue;
+        try {
+          s->ingest_snapshot_entry(e);
+        } catch (const std::exception &ex) {
+          if (std::string(ex.what()).find("read-only") == std::string::npos)
+            std::fprintf(stderr, "cvc: grpc snapshot ingest skipped path '%s': %s\n", e.path.c_str(),
+                         ex.what());
+        } catch (...) {
+          std::fprintf(stderr, "cvc: grpc snapshot ingest skipped path '%s' (non-std)\n",
+                       e.path.c_str());
+        }
+      }
+  }
 }
 
 void state_transport_grpc::on_inbound_heartbeat(const std::string &node_id,
