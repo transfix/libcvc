@@ -948,6 +948,7 @@ static PyObject *pycvc_gl_stream_stats(const cvc::gl::StreamStats &s) {
 %ignore cvc::gl::LightNode::kind;              // returns Kind
 %ignore cvc::gl::LightNode::target;            // double& out-params -> get_target tuple
 %ignore cvc::gl::LightNode::color;             // double& out-params -> get_color tuple
+%ignore cvc::gl::LightNode::direction;         // double& out-params -> get_direction tuple
 %ignore cvc::gl::LightNode::worldPosition;     // double& out-params -> world_position tuple
 %ignore cvc::gl::LightNode::getProp;           // vtkProp* (always nullptr here)
 %ignore cvc::gl::LightNode::getBoundingBox;    // opaque bbox (empty here)
@@ -984,6 +985,12 @@ static PyObject *pycvc_gl_stream_stats(const cvc::gl::StreamStats &s) {
     double r, g, b;
     $self->color(r, g, b);
     return Py_BuildValue("(ddd)", r, g, b);
+  }
+  // A directional light's (azimuth, elevation) in degrees.
+  PyObject *get_direction() const {
+    double az, el;
+    $self->direction(az, el);
+    return Py_BuildValue("(dd)", az, el);
   }
   // World-space position of the light, resolved through the transform chain.
   PyObject *world_position() const {

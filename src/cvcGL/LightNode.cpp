@@ -205,6 +205,10 @@ void LightNode::setDirection(double azimuthDeg, double elevationDeg) {
   getState("elevation").value(elevationDeg);
   notifyScene();
 }
+void LightNode::direction(double &azimuthDeg, double &elevationDeg) const {
+  azimuthDeg = m_impl->az;
+  elevationDeg = m_impl->el;
+}
 
 void LightNode::setColor(double r, double g, double b) {
   Impl &s = *m_impl;

@@ -1,5 +1,6 @@
 // Prove a LightNode is a real scene node: parenting moves it, hiding kills it,
-// and its settings live in the state tree.
+// its settings live in the state tree, and a directional one shines where its
+// azimuth/elevation say.
 //
 // The parenting case is the whole reason LightNode exists. A light held beside
 // the scene as a plain record cannot ride along with a moving actor; a light
@@ -58,6 +59,24 @@ static void lightPos(vtkRenderer *r, double p[3]) {
     p[1] = q[1];
     p[2] = q[2];
   }
+}
+// The first light's unit vector TOWARDS the light (position minus focal point),
+// which is what VTK lights a non-positional light along. Zero if it has none.
+static void lightDir(vtkRenderer *r, double d[3]) {
+  d[0] = d[1] = d[2] = 0.0;
+  vtkLightCollection *lc = r->GetLights();
+  lc->InitTraversal();
+  if (vtkLight *l = lc->GetNextItem()) {
+    const double *p = l->GetPosition(), *f = l->GetFocalPoint();
+    const double v[3] = {p[0] - f[0], p[1] - f[1], p[2] - f[2]};
+    const double n = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    if (n > 0.0)
+      for (int i = 0; i < 3; ++i)
+        d[i] = v[i] / n;
+  }
+}
+static bool near3(const double a[3], double x, double y, double z) {
+  return std::fabs(a[0] - x) < 1e-6 && std::fabs(a[1] - y) < 1e-6 && std::fabs(a[2] - z) < 1e-6;
 }
 int main() {
   cvc::app app;
@@ -136,6 +155,38 @@ int main() {
   chk(litCount(view.renderer()) == 0, "setVisible(false) alone turns the light off");
   head->setVisible(true);
   chk(litCount(view.renderer()) == on, "setVisible(true) alone brings it back");
+
+  printf("== DIRECTIONAL: a sun is aimed by azimuth/elevation ==\n");
+  // Everything above is a spot. A sun used to be handed the node's position and
+  // its target as position and focal point, both the origin unless moved, so its
+  // direction was a zero vector and it lit nothing; counting it as a light, as the
+  // checks above do, cannot see that. Read the direction itself.
+  head->setVisible(false); // only the sun is live, so the first light is it
+  auto sun = sg.addLight("sun");
+  sun->setKind(cvc::gl::LightNode::Kind::Directional);
+  sun->setDirection(90.0, 45.0); // compass east = from +x, 45 degrees up
+  sg.processEvents();
+  chk(litCount(view.renderer()) == 1, "a directional LightNode reaches the renderer");
+  const double h = std::sqrt(0.5);
+  double d[3];
+  lightDir(view.renderer(), d);
+  printf("     azimuth 90, elevation 45 -> towards the light (%.3f,%.3f,%.3f)\n", d[0], d[1], d[2]);
+  chk(near3(d, h, 0.0, h), "azimuth 90 / elevation 45 shines from +x and 45 degrees up");
+  sun->setDirection(-90.0, 45.0);
+  sg.processEvents();
+  lightDir(view.renderer(), d);
+  chk(near3(d, -h, 0.0, h), "azimuth -90 re-aims it from -x");
+  sun->setDirection(0.0, 90.0);
+  sg.processEvents();
+  lightDir(view.renderer(), d);
+  chk(near3(d, 0.0, 0.0, 1.0), "elevation 90 is straight overhead");
+  // Moving or re-targeting the node must not re-aim a sun: only its angles do.
+  sun->setPosition(40, -30, 5);
+  sun->setTarget(7, 8, 9);
+  sg.processEvents();
+  sg.lightsChanged();
+  lightDir(view.renderer(), d);
+  chk(near3(d, 0.0, 0.0, 1.0), "the node position and target do not aim a sun");
 
   printf("\n%s (%d failure%s)\n", fails ? "FAILED" : "PASSED", fails, fails == 1 ? "" : "s");
   return fails ? 1 : 0;
