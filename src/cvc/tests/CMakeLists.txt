@@ -181,6 +181,15 @@ add_executable(nav_coef_energy_test nav_coef_energy_test.cpp)
 add_executable(nav_material_rollout_grad_test nav_material_rollout_grad_test.cpp)
 add_executable(nav_material_bike_rollout_test nav_material_bike_rollout_test.cpp)
 add_executable(nav_material_ext_test nav_material_ext_test.cpp)
+# ACallbackGivingThePatchIsThePatch samples the force patch here, in its callback, and compares
+# the rollout bit for bit with the library's patch source, built with -ffp-contract=off: build
+# this file the same way, or clang contracts the callback's bilinear sample into FMAs on aarch64
+# and the dynamic rollout differs in the last bits.
+if(NOT MSVC)
+  set_source_files_properties(nav_material_ext_test.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+else()
+  set_source_files_properties(nav_material_ext_test.cpp PROPERTIES COMPILE_OPTIONS "/fp:precise")
+endif()
 add_executable(nav_coef_energy_grad_test nav_coef_energy_grad_test.cpp)
 add_executable(nav_material_rollout_cuda_test nav_material_rollout_cuda_test.cpp)
 add_executable(nav_coef_energy_cuda_test nav_coef_energy_cuda_test.cpp)
