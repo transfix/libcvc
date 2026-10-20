@@ -150,6 +150,37 @@ P4 adds three things to measure and contain the drift:
 2. **A per-tick drift residual,** binned by lateral g and published next to the energy residual.
 3. **Lag-aware governors in the Jolt arm only.**
 
+### The dynamic model's residual (P8a against Jolt)
+
+`cvc::physics::one_tick_residuals` (`cvc/physics/plant_log.h`) measures the drift the same way for
+both models. Each tick, it steps P8a's `diff::dyn_plant` and the kinematic bicycle from Jolt's own
+state, with the command nav held over the tick. The models use the tick's substeps (`nsub = k`) and
+are compared with where Jolt was at the tick's end. The bins are the lateral acceleration Jolt
+measured over the tick.
+
+Ticks are left out when they have a static contact, a wheel off the ground, an impact (above
+1.5 g), or the vehicle at rest. `cvc-plant-log` runs it and prints the bins.
+
+Below: nav's 0.06 s tick (6 substeps), 4 seeds, 60 s each, mu 0.9, measured 2026-10-20. Each cell
+is the position rms in mm, dynamic / kinematic.
+
+| lateral g | Humvee slalom | Humvee city | RoboRacer slalom | RoboRacer city |
+|---|---|---|---|---|
+| 0.0-0.1 | 2.0 / 3.9 | 2.0 / 3.4 | 0.9 / 0.7 | 2.5 / 1.9 |
+| 0.1-0.2 | 5.1 / 11.6 | 4.8 / 11.1 | 3.3 / 5.6 | 4.3 / 4.6 |
+| 0.2-0.3 | 7.1 / 17.9 | 7.0 / 18.1 | 5.0 / 10.7 | 5.8 / 9.4 |
+| 0.3-0.5 | 8.1 / 27.5 | 8.1 / 26.2 | 6.9 / 15.8 | 7.1 / 13.8 |
+| >= 0.5 | 5.2 / 94.0 | 4.5 / 52.0 | 6.5 / 25.1 | 4.8 / 19.0 |
+
+- **Position and heading:** the dynamic model is closer than the kinematic bicycle wherever the tires
+  carry load. Above 0.5 g it is closer by 4-18x.
+- **Speed:** for the RoboRacer the dynamic model is worse, with 0.02-0.12 m/s rms against
+  0.007-0.06. Its 0.1 s drive lag (`dyn_bike_si_of`'s `drive_lag`) is slower than the vehicle's
+  driver model.
+- **Yaw rate:** in the city it is off by 0.1-0.3 rad/s rms.
+
+These are the targets a plant fitted to Jolt has to beat, bin by bin.
+
 ## Status
 
 - **P0** is merged; see the clock roadmap.

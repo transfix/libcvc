@@ -1,0 +1,341 @@
+/*
+  Copyright 2026 The University of Texas at Austin
+
+  This file is part of libcvc.
+
+  libcvc is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License version 2.1 as published by the Free Software Foundation.
+*/
+
+// See plant_log.h.
+
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cvc/nav/detail/dyn_bike.h>
+#include <cvc/nav/dyn_bike.h>
+#include <cvc/nav/sim_world.h>
+#include <cvc/physics/nav_plant.h>
+#include <cvc/physics/plant_log.h>
+#include <fstream>
+#include <limits>
+#include <stdexcept>
+
+namespace cvc {
+namespace physics {
+
+namespace {
+
+constexpr double kG = 9.80665;
+constexpr double kPi = 3.14159265358979323846;
+
+vec3 cross(const vec3 &a, const vec3 &b) {
+  return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+}
+
+vec3 rotate(const quat &q, const vec3 &v) {
+  const vec3 u{q.x, q.y, q.z};
+  const vec3 t = cross(u, v) * 2.0;
+  return v + t * q.w + cross(u, t);
+}
+
+// The rearmost unsteered axle's x, as nav_plant reads the rear axle; 0 without one.
+double rear_axle_x(const vehicle_desc &d) {
+  double rear = 0.0;
+  bool have = false;
+  for (const axle_desc &a : d.axles)
+    if (!a.steered && (!have || a.x < rear)) {
+      rear = a.x;
+      have = true;
+    }
+  return rear;
+}
+
+double wrap(double a) {
+  while (a > kPi)
+    a -= 2.0 * kPi;
+  while (a < -kPi)
+    a += 2.0 * kPi;
+  return a;
+}
+
+// Accumulates one bin's squared residuals.
+struct accum {
+  std::uint64_t n = 0;
+  double p2 = 0.0, pmax = 0.0, h2 = 0.0, hmax = 0.0, s2 = 0.0, smax = 0.0, vy2 = 0.0, r2 = 0.0;
+  void add(double p, double h, double s, double vy, double r) {
+    ++n;
+    p2 += p * p;
+    pmax = std::max(pmax, p);
+    h2 += h * h;
+    hmax = std::max(hmax, h);
+    s2 += s * s;
+    smax = std::max(smax, s);
+    vy2 += vy * vy;
+    r2 += r * r;
+  }
+  residual_bin bin(double lo, double hi) const {
+    residual_bin b;
+    b.lo_g = lo;
+    b.hi_g = hi;
+    b.ticks = n;
+    if (n) {
+      b.position_rms_m = std::sqrt(p2 / n);
+      b.position_max_m = pmax;
+      b.heading_rms_rad = std::sqrt(h2 / n);
+      b.heading_max_rad = hmax;
+      b.speed_rms_mps = std::sqrt(s2 / n);
+      b.speed_max_mps = smax;
+      b.lateral_rms_mps = std::sqrt(vy2 / n);
+      b.yaw_rate_rms = std::sqrt(r2 / n);
+    }
+    return b;
+  }
+};
+
+} // namespace
+
+plant_log::plant_log(const cvc::nav::sim_world &sim, nav_plant &plant) : _sim(sim), _plant(plant) {
+  const cvc::nav::sim_world::config &c = sim.current_config();
+  // The tick is a whole number of physics steps (nav_plant::attach requires it); nav's dt is a
+  // float, so take it from the physics step.
+  const double fixed = plant.physics_world().config().fixed_dt;
+  _dt = std::max(1.0, std::round(c.veh.dt / fixed)) * fixed;
+  // The top speed sim_world plans each vehicle with: its own, capped at nav's.
+  for (int i = 0; i < plant.size(); ++i) {
+    const float lim = plant.limits(i).vmax;
+    const double vn = lim > 0.0f ? std::min(lim, c.veh.vmax) : c.veh.vmax;
+    _vmax.push_back(vn * plant.options().metres_per_world_unit / c.scale);
+  }
+  // nav's accelerations are normalized: (m / metres_per_world_unit) * scale per s^2.
+  _accel_si = plant.options().metres_per_world_unit / c.scale;
+}
+
+planar_sample plant_log::sample(int i) const {
+  const vehicle_state vs = _plant.physics_world().vehicle_state(_plant.vehicle(i));
+  const body_state &b = vs.body;
+  const vehicle_desc &d = _plant.desc(i);
+  const vec3 fwd = rotate(b.rotation, {1.0, 0.0, 0.0});
+  const vec3 com = b.position + rotate(b.rotation, d.center_of_mass);
+  const vec3 rear = b.position + rotate(b.rotation, {rear_axle_x(d), 0.0, 0.0});
+  planar_sample s;
+  s.psi = std::atan2(fwd.y, fwd.x);
+  const double c = std::cos(s.psi), sn = std::sin(s.psi);
+  s.x = com.x;
+  s.y = com.y;
+  s.vx = b.linear_velocity.x * c + b.linear_velocity.y * sn;
+  s.vy = -b.linear_velocity.x * sn + b.linear_velocity.y * c;
+  s.r = b.angular_velocity.z;
+  s.rear_x = rear.x;
+  s.rear_y = rear.y;
+  s.steer = vs.steer;
+  s.grade = std::max(-1.0, std::min(1.0, fwd.z));
+  s.wheels = static_cast<int>(vs.wheels.size());
+  for (const wheel_state &w : vs.wheels)
+    s.wheels_down += w.contact ? 1 : 0;
+  s.grounded = s.wheels_down + 1 >= s.wheels;
+  if (i < static_cast<int>(_vmax.size()))
+    s.vmax = _vmax[i];
+  return s;
+}
+
+void plant_log::start() {
+  const int n = _plant.size();
+  _runs.assign(static_cast<std::size_t>(n), {});
+  for (int i = 0; i < n; ++i)
+    _runs[i].push_back(sample(i));
+}
+
+void plant_log::record() {
+  if (_runs.empty())
+    start();
+  const float *sc = _sim.plant_steer_command();
+  const float *ac = _sim.plant_accel_command();
+  for (int i = 0; i < agents(); ++i) {
+    std::vector<planar_sample> &run = _runs[i];
+    const planar_sample &prev = run.back();
+    planar_sample s = sample(i);
+    s.t = static_cast<double>(run.size()) * _dt;
+    s.psi = prev.psi + wrap(s.psi - prev.psi);
+    s.steer_cmd = sc ? sc[i] : 0.0;
+    s.accel_cmd = ac ? ac[i] * _accel_si : 0.0;
+    const vehicle_desc &d = _plant.desc(i);
+    s.drive = std::min(std::max(s.accel_cmd, -d.max_decel), d.max_accel);
+    s.contacts = _plant.static_contacts_step(i);
+    // The centre of mass's acceleration over the tick, across the mean heading.
+    const double c0 = std::cos(prev.psi), s0 = std::sin(prev.psi);
+    const double c1 = std::cos(s.psi), s1 = std::sin(s.psi);
+    const double vwx0 = prev.vx * c0 - prev.vy * s0, vwy0 = prev.vx * s0 + prev.vy * c0;
+    const double vwx1 = s.vx * c1 - s.vy * s1, vwy1 = s.vx * s1 + s.vy * c1;
+    const double pm = 0.5 * (prev.psi + s.psi);
+    s.a_lat = (-(vwx1 - vwx0) * std::sin(pm) + (vwy1 - vwy0) * std::cos(pm)) / _dt;
+    s.a_lon = ((vwx1 - vwx0) * std::cos(pm) + (vwy1 - vwy0) * std::sin(pm)) / _dt;
+    run.push_back(s);
+  }
+}
+
+plant_residuals one_tick_residuals(const std::vector<std::vector<planar_sample>> &runs, double dt,
+                                   const vehicle_desc &d, double mu, int nsub,
+                                   const std::vector<double> &bins_g) {
+  if (!(dt > 0.0) || nsub < 1)
+    throw std::invalid_argument("cvc::physics::one_tick_residuals: needs dt > 0 and nsub >= 1");
+  for (std::size_t k = 1; k < bins_g.size(); ++k)
+    if (!(bins_g[k] > bins_g[k - 1]))
+      throw std::invalid_argument("cvc::physics::one_tick_residuals: bins must ascend");
+  cvc::world_units::normalized_frame si;
+  si.scale = 1.0;
+  const cvc::nav::diff::dyn_bike_params p =
+      cvc::nav::dyn_bike_params_of(nav_plant::dyn_bike_si_of(d, mu), si);
+  const double h = dt / nsub;
+  cvc::nav::diff::bike_veh lim{};
+  lim.L = p.lf + p.lr;
+  lim.delta_max = static_cast<float>(d.max_steer);
+  lim.hdt = static_cast<float>(h);
+  lim.allow_reverse = 1;
+  const double L = d.wheelbase();
+  const std::size_t nb = bins_g.size() + 1;
+  std::vector<accum> dyn(nb), kin(nb);
+  plant_residuals out;
+  for (const std::vector<planar_sample> &run : runs) {
+    double a_shadow = 0.0; // the model's drive actuator, run on the commands alone
+    for (std::size_t k = 0; k + 1 < run.size(); ++k) {
+      const planar_sample &s0 = run[k], &s1 = run[k + 1];
+      // Both models keep the speed within the plan's, as sim_world's reference does.
+      const double vmax = s0.vmax > 0.0 ? s0.vmax : 1e3;
+      lim.vmax = static_cast<float>(vmax);
+      // The dynamic model, from the plant's state at the tick's start.
+      cvc::nav::diff::dyn_state<double> m{};
+      m.x = s0.rear_x;
+      m.y = s0.rear_y;
+      m.psi = s0.psi;
+      m.vx = s0.vx;
+      m.vy = s0.vy;
+      m.r = s0.r;
+      m.delta = s0.steer;
+      m.a = a_shadow;
+      for (int j = 0; j < nsub; ++j) {
+        cvc::nav::diff::dyn_state<double> o;
+        cvc::nav::diff::dyn_plant<double>(p, lim, m, s1.steer_cmd, s1.accel_cmd, s0.grade, o);
+        m = o;
+      }
+      a_shadow = m.a;
+      // The kinematic bicycle (D14's reference): the command at once, about the rear axle.
+      double kx = s0.rear_x, ky = s0.rear_y, kth = s0.psi, ksp = s0.vx;
+      for (int j = 0; j < nsub; ++j) {
+        ksp = std::min(std::max(ksp + h * s1.accel_cmd, -0.25 * vmax), vmax);
+        kth = kth + h * (ksp / L) * std::tan(s1.steer_cmd);
+        kx = kx + h * ksp * std::cos(kth);
+        ky = ky + h * ksp * std::sin(kth);
+      }
+      if (s1.contacts > 0) {
+        ++out.skipped_contact;
+        continue;
+      }
+      if (!s0.grounded || !s1.grounded) {
+        ++out.skipped_airborne;
+        continue;
+      }
+      if (std::hypot(s1.a_lat, s1.a_lon) > kImpactG * kG) {
+        ++out.skipped_impact;
+        continue;
+      }
+      if (std::fabs(s0.vx) < 0.2 && std::fabs(s1.vx) < 0.2) {
+        ++out.skipped_rest;
+        continue;
+      }
+      const double g = std::fabs(s1.a_lat) / kG;
+      std::size_t b = 0;
+      while (b < bins_g.size() && g >= bins_g[b])
+        ++b;
+      dyn[b].add(std::hypot(m.x - s1.rear_x, m.y - s1.rear_y), std::fabs(wrap(m.psi - s1.psi)),
+                 std::fabs(m.vx - s1.vx), std::fabs(m.vy - s1.vy), std::fabs(m.r - s1.r));
+      kin[b].add(std::hypot(kx - s1.rear_x, ky - s1.rear_y), std::fabs(wrap(kth - s1.psi)),
+                 std::fabs(ksp - s1.vx), 0.0, 0.0);
+    }
+  }
+  for (std::size_t b = 0; b < nb; ++b) {
+    const double lo = b == 0 ? 0.0 : bins_g[b - 1];
+    const double hi = b < bins_g.size() ? bins_g[b] : std::numeric_limits<double>::infinity();
+    out.dynamic.push_back(dyn[b].bin(lo, hi));
+    out.kinematic.push_back(kin[b].bin(lo, hi));
+  }
+  return out;
+}
+
+flight_set cut_flights(const std::vector<std::vector<planar_sample>> &runs, std::size_t rows,
+                       std::size_t stride, double min_speed, steer_input steer) {
+  if (rows < 2 || stride < 1)
+    throw std::invalid_argument("cvc::physics::cut_flights: needs rows >= 2 and stride >= 1");
+  flight_set f;
+  f.rows = rows;
+  for (std::size_t a = 0; a < runs.size(); ++a) {
+    const std::vector<planar_sample> &run = runs[a];
+    for (std::size_t s = 0; s + rows <= run.size(); s += stride) {
+      bool contact = false, moving = false;
+      double peak = 0.0;
+      for (std::size_t k = s; k < s + rows; ++k) {
+        contact = contact || !run[k].grounded ||
+                  (k > s &&
+                   (run[k].contacts > 0 || std::hypot(run[k].a_lat, run[k].a_lon) > kImpactG * kG));
+        moving = moving || std::hypot(run[k].vx, run[k].vy) > min_speed;
+        if (k > s)
+          peak = std::max(peak, std::fabs(run[k].a_lat) / kG);
+      }
+      if (contact || !moving) {
+        ++f.dropped;
+        continue;
+      }
+      f.peak_lateral_g = std::max(f.peak_lateral_g, peak);
+      for (std::size_t k = s; k < s + rows; ++k) {
+        const planar_sample &q = run[k];
+        const double u_steer = steer == steer_input::command
+                                   ? q.steer_cmd
+                                   : (k > 0 ? 0.5 * (run[k - 1].steer + q.steer) : q.steer);
+        const double row[kPlanarWidth] = {q.x, q.y, q.psi, q.vx, q.vy, q.r, q.drive, u_steer};
+        f.data.insert(f.data.end(), row, row + kPlanarWidth);
+      }
+      f.agent.push_back(static_cast<int>(a));
+      f.first.push_back(static_cast<int>(s));
+      ++f.flights;
+    }
+  }
+  return f;
+}
+
+void write_npy(const std::string &path, const std::vector<double> &data,
+               const std::vector<std::size_t> &shape) {
+  std::size_t n = 1;
+  std::string dims;
+  for (std::size_t k = 0; k < shape.size(); ++k) {
+    n *= shape[k];
+    dims += std::to_string(shape[k]) + (shape.size() == 1 || k + 1 < shape.size() ? "," : "");
+    if (k + 1 < shape.size())
+      dims += " ";
+  }
+  if (n != data.size())
+    throw std::runtime_error("cvc::physics::write_npy: the shape does not match the data");
+  std::string header = "{'descr': '<f8', 'fortran_order': False, 'shape': (" + dims + "), }";
+  // Pad with spaces to a multiple of 64 bytes with the 10-byte preamble and the newline.
+  while ((10 + header.size() + 1) % 64 != 0)
+    header += ' ';
+  header += '\n';
+  std::ofstream out(path, std::ios::binary);
+  if (!out)
+    throw std::runtime_error("cvc::physics::write_npy: cannot write " + path);
+  const unsigned char magic[8] = {0x93, 'N', 'U', 'M', 'P', 'Y', 1, 0};
+  out.write(reinterpret_cast<const char *>(magic), 8);
+  const std::uint16_t hl = static_cast<std::uint16_t>(header.size());
+  const unsigned char len[2] = {static_cast<unsigned char>(hl & 0xff),
+                                static_cast<unsigned char>(hl >> 8)};
+  out.write(reinterpret_cast<const char *>(len), 2);
+  out.write(header.data(), static_cast<std::streamsize>(header.size()));
+  // Little-endian doubles: every libcvc target is little-endian.
+  out.write(reinterpret_cast<const char *>(data.data()),
+            static_cast<std::streamsize>(data.size() * sizeof(double)));
+  if (!out)
+    throw std::runtime_error("cvc::physics::write_npy: short write to " + path);
+}
+
+} // namespace physics
+} // namespace cvc
