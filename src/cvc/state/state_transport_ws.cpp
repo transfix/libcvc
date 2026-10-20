@@ -21,6 +21,7 @@
 #include "proto/state_transport.pb.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cvc/state/state_cluster_shard.h>
 #include <cvc/state/state_transport_ws.h>
 #include <stdexcept>
@@ -620,6 +621,52 @@ void state_transport_ws::deliver_inbound(connection *c, const void *data, std::s
   } else if (in.has_message()) {
     on_inbound_message(decode_message(in.message()), c);
     _recv_messages.fetch_add(1, std::memory_order_relaxed);
+  } else if (in.has_snapshot_response()) {
+    // A relay pushed its full current state (request_id 0) so this late-joining client sees the
+    // peers already in the room. Apply each entry as an initial-sync bootstrap. The conference uses
+    // a single shard/cluster, so applying to every registered shard is correct here; the entries do
+    // not carry a cluster id.
+    const auto &sr = in.snapshot_response();
+    std::vector<state_cluster_shard *> shards;
+    {
+      std::lock_guard<std::mutex> lk(_shards_mu);
+      shards = _shards;
+    }
+    for (const auto &e : sr.entries()) {
+      state_transport::snapshot_entry se;
+      se.path = e.path();
+      se.string_value = e.string_value();
+      se.comment = e.comment();
+      se.hidden = e.hidden();
+      se.read_only = e.read_only();
+      for (const auto &p : e.properties())
+        se.properties[p.first] = p.second;
+      se.type_name = e.type_name();
+      se.origin_node_id = e.origin_node_id();
+      se.sequence = e.sequence();
+      se.data_type_name = e.data_type_name();
+      if (e.has_data_payload())
+        read_pb_payload(e.data_payload(), se.data_payload);
+      for (auto *s : shards) {
+        if (s == nullptr)
+          continue;
+        // One bootstrap entry the local tree rejects must not take down the whole client: apply
+        // each defensively so the rest of the roster still loads. A relay snapshot carries its whole
+        // shard, which includes per-client read-only UI state the joiner already owns (e.g. the
+        // ariadne runtime's ui.docs.* argv) — those are EXPECTED to be rejected, so skip them
+        // quietly and only surface genuinely unexpected failures.
+        try {
+          s->ingest_snapshot_entry(se);
+        } catch (const std::exception &ex) {
+          if (std::string(ex.what()).find("read-only") == std::string::npos)
+            std::fprintf(stderr, "cvc: ws snapshot ingest skipped path '%s': %s\n", se.path.c_str(),
+                         ex.what());
+        } catch (...) {
+          std::fprintf(stderr, "cvc: ws snapshot ingest skipped path '%s' (non-std)\n",
+                       se.path.c_str());
+        }
+      }
+    }
   }
 }
 
@@ -881,8 +928,10 @@ void state_transport_ws::register_connection(std::shared_ptr<connection> conn) {
 void state_transport_ws::admit_connection(const std::shared_ptr<connection> &conn) {
   // Snapshot the shard list before taking the write mutex (every other path releases _shards_mu
   // before touching a connection's write mutex — keep that order to avoid a lock cycle).
+  const bool backfill = _backfill_on_connect.load(std::memory_order_acquire);
+  const bool relay = _relay.load(std::memory_order_relaxed);
   std::vector<state_cluster_shard *> shards;
-  if (_backfill_on_connect.load(std::memory_order_acquire)) {
+  if (backfill || relay) {
     std::lock_guard<std::mutex> lk(_shards_mu);
     shards = _shards;
   }
@@ -891,8 +940,12 @@ void state_transport_ws::admit_connection(const std::shared_ptr<connection> &con
   std::lock_guard<std::mutex> wlk(conn->write_mu);
   register_connection(conn);
   send_hello_locked(*conn);
-  if (!shards.empty())
+  if (backfill && !shards.empty())
     send_backfill_locked(*conn, shards);
+  // A relay pushes its full current state so a late-joining client sees peers already in the room
+  // (the live set_relay forwarding only carries writes that happen AFTER this client connects).
+  if (relay && !shards.empty())
+    send_snapshot_locked(*conn, shards);
 }
 
 void state_transport_ws::send_hello_locked(connection &c) {
@@ -918,6 +971,45 @@ void state_transport_ws::send_backfill_locked(connection &c,
       _sent_frames.fetch_add(1, std::memory_order_relaxed);
       _backfilled.fetch_add(1, std::memory_order_relaxed);
     }
+  }
+}
+
+void state_transport_ws::send_snapshot_locked(connection &c,
+                                              const std::vector<state_cluster_shard *> &shards) {
+  // A relay holds the whole room tree (every client's forwarded writes land in its shard), but
+  // those entries are REMOTE-origin, so send_backfill_locked's replay_local() yields nothing. Push
+  // the full current snapshot instead, as an unsolicited SnapshotResponse (request_id 0), so a late
+  // joiner bootstraps the peers already present. The receiver applies each entry via
+  // ingest_snapshot_entry (a bulk initial load, no conflict gate).
+  for (auto *s : shards) {
+    if (s == nullptr)
+      continue;
+    const auto snap = s->snapshot();
+    if (snap.empty())
+      continue;
+    pb::Frame f;
+    auto *rsp = f.mutable_snapshot_response();
+    rsp->set_request_id(0);
+    rsp->set_final(true);
+    for (const auto &e : snap) {
+      auto *pe = rsp->add_entries();
+      pe->set_path(e.path);
+      pe->set_string_value(e.string_value);
+      pe->set_comment(e.comment);
+      pe->set_hidden(e.hidden);
+      pe->set_read_only(e.read_only);
+      for (const auto &p : e.properties)
+        (*pe->mutable_properties())[p.first] = p.second;
+      pe->set_type_name(e.type_name);
+      pe->set_origin_node_id(e.origin_node_id);
+      pe->set_sequence(e.sequence);
+      pe->set_data_type_name(e.data_type_name);
+      if (e.data_payload.kind != state_payload_kind::none)
+        set_pb_payload(pe->mutable_data_payload(), e.data_payload);
+    }
+    if (!c.write_locked(f))
+      return; // stream died mid-snapshot; the reader will reap it
+    _sent_frames.fetch_add(1, std::memory_order_relaxed);
   }
 }
 

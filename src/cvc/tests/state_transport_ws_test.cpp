@@ -171,6 +171,49 @@ TEST(StateTransportWsTest, RelayBridgesTwoClients) {
   S.stop();
 }
 
+// Late-joiner bootstrap: a relay that holds the room tree in its own shard pushes a full snapshot to
+// each newly admitted connection, so a client that joins AFTER others are present still sees them
+// (live set_relay forwarding only carries writes made after the client connects). This is what lets
+// a browser that refreshes / opens late see everyone already in the conference room.
+TEST(StateTransportWsTest, RelayBackfillsLateJoinerWithExistingState) {
+  cvc::app aS, aA, aB;
+  cvc::state_transport_ws S, tA, tB;
+  S.start("127.0.0.1:0", "S", "C");
+  S.set_relay(true);
+
+  cvc::state_cluster_shard sS(aS, "C", "S"); // the relay aggregates the room tree here
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sS.attach();
+  sA.attach();
+  sB.attach();
+  S.register_shard(&sS);
+  tA.register_shard(&sA);
+  tB.register_shard(&sB);
+
+  // A joins first and writes; its forwarded mutation lands in the relay's shard.
+  ASSERT_TRUE(tA.connect_to_peer(ws(S.listen_address()), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(
+      wait_until([&] { return S.connection_count() >= 1; }, std::chrono::milliseconds(2000)));
+  cvc::state::instance(aA)("room.a.name").value(std::string("seed"));
+  cvc::state::instance(aA)("room.a.name").value(std::string("alice"));
+  EXPECT_GT(tA.pump_all(), 0u);
+  tA.flush();
+  ASSERT_TRUE(wait_until([&] { return cvc::state::instance(aS)("room.a.name").value() == "alice"; },
+                         std::chrono::milliseconds(3000)));
+
+  // B joins LATE and never writes; A never writes again. B must still see A, which can only come
+  // from the relay's snapshot push on connect.
+  ASSERT_TRUE(tB.connect_to_peer(ws(S.listen_address()), std::chrono::milliseconds(2000)));
+  EXPECT_TRUE(wait_until([&] { return cvc::state::instance(aB)("room.a.name").value() == "alice"; },
+                         std::chrono::milliseconds(3000)));
+  EXPECT_EQ(cvc::state::instance(aB)("room.a.name").value(), "alice");
+
+  tA.stop();
+  tB.stop();
+  S.stop();
+}
+
 #if defined(CVC_ENABLE_GRPC)
 // The WS<->gRPC bridge (the wasm-interop payoff): a relay runs a gRPC acceptor AND a WebSocket
 // acceptor over the SAME shard, bridged both ways. A native WS client and a native gRPC client each

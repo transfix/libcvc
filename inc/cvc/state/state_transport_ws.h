@@ -162,6 +162,10 @@ public:
 private:
   void send_hello_locked(connection &c);
   void send_backfill_locked(connection &c, const std::vector<state_cluster_shard *> &shards);
+  // Relay-only: push the full CURRENT snapshot of each shard to a newly admitted connection, so a
+  // late joiner sees peers already present. replay_local() cannot do this on a relay because the
+  // room tree it holds is all remote-origin (forwarded from clients), not local.
+  void send_snapshot_locked(connection &c, const std::vector<state_cluster_shard *> &shards);
 
   // Server accept loop (native) and the per-connection reader loop, both run on their own threads.
   // Defined in the impl TU (it owns the proto parse + the Beast read/write); no-op under wasm.
