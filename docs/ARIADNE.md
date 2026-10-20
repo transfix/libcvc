@@ -284,7 +284,7 @@ The built-in top-level keys (`is_builtin_block`,
 
 ```
 meta  menubar  windows  overlays  root (alias: children)  scene  customs
-init  on_tick  on_key  on_pointer  on_signal  units  import  channels  lint
+init  on_tick  on_key  on_pointer  on_signal  units  import  channels  lint  args
 ```
 
 Any **other** top-level key is dispatched to a parser registered via
@@ -512,6 +512,65 @@ write wins), so a click is never lost and two jobs never overlap. Parameters sta
 ordinary live keys the job copies when it starts. The FTXUI backend draws such a panel
 read-only: its buttons do not fire yet
 ([`ftxui_backend.cpp`](../src/cvc/ariadne/ftxui_backend.cpp)), and it has no scene.
+
+### 5.6 `args:` and `argv` — the document's command line
+
+A runtime takes only its own general flags, before the document path. Everything after the
+path belongs to the document, as with `python script.py args`:
+
+```
+ari run --fps 30 conf.ari --room standup --camera
+```
+
+The runtime publishes it under the document root before `init:` runs
+([`doc_args.h`](../inc/cvc/ariadne/doc_args.h)). All of it is read-only:
+
+- **`argv`**: the strings as given. Its data is a DSL list, `(state-data-get "argv")`; its
+  value is the same strings joined by spaces, for display.
+- **`args.<name>`**: one per argument declared in an `args:` block that was given or has a
+  default. Its value is the canonical text, `(state-get "args.room")`; its data is the typed
+  value (string, bool, int or float).
+- **`args`**: the whole set as one DSL dict of name → typed value.
+
+```yaml
+args:
+  room:   {type: string, default: lobby, help: Room to join}
+  camera: {type: bool, help: Use the real camera}
+  peers:  {type: int, default: 8}
+  file:   {type: string, positional: true}
+  verbose: bool                  # shorthand: just the type
+init: |
+  (state-set "status" (str-concat "joining " (state-get "args.room")))
+```
+
+**Parsing rules:**
+- `--name value` and `--name=value` both work.
+- A bool is `--flag` or `--no-flag` (`--flag=false` works too); a bare flag never consumes
+  the next argument.
+- Declared positionals are taken in order, and `--` ends the options.
+- If an option is repeated, the last one wins.
+- A negative number is a value, not an option.
+
+The load fails on any of:
+- an unknown option;
+- a malformed value;
+- a missing `required:` argument;
+- an extra positional.
+
+The runtime then prints the generated usage and exits 2. `--help` or `-h` prints that
+usage and exits 0. A malformed `args:` block (an unknown type, a default that is not of
+its type, a bool positional, a required positional after an optional one) fails the load
+too, since nobody could pass arguments to it. Without an `args:` block nothing is checked,
+`--help` included: the document gets `argv` and makes of it what it wants. `ari check`
+validates the block but not the arguments, and declared arguments take their defaults.
+
+**Who can see them.** Only the outermost document takes arguments. A `load:`-mounted
+module's own `args:` is ignored with a warning. Programs are chrooted to their own
+subtree (§7), so a module sees neither `argv` nor `args` unless its parent grants a
+read-only hole (§7.4). A hole links one node:
+- `link: {args: {to: args, mode: ro}}` hands the module the dict,
+  `(get-attr (state-data-get "args") "room")`;
+- `link: {room: {to: args.room, mode: ro}}` hands it one argument, `(state-get "room")`.
 
 ---
 
@@ -741,10 +800,17 @@ if (lr.has_channels_block)
 the terminal with no GL, VTK, or ImGui:
 
 ```
-ari run      doc.ari [--backend ftxui|tvision] [--prefix P] [--fps N] [--no-mouse] [--component-path DIR]...
-ari snapshot doc.ari [--width W] [--height H] [--frames N] [--ansi]   # print a frame
-ari check    doc.ari                                                  # load + warnings
+ari run      [flags] doc.ari [document args...]   # take over the terminal
+ari snapshot [flags] doc.ari [document args...]   # print a frame (--width W --height H --frames N --ansi)
+ari check    [flags] doc.ari                      # load + warnings
 ```
+
+Its flags (`--backend ftxui|tvision`, `--prefix P`, `--fps N`, `--no-mouse`,
+`--component-path DIR`, and the snapshot ones) go **before** the document. They are the
+general flags every runtime shares, parsed by
+[`host_cli.h`](../inc/cvc/ariadne/host_cli.h). Whatever follows the document is the
+document's (§5.6): `ari run doc.ari --help` prints the document's own usage. A general
+flag written after the document goes to the document, and `ari` points that out.
 
 `ari` is its own cvcpkg package (`cvcpkg install ari`, linux for now), built from
 [`cvcpkg/recipes/ari`](../cvcpkg/recipes/ari/recipe.yaml) against the installed libcvc,
@@ -763,9 +829,14 @@ backend.run(rt);  // owns the terminal; drains every iteration; returns on quit 
 
 To route OS signals as well, install your handlers in `RunOptions::on_start` (it runs after
 FTXUI has installed its own), restore them in `on_stop`, and return pending signal names
-from `take_signal`; [`src/ari/main.cpp`](../src/ari/main.cpp) does exactly this with
-`sigaction`. The handlers are process-wide, which is why they belong to the host and not to
-libcvc.
+from `take_signal`. [`host_signals.h`](../inc/cvc/ariadne/host_signals.h) has the
+`sigaction` traps `ari` uses (`install_signal_traps`, `restore_signal_traps`,
+`take_trapped_signal`, `signal_number`). Signal handlers are process-wide, so libcvc never
+installs them by itself: a host program opts in around its own loop.
+
+Give the document its command line with `rt.set_document_args(args, "myhost run doc.ari")`
+before `load()`. When the arguments don't match its `args:` block, `load()` throws
+`document_args_error`, carrying the usage text and whether `--help` was asked for.
 
 `run()` forwards keys and pointer events the UI did not use to the document's
 `on_key` / `on_pointer`, so document-level input works here today.
@@ -779,7 +850,7 @@ on the module's stdin/stdout, which is all FTXUI's Emscripten screen uses. Serve
 over plain http and open `ari.html`; it is single-threaded and needs no COOP/COEP. A page
 has no argv, so the build bakes in one document, `CVC_ARI_WASM_DOC` (default
 `terminal_tour.ari`), with the component library at `/components`. The same `ari.js`
-runs headless under node: `node ari.js snapshot /terminal_tour.ari`. CI's `ari-wasm`
+runs headless under node: `node ari.js snapshot --width 100 /terminal_tour.ari`. CI's `ari-wasm`
 job does exactly that.
 
 What differs from a real terminal:

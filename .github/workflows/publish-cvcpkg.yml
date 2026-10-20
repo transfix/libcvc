@@ -882,8 +882,8 @@ jobs:
           bash cvcpkg/recipes/ari/build.sh
           test -x stage-ari/bin/ari
           # The binary that ships must render a document: the real backend and loader, not stubs.
-          LD_LIBRARY_PATH="$STAGE/lib:$DEPS/lib" stage-ari/bin/ari snapshot \
-            src/cvc/ariadne/examples/terminal_tour.ari --width 100 --height 24 | tee ari-snapshot.txt
+          LD_LIBRARY_PATH="$STAGE/lib:$DEPS/lib" stage-ari/bin/ari snapshot --width 100 --height 24 \
+            src/cvc/ariadne/examples/terminal_tour.ari | tee ari-snapshot.txt
           grep -qF "agents: 64" ari-snapshot.txt
           mkdir -p dist
           cvcpkg pack cvcpkg/recipes/ari \
@@ -1222,8 +1222,8 @@ jobs:
           # The binary that ships must render a document: the real backend and loader, not stubs.
           # Its rpath is @loader_path/../lib, the flat prefix it is installed into, so point dyld at
           # the two prefixes it is split across here.
-          DYLD_LIBRARY_PATH="$STAGE/lib:$DEPS/lib" stage-ari/bin/ari snapshot \
-            src/cvc/ariadne/examples/terminal_tour.ari --width 100 --height 24 | tee ari-snapshot.txt
+          DYLD_LIBRARY_PATH="$STAGE/lib:$DEPS/lib" stage-ari/bin/ari snapshot --width 100 --height 24 \
+            src/cvc/ariadne/examples/terminal_tour.ari | tee ari-snapshot.txt
           grep -qF "agents: 64" ari-snapshot.txt
           mkdir -p dist
           cvcpkg pack cvcpkg/recipes/ari \
@@ -1271,7 +1271,7 @@ jobs:
           # cvc.dll and every dependency DLL sit in the two prefixes' bin/ directories.
           $savedPath = $env:PATH
           $env:PATH = "$stage\bin;$depsPath\bin;$env:PATH"
-          & ./stage-ari/bin/ari.exe snapshot src/cvc/ariadne/examples/terminal_tour.ari --width 100 --height 24 |
+          & ./stage-ari/bin/ari.exe snapshot --width 100 --height 24 src/cvc/ariadne/examples/terminal_tour.ari |
             Tee-Object -FilePath ari-snapshot.txt
           if ($LASTEXITCODE -ne 0) { throw "ari snapshot failed ($LASTEXITCODE)" }
           $env:PATH = $savedPath

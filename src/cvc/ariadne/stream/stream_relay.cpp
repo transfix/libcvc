@@ -32,8 +32,13 @@ std::string stream_relay::relay(const stream_params &params) {
   std::lock_guard<std::mutex> lk(_mu);
   if (_stopped)
     return std::string();
-  // Idempotent per id: an already-relayed stream keeps its proxy and token.
-  auto existing = _proxies.find(params.id);
+  // Idempotent per stream IDENTITY — the canonical (root_path, id) key, which IS the token. The id
+  // ALONE is not unique: a conference scopes each participant's streams under its own root_path
+  // (the pid), so every participant publishes id "camera"/"audio" and only the scope tells them
+  // apart. Keying on id alone collides them, and the idempotent early-return below would then drop
+  // every participant's stream but the first (stream_count would read 2, never 2*N).
+  const std::string key = stream::registry_key(params.root_path, params.id);
+  auto existing = _proxies.find(key);
   if (existing != _proxies.end())
     return existing->second->token();
 
@@ -41,12 +46,12 @@ std::string stream_relay::relay(const stream_params &params) {
   if (!proxy)
     return std::string(); // unsized format, empty id, or a live dup under (root,id)
 
-  const std::string token = proxy->token();
+  const std::string token = proxy->token(); // == key == registry_key(root_path, id)
   // Ingest: a publisher serve()s this token to us; route those frames in.
   _bridge->receive_into(token, *proxy);
   // Egress: offer the proxy so each subscriber can pull it by the same token.
   _bridge->serve_port(*proxy);
-  _proxies.emplace(params.id, std::move(proxy));
+  _proxies.emplace(key, std::move(proxy));
   return token;
 }
 
