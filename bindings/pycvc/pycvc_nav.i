@@ -1362,6 +1362,94 @@ inline cvc::nav::follower_options follower_from(PyObject *d) {
     Py_RETURN_NONE;
   }
 
+  // Belief (observed) material on the sim_world (sim_world::set_material_belief). risk/hard
+  // are ONE (H,W) truth plane; one material + gate plane is kept per belief plane, from what
+  // that plane has seen. seen_rule is "raycast" or "disc". Every precondition set_material_belief
+  // throws on is checked here first, before the GIL is released.
+  PyObject *nav_sim_world_set_material_belief(
+      PyObject *handle, PyObject *risk, PyObject *hard, double lam_soft, double lam_hard,
+      double k_sharp, double d_hat_m, double sigma, int gate_enabled, int primitive_count,
+      int horizon_cells, double hard_margin_m, double improvement_margin, double material_trigger,
+      double progress_slack_cells, double unknown_risk, int unknown_hard, int unknown_gate_hard,
+      const char *seen_rule, double material_range_m, int material_every = 1) {
+    cvc::nav::sim_world *sw = sim_world_from(handle);
+    const char *who = "pycvc.nav_sim_world_set_material_belief: ";
+    cvc::nav::belief_material_params bp;
+    bp.unknown_risk = static_cast<float>(unknown_risk);
+    if (unknown_hard != 0 && unknown_hard != 1)
+      throw std::invalid_argument(std::string(who) + "unknown_hard must be 0 or 1");
+    bp.unknown_hard = static_cast<std::uint8_t>(unknown_hard);
+    bp.unknown_gate_hard = unknown_gate_hard != 0;
+    const std::string rule = seen_rule ? seen_rule : "";
+    if (rule == "raycast")
+      bp.rule = cvc::nav::seen_rule::raycast;
+    else if (rule == "disc")
+      bp.rule = cvc::nav::seen_rule::disc;
+    else
+      throw std::invalid_argument(std::string(who) + "seen_rule must be 'raycast' or 'disc'");
+    bp.material_range_m = material_range_m;
+    cvc::nav::validate(bp);
+    if (sw->current_config().freeze_sense)
+      throw std::invalid_argument(std::string(who) + "freeze_sense is on, so nothing is seen");
+    if (material_range_m > sw->current_config().range_m)
+      throw std::invalid_argument(std::string(who) + "material_range_m exceeds the sense range");
+    if (material_every < 1)
+      throw std::invalid_argument(std::string(who) + "material_every must be >= 1");
+    std::vector<PyArrayObject *> hold;
+    auto fail = [&](const std::string &msg) {
+      for (PyArrayObject *h : hold)
+        Py_DECREF(h);
+      throw std::invalid_argument(msg);
+    };
+    auto take = [&](PyObject *o, int typ) -> PyArrayObject * {
+      PyArrayObject *a = reinterpret_cast<PyArrayObject *>(
+          PyArray_FROMANY(o, typ, 1, 2, NPY_ARRAY_C_CONTIGUOUS));
+      if (!a)
+        fail(std::string(who) + "risk/hard had the wrong dtype/rank");
+      hold.push_back(a);
+      return a;
+    };
+    PyArrayObject *r = take(risk, NPY_FLOAT);
+    PyArrayObject *h = take(hard, NPY_UINT8);
+    const npy_intp want = static_cast<npy_intp>(sw->rows()) * sw->cols();
+    if (PyArray_SIZE(r) != want || PyArray_SIZE(h) != want)
+      fail(std::string(who) + "risk/hard must hold rows*cols elements");
+    cvc::nav::material_config mc;
+    mc.lam_soft = static_cast<float>(lam_soft);
+    mc.lam_hard = static_cast<float>(lam_hard);
+    mc.k_sharp = static_cast<float>(k_sharp);
+    mc.d_hat_m = static_cast<float>(d_hat_m);
+    mc.sigma = sigma;
+    mc.gate_enabled = gate_enabled != 0;
+    mc.gate.primitive_count = primitive_count;
+    mc.gate.horizon_cells = horizon_cells;
+    mc.gate.hard_margin_m = hard_margin_m;
+    mc.gate.improvement_margin = improvement_margin;
+    mc.gate.material_trigger = material_trigger;
+    mc.gate.progress_slack_cells = progress_slack_cells;
+    const float *rd = static_cast<const float *>(PyArray_DATA(r));
+    const std::uint8_t *hd = static_cast<const std::uint8_t *>(PyArray_DATA(h));
+    Py_BEGIN_ALLOW_THREADS sw->set_material_belief(rd, hd, mc, bp, material_every);
+    Py_END_ALLOW_THREADS for (PyArrayObject *a : hold) Py_DECREF(a);
+    Py_RETURN_NONE;
+  }
+
+  // Plane m's material seen mask as a fresh (H,W) numpy-bool array; None without belief
+  // material or for an out-of-range m.
+  PyObject *nav_sim_world_material_seen(PyObject *handle, int m) {
+    cvc::nav::sim_world *sw = sim_world_from(handle);
+    const std::uint8_t *src = sw->material_seen(m);
+    if (!src)
+      Py_RETURN_NONE;
+    npy_intp dims[2] = {sw->rows(), sw->cols()};
+    PyObject *arr = PyArray_SimpleNew(2, dims, NPY_BOOL);
+    if (!arr)
+      throw std::runtime_error("pycvc.nav_sim_world_material_seen: alloc failed");
+    std::memcpy(PyArray_DATA(reinterpret_cast<PyArrayObject *>(arr)), src,
+                static_cast<std::size_t>(dims[0] * dims[1]));
+    return arr;
+  }
+
   PyObject *nav_sim_world_clear_material(PyObject *handle) {
     sim_world_from(handle)->clear_material();
     Py_RETURN_NONE;

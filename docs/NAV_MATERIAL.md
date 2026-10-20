@@ -254,6 +254,15 @@ rather than from the whole map (spec: [`roadmap/NAV-BELIEF-MATERIAL-ROADMAP.md`]
 * `seen_disc` is the optional range-disc rule (`seen_rule::disc`): no occlusion, kept to reproduce
   a controller trained on a disc mask.
 
+On a `sim_world`, `set_material_belief(risk_raw, hard, mc, bp, material_every = 1)` replaces
+`set_material`: the truth is one world plane, and one material + gate plane is kept per belief
+plane from what that plane has seen. Its gate surface uses the plane's own planning raster
+(`belief_occ(m)`), not truth. A plane's planes are re-derived on a sense tick on which its mask
+grew, and its gate surface also when `belief_occ(m)` changed, at most once every `material_every`
+sense ticks. It throws under `freeze_sense` (nothing is ever seen). Read surface: `material_seen(m)`,
+`material_plane_data(m)`, `material_gate_hard(m)`, `material_clear_m(m)` and `material_version(m)`.
+Memory is about 36 bytes per cell per belief plane.
+
 The golden `src/cvc/tests/data/belief_material_golden.json` (`NavBeliefMaterial.Golden`) holds
 GRL-SNAM's numpy twin to all of it, bit for bit: per case, tick and plane, the SHA-256 of every
 raster, and the gate's outputs.
@@ -303,6 +312,8 @@ Belief material: `nav_belief_material_inputs`, `nav_belief_gate_surface`, `nav_s
 Field/gate kernels: `nav_material_build`, `nav_witness_gate`,
 `nav_witness_gate_batch`, `nav_material_sample`, `nav_bicycle_rollout_material`,
 `nav_drive_step_material`.
+
+`sim_world` belief material: `nav_sim_world_set_material_belief`, `nav_sim_world_material_seen`.
 
 `sim_world` material (grouped planes): `nav_sim_world_set_material`,
 `nav_sim_world_clear_material`, `nav_sim_world_material_gate_active`.

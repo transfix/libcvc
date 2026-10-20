@@ -5,8 +5,8 @@
 > the material trainer all read a belief plane's *observed* material: the truth rasters where that
 > plane's sensor has seen, and fixed values everywhere else.
 
-**Status:** B1 (the kernels and golden 1) implemented 2026-10-20; B2 (`sim_world`) and B3 (net
-and trainer) follow. The libcvc side (the kernels, the `sim_world` wiring and the goldens) is built
+**Status:** B1 (the kernels and golden 1) and B2 (`sim_world::set_material_belief`) implemented
+2026-10-20; B3 (net and trainer) follows. The libcvc side (the kernels, the `sim_world` wiring and the goldens) is built
 to this document, with §9's recommended column. The torch side in GRL-SNAM is built against the same goldens.
 The decisions still open are listed in [§9](#9-open-decisions); the settled ones are in
 [§10](#10-settled).

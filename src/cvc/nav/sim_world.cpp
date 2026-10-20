@@ -42,6 +42,7 @@
 #include <new>
 #include <random>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace cvc {
@@ -340,10 +341,29 @@ void sim_world::step(int num_threads) {
     pl.K = M_;
     std::vector<std::uint8_t> fov_changed(static_cast<std::size_t>(M_), 0);
     pl.fov_changed = fov_changed.data(); // ever_seen / last_visible dirty, per plane
+    // Belief material: the material seen mask grows with the same rays (raycast), or with each
+    // agent's range disc after the sense (disc). mat_changed[m]: plane m's mask grew.
+    const bool mat_belief = mat_on_ && mat_belief_on_;
+    std::vector<std::uint8_t> mat_changed(static_cast<std::size_t>(M_), 0);
+    std::vector<double> mrange;
+    if (mat_belief && mat_bp_.rule == seen_rule::raycast) {
+      mrange.assign(static_cast<std::size_t>(n_), mat_bp_.material_range_m);
+      ag.material_range_m = mrange.data();
+      pl.material_seen = mat_seen_.data();
+      pl.material_changed = mat_changed.data();
+    }
     std::vector<std::int32_t> flips(n_);
     sense_batch(truth_.data(), rows_, cols_, cfg_.min_x, cfg_.min_y, cfg_.max_x, cfg_.max_y, ag,
                 nullptr, 0, nullptr, 0, pl, cfg_.l_occ, cfg_.l_free, cfg_.l_clamp, flips.data(),
                 num_threads, pool_);
+    if (mat_belief && mat_bp_.rule == seen_rule::disc) {
+      const double R = mat_bp_.material_range_m > 0.0 ? mat_bp_.material_range_m : cfg_.range_m;
+      for (int i = 0; i < n_; ++i)
+        if (seen_disc(pos[2 * i], pos[2 * i + 1], R, rows_, cols_, cfg_.min_x, cfg_.min_y,
+                      cfg_.max_x, cfg_.max_y,
+                      mat_seen_.data() + static_cast<std::size_t>(map_id_[i]) * hw))
+          mat_changed[map_id_[i]] = 1;
+    }
 
     lap(accSense);
 
@@ -406,7 +426,7 @@ void sim_world::step(int num_threads) {
     // (changed[m]) or its FoV masks (fov_changed[m]). Done before the failure check, so a plane
     // whose occ_ was written but whose rebuild then threw still reports the raster change.
     for (int m = 0; m < M_; ++m)
-      if (changed[m] || fov_changed[m])
+      if (changed[m] || fov_changed[m] || mat_changed[m])
         ++raster_version_[m];
     bool any = false;
     for (int m = 0; m < M_; ++m) {
@@ -418,6 +438,47 @@ void sim_world::step(int num_threads) {
     }
     if (any)
       ++field_ver_;
+
+    // ── BELIEF MATERIAL: re-derive each plane whose mask grew or whose occupancy changed ──
+    // At most once every mat_every_ sense ticks per plane; a change in between stays pending.
+    // Planes are independent (each reads its own mask/occupancy, writes its own slices).
+    if (mat_belief) {
+      ++mat_sense_ticks_;
+      std::vector<std::uint8_t> do_planes(static_cast<std::size_t>(M_), 0),
+          do_gate(static_cast<std::size_t>(M_), 0);
+      for (int m = 0; m < M_; ++m) {
+        if (mat_changed[m])
+          mat_dirty_[m] = 1;
+        if (mat_changed[m] || changed[m])
+          mat_gate_dirty_[m] = 1;
+        if ((mat_dirty_[m] || mat_gate_dirty_[m]) &&
+            mat_sense_ticks_ - mat_last_build_[m] >= mat_every_) {
+          do_planes[m] = mat_dirty_[m];
+          do_gate[m] = 1;
+          mat_dirty_[m] = 0;
+          mat_gate_dirty_[m] = 0;
+          mat_last_build_[m] = mat_sense_ticks_;
+        }
+      }
+      std::vector<std::uint8_t> mfailed(static_cast<std::size_t>(M_), 0);
+      auto derive = [&](int m) noexcept {
+        if (!do_planes[m] && !do_gate[m])
+          return;
+        try {
+          derive_belief_material(m, do_planes[m] != 0, do_gate[m] != 0);
+        } catch (...) {
+          mfailed[m] = 1;
+        }
+      };
+      if (pool_ && M_ > 1)
+        pool_->parallel_for(M_, derive);
+      else
+        for (int m = 0; m < M_; ++m)
+          derive(m);
+      for (int m = 0; m < M_; ++m)
+        if (mfailed[m])
+          throw std::bad_alloc(); // as the occupancy rebuild above surfaces its failure
+    }
     lap(accRebuild);
     ++senseTicks;
   }
@@ -891,6 +952,7 @@ material_stack sim_world::material_view() const {
 
 void sim_world::set_material(const float *risk_raw, const std::uint8_t *hard,
                              const material_config &mc, int planes) {
+  mat_belief_on_ = false; // the oracle path replaces belief material
   if (!risk_raw || !hard) {
     mat_on_ = false;
     return;
@@ -937,6 +999,107 @@ void sim_world::set_material(const float *risk_raw, const std::uint8_t *hard,
   mat_lam_hard_.assign(n_, 0.0f);
   mat_gate_active_.assign(n_, 0);
   mat_on_ = true;
+}
+
+void sim_world::set_material_belief(const float *risk_raw, const std::uint8_t *hard,
+                                    const material_config &mc, const belief_material_params &bp,
+                                    int material_every) {
+  const char *who = "cvc::nav::sim_world::set_material_belief: ";
+  if (!risk_raw || !hard)
+    throw std::invalid_argument(std::string(who) + "risk_raw and hard are required");
+  validate(bp);
+  if (cfg_.freeze_sense)
+    throw std::invalid_argument(std::string(who) + "freeze_sense is on, so nothing is ever seen");
+  if (bp.material_range_m > cfg_.range_m)
+    throw std::invalid_argument(std::string(who) + "material_range_m exceeds the sense range");
+  if (material_every < 1)
+    throw std::invalid_argument(std::string(who) + "material_every must be >= 1");
+  const std::size_t hw = static_cast<std::size_t>(rows_) * cols_;
+  const double cell_w = (cfg_.max_x - cfg_.min_x) / (cols_ - 1);
+  mat_truth_risk_.assign(risk_raw, risk_raw + hw);
+  mat_truth_hard_.assign(hard, hard + hw);
+  mat_planes_ = M_; // one material + gate plane per belief plane
+  mat_cfg_ = mc;
+  mat_bp_ = bp;
+  mat_every_ = material_every;
+  mat_stack_.assign(static_cast<std::size_t>(M_) * 6 * hw, 0.0f);
+  mat_risk_.assign(static_cast<std::size_t>(M_) * hw, 0.0f);
+  mat_gate_hard_.assign(static_cast<std::size_t>(M_) * hw, 0);
+  mat_clear_m_.assign(static_cast<std::size_t>(M_) * hw, 0.0f);
+  // The ray-cast at the sense range IS ever_seen, so a plane attached mid-run starts from what it
+  // has already seen. A shorter range or the disc cannot be recovered from ever_seen: it starts
+  // empty and grows from the next sense tick.
+  const bool as_ever_seen = bp.rule == seen_rule::raycast &&
+                            (bp.material_range_m <= 0.0 || bp.material_range_m >= cfg_.range_m);
+  if (as_ever_seen)
+    mat_seen_ = everseen_;
+  else
+    mat_seen_.assign(static_cast<std::size_t>(M_) * hw, 0);
+  mat_dirty_.assign(static_cast<std::size_t>(M_), 0);
+  mat_gate_dirty_.assign(static_cast<std::size_t>(M_), 0);
+  mat_version_.assign(static_cast<std::size_t>(M_), 0);
+  mat_last_build_.assign(static_cast<std::size_t>(M_), 0);
+  mat_sense_ticks_ = 0;
+  for (int m = 0; m < M_; ++m)
+    derive_belief_material(m, true, true);
+  mat_hard_margin_m_ = mc.gate.hard_margin_m > 0.0 ? mc.gate.hard_margin_m : 2.0 * cell_w;
+  mat_lam_soft_.assign(n_, 0.0f);
+  mat_lam_hard_.assign(n_, 0.0f);
+  mat_gate_active_.assign(n_, 0);
+  mat_belief_on_ = true;
+  mat_on_ = true;
+}
+
+void sim_world::derive_belief_material(int m, bool planes, bool gate) {
+  const std::size_t hw = static_cast<std::size_t>(rows_) * cols_;
+  const std::size_t off = static_cast<std::size_t>(m) * hw;
+  const double cell_w = (cfg_.max_x - cfg_.min_x) / (cols_ - 1);
+  const std::uint8_t *seen = mat_seen_.data() + off;
+  std::vector<float> risk_b(hw);
+  std::vector<std::uint8_t> hard_b(hw);
+  belief_material_inputs(mat_truth_risk_.data(), mat_truth_hard_.data(), seen, rows_, cols_,
+                         mat_bp_, risk_b.data(), hard_b.data());
+  if (planes) {
+    const material_planes mp = material_build(risk_b.data(), hard_b.data(), rows_, cols_, cell_w,
+                                              cfg_.scale, mat_cfg_.sigma);
+    const std::vector<float> stacked = mp.stacked(); // [1,6,H,W]
+    std::copy(stacked.begin(), stacked.end(), mat_stack_.begin() + 6 * off);
+    std::copy(stacked.begin(), stacked.begin() + hw, mat_risk_.begin() + off); // ch 0 = risk
+    ++mat_version_[m];
+  }
+  if (gate)
+    belief_gate_surface(hard_b.data(), occ_.data() + off, seen, rows_, cols_, cell_w, mat_bp_,
+                        mat_gate_hard_.data() + off, mat_clear_m_.data() + off);
+}
+
+const std::uint8_t *sim_world::material_seen(int m) const {
+  if (!(mat_on_ && mat_belief_on_) || m < 0 || m >= M_)
+    return nullptr;
+  return mat_seen_.data() + static_cast<std::size_t>(m) * rows_ * cols_;
+}
+
+const float *sim_world::material_plane_data(int m) const {
+  if (!mat_on_ || m < 0 || m >= mat_planes_)
+    return nullptr;
+  return mat_stack_.data() + static_cast<std::size_t>(m) * 6 * rows_ * cols_;
+}
+
+const std::uint8_t *sim_world::material_gate_hard(int m) const {
+  if (!mat_on_ || m < 0 || m >= mat_planes_)
+    return nullptr;
+  return mat_gate_hard_.data() + static_cast<std::size_t>(m) * rows_ * cols_;
+}
+
+const float *sim_world::material_clear_m(int m) const {
+  if (!mat_on_ || m < 0 || m >= mat_planes_)
+    return nullptr;
+  return mat_clear_m_.data() + static_cast<std::size_t>(m) * rows_ * cols_;
+}
+
+std::int32_t sim_world::material_version(int m) const {
+  if (!(mat_on_ && mat_belief_on_) || m < 0 || m >= M_)
+    return -1;
+  return mat_version_[static_cast<std::size_t>(m)];
 }
 
 void sim_world::snapshot(float *pos_world, float *heading, float *speed, int *mode,
