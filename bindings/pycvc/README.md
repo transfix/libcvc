@@ -146,6 +146,32 @@ Python reads the same values as C++: `test_pycvc_physics.py` rebuilds the cross-
 scene and `physics_parity_test`'s scenarios through pycvc, and requires C++'s state hashes and
 values bit for bit. See `docs/PHYSICS_API.md`, "Python: pycvc".
 
+### Vehicle routes on a plant
+
+A vehicle with a turning radius drives a planned route rather than nav's carrot: the carrot
+FSM's wall-follow target can sit inside the turning circle, where the vehicle hunts between
+gears. `pycvc_nav.i` wraps `plan_vehicle_route` and `route_follower` (lengths in the occupancy
+grid's world units):
+
+```python
+r = pycvc.nav_plan_vehicle_route(occ, min_x, min_y, max_x, max_y, x, y, heading, gx, gy,
+                                 {"min_radius": 4.8, "disc_offsets": [0.0, 2.0],
+                                  "disc_radius": 0.6},          # route_vehicle
+                                 {"max_expansions": 120000})    # route_options
+# r: reached, poses (M,4) [x, y, heading, reverse], cusps, length, reverse_length, expansions
+follow = pycvc.nav_route_follower_create(sim, {"lookahead": 48.0})  # follower_options
+pycvc.nav_route_follower_set(follow, i, r["poses"])
+while running:
+    pycvc.nav_route_follower_apply(follow)   # before each step
+    pycvc.nav_sim_world_step(sim)
+pycvc.nav_route_follower_status(follow)      # following / leg / legs / reversing / done
+```
+
+The option dicts take exactly the C++ structs' fields (an unknown key is an error).
+`nav_route_clearance` gives a pose's clearance, and `nav_sim_world_belief_occ(sim, m)` copies belief
+plane m's planning raster to plan on. The follower holds a reference to its world.
+`test_pycvc_nav_routes.py` covers them.
+
 ## Level of detail (cvc::simplify + cvc::lod)
 
 The whole LOD family is wrapped directly (`pycvc_lod.i`, `LodGraphicsNode` in
