@@ -7,11 +7,11 @@
   This file is part of VolMagick. LGPL 2.1 (see other headers).
 */
 
-// nav_belief_material_net_test: the belief net's side of docs/roadmap/NAV-BELIEF-MATERIAL-ROADMAP.md
-// (B3). The 3-channel .cvcnm (version 2 with its belief block; version 1 still byte-identical with
-// its meta; the loader's checks), a zero seen channel equal to the 2-channel net in the forward
-// and backward, and material_patch_belief's crop. The trainer's side (the gate, the 3-channel
-// gradcheck and golden 3) is in nav_material_train_test.
+// nav_belief_material_net_test: the belief net's side of
+// docs/roadmap/NAV-BELIEF-MATERIAL-ROADMAP.md (B3). The 3-channel .cvcnm (version 2 with its belief
+// block; version 1 still byte-identical with its meta; the loader's checks), a zero seen channel
+// equal to the 2-channel net in the forward and backward, and material_patch_belief's crop. The
+// trainer's side (the gate, the 3-channel gradcheck and golden 3) is in nav_material_train_test.
 
 #include "coef_energy_test_model.h"
 
