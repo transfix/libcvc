@@ -45,13 +45,26 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib> // std::getenv — the conference relay / room / name come from the environment
 #include <cvc/ariadne/app_runtime.h>
 #include <cvc/ariadne/doc_args.h>
 #include <cvc/ariadne/ftxui_backend.h>
 #include <cvc/ariadne/host_cli.h>
 #include <cvc/ariadne/host_signals.h>
+#include <cvc/ariadne/loader.h> // run_init — seed conf.room / conf.self before the first tick
 #include <cvc/ariadne/tvision_backend.h>
 #include <cvc/core/app.h>
+#if CVC_ENABLE_WS
+// Conference mode: a WebSocket state transport joins a hosted room. The browser (wasm) build dials
+// wss://<page-origin>/… (set by the host page) and native builds dial ws://host:port; either way
+// register_conference supplies the room verbs and the shard/transport are wired here in the host.
+#include <cvc/state/state_cluster_shard.h>
+#include <cvc/state/state_transport_ws.h>
+#endif
+#ifdef __EMSCRIPTEN__
+#include <cvc/gl/state_publisher.h> // single-thread wasm: flush the publisher at frame cadence
+#include <emscripten.h>             // emscripten_sleep — yield the asyncify loop to the browser
+#endif
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/ImGuiOverlay.h>
 #include <cvc/gl/SceneGraph.h>
@@ -169,6 +182,70 @@ ari::InputEvent to_ari(const cvc::gl::InputEvent &e) {
   return a;
 }
 
+// ── conference mode (optional) ───────────────────────────────────────────────────────────────────
+// Enabled when CVC_ARIADNE_RELAY is set in the environment: the browser host page sets it to
+// wss://<page-origin>/cyprty-ws (so the deployed client auto-connects to its own server), native
+// tests set it to ws://host:port. register_conference supplies the room verbs (room-join/roster);
+// the shard + WebSocket transport are owned here and pumped each frame. A plain local .ari run just
+// leaves CVC_ARIADNE_RELAY unset and never touches any of this.
+struct ConferenceSession {
+#if CVC_ENABLE_WS
+  // shard is declared BEFORE ws so ws (whose destructor stops the reader) is torn down first.
+  std::unique_ptr<cvc::state_cluster_shard> shard;
+  std::unique_ptr<cvc::state_transport_ws> ws;
+  bool active = false;
+
+  // Call AFTER the GL bundles and BEFORE load(): register the room verbs, seed conf.room/conf.self,
+  // and dial the relay. Returns false (a plain local document) when no relay is configured.
+  bool setup(cvc::app &app, const std::string &prefix, cvc::gl::ImGuiBackend &backend) {
+    const char *relay = std::getenv("CVC_ARIADNE_RELAY");
+    if (!relay || !*relay)
+      return false;
+    const char *roomEnv = std::getenv("CVC_ARIADNE_ROOM");
+    const char *nameEnv = std::getenv("CVC_ARIADNE_NAME");
+    const std::string room = (roomEnv && *roomEnv) ? roomEnv : "standup";
+    const std::string self = (nameEnv && *nameEnv) ? nameEnv : "guest";
+    gla::register_conference(app,
+                             backend); // room-join/roster + streaming + stream_view (idempotent)
+    shard = std::make_unique<cvc::state_cluster_shard>(app, "conf", self);
+    shard->attach();
+    shard->install_as_default(); // room-join derives the participant id from the default shard
+    ws = std::make_unique<cvc::state_transport_ws>();
+    ws->register_shard(shard.get());
+    const bool ok = ws->connect_to_peer(relay, std::chrono::milliseconds(8000));
+    std::fprintf(stderr, "arigl: conference: %s %s as '%s' (room '%s')\n",
+                 ok ? "connected to" : "could NOT reach relay", relay, self.c_str(), room.c_str());
+    std::vector<std::string> ce;
+    ari::run_init(app, prefix,
+                  "(state-set \"conf.room\" \"" + room + "\") (state-set \"conf.self\" \"" + self +
+                      "\")",
+                  &ce);
+    for (const std::string &e : ce)
+      std::fprintf(stderr, "arigl: conference init: %s\n", e.c_str());
+    active = true;
+    return true;
+  }
+  void pump() {
+    if (ws)
+      ws->pump_all();
+  }
+  void stop() {
+    if (ws)
+      ws->stop();
+  }
+#else
+  bool active = false;
+  bool setup(cvc::app &, const std::string &, cvc::gl::ImGuiBackend &) {
+    if (const char *r = std::getenv("CVC_ARIADNE_RELAY"); r && *r)
+      std::fprintf(stderr, "arigl: CVC_ARIADNE_RELAY is set but this build has no WebSocket "
+                           "transport (CVC_ENABLE_WS=OFF); running the document locally.\n");
+    return false;
+  }
+  void pump() {}
+  void stop() {}
+#endif
+};
+
 // ── a real window (ImGui over the VTK scene) ────────────────────────────────────────────────────
 
 int run_window(const ari::HostOptions &o) {
@@ -194,6 +271,10 @@ int run_window(const ari::HostOptions &o) {
   gla::register_gl_basics(app);
   gla::register_streaming(app);
   gla::register_window_widgets(rt.backend(), app);
+  // Conference mode (no-op unless CVC_ARIADNE_RELAY is set): register the room verbs and dial the
+  // relay over WebSocket, so the document (conference_roster.ari) joins a hosted room.
+  ConferenceSession conf;
+  conf.setup(app, sg.getStatePrefix(), rt.backend());
   for (const std::string &d : o.component_paths)
     rt.add_component_path(d);
   rt.on("quit", [&] { rt.request_close(); });
@@ -232,6 +313,7 @@ int run_window(const ari::HostOptions &o) {
   sdl.init();
   std::string exit_signal;
   rt.set_input_pump([&] {
+    conf.pump(); // push this frame's room-tree writes (room-join + roster) to the relay
     touch.update();
     for (const cvc::gl::InputEvent &e : sdl.poll())
       rt.post_input(to_ari(e));
@@ -245,13 +327,27 @@ int run_window(const ari::HostOptions &o) {
   ari::install_signal_traps();
   view.setFrameYield(cvc::gl::SceneRenderer::FrameYield::App);
   const double fps = o.fps > 0 ? o.fps : 120.0;
+#ifndef __EMSCRIPTEN__
   const auto period = std::chrono::duration<double>(1.0 / fps);
+#endif
   while (!rt.should_close()) {
+#ifdef __EMSCRIPTEN__
+    // Browser: one frame, then yield to the event loop (Asyncify). No wall-clock pacing — the
+    // browser throttles requestAnimationFrame; FrameYield::App above keeps VTK from yielding twice.
+    rt.step(1.0 / fps);
+    print_warnings(rt.take_warnings());
+#ifndef __EMSCRIPTEN_PTHREADS__
+    sg.publisher().flush(); // single-thread wasm: no worker drains publishes, so do it per frame
+#endif
+    emscripten_sleep(0);
+#else
     const auto start = std::chrono::steady_clock::now();
     rt.step(1.0 / fps);
     print_warnings(rt.take_warnings());
     std::this_thread::sleep_until(start + period);
+#endif
   }
+  conf.stop(); // join the WS reader before the shard (owned by conf) is destroyed
   ari::restore_signal_traps();
   cam.detach();
   if (!exit_signal.empty())
