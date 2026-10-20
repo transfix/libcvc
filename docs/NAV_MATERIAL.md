@@ -18,6 +18,8 @@ surface here.
 - Tests: `src/cvc/tests/nav_material_test.cpp`
 - Demo: [`src/cvcGL/examples/nav_material_demo.cpp`](../src/cvcGL/examples/nav_material_demo.cpp)
   (built with `-DCVC_BUILD_CVCGL=ON -DCVC_BUILD_EXAMPLES=ON`)
+- Belief (observed) material for range-limited sensing, a spec not yet built:
+  [`roadmap/NAV-BELIEF-MATERIAL-ROADMAP.md`](roadmap/NAV-BELIEF-MATERIAL-ROADMAP.md)
 
 ## The executed field
 
