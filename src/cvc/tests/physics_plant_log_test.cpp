@@ -33,6 +33,7 @@
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <iterator>
 #include <random>
 #include <string>
 #include <vector>
@@ -121,6 +122,8 @@ double total_ticks(const std::vector<residual_bin> &bins) {
 
 } // namespace
 
+// (The run is made in this file and replayed in plant_log.cpp, which a compiler may contract into
+// FMAs differently, so "none" is to rounding: 1e-9.)
 TEST(PlantLog, ARunAModelMadeLeavesThatModelNoResidual) {
   const vehicle_desc d = vehicle_desc::humvee();
   for (const int nsub : {1, 2, 6}) {
@@ -129,18 +132,18 @@ TEST(PlantLog, ARunAModelMadeLeavesThatModelNoResidual) {
     EXPECT_EQ(total_ticks(k.kinematic), 300.0);
     for (const residual_bin &b : k.kinematic) {
       EXPECT_LT(b.position_max_m, 1e-9) << "nsub " << nsub;
-      EXPECT_LT(b.heading_max_rad, 1e-12);
-      EXPECT_LT(b.speed_max_mps, 1e-12);
+      EXPECT_LT(b.heading_max_rad, 1e-9);
+      EXPECT_LT(b.speed_max_mps, 1e-9);
     }
     const plant_residuals y =
         one_tick_residuals({dynamic_run(d, 0.9, 0.06, nsub, 300)}, 0.06, d, 0.9, nsub);
     EXPECT_EQ(total_ticks(y.dynamic), 300.0);
     for (const residual_bin &b : y.dynamic) {
       EXPECT_LT(b.position_max_m, 1e-9) << "nsub " << nsub;
-      EXPECT_LT(b.heading_max_rad, 1e-12);
-      EXPECT_LT(b.speed_max_mps, 1e-12);
-      EXPECT_LT(b.lateral_rms_mps, 1e-12);
-      EXPECT_LT(b.yaw_rate_rms, 1e-12);
+      EXPECT_LT(b.heading_max_rad, 1e-9);
+      EXPECT_LT(b.speed_max_mps, 1e-9);
+      EXPECT_LT(b.lateral_rms_mps, 1e-9);
+      EXPECT_LT(b.yaw_rate_rms, 1e-9);
     }
   }
   // Ticks at rest are skipped, and the bins must ascend.
