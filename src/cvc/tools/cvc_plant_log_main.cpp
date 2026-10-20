@@ -38,6 +38,10 @@
 //   meta.json     the rate, the layout, the run's settings and each flight's seed and agent.
 //   residual.json the one-tick residuals of diff::dyn_plant and the kinematic bicycle against
 //                 the plant, binned by lateral g (also printed).
+//   samples.csv   with --samples: every tick of every run.
+// --fit-dyn fits dyn_bike's lags, tire stiffness and yaw inertia to the runs of every seed but
+// the last (cvc::physics::fit_dyn_bike) and reports the last seed's residual with the spec-sheet
+// and the fitted vehicle (residual.json's "fit").
 // tools/liesphgp_pack.py turns one or more of these directories into a LieSPHGP dataset pickle.
 
 #include <algorithm>
@@ -88,6 +92,10 @@ struct options {
   int nsub = 0; // residual substeps; 0 = the physics steps a tick
   int grid = 600;
   int inflate = 0;
+  bool verbose = false;
+  bool samples = false;
+  bool fit_dyn = false;
+  double accel_margin = -1.0, brake_margin = -1.0; // the plant's; < 0 keeps its defaults
   phys::steer_input steer = phys::steer_input::actual;
 };
 
@@ -97,7 +105,8 @@ void usage() {
       "              [--bundle DIR] [--seeds 100,101,...] [--agents N] [--seconds S] [--dt S]\n"
       "              [--mu MU] [--lateral-g G] [--flight-seconds S] [--stride-seconds S]\n"
       "              [--steer actual|command] [--nsub N] [--grid N] [--inflate CELLS]\n"
-      "              [--policy FILE.cvcnav]\n");
+      "              [--accel-margin SHARE] [--brake-margin SHARE] [--policy FILE.cvcnav]\n"
+      "              [--verbose] [--samples] [--fit-dyn]\n");
 }
 
 options parse(int argc, char **argv) {
@@ -145,6 +154,16 @@ options parse(int argc, char **argv) {
       o.grid = std::stoi(val());
     else if (a == "--inflate")
       o.inflate = std::stoi(val());
+    else if (a == "--verbose")
+      o.verbose = true;
+    else if (a == "--samples")
+      o.samples = true;
+    else if (a == "--fit-dyn")
+      o.fit_dyn = true;
+    else if (a == "--accel-margin")
+      o.accel_margin = std::stod(val());
+    else if (a == "--brake-margin")
+      o.brake_margin = std::stod(val());
     else if (a == "--steer") {
       const std::string s = val();
       if (s == "actual")
@@ -283,6 +302,7 @@ int main(int argc, char **argv) {
     }
 
     std::vector<std::vector<phys::planar_sample>> runs;
+    double eff_accel_margin = 0.0, eff_brake_margin = 0.0; // what the plant planned with
     std::vector<unsigned> run_seed;
     std::vector<int> run_agent;
     for (const unsigned seed : opt.seeds) {
@@ -385,6 +405,15 @@ int main(int argc, char **argv) {
       host.use(sim, opt.vehicle);
       phys::nav_plant &plant = *host.plant();
       plant.set_lateral_g(opt.lateral_g);
+      // The share of the vehicle's acceleration and braking nav plans with (nav_plant's knobs):
+      // below 1, the commands stay gentler, e.g. where hard braking pitches a low chassis onto
+      // the ground.
+      if (opt.accel_margin > 0.0)
+        plant.set_accel_margin(opt.accel_margin);
+      if (opt.brake_margin > 0.0)
+        plant.set_brake_margin(opt.brake_margin);
+      eff_accel_margin = plant.options().accel_margin;
+      eff_brake_margin = plant.options().brake_margin;
       phys::plant_log log(sim, plant);
 
       std::vector<float> pos(2 * n), gw(2 * n), hd(n);
@@ -412,18 +441,35 @@ int main(int argc, char **argv) {
       }
       nav::route_follower follow(sim, fo);
       const double span = s.cfg.max_x - s.cfg.min_x;
-      // A route from agent i's pose to a free cell 5-15% of the map away; a few tries.
+      // A route from agent i's pose to a free cell 5-15% of the map away: the goal is drawn from
+      // the cells in that ring (a draw from the whole map lands in it ~6% of the time), and the
+      // planner gets a few of them.
+      std::size_t no_goal = 0, planner_failed = 0;
+      std::vector<int> ring;
       const auto plan_for = [&](int i) {
-        std::uniform_int_distribution<std::size_t> pk(0, s.free_cells.size() - 1);
-        for (int attempt = 0; attempt < 8; ++attempt) {
-          const int cell = s.free_cells[pk(rng)];
-          const int rr = cell / s.cfg.cols, kk = cell % s.cfg.cols;
-          const double gx = s.cfg.min_x + kk * span / (s.cfg.cols - 1);
-          const double gy = s.cfg.min_y + rr * (s.cfg.max_y - s.cfg.min_y) / (s.cfg.rows - 1);
+        ring.clear();
+        const double dx_cell = span / (s.cfg.cols - 1),
+                     dy_cell = (s.cfg.max_y - s.cfg.min_y) / (s.cfg.rows - 1);
+        for (const int cell : s.free_cells) {
+          const double gx = s.cfg.min_x + (cell % s.cfg.cols) * dx_cell;
+          const double gy = s.cfg.min_y + (cell / s.cfg.cols) * dy_cell;
           const double dist = std::hypot(gx - pos[2 * i], gy - pos[2 * i + 1]);
-          if (dist < 0.05 * span || dist > 0.15 * span)
-            continue;
+          if (dist >= 0.05 * span && dist <= 0.15 * span)
+            ring.push_back(cell);
+        }
+        if (ring.empty()) {
+          ++no_goal;
+          ++unplanned;
+          ++route_fail[i];
+          return;
+        }
+        std::uniform_int_distribution<std::size_t> pk(0, ring.size() - 1);
+        for (int attempt = 0; attempt < 4; ++attempt) {
+          const int cell = ring[pk(rng)];
+          const double gx = s.cfg.min_x + (cell % s.cfg.cols) * dx_cell;
+          const double gy = s.cfg.min_y + (cell / s.cfg.cols) * dy_cell;
           nav::route_options ro;
+          ro.margin = 2.0 / s.host.plant.metres_per_world_unit; // 2 m off building meshes
           const nav::vehicle_route r = nav::plan_vehicle_route(
               s.occ.data(), s.cfg.rows, s.cfg.cols, s.cfg.min_x, s.cfg.min_y, s.cfg.max_x,
               s.cfg.max_y, rv, {pos[2 * i], pos[2 * i + 1], hd[i], false}, gx, gy, ro);
@@ -432,12 +478,18 @@ int main(int argc, char **argv) {
             ++planned;
             return;
           }
+          ++planner_failed;
         }
         ++unplanned;
         ++route_fail[i];
       };
       std::uniform_real_distribution<double> amp(15.0, 45.0), adv(50.0, 90.0);
       std::vector<int> side(n, 1), dir(n, 1);
+      // A routed agent stopped for 5 s (wedged against a building, or a leg it cannot drive) gets
+      // a new route from where it stands; the planner leads a wedged start out.
+      std::vector<int> still(n, 0);
+      std::size_t replans = 0;
+      const int stuck_ticks = static_cast<int>(std::lround(5.0 / opt.dt));
       const int settle = static_cast<int>(std::lround(0.5 / opt.dt));
       std::uniform_int_distribution<std::size_t> pick(
           0, s.free_cells.empty() ? 0 : s.free_cells.size() - 1);
@@ -462,6 +514,13 @@ int main(int argc, char **argv) {
                            static_cast<float>(ny * s.cfg.scale));
             }
           } else if (routed) {
+            const bool stopped = t > 0 && std::fabs(log.runs()[i].back().vx) < 0.3;
+            still[i] = stopped ? still[i] + 1 : 0;
+            if (still[i] > stuck_ticks && follow.following(i) && !follow.done(i)) {
+              follow.clear(i);
+              still[i] = 0;
+              ++replans;
+            }
             if ((!follow.following(i) || follow.done(i)) && route_fail[i] < 20)
               plan_for(i);
           } else if (reached[i]) {
@@ -475,6 +534,19 @@ int main(int argc, char **argv) {
         sim.step();
         if (t >= 0)
           log.record();
+        // --verbose: every agent's state every 5 s.
+        if (opt.verbose && t > 0 && t % static_cast<int>(std::lround(5.0 / opt.dt)) == 0)
+          for (int i = 0; i < n; ++i) {
+            const phys::planar_sample &q = log.runs()[i].back();
+            const phys::vehicle_state vs = plant.physics_world().vehicle_state(plant.vehicle(i));
+            std::printf("  t %5.1f agent %d: (%7.1f, %7.1f, z %6.1f) vx %5.2f, wheels %d/%d, "
+                        "contacts %d, grade %+.2f, cmd a %+6.2f steer %+.2f (has %+.2f), gear %d "
+                        "throttle %.2f brake %.2f, route %s leg %d/%d%s\n",
+                        t * opt.dt, i, q.x, q.y, vs.body.position.z, q.vx, q.wheels_down, q.wheels,
+                        q.contacts, q.grade, q.accel_cmd, q.steer_cmd, q.steer, vs.gear,
+                        vs.throttle, vs.brake, routed && follow.following(i) ? "on" : "off",
+                        follow.leg(i), follow.legs(i), routed && follow.done(i) ? " done" : "");
+          }
       }
       for (int i = 0; i < n; ++i) {
         runs.push_back(log.runs()[i]);
@@ -485,11 +557,14 @@ int main(int argc, char **argv) {
       for (int i = 0; i < n; ++i)
         for (const phys::planar_sample &q : log.runs()[i])
           moving += std::fabs(q.vx) > 0.5 ? 1 : 0;
-      std::printf("seed %u: %d agents, %d ticks, vmax %.1f m/s, moving %.0f%% of the time, %zu "
-                  "routes (%zu unplanned), %.0f us a tick\n",
+      std::printf("seed %u: %d agents, %d ticks, vmax %.1f m/s, moving %.0f%% of the time, %.0f us "
+                  "a tick\n",
                   seed, n, ticks, s.vmax_mps,
-                  100.0 * moving / (static_cast<double>(n) * (ticks + 1)), planned, unplanned,
-                  plant.advance_us());
+                  100.0 * moving / (static_cast<double>(n) * (ticks + 1)), plant.advance_us());
+      if (routed)
+        std::printf("  routes: %zu planned, %zu requests unplanned (%zu with no goal in range), "
+                    "%zu planner attempts failed, %zu replans of a stuck agent\n",
+                    planned, unplanned, no_goal, planner_failed, replans);
       host.use(sim, "kinematic"); // detach before the host and sim go
     }
 
@@ -516,6 +591,24 @@ int main(int argc, char **argv) {
     std::filesystem::create_directories(opt.out);
     phys::write_npy((std::filesystem::path(opt.out) / "flights.npy").string(), f.data,
                     {f.flights, f.rows, static_cast<std::size_t>(phys::kPlanarWidth)});
+
+    // --samples: every sample of every run, for analysis (samples.csv).
+    if (opt.samples) {
+      std::ofstream cs(std::filesystem::path(opt.out) / "samples.csv");
+      cs << "seed,agent,t,x,y,psi,vx,vy,r,rear_x,rear_y,steer,grade,roll,steer_cmd,accel_cmd,"
+            "drive,vmax,a_lat,a_lon,contacts,wheels,wheels_down\n";
+      char line[512];
+      for (std::size_t k = 0; k < runs.size(); ++k)
+        for (const phys::planar_sample &q : runs[k]) {
+          std::snprintf(line, sizeof line,
+                        "%u,%d,%.3f,%.4f,%.4f,%.5f,%.4f,%.4f,%.5f,%.4f,%.4f,%.5f,%.5f,%.5f,%.5f,"
+                        "%.4f,%.4f,%.3f,%.4f,%.4f,%d,%d,%d\n",
+                        run_seed[k], run_agent[k], q.t, q.x, q.y, q.psi, q.vx, q.vy, q.r, q.rear_x,
+                        q.rear_y, q.steer, q.grade, q.roll, q.steer_cmd, q.accel_cmd, q.drive,
+                        q.vmax, q.a_lat, q.a_lon, q.contacts, q.wheels, q.wheels_down);
+          cs << line;
+        }
+    }
 
     // The residuals.
     const phys::plant_residuals res = phys::one_tick_residuals(runs, opt.dt, desc, opt.mu, nsub);
@@ -549,6 +642,40 @@ int main(int argc, char **argv) {
                 static_cast<unsigned long long>(res.skipped_rest));
     print_bins("diff::dyn_plant (dynamic single track)", res.dynamic, true);
     print_bins("kinematic bicycle", res.kinematic, false);
+
+    // --fit-dyn: fit on every seed but the last, judge on the last.
+    phys::dyn_bike_fit fit;
+    phys::plant_residuals res_spec, res_fit;
+    double held_default = 0.0, held_fit = 0.0;
+    const unsigned held = opt.seeds.back();
+    if (opt.fit_dyn) {
+      std::vector<std::vector<phys::planar_sample>> fit_runs, test_runs;
+      for (std::size_t k = 0; k < runs.size(); ++k)
+        (opt.seeds.size() > 1 && run_seed[k] == held ? test_runs : fit_runs).push_back(runs[k]);
+      if (test_runs.empty())
+        test_runs = fit_runs; // one seed: in-sample
+      fit = phys::fit_dyn_bike(fit_runs, opt.dt, desc, opt.mu, nsub);
+      const cvc::nav::dyn_bike_si spec = phys::nav_plant::dyn_bike_si_of(desc, opt.mu);
+      held_default = phys::dyn_bike_cost(test_runs, opt.dt, spec, desc.max_steer, nsub);
+      held_fit = phys::dyn_bike_cost(test_runs, opt.dt, fit.si, desc.max_steer, nsub);
+      std::printf("dyn_bike fitted to %s on %zu runs (%llu ticks): drive lag %.3f s (spec %.3f), "
+                  "steer lag %.3f s, tire B x%.2f front / x%.2f rear, yaw inertia x%.2f, drag and "
+                  "rolling resistance x%.2f\n"
+                  "  mean squared twist residual (m/s)^2: fit set %.5f -> %.5f; held-out seed %u "
+                  "%.5f -> %.5f\n",
+                  opt.vehicle.c_str(), fit_runs.size(), static_cast<unsigned long long>(fit.ticks),
+                  fit.drive_lag, spec.drive_lag, fit.steer_lag, fit.tire_b_front_factor,
+                  fit.tire_b_rear_factor, fit.yaw_inertia_factor, fit.resistance_factor,
+                  fit.cost_default, fit.cost_fit, held, held_default, held_fit);
+      res_spec =
+          phys::one_tick_residuals(test_runs, opt.dt, spec, desc.wheelbase(), desc.max_steer, nsub);
+      res_fit = phys::one_tick_residuals(test_runs, opt.dt, fit.si, desc.wheelbase(),
+                                         desc.max_steer, nsub);
+      std::printf("held-out seed %u:\n", held);
+      print_bins("diff::dyn_plant, spec sheet", res_spec.dynamic, true);
+      print_bins("diff::dyn_plant, fitted", res_fit.dynamic, true);
+      print_bins("kinematic bicycle", res_spec.kinematic, false);
+    }
     std::printf("flights: %zu x %zu rows (%.1f s at %.0f Hz), %zu windows dropped, peak %.2f g\n",
                 f.flights, f.rows, (f.rows - 1) * opt.dt, 1.0 / opt.dt, f.dropped,
                 f.peak_lateral_g);
@@ -586,7 +713,20 @@ int main(int argc, char **argv) {
          << ",\n \"skipped\": {\"contact\": " << res.skipped_contact
          << ", \"airborne\": " << res.skipped_airborne << ", \"impact\": " << res.skipped_impact
          << ", \"rest\": " << res.skipped_rest << "},\n \"dynamic\": " << bins_json(res.dynamic)
-         << ",\n \"kinematic\": " << bins_json(res.kinematic) << "\n}\n";
+         << ",\n \"kinematic\": " << bins_json(res.kinematic);
+      if (opt.fit_dyn)
+        js << ",\n \"fit\": {\"held_out_seed\": " << held
+           << ", \"drive_lag\": " << num(fit.drive_lag) << ", \"steer_lag\": " << num(fit.steer_lag)
+           << ", \"tire_b_front_factor\": " << num(fit.tire_b_front_factor)
+           << ", \"tire_b_rear_factor\": " << num(fit.tire_b_rear_factor)
+           << ", \"yaw_inertia_factor\": " << num(fit.yaw_inertia_factor)
+           << ", \"resistance_factor\": " << num(fit.resistance_factor) << ", \"cost_fit_set\": ["
+           << num(fit.cost_default) << ", " << num(fit.cost_fit) << "], \"cost_held_out\": ["
+           << num(held_default) << ", " << num(held_fit)
+           << "],\n  \"held_out_dynamic_spec\": " << bins_json(res_spec.dynamic)
+           << ",\n  \"held_out_dynamic_fit\": " << bins_json(res_fit.dynamic)
+           << ",\n  \"held_out_kinematic\": " << bins_json(res_spec.kinematic) << "}";
+      js << "\n}\n";
     }
     {
       std::ofstream js(std::filesystem::path(opt.out) / "meta.json");
@@ -595,6 +735,8 @@ int main(int argc, char **argv) {
          << "\",\n \"dt\": " << num(opt.dt) << ", \"rate_hz\": " << num(1.0 / opt.dt)
          << ", \"physics_dt\": 0.01, \"mu\": " << num(opt.mu)
          << ", \"lateral_g\": " << num(opt.lateral_g) << ", \"seconds\": " << num(opt.seconds)
+         << ", \"accel_margin\": " << num(eff_accel_margin)
+         << ", \"brake_margin\": " << num(eff_brake_margin)
          << ",\n \"layout\": [\"x\", \"y\", \"psi\", \"vx\", \"vy\", \"r\", \"drive\", \"steer\"],"
          << "\n \"units\": [\"m\", \"m\", \"rad\", \"m/s\", \"m/s\", \"rad/s\", \"m/s^2\", "
             "\"rad\"],"

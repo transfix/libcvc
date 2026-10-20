@@ -36,6 +36,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cvc/nav/dyn_bike.h>
 #include <cvc/physics/vehicle.h>
 #include <string>
 #include <vector>
@@ -57,7 +58,8 @@ struct planar_sample {
   double r = 0.0;                    // yaw rate
   double rear_x = 0.0, rear_y = 0.0; // the rear axle (the point nav tracks)
   double steer = 0.0;                // the road-wheel (bicycle) angle the vehicle has
-  double grade = 0.0;                // sin of the slope along the heading, + uphill
+  double grade = 0.0;                // sin of the slope along the heading, + uphill (the pitch)
+  double roll = 0.0;                 // sin of the body's roll, + left side up
   double steer_cmd = 0.0;            // nav's command over the tick that ended here; 0 at start()
   double accel_cmd = 0.0;            // m/s^2 along the body's x, as nav sent it
   double drive = 0.0; // accel_cmd within what the vehicle can do: -max_decel..max_accel
@@ -121,6 +123,39 @@ constexpr double kImpactG = 1.5;
 plant_residuals one_tick_residuals(const std::vector<std::vector<planar_sample>> &runs, double dt,
                                    const vehicle_desc &d, double mu = 0.9, int nsub = 1,
                                    const std::vector<double> &bins_g = {0.1, 0.2, 0.3, 0.5});
+
+// The same with the dynamic model built from `si` (SI) and the kinematic bicycle's wheelbase and
+// steering lock given: for a vehicle other than dyn_bike_si_of's, such as a fitted one.
+plant_residuals one_tick_residuals(const std::vector<std::vector<planar_sample>> &runs, double dt,
+                                   const cvc::nav::dyn_bike_si &si, double wheelbase,
+                                   double max_steer, int nsub = 1,
+                                   const std::vector<double> &bins_g = {0.1, 0.2, 0.3, 0.5});
+
+// ── fitting the dynamic model to the plant ───────────────────────────────────────────
+
+// The dynamic model's mean squared one-tick residual in the body twist over the ticks
+// one_tick_residuals keeps: (vx error)^2 + (vy error)^2 + (L x yaw-rate error)^2, in (m/s)^2,
+// L its wheelbase. `ticks`, when given, receives how many ticks it averaged.
+double dyn_bike_cost(const std::vector<std::vector<planar_sample>> &runs, double dt,
+                     const cvc::nav::dyn_bike_si &si, double max_steer, int nsub = 1,
+                     std::uint64_t *ticks = nullptr);
+
+// dyn_bike_si_of(d, mu) with the knobs a spec sheet does not give fitted to the plant by
+// coordinate descent on dyn_bike_cost: the drive and steering lags (s), and factors on the tires'
+// stiffness B (front, rear), on the yaw inertia, and on drag and rolling resistance together (a
+// driver model that tracks the commanded acceleration makes up for them: 0). dyn_bike_si_of's own
+// values are unchanged: this measures what the plant wants. Grids: lags 0-0.3 s, the resistance
+// factor 0-1, the others 0.1-2.1.
+struct dyn_bike_fit {
+  cvc::nav::dyn_bike_si si;                  // the fitted vehicle
+  double cost_default = 0.0, cost_fit = 0.0; // dyn_bike_cost before and after
+  std::uint64_t ticks = 0;
+  double drive_lag = 0.0, steer_lag = 0.0;
+  double tire_b_front_factor = 1.0, tire_b_rear_factor = 1.0, yaw_inertia_factor = 1.0;
+  double resistance_factor = 1.0;
+};
+dyn_bike_fit fit_dyn_bike(const std::vector<std::vector<planar_sample>> &runs, double dt,
+                          const vehicle_desc &d, double mu = 0.9, int nsub = 1, int sweeps = 2);
 
 // ── equal-length flights for a plant-learning dataset ──────────────────────────────
 

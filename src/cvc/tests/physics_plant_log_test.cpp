@@ -72,14 +72,14 @@ std::vector<planar_sample> kinematic_run(const vehicle_desc &d, double dt, int n
   return run;
 }
 
-// A run produced by diff::dyn_plant itself (the vehicle from dyn_bike_si_of), from rest in its
-// actuator, as one_tick_residuals steps it.
+// A run produced by diff::dyn_plant itself (the vehicle `si`, by default dyn_bike_si_of's), from
+// rest in its actuator, as one_tick_residuals steps it.
 std::vector<planar_sample> dynamic_run(const vehicle_desc &d, double mu, double dt, int nsub,
-                                       int ticks) {
+                                       int ticks, const cvc::nav::dyn_bike_si *vehicle = nullptr) {
   cvc::world_units::normalized_frame si;
   si.scale = 1.0;
   const cvc::nav::diff::dyn_bike_params p =
-      cvc::nav::dyn_bike_params_of(nav_plant::dyn_bike_si_of(d, mu), si);
+      cvc::nav::dyn_bike_params_of(vehicle ? *vehicle : nav_plant::dyn_bike_si_of(d, mu), si);
   cvc::nav::diff::bike_veh lim{};
   lim.L = p.lf + p.lr;
   lim.vmax = 1e3f;
@@ -166,6 +166,33 @@ TEST(PlantLog, ARunAModelMadeLeavesThatModelNoResidual) {
                   c.kinematic.back().speed_max_mps,
               std::fabs(fast[1].vx - 6.0), 1e-9);
   EXPECT_THROW(one_tick_residuals({rest}, 0.06, d, 0.9, 1, {0.3, 0.1}), std::invalid_argument);
+}
+
+// fit_dyn_bike finds a vehicle the spec sheet does not give from runs that vehicle made: every
+// knob on its grid, the fitted cost about zero, and the spec sheet's cost well above it.
+TEST(PlantLog, FitsTheDynamicModelToRunsOfAKnownVehicle) {
+  const vehicle_desc d = vehicle_desc::humvee();
+  cvc::nav::dyn_bike_si truth = nav_plant::dyn_bike_si_of(d, 0.9);
+  truth.drive_lag = 0.04;
+  truth.tire_B_front *= 0.55;
+  truth.tire_B_rear *= 0.7;
+  truth.yaw_inertia *= 1.2;
+  truth.drag *= 0.5;
+  truth.rolling_resistance *= 0.5;
+  const std::vector<std::vector<planar_sample>> runs = {dynamic_run(d, 0.9, 0.06, 2, 400, &truth)};
+  const dyn_bike_fit f = fit_dyn_bike(runs, 0.06, d, 0.9, 2, 3);
+  std::printf("  fit: drive lag %.3f, steer lag %.3f, B x%.2f / x%.2f, Iz x%.2f, resistance x%.2f; "
+              "cost %.3g -> %.3g\n",
+              f.drive_lag, f.steer_lag, f.tire_b_front_factor, f.tire_b_rear_factor,
+              f.yaw_inertia_factor, f.resistance_factor, f.cost_default, f.cost_fit);
+  EXPECT_NEAR(f.drive_lag, 0.04, 1e-12);
+  EXPECT_NEAR(f.steer_lag, 0.0, 1e-12);
+  EXPECT_NEAR(f.tire_b_front_factor, 0.55, 1e-12);
+  EXPECT_NEAR(f.tire_b_rear_factor, 0.7, 1e-12);
+  EXPECT_NEAR(f.yaw_inertia_factor, 1.2, 1e-12);
+  EXPECT_NEAR(f.resistance_factor, 0.5, 1e-12);
+  EXPECT_LT(f.cost_fit, 1e-12);
+  EXPECT_GT(f.cost_default, 1e-6);
 }
 
 TEST(PlantLog, CutsFlightsAndWritesThemAsNpy) {

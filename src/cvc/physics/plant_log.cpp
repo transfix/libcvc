@@ -131,6 +131,7 @@ planar_sample plant_log::sample(int i) const {
   s.rear_y = rear.y;
   s.steer = vs.steer;
   s.grade = std::max(-1.0, std::min(1.0, fwd.z));
+  s.roll = std::max(-1.0, std::min(1.0, -rotate(b.rotation, {0.0, 1.0, 0.0}).z));
   s.wheels = static_cast<int>(vs.wheels.size());
   for (const wheel_state &w : vs.wheels)
     s.wheels_down += w.contact ? 1 : 0;
@@ -175,25 +176,90 @@ void plant_log::record() {
   }
 }
 
-plant_residuals one_tick_residuals(const std::vector<std::vector<planar_sample>> &runs, double dt,
-                                   const vehicle_desc &d, double mu, int nsub,
-                                   const std::vector<double> &bins_g) {
+namespace {
+
+// Why a tick is left out of the residual (0: it is not).
+enum skip_why { kept = 0, contact, airborne, impact, rest };
+
+skip_why why_skipped(const planar_sample &s0, const planar_sample &s1) {
+  if (s1.contacts > 0)
+    return contact;
+  if (!s0.grounded || !s1.grounded)
+    return airborne;
+  if (std::hypot(s1.a_lat, s1.a_lon) > kImpactG * kG)
+    return impact;
+  if (std::fabs(s0.vx) < 0.2 && std::fabs(s1.vx) < 0.2)
+    return rest;
+  return kept;
+}
+
+// The dynamic model for one tick: from the plant's state at its start (and the model's own drive
+// actuator, a_shadow, carried along the run), the held command for nsub substeps, as
+// one_tick_residuals takes it. Updates a_shadow.
+cvc::nav::diff::dyn_state<double> dyn_tick(const cvc::nav::diff::dyn_bike_params &p,
+                                           cvc::nav::diff::bike_veh &lim, const planar_sample &s0,
+                                           const planar_sample &s1, int nsub, double &a_shadow) {
+  // Both models keep the speed within the plan's, as sim_world's reference does.
+  lim.vmax = static_cast<float>(s0.vmax > 0.0 ? s0.vmax : 1e3);
+  cvc::nav::diff::dyn_state<double> m{};
+  m.x = s0.rear_x;
+  m.y = s0.rear_y;
+  m.psi = s0.psi;
+  m.vx = s0.vx;
+  m.vy = s0.vy;
+  m.r = s0.r;
+  m.delta = s0.steer;
+  m.a = a_shadow;
+  for (int j = 0; j < nsub; ++j) {
+    cvc::nav::diff::dyn_state<double> o;
+    cvc::nav::diff::dyn_plant<double>(p, lim, m, s1.steer_cmd, s1.accel_cmd, s0.grade, o);
+    m = o;
+  }
+  a_shadow = m.a;
+  return m;
+}
+
+cvc::nav::diff::bike_veh dyn_limits(const cvc::nav::diff::dyn_bike_params &p, double max_steer,
+                                    double h) {
+  cvc::nav::diff::bike_veh lim{};
+  lim.L = p.lf + p.lr;
+  lim.delta_max = static_cast<float>(max_steer);
+  lim.hdt = static_cast<float>(h);
+  lim.allow_reverse = 1;
+  return lim;
+}
+
+cvc::nav::diff::dyn_bike_params si_params(const cvc::nav::dyn_bike_si &si) {
+  cvc::world_units::normalized_frame f;
+  f.scale = 1.0;
+  return cvc::nav::dyn_bike_params_of(si, f);
+}
+
+void check_residual_args(double dt, int nsub, const std::vector<double> &bins_g) {
   if (!(dt > 0.0) || nsub < 1)
     throw std::invalid_argument("cvc::physics::one_tick_residuals: needs dt > 0 and nsub >= 1");
   for (std::size_t k = 1; k < bins_g.size(); ++k)
     if (!(bins_g[k] > bins_g[k - 1]))
       throw std::invalid_argument("cvc::physics::one_tick_residuals: bins must ascend");
-  cvc::world_units::normalized_frame si;
-  si.scale = 1.0;
-  const cvc::nav::diff::dyn_bike_params p =
-      cvc::nav::dyn_bike_params_of(nav_plant::dyn_bike_si_of(d, mu), si);
+}
+
+} // namespace
+
+plant_residuals one_tick_residuals(const std::vector<std::vector<planar_sample>> &runs, double dt,
+                                   const vehicle_desc &d, double mu, int nsub,
+                                   const std::vector<double> &bins_g) {
+  return one_tick_residuals(runs, dt, nav_plant::dyn_bike_si_of(d, mu), d.wheelbase(), d.max_steer,
+                            nsub, bins_g);
+}
+
+plant_residuals one_tick_residuals(const std::vector<std::vector<planar_sample>> &runs, double dt,
+                                   const cvc::nav::dyn_bike_si &si, double wheelbase,
+                                   double max_steer, int nsub, const std::vector<double> &bins_g) {
+  check_residual_args(dt, nsub, bins_g);
+  const cvc::nav::diff::dyn_bike_params p = si_params(si);
   const double h = dt / nsub;
-  cvc::nav::diff::bike_veh lim{};
-  lim.L = p.lf + p.lr;
-  lim.delta_max = static_cast<float>(d.max_steer);
-  lim.hdt = static_cast<float>(h);
-  lim.allow_reverse = 1;
-  const double L = d.wheelbase();
+  cvc::nav::diff::bike_veh lim = dyn_limits(p, max_steer, h);
+  const double L = wheelbase;
   const std::size_t nb = bins_g.size() + 1;
   std::vector<accum> dyn(nb), kin(nb);
   plant_residuals out;
@@ -201,26 +267,9 @@ plant_residuals one_tick_residuals(const std::vector<std::vector<planar_sample>>
     double a_shadow = 0.0; // the model's drive actuator, run on the commands alone
     for (std::size_t k = 0; k + 1 < run.size(); ++k) {
       const planar_sample &s0 = run[k], &s1 = run[k + 1];
-      // Both models keep the speed within the plan's, as sim_world's reference does.
-      const double vmax = s0.vmax > 0.0 ? s0.vmax : 1e3;
-      lim.vmax = static_cast<float>(vmax);
-      // The dynamic model, from the plant's state at the tick's start.
-      cvc::nav::diff::dyn_state<double> m{};
-      m.x = s0.rear_x;
-      m.y = s0.rear_y;
-      m.psi = s0.psi;
-      m.vx = s0.vx;
-      m.vy = s0.vy;
-      m.r = s0.r;
-      m.delta = s0.steer;
-      m.a = a_shadow;
-      for (int j = 0; j < nsub; ++j) {
-        cvc::nav::diff::dyn_state<double> o;
-        cvc::nav::diff::dyn_plant<double>(p, lim, m, s1.steer_cmd, s1.accel_cmd, s0.grade, o);
-        m = o;
-      }
-      a_shadow = m.a;
+      const cvc::nav::diff::dyn_state<double> m = dyn_tick(p, lim, s0, s1, nsub, a_shadow);
       // The kinematic bicycle (D14's reference): the command at once, about the rear axle.
+      const double vmax = s0.vmax > 0.0 ? s0.vmax : 1e3;
       double kx = s0.rear_x, ky = s0.rear_y, kth = s0.psi, ksp = s0.vx;
       for (int j = 0; j < nsub; ++j) {
         ksp = std::min(std::max(ksp + h * s1.accel_cmd, -0.25 * vmax), vmax);
@@ -228,21 +277,21 @@ plant_residuals one_tick_residuals(const std::vector<std::vector<planar_sample>>
         kx = kx + h * ksp * std::cos(kth);
         ky = ky + h * ksp * std::sin(kth);
       }
-      if (s1.contacts > 0) {
+      switch (why_skipped(s0, s1)) {
+      case contact:
         ++out.skipped_contact;
         continue;
-      }
-      if (!s0.grounded || !s1.grounded) {
+      case airborne:
         ++out.skipped_airborne;
         continue;
-      }
-      if (std::hypot(s1.a_lat, s1.a_lon) > kImpactG * kG) {
+      case impact:
         ++out.skipped_impact;
         continue;
-      }
-      if (std::fabs(s0.vx) < 0.2 && std::fabs(s1.vx) < 0.2) {
+      case rest:
         ++out.skipped_rest;
         continue;
+      case kept:
+        break;
       }
       const double g = std::fabs(s1.a_lat) / kG;
       std::size_t b = 0;
@@ -261,6 +310,90 @@ plant_residuals one_tick_residuals(const std::vector<std::vector<planar_sample>>
     out.kinematic.push_back(kin[b].bin(lo, hi));
   }
   return out;
+}
+
+double dyn_bike_cost(const std::vector<std::vector<planar_sample>> &runs, double dt,
+                     const cvc::nav::dyn_bike_si &si, double max_steer, int nsub,
+                     std::uint64_t *ticks) {
+  check_residual_args(dt, nsub, {});
+  const cvc::nav::diff::dyn_bike_params p = si_params(si);
+  cvc::nav::diff::bike_veh lim = dyn_limits(p, max_steer, dt / nsub);
+  const double L = si.cg_to_front + si.cg_to_rear;
+  double sum = 0.0;
+  std::uint64_t n = 0;
+  for (const std::vector<planar_sample> &run : runs) {
+    double a_shadow = 0.0;
+    for (std::size_t k = 0; k + 1 < run.size(); ++k) {
+      const planar_sample &s0 = run[k], &s1 = run[k + 1];
+      const cvc::nav::diff::dyn_state<double> m = dyn_tick(p, lim, s0, s1, nsub, a_shadow);
+      if (why_skipped(s0, s1) != kept)
+        continue;
+      const double ex = m.vx - s1.vx, ey = m.vy - s1.vy, er = L * (m.r - s1.r);
+      sum += ex * ex + ey * ey + er * er;
+      ++n;
+    }
+  }
+  if (ticks)
+    *ticks = n;
+  return n ? sum / static_cast<double>(n) : 0.0;
+}
+
+dyn_bike_fit fit_dyn_bike(const std::vector<std::vector<planar_sample>> &runs, double dt,
+                          const vehicle_desc &d, double mu, int nsub, int sweeps) {
+  const cvc::nav::dyn_bike_si base = nav_plant::dyn_bike_si_of(d, mu);
+  dyn_bike_fit f;
+  f.si = base;
+  f.cost_default = dyn_bike_cost(runs, dt, base, d.max_steer, nsub, &f.ticks);
+  // The candidates, each a value or a factor on the spec-sheet vehicle's.
+  struct knob {
+    double *value;
+    std::vector<double> grid;
+  };
+  double drive_lag = base.drive_lag, steer_lag = base.steer_lag, bf = 1.0, br = 1.0, iz = 1.0;
+  double resist = 1.0;
+  const std::vector<double> factors = {0.1, 0.15, 0.2, 0.25, 0.3,  0.4,  0.55,
+                                       0.7, 0.85, 1.0, 1.2,  1.45, 1.75, 2.1};
+  const std::vector<knob> knobs = {{&drive_lag, {0.0, 0.02, 0.04, 0.07, 0.1, 0.15, 0.2, 0.3}},
+                                   {&steer_lag, {0.0, 0.02, 0.04, 0.07, 0.1}},
+                                   {&resist, {0.0, 0.25, 0.5, 0.75, 1.0}},
+                                   {&bf, factors},
+                                   {&br, factors},
+                                   {&iz, factors}};
+  const auto make = [&]() {
+    cvc::nav::dyn_bike_si si = base;
+    si.drive_lag = drive_lag;
+    si.steer_lag = steer_lag;
+    si.tire_B_front = base.tire_B_front * bf;
+    si.tire_B_rear = base.tire_B_rear * br;
+    si.yaw_inertia = base.yaw_inertia * iz;
+    si.drag = base.drag * resist;
+    si.rolling_resistance = base.rolling_resistance * resist;
+    return si;
+  };
+  double best = f.cost_default;
+  // Coordinate descent: each knob over its grid with the others held, `sweeps` times.
+  for (int sw = 0; sw < sweeps; ++sw)
+    for (const knob &k : knobs) {
+      double keep = *k.value;
+      for (const double v : k.grid) {
+        *k.value = v;
+        const double c = dyn_bike_cost(runs, dt, make(), d.max_steer, nsub, nullptr);
+        if (c < best) {
+          best = c;
+          keep = v;
+        }
+      }
+      *k.value = keep;
+    }
+  f.si = make();
+  f.cost_fit = best;
+  f.drive_lag = drive_lag;
+  f.steer_lag = steer_lag;
+  f.tire_b_front_factor = bf;
+  f.tire_b_rear_factor = br;
+  f.yaw_inertia_factor = iz;
+  f.resistance_factor = resist;
+  return f;
 }
 
 flight_set cut_flights(const std::vector<std::vector<planar_sample>> &runs, std::size_t rows,
