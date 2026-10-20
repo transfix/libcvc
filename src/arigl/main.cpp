@@ -43,6 +43,7 @@
 // check loads the document as run would, offscreen, and prints its warnings.
 
 #include <algorithm>
+#include <cctype> // std::isalnum / std::isdigit — sanitize the conference node id
 #include <chrono>
 #include <cstdio>
 #include <cstdlib> // std::getenv — the conference relay / room / name come from the environment
@@ -205,11 +206,19 @@ struct ConferenceSession {
     const char *nameEnv = std::getenv("CVC_ARIADNE_NAME");
     const std::string room = (roomEnv && *roomEnv) ? roomEnv : "standup";
     const std::string self = (nameEnv && *nameEnv) ? nameEnv : "guest";
-    gla::register_conference(app,
-                             backend); // room-join/roster + streaming + stream_view (idempotent)
-    shard = std::make_unique<cvc::state_cluster_shard>(app, "conf", self);
-    shard->attach();
-    shard->install_as_default(); // room-join derives the participant id from the default shard
+    // The shard's local_node_id identifies this participant in the replicated room tree and must be
+    // a C identifier (letters/digits/underscore, no leading digit). The DISPLAY name (conf.self,
+    // shown in the roster) may be any text — e.g. a browser's random "guest-ab12" — and room-join
+    // already carries it separately as the "name" attr, so derive a safe node id here rather than
+    // passing the display name straight through (a hyphen in it otherwise throws).
+    std::string nodeId;
+    for (char c : self)
+      nodeId += std::isalnum(static_cast<unsigned char>(c)) ? c : '_';
+    if (nodeId.empty() || std::isdigit(static_cast<unsigned char>(nodeId.front())))
+      nodeId.insert(0, "n_");
+    gla::register_conference(app, backend); // room-join/roster + streaming + stream_view
+    shard = std::make_unique<cvc::state_cluster_shard>(app, "conf", nodeId);
+    shard->attach(); // also installs this as the default shard; room-join derives the pid from it
     ws = std::make_unique<cvc::state_transport_ws>();
     ws->register_shard(shard.get());
     const bool ok = ws->connect_to_peer(relay, std::chrono::milliseconds(8000));
@@ -274,7 +283,14 @@ int run_window(const ari::HostOptions &o) {
   // Conference mode (no-op unless CVC_ARIADNE_RELAY is set): register the room verbs and dial the
   // relay over WebSocket, so the document (conference_roster.ari) joins a hosted room.
   ConferenceSession conf;
-  conf.setup(app, sg.getStatePrefix(), rt.backend());
+  // A conference-setup failure must not take down the runtime — fall back to running the document
+  // locally (no relay) and say why, rather than letting the exception abort main.
+  try {
+    conf.setup(app, sg.getStatePrefix(), rt.backend());
+  } catch (const std::exception &e) {
+    std::fprintf(stderr, "arigl: conference setup failed (%s); running the document locally\n",
+                 e.what());
+  }
   for (const std::string &d : o.component_paths)
     rt.add_component_path(d);
   rt.on("quit", [&] { rt.request_close(); });
