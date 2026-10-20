@@ -162,22 +162,48 @@ Ticks are left out when they have a static contact, a wheel off the ground, an i
 1.5 g), or the vehicle at rest. `cvc-plant-log` runs it and prints the bins.
 
 Below: nav's 0.06 s tick (6 substeps), 4 seeds, 60 s each, mu 0.9, measured 2026-10-20. Each cell
-is the position rms in mm, dynamic / kinematic.
+is the position rms in mm, spec-sheet dynamic / kinematic. The RoboRacer's city runs plan with 0.4
+of its acceleration and braking: at its full 6 m/s^2 its chassis box pitches onto the ground.
 
 | lateral g | Humvee slalom | Humvee city | RoboRacer slalom | RoboRacer city |
 |---|---|---|---|---|
-| 0.0-0.1 | 2.0 / 3.9 | 2.0 / 3.4 | 0.9 / 0.7 | 2.5 / 1.9 |
-| 0.1-0.2 | 5.1 / 11.6 | 4.8 / 11.1 | 3.3 / 5.6 | 4.3 / 4.6 |
-| 0.2-0.3 | 7.1 / 17.9 | 7.0 / 18.1 | 5.0 / 10.7 | 5.8 / 9.4 |
-| 0.3-0.5 | 8.1 / 27.5 | 8.1 / 26.2 | 6.9 / 15.8 | 7.1 / 13.8 |
-| >= 0.5 | 5.2 / 94.0 | 4.5 / 52.0 | 6.5 / 25.1 | 4.8 / 19.0 |
+| 0.0-0.1 | 2.0 / 3.9 | 2.0 / 3.4 | 0.9 / 0.7 | 1.9 / 1.9 |
+| 0.1-0.2 | 5.1 / 11.6 | 4.8 / 11.1 | 3.3 / 5.6 | 3.4 / 5.2 |
+| 0.2-0.3 | 7.1 / 17.9 | 7.0 / 18.1 | 5.0 / 10.7 | 4.8 / 8.6 |
+| 0.3-0.5 | 8.1 / 27.5 | 8.1 / 26.2 | 6.9 / 15.8 | 6.5 / 11.7 |
+| >= 0.5 | 5.2 / 94.0 | 4.5 / 52.0 | 6.5 / 25.1 | 12.6 / 30.4 |
 
-- **Position and heading:** the dynamic model is closer than the kinematic bicycle wherever the tires
-  carry load. Above 0.5 g it is closer by 4-18x.
-- **Speed:** for the RoboRacer the dynamic model is worse, with 0.02-0.12 m/s rms against
-  0.007-0.06. Its 0.1 s drive lag (`dyn_bike_si_of`'s `drive_lag`) is slower than the vehicle's
-  driver model.
-- **Yaw rate:** in the city it is off by 0.1-0.3 rad/s rms.
+- **Position and heading:** with `dyn_bike_si_of`'s spec-sheet values, the dynamic model is closer than
+  the kinematic bicycle wherever the tires carry load.
+- **Speed:** for the RoboRacer it is worse, because two of its spec-sheet values are off:
+  - its 0.1 s drive lag;
+  - the drag and rolling resistance it subtracts. The RoboRacer's driver model tracks the commanded
+    acceleration with an integral trim, so it makes up for them.
+
+**Fitted to Jolt** (`cvc::physics::fit_dyn_bike`, `cvc-plant-log --fit-dyn`): a coordinate descent on
+the one-tick twist residual over the knobs a spec sheet does not give. Each fit uses seeds 100-102
+and is judged on seed 103.
+
+| run (50 Hz) | drive lag | tire B front / rear | yaw inertia | drag + rolling | held-out twist residual, (m/s)^2 |
+|---|---|---|---|---|---|
+| Humvee slalom | 0.15 s | x0.40 / x0.30 | x1.00 | x1 | 0.00287 -> 0.00045 |
+| Humvee city | 0.02 s | x0.40 / x0.30 | x1.20 | x1 | 0.00280 -> 0.00060 |
+| RoboRacer slalom | 0 | x0.30 / x0.25 | x0.85 | x0 | 0.00035 -> 0.00001 |
+| RoboRacer city | 0 | x0.30 / x0.30 | x1.75 | x0 | 0.00229 -> 0.00018 |
+
+- **Tires:** both vehicles' Pacejka B from the spec sheet is 2.5-4x stiffer than Jolt's tires behave.
+- **RoboRacer drive:** it has no drive lag and no uncompensated resistance.
+- **Weakly identified:** the Humvee's drive lag and either vehicle's yaw inertia move between scenes.
+- **The city-bundle fits (Austin) are not trustworthy:** they land on the grids' edges (B x0.1-0.2, yaw
+  inertia x1.75-2.1), absorbing what the planar model leaves out on rough terrain.
+- **Held out, at nav's 0.06 s tick:** the fitted model's position residual against the spec sheet's
+  and the kinematic bicycle's, in mm:
+  - Humvee slalom, above 0.5 g: 3.0 / 6.4 / 55.2;
+  - RoboRacer city, 0.3-0.5 g: 1.6 / 6.1 / 11.2.
+
+  The RoboRacer's speed residual comes down to the kinematic bicycle's.
+- **The defaults are unchanged:** `dyn_bike_si_of` keeps the spec-sheet values, so P8b and its goldens
+  do not move. Whether to adopt fitted values is open.
 
 These are the targets a plant fitted to Jolt has to beat, bin by bin.
 
