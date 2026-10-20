@@ -169,7 +169,9 @@ pycvc.nav_route_follower_status(follow)      # following / leg / legs / reversin
 
 The option dicts take exactly the C++ structs' fields (an unknown key is an error).
 `nav_route_clearance` gives a pose's clearance, and `nav_sim_world_belief_occ(sim, m)` copies belief
-plane m's planning raster to plan on. The follower holds a reference to its world.
+plane m's planning raster to plan on. `nav_sim_world_route_vehicle(sim, i)` derives agent i's route
+vehicle and steering geometry from the plant (None on nav's bicycle). The follower holds a
+reference to its world.
 `test_pycvc_nav_routes.py` covers them.
 
 ## Level of detail (cvc::simplify + cvc::lod)

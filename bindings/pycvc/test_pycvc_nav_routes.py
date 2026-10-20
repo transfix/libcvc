@@ -11,7 +11,9 @@ Checks:
      the route's legs;
   6. the follower keeps its sim_world alive after the Python name for the world is gone;
   7. an agent index out of range and a malformed pose array are errors;
-  8. nav_sim_world_belief_occ copies a belief plane's planning raster (what a route is planned on).
+  8. nav_sim_world_belief_occ copies a belief plane's planning raster (what a route is planned on);
+  9. nav_sim_world_route_vehicle derives the route vehicle from the plant (none on nav's bicycle),
+     and with Jolt a Humvee drives its route to the end on the plant.
 Script-style, like the other pycvc tests; self-skips (exit 0) when the running pycvc predates the
 bindings.
 """
@@ -146,5 +148,42 @@ expect_raises(lambda: pycvc.nav_route_follower_clear(follow, -1), "agent -1")
 expect_raises(lambda: pycvc.nav_route_follower_apply(sim), "a world handle is not a follower")
 pycvc.nav_route_follower_clear(follow, 0)
 check(not pycvc.nav_route_follower_status(follow)["following"][0], "cleared")
+
+# 9. the route vehicle from the plant: none on nav's bicycle; on a Jolt plant, the vehicle's
+#    turning radius and body, and a route it drives to the end
+check(pycvc.nav_sim_world_route_vehicle(sim, 0) is None, "no plant, no route vehicle")
+expect_raises(lambda: pycvc.nav_sim_world_route_vehicle(sim, 3), "agent 3 of 1")
+if "jolt" in pycvc.physics_backends() and pycvc.physics_backend_info("jolt")["available"]:
+    w = pycvc.physics_world()
+    gm = w.add_material("ground", friction=0.9, restitution=0.0, rolling_resistance=0.015)
+    w.add_box((150.0, 150.0, 0.5), position=(0.0, 0.0, -0.5), motion="static", material=gm)
+    sim = make_sim(open_ground)
+    plant = pycvc.nav_plant(w, [pycvc.vehicle_desc.humvee()])
+    pycvc.nav_sim_world_set_plant(sim, plant)
+    rv = pycvc.nav_sim_world_route_vehicle(sim, 0)
+    check(rv is not None and rv["min_radius"] > 0.0 and rv["wheelbase"] > 0.0, "a turning radius")
+    check(abs(rv["min_radius"] - rv["wheelbase"] / math.tan(rv["max_steer"])) < 1e-9,
+          "min_radius = wheelbase / tan(max_steer)")
+    check(rv["reach"] > 0.0, "the sim's reach in world units")
+    car = {k: rv[k] for k in ("min_radius", "disc_offsets", "disc_radius")}
+    pos0, head0 = pycvc.nav_sim_world_snapshot(sim)[:2]
+    r = pycvc.nav_plan_vehicle_route(open_ground, *BOUNDS, float(pos0[0, 0]), float(pos0[0, 1]),
+                                     float(head0[0]), 20.0, 0.0, car)
+    check(r["reached"], "a route for the Humvee")
+    follow = pycvc.nav_route_follower_create(
+        sim, {"wheelbase": rv["wheelbase"], "max_steer": rv["max_steer"]})
+    pycvc.nav_route_follower_set(follow, 0, r["poses"])
+    for tick in range(3000):
+        pycvc.nav_route_follower_apply(follow)
+        pycvc.nav_sim_world_step(sim)
+        if pycvc.nav_route_follower_status(follow)["done"][0]:
+            break
+    pos = pycvc.nav_sim_world_snapshot(sim)[0]
+    check(bool(pycvc.nav_route_follower_status(follow)["done"][0]),
+          f"the Humvee finishes its route on the plant (tick {tick})")
+    check(math.hypot(float(pos[0, 0]) - 20.0, float(pos[0, 1])) < rv["reach"] + 2.0,
+          f"the Humvee ends near (20, 0) m: {pos[0].tolist()}")
+else:
+    print("no Jolt in this build: the plant checks are skipped")
 
 print(f"vehicle route bindings: {checks} checks passed")

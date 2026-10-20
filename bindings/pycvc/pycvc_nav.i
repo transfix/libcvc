@@ -16,6 +16,7 @@
 
 %{
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <cvc/nav/belief_material.h>
@@ -32,6 +33,7 @@
 #include <cvc/nav/route_follower.h>
 #include <cvc/nav/sim_thread.h>
 #include <cvc/nav/sim_world.h>
+#include <cvc/nav/vehicle_plant.h>
 #include <cvc/nav/vehicle_route.h>
 #include <memory>
 #include <stdexcept>
@@ -1487,6 +1489,42 @@ inline cvc::nav::follower_options follower_from(PyObject *d) {
                                   min_x, min_y, max_x, max_y, v, p);
     Py_DECREF(a);
     return c;
+  }
+
+  // Agent i's vehicle for nav_plan_vehicle_route and nav_route_follower_create, from the sim's
+  // plant, in world units: None without a plant, else a dict min_radius (the rear axle's tightest
+  // turn, wheelbase / tan(max steer)), disc_offsets and disc_radius (the body's footprint discs,
+  // when the plant has a size), wheelbase, max_steer, and reach (the sim's reach_tol). The same
+  // derivation a C++ host makes from sim_world::plant() and plant_plan_of.
+  PyObject *nav_sim_world_route_vehicle(PyObject *handle, int i) {
+    cvc::nav::sim_world *sw = sim_world_from(handle);
+    if (i < 0 || i >= sw->size())
+      throw std::out_of_range("pycvc.nav_sim_world_route_vehicle: agent index out of range");
+    if (!sw->plant())
+      Py_RETURN_NONE;
+    const cvc::nav::sim_world::config &cfg = sw->current_config();
+    const double S = cfg.scale;
+    const cvc::nav::plant_limits l = sw->plant()->limits(i);
+    const double wheelbase = (l.wheelbase > 0.0f ? l.wheelbase : cfg.veh.L) / S;
+    const double steer = l.max_steer > 0.0f ? l.max_steer : cfg.veh.delta_max;
+    PyObject *offs = PyList_New(0);
+    double disc_radius = 0.0;
+    cvc::nav::sim_world::plant_plan pp;
+    if (sw->plant_plan_of(i, pp)) {
+      disc_radius = pp.body_rr / S;
+      for (const float off : pp.body_offsets) {
+        PyObject *f = PyFloat_FromDouble(off / S);
+        PyList_Append(offs, f);
+        Py_DECREF(f);
+      }
+    }
+    PyObject *out = Py_BuildValue("{s:d,s:N,s:d,s:d,s:d,s:d}", "min_radius",
+                                  wheelbase / std::tan(steer), "disc_offsets", offs, "disc_radius",
+                                  disc_radius, "wheelbase", wheelbase, "max_steer", steer, "reach",
+                                  cfg.reach_tol / S);
+    if (!out)
+      throw std::runtime_error("pycvc.nav_sim_world_route_vehicle: alloc failed");
+    return out;
   }
 
   static const char *kRouteFollowerCapsule = "cvc.nav.route_follower";
