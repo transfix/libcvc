@@ -164,9 +164,9 @@ public:
 
   // ── Media plane (carried as the Frame envelope's MediaFrame, same as the WS transport) ──
   // publish_media_frame sends a frame to this transport's connections; a relay's media_router fans
-  // each received frame back out via fan_media(). set_on_media is the leaf subscribe sugar. Media is
-  // NOT replicated, NOT journaled, and never crosses the control bridge (it crosses protocols through
-  // the media_router instead). Thread-safe; a no-op with no connections.
+  // each received frame back out via fan_media(). set_on_media is the leaf subscribe sugar. Media
+  // is NOT replicated, NOT journaled, and never crosses the control bridge (it crosses protocols
+  // through the media_router instead). Thread-safe; a no-op with no connections.
   void publish_media_frame(const media_frame &m);
   using media_frame_fn = std::function<void(const media_frame &)>;
   void set_on_media(media_frame_fn cb);
@@ -256,8 +256,9 @@ private:
   std::size_t write_media(const media_frame &m, const void *exclude);
   void send_hello_locked(connection &c);
   void send_backfill_locked(connection &c, const std::vector<state_cluster_shard *> &shards);
-  // Relay-only: push the full CURRENT snapshot of each shard to a newly admitted connection, so a late
-  // joiner sees peers already present (the room tree is all remote-origin, so backfill carries nothing).
+  // Relay-only: push the full CURRENT snapshot of each shard to a newly admitted connection, so a
+  // late joiner sees peers already present (the room tree is all remote-origin, so backfill carries
+  // nothing).
   void send_snapshot_locked(connection &c, const std::vector<state_cluster_shard *> &shards);
 
   struct impl;

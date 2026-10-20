@@ -30,8 +30,8 @@ namespace cvc {
 // transports' control-plane set_bridge, generalized from a 1:1 cross-pointer to an N-way hub.)
 //
 // ECHO SUPPRESSION uses the endpoint's opaque source-connection token (see media_endpoint): the
-// origin peer is skipped on its own endpoint, everyone else receives the frame. There is no reliance
-// on origin_node_id, and no per-protocol special-casing.
+// origin peer is skipped on its own endpoint, everyone else receives the frame. There is no
+// reliance on origin_node_id, and no per-protocol special-casing.
 //
 // Lifetime: every registered endpoint must outlive the router (or be removed while quiescent).
 // remove_endpoint() clears that endpoint's sink before dropping it, so no in-flight frame routes

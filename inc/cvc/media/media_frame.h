@@ -30,14 +30,14 @@ namespace cvc {
 // encoding of this struct, shared by both the WS and gRPC transports since both carry the Frame
 // envelope). Keep the two in sync.
 struct media_frame {
-  std::string origin_node_id;        // the publishing participant's pid (route per-peer; skip self)
-  std::string stream_id;             // the KIND on that peer: "camera" | "mic"
-  std::string codec;                 // "mjpeg" (video) | "f32" (audio)
-  std::uint32_t width = 0;           // video frame size (0 for audio)
+  std::string origin_node_id; // the publishing participant's pid (route per-peer; skip self)
+  std::string stream_id;      // the KIND on that peer: "camera" | "mic"
+  std::string codec;          // "mjpeg" (video) | "f32" (audio)
+  std::uint32_t width = 0;    // video frame size (0 for audio)
   std::uint32_t height = 0;
-  std::int64_t seq = 0;              // monotonic per (origin, stream_id)
-  double pts_seconds = 0.0;          // producer presentation timestamp
-  std::uint32_t sample_rate = 0;     // audio (0 for video)
+  std::int64_t seq = 0;          // monotonic per (origin, stream_id)
+  double pts_seconds = 0.0;      // producer presentation timestamp
+  std::uint32_t sample_rate = 0; // audio (0 for video)
   std::uint32_t channels = 0;
   std::vector<std::uint8_t> payload; // one whole frame
 };

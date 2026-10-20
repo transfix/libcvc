@@ -19,7 +19,7 @@
 #include <SDL3/SDL_stdinc.h> // SDL_free, Uint64
 #include <SDL3/SDL_surface.h>
 #include <SDL3/SDL_timer.h> // SDL_Delay
-#include <algorithm>         // std::min / std::max (native-aspect fit)
+#include <algorithm>        // std::min / std::max (native-aspect fit)
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -67,11 +67,11 @@ public:
     if (!raw)
       return out; // no new frame yet (warming up, or permission still pending): skip, don't block
 
-    // Convert the camera's native pixel format to byte-order RGBA, then scale to the output size and
-    // copy densely into the slab (the surface's pitch may exceed w*4). native_ decides the output
-    // size: when false, stretch to exactly w_ x h_ (a fixed-size raw stream); when true, fit the
-    // native frame within the w_ x h_ budget PRESERVING its aspect ratio (never upscaling), so a
-    // portrait / 16:9 camera keeps its true shape (a self-describing-codec wrapper encodes at
+    // Convert the camera's native pixel format to byte-order RGBA, then scale to the output size
+    // and copy densely into the slab (the surface's pitch may exceed w*4). native_ decides the
+    // output size: when false, stretch to exactly w_ x h_ (a fixed-size raw stream); when true, fit
+    // the native frame within the w_ x h_ budget PRESERVING its aspect ratio (never upscaling), so
+    // a portrait / 16:9 camera keeps its true shape (a self-describing-codec wrapper encodes at
     // cur_width/cur_height). getUserMedia's exact delivered size is unknown until frames flow, so
     // this is computed per frame from the delivered size. The same-size case does no scaling.
     SDL_Surface *rgba = (raw->format == SDL_PIXELFORMAT_RGBA32)
@@ -79,9 +79,9 @@ public:
                             : SDL_ConvertSurface(raw, SDL_PIXELFORMAT_RGBA32);
     int ow = w_, oh = h_;
     if (native_ && rgba && rgba->w > 0 && rgba->h > 0) {
-      const double s = std::min(std::min(static_cast<double>(w_) / rgba->w,
-                                         static_cast<double>(h_) / rgba->h),
-                                1.0); // fit within the budget, never upscale
+      const double s =
+          std::min(std::min(static_cast<double>(w_) / rgba->w, static_cast<double>(h_) / rgba->h),
+                   1.0); // fit within the budget, never upscale
       ow = std::max(1, std::min(w_, static_cast<int>(rgba->w * s + 0.5)));
       oh = std::max(1, std::min(h_, static_cast<int>(rgba->h * s + 0.5)));
     }
@@ -94,16 +94,18 @@ public:
       if (!scaled_)
         scaled_ = SDL_CreateSurface(ow, oh, SDL_PIXELFORMAT_RGBA32);
       // SDL_BlitSurfaceScaled resamples src -> the whole dst; nullptr rects = full surfaces.
-      frame = (scaled_ && SDL_BlitSurfaceScaled(rgba, nullptr, scaled_, nullptr, SDL_SCALEMODE_LINEAR))
-                  ? scaled_
-                  : nullptr; // scale failed -> skip this frame (bytes=0), never an OOB copy
+      frame =
+          (scaled_ && SDL_BlitSurfaceScaled(rgba, nullptr, scaled_, nullptr, SDL_SCALEMODE_LINEAR))
+              ? scaled_
+              : nullptr; // scale failed -> skip this frame (bytes=0), never an OOB copy
     }
     if (frame && frame->w == ow && frame->h == oh && frame->pixels) {
       const int row = ow * 4;
       const auto *src = static_cast<const std::uint8_t *>(frame->pixels);
       for (int y = 0; y < oh; ++y)
         std::memcpy(buf + static_cast<std::size_t>(y) * row,
-                    src + static_cast<std::size_t>(y) * frame->pitch, static_cast<std::size_t>(row));
+                    src + static_cast<std::size_t>(y) * frame->pitch,
+                    static_cast<std::size_t>(row));
       cur_w_ = ow;
       cur_h_ = oh;
       out.bytes = static_cast<std::size_t>(ow) * static_cast<std::size_t>(oh) * 4u;
@@ -122,9 +124,10 @@ private:
   SDL_Camera *cam_;
   int w_;
   int h_;
-  bool native_;                   // true: fit-to-budget preserving aspect; false: stretch to w_ x h_
-  int cur_w_, cur_h_;             // actual size of the last produced frame (cur_width/cur_height)
-  SDL_Surface *scaled_ = nullptr; // lazily-created output-size scratch for rescaling off-size frames
+  bool native_;       // true: fit-to-budget preserving aspect; false: stretch to w_ x h_
+  int cur_w_, cur_h_; // actual size of the last produced frame (cur_width/cur_height)
+  SDL_Surface *scaled_ =
+      nullptr; // lazily-created output-size scratch for rescaling off-size frames
 };
 } // namespace
 #endif // CVC_ENABLE_SDL
@@ -144,19 +147,20 @@ camera_open open_camera(int device_index, int want_w, int want_h, double want_fp
     std::string name = nm ? nm : std::string();
 
 #if defined(__EMSCRIPTEN__)
-    // Browser camera (getUserMedia). Permission AND the device format resolve ASYNCHRONOUSLY through
-    // the browser event loop, so in a single-threaded wasm build we must NOT block for them: the
-    // event loop cannot run while we spin, so the grant would never arrive and the bounded native
-    // wait below would always time out (and SDL_GetCameraSupportedFormats reports nothing until the
-    // stream is live). So request the desired size, open WITHOUT waiting, and hand back a source
-    // sized to the request immediately. fill() skips (SDL_AcquireCameraFrame returns null) until the
-    // user approves and frames flow, and whatever size getUserMedia actually delivers is rescaled to
-    // the request by fill(); the app's normal per-frame SDL_PumpEvents (pump_events) services the
-    // approval + frame-ready events.
+    // Browser camera (getUserMedia). Permission AND the device format resolve ASYNCHRONOUSLY
+    // through the browser event loop, so in a single-threaded wasm build we must NOT block for
+    // them: the event loop cannot run while we spin, so the grant would never arrive and the
+    // bounded native wait below would always time out (and SDL_GetCameraSupportedFormats reports
+    // nothing until the stream is live). So request the desired size, open WITHOUT waiting, and
+    // hand back a source sized to the request immediately. fill() skips (SDL_AcquireCameraFrame
+    // returns null) until the user approves and frames flow, and whatever size getUserMedia
+    // actually delivers is rescaled to the request by fill(); the app's normal per-frame
+    // SDL_PumpEvents (pump_events) services the approval + frame-ready events.
     const int rw = want_w > 0 ? want_w : 640;
     const int rh = want_h > 0 ? want_h : 480;
     SDL_CameraSpec want{};
-    want.format = SDL_PIXELFORMAT_RGBA32; // byte-order RGBA; fill() converts anything else regardless
+    want.format =
+        SDL_PIXELFORMAT_RGBA32; // byte-order RGBA; fill() converts anything else regardless
     want.width = rw;
     want.height = rh;
     if (want_fps > 0.0) {
@@ -179,9 +183,9 @@ camera_open open_camera(int device_index, int want_w, int want_h, double want_fp
     // MJPG decoder here. So enumerate the device's formats and REQUEST an uncompressed one; SDL
     // then delivers raw YUY2/RGB frames that convert cleanly to rgba8. Pick the uncompressed format
     // with the best smoothness×resolution, capping fps at 30 so we don't trade away a lot of
-    // resolution for >30 fps — but strongly PREFER an exact match for the requested w x h when one is
-    // given (so the caller's stream size is honoured; fill() rescales any residual mismatch). If the
-    // device is compressed-ONLY (no uncompressed format), fall back to SDL's default (nullptr).
+    // resolution for >30 fps — but strongly PREFER an exact match for the requested w x h when one
+    // is given (so the caller's stream size is honoured; fill() rescales any residual mismatch). If
+    // the device is compressed-ONLY (no uncompressed format), fall back to SDL's default (nullptr).
     SDL_CameraSpec chosen{};
     bool have_spec = false;
     {

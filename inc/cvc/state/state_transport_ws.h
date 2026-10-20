@@ -130,14 +130,15 @@ public:
 
   // ── Media plane (bring-up: media over this WS control channel) ──
   // publish_media_frame sends a frame to this transport's connections: a browser CLIENT has one
-  // connection (the relay), so it pushes its camera/mic UP; a relay's media_router fans each received
-  // frame back out via fan_media(). The frame is NOT journaled and never crosses the WS<->gRPC
-  // CONTROL bridge (media crosses protocols through the media_router instead). Thread-safe; a no-op
-  // with no connections.
+  // connection (the relay), so it pushes its camera/mic UP; a relay's media_router fans each
+  // received frame back out via fan_media(). The frame is NOT journaled and never crosses the
+  // WS<->gRPC CONTROL bridge (media crosses protocols through the media_router instead).
+  // Thread-safe; a no-op with no connections.
   void publish_media_frame(const ws_media_frame &m);
 
-  // Leaf (browser) subscribe sugar: route each peer's received frame into a decode proxy / playback.
-  // Layered over set_media_sink (the source-connection token is ignored). Must be thread-safe.
+  // Leaf (browser) subscribe sugar: route each peer's received frame into a decode proxy /
+  // playback. Layered over set_media_sink (the source-connection token is ignored). Must be
+  // thread-safe.
   using media_frame_fn = std::function<void(const ws_media_frame &)>;
   void set_on_media(media_frame_fn cb);
 
@@ -241,9 +242,10 @@ private:
   connection_closed_fn _on_conn_closed; // set by a relay; invoked on a peer close (see above)
   media_sink_fn _media_sink; // media_router ingress (relay) OR set_on_media leaf sugar; see above
 
-  std::atomic<std::uint64_t> _media_sent{0};  // MediaFrames this transport sent (publish_media_frame)
-  std::atomic<std::uint64_t> _media_recv{0};  // MediaFrames received from peers
-  std::atomic<std::uint64_t> _media_fwd{0};   // MediaFrames a relay fanned to other connections
+  std::atomic<std::uint64_t> _media_sent{
+      0}; // MediaFrames this transport sent (publish_media_frame)
+  std::atomic<std::uint64_t> _media_recv{0}; // MediaFrames received from peers
+  std::atomic<std::uint64_t> _media_fwd{0};  // MediaFrames a relay fanned to other connections
 
   std::atomic<std::uint64_t> _published{0};
   std::atomic<std::uint64_t> _sent_frames{0};

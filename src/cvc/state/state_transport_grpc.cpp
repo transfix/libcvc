@@ -903,10 +903,11 @@ void state_transport_grpc::admit_connection(const std::shared_ptr<connection> &c
   send_hello_locked(*conn);
   if (backfill && !shards.empty())
     send_backfill_locked(*conn, shards);
-  // A relay pushes its full current state so a LATE-joining client sees peers already in the room (the
-  // live set_relay forwarding only carries writes that happen AFTER this client connects, and the
-  // relay's room tree is all remote-origin so backfill's replay_local yields nothing). Mirrors the WS
-  // relay's send_snapshot_locked — without it a native gRPC client joining a populated room sees no one.
+  // A relay pushes its full current state so a LATE-joining client sees peers already in the room
+  // (the live set_relay forwarding only carries writes that happen AFTER this client connects, and
+  // the relay's room tree is all remote-origin so backfill's replay_local yields nothing). Mirrors
+  // the WS relay's send_snapshot_locked — without it a native gRPC client joining a populated room
+  // sees no one.
   if (relay && !shards.empty())
     send_snapshot_locked(*conn, shards);
 }
@@ -943,9 +944,10 @@ void state_transport_grpc::send_snapshot_locked(connection &c,
                                                 const std::vector<state_cluster_shard *> &shards) {
   // Relay-only: push the full CURRENT snapshot of each shard as an unsolicited SnapshotResponse
   // (request_id 0), so a late joiner bootstraps the peers already present. replay_local() cannot do
-  // this on a relay because the room tree it holds is all remote-origin (forwarded from clients). The
-  // receiver applies each entry via on_inbound_snapshot_response's no-waiter path (ingest_snapshot_
-  // entry, a bulk initial load). Mirrors state_transport_ws::send_snapshot_locked.
+  // this on a relay because the room tree it holds is all remote-origin (forwarded from clients).
+  // The receiver applies each entry via on_inbound_snapshot_response's no-waiter path
+  // (ingest_snapshot_ entry, a bulk initial load). Mirrors
+  // state_transport_ws::send_snapshot_locked.
   for (auto *s : shards) {
     if (s == nullptr)
       continue;
@@ -1198,10 +1200,10 @@ void state_transport_grpc::on_inbound_snapshot_response(std::uint64_t request_id
   if (final)
     _snap_waiters_cv.notify_all();
   // An UNSOLICITED snapshot (no pending request — a relay's request_id 0 push to a late joiner, see
-  // send_snapshot_locked) is applied to the local shards as an initial-sync bootstrap, mirroring the
-  // WS relay path, so a native client joining a populated room sees the peers already present. Applied
-  // defensively: a relay snapshot carries its whole shard, including per-client read-only ariadne
-  // ui.docs.* state the joiner already owns, which the local tree is EXPECTED to reject.
+  // send_snapshot_locked) is applied to the local shards as an initial-sync bootstrap, mirroring
+  // the WS relay path, so a native client joining a populated room sees the peers already present.
+  // Applied defensively: a relay snapshot carries its whole shard, including per-client read-only
+  // ariadne ui.docs.* state the joiner already owns, which the local tree is EXPECTED to reject.
   if (!matched && !entries.empty()) {
     std::vector<state_cluster_shard *> shards;
     {
@@ -1216,8 +1218,8 @@ void state_transport_grpc::on_inbound_snapshot_response(std::uint64_t request_id
           s->ingest_snapshot_entry(e);
         } catch (const std::exception &ex) {
           if (std::string(ex.what()).find("read-only") == std::string::npos)
-            std::fprintf(stderr, "cvc: grpc snapshot ingest skipped path '%s': %s\n", e.path.c_str(),
-                         ex.what());
+            std::fprintf(stderr, "cvc: grpc snapshot ingest skipped path '%s': %s\n",
+                         e.path.c_str(), ex.what());
         } catch (...) {
           std::fprintf(stderr, "cvc: grpc snapshot ingest skipped path '%s' (non-std)\n",
                        e.path.c_str());

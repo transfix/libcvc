@@ -69,13 +69,13 @@ struct camera_open {
 // capture size: the source rescales the camera's frames to it, so the caller can size its stream up
 // front (pass 0 to adopt the camera's own negotiated size).
 //
-// `native_aspect` (default false): when true, `want_w`/`want_h` are a MAX BUDGET rather than an exact
-// size — the camera's frames are scaled to FIT WITHIN that budget PRESERVING the device's native
-// aspect ratio (never upscaling), and each frame reports its true size via frame_source::cur_width/
-// cur_height. Use this for a self-describing codec (jpeg_encode_source) so a portrait / 16:9 camera
-// keeps its real shape instead of being stretched to w x h. When false (the default) the frames are
-// stretched to exactly want_w x want_h — required for a fixed-size RAW rgba stream. Returns an empty
-// result
+// `native_aspect` (default false): when true, `want_w`/`want_h` are a MAX BUDGET rather than an
+// exact size — the camera's frames are scaled to FIT WITHIN that budget PRESERVING the device's
+// native aspect ratio (never upscaling), and each frame reports its true size via
+// frame_source::cur_width/ cur_height. Use this for a self-describing codec (jpeg_encode_source) so
+// a portrait / 16:9 camera keeps its real shape instead of being stretched to w x h. When false
+// (the default) the frames are stretched to exactly want_w x want_h — required for a fixed-size RAW
+// rgba stream. Returns an empty result
 // ({nullptr, 0, 0, …}) if SDL is unavailable, the index is out of range, or the open fails.
 //
 // PERMISSION. On a native build SDL resolves camera permission synchronously-ish: open_camera pumps

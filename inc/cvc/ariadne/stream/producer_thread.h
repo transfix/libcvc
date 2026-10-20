@@ -72,7 +72,7 @@ private:
   std::atomic<bool> run_{false};
   std::atomic<long> ticks_{0};
   std::atomic<long> behind_{0};
-  std::thread thr_;    // native / pthread-wasm: the dedicated worker (unused in non-pthread wasm)
+  std::thread thr_;      // native / pthread-wasm: the dedicated worker (unused in non-pthread wasm)
   long interval_id_{-1}; // non-pthread wasm: the emscripten_set_interval id, or -1 when none
 };
 

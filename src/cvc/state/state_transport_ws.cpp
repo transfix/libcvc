@@ -452,9 +452,9 @@ void state_transport_ws::read_loop(std::shared_ptr<connection> conn) {
     deliver_inbound(conn.get(), bytes.data(), bytes.size());
   }
   conn->alive.store(false);
-  // A peer closed this connection (not a relay shutdown): notify the owner so a relay can retract the
-  // departed participant from the room. _running is cleared by stop(), so this fires only on a real
-  // peer drop, and only when the peer identified itself (sent a Hello).
+  // A peer closed this connection (not a relay shutdown): notify the owner so a relay can retract
+  // the departed participant from the room. _running is cleared by stop(), so this fires only on a
+  // real peer drop, and only when the peer identified itself (sent a Hello).
   if (_running.load() && _on_conn_closed && !conn->remote_node_id.empty())
     _on_conn_closed(conn->remote_node_id);
   conn->reader_done.store(true, std::memory_order_release); // reap_idle may now join + erase this
@@ -671,9 +671,9 @@ void state_transport_ws::deliver_inbound(connection *c, const void *data, std::s
         if (s == nullptr)
           continue;
         // One bootstrap entry the local tree rejects must not take down the whole client: apply
-        // each defensively so the rest of the roster still loads. A relay snapshot carries its whole
-        // shard, which includes per-client read-only UI state the joiner already owns (e.g. the
-        // ariadne runtime's ui.docs.* argv) — those are EXPECTED to be rejected, so skip them
+        // each defensively so the rest of the roster still loads. A relay snapshot carries its
+        // whole shard, which includes per-client read-only UI state the joiner already owns (e.g.
+        // the ariadne runtime's ui.docs.* argv) — those are EXPECTED to be rejected, so skip them
         // quietly and only surface genuinely unexpected failures.
         try {
           s->ingest_snapshot_entry(se);
@@ -691,8 +691,8 @@ void state_transport_ws::deliver_inbound(connection *c, const void *data, std::s
     // Media frame (camera/mic) on the control channel. NOT shard state and NEVER on the control
     // bridge: decode to the canonical media_frame and hand it to the media sink, tagged with the
     // source connection as the opaque token. On a relay the sink is a media_router (it fans via
-    // fan_media, skipping this origin, and across to other protocols); on a leaf (browser) it is the
-    // set_on_media subscribe sugar.
+    // fan_media, skipping this origin, and across to other protocols); on a leaf (browser) it is
+    // the set_on_media subscribe sugar.
     _media_recv.fetch_add(1, std::memory_order_relaxed);
     if (_media_sink) {
       const auto &mf = in.media();
@@ -875,8 +875,8 @@ std::size_t state_transport_ws::write_media(const media_frame &m, const void *ex
     std::lock_guard<std::mutex> lk(_conns_mu);
     conns = _conns;
   }
-  // Media is unreplicated, un-bridged, and not subject to the peer path-filter (it carries no path).
-  // `exclude` (a connection*) skips the origin peer when a relay fans; nullptr sends to all.
+  // Media is unreplicated, un-bridged, and not subject to the peer path-filter (it carries no
+  // path). `exclude` (a connection*) skips the origin peer when a relay fans; nullptr sends to all.
   std::size_t n = 0;
   for (auto &c : conns) {
     if (!c || c.get() == exclude || !c->alive.load() || !c->can_write())
@@ -1032,7 +1032,8 @@ void state_transport_ws::register_connection(std::shared_ptr<connection> conn) {
 }
 
 void state_transport_ws::admit_connection(const std::shared_ptr<connection> &conn) {
-  conn->last_rx_ns.store(steady_ns(), std::memory_order_relaxed); // don't reap a just-admitted client
+  conn->last_rx_ns.store(steady_ns(),
+                         std::memory_order_relaxed); // don't reap a just-admitted client
   // Snapshot the shard list before taking the write mutex (every other path releases _shards_mu
   // before touching a connection's write mutex — keep that order to avoid a lock cycle).
   const bool backfill = _backfill_on_connect.load(std::memory_order_acquire);

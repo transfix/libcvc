@@ -183,8 +183,8 @@ TEST(StateTransportWsTest, RelayFansMediaFrameToOtherClient) {
   cvc::state_transport_ws S, tA, tB;
   S.start("127.0.0.1:0", "S", "C");
   S.set_relay(true);
-  // Media now fans through a media_router (set_relay governs the control plane only). Declared after
-  // S so it destructs first, clearing S's media sink while S is still alive.
+  // Media now fans through a media_router (set_relay governs the control plane only). Declared
+  // after S so it destructs first, clearing S's media sink while S is still alive.
   cvc::media_router mr;
   mr.add_endpoint(&S);
 
@@ -295,10 +295,10 @@ TEST(StateTransportWsTest, RelayReapsIdleConnection) {
   S.stop();
 }
 
-// Late-joiner bootstrap: a relay that holds the room tree in its own shard pushes a full snapshot to
-// each newly admitted connection, so a client that joins AFTER others are present still sees them
-// (live set_relay forwarding only carries writes made after the client connects). This is what lets
-// a browser that refreshes / opens late see everyone already in the conference room.
+// Late-joiner bootstrap: a relay that holds the room tree in its own shard pushes a full snapshot
+// to each newly admitted connection, so a client that joins AFTER others are present still sees
+// them (live set_relay forwarding only carries writes made after the client connects). This is what
+// lets a browser that refreshes / opens late see everyone already in the conference room.
 TEST(StateTransportWsTest, RelayBackfillsLateJoinerWithExistingState) {
   cvc::app aS, aA, aB;
   cvc::state_transport_ws S, tA, tB;

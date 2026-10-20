@@ -55,8 +55,8 @@ void producer_thread::start() {
   if (interval_id_ >= 0)
     return; // already running
   run_.store(true);
-  interval_id_ = emscripten_set_interval(&producer_thread::em_tick_trampoline,
-                                         period_.load() * 1000.0, this);
+  interval_id_ =
+      emscripten_set_interval(&producer_thread::em_tick_trampoline, period_.load() * 1000.0, this);
 }
 
 void producer_thread::stop() {

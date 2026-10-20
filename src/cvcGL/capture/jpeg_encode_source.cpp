@@ -32,11 +32,11 @@ st::produced_frame jpeg_encode_source::fill(std::uint8_t *buf, std::size_t cap) 
   const st::produced_frame in = inner_->fill(rgba_.data(), rgba_.size());
   if (in.bytes == 0)
     return out; // the inner source had nothing this tick (warming up / between frames)
-  // Encode at the inner source's ACTUAL frame size when it reports one — a camera that preserves the
-  // device's native aspect ratio within our w_ x h_ budget produces a frame smaller than (and a
-  // different shape from) w_ x h_, and the JPEG must carry those real dims so the decoded video keeps
-  // the true ratio. Fall back to the fixed w_ x h_ (and if the reported size would overrun the rgba
-  // scratch, which it never should). A frame whose JPEG would exceed the slab is dropped.
+  // Encode at the inner source's ACTUAL frame size when it reports one — a camera that preserves
+  // the device's native aspect ratio within our w_ x h_ budget produces a frame smaller than (and a
+  // different shape from) w_ x h_, and the JPEG must carry those real dims so the decoded video
+  // keeps the true ratio. Fall back to the fixed w_ x h_ (and if the reported size would overrun
+  // the rgba scratch, which it never should). A frame whose JPEG would exceed the slab is dropped.
   int ew = inner_->cur_width(), eh = inner_->cur_height();
   if (ew <= 0 || eh <= 0 ||
       static_cast<std::size_t>(ew) * static_cast<std::size_t>(eh) * 4u > rgba_.size()) {

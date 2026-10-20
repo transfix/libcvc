@@ -1169,17 +1169,18 @@ void Runtime::Impl::emit_node(const Widget &w) {
     }
     if (have_seed)
       b.seed_window_geometry(seed);
-    // Raise edge: a one-shot request at tree.<id>.raise (set to "1" by e.g. a "click a user" handler,
-    // alongside tree.<id>.open) brings this window to the front this frame. Consume it so it fires
-    // once (not every frame). Opening a closed window + raising it = set both keys in the handler.
+    // Raise edge: a one-shot request at tree.<id>.raise (set to "1" by e.g. a "click a user"
+    // handler, alongside tree.<id>.open) brings this window to the front this frame. Consume it so
+    // it fires once (not every frame). Opening a closed window + raising it = set both keys in the
+    // handler.
     const std::string raise_path = resolve("tree." + id + ".raise");
     if (read_string(app, raise_path) == "1") {
       b.focus_next_window();
       write<std::string>(app, raise_path, ""); // consume the one-shot
     }
-    // A window may BIND its visible title (e.g. a per-peer camera window titled by the peer's name):
-    // resolve w.bind as the title when present, else the static label. begin_window uses "title###id",
-    // so the title may change each frame while the ###id identity stays stable.
+    // A window may BIND its visible title (e.g. a per-peer camera window titled by the peer's
+    // name): resolve w.bind as the title when present, else the static label. begin_window uses
+    // "title###id", so the title may change each frame while the ###id identity stays stable.
     std::string wtitle = w.label;
     if (!w.bind.empty()) {
       const std::string t = is_expr(w.bind) ? eval_text(w.bind) : read_string(app, resolve(w.bind));

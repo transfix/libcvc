@@ -210,12 +210,13 @@ void register_media_intrinsics() {
             // Device path: open the camera and adopt its frame_source. open_camera() and the
             // resulting stream's teardown touch the SDL camera subsystem on this (owner/action)
             // thread — the same thread stream::close() runs on, so the contract holds.
-            // Request the stream's own w/h/hz as a size budget. For the JPEG path (conference video),
-            // native_aspect=true so the camera's frames keep the device's native aspect ratio within
-            // that budget (a portrait phone camera stays portrait, not stretched to w x h) and the
-            // MJPEG self-describes the real size; for a raw rgba stream the frames are stretched to
-            // exactly w x h to match the fixed-size slab. getUserMedia's delivered size is unknown up
-            // front (it resolves asynchronously), so the fit is computed per frame.
+            // Request the stream's own w/h/hz as a size budget. For the JPEG path (conference
+            // video), native_aspect=true so the camera's frames keep the device's native aspect
+            // ratio within that budget (a portrait phone camera stays portrait, not stretched to w
+            // x h) and the MJPEG self-describes the real size; for a raw rgba stream the frames are
+            // stretched to exactly w x h to match the fixed-size slab. getUserMedia's delivered
+            // size is unknown up front (it resolves asynchronously), so the fit is computed per
+            // frame.
             cvc::gl::capture::camera_open cam =
                 cvc::gl::capture::open_camera(static_cast<int>(device), static_cast<int>(w),
                                               static_cast<int>(h), hz, /*native_aspect=*/jpeg);

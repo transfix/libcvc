@@ -665,7 +665,8 @@ void ImGuiBackend::register_widget(std::string custom_type, CustomDrawFn draw) {
   if (draw) {
     // Tell the core loader this type is handled (natively, by this backend) so it does not warn at
     // load that the type is unregistered and fall back to a placeholder — has_widget_type() reports
-    // it present and the draw routes here via custom_widget(). (e.g. the stream_view peer-video tile.)
+    // it present and the draw routes here via custom_widget(). (e.g. the stream_view peer-video
+    // tile.)
     cvc::ariadne::register_known_widget_type(custom_type);
     m_customWidgets[std::move(custom_type)] = std::move(draw);
   }

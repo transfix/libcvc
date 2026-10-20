@@ -77,11 +77,11 @@ int main(int argc, char **argv) {
   state_tp.start(stateListen, nodeId, "conf");
   state_tp.set_relay(true);
   cvc::state_cluster_shard shard(app, "conf", nodeId);
-  // The relay forwards ONLY the shared room tree (conf.rooms.*). A client also writes per-document UI
-  // state (ui.docs.*, e.g. conf.self — its display name) on the same shard; without this filter the
-  // relay would ingest and fan that to every other client, so they would all show the same name
-  // (clients "collide on the name"). Dropping non-"conf" paths at ingest keeps each client's UI local
-  // and keeps the late-joiner snapshot to just the room tree.
+  // The relay forwards ONLY the shared room tree (conf.rooms.*). A client also writes per-document
+  // UI state (ui.docs.*, e.g. conf.self — its display name) on the same shard; without this filter
+  // the relay would ingest and fan that to every other client, so they would all show the same name
+  // (clients "collide on the name"). Dropping non-"conf" paths at ingest keeps each client's UI
+  // local and keeps the late-joiner snapshot to just the room tree.
   shard.add_interest("conf");
   shard.set_enforce_interest(true);
   shard.attach();
@@ -101,10 +101,11 @@ int main(int argc, char **argv) {
   state_tp.set_bridge(&ws_tp);
   ws_tp.set_bridge(&state_tp);
 
-  // Presence: when a browser (WS) client closes its tab, retract it from the room so the roster does
-  // not accumulate ghosts of closed tabs. The close fires on a WS reader thread, so just queue the
-  // departed node id here and apply room_leave on the main loop below (where every other room-tree
-  // write happens), then the retraction rides the normal pump + relay forwarding to the others.
+  // Presence: when a browser (WS) client closes its tab, retract it from the room so the roster
+  // does not accumulate ghosts of closed tabs. The close fires on a WS reader thread, so just queue
+  // the departed node id here and apply room_leave on the main loop below (where every other
+  // room-tree write happens), then the retraction rides the normal pump + relay forwarding to the
+  // others.
   std::mutex departed_mu;
   std::vector<std::string> departed;
   ws_tp.set_on_connection_closed([&](const std::string &node_id) {
@@ -133,9 +134,8 @@ int main(int argc, char **argv) {
 
   std::signal(SIGINT, on_signal);
   std::signal(SIGTERM, on_signal);
-  std::printf("[arisrv] relay up | room='%s' node='%s' | state=%s | media=%s\n",
-              room.c_str(), nodeId.c_str(), state_tp.listen_address().c_str(),
-              media_tp.listen_address().c_str());
+  std::printf("[arisrv] relay up | room='%s' node='%s' | state=%s | media=%s\n", room.c_str(),
+              nodeId.c_str(), state_tp.listen_address().c_str(), media_tp.listen_address().c_str());
 #if CVC_ENABLE_WS
   std::printf("[arisrv] websocket (browser) clients: ws=%s (bridged to the gRPC room)\n",
               ws_tp.listen_address().c_str());
@@ -145,20 +145,21 @@ int main(int argc, char **argv) {
   std::set<std::string> relayed;
   std::size_t last = 0;
   int ticks = 0;
-  int mediaticks = 0;             // cadence for the media (router) heartbeat
-  std::uint64_t lastRouted = 0;   // last-logged media_router routed count
+  int mediaticks = 0;           // cadence for the media (router) heartbeat
+  std::uint64_t lastRouted = 0; // last-logged media_router routed count
 #if CVC_ENABLE_WS
-  int reapticks = 0;              // cadence for reaping ghost (navigated-away) connections
+  int reapticks = 0; // cadence for reaping ghost (navigated-away) connections
 #endif
   while (!g_stop.load()) {
 #if CVC_ENABLE_WS
     // Reap ghosts (~every second): a tab that navigated or reloaded away without a clean WebSocket
-    // close stops streaming media; reap_idle shuts such a connection down after ~10 s so its on-close
-    // retraction fires and the roster does not accumulate ghosts. A live client streams continuously.
+    // close stops streaming media; reap_idle shuts such a connection down after ~10 s so its
+    // on-close retraction fires and the roster does not accumulate ghosts. A live client streams
+    // continuously.
     if (++reapticks % 5 == 0)
       ws_tp.reap_idle(std::chrono::seconds(10));
-    // Apply any queued departures (a browser tab closed) before pumping, so each retraction goes out
-    // to the remaining clients this tick.
+    // Apply any queued departures (a browser tab closed) before pumping, so each retraction goes
+    // out to the remaining clients this tick.
     {
       std::vector<std::string> gone;
       {
@@ -180,9 +181,9 @@ int main(int argc, char **argv) {
     // shard's publish cursor is shared by the two transports, so a plain state_tp.pump_all() would
     // drain it and the WebSocket side would send nothing (browser rosters would never drop a closed
     // tab). So drain the local journal ONCE and publish each mutation to both transports: publish()
-    // writes only to its own connections and never crosses the bridge, so each client gets it exactly
-    // once with no echo. drain_local yields only our local writes, never the clients' replicated
-    // mutations (those ride set_relay forwarding), so this cannot loop.
+    // writes only to its own connections and never crosses the bridge, so each client gets it
+    // exactly once with no echo. drain_local yields only our local writes, never the clients'
+    // replicated mutations (those ride set_relay forwarding), so this cannot loop.
     {
       auto pending = shard.drain_local();
       for (const auto &m : pending) {
@@ -206,9 +207,9 @@ int main(int argc, char **argv) {
     }
     // Media heartbeat (~every 5s while anyone is connected). Conference media rides the control
     // channels (WS MediaFrame + gRPC MediaFrame), fanned by the media_router — NOT in the gRPC
-    // `relay` stream stats above. Report the router total plus per-plane conns/recv/fanned so a quiet
-    // relay is distinguishable from a stuck one, and so WS<->gRPC interop is visible (a frame received
-    // on one plane is fanned on BOTH).
+    // `relay` stream stats above. Report the router total plus per-plane conns/recv/fanned so a
+    // quiet relay is distinguishable from a stuck one, and so WS<->gRPC interop is visible (a frame
+    // received on one plane is fanned on BOTH).
     if (++mediaticks % 25 == 0) {
       const std::uint64_t routed = mrouter.total_routed();
       std::size_t wsc = 0;
@@ -223,12 +224,12 @@ int main(int argc, char **argv) {
       const std::uint64_t gf = state_tp.total_media_forwarded();
       if (wsc + gc > 0 || routed != lastRouted) {
         lastRouted = routed;
-        std::printf(
-            "[arisrv] media: routed %llu | ws %zu conn recv %llu fan %llu | grpc %zu conn recv %llu "
-            "fan %llu\n",
-            static_cast<unsigned long long>(routed), wsc, static_cast<unsigned long long>(wsr),
-            static_cast<unsigned long long>(wsf), gc, static_cast<unsigned long long>(gr),
-            static_cast<unsigned long long>(gf));
+        std::printf("[arisrv] media: routed %llu | ws %zu conn recv %llu fan %llu | grpc %zu conn "
+                    "recv %llu "
+                    "fan %llu\n",
+                    static_cast<unsigned long long>(routed), wsc,
+                    static_cast<unsigned long long>(wsr), static_cast<unsigned long long>(wsf), gc,
+                    static_cast<unsigned long long>(gr), static_cast<unsigned long long>(gf));
         std::fflush(stdout);
       }
     }

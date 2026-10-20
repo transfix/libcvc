@@ -66,8 +66,8 @@ void media_router::ingest(const media_frame &f, media_endpoint *src, const void 
   _routed.fetch_add(1, std::memory_order_relaxed);
   // Snapshot the (small, rarely-changing) endpoint set, then fan OUTSIDE the lock: fan_media does
   // socket writes, and holding _mu across them would serialize all media and risk lock-ordering
-  // against an endpoint's own connection locks. Endpoints must outlive the router (see header), so a
-  // snapshotted pointer stays valid for the duration of this call.
+  // against an endpoint's own connection locks. Endpoints must outlive the router (see header), so
+  // a snapshotted pointer stays valid for the duration of this call.
   std::vector<media_endpoint *> eps;
   {
     std::lock_guard<std::mutex> lk(_mu);

@@ -42,7 +42,7 @@ public:
   void end_window() override;
   void seed_window_geometry(const cvc::ariadne::WindowGeom &g) override; // §11.4 (pre begin_window)
   cvc::ariadne::WindowGeom window_geometry() const override; // §11.4 (post begin_window)
-  void focus_next_window() override;                        // raise edge (pre begin_window)
+  void focus_next_window() override;                         // raise edge (pre begin_window)
   bool begin_grid(const cvc::ariadne::Layout &layout, const char *id) override;
   void grid_next_cell() override;
   void end_grid() override;
