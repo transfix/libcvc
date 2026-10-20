@@ -120,7 +120,7 @@
     },
   };
 
-  const V = 'cyprty-pv1'; // bump on every redeploy so caches can't serve a stale wasm/js
+  const V = 'cyprty-av1'; // bump on every redeploy so caches can't serve a stale wasm/js
   async function boot() {
     try {
       const resp = await fetch(DEMO + '.wasm?v=' + V, {cache: 'no-cache'});

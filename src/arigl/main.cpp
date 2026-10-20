@@ -59,14 +59,18 @@
 // Conference mode: a WebSocket state transport joins a hosted room. The browser (wasm) build dials
 // wss://<page-origin>/… (set by the host page) and native builds dial ws://host:port; either way
 // register_conference supplies the room verbs and the shard/transport are wired here in the host.
-#include <cvc/ariadne/stream/frame.h>           // frame_ptr — forward the local camera stream's frames
+#include <cvc/ariadne/stream/frame.h>           // frame_ptr — forward the local camera/mic streams
 #include <cvc/ariadne/stream/stream.h>          // stream::open — per-peer decode proxies
 #include <cvc/ariadne/stream/stream_channel.h>  // subscribe / publish_external
-#include <cvc/ariadne/stream/stream_registry.h> // look up the local camera stream by its token
+#include <cvc/ariadne/stream/stream_registry.h> // look up the local camera/mic streams by token
+#include <cvc/core/world_clock.h>               // app.world_clock().t() — the common media timestamp
+#include <cvc/gl/playback/audio_output.h>       // open_audio_output — play each peer's mic
 #include <cvc/state/state.h>                    // cvc::state::instance — conference media state keys
 #include <cvc/state/state_cluster_shard.h>
 #include <cvc/state/state_transport_ws.h>
+#include <chrono>
 #include <cstdint>
+#include <deque>
 #include <map>
 #include <mutex>
 #endif
@@ -204,24 +208,64 @@ struct ConferenceSession {
   std::unique_ptr<cvc::state_transport_ws> ws;
   bool active = false;
 
-  // ── media plane (browser video over the WS control channel) ──
+  // ── media plane (browser camera + mic over the WS control channel) ──
   cvc::app *app_ = nullptr;
   std::string pid_;    // this participant's node id (== the room-join pid; stamps our outgoing frames)
   std::string prefix_; // the document chroot prefix: host state access must prepend it so it reaches
                        // the SAME keys the .ari's (state-get/-set) do (which are prefix-relative)
-  // Publish: forward the local camera stream (the .ari puts its token in "cam_token") to the relay.
-  std::string pub_token_;
-  std::shared_ptr<cvc::ariadne::stream::subscription> pub_sub_;
-  std::int64_t pub_last_seq_ = -1;
-  // Consume: peers' frames arrive on the reader thread -> inbox_; pump() routes each into a per-peer
-  // decode proxy (keyed origin|kind) whose token the .ari binds the peer's tile to.
+
+  // Publish: forward the local camera (latest) and mic (ring) streams. The .ari puts their tokens in
+  // "cam_token" / "mic_token". We re-stamp each outgoing frame with a COMMON host clock (one reading
+  // per pump) so the receiver can A/V-sync them — the sources' own pts are on unrelated clocks (SDL
+  // camera vs SDL audio vs synthetic), not comparable across streams.
+  struct publisher {
+    std::string key;    // state key holding the stream token
+    std::string kind;   // "camera" | "mic"
+    bool ring = false;  // audio = ring (forward EVERY chunk in order); video = latest (freshest)
+    std::string token;  // current stream token
+    std::shared_ptr<cvc::ariadne::stream::subscription> sub;
+    std::int64_t last_seq = -1;
+  };
+  std::vector<publisher> pubs_;
+
+  // Consume: peers' frames arrive on the ws reader -> inbox_; pump() routes them. Per peer we keep a
+  // video decode proxy + a small pts-ordered buffer of video frames (so the display can lag to the
+  // audio clock), and an audio output sink + its last-enqueued stamp (so video follows the audio).
   std::mutex media_mu_;
   std::vector<cvc::ws_media_frame> inbox_;
-  std::map<std::string, std::unique_ptr<cvc::ariadne::stream::stream>> proxies_;
+  struct vframe {
+    double pts = 0.0;
+    std::shared_ptr<std::vector<std::uint8_t>> bytes;
+  };
+  struct peer_media {
+    std::unique_ptr<cvc::ariadne::stream::stream> video_proxy; // what the peer's stream_view renders
+    std::deque<vframe> vbuf;    // buffered video frames awaiting their audio-synced display time
+    double shown_pts = -1.0;    // pts of the frame currently injected into video_proxy
+    std::unique_ptr<cvc::gl::playback::audio_output> audio_out;
+    int a_rate = 0, a_ch = 0;   // the peer mic's format (sizes queued_bytes -> seconds)
+    double last_audio_pts = -1.0; // host-clock stamp of the last enqueued audio chunk
+    bool has_audio = false;       // once true, video display follows this peer's audio clock
+  };
+  std::map<std::string, peer_media> peers_; // keyed by origin pid
 
-  // The state key carrying a peer's decode-proxy token, so the .ari can bind that peer's stream_view.
+  // The state key carrying a peer's video-proxy token, so the .ari can bind that peer's stream_view.
   static std::string media_token_key(const std::string &origin, const std::string &kind) {
     return "media." + origin + "." + kind;
+  }
+
+  // The common media timestamp: cvc::world_clock seconds (the canonical time base; frame pts is meant
+  // to be world time). The conference .ari declares no `clock:` block, so nothing else advances the
+  // per-app clock — drive it from wall time here, once per pump, and stamp BOTH our camera and mic
+  // frames with the returned t() so a receiver can align them (their sources' own pts are on
+  // unrelated clocks). t() is tick*fixed_dt (drift-free, 1/120 s quanta — sub-frame for media).
+  double last_wall_ = -1.0;
+  double media_clock_now() {
+    const double wall =
+        std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (last_wall_ >= 0.0)
+      app_->world_clock().advance(wall - last_wall_);
+    last_wall_ = wall;
+    return app_->world_clock().t();
   }
 
   // Call AFTER the GL bundles and BEFORE load(): register the room verbs, seed conf.room/conf.self,
@@ -252,6 +296,12 @@ struct ConferenceSession {
     app_ = &app;
     pid_ = nodeId;
     prefix_ = prefix;
+    // Drive the world clock from wall time (media_clock_now): live mode so advance() banks wall time.
+    app.world_clock().set_mode(cvc::world_clock::mode::live);
+    // The streams we forward: the camera (latest — freshest frame) and the mic (ring — every chunk in
+    // order, since dropped audio is a glitch). The .ari publishes their tokens in cam_token/mic_token.
+    pubs_ = {{"cam_token", "camera", /*ring=*/false, {}, {}, -1},
+             {"mic_token", "mic", /*ring=*/true, {}, {}, -1}};
     // Peers' media arrives on the reader thread: just queue it here (do not touch the stream
     // registry / app tree off the main thread), and route it in pump() on the main thread.
     ws->set_on_media([this](const cvc::ws_media_frame &m) {
@@ -280,56 +330,77 @@ struct ConferenceSession {
     if (!ws)
       return;
     ws->pump_all();
-    forward_self_cam();
+    const double stamp = media_clock_now(); // one world-clock reading per pump stamps all we forward
+    forward_streams(stamp);
     drain_inbox();
+    sync_and_show(); // advance each peer's video display to match its audio playback clock
   }
   void stop() {
-    proxies_.clear(); // close the decode proxies before the transport/shard go away
-    pub_sub_.reset();
+    peers_.clear(); // close decode proxies + audio outputs before the transport/shard go away
+    for (publisher &p : pubs_)
+      p.sub.reset();
     if (ws)
       ws->stop();
   }
 
-  // Forward the newest frame of the local camera stream to the relay, which fans it to the other
-  // participants. Latest-mode: we send the freshest frame at pump cadence (dropping intermediates),
-  // which is right for live video and self-rate-limits to the frame loop.
-  void forward_self_cam() {
+  // Forward our local streams (camera: freshest frame; mic: every chunk in order) to the relay, which
+  // fans them to the peers. EVERY outgoing frame is stamped with the common world-clock time so a
+  // receiver can A/V-sync them — the sources' own pts (SDL camera vs SDL audio vs synthetic) are not
+  // comparable across streams.
+  void forward_streams(double stamp) {
     if (!app_)
       return;
-    const std::string token = cvc::state::instance(*app_)(prefix_ + ".cam_token").value();
-    if (token.empty())
-      return;
-    if (token != pub_token_) { // the .ari (re)opened the camera stream — rebind
-      pub_token_ = token;
-      pub_sub_.reset();
-      pub_last_seq_ = -1;
-    }
     auto &reg = cvc::ariadne::stream::stream_registry::for_app(*app_);
-    if (!pub_sub_) {
-      cvc::ariadne::stream::stream_channel *ch = reg.lookup(pub_token_);
-      if (!ch)
-        return; // the stream is not open yet
-      pub_sub_ = ch->subscribe(cvc::ariadne::stream::deliver_mode::latest, 1);
+    for (publisher &p : pubs_) {
+      const std::string token = cvc::state::instance(*app_)(prefix_ + "." + p.key).value();
+      if (token.empty())
+        continue;
+      if (token != p.token) { // the .ari (re)opened the stream — rebind
+        p.token = token;
+        p.sub.reset();
+        p.last_seq = -1;
+      }
+      if (!p.sub) {
+        cvc::ariadne::stream::stream_channel *ch = reg.lookup(p.token);
+        if (!ch)
+          continue; // not open yet
+        p.sub = ch->subscribe(p.ring ? cvc::ariadne::stream::deliver_mode::ring
+                                      : cvc::ariadne::stream::deliver_mode::latest,
+                              p.ring ? 8 : 1);
+        if (!p.sub)
+          continue;
+      }
+      if (p.ring) { // audio: forward every new chunk in order
+        cvc::ariadne::stream::frame_ptr f;
+        while (p.sub->try_pop(f))
+          if (f)
+            forward_frame(p, *f, stamp);
+      } else { // video: forward the freshest frame if it is new
+        cvc::ariadne::stream::frame_ptr f = p.sub->latest();
+        if (f && f->seq > p.last_seq)
+          forward_frame(p, *f, stamp);
+      }
     }
-    cvc::ariadne::stream::frame_ptr f = pub_sub_->latest();
-    if (!f || f->seq <= pub_last_seq_)
-      return;
-    cvc::ws_media_frame mf;
-    mf.origin_node_id = pid_;
-    mf.stream_id = "camera";
-    mf.codec = f->format.codec;
-    mf.width = static_cast<std::uint32_t>(f->format.w);
-    mf.height = static_cast<std::uint32_t>(f->format.h);
-    mf.seq = f->seq;
-    mf.pts_seconds = f->pts_seconds;
-    mf.payload.assign(f->data, f->data + f->size);
-    ws->publish_media_frame(mf);
-    pub_last_seq_ = f->seq;
   }
 
-  // Route each queued peer frame into its per-(origin,kind) decode proxy (opened lazily on the first
-  // frame), publishing the proxy token so the .ari binds that peer's tile. publish_external injects
-  // the bytes without a pool slab, so the proxy's format is just the descriptor.
+  void forward_frame(publisher &p, const cvc::ariadne::stream::frame &f, double stamp) {
+    cvc::ws_media_frame mf;
+    mf.origin_node_id = pid_;
+    mf.stream_id = p.kind;
+    mf.codec = f.format.codec;
+    mf.width = static_cast<std::uint32_t>(f.format.w);
+    mf.height = static_cast<std::uint32_t>(f.format.h);
+    mf.sample_rate = static_cast<std::uint32_t>(f.format.sample_rate);
+    mf.channels = static_cast<std::uint32_t>(f.format.channels);
+    mf.seq = f.seq;
+    mf.pts_seconds = stamp; // the COMMON clock, not the source pts
+    mf.payload.assign(f.data, f.data + f.size);
+    ws->publish_media_frame(mf);
+    p.last_seq = f.seq;
+  }
+
+  // Route each queued peer frame: mic -> a per-peer audio output (played immediately; its queue depth
+  // is the A/V clock); camera -> a pts-ordered buffer + a lazily-opened decode proxy the tile renders.
   void drain_inbox() {
     std::vector<cvc::ws_media_frame> batch;
     {
@@ -338,31 +409,76 @@ struct ConferenceSession {
     }
     for (cvc::ws_media_frame &m : batch) {
       if (m.origin_node_id.empty() || m.origin_node_id == pid_)
-        continue; // never render ourselves as a peer
-      const std::string key = m.origin_node_id + "|" + m.stream_id;
-      auto it = proxies_.find(key);
-      if (it == proxies_.end()) {
-        if (m.width == 0 || m.height == 0)
-          continue; // need a size to open the proxy
-        cvc::ariadne::stream::stream_params p;
-        p.id = "peer_" + m.origin_node_id + "_" + m.stream_id; // origin is already a safe node id
-        p.format.kind = cvc::ariadne::stream::frame_kind::video_raw;
-        p.format.codec = m.codec.empty() ? std::string("mjpeg") : m.codec;
-        p.format.w = static_cast<int>(m.width);
-        p.format.h = static_cast<int>(m.height);
-        p.format.stride = static_cast<int>(m.width) * 4; // sizes the descriptor; bytes alias on inject
-        p.expected_subscribers = 1;
-        std::unique_ptr<cvc::ariadne::stream::stream> s =
-            cvc::ariadne::stream::stream::open(*app_, p);
-        if (!s)
-          continue;
-        // Publish the proxy token at the .ari-visible (prefix-relative) key the peer tile binds to.
-        cvc::state::instance(*app_)(prefix_ + "." + media_token_key(m.origin_node_id, m.stream_id))
-            .value(s->token());
-        it = proxies_.emplace(key, std::move(s)).first;
+        continue; // never play/show ourselves as a peer
+      peer_media &pm = peers_[m.origin_node_id];
+      if (m.stream_id == "mic") {
+        if (!pm.audio_out && m.sample_rate > 0 && m.channels > 0) {
+          cvc::gl::playback::audio_output_spec spec;
+          spec.sample_rate = static_cast<int>(m.sample_rate);
+          spec.channels = static_cast<int>(m.channels);
+          cvc::gl::playback::audio_output_open opened = cvc::gl::playback::open_audio_output(spec);
+          pm.audio_out = std::move(opened.sink);
+          pm.a_rate = opened.sample_rate;
+          pm.a_ch = opened.channels;
+        }
+        if (pm.audio_out && !m.payload.empty()) {
+          pm.audio_out->play(m.payload.data(), m.payload.size());
+          pm.last_audio_pts = m.pts_seconds;
+          pm.has_audio = true;
+        }
+      } else { // "camera" (video)
+        if (!pm.video_proxy && m.width > 0 && m.height > 0) {
+          cvc::ariadne::stream::stream_params p;
+          p.id = "peer_" + m.origin_node_id + "_camera"; // origin is already a safe node id
+          p.format.kind = cvc::ariadne::stream::frame_kind::video_raw;
+          p.format.codec = m.codec.empty() ? std::string("mjpeg") : m.codec;
+          p.format.w = static_cast<int>(m.width);
+          p.format.h = static_cast<int>(m.height);
+          p.format.stride = static_cast<int>(m.width) * 4; // descriptor only; bytes alias on inject
+          p.expected_subscribers = 1;
+          pm.video_proxy = cvc::ariadne::stream::stream::open(*app_, p);
+          if (pm.video_proxy)
+            cvc::state::instance(*app_)(prefix_ + "." + media_token_key(m.origin_node_id, "camera"))
+                .value(pm.video_proxy->token());
+        }
+        if (pm.video_proxy && m.width > 0 && m.height > 0) {
+          vframe vf;
+          vf.pts = m.pts_seconds;
+          vf.bytes = std::make_shared<std::vector<std::uint8_t>>(std::move(m.payload));
+          pm.vbuf.push_back(std::move(vf));
+          while (pm.vbuf.size() > 60) // never buffer more than ~1 s (bounds a stalled/absent clock)
+            pm.vbuf.pop_front();
+        }
       }
-      auto buf = std::make_shared<std::vector<std::uint8_t>>(std::move(m.payload));
-      it->second->channel().publish_external(buf->data(), buf->size(), m.pts_seconds, buf);
+    }
+  }
+
+  // A/V sync: display the newest buffered video frame the peer's audio has reached. The audio
+  // currently at the speaker has pts (last-enqueued pts - queued seconds); both streams were stamped
+  // with the sender's world clock, so showing the frame at that pts lines the lips to the sound. With
+  // no audio from a peer the target is +inf, so the freshest frame shows immediately (no added delay).
+  void sync_and_show() {
+    for (auto &kv : peers_) {
+      peer_media &pm = kv.second;
+      if (!pm.video_proxy)
+        continue;
+      double target = 1e18;
+      if (pm.has_audio && pm.audio_out && pm.a_rate > 0 && pm.a_ch > 0) {
+        const double bps = static_cast<double>(pm.a_rate) * static_cast<double>(pm.a_ch) * 4.0;
+        const double queued_s = bps > 0.0 ? static_cast<double>(pm.audio_out->queued_bytes()) / bps : 0.0;
+        target = pm.last_audio_pts - queued_s;
+      }
+      std::shared_ptr<std::vector<std::uint8_t>> show;
+      double show_pts = pm.shown_pts;
+      while (!pm.vbuf.empty() && pm.vbuf.front().pts <= target) { // drop all due frames, keep the last
+        show = pm.vbuf.front().bytes;
+        show_pts = pm.vbuf.front().pts;
+        pm.vbuf.pop_front();
+      }
+      if (show && show_pts > pm.shown_pts) {
+        pm.video_proxy->channel().publish_external(show->data(), show->size(), show_pts, show);
+        pm.shown_pts = show_pts;
+      }
     }
   }
 #else

@@ -86,7 +86,18 @@ on_tick: |
             (stream-capture-camera (get-attr cam "token")
               (dict "synthetic" #t "w" 640 "h" 480 "hz" 30 "jpeg" #t))
             (stream-capture-camera (get-attr cam "token")
-              (dict "device" 0 "w" 640 "h" 480 "hz" 30 "jpeg" #t)))))
+              (dict "device" 0 "w" 640 "h" 480 "hz" 30 "jpeg" #t)))
+        ; Open my own MIC stream (f32 PCM) and drive it from the browser microphone (SDL audio device
+        ; 0 = getUserMedia audio). ?synthetic=1 instead captures a hardware-free 440 Hz tone (no
+        ; device), so audio flow + A/V sync are exercisable without a mic. subscriber_depth 8 covers
+        ; the host forwarder's ring subscription; the mic is not played back to yourself.
+        (set mic (stream-open (dict "id" "mic" "codec" "f32" "rate" 48000 "ch" 1 "frames_per_chunk" 1024
+                                    "subscriber_depth" 8 "expected_subscribers" 2)))
+        (state-set "mic_token" (get-attr mic "token"))
+        (if (= (state-get "cam_synthetic") "1")
+            (stream-capture-audio (get-attr mic "token") (dict "rate" 48000 "ch" 1 "frames" 1024))
+            (stream-capture-audio (get-attr mic "token")
+              (dict "device" 0 "rate" 48000 "ch" 1 "frames" 1024)))))
     ; ── rebuild the roster tiles every tick from the replicated room roster ──
     ; For each participant, copy that peer's decode-proxy token (the host publishes it at
     ; "media.<pid>.camera" once their frames start arriving) into peer.<idx>.cam, which the per-peer
