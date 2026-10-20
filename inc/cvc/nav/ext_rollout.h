@@ -11,7 +11,7 @@
 // cvc::nav::diff::bike_rollout_ext: one agent's kinematic-bicycle trajectory with an external
 // force, and its reverse. The trajectory-level form of the ext_in port in diff_rollout.h, for a
 // trainer whose loss reads the whole path and whose force depends on where the agent is
-// (cvcdbg's comm-network trainer: goal reach, jammer exposure, link outage along the path).
+// (for example a loss on goal reach and on exposure to the force along the path).
 //
 //   diff::bike_ext_fn fn;              // the force, sampled at a pose
 //   fn.sample = my_force;              // writes F (drive frame) and J = dF/do (row-major 2x2)

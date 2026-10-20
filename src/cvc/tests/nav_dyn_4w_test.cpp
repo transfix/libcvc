@@ -783,7 +783,7 @@ TEST(Dyn4, Golden) {
 }
 
 // ── The external-force port on the four-wheel vehicle: dyn4_bike_step's ext_in and
-// dyn4_rollout_ext (ext_rollout.h), for cvcdbg's comm-network trainer ──
+// dyn4_rollout_ext (ext_rollout.h) ──
 
 namespace {
 

@@ -10,7 +10,7 @@
 
 // dyn_4w.h: the differentiable two-track (four-wheel) vehicle with suspension, the
 // vehicle-physics plan's P8d. It extends P8a's single-track plant (dyn_bike.h) to the four
-// contact patches a real car has, so a policy, or cvcdbg's comm-network trainer, trains through
+// contact patches a real car has, so a policy trains through
 // per-wheel grip, terrain under each wheel and the load each corner carries. bike_control
 // commands it exactly as it commands dyn_plant.
 //
