@@ -809,8 +809,8 @@ TEST(SimWorldBelief, UnseenHazardHasNoBarrier) {
   w.set_material_belief(wm.risk.data(), wm.hard.data(), world_mc(), belief_material_params{});
   const std::size_t hw = static_cast<std::size_t>(kWR) * kWC;
   const float *phi = w.material_plane_data(0) + hw;
-  const float pond = phi[3 * kWC + 11], far = phi[14 * kWC + 1];
-  EXPECT_EQ(pond, far);
+  const float pond = phi[3 * kWC + 11], distant = phi[14 * kWC + 1];
+  EXPECT_EQ(pond, distant);
   EXPECT_GT(pond, 1e6f);
   EXPECT_EQ(copy_mask(w.material_gate_hard(0)), std::vector<std::uint8_t>(hw, 1));
   w.step(1); // the agent at (2, 13) with a 4 m range cannot reach the pond at x 9..13, y 2..5
