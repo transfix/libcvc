@@ -68,36 +68,32 @@ on_tick: |
       (begin
         (state-set "joined" "1")
         (room-join "" (state-get "conf.room") (dict "name" (state-get "conf.self")))
-        ; Open my own video stream and drive it from the browser CAMERA (device 0). The producer runs
-        ; on a browser interval timer in this single-threaded wasm build, so frames flow without a
-        ; worker thread; the stream_view above decodes + shows them. getUserMedia prompts on this
-        ; call; frames (rescaled to 640x480, MJPEG) start once the user approves. (room-publish to
-        ; share it with peers is the WS media-transport phase.)
-        ; expected_subscribers >= 2: the "my video" self-preview tile AND the host's forwarder (which
-        ; subscribes to relay the frames to peers) both subscribe to this one stream; 3 gives headroom.
-        (set cam (stream-open (dict "id" "camera" "codec" "mjpeg" "w" 640 "h" 480 "stride" 2560
-                                    "expected_subscribers" 3)))
-        (state-set "cam_token" (get-attr cam "token"))
-        ; Drive the stream from the real browser CAMERA (device 0, getUserMedia). A ?synthetic=1 URL
-        ; param (the host plumbs it to "cam_synthetic") instead uses a hardware-free MJPEG test
-        ; pattern, so the whole conference — including peer video over the relay — can be exercised in
-        ; a browser that has no camera (or won't grant it).
-        (if (= (state-get "cam_synthetic") "1")
-            (stream-capture-camera (get-attr cam "token")
-              (dict "synthetic" #t "w" 640 "h" 480 "hz" 30 "jpeg" #t))
-            (stream-capture-camera (get-attr cam "token")
-              (dict "device" 0 "w" 640 "h" 480 "hz" 30 "jpeg" #t)))
-        ; Open my own MIC stream (f32 PCM) and drive it from the browser microphone (SDL audio device
-        ; 0 = getUserMedia audio). ?synthetic=1 instead captures a hardware-free 440 Hz tone (no
-        ; device), so audio flow + A/V sync are exercisable without a mic. subscriber_depth 8 covers
-        ; the host forwarder's ring subscription; the mic is not played back to yourself.
+        ; Open my MIC stream FIRST (f32 PCM) and drive it from the browser microphone (SDL audio
+        ; device 0 = getUserMedia audio). AUDIO is an independent stream opened BEFORE the camera, so a
+        ; participant with no camera (or who denies video) still captures + forwards their voice — the
+        ; camera path below cannot keep audio from working. ?synthetic=1 captures a hardware-free 440 Hz
+        ; tone instead. subscriber_depth 8 covers the host forwarder's ring subscription; the mic is not
+        ; played back to yourself.
         (set mic (stream-open (dict "id" "mic" "codec" "f32" "rate" 48000 "ch" 1 "frames_per_chunk" 1024
                                     "subscriber_depth" 8 "expected_subscribers" 2)))
         (state-set "mic_token" (get-attr mic "token"))
         (if (= (state-get "cam_synthetic") "1")
             (stream-capture-audio (get-attr mic "token") (dict "rate" 48000 "ch" 1 "frames" 1024))
             (stream-capture-audio (get-attr mic "token")
-              (dict "device" 0 "rate" 48000 "ch" 1 "frames" 1024)))))
+              (dict "device" 0 "rate" 48000 "ch" 1 "frames" 1024)))
+        ; Then open my video stream from the browser CAMERA (device 0, getUserMedia). The producer runs
+        ; on a browser interval timer in this single-threaded wasm build; the "my video" stream_view
+        ; decodes + shows it. A participant with no camera simply sends no video while their audio keeps
+        ; flowing. ?synthetic=1 uses a hardware-free MJPEG test pattern. expected_subscribers >= 2: the
+        ; self-preview tile AND the host forwarder both subscribe to this one stream; 3 gives headroom.
+        (set cam (stream-open (dict "id" "camera" "codec" "mjpeg" "w" 640 "h" 480 "stride" 2560
+                                    "expected_subscribers" 3)))
+        (state-set "cam_token" (get-attr cam "token"))
+        (if (= (state-get "cam_synthetic") "1")
+            (stream-capture-camera (get-attr cam "token")
+              (dict "synthetic" #t "w" 640 "h" 480 "hz" 30 "jpeg" #t))
+            (stream-capture-camera (get-attr cam "token")
+              (dict "device" 0 "w" 640 "h" 480 "hz" 30 "jpeg" #t)))))
     ; ── rebuild the roster tiles every tick from the replicated room roster ──
     ; For each participant, copy that peer's decode-proxy token (the host publishes it at
     ; "media.<pid>.camera" once their frames start arriving) into peer.<idx>.cam, which the per-peer
