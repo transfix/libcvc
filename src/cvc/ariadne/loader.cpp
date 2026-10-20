@@ -551,6 +551,8 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
   if (type == "window" || type == "overlay") {
     Widget w = window(label, parse_seq(ctx, n["children"]));
     w.id = str(n, "id");
+    w.bind =
+        str(n, "bind"); // optional: a computed/state-bound VISIBLE TITLE (else the `window:` label)
     parse_pos(n, w);
     w.size = parse_size(n["size"]);                  // §3.0.3b window sizing (%/px/auto)
     w.layout = parse_layout(n["layout"]);            // §3.0.3b window-body layout (grid/tracks)

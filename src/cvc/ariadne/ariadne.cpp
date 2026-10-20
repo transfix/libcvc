@@ -211,6 +211,12 @@ std::unordered_map<std::string, WidgetEmitFn> &widget_registry() {
   static std::unordered_map<std::string, WidgetEmitFn> r;
   return r;
 }
+// Widget types a BACKEND renders natively (no compositional emit fn) — so the loader does not warn
+// they are unregistered. Guarded by widget_mutex() like widget_registry().
+std::set<std::string> &known_widget_types() {
+  static std::set<std::string> s;
+  return s;
+}
 WidgetEmitFn lookup_widget(const std::string &type) {
   std::lock_guard<std::mutex> lock(widget_mutex());
   auto it = widget_registry().find(type);
@@ -225,9 +231,17 @@ void register_widget_type(const std::string &type, WidgetEmitFn emit) {
   widget_registry()[type] = std::move(emit);
 }
 
+void register_known_widget_type(const std::string &type) {
+  if (type.empty())
+    return;
+  std::lock_guard<std::mutex> lock(widget_mutex());
+  known_widget_types().insert(type);
+}
+
 bool has_widget_type(const std::string &type) {
   std::lock_guard<std::mutex> lock(widget_mutex());
-  return widget_registry().find(type) != widget_registry().end();
+  return widget_registry().find(type) != widget_registry().end() ||
+         known_widget_types().find(type) != known_widget_types().end();
 }
 
 // --- the init: block runner (state_exec) --------------------------------------
@@ -1155,7 +1169,25 @@ void Runtime::Impl::emit_node(const Widget &w) {
     }
     if (have_seed)
       b.seed_window_geometry(seed);
-    const bool visible = b.begin_window(w.label.c_str(), id.c_str(), w.size, w.frame_border,
+    // Raise edge: a one-shot request at tree.<id>.raise (set to "1" by e.g. a "click a user"
+    // handler, alongside tree.<id>.open) brings this window to the front this frame. Consume it so
+    // it fires once (not every frame). Opening a closed window + raising it = set both keys in the
+    // handler.
+    const std::string raise_path = resolve("tree." + id + ".raise");
+    if (read_string(app, raise_path) == "1") {
+      b.focus_next_window();
+      write<std::string>(app, raise_path, ""); // consume the one-shot
+    }
+    // A window may BIND its visible title (e.g. a per-peer camera window titled by the peer's
+    // name): resolve w.bind as the title when present, else the static label. begin_window uses
+    // "title###id", so the title may change each frame while the ###id identity stays stable.
+    std::string wtitle = w.label;
+    if (!w.bind.empty()) {
+      const std::string t = is_expr(w.bind) ? eval_text(w.bind) : read_string(app, resolve(w.bind));
+      if (!t.empty())
+        wtitle = t;
+    }
+    const bool visible = b.begin_window(wtitle.c_str(), id.c_str(), w.size, w.frame_border,
                                         w.closable ? &open : nullptr);
     // Persist the current geometry. When the backend can't report a size (a collapsed window),
     // back-fill it from the seed so a collapse doesn't clobber the stored content size.

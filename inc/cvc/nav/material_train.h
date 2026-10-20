@@ -69,7 +69,7 @@ struct material_batch {
   const float *obs_feats = nullptr;       // [B*N*6]
   const std::uint8_t *obs_mask = nullptr; // [B*N] (also the rollout mask)
   const float *goal_feats = nullptr;      // [B*4]
-  const float *risk_patch = nullptr;      // [B*2*P*P]
+  const float *risk_patch = nullptr;      // [B*C*P*P], C = the model's risk_channels()
   // rollout inputs
   const float *o0 = nullptr, *v0 = nullptr, *goal = nullptr;  // [B*2]
   const float *C = nullptr;                                   // [B*N*2]
@@ -89,6 +89,12 @@ struct material_batch {
   // geometry rollouts leave it out, as they leave out the material forces. With it, the
   // surrogate rollout and its VJP run on the CPU (no device twin of the channel yet).
   const material_ext *ext = nullptr;
+  // The witness gate in training [B] (belief material, docs/roadmap/
+  // NAV-BELIEF-MATERIAL-ROADMAP.md §5): agent i's lam_soft enters every rollout (all three
+  // integrators and their VJPs) times gate_active[i] != 0, a stop-gradient bit computed by the
+  // caller (witness_gate_batch on the sample's belief planes at its start), as at deployment.
+  // L_lreg still reads the head's own lam_soft. Null = ungated, byte-identical to before.
+  const std::uint8_t *gate_active = nullptr;
 };
 
 // The rollout the material loss is taken through.

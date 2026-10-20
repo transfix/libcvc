@@ -36,12 +36,14 @@ float worst_rel(const std::vector<float> &a, const std::vector<float> &b) {
 }
 } // namespace
 
-TEST(NavCoefEnergyCuda, ForwardMatchesCpu) {
-  if (!coef_energy_cuda_available())
-    GTEST_SKIP() << "no CUDA device";
+// channels 3: the belief net ([r~, hard, seen] patches, .cvcnm version 2).
+static void check_forward(int channels) {
   std::mt19937 rng(123);
   const int P = 16;
-  coef_energy_net net = cvc_test::build_test_model(rng, P);
+  cvc_test::test_model_dims dims;
+  dims.risk_channels = channels;
+  coef_energy_net net = cvc_test::build_test_model(rng, P, dims);
+  const int C = net.risk_channels();
 
   const int n = 6;
   const int nobs[n] = {0, 1, 3, 5, 2, 4};
@@ -52,7 +54,7 @@ TEST(NavCoefEnergyCuda, ForwardMatchesCpu) {
 
   std::uniform_real_distribution<float> ur(-1.0f, 1.0f), up(0.0f, 1.0f);
   std::vector<float> obs_feats(std::max(total, 1) * 6), goal_feats(n * 4),
-      risk_patch((std::size_t)n * 2 * P * P);
+      risk_patch((std::size_t)n * C * P * P);
   std::vector<std::uint8_t> obs_mask(std::max(total, 1), 1);
   for (auto &v : obs_feats)
     v = ur(rng);
@@ -100,6 +102,18 @@ TEST(NavCoefEnergyCuda, ForwardMatchesCpu) {
   EXPECT_LT(rml, 3e-3f) << "mu_lat";
 }
 
+TEST(NavCoefEnergyCuda, ForwardMatchesCpu) {
+  if (!coef_energy_cuda_available())
+    GTEST_SKIP() << "no CUDA device";
+  check_forward(2);
+}
+
+TEST(NavCoefEnergyCuda, ForwardMatchesCpuBelief) {
+  if (!coef_energy_cuda_available())
+    GTEST_SKIP() << "no CUDA device";
+  check_forward(3);
+}
+
 // Device backward (accumulated over the batch) == CPU backward_one looped over the
 // batch, per weight tensor (rel + cosine). The atomicAdd sum order differs from
 // the CPU's sequential accumulate, so this is the FLOAT tier, not bit-exact.
@@ -120,8 +134,9 @@ void check_backward(coef_energy_net &net, int P, unsigned seed, const std::vecto
 
   std::mt19937 rng(seed);
   std::uniform_real_distribution<float> ur(-1.0f, 1.0f), up(0.0f, 1.0f);
+  const int C = net.risk_channels();
   std::vector<float> obs_feats(std::max(total, 1) * 6), goal_feats(n * 4),
-      risk_patch((std::size_t)n * 2 * P * P);
+      risk_patch((std::size_t)n * C * P * P);
   std::vector<std::uint8_t> obs_mask(std::max(total, 1), 1);
   for (auto &v : obs_feats)
     v = ur(rng);
@@ -147,7 +162,7 @@ void check_backward(coef_energy_net &net, int P, unsigned seed, const std::vecto
     const int o = off[i], nob = off[i + 1] - o;
     net.backward_one(obs_feats.data() + (std::size_t)o * 6, obs_mask.data() + o, nob,
                      goal_feats.data() + (std::size_t)i * 4,
-                     risk_patch.data() + (std::size_t)i * 2 * P * P, P, ga.data() + o, gb[i], gg[i],
+                     risk_patch.data() + (std::size_t)i * C * P * P, P, ga.data() + o, gb[i], gg[i],
                      gls[i], glh[i], gml[i], gc);
   }
   auto gd = net.zero_grads();
@@ -197,6 +212,18 @@ TEST(NavCoefEnergyCuda, BackwardMatchesCpu) {
   check_backward(net, P, 909, {3, 2}, 2, "all-masked");         // agent 0's keys all padded
   check_backward(net, P, 101, {6, 1, 0, 4}, 1, "wide");         // larger max_obs + singleton + T=1
   check_backward(net, P, 55, {1}, 0, "single");                 // single-agent, single obstacle
+}
+
+TEST(NavCoefEnergyCuda, BackwardMatchesCpuBelief) {
+  if (!coef_energy_cuda_available())
+    GTEST_SKIP() << "no CUDA device";
+  const int P = 16;
+  std::mt19937 mrng(322);
+  cvc_test::test_model_dims dims;
+  dims.risk_channels = 3;
+  coef_energy_net net = cvc_test::build_test_model(mrng, P, dims);
+  check_backward(net, P, 321, {0, 1, 3, 5, 2, 4}, 1, "belief");
+  check_backward(net, P, 909, {3, 2}, 2, "belief-msk");
 }
 
 #endif // CVC_ENABLE_CUDA

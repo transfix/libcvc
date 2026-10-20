@@ -126,5 +126,52 @@ bool seen_disc(double px, double py, double R, int rows, int cols, double min_x,
   return changed;
 }
 
+void material_patch_belief(const float *risk, const std::uint8_t *hard_b, const std::uint8_t *seen,
+                           int rows, int cols, double min_x, double min_y, double max_x,
+                           double max_y, double px, double py, double extent_m, int P,
+                           const belief_material_params &p, float *out) {
+  validate(p);
+  check_grid(rows, cols, "material_patch_belief");
+  if (P < 2)
+    throw std::invalid_argument("cvc::nav::material_patch_belief: P must be >= 2");
+  if (!std::isfinite(extent_m) || !(extent_m > 0.0))
+    throw std::invalid_argument("cvc::nav::material_patch_belief: extent_m must be positive");
+  const std::size_t pp = static_cast<std::size_t>(P) * P;
+  float *ch0 = out, *ch1 = out + pp, *ch2 = out + 2 * pp;
+  const double half = extent_m / 2.0;
+  for (int i = 0; i < P; ++i) {
+    const double y = py + linspace_at(-half, half, P, i);
+    const double rr = (y - min_y) / (max_y - min_y) * (rows - 1);
+    for (int j = 0; j < P; ++j) {
+      const double x = px + linspace_at(-half, half, P, j);
+      const double cc = (x - min_x) / (max_x - min_x) * (cols - 1);
+      const std::size_t o = static_cast<std::size_t>(i) * P + j;
+      const double nr = std::rint(rr), nc = std::rint(cc);
+      const bool on = nr >= 0.0 && nr < rows && nc >= 0.0 && nc < cols;
+      const std::size_t k =
+          on ? static_cast<std::size_t>(nr) * cols + static_cast<std::size_t>(nc) : 0;
+      const bool s = on && seen[k] != 0;
+      ch2[o] = s ? 1.0f : 0.0f;
+      ch1[o] = s ? (hard_b[k] ? 1.0f : 0.0f) : static_cast<float>(p.unknown_hard);
+      if (!s) {
+        ch0[o] = p.unknown_risk;
+        continue;
+      }
+      const double rc = std::min(std::max(rr, 0.0), static_cast<double>(rows - 1));
+      const double ccl = std::min(std::max(cc, 0.0), static_cast<double>(cols - 1));
+      const int r0 = static_cast<int>(std::floor(rc)), c0 = static_cast<int>(std::floor(ccl));
+      const int r1 = std::min(r0 + 1, rows - 1), c1 = std::min(c0 + 1, cols - 1);
+      const double fr = rc - r0, fc = ccl - c0;
+      const double v00 = risk[static_cast<std::size_t>(r0) * cols + c0];
+      const double v01 = risk[static_cast<std::size_t>(r0) * cols + c1];
+      const double v10 = risk[static_cast<std::size_t>(r1) * cols + c0];
+      const double v11 = risk[static_cast<std::size_t>(r1) * cols + c1];
+      const double top = v00 + (v01 - v00) * fc;
+      const double bot = v10 + (v11 - v10) * fc;
+      ch0[o] = static_cast<float>(top + (bot - top) * fr);
+    }
+  }
+}
+
 } // namespace nav
 } // namespace cvc

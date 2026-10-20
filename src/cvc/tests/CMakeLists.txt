@@ -148,6 +148,9 @@ if(CVC_ENABLE_GRPC)
   add_executable(stream_relay_test stream_relay_test.cpp)
   add_executable(room_media_test room_media_test.cpp)
 endif()
+if(CVC_ENABLE_WS)
+  add_executable(state_transport_ws_test state_transport_ws_test.cpp)
+endif()
 add_executable(voxels_test voxels_test.cpp)
 add_executable(volume_test volume_test.cpp)
 add_executable(volren_math_test volren_math_test.cpp)
@@ -175,6 +178,7 @@ add_executable(nav_material_raster_test nav_material_raster_test.cpp)
 add_executable(nav_clearance_cost_test nav_clearance_cost_test.cpp)
 add_executable(nav_material_test nav_material_test.cpp)
 add_executable(nav_belief_material_test nav_belief_material_test.cpp)
+add_executable(nav_belief_material_net_test nav_belief_material_net_test.cpp)
 add_executable(nav_material_deploy_test nav_material_deploy_test.cpp)
 add_executable(nav_coef_energy_test nav_coef_energy_test.cpp)
 add_executable(nav_material_rollout_grad_test nav_material_rollout_grad_test.cpp)
@@ -327,6 +331,7 @@ set(TEST_TARGETS
   nav_clearance_cost_test
   nav_material_test
   nav_belief_material_test
+  nav_belief_material_net_test
   nav_material_deploy_test
   nav_material_raster_test
   nav_coef_energy_test
@@ -853,6 +858,13 @@ target_link_libraries(nav_belief_material_test
     GTest::gtest_main
 )
 
+target_link_libraries(nav_belief_material_net_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(nav_material_deploy_test
   PRIVATE
     cvc
@@ -887,6 +899,17 @@ target_link_libraries(nav_material_ext_test
     GTest::gtest
     GTest::gtest_main
 )
+# Its patch_callback samples the force patch with detail/material_rollout.h's inline sampler, and
+# ACallbackGivingThePatchIsThePatch holds it to the patch source bit for bit. The rollouts sample
+# in TUs built with -ffp-contract=off, so this one is too. Under the compiler's default (on for
+# Clang, fast for GCC) the sampler's bilinear sums fuse into FMAs where the ISA has them (aarch64:
+# the macOS arm64 lanes), and the callback's F and J move by an ulp.
+if(NOT MSVC)
+  set_source_files_properties(nav_material_ext_test.cpp
+                              PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+else()
+  set_source_files_properties(nav_material_ext_test.cpp PROPERTIES COMPILE_OPTIONS "/fp:precise")
+endif()
 
 target_link_libraries(nav_coef_energy_grad_test
   PRIVATE
@@ -1741,6 +1764,17 @@ if(TARGET state_transport_grpc_test)
   list(APPEND TEST_TARGETS state_transport_grpc_test)
 endif()
 
+if(TARGET state_transport_ws_test)
+  target_link_libraries(state_transport_ws_test
+    PRIVATE
+      cvc
+      GTest::gtest
+      GTest::gtest_main
+  )
+  target_compile_features(state_transport_ws_test PRIVATE cxx_std_17)
+  list(APPEND TEST_TARGETS state_transport_ws_test)
+endif()
+
 if(TARGET state_stream_transport_grpc_test)
   target_link_libraries(state_stream_transport_grpc_test
     PRIVATE
@@ -1804,6 +1838,7 @@ target_compile_features(nav_test PRIVATE cxx_std_17)
 target_compile_features(nav_coef_train_test PRIVATE cxx_std_17)
 target_compile_features(nav_material_test PRIVATE cxx_std_17)
 target_compile_features(nav_belief_material_test PRIVATE cxx_std_17)
+target_compile_features(nav_belief_material_net_test PRIVATE cxx_std_17)
 target_compile_features(nav_material_deploy_test PRIVATE cxx_std_17)
 target_compile_features(nav_coef_energy_test PRIVATE cxx_std_17)
 target_compile_features(nav_material_rollout_grad_test PRIVATE cxx_std_17)
@@ -2110,6 +2145,7 @@ cvc_discover_tests(nav_stats_test)
 cvc_discover_tests(nav_clearance_cost_test)
 cvc_discover_tests(nav_material_test)
 cvc_discover_tests(nav_belief_material_test)
+cvc_discover_tests(nav_belief_material_net_test)
 cvc_discover_tests(nav_material_deploy_test)
 cvc_discover_tests(nav_material_raster_test)
 cvc_discover_tests(nav_coef_energy_test)
@@ -2394,6 +2430,9 @@ if(NOT WIN32)
 endif()
 if(TARGET state_transport_grpc_test)
   cvc_discover_tests(state_transport_grpc_test)
+endif()
+if(TARGET state_transport_ws_test)
+  cvc_discover_tests(state_transport_ws_test)
 endif()
 if(TARGET state_stream_transport_grpc_test)
   cvc_discover_tests(state_stream_transport_grpc_test)
