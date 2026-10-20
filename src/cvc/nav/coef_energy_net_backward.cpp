@@ -131,8 +131,9 @@ void coef_energy_net::backward_one(const float *obs_feats, const std::uint8_t *o
   const int P = patch_p;
   std::vector<float> c0, c1, c2, pooled;
   int Ho0, Wo0, Ho1, Wo1, Ho2, Wo2;
-  conv2d(risk_patch, 2, P, P, W("risk_enc.net.0.weight"), W("risk_enc.net.0.bias"), 16, 3, 3, 1, 1,
-         c0, Ho0, Wo0);
+  const int Cin = risk_channels();
+  conv2d(risk_patch, Cin, P, P, W("risk_enc.net.0.weight"), W("risk_enc.net.0.bias"), 16, 3, 3, 1,
+         1, c0, Ho0, Wo0);
   std::vector<float> c0r = c0;
   for (auto &v : c0r)
     v = relu(v);
@@ -302,9 +303,9 @@ void coef_energy_net::backward_one(const float *obs_feats, const std::uint8_t *o
              g_c1.data(), g_c0r.data(), G("risk_enc.net.2.weight"), G("risk_enc.net.2.bias"));
   std::vector<float> g_c0(g_c0r.size(), 0.0f);
   relu_bwd(c0.data(), static_cast<int>(c0.size()), g_c0r.data(), g_c0.data());
-  std::vector<float> g_patch(static_cast<std::size_t>(2) * P * P, 0.0f); // data (discarded)
-  conv2d_bwd(risk_patch, 2, P, P, W("risk_enc.net.0.weight"), 16, 3, 3, 1, 1, Ho0, Wo0, g_c0.data(),
-             g_patch.data(), G("risk_enc.net.0.weight"), G("risk_enc.net.0.bias"));
+  std::vector<float> g_patch(static_cast<std::size_t>(Cin) * P * P, 0.0f); // data (discarded)
+  conv2d_bwd(risk_patch, Cin, P, P, W("risk_enc.net.0.weight"), 16, 3, 3, 1, 1, Ho0, Wo0,
+             g_c0.data(), g_patch.data(), G("risk_enc.net.0.weight"), G("risk_enc.net.0.bias"));
 }
 
 } // namespace nav

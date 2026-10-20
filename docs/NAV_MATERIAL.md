@@ -267,6 +267,23 @@ The golden `src/cvc/tests/data/belief_material_golden.json` (`NavBeliefMaterial.
 GRL-SNAM's numpy twin to all of it, bit for bit: per case, tick and plane, the SHA-256 of every
 raster, and the gate's outputs.
 
+Training on belief planes (B3):
+
+* The model's risk patch has 3 channels, `[r~, hard, seen]`. `material_patch_belief` crops it
+  from the belief planes around an agent: P x P samples over `extent_m`, r~ bilinear, hard and
+  seen from the nearest cell, and the pinned values wherever the nearest cell is unseen or off
+  the map. It is BIT, op order pinned in the header.
+* A 3-channel net is a `.cvcnm` **version 2** file: the version-1 layout plus a belief block
+  after `eps` (`<IIfIIff>`: risk_channels, seen_rule, unknown_risk, unknown_hard,
+  unknown_gate_hard, material_range_m, patch_extent_m). A 2-channel net is still written as
+  version 1, byte for byte, and libcvc 3.7.0 and earlier refuse a version-2 file rather than read
+  its encoder with 2-channel strides. The loader now checks every tensor's shape against the
+  hyperparams and keeps the meta trailer through `serialize()`. `risk_channels()` and
+  `belief_header()` report what a file holds.
+* `material_batch::gate_active` (`[B]` u8, null = ungated) is the witness gate in training: an
+  agent's `lam_soft` enters every rollout times its bit; `L_lreg` reads the head's own value.
+* The CPU and CUDA forward, backward and trainer take `C = risk_channels()` channels.
+
 ### Choosing constants
 
 The defaults are the GRL-SNAM sim-frame values, validated behaviorally there
@@ -293,7 +310,7 @@ minimum). Route-level avoidance belongs to the planner: feed
 |---|---|---|
 | `material_build` | **BIT** vs the Python reference | pinned-op-order blur (scipy-`reflect`-equivalent, symmetric padding, sequential tap/normalization sums, f64 through both passes, one f32 store), EDT metres chain, f32 gradients of the f32-stored planes |
 | `witness_gate` (+batch) | **BIT** | float64 end-to-end, embedded direction table, `sqrt(x*x+y*y)` never `hypot` (CPython's hypot is not libm's), batch == serial bytes at any thread count |
-| `belief_material_inputs`, `belief_gate_surface`, `seen_disc`, `sense_batch`'s material mask | **BIT** | a select, an OR plus the `set_material` clearance chain, the numpy-linspace disc (`belief_material.cpp` is built with `-ffp-contract=off`) |
+| `belief_material_inputs`, `belief_gate_surface`, `seen_disc`, `material_patch_belief`, `sense_batch`'s material mask | **BIT** | a select, an OR plus the `set_material` clearance chain, the numpy-linspace disc (`belief_material.cpp` is built with `-ffp-contract=off`) |
 | `material_sample` | FLOAT (rtol 1e-5) | the proven `sdf_sample` op chain; bit-exact vs torch on x86-64 in practice |
 | `*_material` rollouts | FLOAT (rtol 1e-4 / atol 1e-5) | the `drive_step` tier; null material delegates byte-identically |
 
@@ -307,7 +324,10 @@ cross-language sweep lives in GRL-SNAM `tests/test_material_parity.py`.
 ## pycvc surface
 
 Belief material: `nav_belief_material_inputs`, `nav_belief_gate_surface`, `nav_seen_disc`,
-`nav_sense_batch_material` (the sense plus the material mask).
+`nav_sense_batch_material` (the sense plus the material mask), `nav_material_patch_belief` (the
+model's crop). The trainer's step and loss take a trailing `gate_active`, and
+`nav_material_trainer_risk_channels` reports a handle's channels (and marks a pycvc that takes the
+gate). `nav_matnet_forward` and the trainer take `(B,C,P,P)` risk patches.
 
 Field/gate kernels: `nav_material_build`, `nav_witness_gate`,
 `nav_witness_gate_batch`, `nav_material_sample`, `nav_bicycle_rollout_material`,

@@ -30,7 +30,8 @@
 //   belief_material_inputs  the per-cell select (BIT);
 //   belief_gate_surface     the gate's feasibility surface and its metres
 //                           clearance (BIT; the sim_world::set_material chain);
-//   seen_disc               the optional range-disc seen rule (BIT vs numpy).
+//   seen_disc               the optional range-disc seen rule (BIT vs numpy);
+//   material_patch_belief   the model's 3-channel risk patch, cropped from belief planes (BIT).
 // The default seen mask is the sense ray-cast's field of view, which
 // sense_batch (grid_nav.h) already keeps; its material-range mask is an optional
 // output there. belief_material.cpp is compiled with -ffp-contract=off (the disc
@@ -89,6 +90,25 @@ void belief_gate_surface(const std::uint8_t *hard_b, const std::uint8_t *occ,
 // a non-finite input marks nothing.
 bool seen_disc(double px, double py, double R, int rows, int cols, double min_x, double min_y,
                double max_x, double max_y, std::uint8_t *seen);
+
+// The model's 3-channel belief risk patch for one agent (spec §5): P x P samples on the world
+// offsets o_k = np.linspace(-extent_m/2, extent_m/2, P)[k] around (px, py) — sample (i, j) at
+// x = px + o_j, y = py + o_i (rows along y, columns along x). Per sample, in float64:
+//   rr = (y - min_y) / (max_y - min_y) * (rows - 1),  cc = (x - min_x) / (max_x - min_x) * (cols -
+//   1) the nearest cell (rint(rr), rint(cc)) (round-half-even); `s` = its seen bit, 0 off the grid
+//   ch0 = s ? bilinear(risk) : unknown_risk
+//   ch1 = s ? hard_b[nearest] : unknown_hard
+//   ch2 = s
+// bilinear (align-corners): rr and cc clamped into [0, rows-1] / [0, cols-1], r0 = floor, r1 =
+// min(r0 + 1, rows - 1) (c likewise), fr = rr - r0, fc = cc - c0, then
+//   top = v00 + (v01 - v00) * fc, bot = v10 + (v11 - v10) * fc, value = top + (bot - top) * fr
+// in that order, one f32 store. `risk` is the belief planes' channel 0 (r~), `hard_b` and `seen`
+// their 0/1 rasters (all row-major rows*cols, row 0 at min_y). out [3*P*P] f32, channel-major.
+// Throws std::invalid_argument for P < 2, a non-finite or non-positive extent, or an invalid p.
+void material_patch_belief(const float *risk, const std::uint8_t *hard_b, const std::uint8_t *seen,
+                           int rows, int cols, double min_x, double min_y, double max_x,
+                           double max_y, double px, double py, double extent_m, int P,
+                           const belief_material_params &p, float *out);
 
 } // namespace nav
 } // namespace cvc

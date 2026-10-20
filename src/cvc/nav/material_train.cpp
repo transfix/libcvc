@@ -43,6 +43,7 @@ inline float softplusf(float x) { return x > 20.0f ? x : std::log1p(std::exp(x))
 // Everything the forward produces that the backward reuses.
 struct fwd_cache {
   std::vector<float> alphas, beta, gamma, lam_soft, lam_hard, mu_lat; // model outputs
+  std::vector<float> lam_soft_r; // lam_soft as the rollout saw it (times the gate, if any)
   std::vector<float> oT, vT, min_clear, cum_risk, hard_count, arc;    // rollout outputs
   std::vector<float> th0, sp0, thT, spT;                              // bicycle start and end
   std::vector<float> x0, xT; // dynamic: (vy, r, delta, a) at the start and end [B*4]
@@ -81,7 +82,7 @@ void bicycle_start(const material_batch &b, std::vector<float> &th, std::vector<
 double compute_loss(const coef_energy_net &model, const material_batch &b,
                     const material_loss_config &cfg, float frozen_eta, fwd_cache *cache,
                     bool use_cuda, material_loss_parts *parts = nullptr) {
-  const int B = b.B, N = b.N, P = b.P;
+  const int B = b.B, N = b.N, P = b.P, Cr = model.risk_channels();
   (void)use_cuda;
 
   // model forward (per agent, or one device batch — the padded batch is a ragged
@@ -101,9 +102,16 @@ double compute_loss(const coef_energy_net &model, const material_batch &b,
     for (int i = 0; i < B; ++i)
       model.forward_one(b.obs_feats + static_cast<std::size_t>(i) * N * 6, b.obs_mask + i * N, N,
                         b.goal_feats + static_cast<std::size_t>(i) * 4,
-                        b.risk_patch + static_cast<std::size_t>(i) * 2 * P * P, P,
+                        b.risk_patch + static_cast<std::size_t>(i) * Cr * P * P, P,
                         alphas.data() + static_cast<std::size_t>(i) * N, &beta[i], &gamma[i],
                         &lam_soft[i], &lam_hard[i], &mu_lat[i]);
+
+  // The witness gate in training: each agent's lam_soft enters the rollout times its gate bit
+  // (data, as at deployment); lreg below reads the head's own value. No gate: lam_soft itself.
+  std::vector<float> lam_soft_r = lam_soft;
+  if (b.gate_active)
+    for (int i = 0; i < B; ++i)
+      lam_soft_r[i] = b.gate_active[i] ? lam_soft[i] : 0.0f;
 
   // rollout forward (o/v are updated in place from o0/v0)
   std::vector<float> oT(b.o0, b.o0 + 2 * B), vT(b.v0, b.v0 + 2 * B);
@@ -117,9 +125,9 @@ double compute_loss(const coef_energy_net &model, const material_batch &b,
     xT = x0;
     integrate_dynamic_material(
         oT.data(), thT.data(), spT.data(), xT.data(), b.goal, b.C, b.R, b.obs_mask, alphas.data(),
-        beta.data(), gamma.data(), lam_soft.data(), lam_hard.data(), b.rollout_patch, b.rr, b.d_hat,
-        b.dt, b.H, B, N, b.Hp, b.Wp, cfg.rollout, cfg.bicycle, cfg.dynamic, min_clear.data(),
-        cum_risk.data(), hard_count.data(), arc.data(), cfg.num_threads, b.ext);
+        beta.data(), gamma.data(), lam_soft_r.data(), lam_hard.data(), b.rollout_patch, b.rr,
+        b.d_hat, b.dt, b.H, B, N, b.Hp, b.Wp, cfg.rollout, cfg.bicycle, cfg.dynamic,
+        min_clear.data(), cum_risk.data(), hard_count.data(), arc.data(), cfg.num_threads, b.ext);
     // vT: the rear axle's world velocity, (vx, vy - lr r) turned by the heading.
     for (int i = 0; i < B; ++i) {
       const float vs = xT[4 * i] - cfg.dynamic.lr * xT[4 * i + 1];
@@ -133,7 +141,7 @@ double compute_loss(const coef_energy_net &model, const material_batch &b,
     spT = sp0;
     integrate_bicycle_material(
         oT.data(), thT.data(), spT.data(), b.goal, b.C, b.R, b.obs_mask, alphas.data(), beta.data(),
-        gamma.data(), lam_soft.data(), lam_hard.data(), b.rollout_patch, b.rr, b.d_hat, b.dt, b.H,
+        gamma.data(), lam_soft_r.data(), lam_hard.data(), b.rollout_patch, b.rr, b.d_hat, b.dt, b.H,
         B, N, b.Hp, b.Wp, cfg.rollout, cfg.bicycle, min_clear.data(), cum_risk.data(),
         hard_count.data(), arc.data(), cfg.num_threads, b.ext);
     for (int i = 0; i < B; ++i) {
@@ -144,14 +152,14 @@ double compute_loss(const coef_energy_net &model, const material_batch &b,
 #ifdef CVC_USING_CUDA
       if (use_cuda && !b.ext && material_rollout_cuda_available())
     integrate_surrogate_material_cuda(oT.data(), vT.data(), b.goal, b.C, b.R, b.obs_mask,
-                                      alphas.data(), beta.data(), gamma.data(), lam_soft.data(),
+                                      alphas.data(), beta.data(), gamma.data(), lam_soft_r.data(),
                                       lam_hard.data(), b.rollout_patch, b.rr, b.d_hat, b.dt, b.H, B,
                                       N, b.Hp, b.Wp, cfg.rollout, min_clear.data(), cum_risk.data(),
                                       hard_count.data(), arc.data());
   else
 #endif
     integrate_surrogate_material(oT.data(), vT.data(), b.goal, b.C, b.R, b.obs_mask, alphas.data(),
-                                 beta.data(), gamma.data(), lam_soft.data(), lam_hard.data(),
+                                 beta.data(), gamma.data(), lam_soft_r.data(), lam_hard.data(),
                                  b.rollout_patch, b.rr, b.d_hat, b.dt, b.H, B, N, b.Hp, b.Wp,
                                  cfg.rollout, min_clear.data(), cum_risk.data(), hard_count.data(),
                                  arc.data(), cfg.num_threads, b.ext);
@@ -232,6 +240,7 @@ double compute_loss(const coef_energy_net &model, const material_batch &b,
     cache->beta = std::move(beta);
     cache->gamma = std::move(gamma);
     cache->lam_soft = std::move(lam_soft);
+    cache->lam_soft_r = std::move(lam_soft_r);
     cache->lam_hard = std::move(lam_hard);
     cache->mu_lat = std::move(mu_lat);
     cache->oT = std::move(oT);
@@ -265,7 +274,7 @@ double material_loss(const coef_energy_net &model, const material_batch &b,
 double material_loss_and_grad(const coef_energy_net &model, const material_batch &b,
                               const material_loss_config &cfg, coef_energy_net::param_grads &grads,
                               float *eta_out, bool use_cuda, material_loss_parts *parts) {
-  const int B = b.B, N = b.N, P = b.P;
+  const int B = b.B, N = b.N, P = b.P, Cr = model.risk_channels();
   (void)use_cuda;
   fwd_cache c;
   if (parts)
@@ -326,7 +335,7 @@ double material_loss_and_grad(const coef_energy_net &model, const material_batch
     }
     integrate_dynamic_material_vjp(
         b.o0, c.th0.data(), c.sp0.data(), c.x0.data(), b.goal, b.C, b.R, b.obs_mask,
-        c.alphas.data(), c.beta.data(), c.gamma.data(), c.lam_soft.data(), c.lam_hard.data(),
+        c.alphas.data(), c.beta.data(), c.gamma.data(), c.lam_soft_r.data(), c.lam_hard.data(),
         b.rollout_patch, b.rr, b.d_hat, b.dt, b.H, B, N, b.Hp, b.Wp, cfg.rollout, cfg.bicycle,
         cfg.dynamic, g_oT.data(), g_thT.data(), g_vxT.data(), g_xT.data(), g_min_clear.data(),
         g_cum_risk.data(), g_arc.data(), g_alphas.data(), g_beta.data(), g_gamma.data(),
@@ -341,11 +350,11 @@ double material_loss_and_grad(const coef_energy_net &model, const material_batch
     }
     integrate_bicycle_material_vjp(
         b.o0, c.th0.data(), c.sp0.data(), b.goal, b.C, b.R, b.obs_mask, c.alphas.data(),
-        c.beta.data(), c.gamma.data(), c.lam_soft.data(), c.lam_hard.data(), b.rollout_patch, b.rr,
-        b.d_hat, b.dt, b.H, B, N, b.Hp, b.Wp, cfg.rollout, cfg.bicycle, g_oT.data(), g_thT.data(),
-        g_spT.data(), g_min_clear.data(), g_cum_risk.data(), g_arc.data(), g_alphas.data(),
-        g_beta.data(), g_gamma.data(), g_lam_soft.data(), g_lam_hard.data(), cfg.num_threads,
-        b.ext);
+        c.beta.data(), c.gamma.data(), c.lam_soft_r.data(), c.lam_hard.data(), b.rollout_patch,
+        b.rr, b.d_hat, b.dt, b.H, B, N, b.Hp, b.Wp, cfg.rollout, cfg.bicycle, g_oT.data(),
+        g_thT.data(), g_spT.data(), g_min_clear.data(), g_cum_risk.data(), g_arc.data(),
+        g_alphas.data(), g_beta.data(), g_gamma.data(), g_lam_soft.data(), g_lam_hard.data(),
+        cfg.num_threads, b.ext);
   } else
 #ifdef CVC_USING_CUDA
     // The device VJP stores each agent's whole trajectory in per-thread local
@@ -358,7 +367,7 @@ double material_loss_and_grad(const coef_energy_net &model, const material_batch
         max_horizon(b) <= material_rollout_cuda_max_horizon())
       integrate_surrogate_material_vjp_cuda(
           b.o0, b.v0, b.goal, b.C, b.R, b.obs_mask, c.alphas.data(), c.beta.data(), c.gamma.data(),
-          c.lam_soft.data(), c.lam_hard.data(), b.rollout_patch, b.rr, b.d_hat, b.dt, b.H, B, N,
+          c.lam_soft_r.data(), c.lam_hard.data(), b.rollout_patch, b.rr, b.d_hat, b.dt, b.H, B, N,
           b.Hp, b.Wp, cfg.rollout, g_oT.data(), g_vT.data(), g_min_clear.data(), g_cum_risk.data(),
           g_arc.data(), g_alphas.data(), g_beta.data(), g_gamma.data(), g_lam_soft.data(),
           g_lam_hard.data());
@@ -366,12 +375,17 @@ double material_loss_and_grad(const coef_energy_net &model, const material_batch
 #endif
       integrate_surrogate_material_vjp(
           b.o0, b.v0, b.goal, b.C, b.R, b.obs_mask, c.alphas.data(), c.beta.data(), c.gamma.data(),
-          c.lam_soft.data(), c.lam_hard.data(), b.rollout_patch, b.rr, b.d_hat, b.dt, b.H, B, N,
+          c.lam_soft_r.data(), c.lam_hard.data(), b.rollout_patch, b.rr, b.d_hat, b.dt, b.H, B, N,
           b.Hp, b.Wp, cfg.rollout, g_oT.data(), g_vT.data(), g_min_clear.data(), g_cum_risk.data(),
           g_arc.data(), g_alphas.data(), g_beta.data(), g_gamma.data(), g_lam_soft.data(),
           g_lam_hard.data(), cfg.num_threads, b.ext);
 
-  // add the direct (non-rollout) model-output grads
+  // the gate's chain rule (d lam_soft_r / d lam_soft = the gate bit), then the direct
+  // (non-rollout) model-output grads
+  if (b.gate_active)
+    for (int i = 0; i < B; ++i)
+      if (!b.gate_active[i])
+        g_lam_soft[i] = 0.0f;
   for (int i = 0; i < B; ++i) {
     g_gamma[i] += g_gamma_dir[i];
     g_lam_soft[i] += g_lam_soft_dir[i];
@@ -421,7 +435,7 @@ double material_loss_and_grad(const coef_energy_net &model, const material_batch
     for (int i = 0; i < B; ++i)
       model.backward_one(b.obs_feats + static_cast<std::size_t>(i) * N * 6, b.obs_mask + i * N, N,
                          b.goal_feats + static_cast<std::size_t>(i) * 4,
-                         b.risk_patch + static_cast<std::size_t>(i) * 2 * P * P, P,
+                         b.risk_patch + static_cast<std::size_t>(i) * Cr * P * P, P,
                          g_alphas.data() + static_cast<std::size_t>(i) * N, g_beta[i], g_gamma[i],
                          g_lam_soft[i], g_lam_hard[i], 0.0f, grads);
 

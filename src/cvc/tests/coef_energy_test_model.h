@@ -101,6 +101,7 @@ inline const std::vector<TShape> &coef_energy_tensors() {
 // The header's widths (d_tok, nhead, num_layers, d_risk); the rest of the net is fixed.
 struct test_model_dims {
   int d_tok = 64, nhead = 4, num_layers = 2, d_risk = 64;
+  int risk_channels = 2; // 3: the belief net ([r~, hard, seen]), written as .cvcnm version 2
 };
 
 // The parameter table for any widths, in coef_energy_tensors()'s order (which is its value at the
@@ -140,7 +141,7 @@ inline std::vector<TShape> coef_energy_tensors(const test_model_dims &n) {
   };
   for (const char *h : {"alpha_head", "beta_head", "gamma_head"})
     head(h, d);
-  t.push_back({"risk_enc.net.0.weight", {16, 2, 3, 3}});
+  t.push_back({"risk_enc.net.0.weight", {16, n.risk_channels, 3, 3}});
   t.push_back({"risk_enc.net.0.bias", {16}});
   t.push_back({"risk_enc.net.2.weight", {32, 16, 3, 3}});
   t.push_back({"risk_enc.net.2.bias", {32}});
@@ -173,7 +174,7 @@ inline cvc::nav::coef_energy_net build_test_model(std::mt19937 &rng, int P,
   auto U = [&](float lo, float hi) { return lo + (hi - lo) * (float)u(rng); };
   std::vector<unsigned char> b;
   b.insert(b.end(), {'C', 'V', 'N', 'M'});
-  tm_put32(b, 1);
+  tm_put32(b, n.risk_channels == 3 ? 2 : 1);
   tm_put64(b, 0xABCDu);
   tm_put32(b, static_cast<std::uint32_t>(n.d_tok));
   tm_put32(b, static_cast<std::uint32_t>(n.nhead));
@@ -184,9 +185,19 @@ inline cvc::nav::coef_energy_net build_test_model(std::mt19937 &rng, int P,
   tm_putf(b, 10.0f);
   tm_putf(b, 5.0f);
   tm_putf(b, 1e-5f);
+  if (n.risk_channels == 3) { // the belief block (the spec's defaults, a 12 m patch)
+    tm_put32(b, 3);
+    tm_put32(b, 0);
+    tm_putf(b, 0.0f);
+    tm_put32(b, 0);
+    tm_put32(b, 1);
+    tm_putf(b, 0.0f);
+    tm_putf(b, 12.0f);
+  }
   const test_model_dims def;
   const bool is_default = n.d_tok == def.d_tok && n.nhead == def.nhead &&
-                          n.num_layers == def.num_layers && n.d_risk == def.d_risk;
+                          n.num_layers == def.num_layers && n.d_risk == def.d_risk &&
+                          n.risk_channels == def.risk_channels;
   const std::vector<TShape> generated = is_default ? std::vector<TShape>{} : coef_energy_tensors(n);
   const std::vector<TShape> &kTensors = is_default ? coef_energy_tensors() : generated;
   tm_put32(b, static_cast<std::uint32_t>(kTensors.size()));
