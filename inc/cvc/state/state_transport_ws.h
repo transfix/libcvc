@@ -132,6 +132,13 @@ public:
   using connection_closed_fn = std::function<void(const std::string &node_id)>;
   void set_on_connection_closed(connection_closed_fn cb) { _on_conn_closed = std::move(cb); }
 
+  // Relay maintenance: shut down any connection that has sent NO frame for `timeout` (so its peer's
+  // on-close retraction fires), and join+erase finished reader threads. A conference client streams
+  // media continuously, so this drops a peer whose tab navigated/reloaded away WITHOUT a clean
+  // WebSocket close — the usual TCP close is never seen for such a ghost. Call periodically on the
+  // server's main loop. No-op under wasm. Returns how many connections were erased this call.
+  std::size_t reap_idle(std::chrono::milliseconds timeout);
+
   // ── Media plane (bring-up: media over this WS control channel) ──
   // Send a MediaFrame to this transport's connections. A browser CLIENT has one
   // connection (the relay), so this pushes its camera/mic up to the relay; the

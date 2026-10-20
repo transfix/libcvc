@@ -243,6 +243,53 @@ TEST(StateTransportWsTest, RelayFansMediaFrameToOtherClient) {
   S.stop();
 }
 
+// Ghost reaping: a client whose tab navigated/reloaded away stops streaming and its socket may not
+// close cleanly. reap_idle shuts the silent connection down after the idle timeout, which fires the
+// on-close retraction (so the roster drops the ghost) and then sweeps the connection.
+TEST(StateTransportWsTest, RelayReapsIdleConnection) {
+  cvc::app aA;
+  cvc::state_transport_ws S, tA;
+  S.start("127.0.0.1:0", "S", "C");
+  S.set_relay(true);
+  std::mutex mu;
+  std::vector<std::string> reaped;
+  S.set_on_connection_closed([&](const std::string &nid) {
+    std::lock_guard<std::mutex> lk(mu);
+    reaped.push_back(nid);
+  });
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  sA.attach();
+  tA.register_shard(&sA);
+  ASSERT_TRUE(tA.connect_to_peer(ws(S.listen_address()), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(
+      wait_until([&] { return S.connection_count() >= 1; }, std::chrono::milliseconds(2000)));
+
+  // tA sends nothing further, so S's connection goes idle (only the Hello set its last-rx). Let it
+  // age past the timeout, then reap: the stale connection is shut down and retracted ("A").
+  std::this_thread::sleep_for(std::chrono::milliseconds(80));
+  S.reap_idle(std::chrono::milliseconds(20));
+  EXPECT_TRUE(wait_until(
+      [&] {
+        std::lock_guard<std::mutex> lk(mu);
+        return !reaped.empty();
+      },
+      std::chrono::milliseconds(2000)));
+  // A second pass sweeps the finished reader (join + erase), so connections don't accumulate.
+  EXPECT_TRUE(wait_until(
+      [&] {
+        S.reap_idle(std::chrono::milliseconds(20));
+        return S.connection_count() == 0;
+      },
+      std::chrono::milliseconds(2000)));
+  {
+    std::lock_guard<std::mutex> lk(mu);
+    ASSERT_FALSE(reaped.empty());
+    EXPECT_EQ(reaped[0], "A"); // tA's Hello node id (adopted from its shard)
+  }
+  tA.stop();
+  S.stop();
+}
+
 // Late-joiner bootstrap: a relay that holds the room tree in its own shard pushes a full snapshot to
 // each newly admitted connection, so a client that joins AFTER others are present still sees them
 // (live set_relay forwarding only carries writes made after the client connects). This is what lets

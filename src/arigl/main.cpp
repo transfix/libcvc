@@ -230,7 +230,7 @@ struct ConferenceSession {
 
   // Consume: peers' frames arrive on the ws reader -> inbox_; pump() routes them. Per peer we keep a
   // video decode proxy + a small pts-ordered buffer of video frames (so the display can lag to the
-  // audio clock), and an audio output sink + its last-enqueued stamp (so video follows the audio).
+  // audio clock), and a queue of decoded audio chunks awaiting the mixer (below).
   std::mutex media_mu_;
   std::vector<cvc::ws_media_frame> inbox_;
   struct vframe {
@@ -241,12 +241,19 @@ struct ConferenceSession {
     std::unique_ptr<cvc::ariadne::stream::stream> video_proxy; // what the peer's stream_view renders
     std::deque<vframe> vbuf;    // buffered video frames awaiting their audio-synced display time
     double shown_pts = -1.0;    // pts of the frame currently injected into video_proxy
-    std::unique_ptr<cvc::gl::playback::audio_output> audio_out;
-    int a_rate = 0, a_ch = 0;   // the peer mic's format (sizes queued_bytes -> seconds)
-    double last_audio_pts = -1.0; // host-clock stamp of the last enqueued audio chunk
+    std::deque<std::vector<float>> achunks; // decoded f32 chunks awaiting the mixer
+    double last_audio_pts = -1.0; // world-clock stamp of this peer's last audio chunk
     bool has_audio = false;       // once true, video display follows this peer's audio clock
   };
   std::map<std::string, peer_media> peers_; // keyed by origin pid
+
+  // ALL peers' audio is summed into ONE output: SDL/WebAudio multi-stream behaviour in wasm is
+  // uncertain and browsers cap AudioContexts, so one mixed sink works for any number of talkers.
+  // mix_audio() pops one chunk from each peer per mixed chunk and sums them (silence for an empty
+  // peer). mix_frames_ is the interleaved sample count of a chunk (all mics are 48k/1ch/1024-frame).
+  std::unique_ptr<cvc::gl::playback::audio_output> mix_out_;
+  int mix_rate_ = 0, mix_ch_ = 0;
+  std::size_t mix_frames_ = 0;
 
   // The state key carrying a peer's video-proxy token, so the .ari can bind that peer's stream_view.
   static std::string media_token_key(const std::string &origin, const std::string &kind) {
@@ -333,14 +340,48 @@ struct ConferenceSession {
     const double stamp = media_clock_now(); // one world-clock reading per pump stamps all we forward
     forward_streams(stamp);
     drain_inbox();
+    mix_audio();     // sum all peers' queued audio into the one output
     sync_and_show(); // advance each peer's video display to match its audio playback clock
   }
   void stop() {
-    peers_.clear(); // close decode proxies + audio outputs before the transport/shard go away
+    peers_.clear(); // close decode proxies before the transport/shard go away
+    mix_out_.reset();
     for (publisher &p : pubs_)
       p.sub.reset();
     if (ws)
       ws->stop();
+  }
+
+  // Mix: pop one chunk from each peer that has audio queued, sum them (silence for an empty peer),
+  // clamp, and play to the single output. Produce mixed chunks while the output is below ~100 ms so
+  // it stays fed without running far ahead; stop when no peer has a chunk (output drains to silence).
+  void mix_audio() {
+    if (!mix_out_ || mix_frames_ == 0 || mix_rate_ <= 0 || mix_ch_ <= 0)
+      return;
+    const double bps = static_cast<double>(mix_rate_) * static_cast<double>(mix_ch_) * 4.0;
+    std::vector<float> mixed;
+    for (int guard = 0; guard < 64; ++guard) { // bound work per pump
+      if (bps > 0.0 && static_cast<double>(mix_out_->queued_bytes()) / bps >= 0.10)
+        break;
+      mixed.assign(mix_frames_, 0.0f);
+      bool any = false;
+      for (auto &kv : peers_) {
+        std::deque<std::vector<float>> &q = kv.second.achunks;
+        if (q.empty())
+          continue;
+        const std::vector<float> &c = q.front();
+        const std::size_t n = std::min(c.size(), mixed.size());
+        for (std::size_t i = 0; i < n; ++i)
+          mixed[i] += c[i];
+        q.pop_front();
+        any = true;
+      }
+      if (!any)
+        break;
+      for (float &v : mixed)
+        v = v > 1.0f ? 1.0f : (v < -1.0f ? -1.0f : v); // clamp when several talk at once
+      mix_out_->play(mixed.data(), mixed.size() * sizeof(float));
+    }
   }
 
   // Forward our local streams (camera: freshest frame; mic: every chunk in order) to the relay, which
@@ -412,30 +453,28 @@ struct ConferenceSession {
         continue; // never play/show ourselves as a peer
       peer_media &pm = peers_[m.origin_node_id];
       if (m.stream_id == "mic") {
-        if (!pm.audio_out && m.sample_rate > 0 && m.channels > 0) {
+        if (!mix_out_ && m.sample_rate > 0 && m.channels > 0) {
           cvc::gl::playback::audio_output_spec spec;
           spec.sample_rate = static_cast<int>(m.sample_rate);
           spec.channels = static_cast<int>(m.channels);
           cvc::gl::playback::audio_output_open opened = cvc::gl::playback::open_audio_output(spec);
-          pm.audio_out = std::move(opened.sink);
-          pm.a_rate = opened.sample_rate;
-          pm.a_ch = opened.channels;
+          mix_out_ = std::move(opened.sink);
+          mix_rate_ = opened.sample_rate;
+          mix_ch_ = opened.channels;
         }
-        if (pm.audio_out && !m.payload.empty()) {
-          // Bound the output queue. If it has backed up — a startup burst, or (common) a WebAudio
-          // context the browser still holds SUSPENDED under its autoplay policy until a user gesture,
-          // so nothing drains — enqueueing more would grow queued_bytes without bound, and since the
-          // A/V-sync clock is (last_audio_pts - queued seconds) that would drag a peer's VIDEO target
-          // ever further into the past and STALL their video. So stop enqueueing past a small cap, but
-          // keep advancing the clock so the video still tracks real time (and shows ~cap behind).
-          const double bps = static_cast<double>(pm.a_rate) * static_cast<double>(pm.a_ch) * 4.0;
-          const double queued_s =
-              bps > 0.0 ? static_cast<double>(pm.audio_out->queued_bytes()) / bps : 0.0;
-          if (queued_s < 0.20)
-            pm.audio_out->play(m.payload.data(), m.payload.size());
-          pm.last_audio_pts = m.pts_seconds;
-          pm.has_audio = true;
+        // Decode the f32 chunk and queue it for the mixer (do NOT play per-peer — mix_audio() sums
+        // all peers into mix_out_). Bound the backlog so a stuck mixer can't grow memory unbounded.
+        if (!m.payload.empty() && (m.payload.size() % sizeof(float)) == 0) {
+          const float *s = reinterpret_cast<const float *>(m.payload.data());
+          const std::size_t n = m.payload.size() / sizeof(float);
+          pm.achunks.emplace_back(s, s + n);
+          if (mix_frames_ == 0)
+            mix_frames_ = n;
+          while (pm.achunks.size() > 16)
+            pm.achunks.pop_front();
         }
+        pm.last_audio_pts = m.pts_seconds;
+        pm.has_audio = true;
       } else { // "camera" (video)
         if (!pm.video_proxy && m.width > 0 && m.height > 0) {
           cvc::ariadne::stream::stream_params p;
@@ -472,11 +511,16 @@ struct ConferenceSession {
       peer_media &pm = kv.second;
       if (!pm.video_proxy)
         continue;
+      // This peer's audio latency = what sits in its mixer queue + what is queued in the shared
+      // output. Show the video frame whose pts the audio has reached: last_audio_pts minus that.
       double target = 1e18;
-      if (pm.has_audio && pm.audio_out && pm.a_rate > 0 && pm.a_ch > 0) {
-        const double bps = static_cast<double>(pm.a_rate) * static_cast<double>(pm.a_ch) * 4.0;
-        const double queued_s = bps > 0.0 ? static_cast<double>(pm.audio_out->queued_bytes()) / bps : 0.0;
-        target = pm.last_audio_pts - queued_s;
+      if (pm.has_audio && mix_out_ && mix_rate_ > 0 && mix_ch_ > 0 && mix_frames_ > 0) {
+        const double bps = static_cast<double>(mix_rate_) * static_cast<double>(mix_ch_) * 4.0;
+        const double out_s = bps > 0.0 ? static_cast<double>(mix_out_->queued_bytes()) / bps : 0.0;
+        const double chunk_s =
+            static_cast<double>(mix_frames_) / static_cast<double>(mix_ch_) / static_cast<double>(mix_rate_);
+        const double peer_s = static_cast<double>(pm.achunks.size()) * chunk_s;
+        target = pm.last_audio_pts - out_s - peer_s;
       }
       std::shared_ptr<std::vector<std::uint8_t>> show;
       double show_pts = pm.shown_pts;

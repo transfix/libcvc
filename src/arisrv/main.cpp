@@ -128,9 +128,15 @@ int main(int argc, char **argv) {
 #if CVC_ENABLE_WS
   int wsticks = 0;                 // separate cadence: a browser-only room has no gRPC streams
   std::uint64_t lastMediaFwd = 0;  // last-logged WS media fan-out count
+  int reapticks = 0;               // cadence for reaping ghost (navigated-away) connections
 #endif
   while (!g_stop.load()) {
 #if CVC_ENABLE_WS
+    // Reap ghosts (~every second): a tab that navigated or reloaded away without a clean WebSocket
+    // close stops streaming media; reap_idle shuts such a connection down after ~10 s so its on-close
+    // retraction fires and the roster does not accumulate ghosts. A live client streams continuously.
+    if (++reapticks % 5 == 0)
+      ws_tp.reap_idle(std::chrono::seconds(10));
     // Apply any queued departures (a browser tab closed) before pumping, so each retraction goes out
     // to the remaining clients this tick.
     {
@@ -180,14 +186,16 @@ int main(int argc, char **argv) {
     }
 #if CVC_ENABLE_WS
     // Browser media rides the WS control channel and is fanned peer-to-peer in the transport (SFU), so
-    // it is NOT in the gRPC `relay` stats above. Report it on its own cadence (~every 5s when active).
+    // it is NOT in the gRPC `relay` stats above. Report connections + received + fanned (~every 5s)
+    // whenever any client is connected, so a quiet relay is distinguishable from a stuck one.
     if (++wsticks % 25 == 0) {
+      const std::size_t conns = ws_tp.connection_count();
       const std::uint64_t mf = ws_tp.total_media_forwarded();
-      if (mf != lastMediaFwd) {
+      const std::uint64_t mr = ws_tp.total_media_received();
+      if (conns > 0 || mf != lastMediaFwd) {
         lastMediaFwd = mf;
-        std::printf("[arisrv] ws media: %llu frame(s) fanned to peers (received %llu)\n",
-                    static_cast<unsigned long long>(mf),
-                    static_cast<unsigned long long>(ws_tp.total_media_received()));
+        std::printf("[arisrv] ws: %zu conn(s); media recv %llu, fanned %llu\n", conns,
+                    static_cast<unsigned long long>(mr), static_cast<unsigned long long>(mf));
         std::fflush(stdout);
       }
     }

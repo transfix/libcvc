@@ -226,10 +226,16 @@ public:
   std::atomic<bool> alive{true};
   std::string remote_node_id;
   std::string remote_cluster_id;
+  // Steady-clock ns of the last inbound frame. A live conference client streams media continuously,
+  // so a peer that navigated away (its socket not cleanly closed) stops updating this — the relay's
+  // reaper uses it to drop the ghost. 0 until the first frame; set to "now" when a connection opens
+  // so a brand-new, not-yet-speaking client is not reaped.
+  std::atomic<std::int64_t> last_rx_ns{0};
 
 #ifndef __EMSCRIPTEN__
   std::unique_ptr<websocket::stream<tcp::socket>> ws;
   std::thread reader;
+  std::atomic<bool> reader_done{false}; // the reader loop has returned: safe to join + erase
 
   bool can_write() const { return ws != nullptr; }
 
@@ -451,6 +457,7 @@ void state_transport_ws::read_loop(std::shared_ptr<connection> conn) {
   // peer drop, and only when the peer identified itself (sent a Hello).
   if (_running.load() && _on_conn_closed && !conn->remote_node_id.empty())
     _on_conn_closed(conn->remote_node_id);
+  conn->reader_done.store(true, std::memory_order_release); // reap_idle may now join + erase this
 }
 
 void state_transport_ws::stop() {
@@ -607,11 +614,19 @@ std::string state_transport_ws::listen_address() const {
   return _impl ? _impl->listen_addr_resolved : std::string();
 }
 
+// Steady-clock nanoseconds (the reaper's monotonic clock).
+static std::int64_t steady_ns() {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+
 // Parse one inbound Frame (serialized protobuf bytes) and dispatch it. Shared by the native reader
 // loop and the browser onmessage callback. MVP handles Hello / Mutation / Message; chunk / snapshot
 // / heartbeat are Phase 2 (the base-class defaults cover their request paths).
 void state_transport_ws::deliver_inbound(connection *c, const void *data, std::size_t len) {
   increment_recv_frames();
+  c->last_rx_ns.store(steady_ns(), std::memory_order_relaxed); // liveness for the reaper
   pb::Frame in;
   if (!in.ParseFromArray(data, static_cast<int>(len)))
     return;
@@ -1007,6 +1022,7 @@ void state_transport_ws::register_connection(std::shared_ptr<connection> conn) {
 }
 
 void state_transport_ws::admit_connection(const std::shared_ptr<connection> &conn) {
+  conn->last_rx_ns.store(steady_ns(), std::memory_order_relaxed); // don't reap a just-admitted client
   // Snapshot the shard list before taking the write mutex (every other path releases _shards_mu
   // before touching a connection's write mutex — keep that order to avoid a lock cycle).
   const bool backfill = _backfill_on_connect.load(std::memory_order_acquire);
@@ -1100,6 +1116,55 @@ void state_transport_ws::unregister_connection(connection *conn) {
       std::remove_if(_conns.begin(), _conns.end(),
                      [conn](const std::shared_ptr<connection> &c) { return c.get() == conn; }),
       _conns.end());
+}
+
+std::size_t state_transport_ws::reap_idle(std::chrono::milliseconds timeout) {
+  std::size_t reaped = 0;
+#ifndef __EMSCRIPTEN__
+  const std::int64_t now = steady_ns();
+  const std::int64_t to_ns = static_cast<std::int64_t>(timeout.count()) * 1000000;
+  std::vector<std::shared_ptr<connection>> snap;
+  {
+    std::lock_guard<std::mutex> lk(_conns_mu);
+    snap = _conns;
+  }
+  // 1) Shut down connections gone silent past the timeout. A conference client streams media
+  // continuously, so a peer that navigated/reloaded away (its socket not cleanly closed) stops
+  // sending; shutdown() wakes its reader's blocked read(), which fires _on_conn_closed (retracting
+  // the ghost) and sets reader_done. Same mechanism stop() uses to interrupt a blocked read.
+  for (auto &c : snap) {
+    if (!c || !c->alive.load() || !c->ws)
+      continue;
+    const std::int64_t last = c->last_rx_ns.load(std::memory_order_relaxed);
+    if (last != 0 && (now - last) > to_ns) {
+      std::fprintf(stderr, "[ws] reaping idle connection node='%s' idle=%.1fs\n",
+                   c->remote_node_id.c_str(), static_cast<double>(now - last) / 1.0e9);
+      beast::error_code ec;
+      c->ws->next_layer().shutdown(tcp::socket::shutdown_both, ec);
+      c->ws->next_layer().close(ec);
+      c->alive.store(false);
+    }
+  }
+  // 2) Sweep connections whose reader has returned (dropped peer OR just-reaped): join + erase, so
+  // _conns and the finished reader threads do not accumulate across a session's reconnects.
+  {
+    std::lock_guard<std::mutex> lk(_conns_mu);
+    for (auto it = _conns.begin(); it != _conns.end();) {
+      connection *c = it->get();
+      if (c && c->reader_done.load(std::memory_order_acquire)) {
+        if (c->reader.joinable())
+          c->reader.join();
+        it = _conns.erase(it);
+        ++reaped;
+      } else {
+        ++it;
+      }
+    }
+  }
+#else
+  (void)timeout;
+#endif
+  return reaped;
 }
 
 std::size_t state_transport_ws::shard_count() const {
