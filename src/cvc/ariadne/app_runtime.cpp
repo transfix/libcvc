@@ -3,7 +3,8 @@
 // scene, if any, is delegated to a SceneAdapter, so this file pulls in no renderer.
 
 #include <cvc/ariadne/app_runtime.h>
-#include <cvc/ariadne/backend.h> // cvc::ariadne::Backend (set_backend)
+#include <cvc/ariadne/backend.h>  // cvc::ariadne::Backend (set_backend)
+#include <cvc/ariadne/doc_args.h> // the document's command line
 #include <cvc/ariadne/loader.h>  // load_file / LoadResult / ChannelDecl / sources_changed
 #include <cvc/ariadne/uri.h>     // register_cvc_uri_handler
 #include <cvc/core/app.h>
@@ -20,9 +21,13 @@ namespace cvc {
 namespace ariadne {
 
 AppRuntime::AppRuntime(cvc::app &app, std::string prefix, SceneAdapter *scene)
-    : app_(app), prefix_(std::move(prefix)), scene_(scene), rt_(app, prefix_) {}
+    : app_(app), prefix_(std::move(prefix)), scene_(scene), rt_(app, prefix_),
+      verbs_(std::make_shared<Verbs>()) {}
 
-AppRuntime::~AppRuntime() = default;
+AppRuntime::~AppRuntime() {
+  verbs_->sync.clear(); // the provider outlives us in the registry: it must bind nothing of ours
+  verbs_->async.clear();
+}
 
 void AppRuntime::set_backend(Backend &backend) { rt_.set_backend(&backend); }
 Runtime &AppRuntime::runtime() { return rt_; }
@@ -38,13 +43,13 @@ bool AppRuntime::have_yaml() { return cvc::ariadne::have_yaml(); }
 // ── host verbs on the app-wide scheduler ────────────────────────────────────────────────────────
 
 void AppRuntime::register_verb(const std::string &name, std::function<void()> fn) {
-  syncVerbs_.emplace_back(name, std::move(fn));
+  verbs_->sync.emplace_back(name, std::move(fn));
   ensure_intrinsics();
 }
 
 void AppRuntime::register_async_verb(const std::string &name, const std::string &done_channel,
                                      std::function<std::string()> work) {
-  asyncVerbs_.emplace_back(name, done_channel, std::move(work));
+  verbs_->async.emplace_back(name, done_channel, std::move(work));
   ensure_intrinsics();
 }
 
@@ -53,14 +58,13 @@ void AppRuntime::ensure_intrinsics() {
     return;
   intrinsicsRegistered_ = true;
   cvc::app *app = &app_;
-  // Snapshot the verbs registered so far. register_action_intrinsics providers run when a program
-  // env is built; capture by value so late registrations before load() are all visible.
-  auto syncs = syncVerbs_;
-  auto asyncs = asyncVerbs_;
-  register_action_intrinsics([app, syncs, asyncs](std::shared_ptr<cvc::state_exec::environment> env,
-                                                  cvc::state_exec::intrinsics_context &ictx) {
+  // register_action_intrinsics providers run each time a program env is built. Share the verb
+  // table rather than copy it, so every verb registered so far is bound, not only the first.
+  std::shared_ptr<Verbs> verbs = verbs_;
+  register_action_intrinsics([app, verbs](std::shared_ptr<cvc::state_exec::environment> env,
+                                          cvc::state_exec::intrinsics_context &ictx) {
     namespace se = cvc::state_exec;
-    for (const auto &v : syncs) {
+    for (const auto &v : verbs->sync) {
       std::function<void()> fn = v.second;
       se::builtins::register_fn(env, v.first, [fn](std::span<const se::value_t>) -> se::value_t {
         fn(); // host side effect, on the drain thread
@@ -68,7 +72,7 @@ void AppRuntime::ensure_intrinsics() {
       });
     }
     const std::string root = ictx.root_path;
-    for (const auto &v : asyncs) {
+    for (const auto &v : verbs->async) {
       const std::string chan = se::resolve_channel_key(root, std::get<1>(v));
       std::function<std::string()> work = std::get<2>(v);
       // (name ...) kicks `work` on a pool worker and posts its string result to done_channel;
@@ -95,6 +99,15 @@ void AppRuntime::ensure_intrinsics() {
 
 // ── document ────────────────────────────────────────────────────────────────────────────────────
 
+void AppRuntime::set_document_args(std::vector<std::string> argv, std::string invocation,
+                                   bool validate) {
+  docArgv_ = std::move(argv);
+  invocation_ = std::move(invocation);
+  validateArgs_ = validate;
+}
+
+bool AppRuntime::has_args_block() const { return hasArgsBlock_; }
+
 std::vector<std::string> AppRuntime::load(const std::string &path) {
   register_cvc_uri_handler(componentPaths_); // BEFORE load (cvc:// import resolver)
   LoadResult lr = load_file(path);
@@ -102,7 +115,31 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
     throw std::runtime_error(lr.error.empty() ? ("AppRuntime.load: failed to load " + path)
                                               : lr.error);
 
-  run_init(app_, prefix_, lr.init_script, nullptr); // §init: seeds win over widget defaults
+  // The document's command line goes on the tree before init: runs, so init can read it.
+  hasArgsBlock_ = lr.has_args_block;
+  DocumentArgs parsed;
+  if (lr.has_args_block) {
+    parsed = parse_document_args(lr.args, validateArgs_ ? docArgv_ : std::vector<std::string>());
+    if (validateArgs_ && (parsed.help || !parsed.errors.empty())) {
+      const std::string about = !lr.meta.description.empty() ? lr.meta.description : lr.meta.name;
+      std::string usage =
+          format_document_usage(invocation_.empty() ? path : invocation_, about, lr.args);
+      if (parsed.help)
+        throw document_args_error("help requested", std::move(usage), true);
+      std::string what;
+      for (const std::string &e : parsed.errors)
+        what += (what.empty() ? "" : "; ") + e;
+      throw document_args_error(what, std::move(usage), false);
+    }
+    parsed.errors.clear(); // a check: a required argument nobody passed is not the document's fault
+  }
+  publish_document_args(app_, prefix_, docArgv_, lr.has_args_block ? &lr.args : nullptr,
+                        lr.has_args_block ? &parsed : nullptr);
+
+  std::vector<std::string> initErrors;
+  run_init(app_, prefix_, lr.init_script, &initErrors); // §init: seeds win over widget defaults
+  for (std::string &e : initErrors) // a failed init: is not fatal, but it must not be silent
+    lr.warnings.push_back(std::move(e));
   rt_.set_tick_program(lr.on_tick_script);          // empty = no resident (safe)
   rt_.set_key_program(lr.on_key_script);
   rt_.set_pointer_program(lr.on_pointer_script);
@@ -146,7 +183,9 @@ void AppRuntime::drain() {
     scene_->sync_visibility(app_); // bound visible: -> node .visible
     scene_->tick();                // volren/volslice per-frame service
   }
-  (void)rt_.take_reactive_warnings(); // drop read-lane diagnostics (available via take_warnings())
+  // Keep the read-lane diagnostics for take_warnings(); the Runtime reports each one only once.
+  for (std::string &w : rt_.take_reactive_warnings())
+    pendingWarnings_.push_back(std::move(w));
 }
 
 bool AppRuntime::should_close() const { return quit_; }
@@ -182,7 +221,13 @@ bool AppRuntime::post_signal(const std::string &signal, const std::string &sourc
 
 // ── diagnostics ─────────────────────────────────────────────────────────────────────────────────
 
-std::vector<std::string> AppRuntime::take_warnings() { return rt_.take_reactive_warnings(); }
+std::vector<std::string> AppRuntime::take_warnings() {
+  std::vector<std::string> out = std::move(pendingWarnings_);
+  pendingWarnings_.clear();
+  for (std::string &w : rt_.take_reactive_warnings())
+    out.push_back(std::move(w));
+  return out;
+}
 
 bool AppRuntime::reload_if_changed() {
   if (sources_.empty() || !sources_changed(sources_, stamps_))

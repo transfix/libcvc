@@ -87,7 +87,9 @@ public:
   // publisher's inbound frames into it, and offer it to subscribers. Returns
   // the proxy's token (what publishers serve to and subscribers pull by), or an
   // empty string on failure (bad params, or the relay is stopped). Idempotent
-  // per id: a repeat call for a live id returns the existing token.
+  // per stream identity — the (root_path, id) pair, i.e. the token — so same-id
+  // streams in different scopes (every participant's "camera"/"audio") get their
+  // own proxy; a repeat call for a live identity returns its existing token.
   std::string relay(const stream_params &params);
 
   // Stop everything: stop the bridge (close serve_port subscriptions, join),
@@ -108,7 +110,8 @@ private:
   stream_transport_grpc &_transport;
   std::unique_ptr<stream_bridge> _bridge; // receive_into routes + serve_port offers
   mutable std::mutex _mu;
-  std::map<std::string, std::unique_ptr<stream>> _proxies; // id -> ingest/egress proxy
+  // token (registry_key = <root_path>.streams.<id>) -> ingest/egress proxy
+  std::map<std::string, std::unique_ptr<stream>> _proxies;
   bool _stopped = false;
 };
 

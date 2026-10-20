@@ -81,10 +81,15 @@ int main() {
       held->setPosition(1.0, 2.0, 3.0);
       sg.removeGraphics("removed");
       assert(!sg.hasGraphics("removed"));
-      assert(held->getSceneGraph() == &sg && "a removed node still has a live scene");
+      // Removal detaches: the node no longer reaches the scene it left, so a pose
+      // set now is a direct state write, not a publish into that scene.
+      assert(held->getSceneGraph() == nullptr && "removal must detach the node from its scene");
+      held->setPosition(2.0, 3.0, 4.0);
+      assert(posOf(held) == "2,3,4" && "a removed node's pose is a direct state write");
     }
-    // The scene is gone; only `held` keeps the node alive.
-    assert(held->getSceneGraph() == nullptr && "scene death must clear the back-pointer");
+    // The scene is gone; only `held` keeps the node alive. (Case B covers a
+    // scene dying under a node that is still attached.)
+    assert(held->getSceneGraph() == nullptr);
     held->setPosition(4.0, 5.0, 6.0); // used to lock the freed publisher's mutex
     assert(posOf(held) == "4,5,6" && "pose must fall back to a direct state write");
   }
