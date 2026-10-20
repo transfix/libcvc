@@ -422,7 +422,17 @@ struct ConferenceSession {
           pm.a_ch = opened.channels;
         }
         if (pm.audio_out && !m.payload.empty()) {
-          pm.audio_out->play(m.payload.data(), m.payload.size());
+          // Bound the output queue. If it has backed up — a startup burst, or (common) a WebAudio
+          // context the browser still holds SUSPENDED under its autoplay policy until a user gesture,
+          // so nothing drains — enqueueing more would grow queued_bytes without bound, and since the
+          // A/V-sync clock is (last_audio_pts - queued seconds) that would drag a peer's VIDEO target
+          // ever further into the past and STALL their video. So stop enqueueing past a small cap, but
+          // keep advancing the clock so the video still tracks real time (and shows ~cap behind).
+          const double bps = static_cast<double>(pm.a_rate) * static_cast<double>(pm.a_ch) * 4.0;
+          const double queued_s =
+              bps > 0.0 ? static_cast<double>(pm.audio_out->queued_bytes()) / bps : 0.0;
+          if (queued_s < 0.20)
+            pm.audio_out->play(m.payload.data(), m.payload.size());
           pm.last_audio_pts = m.pts_seconds;
           pm.has_audio = true;
         }

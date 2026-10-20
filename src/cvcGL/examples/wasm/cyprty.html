@@ -87,6 +87,24 @@
   // camera, so the conference (peer video included) can be tried in a browser with no camera.
   const SYNTH = new URLSearchParams(location.search).get('synthetic');
 
+  // Browsers suspend an AudioContext created without a user gesture (autoplay policy). SDL's audio
+  // output (how we play each peer's mic) is one such context, so without this a peer's audio never
+  // plays — AND its buffered-but-unplayed frames would stall the A/V-sync video clock, so you would
+  // not see that peer either until you interacted. Wrap AudioContext BEFORE the wasm creates one,
+  // track every context, and resume them on the first click/key/touch. Harmless if SDL self-resumes.
+  (function () {
+    const Orig = window.AudioContext || window.webkitAudioContext;
+    if (!Orig) return;
+    const live = [];
+    function Tracked() { const c = new Orig(...arguments); live.push(c); return c; }
+    Tracked.prototype = Orig.prototype;
+    try { window.AudioContext = Tracked; } catch (e) {}
+    try { if (window.webkitAudioContext) window.webkitAudioContext = Tracked; } catch (e) {}
+    const resume = () => { live.forEach(c => { try { if (c.state === 'suspended') c.resume(); } catch (e) {} }); };
+    ['pointerdown', 'keydown', 'touchend'].forEach(ev =>
+      window.addEventListener(ev, resume, { capture: true, passive: true }));
+  })();
+
   var Module = {
     canvas,
     // arigl's command line: run the baked conference scene. (No document args needed; the relay
@@ -120,7 +138,7 @@
     },
   };
 
-  const V = 'cyprty-av2'; // bump on every redeploy so caches can't serve a stale wasm/js
+  const V = 'cyprty-av3'; // bump on every redeploy so caches can't serve a stale wasm/js
   async function boot() {
     try {
       const resp = await fetch(DEMO + '.wasm?v=' + V, {cache: 'no-cache'});
