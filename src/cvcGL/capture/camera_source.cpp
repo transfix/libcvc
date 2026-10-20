@@ -19,6 +19,7 @@
 #include <SDL3/SDL_stdinc.h> // SDL_free, Uint64
 #include <SDL3/SDL_surface.h>
 #include <SDL3/SDL_timer.h> // SDL_Delay
+#include <algorithm>         // std::min / std::max (native-aspect fit)
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -38,7 +39,11 @@ namespace st = cvc::ariadne::stream;
 // no fill() runs during teardown.
 class sdl_camera_source : public st::frame_source {
 public:
-  sdl_camera_source(SDL_Camera *cam, int w, int h) : cam_(cam), w_(w), h_(h) {}
+  // `native_aspect`: when true, w/h are a MAX BUDGET and each frame is scaled to fit within it
+  // preserving the camera's native aspect ratio (cur_width/cur_height report the real size); when
+  // false, frames are stretched to exactly w x h (a fixed-size raw stream). See open_camera().
+  sdl_camera_source(SDL_Camera *cam, int w, int h, bool native_aspect)
+      : cam_(cam), w_(w), h_(h), native_(native_aspect), cur_w_(w), cur_h_(h) {}
   ~sdl_camera_source() override {
     if (scaled_)
       SDL_DestroySurface(scaled_);
@@ -53,8 +58,8 @@ public:
 
   st::produced_frame fill(std::uint8_t *buf, std::size_t cap) override {
     st::produced_frame out; // bytes = 0 by default: "no frame this tick" (producer keeps running)
-    const std::size_t need = frame_bytes();
-    if (!cam_ || need == 0 || buf == nullptr || cap < need)
+    const std::size_t budget = frame_bytes();
+    if (!cam_ || budget == 0 || buf == nullptr || cap < budget)
       return out;
 
     Uint64 ts_ns = 0;
@@ -62,31 +67,46 @@ public:
     if (!raw)
       return out; // no new frame yet (warming up, or permission still pending): skip, don't block
 
-    // Convert the camera's native pixel format to byte-order RGBA, then (if the delivered size
-    // differs from the negotiated w/h) RESCALE to w_ x h_, then copy densely into the slab (the
-    // surface's pitch may exceed w*4). The rescale makes the source size-robust: a camera (notably a
-    // browser's getUserMedia, whose exact delivered size we cannot know until frames flow) that hands
-    // us anything other than the requested size still fills the fixed-size stream instead of stalling
-    // on the old exact-match guard. The same-size fast path (the common case) does no scaling.
+    // Convert the camera's native pixel format to byte-order RGBA, then scale to the output size and
+    // copy densely into the slab (the surface's pitch may exceed w*4). native_ decides the output
+    // size: when false, stretch to exactly w_ x h_ (a fixed-size raw stream); when true, fit the
+    // native frame within the w_ x h_ budget PRESERVING its aspect ratio (never upscaling), so a
+    // portrait / 16:9 camera keeps its true shape (a self-describing-codec wrapper encodes at
+    // cur_width/cur_height). getUserMedia's exact delivered size is unknown until frames flow, so
+    // this is computed per frame from the delivered size. The same-size case does no scaling.
     SDL_Surface *rgba = (raw->format == SDL_PIXELFORMAT_RGBA32)
                             ? raw
                             : SDL_ConvertSurface(raw, SDL_PIXELFORMAT_RGBA32);
+    int ow = w_, oh = h_;
+    if (native_ && rgba && rgba->w > 0 && rgba->h > 0) {
+      const double s = std::min(std::min(static_cast<double>(w_) / rgba->w,
+                                         static_cast<double>(h_) / rgba->h),
+                                1.0); // fit within the budget, never upscale
+      ow = std::max(1, std::min(w_, static_cast<int>(rgba->w * s + 0.5)));
+      oh = std::max(1, std::min(h_, static_cast<int>(rgba->h * s + 0.5)));
+    }
     SDL_Surface *frame = rgba;
-    if (rgba && (rgba->w != w_ || rgba->h != h_) && w_ > 0 && h_ > 0) {
+    if (rgba && (rgba->w != ow || rgba->h != oh) && ow > 0 && oh > 0) {
+      if (scaled_ && (scaled_->w != ow || scaled_->h != oh)) {
+        SDL_DestroySurface(scaled_); // output size changed (native camera size settled) -> re-make
+        scaled_ = nullptr;
+      }
       if (!scaled_)
-        scaled_ = SDL_CreateSurface(w_, h_, SDL_PIXELFORMAT_RGBA32);
+        scaled_ = SDL_CreateSurface(ow, oh, SDL_PIXELFORMAT_RGBA32);
       // SDL_BlitSurfaceScaled resamples src -> the whole dst; nullptr rects = full surfaces.
       frame = (scaled_ && SDL_BlitSurfaceScaled(rgba, nullptr, scaled_, nullptr, SDL_SCALEMODE_LINEAR))
                   ? scaled_
                   : nullptr; // scale failed -> skip this frame (bytes=0), never an OOB copy
     }
-    if (frame && frame->w == w_ && frame->h == h_ && frame->pixels) {
-      const int row = w_ * 4;
+    if (frame && frame->w == ow && frame->h == oh && frame->pixels) {
+      const int row = ow * 4;
       const auto *src = static_cast<const std::uint8_t *>(frame->pixels);
-      for (int y = 0; y < h_; ++y)
+      for (int y = 0; y < oh; ++y)
         std::memcpy(buf + static_cast<std::size_t>(y) * row,
                     src + static_cast<std::size_t>(y) * frame->pitch, static_cast<std::size_t>(row));
-      out.bytes = need;
+      cur_w_ = ow;
+      cur_h_ = oh;
+      out.bytes = static_cast<std::size_t>(ow) * static_cast<std::size_t>(oh) * 4u;
       out.pts_seconds = static_cast<double>(ts_ns) / 1.0e9;
     }
     if (rgba && rgba != raw)
@@ -95,16 +115,22 @@ public:
     return out; // bytes stays 0 (skip) if the conversion/scale failed
   }
 
+  int cur_width() const override { return cur_w_; }
+  int cur_height() const override { return cur_h_; }
+
 private:
   SDL_Camera *cam_;
   int w_;
   int h_;
-  SDL_Surface *scaled_ = nullptr; // lazily-created w_ x h_ scratch for rescaling off-size frames
+  bool native_;                   // true: fit-to-budget preserving aspect; false: stretch to w_ x h_
+  int cur_w_, cur_h_;             // actual size of the last produced frame (cur_width/cur_height)
+  SDL_Surface *scaled_ = nullptr; // lazily-created output-size scratch for rescaling off-size frames
 };
 } // namespace
 #endif // CVC_ENABLE_SDL
 
-camera_open open_camera(int device_index, int want_w, int want_h, double want_fps) {
+camera_open open_camera(int device_index, int want_w, int want_h, double want_fps,
+                        bool native_aspect) {
   camera_open result;
 #if CVC_ENABLE_SDL
   if (!SDL_InitSubSystem(SDL_INIT_CAMERA))
@@ -143,7 +169,7 @@ camera_open open_camera(int device_index, int want_w, int want_h, double want_fp
       result.height = rh;
       result.fps = want_fps > 0.0 ? want_fps : 30.0;
       result.name = std::move(name);
-      result.source = std::make_unique<sdl_camera_source>(cam, rw, rh);
+      result.source = std::make_unique<sdl_camera_source>(cam, rw, rh, native_aspect);
       handed_off = true; // the source now owns `cam` and the subsystem ref
     }
 #else
@@ -220,7 +246,7 @@ camera_open open_camera(int device_index, int want_w, int want_h, double want_fp
                 ? static_cast<double>(spec.framerate_numerator) / spec.framerate_denominator
                 : 0.0;
         result.name = std::move(name);
-        result.source = std::make_unique<sdl_camera_source>(cam, sw, sh);
+        result.source = std::make_unique<sdl_camera_source>(cam, sw, sh, native_aspect);
         handed_off = true; // the source now owns `cam` and the subsystem ref
       } else {
         SDL_CloseCamera(cam);
@@ -237,6 +263,7 @@ camera_open open_camera(int device_index, int want_w, int want_h, double want_fp
   (void)want_w;
   (void)want_h;
   (void)want_fps;
+  (void)native_aspect;
 #endif
   return result;
 }

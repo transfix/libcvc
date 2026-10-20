@@ -67,7 +67,15 @@ struct camera_open {
 // Open camera `device_index` (0 = the first enumerated device) and return a frame_source that
 // yields dense rgba8 frames. `want_w`/`want_h` (and optional `want_fps`), when > 0, request that
 // capture size: the source rescales the camera's frames to it, so the caller can size its stream up
-// front (pass 0 to adopt the camera's own negotiated size). Returns an empty result
+// front (pass 0 to adopt the camera's own negotiated size).
+//
+// `native_aspect` (default false): when true, `want_w`/`want_h` are a MAX BUDGET rather than an exact
+// size — the camera's frames are scaled to FIT WITHIN that budget PRESERVING the device's native
+// aspect ratio (never upscaling), and each frame reports its true size via frame_source::cur_width/
+// cur_height. Use this for a self-describing codec (jpeg_encode_source) so a portrait / 16:9 camera
+// keeps its real shape instead of being stretched to w x h. When false (the default) the frames are
+// stretched to exactly want_w x want_h — required for a fixed-size RAW rgba stream. Returns an empty
+// result
 // ({nullptr, 0, 0, …}) if SDL is unavailable, the index is out of range, or the open fails.
 //
 // PERMISSION. On a native build SDL resolves camera permission synchronously-ish: open_camera pumps
@@ -83,7 +91,8 @@ struct camera_open {
 // that drives SDL / pumps its events), the same thread stream::close()/~stream run on. Only the
 // per-frame capture inside fill() runs on the producer thread, using SDL calls documented
 // thread-safe.
-camera_open open_camera(int device_index = 0, int want_w = 0, int want_h = 0, double want_fps = 0.0);
+camera_open open_camera(int device_index = 0, int want_w = 0, int want_h = 0, double want_fps = 0.0,
+                        bool native_aspect = false);
 
 // Human-readable names of the available camera devices (index aligns with open_camera). Empty when
 // SDL is unavailable or no camera is present. Call on the SDL main thread (see open_camera).
