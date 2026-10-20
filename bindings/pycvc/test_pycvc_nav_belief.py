@@ -6,8 +6,9 @@ with only pycvc calls: ``nav_sense_batch_material`` for the sense and the materi
 ``nav_seen_disc`` for the disc rule, ``nav_composite_occupancy`` for the planning raster,
 ``nav_belief_material_inputs``, ``nav_material_build``, ``nav_belief_gate_surface`` and
 ``nav_witness_gate``. Every hash and gate output must match. Also checks the bindings' argument
-validation. Script-style, like the other pycvc tests; self-skips (exit 0) when the running pycvc
-predates the bindings.
+validation, and sim_world's belief material (``nav_sim_world_set_material_belief``,
+``nav_sim_world_material_seen``). Script-style, like the other pycvc tests; self-skips (exit 0)
+when the running pycvc predates the bindings.
 """
 
 import hashlib
@@ -131,6 +132,52 @@ except RuntimeError:
 else:
     fails += 1
     print("MISMATCH nav_seen_disc accepted a uint8 mask (it must be numpy-bool, written in place)")
+
+# sim_world belief material (B2): the mask grows as the agent senses, and the bindings validate.
+if hasattr(pycvc, "nav_sim_world_set_material_belief"):
+
+    def make_sim(freeze):
+        occ = np.zeros((41, 41), np.uint8)
+        on = np.array([[-0.6, 0.0]], np.float32)
+        goal = np.array([[0.6, 0.0]], np.float32)
+        color = np.ones((1, 3), np.float32)
+        return pycvc.nav_sim_world_create(
+            occ, occ, "", on, goal, color, 41, 41, -20.0, -20.0, 20.0, 20.0, 0.0, 0.0, 0.05,
+            8.0, 240, 6.283185307179586, 0.15, 0.35, 0.06, 0.4, 0.165, 0.6, 0.12, 0.12, 0.8, 6,
+            1, 0.05, 1, freeze, 2.2, -1.4, 8.0, 1, 0.5, 0.15, 4.0)
+
+    risk = np.full((41, 41), 0.05, np.float32)
+    risk[10:30, 25:35] = 0.6
+    hard = np.zeros((41, 41), np.uint8)
+    hard[5:9, 5:9] = 1
+    mat = (0.5, 1.0, 1.25, 12.0, 1.0, 1, 16, 12, 0.0, 0.05, 0.45, 0.5)
+    sim = make_sim(0)
+    pycvc.nav_sim_world_set_material_belief(sim, risk, hard, *mat, 0.0, 0, 1, "raycast", 0.0, 1)
+    seen0 = pycvc.nav_sim_world_material_seen(sim, 0)
+    if seen0 is None or seen0.dtype != np.bool_ or seen0.shape != (41, 41) or seen0.any():
+        fails += 1
+        print("MISMATCH material_seen before any sense tick:", None if seen0 is None else seen0.sum())
+    counts = []
+    for _ in range(30):
+        pycvc.nav_sim_world_step(sim)
+        counts.append(int(pycvc.nav_sim_world_material_seen(sim, 0).sum()))
+    if not (counts[0] > 0 and counts[-1] > counts[0] and counts == sorted(counts)):
+        fails += 1
+        print("MISMATCH the material mask did not grow monotonically:", counts[:5], counts[-1])
+    if pycvc.nav_sim_world_material_seen(sim, 3) is not None:
+        fails += 1
+        print("MISMATCH material_seen(3) on a one-plane world was not None")
+    for bad, sim_b in (((0.0, 0, 1, "raycast", 0.0, 1), make_sim(1)),
+                       ((0.0, 0, 1, "cone", 0.0, 1), make_sim(0)),
+                       ((0.0, 0, 1, "raycast", 9.0, 1), make_sim(0)),
+                       ((0.0, 0, 1, "raycast", 0.0, 0), make_sim(0))):
+        try:
+            pycvc.nav_sim_world_set_material_belief(sim_b, risk, hard, *mat, *bad)
+        except RuntimeError:
+            pass
+        else:
+            fails += 1
+            print("MISMATCH nav_sim_world_set_material_belief accepted", bad)
 
 if fails:
     raise SystemExit(f"{fails} mismatches")

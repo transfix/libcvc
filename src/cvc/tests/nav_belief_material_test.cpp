@@ -16,10 +16,15 @@
 //   grows exactly as ever_seen; a shorter range is the field of view of a cast at that
 //   range (square cells), and material_changed flags exactly the planes that grew.
 // - Every cell seen gives back the truth rasters, so material_build is the oracle's.
+// - sim_world::set_material_belief (SimWorldBelief.*): every cell seen gives set_material's
+//   planes; the throws; planes see only their own agents; re-derivation exactly when a mask
+//   grows (and at most every material_every sense ticks); the shorter range and the disc;
+//   set_material / clear_material replace it; runs are deterministic.
 // - NavBeliefMaterial.Golden: the BIT golden GRL-SNAM's numpy twin is held to
 //   (src/cvc/tests/data/belief_material_golden.json). CVC_BELIEF_MATERIAL_GOLDEN_WRITE=1
 //   rewrites it; otherwise this build must reproduce every hash and gate output exactly.
 
+#include <algorithm>
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
 #include <cmath>
@@ -29,8 +34,10 @@
 #include <cstring>
 #include <cvc/nav/belief_material.h>
 #include <cvc/nav/belief_occupancy.h>
+#include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/grid_nav.h>
 #include <cvc/nav/material.h>
+#include <cvc/nav/sim_world.h>
 #include <cvc/state/state_blob_store.h>
 #include <filesystem>
 #include <fstream>
@@ -694,4 +701,311 @@ TEST(NavBeliefMaterial, Golden) {
     ++ci;
   }
   EXPECT_EQ(ci, cases.size());
+}
+
+// ── sim_world::set_material_belief ─────────────────────────────────────────────
+
+namespace {
+// A 16 x 16 world on [0, 15]^2 (1 m cells), normalized by 1/16 about its centre.
+constexpr int kWR = 16, kWC = 16;
+
+sim_world::config world_cfg(double range_m, int n_rays) {
+  sim_world::config cfg;
+  cfg.rows = kWR;
+  cfg.cols = kWC;
+  cfg.min_x = 0.0;
+  cfg.min_y = 0.0;
+  cfg.max_x = kWC - 1;
+  cfg.max_y = kWR - 1;
+  cfg.cx = (kWC - 1) / 2.0;
+  cfg.cy = (kWR - 1) / 2.0;
+  cfg.scale = 1.0 / 16.0;
+  cfg.range_m = range_m;
+  cfg.n_rays = n_rays;
+  cfg.sense_every = 1;
+  cfg.reach_tol = 0.05f; // the default (0.8 normalized) is most of this small world
+  cfg.veh.rr = 0.02f;
+  cfg.veh.d_hat = 0.06f;
+  cfg.veh.dt = 0.06f;
+  cfg.veh.nsub = 1;
+  return cfg;
+}
+
+// World (x, y) -> the normalized frame.
+void to_norm(const sim_world::config &cfg, double x, double y, float *o) {
+  o[0] = static_cast<float>((x - cfg.cx) * cfg.scale);
+  o[1] = static_cast<float>((y - cfg.cy) * cfg.scale);
+}
+
+struct WorldMaterial {
+  std::vector<float> risk;
+  std::vector<std::uint8_t> hard;
+  WorldMaterial() : risk(kWR * kWC, 0.05f), hard(kWR * kWC, 0) {
+    for (int r = 0; r < kWR; ++r)
+      for (int c = 0; c < kWC; ++c) {
+        if (r >= 2 && r <= 5 && c >= 9 && c <= 13) { // a pond
+          hard[r * kWC + c] = 1;
+          risk[r * kWC + c] = 1.0f;
+        }
+        if (r >= 9 && r <= 13 && c >= 3 && c <= 8) // a risky patch
+          risk[r * kWC + c] = 0.6f;
+      }
+  }
+};
+
+material_config world_mc() {
+  material_config mc;
+  mc.gate.horizon_cells = 6;
+  return mc;
+}
+
+std::vector<std::uint8_t> copy_mask(const std::uint8_t *p) {
+  return p ? std::vector<std::uint8_t>(p, p + kWR * kWC) : std::vector<std::uint8_t>();
+}
+} // namespace
+
+TEST(SimWorldBelief, EverySeenMatchesSetMaterial) {
+  // One agent in the middle of an open world with a long range and a dense fan sees every
+  // cell on its first sense tick; its belief planes are then set_material's planes.
+  const sim_world::config cfg = world_cfg(100.0, 2000);
+  const std::vector<std::uint8_t> open(kWR * kWC, 0);
+  const WorldMaterial wm;
+  float o[2], g[2];
+  to_norm(cfg, 7.4, 7.6, o);
+  to_norm(cfg, 12.0, 12.0, g);
+  const float col[3] = {1, 1, 1};
+  sim_world oracle(cfg, open.data(), open.data(), coef_mlp::default_biased(), o, g, col, 1);
+  oracle.set_material(wm.risk.data(), wm.hard.data(), world_mc());
+  sim_world belief(cfg, open.data(), open.data(), coef_mlp::default_biased(), o, g, col, 1);
+  belief.set_material_belief(wm.risk.data(), wm.hard.data(), world_mc(), belief_material_params{});
+  ASSERT_TRUE(belief.has_material_belief());
+  EXPECT_EQ(belief.material_version(0), 1); // derived once at attach
+  belief.step(1);
+  const std::vector<std::uint8_t> seen = copy_mask(belief.material_seen(0));
+  ASSERT_EQ(seen, std::vector<std::uint8_t>(kWR * kWC, 1)) << "the fan did not cover the world";
+  EXPECT_EQ(copy_mask(belief.ever_seen(0)), seen);
+  const std::size_t hw = static_cast<std::size_t>(kWR) * kWC;
+  const std::vector<float> a(belief.material_plane_data(0), belief.material_plane_data(0) + 6 * hw);
+  const std::vector<float> b(oracle.material_plane_data(0), oracle.material_plane_data(0) + 6 * hw);
+  EXPECT_EQ(a, b);
+  EXPECT_EQ(copy_mask(belief.material_gate_hard(0)), copy_mask(oracle.material_gate_hard(0)));
+  const std::vector<float> ca(belief.material_clear_m(0), belief.material_clear_m(0) + hw);
+  const std::vector<float> cb(oracle.material_clear_m(0), oracle.material_clear_m(0) + hw);
+  EXPECT_EQ(ca, cb);
+  EXPECT_EQ(belief.material_version(0), 2);
+}
+
+TEST(SimWorldBelief, UnseenHazardHasNoBarrier) {
+  // Before any sense tick every cell is unseen: no hard cell, so phi_m is the no-hazard value
+  // everywhere, and with unknown_gate_hard every cell blocks the gate.
+  const sim_world::config cfg = world_cfg(4.0, 120);
+  const std::vector<std::uint8_t> open(kWR * kWC, 0);
+  const WorldMaterial wm;
+  float o[2], g[2];
+  to_norm(cfg, 2.0, 13.0, o);
+  to_norm(cfg, 3.0, 12.0, g);
+  const float col[3] = {1, 1, 1};
+  sim_world w(cfg, open.data(), open.data(), coef_mlp::default_biased(), o, g, col, 1);
+  w.set_material_belief(wm.risk.data(), wm.hard.data(), world_mc(), belief_material_params{});
+  const std::size_t hw = static_cast<std::size_t>(kWR) * kWC;
+  const float *phi = w.material_plane_data(0) + hw;
+  const float pond = phi[3 * kWC + 11], far = phi[14 * kWC + 1];
+  EXPECT_EQ(pond, far);
+  EXPECT_GT(pond, 1e6f);
+  EXPECT_EQ(copy_mask(w.material_gate_hard(0)), std::vector<std::uint8_t>(hw, 1));
+  w.step(1); // the agent at (2, 13) with a 4 m range cannot reach the pond at x 9..13, y 2..5
+  phi = w.material_plane_data(0) + hw;
+  EXPECT_GT(phi[3 * kWC + 11], 1e6f);
+  EXPECT_EQ(w.material_seen(0)[3 * kWC + 11], 0);
+}
+
+TEST(SimWorldBelief, Throws) {
+  const std::vector<std::uint8_t> open(kWR * kWC, 0);
+  const WorldMaterial wm;
+  const float o[2] = {0, 0}, g[2] = {0.2f, 0.2f}, col[3] = {1, 1, 1};
+  {
+    sim_world::config cfg = world_cfg(6.0, 90);
+    cfg.freeze_sense = true;
+    sim_world w(cfg, open.data(), open.data(), coef_mlp::default_biased(), o, g, col, 1);
+    EXPECT_THROW(w.set_material_belief(wm.risk.data(), wm.hard.data(), world_mc(), {}),
+                 std::invalid_argument);
+    EXPECT_FALSE(w.has_material());
+  }
+  sim_world w(world_cfg(6.0, 90), open.data(), open.data(), coef_mlp::default_biased(), o, g, col,
+              1);
+  belief_material_params bp;
+  bp.material_range_m = 6.5; // above the sense range
+  EXPECT_THROW(w.set_material_belief(wm.risk.data(), wm.hard.data(), world_mc(), bp),
+               std::invalid_argument);
+  bp = belief_material_params{};
+  bp.unknown_risk = -0.1f;
+  EXPECT_THROW(w.set_material_belief(wm.risk.data(), wm.hard.data(), world_mc(), bp),
+               std::invalid_argument);
+  EXPECT_THROW(w.set_material_belief(wm.risk.data(), wm.hard.data(), world_mc(), {}, 0),
+               std::invalid_argument);
+  EXPECT_THROW(w.set_material_belief(nullptr, wm.hard.data(), world_mc(), {}),
+               std::invalid_argument);
+  EXPECT_FALSE(w.has_material());
+}
+
+TEST(SimWorldBelief, PlanesSeeOnlyTheirOwnAgents) {
+  const sim_world::config cfg = world_cfg(4.0, 180);
+  const std::vector<std::uint8_t> open(kWR * kWC, 0);
+  const WorldMaterial wm;
+  float o[4], g[4];
+  to_norm(cfg, 2.2, 2.4, o);
+  to_norm(cfg, 12.6, 12.8, o + 2);
+  to_norm(cfg, 3.0, 3.0, g);
+  to_norm(cfg, 12.0, 12.0, g + 2);
+  const float col[6] = {1, 1, 1, 1, 1, 1};
+  const int mid[2] = {0, 1};
+  sim_world w(cfg, open.data(), open.data(), coef_mlp::default_biased(), o, g, col, 2, mid, 2);
+  w.set_material_belief(wm.risk.data(), wm.hard.data(), world_mc(), belief_material_params{});
+  for (int t = 0; t < 3; ++t)
+    w.step(1);
+  const std::vector<std::uint8_t> m0 = copy_mask(w.material_seen(0)),
+                                  m1 = copy_mask(w.material_seen(1));
+  EXPECT_EQ(m0, copy_mask(w.ever_seen(0)));
+  EXPECT_EQ(m1, copy_mask(w.ever_seen(1)));
+  int both = 0, n0 = 0, n1 = 0;
+  for (int k = 0; k < kWR * kWC; ++k) {
+    both += m0[k] && m1[k];
+    n0 += m0[k];
+    n1 += m1[k];
+  }
+  EXPECT_GT(n0, 0);
+  EXPECT_GT(n1, 0);
+  EXPECT_EQ(both, 0) << "the two agents are far apart: their planes share no cell";
+  EXPECT_EQ(w.material_seen(2), nullptr);
+  EXPECT_EQ(w.material_version(2), -1);
+}
+
+TEST(SimWorldBelief, RederivesExactlyWhenTheMaskGrows) {
+  const std::vector<std::uint8_t> open(kWR * kWC, 0);
+  const WorldMaterial wm;
+  for (int every : {1, 3}) {
+    const sim_world::config cfg = world_cfg(3.5, 120);
+    float o[2], g[2];
+    to_norm(cfg, 1.5, 7.5, o);
+    to_norm(cfg, 14.0, 7.5, g);
+    const float col[3] = {1, 1, 1};
+    sim_world w(cfg, open.data(), open.data(), coef_mlp::default_biased(), o, g, col, 1);
+    w.set_material_belief(wm.risk.data(), wm.hard.data(), world_mc(), belief_material_params{},
+                          every);
+    int grows = 0, bumps = 0, since = 0; // attaching derives: the next is due `every` on
+    bool pending = false;
+    for (int t = 0; t < 60; ++t) {
+      const std::vector<std::uint8_t> before = copy_mask(w.material_seen(0));
+      const std::int32_t v0 = w.material_version(0);
+      w.step(1);
+      const bool grew = copy_mask(w.material_seen(0)) != before;
+      const bool bumped = w.material_version(0) != v0;
+      grows += grew;
+      bumps += bumped;
+      pending = pending || grew;
+      ++since;
+      // A pending change is derived on the first sense tick at least `every` after the last.
+      const bool expect = pending && since >= every;
+      EXPECT_EQ(bumped, expect) << "every " << every << " tick " << t;
+      if (bumped) {
+        pending = false;
+        since = 0;
+      }
+    }
+    EXPECT_GT(grows, 3) << "the agent should keep seeing new ground";
+    if (every == 1)
+      EXPECT_EQ(bumps, grows);
+    else
+      EXPECT_LT(bumps, grows);
+  }
+}
+
+TEST(SimWorldBelief, ShorterRangeAndDisc) {
+  // A building between the agent and the pond: the ray-cast cannot see behind it, the disc can.
+  sim_world::config cfg = world_cfg(9.0, 360);
+  std::vector<std::uint8_t> truth(kWR * kWC, 0);
+  for (int r = 4; r <= 11; ++r)
+    truth[r * kWC + 7] = 1; // a wall at x = 7, y 4..11
+  const WorldMaterial wm;
+  float o[2], g[2];
+  to_norm(cfg, 3.0, 7.5, o);
+  to_norm(cfg, 3.5, 7.5, g);
+  const float col[3] = {1, 1, 1};
+  auto masks = [&](const belief_material_params &bp) {
+    sim_world w(cfg, truth.data(), truth.data(), coef_mlp::default_biased(), o, g, col, 1);
+    w.set_material_belief(wm.risk.data(), wm.hard.data(), world_mc(), bp);
+    w.step(1);
+    return std::make_pair(copy_mask(w.material_seen(0)), copy_mask(w.ever_seen(0)));
+  };
+  const auto ray = masks(belief_material_params{});
+  EXPECT_EQ(ray.first, ray.second);
+  belief_material_params shortp;
+  shortp.material_range_m = 3.0;
+  const auto sh = masks(shortp);
+  int sub = 0, extra = 0;
+  for (int k = 0; k < kWR * kWC; ++k) {
+    sub += sh.first[k];
+    extra += sh.first[k] && !sh.second[k];
+  }
+  EXPECT_EQ(extra, 0);
+  EXPECT_GT(sub, 0);
+  EXPECT_LT(sub, std::count(sh.second.begin(), sh.second.end(), 1));
+  belief_material_params discp;
+  discp.rule = seen_rule::disc;
+  const auto dc = masks(discp);
+  const int behind = 7 * kWC + 10; // (x 10, y 7), behind the wall
+  EXPECT_EQ(ray.first[behind], 0);
+  EXPECT_EQ(dc.first[behind], 1);
+}
+
+TEST(SimWorldBelief, SetMaterialAndClearReplaceIt) {
+  const sim_world::config cfg = world_cfg(5.0, 120);
+  const std::vector<std::uint8_t> open(kWR * kWC, 0);
+  const WorldMaterial wm;
+  const float o[2] = {0, 0}, g[2] = {0.2f, 0.2f}, col[3] = {1, 1, 1};
+  sim_world w(cfg, open.data(), open.data(), coef_mlp::default_biased(), o, g, col, 1);
+  w.set_material_belief(wm.risk.data(), wm.hard.data(), world_mc(), belief_material_params{});
+  EXPECT_TRUE(w.has_material_belief());
+  w.set_material(wm.risk.data(), wm.hard.data(), world_mc());
+  EXPECT_TRUE(w.has_material());
+  EXPECT_FALSE(w.has_material_belief());
+  EXPECT_EQ(w.material_seen(0), nullptr);
+  w.set_material_belief(wm.risk.data(), wm.hard.data(), world_mc(), belief_material_params{});
+  w.clear_material();
+  EXPECT_FALSE(w.has_material());
+  EXPECT_FALSE(w.has_material_belief());
+  EXPECT_EQ(w.material_plane_data(0), nullptr);
+}
+
+TEST(SimWorldBelief, RunsAreDeterministic) {
+  const sim_world::config cfg = world_cfg(5.0, 120);
+  std::vector<std::uint8_t> truth(kWR * kWC, 0);
+  for (int r = 6; r <= 9; ++r)
+    truth[r * kWC + 8] = 1;
+  const WorldMaterial wm;
+  float o[4], g[4];
+  to_norm(cfg, 2.0, 2.0, o);
+  to_norm(cfg, 2.5, 13.0, o + 2);
+  to_norm(cfg, 13.0, 13.0, g);
+  to_norm(cfg, 13.0, 2.5, g + 2);
+  const float col[6] = {1, 1, 1, 1, 1, 1};
+  auto run = [&]() {
+    sim_world w(cfg, truth.data(), truth.data(), coef_mlp::default_biased(), o, g, col, 2);
+    w.set_material_belief(wm.risk.data(), wm.hard.data(), world_mc(), belief_material_params{});
+    std::vector<float> trace;
+    for (int t = 0; t < 80; ++t) {
+      w.step(2);
+      float pos[4], head[2], spd[2];
+      int mode[2];
+      std::uint8_t reach[2];
+      w.snapshot(pos, head, spd, mode, reach);
+      trace.insert(trace.end(), pos, pos + 4);
+    }
+    return trace;
+  };
+  const std::vector<float> a = run(), b = run();
+  ASSERT_EQ(a.size(), b.size());
+  EXPECT_EQ(std::memcmp(a.data(), b.data(), a.size() * sizeof(float)), 0);
+  for (float v : a)
+    EXPECT_TRUE(std::isfinite(v));
 }
