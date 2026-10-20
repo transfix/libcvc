@@ -187,6 +187,15 @@ depends:
     # and consumers of the bundle do not install it. Unscoped: state_exec builds
     # on every platform, wasm included, and find_package(pegtl) is REQUIRED.
     - name: pegtl
+    # tvision (magiblot Turbo Vision), the Ariadne native-desktop terminal backend
+    # (CVC_ARIADNE_TVISION, §16.5). Build-only: it is a static archive linked
+    # PRIVATE and BUILD_INTERFACE-only into the shared libcvc, so nothing of it
+    # reaches the bundle's exports or a consumer's link. Optional at the CMake
+    # level (found by path; absent -> TvisionBackend is a stub). Scoped to the
+    # platforms this recipe builds; on Windows tvision uses the Win32 console
+    # (cy-pca/cvcpkg tvision cvc.3), elsewhere ncursesw (runtime, below).
+    - name: tvision
+      platforms: [linux, macos, windows]
   # libcvc is a pure C++ SDK — no Python. The pycvc bindings (SWIG, Python,
   # numpy) are a separate `pycvc` recipe that depends on libcvc.
   runtime:
@@ -285,17 +294,23 @@ depends:
     # + json-schema-validator power the .ari Layer-2 JSON-Schema validation (§15);
     # ftxui is the terminal backend (§16.4). All OPTIONAL at the CMake level
     # (find_package; absent -> stubs), declared here so the packaged libcvc's build
-    # compiles the real paths and ships the libs. SCOPED: these three were
-    # published for linux-x86_64 only (cy-pca/cvcpkg #111); publish the
-    # macos/windows/BSD variants and drop the `platforms:` scoping once they land.
-    # ftxui also has wasm/wasm-mt bundles (cy-pca/cvcpkg#378), and the wasm-mt
-    # libcvc links it (publish-cvcgl-wasm.yml), so it is declared there too.
+    # compiles the real paths and ships the libs. Scoped to the platforms this
+    # recipe builds, where all three are published (linux, macOS arm64 and
+    # x86_64, windows x86_64). ftxui also has wasm/wasm-mt bundles
+    # (cy-pca/cvcpkg#378), and the wasm-mt libcvc links it
+    # (publish-cvcgl-wasm.yml), so it is declared there too.
     - name: nlohmann-json
-      platforms: [linux]
+      platforms: [linux, macos, windows]
     - name: json-schema-validator
-      platforms: [linux]
+      platforms: [linux, macos, windows]
     - name: ftxui
-      platforms: [linux, wasm-mt]
+      platforms: [linux, macos, windows, wasm-mt]
+    # ncurses: the Unix tvision backend links libncursesw (tvision, above, is
+    # build-only), and ncurses ships the terminfo database (share/terminfo) that
+    # TvisionBackend::run points ncurses at. A runtime dep so the flat install
+    # puts both in the consumer's prefix. Not Windows: no ncurses there.
+    - name: ncurses
+      platforms: [linux, macos]
     - name: levmar
       platforms: [linux, macos, windows]
     - name: libiimod

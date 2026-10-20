@@ -46,6 +46,11 @@
 #define Uses_TView
 #define Uses_TWindow
 #include <tvision/tv.h>
+
+#ifndef _WIN32
+#include <dlfcn.h>
+#include <sys/stat.h>
+#endif
 #endif
 
 namespace cvc {
@@ -85,6 +90,30 @@ FtxuiBackend::RunExit TvisionBackend::run(AppRuntime &app, const RunOptions &opt
 namespace {
 
 constexpr ushort cmAriMenuBase = 1000; // menu item k is command cmAriMenuBase + k
+
+#ifndef _WIN32
+// tvision reads the terminal's description through ncurses. A cvcpkg prefix ships ncurses' own
+// terminfo database (share/terminfo) beside libcvc, while the bundle's compiled-in search path
+// names the builder's prefix, which no user machine has. So point ncurses at the database next to
+// this library, ahead of the system's, unless the user already chose. The trailing ':' keeps
+// ncurses' built-in search after it. Done here, not in a host, so every host (ari, arigl, cvcGL's
+// ariadne_terminal) gets it.
+void use_bundled_terminfo() {
+  if (std::getenv("TERMINFO_DIRS"))
+    return;
+  Dl_info info;
+  if (!dladdr(reinterpret_cast<const void *>(&use_bundled_terminfo), &info) || !info.dli_fname)
+    return;
+  const std::string lib = info.dli_fname;
+  const std::size_t slash = lib.find_last_of('/');
+  if (slash == std::string::npos)
+    return;
+  const std::string dir = lib.substr(0, slash) + "/../share/terminfo";
+  struct stat st;
+  if (stat(dir.c_str(), &st) == 0 && S_ISDIR(st.st_mode))
+    setenv("TERMINFO_DIRS", (dir + ":").c_str(), 0);
+}
+#endif
 
 // ---- colour: the hosted cells carry SGR parameters; tvision wants TColor ------------------------
 
@@ -538,6 +567,9 @@ FtxuiBackend::RunExit
 TvisionBackend::run_desktop(Runtime &rt, const RunOptions &opts, const std::function<void()> &drain,
                             const std::function<bool()> &should_close,
                             const std::function<void(const TermEvent &)> &unhandled) {
+#ifndef _WIN32
+  use_bundled_terminfo(); // before TApplication starts ncurses
+#endif
   // Lay window bodies out at full colour; tvision quantizes to what the terminal can show.
   const ftxui::Terminal::Color colors = ftxui::Terminal::ColorSupport();
   ftxui::Terminal::SetColorSupport(ftxui::Terminal::Color::TrueColor);

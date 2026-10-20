@@ -476,7 +476,8 @@ jobs:
             -DCVC_BUILD_VOLROVER3=OFF \
             -DCVC_ENABLE_MESHER=ON \
             -DCVC_ENABLE_SDF=ON \
-            -DCVC_USING_XMLRPC=ON
+            -DCVC_USING_XMLRPC=ON \
+            | tee configure.log
 
       - name: Configure (Windows)
         if: matrix.target.platform == 'windows'
@@ -509,7 +510,27 @@ jobs:
             -DCVC_BUILD_VOLROVER3=OFF `
             -DCVC_ENABLE_MESHER=ON `
             -DCVC_ENABLE_SDF=ON `
-            -DCVC_USING_XMLRPC=ON
+            -DCVC_USING_XMLRPC=ON `
+            | Tee-Object -FilePath configure.log
+
+      - name: Assert the Ariadne terminal backends are configured
+        # The .ari loader (yaml-cpp), the FTXUI terminal backend and its tvision desktop are
+        # optional at configure time: a missing dep turns each into a stub, and the bundle still
+        # builds, packs and publishes. That is how every macOS and Windows libcvc through 3.6.0
+        # shipped without a terminal backend: the recipe scoped ftxui to linux. The recipe now
+        # declares yaml-cpp, ftxui and tvision on every platform this job builds, so fail here,
+        # before the long build, instead of shipping a stub (as ci.yml's ari-wasm job does).
+        shell: bash
+        run: |
+          set -euo pipefail
+          for want in "Ariadne: .ari YAML loader ENABLED" \
+                      "Ariadne: FTXUI terminal backend ENABLED" \
+                      "Ariadne: tvision terminal backend ENABLED"; do
+            grep -qF "$want" configure.log || {
+              echo "::error::the ${{ matrix.target.platform }} configure did not print '$want': libcvc would ship a stub"
+              exit 1
+            }
+          done
 
       - name: Build & install
         id: build-libcvc
@@ -841,8 +862,7 @@ jobs:
         # way cvc-cli is.  Like cvcgl-examples it runs the recipe's own build.sh
         # against the libcvc just installed into $STAGE, so the published ari always
         # matches the libcvc built from this tree (its FTXUI backend and .ari loader
-        # live in libcvc).  Linux only: the recipe's matrix is linux-only until
-        # libcvc's ftxui dependency is published for the other platforms.
+        # live in libcvc).  The macOS and Windows twins are at the end of this job.
         if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'linux' && matrix.config == 'release' && matrix.pyver == '311' }}
         shell: bash
         env:
@@ -861,6 +881,10 @@ jobs:
           export CVC_JOBS="$(nproc)"
           bash cvcpkg/recipes/ari/build.sh
           test -x stage-ari/bin/ari
+          # The binary that ships must render a document: the real backend and loader, not stubs.
+          LD_LIBRARY_PATH="$STAGE/lib:$DEPS/lib" stage-ari/bin/ari snapshot --width 100 --height 24 \
+            src/cvc/ariadne/examples/terminal_tour.ari | tee ari-snapshot.txt
+          grep -qF "agents: 64" ari-snapshot.txt
           mkdir -p dist
           cvcpkg pack cvcpkg/recipes/ari \
             --from-prefix stage-ari \
@@ -1164,6 +1188,113 @@ jobs:
             cvcpkg publish pycvc-gl-cp311 --server "$env:CVCPKG_SERVER" --org "$env:CVCPKG_ORG" --platform windows --config release --link shared --output-dir dist --token "$env:CVCPKG_TOKEN"
           } else {
             Write-Host 'dry-run: skipping pycvc-cp311/pycvc-gl-cp311 publish'
+          }
+
+      # ── ari on macOS and Windows ──
+      # The twins of "Build, pack & publish ari [Linux]": the recipe's own build script against the
+      # libcvc just installed into $STAGE. Last in the job because they take cmake and ninja from
+      # cvcpkg, which this action puts first on PATH for every later step.
+      - name: Install build tools (cvcpkg) for ari
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform != 'linux' && matrix.config == 'release' && matrix.pyver == '311' }}
+        uses: ./.github/actions/cvcpkg-build-tools
+        with:
+          tools: cmake ninja
+
+      - name: Build, pack & publish ari [macOS]
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'macos' && matrix.config == 'release' && matrix.pyver == '311' }}
+        shell: bash
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+          DO_PUBLISH: ${{ (github.event_name == 'push' || github.event.inputs.dry_run == 'false') && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          STAGE="$GITHUB_WORKSPACE/stage"
+          DEPS="${{ steps.libcvc-deps.outputs.path }}"
+          if [ -z "$DEPS" ]; then DEPS="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"; fi
+          export CVC_SOURCE_DIR="$GITHUB_WORKSPACE"
+          export CVC_BUILD_DIR="$GITHUB_WORKSPACE/build-ari"
+          export CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-ari"
+          export CVC_DEPS_PREFIX="$STAGE;$DEPS"
+          export CVC_BUILD_TYPE=Release
+          export CVC_JOBS="$(sysctl -n hw.ncpu)"
+          bash cvcpkg/recipes/ari/build.sh
+          test -x stage-ari/bin/ari
+          # The binary that ships must render a document: the real backend and loader, not stubs.
+          # Its rpath is @loader_path/../lib, the flat prefix it is installed into, so point dyld at
+          # the two prefixes it is split across here.
+          DYLD_LIBRARY_PATH="$STAGE/lib:$DEPS/lib" stage-ari/bin/ari snapshot --width 100 --height 24 \
+            src/cvc/ariadne/examples/terminal_tour.ari | tee ari-snapshot.txt
+          grep -qF "agents: 64" ari-snapshot.txt
+          mkdir -p dist
+          cvcpkg pack cvcpkg/recipes/ari \
+            --from-prefix stage-ari \
+            --platform macos \
+            --config release --link shared --local \
+            --cvc-revision ${{ needs.compute-revisions.outputs.ari }} \
+            --output-dir dist
+          if [ "$DO_PUBLISH" = "1" ]; then
+            if [ -z "${CVCPKG_TOKEN:-}" ]; then
+              echo "CVCPKG_TOKEN secret is required to publish"; exit 1
+            fi
+            cvcpkg publish ari \
+              --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
+              --platform macos \
+              --config release --link shared --output-dir dist \
+              --token "$CVCPKG_TOKEN"
+          else
+            echo "dry-run: skipping ari publish"
+          fi
+
+      - name: Build, pack & publish ari [Windows]
+        # build.ps1 builds with cl and Ninja through _common/env-windows.ps1, which imports the
+        # MSVC developer environment itself.
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'windows' && matrix.config == 'release' && matrix.pyver == '311' }}
+        shell: pwsh
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $depsPath = '${{ steps.libcvc-deps.outputs.path }}'
+          if (-not $depsPath) {
+            $depsPath = if ($env:LIBCVC_DEPS_PREFIX) { $env:LIBCVC_DEPS_PREFIX } else { 'D:\libcvc-deps' }
+          }
+          $stage = "$env:GITHUB_WORKSPACE/stage"
+          $env:CVC_SOURCE_DIR = "$env:GITHUB_WORKSPACE"
+          $env:CVC_BUILD_DIR = "$env:GITHUB_WORKSPACE/build-ari"
+          $env:CVC_INSTALL_DIR = "$env:GITHUB_WORKSPACE/stage-ari"
+          $env:CVC_DEPS_PREFIX = "$stage;$depsPath"
+          $env:CVC_BUILD_TYPE = 'Release'
+          $env:CVC_LINK = 'shared'
+          & ./cvcpkg/recipes/ari/build.ps1
+          if (-not (Test-Path 'stage-ari/bin/ari.exe')) { throw 'ari build installed no bin/ari.exe' }
+          # The binary that ships must render a document: the real backend and loader, not stubs.
+          # cvc.dll and every dependency DLL sit in the two prefixes' bin/ directories.
+          $savedPath = $env:PATH
+          $env:PATH = "$stage\bin;$depsPath\bin;$env:PATH"
+          & ./stage-ari/bin/ari.exe snapshot --width 100 --height 24 src/cvc/ariadne/examples/terminal_tour.ari |
+            Tee-Object -FilePath ari-snapshot.txt
+          if ($LASTEXITCODE -ne 0) { throw "ari snapshot failed ($LASTEXITCODE)" }
+          $env:PATH = $savedPath
+          if (-not (Select-String -Path ari-snapshot.txt -SimpleMatch 'agents: 64' -Quiet)) {
+            throw 'the ari snapshot is missing the tour (agents: 64)'
+          }
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          cvcpkg pack cvcpkg/recipes/ari `
+            --from-prefix stage-ari `
+            --platform windows --config release --link shared --local `
+            --cvc-revision ${{ needs.compute-revisions.outputs.ari }} `
+            --output-dir dist
+          if ($LASTEXITCODE -ne 0) { throw "ari pack failed ($LASTEXITCODE)" }
+          $doPublish = ($env:GITHUB_EVENT_NAME -eq 'push') -or ('${{ github.event.inputs.dry_run }}' -eq 'false')
+          if ($doPublish) {
+            if (-not $env:CVCPKG_TOKEN) { throw 'CVCPKG_TOKEN secret is required to publish' }
+            cvcpkg publish ari `
+              --server "$env:CVCPKG_SERVER" --org "$env:CVCPKG_ORG" `
+              --platform windows --config release --link shared --output-dir dist `
+              --token "$env:CVCPKG_TOKEN"
+            if ($LASTEXITCODE -ne 0) { throw "ari publish failed ($LASTEXITCODE)" }
+          } else {
+            Write-Host 'dry-run: skipping ari publish'
           }
 
   # ── Linux libcvc-cuda (GPU variant) ──────────────────────────────────────
