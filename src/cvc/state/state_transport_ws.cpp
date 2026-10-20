@@ -688,27 +688,15 @@ void state_transport_ws::deliver_inbound(connection *c, const void *data, std::s
       }
     }
   } else if (in.has_media()) {
-    // Media frame (camera/mic) on the control channel. NOT shard state and NEVER bridged: a relay
-    // fans it to its OTHER connections (SFU full fan-out), a leaf hands it to its on_media sink.
+    // Media frame (camera/mic) on the control channel. NOT shard state and NEVER on the control
+    // bridge: decode to the canonical media_frame and hand it to the media sink, tagged with the
+    // source connection as the opaque token. On a relay the sink is a media_router (it fans via
+    // fan_media, skipping this origin, and across to other protocols); on a leaf (browser) it is the
+    // set_on_media subscribe sugar.
     _media_recv.fetch_add(1, std::memory_order_relaxed);
-    if (_relay.load(std::memory_order_relaxed)) {
-      std::vector<std::shared_ptr<connection>> conns;
-      {
-        std::lock_guard<std::mutex> lk(_conns_mu);
-        conns = _conns;
-      }
-      for (auto &oc : conns) {
-        if (!oc || oc.get() == c || !oc->alive.load() || !oc->can_write())
-          continue;
-        if (oc->write(in)) { // re-send the already-parsed frame verbatim (origin preserved)
-          _sent_frames.fetch_add(1, std::memory_order_relaxed);
-          _media_fwd.fetch_add(1, std::memory_order_relaxed);
-        }
-      }
-    }
-    if (_on_media) {
+    if (_media_sink) {
       const auto &mf = in.media();
-      ws_media_frame out;
+      media_frame out;
       out.origin_node_id = mf.origin_node_id();
       out.stream_id = mf.stream_id();
       out.codec = mf.codec();
@@ -720,7 +708,7 @@ void state_transport_ws::deliver_inbound(connection *c, const void *data, std::s
       out.channels = mf.channels();
       const std::string &p = mf.payload();
       out.payload.assign(p.begin(), p.end());
-      _on_media(out);
+      _media_sink(out, /*src_conn=*/c);
     }
   }
 }
@@ -868,7 +856,7 @@ state_transport::publish_message_stats state_transport_ws::publish_message(const
   return stats;
 }
 
-void state_transport_ws::publish_media_frame(const ws_media_frame &m) {
+std::size_t state_transport_ws::write_media(const media_frame &m, const void *exclude) {
   pb::Frame frame;
   pb::MediaFrame *mf = frame.mutable_media();
   mf->set_origin_node_id(m.origin_node_id);
@@ -887,17 +875,39 @@ void state_transport_ws::publish_media_frame(const ws_media_frame &m) {
     std::lock_guard<std::mutex> lk(_conns_mu);
     conns = _conns;
   }
-  // A browser client has one connection (the relay), which fans the frame to the other participants.
-  // A relay publishing locally (uncommon) would send to all its connections. Media is unreplicated,
-  // unbridged, and not subject to the peer path-filter (it carries no path).
+  // Media is unreplicated, un-bridged, and not subject to the peer path-filter (it carries no path).
+  // `exclude` (a connection*) skips the origin peer when a relay fans; nullptr sends to all.
+  std::size_t n = 0;
   for (auto &c : conns) {
-    if (!c || !c->alive.load() || !c->can_write())
+    if (!c || c.get() == exclude || !c->alive.load() || !c->can_write())
       continue;
     if (c->write(frame)) {
       _sent_frames.fetch_add(1, std::memory_order_relaxed);
-      _media_sent.fetch_add(1, std::memory_order_relaxed);
+      ++n;
     }
   }
+  return n;
+}
+
+// A browser client has one connection (the relay), so publish_media_frame pushes its camera/mic UP;
+// a relay publishing locally (uncommon) would send to all its connections.
+void state_transport_ws::publish_media_frame(const ws_media_frame &m) {
+  _media_sent.fetch_add(write_media(m, nullptr), std::memory_order_relaxed);
+}
+
+// Router egress: fan one peer's frame to every OTHER connection (the origin is `exclude`).
+void state_transport_ws::fan_media(const media_frame &f, const void *exclude) {
+  _media_fwd.fetch_add(write_media(f, exclude), std::memory_order_relaxed);
+}
+
+void state_transport_ws::set_media_sink(media_sink_fn sink) { _media_sink = std::move(sink); }
+
+void state_transport_ws::set_on_media(media_frame_fn cb) {
+  if (!cb) {
+    _media_sink = {};
+    return;
+  }
+  _media_sink = [cb = std::move(cb)](const media_frame &f, const void * /*src_conn*/) { cb(f); };
 }
 
 std::size_t state_transport_ws::pump_shard(state_cluster_shard &shard) {

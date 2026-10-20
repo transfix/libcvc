@@ -15,6 +15,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cvc/core/namespace.h>
+#include <cvc/media/media_endpoint.h> // media_frame + the media_router plug-in surface
 #include <cvc/state/state_blob_store.h>
 #include <cvc/state/state_transport.h>
 #include <memory>
@@ -71,7 +72,7 @@ namespace cvc {
 //   state_cluster_shard, otherwise an in-flight inbound frame can
 //   dispatch to a freed shard.
 //
-class state_transport_grpc final : public state_transport {
+class state_transport_grpc final : public state_transport, public media_endpoint {
 public:
   // Phase 5: optional transport-level TLS configuration. When set
   // before start() / connect_to_peer(), the server uses
@@ -161,6 +162,24 @@ public:
   void set_relay(bool enable) noexcept { _relay.store(enable, std::memory_order_relaxed); }
   bool relay() const noexcept { return _relay.load(std::memory_order_relaxed); }
 
+  // ── Media plane (carried as the Frame envelope's MediaFrame, same as the WS transport) ──
+  // publish_media_frame sends a frame to this transport's connections; a relay's media_router fans
+  // each received frame back out via fan_media(). set_on_media is the leaf subscribe sugar. Media is
+  // NOT replicated, NOT journaled, and never crosses the control bridge (it crosses protocols through
+  // the media_router instead). Thread-safe; a no-op with no connections.
+  void publish_media_frame(const media_frame &m);
+  using media_frame_fn = std::function<void(const media_frame &)>;
+  void set_on_media(media_frame_fn cb);
+
+  // ── media_endpoint (the media_router plug-in surface) ──
+  void fan_media(const media_frame &f, const void *exclude = nullptr) override;
+  void set_media_sink(media_sink_fn sink) override;
+  const char *media_protocol() const noexcept override { return "grpc"; }
+
+  std::uint64_t total_media_sent() const noexcept { return _media_sent.load(); }
+  std::uint64_t total_media_received() const noexcept { return _media_recv.load(); }
+  std::uint64_t total_media_forwarded() const noexcept { return _media_fwd.load(); }
+
   // state_transport interface.
   void register_shard(state_cluster_shard *shard) override;
   void unregister_shard(state_cluster_shard *shard) override;
@@ -202,6 +221,9 @@ public:
   const auth_config &auth() const noexcept { return _auth; }
   void on_inbound_mutation(const state_mutation &m, connection *origin = nullptr);
   void on_inbound_message(const state_message &m, connection *origin = nullptr);
+  // A MediaFrame arrived from `origin`: hand the decoded media_frame to the media sink tagged with
+  // `origin` as the opaque source token (a relay's media_router fans it, skipping `origin`).
+  void on_inbound_media(const media_frame &m, connection *origin = nullptr);
   // Chunk fetch request/response dispatch (called from connection
   // reader threads when a ChunkRequest/ChunkResponse frame arrives).
   void on_inbound_chunk_request(connection *conn, const std::string &digest,
@@ -229,6 +251,9 @@ public:
   }
 
 private:
+  // Encode `m` to a Frame and write it to every live connection except `exclude` (a connection*;
+  // nullptr = all). Returns the number written. Backs publish_media_frame and fan_media.
+  std::size_t write_media(const media_frame &m, const void *exclude);
   void send_hello_locked(connection &c);
   void send_backfill_locked(connection &c, const std::vector<state_cluster_shard *> &shards);
 
@@ -259,6 +284,11 @@ private:
   std::atomic<std::uint64_t> _recv_mutations{0};
   std::atomic<std::uint64_t> _recv_messages{0};
   std::atomic<std::uint64_t> _delivered{0};
+
+  media_sink_fn _media_sink; // media_router ingress (relay) OR set_on_media leaf sugar
+  std::atomic<std::uint64_t> _media_sent{0};
+  std::atomic<std::uint64_t> _media_recv{0};
+  std::atomic<std::uint64_t> _media_fwd{0};
 
   state_blob_store *_blob_store = nullptr;
 

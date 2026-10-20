@@ -189,6 +189,22 @@ state_message decode_message(const pb::Message &in) {
   return m;
 }
 
+cvc::media_frame decode_media(const pb::MediaFrame &in) {
+  cvc::media_frame m;
+  m.origin_node_id = in.origin_node_id();
+  m.stream_id = in.stream_id();
+  m.codec = in.codec();
+  m.width = in.width();
+  m.height = in.height();
+  m.seq = in.seq();
+  m.pts_seconds = in.pts_seconds();
+  m.sample_rate = in.sample_rate();
+  m.channels = in.channels();
+  const std::string &p = in.payload();
+  m.payload.assign(p.begin(), p.end());
+  return m;
+}
+
 } // namespace
 
 // Connection abstracts a single bidirectional stream. Server-side
@@ -273,6 +289,8 @@ public:
       } else if (in.has_message()) {
         _owner->on_inbound_message(decode_message(in.message()), conn.get());
         _owner->increment_recv_messages();
+      } else if (in.has_media()) {
+        _owner->on_inbound_media(decode_media(in.media()), conn.get());
       } else if (in.has_chunk_request()) {
         _owner->on_inbound_chunk_request(conn.get(), in.chunk_request().digest(),
                                          in.chunk_request().request_id());
@@ -468,6 +486,8 @@ bool state_transport_grpc::connect_to_peer(const std::string &target,
       } else if (in.has_message()) {
         on_inbound_message(decode_message(in.message()), conn.get());
         increment_recv_messages();
+      } else if (in.has_media()) {
+        on_inbound_media(decode_media(in.media()), conn.get());
       } else if (in.has_chunk_request()) {
         on_inbound_chunk_request(conn.get(), in.chunk_request().digest(),
                                  in.chunk_request().request_id());
@@ -796,6 +816,63 @@ void state_transport_grpc::on_inbound_message(const state_message &m, connection
   // Bridge to a sibling transport (the relay's WebSocket side) so its connections get this message.
   if (_bridge)
     _bridge->publish_message(m);
+}
+
+std::size_t state_transport_grpc::write_media(const media_frame &m, const void *exclude) {
+  pb::Frame frame;
+  pb::MediaFrame *mf = frame.mutable_media();
+  mf->set_origin_node_id(m.origin_node_id);
+  mf->set_stream_id(m.stream_id);
+  mf->set_codec(m.codec);
+  mf->set_width(m.width);
+  mf->set_height(m.height);
+  mf->set_seq(m.seq);
+  mf->set_pts_seconds(m.pts_seconds);
+  mf->set_sample_rate(m.sample_rate);
+  mf->set_channels(m.channels);
+  mf->set_payload(m.payload.data(), static_cast<int>(m.payload.size()));
+
+  std::vector<std::shared_ptr<connection>> conns;
+  {
+    std::lock_guard<std::mutex> lk(_conns_mu);
+    conns = _conns;
+  }
+  // Media is unreplicated, un-bridged (it crosses protocols via the media_router), and carries no
+  // path. `exclude` (a connection*) skips the origin peer when a relay fans; nullptr sends to all.
+  std::size_t n = 0;
+  for (auto &c : conns) {
+    if (!c || c.get() == exclude || !c->alive.load() || !c->can_write())
+      continue;
+    if (c->write(frame)) {
+      _sent_frames.fetch_add(1, std::memory_order_relaxed);
+      ++n;
+    }
+  }
+  return n;
+}
+
+void state_transport_grpc::publish_media_frame(const media_frame &m) {
+  _media_sent.fetch_add(write_media(m, nullptr), std::memory_order_relaxed);
+}
+
+void state_transport_grpc::fan_media(const media_frame &f, const void *exclude) {
+  _media_fwd.fetch_add(write_media(f, exclude), std::memory_order_relaxed);
+}
+
+void state_transport_grpc::set_media_sink(media_sink_fn sink) { _media_sink = std::move(sink); }
+
+void state_transport_grpc::set_on_media(media_frame_fn cb) {
+  if (!cb) {
+    _media_sink = {};
+    return;
+  }
+  _media_sink = [cb = std::move(cb)](const media_frame &f, const void * /*src_conn*/) { cb(f); };
+}
+
+void state_transport_grpc::on_inbound_media(const media_frame &m, connection *origin) {
+  _media_recv.fetch_add(1, std::memory_order_relaxed);
+  if (_media_sink)
+    _media_sink(m, /*src_conn=*/origin);
 }
 
 void state_transport_grpc::register_connection(std::shared_ptr<connection> conn) {

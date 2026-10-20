@@ -28,6 +28,7 @@
 #include <cvc/ariadne/conference/room_media_intrinsics.h> // room_relay_tick
 #include <cvc/ariadne/stream/stream_relay.h>
 #include <cvc/core/app.h>
+#include <cvc/media/media_router.h> // protocol-agnostic media hub (WS + gRPC + future protocols)
 #include <cvc/state/state_cluster_shard.h>
 #include <cvc/state/state_stream_transport_grpc.h>
 #include <cvc/state/state_transport_grpc.h>
@@ -111,6 +112,18 @@ int main(int argc, char **argv) {
   cvc::ariadne::stream::stream_relay relay(app, media_tp);
   media_tp.start(mediaListen);
 
+  // Media hub: a protocol-agnostic router fans each received media_frame between every transport
+  // endpoint, so a browser (WS) and a native client (gRPC) in one room see/hear each other through
+  // ONE canonical path — a new protocol is just another endpoint. (The WS<->gRPC control bridge
+  // above carries the ROOM TREE between transports; media crosses HERE instead — media is never on
+  // the control bridge.) Declared AFTER the transports so it destructs FIRST, clearing their media
+  // sinks while they are still alive; the explicit stop()s below join readers before that.
+  cvc::media_router mrouter;
+  mrouter.add_endpoint(&state_tp); // native gRPC clients (state plane carries MediaFrame too)
+#if CVC_ENABLE_WS
+  mrouter.add_endpoint(&ws_tp); // browser (wasm) WebSocket clients
+#endif
+
   std::signal(SIGINT, on_signal);
   std::signal(SIGTERM, on_signal);
   std::printf("[arisrv] relay up | room='%s' node='%s' | state=%s | media=%s\n",
@@ -125,10 +138,10 @@ int main(int argc, char **argv) {
   std::set<std::string> relayed;
   std::size_t last = 0;
   int ticks = 0;
+  int mediaticks = 0;             // cadence for the media (router) heartbeat
+  std::uint64_t lastRouted = 0;   // last-logged media_router routed count
 #if CVC_ENABLE_WS
-  int wsticks = 0;                 // separate cadence: a browser-only room has no gRPC streams
-  std::uint64_t lastMediaFwd = 0;  // last-logged WS media fan-out count
-  int reapticks = 0;               // cadence for reaping ghost (navigated-away) connections
+  int reapticks = 0;              // cadence for reaping ghost (navigated-away) connections
 #endif
   while (!g_stop.load()) {
 #if CVC_ENABLE_WS
@@ -184,22 +197,34 @@ int main(int argc, char **argv) {
                   static_cast<unsigned long long>(relay.frames_forwarded()));
       std::fflush(stdout);
     }
+    // Media heartbeat (~every 5s while anyone is connected). Conference media rides the control
+    // channels (WS MediaFrame + gRPC MediaFrame), fanned by the media_router — NOT in the gRPC
+    // `relay` stream stats above. Report the router total plus per-plane conns/recv/fanned so a quiet
+    // relay is distinguishable from a stuck one, and so WS<->gRPC interop is visible (a frame received
+    // on one plane is fanned on BOTH).
+    if (++mediaticks % 25 == 0) {
+      const std::uint64_t routed = mrouter.total_routed();
+      std::size_t wsc = 0;
+      std::uint64_t wsr = 0, wsf = 0;
 #if CVC_ENABLE_WS
-    // Browser media rides the WS control channel and is fanned peer-to-peer in the transport (SFU), so
-    // it is NOT in the gRPC `relay` stats above. Report connections + received + fanned (~every 5s)
-    // whenever any client is connected, so a quiet relay is distinguishable from a stuck one.
-    if (++wsticks % 25 == 0) {
-      const std::size_t conns = ws_tp.connection_count();
-      const std::uint64_t mf = ws_tp.total_media_forwarded();
-      const std::uint64_t mr = ws_tp.total_media_received();
-      if (conns > 0 || mf != lastMediaFwd) {
-        lastMediaFwd = mf;
-        std::printf("[arisrv] ws: %zu conn(s); media recv %llu, fanned %llu\n", conns,
-                    static_cast<unsigned long long>(mr), static_cast<unsigned long long>(mf));
+      wsc = ws_tp.connection_count();
+      wsr = ws_tp.total_media_received();
+      wsf = ws_tp.total_media_forwarded();
+#endif
+      const std::size_t gc = state_tp.connection_count();
+      const std::uint64_t gr = state_tp.total_media_received();
+      const std::uint64_t gf = state_tp.total_media_forwarded();
+      if (wsc + gc > 0 || routed != lastRouted) {
+        lastRouted = routed;
+        std::printf(
+            "[arisrv] media: routed %llu | ws %zu conn recv %llu fan %llu | grpc %zu conn recv %llu "
+            "fan %llu\n",
+            static_cast<unsigned long long>(routed), wsc, static_cast<unsigned long long>(wsr),
+            static_cast<unsigned long long>(wsf), gc, static_cast<unsigned long long>(gr),
+            static_cast<unsigned long long>(gf));
         std::fflush(stdout);
       }
     }
-#endif
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
   }
 

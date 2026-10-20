@@ -78,6 +78,9 @@ set(INCLUDE_FILES
   ../../inc/cvc/state/state_transport_grpc.h
   ../../inc/cvc/state/state_transport_ws.h
   ../../inc/cvc/state/state_stream_transport_grpc.h
+  ../../inc/cvc/media/media_frame.h
+  ../../inc/cvc/media/media_endpoint.h
+  ../../inc/cvc/media/media_router.h
   ../../inc/cvc/geometry/bunny.h
   ../../inc/cvc/volume/endians.h
   ../../inc/cvc/utility/utility.h
@@ -270,6 +273,7 @@ set(SOURCE_FILES
   state/state_cluster_shard.cpp
   state/state_transport_inproc.cpp
   state/state_transport_ipc.cpp
+  media/media_router.cpp
   state/state_message_bus.cpp
   state/state_peer_registry.cpp
   state/state_write_policy.cpp

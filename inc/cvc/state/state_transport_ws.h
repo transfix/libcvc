@@ -15,6 +15,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cvc/media/media_endpoint.h> // media_frame + the media_router plug-in surface
 #include <cvc/state/state_transport.h>
 #include <functional>
 #include <memory>
@@ -24,24 +25,12 @@
 
 namespace cvc {
 
-// A media frame carried over the WebSocket control channel (the MediaFrame in
-// proto/state_transport.proto — the bring-up media plane, so a browser with only
-// its one WebSocket can push its camera/mic and receive peers'). Plain struct so
-// this header stays proto-free. NOT shard state: a relay fans it to its other
-// connections, a leaf delivers it to its on_media sink; it never touches a shard
-// or the WS<->gRPC bridge.
-struct ws_media_frame {
-  std::string origin_node_id; // the publishing participant's pid (route per-peer; skip self)
-  std::string stream_id;      // the KIND on that peer: "camera" | "mic"
-  std::string codec;          // "mjpeg" (video) | "f32" (audio)
-  std::uint32_t width = 0;    // video frame size (0 for audio)
-  std::uint32_t height = 0;
-  std::int64_t seq = 0;
-  double pts_seconds = 0.0;
-  std::uint32_t sample_rate = 0; // audio (0 for video)
-  std::uint32_t channels = 0;
-  std::vector<std::uint8_t> payload; // one whole frame
-};
+// The media frame carried over this transport is the GENERIC, transport-neutral cvc::media_frame
+// (inc/cvc/media/media_frame.h). ws_media_frame is kept as an alias for existing callers. Its wire
+// encoding is proto/state_transport.proto's MediaFrame, shared with the gRPC transport (both carry
+// the Frame envelope). NOT shard state: a relay fans it across the media_router; a leaf delivers it
+// to its on_media sink; it never touches a shard or the WS<->gRPC CONTROL bridge.
+using ws_media_frame = media_frame;
 
 // ----------------
 // cvc::state_transport_ws
@@ -83,7 +72,7 @@ struct ws_media_frame {
 // destroying any registered state_cluster_shard, or an in-flight inbound frame
 // can dispatch to a freed shard.
 //
-class state_transport_ws final : public state_transport {
+class state_transport_ws final : public state_transport, public media_endpoint {
 public:
   state_transport_ws();
   ~state_transport_ws() override;
@@ -140,18 +129,24 @@ public:
   std::size_t reap_idle(std::chrono::milliseconds timeout);
 
   // ── Media plane (bring-up: media over this WS control channel) ──
-  // Send a MediaFrame to this transport's connections. A browser CLIENT has one
-  // connection (the relay), so this pushes its camera/mic up to the relay; the
-  // relay fans each received frame to the OTHER participants (see set_relay).
-  // Thread-safe; a no-op with no connections. The frame is NOT journaled and
-  // never crosses the WS<->gRPC bridge.
+  // publish_media_frame sends a frame to this transport's connections: a browser CLIENT has one
+  // connection (the relay), so it pushes its camera/mic UP; a relay's media_router fans each received
+  // frame back out via fan_media(). The frame is NOT journaled and never crosses the WS<->gRPC
+  // CONTROL bridge (media crosses protocols through the media_router instead). Thread-safe; a no-op
+  // with no connections.
   void publish_media_frame(const ws_media_frame &m);
 
-  // Invoked (on a reader thread) for each MediaFrame RECEIVED from a peer. A leaf
-  // (browser) sets this to route a peer's frame into a decode proxy / playback; a
-  // relay leaves it unset and just fans. Must be thread-safe and must not block.
+  // Leaf (browser) subscribe sugar: route each peer's received frame into a decode proxy / playback.
+  // Layered over set_media_sink (the source-connection token is ignored). Must be thread-safe.
   using media_frame_fn = std::function<void(const ws_media_frame &)>;
-  void set_on_media(media_frame_fn cb) { _on_media = std::move(cb); }
+  void set_on_media(media_frame_fn cb);
+
+  // ── media_endpoint (the media_router plug-in surface) ──
+  // fan_media writes `f` to every connection except `exclude` (a connection* this transport handed
+  // its sink; nullptr = all). set_media_sink installs the router's ingress (see media_endpoint).
+  void fan_media(const media_frame &f, const void *exclude = nullptr) override;
+  void set_media_sink(media_sink_fn sink) override;
+  const char *media_protocol() const noexcept override { return "ws"; }
 
   std::uint64_t total_media_sent() const noexcept { return _media_sent.load(); }
   std::uint64_t total_media_received() const noexcept { return _media_recv.load(); }
@@ -213,6 +208,9 @@ public:
   void on_connection_open(connection *c);
 
 private:
+  // Encode `m` to a Frame and write it to every live connection except `exclude` (a connection*;
+  // nullptr = all). Returns the number written. Backs both publish_media_frame and fan_media.
+  std::size_t write_media(const media_frame &m, const void *exclude);
   void send_hello_locked(connection &c);
   void send_backfill_locked(connection &c, const std::vector<state_cluster_shard *> &shards);
   // Relay-only: push the full CURRENT snapshot of each shard to a newly admitted connection, so a
@@ -241,7 +239,7 @@ private:
   std::atomic<bool> _backfill_on_connect{true};
   std::atomic<bool> _relay{false};
   connection_closed_fn _on_conn_closed; // set by a relay; invoked on a peer close (see above)
-  media_frame_fn _on_media;              // set by a leaf to receive peers' media frames
+  media_sink_fn _media_sink; // media_router ingress (relay) OR set_on_media leaf sugar; see above
 
   std::atomic<std::uint64_t> _media_sent{0};  // MediaFrames this transport sent (publish_media_frame)
   std::atomic<std::uint64_t> _media_recv{0};  // MediaFrames received from peers

@@ -15,6 +15,7 @@
 #include <atomic>
 #include <chrono>
 #include <cvc/core/app.h>
+#include <cvc/media/media_router.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_cluster_shard.h>
 #include <cvc/state/state_transport.h>
@@ -182,6 +183,10 @@ TEST(StateTransportWsTest, RelayFansMediaFrameToOtherClient) {
   cvc::state_transport_ws S, tA, tB;
   S.start("127.0.0.1:0", "S", "C");
   S.set_relay(true);
+  // Media now fans through a media_router (set_relay governs the control plane only). Declared after
+  // S so it destructs first, clearing S's media sink while S is still alive.
+  cvc::media_router mr;
+  mr.add_endpoint(&S);
 
   cvc::state_cluster_shard sA(aA, "C", "A");
   cvc::state_cluster_shard sB(aB, "C", "B");

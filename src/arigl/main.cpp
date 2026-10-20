@@ -55,19 +55,26 @@
 #include <cvc/ariadne/loader.h> // run_init — seed conf.room / conf.self before the first tick
 #include <cvc/ariadne/tvision_backend.h>
 #include <cvc/core/app.h>
-#if CVC_ENABLE_WS
-// Conference mode: a WebSocket state transport joins a hosted room. The browser (wasm) build dials
-// wss://<page-origin>/… (set by the host page) and native builds dial ws://host:port; either way
-// register_conference supplies the room verbs and the shard/transport are wired here in the host.
+#if CVC_ENABLE_WS || CVC_ENABLE_GRPC
+// Conference mode: a state transport joins a hosted room, chosen by the relay URL scheme —
+// ws://|wss:// (WebSocket, what browsers dial; the host page sets wss://<page-origin>/…) or grpc://
+// (native gRPC). register_conference supplies the room verbs and the shard/transport are wired here
+// in the host; both transports carry the canonical media_frame and interop via the relay's router.
 #include <cvc/ariadne/stream/frame.h>           // frame_ptr — forward the local camera/mic streams
 #include <cvc/ariadne/stream/stream.h>          // stream::open — per-peer decode proxies
 #include <cvc/ariadne/stream/stream_channel.h>  // subscribe / publish_external
 #include <cvc/ariadne/stream/stream_registry.h> // look up the local camera/mic streams by token
 #include <cvc/core/world_clock.h>               // app.world_clock().t() — the common media timestamp
 #include <cvc/gl/playback/audio_output.h>       // open_audio_output — play each peer's mic
+#include <cvc/media/media_frame.h>              // cvc::media_frame — the canonical media frame
 #include <cvc/state/state.h>                    // cvc::state::instance — conference media state keys
 #include <cvc/state/state_cluster_shard.h>
+#if CVC_ENABLE_WS
 #include <cvc/state/state_transport_ws.h>
+#endif
+#if CVC_ENABLE_GRPC
+#include <cvc/state/state_transport_grpc.h>
+#endif
 #include <chrono>
 #include <cstdint>
 #include <deque>
@@ -202,10 +209,22 @@ ari::InputEvent to_ari(const cvc::gl::InputEvent &e) {
 // the shard + WebSocket transport are owned here and pumped each frame. A plain local .ari run just
 // leaves CVC_ARIADNE_RELAY unset and never touches any of this.
 struct ConferenceSession {
-#if CVC_ENABLE_WS
-  // shard is declared BEFORE ws so ws (whose destructor stops the reader) is torn down first.
+#if CVC_ENABLE_WS || CVC_ENABLE_GRPC
+  // shard is declared BEFORE the transport so the transport (whose destructor stops its reader) is
+  // torn down first.
   std::unique_ptr<cvc::state_cluster_shard> shard;
-  std::unique_ptr<cvc::state_transport_ws> ws;
+#if CVC_ENABLE_WS
+  std::unique_ptr<cvc::state_transport_ws> ws_;   // dialed for a ws://|wss:// relay (browsers)
+#endif
+#if CVC_ENABLE_GRPC
+  std::unique_ptr<cvc::state_transport_grpc> grpc_; // dialed for a grpc:// relay (native)
+#endif
+  // The chosen transport, held via the base for the shared ops (register_shard / pump_all). The media
+  // send and stop go through the concrete via these wrappers (publish_media_frame / stop are not on
+  // the base interface). Exactly one of ws_/grpc_ is set; tp_ points at it.
+  cvc::state_transport *tp_ = nullptr;
+  std::function<void(const cvc::media_frame &)> send_media_;
+  std::function<void()> stop_;
   bool active = false;
 
   // ── media plane (browser camera + mic over the WS control channel) ──
@@ -232,7 +251,7 @@ struct ConferenceSession {
   // video decode proxy + a small pts-ordered buffer of video frames (so the display can lag to the
   // audio clock), and a queue of decoded audio chunks awaiting the mixer (below).
   std::mutex media_mu_;
-  std::vector<cvc::ws_media_frame> inbox_;
+  std::vector<cvc::media_frame> inbox_;
   struct vframe {
     double pts = 0.0;
     std::shared_ptr<std::vector<std::uint8_t>> bytes;
@@ -298,8 +317,6 @@ struct ConferenceSession {
     gla::register_conference(app, backend); // room-join/roster + streaming + stream_view
     shard = std::make_unique<cvc::state_cluster_shard>(app, "conf", nodeId);
     shard->attach(); // also installs this as the default shard; room-join derives the pid from it
-    ws = std::make_unique<cvc::state_transport_ws>();
-    ws->register_shard(shard.get());
     app_ = &app;
     pid_ = nodeId;
     prefix_ = prefix;
@@ -309,13 +326,50 @@ struct ConferenceSession {
     // order, since dropped audio is a glitch). The .ari publishes their tokens in cam_token/mic_token.
     pubs_ = {{"cam_token", "camera", /*ring=*/false, {}, {}, -1},
              {"mic_token", "mic", /*ring=*/true, {}, {}, -1}};
-    // Peers' media arrives on the reader thread: just queue it here (do not touch the stream
-    // registry / app tree off the main thread), and route it in pump() on the main thread.
-    ws->set_on_media([this](const cvc::ws_media_frame &m) {
+    // Peers' media arrives on the transport's reader thread: just queue it here (do not touch the
+    // stream registry / app tree off the main thread), and route it in pump() on the main thread.
+    auto on_media = [this](const cvc::media_frame &m) {
       std::lock_guard<std::mutex> lk(media_mu_);
       inbox_.push_back(m);
-    });
-    const bool ok = ws->connect_to_peer(relay, std::chrono::milliseconds(8000));
+    };
+    // Pick the transport by the relay URL scheme: grpc:// dials the native gRPC state plane; anything
+    // else (ws://|wss://) dials the WebSocket plane the browser uses. Both carry the canonical
+    // media_frame and interop through the relay's media_router, so a native and a browser client
+    // share one room's audio/video. One transport is owned here; tp_ is the base handle for the
+    // shared ops and send_media_/stop_ wrap the concrete's publish/stop.
+    const std::string relayUrl(relay);
+    const bool want_grpc = (relayUrl.rfind("grpc://", 0) == 0);
+    bool ok = false;
+    if (want_grpc) {
+#if CVC_ENABLE_GRPC
+      grpc_ = std::make_unique<cvc::state_transport_grpc>();
+      grpc_->start("127.0.0.1:0", nodeId, "conf"); // gRPC must start() (ephemeral port) even to dial
+      grpc_->register_shard(shard.get());
+      grpc_->set_on_media(on_media);
+      tp_ = grpc_.get();
+      send_media_ = [p = grpc_.get()](const cvc::media_frame &m) { p->publish_media_frame(m); };
+      stop_ = [p = grpc_.get()] { p->stop(); };
+      ok = grpc_->connect_to_peer(relayUrl.substr(7), std::chrono::milliseconds(8000));
+#else
+      std::fprintf(stderr, "arigl: conference: relay is grpc:// but this build has no gRPC "
+                           "(CVC_ENABLE_GRPC=OFF); running the document locally.\n");
+      return false;
+#endif
+    } else {
+#if CVC_ENABLE_WS
+      ws_ = std::make_unique<cvc::state_transport_ws>();
+      ws_->register_shard(shard.get());
+      ws_->set_on_media(on_media);
+      tp_ = ws_.get();
+      send_media_ = [p = ws_.get()](const cvc::media_frame &m) { p->publish_media_frame(m); };
+      stop_ = [p = ws_.get()] { p->stop(); };
+      ok = ws_->connect_to_peer(relayUrl, std::chrono::milliseconds(8000));
+#else
+      std::fprintf(stderr, "arigl: conference: relay is ws:// but this build has no WebSocket "
+                           "(CVC_ENABLE_WS=OFF); running the document locally.\n");
+      return false;
+#endif
+    }
     std::fprintf(stderr, "arigl: conference: %s %s as '%s' (room '%s')\n",
                  ok ? "connected to" : "could NOT reach relay", relay, self.c_str(), room.c_str());
     // ?synthetic=1 (the host page sets CVC_ARIADNE_SYNTHETIC_CAM) drives the self-cam from a
@@ -334,9 +388,9 @@ struct ConferenceSession {
     return true;
   }
   void pump() {
-    if (!ws)
+    if (!tp_)
       return;
-    ws->pump_all();
+    tp_->pump_all();
     const double stamp = media_clock_now(); // one world-clock reading per pump stamps all we forward
     forward_streams(stamp);
     drain_inbox();
@@ -348,8 +402,8 @@ struct ConferenceSession {
     mix_out_.reset();
     for (publisher &p : pubs_)
       p.sub.reset();
-    if (ws)
-      ws->stop();
+    if (stop_)
+      stop_();
   }
 
   // Mix: pop one chunk from each peer that has audio queued, sum them (silence for an empty peer),
@@ -425,7 +479,7 @@ struct ConferenceSession {
   }
 
   void forward_frame(publisher &p, const cvc::ariadne::stream::frame &f, double stamp) {
-    cvc::ws_media_frame mf;
+    cvc::media_frame mf;
     mf.origin_node_id = pid_;
     mf.stream_id = p.kind;
     mf.codec = f.format.codec;
@@ -436,19 +490,19 @@ struct ConferenceSession {
     mf.seq = f.seq;
     mf.pts_seconds = stamp; // the COMMON clock, not the source pts
     mf.payload.assign(f.data, f.data + f.size);
-    ws->publish_media_frame(mf);
+    send_media_(mf);
     p.last_seq = f.seq;
   }
 
   // Route each queued peer frame: mic -> a per-peer audio output (played immediately; its queue depth
   // is the A/V clock); camera -> a pts-ordered buffer + a lazily-opened decode proxy the tile renders.
   void drain_inbox() {
-    std::vector<cvc::ws_media_frame> batch;
+    std::vector<cvc::media_frame> batch;
     {
       std::lock_guard<std::mutex> lk(media_mu_);
       batch.swap(inbox_);
     }
-    for (cvc::ws_media_frame &m : batch) {
+    for (cvc::media_frame &m : batch) {
       if (m.origin_node_id.empty() || m.origin_node_id == pid_)
         continue; // never play/show ourselves as a peer
       peer_media &pm = peers_[m.origin_node_id];
@@ -539,8 +593,9 @@ struct ConferenceSession {
   bool active = false;
   bool setup(cvc::app &, const std::string &, cvc::gl::ImGuiBackend &) {
     if (const char *r = std::getenv("CVC_ARIADNE_RELAY"); r && *r)
-      std::fprintf(stderr, "arigl: CVC_ARIADNE_RELAY is set but this build has no WebSocket "
-                           "transport (CVC_ENABLE_WS=OFF); running the document locally.\n");
+      std::fprintf(stderr, "arigl: CVC_ARIADNE_RELAY is set but this build has no conference "
+                           "transport (CVC_ENABLE_WS=OFF and CVC_ENABLE_GRPC=OFF); running the "
+                           "document locally.\n");
     return false;
   }
   void pump() {}
@@ -574,7 +629,8 @@ int run_window(const ari::HostOptions &o) {
   gla::register_streaming(app);
   gla::register_window_widgets(rt.backend(), app);
   // Conference mode (no-op unless CVC_ARIADNE_RELAY is set): register the room verbs and dial the
-  // relay over WebSocket, so the document (conference_roster.ari) joins a hosted room.
+  // relay (WebSocket for ws://|wss://, gRPC for grpc://), so the document (conference_roster.ari)
+  // joins a hosted room.
   ConferenceSession conf;
   // A conference-setup failure must not take down the runtime — fall back to running the document
   // locally (no relay) and say why, rather than letting the exception abort main.
@@ -656,7 +712,7 @@ int run_window(const ari::HostOptions &o) {
     std::this_thread::sleep_until(start + period);
 #endif
   }
-  conf.stop(); // join the WS reader before the shard (owned by conf) is destroyed
+  conf.stop(); // join the transport reader before the shard (owned by conf) is destroyed
   ari::restore_signal_traps();
   cam.detach();
   if (!exit_signal.empty())
