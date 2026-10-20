@@ -16,6 +16,7 @@
 
 %{
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <cvc/nav/belief_material.h>
@@ -30,8 +31,11 @@
 #include <cvc/nav/material.h>
 #include <cvc/nav/material_train.h>
 #include <cvc/nav/nav_stats.h>
+#include <cvc/nav/route_follower.h>
 #include <cvc/nav/sim_thread.h>
 #include <cvc/nav/sim_world.h>
+#include <cvc/nav/vehicle_plant.h>
+#include <cvc/nav/vehicle_route.h>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -265,6 +269,107 @@ PyObject *pycvc_nav_sense_impl(PyObject *truth, PyObject *positions, PyObject *h
 %ignore pycvc::MaterialExtArgs;
 %ignore pycvc::pycvc_new_f32;
 %ignore pycvc::pycvc_f32;
+
+// The vehicle-route bindings' option dicts: every key known (a typo is an error), every value
+// a number, absent keys keep the C++ default.
+%{
+namespace pycvc_routes {
+
+inline void check_keys(PyObject *d, const char *what, std::initializer_list<const char *> known) {
+  if (!d || d == Py_None)
+    return;
+  if (!PyDict_Check(d))
+    throw std::invalid_argument(std::string("pycvc.nav: ") + what + " must be a dict");
+  PyObject *k, *v;
+  Py_ssize_t pos = 0;
+  while (PyDict_Next(d, &pos, &k, &v)) {
+    const char *name = PyUnicode_Check(k) ? PyUnicode_AsUTF8(k) : nullptr;
+    bool ok = false;
+    for (const char *kn : known)
+      ok = ok || (name && std::strcmp(name, kn) == 0);
+    if (!ok)
+      throw std::invalid_argument(std::string("pycvc.nav: ") + what + " has an unknown key '" +
+                                  (name ? name : "?") + "'");
+  }
+}
+
+inline double num(PyObject *d, const char *key, double def) {
+  if (!d || d == Py_None)
+    return def;
+  PyObject *v = PyDict_GetItemString(d, key);
+  if (!v)
+    return def;
+  const double x = PyFloat_AsDouble(v);
+  if (x == -1.0 && PyErr_Occurred()) {
+    PyErr_Clear();
+    throw std::invalid_argument(std::string("pycvc.nav: '") + key + "' must be a number");
+  }
+  return x;
+}
+
+inline cvc::nav::route_vehicle vehicle_from(PyObject *d) {
+  check_keys(d, "vehicle", {"min_radius", "disc_offsets", "disc_radius", "reverse",
+                            "reverse_cost", "cusp_cost"});
+  cvc::nav::route_vehicle v;
+  v.min_radius = num(d, "min_radius", v.min_radius);
+  v.disc_radius = num(d, "disc_radius", v.disc_radius);
+  v.reverse = num(d, "reverse", v.reverse ? 1.0 : 0.0) != 0.0;
+  v.reverse_cost = num(d, "reverse_cost", v.reverse_cost);
+  v.cusp_cost = num(d, "cusp_cost", v.cusp_cost);
+  if (d && d != Py_None) {
+    if (PyObject *offs = PyDict_GetItemString(d, "disc_offsets")) {
+      PyObject *seq = PySequence_Fast(offs, "pycvc.nav: 'disc_offsets' must be a sequence");
+      if (!seq)
+        throw std::invalid_argument("pycvc.nav: 'disc_offsets' must be a sequence of numbers");
+      const Py_ssize_t n = PySequence_Fast_GET_SIZE(seq);
+      for (Py_ssize_t i = 0; i < n; ++i) {
+        const double x = PyFloat_AsDouble(PySequence_Fast_GET_ITEM(seq, i));
+        if (x == -1.0 && PyErr_Occurred()) {
+          PyErr_Clear();
+          Py_DECREF(seq);
+          throw std::invalid_argument("pycvc.nav: 'disc_offsets' must hold numbers");
+        }
+        v.disc_offsets.push_back(x);
+      }
+      Py_DECREF(seq);
+    }
+  }
+  return v;
+}
+
+inline cvc::nav::route_options options_from(PyObject *d) {
+  check_keys(d, "options", {"step", "headings", "goal_tolerance", "margin", "comfort",
+                            "comfort_cost", "escape", "heuristic_weight", "max_expansions"});
+  cvc::nav::route_options o;
+  o.step = num(d, "step", o.step);
+  o.headings = static_cast<int>(num(d, "headings", o.headings));
+  o.goal_tolerance = num(d, "goal_tolerance", o.goal_tolerance);
+  o.margin = num(d, "margin", o.margin);
+  o.comfort = num(d, "comfort", o.comfort);
+  o.comfort_cost = num(d, "comfort_cost", o.comfort_cost);
+  o.escape = static_cast<int>(num(d, "escape", o.escape));
+  o.heuristic_weight = num(d, "heuristic_weight", o.heuristic_weight);
+  o.max_expansions = static_cast<int>(num(d, "max_expansions", o.max_expansions));
+  return o;
+}
+
+inline cvc::nav::follower_options follower_from(PyObject *d) {
+  check_keys(d, "follower options", {"wheelbase", "max_steer", "lookahead", "manoeuvre_speed",
+                                     "pursuit_speed", "accel", "stop_speed", "cusp_tolerance"});
+  cvc::nav::follower_options o;
+  o.wheelbase = num(d, "wheelbase", o.wheelbase);
+  o.max_steer = num(d, "max_steer", o.max_steer);
+  o.lookahead = num(d, "lookahead", o.lookahead);
+  o.manoeuvre_speed = num(d, "manoeuvre_speed", o.manoeuvre_speed);
+  o.pursuit_speed = num(d, "pursuit_speed", o.pursuit_speed);
+  o.accel = num(d, "accel", o.accel);
+  o.stop_speed = num(d, "stop_speed", o.stop_speed);
+  o.cusp_tolerance = num(d, "cusp_tolerance", o.cusp_tolerance);
+  return o;
+}
+
+} // namespace pycvc_routes
+%}
 
 %inline %{
   namespace pycvc {
@@ -1275,6 +1380,22 @@ PyObject *pycvc_nav_sense_impl(PyObject *truth, PyObject *positions, PyObject *h
     return PyLong_FromLong(sim_world_from(handle)->planes());
   }
 
+  // A copy of belief plane m's planning raster, (rows, cols) uint8: what the agents of that plane
+  // currently treat as blocked (sim_world::belief_occ). A route planned on it uses only what the
+  // agent knows.
+  PyObject *nav_sim_world_belief_occ(PyObject *handle, int m) {
+    cvc::nav::sim_world *sw = sim_world_from(handle);
+    if (m < 0 || m >= sw->planes())
+      throw std::out_of_range("pycvc.nav_sim_world_belief_occ: plane out of range");
+    npy_intp d[2] = {sw->rows(), sw->cols()};
+    PyObject *out = PyArray_SimpleNew(2, d, NPY_UINT8);
+    if (!out)
+      throw std::runtime_error("pycvc.nav_sim_world_belief_occ: alloc failed");
+    std::memcpy(PyArray_DATA(reinterpret_cast<PyArrayObject *>(out)), sw->belief_occ(m),
+                static_cast<std::size_t>(sw->rows()) * sw->cols());
+    return out;
+  }
+
   // [n] int32 per-agent belief/material plane id — the map_id set_material
   // validates against, so a caller can build a correctly-sized plane stack.
   PyObject *nav_sim_world_agent_planes(PyObject *handle) {
@@ -1308,6 +1429,217 @@ PyObject *pycvc_nav_sense_impl(PyObject *truth, PyObject *positions, PyObject *h
     std::uint8_t *dst = static_cast<std::uint8_t *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(out)));
     for (int i = 0; i < N; ++i)
       dst[i] = g[i];
+    return out;
+  }
+
+  // ── vehicle routes: plan_vehicle_route + route_follower (the plant's P9 R1/R2) ──
+  // A route for a vehicle with a turning radius (reverse legs and cusps included), and a follower
+  // that drives a sim_world's agents along routes. Lengths are in the occupancy grid's world
+  // units. The follower capsule holds a reference to its sim_world capsule, as sim_thread does.
+
+  // (rows,cols) occupancy, bounds, a start pose (x, y, heading rad) and a goal point -> a dict:
+  // reached, poses (M,4) float64 [x, y, heading, reverse], cusps, length, reverse_length,
+  // expansions. `vehicle` / `options` are dicts of route_vehicle / route_options fields.
+  PyObject *nav_plan_vehicle_route(PyObject *occ, double min_x, double min_y, double max_x,
+                                   double max_y, double start_x, double start_y,
+                                   double start_heading, double goal_x, double goal_y,
+                                   PyObject *vehicle = nullptr, PyObject *options = nullptr) {
+    const cvc::nav::route_vehicle v = pycvc_routes::vehicle_from(vehicle);
+    const cvc::nav::route_options o = pycvc_routes::options_from(options);
+    int rows = 0, cols = 0;
+    PyArrayObject *a = pycvc_nav_as_u8(occ, rows, cols);
+    const std::uint8_t *g = static_cast<const std::uint8_t *>(PyArray_DATA(a));
+    cvc::nav::route_pose start;
+    start.x = start_x;
+    start.y = start_y;
+    start.heading = start_heading;
+    cvc::nav::vehicle_route r;
+    Py_BEGIN_ALLOW_THREADS r = cvc::nav::plan_vehicle_route(g, rows, cols, min_x, min_y, max_x,
+                                                            max_y, v, start, goal_x, goal_y, o);
+    Py_END_ALLOW_THREADS Py_DECREF(a);
+    npy_intp dims[2] = {static_cast<npy_intp>(r.poses.size()), 4};
+    PyObject *poses = PyArray_SimpleNew(2, dims, NPY_DOUBLE);
+    if (!poses)
+      throw std::runtime_error("pycvc.nav_plan_vehicle_route: alloc failed");
+    double *dst = static_cast<double *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(poses)));
+    for (const cvc::nav::route_pose &q : r.poses) {
+      *dst++ = q.x;
+      *dst++ = q.y;
+      *dst++ = q.heading;
+      *dst++ = q.reverse ? 1.0 : 0.0;
+    }
+    PyObject *out = Py_BuildValue("{s:O,s:N,s:i,s:d,s:d,s:i}", "reached",
+                                  r.reached ? Py_True : Py_False, "poses", poses, "cusps", r.cusps,
+                                  "length", r.length, "reverse_length", r.reverse_length,
+                                  "expansions", r.expansions);
+    if (!out)
+      throw std::runtime_error("pycvc.nav_plan_vehicle_route: alloc failed");
+    return out;
+  }
+
+  // How far a pose's discs keep from the walls (world units; negative = inside one).
+  double nav_route_clearance(PyObject *occ, double min_x, double min_y, double max_x, double max_y,
+                             double x, double y, double heading, PyObject *vehicle = nullptr) {
+    const cvc::nav::route_vehicle v = pycvc_routes::vehicle_from(vehicle);
+    int rows = 0, cols = 0;
+    PyArrayObject *a = pycvc_nav_as_u8(occ, rows, cols);
+    cvc::nav::route_pose p;
+    p.x = x;
+    p.y = y;
+    p.heading = heading;
+    const double c =
+        cvc::nav::route_clearance(static_cast<const std::uint8_t *>(PyArray_DATA(a)), rows, cols,
+                                  min_x, min_y, max_x, max_y, v, p);
+    Py_DECREF(a);
+    return c;
+  }
+
+  // Agent i's vehicle for nav_plan_vehicle_route and nav_route_follower_create, from the sim's
+  // plant, in world units: None without a plant, else a dict min_radius (the rear axle's tightest
+  // turn, wheelbase / tan(max steer)), disc_offsets and disc_radius (the body's footprint discs,
+  // when the plant has a size), wheelbase, max_steer, and reach (the sim's reach_tol). The same
+  // derivation a C++ host makes from sim_world::plant() and plant_plan_of.
+  PyObject *nav_sim_world_route_vehicle(PyObject *handle, int i) {
+    cvc::nav::sim_world *sw = sim_world_from(handle);
+    if (i < 0 || i >= sw->size())
+      throw std::out_of_range("pycvc.nav_sim_world_route_vehicle: agent index out of range");
+    if (!sw->plant())
+      Py_RETURN_NONE;
+    const cvc::nav::sim_world::config &cfg = sw->current_config();
+    const double S = cfg.scale;
+    const cvc::nav::plant_limits l = sw->plant()->limits(i);
+    const double wheelbase = (l.wheelbase > 0.0f ? l.wheelbase : cfg.veh.L) / S;
+    const double steer = l.max_steer > 0.0f ? l.max_steer : cfg.veh.delta_max;
+    PyObject *offs = PyList_New(0);
+    double disc_radius = 0.0;
+    cvc::nav::sim_world::plant_plan pp;
+    if (sw->plant_plan_of(i, pp)) {
+      disc_radius = pp.body_rr / S;
+      for (const float off : pp.body_offsets) {
+        PyObject *f = PyFloat_FromDouble(off / S);
+        PyList_Append(offs, f);
+        Py_DECREF(f);
+      }
+    }
+    PyObject *out = Py_BuildValue("{s:d,s:N,s:d,s:d,s:d,s:d}", "min_radius",
+                                  wheelbase / std::tan(steer), "disc_offsets", offs, "disc_radius",
+                                  disc_radius, "wheelbase", wheelbase, "max_steer", steer, "reach",
+                                  cfg.reach_tol / S);
+    if (!out)
+      throw std::runtime_error("pycvc.nav_sim_world_route_vehicle: alloc failed");
+    return out;
+  }
+
+  static const char *kRouteFollowerCapsule = "cvc.nav.route_follower";
+
+  static void route_follower_capsule_dtor(PyObject *cap) {
+    delete static_cast<cvc::nav::route_follower *>(PyCapsule_GetPointer(cap, kRouteFollowerCapsule));
+    Py_XDECREF(static_cast<PyObject *>(PyCapsule_GetContext(cap))); // the world, after the follower
+  }
+
+  static cvc::nav::route_follower *route_follower_from(PyObject *cap) {
+    if (!cap || !PyCapsule_CheckExact(cap))
+      throw std::invalid_argument("pycvc.nav_route_follower_*: not a route_follower handle");
+    auto *f =
+        static_cast<cvc::nav::route_follower *>(PyCapsule_GetPointer(cap, kRouteFollowerCapsule));
+    if (!f)
+      throw std::invalid_argument("pycvc.nav_route_follower_*: null handle");
+    return f;
+  }
+
+  static int route_follower_agents(PyObject *cap) {
+    return sim_world_from(static_cast<PyObject *>(PyCapsule_GetContext(cap)))->size();
+  }
+
+  // A follower for every agent of the sim_world `world_handle`; `options` is a dict of
+  // follower_options fields (world units).
+  PyObject *nav_route_follower_create(PyObject *world_handle, PyObject *options = nullptr) {
+    cvc::nav::sim_world *sw = sim_world_from(world_handle); // validates the handle
+    auto *f = new cvc::nav::route_follower(*sw, pycvc_routes::follower_from(options));
+    PyObject *cap = PyCapsule_New(f, kRouteFollowerCapsule, route_follower_capsule_dtor);
+    if (!cap) {
+      delete f;
+      throw std::runtime_error("pycvc.nav_route_follower_create: capsule alloc failed");
+    }
+    PyCapsule_SetContext(cap, world_handle); // keep the world alive under the follower
+    Py_INCREF(world_handle);
+    return cap;
+  }
+
+  // Agent i follows the route `poses`, (M,3) or (M,4) [x, y, heading(, reverse)] as
+  // nav_plan_vehicle_route returns them; it replaces any route the agent had.
+  void nav_route_follower_set(PyObject *cap, int i, PyObject *poses) {
+    cvc::nav::route_follower *f = route_follower_from(cap);
+    if (i < 0 || i >= route_follower_agents(cap))
+      throw std::out_of_range("pycvc.nav_route_follower_set: agent index out of range");
+    PyArrayObject *a = reinterpret_cast<PyArrayObject *>(
+        PyArray_FROMANY(poses, NPY_DOUBLE, 2, 2, NPY_ARRAY_C_CONTIGUOUS));
+    if (!a)
+      throw std::invalid_argument("pycvc.nav_route_follower_set: poses must be an (M,3|4) array");
+    const npy_intp m = PyArray_DIM(a, 0), w = PyArray_DIM(a, 1);
+    if (w != 3 && w != 4) {
+      Py_DECREF(a);
+      throw std::invalid_argument("pycvc.nav_route_follower_set: poses must be (M,3) or (M,4)");
+    }
+    const double *src = static_cast<const double *>(PyArray_DATA(a));
+    cvc::nav::vehicle_route r;
+    r.reached = true;
+    r.poses.resize(static_cast<std::size_t>(m));
+    for (npy_intp k = 0; k < m; ++k) {
+      cvc::nav::route_pose &q = r.poses[static_cast<std::size_t>(k)];
+      q.x = src[k * w];
+      q.y = src[k * w + 1];
+      q.heading = src[k * w + 2];
+      q.reverse = w == 4 && src[k * w + 3] != 0.0;
+    }
+    Py_DECREF(a);
+    f->set(i, r);
+  }
+
+  void nav_route_follower_clear(PyObject *cap, int i) {
+    cvc::nav::route_follower *f = route_follower_from(cap);
+    if (i < 0 || i >= route_follower_agents(cap))
+      throw std::out_of_range("pycvc.nav_route_follower_clear: agent index out of range");
+    f->clear(i);
+  }
+
+  // Before each nav_sim_world_step: retarget or command every following agent.
+  void nav_route_follower_apply(PyObject *cap) { route_follower_from(cap)->apply(); }
+
+  // Every agent's state: a dict of (N,) arrays following (bool), leg (int32), legs (int32),
+  // reversing (bool), done (bool).
+  PyObject *nav_route_follower_status(PyObject *cap) {
+    cvc::nav::route_follower *f = route_follower_from(cap);
+    const int n = route_follower_agents(cap);
+    npy_intp d1 = n;
+    PyObject *fo = PyArray_SimpleNew(1, &d1, NPY_BOOL), *lg = PyArray_SimpleNew(1, &d1, NPY_INT32),
+             *ls = PyArray_SimpleNew(1, &d1, NPY_INT32), *rv = PyArray_SimpleNew(1, &d1, NPY_BOOL),
+             *dn = PyArray_SimpleNew(1, &d1, NPY_BOOL);
+    if (!fo || !lg || !ls || !rv || !dn) {
+      Py_XDECREF(fo);
+      Py_XDECREF(lg);
+      Py_XDECREF(ls);
+      Py_XDECREF(rv);
+      Py_XDECREF(dn);
+      throw std::runtime_error("pycvc.nav_route_follower_status: alloc failed");
+    }
+    const auto u8 = [](PyObject *o) {
+      return static_cast<std::uint8_t *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(o)));
+    };
+    const auto i32 = [](PyObject *o) {
+      return static_cast<std::int32_t *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(o)));
+    };
+    for (int i = 0; i < n; ++i) {
+      u8(fo)[i] = f->following(i) ? 1 : 0;
+      i32(lg)[i] = f->leg(i);
+      i32(ls)[i] = f->legs(i);
+      u8(rv)[i] = f->reversing(i) ? 1 : 0;
+      u8(dn)[i] = f->done(i) ? 1 : 0;
+    }
+    PyObject *out = Py_BuildValue("{s:N,s:N,s:N,s:N,s:N}", "following", fo, "leg", lg, "legs", ls,
+                                  "reversing", rv, "done", dn);
+    if (!out)
+      throw std::runtime_error("pycvc.nav_route_follower_status: alloc failed");
     return out;
   }
 
