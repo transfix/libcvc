@@ -353,8 +353,8 @@ Not yet:
 ## The four-wheel vehicle: `dyn4_plant` (P8d)
 
 `diff::dyn4_plant` (`inc/cvc/nav/detail/dyn_4w.h`) is P8a's single-track vehicle on its four
-contact patches. `bike_control` commands it as it commands `dyn_plant`, so a policy, or cvcdbg's
-comm-network trainer, trains through per-wheel grip, the terrain under each wheel, and the load
+contact patches. `bike_control` commands it as it commands `dyn_plant`, so a policy trains
+through per-wheel grip, the terrain under each wheel, and the load
 each corner carries.
 
 ```cpp
