@@ -28,15 +28,19 @@
 #include "coef_energy_test_model.h"
 #include "material_batch_fixture.h"
 
+#include <boost/property_tree/json_parser.hpp>
+#include <boost/property_tree/ptree.hpp>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cvc/nav/belief_material.h>
 #include <cvc/nav/coef_energy_net.h>
 #include <cvc/nav/material_train.h>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <limits>
 #include <random>
 #include <sstream>
 #include <string>
@@ -55,12 +59,35 @@ using cvc_test::make_batch;
 
 // with_ext puts an external force in every rollout the loss scores (material_batch::ext): a
 // smooth force patch per agent, about 0.3, so the weights' gradient also runs through its J.
-void full_chain_gradcheck(const material_loss_config &cfg, const char *tag, bool with_ext = false) {
+// belief takes the 3-channel net ([r~, hard, seen] patches, a seen channel of mixed bits) with
+// the training gate on every other agent (material_batch::gate_active).
+void full_chain_gradcheck(const material_loss_config &cfg, const char *tag, bool with_ext = false,
+                          bool belief = false) {
   std::mt19937 rng(2024);
   const int P = 16;
-  coef_energy_net m = cvc_test::build_test_model(rng, P);
-  const Batch batch = make_batch(rng, /*B=*/16, /*N=*/3, P, /*Hp=*/13, /*Wp=*/13);
+  cvc_test::test_model_dims dims;
+  dims.risk_channels = belief ? 3 : 2;
+  coef_energy_net m = cvc_test::build_test_model(rng, P, dims);
+  Batch batch = make_batch(rng, /*B=*/16, /*N=*/3, P, /*Hp=*/13, /*Wp=*/13);
+  std::vector<std::uint8_t> gate;
+  if (belief) {
+    const std::size_t pp = static_cast<std::size_t>(P) * P;
+    std::vector<float> rp(static_cast<std::size_t>(batch.B) * 3 * pp);
+    for (int i = 0; i < batch.B; ++i)
+      for (std::size_t k = 0; k < pp; ++k) {
+        const bool seen = (k + i) % 3 != 0;
+        rp[(i * 3 + 0) * pp + k] = seen ? batch.risk_patch[(i * 2 + 0) * pp + k] : 0.0f;
+        rp[(i * 3 + 1) * pp + k] = seen ? batch.risk_patch[(i * 2 + 1) * pp + k] : 0.0f;
+        rp[(i * 3 + 2) * pp + k] = seen ? 1.0f : 0.0f;
+      }
+    batch.risk_patch = std::move(rp);
+    gate.resize(batch.B);
+    for (int i = 0; i < batch.B; ++i)
+      gate[i] = static_cast<std::uint8_t>(i % 2 == 0);
+  }
   material_batch mb = batch.view();
+  if (belief)
+    mb.gate_active = gate.data();
   std::vector<float> fpatch;
   cvc::nav::material_ext ext;
   if (with_ext) {
@@ -248,6 +275,50 @@ TEST(NavMaterialTrain, FullChainGradcheckDynamic) {
 
 // The same chains with an external force in the rollouts (material_batch::ext, a force patch per
 // agent): the material heads train in the presence of the force they face at deploy.
+// The belief net: 3 risk channels and the training gate, on the surrogate and the bicycle.
+TEST(NavMaterialTrain, FullChainGradcheckBelief) {
+  full_chain_gradcheck(material_loss_config{}, "belief", false, true);
+}
+
+TEST(NavMaterialTrain, FullChainGradcheckBeliefBicycle) {
+  material_loss_config cfg;
+  cfg.integrator = cvc::nav::material_integrator::bicycle;
+  cfg.bicycle.L = 0.3f;
+  cfg.bicycle.a_max = 2.0f;
+  cfg.bicycle.a_lat_max = 1.5f;
+  cfg.bicycle.vmax = 1.5f;
+  full_chain_gradcheck(cfg, "belief bicycle", false, true);
+}
+
+// The training gate: a gated-off agent's lam_soft reaches neither the rollout nor (through it)
+// the gradient, so its loss equals the loss with that agent's lam_soft head at 0 in the rollout,
+// and with every agent gated on the loss is the ungated loss, byte for byte.
+TEST(NavMaterialTrain, TheGateMultipliesLamSoftInTheRolloutOnly) {
+  std::mt19937 rng(77);
+  const int P = 16;
+  coef_energy_net m = cvc_test::build_test_model(rng, P);
+  const Batch batch = make_batch(rng, 8, 3, P, 13, 13);
+  material_batch mb = batch.view();
+  const material_loss_config cfg;
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+  const double L_none = material_loss(m, mb, cfg, nan);
+  std::vector<std::uint8_t> on(batch.B, 1), off(batch.B, 0);
+  mb.gate_active = on.data();
+  EXPECT_EQ(material_loss(m, mb, cfg, nan), L_none);
+  coef_energy_net::param_grads g1 = m.zero_grads(), g2 = m.zero_grads();
+  mb.gate_active = nullptr;
+  const double La = material_loss_and_grad(m, mb, cfg, g1);
+  mb.gate_active = on.data();
+  const double Lb = material_loss_and_grad(m, mb, cfg, g2);
+  EXPECT_EQ(La, Lb);
+  for (const auto &nm : m.param_names())
+    EXPECT_EQ(g1.at(nm), g2.at(nm)) << nm;
+  mb.gate_active = off.data();
+  const double L_off = material_loss(m, mb, cfg, nan);
+  EXPECT_NE(L_off, L_none) << "the gate did not reach the rollout";
+  EXPECT_TRUE(std::isfinite(L_off));
+}
+
 TEST(NavMaterialTrain, FullChainGradcheckWithAnExternalForce) {
   full_chain_gradcheck(material_loss_config{}, "surrogate + ext", true);
 }
@@ -300,14 +371,67 @@ struct trainer_golden_case {
   unsigned seed;
   int P, B, N, Hp, Wp;
   cvc_test::test_model_dims dims;
+  // The belief net (golden 3 of docs/roadmap/NAV-BELIEF-MATERIAL-ROADMAP.md): 3 risk channels,
+  // each agent's patch cropped by material_patch_belief from golden 1's full planes (the
+  // defaults, last tick, plane 0), and the training gate on agents 0 and 2.
+  bool belief = false;
 };
+
+// The crop golden 3's patches come from: golden 1's full arrays, a 12 m patch around each
+// position (on golden 1's [0, 31]^2 grid; the third reaches off the map).
+constexpr double kBeliefExtent = 12.0;
+const double kBeliefPos[4][2] = {{11.9, 7.4}, {24.1, 20.1}, {3.0, 29.5}, {20.0, 2.0}};
+
+static std::vector<float> belief_crops(int B, int P) {
+  namespace fs = std::filesystem;
+  const fs::path g1 = fs::path(__FILE__).parent_path() / "data" / "belief_material_golden.json";
+  boost::property_tree::ptree t;
+  boost::property_tree::read_json(g1.string(), t);
+  const int rows = t.get<int>("grid.rows"), cols = t.get<int>("grid.cols");
+  std::vector<double> bnd;
+  for (const auto &v : t.get_child("grid.bounds"))
+    bnd.push_back(v.second.get_value<double>());
+  auto plane = [&](const char *key) {
+    std::vector<double> out;
+    for (const auto &v : t.get_child(std::string("full.") + key))
+      out.push_back(v.second.get_value<double>());
+    return out;
+  };
+  const std::vector<double> rk = plane("risk"), hb = plane("hard_b"), sn = plane("material_seen");
+  std::vector<float> risk(rk.begin(), rk.end());
+  std::vector<std::uint8_t> hard(hb.size()), seen(sn.size());
+  for (std::size_t k = 0; k < hb.size(); ++k) {
+    hard[k] = hb[k] != 0.0;
+    seen[k] = sn[k] != 0.0;
+  }
+  const std::size_t per = static_cast<std::size_t>(3) * P * P;
+  std::vector<float> out(static_cast<std::size_t>(B) * per);
+  for (int i = 0; i < B; ++i)
+    cvc::nav::material_patch_belief(risk.data(), hard.data(), seen.data(), rows, cols, bnd[0],
+                                    bnd[1], bnd[2], bnd[3], kBeliefPos[i % 4][0],
+                                    kBeliefPos[i % 4][1], kBeliefExtent, P,
+                                    cvc::nav::belief_material_params{}, out.data() + i * per);
+  return out;
+}
 
 static void run_trainer_golden(const trainer_golden_case &gc) {
   std::mt19937 rng(gc.seed);
   const int P = gc.P;
-  coef_energy_net m = cvc_test::build_test_model(rng, P, gc.dims);
-  const Batch batch = make_batch(rng, gc.B, gc.N, P, gc.Hp, gc.Wp);
+  cvc_test::test_model_dims dims = gc.dims;
+  if (gc.belief)
+    dims.risk_channels = 3;
+  coef_energy_net m = cvc_test::build_test_model(rng, P, dims);
+  Batch batch = make_batch(rng, gc.B, gc.N, P, gc.Hp, gc.Wp);
+  std::vector<std::uint8_t> gate;
+  if (gc.belief) {
+    batch.risk_patch = belief_crops(gc.B, P);
+    gate.resize(gc.B);
+    for (int i = 0; i < gc.B; ++i)
+      gate[i] = static_cast<std::uint8_t>(i % 2 == 0);
+  }
   material_batch mb = batch.view();
+  if (gc.belief)
+    mb.gate_active = gate.data();
   const int B = batch.B, Hp = batch.Hp, Wp = batch.Wp, K = 2;
   int steps = 0;
   for (int h : batch.H)
@@ -399,8 +523,20 @@ static void run_trainer_golden(const trainer_golden_case &gc) {
      << ",\n  \"rollout_patch\": " << arr(batch.rollout_patch) << ",\n  \"rr\": " << arr(batch.rr)
      << ",\n  \"d_hat\": " << arr(batch.d_hat) << ",\n  \"dt\": " << arr(batch.dt)
      << ",\n  \"H\": " << arr(batch.H) << ",\n  \"o_tgt\": " << arr(batch.o_tgt)
-     << ",\n  \"v_tgt\": " << arr(batch.v_tgt) << ",\n  \"gamma_o\": " << arr(batch.gamma_o)
-     << "},\n";
+     << ",\n  \"v_tgt\": " << arr(batch.v_tgt) << ",\n  \"gamma_o\": " << arr(batch.gamma_o);
+  if (gc.belief)
+    js << ",\n  \"risk_channels\": 3, \"gate_active\": " << arr(gate);
+  js << "},\n";
+  if (gc.belief) {
+    js << " \"crop\": {\"source\": \"belief_material_golden.json full (defaults, last tick, plane "
+          "0)\", \"extent_m\": "
+       << num(kBeliefExtent) << ", \"P\": " << P
+       << ", \"unknown_risk\": 0, \"unknown_hard\": 0, \"positions\": [";
+    for (int i = 0; i < gc.B; ++i)
+      js << (i ? ", " : "") << "[" << num(kBeliefPos[i % 4][0]) << ", " << num(kBeliefPos[i % 4][1])
+         << "]";
+    js << "]},\n";
+  }
   js << " \"ext\": {\"K\": " << K << ", \"steps\": " << steps
      << ", \"steer\": 1, \"patch\": " << arr(fpatch) << ",\n  \"patch_of_step\": " << arr(fsched)
      << "},\n";
@@ -439,6 +575,12 @@ TEST(NavMaterialTrain, TorchTrainerGolden) {
 // GRL-SNAM's CI can commit it and hold its torch trainer to it.
 TEST(NavMaterialTrain, TorchTrainerGoldenSmall) {
   run_trainer_golden({"material_train_golden_small", 2025, 16, 4, 3, 9, 9, {16, 2, 1, 16}});
+}
+
+// Golden 3 (belief material): the small golden's widths and batch with the 3-channel net,
+// patches cropped from golden 1 and the training gate. Its _w0/_w3 are .cvcnm version 2.
+TEST(NavMaterialTrain, TorchTrainerGoldenBelief) {
+  run_trainer_golden({"material_train_golden_belief", 2026, 16, 4, 3, 9, 9, {16, 2, 1, 16}, true});
 }
 
 // The width-generated parameter table is the fixed one at the default widths.

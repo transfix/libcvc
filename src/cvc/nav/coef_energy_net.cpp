@@ -34,6 +34,8 @@
 #include <fstream>
 #include <limits>
 #include <stdexcept>
+#include <string>
+#include <utility>
 
 namespace cvc {
 namespace nav {
@@ -226,10 +228,17 @@ coef_energy_net coef_energy_net::load_from_memory(const void *data, std::size_t 
   if (nbytes < 8 || std::memcmp(p, "CVNM", 4) != 0)
     throw std::runtime_error("coef_energy_net: bad magic (not a .cvcnm)");
   p += 4;
+  // Every fixed-size read is bounds-checked: a truncated header throws, never reads past `end`.
+  auto need = [&](std::size_t n, const char *what) {
+    if (static_cast<std::size_t>(end - p) < n)
+      throw std::runtime_error(std::string("coef_energy_net: truncated .cvcnm (") + what + ")");
+  };
   coef_energy_net m;
+  need(4, "version");
   const std::uint32_t ver = rd_u32(p);
-  if (ver != kFormatVersion)
+  if (ver != kFormatVersion && ver != kFormatVersionBelief)
     throw std::runtime_error("coef_energy_net: unsupported .cvcnm version");
+  need(8 + 5 * 4 + 4 * 4, "header");
   m.arch_hash_ = rd_u64(p);
   m.d_tok_ = static_cast<int>(rd_u32(p));
   m.nhead_ = static_cast<int>(rd_u32(p));
@@ -240,14 +249,32 @@ coef_energy_net coef_energy_net::load_from_memory(const void *data, std::size_t 
   m.lam_hard_max_ = rd_f32(p);
   m.mu_lat_max_ = rd_f32(p);
   m.eps_ = rd_f32(p);
+  if (ver == kFormatVersionBelief) {
+    need(7 * 4, "belief block");
+    m.belief_.risk_channels = rd_u32(p);
+    m.belief_.seen_rule = rd_u32(p);
+    m.belief_.unknown_risk = rd_f32(p);
+    m.belief_.unknown_hard = rd_u32(p);
+    m.belief_.unknown_gate_hard = rd_u32(p);
+    m.belief_.material_range_m = rd_f32(p);
+    m.belief_.patch_extent_m = rd_f32(p);
+    if (m.belief_.risk_channels != 3)
+      throw std::runtime_error("coef_energy_net: a version-2 .cvcnm must have 3 risk channels");
+    if (m.belief_.seen_rule > 1 || m.belief_.unknown_hard > 1 || m.belief_.unknown_gate_hard > 1)
+      throw std::runtime_error("coef_energy_net: bad belief block in a version-2 .cvcnm");
+  }
+  need(4, "tensor count");
   const std::uint32_t n_tensors = rd_u32(p);
   for (std::uint32_t k = 0; k < n_tensors; ++k) {
+    need(4, "name length");
     const std::uint32_t nl = rd_u32(p);
-    if (p + nl > end)
+    if (static_cast<std::size_t>(end - p) < nl)
       throw std::runtime_error("coef_energy_net: truncated .cvcnm (name)");
     std::string name(reinterpret_cast<const char *>(p), nl);
     p += nl;
+    need(4, "ndim");
     const std::uint32_t ndim = rd_u32(p);
+    need(static_cast<std::size_t>(ndim) * 4, "dims");
     tensor tn;
     std::size_t count = 1;
     for (std::uint32_t di = 0; di < ndim; ++di) {
@@ -255,14 +282,107 @@ coef_energy_net coef_energy_net::load_from_memory(const void *data, std::size_t 
       tn.dims.push_back(dv);
       count *= static_cast<std::size_t>(dv);
     }
-    if (p + count * 4 > end)
+    if (static_cast<std::size_t>(end - p) / 4 < count)
       throw std::runtime_error("coef_energy_net: truncated .cvcnm (data)");
     tn.data.resize(count);
     std::memcpy(tn.data.data(), p, count * 4);
     p += count * 4;
     m.tensors_.emplace(std::move(name), std::move(tn));
   }
+  // The meta trailer (u32 length + UTF-8). Kept so serialize() writes it back; a file that ends
+  // right after the tensors reads as empty meta.
+  if (p != end) {
+    need(4, "meta length");
+    const std::uint32_t ml = rd_u32(p);
+    if (static_cast<std::size_t>(end - p) < ml)
+      throw std::runtime_error("coef_energy_net: truncated .cvcnm (meta)");
+    m.meta_.assign(reinterpret_cast<const char *>(p), ml);
+    p += ml;
+  }
+  // The encoder's input channels come from its first conv; the header must agree.
+  const auto it = m.tensors_.find("risk_enc.net.0.weight");
+  if (it == m.tensors_.end())
+    throw std::runtime_error("coef_energy_net: missing tensor 'risk_enc.net.0.weight'");
+  const int ch = it->second.dims.size() == 4 ? it->second.dims[1] : -1;
+  if (ver == kFormatVersion && ch != 2)
+    throw std::runtime_error("coef_energy_net: a version-1 .cvcnm must have a 2-channel risk "
+                             "encoder (3 channels need version 2)");
+  if (ver == kFormatVersionBelief && ch != 3)
+    throw std::runtime_error("coef_energy_net: the risk encoder's channels do not match the "
+                             "belief block's risk_channels");
+  m.validate_shapes();
   return m;
+}
+
+void coef_energy_net::validate_shapes() const {
+  const int d = d_tok_, dr = d_risk_, C = static_cast<int>(belief_.risk_channels);
+  if (d < 1 || nhead_ < 1 || d % nhead_ != 0 || num_layers_ < 0 || dr < 1 || patch_size_ < 1)
+    throw std::runtime_error("coef_energy_net: bad hyperparams (d_tok, nhead, num_layers, "
+                             "d_risk, patch_size)");
+  // The fixed hidden widths (goal 64, obstacle 128, FFN 128, head 64, CNN 16/32/64, a 4 x 4
+  // pool) are the source net's; only d_tok, num_layers, d_risk and the channels vary.
+  std::vector<std::pair<std::string, std::vector<int>>> want = {
+      {"goal_enc.0.weight", {64, 4}}, {"goal_enc.0.bias", {64}},
+      {"goal_enc.2.weight", {d, 64}}, {"goal_enc.2.bias", {d}},
+      {"obs_enc.0.weight", {128, 6}}, {"obs_enc.0.bias", {128}},
+      {"obs_enc.2.weight", {d, 128}}, {"obs_enc.2.bias", {d}}};
+  for (int L = 0; L < num_layers_; ++L) {
+    const std::string pre = "fuser.layers." + std::to_string(L) + ".";
+    want.push_back({pre + "self_attn.in_proj_weight", {3 * d, d}});
+    want.push_back({pre + "self_attn.in_proj_bias", {3 * d}});
+    want.push_back({pre + "self_attn.out_proj.weight", {d, d}});
+    want.push_back({pre + "self_attn.out_proj.bias", {d}});
+    want.push_back({pre + "linear1.weight", {128, d}});
+    want.push_back({pre + "linear1.bias", {128}});
+    want.push_back({pre + "linear2.weight", {d, 128}});
+    want.push_back({pre + "linear2.bias", {d}});
+    for (const char *nn : {"norm1", "norm2"}) {
+      want.push_back({pre + nn + ".weight", {d}});
+      want.push_back({pre + nn + ".bias", {d}});
+    }
+  }
+  auto head = [&](const std::string &h, int in) {
+    want.push_back({h + ".0.weight", {64, in}});
+    want.push_back({h + ".0.bias", {64}});
+    want.push_back({h + ".2.weight", {1, 64}});
+    want.push_back({h + ".2.bias", {1}});
+  };
+  for (const char *h : {"alpha_head", "beta_head", "gamma_head"})
+    head(h, d);
+  want.push_back({"risk_enc.net.0.weight", {16, C, 3, 3}});
+  want.push_back({"risk_enc.net.0.bias", {16}});
+  want.push_back({"risk_enc.net.2.weight", {32, 16, 3, 3}});
+  want.push_back({"risk_enc.net.2.bias", {32}});
+  want.push_back({"risk_enc.net.4.weight", {64, 32, 3, 3}});
+  want.push_back({"risk_enc.net.4.bias", {64}});
+  want.push_back({"risk_enc.net.8.weight", {dr, 64 * 4 * 4}});
+  want.push_back({"risk_enc.net.8.bias", {dr}});
+  for (const char *h : {"lam_soft_head", "lam_hard_head", "mu_lat_head"})
+    head(h, dr + d);
+  for (const auto &w : want) {
+    const auto it = tensors_.find(w.first);
+    if (it == tensors_.end())
+      throw std::runtime_error("coef_energy_net: missing tensor '" + w.first + "'");
+    if (it->second.dims != w.second) {
+      std::string got, exp;
+      for (int v : it->second.dims)
+        got += (got.empty() ? "" : ",") + std::to_string(v);
+      for (int v : w.second)
+        exp += (exp.empty() ? "" : ",") + std::to_string(v);
+      throw std::runtime_error("coef_energy_net: tensor '" + w.first + "' is [" + got +
+                               "], expected [" + exp + "]");
+    }
+  }
+}
+
+void coef_energy_net::set_belief_header(const cvcnm_belief_header &h) {
+  const tensor &w = t("risk_enc.net.0.weight");
+  if (w.dims.size() != 4 || static_cast<std::uint32_t>(w.dims[1]) != h.risk_channels)
+    throw std::invalid_argument("coef_energy_net::set_belief_header: risk_channels must equal "
+                                "the risk encoder's input channels");
+  if (h.seen_rule > 1 || h.unknown_hard > 1 || h.unknown_gate_hard > 1)
+    throw std::invalid_argument("coef_energy_net::set_belief_header: bad belief block");
+  belief_ = h;
 }
 
 coef_energy_net coef_energy_net::load(const std::string &path) {
@@ -362,7 +482,7 @@ void coef_energy_net::forward_one(const float *obs_feats, const std::uint8_t *ob
   const int P = patch_p;
   std::vector<float> c0, c1, c2, pooled;
   int Ho, Wo;
-  conv2d(risk_patch, 2, P, P, t("risk_enc.net.0.weight").data.data(),
+  conv2d(risk_patch, risk_channels(), P, P, t("risk_enc.net.0.weight").data.data(),
          t("risk_enc.net.0.bias").data.data(), 16, 3, 3, 1, 1, c0, Ho, Wo);
   for (auto &v : c0)
     v = relu(v);
@@ -395,7 +515,7 @@ void coef_energy_net::forward_batch(const float *obs_feats, const std::uint8_t *
                                     const float *risk_patch, int patch_p, float *alphas_out,
                                     float *beta, float *gamma, float *lam_soft, float *lam_hard,
                                     float *mu_lat, int num_threads) const {
-  const int pp = patch_p * patch_p * 2;
+  const int pp = patch_p * patch_p * risk_channels();
   detail::parallel_for(n, num_threads, [&](int i) {
     const int o0 = obs_offsets[i], n_obs = obs_offsets[i + 1] - obs_offsets[i];
     forward_one(obs_feats + static_cast<std::size_t>(o0) * 6, obs_mask + o0, n_obs,

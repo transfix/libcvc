@@ -1939,6 +1939,55 @@ PyObject *pycvc_nav_sense_impl(PyObject *truth, PyObject *positions, PyObject *h
                                min_x, min_y, max_x, max_y, sd);
   }
 
+  // The model's 3-channel belief risk patch for one agent (belief_material.h
+  // material_patch_belief): (H,W) f32 risk (the belief planes' r~), (H,W) u8 hard_b and seen,
+  // the grid's bounds, the world position, the patch's extent in metres and P -> (3,P,P) f32
+  // [r~ | unknown_risk, hard | unknown_hard, seen].
+  ArrayView nav_material_patch_belief(PyObject *risk, PyObject *hard_b, PyObject *seen,
+                                      double min_x, double min_y, double max_x, double max_y,
+                                      double px, double py, double extent_m, int P,
+                                      double unknown_risk, int unknown_hard) {
+    std::vector<PyArrayObject *> hold;
+    auto fail = [&](const char *msg) {
+      for (PyArrayObject *h : hold)
+        Py_DECREF(h);
+      throw std::invalid_argument(msg);
+    };
+    auto take = [&](PyObject *o, int typ) -> PyArrayObject * {
+      PyArrayObject *a = reinterpret_cast<PyArrayObject *>(
+          PyArray_FROMANY(o, typ, 2, 2, NPY_ARRAY_C_CONTIGUOUS));
+      if (!a)
+        fail("pycvc.nav_material_patch_belief: an input array had the wrong dtype/rank");
+      hold.push_back(a);
+      return a;
+    };
+    PyArrayObject *ra = take(risk, NPY_FLOAT);
+    PyArrayObject *ha = take(hard_b, NPY_UINT8);
+    PyArrayObject *sa = take(seen, NPY_UINT8);
+    const int rows = static_cast<int>(PyArray_DIM(ra, 0)), cols = static_cast<int>(PyArray_DIM(ra, 1));
+    if (PyArray_DIM(ha, 0) != rows || PyArray_DIM(ha, 1) != cols || PyArray_DIM(sa, 0) != rows ||
+        PyArray_DIM(sa, 1) != cols)
+      fail("pycvc.nav_material_patch_belief: risk/hard_b/seen shapes differ");
+    if (unknown_hard != 0 && unknown_hard != 1)
+      fail("pycvc.nav_material_patch_belief: unknown_hard must be 0 or 1");
+    cvc::nav::belief_material_params p;
+    p.unknown_risk = static_cast<float>(unknown_risk);
+    p.unknown_hard = static_cast<std::uint8_t>(unknown_hard);
+    std::vector<float> out(static_cast<std::size_t>(3) * (P > 0 ? P : 0) * (P > 0 ? P : 0));
+    try {
+      cvc::nav::material_patch_belief(
+          static_cast<const float *>(PyArray_DATA(ra)),
+          static_cast<const std::uint8_t *>(PyArray_DATA(ha)),
+          static_cast<const std::uint8_t *>(PyArray_DATA(sa)), rows, cols, min_x, min_y, max_x,
+          max_y, px, py, extent_m, P, p, out.data());
+    } catch (const std::invalid_argument &e) {
+      fail(e.what());
+    }
+    for (PyArrayObject *h : hold)
+      Py_DECREF(h);
+    return pycvc_nav_view<float>(std::move(out), {3, (long)P, (long)P}, DType::Float32);
+  }
+
   // Frame-wise feasibility witness (BIT-identical to grl_snam.material.witness_gate).
   // Positions are CONTINUOUS CELL coords (row, col f64). gate_hard must already
   // include occupancy; clear_m is its metres clearance plane. Returns (10,) f64:
@@ -2505,10 +2554,9 @@ PyObject *nav_matnet_forward(const char *weights_path, PyObject *obs_feats, PyOb
   const int n = static_cast<int>(PyArray_DIM(gfa, 0));
   const int P = static_cast<int>(PyArray_DIM(rpa, 2));
   if (PyArray_DIM(ofa, 1) != 6 || PyArray_DIM(oma, 0) != total || PyArray_DIM(oo, 0) != n + 1 ||
-      PyArray_DIM(gfa, 1) != 4 || PyArray_DIM(rpa, 0) != n || PyArray_DIM(rpa, 1) != 2 ||
-      PyArray_DIM(rpa, 3) != P)
+      PyArray_DIM(gfa, 1) != 4 || PyArray_DIM(rpa, 0) != n || PyArray_DIM(rpa, 3) != P)
     fail("pycvc.nav_matnet_forward: shape mismatch (obs (T,6) mask (T,) offs (n+1,) goal (n,4) "
-         "patch (n,2,P,P))");
+         "patch (n,C,P,P))");
   const int *offs = static_cast<const int *>(PyArray_DATA(oo));
   if (offs[0] != 0 || offs[n] != total)
     fail("pycvc.nav_matnet_forward: obs_offsets must start at 0 and end at total");
@@ -2516,6 +2564,9 @@ PyObject *nav_matnet_forward(const char *weights_path, PyObject *obs_feats, PyOb
   cvc::nav::coef_energy_net model = cvc::nav::coef_energy_net::load(weights_path);
   if (model.patch_size() != P)
     fail("pycvc.nav_matnet_forward: risk_patch P does not match the model's patch_size");
+  if (PyArray_DIM(rpa, 1) != model.risk_channels())
+    fail("pycvc.nav_matnet_forward: risk_patch channels do not match the model's (2, or 3 for a "
+         "version-2 .cvcnm)");
 
   npy_intp dt = total, dn = n;
   PyObject *al = PyArray_SimpleNew(1, &dt, NPY_FLOAT);
@@ -3018,7 +3069,8 @@ struct MaterialBatchArgs {
       Py_DECREF(h);
   }
 
-  void bind(const char *who, int model_patch_size, PyObject *obs_feats, PyObject *obs_mask,
+  void bind(const char *who, int model_patch_size, int model_channels, PyObject *obs_feats,
+            PyObject *obs_mask,
             PyObject *goal_feats, PyObject *risk_patch, PyObject *o0, PyObject *v0, PyObject *goal,
             PyObject *C, PyObject *R, PyObject *rollout_patch, PyObject *rr, PyObject *d_hat,
             PyObject *dt, PyObject *H, PyObject *o_tgt, PyObject *v_tgt, PyObject *gamma_o) {
@@ -3058,7 +3110,8 @@ struct MaterialBatchArgs {
               Wp = static_cast<int>(PyArray_DIM(rlpa, 3));
     if (PyArray_DIM(ofa, 0) != B || PyArray_DIM(ofa, 1) != N || PyArray_DIM(ofa, 2) != 6 ||
         PyArray_DIM(oma, 0) != B || PyArray_DIM(oma, 1) != N || PyArray_DIM(gfa, 0) != B ||
-        PyArray_DIM(gfa, 1) != 4 || PyArray_DIM(rpa, 0) != B || PyArray_DIM(rpa, 1) != 2 ||
+        PyArray_DIM(gfa, 1) != 4 || PyArray_DIM(rpa, 0) != B ||
+        PyArray_DIM(rpa, 1) != model_channels ||
         PyArray_DIM(rpa, 3) != P || PyArray_DIM(o0a, 1) != 2 || PyArray_DIM(v0a, 0) != B ||
         PyArray_DIM(v0a, 1) != 2 || PyArray_DIM(ga, 0) != B || PyArray_DIM(ga, 1) != 2 ||
         PyArray_DIM(Ca, 0) != B || PyArray_DIM(Ca, 2) != 2 || PyArray_DIM(Ra, 0) != B ||
@@ -3100,6 +3153,20 @@ struct MaterialBatchArgs {
                 int steer) {
     ext.bind(who, b.B, b.Hp, b.Wp, b.H, patch, pos, F, J, steer);
     b.ext = ext.ptr();
+  }
+
+  // gate_active (B,) u8 or None: the witness gate in training (material_batch::gate_active).
+  void bind_gate(const char *who, PyObject *gate_active) {
+    if (!gate_active || gate_active == Py_None)
+      return;
+    PyArrayObject *g = reinterpret_cast<PyArrayObject *>(
+        PyArray_FROMANY(gate_active, NPY_UINT8, 1, 1, NPY_ARRAY_C_CONTIGUOUS));
+    if (!g)
+      throw std::invalid_argument(std::string("pycvc.") + who + ": gate_active must be (B,) u8");
+    hold.push_back(g);
+    if (PyArray_DIM(g, 0) != b.B)
+      throw std::invalid_argument(std::string("pycvc.") + who + ": gate_active must be (B,)");
+    b.gate_active = static_cast<const std::uint8_t *>(PyArray_DATA(g));
   }
 };
 
@@ -3160,11 +3227,15 @@ PyObject *nav_material_trainer_create(const char *cvcnm_path, double grad_clip =
 }
 
 // One training step over a padded batch. Arrays (C-contiguous): obs_feats
-// (B,N,6) f32, obs_mask (B,N) u8, goal_feats (B,4) f32, risk_patch (B,2,P,P) f32,
+// (B,N,6) f32, obs_mask (B,N) u8, goal_feats (B,4) f32, risk_patch (B,C,P,P) f32 (C the
+// model's risk channels: 2, or 3 for a belief net),
 // o0/v0/goal/o_tgt/v_tgt (B,2) f32, C (B,N,2) f32, R (B,N) f32, rollout_patch
 // (B,6,Hp,Wp) f32, rr/d_hat/dt/gamma_o (B,) f32, H (B,) i32. Applies Adam at lr;
 // returns the scalar loss. ext_* is an external force in the rollouts (MaterialExtArgs:
-// a caller's own force, as the deployed drive_step_material_ext adds it).
+// a caller's own force, as the deployed drive_step_material_ext adds it). gate_active (B,) u8
+// (None = ungated) is the witness gate in training: each agent's lam_soft enters the rollouts
+// times its bit (material_batch::gate_active). nav_material_trainer_risk_channels marks a
+// pycvc that takes it.
 PyObject *nav_material_trainer_step(PyObject *handle, PyObject *obs_feats, PyObject *obs_mask,
                                     PyObject *goal_feats, PyObject *risk_patch, PyObject *o0,
                                     PyObject *v0, PyObject *goal, PyObject *C, PyObject *R,
@@ -3174,13 +3245,15 @@ PyObject *nav_material_trainer_step(PyObject *handle, PyObject *obs_feats, PyObj
                                     PyObject *ext_patch = nullptr,
                                     PyObject *ext_patch_of_step = nullptr,
                                     PyObject *ext_F = nullptr, PyObject *ext_J = nullptr,
-                                    int ext_steer = 1) {
+                                    int ext_steer = 1, PyObject *gate_active = nullptr) {
   MaterialTrainer *t = material_trainer_from(handle);
   MaterialBatchArgs ba;
-  ba.bind("nav_material_trainer_step", t->model.patch_size(), obs_feats, obs_mask, goal_feats,
-          risk_patch, o0, v0, goal, C, R, rollout_patch, rr, d_hat, dt, H, o_tgt, v_tgt, gamma_o);
+  ba.bind("nav_material_trainer_step", t->model.patch_size(), t->model.risk_channels(), obs_feats,
+          obs_mask, goal_feats, risk_patch, o0, v0, goal, C, R, rollout_patch, rr, d_hat, dt, H,
+          o_tgt, v_tgt, gamma_o);
   ba.bind_ext("nav_material_trainer_step", ext_patch, ext_patch_of_step, ext_F, ext_J,
               ext_steer);
+  ba.bind_gate("nav_material_trainer_step", gate_active);
   // Per-call, like nav_material_trainer_loss: writing num_threads onto t->cfg
   // would make one threaded call change the default for every later step.
   cvc::nav::material_loss_config cfg = t->cfg;
@@ -3217,13 +3290,15 @@ PyObject *nav_material_trainer_loss(PyObject *handle, PyObject *obs_feats, PyObj
                                     PyObject *ext_patch = nullptr,
                                     PyObject *ext_patch_of_step = nullptr,
                                     PyObject *ext_F = nullptr, PyObject *ext_J = nullptr,
-                                    int ext_steer = 1) {
+                                    int ext_steer = 1, PyObject *gate_active = nullptr) {
   MaterialTrainer *t = material_trainer_from(handle);
   MaterialBatchArgs ba;
-  ba.bind("nav_material_trainer_loss", t->model.patch_size(), obs_feats, obs_mask, goal_feats,
-          risk_patch, o0, v0, goal, C, R, rollout_patch, rr, d_hat, dt, H, o_tgt, v_tgt, gamma_o);
+  ba.bind("nav_material_trainer_loss", t->model.patch_size(), t->model.risk_channels(), obs_feats,
+          obs_mask, goal_feats, risk_patch, o0, v0, goal, C, R, rollout_patch, rr, d_hat, dt, H,
+          o_tgt, v_tgt, gamma_o);
   ba.bind_ext("nav_material_trainer_loss", ext_patch, ext_patch_of_step, ext_F, ext_J,
               ext_steer);
+  ba.bind_gate("nav_material_trainer_loss", gate_active);
   cvc::nav::material_loss_config cfg = t->cfg; // don't publish num_threads onto the handle
   cfg.num_threads = num_threads;
 
@@ -3241,6 +3316,12 @@ PyObject *nav_material_trainer_loss(PyObject *handle, PyObject *obs_feats, PyObj
 // back as nav_material_trainer_loss's frozen_eta to reproduce the finite-
 // difference workflow material_train.h documents (the FD must see the same
 // quantile the analytic gradient did). 0.0 before the first step.
+// The trainer's model's risk-patch channels (2, or 3 for a version-2 .cvcnm). Its presence also
+// marks a pycvc whose nav_material_trainer_step / _loss take the trailing gate_active.
+PyObject *nav_material_trainer_risk_channels(PyObject *handle) {
+  return PyLong_FromLong(material_trainer_from(handle)->model.risk_channels());
+}
+
 PyObject *nav_material_trainer_last_eta(PyObject *handle) {
   return PyFloat_FromDouble(static_cast<double>(material_trainer_from(handle)->last_eta));
 }

@@ -77,16 +77,22 @@ for _h in ("lam_soft_head", "lam_hard_head", "mu_lat_head"):
     ]
 
 
-def _write_random_cvcnm(path, patch_size, seed=0):
+def _write_random_cvcnm(path, patch_size, seed=0, channels=2):
+    """channels=3 writes the belief net: version 2, its belief block (<IIfIIff>, the spec's
+    defaults and a 12 m patch) and a 3-channel risk encoder."""
     rng = np.random.default_rng(seed)
     with open(path, "wb") as f:
         f.write(b"CVNM")
-        f.write(struct.pack("<I", 1))
+        f.write(struct.pack("<I", 2 if channels == 3 else 1))
         f.write(struct.pack("<Q", 0xABCD))
         f.write(struct.pack("<IIIII", 64, 4, 2, 64, patch_size))
         f.write(struct.pack("<ffff", 5.0, 10.0, 5.0, 1e-5))
+        if channels == 3:
+            f.write(struct.pack("<IIfIIff", 3, 0, 0.0, 0, 1, 0.0, 12.0))
         f.write(struct.pack("<I", len(_TENSORS)))
         for name, shape in _TENSORS:
+            if name == "risk_enc.net.0.weight":
+                shape = (16, channels, 3, 3)
             nb = name.encode()
             f.write(struct.pack("<I", len(nb)))
             f.write(nb)
@@ -374,10 +380,111 @@ def test_external_force():
           f"20 steps {l0:.4f} -> {last:.4f}; rollouts vs golden {worst:.2e}")
 
 
+def test_belief_net_and_the_training_gate():
+    """A 3-channel net (.cvcnm version 2): the trainer takes [r~, hard, seen] patches and the
+    training gate; all-on equals ungated, all-off changes the loss; a 2-channel patch is refused;
+    save keeps version 2."""
+    if not hasattr(pycvc, "nav_material_trainer_risk_channels"):
+        print("  (no nav_material_trainer_risk_channels — skipping the belief net)")
+        return
+    with tempfile.TemporaryDirectory() as d:
+        init = os.path.join(d, "belief.cvcnm")
+        _write_random_cvcnm(init, patch_size=16, seed=5, channels=3)
+        h = pycvc.nav_material_trainer_create(init)
+        assert pycvc.nav_material_trainer_risk_channels(h) == 3
+        batch = _synthetic_batch(seed=13)
+        B, P = batch["risk_patch"].shape[0], batch["risk_patch"].shape[2]
+        seen = (np.arange(P * P).reshape(P, P) % 3 != 0).astype(np.float32)
+        rp = batch["risk_patch"] * seen
+        batch["risk_patch"] = np.concatenate([rp, np.broadcast_to(seen, (B, 1, P, P))], 1)
+        args = _packed(batch)
+        nan = float("nan")
+        ungated = pycvc.nav_material_trainer_loss(h, *args, nan, 0)
+        on = pycvc.nav_material_trainer_loss(h, *args, nan, 0, None, None, None, None, 1,
+                                             np.ones(B, np.uint8))
+        off = pycvc.nav_material_trainer_loss(h, *args, nan, 0, None, None, None, None, 1,
+                                              np.zeros(B, np.uint8))
+        assert on == ungated, (on, ungated)
+        assert off != ungated and np.isfinite(off)
+        gate = (np.arange(B) % 2 == 0).astype(np.uint8)
+        l0 = pycvc.nav_material_trainer_step(h, *args, 1e-3, 0, None, None, None, None, 1, gate)
+        last = l0
+        for _ in range(20):
+            last = pycvc.nav_material_trainer_step(h, *args, 1e-3, 0, None, None, None, None, 1, gate)
+        assert last < l0, (l0, last)
+        two = _packed(_synthetic_batch(seed=13))
+        try:
+            pycvc.nav_material_trainer_loss(h, *two, nan, 0)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("a 2-channel risk patch reached a 3-channel net")
+        out = os.path.join(d, "belief_trained.cvcnm")
+        pycvc.nav_material_trainer_save(h, out)
+        with open(out, "rb") as f:
+            head = f.read(8)
+        assert head[:4] == b"CVNM" and struct.unpack("<I", head[4:8])[0] == 2
+        assert pycvc.nav_material_trainer_risk_channels(pycvc.nav_material_trainer_create(out)) == 3
+    print(f"  belief net: gate on == ungated ({ungated:.4f}), off {off:.4f}; "
+          f"21 gated steps {l0:.4f} -> {last:.4f}; saved as version 2")
+
+
+def _patch_twin(risk, hard_b, seen, bounds, pos, extent_m, P, unknown_risk=0.0, unknown_hard=0):
+    """numpy twin of material_patch_belief (belief_material.h's pinned op order)."""
+    rows, cols = risk.shape
+    off = np.linspace(-extent_m / 2.0, extent_m / 2.0, P, dtype=np.float64)
+    rr = (float(pos[1]) + off[:, None] - bounds[1]) / (bounds[3] - bounds[1]) * (rows - 1)
+    cc = (float(pos[0]) + off[None, :] - bounds[0]) / (bounds[2] - bounds[0]) * (cols - 1)
+    rr, cc = np.broadcast_arrays(rr, cc)
+    nr, nc = np.rint(rr), np.rint(cc)
+    on = (nr >= 0) & (nr < rows) & (nc >= 0) & (nc < cols)
+    ri, ci = np.where(on, nr, 0).astype(np.intp), np.where(on, nc, 0).astype(np.intp)
+    s = on & (seen[ri, ci] != 0)
+    rc, ccl = np.clip(rr, 0.0, rows - 1.0), np.clip(cc, 0.0, cols - 1.0)
+    r0, c0 = np.floor(rc).astype(np.intp), np.floor(ccl).astype(np.intp)
+    r1, c1 = np.minimum(r0 + 1, rows - 1), np.minimum(c0 + 1, cols - 1)
+    fr, fc = rc - r0, ccl - c0
+    r64 = risk.astype(np.float64)
+    top = r64[r0, c0] + (r64[r0, c1] - r64[r0, c0]) * fc
+    bot = r64[r1, c0] + (r64[r1, c1] - r64[r1, c0]) * fc
+    out = np.empty((3, P, P), np.float32)
+    out[0] = np.where(s, (top + (bot - top) * fr).astype(np.float32), np.float32(unknown_risk))
+    out[1] = np.where(s, (hard_b[ri, ci] != 0).astype(np.float32), np.float32(unknown_hard))
+    out[2] = s.astype(np.float32)
+    return out
+
+
+def test_belief_patch_crop_matches_numpy():
+    """nav_material_patch_belief on golden 1's full planes equals its numpy twin, byte for byte."""
+    if not hasattr(pycvc, "nav_material_patch_belief"):
+        print("  (no nav_material_patch_belief — skipping the crop)")
+        return
+    import json
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    g = json.load(open(os.path.join(here, "..", "..", "src", "cvc", "tests", "data",
+                                    "belief_material_golden.json")))
+    R, C = g["grid"]["rows"], g["grid"]["cols"]
+    b = g["grid"]["bounds"]
+    f = g["full"]
+    risk = np.array(f["risk"], np.float32).reshape(R, C)
+    hard = np.array(f["hard_b"], np.uint8).reshape(R, C)
+    seen = np.array(f["material_seen"], np.uint8).reshape(R, C)
+    for pos, ext, P, ur, uh in (((11.9, 7.4), 12.0, 16, 0.0, 0), ((3.0, 29.5), 12.0, 16, 0.5, 1),
+                                ((20.0, 2.0), 7.5, 9, 0.0, 0), ((24.1, 20.1), 30.0, 25, 0.0, 0)):
+        got = np.asarray(pycvc.nav_material_patch_belief(risk, hard, seen, *b, pos[0], pos[1], ext,
+                                                         P, ur, uh))
+        want = _patch_twin(risk, hard, seen, b, pos, ext, P, ur, uh)
+        assert got.shape == (3, P, P) and got.tobytes() == want.tobytes(), pos
+    print("  belief patch crop: 4 crops equal the numpy twin, byte for byte")
+
+
 if __name__ == "__main__":
     test_trainer_reduces_loss_and_round_trips()
     test_forward_only_loss_does_not_train()
     test_sampled_multi_start_args()
     test_bicycle_integrator()
     test_external_force()
+    test_belief_net_and_the_training_gate()
+    test_belief_patch_crop_matches_numpy()
     print("pycvc nav material-trainer integration: OK")
