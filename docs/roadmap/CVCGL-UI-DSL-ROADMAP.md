@@ -4227,9 +4227,11 @@ complementary terminal experiences — a native *text UI* vs a *pixel mirror* of
   noted with the Ariadne tests — backend RENDERING becomes CI-testable (EGL software-fallback on a
   runner without a GPU), instead of only compile-checked + seam-harnessed. It needs *no* terminal
   rasterizer at all — just EGL + readback + an image-diff — so it lands first.
-- **(b) Product mode: "cvcGL in a terminal" (later).** The real renderer over SSH: the 3D scene + the
-  Ariadne ImGui UI as Sixel/Kitty graphics, with terminal input (keys, and SGR mouse where the terminal
-  reports it, bracketed paste) fed to the VTK interactor / ImGui exactly as the onscreen path does.
+- **(b) Product mode: "cvcGL in a terminal" — superseded (2026-10-19).** The plan was to mirror the
+  real renderer's pixels (the 3D scene + the Ariadne ImGui UI as Sixel/Kitty graphics) into a terminal.
+  What shipped instead is better for a terminal: `arigl --terminal` renders only the SCENE offscreen
+  and draws it behind native terminal widgets (FTXUI or tvision), so text stays text and input is the
+  terminal's own. The pixel mirror is dropped; Sixel/Kitty remain as a sharper way to draw that scene.
 
 **Honest caveats.** Readback is a GPU→CPU stall — fine for a test capture, needs PBO async + a frame cap for
 interactive use. Sixel/Kitty bandwidth and terminal latency bound the frame rate (a few fps over SSH is
@@ -4242,7 +4244,8 @@ in beside the native-window and wasm surfaces as a third way to present the same
 > `cvc::gl::ariadne::TerminalScene` renders the document's SCENE offscreen (X / EGL / OSMesa) and the half-block
 > rasterizer (tier 3 below) draws it as the terminal backend's background, with the widgets drawn natively over it by
 > FTXUI or tvision, rather than mirroring the ImGui overlay's pixels. Background drags / the wheel steer the camera.
-> Host: `ariadne_terminal`; test: `cvcgl_terminal_scene`. Sixel / Kitty and the golden-image harness (1) remain.
+> Hosts: `arigl --terminal` (the GL runtime) and the `ariadne_terminal` example; test:
+> `cvcgl_terminal_scene`. Sixel / Kitty and the golden-image harness (1) remain.
 
 **Phasing.** (1) EGL offscreen + `frameRGB` **golden-image test harness** for the ImGui/VTK backend (v1.x —
 the testability win). (2) The half-block-ANSI rasterizer (a pure RGB→bytes function + tests — no GPU needed
