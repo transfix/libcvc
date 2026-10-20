@@ -89,12 +89,21 @@ target_link_libraries(cvcGL PUBLIC cvc::cvc ${VTK_LIBRARIES})
 # stream_view decode path). Optional at build time — where the prefix has no turbojpeg the codec
 # compiles to a no-op (the "mjpeg" path then yields no video); native builds that need it ship it.
 find_package(libjpeg-turbo CONFIG QUIET)
-if(libjpeg-turbo_FOUND)
-  target_link_libraries(cvcGL PRIVATE libjpeg-turbo::turbojpeg)
+# Shared/native prefixes expose libjpeg-turbo::turbojpeg; static-only prefixes (e.g. the
+# wasm dep closure) expose only libjpeg-turbo::turbojpeg-static. The config being FOUND does
+# not guarantee a particular target exists, so pick whichever one it actually defined.
+set(_cvc_turbojpeg_tgt "")
+if(TARGET libjpeg-turbo::turbojpeg)
+  set(_cvc_turbojpeg_tgt libjpeg-turbo::turbojpeg)
+elseif(TARGET libjpeg-turbo::turbojpeg-static)
+  set(_cvc_turbojpeg_tgt libjpeg-turbo::turbojpeg-static)
+endif()
+if(_cvc_turbojpeg_tgt)
+  target_link_libraries(cvcGL PRIVATE ${_cvc_turbojpeg_tgt})
   target_compile_definitions(cvcGL PRIVATE CVC_HAVE_TURBOJPEG=1)
-  message(STATUS "cvcGL: libjpeg-turbo found -- conference video (mjpeg) enabled")
+  message(STATUS "cvcGL: libjpeg-turbo found (${_cvc_turbojpeg_tgt}) -- conference video (mjpeg) enabled")
 else()
-  message(STATUS "cvcGL: libjpeg-turbo NOT found -- mjpeg video disabled (no-op codec)")
+  message(STATUS "cvcGL: libjpeg-turbo turbojpeg target NOT found -- mjpeg video disabled (no-op codec)")
 endif()
 
 # LowMemoryPolyDataMapper carries a replica of VTK 9.5.0's private low-memory
@@ -358,6 +367,15 @@ if(CVC_SDL_VIA_CONFIG)
   set(CVCGL_SDL_DEP "find_dependency(SDL3 CONFIG)")
 else()
   set(CVCGL_SDL_DEP "")
+endif()
+
+# @CVCGL_TURBOJPEG_DEP@ — a find_dependency(libjpeg-turbo) line iff a STATIC cvcGL linked
+# turbojpeg: its export then names that target ($<LINK_ONLY:...>); a shared cvcGL keeps it private.
+get_target_property(_cvcgl_type cvcGL TYPE)
+if(_cvc_turbojpeg_tgt AND _cvcgl_type STREQUAL "STATIC_LIBRARY")
+  set(CVCGL_TURBOJPEG_DEP "find_dependency(libjpeg-turbo CONFIG)")
+else()
+  set(CVCGL_TURBOJPEG_DEP "")
 endif()
 
 # Substitutes @CVCGL_VTK_COMPONENTS@ (the list cvcGL links) into the config so
