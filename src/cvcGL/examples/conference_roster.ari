@@ -42,11 +42,18 @@ windows:
     closable: true
     children:
       # Your display name — the web client launches you in under a random "guest-xxxx"; edit this to
-      # change it. On commit, on_tick re-asserts your room presence so peers see the new name (your
-      # internal id stays fixed, only the shown name changes).
+      # change it. On commit, on_tick checks the name is free and re-asserts your room presence so peers
+      # see the new name (your internal id stays fixed, only the shown name changes). If another
+      # participant already uses that name, on_tick refuses it and shows the error below instead.
       - type: input_text
         label: "Name"
         bind: conf.self
+      # Name-taken error (red). on_tick sets name_error when the typed name is already in the room; the
+      # field keeps what you typed, but your presence keeps its previous name until you pick a free one.
+      - text: ""
+        bind: name_error
+        color: [1.0, 0.4, 0.4]
+        visible_when: (not (= (state-get "name_error") ""))
       - separator
       - type: stream_view
         bind: cam_token
@@ -151,6 +158,7 @@ on_tick: |
     (if (= (state-get "joined") "1") #f
       (begin
         (state-set "joined" "1")
+        (state-set "name_error" "") ; no name conflict yet (the web client's launch name is random)
         (state-set "cam_on" "1") ; on/off toggles start ON (streams open unmuted)
         (state-set "mic_on" "1")
         (room-join "" (state-get "conf.room") (dict "name" (state-get "conf.self")))
@@ -175,13 +183,27 @@ on_tick: |
               (stream-capture-camera (get-attr cam "token")
                 (dict "device" 0 "w" 640 "h" 480 "hz" 30 "jpeg" #t))
               (state-set "cam.cur_device" "0")))))
-    ; ── name change: re-assert presence when the user edits their display name (conf.self) ──
+    ; ── name change: the user edited their display name (conf.self). Refuse a name another participant
+    ;    already uses — set name_error and keep the old presence — else clear the error and re-assert.
+    ;    (Best-effort against the replicated roster: a genuine simultaneous tie is resolved server-side
+    ;    in a later phase; this catches the ordinary "that name is already here" case.) ──
     (if (and (= (state-get "joined") "1")
              (not (= (state-get "conf.self") (state-get "joined.name"))))
       (begin
-        (room-join "" (state-get "conf.room") (dict "name" (state-get "conf.self")))
-        (state-set "joined.name" (state-get "conf.self")))
-      #f)
+        (set want (state-get "conf.self"))
+        (set taken #f)
+        (for p (room-roster (state-get "conf.room"))
+          (if (and (not (= (get-attr p "pid") (state-get "self.pid")))
+                   (= (get-attr p "name") want))
+              (set taken #t)
+              #f))
+        (if taken
+            (state-set "name_error" (str-concat "name '" want "' is taken — pick another"))
+            (begin
+              (state-set "name_error" "")
+              (room-join "" (state-get "conf.room") (dict "name" want))
+              (state-set "joined.name" want))))
+      (state-set "name_error" "")) ; back at the current name: clear any stale error
     ; ── device switch: re-capture when the user picks a different camera / mic (real devices only) ──
     (if (= (state-get "cam_synthetic") "1") #f
       (begin

@@ -370,6 +370,13 @@ struct ConferenceSession {
       nodeId.insert(0, "n_");
     gla::register_conference(app, backend); // room-join/roster + streaming + stream_view
     shard = std::make_unique<cvc::state_cluster_shard>(app, "conf", nodeId);
+    // Replicate ONLY the shared room tree (conf.rooms.*), never this client's per-document UI state
+    // (ui.docs.*). Without this the shard's adapter observes from the root, so a plain (state-set) the
+    // .ari makes — above all conf.self, the display name bound to the Name field — would replicate to
+    // every peer and they would all show the same name (two clients "collide on the name"). The
+    // interest filter is dot-segment aware: "conf" matches conf.rooms.* but not ui.docs.ari.conf.self.
+    shard->add_interest("conf");
+    shard->set_enforce_interest(true);
     shard->attach(); // also installs this as the default shard; room-join derives the pid from it
     app_ = &app;
     pid_ = nodeId;

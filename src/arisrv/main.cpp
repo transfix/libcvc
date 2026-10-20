@@ -77,6 +77,13 @@ int main(int argc, char **argv) {
   state_tp.start(stateListen, nodeId, "conf");
   state_tp.set_relay(true);
   cvc::state_cluster_shard shard(app, "conf", nodeId);
+  // The relay forwards ONLY the shared room tree (conf.rooms.*). A client also writes per-document UI
+  // state (ui.docs.*, e.g. conf.self — its display name) on the same shard; without this filter the
+  // relay would ingest and fan that to every other client, so they would all show the same name
+  // (clients "collide on the name"). Dropping non-"conf" paths at ingest keeps each client's UI local
+  // and keeps the late-joiner snapshot to just the room tree.
+  shard.add_interest("conf");
+  shard.set_enforce_interest(true);
   shard.attach();
   shard.install_as_default();
   state_tp.register_shard(&shard);
