@@ -1109,6 +1109,21 @@ TEST(StateTransportGrpcTest, RelayForwardsBetweenStarClients) {
   ASSERT_TRUE(tA.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
   ASSERT_TRUE(tB.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
 
+  // connect_to_peer returns once the CLIENT stream is open, which can be before the relay has
+  // admitted the connection server-side. The relay forwards a frame only to the connections that
+  // are present (alive + writable) WHEN THE FRAME ARRIVES, and nothing re-pumps A afterward, so if
+  // A's single write/pump below raced ahead of B's admission at R the one forwarded batch would be
+  // lost and B would never converge. Gate on R having admitted BOTH connections first: a server
+  // connection binds its writer (can_write()) before it is counted, so connection_count() == 2
+  // means both A and B are live forward targets. Bounded wait -> deterministic, not a fixed sleep.
+  {
+    auto connect_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (tR.connection_count() < 2 && std::chrono::steady_clock::now() < connect_deadline)
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    ASSERT_EQ(tR.connection_count(), 2u)
+        << "relay R should have admitted both A and B before A writes";
+  }
+
   // A writes (set twice: first-set-on-fresh-child is not observed) and pumps -> A -> R -> B.
   cvc::state::instance(aA)("k").value(std::string("init"));
   cvc::state::instance(aA)("k").value(std::string("v1"));
