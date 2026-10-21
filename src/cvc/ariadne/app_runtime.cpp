@@ -139,7 +139,7 @@ void check_host_requirements(const Runtime &rt, LoadResult &lr) {
     if (rt.has(req.name))
       continue;
     if (req.optional)
-      lr.warnings.push_back("ari: optional requirement " + describe_requirement(req.name) +
+      lr.warnings.push_back("optional requirement " + describe_requirement(req.name) +
                             " is not available on this host");
     else
       missing.push_back(describe_requirement(req.name));
@@ -148,7 +148,7 @@ void check_host_requirements(const Runtime &rt, LoadResult &lr) {
     std::string list;
     for (const std::string &m : missing)
       list += (list.empty() ? "" : ", ") + m;
-    throw std::runtime_error("ari: this host does not provide what the document requires: " + list);
+    throw std::runtime_error("this host does not provide what the document requires: " + list);
   }
 
   std::vector<std::pair<std::string, std::string>> programs;
@@ -176,7 +176,7 @@ void check_host_requirements(const Runtime &rt, LoadResult &lr) {
       where += (i ? ", " : "") + at[i];
     if (at.size() > 3)
       where += " and " + std::to_string(at.size() - 3) + " more";
-    lr.warnings.push_back("ari: " + where + " calls (" + name +
+    lr.warnings.push_back(where + " calls (" + name +
                           " ...), which this host does not provide; that program stops there "
                           "when it runs (list it in requires: to make this an error, or as "
                           "optional if the program checks (has? \"" +

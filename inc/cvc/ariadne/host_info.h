@@ -33,7 +33,8 @@ struct HostInfo {
 
   // What libcvc was built with.
   bool yaml = false, json_schema = false, ftxui = false, tvision = false;
-  bool gl = false; // a GL renderer is available to this runtime (the runtime sets it)
+  bool gl = false;     // a GL renderer is available to this runtime (the runtime sets it)
+  std::string gl_info; // what it is: vendor, renderer and version (the runtime sets it)
 
   std::vector<std::pair<std::string, bool>> capabilities; // every token, and whether it holds
   std::vector<std::string> functions;                     // what programs can call, sorted

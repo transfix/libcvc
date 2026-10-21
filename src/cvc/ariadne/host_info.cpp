@@ -134,7 +134,8 @@ std::string format_host_info(const HostInfo &info, bool json, bool functions) {
       << ", \"json_schema\": " << (info.json_schema ? "true" : "false")
       << ", \"ftxui\": " << (info.ftxui ? "true" : "false")
       << ", \"tvision\": " << (info.tvision ? "true" : "false")
-      << ", \"gl\": " << (info.gl ? "true" : "false") << "},\n  \"capabilities\": {";
+      << ", \"gl\": " << (info.gl ? "true" : "false")
+      << ", \"gl_info\": " << json_string(info.gl_info) << "},\n  \"capabilities\": {";
     for (std::size_t i = 0; i < info.capabilities.size(); ++i)
       o << (i ? ", " : "") << json_string(info.capabilities[i].first) << ": "
         << (info.capabilities[i].second ? "true" : "false");
@@ -178,6 +179,11 @@ std::string format_host_info(const HostInfo &info, bool json, bool functions) {
     << "  terminal backend (FTXUI)      " << yes(info.ftxui) << "\n"
     << "  desktop backend (tvision)     " << yes(info.tvision) << "\n"
     << "  GL rendering                  " << yes(info.gl) << "\n";
+  if (!info.gl_info.empty()) {
+    std::istringstream lines(info.gl_info);
+    for (std::string line; std::getline(lines, line);)
+      o << "    " << line << "\n";
+  }
   o << "\ncapabilities (requires: / has?)\n";
   for (const auto &[name, holds] : info.capabilities) {
     std::string meaning;
