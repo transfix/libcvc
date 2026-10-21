@@ -2380,9 +2380,6 @@ static const command_entry commands[] = {
   {"img2vol",        "Image I/O",       "import image stack as volume",                  cmd_img2vol},
   {"rgba-merge",     "Image I/O",       "merge 4 volumes into RGBA",                     cmd_rgba_merge},
 
-  // ── Learned dynamics ──
-  {"ph-train",       "Learned Dynamics","fit the port-Hamiltonian vehicle to plant logs",  cmd_ph_train},
-
   // ── Test data ──
   {"bunny",          "Test Data",       "output Stanford bunny geometry or SDF",         cmd_bunny},
 
@@ -2395,6 +2392,7 @@ static const command_entry commands[] = {
 
   // ── Vehicle physics ──
   {"plant-log",      "Vehicle Physics", "log nav driving Jolt vehicles for plant fitting", cmd_plant_log},
+  {"ph-train",       "Vehicle Physics", "fit the learned port-Hamiltonian vehicle to plant logs", cmd_ph_train},
 
   // ── Network (legacy XMLRPC) ──
 #ifdef USING_XMLRPC
