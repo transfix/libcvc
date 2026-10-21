@@ -185,9 +185,13 @@ conf/
     <room-id>/
       meta/            { mode: sfu|mesh, created, title, relay-endpoint }   ← server-owned
       roster/          ← server-owned index: <pid> → { name, joined, present }
+      scene/           ← server-owned: the SHARED 3D world every client renders (§5g).
+        env/           { background, ground, lights }
+        objects/       <id> → { source(uri), transform, material }
       participants/
         <pid>/         ← owned by participant <pid> (and the server)
           profile/     { name, avatar }
+          pose/        { pos, orient }   ← participant-owned: avatar position/orientation in scene/ (§5g)
           flags/       { mic, cam, hand, screenshare }
           streams/
             <kind>/    descriptor: { token, format_desc, endpoint-or-relay-slot }
@@ -281,6 +285,30 @@ grants for the *client-local* document sandbox.
 Join carries a credential. v1: a room bearer token the server checks at admission, from which it mints
 the per-connection `pid` binding (§5d). Richer identity (OIDC via the existing SSO) and roles
 (host/moderator/guest, capacity, bans) are admission-time hooks layered on top.
+
+### 5g. Shared 3D scene + avatars (NEXT WORK — user-requested)
+
+The conference is not just floating video windows: it is a **shared 3D space** that every client renders
+**from its own camera viewpoint** (orbit/fly locally; the camera is never replicated). The scene itself is
+**server-authoritative** — the room owns it as replicated state and all clients draw the same world.
+
+* **Scene tree.** `conf.rooms.<room>.scene.*` (server-owned, replicates on the existing `"conf"` shard
+  scope). The server seeds `scene.env` (background, ground, lights) and `scene.objects.<id>`
+  (`source` URI + `transform` + `material`). Clients render it via a `scene:` block in the conference
+  `.ari` fed from that subtree — likely a small custom scene node type (the `agents`/`count:` pattern in
+  §3 and the example scenes), since the live tree, not the document, is the source of truth.
+* **Avatars.** Each participant writes its own `participants.<pid>.pose` (`pos`, `orient`) — e.g. derived
+  from its camera — which replicates; a custom "avatars" scene node reads the roster + each pose and draws
+  a marker/model per participant, so **users see each other moving around the scene** (the `agents` pattern
+  again, keyed by `pid`). Pose is participant-owned (§5b); the scene env is server-owned.
+* **Why this matters for correctness, not just looks.** It was the broad (accidental) replication of each
+  client's per-document `graphics.root` that gave the earlier build a de-facto shared scene; scoping
+  replication to the room tree (the name-collision fix) correctly removed that. This section makes the
+  shared scene a **first-class, server-authoritative** feature instead of a replication side effect.
+* **Sequencing.** MVP first = a minimal server-seeded environment (ground + grid + a reference object) to
+  prove the shared-scene render path end-to-end; then layer avatars (pose publish + the avatars node).
+  Schema impact (a `scene:` driven from state, a custom scene-node type) is coordinated with the host-caps
+  / `requires:` work (transfix/libcvc#754) so the terminal hosts gate it cleanly (`requires: [gl.scene]`).
 
 ---
 

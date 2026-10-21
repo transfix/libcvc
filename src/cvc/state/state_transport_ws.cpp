@@ -1121,6 +1121,68 @@ void state_transport_ws::send_snapshot_locked(connection &c,
   }
 }
 
+std::size_t state_transport_ws::broadcast_snapshot() {
+  // Build each shard's snapshot frame ONCE, then write it to every live connection. The receivers
+  // apply it idempotently (ingest_snapshot_entry is a bulk load), so re-sending the same roster/scene
+  // each interval is a no-op for a client that is already converged and a recovery for one that
+  // missed a live re-fan. Uses connection::write() (locks per connection) — do NOT hold a connection
+  // write lock here. Snapshotting the shard reads the tree under its own lock.
+  std::vector<state_cluster_shard *> shards;
+  {
+    std::lock_guard<std::mutex> lk(_shards_mu);
+    shards = _shards;
+  }
+  std::vector<pb::Frame> frames;
+  for (auto *s : shards) {
+    if (s == nullptr)
+      continue;
+    const auto snap = s->snapshot();
+    if (snap.empty())
+      continue;
+    pb::Frame f;
+    auto *rsp = f.mutable_snapshot_response();
+    rsp->set_request_id(0);
+    rsp->set_final(true);
+    for (const auto &e : snap) {
+      auto *pe = rsp->add_entries();
+      pe->set_path(e.path);
+      pe->set_string_value(e.string_value);
+      pe->set_comment(e.comment);
+      pe->set_hidden(e.hidden);
+      pe->set_read_only(e.read_only);
+      for (const auto &p : e.properties)
+        (*pe->mutable_properties())[p.first] = p.second;
+      pe->set_type_name(e.type_name);
+      pe->set_origin_node_id(e.origin_node_id);
+      pe->set_sequence(e.sequence);
+      pe->set_data_type_name(e.data_type_name);
+      if (e.data_payload.kind != state_payload_kind::none)
+        set_pb_payload(pe->mutable_data_payload(), e.data_payload);
+    }
+    frames.push_back(std::move(f));
+  }
+  if (frames.empty())
+    return 0;
+  std::vector<std::shared_ptr<connection>> conns;
+  {
+    std::lock_guard<std::mutex> lk(_conns_mu);
+    conns = _conns;
+  }
+  std::size_t wrote = 0;
+  for (auto &c : conns) {
+    if (!c || !c->alive.load() || !c->can_write())
+      continue;
+    bool ok = true;
+    for (const auto &f : frames)
+      ok = c->write(f) && ok;
+    if (ok) {
+      ++wrote;
+      _sent_frames.fetch_add(frames.size(), std::memory_order_relaxed);
+    }
+  }
+  return wrote;
+}
+
 void state_transport_ws::unregister_connection(connection *conn) {
   std::lock_guard<std::mutex> lk(_conns_mu);
   _conns.erase(
