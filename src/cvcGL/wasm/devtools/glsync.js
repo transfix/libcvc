@@ -1,8 +1,8 @@
 // glsync.js -- Firefox synchronous-WebGL census for a cvcGL WebAssembly app. Active only with
 // ?glsync. A developer tool: not part of the cvcGL SDK, see GLSYNC.md next to this file.
 //
-// Wraps every WebGL2RenderingContext.prototype method. The dev server (src/cvcGL/examples/wasm/
-// serve.py --glsync) inserts this script BEFORE the page's first <script>, so it is the innermost
+// Wraps every WebGL2RenderingContext.prototype method. The dev server (serve.py --glsync, next
+// to this file) inserts this script BEFORE the page's first <script>, so it is the innermost
 // wrapper: any other WebGL wrapper on the page, and the module's webgl_state_shadow.js
 // (cvcgl_wasm_app's state shim), wrap on top of it, and a query the shadow answers never reaches
 // this census -- what is counted is what reaches Firefox. Each call is timed with performance.now()

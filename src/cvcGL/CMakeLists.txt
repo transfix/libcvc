@@ -37,6 +37,12 @@ message(STATUS "cvcGL version: ${PROJECT_VERSION}")
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Standalone (the cvcgl recipe, the Windows publish lane), take libcvc's MSVC /MP
+# setting. In-tree it already comes from the top-level CMakeLists.txt.
+if(NOT DEFINED libcvc_VERSION AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../CMake/CvcMsvcParallelCompile.cmake")
+  include("${CMAKE_CURRENT_SOURCE_DIR}/../../CMake/CvcMsvcParallelCompile.cmake")
+endif()
+
 if(NOT TARGET cvc::cvc)
   find_package(cvc CONFIG REQUIRED)
 endif()
@@ -304,7 +310,7 @@ endif()
 # The browser-side half of cvcGL: webgl_state_shadow.js (a --pre-js that answers the GL state
 # queries ImGuiOverlay's imgui_impl_opengl3 and VTK make every frame without a synchronous
 # GPU-process round-trip) and the CMake function that links it, plus mimalloc, into an app. See
-# wasm/cvcGLWasm.cmake and docs/CVCGL_WASM.md. In-tree consumers (examples/) get the function
+# wasm/cvcGLWasm.cmake and docs/CVCGL_WASM.md. In-tree consumers (the repo's examples/) get the function
 # from the include below; installed consumers from cvcGLConfig.cmake. Two GLOBAL properties tell
 # it where the JS is and whether this cvcGL is -pthread (wasm-mt: Emscripten forbids mixing
 # pthread and non-pthread objects, so a consumer of a -pthread libcvcGL.a is -pthread too).
@@ -439,11 +445,11 @@ add_test(NAME cvcgl_metadata_mirror COMMAND cvcgl_metadata_mirror)
 # Spectral GPU FFT ocean (the ABYSSAL port used by lsystem_coast). Checks the
 # invariants a broken butterfly IFFT / bit-reversal / conjugate-symmetry would
 # violate: zero-mean height, unit-mean Jacobian, determinism, time evolution and
-# live wind-knob response. Compiles OceanFFT.cpp (it lives in examples/, has no
-# cvc dependency) and runs against an offscreen GL context. SKIPs (rc 0) if the
-# context has no float render targets.
-add_executable(cvcgl_ocean_fft test/cvcgl_ocean_fft.cpp examples/OceanFFT.cpp)
-target_include_directories(cvcgl_ocean_fft PRIVATE examples)
+# live wind-knob response. Compiles OceanFFT.cpp (ocean/, outside the library: it
+# has no cvc dependency and only lsystem_coast uses it) and runs against an offscreen
+# GL context. SKIPs (rc 0) if the context has no float render targets.
+add_executable(cvcgl_ocean_fft test/cvcgl_ocean_fft.cpp ocean/OceanFFT.cpp)
+target_include_directories(cvcgl_ocean_fft PRIVATE ocean)
 target_link_libraries(cvcgl_ocean_fft PRIVATE cvcGL)
 add_test(NAME cvcgl_ocean_fft COMMAND cvcgl_ocean_fft)
 
@@ -817,6 +823,20 @@ add_executable(cvcgl_imgui_table_columns test/cvcgl_imgui_table_columns.cpp)
 target_link_libraries(cvcgl_imgui_table_columns PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_table_columns COMMAND cvcgl_imgui_table_columns)
 
+# Golden images of the Ariadne ImGui/VTK backend (roadmap §16.6 phase 1): each .ari in
+# test/golden runs through AriRuntime + ImGuiBackend offscreen and its frame is compared with the
+# PNG of the same name (made under Mesa llvmpipe, compared within a tolerance measured across
+# rasterizers). A mismatch leaves <name>.actual.png + <name>.diff.png in ari_golden/ here;
+# CVC_UPDATE_GOLDEN=1 rewrites the goldens. Adding one: docs/ARIADNE.md, "Golden-image tests".
+# Skips where nothing rasterises unless CVC_REQUIRE_RENDER=1.
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_ari_golden test/cvcgl_ari_golden.cpp)
+  target_link_libraries(cvcgl_ari_golden PRIVATE cvcGL)
+  add_test(NAME cvcgl_ari_golden
+           COMMAND cvcgl_ari_golden ${CMAKE_CURRENT_SOURCE_DIR}/test/golden
+                   ${CMAKE_CURRENT_BINARY_DIR}/ari_golden)
+endif()
+
 # Ariadne physics: / body: (WORLD-GEOMETRY-ROADMAP.md, G5): a spec's crate lands where the
 # heightfield node draws the ground. Headless; the dynamics need Jolt.
 add_executable(cvcgl_ariadne_physics test/cvcgl_ariadne_physics.cpp)
@@ -1087,7 +1107,10 @@ set_property(TEST ${_cvcgl_tests} APPEND PROPERTY ENVIRONMENT __GL_SYNC_TO_VBLAN
 # (the onscreen "basic window") + CameraController (orbit / Quake-fly / cinematic
 # track). What cvcGL-as-a-demo-toolkit is for: quick self-contained scenes that
 # scale toward a real-time sim/game loop. Off by default; -DCVC_BUILD_EXAMPLES=ON.
-option(CVC_BUILD_EXAMPLES "Build cvcGL example programs" OFF)
+# They live in the repo's top-level examples/ and are added from here, so every way
+# of building cvcGL (top-level, pycvc, a standalone src/cvcGL configure) can build them.
+option(CVC_BUILD_EXAMPLES "Build the libcvc example programs (examples/)" OFF)
 if(CVC_BUILD_EXAMPLES)
-  add_subdirectory(examples)
+  add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../examples"
+                   "${CMAKE_CURRENT_BINARY_DIR}/examples")
 endif()

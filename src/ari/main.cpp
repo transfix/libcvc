@@ -53,6 +53,7 @@
 #include <cvc/ariadne/ftxui_backend.h>
 #include <cvc/ariadne/host_cli.h>
 #include <cvc/ariadne/host_signals.h>
+#include <cvc/ariadne/stream/stream_view.h>
 #include <cvc/ariadne/tvision_backend.h>
 #include <cvc/core/app.h>
 #include <cvc/image/image.h>
@@ -154,6 +155,8 @@ int main(int argc, char **argv) {
       return 1;
     }
   }
+  // stream_view: a live stream's frames, or a still image published under its name (--image).
+  ari::register_stream_view_widget(*backend, app);
   ari::AppRuntime rt(app, o.prefix.empty() ? "ui.docs.ari" : o.prefix);
   rt.set_backend(*backend);
   for (const std::string &d : o.component_paths)

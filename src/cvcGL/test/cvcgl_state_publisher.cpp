@@ -195,7 +195,7 @@ void test_publisher_independent_of_pool() {
 // Two flushers must not put an older value on the tree after a newer one.
 //
 // The worker is not the only flusher: a host can drain by hand from its frame
-// loop while the worker runs (src/cvcGL/examples/bunny_shadow.cpp and
+// loop while the worker runs (examples/cvcgl/bunny_shadow.cpp and
 // volren_bunny.cpp both do). Taking the batch and writing it are two steps, so
 // two flushers can interleave between them — one takes "5", the other takes "6"
 // and writes it, then the first writes "5" over it. Coalescing cannot save that:

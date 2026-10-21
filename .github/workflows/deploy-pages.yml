@@ -1,7 +1,9 @@
 name: deploy pages
 
-# Rebuild the cvcGL wasm demo gallery from libcvc master and deploy it to GitHub
-# Pages (https://transfix.github.io/libcvc/) as a Pages artifact. Mirrors the
+# Rebuild the examples' wasm gallery from libcvc master and deploy it to GitHub
+# Pages (https://transfix.github.io/libcvc/) as a Pages artifact. It builds the
+# single-threaded (wasm) column of the libcvc-examples-web recipe, through the
+# recipe's own build-wasm.sh, so the site and the package are one build. Mirrors the
 # pattern in cy-pca/cyberpcangel-cvcgl's nightly.yml — same self-hosted Linux
 # runner (catx-03) that already holds the emsdk + wasm-mt deps prefix at
 # /opt/cvc-wasm/, just a different deploy target: actions/deploy-pages instead of
@@ -48,7 +50,7 @@ jobs:
       # grl-snam-weights lands here; --preload-file bakes the trained CoefMLP into
       # nav_city_swarm.data so the browser swarm drives with the published policy.
       CVC_WASM_NAV_WEIGHTS: /opt/cvc-wasm/deps-wasm-mt/share/grl-snam-weights/coef_sdf.cvcnav
-      DEMOS: 'terrain_lab lsystem_forest lsystem_forest_ari lsystem_coast volren_bunny volren_bunny_ari volslice_bunny volslice_bunny_ari ari nav_city_swarm nav_city_drive nav_fog_ghost'
+      DEMOS: 'terrain_lab lsystem_forest lsystem_forest_ari lsystem_coast volren_bunny volren_bunny_ari volslice_bunny volslice_bunny_ari ari nav_city_swarm nav_city_drive nav_fog_ghost bunny_shadow'
     steps:
       - name: Checkout master
         uses: actions/checkout@v4
@@ -90,39 +92,35 @@ jobs:
             --platform any --config release --link shared \
             --no-fallback-to-source || echo "  (scene/weights bundles absent — wasm demo falls back to synthetic + default_biased)"
 
-      - name: Build the non-pthread demos
+      - name: Build the gallery (libcvc-examples-web, single-threaded)
         # Non-pthread: matches the single-threaded wasm dep bundles + does not
-        # need SharedArrayBuffer / COOP/COEP on the deploy target.
-        run: ./src/cvcGL/examples/wasm/build-wasm-demo.sh
+        # need SharedArrayBuffer / COOP/COEP on the deploy target. The recipe
+        # script runs examples/web/build-wasm-demo.sh and writes the gallery,
+        # with THIRD_PARTY_NOTICES.md and LICENSE, into the staged prefix.
+        run: |
+          export CVC_SOURCE_DIR="$GITHUB_WORKSPACE"
+          export CVC_BUILD_DIR="$GITHUB_WORKSPACE/build-wasm"
+          export CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-examples-web"
+          export CVC_DEPS_PREFIX="$CVC_WASM_DEPS"
+          export CVC_PLATFORM=wasm
+          rm -rf "$CVC_INSTALL_DIR"
+          bash cvcpkg/recipes/libcvc-examples-web/build-wasm.sh
 
       - name: Assemble the gallery
         id: assemble
         run: |
           set -euo pipefail
-          bin=build-wasm/bin
+          web="$GITHUB_WORKSPACE/stage-examples-web/share/libcvc-examples-web/web"
           # Inside the workspace (not mktemp) so the next checkout's clean wipes
           # it instead of leaking ~500MB into the runner's /tmp every run.
           gallery="$GITHUB_WORKSPACE/_site"
           rm -rf "$gallery" && mkdir -p "$gallery"
-          # Landing page + per-demo hosts (already generated next to the binaries
-          # by examples/wasm/build-pages.py, invoked from build-wasm-demo.sh).
-          if [ -d "build-wasm/gallery" ]; then
-            cp -R build-wasm/gallery/. "$gallery/"
-          else
-            # Fallback: hand-assemble from the built binaries + wasm/index.html
-            # template. build-pages.py is the source of truth; this is a safety net.
-            touch "$gallery/.nojekyll"
-            for d in $DEMOS; do
-              mkdir -p "$gallery/$d"
-              cp "$bin/$d.js" "$bin/$d.wasm" "$gallery/$d/"
-              # emscripten --preload-file emits <demo>.data next to js/wasm
-              [ -f "$bin/$d.data" ] && cp "$bin/$d.data" "$gallery/$d/"
-              [ -f "$bin/$d/index.html" ] && cp "$bin/$d/index.html" "$gallery/$d/"
-              # a target with its own host page (ari's xterm.js terminal) builds it as <demo>.html
-              [ -f "$bin/$d.html" ] && cp "$bin/$d.html" "$gallery/$d/index.html"
-            done
-            [ -f "$bin/index.html" ] && cp "$bin/index.html" "$gallery/"
-          fi
+          test -f "$web/index.html" || { echo "::error::the recipe built no gallery at $web"; exit 1; }
+          cp -R "$web/." "$gallery/"
+          # Every demo the live check below expects must be in the artifact.
+          for d in $DEMOS; do
+            test -f "$gallery/$d/$d.wasm" || { echo "::error::gallery has no $d"; exit 1; }
+          done
           # Ensure Jekyll processing is disabled (._filenames + emscripten paths).
           touch "$gallery/.nojekyll"
           echo "gallery=$gallery" >> "$GITHUB_OUTPUT"

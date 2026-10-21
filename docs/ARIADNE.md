@@ -26,6 +26,7 @@ unfamiliar; every binding, computed field, and handler in an `.ari` document is 
 9. [Running a document](#9-running-a-document)
 10. [Async and networking](#10-async-and-networking)
 11. [Caveats — what is not yet wired](#11-caveats--what-is-not-yet-wired)
+12. [Golden-image tests](#12-golden-image-tests)
 
 ---
 
@@ -55,7 +56,7 @@ collide on one state key.
 
 You rarely wire a Runtime by hand. Two things package it:
 
-- **`ariadne_hello`** ([`src/cvcGL/examples/ariadne_hello.cpp`](../src/cvcGL/examples/ariadne_hello.cpp))
+- **`ariadne_hello`** ([`examples/ariadne/hosts/ariadne_hello.cpp`](../examples/ariadne/hosts/ariadne_hello.cpp))
   — the native reference host: it constructs the Runtime, an `ImGuiBackend` over a
   VTK view, registers URI handlers, loads the document, and runs the SDL-driven frame
   loop. Read it as the canonical "how to host Ariadne" example.
@@ -236,6 +237,15 @@ Three backends ship:
     the picture is real pixels (see *Pixel graphics* below); everywhere else it is
     half-block cells (two pixels per cell, 24-bit colour; a luminance ramp on a colourless
     terminal).
+  - **custom widgets** — `register_widget(type, fn)` draws a custom type with the
+    backend's own primitives, as `ImGuiBackend::register_widget` does. `stream_view` is
+    one: `register_stream_view_widget(backend, app)`
+    ([`stream/stream_view.h`](../inc/cvc/ariadne/stream/stream_view.h)) shows a live
+    video stream's frames through `set_image` / `draw_image`. It uses the same per-widget
+    frame puller as the ImGui `stream_view`, which follows token switches and reopened
+    streams. A compressed codec needs a decoder from the host; `arigl` adds cvcGL's JPEG
+    one for `mjpeg`. `ari` and `arigl --terminal` both register it. With no live stream,
+    it shows whatever still image is published under the stream's name (`--image`).
 
   Commit edges match the ImGui backend: discrete widgets commit on the edit, a
   mouse-dragged slider commits on release (arrow-key steps commit at once), a text field
@@ -259,7 +269,11 @@ Three backends ship:
     a window or menu drawn over an image hides exactly the cells it covers, and FTXUI's
     full repaint redraws them for free. An image is sent again only when its pixels
     change (a republished identical frame is not), and deleted (`a=d,d=I`) once no frame
-    draws it. A placement addresses 297 rows and columns, so a bigger image goes as tiles.
+    draws it. A changed picture goes to a second image id, and the placeholders switch to
+    it at the next frame, once it has fully arrived. Re-sending under the id the cells
+    show makes the terminal drop that image for the whole transfer, so a scene that
+    changes every frame would never appear. A placement addresses 297 rows and columns,
+    so a bigger image goes as tiles.
   - **Sixel** (xterm -ti vt340, foot, mlterm, WezTerm, Windows Terminal). A bitmap is
     drawn after each repaint, because the repaint covers it, inside synchronized-output
     marks (`CSI ? 2026`). It is clipped to the cells nothing covers: the image node draws
@@ -698,9 +712,9 @@ includes. Each binds state keys a C++ object owns, so it needs no host code;
 | `fe_controls` | an `fe_lab` node named `domain` (§5.4) |
 
 Components that address one node use a fixed node id; copy the file and change the id to
-drive another node. `src/cvcGL/examples/mesh_lab.ari` uses the last two. Run it from the
-repository root, where both paths resolve:
-`ariadne_hello src/cvcGL/examples/mesh_lab.ari --component-path src/cvc/ariadne`.
+drive another node. `examples/ariadne/documents/mesh_lab.ari` uses the last two. Run it from
+the repository root, where both paths resolve:
+`ariadne_hello examples/ariadne/documents/mesh_lab.ari --component-path src/cvc/ariadne`.
 
 ---
 
@@ -848,16 +862,18 @@ arigl check    [flags] doc.ari
 
 `arigl` registers cvcGL's bundles before it loads a document
 ([`bundles.h`](../inc/cvc/gl/ariadne/bundles.h)): its node types and shader presets, the
-stream and media verbs, and in a window the ImGui `stream_view` widget. In both modes it
-routes OS signals to `on_signal:` and exits 128 + N for one the document does not handle.
-A snapshot runs on a fixed clock, so its frames are reproducible. The cvcGL examples
+stream and media verbs, and the `stream_view` widget (ImGui in a window, the terminal one
+with `--terminal`). In both modes it routes OS signals to `on_signal:` and exits 128 + N
+for one the document does not handle. A snapshot's frames run at `--fps` (20 by default),
+so a live stream delivers into them; in a window the scene clock is fixed, so its frames
+are reproducible. The cvcGL examples
 (`ariadne_hello`, `ariadne_stream`, `ariadne_conference`, `ariadne_terminal`) still build;
 `arigl` is meant to replace them once it does everything they do.
 
 ### 9.1 Native (C++)
 
 The reference host is
-[`ariadne_hello.cpp`](../src/cvcGL/examples/ariadne_hello.cpp). The shape is:
+[`ariadne_hello.cpp`](../examples/ariadne/hosts/ariadne_hello.cpp). The shape is:
 
 ```cpp
 cvc::ariadne::Runtime rt(app, prefix);
@@ -900,7 +916,7 @@ flag written after the document goes to the document, and `ari` points that out.
 Three of the general flags are for pictures. `--graphics auto|kitty|sixel|color|mono` sets
 how images draw (see *Pixel graphics* in §4), and `--image NAME=FILE` publishes a picture
 for the document's `image:` widgets with `src: NAME`
-([`terminal_images.ari`](../src/cvc/ariadne/examples/terminal_images.ari) is an example).
+([`terminal_images.ari`](../examples/ariadne/terminal/terminal_images.ari) is an example).
 With `--ansi` and `--graphics kitty` or `sixel`, `snapshot` also prints the images, after
 clearing the screen, at the terminal's cell size (`--cell-size WxH` where it can't be asked).
 
@@ -932,7 +948,7 @@ before `load()`. When the arguments don't match its `args:` block, `load()` thro
 
 `run()` forwards keys and pointer events the UI did not use to the document's
 `on_key` / `on_pointer`, so document-level input works here today.
-[`terminal_tour.ari`](../src/cvc/ariadne/examples/terminal_tour.ari) exercises every
+[`terminal_tour.ari`](../examples/ariadne/terminal/terminal_tour.ari) exercises every
 widget kind the backend draws.
 
 **In the browser.** An Emscripten build of libcvc with `ftxui` and `yaml-cpp` in its wasm
@@ -970,8 +986,8 @@ pixels, so a map pan keeps the grabbed point under the pointer. Passed as
 middle-drags into pan and the wheel into zoom. `arigl --terminal` is the host
 (`arigl run --terminal [--backend tvision] doc.ari`, or `arigl snapshot --terminal --ansi`
 for one frame as text), as is the older example
-[`ariadne_terminal`](../src/cvcGL/examples/ariadne_terminal.cpp);
-[`terminal_scene.ari`](../src/cvcGL/examples/terminal_scene.ari) is a small example. No display is needed: VTK picks X, EGL or OSMesa at run time
+[`ariadne_terminal`](../examples/ariadne/hosts/ariadne_terminal.cpp);
+[`terminal_scene.ari`](../examples/ariadne/documents/terminal_scene.ari) is a small example. No display is needed: VTK picks X, EGL or OSMesa at run time
 (`VTK_DEFAULT_OPENGL_WINDOW=vtkEGLRenderWindow` forces EGL).
 
 ### 9.3 From Python (a full app via `AriRuntime`)
@@ -1130,6 +1146,98 @@ below (G17–G21 in the internal gap report) are tracked for reconciliation.
 - **No DSL-visible future from the pycvc async layer.** Both `register_async_fn` and
   `register_async_coro` self-park; there is no gather/join to launch *N* Python async
   calls concurrently from one process (the net verbs' `-async` futures do offer this).
+
+---
+
+## 12. Golden-image tests
+
+`cvcgl_ari_golden` ([`cvcgl_ari_golden.cpp`](../src/cvcGL/test/cvcgl_ari_golden.cpp)) checks
+what the ImGui/VTK backend actually draws (roadmap §16.6, phase 1). Every `.ari` in
+[`src/cvcGL/test/golden/`](../src/cvcGL/test/golden/) is loaded through `AriRuntime`, rendered
+offscreen at 960 x 720 with the overlay visible, and its frame is compared with the PNG of the
+same name. The comparison code is
+[`golden_util.h`](../src/cvcGL/test/golden_util.h), for reuse by other render tests.
+
+A capture is made repeatable by:
+
+- the UI font pinned to `golden/fonts/LiberationSans-Regular.ttf` (OFL; never a system font);
+- UI scale 1, touch mode off, the show/hide button hidden, panels open;
+- ImGui's frame delta pinned (`ImGuiOverlay::setFixedDeltaTime`);
+- at least 4 frames at a fixed dt before the capture.
+
+The test then renders one more frame and requires it to be identical, so a UI that is still
+changing fails as unsettled rather than as a flaky mismatch.
+
+**Comparing.** A pixel mismatches when a channel differs by more than 40. A document passes
+while at most 0.002% of its pixels (13) mismatch. The goldens are made under Mesa llvmpipe, the
+rasterizer of the Linux CI job (Xvfb + cvcpkg's `mesa`). These limits were measured:
+
+- another Mesa version's llvmpipe and an NVIDIA GPU leave no pixel beyond 40;
+- one step of a slider's value (64 to 65) leaves 144 pixels beyond 40, so it fails;
+- a window moved down by one pixel leaves 12,167, so it fails.
+
+A rasterizer that needs its own pictures gets platform goldens, `<name>.<variant>.png`. They are
+used instead of `<name>.png` when present. The variant comes from `CVC_GOLDEN_VARIANT`, and
+defaults to `macos` on Apple. Each comparison prints its largest channel difference and how many
+pixels differ by more than 0 / 8 / 24 / 40, so a CI log shows a platform's spread even when it
+passes.
+
+Measured in CI (2026-10-20):
+
+- Windows' llvmpipe (mesa-dist-win 26.1.7) is within 1 of the goldens everywhere.
+- macOS CI renders with the Apple Software Renderer, which is deterministic but draws edges and
+  shading a little differently. Against the llvmpipe goldens, windows, menus and grid had 3 to 6
+  pixels beyond 40 (they pass), widgets had 40 and scene 467 (they fail).
+- So `widgets.macos.png` and `scene.macos.png` are macOS goldens, and macOS compares those two
+  against its own renderer.
+
+To make or refresh a macOS golden, take `<name>.actual.png` from the failing macOS job's
+`ari-golden-macOS-<lane>` artifact, look at it, and commit it as `<name>.macos.png`.
+
+**On a failure** the test writes `<name>.actual.png` and `<name>.diff.png` to
+`build/src/cvcGL/ari_golden/`. In the diff, mismatches are red (brighter = larger), differences
+within the tolerance are dark blue, and the golden is a dim grey underneath. The log line gives
+the count, the fraction and the bounding box of the mismatches. CI prints every document's
+numbers in its "Ariadne golden-image numbers" step, pass or fail. When a job fails, CI uploads
+that directory as the `ari-golden-<OS>-<lane>` artifact.
+
+**Adding a test.**
+
+1. Add `src/cvcGL/test/golden/<name>.ari`. Declare `meta.min_libcvc`. Fix every value with
+   `init:`, place every window with `pos:`, and give each one a `size:` (see the gaps below).
+   The test requires a document to load without warnings.
+2. If the picture needs input, such as an open menu or a tooltip, add a pointer script for
+   `<name>` to `kCases` in the test: a move, press or release before a given frame, in ImGui
+   pixels from the top left.
+3. Write the golden under llvmpipe and look at it:
+
+   ```bash
+   CVC_UPDATE_GOLDEN=1 LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe DISPLAY=:99 \
+     build/bin/cvcgl_ari_golden src/cvcGL/test/golden build/src/cvcGL/ari_golden <name>
+   ```
+
+   Run it under cvcpkg's `xvfb` and `mesa`, as CI does (`cvcpkg install xvfb mesa --prefix P`,
+   start `P/bin/Xvfb :99`, and put `P/lib` on `LD_LIBRARY_PATH` if VTK's libglvnd is not in
+   `P`). Writing `<name>.png` from any other renderer is refused. With `CVC_GOLDEN_VARIANT` set,
+   the run writes that platform's golden instead.
+4. Commit the `.ari` and the `.png` together. After a deliberate rendering change, regenerate
+   the affected goldens the same way, and review the new pictures in the PR. A document with a
+   `<name>.macos.png` needs that one refreshed too, from the macOS CI artifact (above).
+
+The test skips in a build without ImGui (`CVC_ENABLE_IMGUI`) or the YAML loader, without a GL
+that rasterises, or where ImGui's GL backend cannot start on VTK's context (VTK's EGL fallback
+with no X display). With `CVC_REQUIRE_RENDER=1`, as in the Linux CI job, each of those fails
+instead. CI installs `imgui` from cvcpkg for this; before that, every CI build of cvcGL had the
+ImGui overlay compiled as inert stubs.
+
+**Gaps the goldens step around (2026-10-19):**
+
+- A window with no `size:` stays at ImGui's 32 px minimum. §11.4 persists its size before
+  ImGui has fitted it and seeds that size back, which cancels the auto-fit.
+- A declared directional `light:` leaves the realized scene unlit, so `scene.ari` uses the
+  fallback headlight.
+- `layout: {kind: horizontal}` is ignored on a window body, and the embedded schema rejects the
+  `size: {hint, min, max}` map and `"50%"` strings that the loader accepts.
 
 ---
 

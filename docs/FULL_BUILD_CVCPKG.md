@@ -111,13 +111,14 @@ wasm` / `wasm-mt`), and the Emscripten toolchain itself is a cvcpkg package
 — so a wasm app can be built, packaged, and installed with cvcpkg commands
 only. The existing libcvc/cvcGL wasm targets are the worked example:
 
-- **`cvcgl-examples` recipe** (in-tree `cvcpkg/recipes/cvcgl-examples`) — its
-  `wasm-mt` matrix entry (`build-wasm.sh`) cross-compiles the browser demos
-  and packages the servable gallery under `share/cvcgl-examples/web/` with a
-  `cvcgl-examples-web` launcher. This is the "packaged wasm app".
-- **`wasm-demos` / `wasm-extra-demos` CMake targets** (`src/cvcGL/examples`)
-  — the 9 gallery demos + `ariadne_hello`, each a `cvcgl_wasm_app()` (see
-  `docs/CVCGL_WASM.md`).
+- **`libcvc-examples-web` recipe** (in-tree `cvcpkg/recipes/libcvc-examples-web`)
+  — its `wasm` and `wasm-mt` matrix entries (`build-wasm.sh`) cross-compile the
+  browser demos and package the servable gallery under
+  `share/libcvc-examples-web/web/`; the native `libcvc-examples` recipe ships the
+  `libcvc-examples-web` launcher that serves it. This is the "packaged wasm app".
+- **`wasm-demos` / `wasm-extra-demos` CMake targets** (`examples/`)
+  — the gallery demos + `ariadne_hello` and arigl's `cyprty`, each a
+  `cvcgl_wasm_app()` (see `docs/CVCGL_WASM.md`).
 - **`libcvc` + `cvcgl` wasm-mt SDK bundles** — published by the
   `publish-cvcgl-wasm.yml` workflow (in the libcvc repo), which is the
   reference "build + package a wasm app" flow below.
@@ -132,15 +133,16 @@ why every command below passes `--link static`.
 
 ### 1. Run a prebuilt wasm app (one command)
 
-The launcher ships in the *native* bundle (it serves the wasm gallery out of
-the prefix's `share/cvcgl-examples/web/`); the gallery itself ships in the
-wasm-mt bundle. So the documented pairing is both variants into one prefix:
+The launcher ships in the *native* `libcvc-examples` bundle (it serves the wasm
+gallery out of the prefix's `share/libcvc-examples-web/web/`); the gallery itself
+is the `libcvc-examples-web` wasm-mt bundle. So the documented pairing is both
+into one prefix:
 
 ```bash
-cvcpkg install cvcgl-examples --prefix /tmp/cvc-wasm
-cvcpkg install cvcgl-examples --platform wasm-mt --arch wasm32 --link static \
+cvcpkg install libcvc-examples --prefix /tmp/cvc-wasm
+cvcpkg install libcvc-examples-web --platform wasm-mt --arch wasm32 --link static \
     --prefix /tmp/cvc-wasm
-/tmp/cvc-wasm/bin/cvcgl-examples-web
+/tmp/cvc-wasm/bin/libcvc-examples-web
 ```
 
 The wasm-mt bundle is a self-contained static `.wasm` + JS gallery (no
@@ -213,34 +215,36 @@ cmake --install build-wasm
   `cvcgl_wasm_app(<target>)` — see `docs/CVCGL_WASM.md`.
 
 **c. Package it with cvcpkg** (this is what makes it a distributable wasm
-bundle, e.g. `dist/cvcgl-examples-<ver>-wasm-mt-release-static.tar.gz`):
+bundle, e.g. `dist/libcvc-examples-web-<ver>-wasm-mt-release-static.tar.gz`):
 
 ```bash
-cvcpkg pack cvcpkg/recipes/cvcgl-examples --from-prefix /tmp/cvc-wasm/inst \
+cvcpkg pack cvcpkg/recipes/libcvc-examples-web --from-prefix /tmp/cvc-wasm/inst \
     --platform wasm-mt --config release --link static --local \
     --output-dir dist
 ```
 
 `--from-prefix` skips the build and archives the *installed* prefix against
 the recipe's metadata (name, deps, cmake packages). The in-tree
-`build-wasm.sh` shows the full packaging shape for the gallery: build the
-demos, then `build-pages.py` turns the built `.wasm/.js` pairs into the
-servable gallery (per-demo host page + index of cards) that lands in
-`share/cvcgl-examples/web/`, with `THIRD_PARTY_NOTICES.md` and `LICENSE`
-shipped beside it for binary redistribution.
+`build-wasm.sh` shows the full packaging shape for the gallery: it runs
+`examples/web/build-wasm-demo.sh`, which builds the demos and then has
+`build-pages.py` turn the built `.wasm/.js` pairs into the servable gallery
+(per-demo host page + index of cards) in `share/libcvc-examples-web/web/`, with
+`THIRD_PARTY_NOTICES.md` and `LICENSE` shipped beside it for binary
+redistribution.
 
 **d. Publish (optional)** — then any consumer can run the one-liner from
 step 1:
 
 ```bash
-cvcpkg publish dist/cvcgl-examples-*-wasm-mt-*.tar.gz \
+cvcpkg publish dist/libcvc-examples-web-*-wasm-mt-*.tar.gz \
     --server https://cvcpkg.org --org cvc --token "$CVCPKG_TOKEN"
 ```
 
-### 3. The in-tree gallery dev loop (`src/cvcGL/examples/wasm/`)
+### 3. The in-tree gallery dev loop (`examples/web/`)
 
-`build-wasm-demo.sh` is the *single-threaded* dev variant of the same flow
-for all 9 gallery demos (`wasm-demos` target) + `ariadne_hello`:
+`build-wasm-demo.sh` is the same flow outside cvcpkg, for every gallery demo
+(`wasm-demos` target) + the single-threaded `ari` page; the
+`libcvc-examples-web` recipe and the gh-pages deploy both run it:
 
 ```bash
 cvcpkg install emsdk --platform linux --prefix <emsdk-dir>
@@ -253,19 +257,19 @@ cd /path/to/cvcpkg   # the checkout root auto-overlays its recipes/ dir
 cvcpkg build vtk --platform wasm --local --prefix <deps>
 cd /path/to/libcvc
 export CVC_WASM_DEPS=<deps>
-bash src/cvcGL/examples/wasm/build-wasm-demo.sh            # single-threaded
+bash examples/web/build-wasm-demo.sh            # single-threaded
 # or
-bash src/cvcGL/examples/wasm/build-wasm-demo.sh --pthread  # threaded, needs
+bash examples/web/build-wasm-demo.sh --pthread  # threaded, needs
 # a deps closure built ENTIRELY with CVC_WASM_THREADS=1 (wasm-mt), and the
 # gallery must be served by serve.py (COOP/COEP), not http.server
 ```
 
 The script packages the build with `build-pages.py` into
-`build-wasm[-mt]/gallery/`. Two caveats it encodes: `yaml-cpp` has no wasm
-catalog entry (linux/macos/win/bsd only), so the `.ari` demos' loader
-depends on the script's from-source build into `CVC_WASM_DEPS`; and the
-threaded variant needs the whole closure `-pthread` (Emscripten forbids
-mixing).
+`build-wasm[-mt]/gallery/`. Two caveats it encodes: without `yaml-cpp` in
+`CVC_WASM_DEPS` (`cvcpkg install yaml-cpp --platform wasm --arch wasm32 --link
+static`) it builds one from source there, since the `.ari` demos' loader needs
+it; and the threaded variant needs the whole closure `-pthread` (Emscripten
+forbids mixing).
 
 ## Where this is already documented
 
@@ -280,7 +284,7 @@ mixing).
   `cvcpkg/docs/getting-started-tutorial.md` documents the generic
   `install-deps` + `build` loop.
 - **wasm**: `libcvc/.github/workflows/publish-cvcgl-wasm.yml` — the
-  build+package flow for the `libcvc`/`cvcgl`/`cvcgl-examples`
+  build+package flow for the `libcvc`/`cvcgl`/`libcvc-examples-web`
   wasm-mt bundles (catalog-provisioned emsdk + wasm-mt closure, `emcmake`
   build, `cvcpkg pack --from-prefix`, `cvcpkg publish`); `cvcpkg/docs/wasm-packaging.md`
   + `cvcpkg/cmake/cvcpkg-wasm-app.cmake` — the *general* wasm-app guide for
@@ -288,10 +292,11 @@ mixing).
   `cvcpkg_wasm_app()` boilerplate, packaging any wasm app as a bundle);
   `libcvc/docs/CVCGL_WASM.md`
   — the `cvcgl_wasm_app()` app contract (state shim, FrameYield, mimalloc,
-  glsync, serve.py); `libcvc/src/cvcGL/examples/wasm/build-wasm-demo.sh`
-  — the in-tree single-threaded dev loop whose prerequisites all come from
-  the cvcpkg catalog. The `cvcgl-examples` recipe's own comments document
-  the two-variant install (native + wasm-mt) and the launcher.
+  glsync, serve.py); `libcvc/examples/web/build-wasm-demo.sh`
+  — the in-tree gallery build whose prerequisites all come from
+  the cvcpkg catalog. The `libcvc-examples` and `libcvc-examples-web` recipes'
+  own comments document the two-package install (native + wasm-mt) and the
+  launcher.
 
 What this document adds that the above don't: the `/tmp` prefix variant, the
 "everything enabled" flag table, the `--with-deps` from-source alternative,

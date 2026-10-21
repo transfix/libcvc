@@ -599,12 +599,21 @@ struct FtxuiBackend::Impl {
   std::vector<std::shared_ptr<PixelGfx>> gfx_shown; // ... of the frame last drawn
   bool drew = false; // run(): the renderer laid a frame out this iteration
   // What the terminal holds, per Kitty tile key: the id its placeholders name and what was sent.
+  // A Kitty tile's images in the terminal, double-buffered. Re-sending a picture under the id the
+  // placeholders name makes the terminal drop the shown image for the whole transfer, so a picture
+  // that changes every frame (an animated scene behind the widgets) never shows at all: the cells
+  // only ever get their average colour. So a changed picture goes to the OTHER id, which nothing
+  // names yet, and the next layout switches the placeholders to it (kitty_id), by which time it
+  // has fully arrived; the picture after that reuses the first id. The first send, and a change of
+  // size, go to the id the placeholders already name.
   struct KittySent {
-    std::uint32_t id = 0;
+    std::uint32_t ids[2] = {0, 0};
+    int shown = 0;                // the slot the placeholders name
+    bool pending = false;         // ids[shown ^ 1] holds a newer picture: switch at the next layout
+    bool has[2] = {false, false}; // the slot holds an image in the terminal
     long gen = -1;
-    std::uint64_t hash = 0;
+    std::uint64_t hash = 0; // of the latest picture sent (shown, or pending)
     int w = 0, h = 0, cols = 0, rows = 0;
-    bool sent = false;
     long frame = 0; // the last emit that drew it
   };
   std::map<std::string, KittySent> kitty;
@@ -754,15 +763,27 @@ struct FtxuiBackend::Impl {
     }
   }
 
+  std::uint32_t next_kitty_id() {
+    if (kitty_next == 0) // a random base, so another program's images in the window are safe
+      kitty_next = 1 + ((std::random_device{}() & 0x7FFFu) << 8);
+    const std::uint32_t id = kitty_next;
+    kitty_next = kitty_next >= 0xFFFFFFu ? 1 : kitty_next + 1; // ids fit the 24-bit colour
+    return id;
+  }
+
+  // The id a tile's placeholders name in this layout. A picture sent to the other slot since the
+  // last layout has fully arrived by now, so they switch to it here.
   std::uint32_t kitty_id(const std::string &key) {
     KittySent &k = kitty[key];
-    if (k.id == 0) {
-      if (kitty_next == 0) // a random base, so another program's images in the window are safe
-        kitty_next = 1 + ((std::random_device{}() & 0x7FFFu) << 8);
-      k.id = kitty_next;
-      kitty_next = kitty_next >= 0xFFFFFFu ? 1 : kitty_next + 1; // ids fit the 24-bit colour
+    if (k.ids[0] == 0) {
+      k.ids[0] = next_kitty_id();
+      k.ids[1] = next_kitty_id();
     }
-    return k.id;
+    if (k.pending) {
+      k.shown ^= 1;
+      k.pending = false;
+    }
+    return k.ids[k.shown];
   }
 
   // Lay picture `p` out as a pixel-mode image of cols x rows cells, recorded for this walk.
@@ -828,21 +849,39 @@ struct FtxuiBackend::Impl {
           KittySent &k = kitty[t.key];
           k.frame = frame;
           const bool same_place =
-              k.sent && k.w == t.pw && k.h == t.ph && k.cols == t.cols && k.rows == t.rows;
-          if (same_place && k.gen == g.gen)
+              k.has[k.shown] && k.w == t.pw && k.h == t.ph && k.cols == t.cols && k.rows == t.rows;
+          const int other = k.shown ^ 1;
+          // Once the picture stops changing, the other id's older picture is no longer needed.
+          const auto free_other = [&] {
+            if (!k.pending && k.has[other]) {
+              out += gfx::kitty_delete(k.ids[other]);
+              k.has[other] = false;
+            }
+          };
+          if (same_place && k.gen == g.gen) {
+            free_other();
             continue; // the same picture, already there
+          }
           const unsigned char *origin =
               raster + static_cast<std::size_t>(t.py) * stride + static_cast<std::size_t>(t.px) * 3;
           const std::uint64_t hash = hash_pixels(origin, t.pw, t.ph, stride);
-          if (!same_place || hash != k.hash) // a frame published again unchanged is not re-sent
-            out += gfx::kitty_transmit(origin, t.pw, t.ph, stride, k.id, t.cols, t.rows);
+          if (!same_place) { // the first picture, or a new size: under the id the cells name now
+            out += gfx::kitty_transmit(origin, t.pw, t.ph, stride, k.ids[k.shown], t.cols, t.rows);
+            k.has[k.shown] = true;
+            k.pending = false;
+          } else if (hash != k.hash) { // a new picture: to the other id (see KittySent)
+            out += gfx::kitty_transmit(origin, t.pw, t.ph, stride, k.ids[other], t.cols, t.rows);
+            k.has[other] = true;
+            k.pending = true;
+          } else { // a frame published again unchanged is not re-sent
+            free_other();
+          }
           k.gen = g.gen;
           k.hash = hash;
           k.w = t.pw;
           k.h = t.ph;
           k.cols = t.cols;
           k.rows = t.rows;
-          k.sent = true;
         }
         continue;
       }
@@ -897,8 +936,9 @@ struct FtxuiBackend::Impl {
         ++it;
         continue;
       }
-      if (it->second.sent) // no longer drawn: free it in the terminal
-        out += gfx::kitty_delete(it->second.id);
+      for (int slot = 0; slot < 2; ++slot) // no longer drawn: free it in the terminal
+        if (it->second.has[slot])
+          out += gfx::kitty_delete(it->second.ids[slot]);
       it = kitty.erase(it);
     }
     for (auto it = sixel_cache.begin(); it != sixel_cache.end();)
@@ -909,8 +949,9 @@ struct FtxuiBackend::Impl {
   std::string release_graphics() {
     std::string out;
     for (const auto &k : kitty)
-      if (k.second.sent)
-        out += gfx::kitty_delete(k.second.id);
+      for (int slot = 0; slot < 2; ++slot)
+        if (k.second.has[slot])
+          out += gfx::kitty_delete(k.second.ids[slot]);
     kitty.clear();
     sixel_cache.clear();
     return out;
@@ -2314,6 +2355,14 @@ std::string FtxuiBackend::render_to_string(Runtime &rt, int width, int height, b
   Impl &m = *m_;
   m.term_w = std::max(1, width);
   m.term_h = height > 0 ? height : 24; // percent sizes resolve against a nominal 24 rows
+  // The placeholders' 24-bit colour names their image, and a terminal with the kitty protocol has
+  // true colour, so lay out and print as one would. For the whole walk, not only the print: FTXUI
+  // quantizes an RGB colour to the terminal's palette when the colour is made, during layout, and
+  // a palette colour names no image.
+  const bool true_color = ansi && m.mode() == ImageMode::Kitty;
+  const fx::Terminal::Color colors = fx::Terminal::ColorSupport();
+  if (true_color)
+    fx::Terminal::SetColorSupport(fx::Terminal::Color::TrueColor);
   rt.render(); // walk the tree -> (re)builds m.root through the methods above
   m.gfx_shown = m.gfx_last;
   fx::Screen screen =
@@ -2321,17 +2370,12 @@ std::string FtxuiBackend::render_to_string(Runtime &rt, int width, int height, b
                          height > 0 ? fx::Dimension::Fixed(height) : fx::Dimension::Fit(m.root));
   fx::Render(screen, m.root);
   m.shown = m.last; // the boxes now hold this frame's layout
-  if (ansi && m.mode() == ImageMode::Kitty) {
-    // The placeholders' 24-bit colour names their image: a terminal with the kitty protocol has
-    // true colour, so print it as one would.
-    const fx::Terminal::Color colors = fx::Terminal::ColorSupport();
-    fx::Terminal::SetColorSupport(fx::Terminal::Color::TrueColor);
+  if (ansi) {
     std::string out = screen.ToString();
-    fx::Terminal::SetColorSupport(colors);
+    if (true_color)
+      fx::Terminal::SetColorSupport(colors);
     return out;
   }
-  if (ansi)
-    return screen.ToString();
   std::string out;
   for (int y = 0; y < screen.dimy(); ++y) {
     std::string line;
@@ -2698,8 +2742,9 @@ FtxuiBackend::run_loop(Runtime &rt, const RunOptions &opts, const std::function<
   while (!loop.HasQuitted()) {
     // A repaint goes out between synchronized-output marks, so a terminal that has them shows it
     // whole. Sixel bitmaps go inside: the repaint just covered the ones it replaces. Kitty images
-    // go after: their placeholders are already in the repaint, a new image replaces the old in
-    // one step, and a big one would overflow the terminal's synchronized-update buffer.
+    // go after: a big one would overflow the terminal's synchronized-update buffer, and a changed
+    // one goes to an id the repaint does not name yet (KittySent), so the shown image stays whole
+    // while the next one arrives.
     if (pixels)
       std::cout << "\x1b[?2026h";
     m.drew = false;
@@ -2891,6 +2936,26 @@ void FtxuiBackend::forward_to_document(AppRuntime &, const TermEvent &) const {}
 bool FtxuiBackend::available() { return false; }
 
 #endif
+
+// ── custom widgets: the same in both builds (a host's draw fn calls the primitives above)
+// ─────────
+
+void FtxuiBackend::register_widget(std::string custom_type, CustomDrawFn draw) {
+  if (draw)
+    customWidgets_[std::move(custom_type)] = std::move(draw);
+  else
+    customWidgets_.erase(custom_type);
+}
+
+CustomEdit FtxuiBackend::custom_widget(const char *type, const std::string &current,
+                                       const Widget &w) {
+  const auto it = customWidgets_.find(type ? type : "");
+  if (it == customWidgets_.end())
+    return {}; // not handled: the core draws a placeholder
+  CustomEdit e = it->second(current, w);
+  e.handled = true; // a registered handler drew it, whatever its edit says
+  return e;
+}
 
 } // namespace ariadne
 } // namespace cvc

@@ -734,5 +734,13 @@ void ImGuiBackend::install(cvc::ariadne::Runtime &rt, ImGuiOverlay &overlay) {
   overlay.setDrawCallback([r] { r->render(); });
 }
 
+void ImGuiBackend::setImGuiContext(ImGuiContext *ctx) {
+#ifdef CVC_ENABLE_IMGUI
+  ImGui::SetCurrentContext(ctx);
+#else
+  (void)ctx;
+#endif
+}
+
 } // namespace gl
 } // namespace cvc
