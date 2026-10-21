@@ -240,6 +240,15 @@ Three backends ship:
     the picture is real pixels (see *Pixel graphics* below); everywhere else it is
     half-block cells (two pixels per cell, 24-bit colour; a luminance ramp on a colourless
     terminal).
+  - **custom widgets** — `register_widget(type, fn)` draws a custom type with the
+    backend's own primitives, as `ImGuiBackend::register_widget` does. `stream_view` is
+    one: `register_stream_view_widget(backend, app)`
+    ([`stream/stream_view.h`](../inc/cvc/ariadne/stream/stream_view.h)) shows a live
+    video stream's frames through `set_image` / `draw_image`. It uses the same per-widget
+    frame puller as the ImGui `stream_view`, which follows token switches and reopened
+    streams. A compressed codec needs a decoder from the host; `arigl` adds cvcGL's JPEG
+    one for `mjpeg`. `ari` and `arigl --terminal` both register it. With no live stream,
+    it shows whatever still image is published under the stream's name (`--image`).
 
   Commit edges match the ImGui backend: discrete widgets commit on the edit, a
   mouse-dragged slider commits on release (arrow-key steps commit at once), a text field
@@ -916,9 +925,11 @@ arigl check    [flags] doc.ari
 
 `arigl` registers cvcGL's bundles before it loads a document
 ([`bundles.h`](../inc/cvc/gl/ariadne/bundles.h)): its node types and shader presets, the
-stream and media verbs, and in a window the ImGui `stream_view` widget. In both modes it
-routes OS signals to `on_signal:` and exits 128 + N for one the document does not handle.
-A snapshot runs on a fixed clock, so its frames are reproducible. The cvcGL examples
+stream and media verbs, and the `stream_view` widget (ImGui in a window, the terminal one
+with `--terminal`). In both modes it routes OS signals to `on_signal:` and exits 128 + N
+for one the document does not handle. A snapshot's frames run at `--fps` (20 by default),
+so a live stream delivers into them; in a window the scene clock is fixed, so its frames
+are reproducible. The cvcGL examples
 (`ariadne_hello`, `ariadne_stream`, `ariadne_conference`, `ariadne_terminal`) still build;
 `arigl` is meant to replace them once it does everything they do.
 

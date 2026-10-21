@@ -113,7 +113,9 @@ int main(int argc, char **argv) {
   std::unique_ptr<cvc::ariadne::FtxuiBackend> backend =
       tvision ? std::make_unique<cvc::ariadne::TvisionBackend>(look)
               : std::make_unique<cvc::ariadne::FtxuiBackend>(look);
-  cvc::gl::ariadne::TerminalScene scene(app, *backend);
+  // The scene graph and the document share one state root, so a panel bound to a node's state
+  // (forest.count, light.intensity, ...) reads what the node's realizer seeded.
+  cvc::gl::ariadne::TerminalScene scene(app, *backend, /*supersample=*/2, "ui.docs.ari");
   cvc::ariadne::AppRuntime rt(app, "ui.docs.ari", &scene);
   rt.set_backend(*backend);
   for (const std::string &d : componentPaths)

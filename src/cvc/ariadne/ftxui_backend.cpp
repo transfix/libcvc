@@ -2898,5 +2898,25 @@ bool FtxuiBackend::available() { return false; }
 
 #endif
 
+// ── custom widgets: the same in both builds (a host's draw fn calls the primitives above)
+// ─────────
+
+void FtxuiBackend::register_widget(std::string custom_type, CustomDrawFn draw) {
+  if (draw)
+    customWidgets_[std::move(custom_type)] = std::move(draw);
+  else
+    customWidgets_.erase(custom_type);
+}
+
+CustomEdit FtxuiBackend::custom_widget(const char *type, const std::string &current,
+                                       const Widget &w) {
+  const auto it = customWidgets_.find(type ? type : "");
+  if (it == customWidgets_.end())
+    return {}; // not handled: the core draws a placeholder
+  CustomEdit e = it->second(current, w);
+  e.handled = true; // a registered handler drew it, whatever its edit says
+  return e;
+}
+
 } // namespace ariadne
 } // namespace cvc
