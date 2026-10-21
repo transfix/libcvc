@@ -28,6 +28,7 @@
 #include "streaming_test_util.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -136,7 +137,74 @@ double drawnFraction(const Image &img) {
   return double(n) / double(img.w * img.h);
 }
 
+// The first pixel two frames disagree on, with both colours ("" when they are identical).
+std::string firstDifference(const Image &a, const Image &b) {
+  if (a.empty() || b.empty() || a.w != b.w || a.h != b.h)
+    return "";
+  for (int y = 0; y < a.h; ++y)
+    for (int x = 0; x < a.w; ++x) {
+      const unsigned char *p = a.at(x, y), *q = b.at(x, y);
+      if (p[0] != q[0] || p[1] != q[1] || p[2] != q[2]) {
+        char buf[96];
+        std::snprintf(buf, sizeof buf, "first at (%d,%d): %d,%d,%d then %d,%d,%d", x, y, p[0], p[1],
+                      p[2], q[0], q[1], q[2]);
+        return buf;
+      }
+    }
+  return "";
+}
+
 #ifdef CVC_ENABLE_IMGUI
+// What ImGui handed the GL backend for the last rendered frame: its draw lists (vertices, indices,
+// commands and their clip rects and textures) and every texture's size and pixels. Two frames with
+// equal fingerprints asked GL to draw the same UI, so a pixel difference between them comes from
+// the rasterizer, not from the UI.
+struct DrawFingerprint {
+  uint64_t lists = 0, textures = 0;
+  int vertices = 0;
+  std::string textureSizes;
+  bool sameUi(const DrawFingerprint &o) const {
+    return lists == o.lists && textures == o.textures && vertices == o.vertices;
+  }
+};
+
+DrawFingerprint drawFingerprint(cvc::gl::ImGuiOverlay &ui) {
+  DrawFingerprint fp;
+  ImGui::SetCurrentContext(ui.imguiContext());
+  const ImDrawData *dd = ImGui::GetDrawData();
+  if (!dd || !dd->Valid)
+    return fp;
+  auto fnv = [](uint64_t &h, const void *data, size_t n) {
+    const auto *b = static_cast<const unsigned char *>(data);
+    for (size_t i = 0; i < n; ++i)
+      h = (h ^ b[i]) * 1099511628211ull;
+  };
+  fp.lists = fp.textures = 1469598103934665603ull;
+  for (const ImDrawList *dl : dd->CmdLists) {
+    fnv(fp.lists, dl->VtxBuffer.Data, dl->VtxBuffer.Size * sizeof(ImDrawVert));
+    fnv(fp.lists, dl->IdxBuffer.Data, dl->IdxBuffer.Size * sizeof(ImDrawIdx));
+    for (const ImDrawCmd &c : dl->CmdBuffer) {
+      const ImTextureID tex = c.GetTexID();
+      fnv(fp.lists, &c.ClipRect, sizeof c.ClipRect);
+      fnv(fp.lists, &tex, sizeof tex);
+      fnv(fp.lists, &c.VtxOffset, sizeof c.VtxOffset);
+      fnv(fp.lists, &c.IdxOffset, sizeof c.IdxOffset);
+      fnv(fp.lists, &c.ElemCount, sizeof c.ElemCount);
+    }
+    fp.vertices += dl->VtxBuffer.Size;
+  }
+  if (dd->Textures)
+    for (const ImTextureData *t : *dd->Textures) {
+      fnv(fp.textures, &t->Width, sizeof t->Width);
+      fnv(fp.textures, &t->Height, sizeof t->Height);
+      if (t->Pixels)
+        fnv(fp.textures, t->Pixels, static_cast<size_t>(t->GetSizeInBytes()));
+      fp.textureSizes += (fp.textureSizes.empty() ? "" : " ") + std::to_string(t->Width) + "x" +
+                         std::to_string(t->Height);
+    }
+  return fp;
+}
+
 void injectPointer(cvc::gl::ImGuiOverlay &ui, const GoldenCase *gc, int frame) {
   if (!gc)
     return;
@@ -202,9 +270,15 @@ bool runDocument(const fs::path &doc, const fs::path &goldenDir, const fs::path 
   rt.frame(kDt);
   const Image actual =
       cvcgl_golden::fromFrameRGB(view.frameRGB(), view.frameWidth(), view.frameHeight());
+#ifdef CVC_ENABLE_IMGUI
+  const DrawFingerprint actualUi = drawFingerprint(ui);
+#endif
   rt.frame(kDt);
   const Image next =
       cvcgl_golden::fromFrameRGB(view.frameRGB(), view.frameWidth(), view.frameHeight());
+#ifdef CVC_ENABLE_IMGUI
+  const DrawFingerprint nextUi = drawFingerprint(ui);
+#endif
   for (const std::string &w : rt.take_warnings())
     std::printf("  runtime: %s\n", w.c_str());
 
@@ -219,8 +293,26 @@ bool runDocument(const fs::path &doc, const fs::path &goldenDir, const fs::path 
   check(drawn > 0.01, name + ": the frame is more than the background",
         std::to_string(100.0 * drawn) + "% of pixels drawn");
   const cvcgl_golden::Comparison settled = cvcgl_golden::compare(next, actual, {0, 0.0});
+  std::string settledDetail = cvcgl_golden::describe(settled, {0, 0.0});
+  const std::string firstDiff = firstDifference(actual, next);
+  if (!firstDiff.empty())
+    settledDetail += "; " + firstDiff;
+#ifdef CVC_ENABLE_IMGUI
+  if (actualUi.sameUi(nextUi)) {
+    settledDetail += "; ImGui drew the same UI both times (" + std::to_string(nextUi.vertices) +
+                     " vertices, textures " + nextUi.textureSizes + ")";
+  } else {
+    std::string what = actualUi.lists != nextUi.lists ? "draw lists" : "";
+    if (actualUi.textures != nextUi.textures)
+      what += what.empty() ? "textures" : " and textures";
+    settledDetail += "; ImGui's " + what + " changed between them (" +
+                     std::to_string(actualUi.vertices) + " -> " + std::to_string(nextUi.vertices) +
+                     " vertices, textures " + actualUi.textureSizes + " -> " + nextUi.textureSizes +
+                     ")";
+  }
+#endif
   check(settled.pass, name + ": one more frame draws the same pixels (the UI has settled)",
-        cvcgl_golden::describe(settled, {0, 0.0}));
+        settledDetail);
 
   // Which golden, and how strictly.
   const std::string variant = goldenVariant();
