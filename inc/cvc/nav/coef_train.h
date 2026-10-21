@@ -207,10 +207,14 @@ public:
   // rollout's further state, (vy, r, delta, a) per agent ([n*4]), comes in through
   // `x` (null = zeros, as at a batch start) and goes out through `x_out`; the other
   // rollouts ignore both.
+  //
+  // `potential` ([n*window], agent-major), when given, receives U_nav (detail/nav_potential.h,
+  // diff::surr_potential) at the state each step starts from, with the coefficients the network
+  // gave that step: the energy every rollout kind's force law descends. Nothing else changes.
   double loss_and_grad(const training_scene &scene, const float *o, const float *v,
                        const float *goal, int n, int window, std::vector<float> *grad,
                        float *o_out = nullptr, float *v_out = nullptr, const float *x = nullptr,
-                       float *x_out = nullptr) const;
+                       float *x_out = nullptr, float *potential = nullptr) const;
 
   const std::vector<float> &params() const { return p_; }
   void set_params(const std::vector<float> &p) { p_ = p; }

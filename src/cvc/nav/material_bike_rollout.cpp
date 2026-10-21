@@ -84,8 +84,8 @@ struct rec {
   // geometry (sums over discs), the governor's clearance and normal
   float Fgx, Fgy, Frx, Fry, d, ngx, ngy;
   int jmin;
-  // forces
-  float Fmx, Fmy, Fx, Fy;
+  // forces; (Fcx, Fcy) is the conservative part, before F_ext
+  float Fmx, Fmy, Fx, Fy, Fcx, Fcy;
   // longitudinal command before the governors
   float a0;
   int a0_side;
@@ -207,6 +207,8 @@ state step_fwd(const agent &a, const state &st, rec &r, float &dmin_out, int &jm
   r.Fy = r.Fgy + Fgoal_y;
   r.Fx = r.Fx + r.Fmx;
   r.Fy = r.Fy + r.Fmy;
+  r.Fcx = r.Fx;
+  r.Fcy = r.Fy;
   if (r.ext) { // drive.cpp adds ext_force last
     r.Fx = r.Fx + r.Fex;
     r.Fy = r.Fy + r.Fey;
@@ -742,6 +744,32 @@ int max_horizon(const int *H, int B) {
   return m;
 }
 
+// rollout_energy: U_nav at agent a's pose (ox, oy), row k of agent b.
+void log_potential(const agent &a, rollout_energy &e, int b, int max_H, int k, float ox, float oy) {
+  const potential_terms u = detail::material_potential(
+      ox, oy, a.gx, a.gy, a.Cb, a.Rb, a.mb, a.ab, a.N, a.be, a.ls, a.lh, a.dh, a.rr_eff, a.chan[0],
+      a.chan[1], a.Hp, a.Wp, a.o0x, a.o0y, a.k_sharp, a.d_hat_sdf);
+  const std::size_t row = static_cast<std::size_t>(b) * (max_H + 1) + k;
+  if (e.potential)
+    e.potential[row] = u.total();
+  if (e.terms) {
+    float *t = e.terms + 4 * row;
+    t[0] = u.goal;
+    t[1] = u.barrier;
+    t[2] = u.soft;
+    t[3] = u.hard;
+  }
+}
+
+// rollout_energy: the conservative force step s applied.
+void log_force(const rec &r, rollout_energy &e, int b, int max_H, int s) {
+  if (!e.force)
+    return;
+  float *f = e.force + 2 * (static_cast<std::size_t>(b) * max_H + s);
+  f[0] = r.Fcx;
+  f[1] = r.Fcy;
+}
+
 } // namespace
 
 void validate(const bicycle_material_params &v) {
@@ -761,7 +789,7 @@ void integrate_bicycle_material(float *o, float *th, float *sp, const float *goa
                                 int Hp, int Wp, const surrogate_material_params &p,
                                 const bicycle_material_params &v, float *min_clear, float *cum_risk,
                                 float *hard_count, float *arc_length, int num_threads,
-                                const material_ext *ext) {
+                                const material_ext *ext, rollout_energy *energy) {
   validate(v);
   const int max_H = max_horizon(H, B);
   if (ext)
@@ -779,9 +807,13 @@ void integrate_bicycle_material(float *o, float *th, float *sp, const float *goa
       rec r;
       r.active = s < H[b];
       put_ext(ext, ea, s, st.ox, st.oy, r);
+      if (energy)
+        log_potential(a, *energy, b, max_H, s, st.ox, st.oy);
       float dmin;
       int jmin;
       const state next = step_fwd(a, st, r, dmin, jmin);
+      if (energy)
+        log_force(r, *energy, b, max_H, s);
       if (dmin < minclr)
         minclr = dmin; // ungated, as in the surrogate
       const float active = r.active ? 1.0f : 0.0f;
@@ -790,6 +822,8 @@ void integrate_bicycle_material(float *o, float *th, float *sp, const float *goa
       hard += active * (r.sdf < 1.0f ? 1.0f : 0.0f);
       st = next;
     }
+    if (energy)
+      log_potential(a, *energy, b, max_H, max_H, st.ox, st.oy);
     o[2 * b] = st.ox;
     o[2 * b + 1] = st.oy;
     th[b] = st.th;
@@ -987,16 +1021,14 @@ diff::dyn_state<float> dyn_state_at(const float *o, const float *th, const float
 }
 } // namespace
 
-void integrate_dynamic_material(float *o, float *th, float *vx, float *x, const float *goal,
-                                const float *C, const float *R, const std::uint8_t *mask,
-                                const float *alphas, const float *beta, const float *gamma,
-                                const float *lam_soft, const float *lam_hard,
-                                const float *rollout_patch, const float *rr, const float *d_hat,
-                                const float *dt, const int *H, int B, int N, int Hp, int Wp,
-                                const surrogate_material_params &p,
-                                const bicycle_material_params &v, const diff::dyn_bike_params &dyn,
-                                float *min_clear, float *cum_risk, float *hard_count,
-                                float *arc_length, int num_threads, const material_ext *ext) {
+void integrate_dynamic_material(
+    float *o, float *th, float *vx, float *x, const float *goal, const float *C, const float *R,
+    const std::uint8_t *mask, const float *alphas, const float *beta, const float *gamma,
+    const float *lam_soft, const float *lam_hard, const float *rollout_patch, const float *rr,
+    const float *d_hat, const float *dt, const int *H, int B, int N, int Hp, int Wp,
+    const surrogate_material_params &p, const bicycle_material_params &v,
+    const diff::dyn_bike_params &dyn, float *min_clear, float *cum_risk, float *hard_count,
+    float *arc_length, int num_threads, const material_ext *ext, rollout_energy *energy) {
   validate_dyn(v, dyn);
   const int max_H = max_horizon(H, B);
   if (ext)
@@ -1013,9 +1045,13 @@ void integrate_dynamic_material(float *o, float *th, float *vx, float *x, const 
       rec r;
       r.active = s < H[b];
       put_ext(ext, ea, s, st.x, st.y, r);
+      if (energy)
+        log_potential(a, *energy, b, max_H, s, st.x, st.y);
       float dmin;
       int jmin;
       const diff::dyn_state<float> next = step_fwd_dyn(a, dyn, st, r, dmin, jmin);
+      if (energy)
+        log_force(r, *energy, b, max_H, s);
       if (dmin < minclr)
         minclr = dmin;
       const float active = r.active ? 1.0f : 0.0f;
@@ -1024,6 +1060,8 @@ void integrate_dynamic_material(float *o, float *th, float *vx, float *x, const 
       hard += active * (r.sdf < 1.0f ? 1.0f : 0.0f);
       st = next;
     }
+    if (energy)
+      log_potential(a, *energy, b, max_H, max_H, st.x, st.y);
     o[2 * b] = st.x;
     o[2 * b + 1] = st.y;
     th[b] = st.psi;

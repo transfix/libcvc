@@ -187,7 +187,72 @@ inline float ipc_dbdd(float d, float d_hat) {
   return -(2.0f * (dc - d_hat) * std::log(dc / d_hat) + (dc - d_hat) * (dc - d_hat) / dc);
 }
 
+// The terrain rollout_impl drives with: only with a stack and a nonzero weight.
+inline const terrain_drive *active_terrain(const veh_params &v) {
+  return v.terrain && v.terrain->stack &&
+                 (v.terrain->lam_soft != 0.0f || v.terrain->lam_hard != 0.0f)
+             ? v.terrain
+             : nullptr;
+}
+
+// U_nav at agent i's pose for rollout_impl's conservative force (drive_potential, drive.h), the
+// heading given as (cos, sin). ls / lh are the material weights the drive applied; the terrain's
+// are read as the drive reads them. Write-only for the drive: nothing it steers by reads this.
+potential_terms potential_at(const field_stack &f, const int *map_id, int i, float ox, float oy,
+                             float ch, float sh, float gx, float gy, float al, float be,
+                             const veh_params &v, const material_drive *mat, float ls, float lh) {
+  potential_terms u;
+  const int plane = map_id ? map_id[i] : 0;
+  const float dx = ox - gx, dy = oy - gy;
+  u.goal = 0.5f * be * (dx * dx + dy * dy);
+  const bool has_fp = v.n_body > 0 && (v.body_offsets != nullptr || v.body_offsets_col != nullptr);
+  if (!has_fp) {
+    float phi, nx, ny;
+    sample_unit(f, plane, ox, oy, phi, nx, ny);
+    const float rr_i = v.rr_col ? v.rr_col[i] : v.rr;
+    u.barrier = al * detail::ipc_b(phi - rr_i, v.d_hat);
+  } else {
+    // The footprint's discs along the heading, each with its own barrier (the force sums them).
+    const float body_rr_i = v.body_rr_col ? v.body_rr_col[i] : v.body_rr;
+    const float alg = v.body_gain == 1.0f ? al : al * v.body_gain;
+    for (int b = 0; b < v.n_body; ++b) {
+      const float off =
+          v.body_offsets_col ? v.body_offsets_col[i * v.n_body + b] : v.body_offsets[b];
+      float bphi, bnx, bny;
+      sample_unit(f, plane, ox + off * ch, oy + off * sh, bphi, bnx, bny);
+      u.barrier += alg * detail::ipc_b(bphi - body_rr_i, v.d_hat);
+    }
+  }
+  const plant_drive *pd = v.plant;
+  if (mat && mat->stack) {
+    const int mplane = (map_id && mat->stack->M > 1) ? map_id[i] : 0;
+    float risk, phi, grx, gry, gpx, gpy;
+    detail::material_sample_point(*mat->stack, mplane, ox, oy, risk, phi, grx, gry, gpx, gpy);
+    u.soft = ls * risk;
+    u.hard = lh * static_cast<float>(mat->stack->S) *
+             detail::sdf_barrier_b(phi, mat->k_sharp, mat->d_hat_m);
+  }
+  if (const terrain_drive *ter = active_terrain(v)) {
+    float risk, phi, grx, gry, gpx, gpy;
+    detail::material_sample_point(*ter->stack, 0, ox, oy, risk, phi, grx, gry, gpx, gpy);
+    float lh_t = ter->lam_hard;
+    if (pd && pd->hard_scale)
+      lh_t = lh_t * pd->hard_scale[i];
+    u.terrain = ter->lam_soft * risk + lh_t * static_cast<float>(ter->stack->S) *
+                                           detail::sdf_barrier_b(phi, ter->k_sharp, ter->d_hat_m);
+  }
+  return u;
+}
+
 } // namespace
+
+potential_terms drive_potential(const field_stack &f, float ox, float oy, float th, float gx,
+                                float gy, int i, const int *map_id, const veh_params &v, float al,
+                                float be, const material_drive *mat, float lam_soft,
+                                float lam_hard) {
+  return potential_at(f, map_id, i, ox, oy, std::cos(th), std::sin(th), gx, gy, al, be, v, mat,
+                      lam_soft, lam_hard);
+}
 
 // CVC_USING_CUDA, not CVC_ENABLE_CUDA: the latter is a CMake variable, and the
 // PUBLIC compile define the cvc target actually gets is CVC_USING_CUDA
@@ -367,6 +432,8 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
     float tel_mu = 1.0f, tel_mrisk = 0.0f, tel_lam = 0.0f, tel_lam_hard = 0.0f, tel_ext_x = 0.0f,
           tel_ext_y = 0.0f;
     float tel_steer = 0.0f, tel_curv = 0.0f;
+    potential_terms tel_u;
+    float tel_fx = 0.0f, tel_fy = 0.0f;
 
     for (int s = 0; s < nsub; ++s) {
       // Hoisted above the sample because the footprint places its discs along
@@ -484,11 +551,7 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
       // Terrain (P5 H1): the grade cost's soft force and the infeasible slope's barrier, the
       // material force's form on the terrain's own plane.
       float Fter_x = 0.0f, Fter_y = 0.0f;
-      const terrain_drive *ter =
-          v.terrain && v.terrain->stack &&
-                  (v.terrain->lam_soft != 0.0f || v.terrain->lam_hard != 0.0f)
-              ? v.terrain
-              : nullptr;
+      const terrain_drive *ter = active_terrain(v);
       if (ter) {
         float trisk, tphi, tgrx, tgry, tgpx, tgpy;
         detail::material_sample_point(*ter->stack, 0, ox, oy, trisk, tphi, tgrx, tgry, tgpx, tgpy);
@@ -500,6 +563,13 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
         Fter_y = -ter->lam_soft * tgry + (-lh * db) * tgpy;
         Fx = Fx + Fter_x;
         Fy = Fy + Fter_y;
+      }
+      // U_nav and the conservative force at the tick's start pose (telemetry only).
+      if (tel && s == 0) {
+        tel_u = potential_at(f, map_id, i, ox, oy, ch, sh, gx, gy, ali, bei, v, mat, tel_lam,
+                             tel_lam_hard);
+        tel_fx = Fx;
+        tel_fy = Fy;
       }
 
       // Generic external force (e.g. a downstream layer's own force). Sampled at the
@@ -687,6 +757,10 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
       t.curvature = tel_curv;
       t.clearance = minclr;               // worst (min) clearance over the tick's substeps
       t.binding = minclr < d_hat ? 1 : 0; // IPC barrier active at any point this tick
+      t.potential = tel_u.total();
+      t.terms = tel_u;
+      t.force_x = tel_fx;
+      t.force_y = tel_fy;
     }
   });
 }
