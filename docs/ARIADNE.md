@@ -1234,8 +1234,6 @@ ImGui overlay compiled as inert stubs.
 
 - A window with no `size:` stays at ImGui's 32 px minimum. §11.4 persists its size before
   ImGui has fitted it and seeds that size back, which cancels the auto-fit.
-- A declared directional `light:` leaves the realized scene unlit, so `scene.ari` uses the
-  fallback headlight.
 - `layout: {kind: horizontal}` is ignored on a window body, and the embedded schema rejects the
   `size: {hint, min, max}` map and `"50%"` strings that the loader accepts.
 
