@@ -82,8 +82,9 @@ while (!view.windowClosed()) {
 }
 ```
 
-Every wasm demo in `src/cvcGL/examples` is built this way: the 9 gallery demos
-(`_wasm_demos`) and `ariadne_hello` (`_wasm_extra_demos`, not in the gallery).
+Every wasm demo in the repo's `examples/` is built this way: the gallery demos
+(`_wasm_demos`) and `ariadne_hello` (`_wasm_extra_demos`, not in the gallery), and so
+is arigl's browser build, `cyprty` (`src/arigl/CMakeLists.txt`).
 
 ## cvcgl_wasm_app()
 
@@ -335,7 +336,7 @@ dlmalloc has no lock to contend on, so it gains nothing there.
 
 As a result:
 - the gh-pages gallery (single-threaded) keeps dlmalloc;
-- the cvcgl-examples wasm-mt gallery, like any other wasm-mt app, gets mimalloc.
+- the libcvc-examples-web wasm-mt gallery, like any other wasm-mt app, gets mimalloc.
 
 Under `-fsanitize=address`, `AUTO` resolves to OFF with a status message, because emcc
 refuses to combine mimalloc with ASan. An explicit `MIMALLOC ON` under ASan gets a
@@ -369,7 +370,7 @@ Before shipping it:
      `std::function`, so this covers every Ariadne UI action.
    - ImageMagick's `fd_sync`.
    - Any other blocking `emscripten_*` call.
-2. **`-sFETCH=1`.** Every gallery demo links it (`src/cvcGL/examples/CMakeLists.txt`).
+2. **`-sFETCH=1`.** Every gallery demo links it (`examples/CMakeLists.txt`).
    An app that keeps it must prove fetch is unreachable. Otherwise, do not use
    `IGNORE_INDIRECT`.
 3. **Link once with `-sASYNCIFY_ADVISE=1 -sASSERTIONS=1`**, exercise every UI path, and
@@ -387,12 +388,12 @@ is a developer tool, not installed with the SDK; `devtools/GLSYNC.md` explains h
 read it. Serve a built gallery with it injected:
 
 ```
-python3 src/cvcGL/examples/wasm/serve.py -d build-wasm-mt/gallery --glsync 8822
+python3 src/cvcGL/wasm/devtools/serve.py -d build-wasm-mt/gallery --glsync 8822
 # then  http://localhost:8822/nav_city_drive/?glsync          (shim on)
 #       http://localhost:8822/nav_city_drive/?glsync&glshim=0 (shim off: the A/B)
 ```
 
-`serve.py` takes three flags, all off by default (`cvcgl-examples-web` passes none):
+`serve.py` takes three flags, all off by default (`libcvc-examples-web` passes none):
 - `--glsync[=PATH]` injects the census;
 - `--prof-param NAME` makes the census add `?NAME` to the URL, for apps that print
   `PROF n=` lines with it;

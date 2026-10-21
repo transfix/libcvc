@@ -14,7 +14,7 @@
 // fine-tune the policy on the box you deploy on — e.g. on the actual occupancy of
 // your terrain / lsystem_forest scene — without a torch install anywhere.
 //
-// Build (inside the tree, the canonical examples tree src/cvcGL/examples):
+// Build (inside the tree, in the repo's examples/ tree):
 //   cmake -DCVC_BUILD_CVCGL=ON -DCVC_BUILD_EXAMPLES=ON … && cmake --build build
 //         --target nav_train_demo. Run:
 //   nav_train_demo [out.cvcnav] [steps]

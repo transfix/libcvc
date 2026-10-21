@@ -111,7 +111,7 @@ if(EMSCRIPTEN)
   add_compile_definitions(BOOST_HAS_PTHREADS)
   # Threaded variant: real std::thread/SharedArrayBuffer. Every static lib in
   # the link must also be -pthread (a deps prefix built with CVC_WASM_THREADS=1)
-  # and the hosting page needs COOP/COEP headers (examples/wasm/serve.py).
+  # and the hosting page needs COOP/COEP headers (src/cvcGL/wasm/devtools/serve.py).
   option(CVC_WASM_PTHREADS "Emscripten: build with -pthread (needs -pthread deps + COOP/COEP hosting)" OFF)
   if(CVC_WASM_PTHREADS)
     add_compile_options(-pthread)

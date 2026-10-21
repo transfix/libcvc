@@ -12,7 +12,7 @@ as the worked example for the pieces cvcGL grew to support it: scene-owned light
 shadows, in-place volume animation, per-vertex mesh animation, GLSL shader injection, and
 the built-in `CameraController`.
 
-![the island](../../../docs/img/lsystem_forest.jpg)
+![the island](../../docs/img/lsystem_forest.jpg)
 
 ---
 

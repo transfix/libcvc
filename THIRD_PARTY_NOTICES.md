@@ -5,8 +5,8 @@ libcvc is licensed under the GNU Lesser General Public License, version 2.1
 the code compiled into its libraries from a dependency -- that comes from, or
 is derived from, authors other than The University of Texas at Austin, each
 with its notice exactly as the source carries it. It is installed with the
-documentation by the libcvc and cvcGL installs and ships in the cvcgl-examples
-package.
+documentation by the libcvc and cvcGL installs and ships in the libcvc-examples
+and libcvc-examples-web packages.
 
 Compiled into libcvc:
 
@@ -694,10 +694,10 @@ notices belong here once libcvc compiles them.
 
 ## ABYSSAL
 
-The GPU FFT ocean in `src/cvcGL/examples/OceanFFT.h` and `OceanFFT.cpp` -- its
+The GPU FFT ocean in `src/cvcGL/ocean/OceanFFT.h` and `OceanFFT.cpp` -- its
 spectrum, time evolution, butterfly IFFT and assembly -- is a C++/VTK port of
 ABYSSAL (github.com/Token-Gremlin/natural-disasters). It is built into the
-`lsystem_coast` example (the cvcgl-examples package) and the `cvcgl_ocean_fft`
+`lsystem_coast` example (the libcvc-examples packages) and the `cvcgl_ocean_fft`
 test. Upstream's `LICENSE`:
 
 ```

@@ -1,23 +1,23 @@
-// nav_city_swarm — a cvcGL demo of the cvc::nav reactive swarm: a MASS of vehicles cross
-// a procedural "city" (the same city_scene the trainer learns on) toward SIXTEEN colour-
-// coded targets with NO global plan — pure local reaction, no Python, no libtorch. It
-// proves the point that one machine drives many hundreds of agents at once (runs well at
-// ~800 with threading). Each agent flies a flag coloured by its target, so the swarm reads
-// as 16 converging colour streams. The drive is the PUBLISHED trained CoefMLP (cvcpkg
-// grl-snam-weights) — the same weights the trainer produces — resolved zero-config from the
-// prefix (falls back to the hand-tuned biased net if none is installed). Each agent, each
-// tick: sample the signed-distance clearance field phi -> a tiny CoefMLP (coef_mlp.h,
-// 5->64->64->3 SiLU) emits (alpha,beta,gamma) = wall-barrier / goal-spring / damping ->
-// a kinematic bicycle steers toward a "carrot" on the goal bearing, deflected by the
-// barrier, with a bug-style wall-follow escape on a stall (the carrot FSM, drive.h).
-// The whole swarm runs on a sim_thread off the render thread; agents are ONE merged
-// glyph mesh streamed via GeometryNode::updateVertices, so it stays smooth into the
-// thousands. --belief shared|grouped|private picks how many log-odds belief planes the
-// fleet keeps (agents coloured by plane), but the modes only DIVERGE under --fog: with
-// sensing off every plane equals the known map, so grouped/private just recolour the
-// same trajectories. Interactive window, or offscreen capture -> PNG frames -> mp4.
+// nav_city_drive — a cvcGL demo of the cvc::nav reactive drive: a handful of vehicle
+// CONVOYS cross real downtown Austin (the shipped scene bundle) to SIX colour-coded rally
+// points with NO global plan — pure local reaction, no Python, no libtorch. Where its
+// sibling nav_city_swarm proves "many hundreds of agents on one machine", this one is the
+// legible cousin: a few dozen vehicles in a few coloured convoys, so you can actually WATCH
+// each group thread the streets and converge on its objective, chase-cam onto the lead, and
+// drag a rally point to re-route the whole convoy live. The drive is the PUBLISHED trained
+// CoefMLP (cvcpkg grl-snam-weights) — the same weights the trainer produces — resolved
+// zero-config from the prefix (falls back to the hand-tuned biased net if none is
+// installed). Each vehicle, each tick: sample the signed-distance clearance field phi -> a
+// tiny CoefMLP (coef_mlp.h, 5->64->64->3 SiLU) emits (alpha,beta,gamma) = wall-barrier /
+// goal-spring / damping -> a kinematic bicycle steers toward a "carrot" on the goal bearing,
+// deflected by the barrier, with a bug-style wall-follow escape on a stall (the carrot FSM,
+// drive.h). The convoys run on a sim_thread off the render thread; vehicles are ONE merged
+// glyph mesh streamed via GeometryNode::updateVertices. --belief shared|grouped|private
+// picks how many log-odds belief planes the fleet keeps; under --fog the belief walls light
+// up in each convoy's colour along the corridor it has actually sensed. Interactive window,
+// or offscreen capture -> PNG frames -> mp4.
 //
-//   nav_city_swarm --agents 1500 --belief grouped --capture orbit --offscreen \
+//   nav_city_drive --agents 60 --belief grouped --capture orbit --offscreen \
 //                  --frames 300 --out /tmp/city && \
 //   ffmpeg -framerate 30 -i /tmp/city/frame_%05d.png -c:v libx264 -pix_fmt yuv420p city.mp4
 
@@ -43,9 +43,7 @@
 #include <cvc/gl/ScreenTextHud.h>
 #include <cvc/gl/StageLighting.h>
 #include <cvc/gl/TouchGestures.h>
-#include <cvc/gl/Viewport.h>
-#include <cvc/gl/ViewportManager.h>
-#include <cvc/lod/select.h> // agent distance-LOD selection (--lod)
+#include <cvc/lod/select.h>  // agent distance-LOD selection (--lod)
 #include <cvc/state/state.h> // write Track params (back/height/look_ahead) to camera state
 #include <future>
 #include <utility> // std::pair (lod score list)
@@ -293,18 +291,15 @@ int main(int argc, char **argv) {
   double mouseSens = 0.25, moveSpeed = 0.0; // camera feel (0 move speed = auto from bounds)
   double fps = 30.0, hz = 60.0;
   std::string belief = "shared", capture = "orbit", out = "frames", png, bundle, vehicle;
-  // What the vehicles drive on (--plant). nav's bicycle by default here: hundreds of physics
-  // vehicles do not keep up with the clock (32 Humvees cost about 5 ms a tick on one core, 3 ms
-  // on three of Jolt's workers; nav_city_drive's 60 drive on them by default).
-  std::string plantName = "kinematic";
+  std::string plantName = navdemo::default_plant(); // what the vehicles drive on (--plant)
   bool offscreen = false, fog = false, no_fog = false, no_shadows = false, ortho = false,
        lite = false, lod = false, noLod = false, buildingLod = false, noPip = false;
   int followInit = -1; // agent index to follow at start (-1 = free camera)
   int nearCap = 10;    // --lod: full-detail (rung 0) Humvee budget; coarser rungs fill the rest
 
-  po::options_description desc("nav_city_swarm — cvc::nav swarm in a cvcGL city");
+  po::options_description desc("nav_city_drive — cvc::nav swarm in a cvcGL city");
   desc.add_options()("help,h", "show this help")(
-      "agents", po::value<int>(&agents)->default_value(800), "number of vehicles")(
+      "agents", po::value<int>(&agents)->default_value(60), "number of vehicles")(
       "grid", po::value<int>(&grid)->default_value(96), "city occupancy resolution")(
       "belief", po::value<std::string>(&belief)->default_value("grouped"),
       "shared | grouped | private")("fog", po::bool_switch(&fog),
@@ -356,7 +351,7 @@ int main(int argc, char **argv) {
                 "agent index to CHASE from start with the cinematic Track camera (-1 = free)")(
       "plant", po::value<std::string>(&plantName)->default_value(plantName),
       "what the vehicles drive on: kinematic (nav's bicycle), or a vehicle preset on the Jolt "
-      "physics plant at its real size and limits (humvee, roboracer; best with fewer agents)");
+      "physics plant at its real size and limits (humvee, roboracer)");
   bool no_ui = false;
   desc.add_options()("no-ui", po::bool_switch(&no_ui),
                      "hide the ImGui overlay (default: hidden while capturing)");
@@ -374,7 +369,7 @@ int main(int argc, char **argv) {
     if (frames <= 0)
       frames = 600; // a capture must end — 0 would render offscreen forever, looking hung
     std::filesystem::create_directories(out);
-    std::printf("nav_city_swarm: capturing %ld frames (%s, offscreen) -> %s/frame_*.png\n", frames,
+    std::printf("nav_city_drive: capturing %ld frames (%s, offscreen) -> %s/frame_*.png\n", frames,
                 capture.c_str(), out.c_str());
   }
 
@@ -416,13 +411,13 @@ int main(int argc, char **argv) {
           "share/cvc-scenes/austin_south", "scenes/austin_south", "../scenes/austin_south"}) {
       if (std::filesystem::exists(std::string(p) + "/terrain.json")) {
         bundle = p;
-        std::printf("nav_city_swarm: no --bundle given, autodetected %s\n", bundle.c_str());
+        std::printf("nav_city_drive: no --bundle given, autodetected %s\n", bundle.c_str());
         break;
       }
     }
     if (bundle.empty())
       std::fprintf(stderr,
-                   "nav_city_swarm: no --bundle given and no known local Austin bundle found; "
+                   "nav_city_drive: no --bundle given and no known local Austin bundle found; "
                    "falling back to the synthetic city (no terrain, no satellite, no buildings). "
                    "Pass --bundle <dir> to load one.\n");
   }
@@ -435,11 +430,11 @@ int main(int argc, char **argv) {
       loaded = navdemo::load_city_bundle(bundle, grid, grid, bb, bocc, &cityMesh, &terrain,
                                          /*prefer_flat=*/lite);
     } catch (const std::exception &e) {
-      std::fprintf(stderr, "nav_city_swarm: bundle load threw: %s -> using synthetic city\n",
+      std::fprintf(stderr, "nav_city_drive: bundle load threw: %s -> using synthetic city\n",
                    e.what());
       loaded = false;
     } catch (...) {
-      std::fprintf(stderr, "nav_city_swarm: bundle load raised unknown -> using synthetic city\n");
+      std::fprintf(stderr, "nav_city_drive: bundle load raised unknown -> using synthetic city\n");
       loaded = false;
     }
     if (loaded) {
@@ -459,7 +454,7 @@ int main(int argc, char **argv) {
             stderr,
             "  no buildings mesh — using synthetic occupancy over the real Austin bounds\n");
       }
-      std::printf("nav_city_swarm: bundle %s  bounds [%.0f,%.0f]..[%.0f,%.0f]  %llu tris%s\n",
+      std::printf("nav_city_drive: bundle %s  bounds [%.0f,%.0f]..[%.0f,%.0f]  %llu tris%s\n",
                   bundle.c_str(), bounds.min_x, bounds.min_y, bounds.max_x, bounds.max_y,
                   (unsigned long long)cityMesh.num_tris(),
                   terrain.empty()
@@ -468,7 +463,7 @@ int main(int argc, char **argv) {
                          std::to_string(terrain.field->cols()) + ")")
                             .c_str());
     } else {
-      std::printf("nav_city_swarm: bundle '%s' incomplete; using the synthetic city\n",
+      std::printf("nav_city_drive: bundle '%s' incomplete; using the synthetic city\n",
                   bundle.c_str());
     }
   }
@@ -521,10 +516,10 @@ int main(int argc, char **argv) {
   try {
     driveModel = cvc::nav::coef_mlp::load(navWeightsPath);
     trainedDrive = true;
-    std::printf("nav_city_swarm: trained CoefMLP drive from %s\n", navWeightsPath.c_str());
+    std::printf("nav_city_drive: trained CoefMLP drive from %s\n", navWeightsPath.c_str());
   } catch (const std::exception &e) {
     driveModel = cvc::nav::coef_mlp::default_biased();
-    std::fprintf(stderr, "nav_city_swarm: no trained weights (%s: %s) — using default_biased()\n",
+    std::fprintf(stderr, "nav_city_drive: no trained weights (%s: %s) — using default_biased()\n",
                  navWeightsPath.c_str(), e.what());
   }
 
@@ -550,13 +545,13 @@ int main(int argc, char **argv) {
   int N = world.size();
   int M = world.planes(); // belief-plane count (sensing/fog); reported on the HUD
 
-  // 2. SIXTEEN colour-coded TARGETS. The mass of agents fans out across the map to 16
-  //    destinations; each agent (and the flag it flies) is coloured by its target, so the
-  //    swarm reads as 16 converging colour streams — the "many agents, one machine" point,
-  //    driven by the trained CoefMLP. Agents are binned to a target by the LATITUDE of
-  //    their scattered goal, so streams keep their lane instead of crossing into a tangle.
-  //    Re-run on every world rebuild (the UI can restart with a new agent count).
-  constexpr int kTargets = 16;
+  // 2. SIX colour-coded RALLY POINTS = six convoys. The vehicles split across the map to 6
+  //    objectives; each vehicle (and the flag it flies) is coloured by its rally point, so
+  //    each convoy reads as one converging colour stream — legible enough to follow a single
+  //    group, driven by the trained CoefMLP. Vehicles are binned to a rally point by the
+  //    LATITUDE of their scattered goal, so convoys keep their lane instead of tangling.
+  //    Re-run on every world rebuild (the UI can restart with a new vehicle count).
+  constexpr int kTargets = 6;
   float targetColor[kTargets * 3];
   for (int t = 0; t < kTargets; ++t)
     hsv2rgb(static_cast<double>(t) / kTargets, 0.74, 0.98, &targetColor[3 * t]);
@@ -653,10 +648,6 @@ int main(int argc, char **argv) {
   cvc::app app;
   app.properties("system.log_verbosity", "2");
   SceneGraph sg(app, "city");
-  // A tiny second scene holding ONLY the minimap's PiP-only agent dots. They are
-  // drawn over the minimap through their own viewport, so they never enter the
-  // main view or the 3-D minimap mirror (which echoes the main scene's props).
-  SceneGraph dotsScene(app, "city_pip");
 
   const double wall_rgb[3] = {0.58, 0.58, 0.64};
   const double ground_rgb[3] = {0.20, 0.23, 0.27};
@@ -675,10 +666,10 @@ int main(int argc, char **argv) {
                                                cvc::image::data_type::u8);
         haveSat = satTex.width() > 0 && satTex.height() > 0;
         if (haveSat)
-          std::printf("nav_city_swarm: satellite %s (%dx%d)\n", sp.c_str(), satTex.width(),
+          std::printf("nav_city_drive: satellite %s (%dx%d)\n", sp.c_str(), satTex.width(),
                       satTex.height());
       } catch (const std::exception &e) { // a missing decoder must not kill the demo
-        std::fprintf(stderr, "nav_city_swarm: satellite load failed (%s)\n", e.what());
+        std::fprintf(stderr, "nav_city_drive: satellite load failed (%s)\n", e.what());
       }
     }
   }
@@ -790,7 +781,7 @@ int main(int argc, char **argv) {
           if (farBuildings->prop())
             farBuildings->prop()->SetVisibility(0); // shown only from altitude
         }
-        std::printf("nav_city_swarm: building LOD — far mesh %zu tris (from %llu full)\n",
+        std::printf("nav_city_drive: building LOD — far mesh %zu tris (from %llu full)\n",
                     dt.size(), (unsigned long long)cityMesh.num_tris());
         std::fflush(stdout);
       }
@@ -1023,7 +1014,7 @@ int main(int argc, char **argv) {
     haveVehicle = navdemo::load_vehicle_template(vehicle, gsz, vverts, vtris, &vuvs, &vtexture);
   const bool haveVehicleTexture = haveVehicle && !vuvs.empty() && !vtexture.empty();
   if (haveVehicle)
-    std::printf("nav_city_swarm: vehicle model %s (%zu tris, gsz=%.2f world-units%s%s)\n",
+    std::printf("nav_city_drive: vehicle model %s (%zu tris, gsz=%.2f world-units%s%s)\n",
                 vehicle.c_str(), vtris.size() / 3, gsz,
                 worldIsMetres ? " ~ real 4.72 m Humvee" : " (normalized city)",
                 haveVehicleTexture ? " + baked texture" : "");
@@ -1123,7 +1114,7 @@ int main(int argc, char **argv) {
         else
           rung.rgb.assign(static_cast<std::size_t>(rung.cap) * rung.vpi * 3, 180);
       }
-      std::printf("nav_city_swarm: LOD rung %zu: %zu tris x cap %d%s\n", r, rt.size() / 3, rung.cap,
+      std::printf("nav_city_drive: LOD rung %zu: %zu tris x cap %d%s\n", r, rt.size() / 3, rung.cap,
                   rung.textured ? " (textured)" : "");
     }
     std::fflush(stdout);
@@ -1275,10 +1266,7 @@ int main(int argc, char **argv) {
     }
     pt = {0, 1, 2, 0, 2, 3, 0, 3, 4}; // triangle fan
     cvc::geometry dotGeom = pipDotGlyphs.build_template(app, N, color.data(), pv, pt, /*z=*/0.5);
-    // Into dotsScene, NOT the main scene: these are minimap-only and must never
-    // reach the main view or the mirror.
-    pipDotNode =
-        std::dynamic_pointer_cast<GeometryNode>(dotsScene.addGraphics("pip_dots", dotGeom));
+    pipDotNode = std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics("pip_dots", dotGeom));
     if (pipDotNode) {
       pipDotNode->setUseSingleColor(false);
       pipDotNode->setAmbient(1.0); // flat, no shadow tint — reads as a UI marker
@@ -1500,9 +1488,9 @@ int main(int argc, char **argv) {
     try {
       back_check = cvc::state::instance(app)(tp + "back").value<double>();
     } catch (const std::exception &e) {
-      std::printf("nav_city_swarm: read-back threw: %s\n", e.what());
+      std::printf("nav_city_drive: read-back threw: %s\n", e.what());
     }
-    std::printf("nav_city_swarm: Track configured (gsz=%.1f) at %s (back read=%.2f)\n", gsz,
+    std::printf("nav_city_drive: Track configured (gsz=%.1f) at %s (back read=%.2f)\n", gsz,
                 tp.c_str(), back_check);
   };
   // --follow N: cinematic Track camera. Seed the vtkCamera at the chase pose on
@@ -1541,6 +1529,7 @@ int main(int argc, char **argv) {
   // the PiP renders wherever the window sits. Default: the bottom-right corner.
   double pipVp[4] = {0.72, 0.0, 1.0, 0.28};
   int dragTarget = -1; // minimap: index of the target currently being dragged (-1 = none)
+  vtkSmartPointer<vtkRenderer> pipRenderer = vtkSmartPointer<vtkRenderer>::New();
   vtkSmartPointer<vtkCamera> pipCam = vtkSmartPointer<vtkCamera>::New();
   {
     const double halfH = 0.5 * (bounds.max_y - bounds.min_y);
@@ -1552,42 +1541,44 @@ int main(int argc, char **argv) {
     pipCam->SetFocalPoint(cx, cy, 0.0);
     pipCam->SetViewUp(0.0, 1.0, 0.0);
     pipCam->SetClippingRange(1.0, wall_h * 10.0 + 5000.0);
-
-    // The minimap is now two library viewports on the SAME window/context that
-    // SceneRenderer already owns (reached via viewportManager()), instead of a
-    // hand-rolled second vtkRenderer:
-    //   * "minimap" — a FROZEN mirror of the main scene (layer 1). liveSync=false
-    //     snapshots the props once, so it shows what the old hand-rolled one-time
-    //     prop copy showed (no belief walls discovered later) and keeps its OWN
-    //     flat headlight instead of the main scene's chase-aimed stage rig.
-    //   * "minimap_dots" — the PiP-only agent dots (layer 2), a separate scene
-    //     over the SAME rect + camera, non-clearing so the mirror shows through.
-    // Both draw top-down through the shared pipCam, are non-interactive, and
-    // track the draggable rect (setRegion each frame, below). --no-pip creates
-    // neither (perf diagnostic), exactly as before.
-    if (!noPip) {
-      cvc::gl::ViewportManager &vm = view.viewportManager();
-      cvc::gl::Viewport &mm =
-          vm.addMirrorViewport("minimap", "main", pipVp, /*layer=*/1, /*liveSync=*/false);
-      mm.setBackground(0.02, 0.03, 0.05, /*opaque=*/true);
-      mm.setInputEnabled(false); // "a minimap that pans or dollies stops being a map"
-      mm.renderer()->SetActiveCamera(pipCam);
-      mm.renderer()->AutomaticLightCreationOff();
-      mm.renderer()->RemoveAllLights();
-      {
-        // Dim ambient-only headlight so the satellite ground doesn't blow out
-        // and vehicle glyphs stay legible against it.
-        auto hl = vtkSmartPointer<vtkLight>::New();
-        hl->SetLightTypeToHeadlight();
-        hl->SetIntensity(0.55);
-        mm.renderer()->AddLight(hl);
+    pipRenderer->SetActiveCamera(pipCam);
+    pipRenderer->SetViewport(pipVp[0], pipVp[1], pipVp[2],
+                             pipVp[3]); // driven by the draggable overlay
+    pipRenderer->SetBackground(0.02, 0.03, 0.05);
+    pipRenderer->SetLayer(1);
+    // Own lighting so the top-down view is evenly lit regardless of the main
+    // scene's stage rig (which is aimed at the chase framing).
+    pipRenderer->AutomaticLightCreationOff();
+    pipRenderer->RemoveAllLights();
+    {
+      // Dim, ambient-only headlight so the satellite ground doesn't blow out
+      // and vehicle glyphs stay legible against it.
+      auto hl = vtkSmartPointer<vtkLight>::New();
+      hl->SetLightTypeToHeadlight();
+      hl->SetIntensity(0.55);
+      pipRenderer->AddLight(hl);
+    }
+    // Mirror the main renderer's 3-D props onto the PiP. Each vtkProp3D can live
+    // in multiple renderers — VTK handles that fine. SKIP 2-D actors (HUD text,
+    // FPS overlay): those are viewport-relative and would double-draw on top of
+    // the PiP looking like a bug.
+    vtkRenderer *main = view.renderer();
+    vtkPropCollection *props = main->GetViewProps();
+    props->InitTraversal();
+    while (vtkProp *p = props->GetNextProp())
+      if (!vtkActor2D::SafeDownCast(p))
+        pipRenderer->AddViewProp(p);
+    // The pip_dots overlay is PiP-only: remove from main, keep on PiP.
+    if (pipDotNode) {
+      vtkProp *dotsProp = pipDotNode->prop();
+      if (dotsProp) {
+        main->RemoveViewProp(dotsProp);
+        pipRenderer->AddViewProp(dotsProp);
       }
-      if (pipDotNode) {
-        cvc::gl::Viewport &md = vm.addSceneViewport("minimap_dots", dotsScene, pipVp, /*layer=*/2);
-        md.setBackground(0.0, 0.0, 0.0, /*opaque=*/false); // transparent overlay
-        md.setInputEnabled(false);
-        md.renderer()->SetActiveCamera(pipCam);
-      }
+    }
+    if (!noPip) { // --no-pip skips activation so the PiP never renders (perf diagnostic)
+      view.renderWindow()->SetNumberOfLayers(2);
+      view.renderWindow()->AddRenderer(pipRenderer);
     }
   }
   // Click-in-PiP → follow. We record the last click and, if it lands over the
@@ -1638,7 +1629,7 @@ int main(int argc, char **argv) {
     return true;
   };
 
-  std::printf("nav_city_swarm: %d agents, belief=%s (M=%d), grid=%d, %s, shadows=%s\n", N,
+  std::printf("nav_city_drive: %d agents, belief=%s (M=%d), grid=%d, %s, shadows=%s\n", N,
               belief.c_str(), M, grid, fogOn ? "fog" : "static-map", shadows ? "on" : "off");
 
   // Per-frame terrain elevation at each agent's (x,y). Populated once per
@@ -1661,12 +1652,13 @@ int main(int argc, char **argv) {
   // persistent workers instead of spawning threads per call — and, sized to leave
   // the render thread a core, stop the sim from starving it.
   world.set_thread_pool(&app.computePool());
-  // The plant (--plant). Declared before the sim thread, which is joined before the plant goes.
+  // The plant (--plant): each agent a physics vehicle that plans with its own limits and size.
+  // Declared before the sim thread, which is joined before the plant goes.
   cvc::physics::plant_host plantHost(navdemo::plant_options());
   try {
-    std::printf("nav_city_swarm: driving %s\n", plantHost.use(world, plantName).c_str());
+    std::printf("nav_city_drive: driving %s\n", plantHost.use(world, plantName).c_str());
   } catch (const std::exception &e) {
-    std::fprintf(stderr, "nav_city_swarm: --plant: %s\n", e.what());
+    std::fprintf(stderr, "nav_city_drive: --plant: %s\n", e.what());
     return 2;
   }
   // World time is the app's world clock at the suite quantum (0.01 s). The frame loop is its one
@@ -1688,7 +1680,7 @@ int main(int argc, char **argv) {
   const double speed0 = clock.scale(); // the initial speed: presentation rates are set against it
   const long kSenseRepaint = 15;       // navigator steps between fog / belief-wall repaints
   long lastSenseRepaint = -kSenseRepaint;
-  std::printf("nav_city_swarm: world speed %.2fx real time (--hz %.0f x veh.dt %.3f s); "
+  std::printf("nav_city_drive: world speed %.2fx real time (--hz %.0f x veh.dt %.3f s); "
               "sim.speed changes it\n",
               clock.scale(), hz, static_cast<double>(cfg.veh.dt));
 #if CVC_NAV_DEMO_SIM_WORKER
@@ -1781,18 +1773,18 @@ int main(int argc, char **argv) {
 
     ImGui::SetNextWindowPos(ImVec2(10, 30), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(300, 0), ImGuiCond_FirstUseEver);
-    ImGui::Begin("Swarm controls");
-    ImGui::Text("%d agents | %ld arrived | %.0f fps", N, arrived, ImGui::GetIO().Framerate);
+    ImGui::Begin("Convoy controls");
+    ImGui::Text("%d vehicles | %ld arrived | %.0f fps", N, arrived, ImGui::GetIO().Framerate);
     { // periodic fps to stdout so benchmarking doesn't need a screenshot of the HUD
       static int fpsTick = 0;
       if ((++fpsTick % 120) == 30) {
-        std::printf("nav_city_swarm: %.1f fps | %d agents\n", ImGui::GetIO().Framerate, N);
+        std::printf("nav_city_drive: %.1f fps | %d agents\n", ImGui::GetIO().Framerate, N);
         std::fflush(stdout); // stdout is block-buffered when redirected; flush so a
                              // killed benchmark run still yields its fps samples
       }
     }
     ImGui::Separator();
-    ImGui::SliderInt("agents", &uiAgents, 32, 4000);
+    ImGui::SliderInt("vehicles", &uiAgents, 6, 600);
     const char *modes[] = {"shared", "grouped", "private"};
     int bi = (uiBelief == "private") ? 2 : (uiBelief == "grouped" ? 1 : 0);
     if (ImGui::Combo("belief", &bi, modes, 3))
@@ -1808,8 +1800,7 @@ int main(int argc, char **argv) {
         uiPlant = plants[pi];
       if (ImGui::IsItemHovered())
         ImGui::SetTooltip("What the vehicles drive on: nav's kinematic bicycle, or a vehicle on "
-                          "the Jolt physics plant at its real size and limits (fewer agents keep "
-                          "up with the clock).");
+                          "the Jolt physics plant at its real size and limits.");
     }
     {
       // World seconds per wall second, written to sim.speed (the clock reads it next frame).
@@ -1933,8 +1924,9 @@ int main(int argc, char **argv) {
         out = ImVec2(cur.x + static_cast<float>(u) * side, cur.y + static_cast<float>(v) * side);
         return u >= 0.0 && u <= 1.0 && v >= 0.0 && v <= 1.0;
       };
-      // Draw a grabbable colour-coded dot per target ON the minimap (drawn on top of the PiP,
-      // so they're always visible) — this is what makes the destinations show + be draggable.
+      // Draw a grabbable colour-coded dot per rally point ON the minimap (drawn on top of the
+      // PiP, so they're always visible) — this is what makes the destinations show + be
+      // draggable.
       ImDrawList *dl = ImGui::GetWindowDrawList();
       for (int t = 0; t < kTargets; ++t) {
         ImVec2 sp;
@@ -1952,8 +1944,8 @@ int main(int argc, char **argv) {
         const double mx = mp.x / dw, my = mp.y / dh;
         double wx, wy;
         if (ImGui::IsItemActivated()) {
-          // Grab the nearest target within a screen-pixel radius (robust regardless of zoom);
-          // a press that hits no target falls back to follow-nearest-agent.
+          // Grab the nearest rally point within a screen-pixel radius (robust regardless of
+          // zoom); a press that hits none falls back to follow-nearest-vehicle.
           dragTarget = -1;
           float best = 15.0f; // px
           for (int t = 0; t < kTargets; ++t) {
@@ -2157,7 +2149,7 @@ int main(int argc, char **argv) {
       const std::uint32_t reqSeed = simSeed;
       pendingWorld = std::async(
           std::launch::async, [=]() { return build_world(reqAgents, reqBelief, reqFog, reqSeed); });
-      std::printf("nav_city_swarm: rebuilding world (%d agents, %s, fog=%s, seed=%u) async\n",
+      std::printf("nav_city_drive: rebuilding world (%d agents, %s, fog=%s, seed=%u) async\n",
                   reqAgents, reqBelief.c_str(), reqFog ? "on" : "off", reqSeed);
     }
     if (pendingWorld.valid() &&
@@ -2176,7 +2168,7 @@ int main(int argc, char **argv) {
       try {
         plantHost.use(world, uiPlant); // the fresh world's agents on the chosen plant
       } catch (const std::exception &e) {
-        std::fprintf(stderr, "nav_city_swarm: plant: %s\n", e.what());
+        std::fprintf(stderr, "nav_city_drive: plant: %s\n", e.what());
       }
       N = world.size();
       M = world.planes();
@@ -2251,7 +2243,7 @@ int main(int argc, char **argv) {
 #else
       navFollow.reset(clock.tick());
 #endif
-      std::printf("nav_city_swarm: restarted (%d agents, belief=%s, fog=%s, seed=%u, plant=%s)\n",
+      std::printf("nav_city_drive: restarted (%d agents, belief=%s, fog=%s, seed=%u, plant=%s)\n",
                   N, belief.c_str(), fogOn ? "on" : "off", simSeed, plantHost.driving().c_str());
     }
 #endif
@@ -2262,7 +2254,7 @@ int main(int argc, char **argv) {
     simKeys.drive(dt);
 #if CVC_NAV_DEMO_SIM_WORKER
     if (capturing && sim && !sim->wait_caught_up(10.0))
-      std::fprintf(stderr, "nav_city_swarm: the sim worker fell 10 s behind the capture\n");
+      std::fprintf(stderr, "nav_city_drive: the sim worker fell 10 s behind the capture\n");
 #endif
 
     // Trails: append a ring-buffer segment per agent that moved (every 3rd frame,
@@ -2426,9 +2418,9 @@ int main(int argc, char **argv) {
     if (frame % 15 == 0) { // HUD status line (throttled)
       char st[200];
       std::snprintf(st, sizeof st,
-                    "%d agents · belief %s (M=%d) · learned CoefMLP · fog %s · %s · arrivals "
-                    "%ld/%d",
-                    N, belief.c_str(), M, fogOn ? "on" : "off",
+                    "%d vehicles · %d convoys · belief %s (M=%d) · learned CoefMLP · fog %s · "
+                    "%s · arrivals %ld/%d",
+                    N, kTargets, belief.c_str(), M, fogOn ? "on" : "off",
                     plantHost.driving() == "kinematic" ? "kinematic"
                                                        : (plantHost.driving() + " on Jolt").c_str(),
                     arrived, N);
@@ -2451,7 +2443,7 @@ int main(int argc, char **argv) {
         double px = wt ? wt->GetElement(0, 3) : 0.0;
         double py = wt ? wt->GetElement(1, 3) : 0.0;
         std::printf(
-            "nav_city_swarm: frame %ld  mode=%d  probe=(%.1f,%.1f)  followAgent=%d  dt=%.3f\n",
+            "nav_city_drive: frame %ld  mode=%d  probe=(%.1f,%.1f)  followAgent=%d  dt=%.3f\n",
             frame, (int)cam.mode(), px, py, followAgent, dt);
       }
     } else if (capturing) { // orbit
@@ -2494,12 +2486,8 @@ int main(int argc, char **argv) {
     // the minimap ImGui window (previous frame's callback); re-applying it here — before
     // the render — is what makes the PiP actually FOLLOW the window instead of staying
     // pinned to its initial bottom-right rect. One-frame lag during a drag is invisible.
-    if (!noPip) {
-      cvc::gl::ViewportManager &vm = view.viewportManager();
-      vm.viewport("minimap").setRegion(pipVp[0], pipVp[1], pipVp[2], pipVp[3]);
-      if (pipDotNode)
-        vm.viewport("minimap_dots").setRegion(pipVp[0], pipVp[1], pipVp[2], pipVp[3]);
-    }
+    if (!noPip && pipRenderer)
+      pipRenderer->SetViewport(pipVp[0], pipVp[1], pipVp[2], pipVp[3]);
 
     if (capturing) {
       char path[1024];
@@ -2564,7 +2552,7 @@ int main(int argc, char **argv) {
   if (!png.empty())
     view.writePNG(png);
 #if CVC_NAV_DEMO_SIM_WORKER
-  std::printf("nav_city_swarm: done (%ld frames, sim ticks=%ld)\n", frame, sim ? sim->ticks() : 0L);
+  std::printf("nav_city_drive: done (%ld frames, sim ticks=%ld)\n", frame, sim ? sim->ticks() : 0L);
 #endif
   return 0;
 }

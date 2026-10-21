@@ -1450,7 +1450,7 @@ if(EMSCRIPTEN)
   # The fetch backend's blocking send() spins on emscripten_sleep under Asyncify, so a wasm
   # EXECUTABLE that links it must add -sFETCH=1 and EITHER -sASYNCIFY (main thread, the demo gallery)
   # OR -pthread (off the main thread). Link flags do not propagate out of this static archive; the
-  # executable sets them (see src/cvcGL/examples/CMakeLists.txt).
+  # executable sets them (see examples/CMakeLists.txt).
   message(STATUS "cvc::net: Emscripten-fetch HTTP backend ENABLED "
                  "(link exes with -sFETCH=1 + -sASYNCIFY or -pthread)")
 else()
@@ -2210,11 +2210,9 @@ if(CVC_NAV_WEIGHTS_FILE)
   message(STATUS "cvc::nav: installing policy ${CVC_NAV_WEIGHTS_FILE} -> share/cvc/nav/coef_mlp.cvcnav")
 endif()
 
-# The pure-C++ nav swarm / trainer / material demos moved to the canonical
-# examples tree with the rest of the demos: src/cvcGL/examples/ (built with
-# -DCVC_BUILD_CVCGL=ON -DCVC_BUILD_EXAMPLES=ON, targets nav_swarm_demo /
-# nav_train_demo / nav_material_demo). The old -DCVC_BUILD_NAV_EXAMPLE switch
-# went with the top-level examples/ directory.
+# The pure-C++ nav swarm / trainer / material demos live in examples/nav/ with the
+# rest of the demos (built with -DCVC_BUILD_CVCGL=ON -DCVC_BUILD_EXAMPLES=ON,
+# targets nav_swarm_demo / nav_train_demo / nav_material_demo).
 
 # Headless L-system / world-generation CLIs (GL-free). cvc-lsys derives and
 # renders .lsys recipes to SVG/OFF; cvc-worldgen (added with cvc::world) builds

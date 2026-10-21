@@ -55,7 +55,7 @@ collide on one state key.
 
 You rarely wire a Runtime by hand. Two things package it:
 
-- **`ariadne_hello`** ([`src/cvcGL/examples/ariadne_hello.cpp`](../src/cvcGL/examples/ariadne_hello.cpp))
+- **`ariadne_hello`** ([`examples/ariadne/hosts/ariadne_hello.cpp`](../examples/ariadne/hosts/ariadne_hello.cpp))
   — the native reference host: it constructs the Runtime, an `ImGuiBackend` over a
   VTK view, registers URI handlers, loads the document, and runs the SDL-driven frame
   loop. Read it as the canonical "how to host Ariadne" example.
@@ -707,9 +707,9 @@ includes. Each binds state keys a C++ object owns, so it needs no host code;
 | `fe_controls` | an `fe_lab` node named `domain` (§5.4) |
 
 Components that address one node use a fixed node id; copy the file and change the id to
-drive another node. `src/cvcGL/examples/mesh_lab.ari` uses the last two. Run it from the
-repository root, where both paths resolve:
-`ariadne_hello src/cvcGL/examples/mesh_lab.ari --component-path src/cvc/ariadne`.
+drive another node. `examples/ariadne/documents/mesh_lab.ari` uses the last two. Run it from
+the repository root, where both paths resolve:
+`ariadne_hello examples/ariadne/documents/mesh_lab.ari --component-path src/cvc/ariadne`.
 
 ---
 
@@ -868,7 +868,7 @@ are reproducible. The cvcGL examples
 ### 9.1 Native (C++)
 
 The reference host is
-[`ariadne_hello.cpp`](../src/cvcGL/examples/ariadne_hello.cpp). The shape is:
+[`ariadne_hello.cpp`](../examples/ariadne/hosts/ariadne_hello.cpp). The shape is:
 
 ```cpp
 cvc::ariadne::Runtime rt(app, prefix);
@@ -911,7 +911,7 @@ flag written after the document goes to the document, and `ari` points that out.
 Three of the general flags are for pictures. `--graphics auto|kitty|sixel|color|mono` sets
 how images draw (see *Pixel graphics* in §4), and `--image NAME=FILE` publishes a picture
 for the document's `image:` widgets with `src: NAME`
-([`terminal_images.ari`](../src/cvc/ariadne/examples/terminal_images.ari) is an example).
+([`terminal_images.ari`](../examples/ariadne/terminal/terminal_images.ari) is an example).
 With `--ansi` and `--graphics kitty` or `sixel`, `snapshot` also prints the images, after
 clearing the screen, at the terminal's cell size (`--cell-size WxH` where it can't be asked).
 
@@ -943,7 +943,7 @@ before `load()`. When the arguments don't match its `args:` block, `load()` thro
 
 `run()` forwards keys and pointer events the UI did not use to the document's
 `on_key` / `on_pointer`, so document-level input works here today.
-[`terminal_tour.ari`](../src/cvc/ariadne/examples/terminal_tour.ari) exercises every
+[`terminal_tour.ari`](../examples/ariadne/terminal/terminal_tour.ari) exercises every
 widget kind the backend draws.
 
 **In the browser.** An Emscripten build of libcvc with `ftxui` and `yaml-cpp` in its wasm
@@ -981,8 +981,8 @@ pixels, so a map pan keeps the grabbed point under the pointer. Passed as
 middle-drags into pan and the wheel into zoom. `arigl --terminal` is the host
 (`arigl run --terminal [--backend tvision] doc.ari`, or `arigl snapshot --terminal --ansi`
 for one frame as text), as is the older example
-[`ariadne_terminal`](../src/cvcGL/examples/ariadne_terminal.cpp);
-[`terminal_scene.ari`](../src/cvcGL/examples/terminal_scene.ari) is a small example. No display is needed: VTK picks X, EGL or OSMesa at run time
+[`ariadne_terminal`](../examples/ariadne/hosts/ariadne_terminal.cpp);
+[`terminal_scene.ari`](../examples/ariadne/documents/terminal_scene.ari) is a small example. No display is needed: VTK picks X, EGL or OSMesa at run time
 (`VTK_DEFAULT_OPENGL_WINDOW=vtkEGLRenderWindow` forces EGL).
 
 ### 9.3 From Python (a full app via `AriRuntime`)

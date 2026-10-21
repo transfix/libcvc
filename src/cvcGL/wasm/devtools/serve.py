@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Static server for the cvcGL wasm examples.
+"""Static server for cvcGL wasm apps and the examples gallery.
 
 The -pthread build uses SharedArrayBuffer, which browsers only enable on
 cross-origin-isolated pages — that requires these response headers, which
@@ -45,10 +45,9 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 HERE = Path(__file__).resolve().parent
-# glsync.js: in the source tree (src/cvcGL/examples/wasm -> src/cvcGL/wasm/devtools), or in a
-# devtools/ directory next to an installed copy of this script.
-GLSYNC_CANDIDATES = (HERE.parent.parent / "wasm" / "devtools" / "glsync.js",
-                     HERE / "devtools" / "glsync.js")
+# glsync.js: beside this script in the source tree (src/cvcGL/wasm/devtools), or in a devtools/
+# directory next to an installed copy of it (share/libcvc-examples/).
+GLSYNC_CANDIDATES = (HERE / "glsync.js", HERE / "devtools" / "glsync.js")
 GLSYNC_URL = "/glsync.js"
 GLSYNC_TAG = b'<script src="/glsync.js"></script>'
 FIRST_SCRIPT = re.compile(rb"<script\b", re.IGNORECASE)
