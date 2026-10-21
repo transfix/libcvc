@@ -823,6 +823,20 @@ add_executable(cvcgl_imgui_table_columns test/cvcgl_imgui_table_columns.cpp)
 target_link_libraries(cvcgl_imgui_table_columns PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_table_columns COMMAND cvcgl_imgui_table_columns)
 
+# Golden images of the Ariadne ImGui/VTK backend (roadmap §16.6 phase 1): each .ari in
+# test/golden runs through AriRuntime + ImGuiBackend offscreen and its frame is compared with the
+# PNG of the same name (made under Mesa llvmpipe, compared within a tolerance measured across
+# rasterizers). A mismatch leaves <name>.actual.png + <name>.diff.png in ari_golden/ here;
+# CVC_UPDATE_GOLDEN=1 rewrites the goldens. Adding one: docs/ARIADNE.md, "Golden-image tests".
+# Skips where nothing rasterises unless CVC_REQUIRE_RENDER=1.
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_ari_golden test/cvcgl_ari_golden.cpp)
+  target_link_libraries(cvcgl_ari_golden PRIVATE cvcGL)
+  add_test(NAME cvcgl_ari_golden
+           COMMAND cvcgl_ari_golden ${CMAKE_CURRENT_SOURCE_DIR}/test/golden
+                   ${CMAKE_CURRENT_BINARY_DIR}/ari_golden)
+endif()
+
 # Ariadne physics: / body: (WORLD-GEOMETRY-ROADMAP.md, G5): a spec's crate lands where the
 # heightfield node draws the ground. Headless; the dynamics need Jolt.
 add_executable(cvcgl_ariadne_physics test/cvcgl_ariadne_physics.cpp)

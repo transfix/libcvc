@@ -55,7 +55,9 @@ ari::Widget table(const std::string &id) {
 // Walk `id`'s table for a few frames in a fresh context, with `persisted` in tree.<id>.columns
 // ("" = none), and return what the backend persisted.
 std::string run(const std::string &id, const std::string &persisted) {
-  ImGui::CreateContext();
+  ImGuiContext *ctx = ImGui::CreateContext();
+  // libcvcGL may carry its own copy of imgui (a static imgui, as on Windows): hand it this context.
+  cvc::gl::ImGuiBackend::setImGuiContext(ctx);
   ImGuiIO &io = ImGui::GetIO();
   io.DisplaySize = ImVec2(800.0f, 600.0f);
   io.IniFilename = nullptr;
@@ -82,7 +84,8 @@ std::string run(const std::string &id, const std::string &persisted) {
     }
     out = cvc::state::instance(app)("ui.tree." + id + ".columns").value();
   }
-  ImGui::DestroyContext();
+  cvc::gl::ImGuiBackend::setImGuiContext(nullptr); // with a shared imgui this clears ours too
+  ImGui::DestroyContext(ctx);
   return out;
 }
 #endif

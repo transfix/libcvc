@@ -8,6 +8,7 @@
 #include <cvc/geometry/geometry_file_io.h>
 #include <cvc/model/model.h>
 #include <cvc/model/model_file_io.h>
+#include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
 #include <string>
@@ -216,7 +217,13 @@ namespace {
 // Returns "" (with a skip flag set) if the PNG could not be written (no image
 // delegate) — the caller GTEST_SKIP()s in that case.
 std::string write_obj_fixture(bool &texture_ok) {
-  const std::string dir = ::testing::TempDir();
+  // A directory per test case: ctest runs the cases as parallel processes, and two cases writing
+  // the same fixture files raced (one read the PNG while the other was rewriting it, "unknown
+  // image type"). The file names inside stay the same, so the .mtl/.obj references do too.
+  const ::testing::TestInfo *test = ::testing::UnitTest::GetInstance()->current_test_info();
+  const std::string dir =
+      ::testing::TempDir() + "cvc_model_test_" + (test ? test->name() : "fixture") + "/";
+  std::filesystem::create_directories(dir);
   const std::string obj = dir + "cvc_model_test_mesh.obj";
   const std::string mtl = dir + "cvc_model_test_mesh.mtl";
   const std::string png = dir + "cvc_model_test_tex.png";
