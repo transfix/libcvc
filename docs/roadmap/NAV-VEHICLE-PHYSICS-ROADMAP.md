@@ -96,6 +96,41 @@ The plan, in order:
    trained on the dynamic model beats the point-mass one over paired seeds.
 4. **P8c:** a differentiable power model and energy in the loss, calibrated to the P3 ledger.
 
+### P8a's vehicle fitted to Jolt (2026-10-20)
+
+`nav_plant::dyn_bike_si_of` now gives the dynamic model the values the Jolt plant's one-tick
+residual asks for. Jolt runs of the Humvee and the RoboRacer were fitted on held-out seeds, which
+made the twist residual about 11x lower.
+
+- **Tires.** Jolt's lateral friction ramps linearly to its peak at `tire_peak_slip_angle`: a
+  cornering stiffness of 1 / alpha_peak per unit load. A Pacejka tire peaking at the same angle
+  starts 4.5x steeper. B is now set so that B C = 1.12 / alpha_peak (`kJoltTireStiffness`).
+- **Front and rear.** They are alike now (`front_stiffness` 1, was 0.85), since Jolt's tires have no
+  load sensitivity.
+- **A direct drive** (one gear, no torque converter: the RoboRacer) gets no drive lag and no drag or
+  rolling resistance. The driver model's integral trim tracks the commanded acceleration, so the
+  command is the achieved acceleration.
+- **A geared drive through a converter** (the Humvee) keeps its 0.1 s lag and its resistances.
+
+The P8b gate rerun on Jolt RoboRacers (city, 20 held-out seeds, paired bootstrap; Linux), before
+and after:
+
+| training | dynamic-trained, before / after | dynamic - untrained seed, before | after |
+|---|---|---|---|
+| lr 5e-5, 150 steps | 50.8% / 51.6% | +0.2 [-1.8, +2.2] | +0.9 [-1.0, +3.0] |
+| lr 1e-4, 300 steps | 48.5% / 52.1% | -2.1 [-4.2, +0.1] | +1.5 [-1.4, +4.1] |
+| lr 2e-4, 300 steps | 43.1% / 53.8% | -7.5 [-10.0, -5.3] | +3.1 [+0.7, +5.5] |
+| checkpoints selected on 32 validation seeds | 52.2% / 53.2% | +1.6 [-0.4, +3.6] | +2.6 [+0.7, +4.6] |
+
+- **The point-mass arm and the untrained seed are unchanged:** 51.4%, 49.9%, 22.2%, 52.2% for the
+  point mass, and 50.6% for the seed.
+- **Training through the dynamic model now helps on Jolt** rather than only hurting less:
+  - its validation reach rises steadily over training (0.497 -> 0.526 at step 210), where before it
+    fell to 0.41;
+  - the trained policy beats the untrained one outside the CI at lr 2e-4 and with checkpoint
+    selection.
+- **At the default learning rate the change is within the noise:** +0.7 [-1.4, +2.9].
+
 How the physics channels enter training:
 
 - **Per unit mass.** Each channel is defined per unit mass, for example grade as g·∇z converted with

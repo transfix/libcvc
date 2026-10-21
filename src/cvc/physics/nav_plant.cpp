@@ -315,19 +315,24 @@ cvc::nav::dyn_bike_si nav_plant::dyn_bike_si_of(const vehicle_desc &d, double mu
   si.cg_to_rear = std::max(1e-3, d.center_of_mass.x - rear);
   si.cg_height = std::max(0.0, -z + travel + radius + d.center_of_mass.z);
   si.mu = mu;
-  // Pacejka: sin(C pi / 2) = tire_sliding, C in (1, 2); the peak at B alpha = tan(pi / (2 C)).
+  // Pacejka: sin(C pi / 2) = tire_sliding, C in (1, 2). B makes the cornering stiffness per unit
+  // load, B C, kJoltTireStiffness times Jolt's: its lateral friction ramps linearly to 1 at
+  // tire_peak_slip_angle (jolt_backend.cpp).
   const double kPi = 3.14159265358979323846;
   const double sliding = std::min(std::max(d.tire_sliding, 0.05), 0.999);
   si.tire_C = 2.0 - 2.0 * std::asin(sliding) / kPi;
-  const double B = std::tan(kPi / (2.0 * si.tire_C)) / std::max(d.tire_peak_slip_angle, 1e-3);
+  const double B = kJoltTireStiffness / (si.tire_C * std::max(d.tire_peak_slip_angle, 1e-3));
   si.tire_B_front = B * front_stiffness;
   si.tire_B_rear = B;
   si.front_drive = front_driven && rear_driven ? 0.5 : (front_driven ? 1.0 : 0.0);
   si.front_brake = brake_front + brake_rear > 0.0 ? brake_front / (brake_front + brake_rear) : 0.5;
-  si.drag = 0.5 * d.air_density * d.drag_coefficient * d.frontal_area;
-  si.rolling_resistance = d.rolling_resistance;
+  // A direct drive: one gear, no torque converter. The driver model's trim makes its commanded
+  // acceleration the achieved one within the tick, drag and rolling resistance included.
+  const bool direct = d.gear_ratios.size() <= 1 && !(d.converter_k > 0.0);
+  si.drag = direct ? 0.0 : 0.5 * d.air_density * d.drag_coefficient * d.frontal_area;
+  si.rolling_resistance = direct ? 0.0 : d.rolling_resistance;
   si.steer_rate = d.max_steer_rate;
-  si.drive_lag = drive_lag;
+  si.drive_lag = drive_lag >= 0.0 ? drive_lag : (direct ? 0.0 : 0.1);
   si.gravity = gravity;
   return si;
 }
