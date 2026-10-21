@@ -1,0 +1,54 @@
+# windows.ari — golden: window placement, sizing and chrome through the ImGui backend.
+# cvcgl_ari_golden renders this offscreen and compares it with windows.png (see docs/ARIADNE.md,
+# "Golden-image tests"). Positions and sizes are px; keep everything inside 960 x 720.
+#
+# Every window here has a size: on purpose. A window with no size: stays at ImGui's 32 px minimum
+# today, because §11.4 persists its not-yet-fitted size on its first frame and seeds it back on the
+# next, which cancels ImGui's auto-fit. Add an auto-fit window here once that is fixed.
+
+meta:
+  name: golden windows
+  min_libcvc: 3.6.0
+
+windows:
+  - window: Fixed size
+    id: fixed
+    pos: [24, 24]
+    size: [320, 150]
+    children:
+      - text: "A window with size: [320, 150]."
+      - separator
+      - text: "Text wraps nowhere; it clips at the edge of the window body."
+
+  - window: Tinted text
+    id: tinted
+    pos: [372, 24]
+    size: [300, 90]
+    children:
+      - text: "Text in the default colour,"
+      - text: "and a line tinted with color:."
+        color: [0.95, 0.65, 0.25]
+
+  - window: Closable
+    id: closable
+    pos: [24, 204]
+    size: [320, 120]
+    closable: true
+    frame: { border: 3 }
+    children:
+      - text: "closable: true draws the close button;"
+      - text: "frame: { border: 3 } widens the border."
+
+  - window: Fractions
+    id: fraction
+    pos: [372, 204]
+    size: [0.3, 0.2]
+    children:
+      - text: "size: [0.3, 0.2] is 30% x 20% of the view."
+
+  - window: Half width
+    id: half
+    pos: [24, 354]
+    size: [0.5, 96]
+    children:
+      - text: "size: [0.5, 96] is half the 960 px view wide."

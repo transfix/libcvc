@@ -64,7 +64,7 @@ depends:
     # vtkPythonUtil.h + libvtkWrappingPythonCore for the vtkProp* bridge (F3):
     # a Python vtkActor crosses into the C++ scene as a real vtkProp*.
     - name: vtk-python-cp312
-    # The from-source cvc/cvcGL closure's C++ deps on wasm (mirrors cvcgl-examples'
+    # The from-source cvc/cvcGL closure's C++ deps on wasm (mirrors libcvc-examples-web's
     # trimmed wasm closure). Flavor-matched (wasm vs wasm-mt) via the DAG.
     - name: boost
       platforms: [wasm, wasm-mt]

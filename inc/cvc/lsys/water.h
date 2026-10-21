@@ -27,7 +27,7 @@
 // family's determinism contract (it needs no RNG at all, so it is trivially reproducible). The
 // output is a water-depth density field for a GPU ray-cast VolumeNode, re-filled each frame at the
 // animation time to make the sea roll. Ported in shape from
-// src/cvcGL/examples/lsystem_forest.cpp.
+// examples/cvcgl/lsystem_forest.cpp.
 
 #ifndef CVC_LSYS_WATER_H
 #define CVC_LSYS_WATER_H

@@ -206,7 +206,8 @@ void nav_plant::attach(int n, const cvc::nav::plant_state *start,
     const double yaw = start[i].heading;
     const double c = det::cos(yaw), s = det::sin(yaw);
     const double h = _o.spawn_height >= 0.0 ? _o.spawn_height : resting_height(a.desc);
-    const vec3 origin{p.x - c * a.rear_x, p.y - s * a.rear_x, _o.ground_z + h};
+    const double gz = _o.ground_height ? _o.ground_height(p.x, p.y) : _o.ground_z;
+    const vec3 origin{p.x - c * a.rear_x, p.y - s * a.rear_x, gz + h};
     quat q;
     q.w = det::cos(0.5 * yaw);
     q.z = det::sin(0.5 * yaw);

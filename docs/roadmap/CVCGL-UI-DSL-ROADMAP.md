@@ -1448,6 +1448,14 @@ Both, complementary:
 
 ### 7.6 `requires:` — capability declaration (load-time preflight)
 
+> **Status (2026-10-20):** the whole-document gate is built, and so are the auto-derived
+> warnings (`AppRuntime::load`, `inc/cvc/ariadne/requires.h`, `docs/ARIADNE.md` §5.7).
+> Entries may also be §16.3 capability tokens (`gl.scene`, `gl.shaders`, `raster.bitmap`,
+> `term.kitty`, …) or widget types, and `{name, optional: true}` warns instead of failing.
+> Programs and predicates can ask with `(has? "name")`. **Not yet:** per-program and per-unit
+> `requires:`, strict mode, the reduced-env (sandboxed) check, and per-widget `fallback:`
+> (§16.3).
+
 **Problem.** Symbols resolve at **eval time**, and an unbound one **throws** (`"undefined symbol:
 …"`) — never nil. So a user-extended demo or custom UI that calls an intrinsic missing in *this*
 build/host (or pruned out of *this* handler's reduced env) fails **mid-handler on first fire**,

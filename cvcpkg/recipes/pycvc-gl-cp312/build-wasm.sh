@@ -4,8 +4,8 @@
 #
 # Unlike the native build (which compiles only bindings/pycvc against an installed
 # libcvc SDK), the wasm build compiles the WHOLE trimmed cvc + cvcGL + pycvc +
-# pycvc_gl closure from the repo root under emcc — mirroring cvcgl-examples/
-# build-wasm.sh, the proven cvc-on-wasm pattern (there is no shared-lib wasm libcvc
+# pycvc_gl closure from the repo root under emcc — mirroring
+# examples/web/build-wasm-demo.sh, the proven cvc-on-wasm pattern (there is no shared-lib wasm libcvc
 # to link). The SWIG wrappers build as static archives (bindings/pycvc/CMakeLists.txt
 # TYPE STATIC on EMSCRIPTEN); the host launcher (bindings/pycvc/wasm/pycvc_host.cpp)
 # registers their PyInit__pycvc / PyInit__pycvc_gl via PyImport_AppendInittab.
@@ -64,7 +64,7 @@ _PTHREADS=OFF
 _BOOST_DIR="$(find "${CVC_DEPS_PREFIX}/lib/cmake" -maxdepth 1 -type d -name 'Boost-*' 2>/dev/null | head -1)"
 
 # ── (3) configure the trimmed closure from the repo root (static, BRIDGE=ON) ──
-# Same OFF set as cvcgl-examples/build-wasm.sh (the wasm-linkable subset) PLUS the
+# Same OFF set as examples/web/build-wasm-demo.sh (the wasm-linkable subset) PLUS the
 # pycvc bindings: CVC_BUILD_PYCVC=ON builds bindings/pycvc (core + gl) in-tree.
 emcmake cmake -G Ninja \
     -S "${CVC_SOURCE_DIR}" \

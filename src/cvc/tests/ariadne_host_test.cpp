@@ -101,6 +101,16 @@ TEST(AriadneHostCli, RuntimeFlagsComeBeforeTheDocumentAndTheRestIsItsOwn) {
   EXPECT_NE(misplaced_flag_note("ari", o.doc_args).find("'--fps'"), std::string::npos);
 }
 
+TEST(AriadneHostCli, InfoTakesNoDocument) {
+  const char *info[] = {"ari", "info", "--json"};
+  const HostOptions o = parse_host_args(3, info, {"--json"});
+  EXPECT_TRUE(o.error.empty()) << o.error;
+  EXPECT_EQ(o.command, "info");
+  EXPECT_TRUE(o.doc.empty());
+  const char *run[] = {"ari", "run"};
+  EXPECT_EQ(parse_host_args(2, run).error, "no document given"); // the others still need one
+}
+
 TEST(AriadneHostCli, ExtraFlagsEqualsFormsAndErrors) {
   const char *a1[] = {"arigl", "snapshot", "--terminal", "--width=80", "--ansi", "d.ari"};
   HostOptions o = parse_host_args(6, a1, {"--terminal"});

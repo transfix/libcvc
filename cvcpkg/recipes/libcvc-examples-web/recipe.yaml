@@ -1,0 +1,82 @@
+schema_version: 1
+recipe:
+  name: libcvc-examples-web
+  upstream_version: "3.7.0"
+  # Replaces cvcgl-examples' wasm-mt column (last published 3.7.0+cvc.1), which carried
+  # only the four nav/terrain demos; this carries the whole gallery.
+  cvc_revision: 1
+  maintainer: "cvcpkg group"
+  maintainer_email: "info@cvcpkg.org"
+  maintainer_url: "https://cvcpkg.org"
+  description: "libcvc's examples as a WebAssembly browser gallery (share/libcvc-examples-web/web/): the cvcGL scene demos (terrain_lab, lsystem_forest, lsystem_coast, bunny_shadow, volren_bunny, volslice_bunny), the GRL-SNAM navigation demos (nav_city_swarm / nav_city_drive / nav_fog_ghost, on the real Austin scene with the trained policy) and the Ariadne .ari demos, with a card index and a page per demo. The single-threaded build (wasm) also has the `ari` terminal page and is what transfix.github.io/libcvc serves; the threaded build (wasm-mt) needs cross-origin isolation, which libcvc-examples' libcvc-examples-web launcher provides."
+  homepage: https://github.com/transfix/libcvc
+  # BSD-3-Clause: the demos link cvcGL statically, which carries code derived
+  # from VTK 9.5.0. MIT: lsystem_coast's OceanFFT is a port of ABYSSAL. Both
+  # notices are in THIRD_PARTY_NOTICES.md, shipped beside the gallery.
+  license: "LGPL-2.1-only AND BSD-3-Clause AND MIT"
+  tags: [scientific, graphics, examples, vtk, wasm]
+
+# The browser half of libcvc-examples. build-wasm.sh runs examples/web/build-wasm-demo.sh,
+# the script deploy-pages.yml also runs (through this recipe), so the package and the
+# gh-pages gallery are one build. There is no wasm libcvc bundle to link: the trimmed cvc
+# core + cvcGL closure is compiled from the repo root. Serve it with the native launcher:
+#   cvcpkg install libcvc-examples --prefix ./deps
+#   cvcpkg install libcvc-examples-web --platform wasm-mt --arch wasm32 --link static --prefix ./deps
+#   ./deps/bin/libcvc-examples-web
+
+source:
+  # Co-located with the libcvc source tree (`../../..` is the repo root).
+  type: vendored
+  path: ../../..
+
+patches: []
+
+depends:
+  build:
+    # Static deps for the Emscripten cross-build, flavor-matched (wasm vs wasm-mt): Emscripten
+    # forbids mixing -pthread and non-pthread objects. vtk must be the rendering-enabled wasm
+    # bundle (9.5.0+cvc.3 or later); the older compute-only one does not link the demos.
+    - name: vtk
+    - name: boost
+    - name: zstd
+    - name: zlib
+    # cvc's build-only state_exec grammar engine (header-only).
+    - name: pegtl
+    # The .ari loader: without it the .ari demos load nothing.
+    - name: yaml-cpp
+    # The nav demos' vehicle and building meshes (.glb).
+    - name: assimp
+    # The demos' control panels (cvcGL's ImGuiOverlay is inert stubs without it).
+    - name: imgui
+    # The `ari` page's terminal backend; only the single-threaded gallery has that page.
+    - name: ftxui
+      platforms: [wasm]
+    # Austin scene + trained policy + vehicle model, preloaded into the nav_city demos'
+    # MEMFS so the gallery shows real downtown Austin. Data-only (platform any).
+    # build-wasm.sh preloads them when present and falls back to a synthetic city otherwise.
+    - name: scene-austin-south-small
+    - name: grl-snam-weights
+    - name: vehicle-humvee
+  host_tools:
+    - cmake
+    - ninja
+    # build-pages.py assembles the gallery.
+    - python311
+
+build:
+  matrix:
+    # Single-threaded: plain static hosting (gh-pages), and the ari page.
+    - platform: wasm
+      host_platform: linux
+      script: build-wasm.sh
+    # Threaded: SharedArrayBuffer, served cross-origin isolated (serve.py).
+    - platform: wasm-mt
+      host_platform: linux
+      script: build-wasm.sh
+
+package:
+  files:
+    - share/libcvc-examples-web/
+
+abi:
+  cxx_std: 17

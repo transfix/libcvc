@@ -16,11 +16,13 @@
 #include <cvc/ariadne/backend.h>
 #include <cvc/ariadne/bind.h>
 #include <cvc/ariadne/input.h> // §4.6 InputEvent — Runtime::post_input feeds on_key/on_pointer
+#include <cvc/ariadne/loader.h> // is_builtin_widget_type (has?)
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_scheduler.h> // §4.7 app-wide action scheduler (exec_scheduler)
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/evaluator.h> // evaluation_timeout / evaluation_interrupted
+#include <cvc/state/state_exec/exceptions.h> // dsl_error (has?)
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/parser.h> // parse, parse_error
 #include <cvc/state/state_exec/process.h>
@@ -257,9 +259,33 @@ std::vector<ActionIntrinsicProvider> &action_intrinsics_registry() {
   static std::vector<ActionIntrinsicProvider> v;
   return v;
 }
+// Bumped by every register / clear, so a Runtime's cached program names know when to rebuild.
+std::atomic<std::uint64_t> &action_intrinsics_generation() {
+  static std::atomic<std::uint64_t> g{0};
+  return g;
+}
 std::vector<ActionIntrinsicProvider> action_intrinsics_snapshot() {
   std::lock_guard<std::mutex> lock(action_intrinsics_mutex());
   return action_intrinsics_registry();
+}
+
+// Bind (has? "name") into a program or predicate env. It answers from `has` (Runtime::has), so a
+// document can ask what its host provides, e.g. hide a GL panel in a terminal. A string or a
+// quoted symbol names the thing.
+void bind_has(const std::shared_ptr<cvc::state_exec::environment> &env,
+              const std::function<bool(const std::string &)> &has) {
+  namespace se = cvc::state_exec;
+  if (!has)
+    return;
+  se::builtins::register_fn(env, "has?", [has](std::span<const se::value_t> args) -> se::value_t {
+    if (args.size() != 1)
+      throw se::dsl_error("TypeError", "has?: expected one argument, a name");
+    if (const auto *s = std::get_if<std::string>(&args[0].v))
+      return se::value_t(has(*s));
+    if (const auto *sym = std::get_if<se::symbol>(&args[0].v))
+      return se::value_t(has(sym->name));
+    throw se::dsl_error("TypeError", "has?: the name must be a string or a symbol");
+  });
 }
 } // namespace
 
@@ -268,10 +294,12 @@ void register_action_intrinsics(ActionIntrinsicProvider provider) {
     return;
   std::lock_guard<std::mutex> lock(action_intrinsics_mutex());
   action_intrinsics_registry().push_back(std::move(provider));
+  ++action_intrinsics_generation();
 }
 void clear_action_intrinsics() {
   std::lock_guard<std::mutex> lock(action_intrinsics_mutex());
   action_intrinsics_registry().clear();
+  ++action_intrinsics_generation();
 }
 
 namespace {
@@ -304,7 +332,8 @@ namespace {
 // ReactiveEngine note on the full-env lanes): the full intrinsics env with writes confined to the
 // document prefix, resource-capped, and it never throws.
 std::string run_scoped_program(cvc::app &app, const std::string &prefix, const std::string &script,
-                               uint64_t max_steps, double max_seconds, uint64_t max_bytes) {
+                               uint64_t max_steps, double max_seconds, uint64_t max_bytes,
+                               const std::function<bool(const std::string &)> &has = {}) {
   namespace se = cvc::state_exec;
   try {
     // All of these must outlive execute()+run(): the intrinsics capture &ictx by pointer. A
@@ -329,6 +358,7 @@ std::string run_scoped_program(cvc::app &app, const std::string &prefix, const s
     for (const ActionIntrinsicProvider &p : action_intrinsics_snapshot())
       if (p)
         p(env, ictx);
+    bind_has(env, has);
     // Bound the run so a looping or blocking script (an accidental infinite loop, or a
     // (msg-recv ...) with no sender) can never hang: cap the process (check_limits kills a runner
     // at the cap) AND the run loop (breaks out even when the sole process is blocked, which
@@ -356,7 +386,8 @@ std::string run_scoped_program(cvc::app &app, const std::string &prefix, const s
 } // namespace
 
 bool run_init(cvc::app &app, const std::string &prefix, const std::string &script,
-              std::vector<std::string> *errors) {
+              std::vector<std::string> *errors,
+              const std::function<bool(const std::string &)> &has) {
   const auto err = [&](const std::string &m) {
     if (errors)
       errors->push_back(m);
@@ -366,7 +397,8 @@ bool run_init(cvc::app &app, const std::string &prefix, const std::string &scrip
   // A load-time seed/compute is generous — well above the per-tick action budget (§7.4).
   static constexpr uint64_t kInitMaxSteps = 10'000'000;
   static constexpr double kInitMaxSeconds = 5.0;
-  const std::string e = run_scoped_program(app, prefix, script, kInitMaxSteps, kInitMaxSeconds, 0);
+  const std::string e =
+      run_scoped_program(app, prefix, script, kInitMaxSteps, kInitMaxSeconds, 0, has);
   if (!e.empty()) {
     err("ari: init: script " + e);
     return false;
@@ -398,7 +430,9 @@ namespace se = cvc::state_exec;
 // so `(state-get "demo.n")` reads the SAME key a widget `bind: demo.n` resolves to.
 class ReactiveEngine {
 public:
-  ReactiveEngine(cvc::app &app, const std::string &prefix) {
+  // `has` answers (has? "name") in predicates (Runtime::has); empty leaves it unbound.
+  ReactiveEngine(cvc::app &app, const std::string &prefix,
+                 const std::function<bool(const std::string &)> &has = {}) {
     // The intrinsics capture &ctx_ by pointer; sched_/tracker_/proc_ back it and share
     // this object's lifetime. No scheduler op is ever exposed, so the scheduler stays
     // idle — it exists only to give the readers a well-formed context (mirrors run_init).
@@ -457,6 +491,7 @@ public:
     for (const char *name : kAllowed)
       if (const se::value_t *v = full->lookup(name))
         env_->set(name, *v);
+    bind_has(env_, has); // pure and bounded: a capability / name lookup
     ev_ = std::make_unique<se::stackless_evaluator>(env_);
     // Special-form gate: allow control flow, binding, functions, literals and loops (all
     // step-capped or bounded); DENY the code-generation / object-graph forms. Static so the
@@ -674,6 +709,35 @@ struct Runtime::Impl {
   Backend *backend = nullptr;
   std::string prefix;
 
+  // What this host provides (requires:, has?). The names a program can reference are read from a
+  // probe env built exactly like an action's, then cached; the cache is rebuilt when a provider is
+  // registered (the registry's generation moves) or refresh_program_names() drops it.
+  bool scene_capable = false;
+  mutable std::mutex names_mutex;
+  mutable bool names_valid = false;
+  mutable std::uint64_t names_generation = 0;
+  mutable std::set<std::string> names;
+  void load_names() const; // names_mutex held
+  bool has_function(const std::string &name) const {
+    if (cvc::state_exec::stackless_evaluator::all_special_forms().count(name))
+      return true;
+    std::lock_guard<std::mutex> lock(names_mutex);
+    load_names();
+    return names.count(name) != 0;
+  }
+  HostFacts facts() const {
+    HostFacts f;
+    if (backend)
+      f.caps = backend->capabilities();
+    f.scene = scene_capable;
+    return f;
+  }
+  bool has(const std::string &name) const {
+    if (is_capability_token(name))
+      return capability_holds(name, facts());
+    return has_function(name) || is_builtin_widget_type(name) || has_widget_type(name);
+  }
+
   // §12 channel enforcement: the document's channel policy, installed on every action/resident
   // ictx. Default (enforce=false, empty) = permissive; set_channel_policy fills it from a
   // LoadResult. Pointed-to by ictx.channels (non-owning), so it must outlive the contexts — it
@@ -819,7 +883,8 @@ struct Runtime::Impl {
   // matching where its binds resolve. Every reactive helper goes through here.
   ReactiveEngine &ensure_reactive() {
     if (!reactive)
-      reactive = std::make_unique<ReactiveEngine>(app, prefix);
+      reactive = std::make_unique<ReactiveEngine>(app, prefix,
+                                                  [this](const std::string &n) { return has(n); });
     reactive->set_root_path(app, current_prefix());
     return *reactive;
   }
@@ -1516,6 +1581,7 @@ void Runtime::Impl::submit_action(const QueuedAction &action) {
     for (const ActionIntrinsicProvider &p : action_intrinsics_snapshot())
       if (p)
         p(ac->env, ac->ictx);
+    bind_has(ac->env, [this](const std::string &n) { return has(n); });
     // §4.6 event scope: a widget pointer handler runs with an `event` dict of the item's local
     // pointer coords, so the program can read (get-attr event "x"/"y"/"dx"/"dy"/"button").
     if (action.has_event) {
@@ -1615,6 +1681,7 @@ void Runtime::Impl::ensure_resident(const std::string &channel, const std::strin
     for (const ActionIntrinsicProvider &p : action_intrinsics_snapshot())
       if (p)
         p(ac->env, ac->ictx);
+    bind_has(ac->env, [this](const std::string &n) { return has(n); });
     // Park-then-run loop on `channel`: msg-recv parks the process between deliveries and BINDS each
     // delivered value as `event`, so an on_key/on_pointer body reads (get-attr event "key");
     // on:tick simply ignores `event`. The body runs once per delivery, then loops back to park. No
@@ -1690,6 +1757,60 @@ void Runtime::Impl::deliver_input(const InputEvent &ev) {
 Runtime::Runtime(cvc::app &app, std::string prefix) : m_(new Impl(app, std::move(prefix))) {}
 
 Runtime::~Runtime() = default;
+
+void Runtime::Impl::load_names() const {
+  namespace se = cvc::state_exec;
+  const std::uint64_t generation = action_intrinsics_generation().load();
+  if (names_valid && names_generation == generation)
+    return;
+  // The env an action runs in (submit_action), never executed: only its bindings are read. The
+  // context mirrors a real action's, so a provider that reads it while binding sees what it would.
+  se::scheduler sched;
+  se::memory_tracker tracker;
+  auto proc = se::make_process();
+  proc->pid = 1;
+  proc->status = se::process_status::ready;
+  se::intrinsics_context ictx;
+  ictx.sched = &sched;
+  ictx.tracker = &tracker;
+  ictx.proc = proc;
+  ictx.pid = 1;
+  se::apply_chroot(ictx, cvc::state::instance(app), prefix);
+  ictx.channels = const_cast<se::channel_policy *>(&channel_policy_);
+  ictx.document = const_cast<se::document_scope *>(&doc_scope_);
+  se::environment_ptr env = se::builtins::make_default_environment();
+  se::register_intrinsics(env, &ictx);
+  for (const ActionIntrinsicProvider &p : action_intrinsics_snapshot())
+    if (p)
+      p(env, ictx);
+  std::set<std::string> found;
+  for (const se::environment *e = env.get(); e; e = e->outer.get())
+    for (const auto &kv : e->bindings)
+      found.insert(kv.first);
+  found.insert("has?"); // bound per program (bind_has), not by a provider
+  names = std::move(found);
+  names_valid = true;
+  names_generation = generation;
+}
+
+bool Runtime::has_function(const std::string &name) const { return m_->has_function(name); }
+
+std::vector<std::string> Runtime::program_names() const {
+  std::lock_guard<std::mutex> lock(m_->names_mutex);
+  m_->load_names();
+  return {m_->names.begin(), m_->names.end()};
+}
+
+void Runtime::set_scene_capable(bool on) { m_->scene_capable = on; }
+
+HostFacts Runtime::host_facts() const { return m_->facts(); }
+
+bool Runtime::has(const std::string &name) const { return m_->has(name); }
+
+void Runtime::refresh_program_names() {
+  std::lock_guard<std::mutex> lock(m_->names_mutex);
+  m_->names_valid = false;
+}
 
 void Runtime::set_backend(Backend *backend) { m_->backend = backend; }
 

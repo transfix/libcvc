@@ -34,7 +34,7 @@ using namespace cvc::world;
 
 namespace {
 
-// The demos' occupancy_from_model, verbatim (src/cvcGL/examples/nav_common.cpp
+// The demos' occupancy_from_model, verbatim (examples/nav/nav_common.cpp
 // before G4), as the reference mesh_footprint must reproduce bit for bit.
 std::vector<std::uint8_t> reference_occupancy(const cvc::geometry &mesh, double min_x, double min_y,
                                               double max_x, double max_y, int nx, int ny) {

@@ -70,6 +70,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/physics/pose_tracker.h
   ../../inc/cvc/physics/nav_plant.h
   ../../inc/cvc/physics/nav_eval.h
+  ../../inc/cvc/physics/plant_log.h
+  ../../inc/cvc/physics/plant_log_scene.h
   ../../inc/cvc/state/state_hash_partition.h
   ../../inc/cvc/state/distributed_state_session.h
   ../../inc/cvc/state/state_transport.h
@@ -127,6 +129,12 @@ set(INCLUDE_FILES
   ../../inc/cvc/nav/plant_types.h
   ../../inc/cvc/nav/terrain.h
   ../../inc/cvc/nav/vehicle_plant.h
+  ../../inc/cvc/ph/mat3.h
+  ../../inc/cvc/ph/optim.h
+  ../../inc/cvc/ph/rff.h
+  ../../inc/cvc/ph/rng.h
+  ../../inc/cvc/ph/se2_train.h
+  ../../inc/cvc/ph/se2_vehicle.h
   ../../inc/cvc/lod/select.h
   ../../inc/cvc/lod/pyramid.h
   ../../inc/cvc/lod/tiles.h
@@ -260,6 +268,8 @@ set(SOURCE_FILES
   physics/binding_meta.cpp
   physics/nav_plant.cpp
   physics/nav_eval.cpp
+  physics/plant_log.cpp
+  physics/plant_log_scene.cpp
   state/state_change_journal.cpp
   state/state_subscription_router.cpp
   state/state_sync_adapter.cpp
@@ -321,6 +331,9 @@ set(SOURCE_FILES
   nav/sim_world_binding.cpp
   nav/sim_thread.cpp
   nav/nav_stats.cpp
+  ph/se2_data.cpp
+  ph/se2_model.cpp
+  ph/se2_train.cpp
   lod/select.cpp
   lod/pyramid.cpp
   lod/tiles.cpp
@@ -1290,7 +1303,7 @@ list(APPEND INCLUDE_FILES ../../inc/cvc/net/http_client.h)
 # the retained Widget tree, the Runtime + reconcile boundary, and direct
 # cvc::state binding, walking a pluggable Backend. It touches NO VTK/ImGui/GL —
 # the ImGui-over-VTK backend lives in cvcGL (src/cvcGL/ariadne). Roadmap §16.1.
-list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp)
+list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/requires.cpp ariadne/host_info.cpp)
 list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/widget.h
   ../../inc/cvc/ariadne/backend.h
@@ -1316,6 +1329,8 @@ list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/ftxui_backend.h
   ../../inc/cvc/ariadne/term_graphics.h
   ../../inc/cvc/ariadne/tvision_backend.h
+  ../../inc/cvc/ariadne/requires.h
+  ../../inc/cvc/ariadne/host_info.h
 )
 
 # cvc::ariadne::stream — Layer-(b) real-time in-process frame transport (roadmap
@@ -1325,7 +1340,7 @@ list(APPEND INCLUDE_FILES
 # (install(EXPORT cvcTargets NAMESPACE cvc::) exports only cvc::cvc). Zero-copy
 # frame_pool + drop-oldest/latest per-subscriber channel + dedicated producer
 # thread; borrows cvc::state only for the /streams/<id> descriptor.
-list(APPEND SOURCE_FILES ariadne/stream/frame_pool.cpp ariadne/stream/stream_channel.cpp ariadne/stream/stream_registry.cpp ariadne/stream/producer_thread.cpp ariadne/stream/stream.cpp ariadne/stream/stream_codec.cpp ariadne/stream/to_image.cpp ariadne/stream/synthetic_source.cpp ariadne/stream/audio_sources.cpp)
+list(APPEND SOURCE_FILES ariadne/stream/frame_pool.cpp ariadne/stream/stream_channel.cpp ariadne/stream/stream_registry.cpp ariadne/stream/producer_thread.cpp ariadne/stream/stream.cpp ariadne/stream/stream_codec.cpp ariadne/stream/to_image.cpp ariadne/stream/synthetic_source.cpp ariadne/stream/audio_sources.cpp ariadne/stream/stream_view.cpp)
 list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/stream/frame.h
   ../../inc/cvc/ariadne/stream/stream_codec.h
@@ -1334,6 +1349,7 @@ list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/stream/stream_registry.h
   ../../inc/cvc/ariadne/stream/producer_thread.h
   ../../inc/cvc/ariadne/stream/stream.h
+  ../../inc/cvc/ariadne/stream/stream_view.h
   ../../inc/cvc/ariadne/stream/stream_bridge.h
   ../../inc/cvc/ariadne/stream/stream_relay.h
   ../../inc/cvc/ariadne/stream/to_image.h
@@ -1449,7 +1465,7 @@ if(EMSCRIPTEN)
   # The fetch backend's blocking send() spins on emscripten_sleep under Asyncify, so a wasm
   # EXECUTABLE that links it must add -sFETCH=1 and EITHER -sASYNCIFY (main thread, the demo gallery)
   # OR -pthread (off the main thread). Link flags do not propagate out of this static archive; the
-  # executable sets them (see src/cvcGL/examples/CMakeLists.txt).
+  # executable sets them (see examples/CMakeLists.txt).
   message(STATUS "cvc::net: Emscripten-fetch HTTP backend ENABLED "
                  "(link exes with -sFETCH=1 + -sASYNCIFY or -pthread)")
 else()
@@ -2209,11 +2225,9 @@ if(CVC_NAV_WEIGHTS_FILE)
   message(STATUS "cvc::nav: installing policy ${CVC_NAV_WEIGHTS_FILE} -> share/cvc/nav/coef_mlp.cvcnav")
 endif()
 
-# The pure-C++ nav swarm / trainer / material demos moved to the canonical
-# examples tree with the rest of the demos: src/cvcGL/examples/ (built with
-# -DCVC_BUILD_CVCGL=ON -DCVC_BUILD_EXAMPLES=ON, targets nav_swarm_demo /
-# nav_train_demo / nav_material_demo). The old -DCVC_BUILD_NAV_EXAMPLE switch
-# went with the top-level examples/ directory.
+# The pure-C++ nav swarm / trainer / material demos live in examples/nav/ with the
+# rest of the demos (built with -DCVC_BUILD_CVCGL=ON -DCVC_BUILD_EXAMPLES=ON,
+# targets nav_swarm_demo / nav_train_demo / nav_material_demo).
 
 # Headless L-system / world-generation CLIs (GL-free). cvc-lsys derives and
 # renders .lsys recipes to SVG/OFF; cvc-worldgen (added with cvc::world) builds

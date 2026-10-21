@@ -364,6 +364,197 @@ CVC_HD inline void dyn_plant_vjp(const dyn_bike_params &p, const bike_veh &v, co
   }
 }
 
+// ── The plant in port-Hamiltonian form ────────────────────────────────────────────────────
+// Doc 20's rungs 2 and 3, at the plant. The body is a planar rigid body: the pose q = (x, y, psi)
+// on SE(2) and the body momenta p = M v, with v = (vx, vy, r) the body twist at the centre of
+// gravity and M = diag(m, m, Iz). In the linear-tire regime dyn_plant integrates
+//
+//   H(q, p) = 1/2 p^T M^-1 p + V(q),   dH/dp = v
+//   p' = (J(p) - D(v)) v - dV + G u,   u = (F_x, delta),   y = G^T v
+//
+//   J(p)  [[0, 0, p_y], [0, 0, -p_x], [-p_y, p_x, 0]]: SE(2)'s coadjoint action, J(p) v = ad*_v p.
+//         It gives dyn_plant's + r vy in vx' and - r vx in vy' (and, with equal masses, nothing in
+//         r'). Skew, so it moves no energy.
+//   D(v)  diag(D_x, D_lat). D_x = drag u + c_rr m g / u: the drag and rolling resistance, each
+//         opposing vx (u = sqrt(vx^2 + eps^2), as the plant smooths them). D_lat = (C_f a a^T +
+//         C_r b b^T) / u on (vy, r), a = (1, lf), b = (1, -lr): the velocity parts of the
+//         linearized tires, F_yf = C_f (delta - (vy + lf r) / u), F_yr = -C_r (vy - lr r) / u.
+//         Positive semi-definite for every u > 0.
+//   G     [[1, 0], [0, C_f], [0, lf C_f]]: the drive and brake force on p_x; the steering's C_f
+//         delta on p_y and lf C_f delta on p_r.
+//   dV    (m g grade, 0, 0) in the body frame: gravity along the heading (dyn_plant's grade).
+//   C_f, C_r  the tires' cornering stiffness at zero slip, D C B, D the lateral grip the axle has
+//         left beside its drive or brake force (dyn_lateral_cap).
+//
+// So dH/dt = -v^T D v + y^T u - m g grade vx: supplied power y^T u, dissipated v^T D v. The
+// inputs are the actuators' outputs (the state's delta and a): their lags are outside the body.
+// dyn_plant departs from this by the tires' and the small steering angle's linearization and by
+// its own step; nav_dyn_bike_test's DynBikePH gates measure both. Past a tire's peak its force
+// falls as slip grows, and the tangent dissipation (dyn_ph_tangent_D) loses definiteness: the
+// vehicle slides, which a positive-definite D cannot represent. These are evaluations only;
+// dyn_plant does not call them.
+
+// The kinetic energy 1/2 v^T M v.
+template <class S>
+CVC_HD inline S dyn_ph_hamiltonian(const dyn_bike_params &p, const dyn_state<S> &s) {
+  return S(0.5) * (S(p.m) * (s.vx * s.vx + s.vy * s.vy) + S(p.Iz) * s.r * s.r);
+}
+
+// p = M v.
+template <class S>
+CVC_HD inline void dyn_ph_momentum(const dyn_bike_params &p, const dyn_state<S> &s, S pm[3]) {
+  pm[0] = S(p.m) * s.vx;
+  pm[1] = S(p.m) * s.vy;
+  pm[2] = S(p.Iz) * s.r;
+}
+
+// J(p), the coadjoint structure.
+template <class S> CVC_HD inline void dyn_ph_J(const S pm[3], S J[3][3]) {
+  const S z = S(0);
+  J[0][0] = z;
+  J[0][1] = z;
+  J[0][2] = pm[1];
+  J[1][0] = z;
+  J[1][1] = z;
+  J[1][2] = -pm[0];
+  J[2][0] = -pm[1];
+  J[2][1] = pm[0];
+  J[2][2] = z;
+}
+
+// The lateral grip each axle has left (dyn_plant's step 2 at the state's own a): Dyf, Dyr.
+template <class S>
+CVC_HD inline void dyn_ph_grip(const dyn_bike_params &p, const dyn_state<S> &s, S &Dyf, S &Dyr) {
+  const S m = S(p.m), g = S(p.g), lf = S(p.lf), lr = S(p.lr), h = S(p.h), L = lf + lr;
+  const S fz_floor = S(p.fz_min) * m * g;
+  S Fzf = m * (g * lr - s.a * h) / L, Fzr = m * (g * lf + s.a * h) / L;
+  if (s_val(Fzf) < s_val(fz_floor))
+    Fzf = fz_floor;
+  if (s_val(Fzr) < s_val(fz_floor))
+    Fzr = fz_floor;
+  const S cap_f = S(p.mu) * Fzf, cap_r = S(p.mu) * Fzr, F_drive = m * s.a;
+  const S share = S(s_val(s.a) >= 0.0 ? p.front_drive : p.front_brake);
+  Dyf = dyn_lateral_cap(dyn_sat(F_drive * share, cap_f), cap_f);
+  Dyr = dyn_lateral_cap(dyn_sat(F_drive * (S(1) - share), cap_r), cap_r);
+}
+
+// The cornering stiffnesses at zero slip, D C B.
+template <class S>
+CVC_HD inline void dyn_ph_cornering(const dyn_bike_params &p, const dyn_state<S> &s, S &Cf, S &Cr) {
+  S Dyf, Dyr;
+  dyn_ph_grip(p, s, Dyf, Dyr);
+  Cf = Dyf * S(p.C) * S(p.B_f);
+  Cr = Dyr * S(p.C) * S(p.B_r);
+}
+
+// D(v), the linear-tire dissipation (with drag and rolling resistance on vx).
+template <class S>
+CVC_HD inline void dyn_ph_D(const dyn_bike_params &p, const dyn_state<S> &s, S D[3][3]) {
+  S Cf, Cr;
+  dyn_ph_cornering(p, s, Cf, Cr);
+  const S u = s_sqrt(s.vx * s.vx + S(p.eps) * S(p.eps));
+  const S lf = S(p.lf), lr = S(p.lr), z = S(0);
+  D[0][0] = S(p.drag) * u + S(p.c_rr) * S(p.m) * S(p.g) / u;
+  D[0][1] = z;
+  D[0][2] = z;
+  D[1][0] = z;
+  D[2][0] = z;
+  D[1][1] = (Cf + Cr) / u;
+  D[1][2] = (Cf * lf - Cr * lr) / u;
+  D[2][1] = D[1][2];
+  D[2][2] = (Cf * lf * lf + Cr * lr * lr) / u;
+}
+
+// G, the input map for u = (F_x, delta).
+template <class S>
+CVC_HD inline void dyn_ph_G(const dyn_bike_params &p, const dyn_state<S> &s, S G[3][2]) {
+  S Cf, Cr;
+  dyn_ph_cornering(p, s, Cf, Cr);
+  const S z = S(0);
+  G[0][0] = S(1);
+  G[0][1] = z;
+  G[1][0] = z;
+  G[1][1] = Cf;
+  G[2][0] = z;
+  G[2][1] = S(p.lf) * Cf;
+}
+
+// u = (F_x, delta) from the actuators' state: the drive force m a and the road-wheel angle.
+template <class S>
+CVC_HD inline void dyn_ph_input(const dyn_bike_params &p, const dyn_state<S> &s, S u[2]) {
+  u[0] = S(p.m) * s.a;
+  u[1] = s.delta;
+}
+
+// p' = (J - D) v - dV + G u at the state.
+template <class S>
+CVC_HD inline void dyn_ph_rhs(const dyn_bike_params &p, const dyn_state<S> &s, S grade, S pdot[3]) {
+  S pm[3], J[3][3], D[3][3], G[3][2], u[2];
+  dyn_ph_momentum(p, s, pm);
+  dyn_ph_J(pm, J);
+  dyn_ph_D(p, s, D);
+  dyn_ph_G(p, s, G);
+  dyn_ph_input(p, s, u);
+  const S v[3] = {s.vx, s.vy, s.r};
+  for (int i = 0; i < 3; ++i) {
+    S acc = G[i][0] * u[0] + G[i][1] * u[1];
+    for (int j = 0; j < 3; ++j)
+      acc = acc + (J[i][j] - D[i][j]) * v[j];
+    pdot[i] = acc;
+  }
+  pdot[0] = pdot[0] - S(p.m) * S(p.g) * grade;
+}
+
+// The power balance at the state: dissipated v^T D v and supplied y^T u (y = G^T v).
+template <class S>
+CVC_HD inline void dyn_ph_power(const dyn_bike_params &p, const dyn_state<S> &s, S &dissipated,
+                                S &supplied) {
+  S D[3][3], G[3][2], u[2];
+  dyn_ph_D(p, s, D);
+  dyn_ph_G(p, s, G);
+  dyn_ph_input(p, s, u);
+  const S v[3] = {s.vx, s.vy, s.r};
+  dissipated = S(0);
+  for (int i = 0; i < 3; ++i)
+    for (int j = 0; j < 3; ++j)
+      dissipated = dissipated + v[i] * D[i][j] * v[j];
+  supplied = S(0);
+  for (int k = 0; k < 2; ++k) {
+    S y = S(0);
+    for (int i = 0; i < 3; ++i)
+      y = y + G[i][k] * v[i];
+    supplied = supplied + y * u[k];
+  }
+}
+
+// The tangent dissipation of dyn_plant's Pacejka tires at the state: Dt = -d(Q_y, Q_r)/d(vy, r)
+// with Q the tires' lateral force and yaw moment, = k_f a a^T + k_r b b^T where k is each tire's
+// dF/dalpha times its slip's sensitivity to its lateral velocity (and the front's cos delta).
+// With a and b independent, Dt is positive semi-definite exactly when both k are >= 0, i.e. both
+// tires are below their peak; kf and kr are returned with it. alpha_f and alpha_r are the slips.
+template <class S>
+CVC_HD inline void dyn_ph_tangent_D(const dyn_bike_params &p, const dyn_state<S> &s, S Dt[2][2],
+                                    S &kf, S &kr, S &alpha_f, S &alpha_r) {
+  S Dyf, Dyr;
+  dyn_ph_grip(p, s, Dyf, Dyr);
+  const S lf = S(p.lf), lr = S(p.lr), C = S(p.C), Bf = S(p.B_f), Br = S(p.B_r);
+  const S u = s_sqrt(s.vx * s.vx + S(p.eps) * S(p.eps)), sg = s.vx / u;
+  const S wf = s.vy + lf * s.r, wr = s.vy - lr * s.r;
+  alpha_f = sg * s.delta - s_atan2(wf, u);
+  alpha_r = -s_atan2(wr, u);
+  // dF/dalpha of D sin(C atan(B alpha)).
+  const S bf = Bf * alpha_f, br = Br * alpha_r;
+  const S dFf = Dyf * C * Bf * s_cos(C * s_atan(bf)) / (S(1) + bf * bf);
+  const S dFr = Dyr * C * Br * s_cos(C * s_atan(br)) / (S(1) + br * br);
+  // dalpha/dw = -u / (u^2 + w^2); the front force reaches (vy, r) through cos delta.
+  kf = dFf * s_cos(s.delta) * u / (u * u + wf * wf);
+  kr = dFr * u / (u * u + wr * wr);
+  Dt[0][0] = kf + kr;
+  Dt[0][1] = kf * lf - kr * lr;
+  Dt[1][0] = Dt[0][1];
+  Dt[1][1] = kf * lf * lf + kr * lr * lr;
+}
+
 // ── The vehicle under the trained controller ──────────────────────────────────────────────
 
 // One step: bike_control's commands from the rear axle's pose and the speed vx, through the

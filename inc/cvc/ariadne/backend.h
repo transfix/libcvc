@@ -93,8 +93,9 @@ struct WindowGeom {
   float x = 0.0f, y = 0.0f, w = 0.0f, h = 0.0f;
 };
 
-// What a surface can and cannot do. The core (and, later, the loader's
-// `requires:` preflight, §16.3/§7.6) reads this to fail-safe or substitute —
+// What a surface can and cannot do. AppRuntime::load checks a document's
+// `requires:` against it (§16.3/§7.6, cvc/ariadne/requires.h, which maps the
+// capability tokens onto these fields), and (has? "...") reads it at run time —
 // e.g. a shader widget needs `glsl`, `free` layout needs `windows`. `owns_loop`
 // distinguishes a host-pumped backend (ImGui: the host render pass calls
 // Runtime::render()) from a framework-owned loop (FTXUI/tvision: the backend's
@@ -109,6 +110,10 @@ struct Capabilities {
   bool glsl = false;       // can render GLSL (scene-node shaders / shader_canvas)
   bool view_embed = false; // can embed a live render-to-texture view
   bool owns_loop = false;  // the backend drives its own event loop
+  bool terminal = false;   // draws in a text terminal
+  bool bitmap = false;     // shows images in real pixels (a GL window, or a kitty / Sixel terminal)
+  bool kitty = false;      // the terminal speaks the kitty graphics protocol
+  bool sixel = false;      // the terminal draws DEC Sixel
 };
 
 // The pluggable UI handler. The core walks the tree and calls these; structural

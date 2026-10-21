@@ -12,13 +12,15 @@
 //   register_streaming       the stream verbs (stream-open/info/close), gl-bind-stream, the media
 //                            verbs (stream-capture-camera / -audio, stream-play-audio) and the
 //                            `type: stream` scene node.
-//   register_window_widgets  the ImGui-only widgets: `stream_view`.
+//   register_window_widgets  the ImGui widgets: `stream_view` (a terminal host registers the
+//                            terminal one, cvc::ariadne::register_stream_view_widget).
 //   register_conference      a conference document's set: register_streaming, the room verbs
 //                            (room-join / roster / leave) and `stream_view`. The gRPC clustering
 //                            (state / media transports, the shard, stream_bridge) is not a
 //                            registration and stays with the host.
 //
-// Terminal hosts (`arigl --terminal`) make the first two; the ImGui ones are window-only.
+// Terminal hosts (`arigl --terminal`) make the first two, then register the terminal stream_view
+// (stream/stream_view.h) with jpeg_frame_decoder() for "mjpeg".
 #pragma once
 
 namespace cvc {
