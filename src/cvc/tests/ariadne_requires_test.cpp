@@ -7,6 +7,7 @@
 #include <cvc/ariadne/app_runtime.h>
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/ftxui_backend.h>
+#include <cvc/ariadne/host_info.h>
 #include <cvc/ariadne/requires.h>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
@@ -275,4 +276,38 @@ TEST(AriadneRequires, AReactiveExpressionCanAskWithHas) {
   EXPECT_EQ(screen.find("scene-panel"), std::string::npos) << screen;
   EXPECT_NE(screen.find("terminal-note"), std::string::npos) << screen;
   EXPECT_TRUE(art.take_warnings().empty());
+}
+
+// ---- the host report (ari info / arigl info) ----------------------------------------------------
+
+TEST(AriadneRequires, TheHostReportListsCapabilitiesAndFunctions) {
+  cvc::app app;
+  Runtime rt(app, "ui.req");
+  Capabilities c;
+  c.terminal = true;
+  c.kitty = true;
+  CapsBackend be(c);
+  rt.set_backend(&be);
+  HostInfo info = gather_host_info(rt, "ari");
+  info.backend = "ftxui";
+  EXPECT_EQ(info.runtime, "ari");
+  EXPECT_FALSE(info.libcvc_version.empty());
+  EXPECT_TRUE(info.graphics.kitty);
+  EXPECT_EQ(info.capabilities.size(), capability_tokens().size());
+  EXPECT_TRUE(std::find(info.functions.begin(), info.functions.end(), "state-get") !=
+              info.functions.end());
+
+  const std::string text = format_host_info(info, /*json=*/false, /*functions=*/false);
+  EXPECT_NE(text.find("ari (libcvc "), std::string::npos) << text;
+  EXPECT_NE(text.find("term.kitty      yes"), std::string::npos) << text;
+  EXPECT_NE(text.find("gl.scene        no"), std::string::npos) << text;
+  EXPECT_NE(text.find("functions programs can call: "), std::string::npos) << text;
+  EXPECT_EQ(text.find("  state-get\n"), std::string::npos); // listed only with functions=true
+  EXPECT_NE(format_host_info(info, false, true).find("  state-get\n"), std::string::npos);
+
+  const std::string json = format_host_info(info, /*json=*/true, /*functions=*/false);
+  EXPECT_NE(json.find("\"runtime\": \"ari\""), std::string::npos) << json;
+  EXPECT_NE(json.find("\"term.kitty\": true"), std::string::npos) << json;
+  EXPECT_NE(json.find("\"gl.scene\": false"), std::string::npos) << json;
+  EXPECT_NE(json.find("\"state-get\""), std::string::npos) << json;
 }
