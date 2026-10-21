@@ -398,17 +398,21 @@ TEST(Dyn4, EnvelopesOnFourWheels) {
     double peak = 0.0;
     for (const double delta : {0.05, 0.1, 0.2, 0.35}) {
       dyn4_state<double> s = rolling(15.0);
-      double ay = 0.0;
+      // The body's lateral acceleration over the tail, vy' + r vx: once the tires slide the
+      // vehicle drifts and r vx alone overstates it (as DynBike.SteadyLateralNeverExceedsMuG).
+      double ay = 0.0, vy0 = 0.0;
       const int n = 200, tail = 17;
       for (int t = 0; t < n; ++t) {
+        if (t == n - tail)
+          vy0 = s.vy;
         dyn4_state<double> o;
         const double a_cmd = 2.0 * (15.0 - s.vx) + p.drag * s.vx * s.vx / p.m + p.c_rr * p.g;
         diff::dyn4_plant<double>(p, v, ground, s, delta, a_cmd, o);
         s = o;
         if (t >= n - tail)
-          ay += std::fabs(s.vx * s.r) / tail;
+          ay += s.vx * s.r / tail;
       }
-      peak = std::max(peak, ay);
+      peak = std::max(peak, std::fabs(ay + (s.vy - vy0) / (tail * v.hdt)));
     }
     std::printf("  mu %.1f: the steadiest lateral acceleration %.2f m/s^2 = %.2f mu g\n", mu, peak,
                 peak / (mu * kG));

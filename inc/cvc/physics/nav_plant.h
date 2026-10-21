@@ -152,14 +152,15 @@ public:
   static cvc::nav::diff::dyn_bike_params dyn_bike_params_at(const vehicle_desc &d, double wheelbase,
                                                             double mu = 0.9);
 
-  // The same vehicle on four wheels (nav/dyn_4w.h, P8d): dyn_bike_si_of's numbers, plus
+  // The same vehicle on four wheels (nav/dyn_4w.h, P8d): dyn_bike_si_of's numbers, with its
+  // defaults (front_stiffness 1, drive_lag < 0 for the vehicle's own), plus
   //   - the half tracks of the front (steered) and rear axles;
   //   - the chassis box's roll and pitch inertias, m (hy^2 + hz^2) / 3 and m (hx^2 + hz^2) / 3;
   //   - each corner's spring from its axle's suspension frequency f and the corner's static
   //     load m_c (k = m_c (2 pi f)^2), and its damper from the damping ratio z (c = 2 z
   //     sqrt(k m_c)). The anti-roll bars are left out.
-  static cvc::nav::dyn4_si dyn4_si_of(const vehicle_desc &d, double front_stiffness = 0.85,
-                                      double drive_lag = 0.1, double gravity = 9.80665);
+  static cvc::nav::dyn4_si dyn4_si_of(const vehicle_desc &d, double front_stiffness = 1.0,
+                                      double drive_lag = -1.0, double gravity = 9.80665);
   // dyn4_si_of in a normalized frame where its wheelbase is `wheelbase`, as dyn_bike_params_at.
   static cvc::nav::diff::dyn4_params dyn4_params_at(const vehicle_desc &d, double wheelbase);
 

@@ -167,13 +167,15 @@ derives them from a `vehicle_desc`, so both plants read one vehicle:
 
 - mass, and a yaw inertia from the chassis box;
 - the axles relative to the centre of gravity;
-- Pacejka B and C from the tire's peak slip angle and sliding fraction;
-- the drive and brake splits, drag and rolling resistance;
-- the steering's rate.
+- Pacejka C from the tire's sliding fraction, and B fitted to how Jolt's tires corner: B C =
+  `kJoltTireStiffness` (1.12) / the peak slip angle (#753);
+- the drive and brake splits, drag and rolling resistance (none for a direct drive, whose driver
+  model's trim makes up for them);
+- the steering's rate, and the drive's lag (0 for a direct drive, 0.1 s through a converter).
 
-`front_stiffness` (0.85) scales the front's B. It stands in for the load sensitivity and steering
-compliance that give a road vehicle its understeer, which a single track has no other way to
-show.
+`front_stiffness` (1) scales the front's B. A road vehicle's load sensitivity and steering
+compliance would put it below 1. Jolt's tires have neither, and the fit to Jolt puts front and
+rear alike.
 
 Gates (`nav_dyn_bike_test`; the Humvee from its `vehicle_desc`, in metres):
 
@@ -396,23 +398,24 @@ force `a` behind their actuators.
 - `dyn4_params_of` converts them by length exponent.
 - `dyn4_params_at(desc, wheelbase)` gives the trainer's normalized vehicle, as P8a does.
 
-**Gates** (`nav_dyn_4w_test`, the Humvee from its vehicle_desc unless noted):
+**Gates** (`nav_dyn_4w_test`, the Humvee from its vehicle_desc unless noted; the tires fitted to
+Jolt's since #753):
 
 | Gate | Result |
 |---|---|
 | At rest on flat ground, 200 steps | stays put; the loads sum to m g |
-| Single-track limit (zero track, rigid corners) against P8a's `dyn_plant`: steer, throttle, then brake from 15 m/s | positions within 0.053 m over 95 m; velocities within 0.003 m/s |
-| A steady turn: the roll moment the springs carry against h x the lateral force | -5082 against -5082 N m; the outside wheels loaded |
+| Single-track limit (zero track, rigid corners) against P8a's `dyn_plant`: steer, throttle, then brake from 15 m/s | positions within 0.130 m over 93 m; velocities within 0.016 m/s |
+| A steady turn: the roll moment the springs carry against h x the lateral force | -5118 against -5116 N m; the outside wheels loaded |
 | Steady braking at 3 m/s^2: the front axle against the quasi-static m (g lr - a h) / L | 15820 against 15820 N |
-| Braking with the left wheels on mu 0.3 and the right on 0.9 | yaws toward the high-mu side (-0.16 rad in 1.8 s) |
+| Braking with the left wheels on mu 0.3 and the right on 0.9 | yaws toward the high-mu side (-0.89 rad in 1.8 s) |
 | An 8 cm bump under the left wheels | front left peaks at 1.37 x its static load, front right 1.11 x |
-| The plant's VJP against central differences (double; cruise, corner, braking in a turn, crawl, a bump) | worst relative 3.7e-9 |
-| One step under the controller (a RoboRacer in the trainer's city, float) | directional relative error 6.2e-5 |
-| Steady lateral acceleration, mu 0.4 / 0.9 | 0.97 / 0.95 mu g |
+| The plant's VJP against central differences (double; cruise, corner, braking in a turn, crawl, a bump) | worst relative 2.6e-9 |
+| One step under the controller (a RoboRacer in the trainer's city, float) | directional relative error 4.0e-5 |
+| Steady lateral acceleration (the body's, vy' + r vx), mu 0.4 / 0.9 | 0.94 / 0.89 mu g |
 | Stopping from 20 m/s, mu 0.4 / 0.9 | 47.2 / 21.5 m against v^2 / (2 mu g) = 51.0 / 22.7 m |
-| Against Jolt's Humvee (physics_vehicle_test's numbers) | skidpad 6.56 m/s^2 at mu 0.7 (Jolt 6.85); stopping 24.10 m from 20 m/s at mu 0.8 (Jolt 25.90) |
+| Against Jolt's Humvee (physics_vehicle_test's numbers) | skidpad 6.30 m/s^2 at mu 0.7 (Jolt 6.85); stopping 24.10 m from 20 m/s at mu 0.8 (Jolt 25.90) |
 | Ackermann, as Jolt's gate: cot(right) - cot(left) against track / wheelbase | exact (1e-12) for delta from -0.3 to 0.45 |
-| Held at delta at 3 m/s, the low-speed blend off: the rear axle's circle against L / tan(delta) | +0.10 / +0.17 / +0.32% at 0.15 / 0.30 / 0.45 rad |
+| Held at delta at 3 m/s, the low-speed blend off: the rear axle's circle against L / tan(delta) | -0.03 / +0.18 / +0.62% at 0.15 / 0.30 / 0.45 rad |
 | Golden for the torch twin (`tests/data/dyn4_golden.json`; the sprung and rigid Humvee on a mu split with a bump): next state and VJP | reproduced to 1e-9 |
 
 A gradient check's starting positions should not be the scene's sampled starts. Those sit on
