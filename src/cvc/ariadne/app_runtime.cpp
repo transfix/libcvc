@@ -6,13 +6,16 @@
 #include <cvc/ariadne/backend.h>  // cvc::ariadne::Backend (set_backend)
 #include <cvc/ariadne/doc_args.h> // the document's command line
 #include <cvc/ariadne/loader.h>  // load_file / LoadResult / ChannelDecl / sources_changed
+#include <cvc/ariadne/requires.h> // requires:, free_heads (what a document needs from its host)
 #include <cvc/ariadne/uri.h>     // register_cvc_uri_handler
 #include <cvc/core/app.h>
 #include <cvc/state/state_exec/async_scheduler.h> // exec_scheduler().post_message
 #include <cvc/state/state_exec/builtins.h>        // register_fn
 #include <cvc/state/state_exec/intrinsics.h>      // intrinsics_context, resolve_channel_key
 #include <cvc/state/state_exec/types.h>           // value_t
+#include <map>
 #include <memory>
+#include <set>
 #include <span>
 #include <stdexcept>
 #include <utility>
@@ -22,7 +25,9 @@ namespace ariadne {
 
 AppRuntime::AppRuntime(cvc::app &app, std::string prefix, SceneAdapter *scene)
     : app_(app), prefix_(std::move(prefix)), scene_(scene), rt_(app, prefix_),
-      verbs_(std::make_shared<Verbs>()) {}
+      verbs_(std::make_shared<Verbs>()) {
+  rt_.set_scene_capable(scene_ != nullptr); // the gl.scene capability (requires:, has?)
+}
 
 AppRuntime::~AppRuntime() {
   verbs_->sync.clear(); // the provider outlives us in the registry: it must bind nothing of ours
@@ -45,12 +50,14 @@ bool AppRuntime::have_yaml() { return cvc::ariadne::have_yaml(); }
 void AppRuntime::register_verb(const std::string &name, std::function<void()> fn) {
   verbs_->sync.emplace_back(name, std::move(fn));
   ensure_intrinsics();
+  rt_.refresh_program_names(); // has? / requires: see the new verb
 }
 
 void AppRuntime::register_async_verb(const std::string &name, const std::string &done_channel,
                                      std::function<std::string()> work) {
   verbs_->async.emplace_back(name, done_channel, std::move(work));
   ensure_intrinsics();
+  rt_.refresh_program_names();
 }
 
 void AppRuntime::ensure_intrinsics() {
@@ -97,6 +104,88 @@ void AppRuntime::ensure_intrinsics() {
   });
 }
 
+// ── requires: (roadmap §7.6) ───────────────────────────────────────────────────────────────────
+
+namespace {
+
+// How a requires: name is described in a message: a capability token says what it means.
+std::string describe_requirement(const std::string &name) {
+  for (const CapabilityToken &t : capability_tokens())
+    if (name == t.name)
+      return name + " (" + t.meaning + ")";
+  return name;
+}
+
+// Every program in a loaded document, with where it sits, for the free-head scan.
+void collect_programs(const Widget &w, std::vector<std::pair<std::string, std::string>> &out) {
+  const std::string where = "widget '" + (w.id.empty() ? w.label : w.id) + "'";
+  for (const std::string *p :
+       {&w.on, &w.on_click, &w.on_hover, &w.on_drag, &w.on_drag_start, &w.on_drag_end})
+    if (!p->empty())
+      out.emplace_back(where, *p);
+  for (const Widget &c : w.children)
+    collect_programs(c, out);
+}
+
+// The load-time preflight. requires: entries the host lacks fail the load (all named in one
+// error) or, when optional, warn. Then every name a program calls that the host does not provide
+// gets one warning: today that program would stop with "undefined symbol" the first time it runs.
+// A name the document already listed in requires: is not repeated.
+void check_host_requirements(const Runtime &rt, LoadResult &lr) {
+  std::set<std::string> declared;
+  std::vector<std::string> missing;
+  for (const HostRequirement &req : lr.requirements) {
+    declared.insert(req.name);
+    if (rt.has(req.name))
+      continue;
+    if (req.optional)
+      lr.warnings.push_back("ari: optional requirement " + describe_requirement(req.name) +
+                            " is not available on this host");
+    else
+      missing.push_back(describe_requirement(req.name));
+  }
+  if (!missing.empty()) {
+    std::string list;
+    for (const std::string &m : missing)
+      list += (list.empty() ? "" : ", ") + m;
+    throw std::runtime_error("ari: this host does not provide what the document requires: " + list);
+  }
+
+  std::vector<std::pair<std::string, std::string>> programs;
+  const std::pair<const char *, const std::string *> lanes[] = {
+      {"init:", &lr.init_script},
+      {"on_tick:", &lr.on_tick_script},
+      {"on_key:", &lr.on_key_script},
+      {"on_pointer:", &lr.on_pointer_script},
+      {"on_signal:", &lr.on_signal_script}};
+  for (const auto &[where, script] : lanes)
+    if (!script->empty())
+      programs.emplace_back(where, *script);
+  collect_programs(lr.root, programs);
+  std::map<std::string, std::vector<std::string>> unprovided; // name -> where it is called
+  for (const auto &[where, script] : programs)
+    for (const std::string &name : free_heads(script))
+      if (!declared.count(name) && !rt.has_function(name)) {
+        std::vector<std::string> &at = unprovided[name];
+        if (at.empty() || at.back() != where)
+          at.push_back(where);
+      }
+  for (const auto &[name, at] : unprovided) {
+    std::string where;
+    for (std::size_t i = 0; i < at.size() && i < 3; ++i)
+      where += (i ? ", " : "") + at[i];
+    if (at.size() > 3)
+      where += " and " + std::to_string(at.size() - 3) + " more";
+    lr.warnings.push_back("ari: " + where + " calls (" + name +
+                          " ...), which this host does not provide; that program stops there "
+                          "when it runs (list it in requires: to make this an error, or as "
+                          "optional if the program checks (has? \"" +
+                          name + "\") first)");
+  }
+}
+
+} // namespace
+
 // ── document ────────────────────────────────────────────────────────────────────────────────────
 
 void AppRuntime::set_document_args(std::vector<std::string> argv, std::string invocation,
@@ -114,6 +203,7 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
   if (!lr.ok)
     throw std::runtime_error(lr.error.empty() ? ("AppRuntime.load: failed to load " + path)
                                               : lr.error);
+  check_host_requirements(rt_, lr); // requires: and the calls programs make (§7.6)
 
   // The document's command line goes on the tree before init: runs, so init can read it.
   hasArgsBlock_ = lr.has_args_block;
@@ -137,7 +227,8 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
                         lr.has_args_block ? &parsed : nullptr);
 
   std::vector<std::string> initErrors;
-  run_init(app_, prefix_, lr.init_script, &initErrors); // §init: seeds win over widget defaults
+  run_init(app_, prefix_, lr.init_script, &initErrors, // §init: seeds win over widget defaults
+           [this](const std::string &n) { return rt_.has(n); });
   for (std::string &e : initErrors) // a failed init: is not fatal, but it must not be silent
     lr.warnings.push_back(std::move(e));
   rt_.set_tick_program(lr.on_tick_script);          // empty = no resident (safe)

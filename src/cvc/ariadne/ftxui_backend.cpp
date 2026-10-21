@@ -1332,6 +1332,12 @@ Capabilities FtxuiBackend::capabilities() const {
   c.glsl = false; // no GLSL on a terminal: a shader widget degrades (§16.3)
   c.view_embed = false;
   c.owns_loop = true; // run() owns the terminal's event loop (§16.2)
+  c.terminal = true;
+  // What the terminal can draw, as far as is known: run() probes it, and a host that wants the
+  // answer before loading a document (a requires: check) probes first, set_terminal_graphics().
+  c.kitty = m_->term_gfx.kitty;
+  c.sixel = m_->term_gfx.sixel;
+  c.bitmap = m_->pixels();
   return c;
 }
 
