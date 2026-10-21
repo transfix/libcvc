@@ -39,6 +39,7 @@
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/geometry_file_io.h>
 #include <cvc/nav/coef_mlp.h>
+#include <cvc/ph/se2_train.h>
 #include <cvc/physics/plant_log_scene.h>
 #include <cvc/state/distributed_state_session.h>
 #include <cvc/state/state.h>
@@ -2144,6 +2145,162 @@ static int cmd_plant_log(int argc, char **argv) {
   return 0;
 }
 
+// ── ph-train: fit the learned port-Hamiltonian vehicle (cvc::ph) to plant logs ──
+
+static int cmd_ph_train(int argc, char **argv) {
+  po::options_description desc(
+      "cvc ph-train - fit cvc::ph's learned SE(2) port-Hamiltonian vehicle to cvc-plant-log runs\n"
+      "(LieSPHGP's SE(2) recipe with its rollout loss; no Python)");
+  // clang-format off
+  desc.add_options()
+    ("help,h", "show help")
+    ("runs", po::value<std::vector<std::string>>()->multitoken()->required(),
+     "cvc-plant-log --out directories (flights.npy + meta.json)")
+    ("out,o", po::value<std::string>()->required(), "the fitted model (JSON, cvc-ph-se2/1)")
+    ("test-seeds", po::value<std::vector<int>>()->multitoken()->default_value({101}, "101"),
+     "seeds held out: monitored, never trained on")
+    ("noise", po::value<double>()->default_value(0.05, "0.05"), "observation noise sigma added to x, y, psi, v")
+    ("noise-seed", po::value<std::uint64_t>()->default_value(0), "the noise's random seed")
+    ("seed", po::value<std::uint64_t>()->default_value(0), "features, initial values, batches, draws")
+    ("steps", po::value<int>()->default_value(5000), "optimizer steps")
+    ("batch", po::value<int>()->default_value(16), "windows per step")
+    ("window-points", po::value<int>()->default_value(101), "samples per training window")
+    ("window-stride", po::value<int>()->default_value(75), "samples between window starts")
+    ("substeps", po::value<int>()->default_value(1), "Lie-IMEX steps per sample interval")
+    ("features", po::value<int>()->default_value(64), "random features per GP")
+    ("no-v-gp", "V(x, y) linear only (no GP)")
+    ("v-length", po::value<double>()->default_value(50.0), "V's GP length scale (m)")
+    ("lr", po::value<double>()->default_value(3e-3), "Adam's learning rate (cosine-decayed)")
+    ("level-lr", po::value<double>()->default_value(0.25), "Prodigy's schedule on the levels")
+    ("final-lr-fraction", po::value<double>()->default_value(0.1), "the decay's floor")
+    ("clip", po::value<double>()->default_value(1.0), "global gradient-norm clip (0: none)")
+    ("kl-beta-max", po::value<double>()->default_value(1.0), "the KL weight's final value")
+    ("kl-anneal", po::value<int>()->default_value(1000), "steps for the KL weight to rise")
+    ("eval-every", po::value<int>()->default_value(500), "steps between monitor evaluations")
+    ("eval-windows", po::value<int>()->default_value(64), "held-out windows the monitor reads")
+    ("threads", po::value<int>()->default_value(0), "worker threads (0: all cores)")
+    ("init", po::value<std::string>(), "continue from this model instead of a fresh one")
+    ("dump-dataset", po::value<std::string>(),
+     "also write the noisy train/test flights (npy) and their statistics to this directory")
+    ("log-every", po::value<int>()->default_value(50), "steps between log lines");
+  // clang-format on
+  po::variables_map vm;
+  po::store(po::command_line_parser(argc, argv).options(desc).run(), vm);
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
+  po::notify(vm);
+  namespace ph = cvc::ph;
+  const auto runs = vm["runs"].as<std::vector<std::string>>();
+  const auto test_seeds = vm["test-seeds"].as<std::vector<int>>();
+  const double noise = vm["noise"].as<double>();
+  const std::uint64_t noise_seed = vm["noise-seed"].as<std::uint64_t>();
+
+  const ph::se2_flights all = ph::load_plant_log_runs(runs);
+  const ph::se2_flights noisy =
+      noise > 0.0 ? ph::add_observation_noise(all, noise, noise_seed) : all;
+  const ph::se2_flights train_f = ph::select_seeds(noisy, test_seeds, false);
+  const ph::se2_flights test_f = ph::select_seeds(noisy, test_seeds, true);
+  if (train_f.count == 0)
+    throw std::runtime_error("every flight is held out");
+  const std::array<double, 3> twist = ph::twist_rms(train_f);
+  const std::vector<double> control = ph::control_rms(train_f);
+  if (vm.count("dump-dataset")) {
+    const fs::path dir(vm["dump-dataset"].as<std::string>());
+    fs::create_directories(dir);
+    const auto shape = [](const ph::se2_flights &f) {
+      return std::vector<std::size_t>{f.count, f.rows, static_cast<std::size_t>(f.width)};
+    };
+    ph::write_npy((dir / "train.npy").string(), train_f.data, shape(train_f));
+    ph::write_npy((dir / "test_noisy.npy").string(), test_f.data, shape(test_f));
+    const ph::se2_flights clean = ph::select_seeds(all, test_seeds, true);
+    ph::write_npy((dir / "test.npy").string(), clean.data, shape(clean));
+    std::ofstream js((dir / "dataset.json").string());
+    js << std::setprecision(17) << "{\"dt\": " << all.dt << ", \"noise\": " << noise
+       << ", \"noise_seed\": " << noise_seed << ", \"train_flights\": " << train_f.count
+       << ", \"test_flights\": " << test_f.count << "}\n";
+  }
+
+  const int points = vm["window-points"].as<int>();
+  const int stride = vm["window-stride"].as<int>();
+  const ph::se2_windows train =
+      ph::cut_windows(ph::scale_controls(train_f, control), points, stride);
+  const ph::se2_windows test =
+      test_f.count ? ph::cut_windows(ph::scale_controls(test_f, control), points, stride)
+                   : ph::se2_windows{};
+  ph::se2_model model;
+  if (vm.count("init")) {
+    model = ph::se2_model::load(vm["init"].as<std::string>());
+  } else {
+    ph::se2_init init;
+    init.control_dim = all.control_dim();
+    init.features = vm["features"].as<int>();
+    init.v_gp = !vm.count("no-v-gp");
+    init.v_length = vm["v-length"].as<double>();
+    model = ph::se2_model::initialize(init, vm["seed"].as<std::uint64_t>(), twist, control, all.dt,
+                                      vm["substeps"].as<int>());
+  }
+  ph::se2_train_config cfg;
+  cfg.seed = vm["seed"].as<std::uint64_t>();
+  cfg.total_steps = vm["steps"].as<int>();
+  cfg.batch_size = vm["batch"].as<int>();
+  cfg.kl_beta_max = vm["kl-beta-max"].as<double>();
+  cfg.kl_anneal_steps = vm["kl-anneal"].as<int>();
+  cfg.eval_every = vm["eval-every"].as<int>();
+  cfg.eval_windows = vm["eval-windows"].as<int>();
+  cfg.threads = vm["threads"].as<int>();
+  cfg.optimizer.learning_rate = vm["lr"].as<double>();
+  cfg.optimizer.level_learning_rate = vm["level-lr"].as<double>();
+  cfg.optimizer.final_learning_fraction = vm["final-lr-fraction"].as<double>();
+  cfg.optimizer.gradient_clip_norm = vm["clip"].as<double>();
+  const int log_every = std::max(1, vm["log-every"].as<int>());
+
+  std::cout << std::setprecision(6) << "ph-train: " << all.count << " flights x " << all.rows
+            << " rows at dt " << all.dt << " s; " << train_f.count << " train / " << test_f.count
+            << " held out; windows " << train.count << " / " << test.count << " of " << points
+            << " points\n  twist scale " << twist[0] << " " << twist[1] << " " << twist[2]
+            << "; control scale";
+  for (double c : control)
+    std::cout << " " << c;
+  std::cout << "; parameters " << model.params.size() << "\n";
+  const auto started = std::chrono::steady_clock::now();
+  ph::se2_train_rollout(
+      model, train, test.count ? &test : nullptr, cfg, [&](const ph::se2_train_event &ev) {
+        if (ev.step % log_every && ev.step != 1 && !ev.evaluated)
+          return;
+        const double s =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+        std::cout << "step " << std::setw(6) << ev.step << " loss " << ev.objective.value
+                  << " rollout " << ev.objective.rollout << " kl " << ev.objective.kl << " beta "
+                  << ev.beta << " |g| " << ev.gradient_norm << " (" << s << " s)";
+        if (ev.evaluated)
+          std::cout << "  MONITOR test " << ev.test_loss << " train subset " << ev.train_loss
+                    << " prodigy d " << ev.prodigy_d[0] << " " << ev.prodigy_d[1] << " "
+                    << ev.prodigy_d[2] << " " << ev.prodigy_d[3];
+        std::cout << "\n" << std::flush;
+      });
+  std::string run_list;
+  for (const auto &r : runs)
+    run_list += (run_list.empty() ? "" : ";") + r;
+  std::string seeds;
+  for (int s : test_seeds)
+    seeds += (seeds.empty() ? "" : ",") + std::to_string(s);
+  model.provenance = {{"source", "cvc ph-train (libcvc cvc::ph, rollout loss)"},
+                      {"runs", run_list},
+                      {"test_seeds", seeds},
+                      {"noise", std::to_string(noise)},
+                      {"noise_seed", std::to_string(noise_seed)},
+                      {"seed", std::to_string(cfg.seed)},
+                      {"steps", std::to_string(cfg.total_steps)},
+                      {"batch", std::to_string(cfg.batch_size)},
+                      {"window_points", std::to_string(points)},
+                      {"window_stride", std::to_string(stride)}};
+  model.save(vm["out"].as<std::string>());
+  std::cout << "wrote " << vm["out"].as<std::string>() << "\n";
+  return 0;
+}
+
 // ===========================================================================
 // Command dispatch table
 // ===========================================================================
@@ -2213,6 +2370,9 @@ static const command_entry commands[] = {
   {"vol2img",        "Image I/O",       "export volume slices as images",                cmd_vol2img},
   {"img2vol",        "Image I/O",       "import image stack as volume",                  cmd_img2vol},
   {"rgba-merge",     "Image I/O",       "merge 4 volumes into RGBA",                     cmd_rgba_merge},
+
+  // ── Learned dynamics ──
+  {"ph-train",       "Learned Dynamics","fit the port-Hamiltonian vehicle to plant logs",  cmd_ph_train},
 
   // ── Test data ──
   {"bunny",          "Test Data",       "output Stanford bunny geometry or SDF",         cmd_bunny},

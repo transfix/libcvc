@@ -130,8 +130,10 @@ set(INCLUDE_FILES
   ../../inc/cvc/nav/terrain.h
   ../../inc/cvc/nav/vehicle_plant.h
   ../../inc/cvc/ph/mat3.h
+  ../../inc/cvc/ph/optim.h
   ../../inc/cvc/ph/rff.h
   ../../inc/cvc/ph/rng.h
+  ../../inc/cvc/ph/se2_train.h
   ../../inc/cvc/ph/se2_vehicle.h
   ../../inc/cvc/lod/select.h
   ../../inc/cvc/lod/pyramid.h
@@ -329,7 +331,9 @@ set(SOURCE_FILES
   nav/sim_world_binding.cpp
   nav/sim_thread.cpp
   nav/nav_stats.cpp
+  ph/se2_data.cpp
   ph/se2_model.cpp
+  ph/se2_train.cpp
   lod/select.cpp
   lod/pyramid.cpp
   lod/tiles.cpp
