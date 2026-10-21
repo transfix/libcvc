@@ -18,6 +18,7 @@
 #define CVC_NAV_DETAIL_MATERIAL_ROLLOUT_H
 
 #include <cmath>
+#include <cvc/nav/detail/nav_potential.h>
 
 #if defined(__CUDACC__)
 #define CVC_MR_HD __host__ __device__
@@ -151,6 +152,39 @@ CVC_MR_HD inline void patch_sample_channel_grad(const float *ch, int Hp, int Wp,
   const float diy_doffy = cly ? 0.0f : 0.5f * (Hp - 1) / (half_h + 1e-8f);
   jx = dv_dix * dix_doffx;
   jy = dv_diy * diy_doffy;
+}
+
+// U_nav at o for the force the material rollouts apply (detail/nav_potential.h): the
+// obstacle discs' barriers (ipc_dbdd_pw's potential, summed in the forces' order), the goal
+// spring and the patch's soft and hard terms, with the coefficients held fixed. The patch values
+// are clamped as the forces read them (r~ to [0, 1], phi to [0, 50]). The soft and hard terms
+// are the potentials of -lam_soft grad r~ and -lam_hard db grad phi when the patch's channels
+// 2-5 are the gradients of channels 0-1 in the batch's units; that convention is the caller's.
+CVC_MR_HD inline potential_terms
+material_potential(float ox, float oy, float gx, float gy, const float *Cb, const float *Rb,
+                   const unsigned char *mb, const float *ab, int N, float be, float ls, float lh,
+                   float dh, float rr_eff, const float *pr_risk, const float *pr_phi, int Hp,
+                   int Wp, float o0x, float o0y, float k_sharp, float d_hat_sdf) {
+  potential_terms u;
+  const float dx = ox - gx, dy = oy - gy;
+  u.goal = 0.5f * be * (dx * dx + dy * dy);
+  for (int j = 0; j < N; ++j) {
+    if (!mb[j])
+      continue;
+    const float cx = ox - Cb[2 * j], cy = oy - Cb[2 * j + 1];
+    float r = std::sqrt(cx * cx + cy * cy);
+    if (r < 1e-9f)
+      r = 1e-9f;
+    u.barrier += ab[j] * ipc_b_pw(r - (Rb[j] + rr_eff), dh);
+  }
+  const float offx = ox - o0x, offy = oy - o0y;
+  float risk = patch_sample_channel(pr_risk, Hp, Wp, offx, offy);
+  float sdf = patch_sample_channel(pr_phi, Hp, Wp, offx, offy);
+  risk = risk < 0.0f ? 0.0f : (risk > 1.0f ? 1.0f : risk);
+  sdf = sdf < 0.0f ? 0.0f : (sdf > 50.0f ? 50.0f : sdf);
+  u.soft = ls * risk;
+  u.hard = lh * sdf_barrier_b(sdf, k_sharp, d_hat_sdf);
+  return u;
 }
 
 } // namespace detail

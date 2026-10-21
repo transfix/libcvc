@@ -271,6 +271,24 @@ struct material_ext {
   int steer = 1; // F_ext also steers (bicycle and dynamic), as ext_force::steer
 };
 
+// ── U_nav along a material rollout ──────────────────────────────────────────────
+// An optional per-step record of the potential the rollout's conservative force descends
+// (detail/nav_potential.h, detail::material_potential): the obstacle discs' barriers, the goal
+// spring and the patch's soft and hard terms, with the rollout's coefficients (constant along
+// it). Damping is dissipation and F_ext a port, so neither is in it. A null record (the
+// default) leaves the rollout bit for bit as it was; any of the pointers may be null. Agent b's
+// rows start at b*(max_H+1) (potential, terms) and b*max_H (force), max_H = max(H).
+//   - potential [B*(max_H+1)]: U at the state step s starts from, then at the end state (index
+//     max_H). Steps past H[b] repeat the frozen state's.
+//   - terms [B*(max_H+1)*4]: its terms (goal, barrier, soft, hard) in that order.
+//   - force [B*max_H*2]: the conservative force step s applied (= -grad U at that state when the
+//     patch's gradient channels are its value channels' gradients in the batch's units).
+struct rollout_energy {
+  float *potential = nullptr;
+  float *terms = nullptr;
+  float *force = nullptr;
+};
+
 // ── obstacle-list material surrogate rollout ────────────────────────────────
 // The faithful torch-free port of the source method's differentiable
 // integrator (GRL-SNAM material_nav.integrate_surrogate_material): explicit
@@ -292,15 +310,13 @@ struct surrogate_material_params {
   float k_sharp = 5.0f;   // 1/m
 };
 
-void integrate_surrogate_material(float *o, float *v, const float *goal, const float *C,
-                                  const float *R, const std::uint8_t *mask, const float *alphas,
-                                  const float *beta, const float *gamma, const float *lam_soft,
-                                  const float *lam_hard, const float *rollout_patch,
-                                  const float *rr, const float *d_hat, const float *dt,
-                                  const int *H, int B, int N, int Hp, int Wp,
-                                  const surrogate_material_params &p, float *min_clear,
-                                  float *cum_risk, float *hard_count, float *arc_length,
-                                  int num_threads = 0, const material_ext *ext = nullptr);
+void integrate_surrogate_material(
+    float *o, float *v, const float *goal, const float *C, const float *R, const std::uint8_t *mask,
+    const float *alphas, const float *beta, const float *gamma, const float *lam_soft,
+    const float *lam_hard, const float *rollout_patch, const float *rr, const float *d_hat,
+    const float *dt, const int *H, int B, int N, int Hp, int Wp, const surrogate_material_params &p,
+    float *min_clear, float *cum_risk, float *hard_count, float *arc_length, int num_threads = 0,
+    const material_ext *ext = nullptr, rollout_energy *energy = nullptr);
 
 // VJP (reverse-mode adjoint) of integrate_surrogate_material — the P5 training
 // backward. Given upstream grads on the differentiable outputs (oT, vT,
@@ -365,7 +381,8 @@ void integrate_bicycle_material(float *o, float *th, float *sp, const float *goa
                                 int Hp, int Wp, const surrogate_material_params &p,
                                 const bicycle_material_params &v, float *min_clear, float *cum_risk,
                                 float *hard_count, float *arc_length, int num_threads = 0,
-                                const material_ext *ext = nullptr);
+                                const material_ext *ext = nullptr,
+                                rollout_energy *energy = nullptr);
 
 // VJP of integrate_bicycle_material: upstream grads on the differentiable outputs
 // (oT, thT, spT, min_clear, cum_risk, arc_length; any may be null) -> grads w.r.t.
@@ -418,7 +435,8 @@ void integrate_dynamic_material(
     const float *d_hat, const float *dt, const int *H, int B, int N, int Hp, int Wp,
     const surrogate_material_params &p, const bicycle_material_params &v,
     const diff::dyn_bike_params &dyn, float *min_clear, float *cum_risk, float *hard_count,
-    float *arc_length, int num_threads = 0, const material_ext *ext = nullptr);
+    float *arc_length, int num_threads = 0, const material_ext *ext = nullptr,
+    rollout_energy *energy = nullptr);
 
 // VJP of integrate_dynamic_material: upstream grads on (oT, thT, vxT, xT, min_clear,
 // cum_risk, arc_length; any may be null) -> grads w.r.t. the learned coefficients, ADDED
