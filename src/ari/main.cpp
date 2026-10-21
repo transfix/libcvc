@@ -52,7 +52,9 @@
 #include <cvc/ariadne/doc_args.h>
 #include <cvc/ariadne/ftxui_backend.h>
 #include <cvc/ariadne/host_cli.h>
+#include <cvc/ariadne/host_info.h>
 #include <cvc/ariadne/host_signals.h>
+#include <cvc/ariadne/stream/stream_view.h>
 #include <cvc/ariadne/tvision_backend.h>
 #include <cvc/core/app.h>
 #include <cvc/image/image.h>
@@ -66,12 +68,18 @@ namespace {
 int usage(int code) {
   std::fprintf(code ? stderr : stdout,
                "usage: ari run|snapshot|check [flags] doc.ari [document args...]\n"
+               "       ari info [--json] [--functions] [--backend B] [--graphics MODE]\n"
                "\n"
                "flags (before the document):\n"
                "%s"
                "\n"
                "Everything after the document path is the document's own: it reads it as argv, or\n"
-               "declares an args: block (then `ari run doc.ari --help` shows its options).\n",
+               "declares an args: block (then `ari run doc.ari --help` shows its options).\n"
+               "\n"
+               "info prints what this host provides: the terminal (size, colours, kitty / Sixel\n"
+               "graphics), what libcvc was built with, the capabilities a document's requires:\n"
+               "and (has? ...) see, and how many functions programs can call (--functions lists\n"
+               "them; --json prints it all as JSON).\n",
                cvc::ariadne::host_flags_help().c_str());
   return code;
 }
@@ -90,6 +98,63 @@ cvc::ariadne::FtxuiBackend::Options::ImageColor image_mode(const std::string &s)
   return Mode::Auto;
 }
 
+bool has_flag(const cvc::ariadne::HostOptions &o, const char *flag) {
+  return std::find(o.extra_flags.begin(), o.extra_flags.end(), flag) != o.extra_flags.end();
+}
+
+// Ask the terminal what it can draw (kitty, Sixel, the cell size) when the image mode could use
+// it. Done before the document loads, so its requires: and (has? "term.kitty") see the answer;
+// FtxuiBackend::run then does not ask again.
+cvc::ariadne::TermGraphics probe_terminal(cvc::ariadne::FtxuiBackend &backend,
+                                          const cvc::ariadne::HostOptions &o) {
+  using Mode = cvc::ariadne::FtxuiBackend::Options::ImageColor;
+  const Mode m = image_mode(o.graphics);
+  if (m != Mode::Auto && m != Mode::Kitty && m != Mode::Sixel)
+    return {};
+  cvc::ariadne::TermGraphics g = cvc::ariadne::gfx::probe_terminal();
+  if (o.cell_w > 0) {
+    g.cell_w = o.cell_w;
+    g.cell_h = o.cell_h;
+  }
+  backend.set_terminal_graphics(g);
+  return g;
+}
+
+// `ari info`: what this host gives a document, as `ari run` would set it up.
+int print_info(const cvc::ariadne::HostOptions &o) {
+  namespace ari = cvc::ariadne;
+  if (!o.doc.empty()) {
+    std::fprintf(stderr,
+                 "ari: info takes no document (ari check doc.ari reports what one needs)\n");
+    return 2;
+  }
+  const bool tvision = o.backend == "tvision";
+  cvc::app app;
+  ari::FtxuiBackend::Options look;
+  look.image_color = image_mode(o.graphics);
+  std::unique_ptr<ari::FtxuiBackend> backend = tvision ? std::make_unique<ari::TvisionBackend>(look)
+                                                       : std::make_unique<ari::FtxuiBackend>(look);
+  ari::register_stream_view_widget(*backend, app);
+  ari::AppRuntime rt(app, o.prefix.empty() ? "ui.docs.ari" : o.prefix);
+  rt.set_backend(*backend);
+  rt.register_verb("quit", [] {}); // every document gets (quit)
+  ari::HostInfo term;
+  ari::describe_terminal(term);
+  ari::TermGraphics graphics;
+  const bool probed = term.tty && !tvision; // tvision draws half-blocks only
+  if (probed)
+    graphics = probe_terminal(*backend, o);
+  ari::HostInfo info = ari::gather_host_info(rt.runtime(), "ari");
+  info.backend = tvision ? "tvision" : "ftxui";
+  if (probed) {
+    info.graphics = graphics;
+    info.probed = true;
+  }
+  std::fputs(ari::format_host_info(info, has_flag(o, "--json"), has_flag(o, "--functions")).c_str(),
+             stdout);
+  return 0;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -104,7 +169,7 @@ int main(int argc, char **argv) {
     argv = const_cast<char **>(baked);
   }
 #endif
-  const ari::HostOptions o = ari::parse_host_args(argc, argv);
+  const ari::HostOptions o = ari::parse_host_args(argc, argv, {"--json", "--functions"});
   if (o.help)
     return usage(0);
   if (!o.error.empty()) {
@@ -112,13 +177,19 @@ int main(int argc, char **argv) {
     return usage(2);
   }
   const std::string &cmd = o.command;
-  if (cmd != "run" && cmd != "snapshot" && cmd != "check") {
+  if (cmd != "run" && cmd != "snapshot" && cmd != "check" && cmd != "info") {
     std::fprintf(stderr, "ari: unknown command '%s'\n", cmd.c_str());
     return usage(2);
   }
   if (!o.backend.empty() && o.backend != "ftxui" && o.backend != "tvision") {
     std::fprintf(stderr, "ari: --backend is ftxui or tvision, not '%s'\n", o.backend.c_str());
     return 2;
+  }
+  if (cmd == "info")
+    return print_info(o);
+  if (!o.extra_flags.empty()) {
+    std::fprintf(stderr, "ari: %s is for ari info\n", o.extra_flags.front().c_str());
+    return usage(2);
   }
   if (!o.png.empty()) {
     std::fprintf(stderr, "ari: --png needs a renderer; arigl can write one\n");
@@ -154,6 +225,8 @@ int main(int argc, char **argv) {
       return 1;
     }
   }
+  // stream_view: a live stream's frames, or a still image published under its name (--image).
+  ari::register_stream_view_widget(*backend, app);
   ari::AppRuntime rt(app, o.prefix.empty() ? "ui.docs.ari" : o.prefix);
   rt.set_backend(*backend);
   for (const std::string &d : o.component_paths)
@@ -161,6 +234,8 @@ int main(int argc, char **argv) {
   rt.on("quit", [&] { rt.request_close(); });
   rt.register_verb("quit", [&] { rt.request_close(); }); // (quit), e.g. from an on_signal: program
   rt.set_document_args(o.doc_args, "ari " + cmd + " " + o.doc, /*validate=*/cmd != "check");
+  if (cmd == "run" && !tvision)
+    probe_terminal(*backend, o); // before the load, so requires: / has? see the terminal
 
   std::vector<std::string> warnings;
   try {

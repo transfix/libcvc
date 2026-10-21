@@ -20,6 +20,8 @@
 #include <unordered_map>
 #include <vector>
 
+struct ImGuiContext; // Dear ImGui (global namespace); forward-declared, the header stays imgui-free
+
 namespace cvc {
 namespace ariadne {
 class Runtime;
@@ -105,6 +107,13 @@ public:
   // VTK drives Runtime::render() once per rendered frame. Call after
   // rt.set_backend(this). `rt` must outlive the overlay's callback.
   void install(cvc::ariadne::Runtime &rt, ImGuiOverlay &overlay);
+
+  // Make `ctx` the current Dear ImGui context of the module this backend runs in (libcvcGL), for a
+  // host that created the context itself rather than through ImGuiOverlay. Where imgui is a static
+  // library linked into both the host and libcvcGL (the cvcpkg Windows imgui), each copy keeps its
+  // own current context, so without this the backend sees none and crashes. With ImGuiOverlay, or
+  // a shared imgui, it is not needed and harmless. Pass nullptr before destroying `ctx`.
+  static void setImGuiContext(ImGuiContext *ctx);
 
 private:
   // ImGui style vars pushed per open window (WindowBorderSize, §3.0.3b), popped

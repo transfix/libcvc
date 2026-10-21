@@ -96,7 +96,7 @@ bool is_builtin_block(const std::string &k) {
   return k == "meta" || k == "menubar" || k == "windows" || k == "overlays" || k == "root" ||
          k == "children" || k == "scene" || k == "customs" || k == "init" || k == "on_tick" ||
          k == "on_key" || k == "on_pointer" || k == "on_signal" || k == "units" || k == "import" ||
-         k == "channels" || k == "lint" || k == "args";
+         k == "channels" || k == "lint" || k == "args" || k == "requires";
 }
 } // namespace
 
@@ -142,6 +142,14 @@ const char *const kAriSchema = R"ARISCHEMA({
     "overlays": {"type": "array", "items": {"$ref": "#/$defs/widget"}},
     "root":     {"type": "array", "items": {"$ref": "#/$defs/widget"}},
     "children": {"type": "array", "items": {"$ref": "#/$defs/widget"}},
+    "requires": {
+      "type": "array",
+      "items": {
+        "type": ["string", "object"],
+        "properties": {"name": {"type": "string"}, "optional": {"type": "boolean"}},
+        "required": ["name"]
+      }
+    },
     "args": {
       "type": "object",
       "additionalProperties": {
@@ -169,7 +177,7 @@ const char *const kAriSchema = R"ARISCHEMA({
         "hi": {"type": "number"},
         "def": {"type": ["number", "boolean", "string"]},
         "fmt": {"type": "string"},
-        "options": {"type": "array", "items": {"type": "string"}},
+        "options": {"type": ["array", "string"], "items": {"type": "string"}},
         "default": {"type": "string"},
         "pos": {"type": "array", "items": {"type": "number"}},
         "size": {"type": ["array", "number"], "items": {"type": "number"}},
@@ -231,6 +239,22 @@ bool sources_changed(const std::vector<std::string> &sources,
       it = live.count(it->first) ? std::next(it) : stamps.erase(it);
   }
   return changed;
+}
+
+namespace {
+// The widget types the loader builds itself (each is a .ari key: `slider_int: Speed`). Anything
+// else is a custom type, drawn by register_widget_type / a backend-native widget.
+constexpr const char *kBuiltinWidgetTypes[] = {
+    "group",      "menubar",   "menu",     "menu_item",  "window",       "overlay",
+    "panel",      "text",      "checkbox", "slider_int", "slider_float", "combo",
+    "input_text", "input_int", "color",    "image",      "button",       "separator"};
+} // namespace
+
+bool is_builtin_widget_type(const std::string &type) {
+  for (const char *k : kBuiltinWidgetTypes)
+    if (type == k)
+      return true;
+  return false;
 }
 
 #ifdef CVC_ARIADNE_HAVE_YAML
@@ -359,11 +383,7 @@ std::vector<Widget> parse_seq(Ctx &ctx, const YAML::Node &seq) {
 }
 
 std::string widget_type(const YAML::Node &n, std::string &label) {
-  static const char *kKeys[] = {"group",        "menubar", "menu",       "menu_item", "window",
-                                "overlay",      "panel",   "text",       "checkbox",  "slider_int",
-                                "slider_float", "combo",   "input_text", "input_int", "color",
-                                "image",        "button",  "separator"};
-  for (const char *k : kKeys) {
+  for (const char *k : kBuiltinWidgetTypes) {
     const YAML::Node v = n[k];
     if (v.IsDefined()) {
       label = v.IsScalar() ? v.Scalar() : std::string();
@@ -2009,6 +2029,34 @@ LintConfig parse_lint(Ctx &ctx, const YAML::Node &l) {
   return cfg;
 }
 
+// The top-level `requires:` (§7.6): a sequence of names, or {name, optional} maps. The loader only
+// parses it; AppRuntime::load checks it against the host.
+std::vector<HostRequirement> parse_requires(Ctx &ctx, const YAML::Node &n) {
+  std::vector<HostRequirement> out;
+  if (!n)
+    return out;
+  if (!n.IsSequence()) {
+    ctx.warn("ari: requires: must be a SEQUENCE of names or {name, optional} entries — it is not, "
+             "so nothing it lists is checked");
+    return out;
+  }
+  for (const YAML::Node &e : n) {
+    HostRequirement req;
+    if (e.IsScalar()) {
+      req.name = e.Scalar();
+    } else if (e.IsMap()) {
+      req.name = str(e, "name");
+      req.optional = flag(e, "optional", false);
+    }
+    if (req.name.empty()) {
+      ctx.warn("ari: requires: entry with no name — ignored");
+      continue;
+    }
+    out.push_back(std::move(req));
+  }
+  return out;
+}
+
 std::vector<CustomRequirement> parse_customs(Ctx &ctx, const YAML::Node &c) {
   std::vector<CustomRequirement> out;
   if (!c || !c.IsSequence())
@@ -2189,6 +2237,7 @@ LoadResult load_node(const YAML::Node &doc, const std::string &base_dir = std::s
              "— this customs block is not a sequence and was ignored, so its declarations "
              "(including any required:) are NOT enforced");
   r.customs = parse_customs(ctx, customs_node);
+  r.requirements = parse_requires(ctx, doc.IsMap() ? doc["requires"] : YAML::Node());
   for (const CustomRequirement &req : r.customs) {
     const char *kind = "widget";
     bool present = true;

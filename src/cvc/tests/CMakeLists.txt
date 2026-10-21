@@ -11,6 +11,8 @@ add_executable(ariadne_bind_test ariadne_bind_test.cpp)
 add_executable(ariadne_ftxui_test ariadne_ftxui_test.cpp)
 add_executable(ariadne_term_graphics_test ariadne_term_graphics_test.cpp)
 add_executable(ariadne_host_test ariadne_host_test.cpp)
+add_executable(ariadne_requires_test ariadne_requires_test.cpp)
+add_executable(ariadne_stream_view_test ariadne_stream_view_test.cpp)
 add_executable(x11_macro_headers_test x11_macro_headers_test.cpp)
 add_executable(net_http_client_test net_http_client_test.cpp)
 add_executable(uri_http_cache_test uri_http_cache_test.cpp)
@@ -108,7 +110,19 @@ add_executable(physics_field_test physics_field_test.cpp)
 add_executable(physics_vehicle_test physics_vehicle_test.cpp)
 add_executable(physics_energy_test physics_energy_test.cpp)
 add_executable(nav_plant_test nav_plant_test.cpp)
+add_executable(physics_plant_log_test physics_plant_log_test.cpp)
 add_executable(nav_dyn_bike_test nav_dyn_bike_test.cpp)
+add_executable(nav_potential_test nav_potential_test.cpp)
+# nav_potential_test compares U logged by the material rollouts (built with -ffp-contract=off)
+# with the same inline evaluator called here, bit for bit: build it the same way, or clang
+# contracts this copy into FMAs on aarch64 and the last bits differ.
+if(NOT MSVC)
+  set_source_files_properties(nav_potential_test.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+else()
+  set_source_files_properties(nav_potential_test.cpp PROPERTIES COMPILE_OPTIONS "/fp:precise")
+endif()
+add_executable(ph_se2_test ph_se2_test.cpp)
+add_executable(ph_se2_train_test ph_se2_train_test.cpp)
 add_executable(nav_terrain_test nav_terrain_test.cpp)
 add_executable(nav_binding_test nav_binding_test.cpp)
 add_executable(physics_parity_test physics_parity_test.cpp)
@@ -234,6 +248,8 @@ set(TEST_TARGETS
   ariadne_ftxui_test
   ariadne_term_graphics_test
   ariadne_host_test
+  ariadne_requires_test
+  ariadne_stream_view_test
   x11_macro_headers_test
   net_http_client_test
   uri_http_cache_test
@@ -288,7 +304,11 @@ set(TEST_TARGETS
   physics_vehicle_test
   physics_energy_test
   nav_plant_test
+  physics_plant_log_test
   nav_dyn_bike_test
+  nav_potential_test
+  ph_se2_test
+  ph_se2_train_test
   nav_terrain_test
   nav_binding_test
   physics_parity_test
@@ -529,6 +549,9 @@ target_link_libraries(ariadne_ftxui_test
     GTest::gtest
     GTest::gtest_main
 )
+# Two tests load the GL-free terminal documents from the repo's examples/ tree.
+target_compile_definitions(ariadne_ftxui_test PRIVATE
+  CVC_EXAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../../examples")
 
 target_link_libraries(ariadne_term_graphics_test
   PRIVATE
@@ -538,6 +561,20 @@ target_link_libraries(ariadne_term_graphics_test
 )
 
 target_link_libraries(ariadne_host_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(ariadne_requires_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(ariadne_stream_view_test
   PRIVATE
     cvc
     GTest::gtest
@@ -1613,7 +1650,35 @@ target_link_libraries(nav_plant_test
     GTest::gtest_main
 )
 
+target_link_libraries(physics_plant_log_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(nav_dyn_bike_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(nav_potential_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(ph_se2_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(ph_se2_train_test
   PRIVATE
     cvc
     GTest::gtest
@@ -1958,7 +2023,11 @@ target_compile_features(physics_field_test PRIVATE cxx_std_17)
 target_compile_features(physics_vehicle_test PRIVATE cxx_std_17)
 target_compile_features(physics_energy_test PRIVATE cxx_std_17)
 target_compile_features(nav_plant_test PRIVATE cxx_std_17)
+target_compile_features(physics_plant_log_test PRIVATE cxx_std_17)
 target_compile_features(nav_dyn_bike_test PRIVATE cxx_std_17)
+target_compile_features(nav_potential_test PRIVATE cxx_std_17)
+target_compile_features(ph_se2_test PRIVATE cxx_std_17)
+target_compile_features(ph_se2_train_test PRIVATE cxx_std_17)
 target_compile_features(nav_terrain_test PRIVATE cxx_std_17)
 target_compile_features(nav_binding_test PRIVATE cxx_std_17)
 target_compile_features(physics_parity_test PRIVATE cxx_std_17)
@@ -2109,6 +2178,8 @@ cvc_discover_tests(ariadne_runtime_test)
 cvc_discover_tests(ariadne_ftxui_test)
 cvc_discover_tests(ariadne_term_graphics_test)
 cvc_discover_tests(ariadne_host_test)
+cvc_discover_tests(ariadne_requires_test)
+cvc_discover_tests(ariadne_stream_view_test)
 cvc_discover_tests(ariadne_bind_test)
 cvc_discover_tests(x11_macro_headers_test)
 cvc_discover_tests(net_http_client_test)
@@ -2405,7 +2476,11 @@ cvc_discover_tests(physics_field_test)
 cvc_discover_tests(physics_vehicle_test)
 cvc_discover_tests(physics_energy_test)
 cvc_discover_tests(nav_plant_test)
+cvc_discover_tests(physics_plant_log_test)
 cvc_discover_tests(nav_dyn_bike_test)
+cvc_discover_tests(nav_potential_test)
+cvc_discover_tests(ph_se2_test)
+cvc_discover_tests(ph_se2_train_test)
 cvc_discover_tests(nav_terrain_test)
 cvc_discover_tests(nav_binding_test)
 cvc_discover_tests(physics_parity_test)

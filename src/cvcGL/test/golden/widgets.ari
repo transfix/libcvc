@@ -1,0 +1,81 @@
+# widgets.ari — golden: one of each widget kind the ImGui backend draws, with state seeded by
+# init: so every value is fixed. cvcgl_ari_golden hovers the "Reset" button at the bottom (its
+# pointer script for this document), so the capture also shows its tooltip.
+
+meta:
+  name: golden widgets
+  min_libcvc: 3.6.0
+
+init: |
+  (state-set "w.agents" "64")
+  (state-set "w.speed" "1.25")
+  (state-set "w.wire" "1")
+  (state-set "w.belief" "grouped")
+  (state-set "w.name" "hello")
+  (state-set "w.count" "7")
+  (state-set "w.tint" "0.80,0.55,0.35")
+
+windows:
+  - window: Widgets
+    id: widgets
+    pos: [24, 24]
+    size: [520, 470]
+    children:
+      - text: "Plain text."
+      - text: "Tinted text."
+        color: [0.40, 0.85, 0.55]
+      - text: "computed"
+        bind: (if (> (int (state-get "w.agents")) 32) "many agents" "few agents")
+      - separator
+      - checkbox: Wireframe (on)
+        bind: w.wire
+      - checkbox: Shadows (off)
+        bind: w.shadows
+      - slider_int: Agents
+        bind: w.agents
+        lo: 1
+        hi: 128
+      - slider_float: Speed
+        bind: w.speed
+        lo: 0.0
+        hi: 4.0
+        fmt: "%.2f"
+      - combo: Belief
+        bind: w.belief
+        options: [shared, grouped, private]
+      - input_text: Name
+        bind: w.name
+      - input_int: Count
+        bind: w.count
+        lo: 0
+        hi: 100
+      - color: Tint
+        bind: w.tint
+      - slider_int: Disabled
+        bind: w.locked
+        lo: 0
+        hi: 10
+        def: 5
+        disabled_when: (= 1 1)
+      - text: "never shown"
+        visible_when: (= 1 0)
+      - separator
+      - button: Reset
+        on: (state-set "w.agents" "64")
+        tooltip: "puts Agents back to 64"
+
+  - window: Bound values
+    id: values
+    pos: [572, 24]
+    size: [300, 200]
+    children:
+      - text: "agents"
+        bind: w.agents
+      - text: "speed"
+        bind: w.speed
+      - text: "belief"
+        bind: w.belief
+      - text: "name"
+        bind: w.name
+      - text: "tint"
+        bind: w.tint

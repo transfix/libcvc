@@ -64,7 +64,7 @@ $boostDir = (Get-ChildItem (Join-Path $env:CVC_DEPS_PREFIX 'lib\cmake') -Directo
 # test targets. (Not broadening the shared helper to keep-going for all recipes.)
 
 # ── (3) configure + build + install the trimmed closure (static, BRIDGE=ON) ──
-# Same OFF set as build-wasm.sh / cvcgl-examples, plus the pycvc bindings.
+# Same OFF set as build-wasm.sh / examples/web/build-wasm-demo.sh, plus the pycvc bindings.
 Invoke-CvcWasmCMakeBuild -ExtraArgs @(
     # cmake >=3.30 deprecates the legacy FindBoost module (CMP0167); its module
     # mode fails to locate the cvcpkg boost layout under the cross FIND_ROOT_PATH.

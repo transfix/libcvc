@@ -54,6 +54,13 @@ TerminalScene::~TerminalScene() {
 
 void TerminalScene::realize(const ari::Scene &scene, const std::string &prefix,
                             std::vector<std::string> *warns) {
+  // Node realizers seed their state under the scene graph's prefix; a document under another one
+  // would read none of it. Construct the TerminalScene with the document's prefix.
+  if (warns && prefix != m_->scene.getStatePrefix())
+    warns->push_back("TerminalScene: the document's state root '" + prefix +
+                     "' is not the scene graph's '" + m_->scene.getStatePrefix() +
+                     "', so panels bound to scene-node state will read nothing; pass the "
+                     "document's prefix to the TerminalScene constructor");
   m_->realized = realize_scene(m_->scene, scene, prefix, warns);
   m_->have_scene = true;
   const cvc::bounding_box bb = m_->scene.computeGraphicsBounds();

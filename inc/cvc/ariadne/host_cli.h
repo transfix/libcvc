@@ -2,6 +2,8 @@
 //
 //   <runtime> <command> [general flags] doc.ari [document args...]
 //
+// `<runtime> info [flags]` takes no document: it reports what the host provides (host_info.h).
+//
 // The runtime takes only the general flags below, and only before the document path. Everything
 // after the path belongs to the document (doc_args.h), as with `python script.py args`: the
 // document reads it as argv, or declares an args: block the runtime parses it against. A runtime

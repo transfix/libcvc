@@ -4115,3 +4115,23 @@ TEST(AriadneChannelLint, InitScriptLinted) {
   EXPECT_FALSE(r.ok); // the init: script is linted too; "b" is undeclared -> strict fail
   EXPECT_NE(r.error.find("'b'"), std::string::npos);
 }
+
+// A combo's options: may be a list or a reactive expression (a string the read lane evaluates, e.g.
+// (string.split (state-get "cam.devices") "\n")). The Layer-2 schema accepts both.
+TEST(AriadneLoader, ComboOptionsMayBeAReactiveExpression) {
+  if (!have_yaml() || !have_jsonschema())
+    GTEST_SKIP() << "libcvc built without yaml-cpp or json-schema-validator";
+  const std::string doc = "windows:\n"
+                          "  - window: W\n"
+                          "    children:\n"
+                          "      - combo: Camera\n"
+                          "        bind: cam.sel\n"
+                          "        options: (string.split (state-get \"cam.devices\") \"\\n\")\n"
+                          "      - combo: Mode\n"
+                          "        bind: mode\n"
+                          "        options: [a, b]\n";
+  const LoadResult r = load_string(doc);
+  ASSERT_TRUE(r.ok) << r.error;
+  for (const std::string &w : r.warnings)
+    EXPECT_EQ(w.find("schema:"), std::string::npos) << w;
+}

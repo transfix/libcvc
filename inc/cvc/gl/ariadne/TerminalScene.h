@@ -40,6 +40,9 @@ public:
   // Render for `backend` (it must outlive this). `supersample` renders that many pixels per
   // half-block pixel each way and lets the backend's box filter smooth them (half-blocks only:
   // pixel graphics render at the real pixels).
+  // `state_prefix` is the scene graph's state root. Pass the same prefix the document's AppRuntime
+  // uses: node realizers seed their state (forest.*, light.*, ...) under it, and realize() warns
+  // when the document's root differs.
   TerminalScene(cvc::app &app, cvc::ariadne::FtxuiBackend &backend, int supersample = 2,
                 const std::string &state_prefix = "terminal_scene");
   ~TerminalScene() override;

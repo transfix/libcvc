@@ -197,7 +197,7 @@ jobs:
           if [ -n "$base" ] && [ "$base" != "0000000000000000000000000000000000000000" ] \
              && git cat-file -e "${base}^{commit}" 2>/dev/null; then
             if ! git diff --name-only "$base" HEAD -- src/cvcGL/wasm \
-                   src/cvcGL/test/webgl_state_shadow_test.js src/cvcGL/examples/wasm/serve.py \
+                   src/cvcGL/test/webgl_state_shadow_test.js \
                    .github/workflows/ci.yml | grep -q .; then
               run=false
             fi
@@ -349,7 +349,8 @@ jobs:
           if [ -n "$base" ] && [ "$base" != "0000000000000000000000000000000000000000" ] \
              && git cat-file -e "${base}^{commit}" 2>/dev/null; then
             if ! git diff --name-only "$base" HEAD -- src/cvc/ariadne inc/cvc/ariadne src/cvc/tools \
-                   src/ari CMakeLists.txt src/cvc/CMakeLists.txt CMake cvcpkg/recipes/libcvc \
+                   src/ari examples/ariadne/terminal CMakeLists.txt src/cvc/CMakeLists.txt CMake \
+                   cvcpkg/recipes/libcvc \
                    .github/workflows/ci.yml | grep -q .; then
               run=false
             fi
@@ -595,6 +596,10 @@ jobs:
           # stubs), so CI exercises Layer-2 + both terminal backends.
           cvcpkg install yaml-cpp nlohmann-json json-schema-validator ftxui tvision \
             --prefix "$prefix" --config release --link shared
+          # imgui: cvcGL's ImGuiOverlay and the Ariadne ImGui backend. Without it both
+          # compile to inert stubs and cvcgl_ari_golden (the backend's golden images,
+          # docs/ARIADNE.md section 12) has nothing to render.
+          cvcpkg install imgui --prefix "$prefix" --config release --link shared
 
       - name: Configure
         run: |
@@ -810,6 +815,31 @@ jobs:
                   --repeat until-pass:3 --timeout 300 \
                   -E "${STRESS_REGEX}"
           fi
+
+      # cvcgl_ari_golden prints each document's renderer and how far its frame
+      # is from the golden (docs/ARIADNE.md section 12). --output-on-failure
+      # hides that on a pass, so print it from LastTest.log on every run: it is
+      # how a platform's drift shows before it fails. On a failure the test
+      # wrote <name>.actual.png + <name>.diff.png; keep them, so a mismatch can
+      # be looked at (or become a platform golden) without that machine.
+      - name: Ariadne golden-image numbers
+        if: always() && matrix.kind == 'libcvc'
+        shell: bash
+        run: |
+          log=build/Testing/Temporary/LastTest.log
+          [ -f "$log" ] || { echo "no $log"; exit 0; }
+          awk '/^"cvcgl_ari_golden" start time:/ { run = 1; print "-- attempt " ++n }
+               run && /^(== |  [0-9]+ frames at |  \[(PASS|FAIL)\] [a-z_]+: matches|  skipped:|Test (Passed|Failed))/
+               /^"cvcgl_ari_golden" end time:/ { run = 0 }' "$log"
+
+      - name: Upload Ariadne golden-image diffs
+        if: failure() && matrix.kind == 'libcvc'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ari-golden-${{ runner.os }}-${{ matrix.name }}
+          path: build/src/cvcGL/ari_golden/
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Generate coverage report
         if: matrix.kind == 'libcvc' && matrix.build_type == 'Debug'
@@ -1085,6 +1115,10 @@ jobs:
             prefix="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
           fi
           cvcpkg install vtk --prefix "$prefix" --config release --link shared
+          # imgui (cvcGL's ImGui overlay + the Ariadne ImGui backend) and yaml-cpp (the
+          # .ari loader): without them cvcgl_ari_golden has nothing to render
+          # (docs/ARIADNE.md section 12). See the Linux job's VTK step.
+          cvcpkg install imgui yaml-cpp --prefix "$prefix" --config release --link shared
 
       # gRPC probe: provision grpc+protobuf (shared) for the enable_grpc matrix entry, as on Linux.
       - name: Provision gRPC via cvcpkg
@@ -1219,6 +1253,31 @@ jobs:
                run && /^Test (Passed|Failed)/ { print "   " $0 }
                /^"cvcgl_shadow_casters" end time:/ { run = 0; d = 0 }' "$log"
 
+      # cvcgl_ari_golden prints each document's renderer and how far its frame
+      # is from the golden (docs/ARIADNE.md section 12). --output-on-failure
+      # hides that on a pass, so print it from LastTest.log on every run: it is
+      # how a platform's drift shows before it fails. On a failure the test
+      # wrote <name>.actual.png + <name>.diff.png; keep them, so a mismatch can
+      # be looked at (or become a platform golden) without that machine.
+      - name: Ariadne golden-image numbers
+        if: always() && matrix.kind == 'libcvc'
+        shell: bash
+        run: |
+          log=build/Testing/Temporary/LastTest.log
+          [ -f "$log" ] || { echo "no $log"; exit 0; }
+          awk '/^"cvcgl_ari_golden" start time:/ { run = 1; print "-- attempt " ++n }
+               run && /^(== |  [0-9]+ frames at |  \[(PASS|FAIL)\] [a-z_]+: matches|  skipped:|Test (Passed|Failed))/
+               /^"cvcgl_ari_golden" end time:/ { run = 0 }' "$log"
+
+      - name: Upload Ariadne golden-image diffs
+        if: failure() && matrix.kind == 'libcvc'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ari-golden-${{ runner.os }}-${{ matrix.name }}
+          path: build/src/cvcGL/ari_golden/
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: Pack libcvc zip
         if: matrix.kind == 'libcvc'
         working-directory: build
@@ -1342,6 +1401,11 @@ jobs:
           }
           cvcpkg install vtk --prefix "$prefix" --config release --link shared
           if ($LASTEXITCODE -ne 0) { throw "cvcpkg install vtk failed ($LASTEXITCODE)" }
+          # imgui (cvcGL's ImGui overlay + the Ariadne ImGui backend) and yaml-cpp (the
+          # .ari loader): without them cvcgl_ari_golden has nothing to render
+          # (docs/ARIADNE.md section 12).
+          cvcpkg install imgui yaml-cpp --prefix "$prefix" --config release --link shared
+          if ($LASTEXITCODE -ne 0) { throw "cvcpkg install imgui yaml-cpp failed ($LASTEXITCODE)" }
 
       # gRPC probe: provision grpc+protobuf (shared) for the enable_grpc matrix entry, as on Linux.
       - name: Provision gRPC via cvcpkg (Windows)
@@ -1566,6 +1630,31 @@ jobs:
                   --output-on-failure --parallel --repeat until-pass:3 --timeout 300 `
                   -E "$stressRegex"
           }
+
+      # The same as the Linux and macOS steps: cvcgl_ari_golden's per-document
+      # numbers from LastTest.log on every run, and its actual/diff PNGs on a
+      # failure (docs/ARIADNE.md section 12).
+      - name: Ariadne golden-image numbers
+        if: always() && matrix.kind == 'libcvc'
+        shell: pwsh
+        run: |
+          $log = 'build/Testing/Temporary/LastTest.log'
+          if (-not (Test-Path $log)) { Write-Host "no $log"; exit 0 }
+          $run = $false
+          foreach ($line in Get-Content $log) {
+            if ($line -match '^"cvcgl_ari_golden" start time:') { $run = $true; Write-Host '-- attempt' }
+            elseif ($line -match '^"cvcgl_ari_golden" end time:') { $run = $false }
+            elseif ($run -and $line -match '^(== |  [0-9]+ frames at |  \[(PASS|FAIL)\] [a-z_]+: matches|  skipped:|Test (Passed|Failed))') { Write-Host $line }
+          }
+
+      - name: Upload Ariadne golden-image diffs
+        if: failure() && matrix.kind == 'libcvc'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ari-golden-${{ runner.os }}-${{ matrix.name }}
+          path: build/src/cvcGL/ari_golden/
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Pack libcvc zip
         if: matrix.kind == 'libcvc'

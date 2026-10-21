@@ -47,9 +47,11 @@
 // released only when its slot is next reconciled to a different channel or at backend teardown —
 // not the instant it leaves the tree (there is no per-frame sweep); a displayed widget never leaks.
 //
-// cvcGL-only (ImGui + GL upload), so it lives in cvc::gl::ariadne; the stream core stays pure.
+// The subscriptions and the frame pull are the core's stream_view_puller (stream/stream_view.h),
+// which the terminal stream_view shares; this file adds the ImGui draw and the JPEG decoder.
 
 #include <cstdint>
+#include <cvc/ariadne/stream/stream_view.h> // frame_decoder
 
 namespace cvc {
 class app;
@@ -73,6 +75,11 @@ void register_stream_view_widget(ImGuiBackend &backend, cvc::app &app);
 // the frame cannot be losslessly aliased to an image (padded stride, flipped origin, odd codec).
 bool next_stream_frame_image(cvc::ariadne::stream::subscription &sub, std::int64_t &last_seq,
                              cvc::image &out);
+
+// A stream_view_puller decoder for JPEG frames (codec "mjpeg": conference video), via turbojpeg.
+// The ImGui stream_view adds it itself; a terminal host adds it to the puller
+// cvc::ariadne::register_stream_view_widget(FtxuiBackend&, app) returns.
+cvc::ariadne::stream::frame_decoder jpeg_frame_decoder();
 
 } // namespace ariadne
 } // namespace gl

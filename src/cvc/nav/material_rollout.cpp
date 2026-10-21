@@ -25,15 +25,13 @@
 namespace cvc {
 namespace nav {
 
-void integrate_surrogate_material(float *o, float *v, const float *goal, const float *C,
-                                  const float *R, const std::uint8_t *mask, const float *alphas,
-                                  const float *beta, const float *gamma, const float *lam_soft,
-                                  const float *lam_hard, const float *rollout_patch,
-                                  const float *rr, const float *d_hat, const float *dt,
-                                  const int *H, int B, int N, int Hp, int Wp,
-                                  const surrogate_material_params &p, float *min_clear,
-                                  float *cum_risk, float *hard_count, float *arc_length,
-                                  int num_threads, const material_ext *ext) {
+void integrate_surrogate_material(
+    float *o, float *v, const float *goal, const float *C, const float *R, const std::uint8_t *mask,
+    const float *alphas, const float *beta, const float *gamma, const float *lam_soft,
+    const float *lam_hard, const float *rollout_patch, const float *rr, const float *d_hat,
+    const float *dt, const int *H, int B, int N, int Hp, int Wp, const surrogate_material_params &p,
+    float *min_clear, float *cum_risk, float *hard_count, float *arc_length, int num_threads,
+    const material_ext *ext, rollout_energy *energy) {
   int max_H = 0;
   for (int b = 0; b < B; ++b)
     max_H = std::max(max_H, H[b]);
@@ -65,9 +63,27 @@ void integrate_surrogate_material(float *o, float *v, const float *goal, const f
 
     float minclr = std::numeric_limits<float>::infinity();
     float cum = 0.0f, hard = 0.0f, arc = 0.0f;
+    // U_nav at a state (rollout_energy), row k of agent b.
+    const auto log_potential = [&](int k, float px, float py) {
+      const potential_terms u =
+          detail::material_potential(px, py, gx, gy, Cb, Rb, mb, ab, N, be, ls, lh, dh, rr_eff,
+                                     pr_risk, pr_phi, Hp, Wp, o0x, o0y, p.k_sharp, p.d_hat_sdf);
+      const std::size_t row = static_cast<std::size_t>(b) * (max_H + 1) + k;
+      if (energy->potential)
+        energy->potential[row] = u.total();
+      if (energy->terms) {
+        float *t = energy->terms + 4 * row;
+        t[0] = u.goal;
+        t[1] = u.barrier;
+        t[2] = u.soft;
+        t[3] = u.hard;
+      }
+    };
 
     for (int s = 0; s < max_H; ++s) {
       const float active = (s < H[b]) ? 1.0f : 0.0f;
+      if (energy)
+        log_potential(s, ox, oy);
       const float offx = ox - o0x, offy = oy - o0y;
       float risk_val = detail::patch_sample_channel(pr_risk, Hp, Wp, offx, offy);
       float sdf_val = detail::patch_sample_channel(pr_phi, Hp, Wp, offx, offy);
@@ -106,6 +122,11 @@ void integrate_surrogate_material(float *o, float *v, const float *goal, const f
 
       float ftot_x = fgoal_x + fgeom_x + fsoft_x + fhard_x - ga * vx;
       float ftot_y = fgoal_y + fgeom_y + fsoft_y + fhard_y - ga * vy;
+      if (energy && energy->force) {
+        float *fc = energy->force + 2 * (static_cast<std::size_t>(b) * max_H + s);
+        fc[0] = fgoal_x + fgeom_x + fsoft_x + fhard_x;
+        fc[1] = fgoal_y + fgeom_y + fsoft_y + fhard_y;
+      }
       if (ext && s < H[b]) { // the external force, at the active steps
         float Fe[2], Je[4];
         int at;
@@ -128,6 +149,8 @@ void integrate_surrogate_material(float *o, float *v, const float *goal, const f
       ox = onx;
       oy = ony;
     }
+    if (energy)
+      log_potential(max_H, ox, oy);
 
     o[2 * b] = ox;
     o[2 * b + 1] = oy;

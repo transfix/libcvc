@@ -298,7 +298,7 @@ void coef_trainer::coeffs(const float *feat, int n, float *out) const {
 double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_in,
                                    const float *v_in, const float *goal, int n, int window,
                                    std::vector<float> *grad, float *o_out, float *v_out,
-                                   const float *x_in, float *x_out) const {
+                                   const float *x_in, float *x_out, float *potential) const {
   const diff::field F = to_diff_field(scene.field());
   const int h = hidden_;
   const bool bike = cfg_.rollout == rollout_kind::bicycle;
@@ -409,6 +409,9 @@ double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_i
         S.coef[o] = diff::softplusf_(acc + off_bias[o]);
       }
       const float al = S.coef[0], be = S.coef[1], ga = S.coef[2];
+      if (potential)
+        potential[static_cast<std::size_t>(ag) * window + t] =
+            diff::surr_potential(F, ox, oy, gx, gy, al, be, rr, d_hat).total();
 
       float ox1, oy1, ax1, ay1;
       if (dyn) {
