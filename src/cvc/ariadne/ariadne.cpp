@@ -689,14 +689,15 @@ private:
   static constexpr double kMaxSeconds = 0.005;         // per-eval time cap (5 ms)
   // Aggregate reactive-eval time across ALL predicates in a frame. This is a runaway guard, not a
   // normal operating point: a handful of scalar predicates finish in well under a millisecond. It
-  // was 10 ms, but a live conference re-evaluates ~5-7 predicates PER PEER every frame (roster rows'
-  // visible_when, the per-peer camera-window count/title/texture binds), and the stackless evaluator
-  // is markedly slower under wasm while the browser's single thread is also decoding video — so at a
-  // realistic peer count the 10 ms guard tripped mid-roster, skipping the rest and blinking the
-  // participant list / peer windows empty. 30 ms clears a ~6-7 peer conference with margin and is
-  // still a hard bound on a pathological document (eval time the thread spends descheduled doesn't
-  // count against it, so a merely-loaded machine never trips it). See last_good_count for the
-  // structural backstop that keeps a repeated list stable across any residual skip.
+  // was 10 ms, but a live conference re-evaluates ~5-7 predicates PER PEER every frame (roster
+  // rows' visible_when, the per-peer camera-window count/title/texture binds), and the stackless
+  // evaluator is markedly slower under wasm while the browser's single thread is also decoding
+  // video — so at a realistic peer count the 10 ms guard tripped mid-roster, skipping the rest and
+  // blinking the participant list / peer windows empty. 30 ms clears a ~6-7 peer conference with
+  // margin and is still a hard bound on a pathological document (eval time the thread spends
+  // descheduled doesn't count against it, so a merely-loaded machine never trips it). See
+  // last_good_count for the structural backstop that keeps a repeated list stable across any
+  // residual skip.
   static constexpr double kFrameBudgetSeconds = 0.030; // aggregate across all predicates/frame
   static constexpr std::size_t kMaxOptions = 1024;     // cap on computed combo options
 
@@ -790,12 +791,13 @@ struct Runtime::Impl {
   std::vector<std::string> reactive_warnings;
   std::set<std::string> reactive_warned;
   int frame_instances = 0; // §3: repeat instances emitted this frame (bounds many repeats)
-  // §3: last successful repeat-count per expression. A reactive repeat-count eval fail-safes to 0 on
-  // a transient per-frame budget exhaustion (reactive eval is slow in wasm, and video decode can eat
-  // the frame); collapsing a repeated list — the conference roster, the per-peer camera windows — to
-  // EMPTY for that frame and back flickers it, and under sustained load leaves an apparently empty
-  // conference even though the peers are present in state. Reusing the last-good count bridges those
-  // skips so the list stays stable; a genuine count change is picked up on the next unskipped frame.
+  // §3: last successful repeat-count per expression. A reactive repeat-count eval fail-safes to 0
+  // on a transient per-frame budget exhaustion (reactive eval is slow in wasm, and video decode can
+  // eat the frame); collapsing a repeated list — the conference roster, the per-peer camera windows
+  // — to EMPTY for that frame and back flickers it, and under sustained load leaves an apparently
+  // empty conference even though the peers are present in state. Reusing the last-good count
+  // bridges those skips so the list stays stable; a genuine count change is picked up on the next
+  // unskipped frame.
   std::unordered_map<std::string, int> last_good_count;
 
   // §4.7 action lane: a unique owner tag for this Runtime's processes on the app-wide

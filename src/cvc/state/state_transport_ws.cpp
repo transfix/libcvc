@@ -289,9 +289,10 @@ public:
   // Bytes still unsent in this connection's OS send buffer (Linux only; 0 elsewhere). A large value
   // means the peer is not draining fast enough and the next write would BLOCK. The fan paths check
   // this before writing and skip a backed-up connection — dropping a loss-tolerant media frame, or
-  // deferring the periodic roster re-broadcast to the next tick — instead of blocking the whole relay
-  // (and every other client's roster) on one slow peer. The continuous video flood otherwise fills a
-  // slow client's buffer, the synchronous ws->write() blocks, and the broadcast loop stalls for all.
+  // deferring the periodic roster re-broadcast to the next tick — instead of blocking the whole
+  // relay (and every other client's roster) on one slow peer. The continuous video flood otherwise
+  // fills a slow client's buffer, the synchronous ws->write() blocks, and the broadcast loop stalls
+  // for all.
   std::size_t send_backlog() {
 #if !defined(__EMSCRIPTEN__) && defined(__linux__)
     if (!ws)
@@ -812,8 +813,9 @@ state_transport::publish_stats state_transport_ws::publish(const state_mutation 
       _peers.note_delivery_filtered(c->remote_node_id);
       continue;
     }
-    // Don't block the caller (the arisrv main loop drains local writes here) on a backed-up peer — it
-    // would stall the loop and its periodic broadcast for everyone. The ~1s broadcast re-delivers.
+    // Don't block the caller (the arisrv main loop drains local writes here) on a backed-up peer —
+    // it would stall the loop and its periodic broadcast for everyone. The ~1s broadcast
+    // re-delivers.
     if (c->send_backlog() > 2 * 1024 * 1024)
       continue;
     if (c->write(frame)) {
@@ -909,10 +911,11 @@ std::size_t state_transport_ws::write_media(const media_frame &m, const void *ex
     if (!c || c.get() == exclude || !c->alive.load() || !c->can_write())
       continue;
     // Media is loss-tolerant: if this peer's send buffer is backed up (it can't keep pace with the
-    // video), DROP the frame rather than let the synchronous write block the relay. A LOW threshold is
-    // deliberate — it keeps each peer's buffer small so the small, must-deliver STATE writes (roster
-    // join/leave + the periodic re-broadcast below) are never crowded out or deferred. Dropping video
-    // to a slow peer is invisible; a stalled roster makes clients unable to SEE each other at all.
+    // video), DROP the frame rather than let the synchronous write block the relay. A LOW threshold
+    // is deliberate — it keeps each peer's buffer small so the small, must-deliver STATE writes
+    // (roster join/leave + the periodic re-broadcast below) are never crowded out or deferred.
+    // Dropping video to a slow peer is invisible; a stalled roster makes clients unable to SEE each
+    // other at all.
     if (c->send_backlog() > 32 * 1024)
       continue;
     if (c->write(frame)) {
@@ -1015,7 +1018,8 @@ void state_transport_ws::on_inbound_mutation(const state_mutation &m, connection
       if (!c || c.get() == origin || !c->alive.load() || !c->can_write())
         continue;
       if (c->send_backlog() > 2 * 1024 * 1024)
-        continue; // don't block the relay on a backed-up peer; the ~1s roster broadcast backstops it
+        continue; // don't block the relay on a backed-up peer; the ~1s roster broadcast backstops
+                  // it
       if (c->write(frame))
         _sent_frames.fetch_add(1, std::memory_order_relaxed);
     }
@@ -1054,7 +1058,8 @@ void state_transport_ws::on_inbound_message(const state_message &m, connection *
       if (!c || c.get() == origin || !c->alive.load() || !c->can_write())
         continue;
       if (c->send_backlog() > 2 * 1024 * 1024)
-        continue; // don't block the relay on a backed-up peer; the ~1s roster broadcast backstops it
+        continue; // don't block the relay on a backed-up peer; the ~1s roster broadcast backstops
+                  // it
       if (c->write(frame))
         _sent_frames.fetch_add(1, std::memory_order_relaxed);
     }
@@ -1161,10 +1166,10 @@ void state_transport_ws::send_snapshot_locked(connection &c,
 
 std::size_t state_transport_ws::broadcast_snapshot() {
   // Build each shard's snapshot frame ONCE, then write it to every live connection. The receivers
-  // apply it idempotently (ingest_snapshot_entry is a bulk load), so re-sending the same roster/scene
-  // each interval is a no-op for a client that is already converged and a recovery for one that
-  // missed a live re-fan. Uses connection::write() (locks per connection) — do NOT hold a connection
-  // write lock here. Snapshotting the shard reads the tree under its own lock.
+  // apply it idempotently (ingest_snapshot_entry is a bulk load), so re-sending the same
+  // roster/scene each interval is a no-op for a client that is already converged and a recovery for
+  // one that missed a live re-fan. Uses connection::write() (locks per connection) — do NOT hold a
+  // connection write lock here. Snapshotting the shard reads the tree under its own lock.
   std::vector<state_cluster_shard *> shards;
   {
     std::lock_guard<std::mutex> lk(_shards_mu);
@@ -1207,8 +1212,9 @@ std::size_t state_transport_ws::broadcast_snapshot() {
     conns = _conns;
   }
   // Diagnostic (off unless CVC_WS_BROADCAST_DEBUG is set): per-tick summary of how many peers the
-  // roster broadcast reached vs. skipped, and the worst backlog observed. This is the decisive signal
-  // for "clients can't see each other" — a skipped peer is one the periodic roster never reaches.
+  // roster broadcast reached vs. skipped, and the worst backlog observed. This is the decisive
+  // signal for "clients can't see each other" — a skipped peer is one the periodic roster never
+  // reaches.
   static const bool dbg = std::getenv("CVC_WS_BROADCAST_DEBUG") != nullptr;
   std::size_t wrote = 0, skipped = 0, max_backlog = 0;
   for (auto &c : conns) {
@@ -1217,16 +1223,18 @@ std::size_t state_transport_ws::broadcast_snapshot() {
     const std::size_t bl = c->send_backlog();
     if (bl > max_backlog)
       max_backlog = bl;
-    // Skip a peer whose send buffer is badly backed up: writing the (multi-entry) snapshot would block
-    // the whole broadcast loop on that one slow peer, starving every other client. This is periodic
+    // Skip a peer whose send buffer is badly backed up: writing the (multi-entry) snapshot would
+    // block the whole broadcast loop on that one slow peer, starving every other client. This is
+    // periodic
     // (~1s), so a skipped peer simply catches up on the next tick once its buffer drains. The media
-    // drop keeps a peer's buffer from filling with video, so at 2 MB this only trips for a peer whose
-    // socket is effectively dead (not draining state at all) — exactly when we must not block.
+    // drop keeps a peer's buffer from filling with video, so at 2 MB this only trips for a peer
+    // whose socket is effectively dead (not draining state at all) — exactly when we must not
+    // block.
     if (bl > 2 * 1024 * 1024) {
       ++skipped;
       if (dbg)
-        std::fprintf(stderr, "[ws-bcast] SKIP node='%s' backlog=%zuKB\n",
-                     c->remote_node_id.c_str(), bl / 1024);
+        std::fprintf(stderr, "[ws-bcast] SKIP node='%s' backlog=%zuKB\n", c->remote_node_id.c_str(),
+                     bl / 1024);
       continue;
     }
     bool ok = true;

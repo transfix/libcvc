@@ -158,8 +158,8 @@ int main(int argc, char **argv) {
     // continuously.
     if (++reapticks % 5 == 0) {
       ws_tp.reap_idle(std::chrono::seconds(10));
-      // Re-broadcast the room/scene snapshot to every client (~1s). A client-to-client live re-fan is
-      // single-shot with no retry, so a join that races an already-connected peer's socket is
+      // Re-broadcast the room/scene snapshot to every client (~1s). A client-to-client live re-fan
+      // is single-shot with no retry, so a join that races an already-connected peer's socket is
       // otherwise lost for good (an established client never sees a later joiner). This idempotent
       // re-sync makes every client re-converge within ~1s — and is the reliable push the
       // server-authoritative room+scene tree rides on.
