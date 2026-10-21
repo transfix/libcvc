@@ -220,6 +220,20 @@ TEST_F(LbieMesherTest, QuadDoMeshAdaptiveErrSweep) {
   expect_geoframe_valid(coarse);
 }
 
+// Octree::assign_refine_sign_quad visited every edge the surface crosses, including edges on the
+// volume's boundary, where find_oc_id gives -1 for the cells outside the grid. It then called
+// get_err_grad(-1) and read and wrote vtx_idx_arr_refine[-1]. polygonize_quad never makes a quad
+// for such an edge (is_min_edge rejects it), so those edges are now skipped. AddressSanitizer
+// flagged the read on every mesh of a surface that leaves the volume.
+TEST_F(LbieMesherTest, QuadMeshesASurfaceThatLeavesTheVolume) {
+  volume v = make_sphere_volume(ctx, 17, 1.2); // bigger than its [-1,1]^3 box
+  for (float err : {kDefaultErr, 0.01f}) {
+    LBIE::geoframe g = run_do_mesh(v, 0.0f, 0.0f, err, kDefaultErrIn, LBIE::geoframe::QUAD);
+    EXPECT_GT(g.numquads, 0) << "err=" << err;
+    expect_geoframe_valid(g);
+  }
+}
+
 TEST_F(LbieMesherTest, QuadDoMeshGeoFlow) {
   volume v = make_sphere_volume(ctx, 17, 0.5);
   LBIE::geoframe g = run_do_mesh(v, 0.0f, 0.0f, kDefaultErr, kDefaultErrIn, LBIE::geoframe::QUAD,
@@ -424,12 +438,10 @@ TEST_F(LbieMesherTest, HexaDoMeshOptimize) {
   LBIE::geoframe g = run_do_mesh(v, 0.0f, 0.0f, kDefaultErr, kDefaultErrIn, LBIE::geoframe::HEXA,
                                  LBIE::Mesher::OPTIMIZATION, 1);
   EXPECT_GT(g.numquads, 0);
-  // OPTIMIZATION is subject to the same pre-existing zero-area-division NaN
-  // bug as the geometric_flow_* improvement paths (see
-  // expect_geoframe_topology_valid): it produces finite coords on x86_64 and
-  // arm64 Debug, but a couple of NaN vertices on arm64 Release. Check only
-  // structural validity, matching the other improvement-path tests here.
-  expect_geoframe_topology_valid(g);
+  // This used to check only structure: arm64 Release left a couple of NaN vertices. Octree::getGrad
+  // read v1[3], v2[3] and v3[3] of float[3] arrays (AddressSanitizer: stack-buffer-overflow here),
+  // and v3[3] could be the uninitialized point the line search writes next. Its indices are fixed.
+  expect_geoframe_valid(g);
 }
 
 // ---------------------------------------------------------------------------
