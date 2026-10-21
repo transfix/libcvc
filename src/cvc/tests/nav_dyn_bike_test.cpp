@@ -852,10 +852,12 @@ TEST(DynBikePH, EnergyBalanceInTheLinearRegime) {
   }
 }
 
-// The report: the tires' tangent dissipation (dyn_ph_tangent_D) along steady steer ramps and
+// The report: the tires' tangent dissipation (dyn_ph_tangent_D) along steer ramps to the lock and
 // swerves at several speeds, binned by lateral g like the plant's drift (D14). Below the peak it
 // is positive semi-definite; past the Pacejka peak a tire's force falls as its slip grows and the
-// tangent D loses definiteness. The bins say where.
+// tangent D loses definiteness. The bins say where. With the tires fitted to Jolt's (B C =
+// kJoltTireStiffness / tire_peak_slip_angle) the Humvee understeers: its front tire passes the
+// peak first, from about half its grip, and the ramps plateau short of mu g.
 TEST(DynBikePH, WhereTheTangentDissipationStopsBeingPSD) {
   for (const double mu : {0.9, 0.6}) {
     const dyn_bike_params p = humvee(mu);
@@ -881,11 +883,11 @@ TEST(DynBikePH, WhereTheTangentDissipationStopsBeingPSD) {
       lam_min[b] = std::min(lam_min[b], lmin / (p.m / 1.0));
     };
     for (const double v : {8.0, 12.0, 16.0, 20.0}) {
-      // A steady ramp of the steer, the speed held by the throttle: up to and past the limit.
+      // A steady ramp of the steer to the lock, the speed held by the throttle: past the limit.
       dyn_state<double> s = at_rest<double>(v);
       const int n = static_cast<int>(25.0 / lim.hdt);
       for (int t = 0; t < n; ++t) {
-        const double dcmd = 0.25 * t / double(n);
+        const double dcmd = lim.delta_max * t / double(n);
         const double acmd = 2.0 * (v - s.vx) + p.drag * s.vx * s.vx / p.m + p.c_rr * p.g;
         dyn_state<double> o;
         diff::dyn_plant<double>(p, lim, s, dcmd, acmd, 0.0, o);
@@ -916,14 +918,17 @@ TEST(DynBikePH, WhereTheTangentDissipationStopsBeingPSD) {
       std::printf("    %-10s %8d %9.1f%% %7.1f%% %7.1f%% %14.3g\n", lab, count[b],
                   100.0 * indef[b] / count[b], 100.0 * front[b] / count[b],
                   100.0 * rear[b] / count[b], lam_min[b]);
-      // Below three quarters of the grip both tires are short of their peak: PSD everywhere.
-      if (edges[b + 1] <= 0.75 * mu + 1e-9)
+      // Below half the grip both tires are short of their peak: PSD everywhere.
+      if (edges[b + 1] <= 0.5 * mu + 1e-9)
         EXPECT_EQ(indef[b], 0) << "mu " << mu << ", bin " << lab;
+      // Understeer: the rear tire never passes its peak.
+      EXPECT_EQ(rear[b], 0) << "mu " << mu << ", bin " << lab;
     }
-    // At the grip limit the ramps go past the peak: the tangent D is indefinite there.
+    // Above half the grip the ramps take the front tire past its peak: the tangent D is
+    // indefinite there.
     int top = 0;
     for (int b = 0; b < nb; ++b)
-      if (edges[b] >= 0.8 * mu - 1e-9)
+      if (edges[b] >= 0.5 * mu - 1e-9)
         top += indef[b];
     EXPECT_GT(top, 0) << "mu " << mu << ": the ramps never passed the peak";
   }
