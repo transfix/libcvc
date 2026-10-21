@@ -111,6 +111,7 @@ ariadne::Capabilities ImGuiBackend::capabilities() const {
   c.glsl = true;       // cvcGL can render scene-node shaders / a shader_canvas
   c.view_embed = true; // render-to-texture views (roadmap §9.6)
   c.owns_loop = false; // guest mode: VTK's render pass drives Runtime::render()
+  c.bitmap = true;     // image widgets draw as GL textures
   return c;
 }
 
@@ -732,6 +733,14 @@ ariadne::CustomEdit ImGuiBackend::custom_widget(const char *type, const std::str
 void ImGuiBackend::install(cvc::ariadne::Runtime &rt, ImGuiOverlay &overlay) {
   cvc::ariadne::Runtime *r = &rt;
   overlay.setDrawCallback([r] { r->render(); });
+}
+
+void ImGuiBackend::setImGuiContext(ImGuiContext *ctx) {
+#ifdef CVC_ENABLE_IMGUI
+  ImGui::SetCurrentContext(ctx);
+#else
+  (void)ctx;
+#endif
 }
 
 } // namespace gl

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for src/cvcGL/examples/wasm/serve.py: the opt-in glsync.js injection, --prof-param,
+"""Tests for src/cvcGL/wasm/devtools/serve.py: the opt-in glsync.js injection, --prof-param,
 --js-profiling, and the unchanged isolation headers (and nothing else) without them.
 
 Runs the handler in-process on ephemeral 127.0.0.1 ports (never a port a developer uses), against
@@ -18,7 +18,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 DEVTOOLS = HERE.parent
-SERVE_PY = HERE.parents[2] / "examples" / "wasm" / "serve.py"
+SERVE_PY = DEVTOOLS / "serve.py"
 spec = importlib.util.spec_from_file_location("cvcgl_serve", SERVE_PY)
 serve = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(serve)

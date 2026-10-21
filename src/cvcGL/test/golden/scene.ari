@@ -1,0 +1,32 @@
+# scene.ari — golden: a document with a scene. A box and a sphere, the camera framed to them by the
+# runtime, and a small window over the 3D view. The diagnostic chrome is off so the picture is just
+# the geometry and the UI.
+#
+# No lights: block, so the scene graph's fallback headlight lights it. A declared directional light
+# leaves a realized scene unlit today (hello.ari's bunny renders dark too); add one here once that
+# is fixed.
+
+meta:
+  name: golden scene
+  min_libcvc: 3.6.0
+
+windows:
+  - window: Scene
+    id: hud
+    pos: [24, 24]
+    size: [260, 64]
+    children:
+      - text: "A box and a sphere."
+
+scene:
+  chrome: false
+  nodes:
+    - node: crate
+      type: geometry
+      source: { box: { size: [2.0, 1.0, 1.0] } }
+      material: { color: [0.80, 0.55, 0.35] }
+    - node: ball
+      type: geometry
+      source: { sphere: 0.6 }
+      transform: { position: [0.0, 0.0, 1.2] }
+      material: { color: [0.35, 0.60, 0.85] }
