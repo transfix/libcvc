@@ -52,11 +52,13 @@
 #include <cvc/ariadne/doc_args.h>
 #include <cvc/ariadne/ftxui_backend.h>
 #include <cvc/ariadne/host_cli.h>
+#include <cvc/ariadne/host_info.h>
 #include <cvc/ariadne/host_signals.h>
 #include <cvc/ariadne/loader.h> // run_init — seed conf.room / conf.self before the first tick
 #include <cvc/ariadne/stream/stream_view.h>
 #include <cvc/ariadne/tvision_backend.h>
 #include <cvc/core/app.h>
+#include <sstream> // arigl info: the GL report, line by line
 #if CVC_ENABLE_WS || CVC_ENABLE_GRPC
 // Conference mode: a state transport joins a hosted room, chosen by the relay URL scheme —
 // ws://|wss:// (WebSocket, what browsers dial; the host page sets wss://<page-origin>/…) or grpc://
@@ -109,6 +111,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <vtkRenderWindow.h> // arigl info: the GL it renders with
 
 namespace {
 
@@ -120,6 +123,7 @@ const char *const kDefaultPrefix = "ui.docs.ari"; // the same root ari uses, in 
 int usage(int code) {
   std::fprintf(code ? stderr : stdout,
                "usage: arigl run|snapshot|check [flags] doc.ari [document args...]\n"
+               "       arigl info [--terminal] [--json] [--functions] [--backend B]\n"
                "\n"
                "flags (before the document):\n"
                "  --terminal             run in the terminal, the scene drawn behind the widgets\n"
@@ -128,7 +132,12 @@ int usage(int code) {
                "A window by default (ImGui over the VTK scene). snapshot renders offscreen: write\n"
                "it with --png FILE, or with --terminal print it as text. Everything after the\n"
                "document path is the document's own: it reads it as argv, or declares an args:\n"
-               "block (then `arigl run doc.ari --help` shows its options).\n",
+               "block (then `arigl run doc.ari --help` shows its options).\n"
+               "\n"
+               "info prints what this host provides, in a window or with --terminal: the GL it\n"
+               "renders with, the terminal (size, colours, kitty / Sixel), what libcvc was built\n"
+               "with, the capabilities a document's requires: and (has? ...) see, and how many\n"
+               "functions programs can call (--functions lists them; --json prints JSON).\n",
                ari::host_flags_help().c_str());
   return code;
 }
@@ -833,6 +842,40 @@ struct ConferenceSession {
 
 // ── a real window (ImGui over the VTK scene) ────────────────────────────────────────────────────
 
+bool has_flag(const ari::HostOptions &o, const char *flag) {
+  return std::find(o.extra_flags.begin(), o.extra_flags.end(), flag) != o.extra_flags.end();
+}
+
+// The GL a SceneRenderer renders with: its vendor, renderer and version lines, from one offscreen
+// render. False where there is no usable OpenGL (checked first, so a headless box says so rather
+// than failing in VTK).
+bool describe_gl(cvc::gl::SceneRenderer &view, std::string &out) {
+  vtkRenderWindow *w = view.renderWindow();
+  if (!w || !w->SupportsOpenGL())
+    return false;
+  w->Render();
+  const char *caps = w->ReportCapabilities();
+  if (!caps)
+    return true;
+  std::istringstream lines(caps);
+  for (std::string line; std::getline(lines, line);)
+    if (line.rfind("OpenGL vendor", 0) == 0 || line.rfind("OpenGL renderer", 0) == 0 ||
+        line.rfind("OpenGL version", 0) == 0)
+      out += line + "\n";
+  return true;
+}
+
+int print_info(ari::HostInfo info, const ari::HostOptions &o) {
+  if (!o.doc.empty()) {
+    std::fprintf(stderr,
+                 "arigl: info takes no document (arigl check doc.ari reports what one needs)\n");
+    return 2;
+  }
+  std::fputs(ari::format_host_info(info, has_flag(o, "--json"), has_flag(o, "--functions")).c_str(),
+             stdout);
+  return 0;
+}
+
 int run_window(const ari::HostOptions &o) {
   const bool offscreen = o.command != "run"; // snapshot and check never open a window
   if (o.command == "snapshot" && o.png.empty()) {
@@ -876,6 +919,12 @@ int run_window(const ari::HostOptions &o) {
   rt.register_verb("quit", [&] { rt.request_close(); });
   rt.app_runtime().set_document_args(o.doc_args, "arigl " + o.command + " " + o.doc,
                                      /*validate=*/o.command != "check");
+  if (o.command == "info") {
+    ari::HostInfo info = ari::gather_host_info(rt.app_runtime().runtime(), "arigl");
+    info.backend = "imgui";
+    info.gl = describe_gl(view, info.gl_info);
+    return print_info(std::move(info), o);
+  }
   if (const int status = load_document(rt, o); status >= 0)
     return status;
   note_misplaced(rt.app_runtime(), o);
@@ -1005,6 +1054,35 @@ int run_terminal(const ari::HostOptions &o) {
   rt.register_verb("quit", [&] { rt.request_close(); });
   rt.set_document_args(o.doc_args, "arigl " + o.command + " --terminal " + o.doc,
                        /*validate=*/o.command != "check");
+  // Ask the terminal what it can draw before the load, so requires: / (has? "term.kitty") see it
+  // (the interactive loop then does not ask again). tvision draws half-blocks only.
+  ari::HostInfo term;
+  ari::describe_terminal(term);
+  ari::TermGraphics graphics;
+  const bool probe = (o.command == "run" || o.command == "info") && o.backend != "tvision" &&
+                     term.tty &&
+                     (look.image_color == ari::FtxuiBackend::Options::ImageColor::Auto ||
+                      look.image_color == ari::FtxuiBackend::Options::ImageColor::Kitty ||
+                      look.image_color == ari::FtxuiBackend::Options::ImageColor::Sixel);
+  if (probe) {
+    graphics = ari::gfx::probe_terminal();
+    if (o.cell_w > 0) {
+      graphics.cell_w = o.cell_w;
+      graphics.cell_h = o.cell_h;
+    }
+    backend->set_terminal_graphics(graphics);
+  }
+  if (o.command == "info") {
+    ari::HostInfo info = ari::gather_host_info(rt.runtime(), "arigl --terminal");
+    info.backend = o.backend == "tvision" ? "tvision" : "ftxui";
+    info.gl = true; // the scene behind the widgets renders offscreen
+    info.gl_info = "offscreen, at the cells' size (the scene behind the widgets)\n";
+    if (probe) {
+      info.graphics = graphics;
+      info.probed = true;
+    }
+    return print_info(std::move(info), o);
+  }
   if (const int status = load_document(rt, o); status >= 0)
     return status;
   note_misplaced(rt, o);
@@ -1068,14 +1146,16 @@ int run_terminal(const ari::HostOptions &o) {
 } // namespace
 
 int main(int argc, char **argv) {
-  const ari::HostOptions o = ari::parse_host_args(argc, argv, {"--terminal"});
+  const ari::HostOptions o =
+      ari::parse_host_args(argc, argv, {"--terminal", "--json", "--functions"});
   if (o.help)
     return usage(0);
   if (!o.error.empty()) {
     std::fprintf(stderr, "arigl: %s\n", o.error.c_str());
     return usage(2);
   }
-  if (o.command != "run" && o.command != "snapshot" && o.command != "check") {
+  if (o.command != "run" && o.command != "snapshot" && o.command != "check" &&
+      o.command != "info") {
     std::fprintf(stderr, "arigl: unknown command '%s'\n", o.command.c_str());
     return usage(2);
   }
@@ -1083,8 +1163,11 @@ int main(int argc, char **argv) {
     std::fprintf(stderr, "arigl: --backend is ftxui or tvision, not '%s'\n", o.backend.c_str());
     return 2;
   }
-  const bool terminal =
-      std::find(o.extra_flags.begin(), o.extra_flags.end(), "--terminal") != o.extra_flags.end();
+  const bool terminal = has_flag(o, "--terminal");
+  if (o.command != "info" && (has_flag(o, "--json") || has_flag(o, "--functions"))) {
+    std::fprintf(stderr, "arigl: --json and --functions are for arigl info\n");
+    return usage(2);
+  }
   if (!terminal && (!o.backend.empty() || !o.graphics.empty() || o.cell_w > 0)) {
     std::fprintf(stderr, "arigl: --backend, --graphics and --cell-size are for a terminal; add "
                          "--terminal\n");

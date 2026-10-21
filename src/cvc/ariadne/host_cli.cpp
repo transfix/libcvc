@@ -140,7 +140,7 @@ HostOptions parse_host_args(int argc, const char *const *argv,
     else if (a == "--frames")
       o.frames = n;
   }
-  if (o.doc.empty() && !o.help)
+  if (o.doc.empty() && !o.help && o.command != "info") // info describes the host, not a document
     o.error = "no document given";
   return o;
 }
