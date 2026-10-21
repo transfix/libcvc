@@ -5,11 +5,11 @@
 > the material trainer all read a belief plane's *observed* material: the truth rasters where that
 > plane's sensor has seen, and fixed values everywhere else.
 
-**Status:** B1 (the kernels and golden 1) and B2 (`sim_world::set_material_belief`) implemented
-2026-10-20; B3 (net and trainer) follows. The libcvc side (the kernels, the `sim_world` wiring and the goldens) is built
-to this document, with §9's recommended column. The torch side in GRL-SNAM is built against the same goldens.
-The decisions still open are listed in [§9](#9-open-decisions); the settled ones are in
-[§10](#10-settled).
+**Status:** implemented 2026-10-20, with §9's recommended column: B1 (the kernels and golden 1,
+#742), B2 (`sim_world::set_material_belief`, #744) and B3 (the 3-channel net, `.cvcnm` version 2,
+the patch crop and the gate in training, #746). The torch side in GRL-SNAM is built against the
+same goldens. The decisions in [§9](#9-open-decisions) can still be revisited; the settled ones are
+in [§10](#10-settled).
 
 Related: [`../NAV_MATERIAL.md`](../NAV_MATERIAL.md) (the material field, the gate, the fidelity
 tiers), [`../NAV_TRAINING.md`](../NAV_TRAINING.md), `inc/cvc/nav/belief_occupancy.h` (the
