@@ -38,6 +38,7 @@
 #include <cvc/nav/terrain.h>
 #include <cvc/nav/vehicle_plant.h>
 #include <cvc/physics/world.h>
+#include <functional>
 #include <set>
 #include <string>
 #include <vector>
@@ -53,6 +54,9 @@ struct nav_plant_options {
   // origin is added: < 0 = just above the wheels' full reach (their suspension extended).
   double ground_z = 0.0;
   double spawn_height = -1.0;
+  // The ground's height under a start (world metres, at the rear axle's x, y in metres), for a
+  // terrain that is not flat; empty: ground_z everywhere.
+  std::function<double(double x, double y)> ground_height;
   // advance() steps the world dt / fixed_dt times (a whole number, or attach() throws). false:
   // the world steps itself on the clock nav follows (world::follow), and advance() only reads.
   bool step_world = true;

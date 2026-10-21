@@ -70,6 +70,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/physics/pose_tracker.h
   ../../inc/cvc/physics/nav_plant.h
   ../../inc/cvc/physics/nav_eval.h
+  ../../inc/cvc/physics/plant_log.h
+  ../../inc/cvc/physics/plant_log_scene.h
   ../../inc/cvc/state/state_hash_partition.h
   ../../inc/cvc/state/distributed_state_session.h
   ../../inc/cvc/state/state_transport.h
@@ -127,6 +129,12 @@ set(INCLUDE_FILES
   ../../inc/cvc/nav/plant_types.h
   ../../inc/cvc/nav/terrain.h
   ../../inc/cvc/nav/vehicle_plant.h
+  ../../inc/cvc/ph/mat3.h
+  ../../inc/cvc/ph/optim.h
+  ../../inc/cvc/ph/rff.h
+  ../../inc/cvc/ph/rng.h
+  ../../inc/cvc/ph/se2_train.h
+  ../../inc/cvc/ph/se2_vehicle.h
   ../../inc/cvc/lod/select.h
   ../../inc/cvc/lod/pyramid.h
   ../../inc/cvc/lod/tiles.h
@@ -260,6 +268,8 @@ set(SOURCE_FILES
   physics/binding_meta.cpp
   physics/nav_plant.cpp
   physics/nav_eval.cpp
+  physics/plant_log.cpp
+  physics/plant_log_scene.cpp
   state/state_change_journal.cpp
   state/state_subscription_router.cpp
   state/state_sync_adapter.cpp
@@ -321,6 +331,9 @@ set(SOURCE_FILES
   nav/sim_world_binding.cpp
   nav/sim_thread.cpp
   nav/nav_stats.cpp
+  ph/se2_data.cpp
+  ph/se2_model.cpp
+  ph/se2_train.cpp
   lod/select.cpp
   lod/pyramid.cpp
   lod/tiles.cpp
