@@ -130,7 +130,9 @@ int main() {
       for (int f = 0; f < 4; ++f) {
         pscene.tick();
         pbe.render_to_string(prt, 40, 12);
-        const bool sent = !pbe.take_graphics().empty();
+        // A transmit (a=T) is a send; freeing the image's second id once the frame is stable
+        // (a=d) is not.
+        const bool sent = pbe.take_graphics().find("a=T") != std::string::npos;
         resent += f > 0 && sent ? 1 : 0;
       }
       chk(resent == 0, "kitty: an unchanged frame is not sent again");

@@ -269,7 +269,11 @@ Three backends ship:
     a window or menu drawn over an image hides exactly the cells it covers, and FTXUI's
     full repaint redraws them for free. An image is sent again only when its pixels
     change (a republished identical frame is not), and deleted (`a=d,d=I`) once no frame
-    draws it. A placement addresses 297 rows and columns, so a bigger image goes as tiles.
+    draws it. A changed picture goes to a second image id, and the placeholders switch to
+    it at the next frame, once it has fully arrived. Re-sending under the id the cells
+    show makes the terminal drop that image for the whole transfer, so a scene that
+    changes every frame would never appear. A placement addresses 297 rows and columns,
+    so a bigger image goes as tiles.
   - **Sixel** (xterm -ti vt340, foot, mlterm, WezTerm, Windows Terminal). A bitmap is
     drawn after each repaint, because the repaint covers it, inside synchronized-output
     marks (`CSI ? 2026`). It is clipped to the cells nothing covers: the image node draws
