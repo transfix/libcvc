@@ -74,14 +74,18 @@ template <class S> dyn_state<S> at_rest(S vx = S(0)) {
 
 // Steady-state cornering at speed v and steer delta: hold the speed with a proportional
 // throttle for `seconds`, then average the last second. Returns the lateral acceleration
-// vx r and the path's curvature r / vx.
+// vx r and the path's curvature r / vx. `a_body`, when given, receives the body-frame lateral
+// acceleration over that second, vy' + r vx: vx r alone is it only in a steady turn, and past
+// its limit a vehicle drifts.
 void steady_turn(const dyn_bike_params &p, double v, double delta, double &a_y, double &kappa,
-                 double seconds = 12.0) {
+                 double seconds = 12.0, double *a_body = nullptr) {
   const bike_veh lim = plant_limits(p);
   dyn_state<double> s = at_rest<double>(v);
   const int n = static_cast<int>(seconds / lim.hdt), tail = static_cast<int>(1.0 / lim.hdt);
-  double ay = 0.0, k = 0.0;
+  double ay = 0.0, k = 0.0, vy0 = 0.0;
   for (int t = 0; t < n; ++t) {
+    if (t == n - tail)
+      vy0 = s.vy;
     dyn_state<double> o;
     const double a_cmd = 2.0 * (v - s.vx) + p.drag * s.vx * s.vx / p.m + p.c_rr * p.g;
     diff::dyn_plant<double>(p, lim, s, delta, a_cmd, 0.0, o);
@@ -93,6 +97,8 @@ void steady_turn(const dyn_bike_params &p, double v, double delta, double &a_y, 
   }
   a_y = ay / tail;
   kappa = k / tail;
+  if (a_body)
+    *a_body = a_y + (s.vy - vy0) / (tail * lim.hdt);
 }
 
 // The trainer's city scene, its field and the trainer's bicycle (coef_train's defaults).
@@ -151,12 +157,26 @@ TEST(DynBike, HumveeParametersFromItsSpecSheet) {
   EXPECT_GT(si.tire_C, 1.0);
   EXPECT_LT(si.tire_C, 2.0);
   EXPECT_NEAR(std::sin(si.tire_C * 3.14159265358979 / 2.0), d.tire_sliding, 1e-9);
-  // The peak of mu Fz sin(C atan(B alpha)) is at the tire's peak slip angle (rear tires).
-  EXPECT_NEAR(si.tire_C * std::atan(si.tire_B_rear * d.tire_peak_slip_angle),
-              3.14159265358979 / 2.0, 1e-9);
-  EXPECT_LT(si.tire_B_front, si.tire_B_rear);
+  // The cornering stiffness per unit load, B C, is kJoltTireStiffness times Jolt's linear ramp
+  // to its peak, 1 / alpha_peak; front and rear alike.
+  EXPECT_NEAR(si.tire_B_rear * si.tire_C * d.tire_peak_slip_angle,
+              cvc::physics::nav_plant::kJoltTireStiffness, 1e-9);
+  EXPECT_DOUBLE_EQ(si.tire_B_front, si.tire_B_rear);
   EXPECT_DOUBLE_EQ(si.front_drive, 0.5); // the Humvee drives all four wheels
+  // A geared drive through a torque converter: the force lags, drag and rolling resistance stay.
+  EXPECT_DOUBLE_EQ(si.drive_lag, 0.1);
   EXPECT_GT(si.drag, 0.0);
+  EXPECT_GT(si.rolling_resistance, 0.0);
+  // The RoboRacer's direct drive answers within the tick, the driver model making up for drag and
+  // rolling resistance; an explicit drive lag still wins.
+  const cvc::physics::vehicle_desc rr = cvc::physics::vehicle_desc::roboracer();
+  const cvc::nav::dyn_bike_si sr = cvc::physics::nav_plant::dyn_bike_si_of(rr);
+  EXPECT_DOUBLE_EQ(sr.drive_lag, 0.0);
+  EXPECT_DOUBLE_EQ(sr.drag, 0.0);
+  EXPECT_DOUBLE_EQ(sr.rolling_resistance, 0.0);
+  EXPECT_DOUBLE_EQ(cvc::physics::nav_plant::dyn_bike_si_of(rr, 0.9, 1.0, 0.05).drive_lag, 0.05);
+  EXPECT_NEAR(sr.tire_B_rear * sr.tire_C * rr.tire_peak_slip_angle,
+              cvc::physics::nav_plant::kJoltTireStiffness, 1e-9);
   std::printf("  Humvee: %.0f kg, Iz %.0f kg m^2, lf %.2f m, lr %.2f m, h %.2f m, B %.1f/%.1f, "
               "C %.3f, brake front %.2f\n",
               si.mass, si.yaw_inertia, si.cg_to_front, si.cg_to_rear, si.cg_height, si.tire_B_front,
@@ -499,14 +519,16 @@ TEST(DynBike, OversteerWhenBrakingInATurn) {
 }
 
 // Gate 4c: however hard it is steered, the steady lateral acceleration stays under mu g.
+// The lateral acceleration is the body's, vy' + r vx: past its limit the vehicle drifts, where vx r
+// alone overstates it.
 TEST(DynBike, SteadyLateralNeverExceedsMuG) {
   for (const double mu : {0.4, 0.9}) {
     const dyn_bike_params p = humvee(mu);
     double peak = 0.0;
     for (double delta = 0.05; delta <= 0.6; delta += 0.05) {
-      double ay, kappa;
-      steady_turn(p, 20.0, delta, ay, kappa, 15.0);
-      peak = std::max(peak, std::fabs(ay));
+      double ay, kappa, a_body;
+      steady_turn(p, 20.0, delta, ay, kappa, 15.0, &a_body);
+      peak = std::max(peak, std::fabs(a_body));
     }
     std::printf("  mu %.1f: the steadiest lateral acceleration %.2f m/s^2 against mu g %.2f\n", mu,
                 peak, mu * kG);
