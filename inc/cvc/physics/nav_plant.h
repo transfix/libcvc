@@ -122,15 +122,26 @@ public:
   //   - mass; yaw inertia of the chassis box, m (hx^2 + hy^2) / 3;
   //   - the centre of gravity's distances to the front (steered) and rear axles, and its height
   //     as terrain_config_of has it;
-  //   - Pacejka B and C from the tires' peak slip angle and sliding fraction: sin(C pi / 2) is
-  //     tire_sliding, and the force peaks at tire_peak_slip_angle. vehicle_desc has one tire,
-  //     so `front_stiffness` scales the front's B: a road vehicle's understeer comes from the
-  //     front's load sensitivity and steering compliance, which the single track leaves out;
+  //   - Pacejka C from the tires' sliding fraction (sin(C pi / 2) is tire_sliding) and B fitted to
+  //     how Jolt's tires corner. Jolt's lateral friction ramps linearly to its peak at
+  //     tire_peak_slip_angle, a cornering stiffness of 1 / alpha_peak per unit load, and a Pacejka
+  //     tire peaking at the same angle starts 4.5x steeper (B C = C tan(pi / 2C) / alpha_peak).
+  //     So B C = k / alpha_peak with k = kJoltTireStiffness (1.12), fitted to the one-tick
+  //     residual of Jolt runs of the Humvee and the RoboRacer (libcvc #749's fit_dyn_bike;
+  //     held-out twist residual about 11x lower than with the 4.5x tire). `front_stiffness`
+  //     scales the front's B; Jolt's tires have no load sensitivity or steering compliance, and
+  //     the fit puts front and rear alike (1);
   //   - the drive split from which axles are driven, the brake split from the axles' brake
   //     torques; drag 1/2 rho C_d A and the rolling resistance;
-  //   - the steering's rate; `drive_lag` for the force (nav_plant_options::latency's default).
+  //   - the steering's rate; `drive_lag` for the force, < 0 for the vehicle's own: a direct drive
+  //     (one gear, no torque converter) answers within the tick (0), a geared drive through a
+  //     converter takes 0.1 s (nav_plant_options::latency's default);
+  //   - for a direct drive, no drag or rolling resistance: the driver model's integral trim tracks
+  //     the commanded acceleration and makes up for them, so the commanded acceleration is the
+  //     achieved one (the RoboRacer's fit: lag 0, resistance x0; the Humvee's keeps both).
+  static constexpr double kJoltTireStiffness = 1.12;
   static cvc::nav::dyn_bike_si dyn_bike_si_of(const vehicle_desc &d, double mu = 0.9,
-                                              double front_stiffness = 0.85, double drive_lag = 0.1,
+                                              double front_stiffness = 1.0, double drive_lag = -1.0,
                                               double gravity = 9.80665);
 
   // The same vehicle in a normalized frame where its wheelbase is `wheelbase`: S =

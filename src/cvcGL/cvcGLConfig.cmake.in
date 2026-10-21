@@ -63,6 +63,10 @@ endif()
 # built without SDL3. SDL3's config guards its own target, so this is idempotent.
 @CVCGL_SDL_DEP@
 
+# A static cvcGL built with turbojpeg (the mjpeg conference codec) names libjpeg-turbo's target in
+# its link interface, so consumers must re-find it. Empty for a shared cvcGL or one built without it.
+@CVCGL_TURBOJPEG_DEP@
+
 include("${CMAKE_CURRENT_LIST_DIR}/cvcGLTargets.cmake")
 
 # WebAssembly app support: cvcgl_wasm_app(<target> ...) (cvcGLWasm.cmake, next to this file).

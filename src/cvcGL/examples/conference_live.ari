@@ -1,23 +1,20 @@
-# conference_live.ari — a LIVE two-instance conference, driven entirely from the DSL.
+# conference_live.ari — a LIVE N-PARTY conference, driven entirely from the DSL.
 #
-# Run two CLUSTERED ariadne_conference instances (the host wires the gRPC room cluster + media
-# bridge; see the clustering flags in ariadne_conference.cpp). Each instance joins the room,
-# publishes its own synthetic camera + 440 Hz tone, and subscribes to the peer's camera + audio —
-# so each window shows "me" (my synthetic feed) and "peer" (the other instance's feed, pulled across
-# the process boundary over the merged gRPC stream_bridge, routed only by the replicated room tree).
+# Every CLUSTERED ariadne_conference instance joins the room, publishes its own camera + mic, and
+# discovers EVERY other participant from the replicated room roster, subscribing to each — so each
+# window shows "me" plus one tile per other participant, with tiles appearing/disappearing as people
+# join and leave. No --peer-id: peers are discovered, not named on the command line.
 #
-#   # terminal 1 — node A, serves room-state on :7001, media on an ephemeral port:
-#   ariadne_conference conference_live.ari --node-id A --peer-id B --room standup \
-#       --state-listen 127.0.0.1:7001
-#   # terminal 2 — node B, serves on :7002, dials A's state server:
-#   ariadne_conference conference_live.ari --node-id B --peer-id A --room standup \
-#       --state-listen 127.0.0.1:7002 --state-peer 127.0.0.1:7001
+#   # each friend, on their own machine:
+#   ariadne --name alice --state-peer HOST:7700 --media-server HOST:7701   # (+ --camera --mic)
+#   ariadne --name bob   --state-peer HOST:7700 --media-server HOST:7701
+#   ... everyone in the room sees everyone else.
 #
-# Synthetic + a 440 Hz tone by default (no camera/mic needed); real speaker output on Linux awaits
-# the relocatable-ALSA recipe fix. conf.room / conf.self / conf.peer are set by the host.
+# Video is MJPG-compressed (fits a home uplink); real speaker output on Linux uses the relocatable
+# alsa-lib. conf.room / conf.self are set by the host; cam_live / mic_live reflect --camera / --mic.
 
 meta:
-  name: Ariadne conference (live)
+  name: Ariadne conference (live, N-party)
   author: cvc
   min_libcvc: 3.6.0
 
@@ -31,30 +28,51 @@ windows:
   - window: Me
     id: me
     pos: [20, 20]
-    size: [520, 470]
+    size: [380, 520]
     children:
       - text: "me"
         bind: conf.self
-      # Reactive status: starting -> published (waiting for peer) -> connected.
       - text: "status"
-        bind: (if (= (state-get "joined") "1") (if (= (state-get "subscribed") "1") "● connected — peer video + audio" "● published — waiting for peer…") "starting…")
+        bind: (if (= (state-get "joined") "1") "● in the room" "starting…")
+      - separator
+      # Mic/cam on-off: a button flips the cam_on/mic_on flag and mutes the stream in place
+      # (stream-set-muted blanks the producer at source — black video / silence — without dropping
+      # the publish, so peers stay subscribed). The host-owned --camera stream isn't in the document
+      # table, so stream-set-muted no-ops for it; the host applies cam_on itself from the render loop.
+      - type: button
+        label: "camera on/off"
+        on: (begin (state-set "cam_on" (if (= (state-get "cam_on") "1") "0" "1")) (stream-set-muted (state-get "cam_token") (= (state-get "cam_on") "0")))
+      - text: "camera"
+        bind: (if (= (state-get "cam_on") "1") "● on" "muted")
+      - type: button
+        label: "mic on/off"
+        on: (begin (state-set "mic_on" (if (= (state-get "mic_on") "1") "0" "1")) (stream-set-muted (state-get "mic_token") (= (state-get "mic_on") "0")))
+      - text: "mic"
+        bind: (if (= (state-get "mic_on") "1") "● on" "muted")
       - separator
       - type: stream_view
         bind: cam_token
-        size: 460
-  - window: Peer
-    id: peer
-    pos: [560, 20]
-    size: [520, 470]
+        size: 320
+  - window: Participants
+    id: peers
+    pos: [400, 20]
+    size: [740, 600]
     children:
-      - text: "peer"
-        bind: conf.peer
+      - text: "others in room"
+        bind: peer.count
       - separator
-      # Bound to the proxy token the on_tick lane stores once the peer's stream is subscribed; the
-      # widget re-resolves it each frame, so it shows a placeholder until the peer publishes.
-      - type: stream_view
-        bind: remote_cam_token
-        size: 460
+      # One tile per OTHER participant: the on_tick lane fills peer.<i>.cam with each subscribed
+      # peer's token, peer.<i>.name with their display name, and peer.count with the total, so this
+      # group template is emitted once per peer with {i} bound to the slot index. The name/token
+      # re-resolve each frame (a placeholder until that peer's video arrives).
+      - type: group
+        repeat: (state-get "peer.count")
+        children:
+          - text: "name"
+            bind: peer.{i}.name
+          - type: stream_view
+            bind: peer.{i}.cam
+            size: 320
 
 on_tick: |
   (begin
@@ -62,31 +80,56 @@ on_tick: |
     (if (= (state-get "joined") "1") #f
       (begin
         (state-set "joined" "1")
+        (state-set "cam_on" "1") ; UX toggles start ON (streams open unmuted)
+        (state-set "mic_on" "1")
         (room-join "" (state-get "conf.room") (dict "name" (state-get "conf.self")))
-        ; my camera — id "camera", scoped by this node's document prefix -> a token unique per node.
-        (set cam (stream-open (dict "id" "camera" "codec" "rgba8" "w" 640 "h" 480
-                                    "expected_subscribers" 3)))
-        (state-set "cam_token" (get-attr cam "token"))
-        (stream-capture-camera (get-attr cam "token")
-          (dict "synthetic" #t "w" 640 "h" 480 "hz" 30))
-        (room-publish (state-get "conf.room")
-          (dict "kind" "camera" "token" (get-attr cam "token")))
-        ; my mic — a 440 Hz tone (subscriber_depth >= 8 so a remote player can attach on pull).
+        ; my camera (MJPG). When cam_live the HOST publishes the REAL device camera (it alone knows
+        ; the device resolution) and sets cam_token, so skip the synthetic one.
+        (if (= (state-get "cam_live") "1") #f
+          (begin
+            (set cam (stream-open (dict "id" "camera" "codec" "mjpeg" "w" 640 "h" 480 "stride" 2560
+                                        "expected_subscribers" 3)))
+            (state-set "cam_token" (get-attr cam "token"))
+            (stream-capture-camera (get-attr cam "token")
+              (dict "synthetic" #t "w" 640 "h" 480 "hz" 30 "jpeg" #t))
+            (room-publish (state-get "conf.room")
+              (dict "kind" "camera" "token" (get-attr cam "token")))))
+        ; my mic — the REAL recording device when mic_live, else a hardware-free 440 Hz tone.
         (set mic (stream-open (dict "id" "audio" "codec" "f32" "rate" 48000 "ch" 1
                                     "frames_per_chunk" 1024 "subscriber_depth" 8
                                     "expected_subscribers" 2)))
-        (stream-capture-audio (get-attr mic "token")
-          (dict "rate" 48000 "ch" 1 "frames" 1024 "tone" (dict "hz" 440)))
+        (state-set "mic_token" (get-attr mic "token")) ; so the mic on/off button can mute it
+        (if (= (state-get "mic_live") "1")
+          (stream-capture-audio (get-attr mic "token")
+            (dict "rate" 48000 "ch" 1 "frames" 1024 "device" 0))
+          (stream-capture-audio (get-attr mic "token")
+            (dict "rate" 48000 "ch" 1 "frames" 1024 "tone" (dict "hz" 440))))
         (room-publish (state-get "conf.room")
           (dict "kind" "audio" "token" (get-attr mic "token")))))
-    ; ── phase 2: subscribe to the peer's camera + audio, retried each tick until it has published ──
-    (if (= (state-get "subscribed") "1") #f
+    ; ── phase 2: discover + subscribe EVERY other participant, rebuild the tile slots each tick ──
+    (set idx 0)
+    (for p (room-roster (state-get "conf.room"))
       (begin
-        (set sub (room-subscribe (state-get "conf.room") (state-get "conf.peer") "camera"))
-        (if (get-attr sub "ok")
+        (set pid (get-attr p "pid"))
+        (if (= pid (state-get "conf.self")) #f
           (begin
-            (state-set "remote_cam_token" (get-attr sub "token"))
-            (set asub (room-subscribe (state-get "conf.room") (state-get "conf.peer") "audio"))
-            (stream-play-audio (get-attr asub "token"))
-            (state-set "subscribed" "1"))
-          #f))))
+            ; subscribe this peer's camera + audio ONCE (tracked by sub.<pid>); retried until it has
+            ; published (room-subscribe returns not-ok until the descriptor is replicated + ready).
+            (if (= (state-get (str-concat "sub." pid)) "1") #f
+              (begin
+                (set csub (room-subscribe (state-get "conf.room") pid "camera"))
+                (if (get-attr csub "ok")
+                  (begin
+                    (state-set (str-concat "camtok." pid) (get-attr csub "token"))
+                    (set asub (room-subscribe (state-get "conf.room") pid "audio"))
+                    (stream-play-audio (get-attr asub "token"))
+                    (state-set (str-concat "sub." pid) "1"))
+                  #f)))
+            ; once subscribed, place this peer into the next tile slot
+            (if (= (state-get (str-concat "sub." pid)) "1")
+              (begin
+                (state-set (str-concat "peer." idx ".cam") (state-get (str-concat "camtok." pid)))
+                (state-set (str-concat "peer." idx ".name") (get-attr p "name"))
+                (set idx (+ idx 1)))
+              #f)))))
+    (state-set "peer.count" (str idx)))

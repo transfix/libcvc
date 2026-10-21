@@ -164,6 +164,15 @@ struct MockBackend : Backend {
     rec("seed_grid_tracks");
   }
   std::vector<float> grid_tracks() const override { return grid_tracks_ret; }
+  std::vector<float> seeded_columns;
+  bool seeded_columns_called = false;
+  std::vector<float> grid_columns_ret;
+  void seed_grid_columns(const std::vector<float> &widths) override {
+    seeded_columns = widths;
+    seeded_columns_called = true;
+    rec("seed_grid_columns");
+  }
+  std::vector<float> grid_columns() const override { return grid_columns_ret; }
   BoolEdit menu_item_toggle(const char *l, bool) override {
     rec(std::string("toggle:") + l);
     return {};
@@ -2375,6 +2384,55 @@ TEST(AriadneRuntime, PlainTableGridDoesNotPersistTracks) {
   rt.render();
   EXPECT_FALSE(mb.seeded_tracks_called);
   EXPECT_EQ(cvc::state::instance(app)("ui.demo.tree.Table.tracks").value(), ""); // never written
+}
+
+TEST(AriadneRuntime, ResizableTableColumnsSeedAndPersist) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  // A resizable grid with column tracks and no row tracks is a resizable table: its column widths
+  // take the same two-way edge as a row split's panes, under tree.<id>.columns.
+  Widget g = group({text("a"), text("b")});
+  g.id = "Table";
+  g.layout.kind = LayoutKind::Grid;
+  g.layout.resizable = true;
+  g.layout.col_widths = {Track{Unit::Px, 100.0f}, Track{Unit::Percent, 100.0f}};
+  cvc::state::instance(app)("ui.demo.tree.Table.columns").value(std::string("90,210"));
+  mb.grid_columns_ret = {120.0f, 0.0f}; // dragged column 1; column 2 not set
+  rt.set_root(group({g}));
+  rt.render();
+  ASSERT_TRUE(mb.seeded_columns_called);
+  ASSERT_EQ(mb.seeded_columns.size(), 2u);
+  EXPECT_FLOAT_EQ(mb.seeded_columns[0], 90.0f);
+  EXPECT_FLOAT_EQ(mb.seeded_columns[1], 210.0f);
+  EXPECT_FALSE(mb.seeded_tracks_called) << "a table has no row-split tracks";
+  EXPECT_EQ(cvc::state::instance(app)("ui.demo.tree.Table.columns").value(), "120,0");
+  EXPECT_EQ(cvc::state::instance(app)("ui.demo.tree.Table.tracks").value(), "");
+}
+
+TEST(AriadneRuntime, OnlyAResizableTablePersistsColumns) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  Widget fixed = group({text("a"), text("b")}); // not resizable: nothing to drag
+  fixed.id = "Fixed";
+  fixed.layout.kind = LayoutKind::Grid;
+  fixed.layout.col_widths = {Track{Unit::Px, 100.0f}, Track{Unit::Px, 100.0f}};
+  Widget split = group({text("top"), text("bottom")}); // a row split: tracks, not columns
+  split.id = "Split";
+  split.layout.kind = LayoutKind::Grid;
+  split.layout.resizable = true;
+  split.layout.row_heights = {Track{Unit::Px, 80.0f}, Track{Unit::Px, 80.0f}};
+  cvc::state::instance(app)("ui.demo.tree.Fixed.columns").value(std::string("1,2"));
+  cvc::state::instance(app)("ui.demo.tree.Split.columns").value(std::string("3,4"));
+  mb.grid_columns_ret = {5.0f, 6.0f}; // even if the backend reported widths, the core ignores them
+  rt.set_root(group({fixed, split}));
+  rt.render();
+  EXPECT_FALSE(mb.seeded_columns_called);
+  EXPECT_EQ(cvc::state::instance(app)("ui.demo.tree.Fixed.columns").value(), "1,2");
+  EXPECT_EQ(cvc::state::instance(app)("ui.demo.tree.Split.columns").value(), "3,4");
 }
 
 TEST(AriadneRuntime, WindowWithNoGeometryNeitherSeedsNorWrites) {

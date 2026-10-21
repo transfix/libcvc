@@ -82,6 +82,8 @@ emcmake cmake -G Ninja \
     -DCVC_ENABLE_CUDA=OFF \
     -DCVC_BUILD_TESTS=OFF \
     -DCVC_BUILD_CLI=OFF \
+    `# ari (the terminal runner) has its own recipe; without FTXUI here its wasm link fails` \
+    -DCVC_BUILD_ARI=OFF \
     -DCVC_ENABLE_OPENMP=OFF \
     -DDISABLE_CGAL=ON \
     -DCVC_USING_HDF5=OFF \

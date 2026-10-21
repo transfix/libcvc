@@ -185,7 +185,13 @@ using WidgetEmitFn = std::function<void(const Widget &w, const WidgetEmitContext
 // register_ari_block registries.
 void register_widget_type(const std::string &type, WidgetEmitFn emit);
 
-// Whether a custom widget `type` has a registered emit fn (test/introspection).
+// Mark `type` as a KNOWN widget type that a BACKEND renders natively (e.g. ImGuiBackend's
+// register_widget — a raw-ImGui widget like `stream_view`), so the loader does not warn that it is
+// unregistered and has_widget_type() reports it present. No compositional emit fn is involved.
+void register_known_widget_type(const std::string &type);
+
+// Whether a custom widget `type` is registered — either a compositional emit fn
+// (register_widget_type) or a backend-native widget (register_known_widget_type).
 bool has_widget_type(const std::string &type);
 
 // --- extensibility: the `init:` block (a state_exec script run on load) -------

@@ -38,6 +38,7 @@
 // closes it).
 
 #include <memory>
+#include <set>
 #include <string>
 
 namespace cvc {
@@ -47,24 +48,34 @@ namespace ariadne {
 namespace stream {
 class stream;
 class stream_bridge;
+class stream_relay;
 } // namespace stream
 
 namespace conference {
 
 // Register the (room-publish)/(room-subscribe) verbs against BRIDGE (which must outlive the app's
 // documents) and LOCAL_ENDPOINT (the address peers reach BRIDGE's transport at — its
-// transport.listen_address() after start()).
+// transport.listen_address() after start()). RELAY_ENDPOINT, when non-empty, switches to SFU mode:
+// (room-publish) PUSHES the stream to that relay and advertises the RELAY as its source, so every
+// client reaches media through the server and never peer-to-peer (NAT-safe). Empty = mesh
+// (default).
 void register_room_media_intrinsics(cvc::app &app, cvc::ariadne::stream::stream_bridge &bridge,
-                                    const std::string &local_endpoint);
+                                    const std::string &local_endpoint,
+                                    const std::string &relay_endpoint = std::string());
 
 // ── the media model as reusable free functions (the verbs wrap these; tests call them directly) ──
 
-// Publish: serve LOCAL on BRIDGE and advertise its descriptor (endpoint + token + id + scope +
-// format) under participant PID's streams/<kind> in ROOM. Returns false only on a bad argument.
+// Publish LOCAL into participant PID's streams/<kind> in ROOM and advertise its descriptor
+// (endpoint
+// + token + id + scope + format). MESH (RELAY_ENDPOINT empty): serve_port LOCAL on BRIDGE and
+// advertise LOCAL_ENDPOINT. SFU (RELAY_ENDPOINT set): serve (push) LOCAL to RELAY_ENDPOINT and
+// advertise RELAY_ENDPOINT, so subscribers pull the relayed copy from the server. False on bad
+// args.
 bool room_publish(cvc::app &app, cvc::ariadne::stream::stream_bridge &bridge,
                   const std::string &local_endpoint, const std::string &room_id,
                   const std::string &pid, const std::string &kind,
-                  cvc::ariadne::stream::stream &local);
+                  cvc::ariadne::stream::stream &local,
+                  const std::string &relay_endpoint = std::string());
 
 // Subscribe: read participant TARGET_PID's KIND descriptor from ROOM, open a local proxy sized to
 // its advertised format (and sharing its token so the pull routes), and pull TARGET_PID's frames
@@ -73,6 +84,14 @@ bool room_publish(cvc::app &app, cvc::ariadne::stream::stream_bridge &bridge,
 std::unique_ptr<cvc::ariadne::stream::stream>
 room_subscribe(cvc::app &app, cvc::ariadne::stream::stream_bridge &bridge,
                const std::string &room_id, const std::string &target_pid, const std::string &kind);
+
+// Relay-server tick: scan ROOM's published stream descriptors and, for each one not yet in RELAYED,
+// open an SFU relay for it on RELAY (ingest the publisher's pushed frames, fan out to subscribers)
+// and record its "<pid>/<kind>" key in RELAYED. Call this each tick from the relay server's loop;
+// it is idempotent (RELAYED guards re-relaying, and stream_relay::relay itself is idempotent per
+// id).
+void room_relay_tick(cvc::app &app, const std::string &room_id,
+                     cvc::ariadne::stream::stream_relay &relay, std::set<std::string> &relayed);
 
 } // namespace conference
 } // namespace ariadne

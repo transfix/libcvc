@@ -85,6 +85,27 @@ target_include_directories(cvcGL PUBLIC
 )
 target_link_libraries(cvcGL PUBLIC cvc::cvc ${VTK_LIBRARIES})
 
+# libjpeg-turbo: conference video compression (jpeg_codec.cpp / jpeg_encode_source.cpp / the mjpeg
+# stream_view decode path). Optional at build time — where the prefix has no turbojpeg the codec
+# compiles to a no-op (the "mjpeg" path then yields no video); native builds that need it ship it.
+find_package(libjpeg-turbo CONFIG QUIET)
+# Shared/native prefixes expose libjpeg-turbo::turbojpeg; static-only prefixes (e.g. the
+# wasm dep closure) expose only libjpeg-turbo::turbojpeg-static. The config being FOUND does
+# not guarantee a particular target exists, so pick whichever one it actually defined.
+set(_cvc_turbojpeg_tgt "")
+if(TARGET libjpeg-turbo::turbojpeg)
+  set(_cvc_turbojpeg_tgt libjpeg-turbo::turbojpeg)
+elseif(TARGET libjpeg-turbo::turbojpeg-static)
+  set(_cvc_turbojpeg_tgt libjpeg-turbo::turbojpeg-static)
+endif()
+if(_cvc_turbojpeg_tgt)
+  target_link_libraries(cvcGL PRIVATE ${_cvc_turbojpeg_tgt})
+  target_compile_definitions(cvcGL PRIVATE CVC_HAVE_TURBOJPEG=1)
+  message(STATUS "cvcGL: libjpeg-turbo found (${_cvc_turbojpeg_tgt}) -- conference video (mjpeg) enabled")
+else()
+  message(STATUS "cvcGL: libjpeg-turbo turbojpeg target NOT found -- mjpeg video disabled (no-op codec)")
+endif()
+
 # LowMemoryPolyDataMapper carries a replica of VTK 9.5.0's private low-memory
 # cell-type agents, valid only against an UNPATCHED 9.5.0 (the contract is in
 # inc/cvc/gl/LowMemoryPolyDataMapper.h). The version number cannot tell a
@@ -348,6 +369,15 @@ else()
   set(CVCGL_SDL_DEP "")
 endif()
 
+# @CVCGL_TURBOJPEG_DEP@ — a find_dependency(libjpeg-turbo) line iff a STATIC cvcGL linked
+# turbojpeg: its export then names that target ($<LINK_ONLY:...>); a shared cvcGL keeps it private.
+get_target_property(_cvcgl_type cvcGL TYPE)
+if(_cvc_turbojpeg_tgt AND _cvcgl_type STREQUAL "STATIC_LIBRARY")
+  set(CVCGL_TURBOJPEG_DEP "find_dependency(libjpeg-turbo CONFIG)")
+else()
+  set(CVCGL_TURBOJPEG_DEP "")
+endif()
+
 # Substitutes @CVCGL_VTK_COMPONENTS@ (the list cvcGL links) into the config so
 # find_dependency(VTK COMPONENTS ...) re-finds the same modules for consumers.
 # PATH_VARS: @PACKAGE_CVCGL_WASM_DATADIR@ is computed from the INSTALLED config's own location
@@ -513,6 +543,13 @@ add_test(NAME cvcgl_teardown COMMAND cvcgl_teardown)
 add_executable(cvcgl_light_state_thread test/cvcgl_light_state_thread.cpp)
 target_link_libraries(cvcgl_light_state_thread PRIVATE cvcGL)
 add_test(NAME cvcgl_light_state_thread COMMAND cvcgl_light_state_thread)
+
+# A node with no scene must not run its handlers on another thread: the
+# publisher's worker can flush a stale pose into a node that addGraphicsChild()
+# has constructed but not yet attached.
+add_executable(cvcgl_unattached_node_thread test/cvcgl_unattached_node_thread.cpp)
+target_link_libraries(cvcgl_unattached_node_thread PRIVATE cvcGL)
+add_test(NAME cvcgl_unattached_node_thread COMMAND cvcgl_unattached_node_thread)
 
 # A node's own pose, published and flushed back from off the owner thread, must
 # not rewind it. Guards the echo check in GraphicsNode::handleStateChanged.
@@ -774,6 +811,12 @@ add_executable(cvcgl_terminal_scene test/cvcgl_terminal_scene.cpp)
 target_link_libraries(cvcgl_terminal_scene PRIVATE cvcGL)
 add_test(NAME cvcgl_terminal_scene COMMAND cvcgl_terminal_scene)
 
+# ImGuiBackend's table-column persistence (tree.<id>.columns, §11.4) on a bare ImGui context: a
+# resizable table seeds its widths from state and reports them back. No window, no GL.
+add_executable(cvcgl_imgui_table_columns test/cvcgl_imgui_table_columns.cpp)
+target_link_libraries(cvcgl_imgui_table_columns PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_table_columns COMMAND cvcgl_imgui_table_columns)
+
 # Ariadne physics: / body: (WORLD-GEOMETRY-ROADMAP.md, G5): a spec's crate lands where the
 # heightfield node draws the ground. Headless; the dynamics need Jolt.
 add_executable(cvcgl_ariadne_physics test/cvcgl_ariadne_physics.cpp)
@@ -1012,7 +1055,8 @@ get_property(_cvcgl_gl_tests DIRECTORY PROPERTY TESTS)
 list(REMOVE_ITEM _cvcgl_gl_tests
   cvcgl_smoke cvcgl_metadata_mirror cvcgl_volume_range cvcgl_traversal cvcgl_x11_macros
   cvcgl_grid_bounds cvcgl_bounds_walk cvcgl_scene_chrome cvcgl_remove
-  cvcgl_teardown cvcgl_light_state_thread cvcgl_pose_echo cvcgl_physics_scene_binding
+  cvcgl_teardown cvcgl_light_state_thread cvcgl_unattached_node_thread cvcgl_pose_echo
+  cvcgl_physics_scene_binding
   cvcgl_world_geometry_nodes cvcgl_ariadne_physics
   cvcgl_node_outlives_scene cvcgl_texture cvcgl_texture_zerocopy
   cvcgl_stream_texture cvcgl_state_publisher cvcgl_nav_stats_publish
@@ -1025,6 +1069,18 @@ list(REMOVE_ITEM _cvcgl_gl_tests
   cvcgl_stream_bind cvcgl_stream_view
   cvcgl_camera_source cvcgl_audio_source cvcgl_audio_output)
 set_tests_properties(${_cvcgl_gl_tests} PROPERTIES RESOURCE_LOCK cvcgl_gl_context)
+
+# ── GL tests: sync-to-vblank off ──
+# NVIDIA's GLX driver throttles buffer swaps of an unmapped (offscreen) window to
+# about one per second while sync-to-vblank is on, which turns an offscreen GL
+# test into minutes of wall time for seconds of CPU (cvcgl_streaming_overlays:
+# 4m15s wall for 1.7 s CPU; 4.7 s with it off). Mesa reads vblank_mode; other
+# drivers ignore both. Set on every test here (a headless one ignores it) rather
+# than by each test before its first GL context: no test can miss it and no test
+# needs setenv. ctest's ENVIRONMENT wins over the caller's, so to time a test
+# with vsync on, run its binary directly.
+get_property(_cvcgl_tests DIRECTORY PROPERTY TESTS)
+set_property(TEST ${_cvcgl_tests} APPEND PROPERTY ENVIRONMENT __GL_SYNC_TO_VBLANK=0 vblank_mode=0)
 
 # ── examples (opt-in, OFF by default) ──
 # Standalone C++ programs that drive cvcGL directly — SceneGraph + SceneRenderer

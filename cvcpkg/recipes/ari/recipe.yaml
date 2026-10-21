@@ -1,7 +1,7 @@
 schema_version: 1
 recipe:
   name: ari
-  upstream_version: "3.6.0"
+  upstream_version: "3.7.0"
   cvc_revision: 1
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
@@ -16,11 +16,11 @@ recipe:
 # the libcvc SDK bundle. It builds src/ari standalone against the installed libcvc
 # SDK (find_package(cvc CONFIG)) and installs just bin/ari; libcvc is never rebuilt.
 #
-# The terminal backend and the .ari loader live in libcvc itself (cvc::ariadne,
-# with FTXUI and yaml-cpp as libcvc's own optional deps), so ari needs nothing but
-# libcvc. Linux only for now: the libcvc recipe declares ftxui for linux only
-# (cy-pca/cvcpkg #111). A macOS / Windows ari would build, but only print that its
-# libcvc has no terminal backend; add those platforms when libcvc's ftxui does.
+# The terminal backends and the .ari loader live in libcvc itself (cvc::ariadne,
+# with FTXUI, tvision and yaml-cpp as libcvc's own optional deps), so ari needs
+# nothing but libcvc. It builds wherever libcvc declares ftxui and yaml-cpp:
+# linux, macos and windows. `--backend tvision` needs libcvc's tvision dep, also
+# declared on all three.
 
 source:
   # Co-located with the libcvc source tree; build.sh points cmake at src/ari.
@@ -43,11 +43,18 @@ build:
   matrix:
     - platform: linux
       script: build.sh
+    - platform: macos
+      script: build.sh
+      env:
+        MACOSX_DEPLOYMENT_TARGET: "13.0"
+    - platform: windows
+      script: build.ps1
 
 package:
-  # Just the `ari` executable. No cmake package config — ari is an application.
+  # Just the `ari` executable (bin/ari, bin/ari.exe on Windows). No cmake package
+  # config — ari is an application.
   files:
-    - bin/ari
+    - bin/ari*
 
 abi:
   cxx_std: 20

@@ -21,6 +21,7 @@
 #include <limits>
 #include <unordered_map>
 #include <vtkActor.h>
+#include <vtkCamera.h>
 #include <vtkCameraPass.h>
 #include <vtkDataObject.h>
 #include <vtkGPUVolumeRayCastMapper.h>
@@ -802,6 +803,16 @@ constexpr double kDeg = 3.14159265358979323846 / 180.0;
 // "infinite" directional light: a scene light is positional-or-not, and a
 // non-positional one uses position-minus-focal-point as its direction.
 constexpr double kSunDistance = 1.0e4;
+
+// Where a non-positional vtkLight aimed at the origin sits for a sun at
+// (azimuth, elevation). Both kinds of directional light go through this, so a
+// LightNode sun and an addDirectionalLight sun are the same vtkLight.
+void sunPosition(double azimuthDeg, double elevationDeg, double p[3]) {
+  const double ce = std::cos(elevationDeg * kDeg), se = std::sin(elevationDeg * kDeg);
+  p[0] = kSunDistance * ce * std::sin(azimuthDeg * kDeg);
+  p[1] = -kSunDistance * ce * std::cos(azimuthDeg * kDeg);
+  p[2] = kSunDistance * se;
+}
 } // namespace
 
 std::shared_ptr<cvc::gl::LightNode> SceneGraph::addLight(const std::string &name) {
@@ -855,9 +866,9 @@ void SceneGraph::applyLights() {
       light->SetConeAngle(l.cone);
     } else {
       light->SetPositional(false); // directional: only the direction matters
-      const double ce = std::cos(l.el * kDeg), se = std::sin(l.el * kDeg);
-      light->SetPosition(kSunDistance * ce * std::sin(l.az * kDeg),
-                         -kSunDistance * ce * std::cos(l.az * kDeg), kSunDistance * se);
+      double sp[3];
+      sunPosition(l.az, l.el, sp);
+      light->SetPosition(sp);
       light->SetFocalPoint(0.0, 0.0, 0.0);
     }
     light->SetColor(l.r, l.g, l.b);
@@ -882,9 +893,16 @@ void SceneGraph::applyLights() {
     vtkSmartPointer<vtkLight> light = vtkSmartPointer<vtkLight>::New();
     light->SetLightTypeToSceneLight();
     if (ln->kind() == cvc::gl::LightNode::Kind::Directional) {
+      // A sun is aimed by its azimuth/elevation alone. VTK takes a non-positional
+      // light's direction from position minus focal point, and those used to be the
+      // node's position and target, both the origin unless someone moved them: a
+      // zero vector, so a declared sun added no light and its angles did nothing.
+      double az, el, sp[3];
+      ln->direction(az, el);
+      sunPosition(az, el, sp);
       light->SetPositional(false);
-      light->SetPosition(px, py, pz);
-      light->SetFocalPoint(tx, ty, tz);
+      light->SetPosition(sp);
+      light->SetFocalPoint(0.0, 0.0, 0.0);
     } else {
       light->SetPositional(true);
       light->SetPosition(px, py, pz);
@@ -1284,6 +1302,18 @@ vtkStandardNewMacro(StridedShadowBaker);
 // hands its opaque sequence every visible prop; this one passes on only those
 // GraphicsNode::propCastsShadow() accepts, so a non-caster is left out of the
 // maps rather than frozen into them at its last-baked pose.
+//
+// It also squares the light's camera. The baker makes the light's camera the
+// active one and runs this pass to fill the map, so the projection is the one
+// vtkOpenGLCamera::GetKeyMatrices builds, at the RENDERER's aspect
+// (ren->GetTiledAspectRatio()). vtkShadowMapPass then looks the map up through
+// the same camera at aspect 1 (GetProjectionTransformObject(1, -1, 1)). In a
+// view that is not square the two disagree: every receiver reads the depth of a
+// point stretched sideways from it by the window's aspect, often one nearer the
+// light, so a lit surface shadows itself (under a sun, a ball dark but for a
+// rim and wedges across a box's lit faces; spots the same). The tests' square
+// windows hid it. Pinned at aspect 1, the bake matches the lookup at any window
+// shape, and a resize leaves the maps valid.
 class ShadowCasterFilterPass : public vtkRenderPass {
 public:
   static ShadowCasterFilterPass *New();
@@ -1295,6 +1325,10 @@ public:
     this->NumberOfRenderedProps = 0;
     if (!this->Delegate || !s)
       return;
+    if (vtkCamera *light = s->GetRenderer()->GetActiveCamera()) {
+      light->SetUseExplicitAspectRatio(true); // vtkSetMacro: no MTime bump once set
+      light->SetExplicitAspectRatio(1.0);
+    }
     m_props.clear();
     vtkProp **all = s->GetPropArray();
     for (int i = 0; i < s->GetPropArrayCount(); ++i)

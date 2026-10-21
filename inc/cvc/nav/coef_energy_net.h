@@ -54,12 +54,30 @@
 namespace cvc {
 namespace nav {
 
+// A version-2 .cvcnm's belief block (docs/roadmap/NAV-BELIEF-MATERIAL-ROADMAP.md §6): what a net
+// on belief (observed) material was trained with. Written after `eps` as <IIfIIff>, matching
+// GRL-SNAM's matnet_export.BeliefHeader. A version-1 file reads as the defaults with
+// risk_channels 2 (every cell seen).
+struct cvcnm_belief_header {
+  std::uint32_t risk_channels = 2;     // 2 = [r~, hard]; 3 = [r~, hard, seen]
+  std::uint32_t seen_rule = 0;         // 0 raycast, 1 disc (belief_material.h seen_rule)
+  float unknown_risk = 0.0f;           // the pinned unseen risk the net was trained with
+  std::uint32_t unknown_hard = 0;      // 0 or 1
+  std::uint32_t unknown_gate_hard = 1; // 0 or 1
+  float material_range_m = 0.0f;       // 0 = the sense range
+  float patch_extent_m = 0.0f;         // world metres the P x P model patch spans; 0 = not recorded
+};
+
 class coef_energy_net {
 public:
-  static constexpr std::uint32_t kFormatVersion = 1;
+  static constexpr std::uint32_t kFormatVersion = 1;       // a 2-channel net
+  static constexpr std::uint32_t kFormatVersionBelief = 2; // a 3-channel net + its belief block
 
-  // Load a .cvcnm from disk / memory. Throws std::runtime_error on bad
-  // magic / version / truncation / missing tensor.
+  // Load a .cvcnm from disk / memory. Version 1 is a 2-channel net; version 2 adds the belief
+  // block and is required for 3 channels (a pre-belief reader refuses it instead of reading a
+  // 3-channel encoder with 2-channel strides). Every tensor's shape is checked against the
+  // hyperparams, and the risk encoder's input channels against the header. Throws
+  // std::runtime_error on bad magic / version / truncation / a missing or misshapen tensor.
   static coef_energy_net load(const std::string &path);
   static coef_energy_net load_from_memory(const void *data, std::size_t nbytes);
 
@@ -67,7 +85,8 @@ public:
   //   obs_feats  [n_obs*6]   per-obstacle [cx,cy,R_eff,W,goal_x-cx,goal_y-cy]
   //   obs_mask   [n_obs]     nonzero = valid obstacle (n_obs may be 0)
   //   goal_feats [4]         [dx,dy,dist,1.0]
-  //   risk_patch [2*P*P]     ch0 = smoothed risk, ch1 = hard mask (P = patch_size)
+  //   risk_patch [C*P*P]     C = risk_channels(): ch0 = smoothed risk, ch1 = hard mask, and
+  //                          with 3 channels ch2 = seen (P = patch_size)
   // Outputs:
   //   alphas_out [n_obs]     per-obstacle barrier weight (0 for masked)
   //   *beta,*gamma           goal spring / damping
@@ -80,7 +99,7 @@ public:
 
   // Batched over n agents with ragged obstacle lists. obs_offsets[n+1] indexes
   // into obs_feats [total*6] / obs_mask [total] / alphas_out [total];
-  // goal_feats [n*4]; risk_patch [n*2*P*P]; beta/.../mu_lat [n]. Agents are
+  // goal_feats [n*4]; risk_patch [n*C*P*P]; beta/.../mu_lat [n]. Agents are
   // independent — fanned across num_threads. patch_p = P.
   void forward_batch(const float *obs_feats, const std::uint8_t *obs_mask, const int *obs_offsets,
                      int n, const float *goal_feats, const float *risk_patch, int patch_p,
@@ -88,6 +107,16 @@ public:
                      float *mu_lat, int num_threads = 0) const;
 
   int patch_size() const { return patch_size_; }
+  // The risk encoder's input channels (2, or 3 with the seen channel) and the belief block (a
+  // version-1 file: the defaults, risk_channels 2). meta() is the file's UTF-8 trailer, kept on
+  // load and written back by serialize().
+  int risk_channels() const { return static_cast<int>(belief_.risk_channels); }
+  const cvcnm_belief_header &belief_header() const { return belief_; }
+  const std::string &meta() const { return meta_; }
+  void set_meta(const std::string &m) { meta_ = m; }
+  // Replace the belief block (training settings). Its risk_channels must equal the encoder's
+  // input channels; throws std::invalid_argument otherwise.
+  void set_belief_header(const cvcnm_belief_header &h);
   std::uint64_t arch_hash() const { return arch_hash_; }
   float lam_soft_max() const { return lam_soft_max_; }
   float lam_hard_max() const { return lam_hard_max_; }
@@ -122,16 +151,18 @@ public:
 
   // Serialize to the .cvcnm container — the exact byte layout load_from_memory
   // reads and GRL-SNAM matnet_export.py writes (magic "CVNM", the hyperparams,
-  // then name-keyed f32 tensors). The arch_hash is preserved (the architecture
-  // is unchanged by training). Round-trips: load_from_memory(serialize()) has
-  // byte-identical weights. Used to checkpoint a C++-trained policy.
+  // then name-keyed f32 tensors, then the meta trailer). A 2-channel net is written
+  // as version 1, byte-identical to before; a 3-channel net as version 2 with its
+  // belief block. The arch_hash is preserved (the architecture is unchanged by
+  // training). Round-trips: load_from_memory(serialize()) has byte-identical weights.
+  // Used to checkpoint a C++-trained policy.
   std::vector<unsigned char> serialize() const;
   void save(const std::string &path) const;
 
   // ── CUDA twin (defined in coef_energy_net.cu; CVC_ENABLE_CUDA only) ──────────
   // Batched device forward, float-equivalent to forward_batch (same ragged
   // obs_offsets layout: obs_feats [total*6] / obs_mask [total] / alphas_out
-  // [total]; goal_feats [n*4]; risk_patch [n*2*P*P]; beta/.../mu_lat [n]). One
+  // [total]; goal_feats [n*4]; risk_patch [n*C*P*P]; beta/.../mu_lat [n]). One
   // CUDA block per agent, d_tok threads cooperating; the CNN activations live in
   // per-agent device scratch. Validated vs the CPU forward by
   // nav_coef_energy_cuda_test (FLOAT tier). Throws if built without CUDA or no
@@ -169,6 +200,9 @@ private:
   int d_tok_ = 64, nhead_ = 4, num_layers_ = 2, d_risk_ = 64, patch_size_ = 32;
   float lam_soft_max_ = 5.0f, lam_hard_max_ = 10.0f, mu_lat_max_ = 5.0f, eps_ = 1e-5f;
   std::uint64_t arch_hash_ = 0;
+  cvcnm_belief_header belief_;
+  std::string meta_;
+  void validate_shapes() const; // every known tensor against the hyperparams (load)
 };
 
 // True when this build has CUDA AND a device is present (so forward_batch_cuda

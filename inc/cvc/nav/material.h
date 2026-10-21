@@ -230,6 +230,47 @@ void drive_step_material_ext(const field_stack &f, float *o, float *th, float *s
                              float *minclr_out, int num_threads = 0,
                              drive_telemetry *tel = nullptr);
 
+// ── an external force in the material rollouts ───────────────────────────────
+// The deployed drive takes an external force alongside the material one
+// (drive_step_material_ext with an ext_force, a hook for a caller's own force). material_ext puts
+// the same force in the material trainer's rollouts, so the material heads learn in the
+// presence of the force they face at deploy. Positions are the batch's: the frame and
+// units of o, C and the rollout patch. F_ext joins
+//   - the surrogate's force sum, ftot + F_ext (a point mass: `steer` has nothing to act on);
+//   - the bicycle's and the dynamic vehicle's F = F_bar + F_goal + F_mat + F_ext, before
+//     the division by mass (which the deployed drive does not make: the two agree at mass
+//     1), and with `steer` their steering bias, (F_rep + F_mat + F_ext) . left, as
+//     drive_step_material_ext adds ext_force.
+// A null material_ext is the rollout without one, bit for bit. Exactly one source:
+//   - `patch`: K force patches per agent, two channels (fx, fy) each on the rollout patch's
+//     grid (Hp, Wp, centred on the start), [B*K*2*Hp*Wp], sampled bilinearly at the current
+//     position as the rollout patch's channels are. J = dF/do is the patch's own gradient
+//     (zero along a clamped border). `patch_of_step` [B*steps] picks agent b's patch at step
+//     s (a schedule: sources switching on and off); null uses patch 0 throughout.
+//   - `F`: per-step values [B*steps*2], and optionally J [B*steps*4] (dF/do, row-major
+//     (dfx/dox, dfx/doy, dfy/dox, dfy/doy)) for the reverse.
+//   - `sample`: a callback giving F and J at agent b's pose at step s, every `hold` steps
+//     and held between (the diff rollout's bike_ext_fn with an agent index). C++ only. It
+//     runs on the rollout's worker threads, once per sampled step of each forward and of
+//     each VJP's recompute.
+// The VJPs chain J^T dL/dF_ext into the position adjoint (a held window's sum at the step
+// it was sampled), and given g_fext [B*steps*2] ADD dL/dF_ext per step into it. The
+// rollouts throw std::invalid_argument on a malformed channel (no source or more than one,
+// steps < max(H) where a per-step array needs it, J without F, hold < 1, K < 1, a patch
+// index outside [0, K)).
+struct material_ext {
+  const float *patch = nullptr;       // [B*K*2*Hp*Wp]
+  int K = 1;                          // patches per agent
+  const int *patch_of_step = nullptr; // [B*steps], each in [0, K); null = patch 0
+  const float *F = nullptr;           // [B*steps*2]
+  const float *J = nullptr;           // [B*steps*4], optional with F
+  void (*sample)(void *user, int b, int s, float ox, float oy, float *f, float *J) = nullptr;
+  void *user = nullptr;
+  int hold = 1;  // the callback's sampling period, in steps
+  int steps = 0; // the per-step arrays' stride: patch_of_step, F, J and a VJP's g_fext
+  int steer = 1; // F_ext also steers (bicycle and dynamic), as ext_force::steer
+};
+
 // ── obstacle-list material surrogate rollout ────────────────────────────────
 // The faithful torch-free port of the source method's differentiable
 // integrator (GRL-SNAM material_nav.integrate_surrogate_material): explicit
@@ -251,12 +292,15 @@ struct surrogate_material_params {
   float k_sharp = 5.0f;   // 1/m
 };
 
-void integrate_surrogate_material(
-    float *o, float *v, const float *goal, const float *C, const float *R, const std::uint8_t *mask,
-    const float *alphas, const float *beta, const float *gamma, const float *lam_soft,
-    const float *lam_hard, const float *rollout_patch, const float *rr, const float *d_hat,
-    const float *dt, const int *H, int B, int N, int Hp, int Wp, const surrogate_material_params &p,
-    float *min_clear, float *cum_risk, float *hard_count, float *arc_length, int num_threads = 0);
+void integrate_surrogate_material(float *o, float *v, const float *goal, const float *C,
+                                  const float *R, const std::uint8_t *mask, const float *alphas,
+                                  const float *beta, const float *gamma, const float *lam_soft,
+                                  const float *lam_hard, const float *rollout_patch,
+                                  const float *rr, const float *d_hat, const float *dt,
+                                  const int *H, int B, int N, int Hp, int Wp,
+                                  const surrogate_material_params &p, float *min_clear,
+                                  float *cum_risk, float *hard_count, float *arc_length,
+                                  int num_threads = 0, const material_ext *ext = nullptr);
 
 // VJP (reverse-mode adjoint) of integrate_surrogate_material — the P5 training
 // backward. Given upstream grads on the differentiable outputs (oT, vT,
@@ -276,7 +320,8 @@ void integrate_surrogate_material_vjp(
     const float *d_hat, const float *dt, const int *H, int B, int N, int Hp, int Wp,
     const surrogate_material_params &p, const float *g_oT, const float *g_vT,
     const float *g_min_clear, const float *g_cum_risk, const float *g_arc_length, float *g_alphas,
-    float *g_beta, float *g_gamma, float *g_lam_soft, float *g_lam_hard, int num_threads = 0);
+    float *g_beta, float *g_gamma, float *g_lam_soft, float *g_lam_hard, int num_threads = 0,
+    const material_ext *ext = nullptr, float *g_fext = nullptr);
 
 // ── the material rollout on the kinematic bicycle ────────────────────────────
 // The same force law as integrate_surrogate_material, driven through the deployed
@@ -319,7 +364,8 @@ void integrate_bicycle_material(float *o, float *th, float *sp, const float *goa
                                 const float *d_hat, const float *dt, const int *H, int B, int N,
                                 int Hp, int Wp, const surrogate_material_params &p,
                                 const bicycle_material_params &v, float *min_clear, float *cum_risk,
-                                float *hard_count, float *arc_length, int num_threads = 0);
+                                float *hard_count, float *arc_length, int num_threads = 0,
+                                const material_ext *ext = nullptr);
 
 // VJP of integrate_bicycle_material: upstream grads on the differentiable outputs
 // (oT, thT, spT, min_clear, cum_risk, arc_length; any may be null) -> grads w.r.t.
@@ -335,7 +381,8 @@ void integrate_bicycle_material_vjp(
     int Wp, const surrogate_material_params &p, const bicycle_material_params &v, const float *g_oT,
     const float *g_thT, const float *g_spT, const float *g_min_clear, const float *g_cum_risk,
     const float *g_arc_length, float *g_alphas, float *g_beta, float *g_gamma, float *g_lam_soft,
-    float *g_lam_hard, int num_threads = 0);
+    float *g_lam_hard, int num_threads = 0, const material_ext *ext = nullptr,
+    float *g_fext = nullptr);
 
 // L_multi on the bicycle: multi_start_penalty (geom_rollout.h) with its short rollouts
 // driven through integrate_bicycle_material instead of a point mass.
@@ -364,16 +411,14 @@ double multi_start_penalty_bicycle(const float *alphas, const float *beta, const
 // batch's length units; its wheelbase lf + lr must be v.L. Arc length and cumulative risk
 // follow the dynamic path. Like the bicycle, the loop runs to max(H) with a per-agent
 // active gate. CPU only.
-void integrate_dynamic_material(float *o, float *th, float *vx, float *x, const float *goal,
-                                const float *C, const float *R, const std::uint8_t *mask,
-                                const float *alphas, const float *beta, const float *gamma,
-                                const float *lam_soft, const float *lam_hard,
-                                const float *rollout_patch, const float *rr, const float *d_hat,
-                                const float *dt, const int *H, int B, int N, int Hp, int Wp,
-                                const surrogate_material_params &p,
-                                const bicycle_material_params &v, const diff::dyn_bike_params &dyn,
-                                float *min_clear, float *cum_risk, float *hard_count,
-                                float *arc_length, int num_threads = 0);
+void integrate_dynamic_material(
+    float *o, float *th, float *vx, float *x, const float *goal, const float *C, const float *R,
+    const std::uint8_t *mask, const float *alphas, const float *beta, const float *gamma,
+    const float *lam_soft, const float *lam_hard, const float *rollout_patch, const float *rr,
+    const float *d_hat, const float *dt, const int *H, int B, int N, int Hp, int Wp,
+    const surrogate_material_params &p, const bicycle_material_params &v,
+    const diff::dyn_bike_params &dyn, float *min_clear, float *cum_risk, float *hard_count,
+    float *arc_length, int num_threads = 0, const material_ext *ext = nullptr);
 
 // VJP of integrate_dynamic_material: upstream grads on (oT, thT, vxT, xT, min_clear,
 // cum_risk, arc_length; any may be null) -> grads w.r.t. the learned coefficients, ADDED
@@ -388,7 +433,8 @@ void integrate_dynamic_material_vjp(
     const bicycle_material_params &v, const diff::dyn_bike_params &dyn, const float *g_oT,
     const float *g_thT, const float *g_vxT, const float *g_xT, const float *g_min_clear,
     const float *g_cum_risk, const float *g_arc_length, float *g_alphas, float *g_beta,
-    float *g_gamma, float *g_lam_soft, float *g_lam_hard, int num_threads = 0);
+    float *g_gamma, float *g_lam_soft, float *g_lam_hard, int num_threads = 0,
+    const material_ext *ext = nullptr, float *g_fext = nullptr);
 
 // L_multi on the dynamic vehicle: multi_start_penalty_bicycle with its short rollouts
 // through integrate_dynamic_material, each from rest in its x (zeros) and the agent's

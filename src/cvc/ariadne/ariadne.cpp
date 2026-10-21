@@ -211,6 +211,12 @@ std::unordered_map<std::string, WidgetEmitFn> &widget_registry() {
   static std::unordered_map<std::string, WidgetEmitFn> r;
   return r;
 }
+// Widget types a BACKEND renders natively (no compositional emit fn) — so the loader does not warn
+// they are unregistered. Guarded by widget_mutex() like widget_registry().
+std::set<std::string> &known_widget_types() {
+  static std::set<std::string> s;
+  return s;
+}
 WidgetEmitFn lookup_widget(const std::string &type) {
   std::lock_guard<std::mutex> lock(widget_mutex());
   auto it = widget_registry().find(type);
@@ -225,9 +231,17 @@ void register_widget_type(const std::string &type, WidgetEmitFn emit) {
   widget_registry()[type] = std::move(emit);
 }
 
+void register_known_widget_type(const std::string &type) {
+  if (type.empty())
+    return;
+  std::lock_guard<std::mutex> lock(widget_mutex());
+  known_widget_types().insert(type);
+}
+
 bool has_widget_type(const std::string &type) {
   std::lock_guard<std::mutex> lock(widget_mutex());
-  return widget_registry().find(type) != widget_registry().end();
+  return widget_registry().find(type) != widget_registry().end() ||
+         known_widget_types().find(type) != known_widget_types().end();
 }
 
 // --- the init: block runner (state_exec) --------------------------------------
@@ -996,16 +1010,24 @@ void Runtime::Impl::emit_container(const Widget &w) {
   if (w.layout.kind == LayoutKind::Grid || w.layout.kind == LayoutKind::Horizontal) {
     const std::string &id = w.id.empty() ? w.label : w.id;
     // §11.4 two-way track edge: a resizable row-split grid persists its dragged pane sizes to
-    // tree.<id>.tracks. Seed the backend from the persisted sizes before opening (apply-once on the
-    // backend side), then write the post-drag sizes back after closing. A plain table has no
-    // draggable rows, so it neither seeds nor persists.
+    // tree.<id>.tracks, and a resizable table its column widths to tree.<id>.columns. Seed the
+    // backend from the persisted sizes before opening (apply-once on the backend side), then write
+    // the post-drag sizes back after closing. A table that is not resizable has nothing to drag,
+    // so it neither seeds nor persists.
     const bool split = w.layout.is_row_split();
-    std::string tracks_path;
+    const bool table = w.layout.resizable && !split;
+    std::string tracks_path, columns_path;
     if (split) {
       tracks_path = resolve("tree." + id + ".tracks");
       const std::vector<float> seed = parse_tracks(read_string(app, tracks_path));
       if (!seed.empty())
         b.seed_grid_tracks(seed);
+    }
+    if (table) {
+      columns_path = resolve("tree." + id + ".columns");
+      const std::vector<float> seed = parse_tracks(read_string(app, columns_path));
+      if (!seed.empty())
+        b.seed_grid_columns(seed);
     }
     if (b.begin_grid(w.layout, id.c_str())) {
       for (const Widget &c : w.children) {
@@ -1028,6 +1050,11 @@ void Runtime::Impl::emit_container(const Widget &w) {
         const std::vector<float> cur = b.grid_tracks();
         if (!cur.empty())
           write<std::string>(app, tracks_path, format_tracks(cur));
+      }
+      if (table) {
+        const std::vector<float> cur = b.grid_columns();
+        if (!cur.empty())
+          write<std::string>(app, columns_path, format_tracks(cur));
       }
     }
   } else {
@@ -1142,7 +1169,25 @@ void Runtime::Impl::emit_node(const Widget &w) {
     }
     if (have_seed)
       b.seed_window_geometry(seed);
-    const bool visible = b.begin_window(w.label.c_str(), id.c_str(), w.size, w.frame_border,
+    // Raise edge: a one-shot request at tree.<id>.raise (set to "1" by e.g. a "click a user"
+    // handler, alongside tree.<id>.open) brings this window to the front this frame. Consume it so
+    // it fires once (not every frame). Opening a closed window + raising it = set both keys in the
+    // handler.
+    const std::string raise_path = resolve("tree." + id + ".raise");
+    if (read_string(app, raise_path) == "1") {
+      b.focus_next_window();
+      write<std::string>(app, raise_path, ""); // consume the one-shot
+    }
+    // A window may BIND its visible title (e.g. a per-peer camera window titled by the peer's
+    // name): resolve w.bind as the title when present, else the static label. begin_window uses
+    // "title###id", so the title may change each frame while the ###id identity stays stable.
+    std::string wtitle = w.label;
+    if (!w.bind.empty()) {
+      const std::string t = is_expr(w.bind) ? eval_text(w.bind) : read_string(app, resolve(w.bind));
+      if (!t.empty())
+        wtitle = t;
+    }
+    const bool visible = b.begin_window(wtitle.c_str(), id.c_str(), w.size, w.frame_border,
                                         w.closable ? &open : nullptr);
     // Persist the current geometry. When the backend can't report a size (a collapsed window),
     // back-fill it from the seed so a collapse doesn't clobber the stored content size.

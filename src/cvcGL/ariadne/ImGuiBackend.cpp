@@ -119,6 +119,12 @@ void ImGuiBackend::end_main_menu_bar() { ui::EndMainMenuBar(); }
 bool ImGuiBackend::begin_menu(const char *label) { return ui::BeginMenu(label); }
 void ImGuiBackend::end_menu() { ui::EndMenu(); }
 
+void ImGuiBackend::focus_next_window() {
+#ifdef CVC_ENABLE_IMGUI
+  ImGui::SetNextWindowFocus(); // applies to the next ImGui::Begin — i.e. the next begin_window
+#endif
+}
+
 bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne::Size &size,
                                 float border, bool *p_open) {
   int pushes = 0;
@@ -217,7 +223,8 @@ void ImGuiBackend::end_window() {
 bool ImGuiBackend::begin_grid(const ariadne::Layout &layout, const char *id) {
 #ifdef CVC_ENABLE_IMGUI
   const bool haveTrackSeed = m_haveTracks; // §11.4: consumed by this grid whatever its mode
-  m_haveTracks = false;
+  const bool haveColumnSeed = m_haveColumns;
+  m_haveTracks = m_haveColumns = false;
   GridState gs;
   gs.cols = layout.col_widths.empty() ? 1 : static_cast<int>(layout.col_widths.size());
   const ImVec2 avail = ImGui::GetContentRegionAvail();
@@ -280,6 +287,7 @@ bool ImGuiBackend::begin_grid(const ariadne::Layout &layout, const char *id) {
   tid += (id ? id : "");
   const bool open = ImGui::BeginTable(tid.c_str(), gs.cols, flags);
   if (open) {
+    gs.resizable = layout.resizable;
     for (int i = 0; i < gs.cols; ++i) {
       ImGuiTableColumnFlags cf = ImGuiTableColumnFlags_WidthStretch;
       float w = 1.0f;
@@ -296,6 +304,13 @@ bool ImGuiBackend::begin_grid(const ariadne::Layout &layout, const char *id) {
           w = 0.0f; // Auto → fit content
         }
       }
+      // §11.4: a persisted width (seed_grid_columns, px) is the column's create-time init value,
+      // which ImGui applies only when it creates the table, so a live drag wins. A fixed column
+      // takes it as its width; a stretch column as its weight, so the stretch columns keep their
+      // persisted proportions at any table width.
+      if (layout.resizable && haveColumnSeed && i < static_cast<int>(m_pendingColumns.size()) &&
+          m_pendingColumns[static_cast<std::size_t>(i)] > 0.0f)
+        w = m_pendingColumns[static_cast<std::size_t>(i)];
       ImGui::TableSetupColumn("", cf, w);
     }
     m_grids.push_back(std::move(gs));
@@ -306,7 +321,7 @@ bool ImGuiBackend::begin_grid(const ariadne::Layout &layout, const char *id) {
 #else
   (void)layout;
   (void)id;
-  m_haveTracks =
+  m_haveTracks = m_haveColumns =
       false;   // consume the seed even in the inert build (parity with begin_window's #else)
   return true; // stub: emit the children as a plain vertical flow
 #endif
@@ -359,6 +374,7 @@ void ImGuiBackend::end_grid() {
   // §11.4: snapshot the (possibly dragged) pane sizes for the core to persist; clear it for a
   // non-split grid so a stale split's sizes are never reported against it.
   m_lastGridTracks.clear();
+  m_lastGridColumns.clear();
   if (g.split) {
     if (g.cell > 0)
       ImGui::EndChild(); // close the last pane FIRST -> back to the parent window, whose
@@ -367,6 +383,13 @@ void ImGuiBackend::end_grid() {
     for (unsigned int k : g.pane_keys)
       m_lastGridTracks.push_back(store->GetFloat(k));
   } else {
+    // §11.4: a resizable table's column widths (the width each column was given this frame, the
+    // value TableSetupColumn takes back), read before EndTable while the table is current. Not
+    // before its layout is locked (its first row), when the widths are not computed yet.
+    const ImGuiTable *t = ImGui::GetCurrentTable();
+    if (g.resizable && t && t->IsLayoutLocked)
+      for (int i = 0; i < t->ColumnsCount; ++i)
+        m_lastGridColumns.push_back(t->Columns[i].WidthGiven);
     ImGui::EndTable();
     if (g.color_pushes)
       ImGui::PopStyleColor(g.color_pushes);
@@ -380,6 +403,13 @@ void ImGuiBackend::seed_grid_tracks(const std::vector<float> &sizes) {
 }
 
 std::vector<float> ImGuiBackend::grid_tracks() const { return m_lastGridTracks; }
+
+void ImGuiBackend::seed_grid_columns(const std::vector<float> &widths) {
+  m_pendingColumns = widths;
+  m_haveColumns = true;
+}
+
+std::vector<float> ImGuiBackend::grid_columns() const { return m_lastGridColumns; }
 void ImGuiBackend::begin_disabled() {
 #ifdef CVC_ENABLE_IMGUI
   ImGui::BeginDisabled(true); // §4 enabled_when/disabled_when: grey + non-interactive
@@ -406,9 +436,9 @@ void ImGuiBackend::pop_id() { ui::PopId(); }
 
 void ImGuiBackend::text_line(const char *text) { ui::TextLine(text); }
 void ImGuiBackend::text_value(const char *label, const std::string &value) {
-  std::string line = label;
-  line += ": ";
-  line += value;
+  // A non-empty label prefixes "label: value"; an empty label shows just the value (e.g. a roster
+  // name bound with no caption).
+  std::string line = (label && *label) ? (std::string(label) + ": " + value) : value;
   ui::TextLine(line.c_str());
 }
 void ImGuiBackend::text_line_colored(const char *text, const float rgb[3]) {
@@ -416,9 +446,7 @@ void ImGuiBackend::text_line_colored(const char *text, const float rgb[3]) {
 }
 void ImGuiBackend::text_value_colored(const char *label, const std::string &value,
                                       const float rgb[3]) {
-  std::string line = label;
-  line += ": ";
-  line += value;
+  std::string line = (label && *label) ? (std::string(label) + ": " + value) : value;
   ui::TextLineColored(line.c_str(), rgb[0], rgb[1], rgb[2]);
 }
 void ImGuiBackend::separator() { ui::Separator(); }
@@ -634,8 +662,14 @@ ariadne::ColorEdit ImGuiBackend::color(const char *label, const float rgb[3]) {
 }
 
 void ImGuiBackend::register_widget(std::string custom_type, CustomDrawFn draw) {
-  if (draw)
+  if (draw) {
+    // Tell the core loader this type is handled (natively, by this backend) so it does not warn at
+    // load that the type is unregistered and fall back to a placeholder — has_widget_type() reports
+    // it present and the draw routes here via custom_widget(). (e.g. the stream_view peer-video
+    // tile.)
+    cvc::ariadne::register_known_widget_type(custom_type);
     m_customWidgets[std::move(custom_type)] = std::move(draw);
+  }
 }
 
 void ImGuiBackend::set_image(const std::string &name, const cvc::image &img) {

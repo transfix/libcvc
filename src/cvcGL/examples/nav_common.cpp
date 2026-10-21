@@ -768,7 +768,9 @@ void plot_line(unsigned char *dst, int dw, int dh, int x0, int y0, int x1, int y
 
 // 4-connected dilation of a rows*cols (ny*nx) occupancy `it` times.
 
-std::string default_plant() { return "kinematic"; }
+std::string default_plant() {
+  return cvc::physics::plant_host::available() ? "humvee" : "kinematic";
+}
 
 cvc::physics::plant_host_options plant_options() {
   cvc::physics::plant_host_options o;

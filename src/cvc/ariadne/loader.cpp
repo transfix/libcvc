@@ -96,7 +96,7 @@ bool is_builtin_block(const std::string &k) {
   return k == "meta" || k == "menubar" || k == "windows" || k == "overlays" || k == "root" ||
          k == "children" || k == "scene" || k == "customs" || k == "init" || k == "on_tick" ||
          k == "on_key" || k == "on_pointer" || k == "on_signal" || k == "units" || k == "import" ||
-         k == "channels" || k == "lint";
+         k == "channels" || k == "lint" || k == "args";
 }
 } // namespace
 
@@ -141,7 +141,20 @@ const char *const kAriSchema = R"ARISCHEMA({
     "windows":  {"type": "array", "items": {"$ref": "#/$defs/widget"}},
     "overlays": {"type": "array", "items": {"$ref": "#/$defs/widget"}},
     "root":     {"type": "array", "items": {"$ref": "#/$defs/widget"}},
-    "children": {"type": "array", "items": {"$ref": "#/$defs/widget"}}
+    "children": {"type": "array", "items": {"$ref": "#/$defs/widget"}},
+    "args": {
+      "type": "object",
+      "additionalProperties": {
+        "type": ["string", "object", "null"],
+        "properties": {
+          "type": {"enum": ["string", "bool", "int", "float"]},
+          "default": {"type": ["string", "number", "boolean"]},
+          "help": {"type": "string"},
+          "required": {"type": "boolean"},
+          "positional": {"type": "boolean"}
+        }
+      }
+    }
   },
   "$defs": {
     "widget": {
@@ -159,7 +172,7 @@ const char *const kAriSchema = R"ARISCHEMA({
         "options": {"type": "array", "items": {"type": "string"}},
         "default": {"type": "string"},
         "pos": {"type": "array", "items": {"type": "number"}},
-        "size": {"type": "array", "items": {"type": "number"}},
+        "size": {"type": ["array", "number"], "items": {"type": "number"}},
         "items": {"type": "array", "items": {"$ref": "#/$defs/widget"}},
         "children": {"type": "array", "items": {"$ref": "#/$defs/widget"}}
       }
@@ -538,6 +551,8 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
   if (type == "window" || type == "overlay") {
     Widget w = window(label, parse_seq(ctx, n["children"]));
     w.id = str(n, "id");
+    w.bind =
+        str(n, "bind"); // optional: a computed/state-bound VISIBLE TITLE (else the `window:` label)
     parse_pos(n, w);
     w.size = parse_size(n["size"]);                  // §3.0.3b window sizing (%/px/auto)
     w.layout = parse_layout(n["layout"]);            // §3.0.3b window-body layout (grid/tracks)
@@ -1052,6 +1067,11 @@ Widget expand_load(Ctx &ctx, const YAML::Node &n) {
       ctx.warn("ari: load '" + uri +
                "': the fragment's init: must be a scalar state_exec script string — ignored");
   }
+  // Only the outermost document takes arguments (doc_args.h); a module reaches them through a hole.
+  if (frag.IsMap() && frag["args"])
+    ctx.warn("ari: load '" + uri +
+             "': the fragment's args: is ignored — only the outermost document takes arguments; "
+             "grant them with link: {args: {to: args, mode: ro}}");
   // §12 link: parent-scope holes — each entry becomes a transparent link node the Runtime plants
   // inside the mount's sub-prefix (created there, not here — the loader is state-free). Value form
   // `name: target` (rw); map form `name: { to: target, mode: ro|rw }`.
@@ -1873,6 +1893,97 @@ std::vector<ChannelDecl> parse_channels(Ctx &ctx, const YAML::Node &c) {
   return out;
 }
 
+// The document's `args:` block (doc_args.h): a MAP of name -> {type:, default:, help:, required:,
+// positional:}, or name -> a bare type. A malformed spec is the author's error, so it fails the
+// load (`error` set) rather than letting the document run on arguments nobody could pass.
+std::vector<ArgSpec> parse_args(Ctx &ctx, const YAML::Node &a, std::string &error) {
+  std::vector<ArgSpec> out;
+  if (!a.IsMap()) {
+    error = "ari: args: must be a map of name -> {type:, default:, help:, required:, positional:}";
+    return out;
+  }
+  bool optional_positional = false;
+  for (const auto &kv : a) {
+    ArgSpec spec;
+    spec.name = kv.first.IsScalar() ? kv.first.Scalar() : std::string();
+    if (!valid_arg_name(spec.name)) {
+      error = "ari: args: '" + spec.name +
+              "' is not a valid argument name (a letter, then letters, digits, '-' or '_'; "
+              "'help' is reserved)";
+      return out;
+    }
+    if (std::any_of(out.begin(), out.end(),
+                    [&](const ArgSpec &x) { return x.name == spec.name; })) {
+      error = "ari: args: '" + spec.name + "' is declared more than once";
+      return out;
+    }
+    const YAML::Node &e = kv.second;
+    std::string type = "string";
+    if (e.IsScalar()) {
+      type = e.Scalar(); // `verbose: bool` shorthand
+    } else if (e.IsMap()) {
+      for (const auto &f : e) {
+        const std::string k = f.first.IsScalar() ? f.first.Scalar() : std::string();
+        if (k != "type" && k != "default" && k != "help" && k != "required" && k != "positional")
+          ctx.warn("ari: args." + spec.name + ": unknown key '" + k + "' — ignored");
+      }
+      type = str(e, "type", "string");
+      spec.help = str(e, "help");
+      spec.required = flag(e, "required", false);
+      spec.positional = flag(e, "positional", false);
+      if (const YAML::Node d = e["default"]) {
+        if (!d.IsScalar()) {
+          error = "ari: args." + spec.name + ": default must be a scalar";
+          return out;
+        }
+        spec.has_default = true;
+        spec.default_value = d.Scalar();
+      }
+    } else if (!e.IsNull()) {
+      error = "ari: args." + spec.name + ": must be a type name or a map";
+      return out;
+    }
+    if (type == "string")
+      spec.type = ArgSpec::Type::String;
+    else if (type == "bool")
+      spec.type = ArgSpec::Type::Bool;
+    else if (type == "int")
+      spec.type = ArgSpec::Type::Int;
+    else if (type == "float")
+      spec.type = ArgSpec::Type::Float;
+    else {
+      error =
+          "ari: args." + spec.name + ": unknown type '" + type + "' (string, bool, int or float)";
+      return out;
+    }
+    if (spec.has_default) {
+      std::string canonical;
+      if (!canonical_arg_value(spec.type, spec.default_value, canonical)) {
+        error = "ari: args." + spec.name + ": default '" + spec.default_value + "' is not " +
+                (spec.type == ArgSpec::Type::Int ? "an " : "a ") + arg_type_name(spec.type);
+        return out;
+      }
+      spec.default_value = canonical;
+      if (spec.required)
+        ctx.warn("ari: args." + spec.name + ": has a default, so required: has no effect");
+    }
+    if (spec.positional) {
+      if (spec.type == ArgSpec::Type::Bool) {
+        error = "ari: args." + spec.name + ": a positional argument cannot be a bool";
+        return out;
+      }
+      const bool optional = !spec.required || spec.has_default;
+      if (!optional && optional_positional) {
+        error = "ari: args." + spec.name + ": a required positional cannot follow an optional one";
+        return out;
+      }
+      optional_positional = optional_positional || optional;
+    }
+    out.push_back(std::move(spec));
+  }
+  return out;
+}
+
 // §12 lint policy: parse the doc-level `lint:` MAP. `channels: strict|warn|off` sets how an
 // undeclared channel reference is treated (default strict); `quiet: true` suppresses the relaxed-
 // enforcement notice. Unknown keys/values warn and fall back to the default (fail-safe).
@@ -2114,6 +2225,16 @@ LoadResult load_node(const YAML::Node &doc, const std::string &base_dir = std::s
       r.channels = parse_channels(ctx, cn);
     }
     r.lint = parse_lint(ctx, doc["lint"]);
+    if (const YAML::Node an = doc["args"]) {
+      r.has_args_block = true;
+      std::string err;
+      r.args = parse_args(ctx, an, err);
+      if (!err.empty()) {
+        r.error = std::move(err);
+        r.warnings = std::move(ctx.warnings);
+        return r; // fail fast — no tree built (r.ok stays false)
+      }
+    }
   }
 
 #ifdef CVC_ARIADNE_HAVE_JSONSCHEMA
