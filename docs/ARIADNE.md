@@ -82,7 +82,9 @@ Reactive slots — `visible_when`, `enabled_when` / `disabled_when`, computed `b
 **default-deny** environment:
 
 - The value allowlist admits arithmetic, coercion, logic, and side-effect-free state
-  *readers* only (`kAllowed`, [`ariadne.cpp:417`](../src/cvc/ariadne/ariadne.cpp)).
+  *readers* only (`kAllowed`, [`ariadne.cpp:417`](../src/cvc/ariadne/ariadne.cpp)), plus
+  `(has? "name")`, which asks what the host provides
+  ([§5.7](#57-requires-and-has--what-a-document-needs-from-its-host)).
 - The special-form gate admits only `if / begin / let / while / for / lambda / defun /
   set / return / quote / yield / break` (`kAllowedForms`,
   [`ariadne.cpp:433`](../src/cvc/ariadne/ariadne.cpp)).
@@ -202,8 +204,10 @@ Each state-bound primitive returns `{changed, committed, value}`
 `committed`**, so a slider drag is one write on release, not one write per frame.
 
 A backend advertises `Capabilities{windows, menubar, mouse, keyboard, color, glsl,
-view_embed, owns_loop}` ([`backend.h`](../inc/cvc/ariadne/backend.h)); the loader uses
-these to decide widget substitution. `owns_loop` distinguishes a **host-pumped**
+view_embed, owns_loop, terminal, bitmap, kitty, sixel}`
+([`backend.h`](../inc/cvc/ariadne/backend.h)). A document's `requires:` and `(has? ...)`
+read them through capability tokens ([§5.7](#57-requires-and-has--what-a-document-needs-from-its-host)).
+`owns_loop` distinguishes a **host-pumped**
 backend (the app runs the loop and calls in per frame) from a **framework-owned** one
 (the backend runs its own loop).
 
@@ -302,8 +306,11 @@ Three backends ship:
   the roadmap keeps for tvision's Borland-derived licensing) when tvision, ncursesw and
   FTXUI are found; `ari run --backend tvision` runs it.
 
-Because the core is backend-neutral, the same document renders through any backend;
-capability gaps (e.g. no `color`) drive graceful widget substitution rather than errors.
+Because the core is backend-neutral, the same document renders through any backend. A
+document that needs something only some hosts have says so in `requires:`, or asks with
+`(has? ...)` and degrades itself
+([§5.7](#57-requires-and-has--what-a-document-needs-from-its-host)); the core does not
+substitute widgets on its own.
 
 ---
 
@@ -328,7 +335,7 @@ The built-in top-level keys (`is_builtin_block`,
 [`loader.cpp:97`](../src/cvc/ariadne/loader.cpp)) are:
 
 ```
-meta  menubar  windows  overlays  root (alias: children)  scene  customs
+meta  menubar  windows  overlays  root (alias: children)  scene  customs  requires
 init  on_tick  on_key  on_pointer  on_signal  units  import  channels  lint  args
 ```
 
@@ -618,6 +625,67 @@ read-only hole (§7.4). A hole links one node:
 - `link: {room: {to: args.room, mode: ro}}` hands it one argument, `(state-get "room")`.
 
 ---
+
+### 5.7 `requires:` and `has?` — what a document needs from its host
+
+The same document can run under `arigl` (a GL window), `arigl --terminal`, `ari` (a terminal
+with no GL at all), a browser page or a custom host. What each provides differs: `ari` has
+no scene renderer and none of cvcGL's verbs, and only a kitty or Sixel terminal shows real
+pixels. A document says what it needs in a top-level `requires:` list (roadmap §7.6, §16.3;
+[`requires.h`](../inc/cvc/ariadne/requires.h)):
+
+```yaml
+requires:
+  - gl.scene                              # fail the load unless a scene renderer is here
+  - room-join                             # ... or unless programs can call (room-join ...)
+  - {name: term.kitty, optional: true}    # only warn if this is missing
+```
+
+`AppRuntime::load` checks every entry before `init:` runs. If any required entry is
+missing, the load fails with one error that names them all. A missing `optional: true`
+entry warns. An entry is one of:
+
+- a **capability token**, answered by the backend's `Capabilities` and the host:
+
+  | token | holds when |
+  |---|---|
+  | `gl.scene` | a scene adapter realizes `scene:` (arigl, the cvcGL hosts) |
+  | `gl.shaders` | GLSL runs (scene `shaders:`, `shader_canvas`) |
+  | `gl.view` | a live render view can sit in a widget |
+  | `ui.windows`, `ui.menubar`, `ui.color` | movable windows; a menu bar; coloured styling |
+  | `input.mouse`, `input.keyboard` | pointer input; key and text input |
+  | `raster.bitmap` | images show in real pixels (a GL window, or a kitty or Sixel terminal) |
+  | `term`, `term.kitty`, `term.sixel` | a text terminal; one that speaks kitty graphics; one that draws Sixel |
+
+- a **function** a program can call: a builtin, a stdlib function, a state intrinsic or a
+  host verb (`Runtime::has_function`);
+- a **widget type**, built in (`slider_int`, `button`, …) or registered
+  (`register_widget_type`, a backend-native widget such as `stream_view`).
+
+Whether or not `requires:` is there, the load also reads every program (`init:`, the
+`on_*:` handlers and each widget's `on:` / `on_click:` / … programs). Any function a
+program calls that the host does not provide gets a warning at load. Before, the program
+stopped with "undefined symbol" the first time it ran. The scan skips special forms,
+quoted data and names the program binds itself. It cannot see a name built at run time or
+handed to `apply`, so it only warns; `requires:` is the authoritative list, and a name
+listed there is not warned about again. `ari check doc.ari` shows both.
+
+A document that can run without something asks for it at run time with `(has? "name")`,
+which answers the same question for a token, a function or a widget type. It works in
+programs and in reactive expressions:
+
+```yaml
+windows:
+  - window: Scene
+    visible_when: (has? "gl.scene")   # hidden in a plain terminal
+    children:
+      - button: Join call
+        enabled_when: (has? "room-join")
+        on: (room-join "lobby")
+```
+
+A host can ask the same thing in C++: `Runtime::has`, `has_function`, `program_names` and
+`host_facts`.
 
 ## 6. Composition: include / import / load
 

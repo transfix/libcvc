@@ -253,3 +253,26 @@ TEST(AriadneRequires, AProgramCanAskWithHas) {
   EXPECT_EQ(val(app, "ui.req.fn"), "yes");
   EXPECT_EQ(val(app, "ui.req.none"), "no");
 }
+
+TEST(AriadneRequires, AReactiveExpressionCanAskWithHas) {
+  REQUIRE_YAML();
+  if (!FtxuiBackend::available())
+    GTEST_SKIP() << "libcvc built without FTXUI";
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.req"); // no SceneAdapter: (has? "gl.scene") is false
+  art.set_backend(be);
+  const fs::path doc = write_doc("reactive", "windows:\n"
+                                             "  - window: W\n"
+                                             "    children:\n"
+                                             "      - text: scene-panel\n"
+                                             "        visible_when: (has? \"gl.scene\")\n"
+                                             "      - text: terminal-note\n"
+                                             "        visible_when: (has? \"term\")\n");
+  ASSERT_NO_THROW(art.load(doc.string()));
+  art.drain();
+  const std::string screen = be.render_to_string(art.runtime(), 60, 10);
+  EXPECT_EQ(screen.find("scene-panel"), std::string::npos) << screen;
+  EXPECT_NE(screen.find("terminal-note"), std::string::npos) << screen;
+  EXPECT_TRUE(art.take_warnings().empty());
+}
