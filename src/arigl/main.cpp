@@ -451,7 +451,11 @@ struct ConferenceSession {
     ari::run_init(app, prefix,
                   "(state-set \"conf.room\" \"" + room + "\") (state-set \"conf.self\" \"" + self +
                       "\") (state-set \"cam_synthetic\" \"" + synth +
-                      "\") (state-set \"self.pid\" \"" + nodeId + "\")",
+                      "\") (state-set \"self.pid\" \"" + nodeId +
+                      // Seed peer.count to a valid integer BEFORE the first render, so the roster's
+                      // `repeat: (state-get "peer.count")` never evaluates an empty node on frame 0
+                      // (which warns "did not yield an integer" until the first on_tick sets it).
+                      "\") (state-set \"peer.count\" \"0\")",
                   &ce);
     for (const std::string &e : ce)
       std::fprintf(stderr, "arigl: conference init: %s\n", e.c_str());
