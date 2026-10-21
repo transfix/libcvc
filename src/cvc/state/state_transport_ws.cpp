@@ -33,6 +33,10 @@
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/websocket.hpp>
+#ifdef __linux__
+#include <linux/sockios.h> // SIOCOUTQ — unsent bytes in a socket's send buffer (send_backlog)
+#include <sys/ioctl.h>
+#endif
 #else
 #include <cstdint>
 #include <cstring>
@@ -279,6 +283,24 @@ public:
   bool write(const pb::Frame &f) {
     std::lock_guard<std::mutex> lk(write_mu);
     return write_locked(f);
+  }
+
+  // Bytes still unsent in this connection's OS send buffer (Linux only; 0 elsewhere). A large value
+  // means the peer is not draining fast enough and the next write would BLOCK. The fan paths check
+  // this before writing and skip a backed-up connection — dropping a loss-tolerant media frame, or
+  // deferring the periodic roster re-broadcast to the next tick — instead of blocking the whole relay
+  // (and every other client's roster) on one slow peer. The continuous video flood otherwise fills a
+  // slow client's buffer, the synchronous ws->write() blocks, and the broadcast loop stalls for all.
+  std::size_t send_backlog() {
+#if !defined(__EMSCRIPTEN__) && defined(__linux__)
+    if (!ws)
+      return 0;
+    int unsent = 0;
+    const int fd = ws->next_layer().native_handle();
+    if (fd >= 0 && ::ioctl(fd, SIOCOUTQ, &unsent) == 0 && unsent > 0)
+      return static_cast<std::size_t>(unsent);
+#endif
+    return 0;
   }
 };
 
@@ -789,6 +811,10 @@ state_transport::publish_stats state_transport_ws::publish(const state_mutation 
       _peers.note_delivery_filtered(c->remote_node_id);
       continue;
     }
+    // Don't block the caller (the arisrv main loop drains local writes here) on a backed-up peer — it
+    // would stall the loop and its periodic broadcast for everyone. The ~1s broadcast re-delivers.
+    if (c->send_backlog() > 512 * 1024)
+      continue;
     if (c->write(frame)) {
       _sent_frames.fetch_add(1, std::memory_order_relaxed);
       ++stats.delivered;
@@ -880,6 +906,11 @@ std::size_t state_transport_ws::write_media(const media_frame &m, const void *ex
   std::size_t n = 0;
   for (auto &c : conns) {
     if (!c || c.get() == exclude || !c->alive.load() || !c->can_write())
+      continue;
+    // Media is loss-tolerant: if this peer's send buffer is backed up (it can't keep pace with the
+    // video), DROP the frame rather than let the synchronous write block the relay. Dropping video to
+    // a slow peer is invisible; blocking here would stall state delivery (the roster) to EVERY peer.
+    if (c->send_backlog() > 128 * 1024)
       continue;
     if (c->write(frame)) {
       _sent_frames.fetch_add(1, std::memory_order_relaxed);
@@ -980,6 +1011,8 @@ void state_transport_ws::on_inbound_mutation(const state_mutation &m, connection
     for (auto &c : conns) {
       if (!c || c.get() == origin || !c->alive.load() || !c->can_write())
         continue;
+      if (c->send_backlog() > 512 * 1024)
+        continue; // don't block the relay on a backed-up peer; the ~1s roster broadcast backstops it
       if (c->write(frame))
         _sent_frames.fetch_add(1, std::memory_order_relaxed);
     }
@@ -1017,6 +1050,8 @@ void state_transport_ws::on_inbound_message(const state_message &m, connection *
     for (auto &c : conns) {
       if (!c || c.get() == origin || !c->alive.load() || !c->can_write())
         continue;
+      if (c->send_backlog() > 512 * 1024)
+        continue; // don't block the relay on a backed-up peer; the ~1s roster broadcast backstops it
       if (c->write(frame))
         _sent_frames.fetch_add(1, std::memory_order_relaxed);
     }
@@ -1171,6 +1206,12 @@ std::size_t state_transport_ws::broadcast_snapshot() {
   std::size_t wrote = 0;
   for (auto &c : conns) {
     if (!c || !c->alive.load() || !c->can_write())
+      continue;
+    // Skip a peer whose send buffer is badly backed up: writing the (multi-entry) snapshot would block
+    // the whole broadcast loop on that one slow peer, starving every other client. This is periodic
+    // (~1s), so a skipped peer simply catches up on the next tick once its buffer drains. The media
+    // drop above keeps a peer's buffer from filling with video, so this rarely trips for a live peer.
+    if (c->send_backlog() > 512 * 1024)
       continue;
     bool ok = true;
     for (const auto &f : frames)
