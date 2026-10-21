@@ -46,7 +46,7 @@ int main() {
   ari::FtxuiBackend::Options opts;
   opts.image_color = ari::FtxuiBackend::Options::ImageColor::Color;
   ari::FtxuiBackend backend(opts);
-  cvc::gl::ariadne::TerminalScene scene(app, backend);
+  cvc::gl::ariadne::TerminalScene scene(app, backend, /*supersample=*/2, "term");
 
   ari::Scene spec;
   ari::SceneNode box;
@@ -57,6 +57,16 @@ int main() {
   std::vector<std::string> warns;
   scene.realize(spec, "term", &warns);
   chk(warns.empty(), "the box scene realizes without warnings");
+  // A document under another state root than the scene graph's is warned about: node state would
+  // land where its panels never look.
+  {
+    ari::FtxuiBackend other_backend(opts); // its own: ~TerminalScene clears its backend's backdrop
+    cvc::gl::ariadne::TerminalScene other(app, other_backend, 2, "elsewhere");
+    std::vector<std::string> w2;
+    other.realize(spec, "term", &w2);
+    chk(w2.size() == 1 && w2[0].find("'term'") != std::string::npos,
+        "a mismatched state root is warned about");
+  }
 
   ari::Runtime rt(app, "");
   rt.set_backend(&backend);
@@ -96,7 +106,7 @@ int main() {
     ari::FtxuiBackend pbe(po);
     pbe.set_terminal_graphics(kitty);
     cvc::app papp;
-    cvc::gl::ariadne::TerminalScene pscene(papp, pbe);
+    cvc::gl::ariadne::TerminalScene pscene(papp, pbe, /*supersample=*/2, "term");
     pscene.realize(spec, "term", &warns);
     ari::Runtime prt(papp, "");
     prt.set_backend(&pbe);

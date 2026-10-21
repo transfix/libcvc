@@ -990,8 +990,12 @@ int run_terminal(const ari::HostOptions &o) {
   const auto streams = ari::register_stream_view_widget(*backend, app);
   streams->set_decoder("mjpeg", gla::jpeg_frame_decoder());
   streams->set_decoder("jpeg", gla::jpeg_frame_decoder());
-  CheckedTerminalScene scene(app, *backend);
-  ari::AppRuntime rt(app, o.prefix.empty() ? kDefaultPrefix : o.prefix, &scene);
+  // One state root for the document AND the scene graph, as in a window (AriRuntime uses the
+  // scene's prefix): node realizers seed their state (forest.*, light.*, ...) under the scene's
+  // prefix, so a different one leaves the document's panels reading nothing.
+  const std::string prefix = o.prefix.empty() ? kDefaultPrefix : o.prefix;
+  CheckedTerminalScene scene(app, *backend, /*supersample=*/2, prefix);
+  ari::AppRuntime rt(app, prefix, &scene);
   rt.set_backend(*backend);
   gla::register_gl_basics(app);
   gla::register_streaming(app);
