@@ -71,6 +71,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/physics/nav_plant.h
   ../../inc/cvc/physics/nav_eval.h
   ../../inc/cvc/physics/plant_log.h
+  ../../inc/cvc/physics/plant_log_scene.h
   ../../inc/cvc/state/state_hash_partition.h
   ../../inc/cvc/state/distributed_state_session.h
   ../../inc/cvc/state/state_transport.h
@@ -262,6 +263,7 @@ set(SOURCE_FILES
   physics/nav_plant.cpp
   physics/nav_eval.cpp
   physics/plant_log.cpp
+  physics/plant_log_scene.cpp
   state/state_change_journal.cpp
   state/state_subscription_router.cpp
   state/state_sync_adapter.cpp
@@ -2235,16 +2237,6 @@ if(CVC_BUILD_LSYS_TOOLS)
     target_include_directories(cvc-lod-bake PRIVATE ${HDF5_INCLUDE_DIRS})
     target_compile_features(cvc-lod-bake PRIVATE cxx_std_17)
   endif()
-endif()
-
-# cvc-plant-log: nav driving physics vehicles, logged as planar rigid bodies for fitting a plant
-# model, with the dynamic single-track model's residual against them (cvc/physics/plant_log.h).
-# Links only cvc::cvc; it needs the Jolt backend at run time.
-option(CVC_BUILD_PLANT_LOG "Build the cvc-plant-log tool" ON)
-if(CVC_BUILD_PLANT_LOG AND NOT EMSCRIPTEN)
-  add_executable(cvc-plant-log ${CMAKE_CURRENT_SOURCE_DIR}/tools/cvc_plant_log_main.cpp)
-  target_link_libraries(cvc-plant-log PRIVATE cvc)
-  target_compile_features(cvc-plant-log PRIVATE cxx_std_17)
 endif()
 
 # The Ariadne conference RELAY moved to src/arisrv (the `arisrv` target, wired from

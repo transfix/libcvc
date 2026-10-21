@@ -528,6 +528,40 @@ TEST_F(CvcCliTest, PsHelp) {
 }
 
 // ===========================================================================
+// plant-log (nav driving Jolt vehicles; cvc/physics/plant_log_scene.h)
+// ===========================================================================
+
+TEST_F(CvcCliTest, PlantLogHelp) {
+  auto r = cvc("plant-log --help");
+  EXPECT_EQ(0, r.exit_code);
+  for (const char *opt : {"--out", "--vehicle", "--scene", "--bundle", "--seeds", "--fit-dyn"})
+    EXPECT_NE(std::string::npos, r.output.find(opt)) << opt;
+}
+
+TEST_F(CvcCliTest, PlantLogNeedsAnOutputDirectory) {
+  auto r = cvc("plant-log --scene swerve");
+  EXPECT_NE(0, r.exit_code);
+}
+
+TEST_F(CvcCliTest, PlantLogRejectsAnUnknownScene) {
+  auto r = cvc("plant-log --scene moon --out \"" + path("run") + "\"");
+  EXPECT_NE(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("swerve, city or bundle")) << r.output;
+}
+
+TEST_F(CvcCliTest, PlantLogWritesARun) {
+  auto r = cvc("plant-log --seeds 3 --agents 1 --seconds 1 --flight-seconds 0.5 "
+               "--stride-seconds 0.5 --out \"" +
+               path("run") + "\"");
+  if (r.exit_code != 0 && r.output.find("without Jolt") != std::string::npos)
+    GTEST_SKIP() << "this libcvc was built without Jolt";
+  ASSERT_EQ(0, r.exit_code) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("seed 3: 1 agents")) << r.output;
+  for (const char *f : {"flights.npy", "meta.json", "residual.json"})
+    EXPECT_TRUE(fs::exists(fs::path(path("run")) / f)) << f;
+}
+
+// ===========================================================================
 // Bunny command (geometry only — fast)
 // ===========================================================================
 

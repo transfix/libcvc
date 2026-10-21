@@ -159,7 +159,7 @@ are compared with where Jolt was at the tick's end. The bins are the lateral acc
 measured over the tick.
 
 Ticks are left out when they have a static contact, a wheel off the ground, an impact (above
-1.5 g), or the vehicle at rest. `cvc-plant-log` runs it and prints the bins.
+1.5 g), or the vehicle at rest. `cvc plant-log` runs it and prints the bins.
 
 Below: nav's 0.06 s tick (6 substeps), 4 seeds, 60 s each, mu 0.9, measured 2026-10-20. Each cell
 is the position rms in mm, spec-sheet dynamic / kinematic. The RoboRacer's city runs plan with 0.4
@@ -180,7 +180,7 @@ of its acceleration and braking: at its full 6 m/s^2 its chassis box pitches ont
   - the drag and rolling resistance it subtracts. The RoboRacer's driver model tracks the commanded
     acceleration with an integral trim, so it makes up for them.
 
-**Fitted to Jolt** (`cvc::physics::fit_dyn_bike`, `cvc-plant-log --fit-dyn`): a coordinate descent on
+**Fitted to Jolt** (`cvc::physics::fit_dyn_bike`, `cvc plant-log --fit-dyn`): a coordinate descent on
 the one-tick twist residual over the knobs a spec sheet does not give. Each fit uses seeds 100-102
 and is judged on seed 103.
 

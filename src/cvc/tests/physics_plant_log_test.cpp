@@ -29,12 +29,15 @@
 #include <cvc/physics/nav_plant.h>
 #include <cvc/physics/plant_host.h>
 #include <cvc/physics/plant_log.h>
+#include <cvc/physics/plant_log_scene.h>
 #include <cvc/physics/world.h>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <gtest/gtest.h>
 #include <iterator>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -367,4 +370,76 @@ TEST(PlantLog, GroundHeightPutsAStartOnTheGroundUnderIt) {
   }
   EXPECT_EQ(z[0], z[1]);
   EXPECT_GT(z[1], 3.0);
+}
+
+TEST(PlantLogScene, ResolveFillsTheSceneDefaultsAndRejectsBadOptions) {
+  plant_log_options o;
+  o.resolve();
+  EXPECT_EQ(o.agents, 4);
+  EXPECT_EQ(o.lateral_g, 0.9);
+  EXPECT_EQ(o.nsub, 2); // 0.02 s is two physics steps
+  plant_log_options c;
+  c.scene = "city";
+  c.dt = 0.06;
+  c.resolve();
+  EXPECT_EQ(c.agents, 8);
+  EXPECT_EQ(c.lateral_g, 0.5);
+  EXPECT_EQ(c.nsub, 6);
+  for (const auto &bad : std::vector<std::function<void(plant_log_options &)>>{
+           [](plant_log_options &x) { x.scene = "moon"; },
+           [](plant_log_options &x) { x.scene = "bundle"; }, // no bundle directory
+           [](plant_log_options &x) { x.dt = 0.025; },
+           [](plant_log_options &x) { x.seeds.clear(); }}) {
+    plant_log_options x;
+    bad(x);
+    EXPECT_THROW(x.resolve(), std::invalid_argument);
+  }
+}
+
+// The scenes are deterministic: the same options drive the same runs, which write_plant_log
+// turns into the directory liesphgp_pack.py reads.
+TEST(PlantLogScene, DrivesTheSwerveTheSameTwiceAndWritesItsDirectory) {
+  REQUIRE_JOLT();
+  plant_log_options o;
+  o.seeds = {7, 8};
+  o.agents = 2;
+  o.seconds = 2.0;
+  o.flight_seconds = 1.0;
+  o.stride_seconds = 1.0;
+  o.resolve();
+  const cvc::nav::coef_mlp net = cvc::nav::coef_mlp::default_biased();
+  const plant_log_drive a = drive_plant_log_scene(o, net), b = drive_plant_log_scene(o, net);
+  ASSERT_EQ(a.runs.size(), 4u);
+  EXPECT_EQ(a.run_seed, (std::vector<unsigned>{7, 7, 8, 8}));
+  EXPECT_EQ(a.run_agent, (std::vector<int>{0, 1, 0, 1}));
+  EXPECT_GT(a.accel_margin, 0.0);
+  ASSERT_EQ(b.runs.size(), a.runs.size());
+  for (std::size_t k = 0; k < a.runs.size(); ++k) {
+    ASSERT_EQ(a.runs[k].size(), 101u); // the start and 100 ticks
+    ASSERT_EQ(b.runs[k].size(), a.runs[k].size());
+    for (std::size_t t = 0; t < a.runs[k].size(); ++t) {
+      const planar_sample &p = a.runs[k][t], &q = b.runs[k][t];
+      ASSERT_EQ(std::memcmp(&p.x, &q.x, sizeof p.x), 0) << k << " " << t;
+      ASSERT_EQ(std::memcmp(&p.psi, &q.psi, sizeof p.psi), 0) << k << " " << t;
+      ASSERT_EQ(std::memcmp(&p.vy, &q.vy, sizeof p.vy), 0) << k << " " << t;
+      ASSERT_EQ(std::memcmp(&p.steer, &q.steer, sizeof p.steer), 0) << k << " " << t;
+    }
+  }
+  EXPECT_GT(a.runs[0].back().vx, 1.0); // it drove
+
+  o.out = (std::filesystem::temp_directory_path() / "cvc_plant_log_scene_test").string();
+  std::error_code ec;
+  std::filesystem::remove_all(o.out, ec);
+  write_plant_log(o, a);
+  for (const char *f : {"flights.npy", "meta.json", "residual.json"})
+    EXPECT_TRUE(std::filesystem::exists(std::filesystem::path(o.out) / f)) << f;
+  std::string meta;
+  {
+    std::ifstream in(std::filesystem::path(o.out) / "meta.json");
+    meta.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+  }
+  std::filesystem::remove_all(o.out, ec);
+  EXPECT_NE(meta.find("\"format\": \"cvc-plant-log-1\""), std::string::npos) << meta;
+  EXPECT_NE(meta.find("\"seeds\": [7, 8]"), std::string::npos) << meta;
+  EXPECT_NE(meta.find("\"shape\": [8, 51, 8]"), std::string::npos) << meta; // 2 s / 1 s x 4 runs
 }

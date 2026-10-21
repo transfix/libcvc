@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Pack cvc-plant-log runs into a LieSPHGP dataset pickle.
+"""Pack `cvc plant-log` runs into a LieSPHGP dataset pickle.
 
-cvc-plant-log (src/cvc/tools/cvc_plant_log_main.cpp) writes, per run directory, ``flights.npy``
+`cvc plant-log` (cvc::physics::write_plant_log) writes, per run directory, ``flights.npy``
 (float64, (F, T, 8): x, y, psi, vx, vy, r, drive, steer at a uniform rate) and ``meta.json``.
 This script turns one or more of those directories into the pickle CVC-Lab/LieSPHGP reads
 (``src/models/SE3_Quadrotor/lie_ph/data.py`` and the ROV variant's loader at commit 65db994):
@@ -168,7 +168,7 @@ def check(path, layout):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("runs", nargs="+", help="cvc-plant-log --out directories")
+    ap.add_argument("runs", nargs="+", help="cvc plant-log --out directories")
     ap.add_argument("--out", required=True, help="the pickle to write")
     ap.add_argument("--layout", choices=("se3", "se2"), default="se3")
     ap.add_argument("--noise", type=float, default=0.05, help="absolute observation noise sigma")

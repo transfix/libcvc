@@ -38,6 +38,8 @@
 #include <cvc/core/types.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/geometry_file_io.h>
+#include <cvc/nav/coef_mlp.h>
+#include <cvc/physics/plant_log_scene.h>
 #include <cvc/state/distributed_state_session.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_distributed_admin.h>
@@ -2062,6 +2064,86 @@ static int cmd_compare(int argc, char **argv) {
   return 0;
 }
 
+// ---------------------------------------------------------------------------
+// Vehicle physics
+// ---------------------------------------------------------------------------
+
+static int cmd_plant_log(int argc, char **argv) {
+  po::options_description desc(
+      "cvc plant-log - nav driving physics vehicles on Jolt, logged for fitting a plant model\n\n"
+      "Logs every vehicle tick by tick as a planar rigid body, cuts the runs into flights\n"
+      "(flights.npy, meta.json; tools/liesphgp_pack.py packs them as a LieSPHGP dataset) and\n"
+      "reports the dynamic single-track model's one-tick residual against them\n"
+      "(residual.json). Scenes (cvc/physics/plant_log_scene.h):\n"
+      "  swerve  open flat ground, each agent slaloming\n"
+      "  city    the coef trainer's city, scaled to the vehicle\n"
+      "  bundle  a cvc::world city bundle (--bundle DIR), driven on vehicle routes\n\n"
+      "  cvc plant-log --vehicle humvee --scene swerve --seeds 100,101,102 --out runs/swerve\n");
+  cvc::physics::plant_log_options o;
+  std::string seeds = "100,101,102,103", steer = "actual", policy;
+  desc.add_options()("help,h", "show help")("out,o", po::value<std::string>(&o.out)->required(),
+                                            "output directory")(
+      "vehicle", po::value<std::string>(&o.vehicle)->default_value(o.vehicle),
+      "humvee or roboracer")("scene", po::value<std::string>(&o.scene)->default_value(o.scene),
+                             "swerve, city or bundle")("bundle", po::value<std::string>(&o.bundle),
+                                                       "city bundle directory (--scene bundle)")(
+      "seeds", po::value<std::string>(&seeds)->default_value(seeds),
+      "comma-separated seeds, one run per agent each")(
+      "agents", po::value<int>(&o.agents)->default_value(o.agents),
+      "vehicles per seed (< 0: 4 in swerve, 8 otherwise)")(
+      "seconds", po::value<double>(&o.seconds)->default_value(o.seconds),
+      "seconds per seed")("dt", po::value<double>(&o.dt)->default_value(o.dt),
+                          "nav's tick, a whole number of 0.01 s physics steps")(
+      "mu", po::value<double>(&o.mu)->default_value(o.mu), "the ground's friction")(
+      "lateral-g", po::value<double>(&o.lateral_g)->default_value(o.lateral_g),
+      "nav's corner cap in g (< 0: 0.9 in swerve, 0.5 otherwise)")(
+      "flight-seconds", po::value<double>(&o.flight_seconds)->default_value(o.flight_seconds),
+      "a flight's length")("stride-seconds",
+                           po::value<double>(&o.stride_seconds)->default_value(o.stride_seconds),
+                           "from one flight's start to the next's")(
+      "steer", po::value<std::string>(&steer)->default_value(steer),
+      "the steer input: actual (the road-wheel angle's mean over the tick) or command")(
+      "nsub", po::value<int>(&o.nsub)->default_value(o.nsub),
+      "residual substeps a tick (0: the physics steps a tick)")(
+      "grid", po::value<int>(&o.grid)->default_value(o.grid),
+      "bundle: grid cells a side")("inflate", po::value<int>(&o.inflate)->default_value(o.inflate),
+                                   "bundle: obstacle inflation in cells")(
+      "accel-margin", po::value<double>(&o.accel_margin)->default_value(o.accel_margin),
+      "the share of the vehicle's acceleration nav plans with (<= 0: the plant's)")(
+      "brake-margin", po::value<double>(&o.brake_margin)->default_value(o.brake_margin),
+      "the share of its braking (<= 0: the plant's)")(
+      "policy", po::value<std::string>(&policy), "a .cvcnav policy (default: the built-in one)")(
+      "verbose", po::bool_switch(&o.verbose), "every agent's state every 5 s")(
+      "samples", po::bool_switch(&o.samples), "also write samples.csv, every tick of every run")(
+      "fit-dyn", po::bool_switch(&o.fit_dyn),
+      "fit dyn_bike to every seed but the last and report the last");
+
+  po::variables_map vm;
+  po::store(po::parse_command_line(argc, argv, desc), vm);
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
+  po::notify(vm);
+
+  o.seeds.clear();
+  std::stringstream ss(seeds);
+  for (std::string t; std::getline(ss, t, ',');)
+    o.seeds.push_back(static_cast<unsigned>(std::stoul(t)));
+  if (steer == "actual")
+    o.steer = cvc::physics::steer_input::actual;
+  else if (steer == "command")
+    o.steer = cvc::physics::steer_input::command;
+  else
+    throw std::invalid_argument("--steer is actual or command");
+  o.resolve();
+  o.report = stdout;
+  const cvc::nav::coef_mlp net =
+      policy.empty() ? cvc::nav::coef_mlp::default_biased() : cvc::nav::coef_mlp::load(policy);
+  cvc::physics::write_plant_log(o, cvc::physics::drive_plant_log_scene(o, net));
+  return 0;
+}
+
 // ===========================================================================
 // Command dispatch table
 // ===========================================================================
@@ -2141,6 +2223,9 @@ static const command_entry commands[] = {
   {"state",          "State",           "get/set/list state tree values",                cmd_state},
   {"cluster-status", "State Server",    "display cluster health report",                 cmd_cluster_status},
   {"ps",             "State Exec",      "list state_exec processes",                     cmd_ps},
+
+  // ── Vehicle physics ──
+  {"plant-log",      "Vehicle Physics", "log nav driving Jolt vehicles for plant fitting", cmd_plant_log},
 
   // ── Network (legacy XMLRPC) ──
 #ifdef USING_XMLRPC
