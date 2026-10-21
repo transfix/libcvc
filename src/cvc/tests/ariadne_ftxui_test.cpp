@@ -1035,13 +1035,38 @@ TEST(AriadneFtxuiGraphics, KittyImageIsPlaceholdersAndIsSentOnlyWhenItChanges) {
   t.draw();
   const std::string changed = t.be.take_graphics();
   EXPECT_EQ(count(changed, "a=T"), 1) << "new pixels are sent";
-  EXPECT_NE(changed.find(",i=" + id + ","), std::string::npos) << "under the same id";
+  // ... under the image's second id, which nothing names yet: re-sent under the shown id, the
+  // terminal would drop the shown image for the whole transfer (an animated scene never shows).
+  const std::size_t at2 = changed.find(",i=");
+  ASSERT_NE(at2, std::string::npos);
+  const std::string id2 = changed.substr(at2 + 3, changed.find(',', at2 + 3) - at2 - 3);
+  EXPECT_NE(id2, id) << "the other id";
+  // The next layout switches the placeholders to it (their colour names the image).
+  const auto names = [&](const std::string &image_id) {
+    const unsigned long v = std::stoul(image_id);
+    const std::string colour = "38;2;" + std::to_string((v >> 16) & 0xFF) + ";" +
+                               std::to_string((v >> 8) & 0xFF) + ";" + std::to_string(v & 0xFF);
+    return t.be.render_to_string(t.rt, t.width, t.height, /*ansi=*/true).find(colour) !=
+           std::string::npos;
+  };
+  EXPECT_TRUE(names(id2));
+  EXPECT_FALSE(names(id));
+  // The picture no longer changes, so the first id's older picture is freed ...
+  EXPECT_EQ(t.be.take_graphics(), "\x1b_Ga=d,d=I,i=" + id + ",q=2\x1b\\");
+  // ... and the next new picture goes to it again, while the cells still name the second.
+  t.be.set_image("map", solid(10, 8, 30, 200, 30));
+  t.draw();
+  const std::string again = t.be.take_graphics();
+  EXPECT_EQ(count(again, "a=T"), 1);
+  EXPECT_NE(again.find(",i=" + id + ","), std::string::npos) << "back to the first id";
 
   t.rt.set_root(group({text("gone")}));
   t.draw();
   EXPECT_EQ(count(t.screen, kPlaceholder), 0);
-  EXPECT_EQ(t.be.take_graphics(), "\x1b_Ga=d,d=I,i=" + id + ",q=2\x1b\\")
-      << "an image no longer drawn is deleted";
+  const std::string gone = t.be.take_graphics();
+  EXPECT_NE(gone.find("\x1b_Ga=d,d=I,i=" + id + ",q=2\x1b\\"), std::string::npos) << gone;
+  EXPECT_NE(gone.find("\x1b_Ga=d,d=I,i=" + id2 + ",q=2\x1b\\"), std::string::npos)
+      << "an image no longer drawn is deleted, both its ids";
   EXPECT_EQ(t.be.release_graphics(), "");
 }
 
