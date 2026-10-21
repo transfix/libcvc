@@ -2265,8 +2265,15 @@ static int cmd_ph_train(int argc, char **argv) {
     std::cout << " " << c;
   std::cout << "; parameters " << model.params.size() << "\n";
   const auto started = std::chrono::steady_clock::now();
+  const std::size_t batch = std::min<std::size_t>(std::max(cfg.batch_size, 1), train.count);
+  std::size_t dropped = 0; // training windows whose rollout left the finite numbers
   ph::se2_train_rollout(
       model, train, test.count ? &test : nullptr, cfg, [&](const ph::se2_train_event &ev) {
+        if (ev.objective.healthy < batch) {
+          dropped += batch - ev.objective.healthy;
+          std::cout << "step " << ev.step << ": " << batch - ev.objective.healthy
+                    << " window(s) diverged; left out of the loss and the gradient\n";
+        }
         if (ev.step % log_every && ev.step != 1 && !ev.evaluated)
           return;
         const double s =
@@ -2296,8 +2303,10 @@ static int cmd_ph_train(int argc, char **argv) {
                       {"batch", std::to_string(cfg.batch_size)},
                       {"window_points", std::to_string(points)},
                       {"window_stride", std::to_string(stride)}};
+  model.provenance.emplace_back("diverged_windows", std::to_string(dropped));
   model.save(vm["out"].as<std::string>());
-  std::cout << "wrote " << vm["out"].as<std::string>() << "\n";
+  std::cout << "wrote " << vm["out"].as<std::string>() << " (" << dropped
+            << " diverged training windows left out)\n";
   return 0;
 }
 

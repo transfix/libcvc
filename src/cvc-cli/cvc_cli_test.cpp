@@ -23,11 +23,13 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/core/app.h>
 #include <cvc/core/types.h>
 #include <cvc/geometry/geometry.h>
+#include <cvc/ph/se2_train.h>
 #include <cvc/volume/volume.h>
 #include <filesystem>
 #include <fstream>
@@ -2286,3 +2288,62 @@ TEST_F(CvcCliTest, Regression_ClusterStatusDefaultIdsEndToEnd) {
   EXPECT_NE(std::string::npos, r.output.find("Session status")) << r.output;
 }
 #endif // !_WIN32
+
+// ===========================================================================
+// ph-train: the learned port-Hamiltonian vehicle (cvc::ph) from plant logs
+// ===========================================================================
+
+// A cvc-plant-log run directory: six flights of a vehicle on a gentle curve, seeds 100 and 101.
+static void write_plant_log_run(const fs::path &dir) {
+  fs::create_directories(dir);
+  const std::size_t flights = 6, rows = 61;
+  std::vector<double> data(flights * rows * 8);
+  for (std::size_t f = 0; f < flights; ++f) {
+    double x = 0.0, y = 0.0, psi = 0.1 * f;
+    const double v = 3.0 + f, r = 0.05 * (f % 3);
+    for (std::size_t k = 0; k < rows; ++k) {
+      double *row = &data[(f * rows + k) * 8];
+      row[0] = x;
+      row[1] = y;
+      row[2] = psi;
+      row[3] = v;
+      row[4] = 0.01;
+      row[5] = r;
+      row[6] = 0.2;
+      row[7] = 0.02 * (f % 3);
+      x += 0.02 * v * std::cos(psi);
+      y += 0.02 * v * std::sin(psi);
+      psi += 0.02 * r;
+    }
+  }
+  cvc::ph::write_npy((dir / "flights.npy").string(), data, {flights, rows, 8});
+  std::ofstream(dir / "meta.json") << "{\"format\": \"cvc-plant-log-1\", \"dt\": 0.02, "
+                                      "\"flight_seed\": [100, 100, 100, 101, 101, 101]}\n";
+}
+
+TEST_F(CvcCliTest, PhTrainFitsAModelToPlantLogs) {
+  const fs::path run = fs::path(test_dir) / "run";
+  write_plant_log_run(run);
+  const std::string out = path("model.json");
+  auto r = cvc("ph-train --runs \"" + run.string() + "\" --out \"" + out +
+               "\" --steps 20 --window-points 21 --window-stride 20 --features 8 --eval-every 10"
+               " --threads 2");
+  ASSERT_EQ(0, r.exit_code) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("3 train / 3 held out")) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("MONITOR test")) << r.output;
+  ASSERT_TRUE(fs::exists(out));
+  const cvc::ph::se2_model m = cvc::ph::se2_model::load(out);
+  EXPECT_EQ(m.setup.features, 8);
+  EXPECT_EQ(m.setup.control_dim, 2);
+  bool has_runs = false;
+  for (const auto &kv : m.provenance)
+    has_runs |= kv.first == "runs" && kv.second == run.string();
+  EXPECT_TRUE(has_runs);
+}
+
+TEST_F(CvcCliTest, PhTrainRefusesADirectoryThatIsNotAPlantLog) {
+  fs::create_directories(path("empty"));
+  auto r = cvc("ph-train --runs \"" + path("empty") + "\" --out \"" + path("m.json") + "\"");
+  EXPECT_NE(0, r.exit_code);
+  EXPECT_FALSE(fs::exists(path("m.json")));
+}

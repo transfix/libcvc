@@ -317,6 +317,28 @@ TEST(PhSe2Train, ObjectiveIsTheSameOnAnyThreadCount) {
   EXPECT_EQ(flat(g1), flat(g8));
 }
 
+// A window whose rollout leaves the finite numbers is left out of the loss and of the gradient
+// (LieSPHGP's rollout_loss means to drop it too, but its gradient still carries the NaN, and
+// train.py aborts).
+TEST(PhSe2Train, ADivergingWindowIsLeftOut) {
+  const se2_model m = small_model(17);
+  const se2_windows healthy = synthetic_windows(small_model(18), 3, 16, 0.02, 19);
+  se2_windows with_bad = healthy;
+  with_bad.count += 1;
+  with_bad.data.insert(with_bad.data.end(), healthy.window(0),
+                       healthy.window(0) + healthy.points * healthy.width);
+  with_bad.data[3 * healthy.points * healthy.width + 3] = 1e300; // v_x at its start
+  rng r(20);
+  const se2_draw_noise z = se2_draw_noise::standard_normal(m, r);
+  se2_params g_ok, g_bad;
+  const auto ok = se2_rollout_objective(m, healthy, nullptr, &z, 0.01, &g_ok);
+  const auto bad = se2_rollout_objective(m, with_bad, nullptr, &z, 0.01, &g_bad);
+  EXPECT_EQ(ok.healthy, 3u);
+  EXPECT_EQ(bad.healthy, 3u);
+  EXPECT_EQ(bad.value, ok.value);
+  EXPECT_EQ(flat(g_bad), flat(g_ok));
+}
+
 // A fresh model fit for 1,200 steps to flights of another one: the rollout loss falls well below
 // where it started, on windows it never trained on as well.
 TEST(PhSe2Train, ShortFitLowersTheLoss) {
