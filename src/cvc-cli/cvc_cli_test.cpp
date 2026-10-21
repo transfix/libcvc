@@ -34,6 +34,7 @@
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <iomanip>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -2339,6 +2340,31 @@ TEST_F(CvcCliTest, PhTrainFitsAModelToPlantLogs) {
   for (const auto &kv : m.provenance)
     has_runs |= kv.first == "runs" && kv.second == run.string();
   EXPECT_TRUE(has_runs);
+}
+
+// --init continues a model with its own scales, not the new runs' RMS.
+TEST_F(CvcCliTest, PhTrainContinuesAModelWithItsOwnScales) {
+  const fs::path run = fs::path(test_dir) / "run";
+  write_plant_log_run(run);
+  const std::string first = path("first.json"), second = path("second.json");
+  const std::string common =
+      " --steps 5 --window-points 21 --window-stride 20 --features 8 --threads 1";
+  ASSERT_EQ(
+      0,
+      cvc("ph-train --runs \"" + run.string() + "\" --out \"" + first + "\"" + common).exit_code);
+  cvc::ph::se2_model m = cvc::ph::se2_model::load(first);
+  m.control_scale = {2.0 * m.control_scale[0], 3.0 * m.control_scale[1]};
+  m.save(first);
+  auto r = cvc("ph-train --runs \"" + run.string() + "\" --out \"" + second + "\" --init \"" +
+               first + "\"" + common);
+  ASSERT_EQ(0, r.exit_code) << r.output;
+  std::ostringstream scales; // the inputs were read with the model's scales (the log says which)
+  scales << std::setprecision(6) << "control scale " << m.control_scale[0] << " "
+         << m.control_scale[1];
+  EXPECT_NE(std::string::npos, r.output.find(scales.str())) << r.output;
+  const cvc::ph::se2_model back = cvc::ph::se2_model::load(second);
+  EXPECT_EQ(back.control_scale, m.control_scale);
+  EXPECT_EQ(back.twist_scale, m.twist_scale);
 }
 
 TEST_F(CvcCliTest, PhTrainRefusesADirectoryThatIsNotAPlantLog) {

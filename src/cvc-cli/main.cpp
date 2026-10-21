@@ -2224,14 +2224,13 @@ static int cmd_ph_train(int argc, char **argv) {
 
   const int points = vm["window-points"].as<int>();
   const int stride = vm["window-stride"].as<int>();
-  const ph::se2_windows train =
-      ph::cut_windows(ph::scale_controls(train_f, control), points, stride);
-  const ph::se2_windows test =
-      test_f.count ? ph::cut_windows(ph::scale_controls(test_f, control), points, stride)
-                   : ph::se2_windows{};
   ph::se2_model model;
   if (vm.count("init")) {
+    // A model continues with its own scales: the inputs are divided by the RMS it was fit with.
     model = ph::se2_model::load(vm["init"].as<std::string>());
+    if (model.setup.control_dim != all.control_dim())
+      throw std::runtime_error("--init's model has " + std::to_string(model.setup.control_dim) +
+                               " inputs; the runs have " + std::to_string(all.control_dim()));
   } else {
     ph::se2_init init;
     init.control_dim = all.control_dim();
@@ -2241,6 +2240,12 @@ static int cmd_ph_train(int argc, char **argv) {
     model = ph::se2_model::initialize(init, vm["seed"].as<std::uint64_t>(), twist, control, all.dt,
                                       vm["substeps"].as<int>());
   }
+  const ph::se2_windows train =
+      ph::cut_windows(ph::scale_controls(train_f, model.control_scale), points, stride);
+  const ph::se2_windows test =
+      test_f.count
+          ? ph::cut_windows(ph::scale_controls(test_f, model.control_scale), points, stride)
+          : ph::se2_windows{};
   ph::se2_train_config cfg;
   cfg.seed = vm["seed"].as<std::uint64_t>();
   cfg.total_steps = vm["steps"].as<int>();
@@ -2259,9 +2264,9 @@ static int cmd_ph_train(int argc, char **argv) {
   std::cout << std::setprecision(6) << "ph-train: " << all.count << " flights x " << all.rows
             << " rows at dt " << all.dt << " s; " << train_f.count << " train / " << test_f.count
             << " held out; windows " << train.count << " / " << test.count << " of " << points
-            << " points\n  twist scale " << twist[0] << " " << twist[1] << " " << twist[2]
-            << "; control scale";
-  for (double c : control)
+            << " points\n  twist scale " << model.twist_scale[0] << " " << model.twist_scale[1]
+            << " " << model.twist_scale[2] << "; control scale";
+  for (double c : model.control_scale)
     std::cout << " " << c;
   std::cout << "; parameters " << model.params.size() << "\n";
   const auto started = std::chrono::steady_clock::now();
