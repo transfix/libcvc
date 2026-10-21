@@ -112,6 +112,7 @@ add_executable(physics_energy_test physics_energy_test.cpp)
 add_executable(nav_plant_test nav_plant_test.cpp)
 add_executable(physics_plant_log_test physics_plant_log_test.cpp)
 add_executable(nav_dyn_bike_test nav_dyn_bike_test.cpp)
+add_executable(nav_dyn_4w_test nav_dyn_4w_test.cpp)
 add_executable(nav_potential_test nav_potential_test.cpp)
 # nav_potential_test compares U logged by the material rollouts (built with -ffp-contract=off)
 # with the same inline evaluator called here, bit for bit: build it the same way, or clang
@@ -306,6 +307,7 @@ set(TEST_TARGETS
   nav_plant_test
   physics_plant_log_test
   nav_dyn_bike_test
+  nav_dyn_4w_test
   nav_potential_test
   ph_se2_test
   ph_se2_train_test
@@ -1664,6 +1666,13 @@ target_link_libraries(nav_dyn_bike_test
     GTest::gtest_main
 )
 
+target_link_libraries(nav_dyn_4w_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(nav_potential_test
   PRIVATE
     cvc
@@ -2025,6 +2034,7 @@ target_compile_features(physics_energy_test PRIVATE cxx_std_17)
 target_compile_features(nav_plant_test PRIVATE cxx_std_17)
 target_compile_features(physics_plant_log_test PRIVATE cxx_std_17)
 target_compile_features(nav_dyn_bike_test PRIVATE cxx_std_17)
+target_compile_features(nav_dyn_4w_test PRIVATE cxx_std_17)
 target_compile_features(nav_potential_test PRIVATE cxx_std_17)
 target_compile_features(ph_se2_test PRIVATE cxx_std_17)
 target_compile_features(ph_se2_train_test PRIVATE cxx_std_17)
@@ -2478,6 +2488,7 @@ cvc_discover_tests(physics_energy_test)
 cvc_discover_tests(nav_plant_test)
 cvc_discover_tests(physics_plant_log_test)
 cvc_discover_tests(nav_dyn_bike_test)
+cvc_discover_tests(nav_dyn_4w_test)
 cvc_discover_tests(nav_potential_test)
 cvc_discover_tests(ph_se2_test)
 cvc_discover_tests(ph_se2_train_test)
