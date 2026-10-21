@@ -1,9 +1,9 @@
 # terminal_tour.ari — a tour of the Ariadne terminal backend (FTXUI, roadmap §16.4).
 #
-#   ari run src/cvc/ariadne/examples/terminal_tour.ari
-#   ari run src/cvc/ariadne/examples/terminal_tour.ari --agents 128 --name ada
-#   ari run src/cvc/ariadne/examples/terminal_tour.ari --help
-#   ari snapshot --width 100 --height 30 src/cvc/ariadne/examples/terminal_tour.ari
+#   ari run examples/ariadne/terminal/terminal_tour.ari
+#   ari run examples/ariadne/terminal/terminal_tour.ari --agents 128 --name ada
+#   ari run examples/ariadne/terminal/terminal_tour.ari --help
+#   ari snapshot --width 100 --height 30 examples/ariadne/terminal/terminal_tour.ari
 #
 # ari's own flags go before the document; what follows it is the document's, checked against the
 # args: block below (`--help` lists it).

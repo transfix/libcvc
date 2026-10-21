@@ -1,6 +1,6 @@
 # terminal_images.ari — pictures in the terminal backend (roadmap §16.6).
 #
-#   ari run src/cvc/ariadne/examples/terminal_images.ari --image photo=picture.png
+#   ari run examples/ariadne/terminal/terminal_images.ari --image photo=picture.png
 #   ari run ... --graphics sixel    # or kitty / color / mono; the default (auto) picks for you
 #
 # An `image:` widget shows a picture the host publishes under its `src` name (ari's --image). On a

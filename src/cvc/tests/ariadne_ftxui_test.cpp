@@ -1196,10 +1196,9 @@ TEST(AriadneFtxuiGraphics, TerminalImagesDocumentShowsItsPicture) {
   if (!AppRuntime::have_yaml())
     GTEST_SKIP() << "libcvc built without yaml-cpp";
   namespace fs = std::filesystem;
-  const fs::path doc = fs::path(__FILE__).parent_path().parent_path() / "ariadne" / "examples" /
-                       "terminal_images.ari";
-  if (!fs::exists(doc))
-    GTEST_SKIP() << "example not found at " << doc.string();
+  // A missing document fails: if the examples move again, this test must follow them.
+  const fs::path doc = fs::path(CVC_EXAMPLES_DIR) / "ariadne" / "terminal" / "terminal_images.ari";
+  ASSERT_TRUE(fs::exists(doc)) << "example not found at " << doc.string();
   FtxuiBackend::Options o;
   o.image_color = ImageColor::Kitty;
   cvc::app app;
@@ -1222,10 +1221,8 @@ TEST(AriadneFtxui, TerminalTourDocumentRuns) {
   if (!AppRuntime::have_yaml())
     GTEST_SKIP() << "libcvc built without yaml-cpp";
   namespace fs = std::filesystem;
-  const fs::path doc =
-      fs::path(__FILE__).parent_path().parent_path() / "ariadne" / "examples" / "terminal_tour.ari";
-  if (!fs::exists(doc))
-    GTEST_SKIP() << "example not found at " << doc.string();
+  const fs::path doc = fs::path(CVC_EXAMPLES_DIR) / "ariadne" / "terminal" / "terminal_tour.ari";
+  ASSERT_TRUE(fs::exists(doc)) << "example not found at " << doc.string();
   cvc::app app;
   FtxuiBackend be;
   AppRuntime art(app, "ui.docs.tour");

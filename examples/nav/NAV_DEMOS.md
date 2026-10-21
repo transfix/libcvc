@@ -132,7 +132,7 @@ Preferred: install into a cvcpkg prefix and run straight from `bin/` — the bin
 `$ORIGIN`-relative RPATHs, so there is no `LD_LIBRARY_PATH` to set:
 
 ```sh
-cvcpkg install cvcgl-examples          # drops lsystem_forest + the three nav demos into <prefix>/bin
+cvcpkg install libcvc-examples         # drops the cvcGL and nav demos into <prefix>/bin
 <prefix>/bin/nav_city_swarm --agents 1000 --belief grouped
 ```
 

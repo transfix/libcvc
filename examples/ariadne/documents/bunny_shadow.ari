@@ -3,7 +3,7 @@
 # The SCENE (bunny on a ground plane, a tuned three-point rig, shadows), the UI (lighting + scene
 # control windows, a View window), and the ACTIONS are all DECLARED here — the host is the generic
 # `ariadne_hello` runner, which just loads this file, realizes the scene, frames the camera, and
-# renders. Compare src/cvcGL/examples/bunny_shadow.cpp — the same bench in ~280 lines of C++.
+# renders. Compare examples/cvcgl/bunny_shadow.cpp — the same bench in ~280 lines of C++.
 #
 #   ariadne_hello bunny_shadow.ari                       # navigable window
 #   ariadne_hello bunny_shadow.ari --offscreen --png bunny.png   # one captured frame

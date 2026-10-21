@@ -3,7 +3,7 @@
 // glyphs streamed each frame via GeometryNode::updateVertices — the path that scales
 // to thousands of agents (per-node actors die at ~63 nodes / 3 FPS). occupancy_to_walls
 // turns a cvc::nav occupancy grid into the static scene, and orbit_camera drives a
-// scripted capture orbit. See src/cvcGL/examples/NAV_DEMOS.md.
+// scripted capture orbit. See examples/nav/NAV_DEMOS.md.
 
 #ifndef CVC_NAV_DEMO_NAV_COMMON_H
 #define CVC_NAV_DEMO_NAV_COMMON_H

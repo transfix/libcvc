@@ -13,10 +13,12 @@
 #                      interpreter column (python31X + numpy-cp31X).
 #   * pycvc-gl-cp31X — the scriptable-scene bindings per column (needs
 #                      cvcgl + VTK + vtk-python-cp31X + Python).
-#   * cvcgl-examples — the example COMMANDS (lsystem_forest + the nav demos +
-#                      the cvcgl-examples-web launcher), linux release only.
+#   * libcvc-examples — the example COMMANDS (examples/: the cvcGL scene demos,
+#                      the nav demos, the .ari documents and the
+#                      libcvc-examples-web launcher), linux release only.
 #                      Built through the recipe's own build.sh so the workflow
-#                      and the remote builders cannot drift.
+#                      and the remote builders cannot drift. (Its browser
+#                      gallery, libcvc-examples-web, is publish-cvcgl-wasm.yml's.)
 # The interpreter column is a matrix dimension (`pyver`): every job carries
 # the base "311", and extra linux-x86_64 release jobs (matrix include) build
 # the cp312/cp313 columns. Those column jobs rebuild libcvc + cvcgl locally
@@ -24,9 +26,9 @@
 # pair — libcvc/cvcgl publish exactly once, from the pyver-311 job (see the
 # `matrix.pyver == '311'` guards).
 # Platform coverage (see the guards on each step below):
-#   * Linux   — libcvc + cvcgl + cvcgl-examples + pycvc-cp311/312/313 +
+#   * Linux   — libcvc + cvcgl + libcvc-examples + pycvc-cp311/312/313 +
 #               pycvc-gl-cp311/312/313 (release config; the 312/313 columns on
-#               x86_64 only; cvcgl-examples from the pyver-311 column only).
+#               x86_64 only; libcvc-examples from the pyver-311 column only).
 #   * Windows — libcvc + cvcgl always; pycvc-cp311/pycvc-gl-cp311 only behind
 #               the `windows_pycvc` dispatch input (still a TODO — unverified;
 #               Windows stays cp311-only for now).
@@ -181,7 +183,7 @@ jobs:
     outputs:
       libcvc: ${{ steps.rev.outputs.libcvc }}
       cvcgl: ${{ steps.rev.outputs.cvcgl }}
-      cvcgl_examples: ${{ steps.rev.outputs.cvcgl_examples }}
+      libcvc_examples: ${{ steps.rev.outputs.libcvc_examples }}
       ari: ${{ steps.rev.outputs.ari }}
       # One output per pycvc interpreter column; the build matrix selects the
       # right one via outputs[format('pycvc_cp{0}', matrix.pyver)].
@@ -222,7 +224,7 @@ jobs:
           }
           emit libcvc         libcvc
           emit cvcgl          cvcgl
-          emit cvcgl-examples cvcgl_examples
+          emit libcvc-examples libcvc_examples
           emit ari            ari
           emit pycvc-cp311    pycvc_cp311
           emit pycvc-cp312    pycvc_cp312
@@ -743,7 +745,7 @@ jobs:
           # cvcgl links the installed libcvc SDK ($STAGE) + VTK (from $PY).
           # Dear ImGui powers the cvcGL overlay (cvc::gl::ImGuiOverlay). Build the
           # SDK WITH it so CVC_ENABLE_IMGUI is on and the overlay actually renders
-          # for downstream GUI consumers (e.g. cvcgl-examples). Safe:
+          # for downstream GUI consumers (e.g. libcvc-examples). Safe:
           # cvcGL's imgui export is the imgui::imgui target name (relocatable, not
           # this builder's abs path), re-resolved from the CONSUMER's prefix by
           # cvcGLConfig.cmake, so no path leaks into cvcGLTargets.cmake. Built into
@@ -810,11 +812,12 @@ jobs:
             echo "dry-run: skipping cvcgl publish"
           fi
 
-      - name: Build, pack & publish cvcgl-examples [Linux]
-        # The example COMMANDS (lsystem_forest + the nav demos + the
-        # cvcgl-examples-web launcher), packaged apart from the cvcgl SDK the
-        # same way cvc-cli is packaged apart from libcvc.  Nothing else links
-        # them, so unlike cvcgl this runs only in the pyver-311 column.
+      - name: Build, pack & publish libcvc-examples [Linux]
+        # The example COMMANDS (examples/: the cvcGL scene demos, the nav demos,
+        # the .ari documents and the libcvc-examples-web launcher), packaged
+        # apart from the cvcgl SDK the same way cvc-cli is packaged apart from
+        # libcvc.  Nothing else links them, so unlike cvcgl this runs only in
+        # the pyver-311 column.  It replaces cvcgl-examples.
         #
         # This invokes the recipe's own build.sh rather than repeating its
         # cmake here: the recipe is what the remote builders run, and the two
@@ -829,10 +832,8 @@ jobs:
         # installs libcvc from THIS tree into $STAGE first -- publishing the
         # examples from anywhere else requires a libcvc republish beforehand.
         #
-        # TODO: the recipe also has a `platform: wasm` entry (the browser build
-        # under share/cvcgl-examples/web/).  Publishing it needs emsdk + the
-        # wasm dep closure + a rendering-enabled wasm vtk on the catalog, so it
-        # is deliberately not wired up here yet.
+        # The browser build of the same programs is its own recipe,
+        # libcvc-examples-web, which publish-cvcgl-wasm.yml builds and publishes.
         if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'linux' && matrix.config == 'release' && matrix.pyver == '311' }}
         shell: bash
         env:
@@ -855,35 +856,44 @@ jobs:
           IMGUI="$GITHUB_WORKSPACE/prefix-imgui"
           cvcpkg install imgui --prefix "$IMGUI"
           export CVC_SOURCE_DIR="$GITHUB_WORKSPACE"
-          export CVC_BUILD_DIR="$GITHUB_WORKSPACE/build-cvcgl-examples"
-          export CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-cvcgl-examples"
+          export CVC_BUILD_DIR="$GITHUB_WORKSPACE/build-libcvc-examples"
+          export CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-libcvc-examples"
           export CVC_DEPS_PREFIX="$STAGE;$PY;$IMGUI;$DEPS"
           export CVC_BUILD_TYPE=Release
           export CVC_JOBS="$(nproc)"
-          bash cvcpkg/recipes/cvcgl-examples/build.sh
+          bash cvcpkg/recipes/libcvc-examples/build.sh
+          # Every program the recipe lists, and the documents arigl and ari run.
+          for b in lsystem_forest lsystem_coast terrain_lab bunny_shadow volren_bunny \
+                   volslice_bunny nav_city_swarm nav_city_drive nav_fog_ghost nav_finale \
+                   nav_swarm_demo nav_train_demo nav_material_demo libcvc-examples-web; do
+            test -x "stage-libcvc-examples/bin/$b" \
+              || { echo "::error::libcvc-examples did not install bin/$b"; exit 1; }
+          done
+          test -f stage-libcvc-examples/share/libcvc-examples/ariadne/documents/hello.ari
+          test -f stage-libcvc-examples/share/libcvc-examples/ariadne/terminal/terminal_tour.ari
           mkdir -p dist
-          cvcpkg pack cvcpkg/recipes/cvcgl-examples \
-            --from-prefix stage-cvcgl-examples \
+          cvcpkg pack cvcpkg/recipes/libcvc-examples \
+            --from-prefix stage-libcvc-examples \
             --platform "${{ matrix.target.platform }}" \
             --config release --link shared --local \
-            --cvc-revision ${{ needs.compute-revisions.outputs.cvcgl_examples }} \
+            --cvc-revision ${{ needs.compute-revisions.outputs.libcvc_examples }} \
             --output-dir dist
           if [ "$DO_PUBLISH" = "1" ]; then
             if [ -z "${CVCPKG_TOKEN:-}" ]; then
               echo "CVCPKG_TOKEN secret is required to publish"; exit 1
             fi
-            cvcpkg publish cvcgl-examples \
+            cvcpkg publish libcvc-examples \
               --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
               --platform "${{ matrix.target.platform }}" \
               --config release --link shared --output-dir dist \
               --token "$CVCPKG_TOKEN"
           else
-            echo "dry-run: skipping cvcgl-examples publish"
+            echo "dry-run: skipping libcvc-examples publish"
           fi
 
       - name: Build, pack & publish ari [Linux]
         # The `ari` terminal runner (src/ari), packaged apart from the libcvc SDK the
-        # way cvc-cli is.  Like cvcgl-examples it runs the recipe's own build.sh
+        # way cvc-cli is.  Like libcvc-examples it runs the recipe's own build.sh
         # against the libcvc just installed into $STAGE, so the published ari always
         # matches the libcvc built from this tree (its FTXUI backend and .ari loader
         # live in libcvc).  The macOS and Windows twins are at the end of this job.
@@ -907,7 +917,7 @@ jobs:
           test -x stage-ari/bin/ari
           # The binary that ships must render a document: the real backend and loader, not stubs.
           LD_LIBRARY_PATH="$STAGE/lib:$DEPS/lib" stage-ari/bin/ari snapshot --width 100 --height 24 \
-            src/cvc/ariadne/examples/terminal_tour.ari | tee ari-snapshot.txt
+            examples/ariadne/terminal/terminal_tour.ari | tee ari-snapshot.txt
           grep -qF "agents: 64" ari-snapshot.txt
           mkdir -p dist
           cvcpkg pack cvcpkg/recipes/ari \
@@ -1247,7 +1257,7 @@ jobs:
           # Its rpath is @loader_path/../lib, the flat prefix it is installed into, so point dyld at
           # the two prefixes it is split across here.
           DYLD_LIBRARY_PATH="$STAGE/lib:$DEPS/lib" stage-ari/bin/ari snapshot --width 100 --height 24 \
-            src/cvc/ariadne/examples/terminal_tour.ari | tee ari-snapshot.txt
+            examples/ariadne/terminal/terminal_tour.ari | tee ari-snapshot.txt
           grep -qF "agents: 64" ari-snapshot.txt
           mkdir -p dist
           cvcpkg pack cvcpkg/recipes/ari \
@@ -1295,7 +1305,7 @@ jobs:
           # cvc.dll and every dependency DLL sit in the two prefixes' bin/ directories.
           $savedPath = $env:PATH
           $env:PATH = "$stage\bin;$depsPath\bin;$env:PATH"
-          & ./stage-ari/bin/ari.exe snapshot --width 100 --height 24 src/cvc/ariadne/examples/terminal_tour.ari |
+          & ./stage-ari/bin/ari.exe snapshot --width 100 --height 24 examples/ariadne/terminal/terminal_tour.ari |
             Tee-Object -FilePath ari-snapshot.txt
           if ($LASTEXITCODE -ne 0) { throw "ari snapshot failed ($LASTEXITCODE)" }
           $env:PATH = $savedPath

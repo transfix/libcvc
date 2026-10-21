@@ -29,7 +29,7 @@
 #include <cvc/ariadne/conference/room_intrinsics.h> // register_room_intrinsics (room-join/roster/leave)
 #include <cvc/ariadne/loader.h>
 #include <cvc/ariadne/stream/muted_source.h> // --camera: mute gate for the host-owned camera stream
-#include <cvc/ariadne/stream/stream.h> // --camera: open the video stream sized to the device
+#include <cvc/ariadne/stream/stream.h>       // --camera: open the video stream sized to the device
 #include <cvc/ariadne/stream/stream_registry.h> // post-run verification: lookup the opened tokens
 #include <cvc/ariadne/stream_intrinsics.h> // register_stream_intrinsics (stream-open/info/close)
 #include <cvc/ariadne/uri.h>

@@ -37,7 +37,7 @@ if(EMSCRIPTEN)
   # cvc::net's fetch backend needs as well, with -sFETCH). Single-threaded: it runs on the
   # page's main thread and needs no COOP/COEP headers. EXIT_RUNTIME so a document that quits
   # reaches the page's onExit.
-  set(CVC_ARI_WASM_DOC "${CMAKE_CURRENT_SOURCE_DIR}/../cvc/ariadne/examples/terminal_tour.ari"
+  set(CVC_ARI_WASM_DOC "${CMAKE_CURRENT_SOURCE_DIR}/../../examples/ariadne/terminal/terminal_tour.ari"
       CACHE FILEPATH "The .ari document the ari browser build runs")
   get_filename_component(_ari_doc_name "${CVC_ARI_WASM_DOC}" NAME)
   target_compile_definitions(ari PRIVATE CVC_ARIADNE_WASM_DOC="/${_ari_doc_name}")

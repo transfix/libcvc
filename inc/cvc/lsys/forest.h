@@ -22,7 +22,7 @@
 
 // forest.h — the lsystem_forest demo's TREE generators, promoted into the library.
 //
-// Two species, ported VERBATIM in shape from src/cvcGL/examples/lsystem_forest.cpp so the
+// Two species, ported VERBATIM in shape from examples/cvcgl/lsystem_forest.cpp so the
 // trees look exactly as they do in the demo (this is the look the author wants kept — it is
 // NOT the generic parametric pine_monopodial recipe):
 //

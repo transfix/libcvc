@@ -197,7 +197,7 @@ jobs:
           if [ -n "$base" ] && [ "$base" != "0000000000000000000000000000000000000000" ] \
              && git cat-file -e "${base}^{commit}" 2>/dev/null; then
             if ! git diff --name-only "$base" HEAD -- src/cvcGL/wasm \
-                   src/cvcGL/test/webgl_state_shadow_test.js src/cvcGL/examples/wasm/serve.py \
+                   src/cvcGL/test/webgl_state_shadow_test.js \
                    .github/workflows/ci.yml | grep -q .; then
               run=false
             fi
@@ -349,7 +349,8 @@ jobs:
           if [ -n "$base" ] && [ "$base" != "0000000000000000000000000000000000000000" ] \
              && git cat-file -e "${base}^{commit}" 2>/dev/null; then
             if ! git diff --name-only "$base" HEAD -- src/cvc/ariadne inc/cvc/ariadne src/cvc/tools \
-                   src/ari CMakeLists.txt src/cvc/CMakeLists.txt CMake cvcpkg/recipes/libcvc \
+                   src/ari examples/ariadne/terminal CMakeLists.txt src/cvc/CMakeLists.txt CMake \
+                   cvcpkg/recipes/libcvc \
                    .github/workflows/ci.yml | grep -q .; then
               run=false
             fi

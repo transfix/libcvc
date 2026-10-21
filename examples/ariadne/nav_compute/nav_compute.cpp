@@ -24,7 +24,7 @@
 #include <cvc/ariadne/loader.h>
 #include <cvc/ariadne/uri.h> // register_cvc_uri_handler — the cvc:// component-library import path
 #include <cvc/core/app.h>
-#include <cvc/core/thread_pool.h>           // compute_async drives computePool().parallel_for
+#include <cvc/core/thread_pool.h> // compute_async drives computePool().parallel_for
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/ImGuiOverlay.h>
 #include <cvc/gl/SceneGraph.h>

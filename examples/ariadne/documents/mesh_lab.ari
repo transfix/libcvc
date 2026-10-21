@@ -11,7 +11,7 @@
 # refuse the document up front instead of showing an empty scene.
 #
 # Run from the repository root:
-#   ariadne_hello src/cvcGL/examples/mesh_lab.ari --component-path src/cvc/ariadne
+#   ariadne_hello examples/ariadne/documents/mesh_lab.ari --component-path src/cvc/ariadne
 
 meta:
   name: Mesh lab (Ariadne + libigl)

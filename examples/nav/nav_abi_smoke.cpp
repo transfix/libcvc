@@ -1,4 +1,4 @@
-// nav_abi_smoke — a headless (no-GL) consistency guard the cvcgl-examples recipe
+// nav_abi_smoke — a headless (no-GL) consistency guard the libcvc-examples recipe
 // runs after building the demos.
 //
 // The nav demos compile against the IN-TREE cvc/nav headers but link the SHARED

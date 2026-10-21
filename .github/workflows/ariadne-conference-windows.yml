@@ -2,8 +2,8 @@ name: ariadne-conference-windows
 
 # Build the Ariadne conference CLIENT (ariadne_conference) + RELAY (arisrv) on Windows.
 #
-# These are not part of the normal CI matrix: the conference example lives behind CVC_BUILD_EXAMPLES
-# (OFF by default), and this turns gRPC ON on Windows (proven to build in #643 — package-windows /
+# These are not part of the normal CI matrix: the conference example (examples/ariadne/hosts) lives
+# behind CVC_BUILD_EXAMPLES (OFF by default), and this turns gRPC ON on Windows (proven to build in #643 — package-windows /
 # libcvc-release-grpc is green). It mirrors ci.yml's package-windows dep provisioning (cvcpkg is the
 # sole third-party source: Boost/HDF5/VTK/SDL3/imgui/libjpeg-turbo + grpc/protobuf), then builds just
 # the two conference targets (not every example) and uploads them. Manual trigger — run it with
@@ -20,6 +20,7 @@ on:
     paths:
       - '.github/workflows/ariadne-conference-windows.yml'
       - 'src/cvcGL/**'
+      - 'examples/ariadne/**'
       - 'inc/cvc/gl/**'
       - 'src/cvc/ariadne/**'
       - 'inc/cvc/ariadne/**'
