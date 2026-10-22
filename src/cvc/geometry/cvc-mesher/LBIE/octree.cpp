@@ -5931,18 +5931,20 @@ void Octree::getGrad(float v0[3], float v1[3], float v2[3], float v3[3], float& 
 	else jacob = (float) sqrt(jacob);
 	condition_no = (g11 + g22 + g33) / (3.0f*jacob);
 
+	// t1 is d(jacobian)/d(v0) for the edges v1-v0, v2-v0, v3-v0 (unnormalized). Its second factors
+	// were indexed 1-based: [3] for z, which read past these float[3] arrays, and [2] for y.
 	t0 = 2.0f*(v1[0] + v2[0] + v3[0] - 3.0f*v0[0]);
-	t1 = (v1[1]-v0[1])*(v3[3]-v2[3]) + (v2[1]-v0[1])*(v1[3]-v3[3]) + (v3[1]-v0[1])*(v2[3]-v1[3]);
+	t1 = (v1[1]-v0[1])*(v3[2]-v2[2]) + (v2[1]-v0[1])*(v1[2]-v3[2]) + (v3[1]-v0[1])*(v2[2]-v1[2]);
 	grad[0] = t0/jacob - (g11+g22+g33)*t1/(jacob*jacob);
 	//grad[0] = t1/(g11+g22+g33) - jacob*t0/((g11+g22+g33)*(g11+g22+g33));
 
 	t0 = 2.0f*(v1[1] + v2[1] + v3[1] - 3.0f*v0[1]);
-	t1 = (v1[0]-v0[0])*(v2[3]-v3[3]) + (v2[0]-v0[0])*(v3[3]-v1[3]) + (v3[0]-v0[0])*(v1[3]-v2[3]);
+	t1 = (v1[0]-v0[0])*(v2[2]-v3[2]) + (v2[0]-v0[0])*(v3[2]-v1[2]) + (v3[0]-v0[0])*(v1[2]-v2[2]);
 	grad[1] = t0/jacob - (g11+g22+g33)*t1/(jacob*jacob);
 	//grad[1] = t1/(g11+g22+g33) - jacob*t0/((g11+g22+g33)*(g11+g22+g33));
 
 	t0 = 2.0f*(v1[2] + v2[2] + v3[2] - 3.0f*v0[2]);
-	t1 = (v1[0]-v0[0])*(v3[2]-v2[2]) + (v2[0]-v0[0])*(v1[2]-v3[2]) + (v3[0]-v0[0])*(v2[2]-v1[2]);
+	t1 = (v1[0]-v0[0])*(v3[1]-v2[1]) + (v2[0]-v0[0])*(v1[1]-v3[1]) + (v3[0]-v0[0])*(v2[1]-v1[1]);
 	grad[2] = t0/jacob - (g11+g22+g33)*t1/(jacob*jacob);
 	//grad[2] = t1/(g11+g22+g33) - jacob*t0/((g11+g22+g33)*(g11+g22+g33));
 
@@ -6488,6 +6490,10 @@ void Octree::assign_refine_sign_quad(geoframe& geofrm, float err_tol) {
 			if (intersect_id == 1 || intersect_id == -1) {
 				eflag_on(x, y, z, level, j);
 				find_oc_id(x, y, z, level, j, intersect_id, oc_id);
+				// An edge on the volume's boundary has cells outside the grid (-1 from xyz2octcell).
+				// is_min_edge() never makes a quad for it, and get_err_grad(-1) and
+				// vtx_idx_arr_refine[-1] read and wrote out of bounds.
+				if (oc_id[1] < 0 || oc_id[2] < 0 || oc_id[3] < 0) continue;
 				
 				num_id = 0;
 				if(get_err_grad(oc_id[0]) > err_tol) num_id++;
@@ -6530,6 +6536,7 @@ void Octree::assign_refine_sign_quad(geoframe& geofrm, float err_tol) {
 				if (intersect_id == 1 || intersect_id == -1) {
 					eflag_on(x, y, z, level, j);
 					find_oc_id(x, y, z, level, j, intersect_id, oc_id);
+					if (oc_id[1] < 0 || oc_id[2] < 0 || oc_id[3] < 0) continue; // see above
 
 					num_id = 0;
 					if(vtx_idx_arr_refine[oc_id[0]] == 1) num_id++;
