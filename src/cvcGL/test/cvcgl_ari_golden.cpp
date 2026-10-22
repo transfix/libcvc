@@ -10,6 +10,9 @@
 // least 700 px on its short side, so the small-screen rule never closes them), ImGui's frame delta
 // pinned, and several frames at a fixed dt before the capture, so new windows have finished
 // appearing. The test then renders one frame more and requires it to be identical to the capture.
+// When ImGui drew exactly the same UI in both and only the rasterizer moved (the Apple Software
+// Renderer, in a process's first frames), it renders up to kRasterSettleFrames more until two
+// agree.
 //
 // Goldens are made under Mesa llvmpipe, the rasterizer of the Linux and Windows CI jobs. Other
 // rasterizers, and other Mesa versions, draw anti-aliased edges and shading a little differently,
@@ -56,6 +59,7 @@ namespace {
 constexpr int kWidth = 960, kHeight = 720; // short side >= 700: the overlay keeps its panels open
 constexpr double kDt = 1.0 / 30.0;         // the host frame step AND ImGui's frame delta
 constexpr int kMinFrames = 4;              // frames before the capture (ImGui auto-fit needs 2)
+constexpr int kRasterSettleFrames = 10;    // more frames for a rasterizer drawing one UI two ways
 const double kBackground[3] = {0.09, 0.10, 0.12};
 
 // One tolerance for every rasterizer, from these measurements against the goldens (Mesa 25.3.6
@@ -154,22 +158,25 @@ std::string firstDifference(const Image &a, const Image &b) {
   return "";
 }
 
-#ifdef CVC_ENABLE_IMGUI
 // What ImGui handed the GL backend for the last rendered frame: its draw lists (vertices, indices,
 // commands and their clip rects and textures) and every texture's size and pixels. Two frames with
 // equal fingerprints asked GL to draw the same UI, so a pixel difference between them comes from
 // the rasterizer, not from the UI.
 struct DrawFingerprint {
+  bool valid = false; // false: no draw data (or no ImGui in this build), so nothing is known
   uint64_t lists = 0, textures = 0;
   int vertices = 0;
   std::string textureSizes;
   bool sameUi(const DrawFingerprint &o) const {
-    return lists == o.lists && textures == o.textures && vertices == o.vertices;
+    return valid && o.valid && lists == o.lists && textures == o.textures && vertices == o.vertices;
   }
 };
 
 DrawFingerprint drawFingerprint(cvc::gl::ImGuiOverlay &ui) {
   DrawFingerprint fp;
+#ifndef CVC_ENABLE_IMGUI
+  (void)ui;
+#else
   ImGui::SetCurrentContext(ui.imguiContext());
   const ImDrawData *dd = ImGui::GetDrawData();
   if (!dd || !dd->Valid)
@@ -202,9 +209,12 @@ DrawFingerprint drawFingerprint(cvc::gl::ImGuiOverlay &ui) {
       fp.textureSizes += (fp.textureSizes.empty() ? "" : " ") + std::to_string(t->Width) + "x" +
                          std::to_string(t->Height);
     }
+  fp.valid = true;
+#endif
   return fp;
 }
 
+#ifdef CVC_ENABLE_IMGUI
 void injectPointer(cvc::gl::ImGuiOverlay &ui, const GoldenCase *gc, int frame) {
   if (!gc)
     return;
@@ -267,24 +277,41 @@ bool runDocument(const fs::path &doc, const fs::path &goldenDir, const fs::path 
   // no X display, which imgui's GLX-based loader cannot reach) nothing here can be tested.
   if (!ui.enabled())
     return false;
-  rt.frame(kDt);
-  const Image actual =
-      cvcgl_golden::fromFrameRGB(view.frameRGB(), view.frameWidth(), view.frameHeight());
-#ifdef CVC_ENABLE_IMGUI
-  const DrawFingerprint actualUi = drawFingerprint(ui);
-#endif
-  rt.frame(kDt);
-  const Image next =
-      cvcgl_golden::fromFrameRGB(view.frameRGB(), view.frameWidth(), view.frameHeight());
-#ifdef CVC_ENABLE_IMGUI
-  const DrawFingerprint nextUi = drawFingerprint(ui);
-#endif
+  // The capture, then one frame more, which must draw the same pixels. A UI that is still changing
+  // fails here. The one other way two frames differ is the rasterizer: ImGui handed GL exactly the
+  // same UI (the same fingerprint) and some pixels still moved. macOS CI's Apple Software Renderer
+  // does that, by 1 in a few pixels, in a process's first frames. Then the later frame becomes the
+  // capture and one more is drawn, up to kRasterSettleFrames times, and the log says so.
+  auto render = [&] {
+    rt.frame(kDt);
+    return cvcgl_golden::fromFrameRGB(view.frameRGB(), view.frameWidth(), view.frameHeight());
+  };
+  Image actual = render();
+  DrawFingerprint actualUi = drawFingerprint(ui);
+  Image next;
+  DrawFingerprint nextUi;
+  cvcgl_golden::Comparison settled;
+  std::string rasterNoise; // the first same-UI difference, when the rasterizer needed more frames
+  int rasterFrames = 0;
+  for (;;) {
+    next = render();
+    nextUi = drawFingerprint(ui);
+    settled = cvcgl_golden::compare(next, actual, {0, 0.0});
+    if (settled.pass || !actualUi.sameUi(nextUi) || rasterFrames == kRasterSettleFrames)
+      break;
+    if (rasterNoise.empty())
+      rasterNoise =
+          cvcgl_golden::describe(settled, {0, 0.0}) + "; " + firstDifference(actual, next);
+    ++rasterFrames;
+    actual = std::move(next);
+    actualUi = nextUi;
+  }
   for (const std::string &w : rt.take_warnings())
     std::printf("  runtime: %s\n", w.c_str());
 
   const std::string renderer = glRenderer(view);
   const bool llvmpipe = renderer.find("llvmpipe") != std::string::npos;
-  std::printf("  %d frames at %dx%d on %s\n", frames + 2, kWidth, kHeight,
+  std::printf("  %d frames at %dx%d on %s\n", frames + 2 + rasterFrames, kWidth, kHeight,
               renderer.empty() ? "(unknown renderer)" : renderer.c_str());
 
   check(!actual.empty() && actual.w == kWidth && actual.h == kHeight,
@@ -292,16 +319,14 @@ bool runDocument(const fs::path &doc, const fs::path &goldenDir, const fs::path 
   const double drawn = drawnFraction(actual);
   check(drawn > 0.01, name + ": the frame is more than the background",
         std::to_string(100.0 * drawn) + "% of pixels drawn");
-  const cvcgl_golden::Comparison settled = cvcgl_golden::compare(next, actual, {0, 0.0});
   std::string settledDetail = cvcgl_golden::describe(settled, {0, 0.0});
   const std::string firstDiff = firstDifference(actual, next);
   if (!firstDiff.empty())
     settledDetail += "; " + firstDiff;
-#ifdef CVC_ENABLE_IMGUI
   if (actualUi.sameUi(nextUi)) {
     settledDetail += "; ImGui drew the same UI both times (" + std::to_string(nextUi.vertices) +
                      " vertices, textures " + nextUi.textureSizes + ")";
-  } else {
+  } else if (actualUi.valid && nextUi.valid) {
     std::string what = actualUi.lists != nextUi.lists ? "draw lists" : "";
     if (actualUi.textures != nextUi.textures)
       what += what.empty() ? "textures" : " and textures";
@@ -310,7 +335,10 @@ bool runDocument(const fs::path &doc, const fs::path &goldenDir, const fs::path 
                      " vertices, textures " + actualUi.textureSizes + " -> " + nextUi.textureSizes +
                      ")";
   }
-#endif
+  if (rasterFrames > 0)
+    settledDetail += std::string("; with the same UI, the rasterizer ") +
+                     (settled.pass ? "settled after " : "had not settled after ") +
+                     std::to_string(rasterFrames) + " more frame(s) (first: " + rasterNoise + ")";
   check(settled.pass, name + ": one more frame draws the same pixels (the UI has settled)",
         settledDetail);
 
