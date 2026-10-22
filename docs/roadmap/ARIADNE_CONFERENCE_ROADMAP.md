@@ -367,7 +367,8 @@ bundles them yet.
   confirm the deterministic physics path (`det_math.h`).
 - **H1 — single holon** (the §5g scene + avatars, formalized): bundle `{clock,physics,scene}`;
   server-authoritative; client replica with prediction + reconcile; pose propose→veto→override; geometry
-  LOD + spatial interest; **per-camera `RenderView` + `VisibilityMask`** (pull in CVCGL-UI-DSL §9.5).
+  LOD + spatial interest; **per-camera `RenderView` + `VisibilityMask`** (both already exist —
+  `src/cvcGL/RenderView.cpp`, §9.5 — so H1 *uses* them, it does not build them).
 - **H2 — physics/sim LOD + re-hydrate; cross-node clock tracking** (seek/scale, shared pause).
 - **H3 — subdelegation / holarchy:** spatial→path delegation on the lease manager; parent-as-authority-
   client + override primitive; live-remote-holon scene mount at copy/LOD; residency/paging driver
@@ -664,37 +665,38 @@ mesh works first, auth hardens later (§5, Phase 8); **WASI server committed** (
 
 ---
 
-## 13. Consolidated from the Ariadne (cvcGL UI & scene DSL) roadmap
+## 13. Status of the Ariadne (cvcGL UI & scene DSL) roadmap — verified against code
 
-`CVCGL-UI-DSL-ROADMAP.md` is **substantially complete** — the `state_exec` engine, the widget/layout model,
-the reactive + action lanes, composition/URI, the **scene-graph core**, the **streamed-source zero-copy
-contract + clipping**, Unicode, and the backend-core split + AppRuntime refactor all landed. Its remaining
-items are **retained here (nothing dropped)**: conference-relevant ones feed the H/D arc, the rest are
-backlog we still want.
+The Ariadne UI/scene DSL is **essentially complete in code, and its roadmap docs are badly stale** — a
+*doc* audit mis-reports finished work as open (even this file's §9/§10 still call `input_text` a gap, though
+it shipped in **#636**). The statuses below are **verified against the tree**, not read off the doc.
 
-**Near-term (fold into the H/D arc):**
-* **`input_text` / `input_int` widgets** (§3.5/§6) — keyboard plumbing landed, the *widgets* do not exist;
-  needed for chat + real name entry (already Phase-0 in §10).
-* Text **editing + clipboard** (§17.5/§17.8) — chat.
-* **Multi-view `RenderView` + `VisibilityMask`** (§9.5) — pulled into **H1** (per-camera render + per-view
-  mask/LOD; this is a holon building block, not just a UI feature).
-* **Light node** + binding scene props (transform/material/color/TF) **to state** (§9.1); `minimap` /
-  `view_embed` (§9.6) — shared-scene polish.
-* HTTP **cache LRU/async** (§13.9) + **write side** (§13.10); document `on_key/on_pointer` + portable
-  `drain_input` (§16.1); **`state_exec` async-scheduler parity** (§7.1/§7.7 — port `receive_message`/`sleep`,
-  wire `memory_tracker`), which the DSL-in-the-frame-loop (§5h driver) and the D4 limits lean on.
+**Landed (several still listed open/planned in the docs — refresh needed):**
+* `input_text` / `input_int` widgets (§3.5/§6) — `src/cvc/ariadne/loader.cpp:650` (#636).
+* Multi-view **`RenderView` / `VisibilityMask`** (§9.5) — `src/cvcGL/RenderView.cpp`.
+* **Light** scene node (§9.1) — `src/cvcGL/LightNode.cpp` + loader `"light"`.
+* **Clipboard** (§17.8) — `src/cvcGL/Clipboard*.{cpp,mm}`.
+* `state_exec` **async-scheduler parity** (§7.1/§7.7) — `receive_message`/`sleep`/`yield_frame` in
+  `async_scheduler.cpp`.
+* **JSON-Schema validator integration** (§15) — `nlohmann_json_schema_validator` wired in CMake
+  (dep-conditional).
+* **s-expr in binds/scripts** (part of §18) — homoiconic read-lane in `ariadne.cpp` / `loader.cpp`.
+* **Geometry LOD** (PR #249+), **tvision** terminal backend (§16.4), **EGL golden-image harness** (§16.6).
+* The core: engine, widget/layout, reactive + action lanes, composition/URI, scene-graph core,
+  streamed-source zero-copy + clipping, Unicode, backend split + AppRuntime.
 
-**Backlog (wanted, later — retained, not scheduled yet):**
-* Transfer-function editor + `data()`-channel authoring (§10/§10.3).
-* Formal draft-2020-12 JSON Schema + the C++ validator + `ari validate` (§15).
-* YAML-free pure-s-expr `.ari` dialect (§18).
-* `state_exec` program modularity — `(include/load "uri")` (§19).
-* pycvc URI-scheme handler override + `py_to_value` bytes branch (§14.2).
+**Genuinely remaining — VERIFY each in code before scheduling (the doc can't be trusted); all retained:**
+* Transfer-function editor + `data()`-channel authoring (§10) — *no code found.*
+* `state_exec` program modularity `(include/load "uri")` (§19) — *no code found.*
+* pycvc URI-scheme handler override + bytes branch (§14.2) — *not found; verify.*
+* Full YAML-free s-expr `.ari` **document** dialect (§18) — exprs land in binds/scripts; the whole-document
+  front-end is the remainder.
+* Formal draft-2020-12 JSON Schema + the `ari validate` command (§15) — the validator *integration* exists;
+  the formal schema + CLI may be the gap.
+* HTTP response-**cache LRU** (§13.9) — per-request `max_bytes` cap exists (`http_client_fetch.cpp`); the
+  response-cache LRU + the write side (§13.10) are unverified.
 
-**Already landed — source roadmaps are stale (refresh action):**
-* **Geometry LOD** — VISIBILITY-AND-LOD-ROADMAP.md header still says "design, not yet implemented"; it is
-  **landed (PR #249+)**: `lod/select`, `lod/pyramid`, `geometry/simplify` (QEM), `lod/tiles`, `lod/store`
-  (HDF5 `scene.cvch5`), `LodGraphicsNode`.
-* **tvision** terminal backend (§16.4) and the **EGL golden-image test harness** (§16.6) — **done**.
-* *Action:* scrub these statuses in `CVCGL-UI-DSL-ROADMAP.md` and `VISIBILITY-AND-LOD-ROADMAP.md` so they
-  stop misreporting finished work.
+**Action + takeaway:** refresh the stale statuses in `CVCGL-UI-DSL-ROADMAP.md`,
+`VISIBILITY-AND-LOD-ROADMAP.md`, and this file's own §9/§10. Net: the DSL's UI/scene substrate is **done** —
+the conference's forward work is the **holon (§5h) + DSL-programmability (§5i)**, genuinely new capability,
+**not** DSL catch-up.
