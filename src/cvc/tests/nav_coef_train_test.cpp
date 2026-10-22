@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/coef_train.h>
 #include <cvc/nav/sim_world.h>
@@ -65,6 +66,72 @@ TEST(NavCoefTrain, CityScenePortRasterizesBlocks) {
   EXPECT_LT(obstacles, (int)sc.occ.size() / 2);      // but it is mostly streets
   EXPECT_GT((int)sc.free_cells.size(), 0);           // a reachable free component
   EXPECT_EQ((int)sc.field_data.size(), 3 * 48 * 48); // SDF built
+}
+
+// Local goals (sample_starts_goals' goal_min..goal_max): every goal lies in range of its start,
+// both on the largest free component; the draws repeat by seed; goal_max 0 is the default draw,
+// goals across the map; train() draws its batches that way when train_config asks; and an
+// inverted range, or one no start can meet, throws.
+TEST(NavCoefTrain, LocalGoalsLieInTheirRange) {
+  const training_scene sc = cvc::nav::city_scene(96); // +-100 at scale 0.05: +-5 normalized
+  std::vector<std::uint8_t> in(sc.occ.size(), 0);
+  for (const int c : sc.free_cells)
+    in[static_cast<std::size_t>(c)] = 1;
+  const auto on_component = [&](float x, float y) {
+    const long c =
+        std::lround((x / sc.scale + sc.cx - sc.min_x) / (sc.max_x - sc.min_x) * (sc.cols - 1));
+    const long r =
+        std::lround((y / sc.scale + sc.cy - sc.min_y) / (sc.max_y - sc.min_y) * (sc.rows - 1));
+    return c >= 0 && c < sc.cols && r >= 0 && r < sc.rows &&
+           in[static_cast<std::size_t>(r * sc.cols + c)] != 0;
+  };
+  const int n = 200;
+  const float lo = 1.0f, hi = 3.0f;
+  std::vector<float> o(2 * n), g(2 * n), o2(2 * n), g2(2 * n);
+  sc.sample_starts_goals(n, 11, o.data(), g.data(), lo, hi);
+  float dmin = 1e9f, dmax = 0.0f;
+  for (int i = 0; i < n; ++i) {
+    const float d = std::hypot(g[2 * i] - o[2 * i], g[2 * i + 1] - o[2 * i + 1]);
+    dmin = std::min(dmin, d);
+    dmax = std::max(dmax, d);
+    EXPECT_GE(d, lo - 1e-4f) << "agent " << i;
+    EXPECT_LE(d, hi + 1e-4f) << "agent " << i;
+    EXPECT_TRUE(on_component(o[2 * i], o[2 * i + 1])) << "start " << i;
+    EXPECT_TRUE(on_component(g[2 * i], g[2 * i + 1])) << "goal " << i;
+  }
+  sc.sample_starts_goals(n, 11, o2.data(), g2.data(), lo, hi);
+  EXPECT_EQ(o, o2);
+  EXPECT_EQ(g, g2);
+  sc.sample_starts_goals(n, 12, o2.data(), g2.data(), lo, hi);
+  EXPECT_NE(g, g2) << "another seed, other goals";
+
+  sc.sample_starts_goals(n, 11, o.data(), g.data());
+  sc.sample_starts_goals(n, 11, o2.data(), g2.data(), 0.0f, 0.0f);
+  EXPECT_EQ(o, o2);
+  EXPECT_EQ(g, g2);
+  float farthest = 0.0f;
+  for (int i = 0; i < n; ++i)
+    farthest = std::max(farthest, std::hypot(g[2 * i] - o[2 * i], g[2 * i + 1] - o[2 * i + 1]));
+  EXPECT_GT(farthest, 2.0f * hi) << "the default draws goals across the map";
+  std::printf(
+      "  goals %.1f..%.1f: drawn %.3f..%.3f from their starts; the default's farthest %.2f\n", lo,
+      hi, dmin, dmax, farthest);
+
+  train_config cfg = small_cfg();
+  cfg.steps = 2;
+  coef_trainer anywhere(cfg, 1);
+  anywhere.train(sc);
+  cfg.goal_min = lo;
+  cfg.goal_max = hi;
+  coef_trainer local(cfg, 1);
+  local.train(sc);
+  EXPECT_NE(anywhere.params(), local.params()) << "train() should draw local goals";
+
+  EXPECT_THROW(sc.sample_starts_goals(n, 11, o.data(), g.data(), hi, lo), std::invalid_argument);
+  EXPECT_THROW(sc.sample_starts_goals(n, 11, o.data(), g.data(), -1.0f, hi), std::invalid_argument);
+  EXPECT_THROW(sc.sample_starts_goals(n, 11, o.data(), g.data(), 20.0f, 30.0f),
+               std::invalid_argument)
+      << "no two cells of the +-5 city are 20 apart";
 }
 
 TEST(NavCoefTrain, GradcheckMatchesFiniteDifference) {
