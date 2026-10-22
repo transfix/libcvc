@@ -35,6 +35,11 @@ using cvc::physics::quat;
 using cvc::physics::vec3;
 
 namespace {
+// The type names come from the public inline accessors
+// cvc::physics::body_state_type_name() / pose_type_name() -- being inline (not an
+// exported data symbol) they link across a shared-library boundary on every
+// platform, and there is no static global to carry them.
+
 // Bit pattern of a double, so NaN / -0.0 / denormals compare exactly.
 std::uint64_t bits(double d) {
   std::uint64_t u = 0;
@@ -81,8 +86,8 @@ protected:
 TEST_F(PhysicsCodecTest, BodyStateRoundTripsBitForBit) {
   const body_state in = sample_body_state();
   const std::vector<unsigned char> wire =
-      reg.encode(cvc::physics::kBodyStateTypeName, boost::any(in));
-  const boost::any back = reg.decode(cvc::physics::kBodyStateTypeName, wire);
+      reg.encode(cvc::physics::body_state_type_name(), boost::any(in));
+  const boost::any back = reg.decode(cvc::physics::body_state_type_name(), wire);
   ASSERT_FALSE(back.empty());
   const body_state out = boost::any_cast<body_state>(back);
   expect_vec3_bit_eq(in.position, out.position);
@@ -96,23 +101,24 @@ TEST_F(PhysicsCodecTest, PoseRoundTripsBitForBit) {
   pose in;
   in.position = {-7.0, 0.0, 12345.678};
   in.rotation = {1.0, 0.0, 0.0, 0.0};
-  const std::vector<unsigned char> wire = reg.encode(cvc::physics::kPoseTypeName, boost::any(in));
-  const pose out = boost::any_cast<pose>(reg.decode(cvc::physics::kPoseTypeName, wire));
+  const std::vector<unsigned char> wire =
+      reg.encode(cvc::physics::pose_type_name(), boost::any(in));
+  const pose out = boost::any_cast<pose>(reg.decode(cvc::physics::pose_type_name(), wire));
   expect_vec3_bit_eq(in.position, out.position);
   expect_quat_bit_eq(in.rotation, out.rotation);
 }
 
 TEST_F(PhysicsCodecTest, RegistryHasBothCodecs) {
-  EXPECT_TRUE(reg.has(cvc::physics::kBodyStateTypeName));
-  EXPECT_TRUE(reg.has(cvc::physics::kPoseTypeName));
+  EXPECT_TRUE(reg.has(cvc::physics::body_state_type_name()));
+  EXPECT_TRUE(reg.has(cvc::physics::pose_type_name()));
 }
 
 // The #767 S1 class of bug: if the registry key differed from what dataTypeName()
 // returns, the emit path's _codecs->encode(dataTypeName(), ...) would miss and the
 // object would silently fail to replicate. Pin that they are identical.
 TEST_F(PhysicsCodecTest, RegistryKeyEqualsDataTypeName) {
-  EXPECT_EQ(ctx.dataTypeName<body_state>(), std::string(cvc::physics::kBodyStateTypeName));
-  EXPECT_EQ(ctx.dataTypeName<pose>(), std::string(cvc::physics::kPoseTypeName));
+  EXPECT_EQ(ctx.dataTypeName<body_state>(), std::string(cvc::physics::body_state_type_name()));
+  EXPECT_EQ(ctx.dataTypeName<pose>(), std::string(cvc::physics::pose_type_name()));
 }
 
 // ── wire shape: fixed-width little-endian, field-by-field ───────────────────
@@ -122,7 +128,7 @@ TEST_F(PhysicsCodecTest, WireIsFixedWidthLittleEndian) {
   s.position.x = 1.0;
   s.active = true;
   const std::vector<unsigned char> wire =
-      reg.encode(cvc::physics::kBodyStateTypeName, boost::any(s));
+      reg.encode(cvc::physics::body_state_type_name(), boost::any(s));
   // 13 doubles (pos.xyz, rot.wxyz, linvel.xyz, angvel.xyz) * 8 + 1 active byte.
   ASSERT_EQ(wire.size(), 13u * 8u + 1u);
   // position.x == 1.0 -> IEEE-754 0x3FF0000000000000, little-endian first field.
@@ -137,7 +143,7 @@ TEST_F(PhysicsCodecTest, WireIsFixedWidthLittleEndian) {
 
 TEST_F(PhysicsCodecTest, PoseWireIsSevenDoubles) {
   const std::vector<unsigned char> wire =
-      reg.encode(cvc::physics::kPoseTypeName, boost::any(pose{}));
+      reg.encode(cvc::physics::pose_type_name(), boost::any(pose{}));
   EXPECT_EQ(wire.size(), 7u * 8u);
 }
 
@@ -145,17 +151,17 @@ TEST_F(PhysicsCodecTest, PoseWireIsSevenDoubles) {
 
 TEST_F(PhysicsCodecTest, TruncatedBodyStateThrows) {
   const std::vector<unsigned char> full =
-      reg.encode(cvc::physics::kBodyStateTypeName, boost::any(sample_body_state()));
+      reg.encode(cvc::physics::body_state_type_name(), boost::any(sample_body_state()));
   for (std::size_t n : {std::size_t{0}, std::size_t{1}, full.size() - 1, full.size() - 8}) {
     const std::vector<unsigned char> short_wire(full.begin(), full.begin() + n);
-    EXPECT_THROW(reg.decode(cvc::physics::kBodyStateTypeName, short_wire), std::exception)
+    EXPECT_THROW(reg.decode(cvc::physics::body_state_type_name(), short_wire), std::exception)
         << "n=" << n;
   }
 }
 
 TEST_F(PhysicsCodecTest, TruncatedPoseThrows) {
   const std::vector<unsigned char> full =
-      reg.encode(cvc::physics::kPoseTypeName, boost::any(pose{vec3{1, 2, 3}, quat{}}));
+      reg.encode(cvc::physics::pose_type_name(), boost::any(pose{vec3{1, 2, 3}, quat{}}));
   const std::vector<unsigned char> short_wire(full.begin(), full.end() - 1);
-  EXPECT_THROW(reg.decode(cvc::physics::kPoseTypeName, short_wire), std::exception);
+  EXPECT_THROW(reg.decode(cvc::physics::pose_type_name(), short_wire), std::exception);
 }

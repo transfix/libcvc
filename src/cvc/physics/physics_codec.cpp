@@ -28,9 +28,6 @@
 namespace cvc {
 namespace physics {
 
-const char *const kBodyStateTypeName = "cvc::physics::body_state";
-const char *const kPoseTypeName = "cvc::physics::pose";
-
 namespace {
 
 // Little-endian, fixed-width framing (mirrors cvc::ariadne::stream::stream_codec)
@@ -153,14 +150,14 @@ boost::any decode_pose(const std::vector<unsigned char> &b) {
 } // namespace
 
 void register_physics_data_types(app &ctx) {
-  ctx.registerDataType<body_state>(kBodyStateTypeName);
-  ctx.registerDataType<pose>(kPoseTypeName);
+  ctx.registerDataType<body_state>(body_state_type_name());
+  ctx.registerDataType<pose>(pose_type_name());
 }
 
 void register_physics_codecs(state_codec_registry &registry) {
-  registry.register_codec(kBodyStateTypeName, encode_body_state, decode_body_state,
+  registry.register_codec(body_state_type_name(), encode_body_state, decode_body_state,
                           "cvc.physics.body_state.v1");
-  registry.register_codec(kPoseTypeName, encode_pose, decode_pose, "cvc.physics.pose.v1");
+  registry.register_codec(pose_type_name(), encode_pose, decode_pose, "cvc.physics.pose.v1");
 }
 
 } // namespace physics

@@ -50,8 +50,13 @@ namespace physics {
 // to this exact string rather than the compiler's mangled typeid name (an
 // unregistered type would fall back to the mangled name, which differs across
 // toolchains and would silently fail to replicate).
-extern const char *const kBodyStateTypeName; // "cvc::physics::body_state"
-extern const char *const kPoseTypeName;      // "cvc::physics::pose"
+//
+// Returned by an inline accessor (a plain string literal) rather than held in a
+// namespace-scope constant: no static global to initialize or to export across a
+// shared-library boundary (a `const char* const` data symbol is not exported by
+// CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS, which covers functions only).
+inline const char *body_state_type_name() { return "cvc::physics::body_state"; }
+inline const char *pose_type_name() { return "cvc::physics::pose"; }
 
 // Register body_state + pose as named data types on `ctx`, so a node holding one
 // in data() reports the stable name from dataTypeName(). Idempotent.
@@ -60,8 +65,8 @@ void register_physics_data_types(app &ctx);
 // Register the body_state + pose (de)serialization codecs into a shard's codec
 // registry so a node's physics data() replicates cross-node. Call on every
 // participating node's shard registry (alongside the built-in / volume-geometry
-// codecs the shard installs itself). The registry key is kBodyStateTypeName /
-// kPoseTypeName -- identical to the registerDataType name above, so the key the
+// codecs the shard installs itself). The registry key is body_state_type_name() /
+// pose_type_name() -- identical to the registerDataType name above, so the key the
 // emit path looks up (dataTypeName()) always matches a registered codec.
 void register_physics_codecs(state_codec_registry &registry);
 
