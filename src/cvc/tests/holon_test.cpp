@@ -25,6 +25,7 @@
 #include <gtest/gtest.h>
 
 using cvc::ariadne::avatar_intent;
+using cvc::ariadne::avatar_sim;
 using cvc::ariadne::holon;
 using cvc::ariadne::holon_role;
 using cvc::physics::body_state;
@@ -103,18 +104,66 @@ TEST(HolonTest, ServerOverrideReconcilesOnClient) {
       << "the client's wrong +x was corrected away";
 }
 
-// ── a client cannot drive a peer ────────────────────────────────────────────
+// A server correction for a PAST tick snaps the client and replays the inputs it
+// issued after that tick (slice 2's replay, driven through the holon). This also
+// validates on_step's tick numbering: an off-by-one would replay the wrong suffix
+// and the result would not match the reference.
+TEST(HolonTest, ClientReplaysInFlightInputsOnServerCorrection) {
+  holon client(holon_role::client);
+  client.add_participant("A", /*local=*/true);
+  const double dt = client.clock().fixed_dt();
+  const avatar_intent mv{vec3{1.0, 0.0, 0.0}}; // client predicts A moving +x
+  for (int frame = 1; frame <= 5; ++frame) {   // predicts ticks 1..5
+    client.set_intent("A", mv);
+    client.advance(dt);
+  }
+  // Authoritative state for tick 3 diverges (the server teleported A to +y). The
+  // client snaps to it and replays its in-flight inputs for ticks 4 and 5.
+  body_state auth3;
+  auth3.position = vec3{0.0, 100.0, 0.0};
+  auth3.linear_velocity = mv.move;
+  client.apply_authoritative("A", auth3, /*server_tick=*/3);
 
-TEST(HolonTest, ClientCannotDriveAPeer) {
+  avatar_sim ref(auth3); // auth@3 + replay of the two post-tick-3 inputs
+  ref.step(mv, dt);
+  ref.step(mv, dt);
+  expect_pos_bit_eq(client.state("A").position, ref.state().position);
+  EXPECT_GT(client.state("A").position.y, 99.0) << "adopted the server's +y teleport";
+  EXPECT_GT(client.state("A").position.x, 0.0) << "replayed the in-flight +x inputs on top";
+}
+
+// ── a peer is sample-driven, not intent-driven ──────────────────────────────
+
+TEST(HolonTest, PeerIsSampleDrivenNotIntentDriven) {
   holon client(holon_role::client);
   client.add_participant("peer", /*local=*/false);
-  client.set_intent("peer", avatar_intent{vec3{9.0, 9.0, 9.0}}); // should be ignored
+  // set_intent on a non-local avatar is ignored (a client cannot drive a peer);
+  // a peer only moves via authoritative samples, so with none it stays at origin.
+  client.set_intent("peer", avatar_intent{vec3{9.0, 9.0, 9.0}});
   const double dt = client.clock().fixed_dt();
   for (int i = 0; i < 5; ++i)
     client.advance(dt);
-  // No authoritative samples arrived, so the peer stays at its start (origin); the
-  // ignored intent did not move it.
   EXPECT_DOUBLE_EQ(client.state("peer").position.x, 0.0);
+}
+
+// A stale / duplicate / reordered peer sample (server_tick at or below the newest
+// applied) is ignored -- the interpolation window must not rewind or collapse.
+TEST(HolonTest, PeerIgnoresStaleOrDuplicateSample) {
+  holon client(holon_role::client);
+  client.add_participant("B", /*local=*/false);
+  body_state s4, s5;
+  s4.position = vec3{4.0, 0.0, 0.0};
+  s5.position = vec3{5.0, 0.0, 0.0};
+  client.apply_authoritative("B", s4, 4);
+  client.apply_authoritative("B", s5, 5); // window is [s4 -> s5]
+  // A reordered older sample (tick 4 again, different value) must be dropped.
+  body_state stale;
+  stale.position = vec3{-100.0, 0.0, 0.0};
+  client.apply_authoritative("B", stale, 4);
+  const double dt = client.clock().fixed_dt();
+  client.advance(0.5 * dt); // alpha ~0.5 over the UNCHANGED window [4 -> 5]
+  EXPECT_NEAR(client.display_pose("B").position.x, 4.5, 1e-9)
+      << "stale sample must not rewind the interpolation window";
 }
 
 // ── a peer is interpolated through the holon's frame alpha, no overshoot ────
@@ -144,5 +193,7 @@ TEST(HolonTest, PeerInterpolatesThroughFrameAlpha) {
   c2.apply_authoritative("B", s1, 1);
   c2.apply_authoritative("B", s2, 2);
   c2.advance(0.999 * dt);
-  EXPECT_LT(c2.display_pose("B").position.x, 10.0) << "peer interpolation never overshoots newest";
+  const double x_near = c2.display_pose("B").position.x;
+  EXPECT_LT(x_near, 10.0) << "peer interpolation never overshoots newest";
+  EXPECT_GT(x_near, 9.0) << "and it did advance most of the way (not frozen)";
 }

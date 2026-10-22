@@ -65,6 +65,16 @@ class holon {
 public:
   explicit holon(holon_role role, holon_config cfg = holon_config{});
 
+  // Non-copyable and non-movable: the clock_driver observers capture `this` and
+  // _driver holds a reference to _clock, so a moved holon would dangle both. This
+  // is already implicit (world_clock's mutex deletes the defaults), but the
+  // explicit deletes pin the invariant against a future refactor that makes the
+  // clock movable.
+  holon(const holon &) = delete;
+  holon &operator=(const holon &) = delete;
+  holon(holon &&) = delete;
+  holon &operator=(holon &&) = delete;
+
   holon_role role() const noexcept { return _role; }
   cvc::world_clock &clock() noexcept { return _clock; }
   const cvc::world_clock &clock() const noexcept { return _clock; }
@@ -113,8 +123,12 @@ private:
     avatar_sim sim;             // server authoritative integrator
     avatar_intent intent;       // latest intent (server input / client-local input)
     predicted_avatar predicted; // client-local prediction + reconcile
-    bool have_newest = false, have_prev = false;
-    cvc::physics::body_state prev, newest; // peer interpolation samples
+    // peer interpolation: the last two authoritative samples + a monotonic guard
+    // (mirroring predicted_avatar's stale/duplicate-ack rejection) so a reordered
+    // or duplicate peer sample never rewinds or freezes the interpolation window.
+    bool have_sample = false;
+    std::uint64_t last_sample_tick = 0;
+    cvc::physics::body_state prev, newest;
   };
 
   void on_step(const cvc::clock_driver::clock_frame &f);

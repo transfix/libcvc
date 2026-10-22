@@ -74,16 +74,22 @@ void holon::apply_authoritative(const std::string &pid, const cvc::physics::body
   if (p.local) {
     p.predicted.reconcile(auth, server_tick, _clock.fixed_dt(), _cfg.reconcile_tol);
   } else {
-    // A peer: shift the interpolation window (prev <- old newest, newest <- auth).
-    if (!p.have_newest) {
+    // A peer. Reject a stale/duplicate/reordered sample (server_tick <= the newest
+    // one applied), exactly as predicted_avatar does for the local path: otherwise
+    // an out-of-order sample would rewind the interpolation window (prev <- newer,
+    // newest <- older) and visibly jerk the peer backward, or a duplicate would
+    // collapse the window (prev == newest) and freeze it.
+    if (p.have_sample && server_tick <= p.last_sample_tick)
+      return;
+    if (!p.have_sample) {
       p.newest = auth;
       p.prev = auth;
-      p.have_newest = true;
+      p.have_sample = true;
     } else {
-      p.prev = p.newest;
+      p.prev = p.newest; // shift the window: prev <- old newest, newest <- auth
       p.newest = auth;
-      p.have_prev = true;
     }
+    p.last_sample_tick = server_tick;
   }
 }
 
