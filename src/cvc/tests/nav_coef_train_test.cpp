@@ -109,13 +109,13 @@ TEST(NavCoefTrain, LocalGoalsLieInTheirRange) {
   sc.sample_starts_goals(n, 11, o2.data(), g2.data(), 0.0f, 0.0f);
   EXPECT_EQ(o, o2);
   EXPECT_EQ(g, g2);
-  float far = 0.0f;
+  float farthest = 0.0f;
   for (int i = 0; i < n; ++i)
-    far = std::max(far, std::hypot(g[2 * i] - o[2 * i], g[2 * i + 1] - o[2 * i + 1]));
-  EXPECT_GT(far, 2.0f * hi) << "the default draws goals across the map";
+    farthest = std::max(farthest, std::hypot(g[2 * i] - o[2 * i], g[2 * i + 1] - o[2 * i + 1]));
+  EXPECT_GT(farthest, 2.0f * hi) << "the default draws goals across the map";
   std::printf(
       "  goals %.1f..%.1f: drawn %.3f..%.3f from their starts; the default's farthest %.2f\n", lo,
-      hi, dmin, dmax, far);
+      hi, dmin, dmax, farthest);
 
   train_config cfg = small_cfg();
   cfg.steps = 2;
