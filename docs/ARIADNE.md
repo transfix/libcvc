@@ -1236,6 +1236,18 @@ A capture is made repeatable by:
 The test then renders one more frame and requires it to be identical, so a UI that is still
 changing fails as unsettled rather than as a flaky mismatch.
 
+To tell the UI from the rasterizer, each of the two frames is fingerprinted with what ImGui
+handed GL: its draw lists (vertices, indices, commands, clip rects, texture ids) and every
+texture's size and pixels. The settle line says whether the UI was the same both times, and
+names the first differing pixel.
+
+macOS CI's Apple Software Renderer sometimes draws the same UI two ways in a process's first
+frames. It has only ever hit the first document. In 2026-10 it moved 8 pixels by 1 between
+frames whose fingerprints were identical. So when the UI is identical and only pixels differ,
+the later frame becomes the capture and the test renders another, up to 10 times, until two
+frames agree exactly. The log says how many extra frames that took. A UI that changed fails at
+once, as does a rasterizer that never settles.
+
 **Comparing.** A pixel mismatches when a channel differs by more than 40. A document passes
 while at most 0.002% of its pixels (13) mismatch. The goldens are made under Mesa llvmpipe, the
 rasterizer of the Linux CI job (Xvfb + cvcpkg's `mesa`). These limits were measured:
