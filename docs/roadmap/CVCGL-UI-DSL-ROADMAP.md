@@ -1,6 +1,8 @@
 # Ariadne — the cvcGL UI & scene DSL (Scoping Spec v0.14, for iteration)
 
-Status: **draft for discussion, no code committed.** Grounded in a full survey of
+Status: **SUBSTANTIALLY LANDED (2026-10). Verify any feature in the code, not this spec — it lags the tree.** Implemented: the `state_exec` engine, widget/layout model, reactive + action lanes, composition/URI, the scene-graph core, the streamed-source zero-copy contract + clipping, Unicode, and the backend-core split + AppRuntime refactor. Also landed despite still reading as open/planned in sections below — `input_text`/`input_int` (§3.5/§6, `loader.cpp`, #636), `RenderView`/`VisibilityMask` (§9.5, `src/cvcGL/RenderView.cpp`), the light scene node (§9.1, `LightNode.cpp`), clipboard (§17.8, `Clipboard*.{cpp,mm}`), `state_exec` async-scheduler parity (§7.1/§7.7, `receive_message`/`sleep`/`yield_frame`), JSON-Schema validator integration (§15), the **tvision** terminal backend (§16.4), the **EGL golden-image harness** (§16.6), and geometry LOD. **Genuinely remaining (verify per-item):** TF editor + `data()`-channel authoring (§10), `state_exec` program modularity `(include/load "uri")` (§19), the full YAML-free s-expr `.ari` *document* dialect (§18), the formal draft-2020-12 JSON Schema + `ari validate` CLI (§15), HTTP response-cache LRU (§13.9), pycvc URI handlers (§14.2). The version history and per-section status below are kept for provenance but are **not** authoritative; see `ARIADNE_CONFERENCE_ROADMAP.md` §13.
+
+Grounded in a full survey of
 the ImGui infrastructure (`ImGuiOverlay`, `ImGuiBinding`, `SceneRenderer`,
 `RenderView`, `Settings`, `StageLighting`), all 14 cvcGL examples, and the
 `cvc::state_exec` subsystem — all on `origin/master` (`4fb4e1198`). **Ariadne** is a
