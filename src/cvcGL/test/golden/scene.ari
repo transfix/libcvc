@@ -1,10 +1,8 @@
 # scene.ari — golden: a document with a scene. A box and a sphere, the camera framed to them by the
 # runtime, and a small window over the 3D view. The diagnostic chrome is off so the picture is just
-# the geometry and the UI.
-#
-# No lights: block, so the scene graph's fallback headlight lights it. A declared directional light
-# leaves a realized scene unlit today (hello.ari's bunny renders dark too); add one here once that
-# is fixed.
+# the geometry and the UI. A directional sun (azimuth 135, elevation 55) shines from above and
+# from +X +Y: the box's top and +X faces are lit, and the -Y face toward the camera takes only
+# ambient light.
 
 meta:
   name: golden scene
@@ -30,3 +28,8 @@ scene:
       source: { sphere: 0.6 }
       transform: { position: [0.0, 0.0, 1.2] }
       material: { color: [0.35, 0.60, 0.85] }
+  lights:
+    - light: sun
+      kind: directional
+      azimuth: 135
+      elevation: 55
