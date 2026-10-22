@@ -51,6 +51,10 @@ depends:
     # The `ari` page's terminal backend; only the single-threaded gallery has that page.
     - name: ftxui
       platforms: [wasm]
+    # The `ari_tvision` page: the same document on the tvision desktop. tvision's wasm column
+    # (cvc.4 on) carries the browser console it needs; there is no older wasm build.
+    - name: tvision
+      platforms: [wasm]
     # Austin scene + trained policy + vehicle model, preloaded into the nav_city demos'
     # MEMFS so the gallery shows real downtown Austin. Data-only (platform any).
     # build-wasm.sh preloads them when present and falls back to a synthetic city otherwise.

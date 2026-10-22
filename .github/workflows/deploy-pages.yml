@@ -87,6 +87,13 @@ jobs:
           cvcpkg install ftxui --prefix "$CVC_WASM_DEPS" \
             --platform wasm --arch wasm32 --config release --link static \
             --no-fallback-to-source
+          # tvision with its browser console (cvcpkg tvision cvc.4 on): the ari_tvision page, the
+          # same document on the tvision desktop. Optional: without it the gallery has no such
+          # page, and the live check below only expects what was built.
+          echo "=== tvision ==="
+          cvcpkg install tvision --prefix "$CVC_WASM_DEPS" \
+            --platform wasm --arch wasm32 --config release --link static \
+            --no-fallback-to-source || echo "  (tvision for wasm not on the catalog: no ari_tvision page)"
           cvcpkg install scene-austin-south-small vehicle-humvee grl-snam-weights \
             --prefix "$CVC_WASM_DEPS" \
             --platform any --config release --link shared \
@@ -117,6 +124,11 @@ jobs:
           rm -rf "$gallery" && mkdir -p "$gallery"
           test -f "$web/index.html" || { echo "::error::the recipe built no gallery at $web"; exit 1; }
           cp -R "$web/." "$gallery/"
+          # ari_tvision is built only when tvision for wasm is installed (above); check it live too.
+          if [ -f "$gallery/ari_tvision/ari_tvision.wasm" ]; then
+            DEMOS="$DEMOS ari_tvision"
+            echo "DEMOS=$DEMOS" >> "$GITHUB_ENV"
+          fi
           # Every demo the live check below expects must be in the artifact.
           for d in $DEMOS; do
             test -f "$gallery/$d/$d.wasm" || { echo "::error::gallery has no $d"; exit 1; }

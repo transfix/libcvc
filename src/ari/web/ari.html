@@ -1,21 +1,24 @@
 <!doctype html>
 <!--
-  ari.html — run an Ariadne (.ari) document in the browser: the ari runner built for wasm
-  (FTXUI's Emscripten screen) behind an xterm.js terminal. The build copies this page next to
-  ari.js / ari.wasm (src/cvc/CMakeLists.txt, the ari target, which fills in the document name);
-  serve that directory over http.
+  ari.html — run an Ariadne (.ari) document in the browser: the ari runner built for wasm behind
+  an xterm.js terminal. The build writes this page next to each browser build of ari
+  (src/ari/CMakeLists.txt, ari_wasm_page, which fills in the module, label and document name):
+  ari.html for FTXUI's Emscripten screen, ari_tvision.html for the tvision desktop (tvision's
+  browser console, from cvcpkg's wasm tvision). Serve that directory over http.
 
-  The wiring is the module's stdio, which is all FTXUI's Emscripten screen talks to:
-    stdin  <- every byte xterm.js produces: keys, and SGR mouse reports once FTXUI turns them on
-    stdout -> xterm.js. FTXUI ends each frame with a NUL (Emscripten has no flush hook), so bytes
-              are buffered and written to the terminal per frame.
-    resize -> _ftxui_on_resize(cols, rows), FTXUI's hook for the terminal size.
+  The wiring is the module's stdio, which is all either backend talks to:
+    stdin  <- every byte xterm.js produces: keys, and SGR mouse reports once the program turns
+              them on
+    stdout -> xterm.js. Both end each frame with a NUL (Emscripten has no flush hook), so bytes
+              are buffered and written to the terminal per frame, or at the next animation frame.
+    resize -> _ftxui_on_resize(cols, rows), FTXUI's hook for the terminal size, and
+              _tvision_set_screen_size(cols, rows), tvision's, whichever the module exports.
 -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ari terminal</title>
+<title>@ARI_WASM_LABEL@ terminal</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css"
       integrity="sha384-8Xk9wy/gzEDUKrXtrmCFa2bBuK3BpjpDuL/p0SeKQX19Khl/M+lHOgD/CyYf7efP"
       crossorigin="anonymous">
@@ -37,8 +40,8 @@
 </head>
 <body>
 <header>
-  <span><b>ari</b> @ARI_WASM_DOC_NAME@</span>
-  <span class="hint">Tab / Enter / arrows · mouse · F10 menu · Ctrl-C asks, twice quits</span>
+  <span><b>@ARI_WASM_LABEL@</b> @ARI_WASM_DOC_NAME@</span>
+  <span class="hint">@ARI_WASM_HINT@</span>
   <a id="gallery" href="../" hidden>all examples</a>
   <span id="status">loading…</span>
 </header>
@@ -56,7 +59,7 @@
 <script>
   const statusEl = document.getElementById('status');
   // In the wasm demo gallery this page is <demo>/index.html (build-pages.py), so link back to it.
-  // Served on its own it is ari.html, with no gallery above it.
+  // Served on its own it is @ARI_WASM_MODULE@.html, with no gallery above it.
   if (location.pathname.endsWith('/')) document.getElementById('gallery').hidden = false;
   const setStatus = (text) => { statusEl.textContent = text; };
 
@@ -89,7 +92,8 @@
   term.onData((s) => { for (const b of utf8.encode(s)) stdin.push(b); });
   term.onBinary((s) => { for (let i = 0; i < s.length; ++i) stdin.push(s.charCodeAt(i) & 0xff); });
 
-  // stdout: one terminal write per FTXUI frame (it ends each frame with a NUL).
+  // stdout: one terminal write per frame (the program ends each frame with a NUL). Anything
+  // written without one goes out at the next animation frame.
   let frame = [];
   const flush = () => {
     if (frame.length) {
@@ -97,6 +101,11 @@
       frame = [];
     }
   };
+  const flushLater = () => {
+    flush();
+    requestAnimationFrame(flushLater);
+  };
+  requestAnimationFrame(flushLater);
   let errLine = [];
 
   let started = false;
@@ -104,11 +113,13 @@
     const dims = fit.proposeDimensions();
     if (!dims || !dims.cols || !dims.rows) return; // hidden or not laid out
     if (dims.cols !== term.cols || dims.rows !== term.rows) term.resize(dims.cols, dims.rows);
-    if (started) Module._ftxui_on_resize(term.cols, term.rows);
+    if (!started) return;
+    if (Module._ftxui_on_resize) Module._ftxui_on_resize(term.cols, term.rows);
+    if (Module._tvision_set_screen_size) Module._tvision_set_screen_size(term.cols, term.rows);
   };
 
   var Module = {
-    arguments: [], // ari runs the document baked into the build
+    arguments: [], // the document (and backend) are baked into the build
     stdin: () => (stdin.length ? stdin.shift() : null),
     stdout: (c) => { if (c === 0) flush(); else frame.push(c); },
     stderr: (c) => {
@@ -120,7 +131,7 @@
       }
     },
     onRuntimeInitialized() {
-      // Runs before main: FTXUI sizes its fullscreen screen from this.
+      // Runs before main: FTXUI and tvision size their screens from this.
       started = true;
       resize();
       new ResizeObserver(resize).observe(termEl);
@@ -128,7 +139,7 @@
     },
     onExit(code) {
       flush();
-      term.write('\r\n\x1b[2m[ari exited with status ' + code + ']\x1b[0m\r\n');
+      term.write('\r\n\x1b[2m[@ARI_WASM_LABEL@ exited with status ' + code + ']\x1b[0m\r\n');
       statusEl.innerHTML = '';
       const again = document.createElement('button');
       again.textContent = 'run again';
@@ -146,7 +157,7 @@
   // before fit can measure a cell; otherwise the first frames are drawn at a bogus size.
   //
   // Both files are fetched revalidated (cache: 'no-cache'), so a redeploy never pairs a cached
-  // ari.js with a new ari.wasm. The wasm goes to the runtime directly (Module.wasmBinary) and the
+  // @ARI_WASM_MODULE@.js with a new @ARI_WASM_MODULE@.wasm. The wasm goes to the runtime directly (Module.wasmBinary) and the
   // glue runs inline; nothing else is fetched (the document is embedded in the wasm).
   const start = async () => {
     fit.fit();
@@ -156,10 +167,10 @@
       return r;
     };
     try {
-      setStatus('loading ari.wasm…');
-      Module.wasmBinary = new Uint8Array(await (await get('ari.wasm')).arrayBuffer());
+      setStatus('loading @ARI_WASM_MODULE@.wasm…');
+      Module.wasmBinary = new Uint8Array(await (await get('@ARI_WASM_MODULE@.wasm')).arrayBuffer());
       const script = document.createElement('script');
-      script.textContent = await (await get('ari.js')).text();
+      script.textContent = await (await get('@ARI_WASM_MODULE@.js')).text();
       document.body.append(script);
     } catch (e) {
       setStatus('load failed: ' + ((e && e.message) || e));
