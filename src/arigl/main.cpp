@@ -669,8 +669,18 @@ struct ConferenceSession {
     for (publisher &p : pubs_)
       p.sub.reset();
     if (stop_)
-      stop_();
+      stop_(); // joins the transport reader thread (idempotent: _running.exchange(false))
   }
+
+  // Join the transport reader BEFORE any member is destroyed. stop() runs in the destructor body,
+  // ahead of reverse-order member destruction, so the reader (which the transport destructor would
+  // otherwise join only AFTER media_mu_/inbox_ are already gone — they are declared after
+  // ws_/grpc_) can no longer fire on_media into a destroyed mutex/vector. This covers every
+  // teardown path: snapshot/check/info and a document-load failure return without the run loop's
+  // explicit stop(), and an exception unwinding the run loop skips it too. stop() is idempotent, so
+  // the run path's explicit call followed by this one is safe. (Single-threaded wasm has no reader
+  // thread.)
+  ~ConferenceSession() { stop(); }
 
   // Mix: pop one chunk from each peer that has audio queued, sum them (silence for an empty peer),
   // clamp, and play to the single output. Produce mixed chunks while the output is below ~100 ms so
