@@ -54,6 +54,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/state/state_cluster_membership.h
   ../../inc/cvc/state/state_hybrid_time.h
   ../../inc/cvc/core/world_clock.h
+  ../../inc/cvc/core/clock_follower.h
+  ../../inc/cvc/core/clock_driver.h
   ../../inc/cvc/core/world_units.h
   ../../inc/cvc/core/unit_registry.h
   ../../inc/cvc/physics/types.h
@@ -253,6 +255,7 @@ set(SOURCE_FILES
   state/state_exec/exec_coordinator.cpp
   core/world_clock.cpp
   core/world_clock_binding.cpp
+  core/clock_driver.cpp
   core/world_units.cpp
   core/unit_registry.cpp
   physics/world.cpp

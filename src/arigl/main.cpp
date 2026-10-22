@@ -68,6 +68,7 @@
 #include <cvc/ariadne/stream/stream.h>         // stream::open — per-peer decode proxies
 #include <cvc/ariadne/stream/stream_channel.h> // subscribe / publish_external
 #include <cvc/ariadne/stream/stream_registry.h> // look up the local camera/mic streams by token
+#include <cvc/core/clock_driver.h>        // one-advance-per-frame fan-out over the world_clock
 #include <cvc/core/world_clock.h>         // app.world_clock().t() — the common media timestamp
 #include <cvc/gl/capture/audio_source.h>  // list_audio_capture_devices — mic picker
 #include <cvc/gl/capture/camera_source.h> // list_cameras — camera picker
@@ -355,21 +356,31 @@ struct ConferenceSession {
     return "media." + origin + "." + kind;
   }
 
-  // The common media timestamp: cvc::world_clock seconds (the canonical time base; frame pts is
-  // meant to be world time). The conference .ari declares no `clock:` block, so nothing else
-  // advances the per-app clock — drive it from wall time here, once per pump, and stamp BOTH our
-  // camera and mic frames with the returned t() so a receiver can align them (their sources' own
-  // pts are on unrelated clocks). t() is tick*fixed_dt (drift-free, 1/120 s quanta — sub-frame for
-  // media).
-  double last_wall_ = -1.0;
-  double media_clock_now() {
-    const double wall =
-        std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
-    if (last_wall_ >= 0.0)
-      app_->world_clock().advance(wall - last_wall_);
-    last_wall_ = wall;
-    return app_->world_clock().t();
-  }
+  // The per-frame clock driver: advances the per-app cvc::world_clock from wall time ONCE per frame
+  // (the conference .ari declares no `clock:` block, so nothing else drives this app's clock) and
+  // fans the conference's per-frame steps out as ordered observers. driver_->frame().t is the ONE
+  // media timestamp per frame — world_clock seconds, tick*fixed_dt (drift-free, 1/120 s quanta;
+  // sub-frame for media) — stamped on BOTH our camera and mic frames so a receiver can align them
+  // (their sources' own pts are on unrelated clocks). Built in setup() once the app is known; null
+  // for a plain local document (no relay), where pump() no-ops. install_observers() defines the
+  // step order below.
+  std::unique_ptr<cvc::clock_driver> driver_;
+  cvc::clock_driver::handle dev_enum_h_; // handle of the self-removing device-enum one-shot
+
+  // The order each conference step fires in, each frame (ascending). Gaps leave room to slot a
+  // future step between these without renumbering.
+  enum : int {
+    kOrderPumpAll = 10,   // drain/flush the state transport (replicated room tree) — first
+    kOrderWall = 20,      // refresh now_wall_ for the wall-time talk-hold
+    kOrderControls = 30,  // read the user-list window's per-peer local controls
+    kOrderDevEnum = 40,   // lazily enumerate camera/mic devices (one-shot)
+    kOrderApplyDev = 50,  // map the device combos' picks to cam/mic.want_device
+    kOrderForward = 60,   // forward our camera+mic, each stamped with frame.t
+    kOrderDrain = 70,     // route peers' inbound frames into per-peer buffers
+    kOrderMix = 80,       // sum peers' queued audio into the single mixed output
+    kOrderShow = 90,      // advance each peer's video to its audio clock
+    kOrderActivity = 100, // decay + publish talk activity for the roster — last
+  };
 
   // Call AFTER the GL bundles and BEFORE load(): register the room verbs, seed conf.room/conf.self,
   // and dial the relay. Returns false (a plain local document) when no relay is configured.
@@ -405,9 +416,12 @@ struct ConferenceSession {
     app_ = &app;
     pid_ = nodeId;
     prefix_ = prefix;
-    // Drive the world clock from wall time (media_clock_now): live mode so advance() banks wall
-    // time.
+    // Drive the world clock from wall time via the clock driver: live mode so advance() banks wall
+    // time. The driver owns the single advance of this app's clock and fires the conference's
+    // per-frame steps in order (install_observers); nothing else advances it.
     app.world_clock().set_mode(cvc::world_clock::mode::live);
+    driver_ = std::make_unique<cvc::clock_driver>(app.world_clock());
+    install_observers();
     // The streams we forward: the camera (latest — freshest frame) and the mic (ring — every chunk
     // in order, since dropped audio is a glitch). The .ari publishes their tokens in
     // cam_token/mic_token.
@@ -492,30 +506,61 @@ struct ConferenceSession {
     active = true;
     return true;
   }
+  // One advance per frame. The driver advances the per-app world_clock from wall time (the single
+  // media stamp, frame().t) and fires the conference's per-frame steps as the ordered observers
+  // install_observers() registered. Called from the input pump (run mode) and directly per frame
+  // (snapshot mode); a plain local document has no driver and no-ops.
   void pump() {
-    if (!tp_)
+    if (!tp_ || !driver_)
       return;
-    tp_->pump_all();
-    const double stamp =
-        media_clock_now(); // one world-clock reading per pump stamps all we forward
-    now_wall_ =            // wall-clock seconds for the talk-hold (frame-rate indep.)
-        std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
-    read_peer_controls(); // pull per-peer volume/mute the user-list window set
+    driver_->advance(); // measured wall delta; fires kOrderPumpAll .. kOrderActivity in order
+  }
+
+  // Register the per-frame steps as ordered observers on the driver, once, in setup(). They fire
+  // in ascending kOrder* each advance(), all BEFORE the document's on:tick (conf.pump runs before
+  // app_rt_.drain()), preserving the deliberate one-frame lag read_peer_controls relies on.
+  void install_observers() {
+    using cf = cvc::clock_driver::clock_frame;
+    // Drive the state transport first: flush replicated room-tree writes and service queued reads
+    // so room-join/roster are in place before anything this frame reads them.
+    driver_->add_frame_observer(kOrderPumpAll, [this](const cf &) { tp_->pump_all(); });
+    // Wall-clock seconds for the talk-hold — deliberately wall time, not world time, so the hold is
+    // frame-rate independent and does not freeze when the sim clock is paused or scaled.
+    driver_->add_frame_observer(kOrderWall, [this](const cf &) {
+      now_wall_ = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch())
+                      .count();
+    });
+    // Pull the user-list window's per-peer volume/mute (local only, never sent).
+    driver_->add_frame_observer(kOrderControls, [this](const cf &) { read_peer_controls(); });
     // Enumerate the camera/mic devices for the pickers LAZILY — once the camera stream is open, so
     // the SDL audio/camera subsystems are already initialized (enumeration is then a cheap refcount
     // bump) and the Asyncify event loop is running. Doing this at setup instead STALLS startup on
-    // single-threaded wasm (SDL device queries before the loop runs block / can't resolve).
-    if (!devices_enumerated_ && app_ &&
-        !cvc::state::instance(*app_)(prefix_ + ".cam_token").value().empty()) {
-      enumerate_devices();
-      devices_enumerated_ = true;
-    }
-    apply_device_selection(); // map the device combos' picks to cam/mic.want_device
-    forward_streams(stamp);   // (also measures our own mic level for self "talking")
-    drain_inbox();            // (also measures each peer's mic level)
-    mix_audio();              // sum all peers' queued audio (per-peer gain, skip muted)
-    sync_and_show();    // advance each peer's video to its audio clock (skip locally video-muted)
-    publish_activity(); // decay talk levels + publish media.<pid>.talking for the name highlight
+    // single-threaded wasm (SDL device queries before the loop runs block / can't resolve). A
+    // self-removing one-shot: it checks every frame until the camera token appears, enumerates
+    // once, then unregisters so the per-frame check stops.
+    dev_enum_h_ = driver_->add_frame_observer(kOrderDevEnum, [this](const cf &) {
+      if (!devices_enumerated_ && app_ &&
+          !cvc::state::instance(*app_)(prefix_ + ".cam_token").value().empty()) {
+        enumerate_devices();
+        devices_enumerated_ = true;
+        driver_->remove(dev_enum_h_);
+      }
+    });
+    // Map the device combos' picks to cam/mic.want_device for the .ari to re-capture against.
+    driver_->add_frame_observer(kOrderApplyDev, [this](const cf &) { apply_device_selection(); });
+    // Forward our camera (latest) + mic (ring), each re-stamped with THIS frame's single
+    // world-clock reading (frame.t) so a receiver can A/V-align them; also measures our own mic
+    // level.
+    driver_->add_frame_observer(kOrderForward, [this](const cf &f) { forward_streams(f.t); });
+    // Route peers' inbound frames (queued by the reader thread) into per-peer buffers; also
+    // measures each peer's mic level.
+    driver_->add_frame_observer(kOrderDrain, [this](const cf &) { drain_inbox(); });
+    // Sum all peers' queued audio into the single mixed output (per-peer gain, skip muted).
+    driver_->add_frame_observer(kOrderMix, [this](const cf &) { mix_audio(); });
+    // Advance each peer's video to its audio clock (skip locally video-muted).
+    driver_->add_frame_observer(kOrderShow, [this](const cf &) { sync_and_show(); });
+    // Decay talk levels + publish media.<pid>.talking for the name highlight.
+    driver_->add_frame_observer(kOrderActivity, [this](const cf &) { publish_activity(); });
   }
 
   // Pull the per-peer LOCAL controls the user-list window writes — keyed by roster INDEX, which the
@@ -624,8 +669,18 @@ struct ConferenceSession {
     for (publisher &p : pubs_)
       p.sub.reset();
     if (stop_)
-      stop_();
+      stop_(); // joins the transport reader thread (idempotent: _running.exchange(false))
   }
+
+  // Join the transport reader BEFORE any member is destroyed. stop() runs in the destructor body,
+  // ahead of reverse-order member destruction, so the reader (which the transport destructor would
+  // otherwise join only AFTER media_mu_/inbox_ are already gone — they are declared after
+  // ws_/grpc_) can no longer fire on_media into a destroyed mutex/vector. This covers every
+  // teardown path: snapshot/check/info and a document-load failure return without the run loop's
+  // explicit stop(), and an exception unwinding the run loop skips it too. stop() is idempotent, so
+  // the run path's explicit call followed by this one is safe. (Single-threaded wasm has no reader
+  // thread.)
+  ~ConferenceSession() { stop(); }
 
   // Mix: pop one chunk from each peer that has audio queued, sum them (silence for an empty peer),
   // clamp, and play to the single output. Produce mixed chunks while the output is below ~100 ms so
