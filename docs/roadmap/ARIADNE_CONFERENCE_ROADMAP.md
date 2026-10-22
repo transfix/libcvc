@@ -52,8 +52,8 @@ UI DSL work). The realtime hard part is **done**; the gaps are glue.
 3. **No room / roster / signaling layer**, no SFU relay class, and **no client-safe authz** — only
    pairwise offer/answer over trust-all-peers replication with self-asserted writer identity (§5c).
 4. **No browser media plane** — native gRPC can't run in a browser; the production path is **WebRTC**
-   (none in-tree today), with a WebSocket fallback for bring-up/signaling. Plus two UI holes: no
-   `input_text` widget (chat) and the audio sink isn't auto-pumped.
+   (none in-tree today), with a WebSocket fallback for bring-up/signaling. The two earlier UI
+   holes — the `input_text` widget (chat) and audio auto-pump — have since landed (#636, #634).
 
 ---
 
@@ -576,7 +576,7 @@ From the UI probe, the conferencing UI is ~90% expressible today:
 * **Participant list / name labels** — `repeat` + `Text` (bound, colorable for speaking/mute state). ✅
   exists.
 * **Chat** — a chat-stream feed (scrollable log via `repeat`) + an **`input_text`** box to compose.
-  `input_text` is the one real widget gap (only the key-event path landed) — a Phase 0 prerequisite (§10).
+  `input_text` **landed (#636)** — the compose box uses it directly.
 
 Registration of `type: stream` / `type: stream_view` is host opt-in — included in the §8 bundle.
 
@@ -587,7 +587,7 @@ Registration of `type: stream` / `type: stream_view` is host opt-in — included
 Ordered to de-risk inner-to-outer: prove the room + SFU with native clients first, then WebRTC off the
 browser, then the browser itself, then the MVP.
 
-* **Phase 0 — prerequisites (headless).** `input_text` widget; stream→`audio_output` auto-pump
+* **Phase 0 — prerequisites (headless). ✅ DONE (#636/#634/#633).** `input_text` widget; stream→`audio_output` auto-pump
   (`stream-play-audio`); the **gRPC SFU relay helper** (§7) with an N×M fan-out unit test (synthetic
   sources).
 * **Phase 1 — media DSL verbs (§4a).** `stream-capture-camera/-audio`, `stream-play-audio`,
@@ -657,7 +657,7 @@ mesh works first, auth hardens later (§5, Phase 8); **WASI server committed** (
   [`../STREAMING.md`](../STREAMING.md) (§6 cross-node).
 * Distributed state / cluster: [`DISTRIBUTED_STATE_ROADMAP.md`](DISTRIBUTED_STATE_ROADMAP.md),
   [`STATE_LIFETIME_AND_ATOMICITY.md`](STATE_LIFETIME_AND_ATOMICITY.md).
-* UI DSL (widgets, `input_text` gap): [`CVCGL-UI-DSL-ROADMAP.md`](CVCGL-UI-DSL-ROADMAP.md).
+* UI DSL (status refreshed in #764; `input_text`/widgets landed): [`CVCGL-UI-DSL-ROADMAP.md`](CVCGL-UI-DSL-ROADMAP.md).
 * World clock / sim pacing (holon driver, §5h): [`WORLD-CLOCK-SYNC-ROADMAP.md`](WORLD-CLOCK-SYNC-ROADMAP.md).
 * LOD — geometry (holon §5h; **doc stale — landed PR #249+**):
   [`VISIBILITY-AND-LOD-ROADMAP.md`](VISIBILITY-AND-LOD-ROADMAP.md).
@@ -668,8 +668,8 @@ mesh works first, auth hardens later (§5, Phase 8); **WASI server committed** (
 ## 13. Status of the Ariadne (cvcGL UI & scene DSL) roadmap — verified against code
 
 The Ariadne UI/scene DSL is **essentially complete in code, and its roadmap docs are badly stale** — a
-*doc* audit mis-reports finished work as open (even this file's §9/§10 still call `input_text` a gap, though
-it shipped in **#636**). The statuses below are **verified against the tree**, not read off the doc.
+*doc* audit mis-reports finished work as open (this file's §9/§10 called `input_text` a gap until this pass,
+though it shipped in **#636** — now corrected). The statuses below are **verified against the tree**, not read off the doc.
 
 **Landed (several still listed open/planned in the docs — refresh needed):**
 * `input_text` / `input_int` widgets (§3.5/§6) — `src/cvc/ariadne/loader.cpp:650` (#636).
