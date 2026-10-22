@@ -466,11 +466,24 @@ struct ConferenceSession {
     const char *synthEnv = std::getenv("CVC_ARIADNE_SYNTHETIC_CAM");
     const std::string synth = (synthEnv && *synthEnv && std::string(synthEnv) != "0") ? "1" : "0";
     std::vector<std::string> ce;
-    ari::run_init(app, prefix,
-                  "(state-set \"conf.room\" \"" + room + "\") (state-set \"conf.self\" \"" + self +
-                      "\") (state-set \"cam_synthetic\" \"" + synth +
-                      "\") (state-set \"self.pid\" \"" + nodeId + "\")",
-                  &ce);
+    ari::run_init(
+        app, prefix,
+        "(state-set \"conf.room\" \"" + room + "\") (state-set \"conf.self\" \"" + self +
+            "\") (state-set \"cam_synthetic\" \"" + synth + "\") (state-set \"self.pid\" \"" +
+            nodeId +
+            // Seed peer.count to a valid integer BEFORE the first render, so the roster's
+            // `repeat: (state-get "peer.count")` never evaluates an empty node on frame 0
+            // (which warns "did not yield an integer" until the first on_tick sets it).
+            "\") (state-set \"peer.count\" \"0\")"
+            // Seed the device-selection fields to EMPTY STRINGS. state-get on an UNSET node
+            // returns nil, not "", so the real-camera on_tick guard (= cam.want_device "")
+            // was false before the host first populated it, running the device-switch body
+            // and evaluating (int nil) — which THROWS and permanently kills the on_tick
+            // resident, so the roster never builds (synthetic skips that block, so it was
+            // only ever broken for real cameras). With "" seeded the guard is correct.
+            " (state-set \"cam.want_device\" \"\") (state-set \"mic.want_device\" \"\")"
+            " (state-set \"cam.cur_device\" \"\") (state-set \"mic.cur_device\" \"\")",
+        &ce);
     for (const std::string &e : ce)
       std::fprintf(stderr, "arigl: conference init: %s\n", e.c_str());
     // NOTE: device enumeration is deferred to pump() (see devices_enumerated_), NOT done here —

@@ -128,6 +128,13 @@ public:
   // server's main loop. No-op under wasm. Returns how many connections were erased this call.
   std::size_t reap_idle(std::chrono::milliseconds timeout);
 
+  // Relay reliability: push the full current shard snapshot to EVERY connection (not just a new
+  // one, the way admit does). A client-to-client live re-fan is single-shot with no retry, so a
+  // join that races an already-connected peer's socket can be missed and never recovers; calling
+  // this periodically on the server's main loop lets every client re-converge on the room/scene
+  // tree within one interval (idempotent bulk apply). Returns how many connections it wrote to.
+  std::size_t broadcast_snapshot();
+
   // ── Media plane (bring-up: media over this WS control channel) ──
   // publish_media_frame sends a frame to this transport's connections: a browser CLIENT has one
   // connection (the relay), so it pushes its camera/mic UP; a relay's media_router fans each

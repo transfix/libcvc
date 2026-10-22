@@ -156,8 +156,15 @@ int main(int argc, char **argv) {
     // close stops streaming media; reap_idle shuts such a connection down after ~10 s so its
     // on-close retraction fires and the roster does not accumulate ghosts. A live client streams
     // continuously.
-    if (++reapticks % 5 == 0)
+    if (++reapticks % 5 == 0) {
       ws_tp.reap_idle(std::chrono::seconds(10));
+      // Re-broadcast the room/scene snapshot to every client (~1s). A client-to-client live re-fan
+      // is single-shot with no retry, so a join that races an already-connected peer's socket is
+      // otherwise lost for good (an established client never sees a later joiner). This idempotent
+      // re-sync makes every client re-converge within ~1s — and is the reliable push the
+      // server-authoritative room+scene tree rides on.
+      ws_tp.broadcast_snapshot();
+    }
     // Apply any queued departures (a browser tab closed) before pumping, so each retraction goes
     // out to the remaining clients this tick.
     {

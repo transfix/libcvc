@@ -185,9 +185,13 @@ conf/
     <room-id>/
       meta/            { mode: sfu|mesh, created, title, relay-endpoint }   ← server-owned
       roster/          ← server-owned index: <pid> → { name, joined, present }
+      scene/           ← server-owned: the SHARED 3D world every client renders (§5g).
+        env/           { background, ground, lights }
+        objects/       <id> → { source(uri), transform, material }
       participants/
         <pid>/         ← owned by participant <pid> (and the server)
           profile/     { name, avatar }
+          pose/        { pos, orient }   ← participant-owned: avatar position/orientation in scene/ (§5g)
           flags/       { mic, cam, hand, screenshare }
           streams/
             <kind>/    descriptor: { token, format_desc, endpoint-or-relay-slot }
@@ -281,6 +285,133 @@ grants for the *client-local* document sandbox.
 Join carries a credential. v1: a room bearer token the server checks at admission, from which it mints
 the per-connection `pid` binding (§5d). Richer identity (OIDC via the existing SSO) and roles
 (host/moderator/guest, capacity, bans) are admission-time hooks layered on top.
+
+### 5g. Shared 3D scene + avatars (NEXT WORK — user-requested)
+
+The conference is not just floating video windows: it is a **shared 3D space** that every client renders
+**from its own camera viewpoint** (orbit/fly locally; the camera is never replicated). The scene itself is
+**server-authoritative** — the room owns it as replicated state and all clients draw the same world.
+
+* **Scene tree.** `conf.rooms.<room>.scene.*` (server-owned, replicates on the existing `"conf"` shard
+  scope). The server seeds `scene.env` (background, ground, lights) and `scene.objects.<id>`
+  (`source` URI + `transform` + `material`). Clients render it via a `scene:` block in the conference
+  `.ari` fed from that subtree — likely a small custom scene node type (the `agents`/`count:` pattern in
+  §3 and the example scenes), since the live tree, not the document, is the source of truth.
+* **Avatars.** Each participant writes its own `participants.<pid>.pose` (`pos`, `orient`) — e.g. derived
+  from its camera — which replicates; a custom "avatars" scene node reads the roster + each pose and draws
+  a marker/model per participant, so **users see each other moving around the scene** (the `agents` pattern
+  again, keyed by `pid`). Pose is participant-owned (§5b); the scene env is server-owned.
+* **Why this matters for correctness, not just looks.** It was the broad (accidental) replication of each
+  client's per-document `graphics.root` that gave the earlier build a de-facto shared scene; scoping
+  replication to the room tree (the name-collision fix) correctly removed that. This section makes the
+  shared scene a **first-class, server-authoritative** feature instead of a replication side effect.
+* **Sequencing.** MVP first = a minimal server-seeded environment (ground + grid + a reference object) to
+  prove the shared-scene render path end-to-end; then layer avatars (pose publish + the avatars node).
+  Schema impact (a `scene:` driven from state, a custom scene-node type) is coordinated with the host-caps
+  / `requires:` work (transfix/libcvc#754) so the terminal hosts gate it cleanly (`requires: [gl.scene]`).
+
+---
+
+### 5h. The holon — the shared scene formalized (authority, prediction, LOD, composition)
+
+§5g's shared scene is the first rung of a larger unit, the **holon**: a bundle of
+`{ cvc::world_clock + cvc::physics::world (Jolt) + scene/pose state }` that is **server-authoritative,
+client-replicable, and composable**. The clock lives *inside* the holon (per-holon, not an app global), so
+a node interacting with several holons runs several clocks. The DSL, media and render *observe* a holon;
+only its deterministic core (clock + physics) replicates and reconciles. All three primitives exist today
+independently (`inc/cvc/core/world_clock.h`, `inc/cvc/physics/*`, the cvcGL retained scene graph) — nothing
+bundles them yet.
+
+* **Driver.** The frame loop is the only driver (as in WORLD-CLOCK-SYNC): one `clock.advance(wall_dt)` →
+  `{steps, alpha, first_tick, dropped_steps}`; an `on_tick` pass runs each due fixed quantum (deterministic
+  physics prediction); an `on_frame` pass runs once (authoritative interpolation, DSL, media pump, render
+  tween via `alpha`). `fixed_dt` is **constant** (1/120 for a navigator-free room); CPU load varies the
+  *step count*, never dt — which is what makes the client's prediction bit-reproducible against the server
+  (`physics/det_math.h`). `clock_follower` already gives per-follower `ticks_per_step`/`steps_due`/`alpha`.
+* **Authority & reconcile.** Server holon = truth; client holon = a replica that predicts locally and
+  reconciles on each authoritative snapshot (soft-blend while tracking, `seek_tick` + replay when it
+  diverged or `dropped_steps` fired). **Pose is server-authoritative with client proposal + veto +
+  override**: the client writes a proposal to `participants.<pid>.intent.*` (replicated), the server
+  validates it as an input to that avatar's physics body and writes the authoritative `…pose/body` —
+  accept, veto (clamp/reject), or override at will (teleport, re-mass, re-parent). "Respect the veto" =
+  authoritative wins on reconcile. This is the server-mediated-write path (§5d) applied per avatar.
+  *(No client-prediction/reconcile/rollback loop exists today — it is new; distributed state resolves
+  last-writer with vector clocks, not predict/rollback.)*
+* **LOD (realtime for large scenes).** A replica is a *scoped, decimated* view, not a full copy: **spatial
+  interest** (extend the shard's `add_interest` from `"conf"` to `scene.<cell>` near the camera) picks
+  *what*; **geometry LOD** (landed, PR #249+: `lod/select.h` rung/budget solver, `lod/pyramid.h`, QEM
+  `geometry/simplify.h`, `lod/tiles.h`, HDF5 `lod/store.h`, `LodGraphicsNode`) picks *how much*; reconcile
+  fixes what was skipped. **Physics LOD is new** (zero hits today) — a sim-detail ladder (collision-hull
+  decimation, substep/rate reduction, freeze-to-kinematic for distant/subordinate bodies) + re-hydrate when
+  a body re-enters interest.
+* **Composition / holarchy.** A server may **subdelegate a sub-volume** `V` to a subordinate server running
+  a child holon (its own clients/streams/clock); the parent becomes a **client of the child that keeps
+  ultimate authority**. Two axes: **scene-graph** — mount the child's replicated scene as a frame node at
+  `V`'s transform (the `physics-world-frame = scene node` + render-origin-offset mechanism already exists
+  for city-scale), presented at the parent's chosen copy/LOD; **physics** — authority **handoff** at `∂V`
+  first, then cross-boundary kinematic proxies (research-grade). Subdelegation rides
+  `state_delegation_manager` (leases: delegate/renew/**revoke**, longest-prefix routing) with a
+  **spatial-volume → path-prefix** mapping (`state_brick_manifest::bricks_in_region` is the spatial index)
+  and a **new parent override/veto primitive** (leases give revoke, not per-write override; build on
+  `write_policy`/`state_authority_map`).
+* **Cross-node clock sync.** `world_clock_binding` already publishes `sim.tick/time/fixed_dt/realized_speed/
+  dropped` to the tree; replicate them and the replica tracks the remote authoritative tick — `seek_tick`
+  on hard correction, `set_scale` nudge toward the remote `realized_scale()` for drift (time dilation),
+  server-set `sim.mode/speed` replicated for **shared pause/slowmo** (local pause stays local).
+* **Hard prerequisite.** `data()` object replication is a known DISTRIBUTED_STATE gap (§52: only scalar
+  value/child changes journal; `set_data` is a no-op pending a codec). Replicating live physics/scene
+  *state objects* rides on closing it — so it leads the phasing.
+
+**Phasing.**
+- **H0 — substrate:** close `data()` object replication (DISTRIBUTED_STATE §52); spatial-interest filter;
+  confirm the deterministic physics path (`det_math.h`).
+- **H1 — single holon** (the §5g scene + avatars, formalized): bundle `{clock,physics,scene}`;
+  server-authoritative; client replica with prediction + reconcile; pose propose→veto→override; geometry
+  LOD + spatial interest; **per-camera `RenderView` + `VisibilityMask`** (both already exist —
+  `src/cvcGL/RenderView.cpp`, §9.5 — so H1 *uses* them, it does not build them).
+- **H2 — physics/sim LOD + re-hydrate; cross-node clock tracking** (seek/scale, shared pause).
+- **H3 — subdelegation / holarchy:** spatial→path delegation on the lease manager; parent-as-authority-
+  client + override primitive; live-remote-holon scene mount at copy/LOD; residency/paging driver
+  (VISIBILITY-AND-LOD HLOD §4.2 — designed, not landed).
+- **H4 — physics boundary composition:** authority handoff at `∂V`, then cross-boundary kinematic proxies
+  *(research-grade; last)*.
+
+---
+
+### 5i. DSL as a first-class holon citizen (programmability & modding)
+
+The DSL is a **first-class read *and write* participant** in the holon — a mutation/event source peer to
+physics — **authority-scoped and capability-sandboxed**. It is not part of the deterministic core, so its
+*authoritative* writes **replicate** (clients receive + reconcile them) rather than being predicted. Three
+roles, each already separable by existing machinery:
+
+* **Client mods — local customize + propose.** A sandboxed client DSL over the replica: local-only effects
+  (UI, LOD prefs, cosmetic overrides, reactions) write the **non-replicated** `ui.docs.*` scope;
+  holon-affecting changes write the **replicated intent** scope as **proposals** the server accepts/vetoes —
+  the exact interest-filter split the name-collision fix relied on (`conf` replicates, `ui.docs.ari` does
+  not).
+* **Server / admin DSLs — authoritative.** Run on the authority: their writes are holon truth (spawn,
+  enforce rules, react to events), role-gated by `state_authority_map`/`write_policy`.
+* **Cross-injection — inject a DSL to run inside the counterpart** under a **capability grant**. Every
+  constraint the grant names is an existing *enforced* primitive: *intrinsics* → reduced-env default-deny
+  allowlist + `requires:` preflight (§7.6); *state tree* → `apply_chroot` to a sub-prefix (+ authority /
+  interest); *stream + message channels* → chroot'd channel scoping (#463–467) + stream-token scoping;
+  *resource* → step/time/memory budgets (§7.3/§7.4, `memory_tracker`). The **new** work is the *grant
+  object*, the *injection transport* (ship DSL + grant over a channel), *host-side sandboxed instantiation*
+  (build an env from a grant, run under it), and the *accept policy* (who may inject into whom; auto vs.
+  prompted). **Security-critical:** a client→server injection is untrusted code on the authority (the grant
+  + reduced-env + chroot + bounded budgets are the whole defense — no fs, no transport beyond granted
+  channels, deterministic caps, no escalation); server→client is the mirror. **Write the threat model
+  first.**
+
+**Phasing.**
+- **D1 — DSL first-class writer** (rides H1): authority-scoped writes (client propose via `intent` → veto;
+  server authoritative) on `write_policy` + the replicated/non-replicated scope split.
+- **D2 — Client mods:** sandboxed client DSL — local (`ui.docs`) customization + replicated proposals.
+- **D3 — Server/admin DSLs:** authoritative holon scripting + event reactions, role-gated.
+- **D4 — Cross-injection + capability grants:** grant object + injection transport + host-side
+  instantiation + accept policy + a **threat-model doc** (built on reduced-env / `apply_chroot` /
+  channel-scoping #463–467 / §7.3–7.6 limits + `requires:`).
 
 ---
 
@@ -488,6 +619,12 @@ browser, then the browser itself, then the MVP.
   for mesh authz; identity (OIDC via SSO / revocable txwtf-style JWT); the **WASI server** build (fill
   cvcpkg gaps, §6f).
 
+> **Baseline shipped (2026-10-21).** The shared-scene + roster conference is **live at
+> cyberpcangel.com/cyprty** on the **WebSocket-relay** path — Phases 2–3 + 5 realized (room control plane,
+> room verbs, native proof, browser bring-up over a WS loopback); the gRPC/WebRTC legs (Phases 4/6) and
+> scale/mesh (7/8) are still pending. The next arc is the **holon + DSL model (§5h/§5i)**; its H0–H4 / D1–D4
+> phasing lives there, parallel to the media/transport phases above (the shared 3D scene + avatars is H1).
+
 ---
 
 ## 11. Open questions / decisions
@@ -521,3 +658,45 @@ mesh works first, auth hardens later (§5, Phase 8); **WASI server committed** (
 * Distributed state / cluster: [`DISTRIBUTED_STATE_ROADMAP.md`](DISTRIBUTED_STATE_ROADMAP.md),
   [`STATE_LIFETIME_AND_ATOMICITY.md`](STATE_LIFETIME_AND_ATOMICITY.md).
 * UI DSL (widgets, `input_text` gap): [`CVCGL-UI-DSL-ROADMAP.md`](CVCGL-UI-DSL-ROADMAP.md).
+* World clock / sim pacing (holon driver, §5h): [`WORLD-CLOCK-SYNC-ROADMAP.md`](WORLD-CLOCK-SYNC-ROADMAP.md).
+* LOD — geometry (holon §5h; **doc stale — landed PR #249+**):
+  [`VISIBILITY-AND-LOD-ROADMAP.md`](VISIBILITY-AND-LOD-ROADMAP.md).
+* Physics (holon §5h): [`NAV-VEHICLE-PHYSICS-ROADMAP.md`](NAV-VEHICLE-PHYSICS-ROADMAP.md).
+
+---
+
+## 13. Status of the Ariadne (cvcGL UI & scene DSL) roadmap — verified against code
+
+The Ariadne UI/scene DSL is **essentially complete in code, and its roadmap docs are badly stale** — a
+*doc* audit mis-reports finished work as open (even this file's §9/§10 still call `input_text` a gap, though
+it shipped in **#636**). The statuses below are **verified against the tree**, not read off the doc.
+
+**Landed (several still listed open/planned in the docs — refresh needed):**
+* `input_text` / `input_int` widgets (§3.5/§6) — `src/cvc/ariadne/loader.cpp:650` (#636).
+* Multi-view **`RenderView` / `VisibilityMask`** (§9.5) — `src/cvcGL/RenderView.cpp`.
+* **Light** scene node (§9.1) — `src/cvcGL/LightNode.cpp` + loader `"light"`.
+* **Clipboard** (§17.8) — `src/cvcGL/Clipboard*.{cpp,mm}`.
+* `state_exec` **async-scheduler parity** (§7.1/§7.7) — `receive_message`/`sleep`/`yield_frame` in
+  `async_scheduler.cpp`.
+* **JSON-Schema validator integration** (§15) — `nlohmann_json_schema_validator` wired in CMake
+  (dep-conditional).
+* **s-expr in binds/scripts** (part of §18) — homoiconic read-lane in `ariadne.cpp` / `loader.cpp`.
+* **Geometry LOD** (PR #249+), **tvision** terminal backend (§16.4), **EGL golden-image harness** (§16.6).
+* The core: engine, widget/layout, reactive + action lanes, composition/URI, scene-graph core,
+  streamed-source zero-copy + clipping, Unicode, backend split + AppRuntime.
+
+**Genuinely remaining — VERIFY each in code before scheduling (the doc can't be trusted); all retained:**
+* Transfer-function editor + `data()`-channel authoring (§10) — *no code found.*
+* `state_exec` program modularity `(include/load "uri")` (§19) — *no code found.*
+* pycvc URI-scheme handler override + bytes branch (§14.2) — *not found; verify.*
+* Full YAML-free s-expr `.ari` **document** dialect (§18) — exprs land in binds/scripts; the whole-document
+  front-end is the remainder.
+* Formal draft-2020-12 JSON Schema + the `ari validate` command (§15) — the validator *integration* exists;
+  the formal schema + CLI may be the gap.
+* HTTP response-**cache LRU** (§13.9) — per-request `max_bytes` cap exists (`http_client_fetch.cpp`); the
+  response-cache LRU + the write side (§13.10) are unverified.
+
+**Action + takeaway:** refresh the stale statuses in `CVCGL-UI-DSL-ROADMAP.md`,
+`VISIBILITY-AND-LOD-ROADMAP.md`, and this file's own §9/§10. Net: the DSL's UI/scene substrate is **done** —
+the conference's forward work is the **holon (§5h) + DSL-programmability (§5i)**, genuinely new capability,
+**not** DSL catch-up.

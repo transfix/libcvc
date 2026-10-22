@@ -687,7 +687,18 @@ private:
 
   static constexpr uint64_t kMaxSteps = 100'000;       // per-eval step cap (a predicate is tiny)
   static constexpr double kMaxSeconds = 0.005;         // per-eval time cap (5 ms)
-  static constexpr double kFrameBudgetSeconds = 0.010; // aggregate across all predicates/frame
+  // Aggregate reactive-eval time across ALL predicates in a frame. This is a runaway guard, not a
+  // normal operating point: a handful of scalar predicates finish in well under a millisecond. It
+  // was 10 ms, but a live conference re-evaluates ~5-7 predicates PER PEER every frame (roster
+  // rows' visible_when, the per-peer camera-window count/title/texture binds), and the stackless
+  // evaluator is markedly slower under wasm while the browser's single thread is also decoding
+  // video — so at a realistic peer count the 10 ms guard tripped mid-roster, skipping the rest and
+  // blinking the participant list / peer windows empty. 30 ms clears a ~6-7 peer conference with
+  // margin and is still a hard bound on a pathological document (eval time the thread spends
+  // descheduled doesn't count against it, so a merely-loaded machine never trips it). See
+  // last_good_count for the structural backstop that keeps a repeated list stable across any
+  // residual skip.
+  static constexpr double kFrameBudgetSeconds = 0.030; // aggregate across all predicates/frame
   static constexpr std::size_t kMaxOptions = 1024;     // cap on computed combo options
 
   std::size_t data_step_nodes_ = 0;            // see resolve_data_settings()
@@ -780,6 +791,14 @@ struct Runtime::Impl {
   std::vector<std::string> reactive_warnings;
   std::set<std::string> reactive_warned;
   int frame_instances = 0; // §3: repeat instances emitted this frame (bounds many repeats)
+  // §3: last successful repeat-count per expression. A reactive repeat-count eval fail-safes to 0
+  // on a transient per-frame budget exhaustion (reactive eval is slow in wasm, and video decode can
+  // eat the frame); collapsing a repeated list — the conference roster, the per-peer camera windows
+  // — to EMPTY for that frame and back flickers it, and under sustained load leaves an apparently
+  // empty conference even though the peers are present in state. Reusing the last-good count
+  // bridges those skips so the list stays stable; a genuine count change is picked up on the next
+  // unskipped frame.
+  std::unordered_map<std::string, int> last_good_count;
 
   // §4.7 action lane: a unique owner tag for this Runtime's processes on the app-wide
   // scheduler (app.exec_scheduler()), so teardown reaps exactly this document's process
@@ -993,8 +1012,16 @@ std::vector<std::string> Runtime::Impl::eval_options(const std::string &expr) {
 int Runtime::Impl::eval_count(const std::string &expr) {
   constexpr int64_t kMaxRepeat = 4096; // a UI with thousands of repeated widgets is pathological
   const ReactiveEngine::IntOutcome o = ensure_reactive().eval_int(expr, /*dflt=*/0);
-  if (!o.error.empty())
+  if (!o.error.empty()) {
     warn_once(o.error);
+    // The eval fail-safed (budget exhausted / broken). Rather than collapse the repeated list to 0
+    // this frame, reuse the last count this expression yielded successfully (if any) — a transient
+    // skip then leaves the roster/peer-window list unchanged instead of blinking empty. With no
+    // prior success the fallback is still 0, so a genuinely-never-valid expr behaves as before.
+    const auto it = last_good_count.find(expr);
+    if (it != last_good_count.end())
+      return it->second;
+  }
   int64_t n = o.value;
   if (n < 0)
     n = 0;
@@ -1003,6 +1030,10 @@ int Runtime::Impl::eval_count(const std::string &expr) {
               std::to_string(kMaxRepeat) + ") — clamped");
     n = kMaxRepeat;
   }
+  // Remember this frame's good value only when the eval actually succeeded (o.error empty): a
+  // fail-safe 0 must never be cached as "last good", or it would pin the list empty.
+  if (o.error.empty())
+    last_good_count[expr] = static_cast<int>(n);
   return static_cast<int>(n);
 }
 

@@ -144,13 +144,13 @@ windows:
     id: cam_{i}
     bind: peer.{i}.name
     repeat: (state-get "peer.count")
-    pos: [780, 40]
-    size: [400, 360]
+    pos: [612, 66]
+    size: [330, 290]
     closable: true
     children:
       - type: stream_view
         bind: peer.{i}.cam
-        size: 360
+        size: 300
 
 on_tick: |
   (begin
@@ -159,6 +159,20 @@ on_tick: |
       (begin
         (state-set "joined" "1")
         (state-set "name_error" "") ; no name conflict yet (the web client's launch name is random)
+        ; ── pre-seed each peer camera window at a distinct TILED position ──
+        ; every cam_<i> declares the SAME authored pos:, so without this the per-peer windows land
+        ; exactly on top of one another and look like a single window — the #1 reason a user reports
+        ; "I can't see the other cameras". Tile them in a 2-column grid to the RIGHT of the Users
+        ; window (which sits at x≈390–610): the roster is NEVER covered, and up to four cameras show
+        ; side-by-side without overlapping on a laptop screen. Seeded ONCE here, before any peer window
+        ; exists, so each window's first-use geometry seed lands at its own spot; the user's drag then
+        ; persists and wins. Covers 6 peers; a 7th+ falls back to the authored pos.
+        (state-set "tree.cam_0.geometry" "612,66,330,290")
+        (state-set "tree.cam_1.geometry" "952,66,330,290")
+        (state-set "tree.cam_2.geometry" "612,364,330,290")
+        (state-set "tree.cam_3.geometry" "952,364,330,290")
+        (state-set "tree.cam_4.geometry" "612,662,330,290")
+        (state-set "tree.cam_5.geometry" "952,662,330,290")
         (state-set "cam_on" "1") ; on/off toggles start ON (streams open unmuted)
         (state-set "mic_on" "1")
         (room-join "" (state-get "conf.room") (dict "name" (state-get "conf.self")))
