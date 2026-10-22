@@ -9,11 +9,17 @@
 */
 
 #include <atomic>
+#include <boost/any.hpp>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
+#include <cvc/state/state_blob_store.h>
 #include <cvc/state/state_cluster_shard.h>
+#include <cvc/state/state_codec_registry.h>
+#include <cvc/state/state_compression_registry.h>
+#include <cvc/state/state_data_hydrator.h>
 #include <cvc/state/state_transport_ipc.h>
 #include <fcntl.h>
 #include <filesystem>
@@ -126,6 +132,119 @@ TEST(StateTransportIpcTest, TwoEndpointConvergence) {
 
   // Stop transports before shards leave scope; otherwise reader
   // threads may still call ingest_remote on a destroyed shard.
+  tA.stop();
+  tB.stop();
+}
+
+namespace {
+struct IpcDesc {
+  int w = 0, h = 0;
+  double fps = 0.0;
+};
+std::vector<unsigned char> enc_ipc_desc(const boost::any &v) {
+  const IpcDesc d = boost::any_cast<IpcDesc>(v);
+  std::vector<unsigned char> b(sizeof(IpcDesc));
+  std::memcpy(b.data(), &d, sizeof(IpcDesc));
+  return b;
+}
+boost::any dec_ipc_desc(const std::vector<unsigned char> &b) {
+  IpcDesc d{};
+  if (b.size() == sizeof(IpcDesc))
+    std::memcpy(&d, b.data(), sizeof(IpcDesc));
+  return boost::any(d);
+}
+} // namespace
+
+// data() OBJECT replication over the IPC transport (S4 — closes §52's "both IPC and gRPC" testing
+// bullet: gRPC has this coverage but compiles out by default, and the IPC tests only ever asserted
+// value()/metadata). Proves the IPC wire serializes a Mutation's Payload (put_payload/read_payload)
+// for a custom inline object, the builtin-int alias (S1) over a real transport, AND a blob_ref.
+// Both endpoints live in one process, so a single shared blob store serves B's hydrator (no
+// transport chunk-fetch; that async path is a separate follow-up, see §52 open questions).
+TEST(StateTransportIpcTest, DataPayloadReplicatesOverIpc) {
+  cvc::app aA, aB;
+  aA.registerDataType<IpcDesc>("ipc_desc");
+  aB.registerDataType<IpcDesc>("ipc_desc");
+
+  cvc::state_transport_ipc tA, tB;
+  auto pA = make_socket_path("A_data");
+  auto pB = make_socket_path("B_data");
+  tA.start(pA, "A", "C");
+  tB.start(pB, "B", "C");
+  ASSERT_TRUE(tA.connect_to_peer(pB, std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_connected(tA, tB, std::chrono::milliseconds(2000)));
+
+  cvc::memory_state_blob_store store; // shared: both endpoints are in this one process
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sA.set_blob_store(&store);
+  sB.set_blob_store(&store);
+  sA.set_max_inline_payload_bytes(256);
+  sB.set_max_inline_payload_bytes(256);
+  sA.codecs().register_codec("ipc_desc", enc_ipc_desc, dec_ipc_desc);
+  sB.codecs().register_codec("ipc_desc", enc_ipc_desc, dec_ipc_desc);
+  cvc::state_data_hydrator hydratorB(store, sB.codecs(),
+                                     &cvc::state_compression_registry::shared());
+  sB.set_data_hydrator(&hydratorB);
+  sA.attach();
+  sB.attach();
+  tA.register_shard(&sA);
+  tB.register_shard(&sB);
+
+  // INLINE: a small custom descriptor + a builtin int (the S1 alias), both ride inline bytes. value
+  // doubles as a sync barrier; data() has no equality guard so set it twice past the
+  // create-consume.
+  cvc::state &nd = cvc::state::instance(aA)("streams.cam.desc");
+  nd.value(std::string("p1"));
+  nd.value(std::string("live"));
+  nd.data(boost::any(IpcDesc{1280, 720, 30.0}));
+  nd.data(boost::any(IpcDesc{1280, 720, 30.0}));
+
+  cvc::state &ni = cvc::state::instance(aA)("nums.i");
+  ni.value(std::string("p1"));
+  ni.value(std::string("p2"));
+  ni.data(boost::any(int{4242}));
+  ni.data(boost::any(int{4242}));
+
+  // BLOB: a 4 KiB payload exceeds the 256-byte inline threshold, so it offloads to a chunked
+  // blob_ref on A; B reconstructs it from the shared store via the hydrator.
+  std::vector<unsigned char> big(4096);
+  for (std::size_t i = 0; i < big.size(); ++i)
+    big[i] = static_cast<unsigned char>(i % 251);
+  const std::string big_s(big.begin(), big.end()); // builtin "std::string" codec, > threshold
+  cvc::state &nb = cvc::state::instance(aA)("streams.cam.lut");
+  nb.value(std::string("p1"));
+  nb.value(std::string("p2"));
+  nb.data(boost::any(big_s));
+  nb.data(boost::any(big_s));
+
+  tA.pump_all();
+  tA.flush();
+
+  ASSERT_TRUE(wait_until(
+      [&] {
+        return cvc::state::instance(aB)("streams.cam.desc").value() == "live" &&
+               !cvc::state::instance(aB)("streams.cam.desc").data().empty() &&
+               !cvc::state::instance(aB)("nums.i").data().empty() &&
+               !cvc::state::instance(aB)("streams.cam.lut").data().empty();
+      },
+      std::chrono::milliseconds(3000)))
+      << "data() payload did not cross the IPC wire";
+
+  const IpcDesc got = boost::any_cast<IpcDesc>(cvc::state::instance(aB)("streams.cam.desc").data());
+  EXPECT_EQ(got.w, 1280);
+  EXPECT_EQ(got.h, 720);
+  EXPECT_DOUBLE_EQ(got.fps, 30.0);
+
+  EXPECT_EQ(boost::any_cast<int>(cvc::state::instance(aB)("nums.i").data()), 4242)
+      << "builtin int data() (S1) did not replicate over IPC";
+
+  const std::string lut =
+      boost::any_cast<std::string>(cvc::state::instance(aB)("streams.cam.lut").data());
+  ASSERT_EQ(lut.size(), big_s.size()) << "blob_ref payload did not reconstruct over IPC";
+  EXPECT_EQ(lut, big_s);
+  EXPECT_GT(store.size(), 0u) << "large data() was not offloaded to a blob";
+
   tA.stop();
   tB.stop();
 }

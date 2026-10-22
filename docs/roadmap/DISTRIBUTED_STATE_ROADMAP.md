@@ -54,16 +54,14 @@ later that week. Also present on `master` today:
 These are implemented on the receive side or in isolation, and are easy to
 mistake for finished:
 
-- **`data()` does not replicate end to end.** `state_sync_adapter::attach_node`
-  connects only `valueChanged` and `childChanged`, so nothing journals
-  `dataChanged`, `commentChanged`, `hiddenChanged` or `readOnlyChanged` — even
-  though the op enum, the wire proto and `apply_remote` all support them. Those
-  mutations can currently only be produced by hand-constructing a
-  `state_mutation`. Additionally, `apply_remote`'s `set_data` case is an
-  explicit no-op pending a codec registry
-  (`src/cvc/state/state_sync_adapter.cpp:293`).
-- **`state_data_hydrator` is never driven from the ingest path.** It works and
-  is tested, but nothing calls it automatically on receiving a blob reference.
+- **`data()` object replication — LANDED** (status corrected 2026-10-22; this was previously listed
+  here as a gap). The sync adapter hooks `dataChanged` and emits a codec-encoded `set_data` (inline,
+  or a content-addressed `blob_ref` above the shard's inline threshold); `apply_remote` decodes inline
+  via the per-shard `state_codec_registry` or hydrates a `blob_ref`; `snapshot()` captures it and
+  `ingest_snapshot_entry` replays it; and `state_data_hydrator` IS driven automatically from
+  `apply_remote`'s blob branch (the session wires it on join). See Phase 10 below for the full chain
+  and the residual deferred items (WebSocket late-joiner blob hydration, the async hydrator install
+  guard, the legacy oversized-`value()` resolver).
 - **Backpressure and slow-peer isolation are `inproc`-only.** The bounded
   outbox, drop policies and quarantine live in `state_transport_inproc`; the
   IPC and gRPC transports publish synchronously with no bounded queue.
@@ -421,59 +419,86 @@ Delivered so far on `feature/phase9-telemetry`:
   - Failure mode: an aggregator stops receiving from a peer for > 3× publish interval and marks the peer `stale`.
   - Bench: 100-node simulated cluster, 1 Hz telemetry, assert per-node CPU overhead is < 1% and aggregator memory is bounded.
 
-### Phase 10: Replicated structured/binary node `data()` (codec-backed) — NOT STARTED
+### Phase 10: Replicated structured/binary node `data()` (codec-backed) — LANDED (residual items below)
 
 Surfaced 2026-10-01 while reviewing the binary-messaging/streaming work (originally floated as the
-"snapshot binary gap"). On investigation the gap is **not** a snapshot-field tweak — it is the whole
-`data()` replication path, which is stubbed out end to end.
+"snapshot binary gap"). **Status corrected 2026-10-22:** an earlier revision of this section said the
+`data()` replication path was "NOT STARTED / stubbed out end to end." That is stale — the path LANDED with
+the cross-node streaming critical-path work and is live across all four transports. This section now
+records what is wired and the small items that remained to close §52 to its own design + testing bullets.
 
-**What already works (so this phase does NOT need to touch it):** a node's `value()` (a `std::string`)
-replicates byte-safely over both transports *and* survives a full-tree snapshot resync. IPC frames every
-string length-prefixed (`state_transport_ipc.cpp` `put_string`/`reader::str`), and proto3 `string` is a
-length-delimited field the C++ runtime passes arbitrary octets through. So a binary *value()* is fine on
-both the mutation and snapshot paths — there is no asymmetry to fix there.
+**What already works (value()):** a node's `value()` (a `std::string`) replicates byte-safely over both
+transports and survives a full-tree snapshot resync (IPC length-prefixes every string; proto3 `string`
+passes arbitrary octets). A binary *value()* is fine on both the mutation and snapshot paths.
 
-**The actual gap:** a node's `data()` (a `boost::any` holding structured/typed/binary payload — e.g. the
-`format_desc` a stream descriptor stores) does **not replicate at all**:
+**What is LANDED for `data()`** (a `boost::any` holding a structured/typed/binary payload — e.g. the
+`format_desc` a stream descriptor stores):
 
-- Nothing emits a `SET_DATA` mutation. `state_sync_adapter` only hooks `valueChanged` and emits
-  `set_value`; it never hooks `dataChanged`.
-- The apply side is an explicit no-op: `state_sync_adapter`'s `set_data` case is `// accept it but do not
-  decode … phase 2 will provide a codec registry`.
-- The snapshot serializer (`state_cluster_shard::snapshot()`) captures only `value()`, `comment`,
-  `hidden`, `read_only` — never `data()`.
-- The *carriers* already exist but are unused end to end: the journal's `state_payload`
-  (`none|inline_bytes|blob`), the proto `Mutation.SET_DATA` + `Payload{inline_bytes|blob}`, the blob store,
-  and `state_data_hydrator` (which can already reassemble + decode a blob-ref payload — but only once a
-  codec registry exists to decode it).
+- **Codec registry** — `cvc::state_codec_registry` (`type_name -> encode/decode`), built per shard with
+  `register_builtin_codecs` (bool / the integer family / float / double / std::string) +
+  `register_volume_geometry_codecs`; the shard ctor sets it on the adapter so it is non-null in production.
+  An unregistered type is skipped (the object does not replicate; value + child structure still converge),
+  never a silent corruption.
+- **Emit** — `state_sync_adapter` hooks `dataChanged` and emits a `set_data` carrying `type_name` +
+  `state_payload`: `inline_bytes` for small payloads, a content-addressed `blob_ref` (via the blob store)
+  above the shard's `max_inline_payload_bytes`.
+- **Apply** — the `set_data` case decodes inline via the registry or routes a `blob_ref` through
+  `state_data_hydrator` (fetch chunks → reassemble → decode → `node->data(decoded)`), under the adapter's
+  thread-suppression guard (no echo).
+- **Snapshot** — `snapshot_entry` / proto `SnapshotEntry` carry `data_type_name` + `data_payload`;
+  `state_cluster_shard::snapshot()` captures `node.data()` mirroring the live encode+offload byte-for-byte,
+  and `ingest_snapshot_entry` replays it as a `set_data`. The value's own `type_name` is carried too.
+- **Wire** — the proto `Payload` oneof (`none|inline_bytes|BlobRef`) and the `SnapshotEntry` payload fields
+  serialize on all four transports (inproc by-value, IPC `put_payload`/`read_payload`, gRPC
+  `set_pb_payload`, WS).
+- **Session wiring** — `distributed_state_session` sets the blob store + `max_inline_payload_bytes`, builds
+  the hydrator over the shard codecs + blob store, and requests + ingests a snapshot on join.
+- **Echo suppression** — transport origin-skip + the shard `(origin,sequence)` seen-set + the adapter's
+  thread-suppression guard.
 
-So "binary data survives resync" presupposes a `data()`-replication path that was never built; it is the
-deferred **codec registry** the no-op comment names, not an extra `bytes` field on `SnapshotEntry`.
+**Closing items (this change):**
 
-**Design to close it:**
+1. **Integer `data()` key fix (LANDED).** `register_builtin_codecs` keyed the integer codecs on the C++
+   spellings (`int32_t`…), but `state::dataTypeName()` returns the app's registered names (`int`,
+   `unsigned int`, `unsigned short`, `int64`, `uint64`), so an integer `data()` silently failed to
+   replicate (encode threw "no codec", swallowed). Codec aliases under the app spellings fix it. Regression
+   test: `TwoNodeInprocIntegerDataReplication`.
+2. **Value `type_name` across apply + snapshot (LANDED).** The emit carried `valueTypeName()`, but
+   `apply_remote::set_value` stamped `"std::string"` and `snapshot()` never captured the value type. A
+   signal-free `state::valueTypeName(const std::string&)` setter + apply/snapshot wiring preserve it. Test:
+   `TwoNodeValueTypeNamePreserved`.
+3. **Transport coverage (LANDED).** A typed `data()` round-trip over IPC — inline, builtin-int, and a
+   blob-ref — is `StateTransportIpcTest.DataPayloadReplicatesOverIpc`. gRPC has equivalent coverage
+   (`SnapshotCarriesData` / `BlobPayloadRoundTrip`), built only under `CVC_ENABLE_GRPC`.
+4. **`set_data` echo-suppression pinned (LANDED).** `DistributedStateSession.SetDataApplyDoesNotEcho`
+   asserts an applied `set_data` emits no local mutation and a quiescent re-pump moves nothing.
 
-1. **Codec registry** — `encode(const boost::any&, type_name) -> bytes` / `decode(bytes, type_name) ->
-   boost::any`, keyed by a registered `type_name`; pluggable per data type (volume, geometry, image, the
-   small structured types first). An unregistered type is skipped with a structured diagnostic, never a
-   silent corruption.
-2. **Emit** — `state_sync_adapter` hooks `dataChanged` and emits a `set_data` mutation carrying
-   `type_name` + `state_payload`: `inline_bytes` for small payloads, a content-addressed `blob_ref`
-   (through the existing blob store) above a threshold.
-3. **Apply** — the `set_data` case decodes via the registry (inline) or routes a `blob_ref` through
-   `state_data_hydrator` (fetch chunks → reassemble → decode → `node->data(decoded)`), replacing the
-   current no-op.
-4. **Snapshot** — add a `payload` (type_name + `state_payload`) to the `snapshot_entry` struct, the proto
-   `SnapshotEntry`, and the IPC snapshot wire format; populate it from `node.data()` via the registry in
-   `state_cluster_shard::snapshot()`; apply it on receive via the same registry/hydrator path as a
-   `set_data` mutation. (Also carry `type_name` for values, which the snapshot currently drops.)
+**Deferred (real, but outside this closure):**
 
-**Testing:** a typed `data()` value round-trips through (a) a live mutation and (b) a full snapshot
-resync, on both IPC and gRPC; a large payload round-trips as a blob-ref through the hydrator; an
-unregistered type degrades gracefully; echo-suppression still holds (a `set_data` apply must not re-emit).
+- **`format_desc` on a production shard.** `register_stream_codecs` + the `format_desc` codec exist and the
+  descriptor is written to a `/streams/<id>` node's `data()`, but NO production shard registers the codec —
+  because no production shard currently *replicates* those descriptors: the conference relay scopes
+  replication to `conf.*` (`add_interest("conf")` + `set_enforce_interest(true)`), descriptor nodes are
+  rooted at the bare stream token (outside `conf.*`), and cross-node media rides `stream_bridge` /
+  `media_frame`, not the state tree. When cross-node descriptor *discovery* is wired (a holon, or a
+  conference feature placing descriptors under a replicated root), register the codec on both shards' codec
+  registries, keyed by the stable `"cvc::ariadne::stream::format_desc"` string, and treat the decoder as an
+  adversarial-bytes surface (`origin_node_id` is forgeable — bounds-check, do not trust length fields).
+  Covered in isolation today by `TwoNodeStreamDescriptorDiscovery` (test-local codec registration).
+- **WebSocket late-joiner blob hydration** — the WS leg does the ~1 s full-shard broadcast with bounded
+  inline bytes only; a large blob-ref payload to a browser late joiner is not yet pullable. Belongs to the
+  conference/browser phase.
+- **Async hydrator late-install** — `state_data_hydrator::retry_pending` / `on_hydrated` install `data()`
+  off the ingest thread with no suppression guard and no conflict-order re-check; inproc/IPC/gRPC
+  `fetch_chunk` completes inline (under the guard), so this is unused today but MUST be closed before any
+  non-blocking chunk transport ships.
+- **Oversized `value()` blob offload** — `set_value` above the threshold emits a `blob_ref` with an empty
+  `string_value` and NO receive-side resolver, so a large `value()` arrives unresolved. Either wire a
+  `set_value` hydrator or cap/forbid oversized `value()` (large payloads should use `data()`).
 
-**Dependency note:** this is independent of the cvc::ariadne::stream work but complements it — a replicated
-`/streams/<id>` descriptor (Phase 4 of the streaming roadmap) stores `format_desc` via `data()`, so it
-needs this to survive a cross-node resync.
+**Dependency note:** independent of the cvc::ariadne::stream work but complements it — a replicated
+`/streams/<id>` descriptor stores `format_desc` via `data()`, so cross-node descriptor discovery will need
+the deferred `format_desc` registration above once such a replication route exists.
 
 ## Testing Requirements
 
