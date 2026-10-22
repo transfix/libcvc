@@ -70,6 +70,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/physics/world_geometry.h
   ../../inc/cvc/physics/plant_host.h
   ../../inc/cvc/physics/pose_tracker.h
+  ../../inc/cvc/physics/physics_codec.h
   ../../inc/cvc/physics/nav_plant.h
   ../../inc/cvc/physics/nav_eval.h
   ../../inc/cvc/physics/plant_log.h
@@ -268,6 +269,7 @@ set(SOURCE_FILES
   physics/world_geometry.cpp
   physics/plant_host.cpp
   physics/pose_tracker.cpp
+  physics/physics_codec.cpp
   physics/binding_meta.cpp
   physics/nav_plant.cpp
   physics/nav_eval.cpp
