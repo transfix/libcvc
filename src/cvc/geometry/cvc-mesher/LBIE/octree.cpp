@@ -3607,6 +3607,13 @@ float Octree::getValue(int i, int j, int k)
 //-------------------------------------------------------------------
 void Octree::getVertGrad(int i, int j, int k, float g[3]) 
 {
+	// interpRect3Dpts_x/y/z also sample the grid point after the one an edge's crossing falls in.
+	// When the edge ends on the volume's far face exactly at the isovalue, that point is one plane
+	// off the grid and getValue() read past orig_vol (its weight is 0, so the face's gradient is
+	// the same answer).
+	i = std::min(std::max(i, 0), dim[0]-1);
+	j = std::min(std::max(j, 0), dim[1]-1);
+	k = std::min(std::max(k, 0), dim[2]-1);
 
 	if(flag_normal == 1) {	// central difference
 		int lres=dim[0];

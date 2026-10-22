@@ -407,6 +407,32 @@ TEST_F(LbieMesherTest, HexaVerticesStayInsideAVolumeTheSurfaceLeaves) {
   }
 }
 
+// Sampled at 17^3 in its [-1,1]^3 box, a sphere of radius 1.5 passes exactly through grid points
+// on the box's faces (8^2 + 4^2 + 8^2 = 12^2 in eighths). Where an edge ends on the far face at the
+// isovalue, Octree::interpRect3Dpts_x/y/z asked getVertGrad() for a point one plane off the grid,
+// and getValue() read up to about 1 KB past orig_vol. That was the access violation in compute_qef
+// that crashed HexaVerticesStayInsideAVolumeTheSurfaceLeaves now and then on Windows;
+// AddressSanitizer flags it on every run, for every mesh type. getVertGrad() now stays on the grid.
+// SINGLE extracts no surface from this sphere. QUAD is left out: polygonize_quad has its own
+// out-of-bounds read wherever a surface leaves the volume (r = 1.2 too), not fixed here.
+TEST_F(LbieMesherTest, MeshesASurfaceThroughGridPointsOnTheFarFaces) {
+  volume v = make_sphere_volume(ctx, 17, 1.5);
+  for (LBIE::geoframe::GEOTYPE mt : {LBIE::geoframe::TETRA, LBIE::geoframe::HEXA,
+                                     LBIE::geoframe::DOUBLE, LBIE::geoframe::TETRA2}) {
+    const bool interval = mt == LBIE::geoframe::DOUBLE || mt == LBIE::geoframe::TETRA2;
+    LBIE::geoframe g = run_do_mesh(v, 0.0f, interval ? -0.15f : 0.0f, kDefaultErr, kDefaultErrIn,
+                                   mt, LBIE::Mesher::NO_IMPROVE, 0, interval);
+    EXPECT_GT(g.numverts, 0) << "mesh type " << mt;
+    expect_geoframe_valid(g);
+    int bad_normal = 0;
+    for (size_t i = 0; i < g.normals.size(); ++i)
+      for (int j = 0; j < 3; ++j)
+        if (!std::isfinite(g.normals[i][j]))
+          ++bad_normal;
+    EXPECT_EQ(bad_normal, 0) << "mesh type " << mt << ": non-finite normals";
+  }
+}
+
 TEST_F(LbieMesherTest, HexaDoMeshGeoFlow) {
   volume v = make_sphere_volume(ctx, 17, 0.5);
   LBIE::geoframe g = run_do_mesh(v, 0.0f, 0.0f, kDefaultErr, kDefaultErrIn, LBIE::geoframe::HEXA,
