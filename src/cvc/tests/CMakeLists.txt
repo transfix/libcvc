@@ -109,6 +109,7 @@ add_executable(world_units_test world_units_test.cpp)
 add_executable(physics_world_test physics_world_test.cpp)
 add_executable(avatar_sim_test avatar_sim_test.cpp)
 add_executable(holon_test holon_test.cpp)
+add_executable(holon_sync_test holon_sync_test.cpp)
 add_executable(physics_field_test physics_field_test.cpp)
 add_executable(physics_vehicle_test physics_vehicle_test.cpp)
 add_executable(physics_energy_test physics_energy_test.cpp)
@@ -307,6 +308,7 @@ set(TEST_TARGETS
   physics_world_test
   avatar_sim_test
   holon_test
+  holon_sync_test
   physics_field_test
   physics_vehicle_test
   physics_energy_test
@@ -1658,6 +1660,13 @@ target_link_libraries(holon_test
     GTest::gtest_main
 )
 
+target_link_libraries(holon_sync_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(physics_vehicle_test
   PRIVATE
     cvc
@@ -2058,6 +2067,7 @@ target_compile_features(world_units_test PRIVATE cxx_std_17)
 target_compile_features(physics_world_test PRIVATE cxx_std_17)
 target_compile_features(avatar_sim_test PRIVATE cxx_std_17)
 target_compile_features(holon_test PRIVATE cxx_std_17)
+target_compile_features(holon_sync_test PRIVATE cxx_std_17)
 target_compile_features(physics_field_test PRIVATE cxx_std_17)
 target_compile_features(physics_vehicle_test PRIVATE cxx_std_17)
 target_compile_features(physics_energy_test PRIVATE cxx_std_17)
@@ -2515,6 +2525,7 @@ cvc_discover_tests(world_units_test)
 cvc_discover_tests(physics_world_test)
 cvc_discover_tests(avatar_sim_test)
 cvc_discover_tests(holon_test)
+cvc_discover_tests(holon_sync_test)
 cvc_discover_tests(physics_field_test)
 cvc_discover_tests(physics_vehicle_test)
 cvc_discover_tests(physics_energy_test)
