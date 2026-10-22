@@ -38,6 +38,16 @@ void predicted_avatar::predict(std::uint64_t tick, const avatar_intent &in, doub
 
 bool predicted_avatar::reconcile(const cvc::physics::body_state &authoritative,
                                  std::uint64_t server_tick, double dt, double tol) {
+  // A stale, duplicate or reordered ack (<= the highest tick we have already
+  // reconciled) is a no-op: acting on it would fail the lookup below (that tick
+  // was pruned), fall into the diverged branch, and snap the avatar back to an old
+  // authoritative state while discarding the inputs between the two acks. Only a
+  // strictly newer ack advances the reconciliation.
+  if (_acked && server_tick <= _last_acked)
+    return false;
+  _last_acked = server_tick;
+  _acked = true;
+
   // What did we predict AT server_tick? (null if we never predicted that tick --
   // e.g. the server is ahead of us, or that input was already acknowledged.)
   const logged *at = nullptr;

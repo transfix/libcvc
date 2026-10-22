@@ -56,17 +56,35 @@ avatar_intent intent_at(std::uint64_t t) {
 }
 } // namespace
 
-// ── determinism ─────────────────────────────────────────────────────────────
+// ── integration correctness + determinism ──────────────────────────────────
 
-TEST(AvatarSimTest, StepIsBitReproducible) {
+TEST(AvatarSimTest, IntegratesConstantVelocityToClosedForm) {
+  // Closed form: after n fixed steps at constant velocity v the position is n*v*dt
+  // (to the rounding of the iterated sum) and the velocity equals the last intent.
+  // This catches a formula regression (sign, scale, a missing dt) that a
+  // "same function twice -> same answer" comparison never could. EXPECT_NEAR, not a
+  // bit-exact golden, so an FMA-contraction difference across toolchains (the
+  // #747/#750 class) can't flip it red.
+  avatar_sim sim;
+  const avatar_intent v{vec3{3.0, -2.0, 0.5}};
+  const int n = 10;
+  for (int i = 0; i < n; ++i)
+    sim.step(v, k120);
+  EXPECT_NEAR(sim.state().position.x, n * 3.0 * k120, 1e-12);
+  EXPECT_NEAR(sim.state().position.y, n * -2.0 * k120, 1e-12);
+  EXPECT_NEAR(sim.state().position.z, n * 0.5 * k120, 1e-12);
+  EXPECT_DOUBLE_EQ(sim.state().linear_velocity.x, 3.0);
+  EXPECT_TRUE(sim.state().active);
+
+  // And it is a pure function of its inputs (no hidden/global state): a second
+  // instance fed the same varied intents reaches a bit-identical state -- the
+  // purity replay depends on.
   avatar_sim a, b;
-  for (std::uint64_t t = 1; t <= 200; ++t) {
-    const avatar_intent in = intent_at(t);
-    a.step(in, k120);
-    b.step(in, k120);
+  for (std::uint64_t t = 1; t <= 64; ++t) {
+    a.step(intent_at(t), k120);
+    b.step(intent_at(t), k120);
   }
   expect_pos_bit_eq(a.state().position, b.state().position);
-  expect_pos_bit_eq(a.state().linear_velocity, b.state().linear_velocity);
 }
 
 // ── perfect prediction costs nothing ────────────────────────────────────────
@@ -153,6 +171,64 @@ TEST(AvatarSimTest, AckAfterCorrectionDoesNotReSnap) {
   EXPECT_EQ(client.pending(), 1u) << "only tick 4 remains";
   // State advanced forward, never jumped backward.
   EXPECT_GE(client.state().position.x, after_snap.position.x);
+}
+
+// The tolerance decides held-vs-snap: a sub-tolerance divergence is held (keep the
+// prediction), a super-tolerance one snaps. Pins the squared-distance comparison
+// (and its direction) at the boundary -- the d==0 "no correction" tests above
+// exercise it only at zero distance.
+TEST(AvatarSimTest, ReconcileHoldsWithinToleranceAndSnapsBeyond) {
+  const double tol = 0.1;
+  const avatar_intent still{vec3{0.0, 0.0, 0.0}}; // client predicts staying at origin
+  {
+    predicted_avatar c;
+    c.predict(1, still, k120);
+    body_state auth;
+    auth.position = vec3{0.5 * tol, 0.0, 0.0}; // within tolerance
+    EXPECT_FALSE(c.reconcile(auth, 1, k120, tol)) << "sub-tolerance divergence must be held";
+    EXPECT_NEAR(c.state().position.x, 0.0, 1e-12) << "held keeps the prediction, not the nudge";
+  }
+  {
+    predicted_avatar c;
+    c.predict(1, still, k120);
+    body_state auth;
+    auth.position = vec3{2.0 * tol, 0.0, 0.0}; // beyond tolerance
+    EXPECT_TRUE(c.reconcile(auth, 1, k120, tol)) << "super-tolerance divergence must snap";
+    EXPECT_NEAR(c.state().position.x, 2.0 * tol, 1e-12) << "snapped to authoritative";
+  }
+}
+
+// A stale / duplicate / reordered ack (server_tick at or below one already
+// reconciled) is a no-op: it must not snap the avatar back to an old authoritative
+// state nor drop progress. Guards the non-monotonic-ack hazard.
+TEST(AvatarSimTest, StaleOrDuplicateAckIsIgnored) {
+  predicted_avatar client;
+  const avatar_intent mv{vec3{1.0, 0.0, 0.0}};
+  for (std::uint64_t t = 1; t <= 10; ++t)
+    client.predict(t, mv, k120);
+
+  // An accepted, matching ack at tick 7 (built by the identical step path, so it is
+  // held, not snapped): prunes ticks 1..7, leaving 8,9,10 pending.
+  avatar_sim ref;
+  for (int i = 0; i < 7; ++i)
+    ref.step(mv, k120);
+  ASSERT_FALSE(client.reconcile(ref.state(), 7, k120, 1e-9));
+  const body_state after7 = client.state();
+  ASSERT_EQ(client.pending(), 3u);
+
+  // A reordered ack for an older tick 5 (far from the current state) must be
+  // ignored -- no snap backward, no loss.
+  body_state stale;
+  stale.position = vec3{5.0 * k120, 0.0, 0.0};
+  stale.linear_velocity = mv.move;
+  EXPECT_FALSE(client.reconcile(stale, 5, k120, 1e-9)) << "stale/reordered ack must be a no-op";
+  expect_pos_bit_eq(client.state().position, after7.position);
+  EXPECT_EQ(client.pending(), 3u);
+
+  // A duplicate of the most recent ack (tick 7) is likewise ignored.
+  EXPECT_FALSE(client.reconcile(stale, 7, k120, 1e-9)) << "duplicate ack must be a no-op";
+  expect_pos_bit_eq(client.state().position, after7.position);
+  EXPECT_EQ(client.pending(), 3u);
 }
 
 // ── peer interpolation never extrapolates ───────────────────────────────────

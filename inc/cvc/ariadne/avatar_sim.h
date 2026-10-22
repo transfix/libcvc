@@ -90,9 +90,13 @@ public:
   // are expected monotonically increasing (the clock's quanta).
   void predict(std::uint64_t tick, const avatar_intent &in, double dt);
 
-  // Reconcile against an authoritative state valid as of `server_tick`
-  // (expected monotonically non-decreasing across calls). Returns true if a hard
-  // correction (snap + replay) was applied, false if the prediction already held.
+  // Reconcile against an authoritative state valid as of `server_tick`. Returns
+  // true if a hard correction (snap + replay) was applied, false if the prediction
+  // already held OR the ack was ignored. A `server_tick` at or below the highest
+  // one already reconciled is a no-op (returns false, touches nothing): a
+  // duplicate or reordered/stale ack -- which real datagram transports produce --
+  // must not snap the avatar back to an old authoritative state and discard
+  // progress, so only a strictly newer ack is acted on.
   bool reconcile(const cvc::physics::body_state &authoritative, std::uint64_t server_tick,
                  double dt, double tol);
 
@@ -108,6 +112,8 @@ private:
   };
   avatar_sim _sim;
   std::deque<logged> _log;
+  std::uint64_t _last_acked = 0; // highest server_tick reconciled; guards non-monotonic acks
+  bool _acked = false;           // whether _last_acked is meaningful yet
 };
 
 // Interpolate a NON-local peer avatar between its last two authoritative samples,
