@@ -15,6 +15,7 @@
 #include <cvc/state/distributed_state_session.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_blob_store.h>
+#include <cvc/state/state_change_journal.h> // state_mutation / state_mutation_op (echo test)
 #include <cvc/state/state_compression_registry.h>
 #include <cvc/state/state_data_hydrator.h>
 #include <gtest/gtest.h>
@@ -564,6 +565,63 @@ TEST(DistributedStateSession, TwoNodeValueTypeNamePreserved) {
   s1.detach();
   s2.detach();
   s3.detach();
+}
+
+// set_data echo-suppression (S5): §52 requires that applying a remote set_data must NOT re-emit a
+// set_data back toward the origin (no ping-pong). The mechanism is apply_remote's
+// thread_suppression_guard, which makes the dataChanged the apply triggers early-return instead of
+// journaling. Pin it: node2, which only APPLIES node1's data(), must emit zero local mutations, and
+// a quiescent re-pump must move nothing.
+TEST(DistributedStateSession, SetDataApplyDoesNotEcho) {
+  app a1, a2;
+
+  state_transport_inproc shared_transport;
+  state_cluster_shard s1(a1, "cluster", "node1");
+  state_cluster_shard s2(a2, "cluster", "node2");
+
+  // Count every LOCAL mutation node2 emits. The emit path fires on_local_mutation; apply_remote,
+  // under its suppression guard, does not. An applied set_data must produce none.
+  int b_local_setdata = 0, b_local_any = 0;
+  s2.adapter().set_on_local_mutation([&](const state_mutation &m) {
+    ++b_local_any;
+    if (m.op == state_mutation_op::set_data)
+      ++b_local_setdata;
+  });
+
+  s1.attach();
+  s2.attach();
+  shared_transport.register_shard(&s1);
+  shared_transport.register_shard(&s2);
+
+  state &n = state::instance(a1)("echo.n");
+  n.value(std::string("p1"));
+  n.value(std::string("p2"));
+  n.data(boost::any(int{123}));
+  n.data(boost::any(int{123}));
+
+  shared_transport.pump_all();
+
+  // node2 applied the data()...
+  const boost::any got = state::instance(a2)("echo.n").data();
+  ASSERT_FALSE(got.empty());
+  EXPECT_EQ(boost::any_cast<int>(got), 123);
+
+  // ...and emitted NOTHING locally in doing so (no echo, no ping-pong).
+  EXPECT_EQ(b_local_setdata, 0) << "applying a remote set_data re-emitted a set_data";
+  EXPECT_EQ(b_local_any, 0) << "node2 emitted a local mutation while only applying remote ones";
+  EXPECT_EQ(s2.adapter().local_mutation_count(), 0u);
+
+  // A quiescent re-pump moves nothing — an echo would surface here as an outbound mutation.
+  const std::size_t pumped2 = shared_transport.pump_all();
+  EXPECT_EQ(pumped2, 0u)
+      << "a set_data echo would surface as outbound mutations on the second pump";
+  EXPECT_EQ(b_local_setdata, 0);
+  EXPECT_EQ(boost::any_cast<int>(state::instance(a2)("echo.n").data()), 123);
+
+  shared_transport.unregister_shard(&s1);
+  shared_transport.unregister_shard(&s2);
+  s1.detach();
+  s2.detach();
 }
 
 // Cross-node stream DISCOVERY (Phase 10, PR5 — the control-plane payoff): a real stream opened on
