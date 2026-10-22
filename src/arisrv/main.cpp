@@ -26,6 +26,8 @@
 #include <cstring>
 #include <cvc/ariadne/conference/room_intrinsics.h>       // room_leave (retract a departed peer)
 #include <cvc/ariadne/conference/room_media_intrinsics.h> // room_relay_tick
+#include <cvc/ariadne/holon.h>                            // server-authoritative avatar holon (H1)
+#include <cvc/ariadne/holon_sync.h> // server_pump: intent -> holon -> authoritative pose
 #include <cvc/ariadne/stream/stream_relay.h>
 #include <cvc/core/app.h>
 #include <cvc/media/media_router.h> // protocol-agnostic media hub (WS + gRPC + future protocols)
@@ -150,6 +152,13 @@ int main(int argc, char **argv) {
 #if CVC_ENABLE_WS
   int reapticks = 0; // cadence for reaping ghost (navigated-away) connections
 #endif
+  // The server-authoritative avatar holon for this room (H1): each tick it reads
+  // every participant's proposed intent from the replicated tree, integrates it on
+  // its own clock, and writes the authoritative pose back (fanned to clients by the
+  // drain_local block below). The relay loop paces ~5 Hz, so the holon catches up
+  // several quanta per tick and clients interpolate between the ~5 Hz pose samples;
+  // a smoother authoritative rate is a later tuning (tick the holon on its own).
+  cvc::ariadne::holon server_holon(cvc::ariadne::holon_role::server);
   while (!g_stop.load()) {
 #if CVC_ENABLE_WS
     // Reap ghosts (~every second): a tab that navigated or reloaded away without a clean WebSocket
@@ -182,6 +191,9 @@ int main(int argc, char **argv) {
     }
 #endif
     cvc::ariadne::conference::room_relay_tick(app, room, relay, relayed);
+    // Advance the authoritative avatar holon and write each participant's pose. The
+    // pose writes are local shard mutations, fanned to clients by the drain below.
+    cvc::ariadne::server_pump(server_holon, app, room);
 #if CVC_ENABLE_WS
     // Fan the relay's OWN room-tree writes — the room_leave retractions queued above and
     // room_relay_tick's per-stream "ready" markers — out to EVERY client on BOTH transports. The

@@ -8,8 +8,11 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
+#include <cstdint>
+#include <cstdlib>               // strtod (room-set-intent numeric args)
 #include <cvc/ariadne/ariadne.h> // register_action_intrinsics
 #include <cvc/ariadne/conference/room_intrinsics.h>
+#include <cvc/ariadne/holon_sync.h>        // write_intent (room-set-intent verb)
 #include <cvc/core/app.h>                  // app.root()
 #include <cvc/state/state.h>               // cvc::state, SEPARATOR, findDescendant, children, value
 #include <cvc/state/state_cluster_shard.h> // default_for / local_node_id (the trust-all pid)
@@ -71,6 +74,18 @@ std::string get_str(const se::value_t *v, const std::string &def = std::string()
   if (v)
     if (const std::string *s = std::get_if<std::string>(&v->v))
       return *s;
+  return def;
+}
+// A number from a value_t arg (double / int64 / numeric string), for the pose/intent verbs.
+double get_num(const se::value_t *v, double def = 0.0) {
+  if (!v)
+    return def;
+  if (const double *d = std::get_if<double>(&v->v))
+    return *d;
+  if (const std::int64_t *i = std::get_if<std::int64_t>(&v->v))
+    return static_cast<double>(*i);
+  if (const std::string *s = std::get_if<std::string>(&v->v))
+    return std::strtod(s->c_str(), nullptr);
   return def;
 }
 se::value_t err(const std::string &msg) {
@@ -240,32 +255,30 @@ void register_room_intrinsics(cvc::app &app) {
         });
 
     // (room-roster ROOM) -> list of { pid name present }.
-    se::builtins::register_fn(env, "room-roster",
-                              [&app, doc](std::span<const se::value_t> args) -> se::value_t {
-                                if (!doc)
-                                  return err("room-roster: no document scope");
-                                room_table *tbl = doc_rooms(doc);
-                                if (!tbl)
-                                  return err("room-roster: internal: room-table slot unavailable");
-                                if (args.empty())
-                                  return err("room-roster: missing room handle or room-id");
-                                // Accept a (room-join) handle OR a bare room-id string, so an
-                                // N-party .ari can iterate with (room-roster (state-get
-                                // "conf.room")).
-                                room_handle *rh = tbl->find(handle_token(args[0]));
-                                const std::string room_id =
-                                    rh ? rh->room_id : handle_token(args[0]);
-                                if (room_id.empty())
-                                  return err(
-                                      "room-roster: ROOM must be a room-join handle or room-id");
-                                std::vector<se::value_t> list;
-                                for (const room_participant &p : room_roster(app, room_id))
-                                  list.push_back(se::make_dict({
-                                      {"pid", se::value_t(p.pid)},
-                                      {"name", se::value_t(p.name)},
-                                  }));
-                                return se::make_list(std::move(list));
-                              });
+    se::builtins::register_fn(
+        env, "room-roster", [&app, doc](std::span<const se::value_t> args) -> se::value_t {
+          if (!doc)
+            return err("room-roster: no document scope");
+          room_table *tbl = doc_rooms(doc);
+          if (!tbl)
+            return err("room-roster: internal: room-table slot unavailable");
+          if (args.empty())
+            return err("room-roster: missing room handle or room-id");
+          // Accept a (room-join) handle OR a bare room-id string, so an
+          // N-party .ari can iterate with (room-roster (state-get
+          // "conf.room")).
+          room_handle *rh = tbl->find(handle_token(args[0]));
+          const std::string room_id = rh ? rh->room_id : handle_token(args[0]);
+          if (room_id.empty())
+            return err("room-roster: ROOM must be a room-join handle or room-id");
+          std::vector<se::value_t> list;
+          for (const room_participant &p : room_roster(app, room_id))
+            list.push_back(se::make_dict({
+                {"pid", se::value_t(p.pid)},
+                {"name", se::value_t(p.name)},
+            }));
+          return se::make_list(std::move(list));
+        });
 
     // (room-leave ROOM) -> { ok #t/#f }.
     se::builtins::register_fn(env, "room-leave",
@@ -285,6 +298,28 @@ void register_room_intrinsics(cvc::app &app) {
                                 tbl->erase(token);
                                 return se::make_dict({{"ok", se::value_t(true)}});
                               });
+
+    // (room-set-intent HANDLE MOVE-X MOVE-Y MOVE-Z) -> { ok #t/#f }. The caller
+    // PROPOSES its own avatar's desired motion by writing only its own .intent.*
+    // (the server holon is the sole writer of the authoritative .pose). The handle
+    // supplies the caller's pid, so a client cannot propose for another participant.
+    se::builtins::register_fn(
+        env, "room-set-intent", [&app, doc](std::span<const se::value_t> args) -> se::value_t {
+          if (!doc)
+            return err("room-set-intent: no document scope");
+          room_table *tbl = doc_rooms(doc);
+          if (!tbl)
+            return err("room-set-intent: internal: room-table slot unavailable");
+          if (args.size() < 4)
+            return err("room-set-intent: (room-set-intent HANDLE MOVE-X MOVE-Y MOVE-Z)");
+          room_handle *rh = tbl->find(handle_token(args[0]));
+          if (!rh)
+            return err("room-set-intent: ROOM must be a room-join handle (needs the caller's pid)");
+          cvc::ariadne::avatar_intent in;
+          in.move = {get_num(&args[1]), get_num(&args[2]), get_num(&args[3])};
+          cvc::ariadne::write_intent(app, rh->room_id, rh->self_pid, in);
+          return se::make_dict({{"ok", se::value_t(true)}});
+        });
   });
 }
 

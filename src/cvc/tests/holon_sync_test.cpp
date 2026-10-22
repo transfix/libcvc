@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cvc/ariadne/avatar_sim.h>
+#include <cvc/ariadne/conference/room_intrinsics.h>
 #include <cvc/ariadne/holon.h>
 #include <cvc/ariadne/holon_sync.h>
 #include <cvc/core/app.h>
@@ -135,6 +136,59 @@ TEST(HolonSyncTest, ServerAuthoritativePoseReplicatesAndClientReconciles) {
     expect_pos_bit_eq(client.state(pid).position, server.state(pid).position);
   }
   EXPECT_GT(server.state(pid).position.x, 0.0);
+
+  tp.unregister_shard(&ss);
+  tp.unregister_shard(&cs);
+  ss.detach();
+  cs.detach();
+}
+
+// server_pump drives the whole roster: it reads each present participant's intent,
+// integrates the server holon, and writes each authoritative pose -- the loop
+// arisrv runs. (Injected dt so the step count is deterministic in a tight loop.)
+TEST(HolonSyncTest, ServerPumpIntegratesRosterFromIntents) {
+  cvc::app server_app, client_app;
+  cvc::state_transport_inproc tp;
+  cvc::state_cluster_shard ss(server_app, "conf", "server");
+  cvc::state_cluster_shard cs(client_app, "conf", "client");
+  ss.attach();
+  cs.attach();
+  tp.register_shard(&ss);
+  tp.register_shard(&cs);
+  const std::string room = "r";
+
+  // Two participants join and propose intent on the client side.
+  cvc::ariadne::conference::room_join(client_app, room, "A");
+  cvc::ariadne::conference::room_join(client_app, room, "B");
+  cvc::ariadne::write_intent(client_app, room, "A", avatar_intent{vec3{1.0, 0.0, 0.0}});
+  cvc::ariadne::write_intent(client_app, room, "B", avatar_intent{vec3{0.0, 2.0, 0.0}});
+  tp.pump_all(); // replicate the roster + intents to the server
+
+  holon server(holon_role::server);
+  const double dt = server.clock().fixed_dt();
+  for (int frame = 0; frame < 5; ++frame) {
+    cvc::ariadne::server_pump(server, server_app, room, dt);
+    tp.pump_all();
+  }
+
+  // The server integrated each avatar from its own intent and wrote authoritative
+  // poses, tagged with the holon tick.
+  body_state pa, pb;
+  std::uint64_t ta = 0, tb = 0;
+  ASSERT_TRUE(cvc::ariadne::read_pose(server_app, room, "A", pa, ta));
+  ASSERT_TRUE(cvc::ariadne::read_pose(server_app, room, "B", pb, tb));
+  EXPECT_GT(pa.position.x, 0.0) << "A moved +x per its intent";
+  EXPECT_DOUBLE_EQ(pa.position.y, 0.0);
+  EXPECT_GT(pb.position.y, 0.0) << "B moved +y per its intent";
+  EXPECT_DOUBLE_EQ(pb.position.x, 0.0);
+  EXPECT_EQ(ta, server.tick());
+
+  // And the authoritative poses replicate back to the client.
+  tp.pump_all();
+  body_state ca;
+  std::uint64_t ct = 0;
+  ASSERT_TRUE(cvc::ariadne::read_pose(client_app, room, "A", ca, ct));
+  EXPECT_GT(ca.position.x, 0.0);
 
   tp.unregister_shard(&ss);
   tp.unregister_shard(&cs);

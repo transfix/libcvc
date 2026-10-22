@@ -15,7 +15,8 @@
 
 #include <cstdio>
 #include <cstdlib>
-#include <cvc/ariadne/conference/room_intrinsics.h> // room_participant_path
+#include <cvc/ariadne/conference/room_intrinsics.h> // room_participant_path, room_roster
+#include <cvc/ariadne/holon.h>                      // cvc::ariadne::holon (server_pump)
 #include <cvc/ariadne/holon_sync.h>
 #include <cvc/core/app.h>
 #include <cvc/physics/types.h> // vec3, quat
@@ -124,6 +125,25 @@ bool read_intent(cvc::app &app, const std::string &room, const std::string &pid,
               read_double(app, leaf(room, pid, {"intent", "move", "y"})),
               read_double(app, leaf(room, pid, {"intent", "move", "z"}))};
   return true;
+}
+
+void server_pump(holon &h, cvc::app &app, const std::string &room, double wall_dt) {
+  // The present participants, straight from the replicated room tree.
+  const std::vector<conference::room_participant> roster = conference::room_roster(app, room);
+  // Add any newcomer, then feed each one's latest proposed intent to the holon.
+  for (const conference::room_participant &p : roster) {
+    if (!h.has_participant(p.pid))
+      h.add_participant(p.pid);
+    avatar_intent in;
+    if (read_intent(app, room, p.pid, in))
+      h.set_intent(p.pid, in);
+  }
+  // One authoritative frame.
+  h.advance(wall_dt);
+  // Publish each participant's authoritative pose (these are local writes on the
+  // relay's shard; the caller fans them to the clients).
+  for (const conference::room_participant &p : roster)
+    write_pose(app, room, p.pid, h.state(p.pid), h.tick());
 }
 
 } // namespace ariadne
