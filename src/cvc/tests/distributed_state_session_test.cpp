@@ -518,6 +518,54 @@ TEST(DistributedStateSession, TwoNodeSnapshotDataMetadataReassembly) {
   s2.detach();
 }
 
+// value() type_name survives replication (S2): the valueChanged emit already carries
+// n.valueTypeName(), but apply_remote::set_value stamped "std::string" and shard.snapshot() never
+// captured the value type, so a typed value lost its declared type both on a live peer and on a
+// snapshot resync. apply + snapshot now preserve it.
+TEST(DistributedStateSession, TwoNodeValueTypeNamePreserved) {
+  app a1, a2, a3;
+
+  state_transport_inproc shared_transport;
+  state_cluster_shard s1(a1, "cluster", "node1");
+  state_cluster_shard s2(a2, "cluster", "node2");
+  s1.attach();
+  s2.attach();
+  shared_transport.register_shard(&s1);
+  shared_transport.register_shard(&s2);
+
+  // A typed (int) value: value<T> records valueTypeName = dataTypeName<int>() = "int"; the string
+  // setter would stamp "std::string". Set twice (first write consumed on node creation).
+  state &n1 = state::instance(a1)("typed.count");
+  n1.value(7);
+  n1.value(8);
+  ASSERT_EQ(n1.valueTypeName(), "int");
+
+  shared_transport.pump_all();
+
+  // LIVE apply: the peer keeps both the string form AND the declared type.
+  EXPECT_EQ(state::instance(a2)("typed.count").value(), "8");
+  EXPECT_EQ(state::instance(a2)("typed.count").valueTypeName(), "int")
+      << "value type_name dropped on live apply";
+
+  // SNAPSHOT resync: a late joiner reconstructs the declared type too (direct snapshot+ingest, the
+  // join path without a transport).
+  state_cluster_shard s3(a3, "cluster", "node3");
+  s3.attach();
+  const std::vector<state_cluster_shard::snapshot_entry> snap = s1.snapshot(std::string());
+  ASSERT_FALSE(snap.empty());
+  for (const auto &e : snap)
+    s3.ingest_snapshot_entry(e);
+  EXPECT_EQ(state::instance(a3)("typed.count").value(), "8");
+  EXPECT_EQ(state::instance(a3)("typed.count").valueTypeName(), "int")
+      << "value type_name dropped on snapshot resync";
+
+  shared_transport.unregister_shard(&s1);
+  shared_transport.unregister_shard(&s2);
+  s1.detach();
+  s2.detach();
+  s3.detach();
+}
+
 // Cross-node stream DISCOVERY (Phase 10, PR5 — the control-plane payoff): a real stream opened on
 // one node publishes its format_desc into the /streams/<id> descriptor node's data(); with the
 // stream codec registered on both shards, that descriptor replicates so a remote node discovers the

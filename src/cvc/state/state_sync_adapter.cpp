@@ -335,6 +335,11 @@ bool state_sync_adapter::apply_remote(const state_mutation &m) {
   switch (m.op) {
   case state_mutation_op::set_value:
     node.value(m.string_value);
+    // Preserve the source value's declared type: value(const std::string&) stamps "std::string",
+    // but the emit carried the real type (valueChanged sends m.type_name = n.valueTypeName()). The
+    // setter is signal-free and we are under the suppression guard, so this does not re-journal.
+    if (!m.type_name.empty())
+      node.valueTypeName(m.type_name);
     break;
   case state_mutation_op::set_comment:
     node.comment(m.string_value);

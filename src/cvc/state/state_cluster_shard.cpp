@@ -697,6 +697,7 @@ state_cluster_shard::snapshot(const std::string &path_prefix) const {
     snapshot_entry e;
     e.path = child_path;
     e.string_value = node.value();
+    e.type_name = node.valueTypeName(); // the value's declared type, so it survives a resync
     e.comment = node.comment();
     e.hidden = node.hidden();
     e.read_only = node.readOnly();
@@ -744,7 +745,17 @@ void state_cluster_shard::ingest_snapshot_entry(const snapshot_entry &e) {
   };
 
   // value() always (also creates the node on the joiner, matching the source even when empty).
-  apply_scalar(state_mutation_op::set_value, e.string_value);
+  // Carry the declared value type too (apply_remote honors m.type_name on set_value), so a typed
+  // read on the joiner sees the source type rather than the "std::string" the string setter stamps.
+  {
+    state_mutation m;
+    m.cluster_id = _cluster_id;
+    m.path = e.path;
+    m.op = state_mutation_op::set_value;
+    m.string_value = e.string_value;
+    m.type_name = e.type_name;
+    _adapter->apply_remote(m);
+  }
 
   // Metadata: apply only the non-default flags (a fresh joiner's nodes start at the defaults).
   if (!e.comment.empty())
