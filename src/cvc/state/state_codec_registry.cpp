@@ -9,6 +9,7 @@
 */
 
 #include <boost/any.hpp>
+#include <boost/cstdint.hpp>
 #include <cstdint>
 #include <cstring>
 #include <cvc/state/state_codec_registry.h>
@@ -189,6 +190,61 @@ void state_codec_registry::register_builtin_codecs() {
         return boost::any(std::string(b.begin(), b.end()));
       },
       "cvc.str.v1");
+
+  // Integer data() under the app's REGISTERED spellings. state::dataTypeName() returns the name
+  // app::registerDefaultTypes gave the type — "int", "unsigned int", "unsigned short", "int64",
+  // "uint64" — NOT the C++ "_t" spellings the codecs above are keyed under. Without these aliases,
+  // _codecs->encode()/decode() miss for an integer data(), the exception is swallowed in the sync
+  // adapter, and the integer object silently fails to replicate (value() + structure still flow).
+  // Each alias any_casts the EXACT stored type (boost::any_cast is exact-typeid, not conversion):
+  // "int64"/"uint64" are boost::int64_t/uint64_t (cvc::int64/uint64 in core/types.h). float,
+  // double, std::string and bool already match the app's spelling and need no alias.
+  register_codec(
+      "int", [](const boost::any &v) { return encode_pod<int>(boost::any_cast<int>(v)); },
+      [](const std::vector<unsigned char> &b) -> boost::any {
+        return boost::any(decode_pod<int>(b));
+      },
+      "cvc.int.v1");
+
+  register_codec(
+      "unsigned int",
+      [](const boost::any &v) {
+        return encode_pod<unsigned int>(boost::any_cast<unsigned int>(v));
+      },
+      [](const std::vector<unsigned char> &b) -> boost::any {
+        return boost::any(decode_pod<unsigned int>(b));
+      },
+      "cvc.uint.v1");
+
+  register_codec(
+      "unsigned short",
+      [](const boost::any &v) {
+        return encode_pod<unsigned short>(boost::any_cast<unsigned short>(v));
+      },
+      [](const std::vector<unsigned char> &b) -> boost::any {
+        return boost::any(decode_pod<unsigned short>(b));
+      },
+      "cvc.ushort.v1");
+
+  register_codec(
+      "int64",
+      [](const boost::any &v) {
+        return encode_pod<boost::int64_t>(boost::any_cast<boost::int64_t>(v));
+      },
+      [](const std::vector<unsigned char> &b) -> boost::any {
+        return boost::any(decode_pod<boost::int64_t>(b));
+      },
+      "cvc.int64.v1");
+
+  register_codec(
+      "uint64",
+      [](const boost::any &v) {
+        return encode_pod<boost::uint64_t>(boost::any_cast<boost::uint64_t>(v));
+      },
+      [](const std::vector<unsigned char> &b) -> boost::any {
+        return boost::any(decode_pod<boost::uint64_t>(b));
+      },
+      "cvc.uint64.v1");
 }
 
 } // namespace cvc

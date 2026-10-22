@@ -3,6 +3,8 @@
   Tests for the distributed_state_session convenience API.
 */
 
+#include <boost/any.hpp>
+#include <boost/cstdint.hpp>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -182,6 +184,72 @@ TEST(DistributedStateSession, TwoNodeInprocDataReplication) {
   state::instance(a1)("plain.value").value(std::string("v2"));
   shared_transport.pump_all();
   EXPECT_EQ(state::instance(a2)("plain.value").value(), "v2");
+
+  shared_transport.unregister_shard(&s1);
+  shared_transport.unregister_shard(&s2);
+  s1.detach();
+  s2.detach();
+}
+
+// data() replication of the builtin integer scalars (regression for the codec-key name mismatch):
+// register_builtin_codecs must key integer codecs under the SAME spellings state::dataTypeName()
+// returns — the app::registerDefaultTypes names "int" / "unsigned int" / "unsigned short" / "int64"
+// / "uint64", NOT the C++ "int32_t"/... spellings — or an integer data() silently fails to
+// replicate (its encode throws "no codec", is swallowed in the sync adapter) while value() and
+// child structure still flow. No manual codec registration here: these are builtin codecs the shard
+// ctor installs, and registerDefaultTypes already names the types.
+TEST(DistributedStateSession, TwoNodeInprocIntegerDataReplication) {
+  app a1, a2;
+
+  state_transport_inproc shared_transport;
+  state_cluster_shard s1(a1, "cluster", "node1");
+  state_cluster_shard s2(a2, "cluster", "node2");
+  s1.attach();
+  s2.attach();
+  shared_transport.register_shard(&s1);
+  shared_transport.register_shard(&s2);
+
+  // data() has no equality guard (unlike value()), so a plain double-write beats the creation-
+  // consume of a fresh node's first signal.
+  {
+    state &n = state::instance(a1)("nums.i");
+    n.value(std::string("p1"));
+    n.value(std::string("p2"));
+    n.data(boost::any(int{42}));
+    n.data(boost::any(int{42}));
+    EXPECT_EQ(n.dataTypeName(), "int") << "app int spelling changed; update the codec alias key";
+  }
+  {
+    state &n = state::instance(a1)("nums.i64");
+    n.value(std::string("p1"));
+    n.value(std::string("p2"));
+    n.data(boost::any(boost::int64_t{-9000000000LL}));
+    n.data(boost::any(boost::int64_t{-9000000000LL}));
+    EXPECT_EQ(n.dataTypeName(), "int64")
+        << "app int64 spelling changed; update the codec alias key";
+  }
+  {
+    state &n = state::instance(a1)("nums.u64");
+    n.value(std::string("p1"));
+    n.value(std::string("p2"));
+    n.data(boost::any(boost::uint64_t{18000000000ULL}));
+    n.data(boost::any(boost::uint64_t{18000000000ULL}));
+    EXPECT_EQ(n.dataTypeName(), "uint64") << "app uint64 spelling changed; update the codec alias";
+  }
+
+  shared_transport.pump_all();
+
+  const boost::any gi = state::instance(a2)("nums.i").data();
+  ASSERT_FALSE(gi.empty()) << "int data() did not replicate (codec key mismatch regressed?)";
+  EXPECT_EQ(boost::any_cast<int>(gi), 42);
+
+  const boost::any g64 = state::instance(a2)("nums.i64").data();
+  ASSERT_FALSE(g64.empty()) << "int64 data() did not replicate";
+  EXPECT_EQ(boost::any_cast<boost::int64_t>(g64), boost::int64_t{-9000000000LL});
+
+  const boost::any gu64 = state::instance(a2)("nums.u64").data();
+  ASSERT_FALSE(gu64.empty()) << "uint64 data() did not replicate";
+  EXPECT_EQ(boost::any_cast<boost::uint64_t>(gu64), boost::uint64_t{18000000000ULL});
 
   shared_transport.unregister_shard(&s1);
   shared_transport.unregister_shard(&s2);
