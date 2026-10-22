@@ -970,6 +970,36 @@ TEST(NavPlant, ReachOnPlantIsRepeatable) {
   EXPECT_THROW(reach_on_plant(p, sc, rr, kCityL, o), std::invalid_argument);
 }
 
+// Local goals (plant_reach_options::goal_max): reach scored to goals near their starts, which
+// the same policy reaches more of in the same ticks than goals across the map. It repeats as the
+// default does, one seed at a time or all at once, and an inverted range is refused.
+TEST(NavPlant, ReachOnPlantWithLocalGoals) {
+  REQUIRE_JOLT();
+  const cvc::nav::training_scene sc = cvc::nav::city_scene(96);
+  const vehicle_desc rr = vehicle_desc::roboracer();
+  const cvc::nav::coef_mlp p = cvc::nav::coef_mlp::default_biased();
+  plant_reach_options o;
+  o.agents = 16;
+  o.ticks = 150;
+  o.seeds = {100u, 101u, 102u};
+  o.threads = 1;
+  const double across = reach_on_plant(p, sc, rr, kCityL, o);
+  o.goal_min = 0.5f; // 4.6..14 m at the RoboRacer's scale
+  o.goal_max = 1.5f;
+  std::vector<double> a, b;
+  const double ma = reach_on_plant(p, sc, rr, kCityL, o, &a);
+  o.threads = 0;
+  const double mb = reach_on_plant(p, sc, rr, kCityL, o, &b);
+  EXPECT_EQ(a, b);
+  EXPECT_EQ(ma, mb);
+  EXPECT_GT(ma, across) << "goals within reach of their starts should be reached more";
+  std::printf("  reach_on_plant, %d agents x %d ticks, seeds 100-102: goals across the map %.3f, "
+              "%.1f..%.1f from their starts %.3f (%.3f %.3f %.3f)\n",
+              o.agents, o.ticks, across, o.goal_min, o.goal_max, ma, a[0], a[1], a[2]);
+  o.goal_min = 2.0f;
+  EXPECT_THROW(reach_on_plant(p, sc, rr, kCityL, o), std::invalid_argument);
+}
+
 // The gate (the vehicle-physics plan's P8b): over >= 20 paired seeds on the Jolt plant, a policy
 // trained through the dynamic vehicle should beat the one trained on the point-mass surrogate,
 // with a 95% bootstrap CI. This reports the comparison; it is a heavy run (the "Convergence"
