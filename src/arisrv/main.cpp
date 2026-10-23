@@ -26,6 +26,7 @@
 #include <cstring>
 #include <cvc/ariadne/conference/room_intrinsics.h>       // room_leave (retract a departed peer)
 #include <cvc/ariadne/conference/room_media_intrinsics.h> // room_relay_tick
+#include <cvc/ariadne/conference/room_scene.h> // seed_default_scene (the shared 3D scene)
 #include <cvc/ariadne/holon.h>                            // server-authoritative avatar holon (H1)
 #include <cvc/ariadne/holon_sync.h> // server_pump: intent -> holon -> authoritative pose
 #include <cvc/ariadne/stream/stream_relay.h>
@@ -159,6 +160,16 @@ int main(int argc, char **argv) {
   // several quanta per tick and clients interpolate between the ~5 Hz pose samples;
   // a smoother authoritative rate is a later tuning (tick the holon on its own).
   cvc::ariadne::holon server_holon(cvc::ariadne::holon_role::server);
+  // The shared 3D scene (H1 slice 5, roadmap §5g): the relay is its sole writer and seeds the MVP
+  // environment (ground + grid + a reference box) once. The writes are local shard mutations, so
+  // the first pass of the loop below fans them to the clients, and late joiners get them in the
+  // snapshot.
+  if (cvc::ariadne::conference::seed_default_scene(app, room)) {
+    const auto rev = cvc::ariadne::conference::scene_revision(app, room);
+    std::printf("[arisrv] seeded the shared scene for room '%s' (rev %llu)\n", room.c_str(),
+                static_cast<unsigned long long>(rev));
+    std::fflush(stdout);
+  }
   while (!g_stop.load()) {
 #if CVC_ENABLE_WS
     // Reap ghosts (~every second): a tab that navigated or reloaded away without a clean WebSocket
