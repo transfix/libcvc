@@ -258,11 +258,15 @@ TEST(HolonSyncTest, ClientPumpPredictsSelfAndWalksPeersSmoothly) {
   EXPECT_LE(b.tick() > server.tick() ? b.tick() - server.tick() : server.tick() - b.tick(),
             static_cast<std::uint64_t>(kServerEvery));
 
-  // A participant who leaves is dropped from the replicas.
+  // A participant who leaves is dropped from the replicas, and from the server holon.
+  ASSERT_TRUE(server.has_participant("B"));
   cvc::ariadne::conference::room_leave(b_app, room, "B");
   tp.pump_all();
   cvc::ariadne::client_pump(a, a_app, room, "A", dt);
   EXPECT_FALSE(a.has_participant("B"));
+  cvc::ariadne::server_pump(server, server_app, room, dt);
+  EXPECT_FALSE(server.has_participant("B")) << "the server stops integrating a departed avatar";
+  EXPECT_TRUE(server.has_participant("A"));
 
   for (cvc::state_cluster_shard *s : {&ss, &as, &bs}) {
     tp.unregister_shard(s);

@@ -149,6 +149,14 @@ void server_pump(holon &h, cvc::app &app, const std::string &room, double wall_d
     if (read_intent(app, room, p.pid, in))
       h.set_intent(p.pid, in);
   }
+  // Drop anyone who left (room_leave): the holon stops integrating them, and a later rejoin under
+  // the same id respawns them on the ring rather than wherever a stale intent carried them.
+  std::set<std::string> present;
+  for (const conference::room_participant &p : roster)
+    present.insert(p.pid);
+  for (const std::string &pid : h.participants())
+    if (!present.count(pid))
+      h.remove_participant(pid);
   // One authoritative frame.
   h.advance(wall_dt);
   // Publish each participant's authoritative pose (these are local writes on the

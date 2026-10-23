@@ -18,6 +18,7 @@
 #include <cvc/media/media_endpoint.h> // media_frame + the media_router plug-in surface
 #include <cvc/state/state_blob_store.h>
 #include <cvc/state/state_transport.h>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -162,6 +163,14 @@ public:
   void set_relay(bool enable) noexcept { _relay.store(enable, std::memory_order_relaxed); }
   bool relay() const noexcept { return _relay.load(std::memory_order_relaxed); }
 
+  // Invoked (on a server RPC thread) when a peer's stream ENDS -- it closed or dropped its
+  // connection -- with that peer's node id (from its Hello). The same contract as
+  // state_transport_ws::set_on_connection_closed, so a relay retracts a departed native client from
+  // the room exactly as it does a closed browser tab. Not called during stop(), nor for a stream
+  // that never sent a Hello. The handler must be thread-safe.
+  using connection_closed_fn = std::function<void(const std::string &node_id)>;
+  void set_on_connection_closed(connection_closed_fn cb) { _on_conn_closed = std::move(cb); }
+
   // ── Media plane (carried as the Frame envelope's MediaFrame, same as the WS transport) ──
   // publish_media_frame sends a frame to this transport's connections; a relay's media_router fans
   // each received frame back out via fan_media(). set_on_media is the leaf subscribe sugar. Media
@@ -242,6 +251,9 @@ public:
   // older ones being replayed.
   void admit_connection(const std::shared_ptr<connection> &conn);
   void unregister_connection(connection *conn);
+  // A server-side stream ended: fire the connection-closed handler for its peer (see
+  // set_on_connection_closed).
+  void notify_connection_closed(const std::string &node_id);
   void increment_recv_frames() noexcept { _recv_frames.fetch_add(1, std::memory_order_relaxed); }
   void increment_recv_mutations() noexcept {
     _recv_mutations.fetch_add(1, std::memory_order_relaxed);
@@ -280,6 +292,7 @@ private:
 
   std::atomic<bool> _backfill_on_connect{true};
   std::atomic<bool> _relay{false};
+  connection_closed_fn _on_conn_closed; // set before start(); read on RPC threads
 
   std::atomic<std::uint64_t> _backfilled{0};
   std::atomic<std::uint64_t> _published{0};

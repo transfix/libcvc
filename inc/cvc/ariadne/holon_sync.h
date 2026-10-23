@@ -84,8 +84,8 @@ bool read_intent(cvc::app &app, const std::string &room, const std::string &pid,
 // read its proposed .intent, feed it to the holon; advance the holon one frame;
 // then write every participant's authoritative .pose + .server_tick back to the
 // tree (which replicates to the clients). The caller supplies the server holon
-// and calls this once per relay tick. A departed participant simply stops
-// receiving intent/pose updates (reaping its holon slot is a follow-up). wall_dt
+// and calls this once per relay tick. A participant who left (room_leave) is dropped
+// from the holon, so a rejoin respawns on the spawn ring. wall_dt
 // is forwarded to holon::advance: the default (-1) measures real elapsed wall time
 // (what the relay wants); a test injects a fixed dt for a deterministic step count.
 void server_pump(holon &h, cvc::app &app, const std::string &room, double wall_dt = -1.0);

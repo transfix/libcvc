@@ -332,6 +332,7 @@ public:
 
     conn->alive.store(false);
     _owner->unregister_connection(conn.get());
+    _owner->notify_connection_closed(conn->remote_node_id);
     return grpc::Status::OK;
   }
 
@@ -533,6 +534,12 @@ bool state_transport_grpc::connect_to_peer(const std::string &target,
   // backfill, all under this connection's write mutex.
   admit_connection(conn);
   return true;
+}
+
+void state_transport_grpc::notify_connection_closed(const std::string &node_id) {
+  // stop() clears _running before it cancels the streams, so a shutdown never reports departures.
+  if (_running.load() && _on_conn_closed && !node_id.empty())
+    _on_conn_closed(node_id);
 }
 
 void state_transport_grpc::stop() {

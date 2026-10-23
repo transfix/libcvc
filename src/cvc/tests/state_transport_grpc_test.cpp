@@ -529,6 +529,38 @@ TEST(StateTransportGrpcTest, BlobPayloadRoundTrip) {
   tB.stop();
 }
 
+// A relay learns when a peer's stream ends, with the peer's node id (the WS transport's contract),
+// so it can retract a departed native client from the room; its own shutdown reports nothing.
+TEST(StateTransportGrpcTest, ConnectionClosedReportsThePeersNodeId) {
+  cvc::state_transport_grpc relay, client;
+  std::mutex mu;
+  std::vector<std::string> closed;
+  relay.set_on_connection_closed([&](const std::string &node_id) {
+    std::lock_guard<std::mutex> lk(mu);
+    closed.push_back(node_id);
+  });
+  relay.start("127.0.0.1:0", "relay", "C");
+  client.start("127.0.0.1:0", "alice", "C");
+  ASSERT_TRUE(client.connect_to_peer(relay.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_connected(client, relay, std::chrono::milliseconds(2000)));
+
+  client.stop(); // alice leaves
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  for (;;) {
+    {
+      std::lock_guard<std::mutex> lk(mu);
+      if (!closed.empty())
+        break;
+    }
+    ASSERT_LT(std::chrono::steady_clock::now(), deadline) << "no connection-closed report";
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  relay.stop();
+  std::lock_guard<std::mutex> lk(mu);
+  ASSERT_EQ(closed.size(), 1u) << "reported once, and not again on the relay's own stop()";
+  EXPECT_EQ(closed[0], "alice");
+}
+
 TEST(StateTransportGrpcTest, DisconnectAfterStop) {
   cvc::state_transport_grpc tA, tB;
   tA.start("127.0.0.1:0", "A", "C");

@@ -298,6 +298,7 @@ struct ConferenceSession {
   std::unique_ptr<gla::room_view> room_view_;
   cvc::gl::CameraController *cam_ = nullptr;
   cvc::ariadne::avatar_intent last_intent_; // the last intent proposed (propose only on change)
+  bool intent_proposed_ = false;            // proposed once yet (the first frame always proposes)
   bool framed_ = false;                     // camera framed on our avatar once
   double orbit_center_[3] = {0.0, 0.0, 0.0};
   static constexpr double kWalkSpeed = 2.0; // m/s
@@ -556,10 +557,13 @@ struct ConferenceSession {
       in = gla::intent_from_keys(held("w", "Up"), held("s", "Down"), held("a", "Left"),
                                  held("d", "Right"), eye, focal, kWalkSpeed);
     }
-    if (in.move.x != last_intent_.move.x || in.move.y != last_intent_.move.y ||
+    // Propose on the first frame even when standing still, so the tree never holds a walk an
+    // earlier session under this id proposed; after that, only on change (a replicated write).
+    if (!intent_proposed_ || in.move.x != last_intent_.move.x || in.move.y != last_intent_.move.y ||
         in.move.z != last_intent_.move.z) {
-      cvc::ariadne::propose_intent(*holon_, *app_, room_, pid_, in); // a replicated write
+      cvc::ariadne::propose_intent(*holon_, *app_, room_, pid_, in);
       last_intent_ = in;
+      intent_proposed_ = true;
     }
     // Re-assert it locally every frame: our avatar joins the holon only once our room-join is in
     // the tree, so an intent proposed before then must still reach the prediction.

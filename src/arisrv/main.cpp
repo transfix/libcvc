@@ -23,6 +23,7 @@
 #include <csignal>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib> // std::getenv (CVC_ARISRV_ROOM_DEBUG)
 #include <cstring>
 #include <cvc/ariadne/conference/room_intrinsics.h>       // room_leave (retract a departed peer)
 #include <cvc/ariadne/conference/room_media_intrinsics.h> // room_relay_tick
@@ -74,9 +75,22 @@ int main(int argc, char **argv) {
 
   cvc::app app;
 
+  // Presence: when a client's connection ends -- a native (gRPC) client exits, or a browser (WS)
+  // tab closes -- retract it from the room so the roster and the avatar holon do not accumulate
+  // ghosts. Both transports report the departed node id the same way, on their own threads, so the
+  // id is only queued here; the main loop below applies room_leave (where every other room-tree
+  // write happens) and the retraction rides the normal pump + relay forwarding to the others.
+  std::mutex departed_mu;
+  std::vector<std::string> departed;
+  const auto on_departed = [&](const std::string &node_id) {
+    std::lock_guard<std::mutex> lk(departed_mu);
+    departed.push_back(node_id);
+  };
+
   // Room-tree (state) plane: serve + RELAY (forward frames between clients). The shard ingests the
   // room tree into app.root() so the media relay below can watch it.
   cvc::state_transport_grpc state_tp;
+  state_tp.set_on_connection_closed(on_departed);
   state_tp.start(stateListen, nodeId, "conf");
   state_tp.set_relay(true);
   cvc::state_cluster_shard shard(app, "conf", nodeId);
@@ -98,23 +112,12 @@ int main(int argc, char **argv) {
   // stream-descriptor mutations cross both ways now; request_snapshot over WS for a late joiner's
   // full bootstrap is Phase 2 (a browser joining a populated room sees peers that join AFTER it).
   cvc::state_transport_ws ws_tp;
+  ws_tp.set_on_connection_closed(on_departed); // a closed browser tab leaves like a native client
   ws_tp.start(wsListen, nodeId, "conf");
   ws_tp.set_relay(true);
   ws_tp.register_shard(&shard);
   state_tp.set_bridge(&ws_tp);
   ws_tp.set_bridge(&state_tp);
-
-  // Presence: when a browser (WS) client closes its tab, retract it from the room so the roster
-  // does not accumulate ghosts of closed tabs. The close fires on a WS reader thread, so just queue
-  // the departed node id here and apply room_leave on the main loop below (where every other
-  // room-tree write happens), then the retraction rides the normal pump + relay forwarding to the
-  // others.
-  std::mutex departed_mu;
-  std::vector<std::string> departed;
-  ws_tp.set_on_connection_closed([&](const std::string &node_id) {
-    std::lock_guard<std::mutex> lk(departed_mu);
-    departed.push_back(node_id);
-  });
 #endif
 
   // Media plane: a stream_relay. Constructed BEFORE media_tp.start() (it installs the frame
@@ -160,6 +163,10 @@ int main(int argc, char **argv) {
   // several quanta per tick and clients interpolate between the ~5 Hz pose samples;
   // a smoother authoritative rate is a later tuning (tick the holon on its own).
   cvc::ariadne::holon server_holon(cvc::ariadne::holon_role::server);
+  const char *room_debug_env = std::getenv("CVC_ARISRV_ROOM_DEBUG");
+  const bool room_debug =
+      room_debug_env && *room_debug_env && std::strcmp(room_debug_env, "0") != 0;
+  int room_debug_ticks = 0;
   // The shared 3D scene (H1 slice 5, roadmap §5g): the relay is its sole writer and seeds the MVP
   // environment (ground + a reference box under a sun) once. The writes are local shard mutations,
   // so the first pass of the loop below fans them to the clients, and late joiners get them in the
@@ -185,8 +192,12 @@ int main(int argc, char **argv) {
       // server-authoritative room+scene tree rides on.
       ws_tp.broadcast_snapshot();
     }
-    // Apply any queued departures (a browser tab closed) before pumping, so each retraction goes
-    // out to the remaining clients this tick.
+#endif
+    // Apply any queued departures (a native client exited or a browser tab closed) before pumping,
+    // so each retraction goes out to the remaining clients this tick. The departed participant's
+    // proposed intent is zeroed too: the server holon drops them now (server_pump follows the
+    // roster), and a client that rejoins under the same id must not resume a walk it proposed
+    // before it left.
     {
       std::vector<std::string> gone;
       {
@@ -195,16 +206,35 @@ int main(int argc, char **argv) {
       }
       for (const std::string &nid : gone) {
         cvc::ariadne::conference::room_leave(app, room, nid);
+        cvc::ariadne::write_intent(app, room, nid, cvc::ariadne::avatar_intent{});
         std::printf("[arisrv] participant left: %s\n", nid.c_str());
       }
       if (!gone.empty())
         std::fflush(stdout);
     }
-#endif
     cvc::ariadne::conference::room_relay_tick(app, room, relay, relayed);
     // Advance the authoritative avatar holon and write each participant's pose. The
     // pose writes are local shard mutations, fanned to clients by the drain below.
     cvc::ariadne::server_pump(server_holon, app, room);
+    // CVC_ARISRV_ROOM_DEBUG=1: every ~5 s, log the room as the server holds it -- each present
+    // participant's authoritative position and its proposed intent -- so replication across the
+    // gRPC and WebSocket planes can be checked from the relay without a client.
+    if (room_debug && ++room_debug_ticks % 25 == 0) {
+      const auto roster = cvc::ariadne::conference::room_roster(app, room);
+      std::printf("[arisrv] room '%s': %zu present, holon tick %llu\n", room.c_str(), roster.size(),
+                  static_cast<unsigned long long>(server_holon.tick()));
+      for (const auto &p : roster) {
+        cvc::physics::body_state s;
+        std::uint64_t t = 0;
+        cvc::ariadne::avatar_intent in;
+        const bool has_pose = cvc::ariadne::read_pose(app, room, p.pid, s, t);
+        const bool has_intent = cvc::ariadne::read_intent(app, room, p.pid, in);
+        std::printf("[arisrv]   %-16s pos %s (%.2f, %.2f) intent %s (%.2f, %.2f)\n", p.pid.c_str(),
+                    has_pose ? "" : "none", s.position.x, s.position.y, has_intent ? "" : "none",
+                    in.move.x, in.move.y);
+      }
+      std::fflush(stdout);
+    }
 #if CVC_ENABLE_WS
     // Fan the relay's OWN room-tree writes — the room_leave retractions queued above and
     // room_relay_tick's per-stream "ready" markers — out to EVERY client on BOTH transports. The
