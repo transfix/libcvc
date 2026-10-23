@@ -9,6 +9,7 @@
 #include<assert.h>
 #include<time.h>
 #include<algorithm>
+#include<cmath>
 #include<vector>
 
 #include"normalspline.h"
@@ -5512,6 +5513,12 @@ void Octree::optimization(geoframe& geofrm) {
 	float mmv0[3], mmv1[3], mmv2[3], mmv3[3], mmv4[3];
 	float jacobian, oddy, condition, jaco_min, jaco_max, oddy_min, oddy_max, cond_min, cond_max;
 	float *jacobianArr, *conditionArr, *oddyArr;
+	// Corner j of hexahedron i (v0..v7 below; v4..v7 lie over v0..v3) is vertex
+	// quads[6*i + corner_row[j]][corner_col[j]]. The vertex to move used to be read as
+	// quads[6*i+1][j-4] for j >= 4, which is v5, v4, v7, v6 (the wrong one), and the per-vertex
+	// statistics read quads[6*i][4] for j == 4, past the end of a quad.
+	static const int corner_row[8] = {0, 0, 0, 0, 1, 1, 1, 1};
+	static const int corner_col[8] = {0, 1, 2, 3, 1, 0, 3, 2};
 
 	//	FILE *output;
 
@@ -5589,8 +5596,7 @@ void Octree::optimization(geoframe& geofrm) {
 				if(cond_min > 0.0f) {minAspIndx = j; hexaIndx = i;}
 				//if(cond_min > 0.0f) {minAspIndx = 2; hexaIndx = i;}
 			}
-			temp_i = 6*i;	temp_j = j;
-			if(j > 4) {temp_i = 6*i+1; temp_j = j -4;}
+			temp_i = 6*i + corner_row[j];	temp_j = corner_col[j];
 			if(conditionArr[geofrm.quads[temp_i][temp_j]] > 0.0f && condition > conditionArr[geofrm.quads[temp_i][temp_j]]) 
 				conditionArr[geofrm.quads[temp_i][temp_j]] = condition;
 			if(condition < 0.0f) conditionArr[geofrm.quads[temp_i][temp_j]] = condition;
@@ -5630,11 +5636,8 @@ void Octree::optimization(geoframe& geofrm) {
 	//	fprintf(output, "statistics = %d %d %d %d %d %d %d %d %d %d\n", sum0, sum1, sum2, sum3, sum4, sum5, sum6, sum7, sum8,
 	//		sum0+sum1+sum2+sum3+sum4+sum5+sum6+sum7+sum8);
 
-	if(minAspIndx < 4)
-		a_vert = geofrm.quads[6*hexaIndx][minAspIndx];
-	else
-		a_vert = geofrm.quads[6*hexaIndx+1][minAspIndx-4];
-	
+	a_vert = geofrm.quads[6*hexaIndx + corner_row[minAspIndx]][corner_col[minAspIndx]];
+
 	//	fprintf(output, "num temp = %d %f\n", num, temp);
 	//fprintf(output, "jacob oddy cond = (%f, %f, %f) (%f, %f, %f) (%f, %f, %f) %d\n", jaco_max, temp/num, jaco_min, 
 	//cond_min, temp0/num, cond_max, oddy_min, temp1/num, oddy_max, a_vert);
@@ -5725,8 +5728,8 @@ void Octree::optimization(geoframe& geofrm) {
 				mmv0[j] = geofrm.verts[v2][j];	mmv1[j] = geofrm.verts[v1][j];	mmv2[j] = geofrm.verts[v3][j];	mmv3[j] = geofrm.verts[v6][j];}
 			else if(minAspIndx == 3){
 				mmv0[j] = geofrm.verts[v3][j];	mmv1[j] = geofrm.verts[v2][j];	mmv2[j] = geofrm.verts[v0][j];	mmv3[j] = geofrm.verts[v7][j];}
-			else if(minAspIndx == 4){
-				mmv0[j] = geofrm.verts[v1][j];	mmv1[j] = geofrm.verts[v0][j];	mmv2[j] = geofrm.verts[v2][j];	mmv3[j] = geofrm.verts[v5][j];}
+			else if(minAspIndx == 4){	// was a copy of corner 1 (v1, v0, v2, v5)
+				mmv0[j] = geofrm.verts[v4][j];	mmv1[j] = geofrm.verts[v5][j];	mmv2[j] = geofrm.verts[v7][j];	mmv3[j] = geofrm.verts[v0][j];}
 			else if(minAspIndx == 5){
 				mmv0[j] = geofrm.verts[v5][j];	mmv1[j] = geofrm.verts[v6][j];	mmv2[j] = geofrm.verts[v4][j];	mmv3[j] = geofrm.verts[v1][j];}
 			else if(minAspIndx == 6){
@@ -5737,9 +5740,17 @@ void Octree::optimization(geoframe& geofrm) {
 
 		getGrad(mmv0, mmv1, mmv2, mmv3, condition, grad);
 
+		// Line search for a position of the worst corner no worse than cond_max. mmv4 starts at the
+		// corner itself: a corner with collinear edges has Jacobian 0 and condition +inf, so
+		// cond_max + 1.0f - cond_max is NaN (or 0 once cond_max >= 2^24), the loop never runs, and
+		// mmv4 was copied into the mesh uninitialized (vertices like (7.4e24, 5.8e-43, 7.9e24)).
+		// Halving the step ends at 0, where mmv4 is the corner again, instead of looping forever when
+		// no step qualifies, and a non-finite position (from a zero-length edge's NaN gradient) is
+		// never written.
+		for(j = 0; j < 3; j++) mmv4[j] = mmv0[j];
 		condition = cond_max + 1.0f;
 		step = 0.5f;
-		while(condition - cond_max > 1.0e-6) {
+		while(condition - cond_max > 1.0e-6 && step > 0.0f) {
 			for(j = 0; j < 3; j++) {
 				mmv4[j] = mmv0[j] - step*grad[j];
 			}
@@ -5747,9 +5758,11 @@ void Octree::optimization(geoframe& geofrm) {
 			if(condition > cond_max) step /= 2.0f;
 		}
 
-		geofrm.verts[a_vert][0] = mmv4[0];
-		geofrm.verts[a_vert][1] = mmv4[1];
-		geofrm.verts[a_vert][2] = mmv4[2];
+		if(std::isfinite(mmv4[0]) && std::isfinite(mmv4[1]) && std::isfinite(mmv4[2])) {
+			geofrm.verts[a_vert][0] = mmv4[0];
+			geofrm.verts[a_vert][1] = mmv4[1];
+			geofrm.verts[a_vert][2] = mmv4[2];
+		}
 
 		//		fprintf(output, "average %d %f %f %f %f\n", a_vert, geofrm.verts[a_vert][0], geofrm.verts[a_vert][1], geofrm.verts[a_vert][2], step);
 
@@ -5806,8 +5819,7 @@ void Octree::optimization(geoframe& geofrm) {
 					//if(cond_min > 0.0f) {minAspIndx = 4; hexaIndx = i;}
 				}
 				//if(condition > conditionArr[vertexArr[i][j]]) conditionArr[vertexArr[i][j]] = condition;
-				temp_i = 6*i;	temp_j = j;
-				if(j > 4) {temp_i = 6*i+1; temp_j = j -4;}
+				temp_i = 6*i + corner_row[j];	temp_j = corner_col[j];
 				if(conditionArr[geofrm.quads[temp_i][temp_j]] > 0.0f && condition > conditionArr[geofrm.quads[temp_i][temp_j]]) 
 					conditionArr[geofrm.quads[temp_i][temp_j]] = condition;
 				if(condition < 0.0f) conditionArr[geofrm.quads[temp_i][temp_j]] = condition;
@@ -5819,10 +5831,7 @@ void Octree::optimization(geoframe& geofrm) {
 
 		}
 		
-		if(minAspIndx < 4)
-			a_vert = geofrm.quads[6*hexaIndx][minAspIndx];
-		else
-			a_vert = geofrm.quads[6*hexaIndx+1][minAspIndx-4];
+		a_vert = geofrm.quads[6*hexaIndx + corner_row[minAspIndx]][corner_col[minAspIndx]];
 
 		//		fprintf(output, "min, max, a_vert = %f %f %f %f %f %f %d %d\n", jaco_min, jaco_max, 
 		//				oddy_min, oddy_max, cond_min, cond_max, a_vert, geofrm.bound_sign[a_vert]);
