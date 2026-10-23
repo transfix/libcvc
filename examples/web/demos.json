@@ -11,6 +11,7 @@
     "volslice_bunny",
     "volslice_bunny_ari",
     "ari",
+    "ari_tvision",
     "nav_city_swarm",
     "nav_city_drive",
     "nav_fog_ghost",
@@ -95,6 +96,13 @@
       "blurb":
           "The Ariadne UI DSL's terminal backend (FTXUI) in the browser, behind an xterm.js terminal. It runs terminal_tour.ari, a document that renders unchanged through the ImGui backend, as a text UI. Tab and the arrow keys move between widgets, and the mouse clicks and drags sliders, window title bars and menus. F10 opens the menu bar. Ctrl-C goes to the document's on_signal handler, which asks once and quits on the second press. Single-threaded WebAssembly, so it needs no special headers.",
       "thumb": "img/ari.jpg"
+    },
+    "ari_tvision": {
+      "title": "ari — Ariadne on a tvision desktop",
+      "desc": "the same .ari document on Turbo Vision's desktop, in the browser",
+      "blurb":
+          "terminal_tour.ari again, this time through the Ariadne tvision backend: Turbo Vision (magiblot/tvision) draws the desktop, with movable, overlapping windows, a menu bar and a status line, and FTXUI lays out each window's contents. tvision runs in the browser through a console written for this page: xterm.js's keys and mouse go to its stdin and its ANSI output is drawn per frame. Drag a window by its title, F10 opens the menu, F6 moves between windows, Alt-X quits. Single-threaded WebAssembly, so it needs no special headers.",
+      "thumb": "img/ari_tvision.jpg"
     }
   }
 }

@@ -154,12 +154,22 @@ cmake --build "${BUILD_DIR}" --target wasm-demos -j "$(nproc)"
 #   cvcpkg install ftxui --platform wasm --arch wasm32 --link static --prefix <deps>
 # Without it the target builds the stub that only says FTXUI is missing, so it is left out. It is
 # a single-threaded page, so only the default (non-pthread) gallery gets it.
+#
+# ari_tvision is the same page on the tvision desktop. It needs tvision with its browser console
+# (cvcpkg tvision >= cvc.4, the wasm column):
+#   cvcpkg install tvision --platform wasm --arch wasm32 --link static --prefix <deps>
+# The configure then defines the target (src/ari/CMakeLists.txt); without it there is none.
 if [[ "${PTHREAD}" == "ON" ]]; then
-    echo "build-wasm-demo: --pthread gallery; the ari page is single-threaded, leaving it out"
+    echo "build-wasm-demo: --pthread gallery; the ari pages are single-threaded, leaving them out"
 elif [ -f "${CVC_WASM_DEPS}/lib/cmake/ftxui/ftxui-config.cmake" ]; then
     cmake --build "${BUILD_DIR}" --target ari -j "$(nproc)"
+    if grep -q '^CVC_ARIADNE_TVISION_ENABLED:INTERNAL=ON' "${BUILD_DIR}/CMakeCache.txt"; then
+        cmake --build "${BUILD_DIR}" --target ari_tvision -j "$(nproc)"
+    else
+        echo "build-wasm-demo: no tvision with a browser console in ${CVC_WASM_DEPS}; the gallery has no ari_tvision page"
+    fi
 else
-    echo "build-wasm-demo: ftxui not in ${CVC_WASM_DEPS}; the gallery has no ari page"
+    echo "build-wasm-demo: ftxui not in ${CVC_WASM_DEPS}; the gallery has no ari pages"
 fi
 
 # Turn the built bin/ into a servable gallery: build-pages.py discovers every
