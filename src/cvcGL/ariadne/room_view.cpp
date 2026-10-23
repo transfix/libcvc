@@ -35,7 +35,10 @@ void avatar_color(const std::string &pid, bool self, float out[3]) {
   std::uint32_t h = 2166136261u; // FNV-1a: the same pid colours the same on every client
   for (unsigned char c : pid)
     h = (h ^ c) * 16777619u;
-  const float hue = static_cast<float>(h % 360u) / 60.0f; // [0, 6)
+  // A hue in [0, 360) that skips 30-75 degrees, the oranges and yellows near the local avatar's
+  // gold, so a peer is never mistaken for you.
+  const std::uint32_t deg = h % 315u;
+  const float hue = static_cast<float>(deg < 30u ? deg : deg + 45u) / 60.0f; // [0, 6)
   const float s = 0.55f, v = 0.85f, c = v * s;
   const float x = c * (1.0f - std::fabs(std::fmod(hue, 2.0f) - 1.0f));
   float r = 0, g = 0, b = 0;
@@ -216,6 +219,13 @@ void room_view::sync_avatars(cvc::ariadne::holon &h, double wall_dt) {
       node->setPoseMatrix(m);
     }
   }
+}
+
+std::vector<std::string> room_view::avatar_pids() const {
+  std::vector<std::string> out;
+  for (const auto &kv : _avatars)
+    out.push_back(kv.first);
+  return out;
 }
 
 bool room_view::self_position(double out[3]) const {

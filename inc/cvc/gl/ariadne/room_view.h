@@ -69,6 +69,9 @@ public:
   // Non-fatal realize warnings since the last call (a missing mesh, ...), then cleared.
   std::vector<std::string> take_warnings();
 
+  // The pids that have an avatar marker right now, in pid order.
+  std::vector<std::string> avatar_pids() const;
+
   // The SceneGraph node ids room_view uses, for hosts and tests.
   static std::string object_node_id(const std::string &id) { return "room_" + id; }
   static std::string avatar_node_id(const std::string &pid) { return "avatar_" + pid; }

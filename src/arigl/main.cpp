@@ -299,6 +299,7 @@ struct ConferenceSession {
   cvc::gl::CameraController *cam_ = nullptr;
   cvc::ariadne::avatar_intent last_intent_; // the last intent proposed (propose only on change)
   bool intent_proposed_ = false;            // proposed once yet (the first frame always proposes)
+  std::vector<std::string> drawn_pids_;     // avatars drawn at the last log (log on change)
   bool framed_ = false;                     // camera framed on our avatar once
   double orbit_center_[3] = {0.0, 0.0, 0.0};
   static constexpr double kWalkSpeed = 2.0; // m/s
@@ -570,13 +571,24 @@ struct ConferenceSession {
     holon_->set_intent(pid_, last_intent_);
     cvc::ariadne::client_pump(*holon_, *app_, room_, pid_, f.wall_dt);
     room_view_->update(*holon_, f.wall_dt);
+    // Log who is drawn whenever that changes (the browser page shows stderr in its footer and the
+    // console): the quickest check that a client sees the room the relay holds.
+    const std::vector<std::string> drawn = room_view_->avatar_pids();
+    if (drawn != drawn_pids_) {
+      std::string who;
+      for (const std::string &pid : drawn)
+        who += (who.empty() ? "" : ", ") + pid;
+      std::fprintf(stderr, "arigl: room: %zu avatar(s): %s\n", drawn.size(), who.c_str());
+      drawn_pids_ = drawn;
+    }
     for (const std::string &w : room_view_->take_warnings())
       std::fprintf(stderr, "arigl: room: %s\n", w.c_str());
     // Third person: frame our avatar once, then keep the orbit centre on it.
     double p[3];
     if (room_view_->self_position(p)) {
       if (!framed_) {
-        cam_->frameBounds(p[0] - 4.0, p[1] - 4.0, p[2], p[0] + 4.0, p[1] + 4.0, p[2] + 2.0);
+        // Frame the room around you, not just you: arriving at a party, you want to see who's here.
+        cam_->frameBounds(p[0] - 8.0, p[1] - 8.0, p[2], p[0] + 8.0, p[1] + 8.0, p[2] + 2.0);
         framed_ = true;
       }
       const double c[3] = {p[0], p[1], p[2] + kEyeHeight};
