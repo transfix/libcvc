@@ -295,7 +295,7 @@ room_scene_env default_scene_env() {
   env.background_top[0] = 0.20f, env.background_top[1] = 0.24f, env.background_top[2] = 0.30f;
   env.background_bottom[0] = 0.05f, env.background_bottom[1] = 0.06f,
   env.background_bottom[2] = 0.08f;
-  env.chrome = true;
+  env.chrome = false; // the SceneGraph chrome is a debug overlay (bbox, axes, labels), not decor
   cvc::ariadne::SceneLight sun;
   sun.id = "sun";
   sun.kind = "directional";
