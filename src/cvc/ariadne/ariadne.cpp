@@ -16,11 +16,13 @@
 #include <cvc/ariadne/backend.h>
 #include <cvc/ariadne/bind.h>
 #include <cvc/ariadne/input.h> // §4.6 InputEvent — Runtime::post_input feeds on_key/on_pointer
+#include <cvc/ariadne/loader.h> // is_builtin_widget_type (has?)
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_scheduler.h> // §4.7 app-wide action scheduler (exec_scheduler)
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/evaluator.h> // evaluation_timeout / evaluation_interrupted
+#include <cvc/state/state_exec/exceptions.h> // dsl_error (has?)
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/parser.h> // parse, parse_error
 #include <cvc/state/state_exec/process.h>
@@ -211,6 +213,12 @@ std::unordered_map<std::string, WidgetEmitFn> &widget_registry() {
   static std::unordered_map<std::string, WidgetEmitFn> r;
   return r;
 }
+// Widget types a BACKEND renders natively (no compositional emit fn) — so the loader does not warn
+// they are unregistered. Guarded by widget_mutex() like widget_registry().
+std::set<std::string> &known_widget_types() {
+  static std::set<std::string> s;
+  return s;
+}
 WidgetEmitFn lookup_widget(const std::string &type) {
   std::lock_guard<std::mutex> lock(widget_mutex());
   auto it = widget_registry().find(type);
@@ -225,9 +233,17 @@ void register_widget_type(const std::string &type, WidgetEmitFn emit) {
   widget_registry()[type] = std::move(emit);
 }
 
+void register_known_widget_type(const std::string &type) {
+  if (type.empty())
+    return;
+  std::lock_guard<std::mutex> lock(widget_mutex());
+  known_widget_types().insert(type);
+}
+
 bool has_widget_type(const std::string &type) {
   std::lock_guard<std::mutex> lock(widget_mutex());
-  return widget_registry().find(type) != widget_registry().end();
+  return widget_registry().find(type) != widget_registry().end() ||
+         known_widget_types().find(type) != known_widget_types().end();
 }
 
 // --- the init: block runner (state_exec) --------------------------------------
@@ -243,9 +259,33 @@ std::vector<ActionIntrinsicProvider> &action_intrinsics_registry() {
   static std::vector<ActionIntrinsicProvider> v;
   return v;
 }
+// Bumped by every register / clear, so a Runtime's cached program names know when to rebuild.
+std::atomic<std::uint64_t> &action_intrinsics_generation() {
+  static std::atomic<std::uint64_t> g{0};
+  return g;
+}
 std::vector<ActionIntrinsicProvider> action_intrinsics_snapshot() {
   std::lock_guard<std::mutex> lock(action_intrinsics_mutex());
   return action_intrinsics_registry();
+}
+
+// Bind (has? "name") into a program or predicate env. It answers from `has` (Runtime::has), so a
+// document can ask what its host provides, e.g. hide a GL panel in a terminal. A string or a
+// quoted symbol names the thing.
+void bind_has(const std::shared_ptr<cvc::state_exec::environment> &env,
+              const std::function<bool(const std::string &)> &has) {
+  namespace se = cvc::state_exec;
+  if (!has)
+    return;
+  se::builtins::register_fn(env, "has?", [has](std::span<const se::value_t> args) -> se::value_t {
+    if (args.size() != 1)
+      throw se::dsl_error("TypeError", "has?: expected one argument, a name");
+    if (const auto *s = std::get_if<std::string>(&args[0].v))
+      return se::value_t(has(*s));
+    if (const auto *sym = std::get_if<se::symbol>(&args[0].v))
+      return se::value_t(has(sym->name));
+    throw se::dsl_error("TypeError", "has?: the name must be a string or a symbol");
+  });
 }
 } // namespace
 
@@ -254,10 +294,12 @@ void register_action_intrinsics(ActionIntrinsicProvider provider) {
     return;
   std::lock_guard<std::mutex> lock(action_intrinsics_mutex());
   action_intrinsics_registry().push_back(std::move(provider));
+  ++action_intrinsics_generation();
 }
 void clear_action_intrinsics() {
   std::lock_guard<std::mutex> lock(action_intrinsics_mutex());
   action_intrinsics_registry().clear();
+  ++action_intrinsics_generation();
 }
 
 namespace {
@@ -290,7 +332,8 @@ namespace {
 // ReactiveEngine note on the full-env lanes): the full intrinsics env with writes confined to the
 // document prefix, resource-capped, and it never throws.
 std::string run_scoped_program(cvc::app &app, const std::string &prefix, const std::string &script,
-                               uint64_t max_steps, double max_seconds, uint64_t max_bytes) {
+                               uint64_t max_steps, double max_seconds, uint64_t max_bytes,
+                               const std::function<bool(const std::string &)> &has = {}) {
   namespace se = cvc::state_exec;
   try {
     // All of these must outlive execute()+run(): the intrinsics capture &ictx by pointer. A
@@ -315,6 +358,7 @@ std::string run_scoped_program(cvc::app &app, const std::string &prefix, const s
     for (const ActionIntrinsicProvider &p : action_intrinsics_snapshot())
       if (p)
         p(env, ictx);
+    bind_has(env, has);
     // Bound the run so a looping or blocking script (an accidental infinite loop, or a
     // (msg-recv ...) with no sender) can never hang: cap the process (check_limits kills a runner
     // at the cap) AND the run loop (breaks out even when the sole process is blocked, which
@@ -342,7 +386,8 @@ std::string run_scoped_program(cvc::app &app, const std::string &prefix, const s
 } // namespace
 
 bool run_init(cvc::app &app, const std::string &prefix, const std::string &script,
-              std::vector<std::string> *errors) {
+              std::vector<std::string> *errors,
+              const std::function<bool(const std::string &)> &has) {
   const auto err = [&](const std::string &m) {
     if (errors)
       errors->push_back(m);
@@ -352,7 +397,8 @@ bool run_init(cvc::app &app, const std::string &prefix, const std::string &scrip
   // A load-time seed/compute is generous — well above the per-tick action budget (§7.4).
   static constexpr uint64_t kInitMaxSteps = 10'000'000;
   static constexpr double kInitMaxSeconds = 5.0;
-  const std::string e = run_scoped_program(app, prefix, script, kInitMaxSteps, kInitMaxSeconds, 0);
+  const std::string e =
+      run_scoped_program(app, prefix, script, kInitMaxSteps, kInitMaxSeconds, 0, has);
   if (!e.empty()) {
     err("ari: init: script " + e);
     return false;
@@ -384,7 +430,9 @@ namespace se = cvc::state_exec;
 // so `(state-get "demo.n")` reads the SAME key a widget `bind: demo.n` resolves to.
 class ReactiveEngine {
 public:
-  ReactiveEngine(cvc::app &app, const std::string &prefix) {
+  // `has` answers (has? "name") in predicates (Runtime::has); empty leaves it unbound.
+  ReactiveEngine(cvc::app &app, const std::string &prefix,
+                 const std::function<bool(const std::string &)> &has = {}) {
     // The intrinsics capture &ctx_ by pointer; sched_/tracker_/proc_ back it and share
     // this object's lifetime. No scheduler op is ever exposed, so the scheduler stays
     // idle — it exists only to give the readers a well-formed context (mirrors run_init).
@@ -443,6 +491,7 @@ public:
     for (const char *name : kAllowed)
       if (const se::value_t *v = full->lookup(name))
         env_->set(name, *v);
+    bind_has(env_, has); // pure and bounded: a capability / name lookup
     ev_ = std::make_unique<se::stackless_evaluator>(env_);
     // Special-form gate: allow control flow, binding, functions, literals and loops (all
     // step-capped or bounded); DENY the code-generation / object-graph forms. Static so the
@@ -638,7 +687,18 @@ private:
 
   static constexpr uint64_t kMaxSteps = 100'000;       // per-eval step cap (a predicate is tiny)
   static constexpr double kMaxSeconds = 0.005;         // per-eval time cap (5 ms)
-  static constexpr double kFrameBudgetSeconds = 0.010; // aggregate across all predicates/frame
+  // Aggregate reactive-eval time across ALL predicates in a frame. This is a runaway guard, not a
+  // normal operating point: a handful of scalar predicates finish in well under a millisecond. It
+  // was 10 ms, but a live conference re-evaluates ~5-7 predicates PER PEER every frame (roster
+  // rows' visible_when, the per-peer camera-window count/title/texture binds), and the stackless
+  // evaluator is markedly slower under wasm while the browser's single thread is also decoding
+  // video — so at a realistic peer count the 10 ms guard tripped mid-roster, skipping the rest and
+  // blinking the participant list / peer windows empty. 30 ms clears a ~6-7 peer conference with
+  // margin and is still a hard bound on a pathological document (eval time the thread spends
+  // descheduled doesn't count against it, so a merely-loaded machine never trips it). See
+  // last_good_count for the structural backstop that keeps a repeated list stable across any
+  // residual skip.
+  static constexpr double kFrameBudgetSeconds = 0.030; // aggregate across all predicates/frame
   static constexpr std::size_t kMaxOptions = 1024;     // cap on computed combo options
 
   std::size_t data_step_nodes_ = 0;            // see resolve_data_settings()
@@ -659,6 +719,35 @@ struct Runtime::Impl {
   cvc::app &app;
   Backend *backend = nullptr;
   std::string prefix;
+
+  // What this host provides (requires:, has?). The names a program can reference are read from a
+  // probe env built exactly like an action's, then cached; the cache is rebuilt when a provider is
+  // registered (the registry's generation moves) or refresh_program_names() drops it.
+  bool scene_capable = false;
+  mutable std::mutex names_mutex;
+  mutable bool names_valid = false;
+  mutable std::uint64_t names_generation = 0;
+  mutable std::set<std::string> names;
+  void load_names() const; // names_mutex held
+  bool has_function(const std::string &name) const {
+    if (cvc::state_exec::stackless_evaluator::all_special_forms().count(name))
+      return true;
+    std::lock_guard<std::mutex> lock(names_mutex);
+    load_names();
+    return names.count(name) != 0;
+  }
+  HostFacts facts() const {
+    HostFacts f;
+    if (backend)
+      f.caps = backend->capabilities();
+    f.scene = scene_capable;
+    return f;
+  }
+  bool has(const std::string &name) const {
+    if (is_capability_token(name))
+      return capability_holds(name, facts());
+    return has_function(name) || is_builtin_widget_type(name) || has_widget_type(name);
+  }
 
   // §12 channel enforcement: the document's channel policy, installed on every action/resident
   // ictx. Default (enforce=false, empty) = permissive; set_channel_policy fills it from a
@@ -702,6 +791,14 @@ struct Runtime::Impl {
   std::vector<std::string> reactive_warnings;
   std::set<std::string> reactive_warned;
   int frame_instances = 0; // §3: repeat instances emitted this frame (bounds many repeats)
+  // §3: last successful repeat-count per expression. A reactive repeat-count eval fail-safes to 0
+  // on a transient per-frame budget exhaustion (reactive eval is slow in wasm, and video decode can
+  // eat the frame); collapsing a repeated list — the conference roster, the per-peer camera windows
+  // — to EMPTY for that frame and back flickers it, and under sustained load leaves an apparently
+  // empty conference even though the peers are present in state. Reusing the last-good count
+  // bridges those skips so the list stays stable; a genuine count change is picked up on the next
+  // unskipped frame.
+  std::unordered_map<std::string, int> last_good_count;
 
   // §4.7 action lane: a unique owner tag for this Runtime's processes on the app-wide
   // scheduler (app.exec_scheduler()), so teardown reaps exactly this document's process
@@ -805,7 +902,8 @@ struct Runtime::Impl {
   // matching where its binds resolve. Every reactive helper goes through here.
   ReactiveEngine &ensure_reactive() {
     if (!reactive)
-      reactive = std::make_unique<ReactiveEngine>(app, prefix);
+      reactive = std::make_unique<ReactiveEngine>(app, prefix,
+                                                  [this](const std::string &n) { return has(n); });
     reactive->set_root_path(app, current_prefix());
     return *reactive;
   }
@@ -914,8 +1012,16 @@ std::vector<std::string> Runtime::Impl::eval_options(const std::string &expr) {
 int Runtime::Impl::eval_count(const std::string &expr) {
   constexpr int64_t kMaxRepeat = 4096; // a UI with thousands of repeated widgets is pathological
   const ReactiveEngine::IntOutcome o = ensure_reactive().eval_int(expr, /*dflt=*/0);
-  if (!o.error.empty())
+  if (!o.error.empty()) {
     warn_once(o.error);
+    // The eval fail-safed (budget exhausted / broken). Rather than collapse the repeated list to 0
+    // this frame, reuse the last count this expression yielded successfully (if any) — a transient
+    // skip then leaves the roster/peer-window list unchanged instead of blinking empty. With no
+    // prior success the fallback is still 0, so a genuinely-never-valid expr behaves as before.
+    const auto it = last_good_count.find(expr);
+    if (it != last_good_count.end())
+      return it->second;
+  }
   int64_t n = o.value;
   if (n < 0)
     n = 0;
@@ -924,6 +1030,10 @@ int Runtime::Impl::eval_count(const std::string &expr) {
               std::to_string(kMaxRepeat) + ") — clamped");
     n = kMaxRepeat;
   }
+  // Remember this frame's good value only when the eval actually succeeded (o.error empty): a
+  // fail-safe 0 must never be cached as "last good", or it would pin the list empty.
+  if (o.error.empty())
+    last_good_count[expr] = static_cast<int>(n);
   return static_cast<int>(n);
 }
 
@@ -996,16 +1106,24 @@ void Runtime::Impl::emit_container(const Widget &w) {
   if (w.layout.kind == LayoutKind::Grid || w.layout.kind == LayoutKind::Horizontal) {
     const std::string &id = w.id.empty() ? w.label : w.id;
     // §11.4 two-way track edge: a resizable row-split grid persists its dragged pane sizes to
-    // tree.<id>.tracks. Seed the backend from the persisted sizes before opening (apply-once on the
-    // backend side), then write the post-drag sizes back after closing. A plain table has no
-    // draggable rows, so it neither seeds nor persists.
+    // tree.<id>.tracks, and a resizable table its column widths to tree.<id>.columns. Seed the
+    // backend from the persisted sizes before opening (apply-once on the backend side), then write
+    // the post-drag sizes back after closing. A table that is not resizable has nothing to drag,
+    // so it neither seeds nor persists.
     const bool split = w.layout.is_row_split();
-    std::string tracks_path;
+    const bool table = w.layout.resizable && !split;
+    std::string tracks_path, columns_path;
     if (split) {
       tracks_path = resolve("tree." + id + ".tracks");
       const std::vector<float> seed = parse_tracks(read_string(app, tracks_path));
       if (!seed.empty())
         b.seed_grid_tracks(seed);
+    }
+    if (table) {
+      columns_path = resolve("tree." + id + ".columns");
+      const std::vector<float> seed = parse_tracks(read_string(app, columns_path));
+      if (!seed.empty())
+        b.seed_grid_columns(seed);
     }
     if (b.begin_grid(w.layout, id.c_str())) {
       for (const Widget &c : w.children) {
@@ -1028,6 +1146,11 @@ void Runtime::Impl::emit_container(const Widget &w) {
         const std::vector<float> cur = b.grid_tracks();
         if (!cur.empty())
           write<std::string>(app, tracks_path, format_tracks(cur));
+      }
+      if (table) {
+        const std::vector<float> cur = b.grid_columns();
+        if (!cur.empty())
+          write<std::string>(app, columns_path, format_tracks(cur));
       }
     }
   } else {
@@ -1142,7 +1265,25 @@ void Runtime::Impl::emit_node(const Widget &w) {
     }
     if (have_seed)
       b.seed_window_geometry(seed);
-    const bool visible = b.begin_window(w.label.c_str(), id.c_str(), w.size, w.frame_border,
+    // Raise edge: a one-shot request at tree.<id>.raise (set to "1" by e.g. a "click a user"
+    // handler, alongside tree.<id>.open) brings this window to the front this frame. Consume it so
+    // it fires once (not every frame). Opening a closed window + raising it = set both keys in the
+    // handler.
+    const std::string raise_path = resolve("tree." + id + ".raise");
+    if (read_string(app, raise_path) == "1") {
+      b.focus_next_window();
+      write<std::string>(app, raise_path, ""); // consume the one-shot
+    }
+    // A window may BIND its visible title (e.g. a per-peer camera window titled by the peer's
+    // name): resolve w.bind as the title when present, else the static label. begin_window uses
+    // "title###id", so the title may change each frame while the ###id identity stays stable.
+    std::string wtitle = w.label;
+    if (!w.bind.empty()) {
+      const std::string t = is_expr(w.bind) ? eval_text(w.bind) : read_string(app, resolve(w.bind));
+      if (!t.empty())
+        wtitle = t;
+    }
+    const bool visible = b.begin_window(wtitle.c_str(), id.c_str(), w.size, w.frame_border,
                                         w.closable ? &open : nullptr);
     // Persist the current geometry. When the backend can't report a size (a collapsed window),
     // back-fill it from the seed so a collapse doesn't clobber the stored content size.
@@ -1471,6 +1612,7 @@ void Runtime::Impl::submit_action(const QueuedAction &action) {
     for (const ActionIntrinsicProvider &p : action_intrinsics_snapshot())
       if (p)
         p(ac->env, ac->ictx);
+    bind_has(ac->env, [this](const std::string &n) { return has(n); });
     // §4.6 event scope: a widget pointer handler runs with an `event` dict of the item's local
     // pointer coords, so the program can read (get-attr event "x"/"y"/"dx"/"dy"/"button").
     if (action.has_event) {
@@ -1570,6 +1712,7 @@ void Runtime::Impl::ensure_resident(const std::string &channel, const std::strin
     for (const ActionIntrinsicProvider &p : action_intrinsics_snapshot())
       if (p)
         p(ac->env, ac->ictx);
+    bind_has(ac->env, [this](const std::string &n) { return has(n); });
     // Park-then-run loop on `channel`: msg-recv parks the process between deliveries and BINDS each
     // delivered value as `event`, so an on_key/on_pointer body reads (get-attr event "key");
     // on:tick simply ignores `event`. The body runs once per delivery, then loops back to park. No
@@ -1645,6 +1788,60 @@ void Runtime::Impl::deliver_input(const InputEvent &ev) {
 Runtime::Runtime(cvc::app &app, std::string prefix) : m_(new Impl(app, std::move(prefix))) {}
 
 Runtime::~Runtime() = default;
+
+void Runtime::Impl::load_names() const {
+  namespace se = cvc::state_exec;
+  const std::uint64_t generation = action_intrinsics_generation().load();
+  if (names_valid && names_generation == generation)
+    return;
+  // The env an action runs in (submit_action), never executed: only its bindings are read. The
+  // context mirrors a real action's, so a provider that reads it while binding sees what it would.
+  se::scheduler sched;
+  se::memory_tracker tracker;
+  auto proc = se::make_process();
+  proc->pid = 1;
+  proc->status = se::process_status::ready;
+  se::intrinsics_context ictx;
+  ictx.sched = &sched;
+  ictx.tracker = &tracker;
+  ictx.proc = proc;
+  ictx.pid = 1;
+  se::apply_chroot(ictx, cvc::state::instance(app), prefix);
+  ictx.channels = const_cast<se::channel_policy *>(&channel_policy_);
+  ictx.document = const_cast<se::document_scope *>(&doc_scope_);
+  se::environment_ptr env = se::builtins::make_default_environment();
+  se::register_intrinsics(env, &ictx);
+  for (const ActionIntrinsicProvider &p : action_intrinsics_snapshot())
+    if (p)
+      p(env, ictx);
+  std::set<std::string> found;
+  for (const se::environment *e = env.get(); e; e = e->outer.get())
+    for (const auto &kv : e->bindings)
+      found.insert(kv.first);
+  found.insert("has?"); // bound per program (bind_has), not by a provider
+  names = std::move(found);
+  names_valid = true;
+  names_generation = generation;
+}
+
+bool Runtime::has_function(const std::string &name) const { return m_->has_function(name); }
+
+std::vector<std::string> Runtime::program_names() const {
+  std::lock_guard<std::mutex> lock(m_->names_mutex);
+  m_->load_names();
+  return {m_->names.begin(), m_->names.end()};
+}
+
+void Runtime::set_scene_capable(bool on) { m_->scene_capable = on; }
+
+HostFacts Runtime::host_facts() const { return m_->facts(); }
+
+bool Runtime::has(const std::string &name) const { return m_->has(name); }
+
+void Runtime::refresh_program_names() {
+  std::lock_guard<std::mutex> lock(m_->names_mutex);
+  m_->names_valid = false;
+}
 
 void Runtime::set_backend(Backend *backend) { m_->backend = backend; }
 

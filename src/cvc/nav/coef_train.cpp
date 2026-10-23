@@ -167,7 +167,11 @@ void training_scene::build() {
   }
 }
 
-void training_scene::sample_starts_goals(int n, unsigned seed, float *o, float *goal) const {
+void training_scene::sample_starts_goals(int n, unsigned seed, float *o, float *goal,
+                                         float goal_min, float goal_max) const {
+  if (!(goal_min >= 0.0f) || !(goal_max >= 0.0f) || (goal_max > 0.0f && goal_min > goal_max))
+    throw std::invalid_argument("cvc::nav::training_scene::sample_starts_goals: needs 0 <= "
+                                "goal_min <= goal_max (goal_max 0 = anywhere)");
   std::mt19937 rng(seed);
   std::uniform_int_distribution<int> pick(0, static_cast<int>(free_cells.size()) - 1);
   auto to_on = [&](int cell, float &onx, float &ony) {
@@ -177,9 +181,44 @@ void training_scene::sample_starts_goals(int n, unsigned seed, float *o, float *
     onx = static_cast<float>((x - cx) * scale);
     ony = static_cast<float>((y - cy) * scale);
   };
+  if (!(goal_max > 0.0f)) {
+    for (int i = 0; i < n; ++i) {
+      to_on(free_cells[pick(rng)], o[2 * i], o[2 * i + 1]);
+      to_on(free_cells[pick(rng)], goal[2 * i], goal[2 * i + 1]);
+    }
+    return;
+  }
+  // Local goals: the component's cells goal_min..goal_max from the start, found in the window
+  // of cells goal_max around it.
+  std::vector<std::uint8_t> in(static_cast<std::size_t>(rows) * cols, 0);
+  for (const int c : free_cells)
+    in[static_cast<std::size_t>(c)] = 1;
+  const double sx = (max_x - min_x) / (cols - 1) * scale, sy = (max_y - min_y) / (rows - 1) * scale;
+  const int wr = static_cast<int>(std::ceil(goal_max / sy)),
+            wc = static_cast<int>(std::ceil(goal_max / sx));
+  std::vector<int> ring;
+  constexpr int kTries = 64; // starts drawn for one agent before giving up
   for (int i = 0; i < n; ++i) {
-    to_on(free_cells[pick(rng)], o[2 * i], o[2 * i + 1]);
-    to_on(free_cells[pick(rng)], goal[2 * i], goal[2 * i + 1]);
+    int start = -1;
+    for (int t = 0; t < kTries && ring.empty(); ++t) {
+      start = free_cells[pick(rng)];
+      const int r0 = start / cols, c0 = start % cols;
+      for (int r = std::max(0, r0 - wr); r <= std::min(rows - 1, r0 + wr); ++r)
+        for (int c = std::max(0, c0 - wc); c <= std::min(cols - 1, c0 + wc); ++c) {
+          const int cell = r * cols + c;
+          const double d = std::hypot((c - c0) * sx, (r - r0) * sy);
+          if (in[static_cast<std::size_t>(cell)] && d >= goal_min && d <= goal_max)
+            ring.push_back(cell);
+        }
+    }
+    if (ring.empty())
+      throw std::invalid_argument("cvc::nav::training_scene::sample_starts_goals: no free cell " +
+                                  std::to_string(goal_min) + ".." + std::to_string(goal_max) +
+                                  " from any of " + std::to_string(kTries) + " starts drawn");
+    to_on(start, o[2 * i], o[2 * i + 1]);
+    std::uniform_int_distribution<int> pick_goal(0, static_cast<int>(ring.size()) - 1);
+    to_on(ring[static_cast<std::size_t>(pick_goal(rng))], goal[2 * i], goal[2 * i + 1]);
+    ring.clear();
   }
 }
 
@@ -298,7 +337,7 @@ void coef_trainer::coeffs(const float *feat, int n, float *out) const {
 double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_in,
                                    const float *v_in, const float *goal, int n, int window,
                                    std::vector<float> *grad, float *o_out, float *v_out,
-                                   const float *x_in, float *x_out) const {
+                                   const float *x_in, float *x_out, float *potential) const {
   const diff::field F = to_diff_field(scene.field());
   const int h = hidden_;
   const bool bike = cfg_.rollout == rollout_kind::bicycle;
@@ -409,6 +448,9 @@ double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_i
         S.coef[o] = diff::softplusf_(acc + off_bias[o]);
       }
       const float al = S.coef[0], be = S.coef[1], ga = S.coef[2];
+      if (potential)
+        potential[static_cast<std::size_t>(ag) * window + t] =
+            diff::surr_potential(F, ox, oy, gx, gy, al, be, rr, d_hat).total();
 
       float ox1, oy1, ax1, ay1;
       if (dyn) {
@@ -655,7 +697,8 @@ void coef_trainer::train(const training_scene &scene, bool verbose,
   if (fitness)
     score(0);
   for (int step = 0; step < cfg_.steps; ++step) {
-    scene.sample_starts_goals(n, cfg_.seed + static_cast<unsigned>(step), o.data(), goal.data());
+    scene.sample_starts_goals(n, cfg_.seed + static_cast<unsigned>(step), o.data(), goal.data(),
+                              cfg_.goal_min, cfg_.goal_max);
     // Initial aux: surrogate v=0; bicycle and dynamic (th aimed at the goal, sp=0), the
     // dynamic vehicle at rest with its wheel straight.
     std::fill(x.begin(), x.end(), 0.0f);

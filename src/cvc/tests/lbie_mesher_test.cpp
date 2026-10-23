@@ -220,6 +220,20 @@ TEST_F(LbieMesherTest, QuadDoMeshAdaptiveErrSweep) {
   expect_geoframe_valid(coarse);
 }
 
+// Octree::assign_refine_sign_quad visited every edge the surface crosses, including edges on the
+// volume's boundary, where find_oc_id gives -1 for the cells outside the grid. It then called
+// get_err_grad(-1) and read and wrote vtx_idx_arr_refine[-1]. polygonize_quad never makes a quad
+// for such an edge (is_min_edge rejects it), so those edges are now skipped. AddressSanitizer
+// flagged the read on every mesh of a surface that leaves the volume.
+TEST_F(LbieMesherTest, QuadMeshesASurfaceThatLeavesTheVolume) {
+  volume v = make_sphere_volume(ctx, 17, 1.2); // bigger than its [-1,1]^3 box
+  for (float err : {kDefaultErr, 0.01f}) {
+    LBIE::geoframe g = run_do_mesh(v, 0.0f, 0.0f, err, kDefaultErrIn, LBIE::geoframe::QUAD);
+    EXPECT_GT(g.numquads, 0) << "err=" << err;
+    expect_geoframe_valid(g);
+  }
+}
+
 TEST_F(LbieMesherTest, QuadDoMeshGeoFlow) {
   volume v = make_sphere_volume(ctx, 17, 0.5);
   LBIE::geoframe g = run_do_mesh(v, 0.0f, 0.0f, kDefaultErr, kDefaultErrIn, LBIE::geoframe::QUAD,
@@ -407,6 +421,32 @@ TEST_F(LbieMesherTest, HexaVerticesStayInsideAVolumeTheSurfaceLeaves) {
   }
 }
 
+// Sampled at 17^3 in its [-1,1]^3 box, a sphere of radius 1.5 passes exactly through grid points
+// on the box's faces (8^2 + 4^2 + 8^2 = 12^2 in eighths). Where an edge ends on the far face at the
+// isovalue, Octree::interpRect3Dpts_x/y/z asked getVertGrad() for a point one plane off the grid,
+// and getValue() read up to about 1 KB past orig_vol. That was the access violation in compute_qef
+// that crashed HexaVerticesStayInsideAVolumeTheSurfaceLeaves now and then on Windows;
+// AddressSanitizer flags it on every run, for every mesh type. getVertGrad() now stays on the grid.
+// SINGLE extracts no surface from this sphere. QUAD is left out: polygonize_quad has its own
+// out-of-bounds read wherever a surface leaves the volume (r = 1.2 too), not fixed here.
+TEST_F(LbieMesherTest, MeshesASurfaceThroughGridPointsOnTheFarFaces) {
+  volume v = make_sphere_volume(ctx, 17, 1.5);
+  for (LBIE::geoframe::GEOTYPE mt : {LBIE::geoframe::TETRA, LBIE::geoframe::HEXA,
+                                     LBIE::geoframe::DOUBLE, LBIE::geoframe::TETRA2}) {
+    const bool interval = mt == LBIE::geoframe::DOUBLE || mt == LBIE::geoframe::TETRA2;
+    LBIE::geoframe g = run_do_mesh(v, 0.0f, interval ? -0.15f : 0.0f, kDefaultErr, kDefaultErrIn,
+                                   mt, LBIE::Mesher::NO_IMPROVE, 0, interval);
+    EXPECT_GT(g.numverts, 0) << "mesh type " << mt;
+    expect_geoframe_valid(g);
+    int bad_normal = 0;
+    for (size_t i = 0; i < g.normals.size(); ++i)
+      for (int j = 0; j < 3; ++j)
+        if (!std::isfinite(g.normals[i][j]))
+          ++bad_normal;
+    EXPECT_EQ(bad_normal, 0) << "mesh type " << mt << ": non-finite normals";
+  }
+}
+
 TEST_F(LbieMesherTest, HexaDoMeshGeoFlow) {
   volume v = make_sphere_volume(ctx, 17, 0.5);
   LBIE::geoframe g = run_do_mesh(v, 0.0f, 0.0f, kDefaultErr, kDefaultErrIn, LBIE::geoframe::HEXA,
@@ -424,12 +464,10 @@ TEST_F(LbieMesherTest, HexaDoMeshOptimize) {
   LBIE::geoframe g = run_do_mesh(v, 0.0f, 0.0f, kDefaultErr, kDefaultErrIn, LBIE::geoframe::HEXA,
                                  LBIE::Mesher::OPTIMIZATION, 1);
   EXPECT_GT(g.numquads, 0);
-  // OPTIMIZATION is subject to the same pre-existing zero-area-division NaN
-  // bug as the geometric_flow_* improvement paths (see
-  // expect_geoframe_topology_valid): it produces finite coords on x86_64 and
-  // arm64 Debug, but a couple of NaN vertices on arm64 Release. Check only
-  // structural validity, matching the other improvement-path tests here.
-  expect_geoframe_topology_valid(g);
+  // This used to check only structure: arm64 Release left a couple of NaN vertices. Octree::getGrad
+  // read v1[3], v2[3] and v3[3] of float[3] arrays (AddressSanitizer: stack-buffer-overflow here),
+  // and v3[3] could be the uninitialized point the line search writes next. Its indices are fixed.
+  expect_geoframe_valid(g);
 }
 
 // ---------------------------------------------------------------------------

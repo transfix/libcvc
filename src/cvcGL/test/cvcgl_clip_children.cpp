@@ -555,7 +555,6 @@ void testRenderFollow(cvc::app &app) {
 } // namespace
 
 int main() {
-  disableSwapThrottle();
   installErrorCounter();
   cvc::app app;
   testPlanes(app);

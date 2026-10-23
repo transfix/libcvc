@@ -76,3 +76,4 @@ inc/cvc/config.h
 __pycache__/
 *.py[cod]
 *.pyo
+deps-extra/

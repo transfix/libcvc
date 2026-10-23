@@ -21,6 +21,7 @@
 #include <cvc/ariadne/scene_adapter.h> // cvc::ariadne::SceneAdapter (optional)
 #include <functional>
 #include <map>
+#include <memory>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -67,12 +68,24 @@ public:
   void register_async_verb(const std::string &name, const std::string &done_channel,
                            std::function<std::string()> work);
 
+  // The document's own command line: everything after its path (doc_args.h). load() publishes
+  // it as the read-only <prefix>.argv before init: runs and, when the document declares an args:
+  // block, parses it into <prefix>.args.<name>. `invocation` starts the usage text (e.g. "ari run
+  // doc.ari"; empty = the document path). With `validate` false (a `check`), argv is not checked
+  // against the block and declared arguments take their defaults.
+  void set_document_args(std::vector<std::string> argv, std::string invocation = std::string(),
+                         bool validate = true);
+
   // --- document ---
 
   // Load + mount a .ari document, running its init:/on_* scripts and (via the SceneAdapter,
   // if any) realizing its scene under the state prefix. Returns non-fatal warnings; THROWS
-  // std::runtime_error on a fatal load (min_libcvc gate, parse error, no yaml support).
+  // std::runtime_error on a fatal load (min_libcvc gate, parse error, no yaml support), and
+  // document_args_error when its arguments do not match its args: block or ask for --help.
   std::vector<std::string> load(const std::string &path);
+
+  // Whether the last load()ed document declares an args: block.
+  bool has_args_block() const;
 
   // Mount a programmatically-built widget tree instead of a file. Applied next frame.
   void set_root(Widget root);
@@ -96,7 +109,7 @@ public:
   bool post_signal(const std::string &signal, const std::string &source = "host");
 
   // --- diagnostics / capabilities ---
-  std::vector<std::string> take_warnings(); // reactive read-lane diagnostics from the last render
+  std::vector<std::string> take_warnings(); // reactive read-lane diagnostics since the last call
   bool reload_if_changed();                 // §12.5 hot reload if a watched source changed
   static bool have_yaml();                  // can load a YAML .ari?
 
@@ -112,8 +125,19 @@ private:
   std::map<std::string, std::int64_t> stamps_;
   bool quit_ = false;
   bool intrinsicsRegistered_ = false;
-  std::vector<std::pair<std::string, std::function<void()>>> syncVerbs_;
-  std::vector<std::tuple<std::string, std::string, std::function<std::string()>>> asyncVerbs_;
+  // The host verbs, shared with the program-lane provider so a verb registered after the first
+  // is still bound when the next program env is built. Emptied by the destructor: the provider
+  // lives on in the process-wide registry, and must not reach this AppRuntime's handlers after it.
+  struct Verbs {
+    std::vector<std::pair<std::string, std::function<void()>>> sync;
+    std::vector<std::tuple<std::string, std::string, std::function<std::string()>>> async;
+  };
+  std::shared_ptr<Verbs> verbs_;
+  std::vector<std::string> pendingWarnings_; // read-lane diagnostics drain() collected
+  std::vector<std::string> docArgv_;         // the document's command line (set_document_args)
+  std::string invocation_;
+  bool validateArgs_ = true;
+  bool hasArgsBlock_ = false;
 };
 
 } // namespace ariadne

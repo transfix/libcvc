@@ -32,6 +32,7 @@
 #ifndef __CVC_NAV_DIFF_ROLLOUT_H__
 #define __CVC_NAV_DIFF_ROLLOUT_H__
 
+#include <cvc/nav/detail/nav_potential.h>
 #include <math.h>
 
 #if defined(__CUDACC__)
@@ -243,6 +244,18 @@ CVC_HD inline void surr_step_bwd(const field &f, float ox, float oy, float vx, f
   goy += sdoy;
 }
 
+// U_nav at o for the force surr_step and bike_control apply (detail/nav_potential.h): the goal
+// spring and the SDF barrier, with the coefficients held fixed. Damping is not part of it.
+CVC_HD inline potential_terms surr_potential(const field &f, float ox, float oy, float gx, float gy,
+                                             float al, float be, float rr, float d_hat) {
+  const sample s = sample_fwd(f, ox, oy);
+  potential_terms u;
+  const float dx = ox - gx, dy = oy - gy;
+  u.goal = 0.5f * be * (dx * dx + dy * dy);
+  u.barrier = al * detail::ipc_b(s.phi - rr, d_hat);
+  return u;
+}
+
 // ── BICYCLE rollout step (deployment integrator, differentiated) ─────────────
 // State (o, th, sp). Forward = one substep of bicycle_rollout (drive.cpp).
 struct bike_veh {
@@ -267,9 +280,14 @@ struct ext_in {
 // a_cmd), with every governor applied. The lateral-acceleration cap on the steering reads the
 // speed the kinematic plant would reach, spi + hdt * a_cmd clamped to [sp_min, vmax]; a dynamic
 // plant (dyn_bike.h) takes the same commands.
+//
+// `force`, when given, receives the conservative force the commands are made from, F_bar +
+// F_goal (= -grad surr_potential), as (Fx, Fy). It is written only; the commands do not change.
+// `ext`, when given, is an external force joined to it (ext_in); `force` stays F_bar + F_goal.
 CVC_HD inline void bike_control(const field &f, float ox, float oy, float thi, float spi, float gx,
                                 float gy, float al, float be, float ga, const bike_veh &v,
-                                float &delta_cmd, float &a_cmd, const ext_in *ext = nullptr) {
+                                float &delta_cmd, float &a_cmd, float *force = nullptr,
+                                const ext_in *ext = nullptr) {
   const float rr = v.rr, d_hat = v.d_hat, vmax = v.vmax, L = v.L, dmax = v.delta_max;
   const float a_max = v.a_max, a_lat_max = v.a_lat_max, k_steer = v.k_steer, hdt = v.hdt;
   const float tan_dmax = tanf(dmax);
@@ -283,6 +301,10 @@ CVC_HD inline void bike_control(const field &f, float ox, float oy, float thi, f
   const float Fbar_x = -(al * ipc) * s.nx, Fbar_y = -(al * ipc) * s.ny;
   const float Fgoal_x = -be * (ox - gx), Fgoal_y = -be * (oy - gy);
   float Fx = Fbar_x + Fgoal_x, Fy = Fbar_y + Fgoal_y;
+  if (force) {
+    force[0] = Fx;
+    force[1] = Fy;
+  }
   if (ext) {
     Fx = Fx + ext->fx;
     Fy = Fy + ext->fy;
@@ -372,7 +394,7 @@ CVC_HD inline void bike_step(const field &f, float ox, float oy, float thi, floa
                              float gy, float al, float be, float ga, const bike_veh &v, float &ox1,
                              float &oy1, float &thi1, float &spi1, const ext_in *ext = nullptr) {
   float delta_cmd, a_cmd;
-  bike_control(f, ox, oy, thi, spi, gx, gy, al, be, ga, v, delta_cmd, a_cmd, ext);
+  bike_control(f, ox, oy, thi, spi, gx, gy, al, be, ga, v, delta_cmd, a_cmd, nullptr, ext);
   bike_plant(ox, oy, thi, spi, delta_cmd, a_cmd, v, ox1, oy1, thi1, spi1);
 }
 

@@ -23,12 +23,14 @@
 #include <cvc/ariadne/stream/stream.h>
 #include <cvc/ariadne/stream/stream_bridge.h>
 #include <cvc/ariadne/stream/stream_channel.h>
+#include <cvc/ariadne/stream/stream_relay.h> // SFU relay (room_relay_tick)
 #include <cvc/core/app.h>
 #include <cvc/state/state_cluster_shard.h>
 #include <cvc/state/state_stream_transport_grpc.h>
 #include <cvc/state/state_transport_inproc.h>
 #include <gtest/gtest.h>
 #include <memory>
+#include <set>
 #include <thread>
 #include <vector>
 
@@ -133,4 +135,125 @@ TEST(RoomMedia, AudioPublishSubscribeCrossesNodes) {
   state_tp.unregister_shard(&sB);
   sA.detach();
   sB.detach();
+}
+
+// SFU (roadmap §7): the publisher pushes its stream to a RELAY and advertises the relay as its
+// source; a subscriber pulls the relayed copy. The relay is a THIRD node that must wire the stream
+// (ingest + egress) before any subscriber pulls — otherwise the pull reaches the relay before it is
+// serving that token, falls back to a dead sink, and never delivers a frame (pull_from succeeds on
+// the open-send alone, so the subscriber wrongly believes it is live). The fix: the relay marks the
+// descriptor "ready" in the room tree only once it has wired the stream (room_relay_tick), and
+// room_subscribe GATES the pull on that marker. This test proves BOTH the gate (a subscribe before
+// the relay is ready is refused, not a silently-dead proxy) AND end-to-end A -> relay -> B
+// delivery.
+TEST(RoomMedia, SfuRelayReadyGateAndDelivery) {
+  cvc::app aA, aB, aR;
+
+  // State plane: A, B, and the RELAY all share the room tree over inproc (pump_all).
+  cvc::state_transport_inproc state_tp;
+  cvc::state_cluster_shard sA(aA, "C", "A"), sB(aB, "C", "B"), sR(aR, "C", "R");
+  sA.attach();
+  sB.attach();
+  sR.attach();
+  state_tp.register_shard(&sA);
+  state_tp.register_shard(&sB);
+  state_tp.register_shard(&sR);
+
+  // Media plane: the RELAY runs a gRPC StreamTransport server with a stream_relay (built BEFORE
+  // start, so its router + open-handler are installed); A and B are clients.
+  cvc::stream_transport_grpc transportR;
+  cs::stream_relay relay(aR, transportR);
+  transportR.start("127.0.0.1:0");
+  ASSERT_TRUE(transportR.is_running());
+  const std::string relayEndpoint = transportR.listen_address();
+
+  cvc::stream_transport_grpc transportA;
+  cs::stream_bridge bridgeA(aA, transportA);
+  cvc::stream_transport_grpc transportB;
+  cs::stream_bridge bridgeB(aB, transportB);
+
+  // A joins and PUBLISHES its audio in SFU mode: serve() pushes frames to the relay, and the
+  // advertised endpoint is the relay (not A). A does NOT mark the stream ready — the relay will.
+  conf::room_join(aA, "standup", "A", "Alice");
+  cs::stream_params pA;
+  pA.id = "audio";
+  pA.root_path = "A";
+  pA.format.kind = cs::frame_kind::audio_pcm;
+  pA.format.codec = "f32";
+  pA.format.sample_rate = 48000;
+  pA.format.channels = 1;
+  pA.format.bytes = cs::audio_f32_bytes(1024, 1);
+  pA.subscriber_depth = 8;
+  pA.expected_subscribers = 2;
+  std::unique_ptr<cs::stream> streamA = cs::stream::open(aA, pA);
+  ASSERT_NE(streamA, nullptr);
+  ASSERT_TRUE(conf::room_publish(aA, bridgeA, /*local_endpoint=*/"unused:0", "standup", "A",
+                                 "audio", *streamA, /*relay_endpoint=*/relayEndpoint));
+  state_tp.pump_all();
+
+  conf::room_join(aB, "standup", "B", "Bob");
+
+  // BEFORE the relay wires the stream, a subscribe MUST be refused (the ready gate). Without the
+  // gate this returns a live-looking proxy that silently never delivers a frame — the exact SFU
+  // bug.
+  ASSERT_EQ(conf::room_subscribe(aB, bridgeB, "standup", "A", "audio"), nullptr)
+      << "subscribe must be gated until the relay marks the stream ready";
+
+  // The relay picks up A's descriptor, opens an ingest+egress proxy, and marks the stream ready.
+  std::set<std::string> relayed;
+  conf::room_relay_tick(aR, "standup", relay, relayed);
+  EXPECT_EQ(relay.stream_count(), 1u) << "the relay should wire exactly A's one stream";
+  state_tp.pump_all(); // publish the relay's ready marker to A and B
+
+  // NOW B subscribes: it resolves A's descriptor (endpoint = the relay) and pulls the relayed copy.
+  std::unique_ptr<cs::stream> proxyB = conf::room_subscribe(aB, bridgeB, "standup", "A", "audio");
+  ASSERT_NE(proxyB, nullptr) << "subscribe should succeed once the relay is ready";
+  EXPECT_EQ(proxyB->token(), streamA->token()) << "proxy shares the publisher's token for routing";
+
+  std::shared_ptr<cs::subscription> subB = proxyB->channel().subscribe(cs::deliver_mode::ring, 8);
+  ASSERT_NE(subB, nullptr);
+
+  // Produce continuously into A (the egress subscriptions along A->relay and relay->B come up
+  // asynchronously, so early frames may be missed); each frame is self-verifying from its first
+  // byte: data[j] == (seq + j) & 0xff. Drain B's proxy until several intact frames have crossed.
+  const std::size_t chunk = cs::audio_f32_bytes(1024, 1);
+  const int want = 3;
+  std::vector<std::vector<unsigned char>> got;
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  int seq = 0;
+  while (static_cast<int>(got.size()) < want && std::chrono::steady_clock::now() < deadline) {
+    auto buf = std::make_shared<std::vector<unsigned char>>(chunk);
+    for (std::size_t j = 0; j < chunk; ++j)
+      (*buf)[j] = static_cast<unsigned char>((seq + j) & 0xff);
+    streamA->channel().publish_external(buf->data(), buf->size(), 0.02 * seq, buf);
+    ++seq;
+    cs::frame_ptr f;
+    while (subB->try_pop(f) && f && static_cast<int>(got.size()) < want) {
+      ASSERT_EQ(f->size, chunk) << "frame truncated crossing the relay";
+      const unsigned char s0 = f->data[0];
+      for (std::size_t j = 0; j < chunk; ++j)
+        ASSERT_EQ(f->data[j], static_cast<unsigned char>((s0 + j) & 0xff))
+            << "frame corrupted crossing A -> relay -> B at byte " << j;
+      got.emplace_back(f->data, f->data + f->size);
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  ASSERT_GE(static_cast<int>(got.size()), want) << "audio did not cross A -> relay -> B";
+
+  // Teardown: client bridges (close A's push + B's pull) first, then the relay (stops its bridge +
+  // drops proxies), then the transports, then the streams, then the shards.
+  bridgeA.stop();
+  bridgeB.stop();
+  relay.stop();
+  streamA.reset();
+  proxyB.reset();
+  transportA.stop();
+  transportB.stop();
+  transportR.stop();
+  state_tp.unregister_shard(&sA);
+  state_tp.unregister_shard(&sB);
+  state_tp.unregister_shard(&sR);
+  sA.detach();
+  sB.detach();
+  sR.detach();
 }

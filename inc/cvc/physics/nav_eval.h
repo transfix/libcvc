@@ -20,8 +20,9 @@
 // scale: `wheelbase` normalized units are its wheelbase, so S = wheelbase / d.wheelbase() per
 // metre. A physics world gets the scene's ground and its occupied cells as static boxes, one per
 // row run; a sim_world of the scene's numbers (rr, d_hat, dt, vmax) drives `agents` vehicles
-// through a nav_plant from scattered starts to goals for `ticks`, once per seed. The result is
-// the mean fraction that reached their goals; `per_seed` gets each seed's, in `seeds` order.
+// through a nav_plant from scattered starts to goals for `ticks`, once per seed (or to goals near
+// their starts: plant_reach_options::goal_max). The result is the mean fraction that reached their
+// goals; `per_seed` gets each seed's, in `seeds` order.
 //
 // It plans with the scene's numbers by default (plan_with_vehicle false), as both the policy
 // and its training did. Needs a physics backend with vehicles (Jolt); throws otherwise.
@@ -51,6 +52,11 @@ struct plant_reach_options {
   // Seeds run in parallel, each in its own world and sim_world: 0 = as many at once as the
   // hardware has threads, 1 = one at a time. A seed's result is the same either way.
   int threads = 0;
+  // Local goals (normalized units): goal_max > 0 draws the starts from the scene's largest free
+  // component and each goal goal_min..goal_max from its start (training_scene::
+  // sample_starts_goals), so reach is scored at the goal distances a policy is deployed at.
+  // 0 = scattered starts and goals anywhere free, the default.
+  float goal_min = 0.0f, goal_max = 0.0f;
 };
 
 double reach_on_plant(const cvc::nav::coef_mlp &policy, const cvc::nav::training_scene &scene,

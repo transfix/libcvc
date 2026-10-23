@@ -11,15 +11,16 @@
 #include <cstdint>
 #include <cvc/ariadne/ariadne.h>              // register_action_intrinsics
 #include <cvc/ariadne/stream/audio_sources.h> // tone_source / gain_source / mix_source (the pure graph)
+#include <cvc/ariadne/stream/muted_source.h> // muted_source (mic/cam on-off blanks frames at source)
 #include <cvc/ariadne/stream/stream.h>
 #include <cvc/ariadne/stream/synthetic_source.h>
 #include <cvc/ariadne/stream_intrinsics.h> // cvc::ariadne::document_stream (the doc stream table)
 #include <cvc/gl/ariadne/media_verbs.h>
 #include <cvc/gl/playback/audio_output.h> // audio_output_spec (the owning player's sink spec)
 #include <cvc/gl/playback/audio_stream_player.h> // the C++ core behind (stream-play-audio)
-#include <cvc/state/state_exec/builtins.h>   // register_fn, environment
-#include <cvc/state/state_exec/intrinsics.h> // intrinsics_context, document_scope
-#include <cvc/state/state_exec/types.h>      // value_t, make_dict, dict_ptr
+#include <cvc/state/state_exec/builtins.h>       // register_fn, environment
+#include <cvc/state/state_exec/intrinsics.h>     // intrinsics_context, document_scope
+#include <cvc/state/state_exec/types.h>          // value_t, make_dict, dict_ptr
 #include <memory>
 #include <span>
 #include <string>
@@ -27,6 +28,10 @@
 #include <utility>
 #include <vector>
 
+// jpeg_encode_source is turbojpeg-based, NOT SDL — the synthetic (hardware-free) camera path
+// compresses with it too, so it must be visible without CVC_ENABLE_SDL (e.g. the no-SDL Windows
+// build). Only the actual SDL device sources below are guarded.
+#include <cvc/gl/capture/jpeg_encode_source.h> // jpeg (codec "mjpeg") video compression
 #ifdef CVC_ENABLE_SDL
 #include <cvc/gl/capture/audio_source.h>  // open_audio_capture (SDL3; the mic device path)
 #include <cvc/gl/capture/camera_source.h> // open_camera (SDL3; the camera device path)
@@ -184,13 +189,15 @@ void register_media_intrinsics() {
           // w/h, cadence hz, and an explicit synthetic:#t override (used by headless tests).
           long device = -1, w = 640, h = 480;
           double hz = 30.0;
-          bool synthetic = false;
+          bool synthetic = false, jpeg = false;
           if (args.size() >= 2) {
             device = as_int(dict_get(args[1], "device"), -1);
             w = as_int(dict_get(args[1], "w"), 640);
             h = as_int(dict_get(args[1], "h"), 480);
             hz = as_num(dict_get(args[1], "hz"), 30.0);
             synthetic = as_bool(dict_get(args[1], "synthetic"), false);
+            jpeg =
+                as_bool(dict_get(args[1], "jpeg"), false); // encode to JPEG (stream codec "mjpeg")
           }
           if (w <= 0 || h <= 0)
             return err("stream-capture-camera: 'w' and 'h' must be positive");
@@ -203,8 +210,16 @@ void register_media_intrinsics() {
             // Device path: open the camera and adopt its frame_source. open_camera() and the
             // resulting stream's teardown touch the SDL camera subsystem on this (owner/action)
             // thread — the same thread stream::close() runs on, so the contract holds.
+            // Request the stream's own w/h/hz as a size budget. For the JPEG path (conference
+            // video), native_aspect=true so the camera's frames keep the device's native aspect
+            // ratio within that budget (a portrait phone camera stays portrait, not stretched to w
+            // x h) and the MJPEG self-describes the real size; for a raw rgba stream the frames are
+            // stretched to exactly w x h to match the fixed-size slab. getUserMedia's delivered
+            // size is unknown up front (it resolves asynchronously), so the fit is computed per
+            // frame.
             cvc::gl::capture::camera_open cam =
-                cvc::gl::capture::open_camera(static_cast<int>(device));
+                cvc::gl::capture::open_camera(static_cast<int>(device), static_cast<int>(w),
+                                              static_cast<int>(h), hz, /*native_aspect=*/jpeg);
             if (!cam.source)
               return err("stream-capture-camera: could not open camera device " +
                          std::to_string(device) + " (no such device, or permission not granted)");
@@ -222,6 +237,18 @@ void register_media_intrinsics() {
             source = std::make_unique<sx::synthetic_source>(static_cast<int>(w),
                                                             static_cast<int>(h), used_hz);
           }
+
+          // Mute gate (stream-set-muted): blank the rgba8 frames while this stream is muted.
+          // Wrapped BEFORE the JPEG encoder so a muted frame is zeroed rgba that encodes to a black
+          // JPEG.
+          source = std::make_unique<sx::muted_source>(std::move(source), s->mute_flag());
+
+          // Compress to JPEG when requested — the publisher side of conference video compression
+          // (see jpeg_encode_source). The stream must be opened with codec "mjpeg" and a byte slab
+          // >= the inner rgba8 size; the subscriber's stream_view decodes it.
+          if (jpeg)
+            source = std::make_unique<cvc::gl::capture::jpeg_encode_source>(
+                std::move(source), static_cast<int>(w), static_cast<int>(h));
 
           // Attach + start the producer thread on this (owner) thread. start_producer replaces any
           // existing producer (old stopped+joined first) and is a no-op if the source is unsized or
@@ -303,6 +330,8 @@ void register_media_intrinsics() {
           // Chunk cadence: sample_rate / frames_per_chunk pulls per second (the natural audio
           // rate). The source's frame_bytes (frames*ch*4) MUST match the stream's open bytes, else
           // start_producer rejects it (the frames then never flow).
+          // Mute gate (stream-set-muted): blank the f32 chunks while muted = silence.
+          source = std::make_unique<sx::muted_source>(std::move(source), s->mute_flag());
           const double hz = static_cast<double>(rate) / static_cast<double>(frames);
           s->start_producer(std::move(source), hz);
           return se::make_dict({{"ok", se::value_t(true)},
@@ -354,6 +383,33 @@ void register_media_intrinsics() {
           return se::make_dict({{"ok", se::value_t(true)},
                                 {"token", se::value_t(token)},
                                 {"playing", se::value_t(playing)}});
+        });
+
+    // (stream-set-muted TOKEN BOOL) -> { ok token muted }. Mute/unmute a captured stream in place:
+    // the attached source is a muted_source bound to the stream's mute_flag(), so this just flips
+    // the atomic. A muted producer keeps publishing but its frames are blanked (silence for f32
+    // audio, a black JPEG for mjpeg video) — peers stay subscribed and the cadence is unchanged.
+    // The UX mic/cam on-off toggles call this; unknown/closed tokens return { ok #f error }.
+    se::builtins::register_fn(
+        env, "stream-set-muted", [doc](std::span<const se::value_t> args) -> se::value_t {
+          if (!doc)
+            return err(
+                "stream-set-muted: no document scope (call from an action or resident lane)");
+          if (args.size() < 2)
+            return err("stream-set-muted: expects (stream-set-muted TOKEN BOOL)");
+          const std::string token = handle_token(args[0]);
+          if (token.empty())
+            return err(
+                "stream-set-muted: TOKEN (a stream handle dict or token string) is required");
+          sx::stream *s = cvc::ariadne::document_stream(doc, token);
+          if (!s)
+            return err("stream-set-muted: no open stream named '" + token +
+                       "' in this document — call (stream-open) first");
+          const bool m = as_bool(&args[1], false);
+          s->set_muted(m);
+          return se::make_dict({{"ok", se::value_t(true)},
+                                {"token", se::value_t(token)},
+                                {"muted", se::value_t(m)}});
         });
   });
 }

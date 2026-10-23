@@ -39,6 +39,7 @@
 #define __CVC_NAV_SIM_WORLD_H__
 
 #include <cstdint>
+#include <cvc/nav/belief_material.h>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/drive.h>
 #include <cvc/nav/material.h>
@@ -147,13 +148,14 @@ public:
   void set_thread_pool(cvc::thread_pool *pool) { pool_ = pool; }
 
   // Inject a generic external per-agent force into the drive. When set
-  // (ext.sample != nullptr) step() routes the (non-material) drive through
-  // drive_step_ext, summing this force into the SAME accumulator as F_rep/F_goal
-  // (and the steering bias when ext.steer) — the sanctioned ext_force port
-  // (drive.h). The core stays physics-agnostic: a downstream consumer (with its
-  // own domain-specific force) supplies the callback + its state via ext.user,
-  // which must outlive stepping. A null sample (the default) is byte-identical to
-  // the plain drive. No effect on the material path (drive_step_material).
+  // (ext.sample != nullptr) step() routes the drive through drive_step_ext, summing
+  // this force into the SAME accumulator as F_rep/F_goal (and the steering bias when
+  // ext.steer) — the sanctioned ext_force port (drive.h). With a material stack also
+  // set, step() fuses the two through drive_step_material_ext: the ext force joins the
+  // material drive's accumulator and steering bias the same way. The core stays
+  // physics-agnostic: a downstream consumer (with its own domain-specific force)
+  // supplies the callback + its state via ext.user, which must outlive stepping. A
+  // null sample (the default) is byte-identical to the plain drive.
   void set_ext_force(const ext_force &ext) { ext_ = ext; }
   void clear_ext_force() { ext_ = ext_force{}; }
 
@@ -360,8 +362,47 @@ public:
   // as its belief plane, so every map_id must be < `planes` (throws otherwise).
   void set_material(const float *risk_raw, const std::uint8_t *hard, const material_config &mc,
                     int planes = 1);
-  void clear_material() { mat_on_ = false; }
+  void clear_material() {
+    mat_on_ = false;
+    mat_belief_on_ = false;
+  }
   bool has_material() const { return mat_on_; }
+
+  // ── belief (observed) material (cvc/nav/belief_material.h) ──────────────────
+  // set_material's planes built from what each belief plane has SEEN rather than from the
+  // whole map (docs/roadmap/NAV-BELIEF-MATERIAL-ROADMAP.md). `risk_raw`/`hard` are the truth,
+  // ONE [rows,cols] world plane (material is world state). One material + gate plane is kept
+  // per belief plane (M of them; agents index it by map_id):
+  //   - its seen mask is the sense ray-cast's field of view (== ever_seen(m) at the default
+  //     range; a shorter bp.material_range_m keeps only the cells within it), or the range
+  //     disc with bp.rule == seen_rule::disc;
+  //   - its planes are material_build of the truth where seen and bp's pinned values elsewhere
+  //     (belief_material_inputs);
+  //   - its gate surface is hard_b | belief_occ(m) | (unseen, while bp.unknown_gate_hard)
+  //     (belief_gate_surface): the plane's own planning raster, not truth.
+  // A plane's planes are re-derived on a sense tick on which its mask grew, its gate surface
+  // also when belief_occ(m) changed, at most once every `material_every` sense ticks (a change
+  // in between waits for the next allowed tick). The drive and the gate are unchanged.
+  // Replaces set_material and is replaced by it; clear_material() turns both off. Throws
+  // std::invalid_argument under freeze_sense (nothing is ever seen), for invalid bp, for a
+  // bp.material_range_m above cfg.range_m, or for material_every < 1. Memory: about 36 bytes
+  // per cell per belief plane (private belief over many agents adds up).
+  void set_material_belief(const float *risk_raw, const std::uint8_t *hard,
+                           const material_config &mc, const belief_material_params &bp,
+                           int material_every = 1);
+  bool has_material_belief() const { return mat_on_ && mat_belief_on_; }
+  // Plane m's material seen mask [rows*cols] 0/1; null without belief material or for an
+  // out-of-range m.
+  const std::uint8_t *material_seen(int m) const;
+  // Plane m's derived material planes [6,rows,cols] (material_stack's channels), its gate
+  // surface [rows*cols] 0/1 and that surface's metres clearance [rows*cols]; null without
+  // material or for an out-of-range m. With set_material, m indexes its `planes`.
+  const float *material_plane_data(int m) const;
+  const std::uint8_t *material_gate_hard(int m) const;
+  const float *material_clear_m(int m) const;
+  // Bumps once per re-derivation of plane m's belief material planes (its seen mask grew);
+  // -1 without belief material or for an out-of-range m.
+  std::int32_t material_version(int m) const;
   // LIVE-tune the material force weights without re-deriving the planes. lam_soft (the soft-risk
   // reroute weight) and lam_hard (the hard-hazard weight) are read fresh every step() from mat_cfg_
   // (they never enter plane derivation — unlike sigma / hard_margin), so mutating them here takes
@@ -576,6 +617,19 @@ private:
   std::vector<float> mat_lam_soft_, mat_lam_hard_; // [n] per-tick columns
   std::vector<std::uint8_t> mat_gate_active_;      // [n]
   double mat_hard_margin_m_ = 0.0;
+  // belief material (set_material_belief; inert while mat_belief_on_ == false)
+  bool mat_belief_on_ = false;
+  belief_material_params mat_bp_;
+  int mat_every_ = 1;
+  std::vector<float> mat_truth_risk_;                    // [H,W] the truth risk_raw
+  std::vector<std::uint8_t> mat_truth_hard_;             // [H,W] the truth hard
+  std::vector<std::uint8_t> mat_seen_;                   // [M,H,W] seen masks
+  std::vector<std::uint8_t> mat_dirty_, mat_gate_dirty_; // [M] a re-derivation is due
+  std::vector<std::int32_t> mat_version_;                // [M]
+  std::vector<long> mat_last_build_;                     // [M] sense tick of the last one
+  long mat_sense_ticks_ = 0;
+  // Re-derive plane m's belief material planes (`planes`) and/or its gate surface (`gate`).
+  void derive_belief_material(int m, bool planes, bool gate);
 
   // the plant (set_plant; inert while plant_ is null)
   vehicle_plant *plant_ = nullptr;

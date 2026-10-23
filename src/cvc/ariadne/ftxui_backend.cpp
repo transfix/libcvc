@@ -30,13 +30,16 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <cvc/ariadne/app_runtime.h>
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/ftxui_backend.h>
 #include <cvc/ariadne/input.h> // InputEvent::Kind, for forwarding pointer events
 #include <cvc/image/image.h>
+#include <iostream>
 #include <map>
 #include <memory>
+#include <random>
 #include <set>
 #include <string>
 #include <thread>
@@ -243,6 +246,173 @@ private:
   FtxuiBackend::Options::ImageColor mode_;
 };
 
+using ImageMode = FtxuiBackend::Options::ImageColor;
+
+// The UTF-8 encoding of U+10EEEE, the kitty placeholder's base character.
+constexpr char kPlaceholderBase[] = "\xF4\x8E\xBB\xAE";
+
+// A block of a Kitty image's cells shown by one placement. A placement addresses at most
+// gfx::kKittyMaxCells rows and columns (one diacritic each), so a bigger image goes as tiles.
+struct KittyTile {
+  std::string key;                        // what the backend records it sent under
+  std::uint32_t id = 0;                   // the image id the placeholders' colour names
+  int c0 = 0, r0 = 0, cols = 0, rows = 0; // its cells within the image
+  int px = 0, py = 0, pw = 0, ph = 0;     // its pixels within the raster
+};
+
+// An image drawn with pixel graphics in one walk: what its node draws and, once the frame is laid
+// out, where it went (and, for Sixel, which of its cells still show it).
+struct PixelGfx {
+  std::string key; // stable across frames: the leaf id, or "bg|" for the backdrop
+  ImageMode mode = ImageMode::Kitty;
+  cvc::image raster; // the pixels to send, RGB8
+  cvc::image cells;  // Kitty: one pixel per cell (the cells' colour); Sixel: two (the underlay)
+  long gen = 0;      // the published picture's generation, for "unchanged since it was sent"
+  int cols = 0, rows = 0;
+  int cell_w = 0, cell_h = 0; // the raster's pixels per cell (Sixel)
+  std::vector<KittyTile> tiles;
+  bool drawn = false;
+  fx::Box box{};                      // where its node was laid out (may reach past the screen)
+  std::vector<unsigned char> visible; // Sixel: cols x rows, the cells nothing covers
+  int screen_h = 0;
+
+  const KittyTile &tile(int c, int r) const {
+    const int k = gfx::kKittyMaxCells, across = (cols + k - 1) / k;
+    return tiles[static_cast<std::size_t>((r / k) * across + c / k)];
+  }
+  const unsigned char *cell_rgb(int c, int r) const { // Kitty: cell (c, r); Sixel: half-row r
+    return std::as_const(cells).data() + (static_cast<std::size_t>(r) * cells.width() + c) * 3;
+  }
+};
+
+fx::Color id_color(std::uint32_t id) {
+  return fx::Color::RGB((id >> 16) & 0xFF, (id >> 8) & 0xFF, id & 0xFF);
+}
+
+// An image in pixel graphics. Kitty: placeholder cells, which the terminal covers with the image
+// the backend sends out of band, each cell's background its average colour (what shows until the
+// image arrives). Sixel: the half-block picture, which the bitmap is drawn over after the frame.
+class PixelImage : public fx::Node {
+public:
+  explicit PixelImage(std::shared_ptr<PixelGfx> g) : g_(std::move(g)) {}
+
+  void ComputeRequirement() override {
+    requirement_.min_x = g_->cols;
+    requirement_.min_y = g_->rows;
+  }
+
+  void Render(fx::Screen &screen) override {
+    PixelGfx &g = *g_;
+    g.drawn = true;
+    g.box = box_;
+    for (int r = 0; r < g.rows && box_.y_min + r <= box_.y_max; ++r)
+      for (int c = 0; c < g.cols && box_.x_min + c <= box_.x_max; ++c) {
+        fx::Cell &cell = screen.CellAt(box_.x_min + c, box_.y_min + r); // clipped by the stencil
+        cell = fx::Cell();
+        if (g.mode == ImageMode::Kitty) {
+          const KittyTile &t = g.tile(c, r);
+          const unsigned char *p = g.cell_rgb(c, r);
+          cell.character = gfx::kitty_placeholder(r - t.r0, c - t.c0);
+          cell.foreground_color = id_color(t.id);
+          cell.background_color = fx::Color::RGB(p[0], p[1], p[2]);
+        } else {
+          const unsigned char *top = g.cell_rgb(c, 2 * r), *bot = g.cell_rgb(c, 2 * r + 1);
+          cell.character = "\xe2\x96\x80"; // ▀
+          cell.foreground_color = fx::Color::RGB(top[0], top[1], top[2]);
+          cell.background_color = fx::Color::RGB(bot[0], bot[1], bot[2]);
+        }
+      }
+  }
+
+private:
+  std::shared_ptr<PixelGfx> g_;
+};
+
+// Drawn last, over the whole frame: settles what the layers above each pixel image did to it.
+//   - Kitty: text drawn over placeholder cells keeps their foreground, the colour that names the
+//     image, so it gets a readable one; and an inverted placeholder (a menu bar's filler) would
+//     still show the image, so it becomes a blank.
+//   - Sixel: records which cells still show the underlay, so the bitmap skips covered cells; text
+//     and inverted cells over the underlay are settled as for Kitty.
+class PixelFinish : public fx::Node {
+public:
+  explicit PixelFinish(std::vector<std::shared_ptr<PixelGfx>> list) : list_(std::move(list)) {}
+
+  void ComputeRequirement() override { requirement_ = fx::Requirement{}; }
+
+  void Render(fx::Screen &screen) override {
+    for (const std::shared_ptr<PixelGfx> &gp : list_) {
+      PixelGfx &g = *gp;
+      if (!g.drawn)
+        continue;
+      g.screen_h = screen.dimy();
+      if (g.mode == ImageMode::Sixel)
+        g.visible.assign(static_cast<std::size_t>(g.cols) * g.rows, 0);
+      for (int r = 0; r < g.rows; ++r) {
+        const int y = g.box.y_min + r;
+        if (y < 0 || y > g.box.y_max || y >= screen.dimy())
+          continue;
+        for (int c = 0; c < g.cols; ++c) {
+          const int x = g.box.x_min + c;
+          if (x < 0 || x > g.box.x_max || x >= screen.dimx())
+            continue;
+          fx::Cell &cell = screen.CellAt(x, y);
+          if (g.mode == ImageMode::Kitty) {
+            const bool placeholder = cell.character.compare(0, 4, kPlaceholderBase) == 0;
+            if (placeholder && !cell.inverted)
+              continue;
+            const fx::Color id = id_color(g.tile(c, r).id);
+            if (placeholder)
+              cell.character = " ";
+            if (cell.foreground_color == id) {
+              const unsigned char *p = g.cell_rgb(c, r);
+              const int lum = (p[0] * 3 + p[1] * 6 + p[2]) / 10;
+              cell.foreground_color = lum > 140 ? fx::Color::Black : fx::Color::White;
+            }
+          } else {
+            const unsigned char *top = g.cell_rgb(c, 2 * r), *bot = g.cell_rgb(c, 2 * r + 1);
+            const fx::Color top_c = fx::Color::RGB(top[0], top[1], top[2]);
+            const bool half = cell.character == "\xe2\x96\x80";
+            g.visible[static_cast<std::size_t>(r) * g.cols + c] =
+                half && !cell.inverted && cell.foreground_color == top_c &&
+                cell.background_color == fx::Color::RGB(bot[0], bot[1], bot[2]);
+            // Text over the underlay, and an inverted underlay cell (a menu bar's filler), as for
+            // Kitty.
+            if (cell.foreground_color == top_c && (!half || cell.inverted)) {
+              if (half)
+                cell.character = " ";
+              const int lum = (bot[0] * 3 + bot[1] * 6 + bot[2]) / 10;
+              cell.foreground_color = lum > 140 ? fx::Color::Black : fx::Color::White;
+            }
+          }
+        }
+      }
+    }
+  }
+
+private:
+  std::vector<std::shared_ptr<PixelGfx>> list_;
+};
+
+// A hash of a pixel block, for "the frame published again is the frame already sent".
+std::uint64_t hash_pixels(const unsigned char *p, int w, int h, std::size_t stride) {
+  std::uint64_t x = 0x9E3779B97F4A7C15ull ^ ((std::uint64_t(w) << 32) | std::uint32_t(h));
+  const std::size_t row = static_cast<std::size_t>(w) * 3;
+  for (int y = 0; y < h; ++y) {
+    const unsigned char *s = p + static_cast<std::size_t>(y) * stride;
+    std::size_t i = 0;
+    for (; i + 8 <= row; i += 8) {
+      std::uint64_t v;
+      std::memcpy(&v, s + i, 8);
+      x = (x ^ v) * 0x100000001B3ull;
+      x ^= x >> 29;
+    }
+    for (; i < row; ++i)
+      x = (x ^ s[i]) * 0x100000001B3ull;
+  }
+  return x;
+}
+
 } // namespace
 
 struct FtxuiBackend::Impl {
@@ -258,6 +428,7 @@ struct FtxuiBackend::Impl {
     std::vector<fx::Elements> cells; // Grid: one list per cell
     Layout layout;                   // Grid
     std::vector<float> tracks;       // Grid: seeded row-split sizes (px)
+    std::vector<float> columns;      // Grid: seeded table column widths (px)
     std::string id;                  // Window / Menu
     std::string title;               // Window
     Size size;                       // Window: the authored size spec (min / max)
@@ -343,6 +514,9 @@ struct FtxuiBackend::Impl {
   std::vector<float> pending_tracks;
   bool have_tracks = false;
   std::vector<float> last_tracks;
+  std::vector<float> pending_columns;
+  bool have_columns = false;
+  std::vector<float> last_columns;
   int term_w = 80, term_h = 24;
 
   // ---- across frames ---------------------------------------------------------------------------
@@ -360,9 +534,17 @@ struct FtxuiBackend::Impl {
     std::string text;
     std::size_t cursor = 0; // byte offset, on a UTF-8 boundary
   };
+  // A pixel-mode image's resampled pixels, kept while the picture and its cells stay the same.
+  struct PixCache {
+    cvc::image raster; // at the size image_raster gives
+    cvc::image cells;  // raster per cell (PixelGfx::cells)
+    long gen = -1;
+  };
   struct Picture {
     cvc::image rgb;    // the published image as RGB8
     cvc::image scaled; // rgb resampled to the last drawn cell grid
+    long gen = 0;      // bumped by each set_image
+    PixCache px;       // the pixel modes' resampling
   };
   // A grid's track sizes in cells, kept across frames: `fixed` tracks hold `size` (seeded or
   // dragged); the rest lay out naturally.
@@ -405,6 +587,45 @@ struct FtxuiBackend::Impl {
   long z_top = 0;
   std::unordered_map<std::string, fx::Box> boxes; // node-based: reflect() keeps references
   std::map<std::string, Picture> images;
+  long image_gen = 0;
+
+  // ---- pixel graphics (Kitty / Sixel) ----------------------------------------------------------
+
+  TermGraphics term_gfx; // what the terminal draws (probed by run, or set by the host)
+  bool term_gfx_set = false;
+  PixCache background_px;                           // the backdrop's resampling
+  std::vector<std::shared_ptr<PixelGfx>> gfx_walk;  // pixel images of the walk being built
+  std::vector<std::shared_ptr<PixelGfx>> gfx_last;  // ... of the last walk finished
+  std::vector<std::shared_ptr<PixelGfx>> gfx_shown; // ... of the frame last drawn
+  bool drew = false; // run(): the renderer laid a frame out this iteration
+  // What the terminal holds, per Kitty tile key: the id its placeholders name and what was sent.
+  // A Kitty tile's images in the terminal, double-buffered. Re-sending a picture under the id the
+  // placeholders name makes the terminal drop the shown image for the whole transfer, so a picture
+  // that changes every frame (an animated scene behind the widgets) never shows at all: the cells
+  // only ever get their average colour. So a changed picture goes to the OTHER id, which nothing
+  // names yet, and the next layout switches the placeholders to it (kitty_id), by which time it
+  // has fully arrived; the picture after that reuses the first id. The first send, and a change of
+  // size, go to the id the placeholders already name.
+  struct KittySent {
+    std::uint32_t ids[2] = {0, 0};
+    int shown = 0;                // the slot the placeholders name
+    bool pending = false;         // ids[shown ^ 1] holds a newer picture: switch at the next layout
+    bool has[2] = {false, false}; // the slot holds an image in the terminal
+    long gen = -1;
+    std::uint64_t hash = 0; // of the latest picture sent (shown, or pending)
+    int w = 0, h = 0, cols = 0, rows = 0;
+    long frame = 0; // the last emit that drew it
+  };
+  std::map<std::string, KittySent> kitty;
+  std::uint32_t kitty_next = 0;
+  // Encoded Sixel images by image key and cell rectangle, while their picture stays the same.
+  struct SixelCached {
+    long gen = -1;
+    std::string bytes;
+    long frame = 0;
+  };
+  std::map<std::string, SixelCached> sixel_cache;
+  long gfx_frames = 0;
 
   // ---- the event the current walk handles ------------------------------------------------------
 
@@ -501,6 +722,239 @@ struct FtxuiBackend::Impl {
   bool pressed(const std::string &id) const { return !is_disabled() && press_id == id; }
   bool activated(const std::string &id) {
     return pressed(id) || key(id, "Return") || key(id, "Space");
+  }
+
+  // ---- pixel graphics --------------------------------------------------------------------------
+
+  // Options::image_color with Auto resolved. Hosted output is tvision's, so it stays half-blocks
+  // (Auto there means: colour, or the ramp on a terminal with none, decided as it draws).
+  ImageMode mode() const {
+    const ImageMode c = opt.image_color;
+    if (opt.hosted)
+      return c == ImageMode::Kitty || c == ImageMode::Sixel ? ImageMode::Auto : c;
+    if (c != ImageMode::Auto)
+      return c;
+    if (term_gfx.kitty)
+      return ImageMode::Kitty;
+    if (term_gfx.sixel && term_gfx.cell_w > 0 && term_gfx.cell_h > 0)
+      return ImageMode::Sixel; // a bitmap is placed in real pixels, so it needs the cell size
+    return ImageMode::Auto;
+  }
+  bool pixels() const {
+    const ImageMode md = mode();
+    return md == ImageMode::Kitty || md == ImageMode::Sixel;
+  }
+  int cell_w() const { return term_gfx.cell_w > 0 ? term_gfx.cell_w : opt.cell_px_w; }
+  int cell_h() const { return term_gfx.cell_h > 0 ? term_gfx.cell_h : opt.cell_px_h; }
+
+  void raster_size(int cols, int rows, ImageMode md, int &w, int &h) const {
+    if (md != ImageMode::Kitty && md != ImageMode::Sixel) {
+      w = std::max(1, cols);
+      h = std::max(1, 2 * rows);
+      return;
+    }
+    w = std::max(1, cols * cell_w());
+    h = std::max(1, rows * cell_h());
+    const double px = double(w) * double(h);
+    if (md == ImageMode::Kitty && opt.max_image_pixels > 0 && px > opt.max_image_pixels) {
+      const double k = std::sqrt(opt.max_image_pixels / px); // the terminal scales it back up
+      w = std::max(1, static_cast<int>(w * k));
+      h = std::max(1, static_cast<int>(h * k));
+    }
+  }
+
+  std::uint32_t next_kitty_id() {
+    if (kitty_next == 0) // a random base, so another program's images in the window are safe
+      kitty_next = 1 + ((std::random_device{}() & 0x7FFFu) << 8);
+    const std::uint32_t id = kitty_next;
+    kitty_next = kitty_next >= 0xFFFFFFu ? 1 : kitty_next + 1; // ids fit the 24-bit colour
+    return id;
+  }
+
+  // The id a tile's placeholders name in this layout. A picture sent to the other slot since the
+  // last layout has fully arrived by now, so they switch to it here.
+  std::uint32_t kitty_id(const std::string &key) {
+    KittySent &k = kitty[key];
+    if (k.ids[0] == 0) {
+      k.ids[0] = next_kitty_id();
+      k.ids[1] = next_kitty_id();
+    }
+    if (k.pending) {
+      k.shown ^= 1;
+      k.pending = false;
+    }
+    return k.ids[k.shown];
+  }
+
+  // Lay picture `p` out as a pixel-mode image of cols x rows cells, recorded for this walk.
+  std::shared_ptr<PixelGfx> pixel_image(const std::string &key, const Picture &p, PixCache &pc,
+                                        int cols, int rows, ImageMode md) {
+    int w = 0, h = 0;
+    raster_size(cols, rows, md, w, h);
+    if (pc.gen != p.gen || pc.raster.width() != w || pc.raster.height() != h) {
+      pc.raster = p.rgb.width() == w && p.rgb.height() == h
+                      ? p.rgb
+                      : p.rgb.resized(w, h, cvc::image::resize_filter::box);
+      pc.gen = p.gen;
+      pc.cells = cvc::image();
+    }
+    const int cells_h = md == ImageMode::Sixel ? 2 * rows : rows;
+    if (pc.cells.width() != cols || pc.cells.height() != cells_h)
+      pc.cells = pc.raster.resized(cols, cells_h, cvc::image::resize_filter::box);
+    auto g = std::make_shared<PixelGfx>();
+    g->key = key;
+    g->mode = md;
+    g->raster = pc.raster;
+    g->cells = pc.cells;
+    g->gen = p.gen;
+    g->cols = cols;
+    g->rows = rows;
+    g->cell_w = cell_w();
+    g->cell_h = cell_h();
+    if (md == ImageMode::Kitty) {
+      const int k = gfx::kKittyMaxCells;
+      for (int r0 = 0; r0 < rows; r0 += k)
+        for (int c0 = 0; c0 < cols; c0 += k) {
+          KittyTile t;
+          t.c0 = c0;
+          t.r0 = r0;
+          t.cols = std::min(k, cols - c0);
+          t.rows = std::min(k, rows - r0);
+          t.px = c0 * w / cols;
+          t.py = r0 * h / rows;
+          t.pw = std::max(1, (c0 + t.cols) * w / cols - t.px);
+          t.ph = std::max(1, (r0 + t.rows) * h / rows - t.py);
+          t.key = key + "#" + std::to_string(c0) + "," + std::to_string(r0);
+          t.id = kitty_id(t.key);
+          g->tiles.push_back(std::move(t));
+        }
+    }
+    gfx_walk.push_back(g);
+    return g;
+  }
+
+  // The bytes that bring the terminal up to date with the frame last drawn (take_graphics).
+  std::string emit_graphics() {
+    std::string out;
+    const long frame = ++gfx_frames;
+    const int colors = term_gfx.sixel_colors > 0 ? term_gfx.sixel_colors : 256;
+    for (const std::shared_ptr<PixelGfx> &gp : gfx_shown) {
+      const PixelGfx &g = *gp;
+      if (!g.drawn || g.raster.empty())
+        continue;
+      const unsigned char *raster = std::as_const(g.raster).data();
+      const std::size_t stride = g.raster.row_stride_bytes();
+      if (g.mode == ImageMode::Kitty) {
+        for (const KittyTile &t : g.tiles) {
+          KittySent &k = kitty[t.key];
+          k.frame = frame;
+          const bool same_place =
+              k.has[k.shown] && k.w == t.pw && k.h == t.ph && k.cols == t.cols && k.rows == t.rows;
+          const int other = k.shown ^ 1;
+          // Once the picture stops changing, the other id's older picture is no longer needed.
+          const auto free_other = [&] {
+            if (!k.pending && k.has[other]) {
+              out += gfx::kitty_delete(k.ids[other]);
+              k.has[other] = false;
+            }
+          };
+          if (same_place && k.gen == g.gen) {
+            free_other();
+            continue; // the same picture, already there
+          }
+          const unsigned char *origin =
+              raster + static_cast<std::size_t>(t.py) * stride + static_cast<std::size_t>(t.px) * 3;
+          const std::uint64_t hash = hash_pixels(origin, t.pw, t.ph, stride);
+          if (!same_place) { // the first picture, or a new size: under the id the cells name now
+            out += gfx::kitty_transmit(origin, t.pw, t.ph, stride, k.ids[k.shown], t.cols, t.rows);
+            k.has[k.shown] = true;
+            k.pending = false;
+          } else if (hash != k.hash) { // a new picture: to the other id (see KittySent)
+            out += gfx::kitty_transmit(origin, t.pw, t.ph, stride, k.ids[other], t.cols, t.rows);
+            k.has[other] = true;
+            k.pending = true;
+          } else { // a frame published again unchanged is not re-sent
+            free_other();
+          }
+          k.gen = g.gen;
+          k.hash = hash;
+          k.w = t.pw;
+          k.h = t.ph;
+          k.cols = t.cols;
+          k.rows = t.rows;
+        }
+        continue;
+      }
+      if (g.mode != ImageMode::Sixel ||
+          g.visible.size() != static_cast<std::size_t>(g.cols) * g.rows)
+        continue;
+      // A bitmap that reaches the screen's last row makes some terminals scroll (the cursor moves
+      // below it), so that row keeps the half-blocks.
+      std::vector<unsigned char> mask = g.visible;
+      for (int r = 0; r < g.rows; ++r)
+        if (g.box.y_min + r >= g.screen_h - 1)
+          std::fill_n(mask.begin() + static_cast<std::ptrdiff_t>(r) * g.cols, g.cols, 0);
+      // A bitmap is whole six-pixel bands tall, so its last band may reach into the row below.
+      // Where that row shows the image too, let it: those pixels are the image's own there.
+      // Elsewhere stop short, and the half-blocks show in the few pixels left. A terminal that
+      // gives a bitmap the cells it touches crops an older one under a newer one, so draw top
+      // first: the rectangle reached into always starts lower than the one reaching.
+      std::vector<gfx::CellRect> rects = gfx::cover_rects(mask, g.cols, g.rows);
+      std::stable_sort(rects.begin(), rects.end(),
+                       [](const gfx::CellRect &a, const gfx::CellRect &b) { return a.y < b.y; });
+      for (const gfx::CellRect &rc : rects) {
+        bool below_shows = rc.y + rc.h < g.rows;
+        for (int k = rc.x; k < rc.x + rc.w && below_shows; ++k)
+          below_shows = mask[static_cast<std::size_t>(rc.y + rc.h) * g.cols + k] != 0;
+        const int pw = rc.w * g.cell_w;
+        const int ph = (rc.h * g.cell_h + (below_shows ? 5 : 0)) / 6 * 6;
+        if (pw <= 0 || ph <= 0 || (rc.y * g.cell_h + ph) > g.raster.height() ||
+            (rc.x + rc.w) * g.cell_w > g.raster.width())
+          continue;
+        SixelCached &sc =
+            sixel_cache[g.key + "@" + std::to_string(rc.x) + "," + std::to_string(rc.y) + "," +
+                        std::to_string(rc.w) + "," + std::to_string(rc.h)];
+        if (sc.bytes.empty() || sc.gen != g.gen) {
+          const unsigned char *origin = raster +
+                                        static_cast<std::size_t>(rc.y) * g.cell_h * stride +
+                                        static_cast<std::size_t>(rc.x) * g.cell_w * 3;
+          sc.bytes = gfx::sixel_encode(origin, pw, ph, stride, colors);
+          sc.gen = g.gen;
+        }
+        sc.frame = frame;
+        // Save the cursor (DECSC), draw at the rectangle's top-left cell, put it back (DECRC).
+        out += '\x1b';
+        out += "7\x1b[" + std::to_string(g.box.y_min + rc.y + 1) + ";" +
+               std::to_string(g.box.x_min + rc.x + 1) + "H";
+        out += sc.bytes;
+        out += '\x1b';
+        out += '8';
+      }
+    }
+    for (auto it = kitty.begin(); it != kitty.end();) {
+      if (it->second.frame == frame) {
+        ++it;
+        continue;
+      }
+      for (int slot = 0; slot < 2; ++slot) // no longer drawn: free it in the terminal
+        if (it->second.has[slot])
+          out += gfx::kitty_delete(it->second.ids[slot]);
+      it = kitty.erase(it);
+    }
+    for (auto it = sixel_cache.begin(); it != sixel_cache.end();)
+      it = it->second.frame == frame ? std::next(it) : sixel_cache.erase(it);
+    return out;
+  }
+
+  std::string release_graphics() {
+    std::string out;
+    for (const auto &k : kitty)
+      for (int slot = 0; slot < 2; ++slot)
+        if (k.second.has[slot])
+          out += gfx::kitty_delete(k.second.ids[slot]);
+    kitty.clear();
+    sixel_cache.clear();
+    return out;
   }
 
   // ---- focus / windows / menus -----------------------------------------------------------------
@@ -842,6 +1296,9 @@ struct FtxuiBackend::Impl {
     if (background.empty() || it == images.end() || it->second.rgb.empty())
       return nullptr;
     const int cols = std::max(1, term_w), rows = std::max(1, term_h);
+    if (pixels())
+      return std::make_shared<PixelImage>(
+          pixel_image("bg|", it->second, background_px, cols, rows, mode()));
     if (background_scaled.width() != cols || background_scaled.height() != 2 * rows)
       background_scaled = it->second.rgb.resized(cols, 2 * rows, cvc::image::resize_filter::box);
     return std::make_shared<HalfBlockImage>(background_scaled, cols, rows, opt.image_color);
@@ -874,6 +1331,8 @@ struct FtxuiBackend::Impl {
     if (!tooltip.empty())
       screen.push_back(place(fx::text(" " + tooltip + " ") | fx::inverted | fx::clear_under, 0,
                              std::max(0, term_h - 1)));
+    if (!gfx_walk.empty())
+      screen.push_back(std::make_shared<PixelFinish>(gfx_walk)); // after every layer
     root = fx::dbox(std::move(screen));
   }
 
@@ -914,6 +1373,12 @@ Capabilities FtxuiBackend::capabilities() const {
   c.glsl = false; // no GLSL on a terminal: a shader widget degrades (§16.3)
   c.view_embed = false;
   c.owns_loop = true; // run() owns the terminal's event loop (§16.2)
+  c.terminal = true;
+  // What the terminal can draw, as far as is known: run() probes it, and a host that wants the
+  // answer before loading a document (a requires: check) probes first, set_terminal_graphics().
+  c.kitty = m_->term_gfx.kitty;
+  c.sixel = m_->term_gfx.sixel;
+  c.bitmap = m_->pixels();
   return c;
 }
 
@@ -935,6 +1400,8 @@ void FtxuiBackend::begin_frame() {
   m.last_item.clear();
   m.have_geom = false;
   m.have_tracks = false;
+  m.have_columns = false;
+  m.gfx_walk.clear();
 }
 
 void FtxuiBackend::end_frame() {
@@ -947,6 +1414,8 @@ void FtxuiBackend::end_frame() {
       m.add(std::move(e));
   }
   m.compose();
+  m.gfx_last = std::move(m.gfx_walk);
+  m.gfx_walk.clear();
   m.settle();
   ++m.walks;
 }
@@ -1219,6 +1688,13 @@ void FtxuiBackend::seed_grid_tracks(const std::vector<float> &sizes) {
 
 std::vector<float> FtxuiBackend::grid_tracks() const { return m_->last_tracks; }
 
+void FtxuiBackend::seed_grid_columns(const std::vector<float> &widths) {
+  m_->pending_columns = widths;
+  m_->have_columns = true;
+}
+
+std::vector<float> FtxuiBackend::grid_columns() const { return m_->last_columns; }
+
 bool FtxuiBackend::begin_grid(const Layout &layout, const char *id) {
   Impl &m = *m_;
   Impl::Frame f;
@@ -1227,7 +1703,9 @@ bool FtxuiBackend::begin_grid(const Layout &layout, const char *id) {
   f.id = m.uid(std::string("grid|") + (id ? id : "")); // keys the grid's draggable sizes
   if (m.have_tracks)
     f.tracks = m.pending_tracks;
-  m.have_tracks = false;
+  if (m.have_columns)
+    f.columns = m.pending_columns;
+  m.have_tracks = m.have_columns = false;
   m.stack.push_back(std::move(f));
   return true;
 }
@@ -1256,6 +1734,15 @@ void FtxuiBackend::end_grid() {
     const bool held =
         m.seam_drag.active && m.seam_drag.sizes == sizes && m.seam_drag.index == index;
     return e | tint | (held ? fx::bold : fx::nothing) | fx::reflect(m.boxes[box_key]);
+  };
+  // What a grid reports for persistence (grid_tracks / grid_columns): a track's size in px when it
+  // is fixed (authored, seeded or dragged), else 0, "not set". A track laid out naturally has no
+  // size until FTXUI lays this frame out, and persisting the last frame's size would pin it there
+  // on the next load (a first walk would even persist the 1 cell of a box never laid out).
+  m.last_columns.clear();
+  auto report = [](std::vector<float> &out) {
+    if (std::all_of(out.begin(), out.end(), [](float v) { return v <= 0.0f; }))
+      out.clear(); // nothing set: nothing to persist
   };
 
   if (L.is_row_split()) {
@@ -1294,10 +1781,10 @@ void FtxuiBackend::end_grid() {
       pane = gs.fixed[i] ? pane | fx::yframe | fx::size(fx::HEIGHT, fx::EQUAL, gs.size[i])
                          : pane | fx::yflex;
       stack.push_back(std::move(pane));
-      const fx::Box &b = m.boxes[pane_key];
-      const int rows = gs.fixed[i] ? gs.size[i] : std::max(0, b.y_max - b.y_min + 1);
-      m.last_tracks.push_back(static_cast<float>(rows * m.opt.cell_px_h));
+      m.last_tracks.push_back(gs.fixed[i] ? static_cast<float>(gs.size[i] * m.opt.cell_px_h)
+                                          : 0.0f);
     }
+    report(m.last_tracks);
     m.add(stack.empty() ? fx::emptyElement() : fx::vbox(std::move(stack)) | frame);
     return;
   }
@@ -1322,7 +1809,26 @@ void FtxuiBackend::end_grid() {
     if (cs->size.size() != static_cast<std::size_t>(cols)) {
       cs->size.assign(static_cast<std::size_t>(cols), 0);
       cs->fixed.assign(static_cast<std::size_t>(cols), false);
+      cs->seeded = false;
     }
+    if (!cs->seeded) { // the persisted widths (seed_grid_columns) fix their columns, once
+      for (std::size_t c = 0; c < cs->size.size() && c < f.columns.size(); ++c)
+        if (f.columns[c] > 0.0f) {
+          cs->size[c] = std::max(1, m.px_to_cols(f.columns[c]));
+          cs->fixed[c] = true;
+        }
+      cs->seeded = true;
+    }
+    for (int c = 0; c < cols; ++c) {
+      const std::size_t k = static_cast<std::size_t>(c);
+      float px = 0.0f;
+      if (cs->fixed[k])
+        px = static_cast<float>(cs->size[k] * m.opt.cell_px_w);
+      else if (k < L.col_widths.size() && L.col_widths[k].unit == Unit::Px)
+        px = L.col_widths[k].value; // authored: as written, so a reload never drifts it
+      m.last_columns.push_back(px);
+    }
+    report(m.last_columns);
   }
   std::vector<fx::Elements> lines;
   for (int r = 0; r < rows; ++r) {
@@ -1780,6 +2286,7 @@ void FtxuiBackend::set_image(const std::string &name, const cvc::image &img) {
   p.rgb = img.empty() ? cvc::image()
                       : img.converted(cvc::image::pixel_format::RGB, cvc::image::data_type::u8);
   p.scaled = cvc::image();
+  p.gen = ++m_->image_gen;
   if (name == m_->background)
     m_->background_scaled = cvc::image(); // a new frame for the backdrop: resample it next draw
 }
@@ -1789,10 +2296,36 @@ void FtxuiBackend::clear_image(const std::string &name) { m_->images.erase(name)
 void FtxuiBackend::set_background(const std::string &image_name) {
   m_->background = image_name;
   m_->background_scaled = cvc::image();
+  m_->background_px = Impl::PixCache{};
 }
 
 int FtxuiBackend::screen_width() const { return m_->term_w; }
 int FtxuiBackend::screen_height() const { return m_->term_h; }
+
+void FtxuiBackend::set_terminal_graphics(const TermGraphics &g) {
+  m_->term_gfx = g;
+  m_->term_gfx_set = true;
+}
+
+TermGraphics FtxuiBackend::terminal_graphics() const { return m_->term_gfx; }
+
+FtxuiBackend::Options::ImageColor FtxuiBackend::image_mode() const {
+  const ImageMode md = m_->mode();
+  if (md != ImageMode::Auto)
+    return md;
+  return fx::Terminal::ColorSupport() == fx::Terminal::Color::Palette1 ? ImageMode::Mono
+                                                                       : ImageMode::Color;
+}
+
+int FtxuiBackend::cell_pixel_width() const { return m_->cell_w(); }
+int FtxuiBackend::cell_pixel_height() const { return m_->cell_h(); }
+
+void FtxuiBackend::image_raster(int cols, int rows, int &w, int &h) const {
+  m_->raster_size(cols, rows, m_->mode(), w, h);
+}
+
+std::string FtxuiBackend::take_graphics() { return m_->emit_graphics(); }
+std::string FtxuiBackend::release_graphics() { return m_->release_graphics(); }
 
 bool FtxuiBackend::draw_image(const char *name, float width) {
   Impl &m = *m_;
@@ -1804,6 +2337,14 @@ bool FtxuiBackend::draw_image(const char *name, float width) {
   // tall, so a cell_px_w x cell_px_h cell shows a 1 x 2 block of square pixels at the right scale).
   const int cols = std::clamp(m.px_to_cols(width), 1, std::max(1, m.term_w - 2));
   const double aspect = double(p.rgb.height()) / double(p.rgb.width());
+  if (m.pixels()) { // real pixels: the rows follow the terminal's real cell shape
+    const int rows =
+        std::max(1, static_cast<int>(std::lround(cols * aspect * m.cell_w() / double(m.cell_h()))));
+    const std::string id = m.uid("img|");
+    m.leaf(id, false,
+           std::make_shared<PixelImage>(m.pixel_image(id, p, p.px, cols, rows, m.mode())));
+    return true;
+  }
   const int rows =
       std::max(1, static_cast<int>(std::lround(cols * aspect * m.opt.cell_px_w / m.opt.cell_px_h)));
   if (p.scaled.width() != cols || p.scaled.height() != 2 * rows)
@@ -1820,14 +2361,27 @@ std::string FtxuiBackend::render_to_string(Runtime &rt, int width, int height, b
   Impl &m = *m_;
   m.term_w = std::max(1, width);
   m.term_h = height > 0 ? height : 24; // percent sizes resolve against a nominal 24 rows
+  // The placeholders' 24-bit colour names their image, and a terminal with the kitty protocol has
+  // true colour, so lay out and print as one would. For the whole walk, not only the print: FTXUI
+  // quantizes an RGB colour to the terminal's palette when the colour is made, during layout, and
+  // a palette colour names no image.
+  const bool true_color = ansi && m.mode() == ImageMode::Kitty;
+  const fx::Terminal::Color colors = fx::Terminal::ColorSupport();
+  if (true_color)
+    fx::Terminal::SetColorSupport(fx::Terminal::Color::TrueColor);
   rt.render(); // walk the tree -> (re)builds m.root through the methods above
+  m.gfx_shown = m.gfx_last;
   fx::Screen screen =
       fx::Screen::Create(fx::Dimension::Fixed(m.term_w),
                          height > 0 ? fx::Dimension::Fixed(height) : fx::Dimension::Fit(m.root));
   fx::Render(screen, m.root);
   m.shown = m.last; // the boxes now hold this frame's layout
-  if (ansi)
-    return screen.ToString();
+  if (ansi) {
+    std::string out = screen.ToString();
+    if (true_color)
+      fx::Terminal::SetColorSupport(colors);
+    return out;
+  }
   std::string out;
   for (int y = 0; y < screen.dimy(); ++y) {
     std::string line;
@@ -2129,17 +2683,34 @@ FtxuiBackend::run_loop(Runtime &rt, const RunOptions &opts, const std::function<
     }
     return ++burst >= 3 || !rt.post_signal(signal, "terminal");
   };
+  // Pixel graphics: ask the terminal what it can draw before FTXUI takes it over. A reply to a
+  // kitty query arriving later would reach FTXUI's input parser (it has no APC case) as typed text.
+  const bool want_pixels = !m.opt.hosted && (m.opt.image_color == ImageMode::Auto ||
+                                             m.opt.image_color == ImageMode::Kitty ||
+                                             m.opt.image_color == ImageMode::Sixel);
+  if (want_pixels && !m.term_gfx_set) {
+    m.term_gfx = gfx::probe_terminal();
+    m.term_gfx_set = true;
+  }
   fx::ScreenInteractive screen = fx::ScreenInteractive::Fullscreen();
   screen.TrackMouse(opts.mouse);
   // Ctrl-C is handled here (see `interrupt`), so it returns to the host. FTXUI's own handling
   // re-raises SIGINT, which would end the whole process under a host that embeds this loop.
   screen.ForceHandleCtrlC(false);
+  bool pixels = false; // a pixel image mode is on (decided once the terminal is set up)
   fx::Component renderer = fx::Renderer([&] {
     const fx::Dimensions d = fx::Terminal::Size();
     m.term_w = std::max(1, d.dimx);
     m.term_h = std::max(1, d.dimy);
+    int cw = 0, ch = 0;
+    if (pixels && gfx::cell_pixel_size(1, cw, ch)) { // follows a font-size change
+      m.term_gfx.cell_w = cw;
+      m.term_gfx.cell_h = ch;
+    }
     rt.render();
     m.shown = m.last; // FTXUI lays this frame out next, which fills the boxes
+    m.gfx_shown = m.gfx_last;
+    m.drew = true;
     return m.root;
   });
   fx::Component app = fx::CatchEvent(renderer, [&](fx::Event e) {
@@ -2161,11 +2732,37 @@ FtxuiBackend::run_loop(Runtime &rt, const RunOptions &opts, const std::function<
     return true;
   });
   fx::Loop loop(&screen, app); // sets the terminal up (and FTXUI's signal handlers)
+  // FTXUI's own DA1 exchange (just now) also reports Sixel.
+  if (want_pixels)
+    for (const int cap : screen.TerminalCapabilities())
+      if (cap == 4)
+        m.term_gfx.sixel = true;
+  pixels = m.pixels();
+  const fx::Terminal::Color colors = fx::Terminal::ColorSupport();
+  if (m.mode() == ImageMode::Kitty) // the placeholders' 24-bit colour names their image
+    fx::Terminal::SetColorSupport(fx::Terminal::Color::TrueColor);
   if (opts.on_start)
     opts.on_start();
   const auto period = std::chrono::milliseconds(1000 / std::max(1, opts.fps));
+  const bool sixel = m.mode() == ImageMode::Sixel;
   while (!loop.HasQuitted()) {
+    // A repaint goes out between synchronized-output marks, so a terminal that has them shows it
+    // whole. Sixel bitmaps go inside: the repaint just covered the ones it replaces. Kitty images
+    // go after: a big one would overflow the terminal's synchronized-update buffer, and a changed
+    // one goes to an id the repaint does not name yet (KittySent), so the shown image stays whole
+    // while the next one arrives.
+    if (pixels)
+      std::cout << "\x1b[?2026h";
+    m.drew = false;
     loop.RunOnce();
+    if (pixels) {
+      const std::string g = m.drew ? m.emit_graphics() : std::string();
+      if (sixel)
+        std::cout << g << "\x1b[?2026l";
+      else
+        std::cout << "\x1b[?2026l" << g;
+      std::cout << std::flush;
+    }
     // OS signals the host collected: the document's on_signal: decides, else they end the loop.
     if (opts.take_signal)
       for (std::string sig = opts.take_signal(); !sig.empty(); sig = opts.take_signal())
@@ -2184,6 +2781,9 @@ FtxuiBackend::run_loop(Runtime &rt, const RunOptions &opts, const std::function<
   }
   if (!loop.HasQuitted())
     loop.RunOnce(); // let a pending Exit() take effect before the terminal is restored
+  if (pixels)
+    std::cout << m.release_graphics() << std::flush;
+  fx::Terminal::SetColorSupport(colors);
   if (opts.on_stop)
     opts.on_stop();
   return result;
@@ -2263,6 +2863,8 @@ void FtxuiBackend::grid_next_cell() {}
 void FtxuiBackend::end_grid() {}
 void FtxuiBackend::seed_grid_tracks(const std::vector<float> &) {}
 std::vector<float> FtxuiBackend::grid_tracks() const { return {}; }
+void FtxuiBackend::seed_grid_columns(const std::vector<float> &) {}
+std::vector<float> FtxuiBackend::grid_columns() const { return {}; }
 void FtxuiBackend::begin_disabled() {}
 void FtxuiBackend::end_disabled() {}
 void FtxuiBackend::set_tooltip(const char *) {}
@@ -2299,6 +2901,19 @@ void FtxuiBackend::clear_image(const std::string &) {}
 void FtxuiBackend::set_background(const std::string &) {}
 int FtxuiBackend::screen_width() const { return 0; }
 int FtxuiBackend::screen_height() const { return 0; }
+void FtxuiBackend::set_terminal_graphics(const TermGraphics &) {}
+TermGraphics FtxuiBackend::terminal_graphics() const { return {}; }
+FtxuiBackend::Options::ImageColor FtxuiBackend::image_mode() const {
+  return Options::ImageColor::Color;
+}
+int FtxuiBackend::cell_pixel_width() const { return 8; }
+int FtxuiBackend::cell_pixel_height() const { return 16; }
+void FtxuiBackend::image_raster(int cols, int rows, int &w, int &h) const {
+  w = cols;
+  h = 2 * rows;
+}
+std::string FtxuiBackend::take_graphics() { return {}; }
+std::string FtxuiBackend::release_graphics() { return {}; }
 std::string FtxuiBackend::render_to_string(Runtime &, int, int, bool) {
   return "ari: libcvc was built without FTXUI (terminal backend unavailable)\n";
 }
@@ -2327,6 +2942,26 @@ void FtxuiBackend::forward_to_document(AppRuntime &, const TermEvent &) const {}
 bool FtxuiBackend::available() { return false; }
 
 #endif
+
+// ── custom widgets: the same in both builds (a host's draw fn calls the primitives above)
+// ─────────
+
+void FtxuiBackend::register_widget(std::string custom_type, CustomDrawFn draw) {
+  if (draw)
+    customWidgets_[std::move(custom_type)] = std::move(draw);
+  else
+    customWidgets_.erase(custom_type);
+}
+
+CustomEdit FtxuiBackend::custom_widget(const char *type, const std::string &current,
+                                       const Widget &w) {
+  const auto it = customWidgets_.find(type ? type : "");
+  if (it == customWidgets_.end())
+    return {}; // not handled: the core draws a placeholder
+  CustomEdit e = it->second(current, w);
+  e.handled = true; // a registered handler drew it, whatever its edit says
+  return e;
+}
 
 } // namespace ariadne
 } // namespace cvc

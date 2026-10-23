@@ -24,13 +24,18 @@
 //     close it, click a menu title to open it.
 //   - free floating windows (capabilities().windows): placed from the authored pos/size or the
 //     persisted tree.<id>.geometry, raised on focus, z-ordered.
-//   - graphics: draw_image renders a published cvc::image as half-block cells (two pixels per cell,
-//     24-bit colour where the terminal has it).
+//   - graphics: draw_image renders a published cvc::image. Where the terminal speaks a pixel
+//     protocol it gets real pixels: Kitty (Unicode placeholder cells for an image sent once, out of
+//     band) or Sixel (a bitmap re-sent after each draw, clipped to what nothing covers); see
+//     term_graphics.h. Everywhere else it is half-block cells (two pixels per cell, 24-bit colour
+//     where the terminal has it).
 //
 // Units. Ariadne authors positions and sizes in px. A terminal lays out in character cells, so this
 // backend converts px to cells by a nominal cell size (Options::cell_px_w / cell_px_h, default
 // 8x16) and converts back when it reports geometry (window_geometry, grid_tracks, item_pointer). A
-// layout persisted under one backend therefore stays meaningful under the other.
+// layout persisted under one backend therefore stays meaningful under the other. The terminal's
+// REAL cell size in pixels (terminal_graphics()) is only a rasterizer parameter for the pixel image
+// modes; it never changes the layout.
 //
 // Optional: compiled with the real FTXUI only when libcvc is built with it (CVC_ARIADNE_FTXUI, via
 // find_package(ftxui)); otherwise every method is an inert stub and available() is false, so libcvc
@@ -38,7 +43,9 @@
 // FTXUI headers — a consumer needs FTXUI only to LINK a build that uses it.
 
 #include <cvc/ariadne/backend.h>
+#include <cvc/ariadne/term_graphics.h>
 #include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -94,11 +101,17 @@ public:
     // The nominal pixel size of one terminal cell, for the px <-> cell conversion (see the header).
     int cell_px_w = 8;
     int cell_px_h = 16;
-    // How draw_image paints: Auto follows the terminal's detected colour support (a terminal with
-    // no colour gets a luminance ramp), Mono always draws the ramp, Color always draws coloured
-    // half-blocks.
-    enum class ImageColor { Auto, Mono, Color };
+    // How draw_image and set_background paint. Color draws coloured half-blocks (two pixels per
+    // cell), Mono a luminance ramp; both work on any terminal. Kitty and Sixel draw real pixels
+    // (term_graphics.h): Kitty as Unicode placeholder cells for an image sent once, Sixel as a
+    // bitmap re-sent after each draw. Auto picks Kitty, else Sixel, from what run() detects in the
+    // terminal (terminal_graphics()), else Color, or Mono on a terminal with no colour. Hosted mode
+    // (the tvision desktop, which owns the output) always draws half-blocks.
+    enum class ImageColor { Auto, Mono, Color, Kitty, Sixel };
     ImageColor image_color = ImageColor::Auto;
+    // A Kitty image bigger than this many pixels is sent scaled down, and the terminal scales it
+    // back up to its cells. It bounds what an image that changes every frame (a 3D scene) costs.
+    int max_image_pixels = 1 << 20;
     // Hosted chrome: draw no window frames and no menu bar, for a host that supplies its own (see
     // "hosted chrome" below).
     bool hosted = false;
@@ -133,6 +146,8 @@ public:
   void end_grid() override;
   void seed_grid_tracks(const std::vector<float> &sizes) override;
   std::vector<float> grid_tracks() const override;
+  void seed_grid_columns(const std::vector<float> &widths) override;
+  std::vector<float> grid_columns() const override;
 
   void begin_disabled() override;
   void end_disabled() override;
@@ -164,6 +179,16 @@ public:
   bool draw_image(const char *name, float width) override;
   ColorEdit color(const char *label, const float rgb[3]) override;
 
+  // Custom widgets (§16.1b), the terminal counterpart of cvc::gl::ImGuiBackend::register_widget: a
+  // host registers a draw fn for a custom type, and custom_widget() calls it during the walk, where
+  // it draws with this backend's own primitives (text_line, set_image + draw_image, ...). It gets
+  // the bound value and the Widget and returns the edit; the core owns the cvc::state write. An
+  // unregistered type is not handled, so the core draws a placeholder. TvisionBackend inherits it.
+  // `stream_view` registers this way (register_stream_view_widget, stream/stream_view.h).
+  using CustomDrawFn = std::function<CustomEdit(const std::string &current, const Widget &w)>;
+  void register_widget(std::string custom_type, CustomDrawFn draw);
+  CustomEdit custom_widget(const char *type, const std::string &current, const Widget &w) override;
+
   // Publish (or replace) the image a Kind::Image widget named `name` shows — the terminal
   // counterpart of cvc::gl::ImGuiBackend::set_image. Any pixel format / data type; it is converted
   // to 8-bit RGB once here and box-filtered to the cell grid at draw time.
@@ -178,6 +203,31 @@ public:
   // The screen size in cells, as of the last frame drawn (or set_screen_size).
   int screen_width() const;
   int screen_height() const;
+
+  // ---- pixel graphics (Kitty / Sixel) ----
+
+  // What the terminal can draw beyond text. run() asks the terminal (gfx::probe_terminal) when it
+  // first starts, unless this was set; a headless driver (render_to_string, a test) or a host that
+  // probed already sets it.
+  void set_terminal_graphics(const TermGraphics &g);
+  TermGraphics terminal_graphics() const;
+  // The image mode in effect: Options::image_color with Auto resolved (Kitty, Sixel, Color, Mono).
+  // Auto picks Sixel only when the cell size in pixels is known.
+  Options::ImageColor image_mode() const;
+  // One cell's size in pixels for the pixel modes: the terminal's, else the nominal cell.
+  int cell_pixel_width() const;
+  int cell_pixel_height() const;
+  // The raster size an image covering cols x rows cells is best drawn from in image_mode(): one
+  // pixel per column and two per row for half-blocks, the cells' real pixels for Kitty (scaled to
+  // fit max_image_pixels) and Sixel. cvcGL's TerminalScene renders its frames at this size.
+  void image_raster(int cols, int rows, int &w, int &h) const;
+  // The out-of-band bytes for the frame last drawn (by render_to_string or run()): for Kitty, the
+  // images whose pixels changed since they were last sent and deletions for those no longer drawn;
+  // for Sixel, every image drawn, clipped to the cells nothing covers. run() writes them after each
+  // draw.
+  std::string take_graphics();
+  // Deletions for every Kitty image still in the terminal (run() sends them as it exits).
+  std::string release_graphics();
 
   // ---- headless (no TTY) ----
 
@@ -294,6 +344,7 @@ protected:
 private:
   struct Impl;
   std::unique_ptr<Impl> m_;
+  std::map<std::string, CustomDrawFn> customWidgets_; // register_widget, in both builds
   RunExit run_loop(Runtime &rt, const RunOptions &opts, const std::function<void()> &drain,
                    const std::function<bool()> &should_close,
                    const std::function<void(const TermEvent &)> &unhandled);

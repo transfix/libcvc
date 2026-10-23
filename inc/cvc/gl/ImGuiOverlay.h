@@ -127,7 +127,10 @@ public:
   bool visible() const;
 
   // False when libcvc was built without CVC_ENABLE_IMGUI, or setup failed
-  // (e.g. no GL context yet) — every method is then a safe no-op.
+  // (e.g. no GL context yet) — every method is then a safe no-op. Also false
+  // once ImGui's GL backend has failed to initialise on the render window's
+  // context (checked at the first render: e.g. VTK's EGL fallback with no X
+  // display, which imgui's GLX-based loader cannot reach).
   bool enabled() const;
 
   // True while ImGui is consuming the pointer / keys — a host loop can use these
@@ -156,6 +159,14 @@ public:
   // camera never receives another event — one tap locks it out permanently.
   void setTouchMode(bool on);
   bool touchMode() const;
+
+  // ---- frame clock ----------------------------------------------------------
+  // ImGui's per-frame delta (io.DeltaTime: hover delays, the text cursor blink,
+  // modal dimming) comes from the wall clock by default. A positive value pins it
+  // instead, so a frame sequence draws the same pixels on every run — what a
+  // golden-image test needs. 0 (the default) returns to the wall clock.
+  void setFixedDeltaTime(float seconds);
+  float fixedDeltaTime() const;
 
   // ---- the floating show/hide button ---------------------------------------
   // A large translucent circular button in the bottom-right corner that hides

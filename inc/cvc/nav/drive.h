@@ -42,6 +42,7 @@
 #define __CVC_NAV_DRIVE_H__
 
 #include <cstdint>
+#include <cvc/nav/detail/nav_potential.h>
 
 namespace cvc {
 class thread_pool; // fork-join executor, injected into the batched kernels below
@@ -110,6 +111,7 @@ void sdf_sample(const field_stack &f, const float *on, int n, const int *map_id,
 // A 6-feature net is not a retrain from scratch: sdf_nav.widen_coef_mlp lifts a
 // trained 5-feature net to one whose mu column is zero, output-identical at init.
 struct material_stack; // defined in material.h; coef_feats takes it by pointer only
+struct material_drive; // defined in material.h; drive_potential takes it by pointer only
 
 // ``risk`` (a material_stack; channel 0 = terrain risk r~) appends the WORST-risk-ahead
 // column — the deployment twin of grl_snam coef_feats(material=). Order matches the net's
@@ -311,6 +313,12 @@ struct drive_telemetry {
   float curvature = 0;          // |tan(delta)| / L (last substep)
   float clearance = 0;          // worst (min) barrier clearance over the tick (footprint: min disc)
   std::uint8_t binding = 0;     // clearance < d_hat (geometry v.d_hat): barrier active this tick
+  // U_nav (detail/nav_potential.h, drive_potential) at the pose the tick starts from (the first
+  // substep's), with this tick's coefficients, and the conservative force the drive made there:
+  // force = F_bar + F_goal + F_mat + F_terrain = -grad U. ext_fx/fy, a port, are in neither.
+  float potential = 0;
+  potential_terms terms;
+  float force_x = 0, force_y = 0;
 };
 
 // The whole per-agent drive for one tick, fused: sample -> coef_feats ->
@@ -323,6 +331,21 @@ void drive_step(const field_stack &f, float *o, float *th, float *sp, const floa
                 const coef_mlp &model, int n, const int *map_id, const veh_params &v,
                 float *minclr_out, int num_threads = 0, thread_pool *pool = nullptr,
                 drive_telemetry *tel = nullptr);
+
+// U_nav, the potential the drive's conservative force descends, at agent i's pose (o, th) with
+// its coefficients held fixed: al/be and the material weights the drive applied (lam_soft,
+// lam_hard as drive_telemetry reports them; ignored without `mat`). The goal is the carrot the
+// drive chased. Terms: beta/2 |o - g|^2; the barrier, alpha b_IPC(phi - rr), summed over the
+// footprint's discs at the heading `th`; the material's lam_soft r~ and lam_hard S b_sp(phi_m);
+// the terrain's two terms on its plane (veh_params::terrain, its hard weight scaled as the plant
+// arm scales it). b_sp(phi_m) = softplus(k (d_hat_m - phi_m)) / k is in metres and its force reads
+// grad phi per metre, so in the drive frame its potential carries the stack's S (normalized units
+// per metre). drive_telemetry::potential is this, bit for bit, at the tick's start pose, and
+// drive_telemetry::force is the force the drive computed there.
+potential_terms drive_potential(const field_stack &f, float ox, float oy, float th, float gx,
+                                float gy, int i, const int *map_id, const veh_params &v, float al,
+                                float be, const material_drive *mat = nullptr,
+                                float lam_soft = 0.0f, float lam_hard = 0.0f);
 
 // ─── Generic external force channel ──────────────────────────────────────────
 // A physics-AGNOSTIC hook that lets a caller add an extra per-agent force to the

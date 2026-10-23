@@ -170,9 +170,10 @@ __device__ inline float scalar_head(const float *h0w, const float *h0b, const fl
 //   risk_ctx[64] mat[128]
 __global__ void ce_fwd_k(const float *obs_feats, const unsigned char *obs_mask,
                          const int *obs_offsets, const float *goal_feats, const float *risk_patch,
-                         int P, int max_T, float eps, float ls_max, float lh_max, float ml_max,
-                         DW w, float *scratch, long scratch_stride, float *alphas_out, float *beta,
-                         float *gamma, float *lam_soft, float *lam_hard, float *mu_lat) {
+                         int P, int Cin, int max_T, float eps, float ls_max, float lh_max,
+                         float ml_max, DW w, float *scratch, long scratch_stride, float *alphas_out,
+                         float *beta, float *gamma, float *lam_soft, float *lam_hard,
+                         float *mu_lat) {
   const int agent = blockIdx.x;
   const int t = threadIdx.x;
   const int o0 = obs_offsets[agent];
@@ -320,7 +321,7 @@ __global__ void ce_fwd_k(const float *obs_feats, const unsigned char *obs_mask,
   float *bufB = bufA + scratch_stride / 2;
   // conv0 (2->16, s1) -> bufA (16,P,P); conv1 (16->32, s2) -> bufB; conv2
   // (32->64, s2) -> bufA. k=3 pad=1, ReLU fused. Ho=(H+2*pad-k)/stride+1.
-  conv_relu_s(risk_patch + (long)agent * 2 * P * P, 2, P, P, w.r0w, w.r0b, 16, 1, bufA, P, P);
+  conv_relu_s(risk_patch + (long)agent * Cin * P * P, Cin, P, P, w.r0w, w.r0b, 16, 1, bufA, P, P);
   __syncthreads();
   const int H2 = (P + 2 - 3) / 2 + 1, W2 = (P + 2 - 3) / 2 + 1; // stride 2
   conv_relu_s(bufA, 16, P, P, w.r2w, w.r2b, 32, 2, bufB, H2, W2);
@@ -416,8 +417,8 @@ void coef_energy_net::forward_batch_cuda(const float *obs_feats, const std::uint
   const int *d_off = static_cast<const int *>(up(obs_offsets, (std::size_t)(n + 1) * sizeof(int)));
   const float *d_goal =
       static_cast<const float *>(up(goal_feats, (std::size_t)n * 4 * sizeof(float)));
-  const float *d_risk =
-      static_cast<const float *>(up(risk_patch, (std::size_t)n * 2 * P * P * sizeof(float)));
+  const float *d_risk = static_cast<const float *>(
+      up(risk_patch, (std::size_t)n * risk_channels() * P * P * sizeof(float)));
 
   DW w{};
   w.ge0w = up_w("goal_enc.0.weight");
@@ -491,9 +492,9 @@ void coef_energy_net::forward_batch_cuda(const float *obs_feats, const std::uint
     cuda_check(
         cudaFuncSetAttribute(ce_fwd_k, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem),
         "set max shared");
-  ce_fwd_k<<<n, DT, smem>>>(d_obs, d_mask, d_off, d_goal, d_risk, P, max_T, eps_, lam_soft_max_,
-                            lam_hard_max_, mu_lat_max_, w, d_scratch, scratch_stride, d_alpha,
-                            d_beta, d_gamma, d_ls, d_lh, d_ml);
+  ce_fwd_k<<<n, DT, smem>>>(d_obs, d_mask, d_off, d_goal, d_risk, P, risk_channels(), max_T, eps_,
+                            lam_soft_max_, lam_hard_max_, mu_lat_max_, w, d_scratch, scratch_stride,
+                            d_alpha, d_beta, d_gamma, d_ls, d_lh, d_ml);
   cuda_check(cudaGetLastError(), "launch");
   cuda_check(cudaDeviceSynchronize(), "sync");
 
@@ -822,8 +823,8 @@ __host__ __device__ inline long bwd_scratch_floats(int T, int P, int no) {
 // device scratch) then reverse, atomicAdd-ing weight grads into g. blockDim=64.
 __global__ void ce_bwd_k(const float *obs_feats, const std::uint8_t *obs_mask,
                          const int *obs_offsets, const float *goal_feats, const float *risk_patch,
-                         int P, float eps, float ls_max, float lh_max, float ml_max, DW w, DWg g,
-                         const float *g_alphas, const float *g_beta, const float *g_gamma,
+                         int P, int Cin, float eps, float ls_max, float lh_max, float ml_max, DW w,
+                         DWg g, const float *g_alphas, const float *g_beta, const float *g_gamma,
                          const float *g_lam_soft, const float *g_lam_hard, const float *g_mu_lat,
                          float *scratch, long stride) {
   const int agent = blockIdx.x, t = threadIdx.x;
@@ -988,7 +989,7 @@ __global__ void ce_bwd_k(const float *obs_feats, const std::uint8_t *obs_mask,
   }
   float *ctxF = tokF; // ctx = tokF row 0
   // CNN forward
-  conv_relu_s(risk_patch + (long)agent * 2 * P * P, 2, P, P, w.r0w, w.r0b, 16, 1, c0r, P, P);
+  conv_relu_s(risk_patch + (long)agent * Cin * P * P, Cin, P, P, w.r0w, w.r0b, 16, 1, c0r, P, P);
   __syncthreads();
   for (int idx = t; idx < 16 * P * P; idx += DT)
     c0[idx] = c0r[idx]; // pre-relu unavailable; store post
@@ -1193,8 +1194,8 @@ __global__ void ce_bwd_k(const float *obs_feats, const std::uint8_t *obs_mask,
   for (int i = t; i < 16 * P * P; i += DT)
     gcA[i] = (c0[i] > 0.f) ? gcA[i] : 0.f; // g_c0
   __syncthreads();
-  d_conv_bwd(risk_patch + (long)agent * 2 * P * P, 2, P, P, w.r0w, 16, 1, P, P, gcA, nullptr, g.r0w,
-             g.r0b);
+  d_conv_bwd(risk_patch + (long)agent * Cin * P * P, Cin, P, P, w.r0w, 16, 1, P, P, gcA, nullptr,
+             g.r0w, g.r0b);
 }
 
 } // namespace
@@ -1248,7 +1249,8 @@ void coef_energy_net::backward_batch_cuda(const float *obs_feats, const std::uin
       static_cast<const unsigned char *>(up(obs_mask, (std::size_t)total));
   const int *d_off = static_cast<const int *>(up(obs_offsets, (std::size_t)(n + 1) * 4));
   const float *d_goal = static_cast<const float *>(up(goal_feats, (std::size_t)n * 4 * 4));
-  const float *d_risk = static_cast<const float *>(up(risk_patch, (std::size_t)n * 2 * P * P * 4));
+  const float *d_risk =
+      static_cast<const float *>(up(risk_patch, (std::size_t)n * risk_channels() * P * P * 4));
   const float *dga = static_cast<const float *>(up(g_alphas, (std::size_t)total * 4));
   const float *dgb = static_cast<const float *>(up(g_beta, (std::size_t)n * 4));
   const float *dgg = static_cast<const float *>(up(g_gamma, (std::size_t)n * 4));
@@ -1333,8 +1335,9 @@ void coef_energy_net::backward_batch_cuda(const float *obs_feats, const std::uin
   const long stride = bwd_scratch_floats(1 + max_obs, P, max_obs);
   float *d_scratch = static_cast<float *>(dmalloc((std::size_t)n * stride * sizeof(float)));
 
-  ce_bwd_k<<<n, DT>>>(d_obs, d_mask, d_off, d_goal, d_risk, P, eps_, lam_soft_max_, lam_hard_max_,
-                      mu_lat_max_, w, g, dga, dgb, dgg, dgls, dglh, dgml, d_scratch, stride);
+  ce_bwd_k<<<n, DT>>>(d_obs, d_mask, d_off, d_goal, d_risk, P, risk_channels(), eps_, lam_soft_max_,
+                      lam_hard_max_, mu_lat_max_, w, g, dga, dgb, dgg, dgls, dglh, dgml, d_scratch,
+                      stride);
   cuda_check(cudaGetLastError(), "launch");
   cuda_check(cudaDeviceSynchronize(), "sync");
 

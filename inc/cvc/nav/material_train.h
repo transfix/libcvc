@@ -69,7 +69,7 @@ struct material_batch {
   const float *obs_feats = nullptr;       // [B*N*6]
   const std::uint8_t *obs_mask = nullptr; // [B*N] (also the rollout mask)
   const float *goal_feats = nullptr;      // [B*4]
-  const float *risk_patch = nullptr;      // [B*2*P*P]
+  const float *risk_patch = nullptr;      // [B*C*P*P], C = the model's risk_channels()
   // rollout inputs
   const float *o0 = nullptr, *v0 = nullptr, *goal = nullptr;  // [B*2]
   const float *C = nullptr;                                   // [B*N*2]
@@ -84,6 +84,17 @@ struct material_batch {
   // from v0: the speed is |v0|, the heading v0's direction (toward the goal when
   // v0 is zero). The surrogate ignores them.
   const float *th0 = nullptr, *sp0 = nullptr;
+  // An external force in the rollout every term scores (material_ext, material.h:
+  // a caller's own force, as the deployed drive_step_material_ext adds it). L_multi's
+  // geometry rollouts leave it out, as they leave out the material forces. With it, the
+  // surrogate rollout and its VJP run on the CPU (no device twin of the channel yet).
+  const material_ext *ext = nullptr;
+  // The witness gate in training [B] (belief material, docs/roadmap/
+  // NAV-BELIEF-MATERIAL-ROADMAP.md §5): agent i's lam_soft enters every rollout (all three
+  // integrators and their VJPs) times gate_active[i] != 0, a stop-gradient bit computed by the
+  // caller (witness_gate_batch on the sample's belief planes at its start), as at deployment.
+  // L_lreg still reads the head's own lam_soft. Null = ungated, byte-identical to before.
+  const std::uint8_t *gate_active = nullptr;
 };
 
 // The rollout the material loss is taken through.
@@ -115,6 +126,15 @@ struct material_loss_config {
   int num_threads = 0;
 };
 
+// The loss's terms, as material_loss and material_loss_and_grad add them: L = 0.3 w_traj
+// traj + 0.3 w_vel vel + w_fric fric + w_clear clear + nav + w_lreg lreg + w_multi multi
+// (each unweighted here), and the CVaR quantile eta that nav used. For a twin trainer's
+// parity (GRL-SNAM's torch trainer) and for logging.
+struct material_loss_parts {
+  double L = 0.0, traj = 0.0, vel = 0.0, fric = 0.0, clear = 0.0, nav = 0.0, lreg = 0.0,
+         multi = 0.0, eta = 0.0;
+};
+
 // Forward-only loss. `frozen_eta` fixes the CVaR quantile (a NaN means "compute
 // it from J") — the gradcheck passes the base-point eta so the finite-difference
 // sees the SAME detached quantile the analytic gradient used. This is the
@@ -123,7 +143,8 @@ struct material_loss_config {
 // rollout forward through their device twins on the same terms as
 // material_loss_and_grad below.
 double material_loss(const coef_energy_net &model, const material_batch &b,
-                     const material_loss_config &cfg, float frozen_eta, bool use_cuda = false);
+                     const material_loss_config &cfg, float frozen_eta, bool use_cuda = false,
+                     material_loss_parts *parts = nullptr);
 
 // Loss + weight gradients (ADDED into `grads`; zero it first for a fresh
 // gradient). Returns the scalar loss and, via `eta_out` (optional), the CVaR
@@ -142,7 +163,8 @@ double material_loss(const coef_energy_net &model, const material_batch &b,
 // geom_rollout.cu), as does the loss/seed-grad glue.
 double material_loss_and_grad(const coef_energy_net &model, const material_batch &b,
                               const material_loss_config &cfg, coef_energy_net::param_grads &grads,
-                              float *eta_out = nullptr, bool use_cuda = false);
+                              float *eta_out = nullptr, bool use_cuda = false,
+                              material_loss_parts *parts = nullptr);
 
 // Cosine-annealed learning rate (torch CosineAnnealingLR): anneals lr0 -> eta_min
 // over t_max steps; lr(t) = eta_min + (lr0-eta_min)*0.5*(1+cos(pi*t/t_max)).

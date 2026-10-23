@@ -1,7 +1,7 @@
 # Visibility, Culling & LOD — Design & Roadmap
 
 **Module:** `cvc::vis` (headless, in `inc/cvc/vis/` + `src/cvc/vis/`) plus a thin VTK-facing adapter in `cvcGL`.
-**Status:** design, not yet implemented.
+**Status:** **LANDED (PR #249+).** The geometry/scene LOD described here is implemented — `inc/cvc/lod/select.h` (rung selection + hysteresis + the budget `solve()`), `lod/pyramid.h`, `cvc/geometry/simplify.h` (native QEM), `lod/tiles.h` (partition + tiled pyramids), `lod/store.h` (HDF5 `scene.cvch5`), the cvcGL `LodGraphicsNode`, and `cvc::vis` culling. The design-notes framing below predates the implementation — read it as rationale, not a TODO. **Still open:** physics LOD (none yet) and the runtime residency/paging driver (HLOD §4.2) — tracked in `ARIADNE_CONFERENCE_ROADMAP.md` §5h (H2/H3).
 **Provenance markers used throughout:** **[M]** measured on the target machine (Release, 32-core CUDA box, GTX 1650, 1280×800, vsync **off**), **[D]** derived arithmetically from measured values, **[E]** estimated.
 
 ---

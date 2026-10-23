@@ -12,7 +12,7 @@ endif()
 
 # First declare project with C and CXX to initialize CMake properly
 project(libcvc
-  VERSION 3.6.0
+  VERSION 3.7.0
   DESCRIPTION "Computational Visualization Center library from VolumeRover package"
   LANGUAGES C CXX
 )
@@ -111,7 +111,7 @@ if(EMSCRIPTEN)
   add_compile_definitions(BOOST_HAS_PTHREADS)
   # Threaded variant: real std::thread/SharedArrayBuffer. Every static lib in
   # the link must also be -pthread (a deps prefix built with CVC_WASM_THREADS=1)
-  # and the hosting page needs COOP/COEP headers (examples/wasm/serve.py).
+  # and the hosting page needs COOP/COEP headers (src/cvcGL/wasm/devtools/serve.py).
   option(CVC_WASM_PTHREADS "Emscripten: build with -pthread (needs -pthread deps + COOP/COEP hosting)" OFF)
   if(CVC_WASM_PTHREADS)
     add_compile_options(-pthread)
@@ -142,6 +142,8 @@ if(MSVC)
   # flags variable. Keep quoting so paths with spaces work.
   set(_CVC_MSVC_FI_HDR "${PROJECT_SOURCE_DIR}/inc/cvc/utility/msvc_compat.h")
   string(APPEND CMAKE_CXX_FLAGS " /FI\"${_CVC_MSVC_FI_HDR}\"")
+  # Compile each target's sources in parallel under the VS generators.
+  include("${PROJECT_SOURCE_DIR}/CMake/CvcMsvcParallelCompile.cmake")
 endif()
 
 # Use modern CMake policies
@@ -210,6 +212,13 @@ option(CVC_BUILD_CLI "Build the cvc command-line executable" ON)
 # `ari` (src/ari) runs a .ari document in the terminal through the FTXUI backend. Like the CLI it
 # ships as its own cvcpkg package (cvcpkg/recipes/ari); the libcvc recipe builds with it OFF.
 option(CVC_BUILD_ARI "Build the ari terminal runner for Ariadne documents" ON)
+# `arigl` (src/arigl) is the GL runtime: a .ari document in a real window, or in the terminal with
+# its scene rendered behind the widgets. It needs cvcGL, so it builds only with CVC_BUILD_CVCGL.
+option(CVC_BUILD_ARIGL "Build the arigl GL runtime for Ariadne documents (needs CVC_BUILD_CVCGL)" ON)
+# `arisrv` (src/arisrv) is the headless Ariadne conference relay (room-state relay + media SFU +
+# WS<->gRPC bridge). It needs a transport, so src/CMakeLists.txt adds it only when CVC_ENABLE_GRPC
+# or CVC_ENABLE_WS is on.
+option(CVC_BUILD_ARISRV "Build the arisrv Ariadne conference relay (needs CVC_ENABLE_GRPC or CVC_ENABLE_WS)" ON)
 option(CVC_ENABLE_COVERAGE "Enable code coverage analysis (requires GCC or Clang)" OFF)
 option(CVC_ENABLE_OPENMP "Enable OpenMP for parallel CPU processing" ON)
 
@@ -389,6 +398,9 @@ add_subdirectory(src)
 option(CVC_BUILD_CVCGL "Build the cvcGL scene-graph library in-tree (no pycvc needed)" OFF)
 if(CVC_BUILD_CVCGL AND NOT TARGET cvcGL)
   add_subdirectory(src/cvcGL)
+endif()
+if(CVC_BUILD_CVCGL AND CVC_BUILD_ARIGL AND TARGET cvcGL)
+  add_subdirectory(src/arigl)
 endif()
 
 # ************* pycvc Python bindings (opt-in) *************

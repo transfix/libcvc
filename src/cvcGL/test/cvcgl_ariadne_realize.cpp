@@ -132,6 +132,84 @@ int main() {
         "light batch baked the spot's moved position (10,20,30), not the origin");
   }
 
+  // ── a declared directional sun LIGHTS the scene, from where its angles say ──────
+  {
+    // The block above counts the sun as one non-positional vtkLight, and a sun that lit nothing
+    // was exactly that: its vtkLight sat at the node's origin aimed at its (0,0,0) target, a zero
+    // direction, so a scene with a declared sun drew ambient-only and every azimuth gave the same
+    // frame (hello.ari's bunny came out a dark silhouette). Only the pixels show it. A unit box
+    // seen from (+x,-y,+z): a sun at azimuth 135 sits towards +x+y, lighting the +x face and
+    // leaving the -y face in shade; at azimuth -45 it sits towards -x-y and the two swap. The top
+    // faces both. Each frame is shot with shadows off and on, since the bug ignored both.
+    struct Faces {
+      double px = 0, my = 0, top = 0; // mean of R,G,B at each visible face's centre
+      bool drawn = false;
+    };
+    auto shoot = [&](const char *name, float azimuth, bool shadows) {
+      SceneGraph sg(app, name);
+      SceneRenderer view(sg, 128, 128, /*offscreen=*/true, "main");
+      Scene scene;
+      SceneNode box;
+      box.id = "box";
+      box.type = "geometry";
+      box.source_primitive = "box"; // unit edges, centred on the origin
+      box.has_material = true;
+      box.color[0] = box.color[1] = box.color[2] = 0.8f;
+      scene.nodes.push_back(box);
+      SceneLight sun;
+      sun.id = "sun";
+      sun.kind = "directional";
+      sun.azimuth = azimuth;
+      sun.elevation = 35;
+      scene.lights.push_back(sun);
+      scene.has_shadows = true;
+      scene.shadows_enabled = shadows;
+      scene.has_chrome = true; // no grid or bounds box over the faces
+      scene.chrome_visible = false;
+      cvc::gl::ariadne::realize_scene(sg, scene, name);
+      sg.processEvents();
+      view.setBackground(0, 0, 0);
+      view.setCamera(4, -5, 3.5, 0, 0, 0, 0, 0, 1, 30.0, 0.1, 100.0);
+      const std::vector<unsigned char> f = view.frameRGB();
+      const int w = view.frameWidth(), h = view.frameHeight();
+      Faces out;
+      if (f.size() != std::size_t(w) * h * 3)
+        return out;
+      auto at = [&](double x, double y, double z) {
+        view.renderer()->SetWorldPoint(x, y, z, 1);
+        view.renderer()->WorldToDisplay();
+        double d[3];
+        view.renderer()->GetDisplayPoint(d);
+        const int px = std::clamp(int(d[0]), 0, w - 1), py = std::clamp(int(d[1]), 0, h - 1);
+        const unsigned char *c = &f[3 * (std::size_t(py) * w + px)];
+        return (c[0] + c[1] + c[2]) / 3.0;
+      };
+      out.px = at(0.5, 0, 0);
+      out.my = at(0, -0.5, 0);
+      out.top = at(0, 0, 0.5);
+      out.drawn = out.px > 0 || out.my > 0 || out.top > 0;
+      return out;
+    };
+    printf("== a declared directional sun lights the scene, from its azimuth ==\n");
+    for (const bool shadows : {false, true}) {
+      const Faces ne = shoot(shadows ? "sun135s" : "sun135", 135.0f, shadows);
+      const Faces sw = shoot(shadows ? "sunm45s" : "sunm45", -45.0f, shadows);
+      printf("     shadows %s: azimuth 135 +x=%.0f -y=%.0f top=%.0f | azimuth -45 +x=%.0f -y=%.0f "
+             "top=%.0f\n",
+             shadows ? "on " : "off", ne.px, ne.my, ne.top, sw.px, sw.my, sw.top);
+      if (!ne.drawn || !sw.drawn) {
+        printf("     (skipped: this build did not rasterise)\n");
+        continue;
+      }
+      const std::string tag = shadows ? " (shadows on)" : " (shadows off)";
+      // 40 of 255 is far above rasteriser noise and far below the ~90 a 35-degree sun adds.
+      chk(ne.px > ne.my + 40, "azimuth 135 lights the +x face, the -y face stays in shade" + tag);
+      chk(sw.my > sw.px + 40, "azimuth -45 lights the -y face, the +x face stays in shade" + tag);
+      chk(ne.top > ne.my + 40 && sw.top > sw.px + 40,
+          "both suns light the top above the shaded side" + tag);
+    }
+  }
+
   // ── nesting: a child's transform is LOCAL (world = parent ∘ local) ──────────
   {
     SceneGraph sg(app, "geo");

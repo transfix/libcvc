@@ -206,7 +206,8 @@ void nav_plant::attach(int n, const cvc::nav::plant_state *start,
     const double yaw = start[i].heading;
     const double c = det::cos(yaw), s = det::sin(yaw);
     const double h = _o.spawn_height >= 0.0 ? _o.spawn_height : resting_height(a.desc);
-    const vec3 origin{p.x - c * a.rear_x, p.y - s * a.rear_x, _o.ground_z + h};
+    const double gz = _o.ground_height ? _o.ground_height(p.x, p.y) : _o.ground_z;
+    const vec3 origin{p.x - c * a.rear_x, p.y - s * a.rear_x, gz + h};
     quat q;
     q.w = det::cos(0.5 * yaw);
     q.z = det::sin(0.5 * yaw);
@@ -314,19 +315,24 @@ cvc::nav::dyn_bike_si nav_plant::dyn_bike_si_of(const vehicle_desc &d, double mu
   si.cg_to_rear = std::max(1e-3, d.center_of_mass.x - rear);
   si.cg_height = std::max(0.0, -z + travel + radius + d.center_of_mass.z);
   si.mu = mu;
-  // Pacejka: sin(C pi / 2) = tire_sliding, C in (1, 2); the peak at B alpha = tan(pi / (2 C)).
+  // Pacejka: sin(C pi / 2) = tire_sliding, C in (1, 2). B makes the cornering stiffness per unit
+  // load, B C, kJoltTireStiffness times Jolt's: its lateral friction ramps linearly to 1 at
+  // tire_peak_slip_angle (jolt_backend.cpp).
   const double kPi = 3.14159265358979323846;
   const double sliding = std::min(std::max(d.tire_sliding, 0.05), 0.999);
   si.tire_C = 2.0 - 2.0 * std::asin(sliding) / kPi;
-  const double B = std::tan(kPi / (2.0 * si.tire_C)) / std::max(d.tire_peak_slip_angle, 1e-3);
+  const double B = kJoltTireStiffness / (si.tire_C * std::max(d.tire_peak_slip_angle, 1e-3));
   si.tire_B_front = B * front_stiffness;
   si.tire_B_rear = B;
   si.front_drive = front_driven && rear_driven ? 0.5 : (front_driven ? 1.0 : 0.0);
   si.front_brake = brake_front + brake_rear > 0.0 ? brake_front / (brake_front + brake_rear) : 0.5;
-  si.drag = 0.5 * d.air_density * d.drag_coefficient * d.frontal_area;
-  si.rolling_resistance = d.rolling_resistance;
+  // A direct drive: one gear, no torque converter. The driver model's trim makes its commanded
+  // acceleration the achieved one within the tick, drag and rolling resistance included.
+  const bool direct = d.gear_ratios.size() <= 1 && !(d.converter_k > 0.0);
+  si.drag = direct ? 0.0 : 0.5 * d.air_density * d.drag_coefficient * d.frontal_area;
+  si.rolling_resistance = direct ? 0.0 : d.rolling_resistance;
   si.steer_rate = d.max_steer_rate;
-  si.drive_lag = drive_lag;
+  si.drive_lag = drive_lag >= 0.0 ? drive_lag : (direct ? 0.0 : 0.1);
   si.gravity = gravity;
   return si;
 }
@@ -339,6 +345,52 @@ cvc::nav::diff::dyn_bike_params nav_plant::dyn_bike_params_at(const vehicle_desc
   cvc::nav::diff::dyn_bike_params p = cvc::nav::dyn_bike_params_of(si, f);
   // Exactly the controller's wheelbase: the float conversion of each half need not sum to it.
   p.lr = static_cast<float>(wheelbase) - p.lf;
+  return p;
+}
+
+cvc::nav::dyn4_si nav_plant::dyn4_si_of(const vehicle_desc &d, double front_stiffness,
+                                        double drive_lag, double gravity) {
+  cvc::nav::dyn4_si si;
+  si.single = dyn_bike_si_of(d, 0.9, front_stiffness, drive_lag, gravity);
+  const double hx = d.half_extents.x, hy = d.half_extents.y, hz = d.half_extents.z;
+  si.roll_inertia = d.mass * (hy * hy + hz * hz) / 3.0;
+  si.pitch_inertia = d.mass * (hx * hx + hz * hz) / 3.0;
+  // The corners' static loads: half of each axle's share of m g.
+  const double lf = si.single.cg_to_front, lr = si.single.cg_to_rear, L = lf + lr;
+  const double m_front = 0.5 * d.mass * lr / L, m_rear = 0.5 * d.mass * lf / L;
+  const double kPi = 3.14159265358979323846;
+  bool have_front = false, have_rear = false;
+  double front_x = 0.0, rear_x = 0.0;
+  for (const axle_desc &a : d.axles) {
+    const bool front = a.steered;
+    if (front ? (have_front && a.x <= front_x) : (have_rear && a.x >= rear_x))
+      continue; // the frontmost steered axle and the rearmost unsteered one, as dyn_bike_si_of
+    const double mc = front ? m_front : m_rear;
+    const double w = 2.0 * kPi * a.suspension_frequency;
+    const double k = mc * w * w, c = 2.0 * a.suspension_damping * std::sqrt(k * mc);
+    if (front) {
+      have_front = true;
+      front_x = a.x;
+      si.half_track_front = a.half_track;
+      si.spring_front = k;
+      si.damper_front = c;
+    } else {
+      have_rear = true;
+      rear_x = a.x;
+      si.half_track_rear = a.half_track;
+      si.spring_rear = k;
+      si.damper_rear = c;
+    }
+  }
+  return si;
+}
+
+cvc::nav::diff::dyn4_params nav_plant::dyn4_params_at(const vehicle_desc &d, double wheelbase) {
+  const cvc::nav::dyn4_si si = dyn4_si_of(d);
+  cvc::world_units::normalized_frame f;
+  f.scale = wheelbase / (si.single.cg_to_front + si.single.cg_to_rear);
+  cvc::nav::diff::dyn4_params p = cvc::nav::dyn4_params_of(si, f);
+  p.lr = static_cast<float>(wheelbase) - p.lf; // exactly the controller's wheelbase
   return p;
 }
 

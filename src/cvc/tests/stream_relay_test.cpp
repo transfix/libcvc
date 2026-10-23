@@ -75,6 +75,45 @@ TEST(StreamRelay, Registration) {
   relay.stop();
 }
 
+// Two participants both publish id "camera" under their OWN scope (root_path = the pid). The relay
+// must key each proxy by its (root_path, id) IDENTITY — the token — not by the id alone, or the
+// second participant collides onto the first and is silently dropped. This is the exact conference
+// SFU bug: with id-only keying the server relayed just 2 of 4 streams (A's), and every peer's pull
+// of B's media had no egress. No network needed.
+TEST(StreamRelay, ScopedSameIdNoCollision) {
+  cvc::app app;
+  cvc::stream_transport_grpc transport;
+  cs::stream_relay relay(app, transport);
+  const cs::format_desc fmt = rgba4x4();
+
+  cs::stream_params a;
+  a.id = "camera";
+  a.root_path = "A";
+  a.format = fmt;
+  const std::string ta = relay.relay(a);
+  ASSERT_FALSE(ta.empty());
+
+  cs::stream_params b;
+  b.id = "camera";   // SAME id as A...
+  b.root_path = "B"; // ...but a different scope (the other participant)
+  b.format = fmt;
+  const std::string tb = relay.relay(b);
+  ASSERT_FALSE(tb.empty());
+
+  EXPECT_NE(ta, tb) << "same id in different scopes must yield distinct tokens";
+  EXPECT_EQ(relay.stream_count(), 2u) << "both scoped streams must each get their own proxy";
+
+  // Idempotent per (scope, id): re-relaying A's camera returns A's token and adds no proxy.
+  cs::stream_params aAgain;
+  aAgain.id = "camera";
+  aAgain.root_path = "A";
+  aAgain.format = fmt;
+  EXPECT_EQ(relay.relay(aAgain), ta);
+  EXPECT_EQ(relay.stream_count(), 2u);
+
+  relay.stop();
+}
+
 // The SFU fan-out: N publishers each serve a stream to the relay; M subscribers
 // each pull all N; every one of the N*M paths delivers that publisher's frames
 // (verified by a per-publisher payload signature). Over loopback gRPC.

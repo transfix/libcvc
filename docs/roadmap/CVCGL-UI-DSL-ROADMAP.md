@@ -1,6 +1,8 @@
 # Ariadne — the cvcGL UI & scene DSL (Scoping Spec v0.14, for iteration)
 
-Status: **draft for discussion, no code committed.** Grounded in a full survey of
+Status: **SUBSTANTIALLY LANDED (2026-10). Verify any feature in the code, not this spec — it lags the tree.** Implemented: the `state_exec` engine, widget/layout model, reactive + action lanes, composition/URI, the scene-graph core, the streamed-source zero-copy contract + clipping, Unicode, and the backend-core split + AppRuntime refactor. Also landed despite still reading as open/planned in sections below — `input_text`/`input_int` (§3.5/§6, `loader.cpp`, #636), `RenderView`/`VisibilityMask` (§9.5, `src/cvcGL/RenderView.cpp`), the light scene node (§9.1, `LightNode.cpp`), clipboard (§17.8, `Clipboard*.{cpp,mm}`), `state_exec` async-scheduler parity (§7.1/§7.7, `receive_message`/`sleep`/`yield_frame`), JSON-Schema validator integration (§15), the **tvision** terminal backend (§16.4), the **EGL golden-image harness** (§16.6), and geometry LOD. **Genuinely remaining (verify per-item):** TF editor + `data()`-channel authoring (§10), `state_exec` program modularity `(include/load "uri")` (§19), the full YAML-free s-expr `.ari` *document* dialect (§18), the formal draft-2020-12 JSON Schema + `ari validate` CLI (§15), HTTP response-cache LRU (§13.9), pycvc URI handlers (§14.2). The version history and per-section status below are kept for provenance but are **not** authoritative; see `ARIADNE_CONFERENCE_ROADMAP.md` §13.
+
+Grounded in a full survey of
 the ImGui infrastructure (`ImGuiOverlay`, `ImGuiBinding`, `SceneRenderer`,
 `RenderView`, `Settings`, `StageLighting`), all 14 cvcGL examples, and the
 `cvc::state_exec` subsystem — all on `origin/master` (`4fb4e1198`). **Ariadne** is a
@@ -432,6 +434,14 @@ state node (`ui.docs.<doc>.tree.<id>`, §11.2), propagated one frame behind for 
 > the core owns the `cvc::state` round-trip. MockBackend-driven gtests in `ariadne_runtime_test`.
 > **Still deferred:** `state_exec` track expressions, thicker-than-1px custom-drawlist borders, mixing
 > resizable rows *and* columns in one grid, and *cross-run* durable persistence (decision #4).
+>
+> **✅ Increment 4 (table columns, 2026-10-19).** A resizable table persists its column widths to
+> `tree.<id>.columns` through the same seam (`seed_grid_columns` / `grid_columns`), in px for every
+> column; `0` = not set. ImGui seeds a stretch column's weight from its persisted px (proportions survive
+> another table width) and reads widths back through `imgui_internal` (`Columns[i].WidthGiven`); FTXUI
+> fixes a seeded column and reports only the tracks it holds at a size, which also fixed a row split's
+> first walk persisting a natural pane as 16 px. Tests: `ariadne_runtime_test`, `ariadne_ftxui_test`,
+> `cvcgl_imgui_table_columns`.
 
 Four related sizing knobs — all realized on the same table engine (§3.0.3a) whose flags this build ships
 (`IMGUI_HAS_TABLE`, confirmed).
@@ -1439,6 +1449,14 @@ Both, complementary:
   default in shipped demos.
 
 ### 7.6 `requires:` — capability declaration (load-time preflight)
+
+> **Status (2026-10-20):** the whole-document gate is built, and so are the auto-derived
+> warnings (`AppRuntime::load`, `inc/cvc/ariadne/requires.h`, `docs/ARIADNE.md` §5.7).
+> Entries may also be §16.3 capability tokens (`gl.scene`, `gl.shaders`, `raster.bitmap`,
+> `term.kitty`, …) or widget types, and `{name, optional: true}` warns instead of failing.
+> Programs and predicates can ask with `(has? "name")`. **Not yet:** per-program and per-unit
+> `requires:`, strict mode, the reduced-env (sandboxed) check, and per-widget `fallback:`
+> (§16.3).
 
 **Problem.** Symbols resolve at **eval time**, and an unbound one **throws** (`"undefined symbol:
 …"`) — never nil. So a user-extended demo or custom UI that calls an intrinsic missing in *this*
@@ -4227,9 +4245,11 @@ complementary terminal experiences — a native *text UI* vs a *pixel mirror* of
   noted with the Ariadne tests — backend RENDERING becomes CI-testable (EGL software-fallback on a
   runner without a GPU), instead of only compile-checked + seam-harnessed. It needs *no* terminal
   rasterizer at all — just EGL + readback + an image-diff — so it lands first.
-- **(b) Product mode: "cvcGL in a terminal" (later).** The real renderer over SSH: the 3D scene + the
-  Ariadne ImGui UI as Sixel/Kitty graphics, with terminal input (keys, and SGR mouse where the terminal
-  reports it, bracketed paste) fed to the VTK interactor / ImGui exactly as the onscreen path does.
+- **(b) Product mode: "cvcGL in a terminal" — superseded (2026-10-19).** The plan was to mirror the
+  real renderer's pixels (the 3D scene + the Ariadne ImGui UI as Sixel/Kitty graphics) into a terminal.
+  What shipped instead is better for a terminal: `arigl --terminal` renders only the SCENE offscreen
+  and draws it behind native terminal widgets (FTXUI or tvision), so text stays text and input is the
+  terminal's own. The pixel mirror is dropped; Sixel/Kitty remain as a sharper way to draw that scene.
 
 **Honest caveats.** Readback is a GPU→CPU stall — fine for a test capture, needs PBO async + a frame cap for
 interactive use. Sixel/Kitty bandwidth and terminal latency bound the frame rate (a few fps over SSH is
@@ -4242,7 +4262,17 @@ in beside the native-window and wasm surfaces as a third way to present the same
 > `cvc::gl::ariadne::TerminalScene` renders the document's SCENE offscreen (X / EGL / OSMesa) and the half-block
 > rasterizer (tier 3 below) draws it as the terminal backend's background, with the widgets drawn natively over it by
 > FTXUI or tvision, rather than mirroring the ImGui overlay's pixels. Background drags / the wheel steer the camera.
-> Host: `ariadne_terminal`; test: `cvcgl_terminal_scene`. Sixel / Kitty and the golden-image harness (1) remain.
+> Hosts: `arigl --terminal` (the GL runtime) and the `ariadne_terminal` example; test:
+> `cvcgl_terminal_scene`.
+>
+> **Status (2026-10-19): Kitty and Sixel are built (phasing step 3).** `FtxuiBackend` probes the terminal before FTXUI
+> takes it (kitty query, `CSI 16 t`, DA1; `TIOCGWINSZ` for the cell's pixels) and `Options::image_color` `Auto` picks
+> Kitty, else Sixel, else half-blocks. Kitty images are sent once, out of band, and shown through Unicode placeholder
+> cells, so windows hide them cell-exactly and FTXUI's full repaint redraws them; Sixel bitmaps are re-sent after each
+> draw, clipped to the cells nothing covers. Both serve `draw_image` and the background, so `TerminalScene` renders at
+> the cells' real pixels. The encoders are pure functions (`term_graphics.h`, `ariadne_term_graphics_test`). Remaining:
+> tmux passthrough, Windows / wasm detection (`Auto` stays half-blocks there), and the tvision desktop, which keeps
+> half-blocks because tvision owns the output.
 
 **Phasing.** (1) EGL offscreen + `frameRGB` **golden-image test harness** for the ImGui/VTK backend (v1.x —
 the testability win). (2) The half-block-ANSI rasterizer (a pure RGB→bytes function + tests — no GPU needed
