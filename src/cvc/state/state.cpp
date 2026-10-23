@@ -336,6 +336,16 @@ std::string state::valueTypeName() {
   return _valueTypeName;
 }
 
+// Set the declared value type directly, without touching the value or emitting a change signal.
+// Replication apply/snapshot uses this to preserve a value's source type across a receive-only node
+// (see the header). Deliberately signal-free: the value itself is set separately, under the sync
+// adapter's thread-suppression guard, so this must not re-enter the journal.
+void state::valueTypeName(const std::string &typeName) {
+  boost::this_thread::interruption_point();
+  boost::mutex::scoped_lock lock(_mutex);
+  _valueTypeName = typeName;
+}
+
 // --------------
 // state::comment
 // --------------

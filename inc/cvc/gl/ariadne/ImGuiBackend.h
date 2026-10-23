@@ -20,6 +20,8 @@
 #include <unordered_map>
 #include <vector>
 
+struct ImGuiContext; // Dear ImGui (global namespace); forward-declared, the header stays imgui-free
+
 namespace cvc {
 namespace ariadne {
 class Runtime;
@@ -42,11 +44,14 @@ public:
   void end_window() override;
   void seed_window_geometry(const cvc::ariadne::WindowGeom &g) override; // §11.4 (pre begin_window)
   cvc::ariadne::WindowGeom window_geometry() const override; // §11.4 (post begin_window)
+  void focus_next_window() override;                         // raise edge (pre begin_window)
   bool begin_grid(const cvc::ariadne::Layout &layout, const char *id) override;
   void grid_next_cell() override;
   void end_grid() override;
   void seed_grid_tracks(const std::vector<float> &sizes) override; // §11.4 (pre begin_grid)
   std::vector<float> grid_tracks() const override;                 // §11.4 (post end_grid)
+  void seed_grid_columns(const std::vector<float> &widths) override; // §11.4 (pre begin_grid)
+  std::vector<float> grid_columns() const override;                  // §11.4 (post end_grid)
   void begin_disabled() override; // §4: ImGui::BeginDisabled (greyed, non-interactive)
   void end_disabled() override;
   void set_tooltip(const char *text) override; // §4: hover tooltip on the last item
@@ -103,6 +108,13 @@ public:
   // rt.set_backend(this). `rt` must outlive the overlay's callback.
   void install(cvc::ariadne::Runtime &rt, ImGuiOverlay &overlay);
 
+  // Make `ctx` the current Dear ImGui context of the module this backend runs in (libcvcGL), for a
+  // host that created the context itself rather than through ImGuiOverlay. Where imgui is a static
+  // library linked into both the host and libcvcGL (the cvcpkg Windows imgui), each copy keeps its
+  // own current context, so without this the backend sees none and crashes. With ImGuiOverlay, or
+  // a shared imgui, it is not needed and harmless. Pass nullptr before destroying `ctx`.
+  static void setImGuiContext(ImGuiContext *ctx);
+
 private:
   // ImGui style vars pushed per open window (WindowBorderSize, §3.0.3b), popped
   // in end_window. A stack so window nesting is correct.
@@ -113,7 +125,8 @@ private:
   // vertical split-pane stack with draggable seams (row splitter). Held on a
   // stack so nested grids compose. No ImGui types here (backend-header-clean).
   struct GridState {
-    bool split = false; // split-pane mode vs table mode
+    bool split = false;     // split-pane mode vs table mode
+    bool resizable = false; // table mode: draggable columns, whose widths persist (§11.4)
     int cols = 1;
     int cell = 0;              // cells emitted so far
     std::vector<float> row_px; // resolved row heights (px; 0 = auto/fit)
@@ -138,6 +151,9 @@ private:
   std::vector<float> m_pendingTracks;
   bool m_haveTracks = false;
   std::vector<float> m_lastGridTracks;
+  std::vector<float> m_pendingColumns; // the same, for a resizable table's column widths
+  bool m_haveColumns = false;
+  std::vector<float> m_lastGridColumns;
 
   // Host-registered raw-ImGui draw fns for custom widget types (register_widget).
   std::unordered_map<std::string, CustomDrawFn> m_customWidgets;

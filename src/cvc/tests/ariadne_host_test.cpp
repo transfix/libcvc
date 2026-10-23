@@ -1,0 +1,468 @@
+// What a runtime host (ari, arigl, arisrv) relies on: the shared command line (host_cli.h), a
+// document's own arguments (doc_args.h: the argv list, the args: block, their read-only state and
+// the mount grant), and AppRuntime's host verbs and init: diagnostics.
+
+#include <cvc/ariadne/app_runtime.h>
+#include <cvc/ariadne/doc_args.h>
+#include <cvc/ariadne/ftxui_backend.h>
+#include <cvc/ariadne/host_cli.h>
+#include <cvc/ariadne/loader.h>
+#include <cvc/core/app.h>
+#include <cvc/state/state.h>
+#include <cvc/state/state_exec/types.h>
+#include <filesystem>
+#include <fstream>
+#include <gtest/gtest.h>
+#include <memory>
+#include <string>
+#include <vector>
+
+using namespace cvc::ariadne;
+namespace se = cvc::state_exec;
+namespace fs = std::filesystem;
+
+namespace {
+
+#define REQUIRE_YAML()                                                                             \
+  do {                                                                                             \
+    if (!AppRuntime::have_yaml())                                                                  \
+      GTEST_SKIP() << "libcvc built without yaml-cpp";                                             \
+  } while (0)
+
+std::string val(cvc::app &app, const std::string &path) {
+  return cvc::state::instance(app)(path).value();
+}
+
+// The DSL value parked on a node's data channel (what state-data-set / publish_document_args put).
+se::value_t data_of(cvc::app &app, const std::string &path) {
+  boost::any d = cvc::state::instance(app)(path).data();
+  if (const se::value_t *v = boost::any_cast<se::value_t>(&d))
+    return *v;
+  return se::value_t();
+}
+
+// A fresh directory per test, holding the documents it writes.
+fs::path test_dir(const std::string &name) {
+  const fs::path dir = fs::temp_directory_path() / ("ariadne_host_test_" + name);
+  fs::remove_all(dir);
+  fs::create_directories(dir);
+  return dir;
+}
+
+fs::path write(const fs::path &dir, const std::string &file, const std::string &text) {
+  const fs::path p = dir / file;
+  std::ofstream(p) << text;
+  return p;
+}
+
+const char *kConfDoc = "meta:\n"
+                       "  name: conf\n"
+                       "  description: Join a call.\n"
+                       "  min_libcvc: 3.4.0\n"
+                       "args:\n"
+                       "  room:   {type: string, default: lobby, help: Room to join}\n"
+                       "  camera: {type: bool, help: Use the real camera}\n"
+                       "  peers:  {type: int, default: 8}\n"
+                       "  scale:  float\n"
+                       "  file:   {type: string, positional: true}\n"
+                       "init: |\n"
+                       "  (state-set \"got.room\" (state-get \"args.room\"))\n"
+                       "  (state-set \"got.argc\" (str (length (state-data-get \"argv\"))))\n"
+                       "root:\n"
+                       "  - text: hello\n";
+
+std::vector<ArgSpec> conf_spec() {
+  LoadResult lr = load_string(kConfDoc);
+  EXPECT_TRUE(lr.ok) << lr.error;
+  return lr.args;
+}
+
+std::string value_of(const DocumentArgs &a, const std::string &name) {
+  for (const auto &kv : a.values)
+    if (kv.first == name)
+      return kv.second;
+  return "<absent>";
+}
+
+} // namespace
+
+// ── the shared command line ─────────────────────────────────────────────────────────────────────
+
+TEST(AriadneHostCli, RuntimeFlagsComeBeforeTheDocumentAndTheRestIsItsOwn) {
+  const char *argv[] = {"ari", "run",     "--fps", "30", "--component-path",
+                        "/c",  "doc.ari", "--fps", "5",  "x"};
+  const HostOptions o = parse_host_args(10, argv);
+  EXPECT_TRUE(o.error.empty()) << o.error;
+  EXPECT_EQ(o.command, "run");
+  EXPECT_EQ(o.fps, 30); // the one before the document
+  ASSERT_EQ(o.component_paths.size(), 1u);
+  EXPECT_EQ(o.doc, "doc.ari");
+  EXPECT_EQ(o.doc_args, (std::vector<std::string>{"--fps", "5", "x"}));
+  EXPECT_NE(misplaced_flag_note("ari", o.doc_args).find("'--fps'"), std::string::npos);
+}
+
+TEST(AriadneHostCli, InfoTakesNoDocument) {
+  const char *info[] = {"ari", "info", "--json"};
+  const HostOptions o = parse_host_args(3, info, {"--json"});
+  EXPECT_TRUE(o.error.empty()) << o.error;
+  EXPECT_EQ(o.command, "info");
+  EXPECT_TRUE(o.doc.empty());
+  const char *run[] = {"ari", "run"};
+  EXPECT_EQ(parse_host_args(2, run).error, "no document given"); // the others still need one
+}
+
+TEST(AriadneHostCli, ExtraFlagsEqualsFormsAndErrors) {
+  const char *a1[] = {"arigl", "snapshot", "--terminal", "--width=80", "--ansi", "d.ari"};
+  HostOptions o = parse_host_args(6, a1, {"--terminal"});
+  EXPECT_TRUE(o.error.empty()) << o.error;
+  EXPECT_EQ(o.extra_flags, (std::vector<std::string>{"--terminal"}));
+  EXPECT_EQ(o.width, 80);
+  EXPECT_TRUE(o.ansi);
+
+  const char *a2[] = {"ari", "run", "--room", "x", "d.ari"};
+  o = parse_host_args(5, a2);
+  EXPECT_NE(o.error.find("unknown option '--room'"), std::string::npos) << o.error;
+
+  const char *a3[] = {"ari", "run", "--fps", "fast", "d.ari"};
+  EXPECT_FALSE(parse_host_args(5, a3).error.empty());
+
+  const char *a4[] = {"ari", "run"};
+  EXPECT_FALSE(parse_host_args(2, a4).error.empty()); // no document
+
+  const char *a5[] = {"ari", "run", "--", "-odd.ari", "--x"};
+  o = parse_host_args(5, a5);
+  EXPECT_EQ(o.doc, "-odd.ari");
+  EXPECT_EQ(o.doc_args, (std::vector<std::string>{"--x"}));
+
+  const char *a6[] = {"ari", "--help"};
+  EXPECT_TRUE(parse_host_args(2, a6).help);
+}
+
+// ── parsing a document's arguments ──────────────────────────────────────────────────────────────
+
+TEST(AriadneHostCli, GraphicsImageAndCellSizeFlags) {
+  const char *a1[] = {"ari",           "snapshot",           "--graphics",  "kitty", "--image",
+                      "photo=a=b.png", "--image=logo=l.png", "--cell-size", "9x17",  "doc.ari"};
+  HostOptions o = parse_host_args(10, a1);
+  ASSERT_TRUE(o.error.empty()) << o.error;
+  EXPECT_EQ(o.graphics, "kitty");
+  ASSERT_EQ(o.images.size(), 2u);
+  EXPECT_EQ(o.images[0].first, "photo");
+  EXPECT_EQ(o.images[0].second, "a=b.png") << "the name ends at the first '='";
+  EXPECT_EQ(o.images[1].first, "logo");
+  EXPECT_EQ(o.cell_w, 9);
+  EXPECT_EQ(o.cell_h, 17);
+  EXPECT_EQ(o.doc, "doc.ari");
+
+  const char *bad_mode[] = {"ari", "run", "--graphics", "iterm", "d.ari"};
+  EXPECT_NE(parse_host_args(5, bad_mode).error.find("--graphics"), std::string::npos);
+  const char *bad_image[] = {"ari", "run", "--image", "photo.png", "d.ari"};
+  EXPECT_NE(parse_host_args(5, bad_image).error.find("NAME=FILE"), std::string::npos);
+  const char *bad_cell[] = {"ari", "snapshot", "--cell-size", "9", "d.ari"};
+  EXPECT_NE(parse_host_args(5, bad_cell).error.find("WxH"), std::string::npos);
+  const char *zero_cell[] = {"ari", "snapshot", "--cell-size", "0x16", "d.ari"};
+  EXPECT_FALSE(parse_host_args(5, zero_cell).error.empty());
+  // After the document they are the document's, and ari says so.
+  const char *after[] = {"ari", "run", "d.ari", "--graphics", "sixel"};
+  o = parse_host_args(5, after);
+  EXPECT_TRUE(o.graphics.empty());
+  EXPECT_NE(misplaced_flag_note("ari", o.doc_args).find("'--graphics'"), std::string::npos);
+}
+
+TEST(AriadneDocArgs, ParsesOptionsBoolsAndPositionals) {
+  const DocumentArgs a = parse_document_args(
+      conf_spec(), {"--room", "standup", "--camera", "--peers=3", "--scale", "0.5", "notes.txt"});
+  EXPECT_TRUE(a.errors.empty()) << a.errors.front();
+  EXPECT_FALSE(a.help);
+  EXPECT_EQ(value_of(a, "room"), "standup");
+  EXPECT_EQ(value_of(a, "camera"), "true");
+  EXPECT_EQ(value_of(a, "peers"), "3");
+  EXPECT_EQ(value_of(a, "scale"), "0.5");
+  EXPECT_EQ(value_of(a, "file"), "notes.txt");
+}
+
+TEST(AriadneDocArgs, DefaultsNegationRepeatsAndDoubleDash) {
+  const std::vector<ArgSpec> spec = conf_spec();
+  DocumentArgs a = parse_document_args(spec, {});
+  EXPECT_TRUE(a.errors.empty());
+  EXPECT_EQ(value_of(a, "room"), "lobby"); // defaults fill in
+  EXPECT_EQ(value_of(a, "peers"), "8");
+  EXPECT_EQ(value_of(a, "camera"), "<absent>"); // no default, not given: absent
+  a = parse_document_args(spec, {"--camera", "--no-camera", "--room", "a", "--room", "b"});
+  EXPECT_EQ(value_of(a, "camera"), "false");
+  EXPECT_EQ(value_of(a, "room"), "b"); // the last one wins
+  a = parse_document_args(spec, {"--", "--not-an-option"});
+  EXPECT_TRUE(a.errors.empty());
+  EXPECT_EQ(value_of(a, "file"), "--not-an-option");
+  a = parse_document_args(spec, {"--peers", "-3"}); // a negative number is a value
+  EXPECT_EQ(value_of(a, "peers"), "-3");
+  a = parse_document_args(spec, {"-h"});
+  EXPECT_TRUE(a.help);
+}
+
+TEST(AriadneDocArgs, ReportsEveryProblem) {
+  const DocumentArgs a =
+      parse_document_args(conf_spec(), {"--bogus", "--peers", "many", "--camera=maybe", "one.txt",
+                                        "two.txt", "--room"});
+  ASSERT_EQ(a.errors.size(), 5u);
+  EXPECT_NE(a.errors[0].find("unknown option '--bogus'"), std::string::npos);
+  EXPECT_NE(a.errors[1].find("'many' is not an int"), std::string::npos);
+  EXPECT_NE(a.errors[2].find("'maybe' is not a bool"), std::string::npos);
+  EXPECT_NE(a.errors[3].find("unexpected argument 'two.txt'"), std::string::npos);
+  EXPECT_NE(a.errors[4].find("--room needs a string value"), std::string::npos);
+
+  ArgSpec need;
+  need.name = "token";
+  need.required = true;
+  EXPECT_EQ(parse_document_args({need}, {}).errors,
+            (std::vector<std::string>{"missing required --token"}));
+}
+
+TEST(AriadneDocArgs, UsageListsEveryArgument) {
+  const std::string u = format_document_usage("ari run conf.ari", "Join a call.", conf_spec());
+  EXPECT_NE(u.find("usage: ari run conf.ari [options] [file]"), std::string::npos) << u;
+  EXPECT_NE(u.find("Join a call."), std::string::npos) << u;
+  EXPECT_NE(u.find("--room <string>"), std::string::npos) << u;
+  EXPECT_NE(u.find("Room to join (default: lobby)"), std::string::npos) << u;
+  EXPECT_NE(u.find("--camera "), std::string::npos) << u; // a bool takes no value
+  EXPECT_NE(u.find("-h, --help"), std::string::npos) << u;
+}
+
+TEST(AriadneDocArgs, LoaderRejectsAMalformedSpec) {
+  REQUIRE_YAML();
+  const auto fails = [](const std::string &args, const std::string &want) {
+    LoadResult lr = load_string("meta: {min_libcvc: 3.4.0}\nargs:\n" + args + "root: []\n");
+    EXPECT_FALSE(lr.ok) << args;
+    EXPECT_NE(lr.error.find(want), std::string::npos) << lr.error;
+  };
+  fails("  n: {type: number}\n", "unknown type 'number'");
+  fails("  n: {type: int, default: lots}\n", "default 'lots' is not an int");
+  fails("  help: bool\n", "not a valid argument name");
+  fails("  9lives: bool\n", "not a valid argument name");
+  fails("  f: {type: bool, positional: true}\n", "cannot be a bool");
+  fails("  a: {positional: true}\n  b: {positional: true, required: true}\n",
+        "a required positional cannot follow an optional one");
+  LoadResult ok = load_string("meta: {min_libcvc: 3.4.0}\nargs:\n  v: bool\nroot: []\n");
+  ASSERT_TRUE(ok.ok) << ok.error;
+  EXPECT_TRUE(ok.has_args_block);
+  ASSERT_EQ(ok.args.size(), 1u);
+  EXPECT_EQ(ok.args[0].type, ArgSpec::Type::Bool);
+}
+
+// ── the arguments on the tree ───────────────────────────────────────────────────────────────────
+
+TEST(AriadneDocArgs, AppRuntimePublishesThemBeforeInitRuns) {
+  REQUIRE_YAML();
+  const fs::path doc = write(test_dir("publish"), "conf.ari", kConfDoc);
+  cvc::app app;
+  FtxuiBackend be; // an inert stub without FTXUI; this test never draws
+  AppRuntime art(app, "ui.docs.conf");
+  art.set_backend(be);
+  art.set_document_args({"--room", "standup", "--peers", "3", "--camera"});
+  const std::vector<std::string> warns = art.load(doc.string());
+  EXPECT_TRUE(warns.empty()) << warns.front();
+  EXPECT_TRUE(art.has_args_block());
+  // init: ran after the arguments were on the tree.
+  EXPECT_EQ(val(app, "ui.docs.conf.got.room"), "standup");
+  EXPECT_EQ(val(app, "ui.docs.conf.got.argc"), "5");
+  // argv: the strings as given, as a DSL list.
+  const se::value_t argv = data_of(app, "ui.docs.conf.argv");
+  const auto *list = std::get_if<se::list_ptr>(&argv.v);
+  ASSERT_TRUE(list && *list);
+  ASSERT_EQ((*list)->size(), 5u);
+  EXPECT_EQ(std::get<std::string>((*list)->at(1).v), "standup");
+  EXPECT_EQ(val(app, "ui.docs.conf.argv"), "--room standup --peers 3 --camera");
+  // args.<name>: canonical text plus the typed value.
+  EXPECT_EQ(val(app, "ui.docs.conf.args.peers"), "3");
+  EXPECT_EQ(std::get<int64_t>(data_of(app, "ui.docs.conf.args.peers").v), 3);
+  EXPECT_TRUE(std::get<bool>(data_of(app, "ui.docs.conf.args.camera").v));
+  EXPECT_EQ(cvc::state::instance(app).findDescendant("ui.docs.conf.args.scale"), nullptr);
+  // args: the whole set as one dict.
+  const se::value_t all = data_of(app, "ui.docs.conf.args");
+  const auto *dict = std::get_if<se::dict_ptr>(&all.v);
+  ASSERT_TRUE(dict && *dict);
+  EXPECT_EQ((*dict)->size(), 3u); // room, camera, peers (scale and file were not given)
+}
+
+TEST(AriadneDocArgs, ADocumentCannotRewriteItsArguments) {
+  REQUIRE_YAML();
+  const fs::path doc = write(test_dir("readonly"), "ro.ari",
+                             "meta: {min_libcvc: 3.4.0}\n"
+                             "args:\n  room: {default: lobby}\n"
+                             "init: |\n"
+                             "  (state-set \"args.room\" \"hijacked\")\n"
+                             "root:\n  - text: hi\n"
+                             "on_tick: |\n"
+                             "  (state-set \"argv\" \"rewritten\")\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.ro");
+  art.set_backend(be);
+  art.set_document_args({"--room", "standup"});
+  const std::vector<std::string> warns = art.load(doc.string());
+  for (int i = 0; i < 3; ++i)
+    art.drain();
+  EXPECT_EQ(val(app, "ui.docs.ro.args.room"), "standup");
+  EXPECT_EQ(val(app, "ui.docs.ro.argv"), "--room standup");
+  // The refused write in init: is reported, not silent.
+  bool reported = false;
+  for (const std::string &w : warns)
+    reported = reported || w.find("init:") != std::string::npos;
+  EXPECT_TRUE(reported);
+}
+
+TEST(AriadneDocArgs, HelpAndBadArgumentsStopTheLoadWithUsage) {
+  REQUIRE_YAML();
+  const fs::path doc = write(test_dir("usage"), "conf.ari", kConfDoc);
+  cvc::app app;
+  FtxuiBackend be;
+  {
+    AppRuntime art(app, "ui.docs.a");
+    art.set_backend(be);
+    art.set_document_args({"--help"}, "ari run conf.ari");
+    try {
+      art.load(doc.string());
+      FAIL() << "--help must stop the load";
+    } catch (const document_args_error &e) {
+      EXPECT_TRUE(e.help);
+      EXPECT_NE(e.usage.find("usage: ari run conf.ari"), std::string::npos) << e.usage;
+    }
+    EXPECT_EQ(cvc::state::instance(app).findDescendant("ui.docs.a.got"), nullptr); // no init:
+  }
+  {
+    AppRuntime art(app, "ui.docs.b");
+    art.set_backend(be);
+    art.set_document_args({"--bogus"});
+    try {
+      art.load(doc.string());
+      FAIL() << "an unknown option must stop the load";
+    } catch (const document_args_error &e) {
+      EXPECT_FALSE(e.help);
+      EXPECT_NE(std::string(e.what()).find("unknown option '--bogus'"), std::string::npos);
+    }
+  }
+  {
+    AppRuntime art(app, "ui.docs.c"); // a check: arguments are not validated, defaults apply
+    art.set_backend(be);
+    art.set_document_args({"--bogus"}, "", /*validate=*/false);
+    EXPECT_NO_THROW(art.load(doc.string()));
+    EXPECT_EQ(val(app, "ui.docs.c.args.room"), "lobby");
+  }
+}
+
+TEST(AriadneDocArgs, WithoutAnArgsBlockTheDocumentGetsRawArgv) {
+  REQUIRE_YAML();
+  const fs::path doc = write(test_dir("raw"), "raw.ari",
+                             "meta: {min_libcvc: 3.4.0}\n"
+                             "init: |\n"
+                             "  (state-set \"first\" (car (state-data-get \"argv\")))\n"
+                             "root:\n  - text: hi\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.raw");
+  art.set_backend(be);
+  art.set_document_args({"--anything", "goes"});
+  EXPECT_NO_THROW(art.load(doc.string()));
+  EXPECT_FALSE(art.has_args_block());
+  EXPECT_EQ(val(app, "ui.docs.raw.first"), "--anything");
+  EXPECT_EQ(cvc::state::instance(app).findDescendant("ui.docs.raw.args"), nullptr);
+}
+
+TEST(AriadneDocArgs, AModuleSeesThemOnlyThroughAReadOnlyGrant) {
+  REQUIRE_YAML();
+  const fs::path dir = test_dir("mount");
+  const fs::path frag =
+      write(dir, "peek.ari",
+            "init: |\n"
+            "  (state-set \"seen\" (if (state-exists \"args\")\n"
+            "                        (get-attr (state-data-get \"args\") \"room\") \"none\"))\n"
+            "  (state-set \"seen_argv\" (if (state-exists \"argv\") \"yes\" \"no\"))\n"
+            "root:\n  - text: peek\n");
+  const fs::path doc = write(dir, "parent.ari",
+                             "meta: {min_libcvc: 3.4.0}\n"
+                             "args:\n  room: {default: lobby}\n"
+                             "root:\n"
+                             "  - load: " +
+                                 frag.string() +
+                                 "\n"
+                                 "    as: granted\n"
+                                 "    link:\n"
+                                 "      args: {to: args, mode: ro}\n"
+                                 "  - load: " +
+                                 frag.string() +
+                                 "\n"
+                                 "    as: denied\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.p");
+  art.set_backend(be);
+  art.set_document_args({"--room", "standup"});
+  art.load(doc.string());
+  art.runtime().render(); // the reconcile mounts both modules, wires the hole, runs their init:
+  EXPECT_EQ(val(app, "ui.docs.p.includes.granted.seen"), "standup");
+  EXPECT_EQ(val(app, "ui.docs.p.includes.denied.seen"), "none");
+  EXPECT_EQ(val(app, "ui.docs.p.includes.granted.seen_argv"), "no"); // granted args, not argv
+  EXPECT_EQ(val(app, "ui.docs.p.includes.denied.seen_argv"), "no");
+}
+
+// ── host verbs and init: diagnostics ────────────────────────────────────────────────────────────
+
+TEST(AriadneHostVerbs, EveryRegisteredVerbIsBound) {
+  REQUIRE_YAML();
+  const fs::path doc = write(test_dir("verbs"), "v.ari",
+                             "meta: {min_libcvc: 3.4.0}\n"
+                             "root:\n  - text: hi\n"
+                             "on_tick: |\n"
+                             "  (first-verb)\n"
+                             "  (second-verb)\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.v");
+  art.set_backend(be);
+  int first = 0, second = 0;
+  art.register_verb("first-verb", [&] { ++first; });
+  art.register_verb("second-verb", [&] { ++second; }); // registered after the first one
+  art.load(doc.string());
+  for (int i = 0; i < 4; ++i)
+    art.drain();
+  EXPECT_GT(first, 0);
+  EXPECT_GT(second, 0);
+}
+
+TEST(AriadneHostVerbs, AGoneRuntimesVerbsAreNotBound) {
+  REQUIRE_YAML();
+  const fs::path doc = write(test_dir("gone"), "g.ari",
+                             "meta: {min_libcvc: 3.4.0}\n"
+                             "root:\n  - text: hi\n"
+                             "on_tick: |\n"
+                             "  (stale-verb)\n");
+  cvc::app app;
+  FtxuiBackend be;
+  int stale = 0;
+  {
+    AppRuntime old(app, "ui.docs.old");
+    old.register_verb("stale-verb", [&] { ++stale; });
+  } // its provider stays in the process-wide registry, but must bind nothing now
+  AppRuntime art(app, "ui.docs.g");
+  art.set_backend(be);
+  art.load(doc.string());
+  for (int i = 0; i < 4; ++i)
+    art.drain();
+  EXPECT_EQ(stale, 0);
+}
+
+TEST(AriadneHostVerbs, AFailingInitIsAWarning) {
+  REQUIRE_YAML();
+  const fs::path doc = write(test_dir("init"), "i.ari",
+                             "meta: {min_libcvc: 3.4.0}\n"
+                             "init: |\n"
+                             "  (no-such-function 1)\n"
+                             "root:\n  - text: hi\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.i");
+  art.set_backend(be);
+  const std::vector<std::string> warns = art.load(doc.string());
+  ASSERT_FALSE(warns.empty());
+  EXPECT_NE(warns.front().find("init:"), std::string::npos) << warns.front();
+}

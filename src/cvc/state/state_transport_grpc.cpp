@@ -189,6 +189,22 @@ state_message decode_message(const pb::Message &in) {
   return m;
 }
 
+cvc::media_frame decode_media(const pb::MediaFrame &in) {
+  cvc::media_frame m;
+  m.origin_node_id = in.origin_node_id();
+  m.stream_id = in.stream_id();
+  m.codec = in.codec();
+  m.width = in.width();
+  m.height = in.height();
+  m.seq = in.seq();
+  m.pts_seconds = in.pts_seconds();
+  m.sample_rate = in.sample_rate();
+  m.channels = in.channels();
+  const std::string &p = in.payload();
+  m.payload.assign(p.begin(), p.end());
+  return m;
+}
+
 } // namespace
 
 // Connection abstracts a single bidirectional stream. Server-side
@@ -268,11 +284,13 @@ public:
         conn->remote_node_id = in.hello().node_id();
         conn->remote_cluster_id = in.hello().cluster_id();
       } else if (in.has_mutation()) {
-        _owner->on_inbound_mutation(decode_mutation(in.mutation()));
+        _owner->on_inbound_mutation(decode_mutation(in.mutation()), conn.get());
         _owner->increment_recv_mutations();
       } else if (in.has_message()) {
-        _owner->on_inbound_message(decode_message(in.message()));
+        _owner->on_inbound_message(decode_message(in.message()), conn.get());
         _owner->increment_recv_messages();
+      } else if (in.has_media()) {
+        _owner->on_inbound_media(decode_media(in.media()), conn.get());
       } else if (in.has_chunk_request()) {
         _owner->on_inbound_chunk_request(conn.get(), in.chunk_request().digest(),
                                          in.chunk_request().request_id());
@@ -463,11 +481,13 @@ bool state_transport_grpc::connect_to_peer(const std::string &target,
         conn->remote_node_id = in.hello().node_id();
         conn->remote_cluster_id = in.hello().cluster_id();
       } else if (in.has_mutation()) {
-        on_inbound_mutation(decode_mutation(in.mutation()));
+        on_inbound_mutation(decode_mutation(in.mutation()), conn.get());
         increment_recv_mutations();
       } else if (in.has_message()) {
-        on_inbound_message(decode_message(in.message()));
+        on_inbound_message(decode_message(in.message()), conn.get());
         increment_recv_messages();
+      } else if (in.has_media()) {
+        on_inbound_media(decode_media(in.media()), conn.get());
       } else if (in.has_chunk_request()) {
         on_inbound_chunk_request(conn.get(), in.chunk_request().digest(),
                                  in.chunk_request().request_id());
@@ -716,7 +736,7 @@ state_transport_grpc::publish_message(const state_message &m) {
   return stats;
 }
 
-void state_transport_grpc::on_inbound_mutation(const state_mutation &m) {
+void state_transport_grpc::on_inbound_mutation(const state_mutation &m, connection *origin) {
   std::vector<state_cluster_shard *> peers;
   {
     std::lock_guard<std::mutex> lk(_shards_mu);
@@ -736,9 +756,31 @@ void state_transport_grpc::on_inbound_mutation(const state_mutation &m) {
     if (r.applied)
       _delivered.fetch_add(1, std::memory_order_relaxed);
   }
+  // Relay (star topology): re-send this mutation to every OTHER connection so clients that only
+  // reach this server still converge with each other. The origin connection is skipped (no echo);
+  // origin_node_id is preserved so duplicate suppression / vector clocks still work end-to-end.
+  if (_relay.load(std::memory_order_relaxed)) {
+    pb::Frame frame;
+    encode_mutation(m, frame.mutable_mutation());
+    std::vector<std::shared_ptr<connection>> conns;
+    {
+      std::lock_guard<std::mutex> lk(_conns_mu);
+      conns = _conns;
+    }
+    for (auto &c : conns) {
+      if (!c || c.get() == origin || !c->alive.load() || !c->can_write())
+        continue;
+      if (c->write(frame))
+        _sent_frames.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
+  // Bridge to a sibling transport (e.g. the relay's WebSocket side) so its connections get this
+  // mutation — the WS<->gRPC bridge that puts browser (wasm) and native clients in one room.
+  if (_bridge)
+    _bridge->publish(m);
 }
 
-void state_transport_grpc::on_inbound_message(const state_message &m) {
+void state_transport_grpc::on_inbound_message(const state_message &m, connection *origin) {
   std::vector<state_cluster_shard *> peers;
   {
     std::lock_guard<std::mutex> lk(_shards_mu);
@@ -755,6 +797,82 @@ void state_transport_grpc::on_inbound_message(const state_message &m) {
   }
   for (auto *peer : peers)
     (void)peer->ingest_remote_message(m);
+  // Relay (star topology): forward the message to every OTHER connection (see on_inbound_mutation).
+  if (_relay.load(std::memory_order_relaxed)) {
+    pb::Frame frame;
+    encode_message(m, frame.mutable_message());
+    std::vector<std::shared_ptr<connection>> conns;
+    {
+      std::lock_guard<std::mutex> lk(_conns_mu);
+      conns = _conns;
+    }
+    for (auto &c : conns) {
+      if (!c || c.get() == origin || !c->alive.load() || !c->can_write())
+        continue;
+      if (c->write(frame))
+        _sent_frames.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
+  // Bridge to a sibling transport (the relay's WebSocket side) so its connections get this message.
+  if (_bridge)
+    _bridge->publish_message(m);
+}
+
+std::size_t state_transport_grpc::write_media(const media_frame &m, const void *exclude) {
+  pb::Frame frame;
+  pb::MediaFrame *mf = frame.mutable_media();
+  mf->set_origin_node_id(m.origin_node_id);
+  mf->set_stream_id(m.stream_id);
+  mf->set_codec(m.codec);
+  mf->set_width(m.width);
+  mf->set_height(m.height);
+  mf->set_seq(m.seq);
+  mf->set_pts_seconds(m.pts_seconds);
+  mf->set_sample_rate(m.sample_rate);
+  mf->set_channels(m.channels);
+  mf->set_payload(m.payload.data(), static_cast<int>(m.payload.size()));
+
+  std::vector<std::shared_ptr<connection>> conns;
+  {
+    std::lock_guard<std::mutex> lk(_conns_mu);
+    conns = _conns;
+  }
+  // Media is unreplicated, un-bridged (it crosses protocols via the media_router), and carries no
+  // path. `exclude` (a connection*) skips the origin peer when a relay fans; nullptr sends to all.
+  std::size_t n = 0;
+  for (auto &c : conns) {
+    if (!c || c.get() == exclude || !c->alive.load() || !c->can_write())
+      continue;
+    if (c->write(frame)) {
+      _sent_frames.fetch_add(1, std::memory_order_relaxed);
+      ++n;
+    }
+  }
+  return n;
+}
+
+void state_transport_grpc::publish_media_frame(const media_frame &m) {
+  _media_sent.fetch_add(write_media(m, nullptr), std::memory_order_relaxed);
+}
+
+void state_transport_grpc::fan_media(const media_frame &f, const void *exclude) {
+  _media_fwd.fetch_add(write_media(f, exclude), std::memory_order_relaxed);
+}
+
+void state_transport_grpc::set_media_sink(media_sink_fn sink) { _media_sink = std::move(sink); }
+
+void state_transport_grpc::set_on_media(media_frame_fn cb) {
+  if (!cb) {
+    _media_sink = {};
+    return;
+  }
+  _media_sink = [cb = std::move(cb)](const media_frame &f, const void * /*src_conn*/) { cb(f); };
+}
+
+void state_transport_grpc::on_inbound_media(const media_frame &m, connection *origin) {
+  _media_recv.fetch_add(1, std::memory_order_relaxed);
+  if (_media_sink)
+    _media_sink(m, /*src_conn=*/origin);
 }
 
 void state_transport_grpc::register_connection(std::shared_ptr<connection> conn) {
@@ -767,8 +885,10 @@ void state_transport_grpc::admit_connection(const std::shared_ptr<connection> &c
   // other path releases _shards_mu before touching a connection's
   // write mutex, and keeping that order here avoids introducing a
   // lock cycle.
+  const bool backfill = _backfill_on_connect.load(std::memory_order_acquire);
+  const bool relay = _relay.load(std::memory_order_relaxed);
   std::vector<state_cluster_shard *> shards;
-  if (_backfill_on_connect.load(std::memory_order_acquire)) {
+  if (backfill || relay) {
     std::lock_guard<std::mutex> lk(_shards_mu);
     shards = _shards;
   }
@@ -781,8 +901,15 @@ void state_transport_grpc::admit_connection(const std::shared_ptr<connection> &c
   std::lock_guard<std::mutex> wlk(conn->write_mu);
   register_connection(conn);
   send_hello_locked(*conn);
-  if (!shards.empty())
+  if (backfill && !shards.empty())
     send_backfill_locked(*conn, shards);
+  // A relay pushes its full current state so a LATE-joining client sees peers already in the room
+  // (the live set_relay forwarding only carries writes that happen AFTER this client connects, and
+  // the relay's room tree is all remote-origin so backfill's replay_local yields nothing). Mirrors
+  // the WS relay's send_snapshot_locked — without it a native gRPC client joining a populated room
+  // sees no one.
+  if (relay && !shards.empty())
+    send_snapshot_locked(*conn, shards);
 }
 
 void state_transport_grpc::send_hello_locked(connection &c) {
@@ -810,6 +937,46 @@ void state_transport_grpc::send_backfill_locked(connection &c,
       _sent_frames.fetch_add(1, std::memory_order_relaxed);
       _backfilled.fetch_add(1, std::memory_order_relaxed);
     }
+  }
+}
+
+void state_transport_grpc::send_snapshot_locked(connection &c,
+                                                const std::vector<state_cluster_shard *> &shards) {
+  // Relay-only: push the full CURRENT snapshot of each shard as an unsolicited SnapshotResponse
+  // (request_id 0), so a late joiner bootstraps the peers already present. replay_local() cannot do
+  // this on a relay because the room tree it holds is all remote-origin (forwarded from clients).
+  // The receiver applies each entry via on_inbound_snapshot_response's no-waiter path
+  // (ingest_snapshot_ entry, a bulk initial load). Mirrors
+  // state_transport_ws::send_snapshot_locked.
+  for (auto *s : shards) {
+    if (s == nullptr)
+      continue;
+    const auto snap = s->snapshot();
+    if (snap.empty())
+      continue;
+    pb::Frame f;
+    auto *rsp = f.mutable_snapshot_response();
+    rsp->set_request_id(0);
+    rsp->set_final(true);
+    for (const auto &e : snap) {
+      auto *pe = rsp->add_entries();
+      pe->set_path(e.path);
+      pe->set_string_value(e.string_value);
+      pe->set_comment(e.comment);
+      pe->set_hidden(e.hidden);
+      pe->set_read_only(e.read_only);
+      for (const auto &p : e.properties)
+        (*pe->mutable_properties())[p.first] = p.second;
+      pe->set_type_name(e.type_name);
+      pe->set_origin_node_id(e.origin_node_id);
+      pe->set_sequence(e.sequence);
+      pe->set_data_type_name(e.data_type_name);
+      if (e.data_payload.kind != state_payload_kind::none)
+        set_pb_payload(pe->mutable_data_payload(), e.data_payload);
+    }
+    if (!c.write_locked(f))
+      return; // stream died mid-snapshot; the reader will reap it
+    _sent_frames.fetch_add(1, std::memory_order_relaxed);
   }
 }
 
@@ -1018,10 +1185,12 @@ void state_transport_grpc::on_inbound_snapshot_request(connection *conn,
 void state_transport_grpc::on_inbound_snapshot_response(std::uint64_t request_id,
                                                         const std::vector<snapshot_entry> &entries,
                                                         bool final) {
+  bool matched = false;
   {
     std::lock_guard<std::mutex> lk(_snap_waiters_mu);
     auto it = _snap_waiters.find(request_id);
     if (it != _snap_waiters.end()) {
+      matched = true;
       for (const auto &e : entries)
         it->second->entries.push_back(e);
       if (final)
@@ -1030,6 +1199,33 @@ void state_transport_grpc::on_inbound_snapshot_response(std::uint64_t request_id
   }
   if (final)
     _snap_waiters_cv.notify_all();
+  // An UNSOLICITED snapshot (no pending request — a relay's request_id 0 push to a late joiner, see
+  // send_snapshot_locked) is applied to the local shards as an initial-sync bootstrap, mirroring
+  // the WS relay path, so a native client joining a populated room sees the peers already present.
+  // Applied defensively: a relay snapshot carries its whole shard, including per-client read-only
+  // ariadne ui.docs.* state the joiner already owns, which the local tree is EXPECTED to reject.
+  if (!matched && !entries.empty()) {
+    std::vector<state_cluster_shard *> shards;
+    {
+      std::lock_guard<std::mutex> lk(_shards_mu);
+      shards = _shards;
+    }
+    for (const auto &e : entries)
+      for (auto *s : shards) {
+        if (s == nullptr)
+          continue;
+        try {
+          s->ingest_snapshot_entry(e);
+        } catch (const std::exception &ex) {
+          if (std::string(ex.what()).find("read-only") == std::string::npos)
+            std::fprintf(stderr, "cvc: grpc snapshot ingest skipped path '%s': %s\n",
+                         e.path.c_str(), ex.what());
+        } catch (...) {
+          std::fprintf(stderr, "cvc: grpc snapshot ingest skipped path '%s' (non-std)\n",
+                       e.path.c_str());
+        }
+      }
+  }
 }
 
 void state_transport_grpc::on_inbound_heartbeat(const std::string &node_id,

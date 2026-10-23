@@ -36,6 +36,7 @@
 // its P0 subset.
 
 #include <cstdint>
+#include <cvc/ariadne/doc_args.h>
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/value.h>
 #include <cvc/ariadne/widget.h>
@@ -73,6 +74,15 @@ struct CustomRequirement {
   bool required = false;
 };
 
+// One entry of the document's top-level `requires:` (roadmap §7.6): something it needs from the
+// host — a capability token, a function its programs call, or a widget type
+// (cvc/ariadne/requires.h). AppRuntime::load checks them: a missing entry fails the load, an
+// `optional: true` one warns.
+struct HostRequirement {
+  std::string name;
+  bool optional = false;
+};
+
 // A channel declared in the document's `channels:` block (§12 channel scoping). `shared` marks a
 // channel that a mount may be granted (documentation/intent). `global` puts the channel at app-root
 // and adds it to the default-deny GLOBALS allowlist, so a '/'-prefixed reference to it is permitted
@@ -103,6 +113,7 @@ struct LoadResult {
   Scene scene;                            // the parsed `scene:` block (§9; empty if none)
   Meta meta;                              // parsed provenance (may be empty)
   std::vector<CustomRequirement> customs; // declared `customs:` (widget/node/block)
+  std::vector<HostRequirement> requirements; // the top-level `requires:` (empty if none)
   // §12 channel scoping: the document's declared `channels:` (empty if none). `has_channels_block`
   // records whether the block was PRESENT (even if empty) — the enforcement gate: enforcement runs
   // only for a document that declares channels:. `lint` is the doc-level `lint:` policy (strictness
@@ -126,6 +137,11 @@ struct LoadResult {
   std::string on_key_script;
   std::string on_pointer_script;
   std::string on_signal_script;
+  // The document's `args:` block (doc_args.h): what it accepts on the command line after its path.
+  // `has_args_block` records presence; without the block the runtime checks nothing and the
+  // document reads its raw argv. Only the outermost document's block counts.
+  std::vector<ArgSpec> args;
+  bool has_args_block = false;
   // Custom top-level blocks (register_ari_block), keyed by block name — whatever the
   // registered parser stored. Empty unless a document uses a registered custom block.
   std::vector<std::pair<std::string, Value>> extras;
@@ -177,6 +193,10 @@ bool have_jsonschema();
 // structural contract Layer-2 validates against, also usable by external tooling
 // (an editor, `ari validate`). Available regardless of have_jsonschema().
 std::string ari_schema_json();
+
+// Whether `type` is a widget type the loader builds itself (text, slider_int, button, …) rather
+// than a custom one (has_widget_type). requires: and (has? ...) accept both.
+bool is_builtin_widget_type(const std::string &type);
 
 // The libcvc version this build reports (CVC_VERSION_STRING) — what the
 // min_libcvc gate compares against. Exposed for tooling / diagnostics.

@@ -34,10 +34,12 @@
 
 #include <cstdint>
 #include <cvc/core/world_units.h>
+#include <cvc/nav/dyn_4w.h>
 #include <cvc/nav/dyn_bike.h>
 #include <cvc/nav/terrain.h>
 #include <cvc/nav/vehicle_plant.h>
 #include <cvc/physics/world.h>
+#include <functional>
 #include <set>
 #include <string>
 #include <vector>
@@ -53,6 +55,9 @@ struct nav_plant_options {
   // origin is added: < 0 = just above the wheels' full reach (their suspension extended).
   double ground_z = 0.0;
   double spawn_height = -1.0;
+  // The ground's height under a start (world metres, at the rear axle's x, y in metres), for a
+  // terrain that is not flat; empty: ground_z everywhere.
+  std::function<double(double x, double y)> ground_height;
   // advance() steps the world dt / fixed_dt times (a whole number, or attach() throws). false:
   // the world steps itself on the clock nav follows (world::follow), and advance() only reads.
   bool step_world = true;
@@ -121,15 +126,26 @@ public:
   //   - mass; yaw inertia of the chassis box, m (hx^2 + hy^2) / 3;
   //   - the centre of gravity's distances to the front (steered) and rear axles, and its height
   //     as terrain_config_of has it;
-  //   - Pacejka B and C from the tires' peak slip angle and sliding fraction: sin(C pi / 2) is
-  //     tire_sliding, and the force peaks at tire_peak_slip_angle. vehicle_desc has one tire,
-  //     so `front_stiffness` scales the front's B: a road vehicle's understeer comes from the
-  //     front's load sensitivity and steering compliance, which the single track leaves out;
+  //   - Pacejka C from the tires' sliding fraction (sin(C pi / 2) is tire_sliding) and B fitted to
+  //     how Jolt's tires corner. Jolt's lateral friction ramps linearly to its peak at
+  //     tire_peak_slip_angle, a cornering stiffness of 1 / alpha_peak per unit load, and a Pacejka
+  //     tire peaking at the same angle starts 4.5x steeper (B C = C tan(pi / 2C) / alpha_peak).
+  //     So B C = k / alpha_peak with k = kJoltTireStiffness (1.12), fitted to the one-tick
+  //     residual of Jolt runs of the Humvee and the RoboRacer (libcvc #749's fit_dyn_bike;
+  //     held-out twist residual about 11x lower than with the 4.5x tire). `front_stiffness`
+  //     scales the front's B; Jolt's tires have no load sensitivity or steering compliance, and
+  //     the fit puts front and rear alike (1);
   //   - the drive split from which axles are driven, the brake split from the axles' brake
   //     torques; drag 1/2 rho C_d A and the rolling resistance;
-  //   - the steering's rate; `drive_lag` for the force (nav_plant_options::latency's default).
+  //   - the steering's rate; `drive_lag` for the force, < 0 for the vehicle's own: a direct drive
+  //     (one gear, no torque converter) answers within the tick (0), a geared drive through a
+  //     converter takes 0.1 s (nav_plant_options::latency's default);
+  //   - for a direct drive, no drag or rolling resistance: the driver model's integral trim tracks
+  //     the commanded acceleration and makes up for them, so the commanded acceleration is the
+  //     achieved one (the RoboRacer's fit: lag 0, resistance x0; the Humvee's keeps both).
+  static constexpr double kJoltTireStiffness = 1.12;
   static cvc::nav::dyn_bike_si dyn_bike_si_of(const vehicle_desc &d, double mu = 0.9,
-                                              double front_stiffness = 0.85, double drive_lag = 0.1,
+                                              double front_stiffness = 1.0, double drive_lag = -1.0,
                                               double gravity = 9.80665);
 
   // The same vehicle in a normalized frame where its wheelbase is `wheelbase`: S =
@@ -139,6 +155,18 @@ public:
   // normalized units per metre, where vmax 0.9 is 8.3 m/s.
   static cvc::nav::diff::dyn_bike_params dyn_bike_params_at(const vehicle_desc &d, double wheelbase,
                                                             double mu = 0.9);
+
+  // The same vehicle on four wheels (nav/dyn_4w.h, P8d): dyn_bike_si_of's numbers, with its
+  // defaults (front_stiffness 1, drive_lag < 0 for the vehicle's own), plus
+  //   - the half tracks of the front (steered) and rear axles;
+  //   - the chassis box's roll and pitch inertias, m (hy^2 + hz^2) / 3 and m (hx^2 + hz^2) / 3;
+  //   - each corner's spring from its axle's suspension frequency f and the corner's static
+  //     load m_c (k = m_c (2 pi f)^2), and its damper from the damping ratio z (c = 2 z
+  //     sqrt(k m_c)). The anti-roll bars are left out.
+  static cvc::nav::dyn4_si dyn4_si_of(const vehicle_desc &d, double front_stiffness = 1.0,
+                                      double drive_lag = -1.0, double gravity = 9.80665);
+  // dyn4_si_of in a normalized frame where its wheelbase is `wheelbase`, as dyn_bike_params_at.
+  static cvc::nav::diff::dyn4_params dyn4_params_at(const vehicle_desc &d, double wheelbase);
 
   // ── the vehicles ──
   int size() const { return static_cast<int>(_agents.size()); }

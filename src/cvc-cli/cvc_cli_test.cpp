@@ -23,15 +23,18 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/core/app.h>
 #include <cvc/core/types.h>
 #include <cvc/geometry/geometry.h>
+#include <cvc/ph/se2_train.h>
 #include <cvc/volume/volume.h>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <iomanip>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -525,6 +528,40 @@ TEST_F(CvcCliTest, ClusterStatusHelp) {
 TEST_F(CvcCliTest, PsHelp) {
   auto r = cvc("ps --help");
   EXPECT_EQ(0, r.exit_code);
+}
+
+// ===========================================================================
+// plant-log (nav driving Jolt vehicles; cvc/physics/plant_log_scene.h)
+// ===========================================================================
+
+TEST_F(CvcCliTest, PlantLogHelp) {
+  auto r = cvc("plant-log --help");
+  EXPECT_EQ(0, r.exit_code);
+  for (const char *opt : {"--out", "--vehicle", "--scene", "--bundle", "--seeds", "--fit-dyn"})
+    EXPECT_NE(std::string::npos, r.output.find(opt)) << opt;
+}
+
+TEST_F(CvcCliTest, PlantLogNeedsAnOutputDirectory) {
+  auto r = cvc("plant-log --scene swerve");
+  EXPECT_NE(0, r.exit_code);
+}
+
+TEST_F(CvcCliTest, PlantLogRejectsAnUnknownScene) {
+  auto r = cvc("plant-log --scene moon --out \"" + path("run") + "\"");
+  EXPECT_NE(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("swerve, city or bundle")) << r.output;
+}
+
+TEST_F(CvcCliTest, PlantLogWritesARun) {
+  auto r = cvc("plant-log --seeds 3 --agents 1 --seconds 1 --flight-seconds 0.5 "
+               "--stride-seconds 0.5 --out \"" +
+               path("run") + "\"");
+  if (r.exit_code != 0 && r.output.find("without Jolt") != std::string::npos)
+    GTEST_SKIP() << "this libcvc was built without Jolt";
+  ASSERT_EQ(0, r.exit_code) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("seed 3: 1 agents")) << r.output;
+  for (const char *f : {"flights.npy", "meta.json", "residual.json"})
+    EXPECT_TRUE(fs::exists(fs::path(path("run")) / f)) << f;
 }
 
 // ===========================================================================
@@ -2252,3 +2289,87 @@ TEST_F(CvcCliTest, Regression_ClusterStatusDefaultIdsEndToEnd) {
   EXPECT_NE(std::string::npos, r.output.find("Session status")) << r.output;
 }
 #endif // !_WIN32
+
+// ===========================================================================
+// ph-train: the learned port-Hamiltonian vehicle (cvc::ph) from plant logs
+// ===========================================================================
+
+// A cvc-plant-log run directory: six flights of a vehicle on a gentle curve, seeds 100 and 101.
+static void write_plant_log_run(const fs::path &dir) {
+  fs::create_directories(dir);
+  const std::size_t flights = 6, rows = 61;
+  std::vector<double> data(flights * rows * 8);
+  for (std::size_t f = 0; f < flights; ++f) {
+    double x = 0.0, y = 0.0, psi = 0.1 * f;
+    const double v = 3.0 + f, r = 0.05 * (f % 3);
+    for (std::size_t k = 0; k < rows; ++k) {
+      double *row = &data[(f * rows + k) * 8];
+      row[0] = x;
+      row[1] = y;
+      row[2] = psi;
+      row[3] = v;
+      row[4] = 0.01;
+      row[5] = r;
+      row[6] = 0.2;
+      row[7] = 0.02 * (f % 3);
+      x += 0.02 * v * std::cos(psi);
+      y += 0.02 * v * std::sin(psi);
+      psi += 0.02 * r;
+    }
+  }
+  cvc::ph::write_npy((dir / "flights.npy").string(), data, {flights, rows, 8});
+  std::ofstream(dir / "meta.json") << "{\"format\": \"cvc-plant-log-1\", \"dt\": 0.02, "
+                                      "\"flight_seed\": [100, 100, 100, 101, 101, 101]}\n";
+}
+
+TEST_F(CvcCliTest, PhTrainFitsAModelToPlantLogs) {
+  const fs::path run = fs::path(test_dir) / "run";
+  write_plant_log_run(run);
+  const std::string out = path("model.json");
+  auto r = cvc("ph-train --runs \"" + run.string() + "\" --out \"" + out +
+               "\" --steps 20 --window-points 21 --window-stride 20 --features 8 --eval-every 10"
+               " --threads 2");
+  ASSERT_EQ(0, r.exit_code) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("3 train / 3 held out")) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("MONITOR test")) << r.output;
+  ASSERT_TRUE(fs::exists(out));
+  const cvc::ph::se2_model m = cvc::ph::se2_model::load(out);
+  EXPECT_EQ(m.setup.features, 8);
+  EXPECT_EQ(m.setup.control_dim, 2);
+  bool has_runs = false;
+  for (const auto &kv : m.provenance)
+    has_runs |= kv.first == "runs" && kv.second == run.string();
+  EXPECT_TRUE(has_runs);
+}
+
+// --init continues a model with its own scales, not the new runs' RMS.
+TEST_F(CvcCliTest, PhTrainContinuesAModelWithItsOwnScales) {
+  const fs::path run = fs::path(test_dir) / "run";
+  write_plant_log_run(run);
+  const std::string first = path("first.json"), second = path("second.json");
+  const std::string common =
+      " --steps 5 --window-points 21 --window-stride 20 --features 8 --threads 1";
+  ASSERT_EQ(
+      0,
+      cvc("ph-train --runs \"" + run.string() + "\" --out \"" + first + "\"" + common).exit_code);
+  cvc::ph::se2_model m = cvc::ph::se2_model::load(first);
+  m.control_scale = {2.0 * m.control_scale[0], 3.0 * m.control_scale[1]};
+  m.save(first);
+  auto r = cvc("ph-train --runs \"" + run.string() + "\" --out \"" + second + "\" --init \"" +
+               first + "\"" + common);
+  ASSERT_EQ(0, r.exit_code) << r.output;
+  std::ostringstream scales; // the inputs were read with the model's scales (the log says which)
+  scales << std::setprecision(6) << "control scale " << m.control_scale[0] << " "
+         << m.control_scale[1];
+  EXPECT_NE(std::string::npos, r.output.find(scales.str())) << r.output;
+  const cvc::ph::se2_model back = cvc::ph::se2_model::load(second);
+  EXPECT_EQ(back.control_scale, m.control_scale);
+  EXPECT_EQ(back.twist_scale, m.twist_scale);
+}
+
+TEST_F(CvcCliTest, PhTrainRefusesADirectoryThatIsNotAPlantLog) {
+  fs::create_directories(path("empty"));
+  auto r = cvc("ph-train --runs \"" + path("empty") + "\" --out \"" + path("m.json") + "\"");
+  EXPECT_NE(0, r.exit_code);
+  EXPECT_FALSE(fs::exists(path("m.json")));
+}

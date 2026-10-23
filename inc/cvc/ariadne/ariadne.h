@@ -22,6 +22,7 @@
 // scene binding, validation) is docs/roadmap/CVCGL-UI-DSL-ROADMAP.md.
 
 #include <cvc/ariadne/input.h> // InputEvent — Runtime::post_input feeds on_key/on_pointer (§4.6)
+#include <cvc/ariadne/requires.h> // HostFacts — what this host provides (requires:, has?)
 #include <cvc/ariadne/widget.h>
 #include <functional>
 #include <memory>
@@ -139,6 +140,29 @@ public:
   // degraded fail-safe. Not part of render()'s hot path beyond a moved-out vector.
   std::vector<std::string> take_reactive_warnings();
 
+  // ---- what this host provides (requires:, has?; cvc/ariadne/requires.h) ----
+  // Whether a program could call `name` here: it resolves in the env this Runtime's programs run
+  // in (the builtins, the stdlib, the state intrinsics and every register_action_intrinsics
+  // provider, host verbs included), or it is a special form.
+  bool has_function(const std::string &name) const;
+  // Every name a program can reference here (functions and constants), sorted. Special forms are
+  // not included.
+  std::vector<std::string> program_names() const;
+  // Whether a scene adapter realizes this document's scene: (the gl.scene capability). AppRuntime
+  // sets it from its SceneAdapter.
+  void set_scene_capable(bool on);
+  // The facts the capability tokens read: the backend's Capabilities (all false without a
+  // backend) and set_scene_capable().
+  HostFacts host_facts() const;
+  // What (has? "name") answers: a capability token that holds here, a function a program can
+  // call (has_function), or a registered widget type. Programs and reactive expressions both have
+  // it, e.g. `visible: (has? "gl.scene")`.
+  bool has(const std::string &name) const;
+  // Forget the cached program names, so has_function() / has() see verbs registered since they
+  // were last asked. AppRuntime::register_verb calls it; a new register_action_intrinsics provider
+  // is noticed without it.
+  void refresh_program_names();
+
   // This document's per-resource scope (the se::document_scope installed on every action/resident
   // intrinsics_context as ictx.document). A host that contributes SCENE-BOUND intrinsics — whose
   // verb must reach live host objects a neutral register_action_intrinsics provider never sees (the
@@ -185,7 +209,13 @@ using WidgetEmitFn = std::function<void(const Widget &w, const WidgetEmitContext
 // register_ari_block registries.
 void register_widget_type(const std::string &type, WidgetEmitFn emit);
 
-// Whether a custom widget `type` has a registered emit fn (test/introspection).
+// Mark `type` as a KNOWN widget type that a BACKEND renders natively (e.g. ImGuiBackend's
+// register_widget — a raw-ImGui widget like `stream_view`), so the loader does not warn that it is
+// unregistered and has_widget_type() reports it present. No compositional emit fn is involved.
+void register_known_widget_type(const std::string &type);
+
+// Whether a custom widget `type` is registered — either a compositional emit fn
+// (register_widget_type) or a backend-native widget (register_known_widget_type).
 bool has_widget_type(const std::string &type);
 
 // --- extensibility: the `init:` block (a state_exec script run on load) -------
@@ -198,8 +228,10 @@ bool has_widget_type(const std::string &type);
 // script); false with a message appended to `errors` on a parse/runtime error. Never
 // throws. (The loader stays app-free and only captures the script; this is the
 // host/Runtime-side seam that has the app.)
+// `has`, when set, binds (has? "name") for the script (AppRuntime passes Runtime::has).
 bool run_init(cvc::app &app, const std::string &prefix, const std::string &script,
-              std::vector<std::string> *errors = nullptr);
+              std::vector<std::string> *errors = nullptr,
+              const std::function<bool(const std::string &)> &has = {});
 
 // ---------------------------------------------------------------------------
 // Host-contributed state_exec intrinsics for the PROGRAM lanes (init: and a program `on:` action).

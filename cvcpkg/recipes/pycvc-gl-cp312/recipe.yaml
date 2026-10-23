@@ -5,7 +5,7 @@ recipe:
   # column recipe. Same sources as pycvc-gl-cp311, built against python312 +
   # numpy-cp312 + vtk-python-cp312. New catalog name — revision starts at 1.
   name: pycvc-gl-cp312
-  upstream_version: "3.6.0"
+  upstream_version: "3.7.0"
   # Reset to 1 for the 3.3.0 upstream version: cvc_revision counts revisions OF
   # an upstream version, so a version bump restarts it. Supersedes the 3.2.4
   # +cvc.2 family republish (material-aware nav). The scene module source is
@@ -64,7 +64,7 @@ depends:
     # vtkPythonUtil.h + libvtkWrappingPythonCore for the vtkProp* bridge (F3):
     # a Python vtkActor crosses into the C++ scene as a real vtkProp*.
     - name: vtk-python-cp312
-    # The from-source cvc/cvcGL closure's C++ deps on wasm (mirrors cvcgl-examples'
+    # The from-source cvc/cvcGL closure's C++ deps on wasm (mirrors libcvc-examples-web's
     # trimmed wasm closure). Flavor-matched (wasm vs wasm-mt) via the DAG.
     - name: boost
       platforms: [wasm, wasm-mt]

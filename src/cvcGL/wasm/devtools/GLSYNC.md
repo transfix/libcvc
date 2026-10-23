@@ -18,14 +18,14 @@ It is a developer tool, not part of the cvcGL SDK. It is how the WebGL state shi
 The cvcGL dev server injects it:
 
 ```
-python3 src/cvcGL/examples/wasm/serve.py -d build-wasm-mt/gallery --glsync [--js-profiling] [--prof-param prof] 8822
+python3 src/cvcGL/wasm/devtools/serve.py -d build-wasm-mt/gallery --glsync [--js-profiling] [--prof-param prof] 8822
 ```
 
 - `--glsync[=PATH]` inserts `<script src="/glsync.js"></script>` before the first `<script>` of every served `index.html`, so the census wraps WebGL before anything else does: before the page's own scripts and before the module's `--pre-js` state shim. `/glsync.js` is served from PATH whatever `-d` says. The default is this file in the source tree, or `devtools/glsync.js` next to an installed `serve.py`. It is read on every request: after editing it, reload the page; there is no need to restart the server.
 - `--prof-param NAME` also injects `window.__glsyncProfParam = "NAME"`, and the census then adds `?NAME` to the URL. Use it for an app that prints `PROF n=` lines only with a URL switch, such as `?prof`.
 - `--js-profiling` sends `Document-Policy: js-profiling`, which Chromium requires before it exposes the JS Self-Profiling API (`new Profiler(...)`). That API samples wasm frames too, so a build linked with `--profiling-funcs` yields a named, function-level CPU profile.
 
-All three are off by default. With none of them, `serve.py` is the plain cross-origin-isolated server that the `cvcgl-examples-web` launcher runs.
+All three are off by default. With none of them, `serve.py` is the plain cross-origin-isolated server that the `libcvc-examples-web` launcher runs.
 
 ## URLs
 

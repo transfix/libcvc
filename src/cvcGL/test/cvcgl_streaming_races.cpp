@@ -28,8 +28,9 @@
 //     now it is refused, and the staged write is applied at the next attach.
 //   * teardown, runOnMainThread: the same producer, paused the same way, is let
 //     go while the owner is INSIDE ~SceneGraph's closing of the sink. Its post is
-//     refused and its work runs inline -- and it must already see no scene
-//     (getSceneGraph() == nullptr), never the scene being destroyed.
+//     refused, and its work is held for the node's own thread rather than run on
+//     the producer; the owner's next work on the node runs it, and it must see no
+//     scene (getSceneGraph() == nullptr), never the scene being destroyed.
 //   * link bounds, owner first: the owner (beforeComputeBounds) is paused
 //     mid-derive while a producer's setStyle runs. The producer's newer box must
 //     survive -- not be overwritten by the owner's older one.
@@ -214,7 +215,7 @@ struct HoldOwnerInClose {
 };
 
 void testTeardownRunOnMainThread(cvc::app &app) {
-  std::printf("teardown: runOnMainThread refused mid-destruction runs with no scene\n");
+  std::printf("teardown: runOnMainThread refused mid-destruction is held for the node's thread\n");
   auto sg = std::make_unique<SceneGraph>(app, "races_marshal");
   auto node = sg->getGraphicsRoot()->addGraphicsChild<MarshalNode>("m");
   sg->processEvents();
@@ -240,7 +241,12 @@ void testTeardownRunOnMainThread(cvc::app &app) {
   check(waitFlag(g_gate.reached, 5000), "the producer holds the sink, about to post");
   sg.reset(); // released (and waited for) from inside the sink's close()
   producer.join();
-  check(ran.load() && onProducer.load(), "the refused post ran its work inline, on the producer");
+  // The node has no scene now and belongs to the thread that attached it. Run on
+  // the producer, the work would race that thread, which may go on using the
+  // node (a host keeping it past the scene).
+  check(!ran.load(), "the refused post did not run on the producer: held for the node's thread");
+  node->marshal([]() {}); // the owner's next work on the node runs what was held, first
+  check(ran.load() && !onProducer.load(), "the owner ran it, on its own thread");
   check(!sawScene.load(),
         "... with getSceneGraph() already nullptr: never the scene being destroyed");
 }

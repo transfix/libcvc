@@ -1,0 +1,332 @@
+# libcvc examples — standalone C++ programs and .ari documents that drive cvcGL, cvc::nav and
+# Ariadne. src/cvcGL adds this directory when CVC_BUILD_EXAMPLES is on, from a top-level build, from
+# pycvc, or from a standalone src/cvcGL configure (the libcvc-examples recipe), so the cvcGL target
+# always exists here.
+#
+#   cvcgl/              scene demos: lsystem_forest, lsystem_coast, terrain_lab, the bunny benches
+#   nav/                cvc::nav demos rendered through cvcGL, and the headless nav CLIs
+#   ariadne/hosts/      the C++ Ariadne hosts (ariadne_hello is the generic one)
+#   ariadne/nav_*/      Ariadne hosts with their own verbs, each beside its document
+#   ariadne/documents/  .ari documents for a generic host (arigl, ariadne_hello)
+#   ariadne/terminal/   GL-free .ari documents for ari
+#   web/                the browser gallery: build-wasm-demo.sh, build-pages.py, templates
+#
+# Each program links the in-tree cvcGL target plus the VTK modules cvcGL does NOT already
+# pull for a consumer: RenderingUI (the onscreen interactor factory) and IOImage
+# (SceneRenderer::writePNG's vtkPNGWriter). InteractionStyle/RenderingOpenGL2 come
+# transitively from cvcGL.
+
+get_filename_component(_cvc_root "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
+
+find_package(VTK REQUIRED COMPONENTS RenderingUI IOImage)
+find_package(Boost REQUIRED COMPONENTS program_options)
+
+add_executable(lsystem_forest cvcgl/lsystem_forest.cpp)
+target_link_libraries(lsystem_forest PRIVATE cvcGL ${VTK_LIBRARIES} Boost::program_options)
+vtk_module_autoinit(TARGETS lsystem_forest MODULES ${VTK_LIBRARIES})
+
+# ariadne_hello — the first Ariadne demo: mounts a programmatic widget tree
+# (cvc::ariadne, pure libcvc) bound to cvc::state, rendered by cvc::gl::ImGuiBackend
+# (the ImGui-over-VTK backend) on the standard cvcGL viewer.
+add_executable(ariadne_hello ariadne/hosts/ariadne_hello.cpp)
+target_link_libraries(ariadne_hello PRIVATE cvcGL ${VTK_LIBRARIES})
+vtk_module_autoinit(TARGETS ariadne_hello MODULES ${VTK_LIBRARIES})
+
+# ariadne_terminal — the same documents in a TERMINAL: widgets through libcvc's terminal backends
+# (FTXUI, or tvision with --backend tvision) and the scene rendered offscreen by cvcGL's
+# TerminalScene, drawn behind them as half-block cells (roadmap §16.6). No window or display.
+add_executable(ariadne_terminal ariadne/hosts/ariadne_terminal.cpp)
+target_link_libraries(ariadne_terminal PRIVATE cvcGL ${VTK_LIBRARIES})
+vtk_module_autoinit(TARGETS ariadne_terminal MODULES ${VTK_LIBRARIES})
+
+# ariadne_stream — the Phase-3 streaming "holy grail": one live video stream shown both as the main
+# scene (a `type: stream` quad filling the viewport) AND in a draggable ImGui `type: stream_view`
+# widget window, wired from stream.ari. Synthetic test pattern by default (headless-verifiable),
+# or a real SDL3 camera with --camera.
+add_executable(ariadne_stream ariadne/hosts/ariadne_stream.cpp)
+target_link_libraries(ariadne_stream PRIVATE cvcGL ${VTK_LIBRARIES})
+vtk_module_autoinit(TARGETS ariadne_stream MODULES ${VTK_LIBRARIES})
+
+# ariadne_conference — the conference host bundle (roadmap §8): ariadne_hello + the five stream/
+# media registrations (stream-open/info/close, gl-bind-stream, capture-camera/-audio, play-audio,
+# type: stream, type: stream_view). It opens NOTHING in C++; conference_media.ari drives the whole
+# capture → stream → render/play pipeline from the DSL program lane. Synthetic video + a 440 Hz tone
+# by default (headless-verifiable); real devices with a CVC_ENABLE_SDL build.
+add_executable(ariadne_conference ariadne/hosts/ariadne_conference.cpp)
+target_link_libraries(ariadne_conference PRIVATE cvcGL ${VTK_LIBRARIES})
+vtk_module_autoinit(TARGETS ariadne_conference MODULES ${VTK_LIBRARIES})
+
+# lsystem_forest is now a PURE .ari demo (ariadne/documents/lsystem_forest.ari): the island/trees/
+# sea/sky are the cvcGL L-system node types (forest_trees/wave_sea/cloud_sky) + the shader presets
+# (terrain_bump/bark), all registered by register_cvcgl_extensions(). So it needs no bespoke host —
+# run it with arigl or the generic shell:
+# `ariadne_hello examples/ariadne/documents/lsystem_forest.ari --component-path src/cvc/ariadne`. The wasm
+# gallery target (lsystem_forest_ari) is built from ariadne_hello in the EMSCRIPTEN block below,
+# exactly like the other _ari demos.
+
+# nav_convoy — a nav-style demo whose entire UI is the reusable .ari component library, with only
+# the streamed agents + sim/camera verbs + stats readouts in the host (the library-based pattern
+# the real cvc::nav integration follows).
+add_executable(nav_convoy ariadne/nav_convoy/nav_convoy.cpp)
+target_link_libraries(nav_convoy PRIVATE cvcGL ${VTK_LIBRARIES})
+vtk_module_autoinit(TARGETS nav_convoy MODULES ${VTK_LIBRARIES})
+
+# nav_compute — the cross-thread async story (roadmap item 2): an .ari button binds one host verb
+# (nav-step-async) that runs a nav step on app.compute_async() off the render thread and posts
+# "nav.done"; the .ari action parks on (msg-recv "nav.done") and resumes on a later frame, so the UI
+# never blocks. Core mechanism covered headlessly by AppTest.ComputeAsync* + AriadneAction gtests.
+add_executable(nav_compute ariadne/nav_compute/nav_compute.cpp)
+target_link_libraries(nav_compute PRIVATE cvcGL ${VTK_LIBRARIES})
+vtk_module_autoinit(TARGETS nav_compute MODULES ${VTK_LIBRARIES})
+
+# bunny_shadow — a Stanford-bunny shader/shadow-mapping test bench (one mesh, one
+# ground plane, a StageLighting rig). Loads the bunny via cvc::read_geometry, so
+# it needs only cvcGL (no nav helpers).
+add_executable(bunny_shadow cvcgl/bunny_shadow.cpp)
+target_link_libraries(bunny_shadow PRIVATE cvcGL ${VTK_LIBRARIES} Boost::program_options)
+vtk_module_autoinit(TARGETS bunny_shadow MODULES ${VTK_LIBRARIES})
+
+add_executable(volren_bunny cvcgl/volren_bunny.cpp)
+target_link_libraries(volren_bunny PRIVATE cvcGL ${VTK_LIBRARIES} Boost::program_options)
+vtk_module_autoinit(TARGETS volren_bunny MODULES ${VTK_LIBRARIES})
+
+add_executable(volslice_bunny cvcgl/volslice_bunny.cpp)
+target_link_libraries(volslice_bunny PRIVATE cvcGL ${VTK_LIBRARIES} Boost::program_options)
+vtk_module_autoinit(TARGETS volslice_bunny MODULES ${VTK_LIBRARIES})
+
+# lsystem_coast — island + GPU FFT-ocean trial. Hosts OceanFFT (the ABYSSAL port
+# target, docs/roadmap/OCEAN-AND-VOLUMETRIC-TERRAIN-NOTES.md), which lives in
+# src/cvcGL/ocean beside the cvcGL test that checks it. A SEPARATE demo
+# from lsystem_forest by design: the forest stays the untouched perf control.
+# OceanFFT depends only on VTK's OpenGL2 module (transitive via cvcGL), so no
+# extra find_package. Enrolled in _wasm_demos below (the default GPU no-readback
+# path is WebGL2-viable; the CPU --cpu path is native-only).
+add_executable(lsystem_coast cvcgl/lsystem_coast.cpp "${_cvc_root}/src/cvcGL/ocean/OceanFFT.cpp")
+target_include_directories(lsystem_coast PRIVATE "${_cvc_root}/src/cvcGL/ocean")
+target_link_libraries(lsystem_coast PRIVATE cvcGL ${VTK_LIBRARIES} Boost::program_options)
+vtk_module_autoinit(TARGETS lsystem_coast MODULES ${VTK_LIBRARIES})
+
+# terrain_lab — the visual QA surface for the cvc::world L-system terrain source
+# (docs/roadmap/LSYSTEM-LABORATORY-ROADMAP.md). RENDERS the generator's own output:
+# terrain coloured by the raster's per-cell material (or risk/occupancy/height),
+# props grown from the built-in L-system recipes and tessellated in place,
+# volumetric water below the sea level, a drifting cloud slab — all regenerated
+# live from the ImGui panel.
+# cvc::world + cvc::lsys are compiled into cvc::cvc (linked transitively via cvcGL),
+# so no extra find_package/link. Enrolled in _wasm_demos below.
+add_executable(terrain_lab cvcgl/terrain_lab.cpp)
+target_link_libraries(terrain_lab PRIVATE cvcGL ${VTK_LIBRARIES} Boost::program_options)
+vtk_module_autoinit(TARGETS terrain_lab MODULES ${VTK_LIBRARIES})
+
+# cvc::nav demos — the reactive swarm rendered through cvcGL. nav symbols come from
+# cvc::cvc, which cvcGL PUBLIC-links. Shared helpers (occupancy walls, merged agent
+# glyph mesh, capture camera) live in nav_common.
+add_library(nav_demo_common STATIC nav/nav_common.cpp)
+target_link_libraries(nav_demo_common PUBLIC cvcGL)
+
+foreach(_demo nav_city_swarm nav_city_drive nav_fog_ghost nav_finale)
+  add_executable(${_demo} nav/${_demo}.cpp)
+  target_link_libraries(${_demo} PRIVATE nav_demo_common cvcGL ${VTK_LIBRARIES}
+                        Boost::program_options)
+  vtk_module_autoinit(TARGETS ${_demo} MODULES ${VTK_LIBRARIES})
+endforeach()
+
+# Headless ABI/consistency guard (no GL). The nav demos compile against the
+# in-tree cvc/nav headers but link the SHARED libcvc from the deps prefix; if that
+# libcvc is older than the headers, sim_world's by-value return from
+# from_occupancy() corrupts the caller (sim_world embeds config+material_config by
+# value) and the demos segfault at startup. nav_abi_smoke exercises exactly that
+# path and asserts a sane read-back; the libcvc-examples recipe runs it after the
+# build so a stale libcvc fails loudly here instead of shipping a broken demo. It
+# links only cvc::cvc (no cvcGL/VTK/GL), is native-only (it must run), and is not
+# installed — it is a build-time check.
+if(NOT EMSCRIPTEN)
+  add_executable(nav_abi_smoke nav/nav_abi_smoke.cpp)
+  target_link_libraries(nav_abi_smoke PRIVATE cvc::cvc)
+endif()
+
+# Headless pure-C++ cvc::nav reference demos: the swarm template
+# (nav_swarm_demo), the self-supervised CoefMLP trainer CLI (nav_train_demo) and
+# the material-aware A/B run (nav_material_demo, docs/NAV_MATERIAL.md). No GL
+# and no cvcGL — each links only cvc::cvc (the core target cvcGL already pulls
+# in), and each runs headless (stdout stats / PPM output / .cvcnav export), so
+# like nav_abi_smoke they are native-only: the browser gallery is for rendered
+# scenes, not CLIs. nav_train_demo gets the CUDA trainer when the core was
+# built with it (it falls back to the CPU trainer otherwise).
+if(NOT EMSCRIPTEN)
+  foreach(_hd nav_swarm_demo nav_train_demo nav_material_demo)
+    add_executable(${_hd} nav/${_hd}.cpp)
+    target_link_libraries(${_hd} PRIVATE cvc::cvc)
+  endforeach()
+  if(CVC_ENABLE_CUDA)
+    target_compile_definitions(nav_train_demo PRIVATE CVC_ENABLE_CUDA)
+  endif()
+endif()
+
+# ---- WebAssembly demo builds -------------------------------------------------
+# The browser-capable examples. nav_finale is native-only (it needs assimp +
+# imagemagick + a runtime bundle the wasm toolchain lacks). Add a new browser demo
+# to _wasm_demos and it builds via the `wasm-demos` target and is auto-discovered
+# into the gallery by web/build-pages.py — no host page to hand-write.
+#
+# _wasm_extra_demos are browser-capable too but stay OUT of the gallery: they build
+# only on request (`--target wasm-extra-demos`, or by name) into bin/extra/, which
+# build-pages.py does not scan. ariadne_hello is the Ariadne app there (its .ari
+# siblings nav_convoy / nav_compute load documents from disk and stay native-only). arigl's own
+# browser build, cyprty, is defined with arigl (src/arigl/CMakeLists.txt) and joins
+# wasm-extra-demos there.
+#
+# Every one of them is a cvcgl_wasm_app (src/cvcGL/wasm/cvcGLWasm.cmake): the WebGL
+# state shim as a --pre-js, plus mimalloc on the threaded (wasm-mt) build. Each also
+# calls SceneRenderer::setFrameYield(FrameYield::App) in its C++, because its loop
+# yields once per frame on every path that renders.
+if(EMSCRIPTEN)
+  set(_wasm_demos lsystem_forest lsystem_coast terrain_lab bunny_shadow volren_bunny volslice_bunny nav_city_swarm nav_city_drive nav_fog_ghost)
+  set(_wasm_extra_demos ariadne_hello)
+
+  # Ariadne (.ari) demos as wasm: build the generic ariadne_hello host once per document, with that
+  # .ari baked in as the default doc (CVC_ARIADNE_WASM_DOC) and the shared component library embedded
+  # in MEMFS (--embed-file), so a pure-DSL demo runs in the browser with no argv. Distinct slugs
+  # (<name>_ari) so they sit ALONGSIDE the C++ volren_bunny/volslice_bunny demos, not replacing them.
+  # This is also the path for every future .ari demo (A/V, lsystem, …) to reach the web gallery.
+  set(_CVC_ARIADNE_COMPONENTS "${_cvc_root}/src/cvc/ariadne/components")
+  # lsystem_forest joins volren_bunny/volslice_bunny as a generic-host .ari demo: now that its
+  # trees/sea/sky are cvcGL node types + shader presets (register_cvcgl_extensions, which
+  # ariadne_hello calls), it needs no bespoke host — it builds from ariadne_hello like the others.
+  foreach(_ari volren_bunny volslice_bunny lsystem_forest)
+    add_executable(${_ari}_ari ariadne/hosts/ariadne_hello.cpp)
+    target_link_libraries(${_ari}_ari PRIVATE cvcGL ${VTK_LIBRARIES})
+    vtk_module_autoinit(TARGETS ${_ari}_ari MODULES ${VTK_LIBRARIES})
+    target_compile_definitions(${_ari}_ari PRIVATE CVC_ARIADNE_WASM_DOC="/${_ari}.ari")
+    target_link_options(${_ari}_ari PRIVATE
+      "--embed-file=${CMAKE_CURRENT_SOURCE_DIR}/ariadne/documents/${_ari}.ari@/${_ari}.ari"
+      "--embed-file=${_CVC_ARIADNE_COMPONENTS}@/components")
+    list(APPEND _wasm_demos ${_ari}_ari)
+  endforeach()
+
+  # Optional runtime asset bundle for nav_city_swarm (Austin: terrain.json +
+  # buildings.glb + satellite.png). When CVC_WASM_BUNDLE is set to a scene dir,
+  # its contents are preloaded to /bundle and, if the sibling shared/Humvee.glb
+  # exists (installed by the vehicle-humvee cvcpkg bundle), that dir is preloaded
+  # to /shared so the demo's <bundle>/../../shared/Humvee.glb autopath resolves.
+  # If CVC_WASM_BUNDLE is empty (the default), the demo falls back to the
+  # synthetic city.
+  set(_nav_swarm_bundle_flags "")
+  set(_city_bundle_flag "") # just the Austin scene dir @ /bundle — shared by terrain_lab
+  if(CVC_WASM_BUNDLE AND EXISTS "${CVC_WASM_BUNDLE}")
+    message(STATUS "cvcGL nav_city_swarm wasm: preloading bundle from ${CVC_WASM_BUNDLE}")
+    list(APPEND _nav_swarm_bundle_flags "--preload-file=${CVC_WASM_BUNDLE}@/bundle")
+    set(_city_bundle_flag "--preload-file=${CVC_WASM_BUNDLE}@/bundle")
+    get_filename_component(_parent "${CVC_WASM_BUNDLE}" DIRECTORY)
+    if(_parent AND EXISTS "${_parent}/shared/Humvee.glb")
+      message(STATUS "cvcGL nav_city_swarm wasm: preloading shared vehicle from ${_parent}/shared")
+      list(APPEND _nav_swarm_bundle_flags "--preload-file=${_parent}/shared@/shared")
+    endif()
+  endif()
+  # Preload the trained CoefMLP weights (cvcpkg grl-snam-weights / coef_sdf.cvcnav) so the
+  # in-browser swarm drives with the PUBLISHED trained policy. nav_city_swarm loads
+  # "coef_sdf.cvcnav" from MEMFS in wasm (dladdr cannot resolve an install prefix in the
+  # browser); with none preloaded it falls back to the hand-tuned biased net.
+  if(CVC_WASM_NAV_WEIGHTS AND EXISTS "${CVC_WASM_NAV_WEIGHTS}")
+    message(STATUS "cvcGL nav_city_swarm wasm: preloading trained weights from ${CVC_WASM_NAV_WEIGHTS}")
+    list(APPEND _nav_swarm_bundle_flags "--preload-file=${CVC_WASM_NAV_WEIGHTS}@/coef_sdf.cvcnav")
+  endif()
+  foreach(_wt ${_wasm_demos} ${_wasm_extra_demos})
+    # Asyncify: each demo keeps its own while-loop and yields via emscripten_sleep.
+    # Growable heap: the forest/sea/sky volumes and city scenes exceed the 16 MB default.
+    # VTK's patched FindOpenGL injects the WebGL2/GLES3 flags; RenderingUI its js-library.
+    target_link_options(${_wt} PRIVATE
+      -sASYNCIFY=1
+      -sASYNCIFY_STACK_SIZE=131072
+      -sALLOW_MEMORY_GROWTH=1
+      # Austin's buildings mesh produces a ~140 MB vtkFloatArray for
+      # colors/normals; the default 2 GB ceiling reachable via growth
+      # sometimes lands short of it once VTK's other buffers pile on.
+      # Bump the hard cap so wasm32 can grow into the full 4 GB address
+      # space rather than throwing "Unable to allocate ..." mid-scene.
+      -sMAXIMUM_MEMORY=4GB
+      -sSTACK_SIZE=2097152
+      -sEXIT_RUNTIME=0
+      # cvc::net's Emscripten-fetch HTTP backend: -sFETCH links the emscripten_fetch symbols; the
+      # blocking send() spins on emscripten_sleep, which returns under the -sASYNCIFY above. Needed by
+      # any demo that resolves an http(s):// URI (or the §13.9 HTTP cache) in the browser.
+      -sFETCH=1
+    )
+    if(CVC_WASM_PTHREADS)
+      # Pre-spawn workers so std::thread creation doesn't stall on the busy main thread.
+      target_link_options(${_wt} PRIVATE -sPTHREAD_POOL_SIZE=4)
+    endif()
+    # nav_city_swarm and nav_city_drive share the Austin bundle + trained weights.
+    if(_nav_swarm_bundle_flags AND ("${_wt}" STREQUAL "nav_city_swarm" OR "${_wt}" STREQUAL "nav_city_drive"))
+      target_link_options(${_wt} PRIVATE ${_nav_swarm_bundle_flags})
+    endif()
+    # terrain_lab draws the Austin building shapes from the same bundle (mounted at /bundle), and
+    # falls back to box massing when it is not preloaded.
+    if(_city_bundle_flag AND ("${_wt}" STREQUAL "terrain_lab"))
+      target_link_options(${_wt} PRIVATE ${_city_bundle_flag})
+    endif()
+    # The browser-side speedups: state shim (--pre-js) + mimalloc on wasm-mt.
+    cvcgl_wasm_app(${_wt})
+  endforeach()
+  if(CMAKE_RUNTIME_OUTPUT_DIRECTORY)
+    set(_wasm_extra_dir "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/extra")
+  else()
+    set(_wasm_extra_dir "${CMAKE_CURRENT_BINARY_DIR}/extra")
+  endif()
+  set_target_properties(${_wasm_extra_demos} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${_wasm_extra_dir}")
+  # One target builds them all; web/build-wasm-demo.sh drives it, then build-pages.py
+  # turns the built bin/ into the servable gallery (per-demo page + index of cards).
+  add_custom_target(wasm-demos DEPENDS ${_wasm_demos})
+  add_custom_target(wasm-extra-demos DEPENDS ${_wasm_extra_demos})
+endif()
+
+# Install rules so the libcvc-examples recipe packages the example binaries with no
+# hand-staging. $ORIGIN/../lib lets them find libcvc / VTK / Boost / imgui in the
+# same cvcpkg prefix with NO LD_LIBRARY_PATH. libcvc-examples is its own install
+# COMPONENT so the recipe can `cmake --install --component libcvc-examples` and get
+# only the bins and documents (not the cvcGL SDK).
+#
+# INSTALL_RPATH_USE_LINK_PATH also writes every link directory into the installed
+# RUNPATH, which is what a local `cmake --install` wants: the installed examples then
+# still find deps that live in other prefixes. A packaged bundle must not have it.
+# There every dependency is installed into the same prefix, so $ORIGIN/../lib is
+# complete, and the link directories are the build machine's prefixes. When
+# publish-cvcpkg.yml builds through build.sh and packs with --from-prefix, cvcpkg
+# never learns those prefixes and cannot rewrite them; its pack-time gate rejects
+# the bundle ("RUNPATH .../stage/lib (a temporary or CI-workspace directory)"). So
+# the recipe's build.sh turns this OFF.
+option(LIBCVC_EXAMPLES_RPATH_USE_LINK_PATH
+       "Add the link directories to the installed examples' RUNPATH (OFF for packaging)" ON)
+set(_cvcgl_example_bins lsystem_forest lsystem_coast terrain_lab bunny_shadow volren_bunny volslice_bunny nav_city_swarm nav_city_drive nav_fog_ghost nav_finale)
+# The three headless nav CLIs exist only in native builds (the wasm column has
+# no CLIs in the gallery), so they join the install list conditionally.
+if(NOT EMSCRIPTEN)
+  list(APPEND _cvcgl_example_bins nav_swarm_demo nav_train_demo nav_material_demo)
+endif()
+set_target_properties(${_cvcgl_example_bins} PROPERTIES
+  INSTALL_RPATH "$ORIGIN/../lib"
+  INSTALL_RPATH_USE_LINK_PATH ${LIBCVC_EXAMPLES_RPATH_USE_LINK_PATH})
+install(TARGETS ${_cvcgl_example_bins}
+        RUNTIME DESTINATION bin COMPONENT libcvc-examples)
+# The .ari documents, for arigl and ari from the same prefix:
+#   arigl <prefix>/share/libcvc-examples/ariadne/documents/hello.ari
+#   ari run <prefix>/share/libcvc-examples/ariadne/terminal/terminal_tour.ari
+install(DIRECTORY ariadne/documents ariadne/terminal
+        DESTINATION share/libcvc-examples/ariadne COMPONENT libcvc-examples)
+# The bins carry third-party code whose notices a binary redistribution must
+# reproduce -- VTK-derived code in the statically linked cvcGL (BSD-3-Clause) and
+# lsystem_coast's OceanFFT, a port of ABYSSAL (MIT) -- so the component ships
+# THIRD_PARTY_NOTICES.md, with the LICENSE it links to. (The browser build gets
+# the same two files from cvcpkg/recipes/libcvc-examples-web/build-wasm.sh.)
+install(FILES "${_cvc_root}/THIRD_PARTY_NOTICES.md" "${_cvc_root}/LICENSE"
+        DESTINATION share/libcvc-examples COMPONENT libcvc-examples)
+
+# Unit tests for nav_common's bounds-safe compositing (the minimap-overflow crash
+# guard) + the occupancy rasterizer. Only when GoogleTest is available (CVC_BUILD_TESTS
+# pulled it in) — the test does no rendering, so it needs no GL context to run.
+if(TARGET GTest::gtest)
+  add_executable(nav_common_test nav/nav_common_test.cpp)
+  target_link_libraries(nav_common_test PRIVATE nav_demo_common GTest::gtest GTest::gtest_main)
+  include(GoogleTest)
+  gtest_discover_tests(nav_common_test)
+endif()

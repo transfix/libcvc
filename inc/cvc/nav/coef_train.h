@@ -74,7 +74,17 @@ struct training_scene {
   field_stack field() const; // borrows field_data
   // n normalized (centered) start/goal pairs from the largest free component
   // (seed-deterministic). Writes o[n*2] and goal[n*2].
-  void sample_starts_goals(int n, unsigned seed, float *o, float *goal) const;
+  //
+  // Local goals: goal_max > 0 draws each goal from the component's cells whose
+  // centres lie goal_min..goal_max (normalized units) from its start, uniformly
+  // over those cells, instead of from the whole component; a start with none is
+  // drawn again. So a policy can train and be scored at the goal distances it is
+  // deployed at (a carrot some tens of metres ahead) rather than across the map.
+  // goal_max == 0 (the default) is the whole component, the same draws as before.
+  // Throws std::invalid_argument on a negative or inverted range, or when no start
+  // drawn has a cell in range.
+  void sample_starts_goals(int n, unsigned seed, float *o, float *goal, float goal_min = 0.0f,
+                           float goal_max = 0.0f) const;
   // Build field_data + free_cells from occ (called by the factories).
   void build();
 };
@@ -147,6 +157,10 @@ struct train_config {
   bool cosine_lr = true;
   float lr_min = 0.0f;
   unsigned seed = 0;
+  // Local goals (normalized units): goal_max > 0 draws each batch's goals goal_min..goal_max
+  // from their starts (training_scene::sample_starts_goals) instead of anywhere in the scene.
+  // 0 = anywhere, the default.
+  float goal_min = 0.0f, goal_max = 0.0f;
 
   rollout_kind rollout = rollout_kind::surrogate; // which integrator to train on
   // Bicycle vehicle params (used only when rollout == bicycle); defaults are the
@@ -207,10 +221,14 @@ public:
   // rollout's further state, (vy, r, delta, a) per agent ([n*4]), comes in through
   // `x` (null = zeros, as at a batch start) and goes out through `x_out`; the other
   // rollouts ignore both.
+  //
+  // `potential` ([n*window], agent-major), when given, receives U_nav (detail/nav_potential.h,
+  // diff::surr_potential) at the state each step starts from, with the coefficients the network
+  // gave that step: the energy every rollout kind's force law descends. Nothing else changes.
   double loss_and_grad(const training_scene &scene, const float *o, const float *v,
                        const float *goal, int n, int window, std::vector<float> *grad,
                        float *o_out = nullptr, float *v_out = nullptr, const float *x = nullptr,
-                       float *x_out = nullptr) const;
+                       float *x_out = nullptr, float *potential = nullptr) const;
 
   const std::vector<float> &params() const { return p_; }
   void set_params(const std::vector<float> &p) { p_ = p; }

@@ -54,6 +54,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/state/state_cluster_membership.h
   ../../inc/cvc/state/state_hybrid_time.h
   ../../inc/cvc/core/world_clock.h
+  ../../inc/cvc/core/clock_follower.h
+  ../../inc/cvc/core/clock_driver.h
   ../../inc/cvc/core/world_units.h
   ../../inc/cvc/core/unit_registry.h
   ../../inc/cvc/physics/types.h
@@ -68,16 +70,23 @@ set(INCLUDE_FILES
   ../../inc/cvc/physics/world_geometry.h
   ../../inc/cvc/physics/plant_host.h
   ../../inc/cvc/physics/pose_tracker.h
+  ../../inc/cvc/physics/physics_codec.h
   ../../inc/cvc/physics/nav_plant.h
   ../../inc/cvc/physics/nav_eval.h
   ../../inc/cvc/physics/nav_es.h
+  ../../inc/cvc/physics/plant_log.h
+  ../../inc/cvc/physics/plant_log_scene.h
   ../../inc/cvc/state/state_hash_partition.h
   ../../inc/cvc/state/distributed_state_session.h
   ../../inc/cvc/state/state_transport.h
   ../../inc/cvc/state/state_transport_inproc.h
   ../../inc/cvc/state/state_transport_ipc.h
   ../../inc/cvc/state/state_transport_grpc.h
+  ../../inc/cvc/state/state_transport_ws.h
   ../../inc/cvc/state/state_stream_transport_grpc.h
+  ../../inc/cvc/media/media_frame.h
+  ../../inc/cvc/media/media_endpoint.h
+  ../../inc/cvc/media/media_router.h
   ../../inc/cvc/geometry/bunny.h
   ../../inc/cvc/volume/endians.h
   ../../inc/cvc/utility/utility.h
@@ -124,6 +133,12 @@ set(INCLUDE_FILES
   ../../inc/cvc/nav/plant_types.h
   ../../inc/cvc/nav/terrain.h
   ../../inc/cvc/nav/vehicle_plant.h
+  ../../inc/cvc/ph/mat3.h
+  ../../inc/cvc/ph/optim.h
+  ../../inc/cvc/ph/rff.h
+  ../../inc/cvc/ph/rng.h
+  ../../inc/cvc/ph/se2_train.h
+  ../../inc/cvc/ph/se2_vehicle.h
   ../../inc/cvc/lod/select.h
   ../../inc/cvc/lod/pyramid.h
   ../../inc/cvc/lod/tiles.h
@@ -221,6 +236,7 @@ set(SOURCE_FILES
   state/state_exec/types.cpp
   state/state_exec/parser.cpp
   state/state_exec/builtins.cpp
+  state/state_exec/exceptions.cpp
   state/state_exec/evaluator.cpp
   state/state_exec/stackless_evaluator.cpp
   state/state_exec/async_evaluator.cpp
@@ -241,6 +257,7 @@ set(SOURCE_FILES
   state/state_exec/exec_coordinator.cpp
   core/world_clock.cpp
   core/world_clock_binding.cpp
+  core/clock_driver.cpp
   core/world_units.cpp
   core/unit_registry.cpp
   physics/world.cpp
@@ -253,10 +270,13 @@ set(SOURCE_FILES
   physics/world_geometry.cpp
   physics/plant_host.cpp
   physics/pose_tracker.cpp
+  physics/physics_codec.cpp
   physics/binding_meta.cpp
   physics/nav_plant.cpp
   physics/nav_eval.cpp
   physics/nav_es.cpp
+  physics/plant_log.cpp
+  physics/plant_log_scene.cpp
   state/state_change_journal.cpp
   state/state_subscription_router.cpp
   state/state_sync_adapter.cpp
@@ -270,6 +290,7 @@ set(SOURCE_FILES
   state/state_cluster_shard.cpp
   state/state_transport_inproc.cpp
   state/state_transport_ipc.cpp
+  media/media_router.cpp
   state/state_message_bus.cpp
   state/state_peer_registry.cpp
   state/state_write_policy.cpp
@@ -312,10 +333,14 @@ set(SOURCE_FILES
   nav/coef_mlp.cpp
   nav/coef_train.cpp
   nav/belief_occupancy.cpp
+  nav/belief_material.cpp
   nav/sim_world.cpp
   nav/sim_world_binding.cpp
   nav/sim_thread.cpp
   nav/nav_stats.cpp
+  ph/se2_data.cpp
+  ph/se2_model.cpp
+  ph/se2_train.cpp
   lod/select.cpp
   lod/pyramid.cpp
   lod/tiles.cpp
@@ -414,10 +439,10 @@ endforeach()
 # this one gets the explicit flag (the CPU analog of the nav .cu precise-math
 # properties below).
 if(NOT MSVC)
-  set_source_files_properties(nav/material.cpp nav/terrain.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_bike_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp
+  set_source_files_properties(nav/material.cpp nav/terrain.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_bike_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp nav/belief_material.cpp
                               PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 else()
-  set_source_files_properties(nav/material.cpp nav/terrain.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_bike_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp
+  set_source_files_properties(nav/material.cpp nav/terrain.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_bike_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp nav/belief_material.cpp
                               PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
 
@@ -506,6 +531,10 @@ option(CVC_ENABLE_SDF "Enable signed distance function calculation capability" O
 option(CVC_ENABLE_LIBIGL "libigl/Eigen geometry processing and P1 finite elements (mesh_ops.h, fem.h); OFF if the packages are missing" ON)
 option(CVC_WITH_JOLT "Jolt Physics backend for cvc::physics (physics/world.h); OFF if the package is missing" ON)
 option(CVC_ENABLE_GRPC "Enable gRPC-based state_transport (Phase 3e)" OFF)
+# WebSocket-based state_transport (browser/wasm interop). Needs only the generated Frame MESSAGES
+# (protobuf) + Boost.Beast (native) — independent of CVC_ENABLE_GRPC. OFF by default so a build with
+# no protobuf in its deps is unaffected; the wasm/conference builds turn it ON.
+option(CVC_ENABLE_WS "Enable WebSocket-based state_transport (wasm interop)" OFF)
 # XMLRPC support
 if(CVC_USING_XMLRPC)
   list(APPEND CVC_LINK_LIBS xmlrpc)
@@ -1175,31 +1204,15 @@ if(CVC_ENABLE_FFTW AND NOT _cvc_fft_provider STREQUAL "fftw")
                   "CVC_FFT_PROVIDER=${_cvc_fft_provider}.")
 endif()
 
-# gRPC-backed state transport (Phase 3e). Generates protobuf and
-# gRPC C++ stubs from libcvc/proto/state_transport.proto and links
-# the cvc target against gRPC::grpc++ + protobuf::libprotobuf.
-if(CVC_ENABLE_GRPC)
+# State-transport protobuf wire. Two transports share the generated Frame MESSAGES from
+# libcvc/proto/state_transport.proto: the gRPC transport (CVC_ENABLE_GRPC) also needs the SERVICE
+# stubs; the WebSocket transport (CVC_ENABLE_WS, wasm interop) needs only the messages. Generate the
+# messages once — the gRPC path emits them alongside the service in one protoc call, the WS-only path
+# emits just the messages — so enabling both does not double-generate.
+if(CVC_ENABLE_GRPC OR CVC_ENABLE_WS)
   find_package(Protobuf CONFIG QUIET)
   if(NOT Protobuf_FOUND)
     find_package(Protobuf REQUIRED)
-  endif()
-  find_package(gRPC CONFIG REQUIRED)
-
-  # Locate grpc_cpp_plugin executable.
-  if(TARGET gRPC::grpc_cpp_plugin)
-    set(_grpc_cpp_plugin_target gRPC::grpc_cpp_plugin)
-    get_target_property(_grpc_cpp_plugin_path gRPC::grpc_cpp_plugin
-      IMPORTED_LOCATION_RELEASE)
-    if(NOT _grpc_cpp_plugin_path)
-      get_target_property(_grpc_cpp_plugin_path gRPC::grpc_cpp_plugin
-        IMPORTED_LOCATION)
-    endif()
-  endif()
-  if(NOT _grpc_cpp_plugin_path)
-    find_program(_grpc_cpp_plugin_path grpc_cpp_plugin)
-    if(NOT _grpc_cpp_plugin_path)
-      message(FATAL_ERROR "CVC_ENABLE_GRPC: grpc_cpp_plugin not found")
-    endif()
   endif()
 
   # Locate protoc.
@@ -1207,6 +1220,11 @@ if(CVC_ENABLE_GRPC)
     set(_protoc_target protobuf::protoc)
   else()
     find_program(_protoc_path protoc REQUIRED)
+  endif()
+  if(_protoc_target)
+    set(_protoc_cmd $<TARGET_FILE:${_protoc_target}>)
+  else()
+    set(_protoc_cmd "${_protoc_path}")
   endif()
 
   set(_proto_src "${CMAKE_SOURCE_DIR}/proto/state_transport.proto")
@@ -1217,34 +1235,67 @@ if(CVC_ENABLE_GRPC)
   set(_proto_grpc_cc "${_proto_out_dir}/state_transport.grpc.pb.cc")
   set(_proto_grpc_h  "${_proto_out_dir}/state_transport.grpc.pb.h")
 
-  if(_protoc_target)
-    set(_protoc_cmd $<TARGET_FILE:${_protoc_target}>)
+  if(CVC_ENABLE_GRPC)
+    find_package(gRPC CONFIG REQUIRED)
+
+    # Locate grpc_cpp_plugin executable.
+    if(TARGET gRPC::grpc_cpp_plugin)
+      set(_grpc_cpp_plugin_target gRPC::grpc_cpp_plugin)
+      get_target_property(_grpc_cpp_plugin_path gRPC::grpc_cpp_plugin
+        IMPORTED_LOCATION_RELEASE)
+      if(NOT _grpc_cpp_plugin_path)
+        get_target_property(_grpc_cpp_plugin_path gRPC::grpc_cpp_plugin
+          IMPORTED_LOCATION)
+      endif()
+    endif()
+    if(NOT _grpc_cpp_plugin_path)
+      find_program(_grpc_cpp_plugin_path grpc_cpp_plugin)
+      if(NOT _grpc_cpp_plugin_path)
+        message(FATAL_ERROR "CVC_ENABLE_GRPC: grpc_cpp_plugin not found")
+      endif()
+    endif()
+
+    # Messages + gRPC service in one protoc call.
+    add_custom_command(
+      OUTPUT ${_proto_pb_cc} ${_proto_pb_h} ${_proto_grpc_cc} ${_proto_grpc_h}
+      COMMAND ${_protoc_cmd}
+        --proto_path=${CMAKE_SOURCE_DIR}/proto
+        --cpp_out=${_proto_out_dir}
+        --grpc_out=${_proto_out_dir}
+        --plugin=protoc-gen-grpc=${_grpc_cpp_plugin_path}
+        ${_proto_src}
+      DEPENDS ${_proto_src}
+      COMMENT "Generating protobuf/gRPC C++ stubs for state_transport.proto"
+      VERBATIM
+    )
+
+    list(APPEND SOURCE_FILES
+      state/state_transport_grpc.cpp
+      state/state_stream_transport_grpc.cpp
+      ariadne/stream/stream_bridge.cpp
+      ariadne/stream/stream_relay.cpp
+      ariadne/conference/room_media_intrinsics.cpp
+      ${_proto_pb_cc}
+      ${_proto_grpc_cc}
+    )
   else()
-    set(_protoc_cmd "${_protoc_path}")
+    # WebSocket-only: generate just the message classes (no gRPC plugin).
+    add_custom_command(
+      OUTPUT ${_proto_pb_cc} ${_proto_pb_h}
+      COMMAND ${_protoc_cmd}
+        --proto_path=${CMAKE_SOURCE_DIR}/proto
+        --cpp_out=${_proto_out_dir}
+        ${_proto_src}
+      DEPENDS ${_proto_src}
+      COMMENT "Generating protobuf C++ message classes for state_transport.proto (WS transport)"
+      VERBATIM
+    )
+    list(APPEND SOURCE_FILES ${_proto_pb_cc})
   endif()
 
-  add_custom_command(
-    OUTPUT ${_proto_pb_cc} ${_proto_pb_h} ${_proto_grpc_cc} ${_proto_grpc_h}
-    COMMAND ${_protoc_cmd}
-      --proto_path=${CMAKE_SOURCE_DIR}/proto
-      --cpp_out=${_proto_out_dir}
-      --grpc_out=${_proto_out_dir}
-      --plugin=protoc-gen-grpc=${_grpc_cpp_plugin_path}
-      ${_proto_src}
-    DEPENDS ${_proto_src}
-    COMMENT "Generating protobuf/gRPC C++ stubs for state_transport.proto"
-    VERBATIM
-  )
-
-  list(APPEND SOURCE_FILES
-    state/state_transport_grpc.cpp
-    state/state_stream_transport_grpc.cpp
-    ariadne/stream/stream_bridge.cpp
-    ariadne/stream/stream_relay.cpp
-    ariadne/conference/room_media_intrinsics.cpp
-    ${_proto_pb_cc}
-    ${_proto_grpc_cc}
-  )
+  if(CVC_ENABLE_WS)
+    list(APPEND SOURCE_FILES state/state_transport_ws.cpp)
+  endif()
 endif()
 
 # cvc::net — the synchronous HTTP client facade (roadmap §13.x). One HttpClient interface
@@ -1259,12 +1310,16 @@ list(APPEND INCLUDE_FILES ../../inc/cvc/net/http_client.h)
 # the retained Widget tree, the Runtime + reconcile boundary, and direct
 # cvc::state binding, walking a pluggable Backend. It touches NO VTK/ImGui/GL —
 # the ImGui-over-VTK backend lives in cvcGL (src/cvcGL/ariadne). Roadmap §16.1.
-list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp)
+list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/requires.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp)
 list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/widget.h
   ../../inc/cvc/ariadne/backend.h
   ../../inc/cvc/ariadne/ariadne.h
+  ../../inc/cvc/ariadne/avatar_sim.h
   ../../inc/cvc/ariadne/app_runtime.h
+  ../../inc/cvc/ariadne/doc_args.h
+  ../../inc/cvc/ariadne/host_cli.h
+  ../../inc/cvc/ariadne/host_signals.h
   ../../inc/cvc/ariadne/scene_adapter.h
   ../../inc/cvc/ariadne/bind.h
   ../../inc/cvc/ariadne/loader.h
@@ -1280,7 +1335,10 @@ list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/scene.h
   ../../inc/cvc/ariadne/value.h
   ../../inc/cvc/ariadne/ftxui_backend.h
+  ../../inc/cvc/ariadne/term_graphics.h
   ../../inc/cvc/ariadne/tvision_backend.h
+  ../../inc/cvc/ariadne/requires.h
+  ../../inc/cvc/ariadne/host_info.h
 )
 
 # cvc::ariadne::stream — Layer-(b) real-time in-process frame transport (roadmap
@@ -1290,7 +1348,7 @@ list(APPEND INCLUDE_FILES
 # (install(EXPORT cvcTargets NAMESPACE cvc::) exports only cvc::cvc). Zero-copy
 # frame_pool + drop-oldest/latest per-subscriber channel + dedicated producer
 # thread; borrows cvc::state only for the /streams/<id> descriptor.
-list(APPEND SOURCE_FILES ariadne/stream/frame_pool.cpp ariadne/stream/stream_channel.cpp ariadne/stream/stream_registry.cpp ariadne/stream/producer_thread.cpp ariadne/stream/stream.cpp ariadne/stream/stream_codec.cpp ariadne/stream/to_image.cpp ariadne/stream/synthetic_source.cpp ariadne/stream/audio_sources.cpp)
+list(APPEND SOURCE_FILES ariadne/stream/frame_pool.cpp ariadne/stream/stream_channel.cpp ariadne/stream/stream_registry.cpp ariadne/stream/producer_thread.cpp ariadne/stream/stream.cpp ariadne/stream/stream_codec.cpp ariadne/stream/to_image.cpp ariadne/stream/synthetic_source.cpp ariadne/stream/audio_sources.cpp ariadne/stream/stream_view.cpp)
 list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/stream/frame.h
   ../../inc/cvc/ariadne/stream/stream_codec.h
@@ -1299,6 +1357,7 @@ list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/stream/stream_registry.h
   ../../inc/cvc/ariadne/stream/producer_thread.h
   ../../inc/cvc/ariadne/stream/stream.h
+  ../../inc/cvc/ariadne/stream/stream_view.h
   ../../inc/cvc/ariadne/stream/stream_bridge.h
   ../../inc/cvc/ariadne/stream/stream_relay.h
   ../../inc/cvc/ariadne/stream/to_image.h
@@ -1414,7 +1473,7 @@ if(EMSCRIPTEN)
   # The fetch backend's blocking send() spins on emscripten_sleep under Asyncify, so a wasm
   # EXECUTABLE that links it must add -sFETCH=1 and EITHER -sASYNCIFY (main thread, the demo gallery)
   # OR -pthread (off the main thread). Link flags do not propagate out of this static archive; the
-  # executable sets them (see src/cvcGL/examples/CMakeLists.txt).
+  # executable sets them (see examples/CMakeLists.txt).
   message(STATUS "cvc::net: Emscripten-fetch HTTP backend ENABLED "
                  "(link exes with -sFETCH=1 + -sASYNCIFY or -pthread)")
 else()
@@ -1441,6 +1500,18 @@ endif()
 # terminal library — it pulls in NO VTK/GL/ImGui, so the core stays graphics-free.
 find_package(ftxui CONFIG QUIET)
 if(TARGET ftxui::component)
+  # FTXUI's MSVC export puts /utf-8 in each target's INTERFACE_COMPILE_OPTIONS. cvc inherits it for
+  # every source, its CUDA ones too, and nvcc reads a bare /utf-8 as a second input file ("A single
+  # input file is required for a non-link phase"). Scope FTXUI's options to C++, like -openmp:llvm
+  # below.
+  foreach(_ftxui_target ftxui::screen ftxui::dom ftxui::component)
+    get_target_property(_ftxui_opts ${_ftxui_target} INTERFACE_COMPILE_OPTIONS)
+    if(_ftxui_opts)
+      list(TRANSFORM _ftxui_opts PREPEND "$<$<COMPILE_LANGUAGE:CXX>:")
+      list(TRANSFORM _ftxui_opts APPEND ">")
+      set_property(TARGET ${_ftxui_target} PROPERTY INTERFACE_COMPILE_OPTIONS ${_ftxui_opts})
+    endif()
+  endforeach()
   target_compile_definitions(cvc PRIVATE CVC_ARIADNE_FTXUI)
   target_link_libraries(cvc PRIVATE ftxui::component ftxui::dom ftxui::screen)
   list(APPEND CVC_PRIVATE_LINK_PACKAGES ftxui)
@@ -1452,20 +1523,36 @@ endif()
 # Ariadne tvision terminal backend — OPTIONAL (roadmap §16.5 row 5), behind CVC_ARIADNE_TVISION:
 # the feature flag the roadmap keeps for tvision's Borland-derived licensing. tvision draws the
 # native desktop (movable windows, menus, status line) and the FTXUI backend lays the windows'
-# contents out, so it needs FTXUI too. tvision ships as a static, position-independent archive with
-# no CMake package (cvcpkg `tvision`, with `ncurses` for ncursesw + the terminfo database), so it is
-# found by path and linked into libcvc privately, as BUILD-only so no absolute path reaches the
-# exported targets. Shared builds only: a static libcvc would have to export the archive.
+# contents out, so it needs FTXUI too. tvision ships as a static, position-independent archive
+# (cvcpkg `tvision`; on Unix with `ncurses` for ncursesw + the terminfo database, on Windows over
+# the Win32 console with no ncurses), so it is found by path and linked into libcvc privately, as
+# BUILD-only so no absolute path reaches the exported targets. Shared builds only: a static libcvc
+# would have to export the archive.
 option(CVC_ARIADNE_TVISION "Build the Ariadne tvision backend when tvision is found" ON)
 if(CVC_ARIADNE_TVISION AND TARGET ftxui::component AND BUILD_SHARED_LIBS)
   find_path(CVC_TVISION_INCLUDE_DIR tvision/tv.h)
   find_library(CVC_TVISION_LIBRARY tvision)
-  find_library(CVC_NCURSESW_LIBRARY ncursesw)
-  if(CVC_TVISION_INCLUDE_DIR AND CVC_TVISION_LIBRARY AND CVC_NCURSESW_LIBRARY)
+  set(_cvc_tvision_libs ${CVC_TVISION_LIBRARY})
+  if(NOT WIN32)
+    find_library(CVC_NCURSESW_LIBRARY ncursesw)
+    list(APPEND _cvc_tvision_libs ${CVC_NCURSESW_LIBRARY})
+  endif()
+  if(CVC_TVISION_INCLUDE_DIR AND CVC_TVISION_LIBRARY AND (WIN32 OR CVC_NCURSESW_LIBRARY))
     target_compile_definitions(cvc PRIVATE CVC_ARIADNE_TVISION)
     target_include_directories(cvc PRIVATE $<BUILD_INTERFACE:${CVC_TVISION_INCLUDE_DIR}>)
-    target_link_libraries(cvc PRIVATE $<BUILD_INTERFACE:${CVC_TVISION_LIBRARY}>
-                                      $<BUILD_INTERFACE:${CVC_NCURSESW_LIBRARY}>)
+    foreach(_lib IN LISTS _cvc_tvision_libs)
+      target_link_libraries(cvc PRIVATE $<BUILD_INTERFACE:${_lib}>)
+    endforeach()
+    if(MSVC)
+      # tvision's own CMake config makes these PUBLIC; found by path, they must be restated for the
+      # one file that includes its headers. Without /Zc:__cplusplus MSVC reports 199711L, and
+      # tvision/ttypes.h then #defines constexpr, noexcept and thread_local away. (Its _CRT_*
+      # definitions are already global under MSVC, see the top-level CMakeLists.txt.)
+      set_property(
+        SOURCE ariadne/tvision_backend.cpp
+        APPEND
+        PROPERTY COMPILE_OPTIONS /permissive- /Zc:__cplusplus /Zc:externConstexpr /Zc:inline)
+    endif()
     message(STATUS "Ariadne: tvision terminal backend ENABLED (${CVC_TVISION_LIBRARY})")
   else()
     message(STATUS "Ariadne: tvision not found - tvision backend compiles to a stub")
@@ -1568,11 +1655,21 @@ endif()
 if(CVC_ENABLE_SDF)
   target_compile_definitions(cvc PUBLIC CVC_ENABLE_SDF)
 endif()
+if(CVC_ENABLE_GRPC OR CVC_ENABLE_WS)
+  # Both transports compile the generated Frame messages: share the generated-header include dir and
+  # the protobuf runtime link. Boost.Beast (the native WS) is header-only and rides SetupBoost's
+  # Boost::system/Boost::thread, already linked PUBLIC on cvc.
+  target_include_directories(cvc PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+  target_link_libraries(cvc PRIVATE protobuf::libprotobuf)
+  list(APPEND CVC_PRIVATE_LINK_PACKAGES Protobuf)
+endif()
 if(CVC_ENABLE_GRPC)
   target_compile_definitions(cvc PUBLIC CVC_ENABLE_GRPC)
-  target_include_directories(cvc PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
-  target_link_libraries(cvc PRIVATE gRPC::grpc++ protobuf::libprotobuf)
-  list(APPEND CVC_PRIVATE_LINK_PACKAGES Protobuf gRPC)
+  target_link_libraries(cvc PRIVATE gRPC::grpc++)
+  list(APPEND CVC_PRIVATE_LINK_PACKAGES gRPC)
+endif()
+if(CVC_ENABLE_WS)
+  target_compile_definitions(cvc PUBLIC CVC_ENABLE_WS)
 endif()
 if(CVC_STATE_MEMORY_MANAGER)
   target_compile_definitions(cvc PUBLIC CVC_STATE_MEMORY_MANAGER)
@@ -2136,11 +2233,9 @@ if(CVC_NAV_WEIGHTS_FILE)
   message(STATUS "cvc::nav: installing policy ${CVC_NAV_WEIGHTS_FILE} -> share/cvc/nav/coef_mlp.cvcnav")
 endif()
 
-# The pure-C++ nav swarm / trainer / material demos moved to the canonical
-# examples tree with the rest of the demos: src/cvcGL/examples/ (built with
-# -DCVC_BUILD_CVCGL=ON -DCVC_BUILD_EXAMPLES=ON, targets nav_swarm_demo /
-# nav_train_demo / nav_material_demo). The old -DCVC_BUILD_NAV_EXAMPLE switch
-# went with the top-level examples/ directory.
+# The pure-C++ nav swarm / trainer / material demos live in examples/nav/ with the
+# rest of the demos (built with -DCVC_BUILD_CVCGL=ON -DCVC_BUILD_EXAMPLES=ON,
+# targets nav_swarm_demo / nav_train_demo / nav_material_demo).
 
 # Headless L-system / world-generation CLIs (GL-free). cvc-lsys derives and
 # renders .lsys recipes to SVG/OFF; cvc-worldgen (added with cvc::world) builds
@@ -2161,6 +2256,10 @@ if(CVC_BUILD_LSYS_TOOLS)
     target_compile_features(cvc-lod-bake PRIVATE cxx_std_17)
   endif()
 endif()
+
+# The Ariadne conference RELAY moved to src/arisrv (the `arisrv` target, wired from
+# src/CMakeLists.txt when CVC_ENABLE_GRPC or CVC_ENABLE_WS is on) — it gained a WebSocket
+# control plane + a WS<->gRPC bridge, so it is no longer gRPC-only.
 
 # Windows-specific batch file
 if(WIN32)

@@ -1,0 +1,135 @@
+# conference_live.ari — a LIVE N-PARTY conference, driven entirely from the DSL.
+#
+# Every CLUSTERED ariadne_conference instance joins the room, publishes its own camera + mic, and
+# discovers EVERY other participant from the replicated room roster, subscribing to each — so each
+# window shows "me" plus one tile per other participant, with tiles appearing/disappearing as people
+# join and leave. No --peer-id: peers are discovered, not named on the command line.
+#
+#   # each friend, on their own machine:
+#   ariadne --name alice --state-peer HOST:7700 --media-server HOST:7701   # (+ --camera --mic)
+#   ariadne --name bob   --state-peer HOST:7700 --media-server HOST:7701
+#   ... everyone in the room sees everyone else.
+#
+# Video is MJPG-compressed (fits a home uplink); real speaker output on Linux uses the relocatable
+# alsa-lib. conf.room / conf.self are set by the host; cam_live / mic_live reflect --camera / --mic.
+
+meta:
+  name: Ariadne conference (live, N-party)
+  author: cvc
+  min_libcvc: 3.6.0
+
+menubar:
+  - menu: Sim
+    items:
+      - menu_item: Quit
+        on: quit
+
+windows:
+  - window: Me
+    id: me
+    pos: [20, 20]
+    size: [380, 520]
+    children:
+      - text: "me"
+        bind: conf.self
+      - text: "status"
+        bind: (if (= (state-get "joined") "1") "● in the room" "starting…")
+      - separator
+      # Mic/cam on-off: a button flips the cam_on/mic_on flag and mutes the stream in place
+      # (stream-set-muted blanks the producer at source — black video / silence — without dropping
+      # the publish, so peers stay subscribed). The host-owned --camera stream isn't in the document
+      # table, so stream-set-muted no-ops for it; the host applies cam_on itself from the render loop.
+      - type: button
+        label: "camera on/off"
+        on: (begin (state-set "cam_on" (if (= (state-get "cam_on") "1") "0" "1")) (stream-set-muted (state-get "cam_token") (= (state-get "cam_on") "0")))
+      - text: "camera"
+        bind: (if (= (state-get "cam_on") "1") "● on" "muted")
+      - type: button
+        label: "mic on/off"
+        on: (begin (state-set "mic_on" (if (= (state-get "mic_on") "1") "0" "1")) (stream-set-muted (state-get "mic_token") (= (state-get "mic_on") "0")))
+      - text: "mic"
+        bind: (if (= (state-get "mic_on") "1") "● on" "muted")
+      - separator
+      - type: stream_view
+        bind: cam_token
+        size: 320
+  - window: Participants
+    id: peers
+    pos: [400, 20]
+    size: [740, 600]
+    children:
+      - text: "others in room"
+        bind: peer.count
+      - separator
+      # One tile per OTHER participant: the on_tick lane fills peer.<i>.cam with each subscribed
+      # peer's token, peer.<i>.name with their display name, and peer.count with the total, so this
+      # group template is emitted once per peer with {i} bound to the slot index. The name/token
+      # re-resolve each frame (a placeholder until that peer's video arrives).
+      - type: group
+        repeat: (state-get "peer.count")
+        children:
+          - text: "name"
+            bind: peer.{i}.name
+          - type: stream_view
+            bind: peer.{i}.cam
+            size: 320
+
+on_tick: |
+  (begin
+    ; ── phase 1: join the room + publish my own camera + mic (ONCE) ──
+    (if (= (state-get "joined") "1") #f
+      (begin
+        (state-set "joined" "1")
+        (state-set "cam_on" "1") ; UX toggles start ON (streams open unmuted)
+        (state-set "mic_on" "1")
+        (room-join "" (state-get "conf.room") (dict "name" (state-get "conf.self")))
+        ; my camera (MJPG). When cam_live the HOST publishes the REAL device camera (it alone knows
+        ; the device resolution) and sets cam_token, so skip the synthetic one.
+        (if (= (state-get "cam_live") "1") #f
+          (begin
+            (set cam (stream-open (dict "id" "camera" "codec" "mjpeg" "w" 640 "h" 480 "stride" 2560
+                                        "expected_subscribers" 3)))
+            (state-set "cam_token" (get-attr cam "token"))
+            (stream-capture-camera (get-attr cam "token")
+              (dict "synthetic" #t "w" 640 "h" 480 "hz" 30 "jpeg" #t))
+            (room-publish (state-get "conf.room")
+              (dict "kind" "camera" "token" (get-attr cam "token")))))
+        ; my mic — the REAL recording device when mic_live, else a hardware-free 440 Hz tone.
+        (set mic (stream-open (dict "id" "audio" "codec" "f32" "rate" 48000 "ch" 1
+                                    "frames_per_chunk" 1024 "subscriber_depth" 8
+                                    "expected_subscribers" 2)))
+        (state-set "mic_token" (get-attr mic "token")) ; so the mic on/off button can mute it
+        (if (= (state-get "mic_live") "1")
+          (stream-capture-audio (get-attr mic "token")
+            (dict "rate" 48000 "ch" 1 "frames" 1024 "device" 0))
+          (stream-capture-audio (get-attr mic "token")
+            (dict "rate" 48000 "ch" 1 "frames" 1024 "tone" (dict "hz" 440))))
+        (room-publish (state-get "conf.room")
+          (dict "kind" "audio" "token" (get-attr mic "token")))))
+    ; ── phase 2: discover + subscribe EVERY other participant, rebuild the tile slots each tick ──
+    (set idx 0)
+    (for p (room-roster (state-get "conf.room"))
+      (begin
+        (set pid (get-attr p "pid"))
+        (if (= pid (state-get "conf.self")) #f
+          (begin
+            ; subscribe this peer's camera + audio ONCE (tracked by sub.<pid>); retried until it has
+            ; published (room-subscribe returns not-ok until the descriptor is replicated + ready).
+            (if (= (state-get (str-concat "sub." pid)) "1") #f
+              (begin
+                (set csub (room-subscribe (state-get "conf.room") pid "camera"))
+                (if (get-attr csub "ok")
+                  (begin
+                    (state-set (str-concat "camtok." pid) (get-attr csub "token"))
+                    (set asub (room-subscribe (state-get "conf.room") pid "audio"))
+                    (stream-play-audio (get-attr asub "token"))
+                    (state-set (str-concat "sub." pid) "1"))
+                  #f)))
+            ; once subscribed, place this peer into the next tile slot
+            (if (= (state-get (str-concat "sub." pid)) "1")
+              (begin
+                (state-set (str-concat "peer." idx ".cam") (state-get (str-concat "camtok." pid)))
+                (state-set (str-concat "peer." idx ".name") (get-attr p "name"))
+                (set idx (+ idx 1)))
+              #f)))))
+    (state-set "peer.count" (str idx)))

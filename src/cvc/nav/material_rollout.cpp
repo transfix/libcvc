@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cvc/nav/detail/material_ext.h>
 #include <cvc/nav/detail/material_rollout.h>
 #include <cvc/nav/detail/parallel.h>
 #include <cvc/nav/material.h>
@@ -29,10 +30,13 @@ void integrate_surrogate_material(
     const float *alphas, const float *beta, const float *gamma, const float *lam_soft,
     const float *lam_hard, const float *rollout_patch, const float *rr, const float *d_hat,
     const float *dt, const int *H, int B, int N, int Hp, int Wp, const surrogate_material_params &p,
-    float *min_clear, float *cum_risk, float *hard_count, float *arc_length, int num_threads) {
+    float *min_clear, float *cum_risk, float *hard_count, float *arc_length, int num_threads,
+    const material_ext *ext, rollout_energy *energy) {
   int max_H = 0;
   for (int b = 0; b < B; ++b)
     max_H = std::max(max_H, H[b]);
+  if (ext)
+    detail::validate_ext(*ext, B, max_H, nullptr, "integrate_surrogate_material");
   const long patch_stride = static_cast<long>(6) * Hp * Wp;
   const long chan = static_cast<long>(Hp) * Wp;
 
@@ -44,6 +48,7 @@ void integrate_surrogate_material(
     const float dh = d_hat[b], dtb = dt[b];
     const float rr_eff = p.margin_factor * rr[b];
     const float o0x = ox, o0y = oy; // patch centre = rollout start
+    detail::ext_agent ea(ext, b, Hp, Wp, o0x, o0y);
     const float *pr = rollout_patch + static_cast<long>(b) * patch_stride;
     const float *pr_risk = pr;           // ch0
     const float *pr_phi = pr + chan;     // ch1
@@ -58,9 +63,27 @@ void integrate_surrogate_material(
 
     float minclr = std::numeric_limits<float>::infinity();
     float cum = 0.0f, hard = 0.0f, arc = 0.0f;
+    // U_nav at a state (rollout_energy), row k of agent b.
+    const auto log_potential = [&](int k, float px, float py) {
+      const potential_terms u =
+          detail::material_potential(px, py, gx, gy, Cb, Rb, mb, ab, N, be, ls, lh, dh, rr_eff,
+                                     pr_risk, pr_phi, Hp, Wp, o0x, o0y, p.k_sharp, p.d_hat_sdf);
+      const std::size_t row = static_cast<std::size_t>(b) * (max_H + 1) + k;
+      if (energy->potential)
+        energy->potential[row] = u.total();
+      if (energy->terms) {
+        float *t = energy->terms + 4 * row;
+        t[0] = u.goal;
+        t[1] = u.barrier;
+        t[2] = u.soft;
+        t[3] = u.hard;
+      }
+    };
 
     for (int s = 0; s < max_H; ++s) {
       const float active = (s < H[b]) ? 1.0f : 0.0f;
+      if (energy)
+        log_potential(s, ox, oy);
       const float offx = ox - o0x, offy = oy - o0y;
       float risk_val = detail::patch_sample_channel(pr_risk, Hp, Wp, offx, offy);
       float sdf_val = detail::patch_sample_channel(pr_phi, Hp, Wp, offx, offy);
@@ -97,8 +120,20 @@ void integrate_surrogate_material(
       const float db = detail::sdf_barrier_db(sdf_val, p.k_sharp, p.d_hat_sdf);
       const float fhard_x = -lh * db * gpx, fhard_y = -lh * db * gpy;
 
-      const float ftot_x = fgoal_x + fgeom_x + fsoft_x + fhard_x - ga * vx;
-      const float ftot_y = fgoal_y + fgeom_y + fsoft_y + fhard_y - ga * vy;
+      float ftot_x = fgoal_x + fgeom_x + fsoft_x + fhard_x - ga * vx;
+      float ftot_y = fgoal_y + fgeom_y + fsoft_y + fhard_y - ga * vy;
+      if (energy && energy->force) {
+        float *fc = energy->force + 2 * (static_cast<std::size_t>(b) * max_H + s);
+        fc[0] = fgoal_x + fgeom_x + fsoft_x + fhard_x;
+        fc[1] = fgoal_y + fgeom_y + fsoft_y + fhard_y;
+      }
+      if (ext && s < H[b]) { // the external force, at the active steps
+        float Fe[2], Je[4];
+        int at;
+        ea.at(s, ox, oy, Fe, Je, at);
+        ftot_x = ftot_x + Fe[0];
+        ftot_y = ftot_y + Fe[1];
+      }
       const float ax = ftot_x / p.mass, ay = ftot_y / p.mass;
       const float vnx = vx + active * dtb * ax, vny = vy + active * dtb * ay;
       const float onx = ox + active * dtb * vnx, ony = oy + active * dtb * vny;
@@ -114,6 +149,8 @@ void integrate_surrogate_material(
       ox = onx;
       oy = ony;
     }
+    if (energy)
+      log_potential(max_H, ox, oy);
 
     o[2 * b] = ox;
     o[2 * b + 1] = oy;
@@ -139,10 +176,13 @@ void integrate_surrogate_material_vjp(
     const float *d_hat, const float *dt, const int *H, int B, int N, int Hp, int Wp,
     const surrogate_material_params &p, const float *g_oT, const float *g_vT,
     const float *g_min_clear, const float *g_cum_risk, const float *g_arc_length, float *g_alphas,
-    float *g_beta, float *g_gamma, float *g_lam_soft, float *g_lam_hard, int num_threads) {
+    float *g_beta, float *g_gamma, float *g_lam_soft, float *g_lam_hard, int num_threads,
+    const material_ext *ext, float *g_fext) {
   int max_H = 0;
   for (int b = 0; b < B; ++b)
     max_H = std::max(max_H, H[b]);
+  if (ext)
+    detail::validate_ext(*ext, B, max_H, g_fext, "integrate_surrogate_material_vjp");
   const long patch_stride = static_cast<long>(6) * Hp * Wp;
   const long chan = static_cast<long>(Hp) * Wp;
 
@@ -162,6 +202,10 @@ void integrate_surrogate_material_vjp(
     // Forward recompute, storing the (o,v) trajectory + locating the min_clear
     // argmin step (first strictly-smaller dmin, matching the forward).
     std::vector<float> Ox(max_H + 1), Oy(max_H + 1), Vx(max_H + 1), Vy(max_H + 1);
+    // The external force each step used: F, J and the step it was sampled at.
+    detail::ext_agent ea(ext, b, Hp, Wp, o0x, o0y);
+    std::vector<float> EF(ext ? 2 * max_H : 0, 0.0f), EJ(ext ? 4 * max_H : 0, 0.0f);
+    std::vector<int> Eat(ext ? max_H : 0, 0);
     Ox[0] = o0x;
     Oy[0] = o0y;
     Vx[0] = v0[2 * b];
@@ -209,8 +253,16 @@ void integrate_surrogate_material_vjp(
       const float fsoft_x = -ls * grx, fsoft_y = -ls * gry;
       const float db = detail::sdf_barrier_db(sdf_val, p.k_sharp, p.d_hat_sdf);
       const float fhard_x = -lh * db * gpx, fhard_y = -lh * db * gpy;
-      const float ftot_x = fgoal_x + fgeom_x + fsoft_x + fhard_x - ga * vx;
-      const float ftot_y = fgoal_y + fgeom_y + fsoft_y + fhard_y - ga * vy;
+      float ftot_x = fgoal_x + fgeom_x + fsoft_x + fhard_x - ga * vx;
+      float ftot_y = fgoal_y + fgeom_y + fsoft_y + fhard_y - ga * vy;
+      if (ext) {
+        Eat[s] = s;
+        if (s < H[b]) {
+          ea.at(s, ox, oy, &EF[2 * s], &EJ[4 * s], Eat[s]);
+          ftot_x = ftot_x + EF[2 * s];
+          ftot_y = ftot_y + EF[2 * s + 1];
+        }
+      }
       const float ax = ftot_x / p.mass, ay = ftot_y / p.mass;
       Vx[s + 1] = vx + active * dtb * ax;
       Vy[s + 1] = vy + active * dtb * ay;
@@ -227,6 +279,7 @@ void integrate_surrogate_material_vjp(
 
     // Reverse pass. ao/av carry dL/d(o_{s+1}), dL/d(v_{s+1}).
     float aox = goTx, aoy = goTy, avx = gvTx, avy = gvTy;
+    detail::ext_reverse er;
     for (int s = max_H - 1; s >= 0; --s) {
       const float active = (s < H[b]) ? 1.0f : 0.0f;
       const float ox = Ox[s], oy = Oy[s], vx = Vx[s], vy = Vy[s];
@@ -328,6 +381,17 @@ void integrate_surrogate_material_vjp(
         detail::patch_sample_channel_grad(chs[c], Hp, Wp, offx, offy, jx, jy);
         go_x += gcs[c] * jx;
         go_y += gcs[c] * jy;
+      }
+
+      // ftot + F_ext: dL/dF_ext is gftot, chained through J into o_s.
+      if (ext) {
+        const float gF[2] = {gftot_x, gftot_y};
+        if (g_fext) {
+          const long i = static_cast<long>(b) * ext->steps + s;
+          g_fext[2 * i] += gF[0];
+          g_fext[2 * i + 1] += gF[1];
+        }
+        er.at(s, Eat[s], &EJ[4 * s], gF, go_x, go_y);
       }
 
       aox = go_x;

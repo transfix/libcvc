@@ -20,6 +20,7 @@
 #include <exception>
 #include <stdexcept>
 #include <thread>
+#include <vector>
 
 namespace cvc {
 namespace physics {
@@ -46,8 +47,15 @@ double reach_once(const cvc::nav::coef_mlp &policy, const cvc::nav::training_sce
   cfg.veh.nsub = o.nsub;
   cfg.reach_tol = o.reach_tol;
   cfg.freeze_sense = true;
-  cvc::nav::sim_world w =
-      cvc::nav::sim_world::from_occupancy(cfg, sc.occ.data(), policy, o.agents, seed);
+  cvc::nav::sim_world w = [&] {
+    if (!(o.goal_max > 0.0f))
+      return cvc::nav::sim_world::from_occupancy(cfg, sc.occ.data(), policy, o.agents, seed);
+    const std::size_t n = static_cast<std::size_t>(o.agents);
+    std::vector<float> start(2 * n), goal(2 * n), color(3 * n, 0.5f);
+    sc.sample_starts_goals(o.agents, seed, start.data(), goal.data(), o.goal_min, o.goal_max);
+    return cvc::nav::sim_world(cfg, sc.occ.data(), sc.occ.data(), policy, start.data(), goal.data(),
+                               color.data(), o.agents);
+  }();
 
   world_config wc;
   wc.backend = backend::jolt;
@@ -118,6 +126,10 @@ std::vector<double> reach_on_plant(const std::vector<cvc::nav::coef_mlp> &polici
       o.seeds.empty())
     throw std::invalid_argument("cvc::physics::reach_on_plant: needs a positive wheelbase, agents, "
                                 "ticks and at least one seed");
+  if (!(o.goal_min >= 0.0f) || !(o.goal_max >= 0.0f) ||
+      (o.goal_max > 0.0f && o.goal_min > o.goal_max))
+    throw std::invalid_argument("cvc::physics::reach_on_plant: needs 0 <= goal_min <= goal_max "
+                                "(goal_max 0 = anywhere)");
   const double s_per_m = wheelbase / d.wheelbase();
   const double mpw = scene.scale / s_per_m; // metres per world unit
   const int ns = static_cast<int>(o.seeds.size());

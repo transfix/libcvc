@@ -28,7 +28,7 @@
 // noise fBm) detail frays the edges and a cheap single-scatter march toward the sun bakes a top
 // light. The output is a density field for a GPU ray-cast VolumeNode, not a mesh.
 //
-// Ported in shape from src/cvcGL/examples/lsystem_forest.cpp so the cloud looks as it does in the
+// Ported in shape from examples/cvcgl/lsystem_forest.cpp so the cloud looks as it does in the
 // demo. The one library-mandated change (roadmap §5.2): the handful of initial placement/heading
 // draws that the predecessor took from a std::mt19937 now go through the hashed RNG on
 // stream::cloud, so a given (seed, variant) always grows the same cloud and distinct variants

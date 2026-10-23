@@ -9,6 +9,10 @@ add_executable(ariadne_loader_test ariadne_loader_test.cpp)
 add_executable(ariadne_runtime_test ariadne_runtime_test.cpp)
 add_executable(ariadne_bind_test ariadne_bind_test.cpp)
 add_executable(ariadne_ftxui_test ariadne_ftxui_test.cpp)
+add_executable(ariadne_term_graphics_test ariadne_term_graphics_test.cpp)
+add_executable(ariadne_host_test ariadne_host_test.cpp)
+add_executable(ariadne_requires_test ariadne_requires_test.cpp)
+add_executable(ariadne_stream_view_test ariadne_stream_view_test.cpp)
 add_executable(x11_macro_headers_test x11_macro_headers_test.cpp)
 add_executable(net_http_client_test net_http_client_test.cpp)
 add_executable(uri_http_cache_test uri_http_cache_test.cpp)
@@ -82,6 +86,7 @@ add_executable(state_exec_bench_test state_exec_bench_test.cpp)
 add_executable(state_exec_integration_test state_exec_integration_test.cpp)
 add_executable(state_exec_advanced_integration_test state_exec_advanced_integration_test.cpp)
 add_executable(state_exec_gaps_test state_exec_gaps_test.cpp)
+add_executable(state_exec_exceptions_test state_exec_exceptions_test.cpp)
 add_executable(state_exec_deep_data_test state_exec_deep_data_test.cpp)
 add_executable(state_exec_data_steps_test state_exec_data_steps_test.cpp)
 if(NOT WIN32)
@@ -99,13 +104,29 @@ add_executable(state_large_tree_bench_test state_large_tree_bench_test.cpp)
 add_executable(state_hash_partition_test state_hash_partition_test.cpp)
 add_executable(state_hybrid_time_test state_hybrid_time_test.cpp)
 add_executable(world_clock_test world_clock_test.cpp)
+add_executable(clock_driver_test clock_driver_test.cpp)
 add_executable(world_units_test world_units_test.cpp)
 add_executable(physics_world_test physics_world_test.cpp)
+add_executable(avatar_sim_test avatar_sim_test.cpp)
+add_executable(physics_codec_test physics_codec_test.cpp)
 add_executable(physics_field_test physics_field_test.cpp)
 add_executable(physics_vehicle_test physics_vehicle_test.cpp)
 add_executable(physics_energy_test physics_energy_test.cpp)
 add_executable(nav_plant_test nav_plant_test.cpp)
+add_executable(physics_plant_log_test physics_plant_log_test.cpp)
 add_executable(nav_dyn_bike_test nav_dyn_bike_test.cpp)
+add_executable(nav_dyn_4w_test nav_dyn_4w_test.cpp)
+add_executable(nav_potential_test nav_potential_test.cpp)
+# nav_potential_test compares U logged by the material rollouts (built with -ffp-contract=off)
+# with the same inline evaluator called here, bit for bit: build it the same way, or clang
+# contracts this copy into FMAs on aarch64 and the last bits differ.
+if(NOT MSVC)
+  set_source_files_properties(nav_potential_test.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+else()
+  set_source_files_properties(nav_potential_test.cpp PROPERTIES COMPILE_OPTIONS "/fp:precise")
+endif()
+add_executable(ph_se2_test ph_se2_test.cpp)
+add_executable(ph_se2_train_test ph_se2_train_test.cpp)
 add_executable(nav_terrain_test nav_terrain_test.cpp)
 add_executable(nav_binding_test nav_binding_test.cpp)
 add_executable(physics_parity_test physics_parity_test.cpp)
@@ -145,6 +166,9 @@ if(CVC_ENABLE_GRPC)
   add_executable(stream_relay_test stream_relay_test.cpp)
   add_executable(room_media_test room_media_test.cpp)
 endif()
+if(CVC_ENABLE_WS)
+  add_executable(state_transport_ws_test state_transport_ws_test.cpp)
+endif()
 add_executable(voxels_test voxels_test.cpp)
 add_executable(volume_test volume_test.cpp)
 add_executable(volren_math_test volren_math_test.cpp)
@@ -171,10 +195,13 @@ add_executable(nav_stats_test nav_stats_test.cpp)
 add_executable(nav_material_raster_test nav_material_raster_test.cpp)
 add_executable(nav_clearance_cost_test nav_clearance_cost_test.cpp)
 add_executable(nav_material_test nav_material_test.cpp)
+add_executable(nav_belief_material_test nav_belief_material_test.cpp)
+add_executable(nav_belief_material_net_test nav_belief_material_net_test.cpp)
 add_executable(nav_material_deploy_test nav_material_deploy_test.cpp)
 add_executable(nav_coef_energy_test nav_coef_energy_test.cpp)
 add_executable(nav_material_rollout_grad_test nav_material_rollout_grad_test.cpp)
 add_executable(nav_material_bike_rollout_test nav_material_bike_rollout_test.cpp)
+add_executable(nav_material_ext_test nav_material_ext_test.cpp)
 add_executable(nav_coef_energy_grad_test nav_coef_energy_grad_test.cpp)
 add_executable(nav_material_rollout_cuda_test nav_material_rollout_cuda_test.cpp)
 add_executable(nav_coef_energy_cuda_test nav_coef_energy_cuda_test.cpp)
@@ -223,6 +250,10 @@ set(TEST_TARGETS
   ariadne_runtime_test
   ariadne_bind_test
   ariadne_ftxui_test
+  ariadne_term_graphics_test
+  ariadne_host_test
+  ariadne_requires_test
+  ariadne_stream_view_test
   x11_macro_headers_test
   net_http_client_test
   uri_http_cache_test
@@ -271,13 +302,21 @@ set(TEST_TARGETS
   state_volume_codec_test
   state_brick_manifest_test
   world_clock_test
+  clock_driver_test
   world_units_test
   physics_world_test
+  avatar_sim_test
+  physics_codec_test
   physics_field_test
   physics_vehicle_test
   physics_energy_test
   nav_plant_test
+  physics_plant_log_test
   nav_dyn_bike_test
+  nav_dyn_4w_test
+  nav_potential_test
+  ph_se2_test
+  ph_se2_train_test
   nav_terrain_test
   nav_binding_test
   physics_parity_test
@@ -319,11 +358,14 @@ set(TEST_TARGETS
   nav_stats_test
   nav_clearance_cost_test
   nav_material_test
+  nav_belief_material_test
+  nav_belief_material_net_test
   nav_material_deploy_test
   nav_material_raster_test
   nav_coef_energy_test
   nav_material_rollout_grad_test
   nav_material_bike_rollout_test
+  nav_material_ext_test
   nav_coef_energy_grad_test
   nav_material_train_test
   nav_material_optim_test
@@ -403,6 +445,7 @@ list(APPEND TEST_TARGETS
   state_exec_integration_test
   state_exec_advanced_integration_test
   state_exec_gaps_test
+  state_exec_exceptions_test
   state_exec_deep_data_test
   state_exec_data_steps_test
 )
@@ -509,6 +552,37 @@ target_link_libraries(ariadne_runtime_test
 )
 
 target_link_libraries(ariadne_ftxui_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+# Two tests load the GL-free terminal documents from the repo's examples/ tree.
+target_compile_definitions(ariadne_ftxui_test PRIVATE
+  CVC_EXAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../../examples")
+
+target_link_libraries(ariadne_term_graphics_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(ariadne_host_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(ariadne_requires_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(ariadne_stream_view_test
   PRIVATE
     cvc
     GTest::gtest
@@ -719,6 +793,13 @@ if(TARGET state_exec_gaps_test)
   )
 endif()
 
+target_link_libraries(state_exec_exceptions_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(procedural_geometry_test
   PRIVATE
     cvc
@@ -815,6 +896,20 @@ target_link_libraries(nav_material_test
     GTest::gtest_main
 )
 
+target_link_libraries(nav_belief_material_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(nav_belief_material_net_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(nav_material_deploy_test
   PRIVATE
     cvc
@@ -842,6 +937,24 @@ target_link_libraries(nav_material_bike_rollout_test
     GTest::gtest
     GTest::gtest_main
 )
+
+target_link_libraries(nav_material_ext_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+# Its patch_callback samples the force patch with detail/material_rollout.h's inline sampler, and
+# ACallbackGivingThePatchIsThePatch holds it to the patch source bit for bit. The rollouts sample
+# in TUs built with -ffp-contract=off, so this one is too. Under the compiler's default (on for
+# Clang, fast for GCC) the sampler's bilinear sums fuse into FMAs where the ISA has them (aarch64:
+# the macOS arm64 lanes), and the callback's F and J move by an ulp.
+if(NOT MSVC)
+  set_source_files_properties(nav_material_ext_test.cpp
+                              PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+else()
+  set_source_files_properties(nav_material_ext_test.cpp PROPERTIES COMPILE_OPTIONS "/fp:precise")
+endif()
 
 target_link_libraries(nav_coef_energy_grad_test
   PRIVATE
@@ -1510,6 +1623,13 @@ target_link_libraries(world_clock_test
     GTest::gtest_main
 )
 
+target_link_libraries(clock_driver_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(world_units_test
   PRIVATE
     cvc
@@ -1518,6 +1638,20 @@ target_link_libraries(world_units_test
 )
 
 target_link_libraries(physics_world_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(avatar_sim_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(physics_codec_test
   PRIVATE
     cvc
     GTest::gtest
@@ -1545,7 +1679,42 @@ target_link_libraries(nav_plant_test
     GTest::gtest_main
 )
 
+target_link_libraries(physics_plant_log_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(nav_dyn_bike_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(nav_dyn_4w_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(nav_potential_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(ph_se2_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(ph_se2_train_test
   PRIVATE
     cvc
     GTest::gtest
@@ -1696,6 +1865,17 @@ if(TARGET state_transport_grpc_test)
   list(APPEND TEST_TARGETS state_transport_grpc_test)
 endif()
 
+if(TARGET state_transport_ws_test)
+  target_link_libraries(state_transport_ws_test
+    PRIVATE
+      cvc
+      GTest::gtest
+      GTest::gtest_main
+  )
+  target_compile_features(state_transport_ws_test PRIVATE cxx_std_17)
+  list(APPEND TEST_TARGETS state_transport_ws_test)
+endif()
+
 if(TARGET state_stream_transport_grpc_test)
   target_link_libraries(state_stream_transport_grpc_test
     PRIVATE
@@ -1758,10 +1938,13 @@ target_compile_features(utility_test PRIVATE cxx_std_17)
 target_compile_features(nav_test PRIVATE cxx_std_17)
 target_compile_features(nav_coef_train_test PRIVATE cxx_std_17)
 target_compile_features(nav_material_test PRIVATE cxx_std_17)
+target_compile_features(nav_belief_material_test PRIVATE cxx_std_17)
+target_compile_features(nav_belief_material_net_test PRIVATE cxx_std_17)
 target_compile_features(nav_material_deploy_test PRIVATE cxx_std_17)
 target_compile_features(nav_coef_energy_test PRIVATE cxx_std_17)
 target_compile_features(nav_material_rollout_grad_test PRIVATE cxx_std_17)
 target_compile_features(nav_material_bike_rollout_test PRIVATE cxx_std_17)
+target_compile_features(nav_material_ext_test PRIVATE cxx_std_17)
 target_compile_features(nav_coef_energy_grad_test PRIVATE cxx_std_17)
 target_compile_features(nav_material_rollout_cuda_test PRIVATE cxx_std_17)
 target_compile_features(nav_coef_energy_cuda_test PRIVATE cxx_std_17)
@@ -1830,6 +2013,7 @@ target_compile_features(state_link_bench_test PRIVATE cxx_std_17)
 target_compile_features(state_exec_parser_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_types_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_deep_data_test PRIVATE cxx_std_20)
+target_compile_features(state_exec_exceptions_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_data_steps_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_builtins_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_evaluator_test PRIVATE cxx_std_20)
@@ -1869,13 +2053,21 @@ target_compile_features(state_large_tree_bench_test PRIVATE cxx_std_17)
 target_compile_features(state_hash_partition_test PRIVATE cxx_std_17)
 target_compile_features(state_hybrid_time_test PRIVATE cxx_std_17)
 target_compile_features(world_clock_test PRIVATE cxx_std_17)
+target_compile_features(clock_driver_test PRIVATE cxx_std_17)
 target_compile_features(world_units_test PRIVATE cxx_std_17)
 target_compile_features(physics_world_test PRIVATE cxx_std_17)
+target_compile_features(avatar_sim_test PRIVATE cxx_std_17)
+target_compile_features(physics_codec_test PRIVATE cxx_std_17)
 target_compile_features(physics_field_test PRIVATE cxx_std_17)
 target_compile_features(physics_vehicle_test PRIVATE cxx_std_17)
 target_compile_features(physics_energy_test PRIVATE cxx_std_17)
 target_compile_features(nav_plant_test PRIVATE cxx_std_17)
+target_compile_features(physics_plant_log_test PRIVATE cxx_std_17)
 target_compile_features(nav_dyn_bike_test PRIVATE cxx_std_17)
+target_compile_features(nav_dyn_4w_test PRIVATE cxx_std_17)
+target_compile_features(nav_potential_test PRIVATE cxx_std_17)
+target_compile_features(ph_se2_test PRIVATE cxx_std_17)
+target_compile_features(ph_se2_train_test PRIVATE cxx_std_17)
 target_compile_features(nav_terrain_test PRIVATE cxx_std_17)
 target_compile_features(nav_binding_test PRIVATE cxx_std_17)
 target_compile_features(physics_parity_test PRIVATE cxx_std_17)
@@ -2024,6 +2216,10 @@ cvc_discover_tests(text_test)
 cvc_discover_tests(ariadne_loader_test)
 cvc_discover_tests(ariadne_runtime_test)
 cvc_discover_tests(ariadne_ftxui_test)
+cvc_discover_tests(ariadne_term_graphics_test)
+cvc_discover_tests(ariadne_host_test)
+cvc_discover_tests(ariadne_requires_test)
+cvc_discover_tests(ariadne_stream_view_test)
 cvc_discover_tests(ariadne_bind_test)
 cvc_discover_tests(x11_macro_headers_test)
 cvc_discover_tests(net_http_client_test)
@@ -2059,11 +2255,14 @@ cvc_discover_tests(nav_drive_refinements_test)
 cvc_discover_tests(nav_stats_test)
 cvc_discover_tests(nav_clearance_cost_test)
 cvc_discover_tests(nav_material_test)
+cvc_discover_tests(nav_belief_material_test)
+cvc_discover_tests(nav_belief_material_net_test)
 cvc_discover_tests(nav_material_deploy_test)
 cvc_discover_tests(nav_material_raster_test)
 cvc_discover_tests(nav_coef_energy_test)
 cvc_discover_tests(nav_material_rollout_grad_test)
 cvc_discover_tests(nav_material_bike_rollout_test)
+cvc_discover_tests(nav_material_ext_test)
 cvc_discover_tests(nav_coef_energy_grad_test)
 cvc_discover_tests(nav_material_rollout_cuda_test)
 cvc_discover_tests(nav_coef_energy_cuda_test)
@@ -2216,6 +2415,7 @@ endif()
 if(TARGET state_exec_gaps_test)
   cvc_discover_tests(state_exec_gaps_test)
 endif()
+cvc_discover_tests(state_exec_exceptions_test)
 cvc_discover_tests(state_change_journal_test)
 cvc_discover_tests(state_subscription_router_test)
 cvc_discover_tests(state_sync_adapter_test)
@@ -2310,13 +2510,21 @@ cvc_discover_tests(state_large_tree_bench_test)
 cvc_discover_tests(state_hash_partition_test)
 cvc_discover_tests(state_hybrid_time_test)
 cvc_discover_tests(world_clock_test)
+cvc_discover_tests(clock_driver_test)
 cvc_discover_tests(world_units_test)
 cvc_discover_tests(physics_world_test)
+cvc_discover_tests(avatar_sim_test)
+cvc_discover_tests(physics_codec_test)
 cvc_discover_tests(physics_field_test)
 cvc_discover_tests(physics_vehicle_test)
 cvc_discover_tests(physics_energy_test)
 cvc_discover_tests(nav_plant_test)
+cvc_discover_tests(physics_plant_log_test)
 cvc_discover_tests(nav_dyn_bike_test)
+cvc_discover_tests(nav_dyn_4w_test)
+cvc_discover_tests(nav_potential_test)
+cvc_discover_tests(ph_se2_test)
+cvc_discover_tests(ph_se2_train_test)
 cvc_discover_tests(nav_terrain_test)
 cvc_discover_tests(nav_binding_test)
 cvc_discover_tests(physics_parity_test)
@@ -2341,6 +2549,9 @@ if(NOT WIN32)
 endif()
 if(TARGET state_transport_grpc_test)
   cvc_discover_tests(state_transport_grpc_test)
+endif()
+if(TARGET state_transport_ws_test)
+  cvc_discover_tests(state_transport_ws_test)
 endif()
 if(TARGET state_stream_transport_grpc_test)
   cvc_discover_tests(state_stream_transport_grpc_test)

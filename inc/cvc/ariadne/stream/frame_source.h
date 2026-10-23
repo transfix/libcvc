@@ -57,6 +57,15 @@ public:
   // written. The source knows its own format (width/height/codec), fixed when it was created to
   // match the stream it feeds, so it needs no format argument. Called on the producer thread.
   virtual produced_frame fill(std::uint8_t *buf, std::size_t cap) = 0;
+
+  // The ACTUAL pixel dimensions of the frame the last fill() produced, for a video source whose
+  // content size can differ from its slab budget — e.g. a camera that preserves the device's NATIVE
+  // ASPECT RATIO within a max budget (a portrait phone camera stays portrait instead of being
+  // stretched). 0 (the default) means "fixed — use the size the stream/source was created with". A
+  // self-describing-codec wrapper (jpeg_encode_source) reads these to encode at the real size, so
+  // the decoded frame carries the true aspect ratio. Read right after fill() returns bytes > 0.
+  virtual int cur_width() const { return 0; }
+  virtual int cur_height() const { return 0; }
 };
 
 } // namespace stream

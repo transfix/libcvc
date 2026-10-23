@@ -24,10 +24,14 @@
 //      by default; a casting StreamingGeometryNode's streamed write bakes, and
 //      so does a draw-range or relayout change alone; a DrapedLinkNode does not
 //      cast by default, and a casting one moved or reshaped by uniforms
-//      (endpoints, width, heights) re-bakes while uploading nothing.
-// B-F render for real and skip where nothing rasterises (fatal under
+//      (endpoints, width, heights) re-bakes while uploading nothing;
+//   G. a sun's shadows in a window that is not square: a lit surface looks the
+//      same with shadows on as off, landscape and portrait, and after a resize
+//      that does not re-bake; a box still shadows the ball behind it.
+// B-G render for real and skip where nothing rasterises (fatal under
 // CVC_REQUIRE_RENDER=1).
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -600,12 +604,222 @@ static void rendered(cvc::app &app) {
       "12 frames moving a caster, interval 3: " + std::to_string(bakes) + " bakes (want 4)");
 }
 
+// A box of half-size h centred on the origin, four vertices a face so each face
+// keeps its own normal (box() shares corners, which smooths its shading).
+static cvc::geometry flatBox(double h) {
+  cvc::geometry g;
+  for (int a = 0; a < 3; ++a)
+    for (const double s : {1.0, -1.0}) {
+      // Face normal f; u, v span the face with u x v = f, so it winds outward.
+      double f[3] = {0, 0, 0}, u[3] = {0, 0, 0};
+      f[a] = s;
+      u[(a + 1) % 3] = 1;
+      const double v[3] = {f[1] * u[2] - f[2] * u[1], f[2] * u[0] - f[0] * u[2],
+                           f[0] * u[1] - f[1] * u[0]};
+      const auto base = static_cast<unsigned int>(g.points().size());
+      const int corner[4][2] = {{-1, -1}, {1, -1}, {1, 1}, {-1, 1}};
+      for (const auto &c : corner)
+        g.points().push_back({h * (f[0] + c[0] * u[0] + c[1] * v[0]),
+                              h * (f[1] + c[0] * u[1] + c[1] * v[1]),
+                              h * (f[2] + c[0] * u[2] + c[1] * v[2])});
+      g.tris().push_back({base, base + 1, base + 2});
+      g.tris().push_back({base, base + 2, base + 3});
+    }
+  return g;
+}
+
+// A UV sphere with its true normals.
+static cvc::geometry ball(double cx, double cy, double cz, double r) {
+  const int nu = 64, nv = 32;
+  const double pi = 3.14159265358979323846;
+  cvc::geometry g;
+  for (int j = 0; j <= nv; ++j)
+    for (int i = 0; i < nu; ++i) {
+      const double th = pi * j / nv, ph = 2 * pi * i / nu;
+      const double n[3] = {std::sin(th) * std::cos(ph), std::sin(th) * std::sin(ph), std::cos(th)};
+      g.points().push_back({cx + r * n[0], cy + r * n[1], cz + r * n[2]});
+      g.normals().push_back({n[0], n[1], n[2]});
+    }
+  auto at = [](int i, int j) { return static_cast<unsigned int>(j * nu + i % nu); };
+  for (int j = 0; j < nv; ++j)
+    for (int i = 0; i < nu; ++i) {
+      g.tris().push_back({at(i, j), at(i, j + 1), at(i + 1, j + 1)});
+      g.tris().push_back({at(i, j), at(i + 1, j + 1), at(i + 1, j)});
+    }
+  return g;
+}
+
+// vtkShadowMapBakerPass draws each map through the light's camera at the
+// RENDERER's aspect; vtkShadowMapPass reads it back at aspect 1. They agree only
+// in a square window -- every other render here is one -- so until the scene
+// pinned the light's camera at aspect 1 (ShadowCasterFilterPass, SceneGraph.cpp)
+// a sun shadowed what it lit: on this scene at 480x360, a ball dark but for a
+// rim, and wedges across the box's lit faces. The box (unit, at the origin)
+// and the ball (radius 0.5 at (1.6, 0, 0)) are seen from (4, -5, 3.5) under a
+// sun at azimuth 135, elevation 35: nothing in view shades anything else, so
+// with shadows on every lit point must read as it does with them off. Then a
+// low sun from -x (azimuth -90, elevation 15) puts the ball's near side in the
+// box's shadow, which must still fall.
+static void sunWindowShape(cvc::app &app) {
+  if (!canRasterise(app))
+    return; // rendered() has reported it (and failed it under CVC_REQUIRE_RENDER)
+  std::printf("G. a sun's shadows in a window that is not square\n");
+  SceneGraph sg(app, "sunshape");
+  sg.setDiagnosticChromeVisible(false);
+  auto cube = sg.getGraphicsRoot()->addGraphicsChild<GeometryNode>("cube");
+  cube->setGeometry(flatBox(0.5));
+  cube->setColor(0.8, 0.8, 0.8);
+  auto orb = sg.getGraphicsRoot()->addGraphicsChild<GeometryNode>("ball");
+  orb->setGeometry(ball(1.6, 0.0, 0.0, 0.5));
+  orb->setColor(0.8, 0.8, 0.8);
+  sg.processEvents();
+  SceneRenderer view(sg, 240, 180, /*offscreen=*/true, "main");
+  view.setBackground(0.0, 0.0, 1.0);
+  view.setCamera(4, -5, 3.5, 0.8, 0, 0, 0, 0, 1, 30.0, 0.1, 100.0);
+  const int sun = sg.addDirectionalLight(135.0, 35.0);
+  sg.setShadowResolution(1024);
+  sg.setShadowUpdateInterval(1);
+
+  // Lit points at 135/35: the box's +x face and top centres, and three on the
+  // ball, from where the sun is overhead towards where the camera looks on.
+  const double pi = 3.14159265358979323846, ce = std::cos(35 * pi / 180);
+  const double sunDir[3] = {ce * std::sin(135 * pi / 180), -ce * std::cos(135 * pi / 180),
+                            std::sin(35 * pi / 180)};
+  const double eye[3] = {4 - 1.6, -5, 3.5}; // the ball's centre to the camera
+  const double eyeLen = std::sqrt(eye[0] * eye[0] + eye[1] * eye[1] + eye[2] * eye[2]);
+  std::vector<std::array<double, 3>> lit = {{0.5, 0, 0}, {0, 0, 0.5}};
+  for (double t : {0.0, 1.0 / 3, 2.0 / 3}) {
+    double n[3], len = 0;
+    for (int k = 0; k < 3; ++k) {
+      n[k] = (1 - t) * sunDir[k] + t * eye[k] / eyeLen;
+      len += n[k] * n[k];
+    }
+    len = std::sqrt(len);
+    lit.push_back({1.6 + 0.5 * n[0] / len, 0.5 * n[1] / len, 0.5 * n[2] / len});
+  }
+  const char *names[] = {"box +x", "box top", "ball sunward", "ball 1/3", "ball 2/3"};
+
+  // Mean luma of the 3x3 pixels around each world point, in the current frame.
+  auto sample = [&](const std::vector<std::array<double, 3>> &pts,
+                    std::vector<unsigned char> *frame = nullptr) {
+    const std::vector<unsigned char> px = view.frameRGB();
+    const int w = view.frameWidth(), h = view.frameHeight();
+    std::vector<double> out;
+    for (const auto &p : pts) {
+      view.renderer()->SetWorldPoint(p[0], p[1], p[2], 1.0);
+      view.renderer()->WorldToDisplay();
+      double d[3];
+      view.renderer()->GetDisplayPoint(d);
+      double sum = 0;
+      int n = 0;
+      for (int y = static_cast<int>(d[1]) - 1; y <= static_cast<int>(d[1]) + 1; ++y)
+        for (int x = static_cast<int>(d[0]) - 1; x <= static_cast<int>(d[0]) + 1; ++x)
+          if (x >= 0 && y >= 0 && x < w && y < h &&
+              px.size() == static_cast<std::size_t>(w) * h * 3) {
+            const std::size_t o = (static_cast<std::size_t>(y) * w + x) * 3;
+            sum += 0.299 * px[o] + 0.587 * px[o + 1] + 0.114 * px[o + 2];
+            ++n;
+          }
+      out.push_back(n ? sum / n : -1.0);
+    }
+    if (frame)
+      *frame = px;
+    return out;
+  };
+  // Shadows on or off, settled (the first frames bake).
+  auto shadows = [&](bool on) {
+    const bool ok = sg.setShadowsEnabled(on);
+    for (int i = 0; i < 3; ++i) {
+      sg.processEvents();
+      view.render();
+    }
+    return ok;
+  };
+  auto print = [&](const char *what, const std::vector<double> &v) {
+    std::printf("  %-28s", what);
+    for (double x : v)
+      std::printf(" %6.1f", x);
+    std::printf("\n");
+  };
+  // Every lit point lit, and within 12 luma of its shadows-off self. The fault
+  // took 20 to 100 off one of them in each shape.
+  auto same = [&](const std::string &shape, const std::vector<double> &off,
+                  const std::vector<double> &on) {
+    bool lit = true, close = true;
+    for (std::size_t i = 0; i < off.size() && i < on.size(); ++i) {
+      lit = lit && off[i] > 40.0;
+      close = close && std::fabs(on[i] - off[i]) <= 12.0;
+    }
+    chk(lit && off.size() == on.size(), shape + ": every sample point is lit, shadows off");
+    chk(close, shape + ": and reads the same with shadows on (within 12 luma)");
+  };
+  std::printf("  luma at:                    ");
+  for (const char *n : names)
+    std::printf(" %s |", n);
+  std::printf("\n");
+
+  if (!shadows(false) || !shadows(true)) {
+    std::printf("  skipped: shadows unavailable\n");
+    return;
+  }
+  shadows(false);
+  std::vector<unsigned char> offFrame, onFrame;
+  const std::vector<double> offWide = sample(lit, &offFrame);
+  shadows(true);
+  const std::vector<double> onWide = sample(lit, &onFrame);
+  print("240x180, shadows off", offWide);
+  print("240x180, shadows on", onWide);
+  same("240x180", offWide, onWide);
+  // And nowhere else in the frame: nothing in view shades anything else. What
+  // moves is a pixel-wide line where a lit box face meets one turned from the
+  // sun (the map's filtering across that edge): 0.08% of the bytes under
+  // llvmpipe, against 3.6% with the fault.
+  const Diff whole = diffRegion(offFrame, onFrame, 240, 180, 0, 240, 0, 180);
+  long big = 0;
+  for (std::size_t i = 0; i < offFrame.size() && i < onFrame.size(); ++i)
+    big += std::abs(static_cast<int>(offFrame[i]) - static_cast<int>(onFrame[i])) > 24;
+  std::printf("  bytes differing, whole frame: %ld (max step %d), %ld by over 24\n", whole.bytes,
+              whole.step, big);
+  chk(whole.bytes >= 0 && big * 200 <= static_cast<long>(offFrame.size()),
+      "240x180: no more than 0.5% of the frame's bytes move by over 24");
+
+  // Turned portrait with shadows on: nothing the maps depend on changed, so they
+  // are not re-baked -- and they still fit.
+  vtkShadowMapBakerPass *baker = findBaker(view.renderer()->GetPass());
+  view.resize(180, 240);
+  sg.processEvents();
+  view.render();
+  const bool rebaked = baker && baker->GetNeedUpdate();
+  const std::vector<double> onTall = sample(lit);
+  shadows(false);
+  const std::vector<double> offTall = sample(lit);
+  print("180x240, shadows off", offTall);
+  print("180x240, on, baked at 240x180", onTall);
+  chk(baker && !rebaked, "turning the window portrait did not re-bake the maps");
+  same("180x240", offTall, onTall);
+
+  // The box's shadow on the ball's near side, from a low sun at -x.
+  view.resize(240, 180);
+  sg.setLightDirection(sun, -90.0, 15.0);
+  const std::vector<std::array<double, 3>> shade = {{1.345, -0.408, 0.138}, {0, 0, 0.5}};
+  const std::vector<double> offLow = sample(shade);
+  shadows(true);
+  const std::vector<double> onLow = sample(shade);
+  print("sun -90/15, shadows off", offLow);
+  print("sun -90/15, shadows on", onLow);
+  chk(offLow[0] > 40.0 && onLow[0] < 0.5 * offLow[0],
+      "the box still shadows the ball (its near side under half its lit level)");
+  chk(offLow[1] > 20.0 && std::fabs(onLow[1] - offLow[1]) <= 12.0,
+      "and the box's own top, lit by that low sun, stays lit");
+}
+
 int main() {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   cvc::app app;
   app.properties("system.log_verbosity", "0");
   flags(app);
   rendered(app);
+  sunWindowShape(app);
   std::printf("\n%s (%d failure%s)\n", fails ? "FAILED" : "PASSED", fails, fails == 1 ? "" : "s");
   return fails ? 1 : 0;
 }

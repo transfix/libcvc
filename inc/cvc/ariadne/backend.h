@@ -93,8 +93,9 @@ struct WindowGeom {
   float x = 0.0f, y = 0.0f, w = 0.0f, h = 0.0f;
 };
 
-// What a surface can and cannot do. The core (and, later, the loader's
-// `requires:` preflight, §16.3/§7.6) reads this to fail-safe or substitute —
+// What a surface can and cannot do. AppRuntime::load checks a document's
+// `requires:` against it (§16.3/§7.6, cvc/ariadne/requires.h, which maps the
+// capability tokens onto these fields), and (has? "...") reads it at run time —
 // e.g. a shader widget needs `glsl`, `free` layout needs `windows`. `owns_loop`
 // distinguishes a host-pumped backend (ImGui: the host render pass calls
 // Runtime::render()) from a framework-owned loop (FTXUI/tvision: the backend's
@@ -109,6 +110,10 @@ struct Capabilities {
   bool glsl = false;       // can render GLSL (scene-node shaders / shader_canvas)
   bool view_embed = false; // can embed a live render-to-texture view
   bool owns_loop = false;  // the backend drives its own event loop
+  bool terminal = false;   // draws in a text terminal
+  bool bitmap = false;     // shows images in real pixels (a GL window, or a kitty / Sixel terminal)
+  bool kitty = false;      // the terminal speaks the kitty graphics protocol
+  bool sixel = false;      // the terminal draws DEC Sixel
 };
 
 // The pluggable UI handler. The core walks the tree and calls these; structural
@@ -154,6 +159,11 @@ public:
   virtual void seed_window_geometry(const WindowGeom &g) { (void)g; }
   virtual WindowGeom window_geometry() const { return {}; }
 
+  // Raise/focus the NEXT window to the front. Called right before begin_window when the core sees a
+  // one-shot raise request at tree.<id>.raise (e.g. "click a user -> bring their camera window
+  // forward"). Default no-op — a backend with no window z-order ignores it.
+  virtual void focus_next_window() {}
+
   virtual void push_id(const char *id) = 0;
   virtual void pop_id() = 0;
 
@@ -175,6 +185,18 @@ public:
   // the last grid was not a row-split. Both default to no-op / {}.
   virtual void seed_grid_tracks(const std::vector<float> &sizes) { (void)sizes; }
   virtual std::vector<float> grid_tracks() const { return {}; }
+
+  // §11.4 table-column persistence: the same pair for a resizable TABLE (a resizable grid that is
+  // not a row split), persisted to tree.<id>.columns. seed_grid_columns() comes right BEFORE
+  // begin_grid with the persisted widths; the backend applies them once, when the table is
+  // created (a later drag wins). grid_columns() returns the widths after the last grid closed,
+  // for the core to persist; empty = the last grid was not a resizable table, or has none yet.
+  // Widths are px for every column, the unit every backend shares. 0 in either direction means
+  // "not set": the column keeps its authored track. A backend seeds a fixed column with its
+  // width; a stretch (percent) column may take the persisted widths as weights, so stretch
+  // columns keep their proportions at another table width (the ImGui backend does).
+  virtual void seed_grid_columns(const std::vector<float> &widths) { (void)widths; }
+  virtual std::vector<float> grid_columns() const { return {}; }
 
   // Disabled scope (§4 read-lane enabled_when/disabled_when). The core wraps a widget
   // (and its subtree) that a reactive predicate has disabled in begin_disabled()/

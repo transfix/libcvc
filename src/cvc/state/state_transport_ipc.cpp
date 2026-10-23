@@ -586,19 +586,22 @@ void state_transport_ipc::reader_loop(std::shared_ptr<connection> conn) {
       conn->remote_cluster_id = br.str();
       continue;
     }
+    // Count a mutation or message only once it has been dispatched (as state_transport_grpc
+    // does), so wait_for_received*() returning means the receiving shards have applied it.
+    // Counting first let a waiter read the state before the value landed.
     if (mtype == kMsgMutation) {
       state_mutation m;
       if (decode_mutation(body, m)) {
-        _recv_mutations.fetch_add(1, std::memory_order_relaxed);
         dispatch_inbound(m);
+        _recv_mutations.fetch_add(1, std::memory_order_relaxed);
       }
       continue;
     }
     if (mtype == kMsgOob) {
       state_message m;
       if (decode_message(body, m)) {
-        _recv_messages.fetch_add(1, std::memory_order_relaxed);
         dispatch_inbound_message(m);
+        _recv_messages.fetch_add(1, std::memory_order_relaxed);
       }
       continue;
     }

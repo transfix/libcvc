@@ -13,10 +13,12 @@
 #                      interpreter column (python31X + numpy-cp31X).
 #   * pycvc-gl-cp31X — the scriptable-scene bindings per column (needs
 #                      cvcgl + VTK + vtk-python-cp31X + Python).
-#   * cvcgl-examples — the example COMMANDS (lsystem_forest + the nav demos +
-#                      the cvcgl-examples-web launcher), linux release only.
+#   * libcvc-examples — the example COMMANDS (examples/: the cvcGL scene demos,
+#                      the nav demos, the .ari documents and the
+#                      libcvc-examples-web launcher), linux release only.
 #                      Built through the recipe's own build.sh so the workflow
-#                      and the remote builders cannot drift.
+#                      and the remote builders cannot drift. (Its browser
+#                      gallery, libcvc-examples-web, is publish-cvcgl-wasm.yml's.)
 # The interpreter column is a matrix dimension (`pyver`): every job carries
 # the base "311", and extra linux-x86_64 release jobs (matrix include) build
 # the cp312/cp313 columns. Those column jobs rebuild libcvc + cvcgl locally
@@ -24,9 +26,9 @@
 # pair — libcvc/cvcgl publish exactly once, from the pyver-311 job (see the
 # `matrix.pyver == '311'` guards).
 # Platform coverage (see the guards on each step below):
-#   * Linux   — libcvc + cvcgl + cvcgl-examples + pycvc-cp311/312/313 +
+#   * Linux   — libcvc + cvcgl + libcvc-examples + pycvc-cp311/312/313 +
 #               pycvc-gl-cp311/312/313 (release config; the 312/313 columns on
-#               x86_64 only; cvcgl-examples from the pyver-311 column only).
+#               x86_64 only; libcvc-examples from the pyver-311 column only).
 #   * Windows — libcvc + cvcgl always; pycvc-cp311/pycvc-gl-cp311 only behind
 #               the `windows_pycvc` dispatch input (still a TODO — unverified;
 #               Windows stays cp311-only for now).
@@ -181,7 +183,7 @@ jobs:
     outputs:
       libcvc: ${{ steps.rev.outputs.libcvc }}
       cvcgl: ${{ steps.rev.outputs.cvcgl }}
-      cvcgl_examples: ${{ steps.rev.outputs.cvcgl_examples }}
+      libcvc_examples: ${{ steps.rev.outputs.libcvc_examples }}
       ari: ${{ steps.rev.outputs.ari }}
       # One output per pycvc interpreter column; the build matrix selects the
       # right one via outputs[format('pycvc_cp{0}', matrix.pyver)].
@@ -222,7 +224,7 @@ jobs:
           }
           emit libcvc         libcvc
           emit cvcgl          cvcgl
-          emit cvcgl-examples cvcgl_examples
+          emit libcvc-examples libcvc_examples
           emit ari            ari
           emit pycvc-cp311    pycvc_cp311
           emit pycvc-cp312    pycvc_cp312
@@ -237,60 +239,84 @@ jobs:
           emit pycvc-cp311-cuda    pycvc_cuda
           emit pycvc-gl-cp311-cuda pycvc_gl_cuda
 
-  # Is there an ONLINE self-hosted runner for each CUDA lane?
+  # Can each CUDA lane actually take a job?
   #
-  # A job whose labels match a registered-but-offline runner does not fail — it
+  # A job whose labels match a runner that never takes it does not fail. It
   # QUEUES, and `timeout-minutes` cannot save it because that clock only starts
-  # once a job is running. The run then never reaches a terminal state, and
-  # `concurrency.cancel-in-progress: false` makes the next same-ref run stack up
-  # behind it. That is exactly how the retired macos-13 lane stranded runs for
-  # 19+ hours, and now that a `v*` tag requests the CUDA runners automatically,
-  # a release tagged while sandipaws (which roams) is offline would do the same.
+  # once a job is running. GitHub cancels it after 24 h; until then the run
+  # never reaches a terminal state, `gh run rerun --failed` is refused, and
+  # `concurrency.cancel-in-progress: false` stacks the next same-ref run behind
+  # it. That is how the retired macos-13 lane stranded runs for 19+ hours.
   #
-  # So: ask first, and skip the lane rather than hang the release.
+  # Two ways a CUDA runner takes no job:
+  #   * it is offline (sandipaws roams);
+  #   * it shows ONLINE and idle, but GitHub sends it nothing. GitHub stops
+  #     queueing jobs to a runner more than 30 days behind on runner updates,
+  #     and the runners API does not report versions. sandipaws-libcvc-cuda
+  #     sat like that from about 2026-10-02 to 2026-10-20 (its self-update kept
+  #     failing). The Windows lanes of v3.5.0, v3.5.1 and v3.6.0 each sat queued
+  #     until cancelled, up to 24 h.
   #
-  # Listing runners needs administration:read, which GITHUB_TOKEN does not
-  # normally carry. The check therefore FAILS OPEN — if the API call is refused
-  # it reports both lanes available and behaviour is exactly as before, never
-  # worse. Set CVCPKG_RUNNER_PAT (a PAT with repo admin read) to make it
-  # effective.
+  # .github/scripts/cuda-lane.sh `probe` checks for both and skips the lane
+  # rather than hang the release:
+  #   * Offline: needs CVCPKG_RUNNER_PAT (a token with administration:read on
+  #     this repo), because GITHUB_TOKEN cannot list runners. Without it this
+  #     check FAILS OPEN and the lane counts as available, as before.
+  #   * Online but taking nothing: a lane job in another run has waited
+  #     STALE_MINUTES while no job runs on that lane. This needs only
+  #     GITHUB_TOKEN. It cannot catch the FIRST run after a runner wedges; the
+  #     cuda-lane-watchdog job below covers that one.
   check-cuda-runners:
     runs-on: ubuntu-latest
     outputs:
       linux: ${{ steps.probe.outputs.linux }}
       windows: ${{ steps.probe.outputs.windows }}
     steps:
+      - uses: actions/checkout@v5
+        with:
+          sparse-checkout: .github/scripts
       - name: Probe self-hosted CUDA runners
         id: probe
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.CVCPKG_RUNNER_PAT || secrets.GITHUB_TOKEN }}
-        run: |
-          set -uo pipefail
-          if ! runners="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runners" --paginate 2>/dev/null)"; then
-            echo "::warning::Cannot list self-hosted runners (needs administration:read; set CVCPKG_RUNNER_PAT). Assuming both CUDA lanes are available."
-            echo "linux=true"   >> "$GITHUB_OUTPUT"
-            echo "windows=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          probe() {  # $1 = os label
-            jq -r --arg os "$1" '
-              [ .runners[]
-                | select(.status == "online")
-                | select([.labels[].name] | index("cuda"))
-                | select([.labels[].name | ascii_downcase] | index($os))
-              ] | length' <<<"$runners"
-          }
-          for os in linux windows; do
-            n="$(probe "$os")"
-            if [ "${n:-0}" -gt 0 ]; then
-              echo "$os: $n online cuda runner(s)"
-              echo "$os=true" >> "$GITHUB_OUTPUT"
-            else
-              echo "::warning::No ONLINE self-hosted [$os, cuda] runner — skipping that CUDA lane instead of queueing on it."
-              echo "$os=false" >> "$GITHUB_OUTPUT"
-            fi
-          done
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUNNERS_TOKEN: ${{ secrets.CVCPKG_RUNNER_PAT }}
+          STALE_MINUTES: '60'
+        run: .github/scripts/cuda-lane.sh probe
+
+  # Ends a run whose CUDA lane job never got a runner, instead of leaving it
+  # open until GitHub cancels the job at 24 h.
+  #
+  # Exits as soon as every CUDA job of this run has a runner (usually within
+  # minutes). If one waits STALE_MINUTES while no job runs on that lane, it
+  # warns, waits for the rest of the run to finish, then cancels the run, so
+  # `gh run rerun --failed` is possible right away. A normal Windows CUDA build
+  # takes about 30 min, so 60 min of queueing with nothing running on the lane
+  # means the runner is not taking jobs. If the rest of the run outlasts this
+  # job's timeout (the hosted macOS queue can), the run still waits out the
+  # 24 h, but this job's warning says why.
+  cuda-lane-watchdog:
+    needs: [check-cuda-runners]
+    if: ${{ (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_cuda == 'true')) && (needs.check-cuda-runners.outputs.linux == 'true' || needs.check-cuda-runners.outputs.windows == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          sparse-checkout: .github/scripts
+      - name: Wait for the CUDA lanes to get a runner
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUNNERS_TOKEN: ${{ secrets.CVCPKG_RUNNER_PAT }}
+          STALE_MINUTES: '60'
+          LINUX: ${{ needs.check-cuda-runners.outputs.linux }}
+          WINDOWS: ${{ needs.check-cuda-runners.outputs.windows }}
+          WATCHDOG_JOB: ${{ github.job }}
+        run: .github/scripts/cuda-lane.sh watch
 
   build:
     needs: [ensure-org, compute-revisions]
@@ -476,7 +502,8 @@ jobs:
             -DCVC_BUILD_VOLROVER3=OFF \
             -DCVC_ENABLE_MESHER=ON \
             -DCVC_ENABLE_SDF=ON \
-            -DCVC_USING_XMLRPC=ON
+            -DCVC_USING_XMLRPC=ON \
+            | tee configure.log
 
       - name: Configure (Windows)
         if: matrix.target.platform == 'windows'
@@ -509,7 +536,27 @@ jobs:
             -DCVC_BUILD_VOLROVER3=OFF `
             -DCVC_ENABLE_MESHER=ON `
             -DCVC_ENABLE_SDF=ON `
-            -DCVC_USING_XMLRPC=ON
+            -DCVC_USING_XMLRPC=ON `
+            | Tee-Object -FilePath configure.log
+
+      - name: Assert the Ariadne terminal backends are configured
+        # The .ari loader (yaml-cpp), the FTXUI terminal backend and its tvision desktop are
+        # optional at configure time: a missing dep turns each into a stub, and the bundle still
+        # builds, packs and publishes. That is how every macOS and Windows libcvc through 3.6.0
+        # shipped without a terminal backend: the recipe scoped ftxui to linux. The recipe now
+        # declares yaml-cpp, ftxui and tvision on every platform this job builds, so fail here,
+        # before the long build, instead of shipping a stub (as ci.yml's ari-wasm job does).
+        shell: bash
+        run: |
+          set -euo pipefail
+          for want in "Ariadne: .ari YAML loader ENABLED" \
+                      "Ariadne: FTXUI terminal backend ENABLED" \
+                      "Ariadne: tvision terminal backend ENABLED"; do
+            grep -qF "$want" configure.log || {
+              echo "::error::the ${{ matrix.target.platform }} configure did not print '$want': libcvc would ship a stub"
+              exit 1
+            }
+          done
 
       - name: Build & install
         id: build-libcvc
@@ -698,7 +745,7 @@ jobs:
           # cvcgl links the installed libcvc SDK ($STAGE) + VTK (from $PY).
           # Dear ImGui powers the cvcGL overlay (cvc::gl::ImGuiOverlay). Build the
           # SDK WITH it so CVC_ENABLE_IMGUI is on and the overlay actually renders
-          # for downstream GUI consumers (e.g. cvcgl-examples). Safe:
+          # for downstream GUI consumers (e.g. libcvc-examples). Safe:
           # cvcGL's imgui export is the imgui::imgui target name (relocatable, not
           # this builder's abs path), re-resolved from the CONSUMER's prefix by
           # cvcGLConfig.cmake, so no path leaks into cvcGLTargets.cmake. Built into
@@ -765,11 +812,12 @@ jobs:
             echo "dry-run: skipping cvcgl publish"
           fi
 
-      - name: Build, pack & publish cvcgl-examples [Linux]
-        # The example COMMANDS (lsystem_forest + the nav demos + the
-        # cvcgl-examples-web launcher), packaged apart from the cvcgl SDK the
-        # same way cvc-cli is packaged apart from libcvc.  Nothing else links
-        # them, so unlike cvcgl this runs only in the pyver-311 column.
+      - name: Build, pack & publish libcvc-examples [Linux]
+        # The example COMMANDS (examples/: the cvcGL scene demos, the nav demos,
+        # the .ari documents and the libcvc-examples-web launcher), packaged
+        # apart from the cvcgl SDK the same way cvc-cli is packaged apart from
+        # libcvc.  Nothing else links them, so unlike cvcgl this runs only in
+        # the pyver-311 column.  It replaces cvcgl-examples.
         #
         # This invokes the recipe's own build.sh rather than repeating its
         # cmake here: the recipe is what the remote builders run, and the two
@@ -784,10 +832,8 @@ jobs:
         # installs libcvc from THIS tree into $STAGE first -- publishing the
         # examples from anywhere else requires a libcvc republish beforehand.
         #
-        # TODO: the recipe also has a `platform: wasm` entry (the browser build
-        # under share/cvcgl-examples/web/).  Publishing it needs emsdk + the
-        # wasm dep closure + a rendering-enabled wasm vtk on the catalog, so it
-        # is deliberately not wired up here yet.
+        # The browser build of the same programs is its own recipe,
+        # libcvc-examples-web, which publish-cvcgl-wasm.yml builds and publishes.
         if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'linux' && matrix.config == 'release' && matrix.pyver == '311' }}
         shell: bash
         env:
@@ -810,39 +856,47 @@ jobs:
           IMGUI="$GITHUB_WORKSPACE/prefix-imgui"
           cvcpkg install imgui --prefix "$IMGUI"
           export CVC_SOURCE_DIR="$GITHUB_WORKSPACE"
-          export CVC_BUILD_DIR="$GITHUB_WORKSPACE/build-cvcgl-examples"
-          export CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-cvcgl-examples"
+          export CVC_BUILD_DIR="$GITHUB_WORKSPACE/build-libcvc-examples"
+          export CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-libcvc-examples"
           export CVC_DEPS_PREFIX="$STAGE;$PY;$IMGUI;$DEPS"
           export CVC_BUILD_TYPE=Release
           export CVC_JOBS="$(nproc)"
-          bash cvcpkg/recipes/cvcgl-examples/build.sh
+          bash cvcpkg/recipes/libcvc-examples/build.sh
+          # Every program the recipe lists, and the documents arigl and ari run.
+          for b in lsystem_forest lsystem_coast terrain_lab bunny_shadow volren_bunny \
+                   volslice_bunny nav_city_swarm nav_city_drive nav_fog_ghost nav_finale \
+                   nav_swarm_demo nav_train_demo nav_material_demo libcvc-examples-web; do
+            test -x "stage-libcvc-examples/bin/$b" \
+              || { echo "::error::libcvc-examples did not install bin/$b"; exit 1; }
+          done
+          test -f stage-libcvc-examples/share/libcvc-examples/ariadne/documents/hello.ari
+          test -f stage-libcvc-examples/share/libcvc-examples/ariadne/terminal/terminal_tour.ari
           mkdir -p dist
-          cvcpkg pack cvcpkg/recipes/cvcgl-examples \
-            --from-prefix stage-cvcgl-examples \
+          cvcpkg pack cvcpkg/recipes/libcvc-examples \
+            --from-prefix stage-libcvc-examples \
             --platform "${{ matrix.target.platform }}" \
             --config release --link shared --local \
-            --cvc-revision ${{ needs.compute-revisions.outputs.cvcgl_examples }} \
+            --cvc-revision ${{ needs.compute-revisions.outputs.libcvc_examples }} \
             --output-dir dist
           if [ "$DO_PUBLISH" = "1" ]; then
             if [ -z "${CVCPKG_TOKEN:-}" ]; then
               echo "CVCPKG_TOKEN secret is required to publish"; exit 1
             fi
-            cvcpkg publish cvcgl-examples \
+            cvcpkg publish libcvc-examples \
               --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
               --platform "${{ matrix.target.platform }}" \
               --config release --link shared --output-dir dist \
               --token "$CVCPKG_TOKEN"
           else
-            echo "dry-run: skipping cvcgl-examples publish"
+            echo "dry-run: skipping libcvc-examples publish"
           fi
 
       - name: Build, pack & publish ari [Linux]
         # The `ari` terminal runner (src/ari), packaged apart from the libcvc SDK the
-        # way cvc-cli is.  Like cvcgl-examples it runs the recipe's own build.sh
+        # way cvc-cli is.  Like libcvc-examples it runs the recipe's own build.sh
         # against the libcvc just installed into $STAGE, so the published ari always
         # matches the libcvc built from this tree (its FTXUI backend and .ari loader
-        # live in libcvc).  Linux only: the recipe's matrix is linux-only until
-        # libcvc's ftxui dependency is published for the other platforms.
+        # live in libcvc).  The macOS and Windows twins are at the end of this job.
         if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'linux' && matrix.config == 'release' && matrix.pyver == '311' }}
         shell: bash
         env:
@@ -861,6 +915,10 @@ jobs:
           export CVC_JOBS="$(nproc)"
           bash cvcpkg/recipes/ari/build.sh
           test -x stage-ari/bin/ari
+          # The binary that ships must render a document: the real backend and loader, not stubs.
+          LD_LIBRARY_PATH="$STAGE/lib:$DEPS/lib" stage-ari/bin/ari snapshot --width 100 --height 24 \
+            examples/ariadne/terminal/terminal_tour.ari | tee ari-snapshot.txt
+          grep -qF "agents: 64" ari-snapshot.txt
           mkdir -p dist
           cvcpkg pack cvcpkg/recipes/ari \
             --from-prefix stage-ari \
@@ -1164,6 +1222,113 @@ jobs:
             cvcpkg publish pycvc-gl-cp311 --server "$env:CVCPKG_SERVER" --org "$env:CVCPKG_ORG" --platform windows --config release --link shared --output-dir dist --token "$env:CVCPKG_TOKEN"
           } else {
             Write-Host 'dry-run: skipping pycvc-cp311/pycvc-gl-cp311 publish'
+          }
+
+      # ── ari on macOS and Windows ──
+      # The twins of "Build, pack & publish ari [Linux]": the recipe's own build script against the
+      # libcvc just installed into $STAGE. Last in the job because they take cmake and ninja from
+      # cvcpkg, which this action puts first on PATH for every later step.
+      - name: Install build tools (cvcpkg) for ari
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform != 'linux' && matrix.config == 'release' && matrix.pyver == '311' }}
+        uses: ./.github/actions/cvcpkg-build-tools
+        with:
+          tools: cmake ninja
+
+      - name: Build, pack & publish ari [macOS]
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'macos' && matrix.config == 'release' && matrix.pyver == '311' }}
+        shell: bash
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+          DO_PUBLISH: ${{ (github.event_name == 'push' || github.event.inputs.dry_run == 'false') && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          STAGE="$GITHUB_WORKSPACE/stage"
+          DEPS="${{ steps.libcvc-deps.outputs.path }}"
+          if [ -z "$DEPS" ]; then DEPS="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"; fi
+          export CVC_SOURCE_DIR="$GITHUB_WORKSPACE"
+          export CVC_BUILD_DIR="$GITHUB_WORKSPACE/build-ari"
+          export CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-ari"
+          export CVC_DEPS_PREFIX="$STAGE;$DEPS"
+          export CVC_BUILD_TYPE=Release
+          export CVC_JOBS="$(sysctl -n hw.ncpu)"
+          bash cvcpkg/recipes/ari/build.sh
+          test -x stage-ari/bin/ari
+          # The binary that ships must render a document: the real backend and loader, not stubs.
+          # Its rpath is @loader_path/../lib, the flat prefix it is installed into, so point dyld at
+          # the two prefixes it is split across here.
+          DYLD_LIBRARY_PATH="$STAGE/lib:$DEPS/lib" stage-ari/bin/ari snapshot --width 100 --height 24 \
+            examples/ariadne/terminal/terminal_tour.ari | tee ari-snapshot.txt
+          grep -qF "agents: 64" ari-snapshot.txt
+          mkdir -p dist
+          cvcpkg pack cvcpkg/recipes/ari \
+            --from-prefix stage-ari \
+            --platform macos \
+            --config release --link shared --local \
+            --cvc-revision ${{ needs.compute-revisions.outputs.ari }} \
+            --output-dir dist
+          if [ "$DO_PUBLISH" = "1" ]; then
+            if [ -z "${CVCPKG_TOKEN:-}" ]; then
+              echo "CVCPKG_TOKEN secret is required to publish"; exit 1
+            fi
+            cvcpkg publish ari \
+              --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
+              --platform macos \
+              --config release --link shared --output-dir dist \
+              --token "$CVCPKG_TOKEN"
+          else
+            echo "dry-run: skipping ari publish"
+          fi
+
+      - name: Build, pack & publish ari [Windows]
+        # build.ps1 builds with cl and Ninja through _common/env-windows.ps1, which imports the
+        # MSVC developer environment itself.
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'windows' && matrix.config == 'release' && matrix.pyver == '311' }}
+        shell: pwsh
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $depsPath = '${{ steps.libcvc-deps.outputs.path }}'
+          if (-not $depsPath) {
+            $depsPath = if ($env:LIBCVC_DEPS_PREFIX) { $env:LIBCVC_DEPS_PREFIX } else { 'D:\libcvc-deps' }
+          }
+          $stage = "$env:GITHUB_WORKSPACE/stage"
+          $env:CVC_SOURCE_DIR = "$env:GITHUB_WORKSPACE"
+          $env:CVC_BUILD_DIR = "$env:GITHUB_WORKSPACE/build-ari"
+          $env:CVC_INSTALL_DIR = "$env:GITHUB_WORKSPACE/stage-ari"
+          $env:CVC_DEPS_PREFIX = "$stage;$depsPath"
+          $env:CVC_BUILD_TYPE = 'Release'
+          $env:CVC_LINK = 'shared'
+          & ./cvcpkg/recipes/ari/build.ps1
+          if (-not (Test-Path 'stage-ari/bin/ari.exe')) { throw 'ari build installed no bin/ari.exe' }
+          # The binary that ships must render a document: the real backend and loader, not stubs.
+          # cvc.dll and every dependency DLL sit in the two prefixes' bin/ directories.
+          $savedPath = $env:PATH
+          $env:PATH = "$stage\bin;$depsPath\bin;$env:PATH"
+          & ./stage-ari/bin/ari.exe snapshot --width 100 --height 24 examples/ariadne/terminal/terminal_tour.ari |
+            Tee-Object -FilePath ari-snapshot.txt
+          if ($LASTEXITCODE -ne 0) { throw "ari snapshot failed ($LASTEXITCODE)" }
+          $env:PATH = $savedPath
+          if (-not (Select-String -Path ari-snapshot.txt -SimpleMatch 'agents: 64' -Quiet)) {
+            throw 'the ari snapshot is missing the tour (agents: 64)'
+          }
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          cvcpkg pack cvcpkg/recipes/ari `
+            --from-prefix stage-ari `
+            --platform windows --config release --link shared --local `
+            --cvc-revision ${{ needs.compute-revisions.outputs.ari }} `
+            --output-dir dist
+          if ($LASTEXITCODE -ne 0) { throw "ari pack failed ($LASTEXITCODE)" }
+          $doPublish = ($env:GITHUB_EVENT_NAME -eq 'push') -or ('${{ github.event.inputs.dry_run }}' -eq 'false')
+          if ($doPublish) {
+            if (-not $env:CVCPKG_TOKEN) { throw 'CVCPKG_TOKEN secret is required to publish' }
+            cvcpkg publish ari `
+              --server "$env:CVCPKG_SERVER" --org "$env:CVCPKG_ORG" `
+              --platform windows --config release --link shared --output-dir dist `
+              --token "$env:CVCPKG_TOKEN"
+            if ($LASTEXITCODE -ne 0) { throw "ari publish failed ($LASTEXITCODE)" }
+          } else {
+            Write-Host 'dry-run: skipping ari publish'
           }
 
   # ── Linux libcvc-cuda (GPU variant) ──────────────────────────────────────
@@ -1688,9 +1853,10 @@ jobs:
       #      "Remove registry entries for Python 3.12(x64)...
       #       ##[error]Remove-Item : Requested registry access is not allowed."
       #   3. Searching for an existing interpreter found only the MSYS2 one.
-      #      The runner service is LocalSystem, so $env:LOCALAPPDATA is the
-      #      SYSTEM profile: per-user installs, and the user PATH they extend,
-      #      are structurally invisible here. No amount of probing fixes that.
+      #      The runner service runs as NETWORK SERVICE (the runner's default),
+      #      so $env:LOCALAPPDATA is that service's profile: per-user installs,
+      #      and the user PATH they extend, are structurally invisible here. No
+      #      amount of probing fixes that.
       #
       # Hence: look for a usable interpreter, and if there is none, unpack
       # python.org's embeddable zip — no installer, no registry, no admin.
@@ -1965,7 +2131,12 @@ jobs:
           # CVC_USING_XMLRPC: parity with the CPU lane -- libcvc-cuda packs
           # include/xmlrpc/ too, so without it the bundle shipped xmlrpc headers for a
           # library it did not contain.
+          # CVC_MSVC_MP=4: compile up to 4 sources at once (CMake/CvcMsvcParallelCompile.cmake).
+          # Serial, the `cvc` target took 50 min here for v3.7.0. The cap, rather than one
+          # process per CPU (20 on sandipaws), is for memory: the box has 16 GB and also runs
+          # the cvcpkg.org Windows builder (about 4 GB was free when checked on 2026-10-20).
           cmake -B build -G "Visual Studio 17 2022" -A x64 `
+            -DCVC_MSVC_MP=4 `
             -T "cuda=$env:CUDA_PATH" `
             -DCMAKE_BUILD_TYPE="$env:CMAKE_CFG" `
             -DCMAKE_CONFIGURATION_TYPES="$env:CMAKE_CFG" `

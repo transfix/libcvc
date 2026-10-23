@@ -1,0 +1,150 @@
+name: ariadne-conference-windows
+
+# Build the Ariadne conference CLIENT (ariadne_conference) + RELAY (arisrv) on Windows.
+#
+# These are not part of the normal CI matrix: the conference example (examples/ariadne/hosts) lives
+# behind CVC_BUILD_EXAMPLES (OFF by default), and this turns gRPC ON on Windows (proven to build in #643 — package-windows /
+# libcvc-release-grpc is green). It mirrors ci.yml's package-windows dep provisioning (cvcpkg is the
+# sole third-party source: Boost/HDF5/VTK/SDL3/imgui/libjpeg-turbo + grpc/protobuf), then builds just
+# the two conference targets (not every example) and uploads them. Manual trigger — run it with
+#   gh workflow run ariadne-conference-windows.yml --ref <branch>   (once this lands on the default
+# branch; until then it is driven by the scoped push trigger below — editing this file or the two
+# conference entry-point sources on the feature branch kicks off a build).
+on:
+  workflow_dispatch:
+  push:
+    branches: [feat/ariadne-conference-server]
+    # The conference source surface: cvcGL + the ariadne stream/conference layer + the server tool +
+    # the state transports (the future wasm WebSocket transport). Core cvc already builds on Windows
+    # in ci.yml's package-windows, so a change there is lower-risk and does not re-trigger this.
+    paths:
+      - '.github/workflows/ariadne-conference-windows.yml'
+      - 'src/cvcGL/**'
+      - 'examples/ariadne/**'
+      - 'inc/cvc/gl/**'
+      - 'src/cvc/ariadne/**'
+      - 'inc/cvc/ariadne/**'
+      - 'src/arisrv/**'
+      - 'src/cvc/state/state_transport**'
+      - 'src/cvc/state/state_stream_transport**'
+      - 'inc/cvc/state/state_transport**'
+      - 'inc/cvc/state/state_stream_transport**'
+
+# While iterating, a newer push cancels the running build (each is ~25 min).
+concurrency:
+  group: conf-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  conference-windows:
+    # windows-2022 (VS2022 v143) pinned for the same reason as package-windows: VS2026's CL.exe ICEs
+    # building libcvc's C++20 TUs.
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # cvcpkg is the sole source of third-party deps (Boost/HDF5/SDL3/imgui/libjpeg-turbo/...).
+      - name: Fetch libcvc-deps (Windows)
+        id: deps
+        uses: ./.github/actions/fetch-libcvc-deps
+        with:
+          build_type: Release
+          link: shared
+
+      # cmake + ninja + pkg-config from cvcpkg; the compiler is the image's VS 2022.
+      - name: Install build tools (cvcpkg)
+        uses: ./.github/actions/cvcpkg-build-tools
+
+      # VTK (cvcGL) + gRPC/protobuf (the cross-node transport the conference needs) + SDL3 (real
+      # camera/mic capture + the input seam — without it cvcGL sets CVC_ENABLE_SDL off and the client
+      # is synthetic-A/V only) into the same prefix, so one CMAKE_PREFIX_PATH covers everything and
+      # one bin\ holds every runtime DLL.
+      - name: Install VTK + gRPC + SDL3 (cvcpkg)
+        id: extradeps
+        shell: pwsh
+        run: |
+          $prefix = '${{ steps.deps.outputs.path }}'
+          if (-not $prefix) {
+            $prefix = if ($env:LIBCVC_DEPS_PREFIX) { $env:LIBCVC_DEPS_PREFIX } else { 'D:\libcvc-deps' }
+          }
+          cvcpkg install vtk --prefix "$prefix" --config release --link shared
+          if ($LASTEXITCODE -ne 0) { throw "cvcpkg install vtk failed ($LASTEXITCODE)" }
+          cvcpkg install grpc protobuf --prefix "$prefix" --config release --link shared
+          if ($LASTEXITCODE -ne 0) { throw "cvcpkg install grpc/protobuf failed ($LASTEXITCODE)" }
+          cvcpkg install sdl3 --prefix "$prefix" --config release --link shared
+          if ($LASTEXITCODE -ne 0) { throw "cvcpkg install sdl3 failed ($LASTEXITCODE)" }
+          "prefix=$prefix" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Configure (cvcGL + gRPC + examples)
+        shell: pwsh
+        run: |
+          $depsPath = '${{ steps.extradeps.outputs.prefix }}'
+          cmake -B build `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_CONFIGURATION_TYPES=Release `
+            -DCMAKE_PREFIX_PATH="$depsPath" `
+            -DCVC_BUILD_TESTS=OFF `
+            -DCVC_BUILD_CLI=OFF `
+            -DCVC_BUILD_CVCGL=ON `
+            -DCVC_BUILD_EXAMPLES=ON `
+            -DCVC_ENABLE_GRPC=ON `
+            -DCVC_ENABLE_CUDA=OFF
+
+      # Build ONLY the two conference targets (not every cvcGL example) so an unrelated example's
+      # Windows portability gap can't block the conference. arisrv is gated on CVC_ENABLE_GRPC (or WS),
+      # ariadne_conference on CVC_BUILD_EXAMPLES + CVC_BUILD_CVCGL.
+      - name: Build ariadne_conference + arisrv
+        shell: pwsh
+        run: |
+          $depsPath = '${{ steps.extradeps.outputs.prefix }}'
+          $env:PATH = (Join-Path $depsPath 'bin') + ';' + $env:PATH
+          cmake --build build --config Release --target ariadne_conference arisrv --parallel
+
+      # Runnable bundle: the exes + EVERY runtime DLL (first-party cvc/cvcGL + all cvcpkg deps:
+      # SDL3, VTK, gRPC/protobuf/abseil, turbojpeg, Boost, ...) flat in one dir, so Windows'
+      # same-directory DLL search resolves them with no launcher. Fat (ships deps the conference
+      # may not touch, e.g. Qt6/HDF5/ImageMagick); a dumpbin-closure slim is a follow-up. Needs the
+      # VC++ 2015-2022 redistributable on the target (noted in the README).
+      - name: Stage runnable bundle (exes + all runtime DLLs)
+        shell: pwsh
+        run: |
+          $depsPath = '${{ steps.extradeps.outputs.prefix }}'
+          $out = Join-Path $PWD 'ariadne-conference-windows'
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          foreach ($d in @('build\bin\Release', 'build\bin')) {
+            if (Test-Path $d) {
+              Copy-Item -Path (Join-Path $d '*.exe') -Destination $out -ErrorAction SilentlyContinue
+              Copy-Item -Path (Join-Path $d '*.dll') -Destination $out -ErrorAction SilentlyContinue
+            }
+          }
+          $depsBin = Join-Path $depsPath 'bin'
+          if (Test-Path $depsBin) {
+            Copy-Item -Path (Join-Path $depsBin '*.dll') -Destination $out -ErrorAction SilentlyContinue
+          }
+          $readme = @(
+            'Ariadne conference (Windows) - client + relay.',
+            '',
+            'Needs the Microsoft Visual C++ 2015-2022 Redistributable (x64):',
+            '  https://aka.ms/vs/17/release/vc_redist.x64.exe',
+            '',
+            'Join a call (camera + mic; peers are discovered from the room roster):',
+            '  ariadne_conference.exe --name YOU --camera --mic --state-peer paladin.sublevels.net:7700 --media-server paladin.sublevels.net:7701',
+            '(default room is "standup"; pass --room NAME to change; omit --camera/--mic for synthetic A/V.)',
+            '',
+            'Run a relay yourself (headless, no GL needed):',
+            '  arisrv.exe --room standup --state-listen 0.0.0.0:7700 --media-listen 0.0.0.0:7701'
+          )
+          Set-Content -Path (Join-Path $out 'README.txt') -Value $readme -Encoding utf8
+          $n = (Get-ChildItem $out).Count
+          $mb = [math]::Round(((Get-ChildItem $out -Recurse | Measure-Object -Property Length -Sum).Sum)/1MB, 1)
+          Write-Host ("bundle: $n files, $mb MB")
+          Get-ChildItem $out | Where-Object { $_.Name -like '*.exe' -or $_.Name -eq 'README.txt' } | Select-Object Name, Length | Format-Table -AutoSize
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ariadne-conference-windows
+          path: ariadne-conference-windows
+          if-no-files-found: error

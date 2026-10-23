@@ -1,0 +1,53 @@
+# grid.ari — golden: grid layouts. A table with fixed and auto columns and every border, one with
+# inner borders in a custom colour, and a resizable row split (a split-pane stack).
+
+meta:
+  name: golden grid
+  min_libcvc: 3.6.0
+
+windows:
+  - window: Table
+    id: table
+    pos: [24, 24]
+    size: [400, 170]
+    layout:
+      kind: grid
+      col_widths: [120, auto]
+      borders: { show: all }
+    children:
+      - text: "name"
+      - text: "value"
+      - text: "agents"
+      - text: "64"
+      - text: "speed"
+      - text: "1.25"
+      - text: "belief"
+      - text: "grouped"
+
+  - window: Inner borders
+    id: inner
+    pos: [24, 224]
+    size: [400, 150]
+    layout:
+      kind: grid
+      col_widths: [100, 100, 100]
+      borders: { show: inner, color: [0.90, 0.30, 0.30] }
+    children:
+      - text: "a1"
+      - text: "b1"
+      - text: "c1"
+      - text: "a2"
+      - text: "b2"
+      - text: "c2"
+
+  - window: Row split
+    id: split
+    pos: [460, 24]
+    size: [320, 300]
+    layout:
+      kind: grid
+      row_heights: [90, auto]
+      resizable: true
+    children:
+      - text: "top pane (90 px)"
+      - text: "bottom pane (the rest)"

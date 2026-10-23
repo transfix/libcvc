@@ -10,6 +10,10 @@ endif()
 if(CVC_BUILD_ARI)
   add_subdirectory(ari)
 endif()
+# The conference relay needs a transport (gRPC for native clients, WebSocket for browser clients).
+if(CVC_BUILD_ARISRV AND (CVC_ENABLE_GRPC OR CVC_ENABLE_WS))
+  add_subdirectory(arisrv)
+endif()
 
 if(CVC_USING_XMLRPC)
   add_subdirectory(xmlrpc)

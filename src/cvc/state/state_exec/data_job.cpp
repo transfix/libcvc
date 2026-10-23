@@ -593,7 +593,15 @@ bool generator_walk::step(std::size_t nodes) {
       eval_deadline_check("generator");
       {
         detail::native_nesting level("generator"); // its own evaluator, on this stack
-        g.evaluator.step(g.state);
+        try {
+          g.evaluator.step(g.state);
+        } catch (...) {
+          if (g.state.uncaught) { // the body raised: the generator is over
+            g.exhausted = true;
+            advancing_ = false;
+          }
+          throw;
+        }
       }
       ++nodes_;
     }

@@ -19,11 +19,21 @@ namespace cvc {
 class app;
 namespace ariadne {
 
-struct Scene; // the parsed scene (scene.h)
+struct Scene;      // the parsed scene (scene.h)
+struct LoadResult; // the loaded document (loader.h)
 
 class SceneAdapter {
 public:
   virtual ~SceneAdapter() = default;
+
+  // Check the document's declared scene-node customs (its customs: block) before realize(). False
+  // = a REQUIRED one is not registered here, so AppRuntime::load skips the scene. Messages are
+  // appended to `errors` if non-null. The default has nothing to check.
+  virtual bool verify(const LoadResult &loaded, std::vector<std::string> *errors) {
+    (void)loaded;
+    (void)errors;
+    return true;
+  }
 
   // Realize the parsed `scene` under state `prefix` (and frame the view's camera to it,
   // when the adapter has one). Non-fatal messages are appended to `warns` if non-null.

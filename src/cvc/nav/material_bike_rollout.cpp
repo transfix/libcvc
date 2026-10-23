@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cvc/nav/detail/dyn_bike.h>
+#include <cvc/nav/detail/material_ext.h>
 #include <cvc/nav/detail/material_rollout.h>
 #include <cvc/nav/detail/parallel.h>
 #include <cvc/nav/material.h>
@@ -74,14 +75,17 @@ struct state {
 // Everything one forward step computed, for the reverse.
 struct rec {
   bool active;
+  // The external force the caller hands the step (material_ext), and whether it steers.
+  bool ext = false, ext_steer = false;
+  float Fex = 0.0f, Fey = 0.0f;
   float ch, sh;
   // patch samples at off = o - o0
   float offx, offy, risk_raw, sdf_raw, risk, sdf, grx, gry, gpx, gpy, db;
   // geometry (sums over discs), the governor's clearance and normal
   float Fgx, Fgy, Frx, Fry, d, ngx, ngy;
   int jmin;
-  // forces
-  float Fmx, Fmy, Fx, Fy;
+  // forces; (Fcx, Fcy) is the conservative part, before F_ext
+  float Fmx, Fmy, Fx, Fy, Fcx, Fcy;
   // longitudinal command before the governors
   float a0;
   int a0_side;
@@ -203,6 +207,12 @@ state step_fwd(const agent &a, const state &st, rec &r, float &dmin_out, int &jm
   r.Fy = r.Fgy + Fgoal_y;
   r.Fx = r.Fx + r.Fmx;
   r.Fy = r.Fy + r.Fmy;
+  r.Fcx = r.Fx;
+  r.Fcy = r.Fy;
+  if (r.ext) { // drive.cpp adds ext_force last
+    r.Fx = r.Fx + r.Fex;
+    r.Fy = r.Fy + r.Fey;
+  }
 
   r.a0 = ((r.Fx * ch + r.Fy * sh) - a.ga * spi) / a.mass;
   r.a0c = clamp3(r.a0, -a.a_max, a.a_max, r.a0_side);
@@ -225,8 +235,14 @@ state step_fwd(const agent &a, const state &st, rec &r, float &dmin_out, int &jm
   r.pick_cap = r.Ldeff_cap < L_d; // std::min(L_d, cap)
   r.Ldeff = r.pick_cap ? r.Ldeff_cap : L_d;
   r.delta0 = r.behind ? turn_sign * a.dmax : std::atan2(2.0f * a.L * r.sa, r.Ldeff);
-  // Steering bias from the repulsive barrier and the material forces.
-  r.S = (r.Frx + r.Fmx) * (-sh) + (r.Fry + r.Fmy) * ch;
+  // Steering bias from the repulsive barrier and the material forces (and a steering
+  // external force).
+  float bsx = r.Frx + r.Fmx, bsy = r.Fry + r.Fmy;
+  if (r.ext_steer) {
+    bsx = bsx + r.Fex;
+    bsy = bsy + r.Fey;
+  }
+  r.S = bsx * (-sh) + bsy * ch;
   r.tS = std::tanh(r.S);
   r.delta1 = r.delta0 + a.k_steer * r.tS;
   r.delta2 = clamp3(r.delta1, -a.dmax, a.dmax, r.delta2_side);
@@ -330,9 +346,13 @@ state step_fwd(const agent &a, const state &st, rec &r, float &dmin_out, int &jm
 // as (g_dc, g_ac) on (delta4, a3), and the arc-length seed is the caller's (r.disp is
 // then the other plant's step). The kinematic default adds 0 to a3's adjoint, so its
 // sums are unchanged.
+//
+// With an external force (r.ext), g_ext[2] receives dL/dF_ext; its position chain is the
+// caller's (detail::ext_reverse).
 void step_bwd(const agent &a, const state &st, const rec &r, float garc, float gcum, float &aox,
               float &aoy, float &ath, float &asp, float *gal, float &gbe, float &gga, float &gls,
-              float &glh, bool kin_plant = true, float g_dc = 0.0f, float g_ac = 0.0f) {
+              float &glh, bool kin_plant = true, float g_dc = 0.0f, float g_ac = 0.0f,
+              float *g_ext = nullptr) {
   if (!r.active)
     return;
   const float ox = st.ox, oy = st.oy, spi = st.sp;
@@ -465,11 +485,16 @@ void step_bwd(const agent &a, const state &st, const rec &r, float garc, float g
   const float Adelta1 = r.delta2_side == 0 ? Adelta2 : 0.0f;
   const float Adelta0 = Adelta1;
   const float AS = Adelta1 * a.k_steer * (1.0f - r.tS * r.tS);
-  // S = (Fr + Fm) . left, left = (-sh, ch)
+  // S = (Fr + Fm [+ F_ext]) . left, left = (-sh, ch)
   const float AFrx = AS * (-sh), AFry = AS * ch;
   float AFmx = AS * (-sh), AFmy = AS * ch;
-  Ash += -AS * (r.Frx + r.Fmx);
-  Ach += AS * (r.Fry + r.Fmy);
+  float bsx = r.Frx + r.Fmx, bsy = r.Fry + r.Fmy;
+  if (r.ext_steer) {
+    bsx = bsx + r.Fex;
+    bsy = bsy + r.Fey;
+  }
+  Ash += -AS * bsx;
+  Ach += AS * bsy;
   // delta0 = atan2(2 L sin(ang), Ldeff) unless behind (then a constant)
   if (!r.behind) {
     const float y = 2.0f * a.L * r.sa, x = r.Ldeff, den = x * x + y * y;
@@ -495,11 +520,19 @@ void step_bwd(const agent &a, const state &st, const rec &r, float garc, float g
     }
   }
 
-  // F = Fg + Fgoal + Fm
+  // F = Fg + Fgoal + Fm [+ F_ext]
   AFgx += AFx;
   AFgy += AFy;
   AFmx += AFx;
   AFmy += AFy;
+  if (r.ext && g_ext) {
+    g_ext[0] = AFx;
+    g_ext[1] = AFy;
+    if (r.ext_steer) {
+      g_ext[0] += AS * (-sh);
+      g_ext[1] += AS * ch;
+    }
+  }
   // Fgoal = -beta * (o - g)
   gbe += -(AFx * (ox - a.gx) + AFy * (oy - a.gy));
   Aox += -a.be * AFx;
@@ -601,7 +634,7 @@ diff::dyn_state<float> step_fwd_dyn(const agent &a, const diff::dyn_bike_params 
 void step_bwd_dyn(const agent &a, const diff::dyn_bike_params &dyn,
                   const diff::dyn_state<float> &ds, const rec &r, float garc, float gcum,
                   diff::dyn_state<float> &g, float *gal, float &gbe, float &gga, float &gls,
-                  float &glh) {
+                  float &glh, float *g_ext = nullptr) {
   if (!r.active)
     return;
   // arc += disp, cum += risk * disp, disp = |o1 - o|: the displacement's share.
@@ -617,7 +650,8 @@ void step_bwd_dyn(const agent &a, const diff::dyn_bike_params &dyn,
   // The controller, fed the plant's command gradients.
   float cox = 0.0f, coy = 0.0f, cth = 0.0f, csp = 0.0f;
   const state st{ds.x, ds.y, ds.psi, ds.vx};
-  step_bwd(a, st, r, garc, gcum, cox, coy, cth, csp, gal, gbe, gga, gls, glh, false, g_dc, g_ac);
+  step_bwd(a, st, r, garc, gcum, cox, coy, cth, csp, gal, gbe, gga, gls, glh, false, g_dc, g_ac,
+           g_ext);
   g_in.x += cox;
   g_in.y += coy;
   g_in.psi += cth;
@@ -671,11 +705,69 @@ agent make_agent(int b, const float *o0, const float *goal, const float *C, cons
   return a;
 }
 
+// Hand step s its external force (at an active step): the channel's F at the pose (ox, oy),
+// recording F, J and the step it was sampled at into F2/J4/at when given (a VJP's recompute).
+void put_ext(const material_ext *ext, detail::ext_agent &ea, int s, float ox, float oy, rec &r,
+             float *F2 = nullptr, float *J4 = nullptr, int *at = nullptr) {
+  if (!ext || !r.active)
+    return;
+  float F[2], J[4];
+  int sat;
+  ea.at(s, ox, oy, F, J, sat);
+  r.ext = true;
+  r.ext_steer = ext->steer != 0;
+  r.Fex = F[0];
+  r.Fey = F[1];
+  if (F2) {
+    F2[0] = F[0];
+    F2[1] = F[1];
+    for (int k = 0; k < 4; ++k)
+      J4[k] = J[k];
+    *at = sat;
+  }
+}
+
+// The same from a recompute's record.
+void put_ext_rec(const material_ext *ext, const float *F2, rec &r) {
+  if (!ext || !r.active)
+    return;
+  r.ext = true;
+  r.ext_steer = ext->steer != 0;
+  r.Fex = F2[0];
+  r.Fey = F2[1];
+}
+
 int max_horizon(const int *H, int B) {
   int m = 0;
   for (int b = 0; b < B; ++b)
     m = std::max(m, H[b]);
   return m;
+}
+
+// rollout_energy: U_nav at agent a's pose (ox, oy), row k of agent b.
+void log_potential(const agent &a, rollout_energy &e, int b, int max_H, int k, float ox, float oy) {
+  const potential_terms u = detail::material_potential(
+      ox, oy, a.gx, a.gy, a.Cb, a.Rb, a.mb, a.ab, a.N, a.be, a.ls, a.lh, a.dh, a.rr_eff, a.chan[0],
+      a.chan[1], a.Hp, a.Wp, a.o0x, a.o0y, a.k_sharp, a.d_hat_sdf);
+  const std::size_t row = static_cast<std::size_t>(b) * (max_H + 1) + k;
+  if (e.potential)
+    e.potential[row] = u.total();
+  if (e.terms) {
+    float *t = e.terms + 4 * row;
+    t[0] = u.goal;
+    t[1] = u.barrier;
+    t[2] = u.soft;
+    t[3] = u.hard;
+  }
+}
+
+// rollout_energy: the conservative force step s applied.
+void log_force(const rec &r, rollout_energy &e, int b, int max_H, int s) {
+  if (!e.force)
+    return;
+  float *f = e.force + 2 * (static_cast<std::size_t>(b) * max_H + s);
+  f[0] = r.Fcx;
+  f[1] = r.Fcy;
 }
 
 } // namespace
@@ -696,23 +788,32 @@ void integrate_bicycle_material(float *o, float *th, float *sp, const float *goa
                                 const float *d_hat, const float *dt, const int *H, int B, int N,
                                 int Hp, int Wp, const surrogate_material_params &p,
                                 const bicycle_material_params &v, float *min_clear, float *cum_risk,
-                                float *hard_count, float *arc_length, int num_threads) {
+                                float *hard_count, float *arc_length, int num_threads,
+                                const material_ext *ext, rollout_energy *energy) {
   validate(v);
   const int max_H = max_horizon(H, B);
+  if (ext)
+    detail::validate_ext(*ext, B, max_H, nullptr, "integrate_bicycle_material");
   // The patch is centred on the start, so keep the start before o is overwritten.
   const std::vector<float> o0(o, o + 2 * B);
   detail::parallel_for(B, num_threads, [&](int b) {
     const agent a = make_agent(b, o0.data(), goal, C, R, mask, alphas, beta, gamma, lam_soft,
                                lam_hard, rollout_patch, rr, d_hat, dt, N, Hp, Wp, p, v);
+    detail::ext_agent ea(ext, b, Hp, Wp, a.o0x, a.o0y);
     state st{o[2 * b], o[2 * b + 1], th[b], sp[b]};
     float minclr = std::numeric_limits<float>::infinity();
     float cum = 0.0f, hard = 0.0f, arc = 0.0f;
     for (int s = 0; s < max_H; ++s) {
       rec r;
       r.active = s < H[b];
+      put_ext(ext, ea, s, st.ox, st.oy, r);
+      if (energy)
+        log_potential(a, *energy, b, max_H, s, st.ox, st.oy);
       float dmin;
       int jmin;
       const state next = step_fwd(a, st, r, dmin, jmin);
+      if (energy)
+        log_force(r, *energy, b, max_H, s);
       if (dmin < minclr)
         minclr = dmin; // ungated, as in the surrogate
       const float active = r.active ? 1.0f : 0.0f;
@@ -721,6 +822,8 @@ void integrate_bicycle_material(float *o, float *th, float *sp, const float *goa
       hard += active * (r.sdf < 1.0f ? 1.0f : 0.0f);
       st = next;
     }
+    if (energy)
+      log_potential(a, *energy, b, max_H, max_H, st.ox, st.oy);
     o[2 * b] = st.ox;
     o[2 * b + 1] = st.oy;
     th[b] = st.th;
@@ -740,21 +843,31 @@ void integrate_bicycle_material_vjp(
     int Wp, const surrogate_material_params &p, const bicycle_material_params &v, const float *g_oT,
     const float *g_thT, const float *g_spT, const float *g_min_clear, const float *g_cum_risk,
     const float *g_arc_length, float *g_alphas, float *g_beta, float *g_gamma, float *g_lam_soft,
-    float *g_lam_hard, int num_threads) {
+    float *g_lam_hard, int num_threads, const material_ext *ext, float *g_fext) {
   validate(v);
   const int max_H = max_horizon(H, B);
+  if (ext)
+    detail::validate_ext(*ext, B, max_H, g_fext, "integrate_bicycle_material_vjp");
   detail::parallel_for(B, num_threads, [&](int b) {
     const agent a = make_agent(b, o0, goal, C, R, mask, alphas, beta, gamma, lam_soft, lam_hard,
                                rollout_patch, rr, d_hat, dt, N, Hp, Wp, p, v);
     // Forward recompute, keeping each step's input state and the min_clear argmin
-    // step (the first strictly smaller clearance, as the forward takes it).
+    // step (the first strictly smaller clearance, as the forward takes it), and the
+    // external force each step used (F, J, the step it was sampled at).
     std::vector<state> S(static_cast<size_t>(max_H) + 1);
     S[0] = {o0[2 * b], o0[2 * b + 1], th0[b], sp0[b]};
+    detail::ext_agent ea(ext, b, Hp, Wp, a.o0x, a.o0y);
+    std::vector<float> EF(ext ? 2 * max_H : 0, 0.0f), EJ(ext ? 4 * max_H : 0, 0.0f);
+    std::vector<int> Eat(ext ? max_H : 0, 0);
+    for (int s = 0; ext && s < max_H; ++s)
+      Eat[s] = s;
     float minclr = std::numeric_limits<float>::infinity();
     int s_star = -1;
     for (int s = 0; s < max_H; ++s) {
       rec r;
       r.active = s < H[b];
+      if (ext)
+        put_ext(ext, ea, s, S[s].ox, S[s].oy, r, &EF[2 * s], &EJ[4 * s], &Eat[s]);
       float dmin;
       int jmin;
       S[s + 1] = step_fwd(a, S[s], r, dmin, jmin);
@@ -771,16 +884,29 @@ void integrate_bicycle_material_vjp(
     const float garc = g_arc_length ? g_arc_length[b] : 0.0f;
     float gbe = 0.0f, gga = 0.0f, gls = 0.0f, glh = 0.0f;
     float *gal = g_alphas + static_cast<long>(b) * N;
+    detail::ext_reverse er;
     for (int s = max_H - 1; s >= 0; --s) {
       rec r;
       r.active = s < H[b];
+      if (ext)
+        put_ext_rec(ext, &EF[2 * s], r);
       float dmin;
       int jmin;
       step_fwd(a, S[s], r, dmin, jmin); // rebuild the step record
-      step_bwd(a, S[s], r, garc, gcum, aox, aoy, ath, asp, gal, gbe, gga, gls, glh);
+      float gF[2] = {0.0f, 0.0f};
+      step_bwd(a, S[s], r, garc, gcum, aox, aoy, ath, asp, gal, gbe, gga, gls, glh, true, 0.0f,
+               0.0f, ext ? gF : nullptr);
       if (s == s_star) { // min_clear = d of the nearest disc at o_s
         aox += gmin * r.ngx;
         aoy += gmin * r.ngy;
+      }
+      if (ext) { // dL/dF_ext, and its chain through J into o_s
+        if (g_fext) {
+          const long i = static_cast<long>(b) * ext->steps + s;
+          g_fext[2 * i] += gF[0];
+          g_fext[2 * i + 1] += gF[1];
+        }
+        er.at(s, Eat[s], &EJ[4 * s], gF, aox, aoy);
       }
     }
     g_beta[b] += gbe;
@@ -895,31 +1021,37 @@ diff::dyn_state<float> dyn_state_at(const float *o, const float *th, const float
 }
 } // namespace
 
-void integrate_dynamic_material(float *o, float *th, float *vx, float *x, const float *goal,
-                                const float *C, const float *R, const std::uint8_t *mask,
-                                const float *alphas, const float *beta, const float *gamma,
-                                const float *lam_soft, const float *lam_hard,
-                                const float *rollout_patch, const float *rr, const float *d_hat,
-                                const float *dt, const int *H, int B, int N, int Hp, int Wp,
-                                const surrogate_material_params &p,
-                                const bicycle_material_params &v, const diff::dyn_bike_params &dyn,
-                                float *min_clear, float *cum_risk, float *hard_count,
-                                float *arc_length, int num_threads) {
+void integrate_dynamic_material(
+    float *o, float *th, float *vx, float *x, const float *goal, const float *C, const float *R,
+    const std::uint8_t *mask, const float *alphas, const float *beta, const float *gamma,
+    const float *lam_soft, const float *lam_hard, const float *rollout_patch, const float *rr,
+    const float *d_hat, const float *dt, const int *H, int B, int N, int Hp, int Wp,
+    const surrogate_material_params &p, const bicycle_material_params &v,
+    const diff::dyn_bike_params &dyn, float *min_clear, float *cum_risk, float *hard_count,
+    float *arc_length, int num_threads, const material_ext *ext, rollout_energy *energy) {
   validate_dyn(v, dyn);
   const int max_H = max_horizon(H, B);
+  if (ext)
+    detail::validate_ext(*ext, B, max_H, nullptr, "integrate_dynamic_material");
   const std::vector<float> o0(o, o + 2 * B); // the patch is centred on the start
   detail::parallel_for(B, num_threads, [&](int b) {
     const agent a = make_agent(b, o0.data(), goal, C, R, mask, alphas, beta, gamma, lam_soft,
                                lam_hard, rollout_patch, rr, d_hat, dt, N, Hp, Wp, p, v);
+    detail::ext_agent ea(ext, b, Hp, Wp, a.o0x, a.o0y);
     diff::dyn_state<float> st = dyn_state_at(o, th, vx, x, b);
     float minclr = std::numeric_limits<float>::infinity();
     float cum = 0.0f, hard = 0.0f, arc = 0.0f;
     for (int s = 0; s < max_H; ++s) {
       rec r;
       r.active = s < H[b];
+      put_ext(ext, ea, s, st.x, st.y, r);
+      if (energy)
+        log_potential(a, *energy, b, max_H, s, st.x, st.y);
       float dmin;
       int jmin;
       const diff::dyn_state<float> next = step_fwd_dyn(a, dyn, st, r, dmin, jmin);
+      if (energy)
+        log_force(r, *energy, b, max_H, s);
       if (dmin < minclr)
         minclr = dmin;
       const float active = r.active ? 1.0f : 0.0f;
@@ -928,6 +1060,8 @@ void integrate_dynamic_material(float *o, float *th, float *vx, float *x, const 
       hard += active * (r.sdf < 1.0f ? 1.0f : 0.0f);
       st = next;
     }
+    if (energy)
+      log_potential(a, *energy, b, max_H, max_H, st.x, st.y);
     o[2 * b] = st.x;
     o[2 * b + 1] = st.y;
     th[b] = st.psi;
@@ -954,19 +1088,29 @@ void integrate_dynamic_material_vjp(
     const bicycle_material_params &v, const diff::dyn_bike_params &dyn, const float *g_oT,
     const float *g_thT, const float *g_vxT, const float *g_xT, const float *g_min_clear,
     const float *g_cum_risk, const float *g_arc_length, float *g_alphas, float *g_beta,
-    float *g_gamma, float *g_lam_soft, float *g_lam_hard, int num_threads) {
+    float *g_gamma, float *g_lam_soft, float *g_lam_hard, int num_threads, const material_ext *ext,
+    float *g_fext) {
   validate_dyn(v, dyn);
   const int max_H = max_horizon(H, B);
+  if (ext)
+    detail::validate_ext(*ext, B, max_H, g_fext, "integrate_dynamic_material_vjp");
   detail::parallel_for(B, num_threads, [&](int b) {
     const agent a = make_agent(b, o0, goal, C, R, mask, alphas, beta, gamma, lam_soft, lam_hard,
                                rollout_patch, rr, d_hat, dt, N, Hp, Wp, p, v);
     std::vector<diff::dyn_state<float>> S(static_cast<size_t>(max_H) + 1);
     S[0] = dyn_state_at(o0, th0, vx0, x0, b);
+    detail::ext_agent ea(ext, b, Hp, Wp, a.o0x, a.o0y);
+    std::vector<float> EF(ext ? 2 * max_H : 0, 0.0f), EJ(ext ? 4 * max_H : 0, 0.0f);
+    std::vector<int> Eat(ext ? max_H : 0, 0);
+    for (int s = 0; ext && s < max_H; ++s)
+      Eat[s] = s;
     float minclr = std::numeric_limits<float>::infinity();
     int s_star = -1;
     for (int s = 0; s < max_H; ++s) {
       rec r;
       r.active = s < H[b];
+      if (ext)
+        put_ext(ext, ea, s, S[s].x, S[s].y, r, &EF[2 * s], &EJ[4 * s], &Eat[s]);
       float dmin;
       int jmin;
       S[s + 1] = step_fwd_dyn(a, dyn, S[s], r, dmin, jmin);
@@ -996,16 +1140,28 @@ void integrate_dynamic_material_vjp(
     const float garc = g_arc_length ? g_arc_length[b] : 0.0f;
     float gbe = 0.0f, gga = 0.0f, gls = 0.0f, glh = 0.0f;
     float *gal = g_alphas + static_cast<long>(b) * N;
+    detail::ext_reverse er;
     for (int s = max_H - 1; s >= 0; --s) {
       rec r;
       r.active = s < H[b];
+      if (ext)
+        put_ext_rec(ext, &EF[2 * s], r);
       float dmin;
       int jmin;
       step_fwd_dyn(a, dyn, S[s], r, dmin, jmin); // rebuild the step record
-      step_bwd_dyn(a, dyn, S[s], r, garc, gcum, g, gal, gbe, gga, gls, glh);
+      float gF[2] = {0.0f, 0.0f};
+      step_bwd_dyn(a, dyn, S[s], r, garc, gcum, g, gal, gbe, gga, gls, glh, ext ? gF : nullptr);
       if (s == s_star) { // min_clear = d of the nearest disc at o_s
         g.x += gmin * r.ngx;
         g.y += gmin * r.ngy;
+      }
+      if (ext) { // dL/dF_ext, and its chain through J into o_s
+        if (g_fext) {
+          const long i = static_cast<long>(b) * ext->steps + s;
+          g_fext[2 * i] += gF[0];
+          g_fext[2 * i + 1] += gF[1];
+        }
+        er.at(s, Eat[s], &EJ[4 * s], gF, g.x, g.y);
       }
     }
     g_beta[b] += gbe;

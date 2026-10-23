@@ -3,6 +3,8 @@
   Tests for the distributed_state_session convenience API.
 */
 
+#include <boost/any.hpp>
+#include <boost/cstdint.hpp>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -13,6 +15,7 @@
 #include <cvc/state/distributed_state_session.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_blob_store.h>
+#include <cvc/state/state_change_journal.h> // state_mutation / state_mutation_op (echo test)
 #include <cvc/state/state_compression_registry.h>
 #include <cvc/state/state_data_hydrator.h>
 #include <gtest/gtest.h>
@@ -182,6 +185,72 @@ TEST(DistributedStateSession, TwoNodeInprocDataReplication) {
   state::instance(a1)("plain.value").value(std::string("v2"));
   shared_transport.pump_all();
   EXPECT_EQ(state::instance(a2)("plain.value").value(), "v2");
+
+  shared_transport.unregister_shard(&s1);
+  shared_transport.unregister_shard(&s2);
+  s1.detach();
+  s2.detach();
+}
+
+// data() replication of the builtin integer scalars (regression for the codec-key name mismatch):
+// register_builtin_codecs must key integer codecs under the SAME spellings state::dataTypeName()
+// returns — the app::registerDefaultTypes names "int" / "unsigned int" / "unsigned short" / "int64"
+// / "uint64", NOT the C++ "int32_t"/... spellings — or an integer data() silently fails to
+// replicate (its encode throws "no codec", is swallowed in the sync adapter) while value() and
+// child structure still flow. No manual codec registration here: these are builtin codecs the shard
+// ctor installs, and registerDefaultTypes already names the types.
+TEST(DistributedStateSession, TwoNodeInprocIntegerDataReplication) {
+  app a1, a2;
+
+  state_transport_inproc shared_transport;
+  state_cluster_shard s1(a1, "cluster", "node1");
+  state_cluster_shard s2(a2, "cluster", "node2");
+  s1.attach();
+  s2.attach();
+  shared_transport.register_shard(&s1);
+  shared_transport.register_shard(&s2);
+
+  // data() has no equality guard (unlike value()), so a plain double-write beats the creation-
+  // consume of a fresh node's first signal.
+  {
+    state &n = state::instance(a1)("nums.i");
+    n.value(std::string("p1"));
+    n.value(std::string("p2"));
+    n.data(boost::any(int{42}));
+    n.data(boost::any(int{42}));
+    EXPECT_EQ(n.dataTypeName(), "int") << "app int spelling changed; update the codec alias key";
+  }
+  {
+    state &n = state::instance(a1)("nums.i64");
+    n.value(std::string("p1"));
+    n.value(std::string("p2"));
+    n.data(boost::any(boost::int64_t{-9000000000LL}));
+    n.data(boost::any(boost::int64_t{-9000000000LL}));
+    EXPECT_EQ(n.dataTypeName(), "int64")
+        << "app int64 spelling changed; update the codec alias key";
+  }
+  {
+    state &n = state::instance(a1)("nums.u64");
+    n.value(std::string("p1"));
+    n.value(std::string("p2"));
+    n.data(boost::any(boost::uint64_t{18000000000ULL}));
+    n.data(boost::any(boost::uint64_t{18000000000ULL}));
+    EXPECT_EQ(n.dataTypeName(), "uint64") << "app uint64 spelling changed; update the codec alias";
+  }
+
+  shared_transport.pump_all();
+
+  const boost::any gi = state::instance(a2)("nums.i").data();
+  ASSERT_FALSE(gi.empty()) << "int data() did not replicate (codec key mismatch regressed?)";
+  EXPECT_EQ(boost::any_cast<int>(gi), 42);
+
+  const boost::any g64 = state::instance(a2)("nums.i64").data();
+  ASSERT_FALSE(g64.empty()) << "int64 data() did not replicate";
+  EXPECT_EQ(boost::any_cast<boost::int64_t>(g64), boost::int64_t{-9000000000LL});
+
+  const boost::any gu64 = state::instance(a2)("nums.u64").data();
+  ASSERT_FALSE(gu64.empty()) << "uint64 data() did not replicate";
+  EXPECT_EQ(boost::any_cast<boost::uint64_t>(gu64), boost::uint64_t{18000000000ULL});
 
   shared_transport.unregister_shard(&s1);
   shared_transport.unregister_shard(&s2);
@@ -446,6 +515,111 @@ TEST(DistributedStateSession, TwoNodeSnapshotDataMetadataReassembly) {
   const TestLut rs = boost::any_cast<TestLut>(got_small);
   EXPECT_EQ(rs.lut, tiny.lut);
 
+  s1.detach();
+  s2.detach();
+}
+
+// value() type_name survives replication (S2): the valueChanged emit already carries
+// n.valueTypeName(), but apply_remote::set_value stamped "std::string" and shard.snapshot() never
+// captured the value type, so a typed value lost its declared type both on a live peer and on a
+// snapshot resync. apply + snapshot now preserve it.
+TEST(DistributedStateSession, TwoNodeValueTypeNamePreserved) {
+  app a1, a2, a3;
+
+  state_transport_inproc shared_transport;
+  state_cluster_shard s1(a1, "cluster", "node1");
+  state_cluster_shard s2(a2, "cluster", "node2");
+  s1.attach();
+  s2.attach();
+  shared_transport.register_shard(&s1);
+  shared_transport.register_shard(&s2);
+
+  // A typed (int) value: value<T> records valueTypeName = dataTypeName<int>() = "int"; the string
+  // setter would stamp "std::string". Set twice (first write consumed on node creation).
+  state &n1 = state::instance(a1)("typed.count");
+  n1.value(7);
+  n1.value(8);
+  ASSERT_EQ(n1.valueTypeName(), "int");
+
+  shared_transport.pump_all();
+
+  // LIVE apply: the peer keeps both the string form AND the declared type.
+  EXPECT_EQ(state::instance(a2)("typed.count").value(), "8");
+  EXPECT_EQ(state::instance(a2)("typed.count").valueTypeName(), "int")
+      << "value type_name dropped on live apply";
+
+  // SNAPSHOT resync: a late joiner reconstructs the declared type too (direct snapshot+ingest, the
+  // join path without a transport).
+  state_cluster_shard s3(a3, "cluster", "node3");
+  s3.attach();
+  const std::vector<state_cluster_shard::snapshot_entry> snap = s1.snapshot(std::string());
+  ASSERT_FALSE(snap.empty());
+  for (const auto &e : snap)
+    s3.ingest_snapshot_entry(e);
+  EXPECT_EQ(state::instance(a3)("typed.count").value(), "8");
+  EXPECT_EQ(state::instance(a3)("typed.count").valueTypeName(), "int")
+      << "value type_name dropped on snapshot resync";
+
+  shared_transport.unregister_shard(&s1);
+  shared_transport.unregister_shard(&s2);
+  s1.detach();
+  s2.detach();
+  s3.detach();
+}
+
+// set_data echo-suppression (S5): §52 requires that applying a remote set_data must NOT re-emit a
+// set_data back toward the origin (no ping-pong). The mechanism is apply_remote's
+// thread_suppression_guard, which makes the dataChanged the apply triggers early-return instead of
+// journaling. Pin it: node2, which only APPLIES node1's data(), must emit zero local mutations, and
+// a quiescent re-pump must move nothing.
+TEST(DistributedStateSession, SetDataApplyDoesNotEcho) {
+  app a1, a2;
+
+  state_transport_inproc shared_transport;
+  state_cluster_shard s1(a1, "cluster", "node1");
+  state_cluster_shard s2(a2, "cluster", "node2");
+
+  // Count every LOCAL mutation node2 emits. The emit path fires on_local_mutation; apply_remote,
+  // under its suppression guard, does not. An applied set_data must produce none.
+  int b_local_setdata = 0, b_local_any = 0;
+  s2.adapter().set_on_local_mutation([&](const state_mutation &m) {
+    ++b_local_any;
+    if (m.op == state_mutation_op::set_data)
+      ++b_local_setdata;
+  });
+
+  s1.attach();
+  s2.attach();
+  shared_transport.register_shard(&s1);
+  shared_transport.register_shard(&s2);
+
+  state &n = state::instance(a1)("echo.n");
+  n.value(std::string("p1"));
+  n.value(std::string("p2"));
+  n.data(boost::any(int{123}));
+  n.data(boost::any(int{123}));
+
+  shared_transport.pump_all();
+
+  // node2 applied the data()...
+  const boost::any got = state::instance(a2)("echo.n").data();
+  ASSERT_FALSE(got.empty());
+  EXPECT_EQ(boost::any_cast<int>(got), 123);
+
+  // ...and emitted NOTHING locally in doing so (no echo, no ping-pong).
+  EXPECT_EQ(b_local_setdata, 0) << "applying a remote set_data re-emitted a set_data";
+  EXPECT_EQ(b_local_any, 0) << "node2 emitted a local mutation while only applying remote ones";
+  EXPECT_EQ(s2.adapter().local_mutation_count(), 0u);
+
+  // A quiescent re-pump moves nothing — an echo would surface here as an outbound mutation.
+  const std::size_t pumped2 = shared_transport.pump_all();
+  EXPECT_EQ(pumped2, 0u)
+      << "a set_data echo would surface as outbound mutations on the second pump";
+  EXPECT_EQ(b_local_setdata, 0);
+  EXPECT_EQ(boost::any_cast<int>(state::instance(a2)("echo.n").data()), 123);
+
+  shared_transport.unregister_shard(&s1);
+  shared_transport.unregister_shard(&s2);
   s1.detach();
   s2.detach();
 }

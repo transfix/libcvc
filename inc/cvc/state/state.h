@@ -245,6 +245,11 @@ public:
 
   std::string value();
   std::string valueTypeName();
+  // Set the value's declared type name directly, WITHOUT changing the value or emitting a change
+  // signal. Replication uses this on apply/snapshot to preserve a value's source type across a node
+  // that only receives the string form (the plain value(const std::string&) setter would stamp
+  // "std::string"). Not for ordinary code, which sets the type by writing a typed value<T>().
+  void valueTypeName(const std::string &typeName);
   std::vector<std::string>
   values(bool unique = false); // shortcut for comma separated values in value()
   state &value(const std::string &v, bool setValueType = true);
