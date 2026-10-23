@@ -1099,6 +1099,10 @@ void CameraController::setPoseMirrorHz(double hz) {
 
 void CameraController::releaseHeldKeys() { m_impl->held.clear(); }
 
+bool CameraController::keyHeld(const std::string &keySym) const {
+  return m_impl->held_has(normKey(keySym));
+}
+
 void CameraController::setPointerCapture(bool on) {
   Impl &s = *m_impl;
   s.pointerCapture = on;
