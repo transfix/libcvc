@@ -161,8 +161,8 @@ int main(int argc, char **argv) {
   // a smoother authoritative rate is a later tuning (tick the holon on its own).
   cvc::ariadne::holon server_holon(cvc::ariadne::holon_role::server);
   // The shared 3D scene (H1 slice 5, roadmap §5g): the relay is its sole writer and seeds the MVP
-  // environment (ground + a reference box under a sun) once. The writes are local shard mutations, so
-  // the first pass of the loop below fans them to the clients, and late joiners get them in the
+  // environment (ground + a reference box under a sun) once. The writes are local shard mutations,
+  // so the first pass of the loop below fans them to the clients, and late joiners get them in the
   // snapshot.
   if (cvc::ariadne::conference::seed_default_scene(app, room)) {
     const auto rev = cvc::ariadne::conference::scene_revision(app, room);
