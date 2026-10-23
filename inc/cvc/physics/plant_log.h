@@ -49,7 +49,9 @@ namespace physics {
 
 class nav_plant;
 
-// One vehicle at one tick.
+// One vehicle at one tick. cvc::nav::plant_sample (nav/plant_types.h, nav_stats' plant ledger)
+// shares vx, vy, r, steer, grade, roll, steer_cmd, accel_cmd, a_lat, a_lon, contacts, wheels and
+// wheels_down with it, by name and meaning; nav_plant computes them as this log does.
 struct planar_sample {
   double t = 0.0;                    // s since start()
   double x = 0.0, y = 0.0;           // the centre of mass

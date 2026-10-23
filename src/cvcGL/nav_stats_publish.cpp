@@ -83,6 +83,9 @@ const leaf_meta kMeta[] = {
      "The fleet's contacts with static geometry (a physics plant)."},
     {"episode.total_infeasible_slope_steps", "",
      "The fleet's vehicle-ticks with a footprint on infeasible slope (a terrain)."},
+    {"episode.vehicles_rolled", "", "Vehicles that rolled over (a physics plant)."},
+    {"episode.first_roll_s", "s",
+     "When the first vehicle rolled over; < 0 = none (a physics plant)."},
     {"coverage.explored_frac", "1", "Belief cells ever seen."},
     {"coverage.visible_frac", "1", "Belief cells in view on the last frame."},
     {"coverage.believed_free_frac", "1", "Belief cells read as free."},
@@ -113,7 +116,20 @@ const leaf_meta kVehicle[] = {
     {"building_contacts", "", "Contacts its body started with static geometry (a physics plant)."},
     {"infeasible_slope_steps", "",
      "Ticks its footprint touched slope steeper than it can climb or cross (a terrain)."},
+    {"rolled_over", "", "1 once it rolled over: tipped past 60 degrees for 1 s (a physics plant)."},
+    {"rolled_over_s", "s", "When it tipped over for good; < 0 = never (a physics plant)."},
+    {"tilt_max_deg", "deg", "The most its body tilted from upright (a physics plant)."},
+    {"ltr_max", "1",
+     "Its largest |lateral load transfer ratio|; 1 = a side lifts (a physics plant)."},
+    {"a_lat_max_g", "g", "Its largest |lateral acceleration| (a physics plant)."},
+    {"steer_sat_share", "1",
+     "Share of ticks nav steered at 95% of its lock or more (a physics plant)."},
 };
+
+bool plant_leaf(const std::string &k) {
+  return k == "rolled_over" || k == "rolled_over_s" || k == "tilt_max_deg" || k == "ltr_max" ||
+         k == "a_lat_max_g" || k == "steer_sat_share";
+}
 
 void describe_leaf(cvc::app &ctx, const std::string &path, const leaf_meta &m) {
   try {
@@ -152,6 +168,8 @@ void publish_nav_stats(cvc::gl::state_publisher &pub, const std::string &scenePr
         continue;
       if (!e.terrain_tracked && k == "episode.total_infeasible_slope_steps")
         continue;
+      if (!e.plant_tracked && (k == "episode.vehicles_rolled" || k == "episode.first_roll_s"))
+        continue;
       if (!coverage && k.compare(0, 9, "coverage.") == 0)
         continue;
       describe_leaf(pub.ctx(), root + "." + k, m);
@@ -186,6 +204,10 @@ void publish_nav_stats(cvc::gl::state_publisher &pub, const std::string &scenePr
   }
   if (e.terrain_tracked) // a terrain was set (nav_stats.h terrain_tracked)
     pub.publish(ep + ".total_infeasible_slope_steps", i2s(e.total_infeasible_slope_steps));
+  if (e.plant_tracked) { // a physics plant fed the plant ledger (nav_stats.h plant_tracked)
+    pub.publish(ep + ".vehicles_rolled", i2s(e.vehicles_rolled));
+    pub.publish(ep + ".first_roll_s", d2s(e.first_roll_s));
+  }
 
   // ── coverage (episode belief-coverage fractions) ──
   if (p.emit_coverage) {
@@ -242,6 +264,8 @@ void publish_nav_stats(cvc::gl::state_publisher &pub, const std::string &scenePr
         continue;
       if (!v.terrain_tracked && k == "infeasible_slope_steps")
         continue;
+      if (!v.plant_tracked && plant_leaf(k))
+        continue;
       describe_leaf(pub.ctx(), vp + "." + k, m);
     }
     pub.publish(vp + ".arrived", b2s(v.arrived));
@@ -263,6 +287,14 @@ void publish_nav_stats(cvc::gl::state_publisher &pub, const std::string &scenePr
     }
     if (v.terrain_tracked)
       pub.publish(vp + ".infeasible_slope_steps", i2s(v.infeasible_slope_steps));
+    if (v.plant_tracked) {
+      pub.publish(vp + ".rolled_over", b2s(v.rolled_over));
+      pub.publish(vp + ".rolled_over_s", d2s(v.rolled_over_s));
+      pub.publish(vp + ".tilt_max_deg", d2s(v.tilt_max_deg));
+      pub.publish(vp + ".ltr_max", d2s(v.ltr_max));
+      pub.publish(vp + ".a_lat_max_g", d2s(v.a_lat_max_g));
+      pub.publish(vp + ".steer_sat_share", d2s(v.steer_sat_share));
+    }
   }
 }
 

@@ -30,7 +30,8 @@ downstream app or test harness, and `sim_world` itself all drive it identically.
   (`infeasible_slope_steps`, the ticks its footprint touched slope beyond its limits, present
   only when `terrain_tracked`: a `sim_world` with `set_terrain` feeds
   `nav_samplers::slope_entries`; `publish_nav_stats` writes `veh.<i>.infeasible_slope_steps` and
-  `episode.total_infeasible_slope_steps`), and **drive telemetry** — the reduced per-tick
+  `episode.total_infeasible_slope_steps`), the **plant ledger** (below, present only when
+  `plant_tracked`), and **drive telemetry** — the reduced per-tick
   `drive_telemetry` (`drive_sample`): policy coefficients (`alpha_mean`/`beta_mean`/`gamma_mean`),
   grip (`mu_mean`/`mu_min`), material risk (`mrisk_mean`/`mrisk_max`), external-force magnitude
   (`ext_force_mean`), steering (`steer_abs_mean`/`steer_abs_max`), and `binding_steps`. These are
@@ -82,6 +83,40 @@ cvc::nav::episode_nav_stats e = world.nav_stats();
 Opt-in and default-off, so a plain `sim_world` run is byte-unchanged. Exposed to Python through the
 `pycvc` bindings `nav_sim_world_begin_nav_stats` / `nav_sim_world_nav_stats` (JSON).
 
+## The plant ledger — what a physics plant's vehicles did
+
+A `sim_world` driving a physics plant that measures its vehicles (`vehicle_plant::tracks_samples()`;
+`cvc::physics::nav_plant` on Jolt) hands the collector each vehicle's `plant_sample`
+(`cvc/nav/plant_types.h`) every tick through `nav_samplers::plant` (`sim_world::plant_samples()`).
+A sample is SI, in the physics world's frame: the centre of mass's velocity along the heading and
+to its left (`vx`, `vy`), the yaw rate `r`, the steering it has and its lock (`steer`,
+`max_steer`), nav's commands over the tick (`steer_cmd`, `accel_cmd` in m/s^2), the attitude as
+sines (`grade` + nose up, `roll` + left side up) and `up_z` (the body's up axis's world z: 1
+upright, 0 on its side), the acceleration over the tick in the heading's frame (`a_lat`, `a_lon`),
+the roll rate about the body's forward axis, the lateral load transfer ratio `ltr` (left - right
+over left + right of the wheels' loads, a wheel's side from its contact point along the body's
+left axis), `wheels` / `wheels_down` and the tick's static `contacts`. Where it overlaps
+`cvc::physics::planar_sample` (the plant log) the fields have its names and meaning, and the Jolt
+plant computes both alike.
+
+`veh_nav_stats` reduces it (`plant_tracked`, `plant_steps`): **`rolled_over`** latches once the
+vehicle stays tipped past `nav_stats_params::roll_up_z` (0.5: 60 degrees) for `roll_hold_s` (1 s),
+and `rolled_over_s` is the end of the tick it went over; `tilt_max_deg` / `roll_max_deg` /
+`pitch_max_deg`; `tilt_s` (time past `tilt_deg`, 20 degrees); `ltr_max` and `lift_s` (time with
+|ltr| past `lift_ltr`, 0.9: a side's wheels about to lift); `wheels_up_s` (two or more wheels off
+the ground); `a_lat_max_g`; `steer_cmd_abs_mean` and `steer_sat_share` (ticks steered at
+`steer_sat`, 95%, of the lock or more); `accel_cmd_mean` and `brake_share` (ticks it asked to slow).
+The episode carries `vehicles_rolled` and `first_roll_s`, and the scorecard, over the runs a plant
+fed (`plant_runs`), `rollover_rate`, `episode_rollover_rate` and the runs' means
+(`mean_tilt_max_deg`, `mean_ltr_max`, `mean_lift_s`, `mean_a_lat_max_g`, `mean_steer_sat_share`,
+`mean_brake_share`). cvcGL's `publish_nav_stats` writes `episode.{vehicles_rolled, first_roll_s}`
+and `veh.<i>.{rolled_over, rolled_over_s, tilt_max_deg, ltr_max, a_lat_max_g, steer_sat_share}`.
+
+All of it, and its JSON, appears only when a plant fed it: the kinematic arm's record and
+scorecard are byte-unchanged. The grl-snam Python twin drives the kinematic plant, so it has
+nothing to mirror and its parity corpora are unaffected. Training does not read the ledger yet;
+a rollover penalty in checkpoint selection is a follow-up.
+
 ## Units — the one trap
 
 `nav_samplers.min_clearance_m` is **metres** (compared against `nav_stats_params::clear_safety_m`).
@@ -120,7 +155,10 @@ when A/B-ing.
 
 ## Tests
 
-`src/cvc/tests/nav_stats_test.cpp` (the base accumulators/scorecard over a scripted trajectory) and
-`nav_test.cpp`'s `NavSimWorld` suite (the `sim_world` internal collector + `min_clearance_world`). The
+`src/cvc/tests/nav_stats_test.cpp` (the base accumulators/scorecard over a scripted trajectory, and
+the plant ledger over synthetic samples: `PlantLedgerReduction`, `PlantLedgerUntrackedLeavesTheJsonUnchanged`),
+`nav_test.cpp`'s `NavSimWorld` suite (the `sim_world` internal collector + `min_clearance_world`), and
+`physics_plant_log_test.cpp` (the Jolt plant's `plant_sample` against the plant log, and a Humvee on
+its side rolled over). The
 scripted corpus + numbers are mirrored in grl-snam's tests (and in any downstream extension that
 re-checks the base record) — the shared-schema contract.

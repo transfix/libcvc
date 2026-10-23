@@ -129,6 +129,36 @@ int main() {
   ck(st("nrg.nav_stats.veh.1.energy_per_km").property("unit") == "J/km", "energy_per_km unit");
   ck(st("nrg.nav_stats.episode.makespan_s").property("access") == "telemetry", "makespan access");
   ck(!st("scene.nav_stats.meta.tick").comment().empty(), "meta.tick has a comment");
+  // the plant ledger is not written untracked
+  ck(!st("nrg.nav_stats.veh.1.rolled_over").initialized(), "untracked: no rolled_over");
+  ck(!st("nrg.nav_stats.episode.vehicles_rolled").initialized(), "untracked: no vehicles_rolled");
+
+  // the plant ledger: a rollover, per vehicle and for the fleet
+  cvc::nav::episode_nav_stats pl = e;
+  pl.plant_tracked = true;
+  pl.vehicles_rolled = 1;
+  pl.first_roll_s = 12.5;
+  pl.per_vehicle[0].plant_tracked = true;
+  pl.per_vehicle[0].rolled_over = true;
+  pl.per_vehicle[0].rolled_over_s = 12.5;
+  pl.per_vehicle[0].tilt_max_deg = 91.0;
+  pl.per_vehicle[0].ltr_max = 1.0;
+  pl.per_vehicle[0].a_lat_max_g = 0.7;
+  pl.per_vehicle[0].steer_sat_share = 0.25;
+  cvc::gl::publish_nav_stats(pub, "plt", pl, 1);
+  pub.flush();
+  ck(st("plt.nav_stats.veh.0.rolled_over").value<int>() == 1, "veh0 rolled over");
+  ck(std::fabs(st("plt.nav_stats.veh.0.rolled_over_s").value<double>() - 12.5) < 1e-9,
+     "veh0 rolled at");
+  ck(std::fabs(st("plt.nav_stats.veh.0.tilt_max_deg").value<double>() - 91.0) < 1e-9, "veh0 tilt");
+  ck(std::fabs(st("plt.nav_stats.veh.0.steer_sat_share").value<double>() - 0.25) < 1e-9,
+     "veh0 steer saturation");
+  ck(!st("plt.nav_stats.veh.1.rolled_over").initialized(), "veh1 untracked");
+  ck(st("plt.nav_stats.episode.vehicles_rolled").value<int>() == 1, "fleet rolled");
+  ck(std::fabs(st("plt.nav_stats.episode.first_roll_s").value<double>() - 12.5) < 1e-9,
+     "fleet first roll");
+  ck(st("plt.nav_stats.veh.0.tilt_max_deg").property("unit") == "deg", "tilt unit");
+  ck(!st("plt.nav_stats.veh.0.ltr_max").comment().empty(), "ltr_max has a comment");
 
   // per_vehicle_every stride: over 3 vehicles, stride 2 publishes veh 0 and 2, skips 1 (fresh
   // prefix).

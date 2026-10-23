@@ -50,7 +50,9 @@ struct nav_stats_publish_params {
 // .episode.{total_energy_J, total_building_contacts} and each vehicle .veh.<i>.{energy_J,
 // energy_per_km, building_contacts}; without one those leaves are not written. Likewise with a
 // terrain (terrain_tracked): .episode.total_infeasible_slope_steps and each vehicle
-// .veh.<i>.infeasible_slope_steps.
+// .veh.<i>.infeasible_slope_steps. And with a physics plant that feeds the plant ledger
+// (plant_tracked): .episode.{vehicles_rolled, first_roll_s} and each vehicle .veh.<i>.{rolled_over,
+// rolled_over_s, tilt_max_deg, ltr_max, a_lat_max_g, steer_sat_share}.
 void publish_nav_stats(cvc::gl::state_publisher &pub, const std::string &scenePrefix,
                        const cvc::nav::episode_nav_stats &e, long tick,
                        const nav_stats_publish_params &p = {});

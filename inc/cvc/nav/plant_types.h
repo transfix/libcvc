@@ -83,6 +83,33 @@ struct drift_sample {
   float stop_speed = 0.0f; // normalized / s: the stopping speed the tick's command respected
 };
 
+// One agent at the end of one tick as a physics plant measures it (vehicle_plant::sample), for
+// nav_stats' plant ledger (nav_samplers::plant): its attitude, its speed, nav's commands and how
+// much of the vehicle they used, its accelerations and how its wheels stand. SI and the physics
+// world's frame (metres, radians, seconds), not nav's normalized frame. Where it overlaps
+// cvc::physics::planar_sample (physics/plant_log.h) a field has its name and meaning, and the
+// Jolt plant computes both alike: vx, vy, r, steer, grade, roll, steer_cmd, accel_cmd, a_lat,
+// a_lon, contacts, wheels, wheels_down.
+struct plant_sample {
+  double vx = 0.0, vy = 0.0; // the centre of mass's velocity along the heading and to its left
+  double r = 0.0;            // yaw rate (rad/s, + left)
+  double steer = 0.0;        // the bicycle angle the vehicle has (rad, + left)
+  double max_steer = 0.0;    // its steering lock (rad)
+  double steer_cmd = 0.0;    // nav's command over the tick that ended here (rad)
+  double accel_cmd = 0.0;    // m/s^2 along the heading, as nav sent it
+  double grade = 0.0;        // sin of the body's pitch, + nose up
+  double roll = 0.0;         // sin of the body's roll, + left side up
+  double up_z = 1.0;         // the body's up axis's world z: 1 upright, 0 on its side, < 0 over
+  double a_lat = 0.0;        // the centre of mass's acceleration over the tick, to the left
+  double a_lon = 0.0;        // and along the heading (m/s^2)
+  double roll_rate = 0.0;    // about the body's forward axis (rad/s, + left side rising)
+  double ltr = 0.0;          // lateral load transfer: (left - right) / (left + right) of the
+                             // wheels' loads, +-1 when one side carries it all (0 with none)
+  int wheels = 0;            // the vehicle's wheels
+  int wheels_down = 0;       // how many touch the ground
+  int contacts = 0;          // contacts its body started with static geometry over the tick
+};
+
 // nav's kinematic bicycle, integrated as the fused drive integrates it (drive.cpp's
 // rollout_impl): nsub Euler steps of dt / nsub, the speed first (clamped to [sp_min, vmax]),
 // then the heading, then the position along the new heading. The command is held through the
