@@ -27,12 +27,11 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <vector>
-
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/coef_train.h> // city_scene, training_scene
 #include <cvc/nav/sim_world.h>
 #include <gtest/gtest.h>
+#include <vector>
 
 using cvc::nav::city_scene;
 using cvc::nav::coef_mlp;
