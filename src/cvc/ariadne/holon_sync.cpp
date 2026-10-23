@@ -13,6 +13,7 @@
   Lesser General Public License for more details.
 */
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/ariadne/conference/room_intrinsics.h> // room_participant_path, room_roster
@@ -22,7 +23,9 @@
 #include <cvc/physics/types.h> // vec3, quat
 #include <cvc/state/state.h>   // cvc::state, SEPARATOR, findDescendant
 #include <initializer_list>
+#include <set>
 #include <string>
+#include <vector>
 
 namespace cvc {
 namespace ariadne {
@@ -130,10 +133,18 @@ bool read_intent(cvc::app &app, const std::string &room, const std::string &pid,
 void server_pump(holon &h, cvc::app &app, const std::string &room, double wall_dt) {
   // The present participants, straight from the replicated room tree.
   const std::vector<conference::room_participant> roster = conference::room_roster(app, room);
-  // Add any newcomer, then feed each one's latest proposed intent to the holon.
+  // Add any newcomer -- spawned on a 4 m ring around the room's origin (where the seeded
+  // reference object stands), each at the next golden-angle step so joiners never stack
+  // -- then feed each one's latest proposed intent to the holon.
   for (const conference::room_participant &p : roster) {
-    if (!h.has_participant(p.pid))
-      h.add_participant(p.pid);
+    if (!h.has_participant(p.pid)) {
+      constexpr double kSpawnRadius = 4.0;
+      constexpr double kGoldenAngle = 2.39996322972865332; // radians
+      const double a = kGoldenAngle * static_cast<double>(h.participants().size());
+      cvc::physics::body_state start;
+      start.position = {kSpawnRadius * std::cos(a), kSpawnRadius * std::sin(a), 0.0};
+      h.add_participant(p.pid, /*local=*/false, start);
+    }
     avatar_intent in;
     if (read_intent(app, room, p.pid, in))
       h.set_intent(p.pid, in);
@@ -144,6 +155,32 @@ void server_pump(holon &h, cvc::app &app, const std::string &room, double wall_d
   // relay's shard; the caller fans them to the clients).
   for (const conference::room_participant &p : roster)
     write_pose(app, room, p.pid, h.state(p.pid), h.tick());
+}
+
+void client_pump(holon &h, cvc::app &app, const std::string &room, const std::string &self_pid,
+                 double wall_dt) {
+  const std::vector<conference::room_participant> roster = conference::room_roster(app, room);
+  std::set<std::string> present;
+  for (const conference::room_participant &p : roster) {
+    present.insert(p.pid);
+    cvc::physics::body_state s;
+    std::uint64_t server_tick = 0;
+    const bool have = read_pose(app, room, p.pid, s, server_tick);
+    if (!h.has_participant(p.pid))
+      h.add_participant(p.pid, /*local=*/p.pid == self_pid, have ? s : cvc::physics::body_state{});
+    if (have)
+      h.apply_authoritative(p.pid, s, server_tick);
+  }
+  for (const std::string &pid : h.participants())
+    if (!present.count(pid))
+      h.remove_participant(pid);
+  h.advance(wall_dt);
+}
+
+void propose_intent(holon &h, cvc::app &app, const std::string &room, const std::string &self_pid,
+                    const avatar_intent &intent) {
+  h.set_intent(self_pid, intent);
+  write_intent(app, room, self_pid, intent);
 }
 
 } // namespace ariadne

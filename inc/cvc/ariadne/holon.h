@@ -25,6 +25,7 @@
 #include <cvc/physics/pose_tracker.h>
 #include <map>
 #include <string>
+#include <vector>
 
 namespace cvc {
 namespace ariadne {
@@ -57,8 +58,18 @@ namespace ariadne {
 enum class holon_role { server, client };
 
 struct holon_config {
+  // A holon is advanced at its HOST's cadence, not a render loop's: arisrv pumps its server holon
+  // at ~5 Hz (24 quanta due per advance at 120 Hz) and a throttled browser tab may run at 10 fps.
+  // world_clock's default catch-up cap (8 quanta, sized for a 60+ Hz frame loop) would silently
+  // drop the rest -- running the room's avatars, and its tick, at a third of real time -- so a
+  // holon's clock allows 0.5 s of catch-up per advance.
+  holon_config() { clock.max_steps_per_advance = 60; }
+
   cvc::world_clock::config clock; // the holon's own quantum / scale / mode
   double reconcile_tol = 0.05;    // metres; the client's snap threshold (slice 2)
+  // CLIENT: how far (in ticks) the replica's clock may drift from the server's tick before
+  // apply_authoritative re-aligns it. 60 = 0.5 s at the default 120 Hz. See apply_authoritative.
+  std::uint64_t max_skew_ticks = 60;
 };
 
 class holon {
@@ -88,6 +99,8 @@ public:
                        const cvc::physics::body_state &start = cvc::physics::body_state{});
   void remove_participant(const std::string &pid);
   bool has_participant(const std::string &pid) const;
+  // Every registered pid, in pid order.
+  std::vector<std::string> participants() const;
 
   // Set a participant's latest intent. Server: the validated input it integrates
   // into the authoritative pose. Client: only the LOCAL avatar's own input (a
@@ -98,6 +111,15 @@ public:
   // arrived via replication. The local avatar reconciles to it (snap + replay on
   // divergence); a peer takes it as its newest interpolation sample. No-op on a
   // server holon or an unknown pid.
+  //
+  // Reconcile compares ticks, so the replica's clock must count the server's ticks.
+  // The two clocks start independently (a client joins a server that has run for
+  // hours), so a sample more than max_skew_ticks from the replica's tick -- the first
+  // one after joining, or one after a backgrounded browser tab stalled the frame
+  // loop -- re-aligns the replica: its clock seeks to server_tick and the local
+  // avatar's unacknowledged input log is dropped (its ticks no longer mean anything;
+  // its state is kept). Between re-alignments both clocks run from wall time at the
+  // same rate.
   void apply_authoritative(const std::string &pid, const cvc::physics::body_state &auth,
                            std::uint64_t server_tick);
 
@@ -112,10 +134,20 @@ public:
   // std::out_of_range for an unknown pid.
   cvc::physics::body_state state(const std::string &pid) const;
 
-  // A participant's DISPLAY pose at the current frame's interpolation alpha:
-  // predicted for the local avatar, interpolated between the last two samples for a
-  // peer (never extrapolated), the integrated pose on a server.
+  // A participant's DISPLAY pose this frame: predicted for the local avatar, the
+  // integrated pose on a server, and for a peer an interpolation between its last
+  // two samples (never extrapolated). Samples arrive far less often than quanta (the
+  // relay publishes ~5 Hz against a 120 Hz clock), so a peer is shown ONE SAMPLE
+  // INTERVAL behind: the newest sample's arrival starts a walk from `prev` to
+  // `newest` that takes as long as the server took between the two (their
+  // server_tick gap), measured on this holon's own clock (tick + alpha).
   cvc::physics::pose display_pose(const std::string &pid) const;
+
+  // CLIENT: the position jumps reconcile has applied to the local avatar `pid`
+  // (snap + replay on divergence) since the last call, summed, then cleared. A
+  // renderer eases this out so a correction reads as a glide rather than a jump; the
+  // holon itself stays exact. Zero for a peer, on a server, or for an unknown pid.
+  cvc::physics::vec3 take_correction(const std::string &pid);
 
 private:
   struct participant {
@@ -123,12 +155,15 @@ private:
     avatar_sim sim;             // server authoritative integrator
     avatar_intent intent;       // latest intent (server input / client-local input)
     predicted_avatar predicted; // client-local prediction + reconcile
+    cvc::physics::vec3 correction{0.0, 0.0, 0.0}; // reconcile jumps not yet taken
     // peer interpolation: the last two authoritative samples + a monotonic guard
     // (mirroring predicted_avatar's stale/duplicate-ack rejection) so a reordered
     // or duplicate peer sample never rewinds or freezes the interpolation window.
     bool have_sample = false;
     std::uint64_t last_sample_tick = 0;
     cvc::physics::body_state prev, newest;
+    std::uint64_t newest_arrival_tick = 0; // this clock's tick when `newest` arrived
+    std::uint64_t sample_span = 0;         // server ticks from prev to newest (0 = one sample)
   };
 
   void on_step(const cvc::clock_driver::clock_frame &f);
