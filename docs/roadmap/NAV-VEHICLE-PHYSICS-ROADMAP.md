@@ -106,7 +106,8 @@ The plan, in order:
    - The same port on the dynamic plant's path; a torch twin in GRL-SNAM.
 5. **P8d: a two-track (four-wheel) dynamic plant** with its adjoint, beside `dyn_plant` (Joe,
    2026-10-19: "add the four-wheel plant to the roadmap, you build it"). It is full Ackermann for
-   the trainers and for cvcdbg.
+   the trainers and for cvcdbg. Done: `diff::dyn4_plant` (#731, docs/NAV_TRAINING.md), all but
+   its external-force port.
    - Wheels: four contact points from the body's pose and the vehicle's geometry, Ackermann
      angles on the front pair from the controller's δ_cmd, and the drive and brake split per
      wheel.
@@ -485,8 +486,10 @@ These are the targets a plant fitted to Jolt has to beat, bin by bin.
         a goal spring too strong for the damping collapses reach to about 20%.
       - So the policy's leverage on Jolt is mostly its basin. A learned, state-dependent policy
         that beats the seed is still open.
-  - Next, in order (Joe 2026-10-19): the external-force port (started), P8d (the four-wheel
-    plant), then P8c.
+  - P8d, the four-wheel plant, is done: `diff::dyn4_plant` passes its gates (#731,
+    docs/NAV_TRAINING.md). Open there: its external-force port, the anti-roll bars, the unsprung
+    masses and wheel spin.
+  - Next, in order (Joe 2026-10-19): the external-force port (transfix/libcvc#728), then P8c.
 - **P9, the plant by default (2026-10-18, Joe: "can't we use the actual jolt vehicle dimensions
   and physics?").**
   - What moved the agents: no default path used Jolt. Every default was the kinematic bicycle
