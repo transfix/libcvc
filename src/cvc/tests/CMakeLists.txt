@@ -184,6 +184,7 @@ add_executable(volume_ops_test volume_ops_test.cpp)
 add_executable(volume_io_test volume_io_test.cpp)
 add_executable(volume_io_extra_test volume_io_extra_test.cpp)
 add_executable(image_test image_test.cpp)
+add_executable(magick_bootstrap_test magick_bootstrap_test.cpp)
 add_executable(model_test model_test.cpp)
 add_executable(geometry_attributes_test geometry_attributes_test.cpp)
 add_executable(utility_test utility_test.cpp)
@@ -347,6 +348,7 @@ set(TEST_TARGETS
   volume_io_test
   volume_io_extra_test
   image_test
+  magick_bootstrap_test
   model_test
   geometry_attributes_test
   utility_test
@@ -818,6 +820,13 @@ target_link_libraries(volume_io_test
 )
 
 target_link_libraries(image_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(magick_bootstrap_test
   PRIVATE
     cvc
     GTest::gtest
@@ -1923,6 +1932,7 @@ target_compile_features(procedural_geometry_test PRIVATE cxx_std_14)
 target_compile_features(volume_ops_test PRIVATE cxx_std_14)
 target_compile_features(volume_io_test PRIVATE cxx_std_17)
 target_compile_features(image_test PRIVATE cxx_std_17)
+target_compile_features(magick_bootstrap_test PRIVATE cxx_std_17)
 target_compile_features(model_test PRIVATE cxx_std_17)
 target_compile_features(geometry_attributes_test PRIVATE cxx_std_17)
 target_compile_features(utility_test PRIVATE cxx_std_17)
@@ -2236,6 +2246,7 @@ endif()
 cvc_discover_tests(volume_ops_test)
 cvc_discover_tests(volume_io_test)
 cvc_discover_tests(image_test)
+cvc_discover_tests(magick_bootstrap_test)
 cvc_discover_tests(model_test)
 cvc_discover_tests(geometry_attributes_test)
 cvc_discover_tests(utility_test)
