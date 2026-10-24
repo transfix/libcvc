@@ -580,6 +580,24 @@ Media off, so the state plane alone:
 | … a late joiner's bootstrap | 491 kB | 215 kB |
 | hall, 12 standing still — per WS receiver (the 1 Hz re-broadcast) | 847 kb/s | 768 kb/s |
 
+**WS re-broadcast diffs.** Same bench, run on sandipaws: a Windows static Release build, the S7
+base and the diff change built in one tree, 12 in clusters in the hall, media off, 20 s windows.
+The ranges cover two runs each:
+
+| | full tree (S7) | diffs |
+|---|---|---|
+| 12 walking — per WS receiver, link in | 196–254 kb/s | 39–45 kb/s |
+| … snapshot entries it applied | 316–409 /s | 36–44 /s |
+| … relay egress | 1.4–1.8 Mb/s | 0.46–0.54 Mb/s |
+| 12 standing still — per WS receiver, link in | 298 kb/s | 30.5 kb/s |
+| … snapshot entries it applied | 489 /s | 15 /s |
+| a late joiner's bootstrap | 203–223 kB | 105–120 kB |
+
+A gRPC receiver never got the re-broadcast, and its rate did not change (32–42 kb/s walking, 23 kb/s
+standing). A browser now costs within ~7 kb/s of a native client. The remainder is each path touched
+live since the last call, sent once more, plus the receiver's own writes echoed back. The late joiner
+converged on its first check in both builds.
+
 With media on: in the 20 m room the gate denied no frame (4 and 8 clients: every pair inner); in the
 hall it withheld 2,688 of 3,695 camera and mic frames (73%) for 12 in clusters, and sent 157 MJPEG
 thumbnails for 16 walking across the tiers. No run showed an origin ghost; clock re-aligns stayed at
