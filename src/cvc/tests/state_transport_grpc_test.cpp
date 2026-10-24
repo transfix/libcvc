@@ -1754,3 +1754,136 @@ TEST(StateTransportGrpcTest, ClientSnapshotIngestHonorsEnforcedInterest) {
   tC.stop();
   tR.stop();
 }
+
+// The admission hold: an accepted stream gets the relay's Hello and nothing else -- no admit
+// snapshot, no push, no live write -- until release_admissions() finds a rule for its peer. Its
+// admit snapshot then goes through that rule and holds what the relay wrote meanwhile: B never
+// sees x.secret, not even in its bootstrap, and x.late, written while B was held, arrives in it.
+TEST(StateTransportGrpcTest, AdmissionHoldFiltersTheBootstrap) {
+  cvc::app aR, aB;
+  cvc::state_transport_grpc tR, tB;
+  tR.set_backfill_on_connect(false);
+  tR.set_admission_hold(std::chrono::seconds(30));
+  tR.start("127.0.0.1:0", "R", "C");
+  tR.set_relay(true);
+  tB.start("127.0.0.1:0", "B", "C");
+
+  cvc::state_cluster_shard sR(aR, "C", "R");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sR.attach();
+  sB.attach();
+  tR.register_shard(&sR);
+  tB.register_shard(&sB);
+  cvc::state::instance(aR)("x.secret").value(std::string("s"));
+  cvc::state::instance(aR)("x.pub").value(std::string("p"));
+
+  ASSERT_TRUE(tB.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_identified(tR, {"B"}, std::chrono::seconds(3)));
+  EXPECT_EQ(tR.total_admissions_held(), 1u);
+  EXPECT_EQ(tR.release_admissions(), 0u) << "no rule for B yet";
+  EXPECT_EQ(tR.push_snapshot_to("B", {leaf_entry("x.pushed", "1")}), 0u);
+  write_fresh(aR, "x.late", "l");
+  tR.pump_all(); // x.late goes out live, to no one
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  EXPECT_EQ(leaf(aB, "x.pub"), "<absent>") << "a held peer gets no bootstrap";
+  EXPECT_EQ(leaf(aB, "x.late"), "<absent>") << "...and no live write";
+  EXPECT_EQ(leaf(aB, "x.pushed"), "<absent>") << "...and no push";
+
+  tR.peers().add_peer("B", "C");
+  ASSERT_TRUE(tR.peers().set_filter("B", std::make_shared<deny_prefix_filter>("x.secret")));
+  EXPECT_EQ(tR.release_admissions(), 1u);
+  EXPECT_EQ(tR.release_admissions(), 0u) << "released once";
+  EXPECT_TRUE(wait_until([&] { return leaf(aB, "x.pub") == "p" && leaf(aB, "x.late") == "l"; },
+                         std::chrono::seconds(3)))
+      << "the bootstrap carries what was written during the hold";
+  EXPECT_EQ(leaf(aB, "x.secret"), "<absent>") << "the bootstrap goes through B's rule";
+  EXPECT_EQ(tR.total_admission_timeouts(), 0u);
+
+  cvc::state::instance(aR)("x.late").value(std::string("l2"));
+  tR.pump_all();
+  EXPECT_TRUE(wait_until([&] { return leaf(aB, "x.late") == "l2"; }, std::chrono::seconds(3)))
+      << "live from the release on";
+
+  tB.stop();
+  tR.stop();
+}
+
+// With backfill on (a relay that keeps its journal), the release replays the journal through the
+// peer's rule too, not only the snapshot.
+TEST(StateTransportGrpcTest, AdmissionHoldFiltersTheBackfillToo) {
+  cvc::app aR, aB;
+  cvc::state_transport_grpc tR, tB;
+  tR.set_admission_hold(std::chrono::seconds(30));
+  tR.start("127.0.0.1:0", "R", "C");
+  tR.set_relay(true);
+  tB.start("127.0.0.1:0", "B", "C");
+
+  cvc::state_cluster_shard sR(aR, "C", "R");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sR.attach();
+  sB.attach();
+  tR.register_shard(&sR);
+  tB.register_shard(&sB);
+  write_fresh(aR, "x.secret", "s");
+  write_fresh(aR, "x.pub", "p");
+
+  ASSERT_TRUE(tB.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_identified(tR, {"B"}, std::chrono::seconds(3)));
+  tR.peers().add_peer("B", "C");
+  ASSERT_TRUE(tR.peers().set_filter("B", std::make_shared<deny_prefix_filter>("x.secret")));
+  const std::uint64_t backfilled = tR.total_backfilled();
+  EXPECT_EQ(tR.release_admissions(), 1u);
+  EXPECT_TRUE(wait_until([&] { return leaf(aB, "x.pub") == "p"; }, std::chrono::seconds(3)));
+  EXPECT_GT(tR.total_backfilled(), backfilled) << "the journal was replayed";
+  EXPECT_EQ(leaf(aB, "x.secret"), "<absent>") << "...through B's rule";
+
+  tB.stop();
+  tR.stop();
+}
+
+// A peer the registry never gets a rule for is bootstrapped, unfiltered, once the hold runs out,
+// and counted as a timeout. Turning the hold off releases a held stream at the next pass.
+TEST(StateTransportGrpcTest, AdmissionHoldTimesOutUnfiltered) {
+  cvc::app aR, aB, aC;
+  cvc::state_transport_grpc tR, tB, tC;
+  tR.set_backfill_on_connect(false);
+  tR.set_admission_hold(std::chrono::milliseconds(500));
+  tR.start("127.0.0.1:0", "R", "C");
+  tR.set_relay(true);
+  tB.start("127.0.0.1:0", "B", "C");
+  tC.start("127.0.0.1:0", "C", "C");
+
+  cvc::state_cluster_shard sR(aR, "C", "R");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  cvc::state_cluster_shard sC(aC, "C", "C");
+  sR.attach();
+  sB.attach();
+  sC.attach();
+  tR.register_shard(&sR);
+  tB.register_shard(&sB);
+  tC.register_shard(&sC);
+  cvc::state::instance(aR)("x.secret").value(std::string("s"));
+
+  const auto opened = std::chrono::steady_clock::now();
+  ASSERT_TRUE(tB.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_identified(tR, {"B"}, std::chrono::seconds(3)));
+  if (std::chrono::steady_clock::now() - opened < std::chrono::milliseconds(400))
+    EXPECT_EQ(tR.release_admissions(), 0u) << "the hold has time left";
+  EXPECT_TRUE(wait_until([&] { return tR.release_admissions() == 1u; }, std::chrono::seconds(3)));
+  EXPECT_EQ(tR.total_admission_timeouts(), 1u);
+  EXPECT_TRUE(wait_until([&] { return leaf(aB, "x.secret") == "s"; }, std::chrono::seconds(3)))
+      << "no rule: the old, unfiltered bootstrap";
+
+  tR.set_admission_hold(std::chrono::seconds(30));
+  ASSERT_TRUE(tC.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_identified(tR, {"C"}, std::chrono::seconds(3)));
+  EXPECT_EQ(tR.release_admissions(), 0u);
+  tR.set_admission_hold(std::chrono::milliseconds(0));
+  EXPECT_EQ(tR.release_admissions(), 1u) << "0 releases what is held";
+  EXPECT_TRUE(wait_until([&] { return leaf(aC, "x.secret") == "s"; }, std::chrono::seconds(3)));
+  EXPECT_EQ(tR.total_admissions_held(), 2u);
+
+  tB.stop();
+  tC.stop();
+  tR.stop();
+}

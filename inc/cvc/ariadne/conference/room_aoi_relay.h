@@ -61,6 +61,12 @@ namespace conference {
 //           (aoi_snapshot::media): deliver, drop, or a thumbnail -- the first frame once the
 //           pair's decision becomes a thumbnail, then thumb_fps of them.
 //
+//   ADMISSION  a transport holding admissions (state_transport::set_admission_hold) bootstraps a
+//           newcomer only once its filter is installed: each step releases the held connections
+//           right after the filters, before the pushes, so a late joiner's admit snapshot is
+//           already filtered (no other participant's intent, no non-inner pose) and its outer
+//           pairs' first pushes, due on the step it is first seen, reach it.
+//
 // A snapshot is rebuilt only when room_aoi reports a change, and the registries and gate are
 // updated only then. aoi_params::enabled = false makes the driver a pass-through: nothing is
 // registered, every frame is delivered and nothing is pushed.
@@ -141,8 +147,10 @@ private:
 // each client gets it once, and two transports sharing the shard's one publish cursor both send
 // it); then, with TRIM_JOURNAL, the published journal is erased (shard.trim_published) -- for a
 // relay whose late joiners bootstrap from the admit snapshot, i.e. with backfill on connect off.
-// With AOI null and TRIM_JOURNAL false it is exactly that drain and publish, nothing else (SERVER
-// and NOW_S are then unused). Returns the number of mutations drained. Main loop only.
+// Between the AOI step and the drain every plane's held admissions get a release pass too (those
+// the hold timed out; a no-op for a transport not holding any). With AOI null and TRIM_JOURNAL
+// false it is otherwise exactly that drain and publish (SERVER and NOW_S are then unused). Returns
+// the number of mutations drained. Main loop only.
 std::size_t relay_room_step(cvc::state_cluster_shard &shard,
                             const std::vector<cvc::state_transport *> &planes, room_aoi_relay *aoi,
                             const cvc::ariadne::holon &server, double now_s, bool trim_journal);

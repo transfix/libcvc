@@ -136,6 +136,9 @@ int main(int argc, char **argv) {
   //                              journal backfill, and the journal is erased as it is published
   //   --media-stall-ms N         gRPC: skip a receiver whose media write has been stuck N ms
   //                              (default 40; 0 = off)
+  //   --admission-hold-ms N      hold a joiner's bootstrap until the area of interest has its
+  //                              filter, so its admit snapshot is filtered too; at most N ms, then
+  //                              unfiltered (default 2000; 0 = off; only with an area of interest)
   //   --scene default|large      the seeded scene (large: a 100 m plane of LOD meshes)
   const char *s7_env = std::getenv("CVC_ARISRV_S7");
   const char *aoi_env = std::getenv("CVC_ARISRV_AOI");
@@ -146,7 +149,7 @@ int main(int argc, char **argv) {
                                                   : s7_env;
   std::string aoiMode = (aoi_env && *aoi_env) ? aoi_env : ""; // empty: the scene's default
   std::string relayGateArg = "on", relayJournal = "trim", scene = "default";
-  std::string aoiVideoMaxArg = "0", mediaStallArg = "40";
+  std::string aoiVideoMaxArg = "0", mediaStallArg = "40", admissionHoldArg = "2000";
   for (int i = 1; i < argc; ++i) {
     const char *a = argv[i];
     auto next = [&](const char *d) { return (i + 1 < argc) ? argv[++i] : d; };
@@ -174,6 +177,8 @@ int main(int argc, char **argv) {
       relayJournal = next("trim");
     else if (!std::strcmp(a, "--media-stall-ms"))
       mediaStallArg = next("");
+    else if (!std::strcmp(a, "--admission-hold-ms"))
+      admissionHoldArg = next("");
     else if (!std::strcmp(a, "--scene"))
       scene = next("default");
   }
@@ -185,9 +190,10 @@ int main(int argc, char **argv) {
       !check_choice("--relay-journal", relayJournal, {"trim", "keep"}) ||
       !check_choice("--scene", scene, {"default", "large"}))
     return 2;
-  long aoiVideoMaxN = 0, mediaStallMs = 40;
+  long aoiVideoMaxN = 0, mediaStallMs = 40, admissionHoldMs = 2000;
   if (!check_count("--aoi-video-max", aoiVideoMaxArg, aoiVideoMaxN) ||
-      !check_count("--media-stall-ms", mediaStallArg, mediaStallMs))
+      !check_count("--media-stall-ms", mediaStallArg, mediaStallMs) ||
+      !check_count("--admission-hold-ms", admissionHoldArg, admissionHoldMs))
     return 2;
   const int aoiVideoMax = static_cast<int>((std::min)(aoiVideoMaxN, 1000000L));
   const bool s7 = s7Arg == "on";
@@ -196,6 +202,8 @@ int main(int argc, char **argv) {
   const bool relayGate = s7 && relayGateArg == "on";
   const bool trimJournal = s7 && relayJournal == "trim";
   const long stallMs = s7 ? mediaStallMs : 0L;
+  // The hold waits for a filter only the area of interest installs.
+  const long holdMs = aoiMode != "off" ? (std::min)(admissionHoldMs, 600000L) : 0L;
 
   cvc::app app;
 
@@ -219,10 +227,12 @@ int main(int argc, char **argv) {
   // The gate withholds a forwarded frame the shard below would not take; every client enforces the
   // same "conf" interest, so none of them would have applied it. Without backfill a joiner takes
   // the relay's own writes from the admit snapshot, which holds every one of them, so the journal
-  // can be trimmed as it is published (relay_room_step).
+  // can be trimmed as it is published (relay_room_step). The admission hold keeps that snapshot
+  // until the area of interest has the joiner's filter, so it is filtered like the live stream.
   state_tp.set_relay_requires_interest(relayGate);
   state_tp.set_backfill_on_connect(!trimJournal);
   state_tp.set_media_stall_drop(std::chrono::milliseconds(stallMs));
+  state_tp.set_admission_hold(std::chrono::milliseconds(holdMs));
   state_tp.start(stateListen, nodeId, "conf");
   state_tp.set_relay(true);
   cvc::state_cluster_shard shard(app, "conf", nodeId);
@@ -247,6 +257,7 @@ int main(int argc, char **argv) {
   ws_tp.set_on_connection_closed(on_departed);  // a closed browser tab leaves like a native client
   ws_tp.set_relay_requires_interest(relayGate); // as on the gRPC side, both legs of the bridge
   ws_tp.set_backfill_on_connect(!trimJournal);
+  ws_tp.set_admission_hold(std::chrono::milliseconds(holdMs));
   ws_tp.start(wsListen, nodeId, "conf");
   ws_tp.set_relay(true);
   ws_tp.register_shard(&shard);
@@ -491,10 +502,15 @@ int main(int argc, char **argv) {
       // the registries filtered; then the transports' own S7 counters (cumulative) and the
       // relay journal's size (about 0 while it is trimmed).
       unsigned long long ws_withheld = 0, ws_gated = 0, ws_backlog = 0;
+      // Admissions the hold delayed, and those it released without a filter (timed out).
+      unsigned long long held = state_tp.total_admissions_held();
+      unsigned long long held_timeouts = state_tp.total_admission_timeouts();
 #if CVC_ENABLE_WS
       ws_withheld = static_cast<unsigned long long>(ws_tp.total_relay_withheld());
       ws_gated = static_cast<unsigned long long>(ws_tp.total_media_gated());
       ws_backlog = static_cast<unsigned long long>(ws_tp.total_media_backlog_dropped());
+      held += ws_tp.total_admissions_held();
+      held_timeouts += ws_tp.total_admission_timeouts();
 #endif
       cvc::ariadne::conference::room_aoi_relay::stats st;
       if (aoi_relay)
@@ -503,7 +519,7 @@ int main(int argc, char **argv) {
           "[arisrv] aoi %s: pairs inner %zu middle %zu outer %zu | pushes %llu (%llu entries) | "
           "media full %llu thumb %llu dropped %llu | state filtered %llu | relay withheld grpc "
           "%llu ws %llu | media gated grpc %llu ws %llu, stalled %llu, backlog %llu | "
-          "journal %zu\n",
+          "admissions held %llu (timed out %llu) | journal %zu\n",
           aoiMode.c_str(), st.inner, st.middle, st.outer,
           static_cast<unsigned long long>(st.pushes),
           static_cast<unsigned long long>(st.push_entries),
@@ -513,8 +529,8 @@ int main(int argc, char **argv) {
           static_cast<unsigned long long>(st.state_filtered),
           static_cast<unsigned long long>(state_tp.total_relay_withheld()), ws_withheld,
           static_cast<unsigned long long>(state_tp.total_media_gated()), ws_gated,
-          static_cast<unsigned long long>(state_tp.total_media_stall_dropped()), ws_backlog,
-          shard.journal().size());
+          static_cast<unsigned long long>(state_tp.total_media_stall_dropped()), ws_backlog, held,
+          held_timeouts, shard.journal().size());
       std::fflush(stdout);
     }
     room_step();

@@ -290,6 +290,11 @@ public:
   // probe thread's watchdog closes a connection whose write has been blocked too long, which fails
   // the write and frees the lock (state_transport_ws::ping_loop).
   std::atomic<std::int64_t> write_started_ns{0};
+  // Waiting for its bootstrap (the admission hold): write() and try_write() fail until
+  // release_locked clears it. Set and cleared only under write_mu, so a write that saw it set
+  // happened before the release took its snapshot, and so is in it. The admission's own frames go
+  // through write_locked.
+  std::atomic<bool> held{false};
 
 #ifndef __EMSCRIPTEN__
   std::unique_ptr<websocket::stream<tcp::socket>> ws;
@@ -355,13 +360,13 @@ public:
 
   bool write(const pb::Frame &f) {
     std::lock_guard<std::mutex> lk(write_mu);
-    return write_locked(f);
+    return !held.load(std::memory_order_relaxed) && write_locked(f);
   }
 
   // Write only if no other write holds the connection right now (the link probe never waits).
   bool try_write(const pb::Frame &f) {
     std::unique_lock<std::mutex> lk(write_mu, std::try_to_lock);
-    return lk.owns_lock() && write_locked(f);
+    return lk.owns_lock() && !held.load(std::memory_order_relaxed) && write_locked(f);
   }
 
   // Bytes still unsent in this connection's OS send buffer (Linux only; 0 elsewhere). A large value
@@ -696,7 +701,7 @@ void state_transport_ws::on_connection_open(connection *c) {
   c->open = true;
   send_hello_locked(*c);
   if (!shards.empty())
-    send_backfill_locked(*c, shards);
+    send_backfill_locked(*c, shards, nullptr);
 }
 
 void state_transport_ws::stop() {
@@ -1031,7 +1036,10 @@ std::size_t state_transport_ws::write_media(const media_frame &m, const void *ex
   const std::size_t backlog_drop = _media_backlog_drop.load(std::memory_order_relaxed);
   std::size_t n = 0;
   for (auto &c : conns) {
-    if (!c || c.get() == exclude || !c->alive.load() || !c->can_write())
+    // A held connection (the admission hold) gets no media yet; skipping it here also keeps the
+    // gate from spending a thumbnail on it.
+    if (!c || c.get() == exclude || !c->alive.load() || !c->can_write() ||
+        c->held.load(std::memory_order_relaxed))
       continue;
     // Media is loss-tolerant: if this peer's send buffer is backed up (it can't keep pace with the
     // video), DROP the frame rather than let the synchronous write block the relay. A LOW threshold
@@ -1358,14 +1366,84 @@ void state_transport_ws::admit_connection(const std::shared_ptr<connection> &con
   // Hold write_mu across publication so a concurrent publish() cannot slip a newer mutation ahead
   // of the replayed older ones (the receiver's seen-set only suppresses exact repeats).
   std::lock_guard<std::mutex> wlk(conn->write_mu);
+  // The admission hold: an accepted relay connection gets its bootstrap, and live traffic, only
+  // once release_admissions() finds it ready, so the snapshot can go through the peer's rule. It is
+  // held before it is visible, and the Hello below goes through write_locked, which the hold does
+  // not stop.
+  const bool hold =
+      relay && conn->accepted && _admission_hold_ns.load(std::memory_order_relaxed) > 0;
+  if (hold) {
+    conn->held.store(true, std::memory_order_relaxed);
+    _admissions_held.fetch_add(1, std::memory_order_relaxed);
+  }
   register_connection(conn);
   send_hello_locked(*conn);
+  if (hold)
+    return;
   if (backfill && !shards.empty())
-    send_backfill_locked(*conn, shards);
+    send_backfill_locked(*conn, shards, nullptr);
   // A relay pushes its full current state so a late-joining client sees peers already in the room
   // (the live set_relay forwarding only carries writes that happen AFTER this client connects).
   if (relay && !shards.empty())
-    send_snapshot_locked(*conn, shards);
+    send_snapshot_locked(*conn, shards, nullptr);
+}
+
+void state_transport_ws::set_admission_hold(std::chrono::milliseconds max_hold) {
+  // A day at most, so the nanosecond count cannot overflow (milliseconds::max() means "long").
+  const auto capped = (std::min)(max_hold, std::chrono::milliseconds(std::chrono::hours(24)));
+  const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(capped).count();
+  _admission_hold_ns.store(ns > 0 ? static_cast<std::int64_t>(ns) : 0, std::memory_order_relaxed);
+}
+
+std::size_t state_transport_ws::release_admissions() {
+  std::vector<std::shared_ptr<connection>> held;
+  {
+    std::lock_guard<std::mutex> lk(_conns_mu);
+    for (const auto &c : _conns)
+      // A closed one stays listed until the reaper sweeps it: never bootstrap it.
+      if (c && c->alive.load() && c->held.load(std::memory_order_relaxed))
+        held.push_back(c);
+  }
+  if (held.empty())
+    return 0;
+  std::vector<state_cluster_shard *> shards;
+  {
+    std::lock_guard<std::mutex> lk(_shards_mu);
+    shards = _shards;
+  }
+  const std::int64_t hold = _admission_hold_ns.load(std::memory_order_relaxed);
+  const std::int64_t now = steady_ns();
+  std::size_t n = 0;
+  for (const auto &c : held) {
+    // The rule is read before the write lock is taken (no path holds the registry's lock and a
+    // connection's write lock together).
+    state_peer_registry::delivery_view view;
+    const std::string *pid = c->peer_id();
+    if (pid)
+      view = _peers.view_of(*pid);
+    const bool ruled = view.filtered();
+    if (!ruled && hold > 0 && now - c->opened_ns < hold)
+      continue; // no rule for the peer yet, and the hold has time left
+    std::lock_guard<std::mutex> wlk(c->write_mu);
+    if (!release_locked(*c, shards, ruled ? &view : nullptr))
+      continue;
+    if (!ruled)
+      _admission_timeouts.fetch_add(1, std::memory_order_relaxed);
+    ++n;
+  }
+  return n;
+}
+
+bool state_transport_ws::release_locked(connection &c,
+                                        const std::vector<state_cluster_shard *> &shards,
+                                        const state_peer_registry::delivery_view *view) {
+  if (!c.held.exchange(false, std::memory_order_relaxed))
+    return false;
+  if (_backfill_on_connect.load(std::memory_order_acquire) && !shards.empty())
+    send_backfill_locked(c, shards, view);
+  if (_relay.load(std::memory_order_relaxed) && !shards.empty())
+    send_snapshot_locked(c, shards, view);
+  return true;
 }
 
 void state_transport_ws::send_hello_locked(connection &c) {
@@ -1377,13 +1455,17 @@ void state_transport_ws::send_hello_locked(connection &c) {
 }
 
 void state_transport_ws::send_backfill_locked(connection &c,
-                                              const std::vector<state_cluster_shard *> &shards) {
-  // The peer's Hello has not arrived yet, so send everything and let the receiver drop what does
-  // not match its cluster or its interest set, exactly as for live traffic.
+                                              const std::vector<state_cluster_shard *> &shards,
+                                              const state_peer_registry::delivery_view *view) {
+  // At admission the peer's Hello has not arrived yet, so send everything and let the receiver
+  // drop what does not match its cluster or its interest set, exactly as for live traffic. A
+  // release from the admission hold passes the peer's rule as `view`.
   for (auto *s : shards) {
     if (s == nullptr)
       continue;
     for (const auto &m : s->replay_local()) {
+      if (view != nullptr && !view->deliver(m.path))
+        continue;
       pb::Frame f;
       encode_mutation(m, f.mutable_mutation());
       if (!c.write_locked(f))
@@ -1395,13 +1477,15 @@ void state_transport_ws::send_backfill_locked(connection &c,
 }
 
 void state_transport_ws::send_snapshot_locked(connection &c,
-                                              const std::vector<state_cluster_shard *> &shards) {
+                                              const std::vector<state_cluster_shard *> &shards,
+                                              const state_peer_registry::delivery_view *view) {
   // A relay holds the whole room tree (every client's forwarded writes land in its shard), but
   // those entries are REMOTE-origin, so send_backfill_locked's replay_local() yields nothing. Push
   // the full current snapshot instead, as an unsolicited SnapshotResponse (request_id 0), so a late
   // joiner bootstraps the peers already present. The receiver applies each entry via
-  // ingest_snapshot_entry (a bulk initial load, no conflict gate). Deliberately UNFILTERED: this
-  // goes out before the peer's Hello, so there is no identity to look a registry entry up by.
+  // ingest_snapshot_entry (a bulk initial load, no conflict gate). Without the admission hold it
+  // goes out before the peer's Hello, so there is no identity to look a registry entry up by and
+  // it is unfiltered; with it, release_admissions passes the peer's rule as `view`.
   for (auto *s : shards) {
     if (s == nullptr)
       continue;
@@ -1409,7 +1493,7 @@ void state_transport_ws::send_snapshot_locked(connection &c,
     if (snap.empty())
       continue;
     pb::Frame f;
-    fill_snapshot_response(f.mutable_snapshot_response(), snap, nullptr);
+    fill_snapshot_response(f.mutable_snapshot_response(), snap, view);
     if (!c.write_locked(f))
       return; // stream died mid-snapshot; the reader will reap it
     _sent_frames.fetch_add(1, std::memory_order_relaxed);

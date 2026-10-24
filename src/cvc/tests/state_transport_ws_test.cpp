@@ -1007,6 +1007,123 @@ TEST(StateTransportWsTest, ClientSnapshotIngestHonorsEnforcedInterest) {
   S.stop();
 }
 
+// The admission hold (as StateTransportGrpcTest.AdmissionHoldFiltersTheBootstrap): an accepted
+// connection gets the relay's Hello and nothing else until release_admissions() finds a rule for
+// its peer; then its admit snapshot goes through the rule and holds what was written meanwhile.
+TEST(StateTransportWsTest, AdmissionHoldFiltersTheBootstrap) {
+  cvc::app aS, aB;
+  cvc::state_transport_ws S, tB;
+  S.set_backfill_on_connect(false);
+  S.set_admission_hold(std::chrono::seconds(30));
+  S.start("127.0.0.1:0", "S", "C");
+  S.set_relay(true);
+
+  cvc::state_cluster_shard sS(aS, "C", "S");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sS.attach();
+  sB.attach();
+  S.register_shard(&sS);
+  tB.register_shard(&sB);
+  write_value(aS, "x.secret", "s");
+  write_value(aS, "x.pub", "p");
+
+  ASSERT_TRUE(tB.connect_to_peer(ws(S.listen_address()), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_identified(S, 1, std::chrono::milliseconds(2000)));
+  EXPECT_EQ(S.total_admissions_held(), 1u) << "held before it was visible";
+  EXPECT_EQ(S.release_admissions(), 0u) << "no rule for B yet";
+  EXPECT_EQ(S.push_snapshot_to("B", {entry("x.pushed", "1")}), 0u);
+  write_value(aS, "x.late", "l");
+  S.pump_all(); // x.late goes out live, to no one
+  S.broadcast_snapshot();
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  EXPECT_EQ(value_at(aB, "x.pub"), "") << "a held peer gets no bootstrap or re-broadcast";
+  EXPECT_EQ(value_at(aB, "x.late"), "") << "...and no live write";
+  EXPECT_EQ(value_at(aB, "x.pushed"), "") << "...and no push";
+
+  S.peers().add_peer("B", "C");
+  ASSERT_TRUE(S.peers().set_filter("B", std::make_shared<deny_prefix_filter>("x.secret")));
+  EXPECT_EQ(S.release_admissions(), 1u);
+  EXPECT_EQ(S.release_admissions(), 0u) << "released once";
+  EXPECT_TRUE(
+      wait_until([&] { return value_at(aB, "x.pub") == "p" && value_at(aB, "x.late") == "l"; },
+                 std::chrono::milliseconds(3000)))
+      << "the bootstrap carries what was written during the hold";
+  EXPECT_EQ(value_at(aB, "x.secret"), "") << "the bootstrap goes through B's rule";
+  EXPECT_EQ(S.total_admission_timeouts(), 0u);
+
+  cvc::state::instance(aS)("x.late").value(std::string("l2"));
+  S.pump_all();
+  EXPECT_TRUE(
+      wait_until([&] { return value_at(aB, "x.late") == "l2"; }, std::chrono::milliseconds(3000)))
+      << "live from the release on";
+
+  tB.stop();
+  S.stop();
+}
+
+// With backfill on (a relay that keeps its journal), the release replays the journal through the
+// peer's rule too, not only the snapshot.
+TEST(StateTransportWsTest, AdmissionHoldFiltersTheBackfillToo) {
+  cvc::app aS, aB;
+  cvc::state_transport_ws S, tB;
+  S.set_admission_hold(std::chrono::seconds(30));
+  S.start("127.0.0.1:0", "S", "C");
+  S.set_relay(true);
+
+  cvc::state_cluster_shard sS(aS, "C", "S");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sS.attach();
+  sB.attach();
+  S.register_shard(&sS);
+  tB.register_shard(&sB);
+  write_value(aS, "x.secret", "s");
+  write_value(aS, "x.pub", "p");
+
+  ASSERT_TRUE(tB.connect_to_peer(ws(S.listen_address()), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_identified(S, 1, std::chrono::milliseconds(2000)));
+  S.peers().add_peer("B", "C");
+  ASSERT_TRUE(S.peers().set_filter("B", std::make_shared<deny_prefix_filter>("x.secret")));
+  const std::uint64_t backfilled = S.total_backfilled();
+  EXPECT_EQ(S.release_admissions(), 1u);
+  EXPECT_TRUE(
+      wait_until([&] { return value_at(aB, "x.pub") == "p"; }, std::chrono::milliseconds(3000)));
+  EXPECT_GT(S.total_backfilled(), backfilled) << "the journal was replayed";
+  EXPECT_EQ(value_at(aB, "x.secret"), "") << "...through B's rule";
+
+  tB.stop();
+  S.stop();
+}
+
+// A peer with no rule is bootstrapped, unfiltered, when the hold runs out (counted as a timeout).
+TEST(StateTransportWsTest, AdmissionHoldTimesOutUnfiltered) {
+  cvc::app aS, aB;
+  cvc::state_transport_ws S, tB;
+  S.set_backfill_on_connect(false);
+  S.set_admission_hold(std::chrono::milliseconds(500));
+  S.start("127.0.0.1:0", "S", "C");
+  S.set_relay(true);
+
+  cvc::state_cluster_shard sS(aS, "C", "S");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sS.attach();
+  sB.attach();
+  S.register_shard(&sS);
+  tB.register_shard(&sB);
+  write_value(aS, "x.secret", "s");
+
+  ASSERT_TRUE(tB.connect_to_peer(ws(S.listen_address()), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_identified(S, 1, std::chrono::milliseconds(2000)));
+  EXPECT_TRUE(
+      wait_until([&] { return S.release_admissions() == 1u; }, std::chrono::milliseconds(3000)));
+  EXPECT_EQ(S.total_admission_timeouts(), 1u);
+  EXPECT_TRUE(
+      wait_until([&] { return value_at(aB, "x.secret") == "s"; }, std::chrono::milliseconds(3000)))
+      << "no rule: the old, unfiltered bootstrap";
+
+  tB.stop();
+  S.stop();
+}
+
 #if defined(CVC_ENABLE_GRPC)
 // The WS<->gRPC bridge (the wasm-interop payoff): a relay runs a gRPC acceptor AND a WebSocket
 // acceptor over the SAME shard, bridged both ways. A native WS client and a native gRPC client each

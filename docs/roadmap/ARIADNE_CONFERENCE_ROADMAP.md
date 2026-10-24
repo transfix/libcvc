@@ -274,9 +274,9 @@ grants for the *client-local* document sandbox.
    authority from the connection, not a self-asserted `origin_node_id`.
 2. **Admission hook** — at join/snapshot: allocate `pid`, grant scope, check capacity/ban/role, and
    gate what subtree a peer may pull (snapshot currently serves everything). *S7 (§5h.1) shapes the gRPC
-   snapshot reply and the WebSocket broadcast by the requester's registry filter, but that is delivery
-   policy, not access control — a peer with no filter still gets everything — and the admit snapshot,
-   sent before Hello, is still unfiltered.*
+   snapshot reply, the WebSocket broadcast and, with the admission hold, a joiner's admit snapshot by
+   the receiver's registry filter. That is delivery policy, not access control: a peer that never gets
+   a filter (one that never joins) is still bootstrapped with everything once the hold times out.*
 3. **Server-mediated write path** — the intent channel + validator + sole-writer discipline (§5d).
 4. **Roster primitive** — immediate-children enumeration, `pid` allocation, presence/heartbeat reaping
    of participant subtrees (drive `expireAt`).
@@ -522,12 +522,13 @@ false)` is the old drain-and-publish exactly); arisrv and arigl turn them on.
 
 | Switch | Default | Effect |
 |---|---|---|
-| `arisrv --s7 on\|off` / `CVC_ARISRV_S7=0\|1\|on\|off` | on | **master kill switch**: off forces `--aoi off`, gate off, journal keep, stall drop 0 — the pre-S7 relay (plus the disabled `aoi.*` leaves) |
+| `arisrv --s7 on\|off` / `CVC_ARISRV_S7=0\|1\|on\|off` | on | **master kill switch**: off forces `--aoi off`, gate off, journal keep, stall drop 0, no admission hold — the pre-S7 relay (plus the disabled `aoi.*` leaves) |
 | `--aoi off\|conference\|hall` / `CVC_ARISRV_AOI` | conference (hall with `--scene large`) | off: no filters, pushes or media gate; `aoi.enabled` 0 |
 | `--aoi-video-max K` | 0 (all) | opt-in nearest-*K* full-rate cameras; the rest of the inner peers as thumbnails |
 | `--relay-gate on\|off` | on | off: forward every client frame |
 | `--relay-journal trim\|keep` | trim | keep: journal backfill on connect, no trim |
 | `--media-stall-ms N` | 40 | gRPC stall drop; 0 = off |
+| `--admission-hold-ms N` | 2000 (only with an AOI) | hold a joiner's bootstrap for its filter, at most N ms; 0 = off (the admit snapshot goes out unfiltered, before Hello) |
 | `--scene default\|large` | default | the seeded scene; not an S7 switch (honoured under `--s7 off`) |
 | `CVC_ARISRV_ROOM_DEBUG=1` | off | adds an `[arisrv] aoi` stats line every ~5 s |
 | `CVC_ARIGL_REPLICATE_ROOT` (arigl) | unset = `conf` | empty or `*`: replicate the whole tree (the S6 A/B) |
@@ -554,10 +555,40 @@ it from everyone else), plays every peer at gain 1, draws the large scene's bunn
 on their side) and pose-less peers at the origin. An S7 client on a pre-S7 relay finds no `aoi.*`
 subtree and plays at gain 1.
 
+**Admission hold** (after S7, stacked on it). The admit snapshot used to go out the moment a
+connection opened, before its Hello and before the relay had a filter for the joiner, so a late
+joiner saw every participant's *current* intent once, plus the non-inner poses and ghost leftovers
+the live filters withhold.
+- **How the hold works:** `state_transport::set_admission_hold` keeps an accepted relay connection
+  silent after the relay's Hello. It gets no bootstrap, push, live write, re-broadcast or media.
+- **When it is released:** the AOI's step installs the newcomer's filter, which happens once its join
+  arrives. Right after that, and before the step's pose pushes, `release_admissions()` sends the
+  admit snapshot through the filter, under the connection's write lock, and live traffic begins.
+- **What the joiner sees:** inner peers come from the snapshot. Outer peers come from the pushes a new
+  outer pair is owed on its first step, so they arrive in that same step.
+- **Timeout:** a connection whose peer never gets a filter, because it never joins, is bootstrapped
+  unfiltered once the hold (2 s) runs out. Such releases count as timeouts in `total_admission_timeouts()`
+  and in arisrv's AOI line.
+- **Tested by** `RoomRelayLoopbackTest.LateJoinerBootstrapIsFiltered`, and
+  `AdmissionHold*` in both transport suites.
+
 **Known limits.**
-* The admit snapshot a connection gets before its Hello is unfiltered (there is no identity to filter
-  by yet), so a late joiner sees every participant's *current* intent once, and the non-inner poses
-  and ghost leftovers the live filters would withhold. Live traffic after that is filtered.
+* **Observers:** a connection that never joins waits out the admission hold, then gets the
+  unfiltered admit snapshot, as every joiner did before.
+* **What a held connection loses** (a step at most): anything that never reaches the tree. That
+  means `state_message`s and delegation ops sent during the hold, and the replies to its own Pings or
+  snapshot requests. `distributed_state_session`'s `snapshot_on_join` would wait out its timeout
+  against a holding relay. The room's clients use neither.
+* **Main-loop cost:** the release writes the bootstrap on the relay's main loop. A joiner slow to read
+  holds that step up to the 3 s write watchdog. Before the hold, the main loop's publish waited on the
+  joiner's write lock while the admit snapshot was written on the accept or handler thread, so the
+  stall itself is not new.
+* **The joiner's own leaves:** the bootstrap now arrives after the join, so it carries the joiner's
+  own leaves. A leaf the joiner rewrote in the meantime takes the relay's older copy locally, until
+  it next writes it. Snapshot entries carry no origin to skip them by. The relay is right and arigl
+  predicts from its holon.
+* **Filter-install race (not new):** a forward that checked the registry just before a newcomer's
+  filter was installed can still deliver one unfiltered frame just after the release.
 * A process that restarts under the node id of a live session has its writes ignored until the relay
   restarts (replication drops an `(origin, sequence)` it has seen), which is why arigl takes a fresh id
   per launch. An in-process reconnect keeps its id and its sequence, and works: the relay withholds the
@@ -593,8 +624,9 @@ reconcile-correction sum varies two-fold between identical runs, so it says noth
   server's.
 * Client- or camera-declared interest (a fly camera far from the avatar; a client want-list plus a relay
   clamp) and a grid-hash AOI broad phase for N > ~200 → **H3**, on S7's registry filter.
-* Admission-scoped bootstrap (the admit snapshot goes out before Hello, unfiltered) → **§5e item 2**.
-  Bootstrap ghost trim and hard reaping of departed subtrees → **Phase 2 / §5e item 4**.
+* Admission-scoped bootstrap as access control (a pid bound to its connection, a scope grant) → **§5e
+  items 1–2**. The *delivery* half, a filtered admit snapshot, landed with the admission hold above.
+  Hard reaping of departed subtrees → **Phase 2 / §5e item 4**.
 * A video subscription matching visible cam tiles, simulcast/resolution tiers, inter codecs, stereo
   panning, an "out of range" tile placeholder; peer-staleness hiding (reconciled with the 5 s outer
   refresh) → **Phase 7**.

@@ -88,8 +88,16 @@ control: a peer with no filter still receives everything.
   the WebSocket ~1 Hz `broadcast_snapshot` (unidentified or unfiltered
   connections share one unfiltered frame per shard; each filtered connection
   gets its own). A skip is counted by `note_delivery_filtered`. The admit
-  snapshot (`send_snapshot_locked`) stays unfiltered by design: it goes out
-  before the peer's Hello. On the client side, unsolicited-snapshot ingest
+  snapshot (`send_snapshot_locked`) goes out before the peer's Hello, so it
+  is unfiltered, unless the relay holds admissions. With
+  `set_admission_hold(max)` an accepted relay connection gets its Hello and
+  nothing else (no bootstrap, push, live write, re-broadcast or media) until
+  `release_admissions()` finds its peer identified with a registry rule, or
+  `max` has passed. The release takes the snapshot through that rule under
+  the connection's write lock. The flag that holds a connection is checked
+  under that lock too, so a write the hold dropped is in the snapshot. The
+  counters are `total_admissions_held()` and `total_admission_timeouts()`.
+  On the client side, unsolicited-snapshot ingest
   now skips entries a shard with enforced interest would reject, so a
   relay's whole-tree snapshot no longer writes outside the client's interest.
 - **Targeted snapshot push** — `state_transport::push_snapshot_to(node_id,

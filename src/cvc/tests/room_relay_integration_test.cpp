@@ -226,12 +226,14 @@ struct relay_options {
   bool trim = true;         // trim the journal and no backfill on connect (--relay-journal trim)
   bool large_scene = false; // a 100 m plane instead of the 20 m room (where hall has room)
   bool ws_broadcast = true; // arisrv's ~1 Hz WebSocket re-broadcast of the room tree
+  bool hold = true;         // hold each admission for its filter (--admission-hold-ms; AOI only)
 };
 
 // The relay, as arisrv builds it, stepped by the test.
 class test_relay {
 public:
   explicit test_relay(relay_options o) : opt(std::move(o)) {
+    const std::chrono::milliseconds hold(opt.use_aoi && opt.hold ? 2000 : 0);
     shard = std::make_unique<cvc::state_cluster_shard>(app, "conf", kRelayId);
     shard->add_interest("conf");
     shard->set_enforce_interest(true);
@@ -247,6 +249,7 @@ public:
     grpc.set_on_connection_closed(on_departed);
     grpc.set_relay_requires_interest(opt.gate);
     grpc.set_backfill_on_connect(!opt.trim);
+    grpc.set_admission_hold(hold);
     grpc.start("127.0.0.1:0", kRelayId, "conf");
     grpc.set_relay(true);
     grpc.register_shard(shard.get());
@@ -258,6 +261,7 @@ public:
     ws.set_relay_requires_interest(opt.gate);
     ws.set_backfill_on_connect(!opt.trim);
     ws.set_media_backlog_drop(0); // lossless media: the note by the frame sizes above
+    ws.set_admission_hold(hold);
     ws.start("127.0.0.1:0", kRelayId, "conf");
     ws.set_relay(true);
     ws.register_shard(shard.get());
@@ -436,6 +440,27 @@ public:
 #endif
 #if defined(CVC_ENABLE_WS)
     n += ws.total_backfilled();
+#endif
+    return n;
+  }
+  // Admissions the hold delayed, and those it released without a filter (timed out).
+  std::uint64_t admissions_held() const {
+    std::uint64_t n = 0;
+#if defined(CVC_ENABLE_GRPC)
+    n += grpc.total_admissions_held();
+#endif
+#if defined(CVC_ENABLE_WS)
+    n += ws.total_admissions_held();
+#endif
+    return n;
+  }
+  std::uint64_t admission_timeouts() const {
+    std::uint64_t n = 0;
+#if defined(CVC_ENABLE_GRPC)
+    n += grpc.total_admission_timeouts();
+#endif
+#if defined(CVC_ENABLE_WS)
+    n += ws.total_admission_timeouts();
 #endif
     return n;
   }
@@ -1178,10 +1203,12 @@ TEST(RoomRelayLoopbackTest, ReconnectUnderSamePidGetsZeroedIntent) {
     return !r.server.has_participant("A") && relay_intent_x(x) && x == 0.0;
   })) << "the relay retracts A and zeroes its intent";
 
+  // It never joins, so no filter is installed for it and the admission hold releases it only when
+  // the hold (2 s) runs out, unfiltered.
   test_client again("A", kind);
   ASSERT_TRUE(again.connect(r));
   cvc::ariadne::avatar_intent got;
-  ASSERT_TRUE(run_room(r, cs, 3.0, {}, [&] {
+  ASSERT_TRUE(run_room(r, cs, 6.0, {}, [&] {
     return cvc::ariadne::read_intent(again.app, kRoom, "A", got);
   })) << "the bootstrap carries A's own intent";
   EXPECT_EQ(got.move.x, 0.0) << "zeroed, not the walk proposed before the drop";
@@ -1197,6 +1224,100 @@ TEST(RoomRelayLoopbackTest, ReconnectUnderSamePidGetsZeroedIntent) {
   EXPECT_LT(std::hypot(v.x, v.y), 0.05) << "the relaunch stands where it spawned";
   EXPECT_EQ(B.tap.intents("A"), 0u) << "B never received A's intent";
   EXPECT_EQ(B.tap.intents("A_2"), 0u);
+}
+
+namespace {
+
+struct bootstrap_run {
+  std::uint64_t intents = 0; // other participants' intent leaves the late joiner applied
+  std::uint64_t held = 0;    // its admission: held, and released by the timeout
+  std::uint64_t timeouts = 0;
+  bool knows_all = false;       // it came to hold every other participant's pose
+  double seconds = -1.0;        // from its join to that
+  double outer_error = -1.0;    // its view of the outer peer C against the relay's
+  std::uint64_t outer_live = 0; // live pose frames it got for C
+};
+
+// Hall preset: A and B walk (each proposing an intent) 4 m apart and C stands 30 m off; then D
+// joins between A and B, so they are inner for it and C is outer. HOLD: the relay holds each
+// admission for its filter, as arisrv does.
+bootstrap_run run_late_bootstrap(bool hold) {
+  bootstrap_run out;
+  relay_options o;
+  o.aoi = ra::hall_aoi_params();
+  o.large_scene = true;
+  o.hold = hold;
+  test_relay r(o);
+  client_list own = make_clients({"A", "B", "C", "D"});
+  test_client &A = *own[0], &B = *own[1], &C = *own[2], &D = *own[3];
+  r.place_on_join = {
+      {"A", {-2.0, 10.0}}, {"B", {2.0, 10.0}}, {"C", {32.0, 10.0}}, {"D", {0.0, 12.0}}};
+  std::vector<test_client *> cs{&A, &B, &C};
+  bring_up(r, cs);
+  if (::testing::Test::HasFatalFailure())
+    return out;
+  cvc::ariadne::avatar_intent walk;
+  walk.move = {0.3, 0.0, 0.0};
+  cvc::ariadne::write_intent(A.app, kRoom, "A", walk);
+  walk.move = {-0.3, 0.0, 0.0};
+  cvc::ariadne::write_intent(B.app, kRoom, "B", walk);
+  cvc::ariadne::avatar_intent got;
+  EXPECT_TRUE(run_room(r, cs, 3.0, {}, [&] {
+    return cvc::ariadne::read_intent(r.app, kRoom, "B", got) && got.move.x < -0.2;
+  })) << "the relay holds the walkers' intents";
+
+  const std::uint64_t held = r.admissions_held(), timeouts = r.admission_timeouts();
+  if (!D.connect(r)) {
+    ADD_FAILURE() << "D could not reach the relay";
+    return out;
+  }
+  D.join();
+  cs.push_back(&D);
+  const double t0 = now_s();
+  out.knows_all = run_room(r, cs, 4.0, {}, [&] {
+    return D.h.pose_known("A") && D.h.pose_known("B") && D.h.pose_known("C");
+  });
+  out.seconds = now_s() - t0;
+  run_room(r, cs, 0.3);
+  out.intents = D.tap.intents("A") + D.tap.intents("B") + D.tap.intents("C");
+  out.held = r.admissions_held() - held;
+  out.timeouts = r.admission_timeouts() - timeouts;
+  cvc::physics::body_state rs, ds;
+  std::uint64_t rt = 0, dt = 0;
+  if (r.tree_pose("C", rs, rt) && D.tree_pose("C", ds, dt))
+    out.outer_error = xy_distance(rs.position, ds.position);
+  out.outer_live = D.tap.live_pose("C");
+  EXPECT_EQ(r.tier("D", "C"), ra::aoi_tier::outer);
+  EXPECT_EQ(r.tier("D", "A"), ra::aoi_tier::inner);
+  return out;
+}
+
+} // namespace
+
+// A late joiner's admit snapshot is filtered like its live stream. Without the admission hold it
+// goes out before the relay knows who the joiner is, so it carries the walkers' intents (and the
+// outer peer's pose) once; with the hold it waits a step for the joiner's filter, then carries no
+// other participant's intent, and the outer peer arrives by the push its new outer pair is owed,
+// in the same step.
+TEST(RoomRelayLoopbackTest, LateJoinerBootstrapIsFiltered) {
+  const bootstrap_run off = run_late_bootstrap(false);
+  ASSERT_FALSE(HasFatalFailure());
+  const bootstrap_run on = run_late_bootstrap(true);
+  ASSERT_FALSE(HasFatalFailure());
+  std::printf("[ room ] late joiner: others' intent leaves %llu without the hold, %llu with it; "
+              "every pose in %.2f s, %.2f s\n",
+              static_cast<unsigned long long>(off.intents),
+              static_cast<unsigned long long>(on.intents), off.seconds, on.seconds);
+  EXPECT_GT(off.intents, 0u) << "without the hold the bootstrap carries the others' intents";
+  EXPECT_EQ(on.intents, 0u) << "with it, not one";
+  EXPECT_EQ(off.held, 0u);
+  EXPECT_EQ(on.held, 1u);
+  EXPECT_EQ(on.timeouts, 0u) << "its filter released it, not the timeout";
+  EXPECT_TRUE(on.knows_all);
+  EXPECT_LT(on.seconds, 1.0) << "a step and a round trip, well inside the 2 s hold";
+  EXPECT_GE(on.outer_error, 0.0);
+  EXPECT_LE(on.outer_error, 1e-4) << "the outer peer, from the push";
+  EXPECT_EQ(on.outer_live, 0u);
 }
 
 namespace {
@@ -1239,6 +1360,7 @@ late_join_run run_late_join(bool trim) {
   relay_options o;
   o.trim = trim;
   o.ws_broadcast = false; // only the joins' own bytes
+  o.hold = false;         // the joiners never join, so a hold would only wait out its 2 s
   test_relay r(o);
   const client_list own = make_clients({"A", "B"});
   const std::vector<test_client *> cs = ptrs(own);

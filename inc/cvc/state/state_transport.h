@@ -218,6 +218,22 @@ public:
     return 0;
   }
 
+  // Admission hold (a relay; off, 0, by default). With `max_hold` > 0, a connection the relay
+  // ACCEPTS gets its Hello at once but no bootstrap (backfill or admit snapshot) and no live
+  // traffic until release_admissions() finds it ready. It is ready once its peer has identified
+  // (Hello) and this transport's registry has a delivery rule for it, or once the hold has lasted
+  // `max_hold`. It is then bootstrapped in one step under its write lock: the admit snapshot
+  // filtered by that rule, then the live stream. A relay whose area of interest installs a
+  // participant's filter only after its join arrives (which follows the Hello) holds admissions,
+  // so a late joiner's first view is already the filtered one. Setting 0 releases every held
+  // connection at the next release_admissions(). Default: not supported (ignored).
+  virtual void set_admission_hold(std::chrono::milliseconds max_hold) { (void)max_hold; }
+  // Bootstrap every held connection that is ready (see set_admission_hold). Returns the number
+  // released. A relay that holds admissions calls it every room step: room_aoi_relay::step does,
+  // between installing filters and the pose pushes, and relay_room_step does after it. Same thread
+  // as publish(). Default: 0.
+  virtual std::size_t release_admissions() { return 0; }
+
   // -------- Transport bridge (wasm interop) --------
   //
   // Link this transport to a sibling of a DIFFERENT backend — e.g. a gRPC transport and a

@@ -331,11 +331,15 @@ public:
   std::atomic<std::int64_t> write_started_ns{0};
   std::mutex cancel_mu;
   std::function<void()> cancel;
+  // Waiting for its bootstrap (the admission hold): every write fails until release_locked clears
+  // it. Set and cleared only under write_mu, so a write that saw it set happened before the release
+  // took its snapshot, and so is in it.
+  std::atomic<bool> held{false};
 
   bool can_write() const { return static_cast<bool>(write_raw); }
 
   bool write_locked(const pb::Frame &f) {
-    if (!alive.load() || !write_raw)
+    if (!alive.load() || !write_raw || held.load(std::memory_order_relaxed))
       return false;
     const std::size_t bytes = f.ByteSizeLong();
     write_started_ns.store(link_now_ns(), std::memory_order_relaxed);
@@ -1009,7 +1013,10 @@ std::size_t state_transport_grpc::write_media(const media_frame &m, const void *
   // path. `exclude` (a connection*) skips the origin peer when a relay fans; nullptr sends to all.
   std::size_t n = 0;
   for (auto &c : conns) {
-    if (!c || c.get() == exclude || !c->alive.load() || !c->can_write())
+    // A held connection (the admission hold) gets no media yet; skipping it here, unlocked, also
+    // keeps the gate from spending a thumbnail on it.
+    if (!c || c.get() == exclude || !c->alive.load() || !c->can_write() ||
+        c->held.load(std::memory_order_relaxed))
       continue;
     std::unique_lock<std::timed_mutex> lk(c->write_mu, std::defer_lock);
     if (stall_ns != 0) {
@@ -1118,15 +1125,79 @@ void state_transport_grpc::admit_connection(const std::shared_ptr<connection> &c
   std::lock_guard<std::timed_mutex> wlk(conn->write_mu);
   register_connection(conn);
   send_hello_locked(*conn);
+  // The admission hold: an accepted relay stream gets its bootstrap, and live traffic, only once
+  // release_admissions() finds it ready, so the snapshot can go through the peer's delivery rule.
+  if (relay && conn->accepted && _admission_hold_ns.load(std::memory_order_relaxed) > 0) {
+    conn->held.store(true, std::memory_order_relaxed);
+    _admissions_held.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
   if (backfill && !shards.empty())
-    send_backfill_locked(*conn, shards);
+    send_backfill_locked(*conn, shards, nullptr);
   // A relay pushes its full current state so a LATE-joining client sees peers already in the room
   // (the live set_relay forwarding only carries writes that happen AFTER this client connects, and
   // the relay's room tree is all remote-origin so backfill's replay_local yields nothing). Mirrors
   // the WS relay's send_snapshot_locked — without it a native gRPC client joining a populated room
   // sees no one.
   if (relay && !shards.empty())
-    send_snapshot_locked(*conn, shards);
+    send_snapshot_locked(*conn, shards, nullptr);
+}
+
+void state_transport_grpc::set_admission_hold(std::chrono::milliseconds max_hold) {
+  // A day at most, so the nanosecond count cannot overflow (milliseconds::max() means "long").
+  const auto capped = (std::min)(max_hold, std::chrono::milliseconds(std::chrono::hours(24)));
+  const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(capped).count();
+  _admission_hold_ns.store(ns > 0 ? static_cast<std::int64_t>(ns) : 0, std::memory_order_relaxed);
+}
+
+std::size_t state_transport_grpc::release_admissions() {
+  std::vector<std::shared_ptr<connection>> held;
+  {
+    std::lock_guard<std::mutex> lk(_conns_mu);
+    for (const auto &c : _conns)
+      if (c && c->alive.load() && c->held.load(std::memory_order_relaxed))
+        held.push_back(c);
+  }
+  if (held.empty())
+    return 0;
+  std::vector<state_cluster_shard *> shards;
+  {
+    std::lock_guard<std::mutex> lk(_shards_mu);
+    shards = _shards;
+  }
+  const std::int64_t hold = _admission_hold_ns.load(std::memory_order_relaxed);
+  const std::int64_t now = link_now_ns();
+  std::size_t n = 0;
+  for (const auto &c : held) {
+    // The rule is read before the write lock is taken (no path holds the registry's lock and a
+    // connection's write lock together).
+    state_peer_registry::delivery_view view;
+    const std::string *pid = c->peer_id();
+    if (pid)
+      view = _peers.view_of(*pid);
+    const bool ruled = view.filtered();
+    if (!ruled && hold > 0 && now - c->opened_ns < hold)
+      continue; // no rule for the peer yet, and the hold has time left
+    std::lock_guard<std::timed_mutex> wlk(c->write_mu);
+    if (!release_locked(*c, shards, ruled ? &view : nullptr))
+      continue;
+    if (!ruled)
+      _admission_timeouts.fetch_add(1, std::memory_order_relaxed);
+    ++n;
+  }
+  return n;
+}
+
+bool state_transport_grpc::release_locked(connection &c,
+                                          const std::vector<state_cluster_shard *> &shards,
+                                          const state_peer_registry::delivery_view *view) {
+  if (!c.held.exchange(false, std::memory_order_relaxed))
+    return false;
+  if (_backfill_on_connect.load(std::memory_order_acquire) && !shards.empty())
+    send_backfill_locked(c, shards, view);
+  if (_relay.load(std::memory_order_relaxed) && !shards.empty())
+    send_snapshot_locked(c, shards, view);
+  return true;
 }
 
 void state_transport_grpc::send_hello_locked(connection &c) {
@@ -1138,15 +1209,19 @@ void state_transport_grpc::send_hello_locked(connection &c) {
 }
 
 void state_transport_grpc::send_backfill_locked(connection &c,
-                                                const std::vector<state_cluster_shard *> &shards) {
-  // The peer's Hello has not arrived yet, so there is no remote node
-  // id to filter on; send everything and let the receiver drop what
-  // does not match its cluster (on_inbound_mutation) or its interest
-  // set (ingest_remote), exactly as it would for live traffic.
+                                                const std::vector<state_cluster_shard *> &shards,
+                                                const state_peer_registry::delivery_view *view) {
+  // At admission the peer's Hello has not arrived yet, so there is no
+  // remote node id to filter on; send everything and let the receiver
+  // drop what does not match its cluster (on_inbound_mutation) or its
+  // interest set (ingest_remote), exactly as it would for live traffic.
+  // A release from the admission hold passes the peer's rule as `view`.
   for (auto *s : shards) {
     if (s == nullptr)
       continue;
     for (const auto &m : s->replay_local()) {
+      if (view != nullptr && !view->deliver(m.path))
+        continue;
       pb::Frame f;
       encode_mutation(m, f.mutable_mutation());
       if (!c.write_locked(f))
@@ -1158,7 +1233,8 @@ void state_transport_grpc::send_backfill_locked(connection &c,
 }
 
 void state_transport_grpc::send_snapshot_locked(connection &c,
-                                                const std::vector<state_cluster_shard *> &shards) {
+                                                const std::vector<state_cluster_shard *> &shards,
+                                                const state_peer_registry::delivery_view *view) {
   // Relay-only: push the full CURRENT snapshot of each shard as an unsolicited SnapshotResponse
   // (request_id 0), so a late joiner bootstraps the peers already present. replay_local() cannot do
   // this on a relay because the room tree it holds is all remote-origin (forwarded from clients).
@@ -1166,8 +1242,9 @@ void state_transport_grpc::send_snapshot_locked(connection &c,
   // (ingest_snapshot_ entry, a bulk initial load). Mirrors
   // state_transport_ws::send_snapshot_locked.
   //
-  // Unfiltered by design: this goes out before the peer's Hello, so there is no identity to look up
-  // in the registry; the receiver keeps only what its own interest takes.
+  // Without the admission hold this goes out before the peer's Hello, so there is no identity to
+  // look up in the registry and it is unfiltered: the receiver keeps only what its own interest
+  // takes. With it, release_admissions passes the peer's rule as `view`.
   for (auto *s : shards) {
     if (s == nullptr)
       continue;
@@ -1178,7 +1255,7 @@ void state_transport_grpc::send_snapshot_locked(connection &c,
     auto *rsp = f.mutable_snapshot_response();
     rsp->set_request_id(0);
     rsp->set_final(true);
-    fill_snapshot_response(rsp, snap, /*view=*/nullptr);
+    fill_snapshot_response(rsp, snap, view);
     if (!c.write_locked(f))
       return; // stream died mid-snapshot; the reader will reap it
     _sent_frames.fetch_add(1, std::memory_order_relaxed);

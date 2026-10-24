@@ -227,6 +227,13 @@ public:
   // encoded, when none matches or `entries` is empty.
   std::size_t push_snapshot_to(const std::string &node_id,
                                const std::vector<snapshot_entry> &entries) override;
+  // See state_transport::set_admission_hold. Applies to the connections this relay accepts.
+  void set_admission_hold(std::chrono::milliseconds max_hold) override;
+  std::size_t release_admissions() override;
+  // Connections whose bootstrap the hold delayed, and those of them it released without a delivery
+  // rule for the peer (the hold ran out, or was turned off).
+  std::uint64_t total_admissions_held() const noexcept { return _admissions_held.load(); }
+  std::uint64_t total_admission_timeouts() const noexcept { return _admission_timeouts.load(); }
 
   // ── Diagnostics ──
   std::size_t shard_count() const;
@@ -256,7 +263,8 @@ public:
   void register_connection(std::shared_ptr<connection> conn);
   // Register `conn`, then (holding conn's write lock) send Hello and, if enabled,
   // the backfill, so a publish() racing on another thread cannot interleave a
-  // newer mutation ahead of the replayed older ones.
+  // newer mutation ahead of the replayed older ones. Under the admission hold an
+  // accepted relay connection gets only the Hello here (release_admissions).
   void admit_connection(const std::shared_ptr<connection> &conn);
   void unregister_connection(connection *conn);
   void increment_recv_frames() noexcept { _recv_frames.fetch_add(1, std::memory_order_relaxed); }
@@ -273,11 +281,20 @@ private:
   // first. Returns the number written. Backs publish_media_frame (ungated) and fan_media (gated).
   std::size_t write_media(const media_frame &m, const void *exclude, bool gated);
   void send_hello_locked(connection &c);
-  void send_backfill_locked(connection &c, const std::vector<state_cluster_shard *> &shards);
+  // Replay each shard's journaled local writes (backfill on connect); with `view`, only the ones
+  // that rule delivers.
+  void send_backfill_locked(connection &c, const std::vector<state_cluster_shard *> &shards,
+                            const state_peer_registry::delivery_view *view);
   // Relay-only: push the full CURRENT snapshot of each shard to a newly admitted connection, so a
   // late joiner sees peers already present. replay_local() cannot do this on a relay because the
-  // room tree it holds is all remote-origin (forwarded from clients), not local.
-  void send_snapshot_locked(connection &c, const std::vector<state_cluster_shard *> &shards);
+  // room tree it holds is all remote-origin (forwarded from clients), not local. With `view`, only
+  // what that rule delivers.
+  void send_snapshot_locked(connection &c, const std::vector<state_cluster_shard *> &shards,
+                            const state_peer_registry::delivery_view *view);
+  // Bootstrap a held connection (backfill, then the snapshot through `view`) and let live traffic
+  // reach it. False when it was no longer held.
+  bool release_locked(connection &c, const std::vector<state_cluster_shard *> &shards,
+                      const state_peer_registry::delivery_view *view);
 
   // Server accept loop (native) and the per-connection reader loop, both run on their own threads.
   // Defined in the impl TU (it owns the proto parse + the Beast read/write); no-op under wasm.
@@ -326,6 +343,9 @@ private:
   // Receiver deliveries the backlog drop skipped, and its threshold in bytes (0 = off).
   std::atomic<std::uint64_t> _media_backlog_dropped{0};
   std::atomic<std::size_t> _media_backlog_drop{kDefaultMediaBacklogDrop};
+  std::atomic<std::int64_t> _admission_hold_ns{0}; // 0 = admit at once
+  std::atomic<std::uint64_t> _admissions_held{0};
+  std::atomic<std::uint64_t> _admission_timeouts{0};
 
   std::atomic<std::uint64_t> _published{0};
   std::atomic<std::uint64_t> _sent_frames{0};

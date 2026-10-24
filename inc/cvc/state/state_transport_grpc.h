@@ -249,6 +249,13 @@ public:
   // to a peer that stopped reading is bounded by the write watchdog.
   std::size_t push_snapshot_to(const std::string &node_id,
                                const std::vector<snapshot_entry> &entries) override;
+  // See state_transport::set_admission_hold. Applies to the streams this relay accepts.
+  void set_admission_hold(std::chrono::milliseconds max_hold) override;
+  std::size_t release_admissions() override;
+  // Connections whose bootstrap the hold delayed, and those of them it released without a delivery
+  // rule for the peer (the hold ran out, or was turned off).
+  std::uint64_t total_admissions_held() const noexcept { return _admissions_held.load(); }
+  std::uint64_t total_admission_timeouts() const noexcept { return _admission_timeouts.load(); }
 
   // Diagnostics.
   std::size_t shard_count() const;
@@ -299,7 +306,8 @@ public:
   // Register `conn`, then send Hello and (if enabled) the backfill,
   // all while holding conn->write_mu so that a publish() racing on
   // another thread cannot slip a newer mutation in ahead of the
-  // older ones being replayed.
+  // older ones being replayed. Under the admission hold an accepted
+  // relay stream gets only the Hello here (release_admissions).
   void admit_connection(const std::shared_ptr<connection> &conn);
   void unregister_connection(connection *conn);
   // A server-side stream ended: fire the connection-closed handler for its peer (see
@@ -327,11 +335,19 @@ private:
                     const std::vector<state_cluster_shard *> &shards) const;
   bool relay_admits(const state_message &m, const std::vector<state_cluster_shard *> &shards) const;
   void send_hello_locked(connection &c);
-  void send_backfill_locked(connection &c, const std::vector<state_cluster_shard *> &shards);
+  // Replay each shard's journaled local writes (backfill on connect); with `view`, only the ones
+  // that rule delivers.
+  void send_backfill_locked(connection &c, const std::vector<state_cluster_shard *> &shards,
+                            const state_peer_registry::delivery_view *view);
   // Relay-only: push the full CURRENT snapshot of each shard to a newly admitted connection, so a
   // late joiner sees peers already present (the room tree is all remote-origin, so backfill carries
-  // nothing).
-  void send_snapshot_locked(connection &c, const std::vector<state_cluster_shard *> &shards);
+  // nothing). With `view`, only what that rule delivers.
+  void send_snapshot_locked(connection &c, const std::vector<state_cluster_shard *> &shards,
+                            const state_peer_registry::delivery_view *view);
+  // Bootstrap a held connection (backfill, then the snapshot through `view`) and let live traffic
+  // reach it. False when it was no longer held.
+  bool release_locked(connection &c, const std::vector<state_cluster_shard *> &shards,
+                      const state_peer_registry::delivery_view *view);
 
   struct impl;
   std::unique_ptr<impl> _impl;
@@ -375,6 +391,9 @@ private:
   std::atomic<std::uint64_t> _media_gated{0};
   std::atomic<std::uint64_t> _media_stall_ns{0};
   std::atomic<std::uint64_t> _media_stall_dropped{0};
+  std::atomic<std::int64_t> _admission_hold_ns{0}; // 0 = admit at once
+  std::atomic<std::uint64_t> _admissions_held{0};
+  std::atomic<std::uint64_t> _admission_timeouts{0};
 
   state_blob_store *_blob_store = nullptr;
 
