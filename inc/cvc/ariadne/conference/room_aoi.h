@@ -169,9 +169,9 @@ private:
   bool _enabled = true;
   bool _video_capped = false; // video_full_max > 0: _ranked applies to inner cameras
   std::uint64_t _generation = 0;
-  std::string _prefix;            // conf.rooms.<room>.participants. (with the trailing separator)
-  std::vector<std::string> _pids; // present, sorted
-  std::vector<aoi_tier> _tiers;   // _pids.size()^2, row = receiver, column = subject
+  std::string _prefix;              // conf.rooms.<room>.participants. (with the trailing separator)
+  std::vector<std::string> _pids;   // present, sorted
+  std::vector<std::uint8_t> _tiers; // aoi_tier, _pids.size()^2, row = receiver, column = subject
   std::vector<std::uint8_t> _ranked;  // same layout: 1 = in the receiver's full-video set
   std::vector<std::string> _departed; // sorted
 };
@@ -205,6 +205,11 @@ public:
   };
 
   room_aoi(std::string room, aoi_params p);
+  ~room_aoi();
+  room_aoi(room_aoi &&) noexcept;
+  room_aoi &operator=(room_aoi &&) noexcept;
+  room_aoi(const room_aoi &) = delete;
+  room_aoi &operator=(const room_aoi &) = delete;
 
   // Take the present participants and their positions (a pid listed twice counts once, at its
   // first position): new pairs start at initial_tier, existing ones step_tier at NOW_S, and anyone
@@ -231,29 +236,17 @@ public:
   const std::string &room() const noexcept;
 
 private:
-  struct pair_state {
-    aoi_tier tier = aoi_tier::inner;
-    double beyond_since_s = -1.0;
-    double d_m = 0.0;
-    bool push_due = false; // a full pose push is owed at the next take_pose_pushes
-    std::uint64_t last_push_tick = 0;
-    std::uint64_t last_version = 0;
-  };
-  struct member {
-    double x = 0.0;
-    double y = 0.0;
-    std::map<std::string, pair_state> subjects; // every other present participant
-    std::set<std::string> ranked;               // the full-video set (video_full_max > 0)
-  };
+  // The present members and their per-pair state. Defined in room_aoi.cpp over file-local types,
+  // so its containers are not exported from cvc.dll (whose export table is nearly full).
+  struct book;
 
-  bool rerank(member &r) const;
   void publish();
 
   std::string _room;
   aoi_params _p;
   std::string _prefix;
   std::uint64_t _generation = 0;
-  std::map<std::string, member> _members;
+  std::unique_ptr<book> _book;
   std::set<std::string> _departed;
   std::shared_ptr<const aoi_snapshot> _snap;
 };

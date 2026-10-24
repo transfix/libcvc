@@ -116,29 +116,19 @@ public:
 
 private:
   struct gate_state;
-  struct plane {
-    cvc::state_transport *tp = nullptr;
-    std::set<std::string> added;    // pids this driver registered (removed again on departure)
-    std::set<std::string> filtered; // pids carrying this driver's filter
-    std::map<std::string, std::uint64_t> filtered_seen; // deliveries_filtered at the last stats
-  };
+  // Each added transport's registrations and the subjects' pose versions. Defined in
+  // room_aoi_relay.cpp over file-local types, so its containers are not exported from cvc.dll
+  // (whose export table is nearly full).
+  struct book;
 
-  using filter_map = std::map<std::string, std::shared_ptr<const cvc::state_delivery_filter>>;
-
-  // One filter per present participant, bound to SNAP; none when SNAP is disabled.
-  static filter_map filters_of(const std::shared_ptr<const aoi_snapshot> &snap);
   void apply(const std::shared_ptr<const aoi_snapshot> &snap);
-  void install(plane &pl, const filter_map &filters);
-  void release(plane &pl, const std::string &pid);
   void push_poses(std::uint64_t tick);
 
   cvc::app &_app;
   cvc::state_cluster_shard &_shard;
   room_aoi _aoi;
-  std::vector<plane> _planes;
   std::vector<cvc::media_endpoint *> _endpoints;
-  std::map<std::string, cvc::physics::body_state> _pose_ref; // the pose at its last version
-  std::map<std::string, std::uint64_t> _pose_version;        // tick of the last move > 1e-4
+  std::unique_ptr<book> _book;
   std::uint64_t _pushes = 0;
   std::uint64_t _push_entries = 0;
   std::shared_ptr<gate_state> _gate;

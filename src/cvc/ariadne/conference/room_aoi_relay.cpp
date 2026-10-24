@@ -25,7 +25,10 @@
 #include <cvc/state/state.h> // SEPARATOR, findDescendant
 #include <cvc/state/state_cluster_shard.h>
 #include <cvc/state/state_transport.h>
+#include <map>
+#include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -90,6 +93,19 @@ std::vector<snapshot_entry> pose_entries(cvc::app &app, const cvc::state_cluster
 } // namespace
 
 // ---------------- the media gate's state ----------------
+
+namespace {
+
+// One (receiver, publisher, stream)'s thumbnail schedule (file-local, see room_aoi_relay.h).
+struct gate_thumb {
+  std::string receiver;
+  std::string publisher;
+  std::string stream_id;
+  std::string codec;
+  std::chrono::steady_clock::time_point due; // the next frame at or after this goes out
+};
+
+} // namespace
 
 // What the gate closure owns: the snapshot it decides by, the thumbnail timers, and its counters.
 // The driver swaps the snapshot in on the main loop; publisher reader threads read it.
@@ -160,13 +176,7 @@ struct room_aoi_relay::gate_state {
   std::atomic<std::uint64_t> dropped{0};
 
 private:
-  struct thumb {
-    std::string receiver;
-    std::string publisher;
-    std::string stream_id;
-    std::string codec;
-    std::chrono::steady_clock::time_point due; // the next frame at or after this goes out
-  };
+  using thumb = gate_thumb;
 
   // A pair's first thumbnail frame goes out at once; after that one per thumb interval, on the
   // interval's own schedule (so a 30 fps camera at 2 fps sends two a second), restarting from now
@@ -206,9 +216,69 @@ private:
 
 // ---------------- room_aoi_relay ----------------
 
+namespace {
+
+// The driver's bookkeeping (room_aoi_relay::book): file-local, see room_aoi_relay.h.
+struct plane {
+  cvc::state_transport *tp = nullptr;
+  std::set<std::string> added;    // pids this driver registered (removed again on departure)
+  std::set<std::string> filtered; // pids carrying this driver's filter
+  std::map<std::string, std::uint64_t> filtered_seen; // deliveries_filtered at the last stats
+};
+
+struct filter_ref {
+  std::shared_ptr<const cvc::state_delivery_filter> filter;
+};
+using filter_map = std::map<std::string, filter_ref>;
+
+// One filter per present participant, bound to SNAP; none when SNAP is disabled.
+filter_map filters_of(const std::shared_ptr<const aoi_snapshot> &snap) {
+  filter_map out;
+  if (!snap || !snap->enabled())
+    return out;
+  for (const std::string &pid : snap->participants())
+    out.emplace(pid, filter_ref{std::make_shared<aoi_state_filter>(snap, pid)});
+  return out;
+}
+
+void release(plane &pl, const std::string &pid) {
+  pl.filtered_seen.erase(pid);
+  cvc::state_peer_registry &reg = pl.tp->peers();
+  if (pl.added.erase(pid)) {
+    reg.remove_peer(pid);
+    pl.filtered.erase(pid);
+  } else if (pl.filtered.erase(pid)) {
+    reg.set_filter(pid, nullptr);
+  }
+}
+
+void install(plane &pl, const filter_map &filters, const std::string &cluster_id,
+             const std::set<std::string> &departed) {
+  cvc::state_peer_registry &reg = pl.tp->peers();
+  for (const auto &kv : filters) {
+    if (!reg.has_peer(kv.first)) {
+      reg.add_peer(kv.first, cluster_id, std::string(), {kRoomTreePrefix});
+      pl.added.insert(kv.first);
+    }
+    reg.set_filter(kv.first, kv.second.filter);
+    pl.filtered.insert(kv.first);
+  }
+  for (const std::string &pid : departed)
+    release(pl, pid);
+}
+
+} // namespace
+
+struct room_aoi_relay::book {
+  std::vector<plane> planes;
+  std::map<std::string, cvc::physics::body_state> pose_ref; // the pose at its last version
+  std::map<std::string, std::uint64_t> pose_version;        // tick of the last move > 1e-4
+};
+
 room_aoi_relay::room_aoi_relay(cvc::app &app, cvc::state_cluster_shard &shard, std::string room,
                                aoi_params p)
     : _app(app), _shard(shard), _aoi(std::move(room), std::move(p)),
+      _book(std::make_unique<book>()),
       _gate(std::make_shared<gate_state>(_aoi.params().thumb_fps)) {
   _gate->store(_aoi.snapshot());
 }
@@ -219,7 +289,7 @@ room_aoi_relay::~room_aoi_relay() {
   for (cvc::media_endpoint *ep : _endpoints)
     ep->set_media_gate({});
   _gate->store(nullptr);
-  for (plane &pl : _planes) {
+  for (plane &pl : _book->planes) {
     cvc::state_peer_registry &reg = pl.tp->peers();
     for (const std::string &pid : pl.added)
       reg.remove_peer(pid);
@@ -232,12 +302,12 @@ room_aoi_relay::~room_aoi_relay() {
 void room_aoi_relay::add_transport(cvc::state_transport *tp) {
   if (!tp)
     return;
-  for (const plane &pl : _planes)
+  for (const plane &pl : _book->planes)
     if (pl.tp == tp)
       return;
-  _planes.emplace_back();
-  _planes.back().tp = tp;
-  install(_planes.back(), filters_of(_aoi.snapshot()));
+  _book->planes.emplace_back();
+  _book->planes.back().tp = tp;
+  install(_book->planes.back(), filters_of(_aoi.snapshot()), _shard.cluster_id(), _aoi.departed());
 }
 
 void room_aoi_relay::add_media_endpoint(cvc::media_endpoint *ep) {
@@ -264,19 +334,19 @@ void room_aoi_relay::step(const cvc::ariadne::holon &server, double now_s) {
     present.push_back({pid, s.position.x, s.position.y});
     // A subject's version moves when its state does, by write_pose's measure, against the state
     // at its last version (so a slow drift still counts once it adds up).
-    const auto [it, fresh] = _pose_ref.try_emplace(pid, s);
+    const auto [it, fresh] = _book->pose_ref.try_emplace(pid, s);
     if (fresh || moved(it->second, s)) {
       it->second = s;
-      _pose_version[pid] = tick;
+      _book->pose_version[pid] = tick;
     }
   }
-  for (auto it = _pose_ref.begin(); it != _pose_ref.end();) {
+  for (auto it = _book->pose_ref.begin(); it != _book->pose_ref.end();) {
     if (here.count(it->first)) {
       ++it;
       continue;
     }
-    _pose_version.erase(it->first);
-    it = _pose_ref.erase(it);
+    _book->pose_version.erase(it->first);
+    it = _book->pose_ref.erase(it);
   }
   if (_aoi.update(present, tick, now_s))
     apply(_aoi.snapshot());
@@ -284,53 +354,18 @@ void room_aoi_relay::step(const cvc::ariadne::holon &server, double now_s) {
   push_poses(tick);
 }
 
-room_aoi_relay::filter_map
-room_aoi_relay::filters_of(const std::shared_ptr<const aoi_snapshot> &snap) {
-  filter_map out;
-  if (!snap || !snap->enabled())
-    return out;
-  for (const std::string &pid : snap->participants())
-    out.emplace(pid, std::make_shared<aoi_state_filter>(snap, pid));
-  return out;
-}
-
 void room_aoi_relay::apply(const std::shared_ptr<const aoi_snapshot> &snap) {
   _gate->store(snap);
   _gate->sweep(*snap);
   // One filter per participant, shared by every registry.
   const filter_map filters = filters_of(snap);
-  for (plane &pl : _planes)
-    install(pl, filters);
-}
-
-void room_aoi_relay::install(plane &pl, const filter_map &filters) {
-  cvc::state_peer_registry &reg = pl.tp->peers();
-  for (const auto &kv : filters) {
-    if (!reg.has_peer(kv.first)) {
-      reg.add_peer(kv.first, _shard.cluster_id(), std::string(), {kRoomTreePrefix});
-      pl.added.insert(kv.first);
-    }
-    reg.set_filter(kv.first, kv.second);
-    pl.filtered.insert(kv.first);
-  }
-  for (const std::string &pid : _aoi.departed())
-    release(pl, pid);
-}
-
-void room_aoi_relay::release(plane &pl, const std::string &pid) {
-  pl.filtered_seen.erase(pid);
-  cvc::state_peer_registry &reg = pl.tp->peers();
-  if (pl.added.erase(pid)) {
-    reg.remove_peer(pid);
-    pl.filtered.erase(pid);
-  } else if (pl.filtered.erase(pid)) {
-    reg.set_filter(pid, nullptr);
-  }
+  for (plane &pl : _book->planes)
+    install(pl, filters, _shard.cluster_id(), _aoi.departed());
 }
 
 void room_aoi_relay::push_poses(std::uint64_t tick) {
-  const std::vector<aoi_push> due = _aoi.take_pose_pushes(tick, _pose_version);
-  if (due.empty() || _planes.empty())
+  const std::vector<aoi_push> due = _aoi.take_pose_pushes(tick, _book->pose_version);
+  if (due.empty() || _book->planes.empty())
     return;
   const std::string stamp = std::to_string(static_cast<unsigned long long>(tick));
   std::map<std::string, std::vector<snapshot_entry>> subtrees; // each subject read once a step
@@ -344,7 +379,7 @@ void room_aoi_relay::push_poses(std::uint64_t tick) {
     }
     if (entries.empty())
       continue;
-    for (plane &pl : _planes) {
+    for (plane &pl : _book->planes) {
       const std::size_t n = pl.tp->push_snapshot_to(p.receiver, entries);
       _pushes += n;
       _push_entries += n * entries.size();
@@ -375,7 +410,7 @@ room_aoi_relay::stats room_aoi_relay::take_stats() {
   st.media_thumb = _gate->thumbs.exchange(0, std::memory_order_relaxed);
   st.media_dropped = _gate->dropped.exchange(0, std::memory_order_relaxed);
   // The registries count per peer since registration; report what was added since the last call.
-  for (plane &pl : _planes)
+  for (plane &pl : _book->planes)
     for (const cvc::state_peer_registry::peer &peer : pl.tp->peers().snapshot()) {
       if (!pl.filtered.count(peer.node_id))
         continue;

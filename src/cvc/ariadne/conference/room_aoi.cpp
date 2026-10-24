@@ -22,6 +22,9 @@
 #include <cvc/state/state.h> // cvc::state, SEPARATOR, findDescendant
 #include <initializer_list>
 #include <iterator>
+#include <map>
+#include <memory>
+#include <set>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -32,6 +35,24 @@ namespace ariadne {
 namespace conference {
 
 namespace {
+
+// room_aoi's bookkeeping (room_aoi::book): file-local, see room_aoi.h.
+struct pair_state {
+  aoi_tier tier = aoi_tier::inner;
+  double beyond_since_s = -1.0;
+  double d_m = 0.0;
+  bool push_due = false; // a full pose push is owed at the next take_pose_pushes
+  std::uint64_t last_push_tick = 0;
+  std::uint64_t last_version = 0;
+};
+struct member {
+  double x = 0.0;
+  double y = 0.0;
+  std::map<std::string, pair_state> subjects; // every other present participant
+  std::set<std::string> ranked;               // the full-video set (video_full_max > 0)
+};
+
+bool rerank(const aoi_params &p, member &r);
 
 constexpr std::size_t kNpos = std::string_view::npos;
 
@@ -231,7 +252,7 @@ bool aoi_snapshot::deliver_path(const std::string &receiver,
     return false;
   if (pose) {
     const std::size_t ri = index_of(receiver);
-    return ri == npos || _tiers[ri * _pids.size() + qi] == aoi_tier::inner;
+    return ri == npos || static_cast<aoi_tier>(_tiers[ri * _pids.size() + qi]) == aoi_tier::inner;
   }
   return true;
 }
@@ -246,7 +267,7 @@ aoi_media aoi_snapshot::media(const std::string &receiver, const std::string &pu
   if (ri == npos || qi == npos)
     return aoi_media::deliver;
   const std::size_t cell = ri * _pids.size() + qi;
-  const aoi_tier t = _tiers[cell];
+  const aoi_tier t = static_cast<aoi_tier>(_tiers[cell]);
   if (t == aoi_tier::outer)
     return aoi_media::drop;
   // Only an intra-only camera can be decimated; anything else is all or nothing.
@@ -263,7 +284,7 @@ aoi_tier aoi_snapshot::tier(const std::string &receiver,
   const std::size_t qi = index_of(subject);
   if (ri == npos || qi == npos || ri == qi)
     return aoi_tier::inner;
-  return _tiers[ri * _pids.size() + qi];
+  return static_cast<aoi_tier>(_tiers[ri * _pids.size() + qi]);
 }
 
 std::uint64_t aoi_snapshot::generation() const noexcept { return _generation; }
@@ -283,14 +304,23 @@ bool aoi_state_filter::deliver(const std::string &path) const noexcept {
 
 // ---------------- room_aoi ----------------
 
+struct room_aoi::book {
+  std::map<std::string, member> members;
+};
+
 room_aoi::room_aoi(std::string room, aoi_params p)
-    : _room(std::move(room)), _p(std::move(p)), _prefix(participants_prefix(_room)) {
+    : _room(std::move(room)), _p(std::move(p)), _prefix(participants_prefix(_room)),
+      _book(std::make_unique<book>()) {
   auto s = std::make_shared<aoi_snapshot>();
   s->_enabled = _p.enabled;
   s->_video_capped = _p.video_full_max > 0;
   s->_prefix = _prefix;
   _snap = std::move(s);
 }
+
+room_aoi::~room_aoi() = default;
+room_aoi::room_aoi(room_aoi &&) noexcept = default;
+room_aoi &room_aoi::operator=(room_aoi &&) noexcept = default;
 
 bool room_aoi::update(const std::vector<position> &present, std::uint64_t now_tick, double now_s) {
   std::map<std::string, const position *> here; // emplace keeps a repeated pid's first entry
@@ -299,21 +329,21 @@ bool room_aoi::update(const std::vector<position> &present, std::uint64_t now_ti
       here.emplace(pos.pid, &pos);
 
   bool changed = false;
-  for (auto it = _members.begin(); it != _members.end();) {
+  for (auto it = _book->members.begin(); it != _book->members.end();) {
     if (here.count(it->first)) {
       ++it;
       continue;
     }
-    for (auto &kv : _members) {
+    for (auto &kv : _book->members) {
       kv.second.subjects.erase(it->first);
       kv.second.ranked.erase(it->first);
     }
     _departed.insert(it->first);
-    it = _members.erase(it);
+    it = _book->members.erase(it);
     changed = true;
   }
   for (const auto &kv : here) {
-    const auto [it, fresh] = _members.try_emplace(kv.first);
+    const auto [it, fresh] = _book->members.try_emplace(kv.first);
     if (fresh) {
       _departed.erase(kv.first);
       changed = true;
@@ -323,8 +353,8 @@ bool room_aoi::update(const std::vector<position> &present, std::uint64_t now_ti
   }
 
   // Each unordered pair is stepped once and mirrored, so tier(r, q) == tier(q, r) always.
-  for (auto a = _members.begin(); a != _members.end(); ++a) {
-    for (auto b = std::next(a); b != _members.end(); ++b) {
+  for (auto a = _book->members.begin(); a != _book->members.end(); ++a) {
+    for (auto b = std::next(a); b != _book->members.end(); ++b) {
       const double d = std::hypot(b->second.x - a->second.x, b->second.y - a->second.y);
       const auto [ab_it, fresh] = a->second.subjects.try_emplace(b->first);
       pair_state &ab = ab_it->second;
@@ -358,18 +388,20 @@ bool room_aoi::update(const std::vector<position> &present, std::uint64_t now_ti
   }
 
   if (_p.video_full_max > 0)
-    for (auto &kv : _members)
-      changed = rerank(kv.second) || changed;
+    for (auto &kv : _book->members)
+      changed = rerank(_p, kv.second) || changed;
 
   if (changed)
     publish();
   return changed;
 }
 
-bool room_aoi::rerank(member &r) const {
-  const std::size_t k = static_cast<std::size_t>(_p.video_full_max);
+namespace {
+
+bool rerank(const aoi_params &p, member &r) {
+  const std::size_t k = static_cast<std::size_t>(p.video_full_max);
   // A non-negative margin, so a swap always moves the set strictly nearer and the loop ends.
-  const double margin = (std::max)(0.0, _p.video_rank_margin_m);
+  const double margin = (std::max)(0.0, p.video_rank_margin_m);
   // The inner subjects, nearest first; subjects iterate in pid order, so ties stay in pid order.
   std::vector<std::pair<double, const std::string *>> inner;
   for (const auto &kv : r.subjects)
@@ -413,25 +445,27 @@ bool room_aoi::rerank(member &r) const {
   return true;
 }
 
+} // namespace
+
 void room_aoi::publish() {
   auto s = std::make_shared<aoi_snapshot>();
   s->_enabled = _p.enabled;
   s->_video_capped = _p.video_full_max > 0;
   s->_generation = ++_generation;
   s->_prefix = _prefix;
-  const std::size_t n = _members.size();
+  const std::size_t n = _book->members.size();
   s->_pids.reserve(n);
-  for (const auto &kv : _members)
+  for (const auto &kv : _book->members)
     s->_pids.push_back(kv.first); // std::map order: sorted, as index_of requires
-  s->_tiers.assign(n * n, aoi_tier::inner);
+  s->_tiers.assign(n * n, static_cast<std::uint8_t>(aoi_tier::inner));
   s->_ranked.assign(n * n, 0);
   std::size_t ri = 0;
-  for (const auto &kv : _members) {
+  for (const auto &kv : _book->members) {
     for (const auto &sv : kv.second.subjects) {
       const std::size_t qi = s->index_of(sv.first);
       if (qi == aoi_snapshot::npos)
         continue;
-      s->_tiers[ri * n + qi] = sv.second.tier;
+      s->_tiers[ri * n + qi] = static_cast<std::uint8_t>(sv.second.tier);
       s->_ranked[ri * n + qi] = kv.second.ranked.count(sv.first) ? 1 : 0;
     }
     ++ri;
@@ -448,7 +482,7 @@ room_aoi::take_pose_pushes(std::uint64_t now_tick,
     return out;
   const std::uint64_t every = aoi_pose_push_interval_ticks(_p);
   const std::uint64_t refresh = aoi_pose_refresh_ticks(_p);
-  for (auto &rm : _members) {
+  for (auto &rm : _book->members) {
     aoi_push push;
     for (auto &qs : rm.second.subjects) {
       pair_state &ps = qs.second;
