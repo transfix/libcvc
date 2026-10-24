@@ -561,6 +561,42 @@ TEST(StateTransportGrpcTest, ConnectionClosedReportsThePeersNodeId) {
   EXPECT_EQ(closed[0], "alice");
 }
 
+// The link probe: both ends Ping, the other end Pongs, and each measures the round trip on its own
+// clock. Each side reports one link with its peer's node id, traffic both ways, and an RTT -- the
+// same report a relay gets for a client and a server gets for a peer (delegation) server.
+TEST(StateTransportGrpcTest, LinkProbeMeasuresRoundTripAtBothEnds) {
+  cvc::state_transport_grpc relay, client;
+  relay.set_ping_interval(std::chrono::milliseconds(30));
+  client.set_ping_interval(std::chrono::milliseconds(30));
+  relay.start("127.0.0.1:0", "relay", "C");
+  client.start("127.0.0.1:0", "alice", "C");
+  ASSERT_TRUE(client.connect_to_peer(relay.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_connected(client, relay, std::chrono::milliseconds(2000)));
+  const auto measured = [](const cvc::state_transport_grpc &t) {
+    const auto links = t.link_reports();
+    return links.size() == 1 && links[0].stats.pongs_received >= 2 && links[0].stats.rtt_ms >= 0.0;
+  };
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (!(measured(relay) && measured(client))) {
+    ASSERT_LT(std::chrono::steady_clock::now(), deadline) << "no round trip measured";
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  const auto server_end = relay.link_reports().at(0);
+  const auto client_end = client.link_reports().at(0);
+  EXPECT_EQ(server_end.transport, "grpc");
+  EXPECT_TRUE(server_end.accepted);
+  EXPECT_EQ(server_end.remote_node_id, "alice");
+  EXPECT_FALSE(client_end.accepted);
+  EXPECT_EQ(client_end.remote_node_id, "relay");
+  for (const auto &r : {server_end, client_end}) {
+    EXPECT_GT(r.stats.bytes_in, 0u);
+    EXPECT_GT(r.stats.bytes_out, 0u);
+    EXPECT_LT(r.stats.rtt_ms, 1000.0) << "loopback round trip";
+  }
+  client.stop();
+  relay.stop();
+}
+
 TEST(StateTransportGrpcTest, DisconnectAfterStop) {
   cvc::state_transport_grpc tA, tB;
   tA.start("127.0.0.1:0", "A", "C");

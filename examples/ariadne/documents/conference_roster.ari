@@ -87,30 +87,58 @@ windows:
         bind: (if (= (state-get "mic_on") "1") "● on" "muted")
 
   # ── Users: the roster with per-peer local controls ──
+  # One compact ROW per participant, as a table of unit widgets: every row is its own grid with the
+  # SAME fixed column widths, so the rows line up as columns. ping / down / up are each person's
+  # link to the relay AS THEY MEASURE IT (published to the room once a second; "--" = not measured
+  # yet). cam / mic / vol are LOCAL controls (what YOU see and hear of them), never sent.
   - window: Users
     id: users
     pos: [390, 40]
-    size: [380, 540]
+    size: [410, 260]
     closable: true
     children:
       - text: "in the room"
         bind: self.count
       - separator
-      # You (first row): your name lights up GREEN while YOU talk.
-      - text: "you"
-        bind: conf.self
-        visible_when: (not (= (state-get "self.talking") "1"))
-      - text: "you"
-        bind: conf.self
-        color: [0.30, 1.0, 0.40]
-        visible_when: (= (state-get "self.talking") "1")
-      - separator
-      # Everyone else: one row per peer (peer.<i>). The on_tick fills peer.<i>.{pid,name,cam,talking}.
+      - type: group
+        id: users_head
+        layout: { kind: grid, col_widths: [118, 54, 50, 50, 34, 34, 0] }
+        children:
+          - text: "name"
+          - text: "ping"
+          - text: "down"
+          - text: "up"
+          - text: "cam"
+          - text: "mic"
+          - text: "vol"
+      # You: your name lights up GREEN while YOU talk (text colour is static, so it is a visibility
+      # swap: only one of the two is visible, so they share one cell).
+      - type: group
+        id: users_you
+        layout: { kind: grid, col_widths: [118, 54, 50, 50, 34, 34, 0] }
+        children:
+          - text: ""
+            bind: conf.self
+            visible_when: (not (= (state-get "self.talking") "1"))
+          - text: ""
+            bind: conf.self
+            color: [0.30, 1.0, 0.40]
+            visible_when: (= (state-get "self.talking") "1")
+          - text: ""
+            bind: self.ping
+          - text: ""
+            bind: self.down
+          - text: ""
+            bind: self.up
+          - text: ""
+          - text: ""
+          - text: "(you)"
+      # Everyone else: one row per peer (peer.<i>), filled by on_tick.
       - type: group
         repeat: (state-get "peer.count")
+        layout: { kind: grid, col_widths: [118, 54, 50, 50, 34, 34, 0] }
         children:
-          # Name — click to open + raise this peer's camera window (cam_<i>). Two texts: the GREEN one
-          # shows only while they are talking (text colour is static, so "light up" is a visibility swap).
+          # Name: click to open + raise this peer's camera window (cam_<i>); GREEN while talking.
           - text: ""
             bind: peer.{i}.name
             on_click: (begin (state-set "tree.cam_{i}.open" "1") (state-set "tree.cam_{i}.raise" "1"))
@@ -120,24 +148,30 @@ windows:
             color: [0.30, 1.0, 0.40]
             on_click: (begin (state-set "tree.cam_{i}.open" "1") (state-set "tree.cam_{i}.raise" "1"))
             visible_when: (= (state-get "peer.{i}.talking") "1")
+          - text: ""
+            bind: peer.{i}.ping
+          - text: ""
+            bind: peer.{i}.down
+          - text: ""
+            bind: peer.{i}.up
           # Local mute toggles (checked = on). Default on: the host treats von/aon as muted only when
-          # explicitly "0", so an untouched peer is shown + heard.
+          # explicitly "0", so an untouched peer is shown + heard. "##" hides the label (the header
+          # names the column).
           - type: checkbox
-            label: "cam"
+            label: "##cam"
             bind: peer.{i}.von
             def: true
           - type: checkbox
-            label: "mic"
+            label: "##mic"
             bind: peer.{i}.aon
             def: true
           # Local volume in our mix (1 = unity, up to 2x boost).
           - type: slider_float
-            label: "vol"
+            label: "##vol"
             bind: peer.{i}.vol
             lo: 0
             hi: 2
             def: 1
-          - separator
 
   # ── One camera window per OTHER participant, titled by their name ──
   - window: Peer
@@ -163,16 +197,16 @@ on_tick: |
         ; every cam_<i> declares the SAME authored pos:, so without this the per-peer windows land
         ; exactly on top of one another and look like a single window — the #1 reason a user reports
         ; "I can't see the other cameras". Tile them in a 2-column grid to the RIGHT of the Users
-        ; window (which sits at x≈390–610): the roster is NEVER covered, and up to four cameras show
+        ; window (which sits at x≈390–800): the roster is NEVER covered, and up to four cameras show
         ; side-by-side without overlapping on a laptop screen. Seeded ONCE here, before any peer window
         ; exists, so each window's first-use geometry seed lands at its own spot; the user's drag then
         ; persists and wins. Covers 6 peers; a 7th+ falls back to the authored pos.
-        (state-set "tree.cam_0.geometry" "612,66,330,290")
-        (state-set "tree.cam_1.geometry" "952,66,330,290")
-        (state-set "tree.cam_2.geometry" "612,364,330,290")
-        (state-set "tree.cam_3.geometry" "952,364,330,290")
-        (state-set "tree.cam_4.geometry" "612,662,330,290")
-        (state-set "tree.cam_5.geometry" "952,662,330,290")
+        (state-set "tree.cam_0.geometry" "806,66,330,290")
+        (state-set "tree.cam_1.geometry" "1146,66,330,290")
+        (state-set "tree.cam_2.geometry" "806,364,330,290")
+        (state-set "tree.cam_3.geometry" "1146,364,330,290")
+        (state-set "tree.cam_4.geometry" "806,662,330,290")
+        (state-set "tree.cam_5.geometry" "1146,662,330,290")
         (state-set "cam_on" "1") ; on/off toggles start ON (streams open unmuted)
         (state-set "mic_on" "1")
         (room-join "" (state-get "conf.room") (dict "name" (state-get "conf.self")))
@@ -251,6 +285,10 @@ on_tick: |
               (state-get (str-concat "media." pid ".camera")))
             (state-set (str-concat "peer." idx ".talking")
               (state-get (str-concat "media." pid ".talking")))
+            ; their link quality, as THEY measure it (ping to the relay, bits/s down + up)
+            (state-set (str-concat "peer." idx ".ping") (get-attr p "ping"))
+            (state-set (str-concat "peer." idx ".down") (get-attr p "down"))
+            (state-set (str-concat "peer." idx ".up") (get-attr p "up"))
             (set idx (+ idx 1))
             (set total (+ total 1))))))
     (state-set "peer.count" (str idx))

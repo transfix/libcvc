@@ -27,6 +27,7 @@
 #include <cstring>
 #include <cvc/ariadne/conference/room_intrinsics.h>       // room_leave (retract a departed peer)
 #include <cvc/ariadne/conference/room_media_intrinsics.h> // room_relay_tick
+#include <cvc/ariadne/conference/room_net.h>   // per-participant + room link-quality stats
 #include <cvc/ariadne/conference/room_scene.h> // seed_default_scene (the shared 3D scene)
 #include <cvc/ariadne/holon.h>                            // server-authoritative avatar holon (H1)
 #include <cvc/ariadne/holon_sync.h> // server_pump: intent -> holon -> authoritative pose
@@ -199,6 +200,14 @@ int main(int argc, char **argv) {
   const bool room_debug =
       room_debug_env && *room_debug_env && std::strcmp(room_debug_env, "0") != 0;
   int room_debug_ticks = 0;
+  // Link stats (~1 s): every connection on both planes reports its traffic and Ping/Pong round
+  // trip (state_transport::link_reports); the rate meter turns the counters into rates. The relay
+  // publishes its view of each participant (net.relay.*) and its totals (server.net.*) into the
+  // room tree, and logs them: every link each ~5 s with CVC_ARISRV_ROOM_DEBUG, a totals line each
+  // minute otherwise. Links that are not participants (peer servers, delegation) are logged too.
+  cvc::state_link_rate_meter link_meter;
+  int net_ticks = 0;
+  const auto net_start = std::chrono::steady_clock::now();
   // The shared 3D scene (H1 slice 5, roadmap §5g): the relay is its sole writer and seeds the MVP
   // environment (ground + a reference box under a sun) once. The writes are local shard mutations,
   // so the first pass of the loop below fans them to the clients, and late joiners get them in the
@@ -251,6 +260,48 @@ int main(int argc, char **argv) {
     // CVC_ARISRV_ROOM_DEBUG=1: every ~5 s, log the room as the server holds it -- each present
     // participant's authoritative position and its proposed intent -- so replication across the
     // gRPC and WebSocket planes can be checked from the relay without a client.
+    if (++net_ticks % 5 == 0) {
+      std::vector<cvc::state_link_report> links = state_tp.link_reports();
+#if CVC_ENABLE_WS
+      for (cvc::state_link_report &r : ws_tp.link_reports())
+        links.push_back(std::move(r));
+#endif
+      const double now_s =
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - net_start).count();
+      const auto rates = link_meter.update(links, now_s);
+      cvc::ariadne::conference::server_net total;
+      std::set<std::string> present;
+      for (const auto &p : cvc::ariadne::conference::room_roster(app, room))
+        present.insert(p.pid);
+      for (const cvc::state_link_report &r : links) {
+        const auto it = rates.find(cvc::state_link_rate_meter::key_of(r));
+        const double in_kbps = it == rates.end() ? 0.0 : it->second.in_bps * 8.0 / 1000.0;
+        const double out_kbps = it == rates.end() ? 0.0 : it->second.out_bps * 8.0 / 1000.0;
+        total.in_kbps += in_kbps;
+        total.out_kbps += out_kbps;
+        ++total.links;
+        if (present.count(r.remote_node_id))
+          cvc::ariadne::conference::write_relay_net(app, room, r.remote_node_id,
+                                                    {r.stats.rtt_ms, in_kbps, out_kbps});
+      }
+      cvc::ariadne::conference::write_server_net(app, room, total);
+      const bool detail = room_debug && net_ticks % 25 == 0;
+      if (detail || net_ticks % 300 == 0) {
+        std::printf("[arisrv] net: %d link(s) | in %.1f kb/s | out %.1f kb/s\n", total.links,
+                    total.in_kbps, total.out_kbps);
+        if (detail)
+          for (const cvc::state_link_report &r : links) {
+            const auto it = rates.find(cvc::state_link_rate_meter::key_of(r));
+            std::printf("[arisrv]   %-4s %-16s %-7s rtt %6.1f ms (min %.1f) | in %7.1f kb/s | out "
+                        "%7.1f kb/s | idle %.1fs\n",
+                        r.transport.c_str(), r.remote_node_id.c_str(),
+                        r.accepted ? "client" : "peer", r.stats.rtt_ms, r.stats.rtt_min_ms,
+                        it == rates.end() ? 0.0 : it->second.in_bps * 8.0 / 1000.0,
+                        it == rates.end() ? 0.0 : it->second.out_bps * 8.0 / 1000.0, r.idle_s);
+          }
+        std::fflush(stdout);
+      }
+    }
     if (room_debug && ++room_debug_ticks % 25 == 0) {
       const auto roster = cvc::ariadne::conference::room_roster(app, room);
       std::printf("[arisrv] room '%s': %zu present, holon tick %llu\n", room.c_str(), roster.size(),

@@ -27,6 +27,11 @@
 #include <vector>
 
 namespace cvc {
+namespace transport {
+namespace v1 {
+class Frame; // the generated envelope (proto/state_transport.proto), for on_link_frame
+} // namespace v1
+} // namespace transport
 
 // ----------------
 // cvc::state_transport_grpc
@@ -204,6 +209,8 @@ public:
   // Diagnostics.
   std::size_t shard_count() const;
   std::size_t connection_count() const;
+  // One report per live connection (bytes/frames both ways, Ping/Pong round-trip time).
+  std::vector<state_link_report> link_reports() const override;
   std::uint64_t total_published() const noexcept { return _published.load(); }
   std::uint64_t total_sent_frames() const noexcept { return _sent_frames.load(); }
   std::uint64_t total_received_frames() const noexcept { return _recv_frames.load(); }
@@ -254,6 +261,9 @@ public:
   // A server-side stream ended: fire the connection-closed handler for its peer (see
   // set_on_connection_closed).
   void notify_connection_closed(const std::string &node_id);
+  // Note an inbound frame on `c` (link counters + liveness), and answer / measure a link probe.
+  // Returns true when `in` was a Ping or Pong (fully handled: never dispatched further).
+  bool on_link_frame(connection &c, const ::cvc::transport::v1::Frame &in);
   void increment_recv_frames() noexcept { _recv_frames.fetch_add(1, std::memory_order_relaxed); }
   void increment_recv_mutations() noexcept {
     _recv_mutations.fetch_add(1, std::memory_order_relaxed);
@@ -334,6 +344,12 @@ private:
   std::chrono::milliseconds _heartbeat_interval{0};
   std::thread _heartbeat_thread;
   void heartbeat_loop();
+
+  // Link probe: every ping_interval(), send each live connection a Ping (state_transport.proto);
+  // the peer's Pong gives the round trip. Runs on its own thread from start() to stop().
+  std::thread _ping_thread;
+  void ping_loop();
+  void send_pings();
 };
 
 } // namespace cvc

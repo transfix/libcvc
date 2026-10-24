@@ -254,6 +254,9 @@ TEST(StateTransportWsTest, RelayFansMediaFrameToOtherClient) {
 TEST(StateTransportWsTest, RelayReapsIdleConnection) {
   cvc::app aA;
   cvc::state_transport_ws S, tA;
+  // No link probe here: a client that answers Pings is NOT idle (see QuietClientAnsweringPings...).
+  S.set_ping_interval(std::chrono::milliseconds(0));
+  tA.set_ping_interval(std::chrono::milliseconds(0));
   S.start("127.0.0.1:0", "S", "C");
   S.set_relay(true);
   std::mutex mu;
@@ -291,6 +294,71 @@ TEST(StateTransportWsTest, RelayReapsIdleConnection) {
     ASSERT_FALSE(reaped.empty());
     EXPECT_EQ(reaped[0], "A"); // tA's Hello node id (adopted from its shard)
   }
+  tA.stop();
+  S.stop();
+}
+
+// The link probe: both ends Ping, the other end Pongs, and each measures the round trip on its own
+// clock. Each side reports one link with its peer's node id, traffic both ways, and an RTT.
+TEST(StateTransportWsTest, LinkProbeMeasuresRoundTripAtBothEnds) {
+  cvc::app aA;
+  cvc::state_transport_ws S, tA;
+  S.set_ping_interval(std::chrono::milliseconds(30));
+  tA.set_ping_interval(std::chrono::milliseconds(30));
+  S.start("127.0.0.1:0", "S", "C");
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  sA.attach();
+  tA.register_shard(&sA);
+  ASSERT_TRUE(tA.connect_to_peer(ws(S.listen_address()), std::chrono::milliseconds(2000)));
+  const auto measured = [](const cvc::state_transport_ws &t) {
+    const auto links = t.link_reports();
+    return links.size() == 1 && links[0].stats.pongs_received >= 2 && links[0].stats.rtt_ms >= 0.0;
+  };
+  ASSERT_TRUE(
+      wait_until([&] { return measured(S) && measured(tA); }, std::chrono::milliseconds(3000)));
+  const auto server = S.link_reports().at(0);
+  const auto client = tA.link_reports().at(0);
+  EXPECT_EQ(server.transport, "ws");
+  EXPECT_TRUE(server.accepted);
+  EXPECT_EQ(server.remote_node_id, "A");
+  EXPECT_FALSE(client.accepted);
+  EXPECT_EQ(client.remote_node_id, "S");
+  for (const auto &r : {server, client}) {
+    EXPECT_GT(r.stats.bytes_in, 0u);
+    EXPECT_GT(r.stats.bytes_out, 0u);
+    EXPECT_GE(r.stats.rtt_min_ms, 0.0);
+    EXPECT_LT(r.stats.rtt_ms, 1000.0) << "loopback round trip";
+    EXPECT_GE(r.age_s, 0.0);
+  }
+  tA.stop();
+  S.stop();
+}
+
+// A client that sends nothing of its own but still answers the relay's Pings is alive, so the idle
+// reaper keeps it -- the backgrounded-browser-tab case (its WebSocket onmessage still fires and
+// answers, while its timers are throttled). A client that cannot answer is still reaped
+// (RelayReapsIdleConnection).
+TEST(StateTransportWsTest, QuietClientAnsweringPingsIsNotReaped) {
+  cvc::app aA;
+  cvc::state_transport_ws S, tA;
+  S.set_ping_interval(std::chrono::milliseconds(20));
+  tA.set_ping_interval(std::chrono::milliseconds(0)); // the client never initiates anything
+  S.start("127.0.0.1:0", "S", "C");
+  S.set_relay(true);
+  std::atomic<int> reaped{0};
+  S.set_on_connection_closed([&](const std::string &) { reaped.fetch_add(1); });
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  sA.attach();
+  tA.register_shard(&sA);
+  ASSERT_TRUE(tA.connect_to_peer(ws(S.listen_address()), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(
+      wait_until([&] { return S.connection_count() >= 1; }, std::chrono::milliseconds(2000)));
+  for (int i = 0; i < 20; ++i) { // ~600 ms of reaping with a 150 ms idle limit
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    S.reap_idle(std::chrono::milliseconds(150));
+  }
+  EXPECT_EQ(reaped.load(), 0) << "a client answering Pings is not a ghost";
+  EXPECT_EQ(S.connection_count(), 1u);
   tA.stop();
   S.stop();
 }
