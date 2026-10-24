@@ -58,6 +58,7 @@
 #include <cvc/ariadne/stream/stream_view.h>
 #include <cvc/ariadne/tvision_backend.h>
 #include <cvc/core/app.h>
+#include <random>  // std::random_device — the conference node id's per-launch suffix
 #include <sstream> // arigl info: the GL report, line by line
 #if CVC_ENABLE_WS || CVC_ENABLE_GRPC
 // Conference mode: a state transport joins a hosted room, chosen by the relay URL scheme —
@@ -284,8 +285,8 @@ struct ConferenceSession {
   cvc::app *app_ = nullptr;
   std::string pid_; // this participant's node id (== the room-join pid; stamps our outgoing frames)
   std::string
-      prefix_; // the document chroot prefix: host state access must prepend it so it reaches
-               // the SAME keys the .ari's (state-get/-set) do (which are prefix-relative)
+      prefix_;       // the document chroot prefix: host state access must prepend it so it reaches
+                     // the SAME keys the .ari's (state-get/-set) do (which are prefix-relative)
   std::string room_; // the joined room id (conf.rooms.<room_>)
 
   // ── the room in 3D (H1 slice 6): the shared scene + avatars, third-person controls ──
@@ -419,11 +420,24 @@ struct ConferenceSession {
     // shown in the roster) may be any text — e.g. a browser's random "guest-ab12" — and room-join
     // already carries it separately as the "name" attr, so derive a safe node id here rather than
     // passing the display name straight through (a hyphen in it otherwise throws).
+    //
+    // The id also gets a random per-launch suffix. Replication drops a write whose (origin node id,
+    // sequence) it has already seen, so a client that restarts under the SAME id (a reloaded tab,
+    // a relaunched native client, two people who both kept the name "guest") would have every
+    // write ignored until the relay restarts: it would join a room nobody can see it in. A fresh
+    // id per session makes each launch a new participant; the name in the roster is unchanged.
     std::string nodeId;
     for (char c : self)
       nodeId += std::isalnum(static_cast<unsigned char>(c)) ? c : '_';
     if (nodeId.empty() || std::isdigit(static_cast<unsigned char>(nodeId.front())))
       nodeId.insert(0, "n_");
+    {
+      std::random_device rd;
+      const char *digits = "0123456789abcdefghijklmnopqrstuvwxyz";
+      nodeId += '_';
+      for (int i = 0; i < 6; ++i)
+        nodeId += digits[rd() % 36];
+    }
     gla::register_conference(app, backend); // room-join/roster + streaming + stream_view
     shard = std::make_unique<cvc::state_cluster_shard>(app, "conf", nodeId);
     // Replicate ONLY the shared room tree (conf.rooms.*), never this client's per-document UI state
