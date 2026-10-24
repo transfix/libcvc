@@ -44,6 +44,10 @@
 #include <cstdint>
 #include <cvc/nav/detail/nav_potential.h>
 
+// Feature test for veh_params::risk_governor, drive_telemetry::v_risk and risk_speed_cap (a
+// consumer that also builds against an older libcvc).
+#define CVC_NAV_HAS_RISK_GOVERNOR 1
+
 namespace cvc {
 class thread_pool; // fork-join executor, injected into the batched kernels below
 namespace nav {
