@@ -1180,7 +1180,8 @@ TEST(NavPlantConvergence, CheckpointSelectionOnJoltReach) {
 // The two trainings share everything but w_energy. On the gate's 20 held-out seeds it reports
 // reach and Wh/km for both and the untrained seed, with paired-bootstrap CIs of the differences:
 // the gate is that the energy-trained policy draws less per km for what it gives up in reach.
-// P8C_GATE_W (the energy weight, 3), P8C_GATE_LR (5e-5) and P8C_GATE_STEPS (150) override it.
+// P8C_GATE_W (the energy weight, 3), P8C_GATE_REF (train_config::energy_ref as a Wh/km; 0, the
+// default, prices time), P8C_GATE_LR (5e-5) and P8C_GATE_STEPS (150) override it.
 TEST(NavPlantConvergence, EnergyTrainedPolicyOnJolt) {
   REQUIRE_JOLT();
   const vehicle_desc rr = vehicle_desc::roboracer();
@@ -1225,6 +1226,10 @@ TEST(NavPlantConvergence, EnergyTrainedPolicyOnJolt) {
   on.w_energy = 3.0f;
   if (const char *e = std::getenv("P8C_GATE_W"))
     on.w_energy = static_cast<float>(std::atof(e));
+  double ref_whkm = 0.0;
+  if (const char *e = std::getenv("P8C_GATE_REF"))
+    ref_whkm = std::atof(e);
+  on.energy_ref = cvc::nav::dyn_energy_ref_of(ref_whkm, f);
   cvc::nav::coef_trainer t_off(off, 1), t_on(on, 1);
   t_off.train(sc);
   t_on.train(sc);
@@ -1247,17 +1252,18 @@ TEST(NavPlantConvergence, EnergyTrainedPolicyOnJolt) {
   paired_ci(d_whkm, wlo, whi);
   paired_ci(d_reach_seed, rlo2, rhi2);
   paired_ci(d_whkm_seed, wlo2, whi2);
-  std::printf("  P8c gate (w_energy %.2f, lr %.0e, %d steps) on Jolt RoboRacers (city, %zu seeds "
+  std::printf("  P8c gate (w_energy %.2f, priced at %.1f Wh/km of progress (0 = time), lr %.0e, "
+              "%d steps) on Jolt RoboRacers (city, %zu seeds "
               "x %d agents, %d ticks):\n"
               "    without the energy term: reach %.1f%%, %.2f Wh/km (%.0f m a seed)\n"
               "    with it:                 reach %.1f%%, %.2f Wh/km (%.0f m a seed)\n"
               "    the untrained seed:      reach %.1f%%, %.2f Wh/km (%.0f m a seed)\n"
               "    with - without: reach %+.1f points [%+.1f, %+.1f], %+.2f Wh/km [%+.2f, %+.2f]\n"
               "    with - seed:    reach %+.1f points [%+.1f, %+.1f], %+.2f Wh/km [%+.2f, %+.2f]\n",
-              on.w_energy, off.lr, off.steps, ns, eval.agents, eval.ticks, 100 * m[0].reach,
-              m[0].wh_per_km(), m[0].distance_m, 100 * m[1].reach, m[1].wh_per_km(),
-              m[1].distance_m, 100 * m[2].reach, m[2].wh_per_km(), m[2].distance_m,
-              100 * (m[1].reach - m[0].reach), 100 * rlo, 100 * rhi,
+              on.w_energy, ref_whkm, off.lr, off.steps, ns, eval.agents, eval.ticks,
+              100 * m[0].reach, m[0].wh_per_km(), m[0].distance_m, 100 * m[1].reach,
+              m[1].wh_per_km(), m[1].distance_m, 100 * m[2].reach, m[2].wh_per_km(),
+              m[2].distance_m, 100 * (m[1].reach - m[0].reach), 100 * rlo, 100 * rhi,
               m[1].wh_per_km() - m[0].wh_per_km(), wlo, whi, 100 * (m[1].reach - m[2].reach),
               100 * rlo2, 100 * rhi2, m[1].wh_per_km() - m[2].wh_per_km(), wlo2, whi2);
   for (std::size_t s = 0; s < ns; ++s)

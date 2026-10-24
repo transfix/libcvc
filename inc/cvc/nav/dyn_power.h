@@ -55,6 +55,14 @@ inline diff::power_params dyn_power_params_of(const dyn_power_si &si, double mas
   return p;
 }
 
+// train_config::energy_ref from a Wh/km: 1 Wh/km is 3.6 J/m, an energy per length (a force),
+// whose length exponent is 1.
+inline float dyn_energy_ref_of(double wh_per_km, const world_units::normalized_frame &f,
+                               double metres_per_world_unit = 1.0) {
+  const double k = f.scale / metres_per_world_unit; // normalized units per metre
+  return static_cast<float>(3.6 * wh_per_km * k);
+}
+
 } // namespace nav
 } // namespace cvc
 
