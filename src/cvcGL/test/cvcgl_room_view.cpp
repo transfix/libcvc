@@ -107,6 +107,15 @@ int main() {
     SceneRenderer view(sg, 128, 128, /*offscreen=*/true, "main");
     holon h(holon_role::client);
     rs::seed_default_scene(app, "r");
+    // The default room has no lights (its rig is the client document's); a room MAY carry its own,
+    // and room_view realizes them like the objects.
+    {
+      rs::room_scene_env env = rs::default_scene_env();
+      cvc::ariadne::SceneLight sun;
+      sun.id = "sun";
+      env.lights.push_back(sun);
+      rs::write_scene_env(app, "r", env);
+    }
     {
       room_view rv(view, app, "r", "A", sg.getStatePrefix());
       rv.update(h, 1.0 / 60.0);

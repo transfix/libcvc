@@ -13,6 +13,7 @@
   Lesser General Public License for more details.
 */
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/ariadne/conference/room_scene.h>
@@ -170,6 +171,8 @@ void write_scene_env(cvc::app &app, const std::string &room_id, const room_scene
   set_rgb(app, sub(e, {"background", "top"}), env.background_top);
   set_rgb(app, sub(e, {"background", "bottom"}), env.background_bottom);
   set_b(app, sub(e, {"chrome"}), env.chrome);
+  set_b(app, sub(e, {"shadows", "enabled"}), env.shadows);
+  set_replicated(app, sub(e, {"shadows", "resolution"}), std::to_string(env.shadow_resolution));
   std::set<std::string> written;
   for (const cvc::ariadne::SceneLight &l : env.lights) {
     check_id(l.id);
@@ -191,6 +194,10 @@ bool read_scene_env(cvc::app &app, const std::string &room_id, room_scene_env &e
   get_rgb(app, sub(e, {"background", "top"}), out.background_top);
   get_rgb(app, sub(e, {"background", "bottom"}), out.background_bottom);
   out.chrome = get_b(app, sub(e, {"chrome"}), true);
+  out.shadows = get_b(app, sub(e, {"shadows", "enabled"}), false);
+  const std::string res = get_s(app, sub(e, {"shadows", "resolution"}));
+  if (!res.empty())
+    out.shadow_resolution = std::max(256, std::atoi(res.c_str()));
   for (const std::string &id : child_ids(app, lights_path(room_id))) {
     const std::string base = sub(lights_path(room_id), {id.c_str()});
     if (get_b(app, sub(base, {"present"}), false))
@@ -279,6 +286,16 @@ cvc::ariadne::Scene read_room_scene(cvc::app &app, const std::string &room_id) {
     s.lights = env.lights;
     s.has_chrome = true;
     s.chrome_visible = env.chrome;
+    // Shadows only when the ROOM turns them on: a room that leaves them off must not switch off the
+    // ones the client's document enabled (the conference document owns the look).
+    if (env.shadows) {
+      s.has_shadows = true;
+      s.shadows_enabled = true;
+      s.has_shadow_resolution = true;
+      s.shadow_resolution = env.shadow_resolution;
+      s.has_shadow_interval = true;
+      s.shadow_interval = 1; // avatars move every frame: re-bake every frame
+    }
     s.has_background = true;
     s.background_gradient = env.background_gradient;
     for (int i = 0; i < 3; ++i) {
@@ -296,13 +313,9 @@ room_scene_env default_scene_env() {
   env.background_bottom[0] = 0.05f, env.background_bottom[1] = 0.06f,
   env.background_bottom[2] = 0.08f;
   env.chrome = false; // the SceneGraph chrome is a debug overlay (bbox, axes, labels), not decor
-  cvc::ariadne::SceneLight sun;
-  sun.id = "sun";
-  sun.kind = "directional";
-  sun.azimuth = -35.0f;
-  sun.elevation = 55.0f;
-  sun.intensity = 1.2f;
-  env.lights.push_back(sun);
+  // No lights and no shadows: the room's look -- its light rig and real-time shadows -- is the
+  // client document's (examples/ariadne/documents/conference_roster.ari, scene:), so every client
+  // draws the shared objects under the rig its document declares.
   return env;
 }
 

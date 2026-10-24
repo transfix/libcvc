@@ -21,6 +21,27 @@ meta:
   author: cvc
   min_libcvc: 3.6.0
 
+# The room's LOOK. The relay owns what is IN the room (conf.rooms.<room>.scene: the ground, the
+# reference box; the avatars), and every client draws it under this document's lighting, so the
+# rig lives here, not in the server. A three-point rig staged over the 20 m floor: the key spot casts
+# real-time shadows from the scene objects and every avatar (re-baked each frame, so a walking
+# avatar's shadow walks with it); fill, back and environment keep the shaded sides readable.
+scene:
+  lights:
+    - light: room_rig
+      rig: three_point
+      stage: { center: [0, 0, 1], radius: 10 }
+      key: { intensity: 0.9, azimuth: -35, elevation: 55, cone: 48 }
+      fill: 0.25
+      back: 0.25
+      warmth: 0.25
+      environment: 0.15
+      ambient: 0.12
+  shadows:
+    enabled: true
+    resolution: 2048
+    update_interval: 1
+
 menubar:
   - menu: Room
     items:

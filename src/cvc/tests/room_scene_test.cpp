@@ -44,6 +44,12 @@ const SceneNode *find_node(const std::vector<SceneNode> &v, const std::string &i
       return &n;
   return nullptr;
 }
+const SceneLight *find_light(const std::vector<SceneLight> &v, const std::string &id) {
+  for (const SceneLight &l : v)
+    if (l.id == id)
+      return &l;
+  return nullptr;
+}
 } // namespace
 
 // ── one app: the schema round-trips ─────────────────────────────────────────
@@ -75,6 +81,8 @@ TEST(RoomSceneTest, EnvRoundTrips) {
   spot.pos[0] = 1.0f, spot.pos[1] = 2.0f, spot.pos[2] = 3.0f;
   spot.cone = 30.0f;
   env.lights = {sun, spot};
+  env.shadows = true;
+  env.shadow_resolution = 4096;
   rs::write_scene_env(app, "r", env);
 
   rs::room_scene_env out;
@@ -83,6 +91,8 @@ TEST(RoomSceneTest, EnvRoundTrips) {
   expect_v3_eq(out.background_top, env.background_top);
   expect_v3_eq(out.background_bottom, env.background_bottom);
   EXPECT_FALSE(out.chrome);
+  EXPECT_TRUE(out.shadows);
+  EXPECT_EQ(out.shadow_resolution, 4096);
   ASSERT_EQ(out.lights.size(), 2u);
   const SceneLight &s = out.lights[1].id == "sun" ? out.lights[1] : out.lights[0];
   const SceneLight &p = out.lights[1].id == "sun" ? out.lights[0] : out.lights[1];
@@ -101,6 +111,9 @@ TEST(RoomSceneTest, EnvRoundTrips) {
 TEST(RoomSceneTest, LightDroppedFromEnvIsSoftRemoved) {
   cvc::app app;
   rs::room_scene_env env = rs::default_scene_env();
+  SceneLight sun;
+  sun.id = "sun";
+  env.lights.push_back(sun);
   SceneLight fill;
   fill.id = "fill";
   fill.kind = "fill";
@@ -111,8 +124,9 @@ TEST(RoomSceneTest, LightDroppedFromEnvIsSoftRemoved) {
 
   rs::room_scene_env out;
   ASSERT_TRUE(rs::read_scene_env(app, "r", out));
-  ASSERT_EQ(out.lights.size(), 1u);
-  EXPECT_EQ(out.lights[0].id, "sun");
+  ASSERT_EQ(out.lights.size(), 1u); // "fill" is gone
+  EXPECT_TRUE(find_light(out.lights, "sun"));
+  EXPECT_FALSE(find_light(out.lights, "fill"));
 }
 
 TEST(RoomSceneTest, ObjectRoundTrips) {
@@ -235,8 +249,8 @@ TEST(RoomSceneTest, ReadRoomSceneIsARealizableAriadneScene) {
   ASSERT_NE(ref, nullptr);
   EXPECT_EQ(ref->source_primitive, "box");
   EXPECT_FLOAT_EQ(ref->position[2], 0.5f); // stands on the ground
-  ASSERT_EQ(s.lights.size(), 1u);
-  EXPECT_EQ(s.lights[0].id, "sun");
+  EXPECT_TRUE(s.lights.empty()) << "the light rig is the client document's, not the room's";
+  EXPECT_FALSE(s.has_shadows) << "a room that leaves shadows off says nothing about them";
   EXPECT_TRUE(s.has_chrome);
   EXPECT_FALSE(s.chrome_visible) << "the debug overlay is off in a conference room";
   EXPECT_TRUE(s.has_background);
@@ -263,7 +277,7 @@ TEST(RoomSceneTest, SeededSceneReplicatesToAClientAndTracksEdits) {
   ASSERT_EQ(got.nodes.size(), 2u);
   ASSERT_NE(find_node(got.nodes, "ground"), nullptr);
   ASSERT_NE(find_node(got.nodes, "ref"), nullptr);
-  ASSERT_EQ(got.lights.size(), 1u);
+  EXPECT_TRUE(got.lights.empty());
 
   // The server moves the reference object and removes the ground; the client follows.
   SceneNode moved = rs::default_scene_objects()[1];
@@ -277,4 +291,17 @@ TEST(RoomSceneTest, SeededSceneReplicatesToAClientAndTracksEdits) {
   ASSERT_EQ(objs.size(), 1u);
   EXPECT_EQ(objs[0].id, "ref");
   EXPECT_FLOAT_EQ(objs[0].position[0], 4.0f);
+}
+
+// A room that turns shadows on asserts them (re-baked every frame, for moving avatars).
+TEST(RoomSceneTest, RoomShadowsAreAssertedOnlyWhenOn) {
+  cvc::app app;
+  rs::room_scene_env env = rs::default_scene_env();
+  env.shadows = true;
+  env.shadow_resolution = 4096;
+  rs::write_scene_env(app, "r", env);
+  const cvc::ariadne::Scene s = rs::read_room_scene(app, "r");
+  EXPECT_TRUE(s.has_shadows && s.shadows_enabled);
+  EXPECT_TRUE(s.has_shadow_resolution && s.shadow_resolution == 4096);
+  EXPECT_TRUE(s.has_shadow_interval && s.shadow_interval == 1);
 }
