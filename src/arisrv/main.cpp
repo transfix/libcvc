@@ -331,8 +331,9 @@ int main(int argc, char **argv) {
     }
     if (room_debug && ++room_debug_ticks % 25 == 0) {
       const auto roster = cvc::ariadne::conference::room_roster(app, room);
-      std::printf("[arisrv] room '%s': %zu present, holon tick %llu\n", room.c_str(), roster.size(),
-                  static_cast<unsigned long long>(server_holon.tick()));
+      std::printf("[arisrv] room '%s': %zu present, holon tick %llu, %llu intent(s) vetoed\n",
+                  room.c_str(), roster.size(), static_cast<unsigned long long>(server_holon.tick()),
+                  static_cast<unsigned long long>(server_holon.vetoes()));
       for (const auto &p : roster) {
         cvc::physics::body_state s;
         std::uint64_t t = 0;

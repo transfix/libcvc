@@ -24,6 +24,7 @@
 #include <cvc/physics/body.h>
 #include <cvc/physics/types.h>
 #include <gtest/gtest.h>
+#include <limits>
 #include <vector>
 
 using cvc::ariadne::avatar_intent;
@@ -616,4 +617,105 @@ TEST(HolonPhysicsTest, ClientPredictionMatchesTheServersPhysics) {
   EXPECT_LT(server.state("A").position.x, -0.5) << "the server stopped it at the cube";
   EXPECT_LT(corrected, 1e-3) << "and the client predicted the same";
   EXPECT_NEAR(client.state("A").position.x, server.state("A").position.x, 0.05);
+}
+
+// ── authority: the server's veto and overrides (§5h propose -> veto -> override) ──
+
+TEST(HolonAuthorityTest, TheVetoCapsSpeedDropsTheVerticalAndRejectsNonFinite) {
+  holon_config cfg;
+  cfg.max_speed = 3.0;
+  holon server(holon_role::server, cfg);
+  const double nan = std::nan("");
+  avatar_intent fast{vec3{30.0, 40.0, 5.0}};
+  fast.yaw = 7.0; // more than a turn
+  const avatar_intent a = server.sanitize_intent(fast);
+  EXPECT_NEAR(a.move.x, 1.8, 1e-12) << "scaled down to max_speed, direction kept";
+  EXPECT_NEAR(a.move.y, 2.4, 1e-12);
+  EXPECT_EQ(a.move.z, 0.0) << "avatars walk; gravity owns z";
+  EXPECT_NEAR(a.yaw, 7.0 - 2.0 * 3.14159265358979323846, 1e-12) << "wrapped to [-pi, pi]";
+  avatar_intent bad{vec3{nan, 1.0, 0.0}};
+  bad.yaw = std::numeric_limits<double>::infinity();
+  const avatar_intent b = server.sanitize_intent(bad);
+  EXPECT_EQ(b.move.x, 0.0);
+  EXPECT_EQ(b.move.y, 0.0) << "a non-finite move is no move at all";
+  EXPECT_EQ(b.yaw, 0.0);
+  const avatar_intent ok{vec3{1.0, 1.0, 0.0}};
+  const avatar_intent c = server.sanitize_intent(ok);
+  EXPECT_TRUE(c.move.x == 1.0 && c.move.y == 1.0 && c.yaw == 0.0)
+      << "an honest intent passes as is";
+
+  // The server integrates the vetoed intent, and counts the veto.
+  server.add_participant("A");
+  const double dt = server.clock().fixed_dt();
+  server.set_intent("A", avatar_intent{vec3{100.0, 0.0, 0.0}});
+  for (int i = 0; i < 120; ++i)
+    server.advance(dt);
+  EXPECT_NEAR(server.state("A").position.x, 3.0, 1e-6) << "1 s at the 3 m/s cap, not 100";
+  server.queue_intent("A", bad, server.tick() + 1);
+  EXPECT_EQ(server.vetoes(), 2u);
+}
+
+// A client that asks for more than the cap predicts with the vetoed intent too, so it still agrees
+// with the server: the veto costs an honest client nothing, and a client running a modified
+// prediction is simply overruled on reconcile.
+TEST(HolonAuthorityTest, AClientPredictsTheVetoedIntent) {
+  holon server(holon_role::server);
+  holon client(holon_role::client);
+  server.add_participant("A");
+  client.add_participant("A", true);
+  const double dt = server.clock().fixed_dt();
+  const avatar_intent greedy{vec3{50.0, 0.0, 0.0}};
+  server.set_intent("A", greedy);
+  client.set_intent("A", greedy);
+  for (int f = 1; f <= 60; ++f) {
+    server.advance(dt);
+    client.advance(dt);
+    client.apply_authoritative("A", server.state("A"), server.tick());
+  }
+  const vec3 c = client.take_correction("A");
+  EXPECT_EQ(c.x, 0.0);
+  EXPECT_DOUBLE_EQ(client.state("A").position.x, server.state("A").position.x);
+  EXPECT_NEAR(server.state("A").position.x, 0.5 * 4.0, 1e-6) << "0.5 s at the default 4 m/s cap";
+}
+
+TEST(HolonAuthorityTest, TheServerTeleportsAnAvatarAndTheClientFollows) {
+  holon server(holon_role::server);
+  holon client(holon_role::client);
+  server.add_participant("A");
+  client.add_participant("A", true);
+  const double dt = server.clock().fixed_dt();
+  server.advance(dt);
+  client.advance(dt);
+  EXPECT_FALSE(client.override_state("A", at(9.0, 9.0))) << "only the authority overrides";
+  ASSERT_TRUE(server.override_state("A", at(6.0, -2.0)));
+  EXPECT_FALSE(server.override_state("nobody", at(0.0, 0.0)));
+  server.advance(dt);
+  client.advance(dt);
+  client.apply_authoritative("A", server.state("A"), server.tick());
+  EXPECT_DOUBLE_EQ(client.state("A").position.x, 6.0) << "the owner reconciles to the override";
+  EXPECT_DOUBLE_EQ(client.state("A").position.y, -2.0);
+}
+
+TEST(HolonAuthorityTest, AReMassedAvatarIsHarderToPush) {
+  // How far a 70 kg walker shoves a still avatar of mass `kg` in 2 s.
+  const auto shove = [](double kg) {
+    holon server(holon_role::server, physics_config());
+    if (!server.physics())
+      return -1.0;
+    server.set_statics(room_statics(), 1);
+    server.add_participant("A", false, at(-6.0, 5.0));
+    server.add_participant("B", false, at(-4.0, 5.0));
+    EXPECT_TRUE(server.set_mass("B", kg));
+    server.set_intent("A", avatar_intent{vec3{2.0, 0.0, 0.0}});
+    run(server, 240);
+    return server.state("B").position.x - (-4.0);
+  };
+  const double light = shove(70.0), heavy = shove(2000.0);
+  if (light < 0.0)
+    GTEST_SKIP() << "no Jolt backend in this build";
+  EXPECT_GT(light, 0.5) << "an equal mass is shoved aside";
+  EXPECT_LT(heavy, 0.5 * light) << "a heavy one barely gives way";
+  holon client(holon_role::client, physics_config());
+  client.add_participant("A", true);
+  EXPECT_FALSE(client.set_mass("A", 10.0)) << "only the authority re-masses";
 }

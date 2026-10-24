@@ -95,6 +95,11 @@ struct holon_config {
   // SERVER with physics: an avatar that fell off the world (below this z) respawns where it
   // joined.
   double respawn_below_z = -10.0;
+  // The VETO (sanitize_intent): the fastest an intent may ask an avatar to move horizontally (m/s;
+  // a faster ask is scaled down to it), and whether it may ask to move vertically at all (avatars
+  // walk; gravity, not the client, owns z).
+  double max_speed = 4.0;
+  bool allow_vertical = false;
 };
 
 class holon {
@@ -130,8 +135,28 @@ public:
   // Set a participant's latest intent. Server: the validated input it integrates
   // into the authoritative pose, from the next quantum on (any queued stamped
   // intents are dropped). Client: only the LOCAL avatar's own input (a non-local
-  // pid is ignored -- a client cannot drive a peer).
+  // pid is ignored -- a client cannot drive a peer). Either way the intent passes
+  // sanitize_intent first.
   void set_intent(const std::string &pid, const avatar_intent &in);
+
+  // The server's VETO over a proposed intent (§5h propose -> veto -> override): a
+  // non-finite move is no move, a non-finite yaw faces +X, the vertical is dropped
+  // unless allow_vertical, the horizontal speed is capped at max_speed and the yaw
+  // is wrapped to [-pi, pi]. An honest client applies the same rule to its own
+  // prediction, so it agrees with what the server will integrate (no correction);
+  // a client that asks for more is overruled on reconcile.
+  avatar_intent sanitize_intent(const avatar_intent &in) const;
+  // SERVER: how many intents the veto has changed.
+  std::uint64_t vetoes() const noexcept { return _vetoes; }
+
+  // SERVER OVERRIDES (§5h): the authority acts on an avatar at will, and the result
+  // replicates like any authoritative pose (the owning client reconciles to it).
+  // Teleport `pid` to `feet` (pose + velocities). False for an unknown pid or on a
+  // client holon.
+  bool override_state(const std::string &pid, const cvc::physics::body_state &feet);
+  // Re-mass `pid` (kg, finite and > 0). Physics only: false without a world, for an
+  // unknown pid, a bad mass, or on a client holon.
+  bool set_mass(const std::string &pid, double kg);
 
   // SERVER: a participant's intent STAMPED with the tick the client applied it from
   // in its prediction. It takes effect at that tick -- so the authoritative pose
@@ -258,6 +283,7 @@ private:
   double _alpha = 0.0;                  // the last frame's interpolation alpha, for display_pose
   std::uint64_t _lead = 0;              // CLIENT: ticks ahead of the server (set_lead_ticks)
   std::unique_ptr<avatar_world> _world; // physics (holon_config::physics + a Jolt build)
+  std::uint64_t _vetoes = 0;            // SERVER: intents sanitize_intent changed
   std::uint64_t _statics_rev = 0;
 };
 

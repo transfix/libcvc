@@ -65,7 +65,7 @@ avatar_world::avatar_world(double fixed_dt, const avatar_body &body) : _body(bod
 
 avatar_world::~avatar_world() = default;
 
-std::uint32_t avatar_world::create_avatar(const ph::body_state &feet, bool dynamic) {
+std::uint32_t avatar_world::create_avatar(const ph::body_state &feet, bool dynamic, double mass) {
   ph::body_desc d;
   d.shape = ph::box{ph::vec3{0.5 * _body.width, 0.5 * _body.width, 0.5 * _body.height}};
   d.motion = dynamic ? ph::motion_type::dynamic : ph::motion_type::kinematic;
@@ -73,7 +73,7 @@ std::uint32_t avatar_world::create_avatar(const ph::body_state &feet, bool dynam
   d.rotation = feet.rotation;
   d.linear_velocity = feet.linear_velocity;
   d.material = static_cast<ph::material_id>(_avatar_material);
-  d.mass = dynamic ? _body.mass : 0.0;
+  d.mass = dynamic ? mass : 0.0;
   d.linear_damping = 0.0;
   d.angular_damping = 0.0;
   d.allow_sleeping = false; // an idle avatar must still be pushable and respond to its intent
@@ -103,14 +103,15 @@ void avatar_world::set_statics(const std::vector<avatar_static> &statics) {
     _statics.push_back(_world->add_body(d).value);
   }
   for (auto &kv : _avatars)
-    kv.second.id = create_avatar(kept[kv.first], kv.second.dynamic);
+    kv.second.id = create_avatar(kept[kv.first], kv.second.dynamic, kv.second.mass);
 }
 
 void avatar_world::add_avatar(const std::string &pid, const ph::body_state &feet, bool dynamic) {
   remove_avatar(pid);
   avatar a;
   a.dynamic = dynamic;
-  a.id = create_avatar(feet, dynamic);
+  a.mass = _body.mass;
+  a.id = create_avatar(feet, dynamic, a.mass);
   _avatars[pid] = a;
 }
 
@@ -160,6 +161,16 @@ void avatar_world::move_kinematic(const std::string &pid, const ph::pose &feet) 
     return;
   _world->move_kinematic(bid(a.id), feet.position + ph::vec3{0.0, 0.0, 0.5 * _body.height},
                          feet.rotation);
+}
+
+void avatar_world::set_mass(const std::string &pid, double kg) {
+  avatar &a = _avatars.at(pid);
+  if (!a.dynamic)
+    return;
+  ph::body_settings s = _world->get_body(bid(a.id));
+  s.mass = kg;
+  _world->set_body(bid(a.id), s);
+  a.mass = kg;
 }
 
 void avatar_world::step() { _world->step(); }
