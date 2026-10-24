@@ -172,6 +172,15 @@ public:
   // local mutations whose journal sequence is > `sequence`.
   void rewind_publish_cursor(std::uint64_t sequence);
 
+  // Erase the journal up to the publish cursor (opt-in; returns the
+  // count erased). For a node whose late joiners bootstrap from a
+  // snapshot rather than a journal backfill (a relay with
+  // set_backfill_on_connect(false)): it keeps the journal, and so
+  // every drain, at O(new). A rewind into the trimmed range replays
+  // only what survived, and replay_local returns only post-trim
+  // entries.
+  std::size_t trim_published();
+
   // Strictness toggle: when true, ingest_remote rejects mutations
   // whose paths resolve to an authority entry whose cluster_id
   // differs from this shard's cluster_id. Default false.
@@ -291,6 +300,14 @@ public:
   void clear_interests();
   std::vector<std::string> interests() const;
   bool path_is_of_interest(const std::string &path) const;
+
+  // The ingest gate, exposed so a relay can ask "would this shard
+  // take it?" before re-fanning a frame: a delegation op always
+  // passes (as in ingest_remote), anything else when its path is of
+  // interest. admits_message adds ingest_remote_message's cluster
+  // check.
+  bool admits(const state_mutation &m) const;
+  bool admits_message(const state_message &m) const;
 
   void set_enforce_interest(bool enforce) noexcept;
   bool enforce_interest() const noexcept;
