@@ -679,7 +679,36 @@ scenes, 30 s each, and judged on two held-out seeds:
     9.0e-4.
   - `EnergyTrainingDrawsLessEnergy`: over 60 steps from the same start the energy term falls
     0.970 → 0.937 with it, against 0.962 without it.
-- Not yet shown: that a policy trained with it draws less on Jolt for what it gives up in reach.
+- **On Jolt, the gate is not met** (`NavPlantConvergence.EnergyTrainedPolicyOnJolt`, Windows).
+  - The setup: the RoboRacer's power model fitted to its own ledger, then two dynamic-rollout
+    trainings that differ only in `w_energy`, both scored on the P8b gate's 20 held-out city
+    seeds by `cvc::physics::score_on_plant`. That is reach_on_plant's runs, plus the energy
+    the agents drew and the distance their chassis drove; Wh/km is the fleet's total over its
+    total.
+  - The fit: k_pos 1.47, k_neg -0.66, p_idle 4.5 W, c_v 0, c_v3 0.0015, c_lat 0.018 (r² 0.955).
+  - Results, with paired-bootstrap 95% CIs over the 20 seeds:
+
+    | Training | w_energy | Reach with | Reach without | Δ reach (points) | Δ Wh/km | Metres a seed (with / without) |
+    |---|--:|--:|--:|--:|--:|--:|
+    | lr 5e-5, 150 steps | 3 | 51.2% | 51.1% | +0.1 [-1.6, +1.8] | -0.03 [-0.52, +0.43] | 2068 / 2110 |
+    | lr 2e-4, 300 steps | 1 | 14.7% | 39.0% | -24.3 [-27.3, -21.2] | -0.23 [-0.89, +0.66] | 1095 / 2589 |
+    | lr 2e-4, 300 steps | 3 | 11.0% | 39.0% | -27.9 [-31.5, -24.5] | +0.17 [-0.59, +1.12] | 940 / 2589 |
+    | lr 2e-4, 300 steps | 10 | 7.6% | 39.0% | -31.4 [-34.8, -28.1] | -0.27 [-1.15, +0.66] | 563 / 2589 |
+    | lr 2e-4, 300 steps | 30 | 5.8% | 39.0% | -33.1 [-36.5, -29.9] | -0.48 [-1.31, +0.56] | 306 / 2589 |
+
+    The untrained seed reaches 51.7% at 4.02 Wh/km.
+  - At the gentle rate, training barely moves the policy, as in P8b, and the term changes
+    nothing.
+  - Where training does move it, the term teaches the policy to stop driving, not to drive for
+    less: distance falls 2-8x and reach with it. Energy per km does not fall significantly
+    against the policy trained without the term.
+  - Per-seed Wh/km ranges from 2.7 to 5.8 on the same policy. The plant's chaos is large next to
+    any per-km effect.
+  - The cause is the term's form. It prices mean power over the window, so the cheapest policy
+    is the one that moves least. The gate asks for energy per distance, at the same reach.
+  - Next: a term that prices energy against progress, not time. One option charges each step's
+    energy above what its progress toward the goal would cost at a reference Wh/km. Another
+    charges energy per unit progress with a smooth floor on progress.
 - Not yet in the torch twin. Like any change to the loss, it must reach `sdf_nav`'s
   `train_bicycle` before the two are compared.
 

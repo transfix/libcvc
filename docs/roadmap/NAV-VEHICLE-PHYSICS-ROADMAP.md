@@ -134,8 +134,11 @@ The plan, in order:
    - Done: `diff::power_step` (`detail/dyn_power.h`), fitted to the ledger by
      `cvc::physics::fit_power`, and `train_config::w_energy` in the dynamic rollout's loss
      (docs/NAV_TRAINING.md, "Energy in the loss").
-   - Open: the gate on Jolt (a policy trained with the energy term draws less per km for what it
-     gives up in reach, over paired seeds); the four-wheel plant's rollout; the torch twin.
+   - The gate on Jolt (a policy trained with the energy term draws less per km for what it
+     gives up in reach, over paired seeds) is measured and not met. The mean-power term teaches
+     the policy to stop driving (docs/NAV_TRAINING.md, "Energy in the loss").
+   - Open: a term priced against progress, and its gate; the four-wheel plant's rollout; the
+     torch twin.
 
 ### P8a's vehicle fitted to Jolt (2026-10-20)
 
@@ -506,7 +509,16 @@ These are the targets a plant fitted to Jolt has to beat, bin by bin.
       within +1.4% (Humvee) and -1.4% (RoboRacer). The swerve alone misses by +9.0% and +17.7%.
     - The trainer's energy term passes its gradcheck. Over 60 steps it lowers the energy term
       0.970 -> 0.937, against 0.962 without it.
-    - Next: the Jolt gate, a policy trained with it against one without over paired seeds.
+    - The Jolt gate (`NavPlantConvergence.EnergyTrainedPolicyOnJolt`, 20 paired seeds,
+      `cvc::physics::score_on_plant` for reach, energy and distance) is not met:
+      - At lr 5e-5 and 150 steps the term changes nothing: +0.1 points of reach and
+        -0.03 Wh/km, both CIs across 0.
+      - At lr 2e-4 and 300 steps, w_energy 1 to 30 cuts the distance driven 2-8x. Reach falls
+        24-33 points against the same training without the term, and Wh/km does not fall
+        outside its CI.
+      - Pricing mean power over the window makes standing still the cheapest policy.
+    - Next: an energy term priced against progress (energy above a reference Wh/km of progress,
+      or per unit progress with a smooth floor), then the gate again.
 - **P9, the plant by default (2026-10-18, Joe: "can't we use the actual jolt vehicle dimensions
   and physics?").**
   - What moved the agents: no default path used Jolt. Every default was the kinematic bicycle
