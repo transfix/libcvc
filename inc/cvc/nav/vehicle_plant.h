@@ -60,6 +60,10 @@ public:
   // Whether energy_step() measures anything (nav_stats then carries energy_J and
   // energy_per_km).
   virtual bool tracks_energy() const { return false; }
+  // For nav_stats' plant ledger: agent i as of the end of the last tick (plant_sample, SI). A
+  // plant that does not measure it reports the default sample and tracks_samples() false.
+  virtual plant_sample sample(int i) const { return (void)i, plant_sample{}; }
+  virtual bool tracks_samples() const { return false; }
   // How the plant's measured state (plant_state::tire_use, load_transfer) modulates the drive
   // (H4); sim_world reads it each tick. Off (no gain) from a plant that does not measure it.
   virtual plant_modulation modulation() const { return {}; }

@@ -47,7 +47,7 @@
 #define Uses_TWindow
 #include <tvision/tv.h>
 
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
 #include <dlfcn.h>
 #include <sys/stat.h>
 #endif
@@ -91,7 +91,7 @@ namespace {
 
 constexpr ushort cmAriMenuBase = 1000; // menu item k is command cmAriMenuBase + k
 
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
 // tvision reads the terminal's description through ncurses. A cvcpkg prefix ships ncurses' own
 // terminfo database (share/terminfo) beside libcvc, while the bundle's compiled-in search path
 // names the builder's prefix, which no user machine has. So point ncurses at the database next to
@@ -567,7 +567,7 @@ FtxuiBackend::RunExit
 TvisionBackend::run_desktop(Runtime &rt, const RunOptions &opts, const std::function<void()> &drain,
                             const std::function<bool()> &should_close,
                             const std::function<void(const TermEvent &)> &unhandled) {
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__EMSCRIPTEN__) // the browser build has no ncurses
   use_bundled_terminfo(); // before TApplication starts ncurses
 #endif
   // Lay window bodies out at full colour; tvision quantizes to what the terminal can show.

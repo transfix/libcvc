@@ -40,24 +40,49 @@ if(EMSCRIPTEN)
   set(CVC_ARI_WASM_DOC "${CMAKE_CURRENT_SOURCE_DIR}/../../examples/ariadne/terminal/terminal_tour.ari"
       CACHE FILEPATH "The .ari document the ari browser build runs")
   get_filename_component(_ari_doc_name "${CVC_ARI_WASM_DOC}" NAME)
-  target_compile_definitions(ari PRIVATE CVC_ARIADNE_WASM_DOC="/${_ari_doc_name}")
-  target_link_options(ari PRIVATE
-    "--embed-file=${CVC_ARI_WASM_DOC}@/${_ari_doc_name}"
-    "--embed-file=${CMAKE_CURRENT_SOURCE_DIR}/../cvc/ariadne/components@/components"
-    -sASYNCIFY=1
-    -sASYNCIFY_STACK_SIZE=131072
-    -sALLOW_MEMORY_GROWTH=1
-    -sSTACK_SIZE=2097152
-    -sFETCH=1
-    -sEXIT_RUNTIME=1
-    # The page reports the xterm.js size through FTXUI's resize hook.
-    -sEXPORTED_FUNCTIONS=_main,_ftxui_on_resize)
-  set_property(TARGET ari APPEND PROPERTY LINK_DEPENDS "${CVC_ARI_WASM_DOC}")
-  # The page goes next to ari.js, with the document name filled in by a plain replace:
+  # The page goes next to <target>.js, with its names filled in by a plain replace:
   # configure_file(@ONLY) would also eat the "@xterm/xterm@" in its CDN URLs.
   set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/web/ari.html")
-  file(READ "${CMAKE_CURRENT_SOURCE_DIR}/web/ari.html" _ari_html)
-  string(REPLACE "@ARI_WASM_DOC_NAME@" "${_ari_doc_name}" _ari_html "${_ari_html}")
-  file(GENERATE OUTPUT "$<TARGET_FILE_DIR:ari>/ari.html" CONTENT "${_ari_html}")
+  file(READ "${CMAKE_CURRENT_SOURCE_DIR}/web/ari.html" _ari_html_in)
+  function(ari_wasm_page target label hint)
+    target_compile_definitions(${target} PRIVATE CVC_ARIADNE_WASM_DOC="/${_ari_doc_name}")
+    target_link_options(${target} PRIVATE
+      "--embed-file=${CVC_ARI_WASM_DOC}@/${_ari_doc_name}"
+      "--embed-file=${CMAKE_CURRENT_SOURCE_DIR}/../cvc/ariadne/components@/components"
+      -sASYNCIFY=1
+      -sASYNCIFY_STACK_SIZE=131072
+      -sALLOW_MEMORY_GROWTH=1
+      -sSTACK_SIZE=2097152
+      -sFETCH=1
+      -sEXIT_RUNTIME=1
+      # The page reports the xterm.js size through FTXUI's resize hook, and tvision's.
+      ${ARGN})
+    set_property(TARGET ${target} APPEND PROPERTY LINK_DEPENDS "${CVC_ARI_WASM_DOC}")
+    set(_html "${_ari_html_in}")
+    string(REPLACE "@ARI_WASM_DOC_NAME@" "${_ari_doc_name}" _html "${_html}")
+    string(REPLACE "@ARI_WASM_MODULE@" "${target}" _html "${_html}")
+    string(REPLACE "@ARI_WASM_LABEL@" "${label}" _html "${_html}")
+    string(REPLACE "@ARI_WASM_HINT@" "${hint}" _html "${_html}")
+    file(GENERATE OUTPUT "$<TARGET_FILE_DIR:${target}>/${target}.html" CONTENT "${_html}")
+  endfunction()
+  ari_wasm_page(ari "ari"
+    "Tab / Enter / arrows · mouse · F10 menu · Ctrl-C asks, twice quits"
+    -sEXPORTED_FUNCTIONS=_main,_ftxui_on_resize)
+  # ari_tvision: the same runner and document on the tvision desktop (movable, overlapping
+  # windows, a menu bar and a status line), when libcvc has the tvision backend: on wasm that is
+  # cvcpkg's tvision with its browser console (src/cvc/CMakeLists.txt). Out of ALL like the gallery
+  # demos; examples/web/build-wasm-demo.sh builds it by name.
+  if(CVC_ARIADNE_TVISION_ENABLED)
+    add_executable(ari_tvision EXCLUDE_FROM_ALL main.cpp)
+    if(TARGET cvc::cvc)
+      target_link_libraries(ari_tvision PRIVATE cvc::cvc)
+    else()
+      target_link_libraries(ari_tvision PRIVATE cvc)
+    endif()
+    target_compile_definitions(ari_tvision PRIVATE CVC_ARI_WASM_BACKEND="tvision")
+    ari_wasm_page(ari_tvision "ari · tvision"
+      "drag a window by its title · F10 menu · F6 next window · Alt-X quits"
+      -sEXPORTED_FUNCTIONS=_main,_ftxui_on_resize,_tvision_set_screen_size)
+  endif()
 endif()

@@ -796,3 +796,25 @@ TEST(NavCoefTrain, CheckpointSelectionEndsOnTheBestScore) {
   for (int k = 0; k < 3; ++k)
     EXPECT_FLOAT_EQ(after[k], before[k]);
 }
+
+// coef_mlp::with_flat_weights is export_flat's inverse: the same weights give the same policy,
+// and a changed weight changes it. (The zeroth-order fine-tune perturbs this flat vector.)
+TEST(NavCoefMlp, WithFlatWeightsInvertsExportFlat) {
+  train_config cfg = small_cfg();
+  const cvc::nav::coef_mlp p = coef_trainer(cfg, 3).to_coef_mlp();
+  std::vector<float> data = p.export_flat().data;
+  const cvc::nav::coef_mlp q = p.with_flat_weights(data);
+  EXPECT_EQ(q.export_flat().data, data);
+  EXPECT_EQ(q.flags(), p.flags());
+  const float feat[5] = {0.3f, 3.0f, 0.7f, 0.71f, 0.0f};
+  float a[3], b[3], c[3];
+  p.forward(feat, 1, a, 1);
+  q.forward(feat, 1, b, 1);
+  for (int k = 0; k < 3; ++k)
+    EXPECT_EQ(a[k], b[k]);
+  data.back() += 0.5f; // the last layer's last bias: the third coefficient
+  p.with_flat_weights(data).forward(feat, 1, c, 1);
+  EXPECT_NE(c[2], a[2]);
+  data.pop_back();
+  EXPECT_THROW(p.with_flat_weights(data), std::invalid_argument);
+}

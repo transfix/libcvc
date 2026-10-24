@@ -112,6 +112,15 @@ public:
   double energy_step(int i) const override;
   int static_contacts_step(int i) const override;
   bool tracks_energy() const override { return true; }
+  // The plant ledger's sample of agent i at the end of the last tick (at attach(), the vehicle
+  // at rest and no command), from the vehicle's state then. The fields it shares with
+  // plant_log's planar_sample are computed as plant_log computes them: the centre of mass's
+  // velocity in the heading's frame, grade and roll the sines of the body's pitch and roll
+  // (fwd.z and left.z), a_lat / a_lon the change of its horizontal velocity over the tick
+  // across the mean heading. ltr classifies a wheel by its contact point's side of the centre of
+  // mass along the body's left axis.
+  cvc::nav::plant_sample sample(int i) const override;
+  bool tracks_samples() const override { return true; }
   cvc::nav::plant_modulation modulation() const override { return _o.modulation; }
 
   // The terrain limits of a vehicle, for sim_world::set_terrain (P5): its steepest climb, the
@@ -249,13 +258,19 @@ private:
     double steer_command = 0.0; // rad
     double accel_command = 0.0; // m/s^2 along the heading
     drift_si drift;
+    cvc::nav::plant_sample sample; // as of the last tick (sample())
+    double psi = 0.0;              // the heading then, rad
+    double vwx = 0.0, vwy = 0.0;   // the centre of mass's world velocity then, m/s
   };
   struct bin_sums {
     std::uint64_t ticks = 0;
     double pos2 = 0.0, pos_max = 0.0, head2 = 0.0, head_max = 0.0, speed2 = 0.0, speed_max = 0.0;
   };
 
-  double drawn(const agent &a) const;
+  double drawn(const agent &a, const vehicle_energy &e) const;
+  // Agent a's plant_sample from its state `vs`; `tick`: over a tick of _dt since the last one
+  // (the accelerations), else at rest (attach).
+  void measure(agent &a, const physics::vehicle_state &vs, bool tick) const;
   void count_contacts();
 
   world &_w;
