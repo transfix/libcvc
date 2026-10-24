@@ -1028,18 +1028,21 @@ std::size_t state_transport_ws::write_media(const media_frame &m, const void *ex
   }
   // Media is unreplicated, un-bridged, and not subject to the peer path-filter (it carries no
   // path). `exclude` (a connection*) skips the origin peer when a relay fans; nullptr sends to all.
+  const std::size_t backlog_drop = _media_backlog_drop.load(std::memory_order_relaxed);
   std::size_t n = 0;
   for (auto &c : conns) {
     if (!c || c.get() == exclude || !c->alive.load() || !c->can_write())
       continue;
     // Media is loss-tolerant: if this peer's send buffer is backed up (it can't keep pace with the
     // video), DROP the frame rather than let the synchronous write block the relay. A LOW threshold
-    // is deliberate — it keeps each peer's buffer small so the small, must-deliver STATE writes
-    // (roster join/leave + the periodic re-broadcast below) are never crowded out or deferred.
-    // Dropping video to a slow peer is invisible; a stalled roster makes clients unable to SEE each
-    // other at all.
-    if (c->send_backlog() > 32 * 1024)
+    // (32 KB unless set_media_backlog_drop says otherwise) is deliberate — it keeps each peer's
+    // buffer small so the small, must-deliver STATE writes (roster join/leave + the periodic
+    // re-broadcast below) are never crowded out or deferred. Dropping video to a slow peer is
+    // invisible; a stalled roster makes clients unable to SEE each other at all.
+    if (backlog_drop != 0 && c->send_backlog() > backlog_drop) {
+      _media_backlog_dropped.fetch_add(1, std::memory_order_relaxed);
       continue;
+    }
     // Per-receiver egress gate, asked last so a frame the backlog drop skips never counts as sent
     // in the gate's own bookkeeping (e.g. a thumbnail cadence). An unidentified receiver is
     // ungated: the gate has no id to decide on, and "unknown" delivers everywhere else too.
@@ -1083,6 +1086,10 @@ void state_transport_ws::set_media_gate(media_gate_fn gate) {
   }
   // `next` now holds the previous gate; it is released here, outside the lock (a fan still using
   // its own copy keeps it alive until that fan finishes).
+}
+
+void state_transport_ws::set_media_backlog_drop(std::size_t bytes) noexcept {
+  _media_backlog_drop.store(bytes, std::memory_order_relaxed);
 }
 
 void state_transport_ws::set_on_media(media_frame_fn cb) {

@@ -182,11 +182,25 @@ public:
   // swapped whole and a fan already in progress finishes with the gate it started with.
   void set_media_gate(media_gate_fn gate) override;
 
+  // Backlog drop (kDefaultMediaBacklogDrop; 0 = off): skip a connection whose OS send buffer
+  // already holds more than `bytes` unsent, rather than let the synchronous write block behind a
+  // peer that cannot keep pace. Media is loss-tolerant, and a small threshold keeps a slow peer's
+  // buffer from crowding out the state writes queued behind its video. Applies to every media
+  // write, own uplink included (the counterpart of state_transport_grpc::set_media_stall_drop).
+  // Linux only: the backlog is read with SIOCOUTQ and is 0 elsewhere. The gate is asked after
+  // this check, so a dropped frame uses no thumbnail. Thread-safe.
+  void set_media_backlog_drop(std::size_t bytes) noexcept;
+  static constexpr std::size_t kDefaultMediaBacklogDrop = 32 * 1024;
+
   std::uint64_t total_media_sent() const noexcept { return _media_sent.load(); }
   std::uint64_t total_media_received() const noexcept { return _media_recv.load(); }
   std::uint64_t total_media_forwarded() const noexcept { return _media_fwd.load(); }
   // Receiver deliveries the media gate denied (one per frame per denied connection).
   std::uint64_t total_media_gated() const noexcept { return _media_gated.load(); }
+  // Receiver deliveries the backlog drop skipped (one per frame per backed-up connection).
+  std::uint64_t total_media_backlog_dropped() const noexcept {
+    return _media_backlog_dropped.load();
+  }
 
   // Backfill on connect (default true): replay each registered shard's journaled
   // local-origin mutations to a newly admitted connection BEFORE any live traffic,
@@ -309,6 +323,9 @@ private:
   std::atomic<std::uint64_t> _media_recv{0};  // MediaFrames received from peers
   std::atomic<std::uint64_t> _media_fwd{0};   // MediaFrames a relay fanned to other connections
   std::atomic<std::uint64_t> _media_gated{0}; // receiver deliveries the media gate denied
+  // Receiver deliveries the backlog drop skipped, and its threshold in bytes (0 = off).
+  std::atomic<std::uint64_t> _media_backlog_dropped{0};
+  std::atomic<std::size_t> _media_backlog_drop{kDefaultMediaBacklogDrop};
 
   std::atomic<std::uint64_t> _published{0};
   std::atomic<std::uint64_t> _sent_frames{0};

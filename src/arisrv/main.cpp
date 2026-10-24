@@ -490,10 +490,11 @@ int main(int argc, char **argv) {
       // frames the gate passed whole, as thumbnails or not at all, and the room-tree deliveries
       // the registries filtered; then the transports' own S7 counters (cumulative) and the
       // relay journal's size (about 0 while it is trimmed).
-      unsigned long long ws_withheld = 0, ws_gated = 0;
+      unsigned long long ws_withheld = 0, ws_gated = 0, ws_backlog = 0;
 #if CVC_ENABLE_WS
       ws_withheld = static_cast<unsigned long long>(ws_tp.total_relay_withheld());
       ws_gated = static_cast<unsigned long long>(ws_tp.total_media_gated());
+      ws_backlog = static_cast<unsigned long long>(ws_tp.total_media_backlog_dropped());
 #endif
       cvc::ariadne::conference::room_aoi_relay::stats st;
       if (aoi_relay)
@@ -501,7 +502,8 @@ int main(int argc, char **argv) {
       std::printf(
           "[arisrv] aoi %s: pairs inner %zu middle %zu outer %zu | pushes %llu (%llu entries) | "
           "media full %llu thumb %llu dropped %llu | state filtered %llu | relay withheld grpc "
-          "%llu ws %llu | media gated grpc %llu ws %llu, stalled %llu | journal %zu\n",
+          "%llu ws %llu | media gated grpc %llu ws %llu, stalled %llu, backlog %llu | "
+          "journal %zu\n",
           aoiMode.c_str(), st.inner, st.middle, st.outer,
           static_cast<unsigned long long>(st.pushes),
           static_cast<unsigned long long>(st.push_entries),
@@ -511,7 +513,7 @@ int main(int argc, char **argv) {
           static_cast<unsigned long long>(st.state_filtered),
           static_cast<unsigned long long>(state_tp.total_relay_withheld()), ws_withheld,
           static_cast<unsigned long long>(state_tp.total_media_gated()), ws_gated,
-          static_cast<unsigned long long>(state_tp.total_media_stall_dropped()),
+          static_cast<unsigned long long>(state_tp.total_media_stall_dropped()), ws_backlog,
           shard.journal().size());
       std::fflush(stdout);
     }

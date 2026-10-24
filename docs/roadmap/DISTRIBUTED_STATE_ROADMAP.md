@@ -137,8 +137,12 @@ control: a peer with no filter still receives everything.
   (0 = off, the library default): a receiver whose in-flight media write
   started longer ago than that, or whose stream a frame cannot get within
   it (`write_mu` is a timed mutex), is skipped (`total_media_stall_dropped()`),
-  the counterpart of the WS leg's 32 KB backlog drop. The gate is asked only
-  once the stream is held, so a dropped frame spends no thumbnail.
+  the counterpart of the WS leg's backlog drop. That drop is now
+  `set_media_backlog_drop(bytes)` (32 KB by default, 0 = off), and its skips
+  count in `total_media_backlog_dropped()`. arisrv's 5 s AOI line prints the
+  count as `backlog`. The gate is asked only once the stream is held, so a
+  dropped frame spends no thumbnail. The relay loopback tests turn both drops
+  off, so they don't shed a frame on a loaded runner.
 - **Accepted-stream lifetime (gRPC).** A server handler's stream dies when
   `Channel()` returns, while publish, relay forwards and the link probe write
   to it from other threads. The handler now cancels the stream and takes

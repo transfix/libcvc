@@ -82,6 +82,10 @@ constexpr double kCameraHz = 30.0;          // the synthetic camera
 constexpr double kMicHz = 48000.0 / 1024.0; // one 1024-sample f32 mono chunk at 48 kHz
 constexpr std::size_t kCameraBytes = 4096;  // small, so loopback never saturates
 constexpr std::size_t kMicBytes = 1024 * 4; // 1024 f32 samples
+// Media is lossless here. gRPC's stall drop is off by default, and the relay and every client turn
+// off the WebSocket backlog drop. On Linux that drop sheds a frame whenever a starved receiver's
+// socket holds more than 32 KB, so a loaded runner used to miss a few percent of the frames. A
+// slow runner now delays frames but sheds none, and the media counts measure the gate alone.
 
 double now_s() {
   static const auto epoch = std::chrono::steady_clock::now();
@@ -253,6 +257,7 @@ public:
     ws.set_on_connection_closed(on_departed);
     ws.set_relay_requires_interest(opt.gate);
     ws.set_backfill_on_connect(!opt.trim);
+    ws.set_media_backlog_drop(0); // lossless media: the note by the frame sizes above
     ws.start("127.0.0.1:0", kRelayId, "conf");
     ws.set_relay(true);
     ws.register_shard(shard.get());
@@ -510,6 +515,7 @@ public:
       _ws = std::make_unique<cvc::state_transport_ws>();
       _ws->register_shard(shard.get());
       _ws->set_on_media(on_media);
+      _ws->set_media_backlog_drop(0); // its uplink is lossless too
       tp = _ws.get();
       return _ws->connect_to_peer("ws://" + r.ws.listen_address(), std::chrono::milliseconds(4000));
     }
@@ -837,8 +843,9 @@ default_room_run run_default_room(bool use_aoi, bool corners) {
       }
     return out.pose_missing == 0 && out.media >= 1.0;
   };
-  // Everything the window sent lands (the room keeps running, as the relay would).
-  run_room(r, cs, 3.0, {}, tally);
+  // Everything the window sent lands (the room keeps running, as the relay would). A loaded runner
+  // may take a while to drain it; the wait ends as soon as it has.
+  run_room(r, cs, 8.0, {}, tally);
   tally();
   out.gated = r.media_gated();
   if (r.aoi)
@@ -850,9 +857,8 @@ default_room_run run_default_room(bool use_aoi, bool corners) {
 
 // The 20 m room's every pair is inner under the conference preset, so live pose, full video and
 // full audio reach every receiver exactly as without the area of interest: each receiver gets
-// every other subject's pose mutation live and (to within what loopback media may drop on a loaded
-// runner, at the 2% the preset promises) every frame, while the gate passes every frame whole and
-// the driver never pushes.
+// every other subject's pose mutation live and every camera and mic frame, while the gate passes
+// every frame whole and the driver never pushes.
 TEST(RoomRelayLoopbackTest, DefaultRoomUnchangedUnderConferencePreset) {
   for (const bool corners : {false, true}) {
     SCOPED_TRACE(corners ? "corners" : "spawn ring");
@@ -868,9 +874,8 @@ TEST(RoomRelayLoopbackTest, DefaultRoomUnchangedUnderConferencePreset) {
     EXPECT_GT(on.pose_expected, 0u);
     EXPECT_EQ(off.pose_missing, 0u);
     EXPECT_EQ(on.pose_missing, 0u) << "an inner pair's live pose is never withheld";
-    EXPECT_GE(off.media, 0.98);
-    EXPECT_GE(on.media, 0.98);
-    EXPECT_NEAR(on.media, off.media, 0.02);
+    EXPECT_EQ(off.media, 1.0) << "every frame lands: media is lossless here";
+    EXPECT_EQ(on.media, 1.0) << "the gate passes every inner frame";
     EXPECT_EQ(on.gated, 0u) << "the gate denies no inner receiver";
     EXPECT_EQ(on.aoi.inner, 6u);
     EXPECT_EQ(on.aoi.middle, 0u);
@@ -1033,7 +1038,7 @@ TEST(RoomRelayLoopbackTest, MiddleGetsThumbnailsAndAudio) {
   run_room(r, cs, kSeconds);
   C.set_media(false);
   // Every chunk lands (the room keeps running meanwhile).
-  EXPECT_TRUE(run_room(r, cs, 3.0, {}, [&] { return B.tap.media("C", "mic") >= C.mic_sent; }));
+  EXPECT_TRUE(run_room(r, cs, 8.0, {}, [&] { return B.tap.media("C", "mic") >= C.mic_sent; }));
 
   EXPECT_GT(C.cam_sent, 30u);
   EXPECT_EQ(B.tap.media("C", "mic"), C.mic_sent) << "a middle peer's audio is never thinned";
@@ -1318,11 +1323,40 @@ TEST(RoomRelayLoopbackTest, LateJoinerBootstrapsFromSnapshotOnly) {
 
 namespace {
 
+// STEPS room steps and the client frames between them on one timeline that never skips: a step
+// every kRoomStepS and a frame of each client every kFrameS, each run when due, or at once when
+// the runner is late. Every run therefore has arigl's 30 frames to arisrv's 20 steps. run_room
+// skips ahead instead, so a starved loop runs fewer client frames per step, which shrinks the
+// echo's share of the egress. SCRIPT runs before each step.
+void run_paced(test_relay &r, const std::vector<test_client *> &cs, int steps,
+               const std::function<void(double)> &script) {
+  const double t0 = now_s();
+  int step = 0;
+  long frame = 0;
+  while (step < steps) {
+    const double step_due = t0 + step * kRoomStepS;
+    const double frame_due = t0 + static_cast<double>(frame) * kFrameS;
+    const bool stepping = step_due <= frame_due;
+    while (now_s() < (stepping ? step_due : frame_due))
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    if (stepping) {
+      script(now_s() - t0);
+      r.step();
+      ++step;
+    } else {
+      for (test_client *c : cs)
+        c->frame();
+      ++frame;
+    }
+  }
+}
+
 // N=3 walking, each client echoing its avatar markers into ui.docs every frame as arigl does.
 // S7: the relay as arisrv runs it and clients rooted at the room tree; otherwise the relay and
 // clients from before it (no area of interest, no gate, a kept journal; whole-tree clients).
-// Returns the relay's egress in bytes per second. The ~1 Hz WebSocket re-broadcast is left out:
-// it is the same room tree either way and would only dilute the comparison.
+// Returns the relay's egress per second of room time: the bytes for a fixed number of steps and
+// frames, however long a loaded runner takes over them. The ~1 Hz WebSocket re-broadcast is left
+// out: it is the same room tree either way and would only dilute the comparison.
 double run_control_plane(bool s7) {
   relay_options o;
   o.use_aoi = s7;
@@ -1346,10 +1380,12 @@ double run_control_plane(bool s7) {
       kv.second.drive(r, kv.first);
   };
   run_room(r, cs, 0.5, script);
-  const double t0 = now_s();
+  constexpr int kSteps = 30; // 1.5 s of room time
   const std::uint64_t b0 = r.egress_bytes();
-  run_room(r, cs, 1.5, script);
-  return static_cast<double>(r.egress_bytes() - b0) / (now_s() - t0);
+  run_paced(r, cs, kSteps, script);
+  // The relay forwards on its transport threads: let the window's last writes go out.
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  return static_cast<double>(r.egress_bytes() - b0) / (kSteps * kRoomStepS);
 }
 
 } // namespace
@@ -1362,8 +1398,9 @@ TEST(RoomRelayLoopbackTest, ControlPlaneEgressDrops) {
   ASSERT_FALSE(HasFatalFailure());
   const double on = run_control_plane(true);
   ASSERT_FALSE(HasFatalFailure());
-  std::printf("[ room ] relay egress, N=3 walking: %.1f kB/s before S7, %.1f kB/s with it\n",
-              off / 1000.0, on / 1000.0);
+  std::printf(
+      "[ room ] relay egress per room second, N=3 walking: %.1f kB before S7, %.1f with it\n",
+      off / 1000.0, on / 1000.0);
   EXPECT_GT(on, 0.0);
   EXPECT_LE(on, off / 3.0);
 }
