@@ -313,8 +313,8 @@ struct ConferenceSession {
   std::unique_ptr<cvc::ariadne::holon> holon_;
   std::unique_ptr<gla::room_view> room_view_;
   cvc::gl::CameraController *cam_ = nullptr;
-  cvc::ariadne::avatar_intent last_intent_; // the last intent proposed (propose only on change)
-  bool intent_proposed_ = false;            // proposed once yet (the first frame always proposes)
+  cvc::ariadne::avatar_intent last_intent_; // the intent our avatar runs on (predicted with)
+  cvc::ariadne::avatar_intent last_user_;   // what the keys + facing asked for last frame
   std::vector<std::string> drawn_pids_;     // avatars drawn at the last log (log on change)
   bool framed_ = false;                     // camera framed on our avatar once
   double orbit_center_[3] = {0.0, 0.0, 0.0};
@@ -688,13 +688,22 @@ struct ConferenceSession {
       in = gla::intent_from_keys(held("w", "Up"), held("s", "Down"), held("a", "Left"),
                                  held("d", "Right"), facing_yaw_, kWalkSpeed);
     }
-    // Propose on the first frame even when standing still, so the tree never holds a walk an
-    // earlier session under this id proposed; after that, only on change (a replicated write).
-    if (!intent_proposed_ || in.move.x != last_intent_.move.x || in.move.y != last_intent_.move.y ||
-        in.move.z != last_intent_.move.z || in.yaw != last_intent_.yaw) {
+    // Propose when the USER changed what they ask for (a key, a click to face) -- a replicated
+    // write, so only on change. Otherwise run on whatever intent the tree holds for us: the
+    // document may drive the avatar itself with (room-set-intent ...), and our prediction must
+    // follow it rather than overrule it. (A stale walk under our id cannot linger: the node id is
+    // fresh per launch and the relay zeroes a departed participant's intent.)
+    const auto differs = [](const cvc::ariadne::avatar_intent &a,
+                            const cvc::ariadne::avatar_intent &b) {
+      return a.move.x != b.move.x || a.move.y != b.move.y || a.move.z != b.move.z || a.yaw != b.yaw;
+    };
+    if (differs(in, last_user_)) {
       cvc::ariadne::propose_intent(*holon_, *app_, room_, pid_, in);
       last_intent_ = in;
-      intent_proposed_ = true;
+      last_user_ = in;
+    } else if (cvc::ariadne::avatar_intent tree;
+               cvc::ariadne::read_intent(*app_, room_, pid_, tree) && differs(tree, last_intent_)) {
+      last_intent_ = tree;
     }
     // Re-assert it locally every frame: our avatar joins the holon only once our room-join is in
     // the tree, so an intent proposed before then must still reach the prediction.
@@ -723,6 +732,7 @@ struct ConferenceSession {
         double eye[3], focal[3], up[3];
         cam_->getPose(eye, focal, up);
         facing_yaw_ = gla::heading_yaw(eye, focal); // face into the screen, so W walks away
+        last_user_.yaw = facing_yaw_; // a default, not the user's ask: no proposal until they act
       }
       const double c[3] = {p[0], p[1], p[2] + kEyeHeight};
       if (std::fabs(c[0] - orbit_center_[0]) + std::fabs(c[1] - orbit_center_[1]) +
