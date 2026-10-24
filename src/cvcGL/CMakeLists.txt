@@ -811,6 +811,11 @@ add_executable(cvcgl_ariadne_realize test/cvcgl_ariadne_realize.cpp)
 target_link_libraries(cvcgl_ariadne_realize PRIVATE cvcGL)
 add_test(NAME cvcgl_ariadne_realize COMMAND cvcgl_ariadne_realize)
 
+# H1 slice 6: the conference room in 3D (room scene realize + avatar markers + key -> intent).
+add_executable(cvcgl_room_view test/cvcgl_room_view.cpp)
+target_link_libraries(cvcgl_room_view PRIVATE cvcGL)
+add_test(NAME cvcgl_room_view COMMAND cvcgl_room_view)
+
 # The terminal extension (TerminalScene, roadmap §16.6): a scene rendered offscreen becomes the
 # terminal backend's background under the widgets, and a background drag turns the camera.
 add_executable(cvcgl_terminal_scene test/cvcgl_terminal_scene.cpp)

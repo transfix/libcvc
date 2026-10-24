@@ -84,11 +84,27 @@ bool read_intent(cvc::app &app, const std::string &room, const std::string &pid,
 // read its proposed .intent, feed it to the holon; advance the holon one frame;
 // then write every participant's authoritative .pose + .server_tick back to the
 // tree (which replicates to the clients). The caller supplies the server holon
-// and calls this once per relay tick. A departed participant simply stops
-// receiving intent/pose updates (reaping its holon slot is a follow-up). wall_dt
+// and calls this once per relay tick. A participant who left (room_leave) is dropped
+// from the holon, so a rejoin respawns on the spawn ring. wall_dt
 // is forwarded to holon::advance: the default (-1) measures real elapsed wall time
 // (what the relay wants); a test injects a fixed dt for a deterministic step count.
 void server_pump(holon &h, cvc::app &app, const std::string &room, double wall_dt = -1.0);
+
+// Drive one frame of a CLIENT holon against the replicated room tree (H1 slice 6), the mirror of
+// server_pump: register every present participant (room_roster) -- SELF_PID as the local,
+// predicted avatar, everyone else as an interpolated peer, each starting at its replicated pose
+// when one exists -- drop the ones that left, apply each replicated authoritative .pose (the holon
+// ignores a sample it has already seen, so re-reading an unchanged pose every frame is harmless),
+// then advance the holon one frame. Read the result with h.display_pose(pid). wall_dt as in
+// server_pump.
+void client_pump(holon &h, cvc::app &app, const std::string &room, const std::string &self_pid,
+                 double wall_dt = -1.0);
+
+// Propose the local avatar's intent (client side): the client holon predicts with it at once and
+// it is written to <self>.intent for the server to validate. Call it when the intent CHANGES (each
+// call is a replicated write), not every frame.
+void propose_intent(holon &h, cvc::app &app, const std::string &room, const std::string &self_pid,
+                    const avatar_intent &intent);
 
 } // namespace ariadne
 } // namespace cvc

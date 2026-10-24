@@ -181,6 +181,8 @@ public:
   // ── Diagnostics ──
   std::size_t shard_count() const;
   std::size_t connection_count() const;
+  // One report per live connection (bytes/frames both ways, Ping/Pong round-trip time).
+  std::vector<state_link_report> link_reports() const override;
   std::uint64_t total_published() const noexcept { return _published.load(); }
   std::uint64_t total_sent_frames() const noexcept { return _sent_frames.load(); }
   std::uint64_t total_received_frames() const noexcept { return _recv_frames.load(); }
@@ -230,6 +232,15 @@ private:
   // Defined in the impl TU (it owns the proto parse + the Beast read/write); no-op under wasm.
   void accept_loop();
   void read_loop(std::shared_ptr<connection> conn);
+
+  // Link probe: Ping every live connection once ping_interval() has passed since the last round.
+  // Native: a thread started with the first start() / connect_to_peer(). Browser (no threads):
+  // pump_all() calls it every frame. A Ping that arrives is answered at once in deliver_inbound --
+  // in a browser that is the WebSocket onmessage event, which keeps firing in a backgrounded tab.
+  void send_pings_if_due();
+  void ping_loop();
+  std::atomic<std::int64_t> _next_ping_ns{0};
+  std::atomic<bool> _ping_started{false};
 
   struct impl;
   std::unique_ptr<impl> _impl;

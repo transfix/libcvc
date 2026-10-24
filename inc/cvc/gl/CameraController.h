@@ -226,6 +226,12 @@ public:
   // camera would drift on its own.
   void releaseHeldKeys();
 
+  // Whether `keySym` (a VTK key sym: "w", "Up", ...; a single letter matches either
+  // case) is held right now -- the same held set Fly navigation reads, so a host
+  // driving something else from the keys (an avatar in Orbit mode) sees exactly what
+  // the camera does, including the drop when a UI overlay takes the keyboard.
+  bool keyHeld(const std::string &keySym) const;
+
   // Rebind a movement key (also settable via state "keys.<action>"). Actions:
   // "forward","backward","strafe_left","strafe_right","up","down","toggle_mode",
   // "sprint". Values are VTK key syms ("w","space","Control_L","Tab","Shift_L").

@@ -12,6 +12,7 @@
 #include <cstdlib>               // strtod (room-set-intent numeric args)
 #include <cvc/ariadne/ariadne.h> // register_action_intrinsics
 #include <cvc/ariadne/conference/room_intrinsics.h>
+#include <cvc/ariadne/conference/room_net.h> // the roster entries carry each link's quality
 #include <cvc/ariadne/holon_sync.h>        // write_intent (room-set-intent verb)
 #include <cvc/core/app.h>                  // app.root()
 #include <cvc/state/state.h>               // cvc::state, SEPARATOR, findDescendant, children, value
@@ -271,12 +272,23 @@ void register_room_intrinsics(cvc::app &app) {
           const std::string room_id = rh ? rh->room_id : handle_token(args[0]);
           if (room_id.empty())
             return err("room-roster: ROOM must be a room-join handle or room-id");
+          // Each entry also carries the participant's self-reported link quality (room_net.h):
+          // raw numbers (negative = not measured yet) and roster-cell text.
           std::vector<se::value_t> list;
-          for (const room_participant &p : room_roster(app, room_id))
+          for (const room_participant &p : room_roster(app, room_id)) {
+            net_sample net;
+            read_participant_net(app, room_id, p.pid, net);
             list.push_back(se::make_dict({
                 {"pid", se::value_t(p.pid)},
                 {"name", se::value_t(p.name)},
+                {"rtt_ms", se::value_t(net.rtt_ms)},
+                {"in_kbps", se::value_t(net.in_kbps)},
+                {"out_kbps", se::value_t(net.out_kbps)},
+                {"ping", se::value_t(format_rtt(net.rtt_ms))},
+                {"down", se::value_t(format_rate(net.in_kbps))},
+                {"up", se::value_t(format_rate(net.out_kbps))},
             }));
+          }
           return se::make_list(std::move(list));
         });
 

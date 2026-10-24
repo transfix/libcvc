@@ -80,12 +80,18 @@
 
   // The relay URL is derived from the PAGE ORIGIN — a wss:// upgrade of this https page's host, at
   // /cyprty-ws (Apache reverse-proxies that to the relay). So the deployed client connects to its
-  // own server automatically; a future build could let the user pick a different one.
-  const RELAY = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/cyprty-ws';
-  const NAME = 'guest-' + Math.random().toString(36).slice(2, 7);
+  // own server automatically. ?relay=ws://host:port (or wss://) points the page at another relay —
+  // a staging or local arisrv — and ?name= presets the display name (otherwise a random guest-xxxxx).
+  const PARAMS = new URLSearchParams(location.search);
+  const RELAY_PARAM = PARAMS.get('relay');
+  const RELAY = (RELAY_PARAM && /^wss?:\/\/[^\s]+$/.test(RELAY_PARAM))
+      ? RELAY_PARAM
+      : (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/cyprty-ws';
+  const NAME = (PARAMS.get('name') || '').trim().slice(0, 32) ||
+               'guest-' + Math.random().toString(36).slice(2, 7);
   // ?synthetic=1 drives the self-cam from a hardware-free MJPEG test pattern instead of the real
   // camera, so the conference (peer video included) can be tried in a browser with no camera.
-  const SYNTH = new URLSearchParams(location.search).get('synthetic');
+  const SYNTH = PARAMS.get('synthetic');
 
   // Browsers suspend an AudioContext created without a user gesture (autoplay policy). SDL's audio
   // output (how we play each peer's mic) is one such context, so without this a peer's audio never

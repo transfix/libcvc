@@ -27,6 +27,7 @@
 using cvc::ariadne::avatar_intent;
 using cvc::ariadne::avatar_sim;
 using cvc::ariadne::holon;
+using cvc::ariadne::holon_config;
 using cvc::ariadne::holon_role;
 using cvc::physics::body_state;
 using cvc::physics::vec3;
@@ -196,4 +197,110 @@ TEST(HolonTest, PeerInterpolatesThroughFrameAlpha) {
   const double x_near = c2.display_pose("B").position.x;
   EXPECT_LT(x_near, 10.0) << "peer interpolation never overshoots newest";
   EXPECT_GT(x_near, 9.0) << "and it did advance most of the way (not frozen)";
+}
+
+// ── a peer walks smoothly across SPARSE samples (the live ~5 Hz relay) ──────
+// Samples arrive every 24 quanta (5 Hz on a 120 Hz clock). The peer must walk from
+// one to the next over those 24 quanta: monotonic, never past the newest sample,
+// and actually moving (not held at the sample or flicking between the two).
+
+TEST(HolonTest, PeerWalksAcrossSparseSamples) {
+  holon client(holon_role::client);
+  client.add_participant("B", /*local=*/false);
+  const double dt = client.clock().fixed_dt();
+  constexpr int kSpan = 24;
+
+  double last_x = -1.0;
+  int moved_frames = 0;
+  for (int k = 0; k <= 4; ++k) {
+    body_state s;
+    s.position = vec3{static_cast<double>(k), 0.0, 0.0}; // 1 m per sample
+    client.apply_authoritative("B", s, 100 + static_cast<std::uint64_t>(k * kSpan));
+    for (int f = 0; f < kSpan; ++f) {
+      client.advance(dt);
+      const double x = client.display_pose("B").position.x;
+      EXPECT_GE(x, last_x) << "sample " << k << " frame " << f << ": the peer never steps back";
+      EXPECT_LE(x, static_cast<double>(k)) << "never past the newest sample";
+      if (x > last_x)
+        ++moved_frames;
+      last_x = x;
+    }
+  }
+  EXPECT_GT(last_x, 3.9) << "it walked (nearly) all the way to the last sample";
+  EXPECT_GT(moved_frames, 4 * (kSpan - 2)) << "it moved on (nearly) every frame of each walk";
+}
+
+// ── a client replica counts the server's ticks ──────────────────────────────
+
+TEST(HolonTest, ClientRealignsItsClockWhenSkewed) {
+  holon_config cfg;
+  cfg.max_skew_ticks = 60;
+  holon client(holon_role::client, cfg);
+  client.add_participant("A", /*local=*/true);
+  client.add_participant("B", /*local=*/false);
+  const double dt = client.clock().fixed_dt();
+  for (int i = 0; i < 500; ++i) // the replica has run on its own for a while
+    client.advance(dt);
+  ASSERT_EQ(client.tick(), 500u);
+
+  // Joining a server whose clock is elsewhere: the first sample aligns to its tick.
+  body_state s;
+  s.position = vec3{3.0, 0.0, 0.0};
+  client.apply_authoritative("A", s, 12);
+  EXPECT_EQ(client.tick(), 12u);
+  EXPECT_DOUBLE_EQ(client.state("A").position.x, 3.0) << "the local avatar adopts the sample";
+
+  // Within max_skew_ticks the clocks are left alone (they run at the same rate).
+  body_state b0, b1;
+  b1.position = vec3{1.0, 0.0, 0.0};
+  client.apply_authoritative("B", b0, 12);
+  client.apply_authoritative("B", b1, 36); // B walks 0 -> 1 over 24 ticks
+  for (int i = 0; i < 10; ++i)
+    client.advance(dt);
+  client.apply_authoritative("A", s, 40); // 18 ticks away: no re-alignment
+  EXPECT_EQ(client.tick(), 22u);
+  const double b_mid = client.display_pose("B").position.x;
+  EXPECT_GT(b_mid, 0.3);
+  EXPECT_LT(b_mid, 0.6);
+
+  // Past it (a stalled frame loop), the clock re-aligns -- and the peer's walk carries on
+  // from where it was shown rather than restarting.
+  client.apply_authoritative("A", s, 400);
+  EXPECT_EQ(client.tick(), 400u);
+  EXPECT_NEAR(client.display_pose("B").position.x, b_mid, 1e-12);
+}
+
+// ── a reconcile jump is reported once, for the renderer to ease out ─────────
+
+TEST(HolonTest, TakeCorrectionReportsReconcileJumpsOnce) {
+  holon client(holon_role::client);
+  client.add_participant("A", /*local=*/true);
+  client.add_participant("B", /*local=*/false);
+  const double dt = client.clock().fixed_dt();
+  for (int i = 0; i < 3; ++i) {
+    client.set_intent("A", avatar_intent{vec3{1.0, 0.0, 0.0}});
+    client.advance(dt);
+  }
+  const vec3 before = client.state("A").position;
+
+  // The prediction holds: no correction.
+  body_state held;
+  held.position = vec3{2.0 * dt, 0.0, 0.0}; // what A predicted at tick 2
+  held.linear_velocity = vec3{1.0, 0.0, 0.0};
+  client.apply_authoritative("A", held, 2);
+  const vec3 none = client.take_correction("A");
+  EXPECT_DOUBLE_EQ(none.x, 0.0);
+  EXPECT_DOUBLE_EQ(none.y, 0.0);
+
+  // The server overrides: the jump is reported, exactly, once.
+  body_state moved;
+  moved.position = vec3{0.0, 5.0, 0.0};
+  client.apply_authoritative("A", moved, 3);
+  const vec3 after = client.state("A").position;
+  const vec3 c = client.take_correction("A");
+  EXPECT_DOUBLE_EQ(c.x, after.x - before.x);
+  EXPECT_DOUBLE_EQ(c.y, after.y - before.y);
+  EXPECT_DOUBLE_EQ(client.take_correction("A").y, 0.0) << "taken, so cleared";
+  EXPECT_DOUBLE_EQ(client.take_correction("B").y, 0.0) << "a peer has no corrections";
+  EXPECT_DOUBLE_EQ(client.take_correction("nobody").y, 0.0);
 }
