@@ -449,6 +449,11 @@ public:
       std::lock_guard<std::mutex> lk(conn->cancel_mu);
       conn->cancel = nullptr; // ctx dies with this handler
     }
+    // So does STREAM, which other threads write to (publish, the relay's forwards, the link
+    // probe): fail any Write still blocked on it, then wait out the one in progress. Every write
+    // runs under write_mu and checks `alive` there, so none starts after this.
+    ctx->TryCancel();
+    { std::lock_guard<std::mutex> wl(conn->write_mu); }
     _owner->unregister_connection(conn.get());
     const std::string *pid = conn->peer_id();
     _owner->notify_connection_closed(pid ? *pid : std::string());
