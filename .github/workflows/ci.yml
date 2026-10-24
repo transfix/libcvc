@@ -754,6 +754,16 @@ jobs:
             echo "::error::cvcGL was built but no cvcgl_* test reached CTestTestfile.cmake."
             exit 1
           fi
+          # Same idea for libigl: CVC_ENABLE_LIBIGL flips itself OFF when eigen /
+          # libigl are missing from the deps prefix, and then mesh_ops/fem build as
+          # throwing stubs and their tests are never configured -- a green run that
+          # tested nothing. Assert they registered.
+          n_igl=$(ctest --test-dir build -N 2>/dev/null | grep -cE 'Test *#[0-9]*: (MeshOps|Fem)\.' || true)
+          echo "mesh_ops/fem (libigl) tests registered with ctest: $n_igl"
+          if [ "$n_igl" -eq 0 ]; then
+            echo "::error::CVC_ENABLE_LIBIGL resolved OFF: eigen/libigl are missing from the deps prefix."
+            exit 1
+          fi
           # Heavy suites:
           #   Stress|Convergence|Benchmark            : long-running suites
           #   Performance                              : perf benchmarks (>200s in Debug)
@@ -1194,6 +1204,13 @@ jobs:
             echo "::error::cvcGL was built but no cvcgl_* test reached CTestTestfile.cmake."
             exit 1
           fi
+          # libigl must have resolved ON -- see the linux step.
+          n_igl=$(ctest --test-dir build -N 2>/dev/null | grep -cE 'Test *#[0-9]*: (MeshOps|Fem)\.' || true)
+          echo "mesh_ops/fem (libigl) tests registered with ctest: $n_igl"
+          if [ "$n_igl" -eq 0 ]; then
+            echo "::error::CVC_ENABLE_LIBIGL resolved OFF: eigen/libigl are missing from the deps prefix."
+            exit 1
+          fi
           # See linux ctest step for rationale, including why Debug pushes skip
           # the heavy set (they killed the hosted runner outright).
           STRESS_REGEX='(Stress|Convergence|Benchmark|Performance|BunnySDF_IsoRoundtrip|QualityImproveAllMethods|Integration)'
@@ -1617,6 +1634,13 @@ jobs:
           # non-grpc release lane still enforces it.
           if ($nCvcgl -eq 0 -and '${{ matrix.enable_grpc }}' -ne 'true') {
             Write-Host "::error::cvcGL was built but no cvcgl_* test reached CTestTestfile.cmake."
+            exit 1
+          }
+          # libigl must have resolved ON -- see the linux step.
+          $nIgl = (ctest --test-dir build -N 2>$null | Select-String -Pattern 'Test\s+#\d+: (MeshOps|Fem)\.').Count
+          Write-Host "mesh_ops/fem (libigl) tests registered with ctest: $nIgl"
+          if ($nIgl -eq 0) {
+            Write-Host "::error::CVC_ENABLE_LIBIGL resolved OFF: eigen/libigl are missing from the deps prefix."
             exit 1
           }
           # See linux ctest step for rationale.
