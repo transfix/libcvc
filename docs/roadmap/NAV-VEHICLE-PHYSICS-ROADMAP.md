@@ -142,9 +142,12 @@ The plan, in order:
    - Why: on the gate's dense city the model misses 31-53% of the draw, mostly tire slip. The
      priced policy brakes less and drives slower, which the model counts, but slips its tires
      more, which it does not.
-   - Open: tire slip in the power model (the dynamic model's own tire dissipation, fitted to the
-     ledger's `tire`), fitted on dense scenes, then the gate again; the four-wheel plant's
-     rollout; the torch twin.
+   - The tire term (the dynamic model's own slip dissipation, calibrated to the ledger's
+     `tire`, fitted on the dense city too) cuts the model's miss to 4-13%. The gate is still not
+     met: the trained policies' tire slip on Jolt rises whatever the model predicts, most likely
+     from contacts and stalls, which the planar rollout cannot represent.
+   - Open: the energy judged on Jolt itself (a zeroth-order fine-tune on measured Wh/km at held
+     reach), or fewer contacts first; the four-wheel plant's rollout; the torch twin.
 
 ### P8a's vehicle fitted to Jolt (2026-10-20)
 
@@ -538,8 +541,16 @@ These are the targets a plant fitted to Jolt has to beat, bin by bin.
       - The ledger: tire slip is about half the engine's work. The priced policy's brakes fall
         0.63 -> 0.34 Wh/km and its aero 0.17 -> 0.02, but its tire slip rises 1.34 -> 1.67, and
         the model sees only the lateral part of slip, through c_lat.
-    - Next: the dynamic model's own tire dissipation as a fitted power term, calibrated to the
-      ledger's `tire` on dense scenes; then the gate again.
+    - The tire term (`diff::dyn_tire_power`, `power_params::tire_lat` / `tire_lon`; gradient-
+      checked; calibrated to the ledger's per-tick `tire` by `fit_power`):
+      - Fitted with 8 seeds of the gate's own dense city, the model misses the gate's runs by
+        4-13% (from 31-40%). Its tire term explains the ledger's per-tick tire energy at r² 0.25.
+      - Trained against it, priced at 8 or 16 Wh/km: -9.1 and -5.0 points of reach, and -0.02
+        and +0.17 Wh/km on Jolt, both CIs across 0. The model predicted -0.26 and -0.27.
+      - The trained policies' tire slip on Jolt rises 1.34 -> 1.64-1.79 Wh/km in every setting.
+        That slip is not the planar vehicle's; most likely contacts and stalls.
+    - Next: judge energy on Jolt itself (ES on measured Wh/km at held reach), or reduce
+      contacts first.
 - **P9, the plant by default (2026-10-18, Joe: "can't we use the actual jolt vehicle dimensions
   and physics?").**
   - What moved the agents: no default path used Jolt. Every default was the kinematic bicycle

@@ -764,10 +764,61 @@ scenes, 30 s each, and judged on two held-out seeds:
   - The trained policy did what the term asks: it brakes less (0.63 -> 0.34) and drives slower
     (aero 0.17 -> 0.02), and the model counts both. But it slips its tires more (1.34 -> 1.67),
     which the model does not count, and that cancels the saving on Jolt.
-  - Next: price tire slip in the rollout itself. The dynamic model already computes each tire's
-    force and slip velocity, so its dissipation (F · v_slip, longitudinal and lateral) can join
-    the power model as a fitted term, calibrated to the ledger's `tire`. Then fit on dense
-    scenes, where contacts and stalls are common, not only the plant-log scenes.
+- **The tire term** (`power_params::tire_lat`, `tire_lon`; `diff::power_step_tire`):
+  - `diff::dyn_tire_power` gives what the dynamic vehicle's own tires lose to slip at a state
+    (vx, vy, r, delta, a), from the same loads, force split, friction ellipse and Pacejka curves
+    `dyn_plant` integrates.
+    - Lateral: each axle's force times the slip velocity its slip angle implies, u sin(alpha).
+      Pacejka's force has alpha's sign, so the product is >= 0 and smooth everywhere. The
+      geometric sideways velocity disagrees with the force's sign at a crawl, where the slip
+      angles' speed floor acts, and gave a corner there.
+    - Longitudinal: each axle's drive or brake force F times kappa u, kappa the slip ratio at which
+      its Pacejka curve, scaled to the axle's grip, gives F.
+  - The step adds `dt (tire_lat P_lat + tire_lon P_lon)`. Its gradient on (vx, vy, r, delta, a)
+    comes from forward-mode duals, so the energy term's adjoint now also reaches vy and delta.
+  - `fit_power` calibrates it in two stages when the runs carry the ledger's tire term
+    (`planar_sample::tire`, which `plant_log` now records per tick):
+    1. Non-negative least squares of each tick's ledger `tire` on P_lat and P_lon
+       (`power_fit::tire_cal_lat`, `tire_cal_lon`, `tire_r2`).
+    2. The calibrated sum joins the energy fit as one column, whose coefficient is what the
+       source pays per tire J.
+  - `fit_power(std::vector<power_runs>, ...)` fits run sets logged at different ticks together.
+    `score_on_plant`'s `logs` argument returns every scored run's `plant_log`, so a model can be
+    fitted on the scene it is judged on.
+  - Gates:
+    - `PowerStepTireMatchesFiniteDifference`: all five derivatives at 180 states.
+    - `TireEnergyGradcheckMatchesFiniteDifference`: direction error 5.0e-4, and 3.1e-3 priced at
+      8 Wh/km.
+    - `FitCalibratesTheTireTermToTheLedger`: a known calibration and price come back to 0.1%.
+- **On Jolt, with the tire term fitted on the dense city too** (8 seeds of the untrained policy
+  on the gate's own city, beside the plant-log scenes):
+  - The fit: k_pos 1.61, k_neg -0.76, p_idle 7.9 W, c_lat 0.0016, tire_lat 1.07, tire_lon 2.57.
+    The energy r² over every tick is 0.69. The tire term explains the ledger's per-tick tire
+    energy at r² 0.25 only.
+  - The model now misses far less on the gate's runs: -3.9% on the seed (from -31%), -12.6% on
+    the policy trained without the term (from -40%).
+  - The gate is still not met (lr 2e-4, 300 steps, w_energy 3; without the term: 39.0% at
+    2.48 Wh/km):
+
+    | Priced at (Wh/km) | Reach with | Δ reach (points) | Δ Wh/km measured | Δ Wh/km the model predicts | Tire slip, without → with |
+    |--:|--:|--:|--:|--:|--:|
+    | 0 (time) | 11.4% | -27.6 [-31.0, -24.3] | +0.10 [-0.75, +1.18] | +0.86 [+0.72, +1.01] | 1.34 → 1.79 |
+    | 8 | 29.9% | -9.1 [-12.4, -5.6] | -0.02 [-0.51, +0.46] | -0.26 [-0.36, -0.17] | 1.34 → 1.64 |
+    | 16 | 34.0% | -5.0 [-8.3, -1.1] | +0.17 [-0.43, +0.87] | -0.27 [-0.36, -0.18] | 1.34 → 1.77 |
+
+  - Every trained policy's tire slip on Jolt rises against the policy trained without the term,
+    whatever the model predicts. The model's tire term, which explains a quarter of the ledger's,
+    does not see the slip these policies add.
+  - So the slip that grows is not the planar vehicle's. Most likely it is contact: 48 vehicles in
+    a dense grid touch walls and each other, and tires scrub in contact and spin in stalls. The
+    planar rollout has neither collisions nor wheel spin, so no term of its state can price them.
+  - Next, either:
+    - judge energy where it happens: a zeroth-order fine-tune of the policy on Jolt's measured
+      Wh/km at held reach (`es_finetune_on_plant` with `score_on_plant` as its fitness), which
+      needs no model of the slip; or
+    - cut the contacts first: the energy the trained policies add is mostly where they touch
+      something, so a policy that touches less (P8b's reach and collision terms) may draw less
+      without an energy term at all.
 - Not yet in the torch twin. Like any change to the loss, it must reach `sdf_nav`'s
   `train_bicycle` before the two are compared.
 
