@@ -37,6 +37,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cvc/nav/dyn_bike.h>
+#include <cvc/nav/dyn_power.h>
 #include <cvc/physics/vehicle.h>
 #include <string>
 #include <vector>
@@ -70,6 +71,9 @@ struct planar_sample {
   int contacts = 0;                // static contacts during that tick
   int wheels = 0, wheels_down = 0; // the vehicle's wheels, and how many touch the ground
   bool grounded = true;            // at most one wheel off the ground (a planar body)
+  // J the vehicle drew over that tick (nav_plant::energy_step: from its fuel or battery, net of
+  // regeneration, or its shaft work without a source); 0 at start()
+  double energy = 0.0;
 };
 
 // Records every agent of `sim`, which drives `plant`. Both must outlive the log.
@@ -158,6 +162,41 @@ struct dyn_bike_fit {
 };
 dyn_bike_fit fit_dyn_bike(const std::vector<std::vector<planar_sample>> &runs, double dt,
                           const vehicle_desc &d, double mu = 0.9, int nsub = 1, int sweeps = 2);
+
+// ── fitting the power model to the ledger (P8c) ──────────────────────────────────────
+
+// One run's energy: what the plant's ledger measured (planar_sample::energy summed) and what the
+// power model gives over the same ticks.
+struct power_run {
+  double measured_J = 0.0, model_J = 0.0;
+  double distance_m = 0.0; // the centre of mass's path
+  double seconds = 0.0;
+};
+
+struct power_fit {
+  cvc::nav::dyn_power_si si; // the model (evaluate_power: the one given)
+  std::uint64_t ticks = 0;
+  double r2 = 0.0;          // over the ticks' energies
+  double total_error = 0.0; // (sum model - sum measured) / sum measured, over every run
+  // The worst run's |model - measured| / measured, over runs that drew at least 1% of the mean.
+  double worst_run_error = 0.0;
+  std::vector<power_run> runs;
+};
+
+// Fits nav::dyn_power_si (detail/dyn_power.h) to the ledger in `runs` by non-negative least
+// squares on the ticks' energies (k_neg's sign held <= 0). The model reads, each tick, the drive
+// force per unit mass the dynamic vehicle `dyn` (nullptr: nav_plant::dyn_bike_si_of(d)) needs to
+// make the motion the plant made (the measured acceleration less dyn's drag, rolling resistance
+// and grade), and the speed vx the tick ended at: the trainer's rollout carries the same two
+// (dyn_state::a, vx). Every tick counts, contacts and impacts included: the run totals are the
+// ledger's own.
+power_fit fit_power(const std::vector<std::vector<planar_sample>> &runs, double dt,
+                    const vehicle_desc &d, const cvc::nav::dyn_bike_si *dyn = nullptr);
+
+// The same report for a model already fitted, such as on held-out runs.
+power_fit evaluate_power(const std::vector<std::vector<planar_sample>> &runs, double dt,
+                         const vehicle_desc &d, const cvc::nav::dyn_power_si &si,
+                         const cvc::nav::dyn_bike_si *dyn = nullptr);
 
 // ── equal-length flights for a plant-learning dataset ──────────────────────────────
 

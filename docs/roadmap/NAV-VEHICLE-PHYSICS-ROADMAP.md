@@ -131,6 +131,11 @@ The plan, in order:
    - CPU first. CUDA comes later, as for `dyn_plant`.
 6. **P8c:** a differentiable power model and energy in the loss, calibrated to the P3 ledger
    (after P8d, Joe 2026-10-19).
+   - Done: `diff::power_step` (`detail/dyn_power.h`), fitted to the ledger by
+     `cvc::physics::fit_power`, and `train_config::w_energy` in the dynamic rollout's loss
+     (docs/NAV_TRAINING.md, "Energy in the loss").
+   - Open: the gate on Jolt (a policy trained with the energy term draws less per km for what it
+     gives up in reach, over paired seeds); the four-wheel plant's rollout; the torch twin.
 
 ### P8a's vehicle fitted to Jolt (2026-10-20)
 
@@ -493,7 +498,15 @@ These are the targets a plant fitted to Jolt has to beat, bin by bin.
     docs/NAV_TRAINING.md), and takes the external force (#780). Open there: the anti-roll bars,
     the unsprung masses and wheel spin.
   - The external-force port is done on every plant: the bicycle and P8a's (#728), and the four
-    wheels (#780). Next (Joe 2026-10-19): P8c.
+    wheels (#780).
+  - P8c, the power model, is in progress:
+    - `plant_log` carries each tick's energy; `fit_power` fits the model to it (`cvc plant-log
+      --fit-power`).
+    - Fitted on four seeds of the swerve and the city and judged on two held out, the totals come
+      within +1.4% (Humvee) and -1.4% (RoboRacer). The swerve alone misses by +9.0% and +17.7%.
+    - The trainer's energy term passes its gradcheck. Over 60 steps it lowers the energy term
+      0.970 -> 0.937, against 0.962 without it.
+    - Next: the Jolt gate, a policy trained with it against one without over paired seeds.
 - **P9, the plant by default (2026-10-18, Joe: "can't we use the actual jolt vehicle dimensions
   and physics?").**
   - What moved the agents: no default path used Jolt. Every default was the kinematic bicycle

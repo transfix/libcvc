@@ -47,8 +47,9 @@
 
 #include <cstdint>
 #include <cvc/nav/coef_mlp.h>
-#include <cvc/nav/detail/dyn_bike.h> // diff::dyn_bike_params
-#include <cvc/nav/drive.h>           // field_stack
+#include <cvc/nav/detail/dyn_bike.h>  // diff::dyn_bike_params
+#include <cvc/nav/detail/dyn_power.h> // diff::power_params
+#include <cvc/nav/drive.h>            // field_stack
 #include <functional>
 #include <vector>
 
@@ -174,6 +175,16 @@ struct train_config {
   // cvc::physics::nav_plant::dyn_bike_params_at(desc, veh_L) (the trainer's defaults are
   // a RoboRacer at about 0.108 normalized units per metre), or dyn_bike_params_of().
   diff::dyn_bike_params dyn{};
+  // Energy in the loss (rollout == dynamic; the vehicle-physics plan's P8c). Each step adds
+  //   w_energy / window * E_t / (hdt * P_full)
+  // per agent, E_t what the power model says the vehicle drew over the step (diff::power_step on
+  // the step's end state) and P_full diff::power_full at veh_a_max and the scene's vmax: so the
+  // term is the window's mean source power as a fraction of full power, O(1), and w_energy a
+  // preference, as w_coll is. Fit `power` to the P3 ledger with cvc::physics::fit_power and
+  // convert it with dyn_power_params_of(); its mass must be dyn's. 0 (the default) leaves the
+  // loss and its gradient exactly as without it.
+  float w_energy = 0.0f;
+  diff::power_params power{};
   // Checkpoint selection (P8b): with a fitness function passed to train(), the policy is
   // scored before training and every `checkpoint_every` outer steps (and after the last), and
   // train() ends on the best-scoring parameters. 0 = every 25 steps when a fitness is given.

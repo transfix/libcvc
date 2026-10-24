@@ -23,6 +23,7 @@
 #include <cstdio>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/coef_train.h>
+#include <cvc/nav/dyn_power.h>
 #include <cvc/nav/sim_world.h>
 #include <cvc/physics/nav_plant.h>
 #include <cvc/physics/vehicle.h>
@@ -552,6 +553,207 @@ TEST(NavCoefTrain, DynamicTrainingReducesLoss) {
   std::printf("[dyn-train] horizon loss before=%.4f after=%.4f\n", before, after);
   EXPECT_TRUE(std::isfinite(after));
   EXPECT_LT(after, before) << "training through the dynamic vehicle did not reduce the loss";
+}
+
+// ── Energy in the loss (P8c): the power model on the dynamic vehicle ──
+
+namespace {
+// A RoboRacer-like power model in SI (the coefficients' shape, not a fit: physics_plant_log_test
+// fits the real ones to the ledger), converted at dynamic_cfg's scale.
+train_config energy_cfg(train_config c, float w_energy) {
+  c = dynamic_cfg(c);
+  const cvc::physics::vehicle_desc d = cvc::physics::vehicle_desc::roboracer();
+  cvc::nav::dyn_power_si si;
+  si.k_pos = 1.4;
+  si.k_neg = -0.3;
+  si.p_idle = 15.0;
+  si.c_v = 3.0;
+  si.c_v3 = 0.002;
+  si.c_lat = 0.02;
+  cvc::world_units::normalized_frame f;
+  f.scale = c.veh_L / d.wheelbase(); // normalized units per metre, as dyn_bike_params_at
+  c.power = cvc::nav::dyn_power_params_of(si, d.mass, f);
+  c.w_energy = w_energy;
+  return c;
+}
+
+// The energy term alone on a batch: the loss with it less the loss without.
+double energy_term(const train_config &with, const std::vector<float> &params,
+                   const training_scene &sc, const std::vector<float> &o,
+                   const std::vector<float> &aux, const std::vector<float> &goal, int window) {
+  train_config without = with;
+  without.w_energy = 0.0f;
+  coef_trainer a(with, 1), b(without, 1);
+  a.set_params(params);
+  b.set_params(params);
+  const int n = static_cast<int>(o.size() / 2);
+  return a.loss_and_grad(sc, o.data(), aux.data(), goal.data(), n, window, nullptr) -
+         b.loss_and_grad(sc, o.data(), aux.data(), goal.data(), n, window, nullptr);
+}
+} // namespace
+
+// The power model's step against a central difference, and the SI conversion: a step's energy
+// in the normalized frame is the SI energy times k^2 (k normalized units per metre).
+TEST(NavCoefTrain, PowerStepMatchesFiniteDifferenceAndConverts) {
+  train_config cfg = energy_cfg(small_cfg(), 1.0f);
+  cvc::nav::diff::power_params p = cfg.power;
+  p.c_lat = 0.02f; // cornering on, so dE/dr is checked too
+  const float dt = 0.06f, w = 1e-3f * cvc::nav::diff::power_full(p, cfg.veh_a_max, 0.9f);
+  using cvc::nav::diff::power_step;
+  for (const float vx : {-0.2f, 0.0f, 0.05f, 0.4f, 0.9f})
+    for (const float a : {-1.2f, -0.01f, 0.0f, 0.3f, 1.5f})
+      for (const float r : {-2.0f, 0.0f, 0.7f}) {
+        float dvx, da, dr, u, v, q;
+        const float E = power_step(p, vx, a, r, dt, w, dvx, da, dr);
+        EXPECT_TRUE(std::isfinite(E)); // < 0 braking hard: regeneration outweighs idle
+        const float h = 1e-3f;
+        const float fvx = (power_step(p, vx + h, a, r, dt, w, u, v, q) -
+                           power_step(p, vx - h, a, r, dt, w, u, v, q)) /
+                          (2 * h);
+        const float fa = (power_step(p, vx, a + h, r, dt, w, u, v, q) -
+                          power_step(p, vx, a - h, r, dt, w, u, v, q)) /
+                         (2 * h);
+        const float fr = (power_step(p, vx, a, r + h, dt, w, u, v, q) -
+                          power_step(p, vx, a, r - h, dt, w, u, v, q)) /
+                         (2 * h);
+        EXPECT_NEAR(dvx, fvx, 2e-2f * (std::fabs(fvx) + 1e-3f)) << vx << " " << a << " " << r;
+        EXPECT_NEAR(da, fa, 2e-2f * (std::fabs(fa) + 1e-3f)) << vx << " " << a << " " << r;
+        EXPECT_NEAR(dr, fr, 2e-2f * (std::fabs(fr) + 1e-3f)) << vx << " " << a << " " << r;
+      }
+  cvc::nav::diff::power_params off;
+  float dvx, da, dr;
+  EXPECT_FALSE(off.on());
+  EXPECT_EQ(power_step(off, 0.5f, 1.0f, 0.3f, dt, 1e-3f, dvx, da, dr), 0.0f);
+  EXPECT_EQ(dvx, 0.0f);
+  EXPECT_EQ(da, 0.0f);
+  EXPECT_EQ(dr, 0.0f);
+  // SI: 3 m/s at 1 m/s^2 turning at 0.5 rad/s for 1 s, the parts sharp. Normalized: the same at k.
+  cvc::nav::dyn_power_si si;
+  si.k_pos = 1.4;
+  si.p_idle = 15.0;
+  si.c_v = 3.0;
+  si.c_v3 = 0.05;
+  si.c_lat = 0.02;
+  si.width = 1e-6;
+  const double m = 3.5, k = 0.108;
+  cvc::world_units::normalized_frame f;
+  f.scale = k;
+  const cvc::nav::diff::power_params pn = cvc::nav::dyn_power_params_of(si, m, f);
+  const double e_si = 1.4 * m * 1.0 * 3.0 + 15.0 + 3.0 * 3.0 + 0.05 * 27.0 +
+                      0.02 * m * (3.0 * 0.5) * (3.0 * 0.5) * 3.0;
+  const double e_n = power_step(pn, static_cast<float>(3.0 * k), static_cast<float>(1.0 * k), 0.5f,
+                                1.0f, 1e-9f, dvx, da, dr);
+  EXPECT_NEAR(e_n / (k * k), e_si, 1e-3 * e_si);
+}
+
+// w_energy needs the dynamic rollout and a power model of its vehicle; 0 changes nothing.
+TEST(NavCoefTrain, EnergyTermNeedsADynamicVehicleAndIsOffByDefault) {
+  const training_scene sc = cvc::nav::city_scene(48);
+  train_config cfg = small_cfg();
+  std::vector<float> o(2 * cfg.n), goal(2 * cfg.n), aux(2 * cfg.n, 0.0f);
+  sc.sample_starts_goals(cfg.n, 7, o.data(), goal.data());
+  train_config bad = energy_cfg(cfg, 1.0f);
+  bad.rollout = cvc::nav::rollout_kind::bicycle;
+  EXPECT_THROW(
+      coef_trainer(bad, 1).loss_and_grad(sc, o.data(), aux.data(), goal.data(), cfg.n, 2, nullptr),
+      std::invalid_argument);
+  bad = energy_cfg(cfg, 1.0f);
+  bad.power.m *= 2.0f;
+  EXPECT_THROW(
+      coef_trainer(bad, 1).loss_and_grad(sc, o.data(), aux.data(), goal.data(), cfg.n, 2, nullptr),
+      std::invalid_argument);
+  // A power model with w_energy 0 leaves the loss and gradient bit for bit.
+  const train_config plain = dynamic_cfg(cfg);
+  const train_config off = energy_cfg(cfg, 0.0f);
+  coef_trainer a(plain, 1), b(off, 1);
+  std::vector<float> ga, gb;
+  const double la = a.loss_and_grad(sc, o.data(), aux.data(), goal.data(), cfg.n, 4, &ga);
+  const double lb = b.loss_and_grad(sc, o.data(), aux.data(), goal.data(), cfg.n, 4, &gb);
+  EXPECT_EQ(la, lb);
+  EXPECT_EQ(ga, gb);
+}
+
+// The dynamic gradcheck with the energy term on: the term's adjoint on (vx, a) is right.
+TEST(NavCoefTrain, EnergyGradcheckMatchesFiniteDifference) {
+  const training_scene sc = cvc::nav::city_scene(48);
+  train_config cfg = small_cfg();
+  cfg.n = 256;
+  cfg.window = 6;
+  cfg.horizon = 6;
+  cfg = energy_cfg(cfg, 3.0f);
+  coef_trainer tr(cfg, 1);
+  const int n = cfg.n, window = cfg.window, P = tr.num_params();
+  std::vector<float> o(2 * n), goal(2 * n), aux(2 * n, 0.0f);
+  sc.sample_starts_goals(n, 7, o.data(), goal.data());
+  for (int i = 0; i < n; ++i)
+    aux[2 * i] = std::atan2(goal[2 * i + 1] - o[2 * i + 1], goal[2 * i] - o[2 * i]);
+  const double term = energy_term(cfg, tr.params(), sc, o, aux, goal, window);
+  EXPECT_GT(term, 0.0);
+  std::vector<float> g;
+  tr.loss_and_grad(sc, o.data(), aux.data(), goal.data(), n, window, &g);
+  // The energy term's own gradient: with it less without, so the check is not carried by the
+  // goal term's larger gradient.
+  train_config without = cfg;
+  without.w_energy = 0.0f;
+  coef_trainer tr0(without, 1);
+  std::vector<float> g0;
+  tr0.loss_and_grad(sc, o.data(), aux.data(), goal.data(), n, window, &g0);
+  std::vector<float> ge(P);
+  double gnorm = 0.0;
+  for (int i = 0; i < P; ++i) {
+    ge[i] = g[i] - g0[i];
+    gnorm += (double)ge[i] * ge[i];
+  }
+  gnorm = std::sqrt(gnorm);
+  ASSERT_GT(gnorm, 1e-7);
+  const std::vector<float> base = tr.params();
+  const float eps = 2e-3f;
+  std::vector<float> pp(P), pm(P);
+  for (int i = 0; i < P; ++i) {
+    const float u = (float)(ge[i] / gnorm);
+    pp[i] = base[i] + eps * u;
+    pm[i] = base[i] - eps * u;
+  }
+  const double dd_fd = (energy_term(cfg, pp, sc, o, aux, goal, window) -
+                        energy_term(cfg, pm, sc, o, aux, goal, window)) /
+                       (2.0 * eps);
+  const double dir_rel = std::fabs(dd_fd - gnorm) / (std::fabs(dd_fd) + gnorm + 1e-12);
+  std::printf("[energy-gradcheck] term=%.4f |g_E|=%.4e dir_rel=%.3e\n", term, gnorm, dir_rel);
+  EXPECT_LT(dir_rel, 5e-2) << "the energy term's backward disagrees with finite differences";
+}
+
+// Training with the energy term draws less energy than training without it, from the same start
+// on the same batches.
+TEST(NavCoefTrain, EnergyTrainingDrawsLessEnergy) {
+#if defined(__APPLE__)
+  GTEST_SKIP() << "nav short-run training margin below arm64 macOS FP drift (as "
+                  "TrainingReducesLoss)";
+#endif
+  const training_scene sc = cvc::nav::city_scene(64);
+  train_config cfg;
+  cfg.n = 64;
+  cfg.hidden = 64;
+  cfg.horizon = 24;
+  cfg.window = 6;
+  cfg.steps = 60;
+  cfg.seed = 0;
+  cfg.lr = 2e-4f;
+  const train_config with = energy_cfg(cfg, 3.0f);
+  train_config without = with;
+  without.w_energy = 0.0f;
+  std::vector<float> o(2 * cfg.n), goal(2 * cfg.n), aux(2 * cfg.n, 0.0f);
+  sc.sample_starts_goals(cfg.n, 999, o.data(), goal.data());
+  for (int i = 0; i < cfg.n; ++i)
+    aux[2 * i] = std::atan2(goal[2 * i + 1] - o[2 * i + 1], goal[2 * i] - o[2 * i]);
+  coef_trainer a(with, 3), b(without, 3);
+  const double e0 = energy_term(with, a.params(), sc, o, aux, goal, cfg.horizon);
+  a.train(sc, /*verbose=*/false);
+  b.train(sc, /*verbose=*/false);
+  const double ea = energy_term(with, a.params(), sc, o, aux, goal, cfg.horizon);
+  const double eb = energy_term(with, b.params(), sc, o, aux, goal, cfg.horizon);
+  std::printf("[energy-train] energy term: seed=%.4f trained without=%.4f with=%.4f\n", e0, eb, ea);
+  EXPECT_TRUE(std::isfinite(ea));
+  EXPECT_LT(ea, eb) << "training with the energy term did not draw less energy";
 }
 
 // A policy trained through the dynamic vehicle still drives the bicycle sim_world.

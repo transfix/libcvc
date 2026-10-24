@@ -537,7 +537,8 @@ TEST_F(CvcCliTest, PsHelp) {
 TEST_F(CvcCliTest, PlantLogHelp) {
   auto r = cvc("plant-log --help");
   EXPECT_EQ(0, r.exit_code);
-  for (const char *opt : {"--out", "--vehicle", "--scene", "--bundle", "--seeds", "--fit-dyn"})
+  for (const char *opt :
+       {"--out", "--vehicle", "--scene", "--bundle", "--seeds", "--fit-dyn", "--fit-power"})
     EXPECT_NE(std::string::npos, r.output.find(opt)) << opt;
 }
 
