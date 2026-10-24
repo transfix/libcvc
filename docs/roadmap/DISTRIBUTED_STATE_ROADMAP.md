@@ -1,6 +1,6 @@
 # Distributed State Synchronization Roadmap
 
-Date: May 22, 2026 (status snapshot corrected 2026-08-11)
+Date: May 22, 2026 (status snapshot corrected 2026-08-11; conference-relay primitives added 2026-10-24)
 
 ## Status Snapshot
 
@@ -49,6 +49,104 @@ later that week. Also present on `master` today:
 - **Fork-based multi-process IPC integration tests**, exercising real
   cross-process replication rather than in-process fan-out.
 
+## Landed for the conference relay (S7, 2026-10)
+
+The Ariadne conference relay's spatial interest (`ARIADNE_CONFERENCE_ROADMAP.md`
+§5h.1) needed per-peer, outbound filtering in this layer. Each piece below is
+opt-in, or a no-op until a caller installs something; the policy (who gets
+what) stays with the caller, here `room_aoi_relay`. None of it is access
+control: a peer with no filter still receives everything.
+
+- **Per-peer delivery predicate** (`state_peer_registry.h`). A
+  `state_delivery_filter` (`bool deliver(const std::string &path) const
+  noexcept`) is installed per known peer with `set_filter(node_id, filter)`
+  (false for an unknown peer; `nullptr` clears). `should_deliver` now passes
+  only when the peer's subscription prefixes match **and** its filter
+  delivers; an unknown peer still delivers everything (the back-compat
+  default). The `shared_ptr` is copied under the registry lock and evaluated
+  outside it, and a displaced filter is released after the lock drops.
+  `view_of(node_id)` returns a `delivery_view` (`known`, `subscriptions`,
+  `filter`, `deliver()`, `filtered()`) so a batch sender takes one lock per
+  connection, not per entry. `add_peer` on an existing id keeps its filter;
+  `remove_peer` drops it. Filters must be immutable once installed and must
+  never call back into the registry or a transport. The conference filter is
+  **deny-only and fails open** — a new leaf family can never be dropped
+  silently, which a prefix whitelist would do — and that is the recommended
+  shape.
+- **Write-once connection identity** (gRPC + WS). The reader thread writes a
+  connection's peer id once, at its first Hello, and publishes it with a
+  release/acquire `identified` flag; every off-thread reader goes through
+  `peer_id()` (`nullptr` until then, or when that Hello named no node:
+  "unknown, deliver"), and a later Hello is ignored. (On gRPC a Hello with an
+  empty node id does not count as the first.) This fixes a data race: the
+  reader thread wrote `remote_node_id` while `publish()` read it unlocked.
+- **The registry on every room-state send.** Before S7 only a transport's own
+  publish paths (`publish()`, `publish_message()`) consulted it, and the
+  `set_relay` forwards ignored it. Now so do both `set_relay` forward loops
+  (and so the bridge leg, which goes through the destination transport's
+  `publish()`), the gRPC snapshot responder (by the requester's view), and
+  the WebSocket ~1 Hz `broadcast_snapshot` (unidentified or unfiltered
+  connections share one unfiltered frame per shard; each filtered connection
+  gets its own). A skip is counted by `note_delivery_filtered`. The admit
+  snapshot (`send_snapshot_locked`) stays unfiltered by design: it goes out
+  before the peer's Hello. On the client side, unsolicited-snapshot ingest
+  now skips entries a shard with enforced interest would reject, so a
+  relay's whole-tree snapshot no longer writes outside the client's interest.
+- **Targeted snapshot push** — `state_transport::push_snapshot_to(node_id,
+  entries)`. gRPC and WS write one final, `request_id` 0 `SnapshotResponse`
+  holding exactly `entries` to every live connection identified as
+  `node_id` and return the number of connections written (0, with nothing
+  encoded, when none match or `entries` is empty; WS also skips a connection
+  with more than 2 MB of send backlog). The registry is not consulted: the
+  caller already decided. Called from the same thread as `publish()`, a push
+  lands ahead of later live writes on that connection. inproc/ipc keep the
+  base default (0). Clients apply it as any unsolicited snapshot, which never
+  blocks later last-writer-wins writes.
+- **Relay interest gate** — `set_relay_requires_interest(bool)` on both
+  transports (default off), with `total_relay_withheld()`. When on, a
+  forwarded mutation or message that no local same-cluster shard `admits()`
+  / `admits_message()` (the ingest gate, exposed on `state_cluster_shard`:
+  a delegation op always passes, anything else when its path is of interest)
+  is withheld from **both** the relay fan and the bridge. Ingest is
+  unchanged, and with no matching local shard everything is forwarded.
+- **Journal trim and O(new) replay.** `state_change_journal::replay_after`
+  is a binary search (sequences are strictly increasing because `append`
+  assigns them under the lock), and `trim_through(sequence)` erases a
+  prefix while numbering continues. `state_cluster_shard::trim_published()`
+  trims through the publish cursor, so nothing undrained is lost. It is for a
+  node whose joiners bootstrap from the snapshot instead of a journal backfill
+  — set `set_backfill_on_connect(false)` with it, or late joiners miss the
+  trimmed writes; a rewind into the trimmed range replays only what survived.
+  arisrv does both on its relay (`--relay-journal trim`); clients are not
+  trimmed.
+- **Rooted client shard.** The fourth `state_cluster_shard` constructor
+  argument, `root_path`, scopes what the adapter journals to one subtree.
+  arigl now passes `"conf"` (`CVC_ARIGL_REPLICATE_ROOT` overrides it; empty or
+  `*` is the whole tree), so per-document `ui.docs.*` state is never
+  journaled, drained or sent. Interest enforcement still filters what comes
+  in.
+- **Media gate and gRPC stall drop** (`media_endpoint.h`, both transports).
+  `set_media_gate(media_gate_fn)`, where `media_gate_fn` is
+  `std::function<bool(const media_frame &, const std::string
+  &receiver_node_id)>`, is asked once per identified receiver per frame on
+  the router fan-out (`fan_media`); an unidentified receiver always gets the
+  frame, a node's own uplink (`publish_media_frame`) is never gated, and an
+  empty gate is the old full fan-out. Denials count in `total_media_gated()`.
+  The gate runs on the publisher's reader thread with no lock held, so it
+  must be cheap and must not throw. gRPC adds `set_media_stall_drop(ms)`
+  (0 = off, the library default): a receiver whose in-flight media write
+  started longer ago than that, or whose stream a frame cannot get within
+  it (`write_mu` is a timed mutex), is skipped (`total_media_stall_dropped()`),
+  the counterpart of the WS leg's 32 KB backlog drop. The gate is asked only
+  once the stream is held, so a dropped frame spends no thumbnail.
+- **Accepted-stream lifetime (gRPC).** A server handler's stream dies when
+  `Channel()` returns, while publish, relay forwards and the link probe write
+  to it from other threads. The handler now cancels the stream and takes
+  `write_mu` once before returning; every write runs under `write_mu` and
+  checks `alive` there, so none is in flight or starts after the stream goes
+  (it was a use-after-free on every disconnect, seen as crashes in
+  `CompletionQueue::Pluck` under parallel load on Windows).
+
 ## Known gaps in the "landed" surface
 
 These are implemented on the receive side or in isolation, and are easy to
@@ -64,7 +162,14 @@ mistake for finished:
   guard, the legacy oversized-`value()` resolver).
 - **Backpressure and slow-peer isolation are `inproc`-only.** The bounded
   outbox, drop policies and quarantine live in `state_transport_inproc`; the
-  IPC and gRPC transports publish synchronously with no bounded queue.
+  IPC and gRPC transports publish synchronously with no bounded queue. (The
+  gRPC media stall drop above covers media frames only. The WebSocket leg's
+  backlog skips read `SIOCOUTQ`, which is Linux-only, so they never fire on a
+  Windows-hosted relay.)
+- **Snapshot coverage differs by transport.** WebSocket has no
+  `request_snapshot` (`WS_STATE_TRANSPORT.md` Phase 2), and gRPC has no
+  counterpart of the WS ~1 Hz `broadcast_snapshot`, so a gRPC client has no
+  periodic recovery backstop (it can still call `request_snapshot`).
 - **`distributed_state_config::blob_store_path` is not read.** `join()`
   unconditionally constructs a `memory_state_blob_store`, so the field — which
   `USAGE.md` documents as selecting filesystem persistence — currently has no
@@ -81,7 +186,11 @@ mistake for finished:
   to `master`.
 
 The journal is also **in-memory only** (`std::vector<state_mutation>`), so a
-process restart loses all replay history; there is no durable/WAL log.
+process restart loses all replay history; there is no durable/WAL log. Since
+S7 a node can trim it (`trim_published()`, above), but only a node that turns
+backfill off may. A client's journal is not trimmed and still grows with its
+own writes: its dial-time backfill re-sends what it wrote while disconnected,
+so client compaction has to preserve that and is still open.
 
 ## Related: state_exec DSL Engine
 

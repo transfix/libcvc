@@ -211,6 +211,38 @@ state_message decode_message(const pb::Message &in) {
   return m;
 }
 
+// Encode `snap` into `rsp` as one unsolicited, final snapshot (request_id 0). With a `view`, only
+// the entries it delivers are written (the receiving peer's registry rule); nullptr writes them
+// all. Returns the number of entries written. The admit snapshot, the periodic broadcast and the
+// targeted push all encode through here, so their entry bytes agree.
+std::size_t fill_snapshot_response(pb::SnapshotResponse *rsp,
+                                   const std::vector<state_transport::snapshot_entry> &snap,
+                                   const state_peer_registry::delivery_view *view) {
+  rsp->set_request_id(0);
+  rsp->set_final(true);
+  std::size_t n = 0;
+  for (const auto &e : snap) {
+    if (view != nullptr && !view->deliver(e.path))
+      continue;
+    auto *pe = rsp->add_entries();
+    pe->set_path(e.path);
+    pe->set_string_value(e.string_value);
+    pe->set_comment(e.comment);
+    pe->set_hidden(e.hidden);
+    pe->set_read_only(e.read_only);
+    for (const auto &p : e.properties)
+      (*pe->mutable_properties())[p.first] = p.second;
+    pe->set_type_name(e.type_name);
+    pe->set_origin_node_id(e.origin_node_id);
+    pe->set_sequence(e.sequence);
+    pe->set_data_type_name(e.data_type_name);
+    if (e.data_payload.kind != state_payload_kind::none)
+      set_pb_payload(pe->mutable_data_payload(), e.data_payload);
+    ++n;
+  }
+  return n;
+}
+
 } // namespace
 
 #ifndef __EMSCRIPTEN__
@@ -229,8 +261,19 @@ class state_transport_ws::connection {
 public:
   std::mutex write_mu;
   std::atomic<bool> alive{true};
+  // The peer's identity from its FIRST Hello. The connection's reader (the one thread that parses
+  // its inbound frames) writes both strings once and then sets `identified` (release); a later
+  // Hello is ignored, so they never change after that. Every other thread reads through peer_id().
   std::string remote_node_id;
   std::string remote_cluster_id;
+  std::atomic<bool> identified{false};
+  // The peer's node id, or nullptr before its Hello (or when that Hello named no node). nullptr
+  // means "unknown", which delivers everything, as an unregistered peer does.
+  const std::string *peer_id() const noexcept {
+    if (!identified.load(std::memory_order_acquire) || remote_node_id.empty())
+      return nullptr;
+    return &remote_node_id;
+  }
   // Steady-clock ns of the last inbound frame. A live conference client streams media continuously,
   // so a peer that navigated away (its socket not cleanly closed) stops updating this — the relay's
   // reaper uses it to drop the ghost. 0 until the first frame; set to "now" when a connection opens
@@ -520,8 +563,8 @@ void state_transport_ws::read_loop(std::shared_ptr<connection> conn) {
   // A peer closed this connection (not a relay shutdown): notify the owner so a relay can retract
   // the departed participant from the room. _running is cleared by stop(), so this fires only on a
   // real peer drop, and only when the peer identified itself (sent a Hello).
-  if (_running.load() && _on_conn_closed && !conn->remote_node_id.empty())
-    _on_conn_closed(conn->remote_node_id);
+  if (const std::string *pid = conn->peer_id(); pid && _running.load() && _on_conn_closed)
+    _on_conn_closed(*pid);
   conn->reader_done.store(true, std::memory_order_release); // reap_idle may now join + erase this
 }
 
@@ -714,8 +757,13 @@ void state_transport_ws::deliver_inbound(connection *c, const void *data, std::s
     return;
   }
   if (in.has_hello()) {
-    c->remote_node_id = in.hello().node_id();
-    c->remote_cluster_id = in.hello().cluster_id();
+    // Write-once identity: only the first Hello counts (see connection::identified). This thread
+    // is the only writer, so the relaxed check cannot race another Hello.
+    if (!c->identified.load(std::memory_order_relaxed)) {
+      c->remote_node_id = in.hello().node_id();
+      c->remote_cluster_id = in.hello().cluster_id();
+      c->identified.store(true, std::memory_order_release);
+    }
   } else if (in.has_mutation()) {
     on_inbound_mutation(decode_mutation(in.mutation()), c);
     _recv_mutations.fetch_add(1, std::memory_order_relaxed);
@@ -752,6 +800,11 @@ void state_transport_ws::deliver_inbound(connection *c, const void *data, std::s
         read_pb_payload(e.data_payload(), se.data_payload);
       for (auto *s : shards) {
         if (s == nullptr)
+          continue;
+        // Honour the shard's enforced interest set as live ingest does: a relay snapshot carries
+        // its whole tree, which would otherwise plant nodes this client never asked for. A shard
+        // that does not enforce interest takes every entry, as before.
+        if (!s->path_is_of_interest(se.path))
           continue;
         // One bootstrap entry the local tree rejects must not take down the whole client: apply
         // each defensively so the rest of the roster still loads. A relay snapshot carries its
@@ -868,8 +921,9 @@ state_transport::publish_stats state_transport_ws::publish(const state_mutation 
   for (auto &c : conns) {
     if (!c || !c->alive.load() || !c->can_write())
       continue;
-    if (!c->remote_node_id.empty() && !_peers.should_deliver(c->remote_node_id, m.path)) {
-      _peers.note_delivery_filtered(c->remote_node_id);
+    const std::string *pid = c->peer_id();
+    if (pid && !_peers.should_deliver(*pid, m.path)) {
+      _peers.note_delivery_filtered(*pid);
       continue;
     }
     // Don't block the caller (the arisrv main loop drains local writes here) on a backed-up peer —
@@ -880,8 +934,8 @@ state_transport::publish_stats state_transport_ws::publish(const state_mutation 
     if (c->write(frame)) {
       _sent_frames.fetch_add(1, std::memory_order_relaxed);
       ++stats.delivered;
-      if (!c->remote_node_id.empty())
-        _peers.note_mutation_delivered(c->remote_node_id);
+      if (pid)
+        _peers.note_mutation_delivered(*pid);
     }
   }
 
@@ -930,21 +984,30 @@ state_transport::publish_message_stats state_transport_ws::publish_message(const
   for (auto &c : conns) {
     if (!c || !c->alive.load() || !c->can_write())
       continue;
-    if (!c->remote_node_id.empty() && !_peers.should_deliver(c->remote_node_id, m.path)) {
-      _peers.note_delivery_filtered(c->remote_node_id);
+    const std::string *pid = c->peer_id();
+    if (pid && !_peers.should_deliver(*pid, m.path)) {
+      _peers.note_delivery_filtered(*pid);
       continue;
     }
     if (c->write(frame)) {
       _sent_frames.fetch_add(1, std::memory_order_relaxed);
       ++stats.peers;
-      if (!c->remote_node_id.empty())
-        _peers.note_message_delivered(c->remote_node_id);
+      if (pid)
+        _peers.note_message_delivered(*pid);
     }
   }
   return stats;
 }
 
-std::size_t state_transport_ws::write_media(const media_frame &m, const void *exclude) {
+std::size_t state_transport_ws::write_media(const media_frame &m, const void *exclude, bool gated) {
+  // One copy of the gate per frame: a concurrent set_media_gate swaps the slot, never the object
+  // this fan is calling, and no lock is held across the socket writes below.
+  std::shared_ptr<const media_gate_fn> gate;
+  if (gated) {
+    std::lock_guard<std::mutex> lk(_media_gate_mu);
+    gate = _media_gate;
+  }
+
   pb::Frame frame;
   pb::MediaFrame *mf = frame.mutable_media();
   mf->set_origin_node_id(m.origin_node_id);
@@ -977,6 +1040,16 @@ std::size_t state_transport_ws::write_media(const media_frame &m, const void *ex
     // other at all.
     if (c->send_backlog() > 32 * 1024)
       continue;
+    // Per-receiver egress gate, asked last so a frame the backlog drop skips never counts as sent
+    // in the gate's own bookkeeping (e.g. a thumbnail cadence). An unidentified receiver is
+    // ungated: the gate has no id to decide on, and "unknown" delivers everywhere else too.
+    if (gate) {
+      const std::string *pid = c->peer_id();
+      if (pid && !(*gate)(m, *pid)) {
+        _media_gated.fetch_add(1, std::memory_order_relaxed);
+        continue;
+      }
+    }
     if (c->write(frame)) {
       _sent_frames.fetch_add(1, std::memory_order_relaxed);
       ++n;
@@ -986,17 +1059,31 @@ std::size_t state_transport_ws::write_media(const media_frame &m, const void *ex
 }
 
 // A browser client has one connection (the relay), so publish_media_frame pushes its camera/mic UP;
-// a relay publishing locally (uncommon) would send to all its connections.
+// a relay publishing locally (uncommon) would send to all its connections. A node's own uplink is
+// never gated.
 void state_transport_ws::publish_media_frame(const ws_media_frame &m) {
-  _media_sent.fetch_add(write_media(m, nullptr), std::memory_order_relaxed);
+  _media_sent.fetch_add(write_media(m, nullptr, /*gated=*/false), std::memory_order_relaxed);
 }
 
-// Router egress: fan one peer's frame to every OTHER connection (the origin is `exclude`).
+// Router egress: fan one peer's frame to every OTHER connection (the origin is `exclude`), each
+// receiver subject to the media gate.
 void state_transport_ws::fan_media(const media_frame &f, const void *exclude) {
-  _media_fwd.fetch_add(write_media(f, exclude), std::memory_order_relaxed);
+  _media_fwd.fetch_add(write_media(f, exclude, /*gated=*/true), std::memory_order_relaxed);
 }
 
 void state_transport_ws::set_media_sink(media_sink_fn sink) { _media_sink = std::move(sink); }
+
+void state_transport_ws::set_media_gate(media_gate_fn gate) {
+  std::shared_ptr<const media_gate_fn> next;
+  if (gate)
+    next = std::make_shared<const media_gate_fn>(std::move(gate));
+  {
+    std::lock_guard<std::mutex> lk(_media_gate_mu);
+    _media_gate.swap(next);
+  }
+  // `next` now holds the previous gate; it is released here, outside the lock (a fan still using
+  // its own copy keeps it alive until that fan finishes).
+}
 
 void state_transport_ws::set_on_media(media_frame_fn cb) {
   if (!cb) {
@@ -1065,10 +1152,24 @@ void state_transport_ws::on_inbound_mutation(const state_mutation &m, connection
     if (r.applied)
       _delivered.fetch_add(1, std::memory_order_relaxed);
   }
+  const bool relay = _relay.load(std::memory_order_relaxed);
+  if (!relay && _bridge == nullptr)
+    return; // a leaf: applied locally, never re-sent
+  // Interest gate (opt-in): re-fan only what some local same-cluster shard admits -- its interest
+  // set covers the path, or it is a delegation op, which ingest always takes. When every client
+  // enforces the relay's interest, a withheld frame is one no client would apply. Asked after
+  // ingest_remote has returned, so admits() takes only the shard's leaf lock. With no matching
+  // shard (a pure forwarding relay) everything is forwarded.
+  if (_relay_requires_interest.load(std::memory_order_relaxed) && !peers.empty() &&
+      std::none_of(peers.begin(), peers.end(),
+                   [&m](const state_cluster_shard *s) { return s->admits(m); })) {
+    _relay_withheld.fetch_add(1, std::memory_order_relaxed);
+    return; // neither the relay loop nor the bridge
+  }
   // Relay (star topology): re-send to every OTHER connection so clients that only reach this server
   // converge with each other. origin is skipped (no echo); origin_node_id is preserved so the
-  // receiver's dedup makes any round-trip a no-op.
-  if (_relay.load(std::memory_order_relaxed)) {
+  // receiver's dedup makes any round-trip a no-op. Each target's registry entry is honoured.
+  if (relay) {
     pb::Frame frame;
     encode_mutation(m, frame.mutable_mutation());
     std::vector<std::shared_ptr<connection>> conns;
@@ -1079,6 +1180,10 @@ void state_transport_ws::on_inbound_mutation(const state_mutation &m, connection
     for (auto &c : conns) {
       if (!c || c.get() == origin || !c->alive.load() || !c->can_write())
         continue;
+      if (const std::string *pid = c->peer_id(); pid && !_peers.should_deliver(*pid, m.path)) {
+        _peers.note_delivery_filtered(*pid);
+        continue;
+      }
       if (c->send_backlog() > 2 * 1024 * 1024)
         continue; // don't block the relay on a backed-up peer; the ~1s roster broadcast backstops
                   // it
@@ -1108,7 +1213,17 @@ void state_transport_ws::on_inbound_message(const state_message &m, connection *
   }
   for (auto *peer : peers)
     (void)peer->ingest_remote_message(m);
-  if (_relay.load(std::memory_order_relaxed)) {
+  const bool relay = _relay.load(std::memory_order_relaxed);
+  if (!relay && _bridge == nullptr)
+    return;
+  // Interest gate (opt-in), as in on_inbound_mutation.
+  if (_relay_requires_interest.load(std::memory_order_relaxed) && !peers.empty() &&
+      std::none_of(peers.begin(), peers.end(),
+                   [&m](const state_cluster_shard *s) { return s->admits_message(m); })) {
+    _relay_withheld.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
+  if (relay) {
     pb::Frame frame;
     encode_message(m, frame.mutable_message());
     std::vector<std::shared_ptr<connection>> conns;
@@ -1119,6 +1234,10 @@ void state_transport_ws::on_inbound_message(const state_message &m, connection *
     for (auto &c : conns) {
       if (!c || c.get() == origin || !c->alive.load() || !c->can_write())
         continue;
+      if (const std::string *pid = c->peer_id(); pid && !_peers.should_deliver(*pid, m.path)) {
+        _peers.note_delivery_filtered(*pid);
+        continue;
+      }
       if (c->send_backlog() > 2 * 1024 * 1024)
         continue; // don't block the relay on a backed-up peer; the ~1s roster broadcast backstops
                   // it
@@ -1144,7 +1263,8 @@ std::vector<state_link_report> state_transport_ws::link_reports() const {
       continue;
     state_link_report r;
     r.transport = "ws";
-    r.remote_node_id = c->remote_node_id;
+    if (const std::string *pid = c->peer_id())
+      r.remote_node_id = *pid;
     r.accepted = c->accepted;
     r.age_s = static_cast<double>(now - c->opened_ns) * 1e-9;
     r.idle_s = static_cast<double>(now - c->last_rx_ns.load()) * 1e-9;
@@ -1199,8 +1319,9 @@ void state_transport_ws::ping_loop() {
     for (auto &c : conns) {
       const std::int64_t started = c ? c->write_started_ns.load(std::memory_order_relaxed) : 0;
       if (started != 0 && now - started > kWriteStallNs && c->alive.load()) {
+        const std::string *pid = c->peer_id();
         std::fprintf(stderr, "[ws] write to '%s' blocked > 3 s (peer not reading): closing\n",
-                     c->remote_node_id.c_str());
+                     pid ? pid->c_str() : "");
         c->abort_io();
       }
     }
@@ -1272,7 +1393,8 @@ void state_transport_ws::send_snapshot_locked(connection &c,
   // those entries are REMOTE-origin, so send_backfill_locked's replay_local() yields nothing. Push
   // the full current snapshot instead, as an unsolicited SnapshotResponse (request_id 0), so a late
   // joiner bootstraps the peers already present. The receiver applies each entry via
-  // ingest_snapshot_entry (a bulk initial load, no conflict gate).
+  // ingest_snapshot_entry (a bulk initial load, no conflict gate). Deliberately UNFILTERED: this
+  // goes out before the peer's Hello, so there is no identity to look a registry entry up by.
   for (auto *s : shards) {
     if (s == nullptr)
       continue;
@@ -1280,25 +1402,7 @@ void state_transport_ws::send_snapshot_locked(connection &c,
     if (snap.empty())
       continue;
     pb::Frame f;
-    auto *rsp = f.mutable_snapshot_response();
-    rsp->set_request_id(0);
-    rsp->set_final(true);
-    for (const auto &e : snap) {
-      auto *pe = rsp->add_entries();
-      pe->set_path(e.path);
-      pe->set_string_value(e.string_value);
-      pe->set_comment(e.comment);
-      pe->set_hidden(e.hidden);
-      pe->set_read_only(e.read_only);
-      for (const auto &p : e.properties)
-        (*pe->mutable_properties())[p.first] = p.second;
-      pe->set_type_name(e.type_name);
-      pe->set_origin_node_id(e.origin_node_id);
-      pe->set_sequence(e.sequence);
-      pe->set_data_type_name(e.data_type_name);
-      if (e.data_payload.kind != state_payload_kind::none)
-        set_pb_payload(pe->mutable_data_payload(), e.data_payload);
-    }
+    fill_snapshot_response(f.mutable_snapshot_response(), snap, nullptr);
     if (!c.write_locked(f))
       return; // stream died mid-snapshot; the reader will reap it
     _sent_frames.fetch_add(1, std::memory_order_relaxed);
@@ -1306,47 +1410,37 @@ void state_transport_ws::send_snapshot_locked(connection &c,
 }
 
 std::size_t state_transport_ws::broadcast_snapshot() {
-  // Build each shard's snapshot frame ONCE, then write it to every live connection. The receivers
-  // apply it idempotently (ingest_snapshot_entry is a bulk load), so re-sending the same
-  // roster/scene each interval is a no-op for a client that is already converged and a recovery for
-  // one that missed a live re-fan. Uses connection::write() (locks per connection) — do NOT hold a
-  // connection write lock here. Snapshotting the shard reads the tree under its own lock.
+  // Snapshot each shard ONCE, then write it to every live connection. The receivers apply it
+  // idempotently (ingest_snapshot_entry is a bulk load), so re-sending the same roster/scene each
+  // interval is a no-op for a client that is already converged and a recovery for one that missed
+  // a live re-fan. Uses connection::write() (locks per connection) — do NOT hold a connection
+  // write lock here. Snapshotting the shard reads the tree under its own lock.
   std::vector<state_cluster_shard *> shards;
   {
     std::lock_guard<std::mutex> lk(_shards_mu);
     shards = _shards;
   }
-  std::vector<pb::Frame> frames;
+  std::vector<std::vector<snapshot_entry>> snaps;
   for (auto *s : shards) {
     if (s == nullptr)
       continue;
-    const auto snap = s->snapshot();
-    if (snap.empty())
-      continue;
-    pb::Frame f;
-    auto *rsp = f.mutable_snapshot_response();
-    rsp->set_request_id(0);
-    rsp->set_final(true);
-    for (const auto &e : snap) {
-      auto *pe = rsp->add_entries();
-      pe->set_path(e.path);
-      pe->set_string_value(e.string_value);
-      pe->set_comment(e.comment);
-      pe->set_hidden(e.hidden);
-      pe->set_read_only(e.read_only);
-      for (const auto &p : e.properties)
-        (*pe->mutable_properties())[p.first] = p.second;
-      pe->set_type_name(e.type_name);
-      pe->set_origin_node_id(e.origin_node_id);
-      pe->set_sequence(e.sequence);
-      pe->set_data_type_name(e.data_type_name);
-      if (e.data_payload.kind != state_payload_kind::none)
-        set_pb_payload(pe->mutable_data_payload(), e.data_payload);
-    }
-    frames.push_back(std::move(f));
+    auto snap = s->snapshot();
+    if (!snap.empty())
+      snaps.push_back(std::move(snap));
   }
-  if (frames.empty())
+  if (snaps.empty())
     return 0;
+  // The frames every unfiltered connection shares (one per shard), encoded on first use so a relay
+  // whose connections are all filtered never builds them.
+  std::vector<pb::Frame> shared;
+  const auto shared_frames = [&]() -> const std::vector<pb::Frame> & {
+    if (shared.empty()) {
+      shared.resize(snaps.size());
+      for (std::size_t i = 0; i < snaps.size(); ++i)
+        fill_snapshot_response(shared[i].mutable_snapshot_response(), snaps[i], nullptr);
+    }
+    return shared;
+  };
   std::vector<std::shared_ptr<connection>> conns;
   {
     std::lock_guard<std::mutex> lk(_conns_mu);
@@ -1357,10 +1451,11 @@ std::size_t state_transport_ws::broadcast_snapshot() {
   // signal for "clients can't see each other" — a skipped peer is one the periodic roster never
   // reaches.
   static const bool dbg = std::getenv("CVC_WS_BROADCAST_DEBUG") != nullptr;
-  std::size_t wrote = 0, skipped = 0, max_backlog = 0;
+  std::size_t wrote = 0, skipped = 0, max_backlog = 0, filtered = 0;
   for (auto &c : conns) {
     if (!c || !c->alive.load() || !c->can_write())
       continue;
+    const std::string *pid = c->peer_id();
     const std::size_t bl = c->send_backlog();
     if (bl > max_backlog)
       max_backlog = bl;
@@ -1374,22 +1469,74 @@ std::size_t state_transport_ws::broadcast_snapshot() {
     if (bl > 2 * 1024 * 1024) {
       ++skipped;
       if (dbg)
-        std::fprintf(stderr, "[ws-bcast] SKIP node='%s' backlog=%zuKB\n", c->remote_node_id.c_str(),
+        std::fprintf(stderr, "[ws-bcast] SKIP node='%s' backlog=%zuKB\n", pid ? pid->c_str() : "",
                      bl / 1024);
       continue;
     }
+    // One registry lookup per connection; the view then answers every entry without the lock.
+    state_peer_registry::delivery_view view;
+    if (pid)
+      view = _peers.view_of(*pid);
     bool ok = true;
-    for (const auto &f : frames)
-      ok = c->write(f) && ok;
-    if (ok) {
+    std::size_t sent = 0;
+    if (!view.filtered()) {
+      for (const auto &f : shared_frames()) {
+        ok = c->write(f) && ok;
+        ++sent;
+      }
+    } else {
+      ++filtered;
+      for (const auto &snap : snaps) {
+        pb::Frame f;
+        if (fill_snapshot_response(f.mutable_snapshot_response(), snap, &view) == 0)
+          continue; // nothing in this shard is for this peer
+        ok = c->write(f) && ok;
+        ++sent;
+      }
+    }
+    if (ok && sent > 0) {
       ++wrote;
-      _sent_frames.fetch_add(frames.size(), std::memory_order_relaxed);
+      _sent_frames.fetch_add(sent, std::memory_order_relaxed);
     }
   }
   if (dbg)
-    std::fprintf(stderr, "[ws-bcast] wrote=%zu skipped=%zu maxbacklog=%zuKB conns=%zu frames=%zu\n",
-                 wrote, skipped, max_backlog / 1024, conns.size(), frames.size());
+    std::fprintf(stderr,
+                 "[ws-bcast] wrote=%zu skipped=%zu filtered=%zu maxbacklog=%zuKB conns=%zu "
+                 "frames=%zu\n",
+                 wrote, skipped, filtered, max_backlog / 1024, conns.size(), snaps.size());
   return wrote;
+}
+
+std::size_t state_transport_ws::push_snapshot_to(const std::string &node_id,
+                                                 const std::vector<snapshot_entry> &entries) {
+  if (node_id.empty() || entries.empty())
+    return 0;
+  std::vector<std::shared_ptr<connection>> targets;
+  {
+    std::lock_guard<std::mutex> lk(_conns_mu);
+    for (const auto &c : _conns) {
+      if (!c || !c->alive.load() || !c->can_write())
+        continue;
+      if (const std::string *pid = c->peer_id(); pid && *pid == node_id)
+        targets.push_back(c);
+    }
+  }
+  if (targets.empty())
+    return 0; // the peer is on another transport (or gone): nothing to encode
+  pb::Frame f;
+  fill_snapshot_response(f.mutable_snapshot_response(), entries, nullptr);
+  std::size_t n = 0;
+  for (auto &c : targets) {
+    // Never block the caller (the relay's main loop) on a peer that is not draining; the caller's
+    // next push or the periodic broadcast covers what this one would have carried.
+    if (c->send_backlog() > 2 * 1024 * 1024)
+      continue;
+    if (c->write(f)) {
+      _sent_frames.fetch_add(1, std::memory_order_relaxed);
+      ++n;
+    }
+  }
+  return n;
 }
 
 void state_transport_ws::unregister_connection(connection *conn) {
@@ -1419,8 +1566,9 @@ std::size_t state_transport_ws::reap_idle(std::chrono::milliseconds timeout) {
       continue;
     const std::int64_t last = c->last_rx_ns.load(std::memory_order_relaxed);
     if (last != 0 && (now - last) > to_ns) {
+      const std::string *pid = c->peer_id();
       std::fprintf(stderr, "[ws] reaping idle connection node='%s' idle=%.1fs\n",
-                   c->remote_node_id.c_str(), static_cast<double>(now - last) / 1.0e9);
+                   pid ? pid->c_str() : "", static_cast<double>(now - last) / 1.0e9);
       beast::error_code ec;
       c->ws->next_layer().shutdown(tcp::socket::shutdown_both, ec);
       c->ws->next_layer().close(ec);

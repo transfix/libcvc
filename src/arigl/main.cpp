@@ -65,8 +65,9 @@
 // ws://|wss:// (WebSocket, what browsers dial; the host page sets wss://<page-origin>/…) or grpc://
 // (native gRPC). register_conference supplies the room verbs and the shard/transport are wired here
 // in the host; both transports carry the canonical media_frame and interop via the relay's router.
+#include <cvc/ariadne/conference/room_aoi.h>        // the relay's AOI params -> peers' audio gain
 #include <cvc/ariadne/conference/room_intrinsics.h> // room_join (re-assert after a reconnect)
-#include <cvc/ariadne/conference/room_net.h>        // publish our link quality to the room
+#include <cvc/ariadne/conference/room_net.h>        // our link quality + voice activity to the room
 #include <cvc/ariadne/holon.h>                 // the client replica of the room holon (avatars, H1)
 #include <cvc/ariadne/holon_sync.h>            // client_pump / propose_intent over the room tree
 #include <cvc/ariadne/stream/frame.h>          // frame_ptr — forward the local camera/mic streams
@@ -75,6 +76,7 @@
 #include <cvc/ariadne/stream/stream_registry.h> // look up the local camera/mic streams by token
 #include <cvc/core/clock_driver.h>        // one-advance-per-frame fan-out over the world_clock
 #include <cvc/core/world_clock.h>         // app.world_clock().t() — the common media timestamp
+#include <cvc/gl/LodGraphicsNode.h>       // lod_stats — the room's LOD selection, logged
 #include <cvc/gl/ariadne/room_view.h>     // the room scene + avatar markers in the 3D view
 #include <cvc/gl/capture/audio_source.h>  // list_audio_capture_devices — mic picker
 #include <cvc/gl/capture/camera_source.h> // list_cameras — camera picker
@@ -94,6 +96,7 @@
 #include <deque>
 #include <map>
 #include <mutex>
+#include <optional>
 #endif
 #ifdef __EMSCRIPTEN__
 #include <cvc/gl/state_publisher.h> // single-thread wasm: flush the publisher at frame cadence
@@ -316,6 +319,10 @@ struct ConferenceSession {
   cvc::ariadne::avatar_intent last_intent_; // the intent our avatar runs on (predicted with)
   cvc::ariadne::avatar_intent last_user_;   // what the keys + facing asked for last frame
   std::vector<std::string> drawn_pids_;     // avatars drawn at the last log (log on change)
+  std::uint64_t logged_realigns_ = 0;       // holon clock re-alignments at the last log
+  std::size_t logged_lod_builds_ = 0;       // LOD pyramid builds at the last log
+  std::vector<int> logged_lod_rungs_;       // the LOD rung histogram at the last log
+  double next_lod_log_s_ = 0.0;             // steady_s() before which the histogram is not logged
   bool framed_ = false;                     // camera framed on our avatar once
   double orbit_center_[3] = {0.0, 0.0, 0.0};
   // Our facing (radians about +Z from +X): WASD walk/strafe relative to it, a click on the scene
@@ -356,7 +363,8 @@ struct ConferenceSession {
     double shown_pts = -1.0; // pts of the frame currently injected into video_proxy
     std::deque<std::vector<float>> achunks; // decoded f32 chunks awaiting the mixer
     double last_audio_pts = -1.0;           // world-clock stamp of this peer's last audio chunk
-    bool has_audio = false; // once true, video display follows this peer's audio clock
+    double last_audio_wall = -1.0;          // now_wall_ when that chunk arrived (-1: none yet)
+    bool has_audio = false; // video display follows this peer's audio clock while it is fresh
     // Per-peer LOCAL controls (this client's mix only — never sent to the peer, never change their
     // capture). Driven by the user-list window; applied in mix_audio / sync_and_show.
     float volume = 1.0f;      // playback gain in our mix (slider; 1 = unity)
@@ -366,6 +374,7 @@ struct ConferenceSession {
   };
   std::map<std::string, peer_media> peers_; // keyed by origin pid
   double self_talk_until_ = 0.0;            // wall time until which WE count as "talking"
+  bool voice_talking_ = false;              // our voice.talking leaf's value (absent = not talking)
   double now_wall_ = 0.0;                   // wall-clock seconds, refreshed once per pump
   std::vector<std::string> cam_devices_, mic_devices_; // cached device names (index = device index)
   bool devices_enumerated_ = false;                    // devices listed yet (deferred past startup)
@@ -391,6 +400,19 @@ struct ConferenceSession {
   static constexpr double kTalkHold = 0.60;      // keep "talking" lit this long (s) after the last
                                             // loud chunk — bridges brief pauses between words and
                                             // jittery delivery (wall time, so frame-rate indep.)
+  // A peer's audio is FRESH while its last mic chunk is younger than this (wall s; about 23 chunks
+  // of 21 ms). Only fresh audio paces its video and says whether it is talking: once the chunks
+  // stop (its mic muted or cut, or the relay sending us none of it, out of range in the room) its
+  // video runs free and its name follows the peer's own voice.talking leaf.
+  static constexpr double kAudioFreshS = 0.5;
+  bool audio_fresh(const peer_media &pm) const {
+    return pm.has_audio && now_wall_ - pm.last_audio_wall < kAudioFreshS;
+  }
+
+  // The relay's AOI params (conf.rooms.<room>.aoi, re-read about once a second by net_step), which
+  // shape each peer's audio by distance (aoi_audio_gain). Empty when the relay publishes none (an
+  // older relay, or one run with --aoi off): every peer then plays at unity.
+  std::optional<cvc::ariadne::conference::aoi_params> aoi_;
 
   // The state key carrying a peer's video-proxy token, so the .ari can bind that peer's
   // stream_view.
@@ -460,12 +482,27 @@ struct ConferenceSession {
         nodeId += digits[rd() % 36];
     }
     gla::register_conference(app, backend); // room-join/roster + streaming + stream_view
-    shard = std::make_unique<cvc::state_cluster_shard>(app, "conf", nodeId);
     // Replicate ONLY the shared room tree (conf.rooms.*), never this client's per-document UI state
-    // (ui.docs.*). Without this the shard's adapter observes from the root, so a plain (state-set)
-    // the .ari makes — above all conf.self, the display name bound to the Name field — would
-    // replicate to every peer and they would all show the same name (two clients "collide on the
-    // name"). The interest filter is dot-segment aware: "conf" matches conf.rooms.* but not
+    // (ui.docs.*). The shard is rooted there, so its adapter observes and journals nothing outside
+    // conf: every room write (room-join, presence, intent, net, voice) is under it, while the UI
+    // state -- the scene's avatar marker matrices, rewritten at the publisher's rate while anyone
+    // walks, the camera and HUD, the ping leaves -- is never journaled, drained or sent (and the
+    // journal no longer grows with it). A shard observing from the root would also send a plain
+    // (state-set) the .ari makes, above all conf.self, the display name bound to the Name field, so
+    // every peer would show the same name (two clients "collide on the name").
+    // CVC_ARIGL_REPLICATE_ROOT overrides the root; set empty (or "*") it observes the whole tree
+    // again, for an A/B against that.
+    std::string replicate_root = "conf";
+    if (const char *rootEnv = std::getenv("CVC_ARIGL_REPLICATE_ROOT")) {
+      replicate_root = rootEnv;
+      if (replicate_root == "*")
+        replicate_root.clear();
+      std::fprintf(stderr, "arigl: conference: replicating %s (CVC_ARIGL_REPLICATE_ROOT)\n",
+                   replicate_root.empty() ? "the whole state tree" : replicate_root.c_str());
+    }
+    shard = std::make_unique<cvc::state_cluster_shard>(app, "conf", nodeId, replicate_root);
+    // The interest filter stays as well, for what arrives: only conf.* is applied, whatever the
+    // relay sends. It is dot-segment aware: "conf" matches conf.rooms.* but not
     // ui.docs.ari.conf.self.
     shard->add_interest("conf");
     shard->set_enforce_interest(true);
@@ -578,6 +615,13 @@ struct ConferenceSession {
     if (now < next_net_s_)
       return;
     next_net_s_ = now + 1.0;
+    // The relay's AOI params, for the audio gain (mix_audio). Read whether or not the link is up:
+    // they are in our replica of the room tree either way.
+    if (cvc::ariadne::conference::aoi_params ap;
+        cvc::ariadne::conference::read_aoi_params(*app_, room_, ap))
+      aoi_ = ap;
+    else
+      aoi_.reset();
     const std::vector<cvc::state_link_report> links = tp_->link_reports();
     const cvc::state_link_report *relay = nullptr;
     for (const cvc::state_link_report &r : links)
@@ -654,6 +698,16 @@ struct ConferenceSession {
     set_lead(0.06); // until the first round trip is measured (net_step)
     room_view_ =
         std::make_unique<gla::room_view>(view, *app_, room_, pid_, view.scene().getStatePrefix());
+    // CVC_ARIGL_LOD=0 draws every room mesh at full detail (the LOD A/B), keeping the platform's
+    // usual screen-error budget for when it is switched back on.
+    if (const char *lod = std::getenv("CVC_ARIGL_LOD"); lod && std::string(lod) == "0") {
+#ifdef __EMSCRIPTEN__
+      room_view_->set_lod(false, cvc::lod::quality_preset::aggressive);
+#else
+      room_view_->set_lod(false, cvc::lod::quality_preset::balanced);
+#endif
+      std::fprintf(stderr, "arigl: room: LOD off (CVC_ARIGL_LOD=0): meshes at full detail\n");
+    }
     cam_ = &cam;
     // Peers' names over their markers: a scene annotation, so it shows with the panels hidden too
     // and sits under the document's windows.
@@ -722,7 +776,15 @@ struct ConferenceSession {
     // the tree, so an intent proposed before then must still reach the prediction.
     holon_->set_intent(pid_, last_intent_);
     cvc::ariadne::client_pump(*holon_, *app_, room_, pid_, f.wall_dt);
+    // Each re-alignment of our clock to the relay's drops our unacknowledged input (a visible
+    // jump). The first sample after joining is one; any after that is worth a line.
+    if (holon_->clock_realigns() != logged_realigns_) {
+      logged_realigns_ = holon_->clock_realigns();
+      std::fprintf(stderr, "arigl: room: clock re-aligned to the relay (%llu)\n",
+                   static_cast<unsigned long long>(logged_realigns_));
+    }
     room_view_->update(*holon_, f.wall_dt);
+    log_lod();
     // Log who is drawn whenever that changes (the browser page shows stderr in its footer and the
     // console): the quickest check that a client sees the room the relay holds.
     const std::vector<std::string> drawn = room_view_->avatar_pids();
@@ -751,6 +813,28 @@ struct ConferenceSession {
         orbit_center_[0] = c[0], orbit_center_[1] = c[1], orbit_center_[2] = c[2];
       }
     }
+  }
+
+  // The room's LOD at work, for a scene that has mesh objects (the default room has none, so this
+  // never prints there): a line per new pyramid build, and the rung histogram with drawn against
+  // full-detail triangles when it changes, at most every 5 s.
+  void log_lod() {
+    if (room_view_->lod_builds() != logged_lod_builds_) {
+      logged_lod_builds_ = room_view_->lod_builds();
+      std::fprintf(stderr, "arigl: room: %zu LOD pyramid build(s) started\n", logged_lod_builds_);
+    }
+    const cvc::gl::lod_stats &s = room_view_->lod_stats();
+    const double now = steady_s();
+    if (s.nodes == 0 || s.rung_nodes == logged_lod_rungs_ || now < next_lod_log_s_)
+      return;
+    logged_lod_rungs_ = s.rung_nodes;
+    next_lod_log_s_ = now + 5.0;
+    std::string rungs;
+    for (std::size_t k = 0; k < s.rung_nodes.size(); ++k)
+      rungs += (k ? " " : "") + std::to_string(s.rung_nodes[k]);
+    std::fprintf(stderr, "arigl: room: LOD %d object(s), per rung [%s], %llu of %llu tris drawn\n",
+                 s.nodes, rungs.c_str(), static_cast<unsigned long long>(s.drawn_tris),
+                 static_cast<unsigned long long>(s.full_tris));
   }
 
   // One advance per frame. The driver advances the per-app world_clock from wall time (the single
@@ -804,11 +888,13 @@ struct ConferenceSession {
     // Route peers' inbound frames (queued by the reader thread) into per-peer buffers; also
     // measures each peer's mic level.
     driver_->add_frame_observer(kOrderDrain, [this](const cf &) { drain_inbox(); });
-    // Sum all peers' queued audio into the single mixed output (per-peer gain, skip muted).
+    // Sum all peers' queued audio into the single mixed output (per-peer volume times the room's
+    // distance gain, skip muted).
     driver_->add_frame_observer(kOrderMix, [this](const cf &) { mix_audio(); });
     // Advance each peer's video to its audio clock (skip locally video-muted).
     driver_->add_frame_observer(kOrderShow, [this](const cf &) { sync_and_show(); });
-    // Decay talk levels + publish media.<pid>.talking for the name highlight.
+    // Decay talk levels + publish media.<pid>.talking for the name highlight (and our own
+    // voice.talking to the room).
     driver_->add_frame_observer(kOrderActivity, [this](const cf &) { publish_activity(); });
   }
 
@@ -899,17 +985,40 @@ struct ConferenceSession {
 
   // Publish each participant's boolean "talking" to media.<pid>.talking (self included) — true
   // while its talk-hold has not expired; the .ari copies it into peer.<i>.talking for the name
-  // highlight.
+  // highlight. Ours also goes to the room tree as our voice.talking leaf, on change only, and a
+  // peer whose audio is not fresh here (the relay sends us none of it, or its mic is off) is lit
+  // by that leaf of its own instead -- so a peer out of earshot still lights up while it talks.
   void publish_activity() {
     if (!app_)
       return;
     auto &st = cvc::state::instance(*app_);
-    auto set_talk = [&](const std::string &pid, double until) {
-      st(prefix_ + "." + media_token_key(pid, "talking")).value(until > now_wall_ ? "1" : "0");
+    auto set_talk = [&](const std::string &pid, bool on) {
+      st(prefix_ + "." + media_token_key(pid, "talking")).value(on ? "1" : "0");
     };
-    set_talk(pid_, self_talk_until_);
+    const bool self_on = self_talk_until_ > now_wall_;
+    set_talk(pid_, self_on);
+    if (self_on != voice_talking_) {
+      // Forced: our tree may hold self_on already, echoed back stale by the relay's re-broadcast.
+      cvc::ariadne::conference::write_participant_voice(*app_, room_, pid_, self_on,
+                                                        /*force=*/true);
+      voice_talking_ = self_on;
+    }
+    const auto lit = [&](const std::string &pid, const peer_media *pm) {
+      if (pm && pm->talk_until > now_wall_)
+        return true;
+      if (pm && audio_fresh(*pm))
+        return false; // its own audio says it is quiet
+      bool leaf = false;
+      return cvc::ariadne::conference::read_participant_voice(*app_, room_, pid, leaf) && leaf;
+    };
     for (auto &kv : peers_)
-      set_talk(kv.first, kv.second.talk_until);
+      set_talk(kv.first, lit(kv.first, &kv.second));
+    // Participants that have sent us no media at all (out of range since they joined) are in the
+    // room's holon, not in peers_.
+    if (holon_)
+      for (const std::string &pid : holon_->participants())
+        if (pid != pid_ && peers_.find(pid) == peers_.end())
+          set_talk(pid, lit(pid, nullptr));
   }
 
   void stop() {
@@ -932,6 +1041,17 @@ struct ConferenceSession {
   // thread.)
   ~ConferenceSession() { stop(); }
 
+  // PID's audio gain for its distance from us in the room: aoi_audio_gain over the XY distance from
+  // where our avatar is drawn to where PID's is. Unity until the relay has published its AOI params
+  // and both poses are known (a peer not placed yet has no distance to fade by).
+  float room_gain(const std::string &pid) const {
+    if (!aoi_ || !holon_ || !holon_->pose_known(pid) || !holon_->pose_known(pid_))
+      return 1.0f;
+    const cvc::physics::vec3 a = holon_->display_pose(pid_).position;
+    const cvc::physics::vec3 b = holon_->display_pose(pid).position;
+    return cvc::ariadne::conference::aoi_audio_gain(std::hypot(b.x - a.x, b.y - a.y), *aoi_);
+  }
+
   // Mix: pop one chunk from each peer that has audio queued, sum them (silence for an empty peer),
   // clamp, and play to the single output. Produce mixed chunks while the output is below ~100 ms so
   // it stays fed without running far ahead; stop when no peer has a chunk (output drains to
@@ -940,20 +1060,27 @@ struct ConferenceSession {
     if (!mix_out_ || mix_frames_ == 0 || mix_rate_ <= 0 || mix_ch_ <= 0)
       return;
     const double bps = static_cast<double>(mix_rate_) * static_cast<double>(mix_ch_) * 4.0;
+    // Each peer's gain this pump, in peers_ order: its local volume (the user's slider) times its
+    // distance gain in the room.
+    std::vector<float> gains;
+    gains.reserve(peers_.size());
+    for (const auto &kv : peers_)
+      gains.push_back(kv.second.audio_muted ? 0.0f : kv.second.volume * room_gain(kv.first));
     std::vector<float> mixed;
     for (int guard = 0; guard < 64; ++guard) { // bound work per pump
       if (bps > 0.0 && static_cast<double>(mix_out_->queued_bytes()) / bps >= 0.10)
         break;
       mixed.assign(mix_frames_, 0.0f);
       bool any = false;
+      std::size_t gi = 0;
       for (auto &kv : peers_) {
         peer_media &pm = kv.second;
+        const float g = gains[gi++];
         if (pm.achunks.empty())
           continue;
         const std::vector<float> &c = pm.achunks.front();
-        if (!pm.audio_muted && pm.volume > 0.0f) { // locally muted -> consume but do not mix
+        if (g > 0.0f) { // muted, silent or out of earshot -> consume but do not mix
           const std::size_t n = std::min(c.size(), mixed.size());
-          const float g = pm.volume; // per-peer local volume (user slider)
           for (std::size_t i = 0; i < n; ++i)
             mixed[i] += c[i] * g;
         }
@@ -1076,6 +1203,7 @@ struct ConferenceSession {
             pm.achunks.pop_front();
         }
         pm.last_audio_pts = m.pts_seconds;
+        pm.last_audio_wall = now_wall_;
         pm.has_audio = true;
       } else { // "camera" (video)
         if (!pm.video_proxy && m.width > 0 && m.height > 0) {
@@ -1108,8 +1236,9 @@ struct ConferenceSession {
   // A/V sync: display the newest buffered video frame the peer's audio has reached. The audio
   // currently at the speaker has pts (last-enqueued pts - queued seconds); both streams were
   // stamped with the sender's world clock, so showing the frame at that pts lines the lips to the
-  // sound. With no audio from a peer the target is +inf, so the freshest frame shows immediately
-  // (no added delay).
+  // sound. With no fresh audio from a peer (none yet, or none for kAudioFreshS: a muted or cut mic)
+  // the target is +inf, so the freshest frame shows immediately (no added delay) instead of waiting
+  // on an audio clock that has stopped.
   void sync_and_show() {
     for (auto &kv : peers_) {
       peer_media &pm = kv.second;
@@ -1122,7 +1251,7 @@ struct ConferenceSession {
       // This peer's audio latency = what sits in its mixer queue + what is queued in the shared
       // output. Show the video frame whose pts the audio has reached: last_audio_pts minus that.
       double target = 1e18;
-      if (pm.has_audio && mix_out_ && mix_rate_ > 0 && mix_ch_ > 0 && mix_frames_ > 0) {
+      if (audio_fresh(pm) && mix_out_ && mix_rate_ > 0 && mix_ch_ > 0 && mix_frames_ > 0) {
         const double bps = static_cast<double>(mix_rate_) * static_cast<double>(mix_ch_) * 4.0;
         const double out_s = bps > 0.0 ? static_cast<double>(mix_out_->queued_bytes()) / bps : 0.0;
         const double chunk_s = static_cast<double>(mix_frames_) / static_cast<double>(mix_ch_) /

@@ -14,7 +14,9 @@
 // harness from state_transport_inproc_test (two apps + two shards + an inproc transport +
 // pump_all); no gRPC and no Runtime/backend are needed because the model is pure replicated state.
 
+#include <cstddef>
 #include <cvc/ariadne/conference/room_intrinsics.h>
+#include <cvc/ariadne/conference/room_net.h>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_cluster_shard.h>
@@ -33,6 +35,19 @@ const conf::room_participant *by_pid(const std::vector<conf::room_participant> &
     if (p.pid == pid)
       return &p;
   return nullptr;
+}
+
+// Publish what SHARD journaled since its last drain to the transport's other shards, keeping the
+// drained mutations in OUT; returns how many there were (what the writes since then cost on the
+// wire).
+std::size_t publish_drained(cvc::state_transport_inproc &tp, cvc::state_cluster_shard &shard,
+                            std::vector<cvc::state_mutation> *out = nullptr) {
+  const std::vector<cvc::state_mutation> drained = shard.drain_local();
+  for (const cvc::state_mutation &m : drained)
+    tp.publish(m);
+  if (out)
+    *out = drained;
+  return drained.size();
 }
 
 } // namespace
@@ -122,6 +137,82 @@ TEST(RoomIntrinsics, LeaveRetractsParticipantAcrossNodes) {
   std::vector<conf::room_participant> rb = conf::room_roster(aB, "standup");
   ASSERT_EQ(rb.size(), 1u) << "A's leave replicated to B";
   EXPECT_EQ(rb[0].pid, "B");
+
+  tp.unregister_shard(&sA);
+  tp.unregister_shard(&sB);
+  sA.detach();
+  sB.detach();
+}
+
+// A participant's voice.talking leaf costs one mutation per change: writing the value it already
+// holds journals nothing, and a flip journals the new value alone (not a touch that re-sends the
+// old one first). A is a client whose shard is rooted at the room tree, B a whole-tree relay; the
+// leaf reaches B either way.
+TEST(RoomIntrinsics, VoiceLeafRoundTripsChangedOnly) {
+  cvc::app aA, aB;
+  cvc::state_transport_inproc tp;
+  cvc::state_cluster_shard sA(aA, "C", "A", "conf");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sA.attach();
+  sB.attach();
+  tp.register_shard(&sA);
+  tp.register_shard(&sB);
+  const std::string leaf = conf::room_participant_path("standup", "A") + ".voice.talking";
+
+  // Never written: absent, and the out-parameter is left alone.
+  bool talking = true;
+  EXPECT_FALSE(conf::read_participant_voice(aA, "standup", "A", talking));
+  EXPECT_TRUE(talking);
+
+  // The first write, twice: one mutation, carrying the value.
+  conf::write_participant_voice(aA, "standup", "A", true);
+  conf::write_participant_voice(aA, "standup", "A", true);
+  std::vector<cvc::state_mutation> sent;
+  ASSERT_EQ(publish_drained(tp, sA, &sent), 1u);
+  EXPECT_EQ(sent[0].path, leaf);
+  EXPECT_EQ(sent[0].string_value, "1");
+  talking = false;
+  ASSERT_TRUE(conf::read_participant_voice(aA, "standup", "A", talking));
+  EXPECT_TRUE(talking);
+  talking = false;
+  ASSERT_TRUE(conf::read_participant_voice(aB, "standup", "A", talking)) << "replicated to B";
+  EXPECT_TRUE(talking);
+
+  // The same value again: nothing to send.
+  conf::write_participant_voice(aA, "standup", "A", true);
+  EXPECT_EQ(publish_drained(tp, sA), 0u);
+
+  // A flip: the new value, once.
+  conf::write_participant_voice(aA, "standup", "A", false);
+  conf::write_participant_voice(aA, "standup", "A", false);
+  ASSERT_EQ(publish_drained(tp, sA, &sent), 1u);
+  EXPECT_EQ(sent[0].path, leaf);
+  EXPECT_EQ(sent[0].string_value, "0");
+  talking = true;
+  ASSERT_TRUE(conf::read_participant_voice(aB, "standup", "A", talking));
+  EXPECT_FALSE(talking) << "B sees A stop talking";
+
+  // And back: still one per change.
+  conf::write_participant_voice(aA, "standup", "A", true);
+  EXPECT_EQ(publish_drained(tp, sA), 1u);
+  ASSERT_TRUE(conf::read_participant_voice(aB, "standup", "A", talking));
+  EXPECT_TRUE(talking);
+
+  // A forced write re-sends an unchanged value: the relay's re-broadcast can echo a stale copy of
+  // A's own leaf back, so A's tree may already hold the value A flips to without B having it.
+  cvc::state::instance(aB)(leaf).value(std::string("0")); // B lost the last flip
+  conf::write_participant_voice(aA, "standup", "A", true, /*force=*/true);
+  ASSERT_EQ(publish_drained(tp, sA, &sent), 1u);
+  EXPECT_EQ(sent[0].path, leaf);
+  EXPECT_EQ(sent[0].string_value, "1");
+  ASSERT_TRUE(conf::read_participant_voice(aB, "standup", "A", talking));
+  EXPECT_TRUE(talking) << "the forced re-send heals B";
+
+  // The leaf sits beside the roster, not in it: no presence, so no participant appears.
+  EXPECT_TRUE(conf::room_roster(aB, "standup").empty());
+  bool other = true;
+  EXPECT_FALSE(conf::read_participant_voice(aB, "standup", "B", other)) << "B never wrote one";
+  EXPECT_TRUE(other);
 
   tp.unregister_shard(&sA);
   tp.unregister_shard(&sB);

@@ -66,11 +66,14 @@ class holon;
 // the §5e/mesh increment (H2); H1 is loopback-trusted sole-writer-by-convention.
 
 // Write a participant's AUTHORITATIVE pose (server side): the body_state's pose +
-// velocity leaves and the server_tick, each replicated (touch-before-value). With
-// HEARTBEAT_TICKS > 0 only the leaves whose value changed are written, and the
-// server_tick only when something changed or HEARTBEAT_TICKS have passed since it was
-// last written: an avatar standing still costs one replicated write per heartbeat, not
-// fourteen per relay tick. 0 writes every leaf every call.
+// velocity leaves and the server_tick, each replicated. With HEARTBEAT_TICKS > 0 only
+// the leaves whose value changed are written, and the server_tick only when something
+// changed or HEARTBEAT_TICKS have passed since it was last written: an avatar standing
+// still costs one replicated write per heartbeat, not fourteen per relay tick. 0 is the
+// forced rewrite: every leaf every call, unchanged ones too (what re-hydrates a peer
+// that missed them). Each written leaf journals ONE mutation: a changed value alone, a
+// new (or still empty) leaf touched first so the state adapter observes it before its
+// first value, and a forced unchanged leaf a touch.
 void write_pose(cvc::app &app, const std::string &room, const std::string &pid,
                 const cvc::physics::body_state &state, std::uint64_t server_tick,
                 std::uint64_t heartbeat_ticks = 0);
@@ -117,11 +120,12 @@ void server_pump(holon &h, cvc::app &app, const std::string &room, double wall_d
 // Drive one frame of a CLIENT holon against the replicated room tree (H1 slice 6), the mirror of
 // server_pump: register every present participant (room_roster) -- SELF_PID as the local,
 // predicted avatar, everyone else as an interpolated peer, each starting at its replicated pose
-// when one exists -- drop the ones that left, apply each replicated authoritative .pose (the holon
-// ignores a sample it has already seen, so re-reading an unchanged pose every frame is harmless),
-// then advance the holon one frame. Read the result with h.display_pose(pid). wall_dt as in
-// server_pump. With physics, both pumps (re)load the holon's statics from the room scene whenever
-// its revision changes.
+// when one exists, else pose-less until its first sample (holon::pose_known false: no peer body,
+// nothing to draw) -- drop the ones that left, apply each replicated authoritative .pose (the
+// holon ignores a sample it has already seen, so re-reading an unchanged pose every frame is
+// harmless), then advance the holon one frame. Read the result with h.display_pose(pid). wall_dt
+// as in server_pump. With physics, both pumps (re)load the holon's statics from the room scene
+// whenever its revision changes.
 void client_pump(holon &h, cvc::app &app, const std::string &room, const std::string &self_pid,
                  double wall_dt = -1.0);
 

@@ -13,6 +13,7 @@
 
 #include <cvc/media/media_frame.h>
 #include <functional>
+#include <string>
 
 namespace cvc {
 
@@ -51,6 +52,16 @@ public:
 
   // A short, stable protocol tag for diagnostics and routing policy: "ws", "grpc", "webrtc", ...
   virtual const char *media_protocol() const noexcept = 0;
+
+  // Per-receiver EGRESS gate: fan_media asks it once per receiving connection, with the node_id
+  // that connection identified as (Hello), and skips the connection when it returns false. A
+  // connection that has not identified yet always receives. Asked on the publisher's reader
+  // thread, so it must be thread-safe and non-blocking (no tree walk, no lock held across a
+  // socket write). It never gates a node's OWN uplink (publish_media_frame). Setting it replaces
+  // any previous gate; {} (the default) is today's full fan-out. Default: ignored (an endpoint
+  // without per-receiver egress, e.g. a test fake).
+  using media_gate_fn = std::function<bool(const media_frame &f, const std::string &receiver_node_id)>;
+  virtual void set_media_gate(media_gate_fn gate) { (void)gate; }
 };
 
 } // namespace cvc
