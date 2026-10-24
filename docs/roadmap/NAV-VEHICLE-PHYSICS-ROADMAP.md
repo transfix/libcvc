@@ -135,10 +135,12 @@ The plan, in order:
      `cvc::physics::fit_power`, and `train_config::w_energy` in the dynamic rollout's loss
      (docs/NAV_TRAINING.md, "Energy in the loss").
    - The gate on Jolt (a policy trained with the energy term draws less per km for what it
-     gives up in reach, over paired seeds) is measured and not met. The mean-power term teaches
-     the policy to stop driving (docs/NAV_TRAINING.md, "Energy in the loss").
-   - Open: a term priced against progress, and its gate; the four-wheel plant's rollout; the
-     torch twin.
+     gives up in reach, over paired seeds) is measured and not met (docs/NAV_TRAINING.md,
+     "Energy in the loss"). The mean-power term teaches the policy to stop driving. Priced
+     against progress (`train_config::energy_ref`), it keeps driving and loses far less reach,
+     but still draws no less per km on Jolt.
+   - Open: whether the power model predicts the trained policies' per-km differences on Jolt;
+     the four-wheel plant's rollout; the torch twin.
 
 ### P8a's vehicle fitted to Jolt (2026-10-20)
 
@@ -517,8 +519,15 @@ These are the targets a plant fitted to Jolt has to beat, bin by bin.
         24-33 points against the same training without the term, and Wh/km does not fall
         outside its CI.
       - Pricing mean power over the window makes standing still the cheapest policy.
-    - Next: an energy term priced against progress (energy above a reference Wh/km of progress,
-      or per unit progress with a smooth floor), then the gate again.
+    - Priced against progress (`train_config::energy_ref`, each step's energy above what its
+      progress covers at a reference Wh/km, hinged at 0; gradient-checked):
+      - At 4-16 Wh/km and w_energy 3-10, the reach loss shrinks to 5-14 points (from 24-33), and
+        the policy drives 1540-1800 m a seed (from 306-1095).
+      - Wh/km still does not fall: +0.05 to +0.35 against the policy trained without it, every
+        CI across 0.
+    - Next: check whether the power model predicts the trained policies' per-km differences on
+      their own Jolt runs (`evaluate_power` on their plant logs); if not, the energy lives in
+      terms the planar model lacks.
 - **P9, the plant by default (2026-10-18, Joe: "can't we use the actual jolt vehicle dimensions
   and physics?").**
   - What moved the agents: no default path used Jolt. Every default was the kinematic bicycle

@@ -706,9 +706,43 @@ scenes, 30 s each, and judged on two held-out seeds:
     any per-km effect.
   - The cause is the term's form. It prices mean power over the window, so the cheapest policy
     is the one that moves least. The gate asks for energy per distance, at the same reach.
-  - Next: a term that prices energy against progress, not time. One option charges each step's
-    energy above what its progress toward the goal would cost at a reference Wh/km. Another
-    charges energy per unit progress with a smooth floor on progress.
+- **Priced against progress** (`train_config::energy_ref`):
+  - Each step adds `w_energy / window · softplus(E_t - energy_ref · p_t) / (hdt · P_full)`, with
+    `p_t = |o_t - goal| - |o_{t+1} - goal|` the step's progress toward the goal.
+  - A step pays only for the energy its progress does not cover at the reference, and the smooth
+    hinge (1% of a full-power step wide) keeps the term >= 0, so it never rewards progress itself.
+  - `cvc::nav::dyn_energy_ref_of(wh_per_km, frame)` converts a reference from Wh/km: 3.6 J/m,
+    whose length exponent is 1.
+  - Its adjoint adds the progress's gradient on both ends of the step, |o_{t+1} - goal| and
+    |o_t - goal|. `PricedEnergyGradcheckMatchesFiniteDifference` checks it: direction error
+    1.4e-3 at 2 Wh/km.
+  - `energy_ref = 0` (the default) is the time-priced term above, bit for bit.
+- **On Jolt, priced against progress: the reach loss shrinks, but the gate is still not met.**
+  Same gate and seeds, lr 2e-4 and 300 steps (where training moves the policy); the policy
+  trained without the term reaches 39.0% at 2.48 Wh/km over 2589 m a seed:
+
+  | w_energy | Priced at (Wh/km of progress) | Reach with | Δ reach (points) | Δ Wh/km | Metres a seed |
+  |--:|--:|--:|--:|--:|--:|
+  | 3 | 4 | 24.9% | -14.1 [-17.5, -10.6] | +0.34 [-0.25, +0.93] | 1587 |
+  | 3 | 8 | 31.9% | -7.1 [-10.5, -3.5] | +0.05 [-0.32, +0.42] | 1761 |
+  | 3 | 16 | 34.3% | -4.7 [-7.7, -1.5] | +0.35 [-0.28, +1.04] | 1799 |
+  | 10 | 8 | 29.9% | -9.1 [-12.6, -5.4] | +0.05 [-0.47, +0.68] | 1540 |
+
+  - The policy keeps driving, and gives up a third to a fifth of the reach the time-priced term
+    cost it. The higher the reference, the less it gives up.
+  - It still draws no less per km on Jolt: every Δ Wh/km is between -0.05 and +0.35, and every
+    CI crosses 0.
+  - So what the trainer saves in the planar power model does not reach Jolt's ledger. The fit
+    describes the untrained policy's driving (r² 0.955) and the gate's seeds vary 2.7-5.8 Wh/km
+    on one policy. The differences the term could make are smaller than both.
+  - Every trained policy here draws less per km than the untrained seed (2.5-2.8 against 4.02
+    Wh/km), with or without the term. Training at this rate also costs reach (39.0% against the
+    seed's 51.7%), so that saving is the slower driving the training itself brings, not the
+    energy term.
+  - Next: the power model on the trained policies' own Jolt runs (`evaluate_power` on their
+    plant logs), to see whether it predicts the per-km differences it is asked to train. If it
+    does not, the plant's energy needs terms the planar model lacks (wall contacts, wheel spin
+    at stalls) before an energy term can pay off on Jolt.
 - Not yet in the torch twin. Like any change to the loss, it must reach `sdf_nav`'s
   `train_bicycle` before the two are compared.
 
