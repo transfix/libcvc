@@ -92,8 +92,9 @@ const float kDefaultErrIn = 0.0001f;
 
 // Build an implicit-sphere scalar volume: f(x,y,z) = r - distance_to_center.
 // Positive inside the sphere, negative outside; isovalue 0 is the surface.
-volume make_sphere_volume(app &ctx, unsigned int n, double radius) {
-  bounding_box bbox(-1.0, -1.0, -1.0, 1.0, 1.0, 1.0);
+// The samples are those of [-1,1]^3 whatever box_size, the half-width of the box the volume covers.
+volume make_sphere_volume(app &ctx, unsigned int n, double radius, double box_size = 1.0) {
+  bounding_box bbox(-box_size, -box_size, -box_size, box_size, box_size, box_size);
   volume v(ctx, dimension(n, n, n), Float, bbox);
   const double dx = 2.0 / double(n - 1);
   for (unsigned int k = 0; k < n; ++k)
@@ -604,6 +605,69 @@ TEST_F(LbieMesherTest, OptimizationMovesTheWorstCornersOwnVertex) {
   const double after = worst_corner_condition(out);
   EXPECT_TRUE(std::isfinite(after));
   EXPECT_LT(after, before);
+}
+
+namespace {
+
+// The largest difference between a's coordinates, scaled by a_scale, and b's.
+float max_coordinate_difference(const LBIE::geoframe &a, float a_scale, const LBIE::geoframe &b) {
+  float worst = 0.0f;
+  for (int i = 0; i < a.numverts; ++i)
+    for (int j = 0; j < 3; ++j)
+      worst = std::max(worst, std::fabs(a.verts[i][j] * a_scale - b.verts[i][j]));
+  return worst;
+}
+
+} // namespace
+
+// do_mesh's -q passes (Mesher::qualityImprove) got world coordinates, after do_duallib_extract's
+// own pass on the octree's grid. In a box 0.02 across, where a cell is 0.00125, optimization's
+// first step of 0.5 is 400 cells, and the -q 1 pass did nothing. The passes now run on the grid,
+// and a move may not leave any corner around the vertex worse than the worst corner, so a pass
+// never makes the worst corner worse. Without that check the -q 1 pass here went from 15.3 to 19.4.
+TEST_F(LbieMesherTest, OptimizationImprovesASmallVolumesMeshPassByPass) {
+  const double half_width = 0.01;
+  volume v = make_sphere_volume(ctx, 17, 1.2, half_width);
+  double worst[3];
+  for (int q = -1; q <= 1; ++q) {
+    LBIE::geoframe g =
+        run_do_mesh(v, 0.0f, 0.0f, kDefaultErr, kDefaultErrIn, LBIE::geoframe::HEXA,
+                    q < 0 ? LBIE::Mesher::NO_IMPROVE : LBIE::Mesher::OPTIMIZATION, std::max(q, 0));
+    ASSERT_GT(g.numquads, 0);
+    expect_geoframe_valid(g);
+    worst[q + 1] = worst_corner_condition(g);
+    const float lim = float(half_width) * (1.0f + 1e-5f);
+    int outside = 0;
+    for (int i = 0; i < g.numverts; ++i)
+      for (int j = 0; j < 3; ++j)
+        if (!(g.verts[i][j] >= -lim && g.verts[i][j] <= lim))
+          ++outside;
+    EXPECT_EQ(outside, 0) << "-q " << q << ": vertex coordinates outside the volume";
+  }
+  EXPECT_LE(worst[1], worst[0]) << "the pass inside extraction made the worst corner worse";
+  EXPECT_LT(worst[2], worst[1]) << "the -q 1 pass did not improve the worst corner";
+}
+
+// LBIE::quality_improve (behind cvc::geometry::quality_improve) gets a mesh with no octree, so
+// there is no grid to run the passes on. Run in the mesh's own units, optimization's half-unit
+// first step gave a sphere's hex mesh a worst corner condition number of 28 in its [-1,1] box, 36
+// scaled up 64 times and 293 scaled down 64 times. The passes now run on a grid whose cell is the
+// mesh's median edge, so scaling the mesh scales the result.
+TEST_F(LbieMesherTest, QualityImproveGivesTheSameMeshInAnyUnits) {
+  LBIE::geoframe g = run_do_mesh(make_sphere_volume(ctx, 17, 1.2), 0.0f, 0.0f, kDefaultErr,
+                                 kDefaultErrIn, LBIE::geoframe::HEXA);
+  ASSERT_GT(g.numquads, 0);
+  LBIE::geoframe ref = LBIE::quality_improve(ctx, g, LBIE::Mesher::OPTIMIZATION, 1);
+  EXPECT_GT(max_coordinate_difference(ref, 1.0f, g), 0.0f) << "optimization moved no vertex";
+  for (float scale : {1.0f / 64.0f, 64.0f}) {
+    LBIE::geoframe scaled = g;
+    for (int i = 0; i < scaled.numverts; ++i)
+      for (int j = 0; j < 3; ++j)
+        scaled.verts[i][j] *= scale;
+    LBIE::geoframe out = LBIE::quality_improve(ctx, scaled, LBIE::Mesher::OPTIMIZATION, 1);
+    ASSERT_EQ(out.numverts, ref.numverts);
+    EXPECT_LT(max_coordinate_difference(out, 1.0f / scale, ref), 1e-5f) << "scale " << scale;
+  }
 }
 
 // The adaptive hexahedral mesh of a sphere that leaves its box refines cells near the surface.

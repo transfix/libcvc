@@ -459,9 +459,26 @@ void bicycle_rollout_cuda(const field_stack &f, float *o, float *th, float *sp, 
 
 // GPU fused drive tick (sample -> coef_feats -> coef_mlp -> bicycle nsub), one
 // thread per agent, float-equivalent to drive_step. Updates o[n*2], th[n], sp[n]
-// in place and writes minclr_out[n]. Shared field (plane 0).
+// in place and writes minclr_out[n]. Shared field (plane 0). It takes what drive_step
+// takes: the grip, risk and slope look-ahead columns (a risk net reads the terrain's risk),
+// the terrain's grade force and barrier (veh_params::terrain) and the slope governors
+// (veh_params::slope). drive_step_material_cuda adds the material stack and the learned lam
+// heads. Optional tel[n]: drive_telemetry as drive_step fills it; null (default) is inert. Not
+// ported: the plant arm (veh_params::plant, refused) and the per-agent disc offsets
+// (body_offsets_col, not read).
 void drive_step_cuda(const field_stack &f, float *o, float *th, float *sp, const float *carrot,
-                     const coef_mlp &model, int n, const veh_params &v, float *minclr_out);
+                     const coef_mlp &model, int n, const veh_params &v, float *minclr_out,
+                     drive_telemetry *tel = nullptr);
+
+// drive_step_material on the GPU: drive_step_cuda plus the material force (soft and hard,
+// into F and the steering bias), the risk look-ahead on the material stack (the worse of it
+// and the terrain's at each probe), and a lam-head net's learned lam_soft / lam_hard (col 3 /
+// col 4, sigmoid-scaled for kFlagLamSigmoid, times mat.lam_soft_scale / lam_hard_scale).
+// Material plane 0 (no map_id). Float-equivalent to drive_step_material with map_id null.
+void drive_step_material_cuda(const field_stack &f, float *o, float *th, float *sp,
+                              const float *carrot, const coef_mlp &model, int n,
+                              const veh_params &v, const material_drive &mat, float *minclr_out,
+                              drive_telemetry *tel = nullptr);
 
 } // namespace nav
 } // namespace cvc
