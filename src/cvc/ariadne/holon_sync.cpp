@@ -320,7 +320,17 @@ void client_pump(holon &h, cvc::app &app, const std::string &room, const std::st
     present.insert(p.pid);
     cvc::physics::body_state s;
     std::uint64_t server_tick = 0;
-    const bool have = read_pose(app, room, p.pid, s, server_tick);
+    bool have = read_pose(app, room, p.pid, s, server_tick);
+    // A peer back after leaving (an in-process reconnect keeps its pid) still has the pose subtree
+    // it left in our tree, which the relay withholds updates to while it is departed: until a
+    // newer sample arrives that is no pose -- registering it from that would show it where it left
+    // and seek our clock back to the old tick. "Newer" allows for a restarted relay, whose ticks
+    // start again near zero: only a tick within kLeftoverTicks at or below the one it left at is
+    // the leftover.
+    constexpr std::uint64_t kLeftoverTicks = 1200; // 10 s at the 120 Hz holon quantum
+    const std::uint64_t left = h.left_tick(p.pid);
+    if (have && left != 0 && server_tick <= left && left - server_tick <= kLeftoverTicks)
+      have = false;
     // A participant the roster lists before its pose has replicated is registered pose-less: no
     // body and no marker at the placeholder origin until its first sample (holon::pose_known).
     if (!h.has_participant(p.pid))

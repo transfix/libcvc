@@ -60,11 +60,16 @@ void set_replicated(cvc::app &app, const std::string &path, const std::string &v
 // leaf's OLD value; it is only needed while the leaf is new or still empty (the attach race above).
 // A valued leaf is already observed: its first value was set after the touch that attached it, or
 // it arrived through replication (applying a remote node attaches it too).
-void set_changed_once(cvc::app &app, const std::string &path, const std::string &val) {
+// FORCE re-sends an unchanged value (one touch) rather than writing nothing.
+void set_changed_once(cvc::app &app, const std::string &path, const std::string &val,
+                      bool force = false) {
   cvc::state *n = app.root().findDescendant(path);
   const std::string cur = n ? n->value() : std::string();
-  if (n && cur == val)
+  if (n && cur == val) {
+    if (force && !cur.empty())
+      n->touch();
     return;
+  }
   if (!cur.empty()) {
     n->value(val);
     return;
@@ -146,8 +151,8 @@ bool read_server_net(cvc::app &app, const std::string &room, server_net &out) {
 }
 
 void write_participant_voice(cvc::app &app, const std::string &room, const std::string &pid,
-                             bool talking) {
-  set_changed_once(app, participant_talking(room, pid), talking ? "1" : "0");
+                             bool talking, bool force) {
+  set_changed_once(app, participant_talking(room, pid), talking ? "1" : "0", force);
 }
 
 bool read_participant_voice(cvc::app &app, const std::string &room, const std::string &pid,

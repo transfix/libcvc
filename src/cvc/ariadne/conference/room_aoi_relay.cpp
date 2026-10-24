@@ -237,7 +237,12 @@ filter_map filters_of(const std::shared_ptr<const aoi_snapshot> &snap) {
   if (!snap || !snap->enabled())
     return out;
   for (const std::string &pid : snap->participants())
-    out.emplace(pid, filter_ref{std::make_shared<aoi_state_filter>(snap, pid)});
+    // The room tree takes any child name, but a registry entry needs a C identifier (add_peer
+    // throws otherwise). No connection can identify as such a pid either (a shard's own node id is
+    // validated), so there is no receiver to filter: skip it. As a subject it is still filtered
+    // for everyone else.
+    if (cvc::state::isValidStateName(pid))
+      out.emplace(pid, filter_ref{std::make_shared<aoi_state_filter>(snap, pid)});
   return out;
 }
 

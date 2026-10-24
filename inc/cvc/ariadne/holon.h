@@ -137,8 +137,13 @@ public:
   void add_participant(const std::string &pid, bool local = false,
                        const cvc::physics::body_state &start = cvc::physics::body_state{},
                        bool pose_known = true);
+  // CLIENT: the newest server tick seen from `pid` is remembered when it is removed (left_tick).
   void remove_participant(const std::string &pid);
   bool has_participant(const std::string &pid) const;
+  // CLIENT: the newest server tick seen from `pid` before it was last removed, until a sample of
+  // it is applied again; 0 otherwise. The pose subtree a departed peer leaves behind in the room
+  // tree carries a tick no newer, so the host (client_pump) can tell it from a pose for its rejoin.
+  std::uint64_t left_tick(const std::string &pid) const;
   // Every registered pid, in pid order.
   std::vector<std::string> participants() const;
 
@@ -308,6 +313,10 @@ private:
   cvc::world_clock _clock; // declared before _driver: _driver references it
   cvc::clock_driver _driver;
   std::map<std::string, participant> _participants;
+  // CLIENT: pid -> the newest tick seen before it left (remove_participant), until a sample of it
+  // is applied; at most kMaxLeft of them (a client sees a fresh pid per launch of every peer).
+  std::map<std::string, std::uint64_t> _left;
+  static constexpr std::size_t kMaxLeft = 1024;
   double _alpha = 0.0;                  // the last frame's interpolation alpha, for display_pose
   std::uint64_t _lead = 0;              // CLIENT: ticks ahead of the server (set_lead_ticks)
   std::unique_ptr<avatar_world> _world; // physics (holon_config::physics + a Jolt build)

@@ -998,7 +998,9 @@ struct ConferenceSession {
     const bool self_on = self_talk_until_ > now_wall_;
     set_talk(pid_, self_on);
     if (self_on != voice_talking_) {
-      cvc::ariadne::conference::write_participant_voice(*app_, room_, pid_, self_on);
+      // Forced: our tree may hold self_on already, echoed back stale by the relay's re-broadcast.
+      cvc::ariadne::conference::write_participant_voice(*app_, room_, pid_, self_on,
+                                                        /*force=*/true);
       voice_talking_ = self_on;
     }
     const auto lit = [&](const std::string &pid, const peer_media *pm) {

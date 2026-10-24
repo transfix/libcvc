@@ -331,6 +331,62 @@ TEST(HolonSyncTest, ClientPumpMarksPoseLessPeersUnknown) {
   }
 }
 
+// A peer that leaves and comes back under the same pid (arigl reconnects in-process) still has
+// the pose subtree it left in our tree, and the relay sends nothing newer while it is departed.
+// That leftover is no pose for its rejoin: registering it from it would show the peer where it
+// left and seek our clock back to the old tick. A newer sample makes it known; so does the low
+// tick of a restarted relay, whose clock starts again near zero.
+TEST(HolonSyncTest, RejoinDoesNotTakeTheLeftoverPose) {
+  cvc::app app;
+  const std::string room = "r";
+  cvc::ariadne::conference::room_join(app, room, "A");
+  cvc::ariadne::conference::room_join(app, room, "B");
+  const auto at = [](double x, double y) {
+    cvc::physics::body_state s;
+    s.position = {x, y, 0.0};
+    return s;
+  };
+  holon a(holon_role::client, cvc::ariadne::room_holon_config());
+  const double dt = a.clock().fixed_dt();
+  cvc::ariadne::write_pose(app, room, "B", at(5.0, 0.0), 5000);
+  cvc::ariadne::client_pump(a, app, room, "A", dt);
+  ASSERT_TRUE(a.pose_known("B"));
+  EXPECT_EQ(a.left_tick("B"), 0u);
+
+  cvc::ariadne::conference::room_leave(app, room, "B");
+  cvc::ariadne::client_pump(a, app, room, "A", dt);
+  ASSERT_FALSE(a.has_participant("B"));
+  EXPECT_EQ(a.left_tick("B"), 5000u);
+
+  // Back: the leftover (tick 5000) is no pose, frame after frame, and moves no clock.
+  cvc::ariadne::conference::room_join(app, room, "B");
+  const std::uint64_t realigns = a.clock_realigns();
+  for (int i = 0; i < 3; ++i) {
+    cvc::ariadne::client_pump(a, app, room, "A", dt);
+    ASSERT_TRUE(a.has_participant("B"));
+    EXPECT_FALSE(a.pose_known("B")) << "frame " << i;
+    if (a.physics())
+      EXPECT_FALSE(a.has_body("B")) << "no body where it left";
+  }
+  EXPECT_EQ(a.clock_realigns(), realigns) << "no seek back to the old tick";
+
+  // The relay respawns it: a newer sample makes it known, where it is now.
+  cvc::ariadne::write_pose(app, room, "B", at(-4.0, 1.0), 5600);
+  cvc::ariadne::client_pump(a, app, room, "A", dt);
+  ASSERT_TRUE(a.pose_known("B"));
+  EXPECT_DOUBLE_EQ(a.display_pose("B").position.x, -4.0);
+  EXPECT_EQ(a.left_tick("B"), 0u) << "forgotten once a real sample is applied";
+
+  // Left again, and the relay restarts: its first tick is far below the old one, so it is new.
+  cvc::ariadne::conference::room_leave(app, room, "B");
+  cvc::ariadne::client_pump(a, app, room, "A", dt);
+  ASSERT_EQ(a.left_tick("B"), 5600u);
+  cvc::ariadne::conference::room_join(app, room, "B");
+  cvc::ariadne::write_pose(app, room, "B", at(2.0, 2.0), 300);
+  cvc::ariadne::client_pump(a, app, room, "A", dt);
+  EXPECT_TRUE(a.pose_known("B")) << "a restarted relay's low tick is not the leftover";
+}
+
 // ── journaling: one mutation per written pose leaf ──────────────────────────
 
 namespace {

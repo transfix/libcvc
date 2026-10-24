@@ -55,7 +55,10 @@ namespace conference {
 //   - another participant's intent (q != r): only the relay and the intent's owner read it
 //   - q's whole pose subtree, server_tick included, unless tier(r, q) == inner (non-inner pairs
 //     get the pose as pushes instead, so a receiver never sees a fresh tick over stale leaves)
-//   - a departed q's pose, intent, net and voice (its soft-left subtree lingers as a ghost)
+//   - a departed q's pose and intent (its soft-left subtree lingers as a ghost; its net and voice
+//     leaves deliver, as a present participant's do, so a same-pid reconnect's writes are never
+//     withheld). The relay remembers the most recent room_aoi::kMaxDeparted departures; an older
+//     ghost falls back to the unknown-pid rule and delivers.
 // The receiver's own subtree always delivers, as do the presence, profile, net, streams and voice
 // of present participants (the roster stays room-wide), the bare participants.<q> node, and the
 // room's scene, server and aoi subtrees.
@@ -229,8 +232,10 @@ public:
 
   std::shared_ptr<const aoi_snapshot> snapshot() const;
 
-  // Everyone who was present at some update and is not now, in pid order.
+  // Everyone who was present at some update and is not now, in pid order: the most recent
+  // kMaxDeparted of them (arigl takes a fresh pid per launch, so departures never stop coming).
   const std::set<std::string> &departed() const;
+  static constexpr std::size_t kMaxDeparted = 1024;
 
   const aoi_params &params() const noexcept;
   const std::string &room() const noexcept;
@@ -241,6 +246,7 @@ private:
   struct book;
 
   void publish();
+  void depart(const std::string &pid);
 
   std::string _room;
   aoi_params _p;

@@ -54,6 +54,10 @@ struct member {
 
 bool rerank(const aoi_params &p, member &r);
 
+struct departure {
+  std::string pid;
+};
+
 constexpr std::size_t kNpos = std::string_view::npos;
 
 // A path BASE.<segs...>, joined with cvc::state::SEPARATOR.
@@ -244,7 +248,7 @@ bool aoi_snapshot::deliver_path(const std::string &receiver,
   const bool pose = family == "pose";
   const bool intent = family == "intent";
   if (is_departed(q))
-    return !(pose || intent || family == "net" || family == "voice");
+    return !(pose || intent);
   const std::size_t qi = index_of(q);
   if (qi == npos)
     return true; // a pid this snapshot has never seen
@@ -306,6 +310,8 @@ bool aoi_state_filter::deliver(const std::string &path) const noexcept {
 
 struct room_aoi::book {
   std::map<std::string, member> members;
+  std::map<std::uint64_t, departure> departed_age; // departure order -> pid, oldest first
+  std::uint64_t departures = 0;
 };
 
 room_aoi::room_aoi(std::string room, aoi_params p)
@@ -338,14 +344,19 @@ bool room_aoi::update(const std::vector<position> &present, std::uint64_t now_ti
       kv.second.subjects.erase(it->first);
       kv.second.ranked.erase(it->first);
     }
-    _departed.insert(it->first);
+    depart(it->first);
     it = _book->members.erase(it);
     changed = true;
   }
   for (const auto &kv : here) {
     const auto [it, fresh] = _book->members.try_emplace(kv.first);
     if (fresh) {
-      _departed.erase(kv.first);
+      if (_departed.erase(kv.first))
+        for (auto a = _book->departed_age.begin(); a != _book->departed_age.end(); ++a)
+          if (a->second.pid == kv.first) {
+            _book->departed_age.erase(a);
+            break;
+          }
       changed = true;
     }
     it->second.x = kv.second->x;
@@ -521,6 +532,17 @@ room_aoi::take_pose_pushes(std::uint64_t now_tick,
 std::shared_ptr<const aoi_snapshot> room_aoi::snapshot() const { return _snap; }
 
 const std::set<std::string> &room_aoi::departed() const { return _departed; }
+
+void room_aoi::depart(const std::string &pid) {
+  if (!_departed.insert(pid).second)
+    return;
+  _book->departed_age.emplace(++_book->departures, departure{pid});
+  while (_departed.size() > kMaxDeparted) {
+    const auto oldest = _book->departed_age.begin();
+    _departed.erase(oldest->second.pid);
+    _book->departed_age.erase(oldest);
+  }
+}
 
 const aoi_params &room_aoi::params() const noexcept { return _p; }
 

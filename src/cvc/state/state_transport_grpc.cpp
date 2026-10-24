@@ -287,10 +287,12 @@ bool registry_allows(state_peer_registry &peers, const std::string *pid, const s
 //
 // write_locked() exists for admit_connection(), which has to keep
 // write_mu held across several frames; write_raw is the underlying
-// stream write and must only be called with write_mu held.
+// stream write and must only be called with write_mu held. It is a
+// timed mutex so a media frame can give up on a receiver whose stream
+// stays busy (the stall drop, state_transport_grpc::write_media).
 class state_transport_grpc::connection {
 public:
-  std::mutex write_mu;
+  std::timed_mutex write_mu;
   std::function<bool(const pb::Frame &)> write_raw;
   std::atomic<bool> alive{true};
   // The peer's identity, from the first Hello that names one. Written once, on this connection's
@@ -347,7 +349,7 @@ public:
 
   // Write only if no other write holds the stream right now (the link probe never waits).
   bool try_write(const pb::Frame &f) {
-    std::unique_lock<std::mutex> lk(write_mu, std::try_to_lock);
+    std::unique_lock<std::timed_mutex> lk(write_mu, std::try_to_lock);
     return lk.owns_lock() && write_locked(f);
   }
 
@@ -360,7 +362,7 @@ public:
   }
 
   bool write(const pb::Frame &f) {
-    std::lock_guard<std::mutex> lk(write_mu);
+    std::lock_guard<std::timed_mutex> lk(write_mu);
     return write_locked(f);
   }
 
@@ -453,7 +455,7 @@ public:
     // probe): fail any Write still blocked on it, then wait out the one in progress. Every write
     // runs under write_mu and checks `alive` there, so none starts after this.
     ctx->TryCancel();
-    { std::lock_guard<std::mutex> wl(conn->write_mu); }
+    { std::lock_guard<std::timed_mutex> wl(conn->write_mu); }
     _owner->unregister_connection(conn.get());
     const std::string *pid = conn->peer_id();
     _owner->notify_connection_closed(pid ? *pid : std::string());
@@ -797,7 +799,7 @@ void state_transport_grpc::flush() {
   for (auto &c : conns) {
     if (!c)
       continue;
-    std::lock_guard<std::mutex> wlk(c->write_mu);
+    std::lock_guard<std::timed_mutex> wlk(c->write_mu);
     (void)wlk;
   }
 }
@@ -1009,6 +1011,25 @@ std::size_t state_transport_grpc::write_media(const media_frame &m, const void *
   for (auto &c : conns) {
     if (!c || c.get() == exclude || !c->alive.load() || !c->can_write())
       continue;
+    std::unique_lock<std::timed_mutex> lk(c->write_mu, std::defer_lock);
+    if (stall_ns != 0) {
+      // A write that has already run past the window: drop at once. Otherwise wait for the stream
+      // at most the window, so this (publisher's reader) thread never queues behind a slow
+      // receiver for longer -- a write that starts and then blocks on flow control would hold
+      // every frame behind it until the 3 s watchdog.
+      const auto started =
+          static_cast<std::uint64_t>(c->write_started_ns.load(std::memory_order_relaxed));
+      if ((started != 0 &&
+           media_write_stalled(started, static_cast<std::uint64_t>(link_now_ns()), stall_ns)) ||
+          !lk.try_lock_for(std::chrono::nanoseconds(stall_ns))) {
+        _media_stall_dropped.fetch_add(1, std::memory_order_relaxed);
+        continue;
+      }
+    } else {
+      lk.lock();
+    }
+    // The gate once the stream is ours, so a frame the stall drop discards never uses up a
+    // thumbnail slot.
     if (gate) {
       const std::string *pid = c->peer_id();
       if (pid && !(*gate)(m, *pid)) {
@@ -1016,16 +1037,7 @@ std::size_t state_transport_grpc::write_media(const media_frame &m, const void *
         continue;
       }
     }
-    if (stall_ns != 0) {
-      const auto started =
-          static_cast<std::uint64_t>(c->write_started_ns.load(std::memory_order_relaxed));
-      if (started != 0 &&
-          media_write_stalled(started, static_cast<std::uint64_t>(link_now_ns()), stall_ns)) {
-        _media_stall_dropped.fetch_add(1, std::memory_order_relaxed);
-        continue;
-      }
-    }
-    if (c->write(frame)) {
+    if (c->write_locked(frame)) {
       _sent_frames.fetch_add(1, std::memory_order_relaxed);
       ++n;
     }
@@ -1103,7 +1115,7 @@ void state_transport_grpc::admit_connection(const std::shared_ptr<connection> &c
   // the wire. If a live mutation went out first, the older values
   // replayed behind it would land on the peer afterwards and clobber
   // the newer one (the seen-set only suppresses exact repeats).
-  std::lock_guard<std::mutex> wlk(conn->write_mu);
+  std::lock_guard<std::timed_mutex> wlk(conn->write_mu);
   register_connection(conn);
   send_hello_locked(*conn);
   if (backfill && !shards.empty())

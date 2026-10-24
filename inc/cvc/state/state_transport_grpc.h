@@ -211,11 +211,13 @@ public:
   void set_media_gate(media_gate_fn gate) override;
 
   // Stall drop (0 = off, the default): skip a receiver whose write in progress started more than
-  // `ms` ago instead of queueing this frame behind it. A healthy buffered write takes microseconds,
-  // so one blocked that long means the peer's flow-control window is full; dropping the frame
-  // keeps the publisher's reader thread (and every other receiver) moving. Media is loss-tolerant;
-  // the existing 3 s write watchdog still closes a peer that stays stuck. Applies to every media
-  // write, own uplink included (the counterpart of the WS transport's backlog drop).
+  // `ms` ago, and one whose stream this frame cannot get within `ms`, instead of queueing behind
+  // it. A healthy buffered write takes microseconds, so one blocked that long means the peer's
+  // flow-control window is full; dropping the frame keeps the publisher's reader thread (and every
+  // other receiver) moving, each frame waiting at most `ms` per such receiver. Media is
+  // loss-tolerant; the existing 3 s write watchdog still closes a peer that stays stuck. Applies to
+  // every media write, own uplink included (the counterpart of the WS transport's backlog drop).
+  // The media gate is asked only once the stream is held, so a dropped frame uses no thumbnail.
   void set_media_stall_drop(std::chrono::milliseconds ms) noexcept;
   // True when a write is in flight (`write_started_ns` != 0) and has run longer than `stall_ns`;
   // `stall_ns` 0 never stalls. Steady-clock nanoseconds, the base of the connection's write clock.

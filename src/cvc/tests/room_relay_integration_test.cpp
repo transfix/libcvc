@@ -853,7 +853,7 @@ default_room_run run_default_room(bool use_aoi, bool corners) {
 // every other subject's pose mutation live and (to within what loopback media may drop on a loaded
 // runner, at the 2% the preset promises) every frame, while the gate passes every frame whole and
 // the driver never pushes.
-TEST(RoomRelayIntegrationTest, DefaultRoomUnchangedUnderConferencePreset) {
+TEST(RoomRelayLoopbackTest, DefaultRoomUnchangedUnderConferencePreset) {
   for (const bool corners : {false, true}) {
     SCOPED_TRACE(corners ? "corners" : "spawn ring");
     const default_room_run off = run_default_room(false, corners);
@@ -885,7 +885,7 @@ TEST(RoomRelayIntegrationTest, DefaultRoomUnchangedUnderConferencePreset) {
 // Hall preset: C walks 30 m from B (34 from A). B and A get no live pose frame for C, but a
 // targeted push about every 24 ticks while C moves, which keeps their view of C walking; they get
 // none of C's video or audio, while their own (inner) media still flows.
-TEST(RoomRelayIntegrationTest, OuterPeerGetsPushesNotLiveFrames) {
+TEST(RoomRelayLoopbackTest, OuterPeerGetsPushesNotLiveFrames) {
   relay_options o;
   o.aoi = ra::hall_aoi_params();
   o.large_scene = true;
@@ -949,7 +949,7 @@ TEST(RoomRelayIntegrationTest, OuterPeerGetsPushesNotLiveFrames) {
 // tick, ahead of that step's live writes: within two steps B's tree has C exactly as the relay
 // does, with a tick at least that fresh, and B's replica never re-aligns its clock (a stale tick
 // would make it seek, and rubber-band its own avatar).
-TEST(RoomRelayIntegrationTest, StillOuterPeerReentryNoRealignNoFreeze) {
+TEST(RoomRelayLoopbackTest, StillOuterPeerReentryNoRealignNoFreeze) {
   relay_options o;
   o.aoi = ra::hall_aoi_params();
   o.large_scene = true;
@@ -1014,7 +1014,7 @@ TEST(RoomRelayIntegrationTest, StillOuterPeerReentryNoRealignNoFreeze) {
 
 // Hall preset, C 13 m from B: middle. B gets C's camera as a thumbnail -- the first frame at
 // once, then about 2 a second -- and every mic chunk; A, 17 m from C and so outer, gets neither.
-TEST(RoomRelayIntegrationTest, MiddleGetsThumbnailsAndAudio) {
+TEST(RoomRelayLoopbackTest, MiddleGetsThumbnailsAndAudio) {
   relay_options o;
   o.aoi = ra::hall_aoi_params();
   o.large_scene = true;
@@ -1052,7 +1052,7 @@ TEST(RoomRelayIntegrationTest, MiddleGetsThumbnailsAndAudio) {
 // each of them on the very step it first sees C -- not at the 5 s refresh -- so they show C at its
 // spot within a step plus a round trip, never at a placeholder: until that push C has no body in
 // their holons and no live pose frame ever arrives.
-TEST(RoomRelayIntegrationTest, NewOuterPairPushedImmediately) {
+TEST(RoomRelayLoopbackTest, NewOuterPairPushedImmediately) {
   relay_options o;
   o.aoi = ra::hall_aoi_params();
   o.large_scene = true;
@@ -1100,7 +1100,7 @@ TEST(RoomRelayIntegrationTest, NewOuterPairPushedImmediately) {
 // every frame. The relay applies A's intent, but no other client ever receives it (only the
 // participant's own intent is its business), and the relay's interest gate withholds D's ui.docs
 // writes, so not one of them reaches another client's shard.
-TEST(RoomRelayIntegrationTest, NoIntentOrUiDocsLeak) {
+TEST(RoomRelayLoopbackTest, NoIntentOrUiDocsLeak) {
   test_relay r(relay_options{});
   const std::vector<link_kind> kinds = link_kinds();
   client_list own;
@@ -1145,7 +1145,7 @@ TEST(RoomRelayIntegrationTest, NoIntentOrUiDocsLeak) {
 // so a process restarting under the same node id has its writes ignored until the relay restarts
 // (which is why arigl gives every launch a random node-id suffix). The relaunch joins as arigl's
 // would, under a fresh id, and the room settles around it after the departure.
-TEST(RoomRelayIntegrationTest, ReconnectUnderSamePidGetsZeroedIntent) {
+TEST(RoomRelayLoopbackTest, ReconnectUnderSamePidGetsZeroedIntent) {
   test_relay r(relay_options{});
   client_list own = make_clients({"A", "B"});
   test_client &B = *own[1];
@@ -1281,7 +1281,7 @@ late_join_run run_late_join(bool trim) {
 // from the admit snapshot alone: nothing is backfilled, and it costs what a joiner that came
 // before those writes cost -- the room as it is now, not its history, which a relay that keeps its
 // journal replays to every joiner.
-TEST(RoomRelayIntegrationTest, LateJoinerBootstrapsFromSnapshotOnly) {
+TEST(RoomRelayLoopbackTest, LateJoinerBootstrapsFromSnapshotOnly) {
   const late_join_run keep = run_late_join(false);
   ASSERT_FALSE(HasFatalFailure());
   const late_join_run trim = run_late_join(true);
@@ -1357,7 +1357,7 @@ double run_control_plane(bool s7) {
 // The echo is what the relay fanned for every walking avatar before S7: a client rooted at the
 // room tree never sends it, and the relay's gate would withhold it from an older one. With it gone
 // (and other participants' intents filtered), relay egress while N=3 walk is at most a third.
-TEST(RoomRelayIntegrationTest, ControlPlaneEgressDrops) {
+TEST(RoomRelayLoopbackTest, ControlPlaneEgressDrops) {
   const double off = run_control_plane(false);
   ASSERT_FALSE(HasFatalFailure());
   const double on = run_control_plane(true);
@@ -1372,7 +1372,7 @@ TEST(RoomRelayIntegrationTest, ControlPlaneEgressDrops) {
 // so pairs flip between inner, middle and outer at 10 Hz while all four stream camera and mic and
 // the WebSocket re-broadcast runs. Nothing crashes or deadlocks, and once everyone stands together
 // again every receiver gets every publisher's media and every pose as the relay holds it.
-TEST(RoomRelayIntegrationTest, ChurnSmoke) {
+TEST(RoomRelayLoopbackTest, ChurnSmoke) {
   relay_options o;
   o.aoi = ra::hall_aoi_params();
   o.aoi.downgrade_dwell_s = 0.0;

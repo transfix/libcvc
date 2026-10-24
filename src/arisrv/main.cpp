@@ -14,8 +14,10 @@
 //     (roster + stream descriptors) between all clients, star-topology;
 //   - the MEDIA plane — a stream_relay watches the room tree and fans out each published stream
 //     (ingest the publisher's pushed frames, serve them to every subscriber).
-// Both planes go through the room's AREA OF INTEREST (room_aoi_relay): how much of each
-// participant every other one receives, by their distance in the room.
+// The room tree, and the camera/mic frames the state transports carry (the media_router's fan-out),
+// go through the room's AREA OF INTEREST (room_aoi_relay): how much of each participant every
+// other one receives, by their distance in the room. The stream_relay plane (--media-listen:
+// room-publish / room-subscribe streams) is not gated by it.
 // Core libcvc + gRPC only — NO cvcGL/VTK/GL — so it runs on a plain headless VM.
 //
 //   arisrv --room standup --state-listen 0.0.0.0:7700 --media-listen 0.0.0.0:7701
@@ -101,6 +103,18 @@ bool check_choice(const char *flag, const std::string &v, std::initializer_list<
   std::fprintf(stderr, "[arisrv] %s expects %s, got '%s'\n", flag, all.c_str(), v.c_str());
   return false;
 }
+
+// A whole non-negative decimal integer, or a usage error naming FLAG.
+bool check_count(const char *flag, const std::string &v, long &out) {
+  char *end = nullptr;
+  const long n = v.empty() ? -1 : std::strtol(v.c_str(), &end, 10);
+  if (n < 0 || !end || *end != '\0') {
+    std::fprintf(stderr, "[arisrv] %s expects a non-negative integer, got '%s'\n", flag, v.c_str());
+    return false;
+  }
+  out = n;
+  return true;
+}
 } // namespace
 
 int main(int argc, char **argv) {
@@ -125,11 +139,14 @@ int main(int argc, char **argv) {
   //   --scene default|large      the seeded scene (large: a 100 m plane of LOD meshes)
   const char *s7_env = std::getenv("CVC_ARISRV_S7");
   const char *aoi_env = std::getenv("CVC_ARISRV_AOI");
-  std::string s7Arg = (s7_env && !std::strcmp(s7_env, "0")) ? "off" : "on";
+  // CVC_ARISRV_S7: 0/off or 1/on (unset: on).
+  std::string s7Arg = !s7_env || !*s7_env         ? "on"
+                      : !std::strcmp(s7_env, "0") ? "off"
+                      : !std::strcmp(s7_env, "1") ? "on"
+                                                  : s7_env;
   std::string aoiMode = (aoi_env && *aoi_env) ? aoi_env : ""; // empty: the scene's default
   std::string relayGateArg = "on", relayJournal = "trim", scene = "default";
-  int aoiVideoMax = 0;
-  long mediaStallMs = 40;
+  std::string aoiVideoMaxArg = "0", mediaStallArg = "40";
   for (int i = 1; i < argc; ++i) {
     const char *a = argv[i];
     auto next = [&](const char *d) { return (i + 1 < argc) ? argv[++i] : d; };
@@ -150,13 +167,13 @@ int main(int argc, char **argv) {
     else if (!std::strcmp(a, "--aoi"))
       aoiMode = next("conference");
     else if (!std::strcmp(a, "--aoi-video-max"))
-      aoiVideoMax = std::atoi(next("0"));
+      aoiVideoMaxArg = next("");
     else if (!std::strcmp(a, "--relay-gate"))
       relayGateArg = next("on");
     else if (!std::strcmp(a, "--relay-journal"))
       relayJournal = next("trim");
     else if (!std::strcmp(a, "--media-stall-ms"))
-      mediaStallMs = std::atol(next("40"));
+      mediaStallArg = next("");
     else if (!std::strcmp(a, "--scene"))
       scene = next("default");
   }
@@ -168,13 +185,17 @@ int main(int argc, char **argv) {
       !check_choice("--relay-journal", relayJournal, {"trim", "keep"}) ||
       !check_choice("--scene", scene, {"default", "large"}))
     return 2;
+  long aoiVideoMaxN = 0, mediaStallMs = 40;
+  if (!check_count("--aoi-video-max", aoiVideoMaxArg, aoiVideoMaxN) ||
+      !check_count("--media-stall-ms", mediaStallArg, mediaStallMs))
+    return 2;
+  const int aoiVideoMax = static_cast<int>((std::min)(aoiVideoMaxN, 1000000L));
   const bool s7 = s7Arg == "on";
   if (!s7)
     aoiMode = "off";
   const bool relayGate = s7 && relayGateArg == "on";
   const bool trimJournal = s7 && relayJournal == "trim";
-  const long stallMs = s7 ? (std::max)(0L, mediaStallMs) : 0L;
-  aoiVideoMax = (std::max)(0, aoiVideoMax);
+  const long stallMs = s7 ? mediaStallMs : 0L;
 
   cvc::app app;
 
@@ -359,9 +380,13 @@ int main(int argc, char **argv) {
     std::fflush(stdout);
   }
   // The AOI's parameters, once, under conf.rooms.<room>.aoi: clients derive their audio gain from
-  // them. With --aoi off none are written, and a client then plays every peer at full gain.
-  if (aoi_relay)
-    cvc::ariadne::conference::write_aoi_params(app, room, aoiParams);
+  // them. With --aoi off (and --s7 off) they are written disabled, so every peer plays at full
+  // gain -- also on a client that lived through an earlier relay's AOI and kept its leaves.
+  {
+    cvc::ariadne::conference::aoi_params published = aoiParams;
+    published.enabled = aoi_relay != nullptr;
+    cvc::ariadne::conference::write_aoi_params(app, room, published);
+  }
   while (!g_stop.load()) {
 #if CVC_ENABLE_WS
     // Reap ghosts (~every second): a tab that navigated or reloaded away without a clean WebSocket

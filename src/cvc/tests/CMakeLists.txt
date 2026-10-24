@@ -2636,6 +2636,8 @@ if(TARGET state_transport_ws_test)
   cvc_discover_tests(state_transport_ws_test)
 endif()
 if(TARGET room_relay_integration_test)
+  # Its suite is RoomRelayLoopbackTest, not *Integration*: CI's PR and recipe runs exclude names
+  # matching "Integration" (the slow CLI suites), and these are S7's only end-to-end checks.
   cvc_discover_tests(room_relay_integration_test)
 endif()
 if(TARGET state_stream_transport_grpc_test)

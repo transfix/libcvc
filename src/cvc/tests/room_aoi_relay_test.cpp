@@ -293,6 +293,33 @@ TEST(RoomAoiRelayTest, DepartedPidRemovedFromRegistries) {
     EXPECT_NE(tp->peers().view_of("C").filter, nullptr) << tp->name();
 }
 
+// The room tree takes any child name, so a client can join under a pid that is no C identifier
+// ("user-1"); the registry refuses such a node id (add_peer throws). The driver must neither throw
+// out of the room step -- that would take the relay down -- nor leave the valid pids unfiltered.
+TEST(RoomAoiRelayTest, InvalidPidIsSkippedNotFatal) {
+  relay_room rr;
+  rr.place({{"A", -2.0, 0.0}, {"B", 2.0, 0.0}});
+  ra::room_join(rr.app, rr.room, "user-1");
+  rr.pump();
+  ASSERT_TRUE(rr.server.has_participant("user-1"));
+  std::vector<std::string> log;
+  recording_transport grpc("grpc", log), ws("ws", log);
+  ra::room_aoi_relay aoi(rr.app, rr.shard, rr.room, ra::conference_aoi_params());
+  aoi.add_transport(&grpc);
+  aoi.add_transport(&ws);
+  ASSERT_NO_THROW(ra::relay_room_step(rr.shard, {&grpc, &ws}, &aoi, rr.server, 0.0, false));
+  for (recording_transport *tp : {&grpc, &ws}) {
+    SCOPED_TRACE(tp->name());
+    EXPECT_FALSE(tp->peers().has_peer("user-1"));
+    EXPECT_NE(tp->peers().view_of("A").filter, nullptr);
+    EXPECT_NE(tp->peers().view_of("B").filter, nullptr);
+    // As a subject it is filtered like anyone else.
+    EXPECT_FALSE(tp->peers().should_deliver("A", rr.leaf("user-1", {"intent", "move", "x"})));
+  }
+  const auto snap = aoi.snapshot();
+  EXPECT_EQ(snap->participants().size(), 3u);
+}
+
 // ── pose pushes ─────────────────────────────────────────────────────────────
 
 // C stands still 30 m away, so write_pose leaves its leaves and server_tick alone until the

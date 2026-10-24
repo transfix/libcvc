@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <cvc/ariadne/holon.h>
 #include <exception>
+#include <iterator>
 
 namespace cvc {
 namespace ariadne {
@@ -74,6 +75,12 @@ void holon::add_participant(const std::string &pid, bool local,
 }
 
 void holon::remove_participant(const std::string &pid) {
+  const auto it = _participants.find(pid);
+  if (it != _participants.end() && _role == holon_role::client && it->second.have_seen) {
+    _left[pid] = it->second.last_seen;
+    if (_left.size() > kMaxLeft)
+      _left.erase(_left.begin() == _left.find(pid) ? std::next(_left.begin()) : _left.begin());
+  }
   _participants.erase(pid);
   if (_world)
     _world->remove_avatar(pid);
@@ -83,6 +90,11 @@ void holon::set_statics(const std::vector<avatar_static> &statics, std::uint64_t
   _statics_rev = revision;
   if (_world)
     _world->set_statics(statics);
+}
+
+std::uint64_t holon::left_tick(const std::string &pid) const {
+  const auto it = _left.find(pid);
+  return it == _left.end() ? 0 : it->second;
 }
 
 bool holon::has_participant(const std::string &pid) const {
@@ -208,6 +220,7 @@ void holon::apply_authoritative(const std::string &pid, const cvc::physics::body
   it->second.have_seen = true;
   it->second.last_seen = server_tick;
   it->second.pose_known = true;
+  _left.erase(pid); // a real sample: whatever it left behind before is superseded
   // Count the server's ticks (see the header): re-align whenever the replica is more
   // than max_skew_ticks away -- on the first sample when the client joined a running
   // server, and after a stall. A replica already within the skew is left alone, so its

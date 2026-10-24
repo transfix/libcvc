@@ -207,6 +207,45 @@ TEST(RoomAoiTest, UpdateRebuildsSnapshotOnlyOnChange) {
   // A pid listed twice counts once, at its first position.
   EXPECT_FALSE(aoi.update({at("a", 0), at("b", 14), at("c", 1), at("c", 100)}, 174, 1.5));
   EXPECT_EQ(aoi.snapshot()->tier("a", "c"), aoi_tier::inner);
+  // A NEWCOMER listed twice starts at its first position's tier at once (no dwell to hide it):
+  // 1 m is inner, 100 m would be outer.
+  EXPECT_TRUE(
+      aoi.update({at("a", 0), at("b", 14), at("c", 1), at("d", 1), at("d", 100)}, 180, 1.55));
+  EXPECT_EQ(aoi.snapshot()->tier("a", "d"), aoi_tier::inner);
+  ra::room_aoi fresh(kRoom, ra::hall_aoi_params());
+  EXPECT_TRUE(fresh.update({at("a", 0), at("d", 100), at("d", 1)}, 0, 0.0));
+  EXPECT_EQ(fresh.snapshot()->tier("a", "d"), aoi_tier::outer);
+}
+
+// arigl takes a fresh pid every launch, so departures never stop on a long-lived relay: the
+// departed set keeps only the most recent kMaxDeparted, and a rejoin leaves it.
+TEST(RoomAoiTest, DepartedSetIsBounded) {
+  ra::room_aoi aoi(kRoom, ra::hall_aoi_params());
+  const std::size_t cap = ra::room_aoi::kMaxDeparted;
+  std::uint64_t tick = 0;
+  double t = 0.0;
+  for (std::size_t i = 0; i < cap + 5; ++i) {
+    const std::string pid = "p" + std::to_string(i);
+    aoi.update({at("a", 0), at(pid.c_str(), 1)}, tick += 6, t += 0.05);
+    aoi.update({at("a", 0)}, tick += 6, t += 0.05);
+  }
+  EXPECT_EQ(aoi.departed().size(), cap);
+  EXPECT_EQ(aoi.departed().count("p0"), 0u) << "the oldest are forgotten";
+  EXPECT_EQ(aoi.departed().count("p4"), 0u);
+  EXPECT_EQ(aoi.departed().count("p5"), 1u);
+  EXPECT_EQ(aoi.departed().count("p" + std::to_string(cap + 4)), 1u);
+  // A forgotten ghost falls back to the unknown-pid rule; a remembered one is still withheld.
+  const auto s = aoi.snapshot();
+  EXPECT_TRUE(s->deliver_path("a", ppath("p0", {"pose", "pos", "x"})));
+  EXPECT_FALSE(s->deliver_path("a", ppath("p5", {"pose", "pos", "x"})));
+  // A rejoin leaves the set (and its age entry with it: the next departures evict others).
+  aoi.update({at("a", 0), at("p5", 1)}, tick += 6, t += 0.05);
+  EXPECT_EQ(aoi.departed().count("p5"), 0u);
+  EXPECT_EQ(aoi.departed().size(), cap - 1);
+  aoi.update({at("a", 0)}, tick += 6, t += 0.05);
+  EXPECT_EQ(aoi.departed().count("p5"), 1u);
+  EXPECT_EQ(aoi.departed().size(), cap);
+  EXPECT_EQ(aoi.departed().count("p6"), 1u) << "p5 re-departed is the newest, nothing evicted";
 }
 
 // ── state delivery ──────────────────────────────────────────────────────────
@@ -262,13 +301,14 @@ TEST(RoomAoiTest, DeliverPathRules) {
     yes("a", ppath(q, {"streams", "camera", "token"}));
   }
 
-  // A departed subject's ghost: pose, intent, net and voice are withheld; the rest is not.
+  // A departed subject's ghost: pose and intent are withheld; the rest is not (net and voice
+  // too deliver, so a same-pid reconnect's writes made before its rejoin lands are never lost).
   no("a", ppath("e", {"pose", "pos", "x"}));
   no("a", ppath("e", {"pose", "server_tick"}));
   no("a", ppath("e", {"intent", "move", "x"}));
-  no("a", ppath("e", {"net", "rtt_ms"}));
-  no("a", ppath("e", {"net", "relay", "rtt_ms"}));
-  no("a", ppath("e", {"voice", "talking"}));
+  yes("a", ppath("e", {"net", "rtt_ms"}));
+  yes("a", ppath("e", {"net", "relay", "rtt_ms"}));
+  yes("a", ppath("e", {"voice", "talking"}));
   yes("a", ppath("e", {"presence", "joined"}));
   yes("a", ppath("e", {"profile", "name"}));
   yes("a", ppath("e", {"streams", "camera", "endpoint"}));

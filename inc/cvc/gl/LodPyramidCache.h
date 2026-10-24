@@ -156,7 +156,8 @@ private:
 
   std::unordered_map<std::uint64_t, cvc::lod::mesh_pyramid> m_cache;
   std::unordered_map<std::uint64_t, pending_build> m_pending;
-  std::unordered_set<std::uint64_t> m_unbuilt;             // over the cap, or the build failed
+  std::unordered_set<std::uint64_t> m_unbuilt;             // keys whose build failed
+  std::unordered_set<std::uint64_t> m_overCap;             // triangle counts warned as over the cap
   std::unordered_map<std::uint64_t, std::uint64_t> m_keys; // fingerprint -> key_of
   std::vector<std::string> m_warnings;
   std::size_t m_builds = 0;

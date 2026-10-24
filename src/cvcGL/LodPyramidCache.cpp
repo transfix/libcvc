@@ -199,6 +199,17 @@ bool LodPyramidCache::attach(const std::shared_ptr<LodGraphicsNode> &node,
     return false;
   // Whatever the node waited for before, it shows `mesh` now.
   forget(node.get());
+  // Over the cap it is never built, so never in the cache either: no content key needed (the
+  // canonical hash sorts the whole mesh, which a re-realize would redo for every such node).
+  const std::uint64_t tris = triangles(mesh);
+  if (tris > m_maxBuildTris) {
+    node->setBase(mesh);
+    if (m_overCap.insert(tris).second)
+      m_warnings.push_back("LodPyramidCache: a " + std::to_string(tris) +
+                           "-triangle mesh is over the " + std::to_string(m_maxBuildTris) +
+                           "-triangle LOD build cap; it draws at full detail only");
+    return false;
+  }
   const std::uint64_t key = key_for(mesh);
 
   const auto hit = m_cache.find(key);
@@ -214,16 +225,7 @@ bool LodPyramidCache::attach(const std::shared_ptr<LodGraphicsNode> &node,
     return false;
   }
   if (m_unbuilt.count(key))
-    return false; // warned about when it was first refused
-
-  const std::uint64_t tris = triangles(mesh);
-  if (tris > m_maxBuildTris) {
-    m_unbuilt.insert(key);
-    m_warnings.push_back("LodPyramidCache: a " + std::to_string(tris) +
-                         "-triangle mesh is over the " + std::to_string(m_maxBuildTris) +
-                         "-triangle LOD build cap; it draws at full detail only");
-    return false;
-  }
+    return false; // its build failed, and was warned about then
 
   cvc::async_lane &builder = lane(); // before any bookkeeping: making it may throw
   auto job = std::make_shared<build_job>();

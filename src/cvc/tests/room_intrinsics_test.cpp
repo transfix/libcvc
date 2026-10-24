@@ -198,6 +198,16 @@ TEST(RoomIntrinsics, VoiceLeafRoundTripsChangedOnly) {
   ASSERT_TRUE(conf::read_participant_voice(aB, "standup", "A", talking));
   EXPECT_TRUE(talking);
 
+  // A forced write re-sends an unchanged value: the relay's re-broadcast can echo a stale copy of
+  // A's own leaf back, so A's tree may already hold the value A flips to without B having it.
+  cvc::state::instance(aB)(leaf).value(std::string("0")); // B lost the last flip
+  conf::write_participant_voice(aA, "standup", "A", true, /*force=*/true);
+  ASSERT_EQ(publish_drained(tp, sA, &sent), 1u);
+  EXPECT_EQ(sent[0].path, leaf);
+  EXPECT_EQ(sent[0].string_value, "1");
+  ASSERT_TRUE(conf::read_participant_voice(aB, "standup", "A", talking));
+  EXPECT_TRUE(talking) << "the forced re-send heals B";
+
   // The leaf sits beside the roster, not in it: no presence, so no participant appears.
   EXPECT_TRUE(conf::room_roster(aB, "standup").empty());
   bool other = true;
