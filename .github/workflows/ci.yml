@@ -371,11 +371,14 @@ jobs:
           test -f "$RUNNER_TEMP/emsdk/emsdk_env.sh"
           echo "CVC_EMSDK_DIR=$RUNNER_TEMP/emsdk" >> "$GITHUB_ENV"
 
-      - name: Install the wasm deps (boost, pegtl, yaml-cpp, ftxui, the compression libraries)
+      - name: Install the wasm deps (boost, pegtl, yaml-cpp, ftxui, ImageMagick and its codecs)
         if: steps.paths.outputs.run == 'true'
         run: |
           mkdir -p "$WASM_DEPS"
-          for p in zlib bzip2 xz zstd boost pegtl yaml-cpp ftxui; do
+          # imagemagick + the codec libraries its static MagickCore links: `ari --image` loads
+          # pictures through cvc::image, so this link is where a missing codec closure shows.
+          for p in zlib bzip2 xz zstd boost pegtl yaml-cpp ftxui \
+                   imagemagick tiff libjpeg-turbo libpng libwebp lerc libxml2; do
             echo "=== $p ==="
             cvcpkg install "$p" --prefix "$WASM_DEPS" \
               --platform wasm --arch wasm32 --config release --link static \
@@ -392,10 +395,15 @@ jobs:
             -DCMAKE_FIND_ROOT_PATH="$WASM_DEPS" -DCMAKE_PREFIX_PATH="$WASM_DEPS" \
             -DCVC_ENABLE_CUDA=OFF -DCVC_BUILD_TESTS=OFF -DCVC_BUILD_CLI=OFF \
             -DCVC_ENABLE_OPENMP=OFF -DDISABLE_CGAL=ON -DCVC_USING_HDF5=OFF \
-            -DCVC_USING_IMOD_MRC=OFF -DCVC_ENABLE_IMAGEMAGICK=OFF -DCVC_ENABLE_FFTW=OFF \
+            -DCVC_USING_IMOD_MRC=OFF -DCVC_ENABLE_IMAGEMAGICK=ON -DCVC_ENABLE_FFTW=OFF \
             -DCVC_FFT_PROVIDER=none -DCVC_ENABLE_ASSIMP=OFF -DCVC_ENABLE_MESHER=OFF \
             -DCVC_BUILD_CVCGL=OFF -DCVC_BUILD_EXAMPLES=OFF -DCVC_WASM_PTHREADS=OFF \
             | tee configure.log
+          # CMAKE_PREFIX_PATH lets pkg-config see MagickCore.pc, so the stock FindImageMagick
+          # tier makes the targets, the one whose static codec closure the ari link needs
+          # src/cvc/CMakeLists.txt to add. HDRI=1 is what the Q16HDRI library was built with.
+          grep -q "ImageMagick found: .*(Q16, HDRI=1)" configure.log \
+            || { echo "::error::the wasm configure did not find ImageMagick (Q16 HDRI)"; exit 1; }
           grep -q "Ariadne: .ari YAML loader ENABLED" configure.log \
             || { echo "::error::the wasm configure did not find yaml-cpp (the .ari loader is a stub)"; exit 1; }
           grep -q "Ariadne: FTXUI terminal backend ENABLED" configure.log \

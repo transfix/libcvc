@@ -11,7 +11,11 @@ recipe:
   # +cvc.2 family republish (material-aware nav). The scene module source is
   # unchanged; it rebuilds so the tested-together family stays revision-consistent
   # and the GRL-SNAM CI closure ships a pycvc that carries the material bindings.
-  cvc_revision: 1
+  # Bumped 1 -> 3: the wasm columns now build with ImageMagick ON (they were OFF because
+  # the static link could not resolve MagickCore's codec libraries). 3, not 2: linux was
+  # already auto-bumped to +cvc.2 on the catalog, and the wasm publish packs verbatim at
+  # this revision, so 3 keeps every platform monotonic. Native builds are unchanged.
+  cvc_revision: 3
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
@@ -74,6 +78,27 @@ depends:
       platforms: [wasm, wasm-mt]
     # cvc's build-only PEGTL (the state_exec grammar engine).
     - name: pegtl
+      platforms: [wasm, wasm-mt]
+    # cvc's image I/O (CVC_ENABLE_IMAGEMAGICK=ON), static, plus every codec library the
+    # static MagickCore and libtiff link (installs are flat, so the closure is listed).
+    # link-host.sh links every archive in the deps prefix, so these reach the host too.
+    - name: imagemagick
+      platforms: [wasm, wasm-mt]
+    - name: tiff
+      platforms: [wasm, wasm-mt]
+    - name: libjpeg-turbo
+      platforms: [wasm, wasm-mt]
+    - name: libpng
+      platforms: [wasm, wasm-mt]
+    - name: libwebp
+      platforms: [wasm, wasm-mt]
+    - name: lerc
+      platforms: [wasm, wasm-mt]
+    - name: xz
+      platforms: [wasm, wasm-mt]
+    - name: bzip2
+      platforms: [wasm, wasm-mt]
+    - name: libxml2
       platforms: [wasm, wasm-mt]
   runtime:
     # pycvc-cp312 supplies the core `import pycvc` module this scene module bridges
