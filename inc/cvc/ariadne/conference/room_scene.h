@@ -38,6 +38,7 @@ namespace conference {
 //   conf.rooms.<room>.scene.rev                          bumped by every scene write
 //   conf.rooms.<room>.scene.env.background.{gradient, top.{r,g,b}, bottom.{r,g,b}}
 //   conf.rooms.<room>.scene.env.chrome                   the SceneGraph diagnostic chrome (1/0)
+//   conf.rooms.<room>.scene.env.shadows.{enabled, resolution}   real-time shadow maps
 //   conf.rooms.<room>.scene.env.lights.<id>.{present, kind, rig, azimuth, elevation, intensity,
 //                                            cone, color.{r,g,b}, pos.{x,y,z}, target.{x,y,z}}
 //   conf.rooms.<room>.scene.objects.<id>.{present, source.{uri, primitive, plane_size,
@@ -64,6 +65,12 @@ struct room_scene_env {
   float background_top[3] = {0.09f, 0.10f, 0.12f};
   float background_bottom[3] = {0.02f, 0.02f, 0.03f};
   bool chrome = true;
+  // Real-time shadows from the shadow-casting lights (directional / spot; a fill never casts),
+  // re-baked every frame so moving avatars cast moving shadows. `shadow_resolution` is the map
+  // size in pixels (bigger = crisper, costlier). Off = the room says nothing about shadows, so a
+  // client keeps whatever its document set (the conference document turns them on).
+  bool shadows = false;
+  int shadow_resolution = 2048;
   // Each light's explicit fields (kind, pos, target, cone, azimuth, elevation, intensity, color)
   // or a bare rig: preset name. Rig tuning knobs (stage/key/fill/...) are not replicated.
   std::vector<cvc::ariadne::SceneLight> lights;
@@ -97,8 +104,9 @@ std::uint64_t scene_revision(cvc::app &app, const std::string &room_id);
 cvc::ariadne::Scene read_room_scene(cvc::app &app, const std::string &room_id);
 
 // The MVP environment the server seeds a room with (§5g "ground + grid + a reference object"): a
-// gradient background, the diagnostic chrome off, a directional sun, a 20 m ground plane and a 1 m
-// reference box standing on it at the origin. Z is up, as in every .ari scene.
+// gradient background, the diagnostic chrome off, a 20 m ground plane and a 1 m reference box
+// standing on it at the origin. Z is up, as in every .ari scene. No lights and no shadows: the
+// room's look is the client document's (conference_roster.ari declares its light rig + shadows).
 room_scene_env default_scene_env();
 std::vector<cvc::ariadne::SceneNode> default_scene_objects();
 

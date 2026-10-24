@@ -13,8 +13,12 @@
 //     local avatar, a smooth walk between samples for a peer. A reconcile jump on the local avatar
 //     (holon::take_correction) is eased out over `correction_tau`, so a server correction reads
 //     as a glide rather than a jump.
-//   * Third-person controls: intent_from_keys turns held WASD / arrow keys into an intent relative
-//     to the camera's heading, and self_position is where the host keeps the camera's orbit centre.
+//   * Each marker carries a dark visor on its front face, so its facing (the pose rotation, from
+//     the participant's intent.yaw) reads at a glance; each peer's display name floats above it
+//     (draw_labels, from the host's ImGuiOverlay scene-draw callback).
+//   * Third-person controls: intent_from_keys turns held WASD / arrow keys into forward / back /
+//     strafe relative to the avatar's FACING; the host turns the avatar by a click on the scene
+//     (pick_ground -> face that point). self_position is where the host keeps the orbit centre.
 //
 // Owner/render thread, like the SceneGraph it draws into.
 
@@ -36,13 +40,16 @@ class SceneRenderer;
 namespace ariadne {
 struct RealizedScene;
 
-// The local avatar's intent from the held movement keys, relative to the camera's heading on a
-// Z-up ground: forward is the view direction (eye -> focal) flattened onto the ground, right is
-// forward x up. Diagonals are normalized (never faster than `speed`); opposing keys cancel. A
-// camera looking straight down has no heading, so forward is then +Y.
+// The local avatar's intent from the held movement keys, relative to its facing YAW (radians about
+// +Z from +X, Z-up): W/S walk forward/back along the facing, A/D strafe left/right of it (right is
+// forward x up). Diagonals are normalized (never faster than `speed`); opposing keys cancel. The
+// intent carries `yaw`, so the avatar keeps facing it while it walks or strafes.
 cvc::ariadne::avatar_intent intent_from_keys(bool forward, bool back, bool left, bool right,
-                                             const double eye[3], const double focal[3],
-                                             double speed);
+                                             double yaw, double speed);
+
+// The camera's heading on a Z-up ground as a yaw (radians about +Z from +X): the view direction
+// (eye -> focal) flattened onto the ground. A camera looking straight down has none: +Y (pi/2).
+double heading_yaw(const double eye[3], const double focal[3]);
 
 class room_view {
 public:
@@ -62,6 +69,18 @@ public:
   // Where the local avatar is shown (the eased display position, at the marker's feet). False
   // until the holon has the local avatar.
   bool self_position(double out[3]) const;
+
+  // The point on the horizontal plane z = GROUND_Z under display pixel (X, Y) (VTK display
+  // coordinates, origin bottom-left, as CameraController::takeClick reports). False when the ray
+  // through the pixel misses the plane (parallel to it, or the plane is behind the camera).
+  bool pick_ground(int x, int y, double ground_z, double out[3]) const;
+
+  // Draw each peer's display name above its marker, into the current ImGui frame's background
+  // draw list -- over the 3D view, under the UI's windows (call it from inside the frame, e.g.
+  // ImGuiOverlay::setSceneDrawCallback, which runs even while the panels are hidden). Names come
+  // from the room roster; a peer with no name shows its pid. Skips markers behind the camera. A
+  // no-op without CVC_ENABLE_IMGUI.
+  void draw_labels() const;
 
   // The room scene revision currently realized (0 = none yet).
   std::uint64_t realized_revision() const { return _realized_rev; }
@@ -83,6 +102,7 @@ private:
   void sync_scene();
   void clear_scene();
   void sync_avatars(cvc::ariadne::holon &h, double wall_dt);
+  void sync_names();
 
   SceneRenderer &_view;
   cvc::app &_app;
@@ -91,6 +111,9 @@ private:
   std::unique_ptr<RealizedScene> _realized;       // owns the scene's light rigs while shown
   std::vector<std::string> _scene_ids;            // the realized room nodes + lights, to remove
   std::map<std::string, bool> _avatars;           // pid -> marker created
+  std::map<std::string, std::string> _names;      // pid -> display name (the roster), for labels
+  std::map<std::string, cvc::physics::vec3> _heads; // pid -> where its label goes (world)
+  int _names_age = 0;                               // frames until _names is re-read
   cvc::physics::vec3 _self_offset{0.0, 0.0, 0.0}; // easing offset on the local avatar
   bool _have_self = false;
   double _self_pos[3] = {0.0, 0.0, 0.0};

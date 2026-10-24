@@ -1,8 +1,9 @@
 // H1 slice 6: cvc::gl::ariadne::room_view — the conference room in 3D, offscreen. The room scene
 // from the replicated tree is realized (and re-realized on a revision change), avatar markers
 // follow a client holon's participants and poses, a local reconcile jump is eased (no visible
-// step), the third-person key -> intent mapping is camera-relative, and teardown removes every
-// node room_view made.
+// step), the key -> intent mapping walks and strafes relative to the avatar's facing, the visor
+// turns with the facing, a pixel picks the ground point under it, and teardown removes every node
+// room_view made.
 #include <cmath>
 #include <cstdio>
 #include <cvc/ariadne/avatar_sim.h>
@@ -15,13 +16,16 @@
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/ariadne/room_view.h>
 #include <string>
+#include <vtkCamera.h>
 #include <vtkMatrix4x4.h>
+#include <vtkRenderer.h>
 
 using cvc::ariadne::avatar_intent;
 using cvc::ariadne::holon;
 using cvc::ariadne::holon_role;
 using cvc::gl::SceneGraph;
 using cvc::gl::SceneRenderer;
+using cvc::gl::ariadne::heading_yaw;
 using cvc::gl::ariadne::intent_from_keys;
 using cvc::gl::ariadne::room_view;
 using cvc::physics::body_state;
@@ -49,22 +53,40 @@ int main() {
   cvc::app app;
   app.properties("system.log_verbosity", "0");
 
-  // ── keys -> intent, relative to the camera's heading ─────────────────────
+  // ── keys -> intent, relative to the avatar's facing ──────────────────────
   {
-    const double eye[3] = {-10, 0, 5}, focal[3] = {0, 0, 0}; // looking along +x
-    avatar_intent w = intent_from_keys(true, false, false, false, eye, focal, 2.0);
-    chk(near(w.move.x, 2.0) && near(w.move.y, 0.0) && near(w.move.z, 0.0),
-        "W walks along the view");
-    avatar_intent d = intent_from_keys(false, false, false, true, eye, focal, 2.0);
-    chk(near(d.move.x, 0.0) && near(d.move.y, -2.0), "D strafes right of the view (-y here)");
-    avatar_intent wd = intent_from_keys(true, false, false, true, eye, focal, 2.0);
+    const double kPi = 3.14159265358979323846;
+    avatar_intent w = intent_from_keys(true, false, false, false, 0.0, 2.0); // facing +x
+    chk(near(w.move.x, 2.0) && near(w.move.y, 0.0) && near(w.move.z, 0.0) && near(w.yaw, 0.0),
+        "W walks along the facing, and the intent carries it");
+    avatar_intent d = intent_from_keys(false, false, false, true, 0.0, 2.0);
+    chk(near(d.move.x, 0.0) && near(d.move.y, -2.0), "D strafes right of the facing (-y here)");
+    avatar_intent s = intent_from_keys(false, true, false, false, 0.5 * kPi, 2.0); // facing +y
+    chk(near(s.move.x, 0.0) && near(s.move.y, -2.0) && near(s.yaw, 0.5 * kPi),
+        "S backs away, still facing the same way");
+    avatar_intent a = intent_from_keys(false, false, true, false, 0.5 * kPi, 2.0);
+    chk(near(a.move.x, -2.0) && near(a.move.y, 0.0), "A strafes left of the facing (-x here)");
+    avatar_intent wd = intent_from_keys(true, false, false, true, 0.0, 2.0);
     chk(near(std::hypot(wd.move.x, wd.move.y), 2.0) && wd.move.x > 0 && wd.move.y < 0,
         "a diagonal is normalized, not faster");
-    avatar_intent ws = intent_from_keys(true, true, false, false, eye, focal, 2.0);
-    chk(near(ws.move.x, 0.0) && near(ws.move.y, 0.0), "opposing keys cancel");
+    avatar_intent ws = intent_from_keys(true, true, false, false, 1.0, 2.0);
+    chk(near(ws.move.x, 0.0) && near(ws.move.y, 0.0) && near(ws.yaw, 1.0),
+        "opposing keys cancel, and standing still keeps the facing");
+    const double eye[3] = {-10, 0, 5}, focal[3] = {0, 0, 0};
+    chk(near(heading_yaw(eye, focal), 0.0), "heading_yaw: the view along +x is yaw 0");
     const double top[3] = {0, 0, 10}, down[3] = {0, 0, 0};
-    avatar_intent td = intent_from_keys(true, false, false, false, top, down, 1.0);
-    chk(near(td.move.y, 1.0) && near(td.move.x, 0.0), "straight down: forward is +Y");
+    chk(near(heading_yaw(top, down), 0.5 * kPi), "heading_yaw: straight down is +Y");
+  }
+
+  // ── the facing reaches the avatar's rotation ─────────────────────────────
+  {
+    cvc::ariadne::avatar_sim sim;
+    avatar_intent in;
+    in.yaw = 0.5 * 3.14159265358979323846;
+    sim.step(in, 1.0 / 60.0);
+    const cvc::physics::quat q = sim.state().rotation;
+    chk(near(q.w, std::sqrt(0.5)) && near(q.z, std::sqrt(0.5)) && near(q.x, 0.0) && near(q.y, 0.0),
+        "the sim faces the intent's yaw (a turn about +Z)");
   }
 
   // ── the camera's held keys are what the host reads for the avatar ─────────
@@ -85,6 +107,15 @@ int main() {
     SceneRenderer view(sg, 128, 128, /*offscreen=*/true, "main");
     holon h(holon_role::client);
     rs::seed_default_scene(app, "r");
+    // The default room has no lights (its rig is the client document's); a room MAY carry its own,
+    // and room_view realizes them like the objects.
+    {
+      rs::room_scene_env env = rs::default_scene_env();
+      cvc::ariadne::SceneLight sun;
+      sun.id = "sun";
+      env.lights.push_back(sun);
+      rs::write_scene_env(app, "r", env);
+    }
     {
       room_view rv(view, app, "r", "A", sg.getStatePrefix());
       rv.update(h, 1.0 / 60.0);
@@ -125,6 +156,34 @@ int main() {
           "the local avatar's marker stands at its pose");
       chk(node_xyz(sg, "avatar_B", pb) && near(pb[1], 4.0), "a peer's marker stands at its pose");
       chk(rv.self_position(self) && near(self[0], 4.0), "self_position is the local avatar");
+      double va[3];
+      chk(node_xyz(sg, "avatar_A_visor", va) && near(va[0], 4.25, 1e-4) && near(va[1], 0.0) &&
+              va[2] > 1.0,
+          "the visor is on the front (+x at yaw 0), at head height");
+
+      // Pick: aim the camera straight down at (4, 0) and the centre pixel is that ground point.
+      vtkCamera *cam = view.renderer()->GetActiveCamera();
+      cam->SetPosition(4.0, 0.0, 20.0);
+      cam->SetFocalPoint(4.0, 0.0, 0.0);
+      cam->SetViewUp(0.0, 1.0, 0.0);
+      view.renderer()->ResetCameraClippingRange();
+      int *vs = view.renderer()->GetSize();
+      double g[3];
+      chk(rv.pick_ground(vs[0] / 2, vs[1] / 2, 0.0, g) && near(g[0], 4.0, 0.2) &&
+              near(g[1], 0.0, 0.2) && near(g[2], 0.0),
+          "pick_ground: the centre pixel lands under the camera");
+      double g2[3];
+      chk(rv.pick_ground(vs[0] - 1, vs[1] / 2, 0.0, g2) && g2[0] > g[0] + 0.5,
+          "pick_ground: a pixel to the right lands further along +x");
+
+      // Turn A to face +y: the visor swings round to its +y side.
+      avatar_intent turn;
+      turn.yaw = 0.5 * 3.14159265358979323846;
+      h.set_intent("A", turn);
+      h.advance(dt);
+      rv.update(h, dt);
+      chk(node_xyz(sg, "avatar_A_visor", va) && near(va[0], 4.0, 1e-4) && near(va[1], 0.25, 1e-4),
+          "the visor turns with the facing");
 
       // A server correction teleports A by +3 m in y: the marker must not jump this frame,
       // then glides to the corrected pose.
@@ -150,10 +209,12 @@ int main() {
       h.remove_participant("B");
       h.advance(dt);
       rv.update(h, dt);
-      chk(sg.getGraphics("avatar_B") == nullptr, "a departed peer's marker is removed");
+      chk(sg.getGraphics("avatar_B") == nullptr && sg.getGraphics("avatar_B_visor") == nullptr,
+          "a departed peer's marker (and visor) is removed");
       chk(sg.getGraphics("avatar_A") != nullptr, "the others stay");
     }
-    chk(sg.getGraphics("avatar_A") == nullptr, "teardown removes the avatar markers");
+    chk(sg.getGraphics("avatar_A") == nullptr && sg.getGraphics("avatar_A_visor") == nullptr,
+        "teardown removes the avatar markers");
   }
 
   printf("%s (%d failure%s)\n", fails ? "FAILED" : "OK", fails, fails == 1 ? "" : "s");

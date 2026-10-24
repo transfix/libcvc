@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cvc/ariadne/conference/room_intrinsics.h> // room_roster
 #include <cvc/ariadne/conference/room_scene.h>
 #include <cvc/ariadne/holon.h>
 #include <cvc/ariadne/scene.h>
@@ -13,6 +14,9 @@
 #include <set>
 #include <utility>
 #include <vtkRenderer.h>
+#ifdef CVC_ENABLE_IMGUI
+#include <imgui.h>
+#endif
 
 namespace cvc {
 namespace gl {
@@ -25,6 +29,17 @@ namespace rs = cvc::ariadne::conference;
 // An avatar marker: a 0.5 x 0.5 x 1.7 m box standing on the pose (its base at the pose's z).
 constexpr float kAvatarWidth = 0.5f;
 constexpr float kAvatarHeight = 1.7f;
+// Its visor: a dark slab across the front (+X in the avatar's frame) at head height, standing
+// proud of the face so it reads from behind and the side too. Centred at kVisorOffset from the
+// marker's centre.
+constexpr float kVisorSize[3] = {0.14f, 0.40f, 0.16f};
+constexpr double kVisorOffset[3] = {0.5 * kAvatarWidth, 0.0, 0.5 * kAvatarHeight - 0.32};
+// A label floats this far above the pose (above the marker's top).
+constexpr double kLabelHeight = kAvatarHeight + 0.35;
+
+std::string visor_node_id(const std::string &pid) {
+  return room_view::avatar_node_id(pid) + "_visor";
+}
 
 // A stable, distinct colour per peer (a hue from the pid's hash); the local avatar is gold.
 void avatar_color(const std::string &pid, bool self, float out[3]) {
@@ -78,26 +93,27 @@ void pose_matrix(const cvc::physics::quat &q, double tx, double ty, double tz, d
 } // namespace
 
 cvc::ariadne::avatar_intent intent_from_keys(bool forward, bool back, bool left, bool right,
-                                             const double eye[3], const double focal[3],
-                                             double speed) {
-  double fx = focal[0] - eye[0], fy = focal[1] - eye[1];
-  const double fl = std::hypot(fx, fy);
-  if (fl < 1e-9) { // looking straight down (or up): no heading
-    fx = 0.0, fy = 1.0;
-  } else {
-    fx /= fl, fy /= fl;
-  }
+                                             double yaw, double speed) {
+  const double fx = std::cos(yaw), fy = std::sin(yaw);
   const double rx = fy, ry = -fx; // forward x up(0,0,1)
   const double f = (forward ? 1.0 : 0.0) - (back ? 1.0 : 0.0);
   const double r = (right ? 1.0 : 0.0) - (left ? 1.0 : 0.0);
   double mx = f * fx + r * rx, my = f * fy + r * ry;
   const double ml = std::hypot(mx, my);
   cvc::ariadne::avatar_intent in;
+  in.yaw = yaw;
   if (ml > 1e-9) {
     mx *= speed / ml, my *= speed / ml;
     in.move = cvc::physics::vec3{mx, my, 0.0};
   }
   return in;
+}
+
+double heading_yaw(const double eye[3], const double focal[3]) {
+  const double fx = focal[0] - eye[0], fy = focal[1] - eye[1];
+  if (std::hypot(fx, fy) < 1e-9) // looking straight down (or up): no heading
+    return 0.5 * 3.14159265358979323846;
+  return std::atan2(fy, fx);
 }
 
 room_view::room_view(SceneRenderer &view, cvc::app &app, std::string room, std::string self_pid,
@@ -108,8 +124,10 @@ room_view::room_view(SceneRenderer &view, cvc::app &app, std::string room, std::
 room_view::~room_view() {
   clear_scene();
   SceneGraph &sg = _view.scene();
-  for (const auto &kv : _avatars)
+  for (const auto &kv : _avatars) {
     sg.removeGraphics(avatar_node_id(kv.first));
+    sg.removeGraphics(visor_node_id(kv.first));
+  }
 }
 
 std::vector<std::string> room_view::take_warnings() {
@@ -121,6 +139,17 @@ std::vector<std::string> room_view::take_warnings() {
 void room_view::update(cvc::ariadne::holon &h, double wall_dt) {
   sync_scene();
   sync_avatars(h, wall_dt);
+  sync_names();
+}
+
+void room_view::sync_names() {
+  // Names change rarely (a join, a rename): re-read the roster a few times a second, not per frame.
+  if (_names_age-- > 0)
+    return;
+  _names_age = 15;
+  _names.clear();
+  for (const rs::room_participant &p : rs::room_roster(_app, _room))
+    _names[p.pid] = p.name;
 }
 
 void room_view::clear_scene() {
@@ -173,6 +202,8 @@ void room_view::sync_avatars(cvc::ariadne::holon &h, double wall_dt) {
   for (auto it = _avatars.begin(); it != _avatars.end();) {
     if (!present.count(it->first)) {
       sg.removeGraphics(avatar_node_id(it->first));
+      sg.removeGraphics(visor_node_id(it->first));
+      _heads.erase(it->first);
       it = _avatars.erase(it);
     } else {
       ++it;
@@ -196,7 +227,12 @@ void room_view::sync_avatars(cvc::ariadne::holon &h, double wall_dt) {
       n.ambient = 0.3f;
       n.diffuse = 0.8f;
       one.nodes.push_back(n);
-      realize_scene(sg, one, _prefix, &_warnings); // a plain geometry node: nothing to keep
+      cvc::ariadne::SceneNode v = n; // the visor: posed with the marker every frame below
+      v.id = visor_node_id(pid);
+      v.box_size[0] = kVisorSize[0], v.box_size[1] = kVisorSize[1], v.box_size[2] = kVisorSize[2];
+      v.color[0] = 0.08f, v.color[1] = 0.09f, v.color[2] = 0.12f;
+      one.nodes.push_back(v);
+      realize_scene(sg, one, _prefix, &_warnings); // plain geometry nodes: nothing to keep
       _avatars[pid] = true;
     }
 
@@ -212,12 +248,21 @@ void room_view::sync_avatars(cvc::ariadne::holon &h, double wall_dt) {
       _self_pos[0] = p.position.x, _self_pos[1] = p.position.y, _self_pos[2] = p.position.z;
       _have_self = true;
     }
-    if (std::shared_ptr<GraphicsNode> node = sg.getGraphics(id)) {
-      double m[16];
-      // The box is centred on its origin: lift it by half its height to stand on the pose.
-      pose_matrix(p.rotation, p.position.x, p.position.y, p.position.z + 0.5 * kAvatarHeight, m);
+    double m[16];
+    // The box is centred on its origin: lift it by half its height to stand on the pose.
+    pose_matrix(p.rotation, p.position.x, p.position.y, p.position.z + 0.5 * kAvatarHeight, m);
+    if (std::shared_ptr<GraphicsNode> node = sg.getGraphics(id))
       node->setPoseMatrix(m);
+    if (std::shared_ptr<GraphicsNode> visor = sg.getGraphics(visor_node_id(pid))) {
+      // The same rotation, its centre moved by the offset in the avatar's frame (R * offset).
+      double vm[16];
+      std::copy(m, m + 16, vm);
+      for (int r = 0; r < 3; ++r)
+        vm[4 * r + 3] += m[4 * r] * kVisorOffset[0] + m[4 * r + 1] * kVisorOffset[1] +
+                         m[4 * r + 2] * kVisorOffset[2];
+      visor->setPoseMatrix(vm);
     }
+    _heads[pid] = cvc::physics::vec3{p.position.x, p.position.y, p.position.z + kLabelHeight};
   }
 }
 
@@ -233,6 +278,59 @@ bool room_view::self_position(double out[3]) const {
     return false;
   out[0] = _self_pos[0], out[1] = _self_pos[1], out[2] = _self_pos[2];
   return true;
+}
+
+bool room_view::pick_ground(int x, int y, double ground_z, double out[3]) const {
+  vtkRenderer *r = _view.renderer();
+  if (!r)
+    return false;
+  // The pixel's ray: its points on the near (depth 0) and far (depth 1) planes, in world space.
+  double ends[2][3];
+  for (int i = 0; i < 2; ++i) {
+    r->SetDisplayPoint(static_cast<double>(x), static_cast<double>(y), static_cast<double>(i));
+    r->DisplayToWorld();
+    const double *w = r->GetWorldPoint();
+    if (std::fabs(w[3]) < 1e-12)
+      return false;
+    ends[i][0] = w[0] / w[3], ends[i][1] = w[1] / w[3], ends[i][2] = w[2] / w[3];
+  }
+  const double dz = ends[1][2] - ends[0][2];
+  if (std::fabs(dz) < 1e-12) // parallel to the ground
+    return false;
+  const double t = (ground_z - ends[0][2]) / dz;
+  if (t < 0.0) // the plane is behind the camera
+    return false;
+  for (int k = 0; k < 3; ++k)
+    out[k] = ends[0][k] + t * (ends[1][k] - ends[0][k]);
+  out[2] = ground_z;
+  return true;
+}
+
+void room_view::draw_labels() const {
+#ifdef CVC_ENABLE_IMGUI
+  vtkRenderer *r = _view.renderer();
+  if (!r || !ImGui::GetCurrentContext())
+    return;
+  const float h = ImGui::GetIO().DisplaySize.y;    // the window's height in display pixels
+  ImDrawList *dl = ImGui::GetBackgroundDrawList(); // under the UI's windows
+  for (const auto &kv : _heads) {
+    if (kv.first == _self) // you are the gold one; your own name would only cover the view
+      continue;
+    const cvc::physics::vec3 &w = kv.second;
+    r->SetWorldPoint(w.x, w.y, w.z, 1.0);
+    r->WorldToDisplay();
+    const double *d = r->GetDisplayPoint();
+    if (d[2] < 0.0 || d[2] > 1.0) // behind the camera (or past the far plane)
+      continue;
+    auto nm = _names.find(kv.first);
+    const std::string &text = (nm == _names.end() || nm->second.empty()) ? kv.first : nm->second;
+    const ImVec2 sz = ImGui::CalcTextSize(text.c_str());
+    // VTK's display origin is bottom-left, ImGui's top-left.
+    const ImVec2 at(static_cast<float>(d[0]) - 0.5f * sz.x, h - static_cast<float>(d[1]) - sz.y);
+    dl->AddText(ImVec2(at.x + 1.0f, at.y + 1.0f), IM_COL32(0, 0, 0, 200), text.c_str());
+    dl->AddText(at, IM_COL32(255, 255, 255, 235), text.c_str());
+  }
+#endif
 }
 
 } // namespace ariadne

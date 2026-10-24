@@ -8,6 +8,7 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
+#include <cmath> // atan2 (room-set-intent facing)
 #include <cstdint>
 #include <cstdlib>               // strtod (room-set-intent numeric args)
 #include <cvc/ariadne/ariadne.h> // register_action_intrinsics
@@ -323,12 +324,17 @@ void register_room_intrinsics(cvc::app &app) {
           if (!tbl)
             return err("room-set-intent: internal: room-table slot unavailable");
           if (args.size() < 4)
-            return err("room-set-intent: (room-set-intent HANDLE MOVE-X MOVE-Y MOVE-Z)");
+            return err("room-set-intent: (room-set-intent HANDLE MOVE-X MOVE-Y MOVE-Z [YAW])");
           room_handle *rh = tbl->find(handle_token(args[0]));
           if (!rh)
             return err("room-set-intent: ROOM must be a room-join handle (needs the caller's pid)");
           cvc::ariadne::avatar_intent in;
           in.move = {get_num(&args[1]), get_num(&args[2]), get_num(&args[3])};
+          // The facing: YAW (radians about +Z from +X) when given, else the way it walks.
+          if (args.size() >= 5)
+            in.yaw = get_num(&args[4]);
+          else if (in.move.x != 0.0 || in.move.y != 0.0)
+            in.yaw = std::atan2(in.move.y, in.move.x);
           cvc::ariadne::write_intent(app, rh->room_id, rh->self_pid, in);
           return se::make_dict({{"ok", se::value_t(true)}});
         });
