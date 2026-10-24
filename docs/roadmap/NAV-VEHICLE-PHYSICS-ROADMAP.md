@@ -104,10 +104,13 @@ The plan, in order:
    - A trajectory helper records each step's state; its reverse takes dL/dstate_t at every step.
      Coefficient gradients are optional.
    - The same port on the dynamic plant's path; a torch twin in GRL-SNAM.
+   - Done: the bicycle and P8a's `dyn_bike_step` (#728), and P8d's four-wheel `dyn4_bike_step`
+     with `dyn4_rollout_ext` (#780). The torch twin covers the first two; its four-wheel path
+     has its fixture (`tests/data/dyn4_ext_rollout_golden.json`).
 5. **P8d: a two-track (four-wheel) dynamic plant** with its adjoint, beside `dyn_plant` (Joe,
    2026-10-19: "add the four-wheel plant to the roadmap, you build it"). It is full Ackermann for
-   the trainers and for cvcdbg. Done: `diff::dyn4_plant` (#731, docs/NAV_TRAINING.md), all but
-   its external-force port.
+   the trainers and for cvcdbg. Done: `diff::dyn4_plant` (#731, docs/NAV_TRAINING.md), and its
+   external-force port (#780).
    - Wheels: four contact points from the body's pose and the vehicle's geometry, Ackermann
      angles on the front pair from the controller's δ_cmd, and the drive and brake split per
      wheel.
@@ -487,9 +490,10 @@ These are the targets a plant fitted to Jolt has to beat, bin by bin.
       - So the policy's leverage on Jolt is mostly its basin. A learned, state-dependent policy
         that beats the seed is still open.
   - P8d, the four-wheel plant, is done: `diff::dyn4_plant` passes its gates (#731,
-    docs/NAV_TRAINING.md). Open there: its external-force port, the anti-roll bars, the unsprung
-    masses and wheel spin.
-  - Next, in order (Joe 2026-10-19): the external-force port (transfix/libcvc#728), then P8c.
+    docs/NAV_TRAINING.md), and takes the external force (#780). Open there: the anti-roll bars,
+    the unsprung masses and wheel spin.
+  - The external-force port is done on every plant: the bicycle and P8a's (#728), and the four
+    wheels (#780). Next (Joe 2026-10-19): P8c.
 - **P9, the plant by default (2026-10-18, Joe: "can't we use the actual jolt vehicle dimensions
   and physics?").**
   - What moved the agents: no default path used Jolt. Every default was the kinematic bicycle
