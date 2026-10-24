@@ -333,21 +333,26 @@ public:
       cvc::ariadne::write_intent(app, kRoom, nid, cvc::ariadne::avatar_intent{});
     }
     cvc::ariadne::server_pump(server, app, kRoom);
-    bool moved = false;
-    for (const std::string &pid : server.participants()) {
-      if (!_known.insert(pid).second)
-        continue;
-      const auto it = place_on_join.find(pid);
-      if (it != place_on_join.end()) {
-        cvc::physics::body_state s;
-        s.position = {it->second.first, it->second.second, 0.0};
-        s.active = true;
-        server.override_state(pid, s);
-        moved = true;
+    // Joins land on transport threads, so a pump can add a newcomer the pass before it never saw:
+    // place newcomers and re-pump until a pass finds none.
+    for (int pass = 0; pass < 8; ++pass) {
+      bool moved = false;
+      for (const std::string &pid : server.participants()) {
+        if (!_known.insert(pid).second)
+          continue;
+        const auto it = place_on_join.find(pid);
+        if (it != place_on_join.end()) {
+          cvc::physics::body_state s;
+          s.position = {it->second.first, it->second.second, 0.0};
+          s.active = true;
+          server.override_state(pid, s);
+          moved = true;
+        }
       }
-    }
-    if (moved)
+      if (!moved)
+        break;
       cvc::ariadne::server_pump(server, app, kRoom);
+    }
     const double t0 = now_s();
     ra::relay_room_step(*shard, planes, aoi.get(), server, now_s(), trim);
     step_ms.push_back((now_s() - t0) * 1000.0);

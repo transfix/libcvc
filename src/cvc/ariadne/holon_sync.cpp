@@ -71,6 +71,10 @@ double read_double(cvc::app &app, const std::string &path) {
 bool node_present(cvc::app &app, const std::string &path) {
   return app.root().findDescendant(path) != nullptr;
 }
+bool leaf_valued(cvc::app &app, const std::string &path) {
+  cvc::state *n = app.root().findDescendant(path);
+  return n && !n->value().empty();
+}
 
 // A pose leaf write that journals ONE mutation, where set_replicated journals two for a leaf whose
 // value changes (touch fires valueChanged, then value() fires it again), doubling pose egress,
@@ -147,23 +151,35 @@ void write_pose(cvc::app &app, const std::string &room, const std::string &pid,
 
 bool read_pose(cvc::app &app, const std::string &room, const std::string &pid,
                cvc::physics::body_state &out, std::uint64_t &out_server_tick) {
-  if (!node_present(app, leaf(room, pid, {"pose", "pos", "x"})))
-    return false; // the pose subtree has not been written/replicated yet
-  out.position = {read_double(app, leaf(room, pid, {"pose", "pos", "x"})),
-                  read_double(app, leaf(room, pid, {"pose", "pos", "y"})),
-                  read_double(app, leaf(room, pid, {"pose", "pos", "z"}))};
-  out.rotation = {read_double(app, leaf(room, pid, {"pose", "orient", "w"})),
-                  read_double(app, leaf(room, pid, {"pose", "orient", "x"})),
-                  read_double(app, leaf(room, pid, {"pose", "orient", "y"})),
-                  read_double(app, leaf(room, pid, {"pose", "orient", "z"}))};
-  out.linear_velocity = {read_double(app, leaf(room, pid, {"pose", "vel", "lin", "x"})),
-                         read_double(app, leaf(room, pid, {"pose", "vel", "lin", "y"})),
-                         read_double(app, leaf(room, pid, {"pose", "vel", "lin", "z"}))};
-  out.angular_velocity = {read_double(app, leaf(room, pid, {"pose", "vel", "ang", "x"})),
-                          read_double(app, leaf(room, pid, {"pose", "vel", "ang", "y"})),
-                          read_double(app, leaf(room, pid, {"pose", "vel", "ang", "z"}))};
-  out.active = true;
-  cvc::state *t = app.root().findDescendant(leaf(room, pid, {"pose", "server_tick"}));
+  // A sample is whole once its position, orientation and tick have all arrived: the leaves
+  // replicate one by one (live mutations, or a push's entries), so a reader can catch a subtree
+  // half applied -- a position with no orientation yet, which is no rotation at all, or no tick.
+  const std::string tick_path = leaf(room, pid, {"pose", "server_tick"});
+  if (!leaf_valued(app, leaf(room, pid, {"pose", "pos", "x"})) ||
+      !leaf_valued(app, leaf(room, pid, {"pose", "orient", "w"})) || !leaf_valued(app, tick_path))
+    return false; // the pose subtree has not been (wholly) written/replicated yet
+  cvc::physics::body_state s;
+  s.position = {read_double(app, leaf(room, pid, {"pose", "pos", "x"})),
+                read_double(app, leaf(room, pid, {"pose", "pos", "y"})),
+                read_double(app, leaf(room, pid, {"pose", "pos", "z"}))};
+  s.rotation = {read_double(app, leaf(room, pid, {"pose", "orient", "w"})),
+                read_double(app, leaf(room, pid, {"pose", "orient", "x"})),
+                read_double(app, leaf(room, pid, {"pose", "orient", "y"})),
+                read_double(app, leaf(room, pid, {"pose", "orient", "z"}))};
+  const double qn = std::sqrt(s.rotation.w * s.rotation.w + s.rotation.x * s.rotation.x +
+                              s.rotation.y * s.rotation.y + s.rotation.z * s.rotation.z);
+  if (!std::isfinite(qn) || qn < 1e-6)
+    return false; // malformed, or caught between its orientation leaves
+  s.rotation = {s.rotation.w / qn, s.rotation.x / qn, s.rotation.y / qn, s.rotation.z / qn};
+  s.linear_velocity = {read_double(app, leaf(room, pid, {"pose", "vel", "lin", "x"})),
+                       read_double(app, leaf(room, pid, {"pose", "vel", "lin", "y"})),
+                       read_double(app, leaf(room, pid, {"pose", "vel", "lin", "z"}))};
+  s.angular_velocity = {read_double(app, leaf(room, pid, {"pose", "vel", "ang", "x"})),
+                        read_double(app, leaf(room, pid, {"pose", "vel", "ang", "y"})),
+                        read_double(app, leaf(room, pid, {"pose", "vel", "ang", "z"}))};
+  s.active = true;
+  cvc::state *t = app.root().findDescendant(tick_path);
+  out = s;
   out_server_tick =
       t ? static_cast<std::uint64_t>(std::strtoull(t->value().c_str(), nullptr, 10)) : 0;
   return true;

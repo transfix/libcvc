@@ -319,21 +319,27 @@ public:
       cvc::ariadne::write_intent(app, kRoom, nid, cvc::ariadne::avatar_intent{});
     }
     cvc::ariadne::server_pump(server, app, kRoom);
-    bool moved = false;
-    for (const std::string &pid : server.participants()) {
-      if (!_known.insert(pid).second)
-        continue;
-      joined_at[pid] = now_s();
-      const auto it = place_on_join.find(pid);
-      if (it != place_on_join.end()) {
-        place(pid, it->second.first, it->second.second);
-        moved = true;
+    // The clients' joins land on transport threads, so a pump can add a newcomer that the pass
+    // before it never saw: place newcomers and re-pump until a pass finds none, so the area of
+    // interest below never sees one on the spawn ring.
+    for (int pass = 0; pass < 8; ++pass) {
+      bool moved = false;
+      for (const std::string &pid : server.participants()) {
+        if (!_known.insert(pid).second)
+          continue;
+        joined_at[pid] = now_s();
+        const auto it = place_on_join.find(pid);
+        if (it != place_on_join.end()) {
+          place(pid, it->second.first, it->second.second);
+          moved = true;
+        }
       }
+      if (!moved)
+        break;
+      cvc::ariadne::server_pump(server, app, kRoom);
     }
     for (auto it = _known.begin(); it != _known.end();)
       it = server.has_participant(*it) ? std::next(it) : _known.erase(it);
-    if (moved)
-      cvc::ariadne::server_pump(server, app, kRoom);
     ra::relay_room_step(*shard, planes, aoi.get(), server, now_s(), opt.trim);
     ++steps;
 #if defined(CVC_ENABLE_WS)
@@ -1131,9 +1137,14 @@ TEST(RoomRelayIntegrationTest, NoIntentOrUiDocsLeak) {
 }
 
 // A walks (an intent it proposed), then its connection drops. The relay retracts it and zeroes
-// its intent; A comes back under the same pid as a fresh process. Its bootstrap carries the zeroed
-// intent -- its own subtree is never filtered, and a departed pid is no longer a registered peer
-// -- so it does not resume the walk, and B never saw A's intent at all.
+// its intent; a fresh process connecting under the same pid bootstraps the zeroed intent -- its
+// own subtree is never filtered, and a departed pid is no longer a registered peer -- so it would
+// not resume the walk, and B never saw A's intent at all.
+//
+// It does not JOIN under that pid: replication drops a write whose (origin, sequence) it has seen,
+// so a process restarting under the same node id has its writes ignored until the relay restarts
+// (which is why arigl gives every launch a random node-id suffix). The relaunch joins as arigl's
+// would, under a fresh id, and the room settles around it after the departure.
 TEST(RoomRelayIntegrationTest, ReconnectUnderSamePidGetsZeroedIntent) {
   test_relay r(relay_options{});
   client_list own = make_clients({"A", "B"});
@@ -1169,15 +1180,18 @@ TEST(RoomRelayIntegrationTest, ReconnectUnderSamePidGetsZeroedIntent) {
     return cvc::ariadne::read_intent(again.app, kRoom, "A", got);
   })) << "the bootstrap carries A's own intent";
   EXPECT_EQ(got.move.x, 0.0) << "zeroed, not the walk proposed before the drop";
-  again.join();
-  cs.push_back(&again);
+
+  test_client relaunch("A_2", kind);
+  ASSERT_TRUE(relaunch.connect(r));
+  relaunch.join();
+  cs.push_back(&relaunch);
   ASSERT_TRUE(run_room(r, cs, 8.0, {}, [&] { return settled(r, cs); }));
   run_room(r, cs, 0.5);
-  ASSERT_TRUE(cvc::ariadne::read_intent(again.app, kRoom, "A", got));
-  EXPECT_EQ(got.move.x, 0.0);
-  const cvc::physics::vec3 v = r.server.state("A").linear_velocity;
-  EXPECT_LT(std::hypot(v.x, v.y), 0.05) << "A stands where it respawned";
+  EXPECT_FALSE(r.server.has_participant("A"));
+  const cvc::physics::vec3 v = r.server.state("A_2").linear_velocity;
+  EXPECT_LT(std::hypot(v.x, v.y), 0.05) << "the relaunch stands where it spawned";
   EXPECT_EQ(B.tap.intents("A"), 0u) << "B never received A's intent";
+  EXPECT_EQ(B.tap.intents("A_2"), 0u);
 }
 
 namespace {
