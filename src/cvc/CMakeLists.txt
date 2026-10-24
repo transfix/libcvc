@@ -73,6 +73,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/physics/physics_codec.h
   ../../inc/cvc/physics/nav_plant.h
   ../../inc/cvc/physics/nav_eval.h
+  ../../inc/cvc/physics/nav_es.h
   ../../inc/cvc/physics/plant_log.h
   ../../inc/cvc/physics/plant_log_scene.h
   ../../inc/cvc/state/state_hash_partition.h
@@ -273,6 +274,7 @@ set(SOURCE_FILES
   physics/binding_meta.cpp
   physics/nav_plant.cpp
   physics/nav_eval.cpp
+  physics/nav_es.cpp
   physics/plant_log.cpp
   physics/plant_log_scene.cpp
   state/state_change_journal.cpp

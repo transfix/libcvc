@@ -42,6 +42,7 @@
 // Linear layer, so they carry no out_bias offset, and the two maxes follow the out_bias
 // block. v1 stays out_bias_len == out_features, all columns softplus.
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -359,6 +360,24 @@ coef_mlp::flat_layers coef_mlp::export_flat() const {
     fl.data.insert(fl.data.end(), L.b.begin(), L.b.end());
   }
   return fl;
+}
+
+coef_mlp coef_mlp::with_flat_weights(const std::vector<float> &data) const {
+  std::size_t n = 0;
+  for (const Layer &L : layers_)
+    n += L.w.size() + L.b.size();
+  if (data.size() != n)
+    throw std::invalid_argument("cvc::nav::coef_mlp::with_flat_weights: expected " +
+                                std::to_string(n) + " weights, got " + std::to_string(data.size()));
+  coef_mlp r = *this;
+  const float *src = data.data();
+  for (Layer &L : r.layers_) {
+    std::copy(src, src + L.w.size(), L.w.begin());
+    src += L.w.size();
+    std::copy(src, src + L.b.size(), L.b.begin());
+    src += L.b.size();
+  }
+  return r;
 }
 
 coef_mlp coef_mlp::load(const std::string &path) {

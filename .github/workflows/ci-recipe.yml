@@ -129,10 +129,15 @@ jobs:
       # Tests are never installed -- no test target has an install() rule and
       # package.files selects only lib/ and include/ -- so the published bundle
       # is byte-identical to what this job produced before.
+      #
+      # The long-running suites (stress, convergence, benchmarks) are left out, as the package
+      # jobs leave them out (ci.yml's STRESS_REGEX): the Jolt convergence experiments alone take
+      # most of a Debug job's 90 minutes.
       - name: Build libcvc from its recipe
         shell: bash
         env:
           CVC_BUILD_TESTS: "ON"
+          CVC_CTEST_EXCLUDE: "(Stress|Convergence|Benchmark|Performance|BunnySDF_IsoRoundtrip|QualityImproveAllMethods|Integration)"
         run: |
           set -euo pipefail
           config=$(echo "${{ matrix.build_type }}" | tr '[:upper:]' '[:lower:]')

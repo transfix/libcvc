@@ -64,6 +64,15 @@ double reach_on_plant(const cvc::nav::coef_mlp &policy, const cvc::nav::training
                       const plant_reach_options &o = plant_reach_options(),
                       std::vector<double> *per_seed = nullptr);
 
+// Several policies on the same seeds: each policy's mean reach, with `per_seed` (if given) each
+// one's per-seed reach. Every (policy, seed) run shares the worker threads (`o.threads`), so a
+// population scores as fast as one policy's seeds would on as many threads.
+std::vector<double> reach_on_plant(const std::vector<cvc::nav::coef_mlp> &policies,
+                                   const cvc::nav::training_scene &scene, const vehicle_desc &d,
+                                   double wheelbase,
+                                   const plant_reach_options &o = plant_reach_options(),
+                                   std::vector<std::vector<double>> *per_seed = nullptr);
+
 } // namespace physics
 } // namespace cvc
 
