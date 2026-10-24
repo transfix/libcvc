@@ -135,8 +135,17 @@ control: a peer with no filter still receives everything.
   The gate runs on the publisher's reader thread with no lock held, so it
   must be cheap and must not throw. gRPC adds `set_media_stall_drop(ms)`
   (0 = off, the library default): a receiver whose in-flight media write
-  started longer ago than that is skipped (`total_media_stall_dropped()`),
-  the counterpart of the WS leg's 32 KB backlog drop.
+  started longer ago than that, or whose stream a frame cannot get within
+  it (`write_mu` is a timed mutex), is skipped (`total_media_stall_dropped()`),
+  the counterpart of the WS leg's 32 KB backlog drop. The gate is asked only
+  once the stream is held, so a dropped frame spends no thumbnail.
+- **Accepted-stream lifetime (gRPC).** A server handler's stream dies when
+  `Channel()` returns, while publish, relay forwards and the link probe write
+  to it from other threads. The handler now cancels the stream and takes
+  `write_mu` once before returning; every write runs under `write_mu` and
+  checks `alive` there, so none is in flight or starts after the stream goes
+  (it was a use-after-free on every disconnect, seen as crashes in
+  `CompletionQueue::Pluck` under parallel load on Windows).
 
 ## Known gaps in the "landed" surface
 

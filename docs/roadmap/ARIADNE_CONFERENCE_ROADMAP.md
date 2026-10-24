@@ -396,9 +396,9 @@ bundles them yet.
 
 #### 5h.1 S7 — room spatial interest + geometry LOD (built)
 
-H1's interest and LOD slice. The code is in; the loopback integration test and the headless AOI bench
-are still to come (`room_relay_integration_test` is a scaffold), so **nothing here is measured yet** —
-the effects below are read from the code.
+H1's interest and LOD slice. `room_relay_integration_test` (suite `RoomRelayLoopbackTest`, 10 cases:
+a relay built as arisrv builds it, real clients on loopback, WS and gRPC mixed in one room) pins the
+behaviour end to end, and `arisrv_aoi_bench` measured it (**Measured**, below).
 
 **What it is.** A **relay-authoritative, avatar-centric area of interest**. Each room step the relay
 places every participant from the server holon's authoritative pose and decides, per ordered pair
@@ -431,17 +431,23 @@ stutters); a 600-tick (5 s) refresh; 2 fps thumbnails; `video_full_max` 0 (every
 rate); a 2 m audio fade. The conference radii exist so the 20 m room is provably unchanged: the plane is
 [-10,10]², its diagonal 28.3 m, so every pair is inner at first sight and stays inner (pinned by
 `RoomAoiTest.ConferencePresetCoversDefaultRoom`). The relay publishes the active parameters once under
-`conf.rooms.<room>.aoi.*`; clients read them about once a second for their audio gain, and an absent
-subtree (an older relay, or `--aoi off`) means gain 1. The fade ends at `middle_enter`, the *upgrade*
+`conf.rooms.<room>.aoi.*`; clients read them about once a second for their audio gain. An absent
+subtree (an older relay) means gain 1; with `--aoi off` or `--s7 off` the relay writes them disabled
+(`aoi.enabled` 0), also gain 1 — so a client that lived through an earlier relay's AOI and kept its
+leaves follows the restarted relay. The fade ends at `middle_enter`, the *upgrade*
 radius, so the relay's cut (outer) and its resume (back to middle) both happen in silence.
 
 **State: a deny-only predicate that fails open.** Per receiver, the relay installs an
 `aoi_state_filter` on both transports' peer registries. Under `conf.rooms.<room>.participants.<q>`
 it denies only: another participant's `intent` (only the relay and its owner read it); *q*'s whole
-`pose` subtree, `server_tick` included, unless the pair is inner; and a departed *q*'s `pose`, `intent`,
-`net` and `voice` (the soft-left ghost). Everything else delivers — the receiver's own subtree,
-presence/profile/net/streams/voice of present participants (the roster stays room-wide, §5b), `scene`,
-`server`, `aoi`, unknown pids and unknown leaf families — so a new family is never dropped silently.
+`pose` subtree, `server_tick` included, unless the pair is inner; and a departed *q*'s `pose` and
+`intent` (the soft-left ghost). Everything else delivers — the receiver's own subtree,
+presence/profile/net/streams/voice of every participant (the roster stays room-wide, §5b; a departed
+one's `net` and `voice` too, so an in-process reconnect's writes made before its rejoin lands are never
+withheld), `scene`, `server`, `aoi`, unknown pids and unknown leaf families — so a new family is never
+dropped silently. The relay remembers the most recent 1024 departures; an older ghost falls back to the
+unknown-pid rule. A pid that is no C identifier (the room tree takes any child name; a registry entry
+cannot) is filtered as a subject but never registered as a receiver — no connection can carry it.
 
 **Pose pushes.** A non-inner subject's pose reaches the receiver as a targeted snapshot
 (`state_transport::push_snapshot_to`) carrying its whole pose subtree, with `server_tick` re-stamped to
@@ -462,9 +468,12 @@ receiver always gets the frame. The nearest-*K* cap is off by default because `c
 tiles `cam_<i>` in roster order, not by distance, so a cap would put visible tiles at 2 fps.
 
 **gRPC media stall drop.** `--media-stall-ms 40`: the gRPC relay skips a receiver whose in-flight media
-write started more than 40 ms ago (a full flow-control window) rather than stall the publisher's reader
-thread for everyone — the counterpart of the WebSocket leg's 32 KB backlog drop. It covers every gRPC
-media write, the relay's own uplink included.
+write started more than 40 ms ago (a full flow-control window), and one whose stream a frame cannot get
+within 40 ms, rather than queue the publisher's reader thread behind it — the counterpart of the
+WebSocket leg's 32 KB backlog drop. It covers every gRPC media write, the relay's own uplink included,
+and the media gate is asked only once the stream is held, so a dropped frame spends no thumbnail. (A
+write that starts and then blocks still holds its own thread until the 3 s watchdog; only an
+asynchronous write path would avoid that.)
 
 **Transport and journal changes** (detail in DISTRIBUTED_STATE_ROADMAP.md, "Landed for the conference
 relay"): a deny-only per-peer delivery predicate on `state_peer_registry`; write-once connection
@@ -513,8 +522,8 @@ false)` is the old drain-and-publish exactly); arisrv and arigl turn them on.
 
 | Switch | Default | Effect |
 |---|---|---|
-| `arisrv --s7 on\|off` / `CVC_ARISRV_S7=0` | on | **master kill switch**: off forces `--aoi off`, gate off, journal keep, stall drop 0 — the pre-S7 relay |
-| `--aoi off\|conference\|hall` / `CVC_ARISRV_AOI` | conference (hall with `--scene large`) | off: no filters, pushes, media gate or `aoi.*` leaves |
+| `arisrv --s7 on\|off` / `CVC_ARISRV_S7=0\|1\|on\|off` | on | **master kill switch**: off forces `--aoi off`, gate off, journal keep, stall drop 0 — the pre-S7 relay (plus the disabled `aoi.*` leaves) |
+| `--aoi off\|conference\|hall` / `CVC_ARISRV_AOI` | conference (hall with `--scene large`) | off: no filters, pushes or media gate; `aoi.enabled` 0 |
 | `--aoi-video-max K` | 0 (all) | opt-in nearest-*K* full-rate cameras; the rest of the inner peers as thumbnails |
 | `--relay-gate on\|off` | on | off: forward every client frame |
 | `--relay-journal trim\|keep` | trim | keep: journal backfill on connect, no trim |
@@ -532,9 +541,10 @@ client's audio-clock staleness and its `voice.talking` leaf. The A/B "before" is
 
 **The default 20 m room.** It *will* show: no origin ghost or invisible obstacle at join, and one's own
 avatar at its first pose (arigl frames the camera there); less control-plane traffic while walking (the
-`ui.docs` echo gone, poses single-journaled, others' intents and departed ghosts' leaves withheld);
-joins that do not grow with relay uptime (admit snapshot, no backfill), with relay journal and drain
-cost flat; and a peer's video that keeps running when its mic is cut. It will **not** show tiering, pose
+`ui.docs` echo gone, poses single-journaled, others' intents and departed ghosts' poses withheld);
+joins that no longer replay the relay's whole journal (admit snapshot, no backfill), with relay journal
+and drain cost flat — a join still grows with the soft-left ghosts' subtrees the room tree keeps until
+Phase-2 reaping, as in S6; and a peer's video that keeps running when its mic is cut. It will **not** show tiering, pose
 pushes, thumbnails, audio rolloff or LOD — every pair is inner, and the plane (2 triangles) and box (12)
 are far below the 4096-triangle LOD minimum. Media is unchanged, apart from the gRPC stall drop for a
 receiver whose writes are stuck. `arisrv --scene large` (hall) is the demo for all of those.
@@ -543,6 +553,38 @@ receiver whose writes are stuck. `arisrv --scene large` (hall) is the demo for a
 it from everyone else), plays every peer at gain 1, draws the large scene's bunnies unfitted (~15 cm,
 on their side) and pose-less peers at the origin. An S7 client on a pre-S7 relay finds no `aoi.*`
 subtree and plays at gain 1.
+
+**Known limits.**
+* The admit snapshot a connection gets before its Hello is unfiltered (there is no identity to filter
+  by yet), so a late joiner sees every participant's *current* intent once, and the non-inner poses
+  and ghost leftovers the live filters would withhold. Live traffic after that is filtered.
+* A process that restarts under the node id of a live session has its writes ignored until the relay
+  restarts (replication drops an `(origin, sequence)` it has seen), which is why arigl takes a fresh id
+  per launch. An in-process reconnect keeps its id and its sequence, and works: the relay withholds the
+  departed subject's pose meanwhile, and a client takes the pose subtree a peer left behind for no pose
+  until a newer sample (`holon::left_tick`).
+* The WebSocket leg's ~1 Hz full-tree re-broadcast is filtered per connection but otherwise unchanged,
+  and in the hall it dominates a browser's state traffic (**Measured**).
+
+**Measured** (`arisrv_aoi_bench` on catx-03, 24 cores: the relay plus N synthetic clients in one
+process on loopback, WS and gRPC alternating, 10 s windows; `--s7 off` is the S6 relay and clients).
+Media off, so the state plane alone:
+
+| | S6 | S7 |
+|---|---|---|
+| 20 m room, 8 walking — relay egress | 6.4 Mb/s | 3.3 Mb/s |
+| … others' intents, per receiver | 40.6 kb/s | 0 |
+| … a late joiner's bootstrap | 309 kB | 35 kB |
+| hall, 12 in clusters (48 of 66 pairs outer) — per gRPC receiver | 242 kb/s | 162 kb/s |
+| … a late joiner's bootstrap | 491 kB | 215 kB |
+| hall, 12 standing still — per WS receiver (the 1 Hz re-broadcast) | 847 kb/s | 768 kb/s |
+
+With media on: in the 20 m room the gate denied no frame (4 and 8 clients: every pair inner); in the
+hall it withheld 2,688 of 3,695 camera and mic frames (73%) for 12 in clusters, and sent 157 MJPEG
+thumbnails for 16 walking across the tiers. No run showed an origin ghost; clock re-aligns stayed at
+0–3 per run in both modes. Caveats: the bench is one thread, CPU-bound at these sizes (room-step p99
+35–130 ms), so its media rates follow the loop rate and are compared by counts, not rates; and its
+reconcile-correction sum varies two-fold between identical runs, so it says nothing either way.
 
 **Deferred, with destinations.**
 * Scene spatial interest (`scene.cells.<i>_<j>`, per-cell revs and realize) → **H3**. The scene is a
@@ -569,8 +611,10 @@ subtree and plays at gain 1.
   node coarsens at the wrong distance (the large scene avoids it with `fit`) → LOD follow-up.
 * Client journal trim, WebSocket `request_snapshot` and a gRPC periodic snapshot →
   DISTRIBUTED_STATE_ROADMAP.md (known gaps); a WS `send_backlog` on Windows-hosted relays (`SIOCOUTQ` is
-  Linux-only) → transport follow-up; per-connection broadcast encode caching → only if the N = 64 bench
-  shows the ~1 Hz broadcast costing > 20 ms/s; merging the visor into the body mesh (2N → N avatar
+  Linux-only) → transport follow-up; an incremental (revision-gated) WS re-broadcast in place of the
+  ~1 Hz full tree, which the hall bench shows at ~0.8 Mb/s per browser → WS_STATE_TRANSPORT.md Phase 2;
+  per-connection broadcast encode caching → only if the N = 64 bench shows the ~1 Hz broadcast costing
+  > 20 ms/s; merging the visor into the body mesh (2N → N avatar
   actors) → perf follow-up.
 
 ---
