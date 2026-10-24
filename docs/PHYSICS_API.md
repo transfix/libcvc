@@ -738,7 +738,11 @@ The five terms (doc 31 D9):
   stopping governor's braking (with the plant's latency) is down to that point's `v_risk` by the
   probe before it, so within one probe spacing of risky ground the vehicle is at its `v_risk`.
   `drive_telemetry.v_risk` reports the cap (0 when off). The CPU drive, both GPU drives and the
-  plant arm apply it; the persistent `sim_world_cuda` path has no material or terrain.
+  plant arm apply it; the persistent `sim_world_cuda` path has no material or terrain. A route
+  follower drives in the drive's place (`sim_world::override_command`), so `sim_world` holds an
+  overriding command to the same cap (`risk_speed_cap`, with the plant's braking and latency):
+  without that, on cvcdbg's convoy, where every Humvee follows a vehicle route, the governor
+  changed nothing.
 - **H3, the slope look-ahead feature.** `coef_feats(..., slope)` appends the worst grade cost
   between the agent and its carrot, after grip and risk. A coefficient net that takes it sets
   `kFlagFeatSlope` and needs format v3, which an older host refuses rather than reading it as a

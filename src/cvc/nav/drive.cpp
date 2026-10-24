@@ -187,6 +187,41 @@ inline float ipc_dbdd(float d, float d_hat) {
   return -(2.0f * (dc - d_hat) * std::log(dc / d_hat) + (dc - d_hat) * (dc - d_hat) / dc);
 }
 
+// The risk governor's cap (risk_speed_cap), the heading given as (cos, sin): v_risk underfoot,
+// and for each probe ahead the speed from which braking at a_gov after tau is down to that
+// probe's v_risk by the probe before it, since its risk may start just past that one. The risk is
+// the worse of `mat`'s (plane `plane`) and the terrain's, read with or without its weights.
+inline float risk_cap(const veh_params &v, const material_stack *mat, int plane, float x, float y,
+                      float ch, float sh, float motion_sign, float vmax, float a_gov, float tau) {
+  const material_stack *ter = (v.terrain && v.terrain->stack) ? v.terrain->stack : nullptr;
+  const auto risk_at = [&](float px, float py) {
+    float r = mat ? sample_risk(*mat, plane, px, py) : 0.0f;
+    if (ter) {
+      const float tr = sample_risk(*ter, 0, px, py);
+      r = tr > r ? tr : r;
+    }
+    return r;
+  };
+  const float vmin = std::min(std::max(v.risk_vmin, 0.0f), vmax);
+  const float span = v.risk_onset < 1.0f ? 1.0f - v.risk_onset : 1.0f;
+  const auto v_risk_at = [&](float r) {
+    const float s = std::min(std::max((r - v.risk_onset) / span, 0.0f), 1.0f);
+    return vmax - (vmax - vmin) * s;
+  };
+  float cap = v_risk_at(risk_at(x, y));
+  const float reach = v.risk_lookahead > 0.0f ? v.risk_lookahead : 0.0f;
+  const int P = reach > 0.0f ? (v.risk_probes < 1 ? 1 : v.risk_probes) : 0;
+  for (int k = 1; k <= P; ++k) {
+    const float dk = (static_cast<float>(k) / static_cast<float>(P)) * reach;
+    const float db = (static_cast<float>(k - 1) / static_cast<float>(P)) * reach;
+    const float vr = v_risk_at(risk_at(x + motion_sign * dk * ch, y + motion_sign * dk * sh));
+    const float vk =
+        std::sqrt(a_gov * a_gov * tau * tau + vr * vr + 2.0f * a_gov * db) - a_gov * tau;
+    cap = std::min(cap, vk);
+  }
+  return cap;
+}
+
 // The terrain rollout_impl drives with: only with a stack and a nonzero weight.
 inline const terrain_drive *active_terrain(const veh_params &v) {
   return v.terrain && v.terrain->stack &&
@@ -444,25 +479,10 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
           tel_ext_y = 0.0f;
     float tel_steer = 0.0f, tel_curv = 0.0f, tel_vrisk = 0.0f;
     potential_terms tel_u;
-    // The risk governor's risk: the worse of the material stack's and the terrain's, the
-    // terrain's read with or without its weights (coef_feats' risk column reads it so too).
-    const material_stack *ter_risk = (v.terrain && v.terrain->stack) ? v.terrain->stack : nullptr;
-    const bool risk_on = v.risk_governor && ((mat && mat->stack) || ter_risk);
-    const int rplane = (mat && mat->stack && map_id && mat->stack->M > 1) ? map_id[i] : 0;
-    const auto risk_at = [&](float x, float y) {
-      float r = (mat && mat->stack) ? sample_risk(*mat->stack, rplane, x, y) : 0.0f;
-      if (ter_risk) {
-        const float tr = sample_risk(*ter_risk, 0, x, y);
-        r = tr > r ? tr : r;
-      }
-      return r;
-    };
-    const float risk_vmin = std::min(std::max(v.risk_vmin, 0.0f), vmax);
-    const float risk_span = v.risk_onset < 1.0f ? 1.0f - v.risk_onset : 1.0f;
-    const auto v_risk_at = [&](float r) {
-      const float s = std::min(std::max((r - v.risk_onset) / risk_span, 0.0f), 1.0f);
-      return vmax - (vmax - risk_vmin) * s;
-    };
+    // The risk governor (risk_cap): the material stack's risk on the agent's plane.
+    const material_stack *mat_risk = mat ? mat->stack : nullptr;
+    const bool risk_on = v.risk_governor && (mat_risk || (v.terrain && v.terrain->stack));
+    const int rplane = (mat_risk && map_id && mat_risk->M > 1) ? map_id[i] : 0;
     float tel_fx = 0.0f, tel_fy = 0.0f;
 
     for (int s = 0; s < nsub; ++s) {
@@ -714,18 +734,8 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
           tau = pd->latency ? pd->latency[i] : 0.0f;
           a_gov = (pd->a_brake && pd->a_brake[i] > 0.0f) ? std::min(pd->a_brake[i], a_gov) : a_gov;
         }
-        float cap = v_risk_at(risk_at(ox, oy));
-        const float reach = v.risk_lookahead > 0.0f ? v.risk_lookahead : 0.0f;
-        const int P = reach > 0.0f ? (v.risk_probes < 1 ? 1 : v.risk_probes) : 0;
-        for (int k = 1; k <= P; ++k) {
-          const float dk = (static_cast<float>(k) / static_cast<float>(P)) * reach;
-          const float db = (static_cast<float>(k - 1) / static_cast<float>(P)) * reach;
-          const float vr =
-              v_risk_at(risk_at(ox + motion_sign * dk * ch, oy + motion_sign * dk * sh));
-          const float vk =
-              std::sqrt(a_gov * a_gov * tau * tau + vr * vr + 2.0f * a_gov * db) - a_gov * tau;
-          cap = std::min(cap, vk);
-        }
+        const float cap =
+            risk_cap(v, mat_risk, rplane, ox, oy, ch, sh, motion_sign, vmax, a_gov, tau);
         tel_vrisk = cap;
         v_lim = std::min(v_lim, cap);
       }
@@ -830,6 +840,13 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
 }
 
 } // namespace
+
+float risk_speed_cap(const veh_params &v, const material_stack *mat, int plane, float x, float y,
+                     float th, float motion_sign, float vmax, float a_brake, float tau) {
+  if (!v.risk_governor || !(mat || (v.terrain && v.terrain->stack)))
+    return vmax;
+  return risk_cap(v, mat, plane, x, y, std::cos(th), std::sin(th), motion_sign, vmax, a_brake, tau);
+}
 
 void bicycle_rollout(const field_stack &f, float *o, float *th, float *sp, const float *goal,
                      const float *al, const float *be, const float *ga, int n, const int *map_id,

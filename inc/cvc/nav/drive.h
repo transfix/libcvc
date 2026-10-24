@@ -310,6 +310,15 @@ struct veh_params {
 // coef_mlp). `goal` is [n*2] normalized (the carrot). Updates o[n*2], th[n],
 // sp[n] IN PLACE and writes minclr_out[n] (min clearance seen). Agents are
 // independent — threaded across `num_threads` workers.
+// The risk governor's speed cap (veh_params::risk_governor) for an agent at (x, y) heading th,
+// moving forward (motion_sign 1) or backing (-1), with top speed vmax, braking a_brake after a
+// latency of tau seconds (normalized units): v_risk underfoot and from its look-ahead probes. The
+// risk is the worse of `mat`'s on `plane` (null: none) and v.terrain's. vmax when the governor is
+// off or has no risk to read. The drive applies it; sim_world caps override_command with it too,
+// so a route follower's command is held to it as the drive's is.
+float risk_speed_cap(const veh_params &v, const material_stack *mat, int plane, float x, float y,
+                     float th, float motion_sign, float vmax, float a_brake, float tau);
+
 void bicycle_rollout(const field_stack &f, float *o, float *th, float *sp, const float *goal,
                      const float *al, const float *be, const float *ga, int n, const int *map_id,
                      const veh_params &v, float *minclr_out, int num_threads = 0,
