@@ -812,13 +812,44 @@ scenes, 30 s each, and judged on two held-out seeds:
   - So the slip that grows is not the planar vehicle's. Most likely it is contact: 48 vehicles in
     a dense grid touch walls and each other, and tires scrub in contact and spin in stalls. The
     planar rollout has neither collisions nor wheel spin, so no term of its state can price them.
-  - Next, either:
-    - judge energy where it happens: a zeroth-order fine-tune of the policy on Jolt's measured
-      Wh/km at held reach (`es_finetune_on_plant` with `score_on_plant` as its fitness), which
-      needs no model of the slip; or
-    - cut the contacts first: the energy the trained policies add is mostly where they touch
-      something, so a policy that touches less (P8b's reach and collision terms) may draw less
-      without an energy term at all.
+- **ES on Jolt's measured energy** (`es_options::fitness`, `es_energy_at_held_reach`;
+  `NavPlantConvergence.EsEnergyAtHeldReachOnJolt`):
+  - `es_finetune_on_plant` can now climb any score of a policy's Jolt runs (`score_on_plant`).
+    Each iteration then scores the start policy on the same seeds too, and the fitness reads both.
+  - `es_energy_at_held_reach(price, slack)` scores -(Wh/km) - price x max(0, points of reach
+    lost against the start - slack). It needs no model of where the energy goes.
+  - The run: starts from the P8b gate's dynamic-trained policy (lr 5e-5, 150 steps). 30
+    iterations x 12 antithetic pairs, sigma 0.02, Adam at 0.005, 4 fresh city seeds an
+    iteration; validated every 5 on 16 seeds (200..215). Price 0.1 Wh/km a point, past 1 point.
+  - Results on the gate's 20 held-out seeds:
+
+    | Searched | Best at | Reach | Wh/km | Δ reach (points) | Δ Wh/km | Tire slip (Wh/km) |
+    |---|--:|--:|--:|--:|--:|--:|
+    | The start | — | 51.1% | 3.95 | — | — | 2.10 |
+    | Every weight | 25 | 52.7% | 3.82 | +1.6 [+0.1, +3.1] | -0.13 [-0.51, +0.21] | 1.99 |
+    | The basin alone (tail 3) | 30 | 51.4% | 4.02 | +0.2 [-1.6, +1.9] | +0.07 [-0.33, +0.52] | 2.15 |
+
+  - Over every weight, the fine-tune is the first policy to move both numbers the right way. Its
+    reach gain is outside the CI, which ES on reach itself never found. Its energy saving (-3.3%,
+    from tire slip 2.10 -> 1.99) is not.
+  - The basin alone finds nothing.
+  - Validation is noisy against the gains: the centre's validation Wh/km wanders 3.92-4.33 over
+    the run, about as much as the saving it is after.
+  - So the gate is still not met on energy, but this is the closest result, and the only one with
+    no reach given up.
+  - Next: more validation seeds (32, as P8b found) and more iterations; and fewer contacts first
+    (layer 1 of the plan below), since the energy left is tire slip in contact.
+- **Next: collisions, wheel spin and yielding** (Joe, 2026-10-24: "the training model needs
+  collisions and wheel spin"; the vehicles should drive around each other, and get out of the
+  way of an incoming vehicle's path):
+  1. Yielding in deployment: `sim_world::set_yield`, intents through an `intent_channel` hook
+     (perfect comms by default; the DBG case over its radios), a `yield_resolver` hook,
+     priorities. In progress (nav/yield.h).
+  2. Contact and wheel spin in the training model: a wheel-speed state per driven axle with
+     longitudinal slip, and penalty contact with friction against walls and between agents, in
+     shared multi-agent training scenes.
+  3. Learned awareness: neighbour and intent features in the policy, trained against contact and
+     blocking losses, on the same intents.
 - Not yet in the torch twin. Like any change to the loss, it must reach `sdf_nav`'s
   `train_bicycle` before the two are compared.
 

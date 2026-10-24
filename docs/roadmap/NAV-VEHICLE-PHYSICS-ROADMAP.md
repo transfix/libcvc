@@ -146,8 +146,11 @@ The plan, in order:
      `tire`, fitted on the dense city too) cuts the model's miss to 4-13%. The gate is still not
      met: the trained policies' tire slip on Jolt rises whatever the model predicts, most likely
      from contacts and stalls, which the planar rollout cannot represent.
-   - Open: the energy judged on Jolt itself (a zeroth-order fine-tune on measured Wh/km at held
-     reach), or fewer contacts first; the four-wheel plant's rollout; the torch twin.
+   - ES on Jolt's measured Wh/km at held reach (`es_energy_at_held_reach`), over every weight:
+     +1.6 points of reach [+0.1, +3.1] and -0.13 Wh/km [-0.51, +0.21] on the held-out seeds. Both
+     move the right way for the first time, but the energy saving is still inside its CI.
+   - Open: that ES with more validation; then contact, wheel spin and yielding (below); the
+     four-wheel plant's rollout; the torch twin.
 
 ### P8a's vehicle fitted to Jolt (2026-10-20)
 
@@ -549,8 +552,18 @@ These are the targets a plant fitted to Jolt has to beat, bin by bin.
         and +0.17 Wh/km on Jolt, both CIs across 0. The model predicted -0.26 and -0.27.
       - The trained policies' tire slip on Jolt rises 1.34 -> 1.64-1.79 Wh/km in every setting.
         That slip is not the planar vehicle's; most likely contacts and stalls.
-    - Next: judge energy on Jolt itself (ES on measured Wh/km at held reach), or reduce
-      contacts first.
+    - ES on Jolt's measured Wh/km at held reach (`es_options::fitness`,
+      `es_energy_at_held_reach`; 30 iterations x 12 pairs from the P8b gate's policy):
+      - Over every weight: reach +1.6 points [+0.1, +3.1], Wh/km -0.13 [-0.51, +0.21]. Tire
+        slip falls 2.10 -> 1.99. The first policy to move both the right way; energy still
+        inside its CI.
+      - The basin alone: +0.2 [-1.6, +1.9] and +0.07 [-0.33, +0.52], nothing.
+    - Next: more validation seeds and iterations for that ES; and the plan Joe set on
+      2026-10-24:
+      1. yielding in deployment (intent-aware, `sim_world::set_yield`, intents through an
+         `intent_channel`, over the DBG radios), gated on demo3-csma;
+      2. contact and wheel spin in the training model;
+      3. learned awareness of the other vehicles and their intents.
 - **P9, the plant by default (2026-10-18, Joe: "can't we use the actual jolt vehicle dimensions
   and physics?").**
   - What moved the agents: no default path used Jolt. Every default was the kinematic bicycle
