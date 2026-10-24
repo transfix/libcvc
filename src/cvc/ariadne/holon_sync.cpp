@@ -13,6 +13,7 @@
   Lesser General Public License for more details.
 */
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -68,25 +69,50 @@ bool node_present(cvc::app &app, const std::string &path) {
   return app.root().findDescendant(path) != nullptr;
 }
 
+// set_replicated unless the leaf already holds VAL; true when it wrote.
+bool set_if_changed(cvc::app &app, const std::string &path, const std::string &val) {
+  if (cvc::state *n = app.root().findDescendant(path); n && n->value() == val)
+    return false;
+  set_replicated(app, path, val);
+  return true;
+}
+
 } // namespace
 
 void write_pose(cvc::app &app, const std::string &room, const std::string &pid,
-                const cvc::physics::body_state &s, std::uint64_t server_tick) {
-  set_replicated(app, leaf(room, pid, {"pose", "pos", "x"}), fmt(s.position.x));
-  set_replicated(app, leaf(room, pid, {"pose", "pos", "y"}), fmt(s.position.y));
-  set_replicated(app, leaf(room, pid, {"pose", "pos", "z"}), fmt(s.position.z));
-  set_replicated(app, leaf(room, pid, {"pose", "orient", "w"}), fmt(s.rotation.w));
-  set_replicated(app, leaf(room, pid, {"pose", "orient", "x"}), fmt(s.rotation.x));
-  set_replicated(app, leaf(room, pid, {"pose", "orient", "y"}), fmt(s.rotation.y));
-  set_replicated(app, leaf(room, pid, {"pose", "orient", "z"}), fmt(s.rotation.z));
-  set_replicated(app, leaf(room, pid, {"pose", "vel", "lin", "x"}), fmt(s.linear_velocity.x));
-  set_replicated(app, leaf(room, pid, {"pose", "vel", "lin", "y"}), fmt(s.linear_velocity.y));
-  set_replicated(app, leaf(room, pid, {"pose", "vel", "lin", "z"}), fmt(s.linear_velocity.z));
-  set_replicated(app, leaf(room, pid, {"pose", "vel", "ang", "x"}), fmt(s.angular_velocity.x));
-  set_replicated(app, leaf(room, pid, {"pose", "vel", "ang", "y"}), fmt(s.angular_velocity.y));
-  set_replicated(app, leaf(room, pid, {"pose", "vel", "ang", "z"}), fmt(s.angular_velocity.z));
-  set_replicated(app, leaf(room, pid, {"pose", "server_tick"}),
-                 std::to_string(static_cast<unsigned long long>(server_tick)));
+                const cvc::physics::body_state &s, std::uint64_t server_tick,
+                std::uint64_t heartbeat_ticks) {
+  const bool all = heartbeat_ticks == 0;
+  bool changed = false;
+  const auto put = [&](std::initializer_list<const char *> parts, double v) {
+    const std::string path = leaf(room, pid, parts);
+    if (all)
+      set_replicated(app, path, fmt(v)), changed = true;
+    else
+      changed = set_if_changed(app, path, fmt(v)) || changed;
+  };
+  put({"pose", "pos", "x"}, s.position.x);
+  put({"pose", "pos", "y"}, s.position.y);
+  put({"pose", "pos", "z"}, s.position.z);
+  put({"pose", "orient", "w"}, s.rotation.w);
+  put({"pose", "orient", "x"}, s.rotation.x);
+  put({"pose", "orient", "y"}, s.rotation.y);
+  put({"pose", "orient", "z"}, s.rotation.z);
+  put({"pose", "vel", "lin", "x"}, s.linear_velocity.x);
+  put({"pose", "vel", "lin", "y"}, s.linear_velocity.y);
+  put({"pose", "vel", "lin", "z"}, s.linear_velocity.z);
+  put({"pose", "vel", "ang", "x"}, s.angular_velocity.x);
+  put({"pose", "vel", "ang", "y"}, s.angular_velocity.y);
+  put({"pose", "vel", "ang", "z"}, s.angular_velocity.z);
+  const std::string tick_path = leaf(room, pid, {"pose", "server_tick"});
+  if (!changed) {
+    // Nothing moved: re-stamp only on the heartbeat (clients re-align their clocks on it).
+    cvc::state *t = app.root().findDescendant(tick_path);
+    const std::uint64_t last = t ? std::strtoull(t->value().c_str(), nullptr, 10) : 0;
+    if (t && server_tick >= last && server_tick - last < heartbeat_ticks)
+      return;
+  }
+  set_replicated(app, tick_path, std::to_string(static_cast<unsigned long long>(server_tick)));
 }
 
 bool read_pose(cvc::app &app, const std::string &room, const std::string &pid,
@@ -114,19 +140,27 @@ bool read_pose(cvc::app &app, const std::string &room, const std::string &pid,
 }
 
 void write_intent(cvc::app &app, const std::string &room, const std::string &pid,
-                  const avatar_intent &intent) {
+                  const avatar_intent &intent, std::uint64_t tick) {
   set_replicated(app, leaf(room, pid, {"intent", "move", "x"}), fmt(intent.move.x));
   set_replicated(app, leaf(room, pid, {"intent", "move", "y"}), fmt(intent.move.y));
   set_replicated(app, leaf(room, pid, {"intent", "move", "z"}), fmt(intent.move.z));
+  set_replicated(app, leaf(room, pid, {"intent", "yaw"}), fmt(intent.yaw));
+  set_replicated(app, leaf(room, pid, {"intent", "tick"}),
+                 std::to_string(static_cast<unsigned long long>(tick)));
 }
 
-bool read_intent(cvc::app &app, const std::string &room, const std::string &pid,
-                 avatar_intent &out) {
+bool read_intent(cvc::app &app, const std::string &room, const std::string &pid, avatar_intent &out,
+                 std::uint64_t *out_tick) {
   if (!node_present(app, leaf(room, pid, {"intent", "move", "x"})))
     return false;
   out.move = {read_double(app, leaf(room, pid, {"intent", "move", "x"})),
               read_double(app, leaf(room, pid, {"intent", "move", "y"})),
               read_double(app, leaf(room, pid, {"intent", "move", "z"}))};
+  out.yaw = read_double(app, leaf(room, pid, {"intent", "yaw"}));
+  if (out_tick) {
+    cvc::state *t = app.root().findDescendant(leaf(room, pid, {"intent", "tick"}));
+    *out_tick = t ? std::strtoull(t->value().c_str(), nullptr, 10) : 0;
+  }
   return true;
 }
 
@@ -146,8 +180,13 @@ void server_pump(holon &h, cvc::app &app, const std::string &room, double wall_d
       h.add_participant(p.pid, /*local=*/false, start);
     }
     avatar_intent in;
-    if (read_intent(app, room, p.pid, in))
-      h.set_intent(p.pid, in);
+    std::uint64_t stamp = 0;
+    if (read_intent(app, room, p.pid, in, &stamp)) {
+      if (stamp != 0)
+        h.queue_intent(p.pid, in, stamp); // applied at its tick (no-op when already queued)
+      else
+        h.set_intent(p.pid, in); // untimed (a DSL verb, a departure's reset): at once
+    }
   }
   // Drop anyone who left (room_leave): the holon stops integrating them, and a later rejoin under
   // the same id respawns them on the ring rather than wherever a stale intent carried them.
@@ -160,9 +199,12 @@ void server_pump(holon &h, cvc::app &app, const std::string &room, double wall_d
   // One authoritative frame.
   h.advance(wall_dt);
   // Publish each participant's authoritative pose (these are local writes on the
-  // relay's shard; the caller fans them to the clients).
+  // relay's shard; the caller fans them to the clients): what changed, and a
+  // heartbeat of about a second for an avatar standing still.
+  const std::uint64_t heartbeat =
+      std::max<std::uint64_t>(1, static_cast<std::uint64_t>(1.0 / h.clock().fixed_dt()));
   for (const conference::room_participant &p : roster)
-    write_pose(app, room, p.pid, h.state(p.pid), h.tick());
+    write_pose(app, room, p.pid, h.state(p.pid), h.tick(), heartbeat);
 }
 
 void client_pump(holon &h, cvc::app &app, const std::string &room, const std::string &self_pid,
@@ -187,8 +229,9 @@ void client_pump(holon &h, cvc::app &app, const std::string &room, const std::st
 
 void propose_intent(holon &h, cvc::app &app, const std::string &room, const std::string &self_pid,
                     const avatar_intent &intent) {
+  // The holon predicts with it from its next quantum; stamp it with that tick.
   h.set_intent(self_pid, intent);
-  write_intent(app, room, self_pid, intent);
+  write_intent(app, room, self_pid, intent, h.tick() + 1);
 }
 
 } // namespace ariadne

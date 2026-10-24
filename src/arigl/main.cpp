@@ -318,6 +318,10 @@ struct ConferenceSession {
   std::vector<std::string> drawn_pids_;     // avatars drawn at the last log (log on change)
   bool framed_ = false;                     // camera framed on our avatar once
   double orbit_center_[3] = {0.0, 0.0, 0.0};
+  // Our facing (radians about +Z from +X): WASD walk/strafe relative to it, a click on the scene
+  // turns it toward the clicked ground point. Starts as the camera's heading when we are framed,
+  // so W first walks "into" the screen.
+  double facing_yaw_ = 0.0;
   static constexpr double kWalkSpeed = 2.0; // m/s
   static constexpr double kEyeHeight = 1.2; // orbit centre above the avatar's feet (m)
 
@@ -598,9 +602,26 @@ struct ConferenceSession {
     st(prefix_ + ".self.ping").value(cvc::ariadne::conference::format_rtt(s.rtt_ms));
     st(prefix_ + ".self.down").value(cvc::ariadne::conference::format_rate(s.in_kbps));
     st(prefix_ + ".self.up").value(cvc::ariadne::conference::format_rate(s.out_kbps));
+    if (holon_ && s.rtt_ms > 0.0)
+      set_lead(s.rtt_ms / 1000.0);
     if (now < rejoin_until_s_)
       cvc::ariadne::conference::room_join(*app_, room_, pid_, st(prefix_ + ".conf.self").value());
   }
+
+  // Run our holon's clock ahead of the relay's by the round trip plus a margin (holon::
+  // set_lead_ticks): a sample takes one way to reach us and our intent one way back, so an intent
+  // we apply at our tick T then reaches the relay before it integrates T, and the relay's pose
+  // agrees with our prediction -- no correction. The margin covers the frame our write waits to
+  // flush, the relay's room step (~50 ms) and jitter. Small RTT changes leave the lead alone (a
+  // change re-aligns the clock, which costs a correction).
+  void set_lead(double rtt_s) {
+    const double dt = holon_->clock().fixed_dt();
+    const auto lead = static_cast<std::uint64_t>(std::ceil((rtt_s + kLeadMarginS) / dt));
+    const std::uint64_t cur = holon_->lead_ticks();
+    if (lead > cur + 2 || lead + 6 < cur)
+      holon_->set_lead_ticks(lead);
+  }
+  static constexpr double kLeadMarginS = 0.06;
 
   void reconnect(double now) {
     next_reconnect_s_ = now + 3.0;
@@ -620,15 +641,23 @@ struct ConferenceSession {
   }
 
   // Window mode: show the room in 3D in `view` — the server's shared scene and an avatar per
-  // participant — with third-person controls: WASD / arrow keys walk our avatar relative to the
-  // camera's heading, and `cam` (Orbit) keeps orbiting it. A no-op for a document with no relay.
-  void attach_view(cvc::gl::SceneRenderer &view, cvc::gl::CameraController &cam) {
+  // participant, each peer named — with third-person controls: W/S walk our avatar forward/back
+  // along its facing and A/D strafe, a click on the scene turns it to face the clicked point, and
+  // `cam` (Orbit) keeps orbiting it. A no-op for a document with no relay.
+  void attach_view(cvc::gl::SceneRenderer &view, cvc::gl::CameraController &cam,
+                   cvc::gl::ImGuiBackend &backend) {
     if (!active || !driver_ || !app_)
       return;
     holon_ = std::make_unique<cvc::ariadne::holon>(cvc::ariadne::holon_role::client);
+    set_lead(0.06); // until the first round trip is measured (net_step)
     room_view_ =
         std::make_unique<gla::room_view>(view, *app_, room_, pid_, view.scene().getStatePrefix());
     cam_ = &cam;
+    // Peers' names over their markers, drawn inside the ImGui frame (after the document's windows).
+    backend.add_frame_hook([this] {
+      if (room_view_)
+        room_view_->draw_labels();
+    });
     driver_->add_frame_observer(kOrderRoom,
                                 [this](const cvc::clock_driver::clock_frame &f) { step_room(f); });
   }
@@ -636,22 +665,31 @@ struct ConferenceSession {
   void step_room(const cvc::clock_driver::clock_frame &f) {
     if (!holon_ || !room_view_ || !cam_)
       return;
+    // A click on the scene (not a drag, and not one the UI took) turns us to face the ground point
+    // under it. Only once we are in the room: the pick needs our position.
+    int cx = 0, cy = 0;
+    double self[3];
+    if (cam_->takeClick(cx, cy) && room_view_->self_position(self)) {
+      double g[3];
+      if (room_view_->pick_ground(cx, cy, self[2], g) &&
+          std::hypot(g[0] - self[0], g[1] - self[1]) > 0.05) // a click on our own feet: no turn
+        facing_yaw_ = std::atan2(g[1] - self[1], g[0] - self[0]);
+    }
     // Keys -> intent, only in Orbit: in Fly the same keys move the camera instead. The camera's
     // held set is dropped while the UI has the keyboard, so typing a name never walks.
     cvc::ariadne::avatar_intent in;
+    in.yaw = facing_yaw_;
     if (cam_->mode() == cvc::gl::CameraController::Mode::Orbit) {
-      double eye[3], focal[3], up[3];
-      cam_->getPose(eye, focal, up);
       const auto held = [this](const char *a, const char *b) {
         return cam_->keyHeld(a) || cam_->keyHeld(b);
       };
       in = gla::intent_from_keys(held("w", "Up"), held("s", "Down"), held("a", "Left"),
-                                 held("d", "Right"), eye, focal, kWalkSpeed);
+                                 held("d", "Right"), facing_yaw_, kWalkSpeed);
     }
     // Propose on the first frame even when standing still, so the tree never holds a walk an
     // earlier session under this id proposed; after that, only on change (a replicated write).
     if (!intent_proposed_ || in.move.x != last_intent_.move.x || in.move.y != last_intent_.move.y ||
-        in.move.z != last_intent_.move.z) {
+        in.move.z != last_intent_.move.z || in.yaw != last_intent_.yaw) {
       cvc::ariadne::propose_intent(*holon_, *app_, room_, pid_, in);
       last_intent_ = in;
       intent_proposed_ = true;
@@ -680,6 +718,9 @@ struct ConferenceSession {
         // Frame the room around you, not just you: arriving at a party, you want to see who's here.
         cam_->frameBounds(p[0] - 8.0, p[1] - 8.0, p[2], p[0] + 8.0, p[1] + 8.0, p[2] + 2.0);
         framed_ = true;
+        double eye[3], focal[3], up[3];
+        cam_->getPose(eye, focal, up);
+        facing_yaw_ = gla::heading_yaw(eye, focal); // face into the screen, so W walks away
       }
       const double c[3] = {p[0], p[1], p[2] + kEyeHeight};
       if (std::fabs(c[0] - orbit_center_[0]) + std::fabs(c[1] - orbit_center_[1]) +
@@ -1091,7 +1132,8 @@ struct ConferenceSession {
                            "document locally.\n");
     return false;
   }
-  void attach_view(cvc::gl::SceneRenderer &, cvc::gl::CameraController &) {}
+  void attach_view(cvc::gl::SceneRenderer &, cvc::gl::CameraController &, cvc::gl::ImGuiBackend &) {
+  }
   void pump() {}
   void stop() {}
 #endif
@@ -1166,7 +1208,7 @@ int run_window(const ari::HostOptions &o) {
   // locally (no relay) and say why, rather than letting the exception abort main.
   try {
     if (conf.setup(app, sg.getStatePrefix(), rt.backend()))
-      conf.attach_view(view, cam); // the room in 3D behind the conference windows
+      conf.attach_view(view, cam, rt.backend()); // the room in 3D behind the conference windows
   } catch (const std::exception &e) {
     std::fprintf(stderr, "arigl: conference setup failed (%s); running the document locally\n",
                  e.what());

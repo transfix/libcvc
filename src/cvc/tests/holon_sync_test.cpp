@@ -273,3 +273,77 @@ TEST(HolonSyncTest, ClientPumpPredictsSelfAndWalksPeersSmoothly) {
     s->detach();
   }
 }
+
+// ── timing: stamped intents, changed-only poses ─────────────────────────────
+
+TEST(HolonSyncTest, IntentStampRoundTrips) {
+  cvc::app app;
+  avatar_intent in{vec3{1.0, 0.0, 0.0}};
+  in.yaw = 0.75;
+  cvc::ariadne::write_intent(app, "r", "A", in, 1234);
+  avatar_intent out;
+  std::uint64_t stamp = 0;
+  ASSERT_TRUE(cvc::ariadne::read_intent(app, "r", "A", out, &stamp));
+  EXPECT_EQ(stamp, 1234u);
+  EXPECT_DOUBLE_EQ(out.yaw, 0.75);
+  cvc::ariadne::write_intent(app, "r", "A", in); // untimed
+  ASSERT_TRUE(cvc::ariadne::read_intent(app, "r", "A", out, &stamp));
+  EXPECT_EQ(stamp, 0u);
+}
+
+TEST(HolonSyncTest, ProposeIntentStampsTheNextTick) {
+  cvc::app app;
+  holon h(holon_role::client);
+  h.add_participant("A", /*local=*/true);
+  for (int i = 0; i < 5; ++i)
+    h.advance(h.clock().fixed_dt());
+  cvc::ariadne::propose_intent(h, app, "r", "A", avatar_intent{vec3{1.0, 0.0, 0.0}});
+  avatar_intent out;
+  std::uint64_t stamp = 0;
+  ASSERT_TRUE(cvc::ariadne::read_intent(app, "r", "A", out, &stamp));
+  EXPECT_EQ(stamp, h.tick() + 1);
+}
+
+TEST(HolonSyncTest, WritePoseWithAHeartbeatWritesOnlyChanges) {
+  cvc::app app;
+  body_state s;
+  s.position = vec3{1.0, 2.0, 0.0};
+  cvc::ariadne::write_pose(app, "r", "A", s, 100, /*heartbeat_ticks=*/120);
+  body_state out;
+  std::uint64_t tick = 0;
+  ASSERT_TRUE(cvc::ariadne::read_pose(app, "r", "A", out, tick));
+  EXPECT_EQ(tick, 100u);
+
+  // Unchanged, within the heartbeat: nothing is written (not even the tick).
+  cvc::ariadne::write_pose(app, "r", "A", s, 150, 120);
+  ASSERT_TRUE(cvc::ariadne::read_pose(app, "r", "A", out, tick));
+  EXPECT_EQ(tick, 100u);
+  // Unchanged, a heartbeat later: the tick is re-stamped.
+  cvc::ariadne::write_pose(app, "r", "A", s, 220, 120);
+  ASSERT_TRUE(cvc::ariadne::read_pose(app, "r", "A", out, tick));
+  EXPECT_EQ(tick, 220u);
+  // Moved: the changed leaf and the tick are written.
+  s.position.x = 1.5;
+  cvc::ariadne::write_pose(app, "r", "A", s, 230, 120);
+  ASSERT_TRUE(cvc::ariadne::read_pose(app, "r", "A", out, tick));
+  EXPECT_EQ(tick, 230u);
+  EXPECT_DOUBLE_EQ(out.position.x, 1.5);
+  EXPECT_DOUBLE_EQ(out.position.y, 2.0);
+}
+
+// server_pump queues a stamped intent for its tick rather than applying it on read.
+TEST(HolonSyncTest, ServerPumpAppliesAStampedIntentAtItsTick) {
+  cvc::app app;
+  const std::string room = "r";
+  cvc::ariadne::conference::room_join(app, room, "A");
+  holon server(holon_role::server);
+  const double dt = server.clock().fixed_dt();
+  cvc::ariadne::server_pump(server, app, room, dt); // registers A (tick 1)
+  const vec3 start = server.state("A").position;
+  cvc::ariadne::write_intent(app, room, "A", avatar_intent{vec3{2.0, 0.0, 0.0}}, server.tick() + 5);
+  for (int i = 0; i < 4; ++i) // ticks 2-5: before the stamp
+    cvc::ariadne::server_pump(server, app, room, dt);
+  EXPECT_DOUBLE_EQ(server.state("A").position.x, start.x) << "not before its tick";
+  cvc::ariadne::server_pump(server, app, room, dt); // tick 6: the stamp
+  EXPECT_DOUBLE_EQ(server.state("A").position.x, start.x + 2.0 * dt);
+}

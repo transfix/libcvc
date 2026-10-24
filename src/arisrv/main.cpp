@@ -189,13 +189,37 @@ int main(int argc, char **argv) {
 #if CVC_ENABLE_WS
   int reapticks = 0; // cadence for reaping ghost (navigated-away) connections
 #endif
-  // The server-authoritative avatar holon for this room (H1): each tick it reads
+  // The server-authoritative avatar holon for this room (H1): each room step it reads
   // every participant's proposed intent from the replicated tree, integrates it on
-  // its own clock, and writes the authoritative pose back (fanned to clients by the
-  // drain_local block below). The relay loop paces ~5 Hz, so the holon catches up
-  // several quanta per tick and clients interpolate between the ~5 Hz pose samples;
-  // a smoother authoritative rate is a later tuning (tick the holon on its own).
+  // its own clock (a stamped intent at the tick the client applied it), and writes
+  // the authoritative pose back -- what changed, plus a ~1 s heartbeat -- fanned to
+  // clients by fan_local_writes. The relay loop paces ~5 Hz; the room steps
+  // kRoomSubsteps times per pass (~20 Hz), so a pose sample is at most ~50 ms old
+  // and an intent waits at most that long before the server integrates it.
   cvc::ariadne::holon server_holon(cvc::ariadne::holon_role::server);
+  constexpr int kRoomSubsteps = 4;
+  constexpr auto kRoomStep = std::chrono::milliseconds(50); // x kRoomSubsteps = the loop's 200 ms
+  // Fan the relay's OWN room-tree writes -- the room_leave retractions, room_relay_tick's
+  // per-stream "ready" markers, the holon's poses -- out to EVERY client on BOTH transports.
+#if CVC_ENABLE_WS
+  // The shard's publish cursor is shared by the two transports, so a plain state_tp.pump_all()
+  // would drain it and the WebSocket side would send nothing (browser rosters would never drop a
+  // closed tab). So drain the local journal ONCE and publish each mutation to both transports:
+  // publish() writes only to its own connections and never crosses the bridge, so each client gets
+  // it exactly once with no echo. drain_local yields only our local writes, never the clients'
+  // replicated mutations (those ride set_relay forwarding), so this cannot loop.
+  const auto fan_local_writes = [&] {
+    auto pending = shard.drain_local();
+    for (const auto &m : pending) {
+      state_tp.publish(m);
+      ws_tp.publish(m);
+    }
+  };
+#else
+  // pump_all publishes only our local writes, never the clients' replicated mutations (those ride
+  // set_relay forwarding), so this cannot echo.
+  const auto fan_local_writes = [&] { state_tp.pump_all(); };
+#endif
   const char *room_debug_env = std::getenv("CVC_ARISRV_ROOM_DEBUG");
   const bool room_debug =
       room_debug_env && *room_debug_env && std::strcmp(room_debug_env, "0") != 0;
@@ -318,28 +342,7 @@ int main(int argc, char **argv) {
       }
       std::fflush(stdout);
     }
-#if CVC_ENABLE_WS
-    // Fan the relay's OWN room-tree writes — the room_leave retractions queued above and
-    // room_relay_tick's per-stream "ready" markers — out to EVERY client on BOTH transports. The
-    // shard's publish cursor is shared by the two transports, so a plain state_tp.pump_all() would
-    // drain it and the WebSocket side would send nothing (browser rosters would never drop a closed
-    // tab). So drain the local journal ONCE and publish each mutation to both transports: publish()
-    // writes only to its own connections and never crosses the bridge, so each client gets it
-    // exactly once with no echo. drain_local yields only our local writes, never the clients'
-    // replicated mutations (those ride set_relay forwarding), so this cannot loop.
-    {
-      auto pending = shard.drain_local();
-      for (const auto &m : pending) {
-        state_tp.publish(m);
-        ws_tp.publish(m);
-      }
-    }
-#else
-    // Publish the relay's own room-tree writes (per-stream "ready" markers from room_relay_tick) to
-    // the connected clients. drain_local pumps only our local writes, never the clients' replicated
-    // mutations (those ride set_relay forwarding), so this cannot echo.
-    state_tp.pump_all();
-#endif
+    fan_local_writes();
     const std::size_t n = relay.stream_count();
     const bool heartbeat = (n > 0 && ++ticks % 25 == 0); // ~every 5s while gRPC media is live
     if (n != last || heartbeat) {
@@ -376,7 +379,14 @@ int main(int argc, char **argv) {
         std::fflush(stdout);
       }
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    // The rest of this pass's room steps (the first ran above): advance the holon and fan its
+    // poses between the loop's slower housekeeping.
+    for (int i = 1; i < kRoomSubsteps && !g_stop.load(); ++i) {
+      std::this_thread::sleep_for(kRoomStep);
+      cvc::ariadne::server_pump(server_holon, app, room);
+      fan_local_writes();
+    }
+    std::this_thread::sleep_for(kRoomStep);
   }
 
   std::printf("[arisrv] shutting down (relayed %zu stream(s), %llu frames forwarded)\n",

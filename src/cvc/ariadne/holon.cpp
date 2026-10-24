@@ -13,6 +13,7 @@
   Lesser General Public License for more details.
 */
 
+#include <algorithm>
 #include <cstdint>
 #include <cvc/ariadne/holon.h>
 
@@ -69,6 +70,30 @@ void holon::set_intent(const std::string &pid, const avatar_intent &in) {
   if (_role == holon_role::client && !it->second.local)
     return;
   it->second.intent = in;
+  it->second.queued.clear();
+}
+
+void holon::queue_intent(const std::string &pid, const avatar_intent &in, std::uint64_t tick) {
+  if (_role != holon_role::server)
+    return;
+  auto it = _participants.find(pid);
+  if (it == _participants.end())
+    return;
+  participant &p = it->second;
+  if (p.have_stamp && tick == p.last_stamp)
+    return; // already queued (the host re-reads an unchanged intent)
+  p.have_stamp = true;
+  p.last_stamp = tick;
+  // The quantum it can still take effect at: its own tick if that is still to come, else the
+  // next one (late), and never before what is already queued (stamps from a client whose clock
+  // moved backwards keep their arrival order). Stamped beyond the allowed lead: at once.
+  const std::uint64_t next = _clock.tick() + 1;
+  std::uint64_t at = tick < next ? next : tick;
+  if (at > next + _cfg.max_intent_lead_ticks)
+    at = next;
+  if (!p.queued.empty() && at < p.queued.back().first)
+    at = p.queued.back().first;
+  p.queued.emplace_back(at, in);
 }
 
 void holon::apply_authoritative(const std::string &pid, const cvc::physics::body_state &auth,
@@ -78,14 +103,23 @@ void holon::apply_authoritative(const std::string &pid, const cvc::physics::body
   auto it = _participants.find(pid);
   if (it == _participants.end())
     return;
+  if (it->second.have_seen && server_tick <= it->second.last_seen)
+    return; // seen already (an unchanged pose re-read), or older
+  it->second.have_seen = true;
+  it->second.last_seen = server_tick;
   // Count the server's ticks (see the header): re-align whenever the replica is more
   // than max_skew_ticks away -- on the first sample when the client joined a running
   // server, and after a stall. A replica already within the skew is left alone, so its
   // logged inputs still line up with the server's ticks and replay correctly.
   const std::uint64_t now = _clock.tick();
-  const std::uint64_t skew = now > server_tick ? now - server_tick : server_tick - now;
-  if (skew > _cfg.max_skew_ticks) {
-    _clock.seek_tick(server_tick);
+  const std::uint64_t target = server_tick + _lead;
+  const bool behind = now < target;
+  const std::uint64_t skew = behind ? target - now : now - target;
+  const std::uint64_t tol = _lead == 0 ? _cfg.max_skew_ticks
+                            : behind   ? _cfg.lead_slack_behind_ticks
+                                       : _cfg.lead_slack_ahead_ticks;
+  if (skew > tol) {
+    _clock.seek_tick(target);
     for (auto &kv : _participants) {
       participant &q = kv.second;
       if (q.local) {
@@ -94,11 +128,10 @@ void holon::apply_authoritative(const std::string &pid, const cvc::physics::body
       } else {
         // Shift the walk's start by the same jump, so the peer carries on from where
         // it is shown instead of restarting the walk (a visible step back).
-        q.newest_arrival_tick = server_tick > now
-                                    ? q.newest_arrival_tick + (server_tick - now)
-                                    : (q.newest_arrival_tick > now - server_tick
-                                           ? q.newest_arrival_tick - (now - server_tick)
-                                           : 0);
+        q.newest_arrival_tick = target > now ? q.newest_arrival_tick + (target - now)
+                                             : (q.newest_arrival_tick > now - target
+                                                    ? q.newest_arrival_tick - (now - target)
+                                                    : 0);
       }
     }
   }
@@ -130,7 +163,7 @@ void holon::apply_authoritative(const std::string &pid, const cvc::physics::body
       p.prev.position = shown.position;
       p.prev.rotation = shown.rotation;
       p.newest = auth;
-      p.sample_span = server_tick - p.last_sample_tick;
+      p.sample_span = std::min(server_tick - p.last_sample_tick, _cfg.max_peer_span_ticks);
     }
     p.last_sample_tick = server_tick;
     p.newest_arrival_tick = _clock.tick();
@@ -143,10 +176,17 @@ void holon::on_step(const cvc::clock_driver::clock_frame &f) {
   for (auto &kv : _participants) {
     participant &p = kv.second;
     if (_role == holon_role::server) {
-      // Authoritative integration: advance by the latest intent over every quantum
-      // that fell due this frame.
-      for (int i = 0; i < steps; ++i)
+      // Authoritative integration: advance over every quantum that fell due this
+      // frame, each by the intent in force at its tick (a stamped intent takes over
+      // at the tick it was queued for).
+      for (int i = 0; i < steps; ++i) {
+        const std::uint64_t tick = f.step.first_tick + 1 + static_cast<std::uint64_t>(i);
+        while (!p.queued.empty() && p.queued.front().first <= tick) {
+          p.intent = p.queued.front().second;
+          p.queued.pop_front();
+        }
         p.sim.step(p.intent, dt);
+      }
     } else if (p.local) {
       // Client prediction: predict the local avatar one quantum at a time, tagging
       // each with its tick so reconcile can replay the right suffix.

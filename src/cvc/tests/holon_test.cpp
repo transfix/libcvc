@@ -16,6 +16,7 @@
 // a server override snaps the client); a client never drives a peer; and a peer is
 // interpolated through the holon's frame alpha, never overshooting.
 
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <cvc/ariadne/avatar_sim.h>
@@ -23,6 +24,7 @@
 #include <cvc/physics/body.h>
 #include <cvc/physics/types.h>
 #include <gtest/gtest.h>
+#include <vector>
 
 using cvc::ariadne::avatar_intent;
 using cvc::ariadne::avatar_sim;
@@ -303,4 +305,149 @@ TEST(HolonTest, TakeCorrectionReportsReconcileJumpsOnce) {
   EXPECT_DOUBLE_EQ(client.take_correction("A").y, 0.0) << "taken, so cleared";
   EXPECT_DOUBLE_EQ(client.take_correction("B").y, 0.0) << "a peer has no corrections";
   EXPECT_DOUBLE_EQ(client.take_correction("nobody").y, 0.0);
+}
+
+// ── stamped intents: the server applies each at the tick the client did ─────
+
+TEST(HolonTest, ServerAppliesAStampedIntentAtItsTick) {
+  holon server(holon_role::server);
+  server.add_participant("A");
+  const double dt = server.clock().fixed_dt();
+  const auto frames = [&](int n) {
+    for (int i = 0; i < n; ++i)
+      server.advance(dt);
+  };
+  frames(10);
+  ASSERT_EQ(server.tick(), 10u);
+
+  // Stamped for tick 15: ticks 11-14 still stand, 15-20 walk at 2 m/s.
+  server.queue_intent("A", avatar_intent{vec3{2.0, 0.0, 0.0}}, 15);
+  server.queue_intent("A", avatar_intent{vec3{2.0, 0.0, 0.0}}, 15); // re-read: a no-op
+  frames(10);
+  ASSERT_EQ(server.tick(), 20u);
+  avatar_sim ref;
+  for (int i = 0; i < 6; ++i)
+    ref.step(avatar_intent{vec3{2.0, 0.0, 0.0}}, dt);
+  expect_pos_bit_eq(server.state("A").position, ref.state().position);
+
+  // A late stamp (its tick already integrated) takes effect at the next tick.
+  server.queue_intent("A", avatar_intent{vec3{0.0, 0.0, 0.0}}, 12);
+  server.advance(dt);
+  expect_pos_bit_eq(server.state("A").position, ref.state().position);
+
+  // A stamp far beyond the allowed lead (a client whose clock is off) also applies at once.
+  server.queue_intent("A", avatar_intent{vec3{0.0, 3.0, 0.0}}, 1'000'000);
+  server.advance(dt);
+  EXPECT_DOUBLE_EQ(server.state("A").position.y, 3.0 * dt);
+
+  // set_intent (untimed) drops anything still queued.
+  server.queue_intent("A", avatar_intent{vec3{9.0, 0.0, 0.0}}, server.tick() + 5);
+  server.set_intent("A", avatar_intent{vec3{0.0, 0.0, 0.0}});
+  const vec3 before = server.state("A").position;
+  frames(10);
+  expect_pos_bit_eq(server.state("A").position, before);
+}
+
+// A client that runs AHEAD of the server by the round trip has its stamped intents reach the
+// server before their tick, so the server's poses agree with its prediction exactly: across a
+// walk with several key changes, reconcile corrects nothing. The same exchange with no lead (the
+// intents arrive late) needs corrections -- the latency the lead removes.
+namespace {
+double total_correction(std::uint64_t lead) {
+  constexpr int kDelay = 6; // frames (= ticks) each way
+  holon server(holon_role::server);
+  holon client(holon_role::client);
+  server.add_participant("A");
+  client.add_participant("A", /*local=*/true);
+  client.set_lead_ticks(lead);
+  const double dt = server.clock().fixed_dt();
+  struct intent_msg {
+    int at;
+    avatar_intent in;
+    std::uint64_t stamp;
+  };
+  struct sample_msg {
+    int at;
+    body_state s;
+    std::uint64_t tick;
+  };
+  std::vector<intent_msg> up;
+  std::vector<sample_msg> down;
+  double corrected = 0.0;
+  avatar_intent cur;
+  for (int f = 0; f < 400; ++f) {
+    // Keys: walk +x, strafe, stop, walk -y, stop.
+    avatar_intent want = cur;
+    if (f == 60)
+      want.move = vec3{2.0, 0.0, 0.0};
+    if (f == 110)
+      want.move = vec3{0.0, 2.0, 0.0};
+    if (f == 150)
+      want.move = vec3{0.0, 0.0, 0.0};
+    if (f == 200)
+      want.move = vec3{0.0, -2.0, 0.0};
+    if (f == 260)
+      want.move = vec3{0.0, 0.0, 0.0};
+    if (want.move.x != cur.move.x || want.move.y != cur.move.y) {
+      cur = want;
+      client.set_intent("A", cur);
+      up.push_back({f + kDelay, cur, client.tick() + 1});
+    }
+    client.advance(dt);
+    for (auto it = up.begin(); it != up.end();)
+      if (it->at <= f) {
+        server.queue_intent("A", it->in, it->stamp);
+        it = up.erase(it);
+      } else {
+        ++it;
+      }
+    server.advance(dt);
+    down.push_back({f + kDelay, server.state("A"), server.tick()});
+    for (auto it = down.begin(); it != down.end();)
+      if (it->at <= f) {
+        client.apply_authoritative("A", it->s, it->tick);
+        it = down.erase(it);
+      } else {
+        ++it;
+      }
+    const vec3 c = client.take_correction("A");
+    if (f >= 60) // after the first sample aligned the clocks
+      corrected += std::fabs(c.x) + std::fabs(c.y) + std::fabs(c.z);
+  }
+  return corrected;
+}
+} // namespace
+
+TEST(HolonTest, ALeadingClientNeedsNoCorrections) {
+  EXPECT_EQ(total_correction(/*lead=*/2 * 6 + 2), 0.0);
+  EXPECT_GT(total_correction(/*lead=*/0), 0.1) << "without the lead the intents land late";
+}
+
+TEST(HolonTest, ClientAlignsAheadOfTheServerByItsLead) {
+  holon client(holon_role::client);
+  client.add_participant("A", /*local=*/true);
+  client.set_lead_ticks(14);
+  body_state s;
+  client.apply_authoritative("A", s, 100);
+  EXPECT_EQ(client.tick(), 114u);
+  // Within the slack it is left alone; falling further behind its target re-aligns.
+  client.apply_authoritative("A", s, 104); // target 118, 4 behind
+  EXPECT_EQ(client.tick(), 114u);
+  client.apply_authoritative("A", s, 120); // target 134, 20 behind
+  EXPECT_EQ(client.tick(), 134u);
+}
+
+TEST(HolonTest, PeerSampleSpanIsCapped) {
+  holon_config cfg;
+  cfg.max_peer_span_ticks = 30;
+  holon client(holon_role::client, cfg);
+  client.add_participant("B", /*local=*/false);
+  const double dt = client.clock().fixed_dt();
+  body_state s0, s1;
+  s1.position = vec3{1.0, 0.0, 0.0};
+  client.apply_authoritative("B", s0, 10);
+  client.apply_authoritative("B", s1, 250); // after a long still spell (a heartbeat gap)
+  for (int i = 0; i < 31; ++i)
+    client.advance(dt);
+  EXPECT_GT(client.display_pose("B").position.x, 0.99) << "walked in over 30 ticks, not 240";
 }
