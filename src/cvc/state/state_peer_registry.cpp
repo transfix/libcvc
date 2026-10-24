@@ -56,8 +56,14 @@ void state_peer_registry::add_peer(std::string node_id, std::string cluster_id,
 }
 
 bool state_peer_registry::remove_peer(const std::string &node_id) {
+  std::shared_ptr<const state_delivery_filter> displaced; // released after _mu (see set_filter)
   std::lock_guard<std::mutex> lk(_mu);
-  return _peers.erase(node_id) > 0;
+  auto it = _peers.find(node_id);
+  if (it == _peers.end())
+    return false;
+  displaced = std::move(it->second.filter);
+  _peers.erase(it);
+  return true;
 }
 
 bool state_peer_registry::set_subscriptions(const std::string &node_id,
@@ -77,11 +83,15 @@ bool state_peer_registry::has_peer(const std::string &node_id) const {
 
 bool state_peer_registry::set_filter(const std::string &node_id,
                                      std::shared_ptr<const state_delivery_filter> f) {
+  // Declared before the lock, so the filter this replaces is released after _mu is: when the
+  // registry holds its last reference, its destructor (caller code) would otherwise run under the
+  // lock every sender takes in should_deliver.
+  std::shared_ptr<const state_delivery_filter> displaced;
   std::lock_guard<std::mutex> lk(_mu);
   auto it = _peers.find(node_id);
   if (it == _peers.end())
     return false;
-  it->second.filter = std::move(f);
+  displaced = std::exchange(it->second.filter, std::move(f));
   return true;
 }
 
@@ -170,8 +180,9 @@ std::vector<state_peer_registry::peer> state_peer_registry::snapshot() const {
 }
 
 void state_peer_registry::clear() {
+  std::unordered_map<std::string, peer> dropped; // filters released after _mu (see set_filter)
   std::lock_guard<std::mutex> lk(_mu);
-  _peers.clear();
+  _peers.swap(dropped);
 }
 
 } // namespace cvc

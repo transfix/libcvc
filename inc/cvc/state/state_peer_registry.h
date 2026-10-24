@@ -55,7 +55,10 @@ public:
 // Delivery filter:
 //   set_filter() layers a state_delivery_filter over a known peer's
 //   prefixes (both must pass). add_peer on an existing id keeps it;
-//   remove_peer drops it.
+//   remove_peer drops it. A filter the registry lets go of (replaced,
+//   removed or cleared) is released outside the lock, and one that a
+//   concurrent should_deliver() is still evaluating stays alive until
+//   that call returns.
 //
 // Membership:
 //   add_peer/remove_peer manage entries. note_seen() bumps a

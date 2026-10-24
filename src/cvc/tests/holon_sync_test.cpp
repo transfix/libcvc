@@ -275,6 +275,210 @@ TEST(HolonSyncTest, ClientPumpPredictsSelfAndWalksPeersSmoothly) {
   }
 }
 
+// client_pump registers whoever the roster lists, but one whose pose has not replicated yet is
+// pose-less: a member with nothing to draw and, with physics, no peer body at the placeholder
+// origin. Its first replicated pose makes it known, where the server put it.
+TEST(HolonSyncTest, ClientPumpMarksPoseLessPeersUnknown) {
+  cvc::app server_app, a_app, b_app;
+  cvc::state_transport_inproc tp;
+  cvc::state_cluster_shard ss(server_app, "conf", "server");
+  cvc::state_cluster_shard as(a_app, "conf", "A");
+  cvc::state_cluster_shard bs(b_app, "conf", "B");
+  for (cvc::state_cluster_shard *s : {&ss, &as, &bs}) {
+    s->attach();
+    tp.register_shard(s);
+  }
+  const std::string room = "r";
+  cvc::ariadne::conference::room_join(a_app, room, "A");
+  cvc::ariadne::conference::room_join(b_app, room, "B");
+  tp.pump_all();
+
+  holon a(holon_role::client, cvc::ariadne::room_holon_config());
+  const double dt = a.clock().fixed_dt();
+  cvc::ariadne::client_pump(a, a_app, room, "A", dt); // the roster is here, no pose yet
+  ASSERT_TRUE(a.has_participant("A"));
+  ASSERT_TRUE(a.has_participant("B")) << "membership does not wait for a pose";
+  EXPECT_FALSE(a.pose_known("A"));
+  EXPECT_FALSE(a.pose_known("B"));
+  if (a.physics()) {
+    EXPECT_TRUE(a.has_body("A")) << "the local avatar is predicted from the start";
+    EXPECT_FALSE(a.has_body("B")) << "no peer body at the placeholder origin";
+  }
+
+  // The server spawns both on its ring and publishes their poses.
+  holon server(holon_role::server);
+  cvc::ariadne::server_pump(server, server_app, room, dt);
+  tp.pump_all();
+  cvc::ariadne::client_pump(a, a_app, room, "A", dt);
+  EXPECT_TRUE(a.pose_known("A"));
+  EXPECT_TRUE(a.pose_known("B"));
+  if (a.physics())
+    EXPECT_TRUE(a.has_body("B")) << "a kinematic body, at its first sample";
+  const vec3 shown = a.display_pose("B").position, spawned = server.state("B").position;
+  EXPECT_DOUBLE_EQ(shown.x, spawned.x);
+  EXPECT_DOUBLE_EQ(shown.y, spawned.y);
+  EXPECT_GT(std::hypot(shown.x, shown.y), 3.0) << "on the spawn ring, not at the origin";
+
+  // A client that joins once the poses have replicated knows every one from its first pump.
+  holon b(holon_role::client);
+  cvc::ariadne::client_pump(b, b_app, room, "B", dt);
+  EXPECT_TRUE(b.pose_known("A"));
+  EXPECT_TRUE(b.pose_known("B"));
+
+  for (cvc::state_cluster_shard *s : {&ss, &as, &bs}) {
+    tp.unregister_shard(s);
+    s->detach();
+  }
+}
+
+// ── journaling: one mutation per written pose leaf ──────────────────────────
+
+namespace {
+// Publish what SHARD journaled since its last drain to the transport's other shards; returns how
+// many mutations that was (what the writes since then cost on the wire).
+std::size_t publish_drained(cvc::state_transport_inproc &tp, cvc::state_cluster_shard &shard) {
+  const std::vector<cvc::state_mutation> drained = shard.drain_local();
+  for (const cvc::state_mutation &m : drained)
+    tp.publish(m);
+  return drained.size();
+}
+} // namespace
+
+// A pose has 14 leaves (13 doubles and the server_tick). Each one written journals ONE mutation: a
+// changed leaf its value, not a touch and then the value.
+TEST(HolonSyncTest, ChangedOnlyPoseWritesOneMutationPerChangedLeaf) {
+  cvc::app server_app, client_app;
+  cvc::state_transport_inproc tp;
+  cvc::state_cluster_shard ss(server_app, "conf", "server");
+  cvc::state_cluster_shard cs(client_app, "conf", "client");
+  ss.attach();
+  cs.attach();
+  tp.register_shard(&ss);
+  tp.register_shard(&cs);
+  const std::string room = "r", pid = "A";
+  constexpr std::uint64_t kHeartbeat = 120;
+  body_state s;
+  s.position = vec3{1.0, 2.0, 0.0};
+  s.linear_velocity = vec3{0.5, 0.0, 0.0};
+  body_state got;
+  std::uint64_t tick = 0;
+
+  // A fresh pose: every leaf, once, and it converges on the client.
+  cvc::ariadne::write_pose(server_app, room, pid, s, 100, kHeartbeat);
+  EXPECT_EQ(publish_drained(tp, ss), 14u);
+  ASSERT_TRUE(cvc::ariadne::read_pose(client_app, room, pid, got, tick));
+  EXPECT_EQ(tick, 100u);
+  expect_pos_bit_eq(got.position, s.position);
+  expect_pos_bit_eq(got.linear_velocity, s.linear_velocity);
+
+  // One leaf moved: that leaf and the tick.
+  s.position.x = 1.5;
+  cvc::ariadne::write_pose(server_app, room, pid, s, 110, kHeartbeat);
+  EXPECT_EQ(publish_drained(tp, ss), 2u);
+  ASSERT_TRUE(cvc::ariadne::read_pose(client_app, room, pid, got, tick));
+  EXPECT_EQ(tick, 110u);
+  expect_pos_bit_eq(got.position, s.position);
+
+  // Unchanged within the heartbeat: nothing.
+  cvc::ariadne::write_pose(server_app, room, pid, s, 150, kHeartbeat);
+  EXPECT_EQ(publish_drained(tp, ss), 0u);
+
+  // Unchanged a heartbeat on: the tick alone.
+  cvc::ariadne::write_pose(server_app, room, pid, s, 230, kHeartbeat);
+  EXPECT_EQ(publish_drained(tp, ss), 1u);
+  ASSERT_TRUE(cvc::ariadne::read_pose(client_app, room, pid, got, tick));
+  EXPECT_EQ(tick, 230u);
+  expect_pos_bit_eq(got.position, s.position);
+
+  tp.unregister_shard(&ss);
+  tp.unregister_shard(&cs);
+  ss.detach();
+  cs.detach();
+}
+
+// Heartbeat 0 is the forced rewrite: every leaf goes out again, changed or not, once each -- so a
+// peer that saw none of the earlier writes converges from that one write.
+TEST(HolonSyncTest, ForcedPoseRewritesEveryLeafOnce) {
+  cvc::app server_app, client_app;
+  cvc::state_transport_inproc tp;
+  cvc::state_cluster_shard ss(server_app, "conf", "server");
+  cvc::state_cluster_shard cs(client_app, "conf", "client");
+  ss.attach();
+  cs.attach();
+  tp.register_shard(&ss);
+  tp.register_shard(&cs);
+  const std::string room = "r", pid = "A";
+  body_state s;
+  s.position = vec3{-2.0, 0.5, 0.0};
+  s.rotation = cvc::physics::quat{0.5, -0.5, 0.5, -0.5};
+
+  cvc::ariadne::write_pose(server_app, room, pid, s, 100);
+  EXPECT_EQ(publish_drained(tp, ss), 14u) << "a fresh pose";
+  cvc::ariadne::write_pose(server_app, room, pid, s, 100);
+  EXPECT_EQ(publish_drained(tp, ss), 14u) << "unchanged, even the tick: each leaf re-sent once";
+  s.position.y = -1.0;
+  cvc::ariadne::write_pose(server_app, room, pid, s, 101);
+  EXPECT_EQ(publish_drained(tp, ss), 14u) << "one moved: still once per leaf, not twice for it";
+
+  // A peer that joins now (an inproc transport replays nothing) is re-hydrated by the next one.
+  cvc::app late_app;
+  cvc::state_cluster_shard ls(late_app, "conf", "late");
+  ls.attach();
+  tp.register_shard(&ls);
+  cvc::ariadne::write_pose(server_app, room, pid, s, 102);
+  EXPECT_EQ(publish_drained(tp, ss), 14u);
+  body_state got;
+  std::uint64_t tick = 0;
+  ASSERT_TRUE(cvc::ariadne::read_pose(late_app, room, pid, got, tick));
+  EXPECT_EQ(tick, 102u);
+  expect_pos_bit_eq(got.position, s.position);
+  EXPECT_EQ(bits(got.rotation.w), bits(s.rotation.w));
+  EXPECT_EQ(bits(got.rotation.z), bits(s.rotation.z));
+  ASSERT_TRUE(cvc::ariadne::read_pose(client_app, room, pid, got, tick));
+  EXPECT_EQ(tick, 102u);
+  expect_pos_bit_eq(got.position, s.position);
+
+  for (cvc::state_cluster_shard *sh : {&ss, &cs, &ls}) {
+    tp.unregister_shard(sh);
+    sh->detach();
+  }
+}
+
+// A leaf can exist, empty, before its first write -- made by a lookup that creates nodes
+// (state::operator()), which signals nothing, so the state adapter is not observing it yet. Its
+// first value must still journal: it is touched first, which attaches it.
+TEST(HolonSyncTest, PreCreatedEmptyLeafStillReplicates) {
+  cvc::app server_app, client_app;
+  cvc::state_transport_inproc tp;
+  cvc::state_cluster_shard ss(server_app, "conf", "server");
+  cvc::state_cluster_shard cs(client_app, "conf", "client");
+  ss.attach();
+  cs.attach();
+  tp.register_shard(&ss);
+  tp.register_shard(&cs);
+  const std::string room = "r", pid = "A";
+  const std::string sep = cvc::state::SEPARATOR;
+  const std::string x_path = cvc::ariadne::conference::room_participant_path(room, pid) + sep +
+                             "pose" + sep + "pos" + sep + "x";
+  server_app.root()(x_path); // created after the shard attached: present, empty, unobserved
+  ASSERT_NE(server_app.root().findDescendant(x_path), nullptr);
+
+  body_state s;
+  s.position = vec3{3.25, -1.0, 0.0};
+  cvc::ariadne::write_pose(server_app, room, pid, s, 7, /*heartbeat_ticks=*/120);
+  EXPECT_EQ(publish_drained(tp, ss), 14u) << "the pre-created leaf journaled too";
+  body_state got;
+  std::uint64_t tick = 0;
+  ASSERT_TRUE(cvc::ariadne::read_pose(client_app, room, pid, got, tick));
+  EXPECT_EQ(tick, 7u);
+  expect_pos_bit_eq(got.position, s.position);
+
+  tp.unregister_shard(&ss);
+  tp.unregister_shard(&cs);
+  ss.detach();
+  cs.detach();
+}
+
 // ── timing: stamped intents, changed-only poses ─────────────────────────────
 
 TEST(HolonSyncTest, IntentStampRoundTrips) {

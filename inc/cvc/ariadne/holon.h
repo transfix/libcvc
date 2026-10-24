@@ -125,12 +125,29 @@ public:
   // Register a participant. `local` marks the CLIENT's own avatar (predicted); on a
   // server every participant is authoritative, and on a client a non-local
   // participant is an interpolated peer.
+  //
+  // POSE_KNOWN = false (CLIENT): `start` is a placeholder, not a pose -- the host saw the
+  // participant in the roster before its first authoritative sample. It is a member like any
+  // other, but pose_known() stays false until apply_authoritative brings that sample, so a
+  // renderer can leave it undrawn. With physics a non-local one has no kinematic body until then
+  // (one held at the placeholder would be an invisible obstacle, at the origin, inside the room's
+  // reference object); the first sample creates it there. The local avatar keeps its body (its
+  // prediction steps it). A server ignores the flag: it is the authority, so every pose it holds
+  // is known.
   void add_participant(const std::string &pid, bool local = false,
-                       const cvc::physics::body_state &start = cvc::physics::body_state{});
+                       const cvc::physics::body_state &start = cvc::physics::body_state{},
+                       bool pose_known = true);
   void remove_participant(const std::string &pid);
   bool has_participant(const std::string &pid) const;
   // Every registered pid, in pid order.
   std::vector<std::string> participants() const;
+
+  // Whether `pid`'s pose is real: it was added with pose_known, or a sample has arrived since.
+  // False for an unknown pid.
+  bool pose_known(const std::string &pid) const;
+  // Whether `pid` has a rigid body in the physics world. False without physics, for an unknown
+  // pid, and for a client peer whose pose is not known yet.
+  bool has_body(const std::string &pid) const;
 
   // Set a participant's latest intent. Server: the validated input it integrates
   // into the authoritative pose, from the next quantum on (any queued stamped
@@ -190,7 +207,9 @@ public:
   // server holon or an unknown pid.
   //
   // A sample at or below the newest one already seen for `pid` is ignored outright
-  // (a re-read of an unchanged pose is not news, and must not move the clock).
+  // (a re-read of an unchanged pose is not news, and must not move the clock). The
+  // first one makes the pose known (pose_known), and gives a peer registered without
+  // one its kinematic body, at the sample.
   //
   // Reconcile compares ticks, so the replica's clock must count the server's ticks.
   // The two clocks start independently (a client joins a server that has run for
@@ -203,6 +222,13 @@ public:
   // from wall time at the same rate.
   void apply_authoritative(const std::string &pid, const cvc::physics::body_state &auth,
                            std::uint64_t server_tick);
+
+  // CLIENT: how many times apply_authoritative has re-aligned the replica's clock (each seek also
+  // drops the local avatar's unacknowledged inputs: a visible jump). The first sample after
+  // joining is one; after that the count should stay flat, and a rising one means samples keep
+  // arriving with ticks far from the replica's (a stalled frame loop, or a sender stamping stale
+  // ticks).
+  std::uint64_t clock_realigns() const noexcept { return _realigns; }
 
   // Advance the holon one frame. SERVER: drives its clock from wall time (wall_dt<0)
   // or an injected dt, then integrates every authoritative avatar over the quanta
@@ -233,6 +259,8 @@ public:
 private:
   struct participant {
     bool local = false;
+    // CLIENT: its pose is real (added with one, or a sample has arrived); see add_participant.
+    bool pose_known = true;
     avatar_sim sim;             // server authoritative integrator
     avatar_intent intent;       // latest intent (server input / client-local input)
     // SERVER: stamped intents waiting for their tick (queue_intent), in tick order.
@@ -284,6 +312,7 @@ private:
   std::uint64_t _lead = 0;              // CLIENT: ticks ahead of the server (set_lead_ticks)
   std::unique_ptr<avatar_world> _world; // physics (holon_config::physics + a Jolt build)
   std::uint64_t _vetoes = 0;            // SERVER: intents sanitize_intent changed
+  std::uint64_t _realigns = 0;          // CLIENT: clock seeks in apply_authoritative
   std::uint64_t _statics_rev = 0;
 };
 

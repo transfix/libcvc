@@ -110,9 +110,25 @@ public:
   // process over the SAME shards; a small bridge (Phase 2) relays frames between
   // the two transports' connection sets so WS and gRPC clients share the room.
   // Off by default — a leaf client applies a received frame locally and never
-  // re-sends it.
+  // re-sends it. Each forward honours the target peer's registry entry
+  // (subscriptions + delivery filter), exactly as publish() does.
   void set_relay(bool enable) noexcept { _relay.store(enable, std::memory_order_relaxed); }
   bool relay() const noexcept { return _relay.load(std::memory_order_relaxed); }
+
+  // Relay interest gate (opt-in; default off). When on, a Mutation/Message received from a
+  // connection is re-fanned -- to the other connections AND across the bridge -- only when some
+  // registered same-cluster shard would admit it (state_cluster_shard::admits / admits_message:
+  // the path is of interest, and a delegation op always passes). A relay whose clients all
+  // enforce the relay's own interest set thereby stops forwarding frames no client would apply.
+  // A relay with no matching shard still forwards everything, and ingest is unchanged. Each
+  // withheld frame is counted in total_relay_withheld().
+  void set_relay_requires_interest(bool on) noexcept {
+    _relay_requires_interest.store(on, std::memory_order_relaxed);
+  }
+  bool relay_requires_interest() const noexcept {
+    return _relay_requires_interest.load(std::memory_order_relaxed);
+  }
+  std::uint64_t total_relay_withheld() const noexcept { return _relay_withheld.load(); }
 
   // Invoked (on a server reader thread) when a peer CLOSES its connection, with that peer's node id
   // (from its Hello). A relay uses this to retract the departed participant from the room so the
@@ -133,6 +149,11 @@ public:
   // join that races an already-connected peer's socket can be missed and never recovers; calling
   // this periodically on the server's main loop lets every client re-converge on the room/scene
   // tree within one interval (idempotent bulk apply). Returns how many connections it wrote to.
+  //
+  // Each connection's frame honours the peer registry. Connections that have not identified, or
+  // whose peer has neither subscriptions nor a delivery filter, share ONE unfiltered frame per
+  // shard (encoded once); a filtered peer gets its own frame holding only the entries its
+  // state_peer_registry::delivery_view passes. Shard snapshots are taken once per call.
   std::size_t broadcast_snapshot();
 
   // ── Media plane (bring-up: media over this WS control channel) ──
@@ -155,10 +176,17 @@ public:
   void fan_media(const media_frame &f, const void *exclude = nullptr) override;
   void set_media_sink(media_sink_fn sink) override;
   const char *media_protocol() const noexcept override { return "ws"; }
+  // Per-receiver egress gate (see media_endpoint::set_media_gate). fan_media asks it once per
+  // identified receiving connection; a connection that has not sent its Hello always receives,
+  // and publish_media_frame (this node's own uplink) is never gated. Thread-safe; the gate is
+  // swapped whole and a fan already in progress finishes with the gate it started with.
+  void set_media_gate(media_gate_fn gate) override;
 
   std::uint64_t total_media_sent() const noexcept { return _media_sent.load(); }
   std::uint64_t total_media_received() const noexcept { return _media_recv.load(); }
   std::uint64_t total_media_forwarded() const noexcept { return _media_fwd.load(); }
+  // Receiver deliveries the media gate denied (one per frame per denied connection).
+  std::uint64_t total_media_gated() const noexcept { return _media_gated.load(); }
 
   // Backfill on connect (default true): replay each registered shard's journaled
   // local-origin mutations to a newly admitted connection BEFORE any live traffic,
@@ -177,6 +205,14 @@ public:
   std::size_t pump_all() override;
   void flush() override;
   // fetch_chunk() / request_snapshot() use the base defaults for now (Phase 2).
+
+  // One unsolicited, final snapshot frame of exactly `entries` to each live connection identified
+  // as `node_id` (see state_transport::push_snapshot_to); the registry is not consulted. A
+  // connection with more than 2 MB of unsent backlog is skipped -- the caller's next push or the
+  // periodic broadcast_snapshot heals it. Returns the connections written; 0, with nothing
+  // encoded, when none matches or `entries` is empty.
+  std::size_t push_snapshot_to(const std::string &node_id,
+                               const std::vector<snapshot_entry> &entries) override;
 
   // ── Diagnostics ──
   std::size_t shard_count() const;
@@ -219,8 +255,9 @@ public:
 
 private:
   // Encode `m` to a Frame and write it to every live connection except `exclude` (a connection*;
-  // nullptr = all). Returns the number written. Backs both publish_media_frame and fan_media.
-  std::size_t write_media(const media_frame &m, const void *exclude);
+  // nullptr = all). With `gated`, the media gate (when one is set) is asked per identified receiver
+  // first. Returns the number written. Backs publish_media_frame (ungated) and fan_media (gated).
+  std::size_t write_media(const media_frame &m, const void *exclude, bool gated);
   void send_hello_locked(connection &c);
   void send_backfill_locked(connection &c, const std::vector<state_cluster_shard *> &shards);
   // Relay-only: push the full CURRENT snapshot of each shard to a newly admitted connection, so a
@@ -257,13 +294,21 @@ private:
 
   std::atomic<bool> _backfill_on_connect{true};
   std::atomic<bool> _relay{false};
+  std::atomic<bool> _relay_requires_interest{false};
+  std::atomic<std::uint64_t> _relay_withheld{0}; // inbound frames the interest gate kept local
   connection_closed_fn _on_conn_closed; // set by a relay; invoked on a peer close (see above)
   media_sink_fn _media_sink; // media_router ingress (relay) OR set_on_media leaf sugar; see above
 
+  // The media egress gate: replaced whole under _media_gate_mu, and copied once per fanned frame so
+  // the per-receiver loop (and its socket writes) runs without the lock. Null = no gate.
+  mutable std::mutex _media_gate_mu;
+  std::shared_ptr<const media_gate_fn> _media_gate;
+
   std::atomic<std::uint64_t> _media_sent{
       0}; // MediaFrames this transport sent (publish_media_frame)
-  std::atomic<std::uint64_t> _media_recv{0}; // MediaFrames received from peers
-  std::atomic<std::uint64_t> _media_fwd{0};  // MediaFrames a relay fanned to other connections
+  std::atomic<std::uint64_t> _media_recv{0};  // MediaFrames received from peers
+  std::atomic<std::uint64_t> _media_fwd{0};   // MediaFrames a relay fanned to other connections
+  std::atomic<std::uint64_t> _media_gated{0}; // receiver deliveries the media gate denied
 
   std::atomic<std::uint64_t> _published{0};
   std::atomic<std::uint64_t> _sent_frames{0};

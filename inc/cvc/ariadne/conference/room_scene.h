@@ -45,6 +45,8 @@ namespace conference {
 //                                         box.{x,y,z}, radius}, transform.{pos,rot,scale}.{x,y,z},
 //                                         material.{color.{r,g,b}, ambient, diffuse, specular,
 //                                         specular_power}, visible}
+//   conf.rooms.<room>.scene.objects.<id>.source.fit.{height, up_y}   only for an object that has
+//                                         (or once had) a fit: -- a mesh asset stood on the ground
 //
 // The schema is the .ari scene's own (cvc::ariadne::Scene / SceneNode / SceneLight) restricted to
 // the fields a shared room needs, so a client turns the live subtree back into a Scene and hands it
@@ -83,8 +85,10 @@ void write_scene_env(cvc::app &app, const std::string &room_id, const room_scene
 bool read_scene_env(cvc::app &app, const std::string &room_id, room_scene_env &env);
 
 // Write (add or replace) one object. Replicated fields: id, the source (a URI in source_file, or a
-// plane/box/sphere source_primitive with its size), the transform, the material colour/ambient/
-// diffuse (+ specular when has_specular), and visible_default. type is always "geometry".
+// plane/box/sphere source_primitive with its size), the mesh's fit (has_fit, fit_height, fit_up_y;
+// see SceneNode), the transform, the material colour/ambient/diffuse (+ specular when
+// has_specular), and visible_default. type is always "geometry". An object without a fit writes
+// no fit leaves, unless it is replacing one that had a fit, which it clears.
 void write_scene_object(cvc::app &app, const std::string &room_id,
                         const cvc::ariadne::SceneNode &obj);
 
@@ -113,6 +117,23 @@ std::vector<cvc::ariadne::SceneNode> default_scene_objects();
 // Seed ROOM-ID with the default scene if it has none yet (scene_revision == 0). Idempotent, so a
 // restarted relay does not clobber a scene already in its tree. Returns true if it seeded.
 bool seed_default_scene(cvc::app &app, const std::string &room_id);
+
+// The large demo scene (arisrv --scene large): room to spread out, and meshes for LOD to work on.
+// A SIDE_M ground plane (centred on the origin, like the default's), the default reference box,
+// and the embedded Stanford bunny (source.uri "x.bunny", 69,473 triangles) fitted about 1.7 m tall
+// at the centre of every cell of a GRID x GRID lattice over the plane -- 20 m apart at the defaults
+// -- except a cell centred on the origin (an odd GRID's middle one), which is the reference box's
+// and the avatars' spawn ring's. The bunnies are named "bunny_<i>_<j>" (cell column, row). They
+// are meshes, so they have no physics (room_statics keeps only the plane and the box), and every
+// one is the same asset, so a client builds one LOD pyramid for them all. Throws
+// std::invalid_argument unless SIDE_M is finite and > 0 and GRID >= 1. The environment is
+// default_scene_env().
+std::vector<cvc::ariadne::SceneNode> large_demo_scene_objects(double side_m = 100.0, int grid = 5);
+
+// Seed ROOM-ID with the large demo scene if it has none yet, exactly as seed_default_scene does
+// with the default one (idempotent; true if it seeded).
+bool seed_large_demo_scene(cvc::app &app, const std::string &room_id, double side_m = 100.0,
+                           int grid = 5);
 
 } // namespace conference
 } // namespace ariadne

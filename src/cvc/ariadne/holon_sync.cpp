@@ -55,7 +55,9 @@ std::string leaf(const std::string &room, const std::string &pid,
 }
 
 // touch-before-value, so a just-created node's first write is not lost to the
-// distributed-state adapter's attach race (the room tree's set_replicated idiom).
+// distributed-state adapter's attach race (the room tree's set_replicated idiom). Every call
+// re-sends the leaf, changed or not, which is what an intent wants: proposing it again reaches a
+// relay whose copy has diverged. Poses use set_pose_leaf instead.
 void set_replicated(cvc::app &app, const std::string &path, const std::string &val) {
   cvc::state &n = app.root()(path);
   n.touch();
@@ -70,7 +72,29 @@ bool node_present(cvc::app &app, const std::string &path) {
   return app.root().findDescendant(path) != nullptr;
 }
 
-// set_replicated unless the leaf already holds V to within kPoseEpsilon; true when it wrote. A
+// A pose leaf write that journals ONE mutation, where set_replicated journals two for a leaf whose
+// value changes (touch fires valueChanged, then value() fires it again), doubling pose egress,
+// backfill and journal growth. A leaf that is new, or exists but has never held a value, may not
+// be observed by the distributed-state adapter yet (creating a node signals nothing; the adapter
+// attaches it on the childChanged a touch emits), so it keeps touch-before-value and its value is
+// the one write that journals. A leaf with a value is observed: a new value alone journals. FORCE
+// re-sends an unchanged leaf with a touch (one mutation carrying the current value, for a peer
+// that missed it); without it an unchanged leaf costs nothing.
+void set_pose_leaf(cvc::app &app, const std::string &path, const std::string &val, bool force) {
+  cvc::state *n = app.root().findDescendant(path);
+  const std::string cur = n ? n->value() : std::string();
+  if (cur.empty()) {
+    cvc::state &m = n ? *n : app.root()(path);
+    m.touch();
+    m.value(val);
+  } else if (cur != val) {
+    n->value(val);
+  } else if (force) {
+    n->touch();
+  }
+}
+
+// set_pose_leaf unless the leaf already holds V to within kPoseEpsilon; true when it wrote. A
 // resting rigid body jitters in its last float bits every step; that is not news worth a write.
 constexpr double kPoseEpsilon = 1e-4; // m, m/s, quaternion units
 bool set_if_changed(cvc::app &app, const std::string &path, double v) {
@@ -78,7 +102,7 @@ bool set_if_changed(cvc::app &app, const std::string &path, double v) {
       n && !n->value().empty() &&
       std::fabs(std::strtod(n->value().c_str(), nullptr) - v) <= kPoseEpsilon)
     return false;
-  set_replicated(app, path, fmt(v));
+  set_pose_leaf(app, path, fmt(v), /*force=*/false);
   return true;
 }
 
@@ -87,12 +111,13 @@ bool set_if_changed(cvc::app &app, const std::string &path, double v) {
 void write_pose(cvc::app &app, const std::string &room, const std::string &pid,
                 const cvc::physics::body_state &s, std::uint64_t server_tick,
                 std::uint64_t heartbeat_ticks) {
+  // Heartbeat 0 is the forced rewrite: every leaf goes out (once), changed or not.
   const bool all = heartbeat_ticks == 0;
   bool changed = false;
   const auto put = [&](std::initializer_list<const char *> parts, double v) {
     const std::string path = leaf(room, pid, parts);
     if (all)
-      set_replicated(app, path, fmt(v)), changed = true;
+      set_pose_leaf(app, path, fmt(v), /*force=*/true), changed = true;
     else
       changed = set_if_changed(app, path, v) || changed;
   };
@@ -117,7 +142,7 @@ void write_pose(cvc::app &app, const std::string &room, const std::string &pid,
     if (t && server_tick >= last && server_tick - last < heartbeat_ticks)
       return;
   }
-  set_replicated(app, tick_path, std::to_string(static_cast<unsigned long long>(server_tick)));
+  set_pose_leaf(app, tick_path, std::to_string(static_cast<unsigned long long>(server_tick)), all);
 }
 
 bool read_pose(cvc::app &app, const std::string &room, const std::string &pid,
@@ -280,8 +305,11 @@ void client_pump(holon &h, cvc::app &app, const std::string &room, const std::st
     cvc::physics::body_state s;
     std::uint64_t server_tick = 0;
     const bool have = read_pose(app, room, p.pid, s, server_tick);
+    // A participant the roster lists before its pose has replicated is registered pose-less: no
+    // body and no marker at the placeholder origin until its first sample (holon::pose_known).
     if (!h.has_participant(p.pid))
-      h.add_participant(p.pid, /*local=*/p.pid == self_pid, have ? s : cvc::physics::body_state{});
+      h.add_participant(p.pid, /*local=*/p.pid == self_pid, have ? s : cvc::physics::body_state{},
+                        /*pose_known=*/have);
     if (have)
       h.apply_authoritative(p.pid, s, server_tick);
   }

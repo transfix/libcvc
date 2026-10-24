@@ -19,6 +19,7 @@
 #include <cvc/state/state_transport_grpc.h>
 #include <functional>
 #include <grpcpp/grpcpp.h>
+#include <iterator>
 #include <stdexcept>
 #include <utility>
 
@@ -214,6 +215,68 @@ cvc::media_frame decode_media(const pb::MediaFrame &in) {
   return m;
 }
 
+// Encode `entries` into `rsp`, skipping each one `view` (when given) would not deliver. The single
+// SnapshotEntry encoding behind the admit snapshot, the request responder and the targeted push.
+// Returns the number of entries encoded.
+std::size_t fill_snapshot_response(pb::SnapshotResponse *rsp,
+                                   const std::vector<state_transport::snapshot_entry> &entries,
+                                   const state_peer_registry::delivery_view *view) {
+  std::size_t n = 0;
+  for (const auto &e : entries) {
+    if (view && !view->deliver(e.path))
+      continue;
+    auto *pe = rsp->add_entries();
+    pe->set_path(e.path);
+    pe->set_string_value(e.string_value);
+    pe->set_comment(e.comment);
+    pe->set_hidden(e.hidden);
+    pe->set_read_only(e.read_only);
+    for (const auto &p : e.properties)
+      (*pe->mutable_properties())[p.first] = p.second;
+    pe->set_type_name(e.type_name);
+    pe->set_origin_node_id(e.origin_node_id);
+    pe->set_sequence(e.sequence);
+    pe->set_data_type_name(e.data_type_name);
+    if (e.data_payload.kind != state_payload_kind::none)
+      set_pb_payload(pe->mutable_data_payload(), e.data_payload);
+    ++n;
+  }
+  return n;
+}
+
+// The inverse of fill_snapshot_response, for a received SnapshotResponse.
+std::vector<state_transport::snapshot_entry> read_snapshot_entries(const pb::SnapshotResponse &sr) {
+  std::vector<state_transport::snapshot_entry> entries;
+  entries.reserve(sr.entries_size());
+  for (const auto &e : sr.entries()) {
+    state_transport::snapshot_entry se;
+    se.path = e.path();
+    se.string_value = e.string_value();
+    se.comment = e.comment();
+    se.hidden = e.hidden();
+    se.read_only = e.read_only();
+    for (const auto &p : e.properties())
+      se.properties[p.first] = p.second;
+    se.type_name = e.type_name();
+    se.origin_node_id = e.origin_node_id();
+    se.sequence = e.sequence();
+    se.data_type_name = e.data_type_name();
+    if (e.has_data_payload())
+      read_pb_payload(e.data_payload(), se.data_payload);
+    entries.push_back(std::move(se));
+  }
+  return entries;
+}
+
+// The registry's verdict on sending `path` to a connection whose peer is `pid`; nullptr (a peer
+// that has not identified yet) gets everything. A refusal is counted against the peer.
+bool registry_allows(state_peer_registry &peers, const std::string *pid, const std::string &path) {
+  if (pid == nullptr || peers.should_deliver(*pid, path))
+    return true;
+  peers.note_delivery_filtered(*pid);
+  return false;
+}
+
 } // namespace
 
 // Connection abstracts a single bidirectional stream. Server-side
@@ -230,8 +293,28 @@ public:
   std::mutex write_mu;
   std::function<bool(const pb::Frame &)> write_raw;
   std::atomic<bool> alive{true};
+  // The peer's identity, from the first Hello that names one. Written once, on this connection's
+  // reader thread, before `identified` is released; a later Hello is ignored, so neither string
+  // changes after that. Any other thread reads them only through peer_id().
   std::string remote_node_id;
   std::string remote_cluster_id;
+  std::atomic<bool> identified{false};
+
+  // The peer's node id once its Hello has arrived; nullptr before (an unknown peer, which the
+  // registry delivers everything to).
+  const std::string *peer_id() const noexcept {
+    return identified.load(std::memory_order_acquire) ? &remote_node_id : nullptr;
+  }
+
+  // Reader thread only. A Hello without a node id identifies nothing.
+  void on_hello(const pb::Hello &h) {
+    if (identified.load(std::memory_order_relaxed) || h.node_id().empty())
+      return;
+    remote_node_id = h.node_id();
+    remote_cluster_id = h.cluster_id();
+    identified.store(true, std::memory_order_release);
+  }
+
   // Link quality (state_link_stats): traffic both ways + the Ping/Pong round trip. `accepted` marks
   // the server end of the stream; opened/last-rx are steady-clock ns for the report's age / idle.
   state_link_stats link;
@@ -331,8 +414,7 @@ public:
       if (_owner->on_link_frame(*conn, in))
         continue;
       if (in.has_hello()) {
-        conn->remote_node_id = in.hello().node_id();
-        conn->remote_cluster_id = in.hello().cluster_id();
+        conn->on_hello(in.hello());
       } else if (in.has_mutation()) {
         _owner->on_inbound_mutation(decode_mutation(in.mutation()), conn.get());
         _owner->increment_recv_mutations();
@@ -355,26 +437,8 @@ public:
                                             in.snapshot_request().request_id());
       } else if (in.has_snapshot_response()) {
         const auto &sr = in.snapshot_response();
-        std::vector<state_transport::snapshot_entry> entries;
-        entries.reserve(sr.entries_size());
-        for (const auto &e : sr.entries()) {
-          state_transport::snapshot_entry se;
-          se.path = e.path();
-          se.string_value = e.string_value();
-          se.comment = e.comment();
-          se.hidden = e.hidden();
-          se.read_only = e.read_only();
-          for (const auto &p : e.properties())
-            se.properties[p.first] = p.second;
-          se.type_name = e.type_name();
-          se.origin_node_id = e.origin_node_id();
-          se.sequence = e.sequence();
-          se.data_type_name = e.data_type_name();
-          if (e.has_data_payload())
-            read_pb_payload(e.data_payload(), se.data_payload);
-          entries.push_back(std::move(se));
-        }
-        _owner->on_inbound_snapshot_response(sr.request_id(), entries, sr.final());
+        _owner->on_inbound_snapshot_response(sr.request_id(), read_snapshot_entries(sr),
+                                             sr.final());
       } else if (in.has_heartbeat()) {
         _owner->on_inbound_heartbeat(in.heartbeat().node_id(), in.heartbeat().cluster_id());
       }
@@ -386,7 +450,8 @@ public:
       conn->cancel = nullptr; // ctx dies with this handler
     }
     _owner->unregister_connection(conn.get());
-    _owner->notify_connection_closed(conn->remote_node_id);
+    const std::string *pid = conn->peer_id();
+    _owner->notify_connection_closed(pid ? *pid : std::string());
     return grpc::Status::OK;
   }
 
@@ -542,8 +607,7 @@ bool state_transport_grpc::connect_to_peer(const std::string &target,
       if (on_link_frame(*conn, in))
         continue;
       if (in.has_hello()) {
-        conn->remote_node_id = in.hello().node_id();
-        conn->remote_cluster_id = in.hello().cluster_id();
+        conn->on_hello(in.hello());
       } else if (in.has_mutation()) {
         on_inbound_mutation(decode_mutation(in.mutation()), conn.get());
         increment_recv_mutations();
@@ -566,26 +630,7 @@ bool state_transport_grpc::connect_to_peer(const std::string &target,
                                     in.snapshot_request().request_id());
       } else if (in.has_snapshot_response()) {
         const auto &sr = in.snapshot_response();
-        std::vector<snapshot_entry> entries;
-        entries.reserve(sr.entries_size());
-        for (const auto &e : sr.entries()) {
-          snapshot_entry se;
-          se.path = e.path();
-          se.string_value = e.string_value();
-          se.comment = e.comment();
-          se.hidden = e.hidden();
-          se.read_only = e.read_only();
-          for (const auto &p : e.properties())
-            se.properties[p.first] = p.second;
-          se.type_name = e.type_name();
-          se.origin_node_id = e.origin_node_id();
-          se.sequence = e.sequence();
-          se.data_type_name = e.data_type_name();
-          if (e.has_data_payload())
-            read_pb_payload(e.data_payload(), se.data_payload);
-          entries.push_back(std::move(se));
-        }
-        on_inbound_snapshot_response(sr.request_id(), entries, sr.final());
+        on_inbound_snapshot_response(sr.request_id(), read_snapshot_entries(sr), sr.final());
       } else if (in.has_heartbeat()) {
         on_inbound_heartbeat(in.heartbeat().node_id(), in.heartbeat().cluster_id());
       }
@@ -703,15 +748,14 @@ state_transport::publish_stats state_transport_grpc::publish(const state_mutatio
   for (auto &c : conns) {
     if (!c || !c->alive.load() || !c->can_write())
       continue;
-    if (!c->remote_node_id.empty() && !_peers.should_deliver(c->remote_node_id, m.path)) {
-      _peers.note_delivery_filtered(c->remote_node_id);
+    const std::string *pid = c->peer_id();
+    if (!registry_allows(_peers, pid, m.path))
       continue;
-    }
     if (c->write(frame)) {
       _sent_frames.fetch_add(1, std::memory_order_relaxed);
       ++stats.delivered;
-      if (!c->remote_node_id.empty())
-        _peers.note_mutation_delivered(c->remote_node_id);
+      if (pid)
+        _peers.note_mutation_delivered(*pid);
     }
   }
 
@@ -794,15 +838,14 @@ state_transport_grpc::publish_message(const state_message &m) {
   for (auto &c : conns) {
     if (!c || !c->alive.load() || !c->can_write())
       continue;
-    if (!c->remote_node_id.empty() && !_peers.should_deliver(c->remote_node_id, m.path)) {
-      _peers.note_delivery_filtered(c->remote_node_id);
+    const std::string *pid = c->peer_id();
+    if (!registry_allows(_peers, pid, m.path))
       continue;
-    }
     if (c->write(frame)) {
       _sent_frames.fetch_add(1, std::memory_order_relaxed);
       ++stats.peers;
-      if (!c->remote_node_id.empty())
-        _peers.note_message_delivered(c->remote_node_id);
+      if (pid)
+        _peers.note_message_delivered(*pid);
     }
   }
   return stats;
@@ -828,10 +871,19 @@ void state_transport_grpc::on_inbound_mutation(const state_mutation &m, connecti
     if (r.applied)
       _delivered.fetch_add(1, std::memory_order_relaxed);
   }
+  const bool relay = _relay.load(std::memory_order_relaxed);
+  if (!relay && !_bridge)
+    return;
+  // The interest gate withholds the frame from the relay fan AND the bridge alike.
+  if (!relay_admits(m, peers)) {
+    _relay_withheld.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
   // Relay (star topology): re-send this mutation to every OTHER connection so clients that only
   // reach this server still converge with each other. The origin connection is skipped (no echo);
   // origin_node_id is preserved so duplicate suppression / vector clocks still work end-to-end.
-  if (_relay.load(std::memory_order_relaxed)) {
+  // Each target's registry entry applies, as it does to publish().
+  if (relay) {
     pb::Frame frame;
     encode_mutation(m, frame.mutable_mutation());
     std::vector<std::shared_ptr<connection>> conns;
@@ -842,12 +894,15 @@ void state_transport_grpc::on_inbound_mutation(const state_mutation &m, connecti
     for (auto &c : conns) {
       if (!c || c.get() == origin || !c->alive.load() || !c->can_write())
         continue;
+      if (!registry_allows(_peers, c->peer_id(), m.path))
+        continue;
       if (c->write(frame))
         _sent_frames.fetch_add(1, std::memory_order_relaxed);
     }
   }
   // Bridge to a sibling transport (e.g. the relay's WebSocket side) so its connections get this
-  // mutation — the WS<->gRPC bridge that puts browser (wasm) and native clients in one room.
+  // mutation — the WS<->gRPC bridge that puts browser (wasm) and native clients in one room. The
+  // sibling's publish() applies its own registry.
   if (_bridge)
     _bridge->publish(m);
 }
@@ -869,8 +924,15 @@ void state_transport_grpc::on_inbound_message(const state_message &m, connection
   }
   for (auto *peer : peers)
     (void)peer->ingest_remote_message(m);
+  const bool relay = _relay.load(std::memory_order_relaxed);
+  if (!relay && !_bridge)
+    return;
+  if (!relay_admits(m, peers)) {
+    _relay_withheld.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
   // Relay (star topology): forward the message to every OTHER connection (see on_inbound_mutation).
-  if (_relay.load(std::memory_order_relaxed)) {
+  if (relay) {
     pb::Frame frame;
     encode_message(m, frame.mutable_message());
     std::vector<std::shared_ptr<connection>> conns;
@@ -881,6 +943,8 @@ void state_transport_grpc::on_inbound_message(const state_message &m, connection
     for (auto &c : conns) {
       if (!c || c.get() == origin || !c->alive.load() || !c->can_write())
         continue;
+      if (!registry_allows(_peers, c->peer_id(), m.path))
+        continue;
       if (c->write(frame))
         _sent_frames.fetch_add(1, std::memory_order_relaxed);
     }
@@ -890,7 +954,24 @@ void state_transport_grpc::on_inbound_message(const state_message &m, connection
     _bridge->publish_message(m);
 }
 
-std::size_t state_transport_grpc::write_media(const media_frame &m, const void *exclude) {
+bool state_transport_grpc::relay_admits(const state_mutation &m,
+                                        const std::vector<state_cluster_shard *> &shards) const {
+  if (!_relay_requires_interest.load(std::memory_order_relaxed) || shards.empty())
+    return true;
+  return std::any_of(shards.begin(), shards.end(),
+                     [&m](const state_cluster_shard *s) { return s->admits(m); });
+}
+
+bool state_transport_grpc::relay_admits(const state_message &m,
+                                        const std::vector<state_cluster_shard *> &shards) const {
+  if (!_relay_requires_interest.load(std::memory_order_relaxed) || shards.empty())
+    return true;
+  return std::any_of(shards.begin(), shards.end(),
+                     [&m](const state_cluster_shard *s) { return s->admits_message(m); });
+}
+
+std::size_t state_transport_grpc::write_media(const media_frame &m, const void *exclude,
+                                              bool gated) {
   pb::Frame frame;
   pb::MediaFrame *mf = frame.mutable_media();
   mf->set_origin_node_id(m.origin_node_id);
@@ -909,12 +990,36 @@ std::size_t state_transport_grpc::write_media(const media_frame &m, const void *
     std::lock_guard<std::mutex> lk(_conns_mu);
     conns = _conns;
   }
+  // One copy of the gate for the whole frame: a concurrent set_media_gate swaps the slot, never
+  // the function this loop is calling.
+  std::shared_ptr<const media_gate_fn> gate;
+  if (gated) {
+    std::lock_guard<std::mutex> lk(_media_gate_mu);
+    gate = _media_gate;
+  }
+  const std::uint64_t stall_ns = _media_stall_ns.load(std::memory_order_relaxed);
   // Media is unreplicated, un-bridged (it crosses protocols via the media_router), and carries no
   // path. `exclude` (a connection*) skips the origin peer when a relay fans; nullptr sends to all.
   std::size_t n = 0;
   for (auto &c : conns) {
     if (!c || c.get() == exclude || !c->alive.load() || !c->can_write())
       continue;
+    if (gate) {
+      const std::string *pid = c->peer_id();
+      if (pid && !(*gate)(m, *pid)) {
+        _media_gated.fetch_add(1, std::memory_order_relaxed);
+        continue;
+      }
+    }
+    if (stall_ns != 0) {
+      const auto started =
+          static_cast<std::uint64_t>(c->write_started_ns.load(std::memory_order_relaxed));
+      if (started != 0 &&
+          media_write_stalled(started, static_cast<std::uint64_t>(link_now_ns()), stall_ns)) {
+        _media_stall_dropped.fetch_add(1, std::memory_order_relaxed);
+        continue;
+      }
+    }
     if (c->write(frame)) {
       _sent_frames.fetch_add(1, std::memory_order_relaxed);
       ++n;
@@ -924,11 +1029,34 @@ std::size_t state_transport_grpc::write_media(const media_frame &m, const void *
 }
 
 void state_transport_grpc::publish_media_frame(const media_frame &m) {
-  _media_sent.fetch_add(write_media(m, nullptr), std::memory_order_relaxed);
+  _media_sent.fetch_add(write_media(m, nullptr, /*gated=*/false), std::memory_order_relaxed);
 }
 
 void state_transport_grpc::fan_media(const media_frame &f, const void *exclude) {
-  _media_fwd.fetch_add(write_media(f, exclude), std::memory_order_relaxed);
+  _media_fwd.fetch_add(write_media(f, exclude, /*gated=*/true), std::memory_order_relaxed);
+}
+
+void state_transport_grpc::set_media_gate(media_gate_fn gate) {
+  std::shared_ptr<const media_gate_fn> next;
+  if (gate)
+    next = std::make_shared<const media_gate_fn>(std::move(gate));
+  {
+    std::lock_guard<std::mutex> lk(_media_gate_mu);
+    _media_gate.swap(next);
+  }
+  // `next` now holds the previous gate; it is released here, outside the lock (a reader thread
+  // mid-frame keeps its own copy alive).
+}
+
+void state_transport_grpc::set_media_stall_drop(std::chrono::milliseconds ms) noexcept {
+  const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(ms).count();
+  _media_stall_ns.store(ns > 0 ? static_cast<std::uint64_t>(ns) : 0, std::memory_order_relaxed);
+}
+
+bool state_transport_grpc::media_write_stalled(std::uint64_t write_started_ns, std::uint64_t now_ns,
+                                               std::uint64_t stall_ns) noexcept {
+  return stall_ns != 0 && write_started_ns != 0 && now_ns > write_started_ns &&
+         now_ns - write_started_ns > stall_ns;
 }
 
 void state_transport_grpc::set_media_sink(media_sink_fn sink) { _media_sink = std::move(sink); }
@@ -1020,6 +1148,9 @@ void state_transport_grpc::send_snapshot_locked(connection &c,
   // The receiver applies each entry via on_inbound_snapshot_response's no-waiter path
   // (ingest_snapshot_ entry, a bulk initial load). Mirrors
   // state_transport_ws::send_snapshot_locked.
+  //
+  // Unfiltered by design: this goes out before the peer's Hello, so there is no identity to look up
+  // in the registry; the receiver keeps only what its own interest takes.
   for (auto *s : shards) {
     if (s == nullptr)
       continue;
@@ -1030,22 +1161,7 @@ void state_transport_grpc::send_snapshot_locked(connection &c,
     auto *rsp = f.mutable_snapshot_response();
     rsp->set_request_id(0);
     rsp->set_final(true);
-    for (const auto &e : snap) {
-      auto *pe = rsp->add_entries();
-      pe->set_path(e.path);
-      pe->set_string_value(e.string_value);
-      pe->set_comment(e.comment);
-      pe->set_hidden(e.hidden);
-      pe->set_read_only(e.read_only);
-      for (const auto &p : e.properties)
-        (*pe->mutable_properties())[p.first] = p.second;
-      pe->set_type_name(e.type_name);
-      pe->set_origin_node_id(e.origin_node_id);
-      pe->set_sequence(e.sequence);
-      pe->set_data_type_name(e.data_type_name);
-      if (e.data_payload.kind != state_payload_kind::none)
-        set_pb_payload(pe->mutable_data_payload(), e.data_payload);
-    }
+    fill_snapshot_response(rsp, snap, /*view=*/nullptr);
     if (!c.write_locked(f))
       return; // stream died mid-snapshot; the reader will reap it
     _sent_frames.fetch_add(1, std::memory_order_relaxed);
@@ -1078,7 +1194,8 @@ std::vector<state_link_report> state_transport_grpc::link_reports() const {
       continue;
     state_link_report r;
     r.transport = "grpc";
-    r.remote_node_id = c->remote_node_id;
+    if (const std::string *pid = c->peer_id())
+      r.remote_node_id = *pid;
     r.accepted = c->accepted;
     r.age_s = static_cast<double>(now - c->opened_ns) * 1e-9;
     r.idle_s = static_cast<double>(now - c->last_rx_ns.load()) * 1e-9;
@@ -1138,8 +1255,9 @@ void state_transport_grpc::ping_loop() {
     for (auto &c : conns) {
       const std::int64_t started = c ? c->write_started_ns.load(std::memory_order_relaxed) : 0;
       if (started != 0 && now - started > kWriteStallNs && c->alive.load()) {
+        const std::string *pid = c->peer_id();
         std::fprintf(stderr, "[grpc] write to '%s' blocked > 3 s (peer not reading): closing\n",
-                     c->remote_node_id.c_str());
+                     pid ? pid->c_str() : "");
         c->abort_io();
       }
     }
@@ -1295,44 +1413,23 @@ void state_transport_grpc::on_inbound_snapshot_request(connection *conn,
   std::vector<snapshot_entry> all;
   for (auto *peer : peers) {
     auto snap = peer->snapshot(path_prefix);
-    for (auto &se : snap) {
-      snapshot_entry te;
-      te.path = std::move(se.path);
-      te.string_value = std::move(se.string_value);
-      te.comment = std::move(se.comment);
-      te.hidden = se.hidden;
-      te.read_only = se.read_only;
-      te.properties = std::move(se.properties);
-      te.type_name = std::move(se.type_name);
-      te.origin_node_id = std::move(se.origin_node_id);
-      te.sequence = se.sequence;
-      te.data_type_name = std::move(se.data_type_name);
-      te.data_payload = std::move(se.data_payload);
-      all.push_back(std::move(te));
-    }
+    all.insert(all.end(), std::make_move_iterator(snap.begin()),
+               std::make_move_iterator(snap.end()));
   }
+
+  // The requester sees what its registry entry lets its live traffic see (a delivery policy, not
+  // access control). A requester that has not identified gets everything.
+  state_peer_registry::delivery_view view;
+  if (conn != nullptr)
+    if (const std::string *pid = conn->peer_id())
+      view = _peers.view_of(*pid);
 
   // Build response frame.
   pb::Frame f;
   auto *rsp = f.mutable_snapshot_response();
   rsp->set_request_id(request_id);
   rsp->set_final(true);
-  for (const auto &e : all) {
-    auto *pe = rsp->add_entries();
-    pe->set_path(e.path);
-    pe->set_string_value(e.string_value);
-    pe->set_comment(e.comment);
-    pe->set_hidden(e.hidden);
-    pe->set_read_only(e.read_only);
-    for (const auto &p : e.properties)
-      (*pe->mutable_properties())[p.first] = p.second;
-    pe->set_type_name(e.type_name);
-    pe->set_origin_node_id(e.origin_node_id);
-    pe->set_sequence(e.sequence);
-    pe->set_data_type_name(e.data_type_name);
-    if (e.data_payload.kind != state_payload_kind::none)
-      set_pb_payload(pe->mutable_data_payload(), e.data_payload);
-  }
+  fill_snapshot_response(rsp, all, view.filtered() ? &view : nullptr);
 
   if (conn && conn->alive.load() && conn->can_write()) {
     conn->write(f);
@@ -1362,6 +1459,8 @@ void state_transport_grpc::on_inbound_snapshot_response(std::uint64_t request_id
   // the WS relay path, so a native client joining a populated room sees the peers already present.
   // Applied defensively: a relay snapshot carries its whole shard, including per-client read-only
   // ariadne ui.docs.* state the joiner already owns, which the local tree is EXPECTED to reject.
+  // A shard that enforces interest takes from a snapshot only what it would take live (a no-op
+  // for a shard that does not enforce).
   if (!matched && !entries.empty()) {
     std::vector<state_cluster_shard *> shards;
     {
@@ -1370,7 +1469,7 @@ void state_transport_grpc::on_inbound_snapshot_response(std::uint64_t request_id
     }
     for (const auto &e : entries)
       for (auto *s : shards) {
-        if (s == nullptr)
+        if (s == nullptr || !s->path_is_of_interest(e.path))
           continue;
         try {
           s->ingest_snapshot_entry(e);
@@ -1442,6 +1541,43 @@ bool state_transport_grpc::request_snapshot(const std::string &cluster_id,
     _snap_waiters.erase(req_id);
   }
   return result;
+}
+
+std::size_t state_transport_grpc::push_snapshot_to(const std::string &node_id,
+                                                   const std::vector<snapshot_entry> &entries) {
+  if (entries.empty())
+    return 0;
+  std::vector<std::shared_ptr<connection>> targets;
+  {
+    std::lock_guard<std::mutex> lk(_conns_mu);
+    for (const auto &c : _conns) {
+      if (!c || !c->alive.load() || !c->can_write())
+        continue;
+      const std::string *pid = c->peer_id();
+      if (pid && *pid == node_id)
+        targets.push_back(c);
+    }
+  }
+  if (targets.empty())
+    return 0;
+
+  // The same frame shape as the admit snapshot, so the client applies it through the same
+  // unsolicited-snapshot path. Unfiltered: the caller chose `entries` for this peer.
+  pb::Frame f;
+  auto *rsp = f.mutable_snapshot_response();
+  rsp->set_request_id(0);
+  rsp->set_final(true);
+  fill_snapshot_response(rsp, entries, /*view=*/nullptr);
+
+  // A synchronous write per connection: a publish() on this thread afterwards lands behind it.
+  std::size_t n = 0;
+  for (auto &c : targets) {
+    if (c->write(f)) {
+      _sent_frames.fetch_add(1, std::memory_order_relaxed);
+      ++n;
+    }
+  }
+  return n;
 }
 
 void state_transport_grpc::heartbeat_loop() {

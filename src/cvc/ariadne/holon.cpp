@@ -51,9 +51,10 @@ holon::holon(holon_role role, holon_config cfg)
 }
 
 void holon::add_participant(const std::string &pid, bool local,
-                            const cvc::physics::body_state &start) {
+                            const cvc::physics::body_state &start, bool pose_known) {
   participant p;
   p.local = local;
+  p.pose_known = pose_known || _role == holon_role::server;
   p.sim.set_state(start);
   p.predicted = predicted_avatar(start);
   p.newest = start;
@@ -61,9 +62,15 @@ void holon::add_participant(const std::string &pid, bool local,
   p.spawn = start;
   _participants[pid] = p;
   // In the world: the server simulates everyone, a client its own avatar; a client's peers are
-  // kinematic, held where they are shown.
-  if (_world)
-    _world->add_avatar(pid, start, _role == holon_role::server || local);
+  // kinematic, held where they are shown -- once there is somewhere to show them (a peer whose
+  // pose is not known yet gets its body with its first sample, apply_authoritative).
+  if (!_world)
+    return;
+  const bool dynamic = _role == holon_role::server || local;
+  if (dynamic || p.pose_known)
+    _world->add_avatar(pid, start, dynamic);
+  else
+    _world->remove_avatar(pid); // re-registered pose-less: no body left at its old pose
 }
 
 void holon::remove_participant(const std::string &pid) {
@@ -80,6 +87,15 @@ void holon::set_statics(const std::vector<avatar_static> &statics, std::uint64_t
 
 bool holon::has_participant(const std::string &pid) const {
   return _participants.find(pid) != _participants.end();
+}
+
+bool holon::pose_known(const std::string &pid) const {
+  auto it = _participants.find(pid);
+  return it != _participants.end() && it->second.pose_known;
+}
+
+bool holon::has_body(const std::string &pid) const {
+  return _world && _participants.count(pid) && _world->has_avatar(pid);
 }
 
 std::vector<std::string> holon::participants() const {
@@ -191,6 +207,7 @@ void holon::apply_authoritative(const std::string &pid, const cvc::physics::body
     return; // seen already (an unchanged pose re-read), or older
   it->second.have_seen = true;
   it->second.last_seen = server_tick;
+  it->second.pose_known = true;
   // Count the server's ticks (see the header): re-align whenever the replica is more
   // than max_skew_ticks away -- on the first sample when the client joined a running
   // server, and after a stall. A replica already within the skew is left alone, so its
@@ -203,6 +220,7 @@ void holon::apply_authoritative(const std::string &pid, const cvc::physics::body
                             : behind   ? _cfg.lead_slack_behind_ticks
                                        : _cfg.lead_slack_ahead_ticks;
   if (skew > tol) {
+    ++_realigns;
     _clock.seek_tick(target);
     for (auto &kv : _participants) {
       participant &q = kv.second;
@@ -237,6 +255,10 @@ void holon::apply_authoritative(const std::string &pid, const cvc::physics::body
     // collapse the window (prev == newest) and freeze it.
     if (p.have_sample && server_tick <= p.last_sample_tick)
       return;
+    // A peer registered before its pose was known has no body yet: its first sample is the first
+    // place it can be held (world_step_client keeps it at its shown pose from here on).
+    if (_world && !_world->has_avatar(pid))
+      _world->add_avatar(pid, auth, /*dynamic=*/false);
     if (!p.have_sample) {
       p.newest = auth;
       p.prev = auth;

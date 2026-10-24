@@ -73,6 +73,22 @@ bool read_server_net(cvc::app &app, const std::string &room, server_net &out);
 std::string format_rtt(double rtt_ms);
 std::string format_rate(double kbps);
 
+// ----------------
+// Voice activity in the shared room tree
+// ----------------
+//   conf.rooms.<room>.participants.<pid>.voice.talking   "1" / "0"
+//       whether the participant is talking, as its OWN client measures its mic -- written by that
+//       client (like its .net), so a peer whose audio the relay does not send it (out of range in
+//       the room) can still light that participant's name. Absent = not talking.
+//
+// The write is changed-only and journals ONE mutation per change: a repeated value writes nothing,
+// and a changed one sets the value without the touch() that would first re-send the old one.
+void write_participant_voice(cvc::app &app, const std::string &room, const std::string &pid,
+                             bool talking);
+// False (TALKING untouched) when the leaf was never written.
+bool read_participant_voice(cvc::app &app, const std::string &room, const std::string &pid,
+                            bool &talking);
+
 } // namespace conference
 } // namespace ariadne
 } // namespace cvc
