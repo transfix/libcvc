@@ -65,6 +65,8 @@
 // ws://|wss:// (WebSocket, what browsers dial; the host page sets wss://<page-origin>/…) or grpc://
 // (native gRPC). register_conference supplies the room verbs and the shard/transport are wired here
 // in the host; both transports carry the canonical media_frame and interop via the relay's router.
+#include <cvc/ariadne/conference/room_intrinsics.h> // room_join (re-assert after a reconnect)
+#include <cvc/ariadne/conference/room_net.h>        // publish our link quality to the room
 #include <cvc/ariadne/holon.h>                 // the client replica of the room holon (avatars, H1)
 #include <cvc/ariadne/holon_sync.h>            // client_pump / propose_intent over the room tree
 #include <cvc/ariadne/stream/frame.h>          // frame_ptr — forward the local camera/mic streams
@@ -289,6 +291,19 @@ struct ConferenceSession {
                      // the SAME keys the .ari's (state-get/-set) do (which are prefix-relative)
   std::string room_; // the joined room id (conf.rooms.<room_>)
 
+  // ── link quality + reconnect ──
+  // Once a second: read our link to the relay (state_transport::link_reports -- the Ping/Pong
+  // round trip and traffic both ways), publish it to the room as participants.<pid>.net.* so every
+  // roster shows it next to our name, and show it in our own row (self.ping / self.down / self.up).
+  // If the link is gone (the relay restarted, the network dropped, or a long-backgrounded tab was
+  // reaped) dial the relay again every few seconds, and after reconnecting re-assert our presence
+  // for a few seconds (the relay marked us as left; our write must land after its snapshot).
+  std::string relay_url_;
+  bool relay_grpc_ = false;
+  bool ever_linked_ = false;
+  double next_net_s_ = 0.0, next_reconnect_s_ = 0.0, rejoin_until_s_ = 0.0;
+  cvc::state_link_rate_meter link_meter_;
+
   // ── the room in 3D (H1 slice 6): the shared scene + avatars, third-person controls ──
   // A client replica of the room holon, kept in step with the replicated room tree by client_pump
   // each frame: our avatar predicted from our own intent, peers walked between the relay's pose
@@ -393,6 +408,7 @@ struct ConferenceSession {
   // future step between these without renumbering.
   enum : int {
     kOrderPumpAll = 10,   // drain/flush the state transport (replicated room tree) — first
+    kOrderNet = 12,       // ~1 Hz: our link quality -> the room; reconnect a lost relay link
     kOrderRoom = 15,      // the room in 3D: keys -> intent, client holon, scene + avatars, camera
     kOrderWall = 20,      // refresh now_wall_ for the wall-time talk-hold
     kOrderControls = 30,  // read the user-list window's per-peer local controls
@@ -477,6 +493,8 @@ struct ConferenceSession {
     // the shared ops and send_media_/stop_ wrap the concrete's publish/stop.
     const std::string relayUrl(relay);
     const bool want_grpc = (relayUrl.rfind("grpc://", 0) == 0);
+    relay_url_ = relayUrl;
+    relay_grpc_ = want_grpc;
     bool ok = false;
     if (want_grpc) {
 #if CVC_ENABLE_GRPC
@@ -543,6 +561,64 @@ struct ConferenceSession {
     active = true;
     return true;
   }
+  static double steady_s() {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+  }
+
+  void net_step() {
+    if (!app_ || !tp_)
+      return;
+    const double now = steady_s();
+    if (now < next_net_s_)
+      return;
+    next_net_s_ = now + 1.0;
+    const std::vector<cvc::state_link_report> links = tp_->link_reports();
+    const cvc::state_link_report *relay = nullptr;
+    for (const cvc::state_link_report &r : links)
+      if (!r.accepted) { // the link WE dialed: the relay
+        relay = &r;
+        break;
+      }
+    auto &st = cvc::state::instance(*app_);
+    if (!relay) {
+      st(prefix_ + ".self.ping").value(std::string("--"));
+      if (ever_linked_ && now >= next_reconnect_s_)
+        reconnect(now);
+      return;
+    }
+    ever_linked_ = true;
+    const auto rates = link_meter_.update(links, now);
+    const auto it = rates.find(cvc::state_link_rate_meter::key_of(*relay));
+    cvc::ariadne::conference::net_sample s;
+    s.rtt_ms = relay->stats.rtt_ms;
+    s.in_kbps = it == rates.end() ? 0.0 : it->second.in_bps * 8.0 / 1000.0;
+    s.out_kbps = it == rates.end() ? 0.0 : it->second.out_bps * 8.0 / 1000.0;
+    cvc::ariadne::conference::write_participant_net(*app_, room_, pid_, s);
+    st(prefix_ + ".self.ping").value(cvc::ariadne::conference::format_rtt(s.rtt_ms));
+    st(prefix_ + ".self.down").value(cvc::ariadne::conference::format_rate(s.in_kbps));
+    st(prefix_ + ".self.up").value(cvc::ariadne::conference::format_rate(s.out_kbps));
+    if (now < rejoin_until_s_)
+      cvc::ariadne::conference::room_join(*app_, room_, pid_, st(prefix_ + ".conf.self").value());
+  }
+
+  void reconnect(double now) {
+    next_reconnect_s_ = now + 3.0;
+    std::fprintf(stderr, "arigl: conference: lost the relay link; reconnecting to %s\n",
+                 relay_url_.c_str());
+    bool ok = false;
+#if CVC_ENABLE_GRPC
+    if (relay_grpc_ && grpc_)
+      ok = grpc_->connect_to_peer(relay_url_.substr(7), std::chrono::milliseconds(3000));
+#endif
+#if CVC_ENABLE_WS
+    if (!relay_grpc_ && ws_)
+      ok = ws_->connect_to_peer(relay_url_, std::chrono::milliseconds(3000));
+#endif
+    if (ok)
+      rejoin_until_s_ = now + 6.0; // re-assert presence until the relay's snapshot has landed
+  }
+
   // Window mode: show the room in 3D in `view` — the server's shared scene and an avatar per
   // participant — with third-person controls: WASD / arrow keys walk our avatar relative to the
   // camera's heading, and `cam` (Orbit) keeps orbiting it. A no-op for a document with no relay.
@@ -633,6 +709,8 @@ struct ConferenceSession {
     // Drive the state transport first: flush replicated room-tree writes and service queued reads
     // so room-join/roster are in place before anything this frame reads them.
     driver_->add_frame_observer(kOrderPumpAll, [this](const cf &) { tp_->pump_all(); });
+    // Our link quality to the room, and reconnecting a lost relay link (~1 Hz).
+    driver_->add_frame_observer(kOrderNet, [this](const cf &) { net_step(); });
     // Wall-clock seconds for the talk-hold — deliberately wall time, not world time, so the hold is
     // frame-rate independent and does not freeze when the sim clock is paused or scaled.
     driver_->add_frame_observer(kOrderWall, [this](const cf &) {
