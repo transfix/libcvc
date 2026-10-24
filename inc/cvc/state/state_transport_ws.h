@@ -144,17 +144,33 @@ public:
   // server's main loop. No-op under wasm. Returns how many connections were erased this call.
   std::size_t reap_idle(std::chrono::milliseconds timeout);
 
-  // Relay reliability: push the full current shard snapshot to EVERY connection (not just a new
-  // one, the way admit does). A client-to-client live re-fan is single-shot with no retry, so a
-  // join that races an already-connected peer's socket can be missed and never recovers; calling
+  // Relay reliability: bring EVERY connection up to date with the current shard snapshot (not just
+  // a new one, the way admit does). A client-to-client live re-fan is single-shot with no retry, so
+  // a join that races an already-connected peer's socket can be missed and never recovers; calling
   // this periodically on the server's main loop lets every client re-converge on the room/scene
-  // tree within one interval (idempotent bulk apply). Returns how many connections it wrote to.
+  // tree within one interval (idempotent bulk apply). Returns how many connections it wrote to: a
+  // connection that already holds everything it is delivered gets no frame and is not counted.
   //
-  // Each connection's frame honours the peer registry. Connections that have not identified, or
-  // whose peer has neither subscriptions nor a delivery filter, share ONE unfiltered frame per
-  // shard (encoded once); a filtered peer gets its own frame holding only the entries its
+  // It sends DIFFS. Per connection, the transport remembers what the last snapshot frame (the admit
+  // snapshot or a broadcast) carried for each path, and forgets a path whenever any other frame
+  // touching it is written to that peer (a live mutation, a push) or arrives from it (the peer's
+  // own write). A broadcast then carries only the entries whose current content differs from what
+  // the peer was last sent, plus the forgotten ones, so an unchanged tree costs nothing and a
+  // missed live re-fan is still healed on the next call. A peer gets the whole tree it is delivered
+  // only on a full refresh: once, when it asks (request_full_refresh) -- for state it dropped on
+  // its own side, which the relay cannot see.
+  //
+  // Each connection's frame honours the peer registry: it holds only the entries its
   // state_peer_registry::delivery_view passes. Shard snapshots are taken once per call.
   std::size_t broadcast_snapshot();
+
+  // Client side of the full refresh: ask every connected relay to send this node the whole tree it
+  // is delivered on its next broadcast_snapshot, not just the diff. For a client that may have
+  // dropped state the relay believes it holds -- frames that arrived while no shard was registered,
+  // a shard re-registered or given a wider interest set, a local write that was never published.
+  // Sends a SnapshotRequest (the whole tree; a path prefix is not honoured yet). Returns the
+  // connections written.
+  std::size_t request_full_refresh();
 
   // ── Media plane (bring-up: media over this WS control channel) ──
   // publish_media_frame sends a frame to this transport's connections: a browser CLIENT has one
@@ -226,6 +242,8 @@ public:
   std::uint64_t total_received_messages() const noexcept { return _recv_messages.load(); }
   std::uint64_t total_delivered() const noexcept { return _delivered.load(); }
   std::uint64_t total_backfilled() const noexcept { return _backfilled.load(); }
+  // Snapshot entries broadcast_snapshot has written, summed over connections.
+  std::uint64_t total_broadcast_entries() const noexcept { return _broadcast_entries.load(); }
 
   // Wait until at least `target` MUTATION frames have been received (Hello frames
   // are not counted) or `timeout` elapses; returns the count reached.
@@ -317,6 +335,10 @@ private:
   std::atomic<std::uint64_t> _recv_messages{0};
   std::atomic<std::uint64_t> _delivered{0};
   std::atomic<std::uint64_t> _backfilled{0};
+  std::atomic<std::uint64_t> _broadcast_entries{0};
+  // broadcast_snapshot's call count: a connection's remembered paths carry the last call that
+  // delivered them, so a path the peer no longer gets (or that left the tree) is dropped.
+  std::atomic<std::uint64_t> _broadcast_round{0};
 
   // wait_for_received infrastructure (received MUTATION frames).
   mutable std::mutex _recv_mu;

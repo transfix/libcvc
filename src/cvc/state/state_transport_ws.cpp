@@ -26,6 +26,7 @@
 #include <cvc/state/state_transport_ws.h>
 #include <stdexcept>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 
 #ifndef __EMSCRIPTEN__
@@ -211,36 +212,96 @@ state_message decode_message(const pb::Message &in) {
   return m;
 }
 
-// Encode `snap` into `rsp` as one unsolicited, final snapshot (request_id 0). With a `view`, only
-// the entries it delivers are written (the receiving peer's registry rule); nullptr writes them
-// all. Returns the number of entries written. The admit snapshot, the periodic broadcast and the
-// targeted push all encode through here, so their entry bytes agree.
-std::size_t fill_snapshot_response(pb::SnapshotResponse *rsp,
-                                   const std::vector<state_transport::snapshot_entry> &snap,
-                                   const state_peer_registry::delivery_view *view) {
+// Append one entry to `rsp`. The admit snapshot, the periodic broadcast and the targeted push all
+// encode through here, so their entry bytes agree.
+void add_snapshot_entry(pb::SnapshotResponse *rsp, const state_transport::snapshot_entry &e) {
+  auto *pe = rsp->add_entries();
+  pe->set_path(e.path);
+  pe->set_string_value(e.string_value);
+  pe->set_comment(e.comment);
+  pe->set_hidden(e.hidden);
+  pe->set_read_only(e.read_only);
+  for (const auto &p : e.properties)
+    (*pe->mutable_properties())[p.first] = p.second;
+  pe->set_type_name(e.type_name);
+  pe->set_origin_node_id(e.origin_node_id);
+  pe->set_sequence(e.sequence);
+  pe->set_data_type_name(e.data_type_name);
+  if (e.data_payload.kind != state_payload_kind::none)
+    set_pb_payload(pe->mutable_data_payload(), e.data_payload);
+}
+
+// Encode all of `snap` into `rsp` as one unsolicited, final snapshot (request_id 0).
+void fill_snapshot_response(pb::SnapshotResponse *rsp,
+                            const std::vector<state_transport::snapshot_entry> &snap) {
   rsp->set_request_id(0);
   rsp->set_final(true);
-  std::size_t n = 0;
-  for (const auto &e : snap) {
-    if (view != nullptr && !view->deliver(e.path))
-      continue;
-    auto *pe = rsp->add_entries();
-    pe->set_path(e.path);
-    pe->set_string_value(e.string_value);
-    pe->set_comment(e.comment);
-    pe->set_hidden(e.hidden);
-    pe->set_read_only(e.read_only);
-    for (const auto &p : e.properties)
-      (*pe->mutable_properties())[p.first] = p.second;
-    pe->set_type_name(e.type_name);
-    pe->set_origin_node_id(e.origin_node_id);
-    pe->set_sequence(e.sequence);
-    pe->set_data_type_name(e.data_type_name);
-    if (e.data_payload.kind != state_payload_kind::none)
-      set_pb_payload(pe->mutable_data_payload(), e.data_payload);
-    ++n;
+  for (const auto &e : snap)
+    add_snapshot_entry(rsp, e);
+}
+
+// FNV-1a 64 over length-prefixed fields: everything an entry carries except its path (the key it
+// is remembered under), so two digests match only when a receiver would end up with the same node.
+class entry_digest {
+public:
+  explicit entry_digest(const state_transport::snapshot_entry &e) {
+    str(e.string_value);
+    str(e.comment);
+    u64((e.hidden ? 1u : 0u) | (e.read_only ? 2u : 0u));
+    u64(e.properties.size());
+    for (const auto &p : e.properties) {
+      str(p.first);
+      str(p.second);
+    }
+    str(e.type_name);
+    str(e.origin_node_id);
+    u64(e.sequence);
+    str(e.data_type_name);
+    const state_payload &pl = e.data_payload;
+    u64(static_cast<std::uint64_t>(pl.kind));
+    if (pl.kind == state_payload_kind::inline_bytes) {
+      u64(pl.inline_bytes.size());
+      bytes(pl.inline_bytes.data(), pl.inline_bytes.size());
+    } else if (pl.kind == state_payload_kind::blob) {
+      str(pl.blob.digest);
+      u64(pl.blob.size_bytes);
+      str(pl.blob.codec);
+    }
   }
-  return n;
+  std::uint64_t value() const noexcept { return _h; }
+
+private:
+  void bytes(const void *data, std::size_t n) {
+    const auto *b = static_cast<const unsigned char *>(data);
+    for (std::size_t i = 0; i < n; ++i) {
+      _h ^= b[i];
+      _h *= 1099511628211ull;
+    }
+  }
+  void u64(std::uint64_t v) {
+    for (int i = 0; i < 8; ++i) {
+      const unsigned char b = static_cast<unsigned char>(v >> (8 * i));
+      bytes(&b, 1);
+    }
+  }
+  void str(const std::string &s) {
+    u64(s.size());
+    bytes(s.data(), s.size());
+  }
+  std::uint64_t _h = 14695981039346656037ull;
+};
+
+// What one connection holds of a tree path, as far as the relay knows: the digest of the content
+// the last snapshot frame carried for it, and the broadcast round that last delivered the path.
+// File-local, so the per-connection map stays out of a DLL's export table.
+struct held_entry {
+  std::uint64_t digest = 0;
+  std::uint64_t round = 0;
+};
+
+// A mutation that can change nodes below its path, not just the node at it.
+bool touches_subtree(state_mutation_op op) {
+  return op == state_mutation_op::reset_node || op == state_mutation_op::delete_subtree;
 }
 
 } // namespace
@@ -290,6 +351,17 @@ public:
   // probe thread's watchdog closes a connection whose write has been blocked too long, which fails
   // the write and frees the lock (state_transport_ws::ping_loop).
   std::atomic<std::int64_t> write_started_ns{0};
+  // What this peer holds, path by path, for broadcast_snapshot's diff (see held_entry): a snapshot
+  // frame records what it carried; any other frame touching the path, written to the peer or
+  // received from it, forgets it. Guarded by held_mu, which is never held across a socket write (a
+  // reader thread forgets its peer's own writes, and must not wait behind a blocked write). A
+  // WRITER also holds write_mu from its record/forget through its write, so the record always
+  // describes the frames in the order the peer receives them. Lock order: write_mu, then held_mu.
+  std::mutex held_mu;
+  std::unordered_map<std::string, held_entry> held;
+  // Set when the peer sends a SnapshotRequest: its next broadcast carries everything it is
+  // delivered, not just the diff.
+  std::atomic<bool> full_refresh{false};
 
 #ifndef __EMSCRIPTEN__
   std::unique_ptr<websocket::stream<tcp::socket>> ws;
@@ -362,6 +434,38 @@ public:
   bool try_write(const pb::Frame &f) {
     std::unique_lock<std::mutex> lk(write_mu, std::try_to_lock);
     return lk.owns_lock() && write_locked(f);
+  }
+
+  // The peer's copy of `m.path` (and, for a subtree op, of everything below it) is no longer
+  // known, so the next broadcast sends it whatever the tree holds there.
+  void forget(const state_mutation &m) {
+    std::lock_guard<std::mutex> lk(held_mu);
+    if (!touches_subtree(m.op)) {
+      held.erase(m.path);
+      return;
+    }
+    for (auto it = held.begin(); it != held.end();)
+      it = state_peer_registry::prefix_matches(m.path, it->first) ? held.erase(it) : std::next(it);
+  }
+
+  // Write a frame carrying the live mutation `m`, forgetting what the peer held at its path.
+  bool write_mutation(const pb::Frame &f, const state_mutation &m) {
+    std::lock_guard<std::mutex> lk(write_mu);
+    forget(m);
+    return write_locked(f);
+  }
+
+  // Write a snapshot frame carrying `entries` outside a broadcast (a targeted push), forgetting
+  // each entry's path.
+  bool write_entries(const pb::Frame &f,
+                     const std::vector<state_transport::snapshot_entry> &entries) {
+    std::lock_guard<std::mutex> lk(write_mu);
+    {
+      std::lock_guard<std::mutex> hk(held_mu);
+      for (const auto &e : entries)
+        held.erase(e.path);
+    }
+    return write_locked(f);
   }
 
   // Bytes still unsent in this connection's OS send buffer (Linux only; 0 elsewhere). A large value
@@ -772,6 +876,10 @@ void state_transport_ws::deliver_inbound(connection *c, const void *data, std::s
   } else if (in.has_message()) {
     on_inbound_message(decode_message(in.message()), c);
     _recv_messages.fetch_add(1, std::memory_order_relaxed);
+  } else if (in.has_snapshot_request()) {
+    // The peer asks for a full refresh (request_full_refresh): its next broadcast carries the whole
+    // tree it is delivered. Answered there, on the relay's own loop, not on this reader thread.
+    c->full_refresh.store(true, std::memory_order_relaxed);
   } else if (in.has_snapshot_response()) {
     // A relay pushed its full current state (request_id 0) so this late-joining client sees the
     // peers already in the room. Apply each entry as an initial-sync bootstrap. The conference uses
@@ -931,7 +1039,7 @@ state_transport::publish_stats state_transport_ws::publish(const state_mutation 
     // re-delivers.
     if (c->send_backlog() > 2 * 1024 * 1024)
       continue;
-    if (c->write(frame)) {
+    if (c->write_mutation(frame, m)) {
       _sent_frames.fetch_add(1, std::memory_order_relaxed);
       ++stats.delivered;
       if (pid)
@@ -1152,6 +1260,10 @@ void state_transport_ws::on_inbound_mutation(const state_mutation &m, connection
     if (r.applied)
       _delivered.fetch_add(1, std::memory_order_relaxed);
   }
+  // The origin wrote this path itself, so what it holds there is no longer what it was last sent:
+  // the next broadcast re-sends the tree's value, which also corrects a write this relay rejected.
+  if (origin != nullptr)
+    origin->forget(m);
   const bool relay = _relay.load(std::memory_order_relaxed);
   if (!relay && _bridge == nullptr)
     return; // a leaf: applied locally, never re-sent
@@ -1187,7 +1299,7 @@ void state_transport_ws::on_inbound_mutation(const state_mutation &m, connection
       if (c->send_backlog() > 2 * 1024 * 1024)
         continue; // don't block the relay on a backed-up peer; the ~1s roster broadcast backstops
                   // it
-      if (c->write(frame))
+      if (c->write_mutation(frame, m))
         _sent_frames.fetch_add(1, std::memory_order_relaxed);
     }
   }
@@ -1395,6 +1507,8 @@ void state_transport_ws::send_snapshot_locked(connection &c,
   // joiner bootstraps the peers already present. The receiver applies each entry via
   // ingest_snapshot_entry (a bulk initial load, no conflict gate). Deliberately UNFILTERED: this
   // goes out before the peer's Hello, so there is no identity to look a registry entry up by.
+  // What it carried is recorded as the peer's starting point, so the first broadcast is a diff.
+  const std::uint64_t round = _broadcast_round.load(std::memory_order_relaxed);
   for (auto *s : shards) {
     if (s == nullptr)
       continue;
@@ -1402,45 +1516,51 @@ void state_transport_ws::send_snapshot_locked(connection &c,
     if (snap.empty())
       continue;
     pb::Frame f;
-    fill_snapshot_response(f.mutable_snapshot_response(), snap, nullptr);
+    fill_snapshot_response(f.mutable_snapshot_response(), snap);
     if (!c.write_locked(f))
       return; // stream died mid-snapshot; the reader will reap it
     _sent_frames.fetch_add(1, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> hk(c.held_mu);
+    for (const auto &e : snap)
+      c.held[e.path] = held_entry{entry_digest(e).value(), round};
   }
 }
 
 std::size_t state_transport_ws::broadcast_snapshot() {
-  // Snapshot each shard ONCE, then write it to every live connection. The receivers apply it
-  // idempotently (ingest_snapshot_entry is a bulk load), so re-sending the same roster/scene each
-  // interval is a no-op for a client that is already converged and a recovery for one that missed
-  // a live re-fan. Uses connection::write() (locks per connection) — do NOT hold a connection
-  // write lock here. Snapshotting the shard reads the tree under its own lock.
+  // Snapshot each shard ONCE, then bring every live connection up to date with it. A connection is
+  // sent only the entries it does not already hold (connection::held): those whose content differs
+  // from what its last snapshot frame carried, and those forgotten since because another frame
+  // touched them. So a path that changed and went out live is sent once more -- the relay cannot
+  // tell whether the live frame was applied -- and an unchanged tree sends nothing. The receivers
+  // apply each entry idempotently (ingest_snapshot_entry is a bulk load), which makes this a
+  // recovery for a client that missed a live re-fan. Uses each connection's write lock for the
+  // comparison and the write together -- do NOT hold one here. Snapshotting the shard reads the
+  // tree under its own lock.
   std::vector<state_cluster_shard *> shards;
   {
     std::lock_guard<std::mutex> lk(_shards_mu);
     shards = _shards;
   }
-  std::vector<std::vector<snapshot_entry>> snaps;
+  struct shard_snapshot {
+    std::vector<snapshot_entry> entries;
+    std::vector<std::uint64_t> digests; // entry_digest of each entry, shared by every connection
+  };
+  std::vector<shard_snapshot> snaps;
   for (auto *s : shards) {
     if (s == nullptr)
       continue;
-    auto snap = s->snapshot();
-    if (!snap.empty())
-      snaps.push_back(std::move(snap));
+    shard_snapshot ss;
+    ss.entries = s->snapshot();
+    if (ss.entries.empty())
+      continue;
+    ss.digests.reserve(ss.entries.size());
+    for (const auto &e : ss.entries)
+      ss.digests.push_back(entry_digest(e).value());
+    snaps.push_back(std::move(ss));
   }
   if (snaps.empty())
     return 0;
-  // The frames every unfiltered connection shares (one per shard), encoded on first use so a relay
-  // whose connections are all filtered never builds them.
-  std::vector<pb::Frame> shared;
-  const auto shared_frames = [&]() -> const std::vector<pb::Frame> & {
-    if (shared.empty()) {
-      shared.resize(snaps.size());
-      for (std::size_t i = 0; i < snaps.size(); ++i)
-        fill_snapshot_response(shared[i].mutable_snapshot_response(), snaps[i], nullptr);
-    }
-    return shared;
-  };
+  const std::uint64_t round = _broadcast_round.fetch_add(1, std::memory_order_relaxed) + 1;
   std::vector<std::shared_ptr<connection>> conns;
   {
     std::lock_guard<std::mutex> lk(_conns_mu);
@@ -1451,7 +1571,7 @@ std::size_t state_transport_ws::broadcast_snapshot() {
   // signal for "clients can't see each other" — a skipped peer is one the periodic roster never
   // reaches.
   static const bool dbg = std::getenv("CVC_WS_BROADCAST_DEBUG") != nullptr;
-  std::size_t wrote = 0, skipped = 0, max_backlog = 0, filtered = 0;
+  std::size_t wrote = 0, skipped = 0, max_backlog = 0, filtered = 0, entries = 0, refreshed = 0;
   for (auto &c : conns) {
     if (!c || !c->alive.load() || !c->can_write())
       continue;
@@ -1477,34 +1597,93 @@ std::size_t state_transport_ws::broadcast_snapshot() {
     state_peer_registry::delivery_view view;
     if (pid)
       view = _peers.view_of(*pid);
-    bool ok = true;
-    std::size_t sent = 0;
-    if (!view.filtered()) {
-      for (const auto &f : shared_frames()) {
-        ok = c->write(f) && ok;
-        ++sent;
-      }
-    } else {
+    if (view.filtered())
       ++filtered;
-      for (const auto &snap : snaps) {
+    // Under write_mu from the comparison through the write: a live frame for one of these paths
+    // lands wholly before (and is compared against) or wholly after (and forgets) this frame.
+    std::lock_guard<std::mutex> wlk(c->write_mu);
+    std::vector<pb::Frame> frames; // one per shard with anything for this peer
+    std::size_t n = 0;
+    {
+      std::lock_guard<std::mutex> hk(c->held_mu);
+      if (c->full_refresh.exchange(false, std::memory_order_relaxed)) {
+        c->held.clear();
+        ++refreshed;
+      }
+      for (const auto &ss : snaps) {
         pb::Frame f;
-        if (fill_snapshot_response(f.mutable_snapshot_response(), snap, &view) == 0)
-          continue; // nothing in this shard is for this peer
-        ok = c->write(f) && ok;
-        ++sent;
+        auto *rsp = f.mutable_snapshot_response();
+        rsp->set_request_id(0);
+        rsp->set_final(true);
+        for (std::size_t i = 0; i < ss.entries.size(); ++i) {
+          const snapshot_entry &e = ss.entries[i];
+          if (!view.deliver(e.path))
+            continue;
+          // Keyed by path alone, as the receiver applies every entry to every shard it has.
+          auto [it, fresh] = c->held.try_emplace(e.path);
+          it->second.round = round;
+          if (!fresh && it->second.digest == ss.digests[i])
+            continue; // the peer holds this already
+          it->second.digest = ss.digests[i];
+          add_snapshot_entry(rsp, e);
+        }
+        if (rsp->entries_size() > 0) {
+          n += static_cast<std::size_t>(rsp->entries_size());
+          frames.push_back(std::move(f));
+        }
+      }
+      // A path this round did not deliver left the tree or the peer's view: drop it, so it is sent
+      // again if it comes back.
+      for (auto it = c->held.begin(); it != c->held.end();)
+        it = it->second.round == round ? std::next(it) : c->held.erase(it);
+    }
+    bool ok = true;
+    for (const auto &f : frames) {
+      if (!c->write_locked(f)) {
+        ok = false;
+        break;
       }
     }
-    if (ok && sent > 0) {
+    if (!ok) {
+      // The stream died (write_locked marked it dead); hold nothing for it.
+      std::lock_guard<std::mutex> hk(c->held_mu);
+      c->held.clear();
+      continue;
+    }
+    if (!frames.empty()) {
       ++wrote;
-      _sent_frames.fetch_add(sent, std::memory_order_relaxed);
+      entries += n;
+      _sent_frames.fetch_add(frames.size(), std::memory_order_relaxed);
+      _broadcast_entries.fetch_add(n, std::memory_order_relaxed);
     }
   }
   if (dbg)
     std::fprintf(stderr,
-                 "[ws-bcast] wrote=%zu skipped=%zu filtered=%zu maxbacklog=%zuKB conns=%zu "
-                 "frames=%zu\n",
-                 wrote, skipped, filtered, max_backlog / 1024, conns.size(), snaps.size());
+                 "[ws-bcast] wrote=%zu skipped=%zu filtered=%zu refreshed=%zu entries=%zu "
+                 "maxbacklog=%zuKB conns=%zu shards=%zu\n",
+                 wrote, skipped, filtered, refreshed, entries, max_backlog / 1024, conns.size(),
+                 snaps.size());
   return wrote;
+}
+
+std::size_t state_transport_ws::request_full_refresh() {
+  pb::Frame f;
+  f.mutable_snapshot_request()->set_cluster_id(_cluster_id);
+  std::vector<std::shared_ptr<connection>> conns;
+  {
+    std::lock_guard<std::mutex> lk(_conns_mu);
+    conns = _conns;
+  }
+  std::size_t n = 0;
+  for (auto &c : conns) {
+    if (!c || !c->alive.load() || !c->can_write())
+      continue;
+    if (c->write(f)) {
+      _sent_frames.fetch_add(1, std::memory_order_relaxed);
+      ++n;
+    }
+  }
+  return n;
 }
 
 std::size_t state_transport_ws::push_snapshot_to(const std::string &node_id,
@@ -1524,14 +1703,16 @@ std::size_t state_transport_ws::push_snapshot_to(const std::string &node_id,
   if (targets.empty())
     return 0; // the peer is on another transport (or gone): nothing to encode
   pb::Frame f;
-  fill_snapshot_response(f.mutable_snapshot_response(), entries, nullptr);
+  fill_snapshot_response(f.mutable_snapshot_response(), entries);
   std::size_t n = 0;
   for (auto &c : targets) {
     // Never block the caller (the relay's main loop) on a peer that is not draining; the caller's
     // next push or the periodic broadcast covers what this one would have carried.
     if (c->send_backlog() > 2 * 1024 * 1024)
       continue;
-    if (c->write(f)) {
+    // The caller chose these entries, so they need not match the tree: forget the peer's copy of
+    // each path, and a broadcast that delivers one sends the tree's value there.
+    if (c->write_entries(f, entries)) {
       _sent_frames.fetch_add(1, std::memory_order_relaxed);
       ++n;
     }

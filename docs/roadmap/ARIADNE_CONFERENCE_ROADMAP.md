@@ -563,8 +563,9 @@ subtree and plays at gain 1.
   per launch. An in-process reconnect keeps its id and its sequence, and works: the relay withholds the
   departed subject's pose meanwhile, and a client takes the pose subtree a peer left behind for no pose
   until a newer sample (`holon::left_tick`).
-* The WebSocket leg's ~1 Hz full-tree re-broadcast is filtered per connection but otherwise unchanged,
-  and in the hall it dominates a browser's state traffic (**Measured**).
+* The WebSocket leg's ~1 Hz re-broadcast was a full tree per connection, filtered but otherwise
+  unchanged by S7, and in the hall it dominated a browser's state traffic (**Measured**). It now sends
+  each connection a diff (see the deferred note below).
 
 **Measured** (`arisrv_aoi_bench` on catx-03, 24 cores: the relay plus N synthetic clients in one
 process on loopback, WS and gRPC alternating, 10 s windows; `--s7 off` is the S6 relay and clients).
@@ -611,11 +612,17 @@ reconcile-correction sum varies two-fold between identical runs, so it says noth
   node coarsens at the wrong distance (the large scene avoids it with `fit`) → LOD follow-up.
 * Client journal trim, WebSocket `request_snapshot` and a gRPC periodic snapshot →
   DISTRIBUTED_STATE_ROADMAP.md (known gaps); a WS `send_backlog` on Windows-hosted relays (`SIOCOUTQ` is
-  Linux-only) → transport follow-up; an incremental (revision-gated) WS re-broadcast in place of the
-  ~1 Hz full tree, which the hall bench shows at ~0.8 Mb/s per browser → WS_STATE_TRANSPORT.md Phase 2;
-  per-connection broadcast encode caching → only if the N = 64 bench shows the ~1 Hz broadcast costing
-  > 20 ms/s; merging the visor into the body mesh (2N → N avatar
-  actors) → perf follow-up.
+  Linux-only) → transport follow-up. ~~An incremental WS re-broadcast in place of the ~1 Hz full
+  tree~~ **done**: `broadcast_snapshot` now sends each connection only the entries it does not already
+  hold. Per connection it keeps a digest of what the last snapshot frame carried for each path, and
+  forgets a path whenever any other frame touching it is written to that peer or arrives from it
+  (a live mutation, a push, the peer's own write). A missed live re-fan is still healed on the next
+  call, and an unchanged tree costs nothing. A client gets the whole tree only when it asks
+  (`state_transport_ws::request_full_refresh`, a SnapshotRequest) — for state it dropped on its own
+  side, which the relay cannot see. There is no periodic full snapshot. The broadcast still snapshots
+  and digests the whole tree once per call; caching that → only if the N = 64 bench shows the ~1 Hz
+  broadcast costing > 20 ms/s. Merging the visor into the body mesh (2N → N avatar actors) → perf
+  follow-up.
 
 ---
 
