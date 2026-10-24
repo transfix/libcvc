@@ -45,9 +45,40 @@
 #include <thread>
 #include <vector>
 
+#if defined(__linux__) && defined(__GLIBC__)
+#include <execinfo.h> // backtrace -- a fatal signal logs the relay's stack
+#include <unistd.h>   // write, STDERR_FILENO
+#endif
+
 namespace {
 std::atomic<bool> g_stop{false};
 void on_signal(int) { g_stop.store(true); }
+
+#if defined(__linux__) && defined(__GLIBC__)
+// A relay runs unattended, so a crash must explain itself in its log: on SIGSEGV / SIGABRT (glibc's
+// "malloc(): ... corrupted" aborts) / SIGBUS / SIGFPE / SIGILL, write the stack to stderr, then
+// re-raise with the default action so the process still dies (and exits non-zero). Only
+// async-signal-safe calls: backtrace_symbols_fd writes straight to the fd without allocating, and
+// install_crash_trace() calls backtrace() once up front so its lazy libgcc load never happens
+// inside the handler on a corrupted heap.
+void on_fatal(int sig) {
+  static const char head[] = "\n[arisrv] FATAL signal; stack:\n";
+  (void)!write(STDERR_FILENO, head, sizeof(head) - 1);
+  void *frames[64];
+  const int n = backtrace(frames, 64);
+  backtrace_symbols_fd(frames, n, STDERR_FILENO);
+  std::signal(sig, SIG_DFL);
+  std::raise(sig);
+}
+void install_crash_trace() {
+  void *warm[1];
+  (void)backtrace(warm, 1);
+  for (int sig : {SIGSEGV, SIGABRT, SIGBUS, SIGFPE, SIGILL})
+    std::signal(sig, on_fatal);
+}
+#else
+void install_crash_trace() {}
+#endif
 } // namespace
 
 int main(int argc, char **argv) {
@@ -138,6 +169,7 @@ int main(int argc, char **argv) {
   mrouter.add_endpoint(&ws_tp); // browser (wasm) WebSocket clients
 #endif
 
+  install_crash_trace();
   std::signal(SIGINT, on_signal);
   std::signal(SIGTERM, on_signal);
   std::printf("[arisrv] relay up | room='%s' node='%s' | state=%s | media=%s\n", room.c_str(),
