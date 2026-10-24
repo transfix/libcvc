@@ -19,7 +19,9 @@
 //      horizon, i moves off it: its carrot shifts away from the path's nearest point by
 //      gain x (clearance - distance) x urgency x w, with urgency = 1 - (arrival time / horizon)
 //      and w = resolver(i, j), the share of the conflict i takes. On the path itself it moves to
-//      j's right.
+//      j's right. Near along the path (within `near_dist`) counts whatever the speeds: urgency is
+//      then at least 1 - (distance / near), so a column standing still clears for a lead starting
+//      from rest behind it, where arrival times are long.
 //   2. Around. If j sits within `clearance` of i's own path, ahead of i and reached within the
 //      horizon, i steers round it: the same shift, away from j, by pass_gain and the share i
 //      cannot count on j to make, 1 - cooperation x resolver(j, i). On the path, to j's left as i
@@ -49,6 +51,8 @@ struct yield_config {
   float cooperation = 0.5f; // [0, 1]: how far a passer counts on the other moving
   float min_len = 0.0f;     // normalized: an intent's shortest path; 0 = 4 x clearance
   float min_speed = 0.05f;  // normalized / s: the floor arrival times are taken at
+  float near_dist = 0.0f;   // normalized: along a path this close a conflict counts at any speed;
+                            // 0 = 4 x clearance, < 0 = off (arrival times alone)
   bool on() const { return horizon_s > 0.0f; }
 };
 

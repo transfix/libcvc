@@ -203,6 +203,50 @@ TEST(NavYield, TheLeadPassesTheColumnInsteadOfPushingThrough) {
     EXPECT_LE(on.lead_front, off.lead_front);
 }
 
+// From rest: the column stands still (its goals where it is), and the lead starts from rest
+// behind it. Arrival times are long at a crawl, so only near_dist makes them clear.
+TEST(NavYield, AStandingColumnClearsForALeadFromRest) {
+  const auto run = [](float near_dist, int &contacts, float &lead_x) {
+    field f;
+    f.cfg.min_gap = 2.0f * f.cfg.veh.rr;
+    const int n = 5;
+    std::vector<float> o(2 * n), g(2 * n);
+    const float x0 = -0.5f * f.half;
+    for (int i = 1; i < n; ++i) {
+      o[2 * i] = x0 - 0.45f * (i - 1);
+      g[2 * i] = o[2 * i]; // stay put
+    }
+    o[0] = x0 - 0.45f * (n - 2) - 0.6f;
+    g[0] = x0 + 4.0f;
+    sim_world w = f.make(o, g);
+    yield_config y = yielding();
+    y.near_dist = near_dist;
+    w.set_yield(y);
+    w.set_priority(0, 10.0f);
+    contacts = 0;
+    const float touch = 2.0f * f.cfg.veh.rr * 1.02f;
+    for (int t = 0; t < 250; ++t) {
+      w.step(1);
+      const std::vector<float> p = positions(w);
+      for (int i = 0; i < n; ++i)
+        for (int j = i + 1; j < n; ++j)
+          if (std::hypot(p[2 * i] - p[2 * j], p[2 * i + 1] - p[2 * j + 1]) < touch)
+            ++contacts;
+      lead_x = p[0];
+    }
+  };
+  int c_time = 0, c_near = 0;
+  float x_time = 0.0f, x_near = 0.0f;
+  run(-1.0f, c_time, x_time); // arrival times alone
+  run(0.0f, c_near, x_near);  // and near (the default)
+  std::printf(
+      "  lead from rest behind a standing column: arrival times alone %d contact pair-ticks "
+      "(lead x %.2f), with near %d (lead x %.2f)\n",
+      c_time, x_time, c_near, x_near);
+  EXPECT_LT(c_near, c_time) << "near_dist should clear the column for the lead";
+  EXPECT_GT(x_near, -0.5f * field().half + 0.5f) << "the lead should get past the column";
+}
+
 TEST(NavYield, TwoAgentsHeadOnPassEachOther) {
   const auto run = [](bool yield_on, float &closest) {
     const field f;

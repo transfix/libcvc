@@ -92,6 +92,16 @@ yield_shift yield_agent(const yield_config &c, float clearance, const agent_inte
                         const yield_resolver &resolve) {
   yield_shift out;
   const float C = clearance, H = c.horizon_s;
+  const float N = c.near_dist > 0.0f ? c.near_dist : (c.near_dist < 0.0f ? 0.0f : 4.0f * C);
+  // The urgency of a conflict s along a path reached at speed v: by arrival time within the
+  // horizon, and by distance within `near_dist`; 0 = none.
+  const auto urgency = [&](float s, float v) {
+    const float t_arr = s / std::max(std::fabs(v), c.min_speed);
+    float u = t_arr < H ? 1.0f - t_arr / H : 0.0f;
+    if (N > 0.0f && s < N)
+      u = std::max(u, 1.0f - s / N);
+    return u;
+  };
   for (const agent_intent &raw : heard) {
     const agent_intent j = advanced(raw, t);
     float s, qx, qy, tx, ty;
@@ -99,9 +109,8 @@ yield_shift yield_agent(const yield_config &c, float clearance, const agent_inte
     float d = intent_path_distance(j.x, j.y, j.heading, j.path, j.n_path, self.x, self.y, s, qx, qy,
                                    tx, ty);
     if (d < C && ahead_of(j, s, self.x, self.y, C)) {
-      const float t_arr = s / std::max(std::fabs(j.speed), c.min_speed);
-      if (t_arr < H) {
-        const float u = 1.0f - t_arr / H;
+      const float u = urgency(s, j.speed);
+      if (u > 0.0f) {
         const float w = resolve ? resolve(self, j) : 0.5f;
         float nx, ny;
         if (d > 1e-4f * C) {
@@ -121,9 +130,8 @@ yield_shift yield_agent(const yield_config &c, float clearance, const agent_inte
     d = intent_path_distance(self.x, self.y, self.heading, self.path, self.n_path, j.x, j.y, s, qx,
                              qy, tx, ty);
     if (d < C && ahead_of(self, s, j.x, j.y, C)) {
-      const float t_arr = s / std::max(std::fabs(self.speed), c.min_speed);
-      if (t_arr < H) {
-        const float u = 1.0f - t_arr / H;
+      const float u = urgency(s, self.speed);
+      if (u > 0.0f) {
         const float w = 1.0f - c.cooperation * (resolve ? resolve(j, self) : 0.5f);
         float nx, ny;
         if (d > 1e-4f * C) { // away from j, across the path
