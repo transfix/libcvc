@@ -21,6 +21,7 @@
 #include <cstring>
 #include <cvc/ariadne/avatar_sim.h>
 #include <cvc/ariadne/conference/room_intrinsics.h>
+#include <cvc/ariadne/conference/room_scene.h>
 #include <cvc/ariadne/holon.h>
 #include <cvc/ariadne/holon_sync.h>
 #include <cvc/core/app.h>
@@ -346,4 +347,20 @@ TEST(HolonSyncTest, ServerPumpAppliesAStampedIntentAtItsTick) {
   EXPECT_DOUBLE_EQ(server.state("A").position.x, start.x) << "not before its tick";
   cvc::ariadne::server_pump(server, app, room, dt); // tick 6: the stamp
   EXPECT_DOUBLE_EQ(server.state("A").position.x, start.x + 2.0 * dt);
+}
+
+// The room scene's objects become physics statics: the floor as a slab under z = 0, the cube as
+// a box standing on it.
+TEST(HolonSyncTest, RoomStaticsComeFromTheRoomScene) {
+  cvc::app app;
+  ASSERT_TRUE(cvc::ariadne::conference::seed_default_scene(app, "r"));
+  const std::vector<cvc::ariadne::avatar_static> st = cvc::ariadne::room_statics(app, "r");
+  ASSERT_EQ(st.size(), 2u);
+  const cvc::ariadne::avatar_static &ground = st[0].half_extents.x > 5.0 ? st[0] : st[1];
+  const cvc::ariadne::avatar_static &cube = st[0].half_extents.x > 5.0 ? st[1] : st[0];
+  EXPECT_DOUBLE_EQ(ground.half_extents.x, 10.0);
+  EXPECT_NEAR(ground.center.z + ground.half_extents.z, 0.0, 1e-9) << "the slab's top is the floor";
+  EXPECT_DOUBLE_EQ(cube.half_extents.z, 0.5);
+  EXPECT_DOUBLE_EQ(cube.center.z, 0.5);
+  EXPECT_TRUE(cvc::ariadne::room_holon_config().physics);
 }

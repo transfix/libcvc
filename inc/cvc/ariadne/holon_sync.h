@@ -17,10 +17,13 @@
 #define __CVC_ARIADNE_HOLON_SYNC_H__
 
 #include <cstdint>
+#include <cvc/ariadne/avatar_physics.h> // avatar_static
 #include <cvc/ariadne/avatar_sim.h>
+#include <cvc/ariadne/holon.h> // holon_config
 #include <cvc/core/namespace.h>
 #include <cvc/physics/body.h>
 #include <string>
+#include <vector>
 
 namespace cvc {
 
@@ -89,6 +92,15 @@ void write_intent(cvc::app &app, const std::string &room, const std::string &pid
 bool read_intent(cvc::app &app, const std::string &room, const std::string &pid,
                  avatar_intent &out_intent, std::uint64_t *out_tick = nullptr);
 
+// The holon configuration every conference room uses, on the relay and in every client (they must
+// agree: the client predicts with the server's physics): rigid-body avatars in a Jolt world.
+holon_config room_holon_config();
+
+// The room scene's objects as physics statics (holon::set_statics): the ground plane as a thin
+// slab under z = its height, boxes as boxes, spheres as spheres, each at its transform (Euler
+// degrees, applied X then Y then Z). Objects with no physical shape (a mesh file) are skipped.
+std::vector<avatar_static> room_statics(cvc::app &app, const std::string &room);
+
 // Drive one authoritative frame of a SERVER holon against the replicated room
 // tree: for every present participant (room_roster), add it to the holon if new,
 // read its proposed .intent, feed it to the holon (a stamped one queued for its tick,
@@ -108,7 +120,8 @@ void server_pump(holon &h, cvc::app &app, const std::string &room, double wall_d
 // when one exists -- drop the ones that left, apply each replicated authoritative .pose (the holon
 // ignores a sample it has already seen, so re-reading an unchanged pose every frame is harmless),
 // then advance the holon one frame. Read the result with h.display_pose(pid). wall_dt as in
-// server_pump.
+// server_pump. With physics, both pumps (re)load the holon's statics from the room scene whenever
+// its revision changes.
 void client_pump(holon &h, cvc::app &app, const std::string &room, const std::string &self_pid,
                  double wall_dt = -1.0);
 

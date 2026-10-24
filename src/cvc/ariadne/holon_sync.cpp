@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/ariadne/conference/room_intrinsics.h> // room_participant_path, room_roster
+#include <cvc/ariadne/conference/room_scene.h>      // read_scene_objects, scene_revision
 #include <cvc/ariadne/holon.h>                      // cvc::ariadne::holon (server_pump)
 #include <cvc/ariadne/holon_sync.h>
 #include <cvc/core/app.h>
@@ -69,11 +70,15 @@ bool node_present(cvc::app &app, const std::string &path) {
   return app.root().findDescendant(path) != nullptr;
 }
 
-// set_replicated unless the leaf already holds VAL; true when it wrote.
-bool set_if_changed(cvc::app &app, const std::string &path, const std::string &val) {
-  if (cvc::state *n = app.root().findDescendant(path); n && n->value() == val)
+// set_replicated unless the leaf already holds V to within kPoseEpsilon; true when it wrote. A
+// resting rigid body jitters in its last float bits every step; that is not news worth a write.
+constexpr double kPoseEpsilon = 1e-4; // m, m/s, quaternion units
+bool set_if_changed(cvc::app &app, const std::string &path, double v) {
+  if (cvc::state *n = app.root().findDescendant(path);
+      n && !n->value().empty() &&
+      std::fabs(std::strtod(n->value().c_str(), nullptr) - v) <= kPoseEpsilon)
     return false;
-  set_replicated(app, path, val);
+  set_replicated(app, path, fmt(v));
   return true;
 }
 
@@ -89,7 +94,7 @@ void write_pose(cvc::app &app, const std::string &room, const std::string &pid,
     if (all)
       set_replicated(app, path, fmt(v)), changed = true;
     else
-      changed = set_if_changed(app, path, fmt(v)) || changed;
+      changed = set_if_changed(app, path, v) || changed;
   };
   put({"pose", "pos", "x"}, s.position.x);
   put({"pose", "pos", "y"}, s.position.y);
@@ -164,7 +169,64 @@ bool read_intent(cvc::app &app, const std::string &room, const std::string &pid,
   return true;
 }
 
+holon_config room_holon_config() {
+  holon_config cfg;
+  cfg.physics = true;
+  return cfg;
+}
+
+std::vector<avatar_static> room_statics(cvc::app &app, const std::string &room) {
+  constexpr double kDeg = 3.14159265358979323846 / 180.0;
+  const auto axis_quat = [](double rad, int axis) {
+    cvc::physics::quat q{std::cos(0.5 * rad), 0.0, 0.0, 0.0};
+    (axis == 0 ? q.x : axis == 1 ? q.y : q.z) = std::sin(0.5 * rad);
+    return q;
+  };
+  const auto mul = [](const cvc::physics::quat &a, const cvc::physics::quat &b) {
+    return cvc::physics::quat{a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+                              a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+                              a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+                              a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w};
+  };
+  std::vector<avatar_static> out;
+  for (const cvc::ariadne::SceneNode &n : conference::read_scene_objects(app, room)) {
+    avatar_static s;
+    s.center = {n.position[0], n.position[1], n.position[2]};
+    // X, then Y, then Z: q = qz * qy * qx.
+    s.rotation = mul(axis_quat(n.rotation[2] * kDeg, 2),
+                     mul(axis_quat(n.rotation[1] * kDeg, 1), axis_quat(n.rotation[0] * kDeg, 0)));
+    if (n.source_primitive == "plane") {
+      // A slab 0.2 m thick whose top face is the plane.
+      constexpr double kSlab = 0.1;
+      s.half_extents = {0.5 * n.plane_size * n.scale[0], 0.5 * n.plane_size * n.scale[1], kSlab};
+      s.center.z -= kSlab;
+    } else if (n.source_primitive == "box") {
+      s.half_extents = {0.5 * n.box_size[0] * n.scale[0], 0.5 * n.box_size[1] * n.scale[1],
+                        0.5 * n.box_size[2] * n.scale[2]};
+    } else if (n.source_primitive == "sphere") {
+      s.type = avatar_static::kind::sphere;
+      s.radius = n.sphere_radius * std::max({n.scale[0], n.scale[1], n.scale[2]});
+    } else {
+      continue; // a mesh file: no physical shape yet
+    }
+    out.push_back(s);
+  }
+  return out;
+}
+
+namespace {
+// Physics: reload the statics when the room scene changed (its revision moved).
+void sync_statics(holon &h, cvc::app &app, const std::string &room) {
+  if (!h.physics())
+    return;
+  const std::uint64_t rev = conference::scene_revision(app, room);
+  if (rev != 0 && rev != h.statics_revision())
+    h.set_statics(room_statics(app, room), rev);
+}
+} // namespace
+
 void server_pump(holon &h, cvc::app &app, const std::string &room, double wall_dt) {
+  sync_statics(h, app, room);
   // The present participants, straight from the replicated room tree.
   const std::vector<conference::room_participant> roster = conference::room_roster(app, room);
   // Add any newcomer -- spawned on a 4 m ring around the room's origin (where the seeded
@@ -209,6 +271,7 @@ void server_pump(holon &h, cvc::app &app, const std::string &room, double wall_d
 
 void client_pump(holon &h, cvc::app &app, const std::string &room, const std::string &self_pid,
                  double wall_dt) {
+  sync_statics(h, app, room);
   const std::vector<conference::room_participant> roster = conference::room_roster(app, room);
   std::set<std::string> present;
   for (const conference::room_participant &p : roster) {

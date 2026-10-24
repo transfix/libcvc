@@ -17,6 +17,7 @@
 #define __CVC_ARIADNE_HOLON_H__
 
 #include <cstdint>
+#include <cvc/ariadne/avatar_physics.h>
 #include <cvc/ariadne/avatar_sim.h>
 #include <cvc/core/clock_driver.h>
 #include <cvc/core/namespace.h>
@@ -25,6 +26,7 @@
 #include <cvc/physics/pose_tracker.h>
 #include <deque>
 #include <map>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -84,6 +86,15 @@ struct holon_config {
   // SERVER: how far ahead of its own tick a stamped intent may be (queue_intent); a stamp
   // further out (a client whose clock is off) takes effect at once instead of waiting.
   std::uint64_t max_intent_lead_ticks = 240;
+  // Rigid-body avatars in a Jolt world (avatar_world): mass, inertia, gravity, collisions with
+  // each other and the room's statics (set_statics). Off = the kinematic avatar_sim (no
+  // collisions). A build without the Jolt backend falls back to avatar_sim with a warning
+  // (physics() reports which is running).
+  bool physics = false;
+  avatar_body body; // with physics: every avatar's body
+  // SERVER with physics: an avatar that fell off the world (below this z) respawns where it
+  // joined.
+  double respawn_below_z = -10.0;
 };
 
 class holon {
@@ -130,6 +141,15 @@ public:
   // the stamp already queued last is a no-op, so a host may re-read the tree every
   // frame. A client holon ignores this.
   void queue_intent(const std::string &pid, const avatar_intent &in, std::uint64_t tick);
+
+  // Whether avatars are rigid bodies in a Jolt world (holon_config::physics, and a build that
+  // has the backend).
+  bool physics() const noexcept { return _world != nullptr; }
+
+  // With physics: the room's static objects (the ground, the cube, ...), from the room scene at
+  // `revision`. Avatars stand still until the first set_statics (there is nothing to stand on).
+  void set_statics(const std::vector<avatar_static> &statics, std::uint64_t revision);
+  std::uint64_t statics_revision() const noexcept { return _statics_rev; }
 
   // CLIENT: run the replica's clock `ticks` AHEAD of the server's (default 0: in step
   // with the samples). With a lead, an intent the client applies at its tick T reaches
@@ -209,7 +229,23 @@ private:
     cvc::physics::body_state prev, newest;
     std::uint64_t newest_arrival_tick = 0; // this clock's tick when `newest` arrived
     std::uint64_t sample_span = 0;         // server ticks from prev to newest (0 = one sample)
+    // physics: where it joined (a SERVER respawn point), and the CLIENT-local avatar's
+    // prediction log -- predicted_avatar's, over the Jolt world instead of avatar_sim.
+    cvc::physics::body_state spawn;
+    struct logged {
+      std::uint64_t tick = 0;
+      avatar_intent in;
+      cvc::physics::body_state after; // its state after the step at `tick`
+    };
+    std::deque<logged> log;
+    bool acked = false;
+    std::uint64_t last_acked = 0;
   };
+
+  // physics: one quantum of the world (the drive, the peers' kinematic poses, the step).
+  void world_step_client(const std::string &self, const avatar_intent &in);
+  bool world_reconcile(const std::string &pid, participant &p, const cvc::physics::body_state &auth,
+                       std::uint64_t server_tick);
 
   void on_step(const cvc::clock_driver::clock_frame &f);
   void on_present(const cvc::clock_driver::clock_frame &f);
@@ -219,8 +255,10 @@ private:
   cvc::world_clock _clock; // declared before _driver: _driver references it
   cvc::clock_driver _driver;
   std::map<std::string, participant> _participants;
-  double _alpha = 0.0;     // the last frame's interpolation alpha, for display_pose
-  std::uint64_t _lead = 0; // CLIENT: ticks ahead of the server (set_lead_ticks)
+  double _alpha = 0.0;                  // the last frame's interpolation alpha, for display_pose
+  std::uint64_t _lead = 0;              // CLIENT: ticks ahead of the server (set_lead_ticks)
+  std::unique_ptr<avatar_world> _world; // physics (holon_config::physics + a Jolt build)
+  std::uint64_t _statics_rev = 0;
 };
 
 } // namespace ariadne

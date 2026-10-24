@@ -648,7 +648,8 @@ struct ConferenceSession {
                    cvc::gl::ImGuiOverlay &ui) {
     if (!active || !driver_ || !app_)
       return;
-    holon_ = std::make_unique<cvc::ariadne::holon>(cvc::ariadne::holon_role::client);
+    holon_ = std::make_unique<cvc::ariadne::holon>(cvc::ariadne::holon_role::client,
+                                                   cvc::ariadne::room_holon_config());
     set_lead(0.06); // until the first round trip is measured (net_step)
     room_view_ =
         std::make_unique<gla::room_view>(view, *app_, room_, pid_, view.scene().getStatePrefix());

@@ -196,7 +196,10 @@ int main(int argc, char **argv) {
   // clients by fan_local_writes. The relay loop paces ~5 Hz; the room steps
   // kRoomSubsteps times per pass (~20 Hz), so a pose sample is at most ~50 ms old
   // and an intent waits at most that long before the server integrates it.
-  cvc::ariadne::holon server_holon(cvc::ariadne::holon_role::server);
+  cvc::ariadne::holon server_holon(cvc::ariadne::holon_role::server,
+                                   cvc::ariadne::room_holon_config());
+  std::printf("[arisrv] avatar physics: %s\n",
+              server_holon.physics() ? "Jolt rigid bodies" : "kinematic (no Jolt in this build)");
   constexpr int kRoomSubsteps = 4;
   constexpr auto kRoomStep = std::chrono::milliseconds(50); // x kRoomSubsteps = the loop's 200 ms
   // Fan the relay's OWN room-tree writes -- the room_leave retractions, room_relay_tick's
