@@ -76,6 +76,9 @@ struct plant_drive_score {
   double energy_J = 0.0;   // drawn by all its agents, moving or not
   double distance_m = 0.0; // their chassis' paths, summed
   double model_J = 0.0;    // the power model's energy over the same ticks (predict_energy)
+  // Where it went: the agents' P3 ledgers at the run's end, every field summed (a mean's, the
+  // seeds' mean). charge and fuel_left are sums too, so read them per agent.
+  vehicle_energy ledger{};
   // The fleet's draw per kilometre driven, Wh/km; 0 if nothing moved.
   double wh_per_km() const {
     return distance_m > 0.0 ? energy_J / 3600.0 / (distance_m / 1000.0) : 0.0;

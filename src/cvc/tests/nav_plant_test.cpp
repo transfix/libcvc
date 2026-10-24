@@ -1320,6 +1320,18 @@ TEST(NavPlantConvergence, EnergyTrainedPolicyOnJolt) {
     }
   std::printf("    per-run Wh/km, model against measured over all %zu runs: r = %.2f\n",
               all_m.size(), corr(all_p, all_m));
+  // Where each policy's energy went, from the ledger (Wh/km of the fleet's distance).
+  for (int k = 0; k < 3; ++k) {
+    const vehicle_energy &e = m[k].ledger;
+    const double perkm = 1.0 / 3600.0 / (m[k].distance_m / 1000.0);
+    std::printf("    ledger %-7s Wh/km: source %.2f engine %.2f idle %.2f | brake %.2f tire %.2f "
+                "drivetrain %.2f rolling %.2f aero %.2f suspension %.2f chassis %.2f | stored "
+                "%.2f residual %.2f regen %.2f\n",
+                names[k], e.source * perkm, e.engine * perkm, e.idle * perkm, e.brake * perkm,
+                e.tire * perkm, e.drivetrain * perkm, e.rolling * perkm, e.aero * perkm,
+                e.suspension * perkm, e.chassis_damping * perkm, e.stored * perkm,
+                e.residual * perkm, e.regen * perkm);
+  }
   EXPECT_TRUE(std::isfinite(m[1].wh_per_km()));
   EXPECT_GT(m[1].model_J, 0.0);
 }

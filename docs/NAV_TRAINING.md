@@ -739,10 +739,35 @@ scenes, 30 s each, and judged on two held-out seeds:
     Wh/km), with or without the term. Training at this rate also costs reach (39.0% against the
     seed's 51.7%), so that saving is the slower driving the training itself brings, not the
     energy term.
-  - Next: the power model on the trained policies' own Jolt runs (`evaluate_power` on their
-    plant logs), to see whether it predicts the per-km differences it is asked to train. If it
-    does not, the plant's energy needs terms the planar model lacks (wall contacts, wheel spin
-    at stalls) before an energy term can pay off on Jolt.
+- **Why: the model does not see half of what the gate's runs draw.**
+  - `plant_reach_options::predict_energy` logs every gate run (`plant_log`) and gives the fitted
+    model's energy over the same motion (`plant_drive_score::model_J`). `plant_drive_score::ledger`
+    sums the agents' P3 ledgers, so each run says where its energy went.
+  - On the gate's dense city (48 RoboRacers in the occupancy-grid city), the model under-predicts
+    every policy: by 40% (without the term), 53% (priced at 8 Wh/km) and 31% (the seed). It was
+    within ±1.4% on the plant-log scenes it was fitted to.
+  - It does predict the direction of what the term trains. On the priced policy's own Jolt runs
+    it says the policy saves -0.30 Wh/km [-0.38, -0.24]; Jolt measures +0.05. Per-run Wh/km,
+    model against measured, correlates at r = 0.74 over the 60 runs, and the per-seed paired
+    differences at r = 0.50.
+  - The ledger shows what it misses (Wh/km of the fleet's distance; w_energy 3 at 8 Wh/km):
+
+    | Policy | Engine | Tire slip | Brakes | Drivetrain | Aero | Rolling | Regen |
+    |---|--:|--:|--:|--:|--:|--:|--:|
+    | Without the term | 2.43 | 1.34 | 0.63 | 0.45 | 0.17 | 0.14 | 0.38 |
+    | With it | 2.31 | 1.67 | 0.34 | 0.42 | 0.02 | 0.14 | 0.18 |
+    | The untrained seed | 4.15 | 2.16 | 1.42 | 0.78 | 0.18 | 0.14 | 0.86 |
+
+  - Tire slip is about half of the engine's work here. The model sees only the lateral part of
+    it, and that only through c_lat (vx r)^2 |vx|. Longitudinal slip, and wheels pushing on
+    walls and on each other, leave no trace in the planar motion it reads.
+  - The trained policy did what the term asks: it brakes less (0.63 -> 0.34) and drives slower
+    (aero 0.17 -> 0.02), and the model counts both. But it slips its tires more (1.34 -> 1.67),
+    which the model does not count, and that cancels the saving on Jolt.
+  - Next: price tire slip in the rollout itself. The dynamic model already computes each tire's
+    force and slip velocity, so its dissipation (F · v_slip, longitudinal and lateral) can join
+    the power model as a fitted term, calibrated to the ledger's `tire`. Then fit on dense
+    scenes, where contacts and stalls are common, not only the plant-log scenes.
 - Not yet in the torch twin. Like any change to the loss, it must reach `sdf_nav`'s
   `train_bicycle` before the two are compared.
 

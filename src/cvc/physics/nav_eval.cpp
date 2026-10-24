@@ -29,6 +29,35 @@ namespace physics {
 
 namespace {
 
+// a += k b, field by field.
+void add_ledger(vehicle_energy &a, const vehicle_energy &b, double k = 1.0) {
+  a.supplied += k * b.supplied;
+  a.idle += k * b.idle;
+  a.brake += k * b.brake;
+  a.tire += k * b.tire;
+  a.aero += k * b.aero;
+  a.rolling += k * b.rolling;
+  a.medium += k * b.medium;
+  a.drivetrain += k * b.drivetrain;
+  a.suspension += k * b.suspension;
+  a.chassis_damping += k * b.chassis_damping;
+  a.fields += k * b.fields;
+  a.drivetrain_split += k * b.drivetrain_split;
+  a.stored += k * b.stored;
+  a.residual += k * b.residual;
+  a.kinetic += k * b.kinetic;
+  a.potential += k * b.potential;
+  a.spring += k * b.spring;
+  a.engine += k * b.engine;
+  a.regen += k * b.regen;
+  a.source += k * b.source;
+  a.charge += k * b.charge;
+  a.fuel_used += k * b.fuel_used;
+  a.fuel_left += k * b.fuel_left;
+  a.distance += k * b.distance;
+  a.power += k * b.power;
+}
+
 // One seed: the fraction of `o.agents` that reached their goals in `o.ticks`, the energy they
 // drew and the distance they drove. `step_threads` is sim_world::step's (its per-agent kernels
 // give the same result on any count).
@@ -112,8 +141,11 @@ plant_drive_score drive_once(const cvc::nav::coef_mlp &policy, const cvc::nav::t
     for (const power_run &r : evaluate_power(log->runs(), log->dt(), d, o.power).runs)
       s.model_J += r.model_J;
   // The ledger's own odometer: the chassis' path since attach() added the vehicle.
-  for (int i = 0; i < o.agents; ++i)
-    s.distance_m += phys.vehicle_state(plant.vehicle(i)).energy.distance;
+  for (int i = 0; i < o.agents; ++i) {
+    const vehicle_energy e = phys.vehicle_state(plant.vehicle(i)).energy;
+    s.distance_m += e.distance;
+    add_ledger(s.ledger, e);
+  }
   std::vector<std::uint8_t> reached(static_cast<std::size_t>(o.agents));
   w.snapshot(nullptr, nullptr, nullptr, nullptr, reached.data());
   w.set_plant(nullptr);
@@ -197,6 +229,7 @@ score_on_plant(const std::vector<cvc::nav::coef_mlp> &policies,
       mean[p].energy_J += x.energy_J;
       mean[p].distance_m += x.distance_m;
       mean[p].model_J += x.model_J;
+      add_ledger(mean[p].ledger, x.ledger, 1.0 / ns);
     }
     mean[p].reach /= ns;
     mean[p].energy_J /= ns;

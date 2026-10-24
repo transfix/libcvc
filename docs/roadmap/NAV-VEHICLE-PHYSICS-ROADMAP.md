@@ -139,8 +139,12 @@ The plan, in order:
      "Energy in the loss"). The mean-power term teaches the policy to stop driving. Priced
      against progress (`train_config::energy_ref`), it keeps driving and loses far less reach,
      but still draws no less per km on Jolt.
-   - Open: whether the power model predicts the trained policies' per-km differences on Jolt;
-     the four-wheel plant's rollout; the torch twin.
+   - Why: on the gate's dense city the model misses 31-53% of the draw, mostly tire slip. The
+     priced policy brakes less and drives slower, which the model counts, but slips its tires
+     more, which it does not.
+   - Open: tire slip in the power model (the dynamic model's own tire dissipation, fitted to the
+     ledger's `tire`), fitted on dense scenes, then the gate again; the four-wheel plant's
+     rollout; the torch twin.
 
 ### P8a's vehicle fitted to Jolt (2026-10-20)
 
@@ -525,9 +529,17 @@ These are the targets a plant fitted to Jolt has to beat, bin by bin.
         the policy drives 1540-1800 m a seed (from 306-1095).
       - Wh/km still does not fall: +0.05 to +0.35 against the policy trained without it, every
         CI across 0.
-    - Next: check whether the power model predicts the trained policies' per-km differences on
-      their own Jolt runs (`evaluate_power` on their plant logs); if not, the energy lives in
-      terms the planar model lacks.
+    - The model on the trained policies' own Jolt runs (`plant_reach_options::predict_energy`,
+      and each run's summed ledger in `plant_drive_score::ledger`):
+      - It under-predicts every policy on the gate's dense city by 31-53%, against ±1.4% on the
+        plant-log scenes it was fitted to.
+      - On the priced policy it predicts a saving of -0.30 Wh/km [-0.38, -0.24]; Jolt measures
+        +0.05.
+      - The ledger: tire slip is about half the engine's work. The priced policy's brakes fall
+        0.63 -> 0.34 Wh/km and its aero 0.17 -> 0.02, but its tire slip rises 1.34 -> 1.67, and
+        the model sees only the lateral part of slip, through c_lat.
+    - Next: the dynamic model's own tire dissipation as a fitted power term, calibrated to the
+      ledger's `tire` on dense scenes; then the gate again.
 - **P9, the plant by default (2026-10-18, Joe: "can't we use the actual jolt vehicle dimensions
   and physics?").**
   - What moved the agents: no default path used Jolt. Every default was the kinematic bicycle
