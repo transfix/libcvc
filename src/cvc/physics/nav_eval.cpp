@@ -27,11 +27,12 @@ namespace physics {
 
 namespace {
 
-// One seed: the fraction of `o.agents` that reached their goals in `o.ticks`. `step_threads`
-// is sim_world::step's (its per-agent kernels give the same result on any count).
-double reach_once(const cvc::nav::coef_mlp &policy, const cvc::nav::training_scene &sc,
-                  const vehicle_desc &d, double mpw, const plant_reach_options &o, unsigned seed,
-                  int step_threads) {
+// One seed: the fraction of `o.agents` that reached their goals in `o.ticks`, the energy they
+// drew and the distance they drove. `step_threads` is sim_world::step's (its per-agent kernels
+// give the same result on any count).
+plant_drive_score drive_once(const cvc::nav::coef_mlp &policy, const cvc::nav::training_scene &sc,
+                             const vehicle_desc &d, double mpw, const plant_reach_options &o,
+                             unsigned seed, int step_threads) {
   cvc::nav::sim_world::config cfg;
   cfg.rows = sc.rows;
   cfg.cols = sc.cols;
@@ -92,15 +93,23 @@ double reach_once(const cvc::nav::coef_mlp &policy, const cvc::nav::training_sce
   po.metres_per_world_unit = mpw;
   nav_plant plant(phys, {d}, po);
   w.set_plant(&plant);
-  for (int t = 0; t < o.ticks; ++t)
+  plant_drive_score s;
+  for (int t = 0; t < o.ticks; ++t) {
     w.step(step_threads);
+    for (int i = 0; i < o.agents; ++i)
+      s.energy_J += plant.energy_step(i);
+  }
+  // The ledger's own odometer: the chassis' path since attach() added the vehicle.
+  for (int i = 0; i < o.agents; ++i)
+    s.distance_m += phys.vehicle_state(plant.vehicle(i)).energy.distance;
   std::vector<std::uint8_t> reached(static_cast<std::size_t>(o.agents));
   w.snapshot(nullptr, nullptr, nullptr, nullptr, reached.data());
   w.set_plant(nullptr);
   int k = 0;
   for (const std::uint8_t r : reached)
     k += r ? 1 : 0;
-  return static_cast<double>(k) / o.agents;
+  s.reach = static_cast<double>(k) / o.agents;
+  return s;
 }
 
 } // namespace
@@ -116,19 +125,20 @@ double reach_on_plant(const cvc::nav::coef_mlp &policy, const cvc::nav::training
   return m[0];
 }
 
-std::vector<double> reach_on_plant(const std::vector<cvc::nav::coef_mlp> &policies,
-                                   const cvc::nav::training_scene &scene, const vehicle_desc &d,
-                                   double wheelbase, const plant_reach_options &o,
-                                   std::vector<std::vector<double>> *per_seed) {
+std::vector<plant_drive_score>
+score_on_plant(const std::vector<cvc::nav::coef_mlp> &policies,
+               const cvc::nav::training_scene &scene, const vehicle_desc &d, double wheelbase,
+               const plant_reach_options &o,
+               std::vector<std::vector<plant_drive_score>> *per_seed) {
   if (!backend_available(backend::jolt))
-    throw std::runtime_error("cvc::physics::reach_on_plant: this libcvc was built without Jolt");
+    throw std::runtime_error("cvc::physics::score_on_plant: this libcvc was built without Jolt");
   if (!(wheelbase > 0.0) || !(d.wheelbase() > 0.0) || o.agents <= 0 || o.ticks <= 0 ||
       o.seeds.empty())
-    throw std::invalid_argument("cvc::physics::reach_on_plant: needs a positive wheelbase, agents, "
+    throw std::invalid_argument("cvc::physics::score_on_plant: needs a positive wheelbase, agents, "
                                 "ticks and at least one seed");
   if (!(o.goal_min >= 0.0f) || !(o.goal_max >= 0.0f) ||
       (o.goal_max > 0.0f && o.goal_min > o.goal_max))
-    throw std::invalid_argument("cvc::physics::reach_on_plant: needs 0 <= goal_min <= goal_max "
+    throw std::invalid_argument("cvc::physics::score_on_plant: needs 0 <= goal_min <= goal_max "
                                 "(goal_max 0 = anywhere)");
   const double s_per_m = wheelbase / d.wheelbase();
   const double mpw = scene.scale / s_per_m; // metres per world unit
@@ -136,9 +146,9 @@ std::vector<double> reach_on_plant(const std::vector<cvc::nav::coef_mlp> &polici
   const int n = static_cast<int>(policies.size()) * ns; // one run per (policy, seed)
   const int hw = std::max(1, static_cast<int>(std::thread::hardware_concurrency()));
   const int workers = std::min(n, o.threads > 0 ? o.threads : hw);
-  std::vector<double> r(static_cast<std::size_t>(n));
+  std::vector<plant_drive_score> r(static_cast<std::size_t>(n));
   const auto run = [&](int k, int step_threads) {
-    r[k] = reach_once(policies[k / ns], scene, d, mpw, o, o.seeds[k % ns], step_threads);
+    r[k] = drive_once(policies[k / ns], scene, d, mpw, o, o.seeds[k % ns], step_threads);
   };
   if (workers <= 1) {
     for (int k = 0; k < n; ++k)
@@ -165,16 +175,41 @@ std::vector<double> reach_on_plant(const std::vector<cvc::nav::coef_mlp> &polici
       if (e)
         std::rethrow_exception(e);
   }
-  std::vector<double> mean(policies.size(), 0.0);
+  std::vector<plant_drive_score> mean(policies.size());
   if (per_seed)
-    per_seed->assign(policies.size(), std::vector<double>());
+    per_seed->assign(policies.size(), std::vector<plant_drive_score>());
   for (std::size_t p = 0; p < policies.size(); ++p) {
-    for (int s = 0; s < ns; ++s)
-      mean[p] += r[p * ns + s];
-    mean[p] /= ns;
+    for (int s = 0; s < ns; ++s) {
+      const plant_drive_score &x = r[p * ns + s];
+      mean[p].reach += x.reach;
+      mean[p].energy_J += x.energy_J;
+      mean[p].distance_m += x.distance_m;
+    }
+    mean[p].reach /= ns;
+    mean[p].energy_J /= ns;
+    mean[p].distance_m /= ns;
     if (per_seed)
       (*per_seed)[p].assign(r.begin() + static_cast<long>(p * ns),
                             r.begin() + static_cast<long>((p + 1) * ns));
+  }
+  return mean;
+}
+
+std::vector<double> reach_on_plant(const std::vector<cvc::nav::coef_mlp> &policies,
+                                   const cvc::nav::training_scene &scene, const vehicle_desc &d,
+                                   double wheelbase, const plant_reach_options &o,
+                                   std::vector<std::vector<double>> *per_seed) {
+  std::vector<std::vector<plant_drive_score>> per;
+  const std::vector<plant_drive_score> m =
+      score_on_plant(policies, scene, d, wheelbase, o, per_seed ? &per : nullptr);
+  std::vector<double> mean(m.size());
+  for (std::size_t p = 0; p < m.size(); ++p)
+    mean[p] = m[p].reach;
+  if (per_seed) {
+    per_seed->assign(m.size(), std::vector<double>());
+    for (std::size_t p = 0; p < m.size(); ++p)
+      for (const plant_drive_score &x : per[p])
+        (*per_seed)[p].push_back(x.reach);
   }
   return mean;
 }

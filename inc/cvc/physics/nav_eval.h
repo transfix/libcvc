@@ -26,6 +26,10 @@
 //
 // It plans with the scene's numbers by default (plan_with_vehicle false), as both the policy
 // and its training did. Needs a physics backend with vehicles (Jolt); throws otherwise.
+//
+// score_on_plant runs the same drives and also returns what they cost (the P8c gate): the energy
+// every agent drew from its source over the run, as the P3 ledger counts it
+// (nav_plant::energy_step summed), and the distance their chassis drove.
 
 #ifndef __CVC_PHYSICS_NAV_EVAL_H__
 #define __CVC_PHYSICS_NAV_EVAL_H__
@@ -59,6 +63,17 @@ struct plant_reach_options {
   float goal_min = 0.0f, goal_max = 0.0f;
 };
 
+// One run's score, or a mean of runs'.
+struct plant_drive_score {
+  double reach = 0.0;      // the fraction of agents that reached their goals
+  double energy_J = 0.0;   // drawn by all its agents, moving or not
+  double distance_m = 0.0; // their chassis' paths, summed
+  // The fleet's draw per kilometre driven, Wh/km; 0 if nothing moved.
+  double wh_per_km() const {
+    return distance_m > 0.0 ? energy_J / 3600.0 / (distance_m / 1000.0) : 0.0;
+  }
+};
+
 double reach_on_plant(const cvc::nav::coef_mlp &policy, const cvc::nav::training_scene &scene,
                       const vehicle_desc &d, double wheelbase,
                       const plant_reach_options &o = plant_reach_options(),
@@ -72,6 +87,15 @@ std::vector<double> reach_on_plant(const std::vector<cvc::nav::coef_mlp> &polici
                                    double wheelbase,
                                    const plant_reach_options &o = plant_reach_options(),
                                    std::vector<std::vector<double>> *per_seed = nullptr);
+
+// reach_on_plant's runs with their energy and distance: each policy's mean over the seeds (each
+// field the mean of the seeds'), with `per_seed` (if given) each one's per-seed scores. Reach is
+// what reach_on_plant gives, bit for bit.
+std::vector<plant_drive_score>
+score_on_plant(const std::vector<cvc::nav::coef_mlp> &policies,
+               const cvc::nav::training_scene &scene, const vehicle_desc &d, double wheelbase,
+               const plant_reach_options &o = plant_reach_options(),
+               std::vector<std::vector<plant_drive_score>> *per_seed = nullptr);
 
 } // namespace physics
 } // namespace cvc
