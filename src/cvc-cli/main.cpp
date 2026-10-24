@@ -2117,7 +2117,9 @@ static int cmd_plant_log(int argc, char **argv) {
       "verbose", po::bool_switch(&o.verbose), "every agent's state every 5 s")(
       "samples", po::bool_switch(&o.samples), "also write samples.csv, every tick of every run")(
       "fit-dyn", po::bool_switch(&o.fit_dyn),
-      "fit dyn_bike to every seed but the last and report the last");
+      "fit dyn_bike to every seed but the last and report the last")(
+      "fit-power", po::bool_switch(&o.fit_power),
+      "fit the power model (P8c) to the ledger of every seed but the last and report the last");
 
   po::variables_map vm;
   po::store(po::parse_command_line(argc, argv, desc), vm);

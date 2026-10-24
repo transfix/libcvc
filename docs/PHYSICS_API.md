@@ -707,8 +707,16 @@ The five terms (doc 31 D9):
 - **H1, the grade force and the hard barrier.** The grade cost goes through the material
   pipeline (`material_build`): `F = -lam_grade ∇r̃_g` leans the drive toward gentler ground,
   and the infeasible cells are its hard plane (`lam_grade_hard`, with the material channel's
-  `k_sharp` and `d_hat_m`). With `block_infeasible` (the default) the infeasible cells also join
-  every belief plane's occupancy, so the SDF's barrier and the governors keep the agents out.
+  `k_sharp` and `d_hat_m`). Slope is a material risk, not a wall: by default (`lam_grade` 0.5,
+  `lam_grade_hard` 3) the drive weighs it like any other material, and a vehicle the planner
+  sends over a steep cell it can physically drive is not pinned there as against a building. The
+  hard weight is three times the material channel's: at 1 the Jolt Humvee crossing Austin's
+  twisted ramps rolled in most runs, at 3 its lead never did. The terrain's risk is material
+  risk where the drive reports and reads it: `drive_telemetry.mrisk` (and with it the nav
+  ledger's `mrisk_mean`/`mrisk_max`) is the worse of the material's risk and the grade cost, and
+  a risk net's look-ahead (`kFlagFeatRisk`) reads the worse of the two ahead, the terrain's alone
+  when there is no material stack. With `block_infeasible` (off by default) the infeasible
+  cells also join every belief plane's occupancy, so the SDF's barrier keeps the agents out.
 - **H2, gravity in the governors.** With `governors` (the default) the drive samples the slope
   under each agent:
   - the stopping governor plans with `a_stop = max(min(a_max, a_max + g_along), 0.1 a_max)`, so

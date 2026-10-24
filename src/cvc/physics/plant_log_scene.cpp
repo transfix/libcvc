@@ -462,16 +462,17 @@ void write_plant_log(const plant_log_options &o, const plant_log_drive &d) {
   if (o.samples) {
     std::ofstream cs(std::filesystem::path(o.out) / "samples.csv");
     cs << "seed,agent,t,x,y,psi,vx,vy,r,rear_x,rear_y,steer,grade,roll,steer_cmd,accel_cmd,"
-          "drive,vmax,a_lat,a_lon,contacts,wheels,wheels_down\n";
+          "drive,vmax,a_lat,a_lon,contacts,wheels,wheels_down,energy\n";
     char line[512];
     for (std::size_t k = 0; k < runs.size(); ++k)
       for (const planar_sample &q : runs[k]) {
         std::snprintf(line, sizeof line,
                       "%u,%d,%.3f,%.4f,%.4f,%.5f,%.4f,%.4f,%.5f,%.4f,%.4f,%.5f,%.5f,%.5f,%.5f,"
-                      "%.4f,%.4f,%.3f,%.4f,%.4f,%d,%d,%d\n",
+                      "%.4f,%.4f,%.3f,%.4f,%.4f,%d,%d,%d,%.6g\n",
                       d.run_seed[k], d.run_agent[k], q.t, q.x, q.y, q.psi, q.vx, q.vy, q.r,
                       q.rear_x, q.rear_y, q.steer, q.grade, q.roll, q.steer_cmd, q.accel_cmd,
-                      q.drive, q.vmax, q.a_lat, q.a_lon, q.contacts, q.wheels, q.wheels_down);
+                      q.drive, q.vmax, q.a_lat, q.a_lon, q.contacts, q.wheels, q.wheels_down,
+                      q.energy);
         cs << line;
       }
   }
@@ -540,6 +541,25 @@ void write_plant_log(const plant_log_options &o, const plant_log_drive &d) {
     print_bins("diff::dyn_plant, fitted", res_fit.dynamic, true);
     print_bins("kinematic bicycle", res_spec.kinematic, false);
   }
+  // fit_power: the power model fitted to the ledger of every seed but the last, judged on the
+  // last.
+  power_fit pfit, pheld;
+  if (o.fit_power) {
+    std::vector<std::vector<planar_sample>> fit_runs, test_runs;
+    for (std::size_t k = 0; k < runs.size(); ++k)
+      (o.seeds.size() > 1 && d.run_seed[k] == held ? test_runs : fit_runs).push_back(runs[k]);
+    if (test_runs.empty())
+      test_runs = fit_runs; // one seed: in-sample
+    pfit = fit_power(fit_runs, o.dt, desc);
+    pheld = evaluate_power(test_runs, o.dt, desc, pfit.si);
+    say(o,
+        "power model fitted to %s's ledger on %zu runs (%llu ticks): k_pos %.3f, k_neg %.3f, "
+        "p_idle %.1f W, c_v %.3f W/(m/s), c_v3 %.5f W/(m/s)^3, c_lat %.5f s^2/m\n"
+        "  tick r2 %.3f; held-out seed %u: r2 %.3f, total %+.2f%%, worst run %.1f%%\n",
+        o.vehicle.c_str(), fit_runs.size(), static_cast<unsigned long long>(pfit.ticks),
+        pfit.si.k_pos, pfit.si.k_neg, pfit.si.p_idle, pfit.si.c_v, pfit.si.c_v3, pfit.si.c_lat,
+        pfit.r2, held, pheld.r2, 100.0 * pheld.total_error, 100.0 * pheld.worst_run_error);
+  }
   say(o, "flights: %zu x %zu rows (%.1f s at %.0f Hz), %zu windows dropped, peak %.2f g\n",
       f.flights, f.rows, (f.rows - 1) * o.dt, 1.0 / o.dt, f.dropped, f.peak_lateral_g);
 
@@ -588,6 +608,15 @@ void write_plant_log(const plant_log_options &o, const plant_log_drive &d) {
          << "],\n  \"held_out_dynamic_spec\": " << bins_json(res_spec.dynamic)
          << ",\n  \"held_out_dynamic_fit\": " << bins_json(res_fit.dynamic)
          << ",\n  \"held_out_kinematic\": " << bins_json(res_spec.kinematic) << "}";
+    if (o.fit_power)
+      js << ",\n \"power\": {\"held_out_seed\": " << held << ", \"k_pos\": " << num(pfit.si.k_pos)
+         << ", \"k_neg\": " << num(pfit.si.k_neg) << ", \"p_idle_W\": " << num(pfit.si.p_idle)
+         << ", \"c_v\": " << num(pfit.si.c_v) << ", \"c_v3\": " << num(pfit.si.c_v3)
+         << ", \"c_lat\": " << num(pfit.si.c_lat) << ", \"width_W\": " << num(pfit.si.width)
+         << ", \"ticks\": " << pfit.ticks << ", \"r2_fit_set\": " << num(pfit.r2)
+         << ", \"r2_held_out\": " << num(pheld.r2)
+         << ", \"total_error_held_out\": " << num(pheld.total_error)
+         << ", \"worst_run_error_held_out\": " << num(pheld.worst_run_error) << "}";
     js << "\n}\n";
   }
   {

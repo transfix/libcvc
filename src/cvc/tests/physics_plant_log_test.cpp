@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/detail/dyn_bike.h>
@@ -606,4 +607,136 @@ TEST(PlantLogScene, DrivesTheSwerveTheSameTwiceAndWritesItsDirectory) {
   EXPECT_NE(meta.find("\"format\": \"cvc-plant-log-1\""), std::string::npos) << meta;
   EXPECT_NE(meta.find("\"seeds\": [7, 8]"), std::string::npos) << meta;
   EXPECT_NE(meta.find("\"shape\": [8, 51, 8]"), std::string::npos) << meta; // 2 s / 1 s x 4 runs
+}
+
+// ── the power model (P8c) ──────────────────────────────────────────────────────────
+
+// A ledger made by the power model itself is fitted back to it: the motion of a kinematic run,
+// its energy from known coefficients on the drive force that motion takes (the measured
+// acceleration less the dynamic vehicle's drag and rolling resistance).
+TEST(PlantLogPower, FitRecoversAKnownPowerModel) {
+  const vehicle_desc d = vehicle_desc::humvee();
+  const cvc::nav::dyn_bike_si si = nav_plant::dyn_bike_si_of(d);
+  const double dt = 0.02;
+  std::vector<std::vector<planar_sample>> runs = {kinematic_run(d, dt, 1, 1500)};
+  cvc::nav::dyn_power_si truth;
+  truth.k_pos = 2.7;
+  truth.k_neg = -0.4;
+  truth.p_idle = 1800.0;
+  truth.c_v = 120.0;
+  truth.c_v3 = 0.8;
+  truth.c_lat = 0.03;
+  double vmax = 1.0;
+  for (planar_sample &s : runs[0]) {
+    vmax = std::max(vmax, std::fabs(s.vx));
+    s.x = s.rear_x; // the kinematic run tracks its rear axle
+    s.y = s.rear_y;
+    s.grade = 0.0;
+  }
+  truth.width = 1e-3 * si.mass * d.max_accel * vmax;
+  for (std::size_t k = 1; k < runs[0].size(); ++k) {
+    const planar_sample &s0 = runs[0][k - 1];
+    planar_sample &s = runs[0][k];
+    s.a_lon = (s.vx - s0.vx) / dt;
+    s.r = (s.psi - s0.psi) / dt;
+    const double v = 0.5 * (s0.vx + s.vx);
+    const double f_res = -si.drag * v * std::fabs(v) - si.rolling_resistance * si.mass *
+                                                           si.gravity *
+                                                           (v > 0   ? 1
+                                                            : v < 0 ? -1
+                                                                    : 0);
+    const double P = si.mass * (s.a_lon - f_res / si.mass) * s.vx;
+    float dd;
+    const double pos =
+        cvc::nav::diff::power_softplus(static_cast<float>(P), static_cast<float>(truth.width), dd);
+    const double neg =
+        cvc::nav::diff::power_softplus(static_cast<float>(-P), static_cast<float>(truth.width), dd);
+    const double speed = std::sqrt(s.vx * s.vx + 1e-6);
+    s.energy = dt * (truth.k_pos * pos + truth.k_neg * neg + truth.p_idle + truth.c_v * speed +
+                     truth.c_v3 * speed * speed * speed +
+                     truth.c_lat * si.mass * s.vx * s.vx * s.r * s.r * speed);
+  }
+  const power_fit f = fit_power(runs, dt, d);
+  EXPECT_NEAR(f.si.k_pos, truth.k_pos, 1e-3 * truth.k_pos);
+  EXPECT_NEAR(f.si.k_neg, truth.k_neg, 1e-2 * std::fabs(truth.k_neg));
+  EXPECT_NEAR(f.si.p_idle, truth.p_idle, 1e-2 * truth.p_idle);
+  EXPECT_NEAR(f.si.c_v, truth.c_v, 5e-2 * truth.c_v);
+  EXPECT_NEAR(f.si.c_v3, truth.c_v3, 5e-2 * truth.c_v3);
+  EXPECT_NEAR(f.si.c_lat, truth.c_lat, 5e-2 * truth.c_lat);
+  EXPECT_GT(f.r2, 0.9999);
+  EXPECT_LT(std::fabs(f.total_error), 1e-5);
+  ASSERT_EQ(f.runs.size(), 1u);
+  EXPECT_GT(f.runs[0].distance_m, 10.0);
+}
+
+// The log carries the ledger: each tick's energy is what nav_plant measured over it.
+TEST(PlantLogPower, LogsTheEnergyEachTickDrew) {
+  REQUIRE_JOLT();
+  plant_log_options o;
+  o.seeds = {7};
+  o.agents = 2;
+  o.seconds = 2.0;
+  o.resolve();
+  const plant_log_drive drv = drive_plant_log_scene(o, cvc::nav::coef_mlp::default_biased());
+  ASSERT_EQ(drv.runs.size(), 2u);
+  for (const auto &run : drv.runs) {
+    EXPECT_EQ(run[0].energy, 0.0); // start(): no tick yet
+    double drawn = 0.0;
+    for (std::size_t t = 1; t < run.size(); ++t) {
+      EXPECT_TRUE(std::isfinite(run[t].energy));
+      drawn += run[t].energy;
+    }
+    EXPECT_GT(drawn, 0.0); // a Humvee driving 2 s burns fuel
+  }
+}
+
+// The P8c calibration on Jolt. For each vehicle, the power model is fitted to the ledger of four
+// seeds of both scenes, swerve and city, and gives the energy of two held-out seeds. (Fitted on
+// one scene's two seeds, the swerve's held-out totals missed by 12% (Humvee) and 22% (RoboRacer):
+// a seed drives all its agents at one speed, so two seeds cannot tell idle from speed.)
+TEST(PlantLogPowerConvergence, FitsTheLedgerAndPredictsHeldOutSeeds) {
+  REQUIRE_JOLT();
+  const cvc::nav::coef_mlp net = cvc::nav::coef_mlp::default_biased();
+  for (const char *veh : {"humvee", "roboracer"}) {
+    const vehicle_desc d =
+        std::string(veh) == "humvee" ? vehicle_desc::humvee() : vehicle_desc::roboracer();
+    std::vector<std::vector<planar_sample>> fit_runs;
+    std::vector<std::vector<std::vector<planar_sample>>> held(2); // by scene
+    double dt = 0.0;
+    int sc = 0;
+    for (const char *scene : {"swerve", "city"}) {
+      plant_log_options o;
+      o.vehicle = veh;
+      o.scene = scene;
+      o.seconds = 30.0;
+      o.seeds = {100, 101, 102, 103, 104, 105};
+      o.resolve();
+      dt = o.dt;
+      const plant_log_drive drv = drive_plant_log_scene(o, net);
+      for (std::size_t k = 0; k < drv.runs.size(); ++k)
+        (drv.run_seed[k] <= 103 ? fit_runs : held[sc]).push_back(drv.runs[k]);
+      ++sc;
+    }
+    const power_fit f = fit_power(fit_runs, dt, d);
+    std::vector<std::vector<planar_sample>> all_held = held[0];
+    all_held.insert(all_held.end(), held[1].begin(), held[1].end());
+    const power_fit h = evaluate_power(all_held, dt, d, f.si);
+    const power_fit hs = evaluate_power(held[0], dt, d, f.si),
+                    hc = evaluate_power(held[1], dt, d, f.si);
+    std::printf("[power-fit] %s: k_pos %.3f k_neg %.3f p_idle %.1f W c_v %.2f W/(m/s) c_v3 %.4f "
+                "W/(m/s)^3 c_lat %.4f s^2/m | fit r2 %.3f worst run %.1f%% | held-out r2 %.3f "
+                "total %+.2f%% (swerve "
+                "%+.2f%%, city %+.2f%%) worst run %.1f%% (%zu runs)\n",
+                veh, f.si.k_pos, f.si.k_neg, f.si.p_idle, f.si.c_v, f.si.c_v3, f.si.c_lat, f.r2,
+                100.0 * f.worst_run_error, h.r2, 100.0 * h.total_error, 100.0 * hs.total_error,
+                100.0 * hc.total_error, 100.0 * h.worst_run_error, h.runs.size());
+    if (std::getenv("CVC_POWER_FIT_RUNS"))
+      for (const power_run &r : h.runs)
+        std::printf("  held run: %.0f s %.0f m (%.2f m/s) measured %.4g J model %.4g J (%+.1f%%)\n",
+                    r.seconds, r.distance_m, r.distance_m / std::max(r.seconds, 1e-9), r.measured_J,
+                    r.model_J, 100.0 * (r.model_J - r.measured_J) / r.measured_J);
+    EXPECT_GT(f.si.k_pos, 0.0) << veh;
+    EXPECT_GT(h.r2, 0.8) << veh;
+    EXPECT_LT(std::fabs(h.total_error), 0.10) << veh;
+  }
 }

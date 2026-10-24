@@ -29,6 +29,8 @@
 // and mesher.h; the LBIE entry points we need from those are declared below.
 #include <LBIE_geoframe.h>
 #include <VolMagickCompat.h>
+#include <algorithm>
+#include <array>
 #include <boost/optional.hpp>
 #include <cmath>
 #include <cstdio>
@@ -468,6 +470,157 @@ TEST_F(LbieMesherTest, HexaDoMeshOptimize) {
   // read v1[3], v2[3] and v3[3] of float[3] arrays (AddressSanitizer: stack-buffer-overflow here),
   // and v3[3] could be the uninitialized point the line search writes next. Its indices are fixed.
   expect_geoframe_valid(g);
+}
+
+namespace {
+
+// Octree::optimization reads hexahedron h's corners v0..v7 from its first two quads (as
+// Octree::add_hexa stores them): v0 v1 v2 v3 round one face from quads[6h], and v4..v7, which lie
+// over v0..v3, from quads[6h+1] in the order v5 v4 v7 v6.
+std::array<unsigned int, 8> hexa_corners(const LBIE::geoframe &g, int h) {
+  const auto &a = g.quads[6 * h];
+  const auto &b = g.quads[6 * h + 1];
+  return {{a[0], a[1], a[2], a[3], b[1], b[0], b[3], b[2]}};
+}
+
+// A geoframe holding one hexahedron with the given corners, in v0..v7 order.
+LBIE::geoframe make_hexa(const float (&corner)[8][3]) {
+  LBIE::geoframe g;
+  for (const auto &c : corner) {
+    float p[3] = {c[0], c[1], c[2]};
+    float n[3] = {0.f, 0.f, 1.f};
+    g.AddVert(p, n);
+  }
+  unsigned int faces[6][4] = {{0, 1, 2, 3}, {5, 4, 7, 6}, {0, 1, 5, 4},
+                              {1, 2, 6, 5}, {2, 3, 7, 6}, {3, 0, 4, 7}};
+  for (auto &f : faces) {
+    unsigned int *fp = f;
+    g.AddQuad(fp, 4);
+  }
+  g.numhexas = 1;
+  g.mesh_type = LBIE::geoframe::HEXA;
+  return g;
+}
+
+// The condition number Octree::testHexa gives corner j of hexahedron h: 1 for a right-angled
+// corner, growing as the corner flattens, +inf once its three edges are coplanar.
+double corner_condition(const LBIE::geoframe &g, int h, int j) {
+  static const int edge_to[8][3] = {{3, 1, 4}, {0, 2, 5}, {1, 3, 6}, {2, 0, 7},
+                                    {5, 7, 0}, {6, 4, 1}, {7, 5, 2}, {4, 6, 3}};
+  const std::array<unsigned int, 8> v = hexa_corners(g, h);
+  double e[3][3];
+  for (int k = 0; k < 3; ++k) {
+    double len = 0.0;
+    for (int i = 0; i < 3; ++i) {
+      e[k][i] = double(g.verts[v[edge_to[j][k]]][i]) - double(g.verts[v[j]][i]);
+      len += e[k][i] * e[k][i];
+    }
+    for (int i = 0; i < 3; ++i)
+      e[k][i] /= std::sqrt(len);
+  }
+  const double det = e[0][0] * (e[1][1] * e[2][2] - e[1][2] * e[2][1]) -
+                     e[0][1] * (e[1][0] * e[2][2] - e[1][2] * e[2][0]) +
+                     e[0][2] * (e[1][0] * e[2][1] - e[1][1] * e[2][0]);
+  return 1.0 / std::fabs(det);
+}
+
+double worst_corner_condition(const LBIE::geoframe &g) {
+  double worst = 0.0;
+  for (int h = 0; h < g.numquads / 6; ++h)
+    for (int j = 0; j < 8; ++j)
+      worst = std::max(worst, corner_condition(g, h, j));
+  return worst;
+}
+
+} // namespace
+
+// geoframe::AddVert gave each vertex 18 refine_edge slots, free when -1, but { { -1 } } set only
+// the first: the second edge or face refined at a vertex found no free slot, and
+// AddRefine_edgevtx_hex and AddRefine_facevtx returned vertex 0 instead of a new vertex. In the
+// bunny's adaptive hex mesh 338 of 351 hexahedra used vertex 0 in place of a corner, and 302
+// corners came out flat.
+TEST_F(LbieMesherTest, RefinementMakesAVertexPerEdgeAndFace) {
+  LBIE::geoframe g;
+  float n[3] = {0.f, 0.f, 1.f};
+  float a[3] = {0.f, 0.f, 0.f}, b[3] = {3.f, 0.f, 0.f};
+  float c[3] = {0.f, 3.f, 0.f}, d[3] = {3.f, 3.f, 0.f};
+  const unsigned int va = g.AddVert(a, n), vb = g.AddVert(b, n);
+  const unsigned int vc = g.AddVert(c, n), vd = g.AddVert(d, n);
+
+  const unsigned int ab = g.AddRefine_edgevtx_hex(va, vb);
+  const unsigned int ac = g.AddRefine_edgevtx_hex(va, vc);
+  const unsigned int ad = g.AddRefine_facevtx(va, vd, vb, vc);
+  EXPECT_EQ(ab, 4u);
+  EXPECT_EQ(ac, 5u);
+  EXPECT_EQ(ad, 6u);
+  EXPECT_EQ(g.numverts, 7);
+  EXPECT_EQ(g.AddRefine_edgevtx_hex(va, vc), ac) << "an edge refined twice gets one vertex";
+  EXPECT_EQ(g.numverts, 7);
+  EXPECT_FLOAT_EQ(g.verts[ac][1], 1.0f) << "a third of the way from a to c";
+}
+
+// Octree::optimization takes the corner with the largest condition number and moves its vertex down
+// the gradient. A corner whose edges are coplanar has condition +inf; cond_max + 1.0f - cond_max is
+// then NaN, the line search ran zero times, and its uninitialized result mmv4 was copied into the
+// mesh: `cvc hexahedralize --improve optimization` on the bunny wrote vertices such as
+// (7.4e24, 5.8e-43, 7.9e24) or (-2.6e13, 0.03, -1.9e13), depending on the stack. No move improves
+// such a corner, so the mesh must come back unchanged. The cube sits away from the origin because
+// untouched stack memory is often zero.
+TEST_F(LbieMesherTest, OptimizationLeavesAFlatCornerInPlace) {
+  // A unit cube at (3, 5, 7) whose v4 has moved onto the line from v0 through v1, so corner 0's
+  // edges to v1 and v4 point the same way.
+  const float corner[8][3] = {{3, 5, 7}, {4, 5, 7}, {4, 6, 7}, {3, 6, 7},
+                              {5, 5, 7}, {4, 5, 8}, {4, 6, 8}, {3, 6, 8}};
+  LBIE::geoframe g = make_hexa(corner);
+  ASSERT_TRUE(std::isinf(corner_condition(g, 0, 0)));
+
+  LBIE::geoframe out = LBIE::quality_improve(ctx, g, LBIE::Mesher::OPTIMIZATION, 1);
+  ASSERT_EQ(out.numverts, 8);
+  for (int i = 0; i < 8; ++i)
+    for (int j = 0; j < 3; ++j)
+      EXPECT_EQ(out.verts[i][j], corner[i][j]) << "vertex " << i << ", coordinate " << j;
+}
+
+// Octree::optimization moved quads[6h+1][j-4] for a worst corner j >= 4, which is v5, v4, v7 or
+// v6, a neighbour of the corner and not the corner (and for j == 4 it took corner 1's edges). Here
+// corner 6 is the worst: the old code left v6 where it was and wrote v6's improved position onto
+// v7, then went on to move v0, v4 and v5 and ended with the worst corner barely better (5.475 from
+// 5.49). Moving v6 takes it to 3.10.
+TEST_F(LbieMesherTest, OptimizationMovesTheWorstCornersOwnVertex) {
+  const float corner[8][3] = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0},          {0, 1, 0},
+                              {0, 0, 1}, {1, 0, 1}, {0.6f, 0.6f, 0.7f}, {0, 1, 1}};
+  LBIE::geoframe g = make_hexa(corner);
+  const double before = worst_corner_condition(g);
+  for (int j = 0; j < 8; ++j)
+    ASSERT_LE(corner_condition(g, 0, j), corner_condition(g, 0, 6)) << "corner " << j;
+
+  LBIE::geoframe out = LBIE::quality_improve(ctx, g, LBIE::Mesher::OPTIMIZATION, 1);
+  expect_geoframe_valid(out);
+  EXPECT_FALSE(out.verts[6][0] == corner[6][0] && out.verts[6][1] == corner[6][1] &&
+               out.verts[6][2] == corner[6][2])
+      << "the worst corner's vertex v6 did not move";
+  for (int j = 0; j < 3; ++j)
+    EXPECT_EQ(out.verts[7][j], corner[7][j]) << "v7 moved, coordinate " << j;
+  const double after = worst_corner_condition(out);
+  EXPECT_TRUE(std::isfinite(after));
+  EXPECT_LT(after, before);
+}
+
+// The adaptive hexahedral mesh of a sphere that leaves its box refines cells near the surface.
+// Before the refine_edge fix 702 of its 729 hexahedra had vertex 0 in place of a corner.
+TEST_F(LbieMesherTest, AdaptiveHexahedraHaveEightDistinctCorners) {
+  volume v = make_sphere_volume(ctx, 17, 1.2);
+  LBIE::geoframe g = run_do_mesh(v, 0.0f, 0.0f, kDefaultErr, kDefaultErrIn, LBIE::geoframe::HEXA);
+  ASSERT_GT(g.numquads, 0);
+  expect_geoframe_valid(g);
+  int repeated = 0;
+  for (int h = 0; h < g.numquads / 6; ++h) {
+    std::array<unsigned int, 8> v = hexa_corners(g, h);
+    std::sort(v.begin(), v.end());
+    if (std::adjacent_find(v.begin(), v.end()) != v.end())
+      ++repeated;
+  }
+  EXPECT_EQ(repeated, 0) << "of " << g.numquads / 6 << " hexahedra";
 }
 
 // ---------------------------------------------------------------------------
