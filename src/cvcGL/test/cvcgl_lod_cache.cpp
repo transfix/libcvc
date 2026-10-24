@@ -3,7 +3,6 @@
 #include <cstdio>
 
 int main() {
-  std::printf("cvcgl_lod_cache: scaffold
-");
+  std::printf("cvcgl_lod_cache: scaffold\n");
   return 0;
 }
