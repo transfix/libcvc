@@ -21,6 +21,7 @@ deploys on and dropped straight into the swarm.
 - [The dynamic vehicle: `dyn_bike_step` (P8a)](#the-dynamic-vehicle-dyn_bike_step-p8a)
 - [The four-wheel vehicle: `dyn4_plant` (P8d)](#the-four-wheel-vehicle-dyn4_plant-p8d)
 - [An external force in the differentiable rollout](#an-external-force-in-the-differentiable-rollout)
+- [Energy in the loss: the power model (P8c)](#energy-in-the-loss-the-power-model-p8c)
 - [Scene source](#scene-source)
 - [CPU vs CUDA (device-resident)](#cpu-vs-cuda-device-resident)
 - [Exporting weights](#exporting-weights)
@@ -602,6 +603,85 @@ float64 or float32, CPU or CUDA, with autograd as the reverse.
   for the twin's four-wheel path (not written yet): four agents' 10-step trajectories of all 14
   state components and their reverse gradients, with the field, the plant's parameters and the
   ground (a friction split and a bump) they used. Rewrite it with `CVC_DYN4_EXT_GOLDEN_WRITE=1`.
+
+## Energy in the loss: the power model (P8c)
+
+The dynamic rollout can price what the vehicle draws from its fuel or battery, as the P3 ledger
+counts it. A differentiable power model (`diff::power_step`, `detail/dyn_power.h`) reads the
+dynamic vehicle's state at each step's end, and the trainer adds it to the loss.
+
+**The model.** With the drive power P = m a vx (`a` the drive force per unit mass, `dyn_state::a`):
+
+```
+E = dt (k_pos P+ + k_neg P- + p_idle + c_v |vx| + c_v3 |vx|^3 + c_lat m (vx r)^2 |vx|)
+```
+
+- P+ and P- are smooth positive and negative parts, and |vx| a smooth magnitude, so E is smooth.
+- `k_pos` is the source energy per joule of positive drive work: the driveline and engine together.
+- `k_neg` is what braking returns: 0 for a fuel engine, which burns none on the overrun, and
+  negative where it regenerates.
+- `p_idle` is what the source draws at rest. On the Humvee it is mostly engine friction at
+  running speed.
+- `c_v` and `c_v3` carry rolling resistance and drag where the dynamic vehicle leaves them out (a
+  direct drive's, whose fitted command is the achieved acceleration).
+- `c_lat` is cornering: a tire's lateral force slips it sideways, losing about m a_lat² |vx| / C,
+  with a_lat = vx r.
+
+**Calibrated to the ledger** (`cvc::physics::fit_power`, `physics/plant_log.h`):
+
+```cpp
+plant_log log(sim, plant);  // each planar_sample now carries the tick's energy (J)
+...
+const power_fit f = fit_power(log.runs(), dt, desc);        // non-negative least squares
+const power_fit h = evaluate_power(held_out, dt, desc, f.si);  // r2, total and per-run error
+cfg.power = cvc::nav::dyn_power_params_of(f.si, desc.mass, frame);
+```
+
+- Every term is linear in its coefficient, so the fit is least squares on each tick's energy,
+  with each coefficient's sign held.
+- The fit reads the drive force the dynamic vehicle needs to make the motion the plant made: the
+  measured acceleration less its own drag, rolling resistance and grade. The trainer's rollout
+  carries that same force as `dyn_state::a`.
+  - A first version read nav's command through the actuator's lag instead. At cruise that
+    command is about zero, while Jolt's driver model holds speed with its own trim, so the
+    resistances' work was invisible and the fit put the Humvee's whole draw into idle.
+- `cvc plant-log --fit-power` fits every seed but the last and reports the last
+  (`residual.json`'s "power"). `samples.csv` gains an `energy` column.
+
+**Measured** (`PlantLogPowerConvergence`, Windows): each vehicle fitted on four seeds of both
+scenes, 30 s each, and judged on two held-out seeds:
+
+| Vehicle | Held-out tick r² | Total energy | Swerve | City | Worst run |
+|---|--:|--:|--:|--:|--:|
+| Humvee | 0.83 | +1.4% | +9.0% | -1.2% | 13% |
+| RoboRacer | 0.91 | -1.4% | +17.7% | -3.5% | 35% |
+
+- Fitted on one scene's two seeds, the swerve's held-out totals missed by 12% (Humvee) and 22%
+  (RoboRacer). A seed drives all its agents at one speed, so two seeds cannot tell idle from speed.
+- The swerve's slowest held-out seed is still over-predicted, by up to 35% a run on the RoboRacer.
+  Its measured energy grows faster with speed than any of the terms.
+- On the Humvee, runs at the same speed can draw very different energy, most likely from the
+  gearbox: at the same road speed, a different gear means a different engine speed and friction.
+  A planar model has no gear.
+
+**In the loss** (`train_config::w_energy`, `train_config::power`; `rollout_kind::dynamic`):
+
+- Each step adds `w_energy / window · E_t / (hdt · P_full)` per agent. P_full is the source power
+  at full drive force and top speed (`diff::power_full`), so the term is the window's mean power as
+  a fraction of full power: O(1), a preference like `w_coll`.
+- Its adjoint lands on the step's end state, (vx, r, a)_{t+1}, before the rollout's reverse.
+- `w_energy = 0` (the default) leaves the loss and its gradient bit for bit.
+- It needs the dynamic rollout and a power model of `dyn`'s vehicle (its mass), or it throws.
+- Gates (`nav_coef_train_test`):
+  - `PowerStepMatchesFiniteDifferenceAndConverts`: the step's derivatives against central
+    differences, and the SI conversion.
+  - `EnergyGradcheckMatchesFiniteDifference`: the energy term's own gradient, direction error
+    9.0e-4.
+  - `EnergyTrainingDrawsLessEnergy`: over 60 steps from the same start the energy term falls
+    0.970 → 0.937 with it, against 0.962 without it.
+- Not yet shown: that a policy trained with it draws less on Jolt for what it gives up in reach.
+- Not yet in the torch twin. Like any change to the loss, it must reach `sdf_nav`'s
+  `train_bicycle` before the two are compared.
 
 ## Scene source
 
