@@ -2536,7 +2536,11 @@ public:
 		vtxnew_sign.resize(numverts+1,0);
 		uint_18 zero_18 = { { 0 } };
 		bound_edge.resize(numverts+1,zero_18);
-		int_18 neg1_18 = { { -1 } };
+		// -1 marks a free slot in every one of the 18. The aggregate initializer { { -1 } } set only
+		// slot 0 and zeroed the rest, so AddRefine_edgevtx* found no free slot after the first
+		// refinement at a vertex and returned vertex 0 for every later one.
+		int_18 neg1_18;
+		neg1_18.fill(-1);
 		refine_edge.resize(numverts+1,neg1_18);
 		refine_edgevtx.resize(numverts+1,zero_18);
 		vtx_idx_arr_extend.resize(numverts+1,-1);

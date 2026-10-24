@@ -45,7 +45,9 @@
 //   samples.csv   with samples: every tick of every run.
 // fit_dyn fits dyn_bike's lags, tire stiffness and yaw inertia to the runs of every seed but the
 // last (fit_dyn_bike) and reports the last seed's residual with the spec-sheet and the fitted
-// vehicle (residual.json's "fit"). tools/liesphgp_pack.py turns one or more of these directories
+// vehicle (residual.json's "fit"). fit_power fits the power model (fit_power, P8c) to the ledger
+// of the same runs and reports the last seed's energy with it (residual.json's "power").
+// tools/liesphgp_pack.py turns one or more of these directories
 // into a LieSPHGP dataset pickle.
 
 #ifndef __CVC_PHYSICS_PLANT_LOG_SCENE_H__
@@ -81,6 +83,7 @@ struct plant_log_options {
   int nsub = 0; // residual substeps; 0: the physics steps a tick
   bool samples = false;
   bool fit_dyn = false;
+  bool fit_power = false;
   // Progress, per-seed summaries and the residual tables; nullptr: none.
   std::FILE *report = nullptr;
   bool verbose = false; // also every agent's state every 5 s

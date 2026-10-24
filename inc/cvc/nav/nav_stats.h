@@ -97,8 +97,10 @@ struct budget_policy {
 // maps drive_telemetry -> drive_sample per tick, collapsing the external force to its magnitude
 // (ext_mag = std::hypot(ext_fx, ext_fy) — an accurate <=1 ULP hypotenuse, the same one the twin
 // must use; the meaningful scalar since a signed component averages to ~0). A Python twin fills the
-// same fields from its own drive; keep it in lockstep with drive_telemetry. mu/mrisk/steer are the
-// LAST substep's value; binding is the barrier-active-any-substep flag (drive_telemetry.binding).
+// same fields from its own drive; keep it in lockstep with drive_telemetry.
+// mu/mrisk/steer/curvature are the LAST substep's value; binding is the barrier-active-any-substep
+// flag (drive_telemetry.binding). lam_soft/lam_hard/curvature come after binding, so a positional
+// initializer written for the fields before them still means what it did.
 struct drive_sample {
   float alpha = 0, beta = 0, gamma = 0; // CoefMLP policy outputs this tick
   float mu = 1;                         // underfoot grip (1 = dry / no grip field)
@@ -106,6 +108,9 @@ struct drive_sample {
   float ext_mag = 0;                    // |applied external force| in the drive frame
   float steer = 0;                      // final steering angle delta (rad)
   std::uint8_t binding = 0;             // IPC barrier active this tick (min clearance < d_hat)
+  float lam_soft = 0;  // the material soft weight the drive used (drive_telemetry.lam_soft)
+  float lam_hard = 0;  // the hard-hazard weight (drive_telemetry.lam_hard)
+  float curvature = 0; // |tan(steer)| / L, 1/m (drive_telemetry.curvature)
 };
 
 // Optional per-position samplers; any left null degrades that stat gracefully to
@@ -262,7 +267,11 @@ struct veh_nav_stats {
   // policy commanded; mu/mrisk show the terrain the agent actually drove (mean + worst);
   // ext_force_mean is the average magnitude of the external (ext_force) push; steer means/peak
   // are control effort; binding_steps counts ticks the IPC barrier was active. drive_steps is the
-  // tick count these average over.
+  // tick count these average over. lam_soft_mean / lam_hard_mean are the material weights the
+  // policy drove with, curvature_abs_mean / _max (1/m) how hard it turned, and
+  // binding_stopped_steps the ticks the barrier was active while the vehicle stood still (speed
+  // under params.speed_eps_mps): pinned against what nav takes for a wall, the signature of a
+  // vehicle the route sends on and the barrier holds back.
   long drive_steps = 0;
   double alpha_mean = 0, beta_mean = 0, gamma_mean = 0;
   double mu_mean = 0, mu_min = 1e30;
@@ -270,6 +279,9 @@ struct veh_nav_stats {
   double ext_force_mean = 0;
   double steer_abs_mean = 0, steer_abs_max = 0;
   long binding_steps = 0;
+  double lam_soft_mean = 0, lam_hard_mean = 0;
+  double curvature_abs_mean = 0, curvature_abs_max = 0;
+  long binding_stopped_steps = 0;
 };
 
 // Fleet coverage fractions over an episode's belief planes — the epistemic counterpart to the
@@ -429,6 +441,10 @@ struct nav_scorecard {
   // training-selection signals.
   double mean_alpha = 0, mean_beta = 0, mean_gamma = 0;
   double mean_mu = 0, mean_mrisk = 0, mean_ext_force = 0;
+  // ... the material weights, the turning, and the share of the drive's ticks spent pinned
+  // (binding_stopped_steps / drive_steps, averaged over those runs).
+  double mean_lam_soft = 0, mean_lam_hard = 0, mean_curvature_abs = 0;
+  double mean_binding_stopped_share = 0;
   // The plant ledger, over the vehicle-runs (and episodes) a plant fed (plant_runs > 0; otherwise
   // all 0 and left out of the JSON, byte-unchanged): rollover_rate = the share of those runs that
   // rolled over, episode_rollover_rate = the share of those episodes with any rollover, and the

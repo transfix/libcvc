@@ -189,6 +189,7 @@ add_executable(volume_ops_test volume_ops_test.cpp)
 add_executable(volume_io_test volume_io_test.cpp)
 add_executable(volume_io_extra_test volume_io_extra_test.cpp)
 add_executable(image_test image_test.cpp)
+add_executable(magick_bootstrap_test magick_bootstrap_test.cpp)
 add_executable(model_test model_test.cpp)
 add_executable(geometry_attributes_test geometry_attributes_test.cpp)
 add_executable(utility_test utility_test.cpp)
@@ -214,6 +215,7 @@ add_executable(nav_material_train_cuda_test nav_material_train_cuda_test.cpp)
 add_executable(nav_material_train_test nav_material_train_test.cpp)
 add_executable(nav_material_optim_test nav_material_optim_test.cpp)
 add_executable(nav_geom_rollout_grad_test nav_geom_rollout_grad_test.cpp)
+add_executable(nav_sim_world_test nav_sim_world_test.cpp)
 add_executable(lod_select_test lod_select_test.cpp)
 add_executable(lod_select_bench_test lod_select_bench_test.cpp)
 add_executable(geometry_simplify_test geometry_simplify_test.cpp)
@@ -357,6 +359,7 @@ set(TEST_TARGETS
   volume_io_test
   volume_io_extra_test
   image_test
+  magick_bootstrap_test
   model_test
   geometry_attributes_test
   utility_test
@@ -378,6 +381,7 @@ set(TEST_TARGETS
   nav_material_train_test
   nav_material_optim_test
   nav_geom_rollout_grad_test
+  nav_sim_world_test
   nav_material_rollout_cuda_test
   nav_coef_energy_cuda_test
   nav_material_adam_cuda_test
@@ -834,6 +838,13 @@ target_link_libraries(image_test
     GTest::gtest_main
 )
 
+target_link_libraries(magick_bootstrap_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(model_test
   PRIVATE
     cvc
@@ -1014,6 +1025,13 @@ target_link_libraries(nav_material_optim_test
 )
 
 target_link_libraries(nav_geom_rollout_grad_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(nav_sim_world_test
   PRIVATE
     cvc
     GTest::gtest
@@ -1968,6 +1986,7 @@ target_compile_features(procedural_geometry_test PRIVATE cxx_std_14)
 target_compile_features(volume_ops_test PRIVATE cxx_std_14)
 target_compile_features(volume_io_test PRIVATE cxx_std_17)
 target_compile_features(image_test PRIVATE cxx_std_17)
+target_compile_features(magick_bootstrap_test PRIVATE cxx_std_17)
 target_compile_features(model_test PRIVATE cxx_std_17)
 target_compile_features(geometry_attributes_test PRIVATE cxx_std_17)
 target_compile_features(utility_test PRIVATE cxx_std_17)
@@ -1989,6 +2008,7 @@ target_compile_features(nav_material_train_cuda_test PRIVATE cxx_std_17)
 target_compile_features(nav_material_train_test PRIVATE cxx_std_17)
 target_compile_features(nav_material_optim_test PRIVATE cxx_std_17)
 target_compile_features(nav_geom_rollout_grad_test PRIVATE cxx_std_17)
+target_compile_features(nav_sim_world_test PRIVATE cxx_std_17)
 # Let the sim_world gtest load the shipped reference policy from the source tree.
 if(EXISTS "${PROJECT_SOURCE_DIR}/share/cvc/nav/coef_mlp.cvcnav")
   target_compile_definitions(nav_test PRIVATE
@@ -2286,6 +2306,7 @@ endif()
 cvc_discover_tests(volume_ops_test)
 cvc_discover_tests(volume_io_test)
 cvc_discover_tests(image_test)
+cvc_discover_tests(magick_bootstrap_test)
 cvc_discover_tests(model_test)
 cvc_discover_tests(geometry_attributes_test)
 cvc_discover_tests(utility_test)
@@ -2311,6 +2332,7 @@ cvc_discover_tests(nav_material_train_cuda_test)
 cvc_discover_tests(nav_material_train_test)
 cvc_discover_tests(nav_material_optim_test)
 cvc_discover_tests(nav_geom_rollout_grad_test)
+cvc_discover_tests(nav_sim_world_test)
 cvc_discover_tests(lod_select_test)
 cvc_discover_tests(lod_select_bench_test)
 cvc_discover_tests(geometry_simplify_test)
