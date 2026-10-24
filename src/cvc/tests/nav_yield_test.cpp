@@ -247,6 +247,79 @@ TEST(NavYield, AStandingColumnClearsForALeadFromRest) {
   EXPECT_GT(x_near, -0.5f * field().half + 0.5f) << "the lead should get past the column";
 }
 
+// Every agent driven by the host's own commands (override_command, as a route's pursuit or a
+// host's pure pursuit drives them), straight east: the column slowly, the lead behind it fast.
+// No carrot to shift, so yielding reaches them only through steer_overrides.
+TEST(NavYield, OverriddenAgentsYieldToo) {
+  const auto run = [](bool overrides, int &contacts) {
+    field f;
+    f.cfg.min_gap = 2.0f * f.cfg.veh.rr;
+    const int n = 5;
+    std::vector<float> o(2 * n), g(2 * n);
+    const float x0 = -0.5f * f.half;
+    for (int i = 1; i < n; ++i) {
+      o[2 * i] = x0 - 0.6f * (i - 1);
+      g[2 * i] = x0 + 6.0f;
+    }
+    o[0] = x0 - 0.6f * (n - 2) - 1.2f;
+    g[0] = x0 + 6.0f;
+    sim_world w = f.make(o, g);
+    yield_config y = yielding();
+    y.steer_overrides = overrides;
+    w.set_yield(y);
+    w.set_priority(0, 10.0f);
+    contacts = 0;
+    const float touch = 2.0f * f.cfg.veh.rr * 1.02f, v_slow = 0.25f * f.cfg.veh.vmax;
+    std::vector<float> sp(n), th(n);
+    for (int t = 0; t < 300; ++t) {
+      w.snapshot(nullptr, th.data(), sp.data(), nullptr, nullptr);
+      for (int i = 0; i < n; ++i) { // hold east, as a host's pursuit would
+        const float v = sp[i] * static_cast<float>(f.cfg.scale);
+        const float want = i == 0 ? f.cfg.veh.vmax : v_slow;
+        w.override_command(i, -0.8f * th[i], (want - v) / 0.5f);
+      }
+      w.step(1);
+      const std::vector<float> p = positions(w);
+      for (int i = 0; i < n; ++i)
+        for (int j = i + 1; j < n; ++j)
+          if (std::hypot(p[2 * i] - p[2 * j], p[2 * i + 1] - p[2 * j + 1]) < touch)
+            ++contacts;
+    }
+  };
+  int c_off = 0, c_on = 0;
+  run(false, c_off);
+  run(true, c_on);
+  std::printf("  every agent on override: %d contact pair-ticks without steer_overrides, %d with\n",
+              c_off, c_on);
+  EXPECT_LT(c_on, c_off) << "overridden followers should move out of the lead's path";
+}
+
+// yield_corridors: what agent i heard, in world units, as the route planner's soft keep-outs.
+TEST(NavYield, CorridorsFromWhatWasHeard) {
+  const field f;
+  const float a = 0.3f * f.half;
+  const std::vector<float> o = {-a, 0.0f, a, 0.0f, 0.0f, 0.5f * a};
+  const std::vector<float> g = {a, 0.0f, -a, 0.0f, 0.0f, 0.5f * a};
+  sim_world w = f.make(o, g);
+  EXPECT_TRUE(w.yield_corridors(1, 5.0, 2.0, 0.5).empty()); // before a step with yielding
+  w.set_yield(yielding());
+  w.set_priority(0, 10.0f);
+  w.step(1);
+  const std::vector<cvc::nav::route_corridor> c = w.yield_corridors(1, 5.0, 2.0, 0.5);
+  ASSERT_EQ(c.size(), 2u); // agents 0 and 2
+  const cvc::nav::route_corridor &lead = c[0].cost == 2.0 ? c[0] : c[1];
+  const cvc::nav::route_corridor &other = c[0].cost == 2.0 ? c[1] : c[0];
+  EXPECT_DOUBLE_EQ(lead.cost, 2.0);
+  EXPECT_GT(lead.xy.size(), 2u) << "a higher priority's corridor is its path";
+  EXPECT_EQ(other.xy.size(), 2u) << "the others' is where they stand";
+  EXPECT_DOUBLE_EQ(other.cost, 0.5);
+  // In world units: the lead's start is -a / scale + cx.
+  EXPECT_NEAR(lead.xy[0], -a / f.cfg.scale + f.cfg.cx, 2.0);
+  // The lead hears nobody of higher priority: only where the others stand.
+  for (const cvc::nav::route_corridor &k : w.yield_corridors(0, 5.0, 2.0, 0.5))
+    EXPECT_EQ(k.xy.size(), 2u);
+}
+
 TEST(NavYield, TwoAgentsHeadOnPassEachOther) {
   const auto run = [](bool yield_on, float &closest) {
     const field f;

@@ -29,6 +29,14 @@
 // A shift that would put the carrot in a wall (the field's phi there below the agent's radius) is
 // tried on the other side, and dropped if that side is no better.
 //
+// An agent the host commands itself (sim_world::override_command: a route_follower's manoeuvre
+// or pursuit, a host's own pure pursuit) has no carrot to shift. With steer_overrides, a forward
+// override's steer takes pure pursuit's correction toward the same shift instead,
+// atan(2 L y / d^2), y the shift across the heading and d the lookahead (the speed's second, at
+// least near_dist), within the lock. Backing up is left as commanded. And a route planner can
+// keep off the paths others mean to drive: sim_world::yield_corridors gives them as soft costs
+// for plan_vehicle_route (route_options::avoid).
+//
 // So a convoy's lead coming up behind its followers announces its path; the followers pull over
 // to the right of it and the lead passes on the left, instead of pushing through. Equal
 // priorities share a conflict: two agents head-on each move half out of the way.
@@ -53,6 +61,7 @@ struct yield_config {
   float min_speed = 0.05f;  // normalized / s: the floor arrival times are taken at
   float near_dist = 0.0f;   // normalized: along a path this close a conflict counts at any speed;
                             // 0 = 4 x clearance, < 0 = off (arrival times alone)
+  bool steer_overrides = true; // a forward override_command's steer takes the shift too
   bool on() const { return horizon_s > 0.0f; }
 };
 

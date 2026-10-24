@@ -101,6 +101,40 @@ TEST(VehicleRoute, DrivesStraightAcrossOpenGround) {
   expect_drivable(g, humvee(), r, 1.5);
 }
 
+// A soft keep-out (route_options::avoid): a corridor another vehicle means to drive, laid along
+// the straight line, bends the route round it where the ground allows; at no cost it changes
+// nothing.
+TEST(VehicleRoute, KeepsOffACorridorOthersMeanToDrive) {
+  const ground g(100, 60);
+  const route_pose s{10, 30, 0};
+  route_options o;
+  route_corridor c;
+  c.xy = {30.0, 30.0, 60.0, 30.0};
+  c.radius = 8.0;
+  c.cost = 3.0;
+  o.avoid = {c};
+  const vehicle_route plain = g.plan(humvee(), s, 80, 30);
+  const vehicle_route kept = g.plan(humvee(), s, 80, 30, o);
+  ASSERT_TRUE(kept.reached);
+  double off_plain = 0.0, off_kept = 0.0;
+  for (const route_pose &q : plain.poses)
+    if (q.x > 35 && q.x < 55)
+      off_plain = std::max(off_plain, std::fabs(q.y - 30.0));
+  for (const route_pose &q : kept.poses)
+    if (q.x > 35 && q.x < 55)
+      off_kept = std::max(off_kept, std::fabs(q.y - 30.0));
+  std::printf("  a corridor along the line: the route stays %.1f m off it (%.1f m without), "
+              "%.1f m long (%.1f m)\n",
+              off_kept, off_plain, kept.length, plain.length);
+  EXPECT_LT(off_plain, 1.0);
+  EXPECT_GT(off_kept, 5.0) << "the route should keep off the corridor";
+  expect_drivable(g, humvee(), kept, 1.5);
+  o.avoid[0].cost = 0.0;
+  const vehicle_route free_ = g.plan(humvee(), s, 80, 30, o);
+  EXPECT_EQ(free_.poses.size(), plain.poses.size());
+  EXPECT_DOUBLE_EQ(free_.length, plain.length);
+}
+
 // A goal behind the vehicle on open ground: it turns round within its circle.
 TEST(VehicleRoute, TurnsRoundWithinItsCircle) {
   const ground g(100, 60);

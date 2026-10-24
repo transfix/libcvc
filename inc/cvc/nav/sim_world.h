@@ -47,6 +47,7 @@
 #include <cvc/nav/nav_stats.h>
 #include <cvc/nav/plant_types.h>
 #include <cvc/nav/terrain.h>
+#include <cvc/nav/vehicle_route.h> // route_corridor
 #include <cvc/nav/yield.h>
 #include <memory>
 #include <string>
@@ -352,6 +353,12 @@ public:
   void set_intent_channel(intent_channel *channel) { yield_chan_ = channel; }
   // Who gives way in a conflict; empty (the default) = priority_resolver().
   void set_yield_resolver(yield_resolver r) { yield_res_ = std::move(r); }
+  // What agent i has heard, as soft keep-outs for its route planner (route_options::avoid), in the
+  // sim's world units: each higher-priority agent's intended path at radius_world and cost_path,
+  // and every other agent where it stands, at radius_world and cost_stand (they are counted on to
+  // move). Empty before a step() with yielding on.
+  std::vector<route_corridor> yield_corridors(int i, double radius_world, double cost_path,
+                                              double cost_stand) const;
   // The last step()'s published intents ([n]) and carrot shifts ([n*2], normalized; at the carrot),
   // for a renderer or a test; null before a step() with yielding on.
   const agent_intent *intents() const {
@@ -653,6 +660,7 @@ private:
   std::vector<std::vector<float>> yield_path_;
   std::vector<agent_intent> yield_intents_;
   std::vector<float> yield_shift_;
+  std::vector<float> yield_need_; // [n*2] the shifts before scaling to the carrot (normalized)
   std::vector<int> stall_, mode_, hist_count_;
   std::vector<float> turn_, dhit_, best_, init_;
   std::vector<float>

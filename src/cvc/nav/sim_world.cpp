@@ -746,7 +746,22 @@ void sim_world::step(int num_threads) {
       float lock = cfg_.veh.delta_max;
       if (plant_ && pl_max_steer_ > 0.0f)
         lock = std::min(lock, pl_max_steer_);
-      const float steer = std::min(std::max(ov_steer_[i], -lock), lock);
+      float steer_cmd = ov_steer_[i];
+      // Yielding on an override: pure pursuit's correction toward the agent's shift, forward only.
+      if (yield_cfg_.on() && yield_cfg_.steer_overrides &&
+          yield_need_.size() == static_cast<std::size_t>(2) * n_) {
+        const float nx = yield_need_[2 * i], ny = yield_need_[2 * i + 1];
+        const float h = plant_ ? th_[i] : ov_start[i].heading;
+        const float v = plant_ ? sp_[i] : ov_start[i].speed;
+        if ((nx != 0.0f || ny != 0.0f) && v >= 0.0f && ov_accel_[i] >= -1e-6f) {
+          const float C = yield_cfg_.clearance > 0.0f ? yield_cfg_.clearance : 3.0f * cfg_.veh.rr;
+          const float nd = yield_cfg_.near_dist > 0.0f ? yield_cfg_.near_dist : 4.0f * C;
+          const float d = std::max(std::fabs(v) * 1.0f, nd);
+          const float y = -std::sin(h) * nx + std::cos(h) * ny;
+          steer_cmd += std::atan(2.0f * L * y / (d * d));
+        }
+      }
+      const float steer = std::min(std::max(steer_cmd, -lock), lock);
       if (plant_) {
         pl_steer_cmd_[i] = steer;
         const float a_b = pl_a_brake_[i] > 0.0f ? pl_a_brake_[i] : pl_a_max_[i];
@@ -1284,6 +1299,36 @@ bool sim_world::infeasible_at(float onx, float ony) const {
   return ter_.infeasible[static_cast<std::size_t>(r * cols_ + c)] != 0;
 }
 
+std::vector<route_corridor> sim_world::yield_corridors(int i, double radius_world, double cost_path,
+                                                       double cost_stand) const {
+  std::vector<route_corridor> out;
+  if (i < 0 || i >= n_ || yield_intents_.size() != static_cast<std::size_t>(n_))
+    return out;
+  const intent_channel &ch = yield_chan_ ? static_cast<const intent_channel &>(*yield_chan_)
+                                         : static_cast<const intent_channel &>(yield_perfect_);
+  std::vector<agent_intent> heard;
+  ch.heard(i, heard);
+  const agent_intent &self = yield_intents_[i];
+  const auto world = [&](float v, double c) { return static_cast<double>(v) / cfg_.scale + c; };
+  for (const agent_intent &a : heard) {
+    route_corridor c;
+    c.radius = radius_world;
+    c.xy = {world(a.x, cfg_.cx), world(a.y, cfg_.cy)};
+    if (a.priority > self.priority) { // its path, at full cost
+      c.cost = cost_path;
+      for (int k = 0; k < a.n_path; ++k) {
+        c.xy.push_back(world(a.path[2 * k], cfg_.cx));
+        c.xy.push_back(world(a.path[2 * k + 1], cfg_.cy));
+      }
+    } else { // where it stands: it will move
+      c.cost = cost_stand;
+    }
+    if (c.cost > 0.0)
+      out.push_back(std::move(c));
+  }
+  return out;
+}
+
 void sim_world::set_priority(int i, float priority) {
   if (i < 0 || i >= n_)
     throw std::out_of_range("cvc::nav::sim_world::set_priority: no agent " + std::to_string(i));
@@ -1380,6 +1425,7 @@ void sim_world::yield_tick(const field_stack &fs, int num_threads) {
   ch.publish(yield_intents_.data(), n_, t);
   const yield_resolver res = yield_res_ ? yield_res_ : priority_resolver();
   yield_shift_.assign(static_cast<std::size_t>(2) * n_, 0.0f);
+  yield_need_.assign(static_cast<std::size_t>(2) * n_, 0.0f);
   std::vector<agent_intent> heard;
   bool any = false;
   for (int i = 0; i < n_; ++i) {
@@ -1417,6 +1463,8 @@ void sim_world::yield_tick(const field_stack &fs, int num_threads) {
         dx = dy = 0.0f;
       }
     }
+    yield_need_[2 * i] = dx;
+    yield_need_[2 * i + 1] = dy;
     // The shift is where the agent should be across the path; at the carrot, as far ahead as the
     // carrot is in clearances, so the turn it asks for does not shrink with the lookahead.
     const float ahead = std::hypot(carrot_[2 * i] - o_[2 * i], carrot_[2 * i + 1] - o_[2 * i + 1]);

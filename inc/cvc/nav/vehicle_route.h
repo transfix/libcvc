@@ -59,6 +59,16 @@ struct route_vehicle {
   double cusp_cost = 0.0;    // world units of length a change of direction costs; 0 = 4 x step
 };
 
+// A soft keep-out for the planner: a corridor another vehicle means to drive (or where one stands),
+// a polyline of world points (x, y interleaved; one point is a disc) with a radius. A move ending d
+// from it, d < radius, costs cost x step x (1 - d / radius) more: the route keeps off it where it
+// can, and goes through it where it must. sim_world::yield_corridors builds them from what an
+// agent has heard.
+struct route_corridor {
+  std::vector<double> xy;
+  double radius = 0.0, cost = 0.0;
+};
+
 struct route_options {
   double step = 0.0;           // arc length of a move; 0 = 1.5 cells, at most 0.6 x min_radius
   int headings = 72;           // heading bins in the search's closed set (5 degrees)
@@ -73,6 +83,7 @@ struct route_options {
   // took 168,000 expansions and 0.66 s.
   double heuristic_weight = 1.5;
   int max_expansions = 200000;
+  std::vector<route_corridor> avoid; // soft keep-outs; empty = none
 };
 
 struct route_pose {

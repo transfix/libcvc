@@ -153,6 +153,26 @@ double route_clearance(const std::uint8_t *occ, int rows, int cols, double min_x
   return footprint_clearance(f, v, p.x, p.y, p.heading);
 }
 
+namespace {
+
+// The distance from (x, y) to a corridor's polyline (a disc's centre for one point).
+double corridor_distance(const route_corridor &a, double x, double y) {
+  const std::size_t n = a.xy.size() / 2;
+  if (n == 0)
+    return std::numeric_limits<double>::infinity();
+  double best = std::hypot(x - a.xy[0], y - a.xy[1]);
+  for (std::size_t k = 1; k < n; ++k) {
+    const double ax = a.xy[2 * k - 2], ay = a.xy[2 * k - 1], bx = a.xy[2 * k], by = a.xy[2 * k + 1];
+    const double ex = bx - ax, ey = by - ay, l2 = ex * ex + ey * ey;
+    double u = l2 > 0.0 ? ((x - ax) * ex + (y - ay) * ey) / l2 : 0.0;
+    u = std::min(1.0, std::max(0.0, u));
+    best = std::min(best, std::hypot(x - (ax + u * ex), y - (ay + u * ey)));
+  }
+  return best;
+}
+
+} // namespace
+
 vehicle_route plan_vehicle_route(const std::uint8_t *occ, int rows, int cols, double min_x,
                                  double min_y, double max_x, double max_y, const route_vehicle &v,
                                  const route_pose &start, double goal_x, double goal_y,
@@ -267,6 +287,12 @@ vehicle_route plan_vehicle_route(const std::uint8_t *occ, int rows, int cols, do
         if (cur.dir == dir)
           cost += 0.2 * step * std::fabs(s - cur.steer);
         cost += o.comfort_cost * step * std::max(0.0, comfort - (clr - o.margin)) / comfort;
+        for (const route_corridor &a : o.avoid)
+          if (a.radius > 0.0 && a.cost > 0.0) {
+            const double d = corridor_distance(a, nx, ny);
+            if (d < a.radius)
+              cost += a.cost * step * (1.0 - d / a.radius);
+          }
         const double g = cur.g + cost;
         const std::uint64_t kn = key(nx, ny, nth);
         const auto b = best.find(kn);
