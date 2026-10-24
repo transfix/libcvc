@@ -16,8 +16,10 @@
 #include <cvc/nav/sim_world.h>
 #include <cvc/physics/nav_eval.h>
 #include <cvc/physics/nav_plant.h>
+#include <cvc/physics/plant_log.h>
 #include <cvc/physics/world.h>
 #include <exception>
+#include <memory>
 #include <stdexcept>
 #include <thread>
 #include <vector>
@@ -94,11 +96,21 @@ plant_drive_score drive_once(const cvc::nav::coef_mlp &policy, const cvc::nav::t
   nav_plant plant(phys, {d}, po);
   w.set_plant(&plant);
   plant_drive_score s;
+  std::unique_ptr<plant_log> log;
+  if (o.predict_energy) {
+    log = std::make_unique<plant_log>(w, plant);
+    log->start();
+  }
   for (int t = 0; t < o.ticks; ++t) {
     w.step(step_threads);
+    if (log)
+      log->record();
     for (int i = 0; i < o.agents; ++i)
       s.energy_J += plant.energy_step(i);
   }
+  if (log)
+    for (const power_run &r : evaluate_power(log->runs(), log->dt(), d, o.power).runs)
+      s.model_J += r.model_J;
   // The ledger's own odometer: the chassis' path since attach() added the vehicle.
   for (int i = 0; i < o.agents; ++i)
     s.distance_m += phys.vehicle_state(plant.vehicle(i)).energy.distance;
@@ -184,10 +196,12 @@ score_on_plant(const std::vector<cvc::nav::coef_mlp> &policies,
       mean[p].reach += x.reach;
       mean[p].energy_J += x.energy_J;
       mean[p].distance_m += x.distance_m;
+      mean[p].model_J += x.model_J;
     }
     mean[p].reach /= ns;
     mean[p].energy_J /= ns;
     mean[p].distance_m /= ns;
+    mean[p].model_J /= ns;
     if (per_seed)
       (*per_seed)[p].assign(r.begin() + static_cast<long>(p * ns),
                             r.begin() + static_cast<long>((p + 1) * ns));

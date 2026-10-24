@@ -1234,7 +1234,9 @@ TEST(NavPlantConvergence, EnergyTrainedPolicyOnJolt) {
   t_off.train(sc);
   t_on.train(sc);
 
-  const plant_reach_options eval; // 20 seeds (100..119) x 48 agents x 400 ticks
+  plant_reach_options eval;   // 20 seeds (100..119) x 48 agents x 400 ticks
+  eval.predict_energy = true; // and what the fitted model says the same motion drew
+  eval.power = fit.si;
   std::vector<std::vector<plant_drive_score>> per;
   const std::vector<plant_drive_score> m = score_on_plant(
       {t_off.to_coef_mlp(), t_on.to_coef_mlp(), cvc::nav::coef_mlp::default_biased()}, sc, rr,
@@ -1267,10 +1269,59 @@ TEST(NavPlantConvergence, EnergyTrainedPolicyOnJolt) {
               m[1].wh_per_km() - m[0].wh_per_km(), wlo, whi, 100 * (m[1].reach - m[2].reach),
               100 * rlo2, 100 * rhi2, m[1].wh_per_km() - m[2].wh_per_km(), wlo2, whi2);
   for (std::size_t s = 0; s < ns; ++s)
-    std::printf("    seed %zu: reach %.3f %.3f %.3f, Wh/km %.2f %.2f %.2f\n", 100 + s,
-                per[0][s].reach, per[1][s].reach, per[2][s].reach, per[0][s].wh_per_km(),
-                per[1][s].wh_per_km(), per[2][s].wh_per_km());
+    std::printf("    seed %zu: reach %.3f %.3f %.3f, Wh/km %.2f %.2f %.2f, model %.2f %.2f %.2f\n",
+                100 + s, per[0][s].reach, per[1][s].reach, per[2][s].reach, per[0][s].wh_per_km(),
+                per[1][s].wh_per_km(), per[2][s].wh_per_km(), per[0][s].model_wh_per_km(),
+                per[1][s].model_wh_per_km(), per[2][s].model_wh_per_km());
+
+  // Does the model predict the differences it trains on? Over the same Jolt runs: its Wh/km per
+  // policy and its error, its paired differences beside the measured ones, and how well its
+  // per-seed differences follow the measured ones (Pearson r over the seeds).
+  const char *names[3] = {"without", "with", "seed"};
+  for (int k = 0; k < 3; ++k)
+    std::printf("    model on %-7s: %.2f Wh/km against %.2f measured (%+.1f%%)\n", names[k],
+                m[k].model_wh_per_km(), m[k].wh_per_km(),
+                100.0 * (m[k].model_J - m[k].energy_J) / m[k].energy_J);
+  const auto corr = [](const std::vector<double> &a, const std::vector<double> &b) {
+    const double n = static_cast<double>(a.size());
+    double ma = 0.0, mb = 0.0;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+      ma += a[i] / n;
+      mb += b[i] / n;
+    }
+    double sab = 0.0, saa = 0.0, sbb = 0.0;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+      sab += (a[i] - ma) * (b[i] - mb);
+      saa += (a[i] - ma) * (a[i] - ma);
+      sbb += (b[i] - mb) * (b[i] - mb);
+    }
+    return saa > 0.0 && sbb > 0.0 ? sab / std::sqrt(saa * sbb) : 0.0;
+  };
+  const int pairs[3][2] = {{1, 0}, {1, 2}, {0, 2}};
+  const char *pair_names[3] = {"with - without", "with - seed", "without - seed"};
+  for (int q = 0; q < 3; ++q) {
+    const int x = pairs[q][0], y = pairs[q][1];
+    std::vector<double> dm(ns), dp(ns);
+    for (std::size_t s = 0; s < ns; ++s) {
+      dm[s] = per[x][s].wh_per_km() - per[y][s].wh_per_km();
+      dp[s] = per[x][s].model_wh_per_km() - per[y][s].model_wh_per_km();
+    }
+    double plo, phi;
+    paired_ci(dp, plo, phi);
+    std::printf("    %-15s Wh/km: model %+.2f [%+.2f, %+.2f], measured %+.2f; per-seed r = %.2f\n",
+                pair_names[q], m[x].model_wh_per_km() - m[y].model_wh_per_km(), plo, phi,
+                m[x].wh_per_km() - m[y].wh_per_km(), corr(dp, dm));
+  }
+  std::vector<double> all_m, all_p; // every (policy, seed) run's Wh/km
+  for (int k = 0; k < 3; ++k)
+    for (std::size_t s = 0; s < ns; ++s) {
+      all_m.push_back(per[k][s].wh_per_km());
+      all_p.push_back(per[k][s].model_wh_per_km());
+    }
+  std::printf("    per-run Wh/km, model against measured over all %zu runs: r = %.2f\n",
+              all_m.size(), corr(all_p, all_m));
   EXPECT_TRUE(std::isfinite(m[1].wh_per_km()));
+  EXPECT_GT(m[1].model_J, 0.0);
 }
 
 // The zeroth-order fine-tune's mechanics, small and quick: a batch of policies scores what each

@@ -29,13 +29,17 @@
 //
 // score_on_plant runs the same drives and also returns what they cost (the P8c gate): the energy
 // every agent drew from its source over the run, as the P3 ledger counts it
-// (nav_plant::energy_step summed), and the distance their chassis drove.
+// (nav_plant::energy_step summed), and the distance their chassis drove. With
+// plant_reach_options::predict_energy it also logs each run (plant_log) and gives what the power
+// model `power` says the same motion drew (evaluate_power), so a model can be judged on the
+// runs a trained policy makes, not only on those it was fitted to.
 
 #ifndef __CVC_PHYSICS_NAV_EVAL_H__
 #define __CVC_PHYSICS_NAV_EVAL_H__
 
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/coef_train.h>
+#include <cvc/nav/dyn_power.h>
 #include <cvc/physics/vehicle.h>
 #include <vector>
 
@@ -61,6 +65,9 @@ struct plant_reach_options {
   // sample_starts_goals), so reach is scored at the goal distances a policy is deployed at.
   // 0 = scattered starts and goals anywhere free, the default.
   float goal_min = 0.0f, goal_max = 0.0f;
+  // score_on_plant: predict each run's energy with `power` too (plant_drive_score::model_J).
+  bool predict_energy = false;
+  cvc::nav::dyn_power_si power{};
 };
 
 // One run's score, or a mean of runs'.
@@ -68,9 +75,13 @@ struct plant_drive_score {
   double reach = 0.0;      // the fraction of agents that reached their goals
   double energy_J = 0.0;   // drawn by all its agents, moving or not
   double distance_m = 0.0; // their chassis' paths, summed
+  double model_J = 0.0;    // the power model's energy over the same ticks (predict_energy)
   // The fleet's draw per kilometre driven, Wh/km; 0 if nothing moved.
   double wh_per_km() const {
     return distance_m > 0.0 ? energy_J / 3600.0 / (distance_m / 1000.0) : 0.0;
+  }
+  double model_wh_per_km() const {
+    return distance_m > 0.0 ? model_J / 3600.0 / (distance_m / 1000.0) : 0.0;
   }
 };
 
