@@ -318,7 +318,8 @@ Three backends ship:
   terminal backends share one widget engine, focus and commit rule, and the hosted mode
   is open to any host with its own chrome. Built behind `CVC_ARIADNE_TVISION` (the flag
   the roadmap keeps for tvision's Borland-derived licensing) when tvision, ncursesw and
-  FTXUI are found; `ari run --backend tvision` runs it.
+  FTXUI are found; `ari run --backend tvision` runs it. In a browser build it needs no
+  ncurses: cvcpkg's wasm tvision carries a browser console (see *In the browser* below).
 
 Because the core is backend-neutral, the same document renders through any backend. A
 document that needs something only some hosts have says so in `requires:`, or asks with
@@ -1028,6 +1029,17 @@ has no argv, so the build bakes in one document, `CVC_ARI_WASM_DOC` (default
 `terminal_tour.ari`), with the component library at `/components`. The same `ari.js`
 runs headless under node: `node ari.js snapshot --width 100 /terminal_tour.ari`. CI's `ari-wasm`
 job does exactly that.
+
+With `tvision` in the deps prefix too (`cvcpkg install tvision --platform wasm --arch wasm32
+--link static`, cvc.4 on), the build also has `ari_tvision` (`ari_tvision.js` + `.wasm` +
+`.html`, built by name): the same document on the tvision desktop, from the same page with
+`--backend tvision` baked in. Upstream tvision needs ncurses and `select()`, neither of which a
+page has, so cvcpkg's recipe patches in a browser console
+(`recipes/tvision/emscripten-browser-console.patch` in cy-pca/cvcpkg): ANSI output on stdout
+ending each frame with a NUL as FTXUI does, non-blocking stdin decoded by tvision's own
+escape-sequence parser (keys, SGR mouse, bracketed paste), the size through the exported
+`tvision_set_screen_size(cols, rows)`, which the page calls beside `_ftxui_on_resize`, and an
+event wait that yields with `emscripten_sleep`. Both pages are in the gallery.
 
 What differs from a real terminal:
 

@@ -31,7 +31,7 @@
 // external force it injects) are a SEPARATE record it keeps, joined by veh_index;
 // they never live here. The collector consumes only the sim_world::snapshot arrays
 // plus optional position samplers, so it has no libcvc-internal dependency beyond
-// the stdlib.
+// the stdlib (and plant_types.h's plain, stdlib-only plant_sample).
 // The scorecard fields mirror the Python grl_snam.scorecard schema (the per-vehicle
 // veh_nav_stats is a superset of grl_snam.metrics.NavStats) — reuse, not reinvent. C++
 // and Python are held in step today by independent hand-computed corpora sharing the
@@ -41,6 +41,7 @@
 
 #include <array>
 #include <cstdint>
+#include <cvc/nav/plant_types.h>
 #include <functional>
 #include <string>
 #include <vector>
@@ -69,6 +70,16 @@ struct nav_stats_params {
   // stall_steps bit-for-bit; retune it only in lockstep across repos (see
   // NAV-STATS-INTRINSIC-ROADMAP).
   double stall_progress_eps_m = 0.05;
+  // The plant ledger (nav_samplers::plant). A vehicle has rolled over once its body's up axis
+  // stays below roll_up_z (tipped past 60 degrees) for roll_hold_s; latched for the episode.
+  // tilt_deg is the tilt tilt_s counts time past, lift_ltr the |ltr| lift_s counts time past (a
+  // side's wheels about to lift), and steer_sat the share of the steering lock a command counts
+  // as saturated at.
+  double roll_up_z = 0.5;
+  double roll_hold_s = 1.0;
+  double tilt_deg = 20.0;
+  double lift_ltr = 0.9;
+  double steer_sat = 0.95;
 };
 
 // Per-episode budget. A vehicle is over_budget (and the episode fails) when EITHER
@@ -130,6 +141,12 @@ struct nav_samplers {
   // Terrain (sim_world::set_terrain): 1 for each vehicle whose footprint touched an infeasible
   // slope cell THIS step ([n]); null ⇒ untracked, and neither the record nor its JSON carries it.
   const int *slope_entries = nullptr;
+  // A physics plant's measurements of each vehicle at the end of THIS step (plant_sample[n], SI;
+  // sim_world::plant_samples() with a plant that tracks them, vehicle_plant.h): the plant
+  // ledger. null (the kinematic plant) => untracked, and neither the record nor its JSON carries
+  // it, byte-unchanged. The grl-snam Python twin drives the kinematic plant, which never feeds
+  // this, so the twin has nothing to mirror and its parity corpora are unaffected.
+  const plant_sample *plant = nullptr;
   // Per-agent drive diagnostics for THIS step (drive_sample[n]); null ⇒ the drive-telemetry stats
   // stay at their defaults (feature off). The collector reduces these per vehicle into means/peaks.
   // The caller maps its drive_telemetry -> drive_sample (see drive_sample) once per tick.
@@ -202,6 +219,31 @@ struct veh_nav_stats {
   // ticks its footprint touched an infeasible slope (terrain_tracked: a terrain was set)
   bool terrain_tracked = false;
   int infeasible_slope_steps = 0;
+  // The plant ledger, reduced from nav_samplers.plant: only when it was fed, which sets
+  // plant_tracked; otherwise at these defaults and left out of the JSON. plant_steps = the ticks
+  // it was fed. rolled_over latches once the vehicle stayed tipped past params.roll_up_z for
+  // params.roll_hold_s; rolled_over_s is the end of the tick that run of tipped ticks began on
+  // (< 0 = never). tilt is the body's up axis's angle from vertical, roll and pitch about its
+  // forward and left axes (peaks in degrees); tilt_s = time tipped past params.tilt_deg. ltr_max =
+  // the largest |load transfer ratio|, lift_s the time past params.lift_ltr, wheels_up_s the time
+  // with two or more wheels off the ground. a_lat_max_g = the largest |lateral acceleration| in g.
+  // Control use: steer_cmd_abs_mean (rad), steer_sat_share = share of ticks nav steered at
+  // params.steer_sat of the lock or more, accel_cmd_mean (m/s^2), brake_share = share of ticks it
+  // asked to slow (accel_cmd < 0).
+  bool plant_tracked = false;
+  long plant_steps = 0;
+  bool rolled_over = false;
+  double rolled_over_s = -1;
+  double tilt_max_deg = 0, roll_max_deg = 0, pitch_max_deg = 0;
+  double tilt_s = 0;
+  double ltr_max = 0;
+  double lift_s = 0;
+  double wheels_up_s = 0;
+  double a_lat_max_g = 0;
+  double steer_cmd_abs_mean = 0;
+  double steer_sat_share = 0;
+  double accel_cmd_mean = 0;
+  double brake_share = 0;
   // formation holding (0 unless a formation_slot sampler is provided) — distance to this vehicle's
   // slot, and whether it ended in it. The continuous formation-holding measure, distinct from the
   // mission-arrival latch above (a deep-formation slot is legitimately far from the objective
@@ -271,6 +313,12 @@ struct episode_nav_stats {
   // otherwise 0 and left out of the JSON)
   bool terrain_tracked = false;
   int total_infeasible_slope_steps = 0;
+  // the plant ledger's fleet view, when a plant fed it (veh_nav_stats::plant_tracked; otherwise
+  // these defaults and left out of the JSON): the vehicles that rolled over, and when the first
+  // did (< 0 = none)
+  bool plant_tracked = false;
+  int vehicles_rolled = 0;
+  double first_roll_s = -1;
   // fleet belief coverage (all zero unless the caller fills it via compute_coverage). Episode-level
   // because the belief rasters are shared across the fleet; per-plane detail lives in the rasters
   // themselves (published for visualization), not here.
@@ -322,6 +370,9 @@ private:
   std::vector<int> parent_; // formation linkage from set_identity
   std::vector<double> slot_err_sum_, slot_err_max_, slot_err_last_;
   std::vector<long> slot_err_cnt_;
+  // plant-ledger accumulators (active only when nav_samplers.plant is provided)
+  std::vector<long> tipped_n_; // ticks each has been tipped past roll_up_z, now
+  std::vector<long> steer_sat_n_, brake_n_;
 };
 
 // ── Scorecard: aggregate a CORPUS of episodes for training-fitness tracking ──
@@ -378,6 +429,14 @@ struct nav_scorecard {
   // training-selection signals.
   double mean_alpha = 0, mean_beta = 0, mean_gamma = 0;
   double mean_mu = 0, mean_mrisk = 0, mean_ext_force = 0;
+  // The plant ledger, over the vehicle-runs (and episodes) a plant fed (plant_runs > 0; otherwise
+  // all 0 and left out of the JSON, byte-unchanged): rollover_rate = the share of those runs that
+  // rolled over, episode_rollover_rate = the share of those episodes with any rollover, and the
+  // runs' means of tilt_max_deg, ltr_max, lift_s, a_lat_max_g, steer_sat_share and brake_share.
+  int plant_runs = 0;
+  double rollover_rate = 0, episode_rollover_rate = 0;
+  double mean_tilt_max_deg = 0, mean_ltr_max = 0, mean_lift_s = 0, mean_a_lat_max_g = 0;
+  double mean_steer_sat_share = 0, mean_brake_share = 0;
 
   std::string to_json() const;
 };

@@ -263,6 +263,19 @@ struct bike_veh {
   int allow_reverse;
 };
 
+// An external force on one agent at one step: the differentiable twin of the deployed drive's
+// ext_force (drive.h). (fx, fy) is F_ext at this step's pose, in the normalized drive frame and
+// the same units as the barrier and goal forces. It joins them in the longitudinal command and,
+// when `steer`, the steering bias, exactly as rollout_impl adds ext_force; the behind branch's
+// barrier term stays barrier-only, as deployed. J = dF_ext/d(o) is optional: the reverse adds
+// J^T dL/dF_ext into the position gradient, so the adjoint runs through a force that depends on
+// where the agent is. A null ext_in is the controller as it was, bit for bit.
+struct ext_in {
+  float fx = 0.0f, fy = 0.0f;
+  float dfx_dox = 0.0f, dfx_doy = 0.0f, dfy_dox = 0.0f, dfy_doy = 0.0f;
+  int steer = 1;
+};
+
 // The controller half of bike_step: the steering and acceleration it commands, (delta_cmd,
 // a_cmd), with every governor applied. The lateral-acceleration cap on the steering reads the
 // speed the kinematic plant would reach, spi + hdt * a_cmd clamped to [sp_min, vmax]; a dynamic
@@ -270,9 +283,11 @@ struct bike_veh {
 //
 // `force`, when given, receives the conservative force the commands are made from, F_bar +
 // F_goal (= -grad surr_potential), as (Fx, Fy). It is written only; the commands do not change.
+// `ext`, when given, is an external force joined to it (ext_in); `force` stays F_bar + F_goal.
 CVC_HD inline void bike_control(const field &f, float ox, float oy, float thi, float spi, float gx,
                                 float gy, float al, float be, float ga, const bike_veh &v,
-                                float &delta_cmd, float &a_cmd, float *force = nullptr) {
+                                float &delta_cmd, float &a_cmd, float *force = nullptr,
+                                const ext_in *ext = nullptr) {
   const float rr = v.rr, d_hat = v.d_hat, vmax = v.vmax, L = v.L, dmax = v.delta_max;
   const float a_max = v.a_max, a_lat_max = v.a_lat_max, k_steer = v.k_steer, hdt = v.hdt;
   const float tan_dmax = tanf(dmax);
@@ -285,10 +300,14 @@ CVC_HD inline void bike_control(const field &f, float ox, float oy, float thi, f
   const float ipc = ipc_(d, d_hat);
   const float Fbar_x = -(al * ipc) * s.nx, Fbar_y = -(al * ipc) * s.ny;
   const float Fgoal_x = -be * (ox - gx), Fgoal_y = -be * (oy - gy);
-  const float Fx = Fbar_x + Fgoal_x, Fy = Fbar_y + Fgoal_y;
+  float Fx = Fbar_x + Fgoal_x, Fy = Fbar_y + Fgoal_y;
   if (force) {
     force[0] = Fx;
     force[1] = Fy;
+  }
+  if (ext) {
+    Fx = Fx + ext->fx;
+    Fy = Fy + ext->fy;
   }
   const float ch = cosf(thi), sh = sinf(thi);
   float a_long = fminf(fmaxf(Fx * ch + Fy * sh - ga * spi, -a_max), a_max);
@@ -308,7 +327,12 @@ CVC_HD inline void bike_control(const field &f, float ox, float oy, float thi, f
   float delta = behind ? turn_sign * dmax : atan2f(2.0f * L * sin_a, L_d_eff);
   const float ipc_rep = ipc < 0.0f ? ipc : 0.0f;
   const float Frep_x = -(al * ipc_rep) * s.nx, Frep_y = -(al * ipc_rep) * s.ny;
-  delta = delta + k_steer * tanhf(Frep_x * (-sh) + Frep_y * ch);
+  float sx = Frep_x, sy = Frep_y; // the forces that steer: F_rep [+ F_ext]
+  if (ext && ext->steer) {
+    sx = sx + ext->fx;
+    sy = sy + ext->fy;
+  }
+  delta = delta + k_steer * tanhf(sx * (-sh) + sy * ch);
   delta = fminf(fmaxf(delta, -dmax), dmax);
 
   float kappa = fabsf(tanf(delta)) / L;
@@ -368,9 +392,9 @@ CVC_HD inline void bike_plant(float ox, float oy, float thi, float spi, float de
 
 CVC_HD inline void bike_step(const field &f, float ox, float oy, float thi, float spi, float gx,
                              float gy, float al, float be, float ga, const bike_veh &v, float &ox1,
-                             float &oy1, float &thi1, float &spi1) {
+                             float &oy1, float &thi1, float &spi1, const ext_in *ext = nullptr) {
   float delta_cmd, a_cmd;
-  bike_control(f, ox, oy, thi, spi, gx, gy, al, be, ga, v, delta_cmd, a_cmd);
+  bike_control(f, ox, oy, thi, spi, gx, gy, al, be, ga, v, delta_cmd, a_cmd, nullptr, ext);
   bike_plant(ox, oy, thi, spi, delta_cmd, a_cmd, v, ox1, oy1, thi1, spi1);
 }
 
@@ -386,7 +410,8 @@ CVC_HD inline void bike_bwd_impl(const field &f, float ox, float oy, float thi, 
                                  float gy, float al, float be, float ga, const bike_veh &v,
                                  float go1x, float go1y, float gth1, float gsp1, float g_delta_cmd,
                                  float g_a_cmd, float &gox, float &goy, float &gth, float &gsp,
-                                 float &gal, float &gbe, float &gga) {
+                                 float &gal, float &gbe, float &gga, const ext_in *ext = nullptr,
+                                 float *g_fext = nullptr) {
   const float rr = v.rr, d_hat = v.d_hat, vmax = v.vmax, L = v.L, dmax = v.delta_max;
   const float a_max = v.a_max, a_lat_max = v.a_lat_max, k_steer = v.k_steer, hdt = v.hdt;
   const float tan_dmax = tanf(dmax);
@@ -400,7 +425,8 @@ CVC_HD inline void bike_bwd_impl(const field &f, float ox, float oy, float thi, 
   const float ipc = ipc_(d, d_hat);
   const float Fbar_x = -(al * ipc) * s.nx, Fbar_y = -(al * ipc) * s.ny;
   const float Fgoal_x = -be * (ox - gx), Fgoal_y = -be * (oy - gy);
-  const float Fx = Fbar_x + Fgoal_x, Fy = Fbar_y + Fgoal_y;
+  const float Fx = ext ? Fbar_x + Fgoal_x + ext->fx : Fbar_x + Fgoal_x,
+              Fy = ext ? Fbar_y + Fgoal_y + ext->fy : Fbar_y + Fgoal_y;
   const float ch = cosf(thi), sh = sinf(thi);
   const float aL0 = Fx * ch + Fy * sh - ga * spi;
   const int c1 = aL0 > -a_max && aL0 < a_max; // a_long clamp #1 passthrough
@@ -422,7 +448,10 @@ CVC_HD inline void bike_bwd_impl(const field &f, float ox, float oy, float thi, 
   const int iprep_pass = ipc < 0.0f;
   const float ipc_rep = iprep_pass ? ipc : 0.0f;
   const float Frep_x = -(al * ipc_rep) * s.nx, Frep_y = -(al * ipc_rep) * s.ny;
-  const float targ = Frep_x * (-sh) + Frep_y * ch;
+  const int ext_steer = ext && ext->steer;
+  const float sx = ext_steer ? Frep_x + ext->fx : Frep_x,
+              sy = ext_steer ? Frep_y + ext->fy : Frep_y;
+  const float targ = sx * (-sh) + sy * ch;
   const float tanh_t = tanhf(targ);
   const float delta1 = delta0 + k_steer * tanh_t;
   const int c2 = delta1 > -dmax && delta1 < dmax;
@@ -628,11 +657,16 @@ CVC_HD inline void bike_bwd_impl(const field &f, float ox, float oy, float thi, 
   // delta1 = delta0 + k_steer*tanh(targ)
   g_delta0 += g_delta1;
   g_targ += g_delta1 * k_steer * (1.0f - tanh_t * tanh_t);
-  // targ = Frep_x*(-sh) + Frep_y*ch
+  // targ = sx*(-sh) + sy*ch ; s = Frep [+ F_ext when it steers]
+  float g_fx = 0.0f, g_fy = 0.0f; // d L / d F_ext
   g_Frep_x += g_targ * (-sh);
   g_Frep_y += g_targ * ch;
-  g_sh += g_targ * (-Frep_x);
-  g_ch += g_targ * Frep_y;
+  if (ext_steer) {
+    g_fx += g_targ * (-sh);
+    g_fy += g_targ * ch;
+  }
+  g_sh += g_targ * (-sx);
+  g_ch += g_targ * sy;
   // Frep = -(al*ipc_rep)*n
   g_al += g_Frep_x * (-ipc_rep * s.nx) + g_Frep_y * (-ipc_rep * s.ny);
   g_ipc_rep += g_Frep_x * (-al * s.nx) + g_Frep_y * (-al * s.ny);
@@ -686,11 +720,15 @@ CVC_HD inline void bike_bwd_impl(const field &f, float ox, float oy, float thi, 
   gsp += g_aL0 * (-ga);
   // ch = cos(thi), sh = sin(thi)  [all g_ch/g_sh contributions accumulated above]
   gth += g_ch * (-sh) + g_sh * ch;
-  // Fx = Fbar_x + Fgoal_x ; Fy = ...
+  // Fx = Fbar_x + Fgoal_x [+ F_ext x] ; Fy = ...
   g_Fbar_x += g_Fx;
   g_Fgoal_x += g_Fx;
   g_Fbar_y += g_Fy;
   g_Fgoal_y += g_Fy;
+  if (ext) {
+    g_fx += g_Fx;
+    g_fy += g_Fy;
+  }
   // Fgoal = -be*(o - goal)
   gbe += g_Fgoal_x * (-(ox - gx)) + g_Fgoal_y * (-(oy - gy));
   gox += g_Fgoal_x * (-be);
@@ -710,15 +748,24 @@ CVC_HD inline void bike_bwd_impl(const field &f, float ox, float oy, float thi, 
   goy += sdoy;
 
   gal += g_al;
+  // F_ext's own dependence on the position: J^T dL/dF_ext.
+  if (ext) {
+    gox += g_fx * ext->dfx_dox + g_fy * ext->dfy_dox;
+    goy += g_fx * ext->dfx_doy + g_fy * ext->dfy_doy;
+    if (g_fext) {
+      g_fext[0] = g_fx;
+      g_fext[1] = g_fy;
+    }
+  }
 }
 
 CVC_HD inline void bike_step_bwd(const field &f, float ox, float oy, float thi, float spi, float gx,
                                  float gy, float al, float be, float ga, const bike_veh &v,
                                  float go1x, float go1y, float gth1, float gsp1, float &gox,
                                  float &goy, float &gth, float &gsp, float &gal, float &gbe,
-                                 float &gga) {
+                                 float &gga, const ext_in *ext = nullptr, float *g_fext = nullptr) {
   bike_bwd_impl(f, ox, oy, thi, spi, gx, gy, al, be, ga, v, go1x, go1y, gth1, gsp1, 0.0f, 0.0f, gox,
-                goy, gth, gsp, gal, gbe, gga);
+                goy, gth, gsp, gal, gbe, gga, ext, g_fext);
 }
 
 // Backward of bike_control: gradients on (delta_cmd, a_cmd) -> on the state and (al, be, ga).
@@ -726,9 +773,10 @@ CVC_HD inline void bike_control_bwd(const field &f, float ox, float oy, float th
                                     float gx, float gy, float al, float be, float ga,
                                     const bike_veh &v, float g_delta_cmd, float g_a_cmd, float &gox,
                                     float &goy, float &gth, float &gsp, float &gal, float &gbe,
-                                    float &gga) {
+                                    float &gga, const ext_in *ext = nullptr,
+                                    float *g_fext = nullptr) {
   bike_bwd_impl(f, ox, oy, thi, spi, gx, gy, al, be, ga, v, 0.0f, 0.0f, 0.0f, 0.0f, g_delta_cmd,
-                g_a_cmd, gox, goy, gth, gsp, gal, gbe, gga);
+                g_a_cmd, gox, goy, gth, gsp, gal, gbe, gga, ext, g_fext);
 }
 
 } // namespace diff

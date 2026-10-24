@@ -20,6 +20,7 @@ deploys on and dropped straight into the swarm.
 - [The rollout switch: surrogate vs bicycle](#the-rollout-switch-surrogate-vs-bicycle)
 - [The dynamic vehicle: `dyn_bike_step` (P8a)](#the-dynamic-vehicle-dyn_bike_step-p8a)
 - [The four-wheel vehicle: `dyn4_plant` (P8d)](#the-four-wheel-vehicle-dyn4_plant-p8d)
+- [An external force in the differentiable rollout](#an-external-force-in-the-differentiable-rollout)
 - [Scene source](#scene-source)
 - [CPU vs CUDA (device-resident)](#cpu-vs-cuda-device-resident)
 - [Exporting weights](#exporting-weights)
@@ -62,7 +63,9 @@ so `train()` can end on the checkpoint that scores best on something closer to i
 #include <cvc/physics/nav_eval.h>
 
 cvc::physics::plant_reach_options val;     // reach on Jolt RoboRacers in the scene
-val.seeds = {200, 201, 202, 203, 204, 205, 206, 207};  // validation seeds, not the evaluation's
+val.seeds.clear();                         // validation seeds, not the evaluation's: 32 of them
+for (unsigned s = 200; s < 232; ++s)
+  val.seeds.push_back(s);
 cfg.checkpoint_every = 30;
 coef_trainer tr(cfg);
 tr.train(scene, false, [&](const coef_mlp &p, int step) {
@@ -82,7 +85,8 @@ tr.train(scene, false, [&](const coef_mlp &p, int step) {
   8 seeds score in about the time of one.
 - **But it is chaotic.** Changing the scale by 4e-9 (passing `0.035f` instead of `0.035`) moves a
   seed's reach by up to 0.1, a per-seed SD of about 0.03. A mean over k validation seeds carries
-  about 3/sqrt(k) points of that alone, so use 8 or more.
+  about 3/sqrt(k) points of that alone. Use 32 when selecting among many checkpoints: with 8,
+  the best of 31 was mostly luck.
 
 ## What gets trained
 
@@ -346,8 +350,91 @@ in parallel, each run took about 9 minutes, three at once.
   more validation seeds (32 cost about two rounds of the parallel evaluation), or Jolt reach as
   the training signal itself rather than only the selector.
 
+**32 validation seeds** (now the test's default; `P8B_SELECT_VAL`). A 32-seed score carries about
+half a point of the plant's chaos. The 2e-4 run took about 10 minutes, the 1e-4 run 17.
+
+| Peak lr, steps, every | Validation seeds | Point mass: step, held-out | Dynamic: step, held-out | Dynamic - point mass | Dynamic - seed (51.7%) |
+|---|---|---|---|---|---|
+| 2e-4, 300, 30 | 8 | 120, 50.1% | 60, 52.7% | +2.6 [+0.3, +4.7] | +1.0 [-1.2, +3.4] |
+| 2e-4, 300, 30 | 32 | 120, 50.1% | 60, 52.7% | +2.6 [+0.3, +4.7] | +1.0 [-1.2, +3.4] |
+| 1e-4, 300, 10 | 8 | 210, 51.1% | 160, 53.5% | +2.4 [+0.3, +4.4] | +1.9 [-0.8, +4.4] |
+| 1e-4, 300, 10 | 32 | 260, 52.0% | 130, 52.3% | +0.3 [-2.2, +3.0] | +0.6 [-1.3, +2.7] |
+
+The validation curves (32 seeds), from the untrained policy's 0.494:
+
+- **2e-4:** point mass flat to step 120 (0.508), then down to 0.33; dynamic up to 0.509 at
+  step 60, then down to about 0.42.
+- **1e-4:** point mass creeps up to 0.50-0.516 and holds; dynamic rises to 0.521 at step 130,
+  then falls to 0.485 by step 300.
+
+**Read it carefully.**
+
+- **Training's real effect is small.** With the noise down, the curves are smooth and rise only
+  1.4 to 2.7 points on validation at their best. Held out, that is +0.3 to +0.6 against the seed
+  at 1e-4.
+- **The 8-seed 1e-4 lead was mostly luck.** Its dynamic policy led the seed by +1.9; with 32
+  seeds the chosen checkpoint leads by +0.6.
+- **The dynamic-over-point-mass gap is about damage.** It holds at 2e-4 (+2.6), where training
+  hurts the point-mass policy more, and vanishes at 1e-4 (+0.3), where neither is hurt.
+- **So the training loss moves Jolt reach by about a point at most.** Selection stops it from
+  hurting, but cannot add what training does not find. The next lever is the signal: Jolt reach
+  as the training objective (for example a zeroth-order fine-tune of the selected policy on
+  `reach_on_plant`), or a loss closer to it.
+
+**Zeroth-order fine-tuning on Jolt reach** (`cvc::physics::es_finetune_on_plant`,
+`inc/cvc/physics/nav_es.h`):
+
+- **The method.** Antithetic evolution strategies over the policy's flat weights
+  (`coef_mlp::export_flat` / `with_flat_weights`).
+  - Each iteration scores `pairs` perturbations either way on fresh city seeds, shared by the
+    whole population.
+  - Centred ranks weight the directions into a gradient estimate, which Adam follows.
+  - The centre is validated on `reach.seeds`, and the best is kept, the start included.
+  - `tail = 3` searches only the output layer's bias, which shifts the coefficient basin.
+- **The tests.** `NavPlantConvergence.EsFinetuneOnJoltReach` (`P8B_ES_*` override it), with
+  `CoefficientLeverageOnJoltReach` and `BasinGridOnJoltReach` alongside.
+
+How much the policy moves Jolt reach (32 validation seeds; `CoefficientLeverageOnJoltReach`):
+
+| Policy | Reach |
+|---|---|
+| the seed's constant (alpha, beta, gamma) = (1, 3, 4) | 50.2% |
+| alpha x0.5 / x2 | 46.0% / 49.7% |
+| beta x0.5 / x2 | 47.1% / 52.0% |
+| gamma x0.5 / x2 | 51.3% / 47.5% |
+| the dynamic-trained policy at its selected checkpoint | 52.1% |
+| it + random weight noise, sigma 0.02 / 0.05 / 0.1 | 50.7-50.8% / 51.4% / 48.2-51.1% |
+
+- **The basin has the leverage, about ±4 points.** Every random weight perturbation of the
+  trained policy costs 0.7 to 4 points: it sits near a local top.
+- **ES over all 4,739 weights** (40 iterations x 16 pairs, sigma 0.02, 4 seeds each) never
+  beat its start on validation; held out it stays at 52.3%.
+- **ES over the basin** (`tail = 3`, 30 x 8 pairs, sigma 0.2, 8 seeds each): from the trained
+  policy, again no gain. From the seed, +1.0 on validation but -0.1 [-2.3, +2.1] held out. Its
+  steps (about 6% in beta) move reach less than the plant's chaos.
+
+**A grid over the basin does what ES could not** (`BasinGridOnJoltReach`): constant policies
+with alpha 1, beta in {3, 4.5, 6, 9} and gamma in {2, 3, 4}, on the 32 validation seeds; the
+top three then on the 20 held-out seeds against the seed.
+
+| Basin | Validation | Held out | Against the seed (51.7%) |
+|---|---|---|---|
+| beta 9, gamma 4 | 52.1% | 55.4% | +3.8 [+1.9, +5.7] |
+| beta 6, gamma 4 | 52.0% | 52.7% | +1.0 [-1.0, +2.9] |
+| beta 4.5, gamma 2 | 51.4% | 54.2% | +2.5 [+0.3, +4.7] |
+
+- **The first policy that beats the seed on Jolt outside the CI.** It is the seed's own form with
+  a three-times stronger goal spring: (1, 9, 4).
+- **It sits on a cliff's edge.** A goal spring too strong for the damping collapses reach to
+  about 20%: beta 9 with gamma 3, beta 6 with gamma 2, and beta 9 with gamma 2 all did. The
+  winner is one grid step from it.
+- **So the coefficient policy's leverage on Jolt is mostly its basin.** The seed's basin was
+  tuned on the kinematic sim. The learned, state-dependent part adds little on this vehicle and
+  this city.
+
 Not yet:
-- a trained policy that beats the seed on Jolt outside the CI;
+- a learned, state-dependent policy that beats the seed on Jolt outside the CI (a tuned
+  constant basin does, above);
 - pycvc (its `nav_train_coef_mlp` takes rollout 0/1 only, and the material trainer's binding
   turns on only the bicycle);
 - a CUDA build of the plant (it is `CVC_HD`, but nothing compiles it for the device yet).
@@ -424,9 +511,82 @@ kink: a central difference there averages two cells' slopes. Jittered off the no
 controller check above went from 5e-2 to 6.2e-5.
 
 Not yet:
-- the external-force port on this plant (with transfix/libcvc#728);
+- the external-force port on this plant (the bicycle and `dyn_bike_step` have it: see
+  [An external force in the differentiable rollout](#an-external-force-in-the-differentiable-rollout));
 - the GRL-SNAM torch twin, held to the golden above;
 - the anti-roll bars, the unsprung masses and wheel spin.
+
+## An external force in the differentiable rollout
+
+The deployed drive takes a per-agent force through `ext_force` (`drive_step_ext`,
+`bicycle_rollout_ext`). The differentiable rollout takes the same force, so a trainer can learn
+whatever produces it through the real controller and vehicle.
+
+**One step** (`diff::ext_in`, `detail/diff_rollout.h`):
+
+```cpp
+diff::ext_in e;
+e.fx = fx; e.fy = fy;       // F_ext at this step's pose, normalized drive frame
+e.dfx_dox = ...;            // optional J = dF_ext/do: the reverse adds J^T dL/dF into dL/do
+e.steer = 1;                // it also steers, like ext_force::steer
+diff::bike_step(F, ox, oy, th, sp, gx, gy, al, be, ga, v, ox1, oy1, th1, sp1, &e);
+float g_fext[2];
+diff::bike_step_bwd(F, ox, oy, th, sp, gx, gy, al, be, ga, v, g_ox1, g_oy1, g_th1, g_sp1,
+                    gox, goy, gth, gsp, gal, gbe, gga, &e, g_fext);
+```
+
+- **Where it enters:** exactly where `rollout_impl` adds `ext_force`. It joins the barrier and
+  goal forces in the longitudinal command and, when it steers, the repulsive force in the steering
+  bias. The behind branch's barrier term stays barrier-only.
+- **Null is unchanged:** a null `ext_in` is the controller as it was, bit for bit.
+- **A force computed in world units:** the drive frame is o = S (w - c). A caller that writes a
+  world-frame force into the drive frame unscaled passes
+  F_drive = F_world. Its Jacobian still needs the chain rule: dF/do = (dF/dw) / S. Passing dF/dw
+  instead is off by a factor of S.
+- **The dynamic plant:** `bike_control`, `bike_control_bwd`, `dyn_bike_step` and
+  `dyn_bike_step_bwd` take the same pair.
+
+**A trajectory** (`diff::bike_rollout_ext` / `bike_rollout_ext_bwd`, `inc/cvc/nav/ext_rollout.h`;
+the dynamic twin is `dyn_rollout_ext`):
+
+- **Per-step inputs:** the goal and the coefficients may change at every step (the carrot, and
+  coef_mlp's per-tick output). They are exogenous: recorded, with no derivative through the pose.
+- **The force:** a callback gives F and J at a pose. It is sampled every `hold` steps and held
+  between, as a harness that computes it once per frame does. `hold = 1` is the deployed drive's
+  per-substep force.
+- **The tape:** every step's state, and the force and J it used.
+- **The reverse:** it takes dL/dstate at every step and returns dL/dF_ext at every step, dL/dcoef
+  (optional) and dL/d(initial state). A hold window's dL/dF goes through J at the step where F was
+  sampled.
+- **Scope:** host only, one agent per call, independent agents for threads.
+
+Measured (`nav_dyn_bike_test`, `DiffExtForce` and `DiffExtRollout`):
+
+| Check | Result |
+|---|---|
+| One step against the deployed `bicycle_rollout_ext` (64 agents, with and without steering) | identical (worst 0.0) |
+| A zero force against no force, forward and backward | identical |
+| dL/dF_ext against central differences, one step | 5.0e-4 kinematic, 1.6e-4 dynamic; 1.3e-3 through a position-dependent force |
+| A 10-step kinematic trajectory, hold 1 / 3: dL/d(initial state), dL/dF, dL/dbeta | 2.9e-4 / 3.0e-4, 2.3e-3 / 1.9e-3, 8.3e-4 / 1.3e-3 |
+| The same on the dynamic twin: dL/d(initial state), dL/dF | 6.8e-4 / 6.2e-4, 9.5e-4 / 1.0e-3 |
+
+The finite differences are taken where they measure a slope. The starts are jittered off the
+SDF's grid nodes. A case whose forward and backward differences disagree, which straddles a
+controller switch, or whose central differences at eps and eps / 2 disagree, where the slope
+is sharply peaked within the step, is skipped and counted, at most a quarter of them. Which cases
+those are depends on the scene's draws, which differ by standard library. macOS's libc++ failed
+the earlier unfiltered sums (dL/dF 0.38). Swept over 100 other draws (`CVC_EXT_CASE_SEED`),
+none fails.
+
+**The torch twin** is GRL-SNAM's `grl_snam/ext_rollout.py` (CVC-Lab/GRL-SNAM#122): batched,
+float64 or float32, CPU or CUDA, with autograd as the reverse.
+- **Its fixture:** `DiffExtRollout.Golden` writes `tests/data/ext_rollout_golden.json`, six agents'
+  12-step trajectories and reverse gradients, which the twin replays.
+- **Agreement:**
+  - In float64, its autograd matches this float reverse to 1.9e-7 (dL/dF_ext), 4.3e-9 (dL/dcoef)
+    and 1.6e-7 (dL/d(initial state)).
+  - The trajectories agree to 1.6e-7.
+  - So the finite-difference figures above are the differences' own error, not an adjoint gap.
 
 ## Scene source
 

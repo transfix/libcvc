@@ -131,7 +131,8 @@ planar_sample plant_log::sample(int i) const {
   s.rear_y = rear.y;
   s.steer = vs.steer;
   s.grade = std::max(-1.0, std::min(1.0, fwd.z));
-  s.roll = std::max(-1.0, std::min(1.0, -rotate(b.rotation, {0.0, 1.0, 0.0}).z));
+  // + left side up: the body's left axis rising (plant_state::roll, plant_sample::roll).
+  s.roll = std::max(-1.0, std::min(1.0, rotate(b.rotation, {0.0, 1.0, 0.0}).z));
   s.wheels = static_cast<int>(vs.wheels.size());
   for (const wheel_state &w : vs.wheels)
     s.wheels_down += w.contact ? 1 : 0;
