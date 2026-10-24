@@ -269,8 +269,14 @@ legs at its cusps, and each leg is driven in one gear. Call `apply()` before eac
 - **The last forward leg** belongs to the trained drive. The agent is retargeted to a carrot
   `lookahead` along the route, so it keeps off walls and parks at the end as it always has:
   - The carrot is at least twice the sim's `reach_tol` ahead; nearer, the drive parks at it.
-  - It is the farthest pose within the lookahead the agent can see on the sim's map. The drive
-    heads straight for its carrot, so one behind a corner stalls it against the building.
+    `lookahead` defaults to 3 `reach_tol` (at least 3 route steps). At 2 `reach_tol` along the
+    route, a carrot on any bend is nearer than that in a straight line (a chord is shorter than
+    its arc), so the stretch went to pure pursuit at `pursuit_speed`. A Humvee convoy in Austin
+    then drove most bends at 5 m/s. On three seeds, setting 3 `reach_tol` (48 m) raised column
+    arrival from 0.17 / 0.33 / 0.33 to 0.83 / 0.83 / 0.33; 4 `reach_tol` cut more corners.
+  - It is the farthest pose within the lookahead the agent can see on its own belief plane
+    (`sim_world::agent_planes()`; with a plane per vehicle, plane 0 is another vehicle's map). The
+    drive heads straight for its carrot, so one behind a corner stalls it against the building.
   - It moves on only once the agent is halfway to it, since a retarget resets the drive's
     carrot state.
   - Where the agent cannot see past the drive's reach (a tight corner, a wall alongside), that
