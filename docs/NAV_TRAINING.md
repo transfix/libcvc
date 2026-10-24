@@ -510,10 +510,12 @@ occupancy-cell centres, which are the SDF field's grid nodes, where the bilinear
 kink: a central difference there averages two cells' slopes. Jittered off the nodes, the
 controller check above went from 5e-2 to 6.2e-5.
 
+The external force reaches this plant as it reaches the others: see
+[An external force in the differentiable rollout](#an-external-force-in-the-differentiable-rollout).
+
 Not yet:
-- the external-force port on this plant (the bicycle and `dyn_bike_step` have it: see
-  [An external force in the differentiable rollout](#an-external-force-in-the-differentiable-rollout));
-- the GRL-SNAM torch twin, held to the golden above;
+- the GRL-SNAM torch twin, held to the golden above (and to the force port's,
+  `tests/data/dyn4_ext_rollout_golden.json`);
 - the anti-roll bars, the unsprung masses and wheel spin.
 
 ## An external force in the differentiable rollout
@@ -543,11 +545,13 @@ diff::bike_step_bwd(F, ox, oy, th, sp, gx, gy, al, be, ga, v, g_ox1, g_oy1, g_th
   world-frame force into the drive frame unscaled passes
   F_drive = F_world. Its Jacobian still needs the chain rule: dF/do = (dF/dw) / S. Passing dF/dw
   instead is off by a factor of S.
-- **The dynamic plant:** `bike_control`, `bike_control_bwd`, `dyn_bike_step` and
-  `dyn_bike_step_bwd` take the same pair.
+- **The dynamic plants:** `bike_control`, `bike_control_bwd`, `dyn_bike_step` and
+  `dyn_bike_step_bwd` (P8a's single track), and `dyn4_bike_step` and `dyn4_bike_step_bwd` (P8d's
+  four wheels, on its ground sampler), take the same pair.
 
 **A trajectory** (`diff::bike_rollout_ext` / `bike_rollout_ext_bwd`, `inc/cvc/nav/ext_rollout.h`;
-the dynamic twin is `dyn_rollout_ext`):
+the dynamic twins are `dyn_rollout_ext` and, for the four-wheel plant on a ground `G`,
+`dyn4_rollout_ext<G>` / `dyn4_rollout_ext_bwd<G>`, whose tape holds `dyn4_state`):
 
 - **Per-step inputs:** the goal and the coefficients may change at every step (the carrot, and
   coef_mlp's per-tick output). They are exogenous: recorded, with no derivative through the pose.
@@ -569,6 +573,9 @@ Measured (`nav_dyn_bike_test`, `DiffExtForce` and `DiffExtRollout`):
 | dL/dF_ext against central differences, one step | 5.0e-4 kinematic, 1.6e-4 dynamic; 1.3e-3 through a position-dependent force |
 | A 10-step kinematic trajectory, hold 1 / 3: dL/d(initial state), dL/dF, dL/dbeta | 2.9e-4 / 3.0e-4, 2.3e-3 / 1.9e-3, 8.3e-4 / 1.3e-3 |
 | The same on the dynamic twin: dL/d(initial state), dL/dF | 6.8e-4 / 6.2e-4, 9.5e-4 / 1.0e-3 |
+| Four wheels (`nav_dyn_4w_test`, `Dyn4ExtForce` and `Dyn4ExtRollout`; the RoboRacer on a mu split with a bump): a zero force against no force | identical |
+| Four wheels, one step: dL/dF_ext, steering / not; through a position-dependent force | 8.6e-5 / 0 (the speed command at its limit: both sides zero); 3.6e-4 |
+| Four wheels, a 10-step trajectory, hold 1 / 3: dL/d(initial state), dL/dF | 5.7e-3 / 1.9e-3, 1.3e-3 / 1.4e-3 |
 
 The finite differences are taken where they measure a slope. The starts are jittered off the
 SDF's grid nodes. A case whose forward and backward differences disagree, which straddles a
@@ -576,7 +583,11 @@ controller switch, or whose central differences at eps and eps / 2 disagree, whe
 is sharply peaked within the step, is skipped and counted, at most a quarter of them. Which cases
 those are depends on the scene's draws, which differ by standard library. macOS's libc++ failed
 the earlier unfiltered sums (dL/dF 0.38). Swept over 100 other draws (`CVC_EXT_CASE_SEED`),
-none fails.
+none fails. The four-wheel checks use the same filter. Their 10-step trajectory crosses more
+switches (a third of the cases may be skipped), and its initial-state gradient, which runs through
+every step's plant and clamps, is held to 1e-1. Swept over `CVC_EXT_CASE_SEED` 1..100, none fails.
+The worst were 1.4e-2 (one step's dL/dF), 3.4e-2 (the trajectory's dL/dF) and 6.6e-2 (its
+dL/d(initial state)).
 
 **The torch twin** is GRL-SNAM's `grl_snam/ext_rollout.py` (CVC-Lab/GRL-SNAM#122): batched,
 float64 or float32, CPU or CUDA, with autograd as the reverse.
@@ -587,6 +598,10 @@ float64 or float32, CPU or CUDA, with autograd as the reverse.
     and 1.6e-7 (dL/d(initial state)).
   - The trajectories agree to 1.6e-7.
   - So the finite-difference figures above are the differences' own error, not an adjoint gap.
+- **The four-wheel fixture:** `Dyn4ExtRollout.Golden` writes `tests/data/dyn4_ext_rollout_golden.json`
+  for the twin's four-wheel path (not written yet): four agents' 10-step trajectories of all 14
+  state components and their reverse gradients, with the field, the plant's parameters and the
+  ground (a friction split and a bump) they used. Rewrite it with `CVC_DYN4_EXT_GOLDEN_WRITE=1`.
 
 ## Scene source
 

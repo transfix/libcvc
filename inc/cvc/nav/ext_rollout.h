@@ -31,12 +31,15 @@
 //   every step, dL/dcoef at every step (pass null to skip), and dL/d(initial state). With
 //   hold > 1, a window's dL/dF_ext is summed and goes through J at the step where F was sampled.
 // - A null `sample` is the rollout without a force, bit for bit (the ext_in pointer is null).
+// - The dynamic vehicles' twins take the same force: dyn_rollout_ext (P8a's single track,
+//   dyn_plant) and dyn4_rollout_ext (P8d's four wheels, dyn4_plant on a ground sampler).
 // - Host only (std::vector). One agent per call: batch on threads; agents are independent.
 
 #ifndef __CVC_NAV_EXT_ROLLOUT_H__
 #define __CVC_NAV_EXT_ROLLOUT_H__
 
 #include <cvc/nav/detail/diff_rollout.h>
+#include <cvc/nav/detail/dyn_4w.h>
 #include <cvc/nav/detail/dyn_bike.h>
 #include <stdexcept>
 #include <vector>
@@ -256,6 +259,100 @@ inline void dyn_rollout_ext_bwd(const field &f, const bike_veh &v, const dyn_bik
       }
     }
     for (int k = 0; k < dyn_state<float>::size; ++k)
+      a[k] = g_state[t][k] + gs[k];
+  }
+  if (g_init)
+    *g_init = a;
+}
+
+// The four-wheel vehicle's twin (dyn4_bike_step: the same controller into dyn4_plant, P8d): the
+// state is dyn4_state (the planar pose and velocities, heave, roll, pitch and their rates, the
+// actuators), on the ground G (dyn4_plant's sampler, e.g. flat_ground), and the force works the
+// same way.
+struct dyn4_tape {
+  int T = 0;
+  bool has_ext = false;
+  int steer = 1;
+  std::vector<dyn4_state<float>> state; // [T+1]
+  std::vector<float> fext;              // [T*2]
+  std::vector<float> jac;               // [T*4]
+  std::vector<int> sampled_at;          // [T]
+};
+
+template <class G>
+inline void dyn4_rollout_ext(const field &f, const bike_veh &v, const dyn4_params &p,
+                             const G &ground, const dyn4_state<float> &s0, const float *goal,
+                             const float *coef, int T, const bike_ext_fn &ext, dyn4_tape &tape) {
+  if (T < 0 || ext.hold < 1)
+    throw std::invalid_argument("cvc::nav::diff::dyn4_rollout_ext: needs T >= 0 and hold >= 1");
+  tape.T = T;
+  tape.has_ext = ext.sample != nullptr;
+  tape.steer = ext.steer;
+  tape.state.assign(static_cast<std::size_t>(T + 1), s0);
+  tape.fext.assign(static_cast<std::size_t>(2 * T), 0.0f);
+  tape.jac.assign(static_cast<std::size_t>(4 * T), 0.0f);
+  tape.sampled_at.assign(static_cast<std::size_t>(T), 0);
+  ext_in e;
+  e.steer = ext.steer;
+  int at = 0;
+  for (int t = 0; t < T; ++t) {
+    const dyn4_state<float> &st = tape.state[t];
+    if (ext.sample && t % ext.hold == 0) {
+      float F[2] = {0.0f, 0.0f}, J[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+      ext.sample(ext.user, t, st.x, st.y, F, J);
+      e.fx = F[0];
+      e.fy = F[1];
+      for (int k = 0; k < 4; ++k)
+        tape.jac[4 * t + k] = J[k];
+      at = t;
+    }
+    tape.fext[2 * t] = e.fx;
+    tape.fext[2 * t + 1] = e.fy;
+    tape.sampled_at[t] = at;
+    dyn4_bike_step(f, st, goal[2 * t], goal[2 * t + 1], coef[3 * t], coef[3 * t + 1],
+                   coef[3 * t + 2], v, p, ground, tape.state[t + 1], ext.sample ? &e : nullptr);
+  }
+}
+
+// g_state[T+1] in; g_fext[T*2], g_coef[T*3] and g_init out, each optional (null).
+template <class G>
+inline void dyn4_rollout_ext_bwd(const field &f, const bike_veh &v, const dyn4_params &p,
+                                 const G &ground, const dyn4_tape &tape, const float *goal,
+                                 const float *coef, const dyn4_state<float> *g_state, float *g_fext,
+                                 float *g_coef, dyn4_state<float> *g_init) {
+  const int T = tape.T;
+  dyn4_state<float> a = g_state[T];
+  float win[2] = {0.0f, 0.0f};
+  for (int t = T - 1; t >= 0; --t) {
+    ext_in e;
+    e.fx = tape.fext[2 * t];
+    e.fy = tape.fext[2 * t + 1];
+    e.steer = tape.steer;
+    dyn4_state<float> gs{};
+    float gal = 0.0f, gbe = 0.0f, gga = 0.0f, gf[2] = {0.0f, 0.0f};
+    dyn4_bike_step_bwd(f, tape.state[t], goal[2 * t], goal[2 * t + 1], coef[3 * t], coef[3 * t + 1],
+                       coef[3 * t + 2], v, p, ground, a, gs, gal, gbe, gga,
+                       tape.has_ext ? &e : nullptr, tape.has_ext ? gf : nullptr);
+    if (g_fext) {
+      g_fext[2 * t] = gf[0];
+      g_fext[2 * t + 1] = gf[1];
+    }
+    if (g_coef) {
+      g_coef[3 * t] = gal;
+      g_coef[3 * t + 1] = gbe;
+      g_coef[3 * t + 2] = gga;
+    }
+    if (tape.has_ext) {
+      win[0] += gf[0];
+      win[1] += gf[1];
+      if (tape.sampled_at[t] == t) {
+        const float *J = tape.jac.data() + 4 * t;
+        gs.x += win[0] * J[0] + win[1] * J[2];
+        gs.y += win[0] * J[1] + win[1] * J[3];
+        win[0] = win[1] = 0.0f;
+      }
+    }
+    for (int k = 0; k < dyn4_state<float>::size; ++k)
       a[k] = g_state[t][k] + gs[k];
   }
   if (g_init)
