@@ -319,9 +319,10 @@ struct ConferenceSession {
   bool framed_ = false;                     // camera framed on our avatar once
   double orbit_center_[3] = {0.0, 0.0, 0.0};
   // Our facing (radians about +Z from +X): WASD walk/strafe relative to it, a click on the scene
-  // turns it toward the clicked ground point. Starts as the camera's heading when we are framed,
-  // so W first walks "into" the screen.
+  // turns it toward the clicked ground point. Until the first click it follows the camera's heading
+  // while no movement key is held (and holds still while one is), so W walks "into" the screen.
   double facing_yaw_ = 0.0;
+  bool facing_chosen_ = false; // the user clicked to face (the facing is theirs from then on)
   static constexpr double kWalkSpeed = 2.0; // m/s
   static constexpr double kEyeHeight = 1.2; // orbit centre above the avatar's feet (m)
 
@@ -674,17 +675,29 @@ struct ConferenceSession {
     if (cam_->takeClick(cx, cy) && room_view_->self_position(self)) {
       double g[3];
       if (room_view_->pick_ground(cx, cy, self[2], g) &&
-          std::hypot(g[0] - self[0], g[1] - self[1]) > 0.05) // a click on our own feet: no turn
+          std::hypot(g[0] - self[0], g[1] - self[1]) > 0.05) { // a click on our own feet: no turn
         facing_yaw_ = std::atan2(g[1] - self[1], g[0] - self[0]);
+        facing_chosen_ = true;
+      }
     }
     // Keys -> intent, only in Orbit: in Fly the same keys move the camera instead. The camera's
     // held set is dropped while the UI has the keyboard, so typing a name never walks.
     cvc::ariadne::avatar_intent in;
+    const auto held = [this](const char *a, const char *b) {
+      return cam_->keyHeld(a) || cam_->keyHeld(b);
+    };
+    const bool walking =
+        held("w", "Up") || held("s", "Down") || held("a", "Left") || held("d", "Right");
+    if (!facing_chosen_ && !walking) {
+      // No facing of the user's own yet: track where the camera looks, so the first W walks into
+      // the screen. A default, not an ask: mirrored into last_user_ so it proposes nothing.
+      double eye[3], focal[3], up[3];
+      cam_->getPose(eye, focal, up);
+      facing_yaw_ = gla::heading_yaw(eye, focal);
+      last_user_.yaw = facing_yaw_;
+    }
     in.yaw = facing_yaw_;
     if (cam_->mode() == cvc::gl::CameraController::Mode::Orbit) {
-      const auto held = [this](const char *a, const char *b) {
-        return cam_->keyHeld(a) || cam_->keyHeld(b);
-      };
       in = gla::intent_from_keys(held("w", "Up"), held("s", "Down"), held("a", "Left"),
                                  held("d", "Right"), facing_yaw_, kWalkSpeed);
     }
@@ -729,10 +742,6 @@ struct ConferenceSession {
         // Frame the room around you, not just you: arriving at a party, you want to see who's here.
         cam_->frameBounds(p[0] - 8.0, p[1] - 8.0, p[2], p[0] + 8.0, p[1] + 8.0, p[2] + 2.0);
         framed_ = true;
-        double eye[3], focal[3], up[3];
-        cam_->getPose(eye, focal, up);
-        facing_yaw_ = gla::heading_yaw(eye, focal); // face into the screen, so W walks away
-        last_user_.yaw = facing_yaw_; // a default, not the user's ask: no proposal until they act
       }
       const double c[3] = {p[0], p[1], p[2] + kEyeHeight};
       if (std::fabs(c[0] - orbit_center_[0]) + std::fabs(c[1] - orbit_center_[1]) +
