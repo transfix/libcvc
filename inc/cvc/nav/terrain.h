@@ -38,13 +38,19 @@ struct terrain_config {
   double tip_ratio = 0.0;   // static stability factor, track / (2 x CG height); 0 = no tip limit
   double tip_margin = 0.8;  // the share of the tip slope that is feasible
   double sigma = 1.0;       // cells: the grade cost's blur (material_build)
-  // The soft grade force and the material-style hard barrier (both 0 = off), with the
-  // material channel's barrier shape.
-  float lam_grade = 0.0f, lam_grade_hard = 0.0f;
-  float k_sharp = 1.25f;        // 1/m
-  float d_hat_m = 12.0f;        // m
-  bool block_infeasible = true; // infeasible cells plan as obstacles
-  bool governors = true;        // gravity along the path in v_stop and v_corner (H2)
+  // Slope is a material risk, not a wall: the grade cost and the infeasible cells go through the
+  // material channel like any other material, the grade cost's soft force leaning the drive
+  // toward gentler ground and the infeasible cells its hard plane, a finite barrier the drive can
+  // weigh against getting on (0 = off; the material channel's barrier shape). The hard weight is
+  // three times the material channel's lam_hard: at 1 the Jolt Humvee crossing Austin's twisted
+  // ramps rolled in most runs, at 3 its lead never did (cvcdbg's convoy A/B, 8 seeds). A vehicle
+  // the planner sends over a steep cell it can physically drive is not pinned there as against a
+  // building.
+  float lam_grade = 0.5f, lam_grade_hard = 3.0f;
+  float k_sharp = 1.25f;         // 1/m
+  float d_hat_m = 12.0f;         // m
+  bool block_infeasible = false; // true: infeasible cells also plan as obstacles (walls)
+  bool governors = true;         // gravity along the path in v_stop and v_corner (H2)
 };
 
 struct terrain_planes {
