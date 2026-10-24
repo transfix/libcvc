@@ -312,6 +312,25 @@ namespace beast = boost::beast;
 namespace websocket = boost::beast::websocket;
 namespace net = boost::asio;
 using tcp = boost::asio::ip::tcp;
+
+// How long one write may block before its connection is closed (see
+// connection::write_started_ns).
+constexpr std::int64_t kWriteStallNs = 3'000'000'000;
+
+// Make a write blocked on `s` fail after kWriteStallNs, so it releases the connection's write lock.
+// Elsewhere the probe thread's watchdog does that with shutdown(), which wakes a send() blocked in
+// another thread; Winsock's shutdown() does not, so on Windows the socket times the send out itself
+// (SO_SNDTIMEO), and the write fails with WSAETIMEDOUT. A timed-out socket is unusable afterwards,
+// which is fine: the failed write marks the connection dead.
+void bound_blocking_writes(tcp::socket &s) {
+#ifdef _WIN32
+  const DWORD ms = static_cast<DWORD>(kWriteStallNs / 1'000'000);
+  ::setsockopt(s.native_handle(), SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char *>(&ms),
+               sizeof(ms));
+#else
+  (void)s;
+#endif
+}
 } // namespace
 #endif
 
@@ -349,7 +368,8 @@ public:
   // (a frozen tab, a dead network) makes a write block once its TCP buffer is full -- while holding
   // write_mu, so every other writer to it (the relay's main loop included) would wait forever. The
   // probe thread's watchdog closes a connection whose write has been blocked too long, which fails
-  // the write and frees the lock (state_transport_ws::ping_loop).
+  // the write and frees the lock (state_transport_ws::ping_loop); on Windows the socket's own send
+  // timeout fails it (bound_blocking_writes).
   std::atomic<std::int64_t> write_started_ns{0};
   // What this peer holds, path by path, for broadcast_snapshot's diff (see held_entry): a snapshot
   // frame records what it carried; any other frame touching the path, written to the peer or
@@ -393,7 +413,8 @@ public:
     return true;
   }
 
-  // Unblock any read or write in progress and mark the connection dead (the write watchdog).
+  // Unblock any read or write in progress and mark the connection dead (the write watchdog). On
+  // Windows shutdown() does not wake a blocked send(); bound_blocking_writes times that one out.
   void abort_io() {
     alive.store(false);
     if (ws) {
@@ -599,6 +620,7 @@ void state_transport_ws::accept_loop() {
     conn->accepted = true;
     conn->ws = std::make_unique<websocket::stream<tcp::socket>>(std::move(sock));
     conn->ws->read_message_max(kMaxWsMessageBytes);
+    bound_blocking_writes(conn->ws->next_layer());
     conn->ws->accept(ec); // server-side WebSocket handshake
     if (ec)
       continue;
@@ -633,6 +655,7 @@ bool state_transport_ws::connect_to_peer(const std::string &url,
       return false;
     conn->ws = std::make_unique<websocket::stream<tcp::socket>>(std::move(sock));
     conn->ws->read_message_max(kMaxWsMessageBytes);
+    bound_blocking_writes(conn->ws->next_layer());
     conn->ws->handshake(host, target.empty() ? std::string("/") : target, ec);
     if (ec)
       return false;
@@ -1423,9 +1446,6 @@ void state_transport_ws::send_pings_if_due() {
 
 void state_transport_ws::ping_loop() {
 #ifndef __EMSCRIPTEN__
-  // How long one write may block before its connection is closed (see
-  // connection::write_started_ns).
-  constexpr std::int64_t kWriteStallNs = 3'000'000'000;
   while (_running.load()) {
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     send_pings_if_due();
