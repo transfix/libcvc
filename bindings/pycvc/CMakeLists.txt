@@ -29,6 +29,13 @@ if(CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
 else()
   # Part of the libcvc build: the `cvc` library target already exists.
   set(_PYCVC_CVC_TARGET cvc)
+  # Re-import the Boost targets cvc links PUBLIC so its transitive link evaluates in
+  # this directory scope, and in the cvcGL added below it (src/arisrv/CMakeLists.txt
+  # explains why).
+  if(NOT TARGET Boost::filesystem)
+    find_package(Boost REQUIRED COMPONENTS thread date_time regex filesystem
+                 OPTIONAL_COMPONENTS system chrono)
+  endif()
 endif()
 
 # ── Which SWIG ───────────────────────────────────────────────────────────────

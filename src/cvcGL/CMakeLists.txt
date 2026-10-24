@@ -45,6 +45,14 @@ endif()
 
 if(NOT TARGET cvc::cvc)
   find_package(cvc CONFIG REQUIRED)
+else()
+  # In-tree: re-import the Boost targets cvc links PUBLIC so its transitive link
+  # evaluates in this directory scope, and in examples/ below it
+  # (src/arisrv/CMakeLists.txt explains why).
+  if(NOT TARGET Boost::filesystem)
+    find_package(Boost REQUIRED COMPONENTS thread date_time regex filesystem
+                 OPTIONAL_COMPONENTS system chrono)
+  endif()
 endif()
 
 # The VTK modules cvcGL links. Kept in one variable so the exact same component
