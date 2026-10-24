@@ -340,6 +340,7 @@ set(SOURCE_FILES
   nav/belief_occupancy.cpp
   nav/belief_material.cpp
   nav/sim_world.cpp
+  nav/yield.cpp
   nav/sim_world_binding.cpp
   nav/sim_thread.cpp
   nav/nav_stats.cpp

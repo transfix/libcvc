@@ -551,6 +551,10 @@ void sim_world::step(int num_threads) {
     }
   }
 
+  // ── YIELDING (optional): out of each other's way, from the intents each heard ──
+  if (yield_cfg_.on() && n_ > 1)
+    yield_tick(fs, num_threads);
+
   lap(accSep);
 
   // ── MATERIAL GATE (optional): frame-wise witness per agent vs its own goal ──
@@ -1278,6 +1282,150 @@ bool sim_world::infeasible_at(float onx, float ony) const {
   if (r < 0 || c < 0 || r >= rows_ || c >= cols_)
     return false;
   return ter_.infeasible[static_cast<std::size_t>(r * cols_ + c)] != 0;
+}
+
+void sim_world::set_priority(int i, float priority) {
+  if (i < 0 || i >= n_)
+    throw std::out_of_range("cvc::nav::sim_world::set_priority: no agent " + std::to_string(i));
+  yield_prio_.resize(static_cast<std::size_t>(n_), 0.0f);
+  yield_prio_[i] = priority;
+}
+
+void sim_world::set_team(int i, int team) {
+  if (i < 0 || i >= n_)
+    throw std::out_of_range("cvc::nav::sim_world::set_team: no agent " + std::to_string(i));
+  yield_team_.resize(static_cast<std::size_t>(n_), 0);
+  yield_team_[i] = team;
+}
+
+void sim_world::set_intent_path(int i, const float *xy, int count) {
+  if (i < 0 || i >= n_)
+    throw std::out_of_range("cvc::nav::sim_world::set_intent_path: no agent " + std::to_string(i));
+  yield_path_.resize(static_cast<std::size_t>(n_));
+  if (count <= 0 || !xy)
+    yield_path_[i].clear();
+  else
+    yield_path_[i].assign(xy, xy + 2 * count);
+}
+
+namespace {
+
+// Walks the polyline from (x, y) through pts[0..n) for `len`, appending its points to `a` (at most
+// kIntentPathMax, the last one where the length runs out).
+void intent_walk(agent_intent &a, float x, float y, const float *pts, int n, float len) {
+  float ax = x, ay = y;
+  for (int k = 0; k < n && len > 0.0f && a.n_path < kIntentPathMax; ++k) {
+    const float bx = pts[2 * k], by = pts[2 * k + 1];
+    const float d = std::hypot(bx - ax, by - ay);
+    if (d < 1e-9f)
+      continue;
+    const float u = std::min(1.0f, len / d);
+    a.path[2 * a.n_path] = ax + u * (bx - ax);
+    a.path[2 * a.n_path + 1] = ay + u * (by - ay);
+    ++a.n_path;
+    len -= u * d;
+    ax = bx;
+    ay = by;
+  }
+}
+
+} // namespace
+
+void sim_world::yield_tick(const field_stack &fs, int num_threads) {
+  const yield_config &yc = yield_cfg_;
+  const float C = yc.clearance > 0.0f ? yc.clearance : 3.0f * cfg_.veh.rr;
+  if (!(C > 0.0f))
+    return;
+  const float min_len = yc.min_len > 0.0f ? yc.min_len : 4.0f * C;
+  const double t = static_cast<double>(gstep_) * cfg_.veh.dt;
+  yield_intents_.assign(static_cast<std::size_t>(n_), agent_intent{});
+  for (int i = 0; i < n_; ++i) {
+    agent_intent &a = yield_intents_[i];
+    a.agent = i;
+    a.team = i < static_cast<int>(yield_team_.size()) ? yield_team_[i] : 0;
+    a.t = t;
+    a.x = o_[2 * i];
+    a.y = o_[2 * i + 1];
+    a.heading = th_[i];
+    a.speed = sp_[i];
+    a.priority = i < static_cast<int>(yield_prio_.size()) ? yield_prio_[i] : 0.0f;
+    a.radius = cfg_.veh.rr;
+    const float len = std::max(std::fabs(sp_[i]) * yc.horizon_s, min_len);
+    const std::vector<float> *ov =
+        i < static_cast<int>(yield_path_.size()) && !yield_path_[i].empty() ? &yield_path_[i]
+                                                                            : nullptr;
+    if (ov) { // the host's path, from the agent's nearest point on it
+      const int np = static_cast<int>(ov->size() / 2);
+      int k0 = 0;
+      float best = 1e30f;
+      for (int k = 0; k < np; ++k) {
+        const float d = std::hypot((*ov)[2 * k] - a.x, (*ov)[2 * k + 1] - a.y);
+        if (d < best) {
+          best = d;
+          k0 = k;
+        }
+      }
+      intent_walk(a, a.x, a.y, ov->data() + 2 * k0, np - k0, len);
+    } else { // toward the carrot, then on toward the goal
+      const float pts[4] = {carrot_[2 * i], carrot_[2 * i + 1], goal_[2 * i], goal_[2 * i + 1]};
+      intent_walk(a, a.x, a.y, pts, 2, len);
+    }
+    if (a.n_path == 0) { // nowhere to go: straight ahead
+      a.path[0] = a.x + min_len * std::cos(a.heading);
+      a.path[1] = a.y + min_len * std::sin(a.heading);
+      a.n_path = 1;
+    }
+  }
+  intent_channel &ch = yield_chan_ ? *yield_chan_ : yield_perfect_;
+  ch.publish(yield_intents_.data(), n_, t);
+  const yield_resolver res = yield_res_ ? yield_res_ : priority_resolver();
+  yield_shift_.assign(static_cast<std::size_t>(2) * n_, 0.0f);
+  std::vector<agent_intent> heard;
+  bool any = false;
+  for (int i = 0; i < n_; ++i) {
+    if (!active_.empty() && !active_[i])
+      continue;
+    ch.heard(i, heard);
+    const yield_shift sh = yield_agent(yc, C, yield_intents_[i], heard, t, res);
+    yield_shift_[2 * i] = sh.dx;
+    yield_shift_[2 * i + 1] = sh.dy;
+    any = any || sh.conflicts > 0;
+  }
+  if (!any)
+    return;
+  // Away from walls: the place each shift moves the agent toward, on its side and the other.
+  std::vector<float> pts(static_cast<std::size_t>(4) * n_), phi(2 * n_), nrm(4 * n_);
+  std::vector<int> mid(static_cast<std::size_t>(2) * n_);
+  for (int i = 0; i < n_; ++i) {
+    pts[4 * i] = o_[2 * i] + yield_shift_[2 * i];
+    pts[4 * i + 1] = o_[2 * i + 1] + yield_shift_[2 * i + 1];
+    pts[4 * i + 2] = o_[2 * i] - yield_shift_[2 * i];
+    pts[4 * i + 3] = o_[2 * i + 1] - yield_shift_[2 * i + 1];
+    mid[2 * i] = mid[2 * i + 1] = map_id_.empty() ? 0 : map_id_[i];
+  }
+  sdf_sample(fs, pts.data(), 2 * n_, mid.data(), phi.data(), nrm.data(), num_threads, pool_);
+  const float rr = cfg_.veh.rr;
+  for (int i = 0; i < n_; ++i) {
+    float &dx = yield_shift_[2 * i], &dy = yield_shift_[2 * i + 1];
+    if (dx == 0.0f && dy == 0.0f)
+      continue;
+    if (phi[2 * i] < rr) { // into a wall: the other side, if it is better
+      if (phi[2 * i + 1] > phi[2 * i]) {
+        dx = -dx;
+        dy = -dy;
+      } else {
+        dx = dy = 0.0f;
+      }
+    }
+    // The shift is where the agent should be across the path; at the carrot, as far ahead as the
+    // carrot is in clearances, so the turn it asks for does not shrink with the lookahead.
+    const float ahead = std::hypot(carrot_[2 * i] - o_[2 * i], carrot_[2 * i + 1] - o_[2 * i + 1]);
+    const float k = std::max(1.0f, ahead / C);
+    dx *= k;
+    dy *= k;
+    carrot_[2 * i] += dx;
+    carrot_[2 * i + 1] += dy;
+  }
 }
 
 plant_kind sim_world::plant_type() const { return plant_ ? plant_->kind() : plant_kind::kinematic; }
