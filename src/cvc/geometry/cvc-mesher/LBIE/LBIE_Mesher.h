@@ -37,7 +37,7 @@ namespace LBIE
         _err(err), _err_in(err_in), _meshType(meshtype),
         _improveMethod(improveMethod), _normalType(normtype),
         _extractionMethod(extractionMethod), _dual(dual_contouring),
-        _octree_volume_updated(false),
+        _octree_volume_updated(false), _mesh_from_octree(false),
         _contourExtractor(ctx)
    {
      _octree.set_isovalue(_isovalue);
@@ -55,7 +55,8 @@ namespace LBIE
        _extractionMethod(mesher._extractionMethod), _dual(mesher._dual),
        _octree(mesher._octree), _geoframe(mesher._geoframe),
        _contourExtractor(mesher._contourExtractor),
-       _octree_volume_updated(mesher._octree_volume_updated)
+       _octree_volume_updated(mesher._octree_volume_updated),
+       _mesh_from_octree(mesher._mesh_from_octree)
    {
      _octree.set_isovalue(_isovalue);
      _octree.set_isovalue_in(_isovalue_in);
@@ -82,6 +83,7 @@ namespace LBIE
      dual(mesher.dual());
      mesh(mesher.mesh());
      _octree_volume_updated = mesher._octree_volume_updated;
+     _mesh_from_octree = mesher._mesh_from_octree;
      return *this;
    }
 
@@ -129,6 +131,7 @@ namespace LBIE
    void mesh(const geoframe& g)
    { 
      _geoframe = g;
+     _mesh_from_octree = false;
      meshType(MeshType(_geoframe.mesh_type));
    }
    geoframe& mesh() { return _geoframe; }
@@ -162,6 +165,7 @@ namespace LBIE
    geoframe _geoframe; //the mesh itself
    FastContouring::ContourExtractor _contourExtractor; //fast contour extractor for single tri meshes
    bool _octree_volume_updated; //flag for updating volume in octree before duallib mesh extraction
+   bool _mesh_from_octree; //_geoframe is a duallib mesh: _octree's grid mapped to world coordinates
  };
 
 }

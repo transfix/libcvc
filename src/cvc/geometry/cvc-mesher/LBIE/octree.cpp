@@ -2830,7 +2830,7 @@ void Octree::mesh_extract(geoframe& geofrm, float err_tol)
 	}
 }
 
-void Octree::quality_improve(geoframe& geofrm, int improve_method)
+void Octree::quality_improve(geoframe& geofrm, int improve_method, bool on_grid)
 {
 	switch (improve_method) {
 	        case 0:
@@ -2848,7 +2848,7 @@ void Octree::quality_improve(geoframe& geofrm, int improve_method)
 			smoothing_joeliu_volume(geofrm,1);
 			break;
 		case 5:
-			optimization(geofrm);
+			optimization(geofrm, on_grid);
 			break;
 		default:
 			break;
@@ -5499,7 +5499,7 @@ void Octree::smoothing_joeliu_volume(geoframe& geofrm, int sign) {
 //	fclose(output);
 }
 
-void Octree::optimization(geoframe& geofrm) {
+void Octree::optimization(geoframe& geofrm, bool on_grid) {
 
 	int i, j, v0, v1, v2, v3, v4, v5, v6, v7;
 	// minAspIndx/hexaIndx are only assigned inside the per-hex quality loop and
@@ -5519,6 +5519,27 @@ void Octree::optimization(geoframe& geofrm) {
 	// statistics read quads[6*i][4] for j == 4, past the end of a quad.
 	static const int corner_row[8] = {0, 0, 0, 0, 1, 1, 1, 1};
 	static const int corner_col[8] = {0, 1, 2, 3, 1, 0, 3, 2};
+	// The other ends of corner j's three edges, in the order testHexa takes them below.
+	static const int corner_edge[8][3] = {{3, 1, 4}, {0, 2, 5}, {1, 3, 6}, {2, 0, 7},
+	                                      {5, 7, 0}, {6, 4, 1}, {7, 5, 2}, {4, 6, 3}};
+	// The hexahedra with a corner at a_vert, all of which move with it.
+	std::vector<int> around;
+	// The largest condition number of the corners of the hexahedra around a_vert, with a_vert at
+	// pos. A NaN counts as +inf.
+	auto worst_around = [&](const float* pos) {
+		float worst = 0.0f, p[8][3], jacob, cond, odd;
+		for(size_t n = 0; n < around.size(); n++) {
+			for(int c = 0; c < 8; c++) {
+				const unsigned int v = geofrm.quads[6*around[n] + corner_row[c]][corner_col[c]];
+				for(int d = 0; d < 3; d++) p[c][d] = int(v) == a_vert ? pos[d] : geofrm.verts[v][d];
+			}
+			for(int c = 0; c < 8; c++) {
+				testHexa(p[c], p[corner_edge[c][0]], p[corner_edge[c][1]], p[corner_edge[c][2]], jacob, cond, odd);
+				if(!(cond <= worst)) worst = std::isnan(cond) ? HUGE_VALF : cond;
+			}
+		}
+		return worst;
+	};
 
 	//	FILE *output;
 
@@ -5744,9 +5765,21 @@ void Octree::optimization(geoframe& geofrm) {
 		// corner itself: a corner with collinear edges has Jacobian 0 and condition +inf, so
 		// cond_max + 1.0f - cond_max is NaN (or 0 once cond_max >= 2^24), the loop never runs, and
 		// mmv4 was copied into the mesh uninitialized (vertices like (7.4e24, 5.8e-43, 7.9e24)).
-		// Halving the step ends at 0, where mmv4 is the corner again, instead of looping forever when
-		// no step qualifies, and a non-finite position (from a zero-length edge's NaN gradient) is
+		// Halving the step ends at 0 instead of looping forever when no step qualifies, and then the
+		// vertex stays where it was. A non-finite position (from a zero-length edge's NaN gradient) is
 		// never written.
+		// The first step is half a grid cell: Mesher::qualityImprove gives every pass the mesh in grid
+		// units. (It passed world coordinates, where a cell of the bunny's volume is 0.01; a first step
+		// of 0.5 threw one of its vertices far outside the volume.) A position must also leave every
+		// other corner of the hexahedra around the vertex no worse than cond_max: checking only the
+		// worst corner let a move flatten its neighbours, so a pass could end with a worse mesh than it
+		// started from (the bunny's went from 169 to 191). And on the octree's grid a position off the
+		// grid does not qualify, so a vertex where the surface meets the volume's boundary is not pushed
+		// out of the volume.
+		around.clear();
+		for(i = 0; i < geofrm.numquads/6; i++)
+			for(j = 0; j < 8; j++)
+				if(int(geofrm.quads[6*i + corner_row[j]][corner_col[j]]) == a_vert) {around.push_back(i); break;}
 		for(j = 0; j < 3; j++) mmv4[j] = mmv0[j];
 		condition = cond_max + 1.0f;
 		step = 0.5f;
@@ -5755,8 +5788,15 @@ void Octree::optimization(geoframe& geofrm) {
 				mmv4[j] = mmv0[j] - step*grad[j];
 			}
 			getGrad(mmv4, mmv1, mmv2, mmv3, condition, grad);
+			const float worst = worst_around(mmv4);
+			if(!(worst <= condition)) condition = worst;
+			if(on_grid)
+				for(j = 0; j < 3; j++)
+					if(!(mmv4[j] >= 0.0f && mmv4[j] <= float(dim[j] - 1))) condition = HUGE_VALF;
 			if(condition > cond_max) step /= 2.0f;
 		}
+		if(condition - cond_max > 1.0e-6)
+			for(j = 0; j < 3; j++) mmv4[j] = mmv0[j];
 
 		if(std::isfinite(mmv4[0]) && std::isfinite(mmv4[1]) && std::isfinite(mmv4[2])) {
 			geofrm.verts[a_vert][0] = mmv4[0];
