@@ -299,9 +299,11 @@ void coef_feats(const field_stack &f, const float *on, const float *goal, int n,
                 float *feat_out, int num_threads, const friction_field *grip, float mu_lookahead,
                 int mu_probes, const material_stack *risk, float risk_lookahead, int risk_probes,
                 thread_pool *pool, const material_stack *slope, float slope_lookahead,
-                int slope_probes) {
+                int slope_probes, const material_stack *terrain_risk) {
   const bool has_grip = grip != nullptr && grip->data != nullptr;
-  const bool has_risk = risk != nullptr && risk->data != nullptr;
+  const bool has_mat_risk = risk != nullptr && risk->data != nullptr;
+  const bool has_ter_risk = terrain_risk != nullptr && terrain_risk->data != nullptr;
+  const bool has_risk = has_mat_risk || has_ter_risk;
   const bool has_slope = slope != nullptr && slope->data != nullptr;
   const std::size_t stride =
       5u + (has_grip ? 1u : 0u) + (has_risk ? 1u : 0u) + (has_slope ? 1u : 0u);
@@ -339,13 +341,22 @@ void coef_feats(const field_stack &f, const float *on, const float *goal, int n,
       // WORST terrain risk from here to the carrot — the mirror of the grip probe but MAX
       // (a risk patch ahead should read as risky, not averaged away); inclusive of `on`,
       // clamped to the carrot. Appended AFTER grip, so its slot is 5 (+1 when grip present).
-      const int rplane = (map_id && risk->M > 1) ? map_id[i] : 0;
+      // Terrain risk is material risk: each probe point reads the worse of the two.
+      const int rplane = (has_mat_risk && map_id && risk->M > 1) ? map_id[i] : 0;
+      const auto risk_at = [&](float x, float y) {
+        float r = has_mat_risk ? sample_risk(*risk, rplane, x, y) : 0.0f;
+        if (has_ter_risk) {
+          const float tr = sample_risk(*terrain_risk, 0, x, y);
+          r = tr > r ? tr : r;
+        }
+        return r;
+      };
       const float reach = gd < risk_lookahead ? gd : risk_lookahead;
-      float worst = sample_risk(*risk, rplane, on[2 * i], on[2 * i + 1]);
+      float worst = risk_at(on[2 * i], on[2 * i + 1]);
       const int P = risk_probes < 1 ? 1 : risk_probes;
       for (int k = 1; k <= P; ++k) {
         const float t = (static_cast<float>(k) / static_cast<float>(P)) * reach;
-        const float m = sample_risk(*risk, rplane, on[2 * i] + t * gdx, on[2 * i + 1] + t * gdy);
+        const float m = risk_at(on[2 * i] + t * gdx, on[2 * i + 1] + t * gdy);
         worst = m > worst ? m : worst;
       }
       fo[has_grip ? 6 : 5] = worst;
@@ -561,6 +572,15 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
           lh = lh * pd->hard_scale[i];
         Fter_x = -ter->lam_soft * tgrx + (-lh * db) * tgpx;
         Fter_y = -ter->lam_soft * tgry + (-lh * db) * tgpy;
+        // Terrain risk is material risk: the telemetry reports the worse of the two, and with no
+        // material stack the terrain's risk and the weights the drive applied to it.
+        if (mat) {
+          tel_mrisk = trisk > tel_mrisk ? trisk : tel_mrisk;
+        } else {
+          tel_mrisk = trisk;
+          tel_lam = ter->lam_soft;
+          tel_lam_hard = lh;
+        }
         Fx = Fx + Fter_x;
         Fy = Fy + Fter_y;
       }
@@ -890,10 +910,13 @@ void drive_step(const field_stack &f, float *o, float *th, float *sp, const floa
   const int in_w = model.in_features();
   const bool want_grip = model.has_mu();
   const bool want_slope = model.has_slope();
-  if (model.has_risk())
-    throw std::runtime_error("cvc::nav::drive_step: a terrain-risk model needs the material drive "
-                             "(drive_step_material)");
-  if (in_w != 5 + (want_grip ? 1 : 0) + (want_slope ? 1 : 0))
+  // A risk model reads the terrain's risk here (no material stack): terrain risk is material
+  // risk.
+  const bool want_risk = model.has_risk();
+  if (want_risk && !(v.terrain && v.terrain->stack))
+    throw std::runtime_error("cvc::nav::drive_step: a risk model needs a material stack "
+                             "(drive_step_material) or a terrain (sim_world::set_terrain)");
+  if (in_w != 5 + (want_grip ? 1 : 0) + (want_risk ? 1 : 0) + (want_slope ? 1 : 0))
     throw std::runtime_error("cvc::nav::drive_step: coef_mlp in_features does not match its flags");
   if (want_grip && !(v.grip && v.grip->data))
     throw std::runtime_error(
@@ -904,7 +927,8 @@ void drive_step(const field_stack &f, float *o, float *th, float *sp, const floa
   std::vector<float> feat(static_cast<std::size_t>(n) * in_w);
   coef_feats(f, o, carrot, n, map_id, feat.data(), num_threads, want_grip ? v.grip : nullptr,
              v.mu_lookahead, v.mu_probes, nullptr, 0.3f, 3, pool,
-             want_slope ? v.terrain->stack : nullptr);
+             want_slope ? v.terrain->stack : nullptr, 0.3f, 3,
+             want_risk ? v.terrain->stack : nullptr);
   const int out_w = model.out_features();
   std::vector<float> coef(static_cast<std::size_t>(n) * out_w);
   model.forward(feat.data(), n, coef.data(), num_threads, pool);
@@ -938,20 +962,23 @@ void drive_step_material(const field_stack &f, float *o, float *th, float *sp, c
   if (want_grip && !(v.grip && v.grip->data))
     throw std::runtime_error(
         "cvc::nav::drive_step_material: model takes the grip feature but veh_params.grip is null");
-  if (want_risk && !(mat.stack && mat.stack->data))
-    throw std::runtime_error("cvc::nav::drive_step_material: model takes the risk feature but the "
-                             "material stack is null");
+  // Terrain risk is material risk: with a terrain the probe reads the worse of the two.
+  const material_stack *ter_risk = want_risk && v.terrain ? v.terrain->stack : nullptr;
+  if (want_risk && !(mat.stack && mat.stack->data) && !ter_risk)
+    throw std::runtime_error(
+        "cvc::nav::drive_step_material: model takes the risk feature but has neither "
+        "a material stack nor a terrain");
   // The risk feature reads the SAME material planes the drive force uses (mat.stack), so the
   // net sees and reroutes around one terrain. Lookahead/probes match the grl_snam training
   // default (coef_feats risk_lookahead=0.3, risk_probes=3).
-  const material_stack *risk_src = want_risk ? mat.stack : nullptr;
+  const material_stack *risk_src = want_risk && mat.stack && mat.stack->data ? mat.stack : nullptr;
   if (want_slope && !(v.terrain && v.terrain->stack))
     throw std::runtime_error("cvc::nav: the model takes the slope feature but veh_params.terrain "
                              "is null (sim_world::set_terrain)");
   std::vector<float> feat(static_cast<std::size_t>(n) * in_w);
   coef_feats(f, o, carrot, n, map_id, feat.data(), num_threads, want_grip ? v.grip : nullptr,
              v.mu_lookahead, v.mu_probes, risk_src, 0.3f, 3, nullptr,
-             want_slope ? v.terrain->stack : nullptr);
+             want_slope ? v.terrain->stack : nullptr, 0.3f, 3, ter_risk);
   const int out_w = model.out_features();
   std::vector<float> coef(static_cast<std::size_t>(n) * out_w);
   model.forward(feat.data(), n, coef.data(), num_threads);
@@ -996,10 +1023,13 @@ void drive_step_ext(const field_stack &f, float *o, float *th, float *sp, const 
   const int in_w = model.in_features();
   const bool want_grip = model.has_mu();
   const bool want_slope = model.has_slope();
-  if (model.has_risk())
-    throw std::runtime_error("cvc::nav::drive_step_ext: a terrain-risk model needs the material "
-                             "drive (drive_step_material)");
-  if (in_w != 5 + (want_grip ? 1 : 0) + (want_slope ? 1 : 0))
+  // A risk model reads the terrain's risk here (no material stack): terrain risk is material
+  // risk.
+  const bool want_risk = model.has_risk();
+  if (want_risk && !(v.terrain && v.terrain->stack))
+    throw std::runtime_error("cvc::nav::drive_step_ext: a risk model needs a material stack "
+                             "(drive_step_material) or a terrain (sim_world::set_terrain)");
+  if (in_w != 5 + (want_grip ? 1 : 0) + (want_risk ? 1 : 0) + (want_slope ? 1 : 0))
     throw std::runtime_error(
         "cvc::nav::drive_step_ext: coef_mlp in_features does not match its flags");
   if (want_grip && !(v.grip && v.grip->data))
@@ -1011,7 +1041,8 @@ void drive_step_ext(const field_stack &f, float *o, float *th, float *sp, const 
   std::vector<float> feat(static_cast<std::size_t>(n) * in_w);
   coef_feats(f, o, carrot, n, map_id, feat.data(), num_threads, want_grip ? v.grip : nullptr,
              v.mu_lookahead, v.mu_probes, nullptr, 0.3f, 3, nullptr,
-             want_slope ? v.terrain->stack : nullptr);
+             want_slope ? v.terrain->stack : nullptr, 0.3f, 3,
+             want_risk ? v.terrain->stack : nullptr);
   const int out_w = model.out_features();
   std::vector<float> coef(static_cast<std::size_t>(n) * out_w);
   model.forward(feat.data(), n, coef.data(), num_threads);
@@ -1055,17 +1086,20 @@ void drive_step_material_ext(const field_stack &f, float *o, float *th, float *s
   if (want_grip && !(v.grip && v.grip->data))
     throw std::runtime_error("cvc::nav::drive_step_material_ext: model takes the grip feature but "
                              "veh_params.grip is null");
-  if (want_risk && !(mat.stack && mat.stack->data))
-    throw std::runtime_error("cvc::nav::drive_step_material_ext: model takes the risk feature but "
-                             "the material stack is null");
-  const material_stack *risk_src = want_risk ? mat.stack : nullptr;
+  // Terrain risk is material risk: with a terrain the probe reads the worse of the two.
+  const material_stack *ter_risk = want_risk && v.terrain ? v.terrain->stack : nullptr;
+  if (want_risk && !(mat.stack && mat.stack->data) && !ter_risk)
+    throw std::runtime_error(
+        "cvc::nav::drive_step_material_ext: model takes the risk feature but has neither "
+        "a material stack nor a terrain");
+  const material_stack *risk_src = want_risk && mat.stack && mat.stack->data ? mat.stack : nullptr;
   if (want_slope && !(v.terrain && v.terrain->stack))
     throw std::runtime_error("cvc::nav: the model takes the slope feature but veh_params.terrain "
                              "is null (sim_world::set_terrain)");
   std::vector<float> feat(static_cast<std::size_t>(n) * in_w);
   coef_feats(f, o, carrot, n, map_id, feat.data(), num_threads, want_grip ? v.grip : nullptr,
              v.mu_lookahead, v.mu_probes, risk_src, 0.3f, 3, nullptr,
-             want_slope ? v.terrain->stack : nullptr);
+             want_slope ? v.terrain->stack : nullptr, 0.3f, 3, ter_risk);
   const int out_w = model.out_features();
   std::vector<float> coef(static_cast<std::size_t>(n) * out_w);
   model.forward(feat.data(), n, coef.data(), num_threads);

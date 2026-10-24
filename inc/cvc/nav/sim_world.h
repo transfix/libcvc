@@ -490,11 +490,11 @@ public:
   // ── terrain (P5, cvc/nav/terrain.h) ───────────────────────────────────────
   // `height_m` is the sim grid's rows x cols (row 0 at min_y), copied in. Builds the slope, the
   // grade cost and the infeasible cells; then, per the config:
-  //   - infeasible cells plan as obstacles: they join every belief plane's occupancy, so the
-  //     SDF's barrier and the governors keep the agents out (block_infeasible);
-  //   - the governors take gravity along the path (governors, H2);
   //   - the grade cost's soft force and a material-style barrier join the drive (lam_grade,
-  //     lam_grade_hard, H1).
+  //     lam_grade_hard, H1): by default slope is a material risk the drive weighs, not a wall;
+  //   - the governors take gravity along the path (governors, H2);
+  //   - with block_infeasible (off by default), infeasible cells also plan as obstacles: they
+  //     join every belief plane's occupancy, so the SDF's barrier keeps the agents out.
   // Default off: without terrain every tick is byte-identical. The tree's terrain does not move.
   void set_terrain(const float *height_m, const terrain_config &tc);
   // A new config for the terrain set last (no-op without one): rebuilds its planes from the same

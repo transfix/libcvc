@@ -259,6 +259,14 @@ void nav_stats_collector::step(const float *pos, const float *head, const float 
         v.steer_abs_max = as;
       if (ds.binding)
         ++v.binding_steps;
+      v.lam_soft_mean += ds.lam_soft;
+      v.lam_hard_mean += ds.lam_hard;
+      const double ac = std::fabs((double)ds.curvature);
+      v.curvature_abs_mean += ac;
+      if (ac > v.curvature_abs_max)
+        v.curvature_abs_max = ac;
+      if (ds.binding && std::fabs((double)spd[i]) < p_.speed_eps_mps)
+        ++v.binding_stopped_steps;
     }
 
     if (reached[i] && v.time_to_goal_s < 0) {
@@ -334,6 +342,9 @@ episode_nav_stats nav_stats_collector::finish() const {
       v.mrisk_mean /= dn;
       v.ext_force_mean /= dn;
       v.steer_abs_mean /= dn;
+      v.lam_soft_mean /= dn;
+      v.lam_hard_mean /= dn;
+      v.curvature_abs_mean /= dn;
     }
 
     const double used_t = v.arrived ? v.time_to_goal_s : elapsed;
@@ -530,6 +541,15 @@ std::string episode_nav_stats::to_json() const {
     o << ",\"steer_abs_max\":";
     num(o, v.steer_abs_max);
     o << ",\"binding_steps\":" << v.binding_steps;
+    o << ",\"lam_soft_mean\":";
+    num(o, v.lam_soft_mean);
+    o << ",\"lam_hard_mean\":";
+    num(o, v.lam_hard_mean);
+    o << ",\"curvature_abs_mean\":";
+    num(o, v.curvature_abs_mean);
+    o << ",\"curvature_abs_max\":";
+    num(o, v.curvature_abs_max);
+    o << ",\"binding_stopped_steps\":" << v.binding_stopped_steps;
     if (v.energy_tracked) {
       o << ",\"energy_J\":";
       num(o, v.energy_J);
@@ -625,6 +645,7 @@ nav_scorecard aggregate_nav(const std::vector<episode_nav_stats> &episodes,
   // drive telemetry (over vehicle-runs that carried a drive feed, i.e. drive_steps > 0)
   int drive_runs = 0;
   double al_sum = 0, be_sum = 0, ga_sum = 0, dmu_sum = 0, dmrisk_sum = 0, dext_sum = 0;
+  double ls_sum = 0, lh_sum = 0, curv_sum = 0, pin_sum = 0;
   // the plant ledger (over the runs and episodes a plant fed)
   int plant_runs = 0, rolled_runs = 0, plant_eps = 0, rolled_eps = 0;
   double tilt_sum = 0, ltr_sum = 0, lift_sum = 0, alat_sum = 0, sat_sum = 0, brake_sum = 0;
@@ -697,6 +718,10 @@ nav_scorecard aggregate_nav(const std::vector<episode_nav_stats> &episodes,
         dmu_sum += v.mu_mean;
         dmrisk_sum += v.mrisk_mean;
         dext_sum += v.ext_force_mean;
+        ls_sum += v.lam_soft_mean;
+        lh_sum += v.lam_hard_mean;
+        curv_sum += v.curvature_abs_mean;
+        pin_sum += static_cast<double>(v.binding_stopped_steps) / v.drive_steps;
       }
       if (v.plant_tracked) {
         ++plant_runs;
@@ -763,6 +788,10 @@ nav_scorecard aggregate_nav(const std::vector<episode_nav_stats> &episodes,
     s.mean_mu = dmu_sum / drive_runs;
     s.mean_mrisk = dmrisk_sum / drive_runs;
     s.mean_ext_force = dext_sum / drive_runs;
+    s.mean_lam_soft = ls_sum / drive_runs;
+    s.mean_lam_hard = lh_sum / drive_runs;
+    s.mean_curvature_abs = curv_sum / drive_runs;
+    s.mean_binding_stopped_share = pin_sum / drive_runs;
   }
   s.plant_runs = plant_runs;
   if (plant_runs > 0) {
@@ -839,6 +868,14 @@ std::string nav_scorecard::to_json() const {
   num(o, mean_mrisk);
   o << ",\"mean_ext_force\":";
   num(o, mean_ext_force);
+  o << ",\"mean_lam_soft\":";
+  num(o, mean_lam_soft);
+  o << ",\"mean_lam_hard\":";
+  num(o, mean_lam_hard);
+  o << ",\"mean_curvature_abs\":";
+  num(o, mean_curvature_abs);
+  o << ",\"mean_binding_stopped_share\":";
+  num(o, mean_binding_stopped_share);
   if (plant_runs > 0) { // a plant fed the ledger (otherwise byte-unchanged)
     o << ",\"plant_runs\":" << plant_runs;
     const std::pair<const char *, double> leaves[] = {

@@ -72,6 +72,20 @@ void validate_dynamic(const train_config &c) {
         "): cvc::physics::nav_plant::dyn_bike_params_at(desc, veh_L)");
 }
 
+// w_energy > 0 needs the dynamic rollout and a power model of the same vehicle.
+void validate_energy(const train_config &c) {
+  if (c.w_energy == 0.0f)
+    return;
+  if (c.rollout != rollout_kind::dynamic)
+    throw std::invalid_argument("cvc::nav::coef_trainer: w_energy needs rollout_kind::dynamic");
+  if (!c.power.on() || !(std::fabs(c.power.m - c.dyn.m) <= 1e-4f * c.dyn.m))
+    throw std::invalid_argument(
+        "cvc::nav::coef_trainer: w_energy needs train_config::power, a power model of dyn's "
+        "vehicle (its mass " +
+        std::to_string(c.dyn.m) + "; got " + std::to_string(c.power.m) +
+        "): cvc::nav::dyn_power_params_of(cvc::physics::fit_power(...).si, mass, frame)");
+}
+
 diff::field to_diff_field(const field_stack &fs) {
   diff::field F;
   F.data = fs.data;
@@ -344,7 +358,19 @@ double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_i
   const bool dyn = cfg_.rollout == rollout_kind::dynamic;
   if (dyn)
     validate_dynamic(cfg_);
+  validate_energy(cfg_);
   const float rr = scene.rr, d_hat = scene.d_hat, vmax = scene.vmax, hdt = scene.dt;
+  // The energy term (P8c): each step's energy as a fraction of what full power draws over it.
+  const bool energy = dyn && cfg_.w_energy != 0.0f;
+  float e_scale = 0.0f, e_width = 0.0f;
+  if (energy) {
+    const float full = diff::power_full(cfg_.power, cfg_.veh_a_max, vmax);
+    if (!(full > 0.0f))
+      throw std::invalid_argument("cvc::nav::coef_trainer: w_energy needs a power model that "
+                                  "draws power at full drive (power_full > 0)");
+    e_scale = cfg_.w_energy / (static_cast<float>(window) * hdt * full);
+    e_width = 1e-3f * full;
+  }
   diff::bike_veh bv;
   bv.rr = rr;
   bv.d_hat = d_hat;
@@ -465,6 +491,12 @@ double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_i
         ext[1] = s1.r;
         ext[2] = s1.delta;
         ext[3] = s1.a;
+        if (energy) {
+          float dvx, da, dr;
+          const float E =
+              diff::power_step(cfg_.power, s1.vx, s1.a, s1.r, hdt, e_width, dvx, da, dr);
+          total_loss += static_cast<double>(e_scale) * E * inv_n;
+        }
       } else if (bike)
         diff::bike_step(F, ox, oy, ax, ay, gx, gy, al, be, ga, bv, ox1, oy1, ax1, ay1);
       else
@@ -522,6 +554,14 @@ double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_i
                             bv, cfg_.dyn, 0.0f, s1);
         ox1 = s1.x;
         oy1 = s1.y;
+        if (energy) { // the energy term at the step's end state: on (vx, r, a)_{t+1}
+          float dvx, da, dr;
+          diff::power_step(cfg_.power, s1.vx, s1.a, s1.r, hdt, e_width, dvx, da, dr);
+          const float sc = e_scale * static_cast<float>(inv_n);
+          gaux_y += sc * dvx;
+          gext[1] += sc * dr;
+          gext[3] += sc * da;
+        }
       } else if (bike)
         diff::bike_step(F, S.ox, S.oy, S.auxx, S.auxy, gx, gy, al, be, ga, bv, ox1, oy1, ax1, ay1);
       else

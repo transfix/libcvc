@@ -108,7 +108,8 @@ const state_key_meta kTerrainKeys[] = {
     {"k_sharp", "knob", "1/m", 0.25, 4, "The barrier's sharpness."},
     {"d_hat_m", "knob", "m", 2, 30, "How far the barrier reaches."},
     {"block_infeasible", "knob", "", 0, 1,
-     "1: infeasible cells plan as obstacles (they join the occupancy)."},
+     "1: infeasible cells also plan as obstacles (they join the occupancy); 0 (the default): "
+     "slope is a material risk only (lam_grade, lam_grade_hard)."},
     {"governors", "knob", "", 0, 1,
      "1: the stopping and corner governors take gravity along and across the path (H2)."},
     {"gravity", "build", "m/s^2", kNone, kNone, "The gravity the terrain's limits are in."},

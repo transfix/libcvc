@@ -34,7 +34,11 @@ downstream app or test harness, and `sim_world` itself all drive it identically.
   `plant_tracked`), and **drive telemetry** — the reduced per-tick
   `drive_telemetry` (`drive_sample`): policy coefficients (`alpha_mean`/`beta_mean`/`gamma_mean`),
   grip (`mu_mean`/`mu_min`), material risk (`mrisk_mean`/`mrisk_max`), external-force magnitude
-  (`ext_force_mean`), steering (`steer_abs_mean`/`steer_abs_max`), and `binding_steps`. These are
+  (`ext_force_mean`), steering (`steer_abs_mean`/`steer_abs_max`), `binding_steps`, the material
+  weights the drive used (`lam_soft_mean`/`lam_hard_mean`), its turning (`curvature_abs_mean`/
+  `curvature_abs_max`, 1/m), and `binding_stopped_steps`, the ticks the barrier was active while the
+  vehicle stood still (under `speed_eps_mps`): pinned against what nav takes for a wall, as a vehicle
+  sits when its route sends it on and the barrier holds it back. These are
   populated only when the driver captures telemetry (`sim_world::set_capture_drive_telemetry(true)`,
   then feed `drive_sample` from `drive_telemetry_data()`); otherwise `mu_mean` stays 1, `mrisk_mean`
   0 (the no-material/no-grip neutral).
@@ -48,7 +52,8 @@ downstream app or test harness, and `sim_world` itself all drive it identically.
   one domain-neutral fitness row (arrival, economy, safety, material) for ranking base-policy
   checkpoints.
   Includes the fleet drive-telemetry means (`mean_alpha`/`mean_beta`/`mean_gamma`, `mean_mu`,
-  `mean_mrisk`, `mean_ext_force`) and `material_time_share[kNumMaterials]` — the signals a grip/risk
+  `mean_mrisk`, `mean_ext_force`, `mean_lam_soft`, `mean_lam_hard`, `mean_curvature_abs`,
+  `mean_binding_stopped_share`) and `material_time_share[kNumMaterials]` — the signals a grip/risk
   tuning or trained-policy A/B is judged on (lower `mean_mrisk` + off-hazard time-share at held
   arrival). A weighted composite score or a grip margin is left to a downstream extension's own
   scorecard, not computed here.
