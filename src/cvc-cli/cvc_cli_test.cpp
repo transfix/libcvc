@@ -2219,6 +2219,31 @@ TEST_F(CvcCliTest, Regression_LayerMeshImproveMethodsNoCrash) {
   }
 }
 
+// `hexahedralize --improve optimization` exited 0 but wrote garbage vertices: on a mesh with a flat
+// hexahedron corner (condition number +inf) Octree::optimization's line search never ran and its
+// uninitialized result went into the mesh, e.g. (7.4e24, 5.8e-43, 7.9e24) or NaN. This mesh has
+// such corners. Every vertex written must be a point of the volume.
+TEST_F(CvcCliTest, Regression_HexahedralizeOptimizationKeepsVerticesInTheVolume) {
+  std::string sdf_vol = path("hex_opt_sdf.rawiv");
+  ASSERT_EQ(0, cvc("sdf -i " + test_geo + " -o " + sdf_vol + " -d 16,16,16 -a v2").exit_code);
+  std::string out = path("hex_opt.off");
+  auto r =
+      cvc("hexahedralize -i " + sdf_vol + " -o " + out + " -v 0.0 --improve optimization -q 1");
+  ASSERT_EQ(0, r.exit_code) << r.output;
+
+  cvc::app ctx;
+  const cvc::bounding_box box = cvc::volume(ctx, sdf_vol).boundingBox();
+  cvc::geometry mesh;
+  mesh.read(out);
+  ASSERT_GT(mesh.num_points(), 0u);
+  int outside = 0;
+  for (const auto &p : mesh.const_points())
+    if (!(p[0] >= box.minx && p[0] <= box.maxx && p[1] >= box.miny && p[1] <= box.maxy &&
+          p[2] >= box.minz && p[2] <= box.maxz))
+      ++outside;
+  EXPECT_EQ(outside, 0) << "of " << mesh.num_points() << " vertices";
+}
+
 #if !defined(_WIN32)
 // Bug 7: `serve` without --node-id auto-generated "node-<ticks>" and
 // `cluster-status` generated "status-<ticks>", and the default --cluster-id was
