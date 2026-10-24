@@ -451,7 +451,8 @@ public:
   //     reference_substeps()) from the tick's start state with the same command, against the
   //     plant (report_drift);
   //   - skips the hard de-overlap (min_gap): the plant's bodies collide instead.
-  // nav_stats then carries the plant's energy and building contacts when it tracks them.
+  // nav_stats then carries the plant's energy and building contacts when it tracks them, and its
+  // plant ledger (plant_samples()) when it measures its vehicles.
   void set_plant(vehicle_plant *p);
   vehicle_plant *plant() const { return plant_; }
   // The footprint discs a plant's vehicle is covered with (plant_limits' size).
@@ -474,6 +475,12 @@ public:
   const float *plant_stop_speed() const { return ptr(pl_v_stop_); }
   const drift_sample *plant_drift() const {
     return plant_ && gstep_ > 0 && !pl_drift_.empty() ? pl_drift_.data() : nullptr;
+  }
+  // Each agent as the plant measured it at the end of the last tick (plant_sample, SI), [size()]:
+  // what feeds nav_stats' plant ledger. null without a plant that measures them
+  // (vehicle_plant::tracks_samples; never the kinematic arm) or before the first step().
+  const plant_sample *plant_samples() const {
+    return plant_ && gstep_ > 0 && !pl_sample_.empty() ? pl_sample_.data() : nullptr;
   }
 
   // How measured plant state modulates the drive (H4, plant_types.h): the plant's
@@ -646,6 +653,7 @@ private:
   std::vector<float> pl_steer_cmd_, pl_accel_cmd_, pl_v_stop_; // [n], the last tick's
   std::vector<plant_state> pl_start_;                          // [n], the tick's start
   std::vector<drift_sample> pl_drift_;                         // [n], the last tick's
+  std::vector<plant_sample> pl_sample_;                        // [n], the last tick's
   std::vector<double> st_energy_;                              // [n], nav_stats feed
   std::vector<int> st_contacts_;                               // [n], nav_stats feed
   const float *ptr(const std::vector<float> &v) const {
