@@ -171,8 +171,8 @@ runners that have no GPU.
 
 `src/cvc/tests/nav_drive_cuda_parity_test.cpp` holds the fused GPU drive to
 the CPU drive with everything it applies: a material stack, a terrain (grade
-force, infeasible-slope barrier, grade cost as risk), the slope governors, a
-risk net, a slope net, a v1 lam-head net and a two-head sigmoid net reading
+force, infeasible-slope barrier, grade cost as risk), the slope governors, the
+risk governor, a risk net, a slope net, a v1 lam-head net and a two-head sigmoid net reading
 grip, risk and slope at once, and every `drive_telemetry` field. Each tick starts both drives from the CPU's state
 and compares that one tick at 1e-5, so the check does not drift with a chaotic
 trajectory; each case also checks that what it adds moves the CPU drive, so it

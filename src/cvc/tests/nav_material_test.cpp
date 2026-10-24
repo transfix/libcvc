@@ -29,7 +29,9 @@
 // truth table, batch==serial byte-identity across thread counts, the
 // null-material rollout byte-identity guarantee, and sim_world integration.
 
+#include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <cvc/nav/material.h>
 #include <cvc/nav/sim_world.h>
@@ -1069,4 +1071,178 @@ TEST(NavMaterialSimWorld, GateDisabledIsFailOpen) {
   w.step(4);
   EXPECT_EQ(w.material_gate_active()[0], std::uint8_t(1))
       << "gate_enabled=false must leave the agent active (fail-open), not gate the soft force off";
+}
+
+// ─── The risk governor (veh_params::risk_governor) ──────────────────────────
+
+namespace {
+
+// rollout_world on open ground (no wall in reach), each agent's goal 1.5 ahead of it, and the
+// material weights zero: the speed is then the goal's pull, the risk and the governor alone.
+void open_up(rollout_world &w) {
+  const int hw = w.H * w.W;
+  for (int i = 0; i < hw; ++i) {
+    w.field[i] = 5.0f;
+    w.field[hw + i] = 1.0f;
+    w.field[2 * hw + i] = 0.0f;
+  }
+  for (int i = 0; i < w.N; ++i) {
+    w.goal[2 * i] = w.o[2 * i] + 1.5f * std::cos(w.th[i]);
+    w.goal[2 * i + 1] = w.o[2 * i + 1] + 1.5f * std::sin(w.th[i]);
+  }
+}
+
+veh_params governed(const veh_params &v, float vmin, float onset, float lookahead) {
+  veh_params g = v;
+  g.risk_governor = true;
+  g.risk_vmin = vmin;
+  g.risk_onset = onset;
+  g.risk_lookahead = lookahead;
+  return g;
+}
+
+// `ticks` ticks of bicycle_rollout_material (with `md`) or bicycle_rollout; the top |speed|
+// any agent reached and the final state.
+struct run_out {
+  float top = 0.0f;
+  std::vector<float> o, th, sp;
+};
+run_out drive_for(const rollout_world &w, const veh_params &v, const material_drive *md,
+                  int ticks) {
+  run_out r{0.0f, w.o, w.th, w.sp};
+  std::vector<float> mc(w.N);
+  for (int t = 0; t < ticks; ++t) {
+    if (md)
+      bicycle_rollout_material(w.fs, r.o.data(), r.th.data(), r.sp.data(), w.goal.data(),
+                               w.al.data(), w.be.data(), w.ga.data(), w.N, nullptr, v, *md,
+                               mc.data(), 1);
+    else
+      bicycle_rollout(w.fs, r.o.data(), r.th.data(), r.sp.data(), w.goal.data(), w.al.data(),
+                      w.be.data(), w.ga.data(), w.N, nullptr, v, mc.data(), 1);
+    for (float s : r.sp)
+      r.top = std::max(r.top, std::fabs(s));
+  }
+  return r;
+}
+
+} // namespace
+
+TEST(NavRiskGovernor, OffOrUnderTheOnsetIsByteIdentical) {
+  rollout_world w;
+  open_up(w);
+  std::vector<float> store;
+  const material_stack ms = make_risk_stack(w, store, [](int, int) { return 0.2f; });
+  std::vector<float> zero(w.N, 0.0f);
+  material_drive md;
+  md.stack = &ms;
+  md.lam_soft = zero.data();
+  md.lam_hard = zero.data();
+  // risk 0.2 under an onset of 0.3: the cap is vmax, nothing moves
+  const run_out off = drive_for(w, w.v, &md, 30);
+  const run_out on = drive_for(w, governed(w.v, 0.1f, 0.3f, 0.5f), &md, 30);
+  EXPECT_EQ(std::memcmp(off.o.data(), on.o.data(), off.o.size() * 4), 0);
+  EXPECT_EQ(std::memcmp(off.th.data(), on.th.data(), off.th.size() * 4), 0);
+  EXPECT_EQ(std::memcmp(off.sp.data(), on.sp.data(), off.sp.size() * 4), 0);
+  // and with no material and no terrain it has nothing to read
+  const run_out plain_off = drive_for(w, w.v, nullptr, 30);
+  const run_out plain_on = drive_for(w, governed(w.v, 0.1f, 0.0f, 0.5f), nullptr, 30);
+  EXPECT_EQ(std::memcmp(plain_off.o.data(), plain_on.o.data(), plain_off.o.size() * 4), 0);
+  EXPECT_EQ(std::memcmp(plain_off.sp.data(), plain_on.sp.data(), plain_off.sp.size() * 4), 0);
+}
+
+TEST(NavRiskGovernor, RiskCapsTheSpeed) {
+  rollout_world w;
+  open_up(w);
+  std::vector<float> store;
+  const material_stack ms = make_risk_stack(w, store, [](int, int) { return 0.65f; });
+  std::vector<float> zero(w.N, 0.0f);
+  material_drive md;
+  md.stack = &ms;
+  md.lam_soft = zero.data();
+  md.lam_hard = zero.data();
+  // onset 0.3, risk 0.65: halfway, so vmax 0.9 - (0.9 - 0.1) / 2 = 0.5
+  const veh_params g = governed(w.v, 0.1f, 0.3f, 0.0f);
+  const run_out off = drive_for(w, w.v, &md, 30);
+  const run_out on = drive_for(w, g, &md, 30);
+  EXPECT_GT(off.top, 0.6f) << "the goals must pull the agents past the cap without it";
+  EXPECT_LE(on.top, 0.5f + 1e-5f);
+  EXPECT_GT(on.top, 0.45f) << "the cap, not a stop";
+  // the cap in the telemetry: 0.5 for every agent, 0 with the governor off
+  const coef_mlp model = coef_mlp::default_biased();
+  std::vector<float> o = w.o, th = w.th, sp = w.sp, mc(w.N);
+  std::vector<drive_telemetry> tel(w.N);
+  drive_step_material(w.fs, o.data(), th.data(), sp.data(), w.goal.data(), model, w.N, nullptr, g,
+                      md, mc.data(), 1, tel.data());
+  for (int i = 0; i < w.N; ++i)
+    EXPECT_NEAR(tel[i].v_risk, 0.5f, 1e-6f) << "agent " << i;
+  o = w.o, th = w.th, sp = w.sp;
+  drive_step_material(w.fs, o.data(), th.data(), sp.data(), w.goal.data(), model, w.N, nullptr, w.v,
+                      md, mc.data(), 1, tel.data());
+  for (int i = 0; i < w.N; ++i)
+    EXPECT_EQ(tel[i].v_risk, 0.0f);
+}
+
+TEST(NavRiskGovernor, TerrainRiskGovernsWithTheTerrainsWeightsZero) {
+  // Terrain risk is material risk: a terrain stack whose weights are zero (no force) still caps
+  // the speed on the plain drive.
+  rollout_world w;
+  open_up(w);
+  std::vector<float> store;
+  const material_stack ts = make_risk_stack(w, store, [](int, int) { return 0.65f; });
+  terrain_drive td;
+  td.stack = &ts;
+  veh_params v = w.v;
+  v.terrain = &td;
+  const run_out off = drive_for(w, v, nullptr, 30);
+  const run_out on = drive_for(w, governed(v, 0.1f, 0.3f, 0.0f), nullptr, 30);
+  EXPECT_GT(off.top, 0.6f);
+  EXPECT_LE(on.top, 0.5f + 1e-5f);
+}
+
+TEST(NavRiskGovernor, TheLookAheadSlowsItBeforeItGetsThere) {
+  // Risk 1 past x = 2 m (bilinear from 0.67 m), none before it. Every agent drives +x at 0.6
+  // toward it; the look-ahead has it at the governor's speed by the time it is on the risk,
+  // where the underfoot cap alone is still braking.
+  rollout_world w;
+  open_up(w);
+  for (int i = 0; i < w.N; ++i) {
+    w.o[2 * i] = -0.8f;
+    w.o[2 * i + 1] = -0.7f + 1.4f * static_cast<float>(i) / static_cast<float>(w.N - 1);
+    w.th[i] = 0.0f;
+    w.sp[i] = 0.6f;
+    w.goal[2 * i] = 0.95f;
+    w.goal[2 * i + 1] = w.o[2 * i + 1];
+  }
+  std::vector<float> store;
+  const material_stack ms = make_risk_stack(w, store, [&](int, int c) {
+    return -10.0f + 20.0f * static_cast<float>(c) / static_cast<float>(w.W - 1) >= 2.0f ? 1.0f
+                                                                                        : 0.0f;
+  });
+  std::vector<float> zero(w.N, 0.0f);
+  material_drive md;
+  md.stack = &ms;
+  md.lam_soft = zero.data();
+  md.lam_hard = zero.data();
+  // each agent's speed on the first tick it is at x >= 0.2 (2 m: risk 1 underfoot)
+  const auto entry = [&](const veh_params &v) {
+    std::vector<float> o = w.o, th = w.th, sp = w.sp, mc(w.N), at(w.N, -1.0f);
+    for (int t = 0; t < 200; ++t) {
+      bicycle_rollout_material(w.fs, o.data(), th.data(), sp.data(), w.goal.data(), w.al.data(),
+                               w.be.data(), w.ga.data(), w.N, nullptr, v, md, mc.data(), 1);
+      for (int i = 0; i < w.N; ++i)
+        if (at[i] < 0.0f && o[2 * i] >= 0.2f)
+          at[i] = sp[i];
+    }
+    float worst = 0.0f;
+    for (float s : at) {
+      EXPECT_GE(s, 0.0f) << "every agent gets there";
+      worst = std::max(worst, s);
+    }
+    return worst;
+  };
+  const float under = entry(governed(w.v, 0.05f, 0.3f, 0.0f));
+  const float ahead = entry(governed(w.v, 0.05f, 0.3f, 0.5f));
+  std::printf("[risk governor] entry speed: underfoot %.3f, look-ahead %.3f\n", under, ahead);
+  EXPECT_LT(ahead, 0.5f * under);
+  EXPECT_LE(ahead, 0.05f + 1e-5f);
 }

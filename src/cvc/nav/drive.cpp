@@ -442,8 +442,27 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
     // no-field case; steer/curv/clear are overwritten every substep).
     float tel_mu = 1.0f, tel_mrisk = 0.0f, tel_lam = 0.0f, tel_lam_hard = 0.0f, tel_ext_x = 0.0f,
           tel_ext_y = 0.0f;
-    float tel_steer = 0.0f, tel_curv = 0.0f;
+    float tel_steer = 0.0f, tel_curv = 0.0f, tel_vrisk = 0.0f;
     potential_terms tel_u;
+    // The risk governor's risk: the worse of the material stack's and the terrain's, the
+    // terrain's read with or without its weights (coef_feats' risk column reads it so too).
+    const material_stack *ter_risk = (v.terrain && v.terrain->stack) ? v.terrain->stack : nullptr;
+    const bool risk_on = v.risk_governor && ((mat && mat->stack) || ter_risk);
+    const int rplane = (mat && mat->stack && map_id && mat->stack->M > 1) ? map_id[i] : 0;
+    const auto risk_at = [&](float x, float y) {
+      float r = (mat && mat->stack) ? sample_risk(*mat->stack, rplane, x, y) : 0.0f;
+      if (ter_risk) {
+        const float tr = sample_risk(*ter_risk, 0, x, y);
+        r = tr > r ? tr : r;
+      }
+      return r;
+    };
+    const float risk_vmin = std::min(std::max(v.risk_vmin, 0.0f), vmax);
+    const float risk_span = v.risk_onset < 1.0f ? 1.0f - v.risk_onset : 1.0f;
+    const auto v_risk_at = [&](float r) {
+      const float s = std::min(std::max((r - v.risk_onset) / risk_span, 0.0f), 1.0f);
+      return vmax - (vmax - risk_vmin) * s;
+    };
     float tel_fx = 0.0f, tel_fy = 0.0f;
 
     for (int s = 0; s < nsub; ++s) {
@@ -686,6 +705,30 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
       approach = std::min(std::max(approach, 0.0f), 1.0f);
       const float v_stop_dir = approach > 0.05f ? v_stop / std::max(approach, 0.05f) : vmax;
       float v_lim = std::min(vmax, std::min(v_corner, v_stop_dir));
+      if (risk_on) {
+        // The risk governor (veh_params::risk_governor): v_risk underfoot, and for each probe
+        // ahead the speed from which the governor's braking (with the plant's latency) is down to
+        // that probe's v_risk by the probe before it, since its risk may start just past that one.
+        float a_gov = v.slope ? a_stop_g : a_max_e, tau = 0.0f;
+        if (pd) {
+          tau = pd->latency ? pd->latency[i] : 0.0f;
+          a_gov = (pd->a_brake && pd->a_brake[i] > 0.0f) ? std::min(pd->a_brake[i], a_gov) : a_gov;
+        }
+        float cap = v_risk_at(risk_at(ox, oy));
+        const float reach = v.risk_lookahead > 0.0f ? v.risk_lookahead : 0.0f;
+        const int P = reach > 0.0f ? (v.risk_probes < 1 ? 1 : v.risk_probes) : 0;
+        for (int k = 1; k <= P; ++k) {
+          const float dk = (static_cast<float>(k) / static_cast<float>(P)) * reach;
+          const float db = (static_cast<float>(k - 1) / static_cast<float>(P)) * reach;
+          const float vr =
+              v_risk_at(risk_at(ox + motion_sign * dk * ch, oy + motion_sign * dk * sh));
+          const float vk =
+              std::sqrt(a_gov * a_gov * tau * tau + vr * vr + 2.0f * a_gov * db) - a_gov * tau;
+          cap = std::min(cap, vk);
+        }
+        tel_vrisk = cap;
+        v_lim = std::min(v_lim, cap);
+      }
 
       const bool hard_steer = std::fabs(delta) >= 0.7f * dmax;
       const bool can_move = d > 0.25f * gov_rr;
@@ -771,6 +814,7 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
       t.lam_hard = tel_lam_hard;
       t.mu = tel_mu;
       t.mrisk = tel_mrisk;
+      t.v_risk = tel_vrisk;
       t.ext_fx = tel_ext_x;
       t.ext_fy = tel_ext_y;
       t.steer = tel_steer;
