@@ -1,7 +1,7 @@
 # state_exec: exceptions and long-running native calls
 
-Status: P0 specification (2026-10-18); P1 is merged (#706). The decisions below are the
-recommended defaults, agreed before this was written. Section 7 records how the five questions
+Status: P0 specification (2026-10-18); P1 (#706) and P2 are implemented. The decisions below
+are the recommended defaults, agreed before this was written. Section 7 records how the five questions
 P0 left open were settled, and one decision added since: async calls are charged to the process
 (2026-10-19).
 Tracked in the `state-exec-exceptions` workstream.
@@ -241,11 +241,37 @@ What each host sees:
     own exception types through a DSL program.
 - **Ariadne:** a failed action or resident is reported with its class, message and traceback.
 
+**As built in P2:**
+- **Not covered:** a syntax error found while a process reads its script (parser.step_tokens)
+  isn't an exception the program raised. It stays as before: the sync scheduler throws its
+  `parse_error` from `run()`, and the async scheduler kills the process with the message.
+- **The schedulers:**
+  - both have `get_exit_error(pid)` (the sync scheduler is new), `get_exit_exception(pid)` and
+    `raise_exit_exception(pid)`;
+  - `raise_exit_exception(pid)` throws a failed process's `dsl_exception`, with the C++
+    exception it was made from, if any, as its `original()`, and returns for any other process;
+  - `process_info` has `exit_error` and `exit_exception`, and `scheduler_stats` has `failed`.
+- **The DSL:** `(inspect pid)` adds `exit_error` and `exception` once a process has ended that
+  way, and `(scheduler-stats)` counts `failed`.
+- **Hosts:** `dsl_error` takes an `origin` and fields of the exception's own, so a host can raise
+  a class with its own origin. pycvc's error for a Python function's exception derives from it
+  as a `PythonError`:
+  - its origin is `"python"`;
+  - `python_type` is the type's `module.QualName`, or the bare name of a builtin;
+  - its message is `python DSL fn 'name': <str(exception)>`, as the error text was before.
+- **Unchanged:** an exception a Python `on_complete` raises is not the program's. It is still
+  thrown from the scheduler call that finished the process (PY-6).
+
 ### 2.7 Snapshots
 
 A `try` frame and an exception value encode like any frame or value (`state_value_codec`).
 The new frame phases are added by name, so older snapshots still decode. A process snapshotted
 mid-unwind resumes the unwinding.
+
+The codec writes a dict once for each value that holds it, so after a restore an exception's
+`__class__` is a copy of the class dict the program names. `catch` and `isinstance` match such
+a copy by its chain of class names (P2). Without that, an exception made before the snapshot,
+re-raised after it, wouldn't be caught by its own class.
 
 ### 2.8 The recursive evaluator
 
@@ -553,10 +579,10 @@ These are the behaviour changes, each covered by a case in section 6:
 7. **On Windows, the CPU half of `max_time` charges real CPU time** (3.8, the thread CPU clock),
    not wall time. A step that was descheduled is no longer charged for the stall there.
 
-P1 already changes two things on the way:
-- On the sync scheduler, a process whose error nothing caught is killed, with the message as its
-  `exit_error`, as on the async scheduler; `run()` still throws the error. Before, the process
-  stayed `running`, and the next `run()` stepped it again.
+P1 also changed two things:
+- On the sync scheduler, a process whose error nothing caught was killed, with the message as its
+  `exit_error`, and `run()` still threw the error. Before, the process stayed `running`, and the
+  next `run()` stepped it again. P2 replaced this with item 1.
 - On the stackless evaluator, `return` leaves only the function it is in (2.9).
 
 ## 6. The test list

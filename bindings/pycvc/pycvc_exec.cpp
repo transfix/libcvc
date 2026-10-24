@@ -15,6 +15,7 @@
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_scheduler.h> // Exec drives a private async scheduler
 #include <cvc/state/state_exec/builtins.h>
+#include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/process.h>
 #include <cvc/state/state_exec/types.h>
@@ -87,13 +88,58 @@ std::shared_ptr<PyObject> own_callable(PyObject *callable) {
   });
 }
 
+// The qualified name of an exception type: "module.QualName", or the bare name of a builtin.
+std::string exception_type_name(PyObject *type) {
+  std::string name;
+  if (PyObject *qual = PyObject_GetAttrString(type, "__qualname__")) {
+    if (const char *s = PyUnicode_AsUTF8(qual))
+      name = s;
+    Py_DECREF(qual);
+  }
+  if (PyObject *mod = PyObject_GetAttrString(type, "__module__")) {
+    const char *m = PyUnicode_Check(mod) ? PyUnicode_AsUTF8(mod) : nullptr;
+    if (m && std::string(m) != "builtins" && !name.empty())
+      name = std::string(m) + "." + name;
+    Py_DECREF(mod);
+  }
+  PyErr_Clear(); // a type without the attributes keeps what was found
+  return name;
+}
+
+// The Python exception set now, taken (cleared) as the C++ error it becomes in the DSL: a
+// python_exception (PythonError) holding it, its message prefixed with `what`.
+python_exception take_py_exception(const std::string &what) {
+  PyObject *type = nullptr, *val = nullptr, *tb = nullptr;
+  PyErr_Fetch(&type, &val, &tb);
+  PyErr_NormalizeException(&type, &val, &tb);
+  if (val != nullptr && tb != nullptr)
+    PyException_SetTraceback(val, tb);
+  std::string msg = "error";
+  if (val != nullptr) {
+    if (PyObject *s = PyObject_Str(val)) {
+      if (const char *cs = PyUnicode_AsUTF8(s))
+        msg = cs;
+      Py_DECREF(s);
+    }
+  }
+  const std::string type_name = type != nullptr ? exception_type_name(type) : std::string();
+  std::shared_ptr<PyObject> held = val != nullptr ? own_callable(val) : nullptr;
+  PyErr_Clear();
+  Py_XDECREF(type);
+  Py_XDECREF(val);
+  Py_XDECREF(tb);
+  return python_exception(what + ": " + msg, type_name, std::move(held));
+}
+
 // Call the held Python callable with `args`, ACQUIRING THE GIL for the duration.
 // Safe from ANY thread (the scheduler thread for a sync fn, a pool worker for an
 // async fn): PyGILState_Ensure creates/binds a thread state and blocks until the
 // GIL is free, so the only rule is that whoever is idle-waiting for this worker
-// must have released the GIL (run()'s pump does). Contains a Python exception as
-// a C++ error carrying the message, prefixed with `what`. With `want_result`
-// false the return value is ignored (an on_complete callback) and nil returned.
+// must have released the GIL (run()'s pump does). A Python exception becomes a
+// python_exception (a PythonError in the DSL, docs/STATE_EXEC_EXCEPTIONS.md),
+// its message prefixed with `what`. With `want_result` false the return value
+// is ignored (an on_complete callback, whose exception stays a runtime_error
+// thrown from the scheduler call) and nil returned.
 value_t call_python(const std::shared_ptr<PyObject> &holder, std::span<const value_t> args,
                     const std::string &what, bool want_result = true) {
   PyGILState_STATE gil = PyGILState_Ensure();
@@ -101,9 +147,14 @@ value_t call_python(const std::shared_ptr<PyObject> &holder, std::span<const val
   PyObject *res = pyargs ? PyObject_CallObject(holder.get(), pyargs) : nullptr;
   Py_XDECREF(pyargs);
   if (res == nullptr) {
-    std::string msg = fetch_py_error();
+    if (!want_result) {
+      std::string msg = fetch_py_error();
+      PyGILState_Release(gil);
+      throw std::runtime_error(what + ": " + msg);
+    }
+    python_exception error = take_py_exception(what);
     PyGILState_Release(gil);
-    throw std::runtime_error(what + ": " + msg);
+    throw error;
   }
   value_t out;
   // strict: e.g. a set or non-str dict key fails
@@ -507,6 +558,7 @@ std::string Exec::run(const std::string &src) {
   std::optional<value_t> result;
   std::optional<std::string> error; // set -> throw AFTER the pool is quiesced
   bool killed = false;              // the scheduler killed the process (error has its exit error)
+  std::exception_ptr failure; // the program failed: its dsl_exception, thrown after the quiesce
   try {
     while (true) {
       sched.drain_ingress(); // deliver any worker post_message FIRST, so a parked receiver readies
@@ -528,6 +580,16 @@ std::string Exec::run(const std::string &src) {
       const std::optional<process_info> info = sched.get_process_info(pid);
       if (!info) {
         error = "pycvc.Exec.run: process vanished (pid " + std::to_string(pid) + ")";
+        break;
+      }
+      if (info->status == process_status::failed) {
+        // An exception the program didn't catch (docs/STATE_EXEC_EXCEPTIONS.md 2.6): raised as
+        // pycvc.dsl_error, or as the Python function's own exception that it was made from.
+        try {
+          sched.raise_exit_exception(pid);
+        } catch (const dsl_exception &) {
+          failure = std::current_exception();
+        }
         break;
       }
       if (info->status == process_status::killed) {
@@ -579,6 +641,8 @@ std::string Exec::run(const std::string &src) {
     // either way, as it does when the script is parsed at submit.
     (void)parse_all(src, parse_options_from_state(*impl_->root, {}, sched.parser_defaults()));
   }
+  if (failure)
+    std::rethrow_exception(failure);
   if (error)
     throw std::runtime_error(*error);
   if (!result.has_value())

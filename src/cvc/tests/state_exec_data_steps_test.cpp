@@ -720,7 +720,7 @@ TEST_F(DataStepsStateJson, AMalformedDocumentSetsNothingThoughItsCheckSpansSteps
   const int pid = submit("(state-from-json \"target\" (state-get \"doc\"))");
   sched.sync_run();
   const auto info = sched.get_process_info(pid);
-  EXPECT_EQ(info->status, process_status::killed);
+  EXPECT_EQ(info->status, process_status::failed); // the native's error, uncaught
   EXPECT_NE(error(pid).find("state-from-json: line 1: expected value"), std::string::npos)
       << error(pid);
   EXPECT_GT(info->data_steps, 10u);
@@ -731,7 +731,9 @@ TEST_F(DataStepsStateJson, TheDocumentIsHeldToTheAllocationLimit) {
   root("state_exec.defaults.limits.max_alloc_bytes").value("4096");
   const int pid = submit("(state-json \"wide\")");
   sched.sync_run();
-  EXPECT_EQ(sched.get_process_info(pid)->status, process_status::killed);
+  // The refused allocation is a MemoryError the program didn't catch.
+  EXPECT_EQ(sched.get_process_info(pid)->status, process_status::failed);
+  EXPECT_NE(error(pid).find("MemoryError: "), std::string::npos) << error(pid);
   EXPECT_NE(error(pid).find("state-json"), std::string::npos) << error(pid);
 }
 

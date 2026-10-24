@@ -138,7 +138,7 @@ struct evaluator_state {
   /// step() throws it again. Not serialized.
   std::optional<value_t> uncaught;
   /// The last exception made from a C++ exception, and that exception: an uncaught exception
-  /// that is this one is thrown as the original, so C++ callers see the type they always did.
+  /// that is this one carries it as its dsl_exception's original().
   value_t converted;
   std::exception_ptr converted_original;
 };
@@ -175,8 +175,8 @@ public:
                                const parse_options &popts = {});
 
   /// Execute one evaluation step.  Returns true when done. An exception the program doesn't
-  /// catch is thrown: the C++ exception it was made from, if any, else a dsl_exception. The
-  /// state is then done, and stepping it again throws it again.
+  /// catch is thrown as a dsl_exception, with the C++ exception it was made from, if any, as its
+  /// original(). The state is then done, and stepping it again throws it again.
   bool step(evaluator_state &state);
 
   /// Raise `exc` (an exception instance, docs/STATE_EXEC_EXCEPTIONS.md) in `state` at the frame

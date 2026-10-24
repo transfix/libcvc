@@ -95,6 +95,10 @@ struct process_info {
   uint64_t message_bytes;
   uint64_t max_message_bytes;
   int parent_pid;
+  /// Why it ended, when it didn't terminate normally: the kill reason, or "Class: message".
+  std::optional<std::string> exit_error;
+  /// A failed process's exception (docs/STATE_EXEC_EXCEPTIONS.md 2.6).
+  std::optional<value_t> exit_exception;
 };
 
 /// Fill `info`'s budget-by-kind fields from a process's evaluation stats.
@@ -116,6 +120,7 @@ struct scheduler_stats {
   int paused = 0;
   int terminated = 0;
   int killed = 0;
+  int failed = 0;
   uint64_t total_steps = 0;
 };
 

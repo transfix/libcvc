@@ -1818,10 +1818,12 @@ TEST(AriadneStdlib, ActionHitsTheAllocationLimitAndIsReported) {
   mb.button_click = true;
   rt.render();
   rt.drain();
-  EXPECT_FALSE(cvc::state::instance(app)("n").value() == "1000"); // killed before the write
+  EXPECT_FALSE(cvc::state::instance(app)("n").value() == "1000"); // failed before the write
   const auto warns = rt.take_reactive_warnings();
   ASSERT_FALSE(warns.empty());
-  EXPECT_NE(warns[0].find("did not complete"), std::string::npos) << warns[0];
+  // The refused allocation is a MemoryError the action didn't catch: it failed, and the report
+  // names the class and message (docs/STATE_EXEC_EXCEPTIONS.md 2.6).
+  EXPECT_NE(warns[0].find("action program failed: MemoryError: "), std::string::npos) << warns[0];
 
   // A limit that fits lets the same action finish.
   cvc::state::instance(app)("state_exec.defaults.limits.max_alloc_bytes").value("1048576");
@@ -1852,10 +1854,10 @@ TEST(AriadneStdlib, ActionMemoryBudgetIsATreeSetting) {
   EXPECT_TRUE(rt.take_reactive_warnings().empty());
 
   root("ariadne.limits.action_max_memory").value(std::string("65536"));
-  EXPECT_EQ(click(), "-"); // over the budget: killed before the write
+  EXPECT_EQ(click(), "-"); // over the budget: failed before the write
   const auto warns = rt.take_reactive_warnings();
   ASSERT_FALSE(warns.empty());
-  EXPECT_NE(warns[0].find("did not complete"), std::string::npos) << warns[0];
+  EXPECT_NE(warns[0].find("action program failed: MemoryError: "), std::string::npos) << warns[0];
 
   root("ariadne.limits.action_max_memory").value(std::string("0")); // no limit
   EXPECT_EQ(click(), "10000");

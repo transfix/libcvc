@@ -2,6 +2,7 @@
 #include <chrono>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/builtins.h>
+#include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/scheduler.h>
 #include <stdexcept>
 
@@ -231,7 +232,7 @@ void scheduler::execute_process_step(process &proc) {
   struct release_guard {
     process &p;
     ~release_guard() {
-      if (p.status == process_status::terminated || p.status == process_status::killed)
+      if (is_finished(p.status))
         p.release_state();
     }
   } release_dead{proc};
@@ -302,16 +303,17 @@ void scheduler::execute_process_step(process &proc) {
       caught_in_program = !proc.state.uncaught;
     }
     if (!caught_in_program) {
-      // An error the program didn't catch ends it, killed with the message as on the async
-      // scheduler (a state left with it would only throw it again), and reaches run()'s caller
-      // as it always has.
-      if (proc.state.uncaught) {
-        proc.accumulated_time +=
-            std::chrono::duration<double>(std::chrono::steady_clock::now() - proc.last_run_start)
-                .count();
-        kill_process(proc, e.what());
-      }
-      throw;
+      // An exception the program didn't catch ends it `failed`, with the exception kept for the
+      // host (docs/STATE_EXEC_EXCEPTIONS.md 2.6); run() goes on with the other processes. An
+      // error that isn't the program's (a syntax error found while reading it) propagates.
+      if (!proc.state.uncaught)
+        throw;
+      proc.accumulated_time +=
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - proc.last_run_start)
+              .count();
+      const auto *thrown = dynamic_cast<const dsl_exception *>(&e);
+      fail_process(proc, *proc.state.uncaught, thrown ? thrown->original() : nullptr);
+      return;
     }
     done = proc.state.done;
   }
@@ -445,7 +447,7 @@ void scheduler::poll_watches() {
   if (!watch_root_)
     return;
   for (auto &[pid, proc] : processes_) {
-    if (proc->status == process_status::terminated || proc->status == process_status::killed)
+    if (is_finished(proc->status))
       continue;
     for (auto &[wid, entry] : proc->watch_handlers) {
       auto *node = watch_root_->findDescendant(entry.path);
@@ -570,7 +572,7 @@ bool scheduler::send_signal(int pid, const std::string &signal) {
   if (it == processes_.end())
     return false;
   auto &proc = *it->second;
-  if (proc.status == process_status::terminated || proc.status == process_status::killed)
+  if (is_finished(proc.status))
     return false;
 
   if (signal == "SIGKILL") {
@@ -632,6 +634,15 @@ void scheduler::terminate_process(process &proc, value_t result) {
 void scheduler::kill_process(process &proc, const std::string &reason) {
   proc.status = process_status::killed;
   proc.exit_error = reason;
+  proc.state.stats.mark_complete();
+  release_if_idle(proc);
+}
+
+void scheduler::fail_process(process &proc, value_t exc, std::exception_ptr original) {
+  proc.status = process_status::failed;
+  proc.exit_error = exception_summary(exc);
+  proc.exit_exception = std::move(exc);
+  proc.exit_original = std::move(original);
   proc.state.stats.mark_complete();
   release_if_idle(proc);
 }
@@ -762,7 +773,7 @@ bool scheduler::kill(int pid) {
   if (it == processes_.end())
     return false;
   auto &proc = *it->second;
-  if (proc.status == process_status::terminated || proc.status == process_status::killed)
+  if (is_finished(proc.status))
     return false;
   kill_process(proc, "killed_by_user");
   return true;
@@ -904,6 +915,8 @@ process_info scheduler::make_info(const process &proc) const {
   info.message_bytes = proc.message_bytes;
   info.max_message_bytes = proc.max_message_bytes;
   info.parent_pid = proc.parent_pid;
+  info.exit_error = proc.exit_error;
+  info.exit_exception = proc.exit_exception;
   return info;
 }
 
@@ -933,6 +946,27 @@ std::optional<value_t> scheduler::get_result(int pid) const {
   if (it->second->status != process_status::terminated)
     return std::nullopt;
   return it->second->exit_code;
+}
+
+std::optional<std::string> scheduler::get_exit_error(int pid) const {
+  auto it = processes_.find(pid);
+  if (it == processes_.end())
+    return std::nullopt;
+  return it->second->exit_error;
+}
+
+std::optional<value_t> scheduler::get_exit_exception(int pid) const {
+  auto it = processes_.find(pid);
+  if (it == processes_.end())
+    return std::nullopt;
+  return it->second->exit_exception;
+}
+
+void scheduler::raise_exit_exception(int pid) const {
+  auto it = processes_.find(pid);
+  if (it == processes_.end() || !it->second->exit_exception)
+    return;
+  throw dsl_exception(*it->second->exit_exception, it->second->exit_original);
 }
 
 std::unordered_map<int, value_t> scheduler::get_results() const {
@@ -965,6 +999,9 @@ scheduler_stats scheduler::get_stats() const {
       break;
     case process_status::killed:
       ++s.killed;
+      break;
+    case process_status::failed:
+      ++s.failed;
       break;
     default:
       break;
