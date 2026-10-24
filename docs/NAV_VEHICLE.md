@@ -70,11 +70,12 @@ untouched.
 | `bicycle_rollout_material` | CPU + the material force |
 | `bicycle_rollout_ext` | CPU + a generic external force (e.g. a downstream layer's steering force) |
 | `bicycle_rollout_material_ext` | CPU + **both** the material force AND the external force, fused |
-| `bicycle_rollout_cuda` | GPU, **given** coefficients — the unfused device twin |
+| `bicycle_rollout_cuda` | GPU, **given** coefficients — the unfused device twin; applies `veh_params::terrain` and `slope` as `bicycle_rollout` does |
 | `drive_step`, `drive_step_material` | fused: `coef_feats` → MLP → rollout |
 | `drive_step_ext` | fused, with an external force channel |
 | `drive_step_material_ext` | fused, with **both** the material drive AND an external force |
-| `drive_step_cuda` | fused on GPU, one thread per agent |
+| `drive_step_cuda` | fused on GPU, one thread per agent; `drive_step`'s twin: grip, risk and slope columns, the terrain's force and the slope governors |
+| `drive_step_material_cuda` | fused on GPU; `drive_step_material`'s twin: adds the material force and a lam-head net's learned `lam_soft` / `lam_hard` |
 | `sim_world_cuda` | device-resident world; holds its own refinement buffers |
 
 `*_material_ext` fuses the two force channels. Without it a caller must pick one
@@ -113,9 +114,20 @@ digital twin that moves differently" failure, and **no parity gate would catch
 it** — the gates hand both paths the same params. So where a width or a field is
 missing, the code raises instead of running:
 
-- `drive_step` / `drive_step_cuda` refuse a model whose input width is neither 5
-  nor 6, and refuse a 6-feature model with a null `grip`. Feeding the first
-  layer a short vector is arithmetic that succeeds and is wrong.
+- `drive_step` / `drive_step_cuda` refuse a model whose input width does not
+  match its feature flags (5, plus one each for grip, risk and slope), and a
+  model whose feature has nothing to read: a grip net with a null `grip`, a
+  slope net with no terrain, a risk net with neither a material stack nor a
+  terrain (terrain risk is material risk). Feeding the first layer a short
+  vector is arithmetic that succeeds and is wrong.
+- The GPU drive (`drive_step_cuda`, `drive_step_material_cuda`,
+  `bicycle_rollout_cuda`) refuses the plant arm (`veh_params::plant`), which is
+  not ported, and a material drive whose `lam_soft` / `lam_hard` column is null
+  for a net with no head for it. It does not read `body_offsets_col` (the
+  shared `body_offsets` apply) and fills no `drive_telemetry`. It runs on the
+  shared field and material plane 0 (no `map_id`).
+- `sim_world_cuda` holds no material stack or terrain, so it refuses a risk or
+  slope look-ahead net.
 
 `dev_veh`'s new members carry in-class initializers on purpose: every
 construction site in `drive.cu` is a bare `dev_veh v;` followed by field
@@ -147,6 +159,20 @@ bit-exact — the `.cu` stores world bounds as float where the CPU keeps them
 double). It skips when `drive_cuda_available()` is false, because a CUDA-enabled
 *build* is not a CUDA-capable *machine*: CI compiles some jobs with CUDA on
 runners that have no GPU.
+
+`src/cvc/tests/nav_drive_cuda_parity_test.cpp` holds the fused GPU drive to
+the CPU drive with everything it applies: a material stack, a terrain (grade
+force, infeasible-slope barrier, grade cost as risk), the slope governors, a
+risk net, a slope net, a v1 lam-head net and a two-head sigmoid net reading
+grip, risk and slope at once. Each tick starts both drives from the CPU's state
+and compares that one tick at 1e-5, so the check does not drift with a chaotic
+trajectory; each case also checks that what it adds moves the CPU drive, so it
+cannot pass by exercising nothing. The refusals throw host-side and run on a
+device-less CUDA build.
+
+```bash
+ctest -R NavDriveCudaParity
+```
 
 **Registering a new test is not optional.** `src/cvc/tests/CMakeLists.txt` fails
 at configure time if a target is in `TEST_TARGETS` but never passed to
