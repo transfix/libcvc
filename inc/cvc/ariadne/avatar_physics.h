@@ -96,6 +96,9 @@ public:
   void place(const std::string &pid, const cvc::physics::body_state &feet);
   // A kinematic avatar: arrive at this feet pose by the end of the next step.
   void move_kinematic(const std::string &pid, const cvc::physics::pose &feet);
+  // A dynamic avatar's mass (kg, > 0) from the next step on; it survives set_statics. A kinematic
+  // avatar has no mass (a no-op).
+  void set_mass(const std::string &pid, double kg);
 
   void step();
 
@@ -108,8 +111,9 @@ private:
   struct avatar {
     std::uint32_t id = 0; // cvc::physics::body_id value
     bool dynamic = true;
+    double mass = 0.0; // kg; avatar_body::mass until set_mass
   };
-  std::uint32_t create_avatar(const cvc::physics::body_state &feet, bool dynamic);
+  std::uint32_t create_avatar(const cvc::physics::body_state &feet, bool dynamic, double mass);
 
   avatar_body _body;
   double _dt;
