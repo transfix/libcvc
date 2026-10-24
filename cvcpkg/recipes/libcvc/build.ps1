@@ -70,7 +70,9 @@ if ($cvcTests -eq 'ON') {
   # publishes a build whose tests did not pass.
   Push-Location $env:CVC_BUILD_DIR
   try {
-    & ctest --output-on-failure -j $env:CVC_JOBS
+    # CVC_CTEST_EXCLUDE: a ctest -E regex of tests to leave out (CI's long-running suites).
+    $exclude = if ($env:CVC_CTEST_EXCLUDE) { @('-E', $env:CVC_CTEST_EXCLUDE) } else { @() }
+    & ctest --output-on-failure -j $env:CVC_JOBS @exclude
     if ($LASTEXITCODE -ne 0) { throw 'ctest reported failures' }
   } finally {
     Pop-Location

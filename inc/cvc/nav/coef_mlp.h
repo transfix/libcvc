@@ -177,6 +177,12 @@ public:
   };
   flat_layers export_flat() const;
 
+  // This policy with its layers' weights replaced by `data`, in export_flat().data's layout
+  // (each layer's w then b). Everything else (flags, output bias, lam ceilings) is kept, so
+  // with_flat_weights(export_flat().data) is this policy. A zeroth-order trainer perturbs the
+  // flat vector and scores the results. Throws if `data` is the wrong size.
+  coef_mlp with_flat_weights(const std::vector<float> &data) const;
+
 private:
   struct Layer {
     int rows = 0, cols = 0;  // rows = out dim, cols = in dim (torch Linear [out,in])
