@@ -2342,8 +2342,9 @@ endif()
 #    would install a libcvc.a whose mesh_ops.o / fem.o reference igl_detail::
 #    symbols that no installed file defines.)
 #  - Neither cvc_igl nor igl::/Eigen3:: targets leak into cvcTargets.cmake.
-#  - MSVC: cvc.dll's generated export table names no igl_detail::, igl:: or
-#    Eigen:: symbol.
+#  - MSVC: cvc.dll's generated export table names no igl:: or Eigen:: symbol.
+#    (cvc::igl_detail:: names may appear: mesh_ops.cpp / fem.cpp compile the
+#    boundary types' inline members and RTTI into cvc's own objects.)
 #  - cvc_igl's parallel_for backend equals igl::core's (adding
 #    IGL_PARALLEL_FOR_FORCE_SERIAL only to cvc_igl is an ODR violation in any
 #    static link that also uses igl::core), except that single-threaded wasm
@@ -2413,10 +2414,10 @@ foreach(_f IN LISTS _exports)
 endforeach()
 
 if(EXPORT_DEF)
-  file(STRINGS "${EXPORT_DEF}" _leaks REGEX "igl_detail@|@igl@@|@Eigen@@")
+  file(STRINGS "${EXPORT_DEF}" _leaks REGEX "@igl@@|@Eigen@@")
   if(_leaks)
     list(LENGTH _leaks _n)
-    string(APPEND _fail "${EXPORT_DEF} exports ${_n} igl_detail::, igl:: or Eigen:: symbols\n")
+    string(APPEND _fail "${EXPORT_DEF} exports ${_n} igl:: or Eigen:: symbols\n")
   endif()
 endif()
 
