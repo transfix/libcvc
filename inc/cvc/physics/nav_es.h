@@ -32,6 +32,11 @@
 // Over every weight, start from a trained policy: coef_mlp::default_biased() has all-zero
 // weights, and small perturbations of a zero network barely change its output (`tail` = 3
 // tunes its basin instead). Needs Jolt (reach_on_plant).
+//
+// es_options::fitness replaces reach with any score of a policy's Jolt runs (score_on_plant):
+// each iteration then scores the start policy on the same seeds too, and the fitness reads both,
+// so it can hold the start's reach. es_energy_at_held_reach is the P8c one: the fleet's measured
+// Wh/km, lower is better, with every point of reach lost against the start charged at a price.
 
 #ifndef __CVC_PHYSICS_NAV_ES_H__
 #define __CVC_PHYSICS_NAV_ES_H__
@@ -41,10 +46,20 @@
 #include <cvc/physics/nav_eval.h>
 #include <cvc/physics/vehicle.h>
 #include <functional>
+#include <limits>
 #include <vector>
 
 namespace cvc {
 namespace physics {
+
+// A policy's fitness from its scores on a set of seeds and the start policy's on the same seeds;
+// higher is better.
+using es_fitness =
+    std::function<double(const plant_drive_score &policy, const plant_drive_score &start)>;
+
+// The P8c fitness: -(Wh/km) - price x max(0, points of reach lost against the start - slack).
+// `price` is in Wh/km per point of reach (100 points = all of it).
+es_fitness es_energy_at_held_reach(double price_wh_per_km_per_point, double slack_points = 0.0);
 
 struct es_options {
   int iterations = 40;
@@ -61,12 +76,16 @@ struct es_options {
   int tail = 0;
   unsigned noise_seed = 0;
   plant_reach_options reach; // agents, ticks, threads, ...; its `seeds` are the validation seeds
+  es_fitness fitness;        // empty: reach_on_plant's reach
 };
 
 struct es_iteration {
   int iteration;          // updates taken so far (0 = the start)
-  double population_mean; // the mean reach of this update's 2 x pairs policies (NaN at 0)
-  double validation;      // the centre's reach on reach.seeds after it (NaN when not scored)
+  double population_mean; // the mean fitness of this update's 2 x pairs policies (NaN at 0)
+  double validation;      // the centre's fitness on reach.seeds after it (NaN when not scored)
+  // The centre's reach and Wh/km on reach.seeds when it was validated with a fitness (NaN else).
+  double validation_reach = std::numeric_limits<double>::quiet_NaN();
+  double validation_wh_per_km = std::numeric_limits<double>::quiet_NaN();
 };
 
 struct es_result {

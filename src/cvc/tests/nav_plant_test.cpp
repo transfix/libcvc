@@ -1404,6 +1404,127 @@ TEST(NavPlant, EsFinetuneOnPlantMechanics) {
   std::printf("  ES mechanics: validation %.3f -> %.3f -> %.3f, best at %d\n",
               a.trace[0].validation, a.trace[1].validation, a.trace[2].validation,
               a.best_iteration);
+
+  // With a fitness (P8c): the energy at held reach. The start's validation is minus its own
+  // Wh/km (it loses no reach against itself), each validated centre carries its reach and Wh/km,
+  // and a rerun repeats it.
+  o.fitness = es_energy_at_held_reach(0.1, 1.0);
+  const es_result c = es_finetune_on_plant(p, sc, rr, kCityL, o);
+  std::vector<plant_drive_score> ps = score_on_plant({p}, sc, rr, kCityL, few);
+  ASSERT_EQ(c.trace.size(), 3u);
+  EXPECT_DOUBLE_EQ(c.trace[0].validation, -ps[0].wh_per_km());
+  EXPECT_DOUBLE_EQ(c.trace[0].validation_reach, ps[0].reach);
+  EXPECT_GE(c.best_validation, c.trace[0].validation);
+  for (int i = 1; i <= 2; ++i) {
+    EXPECT_TRUE(std::isfinite(c.trace[i].validation_wh_per_km));
+    EXPECT_LE(c.trace[i].validation, -c.trace[i].validation_wh_per_km + 1e-12);
+  }
+  const es_result e = es_finetune_on_plant(p, sc, rr, kCityL, o);
+  EXPECT_EQ(e.best.export_flat().data, c.best.export_flat().data);
+  // The fitness itself: Wh/km, and the price of reach lost past the slack.
+  plant_drive_score x, ref;
+  x.energy_J = 3600.0;
+  x.distance_m = 1000.0; // 1 Wh/km
+  ref.reach = 0.50;
+  x.reach = 0.45; // 5 points lost, 4 past the slack
+  EXPECT_NEAR(es_energy_at_held_reach(0.1, 1.0)(x, ref), -1.0 - 0.4, 1e-12);
+  x.reach = 0.6;
+  EXPECT_NEAR(es_energy_at_held_reach(0.1, 1.0)(x, ref), -1.0, 1e-12);
+  EXPECT_THROW(es_energy_at_held_reach(-1.0), std::invalid_argument);
+}
+
+// P8c's gate by ES on Jolt itself: the energy no differentiable model has priced (most of the
+// trained policies' extra draw is tire slip in contacts, docs/NAV_TRAINING.md), climbed on the
+// plant's own measured Wh/km at held reach (es_energy_at_held_reach). The start is the P8b gate's
+// dynamic-trained policy (lr 5e-5, 150 steps, no energy term), which reaches about what the
+// untrained seed does. Its fine-tune validates on 16 seeds (200..215) and is judged against the
+// start on the gate's 20 held-out seeds, with paired-bootstrap CIs. P8C_ES_ITERS (30),
+// P8C_ES_PAIRS (12), P8C_ES_SIGMA (0.02), P8C_ES_LR (0.005), P8C_ES_TAIL (0: every weight),
+// P8C_ES_PRICE (Wh/km per point of reach, 0.1) and P8C_ES_SLACK (points, 1) override it.
+TEST(NavPlantConvergence, EsEnergyAtHeldReachOnJolt) {
+  REQUIRE_JOLT();
+  const cvc::nav::training_scene sc = cvc::nav::city_scene(96);
+  const vehicle_desc rr = vehicle_desc::roboracer();
+  const auto env = [](const char *k, double v) {
+    const char *e = std::getenv(k);
+    return e ? std::atof(e) : v;
+  };
+  cvc::nav::train_config base;
+  base.n = 128;
+  base.hidden = 64;
+  base.horizon = 28;
+  base.window = 7;
+  base.steps = 150;
+  base.seed = 0;
+  base.lr = 5e-5f;
+  base.rollout = cvc::nav::rollout_kind::dynamic;
+  base.dyn = nav_plant::dyn_bike_params_at(rr, base.veh_L);
+  cvc::nav::coef_trainer tr(base, 1);
+  tr.train(sc);
+  const cvc::nav::coef_mlp start = tr.to_coef_mlp();
+
+  es_options o;
+  o.iterations = static_cast<int>(env("P8C_ES_ITERS", 30));
+  o.pairs = static_cast<int>(env("P8C_ES_PAIRS", 12));
+  o.sigma = static_cast<float>(env("P8C_ES_SIGMA", 0.02));
+  o.lr = static_cast<float>(env("P8C_ES_LR", 0.005));
+  o.tail = static_cast<int>(env("P8C_ES_TAIL", 0));
+  o.train_seeds = 4;
+  o.validate_every = 5;
+  o.reach.seeds.clear();
+  for (unsigned k = 0; k < 16; ++k)
+    o.reach.seeds.push_back(200u + k);
+  const double price = env("P8C_ES_PRICE", 0.1), slack = env("P8C_ES_SLACK", 1.0);
+  o.fitness = es_energy_at_held_reach(price, slack);
+  const es_result r = es_finetune_on_plant(start, sc, rr, kCityL, o, [](const es_iteration &t) {
+    if (std::isfinite(t.validation))
+      std::printf("    ES %3d: population %+.3f, validation %+.3f (reach %.3f, %.2f Wh/km)\n",
+                  t.iteration, t.population_mean, t.validation, t.validation_reach,
+                  t.validation_wh_per_km);
+    else
+      std::printf("    ES %3d: population %+.3f\n", t.iteration, t.population_mean);
+    std::fflush(stdout);
+  });
+
+  const plant_reach_options eval; // the gate's 20 held-out seeds
+  std::vector<std::vector<plant_drive_score>> per;
+  const std::vector<plant_drive_score> m = score_on_plant(
+      {start, r.best, cvc::nav::coef_mlp::default_biased()}, sc, rr, kCityL, eval, &per);
+  const std::size_t ns = eval.seeds.size();
+  std::vector<double> d_reach(ns), d_whkm(ns);
+  for (std::size_t s = 0; s < ns; ++s) {
+    d_reach[s] = per[1][s].reach - per[0][s].reach;
+    d_whkm[s] = per[1][s].wh_per_km() - per[0][s].wh_per_km();
+  }
+  double rlo, rhi, wlo, whi;
+  paired_ci(d_reach, rlo, rhi);
+  paired_ci(d_whkm, wlo, whi);
+  std::printf("  P8c by ES on Jolt (%d iterations x %d pairs, sigma %.3f, lr %.3f, tail %d; price "
+              "%.2f Wh/km a point past %.1f), best at %d:\n"
+              "    the start (dynamic-trained): reach %.1f%%, %.2f Wh/km (%.0f m a seed)\n"
+              "    fine-tuned:                  reach %.1f%%, %.2f Wh/km (%.0f m a seed)\n"
+              "    the untrained seed:          reach %.1f%%, %.2f Wh/km (%.0f m a seed)\n"
+              "    fine-tuned - start: reach %+.1f points [%+.1f, %+.1f], %+.2f Wh/km [%+.2f, "
+              "%+.2f]\n",
+              o.iterations, o.pairs, o.sigma, o.lr, o.tail, price, slack, r.best_iteration,
+              100 * m[0].reach, m[0].wh_per_km(), m[0].distance_m, 100 * m[1].reach,
+              m[1].wh_per_km(), m[1].distance_m, 100 * m[2].reach, m[2].wh_per_km(),
+              m[2].distance_m, 100 * (m[1].reach - m[0].reach), 100 * rlo, 100 * rhi,
+              m[1].wh_per_km() - m[0].wh_per_km(), wlo, whi);
+  const char *names[3] = {"start", "tuned", "seed"};
+  for (int k = 0; k < 3; ++k) {
+    const vehicle_energy &e = m[k].ledger;
+    const double perkm = 1.0 / 3600.0 / (m[k].distance_m / 1000.0);
+    std::printf("    ledger %-5s Wh/km: engine %.2f | brake %.2f tire %.2f drivetrain %.2f aero "
+                "%.2f rolling %.2f | regen %.2f\n",
+                names[k], e.engine * perkm, e.brake * perkm, e.tire * perkm, e.drivetrain * perkm,
+                e.aero * perkm, e.rolling * perkm, e.regen * perkm);
+  }
+  for (std::size_t s = 0; s < ns; ++s)
+    std::printf("    seed %zu: reach %.3f %.3f %.3f, Wh/km %.2f %.2f %.2f\n", 100 + s,
+                per[0][s].reach, per[1][s].reach, per[2][s].reach, per[0][s].wh_per_km(),
+                per[1][s].wh_per_km(), per[2][s].wh_per_km());
+  EXPECT_GE(r.best_validation, r.trace[0].validation);
 }
 
 // The zeroth-order fine-tune on Jolt reach (P8b): the dynamic-trained policy at its selected
