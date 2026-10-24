@@ -45,12 +45,20 @@ namespace {
 #ifdef _WIN32
 // The cvcpkg ImageMagick bundle is EXTRACTED from the official installer, not
 // installed, so its module + config paths are absent from the registry and
-// ImageMagick reports "no decode delegate" for every read. Point it at our layout
-// relative to the loaded libcvc DLL (which sits in the same <prefix>\bin as the
-// ImageMagick DLLs): <prefix>\bin holds the CORE_RL_* libs AND the coder/filter
-// modules FLAT — a coder resolves its own CORE_RL_* deps in its directory, so the
-// modules must sit beside them — and <prefix>\share\imagemagick holds the .xml
-// config. Only set what the environment has not already overridden (a user wins).
+// ImageMagick reports "no decode delegate" for every read, after a
+// RegistryKeyLookupFailed `CoderModulesPath'. Point it at the bundle's layout:
+// <prefix>\bin holds the CORE_RL_* libs AND the coder/filter modules FLAT — a
+// coder resolves its own CORE_RL_* deps in its directory, so the modules must
+// sit beside them — and <prefix>\share\imagemagick holds the .xml config. Only
+// set what the environment has not already overridden (a user wins).
+//
+// Setting the variables from inside the process is enough: MagickCore reads
+// them with GetEnvironmentVariableW, from the OS environment block, each time it
+// opens a module, and _putenv_s writes that block as well as the CRT's copy.
+// What failed before was Magick being reached without this running at all, or
+// this running without finding the bundle; magick_bootstrap_test checks the
+// lookup with none of the variables set.
+
 // The directory a loaded module's file is in; empty if it cannot be found.
 std::string module_dir(HMODULE h) {
   if (!h)
@@ -73,55 +81,77 @@ HMODULE module_at(const void *addr) {
   return h;
 }
 
+// The directory `dir` is in; empty above a drive root.
+std::string parent_dir(const std::string &dir) {
+  const auto slash = dir.find_last_of("\\/");
+  return slash == std::string::npos ? std::string() : dir.substr(0, slash);
+}
+
+// Whether `dir` holds a file matching `pattern`.
+bool has_file(const std::string &dir, const char *pattern) {
+  WIN32_FIND_DATAA d;
+  HANDLE h = FindFirstFileA((dir + "\\" + pattern).c_str(), &d);
+  if (h == INVALID_HANDLE_VALUE)
+    return false;
+  FindClose(h);
+  return true;
+}
+
 void set_magick_paths_win() {
   const std::string dllDir =
       module_dir(module_at(reinterpret_cast<const void *>(&set_magick_paths_win)));
-  if (dllDir.empty())
-    return;
-  // Search order: DLL's own directory (normal case: <prefix>\bin); then the
-  // directory the ImageMagick DLL itself was loaded from, since the coders sit
-  // beside it (a dev build's cvc.dll is in build\bin while ImageMagick comes
-  // from the deps prefix on PATH); then <prefix>\bin from the DLL's parent (in
-  // case cvc.dll got copied to build\bin\Release\ for CTest while the real
-  // coders live in deps\bin); then any CVC_DEPS_PREFIX\bin the environment
-  // names. Pick the first that contains at least one IM_MOD_RL_*.dll — an empty
-  // dir here becomes a Magick with no coders, not even xc: or MIFF.
-  auto has_coder = [](const std::string &dir) -> bool {
-    WIN32_FIND_DATAA d;
-    HANDLE h = FindFirstFileA((dir + "\\IM_MOD_RL_*.dll").c_str(), &d);
-    if (h == INVALID_HANDLE_VALUE)
-      return false;
-    FindClose(h);
-    return true;
-  };
-  std::vector<std::string> cand{dllDir};
-  // The ImageMagick DLL by its name in the cvcpkg bundle (the official Windows
-  // build's), then by the address of one of its functions, for other builds.
-  // When that address is an import thunk in cvc.dll it names dllDir again.
+  // Where the coders may be, in order; the first directory holding at least one
+  // IM_MOD_RL_*.dll wins.
+  std::vector<std::string> cand;
+  // 1. Beside libcvc: an installed prefix keeps cvc.dll in <prefix>\bin too.
+  if (!dllDir.empty())
+    cand.push_back(dllDir);
+  // 2. Beside the ImageMagick DLL actually loaded, whose coders they must be: a
+  //    dev build's cvc.dll is in build\bin while ImageMagick comes from the deps
+  //    prefix on PATH. By its name in the cvcpkg bundle (the official Windows
+  //    build's), then by the address of one of its functions, for other builds.
+  //    When that address is an import thunk in cvc.dll it names dllDir again.
   for (const std::string &d :
        {module_dir(GetModuleHandleA("CORE_RL_MagickCore_.dll")),
         module_dir(module_at(reinterpret_cast<const void *>(&MagickCore::GetMagickVersion)))})
     if (!d.empty())
       cand.push_back(d);
-  // If dllDir is <something>\build\bin\Release, walk up to try <something>\bin.
-  cand.push_back(dllDir + "\\..\\..\\..\\..\\deps\\bin");
-  for (const char *var : {"CVC_DEPS_PREFIX", "LIBCVC_DEPS_PREFIX", "CVCPKG_PREFIX"})
-    if (const char *dp = std::getenv(var))
+  // 3. A deps prefix the environment names.
+  for (const char *var : {"CVC_DEPS_PREFIX", "LIBCVC_DEPS_PREFIX", "CVCPKG_PREFIX"}) {
+    const char *dp = std::getenv(var);
+    if (dp && *dp)
       cand.push_back(std::string(dp) + "\\bin");
-  std::string bindir = dllDir; // fallback
+  }
+  // 4. A build tree beside its deps prefix: <root>\deps next to
+  //    <root>\build-X\bin\cvc.dll, or <root>\build-X\bin\Release\cvc.dll.
+  std::string up = parent_dir(dllDir);
+  for (int i = 0; i < 4 && !up.empty(); ++i, up = parent_dir(up))
+    cand.push_back(up + "\\deps\\bin");
+  std::string bindir;
   for (const auto &c : cand)
-    if (has_coder(c)) {
+    if (has_file(c, "IM_MOD_RL_*.dll")) {
       bindir = c;
       break;
     }
-  const std::string share = bindir + "\\..\\share\\imagemagick";
+  // None: leave the environment alone, so an ImageMagick that IS installed still
+  // finds its modules through the registry.
+  if (bindir.empty())
+    return;
+  // Test the OS environment block, the one MagickCore reads.
   auto set_if_absent = [](const char *k, const std::string &v) {
-    if (!std::getenv(k))
+    if (GetEnvironmentVariableA(k, nullptr, 0) == 0)
       _putenv_s(k, v.c_str());
   };
-  set_if_absent("MAGICK_CONFIGURE_PATH", share);
   set_if_absent("MAGICK_CODER_MODULE_PATH", bindir);
   set_if_absent("MAGICK_FILTER_MODULE_PATH", bindir);
+  // The config: <prefix>\share\imagemagick, for <prefix>\bin and <prefix>\debug\bin.
+  const std::string prefix = parent_dir(bindir);
+  for (const std::string &share :
+       {prefix + "\\share\\imagemagick", parent_dir(prefix) + "\\share\\imagemagick"})
+    if (has_file(share, "*.xml")) {
+      set_if_absent("MAGICK_CONFIGURE_PATH", share);
+      break;
+    }
 }
 #endif
 

@@ -118,12 +118,15 @@ struct material_drive; // defined in material.h; drive_potential takes it by poi
 // input layout: base 5, then grip (if ``grip``), then risk (if ``risk``). Null risk => the
 // column is not written and the stride is unchanged. ``slope`` (terrain's grade-cost plane,
 // P5 H3) appends the worst grade cost ahead, the same probe on channel 0, after risk.
+// ``terrain_risk`` (the terrain's grade-cost plane) is material risk too: the risk column reads
+// the worse of the two at each probe point, and with ``risk`` null the terrain's alone. Null (the
+// default) leaves the risk column exactly as before.
 void coef_feats(const field_stack &f, const float *on, const float *goal, int n, const int *map_id,
                 float *feat_out, int num_threads = 0, const friction_field *grip = nullptr,
                 float mu_lookahead = 0.3f, int mu_probes = 3, const material_stack *risk = nullptr,
                 float risk_lookahead = 0.3f, int risk_probes = 3, thread_pool *pool = nullptr,
                 const material_stack *slope = nullptr, float slope_lookahead = 0.3f,
-                int slope_probes = 3);
+                int slope_probes = 3, const material_stack *terrain_risk = nullptr);
 
 // The drive's PLANT ARM (P4, cvc/nav/vehicle_plant.h). With veh_params::plant set, the drive
 // computes each agent's command for the tick and writes it here instead of integrating: o, th

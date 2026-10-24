@@ -513,6 +513,7 @@ TEST(NavStats, DriveTelemetryReduction) {
   EXPECT_EQ(v.binding_steps, 2);
 
   const std::string ej = e0.to_json();
+  EXPECT_NE(ej.find("\"binding_stopped_steps\":0"), std::string::npos); // it moved every tick
   EXPECT_NE(ej.find("\"alpha_mean\":"), std::string::npos);
   EXPECT_NE(ej.find("\"mu_min\":"), std::string::npos);
   EXPECT_NE(ej.find("\"binding_steps\":2"), std::string::npos);
@@ -528,6 +529,60 @@ TEST(NavStats, DriveTelemetryReduction) {
   const std::string sj = s.to_json();
   EXPECT_NE(sj.find("\"mean_alpha\":"), std::string::npos);
   EXPECT_NE(sj.find("\"mean_mu\":"), std::string::npos);
+}
+
+// The rest of drive_telemetry in the ledger: the material weights and the curvature (means, and the
+// curvature's peak), and the ticks the barrier bound while the vehicle stood still -- pinned, the
+// way a vehicle sits when its route sends it on into what nav's barrier takes for a wall.
+TEST(NavStats, DriveTelemetryWeightsCurvatureAndPinned) {
+  nav_stats_collector c;
+  const float start[2] = {0, 0};
+  const float goal[2] = {10, 0};
+  c.begin_episode(1, 1.0, start, goal);
+  const float head[1] = {0};
+  const std::uint8_t rch[1] = {0};
+  const int mode[1] = {0};
+  // lam_soft .5,.25,.75,.5 | lam_hard 1,2,3,2 | curvature .25,-.5,0,.25 | binding 1,1,0,1 |
+  // speed 1,0,0,.05: pinned on ticks 2 and 4 (bound, under speed_eps_mps 0.1); tick 3 is still but
+  // free, tick 1 bound but moving
+  const float lsoft[4] = {0.5f, 0.25f, 0.75f, 0.5f}, lhard[4] = {1, 2, 3, 2};
+  const float curv[4] = {0.25f, -0.5f, 0, 0.25f}, speed[4] = {1, 0, 0, 0.05f};
+  const std::uint8_t bind[4] = {1, 1, 0, 1};
+  drive_sample cur;
+  nav_samplers smp;
+  smp.drive = &cur;
+  float x = 0;
+  for (int s = 0; s < 4; ++s) {
+    cur = drive_sample{};
+    cur.lam_soft = lsoft[s];
+    cur.lam_hard = lhard[s];
+    cur.curvature = curv[s];
+    cur.binding = bind[s];
+    x += speed[s];
+    const float pos[2] = {x, 0};
+    const float spd[1] = {speed[s]};
+    c.step(pos, head, spd, mode, rch, smp);
+  }
+  const episode_nav_stats e = c.finish();
+  const veh_nav_stats &v = e.per_vehicle[0];
+  EXPECT_EQ(v.drive_steps, 4);
+  EXPECT_DOUBLE_EQ(v.lam_soft_mean, 0.5);       // (.5+.25+.75+.5)/4
+  EXPECT_DOUBLE_EQ(v.lam_hard_mean, 2.0);       // (1+2+3+2)/4
+  EXPECT_DOUBLE_EQ(v.curvature_abs_mean, 0.25); // (.25+.5+0+.25)/4
+  EXPECT_DOUBLE_EQ(v.curvature_abs_max, 0.5);
+  EXPECT_EQ(v.binding_steps, 3);
+  EXPECT_EQ(v.binding_stopped_steps, 2);
+  const std::string ej = e.to_json();
+  EXPECT_NE(ej.find("\"lam_hard_mean\":2"), std::string::npos);
+  EXPECT_NE(ej.find("\"curvature_abs_max\":0.5"), std::string::npos);
+  EXPECT_NE(ej.find("\"binding_stopped_steps\":2"), std::string::npos);
+
+  const nav_scorecard s = aggregate_nav({e}, "ckpt-P");
+  EXPECT_DOUBLE_EQ(s.mean_lam_soft, 0.5);
+  EXPECT_DOUBLE_EQ(s.mean_lam_hard, 2.0);
+  EXPECT_DOUBLE_EQ(s.mean_curvature_abs, 0.25);
+  EXPECT_DOUBLE_EQ(s.mean_binding_stopped_share, 0.5); // 2 of 4 ticks
+  EXPECT_NE(s.to_json().find("\"mean_binding_stopped_share\":0.5"), std::string::npos);
 }
 
 // finish() is a running snapshot (cvcGL publish_nav_stats, sim_world::nav_stats() and downstream
@@ -585,6 +640,11 @@ void expect_same_vehicle(const veh_nav_stats &a, const veh_nav_stats &b) {
   EXPECT_EQ(a.steer_abs_mean, b.steer_abs_mean);
   EXPECT_EQ(a.steer_abs_max, b.steer_abs_max);
   EXPECT_EQ(a.binding_steps, b.binding_steps);
+  EXPECT_EQ(a.lam_soft_mean, b.lam_soft_mean);
+  EXPECT_EQ(a.lam_hard_mean, b.lam_hard_mean);
+  EXPECT_EQ(a.curvature_abs_mean, b.curvature_abs_mean);
+  EXPECT_EQ(a.curvature_abs_max, b.curvature_abs_max);
+  EXPECT_EQ(a.binding_stopped_steps, b.binding_stopped_steps);
   EXPECT_EQ(a.plant_tracked, b.plant_tracked);
   EXPECT_EQ(a.plant_steps, b.plant_steps);
   EXPECT_EQ(a.rolled_over, b.rolled_over);
@@ -890,5 +950,5 @@ TEST(NavStats, PlantLedgerUntrackedLeavesTheJsonUnchanged) {
   const std::string sj = aggregate_nav({off}).to_json();
   EXPECT_EQ(sj.find("plant_runs"), std::string::npos);
   EXPECT_EQ(sj.find("rollover_rate"), std::string::npos);
-  EXPECT_NE(sj.find("\"mean_ext_force\":0}"), std::string::npos) << sj;
+  EXPECT_NE(sj.find("\"mean_binding_stopped_share\":0}"), std::string::npos) << sj;
 }
