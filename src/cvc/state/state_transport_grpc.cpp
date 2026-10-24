@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio> // the write watchdog's report
 #include <cvc/state/state_cluster_shard.h>
 #include <cvc/state/state_message_bus.h>
 #include <cvc/state/state_transport_grpc.h>
@@ -237,6 +238,14 @@ public:
   bool accepted = false;
   std::int64_t opened_ns = 0;
   std::atomic<std::int64_t> last_rx_ns{0};
+  // Steady-clock ns when the write in progress started; 0 when none is. A peer that stops reading
+  // makes a stream Write block on flow control while holding write_mu, so every other writer to it
+  // would wait forever; the probe thread's watchdog cancels a stream whose write has been blocked
+  // too long (state_transport_grpc::ping_loop). `cancel` cancels the stream; the server handler
+  // clears it (under cancel_mu) before its ServerContext goes away.
+  std::atomic<std::int64_t> write_started_ns{0};
+  std::mutex cancel_mu;
+  std::function<void()> cancel;
 
   bool can_write() const { return static_cast<bool>(write_raw); }
 
@@ -244,10 +253,27 @@ public:
     if (!alive.load() || !write_raw)
       return false;
     const std::size_t bytes = f.ByteSizeLong();
-    if (!write_raw(f))
+    write_started_ns.store(link_now_ns(), std::memory_order_relaxed);
+    const bool ok = write_raw(f);
+    write_started_ns.store(0, std::memory_order_relaxed);
+    if (!ok)
       return false;
     link.note_tx(bytes);
     return true;
+  }
+
+  // Write only if no other write holds the stream right now (the link probe never waits).
+  bool try_write(const pb::Frame &f) {
+    std::unique_lock<std::mutex> lk(write_mu, std::try_to_lock);
+    return lk.owns_lock() && write_locked(f);
+  }
+
+  // Cancel the stream: a blocked Write fails and frees write_mu (the write watchdog).
+  void abort_io() {
+    alive.store(false);
+    std::lock_guard<std::mutex> lk(cancel_mu);
+    if (cancel)
+      cancel();
   }
 
   bool write(const pb::Frame &f) {
@@ -291,6 +317,7 @@ public:
     conn->accepted = true;
     conn->opened_ns = link_now_ns();
     conn->last_rx_ns.store(conn->opened_ns);
+    conn->cancel = [ctx] { ctx->TryCancel(); };
     auto *raw_stream = stream;
     conn->write_raw = [raw_stream](const pb::Frame &f) -> bool { return raw_stream->Write(f); };
 
@@ -354,6 +381,10 @@ public:
     }
 
     conn->alive.store(false);
+    {
+      std::lock_guard<std::mutex> lk(conn->cancel_mu);
+      conn->cancel = nullptr; // ctx dies with this handler
+    }
     _owner->unregister_connection(conn.get());
     _owner->notify_connection_closed(conn->remote_node_id);
     return grpc::Status::OK;
@@ -500,6 +531,10 @@ bool state_transport_grpc::connect_to_peer(const std::string &target,
   // joinable std::thread to destruct.
   conn->opened_ns = link_now_ns();
   conn->last_rx_ns.store(conn->opened_ns);
+  conn->cancel = [ctx = conn->client_ctx] {
+    if (ctx)
+      ctx->TryCancel();
+  };
   conn->client_reader = std::thread([this, conn]() {
     pb::Frame in;
     while (conn->alive.load() && conn->client_stream->Read(&in)) {
@@ -1083,15 +1118,31 @@ void state_transport_grpc::send_pings() {
     pb::Frame f;
     f.mutable_ping()->set_seq(c->link.next_ping_seq());
     f.mutable_ping()->set_sent_ns(link_now_ns());
-    if (c->write(f))
+    if (c->try_write(f))
       _sent_frames.fetch_add(1, std::memory_order_relaxed);
   }
 }
 
 void state_transport_grpc::ping_loop() {
+  // How long one write may block before its stream is cancelled (connection::write_started_ns).
+  constexpr std::int64_t kWriteStallNs = 3'000'000'000;
   auto next = std::chrono::steady_clock::now();
   while (_running.load()) {
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    std::vector<std::shared_ptr<connection>> conns;
+    {
+      std::lock_guard<std::mutex> lk(_conns_mu);
+      conns = _conns;
+    }
+    const std::int64_t now = link_now_ns();
+    for (auto &c : conns) {
+      const std::int64_t started = c ? c->write_started_ns.load(std::memory_order_relaxed) : 0;
+      if (started != 0 && now - started > kWriteStallNs && c->alive.load()) {
+        std::fprintf(stderr, "[grpc] write to '%s' blocked > 3 s (peer not reading): closing\n",
+                     c->remote_node_id.c_str());
+        c->abort_io();
+      }
+    }
     const auto interval = ping_interval();
     if (interval.count() <= 0 || std::chrono::steady_clock::now() < next)
       continue;

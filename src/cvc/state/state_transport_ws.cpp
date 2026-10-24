@@ -241,6 +241,12 @@ public:
   state_link_stats link;
   bool accepted = false;
   std::int64_t opened_ns = 0;
+  // Steady-clock ns when the write in progress started; 0 when none is. A peer that stops reading
+  // (a frozen tab, a dead network) makes a write block once its TCP buffer is full -- while holding
+  // write_mu, so every other writer to it (the relay's main loop included) would wait forever. The
+  // probe thread's watchdog closes a connection whose write has been blocked too long, which fails
+  // the write and frees the lock (state_transport_ws::ping_loop).
+  std::atomic<std::int64_t> write_started_ns{0};
 
 #ifndef __EMSCRIPTEN__
   std::unique_ptr<websocket::stream<tcp::socket>> ws;
@@ -258,13 +264,27 @@ public:
       return false;
     beast::error_code ec;
     ws->binary(true);
+    write_started_ns.store(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                               std::chrono::steady_clock::now().time_since_epoch())
+                               .count(),
+                           std::memory_order_relaxed);
     ws->write(net::buffer(bytes), ec);
+    write_started_ns.store(0, std::memory_order_relaxed);
     if (ec) {
       alive.store(false);
       return false;
     }
     link.note_tx(bytes.size());
     return true;
+  }
+
+  // Unblock any read or write in progress and mark the connection dead (the write watchdog).
+  void abort_io() {
+    alive.store(false);
+    if (ws) {
+      beast::error_code ec;
+      ws->next_layer().shutdown(tcp::socket::shutdown_both, ec);
+    }
   }
 #else
   // Browser WebSocket: the handle, a back-pointer to the owning transport (for the C callbacks),
@@ -293,6 +313,12 @@ public:
   bool write(const pb::Frame &f) {
     std::lock_guard<std::mutex> lk(write_mu);
     return write_locked(f);
+  }
+
+  // Write only if no other write holds the connection right now (the link probe never waits).
+  bool try_write(const pb::Frame &f) {
+    std::unique_lock<std::mutex> lk(write_mu, std::try_to_lock);
+    return lk.owns_lock() && write_locked(f);
   }
 
   // Bytes still unsent in this connection's OS send buffer (Linux only; 0 elsewhere). A large value
@@ -1146,21 +1172,38 @@ void state_transport_ws::send_pings_if_due() {
   for (auto &c : conns) {
     // Skip a connection that cannot send yet, and one whose send buffer is badly backed up (the
     // write would block the prober behind it; its RTT would only measure the backlog anyway).
-    if (!c || !c->alive.load() || !c->can_write() || c->send_backlog() > (1u << 20))
+    if (!c || !c->alive.load() || !c->can_write() || c->send_backlog() > (64u << 10))
       continue;
     pb::Frame f;
     f.mutable_ping()->set_seq(c->link.next_ping_seq());
     f.mutable_ping()->set_sent_ns(steady_ns());
-    if (c->write(f))
+    if (c->try_write(f))
       _sent_frames.fetch_add(1, std::memory_order_relaxed);
   }
 }
 
 void state_transport_ws::ping_loop() {
 #ifndef __EMSCRIPTEN__
+  // How long one write may block before its connection is closed (see
+  // connection::write_started_ns).
+  constexpr std::int64_t kWriteStallNs = 3'000'000'000;
   while (_running.load()) {
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     send_pings_if_due();
+    std::vector<std::shared_ptr<connection>> conns;
+    {
+      std::lock_guard<std::mutex> lk(_conns_mu);
+      conns = _conns;
+    }
+    const std::int64_t now = steady_ns();
+    for (auto &c : conns) {
+      const std::int64_t started = c ? c->write_started_ns.load(std::memory_order_relaxed) : 0;
+      if (started != 0 && now - started > kWriteStallNs && c->alive.load()) {
+        std::fprintf(stderr, "[ws] write to '%s' blocked > 3 s (peer not reading): closing\n",
+                     c->remote_node_id.c_str());
+        c->abort_io();
+      }
+    }
   }
 #endif
 }

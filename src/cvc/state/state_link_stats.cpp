@@ -13,6 +13,7 @@
   Lesser General Public License for more details.
 */
 
+#include <algorithm>
 #include <cvc/state/state_link_stats.h>
 
 namespace cvc {
@@ -41,12 +42,11 @@ void state_link_stats::note_rtt(std::int64_t rtt_ns) noexcept {
   while ((mn < 0 || us < mn) &&
          !_rtt_min_us.compare_exchange_weak(mn, us, std::memory_order_relaxed)) {
   }
-  // EWMA with alpha 1/4; the first sample seeds it.
-  std::int64_t avg = _rtt_ewma_us.load(std::memory_order_relaxed);
-  std::int64_t next;
-  do {
-    next = avg < 0 ? us : avg + (us - avg) / 4;
-  } while (!_rtt_ewma_us.compare_exchange_weak(avg, next, std::memory_order_relaxed));
+  std::lock_guard<std::mutex> lk(_rtt_mu);
+  _rtt_ring[_rtt_next] = us;
+  _rtt_next = (_rtt_next + 1) % kRttWindow;
+  if (_rtt_count < kRttWindow)
+    ++_rtt_count;
 }
 
 state_link_stats::counters state_link_stats::read() const noexcept {
@@ -58,7 +58,16 @@ state_link_stats::counters state_link_stats::read() const noexcept {
   c.pings_sent = _pings.load(std::memory_order_relaxed);
   c.pongs_received = _pongs.load(std::memory_order_relaxed);
   const auto ms = [](std::int64_t us) { return us < 0 ? -1.0 : static_cast<double>(us) / 1000.0; };
-  c.rtt_ms = ms(_rtt_ewma_us.load(std::memory_order_relaxed));
+  {
+    std::lock_guard<std::mutex> lk(_rtt_mu);
+    if (_rtt_count > 0) {
+      std::array<std::int64_t, kRttWindow> w = _rtt_ring;
+      std::sort(w.begin(), w.begin() + _rtt_count);
+      const int n = _rtt_count;
+      const std::int64_t med = (n % 2) ? w[n / 2] : (w[n / 2 - 1] + w[n / 2]) / 2;
+      c.rtt_ms = ms(med);
+    }
+  }
   c.rtt_last_ms = ms(_rtt_last_us.load(std::memory_order_relaxed));
   c.rtt_min_ms = ms(_rtt_min_us.load(std::memory_order_relaxed));
   return c;

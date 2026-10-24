@@ -16,10 +16,12 @@
 #ifndef __CVC_STATE_LINK_STATS_H__
 #define __CVC_STATE_LINK_STATS_H__
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <cvc/core/namespace.h>
 #include <map>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -35,9 +37,10 @@ namespace cvc {
 // measured the same way. Counters are lock-free: the reader thread notes inbound bytes, any writer
 // notes outbound bytes, and the pinger notes round trips concurrently.
 //
-// RTT: rtt_ms is an exponentially weighted moving average (alpha 1/4) of the measured round trips,
-// so one slow probe does not swing it; last and min are kept beside it. All negative until the
-// first Pong.
+// RTT: rtt_ms is the MEDIAN of the last kRttWindow round trips, so a one-off stall (a probe that
+// waited while a browser tab was frozen) does not distort it for long -- an average would carry a
+// multi-second outlier for dozens of probes. Last and min are kept beside it. All negative until
+// the first Pong.
 class state_link_stats {
 public:
   void note_rx(std::size_t bytes) noexcept;
@@ -55,12 +58,17 @@ public:
   };
   counters read() const noexcept;
 
+  static constexpr int kRttWindow = 8;
+
 private:
   std::atomic<std::uint64_t> _bytes_in{0}, _bytes_out{0};
   std::atomic<std::uint64_t> _frames_in{0}, _frames_out{0};
   std::atomic<std::uint64_t> _pings{0}, _pongs{0};
-  // RTTs in microseconds (atomic integers; -1 = none yet).
-  std::atomic<std::int64_t> _rtt_ewma_us{-1}, _rtt_last_us{-1}, _rtt_min_us{-1};
+  // RTTs in microseconds (-1 = none yet): the recent window (ring) for the median, last, and min.
+  mutable std::mutex _rtt_mu;
+  std::array<std::int64_t, kRttWindow> _rtt_ring{};
+  int _rtt_count = 0, _rtt_next = 0;
+  std::atomic<std::int64_t> _rtt_last_us{-1}, _rtt_min_us{-1};
 };
 
 // One link as a transport reports it (state_transport::link_reports()).

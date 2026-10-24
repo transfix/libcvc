@@ -13,6 +13,10 @@
 // (the browser topology — clients that dial without a local acceptor, as a wasm peer will).
 
 #include <atomic>
+#include <boost/asio/connect.hpp>
+#include <boost/asio/ip/tcp.hpp>
+#include <boost/beast/core.hpp>
+#include <boost/beast/websocket.hpp>
 #include <chrono>
 #include <cvc/core/app.h>
 #include <cvc/media/media_router.h>
@@ -360,6 +364,52 @@ TEST(StateTransportWsTest, QuietClientAnsweringPingsIsNotReaped) {
   EXPECT_EQ(reaped.load(), 0) << "a client answering Pings is not a ghost";
   EXPECT_EQ(S.connection_count(), 1u);
   tA.stop();
+  S.stop();
+}
+
+// A peer that stops reading (a frozen browser tab, a dead network) must not hang the relay: a write
+// to it blocks once its TCP buffers fill, holding the connection's write lock, so without the write
+// watchdog every later writer to it -- the relay's main loop included -- waits forever (seen in
+// production). The watchdog closes a connection whose write has been blocked > 3 s: the write
+// returns and the connection is gone.
+TEST(StateTransportWsTest, WriteToAPeerThatStopsReadingIsAbortedNotHung) {
+  namespace beast = boost::beast;
+  namespace asio = boost::asio;
+  cvc::state_transport_ws S;
+  S.set_ping_interval(std::chrono::milliseconds(0)); // the watchdog still runs; no probe traffic
+  S.start("127.0.0.1:0", "S", "C");
+  const std::string addr = S.listen_address();
+  const std::string port = addr.substr(addr.rfind(':') + 1);
+
+  // A raw WebSocket peer: completes the handshake, then never reads.
+  asio::io_context ioc;
+  asio::ip::tcp::resolver resolver(ioc);
+  asio::ip::tcp::socket sock(ioc);
+  asio::connect(sock, resolver.resolve("127.0.0.1", port));
+  beast::websocket::stream<asio::ip::tcp::socket> peer(std::move(sock));
+  peer.handshake("127.0.0.1", "/");
+  ASSERT_TRUE(
+      wait_until([&] { return S.connection_count() == 1; }, std::chrono::milliseconds(2000)));
+
+  std::atomic<bool> returned{false};
+  std::thread writer([&] {
+    cvc::ws_media_frame m;
+    m.origin_node_id = "S";
+    m.stream_id = "camera";
+    m.codec = "mjpeg";
+    m.payload.assign(std::size_t(32) << 20, 0x5a); // far beyond any socket buffer
+    S.publish_media_frame(m);
+    S.publish_media_frame(m);
+    returned.store(true);
+  });
+  EXPECT_TRUE(wait_until([&] { return returned.load(); }, std::chrono::milliseconds(10000)))
+      << "the write to a non-reading peer never returned (the relay would be hung)";
+  EXPECT_TRUE(
+      wait_until([&] { return S.connection_count() == 0; }, std::chrono::milliseconds(5000)))
+      << "the stalled connection was not closed";
+  writer.join();
+  beast::error_code ec;
+  peer.next_layer().close(ec);
   S.stop();
 }
 

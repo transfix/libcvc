@@ -36,20 +36,33 @@ TEST(StateLinkStatsTest, CountsTrafficBothWays) {
   EXPECT_EQ(c.frames_out, 1u);
 }
 
-TEST(StateLinkStatsTest, RoundTripEwmaMinAndLast) {
+TEST(StateLinkStatsTest, RoundTripMedianMinAndLast) {
   state_link_stats s;
   EXPECT_LT(s.read().rtt_ms, 0.0) << "no measurement before the first Pong";
   EXPECT_EQ(s.next_ping_seq(), 1u);
   EXPECT_EQ(s.next_ping_seq(), 2u);
-  s.note_rtt(40'000'000); // 40 ms seeds the average
-  s.note_rtt(80'000'000); // 80 ms moves it a quarter of the way: 50 ms
+  s.note_rtt(40'000'000); // 40 ms
+  s.note_rtt(80'000'000); // 80 ms: median of two = their mean, 60 ms
   s.note_rtt(-5);         // a clock that went backwards is ignored
-  const auto c = s.read();
+  auto c = s.read();
   EXPECT_EQ(c.pings_sent, 2u);
   EXPECT_EQ(c.pongs_received, 2u);
-  EXPECT_DOUBLE_EQ(c.rtt_ms, 50.0);
+  EXPECT_DOUBLE_EQ(c.rtt_ms, 60.0);
   EXPECT_DOUBLE_EQ(c.rtt_last_ms, 80.0);
   EXPECT_DOUBLE_EQ(c.rtt_min_ms, 40.0);
+}
+
+// One stall (a probe answered only after a frozen tab woke) barely moves the median, and leaves the
+// window entirely after kRttWindow more samples.
+TEST(StateLinkStatsTest, MedianShrugsOffAStall) {
+  state_link_stats s;
+  for (int i = 0; i < 4; ++i)
+    s.note_rtt(50'000'000);
+  s.note_rtt(14'800'000'000); // a 14.8 s stall
+  for (int i = 0; i < 3; ++i)
+    s.note_rtt(50'000'000);
+  EXPECT_DOUBLE_EQ(s.read().rtt_ms, 50.0) << "7 of 8 recent samples are 50 ms";
+  EXPECT_DOUBLE_EQ(s.read().rtt_last_ms, 50.0);
 }
 
 TEST(StateLinkStatsTest, RateMeterTurnsCountersIntoRates) {
