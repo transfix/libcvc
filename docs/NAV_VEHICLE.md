@@ -76,6 +76,15 @@ untouched.
 | `drive_step_material_ext` | fused, with **both** the material drive AND an external force |
 | `drive_step_cuda` | fused on GPU, one thread per agent; `drive_step`'s twin: grip, risk and slope columns, the terrain's force and the slope governors |
 | `drive_step_material_cuda` | fused on GPU; `drive_step_material`'s twin: adds the material force and a lam-head net's learned `lam_soft` / `lam_hard` |
+
+Both GPU drives take the optional `drive_telemetry *tel` the CPU drives take and
+fill it the same way, U_nav's terms included (`detail/nav_potential.h` is host
+and device). From Python, `pycvc.nav_drive_step_material_cuda` is
+`nav_drive_step_material`'s twin without `map_id`, with optional grip,
+terrain, slope, lam authority scales and `telemetry=1` (a dict of `(N,)`
+arrays named as `drive_telemetry`'s fields); `mat_field=None` is
+`drive_step_cuda`. `pycvc.nav_drive_cuda_available()` says whether a device is
+there.
 | `sim_world_cuda` | device-resident world; holds its own refinement buffers |
 
 `*_material_ext` fuses the two force channels. Without it a caller must pick one
@@ -124,8 +133,8 @@ missing, the code raises instead of running:
   `bicycle_rollout_cuda`) refuses the plant arm (`veh_params::plant`), which is
   not ported, and a material drive whose `lam_soft` / `lam_hard` column is null
   for a net with no head for it. It does not read `body_offsets_col` (the
-  shared `body_offsets` apply) and fills no `drive_telemetry`. It runs on the
-  shared field and material plane 0 (no `map_id`).
+  shared `body_offsets` apply). It runs on the shared field and material
+  plane 0 (no `map_id`).
 - `sim_world_cuda` holds no material stack or terrain, so it refuses a risk or
   slope look-ahead net.
 
@@ -164,7 +173,7 @@ runners that have no GPU.
 the CPU drive with everything it applies: a material stack, a terrain (grade
 force, infeasible-slope barrier, grade cost as risk), the slope governors, a
 risk net, a slope net, a v1 lam-head net and a two-head sigmoid net reading
-grip, risk and slope at once. Each tick starts both drives from the CPU's state
+grip, risk and slope at once, and every `drive_telemetry` field. Each tick starts both drives from the CPU's state
 and compares that one tick at 1e-5, so the check does not drift with a chaotic
 trajectory; each case also checks that what it adds moves the CPU drive, so it
 cannot pass by exercising nothing. The refusals throw host-side and run on a

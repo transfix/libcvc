@@ -2940,6 +2940,267 @@ inline cvc::nav::follower_options follower_from(PyObject *d) {
     return tuple;
   }
 
+  // True when this pycvc has the CUDA drive AND a device is present (cvc::nav::
+  // drive_cuda_available); false in a build without CUDA. A caller or a test skips on it rather
+  // than dying in cudaMalloc.
+  bool nav_drive_cuda_available() { return cvc::nav::drive_cuda_available(); }
+
+  // The fused GPU drive with everything the CPU drive applies (cvc::nav::drive_step_material_cuda
+  // / drive_step_cuda): nav_drive_step_material's arguments, without map_id (the GPU drive reads
+  // plane 0, so field and mat_field must be one plane each), plus optional
+  //   - mat_field None: no material stack (drive_step_cuda); lam_soft / lam_hard None when the
+  //     net's lam heads supply them (or there is no material);
+  //   - lam_soft_scale / lam_hard_scale: the authority levers on a lam-head net's weights;
+  //   - grip (H,W): mu; terrain (6,H,W): the terrain's material planes (grade cost, infeasible
+  //     phi and their gradients) with ter_lam_soft / ter_lam_hard / ter_k_sharp / ter_d_hat_m
+  //     (terrain_drive's defaults: weights 0, so only the risk and slope columns read it);
+  //     slope (2,H,W): dz/dx, dz/dy for the governors, with gravity (normalized / s^2);
+  //   - telemetry: nonzero returns a fifth element, a dict of (N,) arrays named as
+  //     drive_telemetry's fields (binding uint8; U_nav's terms as u_goal, u_barrier, u_soft,
+  //     u_hard, u_terrain).
+  // Every raster shares the field's world frame, as the grip raster does in nav_bicycle_rollout.
+  // Returns fresh (o (N,2), th (N,), sp (N,), minclr (N,)[, telemetry]) f32. Present always;
+  // raises if this pycvc was built without CUDA.
+  PyObject *nav_drive_step_material_cuda(
+      PyObject *field, PyObject *on, PyObject *th, PyObject *sp, PyObject *carrot,
+      const char *weights_path, PyObject *mat_field, PyObject *lam_soft, PyObject *lam_hard,
+      double mat_k_sharp, double mat_d_hat_m, double min_x, double min_y, double max_x,
+      double max_y, double cx, double cy, double scale, double rr, double d_hat, double dt,
+      double vmax, double L, double delta_max, double a_max, double a_lat_max, double k_steer,
+      int nsub, int allow_reverse, double lam_soft_scale = 1.0, double lam_hard_scale = 1.0,
+      PyObject *grip = nullptr, PyObject *terrain = nullptr, double ter_lam_soft = 0.0,
+      double ter_lam_hard = 0.0, double ter_k_sharp = 1.25, double ter_d_hat_m = 12.0,
+      PyObject *slope = nullptr, double gravity = 0.0, int telemetry = 0) {
+#ifdef CVC_USING_CUDA
+    const char *who = "pycvc.nav_drive_step_material_cuda";
+    std::vector<PyArrayObject *> hold;
+    std::string err;
+    auto fail = [&](const std::string &msg) {
+      for (PyArrayObject *h : hold)
+        Py_DECREF(h);
+      throw std::invalid_argument(std::string(who) + ": " + msg);
+    };
+    auto take = [&](PyObject *o, int typ, int nd) -> PyArrayObject * {
+      PyArrayObject *a = reinterpret_cast<PyArrayObject *>(
+          PyArray_FROMANY(o, typ, nd, nd, NPY_ARRAY_C_CONTIGUOUS));
+      if (!a)
+        fail("an input array had the wrong dtype/rank");
+      hold.push_back(a);
+      return a;
+    };
+    auto given = [](PyObject *o) { return o && o != Py_None; };
+    PyArrayObject *fa = take(field, NPY_FLOAT, 4);
+    PyArrayObject *oa = take(on, NPY_FLOAT, 2);
+    PyArrayObject *ta = take(th, NPY_FLOAT, 1);
+    PyArrayObject *sa = take(sp, NPY_FLOAT, 1);
+    PyArrayObject *ca = take(carrot, NPY_FLOAT, 2);
+    const int N = static_cast<int>(PyArray_DIM(oa, 0));
+    const int H = static_cast<int>(PyArray_DIM(fa, 2)), W = static_cast<int>(PyArray_DIM(fa, 3));
+    if (PyArray_DIM(fa, 0) != 1 || PyArray_DIM(fa, 1) != 3)
+      fail("field must be (1,3,H,W): the GPU drive reads plane 0");
+    if (PyArray_DIM(oa, 1) != 2 || PyArray_DIM(ta, 0) != N || PyArray_DIM(sa, 0) != N ||
+        PyArray_DIM(ca, 0) != N || PyArray_DIM(ca, 1) != 2)
+      fail("pose / carrot arrays must all be length N");
+    auto frame = [&](auto &g) {
+      g.mnx = min_x;
+      g.mny = min_y;
+      g.mxx = max_x;
+      g.mxy = max_y;
+      g.cx = cx;
+      g.cy = cy;
+      g.S = scale;
+    };
+    auto stack6 = [&](PyObject *o, cvc::nav::material_stack &ms, const char *what) {
+      PyArrayObject *a = take(o, NPY_FLOAT, 4);
+      if (PyArray_DIM(a, 0) != 1 || PyArray_DIM(a, 1) != 6)
+        fail(std::string(what) + " must be (1,6,H,W)");
+      ms.data = static_cast<const float *>(PyArray_DATA(a));
+      ms.M = 1;
+      ms.H = static_cast<int>(PyArray_DIM(a, 2));
+      ms.W = static_cast<int>(PyArray_DIM(a, 3));
+      frame(ms);
+    };
+    auto column = [&](PyObject *o, const char *what) -> const float * {
+      if (!given(o))
+        return nullptr;
+      PyArrayObject *a = take(o, NPY_FLOAT, 1);
+      if (PyArray_DIM(a, 0) != N)
+        fail(std::string(what) + " must be (N,)");
+      return static_cast<const float *>(PyArray_DATA(a));
+    };
+
+    cvc::nav::field_stack fs;
+    fs.data = static_cast<const float *>(PyArray_DATA(fa));
+    fs.M = 1;
+    fs.H = H;
+    fs.W = W;
+    frame(fs);
+    cvc::nav::material_stack ms{}, ts{};
+    cvc::nav::material_drive md;
+    if (given(mat_field)) {
+      stack6(mat_field, ms, "mat_field");
+      md.stack = &ms;
+      md.lam_soft = column(lam_soft, "lam_soft");
+      md.lam_hard = column(lam_hard, "lam_hard");
+      md.k_sharp = static_cast<float>(mat_k_sharp);
+      md.d_hat_m = static_cast<float>(mat_d_hat_m);
+      md.lam_soft_scale = static_cast<float>(lam_soft_scale);
+      md.lam_hard_scale = static_cast<float>(lam_hard_scale);
+    }
+    cvc::nav::veh_params v;
+    v.rr = static_cast<float>(rr);
+    v.d_hat = static_cast<float>(d_hat);
+    v.dt = static_cast<float>(dt);
+    v.vmax = static_cast<float>(vmax);
+    v.L = static_cast<float>(L);
+    v.delta_max = static_cast<float>(delta_max);
+    v.a_max = static_cast<float>(a_max);
+    v.a_lat_max = static_cast<float>(a_lat_max);
+    v.k_steer = static_cast<float>(k_steer);
+    v.nsub = nsub;
+    v.allow_reverse = allow_reverse != 0;
+    cvc::nav::friction_field gf, sf;
+    if (given(grip)) {
+      PyArrayObject *gpa = take(grip, NPY_FLOAT, 2);
+      gf.data = static_cast<const float *>(PyArray_DATA(gpa));
+      gf.M = 1;
+      gf.H = static_cast<int>(PyArray_DIM(gpa, 0));
+      gf.W = static_cast<int>(PyArray_DIM(gpa, 1));
+      frame(gf);
+      v.grip = &gf;
+    }
+    cvc::nav::terrain_drive td;
+    if (given(terrain)) {
+      stack6(terrain, ts, "terrain");
+      td.stack = &ts;
+      td.lam_soft = static_cast<float>(ter_lam_soft);
+      td.lam_hard = static_cast<float>(ter_lam_hard);
+      td.k_sharp = static_cast<float>(ter_k_sharp);
+      td.d_hat_m = static_cast<float>(ter_d_hat_m);
+      v.terrain = &td;
+    }
+    if (given(slope)) {
+      PyArrayObject *spa = take(slope, NPY_FLOAT, 3);
+      if (PyArray_DIM(spa, 0) != 2)
+        fail("slope must be (2,H,W): dz/dx, then dz/dy");
+      sf.data = static_cast<const float *>(PyArray_DATA(spa));
+      sf.M = 2;
+      sf.H = static_cast<int>(PyArray_DIM(spa, 1));
+      sf.W = static_cast<int>(PyArray_DIM(spa, 2));
+      frame(sf);
+      v.slope = &sf;
+      v.gravity = static_cast<float>(gravity);
+    }
+    cvc::nav::coef_mlp model = cvc::nav::coef_mlp::load(weights_path); // throws on bad/stale file
+
+    npy_intp d2[2] = {N, 2}, d1 = N;
+    PyObject *oo = PyArray_SimpleNew(2, d2, NPY_FLOAT);
+    PyObject *to = PyArray_SimpleNew(1, &d1, NPY_FLOAT);
+    PyObject *so = PyArray_SimpleNew(1, &d1, NPY_FLOAT);
+    PyObject *mc = PyArray_SimpleNew(1, &d1, NPY_FLOAT);
+    if (!oo || !to || !so || !mc) {
+      Py_XDECREF(oo);
+      Py_XDECREF(to);
+      Py_XDECREF(so);
+      Py_XDECREF(mc);
+      fail("output alloc failed");
+    }
+    float *ood = static_cast<float *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(oo)));
+    float *tod = static_cast<float *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(to)));
+    float *sod = static_cast<float *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(so)));
+    float *mcd = static_cast<float *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(mc)));
+    std::memcpy(ood, PyArray_DATA(oa), sizeof(float) * 2 * N);
+    std::memcpy(tod, PyArray_DATA(ta), sizeof(float) * N);
+    std::memcpy(sod, PyArray_DATA(sa), sizeof(float) * N);
+    std::vector<cvc::nav::drive_telemetry> tel(telemetry ? N : 0);
+    const float *cad = static_cast<const float *>(PyArray_DATA(ca));
+    // The drive refuses what it cannot apply by throwing; catch it here, with the GIL released,
+    // and raise once the GIL is back.
+    Py_BEGIN_ALLOW_THREADS try {
+      cvc::nav::drive_telemetry *tp = telemetry ? tel.data() : nullptr;
+      if (md.stack)
+        cvc::nav::drive_step_material_cuda(fs, ood, tod, sod, cad, model, N, v, md, mcd, tp);
+      else
+        cvc::nav::drive_step_cuda(fs, ood, tod, sod, cad, model, N, v, mcd, tp);
+    } catch (const std::exception &e) {
+      err = e.what();
+    }
+    Py_END_ALLOW_THREADS if (!err.empty()) {
+      Py_DECREF(oo);
+      Py_DECREF(to);
+      Py_DECREF(so);
+      Py_DECREF(mc);
+      fail(err);
+    }
+    for (PyArrayObject *h : hold)
+      Py_DECREF(h);
+    PyObject *tuple = nullptr;
+    if (!telemetry) {
+      tuple = PyTuple_Pack(4, oo, to, so, mc);
+    } else {
+      PyObject *dict = PyDict_New();
+      auto put = [&](const char *key, auto get) {
+        PyObject *a = PyArray_SimpleNew(1, &d1, NPY_FLOAT);
+        float *ad = static_cast<float *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(a)));
+        for (int i = 0; i < N; ++i)
+          ad[i] = get(tel[i]);
+        PyDict_SetItemString(dict, key, a);
+        Py_DECREF(a);
+      };
+      using T = cvc::nav::drive_telemetry;
+      put("alpha", [](const T &t) { return t.alpha; });
+      put("beta", [](const T &t) { return t.beta; });
+      put("gamma", [](const T &t) { return t.gamma; });
+      put("lam_soft", [](const T &t) { return t.lam_soft; });
+      put("lam_hard", [](const T &t) { return t.lam_hard; });
+      put("mu", [](const T &t) { return t.mu; });
+      put("mrisk", [](const T &t) { return t.mrisk; });
+      put("ext_fx", [](const T &t) { return t.ext_fx; });
+      put("ext_fy", [](const T &t) { return t.ext_fy; });
+      put("steer", [](const T &t) { return t.steer; });
+      put("curvature", [](const T &t) { return t.curvature; });
+      put("clearance", [](const T &t) { return t.clearance; });
+      put("potential", [](const T &t) { return t.potential; });
+      put("u_goal", [](const T &t) { return t.terms.goal; });
+      put("u_barrier", [](const T &t) { return t.terms.barrier; });
+      put("u_soft", [](const T &t) { return t.terms.soft; });
+      put("u_hard", [](const T &t) { return t.terms.hard; });
+      put("u_terrain", [](const T &t) { return t.terms.terrain; });
+      put("force_x", [](const T &t) { return t.force_x; });
+      put("force_y", [](const T &t) { return t.force_y; });
+      PyObject *b = PyArray_SimpleNew(1, &d1, NPY_UINT8);
+      std::uint8_t *bd =
+          static_cast<std::uint8_t *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(b)));
+      for (int i = 0; i < N; ++i)
+        bd[i] = tel[i].binding;
+      PyDict_SetItemString(dict, "binding", b);
+      Py_DECREF(b);
+      tuple = PyTuple_Pack(5, oo, to, so, mc, dict);
+      Py_DECREF(dict);
+    }
+    Py_DECREF(oo);
+    Py_DECREF(to);
+    Py_DECREF(so);
+    Py_DECREF(mc);
+    return tuple;
+#else
+    (void)field;
+    (void)on;
+    (void)th;
+    (void)sp;
+    (void)carrot;
+    (void)weights_path;
+    (void)mat_field;
+    (void)lam_soft;
+    (void)lam_hard;
+    (void)grip;
+    (void)terrain;
+    (void)slope;
+    throw std::runtime_error(
+        "pycvc.nav_drive_step_material_cuda: this pycvc was built without CUDA");
+#endif
+  }
+
 // Learned material coefficient network forward (cvc::nav::coef_energy_net).
 // Batched over n agents with ragged obstacle lists. Inputs: weights_path
 // (.cvcnm), obs_feats (total,6) f32, obs_mask (total,) u8, obs_offsets (n+1,)

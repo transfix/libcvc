@@ -282,6 +282,7 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_nav_train:test_pycvc_nav_train.py
              pycvc_nav_belief:test_pycvc_nav_belief.py
              pycvc_nav_routes:test_pycvc_nav_routes.py
+             pycvc_nav_cuda:test_pycvc_nav_cuda.py
              pycvc_integration:test_pycvc_integration.py
              pycvc_proxy_hooks:test_pycvc_proxy_hooks.py
              pycvc_lod:test_pycvc_lod.py

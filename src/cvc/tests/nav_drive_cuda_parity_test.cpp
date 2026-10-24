@@ -226,26 +226,56 @@ state make_state(int n, unsigned seed) {
 
 enum class path { plain, material };
 
+// The worst telemetry difference, relative where a value can be large (a barrier's potential and
+// force near a wall), and whether every agent's barrier flag agrees.
+struct tel_diff {
+  double worst = 0.0;
+  bool binding_agrees = true;
+  void add(float a, float b) {
+    const double d = std::fabs((double)a - b) / std::max(1.0, std::fabs((double)a));
+    worst = std::max(worst, d);
+  }
+  void add(const drive_telemetry &a, const drive_telemetry &b) {
+    for (auto m :
+         {&drive_telemetry::alpha, &drive_telemetry::beta, &drive_telemetry::gamma,
+          &drive_telemetry::lam_soft, &drive_telemetry::lam_hard, &drive_telemetry::mu,
+          &drive_telemetry::mrisk, &drive_telemetry::ext_fx, &drive_telemetry::ext_fy,
+          &drive_telemetry::steer, &drive_telemetry::curvature, &drive_telemetry::clearance,
+          &drive_telemetry::potential, &drive_telemetry::force_x, &drive_telemetry::force_y})
+      add(a.*m, b.*m);
+    for (auto m : {&potential_terms::goal, &potential_terms::barrier, &potential_terms::soft,
+                   &potential_terms::hard, &potential_terms::terrain})
+      add(a.terms.*m, b.terms.*m);
+    binding_agrees = binding_agrees && a.binding == b.binding;
+  }
+};
+
 // `ticks` ticks of the CPU drive; before each, the GPU drive steps from the same state and the
-// two are compared. Returns the worst absolute difference over every output.
+// two are compared. Returns the worst absolute difference over the state; `td` (optional)
+// collects the telemetry's.
 double run_parity(const world &w, const veh_params &v, const coef_mlp &net, path p, int n,
-                  int ticks, unsigned seed) {
+                  int ticks, unsigned seed, tel_diff *td = nullptr) {
   state s = make_state(n, seed);
   const material_drive md = w.material();
   double worst = 0.0;
   for (int t = 0; t < ticks; ++t) {
     std::vector<float> o2 = s.o, th2 = s.th, sp2 = s.sp, mc(n), mc2(n);
+    std::vector<drive_telemetry> tc(n), tg(n);
+    drive_telemetry *tcp = td ? tc.data() : nullptr, *tgp = td ? tg.data() : nullptr;
     if (p == path::plain) {
       drive_step(w.fs, s.o.data(), s.th.data(), s.sp.data(), s.carrot.data(), net, n, nullptr, v,
-                 mc.data(), 1);
+                 mc.data(), 1, nullptr, tcp);
       drive_step_cuda(w.fs, o2.data(), th2.data(), sp2.data(), s.carrot.data(), net, n, v,
-                      mc2.data());
+                      mc2.data(), tgp);
     } else {
       drive_step_material(w.fs, s.o.data(), s.th.data(), s.sp.data(), s.carrot.data(), net, n,
-                          nullptr, v, md, mc.data(), 1);
+                          nullptr, v, md, mc.data(), 1, tcp);
       drive_step_material_cuda(w.fs, o2.data(), th2.data(), sp2.data(), s.carrot.data(), net, n, v,
-                               md, mc2.data());
+                               md, mc2.data(), tgp);
     }
+    if (td)
+      for (int i = 0; i < n; ++i)
+        td->add(tc[i], tg[i]);
     for (int i = 0; i < n; ++i) {
       worst = std::max(worst, (double)std::fabs(s.o[2 * i] - o2[2 * i]));
       worst = std::max(worst, (double)std::fabs(s.o[2 * i + 1] - o2[2 * i + 1]));
@@ -385,6 +415,42 @@ TEST(NavDriveCudaParity, TwoHeadSigmoidNetWithEverythingMatchesDriveStepMaterial
               effect(w, v, net, path::material, kAgents, 7));
   EXPECT_LT(worst, kTol);
   EXPECT_GT(effect(w, v, net, path::material, kAgents, 7), 1e-3);
+}
+
+TEST(NavDriveCudaParity, TelemetryMatchesTheCpuDrive) {
+  if (!drive_cuda_available())
+    GTEST_SKIP() << "no CUDA device";
+  // drive_telemetry, field by field, U_nav's terms included: on the material drive with the
+  // terrain and the two-head net (mrisk the worse of material and terrain risk, the learned
+  // lams), and on the plain drive with the terrain alone (mrisk and the lams the terrain's).
+  const world w(kAgents);
+  veh_params v = base_veh();
+  const float off[3] = {0.0f, 0.0175f, 0.035f};
+  v.body_offsets = off;
+  v.n_body = 3;
+  v.body_rr = 0.012f;
+  v.body_gain = 1.0f / 3.0f;
+  v.grip = &w.grip;
+  v.terrain = &w.td;
+  v.slope = &w.sl;
+  v.gravity = (float)(9.80665 * kScale);
+  const coef_mlp two_head = make_net(8, 5,
+                                     coef_mlp::kFlagFeatMu | coef_mlp::kFlagFeatRisk |
+                                         coef_mlp::kFlagFeatSlope | coef_mlp::kFlagLamSigmoid,
+                                     17);
+  tel_diff mat_td;
+  EXPECT_LT(run_parity(w, v, two_head, path::material, kAgents, kTicks, 10, &mat_td), kTol);
+  veh_params v1 = base_veh();
+  v1.terrain = &w.td;
+  tel_diff plain_td;
+  EXPECT_LT(run_parity(w, v1, make_net(6, 3, coef_mlp::kFlagFeatRisk, 18), path::plain, kAgents,
+                       kTicks, 11, &plain_td),
+            kTol);
+  std::printf("[drive-cuda telemetry] material=%.3e plain=%.3e\n", mat_td.worst, plain_td.worst);
+  EXPECT_LT(mat_td.worst, kTol);
+  EXPECT_LT(plain_td.worst, kTol);
+  EXPECT_TRUE(mat_td.binding_agrees);
+  EXPECT_TRUE(plain_td.binding_agrees);
 }
 
 TEST(NavDriveCudaParity, LamNetWithoutMaterialMatchesDriveStep) {

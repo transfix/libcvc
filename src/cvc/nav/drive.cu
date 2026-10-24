@@ -297,13 +297,52 @@ __device__ inline void d_mlp(const float *data, const int *rows, const int *cols
   }
 }
 
+// U_nav at the pose for the telemetry — drive.cpp potential_at, on the same planes and weights the
+// force used (detail/nav_potential.h is host and device). Nothing the drive steers by reads it.
+__device__ inline potential_terms d_potential(const dev_field &f, int plane, float ox, float oy,
+                                              float ch, float sh, float gx, float gy, float al,
+                                              float be, const dev_veh &v, const dev_drive_ext &x,
+                                              float ls, float lh) {
+  potential_terms u;
+  const float dx = ox - gx, dy = oy - gy;
+  u.goal = 0.5f * be * (dx * dx + dy * dy);
+  if (!(v.n_body > 0 && v.body_offsets != nullptr)) {
+    float phi, nx, ny;
+    d_sample_unit(f, plane, ox, oy, phi, nx, ny);
+    u.barrier = al * detail::ipc_b(phi - v.rr, v.d_hat);
+  } else {
+    const float alg = v.body_gain == 1.0f ? al : al * v.body_gain;
+    for (int b = 0; b < v.n_body; ++b) {
+      const float off = v.body_offsets[b];
+      float bphi, bnx, bny;
+      d_sample_unit(f, plane, ox + off * ch, oy + off * sh, bphi, bnx, bny);
+      u.barrier += alg * detail::ipc_b(bphi - v.body_rr, v.d_hat);
+    }
+  }
+  if (x.mat_force) {
+    float m[6];
+    d_material_sample(x.mat, x.mat.M > 1 ? plane : 0, ox, oy, m);
+    u.soft = ls * m[0];
+    u.hard = lh * x.mat.S * detail::sdf_barrier_b(m[1], x.mat_k_sharp, x.mat_d_hat_m);
+  }
+  if (x.ter_force) {
+    float t[6];
+    d_material_sample(x.ter, 0, ox, oy, t);
+    u.terrain =
+        x.ter_lam_soft * t[0] +
+        x.ter_lam_hard * x.ter.S * detail::sdf_barrier_b(t[1], x.ter_k_sharp, x.ter_d_hat_m);
+  }
+  return u;
+}
+
 // One agent's bicycle rollout (nsub substeps) — mirrors drive.cpp rollout_impl's kinematic arm:
 // the geometry drive, plus (per `x`) the material force at weights ls / lh, the terrain's
-// grade force and barrier, and the slope governors.
+// grade force and barrier, and the slope governors. `tel` (this agent's slot, or null) gets
+// rollout_impl's drive_telemetry; it is write-only, so a null `tel` runs the same ops.
 __device__ inline void d_bicycle(const dev_field &f, int plane, float &ox, float &oy, float &thi,
                                  float &spi, float gx, float gy, float al, float be, float ga,
                                  const dev_veh &v, float &minclr, const dev_drive_ext &x, float ls,
-                                 float lh) {
+                                 float lh, drive_telemetry *tel = nullptr) {
   const float hdt = v.dt / (float)v.nsub;
   // track_width == 0 returns delta_max unchanged, so tan_dmax and every
   // threshold built from it stay bit-identical on the legacy path.
@@ -316,6 +355,9 @@ __device__ inline void d_bicycle(const dev_field &f, int plane, float &ox, float
   const bool has_fp = v.n_body > 0 && v.body_offsets != nullptr;
   const bool has_grip = v.grip.data != nullptr;
   minclr = 9.9f;
+  float tel_mu = 1.0f, tel_mrisk = 0.0f, tel_lam = 0.0f, tel_lam_hard = 0.0f;
+  float tel_steer = 0.0f, tel_curv = 0.0f, tel_fx = 0.0f, tel_fy = 0.0f;
+  potential_terms tel_u;
   for (int s = 0; s < v.nsub; ++s) {
     // Hoisted above the sample: the footprint places its discs along the
     // heading. Value-identical to computing it after.
@@ -368,6 +410,7 @@ __device__ inline void d_bicycle(const dev_field &f, int plane, float &ox, float
       a_max_e = v.a_max * mu;
       a_lat_e = v.a_lat_max * mu;
       creep_cap = 0.5f * sqrtf(a_lat_e * (v.L / tan_dmax));
+      tel_mu = mu;
     }
     // Gravity along the path (P5 H2): the stopping deceleration the governor plans with, and
     // the corner cap less gravity's cross-slope pull.
@@ -390,6 +433,9 @@ __device__ inline void d_bicycle(const dev_field &f, int plane, float &ox, float
     if (x.mat_force) {
       float m[6];
       d_material_sample(x.mat, x.mat.M > 1 ? plane : 0, ox, oy, m);
+      tel_mrisk = m[0];
+      tel_lam = ls;
+      tel_lam_hard = lh;
       const float db = -(1.0f / (1.0f + expf(-(x.mat_k_sharp * (x.mat_d_hat_m - m[1])))));
       const float fsx = -ls * m[2];
       const float fsy = -ls * m[3];
@@ -408,8 +454,23 @@ __device__ inline void d_bicycle(const dev_field &f, int plane, float &ox, float
       const float db = -(1.0f / (1.0f + expf(-(x.ter_k_sharp * (x.ter_d_hat_m - t[1])))));
       Fter_x = -x.ter_lam_soft * t[2] + (-x.ter_lam_hard * db) * t[4];
       Fter_y = -x.ter_lam_soft * t[3] + (-x.ter_lam_hard * db) * t[5];
+      // Terrain risk is material risk: the telemetry reports the worse of the two, and with no
+      // material the terrain's risk and the weights the drive applied to it.
+      if (x.mat_force) {
+        tel_mrisk = t[0] > tel_mrisk ? t[0] : tel_mrisk;
+      } else {
+        tel_mrisk = t[0];
+        tel_lam = x.ter_lam_soft;
+        tel_lam_hard = x.ter_lam_hard;
+      }
       Fx = Fx + Fter_x;
       Fy = Fy + Fter_y;
+    }
+    // U_nav and the conservative force at the tick's start pose (telemetry only).
+    if (tel && s == 0) {
+      tel_u = d_potential(f, plane, ox, oy, ch, sh, gx, gy, al, be, v, x, tel_lam, tel_lam_hard);
+      tel_fx = Fx;
+      tel_fy = Fy;
     }
     float a_long = (Fx * ch + Fy * sh) - ga * spi;
     a_long = fminf(fmaxf(a_long, -a_max_e), a_max_e);
@@ -492,9 +553,30 @@ __device__ inline void d_bicycle(const dev_field &f, int plane, float &ox, float
       sp2 = 1e-9f;
     const float d_cap = atanf(a_lat_e * v.L / sp2);
     delta = fminf(fmaxf(delta, -d_cap), d_cap);
+    tel_steer = delta;
+    tel_curv = fabsf(tanf(delta)) / v.L;
     thi = thi + hdt * (spi / v.L) * tanf(delta);
     ox = ox + hdt * spi * cosf(thi);
     oy = oy + hdt * spi * sinf(thi);
+  }
+  if (tel) {
+    tel->alpha = al;
+    tel->beta = be;
+    tel->gamma = ga;
+    tel->lam_soft = tel_lam;
+    tel->lam_hard = tel_lam_hard;
+    tel->mu = tel_mu;
+    tel->mrisk = tel_mrisk;
+    tel->ext_fx = 0.0f;
+    tel->ext_fy = 0.0f;
+    tel->steer = tel_steer;
+    tel->curvature = tel_curv;
+    tel->clearance = minclr;
+    tel->binding = minclr < v.d_hat ? 1 : 0;
+    tel->potential = tel_u.total();
+    tel->terms = tel_u;
+    tel->force_x = tel_fx;
+    tel->force_y = tel_fy;
   }
 }
 
@@ -515,7 +597,7 @@ __global__ void drive_kernel(dev_field f, const int *map_id, float *o, float *th
                              const float *carrot, const float *wdata, const int *rows,
                              const int *cols, const int *act, const long *w_off, const long *b_off,
                              int num_layers, const float *out_bias_off, int in, int out, dev_veh v,
-                             int n, float *minclr, dev_drive_ext x) {
+                             int n, float *minclr, dev_drive_ext x, drive_telemetry *tel) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n)
     return;
@@ -587,7 +669,7 @@ __global__ void drive_kernel(dev_field f, const int *map_id, float *o, float *th
   }
   float mc;
   d_bicycle(f, plane, ox, oy, thi, spi, cx, cy, coef[0], coef[1], coef[2], d_veh_for(v, i), mc, x,
-            ls, lh);
+            ls, lh, tel ? tel + i : nullptr);
   o[2 * i] = ox;
   o[2 * i + 1] = oy;
   th[i] = thi;
@@ -888,7 +970,7 @@ namespace {
 // short feature vector is arithmetic that succeeds and is wrong), the uploads, one fused launch.
 void drive_step_cuda_impl(const char *who, const field_stack &f, float *o, float *th, float *sp,
                           const float *carrot, const coef_mlp &model, int n, const veh_params &vp,
-                          const material_drive *mat, float *minclr_out) {
+                          const material_drive *mat, float *minclr_out, drive_telemetry *tel) {
   if (n <= 0)
     return;
   const std::string w = std::string("cvc::nav::") + who;
@@ -963,6 +1045,8 @@ void drive_step_cuda_impl(const char *who, const field_stack &f, float *o, float
   float *d_sp = buf.upload(sp, (size_t)n, "H2D sp");
   const float *d_car = buf.upload(carrot, (size_t)2 * n, "H2D carrot");
   float *d_mc = buf.alloc<float>((size_t)n, "malloc minclr");
+  drive_telemetry *d_tel =
+      tel ? buf.alloc<drive_telemetry>((size_t)n, "malloc telemetry") : nullptr;
   const float *d_w = buf.upload(fl.data.data(), fl.data.size(), "H2D weights");
   const float *d_ob = buf.upload(fl.out_bias_off.data(), fl.out_bias_off.size(), "H2D out_bias");
   const int *d_rows = buf.upload(fl.rows.data(), (size_t)fl.num_layers, "H2D rows");
@@ -987,7 +1071,7 @@ void drive_step_cuda_impl(const char *who, const field_stack &f, float *o, float
   const int threads = 128, blocks = (n + threads - 1) / threads;
   drive_kernel<<<blocks, threads>>>(to_dev_field(f, d_field), nullptr, d_o, d_th, d_sp, d_car, d_w,
                                     d_rows, d_cols, d_act, d_woff, d_boff, fl.num_layers, d_ob,
-                                    fl.in, fl.out, v, n, d_mc, x);
+                                    fl.in, fl.out, v, n, d_mc, x, d_tel);
   cuda_check(cudaGetLastError(), "drive_kernel launch");
   auto D2H = [&](void *dst, const void *src, size_t bytes, const char *what) {
     cuda_check(cudaMemcpy(dst, src, bytes, cudaMemcpyDeviceToHost), what);
@@ -996,20 +1080,25 @@ void drive_step_cuda_impl(const char *who, const field_stack &f, float *o, float
   D2H(th, d_th, (size_t)n * sizeof(float), "D2H th");
   D2H(sp, d_sp, (size_t)n * sizeof(float), "D2H sp");
   D2H(minclr_out, d_mc, (size_t)n * sizeof(float), "D2H minclr");
+  if (tel)
+    D2H(tel, d_tel, (size_t)n * sizeof(drive_telemetry), "D2H telemetry");
 }
 
 } // namespace
 
 void drive_step_cuda(const field_stack &f, float *o, float *th, float *sp, const float *carrot,
-                     const coef_mlp &model, int n, const veh_params &vp, float *minclr_out) {
-  drive_step_cuda_impl("drive_step_cuda", f, o, th, sp, carrot, model, n, vp, nullptr, minclr_out);
+                     const coef_mlp &model, int n, const veh_params &vp, float *minclr_out,
+                     drive_telemetry *tel) {
+  drive_step_cuda_impl("drive_step_cuda", f, o, th, sp, carrot, model, n, vp, nullptr, minclr_out,
+                       tel);
 }
 
 void drive_step_material_cuda(const field_stack &f, float *o, float *th, float *sp,
                               const float *carrot, const coef_mlp &model, int n,
-                              const veh_params &vp, const material_drive &mat, float *minclr_out) {
+                              const veh_params &vp, const material_drive &mat, float *minclr_out,
+                              drive_telemetry *tel) {
   drive_step_cuda_impl("drive_step_material_cuda", f, o, th, sp, carrot, model, n, vp, &mat,
-                       minclr_out);
+                       minclr_out, tel);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1393,7 +1482,7 @@ void sim_world_cuda::step() {
                           s.a_max, s.dt, s.n, s.d_carrot);
   drive_kernel<<<B, T>>>(df, s.d_map_id, s.d_o, s.d_th, s.d_sp, s.d_carrot, s.d_w, s.d_rows,
                          s.d_cols, s.d_act, s.d_woff, s.d_boff, s.num_layers, s.d_ob, s.in, s.out,
-                         s.v, s.n, s.d_minclr, s.x);
+                         s.v, s.n, s.d_minclr, s.x, nullptr);
   reached_park_kernel<<<B, T>>>(s.d_o, s.d_goal, s.reach_tol, s.d_reached, s.d_parked, s.d_active,
                                 s.n);
   cuda_check(cudaGetLastError(), "sim_world_cuda step launch");
