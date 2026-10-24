@@ -1,5 +1,7 @@
 #include <iostream>
 #include <algorithm>
+#include <cmath>
+#include <vector>
 
 #include "LBIE_Mesher.h"
 
@@ -29,6 +31,35 @@ namespace LBIE
       // return this power of two
       return (v<<c);
     }
+  }
+
+  // The median length of the edges of g's triangles and quads, or 0 if it has none.
+  static double medianEdgeLength(const geoframe& g)
+  {
+    std::vector<double> len;
+    len.reserve(4*g.quads.size() + 3*g.triangles.size());
+    for(size_t q=0; q<g.quads.size(); q++)
+      for(int k=0; k<4; k++)
+	{
+	  const geoframe::float_3& a = g.verts[g.quads[q][k]];
+	  const geoframe::float_3& b = g.verts[g.quads[q][(k+1)%4]];
+	  len.push_back(std::sqrt(double(a[0]-b[0])*(a[0]-b[0]) +
+				  double(a[1]-b[1])*(a[1]-b[1]) +
+				  double(a[2]-b[2])*(a[2]-b[2])));
+	}
+    for(size_t t=0; t<g.triangles.size(); t++)
+      for(int k=0; k<3; k++)
+	{
+	  const geoframe::float_3& a = g.verts[g.triangles[t][k]];
+	  const geoframe::float_3& b = g.verts[g.triangles[t][(k+1)%3]];
+	  len.push_back(std::sqrt(double(a[0]-b[0])*(a[0]-b[0]) +
+				  double(a[1]-b[1])*(a[1]-b[1]) +
+				  double(a[2]-b[2])*(a[2]-b[2])));
+	}
+    if(len.empty())
+      return 0.0;
+    std::nth_element(len.begin(), len.begin() + len.size()/2, len.end());
+    return len[len.size()/2];
   }
 
   void Mesher::setVolume(const VolMagick::Volume& vol)
@@ -100,7 +131,7 @@ namespace LBIE
 	cerr << "LBIE::Mesher::extractMesh(): finished mesh extraction" << endl;
       }
     
-    _octree.quality_improve(_geoframe,_improveMethod);
+    _octree.quality_improve(_geoframe,_improveMethod,true);
     _geoframe.mesh_type = geoframe::GEOTYPE(_meshType);
     
     //re-adjust vertices so they're back to their original location
@@ -108,6 +139,7 @@ namespace LBIE
       for(int j=0; j<3; j++)
 	_geoframe.verts[i][j] =
 	  _octree.minext[j] + _octree.spans[j] * _geoframe.verts[i][j];
+    _mesh_from_octree = true;
   }
 
   void Mesher::do_fastcontouring_extract()
@@ -117,6 +149,7 @@ namespace LBIE
     cerr << "LBIE::Mesher::extractMesh(): FASTCONTOURING mesh extraction" << endl;
 
     _geoframe.reset();
+    _mesh_from_octree = false;
     meshType(SINGLE);
     _geoframe.mesh_type = geoframe::GEOTYPE(_meshType);
 
@@ -155,6 +188,7 @@ namespace LBIE
     cerr << "LBIE::Mesher::extractMesh(): LIBISOCONTOUR mesh extraction" << endl;
 
     _geoframe.reset();
+    _mesh_from_octree = false;
     meshType(SINGLE);
     _geoframe.mesh_type = geoframe::GEOTYPE(_meshType);
 
@@ -271,13 +305,76 @@ namespace LBIE
     if(_geoframe.mesh_type != int(_meshType))
       meshType(MeshType(_geoframe.mesh_type));
 
+    // The improvement passes are written for grid units: optimization's first step is half a grid
+    // cell, and geometric flow on tetrahedra and hexahedra skips elements with a volume under 1e-5.
+    // do_duallib_extract runs a pass on the octree's grid and then maps the vertices to world
+    // coordinates, so the passes here used to get world coordinates. On the bunny, whose cells are
+    // 0.01 across, optimization threw a vertex far outside the volume, and geometric flow moved only
+    // 178 of 592 vertices. Map a mesh from the octree back onto its grid for the passes. Any other
+    // mesh gets a grid whose cell is its median edge, so that it is improved the same way in any
+    // units.
+    double origin[3] = {0.0, 0.0, 0.0}, cell[3] = {1.0, 1.0, 1.0};
+    bool on_grid = false, mapped = false;
+    if(iterations > 0 && _improveMethod != NO_IMPROVE && _geoframe.numverts > 0)
+      {
+	if(_mesh_from_octree &&
+	   _octree.spans[0] > 0 && _octree.spans[1] > 0 && _octree.spans[2] > 0)
+	  {
+	    for(int j=0; j<3; j++)
+	      {
+		origin[j] = _octree.minext[j];
+		cell[j] = _octree.spans[j];
+	      }
+	    on_grid = mapped = true;
+	  }
+	else
+	  {
+	    const double h = medianEdgeLength(_geoframe);
+	    if(h > 0.0 && std::isfinite(h))
+	      {
+		for(int j=0; j<3; j++)
+		  {
+		    origin[j] = HUGE_VAL;
+		    for(int i=0; i<_geoframe.numverts; i++)
+		      if(_geoframe.verts[i][j] < origin[j])
+			origin[j] = _geoframe.verts[i][j];
+		    if(!std::isfinite(origin[j]))
+		      origin[j] = 0.0;
+		    cell[j] = h;
+		  }
+		mapped = true;
+	      }
+	  }
+      }
+
+    std::vector<geoframe::float_3> world, grid;
+    if(mapped)
+      {
+	world = _geoframe.verts;
+	for(int i=0; i<_geoframe.numverts; i++)
+	  for(int j=0; j<3; j++)
+	    _geoframe.verts[i][j] = float((world[i][j] - origin[j]) / cell[j]);
+	grid = _geoframe.verts;
+      }
+
     for(unsigned int i = 0; i < iterations; i++)
       {
-	_octree.quality_improve(_geoframe,_improveMethod);
+	_octree.quality_improve(_geoframe,_improveMethod,on_grid);
 	cerr << 
 	  "LBIE::Mesher::qualityImprove(): "
 	  "Quality improvement iteration " << i << " finished." << endl;
       }
+
+    // A vertex the passes did not move gets its world coordinates back exactly, not after a round
+    // trip through the grid.
+    if(mapped)
+      for(int i=0; i<_geoframe.numverts; i++)
+	{
+	  const bool moved = size_t(i) >= grid.size() || _geoframe.verts[i] != grid[i];
+	  for(int j=0; j<3; j++)
+	    _geoframe.verts[i][j] = moved ?
+	      float(origin[j] + cell[j] * _geoframe.verts[i][j]) : world[i][j];
+	}
     return _geoframe;
   }
 

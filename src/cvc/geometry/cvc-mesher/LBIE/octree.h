@@ -357,7 +357,8 @@ public :
 	void add_hexa_adaptive_2_4(geoframe& geofrm, unsigned int* vtx_new);
 	void tetra_to_4_hexa(geoframe& geofrm);
 	void tetrahedralize_interval(geoframe& geofrm);
-	void quality_improve(geoframe& geofrm,int improvemethod);
+	// on_grid: geofrm's vertices are in this octree's grid units (0..dim-1), not world coordinates
+	void quality_improve(geoframe& geofrm,int improvemethod,bool on_grid = false);
 	void find_oc_id(int x, int y, int z, int level, int j, int intersect_id, int* oc_id);
 	void find_oc_id_hexa(int x, int y, int z, int level, int j, int* oc_id);
 	void find_edge_id_hexa(int x, int y, int z, int cell_size, int j, int* edge_id);
@@ -404,7 +405,7 @@ public :
 	float volume_tet(float v0[3], float v1[3], float v2[3], float v3[3]);
 	float volume_hex(float v0[3], float v1[3], float v2[3], float v3[3], float v4[3], float v5[3], float v6[3], float v7[3]);
 	void edge_contraction(geoframe& geofrm);
-	void optimization(geoframe& geofrm);
+	void optimization(geoframe& geofrm, bool on_grid = false);
 	void testHexa(float v0[3], float v1[3], float v2[3], float v3[3], float& jacob, float& condition_no, float& oddy);
 	void getGrad(float v0[3], float v1[3], float v2[3], float v3[3], float& condition_no, float* grad);
 
