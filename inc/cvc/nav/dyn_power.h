@@ -36,6 +36,9 @@ struct dyn_power_si {
   double c_v = 0.0;    // W per m/s of speed
   double c_v3 = 0.0;   // W per (m/s)^3
   double c_lat = 0.0;  // cornering: W per kg (m/s^2)^2 (m/s), s^2 / m
+  // Source J per J of the dynamic vehicle's own tire dissipation (diff::dyn_tire_power), lateral
+  // and longitudinal; dimensionless, so they pass through unconverted.
+  double tire_lat = 0.0, tire_lon = 0.0;
   double width = 0.0;  // W: the smooth parts' width; 0 = the trainer's default
 };
 
@@ -51,6 +54,8 @@ inline diff::power_params dyn_power_params_of(const dyn_power_si &si, double mas
   p.c_v = static_cast<float>(si.c_v * k);
   p.c_v3 = static_cast<float>(si.c_v3 / k);
   p.c_lat = static_cast<float>(si.c_lat / k);
+  p.tire_lat = static_cast<float>(si.tire_lat);
+  p.tire_lon = static_cast<float>(si.tire_lon);
   p.w = static_cast<float>(si.width * k * k);
   return p;
 }

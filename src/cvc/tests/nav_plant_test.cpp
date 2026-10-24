@@ -1198,13 +1198,35 @@ TEST(NavPlantConvergence, EnergyTrainedPolicyOnJolt) {
     const plant_log_drive drv = drive_plant_log_scene(lo, cvc::nav::coef_mlp::default_biased());
     runs.insert(runs.end(), drv.runs.begin(), drv.runs.end());
   }
-  const power_fit fit = fit_power(runs, dt, rr);
-  std::printf("  the RoboRacer's fitted power model: k_pos %.3f k_neg %.3f p_idle %.1f W c_v %.2f "
-              "c_v3 %.4f c_lat %.4f (r2 %.3f)\n",
-              fit.si.k_pos, fit.si.k_neg, fit.si.p_idle, fit.si.c_v, fit.si.c_v3, fit.si.c_lat,
-              fit.r2);
-
   const cvc::nav::training_scene sc = cvc::nav::city_scene(96);
+  // The dense city's tick, as plant_log reads it: the scene's dt in whole physics steps.
+  const double fixed = world_config().fixed_dt;
+  const double dense_dt = std::max(1.0, std::round(sc.dt / fixed)) * fixed;
+  std::vector<power_runs> sets;
+  // P8C_GATE_DENSE (on by default; 0 = off): also fit on the gate's own dense city, 8 seeds
+  // (300..307, never the evaluation's or validation's) of the untrained policy.
+  bool dense = true;
+  if (const char *e = std::getenv("P8C_GATE_DENSE"))
+    dense = std::atoi(e) != 0;
+  if (dense) {
+    plant_reach_options fo;
+    fo.seeds.clear();
+    for (unsigned k = 0; k < 8; ++k)
+      fo.seeds.push_back(300u + k);
+    std::vector<std::vector<planar_sample>> logs;
+    score_on_plant({cvc::nav::coef_mlp::default_biased()}, sc, rr, kCityL, fo, nullptr, &logs);
+    sets.push_back({std::move(logs), dense_dt});
+  }
+  sets.push_back({std::move(runs), dt});
+  const power_fit fit = fit_power(sets, rr);
+  std::printf(
+      "  the RoboRacer's fitted power model%s: k_pos %.3f k_neg %.3f p_idle %.1f W c_v %.2f "
+      "c_v3 %.4f c_lat %.4f tire_lat %.3f tire_lon %.3f (r2 %.3f; the tire term against "
+      "the ledger's tire: %.3f lateral, %.3f longitudinal per J, r2 %.3f)\n",
+      dense ? " (with the dense city)" : "", fit.si.k_pos, fit.si.k_neg, fit.si.p_idle, fit.si.c_v,
+      fit.si.c_v3, fit.si.c_lat, fit.si.tire_lat, fit.si.tire_lon, fit.r2, fit.tire_cal_lat,
+      fit.tire_cal_lon, fit.tire_r2);
+
   cvc::nav::train_config off;
   off.n = 128;
   off.hidden = 64;

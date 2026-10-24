@@ -60,10 +60,11 @@ void add_ledger(vehicle_energy &a, const vehicle_energy &b, double k = 1.0) {
 
 // One seed: the fraction of `o.agents` that reached their goals in `o.ticks`, the energy they
 // drew and the distance they drove. `step_threads` is sim_world::step's (its per-agent kernels
-// give the same result on any count).
+// give the same result on any count). `log_out` (if given) gets the run's plant_log.
 plant_drive_score drive_once(const cvc::nav::coef_mlp &policy, const cvc::nav::training_scene &sc,
                              const vehicle_desc &d, double mpw, const plant_reach_options &o,
-                             unsigned seed, int step_threads) {
+                             unsigned seed, int step_threads,
+                             std::vector<std::vector<planar_sample>> *log_out = nullptr) {
   cvc::nav::sim_world::config cfg;
   cfg.rows = sc.rows;
   cfg.cols = sc.cols;
@@ -126,7 +127,7 @@ plant_drive_score drive_once(const cvc::nav::coef_mlp &policy, const cvc::nav::t
   w.set_plant(&plant);
   plant_drive_score s;
   std::unique_ptr<plant_log> log;
-  if (o.predict_energy) {
+  if (o.predict_energy || log_out) {
     log = std::make_unique<plant_log>(w, plant);
     log->start();
   }
@@ -137,9 +138,11 @@ plant_drive_score drive_once(const cvc::nav::coef_mlp &policy, const cvc::nav::t
     for (int i = 0; i < o.agents; ++i)
       s.energy_J += plant.energy_step(i);
   }
-  if (log)
+  if (log && o.predict_energy)
     for (const power_run &r : evaluate_power(log->runs(), log->dt(), d, o.power).runs)
       s.model_J += r.model_J;
+  if (log_out)
+    *log_out = log->runs();
   // The ledger's own odometer: the chassis' path since attach() added the vehicle.
   for (int i = 0; i < o.agents; ++i) {
     const vehicle_energy e = phys.vehicle_state(plant.vehicle(i)).energy;
@@ -169,11 +172,12 @@ double reach_on_plant(const cvc::nav::coef_mlp &policy, const cvc::nav::training
   return m[0];
 }
 
-std::vector<plant_drive_score>
-score_on_plant(const std::vector<cvc::nav::coef_mlp> &policies,
-               const cvc::nav::training_scene &scene, const vehicle_desc &d, double wheelbase,
-               const plant_reach_options &o,
-               std::vector<std::vector<plant_drive_score>> *per_seed) {
+std::vector<plant_drive_score> score_on_plant(const std::vector<cvc::nav::coef_mlp> &policies,
+                                              const cvc::nav::training_scene &scene,
+                                              const vehicle_desc &d, double wheelbase,
+                                              const plant_reach_options &o,
+                                              std::vector<std::vector<plant_drive_score>> *per_seed,
+                                              std::vector<std::vector<planar_sample>> *logs) {
   if (!backend_available(backend::jolt))
     throw std::runtime_error("cvc::physics::score_on_plant: this libcvc was built without Jolt");
   if (!(wheelbase > 0.0) || !(d.wheelbase() > 0.0) || o.agents <= 0 || o.ticks <= 0 ||
@@ -191,8 +195,10 @@ score_on_plant(const std::vector<cvc::nav::coef_mlp> &policies,
   const int hw = std::max(1, static_cast<int>(std::thread::hardware_concurrency()));
   const int workers = std::min(n, o.threads > 0 ? o.threads : hw);
   std::vector<plant_drive_score> r(static_cast<std::size_t>(n));
+  std::vector<std::vector<std::vector<planar_sample>>> run_logs(logs ? n : 0);
   const auto run = [&](int k, int step_threads) {
-    r[k] = drive_once(policies[k / ns], scene, d, mpw, o, o.seeds[k % ns], step_threads);
+    r[k] = drive_once(policies[k / ns], scene, d, mpw, o, o.seeds[k % ns], step_threads,
+                      logs ? &run_logs[k] : nullptr);
   };
   if (workers <= 1) {
     for (int k = 0; k < n; ++k)
@@ -218,6 +224,12 @@ score_on_plant(const std::vector<cvc::nav::coef_mlp> &policies,
     for (const std::exception_ptr &e : errors)
       if (e)
         std::rethrow_exception(e);
+  }
+  if (logs) {
+    logs->clear();
+    for (auto &l : run_logs)
+      for (auto &a : l)
+        logs->push_back(std::move(a));
   }
   std::vector<plant_drive_score> mean(policies.size());
   if (per_seed)

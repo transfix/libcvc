@@ -646,6 +646,58 @@ TEST(NavCoefTrain, PowerStepMatchesFiniteDifferenceAndConverts) {
   EXPECT_NEAR(e_n / (k * k), e_si, 1e-3 * e_si);
 }
 
+// The tire term (P8c): power_step_tire's five derivatives against central differences, over
+// states that slip sideways and drive or brake hard; without a tire term it is power_step.
+TEST(NavCoefTrain, PowerStepTireMatchesFiniteDifference) {
+  train_config cfg = energy_cfg(small_cfg(), 1.0f);
+  cvc::nav::diff::power_params p = cfg.power;
+  p.tire_lat = 1.5f;
+  p.tire_lon = 1.2f;
+  const cvc::nav::diff::dyn_bike_params &dyn = cfg.dyn;
+  const float dt = 0.06f, w = 1e-3f * cvc::nav::diff::power_full(p, cfg.veh_a_max, 0.9f);
+  const float scale = dt * cvc::nav::diff::power_full(p, cfg.veh_a_max, 0.9f);
+  using cvc::nav::diff::power_step_tire;
+  int checked = 0;
+  for (const float vx : {0.05f, 0.4f, 0.9f})
+    for (const float vy : {-0.08f, 0.0f, 0.05f})
+      for (const float r : {-1.5f, 0.3f})
+        for (const float delta : {-0.3f, 0.1f})
+          for (const float a : {-1.0f, 0.3f, 1.2f}) {
+            float g[5], q[5];
+            const float E = power_step_tire(p, dyn, vx, vy, r, delta, a, dt, w, g);
+            ASSERT_TRUE(std::isfinite(E));
+            const float x[5] = {vx, vy, r, delta, a};
+            for (int k = 0; k < 5; ++k) {
+              float xp[5], xm[5];
+              for (int j = 0; j < 5; ++j)
+                xp[j] = xm[j] = x[j];
+              const float h = 1e-3f;
+              xp[k] += h;
+              xm[k] -= h;
+              const float fd =
+                  (power_step_tire(p, dyn, xp[0], xp[1], xp[2], xp[3], xp[4], dt, w, q) -
+                   power_step_tire(p, dyn, xm[0], xm[1], xm[2], xm[3], xm[4], dt, w, q)) /
+                  (2 * h);
+              EXPECT_NEAR(g[k], fd, 3e-2f * std::fabs(fd) + 2e-3f * scale)
+                  << "d/d" << k << " at " << vx << " " << vy << " " << r << " " << delta << " "
+                  << a;
+              ++checked;
+            }
+          }
+  EXPECT_EQ(checked, 3 * 3 * 2 * 2 * 3 * 5);
+  // Slipping costs more than not: the tire term is >= 0, and a sideways slide draws more.
+  float g[5], dvx, da, dr;
+  const float plain = cvc::nav::diff::power_step(p, 0.6f, 0.3f, 0.0f, dt, w, dvx, da, dr);
+  EXPECT_GE(power_step_tire(p, dyn, 0.6f, 0.0f, 0.0f, 0.0f, 0.3f, dt, w, g), plain);
+  EXPECT_GT(power_step_tire(p, dyn, 0.6f, 0.1f, 0.0f, 0.0f, 0.3f, dt, w, g),
+            power_step_tire(p, dyn, 0.6f, 0.0f, 0.0f, 0.0f, 0.3f, dt, w, g));
+  p.tire_lat = p.tire_lon = 0.0f;
+  EXPECT_EQ(power_step_tire(p, dyn, 0.6f, 0.1f, 0.4f, 0.2f, 0.3f, dt, w, g),
+            cvc::nav::diff::power_step(p, 0.6f, 0.3f, 0.4f, dt, w, dvx, da, dr));
+  EXPECT_EQ(g[1], 0.0f);
+  EXPECT_EQ(g[3], 0.0f);
+}
+
 // w_energy needs the dynamic rollout and a power model of its vehicle; 0 changes nothing.
 TEST(NavCoefTrain, EnergyTermNeedsADynamicVehicleAndIsOffByDefault) {
   const training_scene sc = cvc::nav::city_scene(48);
@@ -676,13 +728,17 @@ TEST(NavCoefTrain, EnergyTermNeedsADynamicVehicleAndIsOffByDefault) {
 namespace {
 // The energy term's own gradient (with it less without) against a central difference along it;
 // the direction's relative error. ref_wh_per_km > 0 prices the energy against progress.
-double energy_gradcheck(double ref_wh_per_km, double &term_out) {
+double energy_gradcheck(double ref_wh_per_km, double &term_out, bool tire = false) {
   const training_scene sc = cvc::nav::city_scene(48);
   train_config cfg = small_cfg();
   cfg.n = 256;
   cfg.window = 6;
   cfg.horizon = 6;
   cfg = energy_cfg(cfg, 3.0f);
+  if (tire) {
+    cfg.power.tire_lat = 1.5f;
+    cfg.power.tire_lon = 1.2f;
+  }
   if (ref_wh_per_km > 0.0) {
     cvc::world_units::normalized_frame f;
     f.scale = cfg.veh_L / cvc::physics::vehicle_desc::roboracer().wheelbase();
@@ -725,8 +781,8 @@ double energy_gradcheck(double ref_wh_per_km, double &term_out) {
                         energy_term(cfg, pm, sc, o, aux, goal, window)) /
                        (2.0 * eps);
   const double dir_rel = std::fabs(dd_fd - gnorm) / (std::fabs(dd_fd) + gnorm + 1e-12);
-  std::printf("[energy-gradcheck] ref %.1f Wh/km: term=%.4f |g_E|=%.4e dir_rel=%.3e\n",
-              ref_wh_per_km, term, gnorm, dir_rel);
+  std::printf("[energy-gradcheck] ref %.1f Wh/km%s: term=%.4f |g_E|=%.4e dir_rel=%.3e\n",
+              ref_wh_per_km, tire ? ", tire term on" : "", term, gnorm, dir_rel);
   return dir_rel;
 }
 } // namespace
@@ -737,6 +793,18 @@ TEST(NavCoefTrain, EnergyGradcheckMatchesFiniteDifference) {
   EXPECT_LT(energy_gradcheck(0.0, term), 5e-2)
       << "the energy term's backward disagrees with finite differences";
   EXPECT_GT(term, 0.0);
+}
+
+// With the tire term on: its adjoint on (vx, vy, r, delta, a), time-priced and priced against
+// progress, and it adds to the energy term.
+TEST(NavCoefTrain, TireEnergyGradcheckMatchesFiniteDifference) {
+  double with_tire = 0.0, without = 0.0, priced = 0.0;
+  EXPECT_LT(energy_gradcheck(0.0, with_tire, true), 5e-2)
+      << "the tire term's backward disagrees with finite differences";
+  EXPECT_LT(energy_gradcheck(8.0, priced, true), 5e-2)
+      << "the priced tire term's backward disagrees with finite differences";
+  energy_gradcheck(0.0, without);
+  EXPECT_GT(with_tire, without);
 }
 
 // Priced against progress (energy_ref): the hinge's adjoint, and the progress's on both ends of

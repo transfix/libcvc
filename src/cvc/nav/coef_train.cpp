@@ -498,9 +498,9 @@ double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_i
         ext[2] = s1.delta;
         ext[3] = s1.a;
         if (energy) {
-          float dvx, da, dr;
-          const float E =
-              diff::power_step(cfg_.power, s1.vx, s1.a, s1.r, hdt, e_width, dvx, da, dr);
+          float gE[5];
+          const float E = diff::power_step_tire(cfg_.power, cfg_.dyn, s1.vx, s1.vy, s1.r, s1.delta,
+                                                s1.a, hdt, e_width, gE);
           if (priced) {
             const float prog = S.gd - std::hypot(s1.x - gx, s1.y - gy);
             float dh;
@@ -567,10 +567,10 @@ double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_i
                             bv, cfg_.dyn, 0.0f, s1);
         ox1 = s1.x;
         oy1 = s1.y;
-        if (energy) { // the energy term at the step's end state: on (vx, r, a)_{t+1}
-          float dvx, da, dr;
-          const float E =
-              diff::power_step(cfg_.power, s1.vx, s1.a, s1.r, hdt, e_width, dvx, da, dr);
+        if (energy) {  // the energy term at the step's end state: on (vx, vy, r, delta, a)_{t+1}
+          float gE[5]; // dE / d(vx, vy, r, delta, a)
+          const float E = diff::power_step_tire(cfg_.power, cfg_.dyn, s1.vx, s1.vy, s1.r, s1.delta,
+                                                s1.a, hdt, e_width, gE);
           float sc = e_scale * static_cast<float>(inv_n);
           if (priced) {
             // d/dE of the hinge, and the progress's own: -e_ref d(prog), with d|o - g|/do =
@@ -587,9 +587,11 @@ double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_i
             }
             e_prog_t = -gp; // d(loss) / d|o_t - g|, taken below
           }
-          gaux_y += sc * dvx;
-          gext[1] += sc * dr;
-          gext[3] += sc * da;
+          gaux_y += sc * gE[0];
+          gext[0] += sc * gE[1];
+          gext[1] += sc * gE[2];
+          gext[2] += sc * gE[3];
+          gext[3] += sc * gE[4];
         }
       } else if (bike)
         diff::bike_step(F, S.ox, S.oy, S.auxx, S.auxy, gx, gy, al, be, ga, bv, ox1, oy1, ax1, ay1);

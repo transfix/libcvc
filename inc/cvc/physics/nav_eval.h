@@ -40,6 +40,7 @@
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/coef_train.h>
 #include <cvc/nav/dyn_power.h>
+#include <cvc/physics/plant_log.h>
 #include <cvc/physics/vehicle.h>
 #include <vector>
 
@@ -104,12 +105,15 @@ std::vector<double> reach_on_plant(const std::vector<cvc::nav::coef_mlp> &polici
 
 // reach_on_plant's runs with their energy and distance: each policy's mean over the seeds (each
 // field the mean of the seeds'), with `per_seed` (if given) each one's per-seed scores. Reach is
-// what reach_on_plant gives, bit for bit.
+// what reach_on_plant gives, bit for bit. `logs` (if given) gets every run's plant_log, its agents'
+// runs one after another in (policy, seed) order: data to fit a plant model to (fit_power) on the
+// scenes a policy is scored on.
 std::vector<plant_drive_score>
 score_on_plant(const std::vector<cvc::nav::coef_mlp> &policies,
                const cvc::nav::training_scene &scene, const vehicle_desc &d, double wheelbase,
                const plant_reach_options &o = plant_reach_options(),
-               std::vector<std::vector<plant_drive_score>> *per_seed = nullptr);
+               std::vector<std::vector<plant_drive_score>> *per_seed = nullptr,
+               std::vector<std::vector<planar_sample>> *logs = nullptr);
 
 } // namespace physics
 } // namespace cvc
