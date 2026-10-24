@@ -94,7 +94,7 @@ windows:
   - window: Users
     id: users
     pos: [390, 40]
-    size: [410, 260]
+    size: [420, 260]
     closable: true
     children:
       - text: "in the room"
@@ -102,7 +102,7 @@ windows:
       - separator
       - type: group
         id: users_head
-        layout: { kind: grid, col_widths: [118, 54, 50, 50, 34, 34, 0] }
+        layout: { kind: grid, col_widths: [118, 64, 50, 50, 34, 34, 0] }
         children:
           - text: "name"
           - text: "ping"
@@ -115,7 +115,7 @@ windows:
       # swap: only one of the two is visible, so they share one cell).
       - type: group
         id: users_you
-        layout: { kind: grid, col_widths: [118, 54, 50, 50, 34, 34, 0] }
+        layout: { kind: grid, col_widths: [118, 64, 50, 50, 34, 34, 0] }
         children:
           - text: ""
             bind: conf.self
@@ -136,7 +136,7 @@ windows:
       # Everyone else: one row per peer (peer.<i>), filled by on_tick.
       - type: group
         repeat: (state-get "peer.count")
-        layout: { kind: grid, col_widths: [118, 54, 50, 50, 34, 34, 0] }
+        layout: { kind: grid, col_widths: [118, 64, 50, 50, 34, 34, 0] }
         children:
           # Name: click to open + raise this peer's camera window (cam_<i>); GREEN while talking.
           - text: ""
