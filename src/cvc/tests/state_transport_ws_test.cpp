@@ -725,8 +725,8 @@ TEST(StateTransportWsTest, RelayForwardHonorsPeerFilter) {
 }
 
 // The periodic broadcast is filtered per connection. B's filter denies room.secret, so its frame
-// omits it; C (unregistered) and D (registered with no rule) are unfiltered and get the one shared
-// frame -- byte-for-byte the same, and larger than B's.
+// omits it; C (unregistered) and D (registered with no rule) are unfiltered and hold the same, so
+// they get the same frame -- byte-for-byte, and larger than B's.
 TEST(StateTransportWsTest, BroadcastSnapshotIsPerConnectionFiltered) {
   cvc::app aS, aB, aC, aD;
   cvc::state_transport_ws S, tB, tC, tD;
@@ -761,12 +761,13 @@ TEST(StateTransportWsTest, BroadcastSnapshotIsPerConnectionFiltered) {
   // carry them.
   write_value(aS, "room.secret", "s");
   write_value(aS, "room.pub", "p");
-  // A connection's admit frames go out under its write lock, which a broadcast write waits for, so
-  // after one broadcast every admit is counted and the next broadcast's bytes stand alone.
-  EXPECT_EQ(S.broadcast_snapshot(), 3u);
+  // A connection's admit frames go out under its write lock, which flush() waits for, so the
+  // broadcast's bytes stand alone.
+  S.flush();
   const auto before = bytes_out_by_peer(S);
   EXPECT_EQ(S.broadcast_snapshot(), 3u);
   const auto after = bytes_out_by_peer(S);
+  EXPECT_EQ(S.broadcast_snapshot(), 0u) << "every peer already holds what it is delivered";
   // A push queued behind the broadcast on B's connection: once it lands, B has applied the whole
   // broadcast frame.
   ASSERT_EQ(S.push_snapshot_to("B", {entry("room.sentinel", "1")}), 1u);
@@ -790,6 +791,90 @@ TEST(StateTransportWsTest, BroadcastSnapshotIsPerConnectionFiltered) {
   tB.stop();
   tC.stop();
   tD.stop();
+  S.stop();
+}
+
+// The broadcast sends diffs, and must still converge a client that lost frames. Each way to lose
+// one, and what heals it:
+//   1. a change no live frame carried (a missed re-fan): the next diff carries it, and only it;
+//   2. a live frame that reached the client, then a change back to the value the relay last
+//      broadcast that the client missed: the live frame made the relay forget what the client held
+//      there, so the diff re-sends it even though the tree matches the last broadcast again;
+//   3. a frame the client dropped itself (no shard registered when it arrived): the relay wrote it,
+//      so no diff re-sends it, and only the client's full-refresh request heals it;
+//   4. the client's own write, overridden on the relay without a live frame: its write made the
+//      relay forget what it held there, so the diff sends the tree's value back.
+TEST(StateTransportWsTest, BroadcastDiffConvergesAClientThatDroppedFrames) {
+  using ms = std::chrono::milliseconds;
+  cvc::app aS, aB;
+  cvc::state_transport_ws S, tB;
+  for (auto *t : {&S, &tB})
+    t->set_ping_interval(ms(0)); // only the frames below cross the link
+  S.start("127.0.0.1:0", "S", "C");
+  S.set_relay(true);
+
+  cvc::state_cluster_shard sS(aS, "C", "S");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sS.attach();
+  sB.attach();
+  S.register_shard(&sS);
+  tB.register_shard(&sB);
+  write_value(aS, "room.k", "v0");
+  EXPECT_GT(S.pump_all(), 0u); // no connection yet: later pumps carry only later writes
+  const auto set = [](cvc::app &a, const std::string &v) {
+    cvc::state::instance(a)("room.k").value(v);
+  };
+
+  ASSERT_TRUE(tB.connect_to_peer(ws(S.listen_address()), ms(2000)));
+  ASSERT_TRUE(wait_identified(S, 1, ms(2000)));
+  S.flush(); // B's admit snapshot is out
+  ASSERT_TRUE(wait_until([&] { return value_at(aB, "room.k") == "v0"; }, ms(3000)));
+  EXPECT_EQ(S.broadcast_snapshot(), 0u) << "B holds what its admit snapshot carried";
+
+  // 1.
+  set(aS, "v1"); // never pumped
+  std::uint64_t e0 = S.total_broadcast_entries();
+  EXPECT_EQ(S.broadcast_snapshot(), 1u);
+  EXPECT_EQ(S.total_broadcast_entries() - e0, 1u) << "only the changed entry";
+  ASSERT_TRUE(wait_until([&] { return value_at(aB, "room.k") == "v1"; }, ms(3000)));
+  EXPECT_EQ(S.broadcast_snapshot(), 0u);
+
+  // 2.
+  set(aS, "v2");
+  EXPECT_GT(S.pump_all(), 0u);
+  ASSERT_TRUE(wait_until([&] { return value_at(aB, "room.k") == "v2"; }, ms(3000)));
+  set(aS, "v1"); // never pumped: the tree is back to what the last broadcast carried
+  EXPECT_EQ(S.broadcast_snapshot(), 1u);
+  ASSERT_TRUE(wait_until([&] { return value_at(aB, "room.k") == "v1"; }, ms(3000)));
+
+  // 3.
+  tB.unregister_shard(&sB);
+  set(aS, "v3"); // never pumped
+  const std::uint64_t r0 = tB.total_received_frames();
+  EXPECT_EQ(S.broadcast_snapshot(), 1u);
+  // B reads its frames in order on one thread, so once the push behind the diff has arrived, B is
+  // done with the diff -- which it dropped, having no shard.
+  ASSERT_EQ(S.push_snapshot_to("B", {entry("room.sentinel", "1")}), 1u);
+  ASSERT_TRUE(wait_until([&] { return tB.total_received_frames() >= r0 + 2; }, ms(3000)));
+  tB.register_shard(&sB);
+  EXPECT_EQ(S.broadcast_snapshot(), 0u) << "the relay believes B holds v3";
+  EXPECT_EQ(value_at(aB, "room.k"), "v1");
+  ASSERT_EQ(tB.request_full_refresh(), 1u);
+  e0 = S.total_broadcast_entries();
+  ASSERT_TRUE(wait_until([&] { return S.broadcast_snapshot() == 1u; }, ms(3000)));
+  EXPECT_GE(S.total_broadcast_entries() - e0, 2u) << "the whole tree: room and room.k";
+  ASSERT_TRUE(wait_until([&] { return value_at(aB, "room.k") == "v3"; }, ms(3000)));
+  EXPECT_EQ(S.broadcast_snapshot(), 0u) << "back to diffs";
+
+  // 4.
+  set(aB, "b4");
+  EXPECT_GT(tB.pump_all(), 0u);
+  ASSERT_TRUE(wait_until([&] { return value_at(aS, "room.k") == "b4"; }, ms(3000)));
+  set(aS, "v3"); // never pumped: the relay overrides B's write with what it last sent B
+  EXPECT_EQ(S.broadcast_snapshot(), 1u);
+  EXPECT_TRUE(wait_until([&] { return value_at(aB, "room.k") == "v3"; }, ms(3000)));
+
+  tB.stop();
   S.stop();
 }
 

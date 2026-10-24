@@ -85,9 +85,10 @@ control: a peer with no filter still receives everything.
   `set_relay` forwards ignored it. Now so do both `set_relay` forward loops
   (and so the bridge leg, which goes through the destination transport's
   `publish()`), the gRPC snapshot responder (by the requester's view), and
-  the WebSocket ~1 Hz `broadcast_snapshot` (unidentified or unfiltered
-  connections share one unfiltered frame per shard; each filtered connection
-  gets its own). A skip is counted by `note_delivery_filtered`. The admit
+  the WebSocket ~1 Hz `broadcast_snapshot` (each connection gets only the
+  entries its view passes; since then the broadcast is also a per-connection
+  diff, see `state_transport_ws.h`). A skip is counted by
+  `note_delivery_filtered`. The admit
   snapshot (`send_snapshot_locked`) stays unfiltered by design: it goes out
   before the peer's Hello. On the client side, unsolicited-snapshot ingest
   now skips entries a shard with enforced interest would reject, so a
