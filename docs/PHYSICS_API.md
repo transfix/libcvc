@@ -598,6 +598,17 @@ cvcGL's `publish_nav_stats` writes them too, again only when tracked:
 - `<prefix>.nav_stats.veh.<i>.{energy_J, energy_per_km, building_contacts}`;
 - `<prefix>.nav_stats.episode.{total_energy_J, total_building_contacts}`.
 
+The plant also keeps a **plant ledger** for nav_stats (NAV_STATS.md, "The plant ledger"):
+`nav_plant::sample(i)` is agent i's `cvc::nav::plant_sample` at the end of the last tick (speed,
+attitude, nav's commands, accelerations, roll rate, the lateral load transfer ratio, wheels down,
+static contacts; SI), measured in `advance()` from the same vehicle state as the energy, and
+`sim_world` feeds it to the collector. `veh_nav_stats` then has `rolled_over` (tipped past 60
+degrees for 1 s, latched) and when, the peak tilt, roll and pitch, the load transfer, the lateral
+acceleration and how much of the steering and the brakes nav used; the episode `vehicles_rolled`
+and `first_roll_s`; the scorecard `rollover_rate`. Only on a plant: the kinematic record is
+unchanged. `planar_sample::roll` (the plant log) now has the sign its comment gives, + left side
+up (it was the right side's), so the two agree.
+
 Gates (`nav_plant_test`, Windows MSVC, the Humvee in nav's trained metric, 1 unit = 20 m):
 
 | Gate | Measured |

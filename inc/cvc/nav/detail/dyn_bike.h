@@ -561,9 +561,10 @@ CVC_HD inline void dyn_ph_tangent_D(const dyn_bike_params &p, const dyn_state<S>
 // dynamic plant.
 CVC_HD inline void dyn_bike_step(const field &f, const dyn_state<float> &s, float gx, float gy,
                                  float al, float be, float ga, const bike_veh &v,
-                                 const dyn_bike_params &p, float grade, dyn_state<float> &o) {
+                                 const dyn_bike_params &p, float grade, dyn_state<float> &o,
+                                 const ext_in *ext = nullptr) {
   float delta_cmd, a_cmd;
-  bike_control(f, s.x, s.y, s.psi, s.vx, gx, gy, al, be, ga, v, delta_cmd, a_cmd);
+  bike_control(f, s.x, s.y, s.psi, s.vx, gx, gy, al, be, ga, v, delta_cmd, a_cmd, nullptr, ext);
   dyn_plant<float>(p, v, s, delta_cmd, a_cmd, grade, o);
 }
 
@@ -572,14 +573,15 @@ CVC_HD inline void dyn_bike_step_bwd(const field &f, const dyn_state<float> &s, 
                                      float al, float be, float ga, const bike_veh &v,
                                      const dyn_bike_params &p, float grade,
                                      const dyn_state<float> &g_o, dyn_state<float> &g_s, float &gal,
-                                     float &gbe, float &gga) {
+                                     float &gbe, float &gga, const ext_in *ext = nullptr,
+                                     float *g_fext = nullptr) {
   float delta_cmd, a_cmd;
-  bike_control(f, s.x, s.y, s.psi, s.vx, gx, gy, al, be, ga, v, delta_cmd, a_cmd);
+  bike_control(f, s.x, s.y, s.psi, s.vx, gx, gy, al, be, ga, v, delta_cmd, a_cmd, nullptr, ext);
   float g_dc, g_ac;
   dyn_plant_vjp<float>(p, v, s, delta_cmd, a_cmd, grade, g_o, g_s, g_dc, g_ac);
   float gox, goy, gth, gsp;
   bike_control_bwd(f, s.x, s.y, s.psi, s.vx, gx, gy, al, be, ga, v, g_dc, g_ac, gox, goy, gth, gsp,
-                   gal, gbe, gga);
+                   gal, gbe, gga, ext, g_fext);
   g_s.x += gox;
   g_s.y += goy;
   g_s.psi += gth;

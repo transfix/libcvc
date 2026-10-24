@@ -23,14 +23,17 @@
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/nav/coef_train.h>
 #include <cvc/nav/dyn_bike.h>
+#include <cvc/nav/ext_rollout.h>
 #include <cvc/physics/nav_plant.h>
 #include <cvc/physics/vehicle.h>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <gtest/gtest.h>
 #include <memory>
 #include <random>
@@ -932,4 +935,681 @@ TEST(DynBikePH, WhereTheTangentDissipationStopsBeingPSD) {
         top += indef[b];
     EXPECT_GT(top, 0) << "mu " << mu << ": the ramps never passed the peak";
   }
+}
+
+// ── The external-force port: the deployed drive's ext_force in the differentiable rollout ──
+
+namespace {
+
+// Agents in the city: the scene's starts and goals, headings near the goal direction, speeds
+// spread over the range, and a force per agent.
+struct ext_case {
+  float ox, oy, th, sp, gx, gy, fx, fy;
+};
+//
+// The starts are jittered off the scene's sampled cell centres, which are the SDF's grid
+// nodes: the bilinear field has a kink there, which a central difference straddles.
+// CVC_EXT_CASE_SEED replaces the seeds (the scene's starts too), for sweeping the checks over
+// other draws, as another standard library's would be.
+std::vector<ext_case> ext_cases(const city &c, int n) {
+  const char *seed = std::getenv("CVC_EXT_CASE_SEED");
+  std::vector<float> o(2 * n), g(2 * n);
+  c.sc.sample_starts_goals(n, seed ? 100 + std::atoi(seed) : 5, o.data(), g.data());
+  std::mt19937 rng(seed ? static_cast<unsigned>(std::atoi(seed)) : 9u);
+  std::uniform_real_distribution<float> u(-1.0f, 1.0f);
+  std::vector<ext_case> r;
+  for (int i = 0; i < n; ++i) {
+    ext_case e;
+    e.ox = o[2 * i] + 0.04f * u(rng);
+    e.oy = o[2 * i + 1] + 0.04f * u(rng);
+    e.gx = g[2 * i];
+    e.gy = g[2 * i + 1];
+    e.th = std::atan2(e.gy - e.oy, e.gx - e.ox) + 0.3f * static_cast<float>(i % 5 - 2);
+    e.sp = c.v.vmax * static_cast<float>(i % 7) / 7.0f;
+    e.fx = u(rng);
+    e.fy = u(rng);
+    r.push_back(e);
+  }
+  return r;
+}
+
+// One finite-difference check summed over cases, given each case's loss as a function of the
+// offset t along the checked direction. A case is skipped and counted, not compared, when its
+// difference does not measure the slope:
+//   - a jump: the forward and backward one-sided differences disagree (by more than 20% of the
+//     larger and an absolute 1e-3), as where the step straddles one of the controller's
+//     switches (a clamp, a governor, the behind branch);
+//   - unresolved: the central differences at eps and eps / 2 disagree by more than 5% of the
+//     larger and 1e-3, as where the slope is sharply peaked within the step (near a steep
+//     barrier: 24.9 at 1e-3, 31.4 at 3e-4 and 31.3 at 1e-4, against the reverse's 31.2).
+// Which cases do either depends on the scene's draws, which differ by standard library
+// (sample_starts_goals' uniform_int_distribution): libc++'s draws failed the old unfiltered sums
+// (dL/dF 0.38 on macOS) while MSVC's and libstdc++'s passed.
+struct fd_sum {
+  double num = 0.0, den = 0.0;
+  int used = 0, kinked = 0;
+  void add(double an, const std::function<double(double)> &f, double eps) {
+    const double l0 = f(0.0), lp = f(eps), lm = f(-eps), lp2 = f(0.5 * eps), lm2 = f(-0.5 * eps);
+    const double fwd = (lp - l0) / eps, bwd = (l0 - lm) / eps;
+    const double c1 = 0.5 * (fwd + bwd), c2 = (lp2 - lm2) / eps;
+    const auto big = [](double a, double b) { return std::max(std::fabs(a), std::fabs(b)); };
+    if (std::fabs(fwd - bwd) > 0.2 * big(fwd, bwd) + 1e-3 ||
+        std::fabs(c1 - c2) > 0.05 * big(c1, c2) + 1e-3) {
+      ++kinked;
+      return;
+    }
+    num += std::fabs(an - c1);
+    den += std::fabs(c1);
+    ++used;
+  }
+  double rel() const { return den > 0.0 ? num / den : 0.0; }
+};
+
+// rel < tol over the cases used, with at most a quarter skipped.
+void expect_fd(const fd_sum &f, double tol, const std::string &what) {
+  EXPECT_GT(f.den, 0.0) << what << ": no gradient to compare";
+  EXPECT_LT(f.rel(), tol) << what;
+  EXPECT_LE(f.kinked, (f.used + f.kinked) / 4) << what << ": too many cases on a switch";
+}
+
+// ext_force::sample for the deployed drive: agent i gets its case's constant force.
+void constant_sample(void *user, int i, int, float, float, float *fx, float *fy) {
+  const std::vector<ext_case> &cs = *static_cast<const std::vector<ext_case> *>(user);
+  *fx = cs[i].fx;
+  *fy = cs[i].fy;
+}
+
+} // namespace
+
+// A zero force through the port is the controller without it, forward and backward.
+TEST(DiffExtForce, AZeroForceIsTheControllerWithoutIt) {
+  const std::unique_ptr<city> c = make_city();
+  const float al = 0.6f, be = 1.8f, ga = 0.9f;
+  for (const ext_case &e : ext_cases(*c, 32)) {
+    diff::ext_in zero;
+    float a1[4], b1[4];
+    diff::bike_step(c->F, e.ox, e.oy, e.th, e.sp, e.gx, e.gy, al, be, ga, c->v, a1[0], a1[1], a1[2],
+                    a1[3]);
+    diff::bike_step(c->F, e.ox, e.oy, e.th, e.sp, e.gx, e.gy, al, be, ga, c->v, b1[0], b1[1], b1[2],
+                    b1[3], &zero);
+    for (int k = 0; k < 4; ++k)
+      EXPECT_EQ(a1[k], b1[k]);
+    float g0[7], g1[7], gf[2];
+    diff::bike_step_bwd(c->F, e.ox, e.oy, e.th, e.sp, e.gx, e.gy, al, be, ga, c->v, 0.3f, -0.2f,
+                        0.5f, 0.7f, g0[0], g0[1], g0[2], g0[3], g0[4], g0[5], g0[6]);
+    diff::bike_step_bwd(c->F, e.ox, e.oy, e.th, e.sp, e.gx, e.gy, al, be, ga, c->v, 0.3f, -0.2f,
+                        0.5f, 0.7f, g1[0], g1[1], g1[2], g1[3], g1[4], g1[5], g1[6], &zero, gf);
+    for (int k = 0; k < 7; ++k)
+      EXPECT_EQ(g0[k], g1[k]);
+  }
+}
+
+// One step through the port matches one tick of the deployed bicycle_rollout_ext (nsub 1) with
+// the same per-agent force, with and without the force in the steering.
+TEST(DiffExtForce, MatchesTheDeployedDrive) {
+  const std::unique_ptr<city> c = make_city();
+  const float al = 0.6f, be = 1.8f, ga = 0.9f;
+  const std::vector<ext_case> cs = ext_cases(*c, 64);
+  const int n = static_cast<int>(cs.size());
+  cvc::nav::veh_params vp;
+  vp.rr = c->v.rr;
+  vp.d_hat = c->v.d_hat;
+  vp.dt = c->v.hdt;
+  vp.vmax = c->v.vmax;
+  vp.L = c->v.L;
+  vp.delta_max = c->v.delta_max;
+  vp.a_max = c->v.a_max;
+  vp.a_lat_max = c->v.a_lat_max;
+  vp.k_steer = c->v.k_steer;
+  vp.nsub = 1;
+  vp.allow_reverse = c->v.allow_reverse != 0;
+  for (const bool steer : {true, false}) {
+    std::vector<float> o(2 * n), th(n), sp(n), goal(2 * n), A(n, al), B(n, be), G(n, ga);
+    for (int i = 0; i < n; ++i) {
+      o[2 * i] = cs[i].ox;
+      o[2 * i + 1] = cs[i].oy;
+      th[i] = cs[i].th;
+      sp[i] = cs[i].sp;
+      goal[2 * i] = cs[i].gx;
+      goal[2 * i + 1] = cs[i].gy;
+    }
+    cvc::nav::ext_force ext;
+    ext.sample = constant_sample;
+    ext.user = const_cast<std::vector<ext_case> *>(&cs);
+    ext.steer = steer;
+    std::vector<float> minclr(n);
+    cvc::nav::bicycle_rollout_ext(c->fs, o.data(), th.data(), sp.data(), goal.data(), A.data(),
+                                  B.data(), G.data(), n, nullptr, vp, ext, minclr.data(), 1);
+    double worst = 0.0;
+    for (int i = 0; i < n; ++i) {
+      diff::ext_in e;
+      e.fx = cs[i].fx;
+      e.fy = cs[i].fy;
+      e.steer = steer ? 1 : 0;
+      float x1, y1, t1, s1;
+      diff::bike_step(c->F, cs[i].ox, cs[i].oy, cs[i].th, cs[i].sp, cs[i].gx, cs[i].gy, al, be, ga,
+                      c->v, x1, y1, t1, s1, &e);
+      worst = std::max({worst, static_cast<double>(std::fabs(x1 - o[2 * i])),
+                        static_cast<double>(std::fabs(y1 - o[2 * i + 1])),
+                        static_cast<double>(std::fabs(t1 - th[i])),
+                        static_cast<double>(std::fabs(s1 - sp[i]))});
+    }
+    std::printf("  one step with F_ext (steer %d) against the deployed drive: worst %.2e\n",
+                steer ? 1 : 0, worst);
+    EXPECT_LT(worst, 1e-5);
+  }
+}
+
+// dL/dF_ext against central differences on the kinematic step and on the dynamic one, and the
+// position Jacobian chained into the position gradient for a force that depends on where the
+// agent is (F = A o + b).
+TEST(DiffExtForce, GradientsMatchFiniteDifferences) {
+  const std::unique_ptr<city> c = make_city();
+  const float al = 0.6f, be = 1.8f, ga = 0.9f, eps = 1e-3f;
+  const float w[4] = {0.7f, -0.4f, 0.3f, 0.5f}; // L = w . (x1, y1, th1, sp1)
+  const float ux = 0.6f, uy = 0.8f;             // the direction of each check
+  const auto loss = [&](const ext_case &e, float fx, float fy, float ox, float oy) {
+    diff::ext_in x;
+    x.fx = fx;
+    x.fy = fy;
+    float s1[4];
+    diff::bike_step(c->F, ox, oy, e.th, e.sp, e.gx, e.gy, al, be, ga, c->v, s1[0], s1[1], s1[2],
+                    s1[3], &x);
+    return static_cast<double>(w[0] * s1[0] + w[1] * s1[1] + w[2] * s1[2] + w[3] * s1[3]);
+  };
+  const float A[4] = {0.8f, -0.3f, 0.4f, 0.6f}, b[2] = {0.1f, -0.2f};
+  const auto F = [&](float ox, float oy, float &fx, float &fy) {
+    fx = A[0] * ox + A[1] * oy + b[0];
+    fy = A[2] * ox + A[3] * oy + b[1];
+  };
+  fd_sum sf, so;
+  for (const ext_case &e : ext_cases(*c, 48)) {
+    diff::ext_in x;
+    x.fx = e.fx;
+    x.fy = e.fy;
+    float g[7], gf[2];
+    diff::bike_step_bwd(c->F, e.ox, e.oy, e.th, e.sp, e.gx, e.gy, al, be, ga, c->v, w[0], w[1],
+                        w[2], w[3], g[0], g[1], g[2], g[3], g[4], g[5], g[6], &x, gf);
+    sf.add(
+        gf[0] * ux + gf[1] * uy,
+        [&](double t) { return loss(e, e.fx + (float)t * ux, e.fy + (float)t * uy, e.ox, e.oy); },
+        eps);
+    // A force that depends on the position: its Jacobian joins the position gradient.
+    diff::ext_in xj;
+    F(e.ox, e.oy, xj.fx, xj.fy);
+    xj.dfx_dox = A[0];
+    xj.dfx_doy = A[1];
+    xj.dfy_dox = A[2];
+    xj.dfy_doy = A[3];
+    diff::bike_step_bwd(c->F, e.ox, e.oy, e.th, e.sp, e.gx, e.gy, al, be, ga, c->v, w[0], w[1],
+                        w[2], w[3], g[0], g[1], g[2], g[3], g[4], g[5], g[6], &xj, gf);
+    const auto lo = [&](float ox, float oy) {
+      float fx, fy;
+      F(ox, oy, fx, fy);
+      return loss(e, fx, fy, ox, oy);
+    };
+    so.add(
+        g[0] * ux + g[1] * uy,
+        [&](double t) { return lo(e.ox + (float)t * ux, e.oy + (float)t * uy); }, eps);
+  }
+
+  // The dynamic step: dL/dF_ext against central differences.
+  const dyn_bike_params p =
+      cvc::physics::nav_plant::dyn_bike_params_at(cvc::physics::vehicle_desc::roboracer(), c->v.L);
+  dyn_state<float> wd{};
+  for (int k = 0; k < dyn_state<float>::size; ++k)
+    wd[k] = 0.1f * static_cast<float>(k + 1) * (k % 2 ? -1.0f : 1.0f);
+  fd_sum sd;
+  for (const ext_case &e : ext_cases(*c, 48)) {
+    dyn_state<float> s{};
+    s.x = e.ox;
+    s.y = e.oy;
+    s.psi = e.th;
+    s.vx = e.sp;
+    const auto dl = [&](float fx, float fy) {
+      diff::ext_in x;
+      x.fx = fx;
+      x.fy = fy;
+      dyn_state<float> o;
+      diff::dyn_bike_step(c->F, s, e.gx, e.gy, al, be, ga, c->v, p, 0.0f, o, &x);
+      double acc = 0.0;
+      for (int k = 0; k < dyn_state<float>::size; ++k)
+        acc += static_cast<double>(wd[k]) * o[k];
+      return acc;
+    };
+    diff::ext_in x;
+    x.fx = e.fx;
+    x.fy = e.fy;
+    dyn_state<float> gs{};
+    float gal = 0, gbe = 0, gga = 0, gf[2];
+    diff::dyn_bike_step_bwd(c->F, s, e.gx, e.gy, al, be, ga, c->v, p, 0.0f, wd, gs, gal, gbe, gga,
+                            &x, gf);
+    sd.add(
+        gf[0] * ux + gf[1] * uy,
+        [&](double t) { return dl(e.fx + (float)t * ux, e.fy + (float)t * uy); }, eps);
+  }
+  std::printf("  dL/dF_ext vs central differences: kinematic %.2e, dynamic %.2e; through a "
+              "position-dependent force %.2e (cases on a switch: %d, %d, %d)\n",
+              sf.rel(), sd.rel(), so.rel(), sf.kinked, sd.kinked, so.kinked);
+  expect_fd(sf, 5e-2, "kinematic dL/dF_ext");
+  expect_fd(sd, 5e-2, "dynamic dL/dF_ext");
+  expect_fd(so, 5e-2, "through a position-dependent force");
+}
+
+// ── The trajectory helper: bike_rollout_ext / bike_rollout_ext_bwd (ext_rollout.h) ──
+
+namespace {
+
+// F = A o + b + c, with J = A: a force that depends on where the agent is, plus an offset c
+// whose gradient is the sum of dL/dF_ext over the steps.
+struct affine_force {
+  float A[4] = {0.8f, -0.3f, 0.4f, 0.6f};
+  float b[2] = {0.1f, -0.2f};
+  float c[2] = {0.0f, 0.0f};
+};
+void affine_sample(void *user, int, float ox, float oy, float *f, float *J) {
+  const affine_force &a = *static_cast<const affine_force *>(user);
+  f[0] = a.A[0] * ox + a.A[1] * oy + a.b[0] + a.c[0];
+  f[1] = a.A[2] * ox + a.A[3] * oy + a.b[1] + a.c[1];
+  for (int k = 0; k < 4; ++k)
+    J[k] = a.A[k];
+}
+
+} // namespace
+
+// The recorded trajectory is bike_step's with the force sampled every `hold` steps and held, and
+// a null force is the plain rollout.
+TEST(DiffExtRollout, TrajectoryIsTheStepsAndTheirForces) {
+  const std::unique_ptr<city> c = make_city();
+  const int T = 20;
+  for (const ext_case &e : ext_cases(*c, 16)) {
+    for (const int hold : {1, 3}) {
+      affine_force af;
+      diff::bike_ext_fn fn;
+      fn.sample = affine_sample;
+      fn.user = &af;
+      fn.hold = hold;
+      diff::bike_tape tape;
+      diff::bike_rollout_ext(c->F, c->v, e.ox, e.oy, e.th, e.sp, e.gx, e.gy, 0.6f, 1.8f, 0.9f, T,
+                             fn, tape);
+      ASSERT_EQ(tape.state.size(), static_cast<std::size_t>(4 * (T + 1)));
+      float s[4] = {e.ox, e.oy, e.th, e.sp};
+      diff::ext_in x;
+      for (int t = 0; t < T; ++t) {
+        if (t % hold == 0) {
+          float J[4];
+          float F[2];
+          affine_sample(&af, t, s[0], s[1], F, J);
+          x.fx = F[0];
+          x.fy = F[1];
+        }
+        float s1[4];
+        diff::bike_step(c->F, s[0], s[1], s[2], s[3], e.gx, e.gy, 0.6f, 1.8f, 0.9f, c->v, s1[0],
+                        s1[1], s1[2], s1[3], &x);
+        for (int k = 0; k < 4; ++k) {
+          EXPECT_EQ(tape.state[4 * (t + 1) + k], s1[k]);
+          s[k] = s1[k];
+        }
+        EXPECT_EQ(tape.sampled_at[t], t - t % hold);
+      }
+    }
+    // No force: the plain rollout.
+    diff::bike_ext_fn none;
+    diff::bike_tape tape;
+    diff::bike_rollout_ext(c->F, c->v, e.ox, e.oy, e.th, e.sp, e.gx, e.gy, 0.6f, 1.8f, 0.9f, T,
+                           none, tape);
+    float s[4] = {e.ox, e.oy, e.th, e.sp};
+    for (int t = 0; t < T; ++t) {
+      float s1[4];
+      diff::bike_step(c->F, s[0], s[1], s[2], s[3], e.gx, e.gy, 0.6f, 1.8f, 0.9f, c->v, s1[0],
+                      s1[1], s1[2], s1[3]);
+      for (int k = 0; k < 4; ++k) {
+        EXPECT_EQ(tape.state[4 * (t + 1) + k], s1[k]);
+        s[k] = s1[k];
+      }
+    }
+  }
+}
+
+// The reverse against central differences over a 10-step trajectory with a position-dependent
+// force, sampled every step and held for 3: dL/d(initial state), dL/dF (through a constant offset
+// added to F at every step) and dL/dbeta at one step, with L = sum_t w_t . state_t.
+TEST(DiffExtRollout, ReverseMatchesFiniteDifferences) {
+  const std::unique_ptr<city> c = make_city();
+  const int T = 10, k_beta = 4;
+  const float eps = 1e-3f, ux = 0.6f, uy = 0.8f;
+  std::vector<float> w(static_cast<std::size_t>(4 * (T + 1)));
+  {
+    std::mt19937 rng(3);
+    std::uniform_real_distribution<float> u(-0.5f, 0.5f);
+    for (float &x : w)
+      x = u(rng);
+  }
+  for (const int hold : {1, 3}) {
+    fd_sum chk[3];
+    for (const ext_case &e : ext_cases(*c, 32)) {
+      // A goal 0.8 ahead: the goal spring stays inside the acceleration clamp, so beta has a
+      // gradient (a far goal saturates it), and 10 steps (at most 0.54) never pass the goal,
+      // whose behind branch would flip under the differences.
+      std::vector<float> goal(2 * T), coef(3 * T);
+      for (int t = 0; t < T; ++t) {
+        goal[2 * t] = e.ox + 0.8f * std::cos(e.th);
+        goal[2 * t + 1] = e.oy + 0.8f * std::sin(e.th);
+        coef[3 * t] = 0.6f;
+        coef[3 * t + 1] = 1.8f;
+        coef[3 * t + 2] = 0.9f;
+      }
+      const auto loss = [&](float ox, float oy, float cx, float cy, const std::vector<float> &cf) {
+        affine_force af;
+        af.c[0] = cx;
+        af.c[1] = cy;
+        diff::bike_ext_fn fn;
+        fn.sample = affine_sample;
+        fn.user = &af;
+        fn.hold = hold;
+        diff::bike_tape tape;
+        diff::bike_rollout_ext(c->F, c->v, ox, oy, e.th, e.sp, goal.data(), cf.data(), T, fn, tape);
+        double acc = 0.0;
+        for (std::size_t i = 0; i < w.size(); ++i)
+          acc += static_cast<double>(w[i]) * tape.state[i];
+        return acc;
+      };
+      affine_force af;
+      diff::bike_ext_fn fn;
+      fn.sample = affine_sample;
+      fn.user = &af;
+      fn.hold = hold;
+      diff::bike_tape tape;
+      diff::bike_rollout_ext(c->F, c->v, e.ox, e.oy, e.th, e.sp, goal.data(), coef.data(), T, fn,
+                             tape);
+      std::vector<float> g_fext(2 * T), g_coef(3 * T);
+      float g_init[4];
+      diff::bike_rollout_ext_bwd(c->F, c->v, tape, goal.data(), coef.data(), w.data(),
+                                 g_fext.data(), g_coef.data(), g_init);
+      // dL/d(initial position) along (ux, uy).
+      chk[0].add(
+          g_init[0] * ux + g_init[1] * uy,
+          [&](double t) { return loss(e.ox + (float)t * ux, e.oy + (float)t * uy, 0, 0, coef); },
+          eps);
+      // dL/dc: the sum of dL/dF_ext over the steps.
+      double gc = 0.0;
+      for (int t = 0; t < T; ++t)
+        gc += g_fext[2 * t] * ux + g_fext[2 * t + 1] * uy;
+      chk[1].add(
+          gc, [&](double t) { return loss(e.ox, e.oy, (float)t * ux, (float)t * uy, coef); }, eps);
+      // dL/dbeta at one step.
+      chk[2].add(
+          g_coef[3 * k_beta + 1],
+          [&](double t) {
+            std::vector<float> cf = coef;
+            cf[3 * k_beta + 1] += (float)t;
+            return loss(e.ox, e.oy, 0, 0, cf);
+          },
+          1e-2); // beta's effect at one step is small: at 1e-3, float noise is a fair share
+    }
+    std::printf("  hold %d, %d steps: dL/dinit %.2e, dL/dF %.2e, dL/dbeta %.2e (relative to "
+                "central differences; cases on a switch %d, %d, %d)\n",
+                hold, T, chk[0].rel(), chk[1].rel(), chk[2].rel(), chk[0].kinked, chk[1].kinked,
+                chk[2].kinked);
+    for (int k = 0; k < 3; ++k)
+      expect_fd(chk[k], 5e-2, "check " + std::to_string(k) + ", hold " + std::to_string(hold));
+  }
+}
+
+// The dynamic twin, dyn_rollout_ext: its trajectory is dyn_bike_step's with the held force, and
+// its reverse matches central differences (dL/d initial position and dL/dF through an offset).
+TEST(DiffExtRollout, TheDynamicTwinMatchesItsStepsAndDifferences) {
+  const std::unique_ptr<city> c = make_city();
+  const dyn_bike_params p =
+      cvc::physics::nav_plant::dyn_bike_params_at(cvc::physics::vehicle_desc::roboracer(), c->v.L);
+  const int T = 10;
+  // 3e-4, not the kinematic checks' 1e-3: at 1e-3 two of the 32 held-force trajectories straddle
+  // a kink in the dynamic plant (a clamp or governor switch) and the difference jumps, while the
+  // reverse agrees with the 3e-4 difference on every agent.
+  const float eps = 3e-4f, ux = 0.6f, uy = 0.8f;
+  std::vector<dyn_state<float>> w(static_cast<std::size_t>(T + 1));
+  {
+    std::mt19937 rng(4);
+    std::uniform_real_distribution<float> u(-0.5f, 0.5f);
+    for (dyn_state<float> &x : w)
+      for (int k = 0; k < dyn_state<float>::size; ++k)
+        x[k] = u(rng);
+  }
+  for (const int hold : {1, 3}) {
+    fd_sum chk[2];
+    for (const ext_case &e : ext_cases(*c, 32)) {
+      std::vector<float> goal(2 * T), coef(3 * T);
+      for (int t = 0; t < T; ++t) {
+        goal[2 * t] = e.ox + 0.8f * std::cos(e.th);
+        goal[2 * t + 1] = e.oy + 0.8f * std::sin(e.th);
+        coef[3 * t] = 0.6f;
+        coef[3 * t + 1] = 1.8f;
+        coef[3 * t + 2] = 0.9f;
+      }
+      const auto run = [&](float ox, float oy, float cx, float cy, diff::dyn_tape &tape) {
+        affine_force af;
+        af.c[0] = cx;
+        af.c[1] = cy;
+        diff::bike_ext_fn fn;
+        fn.sample = affine_sample;
+        fn.user = &af;
+        fn.hold = hold;
+        dyn_state<float> s0{};
+        s0.x = ox;
+        s0.y = oy;
+        s0.psi = e.th;
+        s0.vx = e.sp;
+        diff::dyn_rollout_ext(c->F, c->v, p, s0, goal.data(), coef.data(), T, fn, tape);
+        double acc = 0.0;
+        for (int t = 0; t <= T; ++t)
+          for (int k = 0; k < dyn_state<float>::size; ++k)
+            acc += static_cast<double>(w[t][k]) * tape.state[t][k];
+        return acc;
+      };
+      diff::dyn_tape tape, tp, tm;
+      run(e.ox, e.oy, 0, 0, tape);
+      // The trajectory is the steps with the held force.
+      {
+        affine_force af;
+        dyn_state<float> s = tape.state[0];
+        diff::ext_in x;
+        for (int t = 0; t < T; ++t) {
+          if (t % hold == 0) {
+            float F[2], J[4];
+            affine_sample(&af, t, s.x, s.y, F, J);
+            x.fx = F[0];
+            x.fy = F[1];
+          }
+          dyn_state<float> s1;
+          diff::dyn_bike_step(c->F, s, goal[2 * t], goal[2 * t + 1], 0.6f, 1.8f, 0.9f, c->v, p,
+                              0.0f, s1, &x);
+          for (int k = 0; k < dyn_state<float>::size; ++k)
+            EXPECT_EQ(tape.state[t + 1][k], s1[k]);
+          s = s1;
+        }
+      }
+      std::vector<float> g_fext(2 * T);
+      dyn_state<float> g_init;
+      diff::dyn_rollout_ext_bwd(c->F, c->v, p, tape, goal.data(), coef.data(), w.data(),
+                                g_fext.data(), nullptr, &g_init);
+      chk[0].add(
+          g_init.x * ux + g_init.y * uy,
+          [&](double t) { return run(e.ox + (float)t * ux, e.oy + (float)t * uy, 0, 0, tp); }, eps);
+      double gc = 0.0;
+      for (int t = 0; t < T; ++t)
+        gc += g_fext[2 * t] * ux + g_fext[2 * t + 1] * uy;
+      chk[1].add(
+          gc, [&](double t) { return run(e.ox, e.oy, (float)t * ux, (float)t * uy, tp); }, eps);
+    }
+    std::printf("  dynamic, hold %d, %d steps: dL/dinit %.2e, dL/dF %.2e (relative to central "
+                "differences; cases on a switch %d, %d)\n",
+                hold, T, chk[0].rel(), chk[1].rel(), chk[0].kinked, chk[1].kinked);
+    for (int k = 0; k < 2; ++k)
+      expect_fd(chk[k], 5e-2,
+                "dynamic check " + std::to_string(k) + ", hold " + std::to_string(hold));
+  }
+}
+
+// The torch twin's gate (GRL-SNAM): bike_rollout_ext and its reverse on fixed cases, with the
+// field they sample, written to tests/data/ext_rollout_golden.json. Six agents, 12 steps each,
+// per-step goals and coefficients, an affine force per agent (F = A o + b, J = A) held for 1 or
+// 3 steps, one agent whose force does not steer; the loss is L = sum_t w_t . state_t. The torch
+// twin replays it in float64 and checks this float reverse against autograd.
+// CVC_EXT_ROLLOUT_GOLDEN_WRITE=1 rewrites the file; otherwise this build must reproduce it (the
+// controller is float and uses libm, so to 1e-4, not bit for bit across platforms).
+TEST(DiffExtRollout, Golden) {
+  namespace fs = std::filesystem;
+  const fs::path path = fs::path(__FILE__).parent_path() / "data" / "ext_rollout_golden.json";
+  const int R = 32, C = 32, T = 12;
+  std::vector<std::uint8_t> occ(static_cast<std::size_t>(R * C), 0);
+  for (int r = 13; r <= 18; ++r)
+    for (int c = 12; c <= 19; ++c)
+      occ[static_cast<std::size_t>(r * C + c)] = 1;
+  const cvc::nav::training_scene sc =
+      cvc::nav::occupancy_scene(occ.data(), R, C, -100.0, -100.0, 100.0, 100.0, 0.05);
+  const cvc::nav::field_stack fst = sc.field();
+  diff::field F;
+  F.data = fst.data;
+  F.H = fst.H;
+  F.W = fst.W;
+  F.S = static_cast<float>(fst.S);
+  F.cx = static_cast<float>(fst.cx);
+  F.cy = static_cast<float>(fst.cy);
+  F.mnx = static_cast<float>(fst.mnx);
+  F.mny = static_cast<float>(fst.mny);
+  F.mxx = static_cast<float>(fst.mxx);
+  F.mxy = static_cast<float>(fst.mxy);
+  const cvc::nav::train_config tc;
+  bike_veh v{};
+  v.rr = sc.rr;
+  v.d_hat = sc.d_hat;
+  v.vmax = sc.vmax;
+  v.L = tc.veh_L;
+  v.delta_max = tc.veh_delta_max;
+  v.a_max = tc.veh_a_max;
+  v.a_lat_max = tc.veh_a_lat_max;
+  v.k_steer = tc.veh_k_steer;
+  v.hdt = sc.dt;
+  v.allow_reverse = tc.veh_allow_reverse ? 1 : 0;
+
+  struct gcase {
+    float s0[4], g0[2], A[4], b[2];
+    int hold, steer;
+  };
+  const gcase cases[] = {
+      {{-2.5f, -0.5f, 0.0f, 0.3f}, {2.5f, 0.3f}, {0.2f, -0.1f, 0.05f, 0.15f}, {0.1f, 0.2f}, 1, 1},
+      {{-2.4f, 0.6f, 0.2f, 0.6f}, {2.4f, -0.4f}, {-0.3f, 0.2f, 0.1f, -0.2f}, {0.0f, -0.3f}, 3, 1},
+      {{1.8f, -2.2f, 1.4f, 0.1f}, {-0.5f, 2.6f}, {0.4f, 0.0f, 0.0f, 0.4f}, {-0.2f, 0.1f}, 1, 1},
+      {{0.0f, 2.0f, -1.6f, 0.8f}, {0.3f, -2.5f}, {0.1f, 0.3f, -0.3f, 0.1f}, {0.3f, 0.0f}, 3, 1},
+      {{-1.5f, 1.4f, -0.4f, 0.5f}, {1.6f, 0.9f}, {0.25f, 0.1f, -0.1f, 0.25f}, {-0.1f, -0.1f}, 1, 1},
+      {{2.2f, 0.4f, 3.0f, 0.4f}, {-2.6f, -0.2f}, {0.15f, -0.2f, 0.2f, 0.15f}, {0.2f, 0.1f}, 3, 0},
+  };
+  // The loss weights, the same rule in the file and in the twin.
+  std::vector<float> w(static_cast<std::size_t>(4 * (T + 1)));
+  for (int t = 0; t <= T; ++t)
+    for (int k = 0; k < 4; ++k)
+      w[4 * t + k] = 0.1f * static_cast<float>((3 * t + k) % 7 - 3);
+
+  struct ctx {
+    float A[4], b[2];
+  };
+  const auto sample = [](void *user, int, float ox, float oy, float *f, float *J) {
+    const ctx &c = *static_cast<const ctx *>(user);
+    f[0] = c.A[0] * ox + c.A[1] * oy + c.b[0];
+    f[1] = c.A[2] * ox + c.A[3] * oy + c.b[1];
+    for (int k = 0; k < 4; ++k)
+      J[k] = c.A[k];
+  };
+  const auto num = [](double x) {
+    char b[40];
+    std::snprintf(b, sizeof b, "%.9g", x);
+    return std::string(b);
+  };
+  const auto arr = [&](const float *x, std::size_t n) {
+    std::string out = "[";
+    for (std::size_t k = 0; k < n; ++k)
+      out += (k ? ", " : "") + num(x[k]);
+    return out + "]";
+  };
+  std::vector<double> now;
+  std::ostringstream js;
+  js << "{\n \"format\": \"cvc-ext-rollout-golden-1\",\n";
+  js << " \"note\": \"diff::bike_rollout_ext (float) on fixed cases; L = sum_t w[t] . "
+        "(ox, oy, th, sp)_t\",\n";
+  const std::size_t HW = static_cast<std::size_t>(fst.H) * fst.W;
+  js << " \"field\": {\"H\": " << fst.H << ", \"W\": " << fst.W << ", \"bounds\": [" << num(fst.mnx)
+     << ", " << num(fst.mny) << ", " << num(fst.mxx) << ", " << num(fst.mxy) << "], \"center\": ["
+     << num(fst.cx) << ", " << num(fst.cy) << "], \"scale\": " << num(fst.S)
+     << ",\n  \"phi\": " << arr(fst.data, HW) << ",\n  \"nx\": " << arr(fst.data + HW, HW)
+     << ",\n  \"ny\": " << arr(fst.data + 2 * HW, HW) << "},\n";
+  js << " \"veh\": {\"rr\": " << num(v.rr) << ", \"d_hat\": " << num(v.d_hat)
+     << ", \"vmax\": " << num(v.vmax) << ", \"L\": " << num(v.L)
+     << ", \"delta_max\": " << num(v.delta_max) << ", \"a_max\": " << num(v.a_max)
+     << ", \"a_lat_max\": " << num(v.a_lat_max) << ", \"k_steer\": " << num(v.k_steer)
+     << ", \"hdt\": " << num(v.hdt) << ", \"allow_reverse\": " << v.allow_reverse << "},\n";
+  js << " \"T\": " << T << ",\n \"w\": " << arr(w.data(), w.size()) << ",\n \"cases\": [\n";
+  for (std::size_t ci = 0; ci < sizeof cases / sizeof cases[0]; ++ci) {
+    const gcase &gc = cases[ci];
+    std::vector<float> goal(2 * T), coef(3 * T);
+    for (int t = 0; t < T; ++t) {
+      goal[2 * t] = gc.g0[0] + 0.01f * static_cast<float>(t);
+      goal[2 * t + 1] = gc.g0[1] - 0.005f * static_cast<float>(t);
+      coef[3 * t] = 0.6f + 0.01f * static_cast<float>(t);
+      coef[3 * t + 1] = 1.8f - 0.02f * static_cast<float>(t);
+      coef[3 * t + 2] = 0.9f + 0.005f * static_cast<float>(t);
+    }
+    ctx cx;
+    for (int k = 0; k < 4; ++k)
+      cx.A[k] = gc.A[k];
+    cx.b[0] = gc.b[0];
+    cx.b[1] = gc.b[1];
+    diff::bike_ext_fn fn;
+    fn.sample = sample;
+    fn.user = &cx;
+    fn.hold = gc.hold;
+    fn.steer = gc.steer;
+    diff::bike_tape tape;
+    diff::bike_rollout_ext(F, v, gc.s0[0], gc.s0[1], gc.s0[2], gc.s0[3], goal.data(), coef.data(),
+                           T, fn, tape);
+    std::vector<float> g_fext(2 * T), g_coef(3 * T);
+    float g_init[4];
+    diff::bike_rollout_ext_bwd(F, v, tape, goal.data(), coef.data(), w.data(), g_fext.data(),
+                               g_coef.data(), g_init);
+    for (const float x : tape.state)
+      now.push_back(x);
+    for (const float x : g_fext)
+      now.push_back(x);
+    for (const float x : g_coef)
+      now.push_back(x);
+    for (const float x : g_init)
+      now.push_back(x);
+    js << "  {\"state0\": " << arr(gc.s0, 4) << ", \"A\": " << arr(gc.A, 4)
+       << ", \"b\": " << arr(gc.b, 2) << ", \"hold\": " << gc.hold << ", \"steer\": " << gc.steer
+       << ",\n   \"goals\": " << arr(goal.data(), goal.size())
+       << ",\n   \"coefs\": " << arr(coef.data(), coef.size())
+       << ",\n   \"states\": " << arr(tape.state.data(), tape.state.size())
+       << ",\n   \"g_fext\": " << arr(g_fext.data(), g_fext.size())
+       << ",\n   \"g_coef\": " << arr(g_coef.data(), g_coef.size())
+       << ",\n   \"g_init\": " << arr(g_init, 4) << "}"
+       << (ci + 1 < sizeof cases / sizeof cases[0] ? "," : "") << "\n";
+  }
+  js << " ]\n}\n";
+  const char *write = std::getenv("CVC_EXT_ROLLOUT_GOLDEN_WRITE");
+  if (write && std::string(write) == "1") {
+    std::ofstream(path, std::ios::binary) << js.str();
+    std::printf("  wrote %s\n", path.string().c_str());
+    return;
+  }
+  boost::property_tree::ptree want;
+  ASSERT_NO_THROW(boost::property_tree::read_json(path.string(), want)) << path;
+  std::vector<double> golden;
+  for (const auto &c : want.get_child("cases"))
+    for (const char *key : {"states", "g_fext", "g_coef", "g_init"})
+      for (const auto &x : c.second.get_child(key))
+        golden.push_back(x.second.get_value<double>());
+  ASSERT_EQ(golden.size(), now.size());
+  for (std::size_t k = 0; k < now.size(); ++k)
+    EXPECT_LE(std::fabs(now[k] - golden[k]),
+              1e-4 * std::max(1.0, std::max(std::fabs(now[k]), std::fabs(golden[k]))))
+        << "value " << k << ": golden " << golden[k] << ", now " << now[k];
 }
