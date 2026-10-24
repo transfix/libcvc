@@ -58,18 +58,24 @@
 #include <cvc/ariadne/stream/stream_view.h>
 #include <cvc/ariadne/tvision_backend.h>
 #include <cvc/core/app.h>
+#include <random> // std::random_device — the conference node id's per-launch suffix
 #include <sstream> // arigl info: the GL report, line by line
 #if CVC_ENABLE_WS || CVC_ENABLE_GRPC
 // Conference mode: a state transport joins a hosted room, chosen by the relay URL scheme —
 // ws://|wss:// (WebSocket, what browsers dial; the host page sets wss://<page-origin>/…) or grpc://
 // (native gRPC). register_conference supplies the room verbs and the shard/transport are wired here
 // in the host; both transports carry the canonical media_frame and interop via the relay's router.
+#include <cvc/ariadne/conference/room_intrinsics.h> // room_join (re-assert after a reconnect)
+#include <cvc/ariadne/conference/room_net.h>        // publish our link quality to the room
+#include <cvc/ariadne/holon.h>                 // the client replica of the room holon (avatars, H1)
+#include <cvc/ariadne/holon_sync.h>            // client_pump / propose_intent over the room tree
 #include <cvc/ariadne/stream/frame.h>          // frame_ptr — forward the local camera/mic streams
 #include <cvc/ariadne/stream/stream.h>         // stream::open — per-peer decode proxies
 #include <cvc/ariadne/stream/stream_channel.h> // subscribe / publish_external
 #include <cvc/ariadne/stream/stream_registry.h> // look up the local camera/mic streams by token
 #include <cvc/core/clock_driver.h>        // one-advance-per-frame fan-out over the world_clock
 #include <cvc/core/world_clock.h>         // app.world_clock().t() — the common media timestamp
+#include <cvc/gl/ariadne/room_view.h>     // the room scene + avatar markers in the 3D view
 #include <cvc/gl/capture/audio_source.h>  // list_audio_capture_devices — mic picker
 #include <cvc/gl/capture/camera_source.h> // list_cameras — camera picker
 #include <cvc/gl/playback/audio_output.h> // open_audio_output — play each peer's mic
@@ -281,8 +287,39 @@ struct ConferenceSession {
   cvc::app *app_ = nullptr;
   std::string pid_; // this participant's node id (== the room-join pid; stamps our outgoing frames)
   std::string
-      prefix_; // the document chroot prefix: host state access must prepend it so it reaches
-               // the SAME keys the .ari's (state-get/-set) do (which are prefix-relative)
+      prefix_;       // the document chroot prefix: host state access must prepend it so it reaches
+                     // the SAME keys the .ari's (state-get/-set) do (which are prefix-relative)
+  std::string room_; // the joined room id (conf.rooms.<room_>)
+
+  // ── link quality + reconnect ──
+  // Once a second: read our link to the relay (state_transport::link_reports -- the Ping/Pong
+  // round trip and traffic both ways), publish it to the room as participants.<pid>.net.* so every
+  // roster shows it next to our name, and show it in our own row (self.ping / self.down / self.up).
+  // If the link is gone (the relay restarted, the network dropped, or a long-backgrounded tab was
+  // reaped) dial the relay again every few seconds, and after reconnecting re-assert our presence
+  // for a few seconds (the relay marked us as left; our write must land after its snapshot).
+  std::string relay_url_;
+  bool relay_grpc_ = false;
+  bool ever_linked_ = false;
+  double next_net_s_ = 0.0, next_reconnect_s_ = 0.0, rejoin_until_s_ = 0.0;
+  cvc::state_link_rate_meter link_meter_;
+
+  // ── the room in 3D (H1 slice 6): the shared scene + avatars, third-person controls ──
+  // A client replica of the room holon, kept in step with the replicated room tree by client_pump
+  // each frame: our avatar predicted from our own intent, peers walked between the relay's pose
+  // samples. room_view draws the server's scene + one marker per participant into the window's
+  // SceneGraph; the camera orbits our avatar. Made by attach_view (window mode only); room_view_
+  // is declared after holon_ and torn down first (stop()).
+  std::unique_ptr<cvc::ariadne::holon> holon_;
+  std::unique_ptr<gla::room_view> room_view_;
+  cvc::gl::CameraController *cam_ = nullptr;
+  cvc::ariadne::avatar_intent last_intent_; // the last intent proposed (propose only on change)
+  bool intent_proposed_ = false;            // proposed once yet (the first frame always proposes)
+  std::vector<std::string> drawn_pids_;     // avatars drawn at the last log (log on change)
+  bool framed_ = false;                     // camera framed on our avatar once
+  double orbit_center_[3] = {0.0, 0.0, 0.0};
+  static constexpr double kWalkSpeed = 2.0; // m/s
+  static constexpr double kEyeHeight = 1.2; // orbit centre above the avatar's feet (m)
 
   // Publish: forward the local camera (latest) and mic (ring) streams. The .ari puts their tokens
   // in "cam_token" / "mic_token". We re-stamp each outgoing frame with a COMMON host clock (one
@@ -371,6 +408,8 @@ struct ConferenceSession {
   // future step between these without renumbering.
   enum : int {
     kOrderPumpAll = 10,   // drain/flush the state transport (replicated room tree) — first
+    kOrderNet = 12,       // ~1 Hz: our link quality -> the room; reconnect a lost relay link
+    kOrderRoom = 15,      // the room in 3D: keys -> intent, client holon, scene + avatars, camera
     kOrderWall = 20,      // refresh now_wall_ for the wall-time talk-hold
     kOrderControls = 30,  // read the user-list window's per-peer local controls
     kOrderDevEnum = 40,   // lazily enumerate camera/mic devices (one-shot)
@@ -397,11 +436,24 @@ struct ConferenceSession {
     // shown in the roster) may be any text — e.g. a browser's random "guest-ab12" — and room-join
     // already carries it separately as the "name" attr, so derive a safe node id here rather than
     // passing the display name straight through (a hyphen in it otherwise throws).
+    //
+    // The id also gets a random per-launch suffix. Replication drops a write whose (origin node id,
+    // sequence) it has already seen, so a client that restarts under the SAME id (a reloaded tab,
+    // a relaunched native client, two people who both kept the name "guest") would have every
+    // write ignored until the relay restarts: it would join a room nobody can see it in. A fresh
+    // id per session makes each launch a new participant; the name in the roster is unchanged.
     std::string nodeId;
     for (char c : self)
       nodeId += std::isalnum(static_cast<unsigned char>(c)) ? c : '_';
     if (nodeId.empty() || std::isdigit(static_cast<unsigned char>(nodeId.front())))
       nodeId.insert(0, "n_");
+    {
+      std::random_device rd;
+      const char *digits = "0123456789abcdefghijklmnopqrstuvwxyz";
+      nodeId += '_';
+      for (int i = 0; i < 6; ++i)
+        nodeId += digits[rd() % 36];
+    }
     gla::register_conference(app, backend); // room-join/roster + streaming + stream_view
     shard = std::make_unique<cvc::state_cluster_shard>(app, "conf", nodeId);
     // Replicate ONLY the shared room tree (conf.rooms.*), never this client's per-document UI state
@@ -416,6 +468,7 @@ struct ConferenceSession {
     app_ = &app;
     pid_ = nodeId;
     prefix_ = prefix;
+    room_ = room;
     // Drive the world clock from wall time via the clock driver: live mode so advance() banks wall
     // time. The driver owns the single advance of this app's clock and fires the conference's
     // per-frame steps in order (install_observers); nothing else advances it.
@@ -440,6 +493,8 @@ struct ConferenceSession {
     // the shared ops and send_media_/stop_ wrap the concrete's publish/stop.
     const std::string relayUrl(relay);
     const bool want_grpc = (relayUrl.rfind("grpc://", 0) == 0);
+    relay_url_ = relayUrl;
+    relay_grpc_ = want_grpc;
     bool ok = false;
     if (want_grpc) {
 #if CVC_ENABLE_GRPC
@@ -506,6 +561,136 @@ struct ConferenceSession {
     active = true;
     return true;
   }
+  static double steady_s() {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+  }
+
+  void net_step() {
+    if (!app_ || !tp_)
+      return;
+    const double now = steady_s();
+    if (now < next_net_s_)
+      return;
+    next_net_s_ = now + 1.0;
+    const std::vector<cvc::state_link_report> links = tp_->link_reports();
+    const cvc::state_link_report *relay = nullptr;
+    for (const cvc::state_link_report &r : links)
+      if (!r.accepted) { // the link WE dialed: the relay
+        relay = &r;
+        break;
+      }
+    auto &st = cvc::state::instance(*app_);
+    if (!relay) {
+      st(prefix_ + ".self.ping").value(std::string("--"));
+      if (ever_linked_ && now >= next_reconnect_s_)
+        reconnect(now);
+      return;
+    }
+    ever_linked_ = true;
+    const auto rates = link_meter_.update(links, now);
+    const auto it = rates.find(cvc::state_link_rate_meter::key_of(*relay));
+    cvc::ariadne::conference::net_sample s;
+    s.rtt_ms = relay->stats.rtt_ms;
+    s.in_kbps = it == rates.end() ? 0.0 : it->second.in_bps * 8.0 / 1000.0;
+    s.out_kbps = it == rates.end() ? 0.0 : it->second.out_bps * 8.0 / 1000.0;
+    cvc::ariadne::conference::write_participant_net(*app_, room_, pid_, s);
+    st(prefix_ + ".self.ping").value(cvc::ariadne::conference::format_rtt(s.rtt_ms));
+    st(prefix_ + ".self.down").value(cvc::ariadne::conference::format_rate(s.in_kbps));
+    st(prefix_ + ".self.up").value(cvc::ariadne::conference::format_rate(s.out_kbps));
+    if (now < rejoin_until_s_)
+      cvc::ariadne::conference::room_join(*app_, room_, pid_, st(prefix_ + ".conf.self").value());
+  }
+
+  void reconnect(double now) {
+    next_reconnect_s_ = now + 3.0;
+    std::fprintf(stderr, "arigl: conference: lost the relay link; reconnecting to %s\n",
+                 relay_url_.c_str());
+    bool ok = false;
+#if CVC_ENABLE_GRPC
+    if (relay_grpc_ && grpc_)
+      ok = grpc_->connect_to_peer(relay_url_.substr(7), std::chrono::milliseconds(3000));
+#endif
+#if CVC_ENABLE_WS
+    if (!relay_grpc_ && ws_)
+      ok = ws_->connect_to_peer(relay_url_, std::chrono::milliseconds(3000));
+#endif
+    if (ok)
+      rejoin_until_s_ = now + 6.0; // re-assert presence until the relay's snapshot has landed
+  }
+
+  // Window mode: show the room in 3D in `view` — the server's shared scene and an avatar per
+  // participant — with third-person controls: WASD / arrow keys walk our avatar relative to the
+  // camera's heading, and `cam` (Orbit) keeps orbiting it. A no-op for a document with no relay.
+  void attach_view(cvc::gl::SceneRenderer &view, cvc::gl::CameraController &cam) {
+    if (!active || !driver_ || !app_)
+      return;
+    holon_ = std::make_unique<cvc::ariadne::holon>(cvc::ariadne::holon_role::client);
+    room_view_ =
+        std::make_unique<gla::room_view>(view, *app_, room_, pid_, view.scene().getStatePrefix());
+    cam_ = &cam;
+    driver_->add_frame_observer(kOrderRoom,
+                                [this](const cvc::clock_driver::clock_frame &f) { step_room(f); });
+  }
+
+  void step_room(const cvc::clock_driver::clock_frame &f) {
+    if (!holon_ || !room_view_ || !cam_)
+      return;
+    // Keys -> intent, only in Orbit: in Fly the same keys move the camera instead. The camera's
+    // held set is dropped while the UI has the keyboard, so typing a name never walks.
+    cvc::ariadne::avatar_intent in;
+    if (cam_->mode() == cvc::gl::CameraController::Mode::Orbit) {
+      double eye[3], focal[3], up[3];
+      cam_->getPose(eye, focal, up);
+      const auto held = [this](const char *a, const char *b) {
+        return cam_->keyHeld(a) || cam_->keyHeld(b);
+      };
+      in = gla::intent_from_keys(held("w", "Up"), held("s", "Down"), held("a", "Left"),
+                                 held("d", "Right"), eye, focal, kWalkSpeed);
+    }
+    // Propose on the first frame even when standing still, so the tree never holds a walk an
+    // earlier session under this id proposed; after that, only on change (a replicated write).
+    if (!intent_proposed_ || in.move.x != last_intent_.move.x || in.move.y != last_intent_.move.y ||
+        in.move.z != last_intent_.move.z) {
+      cvc::ariadne::propose_intent(*holon_, *app_, room_, pid_, in);
+      last_intent_ = in;
+      intent_proposed_ = true;
+    }
+    // Re-assert it locally every frame: our avatar joins the holon only once our room-join is in
+    // the tree, so an intent proposed before then must still reach the prediction.
+    holon_->set_intent(pid_, last_intent_);
+    cvc::ariadne::client_pump(*holon_, *app_, room_, pid_, f.wall_dt);
+    room_view_->update(*holon_, f.wall_dt);
+    // Log who is drawn whenever that changes (the browser page shows stderr in its footer and the
+    // console): the quickest check that a client sees the room the relay holds.
+    const std::vector<std::string> drawn = room_view_->avatar_pids();
+    if (drawn != drawn_pids_) {
+      std::string who;
+      for (const std::string &pid : drawn)
+        who += (who.empty() ? "" : ", ") + pid;
+      std::fprintf(stderr, "arigl: room: %zu avatar(s): %s\n", drawn.size(), who.c_str());
+      drawn_pids_ = drawn;
+    }
+    for (const std::string &w : room_view_->take_warnings())
+      std::fprintf(stderr, "arigl: room: %s\n", w.c_str());
+    // Third person: frame our avatar once, then keep the orbit centre on it.
+    double p[3];
+    if (room_view_->self_position(p)) {
+      if (!framed_) {
+        // Frame the room around you, not just you: arriving at a party, you want to see who's here.
+        cam_->frameBounds(p[0] - 8.0, p[1] - 8.0, p[2], p[0] + 8.0, p[1] + 8.0, p[2] + 2.0);
+        framed_ = true;
+      }
+      const double c[3] = {p[0], p[1], p[2] + kEyeHeight};
+      if (std::fabs(c[0] - orbit_center_[0]) + std::fabs(c[1] - orbit_center_[1]) +
+              std::fabs(c[2] - orbit_center_[2]) >
+          1e-4) {
+        cam_->setOrbitCenter(c[0], c[1], c[2]);
+        orbit_center_[0] = c[0], orbit_center_[1] = c[1], orbit_center_[2] = c[2];
+      }
+    }
+  }
+
   // One advance per frame. The driver advances the per-app world_clock from wall time (the single
   // media stamp, frame().t) and fires the conference's per-frame steps as the ordered observers
   // install_observers() registered. Called from the input pump (run mode) and directly per frame
@@ -524,6 +709,8 @@ struct ConferenceSession {
     // Drive the state transport first: flush replicated room-tree writes and service queued reads
     // so room-join/roster are in place before anything this frame reads them.
     driver_->add_frame_observer(kOrderPumpAll, [this](const cf &) { tp_->pump_all(); });
+    // Our link quality to the room, and reconnecting a lost relay link (~1 Hz).
+    driver_->add_frame_observer(kOrderNet, [this](const cf &) { net_step(); });
     // Wall-clock seconds for the talk-hold — deliberately wall time, not world time, so the hold is
     // frame-rate independent and does not freeze when the sim clock is paused or scaled.
     driver_->add_frame_observer(kOrderWall, [this](const cf &) {
@@ -664,7 +851,8 @@ struct ConferenceSession {
   }
 
   void stop() {
-    peers_.clear(); // close decode proxies before the transport/shard go away
+    room_view_.reset(); // remove the room's nodes while the SceneGraph is still alive
+    peers_.clear();     // close decode proxies before the transport/shard go away
     mix_out_.reset();
     for (publisher &p : pubs_)
       p.sub.reset();
@@ -903,6 +1091,7 @@ struct ConferenceSession {
                            "document locally.\n");
     return false;
   }
+  void attach_view(cvc::gl::SceneRenderer &, cvc::gl::CameraController &) {}
   void pump() {}
   void stop() {}
 #endif
@@ -976,7 +1165,8 @@ int run_window(const ari::HostOptions &o) {
   // A conference-setup failure must not take down the runtime — fall back to running the document
   // locally (no relay) and say why, rather than letting the exception abort main.
   try {
-    conf.setup(app, sg.getStatePrefix(), rt.backend());
+    if (conf.setup(app, sg.getStatePrefix(), rt.backend()))
+      conf.attach_view(view, cam); // the room in 3D behind the conference windows
   } catch (const std::exception &e) {
     std::fprintf(stderr, "arigl: conference setup failed (%s); running the document locally\n",
                  e.what());

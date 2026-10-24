@@ -238,7 +238,7 @@ TEST(RoomSceneTest, ReadRoomSceneIsARealizableAriadneScene) {
   ASSERT_EQ(s.lights.size(), 1u);
   EXPECT_EQ(s.lights[0].id, "sun");
   EXPECT_TRUE(s.has_chrome);
-  EXPECT_TRUE(s.chrome_visible);
+  EXPECT_FALSE(s.chrome_visible) << "the debug overlay is off in a conference room";
   EXPECT_TRUE(s.has_background);
   EXPECT_TRUE(s.background_gradient);
 }

@@ -236,6 +236,17 @@ public:
   // reaper uses it to drop the ghost. 0 until the first frame; set to "now" when a connection opens
   // so a brand-new, not-yet-speaking client is not reaped.
   std::atomic<std::int64_t> last_rx_ns{0};
+  // Link quality (state_link_stats): traffic both ways + the Ping/Pong round trip. `accepted` marks
+  // the server end; opened_ns (steady-clock) is the report's age base, set at registration.
+  state_link_stats link;
+  bool accepted = false;
+  std::int64_t opened_ns = 0;
+  // Steady-clock ns when the write in progress started; 0 when none is. A peer that stops reading
+  // (a frozen tab, a dead network) makes a write block once its TCP buffer is full -- while holding
+  // write_mu, so every other writer to it (the relay's main loop included) would wait forever. The
+  // probe thread's watchdog closes a connection whose write has been blocked too long, which fails
+  // the write and frees the lock (state_transport_ws::ping_loop).
+  std::atomic<std::int64_t> write_started_ns{0};
 
 #ifndef __EMSCRIPTEN__
   std::unique_ptr<websocket::stream<tcp::socket>> ws;
@@ -253,12 +264,27 @@ public:
       return false;
     beast::error_code ec;
     ws->binary(true);
+    write_started_ns.store(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                               std::chrono::steady_clock::now().time_since_epoch())
+                               .count(),
+                           std::memory_order_relaxed);
     ws->write(net::buffer(bytes), ec);
+    write_started_ns.store(0, std::memory_order_relaxed);
     if (ec) {
       alive.store(false);
       return false;
     }
+    link.note_tx(bytes.size());
     return true;
+  }
+
+  // Unblock any read or write in progress and mark the connection dead (the write watchdog).
+  void abort_io() {
+    alive.store(false);
+    if (ws) {
+      beast::error_code ec;
+      ws->next_layer().shutdown(tcp::socket::shutdown_both, ec);
+    }
   }
 #else
   // Browser WebSocket: the handle, a back-pointer to the owning transport (for the C callbacks),
@@ -276,14 +302,23 @@ public:
     std::string bytes;
     if (!f.SerializeToString(&bytes))
       return false;
-    return emscripten_websocket_send_binary(em_socket, const_cast<char *>(bytes.data()),
-                                            static_cast<uint32_t>(bytes.size())) >= 0;
+    if (emscripten_websocket_send_binary(em_socket, const_cast<char *>(bytes.data()),
+                                         static_cast<uint32_t>(bytes.size())) < 0)
+      return false;
+    link.note_tx(bytes.size());
+    return true;
   }
 #endif
 
   bool write(const pb::Frame &f) {
     std::lock_guard<std::mutex> lk(write_mu);
     return write_locked(f);
+  }
+
+  // Write only if no other write holds the connection right now (the link probe never waits).
+  bool try_write(const pb::Frame &f) {
+    std::unique_lock<std::mutex> lk(write_mu, std::try_to_lock);
+    return lk.owns_lock() && write_locked(f);
   }
 
   // Bytes still unsent in this connection's OS send buffer (Linux only; 0 elsewhere). A large value
@@ -311,6 +346,7 @@ struct state_transport_ws::impl {
   net::io_context ioc;
   std::unique_ptr<tcp::acceptor> acceptor;
   std::thread accept_thread;
+  std::thread ping_thread; // link probe (ping_loop), joined by stop()
   std::string listen_addr_resolved;
 };
 #else
@@ -396,6 +432,8 @@ void state_transport_ws::start(const std::string &listen_addr, const std::string
 
   _running.store(true);
   _impl->accept_thread = std::thread([this]() { accept_loop(); });
+  if (!_ping_started.exchange(true))
+    _impl->ping_thread = std::thread([this]() { ping_loop(); });
 }
 
 // Server accept loop: synchronous accept → WebSocket handshake → admit + spawn reader. Breaks when
@@ -411,6 +449,7 @@ void state_transport_ws::accept_loop() {
       break; // woken by stop()'s loopback self-connect
 
     auto conn = std::make_shared<connection>();
+    conn->accepted = true;
     conn->ws = std::make_unique<websocket::stream<tcp::socket>>(std::move(sock));
     conn->ws->read_message_max(kMaxWsMessageBytes);
     conn->ws->accept(ec); // server-side WebSocket handshake
@@ -457,6 +496,8 @@ bool state_transport_ws::connect_to_peer(const std::string &url,
   conn->reader = std::thread([this, conn]() { read_loop(conn); });
   _running.store(true); // so stop() tears the client connection down
   admit_connection(conn);
+  if (!_ping_started.exchange(true))
+    _impl->ping_thread = std::thread([this]() { ping_loop(); });
   return true;
 }
 
@@ -524,6 +565,9 @@ void state_transport_ws::stop() {
 
   if (_impl->accept_thread.joinable())
     _impl->accept_thread.join();
+  if (_impl->ping_thread.joinable())
+    _impl->ping_thread.join();
+  _ping_started.store(false);
   for (auto &c : conns)
     if (c->reader.joinable())
       c->reader.join();
@@ -651,9 +695,24 @@ static std::int64_t steady_ns() {
 void state_transport_ws::deliver_inbound(connection *c, const void *data, std::size_t len) {
   increment_recv_frames();
   c->last_rx_ns.store(steady_ns(), std::memory_order_relaxed); // liveness for the reaper
+  c->link.note_rx(len);
   pb::Frame in;
   if (!in.ParseFromArray(data, static_cast<int>(len)))
     return;
+  // Link probe: answer a Ping at once (in a browser this runs in the WebSocket onmessage event,
+  // which a backgrounded tab still receives), and measure a Pong against our own clock.
+  if (in.has_ping()) {
+    pb::Frame f;
+    f.mutable_pong()->set_seq(in.ping().seq());
+    f.mutable_pong()->set_sent_ns(in.ping().sent_ns());
+    if (c->write(f))
+      _sent_frames.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
+  if (in.has_pong()) {
+    c->link.note_rtt(steady_ns() - in.pong().sent_ns());
+    return;
+  }
   if (in.has_hello()) {
     c->remote_node_id = in.hello().node_id();
     c->remote_cluster_id = in.hello().cluster_id();
@@ -955,6 +1014,9 @@ std::size_t state_transport_ws::pump_shard(state_cluster_shard &shard) {
 }
 
 std::size_t state_transport_ws::pump_all() {
+#ifdef __EMSCRIPTEN__
+  send_pings_if_due(); // no ping thread in a browser: the frame pump drives the probe
+#endif
   std::vector<state_cluster_shard *> snap;
   {
     std::lock_guard<std::mutex> lk(_shards_mu);
@@ -1069,7 +1131,86 @@ void state_transport_ws::on_inbound_message(const state_message &m, connection *
     _bridge->publish_message(m);
 }
 
+std::vector<state_link_report> state_transport_ws::link_reports() const {
+  std::vector<std::shared_ptr<connection>> conns;
+  {
+    std::lock_guard<std::mutex> lk(_conns_mu);
+    conns = _conns;
+  }
+  const std::int64_t now = steady_ns();
+  std::vector<state_link_report> out;
+  for (const auto &c : conns) {
+    if (!c || !c->alive.load() || !c->can_write())
+      continue;
+    state_link_report r;
+    r.transport = "ws";
+    r.remote_node_id = c->remote_node_id;
+    r.accepted = c->accepted;
+    r.age_s = static_cast<double>(now - c->opened_ns) * 1e-9;
+    r.idle_s = static_cast<double>(now - c->last_rx_ns.load()) * 1e-9;
+    r.stats = c->link.read();
+    out.push_back(std::move(r));
+  }
+  return out;
+}
+
+void state_transport_ws::send_pings_if_due() {
+  const auto interval = ping_interval();
+  if (interval.count() <= 0)
+    return;
+  const std::int64_t now = steady_ns();
+  std::int64_t due = _next_ping_ns.load(std::memory_order_relaxed);
+  if (now < due ||
+      !_next_ping_ns.compare_exchange_strong(
+          due, now + std::chrono::duration_cast<std::chrono::nanoseconds>(interval).count()))
+    return;
+  std::vector<std::shared_ptr<connection>> conns;
+  {
+    std::lock_guard<std::mutex> lk(_conns_mu);
+    conns = _conns;
+  }
+  for (auto &c : conns) {
+    // Skip a connection that cannot send yet, and one whose send buffer is badly backed up (the
+    // write would block the prober behind it; its RTT would only measure the backlog anyway).
+    if (!c || !c->alive.load() || !c->can_write() || c->send_backlog() > (64u << 10))
+      continue;
+    pb::Frame f;
+    f.mutable_ping()->set_seq(c->link.next_ping_seq());
+    f.mutable_ping()->set_sent_ns(steady_ns());
+    if (c->try_write(f))
+      _sent_frames.fetch_add(1, std::memory_order_relaxed);
+  }
+}
+
+void state_transport_ws::ping_loop() {
+#ifndef __EMSCRIPTEN__
+  // How long one write may block before its connection is closed (see
+  // connection::write_started_ns).
+  constexpr std::int64_t kWriteStallNs = 3'000'000'000;
+  while (_running.load()) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    send_pings_if_due();
+    std::vector<std::shared_ptr<connection>> conns;
+    {
+      std::lock_guard<std::mutex> lk(_conns_mu);
+      conns = _conns;
+    }
+    const std::int64_t now = steady_ns();
+    for (auto &c : conns) {
+      const std::int64_t started = c ? c->write_started_ns.load(std::memory_order_relaxed) : 0;
+      if (started != 0 && now - started > kWriteStallNs && c->alive.load()) {
+        std::fprintf(stderr, "[ws] write to '%s' blocked > 3 s (peer not reading): closing\n",
+                     c->remote_node_id.c_str());
+        c->abort_io();
+      }
+    }
+  }
+#endif
+}
+
 void state_transport_ws::register_connection(std::shared_ptr<connection> conn) {
+  if (conn->opened_ns == 0)
+    conn->opened_ns = steady_ns();
   std::lock_guard<std::mutex> lk(_conns_mu);
   _conns.push_back(std::move(conn));
 }

@@ -53,6 +53,14 @@ bool holon::has_participant(const std::string &pid) const {
   return _participants.find(pid) != _participants.end();
 }
 
+std::vector<std::string> holon::participants() const {
+  std::vector<std::string> out;
+  out.reserve(_participants.size());
+  for (const auto &kv : _participants)
+    out.push_back(kv.first);
+  return out;
+}
+
 void holon::set_intent(const std::string &pid, const avatar_intent &in) {
   auto it = _participants.find(pid);
   if (it == _participants.end())
@@ -70,9 +78,36 @@ void holon::apply_authoritative(const std::string &pid, const cvc::physics::body
   auto it = _participants.find(pid);
   if (it == _participants.end())
     return;
+  // Count the server's ticks (see the header): re-align whenever the replica is more
+  // than max_skew_ticks away -- on the first sample when the client joined a running
+  // server, and after a stall. A replica already within the skew is left alone, so its
+  // logged inputs still line up with the server's ticks and replay correctly.
+  const std::uint64_t now = _clock.tick();
+  const std::uint64_t skew = now > server_tick ? now - server_tick : server_tick - now;
+  if (skew > _cfg.max_skew_ticks) {
+    _clock.seek_tick(server_tick);
+    for (auto &kv : _participants) {
+      participant &q = kv.second;
+      if (q.local) {
+        // The logged inputs' ticks are on the old timeline: keep the state only.
+        q.predicted = predicted_avatar(q.predicted.state());
+      } else {
+        // Shift the walk's start by the same jump, so the peer carries on from where
+        // it is shown instead of restarting the walk (a visible step back).
+        q.newest_arrival_tick = server_tick > now
+                                    ? q.newest_arrival_tick + (server_tick - now)
+                                    : (q.newest_arrival_tick > now - server_tick
+                                           ? q.newest_arrival_tick - (now - server_tick)
+                                           : 0);
+      }
+    }
+  }
+
   participant &p = it->second;
   if (p.local) {
-    p.predicted.reconcile(auth, server_tick, _clock.fixed_dt(), _cfg.reconcile_tol);
+    const cvc::physics::vec3 before = p.predicted.state().position;
+    if (p.predicted.reconcile(auth, server_tick, _clock.fixed_dt(), _cfg.reconcile_tol))
+      p.correction = p.correction + (p.predicted.state().position - before);
   } else {
     // A peer. Reject a stale/duplicate/reordered sample (server_tick <= the newest
     // one applied), exactly as predicted_avatar does for the local path: otherwise
@@ -84,12 +119,21 @@ void holon::apply_authoritative(const std::string &pid, const cvc::physics::body
     if (!p.have_sample) {
       p.newest = auth;
       p.prev = auth;
+      p.sample_span = 0;
       p.have_sample = true;
     } else {
-      p.prev = p.newest; // shift the window: prev <- old newest, newest <- auth
+      // Walk on from wherever the peer is SHOWN now (normally the old newest; earlier
+      // when this sample came before the last walk finished), so a sample that
+      // arrives early never makes the peer skip forward.
+      const cvc::physics::pose shown = display_pose(pid);
+      p.prev = p.newest;
+      p.prev.position = shown.position;
+      p.prev.rotation = shown.rotation;
       p.newest = auth;
+      p.sample_span = server_tick - p.last_sample_tick;
     }
     p.last_sample_tick = server_tick;
+    p.newest_arrival_tick = _clock.tick();
   }
 }
 
@@ -138,9 +182,25 @@ cvc::physics::pose holon::display_pose(const std::string &pid) const {
     const cvc::physics::body_state &s = p.predicted.state();
     return cvc::physics::pose{s.position, s.rotation};
   }
-  // Peer: interpolate between the last two authoritative samples at this frame's
-  // alpha (interpolate_peer clamps alpha to [0,1), so it never overshoots).
-  return interpolate_peer(p.prev, p.newest, _alpha);
+  // Peer: walk from prev to newest over the server's own interval between them,
+  // timed on this clock from the newest sample's arrival (interpolate_peer clamps
+  // the fraction to [0,1), so it never overshoots and holds at newest once done).
+  if (p.sample_span == 0)
+    return cvc::physics::pose{p.newest.position, p.newest.rotation};
+  const std::uint64_t tick = _clock.tick();
+  const double elapsed =
+      (tick >= p.newest_arrival_tick ? static_cast<double>(tick - p.newest_arrival_tick) : 0.0) +
+      _alpha;
+  return interpolate_peer(p.prev, p.newest, elapsed / static_cast<double>(p.sample_span));
+}
+
+cvc::physics::vec3 holon::take_correction(const std::string &pid) {
+  auto it = _participants.find(pid);
+  if (it == _participants.end())
+    return cvc::physics::vec3{0.0, 0.0, 0.0};
+  const cvc::physics::vec3 c = it->second.correction;
+  it->second.correction = cvc::physics::vec3{0.0, 0.0, 0.0};
+  return c;
 }
 
 } // namespace ariadne

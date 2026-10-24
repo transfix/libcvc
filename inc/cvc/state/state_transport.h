@@ -11,10 +11,13 @@
 #ifndef __CVC_STATE_TRANSPORT_H__
 #define __CVC_STATE_TRANSPORT_H__
 
+#include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cvc/core/namespace.h>
 #include <cvc/state/state_change_journal.h>
+#include <cvc/state/state_link_stats.h>
 #include <cvc/state/state_message.h>
 #include <cvc/state/state_peer_registry.h>
 #include <functional>
@@ -110,6 +113,23 @@ public:
   state_peer_registry &peers() noexcept { return _peers; }
   const state_peer_registry &peers() const noexcept { return _peers; }
 
+  // -------- Link quality (Ping/Pong probes, per-connection traffic) --------
+  //
+  // One report per live connection: bytes and frames both ways, and the round-trip time the
+  // transport's Ping/Pong probe measures (state_link_stats). A relay sees one link per client; a
+  // client sees its link to the relay; a server also sees its links to other servers. Transports
+  // without connections report none (the default).
+  virtual std::vector<state_link_report> link_reports() const { return {}; }
+
+  // How often each connection is pinged (default 2 s; 0 turns the probe off). The probe also keeps
+  // a quiet-but-connected peer from looking idle to a relay's reaper.
+  void set_ping_interval(std::chrono::milliseconds interval) noexcept {
+    _ping_interval_ms.store(interval.count(), std::memory_order_relaxed);
+  }
+  std::chrono::milliseconds ping_interval() const noexcept {
+    return std::chrono::milliseconds(_ping_interval_ms.load(std::memory_order_relaxed));
+  }
+
   // -------- Chunk fetch (volume/geometry streaming) --------
   //
   // Callback-based chunk retrieval from remote peers. The
@@ -202,6 +222,7 @@ public:
 protected:
   state_peer_registry _peers;
   state_transport *_bridge = nullptr;
+  std::atomic<std::int64_t> _ping_interval_ms{2000};
 };
 
 } // namespace cvc

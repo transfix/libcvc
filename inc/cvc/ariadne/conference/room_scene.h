@@ -37,7 +37,7 @@ namespace conference {
 //
 //   conf.rooms.<room>.scene.rev                          bumped by every scene write
 //   conf.rooms.<room>.scene.env.background.{gradient, top.{r,g,b}, bottom.{r,g,b}}
-//   conf.rooms.<room>.scene.env.chrome                   the SceneGraph grid/axis chrome (1/0)
+//   conf.rooms.<room>.scene.env.chrome                   the SceneGraph diagnostic chrome (1/0)
 //   conf.rooms.<room>.scene.env.lights.<id>.{present, kind, rig, azimuth, elevation, intensity,
 //                                            cone, color.{r,g,b}, pos.{x,y,z}, target.{x,y,z}}
 //   conf.rooms.<room>.scene.objects.<id>.{present, source.{uri, primitive, plane_size,
@@ -97,7 +97,7 @@ std::uint64_t scene_revision(cvc::app &app, const std::string &room_id);
 cvc::ariadne::Scene read_room_scene(cvc::app &app, const std::string &room_id);
 
 // The MVP environment the server seeds a room with (§5g "ground + grid + a reference object"): a
-// gradient background, the grid chrome on, a directional sun, a 20 m ground plane and a 1 m
+// gradient background, the diagnostic chrome off, a directional sun, a 20 m ground plane and a 1 m
 // reference box standing on it at the origin. Z is up, as in every .ari scene.
 room_scene_env default_scene_env();
 std::vector<cvc::ariadne::SceneNode> default_scene_objects();

@@ -16,6 +16,7 @@
 // C++ verb + arisrv hosting are the live-integration follow-on): just the mapping
 // and that it rides the existing conf.rooms.* replication.
 
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <cvc/ariadne/avatar_sim.h>
@@ -166,7 +167,15 @@ TEST(HolonSyncTest, ServerPumpIntegratesRosterFromIntents) {
 
   holon server(holon_role::server);
   const double dt = server.clock().fixed_dt();
-  for (int frame = 0; frame < 5; ++frame) {
+  // The first pump registers both newcomers at their spawn points (then steps one quantum).
+  cvc::ariadne::server_pump(server, server_app, room, dt);
+  tp.pump_all();
+  const vec3 a0 = server.state("A").position, b0 = server.state("B").position;
+  // Spawned on the 4 m ring around the origin, apart from each other.
+  EXPECT_NEAR(std::hypot(a0.x, a0.y), 4.0, 1.0 * dt + 1e-9);
+  EXPECT_NEAR(std::hypot(b0.x, b0.y), 4.0, 2.0 * dt + 1e-9);
+  EXPECT_GT(std::hypot(a0.x - b0.x, a0.y - b0.y), 1.0) << "joiners never stack";
+  for (int frame = 1; frame < 5; ++frame) {
     cvc::ariadne::server_pump(server, server_app, room, dt);
     tp.pump_all();
   }
@@ -177,10 +186,10 @@ TEST(HolonSyncTest, ServerPumpIntegratesRosterFromIntents) {
   std::uint64_t ta = 0, tb = 0;
   ASSERT_TRUE(cvc::ariadne::read_pose(server_app, room, "A", pa, ta));
   ASSERT_TRUE(cvc::ariadne::read_pose(server_app, room, "B", pb, tb));
-  EXPECT_GT(pa.position.x, 0.0) << "A moved +x per its intent";
-  EXPECT_DOUBLE_EQ(pa.position.y, 0.0);
-  EXPECT_GT(pb.position.y, 0.0) << "B moved +y per its intent";
-  EXPECT_DOUBLE_EQ(pb.position.x, 0.0);
+  EXPECT_GT(pa.position.x, a0.x) << "A moved +x per its intent";
+  EXPECT_DOUBLE_EQ(pa.position.y, a0.y);
+  EXPECT_GT(pb.position.y, b0.y) << "B moved +y per its intent";
+  EXPECT_DOUBLE_EQ(pb.position.x, b0.x);
   EXPECT_EQ(ta, server.tick());
 
   // And the authoritative poses replicate back to the client.
@@ -194,4 +203,73 @@ TEST(HolonSyncTest, ServerPumpIntegratesRosterFromIntents) {
   tp.unregister_shard(&cs);
   ss.detach();
   cs.detach();
+}
+
+// client_pump end to end, timed like the live relay: clients pump every quantum, the
+// server every 24 (~5 Hz). Client A predicts its own avatar and stays near the
+// authoritative one; client B sees A as a peer that moves forward smoothly.
+TEST(HolonSyncTest, ClientPumpPredictsSelfAndWalksPeersSmoothly) {
+  cvc::app server_app, a_app, b_app;
+  cvc::state_transport_inproc tp;
+  cvc::state_cluster_shard ss(server_app, "conf", "server");
+  cvc::state_cluster_shard as(a_app, "conf", "A");
+  cvc::state_cluster_shard bs(b_app, "conf", "B");
+  for (cvc::state_cluster_shard *s : {&ss, &as, &bs}) {
+    s->attach();
+    tp.register_shard(s);
+  }
+  const std::string room = "r";
+  cvc::ariadne::conference::room_join(a_app, room, "A");
+  cvc::ariadne::conference::room_join(b_app, room, "B");
+  tp.pump_all();
+
+  holon server(holon_role::server);
+  holon a(holon_role::client), b(holon_role::client);
+  const double dt = server.clock().fixed_dt();
+  constexpr int kServerEvery = 24;
+
+  cvc::ariadne::client_pump(a, a_app, room, "A", dt); // registers A (local) + B (peer)
+  cvc::ariadne::propose_intent(a, a_app, room, "A", avatar_intent{vec3{2.0, 0.0, 0.0}});
+  tp.pump_all();
+
+  double last_peer_x = -1.0;
+  for (int frame = 1; frame <= 10 * kServerEvery; ++frame) {
+    if (frame % kServerEvery == 0)
+      cvc::ariadne::server_pump(server, server_app, room, kServerEvery * dt);
+    tp.pump_all();
+    cvc::ariadne::client_pump(a, a_app, room, "A", dt);
+    cvc::ariadne::client_pump(b, b_app, room, "B", dt);
+    ASSERT_TRUE(b.has_participant("A"));
+    const double peer_x = b.display_pose("A").position.x;
+    EXPECT_GE(peer_x, last_peer_x) << "frame " << frame << ": B never sees A step back";
+    last_peer_x = peer_x;
+  }
+
+  const double server_x = server.state("A").position.x;
+  EXPECT_GT(server_x, 3.9)
+      << "the server moved A per its intent (2 m/s for 2 s), no dropped quanta";
+  // A's own prediction stays within a relay interval of the authority.
+  EXPECT_NEAR(a.display_pose("A").position.x, server_x, 2.0 * kServerEvery * dt + 1e-9);
+  // B shows A at most one sample interval behind the authority.
+  EXPECT_NEAR(last_peer_x, server_x, 2.0 * kServerEvery * dt + 1e-9);
+  // Both replicas count the server's ticks.
+  EXPECT_LE(a.tick() > server.tick() ? a.tick() - server.tick() : server.tick() - a.tick(),
+            static_cast<std::uint64_t>(kServerEvery));
+  EXPECT_LE(b.tick() > server.tick() ? b.tick() - server.tick() : server.tick() - b.tick(),
+            static_cast<std::uint64_t>(kServerEvery));
+
+  // A participant who leaves is dropped from the replicas, and from the server holon.
+  ASSERT_TRUE(server.has_participant("B"));
+  cvc::ariadne::conference::room_leave(b_app, room, "B");
+  tp.pump_all();
+  cvc::ariadne::client_pump(a, a_app, room, "A", dt);
+  EXPECT_FALSE(a.has_participant("B"));
+  cvc::ariadne::server_pump(server, server_app, room, dt);
+  EXPECT_FALSE(server.has_participant("B")) << "the server stops integrating a departed avatar";
+  EXPECT_TRUE(server.has_participant("A"));
+
+  for (cvc::state_cluster_shard *s : {&ss, &as, &bs}) {
+    tp.unregister_shard(s);
+    s->detach();
+  }
 }

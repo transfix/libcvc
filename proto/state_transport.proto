@@ -150,6 +150,21 @@ message MediaFrame {
   uint32 channels = 10;      // audio: channel count (0 for video)
 }
 
+// Link-quality probe. Each end of a connection sends a Ping on a timer; the other end answers at
+// once with a Pong echoing seq + sent_ns, and the sender measures the round trip on its OWN
+// monotonic clock (no clock sync). A Ping/Pong is link-level: never replicated, never relayed or
+// bridged. Answering also proves liveness, so a relay's idle reaper keeps a client that is quiet
+// but still connected (a backgrounded browser tab answers from its WebSocket event, which is not
+// timer-throttled) while a ghost that cannot answer is still reaped.
+message Ping {
+  uint64 seq = 1;
+  int64 sent_ns = 2; // sender's steady-clock ns
+}
+message Pong {
+  uint64 seq = 1;
+  int64 sent_ns = 2; // the Ping's sent_ns, echoed
+}
+
 // Single bidirectional frame envelope. Both client and server write
 // frames; same-cluster routing happens above this layer.
 message Frame {
@@ -163,6 +178,8 @@ message Frame {
     SnapshotResponse snapshot_response = 7;
     Heartbeat heartbeat = 8;
     MediaFrame media = 9;
+    Ping ping = 10;
+    Pong pong = 11;
   }
 }
 
