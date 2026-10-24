@@ -155,7 +155,9 @@ gov = gpu(telemetry=1, **GOV)
 for c, gg, name in zip(cpu_gov, gov, ("o", "th", "sp", "minclr")):
     err = float(np.max(np.abs(c - gg)))
     check(err < 1e-5, f"governed GPU {name} differs from the CPU drive by {err:.3e}")
-check(bool(np.all(gov[2] <= gov[4]["v_risk"] + 1e-6)), "no agent ends faster than its v_risk")
+vr = gov[4]["v_risk"]
+check(bool(np.all(gov[2] <= np.maximum(vr, sp) + 1e-6)), "no agent is sped past its v_risk")
+check(bool(np.all((sp <= vr) | (gov[2] < sp))), "and one over it slows (a tick brakes only so much)")
 check(bool(np.all(tel["v_risk"] == 0.0)), "v_risk is 0 with the governor off")
 check(float(np.abs(gov[2]).sum()) < float(np.abs(out[2]).sum()) - 1e-3, "the governor slows them")
 
