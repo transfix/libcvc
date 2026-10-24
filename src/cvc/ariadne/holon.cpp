@@ -14,6 +14,7 @@
 */
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cvc/ariadne/holon.h>
@@ -89,6 +90,34 @@ std::vector<std::string> holon::participants() const {
   return out;
 }
 
+avatar_intent holon::sanitize_intent(const avatar_intent &in) const {
+  avatar_intent out = in;
+  const cvc::physics::vec3 &m = in.move;
+  if (!std::isfinite(m.x) || !std::isfinite(m.y) || !std::isfinite(m.z))
+    out.move = cvc::physics::vec3{0.0, 0.0, 0.0};
+  if (!_cfg.allow_vertical)
+    out.move.z = 0.0;
+  const double h2 = out.move.x * out.move.x + out.move.y * out.move.y;
+  if (h2 > _cfg.max_speed * _cfg.max_speed) {
+    const double k = _cfg.max_speed / std::sqrt(h2);
+    out.move.x *= k;
+    out.move.y *= k;
+  }
+  constexpr double kPi = 3.14159265358979323846;
+  if (!std::isfinite(out.yaw))
+    out.yaw = 0.0;
+  else if (out.yaw > kPi || out.yaw < -kPi)
+    out.yaw = std::remainder(out.yaw, 2.0 * kPi);
+  return out;
+}
+
+namespace {
+bool same_intent(const avatar_intent &a, const avatar_intent &b) {
+  // Bitwise-ish: a NaN in `a` differs from whatever sanitize_intent made of it.
+  return a.move.x == b.move.x && a.move.y == b.move.y && a.move.z == b.move.z && a.yaw == b.yaw;
+}
+} // namespace
+
 void holon::set_intent(const std::string &pid, const avatar_intent &in) {
   auto it = _participants.find(pid);
   if (it == _participants.end())
@@ -96,8 +125,33 @@ void holon::set_intent(const std::string &pid, const avatar_intent &in) {
   // A client may drive only its OWN (local) avatar; it cannot move a peer.
   if (_role == holon_role::client && !it->second.local)
     return;
-  it->second.intent = in;
+  const avatar_intent ok = sanitize_intent(in);
+  if (_role == holon_role::server && !same_intent(in, ok))
+    ++_vetoes;
+  it->second.intent = ok;
   it->second.queued.clear();
+}
+
+bool holon::override_state(const std::string &pid, const cvc::physics::body_state &feet) {
+  if (_role != holon_role::server)
+    return false;
+  auto it = _participants.find(pid);
+  if (it == _participants.end())
+    return false;
+  if (_world)
+    _world->place(pid, feet);
+  else
+    it->second.sim.set_state(feet);
+  return true;
+}
+
+bool holon::set_mass(const std::string &pid, double kg) {
+  if (_role != holon_role::server || !_world || !(kg > 0.0) || !std::isfinite(kg))
+    return false;
+  if (!_participants.count(pid))
+    return false;
+  _world->set_mass(pid, kg);
+  return true;
 }
 
 void holon::queue_intent(const std::string &pid, const avatar_intent &in, std::uint64_t tick) {
@@ -120,7 +174,10 @@ void holon::queue_intent(const std::string &pid, const avatar_intent &in, std::u
     at = next;
   if (!p.queued.empty() && at < p.queued.back().first)
     at = p.queued.back().first;
-  p.queued.emplace_back(at, in);
+  const avatar_intent ok = sanitize_intent(in);
+  if (!same_intent(in, ok))
+    ++_vetoes;
+  p.queued.emplace_back(at, ok);
 }
 
 void holon::apply_authoritative(const std::string &pid, const cvc::physics::body_state &auth,

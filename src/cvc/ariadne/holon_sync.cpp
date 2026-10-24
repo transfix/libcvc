@@ -172,6 +172,7 @@ bool read_intent(cvc::app &app, const std::string &room, const std::string &pid,
 holon_config room_holon_config() {
   holon_config cfg;
   cfg.physics = true;
+  cfg.max_speed = 4.0; // twice the walk; room to add a run without loosening the veto
   return cfg;
 }
 
