@@ -1126,8 +1126,9 @@ TEST(Dyn4ExtRollout, TrajectoryIsItsStepsAndTheReverseMatchesDifferences) {
 }
 
 // The torch twin's gate (GRL-SNAM): dyn4_rollout_ext and its reverse on fixed cases, with the
-// field and the ground they sample, written to tests/data/dyn4_ext_rollout_golden.json. Four
-// agents, 10 steps each, per-step goals and coefficients, an affine force per agent (F = A o + b,
+// field and the ground they sample, written to tests/data/dyn4_ext_rollout_golden.json. Six
+// agents (two inside the controller's clamps, where the coefficients have a gradient), 10 steps
+// each, per-step goals and coefficients, an affine force per agent (F = A o + b,
 // J = A) held for 1 or 3 steps, one whose force does not steer; L = sum_t w_t . state_t over the
 // 14 state components. CVC_DYN4_EXT_GOLDEN_WRITE=1 rewrites the file; otherwise this build must
 // reproduce it (float, libm: to 1e-4, not bit for bit across platforms).
@@ -1178,6 +1179,22 @@ TEST(Dyn4ExtRollout, Golden) {
       {{-2.4f, 0.6f, 0.2f, 0.6f}, {2.4f, -0.4f}, {-0.3f, 0.2f, 0.1f, -0.2f}, {0.0f, -0.3f}, 3, 1},
       {{1.8f, -2.2f, 1.4f, 0.1f}, {-0.5f, 2.6f}, {0.4f, 0.0f, 0.0f, 0.4f}, {-0.2f, 0.1f}, 1, 1},
       {{2.2f, 0.4f, 3.0f, 0.4f}, {-2.6f, -0.2f}, {0.15f, -0.2f, 0.2f, 0.15f}, {0.2f, 0.1f}, 3, 0},
+      // Inside the clamps: the four above saturate (a goal 5 away pins the acceleration at a_max,
+      // and the lateral cap pins the steering at speed), so their coefficient gradients are
+      // identically zero. These start slow with the goal 0.6 ahead, as DiffExtRollout's checks do,
+      // so the coefficients and the force move the commands.
+      {{-3.5f, -3.0f, 0.3f, 0.15f},
+       {-2.93f, -2.82f},
+       {0.1f, 0.05f, -0.05f, 0.1f},
+       {0.05f, 0.1f},
+       1,
+       1},
+      {{3.0f, 3.0f, -2.5f, 0.2f},
+       {2.52f, 2.64f},
+       {0.08f, -0.06f, 0.04f, 0.1f},
+       {-0.1f, 0.05f},
+       3,
+       1},
   };
   const int n = dyn4_state<float>::size;
   std::vector<dyn4_state<float>> w(static_cast<std::size_t>(T + 1));
