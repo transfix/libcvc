@@ -451,7 +451,8 @@ public:
   //     reference_substeps()) from the tick's start state with the same command, against the
   //     plant (report_drift);
   //   - skips the hard de-overlap (min_gap): the plant's bodies collide instead.
-  // nav_stats then carries the plant's energy and building contacts when it tracks them.
+  // nav_stats then carries the plant's energy and building contacts when it tracks them, and its
+  // plant ledger (plant_samples()) when it measures its vehicles.
   void set_plant(vehicle_plant *p);
   vehicle_plant *plant() const { return plant_; }
   // The footprint discs a plant's vehicle is covered with (plant_limits' size).
@@ -475,6 +476,12 @@ public:
   const drift_sample *plant_drift() const {
     return plant_ && gstep_ > 0 && !pl_drift_.empty() ? pl_drift_.data() : nullptr;
   }
+  // Each agent as the plant measured it at the end of the last tick (plant_sample, SI), [size()]:
+  // what feeds nav_stats' plant ledger. null without a plant that measures them
+  // (vehicle_plant::tracks_samples; never the kinematic arm) or before the first step().
+  const plant_sample *plant_samples() const {
+    return plant_ && gstep_ > 0 && !pl_sample_.empty() ? pl_sample_.data() : nullptr;
+  }
 
   // How measured plant state modulates the drive (H4, plant_types.h): the plant's
   // vehicle_plant::modulation(), as of the last tick; off without a plant.
@@ -483,11 +490,11 @@ public:
   // ── terrain (P5, cvc/nav/terrain.h) ───────────────────────────────────────
   // `height_m` is the sim grid's rows x cols (row 0 at min_y), copied in. Builds the slope, the
   // grade cost and the infeasible cells; then, per the config:
-  //   - infeasible cells plan as obstacles: they join every belief plane's occupancy, so the
-  //     SDF's barrier and the governors keep the agents out (block_infeasible);
-  //   - the governors take gravity along the path (governors, H2);
   //   - the grade cost's soft force and a material-style barrier join the drive (lam_grade,
-  //     lam_grade_hard, H1).
+  //     lam_grade_hard, H1): by default slope is a material risk the drive weighs, not a wall;
+  //   - the governors take gravity along the path (governors, H2);
+  //   - with block_infeasible (off by default), infeasible cells also plan as obstacles: they
+  //     join every belief plane's occupancy, so the SDF's barrier keeps the agents out.
   // Default off: without terrain every tick is byte-identical. The tree's terrain does not move.
   void set_terrain(const float *height_m, const terrain_config &tc);
   // A new config for the terrain set last (no-op without one): rebuilds its planes from the same
@@ -646,6 +653,7 @@ private:
   std::vector<float> pl_steer_cmd_, pl_accel_cmd_, pl_v_stop_; // [n], the last tick's
   std::vector<plant_state> pl_start_;                          // [n], the tick's start
   std::vector<drift_sample> pl_drift_;                         // [n], the last tick's
+  std::vector<plant_sample> pl_sample_;                        // [n], the last tick's
   std::vector<double> st_energy_;                              // [n], nav_stats feed
   std::vector<int> st_contacts_;                               // [n], nav_stats feed
   const float *ptr(const std::vector<float> &v) const {

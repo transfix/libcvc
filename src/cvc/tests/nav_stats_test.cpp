@@ -513,6 +513,7 @@ TEST(NavStats, DriveTelemetryReduction) {
   EXPECT_EQ(v.binding_steps, 2);
 
   const std::string ej = e0.to_json();
+  EXPECT_NE(ej.find("\"binding_stopped_steps\":0"), std::string::npos); // it moved every tick
   EXPECT_NE(ej.find("\"alpha_mean\":"), std::string::npos);
   EXPECT_NE(ej.find("\"mu_min\":"), std::string::npos);
   EXPECT_NE(ej.find("\"binding_steps\":2"), std::string::npos);
@@ -528,6 +529,60 @@ TEST(NavStats, DriveTelemetryReduction) {
   const std::string sj = s.to_json();
   EXPECT_NE(sj.find("\"mean_alpha\":"), std::string::npos);
   EXPECT_NE(sj.find("\"mean_mu\":"), std::string::npos);
+}
+
+// The rest of drive_telemetry in the ledger: the material weights and the curvature (means, and the
+// curvature's peak), and the ticks the barrier bound while the vehicle stood still -- pinned, the
+// way a vehicle sits when its route sends it on into what nav's barrier takes for a wall.
+TEST(NavStats, DriveTelemetryWeightsCurvatureAndPinned) {
+  nav_stats_collector c;
+  const float start[2] = {0, 0};
+  const float goal[2] = {10, 0};
+  c.begin_episode(1, 1.0, start, goal);
+  const float head[1] = {0};
+  const std::uint8_t rch[1] = {0};
+  const int mode[1] = {0};
+  // lam_soft .5,.25,.75,.5 | lam_hard 1,2,3,2 | curvature .25,-.5,0,.25 | binding 1,1,0,1 |
+  // speed 1,0,0,.05: pinned on ticks 2 and 4 (bound, under speed_eps_mps 0.1); tick 3 is still but
+  // free, tick 1 bound but moving
+  const float lsoft[4] = {0.5f, 0.25f, 0.75f, 0.5f}, lhard[4] = {1, 2, 3, 2};
+  const float curv[4] = {0.25f, -0.5f, 0, 0.25f}, speed[4] = {1, 0, 0, 0.05f};
+  const std::uint8_t bind[4] = {1, 1, 0, 1};
+  drive_sample cur;
+  nav_samplers smp;
+  smp.drive = &cur;
+  float x = 0;
+  for (int s = 0; s < 4; ++s) {
+    cur = drive_sample{};
+    cur.lam_soft = lsoft[s];
+    cur.lam_hard = lhard[s];
+    cur.curvature = curv[s];
+    cur.binding = bind[s];
+    x += speed[s];
+    const float pos[2] = {x, 0};
+    const float spd[1] = {speed[s]};
+    c.step(pos, head, spd, mode, rch, smp);
+  }
+  const episode_nav_stats e = c.finish();
+  const veh_nav_stats &v = e.per_vehicle[0];
+  EXPECT_EQ(v.drive_steps, 4);
+  EXPECT_DOUBLE_EQ(v.lam_soft_mean, 0.5);       // (.5+.25+.75+.5)/4
+  EXPECT_DOUBLE_EQ(v.lam_hard_mean, 2.0);       // (1+2+3+2)/4
+  EXPECT_DOUBLE_EQ(v.curvature_abs_mean, 0.25); // (.25+.5+0+.25)/4
+  EXPECT_DOUBLE_EQ(v.curvature_abs_max, 0.5);
+  EXPECT_EQ(v.binding_steps, 3);
+  EXPECT_EQ(v.binding_stopped_steps, 2);
+  const std::string ej = e.to_json();
+  EXPECT_NE(ej.find("\"lam_hard_mean\":2"), std::string::npos);
+  EXPECT_NE(ej.find("\"curvature_abs_max\":0.5"), std::string::npos);
+  EXPECT_NE(ej.find("\"binding_stopped_steps\":2"), std::string::npos);
+
+  const nav_scorecard s = aggregate_nav({e}, "ckpt-P");
+  EXPECT_DOUBLE_EQ(s.mean_lam_soft, 0.5);
+  EXPECT_DOUBLE_EQ(s.mean_lam_hard, 2.0);
+  EXPECT_DOUBLE_EQ(s.mean_curvature_abs, 0.25);
+  EXPECT_DOUBLE_EQ(s.mean_binding_stopped_share, 0.5); // 2 of 4 ticks
+  EXPECT_NE(s.to_json().find("\"mean_binding_stopped_share\":0.5"), std::string::npos);
 }
 
 // finish() is a running snapshot (cvcGL publish_nav_stats, sim_world::nav_stats() and downstream
@@ -585,6 +640,23 @@ void expect_same_vehicle(const veh_nav_stats &a, const veh_nav_stats &b) {
   EXPECT_EQ(a.steer_abs_mean, b.steer_abs_mean);
   EXPECT_EQ(a.steer_abs_max, b.steer_abs_max);
   EXPECT_EQ(a.binding_steps, b.binding_steps);
+  EXPECT_EQ(a.lam_soft_mean, b.lam_soft_mean);
+  EXPECT_EQ(a.lam_hard_mean, b.lam_hard_mean);
+  EXPECT_EQ(a.curvature_abs_mean, b.curvature_abs_mean);
+  EXPECT_EQ(a.curvature_abs_max, b.curvature_abs_max);
+  EXPECT_EQ(a.binding_stopped_steps, b.binding_stopped_steps);
+  EXPECT_EQ(a.plant_tracked, b.plant_tracked);
+  EXPECT_EQ(a.plant_steps, b.plant_steps);
+  EXPECT_EQ(a.rolled_over, b.rolled_over);
+  EXPECT_EQ(a.rolled_over_s, b.rolled_over_s);
+  EXPECT_EQ(a.tilt_max_deg, b.tilt_max_deg);
+  EXPECT_EQ(a.tilt_s, b.tilt_s);
+  EXPECT_EQ(a.ltr_max, b.ltr_max);
+  EXPECT_EQ(a.a_lat_max_g, b.a_lat_max_g);
+  EXPECT_EQ(a.steer_cmd_abs_mean, b.steer_cmd_abs_mean);
+  EXPECT_EQ(a.steer_sat_share, b.steer_sat_share);
+  EXPECT_EQ(a.accel_cmd_mean, b.accel_cmd_mean);
+  EXPECT_EQ(a.brake_share, b.brake_share);
 }
 
 void expect_same_episode(const episode_nav_stats &a, const episode_nav_stats &b) {
@@ -604,6 +676,9 @@ void expect_same_episode(const episode_nav_stats &a, const episode_nav_stats &b)
   EXPECT_EQ(a.mean_path_ratio, b.mean_path_ratio);
   EXPECT_EQ(a.mean_turn_total_rad, b.mean_turn_total_rad);
   EXPECT_EQ(a.total_fuel, b.total_fuel);
+  EXPECT_EQ(a.plant_tracked, b.plant_tracked);
+  EXPECT_EQ(a.vehicles_rolled, b.vehicles_rolled);
+  EXPECT_EQ(a.first_roll_s, b.first_roll_s);
   EXPECT_EQ(a.coverage.explored_frac, b.coverage.explored_frac);
   EXPECT_EQ(a.coverage.visible_frac, b.coverage.visible_frac);
   EXPECT_EQ(a.coverage.believed_free_frac, b.coverage.believed_free_frac);
@@ -662,6 +737,16 @@ void step_snapshot_episode(nav_stats_collector &c, int s) {
   };
   smp.sense_flips = flips;
   smp.drive = ds;
+  // the plant ledger: vehicle 0 steers at its lock on odd steps, everyone brakes every third step,
+  // and vehicle 0 lies tipped over throughout
+  plant_sample ps[kSnapN];
+  for (int i = 0; i < kSnapN; ++i) {
+    ps[i].max_steer = 0.5;
+    ps[i].steer_cmd = i == 0 && s % 2 ? -0.5 : 0.125;
+    ps[i].accel_cmd = s % 3 == 0 ? -1.0 : 2.0;
+    ps[i].up_z = i == 0 ? 0.25 : 1.0;
+  }
+  smp.plant = ps;
   c.step(pos, head, spd, mode, rch, smp);
 }
 
@@ -693,6 +778,15 @@ TEST(NavStats, FinishIsRepeatableSnapshot) {
     // (.25+.5+.25)/3
     EXPECT_DOUBLE_EQ(v.steer_abs_mean, 1.0 / 3.0);
     EXPECT_EQ(v.binding_steps, 1);
+    // the plant ledger's means are means too
+    EXPECT_EQ(v.plant_steps, 3);
+    EXPECT_DOUBLE_EQ(v.steer_cmd_abs_mean, 0.25);   // (.125+.5+.125)/3
+    EXPECT_DOUBLE_EQ(v.steer_sat_share, 1.0 / 3.0); // step 1
+    EXPECT_DOUBLE_EQ(v.accel_cmd_mean, 1.0);        // (-1+2+2)/3
+    EXPECT_DOUBLE_EQ(v.brake_share, 1.0 / 3.0);     // step 0
+    EXPECT_TRUE(v.rolled_over); // tipped from step 0; at dt 1 s the hold is met at once
+    EXPECT_EQ(v.rolled_over_s, 1.0);
+    EXPECT_EQ(e->vehicles_rolled, 1);
   }
 }
 
@@ -722,4 +816,139 @@ TEST(NavStats, StepAfterFinishMatchesUninterruptedEpisode) {
   EXPECT_DOUBLE_EQ(v.steer_abs_mean, 0.375);
   EXPECT_EQ(v.binding_steps, 3);
   EXPECT_TRUE(v.arrived); // reached latched on step 5
+}
+
+// The plant ledger (nav_samplers::plant): a physics plant's per-tick plant_sample reduced per
+// vehicle, a latched rollover, the episode's rollovers and the scorecard's rates.
+namespace {
+
+// Vehicle 0's 8 ticks of dt 0.25 s: it tips once briefly (tick 1), comes back (tick 2), then tips
+// from tick 3 on and stays over (up_z < 0.5 for 4 ticks = 1 s by tick 6: rolled over, at tick 3's
+// end, t = 1.0). Vehicle 1 drives upright and only brushes the threshold at tick 2.
+episode_nav_stats plant_episode(bool feed) {
+  nav_stats_collector c;
+  const float start[4] = {0, 0, 0, 10};
+  const float goal[4] = {50, 0, 50, 10};
+  c.begin_episode(2, 0.25, start, goal, {}, "plant", 1, "ckpt-P");
+  const double up0[8] = {1.0, 0.4, 0.9, 0.3, 0.2, 0.1, 0.0, 0.0};
+  const double roll0[8] = {0, 0.9, 0.4, 0.95, 0.98, 0.99, 1.0, 1.0};
+  const double ltr0[8] = {0.2, 0.95, 0.2, -1.0, 0.2, 0.2, 0.2, 0.2};
+  const int down0[8] = {4, 4, 4, 4, 4, 3, 0, 0};
+  const double steer0[8] = {0.5, -0.48, 0.1, 0, 0, 0, 0, 0};
+  for (int k = 0; k < 8; ++k) {
+    plant_sample ps[2];
+    ps[0].up_z = up0[k];
+    ps[0].roll = roll0[k];
+    ps[0].grade = k == 4 ? 0.5 : 0.0;
+    ps[0].ltr = ltr0[k];
+    ps[0].wheels = 4;
+    ps[0].wheels_down = down0[k];
+    ps[0].a_lat = k == 2 ? -0.5 * 9.80665 : 1.0;
+    ps[0].max_steer = 0.5;
+    ps[0].steer_cmd = steer0[k];
+    ps[0].accel_cmd = k < 4 ? 2.0 : -1.0;
+    ps[1].up_z = k == 2 ? 0.3 : 1.0;
+    ps[1].wheels = ps[1].wheels_down = 4;
+    ps[1].max_steer = 0.5;
+    ps[1].accel_cmd = 1.0;
+    nav_samplers smp;
+    if (feed)
+      smp.plant = ps;
+    const float pos[4] = {(float)(k + 1), 0, (float)(k + 1), 10};
+    const float head[2] = {0, 0};
+    const float spd[2] = {4, 4};
+    const int mode[2] = {0, 0};
+    const std::uint8_t rch[2] = {0, 0};
+    c.step(pos, head, spd, mode, rch, smp);
+  }
+  return c.finish();
+}
+
+// `json` without the plant ledger's keys: each vehicle's run from ,"plant_steps" to its '}', and
+// the episode's from ,"vehicles_rolled" up to ,"coverage".
+std::string strip_plant_keys(std::string json) {
+  for (std::size_t at; (at = json.find(",\"plant_steps\":")) != std::string::npos;)
+    json.erase(at, json.find('}', at) - at);
+  const std::size_t at = json.find(",\"vehicles_rolled\":");
+  if (at != std::string::npos)
+    json.erase(at, json.find(",\"coverage\":", at) - at);
+  return json;
+}
+
+} // namespace
+
+TEST(NavStats, PlantLedgerReduction) {
+  const episode_nav_stats e = plant_episode(true);
+  const veh_nav_stats &v = e.per_vehicle[0], &u = e.per_vehicle[1];
+  const double kDeg = 180.0 / 3.14159265358979323846;
+  EXPECT_TRUE(v.plant_tracked);
+  EXPECT_EQ(v.plant_steps, 8);
+  // rolled over: tipped from tick 3 (0-based) for 1 s; the brief tip at tick 1 did not count
+  EXPECT_TRUE(v.rolled_over);
+  EXPECT_DOUBLE_EQ(v.rolled_over_s, 1.0); // tick 3's end
+  EXPECT_NEAR(v.tilt_max_deg, 90.0, 1e-9);
+  EXPECT_NEAR(v.roll_max_deg, 90.0, 1e-9);
+  EXPECT_NEAR(v.pitch_max_deg, 30.0, 1e-9);
+  EXPECT_DOUBLE_EQ(v.tilt_s, 7 * 0.25); // every tick but the first is past 20 degrees
+  EXPECT_DOUBLE_EQ(v.ltr_max, 1.0);
+  EXPECT_DOUBLE_EQ(v.lift_s, 2 * 0.25);      // ticks 1 and 3
+  EXPECT_DOUBLE_EQ(v.wheels_up_s, 2 * 0.25); // ticks 6 and 7 (tick 5 has one wheel up)
+  EXPECT_NEAR(v.a_lat_max_g, 0.5, 1e-12);
+  EXPECT_NEAR(v.steer_cmd_abs_mean, (0.5 + 0.48 + 0.1) / 8, 1e-12);
+  EXPECT_DOUBLE_EQ(v.steer_sat_share, 0.25); // 0.5 and -0.48 reach 95% of the 0.5 lock
+  EXPECT_DOUBLE_EQ(v.accel_cmd_mean, 0.5);
+  EXPECT_DOUBLE_EQ(v.brake_share, 0.5);
+  // upright
+  EXPECT_FALSE(u.rolled_over);
+  EXPECT_EQ(u.rolled_over_s, -1.0);
+  EXPECT_NEAR(u.tilt_max_deg, std::acos(0.3) * kDeg, 1e-9);
+  EXPECT_DOUBLE_EQ(u.tilt_s, 0.25);
+  EXPECT_EQ(u.steer_sat_share, 0.0);
+  EXPECT_EQ(u.brake_share, 0.0);
+  EXPECT_DOUBLE_EQ(u.accel_cmd_mean, 1.0);
+  // the episode
+  EXPECT_TRUE(e.plant_tracked);
+  EXPECT_EQ(e.vehicles_rolled, 1);
+  EXPECT_DOUBLE_EQ(e.first_roll_s, 1.0);
+  const std::string j = e.to_json();
+  EXPECT_NE(j.find("\"vehicles_rolled\":1,\"first_roll_s\":1,"), std::string::npos) << j;
+  EXPECT_NE(j.find("\"plant_steps\":8,\"rolled_over\":true,\"rolled_over_s\":1,"),
+            std::string::npos);
+  EXPECT_NE(j.find("\"rolled_over\":false,\"rolled_over_s\":-1,"), std::string::npos);
+  EXPECT_NE(j.find("\"steer_sat_share\":0.25,"), std::string::npos);
+
+  // the scorecard: over the plant-fed runs and episodes only
+  nav_scorecard s = aggregate_nav({e, plant_episode(false)}, "ckpt-P");
+  EXPECT_EQ(s.plant_runs, 2);
+  EXPECT_DOUBLE_EQ(s.rollover_rate, 0.5);
+  EXPECT_DOUBLE_EQ(s.episode_rollover_rate, 1.0);
+  EXPECT_NEAR(s.mean_tilt_max_deg, 0.5 * (90.0 + std::acos(0.3) * kDeg), 1e-9);
+  EXPECT_DOUBLE_EQ(s.mean_ltr_max, 0.5);
+  EXPECT_DOUBLE_EQ(s.mean_lift_s, 0.25);
+  EXPECT_DOUBLE_EQ(s.mean_steer_sat_share, 0.125);
+  EXPECT_DOUBLE_EQ(s.mean_brake_share, 0.25);
+  const std::string sj = s.to_json();
+  EXPECT_NE(sj.find("\"plant_runs\":2,\"rollover_rate\":0.5,\"episode_rollover_rate\":1,"),
+            std::string::npos)
+      << sj;
+}
+
+// Without a plant feed (the kinematic arm) the ledger is untracked and the JSON carries none of it:
+// the record is the tracked one less the ledger's keys, byte for byte, and the scorecard's has
+// none.
+TEST(NavStats, PlantLedgerUntrackedLeavesTheJsonUnchanged) {
+  const episode_nav_stats on = plant_episode(true), off = plant_episode(false);
+  EXPECT_FALSE(off.plant_tracked);
+  EXPECT_FALSE(off.per_vehicle[0].plant_tracked);
+  EXPECT_EQ(off.per_vehicle[0].plant_steps, 0);
+  EXPECT_FALSE(off.per_vehicle[0].rolled_over);
+  const std::string j = off.to_json();
+  for (const char *key : {"plant_steps", "rolled_over", "vehicles_rolled", "first_roll_s",
+                          "tilt_max_deg", "ltr_max", "steer_sat_share", "brake_share"})
+    EXPECT_EQ(j.find(key), std::string::npos) << key;
+  EXPECT_EQ(strip_plant_keys(on.to_json()), j);
+  const std::string sj = aggregate_nav({off}).to_json();
+  EXPECT_EQ(sj.find("plant_runs"), std::string::npos);
+  EXPECT_EQ(sj.find("rollover_rate"), std::string::npos);
+  EXPECT_NE(sj.find("\"mean_binding_stopped_share\":0}"), std::string::npos) << sj;
 }

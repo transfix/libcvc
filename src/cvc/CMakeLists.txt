@@ -73,6 +73,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/physics/physics_codec.h
   ../../inc/cvc/physics/nav_plant.h
   ../../inc/cvc/physics/nav_eval.h
+  ../../inc/cvc/physics/nav_es.h
   ../../inc/cvc/physics/plant_log.h
   ../../inc/cvc/physics/plant_log_scene.h
   ../../inc/cvc/state/state_hash_partition.h
@@ -273,6 +274,7 @@ set(SOURCE_FILES
   physics/binding_meta.cpp
   physics/nav_plant.cpp
   physics/nav_eval.cpp
+  physics/nav_es.cpp
   physics/plant_log.cpp
   physics/plant_log_scene.cpp
   state/state_change_journal.cpp
@@ -1308,11 +1310,14 @@ list(APPEND INCLUDE_FILES ../../inc/cvc/net/http_client.h)
 # the retained Widget tree, the Runtime + reconcile boundary, and direct
 # cvc::state binding, walking a pluggable Backend. It touches NO VTK/ImGui/GL —
 # the ImGui-over-VTK backend lives in cvcGL (src/cvcGL/ariadne). Roadmap §16.1.
-list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/requires.cpp ariadne/host_info.cpp)
+list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/requires.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/holon.cpp ariadne/holon_sync.cpp)
 list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/widget.h
   ../../inc/cvc/ariadne/backend.h
   ../../inc/cvc/ariadne/ariadne.h
+  ../../inc/cvc/ariadne/avatar_sim.h
+  ../../inc/cvc/ariadne/holon.h
+  ../../inc/cvc/ariadne/holon_sync.h
   ../../inc/cvc/ariadne/app_runtime.h
   ../../inc/cvc/ariadne/doc_args.h
   ../../inc/cvc/ariadne/host_cli.h
@@ -1526,7 +1531,32 @@ endif()
 # BUILD-only so no absolute path reaches the exported targets. Shared builds only: a static libcvc
 # would have to export the archive.
 option(CVC_ARIADNE_TVISION "Build the Ariadne tvision backend when tvision is found" ON)
-if(CVC_ARIADNE_TVISION AND TARGET ftxui::component AND BUILD_SHARED_LIBS)
+set(CVC_ARIADNE_TVISION_ENABLED OFF CACHE INTERNAL "libcvc has the tvision backend (src/ari reads it)")
+if(CVC_ARIADNE_TVISION AND TARGET ftxui::component AND EMSCRIPTEN)
+  # The browser build: cvcpkg's wasm tvision carries a browser console (stdin/stdout to a page's
+  # xterm.js, no ncurses), which internal/browsercon.h marks; an unpatched tvision cannot run
+  # there. Static like everything on wasm, so it goes through its CMake config and
+  # CVC_PRIVATE_LINK_PACKAGES, and a consumer of the static cvc finds it the same way.
+  find_package(tvision CONFIG QUIET)
+  if(TARGET tvision::tvision)
+    get_target_property(_cvc_tvision_inc tvision::tvision INTERFACE_INCLUDE_DIRECTORIES)
+  endif()
+  set(_cvc_tvision_browser OFF)
+  foreach(_inc IN LISTS _cvc_tvision_inc)
+    if(EXISTS "${_inc}/tvision/internal/browsercon.h")
+      set(_cvc_tvision_browser ON)
+    endif()
+  endforeach()
+  if(_cvc_tvision_browser)
+    target_compile_definitions(cvc PRIVATE CVC_ARIADNE_TVISION)
+    target_link_libraries(cvc PRIVATE tvision::tvision)
+    list(APPEND CVC_PRIVATE_LINK_PACKAGES tvision)
+    set(CVC_ARIADNE_TVISION_ENABLED ON CACHE INTERNAL "libcvc has the tvision backend (src/ari reads it)")
+    message(STATUS "Ariadne: tvision terminal backend ENABLED (browser console)")
+  else()
+    message(STATUS "Ariadne: no tvision with a browser console - tvision backend compiles to a stub")
+  endif()
+elseif(CVC_ARIADNE_TVISION AND TARGET ftxui::component AND BUILD_SHARED_LIBS)
   find_path(CVC_TVISION_INCLUDE_DIR tvision/tv.h)
   find_library(CVC_TVISION_LIBRARY tvision)
   set(_cvc_tvision_libs ${CVC_TVISION_LIBRARY})
@@ -1550,6 +1580,7 @@ if(CVC_ARIADNE_TVISION AND TARGET ftxui::component AND BUILD_SHARED_LIBS)
         APPEND
         PROPERTY COMPILE_OPTIONS /permissive- /Zc:__cplusplus /Zc:externConstexpr /Zc:inline)
     endif()
+    set(CVC_ARIADNE_TVISION_ENABLED ON CACHE INTERNAL "libcvc has the tvision backend (src/ari reads it)")
     message(STATUS "Ariadne: tvision terminal backend ENABLED (${CVC_TVISION_LIBRARY})")
   else()
     message(STATUS "Ariadne: tvision not found - tvision backend compiles to a stub")

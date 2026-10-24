@@ -11,6 +11,7 @@
 // See plant_log.h.
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cvc/nav/detail/dyn_bike.h>
@@ -131,7 +132,8 @@ planar_sample plant_log::sample(int i) const {
   s.rear_y = rear.y;
   s.steer = vs.steer;
   s.grade = std::max(-1.0, std::min(1.0, fwd.z));
-  s.roll = std::max(-1.0, std::min(1.0, -rotate(b.rotation, {0.0, 1.0, 0.0}).z));
+  // + left side up: the body's left axis rising (plant_state::roll, plant_sample::roll).
+  s.roll = std::max(-1.0, std::min(1.0, rotate(b.rotation, {0.0, 1.0, 0.0}).z));
   s.wheels = static_cast<int>(vs.wheels.size());
   for (const wheel_state &w : vs.wheels)
     s.wheels_down += w.contact ? 1 : 0;
@@ -164,6 +166,7 @@ void plant_log::record() {
     const vehicle_desc &d = _plant.desc(i);
     s.drive = std::min(std::max(s.accel_cmd, -d.max_decel), d.max_accel);
     s.contacts = _plant.static_contacts_step(i);
+    s.energy = _plant.energy_step(i);
     // The centre of mass's acceleration over the tick, across the mean heading.
     const double c0 = std::cos(prev.psi), s0 = std::sin(prev.psi);
     const double c1 = std::cos(s.psi), s1 = std::sin(s.psi);
@@ -393,6 +396,198 @@ dyn_bike_fit fit_dyn_bike(const std::vector<std::vector<planar_sample>> &runs, d
   f.tire_b_rear_factor = br;
   f.yaw_inertia_factor = iz;
   f.resistance_factor = resist;
+  return f;
+}
+
+namespace {
+
+// The power model's six features at each tick of `runs`, in SI, each already times dt, so a
+// tick's energy is sum_j theta_j x_j with theta = (k_pos, k_neg, p_idle, c_v, c_v3, c_lat): the
+// smooth positive and negative parts of the drive power m a vx, the tick itself, the smooth speed,
+// its cube, and cornering's m (vx r)^2 |vx|. `a` is the drive force per unit mass the dynamic
+// vehicle `dyn` needs to make the motion the plant made: the measured acceleration less its
+// resistances (drag, rolling and grade), as diff::dyn_plant integrates vx' = a + F_res / m.
+constexpr int kPowerTerms = 6;
+
+struct power_ticks {
+  std::vector<std::array<double, kPowerTerms>> x;
+  std::vector<double> y;           // the ledger's energy, J
+  std::vector<std::size_t> run_of; // each tick's run
+  std::vector<power_run> runs;     // measured_J, distance_m and seconds filled
+  double width = 0.0;              // W, the smooth parts' width
+};
+
+constexpr double kPowerSpeedEps = 1e-3; // m/s: the smooth speed's width (diff::power_params)
+
+power_ticks power_features(const std::vector<std::vector<planar_sample>> &runs, double dt,
+                           const vehicle_desc &d, const cvc::nav::dyn_bike_si *dyn, double width) {
+  const cvc::nav::dyn_bike_si si = dyn ? *dyn : nav_plant::dyn_bike_si_of(d);
+  power_ticks t;
+  double vmax = 1.0;
+  for (const auto &run : runs)
+    for (const planar_sample &s : run)
+      vmax = std::max(vmax, std::fabs(s.vx));
+  // 1e-3 of the full positive drive power, as the trainer's default (diff::power_full).
+  t.width = width > 0.0 ? width : 1e-3 * si.mass * d.max_accel * vmax;
+  t.runs.resize(runs.size());
+  for (std::size_t r = 0; r < runs.size(); ++r) {
+    const std::vector<planar_sample> &run = runs[r];
+    for (std::size_t k = 1; k < run.size(); ++k) {
+      const planar_sample &s0 = run[k - 1], &s = run[k];
+      const double v = 0.5 * (s0.vx + s.vx);
+      const double sg = v > 0.0 ? 1.0 : (v < 0.0 ? -1.0 : 0.0);
+      const double f_res = -si.drag * v * std::fabs(v) -
+                           si.rolling_resistance * si.mass * si.gravity * sg -
+                           si.mass * si.gravity * 0.5 * (s0.grade + s.grade);
+      const double a = s.a_lon - f_res / si.mass;
+      const double P = si.mass * a * s.vx;
+      float dd;
+      const double pos =
+          cvc::nav::diff::power_softplus(static_cast<float>(P), static_cast<float>(t.width), dd);
+      const double neg =
+          cvc::nav::diff::power_softplus(static_cast<float>(-P), static_cast<float>(t.width), dd);
+      const double speed = std::sqrt(s.vx * s.vx + kPowerSpeedEps * kPowerSpeedEps);
+      const double lat = si.mass * s.vx * s.vx * s.r * s.r * speed;
+      t.x.push_back({pos * dt, neg * dt, dt, speed * dt, speed * speed * speed * dt, lat * dt});
+      t.y.push_back(s.energy);
+      t.run_of.push_back(r);
+      t.runs[r].measured_J += s.energy;
+      t.runs[r].distance_m += std::hypot(s.x - s0.x, s.y - s0.y);
+      t.runs[r].seconds += dt;
+    }
+  }
+  return t;
+}
+
+void report_power(power_ticks &t, power_fit &f) {
+  const auto &si = f.si;
+  const double th[kPowerTerms] = {si.k_pos, si.k_neg, si.p_idle, si.c_v, si.c_v3, si.c_lat};
+  double ybar = 0.0;
+  for (double y : t.y)
+    ybar += y;
+  ybar = t.y.empty() ? 0.0 : ybar / static_cast<double>(t.y.size());
+  double ss_res = 0.0, ss_tot = 0.0;
+  for (std::size_t i = 0; i < t.y.size(); ++i) {
+    double e = 0.0;
+    for (int j = 0; j < kPowerTerms; ++j)
+      e += th[j] * t.x[i][j];
+    t.runs[t.run_of[i]].model_J += e;
+    ss_res += (e - t.y[i]) * (e - t.y[i]);
+    ss_tot += (t.y[i] - ybar) * (t.y[i] - ybar);
+  }
+  f.ticks = t.y.size();
+  f.r2 = ss_tot > 0.0 ? 1.0 - ss_res / ss_tot : 0.0;
+  double sm = 0.0, sy = 0.0;
+  for (const power_run &r : t.runs) {
+    sm += r.model_J;
+    sy += r.measured_J;
+  }
+  f.total_error = sy != 0.0 ? (sm - sy) / sy : 0.0;
+  const double mean = t.runs.empty() ? 0.0 : sy / static_cast<double>(t.runs.size());
+  f.worst_run_error = 0.0;
+  for (const power_run &r : t.runs)
+    if (std::fabs(r.measured_J) >= 0.01 * std::fabs(mean) && r.measured_J != 0.0)
+      f.worst_run_error = std::max(f.worst_run_error,
+                                   std::fabs(r.model_J - r.measured_J) / std::fabs(r.measured_J));
+  f.runs = t.runs;
+}
+
+// Least squares over the coefficients in `free` (the others held at 0), by the normal equations
+// on unit-norm columns. Returns false if they are singular.
+bool power_lsq(const power_ticks &t, const bool free[kPowerTerms], double th[kPowerTerms]) {
+  int idx[kPowerTerms], n = 0;
+  for (int j = 0; j < kPowerTerms; ++j)
+    if (free[j])
+      idx[n++] = j;
+  double scale[kPowerTerms] = {};
+  for (std::size_t i = 0; i < t.y.size(); ++i)
+    for (int a = 0; a < n; ++a)
+      scale[a] += t.x[i][idx[a]] * t.x[i][idx[a]];
+  for (int a = 0; a < n; ++a) {
+    if (!(scale[a] > 0.0))
+      return false;
+    scale[a] = 1.0 / std::sqrt(scale[a]);
+  }
+  double A[kPowerTerms][kPowerTerms + 1] = {};
+  for (std::size_t i = 0; i < t.y.size(); ++i)
+    for (int a = 0; a < n; ++a) {
+      const double xa = t.x[i][idx[a]] * scale[a];
+      for (int b = 0; b < n; ++b)
+        A[a][b] += xa * t.x[i][idx[b]] * scale[b];
+      A[a][n] += xa * t.y[i];
+    }
+  for (int c = 0; c < n; ++c) { // Gauss-Jordan with partial pivoting
+    int piv = c;
+    for (int r = c + 1; r < n; ++r)
+      if (std::fabs(A[r][c]) > std::fabs(A[piv][c]))
+        piv = r;
+    if (std::fabs(A[piv][c]) < 1e-12)
+      return false;
+    for (int k = 0; k <= n; ++k)
+      std::swap(A[c][k], A[piv][k]);
+    for (int r = 0; r < n; ++r) {
+      if (r == c)
+        continue;
+      const double m = A[r][c] / A[c][c];
+      for (int k = c; k <= n; ++k)
+        A[r][k] -= m * A[c][k];
+    }
+  }
+  for (int j = 0; j < kPowerTerms; ++j)
+    th[j] = 0.0;
+  for (int a = 0; a < n; ++a)
+    th[idx[a]] = A[a][n] / A[a][a] * scale[a];
+  return true;
+}
+
+} // namespace
+
+power_fit fit_power(const std::vector<std::vector<planar_sample>> &runs, double dt,
+                    const vehicle_desc &d, const cvc::nav::dyn_bike_si *dyn) {
+  power_ticks t = power_features(runs, dt, d, dyn, 0.0);
+  // Non-negative least squares by every subset of the coefficients (k_neg <= 0, the others >= 0):
+  // the feasible solution with the least squared error.
+  double best[kPowerTerms] = {}, best_sse = std::numeric_limits<double>::infinity();
+  for (int mask = 1; mask < (1 << kPowerTerms); ++mask) {
+    bool free[kPowerTerms];
+    for (int j = 0; j < kPowerTerms; ++j)
+      free[j] = (mask >> j) & 1;
+    double th[kPowerTerms];
+    if (!power_lsq(t, free, th))
+      continue;
+    if (th[0] < 0.0 || th[1] > 0.0 || th[2] < 0.0 || th[3] < 0.0 || th[4] < 0.0 || th[5] < 0.0)
+      continue;
+    double sse = 0.0;
+    for (std::size_t i = 0; i < t.y.size(); ++i) {
+      double e = -t.y[i];
+      for (int j = 0; j < kPowerTerms; ++j)
+        e += th[j] * t.x[i][j];
+      sse += e * e;
+    }
+    if (sse < best_sse) {
+      best_sse = sse;
+      std::copy(th, th + kPowerTerms, best);
+    }
+  }
+  power_fit f;
+  f.si.k_pos = best[0];
+  f.si.k_neg = best[1];
+  f.si.p_idle = best[2];
+  f.si.c_v = best[3];
+  f.si.c_v3 = best[4];
+  f.si.c_lat = best[5];
+  f.si.width = t.width;
+  report_power(t, f);
+  return f;
+}
+
+power_fit evaluate_power(const std::vector<std::vector<planar_sample>> &runs, double dt,
+                         const vehicle_desc &d, const cvc::nav::dyn_power_si &si,
+                         const cvc::nav::dyn_bike_si *dyn) {
+  power_ticks t = power_features(runs, dt, d, dyn, si.width);
+  power_fit f;
+  f.si = si;
+  report_power(t, f);
   return f;
 }
 

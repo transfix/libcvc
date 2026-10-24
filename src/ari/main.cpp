@@ -163,7 +163,17 @@ int main(int argc, char **argv) {
   // The browser build (ari.html over xterm.js) has no command line. Run the document baked into
   // MEMFS, with the embedded component library at /components so cvc://components/*.ari resolves
   // (see the EMSCRIPTEN block in src/ari/CMakeLists.txt).
+#ifdef CVC_ARI_WASM_BACKEND // ari_tvision: the same document on the tvision desktop
+  const char *baked[] = {"ari",
+                         "run",
+                         "--backend",
+                         CVC_ARI_WASM_BACKEND,
+                         "--component-path",
+                         "/",
+                         CVC_ARIADNE_WASM_DOC};
+#else
   const char *baked[] = {"ari", "run", "--component-path", "/", CVC_ARIADNE_WASM_DOC};
+#endif
   if (argc < 2) {
     argc = static_cast<int>(sizeof baked / sizeof *baked);
     argv = const_cast<char **>(baked);

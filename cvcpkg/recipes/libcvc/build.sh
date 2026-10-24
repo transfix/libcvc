@@ -69,8 +69,11 @@ cmake --build "$CVC_BUILD_DIR" -j "$CVC_JOBS"
 # rule and package.files selects only lib/ and include/, so nothing test-
 # related reaches CVC_INSTALL_DIR or the published bundle. Running before the
 # install step keeps a failed suite from staging a bundle at all.
+# CVC_CTEST_EXCLUDE: a ctest -E regex of tests to leave out (CI's long-running suites).
 case "$(printf %s "${CVC_BUILD_TESTS:-OFF}" | tr "[:upper:]" "[:lower:]")" in
-  on|1|true|yes) ctest --test-dir "$CVC_BUILD_DIR" --output-on-failure -j "$CVC_JOBS" ;;
+  on|1|true|yes)
+    ctest --test-dir "$CVC_BUILD_DIR" --output-on-failure -j "$CVC_JOBS" \
+      ${CVC_CTEST_EXCLUDE:+-E "$CVC_CTEST_EXCLUDE"} ;;
 esac
 
 cmake --install "$CVC_BUILD_DIR"

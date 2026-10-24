@@ -771,6 +771,14 @@ void sim_world::step(int num_threads) {
       sp_[i] = s1.speed;
       pl_steer_now_[i] = s1.steer;
     }
+    // What the plant measured of each vehicle over the tick, for the plant ledger.
+    if (plant_->tracks_samples()) {
+      pl_sample_.resize(static_cast<std::size_t>(n_));
+      for (int i = 0; i < n_; ++i)
+        pl_sample_[i] = plant_->sample(i);
+    } else {
+      pl_sample_.clear();
+    }
   }
 
   lap(accDrive);
@@ -911,6 +919,8 @@ void sim_world::step(int num_threads) {
       st_smp_.energy_step_J = st_energy_.data();
       st_smp_.static_contacts = st_contacts_.data();
     }
+    // A plant that measures its vehicles feeds the plant ledger.
+    st_smp_.plant = plant_samples();
     stats_->step(st_pos_.data(), st_head_.data(), st_spd_.data(), st_mode_.data(),
                  st_reached_.data(), st_smp_);
   }
@@ -1265,6 +1275,7 @@ void sim_world::set_plant(vehicle_plant *p) {
       v->clear();
     pl_start_.clear();
     pl_drift_.clear();
+    pl_sample_.clear();
     pl_max_steer_ = 0.0f;
     pl_has_a_max_ = pl_has_vmax_ = pl_has_a_lat_ = pl_fp_ = false;
     return;
@@ -1279,6 +1290,7 @@ void sim_world::set_plant(vehicle_plant *p) {
   pl_hard_scale_.assign(n, 1.0f);
   pl_start_.assign(n, plant_state{});
   pl_drift_.assign(n, drift_sample{});
+  pl_sample_.clear(); // filled each tick when the plant measures its vehicles
   // The plant takes the agents where they are, at rest.
   std::vector<plant_state> start(n);
   for (int i = 0; i < n_; ++i) {

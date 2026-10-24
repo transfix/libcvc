@@ -598,6 +598,17 @@ cvcGL's `publish_nav_stats` writes them too, again only when tracked:
 - `<prefix>.nav_stats.veh.<i>.{energy_J, energy_per_km, building_contacts}`;
 - `<prefix>.nav_stats.episode.{total_energy_J, total_building_contacts}`.
 
+The plant also keeps a **plant ledger** for nav_stats (NAV_STATS.md, "The plant ledger"):
+`nav_plant::sample(i)` is agent i's `cvc::nav::plant_sample` at the end of the last tick (speed,
+attitude, nav's commands, accelerations, roll rate, the lateral load transfer ratio, wheels down,
+static contacts; SI), measured in `advance()` from the same vehicle state as the energy, and
+`sim_world` feeds it to the collector. `veh_nav_stats` then has `rolled_over` (tipped past 60
+degrees for 1 s, latched) and when, the peak tilt, roll and pitch, the load transfer, the lateral
+acceleration and how much of the steering and the brakes nav used; the episode `vehicles_rolled`
+and `first_roll_s`; the scorecard `rollover_rate`. Only on a plant: the kinematic record is
+unchanged. `planar_sample::roll` (the plant log) now has the sign its comment gives, + left side
+up (it was the right side's), so the two agree.
+
 Gates (`nav_plant_test`, Windows MSVC, the Humvee in nav's trained metric, 1 unit = 20 m):
 
 | Gate | Measured |
@@ -696,8 +707,16 @@ The five terms (doc 31 D9):
 - **H1, the grade force and the hard barrier.** The grade cost goes through the material
   pipeline (`material_build`): `F = -lam_grade ∇r̃_g` leans the drive toward gentler ground,
   and the infeasible cells are its hard plane (`lam_grade_hard`, with the material channel's
-  `k_sharp` and `d_hat_m`). With `block_infeasible` (the default) the infeasible cells also join
-  every belief plane's occupancy, so the SDF's barrier and the governors keep the agents out.
+  `k_sharp` and `d_hat_m`). Slope is a material risk, not a wall: by default (`lam_grade` 0.5,
+  `lam_grade_hard` 3) the drive weighs it like any other material, and a vehicle the planner
+  sends over a steep cell it can physically drive is not pinned there as against a building. The
+  hard weight is three times the material channel's: at 1 the Jolt Humvee crossing Austin's
+  twisted ramps rolled in most runs, at 3 its lead never did. The terrain's risk is material
+  risk where the drive reports and reads it: `drive_telemetry.mrisk` (and with it the nav
+  ledger's `mrisk_mean`/`mrisk_max`) is the worse of the material's risk and the grade cost, and
+  a risk net's look-ahead (`kFlagFeatRisk`) reads the worse of the two ahead, the terrain's alone
+  when there is no material stack. With `block_infeasible` (off by default) the infeasible
+  cells also join every belief plane's occupancy, so the SDF's barrier keeps the agents out.
 - **H2, gravity in the governors.** With `governors` (the default) the drive samples the slope
   under each agent:
   - the stopping governor plans with `a_stop = max(min(a_max, a_max + g_along), 0.1 a_max)`, so

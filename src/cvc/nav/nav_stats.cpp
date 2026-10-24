@@ -26,12 +26,15 @@
 #include <cmath>
 #include <cvc/nav/nav_stats.h>
 #include <sstream>
+#include <utility>
 
 namespace cvc {
 namespace nav {
 
 namespace {
 constexpr double kPi = 3.14159265358979323846;
+constexpr double kDeg = 180.0 / kPi;
+constexpr double kG = 9.80665; // standard gravity, for the plant ledger's a_lat_max_g
 // Shortest signed angle a-b into (-pi, pi].
 double wrap_pi(double a) {
   while (a > kPi)
@@ -92,6 +95,9 @@ void nav_stats_collector::begin_episode(int n, double dt_s, const float *start_p
   slot_err_max_.assign(n_, 0.0);
   slot_err_last_.assign(n_, 0.0);
   slot_err_cnt_.assign(n_, 0);
+  tipped_n_.assign(n_, 0);
+  steer_sat_n_.assign(n_, 0);
+  brake_n_.assign(n_, 0);
   for (int i = 0; i < n_; ++i) {
     auto &v = ep_.per_vehicle[i];
     v.veh_index = i;
@@ -203,6 +209,37 @@ void nav_stats_collector::step(const float *pos, const float *head, const float 
       if (smp.static_contacts)
         v.building_contacts += smp.static_contacts[i];
     }
+    if (smp.plant) { // the plant ledger: a physics plant's measurement of the vehicle (SI)
+      const plant_sample &ps = smp.plant[i];
+      v.plant_tracked = true;
+      ++v.plant_steps;
+      const auto clamp1 = [](double a) { return std::max(-1.0, std::min(1.0, a)); };
+      const double tilt = std::acos(clamp1(ps.up_z)) * kDeg;
+      v.tilt_max_deg = std::max(v.tilt_max_deg, tilt);
+      v.roll_max_deg = std::max(v.roll_max_deg, std::asin(std::fabs(clamp1(ps.roll))) * kDeg);
+      v.pitch_max_deg = std::max(v.pitch_max_deg, std::asin(std::fabs(clamp1(ps.grade))) * kDeg);
+      if (tilt > p_.tilt_deg)
+        v.tilt_s += dt_;
+      // Rolled over: tipped past roll_up_z for roll_hold_s on end (latched). The run of tipped
+      // ticks is counted in ticks, so the hold is met on the same tick however a sum would round.
+      tipped_n_[i] = ps.up_z < p_.roll_up_z ? tipped_n_[i] + 1 : 0;
+      if (!v.rolled_over && tipped_n_[i] > 0 && tipped_n_[i] * dt_ >= p_.roll_hold_s - 1e-9) {
+        v.rolled_over = true;
+        v.rolled_over_s = (step_i_ + 2 - tipped_n_[i]) * dt_; // the run's first tick's end
+      }
+      v.ltr_max = std::max(v.ltr_max, std::fabs(ps.ltr));
+      if (std::fabs(ps.ltr) > p_.lift_ltr)
+        v.lift_s += dt_;
+      if (ps.wheels - ps.wheels_down >= 2)
+        v.wheels_up_s += dt_;
+      v.a_lat_max_g = std::max(v.a_lat_max_g, std::fabs(ps.a_lat) / kG);
+      v.steer_cmd_abs_mean += std::fabs(ps.steer_cmd); // a sum until finish()
+      if (ps.max_steer > 0.0 && std::fabs(ps.steer_cmd) >= p_.steer_sat * ps.max_steer)
+        ++steer_sat_n_[i];
+      v.accel_cmd_mean += ps.accel_cmd; // a sum until finish()
+      if (ps.accel_cmd < 0.0)
+        ++brake_n_[i];
+    }
     if (smp.drive) { // drive telemetry: accumulate sums (divided in finish) + running peaks
       const drive_sample &ds = smp.drive[i];
       ++v.drive_steps;
@@ -222,6 +259,14 @@ void nav_stats_collector::step(const float *pos, const float *head, const float 
         v.steer_abs_max = as;
       if (ds.binding)
         ++v.binding_steps;
+      v.lam_soft_mean += ds.lam_soft;
+      v.lam_hard_mean += ds.lam_hard;
+      const double ac = std::fabs((double)ds.curvature);
+      v.curvature_abs_mean += ac;
+      if (ac > v.curvature_abs_max)
+        v.curvature_abs_max = ac;
+      if (ds.binding && std::fabs((double)spd[i]) < p_.speed_eps_mps)
+        ++v.binding_stopped_steps;
     }
 
     if (reached[i] && v.time_to_goal_s < 0) {
@@ -297,6 +342,9 @@ episode_nav_stats nav_stats_collector::finish() const {
       v.mrisk_mean /= dn;
       v.ext_force_mean /= dn;
       v.steer_abs_mean /= dn;
+      v.lam_soft_mean /= dn;
+      v.lam_hard_mean /= dn;
+      v.curvature_abs_mean /= dn;
     }
 
     const double used_t = v.arrived ? v.time_to_goal_s : elapsed;
@@ -335,6 +383,19 @@ episode_nav_stats nav_stats_collector::finish() const {
     if (v.terrain_tracked) {
       ep.terrain_tracked = true;
       ep.total_infeasible_slope_steps += v.infeasible_slope_steps;
+    }
+    if (v.plant_tracked) { // the plant ledger: the means were sums; divide the copy
+      const double pn = static_cast<double>(v.plant_steps);
+      v.steer_cmd_abs_mean /= pn;
+      v.accel_cmd_mean /= pn;
+      v.steer_sat_share = steer_sat_n_[i] / pn;
+      v.brake_share = brake_n_[i] / pn;
+      ep.plant_tracked = true;
+      if (v.rolled_over) {
+        ++ep.vehicles_rolled;
+        if (ep.first_roll_s < 0 || v.rolled_over_s < ep.first_roll_s)
+          ep.first_roll_s = v.rolled_over_s;
+      }
     }
   }
   ep.arrived = arrived;
@@ -395,6 +456,10 @@ std::string episode_nav_stats::to_json() const {
   }
   if (terrain_tracked)
     o << ",\"total_infeasible_slope_steps\":" << total_infeasible_slope_steps;
+  if (plant_tracked) {
+    o << ",\"vehicles_rolled\":" << vehicles_rolled << ",\"first_roll_s\":";
+    num(o, first_roll_s);
+  }
   o << ",\"coverage\":{\"explored_frac\":";
   num(o, coverage.explored_frac);
   o << ",\"visible_frac\":";
@@ -476,6 +541,15 @@ std::string episode_nav_stats::to_json() const {
     o << ",\"steer_abs_max\":";
     num(o, v.steer_abs_max);
     o << ",\"binding_steps\":" << v.binding_steps;
+    o << ",\"lam_soft_mean\":";
+    num(o, v.lam_soft_mean);
+    o << ",\"lam_hard_mean\":";
+    num(o, v.lam_hard_mean);
+    o << ",\"curvature_abs_mean\":";
+    num(o, v.curvature_abs_mean);
+    o << ",\"curvature_abs_max\":";
+    num(o, v.curvature_abs_max);
+    o << ",\"binding_stopped_steps\":" << v.binding_stopped_steps;
     if (v.energy_tracked) {
       o << ",\"energy_J\":";
       num(o, v.energy_J);
@@ -485,6 +559,28 @@ std::string episode_nav_stats::to_json() const {
     }
     if (v.terrain_tracked)
       o << ",\"infeasible_slope_steps\":" << v.infeasible_slope_steps;
+    if (v.plant_tracked) {
+      o << ",\"plant_steps\":" << v.plant_steps
+        << ",\"rolled_over\":" << (v.rolled_over ? "true" : "false") << ",\"rolled_over_s\":";
+      num(o, v.rolled_over_s);
+      const std::pair<const char *, double> leaves[] = {
+          {"tilt_max_deg", v.tilt_max_deg},
+          {"roll_max_deg", v.roll_max_deg},
+          {"pitch_max_deg", v.pitch_max_deg},
+          {"tilt_s", v.tilt_s},
+          {"ltr_max", v.ltr_max},
+          {"lift_s", v.lift_s},
+          {"wheels_up_s", v.wheels_up_s},
+          {"a_lat_max_g", v.a_lat_max_g},
+          {"steer_cmd_abs_mean", v.steer_cmd_abs_mean},
+          {"steer_sat_share", v.steer_sat_share},
+          {"accel_cmd_mean", v.accel_cmd_mean},
+          {"brake_share", v.brake_share}};
+      for (const auto &l : leaves) {
+        o << ",\"" << l.first << "\":";
+        num(o, l.second);
+      }
+    }
     o << '}';
   }
   o << "]}";
@@ -549,9 +645,18 @@ nav_scorecard aggregate_nav(const std::vector<episode_nav_stats> &episodes,
   // drive telemetry (over vehicle-runs that carried a drive feed, i.e. drive_steps > 0)
   int drive_runs = 0;
   double al_sum = 0, be_sum = 0, ga_sum = 0, dmu_sum = 0, dmrisk_sum = 0, dext_sum = 0;
+  double ls_sum = 0, lh_sum = 0, curv_sum = 0, pin_sum = 0;
+  // the plant ledger (over the runs and episodes a plant fed)
+  int plant_runs = 0, rolled_runs = 0, plant_eps = 0, rolled_eps = 0;
+  double tilt_sum = 0, ltr_sum = 0, lift_sum = 0, alat_sum = 0, sat_sum = 0, brake_sum = 0;
   for (const auto &e : episodes) {
     if (e.success)
       ++succ;
+    if (e.plant_tracked) {
+      ++plant_eps;
+      if (e.vehicles_rolled > 0)
+        ++rolled_eps;
+    }
     cov_sum.explored_frac += e.coverage.explored_frac;
     cov_sum.visible_frac += e.coverage.visible_frac;
     cov_sum.believed_free_frac += e.coverage.believed_free_frac;
@@ -613,6 +718,21 @@ nav_scorecard aggregate_nav(const std::vector<episode_nav_stats> &episodes,
         dmu_sum += v.mu_mean;
         dmrisk_sum += v.mrisk_mean;
         dext_sum += v.ext_force_mean;
+        ls_sum += v.lam_soft_mean;
+        lh_sum += v.lam_hard_mean;
+        curv_sum += v.curvature_abs_mean;
+        pin_sum += static_cast<double>(v.binding_stopped_steps) / v.drive_steps;
+      }
+      if (v.plant_tracked) {
+        ++plant_runs;
+        if (v.rolled_over)
+          ++rolled_runs;
+        tilt_sum += v.tilt_max_deg;
+        ltr_sum += v.ltr_max;
+        lift_sum += v.lift_s;
+        alat_sum += v.a_lat_max_g;
+        sat_sum += v.steer_sat_share;
+        brake_sum += v.brake_share;
       }
       if (v.closest_approach_m < 1e29) {
         approach_sum += v.closest_approach_m;
@@ -668,6 +788,21 @@ nav_scorecard aggregate_nav(const std::vector<episode_nav_stats> &episodes,
     s.mean_mu = dmu_sum / drive_runs;
     s.mean_mrisk = dmrisk_sum / drive_runs;
     s.mean_ext_force = dext_sum / drive_runs;
+    s.mean_lam_soft = ls_sum / drive_runs;
+    s.mean_lam_hard = lh_sum / drive_runs;
+    s.mean_curvature_abs = curv_sum / drive_runs;
+    s.mean_binding_stopped_share = pin_sum / drive_runs;
+  }
+  s.plant_runs = plant_runs;
+  if (plant_runs > 0) {
+    s.rollover_rate = static_cast<double>(rolled_runs) / plant_runs;
+    s.episode_rollover_rate = plant_eps > 0 ? static_cast<double>(rolled_eps) / plant_eps : 0;
+    s.mean_tilt_max_deg = tilt_sum / plant_runs;
+    s.mean_ltr_max = ltr_sum / plant_runs;
+    s.mean_lift_s = lift_sum / plant_runs;
+    s.mean_a_lat_max_g = alat_sum / plant_runs;
+    s.mean_steer_sat_share = sat_sum / plant_runs;
+    s.mean_brake_share = brake_sum / plant_runs;
   }
   return s;
 }
@@ -733,6 +868,30 @@ std::string nav_scorecard::to_json() const {
   num(o, mean_mrisk);
   o << ",\"mean_ext_force\":";
   num(o, mean_ext_force);
+  o << ",\"mean_lam_soft\":";
+  num(o, mean_lam_soft);
+  o << ",\"mean_lam_hard\":";
+  num(o, mean_lam_hard);
+  o << ",\"mean_curvature_abs\":";
+  num(o, mean_curvature_abs);
+  o << ",\"mean_binding_stopped_share\":";
+  num(o, mean_binding_stopped_share);
+  if (plant_runs > 0) { // a plant fed the ledger (otherwise byte-unchanged)
+    o << ",\"plant_runs\":" << plant_runs;
+    const std::pair<const char *, double> leaves[] = {
+        {"rollover_rate", rollover_rate},
+        {"episode_rollover_rate", episode_rollover_rate},
+        {"mean_tilt_max_deg", mean_tilt_max_deg},
+        {"mean_ltr_max", mean_ltr_max},
+        {"mean_lift_s", mean_lift_s},
+        {"mean_a_lat_max_g", mean_a_lat_max_g},
+        {"mean_steer_sat_share", mean_steer_sat_share},
+        {"mean_brake_share", mean_brake_share}};
+    for (const auto &l : leaves) {
+      o << ",\"" << l.first << "\":";
+      num(o, l.second);
+    }
+  }
   o << "}";
   return o.str();
 }

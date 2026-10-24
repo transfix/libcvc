@@ -17,10 +17,13 @@
 //     pass 0.3 g, and the residuals are reported by lateral g.
 //   - cut_flights and write_npy: the windows, their layout and the file.
 //   - nav_plant_options::ground_height puts a start on the ground under it.
+//   - nav_plant's plant_sample (nav_stats' plant ledger) agrees with the log's planar_sample on
+//     the fields they share, and a Humvee laid on its side reads up_z ~ 0 and has rolled over.
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/detail/dyn_bike.h>
@@ -343,6 +346,168 @@ TEST(PlantLog, LogsAHumveeSwervingOnJolt) {
   host.use(sim, "kinematic");
 }
 
+namespace {
+
+// The swerve's sim_world: one Humvee's worth of nav at 1 unit = 20 m, starting at (-300, 0) m.
+sim_world swerve_sim(sim_world::config &c, std::vector<std::uint8_t> &occ) {
+  c.rows = c.cols = 201;
+  c.min_x = c.min_y = -400.0;
+  c.max_x = c.max_y = 400.0;
+  c.scale = 0.05;
+  c.veh.rr = 0.15f;
+  c.veh.d_hat = 0.35f;
+  c.veh.dt = 0.02f;
+  c.veh.vmax = static_cast<float>(14.0 * c.scale);
+  c.freeze_sense = true;
+  c.reach_tol = static_cast<float>(4.0 * c.scale);
+  occ.assign(static_cast<std::size_t>(c.rows) * c.cols, 0);
+  const float o[2] = {static_cast<float>(-300 * c.scale), 0.0f};
+  const float g[2] = {static_cast<float>(-240 * c.scale), static_cast<float>(25 * c.scale)};
+  const float col[3] = {1, 1, 1};
+  return sim_world(c, occ.data(), occ.data(), cvc::nav::coef_mlp::default_biased(), o, g, col, 1);
+}
+
+quat mul(const quat &a, const quat &b) {
+  return {
+      a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z, a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+      a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x, a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w};
+}
+
+} // namespace
+
+// sim_world hands nav_stats the plant's plant_sample each tick; on the fields it shares with
+// plant_log's planar_sample it is the same measurement (one definition), and the kinematic arm
+// has none.
+TEST(PlantLog, PlantSampleAgreesWithTheLogAndFeedsNavStats) {
+  REQUIRE_JOLT();
+  sim_world::config c;
+  std::vector<std::uint8_t> occ;
+  sim_world sim = swerve_sim(c, occ);
+  EXPECT_EQ(sim.plant_samples(), nullptr) << "the kinematic arm measures nothing";
+  plant_host_options ho;
+  ho.plant.plan_with_vehicle = true;
+  plant_host host(ho);
+  host.use(sim, "humvee");
+  nav_plant &plant = *host.plant();
+  plant.set_lateral_g(0.9);
+  EXPECT_TRUE(plant.tracks_samples());
+  EXPECT_NEAR(plant.sample(0).up_z, 1.0, 1e-12) << "attach(): upright, at rest";
+  EXPECT_EQ(sim.plant_samples(), nullptr) << "before the first step";
+  sim.begin_nav_stats();
+  plant_log log(sim, plant);
+  log.start();
+  float pos[2], gw[2];
+  int side = 1;
+  double peak = 0.0;
+  for (int t = 0; t < 600; ++t) {
+    sim.snapshot(pos, nullptr, nullptr, nullptr, nullptr);
+    sim.goals_world(gw);
+    if (std::hypot(pos[0] - gw[0], pos[1] - gw[1]) < 25.0) {
+      side = -side;
+      sim.retarget(0, static_cast<float>((gw[0] + 70.0) * c.scale),
+                   static_cast<float>(side * 30.0 * c.scale));
+    }
+    sim.step();
+    log.record();
+    const cvc::nav::plant_sample *ps = sim.plant_samples();
+    ASSERT_NE(ps, nullptr);
+    const planar_sample &q = log.runs()[0].back();
+    const auto close_to = [](double a, double b, double tol) {
+      return std::fabs(a - b) <= tol * (1.0 + std::fabs(b));
+    };
+    ASSERT_TRUE(close_to(ps->vx, q.vx, 1e-9)) << t << ": " << ps->vx << " " << q.vx;
+    ASSERT_TRUE(close_to(ps->vy, q.vy, 1e-9)) << t;
+    ASSERT_EQ(ps->r, q.r) << t;
+    ASSERT_EQ(ps->steer, q.steer) << t;
+    ASSERT_TRUE(close_to(ps->grade, q.grade, 1e-12)) << t;
+    ASSERT_TRUE(close_to(ps->roll, q.roll, 1e-12)) << t;
+    ASSERT_EQ(ps->steer_cmd, q.steer_cmd) << t;
+    ASSERT_TRUE(close_to(ps->accel_cmd, q.accel_cmd, 1e-9)) << t;
+    // The tick's length: nav's float dt here, the physics steps' there.
+    ASSERT_TRUE(close_to(ps->a_lat, q.a_lat, 1e-5)) << t << ": " << ps->a_lat << " " << q.a_lat;
+    ASSERT_TRUE(close_to(ps->a_lon, q.a_lon, 1e-5)) << t;
+    ASSERT_EQ(ps->contacts, q.contacts) << t;
+    ASSERT_EQ(ps->wheels, q.wheels) << t;
+    ASSERT_EQ(ps->wheels_down, q.wheels_down) << t;
+    ASSERT_EQ(ps->max_steer, plant.desc(0).max_steer);
+    ASSERT_GT(ps->up_z, 0.9) << t << ": the swerve keeps it upright";
+    peak = std::max(peak, std::fabs(ps->a_lat) / kG);
+  }
+  const cvc::nav::episode_nav_stats e = sim.nav_stats();
+  const cvc::nav::veh_nav_stats &v = e.per_vehicle[0];
+  std::printf("  swerve ledger: tilt %.1f deg (roll %.1f, pitch %.1f), |ltr| max %.2f, a_lat max "
+              "%.2f g, steer saturated %.0f%% of ticks, braking %.0f%%\n",
+              v.tilt_max_deg, v.roll_max_deg, v.pitch_max_deg, v.ltr_max, v.a_lat_max_g,
+              100.0 * v.steer_sat_share, 100.0 * v.brake_share);
+  EXPECT_TRUE(v.plant_tracked);
+  EXPECT_EQ(v.plant_steps, 600);
+  EXPECT_FALSE(v.rolled_over);
+  EXPECT_EQ(e.vehicles_rolled, 0);
+  EXPECT_DOUBLE_EQ(v.a_lat_max_g, peak);
+  EXPECT_GT(v.a_lat_max_g, 0.3);
+  EXPECT_GT(v.ltr_max, 0.1) << "the swerves load one side";
+  EXPECT_LT(v.tilt_max_deg, 20.0);
+  EXPECT_GT(v.steer_cmd_abs_mean, 0.0);
+  host.use(sim, "kinematic");
+  EXPECT_EQ(sim.plant_samples(), nullptr);
+}
+
+// A Humvee laid on its left side (rolled +90 degrees about its forward axis: the left side up)
+// reads up_z ~ 0 and roll ~ +1, as the log's planar_sample does; a second later nav_stats has it
+// rolled over, at the tick it went over.
+TEST(PlantLog, AHumveeOnItsSideHasRolledOver) {
+  REQUIRE_JOLT();
+  sim_world::config c;
+  std::vector<std::uint8_t> occ;
+  sim_world sim = swerve_sim(c, occ);
+  plant_host host;
+  host.use(sim, "humvee");
+  nav_plant &plant = *host.plant();
+  world &w = *host.physics();
+  sim.begin_nav_stats();
+  plant_log log(sim, plant);
+  log.start();
+  for (int t = 0; t < 25; ++t) { // settle on its wheels
+    sim.step();
+    log.record();
+  }
+  EXPECT_FALSE(sim.nav_stats().per_vehicle[0].rolled_over);
+  EXPECT_GT(sim.plant_samples()[0].up_z, 0.99);
+  const body_id chassis = w.vehicle_state(plant.vehicle(0)).chassis;
+  body_state b = w.state(chassis);
+  const double h = 0.5 * 3.14159265358979323846 * 0.5; // half of 90 degrees
+  b.rotation = mul(b.rotation, quat{std::cos(h), std::sin(h), 0.0, 0.0});
+  b.position.z += 1.5;
+  b.linear_velocity = {};
+  b.angular_velocity = {};
+  w.set_state(chassis, b);
+  sim.step(); // the first tick of its fall: still on its side
+  log.record();
+  const cvc::nav::plant_sample s = sim.plant_samples()[0];
+  EXPECT_LT(std::fabs(s.up_z), 0.05);
+  EXPECT_GT(s.roll, 0.99) << "the left side up";
+  EXPECT_NEAR(log.runs()[0].back().roll, s.roll, 1e-12) << "planar_sample's roll agrees";
+  for (int t = 0; t < 99; ++t) {
+    sim.step();
+    log.record();
+  }
+  const cvc::nav::plant_sample s1 = sim.plant_samples()[0];
+  std::printf("  on its side: up_z %.3f, roll %.3f; 2 s later up_z %.3f, roll %.3f, %d of %d "
+              "wheels down, ltr %.2f\n",
+              s.up_z, s.roll, s1.up_z, s1.roll, s1.wheels_down, s1.wheels, s1.ltr);
+  EXPECT_LT(s1.up_z, 0.5) << "it stays over";
+  const cvc::nav::episode_nav_stats e = sim.nav_stats();
+  const cvc::nav::veh_nav_stats &v = e.per_vehicle[0];
+  EXPECT_TRUE(v.rolled_over);
+  EXPECT_NEAR(v.rolled_over_s, 26 * 0.02, 0.1) << "the tick it was laid over";
+  EXPECT_GT(v.tilt_max_deg, 70.0);
+  EXPECT_GT(v.roll_max_deg, 70.0);
+  EXPECT_EQ(e.vehicles_rolled, 1);
+  EXPECT_NEAR(e.first_roll_s, v.rolled_over_s, 1e-12);
+  EXPECT_NE(e.to_json().find("\"rolled_over\":true"), std::string::npos);
+  host.use(sim, "kinematic");
+}
+
 TEST(PlantLog, GroundHeightPutsAStartOnTheGroundUnderIt) {
   REQUIRE_JOLT();
   const vehicle_desc d = vehicle_desc::roboracer();
@@ -442,4 +607,136 @@ TEST(PlantLogScene, DrivesTheSwerveTheSameTwiceAndWritesItsDirectory) {
   EXPECT_NE(meta.find("\"format\": \"cvc-plant-log-1\""), std::string::npos) << meta;
   EXPECT_NE(meta.find("\"seeds\": [7, 8]"), std::string::npos) << meta;
   EXPECT_NE(meta.find("\"shape\": [8, 51, 8]"), std::string::npos) << meta; // 2 s / 1 s x 4 runs
+}
+
+// ── the power model (P8c) ──────────────────────────────────────────────────────────
+
+// A ledger made by the power model itself is fitted back to it: the motion of a kinematic run,
+// its energy from known coefficients on the drive force that motion takes (the measured
+// acceleration less the dynamic vehicle's drag and rolling resistance).
+TEST(PlantLogPower, FitRecoversAKnownPowerModel) {
+  const vehicle_desc d = vehicle_desc::humvee();
+  const cvc::nav::dyn_bike_si si = nav_plant::dyn_bike_si_of(d);
+  const double dt = 0.02;
+  std::vector<std::vector<planar_sample>> runs = {kinematic_run(d, dt, 1, 1500)};
+  cvc::nav::dyn_power_si truth;
+  truth.k_pos = 2.7;
+  truth.k_neg = -0.4;
+  truth.p_idle = 1800.0;
+  truth.c_v = 120.0;
+  truth.c_v3 = 0.8;
+  truth.c_lat = 0.03;
+  double vmax = 1.0;
+  for (planar_sample &s : runs[0]) {
+    vmax = std::max(vmax, std::fabs(s.vx));
+    s.x = s.rear_x; // the kinematic run tracks its rear axle
+    s.y = s.rear_y;
+    s.grade = 0.0;
+  }
+  truth.width = 1e-3 * si.mass * d.max_accel * vmax;
+  for (std::size_t k = 1; k < runs[0].size(); ++k) {
+    const planar_sample &s0 = runs[0][k - 1];
+    planar_sample &s = runs[0][k];
+    s.a_lon = (s.vx - s0.vx) / dt;
+    s.r = (s.psi - s0.psi) / dt;
+    const double v = 0.5 * (s0.vx + s.vx);
+    const double f_res = -si.drag * v * std::fabs(v) - si.rolling_resistance * si.mass *
+                                                           si.gravity *
+                                                           (v > 0   ? 1
+                                                            : v < 0 ? -1
+                                                                    : 0);
+    const double P = si.mass * (s.a_lon - f_res / si.mass) * s.vx;
+    float dd;
+    const double pos =
+        cvc::nav::diff::power_softplus(static_cast<float>(P), static_cast<float>(truth.width), dd);
+    const double neg =
+        cvc::nav::diff::power_softplus(static_cast<float>(-P), static_cast<float>(truth.width), dd);
+    const double speed = std::sqrt(s.vx * s.vx + 1e-6);
+    s.energy = dt * (truth.k_pos * pos + truth.k_neg * neg + truth.p_idle + truth.c_v * speed +
+                     truth.c_v3 * speed * speed * speed +
+                     truth.c_lat * si.mass * s.vx * s.vx * s.r * s.r * speed);
+  }
+  const power_fit f = fit_power(runs, dt, d);
+  EXPECT_NEAR(f.si.k_pos, truth.k_pos, 1e-3 * truth.k_pos);
+  EXPECT_NEAR(f.si.k_neg, truth.k_neg, 1e-2 * std::fabs(truth.k_neg));
+  EXPECT_NEAR(f.si.p_idle, truth.p_idle, 1e-2 * truth.p_idle);
+  EXPECT_NEAR(f.si.c_v, truth.c_v, 5e-2 * truth.c_v);
+  EXPECT_NEAR(f.si.c_v3, truth.c_v3, 5e-2 * truth.c_v3);
+  EXPECT_NEAR(f.si.c_lat, truth.c_lat, 5e-2 * truth.c_lat);
+  EXPECT_GT(f.r2, 0.9999);
+  EXPECT_LT(std::fabs(f.total_error), 1e-5);
+  ASSERT_EQ(f.runs.size(), 1u);
+  EXPECT_GT(f.runs[0].distance_m, 10.0);
+}
+
+// The log carries the ledger: each tick's energy is what nav_plant measured over it.
+TEST(PlantLogPower, LogsTheEnergyEachTickDrew) {
+  REQUIRE_JOLT();
+  plant_log_options o;
+  o.seeds = {7};
+  o.agents = 2;
+  o.seconds = 2.0;
+  o.resolve();
+  const plant_log_drive drv = drive_plant_log_scene(o, cvc::nav::coef_mlp::default_biased());
+  ASSERT_EQ(drv.runs.size(), 2u);
+  for (const auto &run : drv.runs) {
+    EXPECT_EQ(run[0].energy, 0.0); // start(): no tick yet
+    double drawn = 0.0;
+    for (std::size_t t = 1; t < run.size(); ++t) {
+      EXPECT_TRUE(std::isfinite(run[t].energy));
+      drawn += run[t].energy;
+    }
+    EXPECT_GT(drawn, 0.0); // a Humvee driving 2 s burns fuel
+  }
+}
+
+// The P8c calibration on Jolt. For each vehicle, the power model is fitted to the ledger of four
+// seeds of both scenes, swerve and city, and gives the energy of two held-out seeds. (Fitted on
+// one scene's two seeds, the swerve's held-out totals missed by 12% (Humvee) and 22% (RoboRacer):
+// a seed drives all its agents at one speed, so two seeds cannot tell idle from speed.)
+TEST(PlantLogPowerConvergence, FitsTheLedgerAndPredictsHeldOutSeeds) {
+  REQUIRE_JOLT();
+  const cvc::nav::coef_mlp net = cvc::nav::coef_mlp::default_biased();
+  for (const char *veh : {"humvee", "roboracer"}) {
+    const vehicle_desc d =
+        std::string(veh) == "humvee" ? vehicle_desc::humvee() : vehicle_desc::roboracer();
+    std::vector<std::vector<planar_sample>> fit_runs;
+    std::vector<std::vector<std::vector<planar_sample>>> held(2); // by scene
+    double dt = 0.0;
+    int sc = 0;
+    for (const char *scene : {"swerve", "city"}) {
+      plant_log_options o;
+      o.vehicle = veh;
+      o.scene = scene;
+      o.seconds = 30.0;
+      o.seeds = {100, 101, 102, 103, 104, 105};
+      o.resolve();
+      dt = o.dt;
+      const plant_log_drive drv = drive_plant_log_scene(o, net);
+      for (std::size_t k = 0; k < drv.runs.size(); ++k)
+        (drv.run_seed[k] <= 103 ? fit_runs : held[sc]).push_back(drv.runs[k]);
+      ++sc;
+    }
+    const power_fit f = fit_power(fit_runs, dt, d);
+    std::vector<std::vector<planar_sample>> all_held = held[0];
+    all_held.insert(all_held.end(), held[1].begin(), held[1].end());
+    const power_fit h = evaluate_power(all_held, dt, d, f.si);
+    const power_fit hs = evaluate_power(held[0], dt, d, f.si),
+                    hc = evaluate_power(held[1], dt, d, f.si);
+    std::printf("[power-fit] %s: k_pos %.3f k_neg %.3f p_idle %.1f W c_v %.2f W/(m/s) c_v3 %.4f "
+                "W/(m/s)^3 c_lat %.4f s^2/m | fit r2 %.3f worst run %.1f%% | held-out r2 %.3f "
+                "total %+.2f%% (swerve "
+                "%+.2f%%, city %+.2f%%) worst run %.1f%% (%zu runs)\n",
+                veh, f.si.k_pos, f.si.k_neg, f.si.p_idle, f.si.c_v, f.si.c_v3, f.si.c_lat, f.r2,
+                100.0 * f.worst_run_error, h.r2, 100.0 * h.total_error, 100.0 * hs.total_error,
+                100.0 * hc.total_error, 100.0 * h.worst_run_error, h.runs.size());
+    if (std::getenv("CVC_POWER_FIT_RUNS"))
+      for (const power_run &r : h.runs)
+        std::printf("  held run: %.0f s %.0f m (%.2f m/s) measured %.4g J model %.4g J (%+.1f%%)\n",
+                    r.seconds, r.distance_m, r.distance_m / std::max(r.seconds, 1e-9), r.measured_J,
+                    r.model_J, 100.0 * (r.model_J - r.measured_J) / r.measured_J);
+    EXPECT_GT(f.si.k_pos, 0.0) << veh;
+    EXPECT_GT(h.r2, 0.8) << veh;
+    EXPECT_LT(std::fabs(h.total_error), 0.10) << veh;
+  }
 }

@@ -107,6 +107,9 @@ add_executable(world_clock_test world_clock_test.cpp)
 add_executable(clock_driver_test clock_driver_test.cpp)
 add_executable(world_units_test world_units_test.cpp)
 add_executable(physics_world_test physics_world_test.cpp)
+add_executable(avatar_sim_test avatar_sim_test.cpp)
+add_executable(holon_test holon_test.cpp)
+add_executable(holon_sync_test holon_sync_test.cpp)
 add_executable(physics_codec_test physics_codec_test.cpp)
 add_executable(physics_field_test physics_field_test.cpp)
 add_executable(physics_vehicle_test physics_vehicle_test.cpp)
@@ -210,6 +213,7 @@ add_executable(nav_material_train_cuda_test nav_material_train_cuda_test.cpp)
 add_executable(nav_material_train_test nav_material_train_test.cpp)
 add_executable(nav_material_optim_test nav_material_optim_test.cpp)
 add_executable(nav_geom_rollout_grad_test nav_geom_rollout_grad_test.cpp)
+add_executable(nav_sim_world_test nav_sim_world_test.cpp)
 add_executable(lod_select_test lod_select_test.cpp)
 add_executable(lod_select_bench_test lod_select_bench_test.cpp)
 add_executable(geometry_simplify_test geometry_simplify_test.cpp)
@@ -305,6 +309,9 @@ set(TEST_TARGETS
   clock_driver_test
   world_units_test
   physics_world_test
+  avatar_sim_test
+  holon_test
+  holon_sync_test
   physics_codec_test
   physics_field_test
   physics_vehicle_test
@@ -370,6 +377,7 @@ set(TEST_TARGETS
   nav_material_train_test
   nav_material_optim_test
   nav_geom_rollout_grad_test
+  nav_sim_world_test
   nav_material_rollout_cuda_test
   nav_coef_energy_cuda_test
   nav_material_adam_cuda_test
@@ -1019,6 +1027,13 @@ target_link_libraries(nav_geom_rollout_grad_test
     GTest::gtest_main
 )
 
+target_link_libraries(nav_sim_world_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(lod_select_test
   PRIVATE
     cvc
@@ -1651,6 +1666,27 @@ target_link_libraries(physics_world_test
     GTest::gtest_main
 )
 
+target_link_libraries(avatar_sim_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(holon_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(holon_sync_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(physics_codec_test
   PRIVATE
     cvc
@@ -1954,6 +1990,7 @@ target_compile_features(nav_material_train_cuda_test PRIVATE cxx_std_17)
 target_compile_features(nav_material_train_test PRIVATE cxx_std_17)
 target_compile_features(nav_material_optim_test PRIVATE cxx_std_17)
 target_compile_features(nav_geom_rollout_grad_test PRIVATE cxx_std_17)
+target_compile_features(nav_sim_world_test PRIVATE cxx_std_17)
 # Let the sim_world gtest load the shipped reference policy from the source tree.
 if(EXISTS "${PROJECT_SOURCE_DIR}/share/cvc/nav/coef_mlp.cvcnav")
   target_compile_definitions(nav_test PRIVATE
@@ -2057,6 +2094,9 @@ target_compile_features(world_clock_test PRIVATE cxx_std_17)
 target_compile_features(clock_driver_test PRIVATE cxx_std_17)
 target_compile_features(world_units_test PRIVATE cxx_std_17)
 target_compile_features(physics_world_test PRIVATE cxx_std_17)
+target_compile_features(avatar_sim_test PRIVATE cxx_std_17)
+target_compile_features(holon_test PRIVATE cxx_std_17)
+target_compile_features(holon_sync_test PRIVATE cxx_std_17)
 target_compile_features(physics_codec_test PRIVATE cxx_std_17)
 target_compile_features(physics_field_test PRIVATE cxx_std_17)
 target_compile_features(physics_vehicle_test PRIVATE cxx_std_17)
@@ -2272,6 +2312,7 @@ cvc_discover_tests(nav_material_train_cuda_test)
 cvc_discover_tests(nav_material_train_test)
 cvc_discover_tests(nav_material_optim_test)
 cvc_discover_tests(nav_geom_rollout_grad_test)
+cvc_discover_tests(nav_sim_world_test)
 cvc_discover_tests(lod_select_test)
 cvc_discover_tests(lod_select_bench_test)
 cvc_discover_tests(geometry_simplify_test)
@@ -2514,6 +2555,9 @@ cvc_discover_tests(world_clock_test)
 cvc_discover_tests(clock_driver_test)
 cvc_discover_tests(world_units_test)
 cvc_discover_tests(physics_world_test)
+cvc_discover_tests(avatar_sim_test)
+cvc_discover_tests(holon_test)
+cvc_discover_tests(holon_sync_test)
 cvc_discover_tests(physics_codec_test)
 cvc_discover_tests(physics_field_test)
 cvc_discover_tests(physics_vehicle_test)

@@ -29,6 +29,7 @@ namespace {
 
 using dim = cvc::world_units::dimension;
 constexpr double kG = 9.80665;
+constexpr double kPiRad = 3.14159265358979323846;
 
 vec3 cross(const vec3 &a, const vec3 &b) {
   return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
@@ -214,7 +215,8 @@ void nav_plant::attach(int n, const cvc::nav::plant_state *start,
     a.vehicle = _w.add_vehicle(a.desc, origin, q);
     const physics::vehicle_state vs = _w.vehicle_state(a.vehicle);
     a.chassis = vs.chassis;
-    a.drawn = drawn(a);
+    a.drawn = drawn(a, vs.energy);
+    measure(a, vs, false);
     _agents.push_back(a);
   }
   _ticks = 0;
@@ -463,9 +465,11 @@ void nav_plant::advance() {
     count_contacts(); // the world's last step
   }
   for (agent &a : _agents) {
-    const double now = drawn(a);
+    const physics::vehicle_state vs = _w.vehicle_state(a.vehicle);
+    const double now = drawn(a, vs.energy);
     a.energy_step = now - a.drawn;
     a.drawn = now;
+    measure(a, vs, true);
   }
   _advance_us +=
       std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
@@ -502,8 +506,7 @@ void nav_plant::count_contacts() {
   }
 }
 
-double nav_plant::drawn(const agent &a) const {
-  const vehicle_energy e = _w.vehicle_state(a.vehicle).energy;
+double nav_plant::drawn(const agent &a, const vehicle_energy &e) const {
   // What the source gave, net of what regeneration returned; the shaft work without a source.
   if (a.desc.energy.type != energy_source::kind::none)
     return e.source - e.regen;
@@ -609,6 +612,61 @@ void nav_plant::pull(cvc::app &ctx, const std::string &prefix) {
 
 double nav_plant::energy_step(int i) const {
   return _agents.at(static_cast<std::size_t>(i)).energy_step;
+}
+
+cvc::nav::plant_sample nav_plant::sample(int i) const {
+  return _agents.at(static_cast<std::size_t>(i)).sample;
+}
+
+void nav_plant::measure(agent &a, const physics::vehicle_state &vs, bool tick) const {
+  const body_state &b = vs.body;
+  const vec3 fwd = rotate(b.rotation, {1.0, 0.0, 0.0});
+  const vec3 left = rotate(b.rotation, {0.0, 1.0, 0.0});
+  const vec3 up = rotate(b.rotation, {0.0, 0.0, 1.0});
+  const vec3 com = b.position + rotate(b.rotation, a.desc.center_of_mass);
+  const auto clamp1 = [](double v) { return std::max(-1.0, std::min(1.0, v)); };
+  cvc::nav::plant_sample s;
+  const double psi = det::atan2(fwd.y, fwd.x);
+  const double c = det::cos(psi), sn = det::sin(psi);
+  const vec3 &v = b.linear_velocity;
+  s.vx = v.x * c + v.y * sn;
+  s.vy = -v.x * sn + v.y * c;
+  s.r = b.angular_velocity.z;
+  s.steer = vs.steer;
+  s.max_steer = a.desc.max_steer;
+  s.steer_cmd = a.steer_command;
+  s.accel_cmd = a.accel_command;
+  s.grade = clamp1(fwd.z);
+  s.roll = clamp1(left.z);
+  s.up_z = clamp1(up.z);
+  if (tick && _dt > 0.0) {
+    // The horizontal velocity's change over the tick, across the mean heading (plant_log's).
+    double dpsi = psi - a.psi;
+    while (dpsi > kPiRad)
+      dpsi -= 2.0 * kPiRad;
+    while (dpsi < -kPiRad)
+      dpsi += 2.0 * kPiRad;
+    const double pm = a.psi + 0.5 * dpsi;
+    const double dvx = v.x - a.vwx, dvy = v.y - a.vwy;
+    const double cm = det::cos(pm), sm = det::sin(pm);
+    s.a_lat = (-dvx * sm + dvy * cm) / _dt;
+    s.a_lon = (dvx * cm + dvy * sm) / _dt;
+  }
+  s.roll_rate = dot(b.angular_velocity, fwd);
+  s.wheels = static_cast<int>(vs.wheels.size());
+  double l_load = 0.0, r_load = 0.0;
+  for (const wheel_state &w : vs.wheels) {
+    if (!w.contact)
+      continue;
+    ++s.wheels_down;
+    (dot(w.contact_point - com, left) >= 0.0 ? l_load : r_load) += std::max(0.0, w.load);
+  }
+  s.ltr = l_load + r_load > 0.0 ? (l_load - r_load) / (l_load + r_load) : 0.0;
+  s.contacts = tick ? a.contacts_step : 0;
+  a.sample = s;
+  a.psi = psi;
+  a.vwx = v.x;
+  a.vwy = v.y;
 }
 
 int nav_plant::static_contacts_step(int i) const {
