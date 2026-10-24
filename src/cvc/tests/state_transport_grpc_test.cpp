@@ -543,6 +543,16 @@ TEST(StateTransportGrpcTest, ConnectionClosedReportsThePeersNodeId) {
   client.start("127.0.0.1:0", "alice", "C");
   ASSERT_TRUE(client.connect_to_peer(relay.listen_address(), std::chrono::milliseconds(2000)));
   ASSERT_TRUE(wait_connected(client, relay, std::chrono::milliseconds(2000)));
+  // Leave only once the relay has READ alice's Hello: a cancelled stream drops frames the relay has
+  // not read yet, and a stream that never identified itself is (by contract) not reported.
+  const auto hello_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  for (;;) {
+    const auto links = relay.link_reports();
+    if (!links.empty() && links[0].remote_node_id == "alice")
+      break;
+    ASSERT_LT(std::chrono::steady_clock::now(), hello_deadline) << "the relay never saw alice";
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
 
   client.stop(); // alice leaves
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
