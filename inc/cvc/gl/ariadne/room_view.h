@@ -15,7 +15,7 @@
 //     as a glide rather than a jump.
 //   * Each marker carries a dark visor on its front face, so its facing (the pose rotation, from
 //     the participant's intent.yaw) reads at a glance; each peer's display name floats above it
-//     (draw_labels, run inside the host's ImGui frame).
+//     (draw_labels, from the host's ImGuiOverlay scene-draw callback).
 //   * Third-person controls: intent_from_keys turns held WASD / arrow keys into forward / back /
 //     strafe relative to the avatar's FACING; the host turns the avatar by a click on the scene
 //     (pick_ground -> face that point). self_position is where the host keeps the orbit centre.
@@ -75,10 +75,11 @@ public:
   // through the pixel misses the plane (parallel to it, or the plane is behind the camera).
   bool pick_ground(int x, int y, double ground_z, double out[3]) const;
 
-  // Draw each peer's display name above its marker, into the current ImGui frame's foreground
-  // (call it from inside the frame, e.g. an ImGuiBackend frame hook). Names come from the room
-  // roster; a peer with no name shows its pid. Skips markers behind the camera. A no-op without
-  // CVC_ENABLE_IMGUI.
+  // Draw each peer's display name above its marker, into the current ImGui frame's background
+  // draw list -- over the 3D view, under the UI's windows (call it from inside the frame, e.g.
+  // ImGuiOverlay::setSceneDrawCallback, which runs even while the panels are hidden). Names come
+  // from the room roster; a peer with no name shows its pid. Skips markers behind the camera. A
+  // no-op without CVC_ENABLE_IMGUI.
   void draw_labels() const;
 
   // The room scene revision currently realized (0 = none yet).

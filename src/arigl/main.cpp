@@ -645,7 +645,7 @@ struct ConferenceSession {
   // along its facing and A/D strafe, a click on the scene turns it to face the clicked point, and
   // `cam` (Orbit) keeps orbiting it. A no-op for a document with no relay.
   void attach_view(cvc::gl::SceneRenderer &view, cvc::gl::CameraController &cam,
-                   cvc::gl::ImGuiBackend &backend) {
+                   cvc::gl::ImGuiOverlay &ui) {
     if (!active || !driver_ || !app_)
       return;
     holon_ = std::make_unique<cvc::ariadne::holon>(cvc::ariadne::holon_role::client);
@@ -653,8 +653,9 @@ struct ConferenceSession {
     room_view_ =
         std::make_unique<gla::room_view>(view, *app_, room_, pid_, view.scene().getStatePrefix());
     cam_ = &cam;
-    // Peers' names over their markers, drawn inside the ImGui frame (after the document's windows).
-    backend.add_frame_hook([this] {
+    // Peers' names over their markers: a scene annotation, so it shows with the panels hidden too
+    // and sits under the document's windows.
+    ui.setSceneDrawCallback([this] {
       if (room_view_)
         room_view_->draw_labels();
     });
@@ -1132,7 +1133,7 @@ struct ConferenceSession {
                            "document locally.\n");
     return false;
   }
-  void attach_view(cvc::gl::SceneRenderer &, cvc::gl::CameraController &, cvc::gl::ImGuiBackend &) {
+  void attach_view(cvc::gl::SceneRenderer &, cvc::gl::CameraController &, cvc::gl::ImGuiOverlay &) {
   }
   void pump() {}
   void stop() {}
@@ -1208,7 +1209,7 @@ int run_window(const ari::HostOptions &o) {
   // locally (no relay) and say why, rather than letting the exception abort main.
   try {
     if (conf.setup(app, sg.getStatePrefix(), rt.backend()))
-      conf.attach_view(view, cam, rt.backend()); // the room in 3D behind the conference windows
+      conf.attach_view(view, cam, ui); // the room in 3D behind the conference windows
   } catch (const std::exception &e) {
     std::fprintf(stderr, "arigl: conference setup failed (%s); running the document locally\n",
                  e.what());

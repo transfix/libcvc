@@ -311,8 +311,8 @@ void room_view::draw_labels() const {
   vtkRenderer *r = _view.renderer();
   if (!r || !ImGui::GetCurrentContext())
     return;
-  const float h = ImGui::GetIO().DisplaySize.y; // the window's height in display pixels
-  ImDrawList *dl = ImGui::GetForegroundDrawList();
+  const float h = ImGui::GetIO().DisplaySize.y;    // the window's height in display pixels
+  ImDrawList *dl = ImGui::GetBackgroundDrawList(); // under the UI's windows
   for (const auto &kv : _heads) {
     if (kv.first == _self) // you are the gold one; your own name would only cover the view
       continue;

@@ -108,12 +108,6 @@ public:
   // rt.set_backend(this). `rt` must outlive the overlay's callback.
   void install(cvc::ariadne::Runtime &rt, ImGuiOverlay &overlay);
 
-  // Extra per-frame overlay drawing, run inside the ImGui frame right after the document renders
-  // (in registration order) -- e.g. name labels over a 3D scene. The hook runs in cvcGL's ImGui
-  // context, so it must call cvcGL code that draws (raw ImGui:: calls from another binary module
-  // would hit a separate, uninitialised context).
-  void add_frame_hook(std::function<void()> hook);
-
   // Make `ctx` the current Dear ImGui context of the module this backend runs in (libcvcGL), for a
   // host that created the context itself rather than through ImGuiOverlay. Where imgui is a static
   // library linked into both the host and libcvcGL (the cvcpkg Windows imgui), each copy keeps its
@@ -163,7 +157,6 @@ private:
 
   // Host-registered raw-ImGui draw fns for custom widget types (register_widget).
   std::unordered_map<std::string, CustomDrawFn> m_customWidgets;
-  std::vector<std::function<void()>> m_frameHooks; // add_frame_hook, run after the document
 
   // Host-published images (Kind::Image). Each keeps its source cvc::image + a lazily-created GL
   // texture; `dirty` forces a re-upload after set_image. Textures are process-lifetime (freed at

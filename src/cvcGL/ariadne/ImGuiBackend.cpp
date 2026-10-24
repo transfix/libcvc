@@ -732,16 +732,7 @@ ariadne::CustomEdit ImGuiBackend::custom_widget(const char *type, const std::str
 
 void ImGuiBackend::install(cvc::ariadne::Runtime &rt, ImGuiOverlay &overlay) {
   cvc::ariadne::Runtime *r = &rt;
-  overlay.setDrawCallback([this, r] {
-    r->render();
-    for (const auto &hook : m_frameHooks)
-      if (hook)
-        hook();
-  });
-}
-
-void ImGuiBackend::add_frame_hook(std::function<void()> hook) {
-  m_frameHooks.push_back(std::move(hook));
+  overlay.setDrawCallback([r] { r->render(); });
 }
 
 void ImGuiBackend::setImGuiContext(ImGuiContext *ctx) {
