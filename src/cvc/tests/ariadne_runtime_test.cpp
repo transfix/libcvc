@@ -3633,6 +3633,11 @@ TEST(AriadneAppRuntime, KeysWindowListsTheDocumentsAndTheHostsKeys) {
   art.drain();
   EXPECT_EQ(st("ui.docs.d.tree.ariadne_keys.capture").value(), "camera_forward");
   EXPECT_TRUE(art.runtime().key_capture_pending());
+  art.drain(); // the row shows the wait from the next drain on (a bound text: nothing to evaluate)
+  mb.log.clear();
+  art.runtime().render();
+  EXPECT_TRUE(mb.saw(std::string("text_value:=") + kKeyPrompt));
+  EXPECT_TRUE(mb.saw("text_value:=Right, PageDown")) << "the other rows still show their keys";
   InputEvent up;
   up.kind = InputEvent::Kind::KeyDown;
   up.key = "Up";
@@ -3640,6 +3645,10 @@ TEST(AriadneAppRuntime, KeysWindowListsTheDocumentsAndTheHostsKeys) {
   art.drain();
   EXPECT_EQ(st("cam.keys.forward").value(), "Up") << "the next key down is the binding's key";
   EXPECT_EQ(st("ui.docs.d.tree.ariadne_keys.capture").value(), "");
+  mb.log.clear();
+  art.runtime().render();
+  EXPECT_TRUE(mb.saw("text_value:=Up")) << "and its row shows it";
+  EXPECT_FALSE(mb.saw(std::string("text_value:=") + kKeyPrompt));
 
   art.set_host_keys({});
   mb.log.clear();

@@ -149,12 +149,9 @@ Widget keys_window(const std::vector<KeyBinding> &bindings) {
       kids.push_back(text(heading.empty() ? "This document" : heading));
       first = false;
     }
-    const std::string waiting = "(= (state-get \"" + capture + "\") \"" + b.id + "\")";
-    Widget keys = text_bound("", key_binding_path(b));
-    keys.visible_when = "(not " + waiting + ")";
-    Widget prompt = text("press a key...");
-    prompt.visible_when = waiting;
-    Widget row = group({text(b.label.empty() ? b.id : b.label), std::move(keys), std::move(prompt),
+    // Its keys, or the prompt while its Change waits: kept by the runtime (key_shown_path), so the
+    // window evaluates nothing per frame.
+    Widget row = group({text(b.label.empty() ? b.id : b.label), text_bound("", key_shown_path(b)),
                         button("Change", "(state-set \"" + capture + "\" \"" + b.id + "\")")});
     row.id = "key_" + b.id; // each row's Change button its own
     row.layout.kind = LayoutKind::Grid;
@@ -186,6 +183,9 @@ void AppRuntime::seed_keys(const std::vector<KeyBinding> &own, bool new_document
 void AppRuntime::add_keys(Widget &root, std::vector<KeyBinding> keys) {
   keys.insert(keys.end(), hostKeys_.begin(), hostKeys_.end());
   write<std::string>(app_, resolve_bind(prefix_, kKeyCapture), ""); // no Change waiting
+  for (const KeyBinding &b : keys) // shown from the first frame; the runtime keeps it after
+    write<std::string>(app_, resolve_bind(prefix_, key_shown_path(b)),
+                       read_or<std::string>(app_, resolve_bind(prefix_, key_binding_path(b)), ""));
   if (keysWindow_ || !keys.empty()) {
     read_or_seed<int>(app_, resolve_bind(prefix_, kKeysWindowOpen), 0); // closed until asked for
     root.children.push_back(keys_window(keys));

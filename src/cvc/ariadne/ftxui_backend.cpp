@@ -1482,7 +1482,9 @@ void FtxuiBackend::end_main_menu_bar() {
   if (m.opt.hosted)
     return; // the host draws the bar from hosted_menus()
   f.items.push_back(fx::filler() | fx::inverted);
-  m.menubar = fx::hbox(std::move(f.items));
+  // Over a picture behind the widgets the bar is its own: inverted over the image's colours its
+  // titles would take them (the same colour on both sides of a cell, often).
+  m.menubar = fx::hbox(std::move(f.items)) | fx::clear_under;
 }
 
 bool FtxuiBackend::begin_menu(const char *label) {

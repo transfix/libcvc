@@ -2017,6 +2017,18 @@ void Runtime::Impl::run_key_bindings() {
                       key))
         queued_events.push_back({b.on, prefix});
   }
+  // What the Keys window shows for each binding, written only when it changes.
+  const std::string waiting =
+      key_capture_pending() ? read_or<std::string>(app, capture_path, "") : std::string();
+  for (const KeyBinding &b : key_bindings_) {
+    const std::string shown =
+        !waiting.empty() && b.id == waiting
+            ? std::string(kKeyPrompt)
+            : read_or<std::string>(app, resolve_bind(prefix, key_binding_path(b)), "");
+    const std::string path = resolve_bind(prefix, key_shown_path(b));
+    if (read_or<std::string>(app, path, std::string(1, '\x01')) != shown) // \x01: not there yet
+      write<std::string>(app, path, shown);
+  }
 }
 
 void Runtime::render() { m_->render(); }

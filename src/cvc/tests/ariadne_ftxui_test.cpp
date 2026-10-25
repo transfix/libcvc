@@ -956,6 +956,27 @@ TEST(AriadneFtxui, BackgroundImageFillsTheScreenUnderTheWidgets) {
   EXPECT_NE(t.be.render_to_string(t.rt, 20, 4, /*ansi=*/true), before);
 }
 
+// A menu bar over a picture behind the widgets is its own: no picture cells are left under it, so
+// its inverted titles don't take the picture's colours (often the same on both sides of a cell).
+TEST(AriadneFtxui, AMenuBarOverABackgroundImageIsItsOwn) {
+  REQUIRE_FTXUI();
+  const unsigned char px[] = {200, 20, 20, 20, 20, 200, 20, 200, 20, 200, 200, 20};
+  cvc::image img(2, 2, cvc::image::pixel_format::RGB, cvc::image::data_type::u8, px);
+  FtxuiBackend::Options o;
+  o.image_color = FtxuiBackend::Options::ImageColor::Color;
+  Term t(group({menubar({menu("File", {menu_action("Quit", "quit")})}), text("hello")}), o);
+  t.be.set_image("scene", img);
+  t.be.set_background("scene");
+  t.width = 20;
+  t.height = 4;
+  t.draw();
+  const std::string bar = t.screen.substr(0, t.screen.find('\n'));
+  EXPECT_NE(bar.find("File"), std::string::npos) << t.screen;
+  EXPECT_EQ(bar.find("\xe2\x96\x80"), std::string::npos) << "no picture under the bar\n"
+                                                         << t.screen;
+  EXPECT_NE(t.screen.find("\xe2\x96\x80"), std::string::npos) << "but below it\n" << t.screen;
+}
+
 // ---- pixel graphics (Kitty / Sixel) ----------------------------------------------------------
 
 namespace {

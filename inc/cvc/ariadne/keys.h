@@ -40,6 +40,14 @@ inline std::string key_binding_path(const KeyBinding &b) {
   return b.path.empty() ? "keys." + b.id : b.path;
 }
 
+// What the Keys window shows for a binding: its keys, or "press a key..." while its Change waits.
+// The runtime keeps it (Runtime::drain), so the window's rows are bound texts and cost no reactive
+// evaluation.
+inline std::string key_shown_path(const KeyBinding &b) {
+  return std::string("tree.") + kKeysWindow + ".shown." + b.id;
+}
+inline constexpr const char *kKeyPrompt = "press a key...";
+
 // A binding's keys as stored ("Right, PageDown"), and back. The comma key is stored as "Comma"
 // (stored_key_name), so a comma always separates.
 std::string join_keys(const std::vector<std::string> &keys);
