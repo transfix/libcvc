@@ -286,28 +286,28 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
 // test_pycvc_proxy_hooks.py fails the build's tests on any proxy that references
 // an undefined name, so a flip cannot slip through silently.
 %pythonappend cvc::gl::GraphicsNode::GraphicsNode %{
-    if args: self._pycvc_app = args[0]
+    if args: self._pycvc_app = pycvc._app_keepalive(args[0])
 %}
 %pythonappend cvc::gl::GeometryNode::GeometryNode %{
-    if args: self._pycvc_app = args[0]
+    if args: self._pycvc_app = pycvc._app_keepalive(args[0])
 %}
 %pythonappend cvc::gl::VolumeNode::VolumeNode %{
-    if args: self._pycvc_app = args[0]
+    if args: self._pycvc_app = pycvc._app_keepalive(args[0])
 %}
 %pythonappend cvc::gl::VolRenNode::VolRenNode %{
-    self._pycvc_app = ctx  # single signature -> named-parameter proxy
+    self._pycvc_app = pycvc._app_keepalive(ctx)  # single signature -> named-parameter proxy
 %}
 %pythonappend cvc::gl::LightNode::LightNode %{
-    if args: self._pycvc_app = args[0]
+    if args: self._pycvc_app = pycvc._app_keepalive(args[0])
 %}
 %pythonappend cvc::gl::GridNode::GridNode %{
-    if args: self._pycvc_app = args[0]
+    if args: self._pycvc_app = pycvc._app_keepalive(args[0])
 %}
 %pythonappend cvc::gl::AxisNode::AxisNode %{
-    if args: self._pycvc_app = args[0]
+    if args: self._pycvc_app = pycvc._app_keepalive(args[0])
 %}
 %pythonappend cvc::gl::VolSliceNode::VolSliceNode %{
-    self._pycvc_app = ctx  # single signature -> named-parameter proxy
+    self._pycvc_app = pycvc._app_keepalive(ctx)  # single signature -> named-parameter proxy
 %}
 
 // ── SceneNode (abstract base): trim VTK / threading internals ───────────────
@@ -1207,7 +1207,7 @@ PYCVC_GL_LOD_STYLED(cvc::gl::LodGraphicsNode::setRungStyle)
 %ignore cvc::gl::LodGraphicsNode::addToRenderer;  // vtkRenderer*
 %ignore cvc::gl::lod_stats::rung_nodes;           // std::vector<int> -> the rung_nodes property below
 %pythonappend cvc::gl::LodGraphicsNode::LodGraphicsNode %{
-    if args: self._pycvc_app = args[0]
+    if args: self._pycvc_app = pycvc._app_keepalive(args[0])
 %}
 %pythonappend cvc::gl::LodGraphicsNode::rung %{
     if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
@@ -1312,7 +1312,7 @@ PYCVC_GL_LOD_STYLED(cvc::gl::LodGraphicsNode::setRungStyle)
 // scene_from_capsule proxy needs no stash; grl_snam_lab.Lab holds the app too.)
 %pythonappend cvc::gl::SceneGraph::SceneGraph %{
     if args:
-        self._pycvc_app = args[0]
+        self._pycvc_app = pycvc._app_keepalive(args[0])
 %}
 // Propagate that keep-alive to every RETURNED node proxy: a node's C++ teardown
 // (~SceneNode) touches the app's state tree by raw reference, so a node proxy

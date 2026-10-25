@@ -169,13 +169,28 @@ std::shared_ptr<cvc::app> app_from_capsule(PyObject *cap) {
 // Ergonomic alias: pycvc.App() reads as a constructor for a fresh app.
 %pythoncode %{
 App = make_app
+
+
+def _app_keepalive(app):
+    """What an object that borrows `app` stashes as `_pycvc_app` to keep it alive.
+
+    The app proxy's `this`, the SwigPyObject that owns the std::shared_ptr<cvc::app>, not the
+    proxy itself. The proxy is GC-tracked: when it and a borrower are garbage in the same
+    collection (always the case at interpreter exit for a module-level app and anything left in a
+    reference cycle), the collector may clear the proxy first, which drops its `this` and frees
+    the app while the borrower, holding it by C++ reference, has yet to be destroyed (an access
+    violation in ~scene_reader at exit). A SwigPyObject is not GC-tracked, so only the borrower's
+    own reference keeps it alive, and the borrower's `this` (set first) goes before it.
+    """
+    return getattr(app, "this", app)
 %}
 // Keep the app alive for as long as a volume/geometry built from it lives: the
 // C++ voxels/geometry hold the app by RAW reference (app& _ctx), so without this
 // the app could be freed while a Python object still points at it. Stash it on
-// the proxy (the ctor arg is named `app`).
-%pythonappend cvc::volume::volume(std::shared_ptr<cvc::app>) %{ self._pycvc_app = app %}
-%pythonappend cvc::geometry::geometry(std::shared_ptr<cvc::app>) %{ self._pycvc_app = app %}
+// the proxy (the ctor arg is named `app`) through _app_keepalive, like every
+// _pycvc_app below.
+%pythonappend cvc::volume::volume(std::shared_ptr<cvc::app>) %{ self._pycvc_app = _app_keepalive(app) %}
+%pythonappend cvc::geometry::geometry(std::shared_ptr<cvc::app>) %{ self._pycvc_app = _app_keepalive(app) %}
 // state_set/get/has/children/remove + state_observer come from pycvc_state.h
 // (%include'd below), all taking the app explicitly.
 
@@ -352,7 +367,7 @@ namespace cvc {
 // positional here, and the append is attached by name so the merged __init__
 // carries it (a signature-specific append is dropped when overloads merge).
 %pythonappend cvc::world_clock_binding::world_clock_binding %{
-  self._pycvc_app = args[0]
+  self._pycvc_app = _app_keepalive(args[0])
   self._pycvc_clock = args[1]
 %}
 %include "cvc/core/world_clock_binding.h"

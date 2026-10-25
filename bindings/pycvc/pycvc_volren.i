@@ -157,7 +157,7 @@
 %ignore cvc::volren::raycaster::volume_config(std::size_t) const;
 %include "cvc/volren/raycaster.h"
 %pythonappend cvc::volren::raycaster::raycaster(std::shared_ptr<cvc::app>) %{
-    self._pycvc_app = app
+    self._pycvc_app = _app_keepalive(app)
 %}
 %extend cvc::volren::raycaster {
   // Construct against an injected app (Python holds shared_ptr<app>, not app&).
