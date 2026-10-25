@@ -981,8 +981,8 @@ jobs:
   # It builds cvcGL and the pycvc_gl module too, and runs the pycvc_gl tests on
   # Mesa's llvmpipe under Xvfb. Before that, no CI job built pycvc_gl at all:
   # those tests ran only in local Windows builds. The module is built without the
-  # VTK-Python bridge (CVC_PYCVCGL_VTK_BRIDGE=OFF), so pycvc_vtk checks only that
-  # the bridge is absent.
+  # VTK-Python bridge (CVC_PYCVCGL_VTK_BRIDGE=OFF), so pycvc_vtk skips its
+  # vtkmodules round trip.
   pycvc-linux:
     runs-on: ubuntu-latest
     name: pycvc-linux / cp312
@@ -1129,7 +1129,7 @@ jobs:
           [ -f "$log" ] || { echo "no $log"; exit 0; }
           awk '/^[0-9]+\/[0-9]+ Testing: / { t = $3 }
                /^[0-9]+\/[0-9]+ Test: / { t = $3 }
-               tolower($0) ~ /(^|[^a-z])skip([^a-z]|$)/ { print t ": " $0; n++ }
+               tolower($0) ~ /^ *(\[skip\]|skip[: ])/ { print t ": " $0; n++ }
                END { if (!n) print "no skips" }' "$log"
 
   package-macos:
