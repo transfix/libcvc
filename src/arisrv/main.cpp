@@ -44,7 +44,8 @@
 #include <cvc/core/app.h>
 #include <cvc/media/media_router.h> // protocol-agnostic media hub (WS + gRPC + future protocols)
 #include <cvc/state/state_cluster_shard.h>
-#include <cvc/state/state_identity.h> // valid_room_token
+#include <cvc/state/state_device_key.h> // device-key pins (trust on first use)
+#include <cvc/state/state_identity.h>   // valid_room_token
 #include <cvc/state/state_stream_transport_grpc.h>
 #include <cvc/state/state_transport_grpc.h>
 #if CVC_ENABLE_WS
@@ -155,6 +156,13 @@ int main(int argc, char **argv) {
   //                              as a cvc-token.<token> subprotocol (state_identity.h has the
   //                              rules). A client without it is refused before it is sent
   //                              anything. Unset: an open room, as before
+  // Device keys (§5f; not an S7 switch). The relay always checks them: its Hello challenges each
+  // client, a client answers with its per-relay device key (state_device_key.h), and the first
+  // key a device id shows is pinned to it. A participant's device tag is written only for a
+  // device that proved its pinned key.
+  //   --device-pins PATH         keep the pins in PATH (one "<device id> <key>" line each, added
+  //                              as devices first show), so they outlive a restart. Unset: pins
+  //                              are kept in memory, for this run only
   const char *s7_env = std::getenv("CVC_ARISRV_S7");
   const char *aoi_env = std::getenv("CVC_ARISRV_AOI");
   // CVC_ARISRV_S7: 0/off or 1/on (unset: on).
@@ -166,6 +174,8 @@ int main(int argc, char **argv) {
   std::string relayGateArg = "on", relayJournal = "trim", scene = "default", bindWritesArg = "on";
   std::string roomTokenFile;
   bool roomTokenFlag = false; // --room-token-file was given (even with no path)
+  std::string devicePinsFile;
+  bool devicePinsFlag = false; // --device-pins was given (even with no path)
   std::string aoiVideoMaxArg = "0", mediaStallArg = "40", admissionHoldArg = "2000";
   for (int i = 1; i < argc; ++i) {
     const char *a = argv[i];
@@ -203,6 +213,9 @@ int main(int argc, char **argv) {
     else if (!std::strcmp(a, "--room-token-file")) {
       roomTokenFlag = true;
       roomTokenFile = next("");
+    } else if (!std::strcmp(a, "--device-pins")) {
+      devicePinsFlag = true;
+      devicePinsFile = next("");
     }
   }
   if (aoiMode.empty())
@@ -256,6 +269,16 @@ int main(int argc, char **argv) {
                          "[A-Za-z0-9._~-]\n");
     return 2;
   }
+  // The device-key pins, one store for both transports (a device id pinned on one is checked on
+  // the other). A pin file asked for must be one arisrv can add to.
+  if (devicePinsFlag) {
+    std::ofstream probe(devicePinsFile, std::ios::app);
+    if (devicePinsFile.empty() || !probe) {
+      std::fprintf(stderr, "arisrv: --device-pins: cannot write '%s'\n", devicePinsFile.c_str());
+      return 2;
+    }
+  }
+  const auto devicePins = std::make_shared<cvc::state_device_pins>(devicePinsFile);
 
   cvc::app app;
 
@@ -287,6 +310,7 @@ int main(int argc, char **argv) {
   state_tp.set_admission_hold(std::chrono::milliseconds(holdMs));
   state_tp.set_inbound_gate(bindGate);
   state_tp.set_auth_config({roomToken, std::string()});
+  state_tp.set_device_pins(devicePins);
   state_tp.start(stateListen, nodeId, "conf");
   state_tp.set_relay(true);
   cvc::state_cluster_shard shard(app, "conf", nodeId);
@@ -314,6 +338,7 @@ int main(int argc, char **argv) {
   ws_tp.set_admission_hold(std::chrono::milliseconds(holdMs));
   ws_tp.set_inbound_gate(bindGate);
   ws_tp.set_auth_config({roomToken, std::string()});
+  ws_tp.set_device_pins(devicePins);
   ws_tp.start(wsListen, nodeId, "conf");
   ws_tp.set_relay(true);
   ws_tp.register_shard(&shard);
@@ -376,6 +401,13 @@ int main(int argc, char **argv) {
               relayGate ? "on" : "off", trimJournal ? "trim (no backfill)" : "keep (backfill)",
               stallMs, scene.c_str(), bindGate ? "on" : "off (any client's writes are taken)",
               roomToken.empty() ? "off (an open room)" : "on");
+  if (!cvc::device_keys_available())
+    std::printf("[arisrv] device keys: unavailable (no OpenSSL in this build): no device tags\n");
+  else if (devicePins->path().empty())
+    std::printf("[arisrv] device keys: checked; pins in memory (this run only)\n");
+  else
+    std::printf("[arisrv] device keys: checked; %zu pin(s) in %s\n", devicePins->size(),
+                devicePins->path().c_str());
   std::fflush(stdout);
 
   std::set<std::string> relayed;
@@ -428,6 +460,7 @@ int main(int argc, char **argv) {
   int room_debug_ticks = 0;
   std::uint64_t lastRefused = 0; // client frames the bound-writes gate refused, at the last log
   std::uint64_t lastUnauthorized = 0; // connections refused for the room token, at the last log
+  std::uint64_t lastProofsRefused = 0; // device proofs refused (another key, a bad signature)
   // Link stats (~1 s): every connection on both planes reports its traffic and Ping/Pong round
   // trip (state_transport::link_reports); the rate meter turns the counters into rates. The relay
   // publishes its view of each participant (net.relay.*) and its totals (server.net.*) into the
@@ -555,6 +588,19 @@ int main(int argc, char **argv) {
                       static_cast<unsigned long long>(unauthorized));
           std::fflush(stdout);
           lastUnauthorized = unauthorized;
+        }
+        // And a device whose proof did not check out against its pin: it stays in the room, with
+        // no device tag.
+        std::uint64_t proofsRefused = state_tp.total_device_proofs_refused();
+#if CVC_ENABLE_WS
+        proofsRefused += ws_tp.total_device_proofs_refused();
+#endif
+        if (proofsRefused > lastProofsRefused) {
+          std::printf("[arisrv] device keys: refused %llu proof(s) (%llu in all): no device tag\n",
+                      static_cast<unsigned long long>(proofsRefused - lastProofsRefused),
+                      static_cast<unsigned long long>(proofsRefused));
+          std::fflush(stdout);
+          lastProofsRefused = proofsRefused;
         }
       }
       const bool detail = room_debug && net_ticks % 25 == 0;

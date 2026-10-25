@@ -21,6 +21,7 @@
 #include <cvc/state/state.h>
 #include <cvc/state/state_blob_store.h> // sha256_hex
 #include <initializer_list>
+#include <map>
 #include <string>
 
 namespace cvc {
@@ -181,8 +182,14 @@ std::string room_device_tag(const std::string &room, const std::string &device_i
 
 void write_participant_device(cvc::app &app, const std::string &room, const std::string &pid,
                               const std::string &tag) {
-  if (!tag.empty())
-    set_changed_once(app, sub(room_participant_path(room, pid), {"device"}), tag);
+  const std::string path = sub(room_participant_path(room, pid), {"device"});
+  if (!tag.empty()) {
+    set_changed_once(app, path, tag);
+    return;
+  }
+  cvc::state *n = app.root().findDescendant(path);
+  if (n && !n->value().empty())
+    n->value(std::string()); // cleared, and only when there is a tag to clear
 }
 
 std::string read_participant_device(cvc::app &app, const std::string &room,
@@ -194,10 +201,18 @@ std::string read_participant_device(cvc::app &app, const std::string &room,
 void write_link_devices(cvc::app &app, const std::string &room,
                         const std::vector<cvc::state_link_report> &links,
                         const std::set<std::string> &present) {
-  for (const cvc::state_link_report &r : links)
-    if (r.accepted && r.holds_id && !r.remote_device_id.empty() && present.count(r.remote_node_id))
-      write_participant_device(app, room, r.remote_node_id,
-                               room_device_tag(room, r.remote_device_id));
+  // Each present pid held by an accepted link: its verified device's tag, or "" when no link
+  // holding it proved a key, so a pid taken over by an unverified link loses its old tag.
+  std::map<std::string, std::string> held;
+  for (const cvc::state_link_report &r : links) {
+    if (!r.accepted || !r.holds_id || !present.count(r.remote_node_id))
+      continue;
+    std::string &tag = held[r.remote_node_id];
+    if (r.device_verified && !r.remote_device_id.empty())
+      tag = room_device_tag(room, r.remote_device_id);
+  }
+  for (const auto &[pid, tag] : held)
+    write_participant_device(app, room, pid, tag);
 }
 
 std::string format_rtt(double rtt_ms) {

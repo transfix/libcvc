@@ -46,6 +46,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/state/state_write_policy.h
   ../../inc/cvc/state/state_inbound_gate.h
   ../../inc/cvc/state/state_identity.h
+  ../../inc/cvc/state/state_device_key.h
   ../../inc/cvc/state/state_distributed_metrics.h
   ../../inc/cvc/state/state_delegation_manager.h
   ../../inc/cvc/state/state_distributed_admin.h
@@ -300,6 +301,7 @@ set(SOURCE_FILES
   state/state_write_policy.cpp
   state/state_inbound_gate.cpp
   state/state_identity.cpp
+  state/state_device_key.cpp
   state/state_distributed_metrics.cpp
   state/state_delegation_manager.cpp
   state/state_distributed_admin.cpp
@@ -1505,6 +1507,19 @@ else()
   else()
     message(STATUS "cvc::net: no HTTP backend (libcurl not found) - http(s):// compiles to a stub")
   endif()
+endif()
+
+# Device keys (state_device_key.h): a device proves its id with an Ed25519 key the relay pins on
+# first use. OPTIONAL: built on OpenSSL's libcrypto (cvcpkg's openssl bundle, wasm included); without
+# it no proof is made or verified and every device is unverified.
+find_package(OpenSSL QUIET COMPONENTS Crypto)
+if(TARGET OpenSSL::Crypto)
+  target_compile_definitions(cvc PRIVATE CVC_HAVE_DEVICE_KEYS)
+  target_link_libraries(cvc PRIVATE OpenSSL::Crypto)
+  list(APPEND CVC_PRIVATE_LINK_PACKAGES OpenSSL)
+  message(STATUS "cvc::state: device keys ENABLED (OpenSSL ${OPENSSL_VERSION})")
+else()
+  message(STATUS "cvc::state: no device keys (OpenSSL not found) - every device is unverified")
 endif()
 
 # Ariadne FTXUI terminal backend — OPTIONAL (roadmap §16.4). When FTXUI is

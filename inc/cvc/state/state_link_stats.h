@@ -80,6 +80,9 @@ struct state_link_report {
   // It holds its node id at the transport's inbound gate (always true without one): a relay
   // writes a participant's per-link values (net.relay, device) only from the link holding it.
   bool holds_id = true;
+  // Its device proof checked out against the device id's pin (state_device_key.h); a relay gives a
+  // device's tag (and later its roles) to a verified link only.
+  bool device_verified = false;
   double age_s = 0.0;         // since the connection opened
   double idle_s = 0.0;        // since the last inbound frame
   state_link_stats::counters stats;

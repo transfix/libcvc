@@ -263,6 +263,10 @@ public:
   std::uint64_t total_inbound_rejected() const override { return _inbound_rejected.load(); }
   // Streams refused for a missing or wrong bearer token (auth_config).
   std::uint64_t total_auth_rejected() const noexcept { return _auth_rejected.load(); }
+  std::uint64_t total_devices_verified() const override { return _devices_verified.load(); }
+  std::uint64_t total_device_proofs_refused() const override {
+    return _device_proofs_refused.load();
+  }
 
   // Diagnostics.
   std::size_t shard_count() const;
@@ -339,6 +343,10 @@ public:
   // Whether `id` is this transport's own node id or a registered shard's (a client never speaks
   // as the relay).
   bool is_local_id(const std::string &id) const;
+  // A client answering a relay's Hello nonce (DeviceProof), and a relay checking one.
+  void answer_device_challenge(connection &c, const std::string &nonce,
+                               const std::string &relay_node_id);
+  void on_device_proof(connection &c, const std::string &public_key, const std::string &signature);
 
 private:
   // Encode `m` to a Frame and write it to every live connection except `exclude` (a connection*;
@@ -415,6 +423,8 @@ private:
   std::shared_ptr<state_inbound_gate> _inbound_gate;
   std::atomic<std::uint64_t> _inbound_rejected{0};
   std::atomic<std::uint64_t> _auth_rejected{0};
+  std::atomic<std::uint64_t> _devices_verified{0};
+  std::atomic<std::uint64_t> _device_proofs_refused{0};
 
   state_blob_store *_blob_store = nullptr;
 

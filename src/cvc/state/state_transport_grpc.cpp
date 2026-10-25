@@ -15,6 +15,7 @@
 #include <chrono>
 #include <cstdio> // the write watchdog's report
 #include <cvc/state/state_cluster_shard.h>
+#include <cvc/state/state_device_key.h>
 #include <cvc/state/state_identity.h> // constant_time_equal
 #include <cvc/state/state_message_bus.h>
 #include <cvc/state/state_transport_grpc.h>
@@ -330,6 +331,17 @@ public:
   std::atomic<bool> displaced{false};
   // Its Hello named one of the relay's own ids (the transport's or a shard's): never a client's.
   bool local_id = false;
+  // Device proof (state_device_key.h), on an ACCEPTED stream:
+  //   - device_nonce: the challenge the relay's Hello carried, taken by the first proof checked
+  //     (guarded by proof_mu, as the Hello may go out on another thread);
+  //   - pending_*: a proof that came before the client's own Hello (its reader can answer ours
+  //     before its Hello is written), checked once that Hello names the device; reader only;
+  //   - device_verified: the proof checked out against the device id's pin.
+  std::mutex proof_mu;
+  std::string device_nonce;
+  bool proof_pending = false;
+  std::string pending_key, pending_signature;
+  std::atomic<bool> device_verified{false};
   // Whether this stream may speak now: always without a gate; with one, once it has identified and
   // holds its node id (a duplicate claim retries here until the holder closes or falls silent).
   bool speaks() {
@@ -470,6 +482,16 @@ public:
           conn->local_id = _owner->is_local_id(conn->remote_node_id);
           (void)conn->speaks(); // claim the node id now
         }
+        // A proof that came first can be checked now that the Hello names the device.
+        if (conn->proof_pending && conn->identified.load(std::memory_order_relaxed)) {
+          conn->proof_pending = false;
+          const std::string key = std::move(conn->pending_key);
+          const std::string signature = std::move(conn->pending_signature);
+          _owner->on_device_proof(*conn, key, signature);
+        }
+      } else if (in.has_device_proof()) {
+        _owner->on_device_proof(*conn, in.device_proof().public_key(),
+                                in.device_proof().signature());
       } else if (in.has_mutation()) {
         _owner->on_inbound_mutation(decode_mutation(in.mutation()), conn.get());
         _owner->increment_recv_mutations();
@@ -683,7 +705,12 @@ bool state_transport_grpc::connect_to_peer(const std::string &target,
       if (on_link_frame(*conn, in))
         continue;
       if (in.has_hello()) {
+        const bool first = !conn->identified.load(std::memory_order_relaxed);
         conn->on_hello(in.hello());
+        // A relay that verifies device keys challenges the clients it accepts; answer it.
+        if (first && conn->identified.load(std::memory_order_relaxed) &&
+            !in.hello().nonce().empty())
+          answer_device_challenge(*conn, in.hello().nonce(), in.hello().node_id());
       } else if (in.has_mutation()) {
         on_inbound_mutation(decode_mutation(in.mutation()), conn.get());
         increment_recv_mutations();
@@ -1313,7 +1340,67 @@ void state_transport_grpc::send_hello_locked(connection &c) {
   h->set_cluster_id(_cluster_id);
   if (!_device_id.empty())
     h->set_device_id(_device_id);
+  // A relay with a pin store challenges each client it accepts to prove its device key.
+  if (c.accepted && _device_pins && device_keys_available()) {
+    std::lock_guard<std::mutex> lk(c.proof_mu);
+    c.device_nonce = device_random_bytes(kDeviceNonceBytes);
+    h->set_nonce(c.device_nonce);
+  }
   c.write_locked(f);
+}
+
+void state_transport_grpc::answer_device_challenge(connection &c, const std::string &nonce,
+                                                   const std::string &relay_node_id) {
+  // Sign only a nonce of a sane size: the proof is for one relay's challenge, nothing larger.
+  if (!_device_signer || _device_id.empty() || nonce.size() > kDeviceNonceMaxBytes)
+    return;
+  pb::Frame f;
+  auto *p = f.mutable_device_proof();
+  p->set_public_key(_device_signer->public_key());
+  p->set_signature(
+      _device_signer->sign(device_proof_message(nonce, relay_node_id, _node_id, _device_id)));
+  if (p->signature().empty())
+    return;
+  if (c.write(f))
+    _sent_frames.fetch_add(1, std::memory_order_relaxed);
+}
+
+void state_transport_grpc::on_device_proof(connection &c, const std::string &public_key,
+                                           const std::string &signature) {
+  if (c.accepted && !c.identified.load(std::memory_order_relaxed) && !c.proof_pending) {
+    c.proof_pending = true; // checked when the Hello comes (the server's read loop)
+    c.pending_key = public_key;
+    c.pending_signature = signature;
+    return;
+  }
+  std::string nonce;
+  {
+    std::lock_guard<std::mutex> lk(c.proof_mu);
+    nonce.swap(c.device_nonce); // one proof per challenge
+  }
+  const std::string *pid = c.peer_id();
+  if (nonce.empty() || pid == nullptr || c.local_id || c.remote_device_id.empty() ||
+      !_device_pins) {
+    _device_proofs_refused.fetch_add(1, std::memory_order_relaxed); // unasked, or anonymous
+    return;
+  }
+  const std::string message = device_proof_message(nonce, _node_id, *pid, c.remote_device_id);
+  if (!verify_device_proof(public_key, message, signature)) {
+    _device_proofs_refused.fetch_add(1, std::memory_order_relaxed);
+    std::fprintf(stderr, "cvc: grpc device proof from %s did not verify\n", pid->c_str());
+    return;
+  }
+  const state_device_pins::verdict v = _device_pins->check(c.remote_device_id, public_key);
+  if (v != state_device_pins::verdict::pinned && v != state_device_pins::verdict::matched) {
+    _device_proofs_refused.fetch_add(1, std::memory_order_relaxed);
+    std::fprintf(
+        stderr,
+        "cvc: grpc device of %s was not pinned (another key, or a full store): unverified\n",
+        pid->c_str());
+    return;
+  }
+  c.device_verified.store(true, std::memory_order_relaxed);
+  _devices_verified.fetch_add(1, std::memory_order_relaxed);
 }
 
 void state_transport_grpc::send_backfill_locked(connection &c,
@@ -1400,6 +1487,7 @@ std::vector<state_link_report> state_transport_grpc::link_reports() const {
       r.remote_node_id = *pid;
       r.remote_device_id = c->remote_device_id;
       r.holds_id = !c->gate || c->gate->holder(*pid) == c.get();
+      r.device_verified = c->device_verified.load(std::memory_order_relaxed);
     }
     r.accepted = c->accepted;
     r.age_s = static_cast<double>(now - c->opened_ns) * 1e-9;

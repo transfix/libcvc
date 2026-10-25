@@ -361,3 +361,47 @@ TEST(RoomNet, ADeviceTagIsPerRoom) {
   conf::write_participant_device(app, "standup", "alice", tag);
   EXPECT_EQ(conf::read_participant_device(app, "standup", "alice"), tag);
 }
+
+// write_link_devices tags a present participant from the accepted link that holds its pid and
+// proved its device key, and from no other.
+TEST(RoomNet, LinkDevicesTagOnlyVerifiedHolders) {
+  const auto link = [](const std::string &pid, bool verified) {
+    cvc::state_link_report r;
+    r.transport = "ws";
+    r.remote_node_id = pid;
+    r.remote_device_id = std::string(32, pid[0]);
+    r.accepted = true;
+    r.holds_id = true;
+    r.device_verified = verified;
+    return r;
+  };
+  std::vector<cvc::state_link_report> links = {link("alice", true), link("bob", false),
+                                               link("carol", true), link("dave", true)};
+  links[2].holds_id = false; // carol's duplicate claim
+  links[3].accepted = false; // a link this relay dialed
+  cvc::app app;
+  conf::write_link_devices(app, "standup", links, {"alice", "bob", "carol", "dave"});
+  EXPECT_EQ(conf::read_participant_device(app, "standup", "alice"),
+            conf::room_device_tag("standup", links[0].remote_device_id));
+  EXPECT_EQ(conf::read_participant_device(app, "standup", "bob"), "") << "unverified";
+  EXPECT_EQ(conf::read_participant_device(app, "standup", "carol"), "") << "not its holder";
+  EXPECT_EQ(conf::read_participant_device(app, "standup", "dave"), "") << "not accepted";
+
+  cvc::app absent;
+  conf::write_link_devices(absent, "standup", links, {"bob"});
+  EXPECT_EQ(conf::read_participant_device(absent, "standup", "alice"), "") << "not present";
+
+  // alice's pid taken over by a link that proved no key: the tag her device proved goes.
+  std::vector<cvc::state_link_report> taken = {link("alice", false)};
+  taken[0].remote_device_id = std::string(32, 'z');
+  conf::write_link_devices(app, "standup", taken, {"alice"});
+  EXPECT_EQ(conf::read_participant_device(app, "standup", "alice"), "") << "taken over";
+  conf::write_link_devices(app, "standup", links, {"alice"});
+  EXPECT_EQ(conf::read_participant_device(app, "standup", "alice"),
+            conf::room_device_tag("standup", links[0].remote_device_id))
+      << "and back when her verified device holds it again";
+  conf::write_link_devices(app, "standup", {}, {"alice"});
+  EXPECT_EQ(conf::read_participant_device(app, "standup", "alice"),
+            conf::room_device_tag("standup", links[0].remote_device_id))
+      << "a pid no link holds keeps its tag until it leaves";
+}

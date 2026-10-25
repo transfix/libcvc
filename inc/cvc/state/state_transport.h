@@ -29,6 +29,9 @@
 
 namespace cvc {
 
+class state_device_signer;
+class state_device_pins;
+
 class state_cluster_shard;
 
 // ----------------
@@ -136,6 +139,20 @@ public:
   // which a relay reports as each link's remote_device_id. Set it before connecting.
   void set_device_id(std::string id) { _device_id = std::move(id); }
   const std::string &device_id() const noexcept { return _device_id; }
+
+  // Device keys (state_device_key.h), which give the device id authority. A client with a SIGNER
+  // answers a relay's Hello nonce with a DeviceProof. A relay with PINS (one store shared by its
+  // transports) sends each connection it accepts a nonce, verifies the proof against the link's
+  // device id and pins the key on first use; a link whose proof checked out reports
+  // device_verified. Set both before connecting or starting.
+  void set_device_signer(std::shared_ptr<const state_device_signer> signer) {
+    _device_signer = std::move(signer);
+  }
+  void set_device_pins(std::shared_ptr<state_device_pins> pins) { _device_pins = std::move(pins); }
+  // Proofs that checked out against a new or matching pin, and those refused: a bad signature,
+  // another key for a pinned id, or a proof with no challenge to answer. Default: 0.
+  virtual std::uint64_t total_devices_verified() const { return 0; }
+  virtual std::uint64_t total_device_proofs_refused() const { return 0; }
 
   // -------- Chunk fetch (volume/geometry streaming) --------
   //
@@ -274,6 +291,8 @@ protected:
   state_transport *_bridge = nullptr;
   std::atomic<std::int64_t> _ping_interval_ms{2000};
   std::string _device_id;
+  std::shared_ptr<const state_device_signer> _device_signer;
+  std::shared_ptr<state_device_pins> _device_pins;
 };
 
 } // namespace cvc

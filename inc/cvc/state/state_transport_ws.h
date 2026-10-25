@@ -268,6 +268,10 @@ public:
   };
   void set_auth_config(auth_config cfg) { _auth = std::move(cfg); }
   std::uint64_t total_auth_rejected() const noexcept { return _auth_rejected.load(); }
+  std::uint64_t total_devices_verified() const override { return _devices_verified.load(); }
+  std::uint64_t total_device_proofs_refused() const override {
+    return _device_proofs_refused.load();
+  }
 
   // ── Diagnostics ──
   std::size_t shard_count() const;
@@ -320,6 +324,10 @@ private:
   // Whether `id` is this transport's own node id or a registered shard's (state_inbound_gate: a
   // client never speaks as the relay).
   bool is_local_id(const std::string &id) const;
+  // A client answering a relay's Hello nonce (DeviceProof), and a relay checking one.
+  void answer_device_challenge(connection &c, const std::string &nonce,
+                               const std::string &relay_node_id);
+  void on_device_proof(connection &c, const std::string &public_key, const std::string &signature);
   // Replay each shard's journaled local writes (backfill on connect); with `view`, only the ones
   // that rule delivers.
   void send_backfill_locked(connection &c, const std::vector<state_cluster_shard *> &shards,
@@ -401,6 +409,8 @@ private:
   std::atomic<std::uint64_t> _inbound_rejected{0};
   auth_config _auth; // set before start() / connect_to_peer()
   std::atomic<std::uint64_t> _auth_rejected{0};
+  std::atomic<std::uint64_t> _devices_verified{0};
+  std::atomic<std::uint64_t> _device_proofs_refused{0};
 
   std::atomic<std::uint64_t> _published{0};
   std::atomic<std::uint64_t> _sent_frames{0};

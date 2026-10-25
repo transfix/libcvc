@@ -98,16 +98,20 @@ bool read_participant_voice(cvc::app &app, const std::string &room, const std::s
 // conf.rooms.<room>.participants.<pid>.device -- the participant's device in this room, a
 // default identity before usernames (§5f): room_device_tag of the device id its link's Hello
 // carried. RELAY-written (room_write_gate refuses a client's write), changed-only, and from the
-// link that holds the pid only. The same device shows the same tag in one room across sessions,
-// while the raw id never leaves the relay and a tag in one room says nothing about another.
-// Like the device id it is not a credential.
+// link that holds the pid only, once that link proved the device's key (state_device_key.h): a tag
+// is a device the relay has checked, not a claimed id. The same device shows the same tag in one
+// room across sessions, while the raw id never leaves the relay and a tag in one room says nothing
+// about another.
 std::string room_device_tag(const std::string &room, const std::string &device_id);
+// TAG "" clears the participant's tag.
 void write_participant_device(cvc::app &app, const std::string &room, const std::string &pid,
                               const std::string &tag);
 // "" when never written.
 std::string read_participant_device(cvc::app &app, const std::string &room, const std::string &pid);
 // A relay's device tags from its LINKS (state_transport::link_reports): each PRESENT participant's,
-// written from an accepted link that holds its pid at the inbound gate and carried a device id.
+// written from an accepted link that holds its pid at the inbound gate, carried a device id and
+// proved that device's key against its pin (state_link_report::device_verified). A present pid
+// whose holding link proved no key has its tag cleared, so a takeover does not keep the last one.
 void write_link_devices(cvc::app &app, const std::string &room,
                         const std::vector<cvc::state_link_report> &links,
                         const std::set<std::string> &present);
