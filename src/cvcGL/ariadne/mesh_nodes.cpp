@@ -1165,6 +1165,8 @@ struct FeLabRT {
   std::string base_dir;
   bool single_color = true;
   cvc::volume volume;
+  bool have_volume = false;  // false until a source has loaded
+  bool load_pending = false; // the realize-time SDF, computed by the first tick's load
   Placement place;
   cvc::geometry placeholder; // the volume's bounds as lines, shown until the first mesh
   std::shared_ptr<const cvc::geometry> input; // an SDF source's own (fitted) mesh, or null
@@ -1246,6 +1248,32 @@ std::shared_ptr<FeLoaded> load_fe_source(cvc::app &app, const SourceSpec &s) {
     throw std::runtime_error("unknown source.type '" + s.type + "' (sdf | volume)");
   }
   L->placeholder = box_lines(L->volume->boundingBox());
+  L->place.apply(L->placeholder);
+  L->sig = s.sig();
+  return L;
+}
+
+// An SDF source's mesh, placed, and the box its field will span -- everything but the field, so
+// the scene can frame it before the SDF is computed.
+std::shared_ptr<FeLoaded> frame_sdf_source(const SourceSpec &s) {
+#ifndef CVC_ENABLE_SDF
+  throw std::runtime_error("source: { sdf } needs a CVC_ENABLE_SDF build");
+#endif
+  auto L = std::make_shared<FeLoaded>();
+  SourceSpec turned = s;
+  turned.height = 0.0;
+  const cvc::geometry raw = load_source_mesh(turned);
+  L->place = fit_points(raw.const_points(), s.height);
+  auto shown = std::make_shared<cvc::geometry>();
+  shown->copy(raw, true);
+  L->place.apply(*shown);
+  L->input = shown;
+  const cvc::bounding_box e = raw.extents(); // sdf_volume_of_mesh's grid: padded 10%, cubic
+  const double half = 0.55 * std::max({e.maxx - e.minx, e.maxy - e.miny, e.maxz - e.minz});
+  const double cx = 0.5 * (e.minx + e.maxx), cy = 0.5 * (e.miny + e.maxy),
+               cz = 0.5 * (e.minz + e.maxz);
+  L->placeholder = box_lines(
+      cvc::bounding_box(cx - half, cy - half, cz - half, cx + half, cy + half, cz + half));
   L->place.apply(L->placeholder);
   L->sig = s.sig();
   return L;
@@ -1565,6 +1593,7 @@ void clear_fe_mesh(FeLabRT &rt) {
 
 void apply_fe_loaded(FeLabRT &rt, const FeLoaded &L) {
   rt.volume = *L.volume;
+  rt.have_volume = true;
   rt.input = L.input;
   rt.place = L.place;
   rt.placeholder = L.placeholder;
@@ -1877,7 +1906,10 @@ void run_fe_request(FeLabRT &rt, const std::string &req) {
     }
   } else if (req == "mesh") {
 #ifdef CVC_ENABLE_MESHER
-    launch_fe_job(rt, "mesh");
+    if (rt.have_volume)
+      launch_fe_job(rt, "mesh");
+    else
+      ari::write<std::string>(a, rt.k.status, "no volume to mesh: load a source first");
 #else
     ari::write<std::string>(a, rt.k.status, "mesher unavailable");
 #endif
@@ -1939,6 +1971,11 @@ void tick_fe_lab(FeLabRT &rt) {
       std::shared_ptr<FeJob> done = std::move(rt.job);
       apply_fe_job(rt, *done);
     }
+  } else if (rt.load_pending) {
+    // The realize-time SDF: computed now, before any request (which waits for it).
+    rt.load_pending = false;
+    rt.work.start();
+    launch_fe_job(rt, "load");
   } else {
     // Instant commands run back to back; one that starts a job leaves the rest waiting.
     for (int i = 0; i < 16 && !rt.job; ++i) {
@@ -1982,16 +2019,24 @@ std::shared_ptr<GraphicsNode> realize_fe_lab(SceneGraph &sg, const ari::SceneNod
     return nullptr;
   }
   auto rt = std::make_shared<FeLabRT>(sg.appContext());
-  // The node's own source: is read now, on this thread, so the scene frames it; a `load` request
-  // reads the source.* keys again on the lane.
+  // The node's own source: is read now, on this thread, so the scene frames it: a volume file
+  // whole, and for an SDF only its mesh -- the field itself, the slow part, is computed by the
+  // first tick's load on the lane, so the document shows at once. A `load` request reads the
+  // source.* keys again on the lane.
   const SourceSpec spec = fe_source_from_node(n);
   try {
-    const std::shared_ptr<FeLoaded> loaded = load_fe_source(*rt->app, spec);
-    rt->volume = *loaded->volume;
+    const std::shared_ptr<FeLoaded> loaded =
+        spec.type == "sdf" ? frame_sdf_source(spec) : load_fe_source(*rt->app, spec);
+    if (loaded->volume) {
+      rt->volume = *loaded->volume;
+      rt->have_volume = true;
+      rt->source_sig = loaded->sig;
+    } else {
+      rt->load_pending = true;
+    }
     rt->input = loaded->input;
     rt->place = loaded->place;
     rt->placeholder = loaded->placeholder;
-    rt->source_sig = loaded->sig;
     rt->source_version = 1;
     rt->lane = std::make_unique<cvc::async_lane>("fe_lab." + n.id);
     rt->slice_lane = std::make_unique<cvc::async_lane>("fe_lab." + n.id + ".slice");
@@ -2090,12 +2135,13 @@ std::shared_ptr<GraphicsNode> realize_fe_lab(SceneGraph &sg, const ari::SceneNod
   ari::write<int>(a, k.stoppable, 0);
   ari::write<int>(a, k.progress, 0);
   publish_fe_stats(*rt, 0.0, 0.0);
-  ari::write<std::string>(a, k.status, "volume ready");
+  ari::write<std::string>(
+      a, k.status, rt->load_pending ? "loading " + spec.file + "..." : std::string("volume ready"));
   ari::write<std::string>(a, k.field_min, "-");
   ari::write<std::string>(a, k.field_max, "-");
   // Keys written before the scene was realized (an init: program) name another source: load it
-  // first. A seeded request (auto_mesh) runs after it.
-  if (fe_source_from_keys(*rt).sig() != rt->source_sig) {
+  // first. A seeded request (auto_mesh) runs after it. (A pending load reads the keys anyway.)
+  if (!rt->load_pending && fe_source_from_keys(*rt).sig() != rt->source_sig) {
     const std::string waiting = ari::read_or<std::string>(a, k.request, "");
     ari::write<std::string>(a, k.request, waiting.empty() ? "load" : "load " + waiting);
   }

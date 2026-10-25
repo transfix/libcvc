@@ -600,8 +600,10 @@ unless a request written during the mesh job is already waiting: that request ru
 so stepping `modes.index` through the first few re-solves nothing.
 Until the first mesh the node shows the volume's bounds as lines.
 
-**Switching sources.** The node's `source:` and `fit:` seed the `source.*` keys and are read
-when the scene is realized. A `load` request reads the keys again on the node's lane, but only
+**Switching sources.** The node's `source:` and `fit:` seed the `source.*` keys. A volume file
+is read when the scene is realized; for an `sdf` source only the mesh is, so the scene frames
+its box at once, and the first tick computes the field on the lane (`status` says
+`loading ...`; requests wait for it). A `load` request reads the keys again on the lane, but only
 when one changed; then, with `auto.mesh`, it meshes when the source or a `mesh.*` key changed,
 and otherwise solves (`auto.solve`). So a document can step one node through several datasets
 and problems, re-reading, re-meshing and re-solving only what changed, as

@@ -197,6 +197,10 @@ static void test_lab_sources(cvc::app &app) {
     chk(false, "mesh_lab realized");
     return;
   }
+  if (domain) // before any tick: the bounds are up, the field is the first tick's job
+    chk(starts(fb + ".status", "loading x.bunny") && domain->getGeometry() &&
+            domain->getGeometry()->num_lines() == 12,
+        "fe_lab realize: an SDF source shows its box at once, its field loads on the lane");
   chk(val(mb + ".source.file") == "x.bunny" && val(mb + ".source.height") == "0",
       "mesh_lab seeded source.* from source: (no fit: height 0)");
 
