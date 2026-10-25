@@ -979,10 +979,10 @@ jobs:
   # python312 + numpy-cp312 + swig, the pycvc-cp312 recipe's own build deps.
   #
   # It builds cvcGL and the pycvc_gl module too, and runs the pycvc_gl tests on
-  # Mesa's llvmpipe through EGL, with no X server. Before that, no CI job built
-  # pycvc_gl at all: those tests ran only in local Windows builds. The module is
-  # built without the VTK-Python bridge (CVC_PYCVCGL_VTK_BRIDGE=OFF), so
-  # pycvc_vtk checks only that the bridge is absent.
+  # Mesa's llvmpipe under Xvfb. Before that, no CI job built pycvc_gl at all:
+  # those tests ran only in local Windows builds. The module is built without the
+  # VTK-Python bridge (CVC_PYCVCGL_VTK_BRIDGE=OFF), so pycvc_vtk checks only that
+  # the bridge is absent.
   pycvc-linux:
     runs-on: ubuntu-latest
     name: pycvc-linux / cp312
@@ -1061,12 +1061,17 @@ jobs:
       - name: Build
         run: cmake --build build --parallel --target pycvc pycvc_gl pycvc_gl_pkg physics_parity_test
 
-      # ── a headless software GL for the pycvc_gl tests ──
-      # cvcpkg's mesa: llvmpipe behind EGL (libEGL_mesa.so.0, found by the vtk
-      # bundle's libglvnd through its relocatable vendor dir). VTK picks its
-      # render window at run time, and VTK_DEFAULT_OPENGL_WINDOW makes that EGL,
-      # so nothing probes for an X display. Installed after the build, as in
-      # package-linux, so mesa's llvm20 runtime cannot reach the configure or link.
+      # ── a software GL for the pycvc_gl tests ──
+      # cvcpkg's mesa (llvmpipe) and xvfb, as in package-linux: libGLX.so.0 from
+      # the vtk bundle's libglvnd finds libGLX_mesa.so.0, and Xvfb finds its swrast
+      # driver and XKB data relative to itself. Installed after the build, so
+      # mesa's llvm20 runtime cannot reach the configure or link.
+      #
+      # GLX under Xvfb, not EGL with no X server: VTK would render through EGL,
+      # but ImGui's GL loader resolves through GLX and cannot reach an EGL context
+      # (src/cvcGL/ImGuiOverlay.cpp), so ImGuiOverlay, AriRuntime and the HUD
+      # would go untested.
+      #
       # Without LD_LIBRARY_PATH: mesa's closure rewrites libraries the deps prefix
       # already has (zlib), and cvcpkg's own Python must not have them loaded from
       # there while it does. With them loaded, the install died of SIGBUS halfway
@@ -1075,13 +1080,24 @@ jobs:
       # The pycvc_gl tests skip their render parts without a GL context, and a
       # broken GL here would turn the job into a quiet run of skips.
       # CVC_REQUIRE_RENDER=1 makes each of them fail instead.
-      - name: Software EGL for the pycvc_gl tests (cvcpkg)
+      - name: Software OpenGL for the pycvc_gl tests (cvcpkg)
         shell: bash
         run: |
           set -euo pipefail
-          env -u LD_LIBRARY_PATH cvcpkg install mesa --prefix "$DEPS_PREFIX" --config release --link shared
+          env -u LD_LIBRARY_PATH cvcpkg install xvfb mesa --prefix "$DEPS_PREFIX" --config release --link shared
+          log="$RUNNER_TEMP/xvfb.log"
+          "$DEPS_PREFIX/bin/Xvfb" :99 -screen 0 1280x1024x24 >"$log" 2>&1 &
+          for _ in $(seq 1 50); do
+            [ -e /tmp/.X11-unix/X99 ] && break
+            sleep 0.2
+          done
+          if [ ! -e /tmp/.X11-unix/X99 ]; then
+            echo "::error::cvcpkg's Xvfb did not come up on :99"
+            cat "$log"
+            exit 1
+          fi
           {
-            echo "VTK_DEFAULT_OPENGL_WINDOW=vtkEGLRenderWindow"
+            echo "DISPLAY=:99"
             echo "LIBGL_ALWAYS_SOFTWARE=1"
             echo "GALLIUM_DRIVER=llvmpipe"
             echo "CVC_REQUIRE_RENDER=1"
@@ -1098,7 +1114,9 @@ jobs:
             echo "::error::pycvc and pycvc_gl were built, but their tests did not all reach CTestTestfile.cmake."
             exit 1
           fi
-          ctest --test-dir build -R '^pycvc_' --output-on-failure --timeout 1200
+          # A crash dumps the Python stack (a segfaulting test prints nothing else:
+          # its buffered stdout dies with it).
+          PYTHONFAULTHANDLER=1 ctest --test-dir build -R '^pycvc_' --output-on-failure --timeout 1200
 
       # --output-on-failure hides a passing test's output, and with it whatever it
       # skipped. Print every skip line from LastTest.log, so what is left skipping

@@ -85,12 +85,17 @@ jobs:
       - name: Build
         run: cmake --build build --parallel --target pycvc pycvc_gl pycvc_gl_pkg physics_parity_test
 
-      # ── a headless software GL for the pycvc_gl tests ──
-      # cvcpkg's mesa: llvmpipe behind EGL (libEGL_mesa.so.0, found by the vtk
-      # bundle's libglvnd through its relocatable vendor dir). VTK picks its
-      # render window at run time, and VTK_DEFAULT_OPENGL_WINDOW makes that EGL,
-      # so nothing probes for an X display. Installed after the build, as in
-      # package-linux, so mesa's llvm20 runtime cannot reach the configure or link.
+      # ── a software GL for the pycvc_gl tests ──
+      # cvcpkg's mesa (llvmpipe) and xvfb, as in package-linux: libGLX.so.0 from
+      # the vtk bundle's libglvnd finds libGLX_mesa.so.0, and Xvfb finds its swrast
+      # driver and XKB data relative to itself. Installed after the build, so
+      # mesa's llvm20 runtime cannot reach the configure or link.
+      #
+      # GLX under Xvfb, not EGL with no X server: VTK would render through EGL,
+      # but ImGui's GL loader resolves through GLX and cannot reach an EGL context
+      # (src/cvcGL/ImGuiOverlay.cpp), so ImGuiOverlay, AriRuntime and the HUD
+      # would go untested.
+      #
       # Without LD_LIBRARY_PATH: mesa's closure rewrites libraries the deps prefix
       # already has (zlib), and cvcpkg's own Python must not have them loaded from
       # there while it does. With them loaded, the install died of SIGBUS halfway
@@ -99,13 +104,24 @@ jobs:
       # The pycvc_gl tests skip their render parts without a GL context, and a
       # broken GL here would turn the job into a quiet run of skips.
       # CVC_REQUIRE_RENDER=1 makes each of them fail instead.
-      - name: Software EGL for the pycvc_gl tests (cvcpkg)
+      - name: Software OpenGL for the pycvc_gl tests (cvcpkg)
         shell: bash
         run: |
           set -euo pipefail
-          env -u LD_LIBRARY_PATH cvcpkg install mesa --prefix "$DEPS_PREFIX" --config release --link shared
+          env -u LD_LIBRARY_PATH cvcpkg install xvfb mesa --prefix "$DEPS_PREFIX" --config release --link shared
+          log="$RUNNER_TEMP/xvfb.log"
+          "$DEPS_PREFIX/bin/Xvfb" :99 -screen 0 1280x1024x24 >"$log" 2>&1 &
+          for _ in $(seq 1 50); do
+            [ -e /tmp/.X11-unix/X99 ] && break
+            sleep 0.2
+          done
+          if [ ! -e /tmp/.X11-unix/X99 ]; then
+            echo "::error::cvcpkg's Xvfb did not come up on :99"
+            cat "$log"
+            exit 1
+          fi
           {
-            echo "VTK_DEFAULT_OPENGL_WINDOW=vtkEGLRenderWindow"
+            echo "DISPLAY=:99"
             echo "LIBGL_ALWAYS_SOFTWARE=1"
             echo "GALLIUM_DRIVER=llvmpipe"
             echo "CVC_REQUIRE_RENDER=1"
@@ -122,7 +138,9 @@ jobs:
             echo "::error::pycvc and pycvc_gl were built, but their tests did not all reach CTestTestfile.cmake."
             exit 1
           fi
-          ctest --test-dir build -R '^pycvc_' --output-on-failure --timeout 1200
+          # A crash dumps the Python stack (a segfaulting test prints nothing else:
+          # its buffered stdout dies with it).
+          PYTHONFAULTHANDLER=1 ctest --test-dir build -R '^pycvc_' --output-on-failure --timeout 1200
 
       # --output-on-failure hides a passing test's output, and with it whatever it
       # skipped. Print every skip line from LastTest.log, so what is left skipping
@@ -138,15 +156,11 @@ jobs:
                tolower($0) ~ /(^|[^a-z])skip([^a-z]|$)/ { print t ": " $0; n++ }
                END { if (!n) print "no skips" }' "$log"
 
-      # Do the trailing os._exit calls still matter? Run the scripts with a normal exit,
-      # 20 times each, with a native backtrace on SIGABRT/SIGSEGV.
-      - name: "Experiment: the pycvc_gl scripts without os._exit"
+      # A native backtrace on SIGABRT/SIGSEGV, for the two diagnostic steps below.
+      - name: Build a backtrace shim
         if: always()
-        continue-on-error: true
         shell: bash
         run: |
-          set -uo pipefail
-          command -v gdb || echo "no gdb on the runner"
           cat > "$RUNNER_TEMP/bt.c" <<'C'
           #include <execinfo.h>
           #include <signal.h>
@@ -167,13 +181,43 @@ jobs:
           }
           C
           env -u LD_LIBRARY_PATH gcc -shared -fPIC -o "$RUNNER_TEMP/libbt.so" "$RUNNER_TEMP/bt.c"
+          ls -l "$RUNNER_TEMP/libbt.so"
+
+      # The first run, on EGL with no X server: pycvc_ari's child died (rc=-11) after
+      # ImGui's loader failed, and pycvc_gl_keepalive segfaulted. Where?
+      - name: "Diagnose: pycvc_ari and pycvc_gl_keepalive on EGL"
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          set +e
+          export PYTHONFAULTHANDLER=1 PYTHONUNBUFFERED=1 LD_PRELOAD="$RUNNER_TEMP/libbt.so"
+          export VTK_DEFAULT_OPENGL_WINDOW=vtkEGLRenderWindow
+          for t in pycvc_ari pycvc_gl_keepalive; do
+            echo "=== $t on EGL"
+            env -u DISPLAY ctest --test-dir build -R "^$t\$" -V --timeout 300 2>&1 \
+              | grep -v 'vblank_mode overridden' | tail -150
+          done
+          echo "=== pycvc_gl_keepalive on GLX (for comparison)"
+          ctest --test-dir build -R '^pycvc_gl_keepalive$' -V --timeout 300 2>&1 \
+            | grep -v 'vblank_mode overridden' | tail -60
+          exit 0
+
+      # Do the trailing os._exit calls still matter? Run the scripts with a normal exit,
+      # 20 times each, with a native backtrace on SIGABRT/SIGSEGV.
+      - name: "Experiment: the pycvc_gl scripts without os._exit"
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          set +e
           cd bindings/pycvc
           sed -i 's/^os\._exit(1 if fails else 0)$/sys.exit(1 if fails else 0)/' \
             test_pycvc_gl_camera.py test_pycvc_gl_imgui.py test_pycvc_gl_viewport.py test_pycvc_gl_chase_parity.py
           sed -i 's/^    os\._exit(0)$/    sys.exit(0)/' test_pycvc_gl_keepalive.py
           git diff --stat
           cd "$GITHUB_WORKSPACE"
-          export PYTHONFAULTHANDLER=1 LD_PRELOAD="$RUNNER_TEMP/libbt.so"
+          export PYTHONFAULTHANDLER=1 PYTHONUNBUFFERED=1 LD_PRELOAD="$RUNNER_TEMP/libbt.so"
           fails=0
           for i in $(seq 1 20); do
             out=$(ctest --test-dir build -R '^pycvc_gl_(camera|imgui|viewport|chase_parity|keepalive)$' \
@@ -182,7 +226,8 @@ jobs:
             echo "run $i: rc=$rc $(echo "$out" | grep -E 'tests passed|tests failed')"
             if [ $rc -ne 0 ]; then
               fails=$((fails + 1))
-              echo "$out"
+              echo "$out" | grep -v 'vblank_mode overridden'
             fi
           done
           echo "runs with a failure: $fails / 20"
+          git checkout -- bindings/pycvc
