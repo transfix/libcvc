@@ -841,6 +841,13 @@ add_executable(cvcgl_imgui_table_columns test/cvcgl_imgui_table_columns.cpp)
 target_link_libraries(cvcgl_imgui_table_columns PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_table_columns COMMAND cvcgl_imgui_table_columns)
 
+# ImGuiBackend's window sizing and placement on a bare ImGui context: a window with no size fits
+# its widgets, windows with no pos stack instead of overlapping (until the user moves one), and a
+# sized window scrolls both ways. No window, no GL.
+add_executable(cvcgl_imgui_window_fit test/cvcgl_imgui_window_fit.cpp)
+target_link_libraries(cvcgl_imgui_window_fit PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_window_fit COMMAND cvcgl_imgui_window_fit)
+
 # Golden images of the Ariadne ImGui/VTK backend (roadmap §16.6 phase 1): each .ari in
 # test/golden runs through AriRuntime + ImGuiBackend offscreen and its frame is compared with the
 # PNG of the same name (made under Mesa llvmpipe, compared within a tolerance measured across

@@ -155,6 +155,16 @@ private:
   bool m_haveColumns = false;
   std::vector<float> m_lastGridColumns;
 
+  // Windows that came with no place of their own (no authored pos, nothing persisted) flow down
+  // the left of the viewport, one under another, in columns. Each window id maps to where it was
+  // put last frame; one the user drags elsewhere leaves the flow. The cursor restarts each frame.
+  struct FlowSpot {
+    float x = -1.0f, y = -1.0f;
+  };
+  std::unordered_map<std::string, FlowSpot> m_flow;
+  int m_flowFrame = -1;
+  float m_flowX = 0.0f, m_flowY = 0.0f, m_flowColumnW = 0.0f;
+
   // Host-registered raw-ImGui draw fns for custom widget types (register_widget).
   std::unordered_map<std::string, CustomDrawFn> m_customWidgets;
 

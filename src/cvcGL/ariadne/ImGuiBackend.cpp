@@ -6,9 +6,9 @@
 // does not expose in value-in/edit-out form — the commit-on-release slider (a
 // per-widget edit cache + the IsItemDeactivatedAfterEdit edge) and the value-form
 // combo (BeginCombo) — touch raw ImGui directly, guarded by CVC_ENABLE_IMGUI with
-// inert stubs otherwise. The commit policy is faithful to cvc::gl::ui::Slider*:
-// a drag edits a cache every frame and reports `committed` only on release, so
-// the core writes cvc::state once per drag, not once per frame.
+// inert stubs otherwise. A drag edits a cache every frame, reports `changed` on
+// each frame the value moves and `committed` on release; the core writes each
+// change, or only the release for a `commit: release` slider.
 
 #include <cfloat>
 #include <cvc/ariadne/ariadne.h>
@@ -44,6 +44,9 @@ namespace {
 // the slider; while active it holds the in-progress edit. Salted so a key can
 // never collide with one of ImGui's own storage keys. Mirrors cvc::gl::ui.
 constexpr ImGuiID kCacheSalt = 0x63766367; // 'cvcg'
+
+constexpr float kFlowGap = 10.0f;   // between flowing windows, and from the viewport's edges
+constexpr float kFitFloor = 120.0f; // a fitting window's smallest limit, however near the edge
 
 float *cache_float(const char *key, float seed, bool active) {
   ImGuiStorage *store = ImGui::GetStateStorage();
@@ -129,6 +132,11 @@ void ImGuiBackend::focus_next_window() {
 bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne::Size &size,
                                 float border, bool *p_open) {
   int pushes = 0;
+  // Stable ImGui identity via the "Visible title###stable.id" trick (roadmap §3.3).
+  std::string name = title;
+  name += "###";
+  name += id;
+  bool vis = false;
 #ifdef CVC_ENABLE_IMGUI
   // Resolve the §3.0.3b size against the main viewport's WORK area (the menu-aware
   // content rect), per axis: px verbatim, percent as a fraction of the work size,
@@ -142,43 +150,91 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
       return parent * e.value / 100.0f;
     return 0.0f; // Auto
   };
+  // A window with no authored size fits its widgets every frame, so it grows and shrinks with what
+  // it shows, up to the viewport's edge, past which it scrolls. One with a size keeps it (the user
+  // may resize it) and scrolls, both ways, when its widgets need more.
+  const bool fits = !size.w.is_set() && !size.h.is_set();
+  ImGuiWindow *const existing = ImGui::FindWindowByName(name.c_str());
   // §11.4: seed the window from a persisted tree.<id>.geometry when the core supplied one. A FREE
   // window uses ImGuiCond_FirstUseEver (apply-once: the seed takes only on the window's first
   // appearance — a genuinely new window, or one whose imgui.ini state was cleared — and the user's
   // drag then owns it; the core re-passes the seed each frame, harmless under FirstUseEver, §16.2).
   // A seeded size wins over the authored size below (skip that seeding when a seed carries a size).
-  const bool seededSize = m_haveSeed && m_pendingSeed.has_size;
+  // A fitting window takes no size from it: the size the core persisted after the window's first,
+  // still unmeasured frame would otherwise stop the fit and leave the window a few pixels square.
+  const bool seededPos = m_haveSeed && m_pendingSeed.has_pos;
+  const bool seededSize = m_haveSeed && m_pendingSeed.has_size && !fits;
   if (m_haveSeed) {
     if (m_pendingSeed.has_pos)
       ImGui::SetNextWindowPos(ImVec2(m_pendingSeed.x, m_pendingSeed.y), ImGuiCond_FirstUseEver);
-    if (m_pendingSeed.has_size)
+    if (seededSize)
       ImGui::SetNextWindowSize(ImVec2(m_pendingSeed.w, m_pendingSeed.h), ImGuiCond_FirstUseEver);
     m_haveSeed = false;
   }
-  if (!seededSize && (size.w.is_set() || size.h.is_set()))
+  if (!seededSize && !fits)
     ImGui::SetNextWindowSize(ImVec2(px(size.w, avail.x), px(size.h, avail.y)),
                              ImGuiCond_FirstUseEver);
-  if (size.min_w.is_set() || size.min_h.is_set() || size.max_w.is_set() || size.max_h.is_set()) {
-    const ImVec2 mn(size.min_w.is_set() ? px(size.min_w, avail.x) : 0.0f,
-                    size.min_h.is_set() ? px(size.min_h, avail.y) : 0.0f);
-    const ImVec2 mx(size.max_w.is_set() ? px(size.max_w, avail.x) : FLT_MAX,
-                    size.max_h.is_set() ? px(size.max_h, avail.y) : FLT_MAX);
-    ImGui::SetNextWindowSizeConstraints(mn, mx);
+
+  // A new window with no place of its own joins the flow down the left of the viewport (m_flow);
+  // one the user has dragged since it was put there leaves it.
+  if (ImGui::GetFrameCount() != m_flowFrame) {
+    m_flowFrame = ImGui::GetFrameCount();
+    m_flowX = vp->WorkPos.x + kFlowGap;
+    m_flowY = vp->WorkPos.y + kFlowGap;
+    m_flowColumnW = 0.0f;
   }
+  auto spot = m_flow.find(id);
+  if (!existing && !seededPos)
+    spot = m_flow.emplace(id, FlowSpot{}).first;
+  else if (spot != m_flow.end() && existing &&
+           (existing->Pos.x != spot->second.x || existing->Pos.y != spot->second.y)) {
+    m_flow.erase(spot);
+    spot = m_flow.end();
+  }
+  ImVec2 at = existing ? existing->Pos : ImVec2(vp->WorkPos.x + 60.0f, vp->WorkPos.y + 60.0f);
+  if (spot != m_flow.end()) {
+    // The room it wants: all its widgets, for a window that fits them; else its size. (Nothing
+    // yet for a window not drawn before -- the next frame places it again, measured.)
+    const ImVec2 want = !existing                      ? ImVec2(0.0f, 0.0f)
+                        : fits && !existing->Collapsed ? ImGui::CalcWindowNextAutoFitSize(existing)
+                                                       : existing->Size;
+    const float top = vp->WorkPos.y + kFlowGap, bottom = vp->WorkPos.y + vp->WorkSize.y;
+    if (m_flowY > top && m_flowY + want.y > bottom) { // it would run off the bottom: a new column
+      m_flowX += m_flowColumnW + kFlowGap;
+      m_flowY = top;
+      m_flowColumnW = 0.0f;
+    }
+    at = ImTrunc(ImVec2(m_flowX, m_flowY)); // what ImGui would store, so a drag is told apart
+    ImGui::SetNextWindowPos(at, ImGuiCond_Always);
+    spot->second = FlowSpot{at.x, at.y};
+    m_flowY = at.y + ImMin(want.y, ImMax(bottom - at.y, kFitFloor)) + kFlowGap;
+    m_flowColumnW = ImMax(m_flowColumnW, want.x);
+  }
+
+  ImVec2 mn(size.min_w.is_set() ? px(size.min_w, avail.x) : 0.0f,
+            size.min_h.is_set() ? px(size.min_h, avail.y) : 0.0f);
+  ImVec2 mx(size.max_w.is_set() ? px(size.max_w, avail.x) : FLT_MAX,
+            size.max_h.is_set() ? px(size.max_h, avail.y) : FLT_MAX);
+  if (fits) { // no further than the viewport's far edges from where the window stands
+    mx.x = ImMin(mx.x, ImMax(vp->WorkPos.x + vp->WorkSize.x - at.x, kFitFloor));
+    mx.y = ImMin(mx.y, ImMax(vp->WorkPos.y + vp->WorkSize.y - at.y, kFitFloor));
+  }
+  if (fits || size.min_w.is_set() || size.min_h.is_set() || size.max_w.is_set() ||
+      size.max_h.is_set())
+    ImGui::SetNextWindowSizeConstraints(mn, mx);
   if (border >= 0.0f) {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, border);
     ++pushes;
   }
+  const ImGuiWindowFlags flags =
+      ImGuiWindowFlags_HorizontalScrollbar | (fits ? ImGuiWindowFlags_AlwaysAutoResize : 0);
+  vis = ImGui::Begin(name.c_str(), p_open, flags);
 #else
   (void)size;
   (void)border;
   m_haveSeed = false; // consume the seed even in the inert (no-ImGui) build
+  vis = ui::Begin(name.c_str(), p_open);
 #endif
-  // Stable ImGui identity via the "Visible title###stable.id" trick (roadmap §3.3).
-  std::string name = title;
-  name += "###";
-  name += id;
-  const bool vis = ui::Begin(name.c_str(), p_open);
   m_windowStylePushes.push_back(pushes);
   // §11.4: snapshot this window's current geometry for the core to persist. Position is always
   // valid; size only when NOT collapsed (a collapsed window reports just its title-bar height,
@@ -547,6 +603,10 @@ ariadne::BoolEdit ImGuiBackend::checkbox(const char *label, bool current) {
 // When the label already fits at the default width (a roomy panel / short label), ImGui's default
 // is left untouched, so this never narrows a slider that was fine.
 void reserve_label_width(const char *label) {
+  // A window that fits its widgets grows to the label instead -- and shrinking the frame to the
+  // window's width there would only shrink the window with it, frame after frame.
+  if (ImGui::GetCurrentWindow()->Flags & ImGuiWindowFlags_AlwaysAutoResize)
+    return;
   const float avail = ImGui::GetContentRegionAvail().x;
   const float labelW = ImGui::CalcTextSize(label, nullptr, /*hide_text_after_double_hash=*/true).x;
   const float fit = avail - ImGui::GetStyle().ItemInnerSpacing.x - labelW;
@@ -561,7 +621,7 @@ ariadne::IntEdit ImGuiBackend::slider_int(const char *label, const char *key, in
   int &v = *cache_int(key, current, ImGui::IsAnyItemActive());
   reserve_label_width(label);
   const bool changed = ImGui::SliderInt(label, &v, lo, hi);
-  const bool committed = ImGui::IsItemDeactivatedAfterEdit(); // one write, on release
+  const bool committed = ImGui::IsItemDeactivatedAfterEdit(); // the drag ended
   return {changed, committed, v};
 #else
   (void)label;
