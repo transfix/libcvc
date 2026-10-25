@@ -49,7 +49,17 @@ namespace {
 // finds itself already inside its own pool runs inline rather than posting a
 // nested job the (busy) workers could never pick up — which would deadlock.
 thread_local const thread_pool *t_active_pool = nullptr;
+// The context this thread's fan-outs carry (fanout_context_scope).
+thread_local fanout_context *t_fanout_context = nullptr;
 } // namespace
+
+fanout_context *current_fanout_context() { return t_fanout_context; }
+
+fanout_context_scope::fanout_context_scope(fanout_context *ctx) : outer_(t_fanout_context) {
+  t_fanout_context = ctx;
+}
+
+fanout_context_scope::~fanout_context_scope() { t_fanout_context = outer_; }
 
 thread_pool::thread_pool(unsigned n_workers) {
   unsigned n = n_workers;
@@ -114,7 +124,15 @@ void thread_pool::worker_loop(int worker_index) {
 
     const thread_pool *prev = t_active_pool;
     t_active_pool = this;
-    run_indices(*j); // noexcept: task throws are latched into *j, not propagated here
+    if (fanout_context *ctx = j->ctx) {
+      // The poster's context, as this thread's own while it runs the chunks.
+      ctx->run_chunks([this, j, ctx] {
+        fanout_context_scope scope(ctx);
+        run_indices(*j);
+      });
+    } else {
+      run_indices(*j); // noexcept: task throws are latched into *j, not propagated here
+    }
     t_active_pool = prev;
 
     // Last participant out wakes the caller. (No j access past this point.)
@@ -167,6 +185,7 @@ void thread_pool::parallel_for(int n, const std::function<void(int)> &fn, int ma
   j.cursor.store(0, std::memory_order_relaxed);
   j.remaining.store(enlisted + 1, std::memory_order_relaxed); // + the caller
   j.enlisted = enlisted;
+  j.ctx = t_fanout_context;
 
   {
     std::lock_guard<std::mutex> lk(_mtx);

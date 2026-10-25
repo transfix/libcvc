@@ -90,6 +90,7 @@ public:
   /// the given state-tree path.  Returns false if the PID is invalid
   /// or the process is not in a runnable state.
   bool receive_message(int pid, const std::string &path);
+  bool receive_message_until(int pid, const std::string &path, double seconds) override;
 
   /// Deliver a message dict to all processes waiting on `path`.
   /// Each matching process has the message pushed to its inbox,
@@ -213,9 +214,27 @@ public:
   /// the tree); each process submitted afterwards takes it as its max_alloc_bytes.
   uint64_t max_alloc_bytes() const { return max_alloc_bytes_; }
 
+  /// The steps a CPU millisecond of `proc`'s async calls is charged: its own
+  /// execute_options::async_steps_per_cpu_ms, else limits.async_steps_per_cpu_ms read from the
+  /// tree now (no load_settings() needed: async_steps_per_cpu_ms_from_state), else the default.
+  /// The sync scheduler runs a call's kernel inline, in the step that makes it.
+  double async_steps_per_cpu_ms(const process &proc) override;
+
+  /// Adopt a process decoded from a snapshot (decode_process): it gets a new pid and is ready,
+  /// unless it had ended. Its counters and budget so far are kept. A call it was waiting for
+  /// can't resume: the call raises RuntimeError when the process runs. Returns the pid.
+  int restore(process_ptr proc);
+  /// Snapshot process `pid` into `node` (encode_process). False for an unknown pid.
+  bool snapshot(int pid, cvc::state &node) const;
+  /// Restore a snapshot() (decode_process, rebind_natives with `natives`, then
+  /// restore(process_ptr)). Pass the environment the process ran with (execute_options::env) or
+  /// null for none. Returns the new pid.
+  int restore(cvc::state &node, environment_ptr natives = nullptr);
+
 private:
   std::string id_;
   uint64_t max_alloc_bytes_ = kDefaultMaxAllocBytes;
+  double published_rate_ = -1.0; // the effective.async_steps_per_cpu_ms last published
   scheduling_policy policy_;
   parse_options parse_options_;
   data_options data_options_;

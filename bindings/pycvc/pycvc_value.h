@@ -19,6 +19,7 @@
 // wrapper (pycvc.i), which owns the pycvc.symbol / pycvc.value types. Call with the GIL held.
 #pragma once
 
+#include <cvc/state/state_exec/async_call.h> // async_marshal
 #include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/types.h>
 #include <memory>
@@ -48,6 +49,13 @@ bool py_to_value(PyObject *o, cvc::state_exec::value_t &out);
 /// std::invalid_argument, prefixed with `who`, when `callable` isn't callable or is an async def.
 cvc::state_exec::native_fn python_native_fn(const std::string &who, const std::string &name,
                                             PyObject *callable);
+
+/// An async function's marshal step (register_async_fn) whose kernel calls `callable` on its
+/// executor thread, taking the GIL for the call (the wait for it isn't charged to the process). A
+/// Python exception raises at the call as a PythonError naming `name`. Throws
+/// std::invalid_argument, prefixed with `who`, when `callable` isn't callable or is an async def.
+cvc::state_exec::async_marshal python_async_marshal(const std::string &who, const std::string &name,
+                                                    PyObject *callable);
 
 /// An execute_options::on_complete that calls `callable` with the process's result and ignores
 /// what it returns. A Python exception becomes a C++ error, thrown from the scheduler call that

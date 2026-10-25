@@ -297,10 +297,14 @@ bool values_equal(const value_t &a, const value_t &b);
 
 /// Seconds of CPU time the calling thread has used: time it ran, not time it waited to run
 /// (though in a virtual machine whose kernel does not account steal time, time the hypervisor
-/// takes from the virtual CPU the thread is on still counts). CLOCK_THREAD_CPUTIME_ID where
-/// POSIX has it (Linux, macOS), a system call, so it is read sparingly. Elsewhere it is the
-/// steady clock -- on Windows too, whose per-thread CPU times advance only at the ~15.6 ms
-/// scheduler tick, too coarse for millisecond budgets.
+/// takes from the virtual CPU the thread is on still counts). A system call, so it is read
+/// sparingly:
+/// - Linux and macOS: CLOCK_THREAD_CPUTIME_ID.
+/// - Windows: QueryThreadCycleTime, the thread's cycles on the time-stamp counter, converted at
+///   the counter's rate, measured once (the first call takes about 5 ms). Where the counter's
+///   rate isn't constant (no invariant TSC) or there is none (ARM64), GetThreadTimes, in 100 ns
+///   units that advance at the ~15.6 ms scheduler tick.
+/// - Elsewhere: the steady clock.
 double thread_cpu_seconds();
 
 /// A time budget charged to work the OS may deschedule. Its first half is charged on the

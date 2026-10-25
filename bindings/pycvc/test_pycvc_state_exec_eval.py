@@ -107,9 +107,10 @@ def test_stats_is_a_reference_that_keeps_its_owner():
 
 
 def test_stats_by_kind_of_step():
-    # #658 counts steps and time by kind: reading the script, evaluating, deep-data work.
+    # #658 counts steps and time by kind: reading the script, evaluating, deep-data work, and
+    # the steps async calls are charged (docs/STATE_EXEC_EXCEPTIONS.md 3.8).
     kind = pycvc.step_kind
-    assert [k.name for k in kind] == ["eval", "read", "data"]
+    assert [k.name for k in kind] == ["eval", "read", "data", "async"]
     s = pycvc.evaluation_stats()
     s.increment_step(kind.read)
     s.increment_step(kind.read)

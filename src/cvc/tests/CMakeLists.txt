@@ -87,6 +87,7 @@ add_executable(state_exec_integration_test state_exec_integration_test.cpp)
 add_executable(state_exec_advanced_integration_test state_exec_advanced_integration_test.cpp)
 add_executable(state_exec_gaps_test state_exec_gaps_test.cpp)
 add_executable(state_exec_exceptions_test state_exec_exceptions_test.cpp)
+add_executable(state_exec_async_calls_test state_exec_async_calls_test.cpp)
 add_executable(state_exec_deep_data_test state_exec_deep_data_test.cpp)
 add_executable(state_exec_data_steps_test state_exec_data_steps_test.cpp)
 if(NOT WIN32)
@@ -460,6 +461,7 @@ list(APPEND TEST_TARGETS
   state_exec_advanced_integration_test
   state_exec_gaps_test
   state_exec_exceptions_test
+  state_exec_async_calls_test
   state_exec_deep_data_test
   state_exec_data_steps_test
 )
@@ -808,6 +810,13 @@ if(TARGET state_exec_gaps_test)
 endif()
 
 target_link_libraries(state_exec_exceptions_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(state_exec_async_calls_test
   PRIVATE
     cvc
     GTest::gtest
@@ -2081,6 +2090,7 @@ target_compile_features(state_exec_parser_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_types_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_deep_data_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_exceptions_test PRIVATE cxx_std_20)
+target_compile_features(state_exec_async_calls_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_data_steps_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_builtins_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_evaluator_test PRIVATE cxx_std_20)
@@ -2490,6 +2500,7 @@ if(TARGET state_exec_gaps_test)
   cvc_discover_tests(state_exec_gaps_test)
 endif()
 cvc_discover_tests(state_exec_exceptions_test)
+cvc_discover_tests(state_exec_async_calls_test)
 cvc_discover_tests(state_change_journal_test)
 cvc_discover_tests(state_subscription_router_test)
 cvc_discover_tests(state_sync_adapter_test)

@@ -6,12 +6,72 @@
 #include <time.h>
 #include <utility>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#if defined(_M_X64) || defined(_M_IX86)
+#include <intrin.h>
+#endif
+#endif
+
 namespace cvc::state_exec {
 
 // -- time budgets -------------------------------------------------------------
 
+#ifdef _WIN32
+namespace {
+// The rate QueryThreadCycleTime counts at, in cycles a second, or 0 where it can't be used.
+// Windows counts a thread's cycles on the time-stamp counter, so the rate is the TSC's, which
+// is constant only where the processor says it is invariant (CPUID 0x80000007, EDX bit 8).
+// Measured once, against the performance counter, over a few milliseconds.
+double thread_cycle_rate() {
+#if defined(_M_X64) || defined(_M_IX86)
+  int info[4] = {};
+  __cpuid(info, static_cast<int>(0x80000000));
+  if (static_cast<unsigned>(info[0]) < 0x80000007u)
+    return 0.0;
+  __cpuid(info, static_cast<int>(0x80000007));
+  if ((info[3] & (1 << 8)) == 0)
+    return 0.0;
+  LARGE_INTEGER freq, q0, q1;
+  if (!QueryPerformanceFrequency(&freq) || freq.QuadPart <= 0)
+    return 0.0;
+  QueryPerformanceCounter(&q0);
+  const unsigned long long c0 = __rdtsc();
+  Sleep(5);
+  QueryPerformanceCounter(&q1);
+  const unsigned long long c1 = __rdtsc();
+  const double seconds = double(q1.QuadPart - q0.QuadPart) / double(freq.QuadPart);
+  return seconds > 0.0 ? double(c1 - c0) / seconds : 0.0;
+#else
+  return 0.0; // no time-stamp counter to calibrate against (ARM64): GetThreadTimes
+#endif
+}
+} // namespace
+#endif
+
 double thread_cpu_seconds() {
-#if defined(CLOCK_THREAD_CPUTIME_ID) && !defined(_WIN32)
+#ifdef _WIN32
+  static const double cycle_rate = thread_cycle_rate();
+  if (cycle_rate > 0.0) {
+    ULONG64 cycles = 0;
+    if (QueryThreadCycleTime(GetCurrentThread(), &cycles))
+      return double(cycles) / cycle_rate;
+  }
+  // 100 ns units, advanced at the scheduler tick (about 15.6 ms).
+  FILETIME created, exited, kernel, user;
+  if (GetThreadTimes(GetCurrentThread(), &created, &exited, &kernel, &user)) {
+    const auto ticks = [](const FILETIME &t) {
+      return (static_cast<unsigned long long>(t.dwHighDateTime) << 32) | t.dwLowDateTime;
+    };
+    return 1e-7 * double(ticks(kernel) + ticks(user));
+  }
+#elif defined(CLOCK_THREAD_CPUTIME_ID)
   static const bool has_cpu_clock = [] {
     timespec ts;
     return clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) == 0;

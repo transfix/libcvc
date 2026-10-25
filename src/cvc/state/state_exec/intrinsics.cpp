@@ -4,6 +4,7 @@
 #include <boost/property_tree/json_parser/error.hpp>
 #include <chrono>
 #include <cvc/state/state.h>
+#include <cvc/state/state_exec/async_host.h> // async calls' futures, for await/await-all
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/data_job.h>
 #include <cvc/state/state_exec/intrinsics.h>
@@ -481,27 +482,131 @@ value_t intrinsic_sleep(intrinsics_context *ctx, std::span<const value_t> args) 
   return value_t(ctx->sched->sleep(pid, seconds));
 }
 
+// Park the process `pid` (stepping now) at the native call being applied, waiting on `channel`,
+// for `timeout` seconds at most (docs/STATE_EXEC_EXCEPTIONS.md 3.9).
+void park_await(intrinsics_context *ctx, int pid, const std::string &channel,
+                std::optional<double> timeout, detail::await_request request) {
+  const bool parked = timeout ? ctx->sched->receive_message_until(pid, channel, *timeout)
+                              : ctx->sched->receive_message(pid, channel);
+  if (!parked)
+    throw std::runtime_error("cannot suspend process " + std::to_string(pid));
+  request_await(std::move(request));
+}
+
+// (await f [seconds]): an async call's future returns its value or raises its exception once it
+// finishes (at once if it has); a channel future, the value its producer delivers; anything
+// else, itself, after a frame. With seconds, a future that hasn't finished by then raises
+// TimeoutError; the work goes on, and the future can be awaited again.
 value_t intrinsic_await(intrinsics_context *ctx, std::span<const value_t> args) {
-  expect_exact(args, 1, "await");
+  if (args.empty() || args.size() > 2)
+    throw dsl_error("TypeError",
+                    "await: expected 1 or 2 arguments, got " + std::to_string(args.size()));
   require_sched(ctx, "await");
+  std::optional<double> timeout;
+  if (args.size() == 2) {
+    timeout = as_number(args[1], "await");
+    if (*timeout < 0)
+      throw dsl_error("ValueError", "await: the timeout must be non-negative");
+  }
   int pid = ctx->sched->current_pid();
+  // Only a process a scheduler is stepping can park at the call; a unit-test context with no
+  // step running falls back to its own pid and the placeholder park.
+  const bool stepping = pid >= 0;
   if (pid < 0)
     pid = ctx->pid;
-  // A FUTURE handle {"__future__": chan} → value-carrying park (the §13.8 proper await): suspend
-  // until the producer delivers, then resume with the resolved value threaded into the enclosing
-  // expression, exactly as (msg-recv) does — via the shared park_on_channel primitive.
+  process *proc = nullptr;
+  if (ctx->sched->current_process())
+    proc = ctx->sched->current_process().get();
+  else if (ctx->proc)
+    proc = ctx->proc.get();
+
+  if (is_async_future(args[0])) {
+    const std::shared_ptr<detail::awaitable> call = async_call_of_future(args[0]);
+    if (!call)
+      throw dsl_error("RuntimeError",
+                      "await: the call can't resume (its future was restored from a snapshot)",
+                      "async");
+    if (call->finished())
+      return call->outcome();
+    const std::string channel = *future_channel_of(args[0]);
+    if (stepping && can_await()) {
+      park_await(ctx, pid, channel, timeout,
+                 {channel, call->function_name(), detail::make_awaitable_handle(call)});
+      return nil_value;
+    }
+    // Nowhere to park (a generator's body, a native call's call): wait here, blocking the step.
+    if (!call->wait(timeout))
+      throw dsl_error("TimeoutError",
+                      call->function_name() + ": no result within the time it was given", "async",
+                      {{"function", value_t(call->function_name())}});
+    return call->outcome();
+  }
+
+  // A channel future {"__future__": chan} → a value-carrying park (the §13.8 proper await):
+  // suspend until the producer delivers, then resume with the resolved value threaded into the
+  // enclosing expression.
   if (const std::optional<std::string> fchan = future_channel_of(args[0])) {
-    process *proc = nullptr;
-    if (ctx->sched->current_process())
-      proc = ctx->sched->current_process().get();
-    else if (ctx->proc)
-      proc = ctx->proc.get();
+    if (stepping && can_await()) {
+      if (proc && !proc->inbox.empty()) {
+        value_t msg = std::move(proc->inbox.front());
+        proc->inbox.pop();
+        return msg;
+      }
+      if (std::optional<value_t> pending = ctx->sched->pop_pending_message(*fchan))
+        return std::move(*pending);
+      park_await(ctx, pid, *fchan, timeout, {*fchan, "await", nil_value});
+      return nil_value;
+    }
+    if (timeout)
+      throw dsl_error("RuntimeError", "await: can't wait with a timeout here");
     return park_on_channel(ctx->sched, proc, pid, *fchan);
   }
   // An already-settled value → the cooperative one-frame yield await has always been (a no-op on a
   // scheduler with no frames, where await is identity), then resume with the value unchanged.
   ctx->sched->yield_frame(pid);
   return args[0];
+}
+
+// (await-all (list f1 f2 ...)): wait for every async call's future in the list, then return their
+// values in order, or raise the first failure in list order once all have finished
+// (docs/STATE_EXEC_EXCEPTIONS.md 3.3). Anything else in the list is its own value.
+value_t intrinsic_await_all(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 1, "await-all");
+  require_sched(ctx, "await-all");
+  const list_ptr *lp = std::get_if<list_ptr>(&args[0].v);
+  if (!lp || !*lp)
+    throw dsl_error("TypeError",
+                    "await-all: expected a list of futures, got " + args[0].type_name());
+  const std::vector<value_t> &items = **lp;
+  const int pid = ctx->sched->current_pid();
+  for (const value_t &f : items) {
+    if (!is_async_future(f)) {
+      if (future_channel_of(f))
+        throw dsl_error("TypeError",
+                        "await-all: a channel future can't be waited for with others; await it");
+      continue;
+    }
+    const std::shared_ptr<detail::awaitable> call = async_call_of_future(f);
+    if (!call)
+      throw dsl_error("RuntimeError",
+                      "await-all: a call can't resume (its future was restored from a snapshot)",
+                      "async");
+    if (call->finished())
+      continue;
+    // The first one still running: wait for it, then look at the list again.
+    if (pid >= 0 && can_await()) {
+      const std::string channel = *future_channel_of(f);
+      park_await(ctx, pid, channel, std::nullopt,
+                 {channel, "await-all", detail::make_awaitable_handle(call), /*retry=*/true});
+      return nil_value;
+    }
+    call->wait(std::nullopt);
+  }
+  std::vector<value_t> values;
+  values.reserve(items.size());
+  for (const value_t &f : items) // outcome() raises the first failure in list order
+    values.push_back(is_async_future(f) ? async_call_of_future(f)->outcome() : f);
+  return make_list(std::move(values));
 }
 
 value_t intrinsic_ps(intrinsics_context *ctx, std::span<const value_t> args) {
@@ -534,6 +639,11 @@ static void append_budget_usage(std::vector<std::pair<std::string, value_t>> &en
   entries.emplace_back("read_time", value_t(info.read_time));
   entries.emplace_back("eval_time", value_t(info.eval_time));
   entries.emplace_back("data_time", value_t(info.data_time));
+  // What its async calls were charged (docs/STATE_EXEC_EXCEPTIONS.md 3.8).
+  entries.emplace_back("async_calls", value_t(static_cast<int64_t>(info.async_calls)));
+  entries.emplace_back("async_steps", value_t(static_cast<int64_t>(info.async_steps)));
+  entries.emplace_back("async_time", value_t(info.async_time));
+  entries.emplace_back("async_cpu_time", value_t(info.async_cpu_time));
 }
 
 value_t intrinsic_inspect(intrinsics_context *ctx, std::span<const value_t> args) {
@@ -631,7 +741,8 @@ value_t intrinsic_message_bytes_limit(intrinsics_context *ctx, std::span<const v
 }
 
 // What the current process's budget went on: steps, seconds and deep-data nodes by kind (read,
-// eval, data), plus the total steps -- the same fields inspect reports for any pid.
+// eval, data), what its async calls were charged, plus the total steps -- the same fields
+// inspect reports for any pid.
 value_t intrinsic_budget_usage(intrinsics_context *ctx, std::span<const value_t> args) {
   expect_exact(args, 0, "budget-usage");
   // The running process, as self-pid finds it: the scheduler's current one, else the context's.
@@ -642,6 +753,7 @@ value_t intrinsic_budget_usage(intrinsics_context *ctx, std::span<const value_t>
   } else if (ctx->proc) {
     info.step_count = ctx->proc->step_count();
     fill_budget_usage(info, ctx->proc->state.stats);
+    fill_async_usage(info, *ctx->proc);
   }
   std::vector<std::pair<std::string, value_t>> entries;
   entries.emplace_back("steps", value_t(static_cast<int64_t>(info.step_count)));
@@ -886,6 +998,9 @@ value_t intrinsic_msg_send(intrinsics_context *ctx, std::span<const value_t> arg
 value_t intrinsic_msg_recv(intrinsics_context *ctx, std::span<const value_t> args) {
   expect_exact(args, 1, "msg-recv");
   require_sched(ctx, "msg-recv");
+  // An async call's future delivers no message: receiving it is awaiting it.
+  if (is_async_future(args[0]))
+    return intrinsic_await(ctx, args);
   // Accept a future handle {"__future__": chan} (from an async producer like (http-get-async)) OR a
   // raw channel string. A future's channel is an already-resolved '#'-channel (policy-exempt); a
   // raw string goes through §12 policy + chroot-scoping as before.
@@ -955,6 +1070,7 @@ void register_intrinsics(environment_ptr env, intrinsics_context *ctx) {
   reg("resume", intrinsic_resume);
   reg("sleep", intrinsic_sleep);
   reg("await", intrinsic_await);
+  reg("await-all", intrinsic_await_all);
   reg("ps", intrinsic_ps);
   reg("inspect", intrinsic_inspect);
 
@@ -1019,7 +1135,9 @@ std::optional<std::string> future_channel_of(const value_t &v) {
   if (!dp || !*dp)
     return std::nullopt;
   const std::vector<std::pair<std::string, value_t>> &entries = **dp;
-  if (entries.size() != 1 || entries[0].first != "__future__")
+  // An async call's future (async_host.h) has its handle as a second entry.
+  if (entries.empty() || entries.size() > 2 || entries[0].first != "__future__" ||
+      (entries.size() == 2 && !is_async_future(v)))
     return std::nullopt;
   const std::string *chan = std::get_if<std::string>(&entries[0].second.v);
   if (!chan)

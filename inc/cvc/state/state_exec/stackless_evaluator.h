@@ -57,6 +57,9 @@ enum class eval_phase {
   try_handler,
   try_finally,
   raise_value, // (raise e): evaluate e then raise it
+  // A native call parked its process (docs/STATE_EXEC_EXCEPTIONS.md 3.9): the frame waits for
+  // its result to be delivered, then completes the call with it or raises at the call.
+  await_call,
 };
 
 /// A single evaluation frame on the explicit stack.
@@ -146,6 +149,91 @@ struct evaluator_state {
 /// Whether a frame of `st` waits on deep-data work: any work but a heap measurement, which waits
 /// on no frame. A process cannot fork while one does (the child could not finish the call).
 bool waits_on_data_work(const evaluator_state &st);
+
+// ---------------------------------------------------------------------------
+// Parking at a call (docs/STATE_EXEC_EXCEPTIONS.md 3.9)
+// ---------------------------------------------------------------------------
+//
+// A native function that waits for something (an async call's kernel, a future) parks its
+// process at the call: the scheduler makes the process wait on a channel, and the call's frame
+// stays on the stack in the await_call phase. The scheduler delivers to that frame
+// (deliver_await), or times it out (expire_await); the next step completes the call with what
+// was delivered, or raises at the call. A frame stepped without either (a process restored from
+// a snapshot while it waited) raises RuntimeError: its call can't resume.
+
+namespace detail {
+
+/// What an await_call frame waits for when it isn't a plain channel: an async call. A handle
+/// value (make_awaitable_handle) holds one.
+class awaitable {
+public:
+  virtual ~awaitable() = default;
+  /// The function's name, for errors.
+  virtual const std::string &function_name() const = 0;
+  /// Whether its outcome is known.
+  virtual bool finished() const = 0;
+  /// Block until it is finished or `seconds` pass (nullopt: no limit); whether it finished.
+  virtual bool wait(std::optional<double> seconds) = 0;
+  /// Its value, or throws the exception it raises at the call (a dsl_exception). Only once
+  /// finished().
+  virtual value_t outcome() = 0;
+};
+
+/// The data_object type of a handle to an awaitable. Its payload doesn't survive a snapshot.
+inline constexpr const char *kAwaitableType = "async_call";
+
+/// A value holding `a`, for an await_call frame or a future.
+value_t make_awaitable_handle(std::shared_ptr<awaitable> a);
+
+/// The awaitable a handle holds, or null (not a handle, or one decoded from a snapshot).
+std::shared_ptr<awaitable> awaitable_of(const value_t &handle);
+
+/// A native call's request to park its process at the call (request_await).
+struct await_request {
+  std::string channel;  ///< the channel the scheduler made the process wait on
+  std::string function; ///< the function's name, for errors
+  value_t handle;       ///< what it waits for (make_awaitable_handle), or nil for a channel
+  /// On delivery, apply the call again with the same arguments instead of completing it with
+  /// what was delivered: (await-all ...) waits for each future in turn this way.
+  bool retry = false;
+};
+
+} // namespace detail
+
+/// Whether the native call being applied now may park its process at the call: the stackless
+/// evaluator is applying it at its own level (not from inside another native call) in the
+/// outermost evaluator step on this thread (not in a generator's or a nested evaluator's).
+/// Whether a scheduler will deliver to the process is the native's to know.
+bool can_await();
+
+/// Park at the call: once the native call returns (what it returns is ignored), its frame
+/// waits in the await_call phase. The native has made its scheduler wait on `r.channel`.
+/// Throws std::logic_error when !can_await().
+void request_await(detail::await_request r);
+
+/// Whether parking is forbidden on this thread now (park_forbidden_scope): an async function
+/// called here raises RuntimeError naming it, instead of waiting or running its kernel inline.
+bool parking_forbidden();
+
+/// RAII: forbid parking on this thread while alive. Ariadne's reactive and render lane arms one.
+class park_forbidden_scope {
+public:
+  park_forbidden_scope();
+  ~park_forbidden_scope();
+  park_forbidden_scope(const park_forbidden_scope &) = delete;
+  park_forbidden_scope &operator=(const park_forbidden_scope &) = delete;
+
+private:
+  bool outer_;
+};
+
+/// For the schedulers: deliver `msg` to the await_call frame on top of `st`'s stack (an async
+/// call's frame ignores it and reads its call). False when the top frame doesn't wait.
+bool deliver_await(evaluator_state &st, value_t msg);
+
+/// For the schedulers: time out the await_call frame on top of `st`'s stack; its call raises
+/// TimeoutError. False when the top frame doesn't wait.
+bool expire_await(evaluator_state &st);
 
 /// Synchronous stackless evaluator (Tier 2 — local contexts only).
 ///
@@ -258,6 +346,7 @@ private:
   void step_try_done(evaluator_state &state, eval_frame &frame); // the body or a handler finished
   void step_try_finally(evaluator_state &state, eval_frame &frame);
   void step_raise_value(evaluator_state &state, eval_frame &frame);
+  void step_await_call(evaluator_state &state, eval_frame &frame);
 
   // Exceptions (docs/STATE_EXEC_EXCEPTIONS.md)
   // The step that raised `e` (the top frame's) failed: raise its exception from that frame.

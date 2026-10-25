@@ -1,6 +1,6 @@
 # state_exec: exceptions and long-running native calls
 
-Status: P0 specification (2026-10-18); P1 (#706) and P2 are implemented. The decisions below
+Status: P0 specification (2026-10-18); P1 (#706), P2 (#800) and P3 are implemented. The decisions below
 are the recommended defaults, agreed before this was written. Section 7 records how the five questions
 P0 left open were settled, and one decision added since: async calls are charged to the process
 (2026-10-19).
@@ -442,8 +442,13 @@ limits what that process can make the app do for it.
        default);
     2. `state_exec.schedulers.<id>.limits.async_steps_per_cpu_ms`;
     3. `state_exec.defaults.limits.async_steps_per_cpu_ms`;
-    4. the built-in default, 1000 (about one step per CPU microsecond). That is provisional:
-       P3 measures what a stackless step costs and sets the default from it.
+    4. the built-in default, 2000. P3 measured what a step costs and set it from that: about
+       0.4 to 0.45 CPU microseconds on the async scheduler (Ariadne's and `Exec`'s) and 0.26
+       to 0.3 on the sync one, on a loop of arithmetic, DSL function calls and list and dict
+       work (MSVC Release, x64; `StepCostSetsTheDefaultRate` in
+       `state_exec_async_calls_test`, which fails if the default drifts beyond a factor of
+       four of either). 2000 rounds the async scheduler's 2,200 to 2,500 steps per CPU
+       millisecond down. (The first draft's 1000 was provisional.)
   - The value is a non-negative decimal number; a fraction is allowed, `0.5` being a step every
     2 CPU ms. A node that isn't one falls through to the next level.
   - The scheduler publishes the effective value under its own subtree, as it does its other
@@ -547,6 +552,77 @@ That:
 process's root, which the program reads with `msg-recv` or a resident watches. Nothing waits on
 it; a full queue drops progress values first.
 
+### 3.11 As built in P3
+
+The tests are `src/cvc/tests/state_exec_async_calls_test.cpp` (AS-1..33 in both evaluators and
+on both schedulers where they apply), `bindings/pycvc/test_pycvc_state_exec_async.py` (the same
+from Python, with AS-4, AS-16 and AS-32), and `AriadneAsyncFn` in `ariadne_runtime_test.cpp`
+(AS-17 through a document).
+
+**The names (3.2).**
+- `cvc/state/state_exec/async_call.h`: `async_kernel`, `async_marshal`, `async_call` (for kernels:
+  `cancelled()`, `post(value)`, `add_wait(seconds)`), `executor` (`background()`,
+  `on_lane(name)`, `inline_call()`), `async_options` (`where`, `priority`, `timeout`,
+  `future_variant`).
+- `cvc/state/state_exec/async_host.h`: `async_host` (`async_host(scheduler_base *)` runs kernels
+  inline; `async_host(async_scheduler &, app *)` parks; `add_lane`, `shutdown`, `wait_idle`,
+  `in_flight`; `begin_external`/`finish` for a call whose outcome the host supplies),
+  `register_async_fn(env, host, name, marshal, opts)`, `make_async_future`.
+- `app::exec_async_host()` is the app's host for `exec_scheduler()`; `~app` shuts it down first.
+- pycvc: `pycvc.async_host()` (inline, no scheduler), `pycvc.async_host(scheduler)`,
+  `pycvc.async_host(async_scheduler, app)`, `Exec.async_host()`, and
+  `pycvc.builtins.register_async_fn(env, host, name, fn, executor="background", timeout=None,
+  future_variant=True)`. pycvc takes no keyword arguments, so these are positional. `executor` is
+  `"background"` (`"compute"`, the sketch's name, means the same), `"inline"` or
+  `"lane:<name>"`.
+
+**Calling (3.3, 3.9).**
+- A native the stackless evaluator applies at its own level, in the outermost evaluator step on
+  the thread, may park (`can_await()`, `request_await()`); its frame takes the `await_call`
+  phase. Elsewhere (a generator's body, a native function's own call, the recursive evaluator, a
+  host with no parking scheduler) the kernel runs inline. A job's call of an async function parks
+  too: its frame goes on top, as a DSL function the job called would.
+- A future of an async call is `{"__future__": channel, "__async_call__": handle}`. `await` reads
+  the call directly, so a future can be awaited more than once, and a completion is never queued
+  as a message. `(msg-recv f)` on such a future awaits it. `await-all` takes these futures and
+  plain values; a channel future is awaited on its own. `await` on a channel future (a lane's,
+  `future_pool_task`'s) parks in the `await_call` phase too, so it takes a timeout.
+- The arguments are copied before the marshal step runs (`make_copy_job`), as deep-data work.
+
+**Charging (3.8).**
+- While a kernel runs, the run time since it last recorded its CPU time (`cancelled()`) counts as
+  CPU time, so a kernel that never checks is stopped by its run time; its true CPU time replaces
+  the estimate when it ends. Steps come from recorded CPU time only.
+- An inline call's run time is inside its step's slice of `accumulated_time`; its CPU time and
+  steps are charged as the call's, and the step's own (capped) CPU charge and time by kind leave
+  them out. A call that runs out of the budget drops its outcome, and the scheduler kills the
+  process when the step is over.
+- `async_scheduler::drain_ingress()` takes completions, charges the calls still running, applies
+  registration timeouts, kills at the limits, and wakes due sleepers and timed waits, so a driver
+  that only drains while nothing is runnable (pycvc's `Exec`) keeps budgets and timeouts current.
+- The effective rate is published at `state_exec.schedulers.<id>.effective.async_steps_per_cpu_ms`,
+  not at the scheduler's `limits.` key: that one is an input with precedence over the defaults,
+  so writing the effective value there would pin it and break the live reading. The async
+  scheduler gains `set_id()` for this.
+- `process_info` also gains `heap_alloc_bytes` (what natives and kernels reported allocating
+  since the last heap measurement), and `(inspect pid)` and `(budget-usage)` add the four
+  `async_*` counters.
+- A Python kernel has no handle to the call, so it can't check `cancelled()` or `post()`; its run
+  time stops it, as for any kernel that doesn't check. A coroutine (`register_async_coro`) is an
+  external call: its run time isn't charged, only its one step.
+- The Windows thread CPU clock calibrates the time-stamp counter's rate against the performance
+  counter once, over 5 ms, where the processor reports an invariant TSC.
+
+**Snapshots.** `encode_process`/`decode_process` (the codec) snapshot a process with its budget
+so far; `snapshot(pid, node)` and `restore(node, natives)` on both schedulers wrap them, and
+`rebind_natives` binds the native functions again (natives aren't serialized). A handle to an
+async call decodes empty, so a restored call or future raises `RuntimeError`.
+
+**Ariadne.** `http-get`, `http-request` and `fetch` (with their `-async` forms) are async functions
+on `app::exec_async_host()`. A failed send is still a reply with `ok` `#f`, as they document. The
+reactive lane arms `park_forbidden_scope`. `launch_pool_task` and the lane helpers stay for the
+hosts that use them.
+
 ## 4. Phases
 
 | Phase | Content | Done when |
@@ -554,7 +630,7 @@ it; a full queue drops progress values first.
 | P0 | This spec and the test list (section 6) | merged |
 | P1 | The forms (`raise`, `error`, `try`/`catch`/`finally`, `isinstance`), `__name__` on classes, the built-in classes, the evaluator's and builtins' errors thrown with their class, C++ exception mapping, `cause`/`origin`/`traceback`, all of 2.4 in the stackless evaluator, the same in the recursive evaluator, codec support | EX and UN cases pass in both evaluators |
 | P2 | Leaving the program: `failed`, `exit_exception`, `dsl_exception`, both schedulers, Ariadne reporting; `PythonError` from registered Python functions, pycvc `dsl_error` and `dsl_class`, the round trip | CX and PY cases pass |
-| P3 | Async: `async_host`, `register_async_fn` (C++ and pycvc), the `await_call` frame, futures with timeouts and `await-all`, errors as exceptions, executors (the background pool with priorities, lanes, inline), cancellation, progress, charging calls to the process's budgets (3.8), `Exec` and Ariadne moved onto it | AS cases pass |
+| P3 | Async: `async_host`, `register_async_fn` (C++ and pycvc), the `await_call` frame, futures with timeouts and `await-all`, errors as exceptions, executors (the background pool with priorities, lanes, inline), cancellation, progress, charging calls to the process's budgets (3.8), `Exec` and Ariadne moved onto it | AS cases pass (done: 3.11) |
 | P4 | pycvc parity for the new API, `docs/STATE_EXEC_DEVELOPER_GUIDE.md` and `ARIADNE.md` | the parity doc lists every new item |
 
 ## 5. Compatibility
@@ -690,7 +766,7 @@ them into gtest and pytest cases with these IDs.
 | AS-15 | a snapshot of a process parked in a call, restored | raises `RuntimeError` at the call (the call can't resume) |
 | AS-16 | `Exec.register_async_fn` raising | raises at the call site, no `__async_error__` dict (the compatibility change) |
 | AS-17 | an async function called from Ariadne's reactive lane | not reachable (action seam only); if called, `RuntimeError` |
-| AS-18 | a 200 ms CPU-bound kernel | `async_calls` 1, `async_time` and `async_cpu_time` about 0.2 s, `async_steps` about 200,000 at the default rate; `elapsed_time` includes the 0.2 s |
+| AS-18 | a 200 ms CPU-bound kernel | `async_calls` 1, `async_time` and `async_cpu_time` about 0.2 s, `async_steps` about 400,000 at the default rate; `elapsed_time` includes the 0.2 s |
 | AS-19 | `max_time` 0.1 s, a 1 s CPU-bound kernel that checks `cancelled()`, the call inside a `try` | `killed`, `time_limit_exceeded`, well before 1 s; the catch didn't run; the kernel sees `cancelled()` |
 | AS-20 | `max_steps` 1000, a 50 ms CPU-bound kernel | `killed`, `max_steps_exceeded`; with `limits.async_steps_per_cpu_ms` 0, it finishes |
 | AS-21 | a kernel that sleeps 200 ms (blocking, almost no CPU) | `async_time` about 0.2 s, charged to `max_time`; `async_cpu_time` near 0; a step or a few |
@@ -699,7 +775,7 @@ them into gtest and pytest cases with these IDs.
 | AS-24 | two futures in flight from one process, 100 ms each | `async_time` about 0.2 s, though about 0.1 s passed |
 | AS-25 | a kernel that never checks `cancelled()`, past `max_time` | the process is killed when its run time reaches the limit; the late result is dropped |
 | AS-26 | the AS-18 kernel inline (sync scheduler) | the same charges as AS-18, not the step's capped charge |
-| AS-27 | two 50 ms kernels in a row; between them `state_exec.defaults.limits.async_steps_per_cpu_ms` is set to `0`, with no `load_settings()` | the first call is charged about 50,000 steps and the second one |
+| AS-27 | two 50 ms kernels in a row; between them `state_exec.defaults.limits.async_steps_per_cpu_ms` is set to `0`, with no `load_settings()` | the first call is charged about 100,000 steps and the second one |
 | AS-28 | the rate set to 10 in `state_exec.defaults.limits` and to 100 in `state_exec.schedulers.<id>.limits` | a 50 ms kernel is charged about 5,000 steps (the scheduler's node wins); with `execute_options::async_steps_per_cpu_ms` 1, about 50 |
 | AS-29 | AS-21's sleeping kernel, on Windows | `async_cpu_time` near 0 and a step or a few, as on Linux and macOS (the thread CPU clock) |
 | AS-30 | `max_memory` 1 MiB, a kernel that reports allocating 4 MiB through `eval_alloc_check`, the call inside a `try` | `MemoryError` at the call site, caught; `heap_alloc_bytes` grew by what the kernel reported before the refusal |

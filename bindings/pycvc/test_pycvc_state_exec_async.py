@@ -1,0 +1,441 @@
+"""Long-running native calls from Python (docs/STATE_EXEC_EXCEPTIONS.md section 3, the AS cases of
+section 6.6).
+
+pycvc.builtins.register_async_fn(env, host, name, fn, ...) makes a Python callable an async
+function: the calling process parks while fn runs on the host's executor, then resumes with its
+value or raises its exception at the call. Exec.register_async_fn is built on it, with
+Exec.async_host(). A call is charged to the process that made it: its run time, its CPU time and
+steps at limits.async_steps_per_cpu_ms. The C++ cases are src/cvc/tests/state_exec_async_calls_test.cpp;
+these repeat them from Python, with Python kernels, and add the Python-only ones (AS-4, AS-16,
+AS-32).
+"""
+
+import threading
+import time
+
+import pycvc
+from pycvc import process_status
+
+
+def _raises(exc, fn, *args):
+    try:
+        fn(*args)
+    except exc as e:
+        return e
+    raise AssertionError(f"{fn.__name__}{args!r} did not raise {exc.__name__}")
+
+
+def _busy(seconds):
+    """Use about `seconds` of this thread's CPU time (thread_time is per thread). Pure Python, so
+    it lets the GIL go every switch interval."""
+    end = time.thread_time() + seconds
+    n = 0
+    while time.thread_time() < end:
+        n += 1
+    return n
+
+
+def _per_item():
+    n = 1_000_000
+    start = time.perf_counter()
+    sum(range(n))
+    return max((time.perf_counter() - start) / n, 1e-10)
+
+
+_PER_ITEM = _per_item()
+
+
+def _hold_gil(seconds):
+    """Run flat out for about `seconds` in one C call, which keeps the GIL all along. (On Windows
+    thread_time() advances at the scheduler tick and misses a thread that runs in short bursts,
+    so a CPU-time check uses this instead of _busy.)"""
+    sum(range(int(seconds / _PER_ITEM)))
+    return 0
+
+
+class World:
+    """A scheduler, an async host and an environment with intrinsics, driven by hand.
+
+    kind "async": an async_scheduler whose kernels run on the app's background pool;
+    kind "sync": the synchronous scheduler, whose kernels run inline in the calling step.
+    """
+
+    def __init__(self, kind="async", **register):
+        self.app = pycvc.make_app()
+        self.root = pycvc.State.instance(self.app)
+        self.kind = kind
+        if kind == "async":
+            self.sched = pycvc.async_scheduler()
+            self.host = pycvc.async_host(self.sched, self.app)
+        else:
+            self.sched = pycvc.scheduler()
+            self.host = pycvc.async_host(self.sched)
+        self.sched.set_watch_root(self.root)
+        self.ctx = pycvc.intrinsics_context()
+        self.ctx.sched = self.sched
+        self.ctx.root = self.root
+        self.env = pycvc.builtins.make_default_environment()
+        pycvc.register_intrinsics(self.env, self.ctx)
+        self.register = register
+
+    def fn(self, name, kernel, timeout=None):
+        pycvc.builtins.register_async_fn(self.env, self.host, name, kernel, "background", timeout)
+
+    def submit(self, script, **limits):
+        o = pycvc.execute_options()
+        o.env = self.env
+        for k, v in limits.items():
+            setattr(o, k, v)
+        return self.sched.execute(script, o)
+
+    def pump(self, done, seconds=15.0):
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            if self.kind == "async":
+                self.sched.drain_ingress()
+                self.sched.sync_run(100000, 0.02)
+            else:
+                self.sched.run(100000, 0.02)
+            if done():
+                return True
+            time.sleep(0.001)
+        return done()
+
+    def info(self, pid):
+        return self.sched.get_process_info(pid)
+
+    def finished(self, pid):
+        return self.info(pid).status in (
+            process_status.terminated, process_status.killed, process_status.failed)
+
+    def run(self, script, **limits):
+        pid = self.submit(script, **limits)
+        assert self.pump(lambda: self.finished(pid)), f"process {pid} didn't end"
+        return pid
+
+    def result(self, pid):
+        return self.sched.get_result(pid)
+
+    def close(self):
+        self.host.shutdown()
+
+
+def _slow(x, ms=50):
+    time.sleep(ms / 1000.0)
+    return 2 * x
+
+
+# ── calling (AS-1, 2, 5, 12, 14) ─────────────────────────────────────────────
+
+
+def test_other_processes_step_while_one_is_parked():
+    # AS-1, AS-2
+    w = World()
+    w.fn("slow-op", _slow)
+    a = w.submit("(slow-op 2)")  # the whole program parks
+    b = w.submit("(slow-op 3)")
+    c = w.submit("(begin (set i 0) (while (< i 2000) (set i (+ i 1))) i)")
+    assert w.pump(lambda: all(w.finished(p) for p in (a, b, c)))
+    assert (w.result(a), w.result(b), w.result(c)) == (4, 6, 2000)
+    w.close()
+
+
+def test_await_a_future():
+    # AS-5, on both schedulers
+    for kind in ("async", "sync"):
+        w = World(kind)
+        w.fn("slow-op", _slow)
+        pid = w.run("(begin (set f (slow-op-async 5)) (list (await f) (await f)))")
+        assert w.result(pid) == [10, 10], kind
+        w.close()
+
+
+def test_inline_on_a_bare_evaluator_and_the_sync_scheduler():
+    # AS-12: no executor; the same value and exceptions.
+    host = pycvc.async_host()
+    env = pycvc.builtins.make_default_environment()
+    pycvc.builtins.register_async_fn(env, host, "slow-op", _slow)
+    pycvc.builtins.register_async_fn(env, host, "boom", lambda: 1 // 0)
+    for ev in (pycvc.stackless_evaluator(env), pycvc.evaluator(env)):
+        assert ev.evaluate_script("(+ 1 (slow-op 2 5))") == 5
+        got = ev.evaluate_script(
+            '(try (boom) (catch (PythonError e) (list (get-attr e "python_type") '
+            '(get-attr e "origin"))))')
+        assert got == ["ZeroDivisionError", "async"]
+    w = World("sync")
+    w.fn("slow-op", _slow)
+    assert w.result(w.run("(slow-op 4)")) == 8
+
+
+def test_the_kernel_gets_a_copy_of_a_list_argument():
+    # AS-14
+    w = World()
+    w.fn("sum-later", lambda xs: (time.sleep(0.05), sum(xs))[1])
+    pid = w.run("(begin (set l (list 1 2 3)) (set f (sum-later-async l)) (append l 4) (await f))")
+    assert w.result(pid) == 6
+    w.close()
+
+
+# ── errors (AS-3, 4, 6, 7, 8, 16) ────────────────────────────────────────────
+
+
+class KernelError(Exception):
+    pass
+
+
+def test_a_python_kernels_exception_raises_at_the_call():
+    # AS-3, AS-4: a PythonError, origin "async", function and python_type set.
+    w = World()
+
+    def boom():
+        raise KernelError("kernel failed")
+
+    w.fn("boom", boom)
+    pid = w.run('(try (boom) (catch (PythonError e) (list (get-attr e "origin") (get-attr e '
+                '"function") (get-attr e "python_type"))))')
+    assert w.result(pid) == ["async", "boom", f"{__name__}.KernelError"]
+    w.close()
+
+
+def test_exec_register_async_fn_raises_at_the_call():
+    # AS-16: no {"__async_error__": ...} dict.
+    ex = pycvc.Exec(pycvc.make_app())
+
+    def boom(x):
+        raise KernelError(f"bad {x}")
+
+    ex.register_async_fn("boom", boom)
+    assert ex.run('(try (boom 1) (catch (PythonError e) (get-attr e "message")))').endswith(
+        "bad 1")
+    e = _raises(KernelError, ex.run, "(boom 2)")  # the whole program; the original re-raised
+    assert isinstance(e.__cause__, pycvc.dsl_error)
+    assert e.__cause__.dsl_class == "PythonError"
+    assert e.__cause__.origin == "async"
+    # Its host is the one pycvc.builtins.register_async_fn takes.
+    assert ex.async_host().in_flight() == 0
+
+
+def test_await_times_out_and_the_future_still_finishes():
+    # AS-6
+    w = World()
+    w.fn("slow-op", _slow)
+    pid = w.run('(begin (set f (slow-op-async 2 200)) (set r (try (await f 0.01) (catch '
+                '(TimeoutError e) "timeout"))) (list r (await f)))')
+    assert w.result(pid) == ["timeout", 4]
+    w.close()
+
+
+def test_await_all_raises_the_first_failure_once_all_finish():
+    # AS-7, on both schedulers
+    for kind in ("async", "sync"):
+        w = World(kind)
+        done = {}
+
+        def a():
+            time.sleep(0.1)
+            done["a"] = True
+            return 1
+
+        def b():
+            raise ValueError("b failed")
+
+        w.fn("a", a)
+        w.fn("b", b)
+        pycvc.builtins.register_fn(w.env, "a-done", lambda: done.get("a", False))
+        pid = w.run('(try (await-all (list (a-async) (b-async))) (catch (PythonError e) (list '
+                    '(get-attr e "python_type") (a-done))))')
+        assert w.result(pid) == ["ValueError", True], kind
+        w.close()
+
+
+def test_a_registration_timeout_raises_timeout_error():
+    # AS-8: the kernel sees cancelled() only from C++; a Python kernel's call still times out.
+    w = World()
+    w.fn("slow-op", _slow, timeout=0.05)
+    start = time.monotonic()
+    pid = w.run('(try (slow-op 1 400) (catch (TimeoutError e) (get-attr e "function")))')
+    assert w.result(pid) == "slow-op"
+    assert time.monotonic() - start < 0.35
+    w.close()
+
+
+# ── cancellation, progress, snapshots (AS-9, 10, 13, 15) ─────────────────────
+
+
+def test_killing_a_parked_process_drops_its_call():
+    # AS-9, AS-10
+    w = World()
+    started = threading.Event()
+
+    def slow():
+        started.set()
+        time.sleep(0.2)
+        return 1
+
+    w.fn("slow", slow)
+    pid = w.submit("(slow)")
+    assert w.pump(lambda: started.is_set())
+    assert w.sched.async_calls_in_flight() == 1
+    assert w.sched.kill(pid)
+    assert w.sched.async_calls_in_flight() == 0
+    w.host.wait_idle()  # releases the GIL, so the kernel can finish
+    w.sched.drain_ingress()  # its late result is dropped
+    assert w.info(pid).status == process_status.killed
+    w.close()
+
+
+def test_a_restored_call_cant_resume():
+    # AS-15
+    w = World()
+    w.fn("slow-op", _slow)
+    pid = w.submit('(try (slow-op 2 300) (catch (RuntimeError e) "lost"))')
+    assert w.pump(lambda: w.info(pid).status == process_status.waiting)
+    node = w.root.child("__as15__")
+    assert w.sched.snapshot(pid, node)
+    restored = w.sched.restore(node, w.env)
+    assert w.pump(lambda: w.finished(restored) and w.finished(pid))
+    assert w.result(restored) == "lost"
+    assert w.result(pid) == 4
+    w.close()
+
+
+# ── budgets (AS-18..33) ──────────────────────────────────────────────────────
+
+
+def test_a_cpu_bound_calls_charges():
+    # AS-18 (and AS-26, inline on the sync scheduler): run time, CPU time, steps.
+    for kind in ("async", "sync"):
+        w = World(kind)
+        w.fn("busy", lambda: _hold_gil(0.2))
+        i = w.info(w.run("(busy)"))
+        assert i.async_calls == 1, kind
+        assert 0.15 <= i.async_cpu_time < 0.6, (kind, i.async_cpu_time)
+        assert i.async_time >= i.async_cpu_time - 0.02, kind
+        assert 300000 <= i.async_steps < 1200000, (kind, i.async_steps)  # at 2000 per CPU ms
+        assert i.step_count >= i.async_steps
+        assert i.elapsed_time >= i.async_time - 1e-3
+        w.close()
+
+
+def test_running_out_of_time_in_a_call_kills():
+    # AS-19, AS-25: a Python kernel can't check cancelled(); its run time stops the process.
+    w = World()
+    w.fn("long", lambda: (time.sleep(0.6), 1)[1])
+    start = time.monotonic()
+    pid = w.run('(try (long) (catch (e) "caught"))', max_time=0.1)
+    assert time.monotonic() - start < 0.5
+    i = w.info(pid)
+    assert i.status == process_status.killed
+    assert i.exit_error == "time_limit_exceeded"
+    w.close()
+
+
+def test_a_calls_steps_count_against_max_steps():
+    # AS-20
+    w = World()
+    w.fn("busy", lambda: _busy(0.05) and 0)
+    pid = w.run("(busy)", max_steps=1000)
+    assert w.info(pid).exit_error == "max_steps_exceeded"
+    w.root.child("state_exec.defaults.limits.async_steps_per_cpu_ms").value("0")
+    pid = w.run("(busy)", max_steps=1000)
+    assert w.info(pid).status == process_status.terminated
+    assert w.info(pid).async_steps == 1
+    w.close()
+
+
+def test_a_sleeping_call_is_charged_its_run_time_but_no_cpu():
+    # AS-21, AS-29 (on Windows, the thread CPU clock reads CPU time, not wall time)
+    w = World()
+    w.fn("slow-op", _slow)
+    i = w.info(w.run("(slow-op 1 200)"))
+    assert i.async_time >= 0.19
+    assert i.async_cpu_time < 0.05
+    assert 1 <= i.async_steps < 100000
+    w.close()
+
+
+def test_futures_in_flight_are_each_charged():
+    # AS-24
+    w = World()
+    w.fn("slow-op", _slow)
+    start = time.monotonic()
+    pid = w.run("(begin (set a (slow-op-async 1 100)) (set b (slow-op-async 1 100)) "
+                "(+ (await a) (await b)))")
+    wall = time.monotonic() - start
+    i = w.info(pid)
+    assert w.result(pid) == 4 and i.async_calls == 2
+    assert i.async_time >= 0.19
+    assert wall < i.async_time + 0.05
+    w.close()
+
+
+def test_the_step_rate_is_live_and_set_by_precedence():
+    # AS-27, AS-28
+    w = World()
+    w.sched.set_id("t")
+    w.fn("busy", lambda: _busy(0.05) and 0)
+    w.root.child("state_exec.defaults.limits.async_steps_per_cpu_ms").value("10")
+    w.root.child("state_exec.schedulers.t.limits.async_steps_per_cpu_ms").value("100")
+    i = w.info(w.run("(busy)"))
+    assert 4000 <= i.async_steps < 15000, i.async_steps
+    assert w.root.child("state_exec.schedulers.t.effective.async_steps_per_cpu_ms").value() == "100"
+    i = w.info(w.run("(busy)", async_steps_per_cpu_ms=1.0))
+    assert 40 <= i.async_steps < 150, i.async_steps
+    w.close()
+
+
+def test_a_python_kernels_wait_for_the_gil_isnt_charged():
+    # AS-32: one process's kernel holds the GIL for 200 ms; another's, started with it, waits that
+    # long to take the GIL, then runs 50 ms. Its run time is the 50 ms. (Which kernel thread takes
+    # the GIL first is the OS's call: a scenario where the second one won is tried again.)
+    for _ in range(10):
+        w = World()
+        holding = threading.Event()
+
+        def hold():
+            holding.set()
+            return _hold_gil(0.2)
+
+        def work():
+            if not holding.is_set():
+                return -1  # it took the GIL first: there was no wait to leave out
+            _hold_gil(0.05)
+            return 1
+
+        w.fn("hold", hold)
+        w.fn("work", work)
+        a = w.submit("(hold)")
+        b = w.submit("(work)")  # both calls start in the first slice, a's first
+        start = time.monotonic()
+        assert w.pump(lambda: w.finished(a) and w.finished(b))
+        wall = time.monotonic() - start
+        got, i = w.result(b), w.info(b)
+        w.close()
+        if got == -1:
+            continue
+        assert got == 1
+        assert wall >= 0.2
+        assert i.async_time < 0.15, i.async_time  # its 50 ms, not its 200 ms wait for the GIL
+        return
+    raise AssertionError("the waiting kernel never lost the race for the GIL")
+
+
+def test_the_counters_survive_a_snapshot():
+    # AS-33
+    w = World()
+    w.fn("slow-op", _slow)
+    pid = w.submit('(begin (slow-op 1 100) (msg-recv "never"))')
+    assert w.pump(lambda: w.info(pid).async_calls == 1 and w.sched.async_calls_in_flight() == 0
+                  and w.info(pid).status == process_status.waiting)
+    node = w.root.child("__as33__")
+    assert w.sched.snapshot(pid, node)
+    restored = w.sched.restore(node, w.env)
+    before, after = w.info(pid), w.info(restored)
+    for f in ("async_calls", "async_time", "async_cpu_time", "async_steps", "step_count"):
+        assert getattr(after, f) == getattr(before, f), f
+    w.close()
+
+
+def test_the_new_enum_values():
+    assert int(pycvc.step_kind["async"]) == 3
+    assert int(pycvc.eval_phase["await_call"]) == int(pycvc.eval_phase["raise_value"]) + 1

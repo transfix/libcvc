@@ -111,6 +111,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/state/state_exec/memory_tracker.h
   ../../inc/cvc/state/state_exec/scheduler_base.h
   ../../inc/cvc/state/state_exec/scheduler.h
+  ../../inc/cvc/state/state_exec/async_call.h
+  ../../inc/cvc/state/state_exec/async_host.h
   ../../inc/cvc/state/state_exec/async_scheduler.h
   ../../inc/cvc/state/state_exec/intrinsics.h
   ../../inc/cvc/state/state_exec/resource_policy.h
@@ -251,6 +253,7 @@ set(SOURCE_FILES
   state/state_exec/process.cpp
   state/state_exec/memory_tracker.cpp
   state/state_exec/scheduler.cpp
+  state/state_exec/async_host.cpp
   state/state_exec/async_scheduler.cpp
   state/state_exec/intrinsics.cpp
   state/state_exec/resource_policy.cpp
