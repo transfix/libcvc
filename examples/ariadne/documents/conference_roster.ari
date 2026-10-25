@@ -97,17 +97,18 @@ windows:
       # Camera/mic on-off: stream-set-muted blanks the producer at the source (black video / silence)
       # WITHOUT dropping the publish, so peers stay subscribed. The host then sends nothing (silence
       # and a camera that is off cost no bandwidth) and publishes video.off, so peers show "camera
-      # off" instead of the last frame they got.
+      # off" instead of the last frame they got. Plain "on": the browser build's font is ASCII, so a
+      # "●" there draws as "?".
       - type: button
         label: "camera on/off"
         on: (begin (state-set "cam_on" (if (= (state-get "cam_on") "1") "0" "1")) (stream-set-muted (state-get "cam_token") (= (state-get "cam_on") "0")))
       - text: "camera"
-        bind: (if (= (state-get "cam_on") "1") "● on" "muted")
+        bind: (if (= (state-get "cam_on") "1") "on" "muted")
       - type: button
         label: "mic on/off"
         on: (begin (state-set "mic_on" (if (= (state-get "mic_on") "1") "0" "1")) (stream-set-muted (state-get "mic_token") (= (state-get "mic_on") "0")))
       - text: "mic"
-        bind: (if (= (state-get "mic_on") "1") "● on" "muted")
+        bind: (if (= (state-get "mic_on") "1") "on" "muted")
       # The size the relay sends you everyone's camera at: it steps down when your link cannot
       # keep up (more ping from queueing, frames dropped) and back up once it can.
       - text: ""
@@ -296,7 +297,7 @@ on_tick: |
               (set taken #t)
               #f))
         (if taken
-            (state-set "name_error" (str-concat "name '" want "' is taken — pick another"))
+            (state-set "name_error" (str-concat "name '" want "' is taken; pick another"))
             (begin
               (state-set "name_error" "")
               (room-join "" (state-get "conf.room") (dict "name" want))
