@@ -409,11 +409,12 @@ await_slot::await_slot()
 await_slot::~await_slot() { t_await = outer; }
 
 // An await_call frame keeps
-//   extra_strs  = {the channel its process waits on, the function's name, "retry" or ""},
+//   extra_strs  = {the channel its process waits on, the function's name, "retry" or "",
+//                  the retried call's slot or ""},
 //   extra_vals  = {the handle of what it waits for (nil: a channel)},
 //   extra_lists = {the call's arguments},
 // and index 0 while it waits, 1 once delivered to (results = {what was}), 2 once timed out.
-enum await_slot_index : std::size_t { await_channel, await_function, await_retry };
+enum await_slot_index : std::size_t { await_channel, await_function, await_retry, await_item };
 
 void begin_await(eval_frame &frame, detail::await_request r) {
   frame.phase = eval_phase::await_call;
@@ -422,8 +423,13 @@ void begin_await(eval_frame &frame, detail::await_request r) {
   frame.results.clear();
   frame.extra_vals.assign(1, std::move(r.handle));
   frame.extra_strs = {std::move(r.channel), std::move(r.function),
-                      r.retry ? std::string("retry") : std::string()};
+                      r.retry ? std::string("retry") : std::string(),
+                      r.slot ? std::to_string(*r.slot) : std::string()};
   frame.extra_env = nullptr;
+  if (r.ready) {
+    frame.results.assign(1, std::move(*r.ready));
+    frame.index = 1;
+  }
 }
 
 // A native call a job made (or the value a job's work feeds to another job) parked: its
@@ -481,6 +487,15 @@ value_t detail::make_awaitable_handle(std::shared_ptr<awaitable> a) {
   obj->type_name = kAwaitableType;
   obj->payload = std::move(a);
   return value_t(std::move(obj));
+}
+
+value_t detail::awaited_value(value_t v) { return make_dict({{"__awaited__", std::move(v)}}); }
+
+const value_t *detail::awaited_of(const value_t &v) {
+  const auto *d = std::get_if<dict_ptr>(&v.v);
+  if (!d || !*d || (*d)->size() != 1 || (*d)->front().first != "__awaited__")
+    return nullptr;
+  return &(*d)->front().second;
 }
 
 std::shared_ptr<detail::awaitable> detail::awaitable_of(const value_t &handle) {
@@ -618,6 +633,7 @@ void stackless_evaluator::begin_expansion(evaluator_state &state, value_t expans
 }
 
 bool stackless_evaluator::step(evaluator_state &state) {
+  detail::check_not_in_async_kernel("stackless_evaluator::step");
   check_interrupted();
   const step_depth_guard depth;
   if (state.uncaught)
@@ -1531,13 +1547,30 @@ void stackless_evaluator::step_await_call(evaluator_state &state, eval_frame &fr
   if (frame.index == 2)
     throw dsl_error("TimeoutError", function + ": no result within the time it was given", "async",
                     fields);
-  if (frame.index == 0 && !(awaited && awaited->finished()))
+  const bool on_channel = frame.extra_vals[0].is_nil();
+  if (frame.index == 0 && !on_channel && !(awaited && awaited->finished()))
     // Stepped while it waits: a process restored from a snapshot, whose call is gone.
     throw dsl_error("RuntimeError",
                     function + ": the call can't resume (the process was restored from a snapshot "
                                "while it waited)",
                     "async", fields);
-  if (frame.extra_strs[await_retry] == "retry") {
+  // Stepped while it waits on a channel (restored from a snapshot): apply the call again, and it
+  // waits again.
+  const bool again = frame.index == 0 && on_channel;
+  if (again || frame.extra_strs[await_retry] == "retry") {
+    if (frame.index == 1 && frame.extra_strs.size() > await_item &&
+        !frame.extra_strs[await_item].empty()) {
+      // What was delivered takes its item's place in the call's list, as itself.
+      std::vector<value_t> &args = frame.extra_lists[0];
+      const std::size_t item = std::stoul(frame.extra_strs[await_item]);
+      const list_ptr *lp = args.empty() ? nullptr : std::get_if<list_ptr>(&args[0].v);
+      if (!lp || !*lp || item >= (*lp)->size())
+        throw std::logic_error(function + ": the retried call's list has no item " +
+                               frame.extra_strs[await_item]);
+      std::vector<value_t> items = **lp;
+      items[item] = detail::awaited_value(std::move(frame.results[0]));
+      args[0] = make_list(std::move(items));
+    }
     // Apply the call again, with the same arguments.
     frame.phase = eval_phase::apply;
     frame.index = 0;

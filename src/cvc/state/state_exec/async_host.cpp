@@ -78,9 +78,12 @@ void async_call::post(const value_t &progress) {
     async_sched_->post_message(progress_channel_, progress);
     return;
   }
-  // Inline: the kernel runs in its process's step, on the scheduler's thread.
-  if (sched_ && std::this_thread::get_id() == kernel_thread_)
+  // Inline: the kernel runs in its process's step, on the scheduler's thread, and the delivery is
+  // the host's, not the kernel's.
+  if (sched_ && std::this_thread::get_id() == kernel_thread_) {
+    const detail::async_kernel_scope host(false);
     sched_->deliver_to_receivers(progress_channel_, progress);
+  }
 }
 
 void async_call::add_wait(double seconds) {
@@ -193,6 +196,7 @@ double async_call::unmetered_seconds(clock::time_point now) const {
 void async_call::chunk_context::run_chunks(const std::function<void()> &chunks) noexcept {
   const double cpu0 = thread_cpu_seconds();
   {
+    const detail::async_kernel_scope kernel(true);
     // The process's allocation limit holds in the kernel's chunks too (3.8).
     eval_alloc_guard guard(call->alloc_limit_);
     chunks();
@@ -440,6 +444,7 @@ value_t async_host::run_inline(const std::shared_ptr<async_call> &call, const as
     // The kernel runs under the step's allocation guard (its reports count as the step's); its
     // fan-out chunks under the call's.
     cvc::fanout_context_scope fanout(&call->chunks_);
+    const detail::async_kernel_scope in_kernel(true);
     try {
       value = kernel(*call);
     } catch (...) {
@@ -488,6 +493,7 @@ void async_host::run_kernel(std::shared_ptr<async_call> call, std::shared_ptr<as
       call->begin_kernel();
       {
         cvc::fanout_context_scope fanout(&call->chunks_);
+        const detail::async_kernel_scope in_kernel(true);
         eval_alloc_guard guard(call->alloc_limit_);
         try {
           value = kernel(*call);

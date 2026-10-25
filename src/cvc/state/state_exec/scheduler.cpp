@@ -166,6 +166,7 @@ uint64_t max_alloc_bytes_from_state(cvc::state &root, const std::string &schedul
 // ---------------------------------------------------------------------------
 
 int scheduler::execute(const std::string &script, const execute_options &opts) {
+  detail::check_not_in_async_kernel("scheduler::execute");
   int pid = next_pid_++;
   process proc;
   proc.pid = pid;
@@ -196,6 +197,7 @@ int scheduler::execute(const std::string &script, const execute_options &opts) {
 }
 
 int scheduler::execute(const value_t &expr, const execute_options &opts) {
+  detail::check_not_in_async_kernel("scheduler::execute");
   int pid = next_pid_++;
   process proc;
   proc.pid = pid;
@@ -430,6 +432,7 @@ void scheduler::execute_process_step(process &proc) {
 }
 
 int scheduler::step() {
+  detail::check_not_in_async_kernel("scheduler::step");
   // Wake sleeping processes whose deadline has passed.
   wake_sleeping_processes();
 
@@ -789,6 +792,7 @@ bool scheduler::yield_frame(int /*pid*/) {
 }
 
 bool scheduler::receive_message(int pid, const std::string &path) {
+  detail::check_not_in_async_kernel("scheduler::receive_message");
   auto it = processes_.find(pid);
   if (it == processes_.end())
     return false;
@@ -816,6 +820,7 @@ bool scheduler::receive_message_until(int pid, const std::string &path, double s
 }
 
 int scheduler::deliver_to_receivers(const std::string &path, const value_t &msg) {
+  detail::check_not_in_async_kernel("scheduler::deliver_to_receivers");
   int woken = 0;
   for (auto &[pid, proc] : processes_) {
     if (proc->status == process_status::waiting && proc->recv_path && *proc->recv_path == path) {
@@ -866,6 +871,7 @@ std::size_t scheduler::total_pending_messages() const {
 }
 
 bool scheduler::kill(int pid) {
+  detail::check_not_in_async_kernel("scheduler::kill");
   auto it = processes_.find(pid);
   if (it == processes_.end())
     return false;

@@ -503,6 +503,67 @@ TEST(AsyncCalls, AS7_AwaitAllRaisesTheFirstFailureOnceAllFinish) {
   });
 }
 
+namespace {
+// (chan-future "c"): a channel future on c; (deliver "c" v): v to c's receivers, or c's queue.
+void register_channel_fns(world &w) {
+  builtins::register_fn(w.env, "chan-future", [](std::span<const value_t> a) -> value_t {
+    return make_future(show(a[0]));
+  });
+  builtins::register_fn(w.env, "deliver", [&w](std::span<const value_t> a) -> value_t {
+    return value_t(static_cast<int64_t>(w.ictx.sched->deliver_to_receivers(show(a[0]), a[1])));
+  });
+}
+} // namespace
+
+TEST(AsyncCalls, AwaitAllTakesChannelFutures) {
+  // 3.3: with async calls' futures and plain values, in list order whatever order the messages
+  // come in; a message sent before it waits is taken.
+  for_engines(kSchedulers, [](unsigned e) {
+    world w(e);
+    register_channel_fns(w);
+    const int a =
+        w.submit("(await-all (list (chan-future \"c1\") (slow-op-async 3 50) (chan-future "
+                 "\"c2\") 9))");
+    ASSERT_TRUE(w.pump([&] { return w.waiting(a); }));
+    w.run_to_end(
+        w.submit("(begin (deliver \"c2\" \"two\") (sleep 0.05) (deliver \"c1\" \"one\"))"));
+    w.run_to_end(a);
+    ASSERT_TRUE(w.result(a));
+    EXPECT_EQ(show(*w.result(a)), "(\"one\" 6 \"two\" 9)");
+    EXPECT_EQ(run(w, "(begin (deliver \"c3\" 1) (deliver \"c4\" 2) (await-all (list (chan-future "
+                     "\"c4\") (chan-future \"c3\"))))")
+                  .value,
+              "(2 1)");
+    // A message that is itself a channel future is the value, not waited for in turn.
+    EXPECT_EQ(run(w, "(begin (deliver \"c5\" (chan-future \"c6\")) (get-attr (car (await-all (list "
+                     "(chan-future \"c5\")))) \"__future__\"))")
+                  .value,
+              "c6");
+  });
+}
+
+TEST(AsyncCalls, AwaitAllKeepsTheMessagesItHasInASnapshot) {
+  for_engines(kSchedulers, [](unsigned e) {
+    world w(e);
+    register_channel_fns(w);
+    const int a = w.submit("(await-all (list (chan-future \"s1\") 5 (chan-future \"s2\")))");
+    ASSERT_TRUE(w.pump([&] { return w.waiting(a); }));
+    // s1's message arrives; it waits on s2 by the time the sender ends.
+    w.run_to_end(w.submit("(begin (deliver \"s1\" \"one\") (sleep 0.05))"));
+    ASSERT_TRUE(w.waiting(a));
+    cvc::state &snap = (*w.tree)("__await_all_snapshot__");
+    ASSERT_TRUE(w.sync ? w.sync->snapshot(a, snap) : w.async->snapshot(a, snap));
+    const int r = w.sync ? w.sync->restore(snap, w.env) : w.async->restore(snap, w.env);
+    ASSERT_TRUE(w.pump([&] { return w.waiting(r); })) << "the restored process didn't wait again";
+    w.run_to_end(w.submit("(deliver \"s2\" \"two\")"));
+    for (const int pid : {a, r}) {
+      w.run_to_end(pid);
+      ASSERT_TRUE(w.result(pid)) << pid;
+      EXPECT_EQ(show(*w.result(pid)), "(\"one\" 5 \"two\")") << pid;
+    }
+  });
+}
+
 TEST(AsyncCalls, AS8_ARegistrationTimeoutRaisesTimeoutError) {
   for_engines(kAll, [](unsigned e) {
     async_options opts;
@@ -613,6 +674,66 @@ TEST(AsyncCalls, AS17_WhereParkingIsForbiddenACallRaises) {
       EXPECT_NE(std::string(ex.what()).find("slow-op"), std::string::npos);
     }
     EXPECT_EQ(w.p.ended, 0); // nothing ran
+  });
+}
+
+TEST(AsyncCalls, AKernelCantUseTheEvaluatorOrAScheduler) {
+  // 3.7: a kernel runs off the scheduler's timeline. The evaluators and the schedulers' entry
+  // points refuse it, on its thread and in its fan-out's chunks, and the error raises at the call.
+  for_engines(kAll, [](unsigned e) {
+    world w(e);
+    // (eval-in-kernel stackless?): evaluates (+ 1 2) in the kernel.
+    register_async_fn(w.env, *w.host, "eval-in-kernel",
+                      [](std::span<const value_t> a) -> async_kernel {
+                        const bool use_stackless = int_arg(a, 0, 0) != 0;
+                        return [use_stackless](async_call &) -> value_t {
+                          const environment_ptr env = builtins::make_default_environment();
+                          if (use_stackless)
+                            return stackless_evaluator(env).evaluate_script("(+ 1 2)");
+                          return evaluator(env).evaluate_script("(+ 1 2)");
+                        };
+                      });
+    // (sched-in-kernel): kills a process that doesn't exist, from the kernel.
+    scheduler_base *sched = w.ictx.sched;
+    register_async_fn(
+        w.env, *w.host, "sched-in-kernel", [sched](std::span<const value_t>) -> async_kernel {
+          return [sched](async_call &) -> value_t { return value_t(sched && sched->kill(123456)); };
+        });
+    // (chunks-marked): how many of 8 fan-out chunks run marked as the kernel's.
+    register_async_fn(w.env, *w.host, "chunks-marked",
+                      [&w](std::span<const value_t>) -> async_kernel {
+                        return [&w](async_call &) -> value_t {
+                          std::atomic<int> marked{0};
+                          w.app.computePool().parallel_for(
+                              8,
+                              [&](int) {
+                                std::this_thread::sleep_for(2ms);
+                                if (in_async_kernel())
+                                  ++marked;
+                              },
+                              8);
+                          return value_t(static_cast<int64_t>(marked.load()));
+                        };
+                      });
+    builtins::register_fn(w.env, "in-kernel?", [](std::span<const value_t>) -> value_t {
+      return value_t(in_async_kernel());
+    });
+    for (const char *which : {"0", "1"}) {
+      SCOPED_TRACE(which);
+      const outcome o = run(w, std::string("(try (eval-in-kernel ") + which +
+                                   ") (catch (NativeError e) (list (get-attr e \"origin\") "
+                                   "(get-attr e \"message\"))))");
+      EXPECT_NE(o.value.find("\"async\""), std::string::npos) << o.value << o.cls << o.message;
+      EXPECT_NE(o.value.find("must not use the evaluator"), std::string::npos) << o.value;
+    }
+    if (w.ictx.sched) {
+      const outcome o =
+          run(w, "(try (sched-in-kernel) (catch (NativeError e) (get-attr e \"message\")))");
+      EXPECT_NE(o.value.find("kill: an async function's kernel"), std::string::npos)
+          << o.value << o.cls << o.message;
+    }
+    EXPECT_EQ(run(w, "(list (chunks-marked) (in-kernel?))").value, "(8 #f)");
+    EXPECT_FALSE(in_async_kernel());
   });
 }
 

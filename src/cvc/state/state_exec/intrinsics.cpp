@@ -567,9 +567,11 @@ value_t intrinsic_await(intrinsics_context *ctx, std::span<const value_t> args) 
   return args[0];
 }
 
-// (await-all (list f1 f2 ...)): wait for every async call's future in the list, then return their
-// values in order, or raise the first failure in list order once all have finished
-// (docs/STATE_EXEC_EXCEPTIONS.md 3.3). Anything else in the list is its own value.
+// (await-all (list f1 f2 ...)): wait for every future in the list (an async call's, or a
+// channel's), then return their values in order, or raise the first failure in list order once
+// all have finished (docs/STATE_EXEC_EXCEPTIONS.md 3.3). Anything else in the list is its own
+// value. It waits for one future at a time: each channel future's message takes its place in the
+// call's list (await_request::slot) and the call is applied again.
 value_t intrinsic_await_all(intrinsics_context *ctx, std::span<const value_t> args) {
   expect_exact(args, 1, "await-all");
   require_sched(ctx, "await-all");
@@ -579,12 +581,25 @@ value_t intrinsic_await_all(intrinsics_context *ctx, std::span<const value_t> ar
                     "await-all: expected a list of futures, got " + args[0].type_name());
   const std::vector<value_t> &items = **lp;
   const int pid = ctx->sched->current_pid();
-  for (const value_t &f : items) {
+  const bool parkable = pid >= 0 && can_await();
+  for (std::size_t i = 0; i < items.size(); ++i) {
+    const value_t &f = items[i];
+    if (detail::awaited_of(f))
+      continue; // a channel future's message, delivered
     if (!is_async_future(f)) {
-      if (future_channel_of(f))
-        throw dsl_error("TypeError",
-                        "await-all: a channel future can't be waited for with others; await it");
-      continue;
+      const std::optional<std::string> chan = future_channel_of(f);
+      if (!chan)
+        continue;
+      if (!parkable)
+        throw dsl_error("RuntimeError", "await-all: can't wait for a channel future here");
+      detail::await_request r{*chan, "await-all", nil_value, /*retry=*/true, i};
+      if (std::optional<value_t> pending = ctx->sched->pop_pending_message(*chan)) {
+        r.ready = std::move(*pending);
+        request_await(std::move(r));
+      } else {
+        park_await(ctx, pid, *chan, std::nullopt, std::move(r));
+      }
+      return nil_value;
     }
     const std::shared_ptr<detail::awaitable> call = async_call_of_future(f);
     if (!call)
@@ -594,7 +609,7 @@ value_t intrinsic_await_all(intrinsics_context *ctx, std::span<const value_t> ar
     if (call->finished())
       continue;
     // The first one still running: wait for it, then look at the list again.
-    if (pid >= 0 && can_await()) {
+    if (parkable) {
       const std::string channel = *future_channel_of(f);
       park_await(ctx, pid, channel, std::nullopt,
                  {channel, "await-all", detail::make_awaitable_handle(call), /*retry=*/true});
@@ -604,8 +619,12 @@ value_t intrinsic_await_all(intrinsics_context *ctx, std::span<const value_t> ar
   }
   std::vector<value_t> values;
   values.reserve(items.size());
-  for (const value_t &f : items) // outcome() raises the first failure in list order
-    values.push_back(is_async_future(f) ? async_call_of_future(f)->outcome() : f);
+  for (const value_t &f : items) { // outcome() raises the first failure in list order
+    if (const value_t *msg = detail::awaited_of(f))
+      values.push_back(*msg);
+    else
+      values.push_back(is_async_future(f) ? async_call_of_future(f)->outcome() : f);
+  }
   return make_list(std::move(values));
 }
 
