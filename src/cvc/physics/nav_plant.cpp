@@ -454,8 +454,11 @@ void nav_plant::command(int i, float steer, float accel) {
 
 void nav_plant::advance() {
   const auto t0 = std::chrono::steady_clock::now();
-  for (agent &a : _agents)
+  for (agent &a : _agents) {
     a.contacts_step = 0;
+    a.touched = -1;
+    a.touch_depth = 0.0;
+  }
   if (_o.step_world) {
     for (int k = 0; k < _steps; ++k) {
       _w.step();
@@ -496,9 +499,21 @@ void nav_plant::count_contacts() {
     return f;
   };
   for (const contact_event &e : _w.contacts()) {
+    const auto ia = of_chassis.find(e.body_a.value), ib = of_chassis.find(e.body_b.value);
+    // Vehicle against vehicle, begun or persisting: each one's deepest.
+    if (e.type != contact_event::kind::removed && ia != of_chassis.end() &&
+        ib != of_chassis.end() && ia->second != ib->second) {
+      for (const auto &[self, other] :
+           {std::pair{ia->second, ib->second}, std::pair{ib->second, ia->second}}) {
+        agent &s = _agents[self];
+        if (s.touched < 0 || e.depth > s.touch_depth) {
+          s.touched = static_cast<int>(other);
+          s.touch_depth = e.depth;
+        }
+      }
+    }
     if (e.type != contact_event::kind::added)
       continue;
-    const auto ia = of_chassis.find(e.body_a.value), ib = of_chassis.find(e.body_b.value);
     if (ia != of_chassis.end() && ib == of_chassis.end() && is_fixed(e.body_b))
       ++_agents[ia->second].contacts_step;
     else if (ib != of_chassis.end() && ia == of_chassis.end() && is_fixed(e.body_a))
@@ -667,6 +682,14 @@ void nav_plant::measure(agent &a, const physics::vehicle_state &vs, bool tick) c
   a.psi = psi;
   a.vwx = v.x;
   a.vwy = v.y;
+}
+
+int nav_plant::vehicle_contact_step(int i) const {
+  return _agents.at(static_cast<std::size_t>(i)).touched;
+}
+
+double nav_plant::vehicle_contact_depth(int i) const {
+  return _agents.at(static_cast<std::size_t>(i)).touch_depth;
 }
 
 int nav_plant::static_contacts_step(int i) const {

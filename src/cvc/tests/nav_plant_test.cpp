@@ -233,6 +233,46 @@ TEST(NavPlant, ReadsTheVehicleBackInNavsFrame) {
   EXPECT_NEAR(l.a_brake, 0.8 * d.max_decel * kS, 1e-6);
 }
 
+// Vehicle against vehicle (nav_plant::vehicle_contact_step): one Humvee driven into the back of
+// another standing 10 m ahead. Neither touches another before; both report each other, with a
+// penetration, once they do.
+TEST(NavPlant, ReportsWhichVehicleItTouched) {
+  REQUIRE_JOLT();
+  scene sc;
+  world w(jolt_config());
+  sc.build(w, 0.9);
+  const vehicle_desc d = vehicle_desc::humvee();
+  nav_plant plant(w, {d});
+  cvc::world_units::normalized_frame f;
+  f.scale = kS;
+  cvc::nav::plant_state start[2];
+  start[0].x = static_cast<float>(20.0 * kS);
+  start[0].y = static_cast<float>(30.0 * kS);
+  start[1] = start[0];
+  start[1].x = static_cast<float>(30.0 * kS);
+  plant.attach(2, start, f, 0.06);
+  for (int t = 0; t < 30; ++t)
+    plant.advance();
+  EXPECT_EQ(plant.vehicle_contact_step(0), -1);
+  EXPECT_EQ(plant.vehicle_contact_step(1), -1);
+  int first = -1;
+  double depth = 0.0;
+  for (int t = 0; t < 200 && first < 0; ++t) {
+    plant.command(0, 0.0f, static_cast<float>(2.0 * kS));
+    plant.command(1, 0.0f, 0.0f);
+    plant.advance();
+    if (plant.vehicle_contact_step(0) >= 0) {
+      first = t;
+      depth = plant.vehicle_contact_depth(0);
+      EXPECT_EQ(plant.vehicle_contact_step(0), 1);
+      EXPECT_EQ(plant.vehicle_contact_step(1), 0);
+    }
+  }
+  std::printf("  rear-ended at tick %d (%.2f s), penetration %.3f m\n", first, first * 0.06, depth);
+  ASSERT_GE(first, 0) << "the vehicles should touch";
+  EXPECT_GE(depth, 0.0);
+}
+
 // The plant's own plan (nav_plant_options::plan_with_vehicle, on by default). Its limits are the
 // vehicle's: 0.8 of its max_accel, its rated top speed, 0.5 g of cornering (under 0.8 of its
 // static stability factor), and its body from the rear axle. A sim_world sized for no vehicle in
