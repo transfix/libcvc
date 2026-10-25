@@ -933,7 +933,9 @@ TEST_F(GeometryTest, QualityImproveTetrahedralMesh) {
 
   // First create an SDF from the bunny
   std::cout << "Creating SDF from bunny mesh..." << std::endl;
-  dimension sdf_dim(64, 64, 64);
+  // At 64^3 the bunny is ~290k tets, and four GEO_FLOW passes over them timed out (300 s) in a
+  // Debug CI build.
+  dimension sdf_dim(32, 32, 32);
   volume sdf_vol = sdf(ctx, bunny, sdf_dim, bunny.extents(), SDF_V2);
 
   // Extract a tetrahedral mesh from the SDF
@@ -3417,7 +3419,9 @@ TEST_F(GeometryTest, TetrahedralizeMeshExtraction) {
 TEST_F(GeometryTest, TetrahedralizeWithImprovementMethods) {
   std::cout << "\n=== Testing Tetrahedralize with Different Improvement Methods ===" << std::endl;
 
-  dimension sdf_dim(32, 32, 32); // Smaller for faster testing
+  // LBIE meshes this on a 17^3 grid. On 33^3 (dims 17 to 32) the bunny is ~63k tets, and with six
+  // GEO_FLOW passes of 100 rounds over them this test took 178 s in a Debug CI build.
+  dimension sdf_dim(16, 16, 16);
   volume sdf_vol = sdf(ctx, bunny, sdf_dim, bunny.extents(), SDF_V2);
 
   struct MethodTest {

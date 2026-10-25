@@ -3985,13 +3985,13 @@ void Octree::geometric_flow_tet(geoframe& geofrm) {
 	// face k of a tet is opposite corner k
 	static const int face[4][3] = {{1, 2, 3}, {0, 3, 2}, {0, 1, 3}, {0, 2, 1}};
 
-	// each tet's tet_worst_dihedral_cos, kept up to date as its corners move
-	std::vector<float> tet_cos(geofrm.numtris/4), moved_cos;
+	// each tet's tet_worst_dihedral_cos and volume, kept up to date as its corners move
+	std::vector<float> tet_cos(geofrm.numtris/4), tet_vol(geofrm.numtris/4), moved_cos, moved_vol;
 	for (i = 0; i < geofrm.numtris/4; i++) {
 		v[0] = geofrm.triangles[4*i][0];	v[1] = geofrm.triangles[4*i][1];
 		v[2] = geofrm.triangles[4*i][2];	v[3] = geofrm.triangles[4*i+1][2];
 		tet_cos[i] = tet_worst_dihedral_cos(&geofrm.verts[v[0]][0], &geofrm.verts[v[1]][0],
-						    &geofrm.verts[v[2]][0], &geofrm.verts[v[3]][0], volume);
+						    &geofrm.verts[v[2]][0], &geofrm.verts[v[3]][0], tet_vol[i]);
 	}
 
 	for(index = 0; index < maxIndex; index++) {
@@ -4046,8 +4046,7 @@ void Octree::geometric_flow_tet(geoframe& geofrm) {
 					itet = neighbor[i][nb];
 					v[0] = geofrm.triangles[4*itet][0];	v[1] = geofrm.triangles[4*itet][1];
 					v[2] = geofrm.triangles[4*itet][2];	v[3] = geofrm.triangles[4*itet+1][2];
-					volume = volume_tet(&geofrm.verts[v[0]][0], &geofrm.verts[v[1]][0],
-							    &geofrm.verts[v[2]][0], &geofrm.verts[v[3]][0]);
+					volume = tet_vol[itet];
 					if(volume < 0.00001f) continue;
 					sum_0 += volume;
 					for(k = 0; k < 3; k++)
@@ -4066,6 +4065,7 @@ void Octree::geometric_flow_tet(geoframe& geofrm) {
 				if(tet_cos[neighbor[i][nb]] > worst_before) worst_before = tet_cos[neighbor[i][nb]];
 			bool keep = true;
 			moved_cos.clear();
+			moved_vol.clear();
 			for(j = 0; j < 3; j++) {
 				old_pos[j] = geofrm.verts[i][j];
 				geofrm.verts[i][j] = new_pos[j];
@@ -4076,13 +4076,17 @@ void Octree::geometric_flow_tet(geoframe& geofrm) {
 				v[2] = geofrm.triangles[4*itet][2];	v[3] = geofrm.triangles[4*itet+1][2];
 				moved_cos.push_back(tet_worst_dihedral_cos(&geofrm.verts[v[0]][0], &geofrm.verts[v[1]][0],
 									   &geofrm.verts[v[2]][0], &geofrm.verts[v[3]][0], volume));
+				moved_vol.push_back(volume);
 				keep = volume > 0.0f && moved_cos.back() <= worst_before;
 			}
 			if(!keep) {
 				for(j = 0; j < 3; j++) geofrm.verts[i][j] = old_pos[j];
 				continue;
 			}
-			for(nb = 0; nb < (int)neighbor[i].size(); nb++) tet_cos[neighbor[i][nb]] = moved_cos[nb];
+			for(nb = 0; nb < (int)neighbor[i].size(); nb++) {
+				tet_cos[neighbor[i][nb]] = moved_cos[nb];
+				tet_vol[neighbor[i][nb]] = moved_vol[nb];
+			}
 
 		} // end of i loop
 
