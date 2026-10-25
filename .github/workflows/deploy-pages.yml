@@ -84,7 +84,8 @@ jobs:
             --no-fallback-to-source
           # eigen + libigl (header-only): cvc's mesh_ops / fem, which the FEM gallery's fe_lab and
           # mesh_lab nodes run on. Without them CVC_ENABLE_LIBIGL goes off and those nodes don't exist.
-          for p in eigen libigl; do
+          # sdl3: keyboard and mouse for the documents' on_key / on_pointer (cvcGL's SdlInput).
+          for p in eigen libigl sdl3; do
             echo "=== $p ==="
             cvcpkg install "$p" --prefix "$CVC_WASM_DEPS" \
               --platform wasm --arch wasm32 --config release --link static \
