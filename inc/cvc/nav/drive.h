@@ -44,6 +44,10 @@
 #include <cstdint>
 #include <cvc/nav/detail/nav_potential.h>
 
+// Feature test for veh_params::risk_governor, drive_telemetry::v_risk and risk_speed_cap (a
+// consumer that also builds against an older libcvc).
+#define CVC_NAV_HAS_RISK_GOVERNOR 1
+
 namespace cvc {
 class thread_pool; // fork-join executor, injected into the batched kernels below
 namespace nav {
@@ -282,6 +286,25 @@ struct veh_params {
   float gravity = 0.0f;
   // `terrain`: the grade force and the hard barrier (H1).
   const terrain_drive *terrain = nullptr;
+
+  // RISK GOVERNOR. Off (the default) = byte-identical. On, material risk caps the speed as grip
+  // caps the actuators: the worse of the material stack's risk and the terrain's (whose risk is
+  // read with or without its weights), r in [0, 1], allows
+  //   v_risk(r) = vmax - (vmax - risk_vmin) s,  s = clamp((r - risk_onset) / (1 - risk_onset)),
+  // s clamped to [0, 1], so nothing changes below risk_onset and risk 1 allows risk_vmin. The
+  // forces steer a vehicle off risky ground but never slowed it there: a Humvee sent along a
+  // 24-degree sidehill (risk 0.85) took it at full throttle and rolled. `risk_probes` points spaced
+  // out to `risk_lookahead` (normalized, along the direction of travel; 0 = underfoot only) slow
+  // the vehicle before it gets there: each allows the speed from which the stopping governor's
+  // braking is down to that point's v_risk by the probe before it (the risk may start just past
+  // that one), so within one probe spacing of risky ground the vehicle is at its v_risk. Speeds are
+  // normalized; risk_vmin is clamped to [0, vmax]. The persistent sim_world_cuda path carries no
+  // material or terrain and does not apply it.
+  bool risk_governor = false;
+  float risk_vmin = 0.0f;
+  float risk_onset = 0.3f;
+  float risk_lookahead = 0.0f;
+  int risk_probes = 3;
 };
 
 // Kinematic-bicycle rollout — one drive tick of `v.nsub` substeps per agent,
@@ -291,6 +314,15 @@ struct veh_params {
 // coef_mlp). `goal` is [n*2] normalized (the carrot). Updates o[n*2], th[n],
 // sp[n] IN PLACE and writes minclr_out[n] (min clearance seen). Agents are
 // independent — threaded across `num_threads` workers.
+// The risk governor's speed cap (veh_params::risk_governor) for an agent at (x, y) heading th,
+// moving forward (motion_sign 1) or backing (-1), with top speed vmax, braking a_brake after a
+// latency of tau seconds (normalized units): v_risk underfoot and from its look-ahead probes. The
+// risk is the worse of `mat`'s on `plane` (null: none) and v.terrain's. vmax when the governor is
+// off or has no risk to read. The drive applies it; sim_world caps override_command with it too,
+// so a route follower's command is held to it as the drive's is.
+float risk_speed_cap(const veh_params &v, const material_stack *mat, int plane, float x, float y,
+                     float th, float motion_sign, float vmax, float a_brake, float tau);
+
 void bicycle_rollout(const field_stack &f, float *o, float *th, float *sp, const float *goal,
                      const float *al, const float *be, const float *ga, int n, const int *map_id,
                      const veh_params &v, float *minclr_out, int num_threads = 0,
@@ -311,6 +343,7 @@ struct drive_telemetry {
   float alpha = 0, beta = 0, gamma = 0, lam_soft = 0, lam_hard = 0;
   float mu = 1;                 // underfoot grip at the agent cell (1 = dry / no grip field)
   float mrisk = 0;              // material risk at the agent cell (0 = no material stack)
+  float v_risk = 0;             // the risk governor's speed cap (last substep); 0 = governor off
   float ext_fx = 0, ext_fy = 0; // applied external force in the drive frame (0 = no ext channel)
   float steer = 0;              // final steering angle delta (rad), clamped (last substep)
   float curvature = 0;          // |tan(delta)| / L (last substep)

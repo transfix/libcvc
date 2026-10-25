@@ -16,6 +16,13 @@ if(CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
   set(CMAKE_CXX_STANDARD_REQUIRED ON)
   find_package(cvc CONFIG REQUIRED)
   find_package(cvcGL CONFIG REQUIRED)
+else()
+  # In-tree: re-import the Boost targets cvc links PUBLIC (through cvcGL) so its transitive link
+  # evaluates in this directory scope (src/arisrv/CMakeLists.txt explains why).
+  if(NOT TARGET Boost::filesystem)
+    find_package(Boost REQUIRED COMPONENTS thread date_time regex filesystem
+                 OPTIONAL_COMPONENTS system chrono)
+  endif()
 endif()
 # What the host itself draws with, beyond what cvcGL links: VTK's window/interactor and image IO.
 find_package(VTK REQUIRED COMPONENTS RenderingUI IOImage)

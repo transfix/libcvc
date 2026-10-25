@@ -122,6 +122,11 @@ struct dev_drive_ext {
   // veh_params::slope (dz/dx, dz/dy) for the governors; data null = flat.
   dev_grip slope;
   float gravity = 0.0f;
+  // veh_params::risk_governor, reading the uploaded material stack (gov_mat) and/or the
+  // terrain's (gov_ter): rollout_impl's v_risk cap.
+  int risk_gov = 0, gov_mat = 0, gov_ter = 0;
+  float risk_vmin = 0.0f, risk_onset = 0.3f, risk_lookahead = 0.0f;
+  int risk_probes = 3;
 };
 
 // Substitute the per-agent columns into a per-thread copy of v (null column => scalar),
@@ -253,6 +258,25 @@ __device__ inline float d_risk_at(const dev_drive_ext &x, int mplane, float px, 
   return r;
 }
 
+// The risk governor's risk (drive.cpp rollout_impl's risk_at): the worse of the material's and
+// the terrain's, whether or not the net reads a risk column.
+__device__ inline float d_gov_risk(const dev_drive_ext &x, int mplane, float px, float py) {
+  float r = x.gov_mat ? d_sample_risk(x.mat, mplane, px, py) : 0.0f;
+  if (x.gov_ter) {
+    const float tr = d_sample_risk(x.ter, 0, px, py);
+    r = tr > r ? tr : r;
+  }
+  return r;
+}
+
+// v_risk(r) for a top speed vmax (drive.h veh_params::risk_governor).
+__device__ inline float d_v_risk(const dev_drive_ext &x, float vmax, float r) {
+  const float vmin = fminf(fmaxf(x.risk_vmin, 0.0f), vmax);
+  const float span = x.risk_onset < 1.0f ? 1.0f - x.risk_onset : 1.0f;
+  const float s = fminf(fmaxf((r - x.risk_onset) / span, 0.0f), 1.0f);
+  return vmax - (vmax - vmin) * s;
+}
+
 __device__ inline float d_ipc(float dd, float d_hat) {
   const float dc = dd < 1e-6f ? 1e-6f : dd;
   if (!(dc < d_hat))
@@ -356,7 +380,7 @@ __device__ inline void d_bicycle(const dev_field &f, int plane, float &ox, float
   const bool has_grip = v.grip.data != nullptr;
   minclr = 9.9f;
   float tel_mu = 1.0f, tel_mrisk = 0.0f, tel_lam = 0.0f, tel_lam_hard = 0.0f;
-  float tel_steer = 0.0f, tel_curv = 0.0f, tel_fx = 0.0f, tel_fy = 0.0f;
+  float tel_steer = 0.0f, tel_curv = 0.0f, tel_fx = 0.0f, tel_fy = 0.0f, tel_vrisk = 0.0f;
   potential_terms tel_u;
   for (int s = 0; s < v.nsub; ++s) {
     // Hoisted above the sample: the footprint places its discs along the
@@ -521,6 +545,26 @@ __device__ inline void d_bicycle(const dev_field &f, int plane, float &ox, float
     approach = fminf(fmaxf(approach, 0.0f), 1.0f);
     const float v_stop_dir = approach > 0.05f ? v_stop / fmaxf(approach, 0.05f) : v.vmax;
     float v_lim = fminf(v.vmax, fminf(v_corner, v_stop_dir));
+    if (x.risk_gov) {
+      // The risk governor: v_risk underfoot, and for each probe ahead the speed from which the
+      // governor's braking is down to that probe's v_risk by the probe before it (the kinematic
+      // arm: no latency).
+      const float a_gov = x.slope.data ? a_stop_g : a_max_e;
+      const int mplane = x.mat.M > 1 ? plane : 0;
+      float cap = d_v_risk(x, v.vmax, d_gov_risk(x, mplane, ox, oy));
+      const float reach = x.risk_lookahead > 0.0f ? x.risk_lookahead : 0.0f;
+      const int P = reach > 0.0f ? (x.risk_probes < 1 ? 1 : x.risk_probes) : 0;
+      for (int k = 1; k <= P; ++k) {
+        const float dk = ((float)k / (float)P) * reach;
+        const float db = ((float)(k - 1) / (float)P) * reach;
+        const float vr =
+            d_v_risk(x, v.vmax,
+                     d_gov_risk(x, mplane, ox + motion_sign * dk * ch, oy + motion_sign * dk * sh));
+        cap = fminf(cap, sqrtf(vr * vr + 2.0f * a_gov * db));
+      }
+      tel_vrisk = cap;
+      v_lim = fminf(v_lim, cap);
+    }
     const bool hard_steer = fabsf(delta) >= 0.7f * dmax;
     const bool can_move = d > 0.25f * gov_rr;
     const float v_floor = (hard_steer && can_move) ? 0.08f : 0.0f;
@@ -567,6 +611,7 @@ __device__ inline void d_bicycle(const dev_field &f, int plane, float &ox, float
     tel->lam_hard = tel_lam_hard;
     tel->mu = tel_mu;
     tel->mrisk = tel_mrisk;
+    tel->v_risk = tel_vrisk;
     tel->ext_fx = 0.0f;
     tel->ext_fy = 0.0f;
     tel->steer = tel_steer;
@@ -860,6 +905,18 @@ void upload_terrain(const veh_params &vp, dev_drive_ext &x, dev_buffers &buf) {
   }
 }
 
+// veh_params::risk_governor over the stacks this launch uploaded (x.mat, x.ter): call it after
+// both are in place.
+void set_risk_governor(const veh_params &vp, dev_drive_ext &x) {
+  x.gov_mat = x.mat.data ? 1 : 0;
+  x.gov_ter = x.ter.data ? 1 : 0;
+  x.risk_gov = (vp.risk_governor && (x.gov_mat || x.gov_ter)) ? 1 : 0;
+  x.risk_vmin = vp.risk_vmin;
+  x.risk_onset = vp.risk_onset;
+  x.risk_lookahead = vp.risk_lookahead;
+  x.risk_probes = vp.risk_probes;
+}
+
 } // namespace
 
 bool drive_cuda_available() {
@@ -905,6 +962,7 @@ void bicycle_rollout_cuda(const field_stack &f, float *o, float *th, float *sp, 
   dev_drive_ext x;
   dev_buffers terrain_bufs;
   upload_terrain(vp, x, terrain_bufs);
+  set_risk_governor(vp, x);
   const size_t fsz = (size_t)f.H * f.W * 3 * sizeof(float); // plane 0
   float *d_field = nullptr, *d_o = nullptr, *d_th = nullptr, *d_sp = nullptr, *d_goal = nullptr;
   float *d_al = nullptr, *d_be = nullptr, *d_ga = nullptr, *d_mc = nullptr;
@@ -1038,6 +1096,7 @@ void drive_step_cuda_impl(const char *who, const field_stack &f, float *o, float
     if (!x.lam_hard_head)
       x.lam_hard = buf.upload(mat->lam_hard, (size_t)n, "H2D lam_hard");
   }
+  set_risk_governor(vp, x);
 
   float *d_field = buf.upload(f.data, (size_t)f.H * f.W * 3, "H2D field"); // plane 0
   float *d_o = buf.upload(o, (size_t)2 * n, "H2D o");
