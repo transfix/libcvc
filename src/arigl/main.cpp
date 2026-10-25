@@ -422,7 +422,7 @@ struct ConferenceSession {
   static constexpr double kAudioGapS = 0.4;
   std::unique_ptr<cvc::opus_encoder> mic_opus_;
   std::int64_t mic_opus_seq_ = 0;
-  bool video_off_ = false;      // our video.off leaf's value
+  bool video_off_ = false; // our video.off leaf's value
   // Whether the user turned our camera off (the document's camera on/off toggle).
   bool camera_off() const {
     return app_ && cvc::state::instance(*app_)(prefix_ + ".cam_on").value() == "0";
