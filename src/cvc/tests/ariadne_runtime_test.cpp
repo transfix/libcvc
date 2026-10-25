@@ -8,6 +8,7 @@
 #include <boost/any.hpp>
 #include <chrono>
 #include <condition_variable>
+#include <cvc/ariadne/app_runtime.h> // AppRuntime: host menus, the scene between documents
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/backend.h>
 #include <cvc/ariadne/loader.h>            // §12 end-to-end load: mount through the real Runtime
@@ -3262,4 +3263,92 @@ TEST(AriadneStreamIntrinsics, OpenOnTheInitLaneFailsWithoutADocumentScope) {
   EXPECT_NE(cvc::state::instance(app)("demo.t.err").value().find("no document scope"),
             std::string::npos);
   EXPECT_EQ(cvc::state::instance(app)("demo.streams.cam0").value(), ""); // nothing was opened
+}
+
+// ── AppRuntime: host menus and the scene between documents ──────────────────────────────────────
+
+namespace {
+
+// Counts the adapter calls AppRuntime::load makes, in order.
+struct LogSceneAdapter : SceneAdapter {
+  std::vector<std::string> log;
+  void realize(const Scene &, const std::string &, std::vector<std::string> *) override {
+    log.push_back("realize");
+  }
+  void clear() override { log.push_back("clear"); }
+  void sync_visibility(cvc::app &) override {}
+  void tick() override {}
+};
+
+std::string write_doc(const std::string &name, const std::string &text) {
+  const std::filesystem::path p = std::filesystem::temp_directory_path() / name;
+  std::ofstream(p) << text;
+  return p.string();
+}
+
+// The positions of the begin_menu calls in the walk, by label (-1: never begun).
+long menu_at(const MockBackend &mb, const std::string &label) {
+  const auto it = std::find(mb.log.begin(), mb.log.end(), "begin_menu:" + label);
+  return it == mb.log.end() ? -1 : static_cast<long>(it - mb.log.begin());
+}
+
+} // namespace
+
+// A host's menus (a gallery's Demos) go first in every document's menubar, and give a document
+// without one a menubar of their own; set_root gets them too.
+TEST(AriadneAppRuntime, HostMenusLeadEveryDocumentsMenubar) {
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  cvc::app app;
+  MockBackend mb;
+  AppRuntime art(app, "ui.docs.d");
+  art.set_backend(mb);
+  art.set_host_menus({menu("Demos", {menu_action("other", "gallery:1")})});
+
+  art.load(write_doc("host_menus_a.ari", "meta: {min_libcvc: 3.4.0}\n"
+                                         "menubar:\n"
+                                         "  - menu: File\n"
+                                         "    items:\n"
+                                         "      - menu_item: Quit\n"
+                                         "        on: quit\n"));
+  art.runtime().render();
+  ASSERT_GE(menu_at(mb, "Demos"), 0);
+  EXPECT_LT(menu_at(mb, "Demos"), menu_at(mb, "File"));
+  EXPECT_EQ(std::count(mb.log.begin(), mb.log.end(), "begin_menubar"), 1); // one bar, not two
+
+  mb.log.clear();
+  art.load(write_doc("host_menus_b.ari", "meta: {min_libcvc: 3.4.0}\n"
+                                         "root:\n"
+                                         "  - text: no menubar here\n"));
+  art.runtime().render();
+  EXPECT_TRUE(mb.saw("begin_menubar"));
+  EXPECT_GE(menu_at(mb, "Demos"), 0);
+  EXPECT_TRUE(mb.saw("menu_action:other"));
+
+  mb.log.clear();
+  art.set_root(group({text("built in C++")}));
+  art.runtime().render();
+  EXPECT_GE(menu_at(mb, "Demos"), 0);
+}
+
+// Every load clears the last document's scene before anything is realized -- a host switching
+// documents, or a reload -- and does so even when the new document declares no scene.
+TEST(AriadneAppRuntime, EachLoadClearsTheLastScene) {
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  cvc::app app;
+  MockBackend mb;
+  LogSceneAdapter scene;
+  AppRuntime art(app, "ui.docs.s", &scene);
+  art.set_backend(mb);
+  const std::string with_scene =
+      write_doc("clear_scene_a.ari", "meta: {min_libcvc: 3.4.0}\n"
+                                     "scene:\n"
+                                     "  nodes:\n"
+                                     "    - node: box\n"
+                                     "      source: { file: stanford.bunny }\n");
+  art.load(with_scene);
+  art.load(with_scene);
+  art.load(write_doc("clear_scene_b.ari", "meta: {min_libcvc: 3.4.0}\nroot:\n  - text: x\n"));
+  EXPECT_EQ(scene.log, (std::vector<std::string>{"clear", "realize", "clear", "realize", "clear"}));
 }

@@ -824,6 +824,11 @@ add_executable(cvcgl_room_view test/cvcgl_room_view.cpp)
 target_link_libraries(cvcgl_room_view PRIVATE cvcGL)
 add_test(NAME cvcgl_room_view COMMAND cvcgl_room_view)
 
+# AriRuntime switching documents (arigl's gallery): each load clears the last one's scene.
+add_executable(cvcgl_ari_switch test/cvcgl_ari_switch.cpp)
+target_link_libraries(cvcgl_ari_switch PRIVATE cvcGL)
+add_test(NAME cvcgl_ari_switch COMMAND cvcgl_ari_switch)
+
 # The terminal extension (TerminalScene, roadmap §16.6): a scene rendered offscreen becomes the
 # terminal backend's background under the widgets, and a background drag turns the camera.
 add_executable(cvcgl_terminal_scene test/cvcgl_terminal_scene.cpp)

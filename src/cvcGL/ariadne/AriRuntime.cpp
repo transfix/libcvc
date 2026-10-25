@@ -57,8 +57,19 @@ public:
     // tied to the previous node graph, not part of the document, so they do NOT survive a reload;
     // re-run the binding action after the reload to re-establish them.
     verb_bindings_.clear();
-    realized_ = realize_scene(view_->scene(), scene, prefix, warns);
+    SceneGraph &sg = view_->scene();
+    if (!viewSaved_) { // the view as the host set it up, for clear() to go back to
+      if (vtkRenderer *r = view_->renderer())
+        r->GetBackground(background_);
+      shadows_ = sg.shadowsEnabled();
+      chrome_ = sg.diagnosticChromeVisible();
+      viewSaved_ = true;
+    }
+    realized_ = realize_scene(sg, scene, prefix, warns);
     haveScene_ = true;
+    for (const ari::SceneLight &l : scene.lights)
+      if (l.rig.empty()) // a rig's lights belong to (and leave with) its StageLighting
+        lights_.push_back(l.id);
     const cvc::bounding_box bb = view_->scene().computeGraphicsBounds();
     if (!bb.isNull())
       cam_->frameBounds(bb.minx, bb.miny, bb.minz, bb.maxx, bb.maxy, bb.maxz);
@@ -78,6 +89,29 @@ public:
         view_->setBackground(t[0], t[1], t[2]);
       }
     }
+  }
+
+  // The last document's scene comes down as room_view::clear_scene takes a room's down: its nodes
+  // and free lights, then the RealizedScene (a rig's own lights leave with its StageLighting, the
+  // physics world with its bodies). The view goes back to how the host set it up.
+  void clear() override {
+    verb_bindings_.clear();
+    if (!haveScene_)
+      return;
+    SceneGraph &sg = view_->scene();
+    for (const std::string &id : realized_.created)
+      sg.removeGraphics(id);
+    for (const std::string &id : lights_)
+      sg.removeGraphics(id);
+    lights_.clear();
+    realized_ = RealizedScene{};
+    haveScene_ = false;
+    if (vtkRenderer *r = view_->renderer())
+      r->SetGradientBackground(false);
+    view_->setBackground(background_[0], background_[1], background_[2]);
+    if (sg.shadowsEnabled() != shadows_)
+      sg.setShadowsEnabled(shadows_);
+    sg.setDiagnosticChromeVisible(chrome_);
   }
 
   const RealizedScene *realized() const { return haveScene_ ? &realized_ : nullptr; }
@@ -146,6 +180,11 @@ private:
       realized_; // owns StageLighting rigs; outlives the render loop (adapter outlives use)
   bool haveScene_ = false;
   double tick_dt_ = -1.0;
+  std::vector<std::string> lights_; // the realized free (non-rig) lights, which clear() removes
+  // The view before the first realize(): what clear() restores.
+  bool viewSaved_ = false;
+  double background_[3] = {0.0, 0.0, 0.0};
+  bool shadows_ = false, chrome_ = true;
   // (gl-bind-stream) bindings, keyed by node id (one per node; a rebind replaces). Owned here — a
   // per-document instance member on the scene seam, NOT realized_.custom_ticks (rebuilt on reload)
   // and NOT a process-static table. Destroyed with the adapter on the render thread.

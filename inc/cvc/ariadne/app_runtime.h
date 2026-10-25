@@ -59,6 +59,12 @@ public:
   // Bind a host action `event` to a C++ handler, run inside drain(), never mid-walk.
   void on(const std::string &event, std::function<void()> handler);
 
+  // Menus the host puts in every document it mounts, ahead of the document's own: a gallery's
+  // Demos menu, say, whose menu_action events the host handles with on(). A document without a
+  // menubar gets one holding just these. Applied by the next load() or set_root(); empty (the
+  // default) leaves documents as written.
+  void set_host_menus(std::vector<Widget> menus);
+
   // Register a host verb the .ari program can call. register_verb is SYNCHRONOUS (fn runs
   // inline on the drain thread, no args/return). register_async_verb OFFLOADS `work` to the
   // app compute pool and posts its string result to `done_channel`; the program parks on
@@ -134,6 +140,7 @@ private:
   };
   std::shared_ptr<Verbs> verbs_;
   std::vector<std::string> pendingWarnings_; // read-lane diagnostics drain() collected
+  std::vector<Widget> hostMenus_;            // set_host_menus: put in every mounted tree
   std::vector<std::string> docArgv_;         // the document's command line (set_document_args)
   std::string invocation_;
   bool validateArgs_ = true;

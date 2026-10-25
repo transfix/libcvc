@@ -41,13 +41,14 @@ void register_scene_panels(ImGuiBackend &backend, SceneGraph &sg, StageLighting 
                             return cvc::ariadne::CustomEdit{};
                           });
 
-  if (rig) {
-    backend.register_widget("stage_lighting_panel",
-                            [rig, flags](const std::string &, const cvc::ariadne::Widget &) {
+  // Registered with or without a rig: without one it draws nothing, and it replaces the panel of a
+  // document the host loaded before, whose rig went with that document's scene.
+  backend.register_widget("stage_lighting_panel",
+                          [rig, flags](const std::string &, const cvc::ariadne::Widget &) {
+                            if (rig)
                               cvc::gl::ui::StageLightingPanel(*rig, &flags->lighting);
-                              return cvc::ariadne::CustomEdit{};
-                            });
-  }
+                            return cvc::ariadne::CustomEdit{};
+                          });
 }
 
 } // namespace ariadne

@@ -43,6 +43,25 @@ void AppRuntime::on(const std::string &event, std::function<void()> handler) {
   rt_.on(event, std::move(handler));
 }
 
+void AppRuntime::set_host_menus(std::vector<Widget> menus) { hostMenus_ = std::move(menus); }
+
+namespace {
+
+// The host's menus go first in the document's menubar (a direct child of the root group, where the
+// loader puts it), or in a new menubar at the front when the document has none.
+void add_host_menus(Widget &root, const std::vector<Widget> &menus) {
+  if (menus.empty())
+    return;
+  for (Widget &w : root.children)
+    if (w.kind == Kind::Menubar) {
+      w.children.insert(w.children.begin(), menus.begin(), menus.end());
+      return;
+    }
+  root.children.insert(root.children.begin(), menubar(menus));
+}
+
+} // namespace
+
 bool AppRuntime::have_yaml() { return cvc::ariadne::have_yaml(); }
 
 // ── host verbs on the app-wide scheduler ────────────────────────────────────────────────────────
@@ -244,8 +263,14 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
     }
     rt_.set_channel_policy(declared, global, lr.lint.channels == LintConfig::Mode::Strict,
                            lr.lint.quiet);
+  } else {
+    rt_.set_channel_policy({}, {}, false, false); // a previous document's must not carry over
   }
 
+  // An empty stage for this document: the last one's scene goes, whether this is a hot reload of
+  // the same file or a host switching documents, and even when this one declares no scene.
+  if (scene_)
+    scene_->clear();
   if (lr.scene.any()) {
     if (scene_) {
       std::vector<std::string> warns;
@@ -259,13 +284,17 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
     }
   }
 
+  add_host_menus(lr.root, hostMenus_);
   rt_.set_root(std::move(lr.root)); // applied at the next frame boundary
   sources_ = std::move(lr.sources);
   stamps_ = std::move(lr.source_stamps);
   return lr.warnings;
 }
 
-void AppRuntime::set_root(Widget root) { rt_.set_root(std::move(root)); }
+void AppRuntime::set_root(Widget root) {
+  add_host_menus(root, hostMenus_);
+  rt_.set_root(std::move(root));
+}
 
 // ── per-frame (neutral core) ─────────────────────────────────────────────────────────────────────
 
