@@ -507,53 +507,113 @@ node's `fit:`. `algorithm` picks the `cvc::sdf` implementation: `v2` (the defaul
 or `igl` (exact AABB distance signed by the fast winding number, robust to holes); `igl`
 needs a `CVC_ENABLE_LIBIGL` build and falls back to `v2` with a warning without one.
 
+**`fit:`** stands a loaded mesh on the ground: `fit: { height: H, up: x | y | z, flip: true }`
+turns the dataset's own up axis to +z (`up: y` is a +90° turn about x, `up: x` the cyclic
+x→z), then with `flip` turns it upside down (a half turn about x, for a scan stored head
+down), centres it in x and y, sits it on z = 0 and scales its largest extent to H.
+
 **`type: mesh_lab`** ([`mesh_nodes.h`](../inc/cvc/gl/ariadne/mesh_nodes.h)) reads its
 `source:`/`fit:`/`material:` like a `geometry` node and processes the mesh with
 `cvc::mesh_ops`. Its keys live under the node's own state, `<node>.mesh_ops.*`:
 
 | key | meaning | seeded from prop |
 |---|---|---|
-| `request` | `smooth`, `decimate`, `repair`, `orient`, `curvature`, `reset` (§5.5) | — |
+| `request` | `smooth`, `decimate`, `repair`, `orient`, `curvature`, `reset`, `load`, `reload` (§5.5); several separated by spaces run in order, as in `load smooth` | — |
 | `busy`, `status`, `stats.vertices`, `stats.faces` | published | — |
+| `stats.work_ms` | published: the wall time of the last run of commands, from the first to idle | — |
+| `source.file` | the mesh `load` reads: a path or URI, a relative path resolved against the document's directory (`stanford.bunny` is built in) | `source: { file }` |
+| `source.up`, `source.flip`, `source.height` | the `fit:` `load` applies: up axis `x`/`y`/`z`, upside down, height (0 = no fit) | `fit:` |
 | `smooth.method` | `cotan` (implicit) / `uniform` / `taubin` | `smooth_method` |
 | `smooth.iterations`, `smooth.lambda`, `smooth.fix_boundary` | `cvc::smooth_params` | `smooth_iterations`, `smooth_lambda`, `fix_boundary` |
 | `decimate.target_faces` | triangle target for `cvc::simplify` | `target_faces` |
 | `repair.weld`, `repair.remove_degenerate`, `repair.remove_unreferenced`, `repair.orient` | `cvc::repair_params` | `weld`, `remove_degenerate`, `remove_unreferenced`, `orient` |
-| `color.mode` | `none`, `mean`, `gaussian`, `k1`, `k2`, `geodesic` — followed live | `color_mode` |
+| `color.mode` | `none`, `mean`, `gaussian`, `k1`, `k2`, `geodesic`, `modes` — followed live | `color_mode` |
 | `color.colormap` | `viridis`, `magma`, `plasma`, `inferno`, `turbo`, `jet`, `parula`, `gray` | `colormap` |
-| `geodesic.source` | source vertex for `geodesic` (clamped to #V-1) | `geodesic_source` |
+| `geodesic.source` | source vertex for `geodesic` (clamped to #V-1; -1 is the highest vertex) | `geodesic_source` |
+| `modes.index` | the Laplace–Beltrami eigenfunction `modes` shows (`fem::laplacian_eigenmodes` on the surface; 1 is the first non-constant, up to 50) | `mode` |
 | `color.min`, `color.max` | the colour range used (2-98% percentiles for curvature) | — |
 
 `curvature` switches a non-curvature `color.mode` to `mean` (or recomputes the one shown).
 A geodesic solver is cached per mesh version, so moving the source is two
-back-substitutions.
+back-substitutions; so are the eigenpairs (at least ten are computed), so stepping
+`modes.index` through the first few reuses one eigensolve. `load` reads the file again only
+when a `source.*` key changed since the last load; otherwise it goes back to the loaded mesh
+(undoing a smooth or a decimate), and keeps those caches when that mesh is still the one
+shown. `reload` always reads it. A failed load says why in `status` and keeps the mesh.
 
-**`type: fe_lab`** reads a volume like a `volren` node (`source: { file }` or `{ sdf }`),
-tet-meshes it with the in-tree LBIE mesher (`cvc::tetrahedralize`, `CVC_ENABLE_MESHER`),
-and solves linear (P1) finite-element problems with `cvc::fem`. The node itself shows the
-field on the tet boundary surface; its child `<id>_slice` shows it on an axis-aligned cut.
+**`type: fe_lab`** reads a volume like a `volren` node (`source: { file }` or `{ sdf }`) and
+meshes it with the in-tree LBIE mesher (`CVC_ENABLE_MESHER`): tetrahedra
+(`cvc::tetrahedralize`, or `cvc::tetrahedralize2` for the layer between two isovalues) or
+hexahedra (`cvc::hexahedralize`). It solves linear (P1) finite-element problems on the
+tetrahedra with `cvc::fem`. It has two views:
+
+- **field** (the default): the node shows the field on the boundary, translucent while its
+  child `<id>_slice` shows the field on an axis-aligned cut. The boundary is the smooth surface
+  the elements approximate (`view.boundary: input`): an `sdf` source's own mesh, or a volume's
+  isosurface (`cvc::iso`), the field sampled onto it from the elements' boundary. With
+  `view.boundary: mesh`, or for an interval mesh, it is the elements' own boundary.
+- **elements**: the node shows the elements on one side of the cut plane (the slice axis and
+  offset; all of them with the slice off). Each is kept whole and flat-coloured by its size
+  (log2 of its edge length, one band per octree level) or its quality (a tetrahedron's minimum
+  dihedral angle in degrees, a hexahedron's scaled Jacobian). The child `<id>_edges` outlines
+  each exposed face, and `<id>_ghost` draws the whole outer surface at `view.ghost` opacity.
+
 Keys under `<node>.fe.*`:
 
 | key | meaning | seeded from prop |
 |---|---|---|
-| `request` | `mesh`, `solve`, `stop` (`stop` interrupts a heat solve; any other job runs to the end and the status says so) | `auto_mesh: true` seeds `mesh` |
-| `busy`, `status`, `progress` (0-100), `stats.tets`, `stats.vertices`, `field.min`, `field.max` | published | — |
+| `request` | `load`, `reload`, `mesh`, `solve`, `stop` (`stop` interrupts a heat solve; any other job runs to the end and the status says so); several separated by spaces run in order | `auto_mesh: true` seeds `mesh` |
+| `busy`, `status`, `progress` (0-100), `stats.vertices`, `field.min`, `field.max` | published | — |
+| `stats.tets`, `stats.hexes` | published: the element count (the other is 0) | — |
+| `stats.quality_min`, `stats.quality_mean` | published: minimum dihedral angle (tetrahedra, degrees) or scaled Jacobian (hexahedra) | — |
+| `stats.work_ms` | published: the wall time of the last run of commands, from the first to idle | — |
 | `stoppable` | published: 1 while a heat solve runs (the Stop button's `enabled_when`), else 0 | — |
-| `mesh.isovalue` | the bounding level, in the volume's units | `isovalue` |
+| `source.type` | `sdf` (the signed distance field of a mesh) or `volume` (a volume file) | `source:` |
+| `source.file` | the mesh or the volume: a path or URI, a relative path resolved against the document's directory (`stanford.bunny` is built in) | `source.sdf.mesh` / `source.file` |
+| `source.dim` | `sdf`: the grid's N; `volume`: resampled to N³ (0 = as stored) | `source.sdf.dim` / `resample` |
+| `source.algorithm` | `v1`, `v2` or `igl` for an `sdf` source | `source.sdf.algorithm` |
+| `source.up`, `source.flip`, `source.height` | the `fit:` applied to the elements: up axis, upside down, height (0 = none) | `fit:` |
+| `auto.mesh`, `auto.solve` | mesh after a load; solve after a mesh (or after a load that keeps the mesh) | `auto_mesh`, `auto_solve` |
+| `mesh.isovalue` | the bounding level, in the volume's units (an `sdf` source's are the mesh file's own) | `isovalue` |
 | `mesh.inside` | `below` (an SDF: mesh where v < isovalue) or `above` (a density) | `inside` (default `below` for an `sdf` source, else `above`) |
-| `mesh.improve`, `mesh.improve_iterations` | `cvc::improvement_method` (0-5) and its passes | `improve`, `improve_iterations` |
-| `problem` | `poisson` (-Δu = f, u = 0 on the boundary) or `heat` (hot floor) | `problem` |
+| `mesh.interval`, `mesh.isovalue2` | mesh the layer between the two isovalues (tetrahedra only), in either order | `interval`, `isovalue2` |
+| `mesh.elements` | `tet` or `hex` (hexahedra show in the elements view; a solve refuses them) | `elements` |
+| `mesh.improve`, `mesh.improve_iterations` | `cvc::improvement_method` (0-5; 5 is optimization) and its passes | `improve`, `improve_iterations` |
+| `problem` | `poisson` (-Δu = f, u = 0 on the boundary), `heat` (hot floor) or `modes` (free-vibration eigenmodes of the solid) | `problem` |
 | `poisson.f` | the constant source | `poisson_f` |
 | `heat.kappa`, `heat.dt`, `heat.steps` | backward-Euler heat; κ is relative: the diffusivity used is κ·extent² | `heat_kappa`, `heat_dt`, `heat_steps` |
+| `modes.index` | the eigenmode `modes` solves for (1 is the first non-constant, up to 50) | `mode` |
+| `view.mode` | `field` or `elements` | `view` |
+| `view.boundary` | `input` (the smooth surface, when there is one) or `mesh` | `boundary` |
 | `view.colormap`, `view.show_surface`, `view.show_slice` | display | `colormap`, `show_surface`, `show_slice` |
-| `view.slice_axis`, `view.slice_offset` | 0/1/2 and -1..1 across the mesh bounds | `slice_axis`, `slice_offset` |
+| `view.slice_axis`, `view.slice_offset` | 0/1/2 and -1..1 across the mesh bounds: the cut, in both views | `slice_axis`, `slice_offset` |
 | `view.surface_opacity` | the boundary's opacity while a slice shows | `surface_opacity` |
+| `view.color_by` | the elements' colour: `size` or `quality` | `color_by` |
+| `view.cut_side` | the side of the cut the elements view keeps: 1 (+) or -1 (−) | `cut_side` |
+| `view.ghost` | the outer surface's opacity in the elements view (0 = off) | `ghost` |
+| `view.fixed_range`, `view.range_min`, `view.range_max` | colour over a fixed range instead of the data's (both views) | `fixed_range`, `range_min`, `range_max` |
 
 The heat problem holds the boundary vertices in the lowest 5% of the height at 1 and
-insulates the rest; the body starts at 0. `auto_solve: true` solves after every mesh,
+insulates the rest; the body starts at 0. `auto.solve` solves after every mesh,
 unless a request written during the mesh job is already waiting: that request runs instead
-(a waiting re-mesh auto-solves in its turn).
+(a waiting re-mesh auto-solves in its turn). Eigenpairs are cached per mesh (at least four),
+so stepping `modes.index` through the first few re-solves nothing.
 Until the first mesh the node shows the volume's bounds as lines.
+
+**Switching sources.** The node's `source:` and `fit:` seed the `source.*` keys and are read
+when the scene is realized. A `load` request reads the keys again on the node's lane, but only
+when one changed; then, with `auto.mesh`, it meshes when the source or a `mesh.*` key changed,
+and otherwise solves (`auto.solve`). So a document can step one node through several datasets
+and problems, re-reading, re-meshing and re-solving only what changed, as
+[`fem_gallery.ari`](../examples/ariadne/documents/fem_gallery.ari) does. `reload` always reads
+the source. `fit:` places an `sdf` source's elements after its SDF is taken in the mesh file's
+own units, as it places a volume's: LBIE refines its octree by an error in the volume's value
+units, so an SDF scaled to the fit height would refine a small model everywhere.
+
+**Relative paths** in the `source.*` keys of both node types resolve against the directory of
+the document that declared the node (`SceneNode::base_dir`); a path found only relative to the
+working directory is read from there. A built-in node's `source: { file }` still resolves
+against the working directory.
 
 Both node types run their kernels on one `cvc::async_lane` per node — off the render
 thread, or deferred onto it in a single-threaded wasm build — and apply results in their
@@ -781,9 +841,11 @@ includes. Each binds state keys a C++ object owns, so it needs no host code;
 | `fe_controls` | an `fe_lab` node named `domain` (§5.4) |
 
 Components that address one node use a fixed node id; copy the file and change the id to
-drive another node. `examples/ariadne/documents/mesh_lab.ari` uses the last two. Run it from
-the repository root, where both paths resolve:
-`ariadne_hello examples/ariadne/documents/mesh_lab.ari --component-path src/cvc/ariadne`.
+drive another node. `examples/ariadne/documents/mesh_lab.ari` uses the last two, and so does
+`examples/ariadne/documents/fem_gallery.ari`, which steps one `fe_lab` and one `mesh_lab`
+through the twenty items of [FEM_GALLERY.md](FEM_GALLERY.md). Run them from the repository
+root, where the component path resolves:
+`arigl run --component-path src/cvc/ariadne examples/ariadne/documents/fem_gallery.ari`.
 
 ---
 

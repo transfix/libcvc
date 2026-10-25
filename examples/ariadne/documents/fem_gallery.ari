@@ -1,0 +1,418 @@
+# fem_gallery.ari — the FEM and mesh gallery (docs/FEM_GALLERY.md), live: twenty finite-element
+# and geometry-processing results on three datasets, one at a time, each computed in the scene
+# when you step to it.
+#
+# Two custom scene nodes from cvcGL's extension bundle (src/cvcGL/ariadne/mesh_nodes.cpp) do the
+# work, and the document only writes their keys:
+#   - `domain` (type: fe_lab): a solid -- the signed distance field of a mesh, or a CT volume --
+#     tet-meshed by LBIE and solved by cvc::fem (Poisson, heat, vibration modes), or LBIE's own
+#     elements cut away and coloured by size or quality;
+#   - `mesh` (type: mesh_lab): a triangle surface coloured by a Laplace-Beltrami eigenfunction,
+#     mean curvature or geodesic distance.
+# The item table is data: init: writes it into state (gallery.items.<i>: a title, three lines of
+# description, which node shows, that node's keys under .set, and the request that starts it).
+# on_tick applies an item when gallery.index changes: it copies the item's keys onto the nodes
+# (state-json / state-from-json), shows its node, fires its request and publishes the heading.
+# Step with the Gallery menu, the Gallery window's Previous / Next buttons, or the arrow keys
+# (Left / Right, PageUp / PageDown) where the host feeds keys to on_key. Each item also moves the
+# camera to its own view, unless Keep my view is ticked. The fe_controls, mesh_tools, lighting
+# and camera windows (the Windows menu) tinker with the current item. When an item's work is
+# done, gallery.work_ms (and gallery.times.<i>) holds how long its node took.
+#
+# The data: the built-in stanford.bunny, and examples/data/fem/head.off and vh4.rawiv (their
+# README says where they come from). --data names their directory; a relative one resolves
+# against this document's directory, so the default ../../data/fem is examples/data/fem (and,
+# with the document at /fem_gallery.ari in a browser's file system, /data/fem).
+#
+# Run from the repository root:
+#   arigl run --component-path src/cvc/ariadne examples/ariadne/documents/fem_gallery.ari
+#   arigl run --component-path src/cvc/ariadne examples/ariadne/documents/fem_gallery.ari --item 10
+# --tour S steps through the items on its own, S seconds after each one is done.
+# Both node types exist only in a libcvc built with CVC_ENABLE_LIBIGL, so `customs:` refuses the
+# document up front without them; meshing also needs CVC_ENABLE_MESHER and CVC_ENABLE_SDF.
+
+meta:
+  name: FEM and mesh gallery (Ariadne + libigl + LBIE)
+  author: cvc
+  description: Twenty finite-element and mesh-processing results, computed live one at a time
+  min_libcvc: 3.4.0
+
+customs:
+  - node: mesh_lab
+    required: true
+  - node: fe_lab
+    required: true
+
+args:
+  item: {type: int, default: 1, help: The item to open first (1-20)}
+  tour: {type: float, default: 0, help: Seconds to stay on each finished item before the next (0 = no tour)}
+  data: {type: string, default: ../../data/fem, help: The directory holding head.off and vh4.rawiv}
+
+import:
+  - cvc://components/stage_lighting.ari
+  - cvc://components/camera_controls.ari
+  - cvc://components/mesh_tools.ari
+  - cvc://components/fe_controls.ari
+
+menubar:
+  - menu: File
+    items:
+      - menu_item: Quit
+        on: quit
+  - menu: Gallery
+    items:
+      - menu_item: "Previous   (Left)"
+        on: (state-set "gallery.index" (% (+ (int (state-get "gallery.index")) (- (int (state-get "gallery.count")) 1)) (int (state-get "gallery.count"))))
+      - menu_item: "Next   (Right)"
+        on: (state-set "gallery.index" (% (+ (int (state-get "gallery.index")) 1) (int (state-get "gallery.count"))))
+      - separator
+      - menu_item: " 1. Bunny: Poisson"
+        on: (state-set "gallery.index" 0)
+      - menu_item: " 2. Bunny: heat, 10 steps"
+        on: (state-set "gallery.index" 1)
+      - menu_item: " 3. Bunny: heat, 40 steps"
+        on: (state-set "gallery.index" 2)
+      - menu_item: " 4. Bunny: heat, 160 steps"
+        on: (state-set "gallery.index" 3)
+      - menu_item: " 5. Bunny: vibration mode 1"
+        on: (state-set "gallery.index" 4)
+      - menu_item: " 6. Bunny: vibration mode 2"
+        on: (state-set "gallery.index" 5)
+      - menu_item: " 7. Bunny: vibration mode 3"
+        on: (state-set "gallery.index" 6)
+      - menu_item: " 8. Head: Poisson"
+        on: (state-set "gallery.index" 7)
+      - menu_item: " 9. Head: heat, 60 steps"
+        on: (state-set "gallery.index" 8)
+      - menu_item: "10. CT body: Poisson"
+        on: (state-set "gallery.index" 9)
+      - menu_item: "11. CT body: heat, 60 steps"
+        on: (state-set "gallery.index" 10)
+      - menu_item: "12. CT bone: heat, 80 steps"
+        on: (state-set "gallery.index" 11)
+      - menu_item: "13. Bunny surface: mode 5"
+        on: (state-set "gallery.index" 12)
+      - menu_item: "14. Bunny surface: mode 9"
+        on: (state-set "gallery.index" 13)
+      - menu_item: "15. Head surface: mean curvature"
+        on: (state-set "gallery.index" 14)
+      - menu_item: "16. Head surface: geodesic distance"
+        on: (state-set "gallery.index" 15)
+      - menu_item: "17. Head surface: mode 6"
+        on: (state-set "gallery.index" 16)
+      - menu_item: "18. LBIE hexahedra by size"
+        on: (state-set "gallery.index" 17)
+      - menu_item: "19. LBIE hexahedra by quality"
+        on: (state-set "gallery.index" 18)
+      - menu_item: "20. LBIE tetrahedra by quality"
+        on: (state-set "gallery.index" 19)
+  - menu: Windows
+    items:
+      - menu_item: Finite elements
+        bind: tree.fe_controls.open
+      - menu_item: Mesh tools
+        bind: tree.mesh_tools.open
+      - menu_item: Lighting
+        bind: tree.stage_lighting.open
+      - menu_item: Camera
+        bind: tree.camera_controls.open
+
+windows:
+  - window: Gallery
+    id: gallery
+    bind: gallery.heading # the title: "<n> / 20  <item>"
+    pos: [10, 30]
+    size: [470, 240]
+    children:
+      - text: ""
+        bind: gallery.desc1
+      - text: ""
+        bind: gallery.desc2
+      - text: ""
+        bind: gallery.desc3
+      - separator
+      - text: "status"
+        bind: gallery.status
+      - text: "last run (ms)"
+        bind: gallery.work_ms
+      - text: "progress %"
+        bind: graphics.root.children.domain.fe.progress
+        visible_when: (= (state-get "gallery.node") "domain")
+      - button: "< Previous"
+        on: (state-set "gallery.index" (% (+ (int (state-get "gallery.index")) (- (int (state-get "gallery.count")) 1)) (int (state-get "gallery.count"))))
+      - button: "Next >"
+        on: (state-set "gallery.index" (% (+ (int (state-get "gallery.index")) 1) (int (state-get "gallery.count"))))
+      - checkbox: Keep my view
+        bind: gallery.keep_view
+        tooltip: "step without moving the camera to each item's own view"
+  - include: fe_controls
+    pos: [700, 30]
+    size: [380, 700]
+    closable: true
+  - include: mesh_tools
+    pos: [700, 30]
+    size: [380, 640]
+    closable: true
+  - include: stage_lighting
+    pos: [500, 30]
+    size: [340, 420]
+    closable: true
+  - include: camera_controls
+    pos: [500, 460]
+    size: [340, 260]
+    closable: true
+
+# The item table. Each item writes EVERY key its node reads, so an item never inherits a setting
+# from the one before it; the nodes' load requests then re-read a source only when it changed, and
+# re-mesh only when the mesh keys did, so stepping between items on one solid only re-solves.
+init: |
+  (begin
+    (defun at (i k) (str-concat "gallery.items." (str i) "." k))
+    (defun put (i k v) (state-set (at i k) v))
+    (defun fe (i k v) (put i (str-concat "set.graphics.root.children.domain.fe." k) v))
+    (defun ms (i k v) (put i (str-concat "set.graphics.root.children.mesh.mesh_ops." k) v))
+    (defun about (i node title d1 d2 d3 request)
+      (begin
+        (put i "node" node) (put i "title" title) (put i "request" request)
+        (put i "desc1" d1) (put i "desc2" d2) (put i "desc3" d3)))
+    (set data (state-get "args.data"))
+    (defun file (name) (str-concat data "/" name))
+    ;; Where the camera looks from (applied to every viewer's camera unless Keep my view is on):
+    ;; every dataset is fitted to 100 units, standing on z = 0, so one orbit frames them all.
+    (defun camera (i azimuth elevation distance z)
+      (begin
+        (put i "view.orbit.azimuth" azimuth) (put i "view.orbit.elevation" elevation)
+        (put i "view.orbit.distance" distance) (put i "view.orbit.center.x" 0)
+        (put i "view.orbit.center.y" 0) (put i "view.orbit.center.z" z)))
+    (for i (range 20) (camera i -60 20 300 58))
+
+    ;; ---- fe_lab: a source, its mesh, a problem and a view ----
+    (defun source (i type path dim up flip)
+      (begin
+        (fe i "source.type" type) (fe i "source.file" path) (fe i "source.dim" dim)
+        (fe i "source.algorithm" "igl") (fe i "source.up" up) (fe i "source.flip" flip)
+        (fe i "source.height" 100)))
+    (defun bunny (i) (begin (source i "sdf" "stanford.bunny" 48 "y" 0) (inside i "below" 0)))
+    (defun head (i) (begin (source i "sdf" (file "head.off") 48 "z" 0) (inside i "below" 0)))
+    (defun ct (i iso)
+      (begin (source i "volume" (file "vh4.rawiv") 64 "z" 1) (inside i "above" iso)))
+    (defun inside (i side iso) (begin (fe i "mesh.inside" side) (fe i "mesh.isovalue" iso)))
+    (defun mesh (i elements solve)
+      (begin
+        (fe i "mesh.elements" elements) (fe i "mesh.interval" 0) (fe i "mesh.isovalue2" 0)
+        (fe i "mesh.improve" 0) (fe i "mesh.improve_iterations" 1)
+        (fe i "auto.mesh" 1) (fe i "auto.solve" solve)))
+    (defun view (i mode colormap slice)
+      (begin
+        (fe i "view.mode" mode) (fe i "view.colormap" colormap) (fe i "view.show_surface" 1)
+        (fe i "view.show_slice" slice) (fe i "view.slice_axis" 1) (fe i "view.slice_offset" 0)
+        (fe i "view.surface_opacity" 0.3) (fe i "view.cut_side" 1) (fe i "view.ghost" 0)
+        (fe i "view.fixed_range" 0) (fe i "view.range_min" 0) (fe i "view.range_max" 1)))
+    (defun problem (i name steps mode)
+      (begin
+        (fe i "problem" name) (fe i "poisson.f" 1) (fe i "heat.kappa" 1) (fe i "heat.dt" 0.002)
+        (fe i "heat.steps" steps) (fe i "modes.index" mode)))
+    (defun poisson (i) (begin (mesh i "tet" 1) (problem i "poisson" 40 1) (view i "field" "parula" 1)))
+    (defun heat (i steps slice)
+      (begin (mesh i "tet" 1) (problem i "heat" steps 1) (view i "field" "turbo" slice)))
+    (defun modes (i k) (begin (mesh i "tet" 1) (problem i "modes" 40 k) (view i "field" "turbo" 0)))
+    (defun elements (i kind by colormap)
+      (begin (mesh i kind 0) (problem i "poisson" 40 1) (view i "elements" colormap 1)
+             (fe i "view.color_by" by)))
+
+    ;; ---- mesh_lab: a surface and what colours it ----
+    (defun surface (i path up mode index colormap)
+      (begin
+        (ms i "source.file" path) (ms i "source.up" up) (ms i "source.flip" 0)
+        (ms i "source.height" 100) (ms i "color.mode" mode) (ms i "modes.index" index)
+        (ms i "color.colormap" colormap) (ms i "geodesic.source" -1)
+        (ms i "smooth.method" "cotan") (ms i "smooth.lambda" 0.0002) (ms i "smooth.iterations" 1)
+        (ms i "smooth.fix_boundary" 0)))
+
+    ;; ---- the twenty items (docs/FEM_GALLERY.md, examples/cvcgl/fem_gallery_docs.sh) ----
+    (bunny 0) (poisson 0)
+    (about 0 "domain" "Bunny: Poisson" "-lap u = 1 inside the bunny, u = 0 on its boundary."
+      "The solid is the inside of the bunny's SDF (48^3), tet-meshed by LBIE;"
+      "the boundary is see-through, and the cut shows the field inside." "stop load")
+    (for k (list 1 2 3)
+      (let ((steps (nth (list 10 40 160) (- k 1))))
+        (begin
+          (bunny k) (heat k steps 1)
+          (about k "domain" (str-concat "Bunny: heat, " (str steps) " steps")
+            "Heat from a hot floor: the lowest 5% of the boundary is held at 1,"
+            "the rest insulated, the body starting at 0. Backward Euler,"
+            (str-concat (str steps) " steps of 0.002 (diffusivity: extent^2).") "stop load"))))
+    (for k (list 1 2 3)
+      (begin
+        (bunny (+ k 3)) (modes (+ k 3) k)
+        (about (+ k 3) "domain" (str-concat "Bunny: vibration mode " (str k))
+          "A free-vibration (Neumann) eigenmode of the solid bunny,"
+          "fem::laplacian_eigenmodes on its tetrahedra; mode 0 is constant."
+          (if (= k 1) "Mode 1 is the ears swinging against the body." "") "stop load")))
+    (head 7) (poisson 7)
+    (about 7 "domain" "Head: Poisson" "TexMol's head scan, solid: its SDF at 48^3, tet-meshed."
+      "-lap u = 1 inside, u = 0 on the boundary." "" "stop load")
+    (head 8) (heat 8 60 1)
+    (about 8 "domain" "Head: heat, 60 steps" "TexMol's head scan, solid, heated from the neck."
+      "The lowest 5% of the boundary is held at 1, the rest insulated;"
+      "60 backward-Euler steps of 0.002." "stop load")
+    (ct 9 45) (poisson 9)
+    (about 9 "domain" "CT body: Poisson" "VolRover's Visible Human CT (vh4), resampled to 64^3:"
+      "the body is everything denser than 45. The lungs are cavities,"
+      "so they hold u = 0 like the skin." "stop load")
+    (ct 10 45) (heat 10 60 1)
+    (about 10 "domain" "CT body: heat, 60 steps" "The CT body (denser than 45), heated from below."
+      "60 backward-Euler steps of 0.002 from a hot floor." "" "stop load")
+    (ct 11 80) (heat 11 80 0)
+    (about 11 "domain" "CT bone: heat, 80 steps" "The CT above density 80: the skeleton."
+      "Heat rises from the floor through the spine and ribs; the pieces"
+      "the CT does not connect to the floor stay cold." "stop load")
+    (surface 12 "stanford.bunny" "y" "modes" 5 "turbo")
+    (about 12 "mesh" "Bunny surface: mode 5" "A Laplace-Beltrami eigenfunction of the triangle"
+      "surface itself: fem::laplacian_eigenmodes on the surface domain." "" "load")
+    (surface 13 "stanford.bunny" "y" "modes" 9 "turbo")
+    (about 13 "mesh" "Bunny surface: mode 9" "Laplace-Beltrami eigenfunction 9 of the surface:"
+      "higher modes vibrate faster, with more nodal lines." "" "load")
+    (surface 14 (file "head.off") "z" "mean" 1 "viridis")
+    (about 14 "mesh" "Head surface: mean curvature" "vertex_curvature on the head's surface."
+      "The scan is terraced, so it is smoothed first (cotangent flow,"
+      "2e-4); the colours span the 2nd to 98th percentile." "load smooth")
+    (surface 15 (file "head.off") "z" "geodesic" 1 "turbo")
+    (about 15 "mesh" "Head surface: geodesic distance" "geodesic_distance (the heat method) along"
+      "the surface, from the crown: the highest vertex." "" "load")
+    (surface 16 (file "head.off") "z" "modes" 6 "turbo")
+    (about 16 "mesh" "Head surface: mode 6" "Laplace-Beltrami eigenfunction 6 of the head's surface."
+      "" "" "load")
+    (bunny 17) (elements 17 "hex" "size" "turbo") (fe 17 "view.ghost" 0.12)
+    (about 17 "domain" "LBIE hexahedra by size" "LBIE's hexahedra of the bunny, cut away at the middle:"
+      "colour is the octree level (log2 of the edge length), fine along"
+      "the surface and coarse inside. The ghost is the removed half." "stop load")
+    (bunny 18) (elements 18 "hex" "quality" "inferno")
+    (fe 18 "view.fixed_range" 1) (fe 18 "view.range_min" 0) (fe 18 "view.range_max" 1)
+    (about 18 "domain" "LBIE hexahedra by quality" "Each hexahedron's scaled Jacobian (1 = a cube)."
+      "The dark cells are poor or inverted: they sit where the boundary"
+      "layer meets the coarse interior." "stop load")
+    (bunny 19) (elements 19 "tet" "quality" "inferno")
+    (fe 19 "view.fixed_range" 1) (fe 19 "view.range_min" 0) (fe 19 "view.range_max" 70.5)
+    (about 19 "domain" "LBIE tetrahedra by quality" "Each tetrahedron's minimum dihedral angle,"
+      "from 0 to 70.5 degrees (a regular tetrahedron)." "" "stop load")
+
+    (state-set "gallery.count" 20)
+    (state-set "gallery.index" (% (+ 20 (- (int (state-get "args.item")) 1)) 20))
+    (state-set "gallery.applied" -1)
+    (state-set "gallery.ready_at" "")
+    (state-set "gallery.keep_view" 0)
+    (for i (range 20) (state-set (str-concat "gallery.times." (str i)) "-"))
+    (state-set "gallery.show.domain" 1)
+    (state-set "gallery.show.mesh" 0)
+    (for w (list "fe_controls" "mesh_tools" "stage_lighting" "camera_controls")
+      (state-set (str-concat "tree." w ".open") 0)))
+
+# Apply the selected item when it changes, and mirror the shown node's status every frame.
+on_tick: |
+  (begin
+    (let ((i (state-get "gallery.index")))
+      (if (!= i (state-get "gallery.applied"))
+          (try
+            (let ((at (str-concat "gallery.items." i "."))
+                  (node (state-get (str-concat "gallery.items." i ".node"))))
+              (begin
+                (state-from-json "" (state-json (str-concat at "set")))
+                (if (= (state-get "gallery.keep_view") "1")
+                    nil
+                    (let ((skip (+ (string.length (state-root-path)) 1))
+                          (view (state-json (str-concat at "view"))))
+                      ;; state-children lists the whole subtree by full name: pick each
+                      ;; viewers.<name>.camera, relative to this document's root.
+                      (for c (state-children "viewers")
+                        (let ((rel (string.substring c skip (string.length c))))
+                          (if (= (length (string.split rel ".")) 3)
+                              (if (string.ends-with rel ".camera")
+                                  (state-from-json rel view)
+                                  nil)
+                              nil)))))
+                (state-set "gallery.show.domain" (if (= node "domain") 1 0))
+                (state-set "gallery.show.mesh" (if (= node "mesh") 1 0))
+                (if (= node "mesh") (state-set "graphics.root.children.domain.fe.request" "stop") nil)
+                (state-set (str-concat "graphics.root.children."
+                                       (if (= node "domain") "domain.fe" "mesh.mesh_ops") ".request")
+                           (state-get (str-concat at "request")))
+                (state-set "gallery.node" node)
+                (state-set "gallery.heading"
+                           (str-concat (str (+ 1 (int i))) " / " (state-get "gallery.count") "   "
+                                       (state-get (str-concat at "title"))))
+                (state-set "gallery.desc1" (state-get (str-concat at "desc1")))
+                (state-set "gallery.desc2" (state-get (str-concat at "desc2")))
+                (state-set "gallery.desc3" (state-get (str-concat at "desc3")))
+                (state-set "gallery.ready_at" "")
+                (state-set "gallery.work_ms" "")
+                (state-set "gallery.applied" i)))
+            (catch (Exception e)
+              (begin
+                (state-set "gallery.applied" i)
+                (state-set "gallery.status" (str-concat "no gallery item '" i "'")))))
+          nil))
+    ;; Mirror the shown node's status, and note when it has finished the item's work.
+    (let ((keys (if (= (state-get "gallery.node") "domain")
+                    "graphics.root.children.domain.fe."
+                    "graphics.root.children.mesh.mesh_ops.")))
+      (begin
+        (state-set "gallery.status" (state-get (str-concat keys "status")))
+        (if (and (= (state-get "gallery.applied") (state-get "gallery.index"))
+                 (= (state-get (str-concat keys "busy")) "0")
+                 (= (state-get (str-concat keys "request")) "")
+                 (= (state-get "gallery.ready_at") ""))
+            (begin
+              (state-set "gallery.ready_at" (state-get "sim.time"))
+              (state-set "gallery.work_ms" (state-get (str-concat keys "stats.work_ms")))
+              (state-set (str-concat "gallery.times." (state-get "gallery.index"))
+                         (state-get (str-concat keys "stats.work_ms"))))
+            nil)))
+    ;; --tour S: step on once the item has been finished for S seconds of scene time.
+    ;; (and evaluates every argument, so the tests that parse numbers nest.)
+    (if (and (> (float (state-get "args.tour")) 0) (!= (state-get "gallery.ready_at") ""))
+        (if (> (- (float (state-get "sim.time")) (float (state-get "gallery.ready_at")))
+               (float (state-get "args.tour")))
+            (state-set "gallery.index"
+                       (% (+ (int (state-get "gallery.index")) 1) (int (state-get "gallery.count"))))
+            nil)
+        nil))
+
+on_key: |
+  (if (= (get-attr event "kind") "key_down")
+      (let ((k (get-attr event "key"))
+            (n (int (state-get "gallery.count")))
+            (i (int (state-get "gallery.index"))))
+        (if (or (= k "Right") (= k "PageDown"))
+            (state-set "gallery.index" (% (+ i 1) n))
+            (if (or (= k "Left") (= k "PageUp"))
+                (state-set "gallery.index" (% (+ i (- n 1)) n))
+                nil)))
+      nil)
+
+scene:
+  chrome: false
+  clock: {} # sim.time: the tour's dwell
+  background: { top: [0.10, 0.12, 0.16], bottom: [0.02, 0.02, 0.03] }
+  nodes:
+    # The solid. Its props are item 1's, so the first item finds its volume already loaded.
+    - node: domain
+      type: fe_lab
+      source: { sdf: { mesh: stanford.bunny, dim: 48, algorithm: igl } }
+      fit: { height: 100, up: y }
+      visible: { bind: gallery.show.domain, default: true }
+      material: { color: [0.75, 0.78, 0.85], ambient: 0.25, diffuse: 0.85 }
+      problem: poisson
+      colormap: parula
+      slice_axis: 1
+      surface_opacity: 0.3
+    # The surface, hidden until a surface item shows it.
+    - node: mesh
+      type: mesh_lab
+      source: { file: stanford.bunny }
+      fit: { height: 100, up: y }
+      visible: { bind: gallery.show.mesh, default: false }
+      material: { color: [0.85, 0.82, 0.88], ambient: 0.22, diffuse: 0.9 }
+  lights:
+    - light: studio
+      rig: three_point
