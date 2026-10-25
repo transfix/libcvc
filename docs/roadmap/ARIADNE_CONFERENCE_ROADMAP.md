@@ -621,6 +621,9 @@ false)` is the old drain-and-publish exactly); arisrv and arigl turn them on.
 | `--bind-writes on\|off` | on | bound writes (below): each client writes only its own participant, as itself; off takes any client's writes. Not an S7 switch |
 | `--room-token-file PATH` / `CVC_ARISRV_ROOM_TOKEN` | unset (an open room) | admit only clients that present the room token (§5f). Not an S7 switch |
 | `--device-pins PATH` | unset (pins in memory) | keep the device-key pins in PATH, so they outlive a restart (§5f). Device keys are always checked. Not an S7 switch |
+| `--adapt on\|off` | on | adapt each viewer's video rung to its link (§5j); off: every viewer at `--video-max`. Not an S7 switch |
+| `--video-max RUNG` / `--video-floor RUNG` | full / thumb | the best rung any viewer gets, and the lowest adaptation goes (§5j) |
+| `--viewer-kbps-max N` | 0 (none) | a viewer's budget, kbit/s: above it, it steps down (§5j) |
 | `CVC_ARISRV_ROOM_DEBUG=1` | off | adds an `[arisrv] aoi` stats line every ~5 s |
 | `CVC_ARIGL_REPLICATE_ROOT` (arigl) | unset = `conf` | empty or `*`: replicate the whole tree (the S6 A/B) |
 | `CVC_ARIGL_LOD=0` (arigl) | LOD on | every room mesh at full detail (the LOD A/B) |
@@ -851,6 +854,74 @@ roles, each already separable by existing machinery:
 - **D4 — Cross-injection + capability grants:** grant object + injection transport + host-side
   instantiation + accept policy + a **threat-model doc** (built on reduced-env / `apply_chroot` /
   channel-scoping #463–467 / §7.3–7.6 limits + `requires:`).
+
+### 5j. Per-viewer video rungs (adapted to each viewer's link)
+
+**Built:** the relay sends each viewer every camera at a **rung**.
+
+| Rung | What the viewer gets |
+|---|---|
+| `full` | the frame as its publisher sent it |
+| `half`, `quarter` | the frame re-encoded at 1/2 or 1/4 size |
+| `thumb` | quarter size at 2 fps |
+| `off` | no video; audio still flows |
+
+Each viewer's rung adapts to its link.
+
+- **Re-encoded on the relay, not sent at several sizes.** MJPEG frames stand alone, so the relay
+  makes a smaller rung itself (`cvc::media_rung_shaper`, `media_rungs.h`).
+  - It decodes the publisher's JPEG at 1/2 or 1/4 size. libjpeg-turbo scales in the DCT, so this is
+    cheaper than a full decode.
+  - It re-encodes the result once per frame and rung, and every viewer on that rung gets the same
+    bytes.
+  - So a publisher uploads one stream, old clients need no change, and the policy is the relay's
+    alone.
+  - The relay cannot fix a congested *publisher*. Only the sender can send less, and a browser's
+    uplink already sheds frames at its backlog (`send_backlog` is `bufferedAmount`).
+- **Where it runs:** media endpoints gain `set_media_shaper`, asked per receiver after the gate. It
+  returns the frame as sent, a variant, or nothing. Each variant is encoded once per fanned frame.
+  The camera's AOI tier still applies first.
+- **The controller:** `room_rung_controller` (`room_rungs.h`) runs once a second over the relay's
+  link reports. For each viewer it reads:
+  - the queueing delay: the round trip above its minimum;
+  - the share of media frames dropped for it (the new per-link `media_sent` / `media_dropped`
+    counters);
+  - what it was sent, against an optional budget.
+
+  It steps the viewer down one rung after two bad seconds (queueing over 150 ms, more than 5%
+  dropped, or over budget). It steps back up only after 10 good seconds (queueing under 50 ms,
+  nothing dropped). A step up that fails before its wait is over doubles the next wait, up to 60 s.
+- **What viewers see:** the rung is published as `participants.<pid>.net.relay.video`, a key only the
+  relay writes, and arisrv logs each change. The page shows it as "video in: half (adapted to your
+  link)".
+- **Server settings:**
+
+  | Flag | Default | Effect |
+  |---|---|---|
+  | `--adapt on\|off` | on | off puts every viewer at `--video-max` |
+  | `--video-max RUNG` | `full` | the best rung any viewer gets |
+  | `--video-floor RUNG` | `thumb` | the lowest adaptation goes; `off` allows audio only |
+  | `--viewer-kbps-max N` | 0 (none) | a per-viewer budget |
+- **Camera off is a flag, not frames.** A client with its camera off sends no frames at all and
+  publishes `participants.<pid>.video.off`. Viewers then show "camera off" instead of freezing on the
+  last frame they got.
+- **Opus mics.** A mic sent as raw f32 is 1.5 Mbit/s; in Opus at 32 kbit/s it is about 1/45 of
+  that (`cvc::opus_encoder` / `opus_decoder`, `media_opus.h`, over libopus).
+  - The sender re-chunks the mic's 1024-frame chunks into 20 ms (960-frame) packets, one
+    `media_frame` each (codec `opus`). Each packet gets its own `seq`, so a gap means a lost
+    packet. Silence suppression still applies, and a new talk spurt resets the encoder.
+  - A receiver decodes each peer with its own decoder, since Opus is stateful. It conceals up to
+    two lost packets, and cuts the result into mixer-sized chunks, because the mixer sums one chunk
+    per peer.
+  - The relay forwards a mic as sent, whatever its codec, so it needs no libopus. A client
+    without libopus sends f32, which every client plays. It cannot decode a peer's Opus, so it
+    logs once and that peer is silent to it. Older clients are not provided for; this is not
+    widely deployed.
+  - libopus is optional, found by header and library, as zstd is, because cvcpkg's autotools
+    bundles ship no CMake config. On Windows the MSVC build links the MinGW DLL's import library
+    (`opus.lib`, cvcpkg libopus cvc.8, or `libopus.dll.a`), never the MinGW `libopus.a`. The wasm
+    bundle is cy-pca/cvcpkg#467; the browser client needs it to hear Opus.
+  - Audio is not re-encoded per viewer: 32 kbit/s is already far below anything video sends.
 
 ---
 

@@ -95,6 +95,26 @@ void write_participant_voice(cvc::app &app, const std::string &room, const std::
 bool read_participant_voice(cvc::app &app, const std::string &room, const std::string &pid,
                             bool &talking);
 
+// ----------------
+// Video state in the shared room tree
+// ----------------
+//   conf.rooms.<room>.participants.<pid>.video.off   "1" / "0"
+//       whether the participant's camera is off (muted) -- written by that client, changed-only,
+//       like voice.talking. A client sends no camera frames while it is off, so a viewer shows
+//       "camera off" from this leaf instead of freezing on the last frame it got. Absent = on.
+//   conf.rooms.<room>.participants.<pid>.net.relay.video   "full" / "half" / ... (video_rung_name)
+//       the size the relay sends that participant every camera at (media_rung_shaper), adapted
+//       to its link -- written by the relay (net.relay is the relay's), changed-only.
+void write_participant_video_off(cvc::app &app, const std::string &room, const std::string &pid,
+                                 bool off, bool force = false);
+// False (OFF untouched) when the leaf was never written.
+bool read_participant_video_off(cvc::app &app, const std::string &room, const std::string &pid,
+                                bool &off);
+void write_relay_video_rung(cvc::app &app, const std::string &room, const std::string &pid,
+                            const std::string &rung);
+// "" when never written.
+std::string read_relay_video_rung(cvc::app &app, const std::string &room, const std::string &pid);
+
 // conf.rooms.<room>.participants.<pid>.device -- the participant's device in this room, a
 // default identity before usernames (§5f): room_device_tag of the device id its link's Hello
 // carried. RELAY-written (room_write_gate refuses a client's write), changed-only, and from the

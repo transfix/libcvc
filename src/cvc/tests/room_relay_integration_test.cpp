@@ -47,6 +47,7 @@
 #include <cvc/core/app.h>
 #include <cvc/media/media_frame.h>
 #include <cvc/media/media_router.h>
+#include <cvc/media/media_rungs.h>
 #include <cvc/physics/body.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_cluster_shard.h>
@@ -264,6 +265,8 @@ public:
     grpc.set_inbound_gate(bind_gate);
     grpc.set_auth_config({opt.room_token, std::string()});
     grpc.set_device_pins(pins);
+    grpc.set_media_shaper(
+        [this](const cvc::media_frame &f, const std::string &v) { return shaper.shape(f, v); });
     grpc.start("127.0.0.1:0", kRelayId, "conf");
     grpc.set_relay(true);
     grpc.register_shard(shard.get());
@@ -279,6 +282,8 @@ public:
     ws.set_inbound_gate(bind_gate);
     ws.set_auth_config({opt.room_token, std::string()});
     ws.set_device_pins(pins);
+    ws.set_media_shaper(
+        [this](const cvc::media_frame &f, const std::string &v) { return shaper.shape(f, v); });
     ws.start("127.0.0.1:0", kRelayId, "conf");
     ws.set_relay(true);
     ws.register_shard(shard.get());
@@ -534,6 +539,9 @@ public:
   std::shared_ptr<cvc::state_inbound_gate> bind_gate; // one for both planes (null: off)
   // Device-key pins, in memory, for both planes (arisrv keeps one always; --device-pins a file).
   std::shared_ptr<cvc::state_device_pins> pins = std::make_shared<cvc::state_device_pins>();
+  // Each viewer's video rung on both planes, as arisrv shapes them (declared before the planes, so
+  // it outlives every fan that calls it). A test sets rungs directly; arisrv's controller does.
+  cvc::media_rung_shaper shaper;
   cvc::app app;
   std::unique_ptr<cvc::state_cluster_shard> shard;
 #if defined(CVC_ENABLE_GRPC)
@@ -1381,6 +1389,42 @@ TEST(RoomRelayLoopbackTest, RoomTokenAdmitsOnlyItsHolders) {
     for (const cvc::state_transport *tp : r.planes)
       for (const cvc::state_link_report &l : tp->link_reports())
         EXPECT_NE(l.remote_node_id, c->pid) << "and never admitted";
+  }
+}
+
+// A viewer's video rung (media_rungs.h) shapes what the relay sends it of every camera, on each
+// transport: off sends none (the mic still flows), thumb a couple of frames a second, full all of
+// them. (The synthetic frames are not real JPEGs, so half and quarter would send them as is; the
+// re-encoding has its own tests, MediaRungs.*.)
+TEST(RoomRelayLoopbackTest, AViewersVideoRungShapesWhatItGets) {
+  for (const link_kind kind : link_kinds()) {
+    SCOPED_TRACE(kind == link_kind::grpc ? "grpc" : "ws");
+    test_relay r(relay_options{});
+    test_client A("A", kind), B("B", kind);
+    const std::vector<test_client *> cs = {&A, &B};
+    ASSERT_NO_FATAL_FAILURE(bring_up(r, cs));
+    A.set_media(true);
+    const auto camera = [&] { return B.tap.media("A", "camera"); };
+    const auto mic = [&] { return B.tap.media("A", "mic"); };
+
+    r.shaper.set_rung("B", cvc::video_rung::off);
+    run_room(r, cs, 0.5); // what was in flight lands
+    std::uint64_t cam0 = camera(), mic0 = mic();
+    run_room(r, cs, 2.0);
+    EXPECT_EQ(camera() - cam0, 0u) << "off: no camera";
+    EXPECT_GT(mic() - mic0, 40u) << "but the mic flows";
+
+    r.shaper.set_rung("B", cvc::video_rung::thumb);
+    cam0 = camera();
+    run_room(r, cs, 3.0);
+    const std::uint64_t thumbs = camera() - cam0;
+    EXPECT_GE(thumbs, 3u) << "thumb: about 2 a second";
+    EXPECT_LE(thumbs, 9u);
+
+    r.shaper.set_rung("B", cvc::video_rung::full);
+    cam0 = camera();
+    run_room(r, cs, 2.0);
+    EXPECT_GT(camera() - cam0, 40u) << "full: every frame (30 a second)";
   }
 }
 

@@ -113,6 +113,14 @@ std::string participant_talking(const std::string &room, const std::string &pid)
   return sub(room_participant_path(room, pid), {"voice", "talking"});
 }
 
+std::string participant_video_off(const std::string &room, const std::string &pid) {
+  return sub(room_participant_path(room, pid), {"video", "off"});
+}
+
+std::string relay_video_rung(const std::string &room, const std::string &pid) {
+  return sub(participant_net(room, pid), {"relay", "video"});
+}
+
 } // namespace
 
 void write_participant_net(cvc::app &app, const std::string &room, const std::string &pid,
@@ -165,6 +173,31 @@ bool read_participant_voice(cvc::app &app, const std::string &room, const std::s
     return false;
   talking = v == "1";
   return true;
+}
+
+void write_participant_video_off(cvc::app &app, const std::string &room, const std::string &pid,
+                                 bool off, bool force) {
+  set_changed_once(app, participant_video_off(room, pid), off ? "1" : "0", force);
+}
+
+bool read_participant_video_off(cvc::app &app, const std::string &room, const std::string &pid,
+                                bool &off) {
+  cvc::state *n = app.root().findDescendant(participant_video_off(room, pid));
+  const std::string v = n ? n->value() : std::string();
+  if (v.empty())
+    return false;
+  off = v == "1";
+  return true;
+}
+
+void write_relay_video_rung(cvc::app &app, const std::string &room, const std::string &pid,
+                            const std::string &rung) {
+  set_changed_once(app, relay_video_rung(room, pid), rung);
+}
+
+std::string read_relay_video_rung(cvc::app &app, const std::string &room, const std::string &pid) {
+  cvc::state *n = app.root().findDescendant(relay_video_rung(room, pid));
+  return n ? n->value() : std::string();
 }
 
 std::string room_device_tag(const std::string &room, const std::string &device_id) {

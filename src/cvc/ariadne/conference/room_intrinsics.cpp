@@ -279,7 +279,13 @@ void register_room_intrinsics(cvc::app &app) {
           for (const room_participant &p : room_roster(app, room_id)) {
             net_sample net;
             read_participant_net(app, room_id, p.pid, net);
+            // Its camera is off (it sends no frames: show "camera off", not its last frame), and
+            // the size the relay sends it video at ("" = not adapted yet).
+            bool video_off = false;
+            read_participant_video_off(app, room_id, p.pid, video_off);
             list.push_back(se::make_dict({
+                {"video_off", se::value_t(std::string(video_off ? "1" : "0"))},
+                {"video", se::value_t(read_relay_video_rung(app, room_id, p.pid))},
                 {"pid", se::value_t(p.pid)},
                 {"name", se::value_t(p.name)},
                 {"rtt_ms", se::value_t(net.rtt_ms)},

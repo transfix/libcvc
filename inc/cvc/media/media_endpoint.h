@@ -13,9 +13,16 @@
 
 #include <cvc/media/media_frame.h>
 #include <functional>
+#include <memory>
 #include <string>
 
 namespace cvc {
+
+// What a receiver gets of one frame (media_endpoint::set_media_shaper).
+struct media_shape {
+  bool drop = false;                          // nothing
+  std::shared_ptr<const media_frame> variant; // this instead (null: the frame as sent)
+};
 
 // cvc::media_endpoint — the PLUG-IN SURFACE for a media transport. A transport (WebSocket, gRPC,
 // and whatever protocol we add next: WebRTC, QUIC, ...) implements this so a cvc::media_router can
@@ -63,6 +70,15 @@ public:
   using media_gate_fn =
       std::function<bool(const media_frame &f, const std::string &receiver_node_id)>;
   virtual void set_media_gate(media_gate_fn gate) { (void)gate; }
+
+  // Per-receiver egress SHAPE, asked after the gate admits a frame: send the frame as is, a
+  // variant of it (the same media, smaller -- a relay's lower video rung, media_rungs.h) or
+  // nothing (media_shape). Same thread rules as the gate. One variant may serve many receivers: an
+  // endpoint encodes each variant once per frame. Setting it replaces any previous shaper; {} (the
+  // default) sends every frame as is. Default: ignored.
+  using media_shape_fn =
+      std::function<media_shape(const media_frame &f, const std::string &receiver_node_id)>;
+  virtual void set_media_shaper(media_shape_fn shaper) { (void)shaper; }
 };
 
 } // namespace cvc

@@ -49,11 +49,16 @@ public:
   std::uint64_t next_ping_seq() noexcept;
   // A Pong arrived: rtt_ns is now minus the echoed sent_ns, on the sender's own clock.
   void note_rtt(std::int64_t rtt_ns) noexcept;
+  // A media frame for this link was written, or dropped because the link could not take it (a
+  // backed-up send buffer, a stalled write): the share dropped is how far the link falls short.
+  void note_media_sent() noexcept;
+  void note_media_dropped() noexcept;
 
   struct counters {
     std::uint64_t bytes_in = 0, bytes_out = 0;
     std::uint64_t frames_in = 0, frames_out = 0;
     std::uint64_t pings_sent = 0, pongs_received = 0;
+    std::uint64_t media_sent = 0, media_dropped = 0;
     double rtt_ms = -1.0, rtt_last_ms = -1.0, rtt_min_ms = -1.0;
   };
   counters read() const noexcept;
@@ -64,6 +69,7 @@ private:
   std::atomic<std::uint64_t> _bytes_in{0}, _bytes_out{0};
   std::atomic<std::uint64_t> _frames_in{0}, _frames_out{0};
   std::atomic<std::uint64_t> _pings{0}, _pongs{0};
+  std::atomic<std::uint64_t> _media_sent{0}, _media_dropped{0};
   // RTTs in microseconds (-1 = none yet): the recent window (ring) for the median, last, and min.
   mutable std::mutex _rtt_mu;
   std::array<std::int64_t, kRttWindow> _rtt_ring{};

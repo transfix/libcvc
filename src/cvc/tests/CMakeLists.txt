@@ -33,6 +33,7 @@ add_executable(state_peer_registry_test state_peer_registry_test.cpp)
 add_executable(state_write_policy_test state_write_policy_test.cpp)
 add_executable(state_identity_test state_identity_test.cpp)
 add_executable(state_device_key_test state_device_key_test.cpp)
+add_executable(media_rungs_test media_rungs_test.cpp)
 add_executable(state_distributed_metrics_test state_distributed_metrics_test.cpp)
 add_executable(state_delegation_manager_test state_delegation_manager_test.cpp)
 add_executable(state_distributed_admin_test state_distributed_admin_test.cpp)
@@ -291,6 +292,7 @@ set(TEST_TARGETS
   state_write_policy_test
   state_identity_test
   state_device_key_test
+  media_rungs_test
   state_distributed_metrics_test
   state_delegation_manager_test
   state_distributed_admin_test
@@ -1242,6 +1244,12 @@ target_link_libraries(state_device_key_test
     GTest::gtest
     GTest::gtest_main
 )
+target_link_libraries(media_rungs_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
 
 target_link_libraries(state_distributed_metrics_test
   PRIVATE
@@ -2110,6 +2118,7 @@ target_compile_features(state_peer_registry_test PRIVATE cxx_std_17)
 target_compile_features(state_write_policy_test PRIVATE cxx_std_17)
 target_compile_features(state_identity_test PRIVATE cxx_std_17)
 target_compile_features(state_device_key_test PRIVATE cxx_std_17)
+target_compile_features(media_rungs_test PRIVATE cxx_std_17)
 target_compile_features(state_distributed_metrics_test PRIVATE cxx_std_17)
 target_compile_features(state_delegation_manager_test PRIVATE cxx_std_17)
 target_compile_features(state_distributed_admin_test PRIVATE cxx_std_17)
@@ -2586,6 +2595,7 @@ cvc_discover_tests(state_peer_registry_test)
 cvc_discover_tests(state_write_policy_test)
 cvc_discover_tests(state_identity_test)
 cvc_discover_tests(state_device_key_test)
+cvc_discover_tests(media_rungs_test)
 cvc_discover_tests(state_distributed_metrics_test)
 cvc_discover_tests(state_delegation_manager_test)
 cvc_discover_tests(state_distributed_admin_test)

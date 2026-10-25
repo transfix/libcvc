@@ -95,30 +95,39 @@ windows:
         visible_when: (not (= (state-get "cam_synthetic") "1"))
       - separator
       # Camera/mic on-off: stream-set-muted blanks the producer at the source (black video / silence)
-      # WITHOUT dropping the publish, so peers stay subscribed and the cadence holds.
+      # WITHOUT dropping the publish, so peers stay subscribed. The host then sends nothing (silence
+      # and a camera that is off cost no bandwidth) and publishes video.off, so peers show "camera
+      # off" instead of the last frame they got. Plain "on": the browser build's font is ASCII, so a
+      # "●" there draws as "?".
       - type: button
         label: "camera on/off"
         on: (begin (state-set "cam_on" (if (= (state-get "cam_on") "1") "0" "1")) (stream-set-muted (state-get "cam_token") (= (state-get "cam_on") "0")))
       - text: "camera"
-        bind: (if (= (state-get "cam_on") "1") "● on" "muted")
+        bind: (if (= (state-get "cam_on") "1") "on" "muted")
       - type: button
         label: "mic on/off"
         on: (begin (state-set "mic_on" (if (= (state-get "mic_on") "1") "0" "1")) (stream-set-muted (state-get "mic_token") (= (state-get "mic_on") "0")))
       - text: "mic"
-        bind: (if (= (state-get "mic_on") "1") "● on" "muted")
+        bind: (if (= (state-get "mic_on") "1") "on" "muted")
+      # The size the relay sends you everyone's camera at: it steps down when your link cannot
+      # keep up (more ping from queueing, frames dropped) and back up once it can.
+      - text: ""
+        bind: self.video_in
 
   # ── Users: the roster with per-peer local controls ──
   # One compact ROW per participant, as a table of unit widgets: every row is its own grid with the
   # SAME fixed column widths, so the rows line up as columns. ping / down / up are each person's
   # link to the relay AS THEY MEASURE IT (published to the room once a second; "--" = not measured
-  # yet). cam / mic / vol are LOCAL controls (what YOU see and hear of them), never sent.
+  # yet). cam / mic / vol are LOCAL controls (what YOU see and hear of them), never sent. The dot
+  # before each name is the size the relay sends that person video at, adapted to THEIR link:
+  # green full, red reduced (half, quarter, thumbnails), black none; hover it for which.
   # Every column has a FIXED width, the window wide enough for all of them: an auto-width column is
   # re-fitted to its content each frame, and a slider sized from its column then chased its own
   # width (it could not be dragged).
   - window: Users
     id: users
     pos: [390, 40]
-    size: [470, 260]
+    size: [480, 260]
     closable: true
     children:
       - text: "in the room"
@@ -126,8 +135,9 @@ windows:
       - separator
       - type: group
         id: users_head
-        layout: { kind: grid, col_widths: [110, 52, 52, 52, 30, 30, 72] }
+        layout: { kind: grid, col_widths: [16, 96, 52, 52, 52, 30, 30, 72] }
         children:
+          - text: ""
           - text: "name"
           - text: "ping"
           - text: "down"
@@ -140,8 +150,10 @@ windows:
       # one cell, even on a frame where neither check runs.
       - type: group
         id: users_you
-        layout: { kind: grid, col_widths: [110, 52, 52, 52, 30, 30, 72] }
+        layout: { kind: grid, col_widths: [16, 96, 52, 52, 52, 30, 30, 72] }
         children:
+          - type: status_dot
+            bind: self.dot
           - type: group
             children:
               - text: ""
@@ -163,8 +175,10 @@ windows:
       # Everyone else: one row per peer (peer.<i>), filled by on_tick.
       - type: group
         repeat: (state-get "peer.count")
-        layout: { kind: grid, col_widths: [110, 52, 52, 52, 30, 30, 72] }
+        layout: { kind: grid, col_widths: [16, 96, 52, 52, 52, 30, 30, 72] }
         children:
+          - type: status_dot
+            bind: peer.{i}.dot
           # Name: click to open + raise this peer's camera window (cam_<i>); GREEN while talking. One
           # group, so it is always one cell (see the you row).
           - type: group
@@ -213,9 +227,13 @@ windows:
     size: [330, 290]
     closable: true
     children:
+      # Their camera, or "camera off" while they have it off (they send no frames then).
       - type: stream_view
         bind: peer.{i}.cam
         size: 300
+        visible_when: (not (= (state-get "peer.{i}.video_off") "1"))
+      - text: "camera off"
+        visible_when: (= (state-get "peer.{i}.video_off") "1")
 
 on_tick: |
   (begin
@@ -228,16 +246,16 @@ on_tick: |
         ; every cam_<i> declares the SAME authored pos:, so without this the per-peer windows land
         ; exactly on top of one another and look like a single window — the #1 reason a user reports
         ; "I can't see the other cameras". Tile them in a 2-column grid to the RIGHT of the Users
-        ; window (which sits at x≈390–860): the roster is NEVER covered, and up to four cameras show
+        ; window (which sits at x≈390–870): the roster is NEVER covered, and up to four cameras show
         ; side-by-side without overlapping on a laptop screen. Seeded ONCE here, before any peer window
         ; exists, so each window's first-use geometry seed lands at its own spot; the user's drag then
         ; persists and wins. Covers 6 peers; a 7th+ falls back to the authored pos.
-        (state-set "tree.cam_0.geometry" "866,66,330,290")
-        (state-set "tree.cam_1.geometry" "1206,66,330,290")
-        (state-set "tree.cam_2.geometry" "866,364,330,290")
-        (state-set "tree.cam_3.geometry" "1206,364,330,290")
-        (state-set "tree.cam_4.geometry" "866,662,330,290")
-        (state-set "tree.cam_5.geometry" "1206,662,330,290")
+        (state-set "tree.cam_0.geometry" "876,66,330,290")
+        (state-set "tree.cam_1.geometry" "1216,66,330,290")
+        (state-set "tree.cam_2.geometry" "876,364,330,290")
+        (state-set "tree.cam_3.geometry" "1216,364,330,290")
+        (state-set "tree.cam_4.geometry" "876,662,330,290")
+        (state-set "tree.cam_5.geometry" "1216,662,330,290")
         (state-set "cam_on" "1") ; on/off toggles start ON (streams open unmuted)
         (state-set "mic_on" "1")
         (room-join "" (state-get "conf.room") (dict "name" (state-get "conf.self")))
@@ -279,7 +297,7 @@ on_tick: |
               (set taken #t)
               #f))
         (if taken
-            (state-set "name_error" (str-concat "name '" want "' is taken — pick another"))
+            (state-set "name_error" (str-concat "name '" want "' is taken; pick another"))
             (begin
               (state-set "name_error" "")
               (room-join "" (state-get "conf.room") (dict "name" want))
@@ -318,10 +336,21 @@ on_tick: |
     ; ── rebuild the OTHER-participant slots each tick (self excluded: it has My Camera + the you row) ──
     (set idx 0)
     (set total 1)
+    ; The dot for a rung: green full, red reduced, black none ("" before the relay has adapted it).
+    (defun rung-dot (v)
+      (if (= v "") ""
+        (if (= v "full") "green full video"
+          (if (= v "off") "black no video: the link cannot carry it"
+            (str-concat "red " v " video: reduced for the link")))))
     (for p (room-roster (state-get "conf.room"))
       (begin
         (set pid (get-attr p "pid"))
-        (if (= pid (state-get "self.pid")) #f
+        (if (= pid (state-get "self.pid"))
+          (begin
+           (state-set "self.dot" (rung-dot (get-attr p "video")))
+           (state-set "self.video_in"
+            (if (or (= (get-attr p "video") "") (= (get-attr p "video") "full")) ""
+                (str-concat "video in: " (get-attr p "video") " (adapted to your link)"))))
           (begin
             (state-set (str-concat "peer." idx ".pid") pid)
             (state-set (str-concat "peer." idx ".vol") (state-get (str-concat "ctl." pid ".vol")))
@@ -332,6 +361,8 @@ on_tick: |
               (state-get (str-concat "media." pid ".camera")))
             (state-set (str-concat "peer." idx ".talking")
               (state-get (str-concat "media." pid ".talking")))
+            (state-set (str-concat "peer." idx ".video_off") (get-attr p "video_off"))
+            (state-set (str-concat "peer." idx ".dot") (rung-dot (get-attr p "video")))
             ; their link quality, as THEY measure it (ping to the relay, bits/s down + up)
             (state-set (str-concat "peer." idx ".ping") (get-attr p "ping"))
             (state-set (str-concat "peer." idx ".down") (get-attr p "down"))

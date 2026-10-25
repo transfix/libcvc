@@ -36,6 +36,7 @@
 #include <cvc/ariadne/conference/room_intrinsics.h> // room_leave (retract a departed peer)
 #include <cvc/ariadne/conference/room_media_intrinsics.h> // room_relay_tick
 #include <cvc/ariadne/conference/room_net.h>   // per-participant + room link-quality stats
+#include <cvc/ariadne/conference/room_rungs.h> // each viewer's video rung, adapted to its link
 #include <cvc/ariadne/conference/room_scene.h> // seed_default_scene (the shared 3D scene)
 #include <cvc/ariadne/conference/room_write_gate.h> // bound writes: a client writes only itself
 #include <cvc/ariadne/holon.h>                 // server-authoritative avatar holon (H1)
@@ -163,6 +164,15 @@ int main(int argc, char **argv) {
   //   --device-pins PATH         keep the pins in PATH (one "<device id> <key>" line each, added
   //                              as devices first show), so they outlive a restart. Unset: pins
   //                              are kept in memory, for this run only
+  // Per-viewer video (§5j; not an S7 switch). The relay sends each viewer every camera at a rung --
+  // full (as sent), half or quarter (re-encoded smaller here, media_rungs.h), thumb (quarter at
+  // 2 fps) or off -- adapted to that viewer's link (room_rung_controller). Audio is always sent.
+  //   --adapt on|off             adapt each viewer's rung to its link (default on); off: every
+  //                              viewer at --video-max
+  //   --video-max RUNG           the best rung any viewer gets (default full)
+  //   --video-floor RUNG         the lowest adaptation goes (default thumb; off allows audio only)
+  //   --viewer-kbps-max N        a viewer's budget, kbit/s: above it, it steps down (default 0 =
+  //                              none)
   const char *s7_env = std::getenv("CVC_ARISRV_S7");
   const char *aoi_env = std::getenv("CVC_ARISRV_AOI");
   // CVC_ARISRV_S7: 0/off or 1/on (unset: on).
@@ -176,6 +186,7 @@ int main(int argc, char **argv) {
   bool roomTokenFlag = false; // --room-token-file was given (even with no path)
   std::string devicePinsFile;
   bool devicePinsFlag = false; // --device-pins was given (even with no path)
+  std::string adaptArg = "on", videoMaxArg = "full", videoFloorArg = "thumb", viewerKbpsArg = "0";
   std::string aoiVideoMaxArg = "0", mediaStallArg = "40", admissionHoldArg = "2000";
   for (int i = 1; i < argc; ++i) {
     const char *a = argv[i];
@@ -216,7 +227,14 @@ int main(int argc, char **argv) {
     } else if (!std::strcmp(a, "--device-pins")) {
       devicePinsFlag = true;
       devicePinsFile = next("");
-    }
+    } else if (!std::strcmp(a, "--adapt"))
+      adaptArg = next("on");
+    else if (!std::strcmp(a, "--video-max"))
+      videoMaxArg = next("");
+    else if (!std::strcmp(a, "--video-floor"))
+      videoFloorArg = next("");
+    else if (!std::strcmp(a, "--viewer-kbps-max"))
+      viewerKbpsArg = next("");
   }
   if (aoiMode.empty())
     aoiMode = scene == "large" ? "hall" : "conference";
@@ -225,13 +243,32 @@ int main(int argc, char **argv) {
       !check_choice("--relay-gate", relayGateArg, {"on", "off"}) ||
       !check_choice("--relay-journal", relayJournal, {"trim", "keep"}) ||
       !check_choice("--scene", scene, {"default", "large"}) ||
-      !check_choice("--bind-writes", bindWritesArg, {"on", "off"}))
+      !check_choice("--bind-writes", bindWritesArg, {"on", "off"}) ||
+      !check_choice("--adapt", adaptArg, {"on", "off"}) ||
+      !check_choice("--video-max", videoMaxArg, {"full", "half", "quarter", "thumb", "off"}) ||
+      !check_choice("--video-floor", videoFloorArg, {"full", "half", "quarter", "thumb", "off"}))
     return 2;
   long aoiVideoMaxN = 0, mediaStallMs = 40, admissionHoldMs = 2000;
   if (!check_count("--aoi-video-max", aoiVideoMaxArg, aoiVideoMaxN) ||
       !check_count("--media-stall-ms", mediaStallArg, mediaStallMs) ||
       !check_count("--admission-hold-ms", admissionHoldArg, admissionHoldMs))
     return 2;
+  long viewerKbps = 0;
+  if (!check_count("--viewer-kbps-max", viewerKbpsArg, viewerKbps))
+    return 2;
+  cvc::ariadne::conference::rung_params rungs;
+  rungs.adapt = adaptArg == "on";
+  (void)cvc::parse_video_rung(videoMaxArg, rungs.max_rung);
+  (void)cvc::parse_video_rung(videoFloorArg, rungs.floor_rung);
+  rungs.viewer_kbps_max = static_cast<double>(viewerKbps);
+  // Each viewer's rung (the controller, once a second) and the camera frames shaped to it (the
+  // shaper, on the transports' reader threads). Declared before the transports, so they outlive
+  // every fan that calls the shaper.
+  cvc::ariadne::conference::room_rung_controller rung_ctl(rungs);
+  cvc::media_rung_shaper shaper;
+  const auto shape = [&shaper](const cvc::media_frame &f, const std::string &viewer) {
+    return shaper.shape(f, viewer);
+  };
   const int aoiVideoMax = static_cast<int>((std::min)(aoiVideoMaxN, 1000000L));
   const bool s7 = s7Arg == "on";
   if (!s7)
@@ -311,6 +348,7 @@ int main(int argc, char **argv) {
   state_tp.set_inbound_gate(bindGate);
   state_tp.set_auth_config({roomToken, std::string()});
   state_tp.set_device_pins(devicePins);
+  state_tp.set_media_shaper(shape);
   state_tp.start(stateListen, nodeId, "conf");
   state_tp.set_relay(true);
   cvc::state_cluster_shard shard(app, "conf", nodeId);
@@ -339,6 +377,7 @@ int main(int argc, char **argv) {
   ws_tp.set_inbound_gate(bindGate);
   ws_tp.set_auth_config({roomToken, std::string()});
   ws_tp.set_device_pins(devicePins);
+  ws_tp.set_media_shaper(shape);
   ws_tp.start(wsListen, nodeId, "conf");
   ws_tp.set_relay(true);
   ws_tp.register_shard(&shard);
@@ -408,6 +447,14 @@ int main(int argc, char **argv) {
   else
     std::printf("[arisrv] device keys: checked; %zu pin(s) in %s\n", devicePins->size(),
                 devicePins->path().c_str());
+  const auto kbps_text = [&] {
+    return rungs.viewer_kbps_max > 0.0 ? std::to_string(viewerKbps) + " kb/s" : std::string("none");
+  };
+  std::printf("[arisrv] video per viewer: %s | best %s | floor %s | budget %s | transcode %s\n",
+              rungs.adapt ? "adapted to each link" : "fixed", cvc::video_rung_name(rungs.max_rung),
+              cvc::video_rung_name(rungs.floor_rung), kbps_text().c_str(),
+              cvc::jpeg_transcode_available() ? "libjpeg-turbo"
+                                              : "unavailable (smaller rungs send frames as is)");
   std::fflush(stdout);
 
   std::set<std::string> relayed;
@@ -521,6 +568,8 @@ int main(int argc, char **argv) {
       for (const std::string &nid : gone) {
         cvc::ariadne::conference::room_leave(app, room, nid);
         cvc::ariadne::write_intent(app, room, nid, cvc::ariadne::avatar_intent{});
+        shaper.forget_viewer(nid);
+        shaper.forget_publisher(nid);
         std::printf("[arisrv] participant left: %s\n", nid.c_str());
       }
       if (!gone.empty())
@@ -561,6 +610,20 @@ int main(int argc, char **argv) {
                                                   {r.stats.rtt_ms, in_kbps, out_kbps});
       }
       cvc::ariadne::conference::write_link_devices(app, room, links, present);
+      // Each viewer's video rung for its link, to the shaper and to the room (its net.relay.video,
+      // which its client shows).
+      for (const auto &[pid, s] : rung_ctl.step(links, now_s)) {
+        shaper.set_rung(pid, s.rung);
+        if (present.count(pid))
+          cvc::ariadne::conference::write_relay_video_rung(app, room, pid,
+                                                           cvc::video_rung_name(s.rung));
+        if (s.changed) {
+          std::printf("[arisrv] video: %s now %s (queue %.0f ms, %.0f%% dropped, %.0f kb/s)\n",
+                      pid.c_str(), cvc::video_rung_name(s.rung), s.queue_ms, 100.0 * s.drop,
+                      s.out_kbps);
+          std::fflush(stdout);
+        }
+      }
       cvc::ariadne::conference::write_server_net(app, room, total);
       // A client writing outside its own participant, or as another peer, is refused: say so (at
       // most every ~5 s) whenever the count has grown.
@@ -617,6 +680,12 @@ int main(int argc, char **argv) {
                         it == rates.end() ? 0.0 : it->second.in_bps * 8.0 / 1000.0,
                         it == rates.end() ? 0.0 : it->second.out_bps * 8.0 / 1000.0, r.idle_s);
           }
+        if (detail)
+          std::printf(
+              "[arisrv]   video shaping: %llu variant(s) made, %llu delivered, %llu KB saved\n",
+              static_cast<unsigned long long>(shaper.total_transcoded()),
+              static_cast<unsigned long long>(shaper.total_shaped()),
+              static_cast<unsigned long long>(shaper.total_bytes_saved() / 1024));
         std::fflush(stdout);
       }
     }

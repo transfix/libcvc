@@ -1403,23 +1403,39 @@ std::size_t state_transport_ws::write_media(const media_frame &m, const void *ex
   // One copy of the gate per frame: a concurrent set_media_gate swaps the slot, never the object
   // this fan is calling, and no lock is held across the socket writes below.
   std::shared_ptr<const media_gate_fn> gate;
+  std::shared_ptr<const media_shape_fn> shaper;
   if (gated) {
     std::lock_guard<std::mutex> lk(_media_gate_mu);
     gate = _media_gate;
+    shaper = _media_shaper;
   }
 
+  const auto encode = [](const media_frame &src, pb::Frame &out) {
+    pb::MediaFrame *mf = out.mutable_media();
+    mf->set_origin_node_id(src.origin_node_id);
+    mf->set_stream_id(src.stream_id);
+    mf->set_codec(src.codec);
+    mf->set_width(src.width);
+    mf->set_height(src.height);
+    mf->set_seq(src.seq);
+    mf->set_pts_seconds(src.pts_seconds);
+    mf->set_sample_rate(src.sample_rate);
+    mf->set_channels(src.channels);
+    mf->set_payload(src.payload.data(), static_cast<int>(src.payload.size()));
+  };
   pb::Frame frame;
-  pb::MediaFrame *mf = frame.mutable_media();
-  mf->set_origin_node_id(m.origin_node_id);
-  mf->set_stream_id(m.stream_id);
-  mf->set_codec(m.codec);
-  mf->set_width(m.width);
-  mf->set_height(m.height);
-  mf->set_seq(m.seq);
-  mf->set_pts_seconds(m.pts_seconds);
-  mf->set_sample_rate(m.sample_rate);
-  mf->set_channels(m.channels);
-  mf->set_payload(m.payload.data(), static_cast<int>(m.payload.size()));
+  encode(m, frame);
+  // The shaper's variants, each encoded once for every receiver it serves. Each is held here for
+  // the whole fan: matched by address, a variant freed mid-fan could hand its address to another.
+  std::vector<std::pair<std::shared_ptr<const media_frame>, pb::Frame>> variants;
+  const auto variant_frame = [&](const std::shared_ptr<const media_frame> &v) -> const pb::Frame & {
+    for (const auto &e : variants)
+      if (e.first == v)
+        return e.second;
+    variants.emplace_back(v, pb::Frame());
+    encode(*v, variants.back().second);
+    return variants.back().second;
+  };
 
   std::vector<std::shared_ptr<connection>> conns;
   {
@@ -1447,6 +1463,7 @@ std::size_t state_transport_ws::write_media(const media_frame &m, const void *ex
     const std::size_t limit = m.sample_rate > 0 ? backlog_drop * 4 : backlog_drop;
     if (backlog_drop != 0 && c->send_backlog() > limit) {
       _media_backlog_dropped.fetch_add(1, std::memory_order_relaxed);
+      c->link.note_media_dropped();
       continue;
     }
     // Per-receiver egress gate, asked last so a frame the backlog drop skips never counts as sent
@@ -1459,8 +1476,24 @@ std::size_t state_transport_ws::write_media(const media_frame &m, const void *ex
         continue;
       }
     }
-    if (c->write(frame)) {
+    // Then its shape: the frame as sent, a smaller variant, or nothing. An unidentified receiver
+    // is shaped as "", a viewer the shaper has no rung for.
+    const pb::Frame *out = &frame;
+    if (shaper) {
+      const std::string *pid = c->peer_id();
+      const media_shape s = (*shaper)(m, pid ? *pid : std::string());
+      if (s.drop) {
+        _media_shape_dropped.fetch_add(1, std::memory_order_relaxed);
+        continue;
+      }
+      if (s.variant) {
+        out = &variant_frame(s.variant);
+        _media_shaped.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+    if (c->write(*out)) {
       _sent_frames.fetch_add(1, std::memory_order_relaxed);
+      c->link.note_media_sent();
       ++n;
     }
   }
@@ -1492,6 +1525,16 @@ void state_transport_ws::set_media_gate(media_gate_fn gate) {
   }
   // `next` now holds the previous gate; it is released here, outside the lock (a fan still using
   // its own copy keeps it alive until that fan finishes).
+}
+
+void state_transport_ws::set_media_shaper(media_shape_fn shaper) {
+  std::shared_ptr<const media_shape_fn> next;
+  if (shaper)
+    next = std::make_shared<const media_shape_fn>(std::move(shaper));
+  {
+    std::lock_guard<std::mutex> lk(_media_gate_mu);
+    _media_shaper.swap(next);
+  }
 }
 
 void state_transport_ws::set_media_backlog_drop(std::size_t bytes) noexcept {

@@ -2108,3 +2108,93 @@ TEST(StateTransportWsTest, BridgeLegHonorsDestinationRegistry) {
   G.stop();
 }
 #endif // CVC_ENABLE_GRPC
+
+// The media egress shaper is asked after the gate, per receiver: one gets a variant (its own
+// smaller copy), one gets nothing, one the frame as sent. Each delivery counts on that receiver's
+// link (state_link_stats media_sent), and a frame shaped out is not a link drop: the rung
+// controller reads media_dropped as congestion, and must not see its own off rung as one.
+TEST(StateTransportWsTest, RelayMediaShaperSendsEachReceiverItsShape) {
+  std::mutex mu;
+  std::vector<cvc::ws_media_frame> gotB, gotD;
+  std::atomic<int> gotC{0};
+  cvc::app aA, aB, aC, aD;
+  cvc::state_transport_ws S, tA, tB, tC, tD;
+  S.start("127.0.0.1:0", "S", "C");
+  S.set_relay(true);
+  cvc::media_router mr;
+  mr.add_endpoint(&S);
+  auto small = std::make_shared<cvc::media_frame>();
+  small->origin_node_id = "A";
+  small->stream_id = "camera";
+  small->codec = "mjpeg";
+  small->width = 80;
+  small->height = 60;
+  small->seq = 1;
+  small->payload = {0xff, 0xd8, 0xff, 0xd9};
+  S.set_media_shaper([&](const cvc::media_frame &, const std::string &receiver) {
+    cvc::media_shape s;
+    if (receiver == "B")
+      s.variant = small;
+    else if (receiver == "C1")
+      s.drop = true;
+    return s;
+  });
+
+  cvc::state_cluster_shard sA(aA, "C", "A"), sB(aB, "C", "B"), sC(aC, "C", "C1"), sD(aD, "C", "D");
+  for (cvc::state_cluster_shard *s : {&sA, &sB, &sC, &sD})
+    s->attach();
+  tA.register_shard(&sA);
+  tB.register_shard(&sB);
+  tC.register_shard(&sC);
+  tD.register_shard(&sD);
+  tB.set_on_media([&](const cvc::ws_media_frame &m) {
+    std::lock_guard<std::mutex> lk(mu);
+    gotB.push_back(m);
+  });
+  tC.set_on_media([&](const cvc::ws_media_frame &) { gotC.fetch_add(1); });
+  tD.set_on_media([&](const cvc::ws_media_frame &m) {
+    std::lock_guard<std::mutex> lk(mu);
+    gotD.push_back(m);
+  });
+  for (cvc::state_transport_ws *t : {&tA, &tB, &tC, &tD})
+    ASSERT_TRUE(t->connect_to_peer(ws(S.listen_address()), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_identified(S, 4, std::chrono::milliseconds(2000)));
+
+  cvc::ws_media_frame m;
+  m.origin_node_id = "A";
+  m.stream_id = "camera";
+  m.codec = "mjpeg";
+  m.width = 320;
+  m.height = 240;
+  m.seq = 1;
+  m.payload.assign(2000, 0x5a);
+  tA.publish_media_frame(m);
+  ASSERT_TRUE(wait_until(
+      [&] {
+        std::lock_guard<std::mutex> lk(mu);
+        return !gotB.empty() && !gotD.empty();
+      },
+      std::chrono::milliseconds(3000)));
+  ASSERT_TRUE(wait_until([&] { return S.total_media_shape_dropped() == 1; },
+                         std::chrono::milliseconds(3000)));
+  {
+    std::lock_guard<std::mutex> lk(mu);
+    EXPECT_EQ(gotB[0].width, 80u) << "B gets its variant";
+    EXPECT_EQ(gotB[0].payload.size(), 4u);
+    EXPECT_EQ(gotD[0].width, 320u) << "D gets the frame as sent";
+    EXPECT_EQ(gotD[0].payload.size(), 2000u);
+  }
+  EXPECT_EQ(gotC.load(), 0) << "C gets nothing";
+  EXPECT_EQ(S.total_media_shaped(), 1u);
+  std::map<std::string, cvc::state_link_stats::counters> by;
+  for (const cvc::state_link_report &l : S.link_reports())
+    by[l.remote_node_id] = l.stats;
+  EXPECT_EQ(by["B"].media_sent, 1u);
+  EXPECT_EQ(by["D"].media_sent, 1u);
+  EXPECT_EQ(by["C1"].media_sent, 0u) << "a shaped-out frame is not a delivery";
+  EXPECT_EQ(by["C1"].media_dropped, 0u) << "nor a drop";
+
+  for (cvc::state_transport_ws *t : {&tA, &tB, &tC, &tD})
+    t->stop();
+  S.stop();
+}
