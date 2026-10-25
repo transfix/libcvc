@@ -670,13 +670,10 @@ TEST_F(LbieMesherTest, QualityImproveGivesTheSameMeshInAnyUnits) {
   }
 }
 
-// The adaptive hexahedral mesh of a sphere that leaves its box refines cells near the surface.
-// Before the refine_edge fix 702 of its 729 hexahedra had vertex 0 in place of a corner.
-TEST_F(LbieMesherTest, AdaptiveHexahedraHaveEightDistinctCorners) {
-  volume v = make_sphere_volume(ctx, 17, 1.2);
-  LBIE::geoframe g = run_do_mesh(v, 0.0f, 0.0f, kDefaultErr, kDefaultErrIn, LBIE::geoframe::HEXA);
-  ASSERT_GT(g.numquads, 0);
-  expect_geoframe_valid(g);
+namespace {
+
+// The number of g's hexahedra that use one vertex for two or more corners.
+int hexahedra_with_repeated_corners(const LBIE::geoframe &g) {
   int repeated = 0;
   for (int h = 0; h < g.numquads / 6; ++h) {
     std::array<unsigned int, 8> v = hexa_corners(g, h);
@@ -684,7 +681,36 @@ TEST_F(LbieMesherTest, AdaptiveHexahedraHaveEightDistinctCorners) {
     if (std::adjacent_find(v.begin(), v.end()) != v.end())
       ++repeated;
   }
-  EXPECT_EQ(repeated, 0) << "of " << g.numquads / 6 << " hexahedra";
+  return repeated;
+}
+
+} // namespace
+
+// The adaptive hexahedral mesh of a sphere that leaves its box refines cells near the surface.
+// Before the refine_edge fix 702 of its 729 hexahedra had vertex 0 in place of a corner.
+TEST_F(LbieMesherTest, AdaptiveHexahedraHaveEightDistinctCorners) {
+  volume v = make_sphere_volume(ctx, 17, 1.2);
+  LBIE::geoframe g = run_do_mesh(v, 0.0f, 0.0f, kDefaultErr, kDefaultErrIn, LBIE::geoframe::HEXA);
+  ASSERT_GT(g.numquads, 0);
+  expect_geoframe_valid(g);
+  EXPECT_EQ(hexahedra_with_repeated_corners(g), 0) << "of " << g.numquads / 6 << " hexahedra";
+}
+
+// Octree::traverse_qef refined the octree past the hexahedral grid's level wherever a cell's QEF
+// error passed the tolerance. That error is in the volume's units, so in a box 32 across, 2 units a
+// voxel, this sphere's octree had leaves two levels below the grid, and 3585 of its 8051 hexahedra
+// repeated a corner: where the level changes, min_vtx_hexa gave one coarse cell's vertex to several
+// corners, and AddRefine_* gave vertex 0 once a coarse vertex's 18 refine_edge slots were full.
+// fem_gallery's head.off at --dim 64 and the vh4.rawiv CT were about half collapsed. The grid now
+// stays uniform and only the templates refine it.
+TEST_F(LbieMesherTest, HexahedraHaveEightDistinctCornersWhereTheErrorIsLarge) {
+  volume v = make_sphere_volume(ctx, 17, 0.6, 16.0);
+  LBIE::geoframe g = run_do_mesh(v, 0.0f, 0.0f, kDefaultErr, kDefaultErrIn, LBIE::geoframe::HEXA);
+  ASSERT_GT(g.numquads, 0);
+  expect_geoframe_valid(g);
+  EXPECT_EQ(hexahedra_with_repeated_corners(g), 0) << "of " << g.numquads / 6 << " hexahedra";
+  // The grid's 4^3 cells have 27 interior vertices, one hexahedron each; any more are refinements.
+  EXPECT_GT(g.numquads / 6, 27) << "the templates refined no cell";
 }
 
 // ---------------------------------------------------------------------------

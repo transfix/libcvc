@@ -1953,6 +1953,11 @@ void Octree::traverse_qef(float err_tol)
 			if(temp > r) r = temp;
 			if(temp < r_min) r_min = temp;
 
+			// Hexahedra (flag_type 3) are built on a uniform grid of cells at oct_depth-2, and
+			// hexahedralize's templates refine that grid where the error is large. Refining the octree
+			// itself put level changes in the grid: across one, the dual hexahedron at a fine vertex took
+			// the coarse cell's vertex for several corners (min_vtx_hexa), and a coarse vertex shared by
+			// more refined edges and faces than its 18 refine_edge slots got vertex 0 from AddRefine_*.
 			//if (is_skipcell(oc_id)) {
 			if(minmax[oc_id].min > iso_val) {
 				continue;
@@ -1961,7 +1966,7 @@ void Octree::traverse_qef(float err_tol)
 				
 				
 			} else if (level < oct_depth-2 || (is_skipcell(oc_id) == 0 && level < oct_depth-2) ||
-				(get_err(oc_id) > err_tol && r < 60.0f && level < oct_depth) ){
+				(flag_type != 3 && get_err(oc_id) > err_tol && r < 60.0f && level < oct_depth) ){
 
 			//} else if (level <= 3) {  //4 
 
