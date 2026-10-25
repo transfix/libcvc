@@ -40,7 +40,7 @@ public:
   void install(cvc::ariadne::AppRuntime &rt, std::string *pending, bool *quit) const;
 
   // In the browser, name the document now showing in the page's URL (?doc=<name>), so a reload or a
-  // shared link opens it again. Nothing natively.
+  // shared link opens it again, and in the page's demo picker. Nothing natively.
   static void show_in_url(const std::string &doc);
 
 private:

@@ -200,6 +200,8 @@ def main() -> int:
     entries = []
     for demo in ordered:
         info = meta.get(demo, {})
+        if not info.get("card", True):
+            continue  # an app's own page (arigl's): it is in the menus as its documents
         e = {"slug": demo, "title": info.get("title", demo), "desc": info.get("desc", ""),
              "href": href(demo)}
         if app_of(demo):

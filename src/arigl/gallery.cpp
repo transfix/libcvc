@@ -107,9 +107,16 @@ void gallery::show_in_url(const std::string &doc) {
   const std::string name = fs::path(doc).stem().string();
   MAIN_THREAD_EM_ASM(
       {
+        const name = UTF8ToString($0);
         const u = new URL(window.location.href);
-        u.searchParams.set('doc', UTF8ToString($0));
+        u.searchParams.set('doc', name);
         window.history.replaceState(null, '', u.toString());
+        // The page's demo picker (examples/web's gallery.js) follows.
+        const sel = document.getElementById('demos');
+        if (sel)
+          for (const o of sel.options)
+            if (o.value.endsWith('?doc=' + encodeURIComponent(name)))
+              sel.value = o.value;
       },
       name.c_str());
 #else
