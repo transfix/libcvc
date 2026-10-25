@@ -462,7 +462,7 @@ inline PyObject *bbox_tuple(const cvc::bounding_box &b) {
 // The app's own shared compute pool (cvc::app::computePool). Non-owning: the
 // app owns it, so the returned handle keeps the app alive.
 %pythonappend cvc::app::compute_pool %{
-    val._pycvc_app = _app_keepalive(self)
+    val._pycvc_app = _keepalive(self)
 %}
 %extend cvc::app {
   cvc::thread_pool &compute_pool() { return $self->computePool(); }
@@ -729,15 +729,15 @@ PYCVC_LOD_KWARGS(cvc::lod::build_tiled_pyramids)
 %newobject cvc::lod::scene_reader::_pycvc_open_verified;
 
 // Readers and writers hold the app by reference (their destructors take the HDF5
-// library lock through it): keep it alive on the proxy, through _app_keepalive (pycvc.i).
+// library lock through it): keep it alive on the proxy, through _keepalive (pycvc.i).
 %pythonappend cvc::lod::scene_writer::scene_writer %{
-    if args: self._pycvc_app = _app_keepalive(args[0])
+    if args: self._pycvc_app = _keepalive(args[0])
 %}
 %pythonappend cvc::lod::scene_reader::scene_reader %{
-    if args: self._pycvc_app = _app_keepalive(args[0])
+    if args: self._pycvc_app = _keepalive(args[0])
 %}
 %pythonappend cvc::lod::scene_reader::_pycvc_open_verified %{
-    val._pycvc_app = _app_keepalive(ctx)
+    val._pycvc_app = _keepalive(ctx)
 %}
 %ignore cvc::lod::scene_writer::scene_writer(scene_writer &&);
 %ignore cvc::lod::scene_writer::operator=;
