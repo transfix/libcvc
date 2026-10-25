@@ -25,7 +25,6 @@ Runs under pytest or as a plain script (ctest: pycvc_gl_keepalive).
 
 import gc
 import os
-import sys
 
 import pycvc
 import pycvc_gl
@@ -270,7 +269,3 @@ if __name__ == "__main__":
             print(name)
             fn()
     print("pycvc_gl keep-alive tests: OK")
-    # Like the other pycvc_gl scripts (see test_pycvc_gl_imgui.py): exit past cvcGL's static
-    # teardown at interpreter exit, with the real status.
-    sys.stdout.flush()
-    os._exit(0)

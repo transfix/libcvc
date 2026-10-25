@@ -7,6 +7,7 @@ singleton crosses the boundary.
 """
 
 import os
+import sys
 
 import pycvc
 import pycvc_gl
@@ -189,12 +190,4 @@ check(
 )
 
 print("\n%s (%d failures)" % ("ALL PASS" if fails == 0 else "FAILED", fails))
-
-# cvcGL's static GL/state teardown races at interpreter exit (a known, harmless
-# boost::lock_error that fires AFTER results are printed). Exit hard with the real
-# status so the process code reflects the test, not the teardown race.
-import os
-import sys
-
-sys.stdout.flush()
-os._exit(1 if fails else 0)
+sys.exit(1 if fails else 0)
