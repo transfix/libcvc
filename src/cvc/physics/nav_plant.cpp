@@ -66,83 +66,112 @@ constexpr double kNone = std::numeric_limits<double>::quiet_NaN();
 // What nav_plant's keys are (binding_meta.h's form), relative to <prefix>.nav_plant.
 const detail::key_meta kPlantKeys[] = {
     {"latency", "knob", "s", 0, 0.5,
-     "The vehicle's response lag beyond the tick it holds a command (driver, pedals, engine). The "
-     "stopping governor takes the distance it covers off the distance to a wall."},
+     "How long the vehicle takes to respond to a command, beyond the tick it holds it (driver, "
+     "pedals, engine). The stopping speed limit allows for the distance covered meanwhile. "
+     "Higher: slows earlier. Default 0.1."},
     {"brake_margin", "knob", "1", 0.3, 1,
-     "The share of the vehicle's max_decel the stopping governor plans with."},
+     "The share of each vehicle's maximum braking the navigator plans its stops with. Lower: "
+     "brakes earlier, with more in reserve. Default 0.8."},
     {"plan.with_vehicle", "knob", "", 0, 1,
-     "1: the navigator plans with each vehicle's own acceleration, top speed, cornering and size; "
-     "0: with its own (veh_params)."},
+     "1: the navigator plans with each vehicle's own acceleration, top speed, cornering and "
+     "size; 0: with nav.vehicle's a_max, vmax, a_lat_max and footprint. Steering, braking and "
+     "latency are the vehicle's either way. Default 1."},
     {"plan.accel_margin", "knob", "1", 0.3, 1,
-     "The share of the vehicle's max_accel the navigator plans with."},
+     "With plan.with_vehicle: the share of each vehicle's maximum acceleration the navigator "
+     "plans with. Lower: gentler, with more in reserve. Default 0.8."},
     {"plan.lateral_g", "knob", "g", 0.1, 1.2,
-     "The lateral acceleration the navigator corners at, in g; at most tip_margin of the "
-     "vehicle's static stability factor."},
+     "With plan.with_vehicle: the sideways acceleration the navigator corners at, capped at "
+     "plan.tip_margin of the vehicle's rollover threshold. Higher: faster through bends, closer "
+     "to sliding or rolling. Default 0.5."},
     {"plan.tip_margin", "knob", "1", 0.3, 1,
-     "The share of the vehicle's static stability factor (its rollover threshold, in g) the "
-     "navigator may corner at."},
+     "With plan.with_vehicle: the share of each vehicle's rollover threshold (its static "
+     "stability factor, half its track over its centre of gravity's height, in g) that "
+     "cornering may reach. Lower: more margin against rolling. Default 0.8."},
     {"drift_nsub", "knob", "", 0, 64,
-     "Substeps of the kinematic bicycle the drift is measured against; 0 = the physics steps a "
-     "tick (doc 31 D14's nsub = k)."},
+     "Substeps of nav's kinematic bicycle model in the per-tick prediction the vehicle's motion "
+     "is compared with (the drift). Changes the measurement only, not the driving. 0: one per "
+     "physics step in the tick. Default 0."},
     {"modulation.tire_onset", "knob", "1", 0.3, 1.2,
-     "The tire use (combined slip over its peak) past which the drive slows (H4)."},
+     "The tire use (the most used tire's combined slip over its peak; 1 = at the grip limit) "
+     "past which the drive slows the vehicle. Lower: backs off sooner. Default 0.7."},
     {"modulation.tire_gain", "knob", "1", 0, 10,
-     "How fast the drive's speed damping grows per unit of tire use past its onset; 0 = off."},
+     "How fast the drive's speed damping grows per unit of tire use past "
+     "modulation.tire_onset. Higher: backs off harder near the grip limit. 0: off. Default 0."},
     {"modulation.tip_onset", "knob", "1", 0.1, 0.9,
-     "The load transfer (|left - right| over the total wheel load) past which the drive slows and "
-     "its barriers stiffen (H4)."},
+     "The load transfer (the left-right difference in wheel load over the total; 1 = one side "
+     "unloaded) "
+     "past which the drive slows the vehicle and stiffens its barriers. Lower: reacts sooner. "
+     "Default 0.4."},
     {"modulation.tip_gain", "knob", "1", 0, 10,
      "How fast the speed damping and the barriers' weight grow per unit of load transfer past "
-     "its onset; 0 = off."},
+     "modulation.tip_onset. Higher: backs off harder near rollover. 0: off. Default 0."},
     {"settings.step_world", "build", "", kNone, kNone,
-     "1: advance() steps the world; 0: the world steps itself on a shared clock."},
+     "1: the plant steps the physics world each tick (settings.physics_steps steps); 0: the "
+     "world steps itself on a shared clock and the plant only reads it."},
     {"settings.ground_z", "build", "m", kNone, kNone,
-     "The ground's height under the agents' starts."},
+     "The ground's height under the agents' starts, where the app gives no height map."},
     {"settings.spawn_height", "build", "m", kNone, kNone,
-     "How high above the ground a vehicle is added; < 0 = just above its wheels' full reach."},
-    {"settings.metres_per_world_unit", "build", "m", kNone, kNone, "Nav's world frame in metres."},
-    {"settings.physics_steps", "build", "", kNone, kNone, "Physics steps per nav tick."},
+     "How high above the ground a vehicle is added. Negative: just above its wheels with the "
+     "suspension fully extended."},
+    {"settings.metres_per_world_unit", "build", "m", kNone, kNone,
+     "Metres in one unit of nav's world frame."},
+    {"settings.physics_steps", "build", "", kNone, kNone,
+     "Physics steps per tick: nav's tick over the physics world's fixed step."},
     {"settings.drift_bins_g", "build", "g", kNone, kNone,
-     "The drift summary's lateral-acceleration bins: their upper edges."},
-    {"vehicles", "telemetry", "", kNone, kNone, "Vehicles the plant drives."},
+     "The upper edges of the lateral-acceleration bins the drift summary sorts ticks into; a "
+     "last, open bin holds the rest."},
+    {"vehicles", "telemetry", "", kNone, kNone, "Vehicles the plant drives, one per agent."},
     {"advance_us", "telemetry", "us", kNone, kNone,
-     "advance()'s mean wall time a tick, all vehicles."},
+     "The plant's mean wall-clock time per tick for all its vehicles, including the physics "
+     "steps when settings.step_world is 1."},
     {"advance_us_per_vehicle", "telemetry", "us", kNone, kNone,
-     "advance()'s mean wall time a tick, per vehicle."},
+     "advance_us divided by the number of vehicles."},
 };
 
 // A drift bin's keys, relative to <prefix>.nav_plant.drift.<b>.
 const detail::key_meta kBinKeys[] = {
-    {"lo_g", "telemetry", "g", kNone, kNone, "The bin's lower edge of lateral acceleration."},
+    {"lo_g", "telemetry", "g", kNone, kNone,
+     "The bin's lower edge of lateral acceleration (the bicycle model's, each tick)."},
     {"hi_g", "telemetry", "g", kNone, kNone, "The bin's upper edge; -1 for the open last bin."},
-    {"ticks", "telemetry", "", kNone, kNone, "Agent ticks in the bin."},
+    {"ticks", "telemetry", "", kNone, kNone,
+     "Ticks in the bin, counting each vehicle's tick separately."},
     {"position_rms_m", "telemetry", "m", kNone, kNone,
-     "RMS of the tick's position drift: the plant against nav's kinematic bicycle."},
-    {"position_max_m", "telemetry", "m", kNone, kNone, "The largest position drift."},
-    {"heading_rms_rad", "telemetry", "rad", kNone, kNone, "RMS of the tick's heading drift."},
-    {"heading_max_rad", "telemetry", "rad", kNone, kNone, "The largest heading drift."},
-    {"speed_rms_mps", "telemetry", "m/s", kNone, kNone, "RMS of the tick's speed drift."},
-    {"speed_max_mps", "telemetry", "m/s", kNone, kNone, "The largest speed drift."},
+     "RMS position drift over the bin's ticks: how far the vehicle ended a tick from where nav's "
+     "kinematic bicycle model predicted from the same start and command."},
+    {"position_max_m", "telemetry", "m", kNone, kNone, "The bin's largest position drift."},
+    {"heading_rms_rad", "telemetry", "rad", kNone, kNone,
+     "RMS heading drift over the bin's ticks: the vehicle's heading against the bicycle "
+     "model's prediction."},
+    {"heading_max_rad", "telemetry", "rad", kNone, kNone, "The bin's largest heading drift."},
+    {"speed_rms_mps", "telemetry", "m/s", kNone, kNone,
+     "RMS speed drift over the bin's ticks: the vehicle's speed against the bicycle model's "
+     "prediction."},
+    {"speed_max_mps", "telemetry", "m/s", kNone, kNone, "The bin's largest speed drift."},
 };
 
 // A vehicle's nav keys, relative to <prefix>.vehicles.<name>.nav.
 const detail::key_meta kAgentKeys[] = {
     {"steer_command", "telemetry", "rad", kNone, kNone,
-     "Nav's steering command this tick (+ left)."},
+     "Nav's steering command this tick, positive to the left."},
     {"accel_command", "telemetry", "m/s^2", kNone, kNone,
      "Nav's acceleration command this tick, along the heading."},
     {"drift.position_m", "telemetry", "m", kNone, kNone,
-     "This tick: where the vehicle is against where nav's kinematic bicycle puts it."},
-    {"drift.heading_rad", "telemetry", "rad", kNone, kNone, "This tick's heading drift."},
-    {"drift.speed_mps", "telemetry", "m/s", kNone, kNone, "This tick's speed drift."},
+     "This tick's position drift: how far the vehicle ended from where nav's kinematic bicycle "
+     "model predicted from the same start and command."},
+    {"drift.heading_rad", "telemetry", "rad", kNone, kNone,
+     "This tick's heading drift: the vehicle's heading against the bicycle model's prediction."},
+    {"drift.speed_mps", "telemetry", "m/s", kNone, kNone,
+     "This tick's speed drift: the vehicle's speed against the bicycle model's prediction."},
     {"drift.lateral_g", "telemetry", "g", kNone, kNone,
-     "The bicycle's lateral acceleration this tick."},
+     "The bicycle model's lateral acceleration this tick; it picks the drift summary's bin."},
     {"drift.stop_speed_mps", "telemetry", "m/s", kNone, kNone,
-     "The stopping speed the tick's command respected (latency-aware v_stop)."},
+     "The stopping speed the tick's command respected: the speed from which the vehicle can "
+     "still stop short of what is ahead, allowing for its latency."},
     {"tire_use", "telemetry", "1", kNone, kNone,
      "The most used tire's combined slip over its peak: 1 = at the grip limit (0 below 2 m/s)."},
     {"load_transfer", "telemetry", "1", kNone, kNone,
-     "|left - right| wheel load over the total: 1 = one side's wheels unloaded."},
+     "The left-right difference in wheel load over the total: 0 = even, 1 = one side's wheels "
+     "unloaded."},
     {"pitch_rad", "telemetry", "rad", kNone, kNone, "The chassis' pitch, nose up."},
     {"roll_rad", "telemetry", "rad", kNone, kNone, "The chassis' roll, left side up."},
 };
