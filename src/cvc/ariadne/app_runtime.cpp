@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cvc/ariadne/app_runtime.h>
 #include <cvc/ariadne/backend.h>  // cvc::ariadne::Backend (set_backend)
+#include <cvc/ariadne/bind.h>     // resolve_bind / read_or_seed / write
 #include <cvc/ariadne/doc_args.h> // the document's command line
 #include <cvc/ariadne/loader.h>   // load_file / LoadResult / ChannelDecl / sources_changed
 #include <cvc/ariadne/requires.h> // requires:, free_heads (what a document needs from its host)
@@ -122,6 +123,65 @@ void add_host_menus(Widget &root, const std::vector<Widget> &menus) {
 }
 
 } // namespace
+
+void AppRuntime::set_host_keys(std::vector<KeyBinding> keys) {
+  hostKeys_ = std::move(keys);
+  keysWindow_ = true;
+}
+
+namespace {
+
+// The Keys window: every binding, with its keys and a Change button that makes the next key down
+// its new one (Runtime::set_key_bindings).
+Widget keys_window(const std::vector<KeyBinding> &bindings) {
+  std::vector<Widget> kids;
+  kids.push_back(text(bindings.empty()
+                          ? "No keys to change here."
+                          : "Change, then press the new key. Escape keeps the old one."));
+  const std::string capture = kKeyCapture;
+  bool first = true;
+  std::string heading;
+  for (const KeyBinding &b : bindings) {
+    if (first || b.group != heading) {
+      heading = b.group;
+      kids.push_back(separator());
+      kids.push_back(text(heading.empty() ? "This document" : heading));
+      first = false;
+    }
+    const std::string waiting = "(= (state-get \"" + capture + "\") \"" + b.id + "\")";
+    Widget keys = text_bound("", key_binding_path(b));
+    keys.visible_when = "(not " + waiting + ")";
+    Widget prompt = text("press a key...");
+    prompt.visible_when = waiting;
+    Widget row = group({text(b.label.empty() ? b.id : b.label), std::move(keys), std::move(prompt),
+                        button("Change", "(state-set \"" + capture + "\" \"" + b.id + "\")")});
+    row.id = "key_" + b.id; // each row's Change button its own
+    row.layout.kind = LayoutKind::Grid;
+    row.layout.col_widths = {Track{Unit::Px, 150.0f}, Track{Unit::Px, 130.0f}, Track{}};
+    kids.push_back(std::move(row));
+  }
+  Widget w = window("Keys", std::move(kids));
+  w.id = kKeysWindow;
+  w.closable = true;
+  return w;
+}
+
+} // namespace
+
+void AppRuntime::add_keys(Widget &root, std::vector<KeyBinding> keys) {
+  keys.insert(keys.end(), hostKeys_.begin(), hostKeys_.end());
+  for (const KeyBinding &b : keys)
+    if (!b.keys.empty()) // the binding's own default; one with none is seeded by its reader
+      read_or_seed<std::string>(app_, resolve_bind(prefix_, key_binding_path(b)),
+                                join_keys(b.keys));
+  write<std::string>(app_, resolve_bind(prefix_, kKeyCapture), ""); // no Change waiting
+  if (keysWindow_ || !keys.empty()) {
+    read_or_seed<int>(app_, resolve_bind(prefix_, std::string("tree.") + kKeysWindow + ".open"),
+                      0); // closed until asked for
+    root.children.push_back(keys_window(keys));
+  }
+  rt_.set_key_bindings(std::move(keys));
+}
 
 bool AppRuntime::have_yaml() { return cvc::ariadne::have_yaml(); }
 
@@ -346,6 +406,7 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
   }
 
   add_host_menus(lr.root, hostMenus_);
+  add_keys(lr.root, std::move(lr.keys));
   rt_.set_root(std::move(lr.root)); // applied at the next frame boundary
   sources_ = std::move(lr.sources);
   stamps_ = std::move(lr.source_stamps);
@@ -354,6 +415,7 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
 
 void AppRuntime::set_root(Widget root) {
   add_host_menus(root, hostMenus_);
+  add_keys(root, {});
   rt_.set_root(std::move(root));
 }
 

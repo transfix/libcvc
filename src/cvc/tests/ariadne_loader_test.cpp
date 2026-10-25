@@ -435,6 +435,33 @@ windows:
   EXPECT_TRUE(room->on.empty()); // on: is optional for input_text (no warning, unlike button)
 }
 
+// keys: -- each entry a rebindable action with its label, its default key(s) and its on:.
+TEST(AriadneLoader, KeysBlock) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+keys:
+  next:
+    label: Next item
+    key: [Right, PageDown]
+    on: (state-set "n" 1)
+  quit:
+    key: q
+    on: quit
+  idle:
+    label: Nothing yet
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.keys.size(), 3u);
+  EXPECT_EQ(r.keys[0].id, "next");
+  EXPECT_EQ(r.keys[0].label, "Next item");
+  EXPECT_EQ(r.keys[0].keys, (std::vector<std::string>{"Right", "PageDown"}));
+  EXPECT_EQ(r.keys[0].on, "(state-set \"n\" 1)");
+  EXPECT_EQ(r.keys[1].keys, std::vector<std::string>{"q"});
+  EXPECT_EQ(r.keys[1].on, "quit");
+  EXPECT_TRUE(has_warning(r, "keys.idle: no key:"));
+}
+
 // A slider's `commit:` -- live by default, `release` for a key too costly to write every frame; any
 // other value warns and stays live.
 TEST(AriadneLoader, SliderCommitPolicy) {

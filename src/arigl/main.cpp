@@ -236,6 +236,30 @@ std::chrono::duration<double> snapshot_period(const ari::HostOptions &o) {
 
 // The SDL-free cvc::gl::InputEvent, as the runtime's cvc::ariadne::InputEvent.
 ari::InputEvent to_ari(const cvc::gl::InputEvent &e) {
+// Settings' item that opens the Keys window AppRuntime puts in every document.
+ari::Widget keys_menu_item() {
+  return ari::menu_toggle("Keys...", std::string("tree.") + ari::kKeysWindow + ".open");
+}
+
+// The camera's fly keys, for the Keys window: the camera reads them from its own state, so the
+// bindings have no `on`.
+std::vector<ari::KeyBinding> camera_keys(const cvc::gl::CameraController &cam) {
+  const std::string at = "/" + cam.stateName() + ".keys.";
+  const std::string group = "Camera (fly mode; Tab switches)";
+  std::vector<ari::KeyBinding> keys;
+  for (const auto &[key, label] :
+       std::vector<std::pair<const char *, const char *>>{{"forward", "Forward"},
+                                                          {"backward", "Back"},
+                                                          {"strafe_left", "Left"},
+                                                          {"strafe_right", "Right"},
+                                                          {"up", "Up"},
+                                                          {"down", "Down"},
+                                                          {"sprint", "Faster"},
+                                                          {"toggle_mode", "Orbit / fly"}})
+    keys.push_back({std::string("camera_") + key, label, group, {}, "", at + key});
+  return keys;
+}
+
   ari::InputEvent a;
   using GK = cvc::gl::InputEvent::Kind;
   using AK = ari::InputEvent::Kind;
@@ -1208,18 +1232,22 @@ int run_window(const ari::HostOptions &o) {
   std::string gallery_next;  // a document the Demos menu asked for
   bool gallery_left = false; // the Demos menu started another program
   // arigl's menus: Settings after the document's own; with a gallery, a menu bar of arigl's that
-  // stays the same from document to document, the document's menus under Document.
+  // stays the same from document to document, the document's menus under Document. Settings opens
+  // the Keys window (every document's keys, and the camera's) and holds the scene's display
+  // settings.
   const auto host_menus = [&](const std::string &doc) {
     std::vector<ari::Widget> menus;
     if (!gallery.empty())
       menus.push_back(gallery.menu(doc));
     menus.push_back(ari::AppRuntime::document_menus(gallery.empty() ? "" : "Document"));
-    menus.push_back(ari::menu("Settings", {ari::custom("scene_settings")}));
+    menus.push_back(
+        ari::menu("Settings", {keys_menu_item(), ari::separator(), ari::custom("scene_settings")}));
     return menus;
   };
   rt.app_runtime().set_host_menus(host_menus(o.doc));
   if (!gallery.empty())
     gallery.install(rt.app_runtime(), &gallery_next, &gallery_left);
+  rt.app_runtime().set_host_keys(camera_keys(cam));
   if (const int status = load_document(rt, o); status >= 0)
     return status;
   note_misplaced(rt.app_runtime(), o);
@@ -1273,8 +1301,9 @@ int run_window(const ari::HostOptions &o) {
     return 0;
   }
 
-  // Input the VTK interactor does not carry: touch navigation, SDL events (a wasm canvas), and the
-  // OS signals trapped below. Fed before the drain, so the document sees them this frame.
+  // Input the VTK interactor does not carry: touch navigation, SDL's keys and pointer (the
+  // documents' on_key / on_pointer), and the OS signals trapped below. Fed before the drain, so
+  // the document sees them this frame.
   cvc::gl::SdlInput sdl;
   sdl.init();
   std::string exit_signal;
@@ -1283,6 +1312,8 @@ int run_window(const ari::HostOptions &o) {
     touch.update();
     for (const cvc::gl::InputEvent &e : sdl.poll())
       rt.post_input(to_ari(e));
+    if (!sdl.attached())
+      sdl.attach(view.renderWindow()); // once VTK has made its window
     for (std::string sig = ari::take_trapped_signal(); !sig.empty();
          sig = ari::take_trapped_signal())
       if (!rt.post_signal(sig, "os")) { // no on_signal: the host's default is to stop
@@ -1373,6 +1404,10 @@ int run_terminal(const ari::HostOptions &o) {
   rt.register_verb("quit", [&] { rt.request_close(); });
   rt.set_document_args(o.doc_args, "arigl " + o.command + " --terminal " + o.doc,
                        /*validate=*/o.command != "check");
+  // As in a window, Settings after the document's own menus opens the Keys window (the terminal's
+  // camera has no keys to list; the scene's display settings are ImGui's).
+  rt.set_host_menus({ari::AppRuntime::document_menus(), ari::menu("Settings", {keys_menu_item()})});
+  rt.set_host_keys({});
   // Ask the terminal what it can draw before the load, so requires: / (has? "term.kitty") see it
   // (the interactive loop then does not ask again). tvision draws half-blocks only.
   ari::HostInfo term;

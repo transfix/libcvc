@@ -859,6 +859,17 @@ struct Runtime::Impl {
   // one frame must all arrive) onto the key channel (keyboard) or pointer channel (mouse).
   void deliver_input(const InputEvent &ev);
 
+  // set_key_bindings. post_input (any thread) queues key downs; drain() (the host thread) rebinds
+  // or runs them, so a key's action is queued like a button's.
+  std::vector<KeyBinding> key_bindings_;
+  std::atomic<bool> have_key_bindings_{false};
+  std::mutex pressed_mutex_;
+  std::vector<std::string> pressed_keys_;
+  bool key_capture_pending() const {
+    return !read_or<std::string>(app, resolve_bind(prefix, kKeyCapture), "").empty();
+  }
+  void run_key_bindings();
+
   // §12: the active mount scope during emit. Empty stack = the document prefix; each entry is
   // a composed sub-prefix pushed when the walk enters a mounted subtree (Widget::scope) and
   // popped on exit. current_prefix() is what binds and read-lane reads resolve against.
@@ -1307,7 +1318,13 @@ void Runtime::Impl::emit_node(const Widget &w) {
   }
 
   case Kind::Group:
+    // A group with an id scopes its children's identities, as a window does: two groups can each
+    // hold a "Change" button.
+    if (!w.id.empty())
+      b.push_id(w.id.c_str());
     emit_container(w); // §3.0.3b: a group honours w.layout (grid / vertical)
+    if (!w.id.empty())
+      b.pop_id();
     break;
 
   case Kind::Text:
@@ -1927,14 +1944,54 @@ void Runtime::post_input(const InputEvent &ev) {
   // deliver it. The pump in drain() steps the resident; feed input BEFORE drain() for same-frame
   // delivery (see the header contract).
   m_->ensure_input_residents();
+  if (ev.kind == InputEvent::Kind::KeyDown && m_->have_key_bindings_.load()) {
+    const bool capture = m_->key_capture_pending();
+    {
+      std::lock_guard<std::mutex> lock(m_->pressed_mutex_);
+      m_->pressed_keys_.push_back(ev.key);
+    }
+    if (capture)
+      return; // a new key for the Keys window, not a key press for the document
+  }
   m_->deliver_input(ev);
+}
+
+void Runtime::set_key_bindings(std::vector<KeyBinding> bindings) {
+  m_->key_bindings_ = std::move(bindings);
+  m_->have_key_bindings_.store(!m_->key_bindings_.empty());
+}
+
+void Runtime::Impl::run_key_bindings() {
+  std::vector<std::string> keys;
+  {
+    std::lock_guard<std::mutex> lock(pressed_mutex_);
+    keys.swap(pressed_keys_);
+  }
+  const std::string capture_path = resolve_bind(prefix, kKeyCapture);
+  for (const std::string &key : keys) {
+    if (const std::string capture = read_or<std::string>(app, capture_path, ""); !capture.empty()) {
+      if (canonical_key(key) != "escape")
+        for (const KeyBinding &b : key_bindings_)
+          if (b.id == capture)
+            write<std::string>(app, resolve_bind(prefix, key_binding_path(b)), key);
+      write<std::string>(app, capture_path, "");
+      continue;
+    }
+    for (const KeyBinding &b : key_bindings_)
+      if (!b.on.empty() &&
+          key_matches(read_or<std::string>(app, resolve_bind(prefix, key_binding_path(b)), ""),
+                      key))
+        queued_events.push_back({b.on, prefix});
+  }
 }
 
 void Runtime::render() { m_->render(); }
 
 void Runtime::drain() {
   // Run the queued action events on the host thread, then clear. Never called
-  // from inside render() (the deferred intent-buffer discipline, §7.2/§4.7).
+  // from inside render() (the deferred intent-buffer discipline, §7.2/§4.7). The keys pressed since
+  // the last drain queue theirs first.
+  m_->run_key_bindings();
   std::vector<Impl::QueuedAction> events;
   events.swap(m_->queued_events);
   for (const Impl::QueuedAction &a : events) {

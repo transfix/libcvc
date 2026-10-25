@@ -234,7 +234,9 @@ public:
 
   // Rebind a movement key (also settable via state "keys.<action>"). Actions:
   // "forward","backward","strafe_left","strafe_right","up","down","toggle_mode",
-  // "sprint". Values are VTK key syms ("w","space","Control_L","Tab","Shift_L").
+  // "sprint". Values are key names, SDL's ("W","Space","Left Ctrl","Tab","Left Shift", the
+  // defaults) or VTK's keysyms ("w","space","Control_L","Shift_L"): cvc::ariadne::canonical_key
+  // matches either spelling.
   void setKeyBinding(const std::string &action, const std::string &keySym);
   std::string keyBinding(const std::string &action) const;
 

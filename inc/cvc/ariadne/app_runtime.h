@@ -72,6 +72,13 @@ public:
   // stand in the bar as written, and a host menu named like one of them adds its items to it.
   static Widget document_menus(std::string label = std::string());
 
+  // Key bindings of the host's own (keys.h), beside each document's `keys:`: arigl's camera keys.
+  // Once a host has called this (even with none), or for a document with keys, the document gets
+  // a Keys window (id ariadne_keys, closed until tree.ariadne_keys.open is set -- a host's
+  // menu_toggle on that key opens it) listing them all, each with a Change button: click it, then
+  // press the new key (Escape keeps the old one). Applied by the next load() or set_root().
+  void set_host_keys(std::vector<KeyBinding> keys);
+
   // Register a host verb the .ari program can call. register_verb is SYNCHRONOUS (fn runs
   // inline on the drain thread, no args/return). register_async_verb OFFLOADS `work` to the
   // app compute pool and posts its string result to `done_channel`; the program parks on
@@ -148,6 +155,9 @@ private:
   std::shared_ptr<Verbs> verbs_;
   std::vector<std::string> pendingWarnings_; // read-lane diagnostics drain() collected
   std::vector<Widget> hostMenus_;            // set_host_menus: put in every mounted tree
+  std::vector<KeyBinding> hostKeys_;         // set_host_keys: bound, and listed, in every one
+  bool keysWindow_ = false;                  // set_host_keys was called: always a Keys window
+  void add_keys(Widget &root, std::vector<KeyBinding> keys); // bind them + the Keys window
   std::vector<std::string> docArgv_;         // the document's command line (set_document_args)
   std::string invocation_;
   bool validateArgs_ = true;

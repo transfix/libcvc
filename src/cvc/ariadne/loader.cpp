@@ -96,7 +96,7 @@ bool is_builtin_block(const std::string &k) {
   return k == "meta" || k == "menubar" || k == "windows" || k == "overlays" || k == "root" ||
          k == "children" || k == "scene" || k == "customs" || k == "init" || k == "on_tick" ||
          k == "on_key" || k == "on_pointer" || k == "on_signal" || k == "units" || k == "import" ||
-         k == "channels" || k == "lint" || k == "args" || k == "requires";
+         k == "channels" || k == "lint" || k == "args" || k == "requires" || k == "keys";
 }
 } // namespace
 
@@ -138,6 +138,17 @@ const char *const kAriSchema = R"ARISCHEMA({
       "required": ["min_libcvc"]
     },
     "menubar":  {"type": "array", "items": {"$ref": "#/$defs/widget"}},
+    "keys": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "label": {"type": "string"},
+          "key": {"type": ["string", "array"], "items": {"type": "string"}},
+          "on": {"type": "string"}
+        }
+      }
+    },
     "windows":  {"type": "array", "items": {"$ref": "#/$defs/widget"}},
     "overlays": {"type": "array", "items": {"$ref": "#/$defs/widget"}},
     "root":     {"type": "array", "items": {"$ref": "#/$defs/widget"}},
@@ -373,6 +384,39 @@ inline bool known_widget_key(const std::string &k) {
          k == "on_drag_end" || k == "children" || k == "items" || k == "id" ||
          k == "visible_when" || k == "enabled_when" || k == "disabled_when" || k == "tooltip" ||
          k == "repeat";
+}
+
+// keys: (keys.h) -- each entry a rebindable action: its label, its default key(s), its on:.
+std::vector<KeyBinding> parse_keys(Ctx &ctx, const YAML::Node &n) {
+  std::vector<KeyBinding> out;
+  if (!n)
+    return out;
+  if (!n.IsMap()) {
+    ctx.warn("ari: keys: must be a map of named actions — ignored");
+    return out;
+  }
+  for (const auto &kv : n) {
+    KeyBinding b;
+    b.id = kv.first.Scalar();
+    const YAML::Node &e = kv.second;
+    if (!e.IsMap()) {
+      ctx.warn("ari: keys." + b.id + ": must be a map (label, key, on) — ignored");
+      continue;
+    }
+    b.label = str(e, "label");
+    if (const YAML::Node k = e["key"]; k && k.IsSequence()) {
+      for (const YAML::Node &one : k)
+        if (one.IsScalar())
+          b.keys.push_back(one.Scalar());
+    } else if (k && k.IsScalar()) {
+      b.keys.push_back(k.Scalar());
+    }
+    if (b.keys.empty())
+      ctx.warn("ari: keys." + b.id + ": no key: — it does nothing until one is bound");
+    b.on = str(e, "on");
+    out.push_back(std::move(b));
+  }
+  return out;
 }
 
 // A slider's `commit:` — live (the default: every change while dragged) or release (once, at the
@@ -2197,6 +2241,8 @@ void lint_channels(Ctx &ctx, LoadResult &r) {
   refs_from_script(r.on_key_script, refs);
   refs_from_script(r.on_pointer_script, refs);
   refs_from_script(r.on_signal_script, refs);
+  for (const KeyBinding &k : r.keys)
+    refs_from_script(k.on, refs);
   refs_from_widget(r.root, refs);
   for (const std::string &ch : refs) {
     if (ch.find('#') != std::string::npos)
@@ -2354,6 +2400,7 @@ LoadResult load_node(const YAML::Node &doc, const std::string &base_dir = std::s
       r.on_signal_script = sg.Scalar();
     else if (sg && !sg.IsScalar())
       ctx.warn("ari: on_signal: must be a scalar state_exec script string — ignored");
+    r.keys = parse_keys(ctx, doc["keys"]);
   }
   // §12 channel lint (A): now that root + all scripts are populated, scan static msg-* refs
   // (only if the doc declared channels:). A strict violation fails the load (r.error set).

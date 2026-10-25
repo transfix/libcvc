@@ -15,6 +15,8 @@
 #include <string>
 #include <vector>
 
+class vtkRenderWindow; // VTK (global namespace)
+
 namespace cvc {
 namespace gl {
 
@@ -61,6 +63,13 @@ public:
   // True once init() succeeded (and this build has SDL).
   bool available() const;
 
+  // Take the keyboard (and pointer) of the VTK window a cvcGL host draws in. SDL only delivers keys
+  // to a window of its own, so this wraps the host's -- its HWND, its X11 window, in the browser
+  // its canvas -- and the host's own input goes on as before. False until VTK has made its window
+  // (call again on a later frame), on macOS (not yet), or without SDL. Starts init() itself.
+  bool attach(vtkRenderWindow *window);
+  bool attached() const;
+
   // Drain the SDL event queue, returning the translated keyboard/mouse events (other event types —
   // quit, window, etc. — are left for the host to handle). Empty when not available.
   std::vector<InputEvent> poll();
@@ -70,6 +79,9 @@ public:
 
 private:
   bool inited_ = false;
+  bool video_ = false;           // SDL_INIT_VIDEO, which attach() needs
+  void *window_ = nullptr;       // attach(): the SDL_Window wrapping the host's
+  std::vector<InputEvent> keys_; // the browser's keys, kept by attach()'s event filter
 };
 
 } // namespace gl

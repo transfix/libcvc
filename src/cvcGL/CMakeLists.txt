@@ -1041,6 +1041,12 @@ add_executable(cvcgl_sdl_input test/cvcgl_sdl_input.cpp)
 target_link_libraries(cvcgl_sdl_input PRIVATE cvcGL)
 add_test(NAME cvcgl_sdl_input COMMAND cvcgl_sdl_input)
 
+# SdlInput::attach on a real VTK window: SDL wraps the HWND VTK made, so a key sent to it reaches
+# SDL (a document's on_key) and still VTK's interactor. Windows only; SKIPs (rc 0) elsewhere.
+add_executable(cvcgl_sdl_attach test/cvcgl_sdl_attach.cpp)
+target_link_libraries(cvcgl_sdl_attach PRIVATE cvcGL)
+add_test(NAME cvcgl_sdl_attach COMMAND cvcgl_sdl_attach)
+
 # ── JavaScript tests (node) ──
 # The browser-side pieces cvcgl_wasm_app() links into a wasm app are plain JS, tested under node
 # against mock WebGL contexts -- no browser and no wasm build needed. node must come from the

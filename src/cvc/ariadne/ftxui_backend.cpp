@@ -1928,7 +1928,7 @@ bool FtxuiBackend::item_pointer(float &x, float &y, float &dx, float &dy, int &b
 void FtxuiBackend::text_line(const char *t) { m_->leaf(m_->uid("t|"), false, text_block(t)); }
 
 void FtxuiBackend::text_value(const char *label, const std::string &value) {
-  m_->leaf(m_->uid("t|"), false, text_block(std::string(label) + ": " + value));
+  m_->leaf(m_->uid("t|"), false, text_block(labelled(label, value)));
 }
 
 void FtxuiBackend::text_line_colored(const char *t, const float rgb[3]) {
@@ -1937,8 +1937,7 @@ void FtxuiBackend::text_line_colored(const char *t, const float rgb[3]) {
 
 void FtxuiBackend::text_value_colored(const char *label, const std::string &value,
                                       const float rgb[3]) {
-  m_->leaf(m_->uid("t|"), false,
-           text_block(std::string(label) + ": " + value) | fx::color(rgb_color(rgb)));
+  m_->leaf(m_->uid("t|"), false, text_block(labelled(label, value)) | fx::color(rgb_color(rgb)));
 }
 
 void FtxuiBackend::separator() {
@@ -1946,6 +1945,11 @@ void FtxuiBackend::separator() {
   if (m.opt.hosted && !m.cur_menu.empty() && !m.walk.menus.empty())
     m.walk.menus.back().items.push_back(HostedMenuItem{"", "", false, false, true});
   m.add(fx::separator());
+// "label: value"; with no label just the value, as the ImGui backend draws it.
+static std::string labelled(const char *label, const std::string &value) {
+  return label && *label ? std::string(label) + ": " + value : value;
+}
+
 }
 
 bool FtxuiBackend::button(const char *label) {

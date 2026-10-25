@@ -353,7 +353,7 @@ The built-in top-level keys (`is_builtin_block`,
 
 ```
 meta  menubar  windows  overlays  root (alias: children)  scene  customs  requires
-init  on_tick  on_key  on_pointer  on_signal  units  import  channels  lint  args
+init  on_tick  on_key  on_pointer  on_signal  keys  units  import  channels  lint  args
 ```
 
 Any **other** top-level key is dispatched to a parser registered via
@@ -418,6 +418,29 @@ menubar:
     items:
       - menu_item: Quit
         on: quit                          # a bare name: a host Runtime::on handler
+- **`keys:`** names the document's **rebindable** key actions
+  ([`keys.h`](../inc/cvc/ariadne/keys.h)): each has a label, its default key or keys, and an
+  `on:` (a program, or a host event). A binding's keys live in a state key, `keys.<id>`
+  (seeded from the defaults), and `Runtime::post_input` runs its `on:` on a key down that
+  matches one of them, in the next drain, as a button's runs. Key names compare whoever
+  spells them (`canonical_key`: SDL's `Left Shift` and VTK's `Shift_L` are one key). An
+  `on_key:` still sees every key, besides.
+
+  ```yaml
+  keys:
+    next:
+      label: Next item
+      key: [Right, PageDown]
+      on: (state-set "item" (+ (int (state-get "item")) 1))
+  ```
+
+  `AppRuntime` lists every binding, the document's and the host's
+  (`set_host_keys`: `arigl` adds its camera's fly keys), in a **Keys** window it puts in the
+  document: closed until `tree.ariadne_keys.open` is set (arigl's *Settings > Keys...*), a row
+  per binding with its keys and a **Change** button. Change writes the binding's id to
+  `keys.capture`; the next key down becomes its key (Escape keeps the old one), and no handler
+  sees that key. A group with an `id`, like each of those rows, scopes its children's identities
+  as a window does, so every row's Change is its own.
 windows:
   - window: Controls
     id: controls
@@ -1038,6 +1061,8 @@ The reference host is
 ```cpp
 cvc::ariadne::Runtime rt(app, prefix);
 rt.set_backend(&backend);           // backend must outlive rt
+- `set_host_keys(keys)` adds the host's key bindings to every document's, and gives each
+  document the Keys window (§5.3), even one with no keys of its own.
 backend.install(rt, view);          // sets the view's overlay draw callback → rt.render()
 
 register_cvc_uri_handler(/*extra dirs*/);        // cvc:// components
@@ -1294,11 +1319,13 @@ below (G17–G21 in the internal gap report) are tracked for reconciliation.
   ([`scene_realize.cpp`](../src/cvcGL/ariadne/scene_realize.cpp)). The decoders support
   memory (stb, ImageMagick `Blob`, assimp `ReadFileFromMemory`); exposing that is a
   planned follow-up.
-- **AriRuntime document-level `on_key` / `on_pointer` residents need a VTK event
-  producer.** The `post_key` / `post_pointer` forwarding is wired, but nothing yet
-  translates VTK interactor events into those calls, so stock-loop key/pointer residents
-  do not fire until a host feeds them
-  ([`AriRuntime.h`](../inc/cvc/gl/ariadne/AriRuntime.h)).
+- **AriRuntime document-level `on_key` / `on_pointer` residents need a host to feed them.**
+  The `post_key` / `post_pointer` forwarding is wired, and `arigl` feeds it from SDL3:
+  `cvc::gl::SdlInput::attach` wraps the window VTK made (its HWND or X11 window; in the
+  browser, SDL's own hidden canvas with its key listeners on VTK's), and VTK keeps every
+  event it had. macOS is not wrapped yet, and a host on AriRuntime's stock loop that does
+  not attach an `SdlInput` gets no key or pointer residents
+  ([`AriRuntime.h`](../inc/cvc/gl/ariadne/AriRuntime.h), [`SdlInput.h`](../inc/cvc/gl/SdlInput.h)).
 - **OS signals reach `on_signal` only where a host routes them.** `ari` and `arigl` do, in
   both of `arigl`'s modes (§9). `AriRuntime::post_signal` is the seam for other GL hosts;
   the `ariadne_hello` example routes none, and an embedding host that skips the

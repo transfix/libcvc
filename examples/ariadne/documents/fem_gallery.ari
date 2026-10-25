@@ -13,8 +13,8 @@
 # description, which node shows, that node's keys under .set, and the request that starts it).
 # on_tick applies an item when gallery.index changes: it copies the item's keys onto the nodes
 # (state-json / state-from-json), shows its node, fires its request and publishes the heading.
-# Step with the Gallery menu, the Gallery window's Previous / Next buttons, or the arrow keys
-# (Left / Right, PageUp / PageDown) where the host feeds keys to on_key. Each item also moves the
+# Step with the Gallery menu, the Gallery window's Previous / Next buttons, or the keys: Left /
+# Right and PageUp / PageDown, which a host's Keys window can change. Each item also moves the
 # camera to its own view, unless Keep my view is ticked. The fe_controls, mesh_tools, lighting
 # and camera windows (the Windows menu) tinker with the current item. When an item's work is
 # done, gallery.work_ms (and gallery.times.<i>) holds how long its node took.
@@ -378,17 +378,19 @@ on_tick: |
             nil)
         nil))
 
-on_key: |
-  (if (= (get-attr event "kind") "key_down")
-      (let ((k (get-attr event "key"))
-            (n (int (state-get "gallery.count")))
-            (i (int (state-get "gallery.index"))))
-        (if (or (= k "Right") (= k "PageDown"))
-            (state-set "gallery.index" (% (+ i 1) n))
-            (if (or (= k "Left") (= k "PageUp"))
-                (state-set "gallery.index" (% (+ i (- n 1)) n))
-                nil)))
-      nil)
+keys:
+  next:
+    label: Next item
+    key: [Right, PageDown]
+    on: |
+      (state-set "gallery.index"
+                 (% (+ (int (state-get "gallery.index")) 1) (int (state-get "gallery.count"))))
+  previous:
+    label: Previous item
+    key: [Left, PageUp]
+    on: |
+      (let ((n (int (state-get "gallery.count"))))
+        (state-set "gallery.index" (% (+ (int (state-get "gallery.index")) (- n 1)) n)))
 
 scene:
   chrome: false

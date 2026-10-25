@@ -918,6 +918,89 @@ TEST(AriadneRuntime, SliderWritesWhileDraggedUnlessCommitOnRelease) {
   EXPECT_EQ(cvc::state::instance(app)("demo.held").value(), "40");
 }
 
+// Key names compare across spellings: SDL's ("Left Shift", "Space", "PageDown") and VTK's
+// ("Shift_L", "space", "Next"); letters fold to lower case.
+TEST(AriadneKeys, CanonicalNamesMatchAcrossSpellings) {
+  EXPECT_EQ(canonical_key("Left Shift"), canonical_key("Shift_L"));
+  EXPECT_EQ(canonical_key("Space"), canonical_key("space"));
+  EXPECT_EQ(canonical_key("PageDown"), canonical_key("Next"));
+  EXPECT_EQ(canonical_key("PageUp"), canonical_key("Prior"));
+  EXPECT_EQ(canonical_key("Left Ctrl"), canonical_key("Control_L"));
+  EXPECT_EQ(canonical_key("W"), canonical_key("w"));
+  EXPECT_NE(canonical_key("Left"), canonical_key("Right"));
+  EXPECT_EQ(join_keys({"Right", "PageDown"}), "Right, PageDown");
+  EXPECT_EQ(split_keys(" Right ,PageDown,, "), (std::vector<std::string>{"Right", "PageDown"}));
+  EXPECT_TRUE(key_matches("Right, PageDown", "Next"));
+  EXPECT_FALSE(key_matches("Right, PageDown", "Left"));
+  EXPECT_FALSE(key_matches("", "Left"));
+}
+
+// A key down that matches a binding runs its action in the next drain; with keys.capture naming
+// the binding, the next key down becomes its key instead (and runs nothing), and Escape keeps the
+// old one.
+TEST(AriadneRuntime, KeyBindingsRunTheirActionAndRebind) {
+  cvc::app app;
+  Runtime rt(app, "ui.k");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  auto &st = cvc::state::instance(app);
+  st("ui.k.n").value(0);
+  st("ui.k.keys.next").value(std::string("Right, PageDown"));
+  rt.set_key_bindings({{"next",
+                        "Next",
+                        "",
+                        {"Right", "PageDown"},
+                        "(state-set \"n\" (+ (int (state-get \"n\")) 1))",
+                        ""}});
+  const auto press = [&](const std::string &key, bool down = true) {
+    InputEvent e;
+    e.kind = down ? InputEvent::Kind::KeyDown : InputEvent::Kind::KeyUp;
+    e.key = key;
+    rt.post_input(e);
+    rt.drain();
+  };
+  press("Right");
+  EXPECT_EQ(st("ui.k.n").value(), "1");
+  press("Next"); // VTK's name for PageDown
+  EXPECT_EQ(st("ui.k.n").value(), "2");
+  press("Right", /*down=*/false);
+  press("Left");
+  EXPECT_EQ(st("ui.k.n").value(), "2") << "a key up, and an unbound key, run nothing";
+
+  st("ui.k.keys.capture").value(std::string("next")); // the Keys window's Change
+  press("Up");
+  EXPECT_EQ(st("ui.k.keys.next").value(), "Up");
+  EXPECT_EQ(st("ui.k.keys.capture").value(), "");
+  EXPECT_EQ(st("ui.k.n").value(), "2") << "the captured key is not a press";
+  press("Right");
+  EXPECT_EQ(st("ui.k.n").value(), "2");
+  press("Up");
+  EXPECT_EQ(st("ui.k.n").value(), "3");
+
+  st("ui.k.keys.capture").value(std::string("next"));
+  press("Escape");
+  EXPECT_EQ(st("ui.k.keys.next").value(), "Up") << "Escape keeps the old key";
+  EXPECT_EQ(st("ui.k.keys.capture").value(), "");
+}
+
+// A group with an id scopes its children's identities, as a window does.
+TEST(AriadneRuntime, GroupIdScopesItsChildren) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  Widget a = group({button("Change", "a")});
+  a.id = "row_a";
+  rt.set_root(group({a, group({button("Change", "b")})}));
+  rt.render();
+  const auto at = [&](const std::string &e) {
+    return std::find(mb.log.begin(), mb.log.end(), e) - mb.log.begin();
+  };
+  EXPECT_LT(at("push_id:row_a"), at("button:Change"));
+  EXPECT_LT(at("button:Change"), at("pop_id"));
+  EXPECT_EQ(std::count(mb.log.begin(), mb.log.end(), "push_id:row_a"), 1);
+}
+
 TEST(AriadneRuntime, PrefixResolvesRelativeBinds) {
   cvc::app app;
   Runtime rt(app, "ui.demo"); // relative binds splice onto this
@@ -3435,6 +3518,53 @@ TEST(AriadneAppRuntime, HostMenusBesideTheDocumentsOwn) {
   art.runtime().render();
   EXPECT_LT(menu_at(mb, "Sim"), menu_at(mb, "Settings")); // the host's own, after the document's
   EXPECT_FALSE(mb.saw("separator"));
+}
+
+// Every document a host mounts after set_host_keys gets a Keys window: closed until
+// tree.ariadne_keys.open is set, a row per binding (the document's keys:, then the host's) whose
+// Change button names it in keys.capture, and each binding's default keys seeded. With no keys
+// at all it says so.
+TEST(AriadneAppRuntime, KeysWindowListsTheDocumentsAndTheHostsKeys) {
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  cvc::app app;
+  MockBackend mb;
+  AppRuntime art(app, "ui.docs.d");
+  art.set_backend(mb);
+  art.set_host_keys({{"camera_forward", "Forward", "Camera", {}, "", "/cam.keys.forward"}});
+  cvc::state::instance(app)("cam.keys.forward").value(std::string("w"));
+  art.load(write_doc("keys_window_a.ari", "meta: {min_libcvc: 3.4.0}\n"
+                                          "keys:\n"
+                                          "  next:\n"
+                                          "    label: Next item\n"
+                                          "    key: [Right, PageDown]\n"
+                                          "    on: (state-set \"n\" 1)\n"));
+  auto &st = cvc::state::instance(app);
+  EXPECT_EQ(st("ui.docs.d.keys.next").value(), "Right, PageDown");
+  art.runtime().render();
+  EXPECT_FALSE(mb.saw("begin_window:Keys(closable)")) << "closed until asked for";
+
+  st("ui.docs.d.tree.ariadne_keys.open").value(1);
+  mb.log.clear();
+  art.runtime().render();
+  ASSERT_TRUE(mb.saw("begin_window:Keys(closable)"));
+  EXPECT_TRUE(mb.saw("text_line:Next item"));
+  EXPECT_TRUE(mb.saw("text_value:=Right, PageDown"));
+  EXPECT_TRUE(mb.saw("text_line:Camera"));
+  EXPECT_TRUE(mb.saw("text_line:Forward"));
+  EXPECT_TRUE(mb.saw("text_value:=w"));
+  EXPECT_TRUE(mb.saw("push_id:key_next"));
+  EXPECT_TRUE(mb.saw("push_id:key_camera_forward"));
+  EXPECT_EQ(std::count(mb.log.begin(), mb.log.end(), "button:Change"), 2);
+
+  art.set_host_keys({});
+  mb.log.clear();
+  art.load(write_doc("keys_window_b.ari", "meta: {min_libcvc: 3.4.0}\n"
+                                          "root:\n"
+                                          "  - text: no keys here\n"));
+  art.runtime().render();
+  EXPECT_TRUE(mb.saw("begin_window:Keys(closable)")) << "still open, and still there";
+  EXPECT_TRUE(mb.saw("text_line:No keys to change here."));
 }
 
 // Every load clears the last document's scene before anything is realized -- a host switching
