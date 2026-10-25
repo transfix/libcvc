@@ -126,6 +126,31 @@ TEST(NavBinding, EveryKeySaysWhatItIs) {
   EXPECT_FALSE(st("nav.settings.plant").has_property("unit")) << "not a number";
 }
 
+// The yielding's settings (set_yield) are knobs under <prefix>.nav.yield: seeded in metres from
+// what the world has, and a change applied live, normalized.
+TEST(NavBinding, YieldSettingsAreKnobs) {
+  sim_world w = make_world();
+  cvc::nav::yield_config y;
+  y.horizon_s = 3.0f;
+  y.clearance = static_cast<float>(6.0 * kS);
+  w.set_yield(y);
+  cvc::app app;
+  cvc::state &st = cvc::state::instance(app);
+  w.pull(app, "scene");
+  EXPECT_NEAR(num(st, "scene.nav.yield.horizon_s"), 3.0, 1e-6);
+  EXPECT_NEAR(num(st, "scene.nav.yield.clearance"), 6.0, 1e-4);
+  EXPECT_NEAR(num(st, "scene.nav.yield.pass_time_s"), 1.5, 1e-6);
+  EXPECT_EQ(st("scene.nav.yield.clearance").property("unit"), "m");
+  EXPECT_EQ(st("scene.nav.yield.steer_overrides").property("access"), "knob");
+  st("scene.nav.yield.clearance").value(std::string("9"));
+  st("scene.nav.yield.cooperation").value(std::string("2")); // not in [0, 1]: ignored
+  st("scene.nav.yield.horizon_s").value(std::string("0"));   // yielding off
+  w.pull(app, "scene");
+  EXPECT_NEAR(w.yield_settings().clearance, 9.0 * kS, 1e-6);
+  EXPECT_FLOAT_EQ(w.yield_settings().cooperation, 0.5f);
+  EXPECT_FALSE(w.yield_settings().on());
+}
+
 TEST(NavBinding, MaterialWeightsAreKnobsOnceAMaterialIsSet) {
   sim_world w = make_world();
   cvc::app app;
