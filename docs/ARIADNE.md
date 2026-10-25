@@ -127,11 +127,21 @@ per-activation caps ([`ariadne.cpp:1382`](../src/cvc/ariadne/ariadne.cpp)):
 
 | bound | source | value |
 |-------|--------|-------|
-| step cap | `kActionMaxSteps` | `5000` |
-| wall-time cap | `kActionMaxSeconds` | `0.1 s` |
+| step cap | tree setting `ariadne.limits.action_max_steps` | `5000` by default; `0` = no limit |
+| time cap | tree setting `ariadne.limits.action_max_time` | `0.1 s` by default; `0` = no limit |
 | memory budget | tree setting `ariadne.limits.action_max_memory` | `4 MiB` by default; `0` = no limit |
 
-The memory budget is read on every submission. It covers the action's state-tree writes and its
+The settings are read on every submission, from the app's tree: they are the host's, outside any
+document's prefix, so a document can't raise its own. A missing or unparsable value keeps the
+default.
+
+The step and time caps cover the action's async calls (§10.1; developer guide, "Async
+Functions"): a call's run time and CPU time count against the time cap, and its CPU time as steps
+at `limits.async_steps_per_cpu_ms` (2000 per CPU millisecond by default). At that rate the
+5000-step cap is 2.5 ms of a kernel's CPU, so a host whose documents call CPU-heavy async verbs
+raises the caps. An action that runs out is killed, and the kernel sees `cancelled()`.
+
+The memory budget covers the action's state-tree writes and its
 measured share of the values it holds (developer guide §7), and it bounds each native call's
 allocations: state_exec's per-step allocation limit takes what is left of `max_memory`
 (developer guide §11, "Allocation limit"). A finished action's process is reaped from the app
@@ -1086,7 +1096,7 @@ rt   = pycvc_gl.AriRuntime(view.scene(), view.camera(), view.overlay())
 rt.load("demo.ari")
 # Register a Python function as a DSL verb (host intrinsic on the app-wide scheduler):
 rt.register_verb("greet", lambda name: f"hello {name}")
-rt.register_async_verb("fetch_rows", slow_query)   # offloaded to the compute pool
+rt.register_async_verb("fetch_rows", slow_query)   # an async function: (fetch_rows) parks
 
 while not rt.should_close():
     rt.frame(dt)     # processUIEvents → cam.update → drain → visibility → tick
@@ -1095,7 +1105,12 @@ while not rt.should_close():
 
 `register_verb` / `register_async_verb` install exactly one `register_action_intrinsics`
 provider onto the app-wide scheduler, so the verbs are reachable from the document's
-action lane. `AriRuntime` also exposes `step`, `run`, `on`, `post_key`, `post_pointer`,
+action lane. An async verb is an async function on the app's async host
+([STATE_EXEC_EXCEPTIONS.md](STATE_EXEC_EXCEPTIONS.md) section 3): `(fetch_rows)` parks the
+action while `slow_query` runs on the app's background task pool, then returns `str()` of its
+result. If it raises, the call raises a `PythonError`, which a `try` can catch. The call is
+charged to the action's caps (§2.2). `register_async_verb(name, done_channel, fn)` also posts
+the result to `done_channel`, for documents that wait with `(msg-recv "done_channel")`. `AriRuntime` also exposes `step`, `run`, `on`, `post_key`, `post_pointer`,
 and `reload_if_changed`.
 
 ### 9.4 From Python (DSL only, via `pycvc.Exec`)
@@ -1128,6 +1143,9 @@ callables as DSL functions (§10). One `Exec` is driven by one thread — use a 
   uncaught, `Exec.run` re-raises the Python exception. `(name-async ...)` returns a future
   for `(await f [seconds])` or `(await-all (list f ...))`. The call is charged to the
   program's budget: its run time against `max_time`, its CPU time as steps.
+  `register_async_fn(name, callable, True)` passes the call's `pycvc.async_call` first,
+  before the arguments: `call.cancelled()` says whether to stop (the program was killed or
+  ran out of budget), and `call.post(value)` sends progress to `"<name>.progress"`.
 - **`register_async_coro(name, coro_fn)`** — registers an `async def`. Calling it
   schedules the coroutine on an asyncio loop the `Exec` owns and parks the DSL program.
   Unlike `register_async_fn`, the coroutine runs **on** the `run()` thread, cooperatively

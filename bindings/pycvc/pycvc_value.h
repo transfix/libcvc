@@ -52,10 +52,16 @@ cvc::state_exec::native_fn python_native_fn(const std::string &who, const std::s
 
 /// An async function's marshal step (register_async_fn) whose kernel calls `callable` on its
 /// executor thread, taking the GIL for the call (the wait for it isn't charged to the process). A
-/// Python exception raises at the call as a PythonError naming `name`. Throws
-/// std::invalid_argument, prefixed with `who`, when `callable` isn't callable or is an async def.
+/// Python exception raises at the call as a PythonError naming `name`. With `with_call`, the
+/// callable gets the call's pycvc.async_call handle first, before the arguments, to check
+/// cancelled() and post() progress. Throws std::invalid_argument, prefixed with `who`, when
+/// `callable` isn't callable or is an async def.
 cvc::state_exec::async_marshal python_async_marshal(const std::string &who, const std::string &name,
-                                                    PyObject *callable);
+                                                    PyObject *callable, bool with_call = false);
+
+/// A new pycvc.async_call holding `call` (a kernel's handle), or nullptr with a Python error set.
+/// Defined in the SWIG wrapper, which owns the type. Call with the GIL held.
+PyObject *async_call_to_py(std::shared_ptr<cvc::state_exec::async_call> call);
 
 /// An execute_options::on_complete that calls `callable` with the process's result and ignores
 /// what it returns. A Python exception becomes a C++ error, thrown from the scheduler call that

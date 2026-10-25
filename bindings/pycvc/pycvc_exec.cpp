@@ -139,15 +139,35 @@ python_exception take_py_exception(const std::string &what) {
 // its message prefixed with `what`. With `want_result` false the return value
 // is ignored (an on_complete callback, whose exception stays a runtime_error
 // thrown from the scheduler call) and nil returned. For an async function's kernel,
-// `call` is its call: the wait for the GIL isn't charged as its run time (3.8).
+// `call` is its call: the wait for the GIL isn't charged as its run time (3.8), and with
+// `with_call` the callable gets its pycvc.async_call handle before the arguments.
 value_t call_python(const std::shared_ptr<PyObject> &holder, std::span<const value_t> args,
-                    const std::string &what, bool want_result = true, async_call *call = nullptr) {
+                    const std::string &what, bool want_result = true, async_call *call = nullptr,
+                    bool with_call = false) {
   const auto wait_start = std::chrono::steady_clock::now();
   PyGILState_STATE gil = PyGILState_Ensure();
   if (call != nullptr)
     call->add_wait(
         std::chrono::duration<double>(std::chrono::steady_clock::now() - wait_start).count());
   PyObject *pyargs = values_to_py_tuple(args); // nullptr (error set) if an arg can't convert
+  if (pyargs != nullptr && with_call && call != nullptr) {
+    // (handle, *args)
+    PyObject *handle = async_call_to_py(call->shared_from_this());
+    const Py_ssize_t n = PyTuple_GET_SIZE(pyargs);
+    PyObject *with = handle != nullptr ? PyTuple_New(n + 1) : nullptr;
+    if (with != nullptr) {
+      PyTuple_SET_ITEM(with, 0, handle);
+      for (Py_ssize_t i = 0; i < n; ++i) {
+        PyObject *item = PyTuple_GET_ITEM(pyargs, i);
+        Py_INCREF(item);
+        PyTuple_SET_ITEM(with, i + 1, item);
+      }
+    } else {
+      Py_XDECREF(handle);
+    }
+    Py_DECREF(pyargs);
+    pyargs = with;
+  }
   PyObject *res = pyargs ? PyObject_CallObject(holder.get(), pyargs) : nullptr;
   Py_XDECREF(pyargs);
   if (res == nullptr) {
@@ -316,7 +336,7 @@ void python_on_complete::operator()(value_t result) const {
 }
 
 async_marshal python_async_marshal(const std::string &who, const std::string &name,
-                                   PyObject *callable) {
+                                   PyObject *callable, bool with_call) {
   if (callable == nullptr || !PyCallable_Check(callable))
     throw std::invalid_argument(who + ": '" + name + "' is not callable");
   if (is_coroutine_function(callable))
@@ -327,10 +347,10 @@ async_marshal python_async_marshal(const std::string &who, const std::string &na
   const std::string what = "python DSL fn '" + name + "'";
   // The arguments are private copies already (register_async_fn copies lists and dicts), so the
   // kernel keeps them; it converts them to Python on its own thread, with the GIL.
-  return [holder, what](std::span<const value_t> args) -> async_kernel {
-    return [holder, what,
+  return [holder, what, with_call](std::span<const value_t> args) -> async_kernel {
+    return [holder, what, with_call,
             argv = std::vector<value_t>(args.begin(), args.end())](async_call &call) -> value_t {
-      return call_python(holder, argv, what, true, &call);
+      return call_python(holder, argv, what, true, &call, with_call);
     };
   };
 }
@@ -435,14 +455,14 @@ void Exec::register_fn(const std::string &name, PyObject *callable) {
                         python_native_fn("pycvc.Exec.register_fn", name, callable));
 }
 
-void Exec::register_async_fn(const std::string &name, PyObject *callable) {
+void Exec::register_async_fn(const std::string &name, PyObject *callable, bool with_call) {
   // An async function on this Exec's host (docs/STATE_EXEC_EXCEPTIONS.md 3): (name args...) parks
   // the program while the callable runs on the app's background task pool, then resumes it with
   // the value or raises the callable's exception at the call (a PythonError). (name-async ...)
   // returns a future.
   cvc::state_exec::register_async_fn(
       impl_->env, *impl_->host, name,
-      python_async_marshal("pycvc.Exec.register_async_fn", name, callable));
+      python_async_marshal("pycvc.Exec.register_async_fn", name, callable, with_call));
 }
 
 cvc::state_exec::async_host &Exec::async_host() { return *impl_->host; }

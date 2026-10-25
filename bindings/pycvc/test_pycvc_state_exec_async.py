@@ -78,8 +78,9 @@ class World:
         pycvc.register_intrinsics(self.env, self.ctx)
         self.register = register
 
-    def fn(self, name, kernel, timeout=None):
-        pycvc.builtins.register_async_fn(self.env, self.host, name, kernel, "background", timeout)
+    def fn(self, name, kernel, timeout=None, executor="background", with_call=False):
+        pycvc.builtins.register_async_fn(self.env, self.host, name, kernel, executor, timeout,
+                                         True, with_call)
 
     def submit(self, script, **limits):
         o = pycvc.execute_options()
@@ -296,6 +297,94 @@ def test_a_restored_call_cant_resume():
     assert w.pump(lambda: w.finished(restored) and w.finished(pid))
     assert w.result(restored) == "lost"
     assert w.result(pid) == 4
+    w.close()
+
+
+# ── the kernel's handle, lanes, futures (P4b) ────────────────────────────────
+
+
+def test_a_kernel_with_its_call_gets_the_handle_first_and_posts_progress():
+    w = World()
+    names = []
+
+    def work(call, n):
+        names.append(call.function_name())
+        for i in range(1, n + 1):
+            call.post(i * 10)
+        return n
+
+    w.fn("work", work, with_call=True)
+    pid = w.run('(begin (set n (work 2)) (list n (msg-recv "work.progress") '
+                '(msg-recv "work.progress")))')
+    assert w.result(pid) == [2, 10, 20]
+    assert names == ["work"]
+    w.close()
+
+
+def test_exec_register_async_fn_passes_the_handle_with_call():
+    ex = pycvc.Exec(pycvc.make_app())
+    ex.register_async_fn("tagged", lambda call, x: f"{call.function_name()}:{x}", True)
+    ex.register_async_fn("plain", lambda x: x + 1)
+    assert ex.run("(list (tagged 3) (plain 3))") == '("tagged:3" 4)'  # run() renders the value
+
+
+def test_a_kernel_sees_cancelled_when_its_process_is_killed():
+    w = World()
+    started, saw = threading.Event(), []
+
+    def watch(call):
+        started.set()
+        end = time.monotonic() + 5.0
+        while not call.cancelled() and time.monotonic() < end:
+            time.sleep(0.005)
+        saw.append(call.cancelled())
+        return 0
+
+    w.fn("watch", watch, with_call=True)
+    pid = w.submit("(watch)")
+    assert w.pump(lambda: started.is_set())
+    assert w.sched.kill(pid)
+    w.host.wait_idle()  # releases the GIL, so the kernel sees the kill and stops
+    assert saw == [True]
+    assert w.info(pid).status == process_status.killed
+    w.close()
+
+
+def test_a_lane_runs_a_functions_calls_on_its_one_thread():
+    w = World()
+    lane = pycvc.async_lane("py-lane")
+    w.host.add_lane("py-lane", lane)
+    threads = []
+
+    def on_lane(x):
+        threads.append(threading.get_ident())
+        return x * 3
+
+    w.fn("on-lane", on_lane, executor="lane:py-lane")
+    pid = w.run("(list (on-lane 1) (on-lane 2))")
+    assert w.result(pid) == [3, 6]
+    assert len(set(threads)) == 1 and threads[0] != threading.get_ident()
+    assert (lane.name(), lane.threaded(), lane.completed(), lane.failed()) == ("py-lane", True, 2, 0)
+    w.close()
+    lane.stop()
+    assert lane.stopped()
+
+
+def test_an_unknown_lane_raises_at_the_call():
+    w = World()
+    w.fn("lost", lambda: 1, executor="lane:nowhere")
+    pid = w.run('(try (lost) (catch (e) (get-attr e "message")))')
+    assert "nowhere" in w.result(pid)
+    w.close()
+
+
+def test_is_async_future():
+    w = World()
+    w.fn("slow-op", _slow)
+    fut = w.result(w.run("(slow-op-async 1 5)"))
+    assert pycvc.is_async_future(fut)
+    assert not pycvc.is_async_future({"__future__": "x"})
+    assert not pycvc.is_async_future(5)
     w.close()
 
 

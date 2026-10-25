@@ -12,6 +12,7 @@
 #include <charconv>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/backend.h>
 #include <cvc/ariadne/bind.h>
@@ -303,19 +304,45 @@ void clear_action_intrinsics() {
 }
 
 namespace {
+// The unsigned integer the tree setting `key` holds; `fallback` when it's missing or unparsable.
+uint64_t limit_setting(cvc::state &root, const char *key, uint64_t fallback) {
+  cvc::state *node = root.findDescendant(key);
+  if (!node)
+    return fallback;
+  const std::string v = node->value();
+  uint64_t n = 0;
+  const auto [end, ec] = std::from_chars(v.data(), v.data() + v.size(), n);
+  return !v.empty() && ec == std::errc() && end == v.data() + v.size() ? n : fallback;
+}
+
 // §7.4 an action's memory budget: the tree setting ariadne.limits.action_max_memory (bytes;
 // 0 = no limit), read on every submission so a host can tune it live. It also bounds each
 // native call's allocations in the action (state_exec's per-step allocation limit takes what
 // is left of max_memory). A missing or unparsable value keeps the 4 MiB default.
 uint64_t action_max_memory(cvc::state &root) {
-  constexpr uint64_t kDefault = uint64_t{4} << 20;
-  cvc::state *node = root.findDescendant("ariadne.limits.action_max_memory");
+  return limit_setting(root, "ariadne.limits.action_max_memory", uint64_t{4} << 20);
+}
+
+// §7.4 an action's step and time caps: the tree settings ariadne.limits.action_max_steps (default
+// 5000) and ariadne.limits.action_max_time (seconds, default 0.1), read on every submission like
+// the memory budget; 0 = no limit. The action's async calls are charged to both
+// (docs/STATE_EXEC_EXCEPTIONS.md 3.8), so a host whose documents call long-running async verbs
+// raises them. They are app-wide, outside any document's prefix, so a document can't raise its
+// own. A missing or unparsable value keeps the default.
+uint64_t action_max_steps(cvc::state &root) {
+  return limit_setting(root, "ariadne.limits.action_max_steps", 5000);
+}
+
+double action_max_time(cvc::state &root) {
+  constexpr double kDefault = 0.1;
+  cvc::state *node = root.findDescendant("ariadne.limits.action_max_time");
   if (!node)
     return kDefault;
   const std::string v = node->value();
-  uint64_t bytes = 0;
-  const auto [end, ec] = std::from_chars(v.data(), v.data() + v.size(), bytes);
-  return !v.empty() && ec == std::errc() && end == v.data() + v.size() ? bytes : kDefault;
+  char *end = nullptr;
+  const double seconds = v.empty() ? -1.0 : std::strtod(v.c_str(), &end);
+  return end == v.c_str() + v.size() && std::isfinite(seconds) && seconds >= 0.0 ? seconds
+                                                                                 : kDefault;
 }
 } // namespace
 
@@ -1608,12 +1635,11 @@ void Runtime::Impl::submit_action(const QueuedAction &action) {
   namespace se = cvc::state_exec;
   const std::string &action_prefix = action.prefix;
   const std::string &script = action.event;
-  // §7.4 per-activation caps (same as the old synchronous action lane): the STEP cap is the
-  // deterministic guard on an action's real work; time (a se::time_budget, which time the
-  // thread spends descheduled cannot use up) is a generous anti-hang backstop; memory the §7.4
-  // cap. Full env, writes chrooted to the action's mount prefix.
-  static constexpr uint64_t kActionMaxSteps = 5000;
-  static constexpr double kActionMaxSeconds = 0.1;
+  // §7.4 per-activation caps, tree settings read on every submission (action_max_steps,
+  // action_max_time, action_max_memory): the STEP cap is the deterministic guard on an action's
+  // real work, its async calls' included; time (a se::time_budget, which time the thread spends
+  // descheduled cannot use up) is a generous anti-hang backstop; memory the §7.4 cap. Full env,
+  // writes chrooted to the action's mount prefix.
   try {
     auto &sched = app.exec_scheduler();
     used_scheduler_ = true;
@@ -1649,8 +1675,8 @@ void Runtime::Impl::submit_action(const QueuedAction &action) {
     se::execute_options opts;
     opts.env = ac->env;
     opts.owner = owner_; // so ~Impl's kill_owner reaps exactly this document's processes
-    opts.max_steps = kActionMaxSteps;
-    opts.max_time = kActionMaxSeconds;
+    opts.max_steps = action_max_steps(root);
+    opts.max_time = action_max_time(root);
     opts.max_memory = max_bytes;
     const int pid = sched.execute(script, opts); // throws se::parse_error on a syntax error
     live_actions_[pid] = std::move(ac);          // keep the context alive until the process ends

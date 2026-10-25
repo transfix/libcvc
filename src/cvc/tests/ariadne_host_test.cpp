@@ -2,6 +2,7 @@
 // document's own arguments (doc_args.h: the argv list, the args: block, their read-only state and
 // the mount grant), and AppRuntime's host verbs and init: diagnostics.
 
+#include <chrono>
 #include <cvc/ariadne/app_runtime.h>
 #include <cvc/ariadne/doc_args.h>
 #include <cvc/ariadne/ftxui_backend.h>
@@ -14,7 +15,9 @@
 #include <fstream>
 #include <gtest/gtest.h>
 #include <memory>
+#include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace cvc::ariadne;
@@ -449,6 +452,80 @@ TEST(AriadneHostVerbs, AGoneRuntimesVerbsAreNotBound) {
   for (int i = 0; i < 4; ++i)
     art.drain();
   EXPECT_EQ(stale, 0);
+}
+
+// Drain `art` until `pred` holds, or about 5 s pass.
+template <class Pred> bool drain_until(AppRuntime &art, Pred pred) {
+  for (int i = 0; i < 2500 && !pred(); ++i) {
+    art.drain();
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+  return pred();
+}
+
+// register_async_verb makes an async function (docs/STATE_EXEC_EXCEPTIONS.md 3): (name) parks the
+// program while the work runs on the app's background task pool, and returns its string.
+TEST(AriadneHostVerbs, AnAsyncVerbParksAndReturnsItsValue) {
+  REQUIRE_YAML();
+  const fs::path doc = write(test_dir("async"), "a.ari",
+                             "meta: {min_libcvc: 3.4.0}\n"
+                             "root:\n  - text: hi\n"
+                             "on_tick: |\n"
+                             "  (state-set \"got\" (slow-verb))\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.a");
+  art.set_backend(be);
+  art.register_async_verb("slow-verb", [] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    return std::string("done");
+  });
+  art.load(doc.string());
+  EXPECT_TRUE(drain_until(art, [&] { return val(app, "ui.docs.a.got") == "done"; }))
+      << val(app, "ui.docs.a.got");
+}
+
+// With a done channel the result is also posted there, so a document that waits with msg-recv
+// (the old pattern) keeps working.
+TEST(AriadneHostVerbs, AnAsyncVerbStillPostsToItsDoneChannel) {
+  REQUIRE_YAML();
+  const fs::path doc = write(test_dir("asyncchan"), "c.ari",
+                             "meta: {min_libcvc: 3.4.0}\n"
+                             "root:\n  - text: hi\n"
+                             "on_tick: |\n"
+                             "  (begin (old-verb) (state-set \"chan\" (msg-recv \"old.done\")))\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.c");
+  art.set_backend(be);
+  art.register_async_verb("old-verb", "old.done", [] { return std::string("posted"); });
+  art.load(doc.string());
+  EXPECT_TRUE(drain_until(art, [&] { return val(app, "ui.docs.c.chan") == "posted"; }))
+      << val(app, "ui.docs.c.chan");
+}
+
+// The work's exception raises at the call, where the program can catch it. It used to be lost, and
+// the channel got "".
+TEST(AriadneHostVerbs, AnAsyncVerbsErrorRaisesAtTheCall) {
+  REQUIRE_YAML();
+  const fs::path doc = write(test_dir("asyncerr"), "e.ari",
+                             "meta: {min_libcvc: 3.4.0}\n"
+                             "root:\n  - text: hi\n"
+                             "on_tick: |\n"
+                             "  (state-set \"err\" (try (bad-verb) (catch (e) (list (get-attr e "
+                             "\"origin\") (get-attr e \"message\")))))\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.e");
+  art.set_backend(be);
+  art.register_async_verb("bad-verb",
+                          []() -> std::string { throw std::runtime_error("the verb failed"); });
+  art.load(doc.string());
+  EXPECT_TRUE(drain_until(art, [&] { return !val(app, "ui.docs.e.err").empty(); }));
+  EXPECT_NE(val(app, "ui.docs.e.err").find("async"), std::string::npos)
+      << val(app, "ui.docs.e.err");
+  EXPECT_NE(val(app, "ui.docs.e.err").find("the verb failed"), std::string::npos)
+      << val(app, "ui.docs.e.err");
 }
 
 TEST(AriadneHostVerbs, AFailingInitIsAWarning) {
