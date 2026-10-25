@@ -1,7 +1,14 @@
 /**
  * @file async_task.h
  * @brief Offload a blocking C++ kernel to the compute pool and resume a state_exec process when it
- *        finishes: the substrate behind (http-get)/(fetch) and any long-running intrinsic.
+ *        finishes: the substrate for a long-running intrinsic.
+ *
+ * For a new async function, use state_exec::register_async_fn (cvc/state/state_exec/async_host.h,
+ * docs/STATE_EXEC_EXCEPTIONS.md section 3) with app::exec_async_host() instead: the call parks at
+ * any depth (the whole program included), its kernel's error raises at the call site, it is
+ * charged to the calling process's budget, and a kill or teardown cancels it. (http-get) and
+ * (fetch) are built on it. These helpers remain for the hosts that use them: their kernels'
+ * errors are values (on_error), and the transparent form can't park a top-level call.
  *
  * A host intrinsic that must do slow work (an HTTP request, a volume filter, a mesh decimation)
  * must NOT run it inline: the state_exec evaluator deadline is cooperative, so a blocking builtin

@@ -9,7 +9,8 @@ Checks:
   3. a terrain alone (no material) drives: its weights are the reported lams, its grade cost the
      reported risk, and it moves the agents;
   4. a slope raster runs the governors;
-  5. what the drive cannot apply is an error: a field of more than one plane, a material stack
+  5. the risk governor caps the speed as the CPU drive does, its cap the reported v_risk;
+  6. what the drive cannot apply is an error: a field of more than one plane, a material stack
      with no lam column for a net with no head for it, a malformed slope.
 Script-style, like the other pycvc tests; self-skips (exit 0) when the running pycvc predates the
 binding, was built without CUDA, or has no CUDA device.
@@ -117,9 +118,9 @@ check(float(np.max(np.abs(out[0] - on))) > 1e-4, "the drive moved the agents")
 # 2. telemetry.
 o2, th2, sp2, mc2, tel = gpu(telemetry=1)
 check(np.array_equal(o2, out[0]), "asking for telemetry does not change the drive")
-keys = {"alpha", "beta", "gamma", "lam_soft", "lam_hard", "mu", "mrisk", "ext_fx", "ext_fy",
-        "steer", "curvature", "clearance", "binding", "potential", "u_goal", "u_barrier", "u_soft",
-        "u_hard", "u_terrain", "force_x", "force_y"}
+keys = {"alpha", "beta", "gamma", "lam_soft", "lam_hard", "mu", "mrisk", "v_risk", "ext_fx",
+        "ext_fy", "steer", "curvature", "clearance", "binding", "potential", "u_goal", "u_barrier",
+        "u_soft", "u_hard", "u_terrain", "force_x", "force_y"}
 check(set(tel) == keys, f"telemetry keys {sorted(set(tel) ^ keys)}")
 check(all(v.shape == (N,) for v in tel.values()), "every telemetry array is (N,)")
 check(tel["binding"].dtype == np.uint8, "binding is uint8")
@@ -146,7 +147,21 @@ check(float(np.max(np.abs(ter[0] - plain[0]))) > 1e-6, "the terrain's force move
 sl = gpu(slope=slope, gravity=9.80665 * SCALE)
 check(all(np.all(np.isfinite(x)) for x in sl), "a slope runs")
 
-# 5. refusals.
+# 5. the risk governor: GPU against CPU, its cap the reported v_risk, and slower than without it.
+GOV = dict(risk_governor=1, risk_vmin=0.1, risk_onset=0.3, risk_lookahead=0.6, risk_probes=3)
+cpu_gov = pycvc.nav_drive_step_material(field, on, th, sp, carrot, WEIGHTS, mat, lam_soft,
+                                        lam_hard, 1.25, 12.0, None, *FRAME, *VEH, 1, *GOV.values())
+gov = gpu(telemetry=1, **GOV)
+for c, gg, name in zip(cpu_gov, gov, ("o", "th", "sp", "minclr")):
+    err = float(np.max(np.abs(c - gg)))
+    check(err < 1e-5, f"governed GPU {name} differs from the CPU drive by {err:.3e}")
+vr = gov[4]["v_risk"]
+check(bool(np.all(gov[2] <= np.maximum(vr, sp) + 1e-6)), "no agent is sped past its v_risk")
+check(bool(np.all((sp <= vr) | (gov[2] < sp))), "and one over it slows (a tick brakes only so much)")
+check(bool(np.all(tel["v_risk"] == 0.0)), "v_risk is 0 with the governor off")
+check(float(np.abs(gov[2]).sum()) < float(np.abs(out[2]).sum()) - 1e-3, "the governor slows them")
+
+# 6. refusals.
 expect_raises(lambda: gpu(fld=np.concatenate([field, field])), "a two-plane field")
 expect_raises(lambda: gpu(ls=None), "no lam_soft column and no head for it")
 expect_raises(lambda: gpu(slope=slope[:1]), "a one-plane slope")

@@ -679,7 +679,177 @@ scenes, 30 s each, and judged on two held-out seeds:
     9.0e-4.
   - `EnergyTrainingDrawsLessEnergy`: over 60 steps from the same start the energy term falls
     0.970 → 0.937 with it, against 0.962 without it.
-- Not yet shown: that a policy trained with it draws less on Jolt for what it gives up in reach.
+- **On Jolt, the gate is not met** (`NavPlantConvergence.EnergyTrainedPolicyOnJolt`, Windows).
+  - The setup: the RoboRacer's power model fitted to its own ledger, then two dynamic-rollout
+    trainings that differ only in `w_energy`, both scored on the P8b gate's 20 held-out city
+    seeds by `cvc::physics::score_on_plant`. That is reach_on_plant's runs, plus the energy
+    the agents drew and the distance their chassis drove; Wh/km is the fleet's total over its
+    total.
+  - The fit: k_pos 1.47, k_neg -0.66, p_idle 4.5 W, c_v 0, c_v3 0.0015, c_lat 0.018 (r² 0.955).
+  - Results, with paired-bootstrap 95% CIs over the 20 seeds:
+
+    | Training | w_energy | Reach with | Reach without | Δ reach (points) | Δ Wh/km | Metres a seed (with / without) |
+    |---|--:|--:|--:|--:|--:|--:|
+    | lr 5e-5, 150 steps | 3 | 51.2% | 51.1% | +0.1 [-1.6, +1.8] | -0.03 [-0.52, +0.43] | 2068 / 2110 |
+    | lr 2e-4, 300 steps | 1 | 14.7% | 39.0% | -24.3 [-27.3, -21.2] | -0.23 [-0.89, +0.66] | 1095 / 2589 |
+    | lr 2e-4, 300 steps | 3 | 11.0% | 39.0% | -27.9 [-31.5, -24.5] | +0.17 [-0.59, +1.12] | 940 / 2589 |
+    | lr 2e-4, 300 steps | 10 | 7.6% | 39.0% | -31.4 [-34.8, -28.1] | -0.27 [-1.15, +0.66] | 563 / 2589 |
+    | lr 2e-4, 300 steps | 30 | 5.8% | 39.0% | -33.1 [-36.5, -29.9] | -0.48 [-1.31, +0.56] | 306 / 2589 |
+
+    The untrained seed reaches 51.7% at 4.02 Wh/km.
+  - At the gentle rate, training barely moves the policy, as in P8b, and the term changes
+    nothing.
+  - Where training does move it, the term teaches the policy to stop driving, not to drive for
+    less: distance falls 2-8x and reach with it. Energy per km does not fall significantly
+    against the policy trained without the term.
+  - Per-seed Wh/km ranges from 2.7 to 5.8 on the same policy. The plant's chaos is large next to
+    any per-km effect.
+  - The cause is the term's form. It prices mean power over the window, so the cheapest policy
+    is the one that moves least. The gate asks for energy per distance, at the same reach.
+- **Priced against progress** (`train_config::energy_ref`):
+  - Each step adds `w_energy / window · softplus(E_t - energy_ref · p_t) / (hdt · P_full)`, with
+    `p_t = |o_t - goal| - |o_{t+1} - goal|` the step's progress toward the goal.
+  - A step pays only for the energy its progress does not cover at the reference, and the smooth
+    hinge (1% of a full-power step wide) keeps the term >= 0, so it never rewards progress itself.
+  - `cvc::nav::dyn_energy_ref_of(wh_per_km, frame)` converts a reference from Wh/km: 3.6 J/m,
+    whose length exponent is 1.
+  - Its adjoint adds the progress's gradient on both ends of the step, |o_{t+1} - goal| and
+    |o_t - goal|. `PricedEnergyGradcheckMatchesFiniteDifference` checks it: direction error
+    1.4e-3 at 2 Wh/km.
+  - `energy_ref = 0` (the default) is the time-priced term above, bit for bit.
+- **On Jolt, priced against progress: the reach loss shrinks, but the gate is still not met.**
+  Same gate and seeds, lr 2e-4 and 300 steps (where training moves the policy); the policy
+  trained without the term reaches 39.0% at 2.48 Wh/km over 2589 m a seed:
+
+  | w_energy | Priced at (Wh/km of progress) | Reach with | Δ reach (points) | Δ Wh/km | Metres a seed |
+  |--:|--:|--:|--:|--:|--:|
+  | 3 | 4 | 24.9% | -14.1 [-17.5, -10.6] | +0.34 [-0.25, +0.93] | 1587 |
+  | 3 | 8 | 31.9% | -7.1 [-10.5, -3.5] | +0.05 [-0.32, +0.42] | 1761 |
+  | 3 | 16 | 34.3% | -4.7 [-7.7, -1.5] | +0.35 [-0.28, +1.04] | 1799 |
+  | 10 | 8 | 29.9% | -9.1 [-12.6, -5.4] | +0.05 [-0.47, +0.68] | 1540 |
+
+  - The policy keeps driving, and gives up a third to a fifth of the reach the time-priced term
+    cost it. The higher the reference, the less it gives up.
+  - It still draws no less per km on Jolt: every Δ Wh/km is between -0.05 and +0.35, and every
+    CI crosses 0.
+  - So what the trainer saves in the planar power model does not reach Jolt's ledger. The fit
+    describes the untrained policy's driving (r² 0.955) and the gate's seeds vary 2.7-5.8 Wh/km
+    on one policy. The differences the term could make are smaller than both.
+  - Every trained policy here draws less per km than the untrained seed (2.5-2.8 against 4.02
+    Wh/km), with or without the term. Training at this rate also costs reach (39.0% against the
+    seed's 51.7%), so that saving is the slower driving the training itself brings, not the
+    energy term.
+- **Why: the model does not see half of what the gate's runs draw.**
+  - `plant_reach_options::predict_energy` logs every gate run (`plant_log`) and gives the fitted
+    model's energy over the same motion (`plant_drive_score::model_J`). `plant_drive_score::ledger`
+    sums the agents' P3 ledgers, so each run says where its energy went.
+  - On the gate's dense city (48 RoboRacers in the occupancy-grid city), the model under-predicts
+    every policy: by 40% (without the term), 53% (priced at 8 Wh/km) and 31% (the seed). It was
+    within ±1.4% on the plant-log scenes it was fitted to.
+  - It does predict the direction of what the term trains. On the priced policy's own Jolt runs
+    it says the policy saves -0.30 Wh/km [-0.38, -0.24]; Jolt measures +0.05. Per-run Wh/km,
+    model against measured, correlates at r = 0.74 over the 60 runs, and the per-seed paired
+    differences at r = 0.50.
+  - The ledger shows what it misses (Wh/km of the fleet's distance; w_energy 3 at 8 Wh/km):
+
+    | Policy | Engine | Tire slip | Brakes | Drivetrain | Aero | Rolling | Regen |
+    |---|--:|--:|--:|--:|--:|--:|--:|
+    | Without the term | 2.43 | 1.34 | 0.63 | 0.45 | 0.17 | 0.14 | 0.38 |
+    | With it | 2.31 | 1.67 | 0.34 | 0.42 | 0.02 | 0.14 | 0.18 |
+    | The untrained seed | 4.15 | 2.16 | 1.42 | 0.78 | 0.18 | 0.14 | 0.86 |
+
+  - Tire slip is about half of the engine's work here. The model sees only the lateral part of
+    it, and that only through c_lat (vx r)^2 |vx|. Longitudinal slip, and wheels pushing on
+    walls and on each other, leave no trace in the planar motion it reads.
+  - The trained policy did what the term asks: it brakes less (0.63 -> 0.34) and drives slower
+    (aero 0.17 -> 0.02), and the model counts both. But it slips its tires more (1.34 -> 1.67),
+    which the model does not count, and that cancels the saving on Jolt.
+- **The tire term** (`power_params::tire_lat`, `tire_lon`; `diff::power_step_tire`):
+  - `diff::dyn_tire_power` gives what the dynamic vehicle's own tires lose to slip at a state
+    (vx, vy, r, delta, a), from the same loads, force split, friction ellipse and Pacejka curves
+    `dyn_plant` integrates.
+    - Lateral: each axle's force times the slip velocity its slip angle implies, u sin(alpha).
+      Pacejka's force has alpha's sign, so the product is >= 0 and smooth everywhere. The
+      geometric sideways velocity disagrees with the force's sign at a crawl, where the slip
+      angles' speed floor acts, and gave a corner there.
+    - Longitudinal: each axle's drive or brake force F times kappa u, kappa the slip ratio at which
+      its Pacejka curve, scaled to the axle's grip, gives F.
+  - The step adds `dt (tire_lat P_lat + tire_lon P_lon)`. Its gradient on (vx, vy, r, delta, a)
+    comes from forward-mode duals, so the energy term's adjoint now also reaches vy and delta.
+  - `fit_power` calibrates it in two stages when the runs carry the ledger's tire term
+    (`planar_sample::tire`, which `plant_log` now records per tick):
+    1. Non-negative least squares of each tick's ledger `tire` on P_lat and P_lon
+       (`power_fit::tire_cal_lat`, `tire_cal_lon`, `tire_r2`).
+    2. The calibrated sum joins the energy fit as one column, whose coefficient is what the
+       source pays per tire J.
+  - `fit_power(std::vector<power_runs>, ...)` fits run sets logged at different ticks together.
+    `score_on_plant`'s `logs` argument returns every scored run's `plant_log`, so a model can be
+    fitted on the scene it is judged on.
+  - Gates:
+    - `PowerStepTireMatchesFiniteDifference`: all five derivatives at 180 states.
+    - `TireEnergyGradcheckMatchesFiniteDifference`: direction error 5.0e-4, and 3.1e-3 priced at
+      8 Wh/km.
+    - `FitCalibratesTheTireTermToTheLedger`: a known calibration and price come back to 0.1%.
+- **On Jolt, with the tire term fitted on the dense city too** (8 seeds of the untrained policy
+  on the gate's own city, beside the plant-log scenes):
+  - The fit: k_pos 1.61, k_neg -0.76, p_idle 7.9 W, c_lat 0.0016, tire_lat 1.07, tire_lon 2.57.
+    The energy r² over every tick is 0.69. The tire term explains the ledger's per-tick tire
+    energy at r² 0.25 only.
+  - The model now misses far less on the gate's runs: -3.9% on the seed (from -31%), -12.6% on
+    the policy trained without the term (from -40%).
+  - The gate is still not met (lr 2e-4, 300 steps, w_energy 3; without the term: 39.0% at
+    2.48 Wh/km):
+
+    | Priced at (Wh/km) | Reach with | Δ reach (points) | Δ Wh/km measured | Δ Wh/km the model predicts | Tire slip, without → with |
+    |--:|--:|--:|--:|--:|--:|
+    | 0 (time) | 11.4% | -27.6 [-31.0, -24.3] | +0.10 [-0.75, +1.18] | +0.86 [+0.72, +1.01] | 1.34 → 1.79 |
+    | 8 | 29.9% | -9.1 [-12.4, -5.6] | -0.02 [-0.51, +0.46] | -0.26 [-0.36, -0.17] | 1.34 → 1.64 |
+    | 16 | 34.0% | -5.0 [-8.3, -1.1] | +0.17 [-0.43, +0.87] | -0.27 [-0.36, -0.18] | 1.34 → 1.77 |
+
+  - Every trained policy's tire slip on Jolt rises against the policy trained without the term,
+    whatever the model predicts. The model's tire term, which explains a quarter of the ledger's,
+    does not see the slip these policies add.
+  - So the slip that grows is not the planar vehicle's. Most likely it is contact: 48 vehicles in
+    a dense grid touch walls and each other, and tires scrub in contact and spin in stalls. The
+    planar rollout has neither collisions nor wheel spin, so no term of its state can price them.
+- **ES on Jolt's measured energy** (`es_options::fitness`, `es_energy_at_held_reach`;
+  `NavPlantConvergence.EsEnergyAtHeldReachOnJolt`):
+  - `es_finetune_on_plant` can now climb any score of a policy's Jolt runs (`score_on_plant`).
+    Each iteration then scores the start policy on the same seeds too, and the fitness reads both.
+  - `es_energy_at_held_reach(price, slack)` scores -(Wh/km) - price x max(0, points of reach
+    lost against the start - slack). It needs no model of where the energy goes.
+  - The run: starts from the P8b gate's dynamic-trained policy (lr 5e-5, 150 steps). 30
+    iterations x 12 antithetic pairs, sigma 0.02, Adam at 0.005, 4 fresh city seeds an
+    iteration; validated every 5 on 16 seeds (200..215). Price 0.1 Wh/km a point, past 1 point.
+  - Results on the gate's 20 held-out seeds:
+
+    | Searched | Best at | Reach | Wh/km | Δ reach (points) | Δ Wh/km | Tire slip (Wh/km) |
+    |---|--:|--:|--:|--:|--:|--:|
+    | The start | — | 51.1% | 3.95 | — | — | 2.10 |
+    | Every weight | 25 | 52.7% | 3.82 | +1.6 [+0.1, +3.1] | -0.13 [-0.51, +0.21] | 1.99 |
+    | The basin alone (tail 3) | 30 | 51.4% | 4.02 | +0.2 [-1.6, +1.9] | +0.07 [-0.33, +0.52] | 2.15 |
+
+  - Over every weight, the fine-tune is the first policy to move both numbers the right way. Its
+    reach gain is outside the CI, which ES on reach itself never found. Its energy saving (-3.3%,
+    from tire slip 2.10 -> 1.99) is not.
+  - The basin alone finds nothing.
+  - Validation is noisy against the gains: the centre's validation Wh/km wanders 3.92-4.33 over
+    the run, about as much as the saving it is after.
+  - So the gate is still not met on energy, but this is the closest result, and the only one with
+    no reach given up.
+  - Next: more validation seeds (32, as P8b found) and more iterations; and fewer contacts first
+    (layer 1 of the plan below), since the energy left is tire slip in contact.
+- **Next: collisions, wheel spin and yielding** (Joe, 2026-10-24: "the training model needs
+  collisions and wheel spin"; the vehicles should drive around each other, and get out of the
+  way of an incoming vehicle's path):
+  1. Yielding in deployment: `sim_world::set_yield`, intents through an `intent_channel` hook
+     (perfect comms by default; the DBG case over its radios), a `yield_resolver` hook,
+     priorities. In progress (nav/yield.h).
+  2. Contact and wheel spin in the training model: a wheel-speed state per driven axle with
+     longitudinal slip, and penalty contact with friction against walls and between agents, in
+     shared multi-agent training scenes.
+  3. Learned awareness: neighbour and intent features in the policy, trained against contact and
+     blocking losses, on the same intents.
 - Not yet in the torch twin. Like any change to the loss, it must reach `sdf_nav`'s
   `train_bicycle` before the two are compared.
 

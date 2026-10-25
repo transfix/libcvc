@@ -236,12 +236,12 @@ struct tel_diff {
     worst = std::max(worst, d);
   }
   void add(const drive_telemetry &a, const drive_telemetry &b) {
-    for (auto m :
-         {&drive_telemetry::alpha, &drive_telemetry::beta, &drive_telemetry::gamma,
-          &drive_telemetry::lam_soft, &drive_telemetry::lam_hard, &drive_telemetry::mu,
-          &drive_telemetry::mrisk, &drive_telemetry::ext_fx, &drive_telemetry::ext_fy,
-          &drive_telemetry::steer, &drive_telemetry::curvature, &drive_telemetry::clearance,
-          &drive_telemetry::potential, &drive_telemetry::force_x, &drive_telemetry::force_y})
+    for (auto m : {&drive_telemetry::alpha, &drive_telemetry::beta, &drive_telemetry::gamma,
+                   &drive_telemetry::lam_soft, &drive_telemetry::lam_hard, &drive_telemetry::mu,
+                   &drive_telemetry::mrisk, &drive_telemetry::v_risk, &drive_telemetry::ext_fx,
+                   &drive_telemetry::ext_fy, &drive_telemetry::steer, &drive_telemetry::curvature,
+                   &drive_telemetry::clearance, &drive_telemetry::potential,
+                   &drive_telemetry::force_x, &drive_telemetry::force_y})
       add(a.*m, b.*m);
     for (auto m : {&potential_terms::goal, &potential_terms::barrier, &potential_terms::soft,
                    &potential_terms::hard, &potential_terms::terrain})
@@ -451,6 +451,64 @@ TEST(NavDriveCudaParity, TelemetryMatchesTheCpuDrive) {
   EXPECT_LT(plain_td.worst, kTol);
   EXPECT_TRUE(mat_td.binding_agrees);
   EXPECT_TRUE(plain_td.binding_agrees);
+}
+
+TEST(NavDriveCudaParity, RiskGovernorMatchesTheCpuDrive) {
+  if (!drive_cuda_available())
+    GTEST_SKIP() << "no CUDA device";
+  // veh_params::risk_governor, its cap in the telemetry too: on the material drive over the
+  // material and the terrain, with the slope governors so the look-ahead brakes with gravity,
+  // and on the plain drive over the terrain alone, its weights zero (the governor reads its risk
+  // regardless).
+  const world w(kAgents);
+  veh_params v = base_veh();
+  v.terrain = &w.td;
+  v.slope = &w.sl;
+  v.gravity = (float)(9.80665 * kScale);
+  v.risk_governor = true;
+  v.risk_vmin = 0.1f;
+  v.risk_onset = 0.3f;
+  v.risk_lookahead = 0.6f;
+  v.risk_probes = 3;
+  const coef_mlp net = make_net(5, 3, 0, 19);
+  tel_diff mat_td;
+  const double mat_worst = run_parity(w, v, net, path::material, kAgents, kTicks, 12, &mat_td);
+  terrain_drive inert = w.td;
+  inert.lam_soft = 0.0f;
+  inert.lam_hard = 0.0f;
+  veh_params v1 = v;
+  v1.terrain = &inert;
+  v1.slope = nullptr;
+  tel_diff plain_td;
+  const double plain_worst = run_parity(w, v1, net, path::plain, kAgents, kTicks, 13, &plain_td);
+  // and the governor is doing something: the same drives without it end faster
+  veh_params off = v, off1 = v1;
+  off.risk_governor = false;
+  off1.risk_governor = false;
+  const auto top = [&](const veh_params &vp, path p, unsigned seed) {
+    state s = make_state(kAgents, seed);
+    const material_drive md = w.material();
+    std::vector<float> mc(kAgents);
+    for (int t = 0; t < kTicks; ++t)
+      if (p == path::plain)
+        drive_step(w.fs, s.o.data(), s.th.data(), s.sp.data(), s.carrot.data(), net, kAgents,
+                   nullptr, vp, mc.data(), 1);
+      else
+        drive_step_material(w.fs, s.o.data(), s.th.data(), s.sp.data(), s.carrot.data(), net,
+                            kAgents, nullptr, vp, md, mc.data(), 1);
+    double sum = 0.0;
+    for (float x : s.sp)
+      sum += std::fabs(x);
+    return sum;
+  };
+  std::printf("[drive-cuda risk governor] material=%.3e plain=%.3e tel=%.3e/%.3e\n", mat_worst,
+              plain_worst, mat_td.worst, plain_td.worst);
+  EXPECT_LT(mat_worst, kTol);
+  EXPECT_LT(plain_worst, kTol);
+  EXPECT_LT(mat_td.worst, kTol);
+  EXPECT_LT(plain_td.worst, kTol);
+  EXPECT_LT(top(v, path::material, 12), top(off, path::material, 12) - 1e-3);
+  EXPECT_LT(top(v1, path::plain, 13), top(off1, path::plain, 13) - 1e-3);
 }
 
 TEST(NavDriveCudaParity, LamNetWithoutMaterialMatchesDriveStep) {

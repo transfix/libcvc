@@ -1,7 +1,8 @@
 /// @file state_exec_exceptions_test.cpp
 /// @brief DSL exceptions (docs/STATE_EXEC_EXCEPTIONS.md): raising and catching (EX), the
 /// evaluator's, builtins' and natives' errors as exceptions (UN), and what a program can't catch
-/// (KL), in both evaluators and on both schedulers. Case IDs are the spec's (section 6).
+/// (KL), and leaving the program (CX), in both evaluators and on both schedulers. Case IDs are the
+/// spec's (section 6).
 
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
@@ -64,9 +65,28 @@ std::string show(const value_t &v) {
 struct outcome {
   bool raised = false;
   std::string value;   // the program's value, shown
-  std::string cls;     // the uncaught exception's class ("" on the async scheduler, until P2)
+  std::string cls;     // the uncaught exception's class
   std::string message; // its message
 };
+
+// Record the exception a program ended with in `o`.
+void record(outcome &o, const value_t &exc) {
+  o.raised = true;
+  o.cls = class_name(class_of_instance(exc));
+  o.message = exception_message(exc);
+}
+
+// What a scheduler's process came to: its result, or the exception it failed with.
+template <class Scheduler> void finish(outcome &o, const Scheduler &sched, int pid) {
+  if (const auto exc = sched.get_exit_exception(pid)) {
+    EXPECT_EQ(sched.get_process_info(pid)->status, process_status::failed);
+    EXPECT_EQ(sched.get_exit_error(pid).value_or(""), exception_summary(*exc));
+    record(o, *exc);
+    return;
+  }
+  const auto r = sched.get_result(pid);
+  o.value = r ? show(*r) : "<no result>";
+}
 
 // The default environment plus natives that fail the ways a C++ function can.
 environment_ptr test_env() {
@@ -83,8 +103,8 @@ environment_ptr test_env() {
   return env;
 }
 
-// Run `script` on engine `e`. An exception that reaches the C++ caller is recorded as the DSL
-// exception it is.
+// Run `script` on engine `e`. An exception that reaches the C++ caller, or that a process failed
+// with, is recorded as the DSL exception it is.
 outcome run(unsigned e, const std::string &script) {
   outcome o;
   try {
@@ -104,33 +124,22 @@ outcome run(unsigned e, const std::string &script) {
       execute_options opts;
       opts.env = test_env();
       const int pid = sched.execute(script, opts);
-      sched.run();
-      const auto r = sched.get_result(pid);
-      o.value = r ? show(*r) : "<no result>";
+      sched.run(); // a program's error ends its process failed; run() doesn't throw it (CX-2)
+      finish(o, sched, pid);
       break;
     }
     default: {
-      // A program's error kills the process (P2 makes it `failed`, with its exception).
       async_scheduler sched;
       execute_options opts;
       opts.env = test_env();
       const int pid = sched.execute(script, opts);
       sched.sync_run();
-      if (const auto error = sched.get_exit_error(pid)) {
-        o.raised = true;
-        o.message = *error;
-      } else {
-        const auto r = sched.get_result(pid);
-        o.value = r ? show(*r) : "<no result>";
-      }
+      finish(o, sched, pid);
       break;
     }
     }
   } catch (const std::exception &ex) {
-    const value_t exc = exception_from(ex);
-    o.raised = true;
-    o.cls = class_name(class_of_instance(exc));
-    o.message = exception_message(exc);
+    record(o, exception_from(ex));
   }
   return o;
 }
@@ -156,8 +165,7 @@ void expect_case(const program_case &c) {
       continue;
     }
     ASSERT_TRUE(o.raised) << "value " << o.value;
-    if (e != async_sched)
-      EXPECT_EQ(o.cls, c.cls) << o.message;
+    EXPECT_EQ(o.cls, c.cls) << o.message;
     if (c.message)
       EXPECT_EQ(o.message, c.message);
   }
@@ -418,54 +426,164 @@ TEST(ExceptionsFromErrors, SignalHandlerRaisesInTheProgram) {
     sched.sync_run(40);
     ASSERT_TRUE(sched.send_signal(pid, "SIGUSR1"));
     sched.sync_run();
-    EXPECT_EQ(sched.get_exit_error(pid).value_or(""), "sig");
+    EXPECT_EQ(sched.get_process_info(pid)->status, process_status::failed);
+    EXPECT_EQ(sched.get_exit_error(pid).value_or(""), "RuntimeError: sig");
   }
 }
 
-TEST(ExceptionsFromErrors, UncaughtErrorsKeepTheirCppType) {
-  // A C++ caller sees the exception a builtin threw, as before exceptions existed; a DSL raise
-  // arrives as a dsl_exception with its class chain (CX-3, CX-4).
+TEST(ExceptionsFromErrors, UncaughtReachesTheCallerAsDslException) {
+  // CX-3 and CX-4: the caller gets a dsl_exception with the value and the class chain. One made
+  // from a C++ exception keeps it as original(), through a finally and a re-raise too.
   stackless_evaluator s(test_env());
   evaluator r(test_env());
-  EXPECT_THROW(s.evaluate_script("(nth (list 1) 5)"), dsl_error);
-  EXPECT_THROW(r.evaluate_script("(nth (list 1) 5)"), dsl_error);
-  EXPECT_THROW(s.evaluate_script("(throw-invalid)"), std::invalid_argument);
-  EXPECT_THROW(r.evaluate_script("(throw-invalid)"), std::invalid_argument);
-  // Through a finally and a re-raise, still the original.
-  EXPECT_THROW(s.evaluate_script("(try (throw-invalid) (catch (e) (raise)))"),
-               std::invalid_argument);
-  EXPECT_THROW(r.evaluate_script("(try (throw-invalid) (catch (e) (raise)))"),
-               std::invalid_argument);
-  EXPECT_THROW(s.evaluate_script("(try (throw-invalid) (finally 1))"), std::invalid_argument);
-
-  const char *mine = "(begin (defclass MyError ValueError) (raise (MyError \"m\")))";
+  const auto original_of = [](const auto &evaluate) -> std::exception_ptr {
+    try {
+      evaluate();
+    } catch (const dsl_exception &ex) {
+      return ex.original();
+    }
+    return nullptr;
+  };
   for (unsigned e : {recursive, stackless}) {
     SCOPED_TRACE(engine_name(e));
+    const auto eval = [&](const char *script) {
+      return [&, script] {
+        if (e == recursive)
+          r.evaluate_script(script);
+        else
+          s.evaluate_script(script);
+      };
+    };
+    for (const char *script : {"(throw-invalid)", "(try (throw-invalid) (catch (e) (raise)))",
+                               "(try (throw-invalid) (finally 1))"}) {
+      SCOPED_TRACE(script);
+      const std::exception_ptr original = original_of(eval(script));
+      ASSERT_TRUE(original);
+      EXPECT_THROW(std::rethrow_exception(original), std::invalid_argument);
+    }
+    const std::exception_ptr builtin = original_of(eval("(nth (list 1) 5)"));
+    ASSERT_TRUE(builtin);
+    EXPECT_THROW(std::rethrow_exception(builtin), dsl_error);
+    EXPECT_FALSE(original_of(eval("(error \"raised\")"))); // a DSL raise has none
+
     try {
-      if (e == recursive)
-        r.evaluate_script(mine);
-      else
-        s.evaluate_script(mine);
+      eval("(begin (defclass MyError ValueError) (raise (MyError \"m\")))")();
       ADD_FAILURE() << "no exception";
     } catch (const dsl_exception &ex) {
-      EXPECT_STREQ(ex.what(), "m");
+      EXPECT_STREQ(ex.what(), "MyError: m");
       EXPECT_EQ(ex.class_name(), "MyError");
       EXPECT_EQ(ex.class_chain(), (std::vector<std::string>{"MyError", "ValueError", "Exception"}));
+      EXPECT_EQ(exception_message(ex.value()), "m");
     }
   }
 }
 
-TEST(ExceptionsFromErrors, SyncSchedulerEndsTheProcessAnErrorEnded) {
-  // The error still reaches run()'s caller (until P2), and the process it ended is killed with
-  // its message: a later run() doesn't throw it again.
-  scheduler sched;
-  const int bad = sched.execute(std::string("(nth (list 1) 5)"));
-  EXPECT_THROW(sched.run(), dsl_error);
-  EXPECT_EQ(sched.get_process_info(bad)->status, process_status::killed);
-  const int good = sched.execute(std::string("(+ 1 2)"));
-  EXPECT_NO_THROW(sched.run());
-  ASSERT_TRUE(sched.get_result(good));
-  EXPECT_EQ(show(*sched.get_result(good)), "3");
+TEST(ExceptionsLeaving, SchedulersEndTheProcessFailed) {
+  // CX-1 and CX-2: the process ends failed with its exception, and run() goes on (the sync
+  // scheduler used to throw it). raise_exit_exception() throws it for a host that wants that.
+  const char *program = "(begin (defclass MyError ValueError) (raise (MyError \"bad\" 7)))";
+  const auto check = [](const auto &sched, int pid) {
+    const auto info = sched.get_process_info(pid);
+    ASSERT_TRUE(info);
+    EXPECT_EQ(info->status, process_status::failed);
+    ASSERT_TRUE(info->exit_exception);
+    EXPECT_EQ(class_name(class_of_instance(*info->exit_exception)), "MyError");
+    EXPECT_EQ(show(*field(*info->exit_exception, "data")), "7");
+    EXPECT_EQ(info->exit_error.value_or(""), "MyError: bad");
+    EXPECT_FALSE(sched.get_result(pid));
+    try {
+      sched.raise_exit_exception(pid);
+      ADD_FAILURE() << "no exception";
+    } catch (const dsl_exception &ex) {
+      EXPECT_EQ(ex.class_chain(), (std::vector<std::string>{"MyError", "ValueError", "Exception"}));
+    }
+  };
+  {
+    scheduler sched;
+    const int pid = sched.execute(std::string(program));
+    const int good = sched.execute(std::string("(+ 1 2)"));
+    EXPECT_NO_THROW(sched.run());
+    check(sched, pid);
+    EXPECT_EQ(show(*sched.get_result(good)), "3");
+    EXPECT_NO_THROW(sched.raise_exit_exception(good)); // not failed: nothing to throw
+  }
+  {
+    async_scheduler sched;
+    const int pid = sched.execute(std::string(program));
+    sched.sync_run();
+    check(sched, pid);
+  }
+}
+
+TEST(ExceptionsLeaving, FailedAndKilledAreCountedApart) {
+  // CX-7
+  for (int which : {0, 1}) {
+    SCOPED_TRACE(which ? "async_scheduler" : "scheduler");
+    // One process that fails, one killed at its step limit, one that terminates.
+    const auto submit = [](auto &sched) {
+      execute_options limited;
+      limited.max_steps = 50;
+      sched.execute(std::string("(error \"one\")"));
+      sched.execute(std::string("(while t 1)"), limited);
+      sched.execute(std::string("(+ 1 1)"));
+    };
+    std::vector<process_info> procs;
+    scheduler_stats stats;
+    if (which) {
+      async_scheduler sched;
+      submit(sched);
+      sched.sync_run();
+      procs = sched.list_processes();
+      stats = sched.get_stats();
+    } else {
+      scheduler sched;
+      submit(sched);
+      sched.run();
+      procs = sched.list_processes();
+      stats = sched.get_stats();
+    }
+    EXPECT_EQ(stats.failed, 1);
+    EXPECT_EQ(stats.killed, 1);
+    EXPECT_EQ(stats.terminated, 1);
+    ASSERT_EQ(procs.size(), 3u);
+    EXPECT_EQ(procs[0].status, process_status::failed);
+    EXPECT_EQ(procs[1].status, process_status::killed);
+    EXPECT_EQ(procs[2].status, process_status::terminated);
+    EXPECT_STREQ(to_string(process_status::failed), "failed");
+    EXPECT_EQ(parse_process_status("failed"), process_status::failed);
+  }
+}
+
+TEST(ExceptionsLeaving, AnExceptionFromBeforeASnapshotKeepsItsClass) {
+  // A snapshot writes a class dict once for each value holding it, so a restored exception's
+  // class is a copy: catch matches it by its chain of names. A handler is running when the
+  // snapshot is taken; after the restore it re-raises its exception to an outer catch by class.
+  cvc::app app;
+  stackless_evaluator ev(builtins::make_default_environment());
+  auto st = ev.create_state(parse(
+      "(begin (defclass MyError ValueError) (try (try (raise (MyError \"m\")) (catch (e) (begin "
+      "(set i 0) (while (< i 20) (set i (+ i 1))) (raise e)))) (catch (ValueError e2) (get-attr "
+      "(get-attr e2 \"__class__\") \"__name__\"))))"));
+  ev.run(st, 40);
+  ASSERT_FALSE(st.done);
+  bool handling = false;
+  for (const auto &fr : st.stack)
+    handling = handling || fr.phase == eval_phase::try_handler;
+  ASSERT_TRUE(handling);
+
+  cvc::state &node = cvc::state::instance(app)("__exceptions_class_snapshot__");
+  encode_evaluator_state(node, st);
+  evaluator_state restored = decode_evaluator_state(node);
+  const auto builtins_env = builtins::make_default_environment();
+  for (auto &fr : restored.stack) {
+    environment_ptr env = fr.env;
+    while (env && env->outer)
+      env = env->outer;
+    if (env)
+      for (auto &[name, val] : builtins_env->bindings)
+        env->set(name, val);
+  }
+  EXPECT_EQ(show(ev.run(restored)), "MyError");
 }
 
 TEST(ExceptionsFromErrors, StateRaisesAgainWhenSteppedAgain) {

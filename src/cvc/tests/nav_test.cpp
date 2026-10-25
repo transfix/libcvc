@@ -1876,6 +1876,59 @@ TEST(NavSimWorld, RasterVersionBumpsOncePerRasterChange) {
   EXPECT_EQ(world.plane_version(0), 1) << "neither obstacle event is a belief flip";
 }
 
+// logodds(m) and dynamic_stamps(m) show a viewer the belief behind belief_occ(m): the log-odds
+// start at +-l_clamp from the prior and move as the agent senses, and add_obstacle() stamps the
+// cells it marks with the sim time. Both are null for an out-of-range plane.
+TEST(NavSimWorld, LogOddsAndDynamicStampsAccessors) {
+  const int R = 16, C = 16;
+  std::vector<std::uint8_t> truth((std::size_t)R * C, 0), prior((std::size_t)R * C, 0);
+  const int pr = 8, pc = 10; // a phantom in the prior, on the agent's ray
+  prior[pr * C + pc] = 1;
+  cvc::nav::sim_world::config cfg;
+  cfg.rows = R;
+  cfg.cols = C;
+  cfg.min_x = 0;
+  cfg.min_y = 0;
+  cfg.max_x = C - 1;
+  cfg.max_y = R - 1;
+  cfg.scale = 1.0;
+  cfg.veh.rr = 0.2f;
+  cfg.veh.d_hat = 0.5f;
+  cfg.veh.dt = 0.06f;
+  cfg.veh.vmax = 0.0f;
+  cfg.range_m = 12.0;
+  cfg.n_rays = 1;
+  cfg.fov_rad = 0.0;
+  cfg.sense_every = 1;
+  cfg.freeze_sense = false;
+  cfg.l_free = -1.4;
+  cfg.l_clamp = 8.0;
+  float o[2] = {4.0f, 8.0f}, goal[2] = {14.0f, 8.0f}, color[3] = {1, 1, 1};
+  cvc::nav::sim_world world(cfg, truth.data(), prior.data(), cvc::nav::coef_mlp::default_biased(),
+                            o, goal, color, 1);
+  ASSERT_NE(world.logodds(0), nullptr);
+  ASSERT_NE(world.dynamic_stamps(0), nullptr);
+  EXPECT_EQ(world.logodds(1), nullptr);
+  EXPECT_EQ(world.logodds(-1), nullptr);
+  EXPECT_EQ(world.dynamic_stamps(1), nullptr);
+  EXPECT_FLOAT_EQ(world.logodds(0)[pr * C + pc], 8.0f) << "the prior's occupied cell at +l_clamp";
+  EXPECT_FLOAT_EQ(world.logodds(0)[2 * C + 2], -8.0f) << "a free one at -l_clamp";
+  for (int k = 0; k < R * C; ++k)
+    ASSERT_TRUE(std::isinf(world.dynamic_stamps(0)[k]) && world.dynamic_stamps(0)[k] < 0)
+        << "no cell is stamped at construction";
+
+  world.step(1);
+  EXPECT_LT(world.logodds(0)[pr * C + pc], 8.0f) << "sensing the phantom free lowers its log-odds";
+
+  world.step(2);
+  const double now = world.tick() * static_cast<double>(cfg.veh.dt);
+  world.add_obstacle(2, 2, 2, 2); // a 3x3 mark round (2, 2)
+  const double *st = world.dynamic_stamps(0);
+  EXPECT_DOUBLE_EQ(st[2 * C + 2], now);
+  EXPECT_DOUBLE_EQ(st[1 * C + 3], now);
+  EXPECT_TRUE(std::isinf(st[5 * C + 5])) << "a cell outside the mark is not stamped";
+}
+
 // An ever_seen-ONLY change: two agents share one plane. Agent 0 drives into new ground while the
 // plane's last agent, agent 1 (whose FoV alone is last_visible), stands still. ever_seen grows on
 // the ticks agent 0 sees new cells while last_visible and the occupancy (an empty, fully-known

@@ -25,8 +25,7 @@ def test_async_fn_offloads_and_resumes_with_result():
         return n * 2
 
     ex.register_async_fn("adouble", double)
-    # Nested (not the whole program) so the self-park has an enclosing frame.
-    out = ex.run("(begin (adouble 21))")
+    out = ex.run("(adouble 21)")  # the whole program can park (docs/STATE_EXEC_EXCEPTIONS.md 3.9)
     assert out == "42", out
     # It ran on a pool worker, NOT the thread that called run().
     assert seen["thread"] != threading.get_ident(), "async fn should run off the run() thread"
@@ -65,7 +64,7 @@ def test_gil_released_so_other_python_thread_runs_during_async_wait():
     assert counter["n"] == 100, counter["n"]
 
 
-def test_async_fn_exception_becomes_error_dict():
+def test_async_fn_exception_raises_at_the_call():
     app = pycvc.make_app()
     ex = pycvc.Exec(app)
 
@@ -73,11 +72,17 @@ def test_async_fn_exception_becomes_error_dict():
         raise ValueError("kaboom-async")
 
     ex.register_async_fn("boom", boom)
-    # A raise inside the async callable resumes the program with {"__async_error__": <msg>} — a
-    # reserved key a normal dict result cannot collide with.
-    out = ex.run('(begin (get-attr (boom 1) "__async_error__"))')
+    # A raise inside the async callable raises at the call (docs/STATE_EXEC_EXCEPTIONS.md 3.4), a
+    # PythonError a try catches, with no {"__async_error__": ...} dict.
+    out = ex.run('(try (boom 1) (catch (PythonError e) (get-attr e "message")))')
     assert "kaboom-async" in out, out
-    # The Exec stays usable after a contained async error.
+    # Uncaught, run() re-raises the callable's own exception.
+    try:
+        ex.run("(boom 1)")
+        assert False, "expected the ValueError"
+    except ValueError as e:
+        assert "kaboom-async" in str(e)
+    # The Exec stays usable after an async error.
     ex.register_async_fn("idn", lambda v: v)
     assert ex.run("(begin (idn 5))") == "5"
 

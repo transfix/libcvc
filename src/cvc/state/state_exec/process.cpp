@@ -19,6 +19,8 @@ const char *to_string(process_status s) {
     return "terminated";
   case process_status::killed:
     return "killed";
+  case process_status::failed:
+    return "failed";
   }
   return "unknown";
 }
@@ -36,6 +38,8 @@ process_status parse_process_status(const std::string &s) {
     return process_status::terminated;
   if (s == "killed")
     return process_status::killed;
+  if (s == "failed")
+    return process_status::failed;
   return process_status::ready;
 }
 

@@ -183,7 +183,17 @@ struct train_config {
   // preference, as w_coll is. Fit `power` to the P3 ledger with cvc::physics::fit_power and
   // convert it with dyn_power_params_of(); its mass must be dyn's. 0 (the default) leaves the
   // loss and its gradient exactly as without it.
+  //
+  // energy_ref > 0 prices the energy against progress instead of time: each step adds
+  //   w_energy / window * softplus(E_t - energy_ref * p_t) / (hdt * P_full)
+  // with p_t = |o_t - goal| - |o_{t+1} - goal| the step's progress toward the goal. A step pays
+  // only for the energy its progress does not cover at energy_ref (normalized energy per
+  // normalized unit of progress; dyn_energy_ref_of() converts a Wh/km), and the smooth hinge
+  // keeps the term >= 0, so it never rewards progress itself. Pricing time (energy_ref 0, the
+  // default) makes standing still the cheapest policy: on Jolt it teaches the policy to stop
+  // (docs/NAV_TRAINING.md, "Energy in the loss").
   float w_energy = 0.0f;
+  float energy_ref = 0.0f;
   diff::power_params power{};
   // Checkpoint selection (P8b): with a fitness function passed to train(), the policy is
   // scored before training and every `checkpoint_every` outer steps (and after the last), and

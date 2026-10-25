@@ -97,7 +97,7 @@ def test_lod_node_selects_by_distance():
     # the typed lookups find it, with an app keep-alive
     assert isinstance(sg.getGraphics("box"), pycvc_gl.LodGraphicsNode)
     assert sg.lod_node("box").rungCount() == 4 and sg.lod_node("nope") is None
-    assert node.rung(0)._pycvc_app is app and node.rung(7) is None
+    assert node.rung(0)._pycvc_app is app.this and node.rung(7) is None
     # a directly constructed node joins the scene through add_node
     own = pycvc_gl.LodGraphicsNode(app, "lod_select.mine", "mine")
     sg.add_node("mine", own)

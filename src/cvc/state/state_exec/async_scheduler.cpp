@@ -1,9 +1,12 @@
 #include <algorithm>
 #include <chrono>
 #include <cvc/state/state.h>
+#include <cvc/state/state_exec/async_call.h>
 #include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/state/state_exec/builtins.h>
+#include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/scheduler.h> // max_alloc_bytes_from_state
+#include <cvc/state/state_exec/state_value_codec.h> // snapshot / restore
 
 namespace cvc::state_exec {
 
@@ -19,6 +22,7 @@ async_scheduler::async_scheduler(scheduling_policy policy)
 // ---------------------------------------------------------------------------
 
 int async_scheduler::execute(const std::string &script, const execute_options &opts) {
+  detail::check_not_in_async_kernel("async_scheduler::execute");
   int pid = next_pid_++;
   process proc;
   proc.pid = pid;
@@ -35,6 +39,8 @@ int async_scheduler::execute(const std::string &script, const execute_options &o
   proc.max_memory = opts.max_memory;
   proc.max_messages = opts.max_messages;
   proc.max_message_bytes = opts.max_message_bytes;
+  if (opts.async_steps_per_cpu_ms && *opts.async_steps_per_cpu_ms >= 0.0)
+    proc.async_steps_per_cpu_ms = opts.async_steps_per_cpu_ms;
   // No load_settings() here: read the allocation limit from the tree on every submission.
   proc.max_alloc_bytes =
       watch_root_ ? max_alloc_bytes_from_state(*watch_root_, {}) : kDefaultMaxAllocBytes;
@@ -55,6 +61,7 @@ int async_scheduler::execute(const std::string &script, const execute_options &o
 }
 
 int async_scheduler::execute(const value_t &expr, const execute_options &opts) {
+  detail::check_not_in_async_kernel("async_scheduler::execute");
   int pid = next_pid_++;
   process proc;
   proc.pid = pid;
@@ -71,6 +78,8 @@ int async_scheduler::execute(const value_t &expr, const execute_options &opts) {
   proc.max_memory = opts.max_memory;
   proc.max_messages = opts.max_messages;
   proc.max_message_bytes = opts.max_message_bytes;
+  if (opts.async_steps_per_cpu_ms && *opts.async_steps_per_cpu_ms >= 0.0)
+    proc.async_steps_per_cpu_ms = opts.async_steps_per_cpu_ms;
   // No load_settings() here: read the allocation limit from the tree on every submission.
   proc.max_alloc_bytes =
       watch_root_ ? max_alloc_bytes_from_state(*watch_root_, {}) : kDefaultMaxAllocBytes;
@@ -161,7 +170,7 @@ void async_scheduler::execute_process_step(process &proc) {
   struct release_guard {
     process &p;
     ~release_guard() {
-      if (p.status == process_status::terminated || p.status == process_status::killed)
+      if (is_finished(p.status))
         p.release_state();
     }
   } release_dead{proc};
@@ -186,6 +195,9 @@ void async_scheduler::execute_process_step(process &proc) {
   proc.status = process_status::running;
   proc.last_run_start = std::chrono::steady_clock::now();
   const auto step_start = proc.last_run_start;
+  // Async calls that run inline in this step are charged as calls (3.8), not as the step.
+  proc.step_async_wall = 0.0;
+  proc.step_async_cpu = 0.0;
 
   // Arm the cooperative deadline for this step so an uncapped nested evaluator or a
   // long-running builtin aborts at the process's remaining time budget too — the same
@@ -226,6 +238,16 @@ void async_scheduler::execute_process_step(process &proc) {
       evaluator_.raise(proc.state, std::move(exc));
       raised_in_program = !proc.state.uncaught;
     }
+    if (!raised_in_program && proc.state.uncaught) {
+      // An exception the program didn't catch ends it `failed`, with the exception kept for the
+      // host (docs/STATE_EXEC_EXCEPTIONS.md 2.6).
+      proc.accumulated_time +=
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - proc.last_run_start)
+              .count();
+      const auto *thrown = dynamic_cast<const dsl_exception *>(&e);
+      fail_process(proc, *proc.state.uncaught, thrown ? thrown->original() : nullptr);
+      return;
+    }
     if (!raised_in_program) {
       // A runtime error thrown by a step — a throwing intrinsic (e.g. a channel-policy refusal)
       // or a bad-arg builtin — must NOT propagate out of the pump: it would escape sync_run() and
@@ -253,9 +275,10 @@ void async_scheduler::execute_process_step(process &proc) {
   if (proc.status == process_status::running)
     proc.accumulated_time += std::chrono::duration<double>(now - proc.last_run_start).count();
   if (charge_cpu)
-    proc.charge_cpu_time(thread_cpu_seconds() - cpu0);
+    proc.charge_cpu_time(std::max(0.0, thread_cpu_seconds() - cpu0 - proc.step_async_cpu));
   // Charge the step's time to what it was spent on (eval, read or data).
-  proc.state.stats.add_step_time(std::chrono::duration<double>(now - step_start).count());
+  proc.state.stats.add_step_time(std::chrono::duration<double>(now - step_start).count() -
+                                 proc.step_async_wall);
   // Heap accounting: take a finished measurement, start the next when due (heap.h).
   if (proc.max_memory > 0 || proc.state.heap_measured)
     heap_after_step(proc, step_alloc ? step_alloc->allocated() : 0,
@@ -354,6 +377,14 @@ void async_scheduler::wake_sleeping_processes() {
       proc->wake_time.reset();
       proc->status = process_status::ready;
     }
+    // A timed wait ((await f seconds)) that ran out: the waiting call raises TimeoutError.
+    if (proc->status == process_status::waiting && proc->recv_path && proc->recv_deadline &&
+        now >= *proc->recv_deadline) {
+      proc->recv_path.reset();
+      proc->recv_deadline.reset();
+      expire_await(proc->state);
+      proc->status = process_status::ready;
+    }
   }
 }
 
@@ -404,6 +435,7 @@ int async_scheduler::wake_awaiting() {
 }
 
 bool async_scheduler::receive_message(int pid, const std::string &path) {
+  detail::check_not_in_async_kernel("async_scheduler::receive_message");
   auto it = processes_.find(pid);
   if (it == processes_.end())
     return false;
@@ -415,18 +447,33 @@ bool async_scheduler::receive_message(int pid, const std::string &path) {
     proc.accumulated_time += std::chrono::duration<double>(now - proc.last_run_start).count();
   }
   proc.recv_path = path;
+  proc.recv_deadline.reset();
   proc.status = process_status::waiting;
   return true;
 }
 
+bool async_scheduler::receive_message_until(int pid, const std::string &path, double seconds) {
+  if (!receive_message(pid, path))
+    return false;
+  processes_.at(pid)->recv_deadline =
+      std::chrono::steady_clock::now() +
+      std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+          std::chrono::duration<double>(std::max(0.0, seconds)));
+  return true;
+}
+
 int async_scheduler::deliver_to_receivers(const std::string &path, const value_t &msg) {
+  detail::check_not_in_async_kernel("async_scheduler::deliver_to_receivers");
   int woken = 0;
   for (auto &[pid, proc] : processes_) {
     if (proc->status == process_status::waiting && proc->recv_path && *proc->recv_path == path) {
       proc->recv_path.reset();
+      proc->recv_deadline.reset();
       proc->state.result = msg;
-      // Patch the nil placeholder that msg-recv left in the parent frame.
-      if (!proc->state.stack.empty() && !proc->state.stack.back().results.empty())
+      // A call parked in the await_call phase takes the message; otherwise patch the nil
+      // placeholder that msg-recv left in the parent frame.
+      if (!deliver_await(proc->state, msg) && !proc->state.stack.empty() &&
+          !proc->state.stack.back().results.empty())
         proc->state.stack.back().results.back() = msg;
       proc->status = process_status::ready;
       ++woken;
@@ -474,18 +521,146 @@ void async_scheduler::post_message(const std::string &path, const value_t &msg) 
 }
 
 void async_scheduler::drain_ingress() {
+  detail::check_not_in_async_kernel("async_scheduler::drain_ingress");
   std::vector<std::pair<std::string, value_t>> batch;
+  std::vector<std::shared_ptr<async_call>> finished;
   {
     std::lock_guard<std::mutex> lock(ingress_mutex_);
-    if (ingress_.empty())
-      return;
     batch.swap(ingress_);
+    finished.swap(completions_);
   }
   // On the scheduler thread now: deliver_to_receivers mutates process state, which is safe here
   // (no other thread touches the scheduler). A message with no waiter falls into the per-path
   // pending FIFO, exactly as an on-thread msg-send would.
   for (auto &[path, msg] : batch)
     deliver_to_receivers(path, msg);
+  for (const std::shared_ptr<async_call> &call : finished)
+    finish_async_call(call);
+  charge_async_calls();
+  // A driver that only drains while nothing is runnable must still see due sleepers and timed
+  // waits ((await f seconds)) wake.
+  wake_sleeping_processes();
+}
+
+// ---------------------------------------------------------------------------
+// Async calls (docs/STATE_EXEC_EXCEPTIONS.md 3)
+// ---------------------------------------------------------------------------
+
+void async_scheduler::track_async_call(std::shared_ptr<async_call> call) {
+  async_calls_.push_back(std::move(call));
+}
+
+void async_scheduler::post_async_completion(std::shared_ptr<async_call> call) {
+  std::lock_guard<std::mutex> lock(ingress_mutex_);
+  completions_.push_back(std::move(call));
+}
+
+void async_scheduler::wake_async_waiters(const std::string &channel) {
+  for (auto &[pid, proc] : processes_) {
+    if (proc->status == process_status::waiting && proc->recv_path && *proc->recv_path == channel) {
+      proc->recv_path.reset();
+      proc->recv_deadline.reset();
+      deliver_await(proc->state, nil_value); // the frame reads the call's outcome
+      proc->status = process_status::ready;
+    }
+  }
+}
+
+void async_scheduler::finish_async_call(const std::shared_ptr<async_call> &call) {
+  const auto it = std::find(async_calls_.begin(), async_calls_.end(), call);
+  if (it == async_calls_.end())
+    return; // dropped already: its process was killed or reaped, or it was finished
+  async_calls_.erase(it);
+  const auto pit = processes_.find(call->pid());
+  process *proc = pit == processes_.end() ? nullptr : pit->second.get();
+  if (proc && !is_finished(proc->status)) {
+    // The rest of the call is charged before its process resumes (3.8): a call that used up
+    // the budget kills the process instead.
+    detail::charge_async_call(*proc, *call, async_steps_per_cpu_ms(*proc), true,
+                              std::chrono::steady_clock::now());
+    if (proc->max_memory > 0)
+      proc->heap_alloc_bytes += call->alloc_bytes();
+    check_limits(*proc);
+  } else {
+    call->charged.closed = true;
+  }
+  wake_async_waiters(call->channel());
+}
+
+void async_scheduler::charge_async_calls() {
+  if (async_calls_.empty())
+    return;
+  const auto now = std::chrono::steady_clock::now();
+  // A copy: a kill or a timeout below changes the list.
+  const std::vector<std::shared_ptr<async_call>> calls = async_calls_;
+  std::vector<process *> charged;
+  for (const std::shared_ptr<async_call> &call : calls) {
+    const auto pit = processes_.find(call->pid());
+    if (pit == processes_.end() || is_finished(pit->second->status))
+      continue;
+    process &proc = *pit->second;
+    if (!call->finished() && call->past_timeout(now) && call->settle_timeout()) {
+      // Its own timeout: it raises TimeoutError at the call, and its kernel is told to stop.
+      call->cancel();
+      finish_async_call(call);
+      continue;
+    }
+    if (!call->started())
+      continue; // queued: waiting for a thread isn't charged
+    detail::charge_async_call(proc, *call, async_steps_per_cpu_ms(proc), false, now);
+    if (std::find(charged.begin(), charged.end(), &proc) == charged.end())
+      charged.push_back(&proc);
+  }
+  // At a limit the process is killed (2.5), and its calls cancelled.
+  for (process *proc : charged)
+    if (!is_finished(proc->status))
+      check_limits(*proc);
+}
+
+void async_scheduler::cancel_async_calls(int pid) {
+  const auto pit = processes_.find(pid);
+  const auto now = std::chrono::steady_clock::now();
+  for (auto it = async_calls_.begin(); it != async_calls_.end();) {
+    if ((*it)->pid() != pid) {
+      ++it;
+      continue;
+    }
+    std::shared_ptr<async_call> call = *it;
+    it = async_calls_.erase(it);
+    call->cancel();
+    // What it ran so far stays charged; its result, when it comes, is dropped.
+    if (pit != processes_.end())
+      detail::charge_async_call(*pit->second, *call, async_steps_per_cpu_ms(*pit->second), true,
+                                now);
+  }
+}
+
+double async_scheduler::async_steps_per_cpu_ms(const process &proc) {
+  if (proc.async_steps_per_cpu_ms)
+    return *proc.async_steps_per_cpu_ms;
+  if (!watch_root_)
+    return kDefaultAsyncStepsPerCpuMs;
+  // Read live, at every charge (3.8): a change applies to the next one.
+  const double rate = async_steps_per_cpu_ms_from_state(*watch_root_, id_);
+  if (!id_.empty() && rate != published_rate_) {
+    publish_async_steps_per_cpu_ms(*watch_root_, id_, rate);
+    published_rate_ = rate;
+  }
+  return rate;
+}
+
+int async_scheduler::restore(process_ptr proc) {
+  const int pid = next_pid_++;
+  proc->pid = pid;
+  if (!is_finished(proc->status))
+    proc->status = process_status::ready;
+  proc->wake_time.reset();
+  proc->recv_path.reset();
+  proc->recv_deadline.reset();
+  proc->awaiting_frame = false;
+  proc->create_time = std::chrono::steady_clock::now();
+  processes_.emplace(pid, std::move(proc));
+  return pid;
 }
 
 void async_scheduler::queue_watch_event(int pid, process::watch_event evt) {
@@ -560,7 +735,7 @@ void async_scheduler::poll_watches() {
   if (!watch_root_)
     return;
   for (auto &[pid, proc] : processes_) {
-    if (proc->status == process_status::terminated || proc->status == process_status::killed)
+    if (is_finished(proc->status))
       continue;
     for (auto &[wid, entry] : proc->watch_handlers) {
       auto *node = watch_root_->findDescendant(entry.path);
@@ -625,7 +800,7 @@ bool async_scheduler::send_signal(int pid, const std::string &signal) {
   if (it == processes_.end())
     return false;
   auto &proc = *it->second;
-  if (proc.status == process_status::terminated || proc.status == process_status::killed)
+  if (is_finished(proc.status))
     return false;
 
   if (signal == "SIGKILL") {
@@ -681,8 +856,18 @@ void async_scheduler::terminate_process(process &proc, value_t result) {
 }
 
 void async_scheduler::kill_process(process &proc, const std::string &reason) {
+  cancel_async_calls(proc.pid); // its kernels see cancelled(), and their results are dropped
   proc.status = process_status::killed;
   proc.exit_error = reason;
+  proc.state.stats.mark_complete();
+  release_if_idle(proc);
+}
+
+void async_scheduler::fail_process(process &proc, value_t exc, std::exception_ptr original) {
+  proc.status = process_status::failed;
+  proc.exit_error = exception_summary(exc);
+  proc.exit_exception = std::move(exc);
+  proc.exit_original = std::move(original);
   proc.state.stats.mark_complete();
   release_if_idle(proc);
 }
@@ -721,11 +906,12 @@ bool async_scheduler::resume(int pid) {
 }
 
 bool async_scheduler::kill(int pid) {
+  detail::check_not_in_async_kernel("async_scheduler::kill");
   auto it = processes_.find(pid);
   if (it == processes_.end())
     return false;
   auto &proc = *it->second;
-  if (proc.status == process_status::terminated || proc.status == process_status::killed)
+  if (is_finished(proc.status))
     return false;
   kill_process(proc, "killed_by_user");
   return true;
@@ -734,13 +920,26 @@ bool async_scheduler::kill(int pid) {
 int async_scheduler::kill_owner(const std::string &owner) {
   int killed = 0;
   for (auto &[pid, proc] : processes_) {
-    if (proc->owner == owner && proc->status != process_status::terminated &&
-        proc->status != process_status::killed) {
+    if (proc->owner == owner && !is_finished(proc->status)) {
       kill_process(*proc, "owner_reaped");
       ++killed;
     }
   }
   return killed;
+}
+
+bool async_scheduler::snapshot(int pid, cvc::state &node) const {
+  const auto it = processes_.find(pid);
+  if (it == processes_.end())
+    return false;
+  encode_process(node, *it->second);
+  return true;
+}
+
+int async_scheduler::restore(cvc::state &node, environment_ptr natives) {
+  process_ptr proc = decode_process(node);
+  rebind_natives(proc->state, natives);
+  return restore(std::move(proc));
 }
 
 int async_scheduler::fork(int pid) {
@@ -869,6 +1068,7 @@ process_info async_scheduler::make_info(const process &proc) const {
   info.peak_memory = mem_tracker_.peak_bytes(proc.pid);
   info.heap_memory = proc.heap_bytes;
   info.heap_measurements = proc.heap_measurements;
+  fill_async_usage(info, proc);
   info.max_memory = proc.max_memory;
   info.max_time = proc.max_time;
   info.message_count = proc.message_count;
@@ -876,6 +1076,8 @@ process_info async_scheduler::make_info(const process &proc) const {
   info.message_bytes = proc.message_bytes;
   info.max_message_bytes = proc.max_message_bytes;
   info.parent_pid = proc.parent_pid;
+  info.exit_error = proc.exit_error;
+  info.exit_exception = proc.exit_exception;
   return info;
 }
 
@@ -913,13 +1115,28 @@ std::optional<std::string> async_scheduler::get_exit_error(int pid) const {
   return it->second->exit_error;
 }
 
+std::optional<value_t> async_scheduler::get_exit_exception(int pid) const {
+  auto it = processes_.find(pid);
+  if (it == processes_.end())
+    return std::nullopt;
+  return it->second->exit_exception;
+}
+
+void async_scheduler::raise_exit_exception(int pid) const {
+  auto it = processes_.find(pid);
+  if (it == processes_.end() || !it->second->exit_exception)
+    return;
+  throw dsl_exception(*it->second->exit_exception, it->second->exit_original);
+}
+
 bool async_scheduler::reap(int pid) {
   auto it = processes_.find(pid);
   if (it == processes_.end())
     return false;
   const process_status st = it->second->status;
-  if (st != process_status::terminated && st != process_status::killed)
+  if (!is_finished(st))
     return false; // never drop a still-live (ready/running/waiting/paused) process
+  cancel_async_calls(pid);
   // Its env, state, watch_handlers and captured values (including any Python holders) all live on
   // the process object, so erasing it frees them.
   processes_.erase(it);
@@ -956,6 +1173,9 @@ scheduler_stats async_scheduler::get_stats() const {
       break;
     case process_status::killed:
       ++s.killed;
+      break;
+    case process_status::failed:
+      ++s.failed;
       break;
     default:
       break;

@@ -13,6 +13,7 @@
 #include <chrono>
 #include <cvc/state/state_exec/stackless_evaluator.h>
 #include <cvc/state/state_exec/types.h>
+#include <exception>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -30,8 +31,15 @@ enum class process_status {
   paused,     // Paused by user
   waiting,    // Waiting for signal or I/O
   terminated, // Finished execution normally
-  killed      // Killed by user or resource limit
+  killed,     // Killed by user or resource limit
+  failed      // Ended by an exception the program didn't catch (docs/STATE_EXEC_EXCEPTIONS.md)
 };
+
+/// Whether a process with status `s` has ended: terminated, killed or failed.
+inline bool is_finished(process_status s) {
+  return s == process_status::terminated || s == process_status::killed ||
+         s == process_status::failed;
+}
 
 /// Convert process_status to string.
 const char *to_string(process_status s);
@@ -103,10 +111,33 @@ struct process {
   // and wakes the process.
   std::optional<std::string> recv_path;
   std::queue<value_t> inbox;
+  /// A wait on recv_path with a time limit ((await f seconds)): past it the waiting call raises
+  /// TimeoutError (expire_await).
+  std::optional<std::chrono::steady_clock::time_point> recv_deadline;
+
+  // Async calls (docs/STATE_EXEC_EXCEPTIONS.md 3.8): what the process's calls of async functions
+  // were charged. Their run time is in accumulated_time too, their CPU time in cpu_time_charged
+  // (the part past max_time's halfway point), and their steps in the step count, as
+  // step_kind::async.
+  uint64_t async_calls = 0;    // calls made
+  double async_time = 0.0;     // their run time, seconds
+  double async_cpu_time = 0.0; // their CPU time, seconds, their compute-pool fan-out included
+  uint64_t async_steps = 0;    // the steps charged for them
+  /// The process's own limits.async_steps_per_cpu_ms (execute_options); unset: the tree's.
+  std::optional<double> async_steps_per_cpu_ms;
+  /// The run time and kernel-thread CPU time of the async calls that ran inline in the step
+  /// running now. They are charged as calls: the step's CPU charge (capped per step) and its
+  /// time by kind leave them out. (Its run time is in the step's slice of accumulated_time.)
+  double step_async_wall = 0.0;
+  double step_async_cpu = 0.0;
 
   // Completion
   value_t exit_code;
   std::optional<std::string> exit_error;
+  /// A failed process's exception (exit_error is its "Class: message"), and the C++ exception it
+  /// was made from, if it was (a native's, or a Python function's): a host may rethrow that.
+  std::optional<value_t> exit_exception;
+  std::exception_ptr exit_original;
   std::function<void(value_t)> on_complete;
 
   // Signal handling

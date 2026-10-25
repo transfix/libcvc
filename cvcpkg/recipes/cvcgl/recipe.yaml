@@ -77,7 +77,11 @@ recipe:
   # CVCGL_LOWMEM_DRAW / setDrawPath for A/B), now the base of StreamingLowMemoryPolyDataMapper;
   # late shader replacements reach the GPU on the low-memory path. License metadata now
   # LGPL-2.1-only AND BSD-3-Clause (VTK 9.5.0-derived code).
-  cvc_revision: 1
+  # Bumped 1 -> 3 (3.7.0 lineage): lockstep with libcvc 3.7.0+cvc.3, whose wasm-mt SDK fixes
+  # the ImageMagick HDRI define (cvc::cvc's public MAGICKCORE_HDRI_ENABLE was 0 against the
+  # Q16HDRI library). cvcGL source unchanged; it rebuilds against and re-pins that libcvc.
+  # 3, not 2: native cvcgl is already at +cvc.2 on the catalog.
+  cvc_revision: 3
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"

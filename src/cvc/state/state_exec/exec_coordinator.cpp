@@ -1170,6 +1170,7 @@ std::string exec_coordinator::serialize_scheduler_stats(const scheduler_stats &s
   jkv(os, "paused", s.paused, f);
   jkv(os, "terminated", s.terminated, f);
   jkv(os, "killed", s.killed, f);
+  jkv(os, "failed", s.failed, f);
   jkv(os, "total_steps", s.total_steps, f);
   os << '}';
   return os.str();
@@ -1184,6 +1185,7 @@ bool exec_coordinator::deserialize_scheduler_stats(const std::string &json, sche
   xint(json, "paused", s.paused);
   xint(json, "terminated", s.terminated);
   xint(json, "killed", s.killed);
+  xint(json, "failed", s.failed);
   xu64(json, "total_steps", s.total_steps);
   return true;
 }

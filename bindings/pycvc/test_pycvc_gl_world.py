@@ -68,7 +68,7 @@ def test_local_to_world_composes_the_transform_chain():
     assert math.isclose(back[0], 0.0, abs_tol=1e-6)
     assert math.isclose(back[1], 0.0, abs_tol=1e-6)
     assert math.isclose(back[2], 0.0, abs_tol=1e-6)
-    print("  ok: local_to_world/world_to_local compose the parent∘child chain")
+    print("  ok: local_to_world/world_to_local compose the parent-child chain")
 
 
 def test_local_point_to_real_and_dimensions():

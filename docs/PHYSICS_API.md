@@ -727,6 +727,24 @@ The five terms (doc 31 D9):
 
   On the Jolt plant the driver model also feeds gravity along the ground forward. It takes the
   grade from its wheels' contact normals, not the chassis' pitch.
+
+  The forces steer a vehicle off risky ground but never slowed it there, and on a straight line
+  the corner cap allows any speed. A Humvee routed along a 24-degree sidehill (risk 0.85)
+  accelerated to 9.5 m/s across it and rolled where the ramp twisted. The **risk governor**
+  (`veh_params::risk_governor`, off by default) caps the speed by material risk, the worse of
+  the material's and the terrain's (read with or without the terrain's weights):
+  `v_risk(r) = vmax - (vmax - risk_vmin) s`, `s = clamp((r - risk_onset) / (1 - risk_onset), 0, 1)`.
+  `risk_probes` points spaced out to `risk_lookahead` ahead each allow the speed from which the
+  stopping governor's braking (with the plant's latency) is down to that point's `v_risk` by the
+  probe before it, so within one probe spacing of risky ground the vehicle is at its `v_risk`.
+  `drive_telemetry.v_risk` reports the cap (0 when off). The CPU drive, both GPU drives and the
+  plant arm apply it; the persistent `sim_world_cuda` path has no material or terrain. A route
+  follower drives in the drive's place (`sim_world::override_command`) at its own route speed,
+  so `sim_world` holds an overriding command to the speeds the drive's own command is held to:
+  the agent's top speed (`vmax`; on a plant the lower of the plant's and nav's) and, with the
+  governor, its cap (`risk_speed_cap`, with the plant's braking and latency). Without that, on
+  cvcdbg's convoy, where every Humvee follows a vehicle route, neither nav's `vmax` nor the
+  governor changed how fast they went.
 - **H3, the slope look-ahead feature.** `coef_feats(..., slope)` appends the worst grade cost
   between the agent and its carrot, after grip and risk. A coefficient net that takes it sets
   `kFlagFeatSlope` and needs format v3, which an older host refuses rather than reading it as a
@@ -752,7 +770,9 @@ the counts.
 - `sim_world::pull` (below, "sim_world's settings in the state tree") reads the terrain's knobs:
   - `<prefix>.nav.terrain.{max_grade, tip_ratio, tip_margin, sigma}`;
   - `<prefix>.nav.terrain.{lam_grade, lam_grade_hard, k_sharp, d_hat_m}`;
-  - `<prefix>.nav.terrain.{block_infeasible, governors}`.
+  - `<prefix>.nav.terrain.{block_infeasible, governors}`;
+  - `<prefix>.nav.vehicle.{risk_governor, risk_vmin, risk_onset, risk_lookahead, risk_probes}`
+    (speeds in m/s, the look-ahead in metres).
 
   They are seeded with the world's values. A change rebuilds the planes, and an invalid value
   is ignored.

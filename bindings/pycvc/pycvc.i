@@ -169,13 +169,34 @@ std::shared_ptr<cvc::app> app_from_capsule(PyObject *cap) {
 // Ergonomic alias: pycvc.App() reads as a constructor for a fresh app.
 %pythoncode %{
 App = make_app
+
+
+def _keepalive(obj):
+    """What an object that borrows `obj` (holds its C++ object by reference) stashes to keep it
+    alive: `obj.this`, the SwigPyObject that owns the C++ object, not the proxy itself.
+
+    The proxy is GC-tracked: when it and a borrower are garbage in the same collection (always
+    the case at interpreter exit for module globals and anything left in a reference cycle), the
+    collector may clear the proxy first, which drops its `this` and frees the C++ object while the
+    borrower, whose destructor still uses it, has yet to be destroyed (an access violation in
+    ~scene_reader at exit, for an app). A SwigPyObject is not GC-tracked, so only the borrower's
+    own reference keeps it alive, and the borrower's `this` (set first) goes before it.
+
+    A proxy that does not own its C++ object (a reference into another one, such as
+    Viewport.camera()) is returned as is: its own stash of that owner is what keeps it valid.
+    Not for a director class (a node type Python can subclass): there the C++ object calls back
+    into its Python half, which `this` alone does not keep alive. Stash the proxy for those.
+    """
+    this = getattr(obj, "this", None)
+    return this if this is not None and this.own() else obj
 %}
 // Keep the app alive for as long as a volume/geometry built from it lives: the
 // C++ voxels/geometry hold the app by RAW reference (app& _ctx), so without this
 // the app could be freed while a Python object still points at it. Stash it on
-// the proxy (the ctor arg is named `app`).
-%pythonappend cvc::volume::volume(std::shared_ptr<cvc::app>) %{ self._pycvc_app = app %}
-%pythonappend cvc::geometry::geometry(std::shared_ptr<cvc::app>) %{ self._pycvc_app = app %}
+// the proxy (the ctor arg is named `app`) through _keepalive, like every
+// _pycvc_app below.
+%pythonappend cvc::volume::volume(std::shared_ptr<cvc::app>) %{ self._pycvc_app = _keepalive(app) %}
+%pythonappend cvc::geometry::geometry(std::shared_ptr<cvc::app>) %{ self._pycvc_app = _keepalive(app) %}
 // state_set/get/has/children/remove + state_observer come from pycvc_state.h
 // (%include'd below), all taking the app explicitly.
 
@@ -352,7 +373,7 @@ namespace cvc {
 // positional here, and the append is attached by name so the merged __init__
 // carries it (a signature-specific append is dropped when overloads merge).
 %pythonappend cvc::world_clock_binding::world_clock_binding %{
-  self._pycvc_app = args[0]
+  self._pycvc_app = _keepalive(args[0])
   self._pycvc_clock = args[1]
 %}
 %include "cvc/core/world_clock_binding.h"
@@ -1460,6 +1481,7 @@ class AsyncStateObserver(state_observer):
 // settings (data_options, data_options_from_state, "Deep data on the
 // executor") are wrapped the same way as the parser settings.
 %{
+#include <cvc/state/state_exec/async_host.h>
 #include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/data_job.h>
@@ -2513,7 +2535,8 @@ PYCVC_STATE_EXEC_ENUM(cvc::state_exec::scheduling_policy, pycvc_enum_scheduling_
        {"paused", static_cast<int>(cvc::state_exec::process_status::paused)},
        {"waiting", static_cast<int>(cvc::state_exec::process_status::waiting)},
        {"terminated", static_cast<int>(cvc::state_exec::process_status::terminated)},
-       {"killed", static_cast<int>(cvc::state_exec::process_status::killed)}});
+       {"killed", static_cast<int>(cvc::state_exec::process_status::killed)},
+       {"failed", static_cast<int>(cvc::state_exec::process_status::failed)}});
   if (pycvc_enum_process_status != NULL)
     PyDict_SetItemString(d, "process_status", pycvc_enum_process_status);
   pycvc_enum_scheduling_policy = pycvc_make_int_enum(
@@ -2566,14 +2589,16 @@ PYCVC_STATE_EXEC_ENUM(cvc::state_exec::resource_policy::mode, pycvc_enum_resourc
          {"try_body", static_cast<int>(eval_phase::try_body)},
          {"try_handler", static_cast<int>(eval_phase::try_handler)},
          {"try_finally", static_cast<int>(eval_phase::try_finally)},
-         {"raise_value", static_cast<int>(eval_phase::raise_value)}});
+         {"raise_value", static_cast<int>(eval_phase::raise_value)},
+         {"await_call", static_cast<int>(eval_phase::await_call)}});
     if (pycvc_enum_eval_phase != NULL)
       PyDict_SetItemString(d, "eval_phase", pycvc_enum_eval_phase);
     using cvc::state_exec::step_kind;
     pycvc_enum_step_kind =
         pycvc_make_int_enum("step_kind", {{"eval", static_cast<int>(step_kind::eval)},
                                           {"read", static_cast<int>(step_kind::read)},
-                                          {"data", static_cast<int>(step_kind::data)}});
+                                          {"data", static_cast<int>(step_kind::data)},
+                                          {"async", static_cast<int>(step_kind::async)}});
     if (pycvc_enum_step_kind != NULL)
       PyDict_SetItemString(d, "step_kind", pycvc_enum_step_kind);
     using rp_mode = cvc::state_exec::resource_policy::mode;
@@ -2639,6 +2664,225 @@ evaluation_interrupted = _pycvc.evaluation_interrupted
 evaluation_timeout = _pycvc.evaluation_timeout
 %}
 
+// ── pycvc.dsl_error and pycvc.dsl_class (docs/STATE_EXEC_EXCEPTIONS.md 2.6) ──
+%{
+static PyObject *pycvc_dsl_error_factory = nullptr; // pycvc._make_dsl_error, set at import
+%}
+%inline %{
+// Set by pycvc at import: the function that builds a raised pycvc.dsl_error.
+void _set_dsl_error_factory(PyObject *factory) {
+  Py_XINCREF(factory);
+  Py_XDECREF(pycvc_dsl_error_factory);
+  pycvc_dsl_error_factory = factory;
+}
+// The class chain of a built-in exception class, most derived first; [] for any other name.
+PyObject *_builtin_exception_chain(const std::string &name) {
+  const std::vector<std::string> chain =
+      cvc::state_exec::class_chain(cvc::state_exec::exception_class(name));
+  PyObject *list = PyList_New(static_cast<Py_ssize_t>(chain.size()));
+  for (std::size_t i = 0; list != nullptr && i < chain.size(); ++i) {
+    PyObject *s = PyUnicode_FromString(chain[i].c_str());
+    if (s == nullptr) {
+      Py_CLEAR(list);
+      break;
+    }
+    PyList_SET_ITEM(list, static_cast<Py_ssize_t>(i), s);
+  }
+  return list;
+}
+%}
+%pythoncode %{
+class dsl_error(RuntimeError):
+    """A DSL exception that reached Python (docs/STATE_EXEC_EXCEPTIONS.md 2.6).
+
+    Raised by Exec.run, the evaluators' evaluate/run/step and a scheduler's raise_exit_exception.
+    str() is "Class: message". Its type also derives from dsl_class(name) for every class in the
+    exception's chain, so ``except pycvc.dsl_class("ValueError")`` catches a DSL ValueError and
+    any class derived from it.
+
+    Attributes: ``value`` (the exception, a dict), ``dsl_class`` (its class name), ``dsl_classes``
+    (the chain, most derived first), ``origin`` and ``traceback`` (a list of strings, innermost
+    last).
+    """
+
+    value = None
+    dsl_classes = ()
+    origin = ""
+    traceback = ()
+
+    @property
+    def dsl_class(self):
+        return self.dsl_classes[0] if self.dsl_classes else ""
+
+
+_dsl_classes = {}
+_dsl_chain_types = {}
+
+
+def dsl_class(name):
+    """The Python exception class for the DSL class ``name``, a dsl_error subclass.
+
+    A built-in class derives from its parent's (ValueError from Exception); any other derives from
+    dsl_error, and a raised exception's type derives from every class in its chain.
+    """
+    cls = _dsl_classes.get(name)
+    if cls is None:
+        chain = _pycvc._builtin_exception_chain(name)
+        base = dsl_class(chain[1]) if len(chain) > 1 else dsl_error
+        cls = type(name, (base,), {"__module__": "pycvc.dsl"})
+        _dsl_classes[name] = cls
+    return cls
+
+
+def _dsl_error_type(chain):
+    key = tuple(chain)
+    t = _dsl_chain_types.get(key)
+    if t is None:
+        bases = tuple(dsl_class(n) for n in key)
+        # A base another one already derives from would make the MRO inconsistent.
+        bases = tuple(b for b in bases if not any(o is not b and issubclass(o, b) for o in bases))
+        if not bases:
+            t = dsl_error
+        elif len(bases) == 1:
+            t = bases[0]
+        else:
+            t = type(key[0], bases, {"__module__": "pycvc.dsl"})
+        _dsl_chain_types[key] = t
+    return t
+
+
+def _make_dsl_error(message, value, chain, origin, traceback):
+    e = _dsl_error_type(chain)(message)
+    e.value = value
+    e.dsl_classes = list(chain)
+    e.origin = origin
+    e.traceback = list(traceback or ())
+    return e
+
+
+_pycvc._set_dsl_error_factory(_make_dsl_error)
+%}
+
+// ── exceptions.h: classes and exception values (docs/STATE_EXEC_EXCEPTIONS.md 2.2, 2.3) ──
+// Class dicts and exceptions cross as Python dicts, which are copies. A class dict that came back
+// from Python still matches the one it was copied from: is_instance matches a class by its chain
+// of names when the dicts differ. Where C++ takes a class (a dict_ptr), Python passes a class dict,
+// a class constructor (a pycvc.value), or the name of a built-in class.
+%{
+namespace pycvc {
+// The class `o` names, or null with a Python error set.
+static cvc::state_exec::dict_ptr class_arg(PyObject *o, const char *who) {
+  namespace se = cvc::state_exec;
+  se::value_t v;
+  if (!py_to_value(o, v))
+    return nullptr;
+  if (const auto *s = std::get_if<std::string>(&v.v)) {
+    if (se::dict_ptr cls = se::exception_class(*s))
+      return cls;
+    PyErr_Format(PyExc_KeyError, "%s: no built-in exception class %s", who, s->c_str());
+    return nullptr;
+  }
+  if (const auto *d = std::get_if<se::dict_ptr>(&v.v); d && *d)
+    return *d;
+  if (se::dict_ptr cls = se::class_of_constructor(v))
+    return cls;
+  PyErr_Format(PyExc_TypeError, "%s: expected a class dict, a class constructor or a class name",
+               who);
+  return nullptr;
+}
+
+// A new list of `items` as str, or null with a Python error set.
+static PyObject *string_list(const std::vector<std::string> &items) {
+  PyObject *list = PyList_New(static_cast<Py_ssize_t>(items.size()));
+  for (std::size_t i = 0; list != nullptr && i < items.size(); ++i) {
+    PyObject *s = PyUnicode_FromString(items[i].c_str());
+    if (s == nullptr) {
+      Py_CLEAR(list);
+      break;
+    }
+    PyList_SET_ITEM(list, static_cast<Py_ssize_t>(i), s);
+  }
+  return list;
+}
+
+// `cls` as a Python dict, or None.
+static PyObject *class_or_none(const cvc::state_exec::dict_ptr &cls) {
+  if (!cls)
+    Py_RETURN_NONE;
+  return value_to_py(cvc::state_exec::value_t(cls));
+}
+} // namespace pycvc
+%}
+%rename(exception_class) pycvc_exception_class;
+%rename(exception_class_names) pycvc_exception_class_names;
+%rename(make_exception) pycvc_make_exception;
+%rename(class_of_instance) pycvc_class_of_instance;
+%rename(class_of_constructor) pycvc_class_of_constructor;
+%rename(is_instance) pycvc_is_instance;
+%rename(class_name) pycvc_class_name;
+%rename(class_chain) pycvc_class_chain;
+%inline %{
+// The built-in exception class `name` (a dict), or None.
+PyObject *pycvc_exception_class(const std::string &name) {
+  return pycvc::class_or_none(cvc::state_exec::exception_class(name));
+}
+// The built-in exception class names, parents before children.
+PyObject *pycvc_exception_class_names() {
+  return pycvc::string_list(cvc::state_exec::exception_class_names());
+}
+// A new exception of class `cls`, with `message`, `data` (None: nil) and `origin`.
+PyObject *pycvc_make_exception(PyObject *cls, const std::string &message, PyObject *data = NULL,
+                               const std::string &origin = "dsl") {
+  namespace se = cvc::state_exec;
+  const se::dict_ptr c = pycvc::class_arg(cls, "make_exception");
+  if (!c)
+    return nullptr;
+  se::value_t d;
+  if (data != nullptr && data != Py_None && !pycvc::py_to_value(data, d))
+    return nullptr;
+  return pycvc::value_to_py(se::make_exception(c, message, d, origin));
+}
+// The class dict of the instance `v`, or None.
+PyObject *pycvc_class_of_instance(PyObject *v) {
+  cvc::state_exec::value_t value;
+  if (!pycvc::py_to_value(v, value))
+    return nullptr;
+  return pycvc::class_or_none(cvc::state_exec::class_of_instance(value));
+}
+// The class dict a class constructor makes instances of, or None.
+PyObject *pycvc_class_of_constructor(PyObject *ctor) {
+  cvc::state_exec::value_t value;
+  if (!pycvc::py_to_value(ctor, value))
+    return nullptr;
+  return pycvc::class_or_none(cvc::state_exec::class_of_constructor(value));
+}
+// Whether `v` is an instance of `cls` or of a class derived from it.
+PyObject *pycvc_is_instance(PyObject *v, PyObject *cls) {
+  cvc::state_exec::value_t value;
+  if (!pycvc::py_to_value(v, value))
+    return nullptr;
+  const cvc::state_exec::dict_ptr c = pycvc::class_arg(cls, "is_instance");
+  if (!c)
+    return nullptr;
+  return PyBool_FromLong(cvc::state_exec::is_instance(value, c) ? 1 : 0);
+}
+// A class's name ("" for a class dict without one).
+PyObject *pycvc_class_name(PyObject *cls) {
+  const cvc::state_exec::dict_ptr c = pycvc::class_arg(cls, "class_name");
+  if (!c)
+    return nullptr;
+  const std::string name = cvc::state_exec::class_name(c);
+  return PyUnicode_FromStringAndSize(name.data(), static_cast<Py_ssize_t>(name.size()));
+}
+// The class names from `cls` up its __super__ chain, most derived first.
+PyObject *pycvc_class_chain(PyObject *cls) {
+  const cvc::state_exec::dict_ptr c = pycvc::class_arg(cls, "class_chain");
+  if (!c)
+    return nullptr;
+  return pycvc::string_list(cvc::state_exec::class_chain(c));
+}
+%}
+
 // ── no value: KeyError ──
 // Where C++ returns an empty std::optional<value_t> or a null value_t* (an unbound name, a pid with
 // no result, an empty message queue), the wrapper throws pycvc::no_value and Python gets
@@ -2665,12 +2909,96 @@ static void pycvc_raise_no_value(const pycvc::no_value &e) {
 }
 %}
 
+// ── DSL exceptions reaching Python (docs/STATE_EXEC_EXCEPTIONS.md 2.6) ──
+// A dsl_exception (an evaluator's uncaught exception, a failed process's) raises pycvc.dsl_error,
+// whose type derives from pycvc.dsl_class(name) for each name in the exception's class chain. One
+// made from a registered Python function's exception re-raises that exception instead, with the
+// dsl_error as its __cause__. The Python side (_make_dsl_error, below) builds the instance.
+%{
+// Re-raise a Python function's exception that crossed the DSL; `cause` (a new reference, or
+// null) becomes its __cause__.
+static void pycvc_reraise_python(const pycvc::python_exception &e, PyObject *cause) {
+  PyObject *original = e.exception();
+  if (original == nullptr) {
+    Py_XDECREF(cause);
+    PyErr_SetString(PyExc_RuntimeError, e.what());
+    return;
+  }
+  if (cause != nullptr)
+    PyException_SetCause(original, cause); // steals cause
+  PyErr_SetObject(reinterpret_cast<PyObject *>(Py_TYPE(original)), original);
+}
+
+// The pycvc.dsl_error for `exc`: a new reference, or null with a Python error set.
+static PyObject *pycvc_make_dsl_error(const cvc::state_exec::value_t &exc) {
+  namespace se = cvc::state_exec;
+  const std::string summary = se::exception_summary(exc);
+  if (pycvc_dsl_error_factory == nullptr) {
+    PyErr_SetString(PyExc_RuntimeError, summary.c_str());
+    return nullptr;
+  }
+  PyObject *value = pycvc::value_to_py(exc);
+  if (value == nullptr)
+    return nullptr;
+  const std::vector<std::string> chain = se::class_chain(se::class_of_instance(exc));
+  PyObject *names = PyList_New(static_cast<Py_ssize_t>(chain.size()));
+  for (std::size_t i = 0; names != nullptr && i < chain.size(); ++i) {
+    PyObject *name = PyUnicode_FromString(chain[i].c_str());
+    if (name == nullptr) {
+      Py_CLEAR(names);
+      break;
+    }
+    PyList_SET_ITEM(names, static_cast<Py_ssize_t>(i), name);
+  }
+  const se::value_t *tb = se::field(exc, "traceback");
+  PyObject *traceback = tb != nullptr ? pycvc::value_to_py(*tb) : (Py_INCREF(Py_None), Py_None);
+  const se::value_t *origin = se::field(exc, "origin");
+  const std::string *origin_s = origin ? std::get_if<std::string>(&origin->v) : nullptr;
+  PyObject *inst = nullptr;
+  if (names != nullptr && traceback != nullptr)
+    inst = PyObject_CallFunction(pycvc_dsl_error_factory, "sOOsO", summary.c_str(), value, names,
+                                 origin_s ? origin_s->c_str() : "", traceback);
+  Py_DECREF(value);
+  Py_XDECREF(names);
+  Py_XDECREF(traceback);
+  return inst;
+}
+
+// Raise a DSL exception that reached Python.
+static void pycvc_raise_dsl_exception(const cvc::state_exec::value_t &exc,
+                                      std::exception_ptr original) {
+  PyObject *inst = pycvc_make_dsl_error(exc);
+  if (inst == nullptr)
+    return;
+  if (original) {
+    try {
+      std::rethrow_exception(original);
+    } catch (const pycvc::python_exception &e) {
+      pycvc_reraise_python(e, inst);
+      return;
+    } catch (...) {
+    }
+  }
+  PyErr_SetObject(reinterpret_cast<PyObject *>(Py_TYPE(inst)), inst);
+  Py_DECREF(inst);
+}
+%}
+
 // For the state_exec declarations (and Exec, below): the default mapping, with
 // parse_error first so it raises pycvc.parse_error. Scoped to this section, so
 // the modules that %import pycvc.i keep PYCVC_DEFAULT_EXCEPTION.
 %define PYCVC_STATE_EXEC_CATCH
   catch (const pycvc::no_value &e) {
     pycvc_raise_no_value(e);
+    SWIG_fail;
+  } catch (const pycvc::python_exception &e) {
+    pycvc_reraise_python(e, nullptr);
+    SWIG_fail;
+  } catch (const cvc::state_exec::dsl_exception &e) {
+    pycvc_raise_dsl_exception(e.value(), e.original());
+    SWIG_fail;
+  } catch (const cvc::state_exec::dsl_error &e) {
+    pycvc_raise_dsl_exception(cvc::state_exec::exception_from(e), nullptr);
     SWIG_fail;
   } catch (const cvc::state_exec::parse_error &e) {
     pycvc_raise_parse_error(e);
@@ -2745,6 +3073,7 @@ PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::collect_cycles)
 %naturalvar cvc::state_exec::evaluator_state::user_macros;
 %naturalvar cvc::state_exec::process::recv_path;
 %naturalvar cvc::state_exec::process::exit_error;
+%naturalvar cvc::state_exec::process_info::exit_error;
 %naturalvar cvc::state_exec::process::signal_handlers;
 %naturalvar cvc::state_exec::process::pending_signals;
 %naturalvar cvc::state_exec::process::saved_stack;
@@ -2754,6 +3083,7 @@ PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::collect_cycles)
 %naturalvar cvc::state_exec::channel_policy::declared;
 %naturalvar cvc::state_exec::channel_policy::global;
 %rename(global_) cvc::state_exec::channel_policy::global; // `global` is a Python keyword
+%rename(raise_) cvc::state_exec::stackless_evaluator::raise; // `raise` is one too
 // process::watch_event and process::watch_handler_entry are pycvc.watch_event and
 // pycvc.watch_handler_entry (Python has no nested classes here); process.watch_event names them too.
 %feature("flatnested") cvc::state_exec::process::watch_event;
@@ -2900,6 +3230,7 @@ public:
   void mark_complete();
   void increment_step();
   void increment_step(step_kind kind);
+  void add_steps(step_kind kind, unsigned long long n);
   unsigned long long get_step_count() const;
   unsigned long long steps(step_kind kind) const;
   step_kind last_step_kind() const;
@@ -2977,9 +3308,19 @@ struct evaluator_state {
     }
     return PyLong_FromUnsignedLongLong(static_cast<unsigned long long>(*$self->heap_measured));
   }
+  // The exception the program didn't catch, once the state is done with one (exceptions P1), or
+  // None. Read-only: stepping the state raises it.
+  PyObject *_uncaught() const {
+    if (!$self->uncaught) {
+      Py_INCREF(Py_None);
+      return Py_None;
+    }
+    return pycvc::value_to_py(*$self->uncaught);
+  }
   %pythoncode %{
     stats = property(_stats)
     heap_measured = property(_heap_measured)
+    uncaught = property(_uncaught)
   %}
 }
 
@@ -2991,7 +3332,8 @@ struct evaluator_state {
 %}
 
 // The stackless evaluator. on_complete is a Python callable or None. A str passed to
-// create_state is a script (the std::string overload), as in C++.
+// create_state is a script (the std::string overload), as in C++. raise is raise_ (a Python
+// keyword).
 class stackless_evaluator {
 public:
   stackless_evaluator(environment_ptr global_env);
@@ -3016,6 +3358,7 @@ public:
   void restrict_special_forms(std::shared_ptr<const std::set<std::string> > allowed);
   static const std::set<std::string> &all_special_forms();
   environment_ptr global_env() const; // (#667)
+  void raise(evaluator_state &state, const value_t &exc); // (exceptions P1)
 };
 
 // Snapshot codec for an environment chain and for a whole evaluator state.
@@ -3031,6 +3374,15 @@ enum class process_status;
 enum class scheduling_policy;
 const char *to_string(process_status s);
 process_status parse_process_status(const std::string &s);
+bool is_finished(process_status s); // terminated, killed or failed (exceptions P2)
+
+// exceptions.h, the declarations that take values as they are (the class helpers are above).
+void register_exception_classes(const environment_ptr &env);
+bool is_exception(const value_t &v);
+std::string exception_message(const value_t &exc);
+std::string exception_summary(const value_t &exc);
+std::string traceback_line(const value_t &expr);
+const size_t kTracebackFrames = 64;
 
 // on_complete is a Python callable (or None) called with the process's result when it terminates,
 // on the thread stepping the scheduler. Its return value is ignored; an exception it raises is
@@ -3076,6 +3428,29 @@ struct execute_options {
 }
 %enddef
 PYCVC_STATE_EXEC_ON_COMPLETE(execute_options)
+// async_steps_per_cpu_ms is a float, or None (unset: the tree's limits.async_steps_per_cpu_ms).
+%extend execute_options {
+  PyObject *_async_steps_get() const {
+    if (!$self->async_steps_per_cpu_ms)
+      Py_RETURN_NONE;
+    return PyFloat_FromDouble(*$self->async_steps_per_cpu_ms);
+  }
+  void _async_steps_set(PyObject *rate) {
+    if (rate == Py_None) {
+      $self->async_steps_per_cpu_ms.reset();
+      return;
+    }
+    const double v = PyFloat_AsDouble(rate);
+    if (v == -1.0 && PyErr_Occurred()) {
+      PyErr_Clear();
+      throw std::invalid_argument("execute_options.async_steps_per_cpu_ms: a number or None");
+    }
+    $self->async_steps_per_cpu_ms = v;
+  }
+  %pythoncode %{
+    async_steps_per_cpu_ms = property(_async_steps_get, _async_steps_set)
+  %}
+}
 
 struct process_info {
   int pid;
@@ -3106,9 +3481,24 @@ struct process_info {
   // The measured heap share (#667, heap.h), which max_memory covers too.
   unsigned long long heap_memory;
   unsigned long long heap_measurements;
+  unsigned long long heap_alloc_bytes;
+  // What its async calls were charged (docs/STATE_EXEC_EXCEPTIONS.md 3.8).
+  unsigned long long async_calls;
+  double async_time;
+  double async_cpu_time;
+  unsigned long long async_steps;
+  // Why it ended, if not normally: the kill reason, or a failed process's "Class: message".
+  std::optional<std::string> exit_error;
 };
 %extend process_info {
+  // A failed process's exception (docs/STATE_EXEC_EXCEPTIONS.md 2.6), or None.
+  PyObject *_exit_exception() const {
+    if (!$self->exit_exception)
+      Py_RETURN_NONE;
+    return pycvc::value_to_py(*$self->exit_exception);
+  }
   %pythoncode %{
+    exit_exception = property(_exit_exception)
     def __repr__(self):
         return "<pycvc.process_info pid=%d name=%r status=%s>" % (
             self.pid, self.name, self.status.name)
@@ -3122,15 +3512,16 @@ struct scheduler_stats {
   int paused;
   int terminated;
   int killed;
+  int failed;
   unsigned long long total_steps;
 };
 %extend scheduler_stats {
   %pythoncode %{
     def __repr__(self):
         return ("<pycvc.scheduler_stats total_processes=%d running=%d ready=%d paused=%d "
-                "terminated=%d killed=%d total_steps=%d>" % (
+                "terminated=%d killed=%d failed=%d total_steps=%d>" % (
                     self.total_processes, self.running, self.ready, self.paused,
-                    self.terminated, self.killed, self.total_steps))
+                    self.terminated, self.killed, self.failed, self.total_steps))
   %}
 }
 
@@ -3199,6 +3590,11 @@ struct process {
   unsigned long long heap_measurements;
   size_t heap_check_steps;
   bool heap_measuring;
+  // What its async calls were charged (docs/STATE_EXEC_EXCEPTIONS.md 3.8).
+  unsigned long long async_calls;
+  double async_time;
+  double async_cpu_time;
+  unsigned long long async_steps;
   bool heap_measure_due(unsigned long long state_bytes) const;
   void release_state();
   double elapsed_time() const;
@@ -3211,6 +3607,13 @@ struct process {
 };
 %extend process {
   evaluator_state *_state() { return &$self->state; }
+  // A failed process's exception (docs/STATE_EXEC_EXCEPTIONS.md 2.6), or None. Its exit_original
+  // (the C++ exception it was made from) isn't wrapped: raise_exit_exception raises with it.
+  PyObject *_exit_exception() const {
+    if (!$self->exit_exception)
+      Py_RETURN_NONE;
+    return pycvc::value_to_py(*$self->exit_exception);
+  }
   PyObject *_inbox_get() const {
     std::queue<cvc::state_exec::value_t> q = $self->inbox;
     std::vector<cvc::state_exec::value_t> items;
@@ -3221,6 +3624,7 @@ struct process {
   %pythoncode %{
     state = property(_state)
     inbox = property(_inbox_get)
+    exit_exception = property(_exit_exception)
   %}
 }
 PYCVC_STATE_EXEC_ON_COMPLETE(process)
@@ -3254,6 +3658,7 @@ class scheduler_base {};
   bool sleep(int pid, double seconds);
   bool yield_frame(int pid);
   bool receive_message(int pid, const std::string &path);
+  bool receive_message_until(int pid, const std::string &path, double seconds);
   int deliver_to_receivers(const std::string &path, const value_t &msg);
   size_t pending_message_count(const std::string &path) const;
   size_t total_pending_messages() const;
@@ -3268,6 +3673,8 @@ class scheduler_base {};
   std::vector<process_info> list_processes() const;
   std::optional<process_info> get_process_info(int pid) const;
   std::unordered_map<int, value_t> get_results() const;
+  std::optional<std::string> get_exit_error(int pid) const;
+  void raise_exit_exception(int pid) const;
   scheduler_stats get_stats() const;
   scheduling_policy policy() const;
   int process_count() const;
@@ -3276,11 +3683,21 @@ class scheduler_base {};
   void register_watch_handler(int pid, int watch_id, value_t handler, const std::string &path);
   void unregister_watch_handler(int pid, int watch_id);
   void set_watch_root(cvc::state *root);
+  double async_steps_per_cpu_ms(const process &proc);
+  int restore(process_ptr proc);
+  bool snapshot(int pid, cvc::state &node) const;
+  int restore(cvc::state &node, environment_ptr natives = nullptr);
 %enddef
 
 // get_result and pop_pending_message raise KeyError(pid / path) where C++ returns std::nullopt.
 %define PYCVC_STATE_EXEC_SCHEDULER_EXTEND(CLASS)
 %extend CLASS {
+  // A failed process's exception (docs/STATE_EXEC_EXCEPTIONS.md 2.6), or None.
+  PyObject *get_exit_exception(int pid) const {
+    if (std::optional<cvc::state_exec::value_t> e = $self->get_exit_exception(pid))
+      return pycvc::value_to_py(*e);
+    Py_RETURN_NONE;
+  }
   value_t get_result(int pid) const {
     if (std::optional<cvc::state_exec::value_t> r = $self->get_result(pid))
       return *r;
@@ -3333,7 +3750,9 @@ public:
   int wake_awaiting();
   void post_message(const std::string &path, const value_t &msg);
   void drain_ingress();
-  std::optional<std::string> get_exit_error(int pid) const;
+  size_t async_calls_in_flight() const;
+  void set_id(const std::string &id);
+  std::string id() const;
   bool reap(int pid);
   void set_parser_defaults(const parse_options &defaults);
   parse_options parser_defaults() const;
@@ -3344,6 +3763,82 @@ public:
   static data_options host_data_defaults();
 };
 PYCVC_STATE_EXEC_SCHEDULER_EXTEND(async_scheduler)
+const double kDefaultAsyncStepsPerCpuMs = 2000.0;
+double async_steps_per_cpu_ms_from_state(cvc::state &root, const std::string &scheduler_id);
+void publish_async_steps_per_cpu_ms(cvc::state &root, const std::string &scheduler_id,
+                                    double rate);
+
+// A process snapshot with its budget so far (docs/STATE_EXEC_EXCEPTIONS.md 3.8), for a
+// scheduler's restore().
+void encode_process(cvc::state &node, const process &proc);
+process_ptr decode_process(cvc::state &node);
+void rebind_natives(evaluator_state &st, const environment_ptr &natives);
+
+// ── async functions (docs/STATE_EXEC_EXCEPTIONS.md 3) ──
+// async_host() runs kernels inline with no scheduler (a bare evaluator's: its steps only);
+// async_host(scheduler) runs kernels inline, charged to the scheduler's processes;
+// async_host(async_scheduler, app) parks the calling process while a kernel runs on the app's
+// background task pool (without an app, inline). It keeps the scheduler (and app) alive; destroy
+// it (or shutdown()) before them. Exec.async_host() is an Exec's. shutdown() and wait_idle()
+// release the GIL while they wait. (These directives come before the declaration they apply to.)
+// Inside this namespace block, a feature names its declaration relative to it.
+%pythonappend async_host::async_host %{
+  self._pycvc_refs = args
+%}
+PYCVC_STATE_EXEC_NOGIL(async_host::shutdown)
+PYCVC_STATE_EXEC_NOGIL(async_host::wait_idle)
+// Destroying a host shuts it down, which waits for its kernels: without the GIL, which a Python
+// kernel needs to finish.
+PYCVC_STATE_EXEC_NOGIL(async_host::~async_host)
+%nodefaultctor async_host;
+class async_host {
+public:
+  void shutdown();
+  void wait_idle();
+  size_t in_flight() const;
+};
+%extend async_host {
+  async_host() { return new cvc::state_exec::async_host(); }
+  async_host(scheduler *sched) { return new cvc::state_exec::async_host(sched); }
+  async_host(async_scheduler *sched, std::shared_ptr<cvc::app> app = nullptr) {
+    if (!sched)
+      throw std::invalid_argument("pycvc.async_host: scheduler is None");
+    return new cvc::state_exec::async_host(*sched, app.get());
+  }
+}
+
+// register_async_fn(env, host, name, fn, executor="background", timeout=None, future_variant=True):
+// fn, a Python callable, is the kernel: it runs on an executor thread with copies of the
+// arguments, taking the GIL for its call, and its value or exception is the call's
+// (docs/STATE_EXEC_EXCEPTIONS.md 3.2). executor is "background" (the app's background task pool;
+// "compute" means the same), "inline", or "lane:<name>"; timeout is seconds.
+%extend builtins {
+  static void register_async_fn(environment_ptr env, cvc::state_exec::async_host &host,
+                                const std::string &name, PyObject *fn,
+                                const std::string &executor = "background",
+                                std::optional<double> timeout = std::nullopt,
+                                bool future_variant = true) {
+    namespace se = cvc::state_exec;
+    if (!env)
+      throw std::invalid_argument("pycvc.builtins.register_async_fn: env is None");
+    se::async_options opts;
+    if (executor == "background" || executor == "compute")
+      opts.where = se::executor::background();
+    else if (executor == "inline")
+      opts.where = se::executor::inline_call();
+    else if (executor.rfind("lane:", 0) == 0 && executor.size() > 5)
+      opts.where = se::executor::on_lane(executor.substr(5));
+    else
+      throw std::invalid_argument("pycvc.builtins.register_async_fn: executor must be "
+                                  "\"background\", \"inline\" or \"lane:<name>\", not \"" +
+                                  executor + "\"");
+    opts.timeout = timeout;
+    opts.future_variant = future_variant;
+    se::register_async_fn(env, host, name,
+                          pycvc::python_async_marshal("pycvc.builtins.register_async_fn", name, fn),
+                          std::move(opts));
+  }
+}
 
 // ── resource_policy ──
 // mode is pycvc.resource_policy.mode, an IntEnum. validate_limits raises RuntimeError for
@@ -3632,6 +4127,10 @@ def register_intrinsics(env, ctx):
 
 // Exec.scheduler() returns a reference into the Exec, so the scheduler keeps the Exec alive.
 %pythonappend pycvc::Exec::scheduler %{
+  val._pycvc_exec = self
+%}
+// So does Exec.async_host().
+%pythonappend pycvc::Exec::async_host %{
   val._pycvc_exec = self
 %}
 
