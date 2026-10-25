@@ -39,7 +39,13 @@
 //   - Passing: with another within clearance of its path s ahead, an agent drives no faster than
 //     (s - 2.5 rr) / pass_time_s, so it reaches it no sooner than the time that one has to clear,
 //     and stops short of it, by the two bodies and a margin, if it does not. A host driving it on
-//     a route then plans round it (sim_world::yield_corridors, yield_pass_distance).
+//     a route then plans round it (sim_world::yield_corridors, yield_pass_distance). With
+//     pass_hold_s > 0 (opt-in), a hold that cannot end, behind one standing still itself, is
+//     released after that long: the higher priority (then the lower index) of the two first, so
+//     two holding each other do not both drive. Off by default: released, it drives on into the
+//     one ahead, the push the cap stops; a host's replanning is the way round.
+//   - Backing: an agent backing up stops short of one behind it, by the same 2.5 rr, with the
+//     same cap on its reverse speed; yielding otherwise leaves backing up as commanded.
 //   - Creep (opt-in): an agent that must move out of another's path (rule 1, at least creep_need
 //     of it) but stands still or holds cannot steer out of it; with creep_speed > 0 it creeps
 //     forward at that speed so its steer can, within the clearance its footprint has to the walls.
@@ -75,6 +81,7 @@ struct yield_config {
   bool steer_overrides = true; // a forward override_command's steer takes the shift too
   float steer_look_s = 0.5f;   // s of speed the override correction's lookahead is
   float pass_time_s = 1.5f;    // s: the passing speed cap's; 0 = off
+  float pass_hold_s = 0.0f;    // s held behind one standing still before release; 0 = never
   float creep_speed = 0.0f;    // normalized / s; <= 0 = no creep (the default)
   float creep_need = 0.0f;     // normalized: the rule-1 shift that calls for it; 0 = the rr
   bool on() const { return horizon_s > 0.0f; }
@@ -86,6 +93,7 @@ struct yield_shift {
   int conflicts = 0;                  // intents it reacted to
   float out_dx = 0.0f, out_dy = 0.0f; // the part of the shift out of others' paths (rule 1)
   float pass_s = -1.0f; // along its path to the nearest one it passes (rule 2); -1 none
+  int pass_j = -1;      // that one's agent index
 };
 
 // The distance from (px, py) to the polyline from (x0, y0) through path[0..n), the arc length to

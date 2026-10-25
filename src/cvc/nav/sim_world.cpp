@@ -1324,8 +1324,31 @@ float sim_world::yield_accel(int i, float v, float accel) const {
   if (yc.creep_speed > 0.0f && need >= (yc.creep_need > 0.0f ? yc.creep_need : rr) && v < creep &&
       clear)
     accel = std::max(accel, (creep - v) / tau);
-  // Passing: no sooner at the one in its path than pass_time_s.
-  if (yc.pass_time_s > 0.0f && yield_pass_[i] >= 0.0f) {
+  // Backing: stopping short of one behind it.
+  const bool backing = v < -1e-3f || (v <= 1e-3f && accel < 0.0f);
+  if (backing && yc.pass_time_s > 0.0f) {
+    const float h = th_[i], c = std::cos(h), s = std::sin(h);
+    float behind = -1.0f;
+    for (int j = 0; j < n_; ++j) {
+      if (j == i)
+        continue;
+      const float rx = o_[2 * j] - o_[2 * i], ry = o_[2 * j + 1] - o_[2 * i + 1];
+      const float along = -(rx * c + ry * s), across = std::fabs(-rx * s + ry * c);
+      if (along > 0.0f && across < 2.4f * rr && (behind < 0.0f || along < behind))
+        behind = along;
+    }
+    if (behind >= 0.0f) {
+      const float cap = std::max(0.0f, behind - 2.5f * rr) / yc.pass_time_s; // reverse speed
+      if (-v > cap)
+        accel = std::max(accel, (-cap - v) / tau);
+      else if (cap <= 0.0f)
+        accel = std::max(accel, 0.0f);
+    }
+    return accel;
+  }
+  // Passing: no sooner at the one in its path than pass_time_s; unless its hold was released.
+  if (yc.pass_time_s > 0.0f && yield_pass_[i] >= 0.0f &&
+      !(i < static_cast<int>(yield_release_.size()) && yield_release_[i])) {
     // Stopping short of it: zero within 2.5 rr (the two bodies and a margin) of the one ahead.
     const float cap = std::max(0.0f, yield_pass_[i] - 2.5f * rr) / yc.pass_time_s;
     if (v > cap)
@@ -1462,7 +1485,11 @@ void sim_world::yield_tick(const field_stack &fs, int num_threads) {
   yield_shift_.assign(static_cast<std::size_t>(2) * n_, 0.0f);
   yield_need_.assign(static_cast<std::size_t>(2) * n_, 0.0f);
   yield_out_.assign(static_cast<std::size_t>(2) * n_, 0.0f);
+  std::vector<int> j_before = yield_pass_j_;
   yield_pass_.assign(static_cast<std::size_t>(n_), -1.0f);
+  yield_pass_j_.assign(static_cast<std::size_t>(n_), -1);
+  yield_held_.resize(static_cast<std::size_t>(n_), 0.0f);
+  yield_release_.resize(static_cast<std::size_t>(n_), 0);
   std::vector<agent_intent> heard;
   bool any = false;
   for (int i = 0; i < n_; ++i) {
@@ -1475,7 +1502,33 @@ void sim_world::yield_tick(const field_stack &fs, int num_threads) {
     yield_out_[2 * i] = sh.out_dx;
     yield_out_[2 * i + 1] = sh.out_dy;
     yield_pass_[i] = sh.pass_s;
+    yield_pass_j_[i] = sh.pass_j;
     any = any || sh.conflicts > 0;
+  }
+  // Holds: how long each has stood still behind the one in its path, and whether it may go. A
+  // hold behind one standing still itself cannot end by waiting; after pass_hold_s it is released
+  // for the higher priority (then the lower index) of the two, so a pair holding each other does
+  // not both drive. Released until that one is no longer in its path.
+  const float dt = cfg_.veh.dt;
+  for (int i = 0; i < n_; ++i) {
+    const int j = yield_pass_j_[i];
+    if (j < 0 || j >= n_) {
+      yield_held_[i] = 0.0f;
+      yield_release_[i] = 0;
+      continue;
+    }
+    if (static_cast<int>(j_before.size()) > i && j_before[i] != j)
+      yield_release_[i] = 0; // another one: held anew
+    if (std::fabs(sp_[i]) < yc.min_speed)
+      yield_held_[i] += dt;
+    else if (!yield_release_[i])
+      yield_held_[i] = 0.0f;
+    const bool other_still = std::fabs(sp_[j]) < yc.min_speed;
+    const float pi = yield_intents_[i].priority, pj = yield_intents_[j].priority;
+    const bool first = pi > pj || (pi == pj && i < j);
+    if (yc.pass_hold_s > 0.0f && yield_held_[i] > yc.pass_hold_s && other_still &&
+        (first || yield_held_[i] > 2.0f * yc.pass_hold_s))
+      yield_release_[i] = 1;
   }
   if (!any)
     return;

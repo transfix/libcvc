@@ -669,6 +669,9 @@ private:
   std::vector<float> yield_need_; // [n*2] the shifts before scaling to the carrot (normalized)
   std::vector<float> yield_out_;  // [n*2] their rule-1 part (out of others' paths)
   std::vector<float> yield_pass_; // [n] along its path to the one it passes nearest; -1 none
+  std::vector<int> yield_pass_j_; // [n] that one's index
+  std::vector<float> yield_held_; // [n] s held still behind it
+  std::vector<std::uint8_t> yield_release_; // [n] its hold released (pass_hold_s)
   // The yielding's speed: agent i at speed v commanding accel, with the passing cap and the creep.
   float yield_accel(int i, float v, float accel) const;
   std::vector<int> stall_, mode_, hist_count_;

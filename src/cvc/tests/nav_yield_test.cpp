@@ -355,6 +355,49 @@ TEST(NavYield, TheLeadStopsShortOfAKnotItCannotPass) {
   EXPECT_LT(v_on, 0.5f * v_off) << "the lead should be slower near the knot";
 }
 
+// Backing up (as a host's unstick backs a vehicle out): one reverses on its own commands toward
+// another standing 1 unit behind it. The reverse cap stops it short.
+TEST(NavYield, BackingStopsShortOfOneBehind) {
+  const auto run = [](bool cap, int &contacts, float &closest) {
+    field f;
+    f.cfg.min_gap = 2.0f * f.cfg.veh.rr;
+    f.cfg.veh.allow_reverse = true;
+    const std::vector<float> o = {0.0f, 0.0f, -1.0f, 0.0f}, g = {3.0f, 0.0f, -1.0f, 0.0f};
+    sim_world w = f.make(o, g);
+    yield_config y = yielding();
+    if (!cap)
+      y.pass_time_s = 0.0f;
+    w.set_yield(y);
+    contacts = 0;
+    closest = 1e30f;
+    const float touch = 2.0f * f.cfg.veh.rr * 1.02f;
+    std::vector<float> sp(2), th(2);
+    for (int t = 0; t < 150; ++t) {
+      w.snapshot(nullptr, th.data(), sp.data(), nullptr, nullptr);
+      const float v0 = sp[0] * static_cast<float>(f.cfg.scale);
+      w.override_command(0, 0.0f, (-0.2f - v0) / 0.5f); // back up at 0.2
+      w.override_command(1, 0.0f, 0.0f);                // standing
+      w.step(1);
+      const std::vector<float> p = positions(w);
+      const float d = std::hypot(p[0] - p[2], p[1] - p[3]);
+      closest = std::min(closest, d);
+      if (d < touch)
+        ++contacts;
+    }
+  };
+  int c_off = 0, c_on = 0;
+  float d_off = 0.0f, d_on = 0.0f;
+  run(false, c_off, d_off);
+  run(true, c_on, d_on);
+  const float rr = field().cfg.veh.rr;
+  std::printf("  backing toward one behind: %d contact ticks, closest %.3f without the cap; %d, "
+              "%.3f with (2.5 rr = %.3f)\n",
+              c_off, d_off, c_on, d_on, 2.5f * rr);
+  EXPECT_GT(c_off, 0);
+  EXPECT_EQ(c_on, 0);
+  EXPECT_GT(d_on, 2.0f * rr);
+}
+
 // yield_corridors: what agent i heard, in world units, as the route planner's soft keep-outs.
 TEST(NavYield, CorridorsFromWhatWasHeard) {
   const field f;

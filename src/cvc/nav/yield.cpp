@@ -146,8 +146,10 @@ yield_shift yield_agent(const yield_config &c, float clearance, const agent_inte
         const float k = c.pass_gain * (C - d) * u * w;
         out.dx += k * nx;
         out.dy += k * ny;
-        if (out.pass_s < 0.0f || s < out.pass_s)
+        if (out.pass_s < 0.0f || s < out.pass_s) {
           out.pass_s = s;
+          out.pass_j = j.agent;
+        }
         ++out.conflicts;
       }
     }
