@@ -832,6 +832,34 @@ TEST_F(LbieMesherTest, SnappingToTheSurfaceInvertsNoHexahedron) {
     }
 }
 
+// A cube turned off the grid's axes, half a box across, sampled at n^3 in a box 2 * half_width
+// across. Its QEF points sit on its sharp edges and corners.
+volume make_turned_cube_volume(app &ctx, unsigned int n, double half_width) {
+  volume v = make_sphere_volume(ctx, n, 0.0, half_width);
+  const double dx = 2.0 / double(n - 1), c = std::cos(0.5), s = std::sin(0.5);
+  for (unsigned int k = 0; k < n; ++k)
+    for (unsigned int j = 0; j < n; ++j)
+      for (unsigned int i = 0; i < n; ++i) {
+        const double x = -1 + i * dx, y = -1 + j * dx, z = -1 + k * dx;
+        const double xr = c * x - s * y, yz = s * x + c * y;
+        const double yr = s * z + c * yz, zr = c * z - s * yz;
+        v(i, j, k, 0.45 - std::max({std::fabs(xr), std::fabs(yr), std::fabs(zr)}));
+      }
+  return v;
+}
+
+// untangle_snapped sends the vertices of an inverted hexahedron back to where the extraction puts
+// them without snapping. At QEF points, as on this cube's edges and corners, the dual hexahedra are
+// inverted already, and 22 of its 1323 kept an inverted corner. The reference now has every vertex
+// at its cell's centre, where none is inverted.
+TEST_F(LbieMesherTest, HexahedraOnSharpEdgesAreNotInverted) {
+  LBIE::geoframe g = run_do_mesh(make_turned_cube_volume(ctx, 33, 16.0), 0.0f, 0.0f, kDefaultErr,
+                                 kDefaultErrIn, LBIE::geoframe::HEXA);
+  ASSERT_GT(g.numquads, 0);
+  expect_geoframe_valid(g);
+  EXPECT_EQ(inverted_hexahedra(g), 0) << "of " << g.numquads / 6 << " hexahedra";
+}
+
 // Where the octree's level changes, polygonize_quad gave a quad two corners on one vertex, a
 // triangle (320 of this sphere's 7454 quads), and method 5's templates did not match up across the
 // change: 592 edges had one quad and 128 had three or more. The templates now refine only an octree
