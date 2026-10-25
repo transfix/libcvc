@@ -2,8 +2,11 @@
 //  - a window with no size: fits its widgets, though §11.4 persists its geometry every frame (the
 //    size persisted after its first, unmeasured frame used to stop the fit at ImGui's 32 px);
 //  - windows with no pos: stack down the left of the viewport instead of on top of one another,
-//    until the user moves one;
-//  - a window with a size keeps it and scrolls both ways when its widgets need more.
+//    until the user moves one; below a window that stands where it is; never past the right edge;
+//  - a window with a size keeps it and scrolls both ways when its widgets need more;
+//  - a split-pane window with no size is as wide as its panes' widgets;
+//  - after Runtime::forget_layout (a new document), windows ImGui already has are laid out again;
+//  - an authored pos is below the main menu bar, from the first frame.
 #include <cstdio>
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/widget.h>
@@ -49,6 +52,15 @@ ImGuiWindow *find(const char *id) {
 bool overlap(const ImGuiWindow *a, const ImGuiWindow *b) {
   return a->Pos.x < b->Pos.x + b->Size.x && b->Pos.x < a->Pos.x + a->Size.x &&
          a->Pos.y < b->Pos.y + b->Size.y && b->Pos.y < a->Pos.y + a->Size.y;
+}
+
+ari::Widget placed(ari::Widget w, float x, float y, float width, float height) {
+  w.has_pos = true;
+  w.pos_x = x;
+  w.pos_y = y;
+  w.size.w = ari::Extent{ari::Unit::Px, width};
+  w.size.h = ari::Extent{ari::Unit::Px, height};
+  return w;
 }
 #endif
 
@@ -114,11 +126,71 @@ int main() {
 
     // The user drags the second window away: it stays where they put it, and the third moves up
     // into its place.
+    const ImVec2 b_was = b->Pos, c_was = c->Pos;
     const ImVec2 dropped(300.0f, 300.0f);
     frames(1, [&] { ImGui::SetWindowPos("###fit_b", dropped); });
     frames(3);
     chk(b->Pos.x == dropped.x && b->Pos.y == dropped.y, "a window the user moved stays put");
-    chk(c->Pos.y < dropped.y && !overlap(a, c), "the flow closes up behind it");
+    chk(c->Pos.x == b_was.x && c->Pos.y == b_was.y && c_was.y > b_was.y,
+        "the flow closes up behind it: the third window is where the second was");
+
+    // A window with a place of its own is in the flow's way: the flow goes below it.
+    rt.set_root(ari::group({placed(panel("Fixed", "fixed", 1), 10.0f, 10.0f, 260.0f, 120.0f),
+                            panel("Flowing", "flowing", 2)}));
+    frames(4);
+    ImGuiWindow *fixed = find("fixed"), *flowing = find("flowing");
+    chk(fixed && flowing, "the fixed and the flowing window were drawn");
+    if (!(fixed && flowing))
+      return 1;
+    chk(fixed->Pos.x == 10.0f && fixed->Pos.y == 10.0f, "the fixed window stands where it is");
+    chk(!overlap(fixed, flowing) && flowing->Pos.y >= fixed->Pos.y + fixed->Size.y,
+        "the flowing window goes below it, not over it");
+
+    // More windows than columns fit in: the last column overlaps rather than leave the screen.
+    io.DisplaySize = ImVec2(400.0f, 300.0f);
+    rt.set_root(ari::group({panel("Tall one", "tall_1", 8), panel("Tall two", "tall_2", 8),
+                            panel("Tall three", "tall_3", 8), panel("Tall four", "tall_4", 8)}));
+    frames(5);
+    for (const char *id : {"tall_1", "tall_2", "tall_3", "tall_4"}) {
+      const ImGuiWindow *t = find(id);
+      chk(t && t->Pos.x >= 0.0f && t->Pos.x + t->Size.x <= io.DisplaySize.x + 0.5f,
+          std::string(id) + " is on screen: x " + (t ? std::to_string(int(t->Pos.x)) : "?") +
+              " .. " + (t ? std::to_string(int(t->Pos.x + t->Size.x)) : "?"));
+    }
+    io.DisplaySize = ImVec2(800.0f, 600.0f);
+
+    // A split-pane window with no size: its panes fit their widgets, and so it fits them.
+    ari::Widget split = panel("Split", "split", 2);
+    split.layout.row_heights = {ari::Track{ari::Unit::Px, 60.0f}, ari::Track{ari::Unit::Px, 60.0f}};
+    split.layout.resizable = true;
+    rt.set_root(ari::group({split}));
+    frames(4);
+    const ImGuiWindow *sp = find("split");
+    chk(sp && sp->Size.x > 200.0f, "a split-pane window with no size fits its panes' widgets: " +
+                                       (sp ? std::to_string(int(sp->Size.x)) : std::string("?")) +
+                                       " px wide");
+
+    // A new document whose windows ImGui already has, from the last one: its authored pos and
+    // size apply, and a window the user moved out of the flow is back in it.
+    frames(1, [&] { ImGui::SetWindowPos("###fit_a", ImVec2(500.0f, 400.0f)); });
+    rt.forget_layout();
+    rt.set_root(ari::group({panel("First", "fit_a", 3),
+                            placed(panel("Sized", "sized", 2), 200.0f, 150.0f, 220.0f, 120.0f)}));
+    frames(4);
+    chk(a->Pos.x == 10.0f && a->Pos.y == 10.0f, "the moved window is back at the top of the flow");
+    chk(s->Pos.x == 200.0f && s->Pos.y == 150.0f, "the other takes its new authored pos");
+    chk(s->Size.x == 220.0f && s->Size.y == 120.0f, "and its new authored size");
+
+    // An authored pos is in the work area: below the main menu bar, from the very first frame.
+    rt.forget_layout();
+    rt.set_root(ari::group({ari::menubar({ari::menu("File", {ari::menu_action("Quit", "quit")})}),
+                            placed(panel("Below", "below_bar", 1), 24.0f, 6.0f, 200.0f, 80.0f)}));
+    frames(2); // placed in the first; the second's WorkPos has the bar (it lags a frame)
+    const ImGuiWindow *below = find("below_bar");
+    const float bar = ImGui::GetMainViewport()->WorkPos.y;
+    chk(below && bar > 0.0f && below->Pos.y == bar + 6.0f && below->Pos.x == 24.0f,
+        "the authored pos is under the menu bar (" + std::to_string(int(bar)) + " px): y " +
+            (below ? std::to_string(int(below->Pos.y)) : std::string("?")));
   }
   cvc::gl::ImGuiBackend::setImGuiContext(nullptr); // with a shared imgui this clears ours too
   ImGui::DestroyContext(ctx);

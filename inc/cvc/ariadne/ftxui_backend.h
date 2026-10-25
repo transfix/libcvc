@@ -138,6 +138,7 @@ public:
                     bool *p_open = nullptr) override;
   void end_window() override;
   void seed_window_geometry(const WindowGeom &g) override;
+  void reset_layout() override; // a new document: windows placed afresh, as when first drawn
   WindowGeom window_geometry() const override;
   void push_id(const char *id) override;
   void pop_id() override;
@@ -242,6 +243,14 @@ public:
   // drawn) and run a walk so the widget it lands on reports its edit to the core. Returns whether
   // the UI used the event; an unused key is what a host forwards to the document's on_key.
   bool feed(Runtime &rt, const TermEvent &ev);
+
+  // What the terminal loop does with each event it reads: the UI first (feed), then `background`,
+  // then `unhandled` (the document's on_key / on_pointer). While the Keys window waits for a key
+  // (Runtime::key_capture_pending) every key goes straight to `unhandled`: Tab, the arrows and
+  // Return would otherwise move the UI's focus or press a button.
+  void route(Runtime &rt, const TermEvent &ev,
+             const std::function<bool(const TermEvent &)> &background,
+             const std::function<void(const TermEvent &)> &unhandled);
 
   // ---- hosted chrome ----
   // With Options::hosted this backend draws no window frames and no menu bar. It keeps each

@@ -28,24 +28,31 @@ struct KeyBinding {
   std::string path; // the state key holding its keys ("" = keys.<id>; a leading '/' is absolute)
 };
 
-// The Keys window's id (its open state is tree.ariadne_keys.open), and the state key naming the
-// binding whose Change button is waiting for a key ("" = none). Both under the document's prefix.
+// The Keys window's id, its open state, and the state key naming the binding whose Change button
+// is waiting for a key ("" = none; it counts only while the window is open). Under the document's
+// prefix, beside the window's other tree.<id> state, so no binding id can collide with them.
 inline constexpr const char *kKeysWindow = "ariadne_keys";
-inline constexpr const char *kKeyCapture = "keys.capture";
+inline constexpr const char *kKeysWindowOpen = "tree.ariadne_keys.open";
+inline constexpr const char *kKeyCapture = "tree.ariadne_keys.capture";
 
 // Where a binding's keys live, before resolving against the document's prefix.
 inline std::string key_binding_path(const KeyBinding &b) {
   return b.path.empty() ? "keys." + b.id : b.path;
 }
 
-// A binding's keys as stored ("Right, PageDown"), and back.
+// A binding's keys as stored ("Right, PageDown"), and back. The comma key is stored as "Comma"
+// (stored_key_name), so a comma always separates.
 std::string join_keys(const std::vector<std::string> &keys);
 std::vector<std::string> split_keys(std::string_view stored);
 
 // One spelling for a key whoever names it, to compare a pressed key with a binding: SDL's names
-// ("Left Shift", "Space", "PageUp") and VTK's ("Shift_L", "space", "Prior") come out the same, and
-// letters fold to lower case. Not for showing.
+// ("Left Shift", "Space", "PageUp", ",", "Keypad 1") and VTK's X11 keysyms ("Shift_L", "space",
+// "Prior", "comma", "KP_1") come out the same, and letters fold to lower case. Not for showing.
 std::string canonical_key(std::string_view name);
+
+// How a pressed key is stored in a binding: its name, but "Comma" for "," (see join_keys); ""
+// for a key with no name, which cannot be bound.
+std::string stored_key_name(std::string_view pressed);
 
 // True when `key` is one of the keys stored at a binding (`stored`, as join_keys writes it).
 bool key_matches(std::string_view stored, std::string_view key);

@@ -865,10 +865,19 @@ struct Runtime::Impl {
   std::atomic<bool> have_key_bindings_{false};
   std::mutex pressed_mutex_;
   std::vector<std::string> pressed_keys_;
+  // The Keys window waits for a key: a Change button named a binding, and the window is open (a
+  // capture left over in a closed window is cleared by the next drain).
   bool key_capture_pending() const {
-    return !read_or<std::string>(app, resolve_bind(prefix, kKeyCapture), "").empty();
+    return !read_or<std::string>(app, resolve_bind(prefix, kKeyCapture), "").empty() &&
+           read_bool_or(app, resolve_bind(prefix, kKeysWindowOpen), 0) != 0;
   }
   void run_key_bindings();
+
+  // forget_layout(): applied at the next render. Each window's and grid's first frame after it
+  // (by its tree.<id>.geometry / .tracks / .columns path) seeds only what the document authored.
+  bool forget_layout_pending = false;
+  bool windows_forgotten = false;
+  std::set<std::string> laid_out;
 
   // §12: the active mount scope during emit. Empty stack = the document prefix; each entry is
   // a composed sub-prefix pushed when the walk enters a mounted subtree (Widget::scope) and
@@ -1124,15 +1133,21 @@ void Runtime::Impl::emit_container(const Widget &w) {
     const bool split = w.layout.is_row_split();
     const bool table = w.layout.resizable && !split;
     std::string tracks_path, columns_path;
+    // After forget_layout(), as for a window: the first frame takes no sizes the last document
+    // persisted.
+    const auto persisted = [&](const std::string &path) {
+      const bool fresh = windows_forgotten && laid_out.insert(path).second;
+      return fresh ? std::vector<float>{} : parse_tracks(read_string(app, path));
+    };
     if (split) {
       tracks_path = resolve("tree." + id + ".tracks");
-      const std::vector<float> seed = parse_tracks(read_string(app, tracks_path));
+      const std::vector<float> seed = persisted(tracks_path);
       if (!seed.empty())
         b.seed_grid_tracks(seed);
     }
     if (table) {
       columns_path = resolve("tree." + id + ".columns");
-      const std::vector<float> seed = parse_tracks(read_string(app, columns_path));
+      const std::vector<float> seed = persisted(columns_path);
       if (!seed.empty())
         b.seed_grid_columns(seed);
     }
@@ -1262,7 +1277,9 @@ void Runtime::Impl::emit_node(const Widget &w) {
     // the authority next frame. The backend never touches cvc::state; it only seeds/reports.
     const std::string geo_path = resolve("tree." + id + ".geometry");
     WindowGeom seed;
-    bool have_seed = parse_geom(read_string(app, geo_path), seed);
+    // After forget_layout(), a window's first frame ignores what is persisted: the last document's.
+    const bool fresh = windows_forgotten && laid_out.insert(geo_path).second;
+    bool have_seed = !fresh && parse_geom(read_string(app, geo_path), seed);
     // §3.0.3b first placement: with no persisted geometry yet, seed the window's INITIAL position
     // from the authored `pos:` (ImGui otherwise stacks every new window at the same default spot,
     // so a declared pos would be dead). Seed as FirstUseEver — the user's drag then persists via
@@ -1272,6 +1289,7 @@ void Runtime::Impl::emit_node(const Widget &w) {
       seed.has_pos = true;
       seed.x = w.pos_x;
       seed.y = w.pos_y;
+      seed.authored = true;
       have_seed = true;
     }
     if (have_seed)
@@ -1569,6 +1587,12 @@ void Runtime::Impl::render() {
     }
     planted_holes.clear();
     wired_mounts.clear();
+  }
+  if (forget_layout_pending) { // a new document: its windows are laid out afresh
+    forget_layout_pending = false;
+    laid_out.clear();
+    windows_forgotten = true;
+    backend->reset_layout();
   }
   if (reactive)
     reactive->begin_frame(); // §4: reset the per-frame reactive eval budget
@@ -1956,6 +1980,10 @@ void Runtime::post_input(const InputEvent &ev) {
   m_->deliver_input(ev);
 }
 
+bool Runtime::key_capture_pending() const { return m_->key_capture_pending(); }
+
+void Runtime::forget_layout() { m_->forget_layout_pending = true; }
+
 void Runtime::set_key_bindings(std::vector<KeyBinding> bindings) {
   m_->key_bindings_ = std::move(bindings);
   m_->have_key_bindings_.store(!m_->key_bindings_.empty());
@@ -1968,12 +1996,18 @@ void Runtime::Impl::run_key_bindings() {
     keys.swap(pressed_keys_);
   }
   const std::string capture_path = resolve_bind(prefix, kKeyCapture);
+  if (!key_capture_pending() && !read_or<std::string>(app, capture_path, "").empty())
+    write<std::string>(app, capture_path, ""); // the Keys window closed while it waited
   for (const std::string &key : keys) {
-    if (const std::string capture = read_or<std::string>(app, capture_path, ""); !capture.empty()) {
+    if (key_capture_pending()) {
+      const std::string capture = read_or<std::string>(app, capture_path, "");
+      const std::string stored = stored_key_name(key);
+      if (stored.empty())
+        continue; // a key with no name can't be bound: still waiting
       if (canonical_key(key) != "escape")
         for (const KeyBinding &b : key_bindings_)
           if (b.id == capture)
-            write<std::string>(app, resolve_bind(prefix, key_binding_path(b)), key);
+            write<std::string>(app, resolve_bind(prefix, key_binding_path(b)), stored);
       write<std::string>(app, capture_path, "");
       continue;
     }

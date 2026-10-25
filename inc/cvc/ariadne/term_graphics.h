@@ -58,8 +58,9 @@ bool parse_probe_reply(const std::string &reply, std::uint32_t kitty_id, TermGra
 // Ask the controlling terminal what it can draw. The queries are POSIX only: it opens /dev/tty,
 // puts it in raw mode for the exchange and restores it, so call it BEFORE anything else owns the
 // terminal (FtxuiBackend::run calls it before FTXUI starts). `timeout_ms` bounds the wait for a
-// terminal that never answers. `iterm` comes from $TERM_PROGRAM, everywhere. All-false where
-// there is no terminal (and, but for `iterm`, on Windows / wasm).
+// terminal that never answers. `iterm` comes from $TERM_PROGRAM where stdout is a terminal, and
+// never on Windows (ConPTY misplaces a full-screen program's images). All-false where there is no
+// terminal (and, but for `iterm`, in the browser).
 TermGraphics probe_terminal(int timeout_ms = 300);
 
 // One cell's size in pixels from the tty's window size (TIOCGWINSZ ws_xpixel / ws_col). False

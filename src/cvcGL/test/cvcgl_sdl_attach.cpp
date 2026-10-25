@@ -1,8 +1,11 @@
 // SdlInput::attach on a real VTK window (Windows): SDL wraps the HWND VTK made, a key sent to that
 // window reaches SDL -- so a document's on_key sees it -- and still reaches VTK's own interactor,
-// so ImGui and the camera keep their keys. Once SDL lets go, VTK alone still gets them. SKIPs (rc
-// 0) without SDL, off Windows, or where no window opens.
+// so ImGui and the camera keep their keys. Once SDL lets go, VTK alone still gets them. Then the
+// path X11, Wayland and macOS take ($CVC_SDLINPUT_VTK_KEYS forces it here): VTK's own key events,
+// named as SDL names them, a held key's presses marked as repeats. SKIPs (rc 0) without SDL, off
+// Windows, or where no window opens.
 #include <cstdio>
+#include <cstdlib>
 #include <cvc/core/app.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
@@ -30,10 +33,10 @@ void chk(bool ok, const std::string &what) {
 
 #ifdef _WIN32
 // The Left arrow as Windows sends it: scan code 0x4B, an extended key.
+const LPARAM kLeftDown = 1 | (0x4B << 16) | (1 << 24);
 void press_left(HWND hwnd) {
-  const LPARAM down = 1 | (0x4B << 16) | (1 << 24);
-  SendMessageW(hwnd, WM_KEYDOWN, VK_LEFT, down);
-  SendMessageW(hwnd, WM_KEYUP, VK_LEFT, down | (LPARAM(1) << 30) | (LPARAM(1) << 31));
+  SendMessageW(hwnd, WM_KEYDOWN, VK_LEFT, kLeftDown);
+  SendMessageW(hwnd, WM_KEYUP, VK_LEFT, kLeftDown | (LPARAM(1) << 30) | (LPARAM(1) << 31));
 }
 #endif
 
@@ -100,6 +103,32 @@ int main() {
   press_left(hwnd);
   chk(vtk_keys.size() == 1 && vtk_keys[0] == "Left", "after shutdown() VTK alone gets it");
   chk(IsWindow(hwnd) != FALSE, "and VTK's window is still standing");
+
+  // VTK's keys, as on X11: Left held (a second press while down is a repeat), then released;
+  // a comma (VTK's "comma") comes out as SDL names it.
+  _putenv_s("CVC_SDLINPUT_VTK_KEYS", "1");
+  cvc::gl::SdlInput vk;
+  chk(vk.attach(win) && vk.attached(), "with $CVC_SDLINPUT_VTK_KEYS, attach() takes VTK's keys");
+  SendMessageW(hwnd, WM_KEYDOWN, VK_LEFT, kLeftDown);
+  SendMessageW(hwnd, WM_KEYDOWN, VK_LEFT, kLeftDown | (LPARAM(1) << 30)); // the key repeats
+  SendMessageW(hwnd, WM_KEYUP, VK_LEFT, kLeftDown | (LPARAM(1) << 30) | (LPARAM(1) << 31));
+  std::vector<cvc::gl::InputEvent> got = vk.poll();
+  std::string seq;
+  for (const cvc::gl::InputEvent &e : got)
+    seq += std::string(e.kind == cvc::gl::InputEvent::Kind::KeyDown ? "down" : "up") + ":" + e.key +
+           (e.repeat ? "(repeat)" : "") + " ";
+  chk(seq == "down:Left down:Left(repeat) up:Left ", "a held key repeats, then goes up: " + seq);
+  const LPARAM comma = 1 | (0x33 << 16);
+  SendMessageW(hwnd, WM_KEYDOWN, VK_OEM_COMMA, comma);
+  SendMessageW(hwnd, WM_KEYUP, VK_OEM_COMMA, comma | (LPARAM(1) << 30) | (LPARAM(1) << 31));
+  got = vk.poll();
+  chk(!got.empty() && got.front().key == ",",
+      "VTK's keysym renamed as SDL's: " + (got.empty() ? std::string("nothing") : got.front().key));
+  vk.shutdown();
+  vtk_keys.clear();
+  press_left(hwnd);
+  chk(vk.poll().empty() && vtk_keys.size() == 1, "after shutdown() it observes nothing");
+  _putenv_s("CVC_SDLINPUT_VTK_KEYS", "");
 
   std::printf("cvcgl_sdl_attach: %s\n", failures ? "FAILED" : "PASSED");
   return failures ? 1 : 0;

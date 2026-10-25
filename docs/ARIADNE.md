@@ -204,7 +204,7 @@ Each state-bound primitive returns `{changed, committed, value}`
 ([`backend.h`](../inc/cvc/ariadne/backend.h)). Core writes state on `committed`, and a
 slider's on every `changed` too, so whatever it drives follows the drag. A slider with
 `commit: release` writes once, when the drag ends, for a key whose change is too costly to
-redo every frame.
+redo every frame (the forest controls' structural sliders, which regrow the whole forest).
 
 A backend advertises `Capabilities{windows, menubar, mouse, keyboard, color, glsl,
 view_embed, owns_loop, terminal, bitmap, kitty, sixel}`
@@ -291,7 +291,9 @@ Three backends ship:
     Like Sixel, but each rectangle is a JPEG in an OSC 1337 escape that names its cells
     (`width=` / `height=`, `doNotMoveCursor=1`), and the terminal scales it to them, so the
     cell size need not be known. `Auto` picks it, after Kitty and Sixel, when
-    `$TERM_PROGRAM` names such a terminal (`gfx::iterm_terminal`).
+    `$TERM_PROGRAM` names such a terminal (`gfx::iterm_terminal`: WezTerm, iTerm2, mintty)
+    and stdout is a tty, off Windows. A page with xterm.js's image addon asks for it
+    (`--graphics iterm`), as arigl_term's does.
   - **Detection.** `run()` asks the terminal before FTXUI takes it over, because FTXUI's
     input parser has no APC case and a late kitty reply would arrive as typed text: on
     `/dev/tty` in raw mode it sends a kitty query, `CSI 16 t` (the cell size in pixels)
@@ -310,8 +312,8 @@ Three backends ship:
     (`release_graphics()`: the deletions it sends on exit).
   - **Limits.** Hosted mode (the tvision desktop) always draws half-blocks, because
     tvision owns the output. No probe runs on Windows or in the browser, so `Auto` there is
-    `Iterm` under a terminal `$TERM_PROGRAM` names, else half-blocks (`Kitty` / `Sixel` can
-    still be asked for). On Windows a console program reaches its terminal through ConPTY,
+    half-blocks (`Kitty`, `Sixel` and `Iterm` can still be asked for). On Windows a console
+    program reaches its terminal through ConPTY,
     which decides what gets through: Windows Terminal's (1.22 and later) passes Sixel on,
     and `arigl --terminal --graphics sixel --cell-size WxH` draws real pixels there. The
     ConPTY WezTerm 20240203 bundles, and the one in Windows itself, drop kitty's APC and
@@ -438,9 +440,18 @@ the loader only *captures*. The host wires them:
   (`set_host_keys`: `arigl` adds its camera's fly keys), in a **Keys** window it puts in the
   document: closed until `tree.ariadne_keys.open` is set (arigl's *Settings > Keys...*), a row
   per binding with its keys and a **Change** button. Change writes the binding's id to
-  `keys.capture`; the next key down becomes its key (Escape keeps the old one), and no handler
-  sees that key. A group with an `id`, like each of those rows, scopes its children's identities
-  as a window does, so every row's Change is its own.
+  `tree.ariadne_keys.capture`; while the window is open the next key down becomes its key
+  (Escape keeps the old one; the comma key is stored as `Comma`), and no handler sees that key.
+  Closing the window drops a capture still waiting. In the terminal every key goes to the
+  capture, Tab and Return included. A group with an `id`, like each of those rows, scopes its
+  children's identities as a window does, so every row's Change is its own.
+
+  Documents a host loads in turn share its prefix, so a new document's `keys:` defaults replace
+  what an earlier document left at the same `keys.<id>`; a reload of the same file keeps the
+  keys the user chose. A new document also starts its layout afresh
+  (`Runtime::forget_layout`, `Backend::reset_layout`): each window's first frame takes its own
+  `pos:` and `size:`, not the last document's window of the same id. An authored `pos:` is
+  measured from the work area, below a main menu bar.
 
 A small, complete document (mirroring `nav_compute.ari`). A widget is a map whose
 **first key is its type** and whose value is its label (`slider_int: "N"`), with the
@@ -1334,10 +1345,13 @@ below (G17–G21 in the internal gap report) are tracked for reconciliation.
   planned follow-up.
 - **AriRuntime document-level `on_key` / `on_pointer` residents need a host to feed them.**
   The `post_key` / `post_pointer` forwarding is wired, and `arigl` feeds it from SDL3:
-  `cvc::gl::SdlInput::attach` wraps the window VTK made (its HWND or X11 window; in the
-  browser, SDL's own hidden canvas with its key listeners on VTK's), and VTK keeps every
-  event it had. macOS is not wrapped yet, and a host on AriRuntime's stock loop that does
-  not attach an `SdlInput` gets no key or pointer residents
+  `cvc::gl::SdlInput::attach` wraps the window VTK made (its HWND; in the browser, a hidden
+  canvas of SDL's own, listening for the keys typed into VTK's canvas on the page's window),
+  and VTK keeps every event it had. On X11, Wayland and macOS SDL does not take VTK's window
+  (on X11 its XInput2 selection would take VTK's clicks), so the documents get VTK's own key
+  events, renamed as SDL names them, and no pointer. arigl hands the document neither the keys
+  typed into an ImGui field nor the clicks on a window. A host on AriRuntime's stock loop that
+  does not attach an `SdlInput` gets no key or pointer residents
   ([`AriRuntime.h`](../inc/cvc/gl/ariadne/AriRuntime.h), [`SdlInput.h`](../inc/cvc/gl/SdlInput.h)).
 - **OS signals reach `on_signal` only where a host routes them.** `ari` and `arigl` do, in
   both of `arigl`'s modes (§9). `AriRuntime::post_signal` is the seam for other GL hosts;

@@ -15,6 +15,7 @@
 #include <cvc/state/state_exec/builtins.h>        // register_fn
 #include <cvc/state/state_exec/intrinsics.h>      // intrinsics_context, resolve_channel_key
 #include <cvc/state/state_exec/types.h>           // value_t
+#include <filesystem>
 #include <iterator>
 #include <map>
 #include <memory>
@@ -168,16 +169,25 @@ Widget keys_window(const std::vector<KeyBinding> &bindings) {
 
 } // namespace
 
-void AppRuntime::add_keys(Widget &root, std::vector<KeyBinding> keys) {
-  keys.insert(keys.end(), hostKeys_.begin(), hostKeys_.end());
-  for (const KeyBinding &b : keys)
-    if (!b.keys.empty()) // the binding's own default; one with none is seeded by its reader
+void AppRuntime::seed_keys(const std::vector<KeyBinding> &own, bool new_document) {
+  for (const KeyBinding &b : own) {
+    const std::string path = resolve_bind(prefix_, key_binding_path(b));
+    if (new_document) // not an earlier document's keys for the same id ("" for none)
+      write<std::string>(app_, path, join_keys(b.keys));
+    else if (!b.keys.empty())
+      read_or_seed<std::string>(app_, path, join_keys(b.keys));
+  }
+  for (const KeyBinding &b : hostKeys_)
+    if (!b.keys.empty()) // one with no default of its own is seeded by its reader (the camera)
       read_or_seed<std::string>(app_, resolve_bind(prefix_, key_binding_path(b)),
                                 join_keys(b.keys));
+}
+
+void AppRuntime::add_keys(Widget &root, std::vector<KeyBinding> keys) {
+  keys.insert(keys.end(), hostKeys_.begin(), hostKeys_.end());
   write<std::string>(app_, resolve_bind(prefix_, kKeyCapture), ""); // no Change waiting
   if (keysWindow_ || !keys.empty()) {
-    read_or_seed<int>(app_, resolve_bind(prefix_, std::string("tree.") + kKeysWindow + ".open"),
-                      0); // closed until asked for
+    read_or_seed<int>(app_, resolve_bind(prefix_, kKeysWindowOpen), 0); // closed until asked for
     root.children.push_back(keys_window(keys));
   }
   rt_.set_key_bindings(std::move(keys));
@@ -366,6 +376,13 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
   publish_document_args(app_, prefix_, docArgv_, lr.has_args_block ? &lr.args : nullptr,
                         lr.has_args_block ? &parsed : nullptr);
 
+  // A different document from the last one (a reload is the same file under any spelling): its
+  // windows and key defaults start afresh. The defaults go in before init:, which may set its own.
+  std::error_code same_ec;
+  const bool new_document =
+      docPath_.empty() || !std::filesystem::equivalent(docPath_, path, same_ec);
+  seed_keys(lr.keys, new_document);
+
   std::vector<std::string> initErrors;
   run_init(app_, prefix_, lr.init_script, &initErrors, // §init: seeds win over widget defaults
            [this](const std::string &n) { return rt_.has(n); });
@@ -405,6 +422,9 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
     }
   }
 
+  if (new_document && !docPath_.empty())
+    rt_.forget_layout();
+  docPath_ = path;
   add_host_menus(lr.root, hostMenus_);
   add_keys(lr.root, std::move(lr.keys));
   rt_.set_root(std::move(lr.root)); // applied at the next frame boundary
@@ -415,6 +435,7 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
 
 void AppRuntime::set_root(Widget root) {
   add_host_menus(root, hostMenus_);
+  seed_keys({}, /*new_document=*/false);
   add_keys(root, {});
   rt_.set_root(std::move(root));
 }

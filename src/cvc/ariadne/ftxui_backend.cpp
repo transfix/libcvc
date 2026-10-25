@@ -624,6 +624,24 @@ struct FtxuiBackend::Impl {
     long gen = -1;
     std::string bytes;
     long frame = 0;
+    // What the bytes were cut from: the same picture (gen) laid out over other cells, resampled
+    // to another raster, or cut to another size (a Sixel's last band) needs new bytes for the same
+    // rectangle.
+    int raster_w = 0, raster_h = 0, cols = 0, rows = 0, pw = 0, ph = 0;
+    bool stale(const PixelGfx &g, int w, int h) const {
+      return bytes.empty() || gen != g.gen || raster_w != g.raster.width() ||
+             raster_h != g.raster.height() || cols != g.cols || rows != g.rows || pw != w ||
+             ph != h;
+    }
+    void made_from(const PixelGfx &g, int w, int h) {
+      gen = g.gen;
+      raster_w = g.raster.width();
+      raster_h = g.raster.height();
+      cols = g.cols;
+      rows = g.rows;
+      pw = w;
+      ph = h;
+    }
   };
   std::map<std::string, SixelCached> sixel_cache;
   long gfx_frames = 0;
@@ -917,11 +935,11 @@ struct FtxuiBackend::Impl {
           const int y1 = (rc.y + rc.h) * g.raster.height() / g.rows;
           if (x1 <= x0 || y1 <= y0)
             continue;
-          if (sc.bytes.empty() || sc.gen != g.gen) {
+          if (sc.stale(g, x1 - x0, y1 - y0)) {
             const unsigned char *origin =
                 raster + static_cast<std::size_t>(y0) * stride + static_cast<std::size_t>(x0) * 3;
             sc.bytes = gfx::iterm_image(origin, x1 - x0, y1 - y0, stride, rc.w, rc.h);
-            sc.gen = g.gen;
+            sc.made_from(g, x1 - x0, y1 - y0);
           }
         } else {
           bool below_shows = rc.y + rc.h < g.rows;
@@ -932,12 +950,12 @@ struct FtxuiBackend::Impl {
           if (pw <= 0 || ph <= 0 || (rc.y * g.cell_h + ph) > g.raster.height() ||
               (rc.x + rc.w) * g.cell_w > g.raster.width())
             continue;
-          if (sc.bytes.empty() || sc.gen != g.gen) {
+          if (sc.stale(g, pw, ph)) {
             const unsigned char *origin = raster +
                                           static_cast<std::size_t>(rc.y) * g.cell_h * stride +
                                           static_cast<std::size_t>(rc.x) * g.cell_w * 3;
             sc.bytes = gfx::sixel_encode(origin, pw, ph, stride, colors);
-            sc.gen = g.gen;
+            sc.made_from(g, pw, ph);
           }
         }
         sc.frame = frame;
@@ -1566,6 +1584,11 @@ BoolEdit FtxuiBackend::menu_item_toggle(const char *label, bool current) {
 void FtxuiBackend::seed_window_geometry(const WindowGeom &g) {
   m_->pending_geom = g;
   m_->have_geom = true;
+}
+
+void FtxuiBackend::reset_layout() {
+  m_->windows.clear();
+  m_->drag_win.clear();
 }
 
 bool FtxuiBackend::begin_window(const char *title, const char *id, const Size &size,
@@ -2749,8 +2772,7 @@ FtxuiBackend::run_loop(Runtime &rt, const RunOptions &opts, const std::function<
     TermEvent te;
     if (!translate(e, te))
       return false;
-    if (!feed(rt, te) && !(opts.background_input && opts.background_input(te)) && unhandled)
-      unhandled(te);
+    route(rt, te, opts.background_input, unhandled);
     return true;
   });
   fx::Loop loop(&screen, app); // sets the terminal up (and FTXUI's signal handlers)
@@ -2877,6 +2899,7 @@ bool FtxuiBackend::begin_window(const char *, const char *, const Size &, float,
 }
 void FtxuiBackend::end_window() {}
 void FtxuiBackend::seed_window_geometry(const WindowGeom &) {}
+void FtxuiBackend::reset_layout() {}
 WindowGeom FtxuiBackend::window_geometry() const { return {}; }
 void FtxuiBackend::push_id(const char *) {}
 void FtxuiBackend::pop_id() {}
@@ -2964,6 +2987,17 @@ void FtxuiBackend::forward_to_document(AppRuntime &, const TermEvent &) const {}
 bool FtxuiBackend::available() { return false; }
 
 #endif
+
+void FtxuiBackend::route(Runtime &rt, const TermEvent &ev,
+                         const std::function<bool(const TermEvent &)> &background,
+                         const std::function<void(const TermEvent &)> &unhandled) {
+  if (ev.kind != TermEvent::Kind::Mouse && unhandled && rt.key_capture_pending()) {
+    unhandled(ev);
+    return;
+  }
+  if (!feed(rt, ev) && !(background && background(ev)) && unhandled)
+    unhandled(ev);
+}
 
 // ── custom widgets: the same in both builds (a host's draw fn calls the primitives above)
 // ─────────

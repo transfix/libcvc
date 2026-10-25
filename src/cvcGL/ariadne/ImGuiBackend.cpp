@@ -11,6 +11,7 @@
 // change, or only the release for a `commit: release` slider.
 
 #include <cfloat>
+#include <cstring>
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/gl/ImGuiBinding.h> // cvc::gl::ui::*
 #include <cvc/gl/ImGuiOverlay.h>
@@ -140,9 +141,11 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
 #ifdef CVC_ENABLE_IMGUI
   // Resolve the §3.0.3b size against the main viewport's WORK area (the menu-aware
   // content rect), per axis: px verbatim, percent as a fraction of the work size,
-  // auto -> 0 (let ImGui fit). min/max become window size constraints.
-  const ImGuiViewport *vp = ImGui::GetMainViewport();
-  const ImVec2 avail = vp->WorkSize;
+  // auto -> 0 (let ImGui fit). min/max become window size constraints. The work area as built so
+  // far this frame, which counts a main menu bar drawn before the windows: the viewport's WorkPos
+  // lags a frame, so a document's first frame would put its windows under its menu bar.
+  const ImRect work = static_cast<ImGuiViewportP *>(ImGui::GetMainViewport())->GetBuildWorkRect();
+  const ImVec2 avail = work.GetSize();
   auto px = [](const ariadne::Extent &e, float parent) -> float {
     if (e.unit == ariadne::Unit::Px)
       return e.value;
@@ -154,7 +157,13 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
   // it shows, up to the viewport's edge, past which it scrolls. One with a size keeps it (the user
   // may resize it) and scrolls, both ways, when its widgets need more.
   const bool fits = !size.w.is_set() && !size.h.is_set();
-  ImGuiWindow *const existing = ImGui::FindWindowByName(name.c_str());
+  // After reset_layout() a window's first draw is a new document's: ImGui's window of the same id
+  // (the last document's) counts as none, so the authored place and size apply again.
+  const bool relaid = m_relayout && m_relaid.insert(id).second;
+  ImGuiWindow *const existing = relaid ? nullptr : ImGui::FindWindowByName(name.c_str());
+  const ImGuiCond once = relaid ? ImGuiCond_Always : ImGuiCond_FirstUseEver;
+  if (relaid)
+    ImGui::SetNextWindowCollapsed(false, ImGuiCond_Always);
   // §11.4: seed the window from a persisted tree.<id>.geometry when the core supplied one. A FREE
   // window uses ImGuiCond_FirstUseEver (apply-once: the seed takes only on the window's first
   // appearance — a genuinely new window, or one whose imgui.ini state was cleared — and the user's
@@ -162,26 +171,49 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
   // A seeded size wins over the authored size below (skip that seeding when a seed carries a size).
   // A fitting window takes no size from it: the size the core persisted after the window's first,
   // still unmeasured frame would otherwise stop the fit and leave the window a few pixels square.
+  // An authored `pos:` is in the work area, below a main menu bar; a persisted one is ImGui's own.
   const bool seededPos = m_haveSeed && m_pendingSeed.has_pos;
   const bool seededSize = m_haveSeed && m_pendingSeed.has_size && !fits;
   if (m_haveSeed) {
-    if (m_pendingSeed.has_pos)
-      ImGui::SetNextWindowPos(ImVec2(m_pendingSeed.x, m_pendingSeed.y), ImGuiCond_FirstUseEver);
+    if (m_pendingSeed.has_pos) {
+      const ImVec2 origin = m_pendingSeed.authored ? work.Min : ImVec2(0.0f, 0.0f);
+      ImGui::SetNextWindowPos(origin + ImVec2(m_pendingSeed.x, m_pendingSeed.y), once);
+    }
     if (seededSize)
-      ImGui::SetNextWindowSize(ImVec2(m_pendingSeed.w, m_pendingSeed.h), ImGuiCond_FirstUseEver);
+      ImGui::SetNextWindowSize(ImVec2(m_pendingSeed.w, m_pendingSeed.h), once);
     m_haveSeed = false;
   }
   if (!seededSize && !fits)
-    ImGui::SetNextWindowSize(ImVec2(px(size.w, avail.x), px(size.h, avail.y)),
-                             ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(px(size.w, avail.x), px(size.h, avail.y)), once);
 
   // A new window with no place of its own joins the flow down the left of the viewport (m_flow);
   // one the user has dragged since it was put there leaves it.
   if (ImGui::GetFrameCount() != m_flowFrame) {
     m_flowFrame = ImGui::GetFrameCount();
-    m_flowX = vp->WorkPos.x + kFlowGap;
-    m_flowY = vp->WorkPos.y + kFlowGap;
+    m_flowX = work.Min.x + kFlowGap;
+    m_flowY = work.Min.y + kFlowGap;
     m_flowColumnW = 0.0f;
+    m_flowObstacles.clear();
+    // The first frame of a new document has nothing in its way: what was drawn last frame was
+    // the last document's.
+    const bool fresh = m_resetFrame == ImGui::GetFrameCount();
+    std::unordered_set<ImGuiID> flowing;
+    for (const auto &kv : m_flow)
+      flowing.insert(kv.second.window);
+    for (const ImGuiWindow *w : GImGui->Windows) {
+      if (fresh || !w->WasActive || w->Hidden || w->IsFallbackWindow ||
+          (w->Flags &
+           (ImGuiWindowFlags_ChildWindow | ImGuiWindowFlags_Popup | ImGuiWindowFlags_Tooltip)))
+        continue;
+      // ImGui's own windows ("##MainMenuBar", Ctrl+Tab's "##NavWindowingOverlay") are not in
+      // the way; a window with no title is "###<id>".
+      if (std::strncmp(w->Name, "##", 2) == 0 && std::strncmp(w->Name, "###", 3) != 0)
+        continue;
+      if (flowing.count(w->ID))
+        continue; // a flowing window: the flow places it
+      m_flowObstacles.push_back(
+          FlowRect{w->Pos.x, w->Pos.y, w->Pos.x + w->Size.x, w->Pos.y + w->Size.y});
+    }
   }
   auto spot = m_flow.find(id);
   if (!existing && !seededPos)
@@ -191,22 +223,40 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
     m_flow.erase(spot);
     spot = m_flow.end();
   }
-  ImVec2 at = existing ? existing->Pos : ImVec2(vp->WorkPos.x + 60.0f, vp->WorkPos.y + 60.0f);
+  ImVec2 at = existing ? existing->Pos : work.Min + ImVec2(60.0f, 60.0f);
   if (spot != m_flow.end()) {
     // The room it wants: all its widgets, for a window that fits them; else its size. (Nothing
     // yet for a window not drawn before -- the next frame places it again, measured.)
     const ImVec2 want = !existing                      ? ImVec2(0.0f, 0.0f)
                         : fits && !existing->Collapsed ? ImGui::CalcWindowNextAutoFitSize(existing)
                                                        : existing->Size;
-    const float top = vp->WorkPos.y + kFlowGap, bottom = vp->WorkPos.y + vp->WorkSize.y;
-    if (m_flowY > top && m_flowY + want.y > bottom) { // it would run off the bottom: a new column
-      m_flowX += m_flowColumnW + kFlowGap;
+    const float top = work.Min.y + kFlowGap, bottom = work.Max.y;
+    const float left = work.Min.x + kFlowGap, right = work.Max.x;
+    const auto new_column = [&] {
+      m_flowX += ImMax(m_flowColumnW, want.x) + kFlowGap;
       m_flowY = top;
       m_flowColumnW = 0.0f;
+    };
+    if (m_flowY > top && m_flowY + want.y > bottom) // it would run off the bottom: a new column
+      new_column();
+    // Below any window it would cover (a bounded walk: a crowded screen ends in an overlap).
+    for (int tries = 0; tries < 16 && m_flowX < right; ++tries) {
+      const ImRect r(m_flowX, m_flowY, m_flowX + ImMax(want.x, 1.0f),
+                     m_flowY + ImMax(want.y, 1.0f));
+      const FlowRect *hit = nullptr;
+      for (const FlowRect &o : m_flowObstacles)
+        if (r.Overlaps(ImRect(o.x0, o.y0, o.x1, o.y1)))
+          hit = &o;
+      if (!hit)
+        break;
+      m_flowY = hit->y1 + kFlowGap;
+      if (m_flowY + want.y > bottom)
+        new_column();
     }
-    at = ImTrunc(ImVec2(m_flowX, m_flowY)); // what ImGui would store, so a drag is told apart
+    // Never past the right edge: a column that would start beyond it overlaps the last instead.
+    at = ImTrunc(ImVec2(ImMax(left, ImMin(m_flowX, right - want.x - kFlowGap)), m_flowY));
     ImGui::SetNextWindowPos(at, ImGuiCond_Always);
-    spot->second = FlowSpot{at.x, at.y};
+    spot->second = FlowSpot{at.x, at.y, ImHashStr(name.c_str())};
     m_flowY = at.y + ImMin(want.y, ImMax(bottom - at.y, kFitFloor)) + kFlowGap;
     m_flowColumnW = ImMax(m_flowColumnW, want.x);
   }
@@ -216,8 +266,8 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
   ImVec2 mx(size.max_w.is_set() ? px(size.max_w, avail.x) : FLT_MAX,
             size.max_h.is_set() ? px(size.max_h, avail.y) : FLT_MAX);
   if (fits) { // no further than the viewport's far edges from where the window stands
-    mx.x = ImMin(mx.x, ImMax(vp->WorkPos.x + vp->WorkSize.x - at.x, kFitFloor));
-    mx.y = ImMin(mx.y, ImMax(vp->WorkPos.y + vp->WorkSize.y - at.y, kFitFloor));
+    mx.x = ImMin(mx.x, ImMax(work.Max.x - at.x, kFitFloor));
+    mx.y = ImMin(mx.y, ImMax(work.Max.y - at.y, kFitFloor));
   }
   if (fits || size.min_w.is_set() || size.min_h.is_set() || size.max_w.is_set() ||
       size.max_h.is_set())
@@ -254,6 +304,14 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
   }
 #endif
   return vis;
+}
+
+void ImGuiBackend::reset_layout() {
+  m_flow.clear();
+  m_relaid.clear();
+  m_relaidGrids.clear();
+  m_relayout = true;
+  m_resetFrame = ImGui::GetFrameCount();
 }
 
 void ImGuiBackend::seed_window_geometry(const ariadne::WindowGeom &g) {
@@ -293,6 +351,9 @@ bool ImGuiBackend::begin_grid(const ariadne::Layout &layout, const char *id) {
   // Resizable rows → a vertical split-pane stack with draggable seams (§3.0.3b).
   // Pane heights persist across frames in ImGui window storage, seeded from the
   // row tracks (cross-reload persistence to tree.<id> is the §11.4 follow-up).
+  // After reset_layout() a grid's first draw is a new document's: its authored sizes, not the
+  // ones the last document's grid of the same id was dragged to.
+  const bool relaid = m_relayout && m_relaidGrids.insert(id ? id : "").second;
   if (layout.is_row_split()) {
     gs.split = true;
     gs.split_long_axis = availW;
@@ -307,9 +368,13 @@ bool ImGuiBackend::begin_grid(const ariadne::Layout &layout, const char *id) {
       float def = gs.row_px[i] > 0.0f ? gs.row_px[i] : 80.0f;
       if (haveTrackSeed && i < m_pendingTracks.size() && m_pendingTracks[i] > 0.0f)
         def = m_pendingTracks[i];
-      store->GetFloatRef(key, def); // create/seed the slot apply-once; the returned pointer is NOT
-                                    // cached (a later iteration's insert can realloc the storage) —
-                                    // we keep only the key and re-resolve it below at use time.
+      if (relaid)
+        store->SetFloat(key, def);
+      else
+        store->GetFloatRef(key, def); // create/seed the slot apply-once; the returned pointer is
+                                      // NOT cached (a later iteration's insert can realloc the
+                                      // storage) — we keep only the key and re-resolve it below at
+                                      // use time.
       gs.pane_keys.push_back(key);
     }
     m_grids.push_back(std::move(gs));
@@ -342,6 +407,9 @@ bool ImGuiBackend::begin_grid(const ariadne::Layout &layout, const char *id) {
   }
   std::string tid = "###grid.";
   tid += (id ? id : "");
+  if (relaid) // its columns' widths again from TableSetupColumn below
+    if (ImGuiTable *old = ImGui::TableFindByID(ImGui::GetID(tid.c_str())))
+      ImGui::TableResetSettings(old);
   const bool open = ImGui::BeginTable(tid.c_str(), gs.cols, flags);
   if (open) {
     gs.resizable = layout.resizable;
@@ -406,7 +474,11 @@ void ImGuiBackend::grid_next_cell() {
     }
     const float h = (i < n) ? store->GetFloat(g.pane_keys[i]) : 0.0f;
     const std::string pid = "##cvcg.pane" + std::to_string(i);
-    ImGui::BeginChild(pid.c_str(), ImVec2(0.0f, h), ImGuiChildFlags_Borders);
+    // A pane is as wide as its window, unless the window fits its widgets: then the window takes
+    // its width from the panes', which fit their own widgets.
+    const bool fit = (ImGui::GetCurrentWindow()->Flags & ImGuiWindowFlags_AlwaysAutoResize) != 0;
+    ImGui::BeginChild(pid.c_str(), ImVec2(0.0f, h),
+                      ImGuiChildFlags_Borders | (fit ? ImGuiChildFlags_AutoResizeX : 0));
     ++g.cell;
     return;
   }

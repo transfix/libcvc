@@ -96,6 +96,14 @@ public:
   // (the Keys window's Change button), the next key down is that binding's new key instead
   // (Escape keeps the old one), and on_key does not see it. Replaces the last set; {} clears them.
   void set_key_bindings(std::vector<KeyBinding> bindings);
+  // The Keys window is waiting for a key: a host that would use keys itself first (a terminal's
+  // focus keys) hands them to post_input instead.
+  bool key_capture_pending() const;
+
+  // The next tree is a different document (AppRuntime::load): each window's first frame from the
+  // next render() on ignores the geometry persisted at tree.<id>.geometry -- the last document's,
+  // where it used the same id -- and the backend lays it out afresh (Backend::reset_layout).
+  void forget_layout();
 
   // Document-level signal handler — a state_exec PROGRAM run per signal the host routes here (the
   // .ari on_signal: block; pass LoadResult::on_signal_script). Like on_key it is ONE resident,

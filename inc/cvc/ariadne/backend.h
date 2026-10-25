@@ -91,6 +91,9 @@ struct WindowGeom {
   bool has_pos = false;  // x,y carry a real on-screen position
   bool has_size = false; // w,h carry a real size
   float x = 0.0f, y = 0.0f, w = 0.0f, h = 0.0f;
+  // x,y are the document's own `pos:`, not a position the backend reported: relative to the
+  // backend's work area (below a main menu bar), where a persisted one is the backend's own.
+  bool authored = false;
 };
 
 // What a surface can and cannot do. AppRuntime::load checks a document's
@@ -157,6 +160,10 @@ public:
   // begin_window: the window's current on-screen geometry, so the core writes a user move / resize
   // back to state. Both default to no-op / {} — a backend with no movable windows persists nothing.
   virtual void seed_window_geometry(const WindowGeom &g) { (void)g; }
+  // A new document's tree is coming (Runtime::forget_layout): its windows are new to it even where
+  // the last document used the same ids, so a backend lays each one out afresh -- its authored
+  // place and size, or the backend's own layout -- at its first begin_window from now on.
+  virtual void reset_layout() {}
   virtual WindowGeom window_geometry() const { return {}; }
 
   // Raise/focus the NEXT window to the front. Called right before begin_window when the core sees a

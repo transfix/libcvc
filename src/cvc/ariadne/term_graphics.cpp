@@ -16,6 +16,10 @@
 #define STBI_WRITE_NO_STDIO
 #include "../image/third_party/stb_image_write.h"
 
+#ifdef __EMSCRIPTEN__
+#include <unistd.h> // isatty: $TERM_PROGRAM counts only for a terminal
+#endif
+
 #if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
 #define CVC_TERM_GRAPHICS_POSIX 1
 #include <fcntl.h>
@@ -189,8 +193,12 @@ bool cell_pixel_size(int fd, int &w, int &h) {
 
 TermGraphics probe_terminal(int timeout_ms) {
   TermGraphics g;
-  if (const char *tp = std::getenv("TERM_PROGRAM"))
+#ifndef _WIN32
+  // Not on Windows: ConPTY forwards an iTerm2 image ahead of the redraws it makes itself, so a
+  // full-screen program's images land misplaced and are painted over (ARIADNE.md section 4).
+  if (const char *tp = std::getenv("TERM_PROGRAM"); tp && isatty(STDOUT_FILENO))
     g.iterm = iterm_terminal(tp);
+#endif
 #ifdef CVC_TERM_GRAPHICS_POSIX
   if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO))
     return g;
@@ -345,8 +353,8 @@ std::string kitty_delete(std::uint32_t id) {
 // ---- iTerm2 inline images ----
 
 bool iterm_terminal(const std::string &term_program) {
-  return term_program == "WezTerm" || term_program == "iTerm.app" || term_program == "mintty" ||
-         term_program == "vscode"; // VS Code's terminal: xterm.js with its image addon
+  // Not "vscode": its terminal's image support is off unless the user turns it on.
+  return term_program == "WezTerm" || term_program == "iTerm.app" || term_program == "mintty";
 }
 
 std::string iterm_image(const unsigned char *rgb, int w, int h, std::size_t stride, int cols,

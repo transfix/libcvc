@@ -1314,8 +1314,16 @@ int run_window(const ari::HostOptions &o) {
     touch.update();
     if (!sdl.attached())
       sdl.attach(view.renderWindow()); // once VTK has made its window
-    for (const cvc::gl::InputEvent &e : sdl.poll())
+    // What ImGui takes -- the keys typed into a field, a click on a window -- is not the
+    // document's. A release always is, so nothing the document saw go down stays held.
+    for (const cvc::gl::InputEvent &e : sdl.poll()) {
+      using K = cvc::gl::InputEvent::Kind;
+      if ((e.kind == K::KeyDown && ui.wantsKeyboard()) ||
+          ((e.kind == K::MouseMove || e.kind == K::MouseButtonDown || e.kind == K::MouseWheel) &&
+           ui.wantsMouse()))
+        continue;
       rt.post_input(to_ari(e));
+    }
     for (std::string sig = ari::take_trapped_signal(); !sig.empty();
          sig = ari::take_trapped_signal())
       if (!rt.post_signal(sig, "os")) { // no on_signal: the host's default is to stop
