@@ -2091,6 +2091,10 @@ std::size_t state_transport_ws::broadcast_snapshot() {
           const snapshot_entry &e = ss.entries[i];
           if (!view.deliver(e.path))
             continue;
+          // Never a peer's own value back to it: the peer is its source, and our copy can be
+          // older than what it holds (state_inbound_gate::sources).
+          if (c->gate && pid && c->gate->sources(*pid, e.path))
+            continue;
           // Keyed by path alone, as the receiver applies every entry to every shard it has.
           auto [it, fresh] = c->held.try_emplace(e.path);
           it->second.round = round;

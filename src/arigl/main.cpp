@@ -320,6 +320,7 @@ struct ConferenceSession {
   cvc::gl::CameraController *cam_ = nullptr;
   cvc::ariadne::avatar_intent last_intent_; // the intent our avatar runs on (predicted with)
   cvc::ariadne::avatar_intent last_user_;   // what the keys + facing asked for last frame
+  std::uint64_t proposed_tick_ = 0;         // the stamp of our last proposal (propose_intent)
   std::vector<std::string> drawn_pids_;     // avatars drawn at the last log (log on change)
   std::uint64_t logged_realigns_ = 0;       // holon clock re-alignments at the last log
   std::size_t logged_lod_builds_ = 0;       // LOD pyramid builds at the last log
@@ -798,12 +799,15 @@ struct ConferenceSession {
                             const cvc::ariadne::avatar_intent &b) {
       return a.move.x != b.move.x || a.move.y != b.move.y || a.move.z != b.move.z || a.yaw != b.yaw;
     };
+    // An intent in the tree stamped before our last proposal is an echo of an earlier one (the
+    // relay's re-broadcast can carry it back after the newer write left): not ours any more.
     if (differs(in, last_user_)) {
-      cvc::ariadne::propose_intent(*holon_, *app_, room_, pid_, in);
+      proposed_tick_ = cvc::ariadne::propose_intent(*holon_, *app_, room_, pid_, in);
       last_intent_ = in;
       last_user_ = in;
     } else if (cvc::ariadne::avatar_intent tree;
-               cvc::ariadne::read_intent(*app_, room_, pid_, tree) && differs(tree, last_intent_)) {
+               cvc::ariadne::read_current_intent(*app_, room_, pid_, proposed_tick_, tree) &&
+               differs(tree, last_intent_)) {
       last_intent_ = tree;
     }
     // Re-assert it locally every frame: our avatar joins the holon only once our room-join is in

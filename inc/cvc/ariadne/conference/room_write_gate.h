@@ -54,6 +54,9 @@ public:
 
   bool admit(const std::string &node_id, const cvc::state_mutation &m) const override;
   bool admit(const std::string &node_id, const cvc::state_message &m) const override;
+  // A participant is the source of every value it may write (its participant subtree minus the
+  // relay's keys), so the relay's re-broadcast never sends those back to it.
+  bool sources(const std::string &node_id, const std::string &path) const override;
 
 private:
   bool own_path(const std::string &pid, const std::string &path) const;
