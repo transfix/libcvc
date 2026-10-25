@@ -17,7 +17,8 @@ crashes only now and then; the stash checks fail every time. Also: a scene added
 ViewportManager lives as long as the manager, not as long as the Viewport proxy addSceneViewport
 returned (on that proxy, dropping it freed the scene under the manager).
 
-StageLighting is headless; the rest need an offscreen GL context and skip without one.
+StageLighting is headless; the rest need an offscreen GL context and skip without one
+(fail, with CVC_REQUIRE_RENDER=1).
 Runs under pytest or as a plain script (ctest: pycvc_gl_keepalive).
 """
 
@@ -41,12 +42,19 @@ def _scene(name):
     return sg
 
 
+def _no_gl(e):
+    """Skip (printing why) without a GL context; under CVC_REQUIRE_RENDER, fail instead."""
+    if os.environ.get("CVC_REQUIRE_RENDER", "0") not in ("", "0"):
+        raise AssertionError("no offscreen GL under CVC_REQUIRE_RENDER") from e
+    print("  skip: no offscreen GL (%s)" % e)
+
+
 def _viewer(sg):
-    """An offscreen SceneRenderer over sg, or None (printing why) without a GL context."""
+    """An offscreen SceneRenderer over sg, or None without a GL context (see _no_gl)."""
     try:
         return pycvc_gl.SceneRenderer(sg, 64, 48, True, "keepalive")
     except Exception as e:  # noqa: BLE001 -- no offscreen GL context here
-        print("  skip: no offscreen GL (%s)" % e)
+        _no_gl(e)
         return None
 
 
@@ -103,7 +111,7 @@ def test_viewport_manager():
         try:
             vm = pycvc_gl.ViewportManager(sg, 64, 48, True, "main")
         except Exception as e:  # noqa: BLE001 -- no offscreen GL context here
-            print("  skip: no offscreen GL (%s)" % e)
+            _no_gl(e)
             return None
         vp = vm.addSceneViewport("inset", inset, REGION, 1)
         vm.render()
@@ -122,7 +130,7 @@ def test_added_scene_lives_as_long_as_the_manager():
     try:
         vm = pycvc_gl.ViewportManager(sg, 64, 48, True, "main")
     except Exception as e:  # noqa: BLE001 -- no offscreen GL context here
-        print("  skip: no offscreen GL (%s)" % e)
+        _no_gl(e)
         return
     # Neither the scene nor the Viewport proxy is kept: the manager alone holds the scene.
     vm.addSceneViewport("inset", _scene("ka_inset2"), REGION, 1)
@@ -140,7 +148,7 @@ def test_a_reference_proxy_is_stashed_whole():
     try:
         vm = pycvc_gl.ViewportManager(sg, 64, 48, True, "main")
     except Exception as e:  # noqa: BLE001 -- no offscreen GL context here
-        print("  skip: no offscreen GL (%s)" % e)
+        _no_gl(e)
         return
     cam = vm.primary().camera()
     assert not cam.thisown and pycvc._keepalive(cam) is cam

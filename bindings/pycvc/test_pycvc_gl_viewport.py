@@ -9,7 +9,7 @@ region tuples, and frameRGB bytes. Uses make_app() (no singleton crosses the
 boundary).
 
 Offscreen construction needs a GL driver; where none is available the whole test
-SKIPs cleanly rather than failing.
+SKIPs cleanly rather than failing (unless CVC_REQUIRE_RENDER=1).
 """
 
 import os
@@ -48,6 +48,10 @@ print("A. construct a ViewportManager (offscreen) with an auto primary")
 try:
     vm = VM(main_scene, W, H, True, "main")
 except Exception as e:  # no GL context available in this environment
+    if os.environ.get("CVC_REQUIRE_RENDER", "0") not in ("", "0"):
+        print("FAIL: ViewportManager found no GL driver under CVC_REQUIRE_RENDER — %s" % e)
+        sys.stdout.flush()
+        os._exit(1)
     print("SKIP: ViewportManager needs a GL driver — %s" % e)
     sys.stdout.flush()
     os._exit(0)

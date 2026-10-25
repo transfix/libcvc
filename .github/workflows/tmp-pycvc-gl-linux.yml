@@ -1,0 +1,184 @@
+# TEMPORARY: iterates on ci.yml's pycvc-linux job without running the whole CI.
+# Deleted before the PR opens.
+name: tmp pycvc-gl linux
+
+on:
+  push:
+    branches: [ci/pycvc-gl-linux]
+
+jobs:
+  pycvc-linux:
+    runs-on: ubuntu-latest
+    name: pycvc-linux / cp312
+    concurrency:
+      group: ci-${{ github.ref }}-pycvc-linux
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch libcvc-deps
+        id: libcvc-deps
+        uses: ./.github/actions/fetch-libcvc-deps
+        with:
+          build_type: Release
+          link: shared
+
+      - name: Install build tools (cvcpkg)
+        uses: ./.github/actions/cvcpkg-build-tools
+
+      # Its own prefix: the interpreter bundle carries its own copies of zlib,
+      # openssl and friends, which must not shadow the deps bundle's.
+      - name: Install Python, numpy and SWIG (cvcpkg)
+        shell: bash
+        run: |
+          set -euo pipefail
+          py_prefix="$RUNNER_TEMP/py312"
+          cvcpkg install python312 numpy-cp312 swig --prefix "$py_prefix" --config release --link shared
+          "$py_prefix/bin/python3.12" -c "import numpy, sys; print(sys.version, 'numpy', numpy.__version__)"
+          "$py_prefix/bin/swig" -version | head -3
+          echo "PY_PREFIX=$py_prefix" >> "$GITHUB_ENV"
+
+      # cvcGL needs VTK, and xorgproto for the FindX11 that its find_package(VTK)
+      # re-runs; imgui makes ImGuiOverlay real rather than an inert stub. See the
+      # VTK step in package-linux.
+      - name: Install VTK and imgui for cvcGL (cvcpkg)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${{ steps.libcvc-deps.outputs.path }}" ]; then
+            deps="${{ steps.libcvc-deps.outputs.path }}"
+          else
+            deps="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
+          fi
+          cvcpkg install vtk xorgproto imgui --prefix "$deps" --config release --link shared
+
+      - name: Configure
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${{ steps.libcvc-deps.outputs.path }}" ]; then
+            deps="${{ steps.libcvc-deps.outputs.path }}"
+          else
+            deps="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
+          fi
+          echo "DEPS_PREFIX=$deps" >> "$GITHUB_ENV"
+          # The pycvc tests capture LD_LIBRARY_PATH when they are configured, and
+          # the prefix interpreter needs its own lib/ (it is not run through an
+          # activate script), so set it before cmake runs.
+          export LD_LIBRARY_PATH="$deps/lib:$PY_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$deps;$PY_PREFIX" \
+            -DCVC_BUILD_TESTS=ON \
+            -DCVC_BUILD_CVCGL=ON \
+            -DCVC_ENABLE_CUDA=OFF \
+            -DCVC_BUILD_PYCVC=ON \
+            -DCVC_BUILD_PYCVC_GL=ON \
+            -DCVC_PYCVCGL_VTK_BRIDGE=OFF \
+            -DPython3_EXECUTABLE="$PY_PREFIX/bin/python3.12" \
+            -DSWIG_EXECUTABLE="$PY_PREFIX/bin/swig"
+
+      # The modules, the pycvc_gl package layout its tests import from, and the
+      # C++ reference test_pycvc_physics.py compares against (physics_parity_test,
+      # which ctest hands it in CVC_PHYSICS_PARITY_EXE).
+      - name: Build
+        run: cmake --build build --parallel --target pycvc pycvc_gl pycvc_gl_pkg physics_parity_test
+
+      # ── a headless software GL for the pycvc_gl tests ──
+      # cvcpkg's mesa: llvmpipe behind EGL (libEGL_mesa.so.0, found by the vtk
+      # bundle's libglvnd through its relocatable vendor dir). VTK picks its
+      # render window at run time, and VTK_DEFAULT_OPENGL_WINDOW makes that EGL,
+      # so nothing probes for an X display. Installed after the build, as in
+      # package-linux, so mesa's llvm20 runtime cannot reach the configure or link.
+      #
+      # The pycvc_gl tests skip their render parts without a GL context, and a
+      # broken GL here would turn the job into a quiet run of skips.
+      # CVC_REQUIRE_RENDER=1 makes each of them fail instead.
+      - name: Software EGL for the pycvc_gl tests (cvcpkg)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cvcpkg install mesa --prefix "$DEPS_PREFIX" --config release --link shared
+          {
+            echo "VTK_DEFAULT_OPENGL_WINDOW=vtkEGLRenderWindow"
+            echo "LIBGL_ALWAYS_SOFTWARE=1"
+            echo "GALLIUM_DRIVER=llvmpipe"
+            echo "CVC_REQUIRE_RENDER=1"
+          } >> "$GITHUB_ENV"
+
+      - name: Run the pycvc tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          n=$(ctest --test-dir build -N -R '^pycvc_' | grep -c 'Test *#[0-9]*: pycvc_' || true)
+          n_gl=$(ctest --test-dir build -N -R '^pycvc_gl_' | grep -c 'Test *#[0-9]*: pycvc_gl_' || true)
+          echo "pycvc tests registered with ctest: $n ($n_gl pycvc_gl_*)"
+          if [ "$n" -eq 0 ] || [ "$n_gl" -eq 0 ]; then
+            echo "::error::pycvc and pycvc_gl were built, but their tests did not all reach CTestTestfile.cmake."
+            exit 1
+          fi
+          ctest --test-dir build -R '^pycvc_' --output-on-failure --timeout 1200
+
+      # --output-on-failure hides a passing test's output, and with it whatever it
+      # skipped. Print every skip line from LastTest.log, so what is left skipping
+      # (a build option this job leaves off, such as the VTK-Python bridge) shows.
+      - name: What the pycvc tests skipped
+        if: always()
+        shell: bash
+        run: |
+          log=build/Testing/Temporary/LastTest.log
+          [ -f "$log" ] || { echo "no $log"; exit 0; }
+          awk '/^[0-9]+\/[0-9]+ Testing: / { t = $3 }
+               /^[0-9]+\/[0-9]+ Test: / { t = $3 }
+               tolower($0) ~ /(^|[^a-z])skip([^a-z]|$)/ { print t ": " $0; n++ }
+               END { if (!n) print "no skips" }' "$log"
+
+      # Do the trailing os._exit calls still matter? Run the scripts with a normal exit,
+      # 20 times each, with a native backtrace on SIGABRT/SIGSEGV.
+      - name: "Experiment: the pycvc_gl scripts without os._exit"
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -uo pipefail
+          command -v gdb || echo "no gdb on the runner"
+          cat > "$RUNNER_TEMP/bt.c" <<'C'
+          #include <execinfo.h>
+          #include <signal.h>
+          #include <string.h>
+          #include <unistd.h>
+          static void on_signal(int sig) {
+            void *b[128];
+            int n = backtrace(b, 128);
+            const char *m = "\n== native backtrace ==\n";
+            write(2, m, strlen(m));
+            backtrace_symbols_fd(b, n, 2);
+            signal(sig, SIG_DFL);
+            raise(sig);
+          }
+          __attribute__((constructor)) static void install(void) {
+            signal(SIGABRT, on_signal);
+            signal(SIGSEGV, on_signal);
+          }
+          C
+          gcc -shared -fPIC -o "$RUNNER_TEMP/libbt.so" "$RUNNER_TEMP/bt.c"
+          cd bindings/pycvc
+          sed -i 's/^os\._exit(1 if fails else 0)$/sys.exit(1 if fails else 0)/' \
+            test_pycvc_gl_camera.py test_pycvc_gl_imgui.py test_pycvc_gl_viewport.py test_pycvc_gl_chase_parity.py
+          sed -i 's/^    os\._exit(0)$/    sys.exit(0)/' test_pycvc_gl_keepalive.py
+          git diff --stat
+          cd "$GITHUB_WORKSPACE"
+          export PYTHONFAULTHANDLER=1 LD_PRELOAD="$RUNNER_TEMP/libbt.so"
+          fails=0
+          for i in $(seq 1 20); do
+            out=$(ctest --test-dir build -R '^pycvc_gl_(camera|imgui|viewport|chase_parity|keepalive)$' \
+                  --output-on-failure --timeout 300 2>&1)
+            rc=$?
+            echo "run $i: rc=$rc $(echo "$out" | grep -E 'tests passed|tests failed')"
+            if [ $rc -ne 0 ]; then
+              fails=$((fails + 1))
+              echo "$out"
+            fi
+          done
+          echo "runs with a failure: $fails / 20"

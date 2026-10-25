@@ -144,7 +144,10 @@ try:
     ov.attachCamera(pycvc_gl.CameraController(view))
     check("attachCamera stashes keepalive", getattr(ov, "_pycvc_camera", None) is not None)
 except Exception as e:  # noqa: BLE001 — offscreen GL may be unavailable
-    print("  [SKIP] ImGuiOverlay offscreen path (GL unavailable): %s" % e)
+    if os.environ.get("CVC_REQUIRE_RENDER", "0") not in ("", "0"):
+        check("offscreen GL available (CVC_REQUIRE_RENDER): %s" % e, False)
+    else:
+        print("  [SKIP] ImGuiOverlay offscreen path (GL unavailable): %s" % e)
 
 print("\n%s (%d failures)" % ("ALL PASS" if fails == 0 else "FAILED", fails))
 
