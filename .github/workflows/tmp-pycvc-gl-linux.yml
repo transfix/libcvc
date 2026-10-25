@@ -91,6 +91,10 @@ jobs:
       # render window at run time, and VTK_DEFAULT_OPENGL_WINDOW makes that EGL,
       # so nothing probes for an X display. Installed after the build, as in
       # package-linux, so mesa's llvm20 runtime cannot reach the configure or link.
+      # Without LD_LIBRARY_PATH: mesa's closure rewrites libraries the deps prefix
+      # already has (zlib), and cvcpkg's own Python must not have them loaded from
+      # there while it does. With them loaded, the install died of SIGBUS halfway
+      # through libz.so.1 and left it truncated.
       #
       # The pycvc_gl tests skip their render parts without a GL context, and a
       # broken GL here would turn the job into a quiet run of skips.
@@ -99,7 +103,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cvcpkg install mesa --prefix "$DEPS_PREFIX" --config release --link shared
+          env -u LD_LIBRARY_PATH cvcpkg install mesa --prefix "$DEPS_PREFIX" --config release --link shared
           {
             echo "VTK_DEFAULT_OPENGL_WINDOW=vtkEGLRenderWindow"
             echo "LIBGL_ALWAYS_SOFTWARE=1"
@@ -162,7 +166,7 @@ jobs:
             signal(SIGSEGV, on_signal);
           }
           C
-          gcc -shared -fPIC -o "$RUNNER_TEMP/libbt.so" "$RUNNER_TEMP/bt.c"
+          env -u LD_LIBRARY_PATH gcc -shared -fPIC -o "$RUNNER_TEMP/libbt.so" "$RUNNER_TEMP/bt.c"
           cd bindings/pycvc
           sed -i 's/^os\._exit(1 if fails else 0)$/sys.exit(1 if fails else 0)/' \
             test_pycvc_gl_camera.py test_pycvc_gl_imgui.py test_pycvc_gl_viewport.py test_pycvc_gl_chase_parity.py
