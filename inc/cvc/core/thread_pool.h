@@ -34,6 +34,35 @@
 
 namespace cvc {
 
+// What a fan-out carries from the thread that starts it onto the workers that run its
+// chunks. state_exec's async calls install one while a kernel runs, so the CPU time its
+// parallel_for chunks use is charged to the calling process and the process's allocation
+// limit holds in them too (docs/STATE_EXEC_EXCEPTIONS.md 3.8). The thread that starts the
+// fan-out runs chunks as well; those count as its own work, outside run_chunks.
+class fanout_context {
+public:
+  virtual ~fanout_context() = default;
+  // Run `chunks`, a worker's share of the fan-out, on that worker. It must call `chunks`
+  // exactly once, which never throws.
+  virtual void run_chunks(const std::function<void()> &chunks) noexcept = 0;
+};
+
+// The context this thread's fan-outs carry (null: none). A worker running chunks under a
+// context has it as its own, so a fan-out nested in a chunk carries it too.
+fanout_context *current_fanout_context();
+
+// RAII: this thread's fan-outs carry `ctx` while the scope lives; the previous one after.
+class fanout_context_scope {
+public:
+  explicit fanout_context_scope(fanout_context *ctx);
+  ~fanout_context_scope();
+  fanout_context_scope(const fanout_context_scope &) = delete;
+  fanout_context_scope &operator=(const fanout_context_scope &) = delete;
+
+private:
+  fanout_context *outer_;
+};
+
 // A persistent-worker thread pool for fork-join data parallelism.
 //
 // Spawning a fresh std::thread for every parallel region (the pattern in
@@ -106,6 +135,7 @@ private:
     std::atomic<bool> aborted{false}; // a task threw; remaining indices drain without running fn
     std::exception_ptr eptr;          // first exception thrown by any task (guarded by emtx)
     std::mutex emtx;                  // guards eptr's one-time set
+    fanout_context *ctx = nullptr;    // the poster's context: workers run their chunks under it
   };
 
   // Claim and run indices from `j` on the calling thread until the cursor drains.

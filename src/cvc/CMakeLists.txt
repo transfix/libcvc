@@ -116,6 +116,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/state/state_exec/memory_tracker.h
   ../../inc/cvc/state/state_exec/scheduler_base.h
   ../../inc/cvc/state/state_exec/scheduler.h
+  ../../inc/cvc/state/state_exec/async_call.h
+  ../../inc/cvc/state/state_exec/async_host.h
   ../../inc/cvc/state/state_exec/async_scheduler.h
   ../../inc/cvc/state/state_exec/intrinsics.h
   ../../inc/cvc/state/state_exec/resource_policy.h
@@ -256,6 +258,7 @@ set(SOURCE_FILES
   state/state_exec/process.cpp
   state/state_exec/memory_tracker.cpp
   state/state_exec/scheduler.cpp
+  state/state_exec/async_host.cpp
   state/state_exec/async_scheduler.cpp
   state/state_exec/intrinsics.cpp
   state/state_exec/resource_policy.cpp
@@ -1069,6 +1072,23 @@ if(CVC_ENABLE_IMAGEMAGICK)
                      "${ImageMagick_INCLUDE_DIR}")
     endif()
   endif()
+  # Without a pkg-config answer (an emcmake configure: the Emscripten toolchain pins
+  # PKG_CONFIG_LIBDIR to its own sysroot) the Q16 / HDRI=0 defaults above stand, but
+  # the cvcpkg static build is libMagickCore-7.Q16HDRI, and ImageMagick's headers take
+  # MAGICKCORE_HDRI_ENABLE from the compile line alone: HDRI=0 compiled cvc against an
+  # integer Quantum while the library uses float. The library name carries the ABI
+  # (Q<depth>[HDRI]), so read it from there.
+  if(ImageMagick_FOUND AND NOT WIN32 AND NOT IMAGEMAGICK_PC_FOUND)
+    get_filename_component(_im_core_name "${ImageMagick_MagickCore_LIBRARY}" NAME)
+    if(_im_core_name MATCHES "MagickCore-[0-9]+\\.Q([0-9]+)(HDRI)?")
+      set(CVC_IMAGEMAGICK_QUANTUM_DEPTH "${CMAKE_MATCH_1}")
+      if(CMAKE_MATCH_2)
+        set(CVC_IMAGEMAGICK_HDRI_ENABLE 1)
+      else()
+        set(CVC_IMAGEMAGICK_HDRI_ENABLE 0)
+      endif()
+    endif()
+  endif()
   if(ImageMagick_FOUND)
     message(STATUS "ImageMagick found: ${ImageMagick_INCLUDE_DIRS} "
                    "(Q${CVC_IMAGEMAGICK_QUANTUM_DEPTH}, "
@@ -1078,6 +1098,9 @@ if(CVC_ENABLE_IMAGEMAGICK)
     set(CVC_ENABLE_IMAGEMAGICK OFF)
   endif()
 endif()
+# What the configure ended up with, for build scripts that must not ship without it
+# (examples/web/build-wasm-demo.sh, the pycvc-gl wasm recipe read it from CMakeCache.txt).
+set(CVC_IMAGEMAGICK_ENABLED ${CVC_ENABLE_IMAGEMAGICK} CACHE INTERNAL "libcvc links ImageMagick")
 
 # Assimp support (for native mesh/model import - cvc::model / read_geometry)
 option(CVC_ENABLE_ASSIMP "Enable Assimp for native mesh/model import" ON)
@@ -2064,7 +2087,21 @@ if(CVC_ENABLE_IMAGEMAGICK)
   # Gate on _cvc_im_rawlibs (set above when we took the raw-libs path), NOT on the
   # target existence — we just synthesised ImageMagick::Magick++/::MagickCore, so a
   # TARGET check would now wrongly skip the delegate closure the raw-libs path needs.
-  if(_cvc_im_rawlibs)
+  #
+  # A STATIC MagickCore needs the closure whichever tier found it. CMake >= 3.26's
+  # stock FindImageMagick creates delegate-less ImageMagick::* targets of its own
+  # whenever pkg-config can see MagickCore.pc, and a cvcpkg build env exports
+  # CMAKE_PREFIX_PATH, which FindPkgConfig turns into a pkg-config search path even
+  # under emcmake. A wasm build then took the stock tier, skipped this loop, and every
+  # executable linking the static cvc died in wasm-ld on MagickCore's undefined
+  # BZ2_* / lzma_* / xml* symbols (why the wasm gallery and pycvc-gl recipes built
+  # with ImageMagick OFF). cvcConfig.cmake.in gates its consumer-side copy of this
+  # closure the same way.
+  set(_cvc_im_static FALSE)
+  if(EMSCRIPTEN OR ImageMagick_MagickCore_LIBRARY MATCHES "MagickCore[^/]*\\.a$")
+    set(_cvc_im_static TRUE)
+  endif()
+  if(_cvc_im_rawlibs OR _cvc_im_static)
     # Prefer pkg-config (has the exact link line for a hermetic delegate), but
     # in cross-compile (emcmake) it isn't always available / correctly rooted,
     # so fall back to find_library — which DOES honor CMAKE_FIND_ROOT_PATH.
@@ -2088,7 +2125,10 @@ if(CVC_ENABLE_IMAGEMAGICK)
         "liblzma|lzma"
         "lerc|Lerc"
         "libbrotlidec|brotlidec"
-        "libbrotlicommon|brotlicommon")
+        "libbrotlicommon|brotlicommon"
+        # MagickCore's own gz* blob I/O and libpng's inflate. Usually already on
+        # the line through assimp, but the closure should not depend on that.
+        "zlib|z")
       string(REPLACE "|" ";" _p "${_pair}")
       list(GET _p 0 _pcmod)
       list(GET _p 1 _libname)
@@ -2411,4 +2451,20 @@ if(CVC_BUILD_TESTS)
 elseif(CVC_BUILD_PHYSICS_REPLAY)
   add_executable(physics_replay_test tests/physics_replay.cpp)
   cvc_setup_physics_replay(physics_replay_test)
+endif()
+
+# image_magick_roundtrip_test, the wasm ImageMagick gate: the coders behind every extension
+# magick_image_io claims, and TIFF / WEBP round trips that only Magick can do. A plain main()
+# for the same reason as physics_replay_test; node runs it (`node
+# image_magick_roundtrip_test.js`, ci.yml's ari-wasm job). Natively, image_test covers this.
+option(CVC_BUILD_IMAGE_MAGICK_ROUNDTRIP "Build image_magick_roundtrip_test (the wasm ImageMagick run-time gate)" OFF)
+if(CVC_BUILD_IMAGE_MAGICK_ROUNDTRIP)
+  add_executable(image_magick_roundtrip_test tests/image_magick_roundtrip.cpp)
+  target_link_libraries(image_magick_roundtrip_test PRIVATE cvc)
+  target_compile_features(image_magick_roundtrip_test PRIVATE cxx_std_17)
+  if(EMSCRIPTEN)
+    # The process exits with main's status; the images go through MEMFS's /tmp.
+    target_link_options(image_magick_roundtrip_test PRIVATE -sEXIT_RUNTIME=1
+      -sALLOW_MEMORY_GROWTH=1 -sSTACK_SIZE=2mb)
+  endif()
 endif()

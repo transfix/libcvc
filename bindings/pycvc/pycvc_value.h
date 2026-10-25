@@ -19,6 +19,8 @@
 // wrapper (pycvc.i), which owns the pycvc.symbol / pycvc.value types. Call with the GIL held.
 #pragma once
 
+#include <cvc/state/state_exec/async_call.h> // async_marshal
+#include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/types.h>
 #include <memory>
 #include <span>
@@ -48,6 +50,13 @@ bool py_to_value(PyObject *o, cvc::state_exec::value_t &out);
 cvc::state_exec::native_fn python_native_fn(const std::string &who, const std::string &name,
                                             PyObject *callable);
 
+/// An async function's marshal step (register_async_fn) whose kernel calls `callable` on its
+/// executor thread, taking the GIL for the call (the wait for it isn't charged to the process). A
+/// Python exception raises at the call as a PythonError naming `name`. Throws
+/// std::invalid_argument, prefixed with `who`, when `callable` isn't callable or is an async def.
+cvc::state_exec::async_marshal python_async_marshal(const std::string &who, const std::string &name,
+                                                    PyObject *callable);
+
 /// An execute_options::on_complete that calls `callable` with the process's result and ignores
 /// what it returns. A Python exception becomes a C++ error, thrown from the scheduler call that
 /// finished the process. It keeps the callable, so pycvc can hand it back.
@@ -62,5 +71,23 @@ python_on_complete make_python_on_complete(PyObject *callable);
 /// A shared owner of a new reference to `o`. The last owner to let go drops the reference under
 /// the GIL, so C++ can keep a Python object alive from any thread.
 std::shared_ptr<PyObject> python_ref(PyObject *o);
+
+/// A registered Python function's exception, crossing the DSL (docs/STATE_EXEC_EXCEPTIONS.md,
+/// PY): a PythonError with origin "python" and `python_type` (the exception's type, qualified
+/// unless it is a builtin). It keeps the Python exception, which pycvc re-raises when the DSL
+/// exception comes back to Python unhandled, with a pycvc.dsl_error as its __cause__.
+class python_exception : public cvc::state_exec::dsl_error {
+public:
+  python_exception(const std::string &message, const std::string &python_type,
+                   std::shared_ptr<PyObject> exception)
+      : dsl_error("PythonError", message, "python",
+                  {{"python_type", cvc::state_exec::value_t(python_type)}}),
+        exception_(std::move(exception)) {}
+  /// The Python exception (borrowed), or null.
+  PyObject *exception() const noexcept { return exception_.get(); }
+
+private:
+  std::shared_ptr<PyObject> exception_;
+};
 
 } // namespace pycvc

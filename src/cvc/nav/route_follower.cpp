@@ -114,14 +114,16 @@ void route_follower::apply() {
   const double max_steer = _o.max_steer > 0.0 ? _o.max_steer : cfg.veh.delta_max;
   const auto to_norm_x = [&](double x) { return static_cast<float>((x - cfg.cx) * scale); };
   const auto to_norm_y = [&](double y) { return static_cast<float>((y - cfg.cy) * scale); };
-  // Line of sight on the sim's own map (its belief plane 0), between world points.
-  const std::uint8_t *occ = _sim.belief_occ(0);
+  // Line of sight on agent i's own map (its belief plane, agent_planes()[i]), between world
+  // points: with a plane per vehicle (a second convoy), plane 0 is another vehicle's map.
+  const int *planes = _sim.agent_planes();
   const double cdx = (cfg.max_x - cfg.min_x) / std::max(1, cfg.cols - 1),
                cdy = (cfg.max_y - cfg.min_y) / std::max(1, cfg.rows - 1);
   const auto cell = [&](double v, double lo, double d, int n) {
     return std::min(std::max(static_cast<int>(std::lround((v - lo) / d)), 0), n - 1);
   };
-  const auto visible = [&](double ax, double ay, double bx, double by) {
+  const auto visible = [&](int i, double ax, double ay, double bx, double by) {
+    const std::uint8_t *occ = _sim.belief_occ(planes ? planes[i] : 0);
     if (!occ)
       return true;
     return line_of_sight(occ, cfg.rows, cfg.cols, cell(ay, cfg.min_y, cdy, cfg.rows),
@@ -181,9 +183,13 @@ void route_follower::apply() {
     if (last && gear > 0) {
       // The trained drive's leg: a carrot along the route, and the drive parks at its end.
       // The carrot sits beyond the drive's reach_tol (or it parks at once), and the leg is done
-      // where the drive parks.
+      // where the drive parks. By default it is 3 reach_tol along the route: a carrot 2 reach_tol
+      // along it is nearer than that in a straight line on any bend (a chord is shorter than its
+      // arc), so the visible carrot below fell under 2 reach_tol and the stretch was taken by pure
+      // pursuit at pursuit_speed.
       const double reach = cfg.reach_tol / scale;
-      const double look = std::max(_o.lookahead > 0.0 ? _o.lookahead : 3.0 * step, 2.0 * reach);
+      const double look = std::max(
+          _o.lookahead > 0.0 ? _o.lookahead : std::max(3.0 * step, 3.0 * reach), 2.0 * reach);
       const int ahead = std::max(1, static_cast<int>(std::lround(look / step)));
       if (dist(x, y, p[e].x, p[e].y) <= std::max(tol, reach)) {
         a.done = true;
@@ -192,9 +198,9 @@ void route_follower::apply() {
       // The farthest pose within the lookahead the agent can see: the drive heads straight
       // for its carrot, so one behind a corner would stall it against the building.
       if (a.carrot < 0 || (a.carrot < e && 2 * (a.carrot - a.progress) <= ahead) ||
-          !visible(x, y, p[a.carrot].x, p[a.carrot].y)) {
+          !visible(i, x, y, p[a.carrot].x, p[a.carrot].y)) {
         int c = std::min(e, a.progress + ahead);
-        while (c > a.progress + 1 && !visible(x, y, p[c].x, p[c].y))
+        while (c > a.progress + 1 && !visible(i, x, y, p[c].x, p[c].y))
           --c;
         if (c < e && dist(x, y, p[c].x, p[c].y) < 2.0 * reach) {
           // It cannot see past the drive's reach (a tight corner, a wall alongside): the drive

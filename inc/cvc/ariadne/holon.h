@@ -277,8 +277,8 @@ private:
     bool local = false;
     // CLIENT: its pose is real (added with one, or a sample has arrived); see add_participant.
     bool pose_known = true;
-    avatar_sim sim;             // server authoritative integrator
-    avatar_intent intent;       // latest intent (server input / client-local input)
+    avatar_sim sim;       // server authoritative integrator
+    avatar_intent intent; // latest intent (server input / client-local input)
     // SERVER: stamped intents waiting for their tick (queue_intent), in tick order.
     std::deque<std::pair<std::uint64_t, avatar_intent>> queued;
     bool have_stamp = false;      // a stamped intent has been queued (last_stamp is meaningful)
@@ -288,7 +288,7 @@ private:
     // a heartbeat), so a sample already seen must not count as a clock reading.
     bool have_seen = false;
     std::uint64_t last_seen = 0;
-    predicted_avatar predicted; // client-local prediction + reconcile
+    predicted_avatar predicted;                   // client-local prediction + reconcile
     cvc::physics::vec3 correction{0.0, 0.0, 0.0}; // reconcile jumps not yet taken
     // CLIENT-local: its state before the last quantum, so display_pose interpolates between the
     // last two quanta by alpha as a peer is (a frame that falls between quanta otherwise shows the

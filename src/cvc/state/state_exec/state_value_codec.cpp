@@ -7,10 +7,14 @@
 
 #include <algorithm>
 #include <charconv>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/parser.h>
 #include <cvc/state/state_exec/state_value_codec.h>
 #include <cvc/state/state_list.h>
+#include <iterator>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -635,8 +639,11 @@ void encode_leaf(cvc::state &node, const value_t &val) {
           set_type(node, "data_object");
           if (arg) {
             node("__data_type__").value(arg->type_name);
-            // The payload is boost::any — store it via state::data()
-            node.data(arg->payload);
+            // The payload is boost::any — store it via state::data(). A handle to an async call
+            // is the one exception: the call can't resume after a restore (3.9), so its handle
+            // decodes empty.
+            if (arg->type_name != detail::kAwaitableType)
+              node.data(arg->payload);
           }
         } else if constexpr (std::is_same_v<T, bytes_value>) {
           set_type(node, "bytes"); // SE-3: base64 so arbitrary octets survive text serialization
@@ -747,6 +754,8 @@ std::string phase_to_string(eval_phase p) {
     return "try_finally";
   case eval_phase::raise_value:
     return "raise_value";
+  case eval_phase::await_call:
+    return "await_call";
   }
   return "init";
 }
@@ -794,6 +803,8 @@ eval_phase string_to_phase(const std::string &s) {
     return eval_phase::try_finally;
   if (s == "raise_value")
     return eval_phase::raise_value;
+  if (s == "await_call")
+    return eval_phase::await_call;
   return eval_phase::init;
 }
 
@@ -1033,6 +1044,186 @@ evaluator_state decode_evaluator_state(cvc::state &node) {
   }
 
   return es;
+}
+
+// ---------------------------------------------------------------------------
+// encode_process / decode_process
+// ---------------------------------------------------------------------------
+
+namespace {
+std::string number_text(double d) {
+  char buf[32];
+  std::snprintf(buf, sizeof buf, "%.17g", d);
+  return buf;
+}
+
+std::string child_text(cvc::state &node, const char *key) {
+  return has_child(node, key) ? node(key).value() : std::string();
+}
+
+uint64_t child_u64(cvc::state &node, const char *key) {
+  const std::string v = child_text(node, key);
+  uint64_t n = 0;
+  const auto [end, ec] = std::from_chars(v.data(), v.data() + v.size(), n);
+  return ec == std::errc{} && end == v.data() + v.size() ? n : 0;
+}
+
+double child_double(cvc::state &node, const char *key) {
+  const std::string v = child_text(node, key);
+  if (v.empty())
+    return 0.0;
+  try {
+    return std::stod(v);
+  } catch (const std::exception &) {
+    return 0.0;
+  }
+}
+
+constexpr step_kind kStepKinds[] = {step_kind::eval, step_kind::read, step_kind::data,
+                                    step_kind::async};
+constexpr const char *kStepKindKeys[] = {"eval", "read", "data", "async"};
+} // namespace
+
+void rebind_natives(evaluator_state &st, const environment_ptr &natives) {
+  if (!natives)
+    return;
+  std::unordered_set<const environment *> done;
+  const auto rebind = [&](const environment_ptr &env) {
+    environment *outermost = env.get();
+    while (outermost && outermost->outer)
+      outermost = outermost->outer.get();
+    if (!outermost || outermost == natives.get() || !done.insert(outermost).second)
+      return;
+    for (const auto &[name, v] : natives->bindings)
+      if (std::holds_alternative<native_fn>(v.v) && !outermost->bindings.count(name))
+        outermost->bindings.emplace(name, v);
+    outermost->outer = natives->outer;
+  };
+  rebind(st.global_env);
+  for (const eval_frame &f : st.stack) {
+    rebind(f.env);
+    rebind(f.extra_env);
+  }
+}
+
+void encode_process(cvc::state &node, const process &proc) {
+  set_type(node, "process");
+  encode_evaluator_state(node("state"), proc.state);
+  node("name").value(proc.name);
+  node("status").value(std::string(to_string(proc.status)));
+  node("priority").value(std::to_string(proc.priority));
+  node("uid").value(proc.uid);
+  node("gid").value(proc.gid);
+  node("root_path").value(proc.root_path);
+  node("owner").value(proc.owner);
+  node("parent_pid").value(std::to_string(proc.parent_pid));
+
+  auto &limits = node("limits");
+  limits("max_steps").value(std::to_string(proc.max_steps));
+  limits("max_time").value(number_text(proc.max_time));
+  limits("max_step_time").value(number_text(proc.max_step_time));
+  limits("max_memory").value(std::to_string(proc.max_memory));
+  limits("max_messages").value(std::to_string(proc.max_messages));
+  limits("max_message_bytes").value(std::to_string(proc.max_message_bytes));
+  limits("max_alloc_bytes").value(std::to_string(proc.max_alloc_bytes));
+  limits("heap_check_steps").value(std::to_string(proc.heap_check_steps));
+  if (proc.async_steps_per_cpu_ms)
+    limits("async_steps_per_cpu_ms").value(number_text(*proc.async_steps_per_cpu_ms));
+
+  // What it has used: its budgets go on from here after a restore.
+  auto &used = node("used");
+  auto &steps = used("steps");
+  for (std::size_t k = 0; k < std::size(kStepKinds); ++k)
+    steps(kStepKindKeys[k]).value(std::to_string(proc.state.stats.steps(kStepKinds[k])));
+  used("accumulated_time").value(number_text(proc.accumulated_time));
+  used("cpu_time_charged").value(number_text(proc.cpu_time_charged));
+  used("message_count").value(std::to_string(proc.message_count));
+  used("message_bytes").value(std::to_string(proc.message_bytes));
+  used("heap_bytes").value(std::to_string(proc.heap_bytes));
+  used("heap_measurements").value(std::to_string(proc.heap_measurements));
+  used("async_calls").value(std::to_string(proc.async_calls));
+  used("async_time").value(number_text(proc.async_time));
+  used("async_cpu_time").value(number_text(proc.async_cpu_time));
+  used("async_steps").value(std::to_string(proc.async_steps));
+
+  if (!proc.signal_handlers.empty()) {
+    std::vector<std::pair<std::string, value_t>> handlers(proc.signal_handlers.begin(),
+                                                          proc.signal_handlers.end());
+    encode_value(node("signal_handlers"), make_dict(std::move(handlers)));
+  }
+  if (is_finished(proc.status)) {
+    encode_value(node("exit_code"), proc.exit_code);
+    if (proc.exit_error)
+      node("exit_error").value(*proc.exit_error);
+    if (proc.exit_exception)
+      encode_value(node("exit_exception"), *proc.exit_exception);
+  }
+}
+
+process_ptr decode_process(cvc::state &node) {
+  process_ptr proc = make_process();
+  proc->state = decode_evaluator_state(node("state"));
+  proc->name = child_text(node, "name");
+  proc->status = parse_process_status(child_text(node, "status"));
+  proc->priority = static_cast<int>(std::strtol(child_text(node, "priority").c_str(), nullptr, 10));
+  proc->uid = child_text(node, "uid");
+  proc->gid = child_text(node, "gid");
+  proc->root_path = child_text(node, "root_path");
+  proc->owner = child_text(node, "owner");
+  const std::string parent = child_text(node, "parent_pid");
+  proc->parent_pid =
+      parent.empty() ? -1 : static_cast<int>(std::strtol(parent.c_str(), nullptr, 10));
+
+  if (has_child(node, "limits")) {
+    auto &limits = node("limits");
+    proc->max_steps = child_u64(limits, "max_steps");
+    proc->max_time = child_double(limits, "max_time");
+    proc->max_step_time = child_double(limits, "max_step_time");
+    proc->max_memory = child_u64(limits, "max_memory");
+    proc->max_messages = child_u64(limits, "max_messages");
+    proc->max_message_bytes = child_u64(limits, "max_message_bytes");
+    if (has_child(limits, "max_alloc_bytes"))
+      proc->max_alloc_bytes = child_u64(limits, "max_alloc_bytes");
+    if (has_child(limits, "heap_check_steps"))
+      proc->heap_check_steps = static_cast<std::size_t>(child_u64(limits, "heap_check_steps"));
+    if (has_child(limits, "async_steps_per_cpu_ms"))
+      proc->async_steps_per_cpu_ms = child_double(limits, "async_steps_per_cpu_ms");
+  }
+
+  proc->state.stats.start();
+  if (has_child(node, "used")) {
+    auto &used = node("used");
+    if (has_child(used, "steps")) {
+      auto &steps = used("steps");
+      for (std::size_t k = 0; k < std::size(kStepKinds); ++k)
+        proc->state.stats.add_steps(kStepKinds[k], child_u64(steps, kStepKindKeys[k]));
+    }
+    proc->accumulated_time = child_double(used, "accumulated_time");
+    proc->cpu_time_charged = child_double(used, "cpu_time_charged");
+    proc->message_count = child_u64(used, "message_count");
+    proc->message_bytes = child_u64(used, "message_bytes");
+    proc->heap_bytes = child_u64(used, "heap_bytes");
+    proc->heap_measurements = child_u64(used, "heap_measurements");
+    proc->async_calls = child_u64(used, "async_calls");
+    proc->async_time = child_double(used, "async_time");
+    proc->async_cpu_time = child_double(used, "async_cpu_time");
+    proc->async_steps = child_u64(used, "async_steps");
+  }
+
+  if (has_child(node, "signal_handlers")) {
+    const value_t handlers = decode_value(node("signal_handlers"));
+    if (const auto *dp = std::get_if<dict_ptr>(&handlers.v); dp && *dp)
+      for (const auto &[sig, handler] : **dp)
+        proc->signal_handlers[sig] = handler;
+  }
+  if (has_child(node, "exit_code"))
+    proc->exit_code = decode_value(node("exit_code"));
+  if (has_child(node, "exit_error"))
+    proc->exit_error = node("exit_error").value();
+  if (has_child(node, "exit_exception"))
+    proc->exit_exception = decode_value(node("exit_exception"));
+  proc->create_time = std::chrono::steady_clock::now();
+  return proc;
 }
 
 } // namespace cvc::state_exec

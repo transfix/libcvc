@@ -78,6 +78,13 @@ const state_key_meta kVehicleKeys[] = {
     {"mu_lookahead", "knob", "m", 0, 40,
      "How far ahead the grip feature probes; must match the net's training."},
     {"mu_probes", "knob", "", 1, 8, "Probes along the grip feature's look-ahead."},
+    {"risk_governor", "knob", "", 0, 1,
+     "1: material risk (the worse of the material's and the terrain's) caps the speed."},
+    {"risk_vmin", "knob", "m/s", 0, 40, "The risk governor's speed at risk 1."},
+    {"risk_onset", "knob", "1", 0, 0.95, "The risk below which the governor does not slow."},
+    {"risk_lookahead", "knob", "m", 0, 80,
+     "How far ahead the risk governor probes, so the vehicle slows before it gets there."},
+    {"risk_probes", "knob", "", 1, 8, "Probes along the risk governor's look-ahead."},
 };
 
 // <prefix>.nav.material: the material force's weights.
@@ -269,6 +276,15 @@ void sim_world::pull(cvc::app &ctx, const std::string &prefix) {
     scaled("mass", v.mass, 1.0, positive);
     scaled("mu_lookahead", v.mu_lookahead, L, non_negative);
     r.read("mu_probes", v.mu_probes, whole, [&](double x) { v.mu_probes = static_cast<int>(x); });
+    r.read("risk_governor", b2d(v.risk_governor), flag,
+           [&](double x) { v.risk_governor = x != 0.0; });
+    scaled("risk_vmin", v.risk_vmin, L, non_negative);
+    r.read(
+        "risk_onset", v.risk_onset, [](double x) { return x >= 0.0 && x < 1.0; },
+        [&](double x) { v.risk_onset = static_cast<float>(x); });
+    scaled("risk_lookahead", v.risk_lookahead, L, non_negative);
+    r.read("risk_probes", v.risk_probes, whole,
+           [&](double x) { v.risk_probes = static_cast<int>(x); });
   }
   if (mat_on_) {
     const std::string mb = base + ".material";

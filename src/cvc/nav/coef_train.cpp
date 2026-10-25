@@ -74,6 +74,8 @@ void validate_dynamic(const train_config &c) {
 
 // w_energy > 0 needs the dynamic rollout and a power model of the same vehicle.
 void validate_energy(const train_config &c) {
+  if (!(std::isfinite(c.energy_ref) && c.energy_ref >= 0.0f))
+    throw std::invalid_argument("cvc::nav::coef_trainer: energy_ref must be finite and >= 0");
   if (c.w_energy == 0.0f)
     return;
   if (c.rollout != rollout_kind::dynamic)
@@ -360,9 +362,12 @@ double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_i
     validate_dynamic(cfg_);
   validate_energy(cfg_);
   const float rr = scene.rr, d_hat = scene.d_hat, vmax = scene.vmax, hdt = scene.dt;
-  // The energy term (P8c): each step's energy as a fraction of what full power draws over it.
+  // The energy term (P8c): each step's energy as a fraction of what full power draws over it;
+  // with energy_ref, only what the step's progress does not pay for (`priced`).
   const bool energy = dyn && cfg_.w_energy != 0.0f;
-  float e_scale = 0.0f, e_width = 0.0f;
+  const bool priced = energy && cfg_.energy_ref > 0.0f;
+  const float e_ref = cfg_.energy_ref;
+  float e_scale = 0.0f, e_width = 0.0f, x_width = 0.0f;
   if (energy) {
     const float full = diff::power_full(cfg_.power, cfg_.veh_a_max, vmax);
     if (!(full > 0.0f))
@@ -370,6 +375,7 @@ double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_i
                                   "draws power at full drive (power_full > 0)");
     e_scale = cfg_.w_energy / (static_cast<float>(window) * hdt * full);
     e_width = 1e-3f * full;
+    x_width = 1e-2f * full * hdt; // the hinge's: 1% of a full-power step
   }
   diff::bike_veh bv;
   bv.rr = rr;
@@ -492,10 +498,16 @@ double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_i
         ext[2] = s1.delta;
         ext[3] = s1.a;
         if (energy) {
-          float dvx, da, dr;
-          const float E =
-              diff::power_step(cfg_.power, s1.vx, s1.a, s1.r, hdt, e_width, dvx, da, dr);
-          total_loss += static_cast<double>(e_scale) * E * inv_n;
+          float gE[5];
+          const float E = diff::power_step_tire(cfg_.power, cfg_.dyn, s1.vx, s1.vy, s1.r, s1.delta,
+                                                s1.a, hdt, e_width, gE);
+          if (priced) {
+            const float prog = S.gd - std::hypot(s1.x - gx, s1.y - gy);
+            float dh;
+            total_loss += static_cast<double>(e_scale) *
+                          diff::power_softplus(E - e_ref * prog, x_width, dh) * inv_n;
+          } else
+            total_loss += static_cast<double>(e_scale) * E * inv_n;
         }
       } else if (bike)
         diff::bike_step(F, ox, oy, ax, ay, gx, gy, al, be, ga, bv, ox1, oy1, ax1, ay1);
@@ -544,6 +556,7 @@ double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_i
     for (int t = window - 1; t >= 0; --t) {
       Step &S = st[t];
       const float al = S.coef[0], be = S.coef[1], ga = S.coef[2];
+      float e_prog_t = 0.0f; // the priced energy term's gradient on |o_t - goal|
 
       // collision term at o_{t+1} = the recomputable step output; but we stored
       // only inputs, so recompute o_{t+1} via the step for its sample.
@@ -554,13 +567,31 @@ double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_i
                             bv, cfg_.dyn, 0.0f, s1);
         ox1 = s1.x;
         oy1 = s1.y;
-        if (energy) { // the energy term at the step's end state: on (vx, r, a)_{t+1}
-          float dvx, da, dr;
-          diff::power_step(cfg_.power, s1.vx, s1.a, s1.r, hdt, e_width, dvx, da, dr);
-          const float sc = e_scale * static_cast<float>(inv_n);
-          gaux_y += sc * dvx;
-          gext[1] += sc * dr;
-          gext[3] += sc * da;
+        if (energy) {  // the energy term at the step's end state: on (vx, vy, r, delta, a)_{t+1}
+          float gE[5]; // dE / d(vx, vy, r, delta, a)
+          const float E = diff::power_step_tire(cfg_.power, cfg_.dyn, s1.vx, s1.vy, s1.r, s1.delta,
+                                                s1.a, hdt, e_width, gE);
+          float sc = e_scale * static_cast<float>(inv_n);
+          if (priced) {
+            // d/dE of the hinge, and the progress's own: -e_ref d(prog), with d|o - g|/do =
+            // (o - g) / |o - g| at o_{t+1} (+) and o_t (-, after the step's reverse).
+            const float ex = s1.x - gx, ey = s1.y - gy;
+            const float g1 = std::hypot(ex, ey);
+            float dh;
+            diff::power_softplus(E - e_ref * (S.gd - g1), x_width, dh);
+            sc *= dh;
+            const float gp = sc * e_ref; // d(loss) / d|o_{t+1} - g|
+            if (g1 > 1e-9f) {
+              go_x += gp * ex / g1;
+              go_y += gp * ey / g1;
+            }
+            e_prog_t = -gp; // d(loss) / d|o_t - g|, taken below
+          }
+          gaux_y += sc * gE[0];
+          gext[0] += sc * gE[1];
+          gext[1] += sc * gE[2];
+          gext[2] += sc * gE[3];
+          gext[3] += sc * gE[4];
         }
       } else if (bike)
         diff::bike_step(F, S.ox, S.oy, S.auxx, S.auxy, gx, gy, al, be, ga, bv, ox1, oy1, ax1, ay1);
@@ -648,8 +679,9 @@ double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_i
       const float gcfnx = gfeat[4] * S.gdx, gcfny = gfeat[4] * S.gdy;
       const float gd_safe = S.gd > 1e-9f ? S.gd : 1e-9f;
       const float inv2 = S.inv * S.inv;
-      float g_dx = ggd * S.dx / gd_safe;
-      float g_dy = ggd * S.dy / gd_safe;
+      // |o_t - goal| = gd feeds the policy (ggd) and the priced energy term's progress.
+      float g_dx = (ggd + e_prog_t) * S.dx / gd_safe;
+      float g_dy = (ggd + e_prog_t) * S.dy / gd_safe;
       g_dx += ggdx * (S.inv - S.dx * S.dx * inv2 / gd_safe);
       g_dy += ggdx * (-S.dx * S.dy * inv2 / gd_safe);
       g_dy += ggdy * (S.inv - S.dy * S.dy * inv2 / gd_safe);

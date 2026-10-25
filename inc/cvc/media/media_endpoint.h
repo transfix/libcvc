@@ -67,7 +67,8 @@ public:
   // socket write). It never gates a node's OWN uplink (publish_media_frame). Setting it replaces
   // any previous gate; {} (the default) is today's full fan-out. Default: ignored (an endpoint
   // without per-receiver egress, e.g. a test fake).
-  using media_gate_fn = std::function<bool(const media_frame &f, const std::string &receiver_node_id)>;
+  using media_gate_fn =
+      std::function<bool(const media_frame &f, const std::string &receiver_node_id)>;
   virtual void set_media_gate(media_gate_fn gate) { (void)gate; }
 
   // Per-receiver egress SHAPE, asked after the gate admits a frame: send the frame as is, a

@@ -42,7 +42,7 @@ def _opts(**fields):
 
 def test_enums_are_int_enums_under_the_cpp_names():
     assert [m.name for m in process_status] == [
-        "ready", "running", "paused", "waiting", "terminated", "killed"]
+        "ready", "running", "paused", "waiting", "terminated", "killed", "failed"]
     assert [m.name for m in scheduling_policy] == ["round_robin", "priority", "priority_rr"]
     assert process_status.killed == 5  # an IntEnum, with the C++ values
     assert pycvc.to_string(process_status.waiting) == "waiting"
@@ -119,19 +119,24 @@ def test_builtins_and_register_fn():
     _raises(RuntimeError, pycvc.builtins.register_fn, env, "c", coro)
 
 
-def test_a_python_fn_error_surfaces_as_each_scheduler_reports_it():
+def test_a_python_fn_error_fails_the_process():
+    # docs/STATE_EXEC_EXCEPTIONS.md 2.6: an exception the program didn't catch ends its process
+    # `failed` on either scheduler, with the exception kept; run() doesn't raise it (the sync
+    # scheduler used to). raise_exit_exception() raises it, here the Python exception itself.
     env = pycvc.builtins.make_default_environment()
     pycvc.builtins.register_fn(env, "boom", lambda: 1 / 0)
-    # The sync scheduler throws from run(), as a throwing native fn does in C++.
-    s = pycvc.scheduler()
-    s.execute("(boom)", _opts(env=env))
-    assert "division by zero" in str(_raises(RuntimeError, s.run))
-    # The async scheduler kills the process and keeps the reason as its exit error.
+    for sched, run, _ in _schedulers():
+        pid = sched.execute("(boom)", _opts(env=env))
+        assert run() == {}
+        assert sched.get_process_info(pid).status is process_status.failed
+        assert sched.get_exit_error(pid).startswith("PythonError: ")
+        assert "division by zero" in sched.get_exit_error(pid)
+        assert sched.get_exit_exception(pid)["python_type"] == "ZeroDivisionError"
+        e = _raises(ZeroDivisionError, sched.raise_exit_exception, pid)
+        assert isinstance(e.__cause__, pycvc.dsl_error)
     a = pycvc.async_scheduler()
     pid = a.execute("(boom)", _opts(env=env))
-    assert a.sync_run() == {}
-    assert a.get_process_info(pid).status is process_status.killed
-    assert "division by zero" in a.get_exit_error(pid)
+    a.sync_run()
     assert a.reap(pid) and a.get_process_info(pid) is None
     assert a.get_exit_error(999) is None
 

@@ -506,7 +506,7 @@ int main(int argc, char **argv) {
       room_debug_env && *room_debug_env && std::strcmp(room_debug_env, "0") != 0;
   int room_debug_ticks = 0;
   std::uint64_t lastRefused = 0; // client frames the bound-writes gate refused, at the last log
-  std::uint64_t lastUnauthorized = 0; // connections refused for the room token, at the last log
+  std::uint64_t lastUnauthorized = 0;  // connections refused for the room token, at the last log
   std::uint64_t lastProofsRefused = 0; // device proofs refused (another key, a bad signature)
   // Link stats (~1 s): every connection on both planes reports its traffic and Ping/Pong round
   // trip (state_transport::link_reports); the rate meter turns the counters into rates. The relay

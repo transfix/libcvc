@@ -331,6 +331,22 @@ namespace {
 // no-owner init: context deliberately leaves null). Same trust model as the action lane (see the
 // ReactiveEngine note on the full-env lanes): the full intrinsics env with writes confined to the
 // document prefix, resource-capped, and it never throws.
+// A failed program's exception for a report (docs/STATE_EXEC_EXCEPTIONS.md 2.6): "Class: message",
+// and where it was raised, the innermost line of its traceback.
+std::string failure_report(const std::optional<cvc::state_exec::value_t> &exc,
+                           const std::optional<std::string> &exit_error) {
+  namespace se = cvc::state_exec;
+  if (!exc)
+    return exit_error.value_or("failed");
+  std::string report = se::exception_summary(*exc);
+  if (const se::value_t *tb = se::field(*exc, "traceback"))
+    if (const auto *lines = std::get_if<se::list_ptr>(&tb->v);
+        lines && *lines && !(*lines)->empty())
+      if (const auto *where = std::get_if<std::string>(&(*lines)->back().v))
+        report += " (at " + *where + ")";
+  return report;
+}
+
 std::string run_scoped_program(cvc::app &app, const std::string &prefix, const std::string &script,
                                uint64_t max_steps, double max_seconds, uint64_t max_bytes,
                                const std::function<bool(const std::string &)> &has = {}) {
@@ -374,9 +390,12 @@ std::string run_scoped_program(cvc::app &app, const std::string &prefix, const s
       // Success is ONLY a normal finish. Any other terminal/non-terminal state — killed
       // (runtime error / resource limit) or still ready/running/waiting after the cap
       // (it blocked or looped past the budget) — is a reported failure, not silent.
+      if (info->status == se::process_status::failed)
+        return "failed: " +
+               failure_report(sched.get_exit_exception(pid), sched.get_exit_error(pid));
       if (info->status != se::process_status::terminated)
-        return "did not complete normally (a runtime error, a resource limit, or it "
-               "blocked/looped past the budget)";
+        return "did not complete normally (a resource limit, or it blocked/looped past the "
+               "budget)";
     }
     return std::string();
   } catch (const std::exception &e) {
@@ -631,6 +650,9 @@ private:
     try {
       se::evaluator_state st = ev_->create_state(*expr);
       st.data_step_nodes = data_step_nodes_;
+      // The render lane can't wait (docs/STATE_EXEC_EXCEPTIONS.md 3.3): an async function is
+      // unbound here, and one reached anyway raises RuntimeError instead of parking or blocking.
+      const se::park_forbidden_scope no_parking;
       frame_.start();
       const charge_frame charge{frame_, st};
       se::value_t r = ev_->run(st, kMaxSteps, std::min(kMaxSeconds, remaining));
@@ -1656,7 +1678,8 @@ void Runtime::Impl::pump_and_sweep_actions() {
   static constexpr uint64_t kPumpMaxSteps = 200000;
   static constexpr double kPumpMaxSeconds = 0.1;
   sched.sync_run(kPumpMaxSteps, kPumpMaxSeconds);
-  // Sweep: drop finished actions, report a killed one, keep a still-parked one for a later frame.
+  // Sweep: drop finished actions, report a killed or failed one, keep a still-parked one for a
+  // later frame.
   for (auto it = live_actions_.begin(); it != live_actions_.end();) {
     auto info = sched.get_process_info(it->first);
     if (!info || info->status == se::process_status::terminated) {
@@ -1669,12 +1692,19 @@ void Runtime::Impl::pump_and_sweep_actions() {
                 sched.get_exit_error(it->first).value_or("killed"));
       sched.reap(it->first);
       it = live_actions_.erase(it);
+    } else if (info->status == se::process_status::failed) {
+      // An exception the program didn't catch: its class, message and where it was raised.
+      warn_once("ari: on: action program failed: " +
+                failure_report(info->exit_exception, info->exit_error));
+      sched.reap(it->first);
+      it = live_actions_.erase(it);
     } else {
       ++it; // ready/running/waiting — still in flight (e.g. suspended on await/msg-recv/sleep)
     }
   }
   // A resident never finishes on its own, so one that was killed (a syntax error in its body,
-  // read inside the process; a runtime error; its per-step cap) is reported, once per reason.
+  // read inside the process; its per-step cap) or failed (an exception it didn't catch) is
+  // reported, once per reason.
   const auto report_killed_resident = [&](int pid, const std::string &channel) {
     if (pid < 0)
       return;
@@ -1682,6 +1712,9 @@ void Runtime::Impl::pump_and_sweep_actions() {
     if (info && info->status == se::process_status::killed)
       warn_once("ari: resident [" + channel +
                 "] stopped: " + sched.get_exit_error(pid).value_or("killed"));
+    else if (info && info->status == se::process_status::failed)
+      warn_once("ari: resident [" + channel +
+                "] failed: " + failure_report(info->exit_exception, info->exit_error));
   };
   report_killed_resident(tick_resident_pid_, tick_channel());
   report_killed_resident(key_resident_pid_, key_channel());

@@ -111,7 +111,8 @@ int main() {
   assert(cvc::state::instance(app)("q.done").value() == "1" && "the quality program ran");
   assert(cvc::state::instance(app)("q.bad").value() == "refused" && "quality 0 is refused");
   const auto frame_size = [&](const char *id) -> std::size_t {
-    sx::stream_channel *c = sx::stream_registry::for_app(app).lookup(sx::stream::registry_key("", id));
+    sx::stream_channel *c =
+        sx::stream_registry::for_app(app).lookup(sx::stream::registry_key("", id));
     assert(c && "the quality stream is open");
     std::shared_ptr<sx::subscription> s = c->subscribe(sx::deliver_mode::latest);
     for (int i = 0; i < 400; ++i) {

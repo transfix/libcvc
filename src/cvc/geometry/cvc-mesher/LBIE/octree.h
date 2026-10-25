@@ -163,6 +163,10 @@ private :
 	//MinMax* minmax;
 	std::vector<MinMax> minmax;
 
+	// get_vtx_new moves vertices onto the surface only while this is set; hexahedralize clears it
+	// to extract the same mesh unsnapped for untangle_snapped.
+	bool snap_to_surface = true;
+
 	//albert
 	//SimpleVolumeData *volumeData;
 
@@ -346,6 +350,7 @@ public :
 	void polygonize_interval(geoframe& geofrm);
 
 	void polygonize_quad(geoframe& geofrm, float err_tol);
+	void split_quads(geoframe& geofrm);
 	void tetrahedralize(geoframe& geofrm);
 	void hexahedralize(geoframe& geofrm, float err_tol);
 	void hexa_adaptive_1(geoframe& geofrm, int* oc_id, int* edge_id, float err_tol, unsigned int* vtx);
@@ -370,6 +375,8 @@ public :
 	void quad_adaptive_method4(geoframe& geofrm, int* oc_id, float err_tol, unsigned int* vtx);
 	void quad_adaptive_method5(geoframe& geofrm, int* oc_id, float err_tol, unsigned int* vtx);
 	void get_vtx_new(geoframe& geofrm, int oc_id, unsigned int vtx);
+	void extract_hexa(geoframe& geofrm, float err_tol);
+	void untangle_snapped(geoframe& geofrm, float err_tol);
 	void check_topo();
 	
 

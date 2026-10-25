@@ -23,6 +23,7 @@
 #include <cvc/nav/material.h>
 #include <cvc/nav/sim_world.h>
 #include <cvc/nav/terrain.h>
+#include <cvc/nav/vehicle_plant.h>
 #include <functional>
 #include <gtest/gtest.h>
 #include <string>
@@ -252,6 +253,91 @@ TEST(NavTerrain, SteepSlopeIsARiskNotAWall) {
   EXPECT_LT(furthest[0], 0.0) << "a wall it never crosses";
   EXPECT_GT(furthest[1], 36.0) << "a risk it crosses, to its goal";
   EXPECT_GT(entries[1], 0);
+}
+
+// The risk governor holds an override_command (a route follower's) to its cap as it holds the
+// drive: along a 22-degree sidehill (grade cost 0.72 under the default 31-degree limit), full
+// throttle reaches the top speed without it and stays under v_risk with it.
+TEST(NavTerrain, TheRiskGovernorHoldsAnOverrideCommand) {
+  const std::vector<float> z = heights([](double, double y) { return 0.4 * y; });
+  std::vector<std::uint8_t> occ(static_cast<std::size_t>(R) * C, 0);
+  double top[2];
+  float cap = 0.0f;
+  for (int k = 0; k < 2; ++k) {
+    sim_world::config c = config();
+    c.veh.risk_governor = k == 1;
+    c.veh.risk_vmin = static_cast<float>(1.0 * kS);
+    c.veh.risk_onset = 0.3f;
+    sim_world w = make(c, occ, -80.0, 0.0, 90.0, 0.0);
+    w.set_terrain(z.data(), terrain_config{});
+    top[k] = 0.0;
+    for (int t = 0; t < 300; ++t) {
+      w.override_command(0, 0.0f, c.veh.a_max);
+      w.step();
+      top[k] = std::max(top[k], static_cast<double>(pose_of(w).speed)); // m/s
+    }
+    const float r = w.terrain().grade_cost[static_cast<std::size_t>(R / 2) * C + C / 2];
+    cap = static_cast<float>(8.0 - (8.0 - 1.0) * (r - 0.3) / 0.7);
+    std::printf("  grade cost %.2f: top speed %.2f m/s (governor %s), v_risk %.2f m/s\n", r, top[k],
+                k ? "on" : "off", cap);
+  }
+  EXPECT_GT(top[0], 7.5) << "full throttle reaches the top speed without the governor";
+  EXPECT_LE(top[1], cap + 0.01);
+  EXPECT_GT(top[1], cap - 0.5) << "the cap, not a stop";
+}
+
+namespace {
+
+// A plant that integrates whatever acceleration it is told, with no top speed of its own and
+// no limits to report (nav's envelope then applies): whatever holds an override_command to
+// nav's vmax on a plant has to be sim_world.
+class free_plant : public vehicle_plant {
+public:
+  plant_kind kind() const override { return plant_kind::kinematic; }
+  void attach(int n, const plant_state *start, const cvc::world_units::normalized_frame &,
+              double dt) override {
+    s_.assign(start, start + n);
+    accel_.assign(static_cast<std::size_t>(n), 0.0f);
+    dt_ = static_cast<float>(dt);
+  }
+  plant_state state(int i) const override { return s_[static_cast<std::size_t>(i)]; }
+  plant_limits limits(int) const override { return {}; }
+  void command(int i, float, float accel) override { accel_[static_cast<std::size_t>(i)] = accel; }
+  void advance() override {
+    for (std::size_t i = 0; i < s_.size(); ++i) {
+      plant_state &s = s_[i];
+      s.speed += accel_[i] * dt_;
+      s.x += s.speed * std::cos(s.heading) * dt_;
+      s.y += s.speed * std::sin(s.heading) * dt_;
+    }
+  }
+
+private:
+  std::vector<plant_state> s_;
+  std::vector<float> accel_;
+  float dt_ = 0.0f;
+};
+
+} // namespace
+
+// An override_command (a route follower's, at its own route speed) is held to the agent's top
+// speed on a plant, as the drive's own command is: full throttle on a plant that would speed up
+// for ever stays at nav's 8 m/s.
+TEST(NavTerrain, AnOverrideCommandIsHeldToTheTopSpeed) {
+  std::vector<std::uint8_t> occ(static_cast<std::size_t>(R) * C, 0);
+  const sim_world::config c = config(8.0);
+  sim_world w = make(c, occ, -90.0, 0.0, 95.0, 0.0);
+  free_plant plant;
+  w.set_plant(&plant);
+  double top = 0.0;
+  for (int t = 0; t < 200; ++t) {
+    w.override_command(0, 0.0f, 4.0f * c.veh.a_max);
+    w.step();
+    top = std::max(top, static_cast<double>(pose_of(w).speed)); // m/s
+  }
+  std::printf("  full throttle on a plant with no top speed: %.2f m/s (nav's vmax 8)\n", top);
+  EXPECT_LE(top, 8.0 + 0.01);
+  EXPECT_GT(top, 7.5) << "held at the top speed, not below it";
 }
 
 // H1, the soft force: with the grade cost's weight, the agent driving past a hill leans away

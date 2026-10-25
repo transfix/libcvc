@@ -32,12 +32,12 @@
 // Both are single-signature, i.e. NAMED-parameter proxies: reference the parameter
 // by name (`args` does not exist there; see the %pythonappend note in pycvc_gl.i).
 %pythonappend cvc::gl::ImGuiOverlay::ImGuiOverlay %{
-    self._pycvc_keepalive = viewer
+    self._pycvc_keepalive = pycvc._keepalive(viewer)
 %}
 // Keep the attached camera alive: the overlay holds it by raw pointer (None detaches
 // and releases it).
 %pythonappend cvc::gl::ImGuiOverlay::attachCamera %{
-    self._pycvc_camera = cam
+    self._pycvc_camera = pycvc._keepalive(cam)
 %}
 %include "cvc/gl/ImGuiOverlay.h"
 
