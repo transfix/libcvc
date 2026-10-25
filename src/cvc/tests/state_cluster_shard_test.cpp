@@ -15,6 +15,7 @@
 #include <cvc/state/state.h>
 #include <cvc/state/state_blob_store.h>
 #include <cvc/state/state_cluster_shard.h>
+#include <cvc/state/state_transport_inproc.h>
 #include <gtest/gtest.h>
 #include <string>
 #include <thread>
@@ -179,6 +180,114 @@ TEST(StateClusterShardTest, RewindPublishCursorReemits) {
   sh.rewind_publish_cursor(0);
   auto d2 = sh.drain_local();
   EXPECT_EQ(d1.size(), d2.size());
+}
+
+TEST(StateClusterShardTest, TrimPublishedKeepsDrainOrdered) {
+  cvc::app a;
+  cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
+  sh.attach();
+  const auto set = [&](const char *v) { cvc::state::instance(a)("tp.path").value(std::string(v)); };
+  set("seed"); // the first set on a fresh child may land before the adapter observes it
+  set("a");
+  set("b");
+
+  // Nothing drained yet: a trim keeps every pending entry.
+  const std::size_t pending = sh.journal().size();
+  ASSERT_GE(pending, 2u);
+  EXPECT_EQ(sh.trim_published(), 0u);
+  EXPECT_EQ(sh.journal().size(), pending);
+
+  // After a partial drain, a trim drops only what was handed out, and the rest drains next.
+  auto first = sh.drain_local(1);
+  ASSERT_EQ(first.size(), 1u);
+  EXPECT_EQ(sh.trim_published(), 1u);
+  EXPECT_EQ(sh.journal().size(), pending - 1);
+  auto rest = sh.drain_local();
+  ASSERT_EQ(rest.size(), pending - 1);
+  EXPECT_GT(rest.front().sequence, first.back().sequence);
+  EXPECT_EQ(rest.back().string_value, "b");
+
+  const std::uint64_t cursor = sh.published_cursor();
+  EXPECT_EQ(sh.trim_published(), pending - 1);
+  EXPECT_EQ(sh.journal().size(), 0u);
+  EXPECT_EQ(sh.published_cursor(), cursor); // a trim never moves the cursor
+  EXPECT_TRUE(sh.drain_local().empty());
+
+  // Writes after the trim drain in order, numbered past everything trimmed.
+  set("c");
+  set("d");
+  set("e");
+  auto after = sh.drain_local();
+  ASSERT_EQ(after.size(), 3u);
+  EXPECT_GT(after[0].sequence, cursor);
+  EXPECT_GT(after[1].sequence, after[0].sequence);
+  EXPECT_GT(after[2].sequence, after[1].sequence);
+  EXPECT_EQ(after[0].string_value, "c");
+  EXPECT_EQ(after[1].string_value, "d");
+  EXPECT_EQ(after[2].string_value, "e");
+
+  // A late joiner's backfill and a rewind into the trimmed range see only the survivors.
+  auto replay = sh.replay_local(0);
+  ASSERT_EQ(replay.size(), 3u);
+  EXPECT_EQ(replay.front().sequence, after.front().sequence);
+  EXPECT_EQ(replay.back().sequence, after.back().sequence);
+  sh.rewind_publish_cursor(0);
+  auto again = sh.drain_local();
+  ASSERT_EQ(again.size(), 3u);
+  EXPECT_EQ(again.front().string_value, "c");
+  EXPECT_EQ(sh.published_cursor(), after.back().sequence);
+}
+
+// A client shard rooted at the room tree ("conf") observes only that subtree: UI state written
+// elsewhere in the same app (marker matrices under ui.docs, rewritten every frame while avatars
+// move) is never journaled, so it is never drained, sent or relayed.
+TEST(StateClusterShardTest, RootedShardJournalsOnlyItsSubtree) {
+  const std::string marker = "ui.docs.ari.avatar_x.matrix";
+  const std::string joined = "conf.rooms.r.participants.p.presence.joined";
+  const auto in_room = [](const std::string &path) {
+    return path == "conf" || path.compare(0, 5, "conf.") == 0;
+  };
+
+  cvc::app client_app, relay_app;
+  cvc::state_transport_inproc t;
+  cvc::state_cluster_shard client(client_app, "conf", "client", "conf");
+  cvc::state_cluster_shard relay(relay_app, "conf", "relay");
+  client.attach();
+  relay.attach();
+  t.register_shard(&client);
+  t.register_shard(&relay);
+
+  // Two writes per leaf: the first on a fresh child may land before the adapter observes it.
+  cvc::state &tree = cvc::state::instance(client_app);
+  tree(marker).value(std::string("1 0 0 0"));
+  tree(marker).value(std::string("0 1 0 0"));
+  tree(joined).value(std::string("0"));
+  tree(joined).value(std::string("1"));
+  tree(marker).value(std::string("0 0 1 0"));
+
+  bool joined_journaled = false;
+  for (const auto &m : client.journal().snapshot()) {
+    EXPECT_TRUE(in_room(m.path)) << "journaled outside the root: " << m.path;
+    joined_journaled = joined_journaled || (m.path == joined && m.string_value == "1");
+  }
+  EXPECT_TRUE(joined_journaled);
+
+  EXPECT_GE(t.pump_all(), 1u);
+  cvc::state *got = cvc::state::instance(relay_app).findDescendant(joined);
+  ASSERT_NE(got, nullptr);
+  EXPECT_EQ(got->value(), "1");
+  EXPECT_EQ(cvc::state::instance(relay_app).findDescendant("ui.docs.ari"), nullptr);
+
+  // The same marker writes on an unrooted shard are journaled: rooting is what keeps them home.
+  cvc::app other_app;
+  cvc::state_cluster_shard unrooted(other_app, "conf", "other");
+  unrooted.attach();
+  cvc::state::instance(other_app)(marker).value(std::string("1 0 0 0"));
+  cvc::state::instance(other_app)(marker).value(std::string("0 1 0 0"));
+  bool marker_journaled = false;
+  for (const auto &m : unrooted.journal().snapshot())
+    marker_journaled = marker_journaled || m.path == marker;
+  EXPECT_TRUE(marker_journaled);
 }
 
 TEST(StateClusterShardTest, IngestRemoteScopedToRootPath) {

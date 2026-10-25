@@ -8,14 +8,19 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
+#include <algorithm>
 #include <atomic>
 #include <boost/any.hpp>
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <cvc/core/app.h>
+#include <cvc/media/media_frame.h>
+#include <cvc/media/media_router.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_cluster_shard.h>
+#include <cvc/state/state_peer_registry.h>
 #include <cvc/state/state_transport.h>
 #include <cvc/state/state_transport_grpc.h>
 #include <filesystem>
@@ -1219,4 +1224,533 @@ TEST(StateTransportGrpcTest, RelayForwardsBetweenStarClients) {
   tR.stop();
   sA.detach();
   sB.detach();
+}
+
+// ----------------------------------------------------------------------------
+// Per-peer delivery on a relay: connection identity, the relay interest gate, registry-filtered
+// forwards and snapshots, targeted snapshot pushes, and the media egress gate.
+// ----------------------------------------------------------------------------
+
+namespace {
+
+// Wait until `t` has a live link identified (its Hello read) as each of `ids`.
+bool wait_identified(const cvc::state_transport_grpc &t, const std::vector<std::string> &ids,
+                     std::chrono::milliseconds to) {
+  return wait_until(
+      [&] {
+        const auto links = t.link_reports();
+        return std::all_of(ids.begin(), ids.end(), [&](const std::string &id) {
+          return std::any_of(links.begin(), links.end(), [&](const cvc::state_link_report &l) {
+            return l.remote_node_id == id;
+          });
+        });
+      },
+      to);
+}
+
+// The value at `path`, or "<absent>" when the node does not exist (looked up without creating it).
+std::string leaf(cvc::app &a, const std::string &path) {
+  cvc::state *n = cvc::state::instance(a).findDescendant(path);
+  return n ? n->value() : std::string("<absent>");
+}
+
+// Write `v` at a fresh `path` so that it is journaled: the first set on a new child is not
+// observed, so it is set twice (as in RelayForwardsBetweenStarClients).
+void write_fresh(cvc::app &a, const std::string &path, const std::string &v) {
+  cvc::state::instance(a)(path).value(std::string("init"));
+  cvc::state::instance(a)(path).value(v);
+}
+
+cvc::state_mutation value_mutation(const std::string &origin, std::uint64_t seq,
+                                   const std::string &path, const std::string &value) {
+  cvc::state_mutation m;
+  m.cluster_id = "C";
+  m.tree_id = "default";
+  m.origin_node_id = origin;
+  m.sequence = seq;
+  m.mutation_id = origin + ":" + std::to_string(seq);
+  m.path = path;
+  m.op = cvc::state_mutation_op::set_value;
+  m.type_name = "std::string";
+  m.string_value = value;
+  return m;
+}
+
+cvc::state_transport::snapshot_entry leaf_entry(const std::string &path, const std::string &value) {
+  cvc::state_transport::snapshot_entry e;
+  e.path = path;
+  e.string_value = value;
+  e.type_name = "std::string";
+  return e;
+}
+
+// Denies one path prefix (and everything under it); delivers the rest.
+class deny_prefix_filter final : public cvc::state_delivery_filter {
+public:
+  explicit deny_prefix_filter(std::string prefix) : _prefix(std::move(prefix)) {}
+  bool deliver(const std::string &path) const noexcept override {
+    return !cvc::state_peer_registry::prefix_matches(_prefix, path);
+  }
+
+private:
+  std::string _prefix;
+};
+
+std::uint64_t filtered_count(const cvc::state_transport_grpc &t, const std::string &node_id) {
+  for (const auto &p : t.peers().snapshot())
+    if (p.node_id == node_id)
+      return p.deliveries_filtered;
+  return 0;
+}
+
+} // namespace
+
+// A connection's peer is unknown until a Hello names it. A client whose Hello carries no node id
+// stays unknown: its link reports no id and the registry cannot filter it, so it gets everything.
+// A client whose Hello names it reports that name, and its registry entry filters publish() from
+// then on.
+TEST(StateTransportGrpcTest, PeerIdUnknownUntilHello) {
+  cvc::app aN, aB;
+  cvc::state_transport_grpc tR, tN, tB;
+  tR.start("127.0.0.1:0", "R", "C");
+  tN.start("127.0.0.1:0"); // no node id: its Hello names nobody
+  tB.start("127.0.0.1:0", "B", "C");
+  tR.peers().add_peer("B", "C", "", {"room"});
+
+  cvc::state_cluster_shard sN(aN, "C", "N");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sN.attach();
+  sB.attach();
+  tN.register_shard(&sN);
+  tB.register_shard(&sB);
+
+  ASSERT_TRUE(tN.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(tB.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_until([&] { return tR.connection_count() == 2; }, std::chrono::seconds(3)));
+  ASSERT_TRUE(wait_identified(tR, {"B"}, std::chrono::seconds(3)));
+  {
+    const auto links = tR.link_reports();
+    ASSERT_EQ(links.size(), 2u);
+    EXPECT_EQ(
+        std::count_if(links.begin(), links.end(),
+                      [](const cvc::state_link_report &l) { return l.remote_node_id.empty(); }),
+        1)
+        << "the unnamed client's link reports no peer id";
+  }
+
+  // other.k is outside B's subscription; room.k (published after it) is inside.
+  tR.publish(value_mutation("R", 1, "other.k", "o"));
+  tR.publish(value_mutation("R", 2, "room.k", "r"));
+
+  EXPECT_TRUE(wait_until([&] { return leaf(aB, "room.k") == "r"; }, std::chrono::seconds(3)));
+  EXPECT_TRUE(wait_until([&] { return leaf(aN, "room.k") == "r" && leaf(aN, "other.k") == "o"; },
+                         std::chrono::seconds(3)))
+      << "an unknown peer gets everything";
+  EXPECT_EQ(leaf(aB, "other.k"), "<absent>") << "B's subscription filters what precedes room.k";
+  EXPECT_GE(filtered_count(tR, "B"), 1u);
+
+  tN.stop();
+  tB.stop();
+  tR.stop();
+}
+
+// With the interest gate on, a relay whose shard enforces "conf" withholds a client's ui.docs.*
+// write from the other clients (no shard of its own would take it) while conf.* still flows; with
+// the gate off it forwards both, as before.
+TEST(StateTransportGrpcTest, RelayInterestGateWithholdsOutOfInterestPaths) {
+  cvc::app aR, aA, aB;
+  cvc::state_transport_grpc tR, tA, tB;
+  tR.start("127.0.0.1:0", "R", "C");
+  tR.set_relay(true);
+  tR.set_relay_requires_interest(true);
+  EXPECT_TRUE(tR.relay_requires_interest());
+  tA.start("127.0.0.1:0", "A", "C");
+  tB.start("127.0.0.1:0", "B", "C");
+
+  cvc::state_cluster_shard sR(aR, "C", "R");
+  sR.add_interest("conf");
+  sR.set_enforce_interest(true);
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sR.attach();
+  sA.attach();
+  sB.attach();
+  tR.register_shard(&sR);
+  tA.register_shard(&sA);
+  tB.register_shard(&sB);
+
+  ASSERT_TRUE(tA.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(tB.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_until([&] { return tR.connection_count() == 2; }, std::chrono::seconds(3)));
+
+  // ui.docs.x goes first on A's stream, so once conf.rooms.r.y reaches B the relay has already
+  // decided ui.docs.x.
+  write_fresh(aA, "ui.docs.x", "u1");
+  write_fresh(aA, "conf.rooms.r.y", "c1");
+  EXPECT_GT(tA.pump_all(), 0u);
+  EXPECT_TRUE(
+      wait_until([&] { return leaf(aB, "conf.rooms.r.y") == "c1"; }, std::chrono::seconds(3)));
+  EXPECT_EQ(leaf(aB, "ui.docs.x"), "<absent>") << "the relay withholds an out-of-interest write";
+  EXPECT_EQ(leaf(aR, "conf.rooms.r.y"), "c1") << "ingest is unchanged";
+  const std::uint64_t withheld = tR.total_relay_withheld();
+  EXPECT_GE(withheld, 1u);
+
+  tR.set_relay_requires_interest(false);
+  cvc::state::instance(aA)("ui.docs.x").value(std::string("u2"));
+  cvc::state::instance(aA)("conf.rooms.r.y").value(std::string("c2"));
+  EXPECT_GT(tA.pump_all(), 0u);
+  EXPECT_TRUE(wait_until(
+      [&] { return leaf(aB, "ui.docs.x") == "u2" && leaf(aB, "conf.rooms.r.y") == "c2"; },
+      std::chrono::seconds(3)))
+      << "with the gate off the relay forwards everything";
+  EXPECT_EQ(tR.total_relay_withheld(), withheld);
+
+  tA.stop();
+  tB.stop();
+  tR.stop();
+}
+
+// The gate keeps the ingest exemption for delegation ops: a delegation over an out-of-interest
+// subtree still reaches the other client, while a plain write under it is withheld.
+TEST(StateTransportGrpcTest, RelayInterestGateForwardsDelegationOps) {
+  cvc::app aR, aA, aB;
+  cvc::state_transport_grpc tR, tA, tB;
+  tR.start("127.0.0.1:0", "R", "C");
+  tR.set_relay(true);
+  tR.set_relay_requires_interest(true);
+  tA.start("127.0.0.1:0", "A", "C");
+  tB.start("127.0.0.1:0", "B", "C");
+
+  cvc::state_cluster_shard sR(aR, "C", "R");
+  sR.add_interest("conf");
+  sR.set_enforce_interest(true);
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sR.attach();
+  sA.attach();
+  sB.attach();
+  tR.register_shard(&sR);
+  tA.register_shard(&sA);
+  tB.register_shard(&sB);
+
+  ASSERT_TRUE(tA.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(tB.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_until([&] { return tR.connection_count() == 2; }, std::chrono::seconds(3)));
+
+  // A plain write under ui.docs is withheld (conf.rooms.r.y, written after it, marks the point by
+  // which the relay has decided it)...
+  write_fresh(aA, "ui.docs.x", "u1");
+  write_fresh(aA, "conf.rooms.r.y", "c1");
+  EXPECT_GT(tA.pump_all(), 0u);
+  EXPECT_TRUE(
+      wait_until([&] { return leaf(aB, "conf.rooms.r.y") == "c1"; }, std::chrono::seconds(3)));
+  EXPECT_EQ(leaf(aB, "ui.docs.x"), "<absent>");
+  const std::uint64_t withheld = tR.total_relay_withheld();
+  EXPECT_GE(withheld, 1u);
+
+  // ...but a delegation of that subtree is forwarded.
+  sA.publish_delegation("ui.docs", "C2");
+  cvc::state::instance(aA)("conf.rooms.r.y").value(std::string("c2"));
+  EXPECT_GT(tA.pump_all(), 0u);
+  EXPECT_TRUE(
+      wait_until([&] { return leaf(aB, "conf.rooms.r.y") == "c2"; }, std::chrono::seconds(3)));
+  EXPECT_EQ(sB.total_delegations_applied(), 1u) << "the delegation op is forwarded";
+  EXPECT_EQ(tR.total_relay_withheld(), withheld);
+
+  tA.stop();
+  tB.stop();
+  tR.stop();
+}
+
+// A relay forward consults each target's registry entry: B's delivery filter denies x.secret, so
+// B gets only x.pub, while C (no entry) gets both.
+TEST(StateTransportGrpcTest, RelayForwardHonorsPeerFilter) {
+  cvc::app aA, aB, aC;
+  cvc::state_transport_grpc tR, tA, tB, tC;
+  tR.start("127.0.0.1:0", "R", "C");
+  tR.set_relay(true);
+  tA.start("127.0.0.1:0", "A", "C");
+  tB.start("127.0.0.1:0", "B", "C");
+  tC.start("127.0.0.1:0", "C", "C");
+
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  cvc::state_cluster_shard sC(aC, "C", "C");
+  sA.attach();
+  sB.attach();
+  sC.attach();
+  tA.register_shard(&sA);
+  tB.register_shard(&sB);
+  tC.register_shard(&sC);
+
+  ASSERT_TRUE(tA.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(tB.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(tC.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_identified(tR, {"A", "B", "C"}, std::chrono::seconds(3)));
+  tR.peers().add_peer("B", "C");
+  ASSERT_TRUE(tR.peers().set_filter("B", std::make_shared<deny_prefix_filter>("x.secret")));
+
+  write_fresh(aA, "x.secret", "s1");
+  write_fresh(aA, "x.pub", "p1");
+  EXPECT_GT(tA.pump_all(), 0u);
+
+  EXPECT_TRUE(wait_until([&] { return leaf(aB, "x.pub") == "p1"; }, std::chrono::seconds(3)));
+  EXPECT_TRUE(wait_until([&] { return leaf(aC, "x.pub") == "p1" && leaf(aC, "x.secret") == "s1"; },
+                         std::chrono::seconds(3)));
+  EXPECT_EQ(leaf(aB, "x.secret"), "<absent>") << "B's filter denies x.secret on the forward";
+  EXPECT_GE(filtered_count(tR, "B"), 1u);
+
+  tA.stop();
+  tB.stop();
+  tC.stop();
+  tR.stop();
+}
+
+// The snapshot responder answers with what the requester's registry entry lets it see.
+TEST(StateTransportGrpcTest, SnapshotRequestFilteredByRequester) {
+  cvc::app aR;
+  cvc::state_transport_grpc tR, tB, tC;
+  tR.set_backfill_on_connect(false);
+  tR.start("127.0.0.1:0", "R", "C");
+  tB.start("127.0.0.1:0", "B", "C");
+  tC.start("127.0.0.1:0", "C", "C");
+
+  cvc::state_cluster_shard sR(aR, "C", "R");
+  sR.attach();
+  tR.register_shard(&sR);
+  // The snapshot reads the tree directly, so a single set suffices.
+  cvc::state::instance(aR)("x.secret").value(std::string("s"));
+  cvc::state::instance(aR)("x.pub").value(std::string("p"));
+
+  ASSERT_TRUE(tB.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(tC.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_identified(tR, {"B", "C"}, std::chrono::seconds(3)));
+  tR.peers().add_peer("B", "C");
+  ASSERT_TRUE(tR.peers().set_filter("B", std::make_shared<deny_prefix_filter>("x.secret")));
+
+  const auto paths_from = [](cvc::state_transport_grpc &t) {
+    std::mutex mu;
+    std::vector<std::string> paths;
+    const bool ok = t.request_snapshot(
+        "C", "x", [&](const std::vector<cvc::state_transport::snapshot_entry> &es, bool) {
+          std::lock_guard<std::mutex> lk(mu);
+          for (const auto &e : es)
+            paths.push_back(e.path);
+        });
+    EXPECT_TRUE(ok);
+    std::lock_guard<std::mutex> lk(mu);
+    return paths;
+  };
+  const auto has = [](const std::vector<std::string> &v, const char *p) {
+    return std::find(v.begin(), v.end(), p) != v.end();
+  };
+
+  const auto gotB = paths_from(tB);
+  EXPECT_TRUE(has(gotB, "x.pub"));
+  EXPECT_FALSE(has(gotB, "x.secret")) << "B's filter applies to its snapshot";
+  const auto gotC = paths_from(tC);
+  EXPECT_TRUE(has(gotC, "x.pub"));
+  EXPECT_TRUE(has(gotC, "x.secret")) << "an unfiltered requester gets everything";
+
+  tB.stop();
+  tC.stop();
+  tR.stop();
+}
+
+// push_snapshot_to writes only to the connection identified as the named peer.
+TEST(StateTransportGrpcTest, PushSnapshotToReachesOnlyNamedPeer) {
+  cvc::app aB, aC;
+  cvc::state_transport_grpc tR, tB, tC;
+  tR.start("127.0.0.1:0", "R", "C");
+  tB.start("127.0.0.1:0", "B", "C");
+  tC.start("127.0.0.1:0", "C", "C");
+
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  cvc::state_cluster_shard sC(aC, "C", "C");
+  sB.attach();
+  sC.attach();
+  tB.register_shard(&sB);
+  tC.register_shard(&sC);
+
+  ASSERT_TRUE(tB.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(tC.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_identified(tR, {"B", "C"}, std::chrono::seconds(3)));
+
+  const std::vector<cvc::state_transport::snapshot_entry> forB = {leaf_entry("pushed.k", "v")};
+  EXPECT_EQ(tR.push_snapshot_to("B", forB), 1u);
+  EXPECT_EQ(tR.push_snapshot_to("nobody", forB), 0u) << "an unknown peer gets nothing";
+  EXPECT_EQ(tR.push_snapshot_to("B", {}), 0u) << "an empty push writes nothing";
+  // C's own push, sent after B's, marks the point by which anything for C has landed.
+  EXPECT_EQ(tR.push_snapshot_to("C", {leaf_entry("pushed.c", "c")}), 1u);
+
+  EXPECT_TRUE(wait_until([&] { return leaf(aB, "pushed.k") == "v"; }, std::chrono::seconds(3)));
+  EXPECT_TRUE(wait_until([&] { return leaf(aC, "pushed.c") == "c"; }, std::chrono::seconds(3)));
+  EXPECT_EQ(leaf(aC, "pushed.k"), "<absent>");
+  EXPECT_EQ(leaf(aB, "pushed.c"), "<absent>");
+
+  tB.stop();
+  tC.stop();
+  tR.stop();
+}
+
+// A push and the publishes that follow it on the same thread keep their order on the wire: a
+// snapshot entry bypasses the receiver's conflict gate, so a push overtaken by the newer live write
+// would leave the old value behind.
+TEST(StateTransportGrpcTest, PushThenPublishKeepsOrder) {
+  cvc::app aB;
+  cvc::state_transport_grpc tR, tB;
+  tR.start("127.0.0.1:0", "R", "C");
+  tB.start("127.0.0.1:0", "B", "C");
+
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sB.attach();
+  tB.register_shard(&sB);
+
+  ASSERT_TRUE(tB.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_identified(tR, {"B"}, std::chrono::seconds(3)));
+
+  ASSERT_EQ(tR.push_snapshot_to("B", {leaf_entry("room.p", "v1")}), 1u);
+  tR.publish(value_mutation("R", 1, "room.p", "v2"));
+  tR.publish(value_mutation("R", 2, "room.done", "1"));
+
+  EXPECT_TRUE(wait_until([&] { return leaf(aB, "room.done") == "1"; }, std::chrono::seconds(3)));
+  EXPECT_EQ(leaf(aB, "room.p"), "v2");
+
+  tB.stop();
+  tR.stop();
+}
+
+// The media gate on the relay's fan-out: a receiver it denies is skipped while the others still get
+// the frame, and a node's own uplink is never gated.
+TEST(StateTransportGrpcTest, MediaGateOnGrpc) {
+  cvc::state_transport_grpc tR, tA, tB, tC;
+  tR.start("127.0.0.1:0", "R", "C");
+  tR.set_media_stall_drop(std::chrono::milliseconds(40)); // healthy loopback writes never trip it
+  // Declared after tR so it destructs first, clearing tR's media sink while tR is still alive.
+  cvc::media_router mr;
+  mr.add_endpoint(&tR);
+  tA.start("127.0.0.1:0", "A", "C");
+  tB.start("127.0.0.1:0", "B", "C");
+  tC.start("127.0.0.1:0", "C", "C");
+
+  std::mutex mu;
+  std::vector<std::int64_t> seqB, seqC;
+  std::atomic<int> gotA{0};
+  tA.set_on_media([&](const cvc::media_frame &) { gotA.fetch_add(1); });
+  tB.set_on_media([&](const cvc::media_frame &f) {
+    std::lock_guard<std::mutex> lk(mu);
+    seqB.push_back(f.seq);
+  });
+  tC.set_on_media([&](const cvc::media_frame &f) {
+    std::lock_guard<std::mutex> lk(mu);
+    seqC.push_back(f.seq);
+  });
+
+  ASSERT_TRUE(tA.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(tB.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(tC.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_identified(tR, {"A", "B", "C"}, std::chrono::seconds(3)));
+
+  tR.set_media_gate([](const cvc::media_frame &, const std::string &rx) { return rx != "B"; });
+  // A gate that denies everything on A's own transport: its uplink must ignore it.
+  tA.set_media_gate([](const cvc::media_frame &, const std::string &) { return false; });
+
+  cvc::media_frame m;
+  m.origin_node_id = "A";
+  m.stream_id = "camera";
+  m.codec = "mjpeg";
+  m.width = 64;
+  m.height = 48;
+  m.seq = 1;
+  m.payload = {0xff, 0xd8, 0x01, 0xff, 0xd9};
+  tA.publish_media_frame(m);
+  EXPECT_TRUE(wait_until(
+      [&] {
+        std::lock_guard<std::mutex> lk(mu);
+        return !seqC.empty();
+      },
+      std::chrono::seconds(3)));
+  EXPECT_EQ(tR.total_media_gated(), 1u) << "B is the only receiver denied";
+
+  // Clearing the gate restores full fan-out. B's stream is FIFO, so once seq 2 arrives a seq 1
+  // sent to B would already be there.
+  tR.set_media_gate({});
+  m.seq = 2;
+  tA.publish_media_frame(m);
+  EXPECT_TRUE(wait_until(
+      [&] {
+        std::lock_guard<std::mutex> lk(mu);
+        return seqB.size() == 1 && seqC.size() == 2;
+      },
+      std::chrono::seconds(3)));
+  {
+    std::lock_guard<std::mutex> lk(mu);
+    EXPECT_EQ(seqB, std::vector<std::int64_t>{2});
+  }
+  EXPECT_EQ(tA.total_media_sent(), 2u) << "the uplink is never gated";
+  EXPECT_EQ(tR.total_media_gated(), 1u);
+  EXPECT_EQ(tR.total_media_stall_dropped(), 0u);
+  EXPECT_EQ(gotA.load(), 0) << "the origin is still skipped";
+
+  tA.stop();
+  tB.stop();
+  tC.stop();
+  tR.stop();
+}
+
+TEST(StateTransportGrpcTest, MediaWriteStalled) {
+  using T = cvc::state_transport_grpc;
+  constexpr std::uint64_t kMs = 1'000'000;
+  constexpr std::uint64_t now = 10'000 * kMs;
+  EXPECT_FALSE(T::media_write_stalled(0, now, 40 * kMs)) << "no write in flight";
+  EXPECT_FALSE(T::media_write_stalled(now - 39 * kMs, now, 40 * kMs));
+  EXPECT_TRUE(T::media_write_stalled(now - 41 * kMs, now, 40 * kMs));
+  EXPECT_FALSE(T::media_write_stalled(now - 41 * kMs, now, 0)) << "0 turns the drop off";
+}
+
+// A client shard that enforces interest takes from an unsolicited (relay admit) snapshot only what
+// it would take live; a shard that does not enforce still takes everything.
+TEST(StateTransportGrpcTest, ClientSnapshotIngestHonorsEnforcedInterest) {
+  cvc::app aR, aB, aC;
+  cvc::state_transport_grpc tR, tB, tC;
+  tR.set_backfill_on_connect(false); // the admit snapshot alone carries the relay's state
+  tR.start("127.0.0.1:0", "R", "C");
+  tR.set_relay(true);
+  tB.start("127.0.0.1:0", "B", "C");
+  tC.start("127.0.0.1:0", "C", "C");
+
+  cvc::state_cluster_shard sR(aR, "C", "R");
+  sR.attach();
+  tR.register_shard(&sR);
+  cvc::state::instance(aR)("conf.x").value(std::string("c"));
+  cvc::state::instance(aR)("ui.y").value(std::string("u"));
+
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sB.add_interest("conf");
+  sB.set_enforce_interest(true);
+  cvc::state_cluster_shard sC(aC, "C", "C");
+  sB.attach();
+  sC.attach();
+  tB.register_shard(&sB);
+  tC.register_shard(&sC);
+
+  ASSERT_TRUE(tB.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(tC.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_identified(tR, {"B", "C"}, std::chrono::seconds(3)));
+  // The relay reads a Hello only after the admit snapshot is written, so a push now lands behind
+  // it: once the push is applied, so is the admit snapshot.
+  ASSERT_EQ(tR.push_snapshot_to("B", {leaf_entry("conf.done", "1")}), 1u);
+  ASSERT_EQ(tR.push_snapshot_to("C", {leaf_entry("conf.done", "1")}), 1u);
+  EXPECT_TRUE(
+      wait_until([&] { return leaf(aB, "conf.done") == "1" && leaf(aC, "conf.done") == "1"; },
+                 std::chrono::seconds(3)));
+
+  EXPECT_EQ(leaf(aB, "conf.x"), "c");
+  EXPECT_EQ(leaf(aB, "ui.y"), "<absent>") << "outside B's enforced interest";
+  EXPECT_EQ(leaf(aC, "conf.x"), "c");
+  EXPECT_EQ(leaf(aC, "ui.y"), "u");
+
+  tB.stop();
+  tC.stop();
+  tR.stop();
 }

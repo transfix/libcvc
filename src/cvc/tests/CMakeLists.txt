@@ -113,6 +113,8 @@ add_executable(holon_test holon_test.cpp)
 add_executable(holon_sync_test holon_sync_test.cpp)
 add_executable(state_link_stats_test state_link_stats_test.cpp)
 add_executable(room_scene_test room_scene_test.cpp)
+add_executable(room_aoi_test room_aoi_test.cpp)
+add_executable(room_aoi_relay_test room_aoi_relay_test.cpp)
 add_executable(physics_codec_test physics_codec_test.cpp)
 add_executable(physics_field_test physics_field_test.cpp)
 add_executable(physics_vehicle_test physics_vehicle_test.cpp)
@@ -173,6 +175,11 @@ if(CVC_ENABLE_GRPC)
 endif()
 if(CVC_ENABLE_WS)
   add_executable(state_transport_ws_test state_transport_ws_test.cpp)
+endif()
+# The S7 relay end to end on loopback (spatial interest, media gate, pushes): its WebSocket cases
+# need CVC_ENABLE_WS, its gRPC cases CVC_ENABLE_GRPC.
+if(CVC_ENABLE_GRPC OR CVC_ENABLE_WS)
+  add_executable(room_relay_integration_test room_relay_integration_test.cpp)
 endif()
 add_executable(voxels_test voxels_test.cpp)
 add_executable(volume_test volume_test.cpp)
@@ -318,6 +325,8 @@ set(TEST_TARGETS
   holon_sync_test
   state_link_stats_test
   room_scene_test
+  room_aoi_test
+  room_aoi_relay_test
   physics_codec_test
   physics_field_test
   physics_vehicle_test
@@ -1723,6 +1732,20 @@ target_link_libraries(room_scene_test
     GTest::gtest_main
 )
 
+target_link_libraries(room_aoi_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(room_aoi_relay_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(physics_codec_test
   PRIVATE
     cvc
@@ -1948,6 +1971,17 @@ if(TARGET state_transport_ws_test)
   list(APPEND TEST_TARGETS state_transport_ws_test)
 endif()
 
+if(TARGET room_relay_integration_test)
+  target_link_libraries(room_relay_integration_test
+    PRIVATE
+      cvc
+      GTest::gtest
+      GTest::gtest_main
+  )
+  target_compile_features(room_relay_integration_test PRIVATE cxx_std_17)
+  list(APPEND TEST_TARGETS room_relay_integration_test)
+endif()
+
 if(TARGET state_stream_transport_grpc_test)
   target_link_libraries(state_stream_transport_grpc_test
     PRIVATE
@@ -2138,6 +2172,8 @@ target_compile_features(holon_test PRIVATE cxx_std_17)
 target_compile_features(holon_sync_test PRIVATE cxx_std_17)
 target_compile_features(state_link_stats_test PRIVATE cxx_std_17)
 target_compile_features(room_scene_test PRIVATE cxx_std_17)
+target_compile_features(room_aoi_test PRIVATE cxx_std_17)
+target_compile_features(room_aoi_relay_test PRIVATE cxx_std_17)
 target_compile_features(physics_codec_test PRIVATE cxx_std_17)
 target_compile_features(physics_field_test PRIVATE cxx_std_17)
 target_compile_features(physics_vehicle_test PRIVATE cxx_std_17)
@@ -2619,6 +2655,8 @@ cvc_discover_tests(holon_test)
 cvc_discover_tests(holon_sync_test)
 cvc_discover_tests(state_link_stats_test)
 cvc_discover_tests(room_scene_test)
+cvc_discover_tests(room_aoi_test)
+cvc_discover_tests(room_aoi_relay_test)
 cvc_discover_tests(physics_codec_test)
 cvc_discover_tests(physics_field_test)
 cvc_discover_tests(physics_vehicle_test)
@@ -2657,6 +2695,11 @@ if(TARGET state_transport_grpc_test)
 endif()
 if(TARGET state_transport_ws_test)
   cvc_discover_tests(state_transport_ws_test)
+endif()
+if(TARGET room_relay_integration_test)
+  # Its suite is RoomRelayLoopbackTest, not *Integration*: CI's PR and recipe runs exclude names
+  # matching "Integration" (the slow CLI suites), and these are S7's only end-to-end checks.
+  cvc_discover_tests(room_relay_integration_test)
 endif()
 if(TARGET state_stream_transport_grpc_test)
   cvc_discover_tests(state_stream_transport_grpc_test)

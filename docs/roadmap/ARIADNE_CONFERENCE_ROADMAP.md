@@ -273,7 +273,10 @@ grants for the *client-local* document sandbox.
 1. **Connection↔identity binding** — admission maps a connection to a `pid`; intents/writes derive
    authority from the connection, not a self-asserted `origin_node_id`.
 2. **Admission hook** — at join/snapshot: allocate `pid`, grant scope, check capacity/ban/role, and
-   gate what subtree a peer may pull (snapshot currently serves everything).
+   gate what subtree a peer may pull (snapshot currently serves everything). *S7 (§5h.1) shapes the gRPC
+   snapshot reply and the WebSocket broadcast by the requester's registry filter, but that is delivery
+   policy, not access control — a peer with no filter still gets everything — and the admit snapshot,
+   sent before Hello, is still unfiltered.*
 3. **Server-mediated write path** — the intent channel + validator + sole-writer discipline (§5d).
 4. **Roster primitive** — immediate-children enumeration, `pid` allocation, presence/heartbeat reaping
    of participant subtrees (drive `expireAt`).
@@ -338,12 +341,15 @@ bundles them yet.
   *(No client-prediction/reconcile/rollback loop exists today — it is new; distributed state resolves
   last-writer with vector clocks, not predict/rollback.)*
 * **LOD (realtime for large scenes).** A replica is a *scoped, decimated* view, not a full copy: **spatial
-  interest** (extend the shard's `add_interest` from `"conf"` to `scene.<cell>` near the camera) picks
-  *what*; **geometry LOD** (landed, PR #249+: `lod/select.h` rung/budget solver, `lod/pyramid.h`, QEM
-  `geometry/simplify.h`, `lod/tiles.h`, HDF5 `lod/store.h`, `LodGraphicsNode`) picks *how much*; reconcile
-  fixes what was skipped. **Physics LOD is new** (zero hits today) — a sim-detail ladder (collision-hull
-  decimation, substep/rate reduction, freeze-to-kinematic for distant/subordinate bodies) + re-hydrate when
-  a body re-enters interest.
+  interest** picks *what*; **geometry LOD** (landed, PR #249+: `lod/select.h` rung/budget solver,
+  `lod/pyramid.h`, QEM `geometry/simplify.h`, `lod/tiles.h`, HDF5 `lod/store.h`, `LodGraphicsNode`) picks
+  *how much*; reconcile fixes what was skipped. **H1's spatial interest is built (S7, §5h.1)** and it is
+  *not* the `scene.<cell>`-near-the-camera filter this bullet first proposed: it is a **relay-authoritative,
+  avatar-centric** area of interest over the *participants* subtree (the camera is never replicated, §5g,
+  so the relay centres interest on the authoritative avatar pose it already holds), enforced outbound per
+  receiver by the relay. Cell interest over `scene.*` moves to H3 (§5h.1 says why). **Physics LOD is new**
+  (zero hits today) — a sim-detail ladder (collision-hull decimation, substep/rate reduction,
+  freeze-to-kinematic for distant/subordinate bodies) + re-hydrate when a body re-enters interest.
 * **Composition / holarchy.** A server may **subdelegate a sub-volume** `V` to a subordinate server running
   a child holon (its own clients/streams/clock); the parent becomes a **client of the child that keeps
   ultimate authority**. Two axes: **scene-graph** — mount the child's replicated scene as a frame node at
@@ -358,23 +364,283 @@ bundles them yet.
   dropped` to the tree; replicate them and the replica tracks the remote authoritative tick — `seek_tick`
   on hard correction, `set_scale` nudge toward the remote `realized_scale()` for drift (time dilation),
   server-set `sim.mode/speed` replicated for **shared pause/slowmo** (local pause stays local).
-* **Hard prerequisite.** `data()` object replication is a known DISTRIBUTED_STATE gap (§52: only scalar
-  value/child changes journal; `set_data` is a no-op pending a codec). Replicating live physics/scene
-  *state objects* rides on closing it — so it leads the phasing.
+* **Hard prerequisite — LANDED (this bullet was stale).** It read: "`data()` object replication is a known
+  DISTRIBUTED_STATE gap (§52: only scalar value/child changes journal; `set_data` is a no-op pending a
+  codec)." That path has landed on all four transports — codec-encoded `set_data` (inline or a
+  content-addressed `blob_ref`), snapshot capture + replay, and an automatically driven
+  `state_data_hydrator` (DISTRIBUTED_STATE_ROADMAP.md Phase 10, status corrected 2026-10-22). Its residual
+  items (WebSocket late-joiner blob hydration, the async hydrator install guard, oversized `value()`
+  offload) are tracked there. It no longer gates the phasing; H1 replicates scalar leaves only.
 
 **Phasing.**
-- **H0 — substrate:** close `data()` object replication (DISTRIBUTED_STATE §52); spatial-interest filter;
-  confirm the deterministic physics path (`det_math.h`).
+- **H0 — substrate:** close `data()` object replication (DISTRIBUTED_STATE §52 — **LANDED**, see the
+  prerequisite bullet above); spatial-interest filter (**LANDED in S7** as the per-peer delivery
+  predicate on `state_peer_registry`, §5h.1); confirm the deterministic physics path (`det_math.h`).
 - **H1 — single holon** (the §5g scene + avatars, formalized): bundle `{clock,physics,scene}`;
   server-authoritative; client replica with prediction + reconcile; pose propose→veto→override; geometry
-  LOD + spatial interest; **per-camera `RenderView` + `VisibilityMask`** (both already exist —
-  `src/cvcGL/RenderView.cpp`, §9.5 — so H1 *uses* them, it does not build them).
+  LOD + spatial interest (**S7, §5h.1**: avatar-centric AOI on the relay + per-frame mesh LOD in
+  `room_view`). *(Corrected: this item used to say H1 uses a "per-camera `RenderView` +
+  `VisibilityMask`, both already exist". They exist, but they drive the separate `cvc::gl::Node` graph
+  (`nodes.h` / `traversal.h`), which neither `SceneGraph` nor `room_view` uses; arigl has one view and
+  one camera, and LOD selects from that renderer's camera through `SceneGraph::selectLOD`. Per-camera
+  views wait for a PiP or minimap — CVCGL-UI-DSL-ROADMAP.md §9.5, stage C.)*
 - **H2 — physics/sim LOD + re-hydrate; cross-node clock tracking** (seek/scale, shared pause).
 - **H3 — subdelegation / holarchy:** spatial→path delegation on the lease manager; parent-as-authority-
   client + override primitive; live-remote-holon scene mount at copy/LOD; residency/paging driver
-  (VISIBILITY-AND-LOD HLOD §4.2 — designed, not landed).
+  (VISIBILITY-AND-LOD HLOD §4.2 — designed, not landed). **Scene spatial interest lands here** with the
+  paging driver (`scene.cells.<i>_<j>`, per-cell revs, per-cell realize/teardown, the cell index shared
+  with `lod/tiles.h`'s partition), as does client- or camera-declared interest built on S7's registry
+  filter (§5h.1).
 - **H4 — physics boundary composition:** authority handoff at `∂V`, then cross-boundary kinematic proxies
   *(research-grade; last)*.
+
+#### 5h.1 S7 — room spatial interest + geometry LOD (built)
+
+H1's interest and LOD slice. `room_relay_integration_test` (suite `RoomRelayLoopbackTest`, 10 cases:
+a relay built as arisrv builds it, real clients on loopback, WS and gRPC mixed in one room) pins the
+behaviour end to end, and `arisrv_aoi_bench` measured it (**Measured**, below).
+
+**What it is.** A **relay-authoritative, avatar-centric area of interest**. Each room step the relay
+places every participant from the server holon's authoritative pose and decides, per ordered pair
+(receiver *r*, subject *q*) and from their XY distance, how much of *q* the client *r* gets. **The camera
+is never replicated** (§5g), so interest follows the avatar, not where a client looks, and no client can
+widen or narrow it. All filtering is relay-side, outbound and per receiver; client shards keep
+`add_interest("conf")` + enforcement as defense in depth. Code: `room_aoi.h` (pure tiers, immutable
+snapshot, filter, media decisions, push schedule, presets, audio curve) and `room_aoi_relay.h` (the
+driver + `relay_room_step`), under `inc/cvc/ariadne/conference/`.
+
+| Tier | Subject's pose | Camera | Mic |
+|---|---|---|---|
+| **inner** | live, every room step (~20 Hz) | full rate | yes |
+| **middle** | relay **pushes**: 5 Hz while it moves, a 5 s refresh while still | **MJPEG thumbnails at 2 fps** | yes |
+| **outer** | relay pushes, as for middle | none | none |
+
+Tiers have hysteresis: 2 m enter/exit bands; an upgrade is immediate (outer→inner in one step); a
+downgrade moves one tier, and only after the distance has stayed past the exit radius for 1 s.
+
+**Presets** (`aoi_params`; a default-constructed one *is* the conference preset):
+
+| Preset | inner enter/exit | middle enter/exit | Client audio | Default for |
+|---|---|---|---|---|
+| `conference` | 30 / 32 m | 40 / 44 m | gain 1 (the fade at 38–40 m is never reached) | the seeded 20 m room |
+| `hall` | 10 / 12 m | 16 / 18 m | `min(1, 10/d)`, fading to 0 over 14–16 m | `arisrv --scene large` |
+
+Shared defaults: 1 s downgrade dwell; pushes every 24 ticks at the 120 Hz holon quantum (5 Hz; with one
+6-tick room step of jitter that fits `holon_config::max_peer_span_ticks` = 30, so a pushed peer never
+stutters); a 600-tick (5 s) refresh; 2 fps thumbnails; `video_full_max` 0 (every inner camera at full
+rate); a 2 m audio fade. The conference radii exist so the 20 m room is provably unchanged: the plane is
+[-10,10]², its diagonal 28.3 m, so every pair is inner at first sight and stays inner (pinned by
+`RoomAoiTest.ConferencePresetCoversDefaultRoom`). The relay publishes the active parameters once under
+`conf.rooms.<room>.aoi.*`; clients read them about once a second for their audio gain. An absent
+subtree (an older relay) means gain 1; with `--aoi off` or `--s7 off` the relay writes them disabled
+(`aoi.enabled` 0), also gain 1 — so a client that lived through an earlier relay's AOI and kept its
+leaves follows the restarted relay. The fade ends at `middle_enter`, the *upgrade*
+radius, so the relay's cut (outer) and its resume (back to middle) both happen in silence.
+
+**State: a deny-only predicate that fails open.** Per receiver, the relay installs an
+`aoi_state_filter` on both transports' peer registries. Under `conf.rooms.<room>.participants.<q>`
+it denies only: another participant's `intent` (only the relay and its owner read it); *q*'s whole
+`pose` subtree, `server_tick` included, unless the pair is inner; and a departed *q*'s `pose` and
+`intent` (the soft-left ghost). Everything else delivers — the receiver's own subtree,
+presence/profile/net/streams/voice of every participant (the roster stays room-wide, §5b; a departed
+one's `net` and `voice` too, so an in-process reconnect's writes made before its rejoin lands are never
+withheld), `scene`, `server`, `aoi`, unknown pids and unknown leaf families — so a new family is never
+dropped silently. The relay remembers the most recent 1024 departures; an older ghost falls back to the
+unknown-pid rule. A pid that is no C identifier (the room tree takes any child name; a registry entry
+cannot) is filtered as a subject but never registered as a receiver — no connection can carry it.
+
+**Pose pushes.** A non-inner subject's pose reaches the receiver as a targeted snapshot
+(`state_transport::push_snapshot_to`) carrying its whole pose subtree, with `server_tick` re-stamped to
+the relay holon's *current* tick and written last: the tree's heartbeat tick for a still subject can be
+~120 ticks old, and a client re-aligns its whole clock (and rubber-bands) on more than 24 ticks of skew.
+A pair entering inner, and a new pair that starts middle or outer, is pushed at once. `relay_room_step`
+sends every push **before** the step's `drain_local` + publish, so on each connection a push precedes
+that tick's live writes.
+
+**Media gate — MJPEG-only thumbnails.** The driver installs `media_endpoint::set_media_gate` on both
+relay transports; the router's fan-out asks it once per receiver per frame. Outer drops everything. Only
+stream `camera` in codec `mjpeg` is ever thumbnailed (MJPEG is intra-only, so any subset of frames
+decodes): always in middle, and in inner only under the opt-in `--aoi-video-max K` cap (nearest *K*,
+swapped only past a 1 m margin). Every other stream and codec — the mic, H.264, an MJPEG screen-share
+under another stream id — is delivered in inner and middle (fail open). The first frame after a tier
+change goes out at once. A node's own uplink (`publish_media_frame`) is never gated, and an unidentified
+receiver always gets the frame. The nearest-*K* cap is off by default because `conference_roster.ari`
+tiles `cam_<i>` in roster order, not by distance, so a cap would put visible tiles at 2 fps.
+
+**gRPC media stall drop.** `--media-stall-ms 40`: the gRPC relay skips a receiver whose in-flight media
+write started more than 40 ms ago (a full flow-control window), and one whose stream a frame cannot get
+within 40 ms, rather than queue the publisher's reader thread behind it — the counterpart of the
+WebSocket leg's 32 KB backlog drop. It covers every gRPC media write, the relay's own uplink included,
+and the media gate is asked only once the stream is held, so a dropped frame spends no thumbnail. (A
+write that starts and then blocks still holds its own thread until the 3 s watchdog; only an
+asynchronous write path would avoid that.)
+
+**Transport and journal changes** (detail in DISTRIBUTED_STATE_ROADMAP.md, "Landed for the conference
+relay"): a deny-only per-peer delivery predicate on `state_peer_registry`; write-once connection
+identity (fixes a `remote_node_id` data race; a second Hello is ignored); the registry honoured on every
+room-state send (relay forward loops, the WS ~1 Hz broadcast per connection, the gRPC snapshot
+responder); `push_snapshot_to`; the **relay interest gate** (when on, a forwarded frame that no local
+same-cluster shard `admits()` is withheld from both the relay fan and the bridge; delegation ops still
+pass); and the
+**journal trim** (relay backfill off, `trim_published()` after each drain, `replay_after` by binary
+search), because the admit snapshot already carries every relay-local leaf.
+
+**Client changes.**
+* **Shard rooted at `"conf"`** (`state_cluster_shard(app, "conf", node, "conf")`): `ui.docs.*` —
+  marker matrices at 30 Hz while avatars move, camera/HUD state, ping leaves — is no longer journaled,
+  drained or sent. That ends the `ui.docs` echo through the relay and the client journal that grew from
+  it; unsolicited-snapshot ingest now also honours enforced interest on both transports.
+* **`pose_known` (no origin ghost).** `client_pump` registers a peer that has no replicated pose with
+  `holon::add_participant(…, pose_known = false)`: no Jolt body (it used to be an invisible obstacle at
+  the origin, inside the reference box) and no marker or label until its first sample, which creates a
+  kinematic body there. One's own avatar appears at its first pose with no glide from the origin.
+  `holon::clock_realigns()` counts clock seeks, and arigl logs each one.
+* **Pose leaves journal once per change** (`write_pose`: touch only for a new, empty or forced leaf),
+  halving pose egress, backfill and journal growth; `write_intent` and the existing `room_*` leaves keep
+  always-touch (their re-send semantics rely on it).
+* **Audio.** Per-peer gain is `aoi_audio_gain` over the XY distance (once both poses are known). A peer's
+  audio clock is followed only while its audio is fresh (0.5 s), so a gated or muted mic no longer
+  freezes that peer's video. Each client writes a changed-only `participants.<pid>.voice.talking` leaf
+  (one mutation per change), which lights the name of a peer whose audio is stale or gated; no `.ari`
+  change.
+* **Mesh LOD in `room_view`.** It owns a `LodPyramidCache` that outlives whole-scene re-realizes,
+  realizes with `RealizeOptions{&cache}`, and runs `SceneGraph::selectLOD` from its one camera every
+  frame (`balanced` natively, `aggressive` under `__EMSCRIPTEN__`). Eligible: a file/URI mesh of ≥ 4096
+  triangles with no texture, shader, clip, body or children. Physics never sees a rung (`room_statics`
+  keeps primitives only). Builds run on one `async_lane` (deferred to one per frame on single-threaded
+  wasm), one per distinct mesh, capped at 2M triangles threaded and 60k single-threaded — so the deployed
+  single-threaded cyprty keeps the 69,473-triangle bunny at rung 0 and logs the refusal once.
+* **`--scene large`**: a 100 m plane, the reference box, and 24 `x.bunny` meshes on a 5×5 lattice 20 m
+  apart (the centre cell, which holds the box and the spawn ring, is skipped), each fitted ~1.7 m tall
+  by new `source.fit.{height, up_y}` scene leaves (a fit, not a transform scale, so LOD errors are in
+  metres); one pyramid serves all 24.
+
+**Switches.** In the library every relay mechanism is **opt-in and off by default** (no filter or gate
+until one is installed, `set_relay_requires_interest(false)`, backfill on and no trim,
+`set_media_stall_drop(0)`, `RealizeOptions{}` makes no LOD node, and `relay_room_step(…, nullptr, …,
+false)` is the old drain-and-publish exactly); arisrv and arigl turn them on.
+
+| Switch | Default | Effect |
+|---|---|---|
+| `arisrv --s7 on\|off` / `CVC_ARISRV_S7=0\|1\|on\|off` | on | **master kill switch**: off forces `--aoi off`, gate off, journal keep, stall drop 0 — the pre-S7 relay (plus the disabled `aoi.*` leaves) |
+| `--aoi off\|conference\|hall` / `CVC_ARISRV_AOI` | conference (hall with `--scene large`) | off: no filters, pushes or media gate; `aoi.enabled` 0 |
+| `--aoi-video-max K` | 0 (all) | opt-in nearest-*K* full-rate cameras; the rest of the inner peers as thumbnails |
+| `--relay-gate on\|off` | on | off: forward every client frame |
+| `--relay-journal trim\|keep` | trim | keep: journal backfill on connect, no trim |
+| `--media-stall-ms N` | 40 | gRPC stall drop; 0 = off |
+| `--scene default\|large` | default | the seeded scene; not an S7 switch (honoured under `--s7 off`) |
+| `CVC_ARISRV_ROOM_DEBUG=1` | off | adds an `[arisrv] aoi` stats line every ~5 s |
+| `CVC_ARIGL_REPLICATE_ROOT` (arigl) | unset = `conf` | empty or `*`: replicate the whole tree (the S6 A/B) |
+| `CVC_ARIGL_LOD=0` (arigl) | LOD on | every room mesh at full detail (the LOD A/B) |
+
+An invalid arisrv value is a usage error (exit 2); arisrv prints the effective configuration at start.
+Always on, with no switch: `pose_known`, single pose journaling, the write-once identity, the registry
+checks (a no-op without a filter), interest-checked snapshot ingest (a no-op without enforcement), the
+client's audio-clock staleness and its `voice.talking` leaf. The A/B "before" is `--s7 off` with
+`CVC_ARIGL_REPLICATE_ROOT=*`, which is S6 apart from those.
+
+**The default 20 m room.** It *will* show: no origin ghost or invisible obstacle at join, and one's own
+avatar at its first pose (arigl frames the camera there); less control-plane traffic while walking (the
+`ui.docs` echo gone, poses single-journaled, others' intents and departed ghosts' poses withheld);
+joins that no longer replay the relay's whole journal (admit snapshot, no backfill), with relay journal
+and drain cost flat — a join still grows with the soft-left ghosts' subtrees the room tree keeps until
+Phase-2 reaping, as in S6; and a peer's video that keeps running when its mic is cut. It will **not** show tiering, pose
+pushes, thumbnails, audio rolloff or LOD — every pair is inner, and the plane (2 triangles) and box (12)
+are far below the 4096-triangle LOD minimum. Media is unchanged, apart from the gRPC stall drop for a
+receiver whose writes are stuck. `arisrv --scene large` (hall) is the demo for all of those.
+
+**Compatibility.** A pre-S7 client on an S7 relay keeps uplinking the `ui.docs` echo (the gate withholds
+it from everyone else), plays every peer at gain 1, draws the large scene's bunnies unfitted (~15 cm,
+on their side) and pose-less peers at the origin. An S7 client on a pre-S7 relay finds no `aoi.*`
+subtree and plays at gain 1.
+
+**Known limits.**
+* The admit snapshot a connection gets before its Hello is unfiltered (there is no identity to filter
+  by yet), so a late joiner sees every participant's *current* intent once, and the non-inner poses
+  and ghost leftovers the live filters would withhold. Live traffic after that is filtered.
+* A process that restarts under the node id of a live session has its writes ignored until the relay
+  restarts (replication drops an `(origin, sequence)` it has seen), which is why arigl takes a fresh id
+  per launch. An in-process reconnect keeps its id and its sequence, and works: the relay withholds the
+  departed subject's pose meanwhile, and a client takes the pose subtree a peer left behind for no pose
+  until a newer sample (`holon::left_tick`).
+* The WebSocket leg's ~1 Hz re-broadcast was a full tree per connection, filtered but otherwise
+  unchanged by S7, and in the hall it dominated a browser's state traffic (**Measured**). It now sends
+  each connection a diff (see the deferred note below).
+
+**Measured** (`arisrv_aoi_bench` on catx-03, 24 cores: the relay plus N synthetic clients in one
+process on loopback, WS and gRPC alternating, 10 s windows; `--s7 off` is the S6 relay and clients).
+Media off, so the state plane alone:
+
+| | S6 | S7 |
+|---|---|---|
+| 20 m room, 8 walking — relay egress | 6.4 Mb/s | 3.3 Mb/s |
+| … others' intents, per receiver | 40.6 kb/s | 0 |
+| … a late joiner's bootstrap | 309 kB | 35 kB |
+| hall, 12 in clusters (48 of 66 pairs outer) — per gRPC receiver | 242 kb/s | 162 kb/s |
+| … a late joiner's bootstrap | 491 kB | 215 kB |
+| hall, 12 standing still — per WS receiver (the 1 Hz re-broadcast) | 847 kb/s | 768 kb/s |
+
+**WS re-broadcast diffs.** Same bench, run on sandipaws: a Windows static Release build, the S7
+base and the diff change built in one tree, 12 in clusters in the hall, media off, 20 s windows.
+The ranges cover two runs each:
+
+| | full tree (S7) | diffs |
+|---|---|---|
+| 12 walking — per WS receiver, link in | 196–254 kb/s | 39–45 kb/s |
+| … snapshot entries it applied | 316–409 /s | 36–44 /s |
+| … relay egress | 1.4–1.8 Mb/s | 0.46–0.54 Mb/s |
+| 12 standing still — per WS receiver, link in | 298 kb/s | 30.5 kb/s |
+| … snapshot entries it applied | 489 /s | 15 /s |
+| a late joiner's bootstrap | 203–223 kB | 105–120 kB |
+
+A gRPC receiver never got the re-broadcast, and its rate did not change (32–42 kb/s walking, 23 kb/s
+standing). A browser now costs within ~7 kb/s of a native client. The remainder is each path touched
+live since the last call, sent once more, plus the receiver's own writes echoed back. The late joiner
+converged on its first check in both builds.
+
+With media on: in the 20 m room the gate denied no frame (4 and 8 clients: every pair inner); in the
+hall it withheld 2,688 of 3,695 camera and mic frames (73%) for 12 in clusters, and sent 157 MJPEG
+thumbnails for 16 walking across the tiers. No run showed an origin ghost; clock re-aligns stayed at
+0–3 per run in both modes. Caveats: the bench is one thread, CPU-bound at these sizes (room-step p99
+35–130 ms), so its media rates follow the loop rate and are compared by counts, not rates; and its
+reconcile-correction sum varies two-fold between identical runs, so it says nothing either way.
+
+**Deferred, with destinations.**
+* Scene spatial interest (`scene.cells.<i>_<j>`, per-cell revs and realize) → **H3**. The scene is a
+  handful of objects written once (2 in the default room, 26 in `--scene large`), so there is no
+  bandwidth to win, and a client's physics statics must stay complete for its prediction to match the
+  server's.
+* Client- or camera-declared interest (a fly camera far from the avatar; a client want-list plus a relay
+  clamp) and a grid-hash AOI broad phase for N > ~200 → **H3**, on S7's registry filter.
+* Admission-scoped bootstrap (the admit snapshot goes out before Hello, unfiltered) → **§5e item 2**.
+  Bootstrap ghost trim and hard reaping of departed subtrees → **Phase 2 / §5e item 4**.
+* A video subscription matching visible cam tiles, simulcast/resolution tiers, inter codecs, stereo
+  panning, an "out of range" tile placeholder; peer-staleness hiding (reconciled with the 5 s outer
+  refresh) → **Phase 7**.
+* Interest as access control, spoofed media `origin_node_id`, forwarding of authority-rejected writes →
+  **§5e items 1–2 / Phase 8**.
+* Avatar frustum/screen-size culling, label nearest-*K* caps and the `cvc::vis` ViewParams adapter →
+  **VISIBILITY-AND-LOD §4.1** follow-up (inert at room scale). Per-camera `RenderView`/`VisibilityMask`
+  → **CVCGL-UI-DSL stage C**.
+* The LOD budget solver over `LodGraphicsNode`s, relay-baked `cvch5` pyramids and networked LOD
+  streaming (wasm has no HDF5) → **H3**; physics/sim LOD and re-hydrate on interest entry → **H2**;
+  per-object diff realize in `room_view` → with per-cell revs (**H3**); an `.ari` `lod:` key and LOD for
+  `AriRuntime` documents → **§5i**.
+* `LodGraphicsNode::select` compares mesh-unit errors with world distances, so a transform-scaled LOD
+  node coarsens at the wrong distance (the large scene avoids it with `fit`) → LOD follow-up.
+* Client journal trim, WebSocket `request_snapshot` and a gRPC periodic snapshot →
+  DISTRIBUTED_STATE_ROADMAP.md (known gaps); a WS `send_backlog` on Windows-hosted relays (`SIOCOUTQ` is
+  Linux-only) → transport follow-up. ~~An incremental WS re-broadcast in place of the ~1 Hz full
+  tree~~ **done**: `broadcast_snapshot` now sends each connection only the entries it does not already
+  hold. Per connection it keeps a digest of what the last snapshot frame carried for each path, and
+  forgets a path whenever any other frame touching it is written to that peer or arrives from it
+  (a live mutation, a push, the peer's own write). A missed live re-fan is still healed on the next
+  call, and an unchanged tree costs nothing. A client gets the whole tree only when it asks
+  (`state_transport_ws::request_full_refresh`, a SnapshotRequest) — for state it dropped on its own
+  side, which the relay cannot see. There is no periodic full snapshot. The broadcast still snapshots
+  and digests the whole tree once per call; caching that → only if the N = 64 bench shows the ~1 Hz
+  broadcast costing > 20 ms/s. Merging the visor into the body mesh (2N → N avatar actors) → perf
+  follow-up.
 
 ---
 
@@ -613,7 +879,8 @@ browser, then the browser itself, then the MVP.
   video conference.
 * **Phase 7 — scale & robustness (§7).** Interactive toward ~200 (simulcast/active-speaker selection,
   off-screen pause, pool/thread/bandwidth budgets); the **broadcast→thousands** regime (cascaded/edge
-  SFUs); reconnection/presence/heartbeat; TLS end-to-end.
+  SFUs); reconnection/presence/heartbeat; TLS end-to-end. *S7's per-receiver media gate (§5h.1) is the
+  first selection hook on the relay: distance tiers, MJPEG thumbnails, a gRPC stall drop.*
 * **Phase 8 — mesh + auth hardening + WASI.** `mode: mesh` (WebRTC peer / native serve+pull) with the
   **DC++-style reverse-connect** for NAT (§6g); connection-bound identity + distributed `write_policy`
   for mesh authz; identity (OIDC via SSO / revocable txwtf-style JWT); the **WASI server** build (fill
@@ -659,8 +926,8 @@ mesh works first, auth hardens later (§5, Phase 8); **WASI server committed** (
   [`STATE_LIFETIME_AND_ATOMICITY.md`](STATE_LIFETIME_AND_ATOMICITY.md).
 * UI DSL (status refreshed in #764; `input_text`/widgets landed): [`CVCGL-UI-DSL-ROADMAP.md`](CVCGL-UI-DSL-ROADMAP.md).
 * World clock / sim pacing (holon driver, §5h): [`WORLD-CLOCK-SYNC-ROADMAP.md`](WORLD-CLOCK-SYNC-ROADMAP.md).
-* LOD — geometry (holon §5h; **doc stale — landed PR #249+**):
-  [`VISIBILITY-AND-LOD-ROADMAP.md`](VISIBILITY-AND-LOD-ROADMAP.md).
+* LOD — geometry (holon §5h; **doc stale — landed PR #249+**; what the room uses since S7 is in its
+  §4.1 status note): [`VISIBILITY-AND-LOD-ROADMAP.md`](VISIBILITY-AND-LOD-ROADMAP.md).
 * Physics (holon §5h): [`NAV-VEHICLE-PHYSICS-ROADMAP.md`](NAV-VEHICLE-PHYSICS-ROADMAP.md).
 
 ---
@@ -673,7 +940,8 @@ though it shipped in **#636** — now corrected). The statuses below are **verif
 
 **Landed (several still listed open/planned in the docs — refresh needed):**
 * `input_text` / `input_int` widgets (§3.5/§6) — `src/cvc/ariadne/loader.cpp:650` (#636).
-* Multi-view **`RenderView` / `VisibilityMask`** (§9.5) — `src/cvcGL/RenderView.cpp`.
+* Multi-view **`RenderView` / `VisibilityMask`** (§9.5) — `src/cvcGL/RenderView.cpp`. They drive the
+  `cvc::gl::Node` graph, not `SceneGraph`, so the conference's `room_view` does not use them (§5h, H1).
 * **Light** scene node (§9.1) — `src/cvcGL/LightNode.cpp` + loader `"light"`.
 * **Clipboard** (§17.8) — `src/cvcGL/Clipboard*.{cpp,mm}`.
 * `state_exec` **async-scheduler parity** (§7.1/§7.7) — `receive_message`/`sleep`/`yield_frame` in

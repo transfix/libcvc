@@ -16,6 +16,7 @@
 // a server override snaps the client); a client never drives a peer; and a peer is
 // interpolated through the holon's frame alpha, never overshooting.
 
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <cvc/ariadne/avatar_sim.h>
@@ -23,6 +24,8 @@
 #include <cvc/physics/body.h>
 #include <cvc/physics/types.h>
 #include <gtest/gtest.h>
+#include <limits>
+#include <vector>
 
 using cvc::ariadne::avatar_intent;
 using cvc::ariadne::avatar_sim;
@@ -303,4 +306,484 @@ TEST(HolonTest, TakeCorrectionReportsReconcileJumpsOnce) {
   EXPECT_DOUBLE_EQ(client.take_correction("A").y, 0.0) << "taken, so cleared";
   EXPECT_DOUBLE_EQ(client.take_correction("B").y, 0.0) << "a peer has no corrections";
   EXPECT_DOUBLE_EQ(client.take_correction("nobody").y, 0.0);
+}
+
+// ── stamped intents: the server applies each at the tick the client did ─────
+
+TEST(HolonTest, ServerAppliesAStampedIntentAtItsTick) {
+  holon server(holon_role::server);
+  server.add_participant("A");
+  const double dt = server.clock().fixed_dt();
+  const auto frames = [&](int n) {
+    for (int i = 0; i < n; ++i)
+      server.advance(dt);
+  };
+  frames(10);
+  ASSERT_EQ(server.tick(), 10u);
+
+  // Stamped for tick 15: ticks 11-14 still stand, 15-20 walk at 2 m/s.
+  server.queue_intent("A", avatar_intent{vec3{2.0, 0.0, 0.0}}, 15);
+  server.queue_intent("A", avatar_intent{vec3{2.0, 0.0, 0.0}}, 15); // re-read: a no-op
+  frames(10);
+  ASSERT_EQ(server.tick(), 20u);
+  avatar_sim ref;
+  for (int i = 0; i < 6; ++i)
+    ref.step(avatar_intent{vec3{2.0, 0.0, 0.0}}, dt);
+  expect_pos_bit_eq(server.state("A").position, ref.state().position);
+
+  // A late stamp (its tick already integrated) takes effect at the next tick.
+  server.queue_intent("A", avatar_intent{vec3{0.0, 0.0, 0.0}}, 12);
+  server.advance(dt);
+  expect_pos_bit_eq(server.state("A").position, ref.state().position);
+
+  // A stamp far beyond the allowed lead (a client whose clock is off) also applies at once.
+  server.queue_intent("A", avatar_intent{vec3{0.0, 3.0, 0.0}}, 1'000'000);
+  server.advance(dt);
+  EXPECT_DOUBLE_EQ(server.state("A").position.y, 3.0 * dt);
+
+  // set_intent (untimed) drops anything still queued.
+  server.queue_intent("A", avatar_intent{vec3{9.0, 0.0, 0.0}}, server.tick() + 5);
+  server.set_intent("A", avatar_intent{vec3{0.0, 0.0, 0.0}});
+  const vec3 before = server.state("A").position;
+  frames(10);
+  expect_pos_bit_eq(server.state("A").position, before);
+}
+
+// A client that runs AHEAD of the server by the round trip has its stamped intents reach the
+// server before their tick, so the server's poses agree with its prediction exactly: across a
+// walk with several key changes, reconcile corrects nothing. The same exchange with no lead (the
+// intents arrive late) needs corrections -- the latency the lead removes.
+namespace {
+double total_correction(std::uint64_t lead) {
+  constexpr int kDelay = 6; // frames (= ticks) each way
+  holon server(holon_role::server);
+  holon client(holon_role::client);
+  server.add_participant("A");
+  client.add_participant("A", /*local=*/true);
+  client.set_lead_ticks(lead);
+  const double dt = server.clock().fixed_dt();
+  struct intent_msg {
+    int at;
+    avatar_intent in;
+    std::uint64_t stamp;
+  };
+  struct sample_msg {
+    int at;
+    body_state s;
+    std::uint64_t tick;
+  };
+  std::vector<intent_msg> up;
+  std::vector<sample_msg> down;
+  double corrected = 0.0;
+  avatar_intent cur;
+  for (int f = 0; f < 400; ++f) {
+    // Keys: walk +x, strafe, stop, walk -y, stop.
+    avatar_intent want = cur;
+    if (f == 60)
+      want.move = vec3{2.0, 0.0, 0.0};
+    if (f == 110)
+      want.move = vec3{0.0, 2.0, 0.0};
+    if (f == 150)
+      want.move = vec3{0.0, 0.0, 0.0};
+    if (f == 200)
+      want.move = vec3{0.0, -2.0, 0.0};
+    if (f == 260)
+      want.move = vec3{0.0, 0.0, 0.0};
+    if (want.move.x != cur.move.x || want.move.y != cur.move.y) {
+      cur = want;
+      client.set_intent("A", cur);
+      up.push_back({f + kDelay, cur, client.tick() + 1});
+    }
+    client.advance(dt);
+    for (auto it = up.begin(); it != up.end();)
+      if (it->at <= f) {
+        server.queue_intent("A", it->in, it->stamp);
+        it = up.erase(it);
+      } else {
+        ++it;
+      }
+    server.advance(dt);
+    down.push_back({f + kDelay, server.state("A"), server.tick()});
+    for (auto it = down.begin(); it != down.end();)
+      if (it->at <= f) {
+        client.apply_authoritative("A", it->s, it->tick);
+        it = down.erase(it);
+      } else {
+        ++it;
+      }
+    const vec3 c = client.take_correction("A");
+    if (f >= 60) // after the first sample aligned the clocks
+      corrected += std::fabs(c.x) + std::fabs(c.y) + std::fabs(c.z);
+  }
+  return corrected;
+}
+} // namespace
+
+TEST(HolonTest, ALeadingClientNeedsNoCorrections) {
+  EXPECT_EQ(total_correction(/*lead=*/2 * 6 + 2), 0.0);
+  EXPECT_GT(total_correction(/*lead=*/0), 0.1) << "without the lead the intents land late";
+}
+
+TEST(HolonTest, ClientAlignsAheadOfTheServerByItsLead) {
+  holon client(holon_role::client);
+  client.add_participant("A", /*local=*/true);
+  client.set_lead_ticks(14);
+  body_state s;
+  client.apply_authoritative("A", s, 100);
+  EXPECT_EQ(client.tick(), 114u);
+  // Within the slack it is left alone; falling further behind its target re-aligns.
+  client.apply_authoritative("A", s, 104); // target 118, 4 behind
+  EXPECT_EQ(client.tick(), 114u);
+  client.apply_authoritative("A", s, 120); // target 134, 20 behind
+  EXPECT_EQ(client.tick(), 134u);
+}
+
+// Every clock seek drops the local avatar's unacknowledged inputs, so after the one at join a
+// client should see none; clock_realigns counts them, so a host can tell when it does.
+TEST(HolonTest, RealignCounterCountsSeeks) {
+  holon client(holon_role::client);
+  client.add_participant("A", /*local=*/true);
+  client.add_participant("B", /*local=*/false);
+  client.set_lead_ticks(14);
+  EXPECT_EQ(client.clock_realigns(), 0u);
+  body_state s;
+  client.apply_authoritative("A", s, 100); // joining: the clock seeks to 114
+  ASSERT_EQ(client.tick(), 114u);
+  EXPECT_EQ(client.clock_realigns(), 1u) << "the alignment at join counts";
+  const double dt = client.clock().fixed_dt();
+  for (int i = 0; i < 30; ++i)
+    client.advance(dt);
+  ASSERT_EQ(client.tick(), 144u);
+
+  // Target 112 + 14 = 126, 18 ticks behind the replica: within the slack, no seek.
+  client.apply_authoritative("A", s, 112);
+  EXPECT_EQ(client.tick(), 144u);
+  EXPECT_EQ(client.clock_realigns(), 1u) << "an in-tolerance sample is not a re-alignment";
+
+  // A sample stamped more than lead_slack_ahead_ticks (24) behind -- a peer whose tick a
+  // heartbeat left old -- seeks the clock back, and counts.
+  client.apply_authoritative("B", s, 105); // target 119, 25 behind
+  EXPECT_EQ(client.tick(), 119u);
+  EXPECT_EQ(client.clock_realigns(), 2u);
+  client.apply_authoritative("B", s, 105); // already seen: not a sample, not a seek
+  EXPECT_EQ(client.clock_realigns(), 2u);
+}
+
+TEST(HolonTest, PeerSampleSpanIsCapped) {
+  holon_config cfg;
+  cfg.max_peer_span_ticks = 30;
+  holon client(holon_role::client, cfg);
+  client.add_participant("B", /*local=*/false);
+  const double dt = client.clock().fixed_dt();
+  body_state s0, s1;
+  s1.position = vec3{1.0, 0.0, 0.0};
+  client.apply_authoritative("B", s0, 10);
+  client.apply_authoritative("B", s1, 250); // after a long still spell (a heartbeat gap)
+  for (int i = 0; i < 31; ++i)
+    client.advance(dt);
+  EXPECT_GT(client.display_pose("B").position.x, 0.99) << "walked in over 30 ticks, not 240";
+}
+
+// ── physics: rigid-body avatars in a Jolt world ─────────────────────────────
+
+namespace {
+holon_config physics_config() {
+  holon_config cfg;
+  cfg.physics = true;
+  return cfg;
+}
+// A 20 m floor (a slab whose top is z = 0) and a 1 m cube at the origin, as the default room.
+std::vector<cvc::ariadne::avatar_static> room_statics() {
+  cvc::ariadne::avatar_static ground;
+  ground.center = vec3{0.0, 0.0, -0.1};
+  ground.half_extents = vec3{10.0, 10.0, 0.1};
+  cvc::ariadne::avatar_static cube;
+  cube.center = vec3{0.0, 0.0, 0.5};
+  cube.half_extents = vec3{0.5, 0.5, 0.5};
+  return {ground, cube};
+}
+body_state at(double x, double y, double z = 0.0) {
+  body_state s;
+  s.position = vec3{x, y, z};
+  return s;
+}
+void run(holon &h, int frames) {
+  for (int i = 0; i < frames; ++i)
+    h.advance(h.clock().fixed_dt());
+}
+} // namespace
+
+TEST(HolonPhysicsTest, AnAvatarStandsOnTheFloorAndFallsOntoIt) {
+  holon server(holon_role::server, physics_config());
+  if (!server.physics())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  server.set_statics(room_statics(), 1);
+  server.add_participant("A", false, at(4.0, 0.0, 1.0)); // a metre up
+  run(server, 240);                                      // 2 s
+  EXPECT_NEAR(server.state("A").position.z, 0.0, 0.02) << "gravity brought it down onto the floor";
+  EXPECT_NEAR(server.state("A").position.x, 4.0, 1e-3) << "and it stayed where it landed";
+}
+
+TEST(HolonPhysicsTest, AnAvatarAcceleratesWithInertia) {
+  holon server(holon_role::server, physics_config());
+  if (!server.physics())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  server.set_statics(room_statics(), 1);
+  server.add_participant("A", false, at(4.0, 0.0));
+  run(server, 12);
+  server.set_intent("A", avatar_intent{vec3{0.0, 2.0, 0.0}});
+  run(server, 6); // 50 ms at max_accel 12: ~0.6 m/s, not 2
+  const double v = server.state("A").linear_velocity.y;
+  EXPECT_GT(v, 0.3);
+  EXPECT_LT(v, 1.0) << "mass and a finite drive: no instant top speed";
+  run(server, 60);
+  EXPECT_NEAR(server.state("A").linear_velocity.y, 2.0, 0.05) << "then it reaches the intent's";
+}
+
+TEST(HolonPhysicsTest, AnAvatarStopsAtTheCube) {
+  holon server(holon_role::server, physics_config());
+  if (!server.physics())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  server.set_statics(room_statics(), 1);
+  server.add_participant("A", false, at(-3.0, 0.0));
+  server.set_intent("A", avatar_intent{vec3{2.0, 0.0, 0.0}});
+  run(server, 360); // 3 s: far enough to have walked through it
+  const vec3 p = server.state("A").position;
+  EXPECT_LT(p.x, -0.5 - 0.25 + 0.02) << "its front face stops at the cube's";
+  EXPECT_GT(p.x, -0.85);
+  EXPECT_NEAR(p.y, 0.0, 0.05);
+  EXPECT_NEAR(p.z, 0.0, 0.02) << "upright on the floor, not climbing or tipping";
+}
+
+TEST(HolonPhysicsTest, AvatarsCollideAndPushEachOther) {
+  holon server(holon_role::server, physics_config());
+  if (!server.physics())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  server.set_statics(room_statics(), 1);
+  server.add_participant("A", false, at(-6.0, 5.0));
+  server.add_participant("B", false, at(-4.0, 5.0)); // standing still, in A's way
+  server.set_intent("A", avatar_intent{vec3{2.0, 0.0, 0.0}});
+  run(server, 240); // 2 s
+  const vec3 a = server.state("A").position, b = server.state("B").position;
+  EXPECT_GE(b.x - a.x, 0.5 - 0.02) << "they never pass through each other";
+  EXPECT_GT(b.x, -4.0 + 0.5) << "A shoved B out of its way";
+  EXPECT_NEAR(a.z, 0.0, 0.02);
+  EXPECT_NEAR(b.z, 0.0, 0.02);
+}
+
+TEST(HolonPhysicsTest, AnAvatarThatFallsOffTheWorldRespawns) {
+  holon server(holon_role::server, physics_config());
+  if (!server.physics())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  server.set_statics(room_statics(), 1);
+  server.add_participant("A", false, at(9.0, 0.0));
+  server.set_intent("A", avatar_intent{vec3{3.0, 0.0, 0.0}});
+  run(server, 120); // walks off the edge at x = 10
+  EXPECT_LT(server.state("A").position.z, -0.5) << "it fell";
+  server.set_intent("A", avatar_intent{});
+  run(server, 360);
+  const vec3 p = server.state("A").position;
+  EXPECT_NEAR(p.x, 9.0, 0.05) << "and came back where it joined";
+  EXPECT_GT(p.z, -0.05);
+}
+
+// The leading client again, now with Jolt on both sides and the cube in the walk: the client's
+// world predicts the stop at the cube exactly as the server simulates it, so reconcile has nothing
+// to correct.
+TEST(HolonPhysicsTest, ClientPredictionMatchesTheServersPhysics) {
+  holon server(holon_role::server, physics_config());
+  holon client(holon_role::client, physics_config());
+  if (!server.physics() || !client.physics())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  server.set_statics(room_statics(), 1);
+  client.set_statics(room_statics(), 1);
+  server.add_participant("A", false, at(-3.0, 0.2));
+  client.add_participant("A", true, at(-3.0, 0.2));
+  constexpr int kDelay = 6;
+  client.set_lead_ticks(2 * kDelay + 2);
+  const double dt = server.clock().fixed_dt();
+  struct msg {
+    int at;
+    avatar_intent in;
+    std::uint64_t tick;
+    body_state s;
+  };
+  std::vector<msg> up, down;
+  avatar_intent cur;
+  double corrected = 0.0;
+  for (int f = 0; f < 600; ++f) {
+    avatar_intent want = cur;
+    if (f == 60)
+      want.move = vec3{2.0, 0.0, 0.0}; // into the cube
+    if (f == 300)
+      want.move = vec3{0.0, 2.0, 0.0}; // then along its face
+    if (f == 420)
+      want.move = vec3{0.0, 0.0, 0.0};
+    if (want.move.x != cur.move.x || want.move.y != cur.move.y) {
+      cur = want;
+      client.set_intent("A", cur);
+      up.push_back({f + kDelay, cur, client.tick() + 1, {}});
+    }
+    client.advance(dt);
+    for (auto it = up.begin(); it != up.end();)
+      if (it->at <= f) {
+        server.queue_intent("A", it->in, it->tick);
+        it = up.erase(it);
+      } else {
+        ++it;
+      }
+    server.advance(dt);
+    down.push_back({f + kDelay, {}, server.tick(), server.state("A")});
+    for (auto it = down.begin(); it != down.end();)
+      if (it->at <= f) {
+        client.apply_authoritative("A", it->s, it->tick);
+        it = down.erase(it);
+      } else {
+        ++it;
+      }
+    const vec3 c = client.take_correction("A");
+    if (f >= 60)
+      corrected += std::fabs(c.x) + std::fabs(c.y) + std::fabs(c.z);
+  }
+  EXPECT_LT(server.state("A").position.x, -0.5) << "the server stopped it at the cube";
+  EXPECT_LT(corrected, 1e-3) << "and the client predicted the same";
+  EXPECT_NEAR(client.state("A").position.x, server.state("A").position.x, 0.05);
+}
+
+// A peer the host registered before its pose arrived (client_pump does, from the roster) is a
+// member with nowhere to be yet: no kinematic body at its placeholder -- at the origin that would
+// be an invisible obstacle inside the reference cube -- until its first sample puts one there.
+// The placeholder here stands in the local avatar's path, so its absence is visible.
+TEST(HolonPhysicsTest, PoseLessPeerHasNoBodyUntilFirstSample) {
+  holon client(holon_role::client, physics_config());
+  client.add_participant("A", /*local=*/true, at(-3.0, 5.0));
+  client.add_participant("B", /*local=*/false, at(0.0, 5.0), /*pose_known=*/false);
+  EXPECT_TRUE(client.has_participant("B")) << "a member like any other";
+  EXPECT_TRUE(client.pose_known("A"));
+  EXPECT_FALSE(client.pose_known("B"));
+  EXPECT_FALSE(client.pose_known("nobody"));
+  if (!client.physics())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  client.set_statics(room_statics(), 1);
+  EXPECT_TRUE(client.has_body("A")) << "the local avatar is predicted from the start";
+  EXPECT_FALSE(client.has_body("B")) << "no body at the placeholder";
+  EXPECT_FALSE(client.has_body("nobody"));
+
+  // A walks through where the placeholder is: nothing there to stop it.
+  client.set_intent("A", avatar_intent{vec3{2.0, 0.0, 0.0}});
+  run(client, 300); // 2.5 s: about 4.8 m
+  const double walked = client.state("A").position.x;
+  EXPECT_GT(walked, 1.0) << "on past the placeholder";
+
+  // B's first sample, 1.5 m ahead of A: a kinematic body at the sample, which A walks into.
+  const double bx = walked + 1.5;
+  client.apply_authoritative("B", at(bx, 5.0), client.tick());
+  EXPECT_TRUE(client.pose_known("B"));
+  EXPECT_TRUE(client.has_body("B"));
+  run(client, 240);
+  const vec3 a = client.state("A").position;
+  EXPECT_LT(a.x, bx - 0.5 + 0.02) << "A's front face stops at B's";
+  EXPECT_GT(a.x, bx - 0.6);
+  EXPECT_NEAR(a.y, 5.0, 0.05);
+}
+
+// ── authority: the server's veto and overrides (§5h propose -> veto -> override) ──
+
+TEST(HolonAuthorityTest, TheVetoCapsSpeedDropsTheVerticalAndRejectsNonFinite) {
+  holon_config cfg;
+  cfg.max_speed = 3.0;
+  holon server(holon_role::server, cfg);
+  const double nan = std::nan("");
+  avatar_intent fast{vec3{30.0, 40.0, 5.0}};
+  fast.yaw = 7.0; // more than a turn
+  const avatar_intent a = server.sanitize_intent(fast);
+  EXPECT_NEAR(a.move.x, 1.8, 1e-12) << "scaled down to max_speed, direction kept";
+  EXPECT_NEAR(a.move.y, 2.4, 1e-12);
+  EXPECT_EQ(a.move.z, 0.0) << "avatars walk; gravity owns z";
+  EXPECT_NEAR(a.yaw, 7.0 - 2.0 * 3.14159265358979323846, 1e-12) << "wrapped to [-pi, pi]";
+  avatar_intent bad{vec3{nan, 1.0, 0.0}};
+  bad.yaw = std::numeric_limits<double>::infinity();
+  const avatar_intent b = server.sanitize_intent(bad);
+  EXPECT_EQ(b.move.x, 0.0);
+  EXPECT_EQ(b.move.y, 0.0) << "a non-finite move is no move at all";
+  EXPECT_EQ(b.yaw, 0.0);
+  const avatar_intent ok{vec3{1.0, 1.0, 0.0}};
+  const avatar_intent c = server.sanitize_intent(ok);
+  EXPECT_TRUE(c.move.x == 1.0 && c.move.y == 1.0 && c.yaw == 0.0)
+      << "an honest intent passes as is";
+
+  // The server integrates the vetoed intent, and counts the veto.
+  server.add_participant("A");
+  const double dt = server.clock().fixed_dt();
+  server.set_intent("A", avatar_intent{vec3{100.0, 0.0, 0.0}});
+  for (int i = 0; i < 120; ++i)
+    server.advance(dt);
+  EXPECT_NEAR(server.state("A").position.x, 3.0, 1e-6) << "1 s at the 3 m/s cap, not 100";
+  server.queue_intent("A", bad, server.tick() + 1);
+  EXPECT_EQ(server.vetoes(), 2u);
+}
+
+// A client that asks for more than the cap predicts with the vetoed intent too, so it still agrees
+// with the server: the veto costs an honest client nothing, and a client running a modified
+// prediction is simply overruled on reconcile.
+TEST(HolonAuthorityTest, AClientPredictsTheVetoedIntent) {
+  holon server(holon_role::server);
+  holon client(holon_role::client);
+  server.add_participant("A");
+  client.add_participant("A", true);
+  const double dt = server.clock().fixed_dt();
+  const avatar_intent greedy{vec3{50.0, 0.0, 0.0}};
+  server.set_intent("A", greedy);
+  client.set_intent("A", greedy);
+  for (int f = 1; f <= 60; ++f) {
+    server.advance(dt);
+    client.advance(dt);
+    client.apply_authoritative("A", server.state("A"), server.tick());
+  }
+  const vec3 c = client.take_correction("A");
+  EXPECT_EQ(c.x, 0.0);
+  EXPECT_DOUBLE_EQ(client.state("A").position.x, server.state("A").position.x);
+  EXPECT_NEAR(server.state("A").position.x, 0.5 * 4.0, 1e-6) << "0.5 s at the default 4 m/s cap";
+}
+
+TEST(HolonAuthorityTest, TheServerTeleportsAnAvatarAndTheClientFollows) {
+  holon server(holon_role::server);
+  holon client(holon_role::client);
+  server.add_participant("A");
+  client.add_participant("A", true);
+  const double dt = server.clock().fixed_dt();
+  server.advance(dt);
+  client.advance(dt);
+  EXPECT_FALSE(client.override_state("A", at(9.0, 9.0))) << "only the authority overrides";
+  ASSERT_TRUE(server.override_state("A", at(6.0, -2.0)));
+  EXPECT_FALSE(server.override_state("nobody", at(0.0, 0.0)));
+  server.advance(dt);
+  client.advance(dt);
+  client.apply_authoritative("A", server.state("A"), server.tick());
+  EXPECT_DOUBLE_EQ(client.state("A").position.x, 6.0) << "the owner reconciles to the override";
+  EXPECT_DOUBLE_EQ(client.state("A").position.y, -2.0);
+}
+
+TEST(HolonAuthorityTest, AReMassedAvatarIsHarderToPush) {
+  // How far a 70 kg walker shoves a still avatar of mass `kg` in 2 s.
+  const auto shove = [](double kg) {
+    holon server(holon_role::server, physics_config());
+    if (!server.physics())
+      return -1.0;
+    server.set_statics(room_statics(), 1);
+    server.add_participant("A", false, at(-6.0, 5.0));
+    server.add_participant("B", false, at(-4.0, 5.0));
+    EXPECT_TRUE(server.set_mass("B", kg));
+    server.set_intent("A", avatar_intent{vec3{2.0, 0.0, 0.0}});
+    run(server, 240);
+    return server.state("B").position.x - (-4.0);
+  };
+  const double light = shove(70.0), heavy = shove(2000.0);
+  if (light < 0.0)
+    GTEST_SKIP() << "no Jolt backend in this build";
+  EXPECT_GT(light, 0.5) << "an equal mass is shoved aside";
+  EXPECT_LT(heavy, 0.5 * light) << "a heavy one barely gives way";
+  holon client(holon_role::client, physics_config());
+  client.add_participant("A", true);
+  EXPECT_FALSE(client.set_mass("A", 10.0)) << "only the authority re-masses";
 }

@@ -110,9 +110,25 @@ public:
   // process over the SAME shards; a small bridge (Phase 2) relays frames between
   // the two transports' connection sets so WS and gRPC clients share the room.
   // Off by default — a leaf client applies a received frame locally and never
-  // re-sends it.
+  // re-sends it. Each forward honours the target peer's registry entry
+  // (subscriptions + delivery filter), exactly as publish() does.
   void set_relay(bool enable) noexcept { _relay.store(enable, std::memory_order_relaxed); }
   bool relay() const noexcept { return _relay.load(std::memory_order_relaxed); }
+
+  // Relay interest gate (opt-in; default off). When on, a Mutation/Message received from a
+  // connection is re-fanned -- to the other connections AND across the bridge -- only when some
+  // registered same-cluster shard would admit it (state_cluster_shard::admits / admits_message:
+  // the path is of interest, and a delegation op always passes). A relay whose clients all
+  // enforce the relay's own interest set thereby stops forwarding frames no client would apply.
+  // A relay with no matching shard still forwards everything, and ingest is unchanged. Each
+  // withheld frame is counted in total_relay_withheld().
+  void set_relay_requires_interest(bool on) noexcept {
+    _relay_requires_interest.store(on, std::memory_order_relaxed);
+  }
+  bool relay_requires_interest() const noexcept {
+    return _relay_requires_interest.load(std::memory_order_relaxed);
+  }
+  std::uint64_t total_relay_withheld() const noexcept { return _relay_withheld.load(); }
 
   // Invoked (on a server reader thread) when a peer CLOSES its connection, with that peer's node id
   // (from its Hello). A relay uses this to retract the departed participant from the room so the
@@ -128,12 +144,33 @@ public:
   // server's main loop. No-op under wasm. Returns how many connections were erased this call.
   std::size_t reap_idle(std::chrono::milliseconds timeout);
 
-  // Relay reliability: push the full current shard snapshot to EVERY connection (not just a new
-  // one, the way admit does). A client-to-client live re-fan is single-shot with no retry, so a
-  // join that races an already-connected peer's socket can be missed and never recovers; calling
+  // Relay reliability: bring EVERY connection up to date with the current shard snapshot (not just
+  // a new one, the way admit does). A client-to-client live re-fan is single-shot with no retry, so
+  // a join that races an already-connected peer's socket can be missed and never recovers; calling
   // this periodically on the server's main loop lets every client re-converge on the room/scene
-  // tree within one interval (idempotent bulk apply). Returns how many connections it wrote to.
+  // tree within one interval (idempotent bulk apply). Returns how many connections it wrote to: a
+  // connection that already holds everything it is delivered gets no frame and is not counted.
+  //
+  // It sends DIFFS. Per connection, the transport remembers what the last snapshot frame (the admit
+  // snapshot or a broadcast) carried for each path, and forgets a path whenever any other frame
+  // touching it is written to that peer (a live mutation, a push) or arrives from it (the peer's
+  // own write). A broadcast then carries only the entries whose current content differs from what
+  // the peer was last sent, plus the forgotten ones, so an unchanged tree costs nothing and a
+  // missed live re-fan is still healed on the next call. A peer gets the whole tree it is delivered
+  // only on a full refresh: once, when it asks (request_full_refresh) -- for state it dropped on
+  // its own side, which the relay cannot see.
+  //
+  // Each connection's frame honours the peer registry: it holds only the entries its
+  // state_peer_registry::delivery_view passes. Shard snapshots are taken once per call.
   std::size_t broadcast_snapshot();
+
+  // Client side of the full refresh: ask every connected relay to send this node the whole tree it
+  // is delivered on its next broadcast_snapshot, not just the diff. For a client that may have
+  // dropped state the relay believes it holds -- frames that arrived while no shard was registered,
+  // a shard re-registered or given a wider interest set, a local write that was never published.
+  // Sends a SnapshotRequest (the whole tree; a path prefix is not honoured yet). Returns the
+  // connections written.
+  std::size_t request_full_refresh();
 
   // ── Media plane (bring-up: media over this WS control channel) ──
   // publish_media_frame sends a frame to this transport's connections: a browser CLIENT has one
@@ -155,10 +192,31 @@ public:
   void fan_media(const media_frame &f, const void *exclude = nullptr) override;
   void set_media_sink(media_sink_fn sink) override;
   const char *media_protocol() const noexcept override { return "ws"; }
+  // Per-receiver egress gate (see media_endpoint::set_media_gate). fan_media asks it once per
+  // identified receiving connection; a connection that has not sent its Hello always receives,
+  // and publish_media_frame (this node's own uplink) is never gated. Thread-safe; the gate is
+  // swapped whole and a fan already in progress finishes with the gate it started with.
+  void set_media_gate(media_gate_fn gate) override;
+
+  // Backlog drop (kDefaultMediaBacklogDrop; 0 = off): skip a connection whose OS send buffer
+  // already holds more than `bytes` unsent, rather than let the synchronous write block behind a
+  // peer that cannot keep pace. Media is loss-tolerant, and a small threshold keeps a slow peer's
+  // buffer from crowding out the state writes queued behind its video. Applies to every media
+  // write, own uplink included (the counterpart of state_transport_grpc::set_media_stall_drop).
+  // Linux only: the backlog is read with SIOCOUTQ and is 0 elsewhere. The gate is asked after
+  // this check, so a dropped frame uses no thumbnail. Thread-safe.
+  void set_media_backlog_drop(std::size_t bytes) noexcept;
+  static constexpr std::size_t kDefaultMediaBacklogDrop = 32 * 1024;
 
   std::uint64_t total_media_sent() const noexcept { return _media_sent.load(); }
   std::uint64_t total_media_received() const noexcept { return _media_recv.load(); }
   std::uint64_t total_media_forwarded() const noexcept { return _media_fwd.load(); }
+  // Receiver deliveries the media gate denied (one per frame per denied connection).
+  std::uint64_t total_media_gated() const noexcept { return _media_gated.load(); }
+  // Receiver deliveries the backlog drop skipped (one per frame per backed-up connection).
+  std::uint64_t total_media_backlog_dropped() const noexcept {
+    return _media_backlog_dropped.load();
+  }
 
   // Backfill on connect (default true): replay each registered shard's journaled
   // local-origin mutations to a newly admitted connection BEFORE any live traffic,
@@ -178,6 +236,14 @@ public:
   void flush() override;
   // fetch_chunk() / request_snapshot() use the base defaults for now (Phase 2).
 
+  // One unsolicited, final snapshot frame of exactly `entries` to each live connection identified
+  // as `node_id` (see state_transport::push_snapshot_to); the registry is not consulted. A
+  // connection with more than 2 MB of unsent backlog is skipped -- the caller's next push or the
+  // periodic broadcast_snapshot heals it. Returns the connections written; 0, with nothing
+  // encoded, when none matches or `entries` is empty.
+  std::size_t push_snapshot_to(const std::string &node_id,
+                               const std::vector<snapshot_entry> &entries) override;
+
   // ── Diagnostics ──
   std::size_t shard_count() const;
   std::size_t connection_count() const;
@@ -190,6 +256,8 @@ public:
   std::uint64_t total_received_messages() const noexcept { return _recv_messages.load(); }
   std::uint64_t total_delivered() const noexcept { return _delivered.load(); }
   std::uint64_t total_backfilled() const noexcept { return _backfilled.load(); }
+  // Snapshot entries broadcast_snapshot has written, summed over connections.
+  std::uint64_t total_broadcast_entries() const noexcept { return _broadcast_entries.load(); }
 
   // Wait until at least `target` MUTATION frames have been received (Hello frames
   // are not counted) or `timeout` elapses; returns the count reached.
@@ -219,8 +287,9 @@ public:
 
 private:
   // Encode `m` to a Frame and write it to every live connection except `exclude` (a connection*;
-  // nullptr = all). Returns the number written. Backs both publish_media_frame and fan_media.
-  std::size_t write_media(const media_frame &m, const void *exclude);
+  // nullptr = all). With `gated`, the media gate (when one is set) is asked per identified receiver
+  // first. Returns the number written. Backs publish_media_frame (ungated) and fan_media (gated).
+  std::size_t write_media(const media_frame &m, const void *exclude, bool gated);
   void send_hello_locked(connection &c);
   void send_backfill_locked(connection &c, const std::vector<state_cluster_shard *> &shards);
   // Relay-only: push the full CURRENT snapshot of each shard to a newly admitted connection, so a
@@ -257,13 +326,24 @@ private:
 
   std::atomic<bool> _backfill_on_connect{true};
   std::atomic<bool> _relay{false};
+  std::atomic<bool> _relay_requires_interest{false};
+  std::atomic<std::uint64_t> _relay_withheld{0}; // inbound frames the interest gate kept local
   connection_closed_fn _on_conn_closed; // set by a relay; invoked on a peer close (see above)
   media_sink_fn _media_sink; // media_router ingress (relay) OR set_on_media leaf sugar; see above
 
+  // The media egress gate: replaced whole under _media_gate_mu, and copied once per fanned frame so
+  // the per-receiver loop (and its socket writes) runs without the lock. Null = no gate.
+  mutable std::mutex _media_gate_mu;
+  std::shared_ptr<const media_gate_fn> _media_gate;
+
   std::atomic<std::uint64_t> _media_sent{
       0}; // MediaFrames this transport sent (publish_media_frame)
-  std::atomic<std::uint64_t> _media_recv{0}; // MediaFrames received from peers
-  std::atomic<std::uint64_t> _media_fwd{0};  // MediaFrames a relay fanned to other connections
+  std::atomic<std::uint64_t> _media_recv{0};  // MediaFrames received from peers
+  std::atomic<std::uint64_t> _media_fwd{0};   // MediaFrames a relay fanned to other connections
+  std::atomic<std::uint64_t> _media_gated{0}; // receiver deliveries the media gate denied
+  // Receiver deliveries the backlog drop skipped, and its threshold in bytes (0 = off).
+  std::atomic<std::uint64_t> _media_backlog_dropped{0};
+  std::atomic<std::size_t> _media_backlog_drop{kDefaultMediaBacklogDrop};
 
   std::atomic<std::uint64_t> _published{0};
   std::atomic<std::uint64_t> _sent_frames{0};
@@ -272,6 +352,10 @@ private:
   std::atomic<std::uint64_t> _recv_messages{0};
   std::atomic<std::uint64_t> _delivered{0};
   std::atomic<std::uint64_t> _backfilled{0};
+  std::atomic<std::uint64_t> _broadcast_entries{0};
+  // broadcast_snapshot's call count: a connection's remembered paths carry the last call that
+  // delivered them, so a path the peer no longer gets (or that left the tree) is dropped.
+  std::atomic<std::uint64_t> _broadcast_round{0};
 
   // wait_for_received infrastructure (received MUTATION frames).
   mutable std::mutex _recv_mu;

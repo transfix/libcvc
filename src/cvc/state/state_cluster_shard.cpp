@@ -441,6 +441,10 @@ void state_cluster_shard::rewind_publish_cursor(std::uint64_t sequence) {
   _publish_cursor = sequence;
 }
 
+std::size_t state_cluster_shard::trim_published() {
+  return _adapter->journal().trim_through(published_cursor());
+}
+
 void state_cluster_shard::publish_delegation(const std::string &path_prefix,
                                              const std::string &cluster_id,
                                              const std::string &endpoint,
@@ -551,6 +555,16 @@ bool state_cluster_shard::path_is_of_interest(const std::string &path) const {
       return true;
   }
   return false;
+}
+
+bool state_cluster_shard::admits(const state_mutation &m) const {
+  return is_delegation_op(m.op) || path_is_of_interest(m.path);
+}
+
+bool state_cluster_shard::admits_message(const state_message &m) const {
+  if (!m.cluster_id.empty() && m.cluster_id != _cluster_id)
+    return false;
+  return path_is_of_interest(m.path);
 }
 
 void state_cluster_shard::set_enforce_interest(bool enforce) noexcept {
