@@ -2,9 +2,8 @@
 #include "demos_menu.h"
 
 #ifdef CVC_ENABLE_IMGUI
-#include <imgui.h>
-
 #include <cstdlib>
+#include <imgui.h>
 #include <string>
 #include <vector>
 
@@ -47,6 +46,7 @@ opener g_open[kCount];
 // The demo's address in the deployed gallery (gallery.js's window.CVC_GALLERY): "" when the gallery
 // didn't build it. Outside a gallery page (no gallery.js) it is where the gallery would put it.
 std::string href_for(const demo_entry &d) {
+  // clang-format off: a JavaScript body
   char *got = static_cast<char *>(MAIN_THREAD_EM_ASM_PTR(
       {
         const g = typeof window !== 'undefined' ? window.CVC_GALLERY : undefined;
@@ -56,6 +56,7 @@ std::string href_for(const demo_entry &d) {
         return stringToNewUTF8(e ? e.href : '');
       },
       d.slug));
+  // clang-format on
   if (!got)
     return d.doc[0] ? std::string("../arigl/?doc=") + d.doc : std::string("../") + d.slug + "/";
   std::string href = got;
@@ -99,7 +100,8 @@ std::vector<std::string> argv_for(const demo_entry &d) {
     return exe.empty() ? std::vector<std::string>{} : std::vector<std::string>{exe.string()};
   }
   const fs::path arigl = sibling("arigl");
-  const fs::path share = cvc::process::self_path().parent_path() / ".." / "share" / "libcvc-examples";
+  const fs::path share =
+      cvc::process::self_path().parent_path() / ".." / "share" / "libcvc-examples";
   const fs::path doc =
       first_existing({fs::path(CVC_EXAMPLES_DOCUMENTS) / (std::string(d.doc) + ".ari"),
                       share / "ariadne" / "documents" / (std::string(d.doc) + ".ari")});
@@ -115,9 +117,9 @@ std::vector<std::string> argv_for(const demo_entry &d) {
 
 // arigl's catalog for the program about to start: the build tree's, else the installed one.
 void export_gallery() {
-  const fs::path share = cvc::process::self_path().parent_path() / ".." / "share" / "libcvc-examples";
-  const fs::path catalog =
-      first_existing({fs::path(CVC_EXAMPLES_GALLERY), share / "gallery.json"});
+  const fs::path share =
+      cvc::process::self_path().parent_path() / ".." / "share" / "libcvc-examples";
+  const fs::path catalog = first_existing({fs::path(CVC_EXAMPLES_GALLERY), share / "gallery.json"});
   if (catalog.empty())
     return;
 #ifdef _WIN32

@@ -127,8 +127,10 @@ if(EMSCRIPTEN)
   set(_arigl_examples "${CMAKE_CURRENT_SOURCE_DIR}/../../examples")
   if(TARGET wasm-demos AND EXISTS "${_arigl_examples}/ariadne/documents")
     target_link_options(arigl PRIVATE
-      "--embed-file=${_arigl_examples}/ariadne/documents@/ariadne/documents"
-      "--embed-file=${CMAKE_CURRENT_SOURCE_DIR}/../cvc/ariadne/components@/components"
+      # One arigl.data package beside it (build-pages.py ships it): Emscripten won't mix
+      # --preload-file with --embed-file, and the datasets are too big to embed in the module.
+      "--preload-file=${_arigl_examples}/ariadne/documents@/ariadne/documents"
+      "--preload-file=${CMAKE_CURRENT_SOURCE_DIR}/../cvc/ariadne/components@/components"
       -sASYNCIFY=1
       -sASYNCIFY_STACK_SIZE=131072
       -sALLOW_MEMORY_GROWTH=1
@@ -136,7 +138,7 @@ if(EMSCRIPTEN)
       -sSTACK_SIZE=2097152
       -sEXIT_RUNTIME=0
       -sFETCH=1)
-    if(EXISTS "${_arigl_examples}/data") # the FEM gallery's datasets: a .data package beside it
+    if(EXISTS "${_arigl_examples}/data") # the FEM gallery's datasets
       target_link_options(arigl PRIVATE "--preload-file=${_arigl_examples}/data@/data")
     endif()
     if(CVC_WASM_PTHREADS)

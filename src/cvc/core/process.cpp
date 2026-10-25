@@ -79,8 +79,7 @@ bool spawn_detached(const std::vector<std::string> &argv) {
   STARTUPINFOW si{};
   si.cb = sizeof si;
   PROCESS_INFORMATION pi{};
-  if (!CreateProcessW(nullptr, line.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si,
-                      &pi))
+  if (!CreateProcessW(nullptr, line.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi))
     return false;
   CloseHandle(pi.hThread);
   CloseHandle(pi.hProcess);
