@@ -939,6 +939,25 @@ are reproducible. The cvcGL examples
 (`ariadne_hello`, `ariadne_stream`, `ariadne_conference`, `ariadne_terminal`) still build;
 `arigl` is meant to replace them once it does everything they do.
 
+**A gallery of documents.** With `CVC_ARIGL_GALLERY` naming a catalog of demos (JSON,
+[`src/arigl/gallery.h`](../src/arigl/gallery.h)), `arigl run` puts a **Demos** menu first in
+every document's menubar. A demo there that is a `.ari` document loads in place of the running
+one, in the same window; any other demo opens on its own (its page in the browser, its program
+natively). That is how the examples' browser gallery runs every `.ari` demo in one app
+(`<gallery>/arigl/?doc=<name>`). The catalogs come from `examples/web/demos.json`: the build tree
+and the `libcvc-examples` install get one (`share/libcvc-examples/gallery.json`), and the browser
+gallery writes one for what it deployed.
+
+Two `AppRuntime` pieces make that possible for any host:
+
+- `set_host_menus(menus)` puts the host's menus in every document it mounts, ahead of the
+  document's own, and gives a document without a menubar one. Their `menu_action` events go to
+  the host's `on()` handlers.
+- `load()` clears the last document's scene first (`SceneAdapter::clear()`: its nodes, free
+  lights, rigs, physics, and the background, shadows and chrome it set), whether it is a hot
+  reload or a switch to another document. A document without `channels:` also drops the last
+  one's channel policy.
+
 ### 9.1 Native (C++)
 
 The reference host is

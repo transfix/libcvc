@@ -121,6 +121,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/core/app.h
   ../../inc/cvc/core/async_task.h
   ../../inc/cvc/core/async_lane.h
+  ../../inc/cvc/core/process.h
   ../../inc/cvc/core/text.h
   ../../inc/cvc/core/thread_pool.h
   ../../inc/cvc/volume/volmagick.h
@@ -203,6 +204,7 @@ set(SOURCE_FILES
   core/app.cpp
   core/async_task.cpp
   core/async_lane.cpp
+  core/process.cpp
   core/text.cpp
   core/thread_pool.cpp
   processing/bilateral_filter.cpp

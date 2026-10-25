@@ -42,6 +42,11 @@
 // pixels (default 1024 x 768), writing the last one to --png FILE; with --terminal, the last frame
 // as text (--ansi keeps its colours), plus the rendered scene as --png if given.
 // check loads the document as run would, offscreen, and prints its warnings.
+//
+// A gallery: with $CVC_ARIGL_GALLERY naming a catalog of demos (gallery.h), run in a window puts a
+// Demos menu first in every document's menubar. A demo there that is a .ari document replaces the
+// running one in the same window; any other opens on its own (its page in the browser, its program
+// natively).
 
 #include <algorithm>
 #include <cctype> // std::isalnum / std::isdigit — sanitize the conference node id
@@ -99,6 +104,8 @@
 #include <cvc/gl/state_publisher.h> // single-thread wasm: flush the publisher at frame cadence
 #include <emscripten.h>             // emscripten_sleep — yield the asyncify loop to the browser
 #endif
+#include "gallery.h" // the Demos menu over $CVC_ARIGL_GALLERY
+
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/ImGuiOverlay.h>
 #include <cvc/gl/SceneGraph.h>
@@ -117,6 +124,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <utility> // std::exchange
 #include <vector>
 #include <vtkRenderWindow.h> // arigl info: the GL it renders with
 
@@ -144,7 +152,10 @@ int usage(int code) {
                "info prints what this host provides, in a window or with --terminal: the GL it\n"
                "renders with, the terminal (size, colours, kitty / Sixel), what libcvc was built\n"
                "with, the capabilities a document's requires: and (has? ...) see, and how many\n"
-               "functions programs can call (--functions lists them; --json prints JSON).\n",
+               "functions programs can call (--functions lists them; --json prints JSON).\n"
+               "\n"
+               "With CVC_ARIGL_GALLERY naming a catalog of demos (JSON), run adds a Demos menu:\n"
+               "a .ari demo picked there replaces the document in this window.\n",
                ari::host_flags_help().c_str());
   return code;
 }
@@ -1183,15 +1194,50 @@ int run_window(const ari::HostOptions &o) {
     info.gl = describe_gl(view, info.gl_info);
     return print_info(std::move(info), o);
   }
+  // A gallery ($CVC_ARIGL_GALLERY): its Demos menu leads every document's menubar, and a demo
+  // picked there that is a document loads in this window between frames (the run loop below).
+  std::string gallery_error;
+  const arigl::gallery gallery = arigl::gallery::load(
+      std::getenv("CVC_ARIGL_GALLERY") ? std::getenv("CVC_ARIGL_GALLERY") : "", &gallery_error);
+  if (!gallery_error.empty())
+    std::fprintf(stderr, "arigl: CVC_ARIGL_GALLERY: %s\n", gallery_error.c_str());
+  std::string gallery_next;  // a document the Demos menu asked for
+  bool gallery_left = false; // the Demos menu started another program
+  if (!gallery.empty()) {
+    rt.app_runtime().set_host_menus({gallery.menu(o.doc)});
+    gallery.install(rt.app_runtime(), &gallery_next, &gallery_left);
+  }
   if (const int status = load_document(rt, o); status >= 0)
     return status;
   note_misplaced(rt.app_runtime(), o);
   // The rich scene panels (scene_panel / stage_lighting_panel / scene_menu), for a document that
-  // uses them rather than the declarative components. They need the realized lighting rig.
-  if (const gla::RealizedScene *realized = rt.realized()) {
-    cvc::gl::StageLighting *rig = realized->rigs.empty() ? nullptr : realized->rigs.front().get();
+  // uses them rather than the declarative components. They need the realized lighting rig, so a
+  // document loaded later registers them again.
+  const auto register_panels = [&] {
+    const gla::RealizedScene *realized = rt.realized();
+    cvc::gl::StageLighting *rig =
+        realized && !realized->rigs.empty() ? realized->rigs.front().get() : nullptr;
     gla::register_scene_panels(rt.backend(), sg, rig);
-  }
+  };
+  register_panels();
+  // Between frames: load the document the Demos menu picked, in place of this one. A document that
+  // fails to load leaves the current one running.
+  const auto switch_document = [&] {
+    if (gallery_left)
+      rt.request_close();
+    if (gallery_next.empty())
+      return;
+    const std::string next = std::exchange(gallery_next, std::string());
+    rt.app_runtime().set_host_menus({gallery.menu(next)});
+    rt.app_runtime().set_document_args({}, "arigl run " + next);
+    try {
+      print_warnings(rt.load(next));
+      register_panels();
+      arigl::gallery::show_in_url(next);
+    } catch (const std::exception &e) {
+      std::fprintf(stderr, "arigl: %s\n", e.what());
+    }
+  };
   if (o.command == "check")
     return 0;
 
@@ -1243,6 +1289,7 @@ int run_window(const ari::HostOptions &o) {
     // browser throttles requestAnimationFrame; FrameYield::App above keeps VTK from yielding twice.
     rt.step(1.0 / fps);
     print_warnings(rt.take_warnings());
+    switch_document();
 #ifndef __EMSCRIPTEN_PTHREADS__
     sg.publisher().flush(); // single-thread wasm: no worker drains publishes, so do it per frame
 #endif
@@ -1251,6 +1298,7 @@ int run_window(const ari::HostOptions &o) {
     const auto start = std::chrono::steady_clock::now();
     rt.step(1.0 / fps);
     print_warnings(rt.take_warnings());
+    switch_document();
     std::this_thread::sleep_until(start + period);
 #endif
   }
