@@ -848,10 +848,12 @@ TEST(AsyncCalls, AS33_TheCountersSurviveASnapshot) {
 // ===========================================================================
 
 // Measure the CPU time a scheduler step takes on representative programs, the basis of the
-// default rate: an async call is charged the steps its CPU time would have bought. It reports
-// the steps per CPU millisecond and checks that the default stays within a factor of four of
-// what the cheapest and the dearest of them cost.
+// default rate: an async call is charged the steps its CPU time would have bought. It runs the
+// same number of steps of each, reports the steps per CPU millisecond, and, in an optimized
+// build (the default is set for one), checks that the default stays within a factor of four of
+// what the cheapest and the dearest of them cost. A debug build's steps cost 20 to 40 times more.
 TEST(AsyncCalls, StepCostSetsTheDefaultRate) {
+  constexpr uint64_t kSteps = 100000; // each program runs longer than this
   const char *programs[] = {
       // arithmetic, set and a loop
       "(begin (set i 0) (while (< i 300000) (set i (+ i 1))) i)",
@@ -870,18 +872,27 @@ TEST(AsyncCalls, StepCostSetsTheDefaultRate) {
         w.async->set_data_defaults(async_scheduler::host_data_defaults());
       const int pid = w.submit(program);
       const double cpu0 = thread_cpu_seconds();
-      w.run_to_end(pid);
+      if (w.sync)
+        w.sync->run(kSteps);
+      else
+        w.async->sync_run(kSteps);
       const double cpu_ms = 1e3 * (thread_cpu_seconds() - cpu0);
-      const double rate = double(w.info(pid).step_count) / cpu_ms;
+      const uint64_t steps = w.info(pid).step_count;
+      EXPECT_FALSE(w.finished(pid)) << "the program ended before the measurement did";
+      const double rate = double(steps) / cpu_ms;
       std::printf("STEPCOST %s %.0f steps per CPU ms (%llu steps, %.1f CPU ms): %.50s\n",
-                  engine_name(e), rate, (unsigned long long)w.info(pid).step_count, cpu_ms,
-                  program);
+                  engine_name(e), rate, (unsigned long long)steps, cpu_ms, program);
       lowest = std::min(lowest, rate);
       highest = std::max(highest, rate);
     }
   }
+#ifdef NDEBUG
   EXPECT_GE(kDefaultAsyncStepsPerCpuMs, lowest / 4.0);
   EXPECT_LE(kDefaultAsyncStepsPerCpuMs, highest * 4.0);
+#else
+  std::printf("STEPCOST a debug build: the default (%g) is set for an optimized one\n",
+              kDefaultAsyncStepsPerCpuMs);
+#endif
 }
 
 // ===========================================================================

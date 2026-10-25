@@ -446,8 +446,9 @@ limits what that process can make the app do for it.
        0.4 to 0.45 CPU microseconds on the async scheduler (Ariadne's and `Exec`'s) and 0.26
        to 0.3 on the sync one, on a loop of arithmetic, DSL function calls and list and dict
        work (MSVC Release, x64; `StepCostSetsTheDefaultRate` in
-       `state_exec_async_calls_test`, which fails if the default drifts beyond a factor of
-       four of either). 2000 rounds the async scheduler's 2,200 to 2,500 steps per CPU
+       `state_exec_async_calls_test`, which, in an optimized build, fails if the default
+       drifts beyond a factor of four of either; a debug build's steps cost 20 to 40 times
+       more). 2000 rounds the async scheduler's 2,200 to 2,500 steps per CPU
        millisecond down. (The first draft's 1000 was provisional.)
   - The value is a non-negative decimal number; a fraction is allowed, `0.5` being a step every
     2 CPU ms. A node that isn't one falls through to the next level.
