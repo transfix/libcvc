@@ -40,6 +40,7 @@
 #include <cvc/ariadne/conference/room_intrinsics.h> // room_join, room_leave, room_roster
 #include <cvc/ariadne/conference/room_net.h>        // the per-participant and relay net leaves
 #include <cvc/ariadne/conference/room_scene.h>
+#include <cvc/ariadne/conference/room_write_gate.h> // bound writes, as arisrv
 #include <cvc/ariadne/holon.h>
 #include <cvc/ariadne/holon_sync.h>
 #include <cvc/core/app.h>
@@ -245,6 +246,7 @@ struct bench_config {
   long media_stall_ms = 40;
   long admission_hold_ms = 2000;    // arisrv's --admission-hold-ms (with an area of interest)
   std::string late_joiner = "join"; // join: as a client does; observe: connect and only listen
+  std::string bind_writes = "on";   // arisrv's --bind-writes (not an S7 switch)
   std::string json;
 };
 
@@ -255,6 +257,9 @@ public:
     gate = cfg.s7;
     trim = cfg.s7;
     const std::chrono::milliseconds hold(cfg.s7 && cfg.aoi != "off" ? cfg.admission_hold_ms : 0);
+    std::shared_ptr<cvc::state_inbound_gate> bind_gate;
+    if (cfg.bind_writes == "on")
+      bind_gate = std::make_shared<cvc::ariadne::conference::room_write_gate>(kRoom);
     shard = std::make_unique<cvc::state_cluster_shard>(app, "conf", kRelayId);
     shard->add_interest("conf");
     shard->set_enforce_interest(true);
@@ -270,6 +275,7 @@ public:
     grpc.set_backfill_on_connect(!trim);
     grpc.set_media_stall_drop(std::chrono::milliseconds(cfg.s7 ? cfg.media_stall_ms : 0));
     grpc.set_admission_hold(hold);
+    grpc.set_inbound_gate(bind_gate);
     grpc.start("127.0.0.1:0", kRelayId, "conf");
     grpc.set_relay(true);
     grpc.register_shard(shard.get());
@@ -281,6 +287,7 @@ public:
     ws.set_relay_requires_interest(gate);
     ws.set_backfill_on_connect(!trim);
     ws.set_admission_hold(hold);
+    ws.set_inbound_gate(bind_gate);
     ws.start("127.0.0.1:0", kRelayId, "conf");
     ws.set_relay(true);
     ws.register_shard(shard.get());
@@ -936,12 +943,14 @@ bool check_choice(const char *flag, const std::string &v, std::initializer_list<
 }
 
 void usage() {
-  std::fprintf(stderr,
-               "usage: arisrv_aoi_bench [--clients N] [--layout spawn|corners|clusters|ring|walk]\n"
-               "         [--scene default|large] [--aoi off|conference|hall] [--video-max K]\n"
-               "         [--seconds S] [--warmup W] [--video-bytes B] [--transport ws|grpc|mixed]\n"
-               "         [--s7 on|off] [--media on|off] [--move on|off] [--media-stall-ms N]\n"
-               "         [--admission-hold-ms N] [--late-joiner join|observe] [--json out.json]\n");
+  std::fprintf(
+      stderr,
+      "usage: arisrv_aoi_bench [--clients N] [--layout spawn|corners|clusters|ring|walk]\n"
+      "         [--scene default|large] [--aoi off|conference|hall] [--video-max K]\n"
+      "         [--seconds S] [--warmup W] [--video-bytes B] [--transport ws|grpc|mixed]\n"
+      "         [--s7 on|off] [--media on|off] [--move on|off] [--media-stall-ms N]\n"
+      "         [--admission-hold-ms N] [--late-joiner join|observe] [--bind-writes on|off]\n"
+      "         [--json out.json]\n");
 }
 
 std::string json_str(const std::string &s) {
@@ -1007,6 +1016,8 @@ int main(int argc, char **argv) {
       cfg.admission_hold_ms = (std::max)(0L, std::atol(next()));
     else if (!std::strcmp(a, "--late-joiner"))
       cfg.late_joiner = next();
+    else if (!std::strcmp(a, "--bind-writes"))
+      cfg.bind_writes = next();
     else if (!std::strcmp(a, "--json"))
       cfg.json = next();
     else if (!std::strcmp(a, "--help") || !std::strcmp(a, "-h")) {
@@ -1030,7 +1041,8 @@ int main(int argc, char **argv) {
       !check_choice("--transport", cfg.transport, {"ws", "grpc", "mixed"}) ||
       !check_choice("--s7", s7, {"on", "off"}) || !check_choice("--media", media, {"on", "off"}) ||
       !check_choice("--move", move, {"on", "off"}) ||
-      !check_choice("--late-joiner", cfg.late_joiner, {"join", "observe"}))
+      !check_choice("--late-joiner", cfg.late_joiner, {"join", "observe"}) ||
+      !check_choice("--bind-writes", cfg.bind_writes, {"on", "off"}))
     return 2;
   cfg.s7 = s7 == "on";
   cfg.media = media == "on";
@@ -1263,17 +1275,19 @@ int main(int argc, char **argv) {
       std::fprintf(stderr, "arisrv_aoi_bench: cannot write %s\n", cfg.json.c_str());
       return 1;
     }
-    std::fprintf(
-        f,
-        "{\n  \"config\": {\"clients\": %d, \"layout\": %s, \"scene\": %s, \"aoi\": %s, "
-        "\"video_max\": %d, \"seconds\": %.2f, \"warmup\": %.2f, \"video_bytes\": %zu, "
-        "\"transport\": %s, \"s7\": %s, \"media\": %s, \"move\": %s, "
-        "\"media_stall_ms\": %ld, \"admission_hold_ms\": %ld, \"late_joiner\": %s},\n",
-        cfg.clients, json_str(cfg.layout).c_str(), json_str(cfg.scene).c_str(),
-        json_str(cfg.aoi).c_str(), cfg.video_max, cfg.seconds, cfg.warmup, cfg.video_bytes,
-        json_str(cfg.transport).c_str(), cfg.s7 ? "true" : "false", cfg.media ? "true" : "false",
-        cfg.move ? "true" : "false", cfg.s7 ? cfg.media_stall_ms : 0L,
-        cfg.s7 && cfg.aoi != "off" ? cfg.admission_hold_ms : 0L, json_str(cfg.late_joiner).c_str());
+    std::fprintf(f,
+                 "{\n  \"config\": {\"clients\": %d, \"layout\": %s, \"scene\": %s, \"aoi\": %s, "
+                 "\"video_max\": %d, \"seconds\": %.2f, \"warmup\": %.2f, \"video_bytes\": %zu, "
+                 "\"transport\": %s, \"s7\": %s, \"media\": %s, \"move\": %s, "
+                 "\"media_stall_ms\": %ld, \"admission_hold_ms\": %ld, \"late_joiner\": %s, "
+                 "\"bind_writes\": %s},\n",
+                 cfg.clients, json_str(cfg.layout).c_str(), json_str(cfg.scene).c_str(),
+                 json_str(cfg.aoi).c_str(), cfg.video_max, cfg.seconds, cfg.warmup, cfg.video_bytes,
+                 json_str(cfg.transport).c_str(), cfg.s7 ? "true" : "false",
+                 cfg.media ? "true" : "false", cfg.move ? "true" : "false",
+                 cfg.s7 ? cfg.media_stall_ms : 0L,
+                 cfg.s7 && cfg.aoi != "off" ? cfg.admission_hold_ms : 0L,
+                 json_str(cfg.late_joiner).c_str(), cfg.bind_writes == "on" ? "true" : "false");
     std::fprintf(f, "  \"measured_seconds\": %.3f,\n  \"receivers\": [\n%s  ],\n", secs,
                  jr.c_str());
     std::fprintf(f,

@@ -101,6 +101,24 @@ control: a peer with no filter still receives everything.
   On the client side, unsolicited-snapshot ingest
   now skips entries a shard with enforced interest would reject, so a
   relay's whole-tree snapshot no longer writes outside the client's interest.
+- **Inbound gate (connection-bound identity)** —
+  `state_transport::set_inbound_gate(gate)` on gRPC and WS, with
+  `total_inbound_rejected()`. It holds each connection the transport
+  ACCEPTS afterwards (not one it dials, not the bridge) to a
+  `state_inbound_gate`. The connection speaks only as the node id of its
+  first Hello, and one live connection at a time holds a node id: the first
+  to claim it, until it closes or has been silent for `takeover_after()`
+  (6 s; a live peer answers every link probe), when the next claim takes it
+  over. Share one gate between a relay's transports so
+  the claim spans both. Every mutation, message and media frame must name that
+  node id as its origin (a gRPC heartbeat, as its node), and `admit()` decides
+  each mutation and message. A client's SnapshotResponse is never applied, and
+  one naming the relay's own id (its transport's or a shard's) never speaks. A
+  refused frame is not applied, forwarded or bridged. A connection that never
+  held its node id does not fire the connection-closed callback as that peer.
+  The conference's rule is `room_write_gate` (ARIADNE_CONFERENCE_ROADMAP
+  §5h.1, "Bound writes"). It is not authentication: a node id no one holds can
+  be claimed.
 - **Targeted snapshot push** — `state_transport::push_snapshot_to(node_id,
   entries)`. gRPC and WS write one final, `request_id` 0 `SnapshotResponse`
   holding exactly `entries` to every live connection identified as

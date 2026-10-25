@@ -17,11 +17,13 @@
 #include <cstdint>
 #include <cvc/core/namespace.h>
 #include <cvc/state/state_change_journal.h>
+#include <cvc/state/state_inbound_gate.h>
 #include <cvc/state/state_link_stats.h>
 #include <cvc/state/state_message.h>
 #include <cvc/state/state_peer_registry.h>
 #include <functional>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -233,6 +235,17 @@ public:
   // between installing filters and the pose pushes, and relay_room_step does after it. Same thread
   // as publish(). Default: 0.
   virtual std::size_t release_admissions() { return 0; }
+
+  // Connection-bound identity (a relay; none by default). Each connection this transport ACCEPTS
+  // after the call is held to `gate` (see state_inbound_gate): it speaks only as the node id of its
+  // Hello, while it holds that id, every mutation, message and media frame it sends must name that
+  // id as its origin, and gate->admit() decides each mutation and message. What fails is dropped:
+  // not applied, not forwarded, not bridged, and counted by total_inbound_rejected(). Give a
+  // relay's transports the same gate. nullptr stops gating new connections. Default: not supported
+  // (ignored).
+  virtual void set_inbound_gate(std::shared_ptr<state_inbound_gate> gate) { (void)gate; }
+  // Frames the inbound gate dropped (cumulative). Default: 0.
+  virtual std::uint64_t total_inbound_rejected() const { return 0; }
 
   // -------- Transport bridge (wasm interop) --------
   //

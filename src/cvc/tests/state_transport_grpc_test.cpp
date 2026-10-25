@@ -1887,3 +1887,254 @@ TEST(StateTransportGrpcTest, AdmissionHoldTimesOutUnfiltered) {
   tC.stop();
   tR.stop();
 }
+
+// The inbound gate's rule in these tests: a peer may write only below x.<its node id>.
+class own_prefix_gate final : public cvc::state_inbound_gate {
+public:
+  bool admit(const std::string &node_id, const cvc::state_mutation &m) const override {
+    return cvc::state_peer_registry::prefix_matches("x." + node_id, m.path);
+  }
+  bool admit(const std::string &node_id, const cvc::state_message &m) const override {
+    return cvc::state_peer_registry::prefix_matches("x." + node_id, m.path);
+  }
+};
+
+// Connection-bound identity (state_inbound_gate): an accepted stream speaks only as the node id of
+// its Hello, and the gate's rule decides what it may write. A write to another peer's path, a
+// mutation or media frame naming another origin, and a snapshot pushed at the relay are dropped:
+// not applied, not forwarded, and counted.
+TEST(StateTransportGrpcTest, InboundGateTakesOnlyWhatAPeerMayWriteAsItself) {
+  cvc::app aR, aB, aD;
+  cvc::state_transport_grpc tR, tB, tD;
+  tR.set_inbound_gate(std::make_shared<own_prefix_gate>());
+  tR.start("127.0.0.1:0", "R", "C");
+  tR.set_relay(true);
+  tB.start("127.0.0.1:0", "B", "C");
+  tD.start("127.0.0.1:0", "D", "C");
+  std::atomic<int> media_as_b{0}, media_as_d{0};
+  tD.set_on_media([&](const cvc::media_frame &f) {
+    (f.origin_node_id == "B" ? media_as_b : media_as_d).fetch_add(1);
+  });
+  // The relay fans media to its other streams (a media_router does this in arisrv).
+  tR.set_on_media([&](const cvc::media_frame &f) { tR.publish_media_frame(f); });
+
+  cvc::state_cluster_shard sR(aR, "C", "R");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  cvc::state_cluster_shard sD(aD, "C", "D");
+  sR.attach();
+  sB.attach();
+  sD.attach();
+  tR.register_shard(&sR);
+  tB.register_shard(&sB);
+  tD.register_shard(&sD);
+
+  ASSERT_TRUE(tB.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(tD.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_identified(tR, {"B", "D"}, std::chrono::seconds(3)));
+  ASSERT_TRUE(wait_identified(tB, {"R"}, std::chrono::seconds(3)));
+
+  cvc::media_frame m;
+  m.stream_id = "camera";
+  m.codec = "mjpeg";
+  m.width = 64;
+  m.height = 48;
+  m.payload = {0xff, 0xd8, 0x01, 0xff, 0xd9};
+  m.origin_node_id = "D";
+  m.seq = 1;
+  tB.publish_media_frame(m);                              // as D
+  tB.publish(value_mutation("B", 1, "x.D.k", "b"));       // D's path
+  tB.publish(value_mutation("D", 2, "x.D.k", "spoofed")); // as D
+  cvc::state_message msg;                                 // a message to D's path
+  msg.cluster_id = "C";
+  msg.origin_node_id = "B";
+  msg.message_id = "B:1";
+  msg.path = "x.D.inbox";
+  msg.content_type = cvc::state_message::MIME_TEXT;
+  msg.string_value = "hi";
+  tB.publish_message(msg);
+  EXPECT_EQ(tB.push_snapshot_to("R", {leaf_entry("x.B.pushed", "1")}), 1u);
+  m.origin_node_id = "B";
+  m.seq = 2;
+  tB.publish_media_frame(m);                          // its own
+  tB.publish(value_mutation("B", 3, "x.B.k", "own")); // its own, after the rest
+  EXPECT_TRUE(wait_until([&] { return leaf(aD, "x.B.k") == "own"; }, std::chrono::seconds(3)))
+      << "its own path is taken and forwarded";
+  EXPECT_TRUE(wait_until([&] { return media_as_b.load() == 1; }, std::chrono::seconds(3)))
+      << "...and so is its own media";
+  EXPECT_EQ(leaf(aR, "x.B.k"), "own");
+  EXPECT_EQ(leaf(aR, "x.D.k"), "<absent>") << "another peer's path, or as another peer";
+  EXPECT_EQ(leaf(aD, "x.D.k"), "<absent>") << "...is not forwarded either";
+  EXPECT_EQ(leaf(aR, "x.B.pushed"), "<absent>") << "a client's snapshot is not applied";
+  EXPECT_EQ(media_as_d.load(), 0) << "media as another peer is not fanned";
+  EXPECT_EQ(tR.total_inbound_rejected(), 5u);
+
+  tB.stop();
+  tD.stop();
+  tR.stop();
+}
+
+// One live stream at a time holds a node id: a second stream claiming B is not B. Its writes are
+// dropped and its close is not B leaving, until the first stream closes and frees the id.
+TEST(StateTransportGrpcTest, InboundGateBindsANodeIdToOneStream) {
+  cvc::app aR, aB, aB2, aB3;
+  cvc::state_transport_grpc tR, tB, tB2, tB3;
+  auto gate = std::make_shared<own_prefix_gate>();
+  tR.set_inbound_gate(gate);
+  std::mutex mu;
+  std::vector<std::string> closed;
+  tR.set_on_connection_closed([&](const std::string &id) {
+    std::lock_guard<std::mutex> lk(mu);
+    closed.push_back(id);
+  });
+  const auto closed_now = [&] {
+    std::lock_guard<std::mutex> lk(mu);
+    return closed;
+  };
+  tR.start("127.0.0.1:0", "R", "C");
+  tR.set_relay(true);
+  tB.start("127.0.0.1:0", "B", "C");
+  tB2.start("127.0.0.1:0", "B", "C");
+  tB3.start("127.0.0.1:0", "B", "C");
+
+  cvc::state_cluster_shard sR(aR, "C", "R");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  cvc::state_cluster_shard sB2(aB2, "C", "B");
+  cvc::state_cluster_shard sB3(aB3, "C", "B");
+  for (cvc::state_cluster_shard *s : {&sR, &sB, &sB2, &sB3})
+    s->attach();
+  tR.register_shard(&sR);
+  tB.register_shard(&sB);
+  tB2.register_shard(&sB2);
+  tB3.register_shard(&sB3);
+
+  ASSERT_TRUE(tB.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_until([&] { return gate->holder("B") != nullptr; }, std::chrono::seconds(3)))
+      << "B is bound at its Hello";
+  ASSERT_TRUE(tB2.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_until([&] { return tR.link_reports().size() == 2; }, std::chrono::seconds(3)));
+
+  tB2.publish(value_mutation("B", 20, "x.B.second", "2"));
+  tB.publish(value_mutation("B", 10, "x.B.first", "1"));
+  EXPECT_TRUE(wait_until([&] { return leaf(aR, "x.B.first") == "1"; }, std::chrono::seconds(3)));
+  EXPECT_TRUE(
+      wait_until([&] { return tR.total_inbound_rejected() == 1; }, std::chrono::seconds(3)));
+  EXPECT_EQ(leaf(aR, "x.B.second"), "<absent>") << "a second stream claiming B is not B";
+
+  tB2.stop();
+  ASSERT_TRUE(wait_until([&] { return tR.link_reports().size() == 1; }, std::chrono::seconds(3)));
+  tB.stop();
+  EXPECT_TRUE(wait_until([&] { return gate->holder("B") == nullptr; }, std::chrono::seconds(3)))
+      << "freed when its holder closes";
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  EXPECT_EQ(closed_now(), std::vector<std::string>{"B"}) << "only the holder's close is B leaving";
+
+  ASSERT_TRUE(tB3.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
+  tB3.publish(value_mutation("B", 30, "x.B.third", "3"));
+  EXPECT_TRUE(wait_until([&] { return leaf(aR, "x.B.third") == "3"; }, std::chrono::seconds(3)))
+      << "a free node id is claimed again";
+
+  tB3.stop();
+  tR.stop();
+}
+
+// A client naming the relay's own node id in its Hello never speaks: as "R" its writes would pass
+// the relay's own-origin skip unapplied yet still be forwarded, and with sequences just ahead of
+// the relay's journal they would make every client drop the relay's real writes as duplicates.
+TEST(StateTransportGrpcTest, InboundGateRefusesTheRelaysOwnId) {
+  cvc::app aR, aE, aB;
+  cvc::state_transport_grpc tR, tE, tB;
+  auto gate = std::make_shared<own_prefix_gate>();
+  tR.set_inbound_gate(gate);
+  tR.start("127.0.0.1:0", "R", "C");
+  tR.set_relay(true);
+  tE.start("127.0.0.1:0", "R", "C"); // claims the relay's id
+  tB.start("127.0.0.1:0", "B", "C");
+
+  cvc::state_cluster_shard sR(aR, "C", "R");
+  cvc::state_cluster_shard sE(aE, "C", "R");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  for (cvc::state_cluster_shard *s : {&sR, &sE, &sB})
+    s->attach();
+  tR.register_shard(&sR);
+  tE.register_shard(&sE);
+  tB.register_shard(&sB);
+
+  ASSERT_TRUE(tE.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(tB.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_identified(tR, {"R", "B"}, std::chrono::seconds(3)));
+  tE.publish(value_mutation("R", 1000, "x.R.k", "forged"));
+  EXPECT_TRUE(
+      wait_until([&] { return tR.total_inbound_rejected() == 1; }, std::chrono::seconds(3)));
+  EXPECT_EQ(gate->holder("R"), nullptr) << "the relay's id is never bound";
+
+  // The relay's own writes still reach B: nothing went out in its name.
+  tR.publish(value_mutation("R", 1000, "x.R.real", "1"));
+  EXPECT_TRUE(wait_until([&] { return leaf(aB, "x.R.real") == "1"; }, std::chrono::seconds(3)));
+  EXPECT_EQ(leaf(aB, "x.R.k"), "<absent>");
+
+  tE.stop();
+  tB.stop();
+  tR.stop();
+}
+
+// A holder that has fallen silent (its peer went away without closing the stream) loses its node
+// id to the next claim. The displaced stream speaks no more, and its close is not a departure;
+// the new holder's is.
+TEST(StateTransportGrpcTest, InboundGateHandsASilentHoldersIdOver) {
+  cvc::app aR, aB, aB2;
+  cvc::state_transport_grpc tR, tB, tB2;
+  auto gate = std::make_shared<own_prefix_gate>();
+  gate->set_takeover_after(std::chrono::milliseconds(1000));
+  tR.set_inbound_gate(gate);
+  // No probes: a holder that sends nothing is silent.
+  tR.set_ping_interval(std::chrono::minutes(10));
+  std::mutex mu;
+  std::vector<std::string> closed;
+  tR.set_on_connection_closed([&](const std::string &id) {
+    std::lock_guard<std::mutex> lk(mu);
+    closed.push_back(id);
+  });
+  const auto closed_now = [&] {
+    std::lock_guard<std::mutex> lk(mu);
+    return closed;
+  };
+  tR.start("127.0.0.1:0", "R", "C");
+  tR.set_relay(true);
+  tB.set_ping_interval(std::chrono::minutes(10)); // nor does B probe the relay
+  tB.start("127.0.0.1:0", "B", "C");
+  tB2.start("127.0.0.1:0", "B", "C");
+
+  cvc::state_cluster_shard sR(aR, "C", "R");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  cvc::state_cluster_shard sB2(aB2, "C", "B");
+  for (cvc::state_cluster_shard *s : {&sR, &sB, &sB2})
+    s->attach();
+  tR.register_shard(&sR);
+  tB.register_shard(&sB);
+  tB2.register_shard(&sB2);
+
+  ASSERT_TRUE(tB.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_until([&] { return gate->holder("B") != nullptr; }, std::chrono::seconds(3)));
+  std::this_thread::sleep_for(std::chrono::milliseconds(1500)); // B is silent past the takeover
+  ASSERT_TRUE(tB2.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
+  EXPECT_TRUE(wait_until([&] { return gate->total_takeovers() == 1; }, std::chrono::seconds(3)))
+      << "the second claim takes the silent holder's id";
+
+  tB2.publish(value_mutation("B", 20, "x.B.new", "2"));
+  EXPECT_TRUE(wait_until([&] { return leaf(aR, "x.B.new") == "2"; }, std::chrono::seconds(3)));
+  tB.publish(value_mutation("B", 10, "x.B.old", "1"));
+  EXPECT_TRUE(wait_until([&] { return tR.total_inbound_rejected() == 1; }, std::chrono::seconds(3)))
+      << "the displaced stream speaks no more";
+  EXPECT_EQ(leaf(aR, "x.B.old"), "<absent>");
+
+  tB.stop();
+  ASSERT_TRUE(wait_until([&] { return tR.link_reports().size() == 1; }, std::chrono::seconds(3)));
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  EXPECT_TRUE(closed_now().empty()) << "the displaced stream's close is not B leaving";
+  tB2.stop();
+  EXPECT_TRUE(wait_until([&] { return closed_now() == std::vector<std::string>{"B"}; },
+                         std::chrono::seconds(3)))
+      << "the holder's close is";
+
+  tR.stop();
+}

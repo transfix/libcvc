@@ -357,6 +357,43 @@ public:
       return nullptr;
     return &remote_node_id;
   }
+  // The inbound gate (state_transport::set_inbound_gate) this ACCEPTED connection is held to,
+  // copied before its reader starts; null for a dialed connection or an ungated relay. `bound`: it
+  // held its node id at its last check, and `displaced`: a later claim took it over since (set by
+  // the gate). Used only on this connection's reader thread, apart from `displaced`.
+  std::shared_ptr<state_inbound_gate> gate;
+  bool bound = false;
+  std::atomic<bool> displaced{false};
+  // Its Hello named one of the relay's own ids (the transport's or a shard's): never a client's.
+  bool local_id = false;
+  // Whether this connection may speak now: always without a gate; with one, once it has identified
+  // and holds its node id (a duplicate claim retries here until the holder closes or falls silent).
+  bool speaks() {
+    if (!gate)
+      return true;
+    if (local_id)
+      return false;
+    if (bound && displaced.load(std::memory_order_relaxed))
+      bound = false;
+    if (!bound) {
+      const std::string *pid = peer_id();
+      displaced.store(false, std::memory_order_relaxed);
+      bound = pid != nullptr && gate->bind(*pid, this, &last_rx_ns, &displaced);
+    }
+    return bound;
+  }
+  // As speaks(), naming its own node id as `origin`.
+  bool speaks_as(const std::string &origin) {
+    return speaks() && (!gate || origin == remote_node_id);
+  }
+  // Give the node id up at close. True when this close is that peer leaving: always without a
+  // gate; with one, when it held the id until now.
+  bool unbind() {
+    bound = false;
+    if (!gate)
+      return true;
+    return identified.load() && gate->release(remote_node_id, this);
+  }
   // Steady-clock ns of the last inbound frame. A live conference client streams media continuously,
   // so a peer that navigated away (its socket not cleanly closed) stops updating this — the relay's
   // reaper uses it to drop the ghost. 0 until the first frame; set to "now" when a connection opens
@@ -630,6 +667,10 @@ void state_transport_ws::accept_loop() {
 
     auto conn = std::make_shared<connection>();
     conn->accepted = true;
+    {
+      std::lock_guard<std::mutex> lk(_inbound_gate_mu);
+      conn->gate = _inbound_gate;
+    }
     conn->ws = std::make_unique<websocket::stream<tcp::socket>>(std::move(sock));
     conn->ws->read_message_max(kMaxWsMessageBytes);
     bound_blocking_writes(conn->ws->next_layer());
@@ -701,8 +742,10 @@ void state_transport_ws::read_loop(std::shared_ptr<connection> conn) {
   conn->alive.store(false);
   // A peer closed this connection (not a relay shutdown): notify the owner so a relay can retract
   // the departed participant from the room. _running is cleared by stop(), so this fires only on a
-  // real peer drop, and only when the peer identified itself (sent a Hello).
-  if (const std::string *pid = conn->peer_id(); pid && _running.load() && _on_conn_closed)
+  // real peer drop, and only when the peer identified itself (sent a Hello). Under an inbound gate,
+  // only the connection holding that node id leaves as it: another claiming it is not that peer.
+  const bool left = conn->unbind();
+  if (const std::string *pid = conn->peer_id(); pid && left && _running.load() && _on_conn_closed)
     _on_conn_closed(*pid);
   conn->reader_done.store(true, std::memory_order_release); // reap_idle may now join + erase this
 }
@@ -902,6 +945,10 @@ void state_transport_ws::deliver_inbound(connection *c, const void *data, std::s
       c->remote_node_id = in.hello().node_id();
       c->remote_cluster_id = in.hello().cluster_id();
       c->identified.store(true, std::memory_order_release);
+      if (c->gate) {
+        c->local_id = is_local_id(c->remote_node_id);
+        (void)c->speaks(); // claim the node id now
+      }
     }
   } else if (in.has_mutation()) {
     on_inbound_mutation(decode_mutation(in.mutation()), c);
@@ -914,12 +961,21 @@ void state_transport_ws::deliver_inbound(connection *c, const void *data, std::s
   } else if (in.has_snapshot_request()) {
     // The peer asks for a full refresh (request_full_refresh): its next broadcast carries the whole
     // tree it is delivered. Answered there, on the relay's own loop, not on this reader thread.
+    // Under a gate, only a peer that speaks as itself is answered.
+    if (!c->speaks()) {
+      _inbound_rejected.fetch_add(1, std::memory_order_relaxed);
+      return;
+    }
     c->full_refresh.store(true, std::memory_order_relaxed);
   } else if (in.has_snapshot_response()) {
     // A relay pushed its full current state (request_id 0) so this late-joining client sees the
     // peers already in the room. Apply each entry as an initial-sync bootstrap. The conference uses
     // a single shard/cluster, so applying to every registered shard is correct here; the entries do
-    // not carry a cluster id.
+    // not carry a cluster id. A gated relay takes none from its clients (state_inbound_gate).
+    if (c->gate) {
+      _inbound_rejected.fetch_add(1, std::memory_order_relaxed);
+      return;
+    }
     const auto &sr = in.snapshot_response();
     std::vector<state_cluster_shard *> shards;
     {
@@ -973,6 +1029,10 @@ void state_transport_ws::deliver_inbound(connection *c, const void *data, std::s
     // fan_media, skipping this origin, and across to other protocols); on a leaf (browser) it is
     // the set_on_media subscribe sugar.
     _media_recv.fetch_add(1, std::memory_order_relaxed);
+    if (!c->speaks_as(in.media().origin_node_id())) {
+      _inbound_rejected.fetch_add(1, std::memory_order_relaxed); // media as another peer
+      return;
+    }
     if (_media_sink) {
       const auto &mf = in.media();
       media_frame out;
@@ -1286,6 +1346,14 @@ void state_transport_ws::flush() {
 }
 
 void state_transport_ws::on_inbound_mutation(const state_mutation &m, connection *origin) {
+  // A gated relay takes from a client only what it may write as itself (state_inbound_gate). What
+  // it holds there is now unknown, so the next broadcast sends it the tree's value.
+  if (origin != nullptr && origin->gate &&
+      !(origin->speaks_as(m.origin_node_id) && origin->gate->admit(origin->remote_node_id, m))) {
+    _inbound_rejected.fetch_add(1, std::memory_order_relaxed);
+    origin->forget(m);
+    return;
+  }
   std::vector<state_cluster_shard *> peers;
   {
     std::lock_guard<std::mutex> lk(_shards_mu);
@@ -1354,6 +1422,11 @@ void state_transport_ws::on_inbound_mutation(const state_mutation &m, connection
 }
 
 void state_transport_ws::on_inbound_message(const state_message &m, connection *origin) {
+  if (origin != nullptr && origin->gate &&
+      !(origin->speaks_as(m.origin_node_id) && origin->gate->admit(origin->remote_node_id, m))) {
+    _inbound_rejected.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
   std::vector<state_cluster_shard *> peers;
   {
     std::lock_guard<std::mutex> lk(_shards_mu);
@@ -1532,6 +1605,20 @@ void state_transport_ws::set_admission_hold(std::chrono::milliseconds max_hold) 
   const auto capped = (std::min)(max_hold, std::chrono::milliseconds(std::chrono::hours(24)));
   const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(capped).count();
   _admission_hold_ns.store(ns > 0 ? static_cast<std::int64_t>(ns) : 0, std::memory_order_relaxed);
+}
+
+void state_transport_ws::set_inbound_gate(std::shared_ptr<state_inbound_gate> gate) {
+  std::lock_guard<std::mutex> lk(_inbound_gate_mu);
+  _inbound_gate = std::move(gate);
+}
+
+bool state_transport_ws::is_local_id(const std::string &id) const {
+  if (id == _node_id)
+    return true;
+  std::lock_guard<std::mutex> lk(_shards_mu);
+  return std::any_of(_shards.begin(), _shards.end(), [&id](const state_cluster_shard *s) {
+    return s != nullptr && s->local_node_id() == id;
+  });
 }
 
 std::size_t state_transport_ws::release_admissions() {

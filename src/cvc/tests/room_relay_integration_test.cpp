@@ -40,6 +40,7 @@
 #include <cvc/ariadne/conference/room_aoi_relay.h>
 #include <cvc/ariadne/conference/room_intrinsics.h> // room_join, room_leave, room_participant_path
 #include <cvc/ariadne/conference/room_scene.h>      // seed_default_scene, seed_large_demo_scene
+#include <cvc/ariadne/conference/room_write_gate.h> // bound writes
 #include <cvc/ariadne/holon.h>
 #include <cvc/ariadne/holon_sync.h> // server_pump, client_pump, read_pose, write_intent
 #include <cvc/core/app.h>
@@ -227,6 +228,7 @@ struct relay_options {
   bool large_scene = false; // a 100 m plane instead of the 20 m room (where hall has room)
   bool ws_broadcast = true; // arisrv's ~1 Hz WebSocket re-broadcast of the room tree
   bool hold = true;         // hold each admission for its filter (--admission-hold-ms; AOI only)
+  bool bind_writes = true;  // each client writes only its own participant (--bind-writes)
 };
 
 // The relay, as arisrv builds it, stepped by the test.
@@ -234,12 +236,18 @@ class test_relay {
 public:
   explicit test_relay(relay_options o) : opt(std::move(o)) {
     const std::chrono::milliseconds hold(opt.use_aoi && opt.hold ? 2000 : 0);
+    if (opt.bind_writes)
+      bind_gate = std::make_shared<ra::room_write_gate>(kRoom);
     shard = std::make_unique<cvc::state_cluster_shard>(app, "conf", kRelayId);
     shard->add_interest("conf");
     shard->set_enforce_interest(true);
     shard->attach();
     shard->install_as_default();
     shard->adapter().set_on_local_mutation([this](const cvc::state_mutation &m) { note_local(m); });
+    shard->adapter().set_on_remote_applied([this](const cvc::state_mutation &m) {
+      std::lock_guard<std::mutex> lk(_mu);
+      _applied[m.origin_node_id].push_back(m.path);
+    });
     // A closed connection is queued here (transport threads) and retracted on the next step.
     const auto on_departed = [this](const std::string &node_id) {
       std::lock_guard<std::mutex> lk(_mu);
@@ -250,6 +258,7 @@ public:
     grpc.set_relay_requires_interest(opt.gate);
     grpc.set_backfill_on_connect(!opt.trim);
     grpc.set_admission_hold(hold);
+    grpc.set_inbound_gate(bind_gate);
     grpc.start("127.0.0.1:0", kRelayId, "conf");
     grpc.set_relay(true);
     grpc.register_shard(shard.get());
@@ -262,6 +271,7 @@ public:
     ws.set_backfill_on_connect(!opt.trim);
     ws.set_media_backlog_drop(0); // lossless media: the note by the frame sizes above
     ws.set_admission_hold(hold);
+    ws.set_inbound_gate(bind_gate);
     ws.start("127.0.0.1:0", kRelayId, "conf");
     ws.set_relay(true);
     ws.register_shard(shard.get());
@@ -307,6 +317,7 @@ public:
     grpc.stop();
 #endif
     shard->adapter().set_on_local_mutation({});
+    shard->adapter().set_on_remote_applied({});
     shard->detach();
   }
 
@@ -464,8 +475,22 @@ public:
 #endif
     return n;
   }
+  // The paths of the client mutations the relay applied, as their origin named them.
+  std::vector<std::string> applied_from(const std::string &origin) const {
+    std::lock_guard<std::mutex> lk(_mu);
+    const auto it = _applied.find(origin);
+    return it == _applied.end() ? std::vector<std::string>{} : it->second;
+  }
+  // Client frames the bound-writes gate refused.
+  std::uint64_t inbound_rejected() const {
+    std::uint64_t n = 0;
+    for (const cvc::state_transport *tp : planes)
+      n += tp->total_inbound_rejected();
+    return n;
+  }
 
   relay_options opt;
+  std::shared_ptr<cvc::state_inbound_gate> bind_gate; // one for both planes (null: off)
   cvc::app app;
   std::unique_ptr<cvc::state_cluster_shard> shard;
 #if defined(CVC_ENABLE_GRPC)
@@ -496,6 +521,7 @@ private:
   mutable std::mutex _mu;
   std::vector<std::string> _departed;
   std::map<std::string, std::vector<std::uint64_t>> _pose_seq;
+  std::map<std::string, std::vector<std::string>> _applied; // remote origin -> applied paths
   std::uint64_t _pose_writes = 0;
   std::set<std::string> _known;
   std::map<std::string, double> _yaw;
@@ -1143,7 +1169,7 @@ TEST(RoomRelayLoopbackTest, NoIntentOrUiDocsLeak) {
 
   const std::uint64_t filtered_a = A.shard->total_remote_filtered_out();
   const std::uint64_t filtered_b = B.shard->total_remote_filtered_out();
-  const std::uint64_t withheld = r.withheld();
+  const std::uint64_t refused = r.inbound_rejected();
   const std::uint64_t live_a = B.tap.live_pose("A");
   cvc::ariadne::avatar_intent walk;
   walk.move = {0.5, 0.0, 0.0};
@@ -1159,11 +1185,107 @@ TEST(RoomRelayLoopbackTest, NoIntentOrUiDocsLeak) {
     EXPECT_FALSE(cvc::ariadne::read_intent(rc->app, kRoom, "A", got)) << rc->pid;
     EXPECT_EQ(rc->tap.intents("A"), 0u) << rc->pid;
   }
-  EXPECT_GT(r.withheld(), withheld) << "the relay gate withheld D's echo";
+  // D's echo is a write outside its participant, so bound writes refuse it before the interest
+  // gate would withhold it.
+  EXPECT_GT(r.inbound_rejected(), refused) << "the relay refused D's echo";
   EXPECT_EQ(B.shard->total_remote_filtered_out(), filtered_b) << "no ui.docs frame reached B";
   EXPECT_EQ(A.shard->total_remote_filtered_out(), filtered_a) << "no ui.docs frame reached A";
   EXPECT_EQ(B.app.root().findDescendant("ui.docs"), nullptr);
   EXPECT_EQ(r.app.root().findDescendant("ui.docs"), nullptr) << "ingest keeps only the room";
+}
+
+// Bound writes (arisrv --bind-writes, on by default). M writes, from its own replica and through
+// its own transport like any client write, A's intent (a walk), A's authoritative pose (a
+// teleport), its own authoritative pose, the scene and the area of interest; and it sends, as raw
+// mutations, its own pose by paths the tree would normalise onto it ("..pose", "pose ") and A's
+// intent naming A as the origin. The relay applies none of it -- every client mutation it applied
+// from M lies in M's participant, outside its pose, and none from "A" touches A's intent -- and
+// forwards none of it: A stands still and never receives an intent for itself. M's own walk,
+// inside its participant, still works.
+TEST(RoomRelayLoopbackTest, ClientWritesOnlyItsOwnParticipant) {
+  test_relay r(relay_options{});
+  client_list own = make_clients({"A", "M"});
+  const std::vector<test_client *> cs = ptrs(own);
+  test_client &A = *cs[0], &M = *cs[1];
+  ASSERT_NO_FATAL_FAILURE(bring_up(r, cs));
+  ASSERT_TRUE(run_room(r, cs, 5.0, nullptr, [&] {
+    cvc::physics::body_state s;
+    std::uint64_t t = 0;
+    return M.tree_pose("A", s, t) && M.tree_pose("M", s, t);
+  })) << "M holds both poses";
+
+  const std::string a_part = ra::room_participant_path(kRoom, "A");
+  const std::string m_part = ra::room_participant_path(kRoom, "M");
+  const std::string a_pos = a_part + ".pose.pos.x";
+  const std::string m_pos = m_part + ".pose.pos.x";
+  const std::string rev = ra::room_scene_path(kRoom) + ".rev";
+  const std::string aoi_on = ra::room_aoi_path(kRoom) + ".enabled";
+  const auto relay_leaf = [&](const std::string &p) {
+    cvc::state *n = r.app.root().findDescendant(p);
+    return n ? n->value() : std::string("<absent>");
+  };
+  cvc::physics::body_state a0;
+  std::uint64_t tick = 0;
+  ASSERT_TRUE(cvc::ariadne::read_pose(r.app, kRoom, "A", a0, tick));
+  const std::string rev0 = relay_leaf(rev), aoi0 = relay_leaf(aoi_on);
+  ASSERT_NE(rev0, "<absent>");
+  ASSERT_NE(aoi0, "<absent>");
+  const std::uint64_t refused = r.inbound_rejected();
+
+  cvc::ariadne::avatar_intent push;
+  push.move = {0.9, 0.0, 0.0};
+  cvc::ariadne::write_intent(M.app, kRoom, "A", push);
+  M.app.root()(a_pos).value(std::string("50"));
+  M.app.root()(m_pos).value(std::string("50"));
+  M.app.root()(rev).value(std::string("999"));
+  M.app.root()(aoi_on).value(std::string(aoi0 == "1" ? "0" : "1"));
+  std::uint64_t seq = 1000000; // past anything M or A journals here, so never a duplicate
+  const auto send_raw = [&](const std::string &origin, const std::string &path,
+                            const std::string &v) {
+    cvc::state_mutation m;
+    m.cluster_id = "conf";
+    m.tree_id = "default";
+    m.origin_node_id = origin;
+    m.sequence = ++seq;
+    m.mutation_id = origin + ":" + std::to_string(m.sequence);
+    m.path = path;
+    m.op = cvc::state_mutation_op::set_value;
+    m.type_name = "std::string";
+    m.string_value = v;
+    M.tp->publish(m);
+  };
+  send_raw("M", m_part + "..pose.pos.x", "60");
+  send_raw("M", m_part + ".pose .pos.y", "60");
+  send_raw("A", a_part + ".intent.move.x", "0.9");
+  const std::uint64_t a_intents = A.tap.intents("A");
+  run_room(r, cs, 2.0);
+
+  for (const std::string &p : r.applied_from("M")) {
+    EXPECT_TRUE(cvc::state_peer_registry::prefix_matches(m_part, p)) << "applied from M: " << p;
+    EXPECT_EQ(p.find("pose"), std::string::npos) << "applied from M: " << p;
+  }
+  for (const std::string &p : r.applied_from("A"))
+    EXPECT_EQ(p.find("intent"), std::string::npos) << "applied as A: " << p;
+  cvc::ariadne::avatar_intent got;
+  EXPECT_FALSE(cvc::ariadne::read_intent(r.app, kRoom, "A", got) && got.move.x != 0.0)
+      << "the relay never took an intent for A";
+  cvc::physics::body_state a1;
+  ASSERT_TRUE(cvc::ariadne::read_pose(r.app, kRoom, "A", a1, tick));
+  EXPECT_NEAR(a1.position.x, a0.position.x, 1e-3) << "A did not walk";
+  EXPECT_EQ(A.tap.intents("A"), a_intents) << "nothing was forwarded to A as its intent";
+  EXPECT_EQ(relay_leaf(rev), rev0) << "the scene is the relay's";
+  EXPECT_EQ(relay_leaf(aoi_on), aoi0) << "so is the area of interest";
+  EXPECT_GE(r.inbound_rejected() - refused, 8u)
+      << "A's intent leaves, both poses, the scene, the area of interest and the raw frames";
+
+  cvc::physics::body_state m0, m1;
+  ASSERT_TRUE(cvc::ariadne::read_pose(r.app, kRoom, "M", m0, tick));
+  cvc::ariadne::avatar_intent walk;
+  walk.move = {0.5, 0.0, 0.0};
+  cvc::ariadne::write_intent(M.app, kRoom, "M", walk);
+  run_room(r, cs, 2.0);
+  ASSERT_TRUE(cvc::ariadne::read_pose(r.app, kRoom, "M", m1, tick));
+  EXPECT_GT(m1.position.x - m0.position.x, 0.3) << "M's own intent still moves M";
 }
 
 // A walks (an intent it proposed), then its connection drops. The relay retracts it and zeroes
@@ -1484,6 +1606,7 @@ double run_control_plane(bool s7) {
   o.use_aoi = s7;
   o.gate = s7;
   o.trim = s7;
+  o.bind_writes = s7; // the relay before S7 had no bound writes either (they too refuse the echo)
   o.ws_broadcast = false;
   test_relay r(o);
   const client_list own = make_clients({"A", "B", "C"}, s7 ? "conf" : "");
