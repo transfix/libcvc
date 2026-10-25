@@ -78,6 +78,23 @@ int main() {
   chk(down && up, "SDL reports the Left arrow down and up");
   chk(vtk_keys.size() == 1 && vtk_keys[0] == "Left", "VTK's interactor still gets it");
 
+  // A click: SDL sees it, and so does VTK (ImGui's clicks come through VTK's interactor).
+  int vtk_presses = 0;
+  auto pressed = vtkSmartPointer<vtkCallbackCommand>::New();
+  pressed->SetClientData(&vtk_presses);
+  pressed->SetCallback(
+      [](vtkObject *, unsigned long, void *n, void *) { ++*static_cast<int *>(n); });
+  iren->AddObserver(vtkCommand::LeftButtonPressEvent, pressed);
+  const LPARAM at = MAKELPARAM(40, 30);
+  SendMessageW(hwnd, WM_MOUSEMOVE, 0, at);
+  SendMessageW(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, at);
+  SendMessageW(hwnd, WM_LBUTTONUP, 0, at);
+  bool sdl_click = false;
+  for (const cvc::gl::InputEvent &e : in.poll())
+    sdl_click |= e.kind == cvc::gl::InputEvent::Kind::MouseButtonDown && e.button == 1;
+  chk(sdl_click, "SDL reports the click");
+  chk(vtk_presses == 1, "VTK's interactor still gets the click");
+
   in.shutdown(); // SDL hands the window procedure back
   vtk_keys.clear();
   press_left(hwnd);

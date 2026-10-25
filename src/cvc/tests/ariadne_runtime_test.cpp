@@ -3557,6 +3557,20 @@ TEST(AriadneAppRuntime, KeysWindowListsTheDocumentsAndTheHostsKeys) {
   EXPECT_TRUE(mb.saw("push_id:key_camera_forward"));
   EXPECT_EQ(std::count(mb.log.begin(), mb.log.end(), "button:Change"), 2);
 
+  // Change names its binding in keys.capture -- the key post_input then reads.
+  mb.button_click = true; // the mock clicks every button: the last row's wins
+  art.runtime().render();
+  mb.button_click = false;
+  art.drain();
+  EXPECT_EQ(st("ui.docs.d.keys.capture").value(), "camera_forward");
+  InputEvent up;
+  up.kind = InputEvent::Kind::KeyDown;
+  up.key = "Up";
+  art.runtime().post_input(up);
+  art.drain();
+  EXPECT_EQ(st("cam.keys.forward").value(), "Up") << "the next key down is the binding's key";
+  EXPECT_EQ(st("ui.docs.d.keys.capture").value(), "");
+
   art.set_host_keys({});
   mb.log.clear();
   art.load(write_doc("keys_window_b.ari", "meta: {min_libcvc: 3.4.0}\n"
