@@ -8,7 +8,8 @@ overlay's draw callback. Each proxy keeps what it borrows alive by stashing it. 
 the borrower are garbage in one collection (at interpreter exit: module globals and anything in a
 reference cycle), the collector may clear the borrowed proxy first, which releases its C++ object
 under the borrower. So the stash is the borrowed proxy's untracked `this` (pycvc._keepalive), not
-the proxy.
+the proxy. When the borrowed object keeps objects of its own, it is a tuple of those and then
+`this`: the borrowed proxy can go first, and its own stashes with it.
 
 Each case checks the stash, then collects the borrowed objects and their borrowers in one
 reference cycle, the borrowed ones created first so the collector meets their proxies first. A
@@ -58,10 +59,38 @@ def _viewer(sg):
         return None
 
 
+def _uncleared(stash):
+    """Nothing in stash is anything the collector can clear: tuples of untracked objects."""
+    if isinstance(stash, tuple):
+        return all(_uncleared(x) for x in stash)
+    return not gc.is_tracked(stash)
+
+
+def _kept_by(obj):
+    return tuple(v for k, v in vars(obj).items() if k.startswith("_pycvc_"))
+
+
+def _is_keepalive_of(stash, borrowed):
+    """stash is pycvc._keepalive(borrowed): its owning SwigPyObject, after borrowed's own stashes
+    when it has any, and nothing in it is anything the collector can clear."""
+    kept = _kept_by(borrowed)
+    want = kept + (borrowed.this,) if kept else borrowed.this
+    if isinstance(want, tuple):
+        same = isinstance(stash, tuple) and len(stash) == len(want)
+        same = same and all(a is b for a, b in zip(stash, want))
+    else:
+        same = stash is want
+    return same and _uncleared(stash)
+
+
 def _holds(borrower, attr, borrowed):
-    """borrower.<attr> is borrowed's owning SwigPyObject, which the collector never clears."""
-    stash = getattr(borrower, attr)
-    assert stash is borrowed.this and not gc.is_tracked(stash), (type(borrower).__name__, attr)
+    assert _is_keepalive_of(getattr(borrower, attr), borrowed), (type(borrower).__name__, attr)
+
+
+def _flatten(stash):
+    if isinstance(stash, tuple):
+        return [y for x in stash for y in _flatten(x)]
+    return [stash]
 
 
 def _collected(build):
@@ -116,8 +145,8 @@ def test_viewport_manager():
         vp = vm.addSceneViewport("inset", inset, REGION, 1)
         vm.render()
         _holds(vm, "_pycvc_scene", sg)
-        assert len(vm._pycvc_scenes) == 1
-        assert vm._pycvc_scenes[0] is inset.this and not gc.is_tracked(vm._pycvc_scenes[0])
+        assert isinstance(vm._pycvc_scenes, tuple) and len(vm._pycvc_scenes) == 1
+        assert _is_keepalive_of(vm._pycvc_scenes[0], inset)
         assert vp._pycvc_keepalive is vm  # a Viewport is a reference into its manager
         return [sg, inset, vm, vp]
 
@@ -153,9 +182,34 @@ def test_a_reference_proxy_is_stashed_whole():
     cam = vm.primary().camera()
     assert not cam.thisown and pycvc._keepalive(cam) is cam
     assert cam._pycvc_keepalive._pycvc_keepalive is vm
-    assert sg.thisown and pycvc._keepalive(sg) is sg.this
+    assert pycvc._keepalive(app) is app.this  # keeps nothing of its own
+    assert sg.thisown and _is_keepalive_of(pycvc._keepalive(sg), sg)
+    assert any(x is app.this for x in pycvc._keepalive(sg))  # the scene keeps its app
     assert pycvc._keepalive(None) is None
     print("  ok: _keepalive stashes an owning proxy's `this`, a reference proxy whole")
+
+
+def test_a_borrower_keeps_what_the_borrowed_object_keeps():
+    """CameraController(view) keeps the SceneRenderer, which keeps its scene, which keeps its app.
+    The renderer's `this` alone would outlive the renderer's proxy and with it that proxy's stash
+    of the scene: dropping the proxies oldest first freed the scene, then its app, under the live
+    renderer (a segfault at exit on Linux, in ~ViewportManager's scene->setRenderer)."""
+    own_app = pycvc.make_app()
+    sg = pycvc_gl.SceneGraph(own_app, "ka_chain")
+    view = _viewer(sg)
+    if view is None:
+        return
+    cam = pycvc_gl.CameraController(view)
+    kept = _flatten(cam._pycvc_keepalive)
+    for name, obj in (("renderer", view), ("scene", sg), ("app", own_app)):
+        assert any(x is obj.this for x in kept), "the camera does not keep the " + name
+    assert kept[-1] is view.this  # released first: the renderer goes before its scene
+    del own_app, sg, view  # proxies oldest first: only the camera's stash keeps the chain
+    gc.collect()
+    cam.setMode(pycvc_gl.CameraController.Mode_Fly)
+    del cam
+    gc.collect()
+    print("  ok: a borrower keeps what the borrowed object keeps")
 
 
 def test_camera_controller_and_hud():
