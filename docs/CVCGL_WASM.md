@@ -84,7 +84,11 @@ while (!view.windowClosed()) {
 
 Every wasm demo in the repo's `examples/` is built this way: the gallery demos
 (`_wasm_demos`) and `ariadne_hello` (`_wasm_extra_demos`, not in the gallery), and so
-is arigl's browser build, `cyprty` (`src/arigl/CMakeLists.txt`).
+is arigl's browser build, `cyprty` (`src/arigl/CMakeLists.txt`). So is `arigl` itself
+in the gallery: it is the gallery's Ariadne app, built with every document in
+`examples/ariadne/documents`, the component library and `examples/data` in its file
+system. Each `.ari` demo is `arigl/?doc=<name>`, and its Demos menu switches documents in
+place (ARIADNE.md §9).
 
 ## cvcgl_wasm_app()
 
