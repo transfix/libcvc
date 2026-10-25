@@ -2763,6 +2763,126 @@ def _make_dsl_error(message, value, chain, origin, traceback):
 _pycvc._set_dsl_error_factory(_make_dsl_error)
 %}
 
+// ── exceptions.h: classes and exception values (docs/STATE_EXEC_EXCEPTIONS.md 2.2, 2.3) ──
+// Class dicts and exceptions cross as Python dicts, which are copies. A class dict that came back
+// from Python still matches the one it was copied from: is_instance matches a class by its chain
+// of names when the dicts differ. Where C++ takes a class (a dict_ptr), Python passes a class dict,
+// a class constructor (a pycvc.value), or the name of a built-in class.
+%{
+namespace pycvc {
+// The class `o` names, or null with a Python error set.
+static cvc::state_exec::dict_ptr class_arg(PyObject *o, const char *who) {
+  namespace se = cvc::state_exec;
+  se::value_t v;
+  if (!py_to_value(o, v))
+    return nullptr;
+  if (const auto *s = std::get_if<std::string>(&v.v)) {
+    if (se::dict_ptr cls = se::exception_class(*s))
+      return cls;
+    PyErr_Format(PyExc_KeyError, "%s: no built-in exception class %s", who, s->c_str());
+    return nullptr;
+  }
+  if (const auto *d = std::get_if<se::dict_ptr>(&v.v); d && *d)
+    return *d;
+  if (se::dict_ptr cls = se::class_of_constructor(v))
+    return cls;
+  PyErr_Format(PyExc_TypeError, "%s: expected a class dict, a class constructor or a class name",
+               who);
+  return nullptr;
+}
+
+// A new list of `items` as str, or null with a Python error set.
+static PyObject *string_list(const std::vector<std::string> &items) {
+  PyObject *list = PyList_New(static_cast<Py_ssize_t>(items.size()));
+  for (std::size_t i = 0; list != nullptr && i < items.size(); ++i) {
+    PyObject *s = PyUnicode_FromString(items[i].c_str());
+    if (s == nullptr) {
+      Py_CLEAR(list);
+      break;
+    }
+    PyList_SET_ITEM(list, static_cast<Py_ssize_t>(i), s);
+  }
+  return list;
+}
+
+// `cls` as a Python dict, or None.
+static PyObject *class_or_none(const cvc::state_exec::dict_ptr &cls) {
+  if (!cls)
+    Py_RETURN_NONE;
+  return value_to_py(cvc::state_exec::value_t(cls));
+}
+} // namespace pycvc
+%}
+%rename(exception_class) pycvc_exception_class;
+%rename(exception_class_names) pycvc_exception_class_names;
+%rename(make_exception) pycvc_make_exception;
+%rename(class_of_instance) pycvc_class_of_instance;
+%rename(class_of_constructor) pycvc_class_of_constructor;
+%rename(is_instance) pycvc_is_instance;
+%rename(class_name) pycvc_class_name;
+%rename(class_chain) pycvc_class_chain;
+%inline %{
+// The built-in exception class `name` (a dict), or None.
+PyObject *pycvc_exception_class(const std::string &name) {
+  return pycvc::class_or_none(cvc::state_exec::exception_class(name));
+}
+// The built-in exception class names, parents before children.
+PyObject *pycvc_exception_class_names() {
+  return pycvc::string_list(cvc::state_exec::exception_class_names());
+}
+// A new exception of class `cls`, with `message`, `data` (None: nil) and `origin`.
+PyObject *pycvc_make_exception(PyObject *cls, const std::string &message, PyObject *data = NULL,
+                               const std::string &origin = "dsl") {
+  namespace se = cvc::state_exec;
+  const se::dict_ptr c = pycvc::class_arg(cls, "make_exception");
+  if (!c)
+    return nullptr;
+  se::value_t d;
+  if (data != nullptr && data != Py_None && !pycvc::py_to_value(data, d))
+    return nullptr;
+  return pycvc::value_to_py(se::make_exception(c, message, d, origin));
+}
+// The class dict of the instance `v`, or None.
+PyObject *pycvc_class_of_instance(PyObject *v) {
+  cvc::state_exec::value_t value;
+  if (!pycvc::py_to_value(v, value))
+    return nullptr;
+  return pycvc::class_or_none(cvc::state_exec::class_of_instance(value));
+}
+// The class dict a class constructor makes instances of, or None.
+PyObject *pycvc_class_of_constructor(PyObject *ctor) {
+  cvc::state_exec::value_t value;
+  if (!pycvc::py_to_value(ctor, value))
+    return nullptr;
+  return pycvc::class_or_none(cvc::state_exec::class_of_constructor(value));
+}
+// Whether `v` is an instance of `cls` or of a class derived from it.
+PyObject *pycvc_is_instance(PyObject *v, PyObject *cls) {
+  cvc::state_exec::value_t value;
+  if (!pycvc::py_to_value(v, value))
+    return nullptr;
+  const cvc::state_exec::dict_ptr c = pycvc::class_arg(cls, "is_instance");
+  if (!c)
+    return nullptr;
+  return PyBool_FromLong(cvc::state_exec::is_instance(value, c) ? 1 : 0);
+}
+// A class's name ("" for a class dict without one).
+PyObject *pycvc_class_name(PyObject *cls) {
+  const cvc::state_exec::dict_ptr c = pycvc::class_arg(cls, "class_name");
+  if (!c)
+    return nullptr;
+  const std::string name = cvc::state_exec::class_name(c);
+  return PyUnicode_FromStringAndSize(name.data(), static_cast<Py_ssize_t>(name.size()));
+}
+// The class names from `cls` up its __super__ chain, most derived first.
+PyObject *pycvc_class_chain(PyObject *cls) {
+  const cvc::state_exec::dict_ptr c = pycvc::class_arg(cls, "class_chain");
+  if (!c)
+    return nullptr;
+  return pycvc::string_list(cvc::state_exec::class_chain(c));
+}
+%}
+
 // ── no value: KeyError ──
 // Where C++ returns an empty std::optional<value_t> or a null value_t* (an unbound name, a pid with
 // no result, an empty message queue), the wrapper throws pycvc::no_value and Python gets
@@ -2963,6 +3083,7 @@ PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::collect_cycles)
 %naturalvar cvc::state_exec::channel_policy::declared;
 %naturalvar cvc::state_exec::channel_policy::global;
 %rename(global_) cvc::state_exec::channel_policy::global; // `global` is a Python keyword
+%rename(raise_) cvc::state_exec::stackless_evaluator::raise; // `raise` is one too
 // process::watch_event and process::watch_handler_entry are pycvc.watch_event and
 // pycvc.watch_handler_entry (Python has no nested classes here); process.watch_event names them too.
 %feature("flatnested") cvc::state_exec::process::watch_event;
@@ -3187,9 +3308,19 @@ struct evaluator_state {
     }
     return PyLong_FromUnsignedLongLong(static_cast<unsigned long long>(*$self->heap_measured));
   }
+  // The exception the program didn't catch, once the state is done with one (exceptions P1), or
+  // None. Read-only: stepping the state raises it.
+  PyObject *_uncaught() const {
+    if (!$self->uncaught) {
+      Py_INCREF(Py_None);
+      return Py_None;
+    }
+    return pycvc::value_to_py(*$self->uncaught);
+  }
   %pythoncode %{
     stats = property(_stats)
     heap_measured = property(_heap_measured)
+    uncaught = property(_uncaught)
   %}
 }
 
@@ -3201,7 +3332,8 @@ struct evaluator_state {
 %}
 
 // The stackless evaluator. on_complete is a Python callable or None. A str passed to
-// create_state is a script (the std::string overload), as in C++.
+// create_state is a script (the std::string overload), as in C++. raise is raise_ (a Python
+// keyword).
 class stackless_evaluator {
 public:
   stackless_evaluator(environment_ptr global_env);
@@ -3226,6 +3358,7 @@ public:
   void restrict_special_forms(std::shared_ptr<const std::set<std::string> > allowed);
   static const std::set<std::string> &all_special_forms();
   environment_ptr global_env() const; // (#667)
+  void raise(evaluator_state &state, const value_t &exc); // (exceptions P1)
 };
 
 // Snapshot codec for an environment chain and for a whole evaluator state.
@@ -3241,6 +3374,15 @@ enum class process_status;
 enum class scheduling_policy;
 const char *to_string(process_status s);
 process_status parse_process_status(const std::string &s);
+bool is_finished(process_status s); // terminated, killed or failed (exceptions P2)
+
+// exceptions.h, the declarations that take values as they are (the class helpers are above).
+void register_exception_classes(const environment_ptr &env);
+bool is_exception(const value_t &v);
+std::string exception_message(const value_t &exc);
+std::string exception_summary(const value_t &exc);
+std::string traceback_line(const value_t &expr);
+const size_t kTracebackFrames = 64;
 
 // on_complete is a Python callable (or None) called with the process's result when it terminates,
 // on the thread stepping the scheduler. Its return value is ignored; an exception it raises is
