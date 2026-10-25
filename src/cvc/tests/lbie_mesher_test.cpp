@@ -36,6 +36,8 @@
 #include <cstdio>
 #include <fstream>
 #include <geoframe_adapter.h>
+#include <map>
+#include <ostream>
 #include <string>
 #include <vector>
 
@@ -89,6 +91,8 @@ namespace {
 // Mirrors LBIE::DEFAULT_ERR / DEFAULT_ERR_IN from LBIE_Mesher.h.
 const float kDefaultErr = 1.2501f;
 const float kDefaultErrIn = 0.0001f;
+
+const double kPi = 3.14159265358979323846;
 
 // Build an implicit-sphere scalar volume: f(x,y,z) = r - distance_to_center.
 // Positive inside the sphere, negative outside; isovalue 0 is the surface.
@@ -671,20 +675,161 @@ TEST_F(LbieMesherTest, QualityImproveGivesTheSameMeshInAnyUnits) {
 }
 
 // The adaptive hexahedral mesh of a sphere that leaves its box refines cells near the surface.
-// Before the refine_edge fix 702 of its 729 hexahedra had vertex 0 in place of a corner.
+// Before the refine_edge fix 702 of its 729 hexahedra had vertex 0 in place of a corner. In a box
+// whose voxels are 1 across (8 here) the octree used to refine past oct_depth-2 too, and the
+// templates then collapsed hexahedra; about half of a CT's had repeated corners. traverse_qef now
+// stops quadrilaterals and hexahedra at oct_depth-2 in any units.
 TEST_F(LbieMesherTest, AdaptiveHexahedraHaveEightDistinctCorners) {
-  volume v = make_sphere_volume(ctx, 17, 1.2);
-  LBIE::geoframe g = run_do_mesh(v, 0.0f, 0.0f, kDefaultErr, kDefaultErrIn, LBIE::geoframe::HEXA);
-  ASSERT_GT(g.numquads, 0);
-  expect_geoframe_valid(g);
-  int repeated = 0;
-  for (int h = 0; h < g.numquads / 6; ++h) {
-    std::array<unsigned int, 8> v = hexa_corners(g, h);
-    std::sort(v.begin(), v.end());
-    if (std::adjacent_find(v.begin(), v.end()) != v.end())
-      ++repeated;
+  for (double box_size : {1.0, 8.0}) {
+    volume v = make_sphere_volume(ctx, 17, 1.2, box_size);
+    LBIE::geoframe g = run_do_mesh(v, 0.0f, 0.0f, kDefaultErr, kDefaultErrIn, LBIE::geoframe::HEXA);
+    ASSERT_GT(g.numquads, 0) << "box " << box_size;
+    expect_geoframe_valid(g);
+    int repeated = 0;
+    for (int h = 0; h < g.numquads / 6; ++h) {
+      std::array<unsigned int, 8> c = hexa_corners(g, h);
+      std::sort(c.begin(), c.end());
+      if (std::adjacent_find(c.begin(), c.end()) != c.end())
+        ++repeated;
+    }
+    EXPECT_EQ(repeated, 0) << "box " << box_size << ": of " << g.numquads / 6 << " hexahedra";
   }
-  EXPECT_EQ(repeated, 0) << "of " << g.numquads / 6 << " hexahedra";
+}
+
+// ---------------------------------------------------------------------------
+// Tetrahedral meshes of a sphere: boundary fit, geometric flow, interval layers
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// The vertices of the faces that belong to one tetrahedron only: the mesh's boundary.
+std::vector<unsigned int> tet_boundary_vertices(const geometry &g) {
+  static const int kFaces[4][3] = {{0, 1, 2}, {0, 1, 3}, {0, 2, 3}, {1, 2, 3}};
+  std::map<std::array<unsigned int, 3>, int> uses;
+  for (const geometry::tet_t &t : g.tets())
+    for (const auto &f : kFaces) {
+      std::array<unsigned int, 3> key = {(unsigned int)t[f[0]], (unsigned int)t[f[1]],
+                                         (unsigned int)t[f[2]]};
+      std::sort(key.begin(), key.end());
+      ++uses[key];
+    }
+  std::vector<char> on(g.num_points(), 0);
+  for (const auto &u : uses)
+    if (u.second == 1)
+      for (unsigned int v : u.first)
+        on[v] = 1;
+  std::vector<unsigned int> out;
+  for (unsigned int v = 0; v < on.size(); ++v)
+    if (on[v])
+      out.push_back(v);
+  return out;
+}
+
+// What a tet mesh of the samples make_sphere_volume() takes looks like, in voxels: how far the
+// boundary vertices are from the nearest of the spheres of the given radii (of [-1,1]^3), the
+// minimum dihedral angle, how many tets are inverted, and the tets' total volume.
+struct sphere_tet_report {
+  size_t tets = 0;
+  double max_boundary_distance = 0.0; // voxels
+  double min_dihedral = 0.0;          // degrees
+  double mean_dihedral = 0.0;
+  int inverted = 0;
+  double volume = 0.0; // of [-1,1]^3
+};
+
+sphere_tet_report report_sphere_tets(const geometry &g, unsigned int n, double box_size,
+                                     std::initializer_list<double> radii) {
+  sphere_tet_report r;
+  r.tets = g.num_tets();
+  const double voxel = 2.0 * box_size / double(n - 1);
+  for (unsigned int v : tet_boundary_vertices(g)) {
+    const geometry::point_t &p = g.points()[v];
+    const double d = std::sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
+    double nearest = HUGE_VAL;
+    for (double radius : radii)
+      nearest = std::min(nearest, std::fabs(d - radius * box_size));
+    r.max_boundary_distance = std::max(r.max_boundary_distance, nearest / voxel);
+  }
+  for (const geometry::tet_t &t : g.tets()) {
+    const double vol =
+        tet_volume(g.points()[t[0]], g.points()[t[1]], g.points()[t[2]], g.points()[t[3]]);
+    if (!(vol > 0.0))
+      ++r.inverted;
+    r.volume += std::fabs(vol) / (box_size * box_size * box_size);
+  }
+  const quality_stats q = compute_tet_quality_stats(g.tets(), g.points(), TET_MIN_ANGLE);
+  r.min_dihedral = q.min;
+  r.mean_dihedral = q.mean;
+  return r;
+}
+
+std::ostream &operator<<(std::ostream &os, const sphere_tet_report &r) {
+  return os << r.tets << " tets, boundary within " << r.max_boundary_distance
+            << " voxels, min dihedral " << r.min_dihedral << " (mean " << r.mean_dihedral << "), "
+            << r.inverted << " inverted, volume " << r.volume;
+}
+
+} // namespace
+
+// Octree::interpRect3Dpts_x/y/z placed each edge's crossing at span * grid index, where span is
+// the volume's voxel size, but the QEF solution built from those crossings is checked against the
+// cell in grid units (Octree::get_solution), so wherever the voxel size was not 1 the solution
+// "left its cell" and became the cell's centre. The same span^2 scaling kept the QEF error, which
+// drives refinement, under the tolerance. A tet mesh's boundary vertices are those QEF points, so
+// an SDF's tet mesh (voxels 0.003 across on the bunny) was uniform cubes with a staircase
+// boundary. Hexahedral meshes hid it: Octree::get_vtx_new walks each boundary vertex onto the
+// surface afterwards. The same samples now give the same mesh in any box, and its boundary is on
+// the surface. The tets' total volume checks that none overlap: where boundary cells of two sizes
+// met, Octree::tetrahedralize covered their shared faces twice, and this sphere's adaptive mesh had
+// 13% too much volume. Octree::traverse_qef now gives tets one boundary level.
+TEST_F(LbieMesherTest, TetraBoundaryFitsTheSurfaceInAnyUnits) {
+  const unsigned int n = 33;
+  const double radius = 0.6;
+  sphere_tet_report unit; // a box whose voxels are 1 across: the case that always worked
+  for (double box_size : {16.0, 1.0, 0.01}) {
+    geometry g = cvc::tetrahedralize(make_sphere_volume(ctx, n, radius, box_size), 0.0);
+    ASSERT_GT(g.num_tets(), 0u) << "box " << box_size;
+    const sphere_tet_report r = report_sphere_tets(g, n, box_size, {radius});
+    if (box_size == 16.0)
+      unit = r;
+    EXPECT_LT(r.max_boundary_distance, 0.5) << "box " << box_size << ": " << r;
+    EXPECT_EQ(r.tets, unit.tets) << "box " << box_size << ": " << r;
+    EXPECT_NEAR(r.volume, 4.0 / 3.0 * kPi * radius * radius * radius, 0.015) << r;
+  }
+}
+
+// Where the isosurface passes exactly through samples, LBIE disagreed with itself about them: a
+// coarse cell touching the surface only at such a sample was never refined and had no QEF point,
+// yet its edges counted as crossing, so it got a vertex at its centre, 3.4 voxels off a sphere of
+// radius 12 voxels (which meets the grid at its six poles). Integer data at an integer isovalue,
+// a CT's, is full of such samples. The isovalue now moves off them (Octree::collapse).
+TEST_F(LbieMesherTest, TetraMeshesAnIsovalueTheSamplesHit) {
+  const unsigned int n = 33;
+  {
+    const double radius = 0.75; // 12 voxels
+    geometry g = cvc::tetrahedralize(make_sphere_volume(ctx, n, radius, 16.0), 0.0);
+    ASSERT_GT(g.num_tets(), 0u);
+    const sphere_tet_report r = report_sphere_tets(g, n, 16.0, {radius});
+    EXPECT_LT(r.max_boundary_distance, 0.5) << r;
+  }
+  {
+    // 100 + 4 per voxel of r - d, rounded to unsigned chars; the surface is v = 100
+    const double radius = 0.6;
+    volume v(ctx, dimension(n, n, n), UChar, bounding_box(-16.0, -16.0, -16.0, 16.0, 16.0, 16.0));
+    for (unsigned int k = 0; k < n; ++k)
+      for (unsigned int j = 0; j < n; ++j)
+        for (unsigned int i = 0; i < n; ++i) {
+          const double x = -1.0 + 2.0 * i / (n - 1), y = -1.0 + 2.0 * j / (n - 1),
+                       z = -1.0 + 2.0 * k / (n - 1);
+          v(i, j, k,
+            std::round(100.0 + 4.0 * (radius - std::sqrt(x * x + y * y + z * z)) * (n - 1) / 2.0));
+        }
+    geometry g = cvc::tetrahedralize(v, 100.0);
+    ASSERT_GT(g.num_tets(), 0u);
+    const sphere_tet_report r = report_sphere_tets(g, n, 16.0, {radius});
+    EXPECT_LT(r.max_boundary_distance, 0.5) << r;
+    EXPECT_NEAR(r.volume, 4.0 / 3.0 * kPi * radius * radius * radius, 0.015) << r;
+  }
 }
 
 // ---------------------------------------------------------------------------

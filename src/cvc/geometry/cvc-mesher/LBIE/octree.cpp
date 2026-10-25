@@ -476,10 +476,29 @@ oc_idx++;
 }
 }
 
+// A sample exactly at the isovalue is on neither side of it, and the extraction does not agree
+// with itself about it: is_skipcell() says a cell that only touches the isosurface at such a sample
+// is not crossed, so the cell is never refined and has no QEF point, while is_intersect() makes
+// the sample's edges cross, so the cell still gets a vertex, at its centre, voxels off the surface.
+// That happens wherever integer data meets an integer isovalue (a CT at 45), or a sphere passes
+// through grid points. The isovalue moves off the samples, towards the inside (orig < iso), so
+// they count as outside.
+static float isovalue_off_samples(const std::vector<float>& vol, float iso, float vmin, float vmax)
+{
+	if(std::find(vol.begin(), vol.end(), iso) == vol.end()) return iso;
+	float eps = 1e-6f * std::max(vmax - vmin, std::fabs(iso));
+	if(!(eps > 0.0f)) eps = 1e-30f;
+	float moved = iso - eps;
+	while(std::find(vol.begin(), vol.end(), moved) != vol.end()) moved -= eps;
+	return moved;
+}
+
 void Octree::collapse()
 {
 	CellQueue prev_queue, cur_queue;
 	int i, oc_id, level;
+
+	iso_val = isovalue_off_samples(orig_vol, iso_val, vol_min, vol_max);
 
 	oc_id=0;
 
@@ -1892,8 +1911,6 @@ void Octree::traverse_qef(float err_tol)
 	int x, y, z, tx, ty, tz, cell_size;
 	float r, r_min, temp, center;
 
-	oc_id=0;
-	leaf_num=0;
 	center = (dim[0]-1.0f)/2.0f;
 
 	start_level = oct_depth - 3;	// - 3
@@ -1907,6 +1924,25 @@ void Octree::traverse_qef(float err_tol)
 		end_level = start_level + 1;
 	}
 
+	// Tetrahedra: every cell the surface crosses ends at one level. Where two such cells of different
+	// sizes meet, tetrahedralize() covers each piece of their shared face twice, once from each
+	// cell's QEF point, and those two tets overlap unless the segment between the points happens to
+	// pass through that piece (it always does for cell centres, so the interior can be adaptive). A
+	// sphere's adaptive tet mesh covered 5% of its inside twice. The first pass finds the finest
+	// level the error tolerance wants anywhere on the surface; the second refines the whole surface
+	// to it. (r < 60 kept refinement inside a sphere of 60 voxels around the centre, which only
+	// suited the volume the code was first written for; the tetrahedra leave it out.)
+	// Quadrilaterals and hexahedra refine near the surface with their own templates
+	// (quad_adaptive, hexa_adaptive_2) on an octree that stops at oct_depth-2. On a deeper one the
+	// templates collapse hexahedra: half of a CT's, and 11066 of a sphere's, had repeated corners.
+	// They only ever got a deeper octree from a volume whose voxels are 1 across, because the error
+	// that drives refinement was scaled by span^2.
+	const bool tetra = (flag_type == 1), templates = (flag_type == 2 || flag_type == 3);
+	int boundary_level = oct_depth;
+	for(int pass = 0; pass < (tetra ? 2 : 1); pass++) {
+	int finest_boundary = oct_depth-2;
+	oc_id=0;
+	leaf_num=0;
 	//memset(oct_array,0,sizeof(octcell)*octcell_num);
 	std::fill(oct_array.begin(),oct_array.end(),octcell());
 	prev_queue.Add(oc_id);
@@ -1960,8 +1996,11 @@ void Octree::traverse_qef(float err_tol)
 			//} else if (level <= start_level || (get_err_grad(oc_id) > err_tol && level < end_level)) {    // head
 				
 				
-			} else if (level < oct_depth-2 || (is_skipcell(oc_id) == 0 && level < oct_depth-2) ||
-				(get_err(oc_id) > err_tol && r < 60.0f && level < oct_depth) ){
+			} else if (tetra ?
+				(level < oct_depth-2 || (is_skipcell(oc_id) == 0 && (pass == 0 ?
+					get_err(oc_id) > err_tol && level < oct_depth : level < boundary_level))) :
+				(level < oct_depth-2 || (is_skipcell(oc_id) == 0 && level < oct_depth-2) ||
+				(!templates && get_err(oc_id) > err_tol && r < 60.0f && level < oct_depth)) ){
 
 			//} else if (level <= 3) {  //4 
 
@@ -1978,6 +2017,7 @@ void Octree::traverse_qef(float err_tol)
 				oct_array[oc_id].refine_flag=1;
 			} else {
 				cut_array[leaf_num++]=oc_id;
+				if(is_skipcell(oc_id) == 0 && level > finest_boundary) finest_boundary = level;
 			}
 		}
 		
@@ -1987,6 +2027,8 @@ void Octree::traverse_qef(float err_tol)
 				prev_queue.Add(child(oc_id,level,i));
 		}
 		
+	}
+	boundary_level = finest_boundary;
 	}
 }
 
@@ -2197,17 +2239,30 @@ void Octree::get_solution(int oc_id, float* pos)
 	  pos[2]=qef_array[oc_id] ? qef_array_in[oc_id][11] : 0.0;
 	}
 
-	// to be corrected
-	if (!(pos[0] > x*cell_size && pos[0] < (x+1)*cell_size)) {
+	// Quadrilaterals and hexahedra start each vertex at its cell's centre and walk it onto the
+	// surface along the normal (get_vtx_new). That is what every volume whose voxels are not 1 across
+	// gave them, since the QEF solution always fell outside its cell, and it makes better hexahedra
+	// than starting at the QEF point: a sphere's worst corner condition number is 15, not 35.
+	if (flag_type == 2 || flag_type == 3) {
 		pos[0] = x*cell_size + cell_size/2.;
-	}
-		
-	if (!(pos[1] > y*cell_size && pos[1] < (y+1)*cell_size)) {
 		pos[1] = y*cell_size + cell_size/2.;
-	}
-		
-	if (!(pos[2] > z*cell_size && pos[2] < (z+1)*cell_size)) {
 		pos[2] = z*cell_size + cell_size/2.;
+		return;
+	}
+
+	// The QEF solution is a weighted mean of the cell's edge crossings, so it lies in the closed
+	// cell, but on its boundary where every crossing is on one face, and it is NaN for a cell with
+	// none. A solution not strictly inside used to go to the cell's centre, half a cell off the
+	// surface; now only NaN does, and the rest stays inside the cell. A tetrahedron's corner needs
+	// room: one at a cell's face makes slivers of the tets between it and that face's grid edges.
+	// A fifth of a cell raised a sphere's minimum dihedral angle from 0.5 to 11 degrees and kept
+	// its boundary within 0.3 voxels of the surface.
+	const int corner[3] = {x, y, z};
+	const float inset = (flag_type == 1 ? 0.2f : 0.01f)*cell_size;
+	for (int k = 0; k < 3; k++) {
+		const float lo = corner[k]*cell_size, hi = lo + cell_size;
+		if (!(pos[k] == pos[k])) pos[k] = lo + cell_size/2.;
+		else pos[k] = std::min(std::max(pos[k], lo + inset), hi - inset);
 	}
 }
 
@@ -3410,19 +3465,26 @@ void Octree::interpRect3Dpts_x(int i1, int j1, int k1,
 	
 	cell_size = (dim[0]-1)/(1<<level);
 	
+	// The crossing in grid units, like the cells it is checked against (get_solution) and the
+	// vertices it becomes (do_duallib_extract maps them to the volume's box). It was span * grid
+	// index: where a voxel is not 1 across, every QEF solution then fell outside its cell and was
+	// replaced by the cell's centre, and the QEF error, which drives traverse_qef's refinement,
+	// shrank by span^2.
 	ival = (val - d1)/(d2 - d1);
-	pt[0] = orig[0] + span[0]*(i1 + ival)*cell_size;
-	pt[1] = orig[1] + span[1]*j1*cell_size;
-	pt[2] = orig[2] + span[2]*k1*cell_size;
+	pt[0] = (i1 + ival)*cell_size;
+	pt[1] = j1*cell_size;
+	pt[2] = k1*cell_size;
 	
 	//#ifdef GRAD
 	getVertGrad( (i1+ival)*cell_size   , j1*cell_size , k1*cell_size , g1);
 	getVertGrad( (i1+ival)*cell_size+1 , j1*cell_size , k1*cell_size , g2);
 	gval=(double)((i1+ival)*cell_size)-(double)((int)((i1+ival)*cell_size));
 	
-	norm[0] = g1[0]*(1-gval) + g2[0]*gval;
-	norm[1] = g1[1]*(1-gval) + g2[1]*gval;
-	norm[2] = g1[2]*(1-gval) + g2[2]*gval;
+	// getVertGrad gives the gradient in the volume's units; the QEF is solved on the grid, so
+	// weight it with the gradient there (the same direction where the voxels are cubes).
+	norm[0] = (g1[0]*(1-gval) + g2[0]*gval)*span[0];
+	norm[1] = (g1[1]*(1-gval) + g2[1]*gval)*span[1];
+	norm[2] = (g1[2]*(1-gval) + g2[2]*gval)*span[2];
 	
 	float len= sqrt(norm[0]*norm[0] + norm[1]*norm[1] + norm[2]*norm[2]);
 	norm[0]/=len;
@@ -3450,9 +3512,9 @@ void Octree::interpRect3Dpts_y(int i1, int j1, int k1,
 	cell_size = (dim[0]-1)/(1<<level);
 	
 	ival = (val - d1)/(d2 - d1);
-	pt[0] = orig[0] + span[0]*i1*cell_size;
-	pt[1] = orig[1] + span[1]*(j1 + ival)*cell_size;
-	pt[2] = orig[2] + span[2]*k1*cell_size;
+	pt[0] = i1*cell_size;	// in grid units: see interpRect3Dpts_x
+	pt[1] = (j1 + ival)*cell_size;
+	pt[2] = k1*cell_size;
 	
 	//#ifdef GRAD
 	// grad addtion
@@ -3463,9 +3525,9 @@ void Octree::interpRect3Dpts_y(int i1, int j1, int k1,
 	
 	
 
-	norm[0] = g1[0]*(1-gval) + g2[0]*gval;
-	norm[1] = g1[1]*(1-gval) + g2[1]*gval;
-	norm[2] = g1[2]*(1-gval) + g2[2]*gval;
+	norm[0] = (g1[0]*(1-gval) + g2[0]*gval)*span[0];	// on the grid: see interpRect3Dpts_x
+	norm[1] = (g1[1]*(1-gval) + g2[1]*gval)*span[1];
+	norm[2] = (g1[2]*(1-gval) + g2[2]*gval)*span[2];
 
 	float len= sqrt(norm[0]*norm[0] + norm[1]*norm[1] + norm[2]*norm[2]);
 	norm[0]/=len;
@@ -3492,9 +3554,9 @@ void Octree::interpRect3Dpts_z(int i1, int j1, int k1,
 	cell_size = (dim[0]-1)/(1<<level);
 	
 	ival = (val - d1)/(d2 - d1);
-	pt[0] = orig[0] + span[0]*i1*cell_size;
-	pt[1] = orig[1] + span[1]*j1*cell_size;
-	pt[2] = orig[2] + span[2]*(k1+ival)*cell_size;
+	pt[0] = i1*cell_size;	// in grid units: see interpRect3Dpts_x
+	pt[1] = j1*cell_size;
+	pt[2] = (k1+ival)*cell_size;
 	
 	//#ifdef GRAD
 	
@@ -3503,9 +3565,9 @@ void Octree::interpRect3Dpts_z(int i1, int j1, int k1,
 	gval=(double)((k1+ival)*cell_size)-(double)((int)((k1+ival)*cell_size));
 
 	
-	norm[0] = g1[0]*(1-gval) + g2[0]*gval;
-	norm[1] = g1[1]*(1-gval) + g2[1]*gval;
-	norm[2] = g1[2]*(1-gval) + g2[2]*gval;
+	norm[0] = (g1[0]*(1-gval) + g2[0]*gval)*span[0];	// on the grid: see interpRect3Dpts_x
+	norm[1] = (g1[1]*(1-gval) + g2[1]*gval)*span[1];
+	norm[2] = (g1[2]*(1-gval) + g2[2]*gval)*span[2];
 
 	float len= sqrt(norm[0]*norm[0] + norm[1]*norm[1] + norm[2]*norm[2]);
 	norm[0]/=len;
