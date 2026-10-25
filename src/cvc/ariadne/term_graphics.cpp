@@ -3,10 +3,18 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib> // std::getenv -- $TERM_PROGRAM
 #include <cvc/ariadne/term_graphics.h>
 #include <iostream>
 #include <string>
 #include <vector>
+
+// stb's JPEG encoder, for iTerm2 inline images: a static copy of its own (image/stb_io.cpp has
+// another), so the terminal backend needs no image library.
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#define STB_IMAGE_WRITE_STATIC
+#define STBI_WRITE_NO_STDIO
+#include "../image/third_party/stb_image_write.h"
 
 #if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
 #define CVC_TERM_GRAPHICS_POSIX 1
@@ -181,6 +189,8 @@ bool cell_pixel_size(int fd, int &w, int &h) {
 
 TermGraphics probe_terminal(int timeout_ms) {
   TermGraphics g;
+  if (const char *tp = std::getenv("TERM_PROGRAM"))
+    g.iterm = iterm_terminal(tp);
 #ifdef CVC_TERM_GRAPHICS_POSIX
   if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO))
     return g;
@@ -330,6 +340,44 @@ std::string kitty_transmit(const unsigned char *rgb, int w, int h, std::size_t s
 
 std::string kitty_delete(std::uint32_t id) {
   return "\x1b_Ga=d,d=I,i=" + std::to_string(id) + ",q=2\x1b\\";
+}
+
+// ---- iTerm2 inline images ----
+
+bool iterm_terminal(const std::string &term_program) {
+  return term_program == "WezTerm" || term_program == "iTerm.app" || term_program == "mintty" ||
+         term_program == "vscode"; // VS Code's terminal: xterm.js with its image addon
+}
+
+std::string iterm_image(const unsigned char *rgb, int w, int h, std::size_t stride, int cols,
+                        int rows, int quality) {
+  if (!rgb || w <= 0 || h <= 0 || cols <= 0 || rows <= 0)
+    return std::string();
+  if (stride == 0)
+    stride = static_cast<std::size_t>(w) * 3;
+  // stb's JPEG writer takes packed rows.
+  std::vector<unsigned char> packed;
+  const unsigned char *src = rgb;
+  if (stride != static_cast<std::size_t>(w) * 3) {
+    packed.resize(static_cast<std::size_t>(w) * h * 3);
+    for (int y = 0; y < h; ++y)
+      std::copy_n(rgb + static_cast<std::size_t>(y) * stride, static_cast<std::size_t>(w) * 3,
+                  packed.data() + static_cast<std::size_t>(y) * w * 3);
+    src = packed.data();
+  }
+  std::string jpeg;
+  stbi_write_jpg_to_func(
+      [](void *out, void *data, int n) {
+        static_cast<std::string *>(out)->append(static_cast<const char *>(data),
+                                                static_cast<std::size_t>(n));
+      },
+      &jpeg, w, h, 3, src, std::clamp(quality, 1, 100));
+  if (jpeg.empty())
+    return std::string();
+  return "\x1b]1337;File=inline=1;size=" + std::to_string(jpeg.size()) +
+         ";width=" + std::to_string(cols) + ";height=" + std::to_string(rows) +
+         ";preserveAspectRatio=0;doNotMoveCursor=1:" + // the cursor stays: no scroll at the bottom
+         base64_encode(reinterpret_cast<const unsigned char *>(jpeg.data()), jpeg.size()) + "\x07";
 }
 
 // ---- DEC Sixel --------------------------------------------------------------------------------

@@ -86,11 +86,11 @@ void TerminalScene::tick() {
   m_->camera.update(dt);
   // The size the backend draws the screen from (FtxuiBackend::image_raster). Half-blocks: a cell is
   // one pixel wide and two tall (square pixels on a 1:2 cell), times the supersample factor the
-  // backend's box filter folds back down. Kitty / Sixel: the cells' real pixels (Kitty capped at
-  // the backend's max_image_pixels), so no supersampling.
+  // backend's box filter folds back down. Kitty / Sixel / iTerm2: the cells' real pixels (Kitty and
+  // iTerm2 capped at the backend's max_image_pixels), so no supersampling.
   using Mode = ari::FtxuiBackend::Options::ImageColor;
   const Mode mode = m_->backend.image_mode();
-  const bool pixels = mode == Mode::Kitty || mode == Mode::Sixel;
+  const bool pixels = mode == Mode::Kitty || mode == Mode::Sixel || mode == Mode::Iterm;
   const int cols = std::max(1, m_->backend.screen_width());
   const int rows = std::max(1, m_->backend.screen_height());
   int w = 0, h = 0;

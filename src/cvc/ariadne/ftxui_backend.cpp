@@ -346,7 +346,7 @@ public:
       if (!g.drawn)
         continue;
       g.screen_h = screen.dimy();
-      if (g.mode == ImageMode::Sixel)
+      if (g.mode != ImageMode::Kitty) // Sixel / Iterm: a bitmap, drawn where nothing covers it
         g.visible.assign(static_cast<std::size_t>(g.cols) * g.rows, 0);
       for (int r = 0; r < g.rows; ++r) {
         const int y = g.box.y_min + r;
@@ -618,7 +618,8 @@ struct FtxuiBackend::Impl {
   };
   std::map<std::string, KittySent> kitty;
   std::uint32_t kitty_next = 0;
-  // Encoded Sixel images by image key and cell rectangle, while their picture stays the same.
+  // Encoded Sixel / iTerm2 images by image key and cell rectangle, while their picture stays the
+  // same.
   struct SixelCached {
     long gen = -1;
     std::string bytes;
@@ -731,24 +732,26 @@ struct FtxuiBackend::Impl {
   ImageMode mode() const {
     const ImageMode c = opt.image_color;
     if (opt.hosted)
-      return c == ImageMode::Kitty || c == ImageMode::Sixel ? ImageMode::Auto : c;
+      return pixel_mode(c) ? ImageMode::Auto : c;
     if (c != ImageMode::Auto)
       return c;
     if (term_gfx.kitty)
       return ImageMode::Kitty;
     if (term_gfx.sixel && term_gfx.cell_w > 0 && term_gfx.cell_h > 0)
       return ImageMode::Sixel; // a bitmap is placed in real pixels, so it needs the cell size
+    if (term_gfx.iterm)
+      return ImageMode::Iterm; // scaled to its cells by the terminal: no cell size needed
     return ImageMode::Auto;
   }
-  bool pixels() const {
-    const ImageMode md = mode();
-    return md == ImageMode::Kitty || md == ImageMode::Sixel;
+  static bool pixel_mode(ImageMode md) {
+    return md == ImageMode::Kitty || md == ImageMode::Sixel || md == ImageMode::Iterm;
   }
+  bool pixels() const { return pixel_mode(mode()); }
   int cell_w() const { return term_gfx.cell_w > 0 ? term_gfx.cell_w : opt.cell_px_w; }
   int cell_h() const { return term_gfx.cell_h > 0 ? term_gfx.cell_h : opt.cell_px_h; }
 
   void raster_size(int cols, int rows, ImageMode md, int &w, int &h) const {
-    if (md != ImageMode::Kitty && md != ImageMode::Sixel) {
+    if (!pixel_mode(md)) {
       w = std::max(1, cols);
       h = std::max(1, 2 * rows);
       return;
@@ -756,7 +759,7 @@ struct FtxuiBackend::Impl {
     w = std::max(1, cols * cell_w());
     h = std::max(1, rows * cell_h());
     const double px = double(w) * double(h);
-    if (md == ImageMode::Kitty && opt.max_image_pixels > 0 && px > opt.max_image_pixels) {
+    if (md != ImageMode::Sixel && opt.max_image_pixels > 0 && px > opt.max_image_pixels) {
       const double k = std::sqrt(opt.max_image_pixels / px); // the terminal scales it back up
       w = std::max(1, static_cast<int>(w * k));
       h = std::max(1, static_cast<int>(h * k));
@@ -798,7 +801,7 @@ struct FtxuiBackend::Impl {
       pc.gen = p.gen;
       pc.cells = cvc::image();
     }
-    const int cells_h = md == ImageMode::Sixel ? 2 * rows : rows;
+    const int cells_h = md == ImageMode::Kitty ? rows : 2 * rows; // a bitmap's half-block underlay
     if (pc.cells.width() != cols || pc.cells.height() != cells_h)
       pc.cells = pc.raster.resized(cols, cells_h, cvc::image::resize_filter::box);
     auto g = std::make_shared<PixelGfx>();
@@ -885,9 +888,8 @@ struct FtxuiBackend::Impl {
         }
         continue;
       }
-      if (g.mode != ImageMode::Sixel ||
-          g.visible.size() != static_cast<std::size_t>(g.cols) * g.rows)
-        continue;
+      if (g.visible.size() != static_cast<std::size_t>(g.cols) * g.rows)
+        continue; // Sixel / Iterm from here
       // A bitmap that reaches the screen's last row makes some terminals scroll (the cursor moves
       // below it), so that row keeps the half-blocks.
       std::vector<unsigned char> mask = g.visible;
@@ -903,23 +905,40 @@ struct FtxuiBackend::Impl {
       std::stable_sort(rects.begin(), rects.end(),
                        [](const gfx::CellRect &a, const gfx::CellRect &b) { return a.y < b.y; });
       for (const gfx::CellRect &rc : rects) {
-        bool below_shows = rc.y + rc.h < g.rows;
-        for (int k = rc.x; k < rc.x + rc.w && below_shows; ++k)
-          below_shows = mask[static_cast<std::size_t>(rc.y + rc.h) * g.cols + k] != 0;
-        const int pw = rc.w * g.cell_w;
-        const int ph = (rc.h * g.cell_h + (below_shows ? 5 : 0)) / 6 * 6;
-        if (pw <= 0 || ph <= 0 || (rc.y * g.cell_h + ph) > g.raster.height() ||
-            (rc.x + rc.w) * g.cell_w > g.raster.width())
-          continue;
         SixelCached &sc =
             sixel_cache[g.key + "@" + std::to_string(rc.x) + "," + std::to_string(rc.y) + "," +
                         std::to_string(rc.w) + "," + std::to_string(rc.h)];
-        if (sc.bytes.empty() || sc.gen != g.gen) {
-          const unsigned char *origin = raster +
-                                        static_cast<std::size_t>(rc.y) * g.cell_h * stride +
-                                        static_cast<std::size_t>(rc.x) * g.cell_w * 3;
-          sc.bytes = gfx::sixel_encode(origin, pw, ph, stride, colors);
-          sc.gen = g.gen;
+        if (g.mode == ImageMode::Iterm) {
+          // The terminal scales the image to the rectangle's cells, so its pixels are the raster's
+          // share of them, at whatever resolution the raster has.
+          const int x0 = rc.x * g.raster.width() / g.cols;
+          const int x1 = (rc.x + rc.w) * g.raster.width() / g.cols;
+          const int y0 = rc.y * g.raster.height() / g.rows;
+          const int y1 = (rc.y + rc.h) * g.raster.height() / g.rows;
+          if (x1 <= x0 || y1 <= y0)
+            continue;
+          if (sc.bytes.empty() || sc.gen != g.gen) {
+            const unsigned char *origin =
+                raster + static_cast<std::size_t>(y0) * stride + static_cast<std::size_t>(x0) * 3;
+            sc.bytes = gfx::iterm_image(origin, x1 - x0, y1 - y0, stride, rc.w, rc.h);
+            sc.gen = g.gen;
+          }
+        } else {
+          bool below_shows = rc.y + rc.h < g.rows;
+          for (int k = rc.x; k < rc.x + rc.w && below_shows; ++k)
+            below_shows = mask[static_cast<std::size_t>(rc.y + rc.h) * g.cols + k] != 0;
+          const int pw = rc.w * g.cell_w;
+          const int ph = (rc.h * g.cell_h + (below_shows ? 5 : 0)) / 6 * 6;
+          if (pw <= 0 || ph <= 0 || (rc.y * g.cell_h + ph) > g.raster.height() ||
+              (rc.x + rc.w) * g.cell_w > g.raster.width())
+            continue;
+          if (sc.bytes.empty() || sc.gen != g.gen) {
+            const unsigned char *origin = raster +
+                                          static_cast<std::size_t>(rc.y) * g.cell_h * stride +
+                                          static_cast<std::size_t>(rc.x) * g.cell_w * 3;
+            sc.bytes = gfx::sixel_encode(origin, pw, ph, stride, colors);
+            sc.gen = g.gen;
+          }
         }
         sc.frame = frame;
         // Save the cursor (DECSC), draw at the rectangle's top-left cell, put it back (DECRC).
@@ -1927,6 +1946,11 @@ bool FtxuiBackend::item_pointer(float &x, float &y, float &dx, float &dy, int &b
 
 void FtxuiBackend::text_line(const char *t) { m_->leaf(m_->uid("t|"), false, text_block(t)); }
 
+// "label: value"; with no label just the value, as the ImGui backend draws it.
+static std::string labelled(const char *label, const std::string &value) {
+  return label && *label ? std::string(label) + ": " + value : value;
+}
+
 void FtxuiBackend::text_value(const char *label, const std::string &value) {
   m_->leaf(m_->uid("t|"), false, text_block(labelled(label, value)));
 }
@@ -1945,11 +1969,6 @@ void FtxuiBackend::separator() {
   if (m.opt.hosted && !m.cur_menu.empty() && !m.walk.menus.empty())
     m.walk.menus.back().items.push_back(HostedMenuItem{"", "", false, false, true});
   m.add(fx::separator());
-// "label: value"; with no label just the value, as the ImGui backend draws it.
-static std::string labelled(const char *label, const std::string &value) {
-  return label && *label ? std::string(label) + ": " + value : value;
-}
-
 }
 
 bool FtxuiBackend::button(const char *label) {
@@ -2690,8 +2709,7 @@ FtxuiBackend::run_loop(Runtime &rt, const RunOptions &opts, const std::function<
   // Pixel graphics: ask the terminal what it can draw before FTXUI takes it over. A reply to a
   // kitty query arriving later would reach FTXUI's input parser (it has no APC case) as typed text.
   const bool want_pixels = !m.opt.hosted && (m.opt.image_color == ImageMode::Auto ||
-                                             m.opt.image_color == ImageMode::Kitty ||
-                                             m.opt.image_color == ImageMode::Sixel);
+                                             Impl::pixel_mode(m.opt.image_color));
   if (want_pixels && !m.term_gfx_set) {
     m.term_gfx = gfx::probe_terminal();
     m.term_gfx_set = true;
@@ -2748,20 +2766,20 @@ FtxuiBackend::run_loop(Runtime &rt, const RunOptions &opts, const std::function<
   if (opts.on_start)
     opts.on_start();
   const auto period = std::chrono::milliseconds(1000 / std::max(1, opts.fps));
-  const bool sixel = m.mode() == ImageMode::Sixel;
+  const bool bitmaps = m.mode() == ImageMode::Sixel || m.mode() == ImageMode::Iterm;
   while (!loop.HasQuitted()) {
     // A repaint goes out between synchronized-output marks, so a terminal that has them shows it
-    // whole. Sixel bitmaps go inside: the repaint just covered the ones it replaces. Kitty images
-    // go after: a big one would overflow the terminal's synchronized-update buffer, and a changed
-    // one goes to an id the repaint does not name yet (KittySent), so the shown image stays whole
-    // while the next one arrives.
+    // whole. Sixel / iTerm2 bitmaps go inside: the repaint just covered the ones it replaces. Kitty
+    // images go after: a big one would overflow the terminal's synchronized-update buffer, and a
+    // changed one goes to an id the repaint does not name yet (KittySent), so the shown image
+    // stays whole while the next one arrives.
     if (pixels)
       std::cout << "\x1b[?2026h";
     m.drew = false;
     loop.RunOnce();
     if (pixels) {
       const std::string g = m.drew ? m.emit_graphics() : std::string();
-      if (sixel)
+      if (bitmaps)
         std::cout << g << "\x1b[?2026l";
       else
         std::cout << "\x1b[?2026l" << g;

@@ -266,7 +266,8 @@ Three backends ship:
   `ariadne_ftxui_test` tests it); `run()` owns a real terminal.
 
   **Pixel graphics** ([`term_graphics.h`](../inc/cvc/ariadne/term_graphics.h)).
-  `Options::image_color` is `Auto`, `Kitty`, `Sixel`, `Color` (half-blocks) or `Mono`.
+  `Options::image_color` is `Auto`, `Kitty`, `Sixel`, `Iterm`, `Color` (half-blocks) or
+  `Mono`.
   `Auto` takes the best the terminal has, else half-blocks:
   - **Kitty** (kitty, Ghostty, WezTerm, Konsole). Each image is sent once, out of band,
     after the frame that first draws it (`a=T,U=1,f=24,q=2`, chunked base64), and is
@@ -286,6 +287,11 @@ Three backends ship:
     half-blocks underneath, and a pass after the whole frame keeps the cells still showing
     them, sent as one bitmap per rectangle. Colours go to a fixed 6 × 7 × 6 cube (fewer
     where the terminal reports fewer registers) with an ordered dither.
+  - **Iterm** (iTerm2's inline images: WezTerm, iTerm2, mintty, xterm.js's image addon).
+    Like Sixel, but each rectangle is a JPEG in an OSC 1337 escape that names its cells
+    (`width=` / `height=`, `doNotMoveCursor=1`), and the terminal scales it to them, so the
+    cell size need not be known. `Auto` picks it, after Kitty and Sixel, when
+    `$TERM_PROGRAM` names such a terminal (`gfx::iterm_terminal`).
   - **Detection.** `run()` asks the terminal before FTXUI takes it over, because FTXUI's
     input parser has no APC case and a late kitty reply would arrive as typed text: on
     `/dev/tty` in raw mode it sends a kitty query, `CSI 16 t` (the cell size in pixels)
@@ -303,8 +309,15 @@ Three backends ship:
     `take_graphics()` returns the bytes `run()` would write after that frame
     (`release_graphics()`: the deletions it sends on exit).
   - **Limits.** Hosted mode (the tvision desktop) always draws half-blocks, because
-    tvision owns the output. No probe runs on Windows or in the browser, so `Auto` stays
-    half-blocks there (`Kitty` / `Sixel` can still be asked for). Inside tmux the probe
+    tvision owns the output. No probe runs on Windows or in the browser, so `Auto` there is
+    `Iterm` under a terminal `$TERM_PROGRAM` names, else half-blocks (`Kitty` / `Sixel` can
+    still be asked for). On Windows a console program reaches its terminal through ConPTY,
+    which decides what gets through: Windows Terminal's (1.22 and later) passes Sixel on,
+    and `arigl --terminal --graphics sixel --cell-size WxH` draws real pixels there. The
+    ConPTY WezTerm 20240203 bundles, and the one in Windows itself, drop kitty's APC and
+    Sixel's DCS; they forward an iTerm2 image as it comes but redraw cells later on their
+    own, so a full-screen program's image lands at the wrong place and is painted over.
+    So kitty graphics need a terminal on Linux or macOS. Inside tmux the probe
     gets no kitty reply, so it falls back too (tmux passthrough is not wired). A Sixel
     bitmap never covers the screen's last row (a terminal that moves the cursor below a
     bitmap would scroll), and where its last six-pixel band would reach a covered row it
@@ -405,19 +418,6 @@ the loader only *captures*. The host wires them:
         (begin (state-set "app.quit_armed" "1")
                (state-set "app.status" "Ctrl-C again to quit")))
   ```
-
-A small, complete document (mirroring `nav_compute.ari`). A widget is a map whose
-**first key is its type** and whose value is its label (`slider_int: "N"`), with the
-widget's fields as sibling keys; copy the shipped components (§6.5) for the exact keys
-each type takes:
-
-```yaml
-meta: { name: hello, version: 0.1.0, min_libcvc: 3.4.0 }
-menubar:
-  - menu: File
-    items:
-      - menu_item: Quit
-        on: quit                          # a bare name: a host Runtime::on handler
 - **`keys:`** names the document's **rebindable** key actions
   ([`keys.h`](../inc/cvc/ariadne/keys.h)): each has a label, its default key or keys, and an
   `on:` (a program, or a host event). A binding's keys live in a state key, `keys.<id>`
@@ -441,6 +441,19 @@ menubar:
   `keys.capture`; the next key down becomes its key (Escape keeps the old one), and no handler
   sees that key. A group with an `id`, like each of those rows, scopes its children's identities
   as a window does, so every row's Change is its own.
+
+A small, complete document (mirroring `nav_compute.ari`). A widget is a map whose
+**first key is its type** and whose value is its label (`slider_int: "N"`), with the
+widget's fields as sibling keys; copy the shipped components (§6.5) for the exact keys
+each type takes:
+
+```yaml
+meta: { name: hello, version: 0.1.0, min_libcvc: 3.4.0 }
+menubar:
+  - menu: File
+    items:
+      - menu_item: Quit
+        on: quit                          # a bare name: a host Runtime::on handler
 windows:
   - window: Controls
     id: controls
@@ -1048,6 +1061,8 @@ Two `AppRuntime` pieces make that possible for any host:
   menu is greyed out for a document without menus); without one, in the bar as written, where a
   host menu named like one of them adds its items to it. With no `document_menus()`, the host's
   menus go first.
+- `set_host_keys(keys)` adds the host's key bindings to every document's, and gives each
+  document the Keys window (§5.3), even one with no keys of its own.
 - `load()` clears the last document's scene first (`SceneAdapter::clear()`: its nodes, free
   lights, rigs, physics, and the background, shadows and chrome it set), whether it is a hot
   reload or a switch to another document. A document without `channels:` also drops the last
@@ -1061,8 +1076,6 @@ The reference host is
 ```cpp
 cvc::ariadne::Runtime rt(app, prefix);
 rt.set_backend(&backend);           // backend must outlive rt
-- `set_host_keys(keys)` adds the host's key bindings to every document's, and gives each
-  document the Keys window (§5.3), even one with no keys of its own.
 backend.install(rt, view);          // sets the view's overlay draw callback → rt.render()
 
 register_cvc_uri_handler(/*extra dirs*/);        // cvc:// components
@@ -1098,11 +1111,11 @@ general flags every runtime shares, parsed by
 document's (§5.6): `ari run doc.ari --help` prints the document's own usage. A general
 flag written after the document goes to the document, and `ari` points that out.
 
-Three of the general flags are for pictures. `--graphics auto|kitty|sixel|color|mono` sets
+Three of the general flags are for pictures. `--graphics auto|kitty|sixel|iterm|color|mono` sets
 how images draw (see *Pixel graphics* in §4), and `--image NAME=FILE` publishes a picture
 for the document's `image:` widgets with `src: NAME`
 ([`terminal_images.ari`](../examples/ariadne/terminal/terminal_images.ari) is an example).
-With `--ansi` and `--graphics kitty` or `sixel`, `snapshot` also prints the images, after
+With `--ansi` and `--graphics kitty`, `sixel` or `iterm`, `snapshot` also prints the images, after
 clearing the screen, at the terminal's cell size (`--cell-size WxH` where it can't be asked).
 
 `ari` is its own cvcpkg package (`cvcpkg install ari`, linux for now), built from

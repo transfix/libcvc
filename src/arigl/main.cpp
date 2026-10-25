@@ -208,6 +208,8 @@ ari::FtxuiBackend::Options::ImageColor image_mode(const std::string &s) {
     return Mode::Kitty;
   if (s == "sixel")
     return Mode::Sixel;
+  if (s == "iterm")
+    return Mode::Iterm;
   if (s == "color")
     return Mode::Color;
   if (s == "mono")
@@ -234,8 +236,6 @@ std::chrono::duration<double> snapshot_period(const ari::HostOptions &o) {
   return std::chrono::duration<double>(1.0 / (o.fps > 0 ? o.fps : 20));
 }
 
-// The SDL-free cvc::gl::InputEvent, as the runtime's cvc::ariadne::InputEvent.
-ari::InputEvent to_ari(const cvc::gl::InputEvent &e) {
 // Settings' item that opens the Keys window AppRuntime puts in every document.
 ari::Widget keys_menu_item() {
   return ari::menu_toggle("Keys...", std::string("tree.") + ari::kKeysWindow + ".open");
@@ -260,6 +260,8 @@ std::vector<ari::KeyBinding> camera_keys(const cvc::gl::CameraController &cam) {
   return keys;
 }
 
+// The SDL-free cvc::gl::InputEvent, as the runtime's cvc::ariadne::InputEvent.
+ari::InputEvent to_ari(const cvc::gl::InputEvent &e) {
   ari::InputEvent a;
   using GK = cvc::gl::InputEvent::Kind;
   using AK = ari::InputEvent::Kind;
@@ -1245,9 +1247,9 @@ int run_window(const ari::HostOptions &o) {
     return menus;
   };
   rt.app_runtime().set_host_menus(host_menus(o.doc));
+  rt.app_runtime().set_host_keys(camera_keys(cam));
   if (!gallery.empty())
     gallery.install(rt.app_runtime(), &gallery_next, &gallery_left);
-  rt.app_runtime().set_host_keys(camera_keys(cam));
   if (const int status = load_document(rt, o); status >= 0)
     return status;
   note_misplaced(rt.app_runtime(), o);
@@ -1310,10 +1312,10 @@ int run_window(const ari::HostOptions &o) {
   rt.set_input_pump([&] {
     conf.pump(); // push this frame's room-tree writes (room-join + roster) to the relay
     touch.update();
-    for (const cvc::gl::InputEvent &e : sdl.poll())
-      rt.post_input(to_ari(e));
     if (!sdl.attached())
       sdl.attach(view.renderWindow()); // once VTK has made its window
+    for (const cvc::gl::InputEvent &e : sdl.poll())
+      rt.post_input(to_ari(e));
     for (std::string sig = ari::take_trapped_signal(); !sig.empty();
          sig = ari::take_trapped_signal())
       if (!rt.post_signal(sig, "os")) { // no on_signal: the host's default is to stop
@@ -1402,12 +1404,12 @@ int run_terminal(const ari::HostOptions &o) {
     rt.add_component_path(d);
   rt.on("quit", [&] { rt.request_close(); });
   rt.register_verb("quit", [&] { rt.request_close(); });
-  rt.set_document_args(o.doc_args, "arigl " + o.command + " --terminal " + o.doc,
-                       /*validate=*/o.command != "check");
   // As in a window, Settings after the document's own menus opens the Keys window (the terminal's
   // camera has no keys to list; the scene's display settings are ImGui's).
   rt.set_host_menus({ari::AppRuntime::document_menus(), ari::menu("Settings", {keys_menu_item()})});
   rt.set_host_keys({});
+  rt.set_document_args(o.doc_args, "arigl " + o.command + " --terminal " + o.doc,
+                       /*validate=*/o.command != "check");
   // Ask the terminal what it can draw before the load, so requires: / (has? "term.kitty") see it
   // (the interactive loop then does not ask again). tvision draws half-blocks only.
   ari::HostInfo term;
@@ -1417,7 +1419,8 @@ int run_terminal(const ari::HostOptions &o) {
                      term.tty &&
                      (look.image_color == ari::FtxuiBackend::Options::ImageColor::Auto ||
                       look.image_color == ari::FtxuiBackend::Options::ImageColor::Kitty ||
-                      look.image_color == ari::FtxuiBackend::Options::ImageColor::Sixel);
+                      look.image_color == ari::FtxuiBackend::Options::ImageColor::Sixel ||
+                      look.image_color == ari::FtxuiBackend::Options::ImageColor::Iterm);
   if (probe) {
     graphics = ari::gfx::probe_terminal();
     if (o.cell_w > 0) {
@@ -1448,7 +1451,8 @@ int run_terminal(const ari::HostOptions &o) {
     const int height = std::max(4, o.height ? o.height : 30);
     using Mode = ari::FtxuiBackend::Options::ImageColor;
     const bool pixels =
-        o.ansi && (look.image_color == Mode::Kitty || look.image_color == Mode::Sixel);
+        o.ansi && (look.image_color == Mode::Kitty || look.image_color == Mode::Sixel ||
+                   look.image_color == Mode::Iterm);
     if (pixels) { // the cell size images are drawn at: the terminal's, or --cell-size
       ari::TermGraphics g = ari::gfx::probe_terminal();
       if (o.cell_w > 0) {

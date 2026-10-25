@@ -102,12 +102,13 @@ public:
     int cell_px_w = 8;
     int cell_px_h = 16;
     // How draw_image and set_background paint. Color draws coloured half-blocks (two pixels per
-    // cell), Mono a luminance ramp; both work on any terminal. Kitty and Sixel draw real pixels
-    // (term_graphics.h): Kitty as Unicode placeholder cells for an image sent once, Sixel as a
-    // bitmap re-sent after each draw. Auto picks Kitty, else Sixel, from what run() detects in the
+    // cell), Mono a luminance ramp; both work on any terminal. Kitty, Sixel and Iterm draw real
+    // pixels (term_graphics.h): Kitty as Unicode placeholder cells for an image sent once, Sixel
+    // and Iterm (an iTerm2 inline image, which Windows' ConPTY passes on) as a bitmap re-sent
+    // after each draw. Auto picks Kitty, else Sixel, else Iterm, from what run() detects in the
     // terminal (terminal_graphics()), else Color, or Mono on a terminal with no colour. Hosted mode
     // (the tvision desktop, which owns the output) always draws half-blocks.
-    enum class ImageColor { Auto, Mono, Color, Kitty, Sixel };
+    enum class ImageColor { Auto, Mono, Color, Kitty, Sixel, Iterm };
     ImageColor image_color = ImageColor::Auto;
     // A Kitty image bigger than this many pixels is sent scaled down, and the terminal scales it
     // back up to its cells. It bounds what an image that changes every frame (a 3D scene) costs.

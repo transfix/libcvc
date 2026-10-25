@@ -154,7 +154,9 @@ TEST(AriadneHostCli, GraphicsImageAndCellSizeFlags) {
   EXPECT_EQ(o.cell_h, 17);
   EXPECT_EQ(o.doc, "doc.ari");
 
-  const char *bad_mode[] = {"ari", "run", "--graphics", "iterm", "d.ari"};
+  const char *iterm[] = {"ari", "run", "--graphics", "iterm", "d.ari"};
+  EXPECT_EQ(parse_host_args(5, iterm).graphics, "iterm");
+  const char *bad_mode[] = {"ari", "run", "--graphics", "blocks", "d.ari"};
   EXPECT_NE(parse_host_args(5, bad_mode).error.find("--graphics"), std::string::npos);
   const char *bad_image[] = {"ari", "run", "--image", "photo.png", "d.ari"};
   EXPECT_NE(parse_host_args(5, bad_image).error.find("NAME=FILE"), std::string::npos);

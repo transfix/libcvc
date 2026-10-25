@@ -958,6 +958,12 @@ TermGraphics kitty_term() {
   return g;
 }
 
+TermGraphics iterm_term() {
+  TermGraphics g;
+  g.iterm = true; // what $TERM_PROGRAM says; no cell size (Windows reports none)
+  return g;
+}
+
 TermGraphics sixel_term(int cell_h = 12) {
   TermGraphics g;
   g.sixel = true;
@@ -996,6 +1002,51 @@ TEST(AriadneFtxuiGraphics, AutoPicksKittyThenSixelThenHalfBlocks) {
   tv.set_terminal_graphics(both);
   EXPECT_NE(tv.image_mode(), ImageColor::Kitty);
   EXPECT_NE(tv.image_mode(), ImageColor::Sixel);
+}
+
+TEST(AriadneFtxuiGraphics, AutoPicksItermAfterKittyAndSixel) {
+  REQUIRE_FTXUI();
+  FtxuiBackend be;
+  be.set_terminal_graphics(iterm_term());
+  EXPECT_EQ(be.image_mode(), ImageColor::Iterm) << "needs no cell size: the terminal scales it";
+  TermGraphics also = sixel_term();
+  also.iterm = true;
+  be.set_terminal_graphics(also);
+  EXPECT_EQ(be.image_mode(), ImageColor::Sixel);
+  also.kitty = true;
+  be.set_terminal_graphics(also);
+  EXPECT_EQ(be.image_mode(), ImageColor::Kitty);
+  TvisionBackend tv;
+  tv.set_terminal_graphics(iterm_term());
+  EXPECT_NE(tv.image_mode(), ImageColor::Iterm);
+}
+
+TEST(AriadneFtxuiGraphics, ItermIsSentAfterEveryDrawScaledToTheUncoveredCells) {
+  REQUIRE_FTXUI();
+  FtxuiBackend::Options o;
+  o.image_color = ImageColor::Iterm;
+  Term t(group({text("hello")}), o);
+  t.be.set_terminal_graphics(iterm_term());
+  t.be.set_image("scene", solid(4, 4, 255, 0, 0));
+  t.be.set_background("scene");
+  t.width = 20;
+  t.height = 5;
+  t.draw();
+  EXPECT_EQ(count(t.screen, "\xe2\x96\x80"), 20 * 5 - 5) << "the half-block underlay";
+  const std::string g = t.be.take_graphics();
+  // As for Sixel: row 1 (1-based) from column 6, and rows 2..4 whole; but each image names its
+  // cells, so no band rounding.
+  const std::string inline_image = "\x1b]1337;File=inline=1;";
+  EXPECT_EQ(count(g, inline_image), 2) << g.substr(0, 120);
+  const std::size_t a = g.find(kSaveCursor + "\x1b[2;1H" + inline_image);
+  const std::size_t b = g.find(kSaveCursor + "\x1b[1;6H" + inline_image);
+  ASSERT_NE(a, std::string::npos);
+  ASSERT_NE(b, std::string::npos);
+  EXPECT_NE(g.find(";width=20;height=3;", a), std::string::npos);
+  EXPECT_NE(g.find(";width=15;height=1;", b), std::string::npos);
+  EXPECT_EQ(count(g, kRestoreCursor), 2);
+  t.draw();
+  EXPECT_EQ(t.be.take_graphics(), g) << "a repaint covers the image, so it is sent again";
 }
 
 TEST(AriadneFtxuiGraphics, ImageRasterIsTheCellsRealPixels) {

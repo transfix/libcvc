@@ -452,6 +452,49 @@ TEST(TermGraphics, SixelHonoursTheRowStride) {
   EXPECT_EQ(window, gfx::sixel_encode(packed.data(), 4, 5, 0, 256));
 }
 
+// ---- iTerm2 inline images ------------------------------------------------------------------
+
+TEST(TermGraphics, ItermImageIsAJpegScaledToItsCells) {
+  const int W = 16, H = 8;
+  const std::vector<unsigned char> img = random_rgb(W, H, 7);
+  const std::string s = gfx::iterm_image(img.data(), W, H, 0, 4, 2);
+  const std::string head = "\x1b]1337;File=inline=1;size=";
+  ASSERT_EQ(s.compare(0, head.size(), head), 0) << s.substr(0, 40);
+  ASSERT_EQ(s.back(), '\x07');
+  const std::size_t colon = s.find(':');
+  ASSERT_NE(colon, std::string::npos);
+  const std::string args = s.substr(head.size(), colon - head.size());
+  EXPECT_NE(args.find(";width=4;height=2;preserveAspectRatio=0;doNotMoveCursor=1"),
+            std::string::npos)
+      << args;
+  const std::vector<unsigned char> jpeg = base64_decode(s.substr(colon + 1, s.size() - colon - 2));
+  ASSERT_GE(jpeg.size(), 4u);
+  EXPECT_EQ(jpeg[0], 0xFF); // a JPEG's start-of-image marker
+  EXPECT_EQ(jpeg[1], 0xD8);
+  EXPECT_EQ(std::to_string(jpeg.size()), args.substr(0, args.find(';'))) << "size= is the file's";
+  EXPECT_TRUE(gfx::iterm_image(img.data(), 0, H, 0, 4, 2).empty());
+}
+
+TEST(TermGraphics, ItermImageHonoursTheRowStride) {
+  const int W = 9, H = 8;
+  const std::vector<unsigned char> img = random_rgb(W, H, 5);
+  const unsigned char *origin = img.data() + (2 * W + 3) * 3;
+  std::vector<unsigned char> packed;
+  for (int y = 2; y < 7; ++y)
+    for (int x = 3; x < 7; ++x)
+      for (int c = 0; c < 3; ++c)
+        packed.push_back(img[static_cast<std::size_t>((y * W + x) * 3 + c)]);
+  EXPECT_EQ(gfx::iterm_image(origin, 4, 5, W * 3, 2, 1),
+            gfx::iterm_image(packed.data(), 4, 5, 0, 2, 1));
+}
+
+TEST(TermGraphics, ItermTerminalsAreNamedByTermProgram) {
+  EXPECT_TRUE(gfx::iterm_terminal("WezTerm"));
+  EXPECT_TRUE(gfx::iterm_terminal("iTerm.app"));
+  EXPECT_FALSE(gfx::iterm_terminal("xterm"));
+  EXPECT_FALSE(gfx::iterm_terminal(""));
+}
+
 // ---- rectangle cover ------------------------------------------------------------------------
 
 TEST(TermGraphics, CoverRectsCoversTheMaskWithDisjointRectangles) {
