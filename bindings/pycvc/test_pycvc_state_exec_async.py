@@ -231,7 +231,7 @@ def test_await_all_raises_the_first_failure_once_all_finish():
         w = World(kind)
         done = {}
 
-        def a():
+        def a(done=done):
             time.sleep(0.1)
             done["a"] = True
             return 1
@@ -241,7 +241,7 @@ def test_await_all_raises_the_first_failure_once_all_finish():
 
         w.fn("a", a)
         w.fn("b", b)
-        pycvc.builtins.register_fn(w.env, "a-done", lambda: done.get("a", False))
+        pycvc.builtins.register_fn(w.env, "a-done", lambda done=done: done.get("a", False))
         pid = w.run('(try (await-all (list (a-async) (b-async))) (catch (PythonError e) (list '
                     '(get-attr e "python_type") (a-done))))')
         assert w.result(pid) == ["ValueError", True], kind
@@ -385,39 +385,40 @@ def test_the_step_rate_is_live_and_set_by_precedence():
 
 
 def test_a_python_kernels_wait_for_the_gil_isnt_charged():
-    # AS-32: one process's kernel holds the GIL for 200 ms; another's, started with it, waits that
-    # long to take the GIL, then runs 50 ms. Its run time is the 50 ms. (Which kernel thread takes
-    # the GIL first is the OS's call: a scenario where the second one won is tried again.)
+    # AS-32: another thread holds the GIL for 300 ms, in one C call, while the kernel's thread waits
+    # to take it for its call. The kernel's run time is its own, not the wait.
+    # - `hold` waits for the GIL while this thread holds it, so it takes the GIL the moment
+    #   sync_run lets it go, before the call even starts; the kernel's thread then waits for it.
+    # - The kernel is time.monotonic: a C callable, which never lets the GIL go once it has it (a
+    #   Python function could, at an eval-breaker check, and wait again inside its call, a wait
+    #   the host doesn't see), and which says when it ran. Ran before the hold, it took the GIL
+    #   first: there was no wait, and the scenario is tried again.
     for _ in range(10):
         w = World()
-        holding = threading.Event()
+        w.fn("stamp", time.monotonic)
+        go = threading.Event()
+        window = {}
 
-        def hold():
-            holding.set()
-            return _hold_gil(0.2)
+        def hold(go=go, window=window):
+            go.wait()
+            window["from"] = time.monotonic()
+            _hold_gil(0.3)
 
-        def work():
-            if not holding.is_set():
-                return -1  # it took the GIL first: there was no wait to leave out
-            _hold_gil(0.05)
-            return 1
-
-        w.fn("hold", hold)
-        w.fn("work", work)
-        a = w.submit("(hold)")
-        b = w.submit("(work)")  # both calls start in the first slice, a's first
-        start = time.monotonic()
-        assert w.pump(lambda: w.finished(a) and w.finished(b))
-        wall = time.monotonic() - start
-        got, i = w.result(b), w.info(b)
+        t = threading.Thread(target=hold)
+        t.start()
+        pid = w.submit("(stamp)")
+        go.set()  # `hold` now waits for the GIL
+        w.sched.sync_run(10, 0.01)  # `hold` takes the GIL; the call starts; its kernel waits
+        t.join()
+        assert w.pump(lambda w=w, pid=pid: w.finished(pid))
+        ran_at, i = w.result(pid), w.info(pid)
         w.close()
-        if got == -1:
-            continue
-        assert got == 1
-        assert wall >= 0.2
-        assert i.async_time < 0.15, i.async_time  # its 50 ms, not its 200 ms wait for the GIL
+        if ran_at < window["from"]:
+            continue  # the kernel took the GIL before `hold` did: no wait to leave out
+        assert ran_at - window["from"] >= 0.2  # it waited out the hold
+        assert i.async_time < 0.1, i.async_time  # charged, the wait would be about 0.3 s
         return
-    raise AssertionError("the waiting kernel never lost the race for the GIL")
+    raise AssertionError("the kernel never had to wait for the GIL")
 
 
 def test_the_counters_survive_a_snapshot():
