@@ -669,6 +669,68 @@ TEST(PlantLogPower, FitRecoversAKnownPowerModel) {
   EXPECT_GT(f.runs[0].distance_m, 10.0);
 }
 
+// The tire term's calibration: runs whose ledger tire is a known multiple of the dynamic
+// vehicle's own lateral and longitudinal tire dissipation, and whose energy prices that at a
+// known rate on top of a known model, give back both.
+TEST(PlantLogPower, FitCalibratesTheTireTermToTheLedger) {
+  const vehicle_desc d = vehicle_desc::roboracer();
+  const cvc::nav::dyn_bike_si si = nav_plant::dyn_bike_si_of(d);
+  const cvc::nav::diff::dyn_bike_params tp =
+      cvc::nav::dyn_bike_params_of(si, cvc::world_units::normalized_frame{});
+  const double dt = 0.02, cal_lat = 0.8, cal_lon = 2.5, price = 1.6;
+  cvc::nav::dyn_power_si truth;
+  truth.k_pos = 1.3;
+  truth.p_idle = 6.0;
+  truth.c_v3 = 0.002;
+  std::vector<std::vector<planar_sample>> runs(3);
+  std::mt19937 rng(11);
+  std::uniform_real_distribution<double> U(-1.0, 1.0);
+  for (auto &run : runs) {
+    planar_sample s;
+    run.push_back(s);
+    for (int k = 1; k < 600; ++k) {
+      planar_sample q;
+      const double t = k * dt;
+      q.vx = 4.0 + 2.5 * std::sin(0.7 * t + U(rng)) + 0.3 * U(rng);
+      q.vy = 0.25 * std::sin(1.3 * t) + 0.05 * U(rng);
+      q.r = 0.6 * std::sin(0.9 * t) + 0.1 * U(rng);
+      q.steer = 0.2 * std::sin(0.9 * t + 0.2);
+      q.psi = run.back().psi + q.r * dt;
+      q.x = run.back().x + q.vx * dt;
+      q.y = run.back().y;
+      q.a_lon = (q.vx - run.back().vx) / dt;
+      const double v = 0.5 * (run.back().vx + q.vx);
+      const double f_res = -si.drag * v * std::fabs(v) -
+                           si.rolling_resistance * si.mass * si.gravity * (v > 0 ? 1 : -1);
+      const double a = q.a_lon - f_res / si.mass;
+      double pl = 0.0, po = 0.0, w = 1e-3 * si.mass * d.max_accel * 7.0;
+      cvc::nav::diff::dyn_tire_power(tp, q.vx, q.vy, q.r, q.steer, a, w, pl, po);
+      q.tire = dt * (cal_lat * pl + cal_lon * po);
+      const double P = si.mass * a * q.vx;
+      float dd;
+      const double pos =
+          cvc::nav::diff::power_softplus(static_cast<float>(P), static_cast<float>(w), dd);
+      q.energy = dt * (truth.k_pos * pos + truth.p_idle + truth.c_v3 * q.vx * q.vx * q.vx) +
+                 price * q.tire;
+      run.push_back(q);
+    }
+  }
+  const power_fit f = fit_power(runs, dt, d);
+  std::printf("  tire calibration: lateral %.3f (truth %.3f), longitudinal %.3f (%.3f), r2 %.4f; "
+              "tire_lat %.3f tire_lon %.3f (truth %.3f %.3f); energy r2 %.4f\n",
+              f.tire_cal_lat, cal_lat, f.tire_cal_lon, cal_lon, f.tire_r2, f.si.tire_lat,
+              f.si.tire_lon, price * cal_lat, price * cal_lon, f.r2);
+  EXPECT_NEAR(f.tire_cal_lat, cal_lat, 2e-2 * cal_lat);
+  EXPECT_NEAR(f.tire_cal_lon, cal_lon, 2e-2 * cal_lon);
+  EXPECT_GT(f.tire_r2, 0.999);
+  EXPECT_NEAR(f.si.tire_lat, price * cal_lat, 5e-2 * price * cal_lat);
+  EXPECT_NEAR(f.si.tire_lon, price * cal_lon, 5e-2 * price * cal_lon);
+  EXPECT_GT(f.r2, 0.99);
+  // evaluate_power with the fitted model gives the same totals.
+  const power_fit e = evaluate_power(runs, dt, d, f.si);
+  EXPECT_NEAR(e.total_error, f.total_error, 1e-9);
+}
+
 // The log carries the ledger: each tick's energy is what nav_plant measured over it.
 TEST(PlantLogPower, LogsTheEnergyEachTickDrew) {
   REQUIRE_JOLT();
@@ -681,12 +743,17 @@ TEST(PlantLogPower, LogsTheEnergyEachTickDrew) {
   ASSERT_EQ(drv.runs.size(), 2u);
   for (const auto &run : drv.runs) {
     EXPECT_EQ(run[0].energy, 0.0); // start(): no tick yet
-    double drawn = 0.0;
+    EXPECT_EQ(run[0].tire, 0.0);
+    double drawn = 0.0, tire = 0.0;
     for (std::size_t t = 1; t < run.size(); ++t) {
       EXPECT_TRUE(std::isfinite(run[t].energy));
+      EXPECT_GE(run[t].tire, -1e-9); // the ledger's tire term only grows
       drawn += run[t].energy;
+      tire += run[t].tire;
     }
     EXPECT_GT(drawn, 0.0); // a Humvee driving 2 s burns fuel
+    EXPECT_GT(tire, 0.0);  // and slips its tires
+    EXPECT_LT(tire, drawn);
   }
 }
 
