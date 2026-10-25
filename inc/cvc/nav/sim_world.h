@@ -365,6 +365,13 @@ public:
   float yield_pass_distance(int i) const {
     return i >= 0 && i < static_cast<int>(yield_pass_.size()) ? yield_pass_[i] : -1.0f;
   }
+  // Agent i's shift out of others' paths (rule 1 alone; normalized, across the world): where a host
+  // holding it still should move it to make way. (0, 0) when none, or yielding is off.
+  void yield_out(int i, float &dx, float &dy) const {
+    const bool ok = i >= 0 && 2 * static_cast<std::size_t>(i) + 1 < yield_out_.size();
+    dx = ok ? yield_out_[2 * i] : 0.0f;
+    dy = ok ? yield_out_[2 * i + 1] : 0.0f;
+  }
   // The last step()'s published intents ([n]) and carrot shifts ([n*2], normalized; at the carrot),
   // for a renderer or a test; null before a step() with yielding on.
   const agent_intent *intents() const {
