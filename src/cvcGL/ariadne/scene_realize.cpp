@@ -780,19 +780,66 @@ void realize_light(SceneGraph &sg, const cvc::ariadne::SceneLight &l, RealizedSc
 // is the general form of bunny_shadow.cpp's stand_bunny — placing an arbitrarily-authored mesh
 // predictably on a ground plane.
 cvc::geometry fit_to_ground(const cvc::geometry &raw, bool up_y, float height) {
+  return fit_to_ground(raw, up_y ? 'y' : 'z', false, height);
+}
+
+// Up axis y: (x, y, z) -> (x, -z, y), +90 degrees about x. Up axis x: the cyclic (x, y, z) ->
+// (y, z, x). Flip: a half turn about x, (x, y, z) -> (x, -y, -z). All proper rotations, so
+// winding and normals stay valid.
+void turn_up_point(char up, bool flip, const double in[3], double out[3]) {
+  const double x = in[0], y = in[1], z = in[2];
+  if (up == 'y') {
+    out[0] = x;
+    out[1] = -z;
+    out[2] = y;
+  } else if (up == 'x') {
+    out[0] = y;
+    out[1] = z;
+    out[2] = x;
+  } else {
+    out[0] = x;
+    out[1] = y;
+    out[2] = z;
+  }
+  if (flip) {
+    out[1] = -out[1];
+    out[2] = -out[2];
+  }
+}
+
+char fit_up_axis(const cvc::ariadne::SceneNode &n) {
+  if (n.fit_up_y || n.fit_up == "y")
+    return 'y';
+  return n.fit_up == "x" ? 'x' : 'z';
+}
+
+cvc::geometry turn_up(const cvc::geometry &raw, char up, bool flip) {
+  cvc::geometry g;
+  g.copy(raw, true);
+  if ((up != 'x' && up != 'y') && !flip)
+    return g;
+  for (auto &p : g.points()) {
+    const double in[3] = {p[0], p[1], p[2]};
+    double o[3];
+    turn_up_point(up, flip, in, o);
+    p = {{o[0], o[1], o[2]}};
+  }
+  for (auto &v : g.normals()) {
+    const double in[3] = {v[0], v[1], v[2]};
+    double o[3];
+    turn_up_point(up, flip, in, o);
+    v = {{o[0], o[1], o[2]}};
+  }
+  return g;
+}
+
+cvc::geometry fit_to_ground(const cvc::geometry &raw, char up, bool flip, float height) {
   const auto &P = raw.points();
   const auto &N = raw.normals();
   const auto &C = raw.colors();
-  const auto rot = [up_y](double x, double y, double z, double o[3]) {
-    if (up_y) {
-      o[0] = x;
-      o[1] = -z;
-      o[2] = y;
-    } else {
-      o[0] = x;
-      o[1] = y;
-      o[2] = z;
-    }
+  const auto rot = [up, flip](double x, double y, double z, double o[3]) {
+    const double in[3] = {x, y, z};
+    turn_up_point(up, flip, in, o);
   };
   double lo[3] = {1e30, 1e30, 1e30}, hi[3] = {-1e30, -1e30, -1e30};
   for (const auto &p : P) {
@@ -873,7 +920,7 @@ bool read_node_geometry_and_field(SceneGraph &, const cvc::ariadne::SceneNode &n
                          "': `fit` is ignored on a heightfield (already centered on z=0; size it "
                          "via source.heightfield.size)");
     else if (n.source_primitive.empty())
-      geom = fit_to_ground(geom, n.fit_up_y, n.fit_height);
+      geom = fit_to_ground(geom, fit_up_axis(n), n.fit_flip, n.fit_height);
     else
       warn(warnings, "ari: scene node '" + n.id + "': `fit` is ignored on the built-in '" +
                          n.source_primitive +
@@ -894,14 +941,9 @@ bool read_node_geometry(SceneGraph &sg, const cvc::ariadne::SceneNode &n, cvc::g
 // A dim³ signed-distance-field volume of a mesh, framed like the volume demos' bunny_sdf: the grid
 // spans the mesh extents padded 10% (cubic). Lets a volren/volslice node declare
 // `source: { sdf: { mesh:, dim: } }` instead of a pre-baked volume file.
-cvc::volume sdf_volume_from_mesh(cvc::app &app, const std::string &mesh_uri, int dim,
-                                 bool apply_fit, bool fit_up_y, float fit_height,
-                                 cvc::sdf_algorithm algorithm) {
+cvc::volume sdf_volume_of_mesh(cvc::app &app, const cvc::geometry &mesh, int dim,
+                               cvc::sdf_algorithm algorithm) {
 #if CVC_ENABLE_SDF
-  cvc::geometry mesh = cvc::read_geometry(mesh_uri);
-  if (apply_fit)
-    mesh = fit_to_ground(mesh, fit_up_y, fit_height); // stand/centre/scale the mesh before the SDF,
-                                                      // so the volume is framed like the geometry
   const cvc::bounding_box e = mesh.extents();
   const double ext = std::max({e.maxx - e.minx, e.maxy - e.miny, e.maxz - e.minz});
   const double half = ext * 1.1 * 0.5;
@@ -912,10 +954,35 @@ cvc::volume sdf_volume_from_mesh(cvc::app &app, const std::string &mesh_uri, int
   return cvc::sdf(app, mesh, cvc::dimension(d, d, d), bbox, algorithm);
 #else
   (void)app;
+  (void)mesh;
+  (void)dim;
+  (void)algorithm;
+  throw std::runtime_error("source: { sdf } needs a CVC_ENABLE_SDF build");
+#endif
+}
+
+cvc::volume sdf_volume_from_mesh(cvc::app &app, const std::string &mesh_uri, int dim,
+                                 bool apply_fit, bool fit_up_y, float fit_height,
+                                 cvc::sdf_algorithm algorithm) {
+  return sdf_volume_from_mesh(app, mesh_uri, dim, apply_fit, fit_up_y ? 'y' : 'z', false,
+                              fit_height, algorithm);
+}
+
+cvc::volume sdf_volume_from_mesh(cvc::app &app, const std::string &mesh_uri, int dim,
+                                 bool apply_fit, char fit_up, bool fit_flip, float fit_height,
+                                 cvc::sdf_algorithm algorithm) {
+#if CVC_ENABLE_SDF
+  cvc::geometry mesh = cvc::read_geometry(mesh_uri);
+  if (apply_fit) // stand/centre/scale the mesh before the SDF, so the volume is framed like it
+    mesh = fit_to_ground(mesh, fit_up, fit_flip, fit_height);
+  return sdf_volume_of_mesh(app, mesh, dim, algorithm);
+#else
+  (void)app;
   (void)mesh_uri;
   (void)dim;
   (void)apply_fit;
-  (void)fit_up_y;
+  (void)fit_up;
+  (void)fit_flip;
   (void)fit_height;
   (void)algorithm;
   throw std::runtime_error("source: { sdf } needs a CVC_ENABLE_SDF build");
@@ -945,7 +1012,7 @@ cvc::volume load_node_volume(SceneGraph &sg, const cvc::ariadne::SceneNode &n,
                          "' is not v1, v2 or igl — using v2");
     }
     return sdf_volume_from_mesh(sg.appContext(), n.source_sdf_mesh, n.sdf_dim, n.has_fit,
-                                n.fit_up_y, n.fit_height, alg);
+                                fit_up_axis(n), n.fit_flip, n.fit_height, alg);
   }
   cvc::ariadne::ResolvedFile src = resolve_source(n, warnings);
   if (!src.ok)

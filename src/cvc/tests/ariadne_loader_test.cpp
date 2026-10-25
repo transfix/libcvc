@@ -1022,6 +1022,48 @@ scene:
   EXPECT_EQ(v->sdf_algorithm, "v2"); // the default
 }
 
+// fit: { up: x | y | z, flip } -- the dataset's up axis and an upside-down scan -- and the
+// document's directory on every node (SceneNode::base_dir: where a custom node's relative
+// paths resolve; empty for a document loaded from a string).
+TEST(AriadneScene, FitUpAxisFlipAndBaseDir) {
+  SKIP_WITHOUT_YAML();
+  const std::string doc = R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: ct
+      type: fe_lab
+      source: { file: ../data/ct.rawiv }
+      fit: { height: 100, up: X, flip: true }
+      children:
+        - node: inner
+          source: { file: stanford.bunny }
+          fit: { height: 10 }
+)";
+  LoadResult r = load_string(doc);
+  ASSERT_TRUE(r.ok) << r.error;
+  const SceneNode *ct = find_scene_node(r.scene.nodes, "ct");
+  ASSERT_NE(ct, nullptr);
+  EXPECT_EQ(ct->fit_up, "x"); // lower-cased
+  EXPECT_FALSE(ct->fit_up_y);
+  EXPECT_TRUE(ct->fit_flip);
+  EXPECT_TRUE(ct->base_dir.empty()); // from a string: no directory
+  ASSERT_EQ(ct->children.size(), 1u);
+  EXPECT_EQ(ct->children[0].fit_up, "z"); // the default
+  EXPECT_FALSE(ct->children[0].fit_flip);
+
+  const std::string path = write_temp_ari("fit_base_dir.ari", doc);
+  LoadResult f = load_file(path);
+  ASSERT_TRUE(f.ok) << f.error;
+  const SceneNode *fct = find_scene_node(f.scene.nodes, "ct");
+  ASSERT_NE(fct, nullptr);
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::weakly_canonical(fs::path(path)).parent_path();
+  EXPECT_EQ(fs::path(fct->base_dir), dir);
+  ASSERT_EQ(fct->children.size(), 1u);
+  EXPECT_EQ(fs::path(fct->children[0].base_dir), dir); // children too
+}
+
 // source: { sdf: { ..., algorithm: v1|v2|igl } } picks the cvc::sdf implementation; the loader
 // keeps it lower-cased and leaves validation (and the igl -> v2 fallback) to the realizer.
 TEST(AriadneScene, VolumeSdfAlgorithm) {

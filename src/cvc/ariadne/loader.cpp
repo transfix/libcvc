@@ -1589,7 +1589,9 @@ SceneNode parse_scene_node(const YAML::Node &n) {
   if (fit && fit.IsMap()) {
     sn.has_fit = true;
     sn.fit_height = static_cast<float>(num(fit, "height", sn.fit_height));
-    sn.fit_up_y = (str(fit, "up", "z") == "y"); // up: y -> rotate a Y-up mesh to Z-up first
+    sn.fit_up = lowered(str(fit, "up", "z")); // the dataset's up axis: x | y | z
+    sn.fit_up_y = sn.fit_up == "y";           // up: y -> rotate a Y-up mesh to Z-up first
+    sn.fit_flip = flag(fit, "flip", false);   // then turn it upside down
   }
   const YAML::Node vis = n["visible"];
   if (vis) {
@@ -1727,6 +1729,14 @@ SceneLight parse_scene_light(const YAML::Node &n) {
     sl.rig_ambient = static_cast<float>(num(n, "ambient", sl.rig_ambient));
   }
   return sl;
+}
+
+// Every node (children included) records the document's directory: SceneNode::base_dir.
+void stamp_base_dir(std::vector<SceneNode> &nodes, const std::string &dir) {
+  for (SceneNode &n : nodes) {
+    n.base_dir = dir;
+    stamp_base_dir(n.children, dir);
+  }
 }
 
 Scene parse_scene(const YAML::Node &s) {
@@ -2294,7 +2304,8 @@ LoadResult load_node(const YAML::Node &doc, const std::string &base_dir = std::s
   parse_units(ctx, doc); // §12: collect units: templates BEFORE the body (so include: resolves)
   r.root = parse_document(ctx, doc);
   if (doc.IsMap()) {
-    r.scene = parse_scene(doc["scene"]); // §9: the scene graph, alongside the widgets
+    r.scene = parse_scene(doc["scene"]);         // §9: the scene graph, alongside the widgets
+    stamp_base_dir(r.scene.nodes, ctx.base_dir); // relative paths in a node's keys resolve here
     // init: a state_exec script the host runs once at load (cvc::ariadne::run_init).
     // The loader only captures the text — it has no app and never runs the DSL.
     const YAML::Node in = doc["init"];

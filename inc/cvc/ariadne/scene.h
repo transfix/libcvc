@@ -267,6 +267,15 @@ struct SceneNode {
   bool has_fit = false;
   float fit_height = 1.0f;
   bool fit_up_y = false; // fit: { up: y } — rotate the Y-up mesh +90° about X to Z-up first
+  // fit: { up: x | y | z, flip: true }: the dataset's own up axis, turned to +z first (fit_up_y
+  // is the `y` case, kept for code that sets it directly), then a half turn about x when flip
+  // is set (a scan stored upside down).
+  std::string fit_up = "z";
+  bool fit_flip = false;
+
+  // The directory of the .ari file that declared this node (empty for a document loaded from a
+  // string). A custom realizer resolves a relative path in its own state keys against it.
+  std::string base_dir;
 
   bool has_transform = false;
   float position[3] = {0.0f, 0.0f, 0.0f};

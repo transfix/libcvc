@@ -196,6 +196,14 @@ bool has_scene_node_type(const std::string &type);
 // its base on z = 0 and scale its tallest extent to `height`. Returns a fresh geometry (points,
 // normals, colours, tris).
 cvc::geometry fit_to_ground(const cvc::geometry &raw, bool up_y, float height);
+// The same with the dataset's up axis (`x`, `y` or `z`, which becomes +z) and `flip` (then a half
+// turn about x: a scan stored upside down), as `fit: { up, flip }` declares them.
+cvc::geometry fit_to_ground(const cvc::geometry &raw, char up, bool flip, float height);
+// That rotation alone: points and normals turned, everything else copied.
+cvc::geometry turn_up(const cvc::geometry &raw, char up, bool flip);
+void turn_up_point(char up, bool flip, const double in[3], double out[3]);
+// A node's `fit: { up }` as one of 'x', 'y', 'z' (SceneNode::fit_up_y wins: it is the `y` case).
+char fit_up_axis(const cvc::ariadne::SceneNode &node);
 
 // The mesh a node's `source:` declares — a heightfield (its cvc::height_field's mesh), a plane, box
 // or sphere primitive, or a file / URI — with its `fit:` applied. Warns (naming the node) and
@@ -209,6 +217,12 @@ bool read_node_geometry(SceneGraph &sg, const cvc::ariadne::SceneNode &node, cvc
 cvc::volume sdf_volume_from_mesh(cvc::app &app, const std::string &mesh_uri, int dim,
                                  bool apply_fit, bool fit_up_y, float fit_height,
                                  cvc::sdf_algorithm algorithm = cvc::SDF_V2);
+cvc::volume sdf_volume_from_mesh(cvc::app &app, const std::string &mesh_uri, int dim,
+                                 bool apply_fit, char fit_up, bool fit_flip, float fit_height,
+                                 cvc::sdf_algorithm algorithm = cvc::SDF_V2);
+// The same for a mesh already in hand (any fit applied by the caller).
+cvc::volume sdf_volume_of_mesh(cvc::app &app, const cvc::geometry &mesh, int dim,
+                               cvc::sdf_algorithm algorithm = cvc::SDF_V2);
 
 // The volume a node's `source:` declares: `{ file }`, or `{ sdf: { mesh, dim, algorithm } }`
 // (algorithm v1 | v2 | igl; igl falls back to v2 with a warning when cvc::mesh_ops_available() is
