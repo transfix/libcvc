@@ -832,6 +832,41 @@ TEST_F(LbieMesherTest, TetraMeshesAnIsovalueTheSamplesHit) {
   }
 }
 
+// The QEF error that drives refinement is a residual summed over the three axes, but
+// Octree::compute_qef and compute_qef_interval assigned instead of adding inside their axis loops,
+// so only the z term counted. The side of a cylinder along z has no z component in its normals, so
+// its residual was 0/0 and it never refined, while the same cylinder along x or y did. The same
+// capped cylinder along each axis now gives the same surface and the same tetrahedra.
+TEST_F(LbieMesherTest, RefinementIsTheSameAlongEveryAxis) {
+  const unsigned int n = 33;
+  const double radius = 0.4, half_length = 0.6;
+  int tris[3], tets[3];
+  for (int axis = 0; axis < 3; ++axis) {
+    volume v(ctx, dimension(n, n, n), Float, bounding_box(-1.0, -1.0, -1.0, 1.0, 1.0, 1.0));
+    for (unsigned int k = 0; k < n; ++k)
+      for (unsigned int j = 0; j < n; ++j)
+        for (unsigned int i = 0; i < n; ++i) {
+          const double p[3] = {-1.0 + 2.0 * i / (n - 1), -1.0 + 2.0 * j / (n - 1),
+                               -1.0 + 2.0 * k / (n - 1)};
+          const double a = p[(axis + 1) % 3], b = p[(axis + 2) % 3];
+          v(i, j, k, std::min(radius - std::sqrt(a * a + b * b), half_length - std::fabs(p[axis])));
+        }
+    LBIE::geoframe surface =
+        run_do_mesh(v, 0.0f, 0.0f, kDefaultErr, kDefaultErrIn, LBIE::geoframe::SINGLE);
+    LBIE::geoframe solid =
+        run_do_mesh(v, 0.0f, 0.0f, kDefaultErr, kDefaultErrIn, LBIE::geoframe::TETRA);
+    expect_geoframe_valid(surface);
+    expect_geoframe_valid(solid);
+    tris[axis] = surface.numtris;
+    tets[axis] = solid.numtris / 4;
+  }
+  EXPECT_GT(tris[0], 0);
+  for (int axis = 1; axis < 3; ++axis) {
+    EXPECT_EQ(tris[axis], tris[0]) << "triangles along axis " << axis << " vs x";
+    EXPECT_EQ(tets[axis], tets[0]) << "tets along axis " << axis << " vs x";
+  }
+}
+
 // GEO_FLOW on tetrahedra (Octree::geometric_flow_tet) moved every vertex 100 times per pass with
 // no check on the tets around it, so it could fold them; on the bunny's mesh the minimum dihedral
 // angle fell from 26.6 to 0.75 degrees and a boundary vertex flew far outside. It also read each

@@ -763,6 +763,16 @@ void Octree::get_qef_in(int child_idx,double* temp_sigma_ni_2,double* temp_sigma
 }
 
 
+// The QEF residual along one axis: sum w p^2 - (sum w p)^2 / sum w over the cell's edge crossings p,
+// with w the squared normal component on that axis. get_err() is the sum over the three axes, but
+// every caller assigned instead of adding inside its axis loop, so only z counted: a surface whose
+// normals have no z component (a cylinder along z) had a residual of 0/0 and never refined, while
+// the same surface along x did. An axis no normal has a component on constrains nothing and adds 0.
+static double qef_axis_residual(double w, double wp, double wp2)
+{
+	return w > 0.0 ? wp2 - wp*wp/w : 0.0;
+}
+
 void Octree::compute_qef()
 {
 	float norm[12][3], p[12][3];
@@ -808,7 +818,7 @@ void Octree::compute_qef()
 */
 		qef=0;
 		for (i=0;i<3;i++)
-			qef = sigma_ni_2_pi_2[i] - (sigma_ni_2_pi[i]*sigma_ni_2_pi[i]) / sigma_ni_2[i] ;
+			qef += qef_axis_residual(sigma_ni_2[i], sigma_ni_2_pi[i], sigma_ni_2_pi_2[i]);
 
 		put_qef(oc_id, sigma_ni_2, sigma_ni_2_pi, sigma_ni_2_pi_2, solution, qef);
 	}
@@ -844,7 +854,7 @@ void Octree::compute_qef()
 				solution[i] = sigma_ni_2_pi[i] / sigma_ni_2[i];
 			qef=0;
 			for (i=0;i<3;i++) 
-				qef = sigma_ni_2_pi_2[i] - (sigma_ni_2_pi[i]*sigma_ni_2_pi[i]) / sigma_ni_2[i] ;
+				qef += qef_axis_residual(sigma_ni_2[i], sigma_ni_2_pi[i], sigma_ni_2_pi_2[i]);
 			put_qef(oc_id,sigma_ni_2, sigma_ni_2_pi, sigma_ni_2_pi_2, solution, qef);
 
 		}
@@ -884,7 +894,7 @@ void Octree::compute_qef_interval()
 
 			qef=0;
 			for (i=0;i<3;i++)
-				qef = sigma_ni_2_pi_2[i] - (sigma_ni_2_pi[i]*sigma_ni_2_pi[i]) / sigma_ni_2[i] ;
+				qef += qef_axis_residual(sigma_ni_2[i], sigma_ni_2_pi[i], sigma_ni_2_pi_2[i]);
 
 			put_qef(oc_id, sigma_ni_2, sigma_ni_2_pi, sigma_ni_2_pi_2, solution, qef);
 		}
@@ -908,7 +918,7 @@ void Octree::compute_qef_interval()
 
 			qef=0;
 			for (i=0;i<3;i++)
-				qef = sigma_ni_2_pi_2[i] - (sigma_ni_2_pi[i]*sigma_ni_2_pi[i]) / sigma_ni_2[i] ;
+				qef += qef_axis_residual(sigma_ni_2[i], sigma_ni_2_pi[i], sigma_ni_2_pi_2[i]);
 
 			put_qef_in(oc_id, sigma_ni_2, sigma_ni_2_pi, sigma_ni_2_pi_2, solution, qef);
 		}
@@ -941,7 +951,7 @@ void Octree::compute_qef_interval()
 				solution[i] = sigma_ni_2_pi[i] / sigma_ni_2[i];
 			qef=0;
 			for (i=0;i<3;i++) 
-				qef = sigma_ni_2_pi_2[i] - (sigma_ni_2_pi[i]*sigma_ni_2_pi[i]) / sigma_ni_2[i];
+				qef += qef_axis_residual(sigma_ni_2[i], sigma_ni_2_pi[i], sigma_ni_2_pi_2[i]);
 			put_qef(oc_id,sigma_ni_2, sigma_ni_2_pi, sigma_ni_2_pi_2, solution, qef);
 
 			clear (temp_sigma_ni_2,temp_sigma_ni_2_pi,temp_sigma_ni_2_pi_2);
@@ -964,7 +974,7 @@ void Octree::compute_qef_interval()
 				solution[i] = sigma_ni_2_pi[i] / sigma_ni_2[i];
 			qef=0;
 			for (i=0;i<3;i++) 
-				qef = sigma_ni_2_pi_2[i] - (sigma_ni_2_pi[i]*sigma_ni_2_pi[i]) / sigma_ni_2[i];
+				qef += qef_axis_residual(sigma_ni_2[i], sigma_ni_2_pi[i], sigma_ni_2_pi_2[i]);
 			put_qef_in(oc_id,sigma_ni_2, sigma_ni_2_pi, sigma_ni_2_pi_2, solution, qef);
 
 		}
