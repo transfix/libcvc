@@ -41,19 +41,17 @@ if [[ -z "${CVC_WASM_NAV_WEIGHTS:-}" && -f "$_weights" ]]; then
   export CVC_WASM_NAV_WEIGHTS="$_weights"
 fi
 
-# IMAGEMAGICK is OFF on purpose. cvc's zero-dependency stb image handler
-# (src/cvc/image/stb_io.cpp) is registered AHEAD of Magick for png/jpg/bmp/tga/gif
-# reads, so the demos' textures (the Austin satellite.png, glb base-color maps)
-# load without it; ImageMagick only backs volume_ops image I/O, which no gallery
-# demo uses (the bunny volumes are generated). Linking it in would drag
-# libMagickCore's bz2 / libxml2 / lzma delegate symbols into the executable link,
-# and wasm-ld fails on them (they are not propagated to the demo link line).
+# ImageMagick ON, like every native build: cvc's image I/O (volume_ops, the formats stb
+# does not read) is the same in the browser. The static MagickCore's codec closure (bz2,
+# lzma, libxml2, tiff, webp, ...) comes from the declared build deps, and
+# src/cvc/CMakeLists.txt hangs it off MagickCore for every static link, so the demo link
+# resolves it. build-wasm-demo.sh fails the build if the configure did not find it.
 WEB="$CVC_INSTALL_DIR/share/libcvc-examples-web/web"
 install -d "$WEB"
 CVC_WASM_DEPS="$CVC_DEPS_PREFIX" \
 CVC_WASM_BUILD_DIR="$CVC_BUILD_DIR" \
 CVC_WASM_GALLERY_DIR="$WEB" \
-CVC_WASM_IMAGEMAGICK=OFF \
+CVC_WASM_IMAGEMAGICK=ON \
   bash "$CVC_SOURCE_DIR/examples/web/build-wasm-demo.sh" ${THREADS[@]+"${THREADS[@]}"}
 
 # The .wasm files embed third-party code (VTK-derived code in cvcGL, BSD-3-Clause;

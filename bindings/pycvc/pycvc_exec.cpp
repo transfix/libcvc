@@ -9,12 +9,12 @@
 #include "pycvc_value.h" // the shared value_t <-> Python conversion
 
 #include <chrono>
-#include <condition_variable>
 #include <cvc/core/app.h>
-#include <cvc/core/async_task.h> // park_on_pool_task — offload an async Python fn to the pool
 #include <cvc/state/state.h>
+#include <cvc/state/state_exec/async_host.h>      // Exec's async functions run through its host
 #include <cvc/state/state_exec/async_scheduler.h> // Exec drives a private async scheduler
 #include <cvc/state/state_exec/builtins.h>
+#include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/process.h>
 #include <cvc/state/state_exec/types.h>
@@ -87,23 +87,78 @@ std::shared_ptr<PyObject> own_callable(PyObject *callable) {
   });
 }
 
+// The qualified name of an exception type: "module.QualName", or the bare name of a builtin.
+std::string exception_type_name(PyObject *type) {
+  std::string name;
+  if (PyObject *qual = PyObject_GetAttrString(type, "__qualname__")) {
+    if (const char *s = PyUnicode_AsUTF8(qual))
+      name = s;
+    Py_DECREF(qual);
+  }
+  if (PyObject *mod = PyObject_GetAttrString(type, "__module__")) {
+    const char *m = PyUnicode_Check(mod) ? PyUnicode_AsUTF8(mod) : nullptr;
+    if (m && std::string(m) != "builtins" && !name.empty())
+      name = std::string(m) + "." + name;
+    Py_DECREF(mod);
+  }
+  PyErr_Clear(); // a type without the attributes keeps what was found
+  return name;
+}
+
+// The Python exception set now, taken (cleared) as the C++ error it becomes in the DSL: a
+// python_exception (PythonError) holding it, its message prefixed with `what`.
+python_exception take_py_exception(const std::string &what) {
+  PyObject *type = nullptr, *val = nullptr, *tb = nullptr;
+  PyErr_Fetch(&type, &val, &tb);
+  PyErr_NormalizeException(&type, &val, &tb);
+  if (val != nullptr && tb != nullptr)
+    PyException_SetTraceback(val, tb);
+  std::string msg = "error";
+  if (val != nullptr) {
+    if (PyObject *s = PyObject_Str(val)) {
+      if (const char *cs = PyUnicode_AsUTF8(s))
+        msg = cs;
+      Py_DECREF(s);
+    }
+  }
+  const std::string type_name = type != nullptr ? exception_type_name(type) : std::string();
+  std::shared_ptr<PyObject> held = val != nullptr ? own_callable(val) : nullptr;
+  PyErr_Clear();
+  Py_XDECREF(type);
+  Py_XDECREF(val);
+  Py_XDECREF(tb);
+  return python_exception(what + ": " + msg, type_name, std::move(held));
+}
+
 // Call the held Python callable with `args`, ACQUIRING THE GIL for the duration.
 // Safe from ANY thread (the scheduler thread for a sync fn, a pool worker for an
 // async fn): PyGILState_Ensure creates/binds a thread state and blocks until the
 // GIL is free, so the only rule is that whoever is idle-waiting for this worker
-// must have released the GIL (run()'s pump does). Contains a Python exception as
-// a C++ error carrying the message, prefixed with `what`. With `want_result`
-// false the return value is ignored (an on_complete callback) and nil returned.
+// must have released the GIL (run()'s pump does). A Python exception becomes a
+// python_exception (a PythonError in the DSL, docs/STATE_EXEC_EXCEPTIONS.md),
+// its message prefixed with `what`. With `want_result` false the return value
+// is ignored (an on_complete callback, whose exception stays a runtime_error
+// thrown from the scheduler call) and nil returned. For an async function's kernel,
+// `call` is its call: the wait for the GIL isn't charged as its run time (3.8).
 value_t call_python(const std::shared_ptr<PyObject> &holder, std::span<const value_t> args,
-                    const std::string &what, bool want_result = true) {
+                    const std::string &what, bool want_result = true, async_call *call = nullptr) {
+  const auto wait_start = std::chrono::steady_clock::now();
   PyGILState_STATE gil = PyGILState_Ensure();
+  if (call != nullptr)
+    call->add_wait(
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - wait_start).count());
   PyObject *pyargs = values_to_py_tuple(args); // nullptr (error set) if an arg can't convert
   PyObject *res = pyargs ? PyObject_CallObject(holder.get(), pyargs) : nullptr;
   Py_XDECREF(pyargs);
   if (res == nullptr) {
-    std::string msg = fetch_py_error();
+    if (!want_result) {
+      std::string msg = fetch_py_error();
+      PyGILState_Release(gil);
+      throw std::runtime_error(what + ": " + msg);
+    }
+    python_exception error = take_py_exception(what);
     PyGILState_Release(gil);
-    throw std::runtime_error(what + ": " + msg);
+    throw error;
   }
   value_t out;
   // strict: e.g. a set or non-str dict key fails
@@ -126,21 +181,41 @@ std::string render_result(const value_t &v) {
   return to_string(v);
 }
 
-// The value an async fn/coroutine resumes its DSL process with when the Python side raised: a
-// one-key dict on a RESERVED key a normal dict result can't collide with, so the program can tell
-// an error from data.
-value_t async_error_dict(const std::string &message) {
-  auto pairs = std::make_shared<std::vector<std::pair<std::string, value_t>>>();
-  pairs->emplace_back("__async_error__", value_t(message));
-  return value_t(dict_ptr(std::move(pairs)));
+// The C++ error a Python exception object `exc` (not the one set now) becomes in the DSL: a
+// python_exception (PythonError) holding it, its message prefixed with `what`. The GIL is held.
+std::exception_ptr python_error_of(PyObject *exc, const std::string &what) {
+  std::string msg = "error";
+  if (PyObject *s = PyObject_Str(exc)) {
+    if (const char *cs = PyUnicode_AsUTF8(s))
+      msg = cs;
+    Py_DECREF(s);
+  }
+  PyErr_Clear();
+  return std::make_exception_ptr(python_exception(
+      what + ": " + msg, exception_type_name(reinterpret_cast<PyObject *>(Py_TYPE(exc))),
+      own_callable(exc)));
 }
 
-// Step the Exec's asyncio loop for a BOUNDED wall-time slice, then deliver every completed
-// coroutine's result (or error) to its parked DSL process. Runs on the run() thread with the GIL
-// held; a no-op when no coroutine is pending, so a coro-free Exec pays nothing. `pending` holds
-// (asyncio.Task*, reply-channel) pairs owned here (each Task is DECREF'd when collected).
-void drive_coros(PyObject *loop, std::vector<std::pair<PyObject *, std::string>> &pending,
-                 async_scheduler &sched, double budget_secs) {
+// Settle an external call (a coroutine's) with what it raised and post its outcome.
+void fail_external(async_host &host, const std::shared_ptr<async_call> &call,
+                   std::exception_ptr error) {
+  call->settle({}, std::move(error));
+  host.finish(call);
+}
+
+// A coroutine an async coroutine function's call is waiting for: its asyncio.Task (owned) and
+// the call it settles.
+struct pending_coro {
+  PyObject *task;
+  std::shared_ptr<async_call> call;
+};
+
+// Step the Exec's asyncio loop for a BOUNDED wall-time slice, then settle every completed
+// coroutine's call with its result (or its exception, which the call raises at its call site) and
+// post it to the parked DSL process. Runs on the run() thread with the GIL held; a no-op when no
+// coroutine is pending, so a coro-free Exec pays nothing. Each Task is DECREF'd when collected.
+void drive_coros(PyObject *loop, std::vector<pending_coro> &pending, async_host &host,
+                 double budget_secs) {
   if (loop == nullptr || pending.empty())
     return;
   // Step the loop until a call_later(budget) stops it: ready coroutine steps + timers/IO due within
@@ -167,16 +242,16 @@ void drive_coros(PyObject *loop, std::vector<std::pair<PyObject *, std::string>>
     // can never advance, so fail them all rather than clearing the error and spinning an unkillable
     // pump.
     const std::string msg = "python coro: event loop step failed: " + fetch_py_error();
-    for (auto &pc : pending) {
-      sched.post_message(pc.second, async_error_dict(msg));
-      Py_DECREF(pc.first);
+    for (pending_coro &pc : pending) {
+      fail_external(host, pc.call, std::make_exception_ptr(std::runtime_error(msg)));
+      Py_DECREF(pc.task);
     }
     pending.clear();
     return;
   }
   PyErr_Clear(); // a stray (already-handled) error from stepping must not leak into the next call
   for (auto it = pending.begin(); it != pending.end();) {
-    PyObject *task = it->first;
+    PyObject *task = it->task;
     PyObject *done_obj = PyObject_CallMethod(task, "done", nullptr);
     const bool done = done_obj != nullptr && PyObject_IsTrue(done_obj) == 1;
     Py_XDECREF(done_obj);
@@ -184,72 +259,40 @@ void drive_coros(PyObject *loop, std::vector<std::pair<PyObject *, std::string>>
       ++it;
       continue;
     }
-    value_t payload;
+    const std::string what = "python coro fn '" + it->call->function_name() + "'";
     PyObject *exc = PyObject_CallMethod(task, "exception", nullptr); // None if it returned normally
     if (exc == nullptr) {
-      payload = async_error_dict("python coro: " + fetch_py_error());
+      fail_external(host, it->call, std::make_exception_ptr(take_py_exception(what)));
     } else if (exc == Py_None) {
       Py_DECREF(exc);
       PyObject *res = PyObject_CallMethod(task, "result", nullptr);
       value_t converted;
-      payload = res && py_to_value(res, converted)
-                    ? converted
-                    : async_error_dict("python coro: " + fetch_py_error());
+      if (res != nullptr && py_to_value(res, converted)) {
+        it->call->settle(std::move(converted), nullptr);
+        host.finish(it->call);
+      } else {
+        fail_external(host, it->call,
+                      std::make_exception_ptr(std::runtime_error(
+                          what + " returned an unconvertible value: " + fetch_py_error())));
+      }
       Py_XDECREF(res);
     } else {
-      PyObject *s = PyObject_Str(exc);
-      const char *cs = s ? PyUnicode_AsUTF8(s) : nullptr;
-      payload = async_error_dict(std::string("python coro: ") + (cs ? cs : "error"));
-      Py_XDECREF(s);
+      fail_external(host, it->call, python_error_of(exc, what));
       Py_DECREF(exc);
     }
-    sched.post_message(it->second, payload);
     Py_DECREF(task);
     it = pending.erase(it);
   }
 }
 
-// Counts the async pool tasks a run() has in flight so no worker (which posts back to this Exec's
-// private scheduler, and may touch Python) can outlive run()/the Exec. `begin()` is called on the
-// scheduler thread at offload; `end()` runs on the pool worker the instant its Python body returns
-// (an EndGuard, below), BEFORE the marshalled result is posted — so the count never depends on when
-// the pool happens to destroy the completed task. wait_idle() blocks — WITH THE GIL RELEASED so a
-// GIL-holding worker can finish — until the count reaches zero. wait_idle()'s caller must hold the
-// GIL (run()/~Exec do).
-struct Inflight {
-  std::mutex m;
-  std::condition_variable cv;
-  int count = 0;
-  void begin() {
-    std::lock_guard<std::mutex> l(m);
-    ++count;
-  }
-  void end() {
-    {
-      std::lock_guard<std::mutex> l(m);
-      --count;
-    }
-    cv.notify_all();
-  }
-  int pending() {
-    std::lock_guard<std::mutex> l(m);
-    return count;
-  }
-  void wait_idle() {
-    std::unique_lock<std::mutex> l(m);
-    if (count == 0)
-      return;
-    Py_BEGIN_ALLOW_THREADS cv.wait(l, [this] { return count == 0; });
-    Py_END_ALLOW_THREADS
-  }
-};
-
-// RAII on the WORKER: end() the moment the work body returns or throws (before launch_pool_task
-// marshals/posts), so the in-flight count is decoupled from the pool's task-object lifetime.
-struct EndGuard {
-  std::shared_ptr<Inflight> f;
-  ~EndGuard() { f->end(); }
-};
+// Wait until no kernel of `host` is queued or running, WITH THE GIL RELEASED so a kernel calling
+// into Python can finish. The caller holds the GIL (run()/~Exec do).
+void wait_idle(async_host &host) {
+  if (host.in_flight() == 0)
+    return;
+  Py_BEGIN_ALLOW_THREADS host.wait_idle();
+  Py_END_ALLOW_THREADS
+}
 } // namespace
 
 // A SYNCHRONOUS DSL native_fn: it runs inline on the thread stepping the scheduler (Exec::run's,
@@ -270,6 +313,26 @@ native_fn python_native_fn(const std::string &who, const std::string &name, PyOb
 void python_on_complete::operator()(value_t result) const {
   call_python(callable, std::span<const value_t>(&result, 1), "python on_complete",
               /*want_result=*/false);
+}
+
+async_marshal python_async_marshal(const std::string &who, const std::string &name,
+                                   PyObject *callable) {
+  if (callable == nullptr || !PyCallable_Check(callable))
+    throw std::invalid_argument(who + ": '" + name + "' is not callable");
+  if (is_coroutine_function(callable))
+    throw std::invalid_argument(who + ": '" + name +
+                                "' is an async def — use register_async_coro (register_async_fn is "
+                                "for a blocking callable run on an executor thread)");
+  std::shared_ptr<PyObject> holder = own_callable(callable);
+  const std::string what = "python DSL fn '" + name + "'";
+  // The arguments are private copies already (register_async_fn copies lists and dicts), so the
+  // kernel keeps them; it converts them to Python on its own thread, with the GIL.
+  return [holder, what](std::span<const value_t> args) -> async_kernel {
+    return [holder, what,
+            argv = std::vector<value_t>(args.begin(), args.end())](async_call &call) -> value_t {
+      return call_python(holder, argv, what, true, &call);
+    };
+  };
 }
 
 python_on_complete make_python_on_complete(PyObject *callable) {
@@ -295,12 +358,15 @@ struct Exec::ExecImpl {
   intrinsics_context ictx;
   process_ptr host_proc;
   environment_ptr env;
-  std::shared_ptr<Inflight> inflight = std::make_shared<Inflight>();
+  // The async host of this Exec's async functions (docs/STATE_EXEC_EXCEPTIONS.md 3): kernels run
+  // on the app's background task pool and post back to `sched`. After `sched`, so it goes first;
+  // ~Exec shuts it down before that, with the GIL released.
+  std::unique_ptr<cvc::state_exec::async_host> host;
   // Coroutine support (register_async_coro): a private asyncio loop (lazily created; owned) and the
-  // in-flight (asyncio.Task*, reply-channel) pairs the pump steps + collects. Touched only on the
-  // run() thread (the verb during sync_run + drive_coros after), so no lock needed.
+  // coroutines in flight, which the pump steps + collects. Touched only on the run() thread (the
+  // verb during sync_run + drive_coros after), so no lock needed.
   PyObject *loop = nullptr;
-  std::vector<std::pair<PyObject *, std::string>> pending_coros;
+  std::vector<pending_coro> pending_coros;
   bool running = false; // re-entrancy guard: a registered fn/coro must not call back into run()
 };
 
@@ -334,21 +400,25 @@ Exec::Exec(const std::shared_ptr<cvc::app> &app) : impl_(std::make_shared<ExecIm
 
   impl_->env = builtins::make_default_environment();
   register_intrinsics(impl_->env, &impl_->ictx);
+  impl_->host = std::make_unique<cvc::state_exec::async_host>(impl_->sched, app.get());
 }
 
 Exec::~Exec() {
-  // No pool worker may outlive the private scheduler it posts to: quiesce before ExecImpl (and its
-  // scheduler) tear down. run() already drains on every exit, so this is normally a no-op.
-  if (impl_ && impl_->inflight)
-    impl_->inflight->wait_idle();
+  // No kernel may outlive the private scheduler it posts to: cancel what is in flight and wait for
+  // it, with the GIL released (a kernel may be calling into Python). run() already waits on every
+  // exit, so this normally has nothing to wait for.
+  if (impl_ && impl_->host) {
+    Py_BEGIN_ALLOW_THREADS impl_->host->shutdown();
+    Py_END_ALLOW_THREADS
+  }
   // Cancel + drop any un-collected coroutine Tasks and close the asyncio loop (GIL held: ~Exec is
   // called from Python via SWIG).
   if (impl_ && impl_->loop) {
     PyGILState_STATE gil = PyGILState_Ensure();
-    for (auto &pc : impl_->pending_coros) {
-      if (PyObject *r = PyObject_CallMethod(pc.first, "cancel", nullptr))
+    for (pending_coro &pc : impl_->pending_coros) {
+      if (PyObject *r = PyObject_CallMethod(pc.task, "cancel", nullptr))
         Py_DECREF(r);
-      Py_DECREF(pc.first);
+      Py_DECREF(pc.task);
     }
     impl_->pending_coros.clear();
     if (PyObject *r = PyObject_CallMethod(impl_->loop, "close", nullptr))
@@ -366,42 +436,16 @@ void Exec::register_fn(const std::string &name, PyObject *callable) {
 }
 
 void Exec::register_async_fn(const std::string &name, PyObject *callable) {
-  if (callable == nullptr || !PyCallable_Check(callable))
-    throw std::invalid_argument("pycvc.Exec.register_async_fn: '" + name + "' is not callable");
-  if (is_coroutine_function(callable))
-    throw std::invalid_argument("pycvc.Exec.register_async_fn: '" + name +
-                                "' is an async def — use register_async_coro (register_async_fn is "
-                                "for a blocking callable offloaded to a pool worker)");
-  std::shared_ptr<PyObject> holder = own_callable(callable);
-  cvc::app *app = impl_->app.get();
-  async_scheduler *sched = &impl_->sched; // this Exec's PRIVATE scheduler (the offload posts here)
-  std::shared_ptr<Inflight> inflight = impl_->inflight;
-  const std::string root = impl_->ictx.root_path; // "" (full-tree; the '#' channel is identity)
-  // (name args...) marshals its args on the scheduler thread, offloads the Python call to a pool
-  // worker via park_on_pool_task, and SELF-PARKS until the worker delivers the return value. The
-  // args are COPIED into the worker closure (the span is only valid during this call). An
-  // InflightToken rides ALONG with the worker closure so run()/~Exec can wait out the worker before
-  // tearing down. A Python exception becomes a {"__async_error__": <message>} dict — a reserved key
-  // that a plain dict result cannot collide with — so a waiter still resumes and can tell an error
-  // from data.
-  builtins::register_fn(
-      impl_->env, name,
-      [app, sched, root, holder, name, inflight](std::span<const value_t> args) -> value_t {
-        auto argv = std::make_shared<std::vector<value_t>>(args.begin(), args.end());
-        inflight
-            ->begin(); // ++in-flight NOW (on the scheduler thread) so run() sees it before parking
-        return cvc::park_on_pool_task(
-            *app, *sched, root, name + ".reply",
-            [holder, argv, name, inflight]() -> value_t {
-              EndGuard guard{
-                  inflight}; // --in-flight when this body returns/throws, before the post
-              return call_python(holder, *argv, "python DSL fn '" + name + "'");
-            },
-            [name](const std::string &e) -> value_t {
-              return async_error_dict("python async fn '" + name + "': " + e);
-            });
-      });
+  // An async function on this Exec's host (docs/STATE_EXEC_EXCEPTIONS.md 3): (name args...) parks
+  // the program while the callable runs on the app's background task pool, then resumes it with
+  // the value or raises the callable's exception at the call (a PythonError). (name-async ...)
+  // returns a future.
+  cvc::state_exec::register_async_fn(
+      impl_->env, *impl_->host, name,
+      python_async_marshal("pycvc.Exec.register_async_fn", name, callable));
 }
+
+cvc::state_exec::async_host &Exec::async_host() { return *impl_->host; }
 
 void Exec::register_async_coro(const std::string &name, PyObject *coro_fn) {
   if (coro_fn == nullptr || !PyCallable_Check(coro_fn))
@@ -420,39 +464,49 @@ void Exec::register_async_coro(const std::string &name, PyObject *coro_fn) {
   }
   std::shared_ptr<PyObject> holder = own_callable(coro_fn);
   ExecImpl *impl = impl_.get();
-  async_scheduler *sched = &impl_->sched;
-  const std::string root = impl_->ictx.root_path;
-  // (name args...) calls coro_fn(*args) -> a coroutine, schedules it as a Task on the loop, records
-  // (Task, reply-channel), and SELF-PARKS. run()'s pump steps the loop (drive_coros) and delivers
-  // the Task's result to this channel when it completes.
-  builtins::register_fn(
-      impl_->env, name,
-      [impl, sched, root, holder, name](std::span<const value_t> args) -> value_t {
-        static std::atomic<std::uint64_t> seq{0};
-        const std::string chan =
-            name + ".coro#" + std::to_string(seq.fetch_add(1, std::memory_order_relaxed));
-        const std::string done = resolve_channel_key(root, chan);
-        // The verb runs during sync_run (GIL released by the pump) — re-acquire it to touch Python.
-        PyGILState_STATE gil = PyGILState_Ensure();
-        PyObject *pyargs = values_to_py_tuple(args); // nullptr (error set) on an unconvertible arg
-        PyObject *coro = pyargs ? PyObject_CallObject(holder.get(), pyargs) : nullptr;
-        Py_XDECREF(pyargs);
-        PyObject *task = nullptr;
-        if (coro != nullptr) {
-          task = PyObject_CallMethod(impl->loop, "create_task", "O", coro);
-          Py_DECREF(coro);
-        }
-        if (task == nullptr) {
-          const std::string msg = "python coro fn '" + name + "': " + fetch_py_error();
-          PyGILState_Release(gil);
-          // Nothing to await — deliver the error now; the park below resumes on the next drain.
-          sched->post_message(done, async_error_dict(msg));
-        } else {
-          impl->pending_coros.emplace_back(task, done); // owns the Task ref until collected
-          PyGILState_Release(gil);
-        }
-        return park_on_channel(sched, sched->current_process().get(), sched->current_pid(), done);
-      });
+  // (name args...) calls coro_fn(*args) -> a coroutine, schedules it as a Task on the loop, and
+  // parks the program at the call (an external call of the Exec's host, which no executor runs).
+  // run()'s pump steps the loop (drive_coros) and settles the call with the Task's result or its
+  // exception, which raises at the call. Its arguments are copied first, as for any async function.
+  const auto start = [impl, holder, name](std::span<const value_t> args, bool future) -> value_t {
+    value_t result;
+    const std::shared_ptr<async_call> call = impl->host->begin_external(name, future, result);
+    const std::string what = "python coro fn '" + name + "'";
+    // The verb runs during sync_run (GIL released by the pump) — re-acquire it to touch Python.
+    PyGILState_STATE gil = PyGILState_Ensure();
+    PyObject *pyargs = values_to_py_tuple(args); // nullptr (error set) on an unconvertible arg
+    PyObject *coro = pyargs ? PyObject_CallObject(holder.get(), pyargs) : nullptr;
+    Py_XDECREF(pyargs);
+    PyObject *task = nullptr;
+    if (coro != nullptr) {
+      task = PyObject_CallMethod(impl->loop, "create_task", "O", coro);
+      Py_DECREF(coro);
+    }
+    if (task == nullptr) {
+      // Nothing to await: the call raises the error once the next drain delivers it.
+      std::exception_ptr error = std::make_exception_ptr(take_py_exception(what));
+      PyGILState_Release(gil);
+      fail_external(*impl->host, call, std::move(error));
+    } else {
+      impl->pending_coros.push_back({task, call}); // owns the Task ref until collected
+      PyGILState_Release(gil);
+    }
+    return result;
+  };
+  for (const bool future : {false, true})
+    builtins::register_fn(impl_->env, future ? name + "-async" : name,
+                          [start, future](std::span<const value_t> args) -> value_t {
+                            value_t argv =
+                                make_list(std::vector<value_t>(args.begin(), args.end()));
+                            auto then = [start, future](value_t copied) -> value_t {
+                              const std::vector<value_t> &items = *std::get<list_ptr>(copied.v);
+                              return start(std::span<const value_t>(items), future);
+                            };
+                            if (std::none_of(args.begin(), args.end(),
+                                             [](const value_t &a) { return is_compound(a); }))
+                              return then(std::move(argv));
+                            return run_data_job(make_copy_job(std::move(argv)), std::move(then));
+                          });
 }
 
 std::string Exec::run(const std::string &src) {
@@ -471,10 +525,10 @@ std::string Exec::run(const std::string &src) {
     ~RunGuard() {
       if (!impl->pending_coros.empty()) {
         PyGILState_STATE gil = PyGILState_Ensure();
-        for (auto &pc : impl->pending_coros) {
-          if (PyObject *r = PyObject_CallMethod(pc.first, "cancel", nullptr))
+        for (pending_coro &pc : impl->pending_coros) {
+          if (PyObject *r = PyObject_CallMethod(pc.task, "cancel", nullptr))
             Py_DECREF(r);
-          Py_DECREF(pc.first);
+          Py_DECREF(pc.task);
         }
         impl->pending_coros.clear();
         PyErr_Clear();
@@ -485,7 +539,7 @@ std::string Exec::run(const std::string &src) {
   } run_guard{impl_.get()};
 
   async_scheduler &sched = impl_->sched;
-  Inflight &inflight = *impl_->inflight;
+  cvc::state_exec::async_host &host = *impl_->host;
   execute_options opts;
   opts.name = "pycvc";
   opts.env = impl_->env;
@@ -495,9 +549,9 @@ std::string Exec::run(const std::string &src) {
   const int pid = sched.execute(src, opts);
 
   // Drive the private scheduler to completion. A purely synchronous program finishes in the first
-  // slice; a program that parks (await / an async fn) yields, and the pump waits for a compute-pool
-  // worker to post back, then resumes it. Slices are bounded so a runaway never-parking loop can't
-  // wedge the pump.
+  // slice; a program that parks (await / an async fn) yields, and the pump waits for a kernel to
+  // post back, then resumes it. Slices are bounded so a runaway never-parking loop can't wedge the
+  // pump. Each drain also charges the async calls still running to their processes (3.8).
   static constexpr uint64_t kSliceSteps = 2000000;
   static constexpr double kSliceSeconds = 0.05;
   static constexpr double kCoroSliceSeconds = 0.005; // asyncio-loop slice per pump iteration
@@ -507,9 +561,10 @@ std::string Exec::run(const std::string &src) {
   std::optional<value_t> result;
   std::optional<std::string> error; // set -> throw AFTER the pool is quiesced
   bool killed = false;              // the scheduler killed the process (error has its exit error)
+  std::exception_ptr failure; // the program failed: its dsl_exception, thrown after the quiesce
   try {
     while (true) {
-      sched.drain_ingress(); // deliver any worker post_message FIRST, so a parked receiver readies
+      sched.drain_ingress(); // deliver kernels' results and posts FIRST, so a parked caller readies
       sched.wake_awaiting(); // re-ready (await …)-parked processes (one frame per drain)
       const bool had_runnable = sched.has_runnable();
       // Release the GIL AROUND the slice: a synchronous Python native_fn stepped here re-acquires
@@ -521,13 +576,23 @@ std::string Exec::run(const std::string &src) {
           // Coroutine leg: step the asyncio loop a bounded slice and deliver any completed
           // coroutine's result to its parked process (GIL held here). A no-op when no coroutine is
           // pending, so a coro-free Exec is unaffected.
-          drive_coros(impl_->loop, impl_->pending_coros, sched, kCoroSliceSeconds);
+          drive_coros(impl_->loop, impl_->pending_coros, host, kCoroSliceSeconds);
       result = sched.get_result(pid);
       if (result)
         break; // the program terminated
       const std::optional<process_info> info = sched.get_process_info(pid);
       if (!info) {
         error = "pycvc.Exec.run: process vanished (pid " + std::to_string(pid) + ")";
+        break;
+      }
+      if (info->status == process_status::failed) {
+        // An exception the program didn't catch (docs/STATE_EXEC_EXCEPTIONS.md 2.6): raised as
+        // pycvc.dsl_error, or as the Python function's own exception that it was made from.
+        try {
+          sched.raise_exit_exception(pid);
+        } catch (const dsl_exception &) {
+          failure = std::current_exception();
+        }
         break;
       }
       if (info->status == process_status::killed) {
@@ -551,7 +616,7 @@ std::string Exec::run(const std::string &src) {
       // a delivery is coming, so keep the idle clock fresh; only a park with NOTHING pending can
       // time out (e.g. a msg-recv on a channel nobody sends to) — safe to abandon then, no worker
       // to outlive us.
-      if (inflight.pending() > 0 || !impl_->pending_coros.empty() || sched.has_runnable() ||
+      if (host.in_flight() > 0 || !impl_->pending_coros.empty() || sched.has_runnable() ||
           had_runnable) {
         idle_deadline = clock::now() + std::chrono::duration<double>(kIdleTimeoutSecs);
       } else if (clock::now() > idle_deadline) {
@@ -564,14 +629,14 @@ std::string Exec::run(const std::string &src) {
       Py_END_ALLOW_THREADS
     }
   } catch (...) {
-    inflight.wait_idle(); // never leave a worker touching our (about-to-unwind) scheduler
-    sched.kill(pid);
+    sched.kill(pid); // cancels its calls in flight
+    wait_idle(host); // never leave a kernel touching our (about-to-unwind) scheduler
     sched.reap(pid);
     throw;
   }
-  // No pool worker may outlive run(): quiesce (GIL released) BEFORE we reap the process or return
-  // to Python, so a worker can never post to / be destroyed against a torn-down scheduler.
-  inflight.wait_idle();
+  // No kernel of this run may outlive it: wait (GIL released) BEFORE we reap the process or return
+  // to Python, so a kernel can never post to / be destroyed against a torn-down scheduler.
+  wait_idle(host);
   sched.reap(pid); // drop the finished/killed process from the private scheduler (no leak)
   if (killed) {
     // A script read inside its process (parser.step_tokens) reports a syntax error only as the
@@ -579,6 +644,8 @@ std::string Exec::run(const std::string &src) {
     // either way, as it does when the script is parsed at submit.
     (void)parse_all(src, parse_options_from_state(*impl_->root, {}, sched.parser_defaults()));
   }
+  if (failure)
+    std::rethrow_exception(failure);
   if (error)
     throw std::runtime_error(*error);
   if (!result.has_value())

@@ -39,6 +39,7 @@
 #include <map>
 #include <ostream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace LBIE {
@@ -507,9 +508,9 @@ LBIE::geoframe make_hexa(const float (&corner)[8][3]) {
   return g;
 }
 
-// The condition number Octree::testHexa gives corner j of hexahedron h: 1 for a right-angled
-// corner, growing as the corner flattens, +inf once its three edges are coplanar.
-double corner_condition(const LBIE::geoframe &g, int h, int j) {
+// The scaled Jacobian of corner j of hexahedron h: 1 for a right-angled corner, 0 once its three
+// edges are coplanar, negative when the corner is inverted.
+double corner_jacobian(const LBIE::geoframe &g, int h, int j) {
   static const int edge_to[8][3] = {{3, 1, 4}, {0, 2, 5}, {1, 3, 6}, {2, 0, 7},
                                     {5, 7, 0}, {6, 4, 1}, {7, 5, 2}, {4, 6, 3}};
   const std::array<unsigned int, 8> v = hexa_corners(g, h);
@@ -523,10 +524,27 @@ double corner_condition(const LBIE::geoframe &g, int h, int j) {
     for (int i = 0; i < 3; ++i)
       e[k][i] /= std::sqrt(len);
   }
-  const double det = e[0][0] * (e[1][1] * e[2][2] - e[1][2] * e[2][1]) -
-                     e[0][1] * (e[1][0] * e[2][2] - e[1][2] * e[2][0]) +
-                     e[0][2] * (e[1][0] * e[2][1] - e[1][1] * e[2][0]);
-  return 1.0 / std::fabs(det);
+  return -(e[0][0] * (e[1][1] * e[2][2] - e[1][2] * e[2][1]) -
+           e[0][1] * (e[1][0] * e[2][2] - e[1][2] * e[2][0]) +
+           e[0][2] * (e[1][0] * e[2][1] - e[1][1] * e[2][0]));
+}
+
+// The condition number Octree::testHexa gives corner j of hexahedron h: 1 for a right-angled
+// corner, growing as the corner flattens, +inf once its three edges are coplanar.
+double corner_condition(const LBIE::geoframe &g, int h, int j) {
+  return 1.0 / std::fabs(corner_jacobian(g, h, j));
+}
+
+// The number of g's hexahedra with a corner that is inverted or flat.
+int inverted_hexahedra(const LBIE::geoframe &g) {
+  int inverted = 0;
+  for (int h = 0; h < g.numquads / 6; ++h)
+    for (int j = 0; j < 8; ++j)
+      if (!(corner_jacobian(g, h, j) > 0.0)) {
+        ++inverted;
+        break;
+      }
+  return inverted;
 }
 
 double worst_corner_condition(const LBIE::geoframe &g) {
@@ -564,6 +582,53 @@ TEST_F(LbieMesherTest, RefinementMakesAVertexPerEdgeAndFace) {
   EXPECT_FLOAT_EQ(g.verts[ac][1], 1.0f) << "a third of the way from a to c";
 }
 
+// Each vertex has 18 refine_edge slots, as many as a vertex of a uniform grid needs (6 edges and
+// 12 face diagonals). Once they were full, AddRefine_edgevtx_hex, AddRefine_edgevtx and
+// AddRefine_facevtx returned vertex 0, which is how hexahedra across a change of octree level got
+// vertex 0 for corners; QUAD meshes on the vh4 CT still had 32 such quads.
+TEST_F(LbieMesherTest, RefinementPastEighteenEdgesAtAVertexMakesNewVertices) {
+  LBIE::geoframe g;
+  float n[3] = {0.f, 0.f, 1.f}, zero[3] = {9.f, 9.f, 9.f}, o[3] = {0.f, 0.f, 0.f};
+  g.AddVert(zero, n); // vertex 0, which no refinement should hand out
+  const unsigned int centre = g.AddVert(o, n);
+  std::vector<unsigned int> others;
+  for (int k = 0; k < 24; ++k) {
+    float p[3] = {3.f * std::cos(0.25f * k), 3.f * std::sin(0.25f * k), 0.1f * k};
+    others.push_back(g.AddVert(p, n));
+  }
+  // Edges toward the odd ones, face diagonals toward the even ones: both kinds share the slots.
+  auto refine = [&](int k) {
+    return k % 2 ? g.AddRefine_edgevtx_hex(centre, others[k])
+                 : g.AddRefine_facevtx(centre, others[k], others[(k + 1) % 24],
+                                       others[(k + 23) % 24]);
+  };
+  std::vector<unsigned int> made;
+  for (int k = 0; k < 24; ++k)
+    made.push_back(refine(k));
+  std::vector<unsigned int> distinct(made);
+  std::sort(distinct.begin(), distinct.end());
+  EXPECT_EQ(std::unique(distinct.begin(), distinct.end()) - distinct.begin(), 24);
+  for (int k = 0; k < 24; ++k) {
+    EXPECT_GT(made[k], others.back()) << "refinement " << k << " reused vertex " << made[k];
+    EXPECT_EQ(refine(k), made[k]) << "refinement " << k << " made twice";
+  }
+  EXPECT_FLOAT_EQ(g.verts[made[21]][2], 0.7f) << "a third of the way out to others[21]";
+}
+
+// AddBound_edge filled every free slot with the first boundary edge it recorded at a vertex, so a
+// vertex kept only one, and CheckBound_edge missed the rest.
+TEST_F(LbieMesherTest, AVertexKeepsAllItsBoundaryEdges) {
+  LBIE::geoframe g;
+  float n[3] = {0.f, 0.f, 1.f};
+  float a[3] = {0.f, 0.f, 0.f}, b[3] = {1.f, 0.f, 0.f}, c[3] = {0.f, 1.f, 0.f};
+  const unsigned int va = g.AddVert(a, n), vb = g.AddVert(b, n), vc = g.AddVert(c, n);
+  g.AddBound_edge(va, vb);
+  g.AddBound_edge(vc, va);
+  EXPECT_EQ(g.CheckBound_edge(vb, va), 1);
+  EXPECT_EQ(g.CheckBound_edge(va, vc), 1);
+  EXPECT_EQ(g.CheckBound_edge(vb, vc), 0);
+}
+
 // Octree::optimization takes the corner with the largest condition number and moves its vertex down
 // the gradient. A corner whose edges are coplanar has condition +inf; cond_max + 1.0f - cond_max is
 // then NaN, the line search ran zero times, and its uninitialized result mmv4 was copied into the
@@ -588,9 +653,10 @@ TEST_F(LbieMesherTest, OptimizationLeavesAFlatCornerInPlace) {
 
 // Octree::optimization moved quads[6h+1][j-4] for a worst corner j >= 4, which is v5, v4, v7 or
 // v6, a neighbour of the corner and not the corner (and for j == 4 it took corner 1's edges). Here
-// corner 6 is the worst: the old code left v6 where it was and wrote v6's improved position onto
-// v7, then went on to move v0, v4 and v5 and ended with the worst corner barely better (5.475 from
-// 5.49). Moving v6 takes it to 3.10.
+// v6 sits inside the plane through its three neighbours, so corner 6 is inverted (scaled Jacobian
+// -0.18) and the worst. The old code left v6 where it was and wrote v6's new position onto v7.
+// Fixed, it still pushed v6 further in, to -0.32: testHexa's Jacobian is unsigned, and a corner
+// looked as good as its mirror image. Moving v6 out leaves the corner uninverted.
 TEST_F(LbieMesherTest, OptimizationMovesTheWorstCornersOwnVertex) {
   const float corner[8][3] = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0},          {0, 1, 0},
                               {0, 0, 1}, {1, 0, 1}, {0.6f, 0.6f, 0.7f}, {0, 1, 1}};
@@ -598,6 +664,7 @@ TEST_F(LbieMesherTest, OptimizationMovesTheWorstCornersOwnVertex) {
   const double before = worst_corner_condition(g);
   for (int j = 0; j < 8; ++j)
     ASSERT_LE(corner_condition(g, 0, j), corner_condition(g, 0, 6)) << "corner " << j;
+  ASSERT_LT(corner_jacobian(g, 0, 6), 0.0);
 
   LBIE::geoframe out = LBIE::quality_improve(ctx, g, LBIE::Mesher::OPTIMIZATION, 1);
   expect_geoframe_valid(out);
@@ -606,6 +673,7 @@ TEST_F(LbieMesherTest, OptimizationMovesTheWorstCornersOwnVertex) {
       << "the worst corner's vertex v6 did not move";
   for (int j = 0; j < 3; ++j)
     EXPECT_EQ(out.verts[7][j], corner[7][j]) << "v7 moved, coordinate " << j;
+  EXPECT_EQ(inverted_hexahedra(out), 0);
   const double after = worst_corner_condition(out);
   EXPECT_TRUE(std::isfinite(after));
   EXPECT_LT(after, before);
@@ -674,26 +742,162 @@ TEST_F(LbieMesherTest, QualityImproveGivesTheSameMeshInAnyUnits) {
   }
 }
 
+namespace {
+
+// The number of g's hexahedra that use one vertex for two or more corners.
+int hexahedra_with_repeated_corners(const LBIE::geoframe &g) {
+  int repeated = 0;
+  for (int h = 0; h < g.numquads / 6; ++h) {
+    std::array<unsigned int, 8> v = hexa_corners(g, h);
+    std::sort(v.begin(), v.end());
+    if (std::adjacent_find(v.begin(), v.end()) != v.end())
+      ++repeated;
+  }
+  return repeated;
+}
+
+} // namespace
+
 // The adaptive hexahedral mesh of a sphere that leaves its box refines cells near the surface.
-// Before the refine_edge fix 702 of its 729 hexahedra had vertex 0 in place of a corner. In a box
-// whose voxels are 1 across (8 here) the octree used to refine past oct_depth-2 too, and the
-// templates then collapsed hexahedra; about half of a CT's had repeated corners. traverse_qef now
-// stops quadrilaterals and hexahedra at oct_depth-2 in any units.
+// Before the refine_edge fix 702 of its 729 hexahedra had vertex 0 in place of a corner. The same
+// samples in a box whose voxels are 1 across (8 here) must give the same: that is where the
+// octree used to refine past the hexahedral grid.
 TEST_F(LbieMesherTest, AdaptiveHexahedraHaveEightDistinctCorners) {
   for (double box_size : {1.0, 8.0}) {
     volume v = make_sphere_volume(ctx, 17, 1.2, box_size);
     LBIE::geoframe g = run_do_mesh(v, 0.0f, 0.0f, kDefaultErr, kDefaultErrIn, LBIE::geoframe::HEXA);
     ASSERT_GT(g.numquads, 0) << "box " << box_size;
     expect_geoframe_valid(g);
-    int repeated = 0;
-    for (int h = 0; h < g.numquads / 6; ++h) {
-      std::array<unsigned int, 8> c = hexa_corners(g, h);
-      std::sort(c.begin(), c.end());
-      if (std::adjacent_find(c.begin(), c.end()) != c.end())
-        ++repeated;
-    }
-    EXPECT_EQ(repeated, 0) << "box " << box_size << ": of " << g.numquads / 6 << " hexahedra";
+    EXPECT_EQ(hexahedra_with_repeated_corners(g), 0)
+        << "box " << box_size << ": of " << g.numquads / 6 << " hexahedra";
   }
+}
+
+// Octree::traverse_qef refined the octree past the hexahedral grid's level wherever a cell's QEF
+// error passed the tolerance. That error was in the volume's units (until interpRect3Dpts_* put
+// the crossings on the grid), so in a box 32 across, 2 units a voxel, this sphere's octree had
+// leaves two levels below the grid, and 3585 of its 8051 hexahedra
+// repeated a corner: where the level changes, min_vtx_hexa gave one coarse cell's vertex to several
+// corners, and AddRefine_* gave vertex 0 once a coarse vertex's 18 refine_edge slots were full.
+// fem_gallery's head.off at --dim 64 and the vh4.rawiv CT were about half collapsed. The grid now
+// stays uniform and only the templates refine it.
+TEST_F(LbieMesherTest, HexahedraHaveEightDistinctCornersWhereTheErrorIsLarge) {
+  volume v = make_sphere_volume(ctx, 17, 0.6, 16.0);
+  LBIE::geoframe g = run_do_mesh(v, 0.0f, 0.0f, kDefaultErr, kDefaultErrIn, LBIE::geoframe::HEXA);
+  ASSERT_GT(g.numquads, 0);
+  expect_geoframe_valid(g);
+  EXPECT_EQ(hexahedra_with_repeated_corners(g), 0) << "of " << g.numquads / 6 << " hexahedra";
+  // The grid's 4^3 cells have 27 interior vertices, one hexahedron each; any more are refinements.
+  EXPECT_GT(g.numquads / 6, 27) << "the templates refined no cell";
+}
+
+// The template for a hexahedron with one face refined puts four points halfway between its inner
+// points 21, 22, 25 and 26 and the four under them; the last took 41 for 42 and sat half a sub-cell
+// off, leaving one of the template's hexahedra flat and four skewed even in a cube.
+TEST_F(LbieMesherTest, OneFaceTemplatePutsItsMiddlePointsHalfwayDown) {
+  LBIE::geoframe g;
+  const float cube[8][3] = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0},
+                            {0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}};
+  unsigned int v[8], v_new[48];
+  for (int c = 0; c < 8; ++c) {
+    float p[3] = {cube[c][0], cube[c][1], cube[c][2]}, n[3] = {0.f, 0.f, 1.f};
+    v[c] = g.AddVert(p, n);
+  }
+  const int edge_id[6] = {0, 0, 0, 0, 0, 0};
+  g.AddVert_hexa_adaptive_2_4(v, edge_id, v_new);
+  // The refined face is v0 v1 v2 v3; the points sit under its inner points at thirds of the cube.
+  const float want[4][3] = {{1.f / 3, 1.f / 3, 0.5f},
+                            {2.f / 3, 1.f / 3, 0.5f},
+                            {1.f / 3, 2.f / 3, 0.5f},
+                            {2.f / 3, 2.f / 3, 0.5f}};
+  for (int k = 0; k < 4; ++k)
+    for (int i = 0; i < 3; ++i)
+      EXPECT_NEAR(g.verts[v_new[32 + k]][i], want[k][i], 1e-6f)
+          << "point " << k << ", coordinate " << i;
+}
+
+// get_vtx_new snaps the hexahedral mesh's boundary vertices onto the surface, walking each up to a
+// cell along its normal, and the templates place their vertices between snapped corners. That
+// inverted 12 of the 189 hexahedra of the 17^3 sphere and 101 of the 1389 at 33^3 (and the one-face
+// template's misplaced point 30 more in the box 32 across). Where snapping inverts a hexahedron its
+// vertices now stop short of the surface. Optimization inverted more (21 and 173), because its
+// measure could not tell a corner from its mirror image; it now never takes a corner below 0.01.
+TEST_F(LbieMesherTest, SnappingToTheSurfaceInvertsNoHexahedron) {
+  const struct {
+    unsigned int n;
+    double half_width;
+  } spheres[] = {{17, 1.0}, {33, 1.0}, {33, 16.0}};
+  for (const auto &s : spheres)
+    for (LBIE::Mesher::ImproveMethod im : {LBIE::Mesher::NO_IMPROVE, LBIE::Mesher::OPTIMIZATION}) {
+      const bool optimized = im == LBIE::Mesher::OPTIMIZATION;
+      LBIE::geoframe g =
+          run_do_mesh(make_sphere_volume(ctx, s.n, 0.6, s.half_width), 0.0f, 0.0f, kDefaultErr,
+                      kDefaultErrIn, LBIE::geoframe::HEXA, im, optimized ? 1 : 0);
+      ASSERT_GT(g.numquads, 0);
+      expect_geoframe_valid(g);
+      EXPECT_EQ(inverted_hexahedra(g), 0)
+          << s.n << "^3 in a box " << 2 * s.half_width << " across"
+          << (optimized ? ", optimized" : "") << ": of " << g.numquads / 6 << " hexahedra";
+    }
+}
+
+// A cube turned off the grid's axes, half a box across, sampled at n^3 in a box 2 * half_width
+// across. Its QEF points sit on its sharp edges and corners.
+volume make_turned_cube_volume(app &ctx, unsigned int n, double half_width) {
+  volume v = make_sphere_volume(ctx, n, 0.0, half_width);
+  const double dx = 2.0 / double(n - 1), c = std::cos(0.5), s = std::sin(0.5);
+  for (unsigned int k = 0; k < n; ++k)
+    for (unsigned int j = 0; j < n; ++j)
+      for (unsigned int i = 0; i < n; ++i) {
+        const double x = -1 + i * dx, y = -1 + j * dx, z = -1 + k * dx;
+        const double xr = c * x - s * y, yz = s * x + c * y;
+        const double yr = s * z + c * yz, zr = c * z - s * yz;
+        v(i, j, k, 0.45 - std::max({std::fabs(xr), std::fabs(yr), std::fabs(zr)}));
+      }
+  return v;
+}
+
+// untangle_snapped sends the vertices of an inverted hexahedron back to where the extraction puts
+// them without snapping. At QEF points, as on this cube's edges and corners, the dual hexahedra are
+// inverted already, and 22 of its 1323 kept an inverted corner. The reference now has every vertex
+// at its cell's centre, where none is inverted.
+TEST_F(LbieMesherTest, HexahedraOnSharpEdgesAreNotInverted) {
+  LBIE::geoframe g = run_do_mesh(make_turned_cube_volume(ctx, 33, 16.0), 0.0f, 0.0f, kDefaultErr,
+                                 kDefaultErrIn, LBIE::geoframe::HEXA);
+  ASSERT_GT(g.numquads, 0);
+  expect_geoframe_valid(g);
+  EXPECT_EQ(inverted_hexahedra(g), 0) << "of " << g.numquads / 6 << " hexahedra";
+}
+
+// Where the octree's level changes, polygonize_quad gave a quad two corners on one vertex, a
+// triangle (320 of this sphere's 7454 quads), and method 5's templates did not match up across the
+// change: 592 edges had one quad and 128 had three or more. The templates now refine only an octree
+// whose leaves are all on one level, and a mesh with triangles has each face split once into quads.
+TEST_F(LbieMesherTest, QuadMeshesWithLevelChangesAreClosedAndAllQuads) {
+  LBIE::geoframe g = run_do_mesh(make_sphere_volume(ctx, 33, 0.6, 16.0), 0.0f, 0.0f, kDefaultErr,
+                                 kDefaultErrIn, LBIE::geoframe::QUAD);
+  ASSERT_GT(g.quads.size(), 0u);
+  expect_geoframe_valid(g);
+  int repeated = 0;
+  std::map<std::pair<unsigned int, unsigned int>, int> quads_at;
+  for (const auto &f : g.quads) {
+    std::array<unsigned int, 4> c = {{f[0], f[1], f[2], f[3]}};
+    std::sort(c.begin(), c.end());
+    if (std::adjacent_find(c.begin(), c.end()) != c.end())
+      ++repeated;
+    for (int a = 0; a < 4; ++a)
+      quads_at[std::make_pair(std::min(f[a], f[(a + 1) % 4]), std::max(f[a], f[(a + 1) % 4]))]++;
+  }
+  EXPECT_EQ(repeated, 0) << "of " << g.quads.size() << " quads";
+  int open = 0, crowded = 0;
+  for (const auto &e : quads_at) {
+    if (e.second == 1)
+      ++open;
+    if (e.second > 2)
+      ++crowded;
+  }
+  EXPECT_EQ(open, 0) << "edges with one quad";
+  EXPECT_EQ(crowded, 0) << "edges with three or more quads";
 }
 
 // ---------------------------------------------------------------------------

@@ -24,6 +24,7 @@ evaluator::evaluator(environment_ptr global_env) : global_env_(std::move(global_
 value_t evaluator::evaluate(const value_t &expr, environment_ptr env,
                             std::optional<double> timeout_sec,
                             std::function<void(const value_t &)> on_complete) {
+  detail::check_not_in_async_kernel("evaluator::evaluate");
   std::lock_guard lk(eval_mu_);
   root_expr_ = expr;
   stats_.start();
@@ -75,17 +76,22 @@ value_t evaluator::evaluate(const value_t &expr, environment_ptr env,
     if (on_complete)
       on_complete(result);
     return result;
-  } catch (const dsl_exception &e) {
-    // Nothing caught it: an exception made from a C++ exception is thrown as that exception, a
-    // raised one with where it was raised.
+  } catch (const return_exception &) {
     stats_.mark_complete();
-    if (e.original())
-      std::rethrow_exception(e.original());
-    if (converted_original_ && same_exception(e.value(), converted_))
-      std::rethrow_exception(converted_original_);
-    value_t exc = e.value();
-    annotate(exc);
     throw;
+  } catch (const std::exception &e) {
+    // Nothing caught it: it reaches the caller as a dsl_exception, with where it was raised and,
+    // for one made from a C++ exception, that exception as its original().
+    stats_.mark_complete();
+    if (is_uncatchable(e))
+      throw;
+    std::optional<value_t> exc = caught(e);
+    std::exception_ptr original;
+    if (const auto *d = dynamic_cast<const dsl_exception *>(&e))
+      original = d->original();
+    if (!original && converted_original_ && same_exception(*exc, converted_))
+      original = converted_original_;
+    throw dsl_exception(std::move(*exc), original);
   } catch (...) {
     stats_.mark_complete();
     throw;

@@ -73,6 +73,7 @@ geoframe::geoframe(const geoframe& geofrm)
     bound_tri(geofrm.bound_tri), vtx_idx_arr_extend(geofrm.vtx_idx_arr_extend),
     vtxnew_sign(geofrm.vtxnew_sign), bound_edge(geofrm.bound_edge),
     refine_edge(geofrm.refine_edge), refine_edgevtx(geofrm.refine_edgevtx),
+    refine_more(geofrm.refine_more),
     biggestDim(geofrm.biggestDim), centerx(geofrm.centerx), centery(geofrm.centery),
     centerz(geofrm.centerz), max_x(geofrm.max_x), min_x(geofrm.min_x),
     max_y(geofrm.max_y), min_y(geofrm.min_y), max_z(geofrm.max_z), min_z(geofrm.min_z),
@@ -114,6 +115,7 @@ geoframe& geoframe::operator=(const geoframe& geofrm)
   bound_edge = geofrm.bound_edge;
   refine_edge = geofrm.refine_edge;
   refine_edgevtx = geofrm.refine_edgevtx;
+  refine_more = geofrm.refine_more;
   biggestDim = geofrm.biggestDim;
   centerx = geofrm.centerx;
   centery = geofrm.centery;

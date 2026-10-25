@@ -209,6 +209,19 @@ void init_magick_once() {
 #ifdef __EMSCRIPTEN__
     // wasm only — see the block above. On a native build Genesis has already
     // populated the coder registry, and re-registering duplicates its entries.
+    //
+    // Create the registry first. MagickCore builds it lazily, on the first
+    // GetMagickInfo, and until then RegisterMagickInfo silently drops every entry,
+    // while RegisterStaticModules still marks each module registered, so the lazy
+    // path never retries. Registering straight after InitializeMagick therefore left
+    // the registry empty for good: every Magick read and write failed with "no
+    // encoder"/NoDecodeDelegate. GetMagickInfo("*") instantiates it and registers
+    // every static coder into it; the calls below then only replace those entries.
+    {
+      MagickCore::ExceptionInfo *ex = MagickCore::AcquireExceptionInfo();
+      (void)MagickCore::GetMagickInfo("*", ex);
+      ex = MagickCore::DestroyExceptionInfo(ex);
+    }
     RegisterStaticModules();
     // Force-observe each Register* return value through a volatile sink so
     // wasm-ld / wasm-opt cannot elide the call (plain "(void)RegisterPNGImage()"
@@ -326,8 +339,7 @@ void register_stb_image_handler(); // stb_io.cpp — no dependencies at all.
 // Order matters:
 //   for_read walks the registry and takes the FIRST can_read match, so stb
 //     must be added FIRST to beat magick on png/jpg/bmp/tga/gif reads (the
-//     ImageMagick libtool-dup-static-state trap on wasm makes those reads
-//     throw NoDecodeDelegate — see src/cvc/image/stb_io.cpp).
+//     zero-dependency fast path — see src/cvc/image/stb_io.cpp).
 //   Writes prefer the LAST extension match (for_write_ext and write_image's
 //     first candidate), so magick must be added LAST — it covers every
 //     extension and honors quality/format options stb does not. write_image

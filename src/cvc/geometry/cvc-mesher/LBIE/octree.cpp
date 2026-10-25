@@ -64,6 +64,7 @@ namespace LBIE
     vbit = oc.vbit;
     BSplineCoeff = oc.BSplineCoeff;
     minmax = oc.minmax;
+    snap_to_surface = oc.snap_to_surface;
     prop_flag = oc.prop_flag;
     interior_flag = oc.interior_flag;
     prop_fname = oc.prop_fname;
@@ -107,6 +108,7 @@ namespace LBIE
     vbit = oc.vbit;
     BSplineCoeff = oc.BSplineCoeff;
     minmax = oc.minmax;
+    snap_to_surface = oc.snap_to_surface;
     prop_flag = oc.prop_flag;
     interior_flag = oc.interior_flag;
     prop_fname = oc.prop_fname;
@@ -1942,12 +1944,9 @@ void Octree::traverse_qef(float err_tol)
 	// level the error tolerance wants anywhere on the surface; the second refines the whole surface
 	// to it. (r < 60 kept refinement inside a sphere of 60 voxels around the centre, which only
 	// suited the volume the code was first written for; the tetrahedra leave it out.)
-	// Quadrilaterals and hexahedra refine near the surface with their own templates
-	// (quad_adaptive, hexa_adaptive_2) on an octree that stops at oct_depth-2. On a deeper one the
-	// templates collapse hexahedra: half of a CT's, and 11066 of a sphere's, had repeated corners.
-	// They only ever got a deeper octree from a volume whose voxels are 1 across, because the error
-	// that drives refinement was scaled by span^2.
-	const bool tetra = (flag_type == 1), templates = (flag_type == 2 || flag_type == 3);
+	// Hexahedra stay on oct_depth-2 (see below). Quadrilaterals refine like a surface, and
+	// polygonize_quad's split_quads turns the triangles at their level changes back into quads.
+	const bool tetra = (flag_type == 1), hexa = (flag_type == 3);
 	int boundary_level = oct_depth;
 	for(int pass = 0; pass < (tetra ? 2 : 1); pass++) {
 	int finest_boundary = oct_depth-2;
@@ -1999,6 +1998,11 @@ void Octree::traverse_qef(float err_tol)
 			if(temp > r) r = temp;
 			if(temp < r_min) r_min = temp;
 
+			// Hexahedra (flag_type 3) are built on a uniform grid of cells at oct_depth-2, and
+			// hexahedralize's templates refine that grid where the error is large. Refining the octree
+			// itself put level changes in the grid: across one, the dual hexahedron at a fine vertex took
+			// the coarse cell's vertex for several corners (min_vtx_hexa), and a coarse vertex shared by
+			// more refined edges and faces than its 18 refine_edge slots got vertex 0 from AddRefine_*.
 			//if (is_skipcell(oc_id)) {
 			if(minmax[oc_id].min > iso_val) {
 				continue;
@@ -2010,7 +2014,7 @@ void Octree::traverse_qef(float err_tol)
 				(level < oct_depth-2 || (is_skipcell(oc_id) == 0 && (pass == 0 ?
 					get_err(oc_id) > err_tol && level < oct_depth : level < boundary_level))) :
 				(level < oct_depth-2 || (is_skipcell(oc_id) == 0 && level < oct_depth-2) ||
-				(!templates && get_err(oc_id) > err_tol && r < 60.0f && level < oct_depth)) ){
+				(!hexa && get_err(oc_id) > err_tol && r < 60.0f && level < oct_depth)) ){
 
 			//} else if (level <= 3) {  //4 
 
@@ -5588,9 +5592,9 @@ void Octree::optimization(geoframe& geofrm, bool on_grid) {
 	int index, maxIndex, minAspIndx = 0, hexaIndx = 0, a_vert;
 	//int my_list[200], nlist;
 	int sum0, sum1, sum2, sum3, sum4, sum5, sum6, sum7, sum8, temp_i, temp_j;
-	float grad[3], step;
+	float grad[3];
 	float mv0[3], mv1[3], mv2[3], mv3[3], mv4[3], mv5[3], mv6[3], mv7[3], cond_max1;
-	float mmv0[3], mmv1[3], mmv2[3], mmv3[3], mmv4[3];
+	float mmv0[3], mmv1[3], mmv2[3], mmv3[3];
 	float jacobian, oddy, condition, jaco_min, jaco_max, oddy_min, oddy_max, cond_min, cond_max;
 	float *jacobianArr, *conditionArr, *oddyArr;
 	// Corner j of hexahedron i (v0..v7 below; v4..v7 lie over v0..v3) is vertex
@@ -5604,21 +5608,73 @@ void Octree::optimization(geoframe& geofrm, bool on_grid) {
 	                                      {5, 7, 0}, {6, 4, 1}, {7, 5, 2}, {4, 6, 3}};
 	// The hexahedra with a corner at a_vert, all of which move with it.
 	std::vector<int> around;
-	// The largest condition number of the corners of the hexahedra around a_vert, with a_vert at
-	// pos. A NaN counts as +inf.
-	auto worst_around = [&](const float* pos) {
-		float worst = 0.0f, p[8][3], jacob, cond, odd;
-		for(size_t n = 0; n < around.size(); n++) {
-			for(int c = 0; c < 8; c++) {
-				const unsigned int v = geofrm.quads[6*around[n] + corner_row[c]][corner_col[c]];
-				for(int d = 0; d < 3; d++) p[c][d] = int(v) == a_vert ? pos[d] : geofrm.verts[v][d];
+	// testHexa's Jacobian is the square root of the Gram determinant, so it is never negative and
+	// an inverted corner looks as good as its mirror image; and in float the Gram determinant of a
+	// nearly flat corner is noise. The line search moved vertices into inversions (one pass inverted
+	// 8 of a sphere's 189 hexahedra) and left corners at +5e-7, which the round trip through world
+	// coordinates between passes turned negative. corner_det is the signed determinant of corner c's
+	// unit edges, in double, and orientation makes it positive for most corners of the mesh,
+	// whichever way round its hexahedra are stored. A move may not take any corner around the
+	// vertex below min_corner, or below where it was if that was lower.
+	const double min_corner = 0.01;
+	auto corner_det = [](const float (&p)[8][3], int c) {
+		double e[3][3];
+		for(int k = 0; k < 3; k++) {
+			double len = 0.0;
+			for(int d = 0; d < 3; d++) {
+				e[k][d] = double(p[corner_edge[c][k]][d]) - double(p[c][d]);
+				len += e[k][d]*e[k][d];
 			}
+			if(len == 0.0) return 0.0;
+			for(int d = 0; d < 3; d++) e[k][d] /= sqrt(len);
+		}
+		return e[0][0]*(e[1][1]*e[2][2] - e[1][2]*e[2][1]) - e[0][1]*(e[1][0]*e[2][2] - e[1][2]*e[2][0]) +
+		       e[0][2]*(e[1][0]*e[2][1] - e[1][1]*e[2][0]);
+	};
+	auto hexa_points = [&](int h, const float* pos, float (&p)[8][3]) {
+		for(int c = 0; c < 8; c++) {
+			const unsigned int v = geofrm.quads[6*h + corner_row[c]][corner_col[c]];
+			for(int d = 0; d < 3; d++) p[c][d] = pos && int(v) == a_vert ? pos[d] : geofrm.verts[v][d];
+		}
+	};
+	double orientation = 1.0;
+	{
+		long positive = 0, negative = 0;
+		float p[8][3];
+		for(i = 0; i < geofrm.numquads/6; i++) {
+			hexa_points(i, nullptr, p);
 			for(int c = 0; c < 8; c++) {
-				testHexa(p[c], p[corner_edge[c][0]], p[corner_edge[c][1]], p[corner_edge[c][2]], jacob, cond, odd);
-				if(!(cond <= worst)) worst = std::isnan(cond) ? HUGE_VALF : cond;
+				const double det = corner_det(p, c);
+				if(det > 0.0) positive++;
+				else if(det < 0.0) negative++;
+			}
+		}
+		if(negative > positive) orientation = -1.0;
+	}
+	// The largest condition number of the corners of the hexahedra around a_vert, with a_vert at
+	// pos: testHexa's 1/Jacobian, from corner_det, and +inf for an inverted or flat corner.
+	auto worst_around = [&](const float* pos) {
+		float worst = 0.0f, p[8][3];
+		for(size_t n = 0; n < around.size(); n++) {
+			hexa_points(around[n], pos, p);
+			for(int c = 0; c < 8; c++) {
+				const double det = orientation*corner_det(p, c);
+				const float cond = det > 0.0 ? float(1.0/det) : HUGE_VALF;
+				if(!(cond <= worst)) worst = cond;
 			}
 		}
 		return worst;
+	};
+	// The oriented corner_det of the corners of the hexahedra around a_vert with a_vert at pos, 8 per
+	// hexahedron.
+	auto corners_around = [&](const float* pos) {
+		std::vector<double> det(8*around.size());
+		float p[8][3];
+		for(size_t n = 0; n < around.size(); n++) {
+			hexa_points(around[n], pos, p);
+			for(int c = 0; c < 8; c++) det[8*n + c] = orientation*corner_det(p, c);
+		}
+		return det;
 	};
 
 	//	FILE *output;
@@ -5655,6 +5711,10 @@ void Octree::optimization(geoframe& geofrm, bool on_grid) {
 	jaco_min = 1.0f;		jaco_max = -1.0f;
 	oddy_min = 1000.0f;		oddy_max = -1000.0f;
 	cond_min = 1000.0f;		cond_max = -1000.0f;
+	// The corner to improve: the worst one whose vertex is not stuck (its last move found nothing
+	// better), so that one corner that cannot be improved does not end the whole pass.
+	std::vector<char> stuck(geofrm.numverts, 0);
+	float pick = -1.0f;
 	float temp = 0.0f;
 	float temp0 = 0.0f;
 	float temp1 = 0.0f;
@@ -5689,15 +5749,14 @@ void Octree::optimization(geoframe& geofrm, bool on_grid) {
 			if(oddy > oddy_max) oddy_max = oddy;
 			if(condition < cond_min) {
 				cond_min = condition;	
-				if(condition < 0.0f) {minAspIndx = j; hexaIndx = i;}
 			}
 			if(condition > 0.0f && condition > cond_max) {
 			//if(condition > 0.0f && condition > 13.0f) {
 				cond_max = condition;
-				if(cond_min > 0.0f) {minAspIndx = j; hexaIndx = i;}
 				//if(cond_min > 0.0f) {minAspIndx = 2; hexaIndx = i;}
 			}
 			temp_i = 6*i + corner_row[j];	temp_j = corner_col[j];
+			if(!stuck[geofrm.quads[temp_i][temp_j]] && condition > pick) {pick = condition; minAspIndx = j; hexaIndx = i;}
 			if(conditionArr[geofrm.quads[temp_i][temp_j]] > 0.0f && condition > conditionArr[geofrm.quads[temp_i][temp_j]]) 
 				conditionArr[geofrm.quads[temp_i][temp_j]] = condition;
 			if(condition < 0.0f) conditionArr[geofrm.quads[temp_i][temp_j]] = condition;
@@ -5841,48 +5900,67 @@ void Octree::optimization(geoframe& geofrm, bool on_grid) {
 
 		getGrad(mmv0, mmv1, mmv2, mmv3, condition, grad);
 
-		// Line search for a position of the worst corner no worse than cond_max. mmv4 starts at the
-		// corner itself: a corner with collinear edges has Jacobian 0 and condition +inf, so
-		// cond_max + 1.0f - cond_max is NaN (or 0 once cond_max >= 2^24), the loop never runs, and
-		// mmv4 was copied into the mesh uninitialized (vertices like (7.4e24, 5.8e-43, 7.9e24)).
-		// Halving the step ends at 0 instead of looping forever when no step qualifies, and then the
-		// vertex stays where it was. A non-finite position (from a zero-length edge's NaN gradient) is
-		// never written.
+		// Search for a position of the corner's vertex that makes the worst corner around it better.
+		// The vertex stays where it is when nothing qualifies (an uninitialized position was once
+		// copied into the mesh, giving vertices like (7.4e24, 5.8e-43, 7.9e24)), and a non-finite
+		// position (from a zero-length edge's NaN gradient) never qualifies.
 		// The first step is half a grid cell: Mesher::qualityImprove gives every pass the mesh in grid
 		// units. (It passed world coordinates, where a cell of the bunny's volume is 0.01; a first step
-		// of 0.5 threw one of its vertices far outside the volume.) A position must also leave every
-		// other corner of the hexahedra around the vertex no worse than cond_max: checking only the
-		// worst corner let a move flatten its neighbours, so a pass could end with a worse mesh than it
-		// started from (the bunny's went from 169 to 191). And on the octree's grid a position off the
-		// grid does not qualify, so a vertex where the surface meets the volume's boundary is not pushed
-		// out of the volume.
-		around.clear();
-		for(i = 0; i < geofrm.numquads/6; i++)
-			for(j = 0; j < 8; j++)
-				if(int(geofrm.quads[6*i + corner_row[j]][corner_col[j]]) == a_vert) {around.push_back(i); break;}
-		for(j = 0; j < 3; j++) mmv4[j] = mmv0[j];
-		condition = cond_max + 1.0f;
-		step = 0.5f;
-		while(condition - cond_max > 1.0e-6 && step > 0.0f) {
-			for(j = 0; j < 3; j++) {
-				mmv4[j] = mmv0[j] - step*grad[j];
+		// of 0.5 threw one of its vertices far outside the volume.) A position is judged by every
+		// corner of the hexahedra around the vertex: checking only the worst corner let a move flatten
+		// its neighbours, so a pass could end with a worse mesh than it started from (the bunny's went
+		// from 169 to 191). And on the octree's grid a position off the grid does not qualify, so a
+		// vertex where the surface meets the volume's boundary is not pushed out of the volume.
+		// getGrad's direction is tried first, then the axes: its gradient mixes units and treats an
+		// inverted corner like its mirror image, so on its own it found few moves that did not invert
+		// a corner. The largest step at which some direction qualifies wins, taking the best of them.
+		// The corner's other three vertices shape it too: when its own vertex finds nothing, they
+		// are tried in turn.
+		auto improve = [&](int vert, const float* first) {
+			a_vert = vert;
+			around.clear();
+			for(int h = 0; h < geofrm.numquads/6; h++)
+				for(int c = 0; c < 8; c++)
+					if(int(geofrm.quads[6*h + corner_row[c]][corner_col[c]]) == a_vert) {around.push_back(h); break;}
+			const float from[3] = {geofrm.verts[vert][0], geofrm.verts[vert][1], geofrm.verts[vert][2]};
+			const std::vector<double> corners_before = corners_around(from);
+			const float bound = worst_around(from);
+			const float dirs[7][3] = {{first ? -first[0] : 0.0f, first ? -first[1] : 0.0f, first ? -first[2] : 0.0f},
+			                          {1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+			float best = bound, to[3] = {from[0], from[1], from[2]};
+			for(float st = 0.5f; st > 1.0f/4096.0f && !(best < bound); st /= 2.0f) {
+				for(int d = first ? 0 : 1; d < 7; d++) {
+					float trial[3];
+					bool ok = true;
+					for(int k = 0; k < 3; k++) {
+						trial[k] = from[k] + st*dirs[d][k];
+						if(!std::isfinite(trial[k]) || (on_grid && !(trial[k] >= 0.0f && trial[k] <= float(dim[k] - 1))))
+							ok = false;
+					}
+					if(!ok) continue;
+					const std::vector<double> corners = corners_around(trial);
+					for(size_t n = 0; n < corners.size() && ok; n++)
+						if(!(corners[n] >= std::min(min_corner, corners_before[n]))) ok = false;
+					if(!ok) continue;
+					const float worst = worst_around(trial);
+					if(worst < best) {
+						best = worst;
+						for(int k = 0; k < 3; k++) to[k] = trial[k];
+					}
+				}
 			}
-			getGrad(mmv4, mmv1, mmv2, mmv3, condition, grad);
-			const float worst = worst_around(mmv4);
-			if(!(worst <= condition)) condition = worst;
-			if(on_grid)
-				for(j = 0; j < 3; j++)
-					if(!(mmv4[j] >= 0.0f && mmv4[j] <= float(dim[j] - 1))) condition = HUGE_VALF;
-			if(condition > cond_max) step /= 2.0f;
+			if(!(best < bound)) return false;
+			for(int k = 0; k < 3; k++) geofrm.verts[vert][k] = to[k];
+			return true;
+		};
+		const int corner_vert = a_vert;
+		bool moved = improve(corner_vert, grad);
+		for(int k = 0; k < 3 && !moved; k++) {
+			const int c = corner_edge[minAspIndx][k];
+			moved = improve(int(geofrm.quads[6*hexaIndx + corner_row[c]][corner_col[c]]), nullptr);
 		}
-		if(condition - cond_max > 1.0e-6)
-			for(j = 0; j < 3; j++) mmv4[j] = mmv0[j];
-
-		if(std::isfinite(mmv4[0]) && std::isfinite(mmv4[1]) && std::isfinite(mmv4[2])) {
-			geofrm.verts[a_vert][0] = mmv4[0];
-			geofrm.verts[a_vert][1] = mmv4[1];
-			geofrm.verts[a_vert][2] = mmv4[2];
-		}
+		if(moved) std::fill(stuck.begin(), stuck.end(), 0);
+		else stuck[corner_vert] = 1;
 
 		//		fprintf(output, "average %d %f %f %f %f\n", a_vert, geofrm.verts[a_vert][0], geofrm.verts[a_vert][1], geofrm.verts[a_vert][2], step);
 
@@ -5893,6 +5971,7 @@ void Octree::optimization(geoframe& geofrm, bool on_grid) {
 		jaco_min = 1.0f;		jaco_max = -1.0f;
 		oddy_min = 1000.0f;		oddy_max = -1000.0f;
 		cond_min = 1000.0f;		cond_max = -1000.0f;
+		pick = -1.0f;
 		temp = 0.0f;	temp0 = 0.0f;	temp1 = 0.0f;	num = 0;
 		// Cannot parallelize: race conditions on min/max vars and array writes
 		for(i = 0; i < geofrm.numquads/6; i++) {
@@ -5930,16 +6009,15 @@ void Octree::optimization(geoframe& geofrm, bool on_grid) {
 				//}
 				if(condition < cond_min) {
 					cond_min = condition;	
-					if(condition < 0.0f) {minAspIndx = j; hexaIndx = i;}
 				}
 				if(condition > 0.0f && condition > cond_max) {
 				//if(condition > 0.0f && condition > 50.0f) {
 					cond_max = condition;
-					if(cond_min > 0.0f) {minAspIndx = j; hexaIndx = i;}
 					//if(cond_min > 0.0f) {minAspIndx = 4; hexaIndx = i;}
 				}
 				//if(condition > conditionArr[vertexArr[i][j]]) conditionArr[vertexArr[i][j]] = condition;
 				temp_i = 6*i + corner_row[j];	temp_j = corner_col[j];
+				if(!stuck[geofrm.quads[temp_i][temp_j]] && condition > pick) {pick = condition; minAspIndx = j; hexaIndx = i;}
 				if(conditionArr[geofrm.quads[temp_i][temp_j]] > 0.0f && condition > conditionArr[geofrm.quads[temp_i][temp_j]]) 
 					conditionArr[geofrm.quads[temp_i][temp_j]] = condition;
 				if(condition < 0.0f) conditionArr[geofrm.quads[temp_i][temp_j]] = condition;
@@ -5952,6 +6030,7 @@ void Octree::optimization(geoframe& geofrm, bool on_grid) {
 		}
 		
 		a_vert = geofrm.quads[6*hexaIndx + corner_row[minAspIndx]][corner_col[minAspIndx]];
+		if(pick < 0.0f) break;
 
 		//		fprintf(output, "min, max, a_vert = %f %f %f %f %f %f %d %d\n", jaco_min, jaco_max, 
 		//				oddy_min, oddy_max, cond_min, cond_max, a_vert, geofrm.bound_sign[a_vert]);
@@ -6092,8 +6171,18 @@ void Octree::polygonize_quad(geoframe& geofrm, float err_tol) {
 	in_out = 0;
 	for (k = 0; k < octcell_num; k++) {vtx_idx_arr[k] = -1;}
 
+	// Method 5's templates refine quads on a uniform grid of cells. Where the octree's level changes
+	// they did not match up and left cracks (192 open edges in the mesh of a closed sphere), so they
+	// refine nothing unless all the leaves are on one level; the octree adapts the mesh instead, and
+	// split_quads turns the triangles at its level changes into quads.
+	bool one_level = true;
+	for (i = 1; i < leaf_num && one_level; i++)
+		if (get_level(cut_array[i]) != get_level(cut_array[0])) one_level = false;
 	flag_method = 5;	// 1, 2, 3, 4, 5
-	if(flag_method == 5) assign_refine_sign_quad(geofrm, err_tol);
+	if(flag_method == 5) {
+		if (one_level) assign_refine_sign_quad(geofrm, err_tol);
+		else std::fill(vtx_idx_arr_refine.begin(), vtx_idx_arr_refine.end(), -1);
+	}
 
 	for (i = 0; i < leaf_num; i++ ) {
 		valid_leaf = cut_array[i] ;
@@ -6115,6 +6204,81 @@ void Octree::polygonize_quad(geoframe& geofrm, float err_tol) {
 			}
 		}	// end j
 	}		// end i
+
+	split_quads(geofrm);
+}
+
+// polygonize_quad's octree has cells on more than one level, and where the level changes a quad
+// takes the coarse cell's vertex for two neighbouring corners: it is a triangle (1243 of the head
+// SDF's 30191 quads, 9330 of the vh4 CT's 299205). If there is one, every face is split once around
+// its centre, quads into four and triangles into three, sharing the midpoints of their edges, so
+// that the mesh is all quads again and still conforming. The new vertices go onto the surface like
+// the others. A face left with fewer than three corners, or with two opposite corners on one
+// vertex, has no area and is dropped.
+void Octree::split_quads(geoframe& geofrm)
+{
+	bool degenerate = false;
+	for (size_t q = 0; q < geofrm.quads.size() && !degenerate; q++) {
+		const geoframe::uint_4 &f = geofrm.quads[q];
+		for (int a = 0; a < 4; a++)
+			if (f[a] == f[(a + 1)%4] || (a < 2 && f[a] == f[a + 2])) degenerate = true;
+	}
+	if (!degenerate) return;
+
+	const int fine = 1 << oct_depth;
+	auto add_point = [&](const float (&p)[3], const float (&n)[3]) {
+		float pos[3] = {p[0], p[1], p[2]}, norm[3] = {n[0], n[1], n[2]};
+		const float len = sqrtf(norm[0]*norm[0] + norm[1]*norm[1] + norm[2]*norm[2]);
+		if (len > 0.0f)
+			for (int i = 0; i < 3; i++) norm[i] /= len;
+		const unsigned int v = geofrm.AddVert(pos, norm);
+		geofrm.AddBound(v, 1);
+		int c[3];
+		for (int i = 0; i < 3; i++) {
+			c[i] = int(floorf(pos[i]));
+			c[i] = c[i] < 0 ? 0 : (c[i] >= fine ? fine - 1 : c[i]);
+		}
+		get_vtx_new(geofrm, xyz2octcell(c[0], c[1], c[2], oct_depth), v);
+		return v;
+	};
+	std::map<std::pair<unsigned int, unsigned int>, unsigned int> midpoint;
+	auto edge_point = [&](unsigned int a, unsigned int b) {
+		const std::pair<unsigned int, unsigned int> key(std::min(a, b), std::max(a, b));
+		std::map<std::pair<unsigned int, unsigned int>, unsigned int>::const_iterator it = midpoint.find(key);
+		if (it != midpoint.end()) return it->second;
+		float p[3], n[3];
+		for (int i = 0; i < 3; i++) {
+			p[i] = 0.5f*(geofrm.verts[a][i] + geofrm.verts[b][i]);
+			n[i] = geofrm.normals[a][i] + geofrm.normals[b][i];
+		}
+		const unsigned int v = add_point(p, n);
+		midpoint[key] = v;
+		return v;
+	};
+
+	const std::vector<geoframe::uint_4> faces = geofrm.quads;
+	geofrm.quads.clear();
+	geofrm.numquads = 0;
+	for (size_t q = 0; q < faces.size(); q++) {
+		const geoframe::uint_4 &f = faces[q];
+		unsigned int c[4];
+		int n = 0;
+		for (int a = 0; a < 4; a++)
+			if (f[a] != f[(a + 3)%4]) c[n++] = f[a];
+		if (n < 3 || (n == 4 && (c[0] == c[2] || c[1] == c[3]))) continue;
+		float p[3] = {0.0f, 0.0f, 0.0f}, nn[3] = {0.0f, 0.0f, 0.0f};
+		for (int a = 0; a < n; a++)
+			for (int i = 0; i < 3; i++) {
+				p[i] += geofrm.verts[c[a]][i]/n;
+				nn[i] += geofrm.normals[c[a]][i];
+			}
+		const unsigned int centre = add_point(p, nn);
+		for (int a = 0; a < n; a++) {
+			const unsigned int sub[4] = {c[a], edge_point(c[a], c[(a + 1)%n]), centre,
+			                             edge_point(c[(a + n - 1)%n], c[a])};
+			geofrm.AddQuad(sub, 4);
+		}
+	}
 }
 
 void Octree::get_VtxNorm(float* vtx, float* norm) 

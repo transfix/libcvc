@@ -25,24 +25,35 @@ namespace cvc::state_exec {
 
 /// An error a libcvc builtin (or the evaluator itself) throws, naming the built-in exception
 /// class it raises in the DSL ("TypeError", "IndexError", ...). The evaluator turns it into an
-/// exception of that class with origin "builtin"; what() is the message.
+/// exception of that class; what() is the message.
+///
+/// `origin` and `fields` are the exception's `origin` and any fields of its own. A host derives
+/// its own error type from this one to raise with them: pycvc's error for a Python function's
+/// exception is a PythonError with origin "python" and `python_type`, and keeps the Python
+/// exception to re-raise.
 class dsl_error : public std::runtime_error {
 public:
-  dsl_error(std::string class_name, const std::string &message)
-      : std::runtime_error(message), class_name_(std::move(class_name)) {}
+  dsl_error(std::string class_name, const std::string &message, std::string origin = "builtin",
+            std::vector<std::pair<std::string, value_t>> fields = {})
+      : std::runtime_error(message), class_name_(std::move(class_name)), origin_(std::move(origin)),
+        fields_(std::move(fields)) {}
   const std::string &class_name() const noexcept { return class_name_; }
+  const std::string &origin() const noexcept { return origin_; }
+  const std::vector<std::pair<std::string, value_t>> &fields() const noexcept { return fields_; }
 
 private:
   std::string class_name_;
+  std::string origin_;
+  std::vector<std::pair<std::string, value_t>> fields_;
 };
 
 /// A DSL exception value crossing C++. The `error` builtin and the recursive evaluator throw it
-/// to raise, and an evaluator throws it when nothing caught an exception. what() is the
-/// exception's message.
+/// to raise; an evaluator's step()/run()/evaluate() throw it when nothing caught an exception, and
+/// a scheduler's raise_exit_exception() throws a failed process's. what() is "Class: message".
 class dsl_exception : public std::runtime_error {
 public:
-  /// `original`: the C++ exception the value was made from, when a native threw it; an
-  /// evaluator's run()/evaluate() rethrow that instead, so a C++ caller sees the type it threw.
+  /// `original`: the C++ exception the value was made from, when a native threw one. A host may
+  /// rethrow it: pycvc re-raises a Python function's exception this way.
   explicit dsl_exception(value_t exc, std::exception_ptr original = nullptr);
   const value_t &value() const noexcept { return exc_; }
   std::exception_ptr original() const noexcept { return original_; }

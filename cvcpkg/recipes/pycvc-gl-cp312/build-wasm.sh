@@ -88,7 +88,7 @@ emcmake cmake -G Ninja \
     -DDISABLE_CGAL=ON \
     -DCVC_USING_HDF5=OFF \
     -DCVC_USING_IMOD_MRC=OFF \
-    -DCVC_ENABLE_IMAGEMAGICK=OFF \
+    -DCVC_ENABLE_IMAGEMAGICK=ON \
     -DCVC_ENABLE_FFTW=OFF \
     -DCVC_FFT_PROVIDER=none \
     -DCVC_ENABLE_ASSIMP=ON \
@@ -106,6 +106,11 @@ emcmake cmake -G Ninja \
     -DPython3_NumPy_INCLUDE_DIRS="${NUMPY_INC}" \
     -DSWIG_EXECUTABLE="${HOSTENV}/bin/swig" \
     -DSWIG_DIR="${_SWIG_DIR}"
+# A configure that misses ImageMagick turns it off and carries on; fail instead of
+# shipping a pycvc whose image I/O is gone (imagemagick + its codecs are build deps).
+grep -q '^CVC_IMAGEMAGICK_ENABLED:INTERNAL=ON' "${CVC_BUILD_DIR}/CMakeCache.txt" || {
+    echo "pycvc-gl(wasm): FATAL — the configure found no ImageMagick in ${CVC_DEPS_PREFIX}" >&2
+    exit 1; }
 
 # ── (4) build + install the static SWIG archives + the cvc/cvcGL closure ──
 # Build the default targets (cvc + cvcGL + pycvc + pycvc_gl; examples/tests/cli are
