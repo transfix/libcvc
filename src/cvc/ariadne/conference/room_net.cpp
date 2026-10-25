@@ -19,7 +19,9 @@
 #include <cvc/ariadne/conference/room_net.h>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
+#include <cvc/state/state_blob_store.h> // sha256_hex
 #include <initializer_list>
+#include <map>
 #include <string>
 
 namespace cvc {
@@ -163,6 +165,54 @@ bool read_participant_voice(cvc::app &app, const std::string &room, const std::s
     return false;
   talking = v == "1";
   return true;
+}
+
+std::string room_device_tag(const std::string &room, const std::string &device_id) {
+  if (device_id.empty())
+    return {};
+  // NUL-separated and salted, as default_device_id: 16 hex digits name a device within a room.
+  std::string in = "cvc-room-device/v1";
+  in.push_back('\0');
+  in += room;
+  in.push_back('\0');
+  in += device_id;
+  return cvc::sha256_hex(reinterpret_cast<const unsigned char *>(in.data()), in.size())
+      .substr(0, 16);
+}
+
+void write_participant_device(cvc::app &app, const std::string &room, const std::string &pid,
+                              const std::string &tag) {
+  const std::string path = sub(room_participant_path(room, pid), {"device"});
+  if (!tag.empty()) {
+    set_changed_once(app, path, tag);
+    return;
+  }
+  cvc::state *n = app.root().findDescendant(path);
+  if (n && !n->value().empty())
+    n->value(std::string()); // cleared, and only when there is a tag to clear
+}
+
+std::string read_participant_device(cvc::app &app, const std::string &room,
+                                    const std::string &pid) {
+  cvc::state *n = app.root().findDescendant(sub(room_participant_path(room, pid), {"device"}));
+  return n ? n->value() : std::string();
+}
+
+void write_link_devices(cvc::app &app, const std::string &room,
+                        const std::vector<cvc::state_link_report> &links,
+                        const std::set<std::string> &present) {
+  // Each present pid held by an accepted link: its verified device's tag, or "" when no link
+  // holding it proved a key, so a pid taken over by an unverified link loses its old tag.
+  std::map<std::string, std::string> held;
+  for (const cvc::state_link_report &r : links) {
+    if (!r.accepted || !r.holds_id || !present.count(r.remote_node_id))
+      continue;
+    std::string &tag = held[r.remote_node_id];
+    if (r.device_verified && !r.remote_device_id.empty())
+      tag = room_device_tag(room, r.remote_device_id);
+  }
+  for (const auto &[pid, tag] : held)
+    write_participant_device(app, room, pid, tag);
 }
 
 std::string format_rtt(double rtt_ms) {

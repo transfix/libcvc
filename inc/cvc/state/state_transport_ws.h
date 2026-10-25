@@ -255,6 +255,24 @@ public:
   void set_inbound_gate(std::shared_ptr<state_inbound_gate> gate) override;
   std::uint64_t total_inbound_rejected() const override { return _inbound_rejected.load(); }
 
+  // Bearer-token authentication (a relay's room token, ARIADNE_CONFERENCE_ROADMAP §5f), as
+  // state_transport_grpc::auth_config. A browser cannot set an Authorization header, so the token
+  // travels in the handshake's Sec-WebSocket-Protocol: a client with outbound_token offers
+  // "cvc.v1, cvc-token.<token>", and a server with expected_token refuses the upgrade (HTTP 401,
+  // counted by total_auth_rejected()) unless it is offered, before any frame, so a peer without it
+  // is sent nothing. A server answers cvc.v1 to a client that offers it, as a browser requires.
+  // Tokens must be valid_room_token (state_identity.h). Set before start() / connect_to_peer().
+  struct auth_config {
+    std::string expected_token;
+    std::string outbound_token;
+  };
+  void set_auth_config(auth_config cfg) { _auth = std::move(cfg); }
+  std::uint64_t total_auth_rejected() const noexcept { return _auth_rejected.load(); }
+  std::uint64_t total_devices_verified() const override { return _devices_verified.load(); }
+  std::uint64_t total_device_proofs_refused() const override {
+    return _device_proofs_refused.load();
+  }
+
   // ── Diagnostics ──
   std::size_t shard_count() const;
   std::size_t connection_count() const;
@@ -306,6 +324,10 @@ private:
   // Whether `id` is this transport's own node id or a registered shard's (state_inbound_gate: a
   // client never speaks as the relay).
   bool is_local_id(const std::string &id) const;
+  // A client answering a relay's Hello nonce (DeviceProof), and a relay checking one.
+  void answer_device_challenge(connection &c, const std::string &nonce,
+                               const std::string &relay_node_id);
+  void on_device_proof(connection &c, const std::string &public_key, const std::string &signature);
   // Replay each shard's journaled local writes (backfill on connect); with `view`, only the ones
   // that rule delivers.
   void send_backfill_locked(connection &c, const std::vector<state_cluster_shard *> &shards,
@@ -325,6 +347,12 @@ private:
   // Defined in the impl TU (it owns the proto parse + the Beast read/write); no-op under wasm.
   void accept_loop();
   void read_loop(std::shared_ptr<connection> conn);
+  // An accepted connection's own thread: its handshake (where a room token is checked), then, once
+  // admitted, its reader -- so a client slow to send its upgrade request holds up no one else.
+  void serve_accepted(std::shared_ptr<connection> conn);
+  bool handshake_accepted(connection &c);
+  // Join and drop the threads of handshakes that ended unadmitted.
+  void reap_handshakes();
 
   // Link probe: Ping every live connection once ping_interval() has passed since the last round.
   // Native: a thread started with the first start() / connect_to_peer(). Browser (no threads):
@@ -347,6 +375,9 @@ private:
 
   mutable std::mutex _conns_mu;
   std::vector<std::shared_ptr<connection>> _conns;
+  // Accepted connections still in their handshake, each on its own thread (guarded by _conns_mu).
+  // The probe thread closes one whose handshake outlasts kHandshakeNs; stop() closes them all.
+  std::vector<std::shared_ptr<connection>> _handshaking;
 
   std::atomic<bool> _backfill_on_connect{true};
   std::atomic<bool> _relay{false};
@@ -376,6 +407,10 @@ private:
   mutable std::mutex _inbound_gate_mu;
   std::shared_ptr<state_inbound_gate> _inbound_gate;
   std::atomic<std::uint64_t> _inbound_rejected{0};
+  auth_config _auth; // set before start() / connect_to_peer()
+  std::atomic<std::uint64_t> _auth_rejected{0};
+  std::atomic<std::uint64_t> _devices_verified{0};
+  std::atomic<std::uint64_t> _device_proofs_refused{0};
 
   std::atomic<std::uint64_t> _published{0};
   std::atomic<std::uint64_t> _sent_frames{0};

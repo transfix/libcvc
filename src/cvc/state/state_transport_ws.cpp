@@ -21,9 +21,13 @@
 #include "proto/state_transport.pb.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cvc/state/state_cluster_shard.h>
+#include <cvc/state/state_device_key.h>
+#include <cvc/state/state_identity.h> // constant_time_equal
 #include <cvc/state/state_transport_ws.h>
+#include <future>
 #include <stdexcept>
 #include <thread>
 #include <unordered_map>
@@ -33,6 +37,7 @@
 #include <boost/asio/connect.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/beast/core.hpp>
+#include <boost/beast/http.hpp>
 #include <boost/beast/websocket.hpp>
 #ifdef __linux__
 #include <linux/sockios.h> // SIOCOUTQ — unsent bytes in a socket's send buffer (send_backlog)
@@ -309,16 +314,69 @@ bool touches_subtree(state_mutation_op op) {
 
 } // namespace
 
+namespace {
+
+// The subprotocol a cvc WebSocket peer speaks, and the prefix of the one that carries a room token
+// (state_transport_ws::auth_config).
+constexpr const char *kWsProtocol = "cvc.v1";
+constexpr const char *kTokenProtocol = "cvc-token.";
+
+// The Sec-WebSocket-Protocol offer of a client holding room token TOKEN. No spaces: the browser's
+// WebSocket API takes the list split on commas alone.
+std::string protocol_offer(const std::string &token) {
+  return std::string(kWsProtocol) + "," + kTokenProtocol + token;
+}
+
+} // namespace
+
 #ifndef __EMSCRIPTEN__
 namespace {
 namespace beast = boost::beast;
 namespace websocket = boost::beast::websocket;
+namespace http = boost::beast::http;
 namespace net = boost::asio;
 using tcp = boost::asio::ip::tcp;
+
+// Whether the Sec-WebSocket-Protocol list OFFERED names WANT (each entry trimmed, all of them
+// compared in constant time).
+bool offers_protocol(const std::string &offered, const std::string &want) {
+  bool found = false;
+  std::size_t start = 0;
+  while (start <= offered.size()) {
+    std::size_t end = offered.find(',', start);
+    if (end == std::string::npos)
+      end = offered.size();
+    std::size_t b = start, e = end;
+    while (b < e && std::isspace(static_cast<unsigned char>(offered[b])))
+      ++b;
+    while (e > b && std::isspace(static_cast<unsigned char>(offered[e - 1])))
+      --e;
+    found |= constant_time_equal(offered.substr(b, e - b), want);
+    start = end + 1;
+  }
+  return found;
+}
+
+// Answer an upgrade request with 401 and close: the room token was missing or wrong.
+void refuse_upgrade(tcp::socket &sock, const http::request<http::string_body> &req) {
+  http::response<http::string_body> res{http::status::unauthorized, req.version()};
+  res.set(http::field::content_type, "text/plain");
+  res.keep_alive(false);
+  res.body() = "room token required\n";
+  res.prepare_payload();
+  beast::error_code ec;
+  http::write(sock, res, ec);
+  sock.shutdown(tcp::socket::shutdown_both, ec);
+  sock.close(ec);
+}
 
 // How long one write may block before its connection is closed (see
 // connection::write_started_ns).
 constexpr std::int64_t kWriteStallNs = 3'000'000'000;
+// How long an accepted connection may take to finish its WebSocket handshake, and how many may be
+// in one at once (each holds a thread until it finishes or is closed).
+constexpr std::int64_t kHandshakeNs = 10'000'000'000;
+constexpr std::size_t kMaxHandshakes = 64;
 
 // Make a write blocked on `s` fail after kWriteStallNs, so it releases the connection's write lock.
 // Elsewhere the probe thread's watchdog does that with shutdown(), which wakes a send() blocked in
@@ -349,6 +407,7 @@ public:
   // Hello is ignored, so they never change after that. Every other thread reads through peer_id().
   std::string remote_node_id;
   std::string remote_cluster_id;
+  std::string remote_device_id; // the device id of that Hello ("" when none), written the same way
   std::atomic<bool> identified{false};
   // The peer's node id, or nullptr before its Hello (or when that Hello named no node). nullptr
   // means "unknown", which delivers everything, as an unregistered peer does.
@@ -366,6 +425,17 @@ public:
   std::atomic<bool> displaced{false};
   // Its Hello named one of the relay's own ids (the transport's or a shard's): never a client's.
   bool local_id = false;
+  // Device proof (state_device_key.h), on an ACCEPTED connection:
+  //   - device_nonce: the challenge the relay's Hello carried, taken by the first proof checked
+  //     (guarded by proof_mu, as the Hello may go out on another thread);
+  //   - pending_*: a proof that came before the client's own Hello (its reader can answer ours
+  //     before its Hello is written), checked once that Hello names the device; reader only;
+  //   - device_verified: the proof checked out against the device id's pin.
+  std::mutex proof_mu;
+  std::string device_nonce;
+  bool proof_pending = false;
+  std::string pending_key, pending_signature;
+  std::atomic<bool> device_verified{false};
   // Whether this connection may speak now: always without a gate; with one, once it has identified
   // and holds its node id (a duplicate claim retries here until the holder closes or falls silent).
   bool speaks() {
@@ -411,6 +481,9 @@ public:
   // the write and frees the lock (state_transport_ws::ping_loop); on Windows the socket's own send
   // timeout fails it (bound_blocking_writes).
   std::atomic<std::int64_t> write_started_ns{0};
+  // Steady-clock ns when an accepted connection's handshake began; 0 once it is over (the probe
+  // thread's handshake deadline, state_transport_ws::ping_loop).
+  std::atomic<std::int64_t> handshake_started_ns{0};
   // Waiting for its bootstrap (the admission hold): write(), try_write(), write_mutation(),
   // write_entries() and broadcast_snapshot() send it nothing until release_locked clears it. Set
   // and cleared only under write_mu, so a write that saw it set happened before the release took
@@ -553,6 +626,14 @@ public:
     const int fd = ws->next_layer().native_handle();
     if (fd >= 0 && ::ioctl(fd, SIOCOUTQ, &unsent) == 0 && unsent > 0)
       return static_cast<std::size_t>(unsent);
+#elif defined(__EMSCRIPTEN__)
+    // The browser's own queue (WebSocket.bufferedAmount): a send never blocks there, so without
+    // this a slow uplink only grows the queue, and every frame behind it -- the link probe too --
+    // waits longer.
+    size_t buffered = 0;
+    if (em_socket >= 0 &&
+        emscripten_websocket_get_buffered_amount(em_socket, &buffered) == EMSCRIPTEN_RESULT_SUCCESS)
+      return buffered;
 #endif
     return 0;
   }
@@ -653,8 +734,10 @@ void state_transport_ws::start(const std::string &listen_addr, const std::string
     _impl->ping_thread = std::thread([this]() { ping_loop(); });
 }
 
-// Server accept loop: synchronous accept → WebSocket handshake → admit + spawn reader. Breaks when
-// stop() closes the acceptor (accept() then errors).
+static std::int64_t steady_ns(); // defined with the reaper below
+
+// Server accept loop: synchronous accept, then a thread per connection for its handshake, admission
+// and reads (serve_accepted). Breaks when stop() closes the acceptor (accept() then errors).
 void state_transport_ws::accept_loop() {
   for (;;) {
     tcp::socket sock(_impl->ioc);
@@ -665,6 +748,18 @@ void state_transport_ws::accept_loop() {
     if (!_running.load())
       break; // woken by stop()'s loopback self-connect
 
+    // The handshake runs on the connection's own thread, so a client that connects and never sends
+    // its upgrade request holds up no other join. At most kMaxHandshakes wait at once; the probe
+    // thread closes one that outlasts kHandshakeNs.
+    reap_handshakes();
+    {
+      std::lock_guard<std::mutex> lk(_conns_mu);
+      if (_handshaking.size() >= kMaxHandshakes) {
+        sock.shutdown(tcp::socket::shutdown_both, ec);
+        sock.close(ec);
+        continue;
+      }
+    }
     auto conn = std::make_shared<connection>();
     conn->accepted = true;
     {
@@ -674,15 +769,82 @@ void state_transport_ws::accept_loop() {
     conn->ws = std::make_unique<websocket::stream<tcp::socket>>(std::move(sock));
     conn->ws->read_message_max(kMaxWsMessageBytes);
     bound_blocking_writes(conn->ws->next_layer());
-    conn->ws->accept(ec); // server-side WebSocket handshake
-    if (ec)
-      continue;
-
-    // Spawn the reader before admit (admit publishes the connection to stop(), which joins the
-    // reader — so the thread must already be assigned), matching state_transport_grpc.
-    conn->reader = std::thread([this, conn]() { read_loop(conn); });
-    admit_connection(conn);
+    conn->handshake_started_ns.store(steady_ns(), std::memory_order_relaxed);
+    {
+      std::lock_guard<std::mutex> lk(_conns_mu);
+      _handshaking.push_back(conn);
+    }
+    // The thread waits until its handle is assigned: once admitted, the connection is visible to
+    // stop() and reap_idle(), which join it.
+    auto assigned = std::make_shared<std::promise<void>>();
+    std::shared_future<void> go = assigned->get_future().share();
+    conn->reader = std::thread([this, conn, go]() {
+      go.wait();
+      serve_accepted(conn);
+    });
+    assigned->set_value();
   }
+}
+
+bool state_transport_ws::handshake_accepted(connection &c) {
+  // The upgrade request first: a relay with a room token checks it there, before the connection
+  // is admitted, and a client that offered subprotocols must be answered one (a browser drops the
+  // connection otherwise).
+  beast::error_code ec;
+  beast::flat_buffer hbuf;
+  http::request<http::string_body> req;
+  http::read(c.ws->next_layer(), hbuf, req, ec);
+  if (ec || !websocket::is_upgrade(req))
+    return false;
+  const std::string offered(req[http::field::sec_websocket_protocol]);
+  if (!_auth.expected_token.empty() &&
+      !offers_protocol(offered, kTokenProtocol + _auth.expected_token)) {
+    _auth_rejected.fetch_add(1, std::memory_order_relaxed);
+    refuse_upgrade(c.ws->next_layer(), req);
+    return false;
+  }
+  if (offers_protocol(offered, kWsProtocol))
+    c.ws->set_option(websocket::stream_base::decorator([](websocket::response_type &res) {
+      res.set(http::field::sec_websocket_protocol, kWsProtocol);
+    }));
+  c.ws->accept(req, ec); // server-side WebSocket handshake
+  return !ec;
+}
+
+void state_transport_ws::serve_accepted(std::shared_ptr<connection> conn) {
+  const bool ok = handshake_accepted(*conn) && _running.load();
+  conn->handshake_started_ns.store(0, std::memory_order_relaxed);
+  if (!ok) {
+    // Left in _handshaking for the accept loop (or stop()) to join.
+    conn->alive.store(false);
+    conn->reader_done.store(true, std::memory_order_release);
+    return;
+  }
+  admit_connection(conn); // now in _conns, then out of _handshaking: never in neither
+  {
+    std::lock_guard<std::mutex> lk(_conns_mu);
+    _handshaking.erase(std::remove(_handshaking.begin(), _handshaking.end(), conn),
+                       _handshaking.end());
+  }
+  read_loop(conn);
+}
+
+void state_transport_ws::reap_handshakes() {
+  std::vector<std::shared_ptr<connection>> done;
+  {
+    std::lock_guard<std::mutex> lk(_conns_mu);
+    for (auto it = _handshaking.begin(); it != _handshaking.end();) {
+      if ((*it)->reader_done.load(std::memory_order_acquire)) {
+        done.push_back(std::move(*it));
+        it = _handshaking.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+  for (auto &c : done)
+    if (c->reader.joinable())
+      c->reader.join();
 }
 
 bool state_transport_ws::connect_to_peer(const std::string &url,
@@ -709,9 +871,19 @@ bool state_transport_ws::connect_to_peer(const std::string &url,
     conn->ws = std::make_unique<websocket::stream<tcp::socket>>(std::move(sock));
     conn->ws->read_message_max(kMaxWsMessageBytes);
     bound_blocking_writes(conn->ws->next_layer());
-    conn->ws->handshake(host, target.empty() ? std::string("/") : target, ec);
-    if (ec)
+    if (!_auth.outbound_token.empty())
+      conn->ws->set_option(websocket::stream_base::decorator(
+          [offer = protocol_offer(_auth.outbound_token)](websocket::request_type &req) {
+            req.set(http::field::sec_websocket_protocol, offer);
+          }));
+    websocket::response_type res;
+    conn->ws->handshake(res, host, target.empty() ? std::string("/") : target, ec);
+    if (ec) {
+      if (res.result() == http::status::unauthorized)
+        std::fprintf(stderr, "cvc: ws: %s refused the connection: room token missing or wrong\n",
+                     url.c_str());
       return false;
+    }
   } catch (const std::exception &) {
     return false;
   }
@@ -776,6 +948,10 @@ void state_transport_ws::stop() {
     std::lock_guard<std::mutex> lk(_conns_mu);
     conns = _conns;
     _conns.clear();
+    // Connections still in their handshake: one admitted meanwhile is in both lists, which is fine
+    // (a second shutdown is harmless, and a joined thread is no longer joinable).
+    conns.insert(conns.end(), _handshaking.begin(), _handshaking.end());
+    _handshaking.clear();
   }
   // Interrupt each reader's blocking read(): shutdown() wakes a recv() blocked in another thread
   // (closing the fd alone does not), then close.
@@ -848,6 +1024,12 @@ bool state_transport_ws::connect_to_peer(const std::string &url,
   emscripten_websocket_init_create_attributes(&attrs);
   attrs.url = url.c_str();
   attrs.createOnMainThread = true;
+  // With a room token, offer it as a subprotocol (auth_config); otherwise offer none, so an older
+  // relay that answers no subprotocol still accepts the browser.
+  const std::string offer =
+      _auth.outbound_token.empty() ? std::string() : protocol_offer(_auth.outbound_token);
+  if (!offer.empty())
+    attrs.protocols = offer.c_str();
   EMSCRIPTEN_WEBSOCKET_T sock = emscripten_websocket_new(&attrs);
   if (sock < 0)
     return false;
@@ -944,12 +1126,27 @@ void state_transport_ws::deliver_inbound(connection *c, const void *data, std::s
     if (!c->identified.load(std::memory_order_relaxed)) {
       c->remote_node_id = in.hello().node_id();
       c->remote_cluster_id = in.hello().cluster_id();
+      // An id that is not a valid_device_id (oversized, say) is ignored, not stored.
+      c->remote_device_id =
+          valid_device_id(in.hello().device_id()) ? in.hello().device_id() : std::string();
       c->identified.store(true, std::memory_order_release);
       if (c->gate) {
         c->local_id = is_local_id(c->remote_node_id);
         (void)c->speaks(); // claim the node id now
       }
+      // A relay that verifies device keys challenges a client it accepted; answer it.
+      if (!c->accepted && !in.hello().nonce().empty())
+        answer_device_challenge(*c, in.hello().nonce(), in.hello().node_id());
+      // A proof that came first can be checked now that the Hello names the device.
+      if (c->proof_pending) {
+        c->proof_pending = false;
+        const std::string key = std::move(c->pending_key);
+        const std::string signature = std::move(c->pending_signature);
+        on_device_proof(*c, key, signature);
+      }
     }
+  } else if (in.has_device_proof()) {
+    on_device_proof(*c, in.device_proof().public_key(), in.device_proof().signature());
   } else if (in.has_mutation()) {
     on_inbound_mutation(decode_mutation(in.mutation()), c);
     _recv_mutations.fetch_add(1, std::memory_order_relaxed);
@@ -1245,7 +1442,10 @@ std::size_t state_transport_ws::write_media(const media_frame &m, const void *ex
     // buffer small so the small, must-deliver STATE writes (roster join/leave + the periodic
     // re-broadcast below) are never crowded out or deferred. Dropping video to a slow peer is
     // invisible; a stalled roster makes clients unable to SEE each other at all.
-    if (backlog_drop != 0 && c->send_backlog() > backlog_drop) {
+    // Audio (a frame with a sample rate) is small and the first thing a listener misses, so it
+    // has four times video's allowance: a congested link sheds video first.
+    const std::size_t limit = m.sample_rate > 0 ? backlog_drop * 4 : backlog_drop;
+    if (backlog_drop != 0 && c->send_backlog() > limit) {
       _media_backlog_dropped.fetch_add(1, std::memory_order_relaxed);
       continue;
     }
@@ -1493,8 +1693,12 @@ std::vector<state_link_report> state_transport_ws::link_reports() const {
       continue;
     state_link_report r;
     r.transport = "ws";
-    if (const std::string *pid = c->peer_id())
+    if (const std::string *pid = c->peer_id()) {
       r.remote_node_id = *pid;
+      r.remote_device_id = c->remote_device_id;
+      r.holds_id = !c->gate || c->gate->holder(*pid) == c.get();
+      r.device_verified = c->device_verified.load(std::memory_order_relaxed);
+    }
     r.accepted = c->accepted;
     r.age_s = static_cast<double>(now - c->opened_ns) * 1e-9;
     r.idle_s = static_cast<double>(now - c->last_rx_ns.load()) * 1e-9;
@@ -1537,12 +1741,20 @@ void state_transport_ws::ping_loop() {
   while (_running.load()) {
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     send_pings_if_due();
-    std::vector<std::shared_ptr<connection>> conns;
+    std::vector<std::shared_ptr<connection>> conns, handshaking;
     {
       std::lock_guard<std::mutex> lk(_conns_mu);
       conns = _conns;
+      handshaking = _handshaking;
     }
     const std::int64_t now = steady_ns();
+    // A handshake that has not finished in kHandshakeNs is a client that connected and never sent
+    // (or never finished) its upgrade request: close it, which fails its read and ends its thread.
+    for (auto &c : handshaking) {
+      const std::int64_t started = c->handshake_started_ns.load(std::memory_order_relaxed);
+      if (started != 0 && now - started > kHandshakeNs)
+        c->abort_io();
+    }
     for (auto &c : conns) {
       const std::int64_t started = c ? c->write_started_ns.load(std::memory_order_relaxed) : 0;
       if (started != 0 && now - started > kWriteStallNs && c->alive.load()) {
@@ -1677,7 +1889,68 @@ void state_transport_ws::send_hello_locked(connection &c) {
   auto *h = f.mutable_hello();
   h->set_node_id(_node_id);
   h->set_cluster_id(_cluster_id);
+  if (!_device_id.empty())
+    h->set_device_id(_device_id);
+  // A relay with a pin store challenges each client it accepts to prove its device key.
+  if (c.accepted && _device_pins && device_keys_available()) {
+    std::lock_guard<std::mutex> lk(c.proof_mu);
+    c.device_nonce = device_random_bytes(kDeviceNonceBytes);
+    h->set_nonce(c.device_nonce);
+  }
   c.write_locked(f);
+}
+
+void state_transport_ws::answer_device_challenge(connection &c, const std::string &nonce,
+                                                 const std::string &relay_node_id) {
+  // Sign only a nonce of a sane size: the proof is for one relay's challenge, nothing larger.
+  if (!_device_signer || _device_id.empty() || nonce.size() > kDeviceNonceMaxBytes)
+    return;
+  pb::Frame f;
+  auto *p = f.mutable_device_proof();
+  p->set_public_key(_device_signer->public_key());
+  p->set_signature(
+      _device_signer->sign(device_proof_message(nonce, relay_node_id, _node_id, _device_id)));
+  if (p->signature().empty())
+    return;
+  if (c.write(f))
+    _sent_frames.fetch_add(1, std::memory_order_relaxed);
+}
+
+void state_transport_ws::on_device_proof(connection &c, const std::string &public_key,
+                                         const std::string &signature) {
+  if (c.accepted && !c.identified.load(std::memory_order_relaxed) && !c.proof_pending) {
+    c.proof_pending = true; // checked when the Hello comes (deliver_inbound)
+    c.pending_key = public_key;
+    c.pending_signature = signature;
+    return;
+  }
+  std::string nonce;
+  {
+    std::lock_guard<std::mutex> lk(c.proof_mu);
+    nonce.swap(c.device_nonce); // one proof per challenge
+  }
+  const std::string *pid = c.peer_id();
+  if (nonce.empty() || pid == nullptr || c.local_id || c.remote_device_id.empty() ||
+      !_device_pins) {
+    _device_proofs_refused.fetch_add(1, std::memory_order_relaxed); // unasked, or anonymous
+    return;
+  }
+  const std::string message = device_proof_message(nonce, _node_id, *pid, c.remote_device_id);
+  if (!verify_device_proof(public_key, message, signature)) {
+    _device_proofs_refused.fetch_add(1, std::memory_order_relaxed);
+    std::fprintf(stderr, "cvc: ws device proof from %s did not verify\n", pid->c_str());
+    return;
+  }
+  const state_device_pins::verdict v = _device_pins->check(c.remote_device_id, public_key);
+  if (v != state_device_pins::verdict::pinned && v != state_device_pins::verdict::matched) {
+    _device_proofs_refused.fetch_add(1, std::memory_order_relaxed);
+    std::fprintf(stderr,
+                 "cvc: ws device of %s was not pinned (another key, or a full store): unverified\n",
+                 pid->c_str());
+    return;
+  }
+  c.device_verified.store(true, std::memory_order_relaxed);
+  _devices_verified.fetch_add(1, std::memory_order_relaxed);
 }
 
 void state_transport_ws::send_backfill_locked(connection &c,
@@ -1828,6 +2101,10 @@ std::size_t state_transport_ws::broadcast_snapshot() {
         for (std::size_t i = 0; i < ss.entries.size(); ++i) {
           const snapshot_entry &e = ss.entries[i];
           if (!view.deliver(e.path))
+            continue;
+          // Never a peer's own value back to it: the peer is its source, and our copy can be
+          // older than what it holds (state_inbound_gate::sources).
+          if (c->gate && pid && c->gate->sources(*pid, e.path))
             continue;
           // Keyed by path alone, as the receiver applies every entry to every shard it has.
           auto [it, fresh] = c->held.try_emplace(e.path);
@@ -1982,6 +2259,8 @@ std::size_t state_transport_ws::reap_idle(std::chrono::milliseconds timeout) {
       }
     }
   }
+  // 3) And the threads of handshakes that ended unadmitted.
+  reap_handshakes();
 #else
   (void)timeout;
 #endif

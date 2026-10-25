@@ -35,7 +35,8 @@ namespace conference {
 //   - a value, a touch or a data() payload (no delete, reset, delegation, read-only or hidden
 //     flag: no client uses them, and each could take a key from the relay);
 //   - outside the keys the relay owns there: `pose` (the server holon's authoritative pose),
-//     `net.relay` (the relay's view of the link) and each `streams.<kind>.ready` (SFU mode);
+//     `net.relay` (the relay's view of the link), `device` (its device tag) and each
+//     `streams.<kind>.ready` (SFU mode);
 //   - on a canonical path (no empty or whitespace-padded segment, which the state tree would
 //     trim or skip onto another key) at most 16 segments and 512 bytes long.
 // Everything else is the relay's to write: the scene, the area of interest, the server's own
@@ -53,6 +54,9 @@ public:
 
   bool admit(const std::string &node_id, const cvc::state_mutation &m) const override;
   bool admit(const std::string &node_id, const cvc::state_message &m) const override;
+  // A participant is the source of every value it may write (its participant subtree minus the
+  // relay's keys), so the relay's re-broadcast never sends those back to it.
+  bool sources(const std::string &node_id, const std::string &path) const override;
 
 private:
   bool own_path(const std::string &pid, const std::string &path) const;

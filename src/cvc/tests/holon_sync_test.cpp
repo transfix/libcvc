@@ -558,11 +558,35 @@ TEST(HolonSyncTest, ProposeIntentStampsTheNextTick) {
   h.add_participant("A", /*local=*/true);
   for (int i = 0; i < 5; ++i)
     h.advance(h.clock().fixed_dt());
-  cvc::ariadne::propose_intent(h, app, "r", "A", avatar_intent{vec3{1.0, 0.0, 0.0}});
+  const std::uint64_t proposed =
+      cvc::ariadne::propose_intent(h, app, "r", "A", avatar_intent{vec3{1.0, 0.0, 0.0}});
   avatar_intent out;
   std::uint64_t stamp = 0;
   ASSERT_TRUE(cvc::ariadne::read_intent(app, "r", "A", out, &stamp));
   EXPECT_EQ(stamp, h.tick() + 1);
+  EXPECT_EQ(proposed, stamp) << "propose_intent returns its stamp";
+}
+
+// read_current_intent refuses an intent stamped before our last proposal (an echo of an earlier
+// one) and takes our own, a newer one, or one the document wrote (stamp 0).
+TEST(HolonSyncTest, ReadCurrentIntentRefusesAnEchoOfAnEarlierProposal) {
+  cvc::app app;
+  avatar_intent out;
+  EXPECT_FALSE(cvc::ariadne::read_current_intent(app, "r", "A", 0, out)) << "none in the tree";
+  const avatar_intent earlier{vec3{1.0, 0.0, 0.0}}, later{vec3{0.0, 1.0, 0.0}};
+  cvc::ariadne::write_intent(app, "r", "A", earlier, 10); // what the relay echoes back
+  out = later;
+  EXPECT_FALSE(cvc::ariadne::read_current_intent(app, "r", "A", 20, out));
+  EXPECT_DOUBLE_EQ(out.move.y, 1.0) << "out is untouched";
+  cvc::ariadne::write_intent(app, "r", "A", later, 20); // our own proposal
+  ASSERT_TRUE(cvc::ariadne::read_current_intent(app, "r", "A", 20, out));
+  EXPECT_DOUBLE_EQ(out.move.y, 1.0);
+  cvc::ariadne::write_intent(app, "r", "A", earlier, 25); // newer than our proposal
+  ASSERT_TRUE(cvc::ariadne::read_current_intent(app, "r", "A", 20, out));
+  EXPECT_DOUBLE_EQ(out.move.x, 1.0);
+  cvc::ariadne::write_intent(app, "r", "A", later); // the document's (stamp 0)
+  ASSERT_TRUE(cvc::ariadne::read_current_intent(app, "r", "A", 20, out));
+  EXPECT_DOUBLE_EQ(out.move.y, 1.0);
 }
 
 TEST(HolonSyncTest, WritePoseWithAHeartbeatWritesOnlyChanges) {

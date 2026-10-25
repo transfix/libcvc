@@ -842,6 +842,11 @@ add_test(NAME cvcgl_terminal_scene COMMAND cvcgl_terminal_scene)
 add_executable(cvcgl_imgui_table_columns test/cvcgl_imgui_table_columns.cpp)
 target_link_libraries(cvcgl_imgui_table_columns PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_table_columns COMMAND cvcgl_imgui_table_columns)
+# A slider in a grid cell holds a steady width, even in an auto-width column (the conference
+# roster's volume slider). No window, no GL.
+add_executable(cvcgl_imgui_grid_slider test/cvcgl_imgui_grid_slider.cpp)
+target_link_libraries(cvcgl_imgui_grid_slider PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_grid_slider COMMAND cvcgl_imgui_grid_slider)
 
 # Golden images of the Ariadne ImGui/VTK backend (roadmap §16.6 phase 1): each .ari in
 # test/golden runs through AriRuntime + ImGuiBackend offscreen and its frame is compared with the

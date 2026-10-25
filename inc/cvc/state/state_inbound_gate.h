@@ -87,6 +87,12 @@ public:
   virtual bool admit(const std::string &node_id, const state_mutation &m) const;
   virtual bool admit(const std::string &node_id, const state_message &m) const;
 
+  // Whether `path` is the peer `node_id`'s own: a value only it writes, so it is the source. A
+  // relay never re-sends such a path to that peer (state_transport_ws::broadcast_snapshot): the
+  // relay's copy is at best what the peer already holds, and older while the peer's next write is
+  // in flight -- an echo the peer would take for current. Default false: no path is a peer's own.
+  virtual bool sources(const std::string &node_id, const std::string &path) const;
+
 private:
   // The holders, defined in the .cpp over a file-local element type (which keeps the map's
   // template code out of the cvc.dll export table).

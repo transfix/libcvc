@@ -251,6 +251,8 @@ TEST(RoomWriteGate, AParticipantWritesOnlyItsOwnSubtree) {
       << "a sibling of net.relay is alice's";
   EXPECT_FALSE(gate.may_write("alice", alice + ".streams.camera.ready", op::set_value))
       << "the SFU relay marks a stream ready";
+  EXPECT_FALSE(gate.may_write("alice", alice + ".device", op::set_value))
+      << "the relay writes the device tag";
 
   // Paths the state tree would trim or skip onto one of those keys.
   for (const std::string &p :
@@ -298,6 +300,23 @@ TEST(RoomWriteGate, AParticipantWritesOnlyItsOwnSubtree) {
   EXPECT_FALSE(gate.admit("alice", msg));
 }
 
+// A participant is the source of what it may write, so the relay's re-broadcast never sends it back
+// (state_inbound_gate::sources); the relay's own keys and other participants' are still sent.
+TEST(RoomWriteGate, AParticipantSourcesWhatItWrites) {
+  const conf::room_write_gate gate("standup");
+  const std::string alice = conf::room_participant_path("standup", "alice");
+  const std::string bob = conf::room_participant_path("standup", "bob");
+  EXPECT_TRUE(gate.sources("alice", alice + ".intent.move.x"));
+  EXPECT_TRUE(gate.sources("alice", alice + ".intent.tick"));
+  EXPECT_TRUE(gate.sources("alice", alice + ".profile.name"));
+  EXPECT_FALSE(gate.sources("alice", alice + ".pose.pos.x")) << "the relay's pose";
+  EXPECT_FALSE(gate.sources("alice", alice + ".device")) << "the relay's device tag";
+  EXPECT_FALSE(gate.sources("alice", bob + ".intent.move.x")) << "another participant";
+  EXPECT_FALSE(gate.sources("alice", "conf.rooms.standup.scene")) << "the room";
+  const cvc::state_inbound_gate open;
+  EXPECT_FALSE(open.sources("alice", alice + ".intent.move.x")) << "a plain gate sources nothing";
+}
+
 // The binding a gate holds: one connection per node id, freed by its holder only.
 TEST(RoomWriteGate, BindsOneConnectionPerNodeId) {
   conf::room_write_gate gate("standup");
@@ -340,4 +359,66 @@ TEST(RoomWriteGate, ASilentHolderIsTakenOver) {
       << "and cannot take it back while the new holder is live";
   gate.release("alice", &old_conn); // its close does not free what it no longer holds
   EXPECT_EQ(gate.holder("alice"), &fresh_conn);
+}
+
+// A participant's device tag (room_net.h): stable for one device in one room, different in another
+// room or for another device, and none without a device id.
+TEST(RoomNet, ADeviceTagIsPerRoom) {
+  const std::string dev = "0123456789abcdef0123456789abcdef";
+  const std::string tag = conf::room_device_tag("standup", dev);
+  ASSERT_EQ(tag.size(), 16u);
+  EXPECT_EQ(conf::room_device_tag("standup", dev), tag) << "stable";
+  EXPECT_NE(conf::room_device_tag("other", dev), tag) << "says nothing about another room";
+  EXPECT_NE(conf::room_device_tag("standup", "fedcba9876543210fedcba9876543210"), tag);
+  EXPECT_EQ(tag.find(dev.substr(0, 8)), std::string::npos) << "not the id itself";
+  EXPECT_EQ(conf::room_device_tag("standup", ""), "");
+
+  cvc::app app;
+  EXPECT_EQ(conf::read_participant_device(app, "standup", "alice"), "");
+  conf::write_participant_device(app, "standup", "alice", tag);
+  EXPECT_EQ(conf::read_participant_device(app, "standup", "alice"), tag);
+}
+
+// write_link_devices tags a present participant from the accepted link that holds its pid and
+// proved its device key, and from no other.
+TEST(RoomNet, LinkDevicesTagOnlyVerifiedHolders) {
+  const auto link = [](const std::string &pid, bool verified) {
+    cvc::state_link_report r;
+    r.transport = "ws";
+    r.remote_node_id = pid;
+    r.remote_device_id = std::string(32, pid[0]);
+    r.accepted = true;
+    r.holds_id = true;
+    r.device_verified = verified;
+    return r;
+  };
+  std::vector<cvc::state_link_report> links = {link("alice", true), link("bob", false),
+                                               link("carol", true), link("dave", true)};
+  links[2].holds_id = false; // carol's duplicate claim
+  links[3].accepted = false; // a link this relay dialed
+  cvc::app app;
+  conf::write_link_devices(app, "standup", links, {"alice", "bob", "carol", "dave"});
+  EXPECT_EQ(conf::read_participant_device(app, "standup", "alice"),
+            conf::room_device_tag("standup", links[0].remote_device_id));
+  EXPECT_EQ(conf::read_participant_device(app, "standup", "bob"), "") << "unverified";
+  EXPECT_EQ(conf::read_participant_device(app, "standup", "carol"), "") << "not its holder";
+  EXPECT_EQ(conf::read_participant_device(app, "standup", "dave"), "") << "not accepted";
+
+  cvc::app absent;
+  conf::write_link_devices(absent, "standup", links, {"bob"});
+  EXPECT_EQ(conf::read_participant_device(absent, "standup", "alice"), "") << "not present";
+
+  // alice's pid taken over by a link that proved no key: the tag her device proved goes.
+  std::vector<cvc::state_link_report> taken = {link("alice", false)};
+  taken[0].remote_device_id = std::string(32, 'z');
+  conf::write_link_devices(app, "standup", taken, {"alice"});
+  EXPECT_EQ(conf::read_participant_device(app, "standup", "alice"), "") << "taken over";
+  conf::write_link_devices(app, "standup", links, {"alice"});
+  EXPECT_EQ(conf::read_participant_device(app, "standup", "alice"),
+            conf::room_device_tag("standup", links[0].remote_device_id))
+      << "and back when her verified device holds it again";
+  conf::write_link_devices(app, "standup", {}, {"alice"});
+  EXPECT_EQ(conf::read_participant_device(app, "standup", "alice"),
+            conf::room_device_tag("standup", links[0].remote_device_id))
+      << "a pid no link holds keeps its tag until it leaves";
 }

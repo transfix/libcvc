@@ -84,6 +84,8 @@
 #include <cvc/media/media_frame.h>        // cvc::media_frame — the canonical media frame
 #include <cvc/state/state.h>              // cvc::state::instance — conference media state keys
 #include <cvc/state/state_cluster_shard.h>
+#include <cvc/state/state_device_key.h> // load_device_seed, state_device_signer
+#include <cvc/state/state_identity.h>   // default_device_id, valid_room_token
 #if CVC_ENABLE_WS
 #include <cvc/state/state_transport_ws.h>
 #endif
@@ -318,6 +320,7 @@ struct ConferenceSession {
   cvc::gl::CameraController *cam_ = nullptr;
   cvc::ariadne::avatar_intent last_intent_; // the intent our avatar runs on (predicted with)
   cvc::ariadne::avatar_intent last_user_;   // what the keys + facing asked for last frame
+  std::uint64_t proposed_tick_ = 0;         // the stamp of our last proposal (propose_intent)
   std::vector<std::string> drawn_pids_;     // avatars drawn at the last log (log on change)
   std::uint64_t logged_realigns_ = 0;       // holon clock re-alignments at the last log
   std::size_t logged_lod_builds_ = 0;       // LOD pyramid builds at the last log
@@ -400,6 +403,14 @@ struct ConferenceSession {
   static constexpr double kTalkHold = 0.60;      // keep "talking" lit this long (s) after the last
                                             // loud chunk — bridges brief pauses between words and
                                             // jittery delivery (wall time, so frame-rate indep.)
+  // Uplink: a mic chunk is sent while its RMS is above kSendThreshold (about -48 dBFS, below quiet
+  // speech and above a quiet room) or within kSendHold after one was; a muted camera sends one
+  // frame per kMutedFrameInterval.
+  static constexpr double kSendThreshold = 0.004;
+  static constexpr double kSendHold = 0.8;
+  static constexpr double kMutedFrameInterval = 1.0;
+  double mic_send_until_ = 0.0;   // wall s: send mic chunks until then
+  double last_muted_frame_ = 0.0; // wall s: the last muted camera frame sent
   // A peer's audio is FRESH while its last mic chunk is younger than this (wall s; about 23 chunks
   // of 21 ms). Only fresh audio paces its video and says whether it is talking: once the chunks
   // stop (its mic muted or cut, or the relay sending us none of it, out of range in the room) its
@@ -537,10 +548,39 @@ struct ConferenceSession {
     const bool want_grpc = (relayUrl.rfind("grpc://", 0) == 0);
     relay_url_ = relayUrl;
     relay_grpc_ = want_grpc;
+    // Who we are to the relay (§5f): the room token it may require (CVC_ARIADNE_ROOM_TOKEN; the
+    // host page takes it from its URL fragment) and this device's default identity, a hash of
+    // the machine id, host name and user (CVC_DEVICE_ID overrides it; the page keeps a random
+    // one in localStorage). The device id names the device, it is not a credential.
+    std::string roomToken;
+    if (const char *t = std::getenv("CVC_ARIADNE_ROOM_TOKEN"); t != nullptr && *t != '\0') {
+      roomToken = t;
+      if (!cvc::valid_room_token(roomToken)) {
+        std::fprintf(stderr, "arigl: conference: CVC_ARIADNE_ROOM_TOKEN is not a valid room "
+                             "token (16-256 of [A-Za-z0-9._~-]); not sending it\n");
+        roomToken.clear();
+      }
+    }
+    // Scoped to this relay, so two relays (two operators) cannot match one device's ids.
+    const std::string deviceId = cvc::scoped_device_id(cvc::default_device_id(), relayUrl);
+    // The device's key for this relay (state_device_key.h), derived from the seed it keeps
+    // (CVC_DEVICE_KEY, else a file under the user's config directory; the page keeps one in
+    // localStorage). It answers the relay's challenge, so the relay can pin the device id to it.
+    const std::shared_ptr<const cvc::state_device_signer> deviceKey =
+        cvc::state_device_signer::derive(cvc::load_device_seed(), relayUrl);
+    if (!deviceKey)
+      std::fprintf(stderr,
+                   "arigl: conference: no device key (%s); the relay will not show this "
+                   "device's tag\n",
+                   cvc::device_keys_available() ? "no seed could be read or made"
+                                                : "no OpenSSL in this build");
     bool ok = false;
     if (want_grpc) {
 #if CVC_ENABLE_GRPC
       grpc_ = std::make_unique<cvc::state_transport_grpc>();
+      grpc_->set_auth_config({std::string(), roomToken});
+      grpc_->set_device_id(deviceId);
+      grpc_->set_device_signer(deviceKey);
       grpc_->start("127.0.0.1:0", nodeId,
                    "conf"); // gRPC must start() (ephemeral port) even to dial
       grpc_->register_shard(shard.get());
@@ -557,6 +597,9 @@ struct ConferenceSession {
     } else {
 #if CVC_ENABLE_WS
       ws_ = std::make_unique<cvc::state_transport_ws>();
+      ws_->set_auth_config({std::string(), roomToken});
+      ws_->set_device_id(deviceId);
+      ws_->set_device_signer(deviceKey);
       ws_->register_shard(shard.get());
       ws_->set_on_media(on_media);
       tp_ = ws_.get();
@@ -764,12 +807,15 @@ struct ConferenceSession {
                             const cvc::ariadne::avatar_intent &b) {
       return a.move.x != b.move.x || a.move.y != b.move.y || a.move.z != b.move.z || a.yaw != b.yaw;
     };
+    // An intent in the tree stamped before our last proposal is an echo of an earlier one (the
+    // relay's re-broadcast can carry it back after the newer write left): not ours any more.
     if (differs(in, last_user_)) {
-      cvc::ariadne::propose_intent(*holon_, *app_, room_, pid_, in);
+      proposed_tick_ = cvc::ariadne::propose_intent(*holon_, *app_, room_, pid_, in);
       last_intent_ = in;
       last_user_ = in;
     } else if (cvc::ariadne::avatar_intent tree;
-               cvc::ariadne::read_intent(*app_, room_, pid_, tree) && differs(tree, last_intent_)) {
+               cvc::ariadne::read_current_intent(*app_, room_, pid_, proposed_tick_, tree) &&
+               differs(tree, last_intent_)) {
       last_intent_ = tree;
     }
     // Re-assert it locally every frame: our avatar joins the holon only once our room-join is in
@@ -1137,10 +1183,28 @@ struct ConferenceSession {
   }
 
   void forward_frame(publisher &p, const cvc::ariadne::stream::frame &f, double stamp) {
-    // Self voice activity: measure our own forwarded mic so OUR name lights up in the list too.
-    if (p.kind == "mic" && f.format.codec == "f32" && f.data && f.size >= sizeof(float) &&
-        chunk_rms(reinterpret_cast<const float *>(f.data), f.size / sizeof(float)) > kTalkThreshold)
-      self_talk_until_ = now_wall_ + kTalkHold;
+    if (p.kind == "mic" && f.format.codec == "f32" && f.data && f.size >= sizeof(float)) {
+      const double rms = chunk_rms(reinterpret_cast<const float *>(f.data), f.size / sizeof(float));
+      // Self voice activity: measure our own forwarded mic so OUR name lights up in the list too.
+      if (rms > kTalkThreshold)
+        self_talk_until_ = now_wall_ + kTalkHold;
+      // Silence is not sent: a chunk goes out while the voice is on or within kSendHold after it,
+      // so a quiet or muted mic costs nothing (receivers mix silence for a peer with no chunks).
+      if (rms > kSendThreshold)
+        mic_send_until_ = now_wall_ + kSendHold;
+      if (now_wall_ > mic_send_until_) {
+        p.last_seq = f.seq;
+        return;
+      }
+    }
+    // A muted camera's frames are black: one a second keeps its tile alive.
+    if (p.kind == "camera" && cvc::state::instance(*app_)(prefix_ + ".cam_on").value() == "0") {
+      if (now_wall_ - last_muted_frame_ < kMutedFrameInterval) {
+        p.last_seq = f.seq;
+        return;
+      }
+      last_muted_frame_ = now_wall_;
+    }
     cvc::media_frame mf;
     mf.origin_node_id = pid_;
     mf.stream_id = p.kind;

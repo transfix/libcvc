@@ -101,6 +101,17 @@ control: a peer with no filter still receives everything.
   On the client side, unsolicited-snapshot ingest
   now skips entries a shard with enforced interest would reject, so a
   relay's whole-tree snapshot no longer writes outside the client's interest.
+- **WebSocket bearer token + Hello device id** — `state_transport_ws::auth_config`
+  mirrors gRPC's. A browser cannot set an `Authorization` header, so a client
+  offers its token as the subprotocol `cvc-token.<token>` next to `cvc.v1`, and
+  a server with `expected_token` refuses the upgrade (HTTP 401) without it. That
+  happens before admission, so nothing is sent. It answers `cvc.v1` to a client
+  that offers it. gRPC's bearer compare is now constant-time, and both count
+  refusals in `total_auth_rejected()`. `Hello.device_id` (proto field 3) carries
+  `state_transport::set_device_id()`. A receiver reports it as the link's
+  `remote_device_id`, with `holds_id` saying whether the link holds its node id
+  at the inbound gate. `state_identity.h` has the token rule and
+  `default_device_id()`.
 - **Inbound gate (connection-bound identity)** —
   `state_transport::set_inbound_gate(gate)` on gRPC and WS, with
   `total_inbound_rejected()`. It holds each connection the transport

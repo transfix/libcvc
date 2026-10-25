@@ -39,6 +39,7 @@
 #include <cvc/ariadne/conference/room_aoi.h>
 #include <cvc/ariadne/conference/room_aoi_relay.h>
 #include <cvc/ariadne/conference/room_intrinsics.h> // room_join, room_leave, room_participant_path
+#include <cvc/ariadne/conference/room_net.h>        // room_device_tag, the device leaf
 #include <cvc/ariadne/conference/room_scene.h>      // seed_default_scene, seed_large_demo_scene
 #include <cvc/ariadne/conference/room_write_gate.h> // bound writes
 #include <cvc/ariadne/holon.h>
@@ -49,6 +50,7 @@
 #include <cvc/physics/body.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_cluster_shard.h>
+#include <cvc/state/state_device_key.h>
 #include <cvc/state/state_transport.h>
 #if defined(CVC_ENABLE_GRPC)
 #include <cvc/state/state_transport_grpc.h>
@@ -229,6 +231,7 @@ struct relay_options {
   bool ws_broadcast = true; // arisrv's ~1 Hz WebSocket re-broadcast of the room tree
   bool hold = true;         // hold each admission for its filter (--admission-hold-ms; AOI only)
   bool bind_writes = true;  // each client writes only its own participant (--bind-writes)
+  std::string room_token;   // admit only clients that present it (--room-token-file); "" = open
 };
 
 // The relay, as arisrv builds it, stepped by the test.
@@ -259,6 +262,8 @@ public:
     grpc.set_backfill_on_connect(!opt.trim);
     grpc.set_admission_hold(hold);
     grpc.set_inbound_gate(bind_gate);
+    grpc.set_auth_config({opt.room_token, std::string()});
+    grpc.set_device_pins(pins);
     grpc.start("127.0.0.1:0", kRelayId, "conf");
     grpc.set_relay(true);
     grpc.register_shard(shard.get());
@@ -272,6 +277,8 @@ public:
     ws.set_media_backlog_drop(0); // lossless media: the note by the frame sizes above
     ws.set_admission_hold(hold);
     ws.set_inbound_gate(bind_gate);
+    ws.set_auth_config({opt.room_token, std::string()});
+    ws.set_device_pins(pins);
     ws.start("127.0.0.1:0", kRelayId, "conf");
     ws.set_relay(true);
     ws.register_shard(shard.get());
@@ -361,6 +368,16 @@ public:
     for (auto it = _known.begin(); it != _known.end();)
       it = server.has_participant(*it) ? std::next(it) : _known.erase(it);
     ra::relay_room_step(*shard, planes, aoi.get(), server, now_s(), opt.trim);
+    // arisrv's device tags (its ~1 s link pass): each present participant's, from the link
+    // holding its pid.
+    {
+      std::vector<cvc::state_link_report> links;
+      for (const cvc::state_transport *tp : planes)
+        for (cvc::state_link_report &l : tp->link_reports())
+          links.push_back(std::move(l));
+      const std::vector<std::string> pids = server.participants();
+      ra::write_link_devices(app, kRoom, links, std::set<std::string>(pids.begin(), pids.end()));
+    }
     ++steps;
 #if defined(CVC_ENABLE_WS)
     if (opt.ws_broadcast && now_s() >= _next_broadcast) {
@@ -481,6 +498,30 @@ public:
     const auto it = _applied.find(origin);
     return it == _applied.end() ? std::vector<std::string>{} : it->second;
   }
+  // Connections refused for the room token.
+  // Device proofs the planes verified, and refused.
+  std::uint64_t devices_verified() const {
+    std::uint64_t n = 0;
+    for (const cvc::state_transport *tp : planes)
+      n += tp->total_devices_verified();
+    return n;
+  }
+  std::uint64_t device_proofs_refused() const {
+    std::uint64_t n = 0;
+    for (const cvc::state_transport *tp : planes)
+      n += tp->total_device_proofs_refused();
+    return n;
+  }
+  std::uint64_t auth_rejected() const {
+    std::uint64_t n = 0;
+#if defined(CVC_ENABLE_GRPC)
+    n += grpc.total_auth_rejected();
+#endif
+#if defined(CVC_ENABLE_WS)
+    n += ws.total_auth_rejected();
+#endif
+    return n;
+  }
   // Client frames the bound-writes gate refused.
   std::uint64_t inbound_rejected() const {
     std::uint64_t n = 0;
@@ -491,6 +532,8 @@ public:
 
   relay_options opt;
   std::shared_ptr<cvc::state_inbound_gate> bind_gate; // one for both planes (null: off)
+  // Device-key pins, in memory, for both planes (arisrv keeps one always; --device-pins a file).
+  std::shared_ptr<cvc::state_device_pins> pins = std::make_shared<cvc::state_device_pins>();
   cvc::app app;
   std::unique_ptr<cvc::state_cluster_shard> shard;
 #if defined(CVC_ENABLE_GRPC)
@@ -554,6 +597,9 @@ public:
 #if defined(CVC_ENABLE_GRPC)
     if (kind == link_kind::grpc) {
       _grpc = std::make_unique<cvc::state_transport_grpc>();
+      _grpc->set_auth_config({std::string(), token});
+      _grpc->set_device_id(device);
+      _grpc->set_device_signer(cvc::state_device_signer::derive(seed, r.grpc.listen_address()));
       _grpc->start("127.0.0.1:0", pid, "conf"); // gRPC must start() even to dial
       _grpc->register_shard(shard.get());
       _grpc->set_on_media(on_media);
@@ -564,6 +610,9 @@ public:
 #if defined(CVC_ENABLE_WS)
     if (kind == link_kind::ws) {
       _ws = std::make_unique<cvc::state_transport_ws>();
+      _ws->set_auth_config({std::string(), token});
+      _ws->set_device_id(device);
+      _ws->set_device_signer(cvc::state_device_signer::derive(seed, r.ws.listen_address()));
       _ws->register_shard(shard.get());
       _ws->set_on_media(on_media);
       _ws->set_media_backlog_drop(0); // its uplink is lossless too
@@ -652,6 +701,9 @@ public:
   holon h{holon_role::client, cvc::ariadne::room_holon_config()};
   cvc::state_transport *tp = nullptr;
   bool echo = false; // write arigl's avatar marker matrices into ui.docs every frame
+  std::string token; // the room token its connection presents ("" = none)
+  std::string device; // the device id its Hello carries ("" = none)
+  std::string seed;   // its device key's 32-byte seed (state_device_key.h; "" = no key)
   std::uint64_t cam_sent = 0, mic_sent = 0;
 
 private:
@@ -1286,6 +1338,144 @@ TEST(RoomRelayLoopbackTest, ClientWritesOnlyItsOwnParticipant) {
   run_room(r, cs, 2.0);
   ASSERT_TRUE(cvc::ariadne::read_pose(r.app, kRoom, "M", m1, tick));
   EXPECT_GT(m1.position.x - m0.position.x, 0.3) << "M's own intent still moves M";
+}
+
+// A room token (arisrv --room-token-file): clients that present it join as before, and each one's
+// device shows in the room as its room-scoped tag, the same for every peer, once it proved its
+// device key. A client without the token, on each transport the build has, is refused before it
+// is sent anything: it never sees the room.
+TEST(RoomRelayLoopbackTest, RoomTokenAdmitsOnlyItsHolders) {
+  relay_options o;
+  o.room_token = "room-token-0123456789";
+  test_relay r(o);
+  client_list own = make_clients({"A", "B"});
+  const std::vector<test_client *> cs = ptrs(own);
+  test_client &A = *cs[0], &B = *cs[1];
+  A.token = B.token = o.room_token;
+  A.device = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  B.device = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+  A.seed = std::string(32, 'a');
+  B.seed = std::string(32, 'b');
+  ASSERT_NO_FATAL_FAILURE(bring_up(r, cs));
+  if (cvc::device_keys_available()) {
+    const std::string tag_a = ra::room_device_tag(kRoom, A.device);
+    const std::string tag_b = ra::room_device_tag(kRoom, B.device);
+    EXPECT_TRUE(run_room(r, cs, 5.0, {}, [&] {
+      return ra::read_participant_device(A.app, kRoom, "B") == tag_b &&
+             ra::read_participant_device(B.app, kRoom, "A") == tag_a;
+    })) << "each sees the other's device tag";
+    EXPECT_EQ(ra::read_participant_device(A.app, kRoom, "A"), tag_a) << "and its own";
+  }
+
+  const std::vector<link_kind> kinds = link_kinds();
+  client_list outsiders;
+  for (std::size_t i = 0; i < kinds.size(); ++i) {
+    outsiders.push_back(std::make_unique<test_client>("C" + std::to_string(i), kinds[i]));
+    (void)outsiders.back()->connect(r); // WS fails at once; gRPC opens a channel, then is refused
+  }
+  EXPECT_TRUE(run_room(r, cs, 3.0, {}, [&] { return r.auth_rejected() >= kinds.size(); }));
+  run_room(r, cs, 1.0);
+  for (const auto &c : outsiders) {
+    EXPECT_EQ(c->app.root().findDescendant(ra::room_participant_path(kRoom, "A")), nullptr)
+        << c->pid << " was sent nothing of the room";
+    for (const cvc::state_transport *tp : r.planes)
+      for (const cvc::state_link_report &l : tp->link_reports())
+        EXPECT_NE(l.remote_node_id, c->pid) << "and never admitted";
+  }
+}
+
+// The relay's ~1 Hz WebSocket re-broadcast never sends a client its own intent back. The client is
+// the source: the relay's copy is at best what the client holds, and older while the client's next
+// write is in flight -- the echo that made a walking client's own avatar jump (it predicted on its
+// previous intent until the next broadcast). Here the newer write is held back until after the
+// broadcast, so the relay still has the older one.
+TEST(RoomRelayLoopbackTest, ABroadcastNeverEchoesAClientsOwnIntent) {
+#if !defined(CVC_ENABLE_WS)
+  GTEST_SKIP() << "no WebSocket transport in this build";
+#else
+  test_relay r(relay_options{});
+  test_client A("A", link_kind::ws);
+  const std::vector<test_client *> cs = {&A};
+  ASSERT_NO_FATAL_FAILURE(bring_up(r, cs));
+  cvc::ariadne::avatar_intent first, second;
+  first.move = {0.5, 0.0, 0.0};
+  second.move = {0.0, 0.5, 0.0};
+  cvc::ariadne::write_intent(A.app, kRoom, "A", first, 100);
+  ASSERT_TRUE(run_room(r, cs, 3.0, {}, [&] {
+    cvc::ariadne::avatar_intent got;
+    return cvc::ariadne::read_intent(r.app, kRoom, "A", got) && got.move.x == 0.5;
+  })) << "the relay has A's first intent";
+
+  // A's second intent, not sent yet; then the relay re-broadcasts the room.
+  cvc::ariadne::write_intent(A.app, kRoom, "A", second, 200);
+  r.ws.broadcast_snapshot();
+  std::this_thread::sleep_for(std::chrono::milliseconds(400)); // A's reader applies what came
+  cvc::ariadne::avatar_intent got;
+  std::uint64_t stamp = 0;
+  ASSERT_TRUE(cvc::ariadne::read_intent(A.app, kRoom, "A", got, &stamp));
+  EXPECT_EQ(stamp, 200u) << "A still holds its second intent, not the relay's copy of its first";
+  EXPECT_DOUBLE_EQ(got.move.y, 0.5);
+  EXPECT_FALSE(cvc::ariadne::read_current_intent(A.app, kRoom, "A", 300, got))
+      << "and an intent older than A's last proposal is never taken as current";
+#endif
+}
+
+// Device keys (state_device_key.h): a device that proves its key gets its tag, on each transport
+// the build has. A second device showing the same id under another key (an impostor that learned
+// the id) is refused and gets none, nor does a device with an id and no key; and the first device
+// coming back with its key matches its pin and gets its tag again.
+TEST(RoomRelayLoopbackTest, OnlyAProvenDeviceGetsItsTag) {
+  if (!cvc::device_keys_available())
+    GTEST_SKIP() << "no device keys in this build";
+  const std::string dev = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const std::string tag = ra::room_device_tag(kRoom, dev);
+  const std::vector<link_kind> kinds = link_kinds();
+  for (const link_kind kind : kinds) {
+    SCOPED_TRACE(kind == link_kind::grpc ? "grpc" : "ws");
+    test_relay r(relay_options{});
+    auto A = std::make_unique<test_client>("A", kind);
+    auto I =
+        std::make_unique<test_client>("I", kinds.back() == kind ? kinds.front() : kinds.back());
+    auto N = std::make_unique<test_client>("N", kind);
+    A->device = I->device = dev;
+    A->seed = std::string(32, 'a');
+    I->seed = std::string(32, 'i');
+    N->device = "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn";
+    {
+      const std::vector<test_client *> first = {A.get()};
+      ASSERT_NO_FATAL_FAILURE(bring_up(r, first));
+      EXPECT_TRUE(run_room(r, first, 5.0, {}, [&] {
+        return ra::read_participant_device(A->app, kRoom, "A") == tag;
+      })) << "A proved its key and shows its tag";
+    }
+    const std::vector<test_client *> cs = {A.get(), I.get(), N.get()};
+    for (test_client *c : {I.get(), N.get()}) {
+      ASSERT_TRUE(c->connect(r));
+      c->join();
+    }
+    EXPECT_TRUE(run_room(r, cs, 5.0, {}, [&] {
+      return r.device_proofs_refused() >= 1 && r.server.has_participant("I") &&
+             r.server.has_participant("N");
+    })) << "the impostor's key is not A's pin";
+    run_room(r, cs, 1.5); // a link pass or more
+    for (const char *pid : {"I", "N"})
+      EXPECT_EQ(ra::read_participant_device(r.app, kRoom, pid), "") << pid << " has no tag";
+    EXPECT_EQ(ra::read_participant_device(r.app, kRoom, "A"), tag) << "while A keeps its own";
+    EXPECT_EQ(r.devices_verified(), 1u);
+
+    // The same device again, as a fresh process (which cannot rejoin under its old pid: see
+    // ReconnectUnderSamePidGetsZeroedIntent), proves its key against the pin.
+    A->disconnect();
+    run_room(r, {I.get(), N.get()}, 1.0);
+    auto A2 = std::make_unique<test_client>("A", kind);
+    A2->device = dev;
+    A2->seed = std::string(32, 'a');
+    ASSERT_TRUE(A2->connect(r));
+    EXPECT_TRUE(run_room(r, {A2.get(), I.get(), N.get()}, 5.0, {}, [&] {
+      return r.devices_verified() >= 2;
+    })) << "the device itself matches its pin";
+    EXPECT_EQ(r.device_proofs_refused(), 1u);
+  }
 }
 
 // A walks (an intent it proposed), then its connection drops. The relay retracts it and zeroes

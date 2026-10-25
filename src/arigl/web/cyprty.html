@@ -93,6 +93,35 @@
   // ?synthetic=1 drives the self-cam from a hardware-free MJPEG test pattern instead of the real
   // camera, so the conference (peer video included) can be tried in a browser with no camera.
   const SYNTH = PARAMS.get('synthetic');
+  // A private room's token, when the invite link carries one: in the URL FRAGMENT (#token=...),
+  // which the browser never sends to a server, so it stays out of proxy and access logs. The
+  // relay refuses a connection without it (arisrv --room-token-file).
+  const TOKEN = (new URLSearchParams(location.hash.replace(/^#/, '')).get('token') || '').trim();
+  // This browser's default identity: a browser exposes no hardware id, so a random one is made
+  // once and kept in localStorage (per site; cleared with the site's data). The relay shows it,
+  // hashed per room, as the participant's device, once the device proves its key: the seed of
+  // that key is kept the same way (cvc.device_key), and the relay pins the key it first sees for
+  // this id. Where storage is unavailable (blocked, a sandboxed frame) both last this page load
+  // only, so each load is a new device.
+  const kept = (name, bytes) => {
+    const fresh = () => {
+      const b = new Uint8Array(bytes);
+      crypto.getRandomValues(b);
+      return Array.from(b, x => x.toString(16).padStart(2, '0')).join('');
+    };
+    try {
+      let v = localStorage.getItem(name);
+      if (!new RegExp('^[0-9a-f]{' + 2 * bytes + '}$').test(v || '')) {
+        v = fresh();
+        localStorage.setItem(name, v);
+      }
+      return v;
+    } catch (e) {
+      try { return fresh(); } catch (e2) { return ''; }
+    }
+  };
+  const DEVICE = kept('cvc.device_id', 16);
+  const DEVICE_KEY = kept('cvc.device_key', 32);
 
   // Browsers suspend an AudioContext created without a user gesture (autoplay policy). SDL's audio
   // output (how we play each peer's mic) is one such context, so without this a peer's audio never
@@ -124,6 +153,9 @@
         ENV.CVC_ARIADNE_RELAY = RELAY;
         ENV.CVC_ARIADNE_NAME = NAME;
         if (SYNTH && SYNTH !== '0') ENV.CVC_ARIADNE_SYNTHETIC_CAM = '1';
+        if (TOKEN) ENV.CVC_ARIADNE_ROOM_TOKEN = TOKEN;
+        if (DEVICE) ENV.CVC_DEVICE_ID = DEVICE;
+        if (DEVICE_KEY) ENV.CVC_DEVICE_KEY = DEVICE_KEY;
       } catch (e) { console.warn('cyprty: could not set ENV (no conference):', e); }
     }],
     print: t => { stdoutEl.textContent = t.split('\r').pop(); },

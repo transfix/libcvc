@@ -292,6 +292,79 @@ Join carries a credential. v1: a room bearer token the server checks at admissio
 the per-connection `pid` binding (§5d). Richer identity (OIDC via the existing SSO) and roles
 (host/moderator/guest, capacity, bans) are admission-time hooks layered on top.
 
+**Built (v1, after bound writes):** a room token and a default device identity, before usernames.
+- **Room token** (who may join). `arisrv --room-token-file PATH`, or `CVC_ARISRV_ROOM_TOKEN`; never
+  on the command line, which other users of the host can read.
+  - It is 16–256 characters of `[A-Za-z0-9._~-]`.
+  - gRPC carries it as `authorization: Bearer`, now compared in constant time.
+  - WebSocket carries it in `Sec-WebSocket-Protocol`, because a browser cannot set an
+    `Authorization` header. The client offers `cvc.v1,cvc-token.<token>`, and the relay refuses the
+    upgrade with HTTP 401 unless the token is offered. It answers `cvc.v1`, as a browser requires.
+  - Both checks run before the connection is admitted, so a client without the token is sent
+    nothing: no bootstrap, broadcast or media.
+  - arigl reads `CVC_ARIADNE_ROOM_TOKEN`. The browser page takes it from the invite link's URL
+    fragment (`#token=…`), which never reaches a server or its logs.
+  - No token configured is an open room, as before. A token asked for must be one: a flag with no
+    path, an unreadable or blank file, or a set but empty variable stops arisrv instead of opening
+    the room. arisrv counts refusals (`room token: refused N connection(s)`).
+  - Each accepted WebSocket connection does its handshake (and so its token check) on its own
+    thread, so one client that connects and sends nothing no longer holds up every join. A
+    handshake gets 10 s, and at most 64 wait at once.
+- **Device id** (which device is this). `Hello.device_id`, from `default_device_id()`.
+  - A native client's base id is a salted SHA-256 of the OS machine id, the host name and the user.
+  - A browser exposes no hardware id, so the page makes a random one once and keeps it in
+    `localStorage`, or for the page load only where storage is blocked. `CVC_DEVICE_ID` overrides
+    either.
+  - What a client sends is `scoped_device_id(base, relay URL)`, so two relays (two operators)
+    cannot match one device. A relay ignores a Hello device id that is not 1–64 characters of
+    `[A-Za-z0-9._-]`.
+  - The relay keeps the raw id to itself. It publishes `participants.<pid>.device`, a room-scoped
+    16-hex tag, from the link holding the pid (bound writes), once that device has proved its key
+    (below). Every peer sees the same tag for one device in one room across sessions, and nothing
+    links it to another room. The tag is relay-owned; `room_write_gate` refuses a client's write
+    to it.
+  - On its own the id is an **identifier, not a credential**: anyone who knows or observes the
+    inputs can compute it. The device key gives it authority.
+- **Device key** (the device id is this device's). `state_device_key.h`: Ed25519, on OpenSSL's
+  libcrypto.
+  - A device keeps one 32-byte seed. Natively it is `%LOCALAPPDATA%\cvc\device-key` (local, not
+    roaming: it should not sync to another machine), or
+    `$XDG_CONFIG_HOME/cvc/device-key` (`~/.config/cvc/device-key`), made on first use (owner-only
+    on POSIX). `CVC_DEVICE_KEY_FILE` names another file, and `CVC_DEVICE_KEY` (64 hex digits) gives
+    the seed itself. The page keeps one in `localStorage` (`cvc.device_key`) beside its device id.
+  - For each relay the device derives its own key: HMAC-SHA256 of the seed and the relay URL. Two
+    relays see unrelated public keys, as they see unrelated device ids.
+  - The relay's `Hello.nonce` is a fresh 32-byte challenge for each client it accepts. The client
+    answers with a `DeviceProof`: its public key and a signature over the nonce, both node ids and
+    its device id, each length-prefixed. One proof per challenge. A proof that reaches the relay
+    before the client's Hello (its reader may answer before its Hello is written) is checked when
+    the Hello comes.
+  - The relay pins the first key a device id shows (trust on first use). A later proof under that
+    key verifies the device. A proof under another key is refused (`device keys: refused N
+    proof(s)`), and so is one that does not verify. A refused device stays in the room, without a
+    tag. A pid taken over by a link that proved no key loses its tag, so the tag never outlives
+    the device that proved it.
+  - The pins are shared by both transports. They are kept in memory, or with `arisrv --device-pins
+    PATH` in a file (one `<device id> <key>` line each), so they outlive a restart. A store holds at
+    most 65,536 pins.
+  - Losing the seed: the page loses its id with it (both are site data), so it is simply a new
+    device. A native device keeps its id (it comes from the machine), so its new key is refused
+    until the operator deletes its line from the pin file. Running it once with another
+    `CVC_DEVICE_KEY` does the same.
+  - Roles and bans can now be keyed to a verified device; usernames come next.
+- **Limits:**
+  - One shared token per room, so revoking one person means rotating it for everyone. Roles and
+    per-person tokens come later.
+  - The separate gRPC media plane (`stream_relay`) does not check the token yet.
+  - Every connection that proves a key adds a pin, joined or not, and a full store refuses every
+    new device (fail closed). A client holding the room token (any client, in an open room) can
+    fill it. So can ordinary use, slowly: each private-window load is a new device. The remedy
+    today is the operator's: delete lines from the pin file, or run with pins in memory. Expiring
+    unused pins, or deriving the device id from the key so no pin is needed, would remove the
+    limit.
+  - Over plain `ws://` or insecure gRPC an active man-in-the-middle can relay the challenge, so
+    deploy behind `wss://` as for the token.
+
 ### 5g. Shared 3D scene + avatars (NEXT WORK — user-requested)
 
 The conference is not just floating video windows: it is a **shared 3D space** that every client renders
@@ -478,6 +551,18 @@ and the media gate is asked only once the stream is held, so a dropped frame spe
 write that starts and then blocks still holds its own thread until the 3 s watchdog; only an
 asynchronous write path would avoid that.)
 
+**Media defaults and the uplink.**
+- **Camera:** `conference_roster.ari` captures it at 320x240, 15 fps and JPEG q60
+  (`stream-capture-camera`'s `quality`). That is about 0.6 Mbit/s per receiver, against about 5 for the
+  former 640x480, q70 and 30 fps. Peer tiles are about 300 px wide.
+- **Silence is not sent:** arigl sends no mic chunk below -48 dBFS RMS more than 0.8 s after the last
+  louder one, so a silent or muted mic costs nothing, and it sends a muted camera at 1 fps.
+- **Browser uplink:** a browser's `send_backlog` is now the WebSocket's `bufferedAmount`. Its uplink
+  therefore drops media at the 32 KB threshold instead of queueing it without bound behind everything
+  else, the link probe included.
+- **Audio first:** on every WebSocket link, audio gets four times video's backlog allowance.
+- **Next:** Opus audio (the mic is still raw f32, about 1.5 Mbit/s while talking) and per-receiver rungs.
+
 **Transport and journal changes** (detail in DISTRIBUTED_STATE_ROADMAP.md, "Landed for the conference
 relay"): a deny-only per-peer delivery predicate on `state_peer_registry`; write-once connection
 identity (fixes a `remote_node_id` data race; a second Hello is ignored); the registry honoured on every
@@ -534,6 +619,8 @@ false)` is the old drain-and-publish exactly); arisrv and arigl turn them on.
 | `--admission-hold-ms N` | 2000 (only with an AOI) | hold a joiner's bootstrap for its filter, at most N ms; 0 = off (the admit snapshot goes out unfiltered, before Hello) |
 | `--scene default\|large` | default | the seeded scene; not an S7 switch (honoured under `--s7 off`) |
 | `--bind-writes on\|off` | on | bound writes (below): each client writes only its own participant, as itself; off takes any client's writes. Not an S7 switch |
+| `--room-token-file PATH` / `CVC_ARISRV_ROOM_TOKEN` | unset (an open room) | admit only clients that present the room token (§5f). Not an S7 switch |
+| `--device-pins PATH` | unset (pins in memory) | keep the device-key pins in PATH, so they outlive a restart (§5f). Device keys are always checked. Not an S7 switch |
 | `CVC_ARISRV_ROOM_DEBUG=1` | off | adds an `[arisrv] aoi` stats line every ~5 s |
 | `CVC_ARIGL_REPLICATE_ROOT` (arigl) | unset = `conf` | empty or `*`: replicate the whole tree (the S6 A/B) |
 | `CVC_ARIGL_LOD=0` (arigl) | LOD on | every room mesh at full detail (the LOD A/B) |
@@ -717,7 +804,10 @@ reconcile-correction sum varies two-fold between identical runs, so it says noth
   tree~~ **done**: `broadcast_snapshot` now sends each connection only the entries it does not already
   hold. Per connection it keeps a digest of what the last snapshot frame carried for each path, and
   forgets a path whenever any other frame touching it is written to that peer or arrives from it
-  (a live mutation, a push, the peer's own write). A missed live re-fan is still healed on the next
+  (a live mutation, a push, the peer's own write). A peer's own paths (`state_inbound_gate::sources`)
+  are never re-sent to it: the relay's copy is at best what the peer holds, and older while its next
+  write is in flight. That echo made a walking client predict on its previous intent. A missed live
+  re-fan is still healed on the next
   call, and an unchanged tree costs nothing. A client gets the whole tree only when it asks
   (`state_transport_ws::request_full_refresh`, a SnapshotRequest) — for state it dropped on its own
   side, which the relay cannot see. There is no periodic full snapshot. The broadcast still snapshots

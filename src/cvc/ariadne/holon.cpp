@@ -232,7 +232,22 @@ void holon::apply_authoritative(const std::string &pid, const cvc::physics::body
   const std::uint64_t tol = _lead == 0 ? _cfg.max_skew_ticks
                             : behind   ? _cfg.lead_slack_behind_ticks
                                        : _cfg.lead_slack_ahead_ticks;
-  if (skew > tol) {
+  // Within reach, slew instead (holon_config::lead_slew): the logged inputs stay valid, so the
+  // next sample reconciles without a jump. Keep slewing until within a tick of the target. The
+  // first alignment (joining) always seeks: there is nothing logged to keep yet, and slewing into
+  // it would leave the inputs late meanwhile.
+  const bool can_slew =
+      _lead > 0 && _cfg.lead_slew > 0.0 && skew <= _cfg.max_skew_ticks && _realigns > 0;
+  if (can_slew && (skew > tol || (_slewing && skew > 1))) {
+    _clock.set_scale(_cfg.clock.scale * (behind ? 1.0 + _cfg.lead_slew : 1.0 - _cfg.lead_slew));
+    if (!_slewing)
+      ++_slews;
+    _slewing = true;
+  } else if (_slewing) {
+    _clock.set_scale(_cfg.clock.scale);
+    _slewing = false;
+  }
+  if (skew > tol && !can_slew) {
     ++_realigns;
     _clock.seek_tick(target);
     for (auto &kv : _participants) {
@@ -258,8 +273,11 @@ void holon::apply_authoritative(const std::string &pid, const cvc::physics::body
     world_reconcile(pid, p, auth, server_tick);
   } else if (p.local) {
     const cvc::physics::vec3 before = p.predicted.state().position;
-    if (p.predicted.reconcile(auth, server_tick, _clock.fixed_dt(), _cfg.reconcile_tol))
-      p.correction = p.correction + (p.predicted.state().position - before);
+    if (p.predicted.reconcile(auth, server_tick, _clock.fixed_dt(), _cfg.reconcile_tol)) {
+      const cvc::physics::vec3 d = p.predicted.state().position - before;
+      p.correction = p.correction + d;
+      p.render_prev.position = p.render_prev.position + d;
+    }
   } else {
     // A peer. Reject a stale/duplicate/reordered sample (server_tick <= the newest
     // one applied), exactly as predicted_avatar does for the local path: otherwise
@@ -330,7 +348,9 @@ bool holon::world_reconcile(const std::string &pid, participant &p,
     world_step_client(pid, e.in);
     e.after = _world->state(pid);
   }
-  p.correction = p.correction + (_world->state(pid).position - before);
+  const cvc::physics::vec3 d = _world->state(pid).position - before;
+  p.correction = p.correction + d;
+  p.render_prev.position = p.render_prev.position + d; // the interpolation moves with it
   return true;
 }
 
@@ -361,6 +381,8 @@ void holon::on_step(const cvc::clock_driver::clock_frame &f) {
                                        [](const auto &kv) { return kv.second.local; });
         if (self == _participants.end())
           continue;
+        self->second.render_prev = _world->state(self->first);
+        self->second.have_render_prev = true;
         world_step_client(self->first, self->second.intent);
         participant::logged e;
         e.tick = tick;
@@ -392,6 +414,8 @@ void holon::on_step(const cvc::clock_driver::clock_frame &f) {
       // each with its tick so reconcile can replay the right suffix.
       for (int i = 0; i < steps; ++i) {
         const std::uint64_t tick = f.step.first_tick + 1 + static_cast<std::uint64_t>(i);
+        p.render_prev = p.predicted.state();
+        p.have_render_prev = true;
         p.predicted.predict(tick, p.intent, dt);
       }
     }
@@ -416,6 +440,10 @@ cvc::physics::body_state holon::state(const std::string &pid) const {
 
 cvc::physics::pose holon::display_pose(const std::string &pid) const {
   const participant &p = _participants.at(pid);
+  // The client's own avatar: between its last two quanta, by the frame's alpha.
+  if (_role == holon_role::client && p.local && p.have_render_prev)
+    return interpolate_peer(p.render_prev, _world ? _world->state(pid) : p.predicted.state(),
+                            _alpha);
   if (_world && (_role == holon_role::server || p.local)) {
     const cvc::physics::body_state s = _world->state(pid);
     return cvc::physics::pose{s.position, s.rotation};
