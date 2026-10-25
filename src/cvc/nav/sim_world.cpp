@@ -750,13 +750,22 @@ void sim_world::step(int num_threads) {
       // Yielding on an override: pure pursuit's correction toward the agent's shift, forward only.
       if (yield_cfg_.on() && yield_cfg_.steer_overrides &&
           yield_need_.size() == static_cast<std::size_t>(2) * n_) {
+        const std::size_t need_n = static_cast<std::size_t>(2) * n_;
         const float nx = yield_need_[2 * i], ny = yield_need_[2 * i + 1];
         const float h = plant_ ? th_[i] : ov_start[i].heading;
         const float v = plant_ ? sp_[i] : ov_start[i].speed;
-        if ((nx != 0.0f || ny != 0.0f) && v >= 0.0f && ov_accel_[i] >= -1e-6f) {
+        // Forward: moving ahead, or about to (its own accel, or the creep yield_accel adds).
+        const float out = yield_out_.size() == need_n
+                              ? std::hypot(yield_out_[2 * i], yield_out_[2 * i + 1])
+                              : 0.0f;
+        const float creep_need = yield_cfg_.creep_need > 0.0f ? yield_cfg_.creep_need : cfg_.veh.rr;
+        const bool forward = v > 1e-3f || ov_accel_[i] >= -1e-6f ||
+                             (yield_cfg_.creep_speed > 0.0f && out >= creep_need);
+        if ((nx != 0.0f || ny != 0.0f) && v >= 0.0f && forward) {
           const float C = yield_cfg_.clearance > 0.0f ? yield_cfg_.clearance : 3.0f * cfg_.veh.rr;
           const float nd = yield_cfg_.near_dist > 0.0f ? yield_cfg_.near_dist : 4.0f * C;
-          const float d = std::max(std::fabs(v) * 1.0f, nd);
+          const float d = std::min(std::max(std::fabs(v) * yield_cfg_.steer_look_s, 2.0f * C),
+                                   std::max(nd, 2.0f * C));
           const float y = -std::sin(h) * nx + std::cos(h) * ny;
           steer_cmd += std::atan(2.0f * L * y / (d * d));
         }
@@ -772,7 +781,9 @@ void sim_world::step(int num_threads) {
         const float vmax_i = cfg_.veh.vmax_col ? cfg_.veh.vmax_col[i] : cfg_.veh.vmax;
         const float a_max_i = cfg_.veh.a_max_col ? cfg_.veh.a_max_col[i] : cfg_.veh.a_max;
         const float sp_min = cfg_.veh.allow_reverse ? -0.25f * vmax_i : 0.0f;
-        const float acc = speed_hold(i, ov_accel_[i], ov_start[i], vmax_i, a_max_i, 0.0f);
+        // The top speed and the risk governor's hold, then the yielding's caps on what it leaves.
+        const float acc = yield_accel(
+            i, ov_start[i].speed, speed_hold(i, ov_accel_[i], ov_start[i], vmax_i, a_max_i, 0.0f));
         const plant_state s = kinematic_step(ov_start[i], steer, acc, L, cfg_.veh.dt,
                                              std::max(1, cfg_.veh.nsub), sp_min, vmax_i);
         o_[2 * i] = s.x;
@@ -793,6 +804,7 @@ void sim_world::step(int num_threads) {
         const float sp0 = pl_start_[i].speed;
         pl_accel_cmd_[i] = std::min(std::max(-sp0 / dt, -a_max_i), a_max_i);
       }
+      pl_accel_cmd_[i] = yield_accel(i, pl_start_[i].speed, pl_accel_cmd_[i]);
       plant_->command(i, pl_steer_cmd_[i], pl_accel_cmd_[i]);
     }
     plant_->advance();
@@ -1299,6 +1311,29 @@ bool sim_world::infeasible_at(float onx, float ony) const {
   return ter_.infeasible[static_cast<std::size_t>(r * cols_ + c)] != 0;
 }
 
+float sim_world::yield_accel(int i, float v, float accel) const {
+  const yield_config &yc = yield_cfg_;
+  if (!yc.on() || yield_pass_.size() != static_cast<std::size_t>(n_) || i < 0 || i >= n_)
+    return accel;
+  const float dt = std::max(cfg_.veh.dt, 1e-3f), tau = std::max(dt, 0.5f);
+  // Creep: out of another's path from a standstill, where its footprint is clear of the walls.
+  const float rr = cfg_.veh.rr;
+  const float need = std::hypot(yield_out_[2 * i], yield_out_[2 * i + 1]);
+  const float creep = yc.creep_speed;
+  const bool clear = minclr_.size() != static_cast<std::size_t>(n_) || minclr_[i] > 0.5f * rr;
+  if (yc.creep_speed > 0.0f && need >= (yc.creep_need > 0.0f ? yc.creep_need : rr) && v < creep &&
+      clear)
+    accel = std::max(accel, (creep - v) / tau);
+  // Passing: no sooner at the one in its path than pass_time_s.
+  if (yc.pass_time_s > 0.0f && yield_pass_[i] >= 0.0f) {
+    // Stopping short of it: zero within 2.5 rr (the two bodies and a margin) of the one ahead.
+    const float cap = std::max(0.0f, yield_pass_[i] - 2.5f * rr) / yc.pass_time_s;
+    if (v > cap)
+      accel = std::min(accel, (cap - v) / tau);
+  }
+  return accel;
+}
+
 std::vector<route_corridor> sim_world::yield_corridors(int i, double radius_world, double cost_path,
                                                        double cost_stand) const {
   std::vector<route_corridor> out;
@@ -1426,6 +1461,8 @@ void sim_world::yield_tick(const field_stack &fs, int num_threads) {
   const yield_resolver res = yield_res_ ? yield_res_ : priority_resolver();
   yield_shift_.assign(static_cast<std::size_t>(2) * n_, 0.0f);
   yield_need_.assign(static_cast<std::size_t>(2) * n_, 0.0f);
+  yield_out_.assign(static_cast<std::size_t>(2) * n_, 0.0f);
+  yield_pass_.assign(static_cast<std::size_t>(n_), -1.0f);
   std::vector<agent_intent> heard;
   bool any = false;
   for (int i = 0; i < n_; ++i) {
@@ -1435,6 +1472,9 @@ void sim_world::yield_tick(const field_stack &fs, int num_threads) {
     const yield_shift sh = yield_agent(yc, C, yield_intents_[i], heard, t, res);
     yield_shift_[2 * i] = sh.dx;
     yield_shift_[2 * i + 1] = sh.dy;
+    yield_out_[2 * i] = sh.out_dx;
+    yield_out_[2 * i + 1] = sh.out_dy;
+    yield_pass_[i] = sh.pass_s;
     any = any || sh.conflicts > 0;
   }
   if (!any)

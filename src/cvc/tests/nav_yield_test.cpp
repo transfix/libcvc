@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/coef_train.h> // city_scene
 #include <cvc/nav/intent.h>
@@ -266,6 +267,7 @@ TEST(NavYield, OverriddenAgentsYieldToo) {
     sim_world w = f.make(o, g);
     yield_config y = yielding();
     y.steer_overrides = overrides;
+    y.pass_time_s = 0.0f; // the steering alone (the passing cap would stop the lead either way)
     w.set_yield(y);
     w.set_priority(0, 10.0f);
     contacts = 0;
@@ -292,6 +294,65 @@ TEST(NavYield, OverriddenAgentsYieldToo) {
   std::printf("  every agent on override: %d contact pair-ticks without steer_overrides, %d with\n",
               c_off, c_on);
   EXPECT_LT(c_on, c_off) << "overridden followers should move out of the lead's path";
+}
+
+// The demo3 opening: followers holding still on the host's commands (accel 0, as a trail pursuit
+// holding its slot), right in the path of a lead driving a straight route pursuit at full speed.
+// Neither can steer out: the followers stand still and the lead's pursuit holds its line. The
+// passing cap stops the lead short of them instead of driving through (a host then plans its
+// route round them).
+TEST(NavYield, TheLeadStopsShortOfAKnotItCannotPass) {
+  const auto run = [](bool speed_rules, int &contacts, float &lead_peak_near) {
+    field f;
+    f.cfg.min_gap = 2.0f * f.cfg.veh.rr;
+    const int n = 4;
+    std::vector<float> o(2 * n), g(2 * n);
+    const float x0 = -0.6f * f.half;
+    for (int i = 1; i < n; ++i) { // a staggered knot just ahead of the lead
+      o[2 * i] = x0 + 0.5f + 0.45f * (i - 1);
+      o[2 * i + 1] = (i % 2 ? 0.05f : -0.05f);
+      g[2 * i] = o[2 * i];
+      g[2 * i + 1] = o[2 * i + 1];
+    }
+    o[0] = x0;
+    g[0] = x0 + 6.0f;
+    sim_world w = f.make(o, g);
+    yield_config y = yielding();
+    if (!speed_rules)
+      y.pass_time_s = 0.0f;
+    w.set_yield(y);
+    w.set_priority(0, 10.0f);
+    contacts = 0;
+    lead_peak_near = 0.0f;
+    const float touch = 2.0f * f.cfg.veh.rr * 1.02f;
+    std::vector<float> sp(n), th(n);
+    for (int t = 0; t < 250; ++t) {
+      w.snapshot(nullptr, th.data(), sp.data(), nullptr, nullptr);
+      const float v0 = sp[0] * static_cast<float>(f.cfg.scale);
+      w.override_command(0, -0.8f * th[0], (f.cfg.veh.vmax - v0) / 0.5f); // straight, flat out
+      for (int i = 1; i < n; ++i)
+        w.override_command(i, 0.0f, 0.0f); // holding
+      w.step(1);
+      const std::vector<float> p = positions(w);
+      for (int i = 0; i < n; ++i)
+        for (int j = i + 1; j < n; ++j) {
+          const float d = std::hypot(p[2 * i] - p[2 * j], p[2 * i + 1] - p[2 * j + 1]);
+          if (d < touch)
+            ++contacts;
+          if (i == 0 && d < 4.0f * touch)
+            lead_peak_near = std::max(lead_peak_near, v0);
+        }
+    }
+  };
+  int c_off = 0, c_on = 0;
+  float v_off = 0.0f, v_on = 0.0f;
+  run(false, c_off, v_off);
+  run(true, c_on, v_on);
+  std::printf("  the opening: %d contact pair-ticks, the lead at up to %.2f near them, without the "
+              "passing cap; %d and %.2f with\n",
+              c_off, v_off, c_on, v_on);
+  EXPECT_LT(c_on, c_off) << "the passing cap should stop the lead short of the knot";
+  EXPECT_LT(v_on, 0.5f * v_off) << "the lead should be slower near the knot";
 }
 
 // yield_corridors: what agent i heard, in world units, as the route planner's soft keep-outs.

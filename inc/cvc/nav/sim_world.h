@@ -359,6 +359,12 @@ public:
   // move). Empty before a step() with yielding on.
   std::vector<route_corridor> yield_corridors(int i, double radius_world, double cost_path,
                                               double cost_stand) const;
+  // How far along agent i's own path (normalized) the nearest agent in it is, the one it passes
+  // or is held behind by the passing cap; -1 none (or yielding off). A host driving it on a route
+  // can plan round one that stays there.
+  float yield_pass_distance(int i) const {
+    return i >= 0 && i < static_cast<int>(yield_pass_.size()) ? yield_pass_[i] : -1.0f;
+  }
   // The last step()'s published intents ([n]) and carrot shifts ([n*2], normalized; at the carrot),
   // for a renderer or a test; null before a step() with yielding on.
   const agent_intent *intents() const {
@@ -661,6 +667,10 @@ private:
   std::vector<agent_intent> yield_intents_;
   std::vector<float> yield_shift_;
   std::vector<float> yield_need_; // [n*2] the shifts before scaling to the carrot (normalized)
+  std::vector<float> yield_out_;  // [n*2] their rule-1 part (out of others' paths)
+  std::vector<float> yield_pass_; // [n] along its path to the one it passes nearest; -1 none
+  // The yielding's speed: agent i at speed v commanding accel, with the passing cap and the creep.
+  float yield_accel(int i, float v, float accel) const;
   std::vector<int> stall_, mode_, hist_count_;
   std::vector<float> turn_, dhit_, best_, init_;
   std::vector<float>
