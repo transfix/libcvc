@@ -1,7 +1,8 @@
 // AriRuntime switching documents, offscreen: a host (arigl's gallery) loads one .ari, then another
-// in its place. The second must start on an empty stage -- the first's nodes, its free light, its
-// lighting rig, its background and its shadows gone -- and a reload of one document must not pile
-// its nodes up. The host's menus (set_host_menus) ride along into each document it loads.
+// in its place. The second must start on an empty stage -- the first's nodes (with any a custom
+// type added beside its own), its free light, its lighting rig, its background and its shadows
+// gone -- and a reload of one document must not pile its nodes up. The host's menus
+// (set_host_menus) ride along into each document it loads.
 #include <cmath>
 #include <cstdio>
 #include <cvc/ariadne/app_runtime.h>
@@ -53,6 +54,12 @@ scene:
     - node: ball
       source: { sphere: 1 }
       transform: { position: [3, 0, 0] }
+    - node: grove            # a custom type that adds a second top-level node (grove_needles)
+      type: forest_trees
+      count: 4
+      span: 5
+      sea_level: -1          # no ground: planted on a flat plane at 0
+      levels: 2
   lights:
     - light: lamp
       kind: directional
@@ -84,6 +91,8 @@ scene:
   rt.load(a);
   rt.step(1.0 / 30.0);
   chk(sg.getGraphics("crate") && sg.getGraphics("ball"), "a's nodes are in the scene");
+  chk(sg.getGraphics("grove") && sg.getGraphics("grove_needles"),
+      "a's forest is in the scene, its needles beside it");
   chk(sg.getGraphics("lamp") != nullptr, "a's free light is in the scene");
   chk(rt.realized() && !rt.realized()->rigs.empty(), "a's rig is realized");
 
@@ -97,6 +106,8 @@ scene:
   rt.load(b);
   rt.step(1.0 / 30.0);
   chk(!sg.getGraphics("crate") && !sg.getGraphics("ball"), "a's nodes are gone");
+  chk(!sg.getGraphics("grove") && !sg.getGraphics("grove_needles"),
+      "a's forest is gone, needles and all");
   chk(!sg.getGraphics("lamp"), "a's free light is gone");
   chk(sg.getGraphics("floor") != nullptr, "b's node is there");
   chk(rt.realized() && rt.realized()->rigs.empty(), "no rig left from a");

@@ -59,7 +59,8 @@ class VolSliceNode;
 
 namespace ariadne {
 
-// The result of realizing a Scene: the top-level node ids created, the visibility
+// The result of realizing a Scene: the top-level node ids created (the scene's nodes, and any a
+// custom node type added beside its own), the visibility
 // bindings the host must poll each frame (empty when no node uses `visible: <path>`),
 // any StageLighting rigs, and the volume renderers that need per-frame ticking. The
 // rigs are OWNED here because `~StageLighting` removes the rig's lights from the scene

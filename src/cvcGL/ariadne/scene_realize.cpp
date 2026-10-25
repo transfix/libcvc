@@ -32,6 +32,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <stdexcept>
 #include <vtkMatrix4x4.h>
 #include <vtkRenderer.h>
@@ -1309,11 +1310,21 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
   out.clock.time_key = cvc::ariadne::resolve_bind(bind_prefix, scene.clock.time_key);
   out.clock.tick_key = cvc::ariadne::resolve_bind(bind_prefix, scene.clock.tick_key);
   out.created.reserve(scene.nodes.size());
+  std::set<std::string> present; // the top-level graphics before this scene's
+  for (const auto &kv : sg.getAllGraphics())
+    present.insert(kv.first);
   std::vector<pending_body> bodies;
   for (const auto &n : scene.nodes) {
     realize_node(sg, n, bind_prefix, out, /*parent=*/nullptr, bodies, warnings);
     out.created.push_back(n.id);
   }
+  // A custom node type may add top-level graphics beside its own node (forest_trees' needles).
+  // They are this scene's too, so whoever clears it -- a host loading another document -- removes
+  // them with the rest.
+  for (const auto &kv : sg.getAllGraphics())
+    if (!present.count(kv.first) &&
+        std::find(out.created.begin(), out.created.end(), kv.first) == out.created.end())
+      out.created.push_back(kv.first);
   // physics: and the nodes' body:s, once every node (and every terrain field) exists. A physics
   // scene runs on the scene clock, so it drives app.world_clock() as `clock: {}` would.
   if (scene.physics.present || !bodies.empty()) {
