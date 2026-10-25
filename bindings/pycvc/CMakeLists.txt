@@ -233,6 +233,40 @@ include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcInstallRpath.cmake")
 # libcvc.so must be on the loader path for the tests; the dual-mode cvc target's
 # output dir works both in-tree (built target) and standalone (imported target).
 set(_PYCVC_TEST_LIBPATH "$<TARGET_FILE_DIR:${_PYCVC_CVC_TARGET}>")
+# The environment of a pycvc ctest entry: PYTHONPATH (the PYTHONPATH dirs, in order) and
+# the loader path to the LIBDIRS (libcvc's, cvcGL's).
+#   * POSIX: PYTHONPATH and LD_LIBRARY_PATH (followed by the configuring shell's).
+#   * Windows: Python 3.8+ ignores PATH when it loads an extension module's DLLs, and
+#     PYTHONPATH is ;-separated. CVC_DLL_DIRS lists the LIBDIRS and the bin/ of every
+#     CMAKE_PREFIX_PATH entry (the dependencies' DLLs); ctest_site/sitecustomize.py, first
+#     on PYTHONPATH, passes each to os.add_dll_directory in every interpreter the test
+#     starts. Output is UTF-8, so a test can print any character with stdout redirected
+#     (ctest's pipe would otherwise be the ANSI code page, cp1252 here).
+set(_PYCVC_PREFIX_BIN_DIRS "")
+if(WIN32)
+  foreach(_p IN LISTS CMAKE_PREFIX_PATH)
+    file(TO_CMAKE_PATH "${_p}" _p)
+    if(IS_DIRECTORY "${_p}/bin")
+      list(APPEND _PYCVC_PREFIX_BIN_DIRS "${_p}/bin")
+    endif()
+  endforeach()
+endif()
+function(cvc_pycvc_test_env outvar)
+  cmake_parse_arguments(PARSE_ARGV 1 _arg "" "" "PYTHONPATH;LIBDIRS")
+  if(WIN32)
+    set(_dll_dirs ${_arg_LIBDIRS} ${_PYCVC_PREFIX_BIN_DIRS})
+    # An entry's own ';' is escaped: ENVIRONMENT is a ;-list of NAME=value entries.
+    list(JOIN _arg_PYTHONPATH "\\;" _pythonpath)
+    list(JOIN _dll_dirs "\\;" _dll_dirs)
+    set(_env "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/ctest_site\\;${_pythonpath}"
+             "CVC_DLL_DIRS=${_dll_dirs}" "PYTHONIOENCODING=utf-8")
+  else()
+    list(JOIN _arg_PYTHONPATH ":" _pythonpath)
+    list(JOIN _arg_LIBDIRS ":" _libpath)
+    set(_env "PYTHONPATH=${_pythonpath}" "LD_LIBRARY_PATH=${_libpath}:$ENV{LD_LIBRARY_PATH}")
+  endif()
+  set(${outvar} "${_env}" PARENT_SCOPE)
+endfunction()
 
 # On Emscripten there are no shared (dlopen'd) Python extension modules: build
 # the SWIG wrappers as STATIC archives whose `PyInit__<mod>` symbols the wasm
@@ -267,6 +301,8 @@ if(CVC_BUILD_PYCVC_CORE)
   install(FILES "${CMAKE_CURRENT_BINARY_DIR}/pycvc.py"
     DESTINATION "${_PYCVC_SITEDIR}" COMPONENT pycvc)
   # ctest: facades + zero-copy numpy views end-to-end.
+  cvc_pycvc_test_env(_pycvc_test_env
+    PYTHONPATH "${CMAKE_CURRENT_BINARY_DIR}" LIBDIRS "${_PYCVC_TEST_LIBPATH}")
   foreach(_t pycvc_smoke:test_pycvc.py pycvc_numpy:test_pycvc_numpy.py
              pycvc_memory:test_pycvc_memory.py pycvc_threading:test_pycvc_threading.py
              pycvc_app:test_pycvc_app.py pycvc_filters:test_pycvc_filters.py
@@ -283,6 +319,7 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_state_exec_eval:test_pycvc_state_exec_eval.py
              pycvc_state_exec_data:test_pycvc_state_exec_data.py
              pycvc_state_exec_exceptions:test_pycvc_state_exec_exceptions.py
+             pycvc_state_exec_async:test_pycvc_state_exec_async.py
              pycvc_world_clock:test_pycvc_world_clock.py
              pycvc_world_units:test_pycvc_world_units.py
              pycvc_dataprep:test_pycvc_dataprep.py
@@ -300,14 +337,12 @@ if(CVC_BUILD_PYCVC_CORE)
     list(GET _pair 1 _script)
     add_test(NAME ${_name}
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/${_script})
-    set_tests_properties(${_name} PROPERTIES ENVIRONMENT
-      "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};LD_LIBRARY_PATH=${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
+    set_tests_properties(${_name} PROPERTIES ENVIRONMENT "${_pycvc_test_env}")
   endforeach()
   # The physics world, its vehicles and the navigator's plant (NAV-VEHICLE-PHYSICS-ROADMAP.md,
   # P6). With the tests built, physics_parity_test is the C++ reference Python must match bit
   # for bit; without it the test checks the cross-platform golden hash alone.
-  set(_pycvc_physics_env
-    "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};LD_LIBRARY_PATH=${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}")
+  set(_pycvc_physics_env "${_pycvc_test_env}")
   if(TARGET physics_parity_test)
     list(APPEND _pycvc_physics_env "CVC_PHYSICS_PARITY_EXE=$<TARGET_FILE:physics_parity_test>")
   endif()
@@ -338,7 +373,7 @@ if(CVC_BUILD_PYCVC_GL)
   if(TARGET cvcGL)
     # Already built in-tree (e.g. top-level CVC_BUILD_CVCGL) — reuse that target.
     set(_PYCVC_CVCGL_TARGET cvcGL)
-    set(_PYCVC_GL_TEST_LIBPATH "$<TARGET_FILE_DIR:cvcGL>:")
+    set(_PYCVC_GL_TEST_LIBPATH "$<TARGET_FILE_DIR:cvcGL>")
   elseif(CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
     find_package(cvcGL CONFIG REQUIRED)
     set(_PYCVC_CVCGL_TARGET cvc::cvcGL)
@@ -349,7 +384,7 @@ if(CVC_BUILD_PYCVC_GL)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../src/cvcGL
                      ${CMAKE_CURRENT_BINARY_DIR}/cvcGL)
     set(_PYCVC_CVCGL_TARGET cvcGL)
-    set(_PYCVC_GL_TEST_LIBPATH "$<TARGET_FILE_DIR:cvcGL>:")
+    set(_PYCVC_GL_TEST_LIBPATH "$<TARGET_FILE_DIR:cvcGL>")
   endif()
   set_property(SOURCE pycvc_gl.i PROPERTY CPLUSPLUS ON)
   # Same derived dependency scan as the core module (see above). Recursing
@@ -445,14 +480,14 @@ if(CVC_BUILD_PYCVC_GL)
     COMMENT "Staging the pycvc_gl package layout for the build-tree tests"
     VERBATIM)
   add_custom_target(pycvc_gl_pkg ALL DEPENDS "${_PYCVC_GL_PKGROOT}/pycvc_gl.staged")
-  # The package root first (so `pycvc_gl` is the package), then the binary dir (pycvc).
-  set(_PYCVC_GL_TEST_PYTHONPATH "${_PYCVC_GL_PKGROOT}:${CMAKE_CURRENT_BINARY_DIR}")
-  # Every test below gets this environment. Sync-to-vblank off as for the cvcgl_* tests (see
-  # src/cvcGL/CMakeLists.txt): NVIDIA throttles an offscreen window's swaps to ~1/s with it on.
-  set(_PYCVC_GL_TEST_ENV
-    "PYTHONPATH=${_PYCVC_GL_TEST_PYTHONPATH}"
-    "LD_LIBRARY_PATH=${_PYCVC_GL_TEST_LIBPATH}${_PYCVC_TEST_LIBPATH}:$ENV{LD_LIBRARY_PATH}"
-    "__GL_SYNC_TO_VBLANK=0" "vblank_mode=0")
+  # Every test below gets this environment: the package root first on PYTHONPATH (so
+  # `pycvc_gl` is the package), then the binary dir (pycvc). Sync-to-vblank off as for the
+  # cvcgl_* tests (see src/cvcGL/CMakeLists.txt): NVIDIA throttles an offscreen window's swaps
+  # to ~1/s with it on.
+  cvc_pycvc_test_env(_PYCVC_GL_TEST_ENV
+    PYTHONPATH "${_PYCVC_GL_PKGROOT}" "${CMAKE_CURRENT_BINARY_DIR}"
+    LIBDIRS ${_PYCVC_GL_TEST_LIBPATH} "${_PYCVC_TEST_LIBPATH}")
+  list(APPEND _PYCVC_GL_TEST_ENV "__GL_SYNC_TO_VBLANK=0" "vblank_mode=0")
   add_test(NAME pycvc_gl_smoke
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl.py)
   set_tests_properties(pycvc_gl_smoke PROPERTIES ENVIRONMENT "${_PYCVC_GL_TEST_ENV}")
@@ -525,4 +560,11 @@ if(CVC_BUILD_PYCVC_GL)
   add_test(NAME pycvc_gl_clip
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_clip.py)
   set_tests_properties(pycvc_gl_clip PROPERTIES ENVIRONMENT "${_PYCVC_GL_TEST_ENV}")
+  # Keep-alives the cycle collector cannot undo: what a SceneRenderer / ViewportManager /
+  # StageLighting / CameraController / ScreenTextHud / ImGuiOverlay / AriRuntime borrows by C++
+  # reference is stashed as its untracked `this` (pycvc._keepalive), and a ViewportManager keeps
+  # every scene added to it. StageLighting is headless; the rest self-skip without offscreen GL.
+  add_test(NAME pycvc_gl_keepalive
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_keepalive.py)
+  set_tests_properties(pycvc_gl_keepalive PROPERTIES ENVIRONMENT "${_PYCVC_GL_TEST_ENV}")
 endif() # CVC_BUILD_PYCVC_GL

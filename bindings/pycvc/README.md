@@ -45,7 +45,10 @@ ctest --test-dir build            # runs the smoke test
 
 The importable module (`pycvc.py` + `_pycvc.so`) lands in `build/`. At
 runtime, `libcvc.so` and its dependency prefix must be on the loader path
-(`LD_LIBRARY_PATH`).
+(`LD_LIBRARY_PATH`). On Windows, Python ignores PATH for an extension's DLLs:
+the ctest entries list the build's and each `CMAKE_PREFIX_PATH` entry's `bin/`
+in `CVC_DLL_DIRS`, which `ctest_site/sitecustomize.py` passes to
+`os.add_dll_directory`; a script run by hand needs the same calls.
 
 ## Example
 

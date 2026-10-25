@@ -30,6 +30,8 @@ class state;
 
 namespace cvc::state_exec {
 
+class async_call;
+
 /// Async process scheduler using C++20 coroutines.
 ///
 /// Same semantics as the sync scheduler but all stepping methods are
@@ -94,6 +96,7 @@ public:
 
   // --- Inter-process messaging (msg-send/msg-recv) ---
   bool receive_message(int pid, const std::string &path) override;
+  bool receive_message_until(int pid, const std::string &path, double seconds) override;
   int deliver_to_receivers(const std::string &path, const value_t &msg) override;
   std::optional<value_t> pop_pending_message(const std::string &path) override;
   std::size_t pending_message_count(const std::string &path) const override;
@@ -113,7 +116,40 @@ public:
   /// step() calls this, but a driver must ALSO call it before a run whose has_runnable()
   /// gate would otherwise be false — a delivery can READY a parked receiver, and
   /// sync_run/run skip stepping (so never drain the ingress) when nothing is runnable yet.
+  /// It also takes the async calls that finished, and charges the ones still running
+  /// (docs/STATE_EXEC_EXCEPTIONS.md 3.8): a driver that calls it often (every frame) keeps
+  /// their processes' budgets current. And it wakes the sleepers and timed waits that are due.
   void drain_ingress();
+
+  // --- Async calls (docs/STATE_EXEC_EXCEPTIONS.md 3; for async_host) ---
+
+  /// Track `call`, made by the process stepping now, as in flight: drain_ingress() charges its
+  /// process as it runs, times it out, and cancels it if its process is killed or reaped.
+  void track_async_call(std::shared_ptr<async_call> call);
+  /// THREAD-SAFE: `call` has settled. The next drain_ingress() makes its final charge and
+  /// resumes the processes waiting for it. A call this scheduler no longer tracks is dropped.
+  void post_async_completion(std::shared_ptr<async_call> call);
+  /// Async calls tracked and not yet finished.
+  std::size_t async_calls_in_flight() const { return async_calls_.size(); }
+
+  double async_steps_per_cpu_ms(const process &proc) override;
+
+  /// A unique identifier for this scheduler, the key under `state_exec.schedulers.<id>` its
+  /// live settings are read from (limits.async_steps_per_cpu_ms) and the effective values
+  /// published to (`effective.*`). Empty: the defaults only, nothing published.
+  void set_id(const std::string &id) { id_ = id; }
+  const std::string &id() const { return id_; }
+
+  /// Adopt a process decoded from a snapshot (decode_process): it gets a new pid and is ready,
+  /// unless it had ended. Its counters and budget so far are kept. A call it was waiting for
+  /// can't resume: the call raises RuntimeError when the process runs. Returns the pid.
+  int restore(process_ptr proc);
+  /// Snapshot process `pid` into `node` (encode_process). False for an unknown pid.
+  bool snapshot(int pid, cvc::state &node) const;
+  /// Restore a snapshot() (decode_process, rebind_natives with `natives`, then
+  /// restore(process_ptr)). Pass the environment the process ran with (execute_options::env) or
+  /// null for none. Returns the new pid.
+  int restore(cvc::state &node, environment_ptr natives = nullptr);
 
   bool set_priority(int pid, int priority);
   bool set_max_steps(int pid, uint64_t max_steps);
@@ -144,6 +180,7 @@ public:
   /// freeing its env/state/captured values. Returns false (no-op) for an unknown pid or a live one
   /// — never drops a runnable/waiting process. A one-shot driver (pycvc.Exec.run) reaps its pid
   /// after collecting the result so a long-lived scheduler does not accumulate dead processes.
+  /// Its async calls still in flight (futures it never awaited) are cancelled.
   bool reap(int pid);
   std::unordered_map<int, value_t> get_results() const;
   scheduler_stats get_stats() const override;
@@ -212,7 +249,11 @@ public:
   }
 
 private:
+  friend class async_call; // async_call::outcome() finishes a call before the program sees it
+
   scheduling_policy policy_;
+  std::string id_;
+  double published_rate_ = -1.0; // the effective.async_steps_per_cpu_ms last published
   int next_pid_ = 1;
   int rr_index_ = 0;
   bool running_ = false;
@@ -241,6 +282,18 @@ private:
   /// on the scheduler thread by drain_ingress() (public) and applied via deliver_to_receivers.
   std::mutex ingress_mutex_;
   std::vector<std::pair<std::string, value_t>> ingress_;
+  std::vector<std::shared_ptr<async_call>> completions_; // settled calls, guarded likewise
+
+  /// The async calls in flight (scheduler thread only).
+  std::vector<std::shared_ptr<async_call>> async_calls_;
+  // A settled call: its final charge, then wake who waits for it.
+  void finish_async_call(const std::shared_ptr<async_call> &call);
+  // Charge the calls still running, time them out, kill the processes past their budget.
+  void charge_async_calls();
+  // Cancel and drop the calls of `pid` (killed or reaped).
+  void cancel_async_calls(int pid);
+  // Resume the processes waiting on `channel` in the await_call phase.
+  void wake_async_waiters(const std::string &channel);
 
   process_ptr select_process();
   void execute_process_step(process &proc);
