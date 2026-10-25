@@ -739,10 +739,12 @@ The five terms (doc 31 D9):
   probe before it, so within one probe spacing of risky ground the vehicle is at its `v_risk`.
   `drive_telemetry.v_risk` reports the cap (0 when off). The CPU drive, both GPU drives and the
   plant arm apply it; the persistent `sim_world_cuda` path has no material or terrain. A route
-  follower drives in the drive's place (`sim_world::override_command`), so `sim_world` holds an
-  overriding command to the same cap (`risk_speed_cap`, with the plant's braking and latency):
-  without that, on cvcdbg's convoy, where every Humvee follows a vehicle route, the governor
-  changed nothing.
+  follower drives in the drive's place (`sim_world::override_command`) at its own route speed,
+  so `sim_world` holds an overriding command to the speeds the drive's own command is held to:
+  the agent's top speed (`vmax`; on a plant the lower of the plant's and nav's) and, with the
+  governor, its cap (`risk_speed_cap`, with the plant's braking and latency). Without that, on
+  cvcdbg's convoy, where every Humvee follows a vehicle route, neither nav's `vmax` nor the
+  governor changed how fast they went.
 - **H3, the slope look-ahead feature.** `coef_feats(..., slope)` appends the worst grade cost
   between the agent and its carrot, after grip and risk. A coefficient net that takes it sets
   `kFlagFeatSlope` and needs format v3, which an older host refuses rather than reading it as a
