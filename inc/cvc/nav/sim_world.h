@@ -316,8 +316,11 @@ public:
   // (rad, + left) and the acceleration along the heading (normalized / s^2; from rest a
   // negative one backs up, as the bicycle's speed may fall to -0.25 vmax with allow_reverse).
   // On the kinematic arm the agent integrates the bicycle with it (nsub substeps, the steer
-  // within the lock, the speed within [sp_min, vmax]); on a plant it is the plant's command. For
-  // a route_follower backing a vehicle up, or stopping it at a cusp. A parked agent takes it too.
+  // within the lock, the speed within [sp_min, vmax]); on a plant it is the plant's command. On
+  // either, the acceleration is held to the speeds the drive's command is: the agent's top speed
+  // (on a plant the lower of its and vmax) and, with veh_params::risk_governor, its cap
+  // (risk_speed_cap). For a route_follower backing a vehicle up, or stopping it at a cusp. A
+  // parked agent takes it too.
   void override_command(int i, float steer, float accel);
   // Put agent i at (x, y) (normalized) with a heading (rad) and a speed (normalized / s), on the
   // kinematic arm. A plant owns its vehicles' poses, so with one this does nothing and returns
