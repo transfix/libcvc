@@ -98,13 +98,18 @@ The pictures are the bunny's SDF at 64³:
 | ![Hex mesh by element size](img/fem-gallery/lbie_bunny_hex_size.jpg) | ![Hex mesh by scaled Jacobian](img/fem-gallery/lbie_bunny_hex_quality.jpg) | ![Tet mesh by minimum dihedral angle](img/fem-gallery/lbie_bunny_tet_quality.jpg) |
 
 `fem_gallery` also exposes LBIE's interval meshing (`--iso2`, through `cvc::tetrahedralize2`) and
-its quality-improvement passes (`--improve`). Neither is shown here yet, because of the known
-limitations of LBIE through `cvc::` today:
+its quality-improvement passes (`--improve`). Neither is shown here yet. The pictures on this page
+predate [#808](https://github.com/transfix/libcvc/pull/808), which fixes the limitations that kept
+them out:
 
-- **Tetrahedra:** the tetrahedral boundary follows the octree grid, a staircase, where the
-  hexahedral boundary is fitted to the surface.
-- **Geometric flow on tetrahedra:** it lowers the bunny's minimum dihedral angle from 26.6° to
-  0.75° and can throw a boundary vertex far out.
-- **Interval meshes:** `tetrahedralize2` leaves fans of slivers and holes inside the layer.
-- **Hexahedra on the head and the CT:** adaptive hexahedralization collapses about half of the
-  hexahedra, which then have repeated corners.
+- **Tetrahedra:** the tetrahedral boundary followed the octree grid, a staircase, where the
+  hexahedral boundary is fitted to the surface. It is now fitted and adaptive: fine along the
+  surface and coarse inside. The bunny's SDF at 64³ gives 160,090 tetrahedra instead of 7,440, so
+  the counts on this page will change.
+- **Geometric flow on tetrahedra:** it lowered the bunny's minimum dihedral angle from 26.6° to
+  0.75° and could throw a boundary vertex far out. It now never makes the worst tetrahedron worse.
+- **Interval meshes:** `tetrahedralize2` left fans of slivers and holes inside the layer. It now
+  meshes the layer as a solid between the two isosurfaces, with the isovalues in either order.
+- **Hexahedra on the head and the CT:** adaptive hexahedralization collapsed about half of the
+  hexahedra, which then had repeated corners. None do now: the CT at density 45 gives 183,708
+  hexahedra, and the head's SDF at 128³ gives 51,946.
