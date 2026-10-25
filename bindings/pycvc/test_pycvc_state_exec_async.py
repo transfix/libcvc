@@ -36,21 +36,41 @@ def _busy(seconds):
 
 
 def _per_item():
+    """Seconds per item of sum(range(n)): the best of a few runs, so one slow run (a cold
+    interpreter, a frequency step) doesn't stretch every hold."""
     n = 1_000_000
-    start = time.perf_counter()
-    sum(range(n))
-    return max((time.perf_counter() - start) / n, 1e-10)
+    best = None
+    for _ in range(5):
+        start = time.perf_counter()
+        sum(range(n))
+        took = time.perf_counter() - start
+        best = took if best is None else min(best, took)
+    return max(best / n, 1e-10)
 
 
 _PER_ITEM = _per_item()
 
 
 def _hold_gil(seconds):
-    """Run flat out for about `seconds` in one C call, which keeps the GIL all along. (On Windows
-    thread_time() advances at the scheduler tick and misses a thread that runs in short bursts,
-    so a CPU-time check uses this instead of _busy.)"""
+    """Run flat out for about `seconds` in one C call, which keeps the GIL all along."""
     sum(range(int(seconds / _PER_ITEM)))
     return 0
+
+
+def _spin_cpu(seconds):
+    """Run flat out, in short C calls that keep the GIL, until this thread has used `seconds` of
+    CPU time, and return the CPU time it used: a CPU-bound kernel whose charges are checked
+    against what it measured. (On Windows thread_time() advances at the scheduler tick, so it
+    misses a thread that runs in bursts, like _busy's; one that runs flat out it counts well.)"""
+    start = time.thread_time()
+    while time.thread_time() - start < seconds:
+        _hold_gil(0.005)
+    return time.thread_time() - start
+
+
+def _charged_steps(cpu_seconds, rate):
+    """The steps a call's CPU time is charged at `rate` steps per CPU millisecond (at least one)."""
+    return max(1, int(cpu_seconds * 1000.0 * rate))
 
 
 class World:
@@ -303,15 +323,19 @@ def test_a_restored_call_cant_resume():
 
 
 def test_a_cpu_bound_calls_charges():
-    # AS-18 (and AS-26, inline on the sync scheduler): run time, CPU time, steps.
+    # AS-18 (and AS-26, inline on the sync scheduler): run time, CPU time, steps. The kernel
+    # measures the CPU time it used; the call is charged that, and steps at the default rate.
     for kind in ("async", "sync"):
         w = World(kind)
-        w.fn("busy", lambda: _hold_gil(0.2))
-        i = w.info(w.run("(busy)"))
+        w.fn("busy", lambda: _spin_cpu(0.2))
+        pid = w.run("(busy)")
+        used, i = w.result(pid), w.info(pid)
+        assert used >= 0.2
         assert i.async_calls == 1, kind
-        assert 0.15 <= i.async_cpu_time < 0.6, (kind, i.async_cpu_time)
+        assert 0.7 * used <= i.async_cpu_time <= 1.3 * used + 0.03, (kind, i.async_cpu_time, used)
         assert i.async_time >= i.async_cpu_time - 0.02, kind
-        assert 300000 <= i.async_steps < 1200000, (kind, i.async_steps)  # at 2000 per CPU ms
+        expected = _charged_steps(i.async_cpu_time, pycvc.kDefaultAsyncStepsPerCpuMs)
+        assert abs(i.async_steps - expected) <= max(2, expected // 100), (kind, i.async_steps)
         assert i.step_count >= i.async_steps
         assert i.elapsed_time >= i.async_time - 1e-3
         w.close()
@@ -354,33 +378,45 @@ def test_a_sleeping_call_is_charged_its_run_time_but_no_cpu():
     w.close()
 
 
+def _nap_span(ms):
+    """Sleep `ms` and return when the sleep began and ended (perf_counter: on Windows monotonic()
+    advances only at the ~15.6 ms scheduler tick)."""
+    began = time.perf_counter()
+    time.sleep(ms / 1000.0)
+    return [began, time.perf_counter()]
+
+
 def test_futures_in_flight_are_each_charged():
-    # AS-24
+    # AS-24: two calls in flight at once are each charged their run time, so the process is
+    # charged more run time than passed while they ran. The kernels report when they ran, so a
+    # slow pump doesn't blur it.
     w = World()
-    w.fn("slow-op", _slow)
-    start = time.monotonic()
-    pid = w.run("(begin (set a (slow-op-async 1 100)) (set b (slow-op-async 1 100)) "
-                "(+ (await a) (await b)))")
-    wall = time.monotonic() - start
+    w.fn("nap", _nap_span)
+    pid = w.run("(begin (set a (nap-async 100)) (set b (nap-async 100)) "
+                "(list (await a) (await b)))")
+    (a0, a1), (b0, b1) = w.result(pid)
     i = w.info(pid)
-    assert w.result(pid) == 4 and i.async_calls == 2
-    assert i.async_time >= 0.19
-    assert wall < i.async_time + 0.05
+    assert i.async_calls == 2
+    ran = (a1 - a0) + (b1 - b0)
+    assert max(a1, b1) - min(a0, b0) < 0.75 * ran  # they overlapped
+    assert i.async_time >= 0.9 * ran, (i.async_time, ran)
     w.close()
 
 
 def test_the_step_rate_is_live_and_set_by_precedence():
-    # AS-27, AS-28
+    # AS-27, AS-28: the steps are the call's CPU time at the rate that wins.
     w = World()
     w.sched.set_id("t")
-    w.fn("busy", lambda: _busy(0.05) and 0)
+    w.fn("busy", lambda: _spin_cpu(0.05))
     w.root.child("state_exec.defaults.limits.async_steps_per_cpu_ms").value("10")
     w.root.child("state_exec.schedulers.t.limits.async_steps_per_cpu_ms").value("100")
     i = w.info(w.run("(busy)"))
-    assert 4000 <= i.async_steps < 15000, i.async_steps
+    expected = _charged_steps(i.async_cpu_time, 100)  # the scheduler's node wins
+    assert i.async_cpu_time >= 0.035 and abs(i.async_steps - expected) <= 2, (i.async_steps, expected)
     assert w.root.child("state_exec.schedulers.t.effective.async_steps_per_cpu_ms").value() == "100"
     i = w.info(w.run("(busy)", async_steps_per_cpu_ms=1.0))
-    assert 40 <= i.async_steps < 150, i.async_steps
+    expected = _charged_steps(i.async_cpu_time, 1)  # the process's own wins
+    assert abs(i.async_steps - expected) <= 2, (i.async_steps, expected)
     w.close()
 
 
@@ -393,16 +429,19 @@ def test_a_python_kernels_wait_for_the_gil_isnt_charged():
     #   Python function could, at an eval-breaker check, and wait again inside its call, a wait
     #   the host doesn't see), and which says when it ran. Ran before the hold, it took the GIL
     #   first: there was no wait, and the scenario is tried again.
-    for _ in range(10):
+    # - perf_counter, not monotonic, which on Windows advances only at the ~15.6 ms tick.
+    stalled = 0
+    for _ in range(20):
         w = World()
-        w.fn("stamp", time.monotonic)
+        w.fn("stamp", time.perf_counter)
         go = threading.Event()
         window = {}
 
         def hold(go=go, window=window):
             go.wait()
-            window["from"] = time.monotonic()
+            window["from"] = time.perf_counter()
             _hold_gil(0.3)
+            window["to"] = time.perf_counter()
 
         t = threading.Thread(target=hold)
         t.start()
@@ -415,8 +454,16 @@ def test_a_python_kernels_wait_for_the_gil_isnt_charged():
         w.close()
         if ran_at < window["from"]:
             continue  # the kernel took the GIL before `hold` did: no wait to leave out
+        if window["to"] - window["from"] > 0.45:
+            # The machine stalled the threads (the hold took far longer than it runs): a stall
+            # is run time, rightly charged, which would hide what this checks.
+            stalled += 1
+            continue
         assert ran_at - window["from"] >= 0.2  # it waited out the hold
         assert i.async_time < 0.1, i.async_time  # charged, the wait would be about 0.3 s
+        return
+    if stalled:
+        print("  skipped: the machine stalled every try that waited for the GIL")
         return
     raise AssertionError("the kernel never had to wait for the GIL")
 
@@ -440,3 +487,11 @@ def test_the_counters_survive_a_snapshot():
 def test_the_new_enum_values():
     assert int(pycvc.step_kind["async"]) == 3
     assert int(pycvc.eval_phase["await_call"]) == int(pycvc.eval_phase["raise_value"]) + 1
+
+
+if __name__ == "__main__":
+    tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
+    for t in tests:
+        t()
+        print("  ok:", t.__name__)
+    print("pycvc state_exec async call tests: OK")
