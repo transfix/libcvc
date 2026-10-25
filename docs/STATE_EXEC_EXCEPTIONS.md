@@ -417,8 +417,8 @@ every in-flight kernel and waits for them before the scheduler goes, as `Exec` d
   as a deep-data job, so it counts against the process's budget like other deep-data work.
 - **Large data:** a volume or mesh crosses as a `data_object` holding a `shared_ptr` the kernel
   treats as read-only. A kernel that modifies data works on its own copy.
-- **The kernel must not touch:** the state tree, the evaluator, or any DSL value. A debug build
-  asserts it. Its result is a fresh value.
+- **The kernel must not touch:** the state tree, the evaluator, or any DSL value. The evaluators
+  and the schedulers check it on every build (3.11). Its result is a fresh value.
 
 ### 3.8 Budgets
 
@@ -558,7 +558,8 @@ it; a full queue drops progress values first.
 The tests are `src/cvc/tests/state_exec_async_calls_test.cpp` (AS-1..33 in both evaluators and
 on both schedulers where they apply), `bindings/pycvc/test_pycvc_state_exec_async.py` (the same
 from Python, with AS-4, AS-16 and AS-32), and `AriadneAsyncFn` in `ariadne_runtime_test.cpp`
-(AS-17 through a document).
+(AS-17 through a document). The gtest file also passes under MSVC's AddressSanitizer
+(`/fsanitize=address`), so the teardown in AS-9 and AS-10 frees nothing a kernel still uses.
 
 **The names (3.2).**
 - `cvc/state/state_exec/async_call.h`: `async_kernel`, `async_marshal`, `async_call` (for kernels:
@@ -590,10 +591,27 @@ from Python, with AS-4, AS-16 and AS-32), and `AriadneAsyncFn` in `ariadne_runti
   too: its frame goes on top, as a DSL function the job called would.
 - A future of an async call is `{"__future__": channel, "__async_call__": handle}`. `await` reads
   the call directly, so a future can be awaited more than once, and a completion is never queued
-  as a message. `(msg-recv f)` on such a future awaits it. `await-all` takes these futures and
-  plain values; a channel future is awaited on its own. `await` on a channel future (a lane's,
+  as a message. `(msg-recv f)` on such a future awaits it. `await` on a channel future (a lane's,
   `future_pool_task`'s) parks in the `await_call` phase too, so it takes a timeout.
+- `await-all` takes these futures, channel futures and plain values, and waits for one at a time.
+  A channel future's message (one already queued on its channel, or the next) takes the future's
+  place in the call's list, as `{"__awaited__": message}`, and the call is applied again; so a
+  snapshot keeps the messages it has, and a restored process waits again for the rest. A message
+  that is itself a future is the value, not waited for in turn. A channel future where it can't
+  park raises `RuntimeError`.
+- An `await_call` frame waiting on a channel that is stepped before its message comes (a process
+  restored from a snapshot) applies its call again, and it waits again. One waiting on an async
+  call raises `RuntimeError`, since the call is gone.
 - The arguments are copied before the marshal step runs (`make_copy_job`), as deep-data work.
+
+**Data crossing threads (3.7).** The host marks the threads running a kernel: its executor thread,
+its fan-out's chunks, and the step an inline kernel runs in (`in_async_kernel()`). There
+`evaluator::evaluate`, `stackless_evaluator::step`, both schedulers' `execute`, `receive_message`,
+`deliver_to_receivers` and `kill`, `scheduler::step` and `async_scheduler::drain_ingress` throw
+`std::logic_error`, which raises at the call. The check is on in every build: the mesher defines
+`NDEBUG` for every build type, so a debug-only assert would never fire. An inline kernel's `post()`
+delivers as the host, not the kernel. The state tree isn't checked: Ariadne's `fetch` of a
+`state://` URL reads it on its kernel, by design, pinning the nodes it reads.
 
 **Charging (3.8).**
 - While a kernel runs, the run time since it last recorded its CPU time (`cancelled()`) counts as

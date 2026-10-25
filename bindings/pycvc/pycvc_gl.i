@@ -286,28 +286,28 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
 // test_pycvc_proxy_hooks.py fails the build's tests on any proxy that references
 // an undefined name, so a flip cannot slip through silently.
 %pythonappend cvc::gl::GraphicsNode::GraphicsNode %{
-    if args: self._pycvc_app = args[0]
+    if args: self._pycvc_app = pycvc._keepalive(args[0])
 %}
 %pythonappend cvc::gl::GeometryNode::GeometryNode %{
-    if args: self._pycvc_app = args[0]
+    if args: self._pycvc_app = pycvc._keepalive(args[0])
 %}
 %pythonappend cvc::gl::VolumeNode::VolumeNode %{
-    if args: self._pycvc_app = args[0]
+    if args: self._pycvc_app = pycvc._keepalive(args[0])
 %}
 %pythonappend cvc::gl::VolRenNode::VolRenNode %{
-    self._pycvc_app = ctx  # single signature -> named-parameter proxy
+    self._pycvc_app = pycvc._keepalive(ctx)  # single signature -> named-parameter proxy
 %}
 %pythonappend cvc::gl::LightNode::LightNode %{
-    if args: self._pycvc_app = args[0]
+    if args: self._pycvc_app = pycvc._keepalive(args[0])
 %}
 %pythonappend cvc::gl::GridNode::GridNode %{
-    if args: self._pycvc_app = args[0]
+    if args: self._pycvc_app = pycvc._keepalive(args[0])
 %}
 %pythonappend cvc::gl::AxisNode::AxisNode %{
-    if args: self._pycvc_app = args[0]
+    if args: self._pycvc_app = pycvc._keepalive(args[0])
 %}
 %pythonappend cvc::gl::VolSliceNode::VolSliceNode %{
-    self._pycvc_app = ctx  # single signature -> named-parameter proxy
+    self._pycvc_app = pycvc._keepalive(ctx)  # single signature -> named-parameter proxy
 %}
 
 // ── SceneNode (abstract base): trim VTK / threading internals ───────────────
@@ -1207,7 +1207,7 @@ PYCVC_GL_LOD_STYLED(cvc::gl::LodGraphicsNode::setRungStyle)
 %ignore cvc::gl::LodGraphicsNode::addToRenderer;  // vtkRenderer*
 %ignore cvc::gl::lod_stats::rung_nodes;           // std::vector<int> -> the rung_nodes property below
 %pythonappend cvc::gl::LodGraphicsNode::LodGraphicsNode %{
-    if args: self._pycvc_app = args[0]
+    if args: self._pycvc_app = pycvc._keepalive(args[0])
 %}
 %pythonappend cvc::gl::LodGraphicsNode::rung %{
     if val is not None: val._pycvc_app = getattr(self, "_pycvc_app", None)
@@ -1312,7 +1312,7 @@ PYCVC_GL_LOD_STYLED(cvc::gl::LodGraphicsNode::setRungStyle)
 // scene_from_capsule proxy needs no stash; grl_snam_lab.Lab holds the app too.)
 %pythonappend cvc::gl::SceneGraph::SceneGraph %{
     if args:
-        self._pycvc_app = args[0]
+        self._pycvc_app = pycvc._keepalive(args[0])
 %}
 // Propagate that keep-alive to every RETURNED node proxy: a node's C++ teardown
 // (~SceneNode) touches the app's state tree by raw reference, so a node proxy
@@ -1772,9 +1772,11 @@ def _typed_node(sg, name):
 // Keep the borrowed SceneGraph alive: ~SceneRenderer detaches from it (close() ->
 // ~ViewportManager -> SceneGraph::setRenderer), so a scene released FIRST — e.g. a
 // function returning drops its `sg` local before `view` — was a use-after-free
-// segfault at teardown. (Default args make this an overloaded, *args proxy.)
+// segfault at teardown. Through pycvc._keepalive, as for every borrowed object below,
+// so the collector cannot free the scene first either. (Default args make this an
+// overloaded, *args proxy.)
 %pythonappend cvc::gl::SceneRenderer::SceneRenderer %{
-    if args: self._pycvc_scene = args[0]
+    if args: self._pycvc_scene = pycvc._keepalive(args[0])
 %}
 // FrameYield: SceneRenderer / ViewportManager::setFrameYield take it. At namespace
 // scope, so it must be seen before either header (SWIG does not follow #include).
@@ -1822,9 +1824,10 @@ def _typed_node(sg, name):
 %ignore cvc::gl::CameraController::setScene; // raw SceneGraph* — the viewer ctor sets it
 %ignore cvc::gl::CameraController::getPose;
 %ignore cvc::gl::CameraController::getUpAxis;
-// Keep the injected viewer/app alive: ~state_object touches that app's state tree.
+// Keep the injected viewer/app alive: ~state_object touches that app's state tree, and
+// detach() the viewer's interactor.
 %pythonappend cvc::gl::CameraController::CameraController %{
-    if args: self._pycvc_keepalive = args[0]
+    if args: self._pycvc_keepalive = pycvc._keepalive(args[0])
 %}
 %include "cvc/gl/CameraController.h"
 %extend cvc::gl::CameraController {
@@ -1903,9 +1906,10 @@ def _typed_node(sg, name):
 %clear double out[4];
 
 // ViewportManager: constructed from a wrapped SceneGraph; keep it and every added
-// scene alive, and make every handed-out Viewport keep the manager alive.
+// scene alive (~ViewportManager detaches each), and make every handed-out Viewport
+// keep the manager alive.
 %pythonappend cvc::gl::ViewportManager::ViewportManager %{
-    if args: self._pycvc_scene = args[0]
+    if args: self._pycvc_scene = pycvc._keepalive(args[0])
 %}
 %pythonappend cvc::gl::ViewportManager::primary %{
     if val is not None: val._pycvc_keepalive = self
@@ -1922,10 +1926,12 @@ def _typed_node(sg, name):
 // addSceneViewport is a named-parameter proxy (single signature, no *args), so
 // reference the `scene` argument by name — `args` is undefined here, which raised
 // NameError the moment a viewport was added. (See the %pythonappend note above.)
+// The MANAGER keeps the added scene: it holds it by pointer for its whole life. On
+// the returned Viewport proxy, the scene died with that proxy, under the manager.
 %pythonappend cvc::gl::ViewportManager::addSceneViewport %{
+    self.__dict__.setdefault("_pycvc_scenes", []).append(pycvc._keepalive(scene))
     if val is not None:
         val._pycvc_keepalive = self
-        val._pycvc_scene = scene
 %}
 %pythonappend cvc::gl::ViewportManager::addMirrorViewport %{
     if val is not None: val._pycvc_keepalive = self
@@ -1948,7 +1954,7 @@ def _typed_node(sg, name):
 %ignore cvc::gl::StageLighting::appContext;   // raw cvc::app&
 // Keep the injected SceneGraph alive: ~StageLighting removes its lights from it.
 %pythonappend cvc::gl::StageLighting::StageLighting %{
-    if args: self._pycvc_keepalive = args[0]
+    if args: self._pycvc_keepalive = pycvc._keepalive(args[0])
 %}
 %include "cvc/gl/StageLighting.h"
 %extend cvc::gl::StageLighting {
@@ -1984,9 +1990,11 @@ def _typed_node(sg, name):
 %ignore cvc::gl::ScreenTextHud::position; // double& out-params -> get_position tuple
 %ignore cvc::gl::ScreenTextHud::color;    // double& out-params -> get_color tuple
 // Keep the injected viewer (or app, for the headless ctor) alive: ~state_object
-// touches that app's state tree.
+// touches that app's state tree, and ~ScreenTextHud removes its actor from the
+// viewer's renderer -- the low-level ctor's viewer (its third argument) too.
 %pythonappend cvc::gl::ScreenTextHud::ScreenTextHud %{
-    if args: self._pycvc_keepalive = args[0]
+    if args: self._pycvc_keepalive = pycvc._keepalive(args[0])
+    if len(args) > 2 and args[2] is not None: self._pycvc_viewer = pycvc._keepalive(args[2])
 %}
 %include "cvc/gl/ScreenTextHud.h"
 %extend cvc::gl::ScreenTextHud {

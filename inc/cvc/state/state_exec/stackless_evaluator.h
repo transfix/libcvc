@@ -196,7 +196,20 @@ struct await_request {
   /// On delivery, apply the call again with the same arguments instead of completing it with
   /// what was delivered: (await-all ...) waits for each future in turn this way.
   bool retry = false;
+  /// With retry: what was delivered first takes the place of item `slot` of the call's first
+  /// argument (a list), as awaited_value(it). (await-all ...) collects channel futures' messages
+  /// this way, so a snapshot keeps the ones it has.
+  std::optional<std::size_t> slot;
+  /// Delivered already (a pending message the native took): the frame waits for nothing, and the
+  /// next step completes it (or, with retry, applies the call again).
+  std::optional<value_t> ready;
 };
+
+/// {"__awaited__": v}: what a retried call's `slot` became (await_request::slot).
+value_t awaited_value(value_t v);
+
+/// The value an awaited_value() holds, or null when `v` isn't one.
+const value_t *awaited_of(const value_t &v);
 
 } // namespace detail
 

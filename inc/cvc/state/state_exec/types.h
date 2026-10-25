@@ -457,6 +457,36 @@ void eval_alloc_check(std::size_t bytes, const char *who);
 /// such as cons or slice), for heap accounting only.
 void eval_alloc_note(std::size_t bytes);
 
+// -- async kernels (docs/STATE_EXEC_EXCEPTIONS.md 3.7) ------------------------
+//
+// An async function's kernel runs off the scheduler's timeline, so it must not touch the
+// evaluator, a scheduler or a DSL value the program holds. The host marks the threads that run a
+// kernel (its executor thread, its fan-out chunks, and the step an inline kernel runs in), and
+// the evaluators and the schedulers' entry points check, throwing std::logic_error. (The check is
+// always on: NDEBUG can't tell a debug build here, the mesher defines it for every build type.)
+// The state tree isn't checked: Ariadne's (fetch "state://...") resolves on its kernel, by
+// design, pinning the nodes it reads.
+
+/// Whether this thread is running an async function's kernel now.
+bool in_async_kernel();
+
+namespace detail {
+/// RAII: mark this thread as running a kernel (`running`) or not, while alive.
+class async_kernel_scope {
+public:
+  explicit async_kernel_scope(bool running);
+  ~async_kernel_scope();
+  async_kernel_scope(const async_kernel_scope &) = delete;
+  async_kernel_scope &operator=(const async_kernel_scope &) = delete;
+
+private:
+  bool outer_;
+};
+
+/// Throw std::logic_error naming `what` when this thread runs a kernel.
+void check_not_in_async_kernel(const char *what);
+} // namespace detail
+
 /// `count * each`, saturating at SIZE_MAX, for size estimates that must not wrap.
 inline std::size_t alloc_bytes(std::size_t count, std::size_t each) {
   return each != 0 && count > SIZE_MAX / each ? SIZE_MAX : count * each;

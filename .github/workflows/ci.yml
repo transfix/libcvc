@@ -350,6 +350,7 @@ jobs:
              && git cat-file -e "${base}^{commit}" 2>/dev/null; then
             if ! git diff --name-only "$base" HEAD -- src/cvc/ariadne inc/cvc/ariadne src/cvc/tools \
                    src/ari examples/ariadne/terminal CMakeLists.txt src/cvc/CMakeLists.txt CMake \
+                   src/cvc/image inc/cvc/image src/cvc/tests/image_magick_roundtrip.cpp \
                    cvcpkg/recipes/libcvc \
                    .github/workflows/ci.yml | grep -q .; then
               run=false
@@ -371,11 +372,14 @@ jobs:
           test -f "$RUNNER_TEMP/emsdk/emsdk_env.sh"
           echo "CVC_EMSDK_DIR=$RUNNER_TEMP/emsdk" >> "$GITHUB_ENV"
 
-      - name: Install the wasm deps (boost, pegtl, yaml-cpp, ftxui, the compression libraries)
+      - name: Install the wasm deps (boost, pegtl, yaml-cpp, ftxui, ImageMagick and its codecs)
         if: steps.paths.outputs.run == 'true'
         run: |
           mkdir -p "$WASM_DEPS"
-          for p in zlib bzip2 xz zstd boost pegtl yaml-cpp ftxui; do
+          # imagemagick + the codec libraries its static MagickCore links: `ari --image` loads
+          # pictures through cvc::image, so this link is where a missing codec closure shows.
+          for p in zlib bzip2 xz zstd boost pegtl yaml-cpp ftxui \
+                   imagemagick tiff libjpeg-turbo libpng libwebp lerc libxml2; do
             echo "=== $p ==="
             cvcpkg install "$p" --prefix "$WASM_DEPS" \
               --platform wasm --arch wasm32 --config release --link static \
@@ -392,15 +396,21 @@ jobs:
             -DCMAKE_FIND_ROOT_PATH="$WASM_DEPS" -DCMAKE_PREFIX_PATH="$WASM_DEPS" \
             -DCVC_ENABLE_CUDA=OFF -DCVC_BUILD_TESTS=OFF -DCVC_BUILD_CLI=OFF \
             -DCVC_ENABLE_OPENMP=OFF -DDISABLE_CGAL=ON -DCVC_USING_HDF5=OFF \
-            -DCVC_USING_IMOD_MRC=OFF -DCVC_ENABLE_IMAGEMAGICK=OFF -DCVC_ENABLE_FFTW=OFF \
+            -DCVC_USING_IMOD_MRC=OFF -DCVC_ENABLE_IMAGEMAGICK=ON -DCVC_ENABLE_FFTW=OFF \
             -DCVC_FFT_PROVIDER=none -DCVC_ENABLE_ASSIMP=OFF -DCVC_ENABLE_MESHER=OFF \
             -DCVC_BUILD_CVCGL=OFF -DCVC_BUILD_EXAMPLES=OFF -DCVC_WASM_PTHREADS=OFF \
+            -DCVC_BUILD_IMAGE_MAGICK_ROUNDTRIP=ON \
             | tee configure.log
+          # CMAKE_PREFIX_PATH lets pkg-config see MagickCore.pc, so the stock FindImageMagick
+          # tier makes the targets, the one whose static codec closure the ari link needs
+          # src/cvc/CMakeLists.txt to add. HDRI=1 is what the Q16HDRI library was built with.
+          grep -q "ImageMagick found: .*(Q16, HDRI=1)" configure.log \
+            || { echo "::error::the wasm configure did not find ImageMagick (Q16 HDRI)"; exit 1; }
           grep -q "Ariadne: .ari YAML loader ENABLED" configure.log \
             || { echo "::error::the wasm configure did not find yaml-cpp (the .ari loader is a stub)"; exit 1; }
           grep -q "Ariadne: FTXUI terminal backend ENABLED" configure.log \
             || { echo "::error::the wasm configure did not find ftxui (the terminal backend is a stub)"; exit 1; }
-          cmake --build build-wasm --target ari -j"$(nproc)"
+          cmake --build build-wasm --target ari image_magick_roundtrip_test -j"$(nproc)"
           ls -la build-wasm/bin/ari.html build-wasm/bin/ari.js build-wasm/bin/ari.wasm
 
       - name: Render the baked tour under node
@@ -413,6 +423,16 @@ jobs:
             grep -qF "$want" snapshot.txt \
               || { echo "::error::the wasm ari snapshot is missing '$want'"; exit 1; }
           done
+
+      - name: Round-trip images through ImageMagick under node
+        # The link above only proves the codec libraries resolve. This proves Magick works at run
+        # time: its coders are registered (an empty registry once failed every read and write
+        # while everything still linked) and TIFF / WEBP, which only Magick handles, round-trip.
+        # 77 would mean a build without ImageMagick, which the configure check rules out.
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
+          "$node" build-wasm/bin/image_magick_roundtrip_test.js
 
       - name: Upload the ari web page
         if: steps.paths.outputs.run == 'true'

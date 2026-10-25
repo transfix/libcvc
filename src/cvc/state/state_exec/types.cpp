@@ -347,6 +347,27 @@ void eval_alloc_note(std::size_t bytes) {
     g->allocated_ = g->allocated_ > SIZE_MAX - bytes ? SIZE_MAX : g->allocated_ + bytes;
 }
 
+// -- async kernels -------------------------------------------------------------
+
+namespace {
+thread_local bool t_in_async_kernel = false;
+} // namespace
+
+bool in_async_kernel() { return t_in_async_kernel; }
+
+detail::async_kernel_scope::async_kernel_scope(bool running) : outer_(t_in_async_kernel) {
+  t_in_async_kernel = running;
+}
+
+detail::async_kernel_scope::~async_kernel_scope() { t_in_async_kernel = outer_; }
+
+void detail::check_not_in_async_kernel(const char *what) {
+  if (t_in_async_kernel)
+    throw std::logic_error(std::string(what) +
+                           ": an async function's kernel must not use the evaluator or a "
+                           "scheduler (docs/STATE_EXEC_EXCEPTIONS.md 3.7)");
+}
+
 // -- value_tag ---------------------------------------------------------------
 
 std::string value_tag::type_name() const {

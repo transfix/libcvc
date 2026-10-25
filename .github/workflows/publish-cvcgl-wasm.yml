@@ -139,6 +139,11 @@ jobs:
             grep -qE "IN ITEMS .*\b${pkg}\b" "$INST/lib/cmake/cvc/cvcConfig.cmake" \
               || { echo "::error::libcvc wasm built WITHOUT ${pkg} (find_package failed despite it in \$WASM_DEPS); its Ariadne part is a stub"; exit 1; }
           done
+          # ImageMagick, with the HDRI define its Q16HDRI static library was built with. A
+          # configure without a pkg-config answer used to fall back to HDRI=0, so cvc and every
+          # consumer compiled against an integer Quantum while the library used float.
+          grep -q "MAGICKCORE_HDRI_ENABLE=1" "$INST/lib/cmake/cvc/cvcTargets.cmake" \
+            || { echo "::error::libcvc wasm built WITHOUT ImageMagick, or with MAGICKCORE_HDRI_ENABLE not matching the Q16HDRI library"; exit 1; }
           grep -q CVC_ENABLE_IMGUI "$INST/lib/cmake/cvcGL/cvcGLTargets.cmake" \
             || echo "::warning::cvcGL wasm built WITHOUT imgui (overlay will be inert)"
           # sdl3 is now in $WASM_DEPS, so cvcGL MUST link SDL3::SDL3 (CVC_ENABLE_SDL) — its config

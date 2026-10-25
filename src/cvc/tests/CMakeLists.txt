@@ -2395,6 +2395,9 @@ endif()
 #    would install a libcvc.a whose mesh_ops.o / fem.o reference igl_detail::
 #    symbols that no installed file defines.)
 #  - Neither cvc_igl nor igl::/Eigen3:: targets leak into cvcTargets.cmake.
+#  - MSVC: cvc.dll's generated export table names no igl:: or Eigen:: symbol.
+#    (cvc::igl_detail:: names may appear: mesh_ops.cpp / fem.cpp compile the
+#    boundary types' inline members and RTTI into cvc's own objects.)
 #  - cvc_igl's parallel_for backend equals igl::core's (adding
 #    IGL_PARALLEL_FOR_FORCE_SERIAL only to cvc_igl is an ODR violation in any
 #    static link that also uses igl::core), except that single-threaded wasm
@@ -2403,6 +2406,10 @@ if(CVC_ENABLE_LIBIGL AND TARGET cvc_igl)
   get_target_property(_cvc_igl_cvc_type cvc TYPE)
   get_target_property(_cvc_igl_helper_type cvc_igl TYPE)
   get_target_property(_cvc_igl_cvc_bindir cvc BINARY_DIR)
+  get_target_property(_cvc_igl_export_def cvc CVC_EXPORT_DEF)
+  if(NOT _cvc_igl_export_def)
+    set(_cvc_igl_export_def "")
+  endif()
   get_target_property(_cvc_igl_defs cvc_igl COMPILE_DEFINITIONS)
   get_target_property(_cvc_igl_core_defs igl::core INTERFACE_COMPILE_DEFINITIONS)
   set(_cvc_igl_serial_private OFF)
@@ -2459,6 +2466,14 @@ foreach(_f IN LISTS _exports)
   endif()
 endforeach()
 
+if(EXPORT_DEF)
+  file(STRINGS "${EXPORT_DEF}" _leaks REGEX "@igl@@|@Eigen@@")
+  if(_leaks)
+    list(LENGTH _leaks _n)
+    string(APPEND _fail "${EXPORT_DEF} exports ${_n} igl:: or Eigen:: symbols\n")
+  endif()
+endif()
+
 if(SERIAL_REQUIRED)
   if(NOT SERIAL_PRIVATE AND NOT SERIAL_CORE)
     string(APPEND _fail "single-threaded wasm: libigl's thread pool cannot start, but neither "
@@ -2484,6 +2499,7 @@ message(STATUS "cvc_igl packaging OK: cvc ${CVC_TYPE}, cvc_igl ${HELPER_TYPE}, s
       "-DAR=${CMAKE_AR}"
       "-DAR_IS_LIB_EXE=${MSVC}"
       "-DEXPORT_DIR=${_cvc_igl_cvc_bindir}/CMakeFiles/Export"
+      "-DEXPORT_DEF=${_cvc_igl_export_def}"
       -DSERIAL_PRIVATE=${_cvc_igl_serial_private}
       -DSERIAL_CORE=${_cvc_igl_serial_core}
       -DSERIAL_REQUIRED=${_cvc_igl_serial_required}

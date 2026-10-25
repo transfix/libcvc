@@ -24,6 +24,7 @@ evaluator::evaluator(environment_ptr global_env) : global_env_(std::move(global_
 value_t evaluator::evaluate(const value_t &expr, environment_ptr env,
                             std::optional<double> timeout_sec,
                             std::function<void(const value_t &)> on_complete) {
+  detail::check_not_in_async_kernel("evaluator::evaluate");
   std::lock_guard lk(eval_mu_);
   root_expr_ = expr;
   stats_.start();

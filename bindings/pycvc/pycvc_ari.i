@@ -94,11 +94,13 @@ static pycvc::python_exception pycvc_ari_take_exception(const char *what) {
 // Python — the Python surface loads .ari files instead.
 %ignore cvc::gl::ariadne::AriRuntime::set_root;
 
-// Keep the window/camera/overlay the AriRuntime borrows alive for its whole life. The ctor has a
-// single signature, so its proxy takes NAMED parameters (no `args`; see the %pythonappend note in
+// Keep the window/camera/overlay the AriRuntime borrows alive for its whole life (~AriRuntime
+// resets the overlay's draw callback), through pycvc._keepalive. The ctor has a single
+// signature, so its proxy takes NAMED parameters (no `args`; see the %pythonappend note in
 // pycvc_gl.i).
 %pythonappend cvc::gl::ariadne::AriRuntime::AriRuntime %{
-    self._pycvc_view, self._pycvc_cam, self._pycvc_overlay = view, cam, ui
+    self._pycvc_view, self._pycvc_cam, self._pycvc_overlay = (
+        pycvc._keepalive(view), pycvc._keepalive(cam), pycvc._keepalive(ui))
 %}
 
 %include "cvc/gl/ariadne/AriRuntime.h"

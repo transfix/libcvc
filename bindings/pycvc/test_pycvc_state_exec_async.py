@@ -269,6 +269,40 @@ def test_await_all_raises_the_first_failure_once_all_finish():
         w.close()
 
 
+def test_await_all_takes_channel_futures():
+    # 3.3, on both schedulers: with an async call's future and a plain value, in list order
+    # whatever order the messages come in; one sent before it waits is taken; a snapshot keeps
+    # the messages it has.
+    for kind in ("async", "sync"):
+        w = World(kind)
+        w.fn("slow-op", _slow)
+        pycvc.builtins.register_fn(w.env, "chan-future", lambda c: pycvc.make_future(c))
+        pid = w.submit('(await-all (list (chan-future "c1") (slow-op-async 3) '
+                       '(chan-future "c2") 9))')
+        assert w.pump(lambda: w.info(pid).status == process_status.waiting), kind
+        w.sched.deliver_to_receivers("c2", "two")
+        w.sched.deliver_to_receivers("c1", "one")
+        assert w.pump(lambda: w.finished(pid)), kind
+        assert w.result(pid) == ["one", 6, "two", 9], kind
+
+        w.sched.deliver_to_receivers("c3", 1)
+        pid = w.run('(await-all (list (chan-future "c3") 2))')
+        assert w.result(pid) == [1, 2], kind
+
+        pid = w.submit('(await-all (list (chan-future "s1") 5 (chan-future "s2")))')
+        assert w.pump(lambda: w.info(pid).status == process_status.waiting), kind
+        w.sched.deliver_to_receivers("s1", "one")
+        assert w.pump(lambda: w.info(pid).status == process_status.waiting), kind
+        node = w.root.child(f"__await_all_{kind}__")
+        assert w.sched.snapshot(pid, node), kind
+        restored = w.sched.restore(node, w.env)
+        assert w.pump(lambda: w.info(restored).status == process_status.waiting), kind
+        w.sched.deliver_to_receivers("s2", "two")
+        assert w.pump(lambda: w.finished(pid) and w.finished(restored)), kind
+        assert w.result(pid) == w.result(restored) == ["one", 5, "two"], kind
+        w.close()
+
+
 def test_a_registration_timeout_raises_timeout_error():
     # AS-8: the kernel sees cancelled() only from C++; a Python kernel's call still times out.
     w = World()

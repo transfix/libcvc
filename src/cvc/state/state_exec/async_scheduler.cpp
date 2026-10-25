@@ -22,6 +22,7 @@ async_scheduler::async_scheduler(scheduling_policy policy)
 // ---------------------------------------------------------------------------
 
 int async_scheduler::execute(const std::string &script, const execute_options &opts) {
+  detail::check_not_in_async_kernel("async_scheduler::execute");
   int pid = next_pid_++;
   process proc;
   proc.pid = pid;
@@ -60,6 +61,7 @@ int async_scheduler::execute(const std::string &script, const execute_options &o
 }
 
 int async_scheduler::execute(const value_t &expr, const execute_options &opts) {
+  detail::check_not_in_async_kernel("async_scheduler::execute");
   int pid = next_pid_++;
   process proc;
   proc.pid = pid;
@@ -433,6 +435,7 @@ int async_scheduler::wake_awaiting() {
 }
 
 bool async_scheduler::receive_message(int pid, const std::string &path) {
+  detail::check_not_in_async_kernel("async_scheduler::receive_message");
   auto it = processes_.find(pid);
   if (it == processes_.end())
     return false;
@@ -460,6 +463,7 @@ bool async_scheduler::receive_message_until(int pid, const std::string &path, do
 }
 
 int async_scheduler::deliver_to_receivers(const std::string &path, const value_t &msg) {
+  detail::check_not_in_async_kernel("async_scheduler::deliver_to_receivers");
   int woken = 0;
   for (auto &[pid, proc] : processes_) {
     if (proc->status == process_status::waiting && proc->recv_path && *proc->recv_path == path) {
@@ -517,6 +521,7 @@ void async_scheduler::post_message(const std::string &path, const value_t &msg) 
 }
 
 void async_scheduler::drain_ingress() {
+  detail::check_not_in_async_kernel("async_scheduler::drain_ingress");
   std::vector<std::pair<std::string, value_t>> batch;
   std::vector<std::shared_ptr<async_call>> finished;
   {
@@ -901,6 +906,7 @@ bool async_scheduler::resume(int pid) {
 }
 
 bool async_scheduler::kill(int pid) {
+  detail::check_not_in_async_kernel("async_scheduler::kill");
   auto it = processes_.find(pid);
   if (it == processes_.end())
     return false;
