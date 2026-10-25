@@ -135,6 +135,71 @@ TEST(VehicleRoute, KeepsOffACorridorOthersMeanToDrive) {
   EXPECT_DOUBLE_EQ(free_.length, plain.length);
 }
 
+// The ground (route_options::terrain): a band across the straight line (x 30..60, y 22..38) whose
+// slope runs north (dz/dy 0.4, 22 deg), so a route straight through it has 0.4 across its heading.
+// With a side limit of 0.3 no pose in the band has more than that across it (the route climbs it
+// head on, or goes round) unless it starts there; with a cost alone it keeps off the band; a ramp
+// along the heading (dz/dx 0.4) is taken straight on, since only the slope across is limited.
+TEST(VehicleRoute, PlansOffSlopeAcrossItsHeading) {
+  const ground g(100, 60);
+  const route_pose s{10, 30, 0};
+  std::vector<float> slope(2 * static_cast<std::size_t>(g.rows) * g.cols, 0.0f);
+  const std::size_t plane = static_cast<std::size_t>(g.rows) * g.cols;
+  for (int r = 22; r <= 38; ++r)
+    for (int c = 30; c <= 60; ++c)
+      slope[plane + static_cast<std::size_t>(r) * g.cols + c] = 0.4f; // dz/dy
+  route_options o;
+  o.terrain.slope = slope.data();
+  o.terrain.rows = g.rows;
+  o.terrain.cols = g.cols;
+  o.terrain.max_x = g.cols - 1.0;
+  o.terrain.max_y = g.rows - 1.0;
+  o.terrain.side_max = 0.3;
+  const auto inside = [](const vehicle_route &r) {
+    int n = 0;
+    for (const route_pose &q : r.poses)
+      n += q.x > 31 && q.x < 59 && q.y > 23 && q.y < 37 ? 1 : 0;
+    return n;
+  };
+  const vehicle_route plain = g.plan(humvee(), s, 80, 30);
+  const vehicle_route hard = g.plan(humvee(), s, 80, 30, o);
+  route_options soft = o;
+  soft.terrain.side_max = 0.0;
+  soft.terrain.side_cost = 4.0;
+  const vehicle_route costed = g.plan(humvee(), s, 80, 30, soft);
+  std::printf(
+      "  side slope across the line: poses in the band %d (plain), %d (limit 0.3), %d (cost "
+      "4); lengths %.1f, %.1f, %.1f m\n",
+      inside(plain), inside(hard), inside(costed), plain.length, hard.length, costed.length);
+  ASSERT_TRUE(hard.reached);
+  EXPECT_GT(inside(plain), 0);
+  double worst = 0.0; // the most slope across its heading of any pose in the band
+  for (const route_pose &q : hard.poses)
+    if (q.x > 31 && q.x < 59 && q.y > 23 && q.y < 37)
+      worst = std::max(worst, std::fabs(std::cos(q.heading)) * 0.4);
+  EXPECT_LE(worst, 0.3 + 1e-6) << "past the side limit is infeasible";
+  EXPECT_LT(inside(costed), inside(plain)) << "the cost should keep it mostly off the slope";
+  expect_drivable(g, humvee(), hard, 1.5);
+  // Standing across the slope in the band: it may still drive off it.
+  EXPECT_TRUE(g.plan(humvee(), {45, 30, 0}, 80, 30, o).reached) << "a steep start drives off";
+  // The same slope running east (along the heading): taken straight on.
+  for (std::size_t k = 0; k < plane; ++k) {
+    slope[k] = slope[plane + k];
+    slope[plane + k] = 0.0f;
+  }
+  const vehicle_route along = g.plan(humvee(), s, 80, 30, o);
+  ASSERT_TRUE(along.reached);
+  EXPECT_GT(inside(along), 0) << "a ramp taken straight on is not limited";
+  // Off (no limits, no costs): the plain route.
+  route_options off;
+  off.terrain.slope = slope.data();
+  off.terrain.rows = g.rows;
+  off.terrain.cols = g.cols;
+  off.terrain.max_x = g.cols - 1.0;
+  off.terrain.max_y = g.rows - 1.0;
+  EXPECT_DOUBLE_EQ(g.plan(humvee(), s, 80, 30, off).length, plain.length);
+}
+
 // A goal behind the vehicle on open ground: it turns round within its circle.
 TEST(VehicleRoute, TurnsRoundWithinItsCircle) {
   const ground g(100, 60);

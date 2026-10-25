@@ -69,6 +69,30 @@ struct route_corridor {
   double radius = 0.0, cost = 0.0;
 };
 
+// The ground for the planner (optional): its slope dz/dx then dz/dy (m/m), [2, rows, cols]
+// row-major, row 0 at min_y, cells spanning [min_x, max_x] x [min_y, max_y] as occ's do (its own
+// grid; sim_world::terrain() gives nav's). Each move, at each pose it samples, pays
+//   step x (grade_cost x (along / grade_scale)^2 + side_cost x (across / side_scale)^2)
+// for the slope along its heading and across it, and a pose whose slope across its heading is past
+// side_max (or along it past grade_max) is infeasible, as a wall is. A vehicle tips over sideways:
+// on a twisted ramp the slope across the heading is what rolls it, so a route takes such a ramp
+// straight on, or goes round. Zero limits and costs leave the planner as it was.
+struct route_terrain {
+  const float *slope = nullptr;
+  int rows = 0, cols = 0;
+  double min_x = 0.0, min_y = 0.0, max_x = 0.0, max_y = 0.0;
+  double side_max = 0.0;    // tan across the heading past which a pose is infeasible; 0 = none
+  double grade_max = 0.0;   // tan along it; 0 = none
+  double side_cost = 0.0;   // per unit length at side_scale
+  double grade_cost = 0.0;  // per unit length at grade_scale
+  double side_scale = 0.2;  // tan (11 deg)
+  double grade_scale = 0.3; // tan (17 deg)
+  bool on() const {
+    return slope && rows >= 2 && cols >= 2 &&
+           (side_max > 0.0 || grade_max > 0.0 || side_cost > 0.0 || grade_cost > 0.0);
+  }
+};
+
 struct route_options {
   double step = 0.0;           // arc length of a move; 0 = 1.5 cells, at most 0.6 x min_radius
   int headings = 72;           // heading bins in the search's closed set (5 degrees)
@@ -84,6 +108,7 @@ struct route_options {
   double heuristic_weight = 1.5;
   int max_expansions = 200000;
   std::vector<route_corridor> avoid; // soft keep-outs; empty = none
+  route_terrain terrain;             // the ground's slope, costs and limits; off by default
 };
 
 struct route_pose {
