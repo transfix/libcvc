@@ -97,4 +97,6 @@ bool state_inbound_gate::admit(const std::string &, const state_mutation &) cons
 
 bool state_inbound_gate::admit(const std::string &, const state_message &) const { return true; }
 
+bool state_inbound_gate::sources(const std::string &, const std::string &) const { return false; }
+
 } // namespace cvc

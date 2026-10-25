@@ -551,6 +551,18 @@ and the media gate is asked only once the stream is held, so a dropped frame spe
 write that starts and then blocks still holds its own thread until the 3 s watchdog; only an
 asynchronous write path would avoid that.)
 
+**Media defaults and the uplink.**
+- **Camera:** `conference_roster.ari` captures it at 320x240, 15 fps and JPEG q60
+  (`stream-capture-camera`'s `quality`). That is about 0.6 Mbit/s per receiver, against about 5 for the
+  former 640x480, q70 and 30 fps. Peer tiles are about 300 px wide.
+- **Silence is not sent:** arigl sends no mic chunk below -48 dBFS RMS more than 0.8 s after the last
+  louder one, so a silent or muted mic costs nothing, and it sends a muted camera at 1 fps.
+- **Browser uplink:** a browser's `send_backlog` is now the WebSocket's `bufferedAmount`. Its uplink
+  therefore drops media at the 32 KB threshold instead of queueing it without bound behind everything
+  else, the link probe included.
+- **Audio first:** on every WebSocket link, audio gets four times video's backlog allowance.
+- **Next:** Opus audio (the mic is still raw f32, about 1.5 Mbit/s while talking) and per-receiver rungs.
+
 **Transport and journal changes** (detail in DISTRIBUTED_STATE_ROADMAP.md, "Landed for the conference
 relay"): a deny-only per-peer delivery predicate on `state_peer_registry`; write-once connection
 identity (fixes a `remote_node_id` data race; a second Hello is ignored); the registry honoured on every
@@ -792,7 +804,10 @@ reconcile-correction sum varies two-fold between identical runs, so it says noth
   tree~~ **done**: `broadcast_snapshot` now sends each connection only the entries it does not already
   hold. Per connection it keeps a digest of what the last snapshot frame carried for each path, and
   forgets a path whenever any other frame touching it is written to that peer or arrives from it
-  (a live mutation, a push, the peer's own write). A missed live re-fan is still healed on the next
+  (a live mutation, a push, the peer's own write). A peer's own paths (`state_inbound_gate::sources`)
+  are never re-sent to it: the relay's copy is at best what the peer holds, and older while its next
+  write is in flight. That echo made a walking client predict on its previous intent. A missed live
+  re-fan is still healed on the next
   call, and an unchanged tree costs nothing. A client gets the whole tree only when it asks
   (`state_transport_ws::request_full_refresh`, a SnapshotRequest) — for state it dropped on its own
   side, which the relay cannot see. There is no periodic full snapshot. The broadcast still snapshots

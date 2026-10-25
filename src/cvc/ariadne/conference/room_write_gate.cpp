@@ -115,6 +115,10 @@ bool room_write_gate::admit(const std::string &node_id, const cvc::state_message
   return own_path(node_id, m.path);
 }
 
+bool room_write_gate::sources(const std::string &node_id, const std::string &path) const {
+  return may_write(node_id, path, cvc::state_mutation_op::set_value);
+}
+
 } // namespace conference
 } // namespace ariadne
 } // namespace cvc

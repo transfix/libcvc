@@ -626,6 +626,14 @@ public:
     const int fd = ws->next_layer().native_handle();
     if (fd >= 0 && ::ioctl(fd, SIOCOUTQ, &unsent) == 0 && unsent > 0)
       return static_cast<std::size_t>(unsent);
+#elif defined(__EMSCRIPTEN__)
+    // The browser's own queue (WebSocket.bufferedAmount): a send never blocks there, so without
+    // this a slow uplink only grows the queue, and every frame behind it -- the link probe too --
+    // waits longer.
+    size_t buffered = 0;
+    if (em_socket >= 0 &&
+        emscripten_websocket_get_buffered_amount(em_socket, &buffered) == EMSCRIPTEN_RESULT_SUCCESS)
+      return buffered;
 #endif
     return 0;
   }
@@ -1434,7 +1442,10 @@ std::size_t state_transport_ws::write_media(const media_frame &m, const void *ex
     // buffer small so the small, must-deliver STATE writes (roster join/leave + the periodic
     // re-broadcast below) are never crowded out or deferred. Dropping video to a slow peer is
     // invisible; a stalled roster makes clients unable to SEE each other at all.
-    if (backlog_drop != 0 && c->send_backlog() > backlog_drop) {
+    // Audio (a frame with a sample rate) is small and the first thing a listener misses, so it
+    // has four times video's allowance: a congested link sheds video first.
+    const std::size_t limit = m.sample_rate > 0 ? backlog_drop * 4 : backlog_drop;
+    if (backlog_drop != 0 && c->send_backlog() > limit) {
       _media_backlog_dropped.fetch_add(1, std::memory_order_relaxed);
       continue;
     }
@@ -2090,6 +2101,10 @@ std::size_t state_transport_ws::broadcast_snapshot() {
         for (std::size_t i = 0; i < ss.entries.size(); ++i) {
           const snapshot_entry &e = ss.entries[i];
           if (!view.deliver(e.path))
+            continue;
+          // Never a peer's own value back to it: the peer is its source, and our copy can be
+          // older than what it holds (state_inbound_gate::sources).
+          if (c->gate && pid && c->gate->sources(*pid, e.path))
             continue;
           // Keyed by path alone, as the receiver applies every entry to every shard it has.
           auto [it, fresh] = c->held.try_emplace(e.path);

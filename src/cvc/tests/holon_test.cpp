@@ -354,10 +354,15 @@ TEST(HolonTest, ServerAppliesAStampedIntentAtItsTick) {
 // walk with several key changes, reconcile corrects nothing. The same exchange with no lead (the
 // intents arrive late) needs corrections -- the latency the lead removes.
 namespace {
-double total_correction(std::uint64_t lead) {
+// The walk below over a link of kDelay frames each way, the client leading by `lead`. With
+// `stepped_lead` the host raises the lead mid-walk (frame 120, walking), as arigl does when the
+// round trip grows; `slew` is holon_config::lead_slew.
+double total_correction(std::uint64_t lead, std::uint64_t stepped_lead = 0, double slew = 0.05) {
   constexpr int kDelay = 6; // frames (= ticks) each way
   holon server(holon_role::server);
-  holon client(holon_role::client);
+  holon_config cfg;
+  cfg.lead_slew = slew;
+  holon client(holon_role::client, cfg);
   server.add_participant("A");
   client.add_participant("A", /*local=*/true);
   client.set_lead_ticks(lead);
@@ -377,6 +382,8 @@ double total_correction(std::uint64_t lead) {
   double corrected = 0.0;
   avatar_intent cur;
   for (int f = 0; f < 400; ++f) {
+    if (f == 120 && stepped_lead != 0)
+      client.set_lead_ticks(stepped_lead);
     // Keys: walk +x, strafe, stop, walk -y, stop.
     avatar_intent want = cur;
     if (f == 60)
@@ -424,8 +431,70 @@ TEST(HolonTest, ALeadingClientNeedsNoCorrections) {
   EXPECT_GT(total_correction(/*lead=*/0), 0.1) << "without the lead the intents land late";
 }
 
-TEST(HolonTest, ClientAlignsAheadOfTheServerByItsLead) {
+// The round trip grows mid-walk and the host raises the lead by more than the slack (arigl does
+// this from the measured RTT). Slewing the clock into the new lead keeps every logged input, so
+// the walk still needs no correction; seeking to it drops them, and the next sample snaps the
+// avatar back -- the jump a client saw of its own avatar whenever its ping moved.
+TEST(HolonTest, ALongerLeadIsSlewedIntoWithoutACorrection) {
+  EXPECT_EQ(total_correction(/*lead=*/14, /*stepped_lead=*/24, /*slew=*/0.05), 0.0);
+  EXPECT_GT(total_correction(/*lead=*/14, /*stepped_lead=*/24, /*slew=*/0.0), 0.01)
+      << "seeking instead drops the inputs in flight";
+}
+
+// A drift past the slack but within max_skew_ticks slews the clock: it runs fast until it is
+// within a tick of the target, then at its scale again -- no seek, no dropped inputs.
+TEST(HolonTest, ClientSlewsTowardANewLead) {
   holon client(holon_role::client);
+  client.add_participant("A", /*local=*/true);
+  client.set_lead_ticks(14);
+  body_state s;
+  client.apply_authoritative("A", s, 100); // join: seeks to 114
+  ASSERT_EQ(client.tick(), 114u);
+  ASSERT_EQ(client.clock_realigns(), 1u);
+  client.set_lead_ticks(24); // the round trip grew
+  std::uint64_t server = 100;
+  client.apply_authoritative("A", s, ++server); // target 125, 11 behind
+  EXPECT_EQ(client.tick(), 114u) << "no seek";
+  EXPECT_TRUE(client.clock_slewing());
+  EXPECT_EQ(client.clock_slews(), 1u);
+  const double dt = client.clock().fixed_dt();
+  int frames = 0;
+  while (client.clock_slewing() && frames < 2000) {
+    client.advance(dt); // the server advances one tick a frame, the client a little more
+    client.apply_authoritative("A", s, ++server);
+    ++frames;
+  }
+  EXPECT_FALSE(client.clock_slewing()) << "converged after " << frames << " frames";
+  const std::uint64_t target = server + 24;
+  EXPECT_LE(client.tick() > target ? client.tick() - target : target - client.tick(), 1u);
+  EXPECT_EQ(client.clock_realigns(), 1u) << "only the join seeked";
+  EXPECT_DOUBLE_EQ(client.clock().scale(), 1.0) << "and the clock runs at its scale again";
+}
+
+// The client's own avatar is shown between its last two quanta by the frame's alpha, as a peer is:
+// frames that fall between quanta still move it, instead of a stair-step of still frames and
+// whole-quantum jumps (which the camera following it spread to the whole view).
+TEST(HolonTest, TheLocalAvatarIsShownBetweenQuanta) {
+  holon client(holon_role::client);
+  client.add_participant("A", /*local=*/true);
+  client.set_intent("A", avatar_intent{vec3{2.0, 0.0, 0.0}});
+  const double dt = client.clock().fixed_dt();
+  client.advance(1.5 * dt); // one quantum, alpha 0.5
+  const double a = client.display_pose("A").position.x;
+  client.advance(0.25 * dt); // no quantum, alpha 0.75
+  const double b = client.display_pose("A").position.x;
+  client.advance(0.5 * dt); // a quantum, alpha 0.25
+  const double c = client.display_pose("A").position.x;
+  EXPECT_NEAR(a, 0.5 * 2.0 * dt, 1e-9);
+  EXPECT_NEAR(b, 0.75 * 2.0 * dt, 1e-9) << "a frame between quanta still moves it";
+  EXPECT_NEAR(c, 1.25 * 2.0 * dt, 1e-9);
+  EXPECT_NEAR(client.state("A").position.x, 2.0 * 2.0 * dt, 1e-9) << "the state is still exact";
+}
+
+TEST(HolonTest, ClientAlignsAheadOfTheServerByItsLead) {
+  holon_config cfg;
+  cfg.lead_slew = 0.0; // seek, to see the alignment at once (ClientSlewsTowardANewLead slews)
+  holon client(holon_role::client, cfg);
   client.add_participant("A", /*local=*/true);
   client.set_lead_ticks(14);
   body_state s;
@@ -441,7 +510,9 @@ TEST(HolonTest, ClientAlignsAheadOfTheServerByItsLead) {
 // Every clock seek drops the local avatar's unacknowledged inputs, so after the one at join a
 // client should see none; clock_realigns counts them, so a host can tell when it does.
 TEST(HolonTest, RealignCounterCountsSeeks) {
-  holon client(holon_role::client);
+  holon_config cfg;
+  cfg.lead_slew = 0.0; // every drift past the slack seeks
+  holon client(holon_role::client, cfg);
   client.add_participant("A", /*local=*/true);
   client.add_participant("B", /*local=*/false);
   client.set_lead_ticks(14);

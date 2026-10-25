@@ -1384,6 +1384,42 @@ TEST(RoomRelayLoopbackTest, RoomTokenAdmitsOnlyItsHolders) {
   }
 }
 
+// The relay's ~1 Hz WebSocket re-broadcast never sends a client its own intent back. The client is
+// the source: the relay's copy is at best what the client holds, and older while the client's next
+// write is in flight -- the echo that made a walking client's own avatar jump (it predicted on its
+// previous intent until the next broadcast). Here the newer write is held back until after the
+// broadcast, so the relay still has the older one.
+TEST(RoomRelayLoopbackTest, ABroadcastNeverEchoesAClientsOwnIntent) {
+#if !defined(CVC_ENABLE_WS)
+  GTEST_SKIP() << "no WebSocket transport in this build";
+#else
+  test_relay r(relay_options{});
+  test_client A("A", link_kind::ws);
+  const std::vector<test_client *> cs = {&A};
+  ASSERT_NO_FATAL_FAILURE(bring_up(r, cs));
+  cvc::ariadne::avatar_intent first, second;
+  first.move = {0.5, 0.0, 0.0};
+  second.move = {0.0, 0.5, 0.0};
+  cvc::ariadne::write_intent(A.app, kRoom, "A", first, 100);
+  ASSERT_TRUE(run_room(r, cs, 3.0, {}, [&] {
+    cvc::ariadne::avatar_intent got;
+    return cvc::ariadne::read_intent(r.app, kRoom, "A", got) && got.move.x == 0.5;
+  })) << "the relay has A's first intent";
+
+  // A's second intent, not sent yet; then the relay re-broadcasts the room.
+  cvc::ariadne::write_intent(A.app, kRoom, "A", second, 200);
+  r.ws.broadcast_snapshot();
+  std::this_thread::sleep_for(std::chrono::milliseconds(400)); // A's reader applies what came
+  cvc::ariadne::avatar_intent got;
+  std::uint64_t stamp = 0;
+  ASSERT_TRUE(cvc::ariadne::read_intent(A.app, kRoom, "A", got, &stamp));
+  EXPECT_EQ(stamp, 200u) << "A still holds its second intent, not the relay's copy of its first";
+  EXPECT_DOUBLE_EQ(got.move.y, 0.5);
+  EXPECT_FALSE(cvc::ariadne::read_current_intent(A.app, kRoom, "A", 300, got))
+      << "and an intent older than A's last proposal is never taken as current";
+#endif
+}
+
 // Device keys (state_device_key.h): a device that proves its key gets its tag, on each transport
 // the build has. A second device showing the same id under another key (an impostor that learned
 // the id) is refused and gets none, nor does a device with an id and no key; and the first device

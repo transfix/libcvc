@@ -97,6 +97,15 @@ void write_intent(cvc::app &app, const std::string &room, const std::string &pid
 bool read_intent(cvc::app &app, const std::string &room, const std::string &pid,
                  avatar_intent &out_intent, std::uint64_t *out_tick = nullptr);
 
+// CLIENT: the intent the tree holds for our own `pid`, unless it is older than the one we proposed
+// last (stamped `proposed_tick`, what propose_intent returned; 0 = none yet). A stamp below it is
+// an ECHO of an earlier proposal -- a relay's re-broadcast can carry our previous intent back after
+// the newer one left -- and predicting with it would walk the avatar on input the server no longer
+// has: false, and `out` is untouched. A stamp of 0 (an intent the document wrote,
+// room-set-intent) is always taken.
+bool read_current_intent(cvc::app &app, const std::string &room, const std::string &pid,
+                         std::uint64_t proposed_tick, avatar_intent &out);
+
 // The holon configuration every conference room uses, on the relay and in every client (they must
 // agree: the client predicts with the server's physics): rigid-body avatars in a Jolt world.
 holon_config room_holon_config();
@@ -134,9 +143,9 @@ void client_pump(holon &h, cvc::app &app, const std::string &room, const std::st
 // Propose the local avatar's intent (client side): the client holon predicts with it from its next
 // tick, and it is written to <self>.intent stamped with that tick, for the server to validate and
 // apply at the same tick (see holon::set_lead_ticks). Call it when the intent CHANGES (each call is
-// a replicated write), not every frame.
-void propose_intent(holon &h, cvc::app &app, const std::string &room, const std::string &self_pid,
-                    const avatar_intent &intent);
+// a replicated write), not every frame. Returns the stamp (for read_current_intent).
+std::uint64_t propose_intent(holon &h, cvc::app &app, const std::string &room,
+                             const std::string &self_pid, const avatar_intent &intent);
 
 } // namespace ariadne
 } // namespace cvc

@@ -210,6 +210,18 @@ bool read_intent(cvc::app &app, const std::string &room, const std::string &pid,
   return true;
 }
 
+bool read_current_intent(cvc::app &app, const std::string &room, const std::string &pid,
+                         std::uint64_t proposed_tick, avatar_intent &out) {
+  avatar_intent tree;
+  std::uint64_t stamp = 0;
+  if (!read_intent(app, room, pid, tree, &stamp))
+    return false;
+  if (stamp != 0 && stamp < proposed_tick)
+    return false; // an echo of an earlier proposal
+  out = tree;
+  return true;
+}
+
 holon_config room_holon_config() {
   holon_config cfg;
   cfg.physics = true;
@@ -345,11 +357,13 @@ void client_pump(holon &h, cvc::app &app, const std::string &room, const std::st
   h.advance(wall_dt);
 }
 
-void propose_intent(holon &h, cvc::app &app, const std::string &room, const std::string &self_pid,
-                    const avatar_intent &intent) {
+std::uint64_t propose_intent(holon &h, cvc::app &app, const std::string &room,
+                             const std::string &self_pid, const avatar_intent &intent) {
   // The holon predicts with it from its next quantum; stamp it with that tick.
   h.set_intent(self_pid, intent);
-  write_intent(app, room, self_pid, intent, h.tick() + 1);
+  const std::uint64_t stamp = h.tick() + 1;
+  write_intent(app, room, self_pid, intent, stamp);
+  return stamp;
 }
 
 } // namespace ariadne

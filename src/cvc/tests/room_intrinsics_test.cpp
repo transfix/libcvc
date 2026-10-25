@@ -300,6 +300,23 @@ TEST(RoomWriteGate, AParticipantWritesOnlyItsOwnSubtree) {
   EXPECT_FALSE(gate.admit("alice", msg));
 }
 
+// A participant is the source of what it may write, so the relay's re-broadcast never sends it back
+// (state_inbound_gate::sources); the relay's own keys and other participants' are still sent.
+TEST(RoomWriteGate, AParticipantSourcesWhatItWrites) {
+  const conf::room_write_gate gate("standup");
+  const std::string alice = conf::room_participant_path("standup", "alice");
+  const std::string bob = conf::room_participant_path("standup", "bob");
+  EXPECT_TRUE(gate.sources("alice", alice + ".intent.move.x"));
+  EXPECT_TRUE(gate.sources("alice", alice + ".intent.tick"));
+  EXPECT_TRUE(gate.sources("alice", alice + ".profile.name"));
+  EXPECT_FALSE(gate.sources("alice", alice + ".pose.pos.x")) << "the relay's pose";
+  EXPECT_FALSE(gate.sources("alice", alice + ".device")) << "the relay's device tag";
+  EXPECT_FALSE(gate.sources("alice", bob + ".intent.move.x")) << "another participant";
+  EXPECT_FALSE(gate.sources("alice", "conf.rooms.standup.scene")) << "the room";
+  const cvc::state_inbound_gate open;
+  EXPECT_FALSE(open.sources("alice", alice + ".intent.move.x")) << "a plain gate sources nothing";
+}
+
 // The binding a gate holds: one connection per node id, freed by its holder only.
 TEST(RoomWriteGate, BindsOneConnectionPerNodeId) {
   conf::room_write_gate gate("standup");
