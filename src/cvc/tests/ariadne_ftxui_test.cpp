@@ -195,12 +195,30 @@ TEST(AriadneFtxui, SliderKeysCommitEachStep) {
   EXPECT_EQ(val(t.app, "n"), "1");
 }
 
-TEST(AriadneFtxui, SliderMouseDragCommitsOnRelease) {
+TEST(AriadneFtxui, SliderMouseDragWritesAsItMoves) {
   REQUIRE_FTXUI();
   Term t(group({slider_int("N", "n", 0, 10, 3)}));
   int x = 0, y = 0;
   ASSERT_TRUE(find_cell(t.screen, "N ", x, y)) << t.screen;
   const int gauge = x + 2; // the 20-cell gauge follows "N "
+  t.mouse(TermEvent::Mouse::Press, gauge + 10, y);
+  t.draw();
+  EXPECT_EQ(val(t.app, "n"), "5") << "a held slider writes as it goes";
+  t.mouse(TermEvent::Mouse::Move, gauge + 19, y);
+  t.draw();
+  EXPECT_EQ(val(t.app, "n"), "10");
+  t.mouse(TermEvent::Mouse::Release, gauge + 19, y);
+  EXPECT_EQ(val(t.app, "n"), "10");
+}
+
+TEST(AriadneFtxui, SliderCommitOnReleaseWaitsForTheRelease) {
+  REQUIRE_FTXUI();
+  Widget s = slider_int("N", "n", 0, 10, 3);
+  s.commit_on_release = true;
+  Term t(group({s}));
+  int x = 0, y = 0;
+  ASSERT_TRUE(find_cell(t.screen, "N ", x, y)) << t.screen;
+  const int gauge = x + 2;
   t.mouse(TermEvent::Mouse::Press, gauge + 10, y);
   t.draw();
   EXPECT_EQ(val(t.app, "n"), "3") << "a held slider has not committed yet";

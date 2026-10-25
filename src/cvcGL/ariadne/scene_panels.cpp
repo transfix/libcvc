@@ -35,6 +35,14 @@ void register_scene_panels(ImGuiBackend &backend, SceneGraph &sg, StageLighting 
         return cvc::ariadne::CustomEdit{}; // handled set true by the backend
       });
 
+  // The same items without the panel ticks, which do nothing in a document that places no panels:
+  // what a host puts in a menu of its own (arigl's Settings).
+  backend.register_widget("scene_settings",
+                          [&sg](const std::string &, const cvc::ariadne::Widget &) {
+                            cvc::gl::ui::SceneMenuItems(sg, nullptr, nullptr);
+                            return cvc::ariadne::CustomEdit{};
+                          });
+
   backend.register_widget("scene_panel",
                           [&sg, flags](const std::string &, const cvc::ariadne::Widget &) {
                             cvc::gl::ui::ScenePanel(sg, &flags->scene); // its own window

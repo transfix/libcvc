@@ -435,6 +435,29 @@ windows:
   EXPECT_TRUE(room->on.empty()); // on: is optional for input_text (no warning, unlike button)
 }
 
+// A slider's `commit:` -- live by default, `release` for a key too costly to write every frame; any
+// other value warns and stays live.
+TEST(AriadneLoader, SliderCommitPolicy) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+root:
+  - slider_float: Live
+    bind: a
+  - slider_int: Held
+    bind: b
+    commit: release
+  - slider_float: Typo
+    bind: c
+    commit: onrelease
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_FALSE(find(r.root, Kind::SliderFloat, "Live")->commit_on_release);
+  EXPECT_TRUE(find(r.root, Kind::SliderInt, "Held")->commit_on_release);
+  EXPECT_FALSE(find(r.root, Kind::SliderFloat, "Typo")->commit_on_release);
+  EXPECT_TRUE(has_warning(r, "commit: 'onrelease'"));
+}
+
 // §12/§3.0.3b: a window `include:` site may override the instantiated unit's geometry (pos/size/
 // layout/frame) without forking the shared unit — so a demo arranges reusable panels. An override
 // applies only to the keys present; the component stays layout-agnostic.

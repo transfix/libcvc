@@ -43,10 +43,11 @@
 // as text (--ansi keeps its colours), plus the rendered scene as --png if given.
 // check loads the document as run would, offscreen, and prints its warnings.
 //
-// A gallery: with $CVC_ARIGL_GALLERY naming a catalog of demos (gallery.h), run in a window puts a
-// Demos menu first in every document's menubar. A demo there that is a .ari document replaces the
-// running one in the same window; any other opens on its own (its page in the browser, its program
-// natively).
+// run in a window adds a Settings menu after the document's own (the scene's shadows, grid, axis
+// and bounding boxes). A gallery: with $CVC_ARIGL_GALLERY naming a catalog of demos (gallery.h),
+// the menu bar is arigl's, the same for every document: Demos, Document (the document's own menus)
+// and Settings. A demo picked from Demos that is a .ari document replaces the running one in the
+// same window; any other opens on its own (its page in the browser, its program natively).
 
 #include <algorithm>
 #include <cctype> // std::isalnum / std::isdigit — sanitize the conference node id
@@ -154,8 +155,9 @@ int usage(int code) {
                "with, the capabilities a document's requires: and (has? ...) see, and how many\n"
                "functions programs can call (--functions lists them; --json prints JSON).\n"
                "\n"
-               "With CVC_ARIGL_GALLERY naming a catalog of demos (JSON), run adds a Demos menu:\n"
-               "a .ari demo picked there replaces the document in this window.\n",
+               "With CVC_ARIGL_GALLERY naming a catalog of demos (JSON), run adds a Demos menu\n"
+               "and puts the document's own menus under Document; a .ari demo picked from Demos\n"
+               "replaces the document in this window.\n",
                ari::host_flags_help().c_str());
   return code;
 }
@@ -1154,7 +1156,9 @@ int run_window(const ari::HostOptions &o) {
 
   cvc::app app;
   cvc::gl::SceneGraph sg(app, o.prefix.empty() ? kDefaultPrefix : o.prefix);
-  cvc::gl::SceneRenderer view(sg, width, height, offscreen, "arigl");
+  // The viewer is "main", as the shared components expect: camera_controls binds
+  // viewers.main.camera.settings.*.
+  cvc::gl::SceneRenderer view(sg, width, height, offscreen, "main");
   view.setBackground(0.09, 0.10, 0.12);
   cvc::gl::CameraController cam(view);
   cam.setMode(cvc::gl::CameraController::Mode::Orbit);
@@ -1194,8 +1198,8 @@ int run_window(const ari::HostOptions &o) {
     info.gl = describe_gl(view, info.gl_info);
     return print_info(std::move(info), o);
   }
-  // A gallery ($CVC_ARIGL_GALLERY): its Demos menu leads every document's menubar, and a demo
-  // picked there that is a document loads in this window between frames (the run loop below).
+  // A gallery ($CVC_ARIGL_GALLERY): a demo picked from its Demos menu that is a document loads in
+  // this window between frames (the run loop below).
   std::string gallery_error;
   const arigl::gallery gallery = arigl::gallery::load(
       std::getenv("CVC_ARIGL_GALLERY") ? std::getenv("CVC_ARIGL_GALLERY") : "", &gallery_error);
@@ -1203,16 +1207,25 @@ int run_window(const ari::HostOptions &o) {
     std::fprintf(stderr, "arigl: CVC_ARIGL_GALLERY: %s\n", gallery_error.c_str());
   std::string gallery_next;  // a document the Demos menu asked for
   bool gallery_left = false; // the Demos menu started another program
-  if (!gallery.empty()) {
-    rt.app_runtime().set_host_menus({gallery.menu(o.doc)});
+  // arigl's menus: Settings after the document's own; with a gallery, a menu bar of arigl's that
+  // stays the same from document to document, the document's menus under Document.
+  const auto host_menus = [&](const std::string &doc) {
+    std::vector<ari::Widget> menus;
+    if (!gallery.empty())
+      menus.push_back(gallery.menu(doc));
+    menus.push_back(ari::AppRuntime::document_menus(gallery.empty() ? "" : "Document"));
+    menus.push_back(ari::menu("Settings", {ari::custom("scene_settings")}));
+    return menus;
+  };
+  rt.app_runtime().set_host_menus(host_menus(o.doc));
+  if (!gallery.empty())
     gallery.install(rt.app_runtime(), &gallery_next, &gallery_left);
-  }
   if (const int status = load_document(rt, o); status >= 0)
     return status;
   note_misplaced(rt.app_runtime(), o);
   // The rich scene panels (scene_panel / stage_lighting_panel / scene_menu), for a document that
-  // uses them rather than the declarative components. They need the realized lighting rig, so a
-  // document loaded later registers them again.
+  // uses them rather than the declarative components, and Settings' scene_settings. They need the
+  // realized lighting rig, so a document loaded later registers them again.
   const auto register_panels = [&] {
     const gla::RealizedScene *realized = rt.realized();
     cvc::gl::StageLighting *rig =
@@ -1228,7 +1241,7 @@ int run_window(const ari::HostOptions &o) {
     if (gallery_next.empty())
       return;
     const std::string next = std::exchange(gallery_next, std::string());
-    rt.app_runtime().set_host_menus({gallery.menu(next)});
+    rt.app_runtime().set_host_menus(host_menus(next));
     rt.app_runtime().set_document_args({}, "arigl run " + next);
     try {
       print_warnings(rt.load(next));

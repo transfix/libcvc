@@ -59,11 +59,18 @@ public:
   // Bind a host action `event` to a C++ handler, run inside drain(), never mid-walk.
   void on(const std::string &event, std::function<void()> handler);
 
-  // Menus the host puts in every document it mounts, ahead of the document's own: a gallery's
-  // Demos menu, say, whose menu_action events the host handles with on(). A document without a
-  // menubar gets one holding just these. Applied by the next load() or set_root(); empty (the
+  // Menus the host puts in every document it mounts: a gallery's Demos menu, say, whose
+  // menu_action events the host handles with on(). Where the list holds document_menus(), the
+  // document's own menus go there; otherwise the host's go first, ahead of the document's. A
+  // document without a menubar gets one. Applied by the next load() or set_root(); empty (the
   // default) leaves documents as written.
   void set_host_menus(std::vector<Widget> menus);
+
+  // The place among set_host_menus() for the document's own menus. Given a label, it is one menu
+  // of that name holding them as submenus, so the menu bar stays the same from one document to the
+  // next (the menu is greyed out for a document without menus). Without one, the document's menus
+  // stand in the bar as written, and a host menu named like one of them adds its items to it.
+  static Widget document_menus(std::string label = std::string());
 
   // Register a host verb the .ari program can call. register_verb is SYNCHRONOUS (fn runs
   // inline on the drain thread, no args/return). register_async_verb OFFLOADS `work` to the

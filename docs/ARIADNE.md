@@ -201,8 +201,10 @@ the reconcile, and all `cvc::state`; the Backend owns only the surface** — it 
 value handed to it and reports the edit, and never touches `cvc::state` itself.
 
 Each state-bound primitive returns `{changed, committed, value}`
-([`backend.h`](../inc/cvc/ariadne/backend.h)). Core writes state **only on
-`committed`**, so a slider drag is one write on release, not one write per frame.
+([`backend.h`](../inc/cvc/ariadne/backend.h)). Core writes state on `committed`, and a
+slider's on every `changed` too, so whatever it drives follows the drag. A slider with
+`commit: release` writes once, when the drag ends, for a key whose change is too costly to
+redo every frame.
 
 A backend advertises `Capabilities{windows, menubar, mouse, keyboard, color, glsl,
 view_embed, owns_loop, terminal, bitmap, kitty, sixel}`
@@ -252,8 +254,8 @@ Three backends ship:
     it shows whatever still image is published under the stream's name (`--image`).
 
   Commit edges match the ImGui backend: discrete widgets commit on the edit, a
-  mouse-dragged slider commits on release (arrow-key steps commit at once), a text field
-  commits on Enter or when focus leaves it. Authored px convert to cells by a nominal cell
+  mouse-dragged slider reports each move and commits on release (arrow-key steps commit at
+  once), a text field commits on Enter or when focus leaves it. Authored px convert to cells by a nominal cell
   size (`Options::cell_px_w/h`, 8 × 16), and reported geometry converts back, so a layout
   persisted under one backend holds under the other. Grid seams drag: a row split's
   panes and a `resizable` table's columns resize with the mouse; a row split persists
@@ -1004,19 +1006,25 @@ are reproducible. The cvcGL examples
 `arigl` is meant to replace them once it does everything they do.
 
 **A gallery of documents.** With `CVC_ARIGL_GALLERY` naming a catalog of demos (JSON,
-[`src/arigl/gallery.h`](../src/arigl/gallery.h)), `arigl run` puts a **Demos** menu first in
-every document's menubar. A demo there that is a `.ari` document loads in place of the running
-one, in the same window; any other demo opens on its own (its page in the browser, its program
-natively). That is how the examples' browser gallery runs every `.ari` demo in one app
+[`src/arigl/gallery.h`](../src/arigl/gallery.h)), `arigl run`'s menu bar is its own and the same
+for every document: **Demos**, **Document** (the document's own menus, as submenus) and
+**Settings** (the scene's shadows, grid, origin axis, bounding boxes and extent labels, which
+`arigl` without a gallery adds after the document's menus). A demo picked from Demos that is a
+`.ari` document loads in place of the running one, in the same window; any other demo opens on
+its own (its page in the browser, its program natively). That is how the examples' browser gallery runs every `.ari` demo in one app
 (`<gallery>/arigl/?doc=<name>`). The catalogs come from `examples/web/demos.json`: the build tree
 and the `libcvc-examples` install get one (`share/libcvc-examples/gallery.json`), and the browser
 gallery writes one for what it deployed.
 
 Two `AppRuntime` pieces make that possible for any host:
 
-- `set_host_menus(menus)` puts the host's menus in every document it mounts, ahead of the
-  document's own, and gives a document without a menubar one. Their `menu_action` events go to
-  the host's `on()` handlers.
+- `set_host_menus(menus)` puts the host's menus in every document it mounts, and gives a
+  document without a menubar one. Their `menu_action` events go to the host's `on()` handlers.
+  The document's own menus go where the list holds `AppRuntime::document_menus()`: given a
+  label, inside one menu of that name, so the bar keeps its shape from document to document (the
+  menu is greyed out for a document without menus); without one, in the bar as written, where a
+  host menu named like one of them adds its items to it. With no `document_menus()`, the host's
+  menus go first.
 - `load()` clears the last document's scene first (`SceneAdapter::clear()`: its nodes, free
   lights, rigs, physics, and the background, shadows and chrome it set), whether it is a hot
   reload or a switch to another document. A document without `channels:` also drops the last

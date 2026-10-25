@@ -899,6 +899,25 @@ TEST(AriadneRuntime, SliderReadsLiveStateNotDefault) {
   EXPECT_TRUE(mb.saw("slider_int:N=42")); // the state value, not the widget default 5
 }
 
+// A slider writes its key on every change while it is dragged; with commit: release, only when the
+// drag ends.
+TEST(AriadneRuntime, SliderWritesWhileDraggedUnlessCommitOnRelease) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  Widget held = slider_int("Held", "demo.held", 0, 100, 5);
+  held.commit_on_release = true;
+  rt.set_root(group({slider_int("N", "demo.n", 0, 100, 5), held}));
+  mb.slider_int_ret = IntEdit{true, false, 37}; // mid-drag: changed, not yet released
+  rt.render();
+  EXPECT_EQ(cvc::state::instance(app)("demo.n").value(), "37");
+  EXPECT_EQ(cvc::state::instance(app)("demo.held").value(), "5"); // the seed, not the drag
+  mb.slider_int_ret = IntEdit{false, true, 40};                   // released
+  rt.render();
+  EXPECT_EQ(cvc::state::instance(app)("demo.held").value(), "40");
+}
+
 TEST(AriadneRuntime, PrefixResolvesRelativeBinds) {
   cvc::app app;
   Runtime rt(app, "ui.demo"); // relative binds splice onto this
@@ -3329,6 +3348,93 @@ TEST(AriadneAppRuntime, HostMenusLeadEveryDocumentsMenubar) {
   art.set_root(group({text("built in C++")}));
   art.runtime().render();
   EXPECT_GE(menu_at(mb, "Demos"), 0);
+}
+
+// With document_menus("Document") among the host's menus the bar is the host's and the same for
+// every document: the document's menus are submenus of Document, which is greyed out (not dropped)
+// for a document without any.
+TEST(AriadneAppRuntime, HostMenuBarStaysTheSameAcrossDocuments) {
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  cvc::app app;
+  MockBackend mb;
+  AppRuntime art(app, "ui.docs.d");
+  art.set_backend(mb);
+  art.set_host_menus({menu("Demos", {menu_action("other", "gallery:1")}),
+                      AppRuntime::document_menus("Document"),
+                      menu("Settings", {menu_action("Grid", "grid")})});
+  art.load(write_doc("host_bar_a.ari", "meta: {min_libcvc: 3.4.0}\n"
+                                       "menubar:\n"
+                                       "  - menu: File\n"
+                                       "    items:\n"
+                                       "      - menu_item: Quit\n"
+                                       "        on: quit\n"
+                                       "  - menu: Gallery\n"
+                                       "    items:\n"
+                                       "      - menu_item: Next\n"
+                                       "        on: next\n"));
+  art.runtime().render();
+  const std::vector<std::string> top = {"Demos", "Document", "Settings"};
+  ASSERT_GE(menu_at(mb, "Demos"), 0);
+  EXPECT_LT(menu_at(mb, "Demos"), menu_at(mb, "Document"));
+  EXPECT_LT(menu_at(mb, "Document"), menu_at(mb, "File")); // inside Document, in order
+  EXPECT_LT(menu_at(mb, "File"), menu_at(mb, "Gallery"));
+  EXPECT_LT(menu_at(mb, "Gallery"), menu_at(mb, "Settings"));
+  EXPECT_FALSE(mb.saw("begin_disabled"));
+
+  mb.log.clear();
+  art.load(write_doc("host_bar_b.ari", "meta: {min_libcvc: 3.4.0}\n"
+                                       "root:\n"
+                                       "  - text: no menubar here\n"));
+  art.runtime().render();
+  for (const std::string &m : top)
+    EXPECT_GE(menu_at(mb, m), 0) << m;
+  EXPECT_EQ(menu_at(mb, "File"), -1);
+  const auto dis = std::find(mb.log.begin(), mb.log.end(), "begin_disabled");
+  ASSERT_NE(dis, mb.log.end());
+  EXPECT_EQ(*(dis + 1), "begin_menu:Document"); // the empty Document menu, greyed out
+}
+
+// With an unlabelled document_menus() the document's menus stand in the bar as written, among the
+// host's; a host menu named like one of them adds its items to it after a separator.
+TEST(AriadneAppRuntime, HostMenusBesideTheDocumentsOwn) {
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  cvc::app app;
+  MockBackend mb;
+  AppRuntime art(app, "ui.docs.d");
+  art.set_backend(mb);
+  art.set_host_menus(
+      {AppRuntime::document_menus(), menu("Settings", {menu_action("Grid", "grid")})});
+  art.load(write_doc("host_beside_a.ari", "meta: {min_libcvc: 3.4.0}\n"
+                                          "menubar:\n"
+                                          "  - menu: Sim\n"
+                                          "    items:\n"
+                                          "      - menu_item: Quit\n"
+                                          "        on: quit\n"
+                                          "  - menu: Settings\n"
+                                          "    items:\n"
+                                          "      - menu_item: Panel\n"
+                                          "        on: panel\n"));
+  art.runtime().render();
+  EXPECT_LT(menu_at(mb, "Sim"), menu_at(mb, "Settings"));
+  EXPECT_EQ(std::count(mb.log.begin(), mb.log.end(), "begin_menu:Settings"), 1);
+  const auto at = [&](const std::string &e) {
+    return std::find(mb.log.begin(), mb.log.end(), e) - mb.log.begin();
+  };
+  EXPECT_LT(at("menu_action:Panel"), at("separator"));
+  EXPECT_LT(at("separator"), at("menu_action:Grid"));
+
+  mb.log.clear();
+  art.load(write_doc("host_beside_b.ari", "meta: {min_libcvc: 3.4.0}\n"
+                                          "menubar:\n"
+                                          "  - menu: Sim\n"
+                                          "    items:\n"
+                                          "      - menu_item: Quit\n"
+                                          "        on: quit\n"));
+  art.runtime().render();
+  EXPECT_LT(menu_at(mb, "Sim"), menu_at(mb, "Settings")); // the host's own, after the document's
+  EXPECT_FALSE(mb.saw("separator"));
 }
 
 // Every load clears the last document's scene before anything is realized -- a host switching

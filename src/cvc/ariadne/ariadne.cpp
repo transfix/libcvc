@@ -1348,7 +1348,7 @@ void Runtime::Impl::emit_node(const Widget &w) {
     const std::string path = resolve(w.bind);
     const int cur = read_or_seed<int>(app, path, w.idef);
     const IntEdit e = b.slider_int(label, path.c_str(), cur, w.ilo, w.ihi);
-    if (e.committed)
+    if (e.committed || (e.changed && !w.commit_on_release)) // live while dragged, by default
       write<int>(app, path, e.value);
     break;
   }
@@ -1357,7 +1357,7 @@ void Runtime::Impl::emit_node(const Widget &w) {
     const std::string path = resolve(w.bind);
     const double cur = read_or_seed<double>(app, path, w.def);
     const DoubleEdit e = b.slider_double(label, path.c_str(), cur, w.lo, w.hi, w.fmt.c_str());
-    if (e.committed)
+    if (e.committed || (e.changed && !w.commit_on_release))
       write<double>(app, path, e.value);
     break;
   }

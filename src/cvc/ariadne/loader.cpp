@@ -177,6 +177,7 @@ const char *const kAriSchema = R"ARISCHEMA({
         "hi": {"type": "number"},
         "def": {"type": ["number", "boolean", "string"]},
         "fmt": {"type": "string"},
+        "commit": {"enum": ["live", "release"]},
         "options": {"type": ["array", "string"], "items": {"type": "string"}},
         "default": {"type": "string"},
         "pos": {"type": "array", "items": {"type": "number"}},
@@ -372,6 +373,15 @@ inline bool known_widget_key(const std::string &k) {
          k == "on_drag_end" || k == "children" || k == "items" || k == "id" ||
          k == "visible_when" || k == "enabled_when" || k == "disabled_when" || k == "tooltip" ||
          k == "repeat";
+}
+
+// A slider's `commit:` — live (the default: every change while dragged) or release (once, at the
+// end of the drag).
+bool commit_on_release(Ctx &ctx, const YAML::Node &n, const std::string &label) {
+  const std::string c = str(n, "commit", "live");
+  if (c != "live" && c != "release")
+    ctx.warn("ari: slider '" + label + "' has commit: '" + c + "' (live or release) — live");
+  return c == "release";
 }
 
 std::vector<Widget> parse_seq(Ctx &ctx, const YAML::Node &seq) {
@@ -601,7 +611,9 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     const int lo = static_cast<int>(num(n, "lo", 0)), hi = static_cast<int>(num(n, "hi", 100));
     if (lo >= hi)
       ctx.warn("ari: slider_int '" + label + "' has lo >= hi");
-    return slider_int(label, bind, lo, hi, static_cast<int>(num(n, "def", 0)));
+    Widget w = slider_int(label, bind, lo, hi, static_cast<int>(num(n, "def", 0)));
+    w.commit_on_release = commit_on_release(ctx, n, label);
+    return w;
   }
   if (type == "slider_float") {
     const std::string bind = str(n, "bind");
@@ -609,7 +621,9 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     const double lo = num(n, "lo", 0.0), hi = num(n, "hi", 1.0);
     if (lo >= hi)
       ctx.warn("ari: slider_float '" + label + "' has lo >= hi");
-    return slider_float(label, bind, lo, hi, num(n, "def", 0.0), str(n, "fmt", "%.3f"));
+    Widget w = slider_float(label, bind, lo, hi, num(n, "def", 0.0), str(n, "fmt", "%.3f"));
+    w.commit_on_release = commit_on_release(ctx, n, label);
+    return w;
   }
   if (type == "combo") {
     const std::string bind = str(n, "bind");

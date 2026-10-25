@@ -191,6 +191,10 @@ struct Widget {
   int ilo = 0, ihi = 100, idef = 0;     // SliderInt
   bool bdef = false;                    // Checkbox / MenuItemToggle default
   std::string fmt = "%.3f";             // SliderFloat printf format
+  // A slider writes its key on every change while it is dragged, so what it drives follows the
+  // drag. `commit: release` (true here) writes once, when the drag ends: for a key whose change is
+  // too costly to redo every frame.
+  bool commit_on_release = false;
   std::string sdef; // Combo default (an option label, or — with `values` — a value)
   std::vector<std::string> options; // Combo options (the DISPLAYED labels)
   // §4 Combo value mapping: a parallel list the same length as `options`, so the bound key holds
