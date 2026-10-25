@@ -20,6 +20,7 @@
 #include <cvc/media/media_router.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_cluster_shard.h>
+#include <cvc/state/state_device_key.h>
 #include <cvc/state/state_peer_registry.h>
 #include <cvc/state/state_transport.h>
 #include <cvc/state/state_transport_grpc.h>
@@ -1934,6 +1935,57 @@ TEST(StateTransportGrpcTest, HelloCarriesTheDeviceId) {
 
   tB.stop();
   tC.stop();
+  tR.stop();
+}
+
+// Device keys (state_device_key.h) over gRPC: as the WebSocket test, a relay with a pin store
+// verifies a client that proves its key, pins it, and refuses another key for the same id.
+TEST(StateTransportGrpcTest, DeviceProofsPinOnFirstUse) {
+  if (!cvc::device_keys_available())
+    GTEST_SKIP() << "no device keys in this build";
+  const std::string dev_b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+  cvc::app aR, aB, aN, aI;
+  cvc::state_transport_grpc tR, tB, tN, tI;
+  tR.set_device_pins(std::make_shared<cvc::state_device_pins>());
+  tR.start("127.0.0.1:0", "R", "C");
+  tR.set_relay(true);
+  const std::string scope = tR.listen_address();
+  tB.set_device_id(dev_b);
+  tB.set_device_signer(cvc::state_device_signer::derive(std::string(32, 'b'), scope));
+  tN.set_device_id("nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn");
+  tI.set_device_id(dev_b);
+  tI.set_device_signer(cvc::state_device_signer::derive(std::string(32, 'i'), scope));
+  tB.start("127.0.0.1:0", "B", "C");
+  tN.start("127.0.0.1:0", "N", "C");
+  tI.start("127.0.0.1:0", "I", "C");
+  cvc::state_cluster_shard sR(aR, "C", "R"), sB(aB, "C", "B"), sN(aN, "C", "N"), sI(aI, "C", "I");
+  for (cvc::state_cluster_shard *s : {&sR, &sB, &sN, &sI})
+    s->attach();
+  tR.register_shard(&sR);
+  tB.register_shard(&sB);
+  tN.register_shard(&sN);
+  tI.register_shard(&sI);
+  ASSERT_TRUE(tB.connect_to_peer(scope, std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(tN.connect_to_peer(scope, std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_until([&] { return tR.total_devices_verified() == 1; }, std::chrono::seconds(3)))
+      << "B proves its key";
+  ASSERT_TRUE(tI.connect_to_peer(scope, std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(
+      wait_until([&] { return tR.total_device_proofs_refused() == 1; }, std::chrono::seconds(3)))
+      << "I shows B's id under another key";
+  ASSERT_TRUE(wait_identified(tR, {"B", "N", "I"}, std::chrono::seconds(3)));
+  std::map<std::string, bool> verified;
+  for (const cvc::state_link_report &l : tR.link_reports())
+    verified[l.remote_node_id] = l.device_verified;
+  EXPECT_TRUE(verified["B"]);
+  EXPECT_FALSE(verified["N"]) << "an id without a key";
+  EXPECT_FALSE(verified["I"]) << "another key for a pinned id";
+  EXPECT_EQ(tR.total_devices_verified(), 1u);
+  EXPECT_EQ(tR.total_device_proofs_refused(), 1u);
+
+  tB.stop();
+  tN.stop();
+  tI.stop();
   tR.stop();
 }
 

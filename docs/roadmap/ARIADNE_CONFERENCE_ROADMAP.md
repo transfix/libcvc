@@ -319,15 +319,51 @@ the per-connection `pid` binding (§5d). Richer identity (OIDC via the existing 
     cannot match one device. A relay ignores a Hello device id that is not 1–64 characters of
     `[A-Za-z0-9._-]`.
   - The relay keeps the raw id to itself. It publishes `participants.<pid>.device`, a room-scoped
-    16-hex tag, from the link holding the pid (bound writes). Every peer sees the same tag for one
-    device in one room across sessions, and nothing links it to another room. The tag is
-    relay-owned; `room_write_gate` refuses a client's write to it.
-  - It is an **identifier, not a credential**: anyone who knows or observes the inputs can compute
-    it. Giving it authority (roles, bans) needs a key the device keeps and the relay pins on first
-    use, the next step before usernames.
-- **Limits:** one shared token per room, so revoking one person means rotating it for everyone.
-  Roles and per-person tokens come later. The separate gRPC media plane (`stream_relay`) does not
-  check the token yet.
+    16-hex tag, from the link holding the pid (bound writes), once that device has proved its key
+    (below). Every peer sees the same tag for one device in one room across sessions, and nothing
+    links it to another room. The tag is relay-owned; `room_write_gate` refuses a client's write
+    to it.
+  - On its own the id is an **identifier, not a credential**: anyone who knows or observes the
+    inputs can compute it. The device key gives it authority.
+- **Device key** (the device id is this device's). `state_device_key.h`: Ed25519, on OpenSSL's
+  libcrypto.
+  - A device keeps one 32-byte seed. Natively it is `%LOCALAPPDATA%\cvc\device-key` (local, not
+    roaming: it should not sync to another machine), or
+    `$XDG_CONFIG_HOME/cvc/device-key` (`~/.config/cvc/device-key`), made on first use (owner-only
+    on POSIX). `CVC_DEVICE_KEY_FILE` names another file, and `CVC_DEVICE_KEY` (64 hex digits) gives
+    the seed itself. The page keeps one in `localStorage` (`cvc.device_key`) beside its device id.
+  - For each relay the device derives its own key: HMAC-SHA256 of the seed and the relay URL. Two
+    relays see unrelated public keys, as they see unrelated device ids.
+  - The relay's `Hello.nonce` is a fresh 32-byte challenge for each client it accepts. The client
+    answers with a `DeviceProof`: its public key and a signature over the nonce, both node ids and
+    its device id, each length-prefixed. One proof per challenge. A proof that reaches the relay
+    before the client's Hello (its reader may answer before its Hello is written) is checked when
+    the Hello comes.
+  - The relay pins the first key a device id shows (trust on first use). A later proof under that
+    key verifies the device. A proof under another key is refused (`device keys: refused N
+    proof(s)`), and so is one that does not verify. A refused device stays in the room, without a
+    tag. A pid taken over by a link that proved no key loses its tag, so the tag never outlives
+    the device that proved it.
+  - The pins are shared by both transports. They are kept in memory, or with `arisrv --device-pins
+    PATH` in a file (one `<device id> <key>` line each), so they outlive a restart. A store holds at
+    most 65,536 pins.
+  - Losing the seed: the page loses its id with it (both are site data), so it is simply a new
+    device. A native device keeps its id (it comes from the machine), so its new key is refused
+    until the operator deletes its line from the pin file. Running it once with another
+    `CVC_DEVICE_KEY` does the same.
+  - Roles and bans can now be keyed to a verified device; usernames come next.
+- **Limits:**
+  - One shared token per room, so revoking one person means rotating it for everyone. Roles and
+    per-person tokens come later.
+  - The separate gRPC media plane (`stream_relay`) does not check the token yet.
+  - Every connection that proves a key adds a pin, joined or not, and a full store refuses every
+    new device (fail closed). A client holding the room token (any client, in an open room) can
+    fill it. So can ordinary use, slowly: each private-window load is a new device. The remedy
+    today is the operator's: delete lines from the pin file, or run with pins in memory. Expiring
+    unused pins, or deriving the device id from the key so no pin is needed, would remove the
+    limit.
+  - Over plain `ws://` or insecure gRPC an active man-in-the-middle can relay the challenge, so
+    deploy behind `wss://` as for the token.
 
 ### 5g. Shared 3D scene + avatars (NEXT WORK — user-requested)
 
@@ -572,6 +608,7 @@ false)` is the old drain-and-publish exactly); arisrv and arigl turn them on.
 | `--scene default\|large` | default | the seeded scene; not an S7 switch (honoured under `--s7 off`) |
 | `--bind-writes on\|off` | on | bound writes (below): each client writes only its own participant, as itself; off takes any client's writes. Not an S7 switch |
 | `--room-token-file PATH` / `CVC_ARISRV_ROOM_TOKEN` | unset (an open room) | admit only clients that present the room token (§5f). Not an S7 switch |
+| `--device-pins PATH` | unset (pins in memory) | keep the device-key pins in PATH, so they outlive a restart (§5f). Device keys are always checked. Not an S7 switch |
 | `CVC_ARISRV_ROOM_DEBUG=1` | off | adds an `[arisrv] aoi` stats line every ~5 s |
 | `CVC_ARIGL_REPLICATE_ROOT` (arigl) | unset = `conf` | empty or `*`: replicate the whole tree (the S6 A/B) |
 | `CVC_ARIGL_LOD=0` (arigl) | LOD on | every room mesh at full detail (the LOD A/B) |

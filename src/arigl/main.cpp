@@ -84,7 +84,8 @@
 #include <cvc/media/media_frame.h>        // cvc::media_frame — the canonical media frame
 #include <cvc/state/state.h>              // cvc::state::instance — conference media state keys
 #include <cvc/state/state_cluster_shard.h>
-#include <cvc/state/state_identity.h> // default_device_id, valid_room_token
+#include <cvc/state/state_device_key.h> // load_device_seed, state_device_signer
+#include <cvc/state/state_identity.h>   // default_device_id, valid_room_token
 #if CVC_ENABLE_WS
 #include <cvc/state/state_transport_ws.h>
 #endif
@@ -553,12 +554,24 @@ struct ConferenceSession {
     }
     // Scoped to this relay, so two relays (two operators) cannot match one device's ids.
     const std::string deviceId = cvc::scoped_device_id(cvc::default_device_id(), relayUrl);
+    // The device's key for this relay (state_device_key.h), derived from the seed it keeps
+    // (CVC_DEVICE_KEY, else a file under the user's config directory; the page keeps one in
+    // localStorage). It answers the relay's challenge, so the relay can pin the device id to it.
+    const std::shared_ptr<const cvc::state_device_signer> deviceKey =
+        cvc::state_device_signer::derive(cvc::load_device_seed(), relayUrl);
+    if (!deviceKey)
+      std::fprintf(stderr,
+                   "arigl: conference: no device key (%s); the relay will not show this "
+                   "device's tag\n",
+                   cvc::device_keys_available() ? "no seed could be read or made"
+                                                : "no OpenSSL in this build");
     bool ok = false;
     if (want_grpc) {
 #if CVC_ENABLE_GRPC
       grpc_ = std::make_unique<cvc::state_transport_grpc>();
       grpc_->set_auth_config({std::string(), roomToken});
       grpc_->set_device_id(deviceId);
+      grpc_->set_device_signer(deviceKey);
       grpc_->start("127.0.0.1:0", nodeId,
                    "conf"); // gRPC must start() (ephemeral port) even to dial
       grpc_->register_shard(shard.get());
@@ -577,6 +590,7 @@ struct ConferenceSession {
       ws_ = std::make_unique<cvc::state_transport_ws>();
       ws_->set_auth_config({std::string(), roomToken});
       ws_->set_device_id(deviceId);
+      ws_->set_device_signer(deviceKey);
       ws_->register_shard(shard.get());
       ws_->set_on_media(on_media);
       tp_ = ws_.get();

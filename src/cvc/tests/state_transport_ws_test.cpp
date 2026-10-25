@@ -22,6 +22,7 @@
 #include <cvc/media/media_router.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_cluster_shard.h>
+#include <cvc/state/state_device_key.h>
 #include <cvc/state/state_transport.h>
 #include <cvc/state/state_transport_ws.h>
 #if defined(CVC_ENABLE_GRPC)
@@ -64,6 +65,93 @@ template <typename Pred> bool wait_until(Pred pred, std::chrono::milliseconds to
 }
 
 std::string ws(const std::string &hostport) { return "ws://" + hostport; }
+
+// Protobuf wire helpers for a raw client (no generated code in the tests): a length-delimited
+// field, and the first length-delimited field FIELD of MSG ("" when absent).
+std::string pb_field(unsigned field, const std::string &bytes) {
+  std::string out;
+  const auto varint = [&out](std::uint64_t v) {
+    for (; v >= 0x80; v >>= 7)
+      out.push_back(static_cast<char>((v & 0x7f) | 0x80));
+    out.push_back(static_cast<char>(v));
+  };
+  varint((field << 3) | 2);
+  varint(bytes.size());
+  return out + bytes;
+}
+std::string pb_get(const std::string &msg, unsigned field) {
+  std::size_t i = 0;
+  const auto varint = [&]() {
+    std::uint64_t v = 0;
+    for (int shift = 0; i < msg.size() && shift < 64; shift += 7) {
+      const auto b = static_cast<unsigned char>(msg[i++]);
+      v |= static_cast<std::uint64_t>(b & 0x7f) << shift;
+      if (!(b & 0x80))
+        break;
+    }
+    return v;
+  };
+  while (i < msg.size()) {
+    const std::uint64_t key = varint();
+    switch (key & 7) {
+    case 0:
+      (void)varint();
+      break;
+    case 1:
+      i += 8;
+      break;
+    case 5:
+      i += 4;
+      break;
+    case 2: {
+      const std::uint64_t n = varint();
+      if (n > msg.size() - (std::min)(i, msg.size()))
+        return {};
+      if ((key >> 3) == field)
+        return msg.substr(i, n);
+      i += n;
+      break;
+    }
+    default:
+      return {};
+    }
+  }
+  return {};
+}
+
+// A WebSocket client speaking raw frames to ADDR (host:port), so a test can send what a
+// state_transport_ws client never would, in any order.
+class raw_ws_client {
+public:
+  explicit raw_ws_client(const std::string &addr) : _resolver(_ioc), _ws(_ioc) {
+    const std::size_t colon = addr.rfind(':');
+    boost::asio::connect(_ws.next_layer(),
+                         _resolver.resolve(addr.substr(0, colon), addr.substr(colon + 1)));
+    _ws.handshake(addr, "/");
+    _ws.binary(true);
+  }
+  // The next binary frame.
+  std::string read() {
+    boost::beast::flat_buffer buf;
+    _ws.read(buf);
+    return boost::beast::buffers_to_string(buf.data());
+  }
+  void write(const std::string &frame) { _ws.write(boost::asio::buffer(frame)); }
+
+private:
+  boost::asio::io_context _ioc;
+  boost::asio::ip::tcp::resolver _resolver;
+  boost::beast::websocket::stream<boost::asio::ip::tcp::socket> _ws;
+};
+
+// Frame{hello: Hello{node_id, cluster_id, device_id}} and Frame{device_proof: DeviceProof}.
+std::string hello_frame(const std::string &node, const std::string &cluster,
+                        const std::string &device) {
+  return pb_field(1, pb_field(1, node) + pb_field(2, cluster) + pb_field(3, device));
+}
+std::string proof_frame(const std::string &key, const std::string &signature) {
+  return pb_field(12, pb_field(1, key) + pb_field(2, signature));
+}
 
 // Spin until `t` reports at least `n` links whose peer has identified itself (sent its Hello). A
 // registry rule or a push keyed by node id only applies to a connection once this holds.
@@ -1405,6 +1493,134 @@ TEST(StateTransportWsTest, LinkReportsShowTheHolderAndAValidDeviceId) {
   tB.stop();
   tB2.stop();
   tC.stop();
+  S.stop();
+}
+
+// Device keys (state_device_key.h): a relay with a pin store challenges each client in its Hello.
+// A client with a key and a device id proves it and is verified, pinning its key; one with an id
+// and no key, or a key and no id, is not; one showing a pinned id under another key is refused.
+// A relay without pins challenges nobody, so nothing is sent to refuse.
+TEST(StateTransportWsTest, DeviceProofsPinOnFirstUse) {
+  if (!cvc::device_keys_available())
+    GTEST_SKIP() << "no device keys in this build";
+  const std::string dev_b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+  cvc::app aS, aB, aN, aK, aI;
+  cvc::state_transport_ws S, tB, tN, tK, tI;
+  S.set_device_pins(std::make_shared<cvc::state_device_pins>());
+  S.start("127.0.0.1:0", "S", "C");
+  S.set_relay(true);
+  cvc::state_cluster_shard sS(aS, "C", "S"), sB(aB, "C", "B"), sN(aN, "C", "N"), sK(aK, "C", "K"),
+      sI(aI, "C", "I");
+  for (cvc::state_cluster_shard *s : {&sS, &sB, &sN, &sK, &sI})
+    s->attach();
+  S.register_shard(&sS);
+  tB.register_shard(&sB);
+  tN.register_shard(&sN);
+  tK.register_shard(&sK);
+  tI.register_shard(&sI);
+  const std::string scope = ws(S.listen_address());
+  tB.set_device_id(dev_b);
+  tB.set_device_signer(cvc::state_device_signer::derive(std::string(32, 'b'), scope));
+  tN.set_device_id("nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn");
+  tK.set_device_signer(cvc::state_device_signer::derive(std::string(32, 'k'), scope));
+  tI.set_device_id(dev_b);
+  tI.set_device_signer(cvc::state_device_signer::derive(std::string(32, 'i'), scope));
+  for (cvc::state_transport_ws *t : {&tB, &tN, &tK})
+    ASSERT_TRUE(t->connect_to_peer(scope, std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(
+      wait_until([&] { return S.total_devices_verified() == 1; }, std::chrono::milliseconds(3000)))
+      << "B proves its key";
+  ASSERT_TRUE(tI.connect_to_peer(scope, std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_until([&] { return S.total_device_proofs_refused() == 1; },
+                         std::chrono::milliseconds(3000)))
+      << "I shows B's id under another key";
+  ASSERT_TRUE(wait_identified(S, 4, std::chrono::milliseconds(3000)));
+  std::map<std::string, bool> verified;
+  for (const cvc::state_link_report &l : S.link_reports())
+    verified[l.remote_node_id] = l.device_verified;
+  EXPECT_TRUE(verified["B"]);
+  EXPECT_FALSE(verified["N"]) << "an id without a key";
+  EXPECT_FALSE(verified["K"]) << "a key without an id";
+  EXPECT_FALSE(verified["I"]) << "another key for a pinned id";
+  EXPECT_EQ(S.total_devices_verified(), 1u);
+  EXPECT_EQ(S.total_device_proofs_refused(), 1u);
+  for (const cvc::state_link_report &l : tB.link_reports())
+    EXPECT_FALSE(l.device_verified) << "a client verifies no relay";
+
+  cvc::app aP;
+  cvc::state_transport_ws P; // no pins
+  P.start("127.0.0.1:0", "P", "C");
+  cvc::state_cluster_shard sP(aP, "C", "P");
+  sP.attach();
+  P.register_shard(&sP);
+  cvc::app aB2;
+  cvc::state_transport_ws tB2;
+  cvc::state_cluster_shard sB2(aB2, "C", "B2");
+  sB2.attach();
+  tB2.register_shard(&sB2);
+  tB2.set_device_id(dev_b);
+  tB2.set_device_signer(cvc::state_device_signer::derive(std::string(32, 'b'), scope));
+  ASSERT_TRUE(tB2.connect_to_peer(ws(P.listen_address()), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_identified(P, 1, std::chrono::milliseconds(3000)));
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  EXPECT_EQ(P.total_devices_verified(), 0u);
+  EXPECT_EQ(P.total_device_proofs_refused(), 0u) << "unchallenged, B2 sent no proof";
+
+  for (cvc::state_transport_ws *t : {&tB, &tN, &tK, &tI, &tB2})
+    t->stop();
+  P.stop();
+  S.stop();
+}
+
+// The order a relay must not depend on: a client's reader can answer the relay's challenge before
+// the client's own Hello is written. A proof that comes first is held and checked when the Hello
+// names the device. A proof answers one challenge only, and one for another device id is refused.
+TEST(StateTransportWsTest, AProofBeforeTheHelloIsCheckedWhenItComes) {
+  if (!cvc::device_keys_available())
+    GTEST_SKIP() << "no device keys in this build";
+  cvc::app aS;
+  cvc::state_transport_ws S;
+  S.set_device_pins(std::make_shared<cvc::state_device_pins>());
+  S.start("127.0.0.1:0", "S", "C");
+  S.set_relay(true);
+  cvc::state_cluster_shard sS(aS, "C", "S");
+  sS.attach();
+  S.register_shard(&sS);
+  const auto key = cvc::state_device_signer::derive(std::string(32, 'r'), "raw");
+  ASSERT_NE(key, nullptr);
+  const std::string dev = "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr";
+
+  raw_ws_client R(S.listen_address());
+  const std::string nonce = pb_get(pb_get(R.read(), 1), 4); // the relay's Hello comes first
+  ASSERT_EQ(nonce.size(), cvc::kDeviceNonceBytes);
+  const std::string proof =
+      proof_frame(key->public_key(), key->sign(cvc::device_proof_message(nonce, "S", "R", dev)));
+  R.write(proof);
+  R.write(hello_frame("R", "C", dev));
+  ASSERT_TRUE(
+      wait_until([&] { return S.total_devices_verified() == 1; }, std::chrono::milliseconds(3000)))
+      << "the early proof is checked once the Hello comes";
+  EXPECT_EQ(S.total_device_proofs_refused(), 0u);
+  R.write(proof); // the same proof again
+  EXPECT_TRUE(wait_until([&] { return S.total_device_proofs_refused() == 1; },
+                         std::chrono::milliseconds(3000)))
+      << "a challenge is answered once";
+  bool verified = false;
+  for (const cvc::state_link_report &l : S.link_reports())
+    if (l.remote_node_id == "R")
+      verified = l.device_verified;
+  EXPECT_TRUE(verified) << "and the replay does not undo the proof";
+
+  raw_ws_client Q(S.listen_address());
+  const std::string nonce_q = pb_get(pb_get(Q.read(), 1), 4);
+  ASSERT_EQ(nonce_q.size(), cvc::kDeviceNonceBytes);
+  Q.write(hello_frame("Q", "C", "qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"));
+  Q.write(proof_frame(key->public_key(), key->sign(cvc::device_proof_message(
+                                             nonce_q, "S", "Q", "another-device-id"))));
+  EXPECT_TRUE(wait_until([&] { return S.total_device_proofs_refused() == 2; },
+                         std::chrono::milliseconds(3000)))
+      << "a proof signed for another device id";
+  EXPECT_EQ(S.total_devices_verified(), 1u);
   S.stop();
 }
 
