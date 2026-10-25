@@ -2365,3 +2365,19 @@ elseif(CVC_BUILD_PHYSICS_REPLAY)
   add_executable(physics_replay_test tests/physics_replay.cpp)
   cvc_setup_physics_replay(physics_replay_test)
 endif()
+
+# image_magick_roundtrip_test, the wasm ImageMagick gate: the coders behind every extension
+# magick_image_io claims, and TIFF / WEBP round trips that only Magick can do. A plain main()
+# for the same reason as physics_replay_test; node runs it (`node
+# image_magick_roundtrip_test.js`, ci.yml's ari-wasm job). Natively, image_test covers this.
+option(CVC_BUILD_IMAGE_MAGICK_ROUNDTRIP "Build image_magick_roundtrip_test (the wasm ImageMagick run-time gate)" OFF)
+if(CVC_BUILD_IMAGE_MAGICK_ROUNDTRIP)
+  add_executable(image_magick_roundtrip_test tests/image_magick_roundtrip.cpp)
+  target_link_libraries(image_magick_roundtrip_test PRIVATE cvc)
+  target_compile_features(image_magick_roundtrip_test PRIVATE cxx_std_17)
+  if(EMSCRIPTEN)
+    # The process exits with main's status; the images go through MEMFS's /tmp.
+    target_link_options(image_magick_roundtrip_test PRIVATE -sEXIT_RUNTIME=1
+      -sALLOW_MEMORY_GROWTH=1 -sSTACK_SIZE=2mb)
+  endif()
+endif()
