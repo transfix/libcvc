@@ -75,7 +75,11 @@ private:
 struct state_link_report {
   std::string transport;      // "ws" | "grpc"
   std::string remote_node_id; // the peer's node id (from its Hello); "" before the Hello
+  std::string remote_device_id; // the device id its Hello carried; "" when none
   bool accepted = false;      // this end ACCEPTED the connection (a relay's link to a client)
+  // It holds its node id at the transport's inbound gate (always true without one): a relay
+  // writes a participant's per-link values (net.relay, device) only from the link holding it.
+  bool holds_id = true;
   double age_s = 0.0;         // since the connection opened
   double idle_s = 0.0;        // since the last inbound frame
   state_link_stats::counters stats;

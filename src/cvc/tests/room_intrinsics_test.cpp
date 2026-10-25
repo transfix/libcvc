@@ -251,6 +251,8 @@ TEST(RoomWriteGate, AParticipantWritesOnlyItsOwnSubtree) {
       << "a sibling of net.relay is alice's";
   EXPECT_FALSE(gate.may_write("alice", alice + ".streams.camera.ready", op::set_value))
       << "the SFU relay marks a stream ready";
+  EXPECT_FALSE(gate.may_write("alice", alice + ".device", op::set_value))
+      << "the relay writes the device tag";
 
   // Paths the state tree would trim or skip onto one of those keys.
   for (const std::string &p :
@@ -340,4 +342,22 @@ TEST(RoomWriteGate, ASilentHolderIsTakenOver) {
       << "and cannot take it back while the new holder is live";
   gate.release("alice", &old_conn); // its close does not free what it no longer holds
   EXPECT_EQ(gate.holder("alice"), &fresh_conn);
+}
+
+// A participant's device tag (room_net.h): stable for one device in one room, different in another
+// room or for another device, and none without a device id.
+TEST(RoomNet, ADeviceTagIsPerRoom) {
+  const std::string dev = "0123456789abcdef0123456789abcdef";
+  const std::string tag = conf::room_device_tag("standup", dev);
+  ASSERT_EQ(tag.size(), 16u);
+  EXPECT_EQ(conf::room_device_tag("standup", dev), tag) << "stable";
+  EXPECT_NE(conf::room_device_tag("other", dev), tag) << "says nothing about another room";
+  EXPECT_NE(conf::room_device_tag("standup", "fedcba9876543210fedcba9876543210"), tag);
+  EXPECT_EQ(tag.find(dev.substr(0, 8)), std::string::npos) << "not the id itself";
+  EXPECT_EQ(conf::room_device_tag("standup", ""), "");
+
+  cvc::app app;
+  EXPECT_EQ(conf::read_participant_device(app, "standup", "alice"), "");
+  conf::write_participant_device(app, "standup", "alice", tag);
+  EXPECT_EQ(conf::read_participant_device(app, "standup", "alice"), tag);
 }

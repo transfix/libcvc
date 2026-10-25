@@ -84,6 +84,7 @@
 #include <cvc/media/media_frame.h>        // cvc::media_frame — the canonical media frame
 #include <cvc/state/state.h>              // cvc::state::instance — conference media state keys
 #include <cvc/state/state_cluster_shard.h>
+#include <cvc/state/state_identity.h> // default_device_id, valid_room_token
 #if CVC_ENABLE_WS
 #include <cvc/state/state_transport_ws.h>
 #endif
@@ -537,10 +538,27 @@ struct ConferenceSession {
     const bool want_grpc = (relayUrl.rfind("grpc://", 0) == 0);
     relay_url_ = relayUrl;
     relay_grpc_ = want_grpc;
+    // Who we are to the relay (§5f): the room token it may require (CVC_ARIADNE_ROOM_TOKEN; the
+    // host page takes it from its URL fragment) and this device's default identity, a hash of
+    // the machine id, host name and user (CVC_DEVICE_ID overrides it; the page keeps a random
+    // one in localStorage). The device id names the device, it is not a credential.
+    std::string roomToken;
+    if (const char *t = std::getenv("CVC_ARIADNE_ROOM_TOKEN"); t != nullptr && *t != '\0') {
+      roomToken = t;
+      if (!cvc::valid_room_token(roomToken)) {
+        std::fprintf(stderr, "arigl: conference: CVC_ARIADNE_ROOM_TOKEN is not a valid room "
+                             "token (16-256 of [A-Za-z0-9._~-]); not sending it\n");
+        roomToken.clear();
+      }
+    }
+    // Scoped to this relay, so two relays (two operators) cannot match one device's ids.
+    const std::string deviceId = cvc::scoped_device_id(cvc::default_device_id(), relayUrl);
     bool ok = false;
     if (want_grpc) {
 #if CVC_ENABLE_GRPC
       grpc_ = std::make_unique<cvc::state_transport_grpc>();
+      grpc_->set_auth_config({std::string(), roomToken});
+      grpc_->set_device_id(deviceId);
       grpc_->start("127.0.0.1:0", nodeId,
                    "conf"); // gRPC must start() (ephemeral port) even to dial
       grpc_->register_shard(shard.get());
@@ -557,6 +575,8 @@ struct ConferenceSession {
     } else {
 #if CVC_ENABLE_WS
       ws_ = std::make_unique<cvc::state_transport_ws>();
+      ws_->set_auth_config({std::string(), roomToken});
+      ws_->set_device_id(deviceId);
       ws_->register_shard(shard.get());
       ws_->set_on_media(on_media);
       tp_ = ws_.get();

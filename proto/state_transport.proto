@@ -57,6 +57,9 @@ message Mutation {
 message Hello {
   string node_id = 1;
   string cluster_id = 2;
+  // The sender's device identity (state_identity.h default_device_id): a stable identifier for
+  // the device across launches, not a secret. Empty when the sender sets none.
+  string device_id = 3;
 }
 
 // Out-of-band message that does NOT modify state. Carried alongside

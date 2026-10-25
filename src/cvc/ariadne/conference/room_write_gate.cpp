@@ -71,12 +71,13 @@ std::vector<std::string> canonical_segments(const std::string &path) {
 }
 
 // Whether REST (the path below a participant) names a key the relay writes there: the server
-// holon's `pose` (holon_sync.h), the relay's link sample `net.relay` (room_net.h), and in SFU mode
-// each stream's `streams.<kind>.ready` (room_relay_tick).
+// holon's `pose` (holon_sync.h), the relay's link sample `net.relay` and the participant's
+// `device` tag (room_net.h), and in SFU mode each stream's `streams.<kind>.ready`
+// (room_relay_tick).
 bool relay_owned(const std::vector<std::string> &rest) {
   if (rest.empty())
     return false;
-  if (rest[0] == "pose")
+  if (rest[0] == "pose" || rest[0] == "device")
     return true;
   if (rest[0] == "net" && rest.size() >= 2 && rest[1] == "relay")
     return true;

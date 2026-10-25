@@ -19,6 +19,7 @@
 #include <cvc/ariadne/conference/room_net.h>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
+#include <cvc/state/state_blob_store.h> // sha256_hex
 #include <initializer_list>
 #include <string>
 
@@ -163,6 +164,40 @@ bool read_participant_voice(cvc::app &app, const std::string &room, const std::s
     return false;
   talking = v == "1";
   return true;
+}
+
+std::string room_device_tag(const std::string &room, const std::string &device_id) {
+  if (device_id.empty())
+    return {};
+  // NUL-separated and salted, as default_device_id: 16 hex digits name a device within a room.
+  std::string in = "cvc-room-device/v1";
+  in.push_back('\0');
+  in += room;
+  in.push_back('\0');
+  in += device_id;
+  return cvc::sha256_hex(reinterpret_cast<const unsigned char *>(in.data()), in.size())
+      .substr(0, 16);
+}
+
+void write_participant_device(cvc::app &app, const std::string &room, const std::string &pid,
+                              const std::string &tag) {
+  if (!tag.empty())
+    set_changed_once(app, sub(room_participant_path(room, pid), {"device"}), tag);
+}
+
+std::string read_participant_device(cvc::app &app, const std::string &room,
+                                    const std::string &pid) {
+  cvc::state *n = app.root().findDescendant(sub(room_participant_path(room, pid), {"device"}));
+  return n ? n->value() : std::string();
+}
+
+void write_link_devices(cvc::app &app, const std::string &room,
+                        const std::vector<cvc::state_link_report> &links,
+                        const std::set<std::string> &present) {
+  for (const cvc::state_link_report &r : links)
+    if (r.accepted && r.holds_id && !r.remote_device_id.empty() && present.count(r.remote_node_id))
+      write_participant_device(app, room, r.remote_node_id,
+                               room_device_tag(room, r.remote_device_id));
 }
 
 std::string format_rtt(double rtt_ms) {

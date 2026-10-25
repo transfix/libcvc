@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <csignal>
 #include <cstdint>
@@ -43,11 +44,13 @@
 #include <cvc/core/app.h>
 #include <cvc/media/media_router.h> // protocol-agnostic media hub (WS + gRPC + future protocols)
 #include <cvc/state/state_cluster_shard.h>
+#include <cvc/state/state_identity.h> // valid_room_token
 #include <cvc/state/state_stream_transport_grpc.h>
 #include <cvc/state/state_transport_grpc.h>
 #if CVC_ENABLE_WS
 #include <cvc/state/state_transport_ws.h> // browser (wasm) clients join over WebSocket, bridged to gRPC
 #endif
+#include <fstream>
 #include <initializer_list>
 #include <memory>
 #include <mutex>
@@ -146,6 +149,12 @@ int main(int argc, char **argv) {
   //                              by one live connection at a time, and writes only its own
   //                              participant subtree minus the relay's keys (room_write_gate).
   //                              Default on; off takes any client's writes, as before
+  // Room token (§5f; not an S7 switch):
+  //   --room-token-file PATH     admit only clients that present the token in PATH (its first
+  //                              line), or CVC_ARISRV_ROOM_TOKEN: gRPC as a bearer token, WebSocket
+  //                              as a cvc-token.<token> subprotocol (state_identity.h has the
+  //                              rules). A client without it is refused before it is sent
+  //                              anything. Unset: an open room, as before
   const char *s7_env = std::getenv("CVC_ARISRV_S7");
   const char *aoi_env = std::getenv("CVC_ARISRV_AOI");
   // CVC_ARISRV_S7: 0/off or 1/on (unset: on).
@@ -155,6 +164,8 @@ int main(int argc, char **argv) {
                                                   : s7_env;
   std::string aoiMode = (aoi_env && *aoi_env) ? aoi_env : ""; // empty: the scene's default
   std::string relayGateArg = "on", relayJournal = "trim", scene = "default", bindWritesArg = "on";
+  std::string roomTokenFile;
+  bool roomTokenFlag = false; // --room-token-file was given (even with no path)
   std::string aoiVideoMaxArg = "0", mediaStallArg = "40", admissionHoldArg = "2000";
   for (int i = 1; i < argc; ++i) {
     const char *a = argv[i];
@@ -189,6 +200,10 @@ int main(int argc, char **argv) {
       scene = next("default");
     else if (!std::strcmp(a, "--bind-writes"))
       bindWritesArg = next("on");
+    else if (!std::strcmp(a, "--room-token-file")) {
+      roomTokenFlag = true;
+      roomTokenFile = next("");
+    }
   }
   if (aoiMode.empty())
     aoiMode = scene == "large" ? "hall" : "conference";
@@ -217,6 +232,30 @@ int main(int argc, char **argv) {
   std::shared_ptr<cvc::state_inbound_gate> bindGate;
   if (bindWritesArg == "on")
     bindGate = std::make_shared<cvc::ariadne::conference::room_write_gate>(room);
+  // The room token: from the file (its first line, trimmed), else the environment. Not taken from
+  // the command line, which other users of the host can read. A token asked for must be one: a
+  // flag with no path, an unreadable or blank file, or a set but empty variable stops arisrv here
+  // instead of opening the room.
+  std::string roomToken;
+  bool tokenAsked = false;
+  if (roomTokenFlag) {
+    tokenAsked = true;
+    std::ifstream in(roomTokenFile);
+    if (roomTokenFile.empty() || !in || !std::getline(in, roomToken)) {
+      std::fprintf(stderr, "arisrv: --room-token-file: cannot read '%s'\n", roomTokenFile.c_str());
+      return 2;
+    }
+    while (!roomToken.empty() && std::isspace(static_cast<unsigned char>(roomToken.back())))
+      roomToken.pop_back();
+  } else if (const char *t = std::getenv("CVC_ARISRV_ROOM_TOKEN")) {
+    tokenAsked = true;
+    roomToken = t;
+  }
+  if (tokenAsked && !cvc::valid_room_token(roomToken)) {
+    std::fprintf(stderr, "arisrv: the room token must be 16 to 256 characters from "
+                         "[A-Za-z0-9._~-]\n");
+    return 2;
+  }
 
   cvc::app app;
 
@@ -247,6 +286,7 @@ int main(int argc, char **argv) {
   state_tp.set_media_stall_drop(std::chrono::milliseconds(stallMs));
   state_tp.set_admission_hold(std::chrono::milliseconds(holdMs));
   state_tp.set_inbound_gate(bindGate);
+  state_tp.set_auth_config({roomToken, std::string()});
   state_tp.start(stateListen, nodeId, "conf");
   state_tp.set_relay(true);
   cvc::state_cluster_shard shard(app, "conf", nodeId);
@@ -273,6 +313,7 @@ int main(int argc, char **argv) {
   ws_tp.set_backfill_on_connect(!trimJournal);
   ws_tp.set_admission_hold(std::chrono::milliseconds(holdMs));
   ws_tp.set_inbound_gate(bindGate);
+  ws_tp.set_auth_config({roomToken, std::string()});
   ws_tp.start(wsListen, nodeId, "conf");
   ws_tp.set_relay(true);
   ws_tp.register_shard(&shard);
@@ -330,10 +371,11 @@ int main(int argc, char **argv) {
               ws_tp.listen_address().c_str());
 #endif
   std::printf("[arisrv] S7 %s | aoi %s (full-rate cameras: %d, 0 = all) | relay gate %s | journal "
-              "%s | grpc media stall drop %ld ms | scene %s | bound writes %s\n",
+              "%s | grpc media stall drop %ld ms | scene %s | bound writes %s | room token %s\n",
               s7 ? "on" : "off (the pre-S7 relay)", aoiMode.c_str(), aoiVideoMax,
               relayGate ? "on" : "off", trimJournal ? "trim (no backfill)" : "keep (backfill)",
-              stallMs, scene.c_str(), bindGate ? "on" : "off (any client's writes are taken)");
+              stallMs, scene.c_str(), bindGate ? "on" : "off (any client's writes are taken)",
+              roomToken.empty() ? "off (an open room)" : "on");
   std::fflush(stdout);
 
   std::set<std::string> relayed;
@@ -385,6 +427,7 @@ int main(int argc, char **argv) {
       room_debug_env && *room_debug_env && std::strcmp(room_debug_env, "0") != 0;
   int room_debug_ticks = 0;
   std::uint64_t lastRefused = 0; // client frames the bound-writes gate refused, at the last log
+  std::uint64_t lastUnauthorized = 0; // connections refused for the room token, at the last log
   // Link stats (~1 s): every connection on both planes reports its traffic and Ping/Pong round
   // trip (state_transport::link_reports); the rate meter turns the counters into rates. The relay
   // publishes its view of each participant (net.relay.*) and its totals (server.net.*) into the
@@ -477,10 +520,14 @@ int main(int argc, char **argv) {
         total.in_kbps += in_kbps;
         total.out_kbps += out_kbps;
         ++total.links;
-        if (present.count(r.remote_node_id))
-          cvc::ariadne::conference::write_relay_net(app, room, r.remote_node_id,
-                                                    {r.stats.rtt_ms, in_kbps, out_kbps});
+        // A participant's per-link leaves come from the link holding its pid only (bound writes):
+        // another connection claiming it is not that participant.
+        if (!r.holds_id || !present.count(r.remote_node_id))
+          continue;
+        cvc::ariadne::conference::write_relay_net(app, room, r.remote_node_id,
+                                                  {r.stats.rtt_ms, in_kbps, out_kbps});
       }
+      cvc::ariadne::conference::write_link_devices(app, room, links, present);
       cvc::ariadne::conference::write_server_net(app, room, total);
       // A client writing outside its own participant, or as another peer, is refused: say so (at
       // most every ~5 s) whenever the count has grown.
@@ -496,6 +543,18 @@ int main(int argc, char **argv) {
                       static_cast<unsigned long long>(refused));
           std::fflush(stdout);
           lastRefused = refused;
+        }
+        // And a connection refused for a missing or wrong room token.
+        std::uint64_t unauthorized = state_tp.total_auth_rejected();
+#if CVC_ENABLE_WS
+        unauthorized += ws_tp.total_auth_rejected();
+#endif
+        if (unauthorized > lastUnauthorized) {
+          std::printf("[arisrv] room token: refused %llu connection(s) (%llu in all)\n",
+                      static_cast<unsigned long long>(unauthorized - lastUnauthorized),
+                      static_cast<unsigned long long>(unauthorized));
+          std::fflush(stdout);
+          lastUnauthorized = unauthorized;
         }
       }
       const bool detail = room_debug && net_ticks % 25 == 0;

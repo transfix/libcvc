@@ -132,6 +132,11 @@ public:
     return std::chrono::milliseconds(_ping_interval_ms.load(std::memory_order_relaxed));
   }
 
+  // The device id this end's Hello carries (state_identity.h default_device_id; "" sends none),
+  // which a relay reports as each link's remote_device_id. Set it before connecting.
+  void set_device_id(std::string id) { _device_id = std::move(id); }
+  const std::string &device_id() const noexcept { return _device_id; }
+
   // -------- Chunk fetch (volume/geometry streaming) --------
   //
   // Callback-based chunk retrieval from remote peers. The
@@ -268,6 +273,7 @@ protected:
   state_peer_registry _peers;
   state_transport *_bridge = nullptr;
   std::atomic<std::int64_t> _ping_interval_ms{2000};
+  std::string _device_id;
 };
 
 } // namespace cvc

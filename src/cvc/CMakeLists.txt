@@ -45,6 +45,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/state/state_link_stats.h
   ../../inc/cvc/state/state_write_policy.h
   ../../inc/cvc/state/state_inbound_gate.h
+  ../../inc/cvc/state/state_identity.h
   ../../inc/cvc/state/state_distributed_metrics.h
   ../../inc/cvc/state/state_delegation_manager.h
   ../../inc/cvc/state/state_distributed_admin.h
@@ -298,6 +299,7 @@ set(SOURCE_FILES
   state/state_link_stats.cpp
   state/state_write_policy.cpp
   state/state_inbound_gate.cpp
+  state/state_identity.cpp
   state/state_distributed_metrics.cpp
   state/state_delegation_manager.cpp
   state/state_distributed_admin.cpp

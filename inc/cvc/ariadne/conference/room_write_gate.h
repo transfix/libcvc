@@ -35,7 +35,8 @@ namespace conference {
 //   - a value, a touch or a data() payload (no delete, reset, delegation, read-only or hidden
 //     flag: no client uses them, and each could take a key from the relay);
 //   - outside the keys the relay owns there: `pose` (the server holon's authoritative pose),
-//     `net.relay` (the relay's view of the link) and each `streams.<kind>.ready` (SFU mode);
+//     `net.relay` (the relay's view of the link), `device` (its device tag) and each
+//     `streams.<kind>.ready` (SFU mode);
 //   - on a canonical path (no empty or whitespace-padded segment, which the state tree would
 //     trim or skip onto another key) at most 16 segments and 512 bytes long.
 // Everything else is the relay's to write: the scene, the area of interest, the server's own

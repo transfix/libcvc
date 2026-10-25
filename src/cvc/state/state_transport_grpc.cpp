@@ -15,6 +15,7 @@
 #include <chrono>
 #include <cstdio> // the write watchdog's report
 #include <cvc/state/state_cluster_shard.h>
+#include <cvc/state/state_identity.h> // constant_time_equal
 #include <cvc/state/state_message_bus.h>
 #include <cvc/state/state_transport_grpc.h>
 #include <functional>
@@ -300,6 +301,7 @@ public:
   // changes after that. Any other thread reads them only through peer_id().
   std::string remote_node_id;
   std::string remote_cluster_id;
+  std::string remote_device_id; // the device id of that Hello ("" when none), written the same way
   std::atomic<bool> identified{false};
 
   // The peer's node id once its Hello has arrived; nullptr before (an unknown peer, which the
@@ -314,6 +316,8 @@ public:
       return;
     remote_node_id = h.node_id();
     remote_cluster_id = h.cluster_id();
+    // An id that is not a valid_device_id (oversized, say) is ignored, not stored.
+    remote_device_id = valid_device_id(h.device_id()) ? h.device_id() : std::string();
     identified.store(true, std::memory_order_release);
   }
 
@@ -424,7 +428,8 @@ public:
 
   grpc::Status Channel(grpc::ServerContext *ctx,
                        grpc::ServerReaderWriter<pb::Frame, pb::Frame> *stream) override {
-    // Phase 5: bearer-token check.
+    // Phase 5: bearer-token check (a room token, §5f), before the stream is admitted, so a peer
+    // without it is sent nothing.
     const std::string &expected = _owner->auth().expected_token;
     if (!expected.empty()) {
       const auto &md = ctx->client_metadata();
@@ -432,12 +437,12 @@ public:
       bool ok = false;
       if (it != md.end()) {
         std::string got(it->second.data(), it->second.size());
-        std::string want = "Bearer " + expected;
-        if (got == want)
-          ok = true;
+        ok = constant_time_equal(got, "Bearer " + expected);
       }
-      if (!ok)
+      if (!ok) {
+        _owner->note_auth_rejected();
         return grpc::Status(grpc::StatusCode::UNAUTHENTICATED, "missing or invalid bearer token");
+      }
     }
 
     auto conn = std::make_shared<state_transport_grpc::connection>();
@@ -671,7 +676,7 @@ bool state_transport_grpc::connect_to_peer(const std::string &target,
     if (ctx)
       ctx->TryCancel();
   };
-  conn->client_reader = std::thread([this, conn]() {
+  conn->client_reader = std::thread([this, conn, target]() {
     pb::Frame in;
     while (conn->alive.load() && conn->client_stream->Read(&in)) {
       increment_recv_frames();
@@ -706,6 +711,13 @@ bool state_transport_grpc::connect_to_peer(const std::string &target,
         on_inbound_heartbeat(in.heartbeat().node_id(), in.heartbeat().cluster_id());
       }
     }
+    // A server sends its Hello first; a stream that ended without one was refused (a missing or
+    // wrong bearer token, most likely), though connect_to_peer reported the dial a success.
+    if (!conn->identified.load() && _running.load())
+      std::fprintf(stderr,
+                   "cvc: grpc: %s ended the stream before its Hello: refused (bearer/room token "
+                   "missing or wrong?)\n",
+                   target.c_str());
     conn->alive.store(false);
   });
 
@@ -1299,6 +1311,8 @@ void state_transport_grpc::send_hello_locked(connection &c) {
   auto *h = f.mutable_hello();
   h->set_node_id(_node_id);
   h->set_cluster_id(_cluster_id);
+  if (!_device_id.empty())
+    h->set_device_id(_device_id);
   c.write_locked(f);
 }
 
@@ -1382,8 +1396,11 @@ std::vector<state_link_report> state_transport_grpc::link_reports() const {
       continue;
     state_link_report r;
     r.transport = "grpc";
-    if (const std::string *pid = c->peer_id())
+    if (const std::string *pid = c->peer_id()) {
       r.remote_node_id = *pid;
+      r.remote_device_id = c->remote_device_id;
+      r.holds_id = !c->gate || c->gate->holder(*pid) == c.get();
+    }
     r.accepted = c->accepted;
     r.age_s = static_cast<double>(now - c->opened_ns) * 1e-9;
     r.idle_s = static_cast<double>(now - c->last_rx_ns.load()) * 1e-9;

@@ -16,7 +16,10 @@
 #ifndef __CVC_ARIADNE_CONFERENCE_ROOM_NET_H__
 #define __CVC_ARIADNE_CONFERENCE_ROOM_NET_H__
 
+#include <cvc/state/state_link_stats.h> // state_link_report
+#include <set>
 #include <string>
+#include <vector>
 
 namespace cvc {
 class app;
@@ -91,6 +94,23 @@ void write_participant_voice(cvc::app &app, const std::string &room, const std::
 // False (TALKING untouched) when the leaf was never written.
 bool read_participant_voice(cvc::app &app, const std::string &room, const std::string &pid,
                             bool &talking);
+
+// conf.rooms.<room>.participants.<pid>.device -- the participant's device in this room, a
+// default identity before usernames (§5f): room_device_tag of the device id its link's Hello
+// carried. RELAY-written (room_write_gate refuses a client's write), changed-only, and from the
+// link that holds the pid only. The same device shows the same tag in one room across sessions,
+// while the raw id never leaves the relay and a tag in one room says nothing about another.
+// Like the device id it is not a credential.
+std::string room_device_tag(const std::string &room, const std::string &device_id);
+void write_participant_device(cvc::app &app, const std::string &room, const std::string &pid,
+                              const std::string &tag);
+// "" when never written.
+std::string read_participant_device(cvc::app &app, const std::string &room, const std::string &pid);
+// A relay's device tags from its LINKS (state_transport::link_reports): each PRESENT participant's,
+// written from an accepted link that holds its pid at the inbound gate and carried a device id.
+void write_link_devices(cvc::app &app, const std::string &room,
+                        const std::vector<cvc::state_link_report> &links,
+                        const std::set<std::string> &present);
 
 } // namespace conference
 } // namespace ariadne

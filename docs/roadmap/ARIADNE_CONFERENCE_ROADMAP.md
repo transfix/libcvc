@@ -292,6 +292,43 @@ Join carries a credential. v1: a room bearer token the server checks at admissio
 the per-connection `pid` binding (§5d). Richer identity (OIDC via the existing SSO) and roles
 (host/moderator/guest, capacity, bans) are admission-time hooks layered on top.
 
+**Built (v1, after bound writes):** a room token and a default device identity, before usernames.
+- **Room token** (who may join). `arisrv --room-token-file PATH`, or `CVC_ARISRV_ROOM_TOKEN`; never
+  on the command line, which other users of the host can read.
+  - It is 16–256 characters of `[A-Za-z0-9._~-]`.
+  - gRPC carries it as `authorization: Bearer`, now compared in constant time.
+  - WebSocket carries it in `Sec-WebSocket-Protocol`, because a browser cannot set an
+    `Authorization` header. The client offers `cvc.v1,cvc-token.<token>`, and the relay refuses the
+    upgrade with HTTP 401 unless the token is offered. It answers `cvc.v1`, as a browser requires.
+  - Both checks run before the connection is admitted, so a client without the token is sent
+    nothing: no bootstrap, broadcast or media.
+  - arigl reads `CVC_ARIADNE_ROOM_TOKEN`. The browser page takes it from the invite link's URL
+    fragment (`#token=…`), which never reaches a server or its logs.
+  - No token configured is an open room, as before. A token asked for must be one: a flag with no
+    path, an unreadable or blank file, or a set but empty variable stops arisrv instead of opening
+    the room. arisrv counts refusals (`room token: refused N connection(s)`).
+  - Each accepted WebSocket connection does its handshake (and so its token check) on its own
+    thread, so one client that connects and sends nothing no longer holds up every join. A
+    handshake gets 10 s, and at most 64 wait at once.
+- **Device id** (which device is this). `Hello.device_id`, from `default_device_id()`.
+  - A native client's base id is a salted SHA-256 of the OS machine id, the host name and the user.
+  - A browser exposes no hardware id, so the page makes a random one once and keeps it in
+    `localStorage`, or for the page load only where storage is blocked. `CVC_DEVICE_ID` overrides
+    either.
+  - What a client sends is `scoped_device_id(base, relay URL)`, so two relays (two operators)
+    cannot match one device. A relay ignores a Hello device id that is not 1–64 characters of
+    `[A-Za-z0-9._-]`.
+  - The relay keeps the raw id to itself. It publishes `participants.<pid>.device`, a room-scoped
+    16-hex tag, from the link holding the pid (bound writes). Every peer sees the same tag for one
+    device in one room across sessions, and nothing links it to another room. The tag is
+    relay-owned; `room_write_gate` refuses a client's write to it.
+  - It is an **identifier, not a credential**: anyone who knows or observes the inputs can compute
+    it. Giving it authority (roles, bans) needs a key the device keeps and the relay pins on first
+    use, the next step before usernames.
+- **Limits:** one shared token per room, so revoking one person means rotating it for everyone.
+  Roles and per-person tokens come later. The separate gRPC media plane (`stream_relay`) does not
+  check the token yet.
+
 ### 5g. Shared 3D scene + avatars (NEXT WORK — user-requested)
 
 The conference is not just floating video windows: it is a **shared 3D space** that every client renders
@@ -534,6 +571,7 @@ false)` is the old drain-and-publish exactly); arisrv and arigl turn them on.
 | `--admission-hold-ms N` | 2000 (only with an AOI) | hold a joiner's bootstrap for its filter, at most N ms; 0 = off (the admit snapshot goes out unfiltered, before Hello) |
 | `--scene default\|large` | default | the seeded scene; not an S7 switch (honoured under `--s7 off`) |
 | `--bind-writes on\|off` | on | bound writes (below): each client writes only its own participant, as itself; off takes any client's writes. Not an S7 switch |
+| `--room-token-file PATH` / `CVC_ARISRV_ROOM_TOKEN` | unset (an open room) | admit only clients that present the room token (§5f). Not an S7 switch |
 | `CVC_ARISRV_ROOM_DEBUG=1` | off | adds an `[arisrv] aoi` stats line every ~5 s |
 | `CVC_ARIGL_REPLICATE_ROOT` (arigl) | unset = `conf` | empty or `*`: replicate the whole tree (the S6 A/B) |
 | `CVC_ARIGL_LOD=0` (arigl) | LOD on | every room mesh at full detail (the LOD A/B) |

@@ -93,6 +93,31 @@
   // ?synthetic=1 drives the self-cam from a hardware-free MJPEG test pattern instead of the real
   // camera, so the conference (peer video included) can be tried in a browser with no camera.
   const SYNTH = PARAMS.get('synthetic');
+  // A private room's token, when the invite link carries one: in the URL FRAGMENT (#token=...),
+  // which the browser never sends to a server, so it stays out of proxy and access logs. The
+  // relay refuses a connection without it (arisrv --room-token-file).
+  const TOKEN = (new URLSearchParams(location.hash.replace(/^#/, '')).get('token') || '').trim();
+  // This browser's default identity: a browser exposes no hardware id, so a random one is made
+  // once and kept in localStorage (per site; cleared with the site's data). The relay shows it,
+  // hashed per room, as the participant's device. It names the device; it is not a credential.
+  // Where storage is unavailable (blocked, a sandboxed frame) it lasts this page load only.
+  const DEVICE = (() => {
+    const fresh = () => {
+      const b = new Uint8Array(16);
+      crypto.getRandomValues(b);
+      return Array.from(b, x => x.toString(16).padStart(2, '0')).join('');
+    };
+    try {
+      let id = localStorage.getItem('cvc.device_id');
+      if (!/^[0-9a-f]{32}$/.test(id || '')) {
+        id = fresh();
+        localStorage.setItem('cvc.device_id', id);
+      }
+      return id;
+    } catch (e) {
+      try { return fresh(); } catch (e2) { return ''; }
+    }
+  })();
 
   // Browsers suspend an AudioContext created without a user gesture (autoplay policy). SDL's audio
   // output (how we play each peer's mic) is one such context, so without this a peer's audio never
@@ -124,6 +149,8 @@
         ENV.CVC_ARIADNE_RELAY = RELAY;
         ENV.CVC_ARIADNE_NAME = NAME;
         if (SYNTH && SYNTH !== '0') ENV.CVC_ARIADNE_SYNTHETIC_CAM = '1';
+        if (TOKEN) ENV.CVC_ARIADNE_ROOM_TOKEN = TOKEN;
+        if (DEVICE) ENV.CVC_DEVICE_ID = DEVICE;
       } catch (e) { console.warn('cyprty: could not set ENV (no conference):', e); }
     }],
     print: t => { stdoutEl.textContent = t.split('\r').pop(); },

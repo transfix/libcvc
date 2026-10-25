@@ -27,6 +27,7 @@
 #include <fstream>
 #include <gtest/gtest.h>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <random>
@@ -950,6 +951,8 @@ TEST(StateTransportGrpcPhase5, BearerTokenRejectsMissingMetadata) {
   // Give the server a brief chance to (not) deliver.
   std::this_thread::sleep_for(std::chrono::milliseconds(200));
   EXPECT_EQ(0u, tA.total_received_mutations());
+  EXPECT_GE(tA.total_auth_rejected(), 1u) << "the refused stream is counted";
+  EXPECT_TRUE(tA.link_reports().empty()) << "and never admitted";
 
   tA.stop();
   tB.stop();
@@ -1882,6 +1885,52 @@ TEST(StateTransportGrpcTest, AdmissionHoldTimesOutUnfiltered) {
   EXPECT_EQ(tR.release_admissions(), 1u) << "0 releases what is held";
   EXPECT_TRUE(wait_until([&] { return leaf(aC, "x.secret") == "s"; }, std::chrono::seconds(3)));
   EXPECT_EQ(tR.total_admissions_held(), 2u);
+
+  tB.stop();
+  tC.stop();
+  tR.stop();
+}
+
+// A wrong bearer token is refused like a missing one: counted, never admitted.
+TEST(StateTransportGrpcPhase5, BearerTokenRejectsAWrongToken) {
+  cvc::state_transport_grpc tA, tB;
+  tA.set_auth_config({"room-token-0123456789", ""});
+  tB.set_auth_config({"", "room-token-9876543210"});
+  tA.start("127.0.0.1:0", "A", "C");
+  tB.start("127.0.0.1:0", "B", "C");
+  (void)tB.connect_to_peer(tA.listen_address());
+  EXPECT_TRUE(wait_until([&] { return tA.total_auth_rejected() >= 1; }, std::chrono::seconds(3)));
+  EXPECT_TRUE(tA.link_reports().empty());
+  tB.stop();
+  tA.stop();
+}
+
+// A peer's Hello carries its device id (set_device_id), which the other end reports for the link;
+// a peer that sets none reports "".
+TEST(StateTransportGrpcTest, HelloCarriesTheDeviceId) {
+  cvc::app aR, aB, aC;
+  cvc::state_transport_grpc tR, tB, tC;
+  tR.start("127.0.0.1:0", "R", "C");
+  tR.set_relay(true);
+  tB.set_device_id("0123456789abcdef0123456789abcdef");
+  tB.start("127.0.0.1:0", "B", "C");
+  tC.start("127.0.0.1:0", "C", "C");
+  cvc::state_cluster_shard sR(aR, "C", "R");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  cvc::state_cluster_shard sC(aC, "C", "C");
+  for (cvc::state_cluster_shard *s : {&sR, &sB, &sC})
+    s->attach();
+  tR.register_shard(&sR);
+  tB.register_shard(&sB);
+  tC.register_shard(&sC);
+  ASSERT_TRUE(tB.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(tC.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_identified(tR, {"B", "C"}, std::chrono::seconds(3)));
+  std::map<std::string, std::string> device;
+  for (const cvc::state_link_report &l : tR.link_reports())
+    device[l.remote_node_id] = l.remote_device_id;
+  EXPECT_EQ(device["B"], "0123456789abcdef0123456789abcdef");
+  EXPECT_EQ(device["C"], "");
 
   tB.stop();
   tC.stop();

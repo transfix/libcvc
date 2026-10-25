@@ -1233,6 +1233,181 @@ TEST(StateTransportWsTest, AdmissionHoldTimesOutUnfiltered) {
   S.stop();
 }
 
+// A relay with a room token (auth_config) refuses the upgrade of a client that does not offer it,
+// before any frame, so such a client is sent nothing; one that offers it is admitted and
+// bootstrapped. The device id its Hello carried shows in the relay's link report.
+TEST(StateTransportWsTest, RoomTokenIsCheckedAtTheHandshake) {
+  cvc::app aS, aB;
+  cvc::state_transport_ws S;
+  S.set_auth_config({"room-token-0123456789", ""});
+  S.start("127.0.0.1:0", "S", "C");
+  S.set_relay(true);
+  cvc::state_cluster_shard sS(aS, "C", "S");
+  sS.attach();
+  S.register_shard(&sS);
+  write_value(aS, "x.secret", "s");
+
+  {
+    cvc::state_transport_ws none;
+    EXPECT_FALSE(none.connect_to_peer(ws(S.listen_address()), std::chrono::milliseconds(2000)))
+        << "no token";
+  }
+  {
+    cvc::state_transport_ws wrong;
+    wrong.set_auth_config({"", "room-token-9876543210"});
+    EXPECT_FALSE(wrong.connect_to_peer(ws(S.listen_address()), std::chrono::milliseconds(2000)))
+        << "a wrong token";
+  }
+  EXPECT_EQ(S.total_auth_rejected(), 2u);
+  EXPECT_EQ(S.connection_count(), 0u) << "neither was admitted";
+
+  cvc::state_transport_ws tB;
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sB.attach();
+  tB.register_shard(&sB);
+  tB.set_auth_config({"", "room-token-0123456789"});
+  tB.set_device_id("0123456789abcdef0123456789abcdef");
+  ASSERT_TRUE(tB.connect_to_peer(ws(S.listen_address()), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_identified(S, 1, std::chrono::milliseconds(3000)));
+  const auto links = S.link_reports();
+  ASSERT_EQ(links.size(), 1u);
+  EXPECT_EQ(links[0].remote_device_id, "0123456789abcdef0123456789abcdef");
+  EXPECT_TRUE(
+      wait_until([&] { return value_at(aB, "x.secret") == "s"; }, std::chrono::milliseconds(3000)))
+      << "admitted, and bootstrapped";
+  EXPECT_EQ(S.total_auth_rejected(), 2u);
+
+  // A browser requires the reply to name one of the subprotocols it offered: a raw handshake with
+  // the browser's offer gets cvc.v1 back. (Beast's own client does not check, so this would pass
+  // tB's connect even if the reply were wrong.)
+  {
+    namespace beast = boost::beast;
+    boost::asio::io_context ioc;
+    boost::asio::ip::tcp::resolver resolver(ioc);
+    const std::string addr = S.listen_address();
+    const std::size_t colon = addr.rfind(':');
+    beast::websocket::stream<boost::asio::ip::tcp::socket> raw(ioc);
+    boost::asio::connect(raw.next_layer(),
+                         resolver.resolve(addr.substr(0, colon), addr.substr(colon + 1)));
+    raw.set_option(
+        beast::websocket::stream_base::decorator([](beast::websocket::request_type &req) {
+          req.set(beast::http::field::sec_websocket_protocol,
+                  "cvc.v1,cvc-token.room-token-0123456789");
+        }));
+    beast::websocket::response_type res;
+    beast::error_code ec;
+    raw.handshake(res, addr, "/", ec);
+    ASSERT_FALSE(ec) << ec.message();
+    EXPECT_EQ(std::string(res[beast::http::field::sec_websocket_protocol]), "cvc.v1");
+    raw.next_layer().close(ec);
+  }
+
+  tB.stop();
+  S.stop();
+}
+
+// A client that offers a room token to an open relay (no expected_token) is admitted as before.
+TEST(StateTransportWsTest, ARoomTokenOfferedToAnOpenRelayIsHarmless) {
+  cvc::app aS, aB;
+  cvc::state_transport_ws S, tB;
+  S.start("127.0.0.1:0", "S", "C");
+  S.set_relay(true);
+  cvc::state_cluster_shard sS(aS, "C", "S");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sS.attach();
+  sB.attach();
+  S.register_shard(&sS);
+  tB.register_shard(&sB);
+  write_value(aS, "x.k", "v");
+  tB.set_auth_config({"", "room-token-0123456789"});
+  ASSERT_TRUE(tB.connect_to_peer(ws(S.listen_address()), std::chrono::milliseconds(2000)));
+  EXPECT_TRUE(
+      wait_until([&] { return value_at(aB, "x.k") == "v"; }, std::chrono::milliseconds(3000)));
+  EXPECT_EQ(S.total_auth_rejected(), 0u);
+  tB.stop();
+  S.stop();
+}
+
+// Each accepted connection does its handshake on its own thread: a client that connects and sends
+// nothing does not hold up the next join.
+TEST(StateTransportWsTest, AnIdleHandshakeDoesNotBlockOtherJoins) {
+  cvc::app aS, aB;
+  cvc::state_transport_ws S, tB;
+  S.start("127.0.0.1:0", "S", "C");
+  S.set_relay(true);
+  cvc::state_cluster_shard sS(aS, "C", "S");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sS.attach();
+  sB.attach();
+  S.register_shard(&sS);
+  tB.register_shard(&sB);
+
+  boost::asio::io_context ioc;
+  boost::asio::ip::tcp::socket idle(ioc);
+  const std::string addr = S.listen_address();
+  const std::size_t colon = addr.rfind(':');
+  boost::asio::ip::tcp::resolver resolver(ioc);
+  boost::asio::connect(idle, resolver.resolve(addr.substr(0, colon), addr.substr(colon + 1)));
+  std::this_thread::sleep_for(std::chrono::milliseconds(100)); // accepted, and silent
+
+  const auto t0 = std::chrono::steady_clock::now();
+  ASSERT_TRUE(tB.connect_to_peer(ws(addr), std::chrono::milliseconds(2000)));
+  EXPECT_TRUE(wait_identified(S, 1, std::chrono::milliseconds(2000)));
+  EXPECT_LT(std::chrono::steady_clock::now() - t0, std::chrono::seconds(2));
+
+  boost::system::error_code ec;
+  idle.close(ec);
+  tB.stop();
+  S.stop(); // returns although a handshake was pending
+}
+
+// The link report says which link holds its node id at the inbound gate (a relay writes a
+// participant's per-link leaves from that one only), and carries only a valid device id.
+TEST(StateTransportWsTest, LinkReportsShowTheHolderAndAValidDeviceId) {
+  cvc::app aS, aB, aB2, aC;
+  cvc::state_transport_ws S, tB, tB2, tC;
+  S.set_inbound_gate(std::make_shared<cvc::state_inbound_gate>());
+  S.start("127.0.0.1:0", "S", "C");
+  S.set_relay(true);
+  cvc::state_cluster_shard sS(aS, "C", "S");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  cvc::state_cluster_shard sB2(aB2, "C", "B");
+  cvc::state_cluster_shard sC(aC, "C", "C");
+  for (cvc::state_cluster_shard *s : {&sS, &sB, &sB2, &sC})
+    s->attach();
+  S.register_shard(&sS);
+  tB.register_shard(&sB);
+  tB2.register_shard(&sB2);
+  tC.register_shard(&sC);
+  tB.set_device_id("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+  tB2.set_device_id("dddddddddddddddddddddddddddddddd");
+  tC.set_device_id(std::string(65, 'c')); // too long: ignored
+  ASSERT_TRUE(tB.connect_to_peer(ws(S.listen_address()), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_identified(S, 1, std::chrono::milliseconds(3000)));
+  ASSERT_TRUE(tB2.connect_to_peer(ws(S.listen_address()), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(tC.connect_to_peer(ws(S.listen_address()), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_identified(S, 3, std::chrono::milliseconds(3000)));
+
+  int holders_of_b = 0;
+  for (const cvc::state_link_report &l : S.link_reports()) {
+    if (l.remote_node_id == "B" && l.holds_id) {
+      ++holders_of_b;
+      EXPECT_EQ(l.remote_device_id, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+          << "the first claim holds B";
+    }
+    if (l.remote_node_id == "B" && !l.holds_id)
+      EXPECT_EQ(l.remote_device_id, "dddddddddddddddddddddddddddddddd");
+    if (l.remote_node_id == "C")
+      EXPECT_EQ(l.remote_device_id, "") << "an oversized device id is ignored";
+  }
+  EXPECT_EQ(holders_of_b, 1);
+
+  tB.stop();
+  tB2.stop();
+  tC.stop();
+  S.stop();
+}
+
 // The inbound gate's rule in these tests: a peer may write only below x.<its node id>.
 class own_prefix_gate final : public cvc::state_inbound_gate {
 public:
