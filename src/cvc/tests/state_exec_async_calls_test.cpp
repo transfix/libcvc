@@ -847,11 +847,30 @@ TEST(AsyncCalls, AS33_TheCountersSurviveASnapshot) {
 // What a step costs (3.8: the default of limits.async_steps_per_cpu_ms)
 // ===========================================================================
 
+// Whether the compiler optimized this build, which is what the default rate is set for. Not
+// NDEBUG: the mesher defines it for every build type. Nor a sanitizer's build, whose steps cost
+// several times more.
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+#define CVC_TEST_SANITIZED 1
+#endif
+#endif
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+#define CVC_TEST_SANITIZED 1
+#endif
+#if (defined(__OPTIMIZE__) || (defined(_MSC_VER) && !defined(_DEBUG))) &&                          \
+    !defined(CVC_TEST_SANITIZED)
+constexpr bool kOptimizedBuild = true;
+#else
+constexpr bool kOptimizedBuild = false;
+#endif
+
 // Measure the CPU time a scheduler step takes on representative programs, the basis of the
 // default rate: an async call is charged the steps its CPU time would have bought. It runs the
 // same number of steps of each, reports the steps per CPU millisecond, and, in an optimized
 // build (the default is set for one), checks that the default stays within a factor of four of
-// what the cheapest and the dearest of them cost. A debug build's steps cost 20 to 40 times more.
+// what the cheapest and the dearest of them cost. An unoptimized build's steps cost 20 to 40
+// times more.
 TEST(AsyncCalls, StepCostSetsTheDefaultRate) {
   constexpr uint64_t kSteps = 100000; // each program runs longer than this
   const char *programs[] = {
@@ -886,13 +905,13 @@ TEST(AsyncCalls, StepCostSetsTheDefaultRate) {
       highest = std::max(highest, rate);
     }
   }
-#ifdef NDEBUG
+  if (!kOptimizedBuild) {
+    std::printf("STEPCOST an unoptimized build: the default (%g) is set for an optimized one\n",
+                kDefaultAsyncStepsPerCpuMs);
+    return;
+  }
   EXPECT_GE(kDefaultAsyncStepsPerCpuMs, lowest / 4.0);
   EXPECT_LE(kDefaultAsyncStepsPerCpuMs, highest * 4.0);
-#else
-  std::printf("STEPCOST a debug build: the default (%g) is set for an optimized one\n",
-              kDefaultAsyncStepsPerCpuMs);
-#endif
 }
 
 // ===========================================================================
