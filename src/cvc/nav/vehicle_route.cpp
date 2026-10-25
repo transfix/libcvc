@@ -153,6 +153,47 @@ double route_clearance(const std::uint8_t *occ, int rows, int cols, double min_x
   return footprint_clearance(f, v, p.x, p.y, p.heading);
 }
 
+namespace {
+
+// The ground's slope at (x, y), bilinear on its grid (clamped to its edges): dz/dx, dz/dy.
+void terrain_slope(const route_terrain &t, double x, double y, double &gx, double &gy) {
+  const double fx = std::clamp((x - t.min_x) / (t.max_x - t.min_x) * (t.cols - 1), 0.0,
+                               static_cast<double>(t.cols - 1));
+  const double fy = std::clamp((y - t.min_y) / (t.max_y - t.min_y) * (t.rows - 1), 0.0,
+                               static_cast<double>(t.rows - 1));
+  const int c0 = std::min(static_cast<int>(fx), t.cols - 2),
+            r0 = std::min(static_cast<int>(fy), t.rows - 2);
+  const double u = fx - c0, w = fy - r0;
+  const std::size_t plane = static_cast<std::size_t>(t.rows) * t.cols;
+  const auto at = [&](int k, int r, int c) {
+    return static_cast<double>(t.slope[k * plane + static_cast<std::size_t>(r) * t.cols + c]);
+  };
+  const auto lerp = [&](int k) {
+    return (1 - w) * ((1 - u) * at(k, r0, c0) + u * at(k, r0, c0 + 1)) +
+           w * ((1 - u) * at(k, r0 + 1, c0) + u * at(k, r0 + 1, c0 + 1));
+  };
+  gx = lerp(0);
+  gy = lerp(1);
+}
+
+// The distance from (x, y) to a corridor's polyline (a disc's centre for one point).
+double corridor_distance(const route_corridor &a, double x, double y) {
+  const std::size_t n = a.xy.size() / 2;
+  if (n == 0)
+    return std::numeric_limits<double>::infinity();
+  double best = std::hypot(x - a.xy[0], y - a.xy[1]);
+  for (std::size_t k = 1; k < n; ++k) {
+    const double ax = a.xy[2 * k - 2], ay = a.xy[2 * k - 1], bx = a.xy[2 * k], by = a.xy[2 * k + 1];
+    const double ex = bx - ax, ey = by - ay, l2 = ex * ex + ey * ey;
+    double u = l2 > 0.0 ? ((x - ax) * ex + (y - ay) * ey) / l2 : 0.0;
+    u = std::min(1.0, std::max(0.0, u));
+    best = std::min(best, std::hypot(x - (ax + u * ex), y - (ay + u * ey)));
+  }
+  return best;
+}
+
+} // namespace
+
 vehicle_route plan_vehicle_route(const std::uint8_t *occ, int rows, int cols, double min_x,
                                  double min_y, double max_x, double max_y, const route_vehicle &v,
                                  const route_pose &start, double goal_x, double goal_y,
@@ -178,6 +219,8 @@ vehicle_route plan_vehicle_route(const std::uint8_t *occ, int rows, int cols, do
   const double comfort = o.comfort > 0.0 ? o.comfort : std::max(v.disc_radius, f.cell);
   const int headings = std::max(8, o.headings);
   const int samples = std::max(1, static_cast<int>(std::ceil(step / (0.5 * f.cell))));
+  const bool ter =
+      o.terrain.on() && o.terrain.max_x > o.terrain.min_x && o.terrain.max_y > o.terrain.min_y;
 
   // The heuristic: the free-space distance to the goal, which never overestimates.
   int gr = 0, gc = 0;
@@ -204,6 +247,16 @@ vehicle_route plan_vehicle_route(const std::uint8_t *occ, int rows, int cols, do
   const int escape = o.escape >= 0
                          ? o.escape
                          : static_cast<int>(std::ceil(2.0 * (v.disc_radius + o.margin) / step)) + 2;
+
+  // A start on ground past the slope limits: its first moves may cross it, to drive off.
+  const auto steep = [&](double x, double y, double th) {
+    double gx, gy;
+    terrain_slope(o.terrain, x, y, gx, gy);
+    const double ch = std::cos(th), sh = std::sin(th);
+    return (o.terrain.side_max > 0.0 && std::fabs(-sh * gx + ch * gy) > o.terrain.side_max) ||
+           (o.terrain.grade_max > 0.0 && std::fabs(ch * gx + sh * gy) > o.terrain.grade_max);
+  };
+  const bool steep_start = ter && steep(start.x, start.y, start.heading);
 
   std::vector<node> nodes;
   nodes.push_back({start.x, start.y, start.heading, 0.0, -1, 0, 0.0, 0});
@@ -243,7 +296,7 @@ vehicle_route plan_vehicle_route(const std::uint8_t *occ, int rows, int cols, do
         const double k = s / radius;
         const double floor =
             wedged && cur.depth < escape ? std::min(o.margin, c0) - 1e-9 : o.margin;
-        double nx = cur.x, ny = cur.y, nth = cur.th, clr = kInf;
+        double nx = cur.x, ny = cur.y, nth = cur.th, clr = kInf, ground = 0.0;
         bool ok = true;
         for (int q = 1; q <= samples && ok; ++q) {
           double px, py, pth;
@@ -251,6 +304,16 @@ vehicle_route plan_vehicle_route(const std::uint8_t *occ, int rows, int cols, do
           const double cq = footprint_clearance(f, v, px, py, pth);
           ok = cq >= floor;
           clr = std::min(clr, cq);
+          if (ok && ter) { // the ground's slope along the heading and across it
+            double gx, gy;
+            terrain_slope(o.terrain, px, py, gx, gy);
+            const double ch = std::cos(pth), sh = std::sin(pth);
+            const double along = std::fabs(ch * gx + sh * gy),
+                         across = std::fabs(-sh * gx + ch * gy);
+            ok = (steep_start && cur.depth < escape) || !steep(px, py, pth);
+            const double a = along / o.terrain.grade_scale, s = across / o.terrain.side_scale;
+            ground += (o.terrain.grade_cost * a * a + o.terrain.side_cost * s * s) / samples;
+          }
           nx = px;
           ny = py;
           nth = pth;
@@ -267,6 +330,13 @@ vehicle_route plan_vehicle_route(const std::uint8_t *occ, int rows, int cols, do
         if (cur.dir == dir)
           cost += 0.2 * step * std::fabs(s - cur.steer);
         cost += o.comfort_cost * step * std::max(0.0, comfort - (clr - o.margin)) / comfort;
+        cost += step * ground;
+        for (const route_corridor &a : o.avoid)
+          if (a.radius > 0.0 && a.cost > 0.0) {
+            const double d = corridor_distance(a, nx, ny);
+            if (d < a.radius)
+              cost += a.cost * step * (1.0 - d / a.radius);
+          }
         const double g = cur.g + cost;
         const std::uint64_t kn = key(nx, ny, nth);
         const auto b = best.find(kn);
