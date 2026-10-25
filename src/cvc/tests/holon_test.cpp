@@ -471,6 +471,29 @@ TEST(HolonTest, ClientSlewsTowardANewLead) {
   EXPECT_DOUBLE_EQ(client.clock().scale(), 1.0) << "and the clock runs at its scale again";
 }
 
+// A client whose first sample finds its clock already in step (it started with the server, as a
+// client of a fresh relay can) never seeks to join; a later drift past the slack still slews, as
+// it does after a joining seek. Gated on a past seek instead, that first drift seeked and dropped
+// the logged inputs: the relay loopback test StillOuterPeerReentryNoRealignNoFreeze saw a realign
+// on a slow runner.
+TEST(HolonTest, AClientInStepFromItsFirstSampleStillSlews) {
+  holon client(holon_role::client);
+  client.add_participant("A", /*local=*/true);
+  client.set_lead_ticks(14);
+  const double dt = client.clock().fixed_dt();
+  for (int i = 0; i < 1000 && client.tick() < 114; ++i)
+    client.advance(dt);
+  ASSERT_EQ(client.tick(), 114u);
+  body_state s;
+  client.apply_authoritative("A", s, 100); // target 114: already there
+  EXPECT_EQ(client.clock_realigns(), 0u) << "nothing to seek";
+  client.set_lead_ticks(24);               // the round trip grew
+  client.apply_authoritative("A", s, 101); // target 125, 11 behind
+  EXPECT_EQ(client.clock_realigns(), 0u) << "a drift after the first sample slews, never seeks";
+  EXPECT_TRUE(client.clock_slewing());
+  EXPECT_EQ(client.clock_slews(), 1u);
+}
+
 // The client's own avatar is shown between its last two quanta by the frame's alpha, as a peer is:
 // frames that fall between quanta still move it, instead of a stair-step of still frames and
 // whole-quantum jumps (which the camera following it spread to the whole view).

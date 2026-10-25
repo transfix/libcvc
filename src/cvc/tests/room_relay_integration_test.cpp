@@ -1055,7 +1055,8 @@ TEST(RoomRelayLoopbackTest, OuterPeerGetsPushesNotLiveFrames) {
     EXPECT_EQ(rc->tap.media("C", "camera"), 0u) << rc->pid;
     EXPECT_EQ(rc->tap.media("C", "mic"), 0u) << rc->pid;
   }
-  EXPECT_GT(C.cam_sent, 20u);
+  // C did send all along (a frame per loop pass at most: a Debug gRPC runner managed ~10 a second).
+  EXPECT_GE(C.cam_sent, 10u);
   EXPECT_GT(B.tap.media("A", "camera"), 0u) << "the inner peer's media still flows";
   EXPECT_GT(B.tap.media("A", "mic"), 0u);
 }
@@ -1670,7 +1671,9 @@ TEST(RoomRelayLoopbackTest, LateJoinerBootstrapIsFiltered) {
   EXPECT_EQ(on.held, 1u);
   EXPECT_EQ(on.timeouts, 0u) << "its filter released it, not the timeout";
   EXPECT_TRUE(on.knows_all);
-  EXPECT_LT(on.seconds, 1.0) << "a step and a round trip, well inside the 2 s hold";
+  // A step and a round trip: ~0.1 s here, ~1 s on a Debug gRPC CI runner. The filter, not the
+  // timeout, released it (timeouts above); this only bounds it well inside the 2 s hold.
+  EXPECT_LT(on.seconds, 1.5) << "a step and a round trip, well inside the 2 s hold";
   EXPECT_GE(on.outer_error, 0.0);
   EXPECT_LE(on.outer_error, 1e-4) << "the outer peer, from the push";
   EXPECT_EQ(on.outer_live, 0u);

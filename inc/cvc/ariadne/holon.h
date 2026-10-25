@@ -237,7 +237,8 @@ public:
 
   // CLIENT: how many times apply_authoritative has re-aligned the replica's clock (each seek also
   // drops the local avatar's unacknowledged inputs: a visible jump). The first sample after
-  // joining is one; after that the count should stay flat, and a rising one means samples keep
+  // joining is one if the clock was not already in step; after that the count should stay flat
+  // (later drifts slew, clock_slews), and a rising one means samples keep
   // arriving with ticks far from the replica's (a stalled frame loop, or a sender stamping stale
   // ticks).
   std::uint64_t clock_realigns() const noexcept { return _realigns; }
@@ -341,6 +342,7 @@ private:
   std::uint64_t _realigns = 0;          // CLIENT: clock seeks in apply_authoritative
   std::uint64_t _slews = 0;             // CLIENT: slews started in apply_authoritative
   bool _slewing = false;                // CLIENT: the clock runs off its scale toward the target
+  bool _synced = false;                 // CLIENT: a first sample has set (or found) the clock
   std::uint64_t _statics_rev = 0;
 };
 

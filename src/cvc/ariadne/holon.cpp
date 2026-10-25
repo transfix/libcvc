@@ -234,10 +234,11 @@ void holon::apply_authoritative(const std::string &pid, const cvc::physics::body
                                        : _cfg.lead_slack_ahead_ticks;
   // Within reach, slew instead (holon_config::lead_slew): the logged inputs stay valid, so the
   // next sample reconciles without a jump. Keep slewing until within a tick of the target. The
-  // first alignment (joining) always seeks: there is nothing logged to keep yet, and slewing into
-  // it would leave the inputs late meanwhile.
-  const bool can_slew =
-      _lead > 0 && _cfg.lead_slew > 0.0 && skew <= _cfg.max_skew_ticks && _realigns > 0;
+  // first sample (joining) seeks if it must: there is nothing logged to keep yet, and slewing into
+  // it would leave the inputs late meanwhile. After it, slew -- whether that sample seeked or found
+  // the clock already in step (a client that started with the server never seeks to join).
+  const bool can_slew = _lead > 0 && _cfg.lead_slew > 0.0 && skew <= _cfg.max_skew_ticks && _synced;
+  _synced = true;
   if (can_slew && (skew > tol || (_slewing && skew > 1))) {
     _clock.set_scale(_cfg.clock.scale * (behind ? 1.0 + _cfg.lead_slew : 1.0 - _cfg.lead_slew));
     if (!_slewing)
