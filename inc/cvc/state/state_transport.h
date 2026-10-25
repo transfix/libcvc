@@ -202,6 +202,22 @@ public:
     return false;
   }
 
+  // Targeted push: write `entries` as ONE unsolicited, final snapshot frame (request_id 0) to
+  // every live connection whose peer identified (Hello) as `node_id`, bypassing the peer
+  // registry -- the caller already decided what this peer gets. Clients apply an unsolicited
+  // snapshot like a reply. A relay uses it to backfill or refresh exactly the leaves a delivery
+  // filter withholds from the live stream. Returns the number of connections written; 0 (before
+  // encoding anything) when no connection has that id.
+  //
+  // Called on the same thread as publish(), so per-connection FIFO orders a push ahead of the
+  // publishes that follow it. Default: not supported (returns 0).
+  virtual std::size_t push_snapshot_to(const std::string &node_id,
+                                       const std::vector<snapshot_entry> &entries) {
+    (void)node_id;
+    (void)entries;
+    return 0;
+  }
+
   // -------- Transport bridge (wasm interop) --------
   //
   // Link this transport to a sibling of a DIFFERENT backend — e.g. a gRPC transport and a

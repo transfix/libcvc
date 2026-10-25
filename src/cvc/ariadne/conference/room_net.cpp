@@ -55,6 +55,30 @@ void set_replicated(cvc::app &app, const std::string &path, const std::string &v
   n.value(val);
 }
 
+// Changed-only with ONE journaled mutation per change, for a leaf that flips often. touch() fires
+// valueChanged before value() fires it again, so set_replicated's touch would first re-send the
+// leaf's OLD value; it is only needed while the leaf is new or still empty (the attach race above).
+// A valued leaf is already observed: its first value was set after the touch that attached it, or
+// it arrived through replication (applying a remote node attaches it too).
+// FORCE re-sends an unchanged value (one touch) rather than writing nothing.
+void set_changed_once(cvc::app &app, const std::string &path, const std::string &val,
+                      bool force = false) {
+  cvc::state *n = app.root().findDescendant(path);
+  const std::string cur = n ? n->value() : std::string();
+  if (n && cur == val) {
+    if (force && !cur.empty())
+      n->touch();
+    return;
+  }
+  if (!cur.empty()) {
+    n->value(val);
+    return;
+  }
+  cvc::state &m = app.root()(path);
+  m.touch();
+  m.value(val);
+}
+
 double read_double(cvc::app &app, const std::string &path, double def) {
   cvc::state *n = app.root().findDescendant(path);
   return n && !n->value().empty() ? std::strtod(n->value().c_str(), nullptr) : def;
@@ -81,6 +105,10 @@ std::string participant_net(const std::string &room, const std::string &pid) {
 
 std::string server_net_path(const std::string &room) {
   return sub("conf", {"rooms", room.c_str(), "server", "net"});
+}
+
+std::string participant_talking(const std::string &room, const std::string &pid) {
+  return sub(room_participant_path(room, pid), {"voice", "talking"});
 }
 
 } // namespace
@@ -119,6 +147,21 @@ bool read_server_net(cvc::app &app, const std::string &room, server_net &out) {
   out.in_kbps = read_double(app, sub(base, {"in_kbps"}), 0.0);
   out.out_kbps = read_double(app, sub(base, {"out_kbps"}), 0.0);
   out.links = static_cast<int>(read_double(app, sub(base, {"links"}), 0.0));
+  return true;
+}
+
+void write_participant_voice(cvc::app &app, const std::string &room, const std::string &pid,
+                             bool talking, bool force) {
+  set_changed_once(app, participant_talking(room, pid), talking ? "1" : "0", force);
+}
+
+bool read_participant_voice(cvc::app &app, const std::string &room, const std::string &pid,
+                            bool &talking) {
+  cvc::state *n = app.root().findDescendant(participant_talking(room, pid));
+  const std::string v = n ? n->value() : std::string();
+  if (v.empty())
+    return false;
+  talking = v == "1";
   return true;
 }
 

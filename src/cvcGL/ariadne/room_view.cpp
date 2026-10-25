@@ -7,6 +7,8 @@
 #include <cvc/ariadne/holon.h>
 #include <cvc/ariadne/scene.h>
 #include <cvc/gl/GraphicsNode.h>
+#include <cvc/gl/LodGraphicsNode.h> // lod_stats, make_view_params
+#include <cvc/gl/LodPyramidCache.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/ariadne/room_view.h>
@@ -36,6 +38,14 @@ constexpr float kVisorSize[3] = {0.14f, 0.40f, 0.16f};
 constexpr double kVisorOffset[3] = {0.5 * kAvatarWidth, 0.0, 0.5 * kAvatarHeight - 0.32};
 // A label floats this far above the pose (above the marker's top).
 constexpr double kLabelHeight = kAvatarHeight + 0.35;
+
+// The LOD error budget until set_lod says otherwise: in the browser, the wasm profile, which spends
+// less of a smaller triangle and fill-rate budget.
+#ifdef __EMSCRIPTEN__
+constexpr cvc::lod::quality_preset kDefaultLodPreset = cvc::lod::quality_preset::aggressive;
+#else
+constexpr cvc::lod::quality_preset kDefaultLodPreset = cvc::lod::quality_preset::balanced;
+#endif
 
 std::string visor_node_id(const std::string &pid) {
   return room_view::avatar_node_id(pid) + "_visor";
@@ -119,7 +129,8 @@ double heading_yaw(const double eye[3], const double focal[3]) {
 room_view::room_view(SceneRenderer &view, cvc::app &app, std::string room, std::string self_pid,
                      std::string bind_prefix)
     : _view(view), _app(app), _room(std::move(room)), _self(std::move(self_pid)),
-      _prefix(std::move(bind_prefix)) {}
+      _prefix(std::move(bind_prefix)), _lod_cache(std::make_unique<LodPyramidCache>()),
+      _lod_stats(std::make_unique<cvc::gl::lod_stats>()), _lod_preset(kDefaultLodPreset) {}
 
 room_view::~room_view() {
   clear_scene();
@@ -128,6 +139,7 @@ room_view::~room_view() {
     sg.removeGraphics(avatar_node_id(kv.first));
     sg.removeGraphics(visor_node_id(kv.first));
   }
+  // _lod_cache goes with the members: it cancels its queued builds and waits for a running one.
 }
 
 std::vector<std::string> room_view::take_warnings() {
@@ -136,10 +148,43 @@ std::vector<std::string> room_view::take_warnings() {
   return w;
 }
 
+void room_view::set_lod(bool enabled, cvc::lod::quality_preset preset) {
+  _lod_preset = preset;
+  _view.scene().setLODEnabled(enabled);
+}
+
+const cvc::gl::lod_stats &room_view::lod_stats() const { return *_lod_stats; }
+
+std::size_t room_view::lod_builds() const { return _lod_cache->builds(); }
+
 void room_view::update(cvc::ariadne::holon &h, double wall_dt) {
   sync_scene();
+  // Builds that landed since the last frame reach their objects before this frame's selection.
+  // Where builds have no thread this also runs one queued build, here, on the render thread.
+  _lod_cache->poll();
+  // A mesh over the build cap (the bunny on single-threaded wasm) or a failed build says so here.
+  for (std::string &w : _lod_cache->take_warnings())
+    _warnings.push_back(std::move(w));
   sync_avatars(h, wall_dt);
   sync_names();
+  select_lod();
+}
+
+void room_view::select_lod() {
+  vtkRenderer *r = _view.renderer();
+  // Nothing to select without LOD objects. Nor before the renderer has a camera: make_view_params
+  // never creates one, so it would select from the preset's default eye (the origin). The ladders
+  // draw rung 0 until a selection is made.
+  if (!_realized || _realized->lod_nodes.empty() || !r || !r->IsActiveCameraCreated()) {
+    _lod_stats->reset();
+    return;
+  }
+  SceneGraph &sg = _view.scene();
+  const cvc::lod::view_params view = make_view_params(r, cvc::lod::preset_view(_lod_preset));
+  // A rung switch is geometry appearing and disappearing: a shadow map baked every Nth frame must
+  // be re-baked, or the old rung goes on casting.
+  if (sg.selectLOD(view, _lod_stats.get()) > 0)
+    sg.invalidateShadowBake();
 }
 
 void room_view::sync_names() {
@@ -171,7 +216,12 @@ void room_view::sync_scene() {
   for (cvc::ariadne::SceneLight &l : scene.lights)
     l.id = object_node_id(l.id);
   SceneGraph &sg = _view.scene();
-  _realized = std::make_unique<RealizedScene>(realize_scene(sg, scene, _prefix, &_warnings));
+  // Mesh objects become LOD ladders from the long-lived cache: a revision change re-realizes
+  // every object, and the cache turns that into a re-attach rather than a rebuild.
+  RealizeOptions options;
+  options.lod = _lod_cache.get();
+  _realized =
+      std::make_unique<RealizedScene>(realize_scene(sg, scene, _prefix, &_warnings, options));
   _scene_ids = _realized->created;
   for (const cvc::ariadne::SceneLight &l : scene.lights)
     if (l.rig.empty()) // a rig's lights belong to (and leave with) its StageLighting
@@ -195,10 +245,15 @@ void room_view::sync_scene() {
 
 void room_view::sync_avatars(cvc::ariadne::holon &h, double wall_dt) {
   SceneGraph &sg = _view.scene();
-  const std::vector<std::string> pids = h.participants();
+  // The participants to draw: one whose pose is not known yet (registered from the roster before
+  // its first sample) has nowhere to stand but the placeholder origin, so it gets no marker.
+  std::vector<std::string> pids;
+  for (const std::string &pid : h.participants())
+    if (h.pose_known(pid))
+      pids.push_back(pid);
   const std::set<std::string> present(pids.begin(), pids.end());
 
-  // Departed participants: drop their markers.
+  // Departed participants (or one re-registered pose-less under the same pid): drop their markers.
   for (auto it = _avatars.begin(); it != _avatars.end();) {
     if (!present.count(it->first)) {
       sg.removeGraphics(avatar_node_id(it->first));
@@ -234,6 +289,13 @@ void room_view::sync_avatars(cvc::ariadne::holon &h, double wall_dt) {
       one.nodes.push_back(v);
       realize_scene(sg, one, _prefix, &_warnings); // plain geometry nodes: nothing to keep
       _avatars[pid] = true;
+      if (self) {
+        // Its first pose is where it starts, not a correction to ease out: drop the jump from the
+        // placeholder it was predicted at before the first sample, so the marker appears there
+        // instead of gliding in from the origin.
+        h.take_correction(pid);
+        _self_offset = cvc::physics::vec3{0.0, 0.0, 0.0};
+      }
     }
 
     cvc::physics::pose p = h.display_pose(pid);

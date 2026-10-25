@@ -14,6 +14,7 @@
 */
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/ariadne/conference/room_scene.h>
@@ -216,6 +217,13 @@ void write_scene_object(cvc::app &app, const std::string &room_id,
   set_f(app, sub(o, {"source", "plane_size"}), obj.plane_size);
   set_v3(app, sub(o, {"source", "box"}), obj.box_size);
   set_f(app, sub(o, {"source", "radius"}), obj.sphere_radius);
+  // Only an object with a fit -- or one replacing an object that had one, to clear it -- writes
+  // these, so every other object keeps exactly the leaves it always had. Empty height = no fit.
+  const std::string fit = sub(o, {"source", "fit"});
+  if (obj.has_fit || find(app, sub(fit, {"height"}))) {
+    set_replicated(app, sub(fit, {"height"}), obj.has_fit ? fmt(obj.fit_height) : "");
+    set_b(app, sub(fit, {"up_y"}), obj.has_fit && obj.fit_up_y);
+  }
   set_v3(app, sub(o, {"transform", "pos"}), obj.position);
   set_v3(app, sub(o, {"transform", "rot"}), obj.rotation);
   set_v3(app, sub(o, {"transform", "scale"}), obj.scale);
@@ -254,6 +262,11 @@ std::vector<cvc::ariadne::SceneNode> read_scene_objects(cvc::app &app, const std
     n.plane_size = get_f(app, sub(o, {"source", "plane_size"}), n.plane_size);
     get_v3(app, sub(o, {"source", "box"}), n.box_size);
     n.sphere_radius = get_f(app, sub(o, {"source", "radius"}), n.sphere_radius);
+    if (!get_s(app, sub(o, {"source", "fit", "height"})).empty()) {
+      n.has_fit = true;
+      n.fit_height = get_f(app, sub(o, {"source", "fit", "height"}), n.fit_height);
+      n.fit_up_y = get_b(app, sub(o, {"source", "fit", "up_y"}), false);
+    }
     n.has_transform = true;
     get_v3(app, sub(o, {"transform", "pos"}), n.position);
     get_v3(app, sub(o, {"transform", "rot"}), n.rotation);
@@ -345,6 +358,53 @@ bool seed_default_scene(cvc::app &app, const std::string &room_id) {
     return false;
   write_scene_env(app, room_id, default_scene_env());
   for (const cvc::ariadne::SceneNode &n : default_scene_objects())
+    write_scene_object(app, room_id, n);
+  return true;
+}
+
+std::vector<cvc::ariadne::SceneNode> large_demo_scene_objects(double side_m, int grid) {
+  if (!(std::isfinite(side_m) && side_m > 0.0))
+    throw std::invalid_argument("large demo scene: side_m must be finite and > 0");
+  if (grid < 1)
+    throw std::invalid_argument("large demo scene: grid must be >= 1");
+  std::vector<cvc::ariadne::SceneNode> out = default_scene_objects(); // {ground, ref}
+  out[0].plane_size = static_cast<float>(side_m);
+
+  cvc::ariadne::SceneNode bunny;
+  bunny.source_file = "x.bunny"; // the embedded Stanford bunny: no asset to ship
+  bunny.has_fit = true;          // a Y-up mesh about 15 cm tall, stood up Z-up and scaled
+  bunny.fit_up_y = true;
+  bunny.fit_height = 1.7f; // metres along its largest extent; it stands about that tall
+  bunny.color[0] = 0.78f, bunny.color[1] = 0.74f, bunny.color[2] = 0.66f;
+  bunny.ambient = 0.3f;
+  bunny.diffuse = 0.8f;
+  bunny.has_specular = true;
+  bunny.specular = 0.2f;
+  bunny.specular_power = 16.0f;
+
+  const double spacing = side_m / grid;
+  for (int j = 0; j < grid; ++j)
+    for (int i = 0; i < grid; ++i) {
+      // The middle cell of an odd grid sits on the origin: the reference box's.
+      if (grid % 2 == 1 && i == grid / 2 && j == grid / 2)
+        continue;
+      cvc::ariadne::SceneNode b = bunny;
+      b.id = "bunny_" + std::to_string(i) + "_" + std::to_string(j);
+      b.position[0] = static_cast<float>(-0.5 * side_m + (i + 0.5) * spacing);
+      b.position[1] = static_cast<float>(-0.5 * side_m + (j + 0.5) * spacing);
+      out.push_back(std::move(b));
+    }
+  return out;
+}
+
+bool seed_large_demo_scene(cvc::app &app, const std::string &room_id, double side_m, int grid) {
+  // Validate before the revision check, so a bad argument throws whether or not the room is
+  // already seeded.
+  const std::vector<cvc::ariadne::SceneNode> objects = large_demo_scene_objects(side_m, grid);
+  if (scene_revision(app, room_id) != 0)
+    return false;
+  write_scene_env(app, room_id, default_scene_env());
+  for (const cvc::ariadne::SceneNode &n : objects)
     write_scene_object(app, room_id, n);
   return true;
 }

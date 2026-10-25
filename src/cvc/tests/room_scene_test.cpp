@@ -15,17 +15,25 @@
 
 // H1 slice 5: the shared room scene (conf.rooms.<room>.scene.*). The server-authoritative scene
 // round-trips through scalar leaves back into the .ari Scene types, removal is soft, seeding is
-// idempotent, and the seeded scene replicates to a client over the existing "conf" shard.
+// idempotent, and the seeded scene replicates to a client over the existing "conf" shard. The
+// large demo scene seeds mesh objects that physics never sees, and leaves the default one as it
+// was.
 
+#include <cmath>
 #include <cstdint>
 #include <cvc/ariadne/conference/room_scene.h>
+#include <cvc/ariadne/holon_sync.h> // room_statics
 #include <cvc/ariadne/scene.h>
 #include <cvc/core/app.h>
+#include <cvc/state/state.h>
 #include <cvc/state/state_cluster_shard.h>
 #include <cvc/state/state_transport_inproc.h>
 #include <gtest/gtest.h>
+#include <limits>
+#include <set>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace rs = cvc::ariadne::conference;
@@ -49,6 +57,28 @@ const SceneLight *find_light(const std::vector<SceneLight> &v, const std::string
     if (l.id == id)
       return &l;
   return nullptr;
+}
+// The leaf paths under PATH, relative to it ("source.box.x", ...).
+std::set<std::string> leaves_under(cvc::app &app, const std::string &path) {
+  std::set<std::string> all, leaves;
+  cvc::state *n = app.root().findDescendant(path);
+  if (!n)
+    return leaves;
+  const std::string prefix = path + cvc::state::SEPARATOR;
+  for (const std::string &full : n->children())
+    if (full.rfind(prefix, 0) == 0)
+      all.insert(full.substr(prefix.size()));
+  for (const std::string &p : all) {
+    bool inner = false;
+    for (const std::string &q : all)
+      inner = inner || q.rfind(p + cvc::state::SEPARATOR, 0) == 0;
+    if (!inner)
+      leaves.insert(p);
+  }
+  return leaves;
+}
+std::string object_path(const std::string &room, const std::string &id) {
+  return rs::room_scene_path(room) + ".objects." + id;
 }
 } // namespace
 
@@ -291,6 +321,196 @@ TEST(RoomSceneTest, SeededSceneReplicatesToAClientAndTracksEdits) {
   ASSERT_EQ(objs.size(), 1u);
   EXPECT_EQ(objs[0].id, "ref");
   EXPECT_FLOAT_EQ(objs[0].position[0], 4.0f);
+}
+
+// ── a mesh's fit: ───────────────────────────────────────────────────────────
+
+TEST(RoomSceneTest, FitRoundTripsAndClears) {
+  cvc::app app;
+  SceneNode m;
+  m.id = "m";
+  m.source_file = "x.bunny";
+  m.has_fit = true;
+  m.fit_up_y = true;
+  m.fit_height = 2.5f;
+  rs::write_scene_object(app, "r", m);
+  std::vector<SceneNode> out = rs::read_scene_objects(app, "r");
+  ASSERT_EQ(out.size(), 1u);
+  EXPECT_TRUE(out[0].has_fit);
+  EXPECT_TRUE(out[0].fit_up_y);
+  EXPECT_FLOAT_EQ(out[0].fit_height, 2.5f);
+
+  // Rewritten without a fit: cleared, not left behind.
+  m.has_fit = false;
+  rs::write_scene_object(app, "r", m);
+  out = rs::read_scene_objects(app, "r");
+  ASSERT_EQ(out.size(), 1u);
+  EXPECT_FALSE(out[0].has_fit);
+
+  // An object that never had a fit writes no fit leaves at all.
+  SceneNode p;
+  p.id = "p";
+  p.source_primitive = "plane";
+  rs::write_scene_object(app, "r", p);
+  EXPECT_EQ(app.root().findDescendant(object_path("r", "p") + ".source.fit"), nullptr);
+  out = rs::read_scene_objects(app, "r");
+  const SceneNode *plane = find_node(out, "p");
+  ASSERT_NE(plane, nullptr);
+  EXPECT_FALSE(plane->has_fit);
+}
+
+// ── the large demo scene (--scene large) ─────────────────────────────────────
+
+TEST(RoomSceneTest, LargeDemoSceneSeedsMeshes) {
+  cvc::app app;
+  ASSERT_TRUE(rs::seed_large_demo_scene(app, "r"));
+  EXPECT_FALSE(rs::seed_large_demo_scene(app, "r")) << "idempotent";
+  EXPECT_FALSE(rs::seed_default_scene(app, "r")) << "a seeded room is never re-seeded";
+
+  // 100 m plane, the reference box, and a bunny in every cell of the 5 x 5 lattice but the
+  // middle one, which is the box's.
+  const std::vector<SceneNode> objs = rs::read_scene_objects(app, "r");
+  ASSERT_EQ(objs.size(), 26u);
+  EXPECT_EQ(rs::scene_revision(app, "r"), 27u); // env + 26 objects
+  const SceneNode *ground = find_node(objs, "ground");
+  ASSERT_NE(ground, nullptr);
+  EXPECT_EQ(ground->source_primitive, "plane");
+  EXPECT_FLOAT_EQ(ground->plane_size, 100.0f);
+  EXPECT_FALSE(ground->has_fit);
+  const SceneNode *ref = find_node(objs, "ref");
+  ASSERT_NE(ref, nullptr);
+  EXPECT_EQ(ref->source_primitive, "box");
+  EXPECT_FLOAT_EQ(ref->position[2], 0.5f);
+  EXPECT_FALSE(ref->has_fit);
+
+  std::set<std::pair<long, long>> cells;
+  for (const SceneNode &n : objs) {
+    if (n.id == "ground" || n.id == "ref")
+      continue;
+    EXPECT_EQ(n.id.rfind("bunny_", 0), 0u) << n.id;
+    EXPECT_EQ(n.source_file, "x.bunny") << n.id;
+    EXPECT_TRUE(n.source_primitive.empty()) << n.id;
+    // The size comes from the fit (baked into the mesh), not a transform scale, so the mesh's
+    // own units are metres.
+    EXPECT_TRUE(n.has_fit && n.fit_up_y) << n.id;
+    EXPECT_FLOAT_EQ(n.fit_height, 1.7f) << n.id;
+    expect_v3_eq(n.scale, SceneNode().scale);
+    EXPECT_FLOAT_EQ(n.position[2], 0.0f) << n.id << ": the fit stands it on the ground";
+    // Cell centres 20 m apart, inside the plane, never the origin.
+    const double gx = (n.position[0] + 40.0) / 20.0, gy = (n.position[1] + 40.0) / 20.0;
+    EXPECT_NEAR(gx, std::round(gx), 1e-4) << n.id;
+    EXPECT_NEAR(gy, std::round(gy), 1e-4) << n.id;
+    EXPECT_TRUE(gx > -0.5 && gx < 4.5 && gy > -0.5 && gy < 4.5) << n.id;
+    EXPECT_FALSE(std::lround(gx) == 2 && std::lround(gy) == 2) << n.id;
+    EXPECT_TRUE(n.visible_default);
+    cells.insert({std::lround(gx), std::lround(gy)});
+  }
+  EXPECT_EQ(cells.size(), 24u) << "one bunny per cell";
+
+  // A realizable Scene, in the default room's environment.
+  const cvc::ariadne::Scene s = rs::read_room_scene(app, "r");
+  EXPECT_EQ(s.nodes.size(), 26u);
+  EXPECT_TRUE(s.lights.empty());
+  EXPECT_FALSE(s.has_shadows);
+  EXPECT_TRUE(s.has_chrome && !s.chrome_visible);
+  EXPECT_TRUE(s.background_gradient);
+}
+
+TEST(RoomSceneTest, LargeDemoSceneLattice) {
+  // An even grid has no middle cell: every cell gets a bunny.
+  const std::vector<SceneNode> even = rs::large_demo_scene_objects(60.0, 2);
+  ASSERT_EQ(even.size(), 2u + 4u);
+  EXPECT_FLOAT_EQ(even[0].plane_size, 60.0f);
+  for (std::size_t k = 2; k < even.size(); ++k) {
+    EXPECT_FLOAT_EQ(std::fabs(even[k].position[0]), 15.0f);
+    EXPECT_FLOAT_EQ(std::fabs(even[k].position[1]), 15.0f);
+  }
+  EXPECT_NE(find_node(even, "bunny_1_0"), nullptr);
+  // Odd: the middle is the box's. One cell: no bunny at all.
+  EXPECT_EQ(rs::large_demo_scene_objects(60.0, 3).size(), 2u + 8u);
+  EXPECT_EQ(find_node(rs::large_demo_scene_objects(60.0, 3), "bunny_1_1"), nullptr);
+  EXPECT_EQ(rs::large_demo_scene_objects(10.0, 1).size(), 2u);
+
+  EXPECT_THROW(rs::large_demo_scene_objects(0.0, 5), std::invalid_argument);
+  EXPECT_THROW(rs::large_demo_scene_objects(std::numeric_limits<double>::quiet_NaN(), 5),
+               std::invalid_argument);
+  EXPECT_THROW(rs::large_demo_scene_objects(100.0, 0), std::invalid_argument);
+  cvc::app app;
+  EXPECT_THROW(rs::seed_large_demo_scene(app, "r", -1.0), std::invalid_argument);
+  EXPECT_EQ(rs::scene_revision(app, "r"), 0u) << "a refused seed writes nothing";
+}
+
+// Physics statics are the primitives only: the bunnies are render meshes (and LOD proxies on the
+// clients), so the server's and every client's prediction world stay the plane and the box.
+TEST(RoomSceneTest, RoomStaticsIgnoreMeshes) {
+  cvc::app app;
+  ASSERT_TRUE(rs::seed_large_demo_scene(app, "r"));
+  const std::vector<cvc::ariadne::avatar_static> st = cvc::ariadne::room_statics(app, "r");
+  ASSERT_EQ(st.size(), 2u) << "the plane and the box; the 24 bunnies have no physical shape";
+  const cvc::ariadne::avatar_static &ground = st[0].half_extents.x > 5.0 ? st[0] : st[1];
+  const cvc::ariadne::avatar_static &cube = st[0].half_extents.x > 5.0 ? st[1] : st[0];
+  EXPECT_EQ(ground.type, cvc::ariadne::avatar_static::kind::box);
+  EXPECT_DOUBLE_EQ(ground.half_extents.x, 50.0);
+  EXPECT_DOUBLE_EQ(ground.half_extents.y, 50.0);
+  EXPECT_NEAR(ground.center.z + ground.half_extents.z, 0.0, 1e-9) << "the slab's top is the floor";
+  EXPECT_EQ(cube.type, cvc::ariadne::avatar_static::kind::box);
+  EXPECT_DOUBLE_EQ(cube.half_extents.x, 0.5);
+  EXPECT_DOUBLE_EQ(cube.center.z, 0.5);
+}
+
+// The default seed is what it always was: the same two objects, the same leaves (no fit), the
+// same revision -- the live 20 m room does not change with the large scene's arrival.
+TEST(RoomSceneTest, DefaultSceneUnchanged) {
+  cvc::app app;
+  ASSERT_TRUE(rs::seed_default_scene(app, "r"));
+  EXPECT_EQ(rs::scene_revision(app, "r"), 3u);
+  const std::vector<SceneNode> objs = rs::read_scene_objects(app, "r");
+  ASSERT_EQ(objs.size(), 2u);
+  const SceneNode *ground = find_node(objs, "ground");
+  const SceneNode *ref = find_node(objs, "ref");
+  ASSERT_NE(ground, nullptr);
+  ASSERT_NE(ref, nullptr);
+  EXPECT_EQ(ground->source_primitive, "plane");
+  EXPECT_FLOAT_EQ(ground->plane_size, 20.0f);
+  EXPECT_EQ(ref->source_primitive, "box");
+  expect_v3_eq(ref->box_size, rs::default_scene_objects()[1].box_size);
+  EXPECT_FLOAT_EQ(ref->position[2], 0.5f);
+  EXPECT_FALSE(ground->has_fit || ref->has_fit);
+
+  const std::set<std::string> expected = {"material.ambient",
+                                          "material.color.b",
+                                          "material.color.g",
+                                          "material.color.r",
+                                          "material.diffuse",
+                                          "material.specular",
+                                          "material.specular_power",
+                                          "present",
+                                          "source.box.x",
+                                          "source.box.y",
+                                          "source.box.z",
+                                          "source.plane_size",
+                                          "source.primitive",
+                                          "source.radius",
+                                          "source.uri",
+                                          "transform.pos.x",
+                                          "transform.pos.y",
+                                          "transform.pos.z",
+                                          "transform.rot.x",
+                                          "transform.rot.y",
+                                          "transform.rot.z",
+                                          "transform.scale.x",
+                                          "transform.scale.y",
+                                          "transform.scale.z",
+                                          "visible"};
+  EXPECT_EQ(leaves_under(app, object_path("r", "ground")), expected);
+  EXPECT_EQ(leaves_under(app, object_path("r", "ref")), expected);
+  // The large scene's ground and box are the default's, bar the plane's size.
+  const std::vector<SceneNode> large = rs::large_demo_scene_objects();
+  ASSERT_GE(large.size(), 2u);
+  EXPECT_EQ(large[0].id, "ground");
+  EXPECT_EQ(large[1].id, "ref");
+  expect_v3_eq(large[1].position, ref->position);
+  expect_v3_eq(large[1].color, ref->color);
 }
 
 // A room that turns shadows on asserts them (re-baked every frame, for moving avatars).

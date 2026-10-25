@@ -438,6 +438,37 @@ TEST(HolonTest, ClientAlignsAheadOfTheServerByItsLead) {
   EXPECT_EQ(client.tick(), 134u);
 }
 
+// Every clock seek drops the local avatar's unacknowledged inputs, so after the one at join a
+// client should see none; clock_realigns counts them, so a host can tell when it does.
+TEST(HolonTest, RealignCounterCountsSeeks) {
+  holon client(holon_role::client);
+  client.add_participant("A", /*local=*/true);
+  client.add_participant("B", /*local=*/false);
+  client.set_lead_ticks(14);
+  EXPECT_EQ(client.clock_realigns(), 0u);
+  body_state s;
+  client.apply_authoritative("A", s, 100); // joining: the clock seeks to 114
+  ASSERT_EQ(client.tick(), 114u);
+  EXPECT_EQ(client.clock_realigns(), 1u) << "the alignment at join counts";
+  const double dt = client.clock().fixed_dt();
+  for (int i = 0; i < 30; ++i)
+    client.advance(dt);
+  ASSERT_EQ(client.tick(), 144u);
+
+  // Target 112 + 14 = 126, 18 ticks behind the replica: within the slack, no seek.
+  client.apply_authoritative("A", s, 112);
+  EXPECT_EQ(client.tick(), 144u);
+  EXPECT_EQ(client.clock_realigns(), 1u) << "an in-tolerance sample is not a re-alignment";
+
+  // A sample stamped more than lead_slack_ahead_ticks (24) behind -- a peer whose tick a
+  // heartbeat left old -- seeks the clock back, and counts.
+  client.apply_authoritative("B", s, 105); // target 119, 25 behind
+  EXPECT_EQ(client.tick(), 119u);
+  EXPECT_EQ(client.clock_realigns(), 2u);
+  client.apply_authoritative("B", s, 105); // already seen: not a sample, not a seek
+  EXPECT_EQ(client.clock_realigns(), 2u);
+}
+
 TEST(HolonTest, PeerSampleSpanIsCapped) {
   holon_config cfg;
   cfg.max_peer_span_ticks = 30;
@@ -617,6 +648,43 @@ TEST(HolonPhysicsTest, ClientPredictionMatchesTheServersPhysics) {
   EXPECT_LT(server.state("A").position.x, -0.5) << "the server stopped it at the cube";
   EXPECT_LT(corrected, 1e-3) << "and the client predicted the same";
   EXPECT_NEAR(client.state("A").position.x, server.state("A").position.x, 0.05);
+}
+
+// A peer the host registered before its pose arrived (client_pump does, from the roster) is a
+// member with nowhere to be yet: no kinematic body at its placeholder -- at the origin that would
+// be an invisible obstacle inside the reference cube -- until its first sample puts one there.
+// The placeholder here stands in the local avatar's path, so its absence is visible.
+TEST(HolonPhysicsTest, PoseLessPeerHasNoBodyUntilFirstSample) {
+  holon client(holon_role::client, physics_config());
+  client.add_participant("A", /*local=*/true, at(-3.0, 5.0));
+  client.add_participant("B", /*local=*/false, at(0.0, 5.0), /*pose_known=*/false);
+  EXPECT_TRUE(client.has_participant("B")) << "a member like any other";
+  EXPECT_TRUE(client.pose_known("A"));
+  EXPECT_FALSE(client.pose_known("B"));
+  EXPECT_FALSE(client.pose_known("nobody"));
+  if (!client.physics())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  client.set_statics(room_statics(), 1);
+  EXPECT_TRUE(client.has_body("A")) << "the local avatar is predicted from the start";
+  EXPECT_FALSE(client.has_body("B")) << "no body at the placeholder";
+  EXPECT_FALSE(client.has_body("nobody"));
+
+  // A walks through where the placeholder is: nothing there to stop it.
+  client.set_intent("A", avatar_intent{vec3{2.0, 0.0, 0.0}});
+  run(client, 300); // 2.5 s: about 4.8 m
+  const double walked = client.state("A").position.x;
+  EXPECT_GT(walked, 1.0) << "on past the placeholder";
+
+  // B's first sample, 1.5 m ahead of A: a kinematic body at the sample, which A walks into.
+  const double bx = walked + 1.5;
+  client.apply_authoritative("B", at(bx, 5.0), client.tick());
+  EXPECT_TRUE(client.pose_known("B"));
+  EXPECT_TRUE(client.has_body("B"));
+  run(client, 240);
+  const vec3 a = client.state("A").position;
+  EXPECT_LT(a.x, bx - 0.5 + 0.02) << "A's front face stops at B's";
+  EXPECT_GT(a.x, bx - 0.6);
+  EXPECT_NEAR(a.y, 5.0, 0.05);
 }
 
 // ── authority: the server's veto and overrides (§5h propose -> veto -> override) ──
