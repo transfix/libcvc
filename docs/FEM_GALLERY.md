@@ -111,5 +111,6 @@ them out:
 - **Interval meshes:** `tetrahedralize2` left fans of slivers and holes inside the layer. It now
   meshes the layer as a solid between the two isosurfaces, with the isovalues in either order.
 - **Hexahedra on the head and the CT:** adaptive hexahedralization collapsed about half of the
-  hexahedra, which then had repeated corners. None do now: the CT at density 45 gives 183,708
+  hexahedra, which then had repeated corners. None do now (also fixed on its own by
+  [#806](https://github.com/transfix/libcvc/pull/806)): the CT at density 45 gives 183,708
   hexahedra, and the head's SDF at 128³ gives 51,946.
