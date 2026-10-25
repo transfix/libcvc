@@ -288,6 +288,21 @@ public:
   const std::uint8_t *last_visible(int m) const {
     return lastvis_.data() + static_cast<std::size_t>(m) * rows_ * cols_;
   }
+  // Plane m's belief log-odds [rows*cols] (> 0 believed occupied, clamped to +-l_clamp), the
+  // state belief_occ(m) is thresholded from; null for an out-of-range m. It changes on a sense
+  // tick, often with no raster_version bump (most updates cross no threshold), so a viewer polls
+  // it.
+  const float *logodds(int m) const {
+    return m >= 0 && m < M_ ? logodds_.data() + static_cast<std::size_t>(m) * rows_ * cols_
+                            : nullptr;
+  }
+  // Plane m's dynamic layer [rows*cols]: the sim time (tick * veh.dt, s) each cell was last marked
+  // by add_obstacle(), -inf where never. A mark occupies its cell while now - stamp <= ttl_s, from
+  // the next sense tick (belief_occ composites it then). Null for an out-of-range m.
+  const double *dynamic_stamps(int m) const {
+    return m >= 0 && m < M_ ? dyn_stamp_.data() + static_cast<std::size_t>(m) * rows_ * cols_
+                            : nullptr;
+  }
 
   // Live-scene edits (for the threading layer): retarget agent i (normalized
   // goal) keeping its escape state; stamp a decaying obstacle blob (a centered
