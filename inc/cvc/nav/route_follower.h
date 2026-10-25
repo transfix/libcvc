@@ -23,9 +23,9 @@
 //   - Its progress is the nearest pose of the current leg, ahead of where it last was.
 //   - A forward leg that runs to the route's end is the trained drive's: the agent is retargeted
 //     to a carrot `lookahead` along the route (at least twice the sim's reach_tol, or the drive
-//     would park at it), the farthest it can see on the sim's map (a carrot behind a corner
-//     stalls the drive against the building), so it keeps off walls and parks at the end. The
-//     carrot moves on only once the agent is halfway to it, since a retarget resets the drive's
+//     would park at it), the farthest it can see on its own belief plane (a carrot behind a
+//     corner stalls the drive against the building), so it keeps off walls and parks at the end.
+//     The carrot moves on only once the agent is halfway to it, since a retarget resets the drive's
 //     carrot state. Where it cannot see that far (a tight corner, a wall alongside), it takes
 //     that stretch geometrically, as below, until it can. The leg is done within reach_tol of
 //     its end, where the drive parks.
@@ -52,7 +52,8 @@ class sim_world;
 struct follower_options {
   double wheelbase = 0.0;       // world units: pure pursuit's steer; 0 = the sim's veh.L
   double max_steer = 0.0;       // rad; 0 = the sim's veh.delta_max
-  double lookahead = 0.0;       // world units ahead along the route; 0 = 3 route steps
+  double lookahead = 0.0;       // world units ahead along the route; 0 = 3 x the sim's reach_tol
+                                // (at least 3 route steps). Never under 2 x reach_tol.
   double manoeuvre_speed = 1.5; // world units / s, in either gear
   double pursuit_speed = 5.0;   // world units / s, the drive's leg where it is taken geometrically
   double accel = 1.0;           // world units / s^2 a manoeuvre speeds up and slows down at

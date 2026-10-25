@@ -710,6 +710,28 @@ void sim_world::step(int num_threads) {
 
   // ── override_command: the caller's command in place of the drive's, for this tick ──
   if (ov_any_) {
+    // The risk governor holds the caller's acceleration to its cap as it holds the drive's
+    // (risk_speed_cap): a route follower commands the vehicle in the drive's place, and without
+    // this drove a Humvee along a sidehill at full throttle with the governor on.
+    material_stack ov_ms;
+    const material_stack *ov_mat = nullptr;
+    if (vv.risk_governor && mat_on_) {
+      ov_ms = material_view();
+      ov_mat = &ov_ms;
+    }
+    const auto risk_hold = [&](int i, float acc, const plant_state &s, float vmax_i, float a_b,
+                               float tau) {
+      if (!vv.risk_governor)
+        return acc;
+      const int plane = (ov_mat && ov_mat->M > 1) ? map_id_[i] : 0;
+      const float sgn = s.speed >= 0.0f ? 1.0f : -1.0f;
+      const float cap =
+          risk_speed_cap(vv, ov_mat, plane, s.x, s.y, s.heading, sgn, vmax_i, a_b, tau);
+      const float dt = cfg_.veh.dt;
+      if (s.speed >= 0.0f)
+        return std::min(acc, std::max((cap - s.speed) / dt, -a_b));
+      return std::max(acc, std::min((-cap - s.speed) / dt, a_b));
+    };
     for (int i = 0; i < n_; ++i) {
       if (!ov_on_[i])
         continue;
@@ -720,12 +742,16 @@ void sim_world::step(int num_threads) {
       const float steer = std::min(std::max(ov_steer_[i], -lock), lock);
       if (plant_) {
         pl_steer_cmd_[i] = steer;
-        pl_accel_cmd_[i] = ov_accel_[i];
+        const float a_b = pl_a_brake_[i] > 0.0f ? pl_a_brake_[i] : pl_a_max_[i];
+        pl_accel_cmd_[i] =
+            risk_hold(i, ov_accel_[i], pl_start_[i], pl_vmax_[i], a_b, pl_latency_[i]);
         parked_[i] = 0;
       } else {
         const float vmax_i = cfg_.veh.vmax_col ? cfg_.veh.vmax_col[i] : cfg_.veh.vmax;
+        const float a_max_i = cfg_.veh.a_max_col ? cfg_.veh.a_max_col[i] : cfg_.veh.a_max;
         const float sp_min = cfg_.veh.allow_reverse ? -0.25f * vmax_i : 0.0f;
-        const plant_state s = kinematic_step(ov_start[i], steer, ov_accel_[i], L, cfg_.veh.dt,
+        const float acc = risk_hold(i, ov_accel_[i], ov_start[i], vmax_i, a_max_i, 0.0f);
+        const plant_state s = kinematic_step(ov_start[i], steer, acc, L, cfg_.veh.dt,
                                              std::max(1, cfg_.veh.nsub), sp_min, vmax_i);
         o_[2 * i] = s.x;
         o_[2 * i + 1] = s.y;

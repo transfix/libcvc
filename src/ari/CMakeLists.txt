@@ -15,6 +15,13 @@ if(CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
   set(CMAKE_CXX_STANDARD 20)
   set(CMAKE_CXX_STANDARD_REQUIRED ON)
   find_package(cvc CONFIG REQUIRED)
+else()
+  # In-tree: re-import the Boost targets cvc links PUBLIC so its transitive link evaluates in
+  # this directory scope (src/arisrv/CMakeLists.txt explains why).
+  if(NOT TARGET Boost::filesystem)
+    find_package(Boost REQUIRED COMPONENTS thread date_time regex filesystem
+                 OPTIONAL_COMPONENTS system chrono)
+  endif()
 endif()
 
 add_executable(ari main.cpp)

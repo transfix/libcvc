@@ -2810,7 +2810,9 @@ inline cvc::nav::follower_options follower_from(PyObject *d) {
   // weights_path, samples -> coef_feats -> forward -> bicycle) plus the material
   // coupling of nav_bicycle_rollout_material. This is what a torch-free host (or
   // GRL-SNAM's GRL_SNAM_NAV_DRIVE=native) calls to drive material-aware agents
-  // without libtorch. Returns fresh (o (N,2), th (N,), sp (N,), minclr (N,)) f32.
+  // without libtorch. risk_governor / risk_vmin / risk_onset / risk_lookahead / risk_probes:
+  // veh_params' risk governor (off by default; speeds and the look-ahead normalized). Returns
+  // fresh (o (N,2), th (N,), sp (N,), minclr (N,)) f32.
   PyObject *nav_drive_step_material(PyObject *field, PyObject *on, PyObject *th, PyObject *sp,
                                     PyObject *carrot, const char *weights_path, PyObject *mat_field,
                                     PyObject *lam_soft, PyObject *lam_hard, double mat_k_sharp,
@@ -2819,7 +2821,9 @@ inline cvc::nav::follower_options follower_from(PyObject *d) {
                                     double scale, double rr, double d_hat, double dt, double vmax,
                                     double L, double delta_max, double a_max, double a_lat_max,
                                     double k_steer, int nsub, int allow_reverse,
-                                    int num_threads = 0) {
+                                    int num_threads = 0, int risk_governor = 0,
+                                    double risk_vmin = 0.0, double risk_onset = 0.3,
+                                    double risk_lookahead = 0.0, int risk_probes = 3) {
     std::vector<PyArrayObject *> hold;
     auto fail = [&](const char *msg) {
       for (PyArrayObject *h : hold)
@@ -2928,6 +2932,11 @@ inline cvc::nav::follower_options follower_from(PyObject *d) {
     v.k_steer = static_cast<float>(k_steer);
     v.nsub = nsub;
     v.allow_reverse = allow_reverse != 0;
+    v.risk_governor = risk_governor != 0;
+    v.risk_vmin = static_cast<float>(risk_vmin);
+    v.risk_onset = static_cast<float>(risk_onset);
+    v.risk_lookahead = static_cast<float>(risk_lookahead);
+    v.risk_probes = risk_probes;
     const float *cad = static_cast<const float *>(PyArray_DATA(ca));
     Py_BEGIN_ALLOW_THREADS cvc::nav::drive_step_material(fs, ood, tod, sod, cad, model, N, mid, v,
                                                          md, mcd, num_threads);
@@ -2955,6 +2964,8 @@ inline cvc::nav::follower_options follower_from(PyObject *d) {
   //     phi and their gradients) with ter_lam_soft / ter_lam_hard / ter_k_sharp / ter_d_hat_m
   //     (terrain_drive's defaults: weights 0, so only the risk and slope columns read it);
   //     slope (2,H,W): dz/dx, dz/dy for the governors, with gravity (normalized / s^2);
+  //   - risk_governor / risk_vmin / risk_onset / risk_lookahead / risk_probes: veh_params' risk
+  //     governor over the material stack and the terrain (off by default);
   //   - telemetry: nonzero returns a fifth element, a dict of (N,) arrays named as
   //     drive_telemetry's fields (binding uint8; U_nav's terms as u_goal, u_barrier, u_soft,
   //     u_hard, u_terrain).
@@ -2970,7 +2981,9 @@ inline cvc::nav::follower_options follower_from(PyObject *d) {
       int nsub, int allow_reverse, double lam_soft_scale = 1.0, double lam_hard_scale = 1.0,
       PyObject *grip = nullptr, PyObject *terrain = nullptr, double ter_lam_soft = 0.0,
       double ter_lam_hard = 0.0, double ter_k_sharp = 1.25, double ter_d_hat_m = 12.0,
-      PyObject *slope = nullptr, double gravity = 0.0, int telemetry = 0) {
+      PyObject *slope = nullptr, double gravity = 0.0, int telemetry = 0, int risk_governor = 0,
+      double risk_vmin = 0.0, double risk_onset = 0.3, double risk_lookahead = 0.0,
+      int risk_probes = 3) {
 #ifdef CVC_USING_CUDA
     const char *who = "pycvc.nav_drive_step_material_cuda";
     std::vector<PyArrayObject *> hold;
@@ -3091,6 +3104,11 @@ inline cvc::nav::follower_options follower_from(PyObject *d) {
       v.slope = &sf;
       v.gravity = static_cast<float>(gravity);
     }
+    v.risk_governor = risk_governor != 0;
+    v.risk_vmin = static_cast<float>(risk_vmin);
+    v.risk_onset = static_cast<float>(risk_onset);
+    v.risk_lookahead = static_cast<float>(risk_lookahead);
+    v.risk_probes = risk_probes;
     cvc::nav::coef_mlp model = cvc::nav::coef_mlp::load(weights_path); // throws on bad/stale file
 
     npy_intp d2[2] = {N, 2}, d1 = N;
@@ -3155,6 +3173,7 @@ inline cvc::nav::follower_options follower_from(PyObject *d) {
       put("lam_hard", [](const T &t) { return t.lam_hard; });
       put("mu", [](const T &t) { return t.mu; });
       put("mrisk", [](const T &t) { return t.mrisk; });
+      put("v_risk", [](const T &t) { return t.v_risk; });
       put("ext_fx", [](const T &t) { return t.ext_fx; });
       put("ext_fy", [](const T &t) { return t.ext_fy; });
       put("steer", [](const T &t) { return t.steer; });

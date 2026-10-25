@@ -211,3 +211,110 @@ TEST(RouteFollower, StopsAtACuspAndDrivesOn) {
   EXPECT_EQ(max_leg + 1, follow.legs(0)) << "it took every leg";
   EXPECT_LT(std::hypot(w.x - 12.0, w.y - 52.0), 4.0) << "it reached the goal";
 }
+
+namespace {
+
+// dead_end's walls round the edge, open inside: the prior, and the truth with a 2 m wall across
+// x 30..31, y 20..40.
+struct open_field {
+  static constexpr int W = 100, H = 60;
+  int cols = W + 1, rows = H + 1;
+  std::vector<std::uint8_t> prior =
+      std::vector<std::uint8_t>(static_cast<std::size_t>(W + 1) * (H + 1), 0);
+  std::vector<std::uint8_t> truth;
+  void box(std::vector<std::uint8_t> &occ, int x0, int y0, int x1, int y1) const {
+    for (int y = y0; y <= y1; ++y)
+      for (int x = x0; x <= x1; ++x)
+        occ[static_cast<std::size_t>(y) * cols + x] = 1;
+  }
+  open_field() {
+    box(prior, 0, 0, W, 0);
+    box(prior, 0, H, W, H);
+    box(prior, 0, 0, 0, H);
+    box(prior, W, 0, W, H);
+    truth = prior;
+    box(truth, 30, 20, 31, 40);
+  }
+};
+
+} // namespace
+
+// Line of sight is each vehicle's own map. Two agents on one line toward the wall, each on its
+// own belief plane. Agent 1 starts 14 m from the wall and senses it; agent 0, 27 m away with a
+// 16 m sensor, does not, so only plane 1 holds the wall. Following straight routes through it with
+// a 40 m lookahead, agent 1 takes the farthest pose it can see, short of the wall, while agent 0
+// sees past it on its own map. (Reading plane 0 for both put agent 1's carrot behind the wall.)
+TEST(RouteFollower, LineOfSightIsEachVehiclesOwnPlane) {
+  const open_field f;
+  dead_end g; // for its config's frame (same size)
+  sim_world::config c = humvee_config(g);
+  c.freeze_sense = false;
+  c.range_m = 16.0;
+  c.sense_every = 1;
+  const float o[4] = {static_cast<float>((3 - c.cx) * kS), static_cast<float>((30 - c.cy) * kS),
+                      static_cast<float>((16 - c.cx) * kS), static_cast<float>((30 - c.cy) * kS)};
+  const float goal[4] = {static_cast<float>((80 - c.cx) * kS), static_cast<float>((30 - c.cy) * kS),
+                         static_cast<float>((80 - c.cx) * kS),
+                         static_cast<float>((30 - c.cy) * kS)};
+  const float col[6] = {1, 1, 1, 1, 1, 1};
+  const int map_id[2] = {0, 1};
+  sim_world sim(c, f.truth.data(), f.prior.data(), coef_mlp::default_biased(), o, goal, col, 2,
+                map_id, 2);
+  ASSERT_TRUE(sim.set_pose(0, o[0], o[1], 0.0f));
+  ASSERT_TRUE(sim.set_pose(1, o[2], o[3], 0.0f));
+  for (int t = 0; t < 3; ++t)
+    sim.step();
+  const std::size_t wall = static_cast<std::size_t>(30) * f.cols + 30;
+  ASSERT_EQ(sim.belief_occ(1)[wall], 1) << "agent 1 sensed the wall into its plane";
+  ASSERT_EQ(sim.belief_occ(0)[wall], 0) << "agent 0's plane does not hold it";
+
+  float p[4], h[2], v[2];
+  sim.snapshot(p, h, v, nullptr, nullptr);
+  follower_options fo;
+  fo.lookahead = 40.0;
+  route_follower follow(sim, fo);
+  for (int i = 0; i < 2; ++i) {
+    const vehicle_route r =
+        plan_vehicle_route(f.prior.data(), f.rows, f.cols, 0.0, 0.0, open_field::W, open_field::H,
+                           vehicle(), {p[2 * i], p[2 * i + 1], h[i], false}, 80, 30);
+    ASSERT_TRUE(r.reached) << "agent " << i;
+    follow.set(i, r);
+  }
+  follow.apply();
+  float gw[4];
+  sim.goals_world(gw);
+  std::printf("  carrots: agent 0 (plane 0) at x %.1f, agent 1 (plane 1, the wall at x 30) at "
+              "x %.1f\n",
+              gw[0], gw[2]);
+  EXPECT_GT(gw[0], 32.0f) << "agent 0 sees past where plane 1's wall is";
+  EXPECT_LT(gw[2], 30.0f) << "agent 1's carrot is short of the wall it sensed";
+  EXPECT_GT(gw[2], p[2] + 6.0f) << "and the farthest pose it can see";
+}
+
+// The drive leg's default carrot is 3 reach_tol along the route (here 9 m); an explicit lookahead
+// is taken as given (12 m). (At 2 reach_tol, the old default's floor, the carrot sits right at the
+// distance under which the follower gives the stretch to pure pursuit instead, and on a bend under
+// it: the reason for the new default.)
+TEST(RouteFollower, TheDefaultCarrotIsThreeReachAhead) {
+  const dead_end g;
+  for (const double look : {0.0, 12.0}) {
+    sim_world sim = make(g, 5, 50, 35, 50); // open ground, facing east
+    const where w0 = at(sim);
+    const vehicle_route r =
+        plan_vehicle_route(g.occ.data(), g.rows, g.cols, 0.0, 0.0, dead_end::W, dead_end::H,
+                           vehicle(), {w0.x, w0.y, w0.heading, false}, 35, 50);
+    ASSERT_TRUE(r.reached);
+    ASSERT_EQ(r.cusps, 0);
+    follower_options fo;
+    fo.lookahead = look;
+    route_follower follow(sim, fo);
+    follow.set(0, r);
+    follow.apply();
+    float gw[2];
+    sim.goals_world(gw);
+    const double d = std::hypot(gw[0] - w0.x, gw[1] - w0.y);
+    const double want = look > 0.0 ? look : 9.0;
+    std::printf("  lookahead %.1f: the carrot %.2f m ahead (want %.0f)\n", look, d, want);
+    EXPECT_NEAR(d, want, 1.0);
+  }
+}
