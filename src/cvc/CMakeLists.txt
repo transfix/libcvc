@@ -1617,8 +1617,13 @@ set_target_properties(cvc PROPERTIES
 # On Windows, the sources have no __declspec(dllexport) annotations, so
 # a SHARED build would produce a .dll with an empty export table and no
 # import .lib — breaking every consumer (including our own tests).
-# Ask CMake to auto-generate the export table from all public symbols.
-if(WIN32)
+# Generate the export table from cvc's objects. Under MSVC it leaves out the
+# std:: template instantiations, which would otherwise take most of the PE
+# limit of 65,535 names (CMake/CvcMsvcExportDef.cmake).
+if(MSVC)
+  include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcMsvcExportDef.cmake")
+  cvc_msvc_export_def(cvc)
+elseif(WIN32)
   set_target_properties(cvc PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
 endif()
 
@@ -1719,10 +1724,10 @@ endif()
 # defaults ON, no wasm configure turns it off, and Emscripten (no shared-library
 # support) silently makes add_library(cvc ...) STATIC anyway.
 #  - SHARED cvc: cvc_igl is a private STATIC archive linked into the DLL/.so.
-#    WINDOWS_EXPORT_ALL_SYMBOLS scans only cvc's own objects, so the Eigen/libigl
-#    template instantiations stay out of cvc.dll's export table (~34,900 of its
-#    65,535 slots are already taken), and hidden visibility keeps them out of
-#    libcvc.so's dynamic symbols.
+#    cvc.dll's export table is generated from cvc's own objects only, so the
+#    Eigen/libigl template instantiations stay out of it (it holds at most
+#    65,535 names), and hidden visibility keeps them out of libcvc.so's dynamic
+#    symbols.
 #  - STATIC cvc (wasm, or BUILD_SHARED_LIBS=OFF): an archive cannot carry another
 #    archive, and a BUILD_INTERFACE link to the unexported cvc_igl would ship a
 #    libcvc.a whose mesh_ops.o / fem.o reference igl_detail:: symbols that no
