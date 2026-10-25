@@ -410,7 +410,8 @@ int main(int argc, char **argv) {
       // is single-shot with no retry, so a join that races an already-connected peer's socket is
       // otherwise lost for good (an established client never sees a later joiner). This idempotent
       // re-sync makes every client re-converge within ~1s — and is the reliable push the
-      // server-authoritative room+scene tree rides on.
+      // server-authoritative room+scene tree rides on. It sends each client only what it does not
+      // already hold (a diff), and the whole tree only to a client that asks for a full refresh.
       ws_tp.broadcast_snapshot();
     }
 #endif

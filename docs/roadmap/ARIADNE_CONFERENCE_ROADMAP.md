@@ -577,7 +577,9 @@ the live filters withhold.
   unfiltered admit snapshot, as every joiner did before.
 * **What a held connection loses** (a step at most): anything that never reaches the tree. That
   means `state_message`s and delegation ops sent during the hold, and the replies to its own Pings or
-  snapshot requests. `distributed_state_session`'s `snapshot_on_join` would wait out its timeout
+  (over gRPC) snapshot requests. Over WebSocket a snapshot request only marks the connection for a
+  full refresh, which the first broadcast after the release sends. `distributed_state_session`'s
+  `snapshot_on_join` would wait out its timeout
   against a holding relay. The room's clients use neither.
 * **Main-loop cost:** the release writes the bootstrap on the relay's main loop. A joiner slow to read
   holds that step up to the 3 s write watchdog. Before the hold, the main loop's publish waited on the
@@ -594,8 +596,9 @@ the live filters withhold.
   per launch. An in-process reconnect keeps its id and its sequence, and works: the relay withholds the
   departed subject's pose meanwhile, and a client takes the pose subtree a peer left behind for no pose
   until a newer sample (`holon::left_tick`).
-* The WebSocket leg's ~1 Hz full-tree re-broadcast is filtered per connection but otherwise unchanged,
-  and in the hall it dominates a browser's state traffic (**Measured**).
+* The WebSocket leg's ~1 Hz re-broadcast was a full tree per connection, filtered but otherwise
+  unchanged by S7, and in the hall it dominated a browser's state traffic (**Measured**). It now sends
+  each connection a diff (see the deferred note below).
 
 **Measured** (`arisrv_aoi_bench` on catx-03, 24 cores: the relay plus N synthetic clients in one
 process on loopback, WS and gRPC alternating, 10 s windows; `--s7 off` is the S6 relay and clients).
@@ -609,6 +612,24 @@ Media off, so the state plane alone:
 | hall, 12 in clusters (48 of 66 pairs outer) — per gRPC receiver | 242 kb/s | 162 kb/s |
 | … a late joiner's bootstrap | 491 kB | 215 kB |
 | hall, 12 standing still — per WS receiver (the 1 Hz re-broadcast) | 847 kb/s | 768 kb/s |
+
+**WS re-broadcast diffs.** Same bench, run on sandipaws: a Windows static Release build, the S7
+base and the diff change built in one tree, 12 in clusters in the hall, media off, 20 s windows.
+The ranges cover two runs each:
+
+| | full tree (S7) | diffs |
+|---|---|---|
+| 12 walking — per WS receiver, link in | 196–254 kb/s | 39–45 kb/s |
+| … snapshot entries it applied | 316–409 /s | 36–44 /s |
+| … relay egress | 1.4–1.8 Mb/s | 0.46–0.54 Mb/s |
+| 12 standing still — per WS receiver, link in | 298 kb/s | 30.5 kb/s |
+| … snapshot entries it applied | 489 /s | 15 /s |
+| a late joiner's bootstrap | 203–223 kB | 105–120 kB |
+
+A gRPC receiver never got the re-broadcast, and its rate did not change (32–42 kb/s walking, 23 kb/s
+standing). A browser now costs within ~7 kb/s of a native client. The remainder is each path touched
+live since the last call, sent once more, plus the receiver's own writes echoed back. The late joiner
+converged on its first check in both builds.
 
 With media on: in the 20 m room the gate denied no frame (4 and 8 clients: every pair inner); in the
 hall it withheld 2,688 of 3,695 camera and mic frames (73%) for 12 in clusters, and sent 157 MJPEG
@@ -643,11 +664,17 @@ reconcile-correction sum varies two-fold between identical runs, so it says noth
   node coarsens at the wrong distance (the large scene avoids it with `fit`) → LOD follow-up.
 * Client journal trim, WebSocket `request_snapshot` and a gRPC periodic snapshot →
   DISTRIBUTED_STATE_ROADMAP.md (known gaps); a WS `send_backlog` on Windows-hosted relays (`SIOCOUTQ` is
-  Linux-only) → transport follow-up; an incremental (revision-gated) WS re-broadcast in place of the
-  ~1 Hz full tree, which the hall bench shows at ~0.8 Mb/s per browser → WS_STATE_TRANSPORT.md Phase 2;
-  per-connection broadcast encode caching → only if the N = 64 bench shows the ~1 Hz broadcast costing
-  > 20 ms/s; merging the visor into the body mesh (2N → N avatar
-  actors) → perf follow-up.
+  Linux-only) → transport follow-up. ~~An incremental WS re-broadcast in place of the ~1 Hz full
+  tree~~ **done**: `broadcast_snapshot` now sends each connection only the entries it does not already
+  hold. Per connection it keeps a digest of what the last snapshot frame carried for each path, and
+  forgets a path whenever any other frame touching it is written to that peer or arrives from it
+  (a live mutation, a push, the peer's own write). A missed live re-fan is still healed on the next
+  call, and an unchanged tree costs nothing. A client gets the whole tree only when it asks
+  (`state_transport_ws::request_full_refresh`, a SnapshotRequest) — for state it dropped on its own
+  side, which the relay cannot see. There is no periodic full snapshot. The broadcast still snapshots
+  and digests the whole tree once per call; caching that → only if the N = 64 bench shows the ~1 Hz
+  broadcast costing > 20 ms/s. Merging the visor into the body mesh (2N → N avatar actors) → perf
+  follow-up.
 
 ---
 
