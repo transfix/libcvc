@@ -8,7 +8,8 @@ publishing the bundles to cvcpkg.org was approved on 2026-10-09 and follows that
 **Public API:** [`inc/cvc/geometry/mesh_ops.h`](../../inc/cvc/geometry/mesh_ops.h) and
 [`inc/cvc/geometry/fem.h`](../../inc/cvc/geometry/fem.h); reference in
 [GEOMETRY_API.md — Mesh Operations and Finite Elements](../GEOMETRY_API.md#mesh-operations-and-finite-elements-libigl).
-**Companions:** [ARIADNE.md](../ARIADNE.md) (the `mesh_lab` / `fe_lab` node types),
+**Companions:** [FEM_GALLERY.md](../FEM_GALLERY.md) (rendered results on real datasets),
+[ARIADNE.md](../ARIADNE.md) (the `mesh_lab` / `fe_lab` node types),
 [WATER-RENDERING-ROADMAP.md](WATER-RENDERING-ROADMAP.md) D-W6,
 [VISIBILITY-AND-LOD-ROADMAP.md](VISIBILITY-AND-LOD-ROADMAP.md) layer (c), and the volrover3 roadmap
 (`cvc-engagement-docs/modernization/2026-08-11-volrover3-roadmap.md`) §20.15 and §26.
