@@ -16,6 +16,12 @@ namespace LBIE
 
 void Octree::hexahedralize(geoframe& geofrm, float err_tol) {
 
+	extract_hexa(geofrm, err_tol);
+	untangle_snapped(geofrm, err_tol);
+}
+
+void Octree::extract_hexa(geoframe& geofrm, float err_tol) {
+
 	int x, y, z, valid_leaf, cell_size, level;
 	int oc_id[8], edge_id[6], i, j, k, flag_method;
 	unsigned int vtx[8];
@@ -55,6 +61,154 @@ void Octree::hexahedralize(geoframe& geofrm, float err_tol) {
 
 	}
 
+}
+
+namespace {
+
+// Corner c of a hexahedron in add_hexa's order (0..3 round one face, 4..7 over them, as the unit
+// cube's (0,0,0) (1,0,0) (1,1,0) (0,1,0) and the same at z = 1) has its x, y and z neighbours at
+// hexa_xn[c], hexa_yn[c] and hexa_zn[c]; hexa_sign[c] is -1 where an odd number of those edges
+// point down an axis.
+const int hexa_xn[8] = {1, 0, 3, 2, 5, 4, 7, 6};
+const int hexa_yn[8] = {3, 2, 1, 0, 7, 6, 5, 4};
+const int hexa_zn[8] = {4, 5, 6, 7, 0, 1, 2, 3};
+const double hexa_sign[8] = {1, -1, 1, -1, -1, 1, -1, 1};
+
+// The smallest scaled Jacobian over the corners at p: 1 for a cube, 0 for a flat corner, negative
+// for an inverted one.
+double hexa_min_scaled_jacobian(const float (&p)[8][3])
+{
+	double worst = 1.0;
+	for (int c = 0; c < 8; c++) {
+		const int n[3] = {hexa_xn[c], hexa_yn[c], hexa_zn[c]};
+		double e[3][3];
+		for (int k = 0; k < 3; k++) {
+			double len = 0.0;
+			for (int i = 0; i < 3; i++) {
+				e[k][i] = double(p[n[k]][i]) - double(p[c][i]);
+				len += e[k][i]*e[k][i];
+			}
+			if (len == 0.0) return 0.0;
+			len = sqrt(len);
+			for (int i = 0; i < 3; i++) e[k][i] /= len;
+		}
+		const double det = e[0][0]*(e[1][1]*e[2][2] - e[1][2]*e[2][1])
+			- e[0][1]*(e[1][0]*e[2][2] - e[1][2]*e[2][0])
+			+ e[0][2]*(e[1][0]*e[2][1] - e[1][1]*e[2][0]);
+		worst = std::min(worst, hexa_sign[c]*det);
+	}
+	return worst;
+}
+
+} // namespace
+
+// get_vtx_new snaps a hexahedral vertex onto the surface by walking it as far as a cell along its
+// normal, and the templates place their vertices between snapped corners. That can take a vertex
+// past other corners of its hexahedra and invert them: 12 of a sphere's 189 hexahedra, 11% of the
+// vh4 CT's. Snapping moves vertices and nothing else, so extracting again without it gives the
+// same vertices and hexahedra, where snapping inverted none. Every vertex of an inverted or flat
+// hexahedron goes back to its unsnapped place, until no such hexahedron has a vertex left to move;
+// then each goes toward its snapped place again, as far as it can without taking a hexahedron
+// around it below min_quality, or below where that one already was. Elsewhere the mesh keeps to
+// the surface.
+void Octree::untangle_snapped(geoframe& geofrm, float err_tol)
+{
+	const double min_quality = 0.1;
+	const int nh = int(geofrm.quads.size())/6;
+	const int nv = geofrm.numverts;
+	if (nh == 0) return;
+
+	// add_hexa stored corners 0 3 7 4 as hexahedron h's first quad and 2 1 5 6 as its second.
+	std::vector<unsigned int> corner(8*size_t(nh));
+	for (int h = 0; h < nh; h++) {
+		const geoframe::uint_4 &a = geofrm.quads[6*h], &b = geofrm.quads[6*h + 1];
+		unsigned int *c = &corner[8*size_t(h)];
+		c[0] = a[0];	c[3] = a[1];	c[7] = a[2];	c[4] = a[3];
+		c[2] = b[0];	c[1] = b[1];	c[5] = b[2];	c[6] = b[3];
+	}
+	auto quality = [&](int h) {
+		float p[8][3];
+		for (int k = 0; k < 8; k++)
+			for (int i = 0; i < 3; i++) p[k][i] = geofrm.verts[corner[8*size_t(h) + k]][i];
+		return hexa_min_scaled_jacobian(p);
+	};
+	int h = 0;
+	while (h < nh && quality(h) > 0.0) h++;
+	if (h == nh) return;
+
+	geoframe unsnapped;
+	vflag_clear();
+	snap_to_surface = false;
+	extract_hexa(unsnapped, err_tol);
+	snap_to_surface = true;
+	if (unsnapped.numverts != nv || unsnapped.quads != geofrm.quads) return;
+
+	std::vector<int> first(nv + 1, 0), around(8*size_t(nh));
+	for (size_t i = 0; i < corner.size(); i++) first[corner[i] + 1]++;
+	for (int v = 0; v < nv; v++) first[v + 1] += first[v];
+	{
+		std::vector<int> next(first.begin(), first.end() - 1);
+		for (size_t i = 0; i < corner.size(); i++) around[next[corner[i]]++] = int(i/8);
+	}
+	// Whether every hexahedron around v is at least min_quality, or at least as good as floor
+	// (each one's quality before v moved) where that is lower.
+	std::vector<double> floor;
+	auto fits = [&](unsigned int v) {
+		for (int i = first[v]; i < first[v + 1]; i++)
+			if (quality(around[i]) < floor[i - first[v]]) return false;
+		return true;
+	};
+
+	// along[v]: how far vertex v sits from its unsnapped place (0) to its snapped one (1).
+	const std::vector<geoframe::float_3> snapped = geofrm.verts;
+	std::vector<float> along(nv, 1.0f);
+	std::vector<unsigned int> moved_back;
+	auto place = [&](unsigned int v, double t) {
+		const geoframe::float_3 &off = unsnapped.verts[v], &on = snapped[v];
+		for (int i = 0; i < 3; i++) geofrm.verts[v][i] = float(off[i] + t*(on[i] - off[i]));
+		along[v] = float(t);
+	};
+
+	for (bool again = true; again; ) {
+		again = false;
+		for (h = 0; h < nh; h++) {
+			if (quality(h) > 0.0) continue;
+			for (int k = 0; k < 8; k++) {
+				const unsigned int v = corner[8*size_t(h) + k];
+				if (along[v] == 0.0f || snapped[v] == unsnapped.verts[v]) continue;
+				if (along[v] == 1.0f) moved_back.push_back(v);
+				place(v, 0.0);
+				again = true;
+			}
+		}
+	}
+
+	for (int pass = 0; pass < 8; pass++) {
+		bool advanced = false;
+		for (size_t m = 0; m < moved_back.size(); m++) {
+			const unsigned int v = moved_back[m];
+			const double from = along[v];
+			if (from >= 1.0) continue;
+			floor.clear();
+			for (int i = first[v]; i < first[v + 1]; i++)
+				floor.push_back(std::min(min_quality, quality(around[i])));
+			place(v, 1.0);
+			if (fits(v)) {
+				advanced = true;
+				continue;
+			}
+			double lo = from, hi = 1.0;
+			for (int it = 0; it < 12; it++) {
+				const double mid = 0.5*(lo + hi);
+				place(v, mid);
+				if (fits(v)) lo = mid;
+				else hi = mid;
+			}
+			place(v, lo);
+			if (lo > from) advanced = true;
+		}
+		if (!advanced) break;
+	}
 }
 
 // adaptive hexa mesh generation -- method 1
@@ -1575,6 +1729,7 @@ void Octree::get_vtx_new(geoframe& geofrm, int oc_id, unsigned int vtx)
 	geofrm.normals[vtx][2] = (1-x)*(1-z)*(val[3] - val[0]) + (1-x)*y*(val[7] - val[4])
 								+ x*(1-y)*(val[2] - val[1]) + x*y*(val[6] - val[5]);
 */
+	if (!snap_to_surface) return;
 	// find the intersection point with the trilinear function (the finest resolution)
 	int level, cell_size, xx, yy, zz, tx, ty, tz, i, my_bool, my_id;
 	float val[8], x, y, z, mx, my, mz, step, func, func0, n[3], temp;

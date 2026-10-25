@@ -42,6 +42,8 @@ University of Texas at Austin for a different license.
 #include<assert.h>
 #include<math.h>
 #include<vector>
+#include<map>
+#include<utility>
 #include<boost/array.hpp>		
 	 //#define GRAD
 
@@ -246,91 +248,92 @@ public:
 		}
 	}
 
+	// The vertex made refining from index_1 toward index_2, if there is one. refine_edge holds 18
+	// per vertex, enough for a vertex of a uniform grid (6 edges and 12 face diagonals); any more go
+	// in refine_more. (Once the 18 were full, AddRefine_* returned vertex 0.)
+	bool FindRefine(unsigned int index_1, unsigned int index_2, unsigned int& v) const
+	{
+		for(int i = 0; i < 18 && refine_edge[index_1][i] != -1; i++)
+			if(refine_edge[index_1][i] == (int) index_2) {
+				v = refine_edgevtx[index_1][i];
+				return true;
+			}
+		std::map<std::pair<unsigned int, unsigned int>, unsigned int>::const_iterator it =
+			refine_more.find(std::make_pair(index_1, index_2));
+		if(it == refine_more.end()) return false;
+		v = it->second;
+		return true;
+	}
+
+	void PutRefine(unsigned int index_1, unsigned int index_2, unsigned int v)
+	{
+		for(int i = 0; i < 18; i++)
+			if(refine_edge[index_1][i] == -1) {
+				refine_edge[index_1][i] = index_2;
+				refine_edgevtx[index_1][i] = v;
+				return;
+			}
+		refine_more[std::make_pair(index_1, index_2)] = v;
+	}
+
 	unsigned int AddRefine_edgevtx(unsigned int index_1, unsigned int index_2)
 	{
-		int i, j;
+		int j;
 		unsigned int v_new;
 		float pv[3], nv[3];
 
-		for(i = 0; i < 18; i++) {
-			if(refine_edge[index_1][i] == (int) index_2) return refine_edgevtx[index_1][i];
+		if(FindRefine(index_1, index_2, v_new)) return v_new;
 
-			if(refine_edge[index_1][i] == -1) {
-				refine_edge[index_1][i] = index_2;
-
-				for(j = 0; j < 3; j++) {
-					pv[j] = (2.0f*verts[index_1][j] + verts[index_2][j]) / 3.0f;
-					nv[j] = (2.0f*normals[index_1][j] + normals[index_2][j]) / 3.0f;
-				}
-
-				v_new = AddVert(pv, nv);
-				AddBound(v_new, 1);
-				refine_edgevtx[index_1][i] = v_new;
-
-				return v_new;
-			}
-			
+		for(j = 0; j < 3; j++) {
+			pv[j] = (2.0f*verts[index_1][j] + verts[index_2][j]) / 3.0f;
+			nv[j] = (2.0f*normals[index_1][j] + normals[index_2][j]) / 3.0f;
 		}
-		
-		return 0;
+
+		v_new = AddVert(pv, nv);
+		AddBound(v_new, 1);
+		PutRefine(index_1, index_2, v_new);
+
+		return v_new;
 	}
 
 	unsigned int AddRefine_edgevtx_hex(unsigned int index_1, unsigned int index_2)
 	{
-		int i, j;
+		int j;
 		unsigned int v_new;
 		float pv[3], nv[3];
 
-		for(i = 0; i < 18; i++) {
-			if(refine_edge[index_1][i] == (int) index_2) return refine_edgevtx[index_1][i];
+		if(FindRefine(index_1, index_2, v_new)) return v_new;
 
-			if(refine_edge[index_1][i] == -1) {
-				refine_edge[index_1][i] = index_2;
-
-				for(j = 0; j < 3; j++) {
-					pv[j] = (2.0f*verts[index_1][j] + verts[index_2][j]) / 3.0f;
-					nv[j] = (2.0f*normals[index_1][j] + normals[index_2][j]) / 3.0f;
-				}
-
-				v_new = AddVert(pv, nv);
-				//AddBound(v_new, 1);
-				refine_edgevtx[index_1][i] = v_new;
-
-				return v_new;
-			}
-			
+		for(j = 0; j < 3; j++) {
+			pv[j] = (2.0f*verts[index_1][j] + verts[index_2][j]) / 3.0f;
+			nv[j] = (2.0f*normals[index_1][j] + normals[index_2][j]) / 3.0f;
 		}
-		
-		return 0;
+
+		v_new = AddVert(pv, nv);
+		//AddBound(v_new, 1);
+		PutRefine(index_1, index_2, v_new);
+
+		return v_new;
 	}
 
 	unsigned int AddRefine_facevtx(unsigned int index_1, unsigned int index_2, unsigned int index_3, unsigned int index_4)
 	{
-		int i, j;
+		int j;
 		unsigned int v_new;
 		float pv[3], nv[3];
 
-		for(i = 0; i < 18; i++) {
-			if(refine_edge[index_1][i] == (int) index_2) return refine_edgevtx[index_1][i];
+		if(FindRefine(index_1, index_2, v_new)) return v_new;
 
-			if(refine_edge[index_1][i] == -1) {
-				refine_edge[index_1][i] = index_2;
-
-				for(j = 0; j < 3; j++) {
-					pv[j] = (4.0f*verts[index_1][j] + 2.0f*verts[index_3][j] + 2.0f*verts[index_4][j] + verts[index_2][j]) / 9.0f;
-					nv[j] = (4.0f*normals[index_1][j] + 2.0f*normals[index_3][j] + 2.0f*normals[index_4][j] + normals[index_2][j]) / 9.0f;
-				}
-
-				v_new = AddVert(pv, nv);
-				//AddBound(v_new, 1);
-				refine_edgevtx[index_1][i] = v_new;
-
-				return v_new;
-			}
-			
+		for(j = 0; j < 3; j++) {
+			pv[j] = (4.0f*verts[index_1][j] + 2.0f*verts[index_3][j] + 2.0f*verts[index_4][j] + verts[index_2][j]) / 9.0f;
+			nv[j] = (4.0f*normals[index_1][j] + 2.0f*normals[index_3][j] + 2.0f*normals[index_4][j] + normals[index_2][j]) / 9.0f;
 		}
-		
-		return 0;
+
+		v_new = AddVert(pv, nv);
+		//AddBound(v_new, 1);
+		PutRefine(index_1, index_2, v_new);
+
+		return v_new;
 	}
 	
 	template <class C, class D>
@@ -1631,15 +1634,18 @@ public:
 				nv[10+16*j][i] = (2.0f*nv[11+16*j][i] + nv[8+16*j][i])/3.0f;
 			}
 
+			// Halfway down from the four inner points of the refined face (21, 22, 25, 26) to the
+			// layer below (37, 38, 41, 42). 67 took 41 for 42 and sat half a sub-cell off, leaving
+			// one of the template's hexahedra flat and four skewed.
 			pv[64][i] = (pv[21][i] + pv[37][i])/2.0f;
 			pv[65][i] = (pv[22][i] + pv[38][i])/2.0f;
 			pv[66][i] = (pv[25][i] + pv[41][i])/2.0f;
-			pv[67][i] = (pv[26][i] + pv[41][i])/2.0f;
+			pv[67][i] = (pv[26][i] + pv[42][i])/2.0f;
 
 			nv[64][i] = (nv[21][i] + nv[37][i])/2.0f;
 			nv[65][i] = (nv[22][i] + nv[38][i])/2.0f;
 			nv[66][i] = (nv[25][i] + nv[41][i])/2.0f;
-			nv[67][i] = (nv[26][i] + nv[41][i])/2.0f;
+			nv[67][i] = (nv[26][i] + nv[42][i])/2.0f;
 		}
 		/*
 		for(i = 0; i < 48; i++) {
@@ -2555,6 +2561,8 @@ public:
 		bound_sign[index] = sign;
 	}
 
+	// Records the boundary edge between two vertices in the lower one's 18 slots, where 0 is free.
+	// This filled every free slot with the first edge, so each vertex kept only one.
 	void AddBound_edge(unsigned int index_1, unsigned int index_2)
 	{
 		int i, temp;
@@ -2563,7 +2571,10 @@ public:
 		}
 		for(i = 0; i < 18; i++) {
 			if(bound_edge[index_1][i] == index_2) break;
-			if(bound_edge[index_1][i] == 0) bound_edge[index_1][i] = index_2;
+			if(bound_edge[index_1][i] == 0) {
+				bound_edge[index_1][i] = index_2;
+				break;
+			}
 		}
 	}
 
@@ -2655,6 +2666,7 @@ public:
 	  bound_edge.clear();
 	  refine_edge.clear();
 	  refine_edgevtx.clear();
+	  refine_more.clear();
 	  span[0] = span[1] = span[2] = 1.0;
 	  mesh_type = SINGLE;
 	}
@@ -2700,6 +2712,7 @@ public:
 	std::vector<int_18> refine_edge;
 	//unsigned int (*refine_edgevtx)[18];
 	std::vector<uint_18> refine_edgevtx;
+	std::map<std::pair<unsigned int, unsigned int>, unsigned int> refine_more;
 	
 	double biggestDim;
 	double centerx, centery, centerz;
