@@ -91,6 +91,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/media/media_frame.h
   ../../inc/cvc/media/media_endpoint.h
   ../../inc/cvc/media/media_router.h
+  ../../inc/cvc/media/media_rungs.h
   ../../inc/cvc/geometry/bunny.h
   ../../inc/cvc/volume/endians.h
   ../../inc/cvc/utility/utility.h
@@ -295,6 +296,7 @@ set(SOURCE_FILES
   state/state_transport_inproc.cpp
   state/state_transport_ipc.cpp
   media/media_router.cpp
+  media/media_rungs.cpp
   state/state_message_bus.cpp
   state/state_peer_registry.cpp
   state/state_link_stats.cpp
@@ -1318,7 +1320,7 @@ list(APPEND INCLUDE_FILES ../../inc/cvc/net/http_client.h)
 # the retained Widget tree, the Runtime + reconcile boundary, and direct
 # cvc::state binding, walking a pluggable Backend. It touches NO VTK/ImGui/GL —
 # the ImGui-over-VTK backend lives in cvcGL (src/cvcGL/ariadne). Roadmap §16.1.
-list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/conference/room_write_gate.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/requires.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp)
+list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/conference/room_write_gate.cpp ariadne/conference/room_rungs.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/requires.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp)
 list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/widget.h
   ../../inc/cvc/ariadne/backend.h
@@ -1344,6 +1346,7 @@ list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/conference/room_media_intrinsics.h
   ../../inc/cvc/ariadne/conference/room_scene.h
   ../../inc/cvc/ariadne/conference/room_net.h
+  ../../inc/cvc/ariadne/conference/room_rungs.h
   ../../inc/cvc/ariadne/conference/room_aoi.h
   ../../inc/cvc/ariadne/conference/room_aoi_relay.h
   ../../inc/cvc/ariadne/conference/room_write_gate.h
@@ -1520,6 +1523,26 @@ if(TARGET OpenSSL::Crypto)
   message(STATUS "cvc::state: device keys ENABLED (OpenSSL ${OPENSSL_VERSION})")
 else()
   message(STATUS "cvc::state: no device keys (OpenSSL not found) - every device is unverified")
+endif()
+
+# Per-viewer video rungs (media_rungs.h): a relay re-encodes a camera's MJPEG smaller for a viewer
+# whose link needs it. OPTIONAL: libjpeg-turbo's TurboJPEG (cvcGL's codec uses it too); without it
+# the smaller rungs send frames as is and only the thumbnail rate and "off" apply. Shared/native
+# prefixes export libjpeg-turbo::turbojpeg, static-only ones (the wasm closure) turbojpeg-static.
+find_package(libjpeg-turbo CONFIG QUIET)
+set(_cvc_core_turbojpeg "")
+if(TARGET libjpeg-turbo::turbojpeg)
+  set(_cvc_core_turbojpeg libjpeg-turbo::turbojpeg)
+elseif(TARGET libjpeg-turbo::turbojpeg-static)
+  set(_cvc_core_turbojpeg libjpeg-turbo::turbojpeg-static)
+endif()
+if(_cvc_core_turbojpeg)
+  target_link_libraries(cvc PRIVATE ${_cvc_core_turbojpeg})
+  target_compile_definitions(cvc PRIVATE CVC_HAVE_TURBOJPEG=1)
+  list(APPEND CVC_PRIVATE_LINK_PACKAGES libjpeg-turbo)
+  message(STATUS "cvc::media: video rungs transcode with ${_cvc_core_turbojpeg}")
+else()
+  message(STATUS "cvc::media: no libjpeg-turbo - video rungs only drop frames, never re-encode")
 endif()
 
 # Ariadne FTXUI terminal backend — OPTIONAL (roadmap §16.4). When FTXUI is

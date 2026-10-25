@@ -197,6 +197,9 @@ public:
   // and publish_media_frame (this node's own uplink) is never gated. Thread-safe; the gate is
   // swapped whole and a fan already in progress finishes with the gate it started with.
   void set_media_gate(media_gate_fn gate) override;
+  // Per-receiver egress shape after the gate (see media_endpoint::set_media_shaper): each variant
+  // is encoded once per fanned frame, whatever number of receivers it serves.
+  void set_media_shaper(media_shape_fn shaper) override;
 
   // Backlog drop (kDefaultMediaBacklogDrop; 0 = off): skip a connection whose OS send buffer
   // already holds more than `bytes` unsent, rather than let the synchronous write block behind a
@@ -213,6 +216,9 @@ public:
   std::uint64_t total_media_forwarded() const noexcept { return _media_fwd.load(); }
   // Receiver deliveries the media gate denied (one per frame per denied connection).
   std::uint64_t total_media_gated() const noexcept { return _media_gated.load(); }
+  // Receiver deliveries the shaper sent as a variant, and those it dropped.
+  std::uint64_t total_media_shaped() const noexcept { return _media_shaped.load(); }
+  std::uint64_t total_media_shape_dropped() const noexcept { return _media_shape_dropped.load(); }
   // Receiver deliveries the backlog drop skipped (one per frame per backed-up connection).
   std::uint64_t total_media_backlog_dropped() const noexcept {
     return _media_backlog_dropped.load();
@@ -390,6 +396,8 @@ private:
   // the per-receiver loop (and its socket writes) runs without the lock. Null = no gate.
   mutable std::mutex _media_gate_mu;
   std::shared_ptr<const media_gate_fn> _media_gate;
+  std::shared_ptr<const media_shape_fn> _media_shaper; // under _media_gate_mu, like the gate
+  std::atomic<std::uint64_t> _media_shaped{0}, _media_shape_dropped{0};
 
   std::atomic<std::uint64_t> _media_sent{
       0}; // MediaFrames this transport sent (publish_media_frame)

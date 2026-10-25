@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <cvc/ariadne/conference/room_intrinsics.h>
 #include <cvc/ariadne/conference/room_net.h>
+#include <cvc/ariadne/conference/room_rungs.h>
 #include <cvc/ariadne/conference/room_write_gate.h>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
@@ -421,4 +422,127 @@ TEST(RoomNet, LinkDevicesTagOnlyVerifiedHolders) {
   EXPECT_EQ(conf::read_participant_device(app, "standup", "alice"),
             conf::room_device_tag("standup", links[0].remote_device_id))
       << "a pid no link holds keeps its tag until it leaves";
+}
+
+// ---------------------------------------------------------------------------------------------
+// room_rung_controller (room_rungs.h): each viewer's video rung, adapted to its link.
+
+namespace {
+
+// One viewer's link, one pass a second: its round trip, the media frames sent and dropped this
+// pass, and what the relay sent it (kbit/s).
+struct rung_sim {
+  explicit rung_sim(conf::rung_params p = conf::rung_params()) : ctl(p) {}
+  cvc::video_rung pass(double rtt_ms, int dropped_pct = 0, double kbps = 500.0,
+                       double rtt_min_ms = 10.0) {
+    sent += static_cast<std::uint64_t>(100 - dropped_pct);
+    dropped += static_cast<std::uint64_t>(dropped_pct);
+    bytes += static_cast<std::uint64_t>(kbps * 1000.0 / 8.0);
+    t += 1.0;
+    cvc::state_link_report r;
+    r.transport = "ws";
+    r.remote_node_id = "v";
+    r.accepted = true;
+    r.stats.rtt_ms = rtt_ms;
+    r.stats.rtt_last_ms = rtt_ms;
+    r.stats.rtt_min_ms = rtt_min_ms;
+    r.stats.media_sent = sent;
+    r.stats.media_dropped = dropped;
+    r.stats.bytes_out = bytes;
+    last = ctl.step({r}, t)["v"];
+    return last.rung;
+  }
+  // N passes alike; the rung after the last.
+  cvc::video_rung passes(int n, double rtt_ms, int dropped_pct = 0, double kbps = 500.0) {
+    cvc::video_rung r = cvc::video_rung::full;
+    for (int i = 0; i < n; ++i)
+      r = pass(rtt_ms, dropped_pct, kbps);
+    return r;
+  }
+  conf::room_rung_controller ctl;
+  std::uint64_t sent = 0, dropped = 0, bytes = 0;
+  double t = 0.0;
+  conf::rung_sample last;
+};
+
+} // namespace
+
+// A viewer whose frames queue (the round trip far above its minimum) steps down one rung per
+// two bad seconds, to the floor and no further.
+TEST(RoomRungs, AQueueingViewerStepsDownToTheFloor) {
+  rung_sim sim;
+  EXPECT_EQ(sim.passes(5, 12.0), cvc::video_rung::full) << "a good link stays full";
+  EXPECT_EQ(sim.pass(260.0), cvc::video_rung::full) << "one bad second is not enough";
+  EXPECT_EQ(sim.pass(260.0), cvc::video_rung::half);
+  EXPECT_TRUE(sim.last.changed);
+  EXPECT_NEAR(sim.last.queue_ms, 250.0, 1e-9);
+  EXPECT_EQ(sim.passes(2, 260.0), cvc::video_rung::quarter);
+  EXPECT_EQ(sim.passes(2, 260.0), cvc::video_rung::thumb);
+  EXPECT_EQ(sim.passes(10, 260.0), cvc::video_rung::thumb) << "the floor (default thumb)";
+}
+
+TEST(RoomRungs, DroppedFramesStepAViewerDown) {
+  rung_sim sim;
+  EXPECT_EQ(sim.passes(3, 12.0, /*dropped_pct=*/2), cvc::video_rung::full)
+      << "a few drops are noise";
+  EXPECT_EQ(sim.passes(2, 12.0, /*dropped_pct=*/20), cvc::video_rung::half);
+  EXPECT_NEAR(sim.last.drop, 0.2, 1e-9);
+}
+
+// Up is slow: a recovered link waits up_after_s of good seconds per rung. A step up that turns bad
+// before its wait was over doubles the next wait.
+TEST(RoomRungs, AViewerStepsBackUpSlowlyAndWaitsLongerAfterAFailedTry) {
+  rung_sim sim;
+  sim.passes(2, 12.0);
+  ASSERT_EQ(sim.passes(2, 260.0), cvc::video_rung::half);
+  EXPECT_EQ(sim.passes(10, 12.0), cvc::video_rung::half) << "nine good seconds are not ten";
+  EXPECT_EQ(sim.pass(12.0), cvc::video_rung::full) << "ten are";
+  // The step up does not hold: back down within its 10 s wait, so the next wait is 20 s.
+  ASSERT_EQ(sim.passes(2, 260.0), cvc::video_rung::half);
+  EXPECT_EQ(sim.passes(20, 12.0), cvc::video_rung::half) << "the wait doubled after the failed try";
+  EXPECT_EQ(sim.pass(12.0), cvc::video_rung::full);
+}
+
+TEST(RoomRungs, TheServerSettingsBoundEveryViewer) {
+  conf::rung_params best_half;
+  best_half.max_rung = cvc::video_rung::half;
+  rung_sim capped(best_half);
+  EXPECT_EQ(capped.passes(30, 12.0), cvc::video_rung::half) << "never above --video-max";
+
+  conf::rung_params floor_quarter;
+  floor_quarter.floor_rung = cvc::video_rung::quarter;
+  rung_sim floored(floor_quarter);
+  EXPECT_EQ(floored.passes(20, 400.0), cvc::video_rung::quarter) << "never below --video-floor";
+
+  conf::rung_params fixed;
+  fixed.adapt = false;
+  fixed.max_rung = cvc::video_rung::quarter;
+  rung_sim pinned(fixed);
+  EXPECT_EQ(pinned.passes(5, 400.0, 50), cvc::video_rung::quarter) << "--adapt off: --video-max";
+  EXPECT_EQ(pinned.passes(30, 12.0), cvc::video_rung::quarter);
+
+  conf::rung_params budget;
+  budget.viewer_kbps_max = 1000.0;
+  rung_sim budgeted(budget);
+  EXPECT_EQ(budgeted.passes(3, 12.0, 0, /*kbps=*/900.0), cvc::video_rung::full);
+  EXPECT_EQ(budgeted.passes(2, 12.0, 0, /*kbps=*/1600.0), cvc::video_rung::half)
+      << "over --viewer-kbps-max";
+  EXPECT_NEAR(budgeted.last.out_kbps, 1600.0, 1.0);
+}
+
+// Only a viewer's own link counts: a link the relay dialed or one that does not hold its pid is
+// no viewer, and a viewer whose link went is forgotten.
+TEST(RoomRungs, OnlyAViewersHoldingLinkCounts) {
+  conf::room_rung_controller ctl;
+  cvc::state_link_report dialed, duplicate, viewer;
+  dialed.remote_node_id = "peer";
+  duplicate.remote_node_id = "v";
+  duplicate.accepted = true;
+  duplicate.holds_id = false;
+  viewer.remote_node_id = "v";
+  viewer.accepted = true;
+  const auto out = ctl.step({dialed, duplicate, viewer}, 1.0);
+  EXPECT_EQ(out.size(), 1u);
+  EXPECT_EQ(out.count("v"), 1u);
+  EXPECT_TRUE(ctl.step({}, 2.0).empty());
 }

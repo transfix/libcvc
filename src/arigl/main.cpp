@@ -404,13 +404,15 @@ struct ConferenceSession {
                                             // loud chunk — bridges brief pauses between words and
                                             // jittery delivery (wall time, so frame-rate indep.)
   // Uplink: a mic chunk is sent while its RMS is above kSendThreshold (about -48 dBFS, below quiet
-  // speech and above a quiet room) or within kSendHold after one was; a muted camera sends one
-  // frame per kMutedFrameInterval.
+  // speech and above a quiet room) or within kSendHold after one was; a muted camera sends nothing.
   static constexpr double kSendThreshold = 0.004;
   static constexpr double kSendHold = 0.8;
-  static constexpr double kMutedFrameInterval = 1.0;
-  double mic_send_until_ = 0.0;   // wall s: send mic chunks until then
-  double last_muted_frame_ = 0.0; // wall s: the last muted camera frame sent
+  double mic_send_until_ = 0.0; // wall s: send mic chunks until then
+  bool video_off_ = false;      // our video.off leaf's value
+  // Whether the user turned our camera off (the document's camera on/off toggle).
+  bool camera_off() const {
+    return app_ && cvc::state::instance(*app_)(prefix_ + ".cam_on").value() == "0";
+  }
   // A peer's audio is FRESH while its last mic chunk is younger than this (wall s; about 23 chunks
   // of 21 ms). Only fresh audio paces its video and says whether it is talking: once the chunks
   // stop (its mic muted or cut, or the relay sending us none of it, out of range in the room) its
@@ -1049,6 +1051,14 @@ struct ConferenceSession {
                                                         /*force=*/true);
       voice_talking_ = self_on;
     }
+    // Our camera on or off, for viewers: we send no frames while it is off (forward_frame), so
+    // they show "camera off" from this leaf rather than our last frame.
+    const bool video_off = camera_off();
+    if (video_off != video_off_) {
+      cvc::ariadne::conference::write_participant_video_off(*app_, room_, pid_, video_off,
+                                                            /*force=*/true);
+      video_off_ = video_off;
+    }
     const auto lit = [&](const std::string &pid, const peer_media *pm) {
       if (pm && pm->talk_until > now_wall_)
         return true;
@@ -1197,13 +1207,10 @@ struct ConferenceSession {
         return;
       }
     }
-    // A muted camera's frames are black: one a second keeps its tile alive.
-    if (p.kind == "camera" && cvc::state::instance(*app_)(prefix_ + ".cam_on").value() == "0") {
-      if (now_wall_ - last_muted_frame_ < kMutedFrameInterval) {
-        p.last_seq = f.seq;
-        return;
-      }
-      last_muted_frame_ = now_wall_;
+    // A muted camera sends nothing: viewers show "camera off" from our video.off leaf.
+    if (p.kind == "camera" && camera_off()) {
+      p.last_seq = f.seq;
+      return;
     }
     cvc::media_frame mf;
     mf.origin_node_id = pid_;

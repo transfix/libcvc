@@ -1093,18 +1093,31 @@ bool state_transport_grpc::relay_admits(const state_message &m,
 
 std::size_t state_transport_grpc::write_media(const media_frame &m, const void *exclude,
                                               bool gated) {
+  const auto encode = [](const media_frame &src, pb::Frame &out) {
+    pb::MediaFrame *mf = out.mutable_media();
+    mf->set_origin_node_id(src.origin_node_id);
+    mf->set_stream_id(src.stream_id);
+    mf->set_codec(src.codec);
+    mf->set_width(src.width);
+    mf->set_height(src.height);
+    mf->set_seq(src.seq);
+    mf->set_pts_seconds(src.pts_seconds);
+    mf->set_sample_rate(src.sample_rate);
+    mf->set_channels(src.channels);
+    mf->set_payload(src.payload.data(), static_cast<int>(src.payload.size()));
+  };
   pb::Frame frame;
-  pb::MediaFrame *mf = frame.mutable_media();
-  mf->set_origin_node_id(m.origin_node_id);
-  mf->set_stream_id(m.stream_id);
-  mf->set_codec(m.codec);
-  mf->set_width(m.width);
-  mf->set_height(m.height);
-  mf->set_seq(m.seq);
-  mf->set_pts_seconds(m.pts_seconds);
-  mf->set_sample_rate(m.sample_rate);
-  mf->set_channels(m.channels);
-  mf->set_payload(m.payload.data(), static_cast<int>(m.payload.size()));
+  encode(m, frame);
+  // The shaper's variants, each encoded once for every receiver it serves.
+  std::vector<std::pair<const media_frame *, pb::Frame>> variants;
+  const auto variant_frame = [&](const media_frame *v) -> const pb::Frame & {
+    for (const auto &e : variants)
+      if (e.first == v)
+        return e.second;
+    variants.emplace_back(v, pb::Frame());
+    encode(*v, variants.back().second);
+    return variants.back().second;
+  };
 
   std::vector<std::shared_ptr<connection>> conns;
   {
@@ -1114,9 +1127,11 @@ std::size_t state_transport_grpc::write_media(const media_frame &m, const void *
   // One copy of the gate for the whole frame: a concurrent set_media_gate swaps the slot, never
   // the function this loop is calling.
   std::shared_ptr<const media_gate_fn> gate;
+  std::shared_ptr<const media_shape_fn> shaper;
   if (gated) {
     std::lock_guard<std::mutex> lk(_media_gate_mu);
     gate = _media_gate;
+    shaper = _media_shaper;
   }
   const std::uint64_t stall_ns = _media_stall_ns.load(std::memory_order_relaxed);
   // Media is unreplicated, un-bridged (it crosses protocols via the media_router), and carries no
@@ -1140,6 +1155,7 @@ std::size_t state_transport_grpc::write_media(const media_frame &m, const void *
            media_write_stalled(started, static_cast<std::uint64_t>(link_now_ns()), stall_ns)) ||
           !lk.try_lock_for(std::chrono::nanoseconds(stall_ns))) {
         _media_stall_dropped.fetch_add(1, std::memory_order_relaxed);
+        c->link.note_media_dropped();
         continue;
       }
     } else {
@@ -1154,8 +1170,25 @@ std::size_t state_transport_grpc::write_media(const media_frame &m, const void *
         continue;
       }
     }
-    if (c->write_locked(frame)) {
+    // Then its shape: the frame as sent, a smaller variant, or nothing.
+    const pb::Frame *out = &frame;
+    if (shaper) {
+      const std::string *pid = c->peer_id();
+      if (pid) {
+        const media_shape s = (*shaper)(m, *pid);
+        if (s.drop) {
+          _media_shape_dropped.fetch_add(1, std::memory_order_relaxed);
+          continue;
+        }
+        if (s.variant) {
+          out = &variant_frame(s.variant.get());
+          _media_shaped.fetch_add(1, std::memory_order_relaxed);
+        }
+      }
+    }
+    if (c->write_locked(*out)) {
       _sent_frames.fetch_add(1, std::memory_order_relaxed);
+      c->link.note_media_sent();
       ++n;
     }
   }
@@ -1180,6 +1213,16 @@ void state_transport_grpc::set_media_gate(media_gate_fn gate) {
   }
   // `next` now holds the previous gate; it is released here, outside the lock (a reader thread
   // mid-frame keeps its own copy alive).
+}
+
+void state_transport_grpc::set_media_shaper(media_shape_fn shaper) {
+  std::shared_ptr<const media_shape_fn> next;
+  if (shaper)
+    next = std::make_shared<const media_shape_fn>(std::move(shaper));
+  {
+    std::lock_guard<std::mutex> lk(_media_gate_mu);
+    _media_shaper.swap(next);
+  }
 }
 
 void state_transport_grpc::set_media_stall_drop(std::chrono::milliseconds ms) noexcept {

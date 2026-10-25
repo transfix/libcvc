@@ -211,6 +211,9 @@ public:
   // once per frame and asked once per identified receiver; a receiver that has not sent its Hello
   // always gets the frame, and publish_media_frame is never gated. {} restores full fan-out.
   void set_media_gate(media_gate_fn gate) override;
+  // Per-receiver egress shape after the gate (see media_endpoint::set_media_shaper): each variant
+  // is encoded once per fanned frame, whatever number of receivers it serves.
+  void set_media_shaper(media_shape_fn shaper) override;
 
   // Stall drop (0 = off, the default): skip a receiver whose write in progress started more than
   // `ms` ago, and one whose stream this frame cannot get within `ms`, instead of queueing behind
@@ -230,6 +233,9 @@ public:
   std::uint64_t total_media_received() const noexcept { return _media_recv.load(); }
   std::uint64_t total_media_forwarded() const noexcept { return _media_fwd.load(); }
   std::uint64_t total_media_gated() const noexcept { return _media_gated.load(); }
+  // Receiver deliveries the shaper sent as a variant, and those it dropped.
+  std::uint64_t total_media_shaped() const noexcept { return _media_shaped.load(); }
+  std::uint64_t total_media_shape_dropped() const noexcept { return _media_shape_dropped.load(); }
   std::uint64_t total_media_stall_dropped() const noexcept { return _media_stall_dropped.load(); }
 
   // state_transport interface.
@@ -412,6 +418,8 @@ private:
   // thread keeps calling its own copy while another thread replaces the slot.
   mutable std::mutex _media_gate_mu;
   std::shared_ptr<const media_gate_fn> _media_gate;
+  std::shared_ptr<const media_shape_fn> _media_shaper; // under _media_gate_mu, like the gate
+  std::atomic<std::uint64_t> _media_shaped{0}, _media_shape_dropped{0};
   std::atomic<std::uint64_t> _media_gated{0};
   std::atomic<std::uint64_t> _media_stall_ns{0};
   std::atomic<std::uint64_t> _media_stall_dropped{0};
