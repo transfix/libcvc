@@ -256,6 +256,9 @@ public:
   // rule for the peer (the hold ran out, or was turned off).
   std::uint64_t total_admissions_held() const noexcept { return _admissions_held.load(); }
   std::uint64_t total_admission_timeouts() const noexcept { return _admission_timeouts.load(); }
+  // See state_transport::set_inbound_gate. Applies to the streams this relay accepts afterwards.
+  void set_inbound_gate(std::shared_ptr<state_inbound_gate> gate) override;
+  std::uint64_t total_inbound_rejected() const override { return _inbound_rejected.load(); }
 
   // Diagnostics.
   std::size_t shard_count() const;
@@ -323,6 +326,14 @@ public:
   void increment_recv_messages() noexcept {
     _recv_messages.fetch_add(1, std::memory_order_relaxed);
   }
+  // The inbound gate a newly accepted stream is held to (set_inbound_gate), and a frame it dropped.
+  std::shared_ptr<state_inbound_gate> inbound_gate() const;
+  void note_inbound_rejected() noexcept {
+    _inbound_rejected.fetch_add(1, std::memory_order_relaxed);
+  }
+  // Whether `id` is this transport's own node id or a registered shard's (a client never speaks
+  // as the relay).
+  bool is_local_id(const std::string &id) const;
 
 private:
   // Encode `m` to a Frame and write it to every live connection except `exclude` (a connection*;
@@ -394,6 +405,10 @@ private:
   std::atomic<std::int64_t> _admission_hold_ns{0}; // 0 = admit at once
   std::atomic<std::uint64_t> _admissions_held{0};
   std::atomic<std::uint64_t> _admission_timeouts{0};
+  // The inbound gate new accepted streams copy (each keeps its own, so a reader never locks this).
+  mutable std::mutex _inbound_gate_mu;
+  std::shared_ptr<state_inbound_gate> _inbound_gate;
+  std::atomic<std::uint64_t> _inbound_rejected{0};
 
   state_blob_store *_blob_store = nullptr;
 

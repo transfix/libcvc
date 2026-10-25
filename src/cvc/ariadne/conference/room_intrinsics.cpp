@@ -156,9 +156,9 @@ std::string room_participant_path(const std::string &room_id, const std::string 
 std::string room_join(cvc::app &app, const std::string &room_id, const std::string &pid,
                       const std::string &name) {
   const std::string sp = room_participant_path(room_id, pid);
-  // Write ONLY this participant's own subtree (the §5d client invariant, honoured voluntarily here;
-  // enforcement is Phase 2). presence.joined also materializes the <pid> node so the roster
-  // enumerates it even with no name.
+  // Write ONLY this participant's own subtree (the §5d client invariant; a relay with bound writes,
+  // room_write_gate, refuses anything else). presence.joined also materializes the <pid> node so
+  // the roster enumerates it even with no name.
   set_replicated(app, join_path({sp.c_str(), "presence", "joined"}), "1");
   if (!name.empty())
     set_replicated(app, join_path({sp.c_str(), "profile", "name"}), name);

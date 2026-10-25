@@ -317,6 +317,44 @@ public:
     identified.store(true, std::memory_order_release);
   }
 
+  // The inbound gate (state_transport::set_inbound_gate) this ACCEPTED stream is held to, copied
+  // before its first read; null for a dialed stream or an ungated relay. `bound`: it held its node
+  // id at its last check, and `displaced`: a later claim took it over since (set by the gate). Used
+  // only on this stream's reader thread, apart from `displaced`.
+  std::shared_ptr<state_inbound_gate> gate;
+  bool bound = false;
+  std::atomic<bool> displaced{false};
+  // Its Hello named one of the relay's own ids (the transport's or a shard's): never a client's.
+  bool local_id = false;
+  // Whether this stream may speak now: always without a gate; with one, once it has identified and
+  // holds its node id (a duplicate claim retries here until the holder closes or falls silent).
+  bool speaks() {
+    if (!gate)
+      return true;
+    if (local_id)
+      return false;
+    if (bound && displaced.load(std::memory_order_relaxed))
+      bound = false;
+    if (!bound) {
+      const std::string *pid = peer_id();
+      displaced.store(false, std::memory_order_relaxed);
+      bound = pid != nullptr && gate->bind(*pid, this, &last_rx_ns, &displaced);
+    }
+    return bound;
+  }
+  // As speaks(), naming its own node id as `origin`.
+  bool speaks_as(const std::string &origin) {
+    return speaks() && (!gate || origin == remote_node_id);
+  }
+  // Give the node id up at close. True when this close is that peer leaving: always without a
+  // gate; with one, when it held the id until now.
+  bool unbind() {
+    bound = false;
+    if (!gate)
+      return true;
+    return identified.load() && gate->release(remote_node_id, this);
+  }
+
   // Link quality (state_link_stats): traffic both ways + the Ping/Pong round trip. `accepted` marks
   // the server end of the stream; opened/last-rx are steady-clock ns for the report's age / idle.
   state_link_stats link;
@@ -404,6 +442,7 @@ public:
 
     auto conn = std::make_shared<state_transport_grpc::connection>();
     conn->accepted = true;
+    conn->gate = _owner->inbound_gate();
     conn->opened_ns = link_now_ns();
     conn->last_rx_ns.store(conn->opened_ns);
     conn->cancel = [ctx] { ctx->TryCancel(); };
@@ -420,7 +459,12 @@ public:
       if (_owner->on_link_frame(*conn, in))
         continue;
       if (in.has_hello()) {
+        const bool first = !conn->identified.load(std::memory_order_relaxed);
         conn->on_hello(in.hello());
+        if (first && conn->gate && conn->identified.load(std::memory_order_relaxed)) {
+          conn->local_id = _owner->is_local_id(conn->remote_node_id);
+          (void)conn->speaks(); // claim the node id now
+        }
       } else if (in.has_mutation()) {
         _owner->on_inbound_mutation(decode_mutation(in.mutation()), conn.get());
         _owner->increment_recv_mutations();
@@ -438,14 +482,28 @@ public:
         std::vector<unsigned char> data_vec(data_str.begin(), data_str.end());
         _owner->on_inbound_chunk_response(cr.request_id(), cr.found(), std::move(data_vec));
       } else if (in.has_snapshot_request()) {
+        // Under a gate, only a peer that speaks as itself is answered (so through its own rule).
+        if (!conn->speaks()) {
+          _owner->note_inbound_rejected();
+          continue;
+        }
         _owner->on_inbound_snapshot_request(conn.get(), in.snapshot_request().cluster_id(),
                                             in.snapshot_request().path_prefix(),
                                             in.snapshot_request().request_id());
       } else if (in.has_snapshot_response()) {
+        // A gated relay takes none from its clients (state_inbound_gate).
+        if (conn->gate) {
+          _owner->note_inbound_rejected();
+          continue;
+        }
         const auto &sr = in.snapshot_response();
         _owner->on_inbound_snapshot_response(sr.request_id(), read_snapshot_entries(sr),
                                              sr.final());
       } else if (in.has_heartbeat()) {
+        if (!conn->speaks_as(in.heartbeat().node_id())) {
+          _owner->note_inbound_rejected(); // a heartbeat for another peer
+          continue;
+        }
         _owner->on_inbound_heartbeat(in.heartbeat().node_id(), in.heartbeat().cluster_id());
       }
     }
@@ -461,8 +519,10 @@ public:
     ctx->TryCancel();
     { std::lock_guard<std::timed_mutex> wl(conn->write_mu); }
     _owner->unregister_connection(conn.get());
+    // Under an inbound gate, only the stream holding its node id leaves as that peer.
+    const bool left = conn->unbind();
     const std::string *pid = conn->peer_id();
-    _owner->notify_connection_closed(pid ? *pid : std::string());
+    _owner->notify_connection_closed(pid && left ? *pid : std::string());
     return grpc::Status::OK;
   }
 
@@ -863,6 +923,12 @@ state_transport_grpc::publish_message(const state_message &m) {
 }
 
 void state_transport_grpc::on_inbound_mutation(const state_mutation &m, connection *origin) {
+  // A gated relay takes from a client only what it may write as itself (state_inbound_gate).
+  if (origin != nullptr && origin->gate &&
+      !(origin->speaks_as(m.origin_node_id) && origin->gate->admit(origin->remote_node_id, m))) {
+    note_inbound_rejected();
+    return;
+  }
   std::vector<state_cluster_shard *> peers;
   {
     std::lock_guard<std::mutex> lk(_shards_mu);
@@ -919,6 +985,11 @@ void state_transport_grpc::on_inbound_mutation(const state_mutation &m, connecti
 }
 
 void state_transport_grpc::on_inbound_message(const state_message &m, connection *origin) {
+  if (origin != nullptr && origin->gate &&
+      !(origin->speaks_as(m.origin_node_id) && origin->gate->admit(origin->remote_node_id, m))) {
+    note_inbound_rejected();
+    return;
+  }
   std::vector<state_cluster_shard *> peers;
   {
     std::lock_guard<std::mutex> lk(_shards_mu);
@@ -1095,6 +1166,10 @@ void state_transport_grpc::set_on_media(media_frame_fn cb) {
 
 void state_transport_grpc::on_inbound_media(const media_frame &m, connection *origin) {
   _media_recv.fetch_add(1, std::memory_order_relaxed);
+  if (origin != nullptr && !origin->speaks_as(m.origin_node_id)) {
+    note_inbound_rejected(); // media as another peer
+    return;
+  }
   if (_media_sink)
     _media_sink(m, /*src_conn=*/origin);
 }
@@ -1148,6 +1223,25 @@ void state_transport_grpc::set_admission_hold(std::chrono::milliseconds max_hold
   const auto capped = (std::min)(max_hold, std::chrono::milliseconds(std::chrono::hours(24)));
   const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(capped).count();
   _admission_hold_ns.store(ns > 0 ? static_cast<std::int64_t>(ns) : 0, std::memory_order_relaxed);
+}
+
+void state_transport_grpc::set_inbound_gate(std::shared_ptr<state_inbound_gate> gate) {
+  std::lock_guard<std::mutex> lk(_inbound_gate_mu);
+  _inbound_gate = std::move(gate);
+}
+
+std::shared_ptr<state_inbound_gate> state_transport_grpc::inbound_gate() const {
+  std::lock_guard<std::mutex> lk(_inbound_gate_mu);
+  return _inbound_gate;
+}
+
+bool state_transport_grpc::is_local_id(const std::string &id) const {
+  if (id == _node_id)
+    return true;
+  std::lock_guard<std::mutex> lk(_shards_mu);
+  return std::any_of(_shards.begin(), _shards.end(), [&id](const state_cluster_shard *s) {
+    return s != nullptr && s->local_node_id() == id;
+  });
 }
 
 std::size_t state_transport_grpc::release_admissions() {

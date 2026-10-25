@@ -61,9 +61,11 @@ class holon;
 // holon, and is the SOLE writer of .pose + .server_tick. A client reads .pose
 // read-only and reconciles. Writes go through a C++ host (these helpers / a verb),
 // never a DSL (state-set), because the document chroot ui.docs.* is excluded from
-// replication -- the same reason room-join is a C++ verb. The connection<->pid
-// admission binding that would make "sole writer" cryptographically enforced is
-// the §5e/mesh increment (H2); H1 is loopback-trusted sole-writer-by-convention.
+// replication -- the same reason room-join is a C++ verb. A relay with bound
+// writes (room_write_gate, arisrv's default) enforces the split: it binds each
+// connection to the pid of its Hello, takes .intent.* only from that pid's own
+// connection, and refuses any client's write to .pose. Nothing authenticates a pid
+// yet (§5f), so a client can still claim one nobody holds.
 
 // Write a participant's AUTHORITATIVE pose (server side): the body_state's pose +
 // velocity leaves and the server_tick, each replicated. With HEARTBEAT_TICKS > 0 only

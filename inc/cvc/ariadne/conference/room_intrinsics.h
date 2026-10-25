@@ -27,20 +27,20 @@
 //                                           participant dicts { "pid" "name" }, in pid order —
 //                                           every PRESENT participant in the room tree, local and
 //                                           (once replicated) remote.
-//   (room-leave ROOM)                       Remove my participant subtree + drop the handle.
-//                                           Returns { "ok" #t/#f }.
+//   (room-leave ROOM)                       Mark me left (presence.joined = 0, a soft leave) + drop
+//                                           the handle. Returns { "ok" #t/#f }.
 //
 // THE ROOM TREE (roadmap §5a) is SHARED, not document-scoped: it lives at the absolute path
 //   conf.rooms.<room-id>.participants.<pid>.{ profile.name, presence.joined }
 // off the app root (cvc::state::SEPARATOR between segments), so every participant — each a
 // different document, typically on a different node — converges on the SAME tree. Cross-node
 // propagation is whatever state_cluster_shard the host installs (the verbs just read/write
-// app.root(); replication is transparent). This FIRST slice is deliberately TRUST-ALL self-insert:
-// a client writes its own participant subtree directly and the pid is the local cluster node id.
-// Server-mediated writes, admission/pid-allocation, roster authority and presence reaping are Phase
-// 2 (§5d) — this is the working skeleton they interpose on, and it matches the roadmap's "mesh
-// works first; auth hardens later". The media wiring (room-publish/-subscribe over the gRPC
-// bridge/relay) is a later slice.
+// app.root(); replication is transparent). A client writes its own participant subtree directly
+// and the pid is the local cluster node id (self-insert, no allocation). A relay with bound writes
+// (room_write_gate, arisrv's default) holds each connection to the pid of its Hello and takes from
+// it only writes inside that participant, outside the relay's own keys there. Admission with a
+// credential, pid allocation, roster authority and presence reaping are Phase 2 (§5d, §5f). The
+// media wiring (room-publish/-subscribe over the gRPC bridge/relay) is a later slice.
 //
 // OWNERSHIP: the join handle is owned by the CALLING DOCUMENT's se::document_scope (reached via
 // ictx.document), keyed by its token, exactly like (stream-open). It lives until (room-leave) or

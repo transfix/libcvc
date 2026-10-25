@@ -14,12 +14,18 @@
 // harness from state_transport_inproc_test (two apps + two shards + an inproc transport +
 // pump_all); no gRPC and no Runtime/backend are needed because the model is pure replicated state.
 
+#include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <cvc/ariadne/conference/room_intrinsics.h>
 #include <cvc/ariadne/conference/room_net.h>
+#include <cvc/ariadne/conference/room_write_gate.h>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_cluster_shard.h>
+#include <cvc/state/state_message.h>
 #include <cvc/state/state_transport_inproc.h>
 #include <gtest/gtest.h>
 #include <string>
@@ -218,4 +224,120 @@ TEST(RoomIntrinsics, VoiceLeafRoundTripsChangedOnly) {
   tp.unregister_shard(&sB);
   sA.detach();
   sB.detach();
+}
+
+// The bound-writes rule (room_write_gate): a participant writes only its own subtree, minus the
+// keys the relay owns there, with value, touch and data ops; every other path is the relay's.
+TEST(RoomWriteGate, AParticipantWritesOnlyItsOwnSubtree) {
+  const conf::room_write_gate gate("standup");
+  const std::string alice = conf::room_participant_path("standup", "alice");
+  const std::string bob = conf::room_participant_path("standup", "bob");
+  using op = cvc::state_mutation_op;
+
+  // What clients write (room_join, write_intent, room_net, room_publish).
+  for (const char *key : {"presence.joined", "profile.name", "intent.move.x", "intent.yaw",
+                          "intent.tick", "net.rtt_ms", "net.in_kbps", "voice.talking",
+                          "streams.camera.endpoint", "streams.camera.token"})
+    EXPECT_TRUE(gate.may_write("alice", alice + "." + key, op::set_value)) << key;
+  EXPECT_TRUE(gate.may_write("alice", alice + ".intent.move.x", op::touch));
+  EXPECT_TRUE(gate.may_write("alice", alice + ".avatar", op::set_data));
+
+  // The relay's keys inside alice's own subtree.
+  EXPECT_FALSE(gate.may_write("alice", alice + ".pose", op::set_value));
+  EXPECT_FALSE(gate.may_write("alice", alice + ".pose.pos.x", op::set_value));
+  EXPECT_FALSE(gate.may_write("alice", alice + ".pose.server_tick", op::touch));
+  EXPECT_FALSE(gate.may_write("alice", alice + ".net.relay.rtt_ms", op::set_value));
+  EXPECT_TRUE(gate.may_write("alice", alice + ".net.relayed", op::set_value))
+      << "a sibling of net.relay is alice's";
+  EXPECT_FALSE(gate.may_write("alice", alice + ".streams.camera.ready", op::set_value))
+      << "the SFU relay marks a stream ready";
+
+  // Paths the state tree would trim or skip onto one of those keys.
+  for (const std::string &p :
+       {alice + "..pose.pos.x", alice + ".pose .pos.x", alice + ". pose.pos.x",
+        alice + ".\tpose.pos.x", alice + ".net..relay.rtt_ms", alice + ".pose.pos.x.",
+        "." + alice + ".intent.move.x", alice + "..intent.move.x"})
+    EXPECT_FALSE(gate.may_write("alice", p, op::set_value)) << '"' << p << '"';
+  // At most 16 segments and 512 bytes.
+  std::string deep = alice;
+  while (std::count(deep.begin(), deep.end(), '.') < 15)
+    deep += ".a";
+  EXPECT_TRUE(gate.may_write("alice", deep, op::set_value)) << "16 segments";
+  EXPECT_FALSE(gate.may_write("alice", deep + ".a", op::set_value)) << "17 segments";
+  EXPECT_FALSE(gate.may_write("alice", alice + "." + std::string(600, 'a'), op::set_value))
+      << "longer than 512 bytes";
+
+  // Everyone else's, and the room's.
+  EXPECT_FALSE(gate.may_write("alice", bob + ".intent.move.x", op::set_value));
+  EXPECT_FALSE(gate.may_write("alice", alice + "2.intent.move.x", op::set_value))
+      << "alice2 is not alice";
+  EXPECT_FALSE(
+      gate.may_write("alice", "conf.rooms.standup.scene.objects.box.present", op::set_value));
+  EXPECT_FALSE(gate.may_write("alice", "conf.rooms.standup.aoi.inner_m", op::set_value));
+  EXPECT_FALSE(gate.may_write("alice", "conf.rooms.standup", op::touch));
+  EXPECT_FALSE(
+      gate.may_write("alice", conf::room_participant_path("other", "alice") + ".x", op::set_value))
+      << "another room";
+  EXPECT_FALSE(gate.may_write("alice", "ui.docs.ari.conf.self", op::set_value));
+
+  // Ops no client uses, even on its own keys.
+  for (op o : {op::delete_subtree, op::reset_node, op::delegate_subtree, op::revoke_delegation,
+               op::set_read_only, op::set_hidden, op::set_comment, op::set_property})
+    EXPECT_FALSE(gate.may_write("alice", alice + ".intent.move.x", o));
+  EXPECT_FALSE(gate.may_write("alice", alice, op::delete_subtree));
+
+  // A pid must be one identifier: "bob.pose" would otherwise own bob's pose.
+  EXPECT_FALSE(gate.may_write("bob.pose", bob + ".pose.pos.x", op::set_value));
+  EXPECT_FALSE(gate.may_write("", alice + ".intent.move.x", op::set_value));
+
+  // Messages go on the same paths.
+  cvc::state_message msg;
+  msg.path = alice + ".voice.talking";
+  EXPECT_TRUE(gate.admit("alice", msg));
+  msg.path = bob + ".voice.talking";
+  EXPECT_FALSE(gate.admit("alice", msg));
+}
+
+// The binding a gate holds: one connection per node id, freed by its holder only.
+TEST(RoomWriteGate, BindsOneConnectionPerNodeId) {
+  conf::room_write_gate gate("standup");
+  int a = 0, b = 0;
+  EXPECT_TRUE(gate.bind("alice", &a));
+  EXPECT_TRUE(gate.bind("alice", &a)) << "the holder again";
+  EXPECT_FALSE(gate.bind("alice", &b)) << "a second claim";
+  EXPECT_TRUE(gate.bind("bob", &b));
+  gate.release("alice", &b); // not the holder: no effect
+  EXPECT_EQ(gate.holder("alice"), &a);
+  gate.release("alice", &a);
+  EXPECT_EQ(gate.holder("alice"), nullptr);
+  EXPECT_TRUE(gate.bind("alice", &b));
+  EXPECT_FALSE(gate.bind("", &a)) << "an empty node id is never bound";
+}
+
+// A holder silent for longer than takeover_after() loses its id to the next claim (a peer whose
+// old connection never closed, reconnecting); a live one keeps it.
+TEST(RoomWriteGate, ASilentHolderIsTakenOver) {
+  conf::room_write_gate gate("standup");
+  gate.set_takeover_after(std::chrono::milliseconds(1000));
+  const auto now_ns = [] {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+  };
+  int old_conn = 0, fresh_conn = 0;
+  std::atomic<std::int64_t> old_rx{now_ns()}, fresh_rx{now_ns()};
+  std::atomic<bool> old_displaced{false}, fresh_displaced{false};
+  ASSERT_TRUE(gate.bind("alice", &old_conn, &old_rx, &old_displaced));
+  EXPECT_FALSE(gate.bind("alice", &fresh_conn, &fresh_rx, &fresh_displaced)) << "a live holder";
+  EXPECT_FALSE(old_displaced.load());
+
+  old_rx.store(now_ns() - 5'000'000'000); // the holder has not been heard from for 5 s
+  EXPECT_TRUE(gate.bind("alice", &fresh_conn, &fresh_rx, &fresh_displaced)) << "taken over";
+  EXPECT_TRUE(old_displaced.load()) << "the old holder is told";
+  EXPECT_EQ(gate.holder("alice"), &fresh_conn);
+  EXPECT_EQ(gate.total_takeovers(), 1u);
+  EXPECT_FALSE(gate.bind("alice", &old_conn, &old_rx, &old_displaced))
+      << "and cannot take it back while the new holder is live";
+  gate.release("alice", &old_conn); // its close does not free what it no longer holds
+  EXPECT_EQ(gate.holder("alice"), &fresh_conn);
 }

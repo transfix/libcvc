@@ -250,6 +250,10 @@ public:
   // rule for the peer (the hold ran out, or was turned off).
   std::uint64_t total_admissions_held() const noexcept { return _admissions_held.load(); }
   std::uint64_t total_admission_timeouts() const noexcept { return _admission_timeouts.load(); }
+  // See state_transport::set_inbound_gate. Applies to the connections this relay accepts
+  // afterwards.
+  void set_inbound_gate(std::shared_ptr<state_inbound_gate> gate) override;
+  std::uint64_t total_inbound_rejected() const override { return _inbound_rejected.load(); }
 
   // ── Diagnostics ──
   std::size_t shard_count() const;
@@ -299,6 +303,9 @@ private:
   // first. Returns the number written. Backs publish_media_frame (ungated) and fan_media (gated).
   std::size_t write_media(const media_frame &m, const void *exclude, bool gated);
   void send_hello_locked(connection &c);
+  // Whether `id` is this transport's own node id or a registered shard's (state_inbound_gate: a
+  // client never speaks as the relay).
+  bool is_local_id(const std::string &id) const;
   // Replay each shard's journaled local writes (backfill on connect); with `view`, only the ones
   // that rule delivers.
   void send_backfill_locked(connection &c, const std::vector<state_cluster_shard *> &shards,
@@ -364,6 +371,11 @@ private:
   std::atomic<std::int64_t> _admission_hold_ns{0}; // 0 = admit at once
   std::atomic<std::uint64_t> _admissions_held{0};
   std::atomic<std::uint64_t> _admission_timeouts{0};
+  // The inbound gate new accepted connections copy (each keeps its own, so a reader never locks
+  // this).
+  mutable std::mutex _inbound_gate_mu;
+  std::shared_ptr<state_inbound_gate> _inbound_gate;
+  std::atomic<std::uint64_t> _inbound_rejected{0};
 
   std::atomic<std::uint64_t> _published{0};
   std::atomic<std::uint64_t> _sent_frames{0};

@@ -271,7 +271,10 @@ grants for the *client-local* document sandbox.
 
 **Must be built (the room's new security work):**
 1. **Connection↔identity binding** — admission maps a connection to a `pid`; intents/writes derive
-   authority from the connection, not a self-asserted `origin_node_id`.
+   authority from the connection, not a self-asserted `origin_node_id`. *Built without a credential
+   as bound writes (§5h.1, `state_inbound_gate` + `room_write_gate`): the pid is the one the Hello
+   claims, held by one live connection, and a client writes only its own participant as itself.
+   Proving the claim is §5f.*
 2. **Admission hook** — at join/snapshot: allocate `pid`, grant scope, check capacity/ban/role, and
    gate what subtree a peer may pull (snapshot currently serves everything). *S7 (§5h.1) shapes the gRPC
    snapshot reply, the WebSocket broadcast and, with the admission hold, a joiner's admit snapshot by
@@ -530,6 +533,7 @@ false)` is the old drain-and-publish exactly); arisrv and arigl turn them on.
 | `--media-stall-ms N` | 40 | gRPC stall drop; 0 = off |
 | `--admission-hold-ms N` | 2000 (only with an AOI) | hold a joiner's bootstrap for its filter, at most N ms; 0 = off (the admit snapshot goes out unfiltered, before Hello) |
 | `--scene default\|large` | default | the seeded scene; not an S7 switch (honoured under `--s7 off`) |
+| `--bind-writes on\|off` | on | bound writes (below): each client writes only its own participant, as itself; off takes any client's writes. Not an S7 switch |
 | `CVC_ARISRV_ROOM_DEBUG=1` | off | adds an `[arisrv] aoi` stats line every ~5 s |
 | `CVC_ARIGL_REPLICATE_ROOT` (arigl) | unset = `conf` | empty or `*`: replicate the whole tree (the S6 A/B) |
 | `CVC_ARIGL_LOD=0` (arigl) | LOD on | every room mesh at full detail (the LOD A/B) |
@@ -571,6 +575,49 @@ the live filters withhold.
   and in arisrv's AOI line.
 - **Tested by** `RoomRelayLoopbackTest.LateJoinerBootstrapIsFiltered`, and
   `AdmissionHold*` in both transport suites.
+
+**Bound writes** (§5e item 1, after the admission hold). The relay used to apply and forward
+whatever a client sent: any participant's intent, the server holon's poses, the scene, a mutation
+naming another origin, even a snapshot pushed at it. `arisrv --bind-writes` (on by default, and not
+an S7 switch) installs one `room_write_gate` on both transports.
+- **Identity:** an accepted connection speaks only as the node id (the pid) of its first Hello, and
+  one live connection at a time holds a pid, on either transport: the first to claim it, until it
+  closes. A second connection claiming a held pid is refused until then, and its close is not that
+  participant leaving. A holder silent for 6 s (three missed link probes; a live client answers
+  every Ping) is taken over by the next claim. A dropped network leaves the old stream open on the
+  relay, gRPC's especially, which has no idle reaper, and the reconnect must not wait on it. The
+  displaced connection's close is not a departure either.
+- **Origin:** every mutation, message and media frame must name the connection's pid as its origin,
+  and a gRPC heartbeat must name it as its node. A SnapshotResponse from a client is never applied.
+- **The relay's own ids** (its transport's and its shards') are never a client's: a connection
+  whose Hello names one never speaks. Its frames would skip the relay's own ingest yet still be
+  fanned out, and could spend the relay's sequence numbers ahead of it.
+- **The room's rule:** a participant writes only inside `participants.<pid>`, with a value, touch
+  or `data()` op, and never the relay's keys there: `pose`, `net.relay` and, in SFU mode, each
+  `streams.<kind>.ready`. A pid must be one identifier, so `bob.pose` owns nothing of bob's. The
+  path must be canonical: no empty or whitespace-padded segment, which the tree would skip or trim
+  onto another key. It may be at most 16 segments and 512 bytes long, since the relay walks a
+  participant's whole subtree every tick. Every other path is the relay's. A gated relay answers a
+  snapshot request only from a peer speaking as itself.
+- **What is refused** is dropped (not applied, forwarded or bridged; over WS the next broadcast sends
+  the client the tree's value) and counted in `total_inbound_rejected()`; arisrv logs the count
+  when it grows. The rule matches every write clients make today, so a well-behaved room is
+  unchanged.
+- **Tested by** `RoomRelayLoopbackTest.ClientWritesOnlyItsOwnParticipant` (M writes A's intent and
+  pose, its own pose, the scene and the AOI; A never moves and the relay keeps its values),
+  `InboundGate*` in both transport suites, and `RoomWriteGate.*`.
+- **Limits:**
+  - Nothing authenticates a pid (§5f), so a client may claim any pid no one holds, a departed
+    participant's included.
+  - A refused gRPC client keeps its own wrong copy until the relay next writes that path.
+  - An impostor refused a held pid is still delivered that pid's filtered view.
+  - A reconnect that finds its old, silently dead stream still holding the pid is refused for up
+    to 6 s; arigl re-asserts its presence for 6 s after a reconnect.
+  - No size or rate limit: a client may still write many or large leaves inside its own
+    participant (Phase 7).
+  - Chunk responses are not checked against their request (no relay installs a hydrator).
+  - The separate gRPC media plane (`stream_relay`, routed by stream id) is not gated: any client
+    holding a stream's token can publish into it.
 
 **Known limits.**
 * **Observers:** a connection that never joins waits out the admission hold, then gets the
@@ -651,8 +698,10 @@ reconcile-correction sum varies two-fold between identical runs, so it says noth
 * A video subscription matching visible cam tiles, simulcast/resolution tiers, inter codecs, stereo
   panning, an "out of range" tile placeholder; peer-staleness hiding (reconciled with the 5 s outer
   refresh) → **Phase 7**.
-* Interest as access control, spoofed media `origin_node_id`, forwarding of authority-rejected writes →
-  **§5e items 1–2 / Phase 8**.
+* Interest as access control (what a peer may *read*) → **§5e item 2 / Phase 8**. ~~Spoofed media
+  `origin_node_id`, forwarding of authority-rejected writes~~ **done** as bound writes: the relay
+  drops media naming another origin, and a write outside the sender's participant is neither
+  applied nor forwarded.
 * Avatar frustum/screen-size culling, label nearest-*K* caps and the `cvc::vis` ViewParams adapter →
   **VISIBILITY-AND-LOD §4.1** follow-up (inert at room scale). Per-camera `RenderView`/`VisibilityMask`
   → **CVCGL-UI-DSL stage C**.

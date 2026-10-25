@@ -36,6 +36,7 @@
 #include <cvc/ariadne/conference/room_media_intrinsics.h> // room_relay_tick
 #include <cvc/ariadne/conference/room_net.h>   // per-participant + room link-quality stats
 #include <cvc/ariadne/conference/room_scene.h> // seed_default_scene (the shared 3D scene)
+#include <cvc/ariadne/conference/room_write_gate.h> // bound writes: a client writes only itself
 #include <cvc/ariadne/holon.h>                 // server-authoritative avatar holon (H1)
 #include <cvc/ariadne/holon_sync.h>            // server_pump: intent -> holon -> authoritative pose
 #include <cvc/ariadne/stream/stream_relay.h>
@@ -140,6 +141,11 @@ int main(int argc, char **argv) {
   //                              filter, so its admit snapshot is filtered too; at most N ms, then
   //                              unfiltered (default 2000; 0 = off; only with an area of interest)
   //   --scene default|large      the seeded scene (large: a 100 m plane of LOD meshes)
+  // Bound writes (not an S7 switch, so --s7 off leaves it on):
+  //   --bind-writes on|off       each client connection speaks only as the pid of its Hello, held
+  //                              by one live connection at a time, and writes only its own
+  //                              participant subtree minus the relay's keys (room_write_gate).
+  //                              Default on; off takes any client's writes, as before
   const char *s7_env = std::getenv("CVC_ARISRV_S7");
   const char *aoi_env = std::getenv("CVC_ARISRV_AOI");
   // CVC_ARISRV_S7: 0/off or 1/on (unset: on).
@@ -148,7 +154,7 @@ int main(int argc, char **argv) {
                       : !std::strcmp(s7_env, "1") ? "on"
                                                   : s7_env;
   std::string aoiMode = (aoi_env && *aoi_env) ? aoi_env : ""; // empty: the scene's default
-  std::string relayGateArg = "on", relayJournal = "trim", scene = "default";
+  std::string relayGateArg = "on", relayJournal = "trim", scene = "default", bindWritesArg = "on";
   std::string aoiVideoMaxArg = "0", mediaStallArg = "40", admissionHoldArg = "2000";
   for (int i = 1; i < argc; ++i) {
     const char *a = argv[i];
@@ -181,6 +187,8 @@ int main(int argc, char **argv) {
       admissionHoldArg = next("");
     else if (!std::strcmp(a, "--scene"))
       scene = next("default");
+    else if (!std::strcmp(a, "--bind-writes"))
+      bindWritesArg = next("on");
   }
   if (aoiMode.empty())
     aoiMode = scene == "large" ? "hall" : "conference";
@@ -188,7 +196,8 @@ int main(int argc, char **argv) {
       !check_choice("--aoi", aoiMode, {"off", "conference", "hall"}) ||
       !check_choice("--relay-gate", relayGateArg, {"on", "off"}) ||
       !check_choice("--relay-journal", relayJournal, {"trim", "keep"}) ||
-      !check_choice("--scene", scene, {"default", "large"}))
+      !check_choice("--scene", scene, {"default", "large"}) ||
+      !check_choice("--bind-writes", bindWritesArg, {"on", "off"}))
     return 2;
   long aoiVideoMaxN = 0, mediaStallMs = 40, admissionHoldMs = 2000;
   if (!check_count("--aoi-video-max", aoiVideoMaxArg, aoiVideoMaxN) ||
@@ -204,6 +213,10 @@ int main(int argc, char **argv) {
   const long stallMs = s7 ? mediaStallMs : 0L;
   // The hold waits for a filter only the area of interest installs.
   const long holdMs = aoiMode != "off" ? (std::min)(admissionHoldMs, 600000L) : 0L;
+  // One gate for both transports, so a pid held on one cannot be claimed on the other.
+  std::shared_ptr<cvc::state_inbound_gate> bindGate;
+  if (bindWritesArg == "on")
+    bindGate = std::make_shared<cvc::ariadne::conference::room_write_gate>(room);
 
   cvc::app app;
 
@@ -233,6 +246,7 @@ int main(int argc, char **argv) {
   state_tp.set_backfill_on_connect(!trimJournal);
   state_tp.set_media_stall_drop(std::chrono::milliseconds(stallMs));
   state_tp.set_admission_hold(std::chrono::milliseconds(holdMs));
+  state_tp.set_inbound_gate(bindGate);
   state_tp.start(stateListen, nodeId, "conf");
   state_tp.set_relay(true);
   cvc::state_cluster_shard shard(app, "conf", nodeId);
@@ -258,6 +272,7 @@ int main(int argc, char **argv) {
   ws_tp.set_relay_requires_interest(relayGate); // as on the gRPC side, both legs of the bridge
   ws_tp.set_backfill_on_connect(!trimJournal);
   ws_tp.set_admission_hold(std::chrono::milliseconds(holdMs));
+  ws_tp.set_inbound_gate(bindGate);
   ws_tp.start(wsListen, nodeId, "conf");
   ws_tp.set_relay(true);
   ws_tp.register_shard(&shard);
@@ -315,10 +330,10 @@ int main(int argc, char **argv) {
               ws_tp.listen_address().c_str());
 #endif
   std::printf("[arisrv] S7 %s | aoi %s (full-rate cameras: %d, 0 = all) | relay gate %s | journal "
-              "%s | grpc media stall drop %ld ms | scene %s\n",
+              "%s | grpc media stall drop %ld ms | scene %s | bound writes %s\n",
               s7 ? "on" : "off (the pre-S7 relay)", aoiMode.c_str(), aoiVideoMax,
               relayGate ? "on" : "off", trimJournal ? "trim (no backfill)" : "keep (backfill)",
-              stallMs, scene.c_str());
+              stallMs, scene.c_str(), bindGate ? "on" : "off (any client's writes are taken)");
   std::fflush(stdout);
 
   std::set<std::string> relayed;
@@ -369,6 +384,7 @@ int main(int argc, char **argv) {
   const bool room_debug =
       room_debug_env && *room_debug_env && std::strcmp(room_debug_env, "0") != 0;
   int room_debug_ticks = 0;
+  std::uint64_t lastRefused = 0; // client frames the bound-writes gate refused, at the last log
   // Link stats (~1 s): every connection on both planes reports its traffic and Ping/Pong round
   // trip (state_transport::link_reports); the rate meter turns the counters into rates. The relay
   // publishes its view of each participant (net.relay.*) and its totals (server.net.*) into the
@@ -466,6 +482,22 @@ int main(int argc, char **argv) {
                                                     {r.stats.rtt_ms, in_kbps, out_kbps});
       }
       cvc::ariadne::conference::write_server_net(app, room, total);
+      // A client writing outside its own participant, or as another peer, is refused: say so (at
+      // most every ~5 s) whenever the count has grown.
+      if (net_ticks % 25 == 0) {
+        std::uint64_t refused = state_tp.total_inbound_rejected();
+#if CVC_ENABLE_WS
+        refused += ws_tp.total_inbound_rejected();
+#endif
+        if (refused > lastRefused) {
+          std::printf("[arisrv] bound writes: refused %llu client frame(s) (%llu in all): writes "
+                      "outside the sender's own participant, or as another peer\n",
+                      static_cast<unsigned long long>(refused - lastRefused),
+                      static_cast<unsigned long long>(refused));
+          std::fflush(stdout);
+          lastRefused = refused;
+        }
+      }
       const bool detail = room_debug && net_ticks % 25 == 0;
       if (detail || net_ticks % 300 == 0) {
         std::printf("[arisrv] net: %d link(s) | in %.1f kb/s | out %.1f kb/s\n", total.links,
