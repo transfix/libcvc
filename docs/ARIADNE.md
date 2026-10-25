@@ -1210,6 +1210,18 @@ for one frame as text), as is the older example
 [`terminal_scene.ari`](../examples/ariadne/documents/terminal_scene.ari) is a small example. No display is needed: VTK picks X, EGL or OSMesa at run time
 (`VTK_DEFAULT_OPENGL_WINDOW=vtkEGLRenderWindow` forces EGL).
 
+In the browser the same host is `arigl_term` (`arigl_term.js` + `.wasm` + `.data` +
+`arigl_term.html`, built by name in a wasm build with FTXUI): `arigl run --terminal` behind an
+xterm.js page derived from `ari.html`. VTK renders the scene into a hidden `#canvas` in the page
+(WebGL; the scene reaches the terminal only through stdout), and the page loads xterm.js's image
+addon, so by default the scene is drawn as iTerm2 inline images at the cells' real pixels
+(`?gfx=iterm`), or as half-blocks (`?gfx=color`, `?gfx=mono`). `?doc=documents/terminal_scene`
+picks a document under `/ariadne`. The page writes the program's output once per animation
+frame, the text and the images after it together. FTXUI repaints every cell each frame, which
+deletes the image tiles under them, and the addon decodes each image asynchronously, so for a
+moment the half-block underlay can show through: the picture flickers between its real pixels
+and the half-block version, never to blank.
+
 ### 9.3 From Python (a full app via `AriRuntime`)
 
 `AriRuntime` ([`AriRuntime.h`](../inc/cvc/gl/ariadne/AriRuntime.h)) collapses all of the

@@ -1,6 +1,6 @@
 {
   "_comment":
-      "Metadata for the wasm demo gallery. build-pages.py discovers demos by scanning the built bin/ for <demo>.wasm; anything listed here gets rich text, anything NOT listed still appears with name-based defaults. 'order' controls gallery ordering (listed first, discovered extras appended). WASM_MB is computed from the built file, not stored here. An entry with 'app' and 'doc' is a document demo: arigl (the gallery's Ariadne app) opened on examples/ariadne/documents/<doc>.ari, with no binary of its own; arigl's 'boot' is its command line, environment and pre-main files. 'card': false keeps a page off the index.",
+      "Metadata for the wasm demo gallery. build-pages.py discovers demos by scanning the built bin/ for <demo>.wasm; anything listed here gets rich text, anything NOT listed still appears with name-based defaults. 'order' controls gallery ordering (listed first, discovered extras appended). WASM_MB is computed from the built file, not stored here. An entry with 'app' and 'doc' is a document demo: arigl (the gallery's Ariadne app) opened on examples/ariadne/documents/<doc>.ari, with no binary of its own; arigl's 'boot' is its command line, environment and pre-main files. An arigl_term document (arigl --terminal in xterm.js) names its path under examples/ariadne instead (documents/terminal_scene). 'card': false keeps a page off the index.",
   "order": [
     "terrain_lab",
     "lsystem_forest",
@@ -13,6 +13,8 @@
     "fem_gallery_ari",
     "ari",
     "ari_tvision",
+    "terminal_scene_term",
+    "terminal_tour_term",
     "nav_city_swarm",
     "nav_city_drive",
     "nav_fog_ghost",
@@ -116,6 +118,29 @@
       "blurb":
           "The slice-based bunny, rebuilt in the Ariadne UI DSL: scene, transfer function, lighting and the slice control panel declared in one .ari document, run by arigl — no demo-specific C++. The volume is the signed distance field of the embedded Stanford mesh (source: { sdf: { mesh } }), and the controls are reusable .ari components.",
       "thumb": "img/volslice_bunny_ari.jpg"
+    },
+    "arigl_term": {
+      "title": "arigl --terminal",
+      "desc": "arigl in a terminal in the browser: the widgets as text, the 3D scene drawn behind them",
+      "card": false
+    },
+    "terminal_scene_term": {
+      "app": "arigl_term",
+      "doc": "documents/terminal_scene",
+      "title": "terminal_scene — a 3D scene in a terminal",
+      "desc": "a cvcGL scene drawn behind terminal widgets, as inline images, in xterm.js",
+      "blurb":
+          "arigl --terminal in the browser. The document's widgets run through Ariadne's terminal backend (FTXUI) in an xterm.js terminal, and its 3D scene is rendered by cvcGL into a hidden WebGL canvas, read back and drawn behind them: as iTerm2 inline images at the cells' real pixels (xterm.js's image addon), or as half-block cells. Drag the background to orbit, middle-drag to pan, the wheel zooms; Tab and the arrows move between widgets, F10 opens the menu. Switch the drawing from the page's header.",
+      "thumb": "img/terminal_scene_term.jpg"
+    },
+    "terminal_tour_term": {
+      "app": "arigl_term",
+      "doc": "terminal/terminal_tour",
+      "title": "terminal_tour — arigl --terminal",
+      "desc": "the Ariadne widget tour through arigl's terminal mode, in the browser",
+      "blurb":
+          "terminal_tour.ari, the document ari runs, through arigl's terminal mode instead: the same FTXUI widgets in an xterm.js terminal, from a host that also renders a 3D scene behind them when a document has one. Tab and the arrow keys move between widgets, the mouse clicks and drags, F10 opens the menu bar, and Ctrl-C asks before it quits.",
+      "thumb": "img/terminal_tour_term.jpg"
     },
     "ari": {
       "title": "ari — Ariadne in a terminal",

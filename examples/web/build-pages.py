@@ -24,6 +24,8 @@ that app's page opened on that document (<app>/?doc=<doc>), so arigl -- the gall
 and its own directory redirects there. An app's "boot" ({args, env, files, doc}) is its command
 line ({doc} becomes /ariadne/documents/<?doc= or boot.doc>.ari), its environment, and files
 fetched into its file system before main (path -> URL). "card": false keeps a demo off the index.
+arigl_term (arigl --terminal behind xterm.js, its own page) takes a doc under /ariadne instead
+("documents/terminal_scene"); in arigl's Demos menu its documents are pages to open, not loaded.
 """
 import argparse
 import json
@@ -204,7 +206,7 @@ def main() -> int:
             continue  # an app's own page (arigl's): it is in the menus as its documents
         e = {"slug": demo, "title": info.get("title", demo), "desc": info.get("desc", ""),
              "href": href(demo)}
-        if app_of(demo):
+        if app_of(demo) == "arigl":  # arigl loads it in place; another app's is a page to open
             e["doc"] = f"/ariadne/documents/{info['doc']}.ari"
         entries.append(e)
     (args.out / "gallery.json").write_text(json.dumps({"demos": entries}, indent=1) + "\n")

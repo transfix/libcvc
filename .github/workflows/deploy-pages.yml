@@ -52,7 +52,7 @@ jobs:
       CVC_WASM_NAV_WEIGHTS: /opt/cvc-wasm/deps-wasm-mt/share/grl-snam-weights/coef_sdf.cvcnav
       # The .ari demos (lsystem_forest_ari, volren_bunny_ari, volslice_bunny_ari, fem_gallery_ari) are
       # arigl on their documents: arigl is the binary to expect, their own dirs only redirect to it.
-      DEMOS: 'terrain_lab lsystem_forest arigl lsystem_coast volren_bunny volslice_bunny ari nav_city_swarm nav_city_drive nav_fog_ghost bunny_shadow'
+      DEMOS: 'terrain_lab lsystem_forest arigl lsystem_coast volren_bunny volslice_bunny ari arigl_term nav_city_swarm nav_city_drive nav_fog_ghost bunny_shadow'
     steps:
       - name: Checkout master
         uses: actions/checkout@v4

@@ -152,5 +152,40 @@ if(EMSCRIPTEN)
       cvcgl_wasm_app(arigl)
     endif()
     add_dependencies(wasm-demos arigl)
+
+    # arigl_term: `arigl run --terminal` in the browser, behind an xterm.js page (web/
+    # arigl_term.html, from ari's): the widgets through FTXUI's Emscripten screen on the module's
+    # stdio, the scene rendered by VTK into a hidden canvas and drawn behind them, as iTerm2 inline
+    # images (xterm.js's image addon) or half-blocks. The page picks the document (?doc=) and the
+    # drawing (?gfx=); the documents and components are preloaded as for arigl, without the
+    # datasets. Built by name (not part of wasm-demos), and only defined where FTXUI is found: it
+    # exports FTXUI's resize hook. (libcvc found FTXUI in its own directory; its targets aren't
+    # visible here.)
+    find_package(ftxui CONFIG QUIET)
+    if(TARGET ftxui::screen)
+      add_executable(arigl_term EXCLUDE_FROM_ALL main.cpp gallery.cpp)
+      target_link_libraries(arigl_term PRIVATE cvc::cvcGL ${VTK_LIBRARIES})
+      vtk_module_autoinit(TARGETS arigl_term MODULES ${VTK_LIBRARIES})
+      target_compile_definitions(arigl_term PRIVATE CVC_ARIGL_WASM_TERMINAL=1)
+      target_link_options(arigl_term PRIVATE
+        "--preload-file=${_arigl_examples}/ariadne/documents@/ariadne/documents"
+        "--preload-file=${_arigl_examples}/ariadne/terminal@/ariadne/terminal"
+        "--preload-file=${CMAKE_CURRENT_SOURCE_DIR}/../cvc/ariadne/components@/components"
+        -sASYNCIFY=1
+        -sASYNCIFY_STACK_SIZE=131072
+        -sALLOW_MEMORY_GROWTH=1
+        -sMAXIMUM_MEMORY=4GB
+        -sSTACK_SIZE=2097152
+        -sEXIT_RUNTIME=1
+        -sFETCH=1
+        -sEXPORTED_FUNCTIONS=_main,_ftxui_on_resize)
+      set_property(TARGET arigl_term APPEND PROPERTY LINK_DEPENDS ${_arigl_embedded})
+      if(COMMAND cvcgl_wasm_app)
+        # The state shim patches every WebGL context on the page, xterm.js's renderer's too.
+        cvcgl_wasm_app(arigl_term STATE_SHIM OFF)
+      endif()
+      file(GENERATE OUTPUT "$<TARGET_FILE_DIR:arigl_term>/arigl_term.html"
+           INPUT "${CMAKE_CURRENT_SOURCE_DIR}/web/arigl_term.html")
+    endif()
   endif()
 endif()

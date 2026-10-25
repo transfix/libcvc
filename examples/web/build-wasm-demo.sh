@@ -163,6 +163,9 @@ if [[ "${PTHREAD}" == "ON" ]]; then
     echo "build-wasm-demo: --pthread gallery; the ari pages are single-threaded, leaving them out"
 elif [ -f "${CVC_WASM_DEPS}/lib/cmake/ftxui/ftxui-config.cmake" ]; then
     cmake --build "${BUILD_DIR}" --target ari -j "$(nproc)"
+    # arigl_term: arigl --terminal in the same kind of page, the 3D scene drawn behind the widgets
+    # (src/arigl/web/arigl_term.html); its cards (demos.json) open it on their documents.
+    cmake --build "${BUILD_DIR}" --target arigl_term -j "$(nproc)"
     if grep -q '^CVC_ARIADNE_TVISION_ENABLED:INTERNAL=ON' "${BUILD_DIR}/CMakeCache.txt"; then
         cmake --build "${BUILD_DIR}" --target ari_tvision -j "$(nproc)"
     else

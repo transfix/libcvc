@@ -51,6 +51,8 @@ foreach(_i RANGE ${_demos_last})
   endif()
   if(_app STREQUAL "")
     set(_doc "") # a doc means something only with the app that opens it
+  elseif(NOT _app STREQUAL "arigl")
+    continue() # another app's document (arigl_term's, in the browser) is not native arigl's
   endif()
 
   # The C table: non-ASCII folded to '-' (ImGui's UI font, and MSVC without /utf-8).

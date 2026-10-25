@@ -1512,6 +1512,20 @@ int run_terminal(const ari::HostOptions &o) {
 } // namespace
 
 int main(int argc, char **argv) {
+#ifdef CVC_ARIGL_WASM_TERMINAL
+  // arigl_term, the browser terminal (web/arigl_term.html): the page passes the command line, and
+  // opened without one it runs terminal_scene. Always in the terminal: its canvas is the scene's.
+  const char *baked[] = {"arigl",      "run",
+                         "--terminal", "--component-path",
+                         "/",          "/ariadne/documents/terminal_scene.ari"};
+  if (argc < 2) {
+    argc = static_cast<int>(sizeof baked / sizeof *baked);
+    argv = const_cast<char **>(baked);
+  }
+  constexpr bool kTerminalOnly = true;
+#else
+  constexpr bool kTerminalOnly = false;
+#endif
   const ari::HostOptions o =
       ari::parse_host_args(argc, argv, {"--terminal", "--json", "--functions"});
   if (o.help)
@@ -1529,7 +1543,7 @@ int main(int argc, char **argv) {
     std::fprintf(stderr, "arigl: --backend is ftxui or tvision, not '%s'\n", o.backend.c_str());
     return 2;
   }
-  const bool terminal = has_flag(o, "--terminal");
+  const bool terminal = kTerminalOnly || has_flag(o, "--terminal");
   if (o.command != "info" && (has_flag(o, "--json") || has_flag(o, "--functions"))) {
     std::fprintf(stderr, "arigl: --json and --functions are for arigl info\n");
     return usage(2);
