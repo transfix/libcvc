@@ -832,6 +832,40 @@ TEST_F(LbieMesherTest, TetraMeshesAnIsovalueTheSamplesHit) {
   }
 }
 
+// GEO_FLOW on tetrahedra (Octree::geometric_flow_tet) moved every vertex 100 times per pass with
+// no check on the tets around it, so it could fold them; on the bunny's mesh the minimum dihedral
+// angle fell from 26.6 to 0.75 degrees and a boundary vertex flew far outside. It also read each
+// tet's corners in an order that made every volume negative, so only boundary vertices moved, and
+// their tangent move took the gradient of the volume's values for a unit normal: in a box 0.01
+// across the sphere's gradient is 100, and the flow sent every vertex to infinity. A move is now
+// taken only if every tet around the vertex keeps a positive volume and none gets a smaller
+// dihedral angle than the worst of them had. Here the minimum angle goes from 20 to 32 degrees.
+TEST_F(LbieMesherTest, TetraGeometricFlowNeverMakesTheWorstTetWorse) {
+  const unsigned int n = 17;
+  const double radius = 0.6;
+  // voxels 1 across with a gradient of 1/8, and voxels 1/800 across with a gradient of 10^4
+  for (std::pair<double, double> c : {std::make_pair(8.0, 1.0), std::make_pair(0.01, 100.0)}) {
+    const double box_size = c.first, value_scale = c.second;
+    volume v = make_sphere_volume(ctx, n, radius, box_size);
+    for (unsigned int k = 0; k < n; ++k)
+      for (unsigned int j = 0; j < n; ++j)
+        for (unsigned int i = 0; i < n; ++i)
+          v(i, j, k, v(i, j, k) * value_scale);
+    const sphere_tet_report before =
+        report_sphere_tets(cvc::tetrahedralize(v, 0.0), n, box_size, {radius});
+    const sphere_tet_report after =
+        report_sphere_tets(cvc::tetrahedralize(v, 0.0, DUALLIB, GEO_FLOW, BSPLINE_CONVOLUTION, 1),
+                           n, box_size, {radius});
+    const std::string where =
+        "box " + std::to_string(box_size) + ", values x" + std::to_string(value_scale);
+    ASSERT_EQ(after.tets, before.tets) << where;
+    EXPECT_EQ(after.inverted, 0) << where << ": " << after;
+    EXPECT_GT(after.min_dihedral, 1.5 * before.min_dihedral) << where << ": " << after;
+    EXPECT_GT(after.mean_dihedral, before.mean_dihedral) << where << ": " << after;
+    EXPECT_LT(after.max_boundary_distance, 0.5) << where << ": " << after;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // mesher.cpp wrappers: verbose path, quality_improve, geometry-based API
 // ---------------------------------------------------------------------------

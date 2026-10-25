@@ -3901,178 +3901,182 @@ void Octree::geometric_flow_tri(geoframe& geofrm) {
 	//	fclose(output);
 }
 
+// The cosine of the smallest dihedral angle of the tet p0 p1 p2 p3 (the largest cosine, 1 for a
+// flat tet), and its volume, positive when it is right-handed as AddTetra stores tets.
+static float tet_worst_dihedral_cos(const float* p0, const float* p1, const float* p2, const float* p3,
+				     float& volume)
+{
+	const float* p[4] = {p0, p1, p2, p3};
+	// face k is opposite corner k, wound so its normal points out of a right-handed tet
+	static const int face[4][3] = {{1, 2, 3}, {0, 3, 2}, {0, 1, 3}, {0, 2, 1}};
+	float n[4][3];
+	int i, j, k;
+
+	float a[3], b[3], c[3];
+	for(j = 0; j < 3; j++) {
+		a[j] = p1[j] - p0[j];	b[j] = p2[j] - p0[j];	c[j] = p3[j] - p0[j];
+	}
+	volume = (a[0]*(b[1]*c[2] - b[2]*c[1]) - a[1]*(b[0]*c[2] - b[2]*c[0]) +
+		  a[2]*(b[0]*c[1] - b[1]*c[0])) / 6.0f;
+
+	for(k = 0; k < 4; k++) {
+		for(j = 0; j < 3; j++) {
+			a[j] = p[face[k][1]][j] - p[face[k][0]][j];
+			b[j] = p[face[k][2]][j] - p[face[k][0]][j];
+		}
+		n[k][0] = a[1]*b[2] - a[2]*b[1];
+		n[k][1] = a[2]*b[0] - a[0]*b[2];
+		n[k][2] = a[0]*b[1] - a[1]*b[0];
+		float len = (float) sqrt(n[k][0]*n[k][0] + n[k][1]*n[k][1] + n[k][2]*n[k][2]);
+		if(!(len > 0.0f)) return 1.0f;
+		for(j = 0; j < 3; j++) n[k][j] /= len;
+	}
+	float worst = -1.0f;
+	for(i = 0; i < 4; i++)
+		for(k = i+1; k < 4; k++) {
+			float cos_angle = -(n[i][0]*n[k][0] + n[i][1]*n[k][1] + n[i][2]*n[k][2]);
+			if(cos_angle > worst) worst = cos_angle;
+		}
+	return worst;
+}
+
 // quality improvement with geometric flow -- tet mesh
+//
+// Each of 100 rounds moves every vertex a step towards the volume-weighted centre of its tets, or,
+// on the boundary, towards the area-weighted centre of its boundary faces within the surface's
+// tangent plane. Three things made it wreck meshes (the bunny's minimum dihedral angle fell from
+// 26.6 to 0.75 degrees, and a vertex flew far outside):
+// - It read each tet's corners in an order that made volume_tet() negative for every tet, so every
+//   tet was skipped as "too small" and the interior vertices never moved.
+// - The tangent move took the vertex normal for a unit vector. It is the gradient of the volume's
+//   values, so a CT's (tens of units per voxel) pushed boundary vertices out along the normal and
+//   doubled the push every round.
+// - Nothing checked the tets around a vertex, so a move could fold them.
+// A move is now taken only if every tet around the vertex keeps a positive volume and none has a
+// smaller dihedral angle than the worst of them had, so a pass never makes the mesh's worst tet
+// worse.
 void Octree::geometric_flow_tet(geoframe& geofrm) {
 
-	int i, j, k, v0, v1, v2, v3, **neighbor;
-	int itet, index, maxIndex, bool_0, bool_1, bool_2, bool_3;
-	float mv0[3], mv1[3], mv2[3], mv3[3], p[3], volume;
-	float sum_0, delta_t, area, t;
-	//	FILE *output;
-
-	//	output = fopen("qimprove_temp", "w");
-
-	//	fprintf(output, "geometric flow tet\n");
+	int i, j, k, v[4], itet, index, maxIndex, nb;
+	float p[3], n[3], volume, sum_0, delta_t, area, t, len;
+	float old_pos[3], new_pos[3];
 
 	delta_t = 0.01f;
 	maxIndex = 100;
 
-	neighbor = 0;
-	neighbor = new int*[geofrm.numverts];
-
-	for(i = 0; i < geofrm.numverts; i++)	neighbor[i] = 0;
-	for(i = 0; i < geofrm.numverts; i++)	neighbor[i] = new int[50];
-	for(i = 0; i < geofrm.numverts; i++) {
-		for (j = 0; j < 50; j++)	neighbor[i][j] = -1;
-	}
-
+	// the tets around each vertex
+	std::vector< std::vector<int> > neighbor(geofrm.numverts);
 	for (i = 0; i < geofrm.numtris/4; i++) {
-		v0 = geofrm.triangles[4*i][0];
-		v2 = geofrm.triangles[4*i][1];
-		v1 = geofrm.triangles[4*i][2];
-		v3 = geofrm.triangles[4*i+1][2];
-
-		for(j = 0; j < 50; j++) {
-			if(neighbor[v0][j] == -1) {neighbor[v0][j] = i;	break;}
-		}
-		for(j = 0; j < 50; j++) {
-			if(neighbor[v1][j] == -1) {neighbor[v1][j] = i;	break;}
-		}
-		for(j = 0; j < 50; j++) {
-			if(neighbor[v2][j] == -1) {neighbor[v2][j] = i;	break;}
-		}
-		for(j = 0; j < 50; j++) {
-			if(neighbor[v3][j] == -1) {neighbor[v3][j] = i;	break;}
-		}
+		v[0] = geofrm.triangles[4*i][0];	v[1] = geofrm.triangles[4*i][1];
+		v[2] = geofrm.triangles[4*i][2];	v[3] = geofrm.triangles[4*i+1][2];
+		for(j = 0; j < 4; j++) neighbor[v[j]].push_back(i);
 	}
 
-	//	fprintf(output, "%d %d\n", geofrm.numverts, geofrm.numtris/4);
-	for(index = 0; index < maxIndex; index++) {
+	// face k of a tet is opposite corner k
+	static const int face[4][3] = {{1, 2, 3}, {0, 3, 2}, {0, 1, 3}, {0, 2, 1}};
 
-	  //		fprintf(output, "%d ", index);
-	  //		if(index % 20 == 0 && index > 0) fprintf(output, "\n");
+	// each tet's tet_worst_dihedral_cos, kept up to date as its corners move
+	std::vector<float> tet_cos(geofrm.numtris/4), moved_cos;
+	for (i = 0; i < geofrm.numtris/4; i++) {
+		v[0] = geofrm.triangles[4*i][0];	v[1] = geofrm.triangles[4*i][1];
+		v[2] = geofrm.triangles[4*i][2];	v[3] = geofrm.triangles[4*i+1][2];
+		tet_cos[i] = tet_worst_dihedral_cos(&geofrm.verts[v[0]][0], &geofrm.verts[v[1]][0],
+						    &geofrm.verts[v[2]][0], &geofrm.verts[v[3]][0], volume);
+	}
+
+	for(index = 0; index < maxIndex; index++) {
 
 		for(i = 0; i < geofrm.numverts; i++) {
 
+			if(neighbor[i].empty()) continue;
+			sum_0 = 0.0f;
+			for(j = 0; j < 3; j++) p[j] = 0.0f;
+
 			if(geofrm.bound_sign[i] == 1) {					// boundary vertex
 
-				// calculate the mass center p[3]
-				sum_0 = 0.0f;
-				for(j = 0; j < 3; j++) p[j] = 0.0f;
-				for(j = 0; j < 50; j++) {
-					itet = neighbor[i][j];
-					if(itet == -1) break;
-					v0 = geofrm.triangles[4*itet][0];	v2 = geofrm.triangles[4*itet][1];
-					v1 = geofrm.triangles[4*itet][2];	v3 = geofrm.triangles[4*itet+1][2];
-
-					bool_0 = geofrm.bound_sign[v0] + geofrm.bound_sign[v2] + geofrm.bound_sign[v1];
-					bool_1 = geofrm.bound_sign[v0] + geofrm.bound_sign[v1] + geofrm.bound_sign[v3];
-					bool_2 = geofrm.bound_sign[v1] + geofrm.bound_sign[v2] + geofrm.bound_sign[v3];
-					bool_3 = geofrm.bound_sign[v2] + geofrm.bound_sign[v0] + geofrm.bound_sign[v3];
-
-					if((i == v0 || i == v1 || i == v2) && bool_0 == 3) {
-						for(k = 0; k < 3; k++) {
-							mv0[k] = geofrm.verts[v0][k];	mv1[k] = geofrm.verts[v2][k];
-							mv2[k] = geofrm.verts[v1][k];		
-						}
-						area = area_tri(mv0, mv1, mv2);
+				// the area-weighted centre of the boundary faces around it
+				for(nb = 0; nb < (int)neighbor[i].size(); nb++) {
+					itet = neighbor[i][nb];
+					v[0] = geofrm.triangles[4*itet][0];	v[1] = geofrm.triangles[4*itet][1];
+					v[2] = geofrm.triangles[4*itet][2];	v[3] = geofrm.triangles[4*itet+1][2];
+					for(k = 0; k < 4; k++) {
+						const int a = v[face[k][0]], b = v[face[k][1]], c = v[face[k][2]];
+						if((a != i && b != i && c != i) ||
+						   geofrm.bound_sign[a] + geofrm.bound_sign[b] + geofrm.bound_sign[c] != 3) continue;
+						area = area_tri(&geofrm.verts[a][0], &geofrm.verts[b][0], &geofrm.verts[c][0]);
 						sum_0 += area;
-						for(k = 0; k < 3; k++) {
-							p[k] += (mv0[k] + mv1[k] + mv2[k])*area/3.0f;
-						}
+						for(j = 0; j < 3; j++)
+							p[j] += (geofrm.verts[a][j] + geofrm.verts[b][j] + geofrm.verts[c][j])*area/3.0f;
 					}
-					if((i == v0 || i == v1 || i == v3) && bool_1 == 3) { 
-						for(k = 0; k < 3; k++) {
-							mv0[k] = geofrm.verts[v0][k];	mv1[k] = geofrm.verts[v1][k];
-							mv2[k] = geofrm.verts[v3][k];	
-						}
-						area = area_tri(mv0, mv1, mv2);
-						sum_0 += area;
-						for(k = 0; k < 3; k++) {
-							p[k] += (mv0[k] + mv1[k] + mv2[k])*area/3.0f;
-						}
-					}
-					if((i == v1 || i == v2 || i == v3) && bool_2 == 3) {
-						for(k = 0; k < 3; k++) {
-							mv0[k] = geofrm.verts[v1][k];	mv1[k] = geofrm.verts[v2][k];
-							mv2[k] = geofrm.verts[v3][k];	
-						}
-						area = area_tri(mv0, mv1, mv2);
-						sum_0 += area;
-						for(k = 0; k < 3; k++) {
-							p[k] += (mv0[k] + mv1[k] + mv2[k])*area/3.0f;
-						}
-					}
-					if((i == v2 || i == v0 || i == v3) && bool_3 == 3) {
-						for(k = 0; k < 3; k++) {
-							mv0[k] = geofrm.verts[v2][k];	mv1[k] = geofrm.verts[v0][k];
-							mv2[k] = geofrm.verts[v3][k];	
-						}
-						area = area_tri(mv0, mv1, mv2);
-						sum_0 += area;
-						for(k = 0; k < 3; k++) {
-							p[k] += (mv0[k] + mv1[k] + mv2[k])*area/3.0f;
-						}
-					}
-
 				}
-				
-				for(j = 0; j < 3; j++) p[j] /= sum_0;
-				if(sum_0 == 0.0f) {printf("s%d ", i); continue;}
+				if(!(sum_0 > 0.0f)) continue;
 
-				// calculate the new position in tangent direction
-				// xi+1 = xi + delta_t*((m-xi) - (n, m-xi)n))
+				// xi+1 = xi + delta_t*((m-xi) - (n, m-xi)n)), with n the unit normal
+				len = 0.0f;
+				for(j = 0; j < 3; j++) {
+					n[j] = geofrm.normals[i][j];
+					len += n[j]*n[j];
+				}
+				len = (float) sqrt(len);
+				if(!(len > 0.0f)) continue;
 				t = 0.0f;
 				for(j = 0; j < 3; j++) {
-					p[j] -= geofrm.verts[i][j];
-					t += p[j]*geofrm.normals[i][j];
+					n[j] /= len;
+					p[j] = p[j]/sum_0 - geofrm.verts[i][j];
+					t += p[j]*n[j];
 				}
-				for(j = 0; j < 3; j++) {
-					//geofrm.verts[i][j] += delta_t*p[j];							// mass center
-					geofrm.verts[i][j] += delta_t*(p[j] - t*geofrm.normals[i][j]);		// tangent movement
-				}
-				
+				for(j = 0; j < 3; j++)
+					new_pos[j] = geofrm.verts[i][j] + delta_t*(p[j] - t*n[j]);		// tangent movement
+
 			}
 			else {									// interior vertex
 
-				// calculate the volume center p[3]
-				sum_0 = 0.0f;
-				for(j = 0; j < 3; j++) p[j] = 0.0f;
-				for(j = 0; j < 50; j++) {
-					itet = neighbor[i][j];
-					if(itet == -1) break;
-					v0 = geofrm.triangles[4*itet][0];	v2 = geofrm.triangles[4*itet][1];
-					v1 = geofrm.triangles[4*itet][2];	v3 = geofrm.triangles[4*itet+1][2];
-
-					for(k = 0; k < 3; k++) {
-						mv0[k] = geofrm.verts[v0][k];	mv1[k] = geofrm.verts[v1][k];
-						mv2[k] = geofrm.verts[v2][k];	mv3[k] = geofrm.verts[v3][k];
-					}
-					volume = volume_tet(mv0, mv1, mv2, mv3);
+				// the volume-weighted centre of its tets
+				for(nb = 0; nb < (int)neighbor[i].size(); nb++) {
+					itet = neighbor[i][nb];
+					v[0] = geofrm.triangles[4*itet][0];	v[1] = geofrm.triangles[4*itet][1];
+					v[2] = geofrm.triangles[4*itet][2];	v[3] = geofrm.triangles[4*itet+1][2];
+					volume = volume_tet(&geofrm.verts[v[0]][0], &geofrm.verts[v[1]][0],
+							    &geofrm.verts[v[2]][0], &geofrm.verts[v[3]][0]);
 					if(volume < 0.00001f) continue;
-					sum_0 += (float) volume;
-					for(k = 0; k < 3; k++) {
-						p[k] += (mv0[k] + mv1[k] + mv2[k] + mv3[k])*volume/4.0f;
-					}
+					sum_0 += volume;
+					for(k = 0; k < 3; k++)
+						p[k] += (geofrm.verts[v[0]][k] + geofrm.verts[v[1]][k] +
+							 geofrm.verts[v[2]][k] + geofrm.verts[v[3]][k])*volume/4.0f;
 				}
-
-				for(j = 0; j < 3; j++) p[j] /= sum_0;
-				//if(sum_0 <= 0.0f || sum_0 > 10000.0f) {printf("v%d %f\n", i, sum_0); continue;}
 				if(sum_0 < 0.00001f) continue;
-				for(j = 0; j < 3; j++) {
-					geofrm.verts[i][j] += delta_t*(p[j] - geofrm.verts[i][j]);					// volume center
-				}
+				for(j = 0; j < 3; j++)
+					new_pos[j] = geofrm.verts[i][j] + delta_t*(p[j]/sum_0 - geofrm.verts[i][j]);	// volume center
 
 			}
+
+			// take the move only if no tet around the vertex folds or gets worse than the worst of them
+			float worst_before = -1.0f;
+			for(nb = 0; nb < (int)neighbor[i].size(); nb++)
+				if(tet_cos[neighbor[i][nb]] > worst_before) worst_before = tet_cos[neighbor[i][nb]];
+			bool keep = true;
+			moved_cos.clear();
+			for(j = 0; j < 3; j++) {
+				old_pos[j] = geofrm.verts[i][j];
+				geofrm.verts[i][j] = new_pos[j];
+			}
+			for(nb = 0; nb < (int)neighbor[i].size() && keep; nb++) {
+				itet = neighbor[i][nb];
+				v[0] = geofrm.triangles[4*itet][0];	v[1] = geofrm.triangles[4*itet][1];
+				v[2] = geofrm.triangles[4*itet][2];	v[3] = geofrm.triangles[4*itet+1][2];
+				moved_cos.push_back(tet_worst_dihedral_cos(&geofrm.verts[v[0]][0], &geofrm.verts[v[1]][0],
+									   &geofrm.verts[v[2]][0], &geofrm.verts[v[3]][0], volume));
+				keep = volume > 0.0f && moved_cos.back() <= worst_before;
+			}
+			if(!keep) {
+				for(j = 0; j < 3; j++) geofrm.verts[i][j] = old_pos[j];
+				continue;
+			}
+			for(nb = 0; nb < (int)neighbor[i].size(); nb++) tet_cos[neighbor[i][nb]] = moved_cos[nb];
 
 		} // end of i loop
 
 	} // end of index loop
-
-	for(i = 0; i < geofrm.numverts; i++)	delete [] neighbor[i];
-	delete [] neighbor;
-
-	//	fclose(output);
 }
 
 // quality improvement with geometric flow -- quad mesh
