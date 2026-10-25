@@ -84,17 +84,17 @@ std::vector<state_mutation> state_change_journal::replay_after(std::uint64_t seq
 
   // append() assigns strictly increasing sequences, so the tail after `sequence` is found by
   // binary search: a drain that runs every frame costs O(new), not O(journal).
-  const auto first = std::upper_bound(
-      _mutations.begin(), _mutations.end(), sequence,
-      [](std::uint64_t s, const state_mutation &m) { return s < m.sequence; });
+  const auto first =
+      std::upper_bound(_mutations.begin(), _mutations.end(), sequence,
+                       [](std::uint64_t s, const state_mutation &m) { return s < m.sequence; });
   return std::vector<state_mutation>(first, _mutations.end());
 }
 
 std::size_t state_change_journal::trim_through(std::uint64_t sequence) {
   std::lock_guard<std::mutex> lock(_mutex);
-  const auto last = std::upper_bound(
-      _mutations.begin(), _mutations.end(), sequence,
-      [](std::uint64_t s, const state_mutation &m) { return s < m.sequence; });
+  const auto last =
+      std::upper_bound(_mutations.begin(), _mutations.end(), sequence,
+                       [](std::uint64_t s, const state_mutation &m) { return s < m.sequence; });
   const auto n = static_cast<std::size_t>(last - _mutations.begin());
   _mutations.erase(_mutations.begin(), last);
   return n;
