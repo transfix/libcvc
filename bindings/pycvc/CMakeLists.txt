@@ -559,4 +559,11 @@ if(CVC_BUILD_PYCVC_GL)
   add_test(NAME pycvc_gl_clip
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_clip.py)
   set_tests_properties(pycvc_gl_clip PROPERTIES ENVIRONMENT "${_PYCVC_GL_TEST_ENV}")
+  # Keep-alives the cycle collector cannot undo: what a SceneRenderer / ViewportManager /
+  # StageLighting / CameraController / ScreenTextHud / ImGuiOverlay / AriRuntime borrows by C++
+  # reference is stashed as its untracked `this` (pycvc._keepalive), and a ViewportManager keeps
+  # every scene added to it. StageLighting is headless; the rest self-skip without offscreen GL.
+  add_test(NAME pycvc_gl_keepalive
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_keepalive.py)
+  set_tests_properties(pycvc_gl_keepalive PROPERTIES ENVIRONMENT "${_PYCVC_GL_TEST_ENV}")
 endif() # CVC_BUILD_PYCVC_GL

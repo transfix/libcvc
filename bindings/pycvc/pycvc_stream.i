@@ -46,7 +46,7 @@
 // module-global app CLASS and pin nothing — the bug this fixes).
 %pythonappend pycvc::stream_open %{
     if args:
-        val._pycvc_app = _app_keepalive(args[0])
+        val._pycvc_app = _keepalive(args[0])
 %}
 
 %inline %{
