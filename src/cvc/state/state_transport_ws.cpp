@@ -714,8 +714,10 @@ void state_transport_ws::start(const std::string &listen_addr, const std::string
     _impl->ping_thread = std::thread([this]() { ping_loop(); });
 }
 
-// Server accept loop: synchronous accept → WebSocket handshake → admit + spawn reader. Breaks when
-// stop() closes the acceptor (accept() then errors).
+static std::int64_t steady_ns(); // defined with the reaper below
+
+// Server accept loop: synchronous accept, then a thread per connection for its handshake, admission
+// and reads (serve_accepted). Breaks when stop() closes the acceptor (accept() then errors).
 void state_transport_ws::accept_loop() {
   for (;;) {
     tcp::socket sock(_impl->ioc);
