@@ -1662,28 +1662,40 @@ double hex_jacobian(const geometry::point_t vertices[8]) {
 // Purpose:
 //   Compute scaled Jacobian quality metric for hexahedron.
 //   Range: [-1, 1], where 1 = perfect cube.
+//   The minimum over the 8 corners of the determinant of the corner's three
+//   unit edge vectors (the Verdict / CUBIT definition): 1 for a box, 1/sqrt(5)
+//   for a cube sheared by twice its height, <= 0 once a corner folds over.
 // ---- Change History ----
 // 12/28/2025 -- Joe R. -- Creation (Week 3 Option 3).
+// 10/24/2026 -- Joe R. -- Per-corner unit edges, so a cube really scores 1
+//                         (it scored 1/sqrt(27): the centre Jacobian over the
+//                         space diagonal cubed).
 double hex_scaled_jacobian(const geometry::point_t vertices[8]) {
-
-  // Compute Jacobian at center
-  double jac = hex_jacobian(vertices);
-
-  // Compute edge length scale
-  double max_edge = 0.0;
-  for (int i = 0; i < 8; ++i) {
-    for (int j = i + 1; j < 8; ++j) {
-      double dx = vertices[j][0] - vertices[i][0];
-      double dy = vertices[j][1] - vertices[i][1];
-      double dz = vertices[j][2] - vertices[i][2];
-      double len = std::sqrt(dx * dx + dy * dy + dz * dz);
-      max_edge = std::max(max_edge, len);
+  // The three edges leaving each corner, ordered so a right-handed hex is positive.
+  static const int kCornerEdges[8][3] = {{1, 3, 4}, {2, 0, 5}, {3, 1, 6}, {0, 2, 7},
+                                         {7, 5, 0}, {4, 6, 1}, {5, 7, 2}, {6, 4, 3}};
+  double worst = 1.0;
+  for (int c = 0; c < 8; ++c) {
+    double e[3][3];
+    bool degenerate = false;
+    for (int k = 0; k < 3 && !degenerate; ++k) {
+      double len = 0.0;
+      for (int j = 0; j < 3; ++j) {
+        e[k][j] = vertices[kCornerEdges[c][k]][j] - vertices[c][j];
+        len += e[k][j] * e[k][j];
+      }
+      len = std::sqrt(len);
+      degenerate = !(len > 1e-300);
+      for (int j = 0; j < 3 && !degenerate; ++j)
+        e[k][j] /= len;
     }
+    const double det = degenerate ? 0.0
+                                  : e[0][0] * (e[1][1] * e[2][2] - e[1][2] * e[2][1]) -
+                                        e[0][1] * (e[1][0] * e[2][2] - e[1][2] * e[2][0]) +
+                                        e[0][2] * (e[1][0] * e[2][1] - e[1][1] * e[2][0]);
+    worst = std::min(worst, det);
   }
-
-  // Scale Jacobian by edge length cubed
-  double scale = max_edge * max_edge * max_edge;
-  return (scale > 1e-15) ? (jac / scale) : 0.0;
+  return worst;
 }
 
 // ---------------------------

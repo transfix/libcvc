@@ -4558,10 +4558,9 @@ TEST_F(AlgorithmTest, HexJacobianMetric) {
   // Should be positive for valid hex
   EXPECT_GT(jac, 0.0);
 
-  // Scaled Jacobian should be close to 1 for perfect cube
+  // Scaled Jacobian is 1 for a perfect cube
   double scaled_jac = hex_scaled_jacobian(vertices);
-  EXPECT_GT(scaled_jac, 0.0);
-  EXPECT_LE(scaled_jac, 1.0);
+  EXPECT_NEAR(scaled_jac, 1.0, 1e-12);
 }
 
 TEST_F(AlgorithmTest, TetMeshQualityStatistics) {
