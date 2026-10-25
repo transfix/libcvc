@@ -2109,10 +2109,10 @@ TEST(StateTransportWsTest, BridgeLegHonorsDestinationRegistry) {
 }
 #endif // CVC_ENABLE_GRPC
 
-// The media egress shaper is asked after the gate, once per identified receiver: one gets a
-// variant (its own smaller copy, encoded once whatever number of receivers share it), one gets
-// nothing, one the frame as sent; the relay's own uplink is never shaped, and each delivery and
-// drop counts on that receiver's link (state_link_stats media counters).
+// The media egress shaper is asked after the gate, per receiver: one gets a variant (its own
+// smaller copy), one gets nothing, one the frame as sent. Each delivery counts on that receiver's
+// link (state_link_stats media_sent), and a frame shaped out is not a link drop: the rung
+// controller reads media_dropped as congestion, and must not see its own off rung as one.
 TEST(StateTransportWsTest, RelayMediaShaperSendsEachReceiverItsShape) {
   std::mutex mu;
   std::vector<cvc::ws_media_frame> gotB, gotD;
@@ -2192,6 +2192,7 @@ TEST(StateTransportWsTest, RelayMediaShaperSendsEachReceiverItsShape) {
   EXPECT_EQ(by["B"].media_sent, 1u);
   EXPECT_EQ(by["D"].media_sent, 1u);
   EXPECT_EQ(by["C1"].media_sent, 0u) << "a shaped-out frame is not a delivery";
+  EXPECT_EQ(by["C1"].media_dropped, 0u) << "nor a drop";
 
   for (cvc::state_transport_ws *t : {&tA, &tB, &tC, &tD})
     t->stop();

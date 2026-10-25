@@ -237,8 +237,8 @@ TEST(RoomWriteGate, AParticipantWritesOnlyItsOwnSubtree) {
 
   // What clients write (room_join, write_intent, room_net, room_publish).
   for (const char *key : {"presence.joined", "profile.name", "intent.move.x", "intent.yaw",
-                          "intent.tick", "net.rtt_ms", "net.in_kbps", "voice.talking",
-                          "streams.camera.endpoint", "streams.camera.token"})
+                          "intent.tick", "net.rtt_ms", "net.in_kbps", "voice.talking", "video.off",
+                          "audio.opus", "streams.camera.endpoint", "streams.camera.token"})
     EXPECT_TRUE(gate.may_write("alice", alice + "." + key, op::set_value)) << key;
   EXPECT_TRUE(gate.may_write("alice", alice + ".intent.move.x", op::touch));
   EXPECT_TRUE(gate.may_write("alice", alice + ".avatar", op::set_data));
@@ -248,6 +248,8 @@ TEST(RoomWriteGate, AParticipantWritesOnlyItsOwnSubtree) {
   EXPECT_FALSE(gate.may_write("alice", alice + ".pose.pos.x", op::set_value));
   EXPECT_FALSE(gate.may_write("alice", alice + ".pose.server_tick", op::touch));
   EXPECT_FALSE(gate.may_write("alice", alice + ".net.relay.rtt_ms", op::set_value));
+  EXPECT_FALSE(gate.may_write("alice", alice + ".net.relay.video", op::set_value))
+      << "the relay picks alice's video rung";
   EXPECT_TRUE(gate.may_write("alice", alice + ".net.relayed", op::set_value))
       << "a sibling of net.relay is alice's";
   EXPECT_FALSE(gate.may_write("alice", alice + ".streams.camera.ready", op::set_value))
@@ -545,4 +547,11 @@ TEST(RoomRungs, OnlyAViewersHoldingLinkCounts) {
   EXPECT_EQ(out.size(), 1u);
   EXPECT_EQ(out.count("v"), 1u);
   EXPECT_TRUE(ctl.step({}, 2.0).empty());
+
+  // A viewer whose link is gone is forgotten: back, it starts again at the best rung, not at the
+  // one it left on.
+  rung_sim sim;
+  ASSERT_EQ(sim.passes(2, 260.0), cvc::video_rung::half);
+  EXPECT_TRUE(sim.ctl.step({}, sim.t + 0.5).empty());
+  EXPECT_EQ(sim.pass(12.0), cvc::video_rung::full);
 }

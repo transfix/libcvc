@@ -25,6 +25,10 @@ namespace {
 
 constexpr const char *kRungNames[kVideoRungs] = {"full", "half", "quarter", "thumb", "off"};
 
+// The largest JPEG the relay decodes (4096 x 4096). A JPEG's header names its own size, and a frame
+// from any client claiming 65535 x 65535 would otherwise allocate gigabytes on a reader thread.
+constexpr long long kMaxJpegPixels = 4096LL * 4096LL;
+
 double now_s() {
   return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
@@ -37,13 +41,36 @@ bool shapeable(const media_frame &f) {
 
 #ifdef CVC_HAVE_TURBOJPEG
 // One TurboJPEG handle per thread per direction (tj3Init is not free); publishers' reader threads
-// each keep their own.
-tjhandle decompressor() {
-  thread_local tjhandle h = tj3Init(TJINIT_DECOMPRESS);
+// each keep their own. A handle a call failed on is replaced: a decompressor that stopped partway
+// through a bad header refuses every image after it ("two SOI markers"), so one malformed frame
+// would otherwise end downscaling on that thread for good.
+class tj_handle {
+public:
+  explicit tj_handle(int init) : _init(init) {}
+  ~tj_handle() { reset(); }
+  tj_handle(const tj_handle &) = delete;
+  tj_handle &operator=(const tj_handle &) = delete;
+  tjhandle get() {
+    if (!_h)
+      _h = tj3Init(_init);
+    return _h;
+  }
+  void reset() {
+    if (_h)
+      tj3Destroy(_h);
+    _h = nullptr;
+  }
+
+private:
+  int _init;
+  tjhandle _h = nullptr;
+};
+tj_handle &decompressor() {
+  thread_local tj_handle h(TJINIT_DECOMPRESS);
   return h;
 }
-tjhandle compressor() {
-  thread_local tjhandle h = tj3Init(TJINIT_COMPRESS);
+tj_handle &compressor() {
+  thread_local tj_handle h(TJINIT_COMPRESS);
   return h;
 }
 #endif
@@ -77,20 +104,31 @@ std::vector<std::uint8_t> jpeg_downscale(const std::uint8_t *jpeg, std::size_t s
 #ifdef CVC_HAVE_TURBOJPEG
   if (!jpeg || size == 0 || (denom != 1 && denom != 2 && denom != 4 && denom != 8))
     return {};
-  tjhandle d = decompressor();
-  tjhandle c = compressor();
-  if (!d || !c || tj3DecompressHeader(d, jpeg, size) != 0)
+  tj_handle &dh = decompressor();
+  tj_handle &ch = compressor();
+  tjhandle d = dh.get();
+  tjhandle c = ch.get();
+  if (!d || !c)
     return {};
+  const auto bad_input = [&dh]() {
+    dh.reset();
+    return std::vector<std::uint8_t>();
+  };
+  if (tj3DecompressHeader(d, jpeg, size) != 0)
+    return bad_input();
+  const long long src_w = tj3Get(d, TJPARAM_JPEGWIDTH), src_h = tj3Get(d, TJPARAM_JPEGHEIGHT);
+  if (src_w <= 0 || src_h <= 0 || src_w * src_h > kMaxJpegPixels)
+    return bad_input();
   const tjscalingfactor scale{1, denom};
   if (tj3SetScalingFactor(d, scale) != 0)
-    return {};
+    return bad_input();
   const int w = TJSCALED(tj3Get(d, TJPARAM_JPEGWIDTH), scale);
   const int h = TJSCALED(tj3Get(d, TJPARAM_JPEGHEIGHT), scale);
   if (w <= 0 || h <= 0)
-    return {};
+    return bad_input();
   std::vector<std::uint8_t> rgb(static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * 3u);
   if (tj3Decompress8(d, jpeg, size, rgb.data(), /*pitch=*/0, TJPF_RGB) != 0)
-    return {};
+    return bad_input();
   tj3Set(c, TJPARAM_NOREALLOC, 0); // let it size the output
   tj3Set(c, TJPARAM_QUALITY, quality < 1 ? 1 : (quality > 100 ? 100 : quality));
   tj3Set(c, TJPARAM_SUBSAMP, TJSAMP_420);
@@ -98,6 +136,7 @@ std::vector<std::uint8_t> jpeg_downscale(const std::uint8_t *jpeg, std::size_t s
   std::size_t out_size = 0;
   if (tj3Compress8(c, rgb.data(), w, /*pitch=*/0, h, TJPF_RGB, &out, &out_size) != 0) {
     tj3Free(out);
+    ch.reset();
     return {};
   }
   std::vector<std::uint8_t> result(out, out + out_size);
@@ -118,7 +157,8 @@ std::vector<std::uint8_t> jpeg_downscale(const std::uint8_t *jpeg, std::size_t s
 
 std::vector<std::uint8_t> jpeg_encode_rgb(const std::uint8_t *rgb, int w, int h, int quality) {
 #ifdef CVC_HAVE_TURBOJPEG
-  tjhandle c = compressor();
+  tj_handle &ch = compressor();
+  tjhandle c = ch.get();
   if (!c || !rgb || w <= 0 || h <= 0)
     return {};
   tj3Set(c, TJPARAM_NOREALLOC, 0);
@@ -128,6 +168,7 @@ std::vector<std::uint8_t> jpeg_encode_rgb(const std::uint8_t *rgb, int w, int h,
   std::size_t out_size = 0;
   if (tj3Compress8(c, rgb, w, /*pitch=*/0, h, TJPF_RGB, &out, &out_size) != 0) {
     tj3Free(out);
+    ch.reset();
     return {};
   }
   std::vector<std::uint8_t> result(out, out + out_size);
@@ -243,12 +284,14 @@ media_shape media_rung_shaper::shape(const media_frame &f, const std::string &vi
     s.drop = true;
     return s;
   case video_rung::thumb: {
-    // A frame at most every 1/thumb_fps per viewer and publisher.
+    // A frame about every 1/thumb_fps per viewer and publisher. A quarter of the interval early
+    // still goes: the AOI tier may already pace this camera at the same rate on its own schedule,
+    // and those frames reach here with a frame period of jitter, half of them a little early.
     const double now = now_s();
     const double gap = _impl->cfg.thumb_fps > 0.0 ? 1.0 / _impl->cfg.thumb_fps : 0.0;
     std::lock_guard<std::mutex> lk(_impl->mu);
     double &last = _impl->last_thumb[impl::key(viewer, f.origin_node_id)];
-    if (last > 0.0 && now - last < gap) {
+    if (last > 0.0 && now - last < 0.75 * gap) {
       s.drop = true;
       return s;
     }

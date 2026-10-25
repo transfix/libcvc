@@ -1425,9 +1425,10 @@ std::size_t state_transport_ws::write_media(const media_frame &m, const void *ex
   };
   pb::Frame frame;
   encode(m, frame);
-  // The shaper's variants, each encoded once for every receiver it serves.
-  std::vector<std::pair<const media_frame *, pb::Frame>> variants;
-  const auto variant_frame = [&](const media_frame *v) -> const pb::Frame & {
+  // The shaper's variants, each encoded once for every receiver it serves. Each is held here for
+  // the whole fan: matched by address, a variant freed mid-fan could hand its address to another.
+  std::vector<std::pair<std::shared_ptr<const media_frame>, pb::Frame>> variants;
+  const auto variant_frame = [&](const std::shared_ptr<const media_frame> &v) -> const pb::Frame & {
     for (const auto &e : variants)
       if (e.first == v)
         return e.second;
@@ -1475,20 +1476,19 @@ std::size_t state_transport_ws::write_media(const media_frame &m, const void *ex
         continue;
       }
     }
-    // Then its shape: the frame as sent, a smaller variant, or nothing.
+    // Then its shape: the frame as sent, a smaller variant, or nothing. An unidentified receiver
+    // is shaped as "", a viewer the shaper has no rung for.
     const pb::Frame *out = &frame;
     if (shaper) {
       const std::string *pid = c->peer_id();
-      if (pid) {
-        const media_shape s = (*shaper)(m, *pid);
-        if (s.drop) {
-          _media_shape_dropped.fetch_add(1, std::memory_order_relaxed);
-          continue;
-        }
-        if (s.variant) {
-          out = &variant_frame(s.variant.get());
-          _media_shaped.fetch_add(1, std::memory_order_relaxed);
-        }
+      const media_shape s = (*shaper)(m, pid ? *pid : std::string());
+      if (s.drop) {
+        _media_shape_dropped.fetch_add(1, std::memory_order_relaxed);
+        continue;
+      }
+      if (s.variant) {
+        out = &variant_frame(s.variant);
+        _media_shaped.fetch_add(1, std::memory_order_relaxed);
       }
     }
     if (c->write(*out)) {

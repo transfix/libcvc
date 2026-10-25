@@ -680,6 +680,12 @@ int main(int argc, char **argv) {
                         it == rates.end() ? 0.0 : it->second.in_bps * 8.0 / 1000.0,
                         it == rates.end() ? 0.0 : it->second.out_bps * 8.0 / 1000.0, r.idle_s);
           }
+        if (detail)
+          std::printf(
+              "[arisrv]   video shaping: %llu variant(s) made, %llu delivered, %llu KB saved\n",
+              static_cast<unsigned long long>(shaper.total_transcoded()),
+              static_cast<unsigned long long>(shaper.total_shaped()),
+              static_cast<unsigned long long>(shaper.total_bytes_saved() / 1024));
         std::fflush(stdout);
       }
     }
