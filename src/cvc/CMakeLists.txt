@@ -92,6 +92,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/media/media_endpoint.h
   ../../inc/cvc/media/media_router.h
   ../../inc/cvc/media/media_rungs.h
+  ../../inc/cvc/media/media_opus.h
   ../../inc/cvc/geometry/bunny.h
   ../../inc/cvc/volume/endians.h
   ../../inc/cvc/utility/utility.h
@@ -297,6 +298,7 @@ set(SOURCE_FILES
   state/state_transport_ipc.cpp
   media/media_router.cpp
   media/media_rungs.cpp
+  media/media_opus.cpp
   state/state_message_bus.cpp
   state/state_peer_registry.cpp
   state/state_link_stats.cpp
@@ -1543,6 +1545,37 @@ if(_cvc_core_turbojpeg)
   message(STATUS "cvc::media: video rungs transcode with ${_cvc_core_turbojpeg}")
 else()
   message(STATUS "cvc::media: no libjpeg-turbo - video rungs only drop frames, never re-encode")
+endif()
+
+# Opus mics (media_opus.h): a sender encodes its mic in Opus, and a relay decodes it to f32 for the
+# viewers that cannot. OPTIONAL: libopus (cvcpkg `libopus`, BSD-3-Clause); without it every mic
+# stays f32. Found by header and library, since cvcpkg's autotools-built bundles ship no CMake
+# config, and linked through a synthesised imported target, as zstd is (below): a PRIVATE
+# absolute-path link would leak into a static cvc's export, and cvcConfig.cmake recreates the
+# target for a static consumer. On Windows the MinGW-built import library is opus.lib (libopus
+# cvc.8) or, in older bundles, libopus.dll.a; MSVC's link reads either.
+find_path(CVC_OPUS_INCLUDE_DIR NAMES opus/opus.h)
+if(MSVC)
+  # The import library only: CMake's MSVC search would also take libopus.a for `opus`, and that
+  # MinGW-compiled archive calls ___chkstk_ms, which no MSVC link resolves.
+  find_library(CVC_OPUS_LIBRARY NAMES opus.lib libopus.dll.a NAMES_PER_DIR)
+else()
+  find_library(CVC_OPUS_LIBRARY NAMES opus)
+endif()
+set(CVC_HAVE_OPUS OFF)
+if(CVC_OPUS_INCLUDE_DIR AND CVC_OPUS_LIBRARY)
+  set(CVC_HAVE_OPUS ON)
+  if(NOT TARGET CvcOpus::opus)
+    add_library(CvcOpus::opus INTERFACE IMPORTED)
+    set_target_properties(CvcOpus::opus PROPERTIES
+      INTERFACE_INCLUDE_DIRECTORIES "${CVC_OPUS_INCLUDE_DIR}"
+      INTERFACE_LINK_LIBRARIES "${CVC_OPUS_LIBRARY}")
+  endif()
+  target_link_libraries(cvc PRIVATE CvcOpus::opus)
+  target_compile_definitions(cvc PRIVATE CVC_HAVE_OPUS=1)
+  message(STATUS "cvc::media: Opus mics with ${CVC_OPUS_LIBRARY}")
+else()
+  message(STATUS "cvc::media: no libopus - mics stay f32")
 endif()
 
 # Ariadne FTXUI terminal backend — OPTIONAL (roadmap §16.4). When FTXUI is

@@ -48,6 +48,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib> // std::getenv — the conference relay / room / name come from the environment
+#include <cstring> // std::memcpy — a peer's f32 mic chunk out of its payload
 #include <cvc/ariadne/app_runtime.h>
 #include <cvc/ariadne/doc_args.h>
 #include <cvc/ariadne/ftxui_backend.h>
@@ -82,6 +83,7 @@
 #include <cvc/gl/capture/camera_source.h> // list_cameras — camera picker
 #include <cvc/gl/playback/audio_output.h> // open_audio_output — play each peer's mic
 #include <cvc/media/media_frame.h>        // cvc::media_frame — the canonical media frame
+#include <cvc/media/media_opus.h>         // our mic in Opus, and peers' Opus mics decoded
 #include <cvc/state/state.h>              // cvc::state::instance — conference media state keys
 #include <cvc/state/state_cluster_shard.h>
 #include <cvc/state/state_device_key.h> // load_device_seed, state_device_signer
@@ -365,6 +367,9 @@ struct ConferenceSession {
     std::deque<vframe> vbuf; // buffered video frames awaiting their audio-synced display time
     double shown_pts = -1.0; // pts of the frame currently injected into video_proxy
     std::deque<std::vector<float>> achunks; // decoded f32 chunks awaiting the mixer
+    std::vector<float> apend;               // samples short of a whole mixer chunk
+    std::unique_ptr<cvc::opus_decoder> opus; // this peer's Opus mic (a decoder per peer: stateful)
+    std::int64_t opus_seq = -1;              // the last Opus packet's seq, for loss concealment
     double last_audio_pts = -1.0;           // world-clock stamp of this peer's last audio chunk
     double last_audio_wall = -1.0;          // now_wall_ when that chunk arrived (-1: none yet)
     bool has_audio = false; // video display follows this peer's audio clock while it is fresh
@@ -386,7 +391,8 @@ struct ConferenceSession {
   // uncertain and browsers cap AudioContexts, so one mixed sink works for any number of talkers.
   // mix_audio() pops one chunk from each peer per mixed chunk and sums them (silence for an empty
   // peer). mix_frames_ is the interleaved sample count of a chunk (all mics are
-  // 48k/1ch/1024-frame).
+  // 48k/1ch/1024-frame); each peer's audio is cut into chunks of that size, since an Opus packet
+  // is 20 ms (960 frames).
   std::unique_ptr<cvc::gl::playback::audio_output> mix_out_;
   int mix_rate_ = 0, mix_ch_ = 0;
   std::size_t mix_frames_ = 0;
@@ -408,6 +414,14 @@ struct ConferenceSession {
   static constexpr double kSendThreshold = 0.004;
   static constexpr double kSendHold = 0.8;
   double mic_send_until_ = 0.0; // wall s: send mic chunks until then
+  // Our mic in Opus, 32 kbit/s against f32's 1.5 Mbit/s, whenever this build has libopus.
+  static constexpr int kOpusBitrate = 32000;
+  static constexpr std::size_t kMixChunkFrames = 1024; // a mixer chunk when Opus sets the size
+  // A gap in a peer's audio this long (wall s) ends its talk spurt: the sender keeps sending
+  // kSendHold past its voice, so a hitch in delivery is shorter than this and keeps its samples.
+  static constexpr double kAudioGapS = 0.4;
+  std::unique_ptr<cvc::opus_encoder> mic_opus_;
+  std::int64_t mic_opus_seq_ = 0;
   bool video_off_ = false;      // our video.off leaf's value
   // Whether the user turned our camera off (the document's camera on/off toggle).
   bool camera_off() const {
@@ -1203,9 +1217,13 @@ struct ConferenceSession {
       if (rms > kSendThreshold)
         mic_send_until_ = now_wall_ + kSendHold;
       if (now_wall_ > mic_send_until_) {
+        if (mic_opus_)
+          mic_opus_->reset(); // the next talk spurt starts afresh
         p.last_seq = f.seq;
         return;
       }
+      if (send_opus(p, f, stamp))
+        return;
     }
     // A muted camera sends nothing: viewers show "camera off" from our video.off leaf.
     if (p.kind == "camera" && camera_off()) {
@@ -1227,6 +1245,63 @@ struct ConferenceSession {
     p.last_seq = f.seq;
   }
 
+  // Send mic chunk F as Opus packets, when this build has libopus and the encoder opens at the
+  // mic's rate (Opus has 8, 12, 16, 24 and 48 kHz). False: send it as f32.
+  bool send_opus(publisher &p, const cvc::ariadne::stream::frame &f, double stamp) {
+    if (!cvc::opus_available() || f.format.channels <= 0)
+      return false;
+    if (!mic_opus_ || mic_opus_->rate() != f.format.sample_rate ||
+        mic_opus_->channels() != f.format.channels)
+      mic_opus_ = std::make_unique<cvc::opus_encoder>(f.format.sample_rate, f.format.channels,
+                                                      kOpusBitrate);
+    if (!mic_opus_->valid())
+      return false;
+    const int frames = static_cast<int>(f.size / sizeof(float)) / f.format.channels;
+    for (cvc::opus_packet &pk :
+         mic_opus_->encode(reinterpret_cast<const float *>(f.data), frames)) {
+      cvc::media_frame mf;
+      mf.origin_node_id = pid_;
+      mf.stream_id = p.kind;
+      mf.codec = "opus";
+      mf.sample_rate = static_cast<std::uint32_t>(f.format.sample_rate);
+      mf.channels = static_cast<std::uint32_t>(f.format.channels);
+      mf.seq = mic_opus_seq_++; // packets, not chunks: a receiver reads a gap as a lost packet
+      mf.pts_seconds = stamp;
+      mf.payload = std::move(pk.bytes);
+      send_media_(mf);
+    }
+    p.last_seq = f.seq;
+    return true;
+  }
+
+  // Peer PM's Opus packet M as f32, after concealment for a packet or two lost before it.
+  static std::vector<float> decode_opus(peer_media &pm, const cvc::media_frame &m) {
+    const int rate = m.sample_rate > 0 ? static_cast<int>(m.sample_rate) : 48000;
+    const int ch = m.channels > 0 ? static_cast<int>(m.channels) : 1;
+    if (!pm.opus || pm.opus->rate() != rate || pm.opus->channels() != ch) {
+      pm.opus = std::make_unique<cvc::opus_decoder>(rate, ch);
+      pm.opus_seq = -1;
+    }
+    std::vector<float> out;
+    if (!pm.opus->valid()) {
+      static bool warned = false;
+      if (!warned)
+        std::fprintf(stderr, "arigl: a peer's mic is Opus, and this build has no libopus to "
+                             "decode it: that mic is silent here\n");
+      warned = true;
+      return out;
+    }
+    if (pm.opus_seq >= 0 && m.seq > pm.opus_seq + 1 && m.seq <= pm.opus_seq + 3)
+      for (std::int64_t lost = pm.opus_seq + 1; lost < m.seq; ++lost) {
+        const std::vector<float> c = pm.opus->conceal(rate / 50); // a 20 ms packet
+        out.insert(out.end(), c.begin(), c.end());
+      }
+    pm.opus_seq = m.seq;
+    const std::vector<float> d = pm.opus->decode(m.payload.data(), m.payload.size());
+    out.insert(out.end(), d.begin(), d.end());
+    return out;
+  }
+
   // Route each queued peer frame: mic -> a per-peer audio output (played immediately; its queue
   // depth is the A/V clock); camera -> a pts-ordered buffer + a lazily-opened decode proxy the tile
   // renders.
@@ -1241,9 +1316,16 @@ struct ConferenceSession {
         continue; // never play/show ourselves as a peer
       peer_media &pm = peers_[m.origin_node_id];
       if (m.stream_id == "mic") {
-        if (!m.payload.empty() && (m.payload.size() % sizeof(float)) == 0) {
-          const float *s = reinterpret_cast<const float *>(m.payload.data());
-          const std::size_t n = m.payload.size() / sizeof(float);
+        std::vector<float> pcm;
+        if (m.codec == "opus") {
+          pcm = decode_opus(pm, m);
+        } else if (!m.payload.empty() && (m.payload.size() % sizeof(float)) == 0) {
+          pcm.resize(m.payload.size() / sizeof(float));
+          std::memcpy(pcm.data(), m.payload.data(), m.payload.size());
+        }
+        if (!pcm.empty()) {
+          const float *s = pcm.data();
+          const std::size_t n = pcm.size();
           // Voice activity FIRST — a loud chunk holds the peer "talking" for kTalkHold seconds, for
           // the name highlight. Independent of the audio output below (which can fail to open with
           // no device), so "talking" works even where playback does not.
@@ -1265,11 +1347,21 @@ struct ConferenceSession {
               mix_out_.reset();
             }
           }
-          // Queue the chunk for the mixer (do NOT play per-peer — mix_audio() sums all peers).
+          // Queue the samples for the mixer in chunks of its size (do NOT play per-peer —
+          // mix_audio() sums all peers). After a gap (the peer stopped sending through a silence)
+          // the last spurt's remainder, its quiet tail, is dropped rather than led into the next.
           // Bound the backlog so a stuck mixer can't grow memory unbounded.
-          pm.achunks.emplace_back(s, s + n);
           if (mix_frames_ == 0)
-            mix_frames_ = n;
+            mix_frames_ = m.codec == "opus" ? kMixChunkFrames * (m.channels ? m.channels : 1u) : n;
+          if (pm.last_audio_wall >= 0.0 && now_wall_ - pm.last_audio_wall > kAudioGapS)
+            pm.apend.clear();
+          pm.apend.insert(pm.apend.end(), s, s + n);
+          std::size_t at = 0;
+          for (; pm.apend.size() - at >= mix_frames_; at += mix_frames_)
+            pm.achunks.emplace_back(pm.apend.begin() + static_cast<std::ptrdiff_t>(at),
+                                    pm.apend.begin() +
+                                        static_cast<std::ptrdiff_t>(at + mix_frames_));
+          pm.apend.erase(pm.apend.begin(), pm.apend.begin() + static_cast<std::ptrdiff_t>(at));
           while (pm.achunks.size() > 16)
             pm.achunks.pop_front();
         }

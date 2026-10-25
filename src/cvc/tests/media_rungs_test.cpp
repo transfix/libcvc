@@ -10,10 +10,13 @@
 
 // Per-viewer video rungs (media_rungs.h): the relay's JPEG downscale, and the shaper that sends
 // each viewer a camera at its rung -- as sent, smaller (one variant per frame and rung, shared),
-// at a thumbnail rate, or not at all.
+// at a thumbnail rate, or not at all. And the Opus codec the mics use (media_opus.h).
 
 #include <chrono>
+#include <cmath>
 #include <cstdint>
+#include <cstring>
+#include <cvc/media/media_opus.h>
 #include <cvc/media/media_rungs.h>
 #include <gtest/gtest.h>
 #include <string>
@@ -45,6 +48,22 @@ cvc::media_frame camera_frame(const std::string &origin, std::int64_t seq) {
   f.seq = seq;
   f.payload = camera_jpeg(320, 240);
   return f;
+}
+
+// N frames of a 440 Hz tone at 48 kHz mono, from sample START on, like a mic chunk.
+std::vector<float> tone(int start, int n) {
+  std::vector<float> s(static_cast<std::size_t>(n));
+  for (int i = 0; i < n; ++i)
+    s[static_cast<std::size_t>(i)] =
+        0.3f * static_cast<float>(std::sin(2.0 * 3.14159265358979 * 440.0 * (start + i) / 48000.0));
+  return s;
+}
+
+double rms(const std::vector<float> &s) {
+  double sum = 0.0;
+  for (float v : s)
+    sum += static_cast<double>(v) * v;
+  return s.empty() ? 0.0 : std::sqrt(sum / static_cast<double>(s.size()));
 }
 
 } // namespace
@@ -80,6 +99,20 @@ TEST(MediaRungs, AJpegIsDownscaledByHalvesAndShrinks) {
                                                                                      "DCT scale";
   const std::uint8_t junk[] = {1, 2, 3, 4};
   EXPECT_TRUE(cvc::jpeg_downscale(junk, sizeof(junk), 2, 50, w, h).empty()) << "not a JPEG";
+
+  // A header claiming 65535 x 65535 is refused before anything is allocated for it.
+  std::vector<std::uint8_t> huge = full;
+  bool patched = false;
+  for (std::size_t i = 0; i + 8 < huge.size(); ++i)
+    if (huge[i] == 0xFF && huge[i + 1] == 0xC0) { // SOF0: length(2) precision(1) height(2) width(2)
+      huge[i + 5] = huge[i + 6] = huge[i + 7] = huge[i + 8] = 0xFF;
+      patched = true;
+      break;
+    }
+  ASSERT_TRUE(patched) << "a baseline JPEG has an SOF0 marker";
+  EXPECT_TRUE(cvc::jpeg_downscale(huge.data(), huge.size(), 2, 50, w, h).empty());
+  // Nor does a bad frame spoil the next: the decoder it failed in is replaced.
+  EXPECT_EQ(cvc::jpeg_downscale(full.data(), full.size(), 2, 55, w, h).size(), half.size());
 }
 
 // Each viewer gets the camera at its rung. A smaller rung's variant is made once per frame and
@@ -133,10 +166,14 @@ TEST(MediaRungs, TheThumbRungPacesEachPublisher) {
   shaper.set_rung("v", cvc::video_rung::thumb);
   EXPECT_FALSE(shaper.shape(camera_frame("A", 1), "v").drop) << "the first goes";
   EXPECT_TRUE(shaper.shape(camera_frame("A", 2), "v").drop) << "the next, too soon, does not";
+  std::this_thread::sleep_for(std::chrono::milliseconds(170));
+  EXPECT_FALSE(shaper.shape(camera_frame("A", 3), "v").drop)
+      << "a little early still goes: an AOI-paced camera arrives with jitter";
+  EXPECT_TRUE(shaper.shape(camera_frame("A", 4), "v").drop);
   EXPECT_FALSE(shaper.shape(camera_frame("B", 1), "v").drop)
       << "another publisher has its own pace";
   std::this_thread::sleep_for(std::chrono::milliseconds(250));
-  const cvc::media_shape later = shaper.shape(camera_frame("A", 3), "v");
+  const cvc::media_shape later = shaper.shape(camera_frame("A", 5), "v");
   EXPECT_FALSE(later.drop) << "once the interval has passed";
   if (cvc::jpeg_transcode_available()) {
     ASSERT_NE(later.variant, nullptr);
@@ -144,4 +181,56 @@ TEST(MediaRungs, TheThumbRungPacesEachPublisher) {
   }
   shaper.forget_viewer("v");
   EXPECT_EQ(shaper.rung("v"), cvc::video_rung::full) << "a viewer that left is forgotten";
+}
+
+// The mic's 1024-frame chunks go out as 20 ms (960-frame) packets at speech size, and come back
+// as the same sound.
+TEST(MediaOpus, MicChunksRoundTripAsSmallPackets) {
+  if (!cvc::opus_available())
+    GTEST_SKIP() << "no libopus in this build";
+  cvc::opus_encoder enc(48000, 1, 32000);
+  cvc::opus_decoder dec(48000, 1);
+  ASSERT_TRUE(enc.valid());
+  ASSERT_TRUE(dec.valid());
+  std::vector<cvc::opus_packet> packets;
+  for (int c = 0; c < 15; ++c) { // 15 chunks = 15360 frames = 16 packets
+    const std::vector<float> chunk = tone(c * 1024, 1024);
+    for (cvc::opus_packet &p : enc.encode(chunk.data(), 1024))
+      packets.push_back(std::move(p));
+  }
+  ASSERT_EQ(packets.size(), 16u) << "a packet per 20 ms, the remainder kept for the next chunk";
+  std::size_t bytes = 0;
+  std::vector<float> out;
+  for (const cvc::opus_packet &p : packets) {
+    EXPECT_EQ(p.frames, 960);
+    bytes += p.bytes.size();
+    const std::vector<float> s = dec.decode(p.bytes.data(), p.bytes.size());
+    EXPECT_EQ(s.size(), 960u);
+    out.insert(out.end(), s.begin(), s.end());
+  }
+  EXPECT_LT(bytes / packets.size(), 200u) << "about 80 bytes a packet at 32 kbit/s, not 3840";
+  // Past the codec's warm-up, the tone comes back at its level.
+  const std::vector<float> tail(out.begin() + 4800, out.end());
+  EXPECT_NEAR(rms(tail), rms(tone(0, 9600)), 0.05);
+  EXPECT_TRUE(dec.decode(nullptr, 0).empty());
+  const std::uint8_t junk[] = {0xff, 0xff, 0xff};
+  EXPECT_TRUE(dec.decode(junk, sizeof(junk)).empty()) << "not a packet";
+  EXPECT_EQ(dec.conceal(960).size(), 960u) << "a lost packet's stand-in";
+}
+
+// reset() drops the remainder: a talk spurt does not begin with the end of the last.
+TEST(MediaOpus, AResetEncoderStartsAfresh) {
+  if (!cvc::opus_available())
+    GTEST_SKIP() << "no libopus in this build";
+  cvc::opus_encoder enc(48000, 1, 32000);
+  const std::vector<float> half = tone(0, 500);
+  EXPECT_TRUE(enc.encode(half.data(), 500).empty()) << "under 20 ms: waits";
+  enc.reset();
+  EXPECT_TRUE(enc.encode(half.data(), 500).empty()) << "500 + 500 would be a packet, 500 is not";
+  EXPECT_EQ(enc.encode(half.data(), 500).size(), 1u);
+}
+
+TEST(MediaOpus, AnEncoderOnlyOpensAtAnOpusRate) {
+  EXPECT_FALSE(cvc::opus_encoder(44100, 1, 32000).valid()) << "Opus has no 44.1 kHz";
+  EXPECT_FALSE(cvc::opus_decoder(44100, 1).valid());
 }

@@ -905,9 +905,23 @@ Each viewer's rung adapts to its link.
 - **Camera off is a flag, not frames.** A client with its camera off sends no frames at all and
   publishes `participants.<pid>.video.off`. Viewers then show "camera off" instead of freezing on the
   last frame they got.
-- **Audio next:** audio is not shaped yet; the mic is raw f32. Opus comes next, needing libopus for
-  native and wasm. With it the relay can re-encode a struggling viewer's audio at a lower bitrate,
-  as it does video.
+- **Opus mics.** A mic sent as raw f32 is 1.5 Mbit/s; in Opus at 32 kbit/s it is about 1/45 of
+  that (`cvc::opus_encoder` / `opus_decoder`, `media_opus.h`, over libopus).
+  - The sender re-chunks the mic's 1024-frame chunks into 20 ms (960-frame) packets, one
+    `media_frame` each (codec `opus`). Each packet gets its own `seq`, so a gap means a lost
+    packet. Silence suppression still applies, and a new talk spurt resets the encoder.
+  - A receiver decodes each peer with its own decoder, since Opus is stateful. It conceals up to
+    two lost packets, and cuts the result into mixer-sized chunks, because the mixer sums one chunk
+    per peer.
+  - The relay forwards a mic as sent, whatever its codec, so it needs no libopus. A client
+    without libopus sends f32, which every client plays. It cannot decode a peer's Opus, so it
+    logs once and that peer is silent to it. Older clients are not provided for; this is not
+    widely deployed.
+  - libopus is optional, found by header and library, as zstd is, because cvcpkg's autotools
+    bundles ship no CMake config. On Windows the MSVC build links the MinGW DLL's import library
+    (`opus.lib`, cvcpkg libopus cvc.8, or `libopus.dll.a`), never the MinGW `libopus.a`. The wasm
+    bundle is cy-pca/cvcpkg#467; the browser client needs it to hear Opus.
+  - Audio is not re-encoded per viewer: 32 kbit/s is already far below anything video sends.
 
 ---
 

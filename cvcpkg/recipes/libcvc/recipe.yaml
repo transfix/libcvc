@@ -231,6 +231,11 @@ depends:
       platforms: [linux, macos, windows]
     - name: log4cplus
       platforms: [linux, macos, windows]
+    # The conference's Opus mics (media_opus.h): without libopus every mic stays f32, 1.5 Mbit/s
+    # against 32 kbit/s. Linked from its shared library, so a runtime dep. wasm follows once its
+    # bundle is published (cy-pca/cvcpkg#467).
+    - name: libopus
+      platforms: [linux, macos, windows]
     - name: tiff
     - name: imagemagick
     # ImageMagick delegates + libtiff codecs. `cvcpkg install` installs each
