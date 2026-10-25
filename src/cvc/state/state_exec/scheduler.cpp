@@ -1,9 +1,11 @@
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/scheduler.h>
+#include <cvc/state/state_exec/state_value_codec.h> // snapshot / restore
 #include <stdexcept>
 
 namespace cvc::state_exec {
@@ -73,11 +75,77 @@ void scheduler::load_settings() {
     (*watch_root_)(base + ".limits.max_alloc_bytes").value(std::to_string(max_alloc_bytes_));
     (*watch_root_)(base + ".limits.heap_check_steps")
         .value(std::to_string(heap_options_.check_steps));
+    // Read live at every charge; this publishes what it is now.
+    const double rate = async_steps_per_cpu_ms_from_state(*watch_root_, id_);
+    publish_async_steps_per_cpu_ms(*watch_root_, id_, rate);
+    published_rate_ = rate;
     (*watch_root_)(base + ".policy")
         .value(policy_ == scheduling_policy::round_robin ? "round_robin"
                : policy_ == scheduling_policy::priority  ? "priority"
                                                          : "priority_rr");
   }
+}
+
+// A non-negative decimal number ("1000", "0.5", ".25"), read without the C locale's help; nullopt
+// for anything else.
+static std::optional<double> read_rate_setting(cvc::state *root, const std::string &path) {
+  auto *node = root->findDescendant(path);
+  if (!node)
+    return std::nullopt;
+  const std::string v = node->value();
+  double whole = 0.0, scale = 1.0;
+  bool digits = false, point = false;
+  for (const char c : v) {
+    if (c == '.' && !point) {
+      point = true;
+    } else if (c >= '0' && c <= '9') {
+      digits = true;
+      if (point) {
+        scale /= 10.0;
+        whole += scale * (c - '0');
+      } else {
+        whole = whole * 10.0 + (c - '0');
+      }
+    } else {
+      return std::nullopt;
+    }
+  }
+  return digits ? std::optional<double>(whole) : std::nullopt;
+}
+
+double async_steps_per_cpu_ms_from_state(cvc::state &root, const std::string &scheduler_id) {
+  constexpr const char *suffix = ".limits.async_steps_per_cpu_ms";
+  if (!scheduler_id.empty())
+    if (auto v = read_rate_setting(&root, std::string(scheduler::sched_prefix) + "." +
+                                              scheduler_id + suffix))
+      return *v;
+  if (auto v = read_rate_setting(&root, std::string(scheduler::defaults_prefix) + suffix))
+    return *v;
+  return kDefaultAsyncStepsPerCpuMs;
+}
+
+void publish_async_steps_per_cpu_ms(cvc::state &root, const std::string &scheduler_id,
+                                    double rate) {
+  if (scheduler_id.empty())
+    return;
+  char buf[32];
+  std::snprintf(buf, sizeof buf, "%.17g", rate);
+  root(std::string(scheduler::sched_prefix) + "." + scheduler_id +
+       ".effective.async_steps_per_cpu_ms")
+      .value(buf);
+}
+
+double scheduler::async_steps_per_cpu_ms(const process &proc) {
+  if (proc.async_steps_per_cpu_ms)
+    return *proc.async_steps_per_cpu_ms;
+  if (!watch_root_)
+    return kDefaultAsyncStepsPerCpuMs;
+  const double rate = async_steps_per_cpu_ms_from_state(*watch_root_, id_);
+  if (!id_.empty() && rate != published_rate_) {
+    publish_async_steps_per_cpu_ms(*watch_root_, id_, rate);
+    published_rate_ = rate;
+  }
+  return rate;
 }
 
 uint64_t max_alloc_bytes_from_state(cvc::state &root, const std::string &scheduler_id,
@@ -98,6 +166,7 @@ uint64_t max_alloc_bytes_from_state(cvc::state &root, const std::string &schedul
 // ---------------------------------------------------------------------------
 
 int scheduler::execute(const std::string &script, const execute_options &opts) {
+  detail::check_not_in_async_kernel("scheduler::execute");
   int pid = next_pid_++;
   process proc;
   proc.pid = pid;
@@ -113,6 +182,8 @@ int scheduler::execute(const std::string &script, const execute_options &opts) {
   proc.max_memory = opts.max_memory;
   proc.max_messages = opts.max_messages;
   proc.max_message_bytes = opts.max_message_bytes;
+  if (opts.async_steps_per_cpu_ms && *opts.async_steps_per_cpu_ms >= 0.0)
+    proc.async_steps_per_cpu_ms = opts.async_steps_per_cpu_ms;
   proc.max_alloc_bytes = max_alloc_bytes_;
   proc.heap_check_steps = heap_options_.check_steps;
   proc.signal_handlers = opts.signal_handlers;
@@ -126,6 +197,7 @@ int scheduler::execute(const std::string &script, const execute_options &opts) {
 }
 
 int scheduler::execute(const value_t &expr, const execute_options &opts) {
+  detail::check_not_in_async_kernel("scheduler::execute");
   int pid = next_pid_++;
   process proc;
   proc.pid = pid;
@@ -141,6 +213,8 @@ int scheduler::execute(const value_t &expr, const execute_options &opts) {
   proc.max_memory = opts.max_memory;
   proc.max_messages = opts.max_messages;
   proc.max_message_bytes = opts.max_message_bytes;
+  if (opts.async_steps_per_cpu_ms && *opts.async_steps_per_cpu_ms >= 0.0)
+    proc.async_steps_per_cpu_ms = opts.async_steps_per_cpu_ms;
   proc.max_alloc_bytes = max_alloc_bytes_;
   proc.heap_check_steps = heap_options_.check_steps;
   proc.signal_handlers = opts.signal_handlers;
@@ -259,6 +333,9 @@ void scheduler::execute_process_step(process &proc) {
   // 2. Mark as running and track timing
   proc.status = process_status::running;
   proc.last_run_start = std::chrono::steady_clock::now();
+  // Async calls run inline in the step (3.5) and are charged as calls (3.8), not as the step.
+  proc.step_async_wall = 0.0;
+  proc.step_async_cpu = 0.0;
 
   // 3. Execute one evaluation step, bounded by the process's remaining time budget.
   // A single step may enter an uncapped nested evaluator (a defclass method body) or a
@@ -322,9 +399,9 @@ void scheduler::execute_process_step(process &proc) {
   auto now = std::chrono::steady_clock::now();
   const double step_seconds = std::chrono::duration<double>(now - proc.last_run_start).count();
   proc.accumulated_time += step_seconds;
-  proc.state.stats.add_step_time(step_seconds);
+  proc.state.stats.add_step_time(step_seconds - proc.step_async_wall);
   if (charge_cpu)
-    proc.charge_cpu_time(thread_cpu_seconds() - cpu0);
+    proc.charge_cpu_time(std::max(0.0, thread_cpu_seconds() - cpu0 - proc.step_async_cpu));
   // Heap accounting: take a finished measurement, start the next when due (heap.h).
   if (proc.max_memory > 0 || proc.state.heap_measured)
     heap_after_step(proc, step_alloc ? step_alloc->allocated() : 0,
@@ -355,6 +432,7 @@ void scheduler::execute_process_step(process &proc) {
 }
 
 int scheduler::step() {
+  detail::check_not_in_async_kernel("scheduler::step");
   // Wake sleeping processes whose deadline has passed.
   wake_sleeping_processes();
 
@@ -471,6 +549,14 @@ void scheduler::wake_sleeping_processes() {
   for (auto &[pid, proc] : processes_) {
     if (proc->status == process_status::waiting && proc->wake_time && now >= *proc->wake_time) {
       proc->wake_time.reset();
+      proc->status = process_status::ready;
+    }
+    // A timed wait ((await f seconds)) that ran out: the waiting call raises TimeoutError.
+    if (proc->status == process_status::waiting && proc->recv_path && proc->recv_deadline &&
+        now >= *proc->recv_deadline) {
+      proc->recv_path.reset();
+      proc->recv_deadline.reset();
+      expire_await(proc->state);
       proc->status = process_status::ready;
     }
   }
@@ -706,6 +792,7 @@ bool scheduler::yield_frame(int /*pid*/) {
 }
 
 bool scheduler::receive_message(int pid, const std::string &path) {
+  detail::check_not_in_async_kernel("scheduler::receive_message");
   auto it = processes_.find(pid);
   if (it == processes_.end())
     return false;
@@ -717,18 +804,33 @@ bool scheduler::receive_message(int pid, const std::string &path) {
     proc.accumulated_time += std::chrono::duration<double>(now - proc.last_run_start).count();
   }
   proc.recv_path = path;
+  proc.recv_deadline.reset();
   proc.status = process_status::waiting;
   return true;
 }
 
+bool scheduler::receive_message_until(int pid, const std::string &path, double seconds) {
+  if (!receive_message(pid, path))
+    return false;
+  processes_.at(pid)->recv_deadline =
+      std::chrono::steady_clock::now() +
+      std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+          std::chrono::duration<double>(std::max(0.0, seconds)));
+  return true;
+}
+
 int scheduler::deliver_to_receivers(const std::string &path, const value_t &msg) {
+  detail::check_not_in_async_kernel("scheduler::deliver_to_receivers");
   int woken = 0;
   for (auto &[pid, proc] : processes_) {
     if (proc->status == process_status::waiting && proc->recv_path && *proc->recv_path == path) {
       proc->recv_path.reset();
+      proc->recv_deadline.reset();
       proc->state.result = msg;
-      // Patch the nil placeholder that msg-recv left in the parent frame.
-      if (!proc->state.stack.empty() && !proc->state.stack.back().results.empty())
+      // A call parked in the await_call phase takes the message; otherwise patch the nil
+      // placeholder that msg-recv left in the parent frame.
+      if (!deliver_await(proc->state, msg) && !proc->state.stack.empty() &&
+          !proc->state.stack.back().results.empty())
         proc->state.stack.back().results.back() = msg;
       proc->status = process_status::ready;
       ++woken;
@@ -769,6 +871,7 @@ std::size_t scheduler::total_pending_messages() const {
 }
 
 bool scheduler::kill(int pid) {
+  detail::check_not_in_async_kernel("scheduler::kill");
   auto it = processes_.find(pid);
   if (it == processes_.end())
     return false;
@@ -777,6 +880,34 @@ bool scheduler::kill(int pid) {
     return false;
   kill_process(proc, "killed_by_user");
   return true;
+}
+
+int scheduler::restore(process_ptr proc) {
+  const int pid = next_pid_++;
+  proc->pid = pid;
+  if (!is_finished(proc->status))
+    proc->status = process_status::ready;
+  proc->wake_time.reset();
+  proc->recv_path.reset();
+  proc->recv_deadline.reset();
+  proc->awaiting_frame = false;
+  proc->create_time = std::chrono::steady_clock::now();
+  processes_.emplace(pid, std::move(proc));
+  return pid;
+}
+
+bool scheduler::snapshot(int pid, cvc::state &node) const {
+  const auto it = processes_.find(pid);
+  if (it == processes_.end())
+    return false;
+  encode_process(node, *it->second);
+  return true;
+}
+
+int scheduler::restore(cvc::state &node, environment_ptr natives) {
+  process_ptr proc = decode_process(node);
+  rebind_natives(proc->state, natives);
+  return restore(std::move(proc));
 }
 
 int scheduler::fork(int pid) {
@@ -908,6 +1039,7 @@ process_info scheduler::make_info(const process &proc) const {
   info.peak_memory = mem_tracker_.peak_bytes(proc.pid);
   info.heap_memory = proc.heap_bytes;
   info.heap_measurements = proc.heap_measurements;
+  fill_async_usage(info, proc);
   info.max_memory = proc.max_memory;
   info.max_time = proc.max_time;
   info.message_count = proc.message_count;

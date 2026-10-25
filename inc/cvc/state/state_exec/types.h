@@ -297,10 +297,14 @@ bool values_equal(const value_t &a, const value_t &b);
 
 /// Seconds of CPU time the calling thread has used: time it ran, not time it waited to run
 /// (though in a virtual machine whose kernel does not account steal time, time the hypervisor
-/// takes from the virtual CPU the thread is on still counts). CLOCK_THREAD_CPUTIME_ID where
-/// POSIX has it (Linux, macOS), a system call, so it is read sparingly. Elsewhere it is the
-/// steady clock -- on Windows too, whose per-thread CPU times advance only at the ~15.6 ms
-/// scheduler tick, too coarse for millisecond budgets.
+/// takes from the virtual CPU the thread is on still counts). A system call, so it is read
+/// sparingly:
+/// - Linux and macOS: CLOCK_THREAD_CPUTIME_ID.
+/// - Windows: QueryThreadCycleTime, the thread's cycles on the time-stamp counter, converted at
+///   the counter's rate, measured once (the first call takes about 5 ms). Where the counter's
+///   rate isn't constant (no invariant TSC) or there is none (ARM64), GetThreadTimes, in 100 ns
+///   units that advance at the ~15.6 ms scheduler tick.
+/// - Elsewhere: the steady clock.
 double thread_cpu_seconds();
 
 /// A time budget charged to work the OS may deschedule. Its first half is charged on the
@@ -452,6 +456,36 @@ void eval_alloc_check(std::size_t bytes, const char *who);
 /// Report `bytes` a native allocated without a limit check (a copy no bigger than an argument,
 /// such as cons or slice), for heap accounting only.
 void eval_alloc_note(std::size_t bytes);
+
+// -- async kernels (docs/STATE_EXEC_EXCEPTIONS.md 3.7) ------------------------
+//
+// An async function's kernel runs off the scheduler's timeline, so it must not touch the
+// evaluator, a scheduler or a DSL value the program holds. The host marks the threads that run a
+// kernel (its executor thread, its fan-out chunks, and the step an inline kernel runs in), and
+// the evaluators and the schedulers' entry points check, throwing std::logic_error. (The check is
+// always on: NDEBUG can't tell a debug build here, the mesher defines it for every build type.)
+// The state tree isn't checked: Ariadne's (fetch "state://...") resolves on its kernel, by
+// design, pinning the nodes it reads.
+
+/// Whether this thread is running an async function's kernel now.
+bool in_async_kernel();
+
+namespace detail {
+/// RAII: mark this thread as running a kernel (`running`) or not, while alive.
+class async_kernel_scope {
+public:
+  explicit async_kernel_scope(bool running);
+  ~async_kernel_scope();
+  async_kernel_scope(const async_kernel_scope &) = delete;
+  async_kernel_scope &operator=(const async_kernel_scope &) = delete;
+
+private:
+  bool outer_;
+};
+
+/// Throw std::logic_error naming `what` when this thread runs a kernel.
+void check_not_in_async_kernel(const char *what);
+} // namespace detail
 
 /// `count * each`, saturating at SIZE_MAX, for size estimates that must not wrap.
 inline std::size_t alloc_bytes(std::size_t count, std::size_t each) {

@@ -370,7 +370,141 @@ environment_ptr bind_closure_args(const closure_ptr &cls, std::span<const value_
   }
   return local;
 }
+
+// -- parking at a call (docs/STATE_EXEC_EXCEPTIONS.md 3.9) ------------------------------------
+
+// Evaluator steps running on this thread: only the outermost one's calls can park, since a
+// scheduler delivers to the process's own state, not to a generator's or a nested evaluator's.
+thread_local int t_step_depth = 0;
+thread_local bool t_park_forbidden = false;
+
+struct step_depth_guard {
+  step_depth_guard() { ++t_step_depth; }
+  ~step_depth_guard() { --t_step_depth; }
+  step_depth_guard(const step_depth_guard &) = delete;
+  step_depth_guard &operator=(const step_depth_guard &) = delete;
+};
+
+// Armed around a native call the evaluator makes at its own level: the park the call asks for
+// (request_await), if any.
+struct await_slot {
+  await_slot();
+  ~await_slot();
+  await_slot(const await_slot &) = delete;
+  await_slot &operator=(const await_slot &) = delete;
+
+  await_slot *outer;
+  bool enabled;      // the outermost evaluator step on this thread
+  std::size_t depth; // the native nesting of the call itself
+  std::optional<detail::await_request> request;
+};
+
+thread_local await_slot *t_await = nullptr;
+
+await_slot::await_slot()
+    : outer(t_await), enabled(t_step_depth == 1), depth(detail::native_nesting::depth()) {
+  t_await = this;
+}
+
+await_slot::~await_slot() { t_await = outer; }
+
+// An await_call frame keeps
+//   extra_strs  = {the channel its process waits on, the function's name, "retry" or "",
+//                  the retried call's slot or ""},
+//   extra_vals  = {the handle of what it waits for (nil: a channel)},
+//   extra_lists = {the call's arguments},
+// and index 0 while it waits, 1 once delivered to (results = {what was}), 2 once timed out.
+enum await_slot_index : std::size_t { await_channel, await_function, await_retry, await_item };
+
+void begin_await(eval_frame &frame, detail::await_request r) {
+  frame.phase = eval_phase::await_call;
+  frame.index = 0;
+  frame.extra_lists.assign(1, std::move(frame.results));
+  frame.results.clear();
+  frame.extra_vals.assign(1, std::move(r.handle));
+  frame.extra_strs = {std::move(r.channel), std::move(r.function),
+                      r.retry ? std::string("retry") : std::string(),
+                      r.slot ? std::to_string(*r.slot) : std::string()};
+  frame.extra_env = nullptr;
+  if (r.ready) {
+    frame.results.assign(1, std::move(*r.ready));
+    frame.index = 1;
+  }
+}
+
+// A native call a job made (or the value a job's work feeds to another job) parked: its
+// await_call frame goes on top, as a DSL function the job called would, and its value arrives on
+// the frame waiting on the job.
+void push_await(evaluator_state &state, detail::await_request r, std::span<const value_t> args) {
+  std::vector<value_t> call;
+  call.reserve(1 + args.size());
+  call.emplace_back(symbol{r.function});
+  call.insert(call.end(), args.begin(), args.end());
+  eval_frame frame{.expr = make_list(std::move(call)),
+                   .env = state.stack.empty() ? nullptr : state.stack.back().env};
+  frame.results.assign(args.begin(), args.end());
+  begin_await(frame, std::move(r));
+  state.stack.push_back(std::move(frame));
+}
 } // namespace
+
+bool can_await() {
+  const await_slot *slot = t_await;
+  return slot && slot->enabled && !slot->request && !t_park_forbidden &&
+         detail::native_nesting::depth() == slot->depth;
+}
+
+void request_await(detail::await_request r) {
+  if (!can_await())
+    throw std::logic_error("request_await: " + r.function + " can't park its process here");
+  t_await->request = std::move(r);
+}
+
+bool parking_forbidden() { return t_park_forbidden; }
+
+park_forbidden_scope::park_forbidden_scope() : outer_(t_park_forbidden) { t_park_forbidden = true; }
+
+park_forbidden_scope::~park_forbidden_scope() { t_park_forbidden = outer_; }
+
+bool deliver_await(evaluator_state &st, value_t msg) {
+  if (st.stack.empty() || st.stack.back().phase != eval_phase::await_call)
+    return false;
+  eval_frame &frame = st.stack.back();
+  frame.results.assign(1, std::move(msg));
+  frame.index = 1;
+  return true;
+}
+
+bool expire_await(evaluator_state &st) {
+  if (st.stack.empty() || st.stack.back().phase != eval_phase::await_call)
+    return false;
+  st.stack.back().index = 2;
+  return true;
+}
+
+value_t detail::make_awaitable_handle(std::shared_ptr<awaitable> a) {
+  auto obj = std::make_shared<data_object>();
+  obj->type_name = kAwaitableType;
+  obj->payload = std::move(a);
+  return value_t(std::move(obj));
+}
+
+value_t detail::awaited_value(value_t v) { return make_dict({{"__awaited__", std::move(v)}}); }
+
+const value_t *detail::awaited_of(const value_t &v) {
+  const auto *d = std::get_if<dict_ptr>(&v.v);
+  if (!d || !*d || (*d)->size() != 1 || (*d)->front().first != "__awaited__")
+    return nullptr;
+  return &(*d)->front().second;
+}
+
+std::shared_ptr<detail::awaitable> detail::awaitable_of(const value_t &handle) {
+  const auto *obj = std::get_if<data_object_ptr>(&handle.v);
+  if (!obj || !*obj || (*obj)->type_name != kAwaitableType)
+    return nullptr;
+  const auto *a = boost::any_cast<std::shared_ptr<awaitable>>(&(*obj)->payload);
+  return a ? *a : nullptr;
+}
 
 // Run a slice of the deep-data work a step left, making the calls its job needs: a native
 // function here, at the evaluator's own level (a native call a native function made from deeper
@@ -414,9 +548,18 @@ bool stackless_evaluator::step_data(evaluator_state &state) {
       throw dsl_error("TypeError",
                       std::string(call->who) + ": not a function: " + call->fn->type_name());
     value_t value;
+    await_slot parked;
     {
       native_call_scope scope(data);
       value = (*fn)(call->args);
+    }
+    if (parked.request) {
+      // The function parked: its frame waits on top, and its value is the call's.
+      if (data)
+        data->take_deferred();
+      work->calling = true;
+      push_await(state, std::move(*parked.request), call->args);
+      return false;
     }
     if (auto deferred = data ? data->take_deferred() : nullptr) {
       // The function left deep-data work of its own (a call of its own, say): it runs first, and
@@ -447,8 +590,22 @@ bool stackless_evaluator::step_data(evaluator_state &state) {
     return false;
   }
   if (work->then) {
-    native_call_scope call(data); // `then` may end in another job
+    native_call_scope call(data); // `then` may end in another job, or park
+    await_slot parked;
     result = work->then(std::move(result));
+    if (parked.request) {
+      if (data)
+        data->take_deferred();
+      if (work->feeds_outer) {
+        // The call outer's job made parked: its frame waits on top for the job, as a DSL
+        // function the job called would.
+        work->outer->calling = true;
+        push_await(state, std::move(*parked.request), {});
+      } else {
+        begin_await(state.stack.back(), std::move(*parked.request)); // the frame waiting on it
+      }
+      return false;
+    }
     if (auto deferred = data ? data->take_deferred() : nullptr) {
       await_deferred(state, std::move(*deferred), work->base, work->frame_args, work->outer,
                      work->feeds_outer);
@@ -476,7 +633,9 @@ void stackless_evaluator::begin_expansion(evaluator_state &state, value_t expans
 }
 
 bool stackless_evaluator::step(evaluator_state &state) {
+  detail::check_not_in_async_kernel("stackless_evaluator::step");
   check_interrupted();
+  const step_depth_guard depth;
   if (state.uncaught)
     rethrow_uncaught(state);
   if (state.data_step_nodes > 0 && !state.backlog)
@@ -588,6 +747,9 @@ void stackless_evaluator::step_frame(evaluator_state &state) {
     break;
   case eval_phase::raise_value:
     step_raise_value(state, frame);
+    break;
+  case eval_phase::await_call:
+    step_await_call(state, frame);
     break;
   }
 }
@@ -1089,9 +1251,17 @@ void stackless_evaluator::apply_native(evaluator_state &state, eval_frame &frame
                                        const native_fn &fn, std::span<const value_t> args) {
   detail::data_step_scope *data = detail::data_step_scope::current();
   value_t result;
+  await_slot parked;
   {
     native_call_scope call(data);
     result = fn(args);
+  }
+  if (parked.request) {
+    // The call parked its process: this frame waits for what its scheduler delivers.
+    if (data)
+      data->take_deferred();
+    begin_await(frame, std::move(*parked.request));
+    return;
   }
   if (auto deferred = data ? data->take_deferred() : nullptr) {
     // The call left deep-data work: this frame waits while step_data() runs it.
@@ -1369,6 +1539,50 @@ void stackless_evaluator::step_raise_value(evaluator_state & /*state*/, eval_fra
 // ---------------------------------------------------------------------------
 // step: eval
 // ---------------------------------------------------------------------------
+
+void stackless_evaluator::step_await_call(evaluator_state &state, eval_frame &frame) {
+  const std::string function = frame.extra_strs[await_function];
+  const std::shared_ptr<detail::awaitable> awaited = detail::awaitable_of(frame.extra_vals[0]);
+  const std::vector<std::pair<std::string, value_t>> fields = {{"function", value_t(function)}};
+  if (frame.index == 2)
+    throw dsl_error("TimeoutError", function + ": no result within the time it was given", "async",
+                    fields);
+  const bool on_channel = frame.extra_vals[0].is_nil();
+  if (frame.index == 0 && !on_channel && !(awaited && awaited->finished()))
+    // Stepped while it waits: a process restored from a snapshot, whose call is gone.
+    throw dsl_error("RuntimeError",
+                    function + ": the call can't resume (the process was restored from a snapshot "
+                               "while it waited)",
+                    "async", fields);
+  // Stepped while it waits on a channel (restored from a snapshot): apply the call again, and it
+  // waits again.
+  const bool again = frame.index == 0 && on_channel;
+  if (again || frame.extra_strs[await_retry] == "retry") {
+    if (frame.index == 1 && frame.extra_strs.size() > await_item &&
+        !frame.extra_strs[await_item].empty()) {
+      // What was delivered takes its item's place in the call's list, as itself.
+      std::vector<value_t> &args = frame.extra_lists[0];
+      const std::size_t item = std::stoul(frame.extra_strs[await_item]);
+      const list_ptr *lp = args.empty() ? nullptr : std::get_if<list_ptr>(&args[0].v);
+      if (!lp || !*lp || item >= (*lp)->size())
+        throw std::logic_error(function + ": the retried call's list has no item " +
+                               frame.extra_strs[await_item]);
+      std::vector<value_t> items = **lp;
+      items[item] = detail::awaited_value(std::move(frame.results[0]));
+      args[0] = make_list(std::move(items));
+    }
+    // Apply the call again, with the same arguments.
+    frame.phase = eval_phase::apply;
+    frame.index = 0;
+    frame.results = std::move(frame.extra_lists[0]);
+    frame.extra_lists.clear();
+    frame.extra_vals.clear();
+    frame.extra_strs.clear();
+    return;
+  }
+  value_t value = awaited ? awaited->outcome() : std::move(frame.results[0]);
+  pop_frame(state, std::move(value));
+}
 
 void stackless_evaluator::step_eval_inner(evaluator_state &state, eval_frame &frame) {
   value_t code = frame.results.back();

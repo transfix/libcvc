@@ -1481,6 +1481,7 @@ class AsyncStateObserver(state_observer):
 // settings (data_options, data_options_from_state, "Deep data on the
 // executor") are wrapped the same way as the parser settings.
 %{
+#include <cvc/state/state_exec/async_host.h>
 #include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/data_job.h>
@@ -2588,14 +2589,16 @@ PYCVC_STATE_EXEC_ENUM(cvc::state_exec::resource_policy::mode, pycvc_enum_resourc
          {"try_body", static_cast<int>(eval_phase::try_body)},
          {"try_handler", static_cast<int>(eval_phase::try_handler)},
          {"try_finally", static_cast<int>(eval_phase::try_finally)},
-         {"raise_value", static_cast<int>(eval_phase::raise_value)}});
+         {"raise_value", static_cast<int>(eval_phase::raise_value)},
+         {"await_call", static_cast<int>(eval_phase::await_call)}});
     if (pycvc_enum_eval_phase != NULL)
       PyDict_SetItemString(d, "eval_phase", pycvc_enum_eval_phase);
     using cvc::state_exec::step_kind;
     pycvc_enum_step_kind =
         pycvc_make_int_enum("step_kind", {{"eval", static_cast<int>(step_kind::eval)},
                                           {"read", static_cast<int>(step_kind::read)},
-                                          {"data", static_cast<int>(step_kind::data)}});
+                                          {"data", static_cast<int>(step_kind::data)},
+                                          {"async", static_cast<int>(step_kind::async)}});
     if (pycvc_enum_step_kind != NULL)
       PyDict_SetItemString(d, "step_kind", pycvc_enum_step_kind);
     using rp_mode = cvc::state_exec::resource_policy::mode;
@@ -3106,6 +3109,7 @@ public:
   void mark_complete();
   void increment_step();
   void increment_step(step_kind kind);
+  void add_steps(step_kind kind, unsigned long long n);
   unsigned long long get_step_count() const;
   unsigned long long steps(step_kind kind) const;
   step_kind last_step_kind() const;
@@ -3282,6 +3286,29 @@ struct execute_options {
 }
 %enddef
 PYCVC_STATE_EXEC_ON_COMPLETE(execute_options)
+// async_steps_per_cpu_ms is a float, or None (unset: the tree's limits.async_steps_per_cpu_ms).
+%extend execute_options {
+  PyObject *_async_steps_get() const {
+    if (!$self->async_steps_per_cpu_ms)
+      Py_RETURN_NONE;
+    return PyFloat_FromDouble(*$self->async_steps_per_cpu_ms);
+  }
+  void _async_steps_set(PyObject *rate) {
+    if (rate == Py_None) {
+      $self->async_steps_per_cpu_ms.reset();
+      return;
+    }
+    const double v = PyFloat_AsDouble(rate);
+    if (v == -1.0 && PyErr_Occurred()) {
+      PyErr_Clear();
+      throw std::invalid_argument("execute_options.async_steps_per_cpu_ms: a number or None");
+    }
+    $self->async_steps_per_cpu_ms = v;
+  }
+  %pythoncode %{
+    async_steps_per_cpu_ms = property(_async_steps_get, _async_steps_set)
+  %}
+}
 
 struct process_info {
   int pid;
@@ -3312,6 +3339,12 @@ struct process_info {
   // The measured heap share (#667, heap.h), which max_memory covers too.
   unsigned long long heap_memory;
   unsigned long long heap_measurements;
+  unsigned long long heap_alloc_bytes;
+  // What its async calls were charged (docs/STATE_EXEC_EXCEPTIONS.md 3.8).
+  unsigned long long async_calls;
+  double async_time;
+  double async_cpu_time;
+  unsigned long long async_steps;
   // Why it ended, if not normally: the kill reason, or a failed process's "Class: message".
   std::optional<std::string> exit_error;
 };
@@ -3415,6 +3448,11 @@ struct process {
   unsigned long long heap_measurements;
   size_t heap_check_steps;
   bool heap_measuring;
+  // What its async calls were charged (docs/STATE_EXEC_EXCEPTIONS.md 3.8).
+  unsigned long long async_calls;
+  double async_time;
+  double async_cpu_time;
+  unsigned long long async_steps;
   bool heap_measure_due(unsigned long long state_bytes) const;
   void release_state();
   double elapsed_time() const;
@@ -3478,6 +3516,7 @@ class scheduler_base {};
   bool sleep(int pid, double seconds);
   bool yield_frame(int pid);
   bool receive_message(int pid, const std::string &path);
+  bool receive_message_until(int pid, const std::string &path, double seconds);
   int deliver_to_receivers(const std::string &path, const value_t &msg);
   size_t pending_message_count(const std::string &path) const;
   size_t total_pending_messages() const;
@@ -3502,6 +3541,10 @@ class scheduler_base {};
   void register_watch_handler(int pid, int watch_id, value_t handler, const std::string &path);
   void unregister_watch_handler(int pid, int watch_id);
   void set_watch_root(cvc::state *root);
+  double async_steps_per_cpu_ms(const process &proc);
+  int restore(process_ptr proc);
+  bool snapshot(int pid, cvc::state &node) const;
+  int restore(cvc::state &node, environment_ptr natives = nullptr);
 %enddef
 
 // get_result and pop_pending_message raise KeyError(pid / path) where C++ returns std::nullopt.
@@ -3565,6 +3608,9 @@ public:
   int wake_awaiting();
   void post_message(const std::string &path, const value_t &msg);
   void drain_ingress();
+  size_t async_calls_in_flight() const;
+  void set_id(const std::string &id);
+  std::string id() const;
   bool reap(int pid);
   void set_parser_defaults(const parse_options &defaults);
   parse_options parser_defaults() const;
@@ -3575,6 +3621,82 @@ public:
   static data_options host_data_defaults();
 };
 PYCVC_STATE_EXEC_SCHEDULER_EXTEND(async_scheduler)
+const double kDefaultAsyncStepsPerCpuMs = 2000.0;
+double async_steps_per_cpu_ms_from_state(cvc::state &root, const std::string &scheduler_id);
+void publish_async_steps_per_cpu_ms(cvc::state &root, const std::string &scheduler_id,
+                                    double rate);
+
+// A process snapshot with its budget so far (docs/STATE_EXEC_EXCEPTIONS.md 3.8), for a
+// scheduler's restore().
+void encode_process(cvc::state &node, const process &proc);
+process_ptr decode_process(cvc::state &node);
+void rebind_natives(evaluator_state &st, const environment_ptr &natives);
+
+// ── async functions (docs/STATE_EXEC_EXCEPTIONS.md 3) ──
+// async_host() runs kernels inline with no scheduler (a bare evaluator's: its steps only);
+// async_host(scheduler) runs kernels inline, charged to the scheduler's processes;
+// async_host(async_scheduler, app) parks the calling process while a kernel runs on the app's
+// background task pool (without an app, inline). It keeps the scheduler (and app) alive; destroy
+// it (or shutdown()) before them. Exec.async_host() is an Exec's. shutdown() and wait_idle()
+// release the GIL while they wait. (These directives come before the declaration they apply to.)
+// Inside this namespace block, a feature names its declaration relative to it.
+%pythonappend async_host::async_host %{
+  self._pycvc_refs = args
+%}
+PYCVC_STATE_EXEC_NOGIL(async_host::shutdown)
+PYCVC_STATE_EXEC_NOGIL(async_host::wait_idle)
+// Destroying a host shuts it down, which waits for its kernels: without the GIL, which a Python
+// kernel needs to finish.
+PYCVC_STATE_EXEC_NOGIL(async_host::~async_host)
+%nodefaultctor async_host;
+class async_host {
+public:
+  void shutdown();
+  void wait_idle();
+  size_t in_flight() const;
+};
+%extend async_host {
+  async_host() { return new cvc::state_exec::async_host(); }
+  async_host(scheduler *sched) { return new cvc::state_exec::async_host(sched); }
+  async_host(async_scheduler *sched, std::shared_ptr<cvc::app> app = nullptr) {
+    if (!sched)
+      throw std::invalid_argument("pycvc.async_host: scheduler is None");
+    return new cvc::state_exec::async_host(*sched, app.get());
+  }
+}
+
+// register_async_fn(env, host, name, fn, executor="background", timeout=None, future_variant=True):
+// fn, a Python callable, is the kernel: it runs on an executor thread with copies of the
+// arguments, taking the GIL for its call, and its value or exception is the call's
+// (docs/STATE_EXEC_EXCEPTIONS.md 3.2). executor is "background" (the app's background task pool;
+// "compute" means the same), "inline", or "lane:<name>"; timeout is seconds.
+%extend builtins {
+  static void register_async_fn(environment_ptr env, cvc::state_exec::async_host &host,
+                                const std::string &name, PyObject *fn,
+                                const std::string &executor = "background",
+                                std::optional<double> timeout = std::nullopt,
+                                bool future_variant = true) {
+    namespace se = cvc::state_exec;
+    if (!env)
+      throw std::invalid_argument("pycvc.builtins.register_async_fn: env is None");
+    se::async_options opts;
+    if (executor == "background" || executor == "compute")
+      opts.where = se::executor::background();
+    else if (executor == "inline")
+      opts.where = se::executor::inline_call();
+    else if (executor.rfind("lane:", 0) == 0 && executor.size() > 5)
+      opts.where = se::executor::on_lane(executor.substr(5));
+    else
+      throw std::invalid_argument("pycvc.builtins.register_async_fn: executor must be "
+                                  "\"background\", \"inline\" or \"lane:<name>\", not \"" +
+                                  executor + "\"");
+    opts.timeout = timeout;
+    opts.future_variant = future_variant;
+    se::register_async_fn(env, host, name,
+                          pycvc::python_async_marshal("pycvc.builtins.register_async_fn", name, fn),
+                          std::move(opts));
+  }
+}
 
 // ── resource_policy ──
 // mode is pycvc.resource_policy.mode, an IntEnum. validate_limits raises RuntimeError for
@@ -3863,6 +3985,10 @@ def register_intrinsics(env, ctx):
 
 // Exec.scheduler() returns a reference into the Exec, so the scheduler keeps the Exec alive.
 %pythonappend pycvc::Exec::scheduler %{
+  val._pycvc_exec = self
+%}
+// So does Exec.async_host().
+%pythonappend pycvc::Exec::async_host %{
   val._pycvc_exec = self
 %}
 

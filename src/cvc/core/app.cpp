@@ -29,6 +29,7 @@
 #include <cvc/core/world_units.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/state/state.h>
+#include <cvc/state/state_exec/async_host.h>
 #include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/utility/utility.h>
 #include <cvc/volume/bounding_box.h>
@@ -211,6 +212,11 @@ void app::registerDefaultHandlers() {
 //                         fixture-owned app could be destroyed out from
 //                         under a running handler thread.
 app::~app() {
+  // Async calls first: their kernels run on the background pool and post to the exec scheduler,
+  // so cancel them and wait for their kernels while both are still here.
+  if (_execAsyncHost)
+    _execAsyncHost->shutdown();
+
   // Copy and clear under the lock, then join without it: a worker winding
   // down takes _threadsMutex itself, so joining while holding it deadlocks.
   thread_map remaining;
@@ -1030,6 +1036,14 @@ cvc::state_exec::async_scheduler &app::exec_scheduler() {
     _execScheduler->set_data_defaults(cvc::state_exec::async_scheduler::host_data_defaults());
   }
   return *_execScheduler;
+}
+
+cvc::state_exec::async_host &app::exec_async_host() {
+  cvc::state_exec::async_scheduler &sched = exec_scheduler();
+  boost::mutex::scoped_lock lock(_execSchedulerMutex);
+  if (!_execAsyncHost)
+    _execAsyncHost.reset(new cvc::state_exec::async_host(sched, this));
+  return *_execAsyncHost;
 }
 
 void app::setThreadPoolSize(unsigned int size) {
