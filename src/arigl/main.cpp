@@ -403,6 +403,14 @@ struct ConferenceSession {
   static constexpr double kTalkHold = 0.60;      // keep "talking" lit this long (s) after the last
                                             // loud chunk — bridges brief pauses between words and
                                             // jittery delivery (wall time, so frame-rate indep.)
+  // Uplink: a mic chunk is sent while its RMS is above kSendThreshold (about -48 dBFS, below quiet
+  // speech and above a quiet room) or within kSendHold after one was; a muted camera sends one
+  // frame per kMutedFrameInterval.
+  static constexpr double kSendThreshold = 0.004;
+  static constexpr double kSendHold = 0.8;
+  static constexpr double kMutedFrameInterval = 1.0;
+  double mic_send_until_ = 0.0;   // wall s: send mic chunks until then
+  double last_muted_frame_ = 0.0; // wall s: the last muted camera frame sent
   // A peer's audio is FRESH while its last mic chunk is younger than this (wall s; about 23 chunks
   // of 21 ms). Only fresh audio paces its video and says whether it is talking: once the chunks
   // stop (its mic muted or cut, or the relay sending us none of it, out of range in the room) its
@@ -1175,10 +1183,28 @@ struct ConferenceSession {
   }
 
   void forward_frame(publisher &p, const cvc::ariadne::stream::frame &f, double stamp) {
-    // Self voice activity: measure our own forwarded mic so OUR name lights up in the list too.
-    if (p.kind == "mic" && f.format.codec == "f32" && f.data && f.size >= sizeof(float) &&
-        chunk_rms(reinterpret_cast<const float *>(f.data), f.size / sizeof(float)) > kTalkThreshold)
-      self_talk_until_ = now_wall_ + kTalkHold;
+    if (p.kind == "mic" && f.format.codec == "f32" && f.data && f.size >= sizeof(float)) {
+      const double rms = chunk_rms(reinterpret_cast<const float *>(f.data), f.size / sizeof(float));
+      // Self voice activity: measure our own forwarded mic so OUR name lights up in the list too.
+      if (rms > kTalkThreshold)
+        self_talk_until_ = now_wall_ + kTalkHold;
+      // Silence is not sent: a chunk goes out while the voice is on or within kSendHold after it,
+      // so a quiet or muted mic costs nothing (receivers mix silence for a peer with no chunks).
+      if (rms > kSendThreshold)
+        mic_send_until_ = now_wall_ + kSendHold;
+      if (now_wall_ > mic_send_until_) {
+        p.last_seq = f.seq;
+        return;
+      }
+    }
+    // A muted camera's frames are black: one a second keeps its tile alive.
+    if (p.kind == "camera" && cvc::state::instance(*app_)(prefix_ + ".cam_on").value() == "0") {
+      if (now_wall_ - last_muted_frame_ < kMutedFrameInterval) {
+        p.last_seq = f.seq;
+        return;
+      }
+      last_muted_frame_ = now_wall_;
+    }
     cvc::media_frame mf;
     mf.origin_node_id = pid_;
     mf.stream_id = p.kind;

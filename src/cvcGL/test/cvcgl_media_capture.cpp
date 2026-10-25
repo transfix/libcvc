@@ -89,6 +89,43 @@ int main() {
   // here would fail the test, so this also exercises clean producer teardown.
   sub.reset();
 
+  // The JPEG path's quality option (the conference sends q60): the same synthetic frames encode
+  // smaller at a low quality than at a high one, and a quality outside 1-100 is refused.
+  rt.set_tick_program(
+      "(if (= (state-get \"q.done\") \"1\") #f"
+      "  (begin"
+      "    (stream-capture-camera"
+      "      (get-attr (stream-open (dict \"id\" \"lo\" \"codec\" \"mjpeg\" \"w\" 160 \"h\" 120))"
+      "                \"token\")"
+      "      (dict \"synthetic\" #t \"w\" 160 \"h\" 120 \"hz\" 240 \"jpeg\" #t \"quality\" 20))"
+      "    (stream-capture-camera"
+      "      (get-attr (stream-open (dict \"id\" \"hi\" \"codec\" \"mjpeg\" \"w\" 160 \"h\" 120))"
+      "                \"token\")"
+      "      (dict \"synthetic\" #t \"w\" 160 \"h\" 120 \"hz\" 240 \"jpeg\" #t \"quality\" 95))"
+      "    (state-set \"q.bad\""
+      "      (if (get-attr (stream-capture-camera \"streams.lo\""
+      "                      (dict \"synthetic\" #t \"w\" 160 \"h\" 120 \"jpeg\" #t \"quality\" 0))"
+      "                    \"ok\") \"accepted\" \"refused\"))"
+      "    (state-set \"q.done\" \"1\")))");
+  rt.drain();
+  assert(cvc::state::instance(app)("q.done").value() == "1" && "the quality program ran");
+  assert(cvc::state::instance(app)("q.bad").value() == "refused" && "quality 0 is refused");
+  const auto frame_size = [&](const char *id) -> std::size_t {
+    sx::stream_channel *c = sx::stream_registry::for_app(app).lookup(sx::stream::registry_key("", id));
+    assert(c && "the quality stream is open");
+    std::shared_ptr<sx::subscription> s = c->subscribe(sx::deliver_mode::latest);
+    for (int i = 0; i < 400; ++i) {
+      if (sx::frame_ptr f = s->latest())
+        return f->size;
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return 0;
+  };
+  const std::size_t lo = frame_size("lo"), hi = frame_size("hi");
+  std::printf("jpeg 160x120: q20 %zu bytes, q95 %zu bytes\n", lo, hi);
+  assert(lo > 0 && hi > 0 && "both encoders published");
+  assert(lo < hi && "a lower quality encodes smaller frames");
+
   std::printf("cvcgl_media_capture: OK (synthetic capture via DSL verb -> %lld frames)\n",
               published);
   return 0;
