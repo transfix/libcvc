@@ -57,6 +57,7 @@
 #include <boost/scoped_array.hpp>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <numeric>
 
@@ -847,15 +848,19 @@ geometry hexahedralize(const volume &vol, double isovalue, extraction_method met
 // tetrahedralize2
 // ---------------
 // Purpose:
-//   Extract a dual tetrahedral (tet2) volumetric mesh from a volume.
+//   Extract a dual tetrahedral (tet2) volumetric mesh from a volume: the solid above isovalue,
+//   meshed as a layer with no upper surface.
 // ---- Change History ----
 // 12/27/2025 -- Joe R. -- Creation.
 // 12/28/2025 -- Joe R. -- Adding normal_type parameter.
+// 10/24/2026 -- Joe R. -- The layer's other end is +inf, not LBIE's default inner isovalue
+//                         (9.5001, from the data LBIE was first written for).
 geometry tetrahedralize2(const volume &vol, double isovalue, extraction_method method,
                          improvement_method improve_method, normal_type normals,
                          int improve_iterations) {
   Arguments args;
   args["isovalue"] = float(isovalue);
+  args["isovalue_in"] = std::numeric_limits<float>::max();
   args["improve_iterations"] = improve_iterations;
   args["extraction_method_enum"] = static_cast<LBIE::Mesher::ExtractionMethod>(method);
   args["improvement_method_enum"] = static_cast<LBIE::Mesher::ImproveMethod>(improve_method);
@@ -865,6 +870,10 @@ geometry tetrahedralize2(const volume &vol, double isovalue, extraction_method m
   return cvc_mesher(vol, args);
 }
 
+// The layer between the two isovalues, given in either order.
+// ---- Change History ----
+// 12/27/2025 -- Joe R. -- Creation.
+// 10/24/2026 -- Joe R. -- Reaches LBIE's TETRA2 mesh (it was TETRA); either order.
 geometry tetrahedralize2(const volume &vol, double isovalue_outer, double isovalue_inner,
                          extraction_method method, improvement_method improve_method,
                          normal_type normals, int improve_iterations) {

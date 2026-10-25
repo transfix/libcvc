@@ -866,6 +866,43 @@ TEST_F(LbieMesherTest, TetraGeometricFlowNeverMakesTheWorstTetWorse) {
   }
 }
 
+// cvc::tetrahedralize2 asks for LBIE's TETRA2 mesh, but do_mesh_geometry turned VOLUME_TET back
+// into TETRA, so the layer went through the one-surface Octree::tetrahedralize on the interval's
+// octree: fans of slivers, holes, and tets on both sides of the inner surface.
+// Octree::tetrahedralize_interval itself was no better (see Mesher::do_duallib_extract). A layer is
+// now the solid min(v - lo, hi - v) >= 0 meshed by Octree::tetrahedralize, with either isovalue
+// first.
+TEST_F(LbieMesherTest, Tetrahedralize2MeshesTheLayerBetweenTwoIsosurfaces) {
+  const unsigned int n = 33;
+  const double radius = 0.6, half = 0.15; // the layer is radius +- half
+  const double r0 = radius - half, r1 = radius + half;
+  const double exact = 4.0 / 3.0 * kPi * (r1 * r1 * r1 - r0 * r0 * r0);
+  for (double box_size : {16.0, 0.01}) {
+    volume v = make_sphere_volume(ctx, n, radius, box_size);
+    for (bool upper_first : {true, false}) {
+      geometry g =
+          upper_first ? cvc::tetrahedralize2(v, half, -half) : cvc::tetrahedralize2(v, -half, half);
+      ASSERT_GT(g.num_tets(), 0u) << "box " << box_size;
+      const sphere_tet_report r = report_sphere_tets(g, n, box_size, {r0, r1});
+      const std::string where = "box " + std::to_string(box_size) +
+                                (upper_first ? ", upper isovalue first" : ", lower first");
+      EXPECT_LT(r.max_boundary_distance, 0.5) << where << ": " << r;
+      EXPECT_EQ(r.inverted, 0) << where << ": " << r;
+      EXPECT_NEAR(r.volume, exact, 0.03 * exact) << where << ": " << r;
+      // Every corner of every tet is in the layer (to half a voxel).
+      int outside = 0;
+      for (const geometry::tet_t &t : g.tets())
+        for (int c = 0; c < 4; ++c) {
+          const geometry::point_t &p = g.points()[t[c]];
+          const double d = std::sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]) / box_size;
+          if (d < r0 - 1.0 / (n - 1) || d > r1 + 1.0 / (n - 1))
+            ++outside;
+        }
+      EXPECT_EQ(outside, 0) << where << ": tet corners off the layer";
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // mesher.cpp wrappers: verbose path, quality_improve, geometry-based API
 // ---------------------------------------------------------------------------
