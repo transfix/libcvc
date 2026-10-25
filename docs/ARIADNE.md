@@ -171,6 +171,36 @@ is wall-capped at `kResidentStepSeconds = 0.05`
 ([`ariadne.cpp:1497`](../src/cvc/ariadne/ariadne.cpp)). On teardown they are reaped as a
 group via their owner tag.
 
+### 2.4 Errors in actions and residents
+
+Handlers raise and catch exceptions like any state_exec program, with `try`/`catch`/`finally`,
+`raise` and `error` ([STATE_EXEC_EXCEPTIONS.md](STATE_EXEC_EXCEPTIONS.md)). A builtin's or a
+host intrinsic's error is an exception of its class too. An allocation an action's memory budget
+refuses is a `MemoryError`, for example, so a handler can catch it.
+
+**What the drain reports.** An exception a handler doesn't catch ends its process `failed`. The
+drain sweep warns once per message, through the warnings `take_reactive_warnings()` returns:
+
+| What ended | Warning |
+|---|---|
+| an action, by an exception | `ari: on: action program failed: Class: message (at <where>)` |
+| a resident, by an exception | `ari: resident [<channel>] failed: Class: message (at <where>)` |
+| an action, by a kill (its step or time cap, a syntax error found while reading it) | `ari: on: action program did not complete: <reason>` |
+| a resident, by a kill | `ari: resident [<channel>] stopped: <reason>` |
+
+`<where>` is the innermost line of the exception's traceback. An `init:` program that fails
+reports `failed: Class: message (at <where>)` to its caller.
+
+**Keeping a resident alive.** A resident is one process for the life of the document. An
+exception it doesn't catch ends it, and its channel goes unserved from then on. Catch inside the
+body to keep it running:
+
+```yaml
+on_key: |
+  (try (handle-key event)
+    (catch (e) (state-set "ui.last_error" (get-attr e "message"))))
+```
+
 ---
 
 ## 3. The per-frame (deferred-intent) contract
