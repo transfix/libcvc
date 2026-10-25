@@ -558,7 +558,8 @@ it; a full queue drops progress values first.
 The tests are `src/cvc/tests/state_exec_async_calls_test.cpp` (AS-1..33 in both evaluators and
 on both schedulers where they apply), `bindings/pycvc/test_pycvc_state_exec_async.py` (the same
 from Python, with AS-4, AS-16 and AS-32), and `AriadneAsyncFn` in `ariadne_runtime_test.cpp`
-(AS-17 through a document).
+(AS-17 through a document). The gtest file also passes under MSVC's AddressSanitizer
+(`/fsanitize=address`), so the teardown in AS-9 and AS-10 frees nothing a kernel still uses.
 
 **The names (3.2).**
 - `cvc/state/state_exec/async_call.h`: `async_kernel`, `async_marshal`, `async_call` (for kernels:
