@@ -136,6 +136,14 @@ public:
   std::vector<process_info> list_processes() const;
   std::optional<process_info> get_process_info(int pid) const;
   std::optional<value_t> get_result(int pid) const;
+  /// Why a process ended, when it didn't terminate normally: the kill reason, or a failed
+  /// process's "Class: message". nullopt for an unknown pid or one still running or terminated.
+  std::optional<std::string> get_exit_error(int pid) const;
+  /// A failed process's exception (docs/STATE_EXEC_EXCEPTIONS.md 2.6), or nullopt.
+  std::optional<value_t> get_exit_exception(int pid) const;
+  /// Throw a failed process's exception as a dsl_exception (with the C++ exception it was made
+  /// from, if any, as its original()); returns for any other process.
+  void raise_exit_exception(int pid) const;
   std::unordered_map<int, value_t> get_results() const;
   scheduler_stats get_stats() const;
 
@@ -259,6 +267,9 @@ private:
 
   /// Mark a process as killed with an error.
   void kill_process(process &proc, const std::string &reason);
+
+  /// Mark a process as failed with the exception it didn't catch.
+  void fail_process(process &proc, value_t exc, std::exception_ptr original);
 
   /// After a process ended: note it for the cycle collector and, unless it is the one stepping
   /// now, release its evaluation state (process::release_state).

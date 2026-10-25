@@ -19,6 +19,7 @@
 // wrapper (pycvc.i), which owns the pycvc.symbol / pycvc.value types. Call with the GIL held.
 #pragma once
 
+#include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/types.h>
 #include <memory>
 #include <span>
@@ -62,5 +63,23 @@ python_on_complete make_python_on_complete(PyObject *callable);
 /// A shared owner of a new reference to `o`. The last owner to let go drops the reference under
 /// the GIL, so C++ can keep a Python object alive from any thread.
 std::shared_ptr<PyObject> python_ref(PyObject *o);
+
+/// A registered Python function's exception, crossing the DSL (docs/STATE_EXEC_EXCEPTIONS.md,
+/// PY): a PythonError with origin "python" and `python_type` (the exception's type, qualified
+/// unless it is a builtin). It keeps the Python exception, which pycvc re-raises when the DSL
+/// exception comes back to Python unhandled, with a pycvc.dsl_error as its __cause__.
+class python_exception : public cvc::state_exec::dsl_error {
+public:
+  python_exception(const std::string &message, const std::string &python_type,
+                   std::shared_ptr<PyObject> exception)
+      : dsl_error("PythonError", message, "python",
+                  {{"python_type", cvc::state_exec::value_t(python_type)}}),
+        exception_(std::move(exception)) {}
+  /// The Python exception (borrowed), or null.
+  PyObject *exception() const noexcept { return exception_.get(); }
+
+private:
+  std::shared_ptr<PyObject> exception_;
+};
 
 } // namespace pycvc

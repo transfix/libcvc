@@ -375,15 +375,43 @@ evaluator's timeout or `interrupt()` ends it with no handler or `finally` run.
 A signal or watch handler's uncaught exception is raised in the program where the handler
 interrupted it, so the program's own `try` can catch it.
 
-**From C++.** A native function throws `cvc::state_exec::dsl_error(class_name, message)` to raise
-a built-in class (`#include <cvc/state/state_exec/exceptions.h>`), or `dsl_exception(value)` to
-raise an exception value it made with `make_exception`. Other C++ exceptions are mapped:
-`std::invalid_argument` to `ValueError`, `std::out_of_range` to `IndexError`, `std::bad_alloc` to
-`MemoryError`, `parse_error` to `ParseError`, a plain `std::runtime_error` to `RuntimeError`, and
-anything else to `NativeError`. An exception nothing catches reaches the C++ caller as the C++
-exception it was made from, unchanged, or as a `dsl_exception` (whose `class_chain()` names its
-classes) when the program raised it. `stackless_evaluator::raise(state, exc)` raises an exception
-in a state where it is evaluating.
+**Raising from a native function.** Include `<cvc/state/state_exec/exceptions.h>`.
+- `dsl_error(class_name, message)` raises a built-in class.
+- `dsl_exception(value)` raises an exception value made with `make_exception`.
+- Other C++ exceptions are mapped:
+
+  | C++ exception | DSL class |
+  |---|---|
+  | `std::invalid_argument` | `ValueError` |
+  | `std::out_of_range` | `IndexError` |
+  | `std::bad_alloc` | `MemoryError` |
+  | `parse_error` | `ParseError` |
+  | a plain `std::runtime_error` | `RuntimeError` |
+  | anything else | `NativeError` |
+
+**When nothing catches it,** the process ends **`failed`**, which is not `killed`.
+- **On a scheduler:**
+  - `run()` doesn't throw it;
+  - `get_exit_exception(pid)` returns the exception, and `get_exit_error(pid)` its
+    `"Class: message"`;
+  - `raise_exit_exception(pid)` throws it as a `dsl_exception`;
+  - `process_info` carries both `exit_exception` and `exit_error`, and `scheduler_stats`
+    counts `failed`.
+- **On a bare evaluator:** `step()`, `run()` and `evaluate()` throw the `dsl_exception`.
+- **The `dsl_exception`:** `what()` is `"Class: message"`, `value()` is the exception, and
+  `class_chain()` names its classes. For an exception made from a C++ exception, `original()`
+  is that exception.
+
+**Raising into a state:** `stackless_evaluator::raise(state, exc)` raises an exception in a
+state where it is evaluating.
+
+**From Python:**
+- A DSL exception that reaches Python raises `pycvc.dsl_error` (a `RuntimeError`). It has
+  `.value`, `.dsl_class`, `.dsl_classes`, `.origin` and `.traceback`.
+- Its type derives from `pycvc.dsl_class(name)` for each class in its chain, so
+  `except pycvc.dsl_class("ValueError")` catches a `(defclass MyError ValueError)`.
+- A registered Python function's exception is a `PythonError` in the DSL. Uncaught, it comes
+  back to Python as the original exception, with the `dsl_error` as its `__cause__`.
 
 ---
 

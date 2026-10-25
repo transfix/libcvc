@@ -8,6 +8,7 @@
 #include <cvc/state/state_exec/parser.h> // parse_error
 #include <memory>
 #include <new>
+#include <optional>
 #include <typeinfo>
 #include <unordered_map>
 #include <utility>
@@ -102,7 +103,7 @@ value_t native_exception(const char *cls, const std::exception &e) {
 } // namespace
 
 dsl_exception::dsl_exception(value_t exc, std::exception_ptr original)
-    : std::runtime_error(exception_message(exc)), exc_(std::move(exc)),
+    : std::runtime_error(exception_summary(exc)), exc_(std::move(exc)),
       original_(std::move(original)) {}
 
 std::string dsl_exception::class_name() const {
@@ -182,10 +183,20 @@ dict_ptr class_of_constructor(const value_t &ctor) {
 bool is_instance(const value_t &v, const dict_ptr &cls) {
   if (!cls)
     return false;
+  // A snapshot writes a class dict once for each value holding it, so after a restore an
+  // instance's class can be a copy of the one a program names: the same class by its chain of
+  // names. Built lazily: most matches are by identity.
+  std::optional<std::vector<std::string>> wanted;
   dict_ptr at = class_of_instance(v);
   for (int hop = 0; at && hop < 4096; ++hop) { // bounded: a class dict could be made to loop
     if (at.get() == cls.get())
       return true;
+    if (!class_name(at).empty() && class_name(at) == class_name(cls)) {
+      if (!wanted)
+        wanted = class_chain(cls);
+      if (class_chain(at) == *wanted)
+        return true;
+    }
     const value_t *super = field(value_t(at), "__super__");
     const auto *next = super ? std::get_if<dict_ptr>(&super->v) : nullptr;
     at = next ? *next : nullptr;
@@ -232,8 +243,11 @@ value_t exception_from(const std::exception &e) {
     return d->value();
   if (const auto *d = dynamic_cast<const dsl_error *>(&e)) {
     dict_ptr cls = exception_class(d->class_name());
-    return make_exception(cls ? cls : exception_class("RuntimeError"), e.what(), nil_value,
-                          "builtin");
+    value_t exc = make_exception(cls ? cls : exception_class("RuntimeError"), e.what(), nil_value,
+                                 d->origin());
+    for (const auto &[key, v] : d->fields())
+      set_field(exc, key, v);
+    return exc;
   }
   if (const auto *p = dynamic_cast<const parse_error *>(&e)) {
     value_t exc = make_exception(exception_class("ParseError"), e.what(), nil_value, "builtin");

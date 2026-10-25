@@ -515,14 +515,7 @@ value_t intrinsic_ps(intrinsics_context *ctx, std::span<const value_t> args) {
     std::vector<std::pair<std::string, value_t>> entries;
     entries.emplace_back("pid", value_t(static_cast<int64_t>(pi.pid)));
     entries.emplace_back("name", value_t(pi.name));
-    entries.emplace_back(
-        "status", value_t(std::string(pi.status == process_status::ready        ? "ready"
-                                      : pi.status == process_status::running    ? "running"
-                                      : pi.status == process_status::paused     ? "paused"
-                                      : pi.status == process_status::waiting    ? "waiting"
-                                      : pi.status == process_status::terminated ? "terminated"
-                                      : pi.status == process_status::killed     ? "killed"
-                                                                                : "unknown")));
+    entries.emplace_back("status", value_t(std::string(to_string(pi.status))));
     entries.emplace_back("priority", value_t(static_cast<int64_t>(pi.priority)));
     entries.emplace_back("uid", value_t(pi.uid));
     entries.emplace_back("steps", value_t(static_cast<int64_t>(pi.step_count)));
@@ -553,14 +546,7 @@ value_t intrinsic_inspect(intrinsics_context *ctx, std::span<const value_t> args
   std::vector<std::pair<std::string, value_t>> entries;
   entries.emplace_back("pid", value_t(static_cast<int64_t>(info->pid)));
   entries.emplace_back("name", value_t(info->name));
-  entries.emplace_back(
-      "status", value_t(std::string(info->status == process_status::ready        ? "ready"
-                                    : info->status == process_status::running    ? "running"
-                                    : info->status == process_status::paused     ? "paused"
-                                    : info->status == process_status::waiting    ? "waiting"
-                                    : info->status == process_status::terminated ? "terminated"
-                                    : info->status == process_status::killed     ? "killed"
-                                                                                 : "unknown")));
+  entries.emplace_back("status", value_t(std::string(to_string(info->status))));
   entries.emplace_back("priority", value_t(static_cast<int64_t>(info->priority)));
   entries.emplace_back("uid", value_t(info->uid));
   entries.emplace_back("gid", value_t(info->gid));
@@ -577,6 +563,10 @@ value_t intrinsic_inspect(intrinsics_context *ctx, std::span<const value_t> args
   entries.emplace_back("message_bytes", value_t(static_cast<int64_t>(info->message_bytes)));
   entries.emplace_back("max_message_bytes", value_t(static_cast<int64_t>(info->max_message_bytes)));
   entries.emplace_back("parent_pid", value_t(static_cast<int64_t>(info->parent_pid)));
+  if (info->exit_error)
+    entries.emplace_back("exit_error", value_t(*info->exit_error));
+  if (info->exit_exception)
+    entries.emplace_back("exception", *info->exit_exception);
   return make_dict(std::move(entries));
 }
 
@@ -691,6 +681,7 @@ value_t intrinsic_scheduler_stats(intrinsics_context *ctx, std::span<const value
   entries.emplace_back("paused", value_t(static_cast<int64_t>(s.paused)));
   entries.emplace_back("terminated", value_t(static_cast<int64_t>(s.terminated)));
   entries.emplace_back("killed", value_t(static_cast<int64_t>(s.killed)));
+  entries.emplace_back("failed", value_t(static_cast<int64_t>(s.failed)));
   entries.emplace_back("steps", value_t(static_cast<int64_t>(s.total_steps)));
   return make_dict(std::move(entries));
 }

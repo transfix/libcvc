@@ -3,6 +3,7 @@
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/state/state_exec/builtins.h>
+#include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/scheduler.h> // max_alloc_bytes_from_state
 
 namespace cvc::state_exec {
@@ -161,7 +162,7 @@ void async_scheduler::execute_process_step(process &proc) {
   struct release_guard {
     process &p;
     ~release_guard() {
-      if (p.status == process_status::terminated || p.status == process_status::killed)
+      if (is_finished(p.status))
         p.release_state();
     }
   } release_dead{proc};
@@ -225,6 +226,16 @@ void async_scheduler::execute_process_step(process &proc) {
       restore_from_signal(proc);
       evaluator_.raise(proc.state, std::move(exc));
       raised_in_program = !proc.state.uncaught;
+    }
+    if (!raised_in_program && proc.state.uncaught) {
+      // An exception the program didn't catch ends it `failed`, with the exception kept for the
+      // host (docs/STATE_EXEC_EXCEPTIONS.md 2.6).
+      proc.accumulated_time +=
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - proc.last_run_start)
+              .count();
+      const auto *thrown = dynamic_cast<const dsl_exception *>(&e);
+      fail_process(proc, *proc.state.uncaught, thrown ? thrown->original() : nullptr);
+      return;
     }
     if (!raised_in_program) {
       // A runtime error thrown by a step — a throwing intrinsic (e.g. a channel-policy refusal)
@@ -560,7 +571,7 @@ void async_scheduler::poll_watches() {
   if (!watch_root_)
     return;
   for (auto &[pid, proc] : processes_) {
-    if (proc->status == process_status::terminated || proc->status == process_status::killed)
+    if (is_finished(proc->status))
       continue;
     for (auto &[wid, entry] : proc->watch_handlers) {
       auto *node = watch_root_->findDescendant(entry.path);
@@ -625,7 +636,7 @@ bool async_scheduler::send_signal(int pid, const std::string &signal) {
   if (it == processes_.end())
     return false;
   auto &proc = *it->second;
-  if (proc.status == process_status::terminated || proc.status == process_status::killed)
+  if (is_finished(proc.status))
     return false;
 
   if (signal == "SIGKILL") {
@@ -687,6 +698,15 @@ void async_scheduler::kill_process(process &proc, const std::string &reason) {
   release_if_idle(proc);
 }
 
+void async_scheduler::fail_process(process &proc, value_t exc, std::exception_ptr original) {
+  proc.status = process_status::failed;
+  proc.exit_error = exception_summary(exc);
+  proc.exit_exception = std::move(exc);
+  proc.exit_original = std::move(original);
+  proc.state.stats.mark_complete();
+  release_if_idle(proc);
+}
+
 void async_scheduler::release_if_idle(process &proc) {
   note_process_exit(); // what it leaked is garbage now (heap.h)
   // A process stepping right now (one that killed itself) is released once its step is over.
@@ -725,7 +745,7 @@ bool async_scheduler::kill(int pid) {
   if (it == processes_.end())
     return false;
   auto &proc = *it->second;
-  if (proc.status == process_status::terminated || proc.status == process_status::killed)
+  if (is_finished(proc.status))
     return false;
   kill_process(proc, "killed_by_user");
   return true;
@@ -734,8 +754,7 @@ bool async_scheduler::kill(int pid) {
 int async_scheduler::kill_owner(const std::string &owner) {
   int killed = 0;
   for (auto &[pid, proc] : processes_) {
-    if (proc->owner == owner && proc->status != process_status::terminated &&
-        proc->status != process_status::killed) {
+    if (proc->owner == owner && !is_finished(proc->status)) {
       kill_process(*proc, "owner_reaped");
       ++killed;
     }
@@ -876,6 +895,8 @@ process_info async_scheduler::make_info(const process &proc) const {
   info.message_bytes = proc.message_bytes;
   info.max_message_bytes = proc.max_message_bytes;
   info.parent_pid = proc.parent_pid;
+  info.exit_error = proc.exit_error;
+  info.exit_exception = proc.exit_exception;
   return info;
 }
 
@@ -913,12 +934,26 @@ std::optional<std::string> async_scheduler::get_exit_error(int pid) const {
   return it->second->exit_error;
 }
 
+std::optional<value_t> async_scheduler::get_exit_exception(int pid) const {
+  auto it = processes_.find(pid);
+  if (it == processes_.end())
+    return std::nullopt;
+  return it->second->exit_exception;
+}
+
+void async_scheduler::raise_exit_exception(int pid) const {
+  auto it = processes_.find(pid);
+  if (it == processes_.end() || !it->second->exit_exception)
+    return;
+  throw dsl_exception(*it->second->exit_exception, it->second->exit_original);
+}
+
 bool async_scheduler::reap(int pid) {
   auto it = processes_.find(pid);
   if (it == processes_.end())
     return false;
   const process_status st = it->second->status;
-  if (st != process_status::terminated && st != process_status::killed)
+  if (!is_finished(st))
     return false; // never drop a still-live (ready/running/waiting/paused) process
   // Its env, state, watch_handlers and captured values (including any Python holders) all live on
   // the process object, so erasing it frees them.
@@ -956,6 +991,9 @@ scheduler_stats async_scheduler::get_stats() const {
       break;
     case process_status::killed:
       ++s.killed;
+      break;
+    case process_status::failed:
+      ++s.failed;
       break;
     default:
       break;

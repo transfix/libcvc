@@ -13,6 +13,7 @@
 #include <chrono>
 #include <cvc/state/state_exec/stackless_evaluator.h>
 #include <cvc/state/state_exec/types.h>
+#include <exception>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -30,8 +31,15 @@ enum class process_status {
   paused,     // Paused by user
   waiting,    // Waiting for signal or I/O
   terminated, // Finished execution normally
-  killed      // Killed by user or resource limit
+  killed,     // Killed by user or resource limit
+  failed      // Ended by an exception the program didn't catch (docs/STATE_EXEC_EXCEPTIONS.md)
 };
+
+/// Whether a process with status `s` has ended: terminated, killed or failed.
+inline bool is_finished(process_status s) {
+  return s == process_status::terminated || s == process_status::killed ||
+         s == process_status::failed;
+}
 
 /// Convert process_status to string.
 const char *to_string(process_status s);
@@ -107,6 +115,10 @@ struct process {
   // Completion
   value_t exit_code;
   std::optional<std::string> exit_error;
+  /// A failed process's exception (exit_error is its "Class: message"), and the C++ exception it
+  /// was made from, if it was (a native's, or a Python function's): a host may rethrow that.
+  std::optional<value_t> exit_exception;
+  std::exception_ptr exit_original;
   std::function<void(value_t)> on_complete;
 
   // Signal handling

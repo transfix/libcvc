@@ -248,13 +248,12 @@ void annotate(const evaluator_state &state, value_t &exc) {
     set_field(exc, "function", value_t(head->name));
 }
 
-// Throw the exception a state left uncaught: the C++ exception it was made from, if it was one,
-// else a dsl_exception carrying it.
+// Throw the exception a state left uncaught as a dsl_exception, with the C++ exception it was
+// made from, if it was one, as its original().
 [[noreturn]] void rethrow_uncaught(const evaluator_state &state) {
   const value_t &exc = *state.uncaught;
-  if (state.converted_original && same_exception(state.converted, exc))
-    std::rethrow_exception(state.converted_original);
-  throw dsl_exception(exc);
+  const bool converted = state.converted_original && same_exception(state.converted, exc);
+  throw dsl_exception(exc, converted ? state.converted_original : nullptr);
 }
 
 // Drop the deep-data work whose waiting frame unwinding popped: its native call raised.

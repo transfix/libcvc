@@ -135,6 +135,11 @@ public:
   /// resource-limit tag), or nullopt if the pid is unknown or did not fail. A driver reports this
   /// so a caught exception is not flattened to a generic "killed".
   std::optional<std::string> get_exit_error(int pid) const;
+  /// A failed process's exception (docs/STATE_EXEC_EXCEPTIONS.md 2.6), or nullopt.
+  std::optional<value_t> get_exit_exception(int pid) const;
+  /// Throw a failed process's exception as a dsl_exception (with the C++ exception it was made
+  /// from, if any, as its original()); returns for any other process.
+  void raise_exit_exception(int pid) const;
   /// Erase a FINISHED (terminated or killed) process and its side-table entries from the scheduler,
   /// freeing its env/state/captured values. Returns false (no-op) for an unknown pid or a live one
   /// — never drops a runnable/waiting process. A one-shot driver (pycvc.Exec.run) reaps its pid
@@ -247,6 +252,8 @@ private:
   void check_limits(process &proc);
   void terminate_process(process &proc, value_t result);
   void kill_process(process &proc, const std::string &reason);
+  // End a process `failed` with the exception it didn't catch (docs/STATE_EXEC_EXCEPTIONS.md 2.6).
+  void fail_process(process &proc, value_t exc, std::exception_ptr original);
   /// After a process ended: note it for the cycle collector and, unless it is the one stepping
   /// now, release its evaluation state (process::release_state).
   void release_if_idle(process &proc);
