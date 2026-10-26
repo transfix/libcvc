@@ -117,6 +117,13 @@ public:
   // resting against another counts every tick it does.
   int vehicle_contact_step(int i) const;
   double vehicle_contact_depth(int i) const;
+  // Agent i's chassis against a wall over the last tick: a static or kinematic body met with the
+  // contact's normal within 45 degrees of horizontal (a building's side, a cell box, a kerb),
+  // from when the contact begins until it ends (a vehicle at rest against a wall sleeps, and its
+  // contacts persist without the engine reporting them), and the deepest such penetration (m).
+  // The ground under a vehicle on its side or roof meets it from below, so it is not a wall.
+  bool wall_contact_step(int i) const;
+  double wall_contact_depth(int i) const;
   bool tracks_energy() const override { return true; }
   // The plant ledger's sample of agent i at the end of the last tick (at attach(), the vehicle
   // at rest and no command), from the vehicle's state then. The fields it shares with
@@ -263,6 +270,13 @@ private:
     int contacts_step = 0;      // last tick
     int touched = -1;           // the vehicle it touched deepest last tick (agent index); -1 none
     double touch_depth = 0.0;   // that contact's penetration, m
+    bool wall = false;          // a wall contact began or persisted last tick
+    double wall_depth = 0.0;    // the deepest of those contacts' penetrations last tick, m
+    struct wall_touch {
+      std::uint32_t body = 0, sub_wall = 0, sub_chassis = 0; // the contact's (removed by them)
+      double depth = 0.0;                                    // its last penetration, m
+    };
+    std::vector<wall_touch> walls; // its wall contacts begun and not yet removed
     double steer_command = 0.0; // rad
     double accel_command = 0.0; // m/s^2 along the heading
     drift_si drift;

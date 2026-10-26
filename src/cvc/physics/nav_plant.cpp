@@ -458,6 +458,8 @@ void nav_plant::advance() {
     a.contacts_step = 0;
     a.touched = -1;
     a.touch_depth = 0.0;
+    a.wall = false;
+    a.wall_depth = 0.0;
   }
   if (_o.step_world) {
     for (int k = 0; k < _steps; ++k) {
@@ -509,6 +511,37 @@ void nav_plant::count_contacts() {
         if (s.touched < 0 || e.depth > s.touch_depth) {
           s.touched = static_cast<int>(other);
           s.touch_depth = e.depth;
+        }
+      }
+    }
+    // Chassis against a fixed body with the normal near horizontal: a wall. Each contact is kept
+    // from its start to its removal: a body at rest sleeps, and its contacts persist unreported.
+    {
+      std::size_t self = _agents.size();
+      agent::wall_touch k;
+      if (ia != of_chassis.end() && ib == of_chassis.end() && is_fixed(e.body_b)) {
+        self = ia->second;
+        k = {e.body_b.value, e.sub_shape_b, e.sub_shape_a, e.depth};
+      } else if (ib != of_chassis.end() && ia == of_chassis.end() && is_fixed(e.body_a)) {
+        self = ib->second;
+        k = {e.body_a.value, e.sub_shape_a, e.sub_shape_b, e.depth};
+      }
+      if (self < _agents.size()) {
+        agent &s = _agents[self];
+        auto it = std::find_if(s.walls.begin(), s.walls.end(), [&](const agent::wall_touch &w) {
+          return w.body == k.body && w.sub_wall == k.sub_wall && w.sub_chassis == k.sub_chassis;
+        });
+        const bool wall =
+            e.type != contact_event::kind::removed && std::fabs(e.normal.z) < std::sqrt(0.5);
+        if (wall) {
+          s.wall = true;
+          s.wall_depth = std::max(s.wall_depth, e.depth);
+          if (it != s.walls.end())
+            it->depth = e.depth;
+          else
+            s.walls.push_back(k);
+        } else if (it != s.walls.end()) { // removed, or turned to the ground under it
+          s.walls.erase(it);
         }
       }
     }
@@ -690,6 +723,19 @@ int nav_plant::vehicle_contact_step(int i) const {
 
 double nav_plant::vehicle_contact_depth(int i) const {
   return _agents.at(static_cast<std::size_t>(i)).touch_depth;
+}
+
+bool nav_plant::wall_contact_step(int i) const {
+  const agent &a = _agents.at(static_cast<std::size_t>(i));
+  return a.wall || !a.walls.empty();
+}
+
+double nav_plant::wall_contact_depth(int i) const {
+  const agent &a = _agents.at(static_cast<std::size_t>(i));
+  double d = a.wall_depth;
+  for (const agent::wall_touch &w : a.walls)
+    d = std::max(d, w.depth);
+  return d;
 }
 
 int nav_plant::static_contacts_step(int i) const {

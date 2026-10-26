@@ -273,6 +273,52 @@ TEST(NavPlant, ReportsWhichVehicleItTouched) {
   EXPECT_GE(depth, 0.0);
 }
 
+// A Humvee driven into a wall (wall_contact_step): no wall while it stands on the ground, one from
+// when its nose meets the wall's side, and it stays one while the vehicle pushes against it, at
+// rest (asleep, its contact no longer reported); backed off it, no wall again.
+TEST(NavPlant, ReportsAWallItDroveInto) {
+  REQUIRE_JOLT();
+  scene sc;
+  sc.wall(40.0, 20.0, 44.0, 40.0);
+  world w(jolt_config());
+  sc.build(w, 0.9);
+  nav_plant plant(w, {vehicle_desc::humvee()});
+  cvc::world_units::normalized_frame f;
+  f.scale = kS;
+  cvc::nav::plant_state start;
+  start.x = static_cast<float>(20.0 * kS);
+  start.y = static_cast<float>(30.0 * kS);
+  plant.attach(1, &start, f, 0.06);
+  for (int t = 0; t < 30; ++t)
+    plant.advance();
+  EXPECT_FALSE(plant.wall_contact_step(0)) << "the ground is not a wall";
+  int first = -1, after = 0;
+  double depth = 0.0;
+  for (int t = 0; t < 300; ++t) {
+    plant.command(0, 0.0f, static_cast<float>(2.0 * kS));
+    plant.advance();
+    if (plant.wall_contact_step(0)) {
+      if (first < 0) {
+        first = t;
+        EXPECT_GT(plant.state(0).x / kS, 30.0) << "it meets the wall at the wall";
+      }
+      depth = std::max(depth, plant.wall_contact_depth(0));
+      ++after;
+    }
+  }
+  std::printf("  into the wall at tick %d (%.2f s), against it %d ticks, penetration %.3f m\n",
+              first, first * 0.06, after, depth);
+  ASSERT_GE(first, 0) << "it should meet the wall";
+  EXPECT_GT(after, 200) << "pushing against it, it stays against it";
+  EXPECT_GE(depth, 0.0);
+  for (int t = 0; t < 100; ++t) {
+    plant.command(0, 0.0f, static_cast<float>(-2.0 * kS));
+    plant.advance();
+  }
+  EXPECT_LT(plant.state(0).x / kS, 34.0) << "it should back off";
+  EXPECT_FALSE(plant.wall_contact_step(0)) << "backed off the wall";
+}
+
 // The plant's own plan (nav_plant_options::plan_with_vehicle, on by default). Its limits are the
 // vehicle's: 0.8 of its max_accel, its rated top speed, 0.5 g of cornering (under 0.8 of its
 // static stability factor), and its body from the rear axle. A sim_world sized for no vehicle in
