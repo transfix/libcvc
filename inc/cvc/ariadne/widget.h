@@ -43,6 +43,8 @@ enum class Kind {
   Image,          // a host-published image viewer (a live raster); src / bound name
   Button,         // a fire-once button -> raises `on` event
   Custom,         // a registered custom widget type (custom_type + props); §extensibility
+  WindowsMenu,    // the built-in Windows menu (reopen a closed window): placed here in a menubar,
+                  // or, outside one, the document's setting for it (bdef false: no such menu)
 };
 
 // ---------------------------------------------------------------------------
@@ -290,6 +292,17 @@ inline Widget menu_action(std::string label, std::string on) {
   w.kind = Kind::MenuItemAction;
   w.label = std::move(label);
   w.on = std::move(on);
+  return w;
+}
+
+// The built-in Windows menu (ARIADNE.md §5.9). In a menubar (or a menu), it is drawn there under
+// `title` ("" = "Windows") instead of at the end of the bar. Anywhere else it only sets the menu
+// up: `on` false turns it off for the whole document, and a `title` renames it.
+inline Widget windows_menu(std::string title = std::string(), bool on = true) {
+  Widget w;
+  w.kind = Kind::WindowsMenu;
+  w.label = std::move(title);
+  w.bdef = on;
   return w;
 }
 

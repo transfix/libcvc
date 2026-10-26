@@ -13,11 +13,13 @@
 // It degrades to safe no-ops when libcvc is built without CVC_ENABLE_IMGUI
 // (every draw becomes an inert stub, mirroring the cvc::gl::ui:: layer).
 
+#include <algorithm>
 #include <cvc/ariadne/backend.h>
 #include <cvc/image/image.h> // set_image publishes a cvc::image for the Kind::Image raster viewer
 #include <functional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 struct ImGuiContext; // Dear ImGui (global namespace); forward-declared, the header stays imgui-free
@@ -116,9 +118,41 @@ public:
   static void setImGuiContext(ImGuiContext *ctx);
 
 private:
-  // ImGui style vars pushed per open window (WindowBorderSize, §3.0.3b), popped
-  // in end_window. A stack so window nesting is correct.
-  std::vector<int> m_windowStylePushes;
+  // Per open window: the ImGui style vars pushed for it (WindowBorderSize, §3.0.3b), popped in
+  // end_window, and whether it is fitting itself to its content this frame (§3.0.3b auto-fit: its
+  // labeled widgets then take a fixed width, so what it fits to is not the size it starts at). A
+  // stack so window nesting is correct.
+  struct OpenWindow {
+    int style_pushes = 0;
+    bool fitting = false;
+  };
+  std::vector<OpenWindow> m_openWindows;
+  bool fitting() const { return !m_openWindows.empty() && m_openWindows.back().fitting; }
+
+  // §3.0.3b first placement of a window with neither an authored `pos:` nor a persisted geometry:
+  // such windows flow down the work area's left edge in document order, a new column starting when
+  // the next one would not fit below the last. m_flowIds remembers which windows joined the flow
+  // (decided when a window first appears). A cursor is where the next window would go: below the
+  // window furthest along the flow of those it passed (the lowest in the rightmost column), and
+  // beside the widest window of that column when there is no room below.
+  struct FlowCursor {
+    bool have = false; // passed a window yet (else the next one goes to the top-left)
+    float x = 0.0f, bottom = 0.0f, col_right = 0.0f;
+    void pass(float wx, float wy, float ww, float wh) {
+      if (have && wx < x)
+        return; // an earlier column
+      col_right = (have && wx == x) ? std::max(col_right, wx + ww) : wx + ww;
+      bottom = (have && wx == x) ? std::max(bottom, wy + wh) : wy + wh;
+      x = wx;
+      have = true;
+    }
+  };
+  std::unordered_set<std::string> m_flowIds;
+  // m_flowFrame is the ImGui frame the cursors belong to. m_flowSettled passes the flow windows
+  // that have their size and place; a window still being placed goes where m_flowPlace is, which
+  // starts each frame past every settled window of the frame before.
+  int m_flowFrame = -1;
+  FlowCursor m_flowSettled, m_flowPlace;
 
   // Per open grid (§3.0.3b). A grid is realized either as an ImGui table (columns
   // + optional per-row min-heights) or, when resizable with row tracks, as a

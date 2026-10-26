@@ -265,7 +265,8 @@ Three backends ship:
   - **mouse** — click to focus or activate, drag a slider, drag a window by its title
     bar, click `[x]` to close it, click a menu title to open it.
   - **windows** (`caps.windows = true`) — free, z-ordered, raised on focus, placed from
-    `pos:`/`size:` or the persisted `tree.<id>.geometry`; a drag persists back (§11.4).
+    `pos:`/`size:` or the persisted `tree.<id>.geometry`; a drag persists back (§11.4). A
+    window stops at the screen's edge and scrolls what does not fit (§5.8).
   - **graphics** — `draw_image` paints a raster published with `set_image`, and
     `set_background` puts one behind everything. Where the terminal speaks a pixel protocol
     the picture is real pixels (see *Pixel graphics* below); everywhere else it is
@@ -382,6 +383,7 @@ The built-in top-level keys (`is_builtin_block`,
 ```
 meta  menubar  windows  overlays  root (alias: children)  scene  customs  requires
 init  on_tick  on_key  on_pointer  on_signal  units  import  channels  lint  args
+windows_menu
 ```
 
 Any **other** top-level key is dispatched to a parser registered via
@@ -731,6 +733,74 @@ windows:
 
 A host can ask the same thing in C++: `Runtime::has`, `has_function`, `program_names` and
 `host_facts`.
+
+### 5.8 Window size, placement and scrolling
+
+A window needs neither `pos:` nor `size:`. What decides its size, first match wins:
+
+1. its persisted `tree.<id>.geometry` (§11.4), once it has one;
+2. its `size:` (px or `"%"` of the view, per axis; `min:`/`max:` bound it);
+3. its content. A window with no size on an axis fits its content on that axis when it first
+   appears, so it opens showing every widget. It stops at the edge of the view, measured from
+   where it opens, and never goes below an authored `min:` or past a `max:`.
+
+After that first fit the window keeps its size: the user resizes it, and that size is the one
+persisted. Content that does not fit the window, whatever set its size, scrolls. A window gets a
+scroll bar on each axis where it needs one, and never clips its content or shrinks to a stub.
+
+Where it opens: at its persisted position, else its `pos:`. A window with neither joins a column
+down the left edge of the view, in document order, below the last such window. When the next one
+would not fit below, it starts a new column to the right. A window that opens later, such as a
+closable window opened from a menu, takes the next place in that flow.
+
+How each backend does it:
+
+- **ImGui** measures a new window on a hidden first frame and sizes it on the next. While it
+  measures, a labeled slider, input, combo or colour widget is measured at ImGui's auto-resize
+  width (16 font sizes), and a row-split pane at one and a half times that, since a pane only fills
+  its window. Until the window has settled the backend reports no geometry, so the size it has
+  before it measures is never persisted (persisting it, then seeding it back, would stop the fit).
+  Once the window has its size, the labeled widgets share it again.
+- **The terminal backends** lay a window with no size out at its content's size every frame,
+  and cascade new windows instead of flowing them. A window that would run off the screen stops at
+  the screen's edge, and a window whose content is larger than it is (or than its `size:`) gets a
+  scroll bar. Its body scrolls to keep the focused widget in view; there is no wheel scrolling.
+
+### 5.9 Closing and reopening windows: the Windows menu
+
+A window's open state is `tree.<id>.open` (default open; `<id>` is its `id:`, else its title). A
+window whose state is `0` is not drawn. A `closable: true` window has a close button that sets it
+to `0`.
+
+Every document gets a **Windows** menu to open such a window again, with no menu items to write:
+
+- It holds a ticked item per window, bound to that window's `tree.<id>.open`. Unticking an item
+  closes the window, closable or not; ticking it opens it.
+- It lists only the windows no menu item of the document already toggles. A document with its own
+  "Settings" or "View" menu bound to `tree.<id>.open` (`lsystem_forest.ari`,
+  `conference_roster.ari`) keeps it, and the Windows menu lists only the windows that menu leaves
+  out. When it leaves none out there is no Windows menu.
+- A window made by `repeat:` is not listed, since there can be any number of them. The document
+  opens those itself (`conference_roster.ari`'s camera windows open from the Users list).
+- It goes after the document's own menus. A document with no `menubar:` gets a menu bar holding
+  just the Windows menu, but only when one of its windows is closable; otherwise nothing can be
+  closed.
+
+A document places or turns it off:
+
+```yaml
+windows_menu: false            # top level: no Windows menu (a string instead renames it)
+menubar:
+  - menu: View
+    items:
+      - windows_menu: Panels   # here, as a submenu titled Panels, instead of at the end
+```
+
+A bare `- windows_menu` entry places it under its default title. The menu is the core's (it calls
+the backend's ordinary menu functions), so the ImGui menu bar, the FTXUI menu bar and the tvision
+host's menu bar all show it, and its items toggle the same state the close buttons write. The open
+state lives in the document's state tree like the geometry (§11.4): it holds for the run and
+across a reload, but not across runs.
 
 ## 6. Composition: include / import / load
 
@@ -1256,10 +1326,6 @@ below (G17–G21 in the internal gap report) are tracked for reconciliation.
   scene needs a cvcGL build and a GL that works offscreen (X, EGL or OSMesa). On a Kitty terminal a
   scene that keeps moving sends a frame per change (up to `max_image_pixels`), and on a Sixel one
   every frame, so a remote session is better off with half-blocks (`--graphics color`).
-- **An auto-sized ImGui window draws as a collapsed stub.** A window with `pos:` but no
-  `size:` (or neither) shows only its title-bar stub in the ImGui backend, in `ariadne_hello`
-  and `arigl` alike (`hello.ari`'s Controls, `terminal_tour.ari`'s Status and Layout); give it
-  a `size:` until that is fixed. The terminal backends size such windows correctly.
 - **`load:` `prefix:` / `reload:` and §12.2 sub-scene mounting are not yet parsed** at the
   loader; only sub-UI `load:` is landed ([`loader.cpp`](../src/cvc/ariadne/loader.cpp)).
 - **No DSL-visible future from the pycvc async layer.** Both `register_async_fn` and
@@ -1335,8 +1401,9 @@ that directory as the `ari-golden-<OS>-<lane>` artifact.
 **Adding a test.**
 
 1. Add `src/cvcGL/test/golden/<name>.ari`. Declare `meta.min_libcvc`. Fix every value with
-   `init:`, place every window with `pos:`, and give each one a `size:` (see the gaps below).
-   The test requires a document to load without warnings.
+   `init:` and place every window with `pos:`. A window with no `size:` fits its content
+   (§5.8), which the pinned font keeps the same from run to run. The test requires a document to
+   load without warnings.
 2. If the picture needs input, such as an open menu or a tooltip, add a pointer script for
    `<name>` to `kCases` in the test: a move, press or release before a given frame, in ImGui
    pixels from the top left.
@@ -1363,8 +1430,6 @@ ImGui overlay compiled as inert stubs.
 
 **Gaps the goldens step around (2026-10-19):**
 
-- A window with no `size:` stays at ImGui's 32 px minimum. §11.4 persists its size before
-  ImGui has fitted it and seeds that size back, which cancels the auto-fit.
 - `layout: {kind: horizontal}` is ignored on a window body, and the embedded schema rejects the
   `size: {hint, min, max}` map and `"50%"` strings that the loader accepts.
 

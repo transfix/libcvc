@@ -87,6 +87,19 @@ float resolve_track(const ariadne::Track &t, float parent) {
   return 0.0f;
 }
 
+// §3.0.3b auto-fit. A window with no authored or persisted size fits its content when it first
+// appears: ImGui measures the content on a hidden first frame and sizes the window to it on the
+// next. These are those frames; after them the window keeps its size and the user owns it.
+bool is_fitting(const ImGuiWindow *w) {
+  return w->AutoFitFramesX > 0 || w->AutoFitFramesY > 0 || w->HiddenFramesCannotSkipItems > 0;
+}
+
+// The width a labeled widget is measured at while its window fits: what ImGui gives an
+// auto-resizing window's items. A window's default item width is 65% of the window, and the window
+// is still at its minimum size while it measures, so without this the window would fit sliders a
+// few pixels wide.
+float fit_item_width() { return ImTrunc(ImGui::GetFontSize() * 16.0f); }
+
 // A horizontal drag seam between two stacked panes (the classic ImGui splitter
 // idiom, §3.0.3b "rows are a manual splitter"): dragging adjusts *a and *b.
 bool row_splitter(float thickness, float *a, float *b, float min_a, float min_b, float long_axis) {
@@ -128,12 +141,17 @@ void ImGuiBackend::focus_next_window() {
 
 bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne::Size &size,
                                 float border, bool *p_open) {
-  int pushes = 0;
+  // Stable ImGui identity via the "Visible title###stable.id" trick (roadmap §3.3).
+  std::string name = title;
+  name += "###";
+  name += id;
+  OpenWindow ow;
 #ifdef CVC_ENABLE_IMGUI
   // Resolve the §3.0.3b size against the main viewport's WORK area (the menu-aware
   // content rect), per axis: px verbatim, percent as a fraction of the work size,
   // auto -> 0 (let ImGui fit). min/max become window size constraints.
   const ImGuiViewport *vp = ImGui::GetMainViewport();
+  const ImGuiStyle &style = ImGui::GetStyle();
   const ImVec2 avail = vp->WorkSize;
   auto px = [](const ariadne::Extent &e, float parent) -> float {
     if (e.unit == ariadne::Unit::Px)
@@ -142,15 +160,21 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
       return parent * e.value / 100.0f;
     return 0.0f; // Auto
   };
+  ImGuiWindow *win = ImGui::FindWindowByName(name.c_str()); // nullptr until its first Begin
   // §11.4: seed the window from a persisted tree.<id>.geometry when the core supplied one. A FREE
   // window uses ImGuiCond_FirstUseEver (apply-once: the seed takes only on the window's first
   // appearance — a genuinely new window, or one whose imgui.ini state was cleared — and the user's
   // drag then owns it; the core re-passes the seed each frame, harmless under FirstUseEver, §16.2).
   // A seeded size wins over the authored size below (skip that seeding when a seed carries a size).
+  const bool seededPos = m_haveSeed && m_pendingSeed.has_pos;
   const bool seededSize = m_haveSeed && m_pendingSeed.has_size;
+  ImVec2 pos = win ? win->Pos : vp->Pos + ImVec2(60.0f, 60.0f); // ImGui's spot for a new window
   if (m_haveSeed) {
-    if (m_pendingSeed.has_pos)
+    if (m_pendingSeed.has_pos) {
       ImGui::SetNextWindowPos(ImVec2(m_pendingSeed.x, m_pendingSeed.y), ImGuiCond_FirstUseEver);
+      if (!win)
+        pos = ImVec2(m_pendingSeed.x, m_pendingSeed.y);
+    }
     if (m_pendingSeed.has_size)
       ImGui::SetNextWindowSize(ImVec2(m_pendingSeed.w, m_pendingSeed.h), ImGuiCond_FirstUseEver);
     m_haveSeed = false;
@@ -158,43 +182,101 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
   if (!seededSize && (size.w.is_set() || size.h.is_set()))
     ImGui::SetNextWindowSize(ImVec2(px(size.w, avail.x), px(size.h, avail.y)),
                              ImGuiCond_FirstUseEver);
-  if (size.min_w.is_set() || size.min_h.is_set() || size.max_w.is_set() || size.max_h.is_set()) {
-    const ImVec2 mn(size.min_w.is_set() ? px(size.min_w, avail.x) : 0.0f,
-                    size.min_h.is_set() ? px(size.min_h, avail.y) : 0.0f);
-    const ImVec2 mx(size.max_w.is_set() ? px(size.max_w, avail.x) : FLT_MAX,
-                    size.max_h.is_set() ? px(size.max_h, avail.y) : FLT_MAX);
-    ImGui::SetNextWindowSizeConstraints(mn, mx);
+  // §3.0.3b auto-fit: an axis with neither an authored nor a persisted size fits the content.
+  const bool fitW = !seededSize && !size.w.is_set();
+  const bool fitH = !seededSize && !size.h.is_set();
+  ow.fitting = (fitW || fitH) && (!win || is_fitting(win));
+
+  // §3.0.3b first placement: a window that first appears with no position (no authored `pos:` and
+  // no persisted geometry) joins the flow (see m_flowIds) and is placed there while it fits.
+  if (!win && !seededPos)
+    m_flowIds.insert(id);
+  const bool flow = m_flowIds.count(id) != 0;
+  const bool placing = flow && (!win || is_fitting(win));
+  if (ImGui::GetFrameCount() != m_flowFrame) {
+    m_flowFrame = ImGui::GetFrameCount();
+    m_flowPlace = m_flowSettled; // windows placed this frame go after every settled one
+    m_flowSettled = FlowCursor{};
   }
+  const ImVec2 lo = vp->WorkPos + style.WindowPadding; // the work area, inset by a window padding
+  const ImVec2 hi = vp->WorkPos + vp->WorkSize - style.WindowPadding;
+  if (placing) {
+    // The size it is about to take: the authored px on a sized axis, else what its content measured
+    // (nothing yet on its first, hidden frame, which is placed again once it has measured).
+    ImVec2 expect(px(size.w, avail.x), px(size.h, avail.y));
+    if (win) {
+      const ImVec2 fit = ImGui::CalcWindowNextAutoFitSize(win);
+      if (fitW)
+        expect.x = fit.x;
+      if (fitH)
+        expect.y = fit.y;
+    }
+    pos = lo;
+    if (m_flowPlace.have) {
+      pos = ImVec2(m_flowPlace.x, m_flowPlace.bottom + style.ItemSpacing.y); // below the flow
+      if (pos.y + expect.y > hi.y)
+        pos = ImVec2(m_flowPlace.col_right + style.ItemSpacing.x, lo.y); // no room: a new column
+      if (pos.x + expect.x > hi.x)
+        pos.x = ImMax(lo.x, hi.x - expect.x); // no room for a column either: overlap, on screen
+    }
+    ImGui::SetNextWindowPos(pos, ImGuiCond_Always);
+  }
+
+  // Size constraints: the authored min/max, and while a window fits, the edge of the work area —
+  // a fitted axis stops where the window would leave the viewport (never below an authored min),
+  // and the rest scrolls.
+  ImVec2 mn(size.min_w.is_set() ? px(size.min_w, avail.x) : 0.0f,
+            size.min_h.is_set() ? px(size.min_h, avail.y) : 0.0f);
+  ImVec2 mx(size.max_w.is_set() ? px(size.max_w, avail.x) : FLT_MAX,
+            size.max_h.is_set() ? px(size.max_h, avail.y) : FLT_MAX);
+  const bool constrained =
+      size.min_w.is_set() || size.min_h.is_set() || size.max_w.is_set() || size.max_h.is_set();
+  if (ow.fitting) {
+    if (fitW)
+      mx.x = ImMax(mn.x, ImMin(mx.x, ImMax(hi.x - pos.x, style.WindowMinSize.x)));
+    if (fitH)
+      mx.y = ImMax(mn.y, ImMin(mx.y, ImMax(hi.y - pos.y, style.WindowMinSize.y)));
+  }
+  if (constrained || ow.fitting)
+    ImGui::SetNextWindowSizeConstraints(mn, mx);
   if (border >= 0.0f) {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, border);
-    ++pushes;
+    ++ow.style_pushes;
   }
+  // HorizontalScrollbar: content wider than the window scrolls instead of being clipped (ImGui
+  // already scrolls a window vertically).
+  const bool vis = ImGui::Begin(name.c_str(), p_open, ImGuiWindowFlags_HorizontalScrollbar);
+  ImGuiWindow *cur = ImGui::GetCurrentWindow();
+  // The next window placed goes below this one, wherever the user has moved it since, and as tall
+  // as it is when expanded (SizeFull), so a collapsed window keeps its room.
+  if (placing)
+    m_flowPlace.pass(cur->Pos.x, cur->Pos.y, cur->SizeFull.x, cur->SizeFull.y);
+  if (flow && !is_fitting(cur))
+    m_flowSettled.pass(cur->Pos.x, cur->Pos.y, cur->SizeFull.x, cur->SizeFull.y);
 #else
   (void)size;
   (void)border;
   m_haveSeed = false; // consume the seed even in the inert (no-ImGui) build
-#endif
-  // Stable ImGui identity via the "Visible title###stable.id" trick (roadmap §3.3).
-  std::string name = title;
-  name += "###";
-  name += id;
   const bool vis = ui::Begin(name.c_str(), p_open);
-  m_windowStylePushes.push_back(pushes);
+#endif
+  m_openWindows.push_back(ow);
   // §11.4: snapshot this window's current geometry for the core to persist. Position is always
   // valid; size only when NOT collapsed (a collapsed window reports just its title-bar height,
   // which must not clobber the persisted content size — the core back-fills the size from the
-  // seed). A build without ImGui reports nothing (has_pos/has_size stay false).
+  // seed). A build without ImGui reports nothing (has_pos/has_size stay false). Nor does a window
+  // that is still fitting: its size is not final yet, and persisting it would seed it back and stop
+  // the fit (the window would stay at ImGui's 32 px minimum).
   m_lastWindowGeom = ariadne::WindowGeom{};
 #ifdef CVC_ENABLE_IMGUI
-  const ImVec2 wp = ImGui::GetWindowPos();
-  m_lastWindowGeom.has_pos = true;
-  m_lastWindowGeom.x = wp.x;
-  m_lastWindowGeom.y = wp.y;
-  if (!ImGui::IsWindowCollapsed()) {
-    const ImVec2 ws = ImGui::GetWindowSize();
-    m_lastWindowGeom.has_size = true;
-    m_lastWindowGeom.w = ws.x;
-    m_lastWindowGeom.h = ws.y;
+  if (!is_fitting(cur)) {
+    m_lastWindowGeom.has_pos = true;
+    m_lastWindowGeom.x = cur->Pos.x;
+    m_lastWindowGeom.y = cur->Pos.y;
+    if (!cur->Collapsed) {
+      m_lastWindowGeom.has_size = true;
+      m_lastWindowGeom.w = cur->Size.x;
+      m_lastWindowGeom.h = cur->Size.y;
+    }
   }
 #endif
   return vis;
@@ -209,9 +291,9 @@ ariadne::WindowGeom ImGuiBackend::window_geometry() const { return m_lastWindowG
 
 void ImGuiBackend::end_window() {
   ui::End(); // unconditional per ImGui's contract
-  if (!m_windowStylePushes.empty()) {
-    const int n = m_windowStylePushes.back();
-    m_windowStylePushes.pop_back();
+  if (!m_openWindows.empty()) {
+    const int n = m_openWindows.back().style_pushes;
+    m_openWindows.pop_back();
 #ifdef CVC_ENABLE_IMGUI
     if (n)
       ImGui::PopStyleVar(n);
@@ -349,8 +431,12 @@ void ImGuiBackend::grid_next_cell() {
       row_splitter(4.0f, a, b, 24.0f, 24.0f, g.split_long_axis);
     }
     const float h = (i < n) ? store->GetFloat(g.pane_keys[i]) : 0.0f;
+    // A pane fills its window's width (0), so it has no width of its own for a fitting window to
+    // measure: while the window fits, a pane is as wide as a fitted labeled widget with its label.
+    const float w =
+        fitting() ? ImMax(ImGui::GetContentRegionAvail().x, fit_item_width() * 1.5f) : 0.0f;
     const std::string pid = "##cvcg.pane" + std::to_string(i);
-    ImGui::BeginChild(pid.c_str(), ImVec2(0.0f, h), ImGuiChildFlags_Borders);
+    ImGui::BeginChild(pid.c_str(), ImVec2(w, h), ImGuiChildFlags_Borders);
     ++g.cell;
     return;
   }
@@ -539,19 +625,26 @@ ariadne::BoolEdit ImGuiBackend::checkbox(const char *label, bool current) {
 }
 
 #ifdef CVC_ENABLE_IMGUI
-// Keep a slider/int widget's TRAILING label from clipping in a narrow window. ImGui lays a labeled
-// widget out as [frame of CalcItemWidth()][ItemInnerSpacing][label]; the default item width (~65%
-// of the content region) leaves only the remainder for the label, so a long label ("Bake interval
-// (frames)") runs past the right edge of a slim panel. When that would happen, shrink JUST the next
-// item so [frame][spacing][label] fits the content region — floored so the frame stays grabbable.
-// When the label already fits at the default width (a roomy panel / short label), ImGui's default
-// is left untouched, so this never narrows a slider that was fine.
+// Keep a slider / input / combo / colour widget's TRAILING label from clipping in a narrow window.
+// ImGui lays a labeled widget out as [frame of CalcItemWidth()][ItemInnerSpacing][label]; the
+// default item width (~65% of the content region) leaves only the remainder for the label, so a
+// long label ("Bake interval (frames)") runs past the right edge of a slim panel. When that would
+// happen, shrink JUST the next item so [frame][spacing][label] fits the content region — floored so
+// the frame stays grabbable. When the label already fits at the default width (a roomy panel /
+// short label), ImGui's default is left untouched, so this never narrows a slider that was fine.
 //
 // In a table cell the widget always fills the cell instead. The default (~65% of the cell) feeds
 // back into an auto-width column, which ImGui re-fits to its content each frame: the column shrank
 // to 65% of itself every frame until the 48 px floor snapped it back, so the slider never held a
 // width long enough to be dragged.
-void reserve_label_width(const char *label) {
+//
+// While its window fits itself to its content (§3.0.3b auto-fit) the widget takes fit_item_width()
+// instead: the window is measuring, not yet at the size the widget should share.
+void reserve_label_width(const char *label, bool fitting) {
+  if (fitting) {
+    ImGui::SetNextItemWidth(fit_item_width());
+    return;
+  }
   const float avail = ImGui::GetContentRegionAvail().x;
   const float labelW = ImGui::CalcTextSize(label, nullptr, /*hide_text_after_double_hash=*/true).x;
   const float fit = avail - ImGui::GetStyle().ItemInnerSpacing.x - labelW;
@@ -564,7 +657,7 @@ ariadne::IntEdit ImGuiBackend::slider_int(const char *label, const char *key, in
                                           int hi) {
 #ifdef CVC_ENABLE_IMGUI
   int &v = *cache_int(key, current, ImGui::IsAnyItemActive());
-  reserve_label_width(label);
+  reserve_label_width(label, fitting());
   const bool changed = ImGui::SliderInt(label, &v, lo, hi);
   const bool committed = ImGui::IsItemDeactivatedAfterEdit(); // one write, on release
   return {changed, committed, v};
@@ -581,7 +674,7 @@ ariadne::DoubleEdit ImGuiBackend::slider_double(const char *label, const char *k
                                                 double lo, double hi, const char *fmt) {
 #ifdef CVC_ENABLE_IMGUI
   float &v = *cache_float(key, static_cast<float>(current), ImGui::IsAnyItemActive());
-  reserve_label_width(label);
+  reserve_label_width(label, fitting());
   const bool changed =
       ImGui::SliderFloat(label, &v, static_cast<float>(lo), static_cast<float>(hi), fmt);
   const bool committed = ImGui::IsItemDeactivatedAfterEdit();
@@ -605,6 +698,7 @@ ariadne::IndexEdit ImGuiBackend::combo(const char *label, int current_index,
 #ifdef CVC_ENABLE_IMGUI
   const int idx =
       (current_index >= 0 && current_index < static_cast<int>(options.size())) ? current_index : 0;
+  reserve_label_width(label, fitting());
   if (ImGui::BeginCombo(label, options[idx].c_str())) {
     for (std::size_t i = 0; i < options.size(); ++i) {
       const bool sel = (static_cast<int>(i) == idx);
@@ -633,7 +727,7 @@ ariadne::StringEdit ImGuiBackend::input_text(const char *label, const char *key,
   if (!ImGui::IsAnyItemActive())
     buf = current;
   InputTextStr ud{&buf};
-  reserve_label_width(label);
+  reserve_label_width(label, fitting());
   // EnterReturnsTrue commits on Enter (a chat box's send); IsItemDeactivatedAfterEdit commits on
   // focus-leave; CallbackResize lets the std::string grow past its initial capacity as typed.
   const bool entered =
@@ -656,6 +750,7 @@ ariadne::ColorEdit ImGuiBackend::color(const char *label, const float rgb[3]) {
   e.rgb[2] = rgb[2];
 #ifdef CVC_ENABLE_IMGUI
   e.drawn = true;
+  reserve_label_width(label, fitting());
   // ColorEdit3 edits e.rgb in place and returns true on any change this frame. Commit immediately
   // (like a discrete widget) — the core writes each change, so the picker reads its own value back
   // next frame with no per-widget edit cache (a colour edit is infrequent, not a continuous drag).

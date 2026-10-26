@@ -155,7 +155,10 @@ public:
   // owns it; the core re-passes the seed each frame, harmless under FirstUseEver, §16.2), so the
   // core never asks the backend to re-force geometry. window_geometry() is queried right AFTER
   // begin_window: the window's current on-screen geometry, so the core writes a user move / resize
-  // back to state. Both default to no-op / {} — a backend with no movable windows persists nothing.
+  // back to state. It reports {} while the window is still fitting its content (§3.0.3b auto-fit:
+  // a window with no size measures for a frame or two first), so a size that is not final is never
+  // persisted and seeded back. Both default to no-op / {} — a backend with no movable windows
+  // persists nothing.
   virtual void seed_window_geometry(const WindowGeom &g) { (void)g; }
   virtual WindowGeom window_geometry() const { return {}; }
 

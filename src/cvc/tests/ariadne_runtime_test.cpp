@@ -29,6 +29,7 @@
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <span>
@@ -174,8 +175,13 @@ struct MockBackend : Backend {
     rec("seed_grid_columns");
   }
   std::vector<float> grid_columns() const override { return grid_columns_ret; }
-  BoolEdit menu_item_toggle(const char *l, bool) override {
+  std::string click_toggle; // simulate the user clicking the menu item with this label
+  std::map<std::string, bool> toggle_shown; // label -> the tick it was drawn with
+  BoolEdit menu_item_toggle(const char *l, bool cur) override {
     rec(std::string("toggle:") + l);
+    toggle_shown[l] = cur;
+    if (click_toggle == l)
+      return {true, true, !cur};
     return {};
   }
   BoolEdit checkbox(const char *l, bool) override {
@@ -2452,6 +2458,41 @@ TEST(AriadneRuntime, WindowWithNoGeometryNeitherSeedsNorWrites) {
   EXPECT_EQ(cvc::state::instance(app)("ui.demo.tree.W.geometry").value(), ""); // no spurious write
 }
 
+TEST(AriadneRuntime, AWindowFittingItsContentIsNeitherPersistedNorSeededUntilItSettles) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  // §3.0.3b auto-fit: a window with no size: measures its content for its first frames, and its
+  // backend reports no geometry until the size is final. Persisting the size it has before that
+  // would seed it back next frame and stop the fit (ImGui's 32 px stub).
+  Widget w = window("W", {text("x")});
+  w.has_pos = true;
+  w.pos_x = 40;
+  w.pos_y = 50;
+  rt.set_root(group({w}));
+  mb.window_geom_ret = WindowGeom{}; // fitting
+  for (int f = 0; f < 2; ++f) {
+    mb.seeded_geom_called = false;
+    rt.render();
+    EXPECT_EQ(cvc::state::instance(app)("ui.demo.tree.W.geometry").value(), "") << "frame " << f;
+    // Only the authored pos: reaches the backend while it fits — never a size.
+    ASSERT_TRUE(mb.seeded_geom_called) << "frame " << f;
+    EXPECT_TRUE(mb.seeded_geom.has_pos);
+    EXPECT_FLOAT_EQ(mb.seeded_geom.x, 40.0f);
+    EXPECT_FALSE(mb.seeded_geom.has_size) << "frame " << f;
+  }
+  mb.window_geom_ret = WindowGeom{true, true, 40, 50, 310, 280}; // settled at its content's size
+  rt.render();
+  EXPECT_EQ(cvc::state::instance(app)("ui.demo.tree.W.geometry").value(), "40,50,310,280");
+  mb.seeded_geom_called = false;
+  rt.render(); // from now on the fitted geometry is the seed
+  ASSERT_TRUE(mb.seeded_geom_called);
+  EXPECT_TRUE(mb.seeded_geom.has_size);
+  EXPECT_FLOAT_EQ(mb.seeded_geom.w, 310.0f);
+  EXPECT_FLOAT_EQ(mb.seeded_geom.h, 280.0f);
+}
+
 TEST(AriadneRuntime, WindowGeometryIsKeyedPerId) {
   cvc::app app;
   Runtime rt(app, "ui.demo");
@@ -3170,6 +3211,151 @@ TEST(AriadneRuntime, ClosableWindowClosesAndReopens) {
   mb.log.clear();
   rt.render();
   EXPECT_TRUE(has("begin_window:Panel(closable)"));
+}
+
+// ── §5.9 the built-in Windows menu ──────────────────────────────────────────────────────────────
+namespace {
+std::ptrdiff_t log_index(const MockBackend &mb, const std::string &s) {
+  const auto it = std::find(mb.log.begin(), mb.log.end(), s);
+  return it == mb.log.end() ? -1 : it - mb.log.begin();
+}
+Widget window_with_id(const std::string &title, const std::string &id, bool closable) {
+  Widget w = window(title, {text("body")});
+  w.id = id;
+  w.closable = closable;
+  return w;
+}
+} // namespace
+
+TEST(AriadneRuntime, WindowsMenuReopensAClosedWindow) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  // The document's own menu, a closable window and one without a close button.
+  rt.set_root(group({menubar({menu("File", {menu_action("Quit", "quit")})}),
+                     window_with_id("Alpha", "a", true), window_with_id("Beta", "b", false)}));
+  rt.render();
+  // The Windows menu comes after the document's menus, with a ticked item per window.
+  ASSERT_GE(log_index(mb, "begin_menu:Windows"), 0);
+  EXPECT_LT(log_index(mb, "begin_menu:File"), log_index(mb, "begin_menu:Windows"));
+  EXPECT_TRUE(mb.toggle_shown["Alpha"]);
+  EXPECT_TRUE(mb.toggle_shown["Beta"]);
+
+  // Alpha's X closes it; its item loses the tick and the window is not drawn.
+  mb.close_windows = true;
+  rt.render();
+  mb.close_windows = false;
+  EXPECT_EQ(cvc::state::instance(app)("ui.demo.tree.a.open").value(), "0");
+  mb.log.clear();
+  rt.render();
+  EXPECT_FALSE(mb.saw("begin_window:Alpha(closable)"));
+  EXPECT_FALSE(mb.toggle_shown["Alpha"]);
+
+  // Clicking the item opens it again.
+  mb.click_toggle = "Alpha";
+  rt.render();
+  mb.click_toggle.clear();
+  EXPECT_EQ(cvc::state::instance(app)("ui.demo.tree.a.open").value(), "1");
+  mb.log.clear();
+  rt.render();
+  EXPECT_TRUE(mb.saw("begin_window:Alpha(closable)"));
+
+  // A window with no close button can be hidden and shown from the menu too.
+  mb.click_toggle = "Beta";
+  rt.render();
+  mb.click_toggle.clear();
+  mb.log.clear();
+  rt.render();
+  EXPECT_FALSE(mb.saw("begin_window:Beta"));
+  mb.click_toggle = "Beta";
+  rt.render();
+  mb.click_toggle.clear();
+  mb.log.clear();
+  rt.render();
+  EXPECT_TRUE(mb.saw("begin_window:Beta"));
+}
+
+TEST(AriadneRuntime, WindowsMenuLeavesOutWindowsTheDocumentAlreadyToggles) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  // A Settings menu of the document already opens Alpha (lsystem_forest's pattern).
+  rt.set_root(group({menubar({menu("Settings", {menu_toggle("Alpha", "tree.a.open", true)})}),
+                     window_with_id("Alpha", "a", true), window_with_id("Beta", "b", true)}));
+  rt.render();
+  ASSERT_TRUE(mb.saw("begin_menu:Windows"));
+  EXPECT_EQ(std::count(mb.log.begin(), mb.log.end(), "toggle:Alpha"), 1) << "not listed twice";
+  EXPECT_TRUE(mb.saw("toggle:Beta"));
+
+  // Every window already covered: no Windows menu at all.
+  MockBackend mb2;
+  Runtime rt2(app, "");
+  rt2.set_backend(&mb2);
+  rt2.set_root(group({menubar({menu("Settings", {menu_toggle("Alpha", "tree.a.open", true)})}),
+                      window_with_id("Alpha", "a", true)}));
+  rt2.render();
+  EXPECT_FALSE(mb2.saw("begin_menu:Windows"));
+}
+
+TEST(AriadneRuntime, WindowsMenuCanBePlacedOrTurnedOff) {
+  cvc::app app;
+  {
+    // Placed inside the document's View menu, under its own title, and not appended again.
+    MockBackend mb;
+    Runtime rt(app, "");
+    rt.set_backend(&mb);
+    rt.set_root(group(
+        {menubar({menu("View", {windows_menu("Panels")})}), window_with_id("Alpha", "a", true)}));
+    rt.render();
+    const std::ptrdiff_t view = log_index(mb, "begin_menu:View"),
+                         panels = log_index(mb, "begin_menu:Panels");
+    ASSERT_GE(view, 0);
+    ASSERT_GE(panels, 0);
+    EXPECT_LT(view, panels);
+    EXPECT_FALSE(mb.saw("begin_menu:Windows"));
+    EXPECT_TRUE(mb.saw("toggle:Alpha"));
+  }
+  {
+    // windows_menu: false (a setting outside the menubar): no menu.
+    MockBackend mb;
+    Runtime rt(app, "");
+    rt.set_backend(&mb);
+    rt.set_root(group({menubar({menu("File", {menu_action("Quit", "quit")})}),
+                       window_with_id("Alpha", "a", true), windows_menu("", false)}));
+    rt.render();
+    EXPECT_FALSE(mb.saw("begin_menu:Windows"));
+    EXPECT_FALSE(mb.saw("toggle:Alpha"));
+  }
+}
+
+TEST(AriadneRuntime, WindowsMenuWithoutADocumentMenubar) {
+  cvc::app app;
+  {
+    // A closable window but no menubar: one is added for the Windows menu, or the closed window
+    // could never come back.
+    MockBackend mb;
+    Runtime rt(app, "");
+    rt.set_backend(&mb);
+    rt.set_root(group({window_with_id("Alpha", "a", true)}));
+    rt.render();
+    EXPECT_TRUE(mb.saw("begin_menubar"));
+    EXPECT_TRUE(mb.saw("begin_menu:Windows"));
+    EXPECT_TRUE(mb.saw("toggle:Alpha"));
+  }
+  {
+    // Nothing can be closed: no menubar is added.
+    MockBackend mb;
+    Runtime rt(app, "");
+    rt.set_backend(&mb);
+    Widget repeated = window_with_id("Cam {i}", "cam_{i}", true);
+    repeated.repeat = "2"; // made per frame: not listed (the document opens these itself)
+    rt.set_root(group({window_with_id("Alpha", "a", false), repeated}));
+    rt.render();
+    EXPECT_FALSE(mb.saw("begin_menubar"));
+    EXPECT_FALSE(mb.saw("begin_menu:Windows"));
+  }
 }
 
 // ── Phase-2 PR6: cvc::ariadne::stream DSL surface (stream-open/stream-info/stream-close) ──

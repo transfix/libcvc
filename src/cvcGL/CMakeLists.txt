@@ -847,6 +847,16 @@ add_test(NAME cvcgl_imgui_table_columns COMMAND cvcgl_imgui_table_columns)
 add_executable(cvcgl_imgui_grid_slider test/cvcgl_imgui_grid_slider.cpp)
 target_link_libraries(cvcgl_imgui_grid_slider PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_grid_slider COMMAND cvcgl_imgui_grid_slider)
+# A window with no size: fits its content when it first appears, inside the viewport, and scrolls
+# what does not fit; windows with no pos: flow instead of stacking (§3.0.3b). No window, no GL.
+add_executable(cvcgl_imgui_window_fit test/cvcgl_imgui_window_fit.cpp)
+target_link_libraries(cvcgl_imgui_window_fit PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_window_fit COMMAND cvcgl_imgui_window_fit)
+# A window closed with its X comes back from the built-in Windows menu (§5.9), clicked through
+# ImGui's own input. No window, no GL.
+add_executable(cvcgl_imgui_windows_menu test/cvcgl_imgui_windows_menu.cpp)
+target_link_libraries(cvcgl_imgui_windows_menu PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_windows_menu COMMAND cvcgl_imgui_windows_menu)
 
 # Golden images of the Ariadne ImGui/VTK backend (roadmap §16.6 phase 1): each .ari in
 # test/golden runs through AriRuntime + ImGuiBackend offscreen and its frame is compared with the
