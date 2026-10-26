@@ -256,11 +256,9 @@ def test_unit_hex_metrics():
     v = pycvc.hex_volume(hexv)
     sj = pycvc.hex_scaled_jacobian(hexv)
     assert abs(v - 1.0) < 1e-9, f"unit cube volume should be 1.0, got {v}"
-    # libcvc scales the Jacobian by the max pairwise distance cubed (the space
-    # diagonal), so a perfect cube is ~0.024, not the canonical 1.0 — assert it
-    # is positive (a valid, non-inverted element) and finite.
-    assert sj > 0.0 and math.isfinite(sj)
-    print(f"unit hex: volume={v:.4f} scaled_jacobian={sj:.4f} (>0 = valid element)")
+    # The worst corner's determinant of unit edges: 1 for a cube.
+    assert abs(sj - 1.0) < 1e-9, f"unit cube scaled Jacobian should be 1.0, got {sj}"
+    print(f"unit hex: volume={v:.4f} scaled_jacobian={sj:.4f}")
 
 
 def test_quality_metric_bad_length_raises():

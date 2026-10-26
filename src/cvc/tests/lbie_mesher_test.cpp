@@ -891,6 +891,50 @@ TEST_F(LbieMesherTest, QuadMeshesWithLevelChangesAreClosedAndAllQuads) {
   EXPECT_EQ(crowded, 0) << "edges with three or more quads";
 }
 
+// The geoframe <-> geometry adapter read a hexahedron as quads[6h] and then quads[6h+1] in
+// order, and wrote it back the same way, but LBIE winds that second face the other way (see
+// hexa_corners). Every hexahedron cvc::hexahedralize returned was twisted -- corner k + 4 not
+// over corner k, the scaled Jacobian of this sphere's mesh 0 on average where it is ~0.8 -- and
+// cvc::geometry::quality_improve handed LBIE's optimizer twisted hexahedra. The adapter now reads
+// and writes LBIE's own layout.
+TEST_F(LbieMesherTest, AdapterKeepsLbiesHexahedronCorners) {
+  LBIE::geoframe g = run_do_mesh(make_sphere_volume(ctx, 17, 0.5), 0.0f, 0.0f, kDefaultErr,
+                                 kDefaultErrIn, LBIE::geoframe::HEXA);
+  ASSERT_GT(g.numquads, 0);
+  const int n = g.numquads / 6;
+  geometry geom = LBIE::to_geometry(g);
+  ASSERT_EQ(geom.num_hexs(), std::size_t(n));
+  for (int h = 0; h < n; ++h) {
+    const std::array<unsigned int, 8> v = hexa_corners(g, h);
+    for (int k = 0; k < 8; ++k)
+      ASSERT_EQ(geom.const_hexs()[h][k], v[k]) << "hexahedron " << h << ", corner " << k;
+  }
+
+  const LBIE::geoframe back = LBIE::to_geoframe(geom);
+  ASSERT_EQ(back.numquads, g.numquads);
+  for (int h = 0; h < n; ++h)
+    ASSERT_EQ(hexa_corners(back, h), hexa_corners(g, h)) << "hexahedron " << h;
+  {
+    LBIE::geoframe_adapter adapter(geom);
+    ASSERT_EQ(adapter.numquads, g.numquads);
+    for (int h = 0; h < n; ++h)
+      ASSERT_EQ(hexa_corners(adapter, h), hexa_corners(g, h)) << "hexahedron " << h;
+  }
+
+  int valid = 0;
+  double sum = 0.0;
+  for (const auto &hex : geom.const_hexs()) {
+    geometry::point_t c[8];
+    for (int k = 0; k < 8; ++k)
+      c[k] = geom.const_points()[hex[k]];
+    const double sj = hex_scaled_jacobian(c);
+    valid += sj > 0.0;
+    sum += sj;
+  }
+  EXPECT_GE(valid, 9 * n / 10) << "of " << n << " hexahedra have every corner right-handed";
+  EXPECT_GT(sum / n, 0.5) << "mean scaled Jacobian";
+}
+
 // ---------------------------------------------------------------------------
 // mesher.cpp wrappers: verbose path, quality_improve, geometry-based API
 // ---------------------------------------------------------------------------
@@ -1347,7 +1391,8 @@ TEST_F(LbieMesherTest, AdapterTetHexQuadRoundtrip) {
   EXPECT_EQ(hf.mesh_type, LBIE::geoframe::HEXA);
   EXPECT_EQ(hf.numquads, 6);
   geometry hback = LBIE::to_geometry(hf);
-  EXPECT_EQ(hback.num_hexs(), 1u);
+  ASSERT_EQ(hback.num_hexs(), 1u);
+  EXPECT_EQ(hback.const_hexs()[0], hexg.const_hexs()[0]);
 
   // Quad surface geometry.
   geometry quadg;
@@ -1493,14 +1538,20 @@ TEST_F(LbieMesherTest, HexUtilityFunctions) {
   EXPECT_NEAR(std::fabs(hex_volume(cube)), 1.0, 1e-9);
   double jac = hex_jacobian(cube);
   EXPECT_NEAR(std::fabs(jac), 0.125, 1e-9); // parametric-center determinant
-  // Note: hex_scaled_jacobian is documented as "1 = perfect cube" but the
-  // implementation normalizes by the max *pairwise* vertex distance cubed
-  // (includes the body diagonal), so a unit cube scores
-  // 0.125 / sqrt(3)^3 ~= 0.024 rather than 1.0.
+  // The scaled Jacobian is the worst corner's determinant of unit edges: 1 for a cube (it was
+  // the centre Jacobian over the space diagonal cubed, 1/sqrt(27)), 1/sqrt(5) for a cube
+  // sheared by twice its height, -1 for the cube's mirror image.
   double sj = hex_scaled_jacobian(cube);
-  EXPECT_NEAR(sj, jac / std::pow(std::sqrt(3.0), 3), 1e-9);
-  EXPECT_GT(sj, 0.0);
-  EXPECT_LE(sj, 1.0);
+  EXPECT_NEAR(sj, 1.0, 1e-12);
+  geometry::point_t sheared[8], mirrored[8];
+  for (int i = 0; i < 8; ++i) {
+    sheared[i] = cube[i];
+    sheared[i][0] += 2.0 * cube[i][2];
+    mirrored[i] = cube[i];
+    mirrored[i][0] = -cube[i][0];
+  }
+  EXPECT_NEAR(hex_scaled_jacobian(sheared), 1.0 / std::sqrt(5.0), 1e-12);
+  EXPECT_NEAR(hex_scaled_jacobian(mirrored), -1.0, 1e-12);
 
   geometry::point_t center = {{0.5, 0.5, 0.5}};
   std::array<double, 8> w = hex_trilinear(center, cube);
@@ -1538,11 +1589,10 @@ TEST_F(LbieMesherTest, HexUtilityFunctions) {
   geometry::point_t outside = {{9.0, 9.0, 9.0}};
   EXPECT_TRUE(find_hexs_containing_point(outside, hexs, pts).empty());
 
-  // A unit cube scores ~0.024 on the implemented scaled-jacobian metric,
-  // so the documented default threshold of 0.2 would reject it.
-  std::vector<size_t> keep = filter_hexs_by_quality(hexs, pts, 0.01, HEX_SCALED_JACOBIAN);
+  // The documented default threshold (0.2) keeps a cube; nothing beats 1.
+  std::vector<size_t> keep = filter_hexs_by_quality(hexs, pts);
   EXPECT_EQ(keep.size(), 1u);
-  std::vector<size_t> none = filter_hexs_by_quality(hexs, pts, 0.5, HEX_SCALED_JACOBIAN);
+  std::vector<size_t> none = filter_hexs_by_quality(hexs, pts, 1.0, HEX_SCALED_JACOBIAN);
   EXPECT_TRUE(none.empty());
 
   geometry hg;
@@ -1551,7 +1601,7 @@ TEST_F(LbieMesherTest, HexUtilityFunctions) {
   hg.hexs().push_back(hex);
   geometry surf = extract_surface(hg);
   EXPECT_EQ(surf.num_quads(), 6u);
-  geometry hq = extract_quality_elements(hg, 0.01, HEX_SCALED_JACOBIAN);
+  geometry hq = extract_quality_elements(hg, 0.2, HEX_SCALED_JACOBIAN);
   EXPECT_EQ(hq.num_hexs(), 1u);
   std::array<double, 6> bounds = compute_mesh_bounds(hg);
   EXPECT_DOUBLE_EQ(bounds[5], 1.0);
