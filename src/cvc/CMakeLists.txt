@@ -2106,7 +2106,8 @@ if(CVC_ENABLE_IMAGEMAGICK)
     # Prefer pkg-config (has the exact link line for a hermetic delegate), but
     # in cross-compile (emcmake) it isn't always available / correctly rooted,
     # so fall back to find_library — which DOES honor CMAKE_FIND_ROOT_PATH.
-    # NAME:libname pairs: pkg-config module + library basename.
+    # "module|libname[|libname...]": pkg-config module + the library basenames the
+    # find_library fallback tries, in order (MSVC spellings after the unix one).
     foreach(_pair
         "bzip2|bz2"
         "libjpeg|jpeg"
@@ -2129,15 +2130,36 @@ if(CVC_ENABLE_IMAGEMAGICK)
         "libbrotlicommon|brotlicommon"
         # MagickCore's own gz* blob I/O and libpng's inflate. Usually already on
         # the line through assimp, but the closure should not depend on that.
-        "zlib|z")
+        # zlib's own CMake names the MSVC import library zlib.lib, not z.lib.
+        "zlib|z|zlib")
       string(REPLACE "|" ";" _p "${_pair}")
       list(GET _p 0 _pcmod)
-      list(GET _p 1 _libname)
+      list(SUBLIST _p 1 -1 _libnames)
       string(MAKE_C_IDENTIFIER "_im_dep_${_pcmod}" _im_var)
       set(_pc_found FALSE)
       if(PkgConfig_FOUND)
         pkg_check_modules(${_im_var} QUIET IMPORTED_TARGET ${_pcmod})
-        if(${_im_var}_FOUND)
+        # pkg_check_modules() reports FOUND once the .pc file parses, even when
+        # find_library() could not resolve one of its `-l` names: FindPkgConfig then
+        # leaves that name BARE in <prefix>_LINK_LIBRARIES and in the imported
+        # target. link.exe turns a bare name into <name>.lib on LIB and fails, and
+        # that is what cvcpkg's zlib.pc (`Libs: -lz`) does to an MSVC build, whose
+        # import library is zlib.lib: LNK1181 "cannot open input file 'z.lib'" on
+        # cvc.dll. Only a box with an MSYS2 pkg-config on PATH gets that far (the
+        # GitHub windows-2022 image has none), so CI stays green. On MSVC, trust
+        # pkg-config only when every library resolved to a path; otherwise use the
+        # find_library fallback below, which knows the MSVC names. Leave other
+        # toolchains alone: their linkers search for a bare name themselves (the
+        # wasm libxml-2.0.pc lists `-lm`, which emcc resolves with no file behind it).
+        set(_im_pc_resolved TRUE)
+        if(MSVC)
+          foreach(_im_pc_lib IN LISTS ${_im_var}_LINK_LIBRARIES)
+            if(NOT IS_ABSOLUTE "${_im_pc_lib}")
+              set(_im_pc_resolved FALSE)
+            endif()
+          endforeach()
+        endif()
+        if(${_im_var}_FOUND AND _im_pc_resolved)
           # Never let the build-local PkgConfig::_im_dep_* imported targets reach
           # the exported cvcTargets.cmake: downstream find_package(cvc) fails
           # ("target PkgConfig::_im_dep_bzip2 not found") because the consumer
@@ -2160,7 +2182,10 @@ if(CVC_ENABLE_IMAGEMAGICK)
         endif()
       endif()
       if(NOT _pc_found)
-        find_library(${_im_var}_LIB NAMES ${_libname})
+        # NAMES_PER_DIR: the first directory holding the library under ANY of its
+        # names wins, so the cvcpkg prefix's zlib.lib is not passed over for a later
+        # directory that happens to match the unix spelling.
+        find_library(${_im_var}_LIB NAMES ${_libnames} NAMES_PER_DIR)
         if(${_im_var}_LIB)
           # A direct PRIVATE link of this absolute find_library path leaks into the
           # STATIC export — a static cvc propagates PRIVATE deps as
