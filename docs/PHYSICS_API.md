@@ -819,9 +819,17 @@ sim.step();
 sim.publish(app, "scene"); // the fixed settings and the tick
 ```
 
-Lengths, speeds and accelerations in the tree are in nav's world frame (metres), not the
-normalized one (normalized = world × `config.scale`). So `nav.vehicle.vmax` is in m/s whatever
-metric the net was trained in.
+Lengths, speeds and accelerations in the tree are in nav's world frame (metres, seconds), never
+the normalized one (normalized = world × `config.scale`) or the map's cells. So
+`nav.vehicle.vmax` is in m/s whatever metric the net was trained in. `nav.sep_gain` (the carrot
+shift at contact) is in metres, and `nav.terrain.sigma` (the grade cost's blur, kept in cells by
+`terrain_config`) is in metres too. The force weights are in world units as well:
+
+- `nav.material.lam_hard` and `nav.terrain.lam_grade_hard` (a barrier's push at full strength)
+  are in m/s² (normalized ÷ scale);
+- `nav.material.lam_soft` and `nav.terrain.lam_grade` (the push per unit of risk or grade cost
+  gained per metre) are in m²/s² (normalized ÷ scale²);
+- `lam_soft_scale` and `lam_hard_scale` are plain multipliers.
 
 `pull()` reads these knobs. Each is seeded with the world's value when unset, applied when it
 changes, and ignored when invalid:

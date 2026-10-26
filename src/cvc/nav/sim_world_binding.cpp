@@ -70,10 +70,10 @@ const state_key_meta kNavKeys[] = {
     {"sep_radius", "knob", "m", 0, 20,
      "Agents closer than this push their carrots (the points they steer toward) apart, so a "
      "crowd steers round itself. Needs sep_gain too. 0: off. Default 0."},
-    {"sep_gain", "knob", "1", 0, 5,
-     "How hard nearby agents push each other's carrots apart: the shift, in nav's normalized "
-     "units, from a neighbour at contact. Higher: wider spacing, more weaving. 0: off. "
-     "Default 0."},
+    {"sep_gain", "knob", "m", 0, 10,
+     "How hard nearby agents push each other's carrots apart: how far a neighbour at contact "
+     "shifts an agent's carrot, falling off to nothing at sep_radius. Higher: wider spacing, more "
+     "weaving. 0: off. Default 0."},
     {"min_gap", "knob", "m", 0, 10,
      "The closest two agents' centres may come: after each drive, closer pairs are pushed "
      "apart to this (never into a wall). Skipped on a physics plant, whose bodies collide. "
@@ -154,13 +154,13 @@ const state_key_meta kVehicleKeys[] = {
 
 // <prefix>.nav.material: the material force's weights.
 const state_key_meta kMaterialKeys[] = {
-    {"lam_soft", "knob", "1", 0, 10,
-     "The weight of the soft force that steers vehicles off risky ground. Higher: wider detours "
-     "round risk. A steering policy that outputs its own weight replaces it per vehicle. "
-     "0: off. Default 0.5."},
-    {"lam_hard", "knob", "1", 0, 10,
-     "The weight of the barrier that keeps vehicles off hazardous material. Higher: they keep "
-     "further off it. Default 1."},
+    {"lam_soft", "knob", "m^2/s^2", 0, 4000,
+     "The weight of the soft force that steers vehicles off risky ground: the push, in m/s^2, "
+     "for each unit of risk gained per metre. Higher: wider detours round risk. A steering "
+     "policy that outputs its own weight replaces it per vehicle. 0: off."},
+    {"lam_hard", "knob", "m/s^2", 0, 200,
+     "The weight of the barrier that keeps vehicles off hazardous material: its push at full "
+     "strength. Higher: they keep further off it."},
     {"lam_soft_scale", "knob", "1", 0, 4,
      "A multiplier on the soft weight, whether fixed (lam_soft) or output by a trained policy, "
      "so it turns a trained policy's risk avoidance up or down too. Default 1."},
@@ -231,17 +231,18 @@ const state_key_meta kTerrainKeys[] = {
     {"tip_margin", "knob", "1", 0.5, 1,
      "The share of the rollover slope (the slope whose rise over run is tip_ratio) that counts "
      "as feasible. Lower: more margin against rolling, less ground open. Default 0.8."},
-    {"sigma", "knob", "cell", 0, 3,
-     "How much the grade cost (how near each cell's slope is to the limit) is blurred before "
-     "the force takes its gradient. Higher: a smoother push that starts further out. "
-     "Default 1."},
-    {"lam_grade", "knob", "1", 0, 10,
-     "The weight of the soft force that leans the drive toward gentler ground. Higher: a "
-     "stronger preference for flat ground, at the cost of longer paths. 0: off. Default 0.5."},
-    {"lam_grade_hard", "knob", "1", 0, 10,
-     "The weight of the barrier that pushes vehicles off infeasible slope. Unlike a wall, a "
-     "vehicle sent across such a cell can still cross it. Higher: keeps further off. 0: off. "
-     "Default 3."},
+    {"sigma", "knob", "m", 0, 50,
+     "How far the grade cost (how near each cell's slope is to the limit) is blurred before the "
+     "force takes its gradient. Higher: a smoother push that starts further out. Default: one "
+     "map cell."},
+    {"lam_grade", "knob", "m^2/s^2", 0, 4000,
+     "The weight of the soft force that leans the drive toward gentler ground: the push, in "
+     "m/s^2, for each unit of grade cost gained per metre. Higher: a stronger preference for flat "
+     "ground, at the cost of longer paths. 0: off."},
+    {"lam_grade_hard", "knob", "m/s^2", 0, 200,
+     "The weight of the barrier that pushes vehicles off infeasible slope: its push at full "
+     "strength. Unlike a wall, a vehicle sent across such a cell can still cross it. Higher: "
+     "keeps further off. 0: off."},
     {"k_sharp", "knob", "1/m", 0.25, 4,
      "How sharply the infeasible-slope barrier rises around d_hat_m. Higher: a more sudden, "
      "wall-like edge; lower: a gradual push. Default 1.25."},
@@ -387,8 +388,8 @@ void sim_world::pull(cvc::app &ctx, const std::string &prefix) {
            [&](double v) { c.reach_tol = static_cast<float>(v * S); });
     r.read("sep_radius", c.sep_radius * L, non_negative,
            [&](double v) { c.sep_radius = static_cast<float>(v * S); });
-    r.read("sep_gain", c.sep_gain, non_negative,
-           [&](double v) { c.sep_gain = static_cast<float>(v); });
+    r.read("sep_gain", c.sep_gain * L, non_negative,
+           [&](double v) { c.sep_gain = static_cast<float>(v * S); });
     r.read("min_gap", c.min_gap * L, non_negative,
            [&](double v) { c.min_gap = static_cast<float>(v * S); });
     r.read("min_gap_iters", c.min_gap_iters, whole,
@@ -464,13 +465,16 @@ void sim_world::pull(cvc::app &ctx, const std::string &prefix) {
     describe_state_keys(ctx, mb, kMaterialKeys, true);
     reader r(ctx, mb);
     material_config &m = mat_cfg_;
-    const auto weight = [&](const char *key, float &f) {
-      r.read(key, f, non_negative, [&](double x) { f = static_cast<float>(x); });
+    // unit: world per normalized. The soft force's weight multiplies a risk gradient per
+    // normalized unit into a normalized acceleration (L^2 to the world's m^2/s^2); the barrier's
+    // multiplies a unit direction (L to m/s^2). The scales are plain multipliers.
+    const auto weight = [&](const char *key, float &f, double unit) {
+      r.read(key, f * unit, non_negative, [&](double x) { f = static_cast<float>(x / unit); });
     };
-    weight("lam_soft", m.lam_soft);
-    weight("lam_hard", m.lam_hard);
-    weight("lam_soft_scale", m.lam_soft_scale);
-    weight("lam_hard_scale", m.lam_hard_scale);
+    weight("lam_soft", m.lam_soft, L * L);
+    weight("lam_hard", m.lam_hard, L);
+    weight("lam_soft_scale", m.lam_soft_scale, 1.0);
+    weight("lam_hard_scale", m.lam_hard_scale, 1.0);
   }
   if (terrain_on_) {
     const std::string tb = base + ".terrain";
@@ -481,8 +485,8 @@ void sim_world::pull(cvc::app &ctx, const std::string &prefix) {
     const auto value = [&](const char *key, double &d, bool (*ok)(double)) {
       changed |= r.read(key, d, ok, [&](double x) { d = x; });
     };
-    const auto weight = [&](const char *key, float &f, bool (*ok)(double)) {
-      changed |= r.read(key, f, ok, [&](double x) { f = static_cast<float>(x); });
+    const auto weight = [&](const char *key, float &f, double unit, bool (*ok)(double)) {
+      changed |= r.read(key, f * unit, ok, [&](double x) { f = static_cast<float>(x / unit); });
     };
     const auto toggle = [&](const char *key, bool &b) {
       changed |= r.read(key, b2d(b), flag, [&](double x) { b = x != 0.0; });
@@ -492,11 +496,15 @@ void sim_world::pull(cvc::app &ctx, const std::string &prefix) {
     changed |= r.read(
         "tip_margin", tc.tip_margin, [](double x) { return x > 0.0 && x <= 1.0; },
         [&](double x) { tc.tip_margin = x; });
-    value("sigma", tc.sigma, non_negative);
-    weight("lam_grade", tc.lam_grade, non_negative);
-    weight("lam_grade_hard", tc.lam_grade_hard, non_negative);
-    weight("k_sharp", tc.k_sharp, positive);
-    weight("d_hat_m", tc.d_hat_m, positive);
+    // The blur is kept in cells (material_build); the tree has it in metres.
+    const double cell_w = (cfg_.max_x - cfg_.min_x) / std::max(1, cols_ - 1);
+    changed |=
+        r.read("sigma", tc.sigma * cell_w, non_negative, [&](double x) { tc.sigma = x / cell_w; });
+    // The grade force's weights in world units, as the material's (L^2: m^2/s^2; L: m/s^2).
+    weight("lam_grade", tc.lam_grade, L * L, non_negative);
+    weight("lam_grade_hard", tc.lam_grade_hard, L, non_negative);
+    weight("k_sharp", tc.k_sharp, 1.0, positive);
+    weight("d_hat_m", tc.d_hat_m, 1.0, positive);
     toggle("block_infeasible", tc.block_infeasible);
     toggle("governors", tc.governors);
     if (changed)
