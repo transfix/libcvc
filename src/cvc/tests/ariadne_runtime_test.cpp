@@ -458,9 +458,10 @@ TEST(AriadneAction, ProgramActionCapturesDeliveredValueFromMsgRecv) {
 // (HostIntrinsicCallableFromProgram) with the worker-delivers park/resume path
 // (ProgramActionParksOnMsgRecvAndResumesWhenWorkerDelivers). msg-recv is race-free either way: it
 // pops any already-buffered pending message before parking, so worker-posts-early also delivers.
-// NB the nav_compute demo drives this through app.compute_async (which wraps exactly this
-// background-thread → parallel_for → post_message); here we hand-roll a joinable std::thread so the
-// test can join() deterministically before asserting (compute_async is fire-and-forget by design).
+// This is the raw cross-thread primitive (a worker posts, msg-recv wakes). A host verb is better
+// written as an async function, which parks at the call and is charged to the action: see
+// NavStepAsAnAsyncFunctionReturnsItsResult, the nav_compute demo's verb. Here we hand-roll a
+// joinable std::thread so the test can join() deterministically before asserting.
 TEST(AriadneAction, IntrinsicRunsNavStepOnComputePoolAndWakesMsgRecv) {
   namespace se = cvc::state_exec;
   cvc::app app;
@@ -2653,6 +2654,45 @@ template <class Pred> bool pump_until(Runtime &rt, Pred pred, int budget_ms = 50
   return pred();
 }
 
+// The nav_compute demo's verb: (nav-step) is an async function on the app's async host. The action
+// parks at the call while the kernel runs on the background task pool and fans out over the compute
+// pool, then resumes with the call's value. No channel, no msg-recv.
+TEST(AriadneAction, NavStepAsAnAsyncFunctionReturnsItsResult) {
+  namespace se = cvc::state_exec;
+  cvc::app app;
+  app.computePool();
+  app.exec_scheduler();
+  app.exec_async_host(); // warm them on THIS thread
+  register_action_intrinsics(
+      [&app](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
+        se::register_async_fn(env, app.exec_async_host(), "nav-step",
+                              [&app](std::span<const se::value_t>) -> se::async_kernel {
+                                return [&app](se::async_call &) -> se::value_t {
+                                  std::atomic<int> arrived{0};
+                                  app.computePool().parallel_for(256, [&arrived](int i) {
+                                    if ((i % 3) == 0)
+                                      arrived.fetch_add(1, std::memory_order_relaxed);
+                                  });
+                                  return se::value_t(std::to_string(arrived.load()));
+                                };
+                              });
+      });
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({button("Go", "(state-set \"nav.result\" (nav-step))")}));
+  mb.button_click = true;
+  rt.render();
+  rt.drain();
+  mb.button_click = false;
+  const bool resumed =
+      pump_until(rt, [&] { return !cvc::state::instance(app)("nav.result").value().empty(); });
+  clear_action_intrinsics();
+  ASSERT_TRUE(resumed) << "the parked action never resumed";
+  EXPECT_EQ(cvc::state::instance(app)("nav.result").value(), "86");
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+}
+
 std::string node_data_string(cvc::app &app, const char *path) {
   const boost::any d = cvc::state::instance(app)(path).data();
   const std::string *s = boost::any_cast<std::string>(&d);
@@ -3134,6 +3174,72 @@ TEST(AriadneAsyncFn, ActionCallsResumeAndTheReactiveLaneCantReachThem) {
   EXPECT_EQ(cvc::state::instance(app)("r.e").value(), "async"); // raised at the call, caught
   EXPECT_FALSE(mb.saw("text_line:never"));                      // AS-17: denied, so hidden
   EXPECT_FALSE(rt.take_reactive_warnings().empty());            // and reported
+}
+
+// §7.4 an action's step and time caps are tree settings (ariadne.limits.action_max_steps, default
+// 5000; ariadne.limits.action_max_time, default 0.1 s), read on every submission. The action's
+// async calls are charged to them (docs/STATE_EXEC_EXCEPTIONS.md 3.8), so a CPU-heavy verb kills an
+// action at the default caps, and a host whose documents need it raises them.
+TEST(AriadneAsyncFn, ActionCapsAreTreeSettingsAndChargeAsyncCalls) {
+  namespace se = cvc::state_exec;
+  cvc::app app;
+  app.exec_async_host();
+  // About 20 ms of CPU: some 40,000 steps at the default rate, far over the default 5000.
+  register_action_intrinsics(
+      [&app](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
+        se::register_async_fn(env, app.exec_async_host(), "spin",
+                              [](std::span<const se::value_t>) -> se::async_kernel {
+                                return [](se::async_call &call) -> se::value_t {
+                                  const double until = se::thread_cpu_seconds() + 0.02;
+                                  volatile std::uint64_t x = 0;
+                                  while (se::thread_cpu_seconds() < until && !call.cancelled())
+                                    for (int i = 0; i < 1000; ++i)
+                                      x = x + static_cast<std::uint64_t>(i);
+                                  return se::value_t(std::string("spun"));
+                                };
+                              });
+      });
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  auto &root = cvc::state::instance(app);
+  rt.set_root(group({button("Loop", "(begin (set i 0) (while (< i 200) (set i (+ i 1))) "
+                                    "(state-set \"r.loop\" (str i)))"),
+                     button("Spin", "(state-set \"r.spin\" (spin))")}));
+  const auto click = [&](const char *key) {
+    root(key).value(std::string("-"));
+    mb.button_click = true;
+    rt.render();
+    rt.drain();
+    mb.button_click = false;
+    pump_until(rt, [&] { return root(key).value() != "-"; }, 1000);
+    for (int i = 0; i < 3; ++i) { // let the sweep report a kill
+      rt.render();
+      rt.drain();
+    }
+    return root(key).value();
+  };
+
+  // The defaults: the loop fits in 5000 steps; the spin's CPU doesn't.
+  EXPECT_EQ(click("r.loop"), "200");
+  EXPECT_EQ(click("r.spin"), "-");
+  auto warns = rt.take_reactive_warnings();
+  ASSERT_FALSE(warns.empty());
+  EXPECT_NE(warns.back().find("max_steps_exceeded"), std::string::npos) << warns.back();
+
+  // A step cap below the loop's needs kills it too.
+  root("ariadne.limits.action_max_steps").value(std::string("100"));
+  EXPECT_EQ(click("r.loop"), "-");
+  // No limit on either: the spin finishes.
+  root("ariadne.limits.action_max_steps").value(std::string("0"));
+  root("ariadne.limits.action_max_time").value(std::string("0"));
+  EXPECT_EQ(click("r.spin"), "spun");
+  // Unparsable values keep the defaults.
+  root("ariadne.limits.action_max_steps").value(std::string("lots"));
+  root("ariadne.limits.action_max_time").value(std::string("soon"));
+  EXPECT_EQ(click("r.loop"), "200");
+  EXPECT_EQ(click("r.spin"), "-");
+  clear_action_intrinsics();
 }
 
 // A `closable: true` window renders with a close button, persists tree.<id>.open, is skipped once

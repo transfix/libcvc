@@ -574,9 +574,14 @@ from Python, with AS-4, AS-16 and AS-32), and `AriadneAsyncFn` in `ariadne_runti
 - pycvc: `pycvc.async_host()` (inline, no scheduler), `pycvc.async_host(scheduler)`,
   `pycvc.async_host(async_scheduler, app)`, `Exec.async_host()`, and
   `pycvc.builtins.register_async_fn(env, host, name, fn, executor="background", timeout=None,
-  future_variant=True)`. pycvc takes no keyword arguments, so these are positional. `executor` is
-  `"background"` (`"compute"`, the sketch's name, means the same), `"inline"` or
-  `"lane:<name>"`.
+  future_variant=True, with_call=False)`. pycvc takes no keyword arguments, so these are
+  positional. `executor` is `"background"` (`"compute"`, the sketch's name, means the same),
+  `"inline"` or `"lane:<name>"`, a `pycvc.async_lane` given to `host.add_lane(name, lane)`.
+  With `with_call` (also `Exec.register_async_fn(name, fn, with_call)`), `fn` gets the call's
+  `pycvc.async_call` (`function_name()`, `cancelled()`, `post(value)`, `add_wait(seconds)`,
+  `finished()`) before the arguments. `pycvc.is_async_future(v)` too. `begin_external`/`finish`
+  and `make_async_future` aren't bound: an external call's outcome comes from C++ host code
+  (`register_async_coro` is pycvc's), and a future is made by `(name-async ...)`.
 
 **Calling (3.3, 3.9).**
 - A native the stackless evaluator applies at its own level, in the outermost evaluator step on
@@ -626,9 +631,10 @@ delivers as the host, not the kernel. The state tree isn't checked: Ariadne's `f
 - `process_info` also gains `heap_alloc_bytes` (what natives and kernels reported allocating
   since the last heap measurement), and `(inspect pid)` and `(budget-usage)` add the four
   `async_*` counters.
-- A Python kernel has no handle to the call, so it can't check `cancelled()` or `post()`; its run
-  time stops it, as for any kernel that doesn't check. A coroutine (`register_async_coro`) is an
-  external call: its run time isn't charged, only its one step.
+- A Python kernel registered without `with_call` has no handle to the call, so it can't check
+  `cancelled()` or `post()`; its run time stops it, as for any kernel that doesn't check. A
+  coroutine (`register_async_coro`) is an external call: its run time isn't charged, only its
+  one step.
 - The Windows thread CPU clock calibrates the time-stamp counter's rate against the performance
   counter once, over 5 ms, where the processor reports an invariant TSC.
 
@@ -640,7 +646,13 @@ async call decodes empty, so a restored call or future raises `RuntimeError`.
 **Ariadne.** `http-get`, `http-request` and `fetch` (with their `-async` forms) are async functions
 on `app::exec_async_host()`. A failed send is still a reply with `ok` `#f`, as they document. The
 reactive lane arms `park_forbidden_scope`. `launch_pool_task` and the lane helpers stay for the
-hosts that use them.
+hosts that use them. After P3:
+- `AppRuntime::register_async_verb` (and `AriRuntime`'s, and pycvc_gl's) registers an async
+  function on the app's host, so a host verb parks at the call, raises there and is charged to the
+  action; the done-channel form also posts its result. The nav_compute example's verb is
+  `(nav-step)`, an async function.
+- An action's step and time caps are the tree settings `ariadne.limits.action_max_steps` (5000)
+  and `ariadne.limits.action_max_time` (0.1 s), read on every submission, `0` = no limit.
 
 ## 4. Phases
 
