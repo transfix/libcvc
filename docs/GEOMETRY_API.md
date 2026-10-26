@@ -1475,17 +1475,17 @@ geometry tetrahedralize2(const volume& vol,
 ```
 
 (There is also a single-isovalue overload, `tetrahedralize2(vol, isovalue, method,
-improve_method, normals, improve_iterations)`. Both overloads request LBIE's TETRA2 mesh type,
-but the request passes through `geometry_type`, which maps TETRA2 to `VOLUME_TET` and back to
-plain TETRA, with dual contouring forced. See P2.2 of
-[the libigl roadmap](roadmap/LIBIGL-GEOMETRY-FE-ROADMAP.md).)
+improve_method, normals, improve_iterations)`: the solid above `isovalue`, the region
+`tetrahedralize()` meshes, as a layer with no upper surface.)
 
-Creates a tetrahedral mesh of the **layer/shell** between two isosurfaces. This is a dual-isovalue interval meshing technique unique to the LBIE mesher.
+Creates a tetrahedral mesh of the **layer/shell** between two isosurfaces: the region where
+`min <= v <= max` of the two isovalues, which may come in either order. LBIE meshes it as the
+solid `min(v - lo, hi - v) >= 0` (`lo` and `hi` the two isovalues), whose boundary is both
+isosurfaces, with the same mesher as `tetrahedralize()`.
 
 **Parameters:**
 - `vol`: Input volume (SDF)
-- `isovalue_outer`: Outer surface isovalue (more positive = further outside)
-- `isovalue_inner`: Inner surface isovalue (more negative = further inside)
+- `isovalue_outer`, `isovalue_inner`: the two isovalues bounding the layer, in either order
 - `method`: Extraction algorithm
 - `improve_method`: Quality improvement method
 - `improve_iterations`: Number of improvement passes
@@ -1525,15 +1525,14 @@ geometry thick_shell = tetrahedralize2(sdf_vol,
 
 **Implementation Notes:**
 
-The tet2 interval meshing implementation had several bugs that were fixed in December 2025:
-
-1. **Skip Condition Bug** (Fixed): `traverse_qef_interval()` had backwards logic for filtering octree cells. It was keeping only cells that fully spanned both isovalues (extremely restrictive), rather than cells that overlapped the interval.
-   
-2. **Infinite Refinement Bug** (Fixed): Missing octree depth check caused infinite subdivision when cells reached maximum depth.
-   
-3. **Intersection Handling Bug** (Fixed): `tetrahedralize_interval()` only processed intersection types ±1 (edge crosses one isovalue) but ignored type ±3 (edge crosses through entire interval), which is the most common case for interval meshing.
-
-**Current Status:** Fully functional as of December 27, 2025. Generates high-quality volumetric meshes of layers between isosurfaces.
+Until October 2026 `tetrahedralize2()` never reached LBIE's interval mesher: the request for
+TETRA2 went through `geometry_type`, which turned `VOLUME_TET` back into TETRA, so the layer was
+built by the one-surface tetrahedralizer on the interval's octree, with fans of slivers and holes.
+`Octree::tetrahedralize_interval()` was no better: it chose which isosurface an edge crosses by
+its cell rather than by the edge, gave an edge that crosses both isosurfaces a pyramid whose apex
+lies outside the layer, and did not share grid vertices between neighbouring tets. A layer is now
+the solid `min(v - lo, hi - v) >= 0`, meshed like any other solid. A layer thinner than a voxel
+can break up, since the samples on either side of it are both outside.
 
 ### Complete Volumetric Mesh Example
 

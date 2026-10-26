@@ -199,14 +199,13 @@ def test_tetrahedralize2_interval_layer():
 
 
 def test_tetrahedralize2_single_returns_geometry():
-    # NOTE: on an SDF-like field the single-isovalue TETRA2 path yields an
-    # empty mesh in libcvc (see report); we assert the overload is callable
-    # and returns a Geometry, not that it is non-empty.
+    # The single-isovalue overload meshes the solid above the isovalue, as
+    # tetrahedralize does: here the outside of the sphere, out to the box.
     vol = _analytic_sphere_field(radius=1.0, dim=24)
     g = pycvc.tetrahedralize2(vol, 0.0)
     assert isinstance(g, pycvc.geometry)
-    assert g.num_vertices() >= 0
-    print(f"tetrahedralize2 single iso=0.0: {g.num_vertices()} verts (empty is expected here)")
+    assert g.num_vertices() > 0, "single-isovalue tetrahedralize2 produced no vertices"
+    print(f"tetrahedralize2 single iso=0.0: {g.num_vertices()} verts")
 
 
 # ── surface extraction ───────────────────────────────────────────────

@@ -125,7 +125,8 @@ geometry hexahedralize(const volume &vol, double isovalue, extraction_method met
 // tetrahedralize2
 // ---------------
 // Purpose:
-//   Extract a dual tetrahedral (tet2) volumetric mesh from a volume.
+//   Extract a dual tetrahedral (tet2) volumetric mesh from a volume: the solid above isovalue,
+//   meshed as a layer with no upper surface (the same region tetrahedralize() meshes).
 // ---- Change History ----
 // 12/27/2025 -- Joe R. -- Creation.
 // 12/28/2025 -- Joe R. -- Adding normal_type parameter.
@@ -138,7 +139,8 @@ geometry tetrahedralize2(const volume &vol, double isovalue, extraction_method m
 // Purpose:
 //   Extract a volumetric tetrahedral mesh of the layer/interval between
 //   two isosurfaces. This creates a 3D mesh of the region between
-//   isovalue_outer and isovalue_inner.
+//   isovalue_outer and isovalue_inner, which may come in either order:
+//   min <= v <= max. (LBIE meshes it as the solid min(v - min, max - v) >= 0.)
 // ---- Change History ----
 // 12/27/2025 -- Joe R. -- Creation.
 // 12/28/2025 -- Joe R. -- Adding normal_type parameter.

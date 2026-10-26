@@ -143,7 +143,9 @@ namespace LBIE
     switch(geom_type) {
       case cvc::geometry::SURFACE_TRI:  meshtype = geoframe::SINGLE; break;
       case cvc::geometry::SURFACE_QUAD: meshtype = geoframe::QUAD; break;
-      case cvc::geometry::VOLUME_TET:   meshtype = geoframe::TETRA; break;
+      // cvc::tetrahedralize2 asks for the layer between two isovalues as dual_contouring tets:
+      // TETRA2, not TETRA's solid on one side of the first isovalue
+      case cvc::geometry::VOLUME_TET:   meshtype = dual_contouring ? geoframe::TETRA2 : geoframe::TETRA; break;
       case cvc::geometry::VOLUME_HEX:   meshtype = geoframe::HEXA; break;
       case cvc::geometry::MIXED:        meshtype = geoframe::SINGLE; break;
       default: throw cvc_mesher_exception("invalid geometry type");
