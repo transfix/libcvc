@@ -42,18 +42,20 @@ namespace ariadne {
 // slice 3+). The integrator is a linear stub; slice 3 swaps it for
 // physics::world save/restore stepping behind the same predict/reconcile shape.
 
-// The per-tick input that drives an avatar: a desired world-space linear velocity.
-// Purely linear (no orientation integration) so the stub needs no trig and is
-// trivially bit-reproducible across platforms.
+// The per-tick input that drives an avatar: a desired world-space linear velocity and
+// the direction the avatar faces. The position integration is purely linear (no trig),
+// so it stays bit-reproducible across platforms; the facing only sets the rotation,
+// which reconcile does not compare (its tolerance is positional).
 struct avatar_intent {
   cvc::physics::vec3 move; // desired linear velocity, world metres/second
+  double yaw = 0.0;        // facing: radians about +Z from +X (Z-up), chosen by the user
 };
 
 // A deterministic, headless kinematic avatar: integrate an avatar_intent over
 // fixed-dt quanta into a cvc::physics::body_state. position += velocity*dt and
-// velocity = move; rotation is carried unchanged. Pure double arithmetic, so the
-// same intents from the same start at the same dt reproduce BIT-FOR-BIT -- the
-// property prediction and reconciliation both rely on.
+// velocity = move; the rotation is the intent's facing (yaw about +Z). The position
+// is pure double arithmetic, so the same intents from the same start at the same dt
+// reproduce it BIT-FOR-BIT -- the property prediction and reconciliation rely on.
 class avatar_sim {
 public:
   avatar_sim() = default;
@@ -87,8 +89,11 @@ public:
   explicit predicted_avatar(const cvc::physics::body_state &start) : _sim(start) {}
 
   // Apply the local player's intent for `tick` and advance the prediction. Ticks
-  // are expected monotonically increasing (the clock's quanta).
+  // are expected monotonically increasing (the clock's quanta). The log keeps at
+  // most kMaxLog unacknowledged entries (the oldest drop): with no acks for that
+  // long the link is gone, and the next ack snaps + replays whatever is left.
   void predict(std::uint64_t tick, const avatar_intent &in, double dt);
+  static constexpr std::size_t kMaxLog = 2400; // 20 s at the default 120 Hz
 
   // Reconcile against an authoritative state valid as of `server_tick`. Returns
   // true if a hard correction (snap + replay) was applied, false if the prediction

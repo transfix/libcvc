@@ -6,6 +6,7 @@
 #include <cvc/gl/ariadne/bundles.h>
 #include <cvc/gl/ariadne/extensions.h>         // register_cvcgl_extensions
 #include <cvc/gl/ariadne/media_verbs.h>        // register_media_intrinsics
+#include <cvc/gl/ariadne/status_dot_widget.h>  // register_status_dot_widget
 #include <cvc/gl/ariadne/stream_node.h>        // register_stream_node_type
 #include <cvc/gl/ariadne/stream_verbs.h>       // register_gl_stream_intrinsics
 #include <cvc/gl/ariadne/stream_view_widget.h> // register_stream_view_widget
@@ -37,6 +38,7 @@ void register_streaming(cvc::app &app) {
 
 void register_window_widgets(cvc::gl::ImGuiBackend &backend, cvc::app &app) {
   register_stream_view_widget(backend, app); // type: stream_view
+  register_status_dot_widget(backend);       // type: status_dot
 }
 
 void register_conference(cvc::app &app, cvc::gl::ImGuiBackend &backend) {

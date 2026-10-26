@@ -67,6 +67,15 @@ std::vector<double> centred_ranks(const std::vector<double> &f) {
 
 } // namespace
 
+es_fitness es_energy_at_held_reach(double price, double slack) {
+  if (!(price >= 0.0) || !(slack >= 0.0))
+    throw std::invalid_argument("cvc::physics::es_energy_at_held_reach: needs price, slack >= 0");
+  return [price, slack](const plant_drive_score &p, const plant_drive_score &start) {
+    const double lost = 100.0 * (start.reach - p.reach) - slack;
+    return -p.wh_per_km() - price * (lost > 0.0 ? lost : 0.0);
+  };
+}
+
 es_result es_finetune_on_plant(const cvc::nav::coef_mlp &start,
                                const cvc::nav::training_scene &scene, const vehicle_desc &d,
                                double wheelbase, const es_options &o,
@@ -84,11 +93,44 @@ es_result es_finetune_on_plant(const cvc::nav::coef_mlp &start,
   portable_normal gauss(o.noise_seed);
   const double nan = std::numeric_limits<double>::quiet_NaN();
 
+  // Scores policies on `opts`' seeds: reach, or the fitness beside `ref` (the start's scores on
+  // the same seeds; with ref_out, the start is scored alongside and returned there).
+  const auto score = [&](const std::vector<cvc::nav::coef_mlp> &pols,
+                         const plant_reach_options &opts, const plant_drive_score *ref,
+                         plant_drive_score *ref_out, std::vector<plant_drive_score> *scores) {
+    if (!o.fitness)
+      return reach_on_plant(pols, scene, d, wheelbase, opts);
+    std::vector<cvc::nav::coef_mlp> all = pols;
+    if (ref_out)
+      all.push_back(start);
+    std::vector<plant_drive_score> m = score_on_plant(all, scene, d, wheelbase, opts);
+    if (ref_out) {
+      *ref_out = m.back();
+      m.pop_back();
+      ref = ref_out;
+    }
+    std::vector<double> f(m.size());
+    for (std::size_t i = 0; i < m.size(); ++i)
+      f[i] = o.fitness(m[i], *ref);
+    if (scores)
+      *scores = m;
+    return f;
+  };
+
   es_result res;
   res.best = start;
   res.best_iteration = 0;
-  res.best_validation = reach_on_plant(start, scene, d, wheelbase, o.reach);
+  plant_drive_score start_val; // the start on the validation seeds (with a fitness)
+  if (o.fitness) {
+    start_val = score_on_plant({start}, scene, d, wheelbase, o.reach)[0];
+    res.best_validation = o.fitness(start_val, start_val);
+  } else
+    res.best_validation = reach_on_plant(start, scene, d, wheelbase, o.reach);
   res.trace.push_back({0, nan, res.best_validation});
+  if (o.fitness) {
+    res.trace.back().validation_reach = start_val.reach;
+    res.trace.back().validation_wh_per_km = start_val.wh_per_km();
+  }
   if (progress)
     progress(res.trace.back());
 
@@ -111,7 +153,8 @@ es_result es_finetune_on_plant(const cvc::nav::coef_mlp &start,
         pop[2 * k + side] = start.with_flat_weights(w);
       }
     }
-    const std::vector<double> f = reach_on_plant(pop, scene, d, wheelbase, train);
+    plant_drive_score start_train; // the start on this iteration's seeds
+    const std::vector<double> f = score(pop, train, nullptr, &start_train, nullptr);
     const std::vector<double> u = centred_ranks(f);
     // The gradient estimate, then an Adam step uphill.
     std::fill(g.begin(), g.end(), 0.0f);
@@ -133,17 +176,22 @@ es_result es_finetune_on_plant(const cvc::nav::coef_mlp &start,
     for (const double x : f)
       mean += x;
     mean /= static_cast<double>(f.size());
-    double val = nan;
+    double val = nan, val_reach = nan, val_whkm = nan;
     if (it + 1 == o.iterations || (o.validate_every > 0 && (it + 1) % o.validate_every == 0)) {
       const cvc::nav::coef_mlp centre = start.with_flat_weights(theta);
-      val = reach_on_plant(centre, scene, d, wheelbase, o.reach);
+      std::vector<plant_drive_score> cs;
+      val = score({centre}, o.reach, &start_val, nullptr, &cs)[0];
+      if (o.fitness) {
+        val_reach = cs[0].reach;
+        val_whkm = cs[0].wh_per_km();
+      }
       if (val > res.best_validation) { // ties keep the earlier
         res.best_validation = val;
         res.best = centre;
         res.best_iteration = it + 1;
       }
     }
-    res.trace.push_back({it + 1, mean, val});
+    res.trace.push_back({it + 1, mean, val, val_reach, val_whkm});
     if (progress)
       progress(res.trace.back());
   }

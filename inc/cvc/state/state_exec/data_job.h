@@ -245,6 +245,8 @@ public:
   std::size_t step_nodes() const { return step_nodes_; }
   /// Nodes counted in this step so far.
   std::size_t nodes() const { return nodes_; }
+  /// The stats of the state being stepped.
+  evaluation_stats &stats() const { return stats_; }
   /// What is left of the slice (never 0 while slicing, so a job always advances).
   std::size_t remaining() const;
 

@@ -74,6 +74,8 @@ struct planar_sample {
   // J the vehicle drew over that tick (nav_plant::energy_step: from its fuel or battery, net of
   // regeneration, or its shaft work without a source); 0 at start()
   double energy = 0.0;
+  // J its tires lost to slip over that tick (the ledger's `tire`); 0 at start()
+  double tire = 0.0;
 };
 
 // Records every agent of `sim`, which drives `plant`. Both must outlive the log.
@@ -92,6 +94,7 @@ private:
   nav_plant &_plant;
   double _dt = 0.0, _accel_si = 1.0;
   std::vector<double> _vmax;
+  std::vector<double> _tire; // each agent's ledger `tire` at its last sample
   std::vector<std::vector<planar_sample>> _runs;
 };
 
@@ -175,6 +178,10 @@ struct power_run {
 
 struct power_fit {
   cvc::nav::dyn_power_si si; // the model (evaluate_power: the one given)
+  // The tire term's calibration (fit_power, when the runs carry the ledger's `tire`): the ledger's
+  // tire J per J of diff::dyn_tire_power, lateral and longitudinal, and the r^2 of the ticks' tire
+  // energy it gives. si.tire_lat and si.tire_lon are these times the source's price of a tire J.
+  double tire_cal_lat = 0.0, tire_cal_lon = 0.0, tire_r2 = 0.0;
   std::uint64_t ticks = 0;
   double r2 = 0.0;          // over the ticks' energies
   double total_error = 0.0; // (sum model - sum measured) / sum measured, over every run
@@ -184,14 +191,26 @@ struct power_fit {
 };
 
 // Fits nav::dyn_power_si (detail/dyn_power.h) to the ledger in `runs` by non-negative least
-// squares on the ticks' energies (k_neg's sign held <= 0). The model reads, each tick, the drive
-// force per unit mass the dynamic vehicle `dyn` (nullptr: nav_plant::dyn_bike_si_of(d)) needs to
-// make the motion the plant made (the measured acceleration less dyn's drag, rolling resistance
-// and grade), and the speed vx the tick ended at: the trainer's rollout carries the same two
-// (dyn_state::a, vx). Every tick counts, contacts and impacts included: the run totals are the
-// ledger's own.
+// squares on the ticks' energies (k_neg's sign held <= 0). When the runs carry the ledger's tire
+// term (planar_sample::tire), the tire term is fitted first: the dynamic vehicle's own tire
+// dissipation at each tick's state (diff::dyn_tire_power, from `dyn`'s tires), lateral and
+// longitudinal, scaled to the ledger's `tire` by non-negative least squares. Its sum then joins
+// the energy fit as one more column, whose coefficient is what the source pays per tire J. The
+// model reads, each tick, the drive force per unit mass the dynamic vehicle `dyn` (nullptr:
+// nav_plant::dyn_bike_si_of(d)) needs to make the motion the plant made (the measured acceleration
+// less dyn's drag, rolling resistance and grade), and the speed vx the tick ended at: the trainer's
+// rollout carries the same two (dyn_state::a, vx). Every tick counts, contacts and impacts
+// included: the run totals are the ledger's own.
 power_fit fit_power(const std::vector<std::vector<planar_sample>> &runs, double dt,
                     const vehicle_desc &d, const cvc::nav::dyn_bike_si *dyn = nullptr);
+
+// Runs logged at one tick dt (s), for fitting several scenes whose ticks differ at once.
+struct power_runs {
+  std::vector<std::vector<planar_sample>> runs;
+  double dt = 0.0;
+};
+power_fit fit_power(const std::vector<power_runs> &sets, const vehicle_desc &d,
+                    const cvc::nav::dyn_bike_si *dyn = nullptr);
 
 // The same report for a model already fitted, such as on held-out runs.
 power_fit evaluate_power(const std::vector<std::vector<planar_sample>> &runs, double dt,

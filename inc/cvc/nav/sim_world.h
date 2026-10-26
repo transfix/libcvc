@@ -42,10 +42,13 @@
 #include <cvc/nav/belief_material.h>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/drive.h>
+#include <cvc/nav/intent.h>
 #include <cvc/nav/material.h>
 #include <cvc/nav/nav_stats.h>
 #include <cvc/nav/plant_types.h>
 #include <cvc/nav/terrain.h>
+#include <cvc/nav/vehicle_route.h> // route_corridor
+#include <cvc/nav/yield.h>
 #include <memory>
 #include <string>
 #include <vector>
@@ -288,6 +291,21 @@ public:
   const std::uint8_t *last_visible(int m) const {
     return lastvis_.data() + static_cast<std::size_t>(m) * rows_ * cols_;
   }
+  // Plane m's belief log-odds [rows*cols] (> 0 believed occupied, clamped to +-l_clamp), the
+  // state belief_occ(m) is thresholded from; null for an out-of-range m. It changes on a sense
+  // tick, often with no raster_version bump (most updates cross no threshold), so a viewer polls
+  // it.
+  const float *logodds(int m) const {
+    return m >= 0 && m < M_ ? logodds_.data() + static_cast<std::size_t>(m) * rows_ * cols_
+                            : nullptr;
+  }
+  // Plane m's dynamic layer [rows*cols]: the sim time (tick * veh.dt, s) each cell was last marked
+  // by add_obstacle(), -inf where never. A mark occupies its cell while now - stamp <= ttl_s, from
+  // the next sense tick (belief_occ composites it then). Null for an out-of-range m.
+  const double *dynamic_stamps(int m) const {
+    return m >= 0 && m < M_ ? dyn_stamp_.data() + static_cast<std::size_t>(m) * rows_ * cols_
+                            : nullptr;
+  }
 
   // Live-scene edits (for the threading layer): retarget agent i (normalized
   // goal) keeping its escape state; stamp a decaying obstacle blob (a centered
@@ -301,14 +319,67 @@ public:
   // (rad, + left) and the acceleration along the heading (normalized / s^2; from rest a
   // negative one backs up, as the bicycle's speed may fall to -0.25 vmax with allow_reverse).
   // On the kinematic arm the agent integrates the bicycle with it (nsub substeps, the steer
-  // within the lock, the speed within [sp_min, vmax]); on a plant it is the plant's command. For
-  // a route_follower backing a vehicle up, or stopping it at a cusp. A parked agent takes it too.
+  // within the lock, the speed within [sp_min, vmax]); on a plant it is the plant's command. On
+  // either, the acceleration is held to the speeds the drive's command is: the agent's top speed
+  // (on a plant the lower of its and vmax) and, with veh_params::risk_governor, its cap
+  // (risk_speed_cap). For a route_follower backing a vehicle up, or stopping it at a cusp. A
+  // parked agent takes it too.
   void override_command(int i, float steer, float accel);
   // Put agent i at (x, y) (normalized) with a heading (rad) and a speed (normalized / s), on the
   // kinematic arm. A plant owns its vehicles' poses, so with one this does nothing and returns
   // false.
   bool set_pose(int i, float x_n, float y_n, float heading, float speed = 0.0f);
   void add_obstacle(int r0, int r1, int c0, int c1);
+
+  // ── yielding: agents that get out of each other's way (nav/yield.h, nav/intent.h) ──
+  // Off by default (yield_config::horizon_s 0): runs are byte-unchanged. On, every step()
+  // publishes each agent's intent (its pose, speed, priority and the path it means to drive next)
+  // to the intent channel after the carrot FSM, asks the channel what each agent has heard of the
+  // others, and shifts each agent's carrot out of the paths of those it should give way to and
+  // round those in its own (yield_agent), away from walls. O(n^2) with perfect comms.
+  void set_yield(const yield_config &c) { yield_cfg_ = c; }
+  const yield_config &yield_settings() const { return yield_cfg_; }
+  // Agent i's priority (higher goes first; all 0 by default) and team (a convoy; 0 by default),
+  // as its intent carries them.
+  void set_priority(int i, float priority);
+  void set_team(int i, int team);
+  // The path agent i announces, as a normalized polyline of `count` points, in place of the one
+  // built from its carrot and goal; count 0 goes back to that. Each tick the intent takes the part
+  // ahead of the agent's nearest point on it, about speed x horizon long (a route's next stretch,
+  // say).
+  void set_intent_path(int i, const float *xy, int count);
+  // The channel intents travel on: borrowed, outliving the world's use of it; nullptr (the
+  // default) = perfect comms (perfect_intent_channel). The DBG case sends them over its radios.
+  void set_intent_channel(intent_channel *channel) { yield_chan_ = channel; }
+  // Who gives way in a conflict; empty (the default) = priority_resolver().
+  void set_yield_resolver(yield_resolver r) { yield_res_ = std::move(r); }
+  // What agent i has heard, as soft keep-outs for its route planner (route_options::avoid), in the
+  // sim's world units: each higher-priority agent's intended path at radius_world and cost_path,
+  // and every other agent where it stands, at radius_world and cost_stand (they are counted on to
+  // move). Empty before a step() with yielding on.
+  std::vector<route_corridor> yield_corridors(int i, double radius_world, double cost_path,
+                                              double cost_stand) const;
+  // How far along agent i's own path (normalized) the nearest agent in it is, the one it passes
+  // or is held behind by the passing cap; -1 none (or yielding off). A host driving it on a route
+  // can plan round one that stays there.
+  float yield_pass_distance(int i) const {
+    return i >= 0 && i < static_cast<int>(yield_pass_.size()) ? yield_pass_[i] : -1.0f;
+  }
+  // Agent i's shift out of others' paths (rule 1 alone; normalized, across the world): where a host
+  // holding it still should move it to make way. (0, 0) when none, or yielding is off.
+  void yield_out(int i, float &dx, float &dy) const {
+    const bool ok = i >= 0 && 2 * static_cast<std::size_t>(i) + 1 < yield_out_.size();
+    dx = ok ? yield_out_[2 * i] : 0.0f;
+    dy = ok ? yield_out_[2 * i + 1] : 0.0f;
+  }
+  // The last step()'s published intents ([n]) and carrot shifts ([n*2], normalized; at the carrot),
+  // for a renderer or a test; null before a step() with yielding on.
+  const agent_intent *intents() const {
+    return yield_intents_.size() == static_cast<std::size_t>(n_) ? yield_intents_.data() : nullptr;
+  }
+  const float *yield_shifts() const {
+    return yield_shift_.size() == static_cast<std::size_t>(2 * n_) ? yield_shift_.data() : nullptr;
+  }
 
   // Live-tune the optional inter-agent separation (config.sep_radius/sep_gain);
   // gain 0 disables it. Lets a host toggle/scale swarm collision avoidance at
@@ -560,6 +631,9 @@ public:
   bool nav_stats_armed() const { return static_cast<bool>(stats_); }
 
 private:
+  // step()'s yielding pass (set_yield).
+  void yield_tick(const field_stack &fs, int num_threads);
+
   config cfg_;
   int n_ = 0, rows_ = 0, cols_ = 0, M_ = 1;
   long gstep_ = 0;
@@ -588,6 +662,25 @@ private:
   // SoA agent columns
   std::vector<float> o_, goal_, th_, sp_, color_, wall_entry_, pos_hist_;
   std::vector<float> carrot_; // [n*2] last tick's FSM steering target (for renderers)
+  // Yielding (set_yield): its settings, channel (null = the perfect one below), resolver, each
+  // agent's priority / team / announced path override, and the last tick's intents and shifts.
+  yield_config yield_cfg_{};
+  perfect_intent_channel yield_perfect_;
+  intent_channel *yield_chan_ = nullptr;
+  yield_resolver yield_res_;
+  std::vector<float> yield_prio_;
+  std::vector<int> yield_team_;
+  std::vector<std::vector<float>> yield_path_;
+  std::vector<agent_intent> yield_intents_;
+  std::vector<float> yield_shift_;
+  std::vector<float> yield_need_; // [n*2] the shifts before scaling to the carrot (normalized)
+  std::vector<float> yield_out_;  // [n*2] their rule-1 part (out of others' paths)
+  std::vector<float> yield_pass_; // [n] along its path to the one it passes nearest; -1 none
+  std::vector<int> yield_pass_j_; // [n] that one's index
+  std::vector<float> yield_held_; // [n] s held still behind it
+  std::vector<std::uint8_t> yield_release_; // [n] its hold released (pass_hold_s)
+  // The yielding's speed: agent i at speed v commanding accel, with the passing cap and the creep.
+  float yield_accel(int i, float v, float accel) const;
   std::vector<int> stall_, mode_, hist_count_;
   std::vector<float> turn_, dhit_, best_, init_;
   std::vector<float>

@@ -97,6 +97,33 @@ const state_key_meta kMaterialKeys[] = {
     {"lam_hard_scale", "knob", "1", 0, 4, "A multiplier on the hard weight, fixed or learned."},
 };
 
+// <prefix>.nav.yield: agents out of each other's way (set_yield, nav/yield.h).
+const state_key_meta kYieldKeys[] = {
+    {"horizon_s", "knob", "s", 0, 10,
+     "How far ahead intents reach and conflicts count; 0 = yielding off."},
+    {"clearance", "knob", "m", 0, 30,
+     "The corridor's half-width round a path; 0 = 3 x the vehicle's rr."},
+    {"gain", "knob", "1", 0, 4,
+     "How far an agent moves out of another's path, per unit intrusion."},
+    {"pass_gain", "knob", "1", 0, 4, "How far it steers round one in its own path."},
+    {"cooperation", "knob", "1", 0, 1, "How far a passer counts on the other moving aside."},
+    {"min_len", "knob", "m", 0, 100, "An intent's shortest path; 0 = 4 x clearance."},
+    {"min_speed", "knob", "m/s", 0, 10, "The speed floor arrival times are taken at."},
+    {"near_dist", "knob", "m", -1, 100,
+     "Along a path this close a conflict counts at any speed; 0 = 4 x clearance, < 0 = off."},
+    {"steer_overrides", "knob", "", 0, 1,
+     "1: a forward override_command's steer (a route's pursuit) takes the shift too."},
+    {"steer_look_s", "knob", "s", 0, 5, "Seconds of speed the override correction looks ahead."},
+    {"pass_time_s", "knob", "s", 0, 10,
+     "The passing cap: no sooner at one in the path than this; it stops short of one that stays. "
+     "0 = off."},
+    {"pass_hold_s", "knob", "s", 0, 30,
+     "Held this long behind one standing still, the hold is released; 0 = never (the default)."},
+    {"creep_speed", "knob", "m/s", 0, 5,
+     "An agent asked to move aside from a standstill creeps forward at this; 0 = no creep."},
+    {"creep_need", "knob", "m", 0, 30, "The shift out of a path that calls for the creep; 0 = rr."},
+};
+
 // <prefix>.nav.terrain (P5).
 const state_key_meta kTerrainKeys[] = {
     {"max_grade", "knob", "1", 0.1, 1.5,
@@ -285,6 +312,34 @@ void sim_world::pull(cvc::app &ctx, const std::string &prefix) {
     scaled("risk_lookahead", v.risk_lookahead, L, non_negative);
     r.read("risk_probes", v.risk_probes, whole,
            [&](double x) { v.risk_probes = static_cast<int>(x); });
+  }
+  {
+    const std::string yb = base + ".yield";
+    describe_state_keys(ctx, yb, kYieldKeys, true);
+    reader r(ctx, yb);
+    yield_config &y = yield_cfg_;
+    const auto scaled = [&](const char *key, float &f, double unit, bool (*ok)(double)) {
+      r.read(key, f * unit, ok, [&](double x) { f = static_cast<float>(x / unit); });
+    };
+    scaled("horizon_s", y.horizon_s, 1.0, non_negative);
+    scaled("clearance", y.clearance, L, non_negative);
+    scaled("gain", y.gain, 1.0, non_negative);
+    scaled("pass_gain", y.pass_gain, 1.0, non_negative);
+    r.read(
+        "cooperation", y.cooperation, [](double x) { return x >= 0.0 && x <= 1.0; },
+        [&](double x) { y.cooperation = static_cast<float>(x); });
+    scaled("min_len", y.min_len, L, non_negative);
+    scaled("min_speed", y.min_speed, L, non_negative);
+    r.read(
+        "near_dist", y.near_dist * L, [](double x) { return std::isfinite(x); },
+        [&](double x) { y.near_dist = static_cast<float>(x * S); });
+    r.read("steer_overrides", b2d(y.steer_overrides), flag,
+           [&](double x) { y.steer_overrides = x != 0.0; });
+    scaled("steer_look_s", y.steer_look_s, 1.0, non_negative);
+    scaled("pass_time_s", y.pass_time_s, 1.0, non_negative);
+    scaled("pass_hold_s", y.pass_hold_s, 1.0, non_negative);
+    scaled("creep_speed", y.creep_speed, L, non_negative);
+    scaled("creep_need", y.creep_need, L, non_negative);
   }
   if (mat_on_) {
     const std::string mb = base + ".material";

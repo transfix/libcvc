@@ -21,6 +21,7 @@
 #include <cvc/core/thread_pool.h> // item 2: full type for app.computePool().parallel_for
 #include <cvc/net/http_client.h>  // §13.8: swap the transport for a fake in the http-get test
 #include <cvc/state/state.h>
+#include <cvc/state/state_exec/async_host.h>      // register_async_fn on app.exec_async_host()
 #include <cvc/state/state_exec/async_scheduler.h> // exec_scheduler().post_message end-to-end test
 #include <cvc/state/state_exec/builtins.h>        // host-intrinsic seam test: register_fn
 #include <cvc/state/state_exec/heap.h>            // collect_cycles / tracked_objects
@@ -1990,10 +1991,12 @@ TEST(AriadneStdlib, ActionHitsTheAllocationLimitAndIsReported) {
   mb.button_click = true;
   rt.render();
   rt.drain();
-  EXPECT_FALSE(cvc::state::instance(app)("n").value() == "1000"); // killed before the write
+  EXPECT_FALSE(cvc::state::instance(app)("n").value() == "1000"); // failed before the write
   const auto warns = rt.take_reactive_warnings();
   ASSERT_FALSE(warns.empty());
-  EXPECT_NE(warns[0].find("did not complete"), std::string::npos) << warns[0];
+  // The refused allocation is a MemoryError the action didn't catch: it failed, and the report
+  // names the class and message (docs/STATE_EXEC_EXCEPTIONS.md 2.6).
+  EXPECT_NE(warns[0].find("action program failed: MemoryError: "), std::string::npos) << warns[0];
 
   // A limit that fits lets the same action finish.
   cvc::state::instance(app)("state_exec.defaults.limits.max_alloc_bytes").value("1048576");
@@ -2024,10 +2027,10 @@ TEST(AriadneStdlib, ActionMemoryBudgetIsATreeSetting) {
   EXPECT_TRUE(rt.take_reactive_warnings().empty());
 
   root("ariadne.limits.action_max_memory").value(std::string("65536"));
-  EXPECT_EQ(click(), "-"); // over the budget: killed before the write
+  EXPECT_EQ(click(), "-"); // over the budget: failed before the write
   const auto warns = rt.take_reactive_warnings();
   ASSERT_FALSE(warns.empty());
-  EXPECT_NE(warns[0].find("did not complete"), std::string::npos) << warns[0];
+  EXPECT_NE(warns[0].find("action program failed: MemoryError: "), std::string::npos) << warns[0];
 
   root("ariadne.limits.action_max_memory").value(std::string("0")); // no limit
   EXPECT_EQ(click(), "10000");
@@ -3255,6 +3258,54 @@ TEST(AriadnePoolTask, OffloadedKernelResumesTransparentAndFuture) {
       << "the offloaded pool task never resumed the action";
   EXPECT_EQ(cvc::state::instance(app)("r.t").value(), "42"); // transparent self-park
   EXPECT_EQ(cvc::state::instance(app)("r.a").value(), "20"); // awaited future
+}
+
+// An async function on the app's exec async host (docs/STATE_EXEC_EXCEPTIONS.md 3), registered
+// through the action seam: an action's call parks and resumes, its kernel's error raises at the
+// call, and (AS-17) the reactive lane can't reach it: a predicate naming it is denied, hidden and
+// reported, never parked or blocked.
+TEST(AriadneAsyncFn, ActionCallsResumeAndTheReactiveLaneCantReachThem) {
+  namespace se = cvc::state_exec;
+  cvc::app app;
+  NetIntrinsicsGuard guard;
+  app.exec_async_host(); // warm it on THIS thread
+  register_action_intrinsics(
+      [&app](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
+        se::register_async_fn(env, app.exec_async_host(), "pool-triple",
+                              [](std::span<const se::value_t> args) -> se::async_kernel {
+                                const std::int64_t n =
+                                    args.empty() ? 0 : std::get<std::int64_t>(args[0].v);
+                                return [n](se::async_call &) -> se::value_t {
+                                  if (n < 0)
+                                    throw std::invalid_argument("negative");
+                                  return se::value_t(n * 3);
+                                };
+                              });
+      });
+
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  Widget predicate = text("never");
+  predicate.visible_when = "(pool-triple 1)";
+  rt.set_root(group(
+      {button("Go", "(state-set \"r.t\" (str (pool-triple 14)))"),
+       button("Bad", "(state-set \"r.e\" (try (pool-triple -1) (catch (ValueError e) (get-attr e "
+                     "\"origin\"))))"),
+       predicate}));
+  mb.button_click = true;
+  rt.render();
+  rt.drain();
+  mb.button_click = false;
+
+  ASSERT_TRUE(pump_until(rt, [&] {
+    return !cvc::state::instance(app)("r.t").value().empty() &&
+           !cvc::state::instance(app)("r.e").value().empty();
+  })) << "an async call never resumed its action";
+  EXPECT_EQ(cvc::state::instance(app)("r.t").value(), "42");
+  EXPECT_EQ(cvc::state::instance(app)("r.e").value(), "async"); // raised at the call, caught
+  EXPECT_FALSE(mb.saw("text_line:never"));                      // AS-17: denied, so hidden
+  EXPECT_FALSE(rt.take_reactive_warnings().empty());            // and reported
 }
 
 // A `closable: true` window renders with a close button, persists tree.<id>.open, is skipped once

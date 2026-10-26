@@ -674,6 +674,11 @@ ariadne::BoolEdit ImGuiBackend::checkbox(const char *label, bool current) {
 // item so [frame][spacing][label] fits the content region — floored so the frame stays grabbable.
 // When the label already fits at the default width (a roomy panel / short label), ImGui's default
 // is left untouched, so this never narrows a slider that was fine.
+//
+// In a table cell the widget always fills the cell instead. The default (~65% of the cell) feeds
+// back into an auto-width column, which ImGui re-fits to its content each frame: the column shrank
+// to 65% of itself every frame until the 48 px floor snapped it back, so the slider never held a
+// width long enough to be dragged.
 void reserve_label_width(const char *label) {
   // A window that fits its widgets grows to the label instead -- and shrinking the frame to the
   // window's width there would only shrink the window with it, frame after frame.
@@ -682,7 +687,7 @@ void reserve_label_width(const char *label) {
   const float avail = ImGui::GetContentRegionAvail().x;
   const float labelW = ImGui::CalcTextSize(label, nullptr, /*hide_text_after_double_hash=*/true).x;
   const float fit = avail - ImGui::GetStyle().ItemInnerSpacing.x - labelW;
-  if (fit < ImGui::CalcItemWidth()) // only when the default frame width would push the label off
+  if (ImGui::GetCurrentTable() != nullptr || fit < ImGui::CalcItemWidth())
     ImGui::SetNextItemWidth(ImMax(fit, 48.0f)); // floor: a still-usable slider/drag handle
 }
 #endif

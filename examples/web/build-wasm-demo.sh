@@ -147,6 +147,15 @@ emcmake cmake -G Ninja -S "${REPO_ROOT}" -B "${BUILD_DIR}" \
     -DCVC_BUILD_EXAMPLES=ON \
     -DCVC_WASM_PTHREADS=${PTHREAD}
 
+# A configure that misses ImageMagick turns it off and carries on, so a gallery asked to
+# have it would ship without it. Fail here instead (imagemagick and its codec libraries
+# belong in CVC_WASM_DEPS: cvcpkg install imagemagick bzip2 xz libxml2 ... --platform wasm).
+if [[ "${CVC_WASM_IMAGEMAGICK:-ON}" == "ON" ]] \
+   && ! grep -q '^CVC_IMAGEMAGICK_ENABLED:INTERNAL=ON' "${BUILD_DIR}/CMakeCache.txt"; then
+    echo "build-wasm-demo: CVC_WASM_IMAGEMAGICK=ON but the configure found no ImageMagick in ${CVC_WASM_DEPS}" >&2
+    exit 1
+fi
+
 cmake --build "${BUILD_DIR}" --target wasm-demos -j "$(nproc)"
 
 # ari, the Ariadne terminal backend in an xterm.js page (src/ari/web/ari.html), joins the

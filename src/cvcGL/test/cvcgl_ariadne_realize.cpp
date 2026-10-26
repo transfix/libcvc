@@ -19,6 +19,8 @@
 #include <cvc/geometry/geometry_file_io.h>
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/GraphicsNode.h>
+#include <cvc/gl/LodGraphicsNode.h> // LOD test: RealizeOptions realizes mesh nodes as ladders
+#include <cvc/gl/LodPyramidCache.h>
 #include <cvc/gl/LowMemoryPolyDataMapper.h> // clip test: the low-memory mapper honours no planes
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
@@ -34,10 +36,12 @@
 #include <cvc/volume/volume_file_io.h>
 #include <filesystem> // mesh_lab / fe_lab sources: a temp "document directory"
 #include <thread>
+#include <vtkActor.h> // LOD test: a rung's material
 #include <vtkLight.h>
 #include <vtkLightCollection.h>
 #include <vtkPlane.h> // clip test: the planes handed to a node's renderer
 #include <vtkPlaneCollection.h>
+#include <vtkProperty.h>
 #include <vtkRenderer.h>
 
 using cvc::ariadne::Scene;
@@ -1444,6 +1448,232 @@ int main() {
                                 "support") != std::string::npos;
     chk(warned, "clip: under the low-memory mapper -> a warning that the node draws unclipped");
     cvc::gl::setLowMemoryMapperPolicy(cvc::gl::LowMemoryMapperPolicy::Auto);
+  }
+
+  // ── LOD: RealizeOptions realizes a mesh-file node as a LodGraphicsNode, and only such a node ──
+  {
+    using cvc::gl::GeometryNode;
+    using cvc::gl::LodGraphicsNode;
+    using cvc::gl::LodPyramidCache;
+    // The embedded bunny (69,473 triangles), stood up 1.7 m tall, in an orange material.
+    auto bunny = [](const char *id) {
+      SceneNode b;
+      b.id = id;
+      b.type = "geometry";
+      b.source_file = "x.bunny";
+      b.has_fit = true;
+      b.fit_up_y = true;
+      b.fit_height = 1.7f;
+      b.has_material = true;
+      b.color[0] = 0.9f;
+      b.color[1] = 0.4f;
+      b.color[2] = 0.1f;
+      b.ambient = 0.3f;
+      b.diffuse = 0.6f;
+      b.has_specular = true;
+      b.specular = 0.25f;
+      b.specular_power = 12.0f;
+      return b;
+    };
+    const SceneNode spec = bunny("spec");
+    // The node's material, on a rung or a plain GeometryNode.
+    auto material_matches = [&spec](const std::shared_ptr<GeometryNode> &g) {
+      vtkActor *a = g ? vtkActor::SafeDownCast(g->prop()) : nullptr;
+      if (!a)
+        return false;
+      const double *c = a->GetProperty()->GetColor();
+      return approx(c[0], spec.color[0]) && approx(c[1], spec.color[1]) &&
+             approx(c[2], spec.color[2]) && approx(a->GetProperty()->GetAmbient(), spec.ambient) &&
+             approx(a->GetProperty()->GetDiffuse(), spec.diffuse) &&
+             approx(a->GetProperty()->GetSpecular(), spec.specular);
+    };
+    auto is_lod = [](SceneGraph &sg, const std::string &id) {
+      return std::dynamic_pointer_cast<LodGraphicsNode>(sg.getGraphics(id)) != nullptr;
+    };
+    auto is_geometry = [](SceneGraph &sg, const std::string &id) {
+      return std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics(id)) != nullptr;
+    };
+
+    printf("== LOD: a bunny becomes a LodGraphicsNode with RealizeOptions ==\n");
+    {
+      // Deferred, so the build runs exactly when this block polls.
+      LodPyramidCache cache(cvc::lod::pyramid_params(), LodPyramidCache::default_max_build_tris(),
+                            cvc::lane_mode::deferred);
+      cvc::gl::ariadne::RealizeOptions opts;
+      opts.lod = &cache;
+      SceneGraph sg(app, "lodr");
+      Scene scene;
+      SceneNode top = bunny("bunny");
+      top.has_transform = true;
+      top.position[0] = 5.0f;
+      scene.nodes.push_back(top);
+      SceneNode grp; // a group holding a second, hidden bunny
+      grp.id = "grp";
+      grp.type = "group";
+      grp.has_transform = true;
+      grp.position[1] = 10.0f;
+      SceneNode inner = bunny("inner");
+      inner.visible_default = false;
+      grp.children.push_back(inner);
+      scene.nodes.push_back(grp);
+      std::vector<std::string> warnings;
+      auto realized = cvc::gl::ariadne::realize_scene(sg, scene, "lodr", &warnings, opts);
+      sg.processEvents();
+
+      auto lod = std::dynamic_pointer_cast<LodGraphicsNode>(sg.getGraphics("bunny"));
+      chk(lod != nullptr, "LOD: the bunny is a LodGraphicsNode, registered under its id");
+      auto g = sg.getGraphics("grp");
+      auto nested =
+          g ? std::dynamic_pointer_cast<LodGraphicsNode>(g->findChildByName("inner")) : nullptr;
+      chk(nested != nullptr, "LOD: a nested bunny is a LodGraphicsNode under its parent");
+      chk(realized.lod_nodes.size() == 2 && realized.lod_nodes[0].lock() == lod &&
+              realized.lod_nodes[1].lock() == nested,
+          "LOD: both are listed in lod_nodes");
+      chk(warnings.empty(), "LOD: no warnings");
+      if (lod && nested) {
+        chk(lod->rungCount() == 1 && lod->rungTriangles(0) == 69473,
+            "LOD: the full bunny draws at once, as rung 0");
+        chk(cache.builds() == 1 && cache.in_flight() == 1,
+            "LOD: one build for the two nodes (one mesh)");
+        chk(material_matches(lod->rung(0)), "LOD: rung 0 wears the node's material");
+        const double origin[3] = {0, 0, 0};
+        double world[3] = {0, 0, 0};
+        lod->localToWorld(origin, world);
+        double nestedWorld[3] = {0, 0, 0};
+        nested->localToWorld(origin, nestedWorld);
+        chk(approx(world[0], 5.0) && approx(nestedWorld[1], 10.0),
+            "LOD: the node's transform applies (and composes under its parent)");
+        chk(lod->isVisible() && !nested->isVisible() && nested->rung(0) &&
+                !nested->rung(0)->prop()->GetVisibility(),
+            "LOD: visible: false hides the ladder");
+
+        chk(cache.poll() == 1, "LOD: one poll runs the deferred build");
+        chk(lod->rungCount() > 1 && nested->rungCount() == lod->rungCount(),
+            "LOD: both nodes get the coarser rungs");
+        bool all = true;
+        for (int k = 0; k < lod->rungCount(); ++k)
+          all = all && material_matches(lod->rung(k)) && material_matches(nested->rung(k));
+        chk(all, "LOD: every rung wears the node's material");
+        int shown = 0;
+        for (int k = 0; k < nested->rungCount(); ++k)
+          shown += nested->rung(k)->prop()->GetVisibility() ? 1 : 0;
+        chk(shown == 0, "LOD: the hidden node's new rungs stay hidden");
+      }
+
+      // A re-realize of the same scene (a room's whole-scene rev bump) needs no build.
+      SceneGraph again(app, "lodr2");
+      auto realized2 = cvc::gl::ariadne::realize_scene(again, scene, "lodr2", nullptr, opts);
+      auto lod2 = std::dynamic_pointer_cast<LodGraphicsNode>(again.getGraphics("bunny"));
+      chk(lod2 && lod2->rungCount() > 1 && cache.builds() == 1 && cache.in_flight() == 0,
+          "LOD: realizing the same meshes again attaches the cached ladder");
+      (void)realized2;
+    }
+
+    printf("== LOD: ineligible nodes stay GeometryNodes ==\n");
+    {
+      LodPyramidCache cache(cvc::lod::pyramid_params(), LodPyramidCache::default_max_build_tris(),
+                            cvc::lane_mode::deferred);
+      cvc::gl::ariadne::RealizeOptions opts;
+      opts.lod = &cache;
+      // A mesh file under lod_min_tris: a 12-triangle cube.
+      const std::string smallPath = "ari_realize_lod_small.off";
+      {
+        cvc::geometry cube(app);
+        for (int i = 0; i < 8; ++i) {
+          const double x = (i & 1) ? 0.5 : -0.5, y = (i & 2) ? 0.5 : -0.5, z = (i & 4) ? 0.5 : -0.5;
+          cube.points().push_back({x, y, z});
+        }
+        const int faces[12][3] = {{0, 1, 3}, {0, 3, 2}, {4, 6, 7}, {4, 7, 5}, {0, 4, 5}, {0, 5, 1},
+                                  {2, 3, 7}, {2, 7, 6}, {0, 2, 6}, {0, 6, 4}, {1, 5, 7}, {1, 7, 3}};
+        for (const auto &f : faces)
+          cube.tris().push_back({std::uint64_t(f[0]), std::uint64_t(f[1]), std::uint64_t(f[2])});
+        cvc::write_geometry(cube, smallPath);
+      }
+      // (The texture makes the node ineligible whether or not the image is readable.)
+      const std::string texPath = "ari_realize_lod_tex.png";
+      try {
+        cvc::write_image(cvc::image(4, 4), texPath);
+      } catch (const std::exception &) {
+      }
+
+      SceneGraph sg(app, "lodi");
+      Scene scene;
+      SceneNode box; // a primitive
+      box.id = "box";
+      box.type = "geometry";
+      box.source_primitive = "box";
+      scene.nodes.push_back(box);
+      SceneNode hf; // a heightfield
+      hf.id = "hf";
+      hf.type = "geometry";
+      hf.has_heightfield = true;
+      hf.heightfield.size = 10.0f;
+      hf.heightfield.resolution = 128; // ~32k triangles: big enough, but terrain
+      scene.nodes.push_back(hf);
+      SceneNode tex = bunny("tex"); // a texture
+      tex.material_texture = texPath;
+      scene.nodes.push_back(tex);
+      SceneNode shd = bunny("shd"); // a shader
+      shd.shader.present = true;
+      scene.nodes.push_back(shd);
+      SceneNode clip = bunny("clip"); // a clip
+      clip.clip.present = true;
+      clip.clip.planes.push_back(SceneClipPlane());
+      scene.nodes.push_back(clip);
+      SceneNode body = bunny("body"); // a body
+      body.has_transform = true;
+      body.position[0] = 20.0f;
+      body.body.present = true;
+      body.body.motion = "static";
+      body.body.shape = "box";
+      scene.nodes.push_back(body);
+      SceneNode parent = bunny("parent"); // children
+      SceneNode kid;
+      kid.id = "kid";
+      kid.type = "group";
+      parent.children.push_back(kid);
+      scene.nodes.push_back(parent);
+      SceneNode small; // under lod_min_tris
+      small.id = "small";
+      small.type = "geometry";
+      small.source_file = smallPath;
+      scene.nodes.push_back(small);
+      std::vector<std::string> warnings;
+      auto realized = cvc::gl::ariadne::realize_scene(sg, scene, "lodi", &warnings, opts);
+      std::remove(smallPath.c_str());
+      std::remove(texPath.c_str());
+
+      bool allPlain = true;
+      for (const char *id : {"box", "hf", "tex", "shd", "clip", "body", "parent", "small"}) {
+        const bool plain = is_geometry(sg, id) && !is_lod(sg, id);
+        if (!plain)
+          printf("     '%s' is not a plain GeometryNode\n", id);
+        allPlain = allPlain && plain;
+      }
+      chk(allPlain, "LOD: a primitive, a heightfield, a textured, shaded, clipped, bodied or "
+                    "parent mesh, and one under lod_min_tris, all stay GeometryNodes");
+      chk(realized.lod_nodes.empty() && cache.builds() == 0, "LOD: ... and none is built");
+      chk(material_matches(std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("shd"))),
+          "LOD: the plain path still applies the material (apply_node_material)");
+      chk(realized.body("body").valid(), "LOD: the bodied mesh still gets its body");
+    }
+
+    printf("== LOD: the four-argument realize_scene never makes a LOD node ==\n");
+    {
+      Scene scene;
+      scene.nodes.push_back(bunny("bunny"));
+      SceneGraph sg(app, "lod4");
+      auto realized = cvc::gl::ariadne::realize_scene(sg, scene, "lod4");
+      chk(is_geometry(sg, "bunny") && !is_lod(sg, "bunny") && realized.lod_nodes.empty(),
+          "LOD: four arguments -> a plain GeometryNode");
+      chk(material_matches(std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("bunny"))),
+          "LOD: ... wearing the node's material, as before");
+      SceneGraph sg2(app, "lod5");
+      auto realized2 = cvc::gl::ariadne::realize_scene(sg2, scene, "lod5", nullptr,
+                                                       cvc::gl::ariadne::RealizeOptions());
+      chk(is_geometry(sg2, "bunny") && !is_lod(sg2, "bunny") && realized2.lod_nodes.empty(),
+          "LOD: default RealizeOptions (no cache) -> a plain GeometryNode too");
+    }
   }
 
 #ifdef CVC_ENABLE_LIBIGL

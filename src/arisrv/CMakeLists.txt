@@ -43,3 +43,14 @@ endif()
 include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcInstallRpath.cmake")
 cvc_set_install_rpath(arisrv bin)
 install(TARGETS arisrv RUNTIME DESTINATION bin COMPONENT arisrv)
+
+# `arisrv_aoi_bench`: a headless load bench for the relay's area of interest — a relay built as
+# arisrv builds it plus N synthetic clients in one process on loopback, reporting what each
+# receiver got by kind, per-link rates, the journal, a late joiner's bootstrap and the probes. A
+# development tool, built in-tree only (never by the standalone relay recipe) and not installed. It
+# runs on whichever transports the build has (the parent adds this directory only with one).
+if(NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR AND (CVC_ENABLE_GRPC OR CVC_ENABLE_WS))
+  add_executable(arisrv_aoi_bench aoi_bench.cpp)
+  target_compile_features(arisrv_aoi_bench PRIVATE cxx_std_17)
+  target_link_libraries(arisrv_aoi_bench PRIVATE cvc)
+endif()

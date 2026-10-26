@@ -31,6 +31,9 @@ add_executable(state_cluster_shard_test state_cluster_shard_test.cpp)
 add_executable(state_message_bus_test state_message_bus_test.cpp)
 add_executable(state_peer_registry_test state_peer_registry_test.cpp)
 add_executable(state_write_policy_test state_write_policy_test.cpp)
+add_executable(state_identity_test state_identity_test.cpp)
+add_executable(state_device_key_test state_device_key_test.cpp)
+add_executable(media_rungs_test media_rungs_test.cpp)
 add_executable(state_distributed_metrics_test state_distributed_metrics_test.cpp)
 add_executable(state_delegation_manager_test state_delegation_manager_test.cpp)
 add_executable(state_distributed_admin_test state_distributed_admin_test.cpp)
@@ -87,6 +90,7 @@ add_executable(state_exec_integration_test state_exec_integration_test.cpp)
 add_executable(state_exec_advanced_integration_test state_exec_advanced_integration_test.cpp)
 add_executable(state_exec_gaps_test state_exec_gaps_test.cpp)
 add_executable(state_exec_exceptions_test state_exec_exceptions_test.cpp)
+add_executable(state_exec_async_calls_test state_exec_async_calls_test.cpp)
 add_executable(state_exec_deep_data_test state_exec_deep_data_test.cpp)
 add_executable(state_exec_data_steps_test state_exec_data_steps_test.cpp)
 if(NOT WIN32)
@@ -112,6 +116,8 @@ add_executable(holon_test holon_test.cpp)
 add_executable(holon_sync_test holon_sync_test.cpp)
 add_executable(state_link_stats_test state_link_stats_test.cpp)
 add_executable(room_scene_test room_scene_test.cpp)
+add_executable(room_aoi_test room_aoi_test.cpp)
+add_executable(room_aoi_relay_test room_aoi_relay_test.cpp)
 add_executable(physics_codec_test physics_codec_test.cpp)
 add_executable(physics_field_test physics_field_test.cpp)
 add_executable(physics_vehicle_test physics_vehicle_test.cpp)
@@ -173,6 +179,11 @@ endif()
 if(CVC_ENABLE_WS)
   add_executable(state_transport_ws_test state_transport_ws_test.cpp)
 endif()
+# The S7 relay end to end on loopback (spatial interest, media gate, pushes): its WebSocket cases
+# need CVC_ENABLE_WS, its gRPC cases CVC_ENABLE_GRPC.
+if(CVC_ENABLE_GRPC OR CVC_ENABLE_WS)
+  add_executable(room_relay_integration_test room_relay_integration_test.cpp)
+endif()
 add_executable(voxels_test voxels_test.cpp)
 add_executable(volume_test volume_test.cpp)
 add_executable(volren_math_test volren_math_test.cpp)
@@ -217,6 +228,7 @@ add_executable(nav_material_train_test nav_material_train_test.cpp)
 add_executable(nav_material_optim_test nav_material_optim_test.cpp)
 add_executable(nav_geom_rollout_grad_test nav_geom_rollout_grad_test.cpp)
 add_executable(nav_sim_world_test nav_sim_world_test.cpp)
+add_executable(nav_yield_test nav_yield_test.cpp)
 add_executable(lod_select_test lod_select_test.cpp)
 add_executable(lod_select_bench_test lod_select_bench_test.cpp)
 add_executable(geometry_simplify_test geometry_simplify_test.cpp)
@@ -279,6 +291,9 @@ set(TEST_TARGETS
   state_message_bus_test
   state_peer_registry_test
   state_write_policy_test
+  state_identity_test
+  state_device_key_test
+  media_rungs_test
   state_distributed_metrics_test
   state_delegation_manager_test
   state_distributed_admin_test
@@ -317,6 +332,8 @@ set(TEST_TARGETS
   holon_sync_test
   state_link_stats_test
   room_scene_test
+  room_aoi_test
+  room_aoi_relay_test
   physics_codec_test
   physics_field_test
   physics_vehicle_test
@@ -383,6 +400,7 @@ set(TEST_TARGETS
   nav_material_optim_test
   nav_geom_rollout_grad_test
   nav_sim_world_test
+  nav_yield_test
   nav_material_rollout_cuda_test
   nav_drive_cuda_parity_test
   nav_coef_energy_cuda_test
@@ -460,6 +478,7 @@ list(APPEND TEST_TARGETS
   state_exec_advanced_integration_test
   state_exec_gaps_test
   state_exec_exceptions_test
+  state_exec_async_calls_test
   state_exec_deep_data_test
   state_exec_data_steps_test
 )
@@ -814,6 +833,13 @@ target_link_libraries(state_exec_exceptions_test
     GTest::gtest_main
 )
 
+target_link_libraries(state_exec_async_calls_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(procedural_geometry_test
   PRIVATE
     cvc
@@ -1047,6 +1073,13 @@ target_link_libraries(nav_sim_world_test
     GTest::gtest_main
 )
 
+target_link_libraries(nav_yield_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(lod_select_test
   PRIVATE
     cvc
@@ -1203,6 +1236,24 @@ target_link_libraries(state_peer_registry_test
 )
 
 target_link_libraries(state_write_policy_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+target_link_libraries(state_identity_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+target_link_libraries(state_device_key_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+target_link_libraries(media_rungs_test
   PRIVATE
     cvc
     GTest::gtest
@@ -1714,6 +1765,20 @@ target_link_libraries(room_scene_test
     GTest::gtest_main
 )
 
+target_link_libraries(room_aoi_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(room_aoi_relay_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(physics_codec_test
   PRIVATE
     cvc
@@ -1939,6 +2004,17 @@ if(TARGET state_transport_ws_test)
   list(APPEND TEST_TARGETS state_transport_ws_test)
 endif()
 
+if(TARGET room_relay_integration_test)
+  target_link_libraries(room_relay_integration_test
+    PRIVATE
+      cvc
+      GTest::gtest
+      GTest::gtest_main
+  )
+  target_compile_features(room_relay_integration_test PRIVATE cxx_std_17)
+  list(APPEND TEST_TARGETS room_relay_integration_test)
+endif()
+
 if(TARGET state_stream_transport_grpc_test)
   target_link_libraries(state_stream_transport_grpc_test
     PRIVATE
@@ -2019,6 +2095,7 @@ target_compile_features(nav_material_train_test PRIVATE cxx_std_17)
 target_compile_features(nav_material_optim_test PRIVATE cxx_std_17)
 target_compile_features(nav_geom_rollout_grad_test PRIVATE cxx_std_17)
 target_compile_features(nav_sim_world_test PRIVATE cxx_std_17)
+target_compile_features(nav_yield_test PRIVATE cxx_std_17)
 # Let the sim_world gtest load the shipped reference policy from the source tree.
 if(EXISTS "${PROJECT_SOURCE_DIR}/share/cvc/nav/coef_mlp.cvcnav")
   target_compile_definitions(nav_test PRIVATE
@@ -2049,6 +2126,9 @@ target_compile_features(state_cluster_shard_test PRIVATE cxx_std_17)
 target_compile_features(state_message_bus_test PRIVATE cxx_std_17)
 target_compile_features(state_peer_registry_test PRIVATE cxx_std_17)
 target_compile_features(state_write_policy_test PRIVATE cxx_std_17)
+target_compile_features(state_identity_test PRIVATE cxx_std_17)
+target_compile_features(state_device_key_test PRIVATE cxx_std_17)
+target_compile_features(media_rungs_test PRIVATE cxx_std_17)
 target_compile_features(state_distributed_metrics_test PRIVATE cxx_std_17)
 target_compile_features(state_delegation_manager_test PRIVATE cxx_std_17)
 target_compile_features(state_distributed_admin_test PRIVATE cxx_std_17)
@@ -2081,6 +2161,7 @@ target_compile_features(state_exec_parser_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_types_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_deep_data_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_exceptions_test PRIVATE cxx_std_20)
+target_compile_features(state_exec_async_calls_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_data_steps_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_builtins_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_evaluator_test PRIVATE cxx_std_20)
@@ -2128,6 +2209,8 @@ target_compile_features(holon_test PRIVATE cxx_std_17)
 target_compile_features(holon_sync_test PRIVATE cxx_std_17)
 target_compile_features(state_link_stats_test PRIVATE cxx_std_17)
 target_compile_features(room_scene_test PRIVATE cxx_std_17)
+target_compile_features(room_aoi_test PRIVATE cxx_std_17)
+target_compile_features(room_aoi_relay_test PRIVATE cxx_std_17)
 target_compile_features(physics_codec_test PRIVATE cxx_std_17)
 target_compile_features(physics_field_test PRIVATE cxx_std_17)
 target_compile_features(physics_vehicle_test PRIVATE cxx_std_17)
@@ -2345,6 +2428,7 @@ cvc_discover_tests(nav_material_train_test)
 cvc_discover_tests(nav_material_optim_test)
 cvc_discover_tests(nav_geom_rollout_grad_test)
 cvc_discover_tests(nav_sim_world_test)
+cvc_discover_tests(nav_yield_test)
 cvc_discover_tests(lod_select_test)
 cvc_discover_tests(lod_select_bench_test)
 cvc_discover_tests(geometry_simplify_test)
@@ -2385,6 +2469,9 @@ endif()
 #    would install a libcvc.a whose mesh_ops.o / fem.o reference igl_detail::
 #    symbols that no installed file defines.)
 #  - Neither cvc_igl nor igl::/Eigen3:: targets leak into cvcTargets.cmake.
+#  - MSVC: cvc.dll's generated export table names no igl:: or Eigen:: symbol.
+#    (cvc::igl_detail:: names may appear: mesh_ops.cpp / fem.cpp compile the
+#    boundary types' inline members and RTTI into cvc's own objects.)
 #  - cvc_igl's parallel_for backend equals igl::core's (adding
 #    IGL_PARALLEL_FOR_FORCE_SERIAL only to cvc_igl is an ODR violation in any
 #    static link that also uses igl::core), except that single-threaded wasm
@@ -2393,6 +2480,10 @@ if(CVC_ENABLE_LIBIGL AND TARGET cvc_igl)
   get_target_property(_cvc_igl_cvc_type cvc TYPE)
   get_target_property(_cvc_igl_helper_type cvc_igl TYPE)
   get_target_property(_cvc_igl_cvc_bindir cvc BINARY_DIR)
+  get_target_property(_cvc_igl_export_def cvc CVC_EXPORT_DEF)
+  if(NOT _cvc_igl_export_def)
+    set(_cvc_igl_export_def "")
+  endif()
   get_target_property(_cvc_igl_defs cvc_igl COMPILE_DEFINITIONS)
   get_target_property(_cvc_igl_core_defs igl::core INTERFACE_COMPILE_DEFINITIONS)
   set(_cvc_igl_serial_private OFF)
@@ -2449,6 +2540,14 @@ foreach(_f IN LISTS _exports)
   endif()
 endforeach()
 
+if(EXPORT_DEF)
+  file(STRINGS "${EXPORT_DEF}" _leaks REGEX "@igl@@|@Eigen@@")
+  if(_leaks)
+    list(LENGTH _leaks _n)
+    string(APPEND _fail "${EXPORT_DEF} exports ${_n} igl:: or Eigen:: symbols\n")
+  endif()
+endif()
+
 if(SERIAL_REQUIRED)
   if(NOT SERIAL_PRIVATE AND NOT SERIAL_CORE)
     string(APPEND _fail "single-threaded wasm: libigl's thread pool cannot start, but neither "
@@ -2474,6 +2573,7 @@ message(STATUS "cvc_igl packaging OK: cvc ${CVC_TYPE}, cvc_igl ${HELPER_TYPE}, s
       "-DAR=${CMAKE_AR}"
       "-DAR_IS_LIB_EXE=${MSVC}"
       "-DEXPORT_DIR=${_cvc_igl_cvc_bindir}/CMakeFiles/Export"
+      "-DEXPORT_DEF=${_cvc_igl_export_def}"
       -DSERIAL_PRIVATE=${_cvc_igl_serial_private}
       -DSERIAL_CORE=${_cvc_igl_serial_core}
       -DSERIAL_REQUIRED=${_cvc_igl_serial_required}
@@ -2490,6 +2590,7 @@ if(TARGET state_exec_gaps_test)
   cvc_discover_tests(state_exec_gaps_test)
 endif()
 cvc_discover_tests(state_exec_exceptions_test)
+cvc_discover_tests(state_exec_async_calls_test)
 cvc_discover_tests(state_change_journal_test)
 cvc_discover_tests(state_subscription_router_test)
 cvc_discover_tests(state_sync_adapter_test)
@@ -2503,6 +2604,9 @@ cvc_discover_tests(state_cluster_shard_test)
 cvc_discover_tests(state_message_bus_test)
 cvc_discover_tests(state_peer_registry_test)
 cvc_discover_tests(state_write_policy_test)
+cvc_discover_tests(state_identity_test)
+cvc_discover_tests(state_device_key_test)
+cvc_discover_tests(media_rungs_test)
 cvc_discover_tests(state_distributed_metrics_test)
 cvc_discover_tests(state_delegation_manager_test)
 cvc_discover_tests(state_distributed_admin_test)
@@ -2592,6 +2696,8 @@ cvc_discover_tests(holon_test)
 cvc_discover_tests(holon_sync_test)
 cvc_discover_tests(state_link_stats_test)
 cvc_discover_tests(room_scene_test)
+cvc_discover_tests(room_aoi_test)
+cvc_discover_tests(room_aoi_relay_test)
 cvc_discover_tests(physics_codec_test)
 cvc_discover_tests(physics_field_test)
 cvc_discover_tests(physics_vehicle_test)
@@ -2630,6 +2736,11 @@ if(TARGET state_transport_grpc_test)
 endif()
 if(TARGET state_transport_ws_test)
   cvc_discover_tests(state_transport_ws_test)
+endif()
+if(TARGET room_relay_integration_test)
+  # Its suite is RoomRelayLoopbackTest, not *Integration*: CI's PR and recipe runs exclude names
+  # matching "Integration" (the slow CLI suites), and these are S7's only end-to-end checks.
+  cvc_discover_tests(room_relay_integration_test)
 endif()
 if(TARGET state_stream_transport_grpc_test)
   cvc_discover_tests(state_stream_transport_grpc_test)

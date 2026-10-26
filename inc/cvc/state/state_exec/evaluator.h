@@ -35,9 +35,12 @@ public:
 };
 
 /// What a step was spent on: evaluating code, reading the script a slice at a time
-/// (parser.step_tokens), or deep-data work a slice at a time (data.step_nodes: comparing,
-/// printing, copying or expanding a nested value, or freeing one).
-enum class step_kind { eval = 0, read = 1, data = 2 };
+/// (parser.step_tokens), deep-data work a slice at a time (data.step_nodes: comparing,
+/// printing, copying or expanding a nested value, or freeing one), or the CPU time of the
+/// process's async calls, converted at limits.async_steps_per_cpu_ms
+/// (docs/STATE_EXEC_EXCEPTIONS.md 3.8). Async steps aren't evaluator steps: the host charges
+/// them with add_steps().
+enum class step_kind { eval = 0, read = 1, data = 2, async = 3 };
 
 /// Thread-safe evaluation statistics.
 struct evaluation_stats {
@@ -82,12 +85,22 @@ struct evaluation_stats {
       kind_steps[static_cast<std::size_t>(kind)].fetch_add(1, std::memory_order_relaxed);
     last_kind = kind;
   }
+  /// Count `n` steps of `kind` that no evaluator step took: what an async call is charged
+  /// (step_kind::async), or the counts a restored process had. The last step's kind stays.
+  void add_steps(step_kind kind, uint64_t n) {
+    if (n == 0)
+      return;
+    step_count.fetch_add(n, std::memory_order_relaxed);
+    if (kind != step_kind::eval)
+      kind_steps[static_cast<std::size_t>(kind)].fetch_add(n, std::memory_order_relaxed);
+  }
   uint64_t get_step_count() const { return step_count.load(std::memory_order_relaxed); }
   /// Steps spent on `kind`.
   uint64_t steps(step_kind kind) const {
     if (kind != step_kind::eval)
       return kind_steps[static_cast<std::size_t>(kind)].load(std::memory_order_relaxed);
-    const uint64_t other = steps(step_kind::read) + steps(step_kind::data);
+    const uint64_t other =
+        steps(step_kind::read) + steps(step_kind::data) + steps(step_kind::async);
     const uint64_t all = get_step_count();
     return all > other ? all - other : 0;
   }
@@ -122,7 +135,7 @@ struct evaluation_stats {
   }
 
 private:
-  static constexpr std::size_t kKinds = 3;
+  static constexpr std::size_t kKinds = 4;
   void copy_counts(const evaluation_stats &o) {
     step_count.store(o.step_count.load(std::memory_order_relaxed), std::memory_order_relaxed);
     for (std::size_t k = 0; k < kKinds; ++k) {

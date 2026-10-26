@@ -20,6 +20,7 @@
 // pointer), so it can never dangle into a torn-down node.
 
 #include <chrono>                 // RealizedScene clock-drive wall-dt timestamp
+#include <cstdint>                // RealizeOptions::lod_min_tris
 #include <cvc/ariadne/bind.h>     // SceneVisibilityBinding
 #include <cvc/ariadne/loader.h>   // LoadResult / CustomRequirement (verify_scene_customs)
 #include <cvc/ariadne/scene.h>    // SceneClock (RealizedScene holds the resolved clock by value)
@@ -54,6 +55,8 @@ namespace gl {
 class SceneGraph;
 class GraphicsNode;
 class GeometryNode; // ShaderPreset applies to a GeometryNode (forward-decl: used only by reference)
+class LodGraphicsNode;
+class LodPyramidCache;
 class VolRenNode;
 class VolSliceNode;
 
@@ -77,6 +80,10 @@ struct RealizedScene {
   std::vector<std::unique_ptr<StageLighting>> rigs;
   std::vector<std::weak_ptr<VolRenNode>> volren_ticks;
   std::vector<std::weak_ptr<VolSliceNode>> volslice_ticks;
+  // The geometry nodes realized as LOD ladders (RealizeOptions::lod), held weakly like the
+  // tickers. Empty without the option, so a host runs a SceneGraph::selectLOD pass per frame only
+  // when this is not.
+  std::vector<std::weak_ptr<LodGraphicsNode>> lod_nodes;
   // Per-frame closures a CUSTOM node type registered (register_scene_node_type) that
   // needs servicing — run by tick_scene after the built-in tickers. A closure should
   // capture a weak_ptr to its node (not the node), matching the volren/volslice
@@ -162,6 +169,28 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
                             const std::string &bind_prefix,
                             std::vector<std::string> *warnings = nullptr);
 
+// Opt-in realize behaviour. The defaults are the four-argument realize_scene, exactly.
+struct RealizeOptions {
+  // Realize a mesh-file geometry node as a LodGraphicsNode whose ladder comes from this cache
+  // (LodPyramidCache::attach: full detail at once, the coarser rungs once their build lands on a
+  // later poll()). Null = never. A node qualifies only when its source is a file or URI (not a
+  // primitive or a heightfield), it has no material texture, shader, clip, body or children, and
+  // the mesh it reads has at least `lod_min_tris` triangles; everything else realizes exactly as
+  // without the option. A qualifying node keeps its id, registration (top level) or nesting, its
+  // transform and its `visible:`; every rung gets the node's material (apply_node_material). The
+  // cache must outlive the realized nodes' builds -- keep it beside the scene, across re-realizes,
+  // so a realize of the same meshes again needs no build. LOD is a render proxy only: such a node
+  // has no body, and nothing that reads geometry for physics or navigation sees a rung.
+  LodPyramidCache *lod = nullptr;
+  // Below this a ladder saves little and costs about 1.5x the resident buffers.
+  std::uint64_t lod_min_tris = 4096;
+};
+
+// realize_scene with options; the LOD nodes it creates are listed in RealizedScene::lod_nodes.
+RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
+                            const std::string &bind_prefix, std::vector<std::string> *warnings,
+                            const RealizeOptions &options);
+
 // --- extensibility: custom scene node types ----------------------------------
 //
 // A realizer for a CUSTOM scene node `type` (a type: the built-ins don't handle).
@@ -211,6 +240,11 @@ char fit_up_axis(const cvc::ariadne::SceneNode &node);
 // returns false when there is no usable source.
 bool read_node_geometry(SceneGraph &sg, const cvc::ariadne::SceneNode &node, cvc::geometry &geom,
                         std::vector<std::string> *warnings);
+
+// A geometry node's `material:` block -- single colour, colour, ambient, diffuse, and specular when
+// stated -- as the built-in geometry node applies it (and every rung of a LOD node). A node with no
+// material block is left as it is.
+void apply_node_material(GeometryNode &g, const cvc::ariadne::SceneNode &node);
 
 // A dim³ signed distance field of the mesh at `mesh_uri` (fit applied first when `apply_fit`),
 // framed to the mesh extents padded 10% and cubic. Negative inside. Throws on a build without

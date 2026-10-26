@@ -12,6 +12,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib> // std::abs(int): click slop
 #include <cvc/ariadne/keys.h> // canonical_key: a binding may use SDL's key names or VTK's
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/GraphicsNode.h>
@@ -152,12 +153,24 @@ public:
     m_controller->mouseLook(x - lx, y - ly);
   }
   void OnLeftButtonDown() override {
-    if (m_controller)
-      m_controller->beginDrag();
+    if (!m_controller)
+      return;
+    if (this->Interactor) {
+      int x, y;
+      this->Interactor->GetEventPosition(x, y);
+      m_controller->notePointerDown(x, y);
+    }
+    m_controller->beginDrag();
   }
   void OnLeftButtonUp() override {
-    if (m_controller)
-      m_controller->endDrag();
+    if (!m_controller)
+      return;
+    if (this->Interactor) {
+      int x, y;
+      this->Interactor->GetEventPosition(x, y);
+      m_controller->notePointerUp(x, y);
+    }
+    m_controller->endDrag();
   }
   // Middle button = pan, the standard "move the scene" drag.
   void OnMiddleButtonDown() override {
@@ -249,6 +262,11 @@ struct CameraController::Impl {
   // runtime (not state)
   std::set<std::string> held;
   bool dragging = false;
+  // Click detection (notePointerDown/Up, takeClick).
+  bool pointerDown = false;
+  int pressX = 0, pressY = 0;
+  bool clickPending = false;
+  int clickX = 0, clickY = 0;
   bool panning = false; // middle-button drag, or primary drag on touch
   bool primaryDragPans = false;
   double poseMirrorAccum = 0.0;
@@ -1071,6 +1089,35 @@ void CameraController::setPrimaryDragPans(bool on) {
 bool CameraController::primaryDragPans() const { return m_impl->primaryDragPans; }
 
 void CameraController::beginDrag() { m_impl->dragging = true; }
+
+void CameraController::notePointerDown(int x, int y) {
+  m_impl->pointerDown = true;
+  m_impl->pressX = x;
+  m_impl->pressY = y;
+}
+
+void CameraController::notePointerUp(int x, int y) {
+  Impl &s = *m_impl;
+  if (!s.pointerDown)
+    return;
+  s.pointerDown = false;
+  constexpr int kClickSlop = 4; // px: farther than this from the press is a drag, not a click
+  if (std::abs(x - s.pressX) <= kClickSlop && std::abs(y - s.pressY) <= kClickSlop) {
+    s.clickPending = true;
+    s.clickX = x;
+    s.clickY = y;
+  }
+}
+
+bool CameraController::takeClick(int &x, int &y) {
+  Impl &s = *m_impl;
+  if (!s.clickPending)
+    return false;
+  s.clickPending = false;
+  x = s.clickX;
+  y = s.clickY;
+  return true;
+}
 void CameraController::endDrag() { m_impl->dragging = false; }
 
 // ---- tunables ----

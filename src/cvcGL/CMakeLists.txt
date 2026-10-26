@@ -442,6 +442,13 @@ add_executable(cvcgl_lod_node test/cvcgl_lod_node.cpp)
 target_link_libraries(cvcgl_lod_node PRIVATE cvcGL)
 add_test(NAME cvcgl_lod_node COMMAND cvcgl_lod_node)
 
+# LodPyramidCache: one QEM pyramid build per (mesh content, params) on an async lane (deferred,
+# one build per poll, where wasm has no threads), rung 0 drawn before the build lands, the build
+# cap, and a prompt teardown with builds still queued. Offscreen.
+add_executable(cvcgl_lod_cache test/cvcgl_lod_cache.cpp)
+target_link_libraries(cvcgl_lod_cache PRIVATE cvcGL)
+add_test(NAME cvcgl_lod_cache COMMAND cvcgl_lod_cache)
+
 # GraphicsNode::setMetadata's read-only state mirror: it follows the node (it
 # used to keep the first value forever, each later write throwing a swallowed
 # read_only_error), stays locked to other writers, costs nothing for an
@@ -840,6 +847,11 @@ add_test(NAME cvcgl_terminal_scene COMMAND cvcgl_terminal_scene)
 add_executable(cvcgl_imgui_table_columns test/cvcgl_imgui_table_columns.cpp)
 target_link_libraries(cvcgl_imgui_table_columns PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_table_columns COMMAND cvcgl_imgui_table_columns)
+# A slider in a grid cell holds a steady width, even in an auto-width column (the conference
+# roster's volume slider). No window, no GL.
+add_executable(cvcgl_imgui_grid_slider test/cvcgl_imgui_grid_slider.cpp)
+target_link_libraries(cvcgl_imgui_grid_slider PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_grid_slider COMMAND cvcgl_imgui_grid_slider)
 
 # ImGuiBackend's window sizing and placement on a bare ImGui context: a window with no size fits
 # its widgets, windows with no pos stack instead of overlapping (until the user moves one), and a

@@ -17,14 +17,18 @@
 #define __CVC_ARIADNE_HOLON_H__
 
 #include <cstdint>
+#include <cvc/ariadne/avatar_physics.h>
 #include <cvc/ariadne/avatar_sim.h>
 #include <cvc/core/clock_driver.h>
 #include <cvc/core/namespace.h>
 #include <cvc/core/world_clock.h>
 #include <cvc/physics/body.h>
 #include <cvc/physics/pose_tracker.h>
+#include <deque>
 #include <map>
+#include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace cvc {
@@ -70,6 +74,39 @@ struct holon_config {
   // CLIENT: how far (in ticks) the replica's clock may drift from the server's tick before
   // apply_authoritative re-aligns it. 60 = 0.5 s at the default 120 Hz. See apply_authoritative.
   std::uint64_t max_skew_ticks = 60;
+  // CLIENT with a lead (set_lead_ticks > 0): how far the replica may fall BEHIND its lead target
+  // (late inputs: the server would apply them after their tick, a correction each time) or run
+  // AHEAD of it (only delays what peers see) before it re-aligns.
+  std::uint64_t lead_slack_behind_ticks = 6;
+  std::uint64_t lead_slack_ahead_ticks = 24;
+  // CLIENT with a lead: a drift past the slack but within max_skew_ticks is closed by SLEWING the
+  // replica's clock -- running it this fraction faster (behind) or slower (ahead) than its scale --
+  // until it is within a tick of the target, instead of seeking, which drops the local avatar's
+  // logged inputs (the next sample then snaps it back a round trip: a visible jump). A lead moves
+  // with the round trip, so this is the common case. 0.05 closes 6 ticks in about a second; 0
+  // always seeks.
+  double lead_slew = 0.05;
+  // CLIENT: the longest walk between two peer samples, in ticks. A server that publishes only
+  // what changed (write_pose's heartbeat) leaves a long gap before a peer's first sample after
+  // standing still; walking that sample in over the whole gap would leave the peer far behind.
+  std::uint64_t max_peer_span_ticks = 30;
+  // SERVER: how far ahead of its own tick a stamped intent may be (queue_intent); a stamp
+  // further out (a client whose clock is off) takes effect at once instead of waiting.
+  std::uint64_t max_intent_lead_ticks = 240;
+  // Rigid-body avatars in a Jolt world (avatar_world): mass, inertia, gravity, collisions with
+  // each other and the room's statics (set_statics). Off = the kinematic avatar_sim (no
+  // collisions). A build without the Jolt backend falls back to avatar_sim with a warning
+  // (physics() reports which is running).
+  bool physics = false;
+  avatar_body body; // with physics: every avatar's body
+  // SERVER with physics: an avatar that fell off the world (below this z) respawns where it
+  // joined.
+  double respawn_below_z = -10.0;
+  // The VETO (sanitize_intent): the fastest an intent may ask an avatar to move horizontally (m/s;
+  // a faster ask is scaled down to it), and whether it may ask to move vertically at all (avatars
+  // walk; gravity, not the client, owns z).
+  double max_speed = 4.0;
+  bool allow_vertical = false;
 };
 
 class holon {
@@ -95,33 +132,120 @@ public:
   // Register a participant. `local` marks the CLIENT's own avatar (predicted); on a
   // server every participant is authoritative, and on a client a non-local
   // participant is an interpolated peer.
+  //
+  // POSE_KNOWN = false (CLIENT): `start` is a placeholder, not a pose -- the host saw the
+  // participant in the roster before its first authoritative sample. It is a member like any
+  // other, but pose_known() stays false until apply_authoritative brings that sample, so a
+  // renderer can leave it undrawn. With physics a non-local one has no kinematic body until then
+  // (one held at the placeholder would be an invisible obstacle, at the origin, inside the room's
+  // reference object); the first sample creates it there. The local avatar keeps its body (its
+  // prediction steps it). A server ignores the flag: it is the authority, so every pose it holds
+  // is known.
   void add_participant(const std::string &pid, bool local = false,
-                       const cvc::physics::body_state &start = cvc::physics::body_state{});
+                       const cvc::physics::body_state &start = cvc::physics::body_state{},
+                       bool pose_known = true);
+  // CLIENT: the newest server tick seen from `pid` is remembered when it is removed (left_tick).
   void remove_participant(const std::string &pid);
   bool has_participant(const std::string &pid) const;
+  // CLIENT: the newest server tick seen from `pid` before it was last removed, until a sample of
+  // it is applied again; 0 otherwise. The pose subtree a departed peer leaves behind in the room
+  // tree carries a tick no newer, so the host (client_pump) can tell it from a pose for its rejoin.
+  std::uint64_t left_tick(const std::string &pid) const;
   // Every registered pid, in pid order.
   std::vector<std::string> participants() const;
 
+  // Whether `pid`'s pose is real: it was added with pose_known, or a sample has arrived since.
+  // False for an unknown pid.
+  bool pose_known(const std::string &pid) const;
+  // Whether `pid` has a rigid body in the physics world. False without physics, for an unknown
+  // pid, and for a client peer whose pose is not known yet.
+  bool has_body(const std::string &pid) const;
+
   // Set a participant's latest intent. Server: the validated input it integrates
-  // into the authoritative pose. Client: only the LOCAL avatar's own input (a
-  // non-local pid is ignored -- a client cannot drive a peer).
+  // into the authoritative pose, from the next quantum on (any queued stamped
+  // intents are dropped). Client: only the LOCAL avatar's own input (a non-local
+  // pid is ignored -- a client cannot drive a peer). Either way the intent passes
+  // sanitize_intent first.
   void set_intent(const std::string &pid, const avatar_intent &in);
+
+  // The server's VETO over a proposed intent (§5h propose -> veto -> override): a
+  // non-finite move is no move, a non-finite yaw faces +X, the vertical is dropped
+  // unless allow_vertical, the horizontal speed is capped at max_speed and the yaw
+  // is wrapped to [-pi, pi]. An honest client applies the same rule to its own
+  // prediction, so it agrees with what the server will integrate (no correction);
+  // a client that asks for more is overruled on reconcile.
+  avatar_intent sanitize_intent(const avatar_intent &in) const;
+  // SERVER: how many intents the veto has changed.
+  std::uint64_t vetoes() const noexcept { return _vetoes; }
+
+  // SERVER OVERRIDES (§5h): the authority acts on an avatar at will, and the result
+  // replicates like any authoritative pose (the owning client reconciles to it).
+  // Teleport `pid` to `feet` (pose + velocities). False for an unknown pid or on a
+  // client holon.
+  bool override_state(const std::string &pid, const cvc::physics::body_state &feet);
+  // Re-mass `pid` (kg, finite and > 0). Physics only: false without a world, for an
+  // unknown pid, a bad mass, or on a client holon.
+  bool set_mass(const std::string &pid, double kg);
+
+  // SERVER: a participant's intent STAMPED with the tick the client applied it from
+  // in its prediction. It takes effect at that tick -- so the authoritative pose
+  // matches the prediction exactly when it arrives in time (the client runs ahead by
+  // its lead, set_lead_ticks) -- or at once when it arrives late (that tick is
+  // already integrated) or stamped too far ahead (max_intent_lead_ticks). Re-queueing
+  // the stamp already queued last is a no-op, so a host may re-read the tree every
+  // frame. A client holon ignores this.
+  void queue_intent(const std::string &pid, const avatar_intent &in, std::uint64_t tick);
+
+  // Whether avatars are rigid bodies in a Jolt world (holon_config::physics, and a build that
+  // has the backend).
+  bool physics() const noexcept { return _world != nullptr; }
+
+  // With physics: the room's static objects (the ground, the cube, ...), from the room scene at
+  // `revision`. Avatars stand still until the first set_statics (there is nothing to stand on).
+  void set_statics(const std::vector<avatar_static> &statics, std::uint64_t revision);
+  std::uint64_t statics_revision() const noexcept { return _statics_rev; }
+
+  // CLIENT: run the replica's clock `ticks` AHEAD of the server's (default 0: in step
+  // with the samples). With a lead, an intent the client applies at its tick T reaches
+  // the server before the server integrates T, so the server's pose agrees with the
+  // prediction and reconcile has nothing to correct. The host sets it from the measured
+  // round trip plus a margin (one way for the sample, one way for the intent).
+  void set_lead_ticks(std::uint64_t ticks) { _lead = ticks; }
+  std::uint64_t lead_ticks() const { return _lead; }
 
   // CLIENT ONLY: an authoritative state for `pid`, valid as of `server_tick`,
   // arrived via replication. The local avatar reconciles to it (snap + replay on
   // divergence); a peer takes it as its newest interpolation sample. No-op on a
   // server holon or an unknown pid.
   //
+  // A sample at or below the newest one already seen for `pid` is ignored outright
+  // (a re-read of an unchanged pose is not news, and must not move the clock). The
+  // first one makes the pose known (pose_known), and gives a peer registered without
+  // one its kinematic body, at the sample.
+  //
   // Reconcile compares ticks, so the replica's clock must count the server's ticks.
   // The two clocks start independently (a client joins a server that has run for
   // hours), so a sample more than max_skew_ticks from the replica's tick -- the first
   // one after joining, or one after a backgrounded browser tab stalled the frame
-  // loop -- re-aligns the replica: its clock seeks to server_tick and the local
-  // avatar's unacknowledged input log is dropped (its ticks no longer mean anything;
-  // its state is kept). Between re-alignments both clocks run from wall time at the
-  // same rate.
+  // loop -- re-aligns the replica: its clock seeks to server_tick (+ the lead) and the
+  // local avatar's unacknowledged input log is dropped (its ticks no longer mean
+  // anything; its state is kept). With a lead the target is server_tick + lead and the
+  // tolerance the lead slack (holon_config). Between re-alignments both clocks run
+  // from wall time at the same rate.
   void apply_authoritative(const std::string &pid, const cvc::physics::body_state &auth,
                            std::uint64_t server_tick);
+
+  // CLIENT: how many times apply_authoritative has re-aligned the replica's clock (each seek also
+  // drops the local avatar's unacknowledged inputs: a visible jump). The first sample after
+  // joining is one if the clock was not already in step; after that the count should stay flat
+  // (later drifts slew, clock_slews), and a rising one means samples keep
+  // arriving with ticks far from the replica's (a stalled frame loop, or a sender stamping stale
+  // ticks).
+  std::uint64_t clock_realigns() const noexcept { return _realigns; }
+  // CLIENT: how many times it has started slewing its clock toward the lead target instead
+  // (holon_config::lead_slew), and whether it is slewing now.
+  std::uint64_t clock_slews() const noexcept { return _slews; }
+  bool clock_slewing() const noexcept { return _slewing; }
 
   // Advance the holon one frame. SERVER: drives its clock from wall time (wall_dt<0)
   // or an injected dt, then integrates every authoritative avatar over the quanta
@@ -152,10 +276,27 @@ public:
 private:
   struct participant {
     bool local = false;
-    avatar_sim sim;             // server authoritative integrator
-    avatar_intent intent;       // latest intent (server input / client-local input)
-    predicted_avatar predicted; // client-local prediction + reconcile
+    // CLIENT: its pose is real (added with one, or a sample has arrived); see add_participant.
+    bool pose_known = true;
+    avatar_sim sim;       // server authoritative integrator
+    avatar_intent intent; // latest intent (server input / client-local input)
+    // SERVER: stamped intents waiting for their tick (queue_intent), in tick order.
+    std::deque<std::pair<std::uint64_t, avatar_intent>> queued;
+    bool have_stamp = false;      // a stamped intent has been queued (last_stamp is meaningful)
+    std::uint64_t last_stamp = 0; // the stamp queued last (re-queueing it is a no-op)
+    // CLIENT: the newest sample tick seen for this participant. A host re-reads an unchanged pose
+    // every frame (and a server publishing only changes leaves a still avatar's tick old for up to
+    // a heartbeat), so a sample already seen must not count as a clock reading.
+    bool have_seen = false;
+    std::uint64_t last_seen = 0;
+    predicted_avatar predicted;                   // client-local prediction + reconcile
     cvc::physics::vec3 correction{0.0, 0.0, 0.0}; // reconcile jumps not yet taken
+    // CLIENT-local: its state before the last quantum, so display_pose interpolates between the
+    // last two quanta by alpha as a peer is (a frame that falls between quanta otherwise shows the
+    // avatar standing still, then moving a whole quantum: judder the following camera spreads to
+    // the whole view). A reconcile shifts it with the correction.
+    bool have_render_prev = false;
+    cvc::physics::body_state render_prev;
     // peer interpolation: the last two authoritative samples + a monotonic guard
     // (mirroring predicted_avatar's stale/duplicate-ack rejection) so a reordered
     // or duplicate peer sample never rewinds or freezes the interpolation window.
@@ -164,7 +305,23 @@ private:
     cvc::physics::body_state prev, newest;
     std::uint64_t newest_arrival_tick = 0; // this clock's tick when `newest` arrived
     std::uint64_t sample_span = 0;         // server ticks from prev to newest (0 = one sample)
+    // physics: where it joined (a SERVER respawn point), and the CLIENT-local avatar's
+    // prediction log -- predicted_avatar's, over the Jolt world instead of avatar_sim.
+    cvc::physics::body_state spawn;
+    struct logged {
+      std::uint64_t tick = 0;
+      avatar_intent in;
+      cvc::physics::body_state after; // its state after the step at `tick`
+    };
+    std::deque<logged> log;
+    bool acked = false;
+    std::uint64_t last_acked = 0;
   };
+
+  // physics: one quantum of the world (the drive, the peers' kinematic poses, the step).
+  void world_step_client(const std::string &self, const avatar_intent &in);
+  bool world_reconcile(const std::string &pid, participant &p, const cvc::physics::body_state &auth,
+                       std::uint64_t server_tick);
 
   void on_step(const cvc::clock_driver::clock_frame &f);
   void on_present(const cvc::clock_driver::clock_frame &f);
@@ -174,7 +331,19 @@ private:
   cvc::world_clock _clock; // declared before _driver: _driver references it
   cvc::clock_driver _driver;
   std::map<std::string, participant> _participants;
-  double _alpha = 0.0; // the last frame's interpolation alpha, for display_pose
+  // CLIENT: pid -> the newest tick seen before it left (remove_participant), until a sample of it
+  // is applied; at most kMaxLeft of them (a client sees a fresh pid per launch of every peer).
+  std::map<std::string, std::uint64_t> _left;
+  static constexpr std::size_t kMaxLeft = 1024;
+  double _alpha = 0.0;                  // the last frame's interpolation alpha, for display_pose
+  std::uint64_t _lead = 0;              // CLIENT: ticks ahead of the server (set_lead_ticks)
+  std::unique_ptr<avatar_world> _world; // physics (holon_config::physics + a Jolt build)
+  std::uint64_t _vetoes = 0;            // SERVER: intents sanitize_intent changed
+  std::uint64_t _realigns = 0;          // CLIENT: clock seeks in apply_authoritative
+  std::uint64_t _slews = 0;             // CLIENT: slews started in apply_authoritative
+  bool _slewing = false;                // CLIENT: the clock runs off its scale toward the target
+  bool _synced = false;                 // CLIENT: a first sample has set (or found) the clock
+  std::uint64_t _statics_rev = 0;
 };
 
 } // namespace ariadne

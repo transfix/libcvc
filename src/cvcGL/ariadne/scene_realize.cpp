@@ -13,6 +13,8 @@
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/LightNode.h>
+#include <cvc/gl/LodGraphicsNode.h> // RealizeOptions::lod: a mesh node as a LOD ladder
+#include <cvc/gl/LodPyramidCache.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/StageLighting.h>
 #include <cvc/gl/VolRenNode.h>
@@ -508,9 +510,49 @@ bool read_node_geometry_and_field(SceneGraph &sg, const cvc::ariadne::SceneNode 
                                   std::shared_ptr<const cvc::height_field> &field,
                                   std::vector<std::string> *warnings);
 
+// RealizeOptions::lod: whether geometry node `n`, whose mesh is `geom`, realizes as a LOD ladder.
+bool lod_eligible(const cvc::ariadne::SceneNode &n, const cvc::geometry &geom,
+                  const RealizeOptions &options) {
+  if (!options.lod)
+    return false;
+  // A mesh asset only. A primitive is a handful of triangles, and a heightfield is the terrain
+  // bodies collide with and custom nodes sample (out.height_fields).
+  if (n.has_heightfield || !n.source_primitive.empty() || n.source_file.empty())
+    return false;
+  // Nothing a ladder cannot carry: a texture, shader or clip is set up on one GeometryNode, a body
+  // is made from the node's own GeometryNode (realize_physics), and children would nest under a
+  // node whose rungs come and go.
+  if (!n.material_texture.empty() || n.shader.present || n.clip.present || n.body.present ||
+      !n.children.empty())
+    return false;
+  return geom.num_tris() + 2 * geom.num_quads() >= options.lod_min_tris;
+}
+
+// A geometry node realized as a LOD ladder, created where its GeometryNode would have been: under
+// `parent`, or at the top level with sg.addGraphics' last-wins registration. Every rung gets the
+// node's material; the cache shows `geom` at once and adds the coarser rungs when they are built.
+std::shared_ptr<LodGraphicsNode>
+realize_lod_geometry(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const cvc::geometry &geom,
+                     GraphicsNode *parent, LodPyramidCache &cache) {
+  std::shared_ptr<LodGraphicsNode> lod;
+  if (parent) {
+    lod = parent->addGraphicsChild<LodGraphicsNode>(n.id);
+  } else {
+    if (sg.hasGraphics(n.id)) // last-wins parity with sg.addGraphics (see volren)
+      sg.removeGraphics(n.id);
+    lod = sg.getGraphicsRoot()->addGraphicsChild<LodGraphicsNode>(n.id);
+    sg.registerGraphics(n.id, lod); // name-map parity + grid enclosure for a top-level node
+  }
+  // Set before the first rung exists, so no rung ever draws unstyled. The style lives as long as
+  // the node and the Scene may not (a room scene is read into a temporary): it holds a copy.
+  lod->setRungStyle([spec = n](GeometryNode &g) { apply_node_material(g, spec); });
+  cache.attach(lod, geom);
+  return lod;
+}
+
 void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::string &bind_prefix,
                   RealizedScene &out, GraphicsNode *parent, std::vector<pending_body> &bodies,
-                  std::vector<std::string> *warnings) {
+                  const RealizeOptions &options, std::vector<std::string> *warnings) {
   std::shared_ptr<GraphicsNode> node;
 
   if (n.type == "geometry") {
@@ -520,40 +562,40 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
       return;
     if (field)
       out.height_fields[n.id] = field; // the grid this node draws, for bodies and custom nodes
-    std::shared_ptr<GeometryNode> g =
-        parent ? parent->createChild<GeometryNode>(n.id, geom)
-               : std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics(n.id, geom));
-    if (g && n.has_material) {
-      g->setUseSingleColor(n.use_single_color);
-      g->setColor(n.color[0], n.color[1], n.color[2]);
-      g->setAmbient(n.ambient);
-      g->setDiffuse(n.diffuse);
-      if (n.has_specular) {
-        g->setSpecular(n.specular);
-        g->setSpecularPower(n.specular_power);
-      }
-    }
-    // A heightfield's per-vertex band colours are there to be shown: switch the node to per-vertex
-    // colour (overriding the material single-colour default) when the field supplied them.
-    if (g && n.has_heightfield && !n.heightfield.colors.empty())
-      g->setUseSingleColor(false);
-    // material: { texture: <uri> } — resolve the URI, read the image, sample it through the mesh's
-    // UVs. Warn (never throw) on an unresolved URI or an unreadable image so the rest of the scene
-    // still realizes; a mesh with no UVs simply shows the texture's (0,0) texel.
-    if (g && !n.material_texture.empty()) {
-      cvc::ariadne::ResolvedFile tex = cvc::ariadne::resolve_to_file(n.material_texture);
-      if (!tex.ok) {
-        warn(warnings, "ari: scene node '" + n.id + "': texture " + tex.error);
-      } else {
-        try {
-          g->setTexture(cvc::read_image(tex.path));
-        } catch (const std::exception &e) {
-          warn(warnings,
-               "ari: scene node '" + n.id + "': texture '" + n.material_texture + "': " + e.what());
+    if (lod_eligible(n, geom, options)) {
+      std::shared_ptr<LodGraphicsNode> lod =
+          realize_lod_geometry(sg, n, geom, parent, *options.lod);
+      out.lod_nodes.push_back(lod);
+      node = lod;
+    } else {
+      std::shared_ptr<GeometryNode> g =
+          parent ? parent->createChild<GeometryNode>(n.id, geom)
+                 : std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics(n.id, geom));
+      if (g)
+        apply_node_material(*g, n);
+      // A heightfield's per-vertex band colours are there to be shown: switch the node to
+      // per-vertex colour (overriding the material single-colour default) when the field supplied
+      // them.
+      if (g && n.has_heightfield && !n.heightfield.colors.empty())
+        g->setUseSingleColor(false);
+      // material: { texture: <uri> } — resolve the URI, read the image, sample it through the
+      // mesh's UVs. Warn (never throw) on an unresolved URI or an unreadable image so the rest of
+      // the scene still realizes; a mesh with no UVs simply shows the texture's (0,0) texel.
+      if (g && !n.material_texture.empty()) {
+        cvc::ariadne::ResolvedFile tex = cvc::ariadne::resolve_to_file(n.material_texture);
+        if (!tex.ok) {
+          warn(warnings, "ari: scene node '" + n.id + "': texture " + tex.error);
+        } else {
+          try {
+            g->setTexture(cvc::read_image(tex.path));
+          } catch (const std::exception &e) {
+            warn(warnings, "ari: scene node '" + n.id + "': texture '" + n.material_texture +
+                               "': " + e.what());
+          }
         }
       }
+      node = g;
     }
-    node = g;
   } else if (n.type == "volume") {
     if (n.source_file.empty()) {
       warn(warnings, "ari: scene node '" + n.id + "' (volume) has no source.file");
@@ -691,7 +733,7 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
 
   // Children nest UNDER this node, so each child's transform is local to it.
   for (const auto &c : n.children)
-    realize_node(sg, c, bind_prefix, out, node.get(), bodies, warnings);
+    realize_node(sg, c, bind_prefix, out, node.get(), bodies, options, warnings);
 }
 
 LightNode::Kind light_kind(const std::string &k) {
@@ -937,6 +979,19 @@ bool read_node_geometry(SceneGraph &sg, const cvc::ariadne::SceneNode &n, cvc::g
                         std::vector<std::string> *warnings) {
   std::shared_ptr<const cvc::height_field> field;
   return read_node_geometry_and_field(sg, n, geom, field, warnings);
+}
+
+void apply_node_material(GeometryNode &g, const cvc::ariadne::SceneNode &n) {
+  if (!n.has_material)
+    return;
+  g.setUseSingleColor(n.use_single_color);
+  g.setColor(n.color[0], n.color[1], n.color[2]);
+  g.setAmbient(n.ambient);
+  g.setDiffuse(n.diffuse);
+  if (n.has_specular) {
+    g.setSpecular(n.specular);
+    g.setSpecularPower(n.specular_power);
+  }
 }
 
 // A dim³ signed-distance-field volume of a mesh, framed like the volume demos' bunny_sdf: the grid
@@ -1296,6 +1351,12 @@ void realize_physics(SceneGraph &sg, const cvc::ariadne::ScenePhysics &spec,
 
 RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
                             const std::string &bind_prefix, std::vector<std::string> *warnings) {
+  return realize_scene(sg, scene, bind_prefix, warnings, RealizeOptions());
+}
+
+RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
+                            const std::string &bind_prefix, std::vector<std::string> *warnings,
+                            const RealizeOptions &options) {
   RealizedScene out;
   // §9 time: carry the app + the scene's clock declaration so tick_scene can drive
   // app.world_clock() each frame (a no-op unless the scene declared a `clock:` block).
@@ -1315,7 +1376,7 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
     present.insert(kv.first);
   std::vector<pending_body> bodies;
   for (const auto &n : scene.nodes) {
-    realize_node(sg, n, bind_prefix, out, /*parent=*/nullptr, bodies, warnings);
+    realize_node(sg, n, bind_prefix, out, /*parent=*/nullptr, bodies, options, warnings);
     out.created.push_back(n.id);
   }
   // A custom node type may add top-level graphics beside its own node (forest_trees' needles).

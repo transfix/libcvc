@@ -193,6 +193,14 @@ public:
   void mouseLook(int dxPixels, int dyPixels);
   void mouseWheel(double steps);
   void beginDrag();
+  // Primary-button press / release positions (VTK display coordinates: origin bottom-left), from
+  // the attached interactor or fed by a host. A release within 4 px of its press is a CLICK -- the
+  // drag it also began barely moved the camera -- and takeClick() returns the latest click's
+  // position once (then clears it), so a host can act on clicks in the scene (e.g. "face there")
+  // while drags keep orbiting. A click the UI overlay swallowed never reaches here.
+  void notePointerDown(int x, int y);
+  void notePointerUp(int x, int y);
+  bool takeClick(int &x, int &y);
   void endDrag();
 
   // The app context this controller was built with. Together with the inherited
