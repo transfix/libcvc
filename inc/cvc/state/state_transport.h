@@ -17,15 +17,20 @@
 #include <cstdint>
 #include <cvc/core/namespace.h>
 #include <cvc/state/state_change_journal.h>
+#include <cvc/state/state_inbound_gate.h>
 #include <cvc/state/state_link_stats.h>
 #include <cvc/state/state_message.h>
 #include <cvc/state/state_peer_registry.h>
 #include <functional>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
 namespace cvc {
+
+class state_device_signer;
+class state_device_pins;
 
 class state_cluster_shard;
 
@@ -130,6 +135,25 @@ public:
     return std::chrono::milliseconds(_ping_interval_ms.load(std::memory_order_relaxed));
   }
 
+  // The device id this end's Hello carries (state_identity.h default_device_id; "" sends none),
+  // which a relay reports as each link's remote_device_id. Set it before connecting.
+  void set_device_id(std::string id) { _device_id = std::move(id); }
+  const std::string &device_id() const noexcept { return _device_id; }
+
+  // Device keys (state_device_key.h), which give the device id authority. A client with a SIGNER
+  // answers a relay's Hello nonce with a DeviceProof. A relay with PINS (one store shared by its
+  // transports) sends each connection it accepts a nonce, verifies the proof against the link's
+  // device id and pins the key on first use; a link whose proof checked out reports
+  // device_verified. Set both before connecting or starting.
+  void set_device_signer(std::shared_ptr<const state_device_signer> signer) {
+    _device_signer = std::move(signer);
+  }
+  void set_device_pins(std::shared_ptr<state_device_pins> pins) { _device_pins = std::move(pins); }
+  // Proofs that checked out against a new or matching pin, and those refused: a bad signature,
+  // another key for a pinned id, or a proof with no challenge to answer. Default: 0.
+  virtual std::uint64_t total_devices_verified() const { return 0; }
+  virtual std::uint64_t total_device_proofs_refused() const { return 0; }
+
   // -------- Chunk fetch (volume/geometry streaming) --------
   //
   // Callback-based chunk retrieval from remote peers. The
@@ -202,6 +226,49 @@ public:
     return false;
   }
 
+  // Targeted push: write `entries` as ONE unsolicited, final snapshot frame (request_id 0) to
+  // every live connection whose peer identified (Hello) as `node_id`, bypassing the peer
+  // registry -- the caller already decided what this peer gets. Clients apply an unsolicited
+  // snapshot like a reply. A relay uses it to backfill or refresh exactly the leaves a delivery
+  // filter withholds from the live stream. Returns the number of connections written; 0 (before
+  // encoding anything) when no connection has that id.
+  //
+  // Called on the same thread as publish(), so per-connection FIFO orders a push ahead of the
+  // publishes that follow it. Default: not supported (returns 0).
+  virtual std::size_t push_snapshot_to(const std::string &node_id,
+                                       const std::vector<snapshot_entry> &entries) {
+    (void)node_id;
+    (void)entries;
+    return 0;
+  }
+
+  // Admission hold (a relay; off, 0, by default). With `max_hold` > 0, a connection the relay
+  // ACCEPTS gets its Hello at once but no bootstrap (backfill or admit snapshot) and no live
+  // traffic until release_admissions() finds it ready. It is ready once its peer has identified
+  // (Hello) and this transport's registry has a delivery rule for it, or once the hold has lasted
+  // `max_hold`. It is then bootstrapped in one step under its write lock: the admit snapshot
+  // filtered by that rule, then the live stream. A relay whose area of interest installs a
+  // participant's filter only after its join arrives (which follows the Hello) holds admissions,
+  // so a late joiner's first view is already the filtered one. Setting 0 releases every held
+  // connection at the next release_admissions(). Default: not supported (ignored).
+  virtual void set_admission_hold(std::chrono::milliseconds max_hold) { (void)max_hold; }
+  // Bootstrap every held connection that is ready (see set_admission_hold). Returns the number
+  // released. A relay that holds admissions calls it every room step: room_aoi_relay::step does,
+  // between installing filters and the pose pushes, and relay_room_step does after it. Same thread
+  // as publish(). Default: 0.
+  virtual std::size_t release_admissions() { return 0; }
+
+  // Connection-bound identity (a relay; none by default). Each connection this transport ACCEPTS
+  // after the call is held to `gate` (see state_inbound_gate): it speaks only as the node id of its
+  // Hello, while it holds that id, every mutation, message and media frame it sends must name that
+  // id as its origin, and gate->admit() decides each mutation and message. What fails is dropped:
+  // not applied, not forwarded, not bridged, and counted by total_inbound_rejected(). Give a
+  // relay's transports the same gate. nullptr stops gating new connections. Default: not supported
+  // (ignored).
+  virtual void set_inbound_gate(std::shared_ptr<state_inbound_gate> gate) { (void)gate; }
+  // Frames the inbound gate dropped (cumulative). Default: 0.
+  virtual std::uint64_t total_inbound_rejected() const { return 0; }
+
   // -------- Transport bridge (wasm interop) --------
   //
   // Link this transport to a sibling of a DIFFERENT backend — e.g. a gRPC transport and a
@@ -223,6 +290,9 @@ protected:
   state_peer_registry _peers;
   state_transport *_bridge = nullptr;
   std::atomic<std::int64_t> _ping_interval_ms{2000};
+  std::string _device_id;
+  std::shared_ptr<const state_device_signer> _device_signer;
+  std::shared_ptr<state_device_pins> _device_pins;
 };
 
 } // namespace cvc

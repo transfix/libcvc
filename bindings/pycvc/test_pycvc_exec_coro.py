@@ -61,7 +61,7 @@ def test_coro_marches_along_with_a_busy_state_exec_sibling():
     assert out == "15", out  # sum(0..5)
 
 
-def test_coro_exception_becomes_error_dict():
+def test_coro_exception_raises_at_the_call():
     app = pycvc.make_app()
     ex = pycvc.Exec(app)
 
@@ -69,8 +69,16 @@ def test_coro_exception_becomes_error_dict():
         raise ValueError("coro-kaboom")
 
     ex.register_async_coro("boom", boom)
-    out = ex.run('(begin (get-attr (boom 1) "__async_error__"))')
-    assert "coro-kaboom" in out, out
+    # The coroutine's exception raises at the call, a PythonError a try catches (no
+    # {"__async_error__": ...} dict); uncaught, run() re-raises it.
+    out = ex.run('(try (boom 1) (catch (PythonError e) (list (get-attr e "python_type") '
+                 '(get-attr e "origin"))))')
+    assert out == '("ValueError" "async")', out
+    try:
+        ex.run("(boom 1)")
+        assert False, "expected the ValueError"
+    except ValueError as e:
+        assert "coro-kaboom" in str(e)
 
     # Exec stays usable after a contained coroutine error.
     async def idn(v):

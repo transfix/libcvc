@@ -278,6 +278,30 @@ if(@ZSTD_FOUND@)
   endif()
 endif()
 
+# libopus (Opus mics, media_opus.h). A STATIC cvc links it via CvcOpus::opus, which libcvc's build
+# made from the header and library it found (cvcpkg's libopus ships no CMake config); recreate it
+# from the consumer's prefix, as PkgConfig::ZSTD above. A shared cvc absorbed libopus and never
+# exports the target, so this is a harmless no-op there.
+if(@CVC_HAVE_OPUS@)
+  if(NOT TARGET CvcOpus::opus)
+    find_path(_CVC_OPUS_INC NAMES opus/opus.h)
+    if(MSVC) # the import library, never the MinGW libopus.a (see src/cvc/CMakeLists.txt)
+      find_library(_CVC_OPUS_LIB NAMES opus.lib libopus.dll.a NAMES_PER_DIR)
+    else()
+      find_library(_CVC_OPUS_LIB NAMES opus)
+    endif()
+    if(_CVC_OPUS_LIB)
+      add_library(CvcOpus::opus INTERFACE IMPORTED)
+      set_target_properties(CvcOpus::opus PROPERTIES
+        INTERFACE_LINK_LIBRARIES "${_CVC_OPUS_LIB}")
+      if(_CVC_OPUS_INC)
+        set_target_properties(CvcOpus::opus PROPERTIES
+          INTERFACE_INCLUDE_DIRECTORIES "${_CVC_OPUS_INC}")
+      endif()
+    endif()
+  endif()
+endif()
+
 # A STATIC cvc also exports its PRIVATE imported-target links, wrapped in
 # $<LINK_ONLY:...>: yaml-cpp::yaml-cpp, ftxui::*, nlohmann_json_schema_validator::
 # validator, CURL::libcurl (and gRPC/protobuf when built in). A consumer that cannot

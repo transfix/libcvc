@@ -31,8 +31,8 @@ std::string show(const std::optional<value_t> &r) {
   return to_string(*r);
 }
 
-// Run a script to completion on the sync scheduler with its default environment. A runtime
-// error propagates out of run().
+// Run a script to completion on the sync scheduler with its default environment. A program's
+// error comes back as the dsl_exception its process failed with (raise_exit_exception).
 std::string run_sync(const std::string &script, execute_options opts = {},
                      cvc::state *root = nullptr, const std::string &id = {}) {
   scheduler sched;
@@ -43,11 +43,12 @@ std::string run_sync(const std::string &script, execute_options opts = {},
   }
   const int pid = sched.execute(script, opts);
   sched.run();
+  sched.raise_exit_exception(pid);
   return show(sched.get_result(pid));
 }
 
-// Same on the async scheduler (the app's exec scheduler type). A runtime error kills the
-// process; it comes back through `error`.
+// Same on the async scheduler (the app's exec scheduler type). A program's error fails the
+// process; it comes back through `error`, as "Class: message".
 std::string run_async(const std::string &script, std::string *error, execute_options opts = {},
                       cvc::state *root = nullptr) {
   async_scheduler sched;
@@ -389,6 +390,7 @@ struct sliced_scheduler {
   std::pair<std::string, process_info> run(const std::string &script, execute_options opts = {}) {
     const int pid = sched.execute(script, opts);
     sched.run();
+    sched.raise_exit_exception(pid); // a program's error, as run_sync reports it
     return {show(sched.get_result(pid)), *sched.get_process_info(pid)};
   }
 };

@@ -284,18 +284,16 @@ TEST(HeapBudgetTest, KeptValuesCountAgainstMaxMemory) {
                   "(begin (append keep (collections.range 200)) (set i (+ i 1)))) (length keep))"),
       opts);
   // Over the budget the process is killed (memory_limit_exceeded); or, when a measurement left
-  // less room than the next call needs, that call fails its allocation limit (which the sync
-  // scheduler rethrows). Without heap accounting neither happens: nothing is written to the tree.
-  std::string error;
-  try {
-    sched.run();
-  } catch (const std::exception &e) {
-    error = e.what();
-  }
+  // less room than the next call needs, that call fails its allocation limit: a MemoryError the
+  // program doesn't catch, so the process fails. Without heap accounting neither happens:
+  // nothing is written to the tree.
+  sched.run();
   const auto info = sched.get_process_info(pid);
   ASSERT_TRUE(info);
+  const std::string error = info->exit_error.value_or("");
   EXPECT_TRUE(info->status == process_status::killed ||
-              error.find("allocation limit") != std::string::npos)
+              (info->status == process_status::failed &&
+               error.find("allocation limit") != std::string::npos))
       << error;
   EXPECT_FALSE(sched.get_result(pid));
   EXPECT_GT(info->heap_measurements, 0u);

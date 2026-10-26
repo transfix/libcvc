@@ -98,6 +98,12 @@ public:
   // Render(); just call ImGui::* inside it.
   void setDrawCallback(std::function<void()> draw);
 
+  // Annotations that belong to the SCENE rather than the UI -- e.g. names over
+  // 3D objects. Called every rendered frame like the draw callback, but also
+  // while the panels are hidden (the toggle, a phone's default), and BEFORE it,
+  // so draw into ImGui::GetBackgroundDrawList() and the UI's windows cover it.
+  void setSceneDrawCallback(std::function<void()> draw);
+
   // The overlay's Dear ImGui context (nullptr if libcvc was built without
   // CVC_ENABLE_IMGUI or setup failed). The overlay CREATES the context inside
   // libcvc, so a program in ANOTHER binary module (a demo .exe that links its own

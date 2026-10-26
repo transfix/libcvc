@@ -21,17 +21,23 @@
 #include "proto/state_transport.pb.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cvc/state/state_cluster_shard.h>
+#include <cvc/state/state_device_key.h>
+#include <cvc/state/state_identity.h> // constant_time_equal
 #include <cvc/state/state_transport_ws.h>
+#include <future>
 #include <stdexcept>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 
 #ifndef __EMSCRIPTEN__
 #include <boost/asio/connect.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/beast/core.hpp>
+#include <boost/beast/http.hpp>
 #include <boost/beast/websocket.hpp>
 #ifdef __linux__
 #include <linux/sockios.h> // SIOCOUTQ — unsent bytes in a socket's send buffer (send_backlog)
@@ -211,14 +217,181 @@ state_message decode_message(const pb::Message &in) {
   return m;
 }
 
+// Append one entry to `rsp`. The admit snapshot, the periodic broadcast and the targeted push all
+// encode through here, so their entry bytes agree.
+void add_snapshot_entry(pb::SnapshotResponse *rsp, const state_transport::snapshot_entry &e) {
+  auto *pe = rsp->add_entries();
+  pe->set_path(e.path);
+  pe->set_string_value(e.string_value);
+  pe->set_comment(e.comment);
+  pe->set_hidden(e.hidden);
+  pe->set_read_only(e.read_only);
+  for (const auto &p : e.properties)
+    (*pe->mutable_properties())[p.first] = p.second;
+  pe->set_type_name(e.type_name);
+  pe->set_origin_node_id(e.origin_node_id);
+  pe->set_sequence(e.sequence);
+  pe->set_data_type_name(e.data_type_name);
+  if (e.data_payload.kind != state_payload_kind::none)
+    set_pb_payload(pe->mutable_data_payload(), e.data_payload);
+}
+
+// Encode `snap` into `rsp` as one unsolicited, final snapshot (request_id 0). With a `view`, only
+// the entries it delivers are written (the receiving peer's rule); nullptr writes them all.
+void fill_snapshot_response(pb::SnapshotResponse *rsp,
+                            const std::vector<state_transport::snapshot_entry> &snap,
+                            const state_peer_registry::delivery_view *view = nullptr) {
+  rsp->set_request_id(0);
+  rsp->set_final(true);
+  for (const auto &e : snap)
+    if (view == nullptr || view->deliver(e.path))
+      add_snapshot_entry(rsp, e);
+}
+
+// FNV-1a 64 over length-prefixed fields: everything an entry carries except its path (the key it
+// is remembered under), so two digests match only when a receiver would end up with the same node.
+class entry_digest {
+public:
+  explicit entry_digest(const state_transport::snapshot_entry &e) {
+    str(e.string_value);
+    str(e.comment);
+    u64((e.hidden ? 1u : 0u) | (e.read_only ? 2u : 0u));
+    u64(e.properties.size());
+    for (const auto &p : e.properties) {
+      str(p.first);
+      str(p.second);
+    }
+    str(e.type_name);
+    str(e.origin_node_id);
+    u64(e.sequence);
+    str(e.data_type_name);
+    const state_payload &pl = e.data_payload;
+    u64(static_cast<std::uint64_t>(pl.kind));
+    if (pl.kind == state_payload_kind::inline_bytes) {
+      u64(pl.inline_bytes.size());
+      bytes(pl.inline_bytes.data(), pl.inline_bytes.size());
+    } else if (pl.kind == state_payload_kind::blob) {
+      str(pl.blob.digest);
+      u64(pl.blob.size_bytes);
+      str(pl.blob.codec);
+    }
+  }
+  std::uint64_t value() const noexcept { return _h; }
+
+private:
+  void bytes(const void *data, std::size_t n) {
+    const auto *b = static_cast<const unsigned char *>(data);
+    for (std::size_t i = 0; i < n; ++i) {
+      _h ^= b[i];
+      _h *= 1099511628211ull;
+    }
+  }
+  void u64(std::uint64_t v) {
+    for (int i = 0; i < 8; ++i) {
+      const unsigned char b = static_cast<unsigned char>(v >> (8 * i));
+      bytes(&b, 1);
+    }
+  }
+  void str(const std::string &s) {
+    u64(s.size());
+    bytes(s.data(), s.size());
+  }
+  std::uint64_t _h = 14695981039346656037ull;
+};
+
+// What one connection holds of a tree path, as far as the relay knows: the digest of the content
+// the last snapshot frame carried for it, and the broadcast round that last delivered the path.
+// File-local, so the per-connection map stays out of a DLL's export table.
+struct held_entry {
+  std::uint64_t digest = 0;
+  std::uint64_t round = 0;
+};
+
+// A mutation that can change nodes below its path, not just the node at it.
+bool touches_subtree(state_mutation_op op) {
+  return op == state_mutation_op::reset_node || op == state_mutation_op::delete_subtree;
+}
+
+} // namespace
+
+namespace {
+
+// The subprotocol a cvc WebSocket peer speaks, and the prefix of the one that carries a room token
+// (state_transport_ws::auth_config).
+constexpr const char *kWsProtocol = "cvc.v1";
+constexpr const char *kTokenProtocol = "cvc-token.";
+
+// The Sec-WebSocket-Protocol offer of a client holding room token TOKEN. No spaces: the browser's
+// WebSocket API takes the list split on commas alone.
+std::string protocol_offer(const std::string &token) {
+  return std::string(kWsProtocol) + "," + kTokenProtocol + token;
+}
+
 } // namespace
 
 #ifndef __EMSCRIPTEN__
 namespace {
 namespace beast = boost::beast;
 namespace websocket = boost::beast::websocket;
+namespace http = boost::beast::http;
 namespace net = boost::asio;
 using tcp = boost::asio::ip::tcp;
+
+// Whether the Sec-WebSocket-Protocol list OFFERED names WANT (each entry trimmed, all of them
+// compared in constant time).
+bool offers_protocol(const std::string &offered, const std::string &want) {
+  bool found = false;
+  std::size_t start = 0;
+  while (start <= offered.size()) {
+    std::size_t end = offered.find(',', start);
+    if (end == std::string::npos)
+      end = offered.size();
+    std::size_t b = start, e = end;
+    while (b < e && std::isspace(static_cast<unsigned char>(offered[b])))
+      ++b;
+    while (e > b && std::isspace(static_cast<unsigned char>(offered[e - 1])))
+      --e;
+    found |= constant_time_equal(offered.substr(b, e - b), want);
+    start = end + 1;
+  }
+  return found;
+}
+
+// Answer an upgrade request with 401 and close: the room token was missing or wrong.
+void refuse_upgrade(tcp::socket &sock, const http::request<http::string_body> &req) {
+  http::response<http::string_body> res{http::status::unauthorized, req.version()};
+  res.set(http::field::content_type, "text/plain");
+  res.keep_alive(false);
+  res.body() = "room token required\n";
+  res.prepare_payload();
+  beast::error_code ec;
+  http::write(sock, res, ec);
+  sock.shutdown(tcp::socket::shutdown_both, ec);
+  sock.close(ec);
+}
+
+// How long one write may block before its connection is closed (see
+// connection::write_started_ns).
+constexpr std::int64_t kWriteStallNs = 3'000'000'000;
+// How long an accepted connection may take to finish its WebSocket handshake, and how many may be
+// in one at once (each holds a thread until it finishes or is closed).
+constexpr std::int64_t kHandshakeNs = 10'000'000'000;
+constexpr std::size_t kMaxHandshakes = 64;
+
+// Make a write blocked on `s` fail after kWriteStallNs, so it releases the connection's write lock.
+// Elsewhere the probe thread's watchdog does that with shutdown(), which wakes a send() blocked in
+// another thread; Winsock's shutdown() does not, so on Windows the socket times the send out itself
+// (SO_SNDTIMEO), and the write fails with WSAETIMEDOUT. A timed-out socket is unusable afterwards,
+// which is fine: the failed write marks the connection dead.
+void bound_blocking_writes(tcp::socket &s) {
+#ifdef _WIN32
+  const DWORD ms = static_cast<DWORD>(kWriteStallNs / 1'000'000);
+  ::setsockopt(s.native_handle(), SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char *>(&ms),
+               sizeof(ms));
+#else
+  (void)s;
+#endif
+}
 } // namespace
 #endif
 
@@ -229,8 +402,68 @@ class state_transport_ws::connection {
 public:
   std::mutex write_mu;
   std::atomic<bool> alive{true};
+  // The peer's identity from its FIRST Hello. The connection's reader (the one thread that parses
+  // its inbound frames) writes both strings once and then sets `identified` (release); a later
+  // Hello is ignored, so they never change after that. Every other thread reads through peer_id().
   std::string remote_node_id;
   std::string remote_cluster_id;
+  std::string remote_device_id; // the device id of that Hello ("" when none), written the same way
+  std::atomic<bool> identified{false};
+  // The peer's node id, or nullptr before its Hello (or when that Hello named no node). nullptr
+  // means "unknown", which delivers everything, as an unregistered peer does.
+  const std::string *peer_id() const noexcept {
+    if (!identified.load(std::memory_order_acquire) || remote_node_id.empty())
+      return nullptr;
+    return &remote_node_id;
+  }
+  // The inbound gate (state_transport::set_inbound_gate) this ACCEPTED connection is held to,
+  // copied before its reader starts; null for a dialed connection or an ungated relay. `bound`: it
+  // held its node id at its last check, and `displaced`: a later claim took it over since (set by
+  // the gate). Used only on this connection's reader thread, apart from `displaced`.
+  std::shared_ptr<state_inbound_gate> gate;
+  bool bound = false;
+  std::atomic<bool> displaced{false};
+  // Its Hello named one of the relay's own ids (the transport's or a shard's): never a client's.
+  bool local_id = false;
+  // Device proof (state_device_key.h), on an ACCEPTED connection:
+  //   - device_nonce: the challenge the relay's Hello carried, taken by the first proof checked
+  //     (guarded by proof_mu, as the Hello may go out on another thread);
+  //   - pending_*: a proof that came before the client's own Hello (its reader can answer ours
+  //     before its Hello is written), checked once that Hello names the device; reader only;
+  //   - device_verified: the proof checked out against the device id's pin.
+  std::mutex proof_mu;
+  std::string device_nonce;
+  bool proof_pending = false;
+  std::string pending_key, pending_signature;
+  std::atomic<bool> device_verified{false};
+  // Whether this connection may speak now: always without a gate; with one, once it has identified
+  // and holds its node id (a duplicate claim retries here until the holder closes or falls silent).
+  bool speaks() {
+    if (!gate)
+      return true;
+    if (local_id)
+      return false;
+    if (bound && displaced.load(std::memory_order_relaxed))
+      bound = false;
+    if (!bound) {
+      const std::string *pid = peer_id();
+      displaced.store(false, std::memory_order_relaxed);
+      bound = pid != nullptr && gate->bind(*pid, this, &last_rx_ns, &displaced);
+    }
+    return bound;
+  }
+  // As speaks(), naming its own node id as `origin`.
+  bool speaks_as(const std::string &origin) {
+    return speaks() && (!gate || origin == remote_node_id);
+  }
+  // Give the node id up at close. True when this close is that peer leaving: always without a
+  // gate; with one, when it held the id until now.
+  bool unbind() {
+    bound = false;
+    if (!gate)
+      return true;
+    return identified.load() && gate->release(remote_node_id, this);
+  }
   // Steady-clock ns of the last inbound frame. A live conference client streams media continuously,
   // so a peer that navigated away (its socket not cleanly closed) stops updating this — the relay's
   // reaper uses it to drop the ghost. 0 until the first frame; set to "now" when a connection opens
@@ -245,8 +478,28 @@ public:
   // (a frozen tab, a dead network) makes a write block once its TCP buffer is full -- while holding
   // write_mu, so every other writer to it (the relay's main loop included) would wait forever. The
   // probe thread's watchdog closes a connection whose write has been blocked too long, which fails
-  // the write and frees the lock (state_transport_ws::ping_loop).
+  // the write and frees the lock (state_transport_ws::ping_loop); on Windows the socket's own send
+  // timeout fails it (bound_blocking_writes).
   std::atomic<std::int64_t> write_started_ns{0};
+  // Steady-clock ns when an accepted connection's handshake began; 0 once it is over (the probe
+  // thread's handshake deadline, state_transport_ws::ping_loop).
+  std::atomic<std::int64_t> handshake_started_ns{0};
+  // Waiting for its bootstrap (the admission hold): write(), try_write(), write_mutation(),
+  // write_entries() and broadcast_snapshot() send it nothing until release_locked clears it. Set
+  // and cleared only under write_mu, so a write that saw it set happened before the release took
+  // its snapshot, and so is in it. The admission's own frames go through write_locked.
+  std::atomic<bool> admission_held{false};
+  // What this peer holds, path by path, for broadcast_snapshot's diff (see held_entry): a snapshot
+  // frame records what it carried; any other frame touching the path, written to the peer or
+  // received from it, forgets it. Guarded by held_mu, which is never held across a socket write (a
+  // reader thread forgets its peer's own writes, and must not wait behind a blocked write). A
+  // WRITER also holds write_mu from its record/forget through its write, so the record always
+  // describes the frames in the order the peer receives them. Lock order: write_mu, then held_mu.
+  std::mutex held_mu;
+  std::unordered_map<std::string, held_entry> held;
+  // Set when the peer sends a SnapshotRequest: its next broadcast carries everything it is
+  // delivered, not just the diff.
+  std::atomic<bool> full_refresh{false};
 
 #ifndef __EMSCRIPTEN__
   std::unique_ptr<websocket::stream<tcp::socket>> ws;
@@ -278,7 +531,8 @@ public:
     return true;
   }
 
-  // Unblock any read or write in progress and mark the connection dead (the write watchdog).
+  // Unblock any read or write in progress and mark the connection dead (the write watchdog). On
+  // Windows shutdown() does not wake a blocked send(); bound_blocking_writes times that one out.
   void abort_io() {
     alive.store(false);
     if (ws) {
@@ -312,13 +566,49 @@ public:
 
   bool write(const pb::Frame &f) {
     std::lock_guard<std::mutex> lk(write_mu);
-    return write_locked(f);
+    return !admission_held.load(std::memory_order_relaxed) && write_locked(f);
   }
 
   // Write only if no other write holds the connection right now (the link probe never waits).
   bool try_write(const pb::Frame &f) {
     std::unique_lock<std::mutex> lk(write_mu, std::try_to_lock);
-    return lk.owns_lock() && write_locked(f);
+    return lk.owns_lock() && !admission_held.load(std::memory_order_relaxed) && write_locked(f);
+  }
+
+  // The peer's copy of `m.path` (and, for a subtree op, of everything below it) is no longer
+  // known, so the next broadcast sends it whatever the tree holds there.
+  void forget(const state_mutation &m) {
+    std::lock_guard<std::mutex> lk(held_mu);
+    if (!touches_subtree(m.op)) {
+      held.erase(m.path);
+      return;
+    }
+    for (auto it = held.begin(); it != held.end();)
+      it = state_peer_registry::prefix_matches(m.path, it->first) ? held.erase(it) : std::next(it);
+  }
+
+  // Write a frame carrying the live mutation `m`, forgetting what the peer held at its path.
+  bool write_mutation(const pb::Frame &f, const state_mutation &m) {
+    std::lock_guard<std::mutex> lk(write_mu);
+    if (admission_held.load(std::memory_order_relaxed))
+      return false;
+    forget(m);
+    return write_locked(f);
+  }
+
+  // Write a snapshot frame carrying `entries` outside a broadcast (a targeted push), forgetting
+  // each entry's path.
+  bool write_entries(const pb::Frame &f,
+                     const std::vector<state_transport::snapshot_entry> &entries) {
+    std::lock_guard<std::mutex> lk(write_mu);
+    if (admission_held.load(std::memory_order_relaxed))
+      return false;
+    {
+      std::lock_guard<std::mutex> hk(held_mu);
+      for (const auto &e : entries)
+        held.erase(e.path);
+    }
+    return write_locked(f);
   }
 
   // Bytes still unsent in this connection's OS send buffer (Linux only; 0 elsewhere). A large value
@@ -336,6 +626,14 @@ public:
     const int fd = ws->next_layer().native_handle();
     if (fd >= 0 && ::ioctl(fd, SIOCOUTQ, &unsent) == 0 && unsent > 0)
       return static_cast<std::size_t>(unsent);
+#elif defined(__EMSCRIPTEN__)
+    // The browser's own queue (WebSocket.bufferedAmount): a send never blocks there, so without
+    // this a slow uplink only grows the queue, and every frame behind it -- the link probe too --
+    // waits longer.
+    size_t buffered = 0;
+    if (em_socket >= 0 &&
+        emscripten_websocket_get_buffered_amount(em_socket, &buffered) == EMSCRIPTEN_RESULT_SUCCESS)
+      return buffered;
 #endif
     return 0;
   }
@@ -436,8 +734,10 @@ void state_transport_ws::start(const std::string &listen_addr, const std::string
     _impl->ping_thread = std::thread([this]() { ping_loop(); });
 }
 
-// Server accept loop: synchronous accept → WebSocket handshake → admit + spawn reader. Breaks when
-// stop() closes the acceptor (accept() then errors).
+static std::int64_t steady_ns(); // defined with the reaper below
+
+// Server accept loop: synchronous accept, then a thread per connection for its handshake, admission
+// and reads (serve_accepted). Breaks when stop() closes the acceptor (accept() then errors).
 void state_transport_ws::accept_loop() {
   for (;;) {
     tcp::socket sock(_impl->ioc);
@@ -448,19 +748,103 @@ void state_transport_ws::accept_loop() {
     if (!_running.load())
       break; // woken by stop()'s loopback self-connect
 
+    // The handshake runs on the connection's own thread, so a client that connects and never sends
+    // its upgrade request holds up no other join. At most kMaxHandshakes wait at once; the probe
+    // thread closes one that outlasts kHandshakeNs.
+    reap_handshakes();
+    {
+      std::lock_guard<std::mutex> lk(_conns_mu);
+      if (_handshaking.size() >= kMaxHandshakes) {
+        sock.shutdown(tcp::socket::shutdown_both, ec);
+        sock.close(ec);
+        continue;
+      }
+    }
     auto conn = std::make_shared<connection>();
     conn->accepted = true;
+    {
+      std::lock_guard<std::mutex> lk(_inbound_gate_mu);
+      conn->gate = _inbound_gate;
+    }
     conn->ws = std::make_unique<websocket::stream<tcp::socket>>(std::move(sock));
     conn->ws->read_message_max(kMaxWsMessageBytes);
-    conn->ws->accept(ec); // server-side WebSocket handshake
-    if (ec)
-      continue;
-
-    // Spawn the reader before admit (admit publishes the connection to stop(), which joins the
-    // reader — so the thread must already be assigned), matching state_transport_grpc.
-    conn->reader = std::thread([this, conn]() { read_loop(conn); });
-    admit_connection(conn);
+    bound_blocking_writes(conn->ws->next_layer());
+    conn->handshake_started_ns.store(steady_ns(), std::memory_order_relaxed);
+    {
+      std::lock_guard<std::mutex> lk(_conns_mu);
+      _handshaking.push_back(conn);
+    }
+    // The thread waits until its handle is assigned: once admitted, the connection is visible to
+    // stop() and reap_idle(), which join it.
+    auto assigned = std::make_shared<std::promise<void>>();
+    std::shared_future<void> go = assigned->get_future().share();
+    conn->reader = std::thread([this, conn, go]() {
+      go.wait();
+      serve_accepted(conn);
+    });
+    assigned->set_value();
   }
+}
+
+bool state_transport_ws::handshake_accepted(connection &c) {
+  // The upgrade request first: a relay with a room token checks it there, before the connection
+  // is admitted, and a client that offered subprotocols must be answered one (a browser drops the
+  // connection otherwise).
+  beast::error_code ec;
+  beast::flat_buffer hbuf;
+  http::request<http::string_body> req;
+  http::read(c.ws->next_layer(), hbuf, req, ec);
+  if (ec || !websocket::is_upgrade(req))
+    return false;
+  const std::string offered(req[http::field::sec_websocket_protocol]);
+  if (!_auth.expected_token.empty() &&
+      !offers_protocol(offered, kTokenProtocol + _auth.expected_token)) {
+    _auth_rejected.fetch_add(1, std::memory_order_relaxed);
+    refuse_upgrade(c.ws->next_layer(), req);
+    return false;
+  }
+  if (offers_protocol(offered, kWsProtocol))
+    c.ws->set_option(websocket::stream_base::decorator([](websocket::response_type &res) {
+      res.set(http::field::sec_websocket_protocol, kWsProtocol);
+    }));
+  c.ws->accept(req, ec); // server-side WebSocket handshake
+  return !ec;
+}
+
+void state_transport_ws::serve_accepted(std::shared_ptr<connection> conn) {
+  const bool ok = handshake_accepted(*conn) && _running.load();
+  conn->handshake_started_ns.store(0, std::memory_order_relaxed);
+  if (!ok) {
+    // Left in _handshaking for the accept loop (or stop()) to join.
+    conn->alive.store(false);
+    conn->reader_done.store(true, std::memory_order_release);
+    return;
+  }
+  admit_connection(conn); // now in _conns, then out of _handshaking: never in neither
+  {
+    std::lock_guard<std::mutex> lk(_conns_mu);
+    _handshaking.erase(std::remove(_handshaking.begin(), _handshaking.end(), conn),
+                       _handshaking.end());
+  }
+  read_loop(conn);
+}
+
+void state_transport_ws::reap_handshakes() {
+  std::vector<std::shared_ptr<connection>> done;
+  {
+    std::lock_guard<std::mutex> lk(_conns_mu);
+    for (auto it = _handshaking.begin(); it != _handshaking.end();) {
+      if ((*it)->reader_done.load(std::memory_order_acquire)) {
+        done.push_back(std::move(*it));
+        it = _handshaking.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+  for (auto &c : done)
+    if (c->reader.joinable())
+      c->reader.join();
 }
 
 bool state_transport_ws::connect_to_peer(const std::string &url,
@@ -486,9 +870,20 @@ bool state_transport_ws::connect_to_peer(const std::string &url,
       return false;
     conn->ws = std::make_unique<websocket::stream<tcp::socket>>(std::move(sock));
     conn->ws->read_message_max(kMaxWsMessageBytes);
-    conn->ws->handshake(host, target.empty() ? std::string("/") : target, ec);
-    if (ec)
+    bound_blocking_writes(conn->ws->next_layer());
+    if (!_auth.outbound_token.empty())
+      conn->ws->set_option(websocket::stream_base::decorator(
+          [offer = protocol_offer(_auth.outbound_token)](websocket::request_type &req) {
+            req.set(http::field::sec_websocket_protocol, offer);
+          }));
+    websocket::response_type res;
+    conn->ws->handshake(res, host, target.empty() ? std::string("/") : target, ec);
+    if (ec) {
+      if (res.result() == http::status::unauthorized)
+        std::fprintf(stderr, "cvc: ws: %s refused the connection: room token missing or wrong\n",
+                     url.c_str());
       return false;
+    }
   } catch (const std::exception &) {
     return false;
   }
@@ -519,9 +914,11 @@ void state_transport_ws::read_loop(std::shared_ptr<connection> conn) {
   conn->alive.store(false);
   // A peer closed this connection (not a relay shutdown): notify the owner so a relay can retract
   // the departed participant from the room. _running is cleared by stop(), so this fires only on a
-  // real peer drop, and only when the peer identified itself (sent a Hello).
-  if (_running.load() && _on_conn_closed && !conn->remote_node_id.empty())
-    _on_conn_closed(conn->remote_node_id);
+  // real peer drop, and only when the peer identified itself (sent a Hello). Under an inbound gate,
+  // only the connection holding that node id leaves as it: another claiming it is not that peer.
+  const bool left = conn->unbind();
+  if (const std::string *pid = conn->peer_id(); pid && left && _running.load() && _on_conn_closed)
+    _on_conn_closed(*pid);
   conn->reader_done.store(true, std::memory_order_release); // reap_idle may now join + erase this
 }
 
@@ -551,6 +948,10 @@ void state_transport_ws::stop() {
     std::lock_guard<std::mutex> lk(_conns_mu);
     conns = _conns;
     _conns.clear();
+    // Connections still in their handshake: one admitted meanwhile is in both lists, which is fine
+    // (a second shutdown is harmless, and a joined thread is no longer joinable).
+    conns.insert(conns.end(), _handshaking.begin(), _handshaking.end());
+    _handshaking.clear();
   }
   // Interrupt each reader's blocking read(): shutdown() wakes a recv() blocked in another thread
   // (closing the fd alone does not), then close.
@@ -623,6 +1024,12 @@ bool state_transport_ws::connect_to_peer(const std::string &url,
   emscripten_websocket_init_create_attributes(&attrs);
   attrs.url = url.c_str();
   attrs.createOnMainThread = true;
+  // With a room token, offer it as a subprotocol (auth_config); otherwise offer none, so an older
+  // relay that answers no subprotocol still accepts the browser.
+  const std::string offer =
+      _auth.outbound_token.empty() ? std::string() : protocol_offer(_auth.outbound_token);
+  if (!offer.empty())
+    attrs.protocols = offer.c_str();
   EMSCRIPTEN_WEBSOCKET_T sock = emscripten_websocket_new(&attrs);
   if (sock < 0)
     return false;
@@ -653,7 +1060,7 @@ void state_transport_ws::on_connection_open(connection *c) {
   c->open = true;
   send_hello_locked(*c);
   if (!shards.empty())
-    send_backfill_locked(*c, shards);
+    send_backfill_locked(*c, shards, nullptr);
 }
 
 void state_transport_ws::stop() {
@@ -714,8 +1121,32 @@ void state_transport_ws::deliver_inbound(connection *c, const void *data, std::s
     return;
   }
   if (in.has_hello()) {
-    c->remote_node_id = in.hello().node_id();
-    c->remote_cluster_id = in.hello().cluster_id();
+    // Write-once identity: only the first Hello counts (see connection::identified). This thread
+    // is the only writer, so the relaxed check cannot race another Hello.
+    if (!c->identified.load(std::memory_order_relaxed)) {
+      c->remote_node_id = in.hello().node_id();
+      c->remote_cluster_id = in.hello().cluster_id();
+      // An id that is not a valid_device_id (oversized, say) is ignored, not stored.
+      c->remote_device_id =
+          valid_device_id(in.hello().device_id()) ? in.hello().device_id() : std::string();
+      c->identified.store(true, std::memory_order_release);
+      if (c->gate) {
+        c->local_id = is_local_id(c->remote_node_id);
+        (void)c->speaks(); // claim the node id now
+      }
+      // A relay that verifies device keys challenges a client it accepted; answer it.
+      if (!c->accepted && !in.hello().nonce().empty())
+        answer_device_challenge(*c, in.hello().nonce(), in.hello().node_id());
+      // A proof that came first can be checked now that the Hello names the device.
+      if (c->proof_pending) {
+        c->proof_pending = false;
+        const std::string key = std::move(c->pending_key);
+        const std::string signature = std::move(c->pending_signature);
+        on_device_proof(*c, key, signature);
+      }
+    }
+  } else if (in.has_device_proof()) {
+    on_device_proof(*c, in.device_proof().public_key(), in.device_proof().signature());
   } else if (in.has_mutation()) {
     on_inbound_mutation(decode_mutation(in.mutation()), c);
     _recv_mutations.fetch_add(1, std::memory_order_relaxed);
@@ -724,11 +1155,24 @@ void state_transport_ws::deliver_inbound(connection *c, const void *data, std::s
   } else if (in.has_message()) {
     on_inbound_message(decode_message(in.message()), c);
     _recv_messages.fetch_add(1, std::memory_order_relaxed);
+  } else if (in.has_snapshot_request()) {
+    // The peer asks for a full refresh (request_full_refresh): its next broadcast carries the whole
+    // tree it is delivered. Answered there, on the relay's own loop, not on this reader thread.
+    // Under a gate, only a peer that speaks as itself is answered.
+    if (!c->speaks()) {
+      _inbound_rejected.fetch_add(1, std::memory_order_relaxed);
+      return;
+    }
+    c->full_refresh.store(true, std::memory_order_relaxed);
   } else if (in.has_snapshot_response()) {
     // A relay pushed its full current state (request_id 0) so this late-joining client sees the
     // peers already in the room. Apply each entry as an initial-sync bootstrap. The conference uses
     // a single shard/cluster, so applying to every registered shard is correct here; the entries do
-    // not carry a cluster id.
+    // not carry a cluster id. A gated relay takes none from its clients (state_inbound_gate).
+    if (c->gate) {
+      _inbound_rejected.fetch_add(1, std::memory_order_relaxed);
+      return;
+    }
     const auto &sr = in.snapshot_response();
     std::vector<state_cluster_shard *> shards;
     {
@@ -752,6 +1196,11 @@ void state_transport_ws::deliver_inbound(connection *c, const void *data, std::s
         read_pb_payload(e.data_payload(), se.data_payload);
       for (auto *s : shards) {
         if (s == nullptr)
+          continue;
+        // Honour the shard's enforced interest set as live ingest does: a relay snapshot carries
+        // its whole tree, which would otherwise plant nodes this client never asked for. A shard
+        // that does not enforce interest takes every entry, as before.
+        if (!s->path_is_of_interest(se.path))
           continue;
         // One bootstrap entry the local tree rejects must not take down the whole client: apply
         // each defensively so the rest of the roster still loads. A relay snapshot carries its
@@ -777,6 +1226,10 @@ void state_transport_ws::deliver_inbound(connection *c, const void *data, std::s
     // fan_media, skipping this origin, and across to other protocols); on a leaf (browser) it is
     // the set_on_media subscribe sugar.
     _media_recv.fetch_add(1, std::memory_order_relaxed);
+    if (!c->speaks_as(in.media().origin_node_id())) {
+      _inbound_rejected.fetch_add(1, std::memory_order_relaxed); // media as another peer
+      return;
+    }
     if (_media_sink) {
       const auto &mf = in.media();
       media_frame out;
@@ -868,8 +1321,9 @@ state_transport::publish_stats state_transport_ws::publish(const state_mutation 
   for (auto &c : conns) {
     if (!c || !c->alive.load() || !c->can_write())
       continue;
-    if (!c->remote_node_id.empty() && !_peers.should_deliver(c->remote_node_id, m.path)) {
-      _peers.note_delivery_filtered(c->remote_node_id);
+    const std::string *pid = c->peer_id();
+    if (pid && !_peers.should_deliver(*pid, m.path)) {
+      _peers.note_delivery_filtered(*pid);
       continue;
     }
     // Don't block the caller (the arisrv main loop drains local writes here) on a backed-up peer —
@@ -877,11 +1331,11 @@ state_transport::publish_stats state_transport_ws::publish(const state_mutation 
     // re-delivers.
     if (c->send_backlog() > 2 * 1024 * 1024)
       continue;
-    if (c->write(frame)) {
+    if (c->write_mutation(frame, m)) {
       _sent_frames.fetch_add(1, std::memory_order_relaxed);
       ++stats.delivered;
-      if (!c->remote_node_id.empty())
-        _peers.note_mutation_delivered(c->remote_node_id);
+      if (pid)
+        _peers.note_mutation_delivered(*pid);
     }
   }
 
@@ -930,33 +1384,58 @@ state_transport::publish_message_stats state_transport_ws::publish_message(const
   for (auto &c : conns) {
     if (!c || !c->alive.load() || !c->can_write())
       continue;
-    if (!c->remote_node_id.empty() && !_peers.should_deliver(c->remote_node_id, m.path)) {
-      _peers.note_delivery_filtered(c->remote_node_id);
+    const std::string *pid = c->peer_id();
+    if (pid && !_peers.should_deliver(*pid, m.path)) {
+      _peers.note_delivery_filtered(*pid);
       continue;
     }
     if (c->write(frame)) {
       _sent_frames.fetch_add(1, std::memory_order_relaxed);
       ++stats.peers;
-      if (!c->remote_node_id.empty())
-        _peers.note_message_delivered(c->remote_node_id);
+      if (pid)
+        _peers.note_message_delivered(*pid);
     }
   }
   return stats;
 }
 
-std::size_t state_transport_ws::write_media(const media_frame &m, const void *exclude) {
+std::size_t state_transport_ws::write_media(const media_frame &m, const void *exclude, bool gated) {
+  // One copy of the gate per frame: a concurrent set_media_gate swaps the slot, never the object
+  // this fan is calling, and no lock is held across the socket writes below.
+  std::shared_ptr<const media_gate_fn> gate;
+  std::shared_ptr<const media_shape_fn> shaper;
+  if (gated) {
+    std::lock_guard<std::mutex> lk(_media_gate_mu);
+    gate = _media_gate;
+    shaper = _media_shaper;
+  }
+
+  const auto encode = [](const media_frame &src, pb::Frame &out) {
+    pb::MediaFrame *mf = out.mutable_media();
+    mf->set_origin_node_id(src.origin_node_id);
+    mf->set_stream_id(src.stream_id);
+    mf->set_codec(src.codec);
+    mf->set_width(src.width);
+    mf->set_height(src.height);
+    mf->set_seq(src.seq);
+    mf->set_pts_seconds(src.pts_seconds);
+    mf->set_sample_rate(src.sample_rate);
+    mf->set_channels(src.channels);
+    mf->set_payload(src.payload.data(), static_cast<int>(src.payload.size()));
+  };
   pb::Frame frame;
-  pb::MediaFrame *mf = frame.mutable_media();
-  mf->set_origin_node_id(m.origin_node_id);
-  mf->set_stream_id(m.stream_id);
-  mf->set_codec(m.codec);
-  mf->set_width(m.width);
-  mf->set_height(m.height);
-  mf->set_seq(m.seq);
-  mf->set_pts_seconds(m.pts_seconds);
-  mf->set_sample_rate(m.sample_rate);
-  mf->set_channels(m.channels);
-  mf->set_payload(m.payload.data(), static_cast<int>(m.payload.size()));
+  encode(m, frame);
+  // The shaper's variants, each encoded once for every receiver it serves. Each is held here for
+  // the whole fan: matched by address, a variant freed mid-fan could hand its address to another.
+  std::vector<std::pair<std::shared_ptr<const media_frame>, pb::Frame>> variants;
+  const auto variant_frame = [&](const std::shared_ptr<const media_frame> &v) -> const pb::Frame & {
+    for (const auto &e : variants)
+      if (e.first == v)
+        return e.second;
+    variants.emplace_back(v, pb::Frame());
+    encode(*v, variants.back().second);
+    return variants.back().second;
+  };
 
   std::vector<std::shared_ptr<connection>> conns;
   {
@@ -965,20 +1444,56 @@ std::size_t state_transport_ws::write_media(const media_frame &m, const void *ex
   }
   // Media is unreplicated, un-bridged, and not subject to the peer path-filter (it carries no
   // path). `exclude` (a connection*) skips the origin peer when a relay fans; nullptr sends to all.
+  const std::size_t backlog_drop = _media_backlog_drop.load(std::memory_order_relaxed);
   std::size_t n = 0;
   for (auto &c : conns) {
-    if (!c || c.get() == exclude || !c->alive.load() || !c->can_write())
+    // A held connection (the admission hold) gets no media yet; skipping it here also keeps the
+    // gate from spending a thumbnail on it.
+    if (!c || c.get() == exclude || !c->alive.load() || !c->can_write() ||
+        c->admission_held.load(std::memory_order_relaxed))
       continue;
     // Media is loss-tolerant: if this peer's send buffer is backed up (it can't keep pace with the
     // video), DROP the frame rather than let the synchronous write block the relay. A LOW threshold
-    // is deliberate — it keeps each peer's buffer small so the small, must-deliver STATE writes
-    // (roster join/leave + the periodic re-broadcast below) are never crowded out or deferred.
-    // Dropping video to a slow peer is invisible; a stalled roster makes clients unable to SEE each
-    // other at all.
-    if (c->send_backlog() > 32 * 1024)
+    // (32 KB unless set_media_backlog_drop says otherwise) is deliberate — it keeps each peer's
+    // buffer small so the small, must-deliver STATE writes (roster join/leave + the periodic
+    // re-broadcast below) are never crowded out or deferred. Dropping video to a slow peer is
+    // invisible; a stalled roster makes clients unable to SEE each other at all.
+    // Audio (a frame with a sample rate) is small and the first thing a listener misses, so it
+    // has four times video's allowance: a congested link sheds video first.
+    const std::size_t limit = m.sample_rate > 0 ? backlog_drop * 4 : backlog_drop;
+    if (backlog_drop != 0 && c->send_backlog() > limit) {
+      _media_backlog_dropped.fetch_add(1, std::memory_order_relaxed);
+      c->link.note_media_dropped();
       continue;
-    if (c->write(frame)) {
+    }
+    // Per-receiver egress gate, asked last so a frame the backlog drop skips never counts as sent
+    // in the gate's own bookkeeping (e.g. a thumbnail cadence). An unidentified receiver is
+    // ungated: the gate has no id to decide on, and "unknown" delivers everywhere else too.
+    if (gate) {
+      const std::string *pid = c->peer_id();
+      if (pid && !(*gate)(m, *pid)) {
+        _media_gated.fetch_add(1, std::memory_order_relaxed);
+        continue;
+      }
+    }
+    // Then its shape: the frame as sent, a smaller variant, or nothing. An unidentified receiver
+    // is shaped as "", a viewer the shaper has no rung for.
+    const pb::Frame *out = &frame;
+    if (shaper) {
+      const std::string *pid = c->peer_id();
+      const media_shape s = (*shaper)(m, pid ? *pid : std::string());
+      if (s.drop) {
+        _media_shape_dropped.fetch_add(1, std::memory_order_relaxed);
+        continue;
+      }
+      if (s.variant) {
+        out = &variant_frame(s.variant);
+        _media_shaped.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+    if (c->write(*out)) {
       _sent_frames.fetch_add(1, std::memory_order_relaxed);
+      c->link.note_media_sent();
       ++n;
     }
   }
@@ -986,17 +1501,45 @@ std::size_t state_transport_ws::write_media(const media_frame &m, const void *ex
 }
 
 // A browser client has one connection (the relay), so publish_media_frame pushes its camera/mic UP;
-// a relay publishing locally (uncommon) would send to all its connections.
+// a relay publishing locally (uncommon) would send to all its connections. A node's own uplink is
+// never gated.
 void state_transport_ws::publish_media_frame(const ws_media_frame &m) {
-  _media_sent.fetch_add(write_media(m, nullptr), std::memory_order_relaxed);
+  _media_sent.fetch_add(write_media(m, nullptr, /*gated=*/false), std::memory_order_relaxed);
 }
 
-// Router egress: fan one peer's frame to every OTHER connection (the origin is `exclude`).
+// Router egress: fan one peer's frame to every OTHER connection (the origin is `exclude`), each
+// receiver subject to the media gate.
 void state_transport_ws::fan_media(const media_frame &f, const void *exclude) {
-  _media_fwd.fetch_add(write_media(f, exclude), std::memory_order_relaxed);
+  _media_fwd.fetch_add(write_media(f, exclude, /*gated=*/true), std::memory_order_relaxed);
 }
 
 void state_transport_ws::set_media_sink(media_sink_fn sink) { _media_sink = std::move(sink); }
+
+void state_transport_ws::set_media_gate(media_gate_fn gate) {
+  std::shared_ptr<const media_gate_fn> next;
+  if (gate)
+    next = std::make_shared<const media_gate_fn>(std::move(gate));
+  {
+    std::lock_guard<std::mutex> lk(_media_gate_mu);
+    _media_gate.swap(next);
+  }
+  // `next` now holds the previous gate; it is released here, outside the lock (a fan still using
+  // its own copy keeps it alive until that fan finishes).
+}
+
+void state_transport_ws::set_media_shaper(media_shape_fn shaper) {
+  std::shared_ptr<const media_shape_fn> next;
+  if (shaper)
+    next = std::make_shared<const media_shape_fn>(std::move(shaper));
+  {
+    std::lock_guard<std::mutex> lk(_media_gate_mu);
+    _media_shaper.swap(next);
+  }
+}
+
+void state_transport_ws::set_media_backlog_drop(std::size_t bytes) noexcept {
+  _media_backlog_drop.store(bytes, std::memory_order_relaxed);
+}
 
 void state_transport_ws::set_on_media(media_frame_fn cb) {
   if (!cb) {
@@ -1046,6 +1589,14 @@ void state_transport_ws::flush() {
 }
 
 void state_transport_ws::on_inbound_mutation(const state_mutation &m, connection *origin) {
+  // A gated relay takes from a client only what it may write as itself (state_inbound_gate). What
+  // it holds there is now unknown, so the next broadcast sends it the tree's value.
+  if (origin != nullptr && origin->gate &&
+      !(origin->speaks_as(m.origin_node_id) && origin->gate->admit(origin->remote_node_id, m))) {
+    _inbound_rejected.fetch_add(1, std::memory_order_relaxed);
+    origin->forget(m);
+    return;
+  }
   std::vector<state_cluster_shard *> peers;
   {
     std::lock_guard<std::mutex> lk(_shards_mu);
@@ -1065,10 +1616,28 @@ void state_transport_ws::on_inbound_mutation(const state_mutation &m, connection
     if (r.applied)
       _delivered.fetch_add(1, std::memory_order_relaxed);
   }
+  // The origin wrote this path itself, so what it holds there is no longer what it was last sent:
+  // the next broadcast re-sends the tree's value, which also corrects a write this relay rejected.
+  if (origin != nullptr)
+    origin->forget(m);
+  const bool relay = _relay.load(std::memory_order_relaxed);
+  if (!relay && _bridge == nullptr)
+    return; // a leaf: applied locally, never re-sent
+  // Interest gate (opt-in): re-fan only what some local same-cluster shard admits -- its interest
+  // set covers the path, or it is a delegation op, which ingest always takes. When every client
+  // enforces the relay's interest, a withheld frame is one no client would apply. Asked after
+  // ingest_remote has returned, so admits() takes only the shard's leaf lock. With no matching
+  // shard (a pure forwarding relay) everything is forwarded.
+  if (_relay_requires_interest.load(std::memory_order_relaxed) && !peers.empty() &&
+      std::none_of(peers.begin(), peers.end(),
+                   [&m](const state_cluster_shard *s) { return s->admits(m); })) {
+    _relay_withheld.fetch_add(1, std::memory_order_relaxed);
+    return; // neither the relay loop nor the bridge
+  }
   // Relay (star topology): re-send to every OTHER connection so clients that only reach this server
   // converge with each other. origin is skipped (no echo); origin_node_id is preserved so the
-  // receiver's dedup makes any round-trip a no-op.
-  if (_relay.load(std::memory_order_relaxed)) {
+  // receiver's dedup makes any round-trip a no-op. Each target's registry entry is honoured.
+  if (relay) {
     pb::Frame frame;
     encode_mutation(m, frame.mutable_mutation());
     std::vector<std::shared_ptr<connection>> conns;
@@ -1079,10 +1648,14 @@ void state_transport_ws::on_inbound_mutation(const state_mutation &m, connection
     for (auto &c : conns) {
       if (!c || c.get() == origin || !c->alive.load() || !c->can_write())
         continue;
+      if (const std::string *pid = c->peer_id(); pid && !_peers.should_deliver(*pid, m.path)) {
+        _peers.note_delivery_filtered(*pid);
+        continue;
+      }
       if (c->send_backlog() > 2 * 1024 * 1024)
         continue; // don't block the relay on a backed-up peer; the ~1s roster broadcast backstops
                   // it
-      if (c->write(frame))
+      if (c->write_mutation(frame, m))
         _sent_frames.fetch_add(1, std::memory_order_relaxed);
     }
   }
@@ -1092,6 +1665,11 @@ void state_transport_ws::on_inbound_mutation(const state_mutation &m, connection
 }
 
 void state_transport_ws::on_inbound_message(const state_message &m, connection *origin) {
+  if (origin != nullptr && origin->gate &&
+      !(origin->speaks_as(m.origin_node_id) && origin->gate->admit(origin->remote_node_id, m))) {
+    _inbound_rejected.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
   std::vector<state_cluster_shard *> peers;
   {
     std::lock_guard<std::mutex> lk(_shards_mu);
@@ -1108,7 +1686,17 @@ void state_transport_ws::on_inbound_message(const state_message &m, connection *
   }
   for (auto *peer : peers)
     (void)peer->ingest_remote_message(m);
-  if (_relay.load(std::memory_order_relaxed)) {
+  const bool relay = _relay.load(std::memory_order_relaxed);
+  if (!relay && _bridge == nullptr)
+    return;
+  // Interest gate (opt-in), as in on_inbound_mutation.
+  if (_relay_requires_interest.load(std::memory_order_relaxed) && !peers.empty() &&
+      std::none_of(peers.begin(), peers.end(),
+                   [&m](const state_cluster_shard *s) { return s->admits_message(m); })) {
+    _relay_withheld.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
+  if (relay) {
     pb::Frame frame;
     encode_message(m, frame.mutable_message());
     std::vector<std::shared_ptr<connection>> conns;
@@ -1119,6 +1707,10 @@ void state_transport_ws::on_inbound_message(const state_message &m, connection *
     for (auto &c : conns) {
       if (!c || c.get() == origin || !c->alive.load() || !c->can_write())
         continue;
+      if (const std::string *pid = c->peer_id(); pid && !_peers.should_deliver(*pid, m.path)) {
+        _peers.note_delivery_filtered(*pid);
+        continue;
+      }
       if (c->send_backlog() > 2 * 1024 * 1024)
         continue; // don't block the relay on a backed-up peer; the ~1s roster broadcast backstops
                   // it
@@ -1144,7 +1736,12 @@ std::vector<state_link_report> state_transport_ws::link_reports() const {
       continue;
     state_link_report r;
     r.transport = "ws";
-    r.remote_node_id = c->remote_node_id;
+    if (const std::string *pid = c->peer_id()) {
+      r.remote_node_id = *pid;
+      r.remote_device_id = c->remote_device_id;
+      r.holds_id = !c->gate || c->gate->holder(*pid) == c.get();
+      r.device_verified = c->device_verified.load(std::memory_order_relaxed);
+    }
     r.accepted = c->accepted;
     r.age_s = static_cast<double>(now - c->opened_ns) * 1e-9;
     r.idle_s = static_cast<double>(now - c->last_rx_ns.load()) * 1e-9;
@@ -1184,23 +1781,29 @@ void state_transport_ws::send_pings_if_due() {
 
 void state_transport_ws::ping_loop() {
 #ifndef __EMSCRIPTEN__
-  // How long one write may block before its connection is closed (see
-  // connection::write_started_ns).
-  constexpr std::int64_t kWriteStallNs = 3'000'000'000;
   while (_running.load()) {
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     send_pings_if_due();
-    std::vector<std::shared_ptr<connection>> conns;
+    std::vector<std::shared_ptr<connection>> conns, handshaking;
     {
       std::lock_guard<std::mutex> lk(_conns_mu);
       conns = _conns;
+      handshaking = _handshaking;
     }
     const std::int64_t now = steady_ns();
+    // A handshake that has not finished in kHandshakeNs is a client that connected and never sent
+    // (or never finished) its upgrade request: close it, which fails its read and ends its thread.
+    for (auto &c : handshaking) {
+      const std::int64_t started = c->handshake_started_ns.load(std::memory_order_relaxed);
+      if (started != 0 && now - started > kHandshakeNs)
+        c->abort_io();
+    }
     for (auto &c : conns) {
       const std::int64_t started = c ? c->write_started_ns.load(std::memory_order_relaxed) : 0;
       if (started != 0 && now - started > kWriteStallNs && c->alive.load()) {
+        const std::string *pid = c->peer_id();
         std::fprintf(stderr, "[ws] write to '%s' blocked > 3 s (peer not reading): closing\n",
-                     c->remote_node_id.c_str());
+                     pid ? pid->c_str() : "");
         c->abort_io();
       }
     }
@@ -1230,14 +1833,98 @@ void state_transport_ws::admit_connection(const std::shared_ptr<connection> &con
   // Hold write_mu across publication so a concurrent publish() cannot slip a newer mutation ahead
   // of the replayed older ones (the receiver's seen-set only suppresses exact repeats).
   std::lock_guard<std::mutex> wlk(conn->write_mu);
+  // The admission hold: an accepted relay connection gets its bootstrap, and live traffic, only
+  // once release_admissions() finds it ready, so the snapshot can go through the peer's rule. It is
+  // held before it is visible, and the Hello below goes through write_locked, which the hold does
+  // not stop.
+  const bool hold =
+      relay && conn->accepted && _admission_hold_ns.load(std::memory_order_relaxed) > 0;
+  if (hold) {
+    conn->admission_held.store(true, std::memory_order_relaxed);
+    _admissions_held.fetch_add(1, std::memory_order_relaxed);
+  }
   register_connection(conn);
   send_hello_locked(*conn);
+  if (hold)
+    return;
   if (backfill && !shards.empty())
-    send_backfill_locked(*conn, shards);
+    send_backfill_locked(*conn, shards, nullptr);
   // A relay pushes its full current state so a late-joining client sees peers already in the room
   // (the live set_relay forwarding only carries writes that happen AFTER this client connects).
   if (relay && !shards.empty())
-    send_snapshot_locked(*conn, shards);
+    send_snapshot_locked(*conn, shards, nullptr);
+}
+
+void state_transport_ws::set_admission_hold(std::chrono::milliseconds max_hold) {
+  // A day at most, so the nanosecond count cannot overflow (milliseconds::max() means "long").
+  const auto capped = (std::min)(max_hold, std::chrono::milliseconds(std::chrono::hours(24)));
+  const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(capped).count();
+  _admission_hold_ns.store(ns > 0 ? static_cast<std::int64_t>(ns) : 0, std::memory_order_relaxed);
+}
+
+void state_transport_ws::set_inbound_gate(std::shared_ptr<state_inbound_gate> gate) {
+  std::lock_guard<std::mutex> lk(_inbound_gate_mu);
+  _inbound_gate = std::move(gate);
+}
+
+bool state_transport_ws::is_local_id(const std::string &id) const {
+  if (id == _node_id)
+    return true;
+  std::lock_guard<std::mutex> lk(_shards_mu);
+  return std::any_of(_shards.begin(), _shards.end(), [&id](const state_cluster_shard *s) {
+    return s != nullptr && s->local_node_id() == id;
+  });
+}
+
+std::size_t state_transport_ws::release_admissions() {
+  std::vector<std::shared_ptr<connection>> waiting;
+  {
+    std::lock_guard<std::mutex> lk(_conns_mu);
+    for (const auto &c : _conns)
+      // A closed one stays listed until the reaper sweeps it: never bootstrap it.
+      if (c && c->alive.load() && c->admission_held.load(std::memory_order_relaxed))
+        waiting.push_back(c);
+  }
+  if (waiting.empty())
+    return 0;
+  std::vector<state_cluster_shard *> shards;
+  {
+    std::lock_guard<std::mutex> lk(_shards_mu);
+    shards = _shards;
+  }
+  const std::int64_t hold = _admission_hold_ns.load(std::memory_order_relaxed);
+  const std::int64_t now = steady_ns();
+  std::size_t n = 0;
+  for (const auto &c : waiting) {
+    // The rule is read before the write lock is taken (no path holds the registry's lock and a
+    // connection's write lock together).
+    state_peer_registry::delivery_view view;
+    const std::string *pid = c->peer_id();
+    if (pid)
+      view = _peers.view_of(*pid);
+    const bool ruled = view.filtered();
+    if (!ruled && hold > 0 && now - c->opened_ns < hold)
+      continue; // no rule for the peer yet, and the hold has time left
+    std::lock_guard<std::mutex> wlk(c->write_mu);
+    if (!release_locked(*c, shards, ruled ? &view : nullptr))
+      continue;
+    if (!ruled)
+      _admission_timeouts.fetch_add(1, std::memory_order_relaxed);
+    ++n;
+  }
+  return n;
+}
+
+bool state_transport_ws::release_locked(connection &c,
+                                        const std::vector<state_cluster_shard *> &shards,
+                                        const state_peer_registry::delivery_view *view) {
+  if (!c.admission_held.exchange(false, std::memory_order_relaxed))
+    return false;
+  if (_backfill_on_connect.load(std::memory_order_acquire) && !shards.empty())
+    send_backfill_locked(c, shards, view);
+  if (_relay.load(std::memory_order_relaxed) && !shards.empty())
+    send_snapshot_locked(c, shards, view);
+  return true;
 }
 
 void state_transport_ws::send_hello_locked(connection &c) {
@@ -1245,17 +1932,82 @@ void state_transport_ws::send_hello_locked(connection &c) {
   auto *h = f.mutable_hello();
   h->set_node_id(_node_id);
   h->set_cluster_id(_cluster_id);
+  if (!_device_id.empty())
+    h->set_device_id(_device_id);
+  // A relay with a pin store challenges each client it accepts to prove its device key.
+  if (c.accepted && _device_pins && device_keys_available()) {
+    std::lock_guard<std::mutex> lk(c.proof_mu);
+    c.device_nonce = device_random_bytes(kDeviceNonceBytes);
+    h->set_nonce(c.device_nonce);
+  }
   c.write_locked(f);
 }
 
+void state_transport_ws::answer_device_challenge(connection &c, const std::string &nonce,
+                                                 const std::string &relay_node_id) {
+  // Sign only a nonce of a sane size: the proof is for one relay's challenge, nothing larger.
+  if (!_device_signer || _device_id.empty() || nonce.size() > kDeviceNonceMaxBytes)
+    return;
+  pb::Frame f;
+  auto *p = f.mutable_device_proof();
+  p->set_public_key(_device_signer->public_key());
+  p->set_signature(
+      _device_signer->sign(device_proof_message(nonce, relay_node_id, _node_id, _device_id)));
+  if (p->signature().empty())
+    return;
+  if (c.write(f))
+    _sent_frames.fetch_add(1, std::memory_order_relaxed);
+}
+
+void state_transport_ws::on_device_proof(connection &c, const std::string &public_key,
+                                         const std::string &signature) {
+  if (c.accepted && !c.identified.load(std::memory_order_relaxed) && !c.proof_pending) {
+    c.proof_pending = true; // checked when the Hello comes (deliver_inbound)
+    c.pending_key = public_key;
+    c.pending_signature = signature;
+    return;
+  }
+  std::string nonce;
+  {
+    std::lock_guard<std::mutex> lk(c.proof_mu);
+    nonce.swap(c.device_nonce); // one proof per challenge
+  }
+  const std::string *pid = c.peer_id();
+  if (nonce.empty() || pid == nullptr || c.local_id || c.remote_device_id.empty() ||
+      !_device_pins) {
+    _device_proofs_refused.fetch_add(1, std::memory_order_relaxed); // unasked, or anonymous
+    return;
+  }
+  const std::string message = device_proof_message(nonce, _node_id, *pid, c.remote_device_id);
+  if (!verify_device_proof(public_key, message, signature)) {
+    _device_proofs_refused.fetch_add(1, std::memory_order_relaxed);
+    std::fprintf(stderr, "cvc: ws device proof from %s did not verify\n", pid->c_str());
+    return;
+  }
+  const state_device_pins::verdict v = _device_pins->check(c.remote_device_id, public_key);
+  if (v != state_device_pins::verdict::pinned && v != state_device_pins::verdict::matched) {
+    _device_proofs_refused.fetch_add(1, std::memory_order_relaxed);
+    std::fprintf(stderr,
+                 "cvc: ws device of %s was not pinned (another key, or a full store): unverified\n",
+                 pid->c_str());
+    return;
+  }
+  c.device_verified.store(true, std::memory_order_relaxed);
+  _devices_verified.fetch_add(1, std::memory_order_relaxed);
+}
+
 void state_transport_ws::send_backfill_locked(connection &c,
-                                              const std::vector<state_cluster_shard *> &shards) {
-  // The peer's Hello has not arrived yet, so send everything and let the receiver drop what does
-  // not match its cluster or its interest set, exactly as for live traffic.
+                                              const std::vector<state_cluster_shard *> &shards,
+                                              const state_peer_registry::delivery_view *view) {
+  // At admission the peer's Hello has not arrived yet, so send everything and let the receiver
+  // drop what does not match its cluster or its interest set, exactly as for live traffic. A
+  // release from the admission hold passes the peer's rule as `view`.
   for (auto *s : shards) {
     if (s == nullptr)
       continue;
     for (const auto &m : s->replay_local()) {
+      if (view != nullptr && !view->deliver(m.path))
+        continue;
       pb::Frame f;
       encode_mutation(m, f.mutable_mutation());
       if (!c.write_locked(f))
@@ -1267,12 +2019,17 @@ void state_transport_ws::send_backfill_locked(connection &c,
 }
 
 void state_transport_ws::send_snapshot_locked(connection &c,
-                                              const std::vector<state_cluster_shard *> &shards) {
+                                              const std::vector<state_cluster_shard *> &shards,
+                                              const state_peer_registry::delivery_view *view) {
   // A relay holds the whole room tree (every client's forwarded writes land in its shard), but
   // those entries are REMOTE-origin, so send_backfill_locked's replay_local() yields nothing. Push
   // the full current snapshot instead, as an unsolicited SnapshotResponse (request_id 0), so a late
   // joiner bootstraps the peers already present. The receiver applies each entry via
-  // ingest_snapshot_entry (a bulk initial load, no conflict gate).
+  // ingest_snapshot_entry (a bulk initial load, no conflict gate). Without the admission hold it
+  // goes out before the peer's Hello, so there is no identity to look a registry entry up by and
+  // it is unfiltered; with it, release_admissions passes the peer's rule as `view`. What it
+  // carried is recorded as the peer's starting point, so the first broadcast is a diff.
+  const std::uint64_t round = _broadcast_round.load(std::memory_order_relaxed);
   for (auto *s : shards) {
     if (s == nullptr)
       continue;
@@ -1280,73 +2037,53 @@ void state_transport_ws::send_snapshot_locked(connection &c,
     if (snap.empty())
       continue;
     pb::Frame f;
-    auto *rsp = f.mutable_snapshot_response();
-    rsp->set_request_id(0);
-    rsp->set_final(true);
-    for (const auto &e : snap) {
-      auto *pe = rsp->add_entries();
-      pe->set_path(e.path);
-      pe->set_string_value(e.string_value);
-      pe->set_comment(e.comment);
-      pe->set_hidden(e.hidden);
-      pe->set_read_only(e.read_only);
-      for (const auto &p : e.properties)
-        (*pe->mutable_properties())[p.first] = p.second;
-      pe->set_type_name(e.type_name);
-      pe->set_origin_node_id(e.origin_node_id);
-      pe->set_sequence(e.sequence);
-      pe->set_data_type_name(e.data_type_name);
-      if (e.data_payload.kind != state_payload_kind::none)
-        set_pb_payload(pe->mutable_data_payload(), e.data_payload);
-    }
+    fill_snapshot_response(f.mutable_snapshot_response(), snap, view);
     if (!c.write_locked(f))
       return; // stream died mid-snapshot; the reader will reap it
     _sent_frames.fetch_add(1, std::memory_order_relaxed);
+    // Only what the view let through: an entry it withheld must still go out once the rule allows.
+    std::lock_guard<std::mutex> hk(c.held_mu);
+    for (const auto &e : snap)
+      if (view == nullptr || view->deliver(e.path))
+        c.held[e.path] = held_entry{entry_digest(e).value(), round};
   }
 }
 
 std::size_t state_transport_ws::broadcast_snapshot() {
-  // Build each shard's snapshot frame ONCE, then write it to every live connection. The receivers
-  // apply it idempotently (ingest_snapshot_entry is a bulk load), so re-sending the same
-  // roster/scene each interval is a no-op for a client that is already converged and a recovery for
-  // one that missed a live re-fan. Uses connection::write() (locks per connection) — do NOT hold a
-  // connection write lock here. Snapshotting the shard reads the tree under its own lock.
+  // Snapshot each shard ONCE, then bring every live connection up to date with it. A connection is
+  // sent only the entries it does not already hold (connection::held): those whose content differs
+  // from what its last snapshot frame carried, and those forgotten since because another frame
+  // touched them. So a path that changed and went out live is sent once more -- the relay cannot
+  // tell whether the live frame was applied -- and an unchanged tree sends nothing. The receivers
+  // apply each entry idempotently (ingest_snapshot_entry is a bulk load), which makes this a
+  // recovery for a client that missed a live re-fan. Uses each connection's write lock for the
+  // comparison and the write together -- do NOT hold one here. Snapshotting the shard reads the
+  // tree under its own lock.
   std::vector<state_cluster_shard *> shards;
   {
     std::lock_guard<std::mutex> lk(_shards_mu);
     shards = _shards;
   }
-  std::vector<pb::Frame> frames;
+  struct shard_snapshot {
+    std::vector<snapshot_entry> entries;
+    std::vector<std::uint64_t> digests; // entry_digest of each entry, shared by every connection
+  };
+  std::vector<shard_snapshot> snaps;
   for (auto *s : shards) {
     if (s == nullptr)
       continue;
-    const auto snap = s->snapshot();
-    if (snap.empty())
+    shard_snapshot ss;
+    ss.entries = s->snapshot();
+    if (ss.entries.empty())
       continue;
-    pb::Frame f;
-    auto *rsp = f.mutable_snapshot_response();
-    rsp->set_request_id(0);
-    rsp->set_final(true);
-    for (const auto &e : snap) {
-      auto *pe = rsp->add_entries();
-      pe->set_path(e.path);
-      pe->set_string_value(e.string_value);
-      pe->set_comment(e.comment);
-      pe->set_hidden(e.hidden);
-      pe->set_read_only(e.read_only);
-      for (const auto &p : e.properties)
-        (*pe->mutable_properties())[p.first] = p.second;
-      pe->set_type_name(e.type_name);
-      pe->set_origin_node_id(e.origin_node_id);
-      pe->set_sequence(e.sequence);
-      pe->set_data_type_name(e.data_type_name);
-      if (e.data_payload.kind != state_payload_kind::none)
-        set_pb_payload(pe->mutable_data_payload(), e.data_payload);
-    }
-    frames.push_back(std::move(f));
+    ss.digests.reserve(ss.entries.size());
+    for (const auto &e : ss.entries)
+      ss.digests.push_back(entry_digest(e).value());
+    snaps.push_back(std::move(ss));
   }
-  if (frames.empty())
+  if (snaps.empty())
     return 0;
+  const std::uint64_t round = _broadcast_round.fetch_add(1, std::memory_order_relaxed) + 1;
   std::vector<std::shared_ptr<connection>> conns;
   {
     std::lock_guard<std::mutex> lk(_conns_mu);
@@ -1357,10 +2094,11 @@ std::size_t state_transport_ws::broadcast_snapshot() {
   // signal for "clients can't see each other" — a skipped peer is one the periodic roster never
   // reaches.
   static const bool dbg = std::getenv("CVC_WS_BROADCAST_DEBUG") != nullptr;
-  std::size_t wrote = 0, skipped = 0, max_backlog = 0;
+  std::size_t wrote = 0, skipped = 0, max_backlog = 0, filtered = 0, entries = 0, refreshed = 0;
   for (auto &c : conns) {
     if (!c || !c->alive.load() || !c->can_write())
       continue;
+    const std::string *pid = c->peer_id();
     const std::size_t bl = c->send_backlog();
     if (bl > max_backlog)
       max_backlog = bl;
@@ -1374,22 +2112,142 @@ std::size_t state_transport_ws::broadcast_snapshot() {
     if (bl > 2 * 1024 * 1024) {
       ++skipped;
       if (dbg)
-        std::fprintf(stderr, "[ws-bcast] SKIP node='%s' backlog=%zuKB\n", c->remote_node_id.c_str(),
+        std::fprintf(stderr, "[ws-bcast] SKIP node='%s' backlog=%zuKB\n", pid ? pid->c_str() : "",
                      bl / 1024);
       continue;
     }
+    // One registry lookup per connection; the view then answers every entry without the lock.
+    state_peer_registry::delivery_view view;
+    if (pid)
+      view = _peers.view_of(*pid);
+    if (view.filtered())
+      ++filtered;
+    // Under write_mu from the comparison through the write: a live frame for one of these paths
+    // lands wholly before (and is compared against) or wholly after (and forgets) this frame.
+    std::lock_guard<std::mutex> wlk(c->write_mu);
+    // A connection the admission hold still holds gets its first state from its release.
+    if (c->admission_held.load(std::memory_order_relaxed))
+      continue;
+    std::vector<pb::Frame> frames; // one per shard with anything for this peer
+    std::size_t n = 0;
+    {
+      std::lock_guard<std::mutex> hk(c->held_mu);
+      if (c->full_refresh.exchange(false, std::memory_order_relaxed)) {
+        c->held.clear();
+        ++refreshed;
+      }
+      for (const auto &ss : snaps) {
+        pb::Frame f;
+        auto *rsp = f.mutable_snapshot_response();
+        rsp->set_request_id(0);
+        rsp->set_final(true);
+        for (std::size_t i = 0; i < ss.entries.size(); ++i) {
+          const snapshot_entry &e = ss.entries[i];
+          if (!view.deliver(e.path))
+            continue;
+          // Never a peer's own value back to it: the peer is its source, and our copy can be
+          // older than what it holds (state_inbound_gate::sources).
+          if (c->gate && pid && c->gate->sources(*pid, e.path))
+            continue;
+          // Keyed by path alone, as the receiver applies every entry to every shard it has.
+          auto [it, fresh] = c->held.try_emplace(e.path);
+          it->second.round = round;
+          if (!fresh && it->second.digest == ss.digests[i])
+            continue; // the peer holds this already
+          it->second.digest = ss.digests[i];
+          add_snapshot_entry(rsp, e);
+        }
+        if (rsp->entries_size() > 0) {
+          n += static_cast<std::size_t>(rsp->entries_size());
+          frames.push_back(std::move(f));
+        }
+      }
+      // A path this round did not deliver left the tree or the peer's view: drop it, so it is sent
+      // again if it comes back.
+      for (auto it = c->held.begin(); it != c->held.end();)
+        it = it->second.round == round ? std::next(it) : c->held.erase(it);
+    }
     bool ok = true;
-    for (const auto &f : frames)
-      ok = c->write(f) && ok;
-    if (ok) {
+    for (const auto &f : frames) {
+      if (!c->write_locked(f)) {
+        ok = false;
+        break;
+      }
+    }
+    if (!ok) {
+      // The stream died (write_locked marked it dead); hold nothing for it.
+      std::lock_guard<std::mutex> hk(c->held_mu);
+      c->held.clear();
+      continue;
+    }
+    if (!frames.empty()) {
       ++wrote;
+      entries += n;
       _sent_frames.fetch_add(frames.size(), std::memory_order_relaxed);
+      _broadcast_entries.fetch_add(n, std::memory_order_relaxed);
     }
   }
   if (dbg)
-    std::fprintf(stderr, "[ws-bcast] wrote=%zu skipped=%zu maxbacklog=%zuKB conns=%zu frames=%zu\n",
-                 wrote, skipped, max_backlog / 1024, conns.size(), frames.size());
+    std::fprintf(stderr,
+                 "[ws-bcast] wrote=%zu skipped=%zu filtered=%zu refreshed=%zu entries=%zu "
+                 "maxbacklog=%zuKB conns=%zu shards=%zu\n",
+                 wrote, skipped, filtered, refreshed, entries, max_backlog / 1024, conns.size(),
+                 snaps.size());
   return wrote;
+}
+
+std::size_t state_transport_ws::request_full_refresh() {
+  pb::Frame f;
+  f.mutable_snapshot_request()->set_cluster_id(_cluster_id);
+  std::vector<std::shared_ptr<connection>> conns;
+  {
+    std::lock_guard<std::mutex> lk(_conns_mu);
+    conns = _conns;
+  }
+  std::size_t n = 0;
+  for (auto &c : conns) {
+    if (!c || !c->alive.load() || !c->can_write())
+      continue;
+    if (c->write(f)) {
+      _sent_frames.fetch_add(1, std::memory_order_relaxed);
+      ++n;
+    }
+  }
+  return n;
+}
+
+std::size_t state_transport_ws::push_snapshot_to(const std::string &node_id,
+                                                 const std::vector<snapshot_entry> &entries) {
+  if (node_id.empty() || entries.empty())
+    return 0;
+  std::vector<std::shared_ptr<connection>> targets;
+  {
+    std::lock_guard<std::mutex> lk(_conns_mu);
+    for (const auto &c : _conns) {
+      if (!c || !c->alive.load() || !c->can_write())
+        continue;
+      if (const std::string *pid = c->peer_id(); pid && *pid == node_id)
+        targets.push_back(c);
+    }
+  }
+  if (targets.empty())
+    return 0; // the peer is on another transport (or gone): nothing to encode
+  pb::Frame f;
+  fill_snapshot_response(f.mutable_snapshot_response(), entries);
+  std::size_t n = 0;
+  for (auto &c : targets) {
+    // Never block the caller (the relay's main loop) on a peer that is not draining; the caller's
+    // next push or the periodic broadcast covers what this one would have carried.
+    if (c->send_backlog() > 2 * 1024 * 1024)
+      continue;
+    // The caller chose these entries, so they need not match the tree: forget the peer's copy of
+    // each path, and a broadcast that delivers one sends the tree's value there.
+    if (c->write_entries(f, entries)) {
+      _sent_frames.fetch_add(1, std::memory_order_relaxed);
+      ++n;
+    }
+  }
+  return n;
 }
 
 void state_transport_ws::unregister_connection(connection *conn) {
@@ -1419,8 +2277,9 @@ std::size_t state_transport_ws::reap_idle(std::chrono::milliseconds timeout) {
       continue;
     const std::int64_t last = c->last_rx_ns.load(std::memory_order_relaxed);
     if (last != 0 && (now - last) > to_ns) {
+      const std::string *pid = c->peer_id();
       std::fprintf(stderr, "[ws] reaping idle connection node='%s' idle=%.1fs\n",
-                   c->remote_node_id.c_str(), static_cast<double>(now - last) / 1.0e9);
+                   pid ? pid->c_str() : "", static_cast<double>(now - last) / 1.0e9);
       beast::error_code ec;
       c->ws->next_layer().shutdown(tcp::socket::shutdown_both, ec);
       c->ws->next_layer().close(ec);
@@ -1443,6 +2302,8 @@ std::size_t state_transport_ws::reap_idle(std::chrono::milliseconds timeout) {
       }
     }
   }
+  // 3) And the threads of handshakes that ended unadmitted.
+  reap_handshakes();
 #else
   (void)timeout;
 #endif

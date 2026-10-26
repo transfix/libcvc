@@ -57,6 +57,20 @@ message Mutation {
 message Hello {
   string node_id = 1;
   string cluster_id = 2;
+  // The sender's device identity (state_identity.h default_device_id): a stable identifier for
+  // the device across launches, not a secret. Empty when the sender sets none.
+  string device_id = 3;
+  // A relay that verifies device keys (state_device_key.h) sends a fresh random challenge here; the
+  // device answers it with a DeviceProof. Empty from a client, or a relay that does not verify.
+  bytes nonce = 4;
+}
+
+// A device's answer to its relay's Hello.nonce: its Ed25519 public key for this relay (32 bytes)
+// and a signature (64 bytes) over device_proof_message(nonce, relay node id, its node id, its
+// device id). The relay verifies it and pins the key to the device id on first use.
+message DeviceProof {
+  bytes public_key = 1;
+  bytes signature = 2;
 }
 
 // Out-of-band message that does NOT modify state. Carried alongside
@@ -180,6 +194,7 @@ message Frame {
     MediaFrame media = 9;
     Ping ping = 10;
     Pong pong = 11;
+    DeviceProof device_proof = 12;
   }
 }
 

@@ -1,13 +1,12 @@
 // stb_image_io — zero-dependency PNG/JPG/BMP/TGA/GIF fast-path handler,
 // registered AHEAD of magick_image_io in register_default_image_handlers.
 //
-// Motivation: on wasm builds ImageMagick's libtool build ships libMagickCore.a
-// with two independent compilations of magick.c/cache.c/tree.c/etc. and
-// wasm-ld's satisfy-and-DCE model splits its static state — the coder
-// registry the reader consults is not the one Register*Image() writes to, and
-// every PNG/JPG texture load throws NoDecodeDelegateForThisImageFormat.
-// stb_image is a single self-contained header; it has none of that machinery
-// and just decodes bytes -> pixels.
+// Motivation: on wasm every PNG/JPG texture load through ImageMagick used to throw
+// NoDecodeDelegateForThisImageFormat. That was blamed on duplicated objects in the
+// static libMagickCore.a; the real cause was magick_io.cpp registering the static
+// coders before MagickCore had created its registry, which left it empty (fixed
+// there). stb_image is still the fast path for these formats: a single
+// self-contained header that just decodes bytes -> pixels.
 //
 // Dispatch (see image.cpp): for_read takes the FIRST can_read match, so stb —
 // registered first — wins reads for its declared extensions

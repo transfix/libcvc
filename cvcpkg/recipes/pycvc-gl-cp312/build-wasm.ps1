@@ -79,7 +79,7 @@ Invoke-CvcWasmCMakeBuild -ExtraArgs @(
     '-DDISABLE_CGAL=ON',
     '-DCVC_USING_HDF5=OFF',
     '-DCVC_USING_IMOD_MRC=OFF',
-    '-DCVC_ENABLE_IMAGEMAGICK=OFF',
+    '-DCVC_ENABLE_IMAGEMAGICK=ON',
     '-DCVC_ENABLE_FFTW=OFF',
     '-DCVC_FFT_PROVIDER=none',
     '-DCVC_ENABLE_ASSIMP=ON',
@@ -100,6 +100,11 @@ Invoke-CvcWasmCMakeBuild -ExtraArgs @(
     "-DSWIG_EXECUTABLE=$swigExe",
     "-DSWIG_DIR=$swigDir"
 )
+# A configure that misses ImageMagick turns it off and carries on; fail instead of
+# shipping a pycvc whose image I/O is gone (imagemagick + its codecs are build deps).
+if (-not (Select-String -Quiet -Pattern '^CVC_IMAGEMAGICK_ENABLED:INTERNAL=ON' -Path (Join-Path $env:CVC_BUILD_DIR 'CMakeCache.txt'))) {
+    throw "pycvc-gl(wasm): the configure found no ImageMagick in $env:CVC_DEPS_PREFIX"
+}
 
 # ── (4) link the CPython-wasm host (embeds pycvc + pycvc_gl + numpy) ──────────
 # Invoke-CvcWasmCMakeBuild already installed the archives + .py proxies. Drive the

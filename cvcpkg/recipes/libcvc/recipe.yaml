@@ -139,7 +139,15 @@ recipe:
   # (LowMemoryPolyDataMapper, ~2/3 fewer GL calls per frame on WebGL2) and the expanded
   # THIRD_PARTY_NOTICES.md. libcvc's own sources are unchanged by it; the bump keeps the pair's
   # revisions aligned for consumers that pin both.
-  cvc_revision: 1
+  # Bumped 1 -> 3 (3.7.0 lineage): the wasm-mt SDK was compiled with MAGICKCORE_HDRI_ENABLE=0
+  # against the Q16HDRI static ImageMagick (an emcmake configure has no pkg-config answer, and
+  # the Q16/HDRI=0 defaults stood), so cvc and every consumer saw an integer Quantum where the
+  # library uses float. src/cvc/CMakeLists.txt now reads the ABI from the library name. The
+  # build also hangs MagickCore's static codec closure off every static link, whichever
+  # FindImageMagick tier ran. Native bundles are unchanged. 3, not 2: native is already at
+  # +cvc.2 on the catalog and the wasm-mt publish packs verbatim at this revision. cvcgl bumps
+  # in lockstep (1 -> 3) and re-pins this build.
+  cvc_revision: 3
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
@@ -209,6 +217,17 @@ depends:
     # Build-only: nothing in libcvc's public headers mentions it.
     - name: pocketfft
       platforms: [linux, macos, windows]
+    # Eigen 5 + libigl's MPL-2.0 core module, both header-only, back
+    # mesh_ops.h / fem.h (CVC_ENABLE_LIBIGL). Build-only like pocketfft: nothing
+    # under inc/cvc includes them, they compile into the private cvc_igl helper,
+    # and cvcTargets.cmake never names them. Declared under runtime for the same
+    # reason as pocketfft (build.sh only reads CVC_DEPS_PREFIX). Without them the
+    # option flips OFF and every mesh_ops/fem entry point throws
+    # mesh_ops_unavailable; CI asserts that did not happen.
+    - name: eigen
+      platforms: [linux, macos, windows]
+    - name: libigl
+      platforms: [linux, macos, windows]
     - name: gsl
       platforms: [linux, macos, windows]
     - name: cgal
@@ -231,6 +250,12 @@ depends:
       platforms: [linux, macos, windows]
     - name: log4cplus
       platforms: [linux, macos, windows]
+    # The conference's Opus mics (media_opus.h): without libopus every mic stays f32, 1.5 Mbit/s
+    # against 32 kbit/s. Linked from its shared library natively, so a runtime dep; wasm links the
+    # static libopus.a (cvc.8 on, cy-pca/cvcpkg#467). No wasm-mt bundle exists yet, and Emscripten
+    # will not link a single-threaded archive into a -pthread build, so wasm-mt goes without.
+    - name: libopus
+      platforms: [linux, macos, windows, wasm]
     - name: tiff
     - name: imagemagick
     # ImageMagick delegates + libtiff codecs. `cvcpkg install` installs each

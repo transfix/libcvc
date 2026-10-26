@@ -26,12 +26,21 @@
 //
 // It plans with the scene's numbers by default (plan_with_vehicle false), as both the policy
 // and its training did. Needs a physics backend with vehicles (Jolt); throws otherwise.
+//
+// score_on_plant runs the same drives and also returns what they cost (the P8c gate): the energy
+// every agent drew from its source over the run, as the P3 ledger counts it
+// (nav_plant::energy_step summed), and the distance their chassis drove. With
+// plant_reach_options::predict_energy it also logs each run (plant_log) and gives what the power
+// model `power` says the same motion drew (evaluate_power), so a model can be judged on the
+// runs a trained policy makes, not only on those it was fitted to.
 
 #ifndef __CVC_PHYSICS_NAV_EVAL_H__
 #define __CVC_PHYSICS_NAV_EVAL_H__
 
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/coef_train.h>
+#include <cvc/nav/dyn_power.h>
+#include <cvc/physics/plant_log.h>
 #include <cvc/physics/vehicle.h>
 #include <vector>
 
@@ -57,6 +66,27 @@ struct plant_reach_options {
   // sample_starts_goals), so reach is scored at the goal distances a policy is deployed at.
   // 0 = scattered starts and goals anywhere free, the default.
   float goal_min = 0.0f, goal_max = 0.0f;
+  // score_on_plant: predict each run's energy with `power` too (plant_drive_score::model_J).
+  bool predict_energy = false;
+  cvc::nav::dyn_power_si power{};
+};
+
+// One run's score, or a mean of runs'.
+struct plant_drive_score {
+  double reach = 0.0;      // the fraction of agents that reached their goals
+  double energy_J = 0.0;   // drawn by all its agents, moving or not
+  double distance_m = 0.0; // their chassis' paths, summed
+  double model_J = 0.0;    // the power model's energy over the same ticks (predict_energy)
+  // Where it went: the agents' P3 ledgers at the run's end, every field summed (a mean's, the
+  // seeds' mean). charge and fuel_left are sums too, so read them per agent.
+  vehicle_energy ledger{};
+  // The fleet's draw per kilometre driven, Wh/km; 0 if nothing moved.
+  double wh_per_km() const {
+    return distance_m > 0.0 ? energy_J / 3600.0 / (distance_m / 1000.0) : 0.0;
+  }
+  double model_wh_per_km() const {
+    return distance_m > 0.0 ? model_J / 3600.0 / (distance_m / 1000.0) : 0.0;
+  }
 };
 
 double reach_on_plant(const cvc::nav::coef_mlp &policy, const cvc::nav::training_scene &scene,
@@ -72,6 +102,18 @@ std::vector<double> reach_on_plant(const std::vector<cvc::nav::coef_mlp> &polici
                                    double wheelbase,
                                    const plant_reach_options &o = plant_reach_options(),
                                    std::vector<std::vector<double>> *per_seed = nullptr);
+
+// reach_on_plant's runs with their energy and distance: each policy's mean over the seeds (each
+// field the mean of the seeds'), with `per_seed` (if given) each one's per-seed scores. Reach is
+// what reach_on_plant gives, bit for bit. `logs` (if given) gets every run's plant_log, its agents'
+// runs one after another in (policy, seed) order: data to fit a plant model to (fit_power) on the
+// scenes a policy is scored on.
+std::vector<plant_drive_score>
+score_on_plant(const std::vector<cvc::nav::coef_mlp> &policies,
+               const cvc::nav::training_scene &scene, const vehicle_desc &d, double wheelbase,
+               const plant_reach_options &o = plant_reach_options(),
+               std::vector<std::vector<plant_drive_score>> *per_seed = nullptr,
+               std::vector<std::vector<planar_sample>> *logs = nullptr);
 
 } // namespace physics
 } // namespace cvc

@@ -94,10 +94,12 @@ public:
     bool require_client_auth = false;
   };
 
-  // Phase 5: optional bearer-token authentication. When
-  // expected_token is set, the server rejects any incoming
+  // Phase 5: optional bearer-token authentication (a relay's room
+  // token, ARIADNE_CONFERENCE_ROADMAP §5f). When expected_token is
+  // set, the server rejects, before admitting it, any incoming
   // Channel() RPC whose "authorization" metadata does not equal
-  // "Bearer <expected_token>". When outbound_token is set, the
+  // "Bearer <expected_token>" (compared in constant time, counted
+  // by total_auth_rejected()). When outbound_token is set, the
   // client stamps the same metadata on its ClientContext.
   struct auth_config {
     std::string expected_token;
@@ -164,9 +166,25 @@ public:
   // connection is also forwarded to every OTHER connection, so clients that only connect to this
   // (server) node still see each other's room-tree writes. Off by default — a leaf node applies a
   // received frame to its local shards and never re-sends it. Enable only on a relay/server; a
-  // forwarded frame keeps its origin_node_id, and the origin connection is skipped (no echo).
+  // forwarded frame keeps its origin_node_id, and the origin connection is skipped (no echo). Each
+  // target's peer registry entry applies to the forward exactly as it does to publish().
   void set_relay(bool enable) noexcept { _relay.store(enable, std::memory_order_relaxed); }
   bool relay() const noexcept { return _relay.load(std::memory_order_relaxed); }
+
+  // Relay interest gate (off by default). When on, a frame received from a connection is re-sent
+  // (to the other connections AND across the bridge) only if some local same-cluster shard would
+  // take it: state_cluster_shard::admits() for a mutation, so delegation ops always pass, and
+  // admits_message() for a message. A relay without such a shard forwards everything, as before.
+  // Ingest into the local shards is unchanged; each withheld frame is counted. Meant for a relay
+  // whose clients all enforce the relay's interest, where a withheld frame is one no client would
+  // apply. Thread-safe; a flip applies to the frames received after it.
+  void set_relay_requires_interest(bool on) noexcept {
+    _relay_requires_interest.store(on, std::memory_order_relaxed);
+  }
+  bool relay_requires_interest() const noexcept {
+    return _relay_requires_interest.load(std::memory_order_relaxed);
+  }
+  std::uint64_t total_relay_withheld() const noexcept { return _relay_withheld.load(); }
 
   // Invoked (on a server RPC thread) when a peer's stream ENDS -- it closed or dropped its
   // connection -- with that peer's node id (from its Hello). The same contract as
@@ -189,10 +207,36 @@ public:
   void fan_media(const media_frame &f, const void *exclude = nullptr) override;
   void set_media_sink(media_sink_fn sink) override;
   const char *media_protocol() const noexcept override { return "grpc"; }
+  // Per-receiver egress gate for fan_media (see media_endpoint::set_media_gate). The gate is copied
+  // once per frame and asked once per identified receiver; a receiver that has not sent its Hello
+  // always gets the frame, and publish_media_frame is never gated. {} restores full fan-out.
+  void set_media_gate(media_gate_fn gate) override;
+  // Per-receiver egress shape after the gate (see media_endpoint::set_media_shaper): each variant
+  // is encoded once per fanned frame, whatever number of receivers it serves.
+  void set_media_shaper(media_shape_fn shaper) override;
+
+  // Stall drop (0 = off, the default): skip a receiver whose write in progress started more than
+  // `ms` ago, and one whose stream this frame cannot get within `ms`, instead of queueing behind
+  // it. A healthy buffered write takes microseconds, so one blocked that long means the peer's
+  // flow-control window is full; dropping the frame keeps the publisher's reader thread (and every
+  // other receiver) moving, each frame waiting at most `ms` per such receiver. Media is
+  // loss-tolerant; the existing 3 s write watchdog still closes a peer that stays stuck. Applies to
+  // every media write, own uplink included (the counterpart of the WS transport's backlog drop).
+  // The media gate is asked only once the stream is held, so a dropped frame uses no thumbnail.
+  void set_media_stall_drop(std::chrono::milliseconds ms) noexcept;
+  // True when a write is in flight (`write_started_ns` != 0) and has run longer than `stall_ns`;
+  // `stall_ns` 0 never stalls. Steady-clock nanoseconds, the base of the connection's write clock.
+  static bool media_write_stalled(std::uint64_t write_started_ns, std::uint64_t now_ns,
+                                  std::uint64_t stall_ns) noexcept;
 
   std::uint64_t total_media_sent() const noexcept { return _media_sent.load(); }
   std::uint64_t total_media_received() const noexcept { return _media_recv.load(); }
   std::uint64_t total_media_forwarded() const noexcept { return _media_fwd.load(); }
+  std::uint64_t total_media_gated() const noexcept { return _media_gated.load(); }
+  // Receiver deliveries the shaper sent as a variant, and those it dropped.
+  std::uint64_t total_media_shaped() const noexcept { return _media_shaped.load(); }
+  std::uint64_t total_media_shape_dropped() const noexcept { return _media_shape_dropped.load(); }
+  std::uint64_t total_media_stall_dropped() const noexcept { return _media_stall_dropped.load(); }
 
   // state_transport interface.
   void register_shard(state_cluster_shard *shard) override;
@@ -203,8 +247,32 @@ public:
   std::size_t pump_all() override;
   void flush() override;
   bool fetch_chunk(const std::string &digest, chunk_callback on_chunk) override;
+  // The answering side filters its reply by the requester's peer registry entry (the rule its live
+  // traffic gets; a requester that has not sent its Hello gets everything).
   bool request_snapshot(const std::string &cluster_id, const std::string &path_prefix,
                         snapshot_callback on_entries) override;
+  // Writes `entries` as one unsolicited final SnapshotResponse (request_id 0) to each live
+  // connection whose Hello named `node_id`, unfiltered by the peer registry. Returns the number of
+  // connections written: 0, with nothing encoded, when none matches or `entries` is empty. A write
+  // to a peer that stopped reading is bounded by the write watchdog.
+  std::size_t push_snapshot_to(const std::string &node_id,
+                               const std::vector<snapshot_entry> &entries) override;
+  // See state_transport::set_admission_hold. Applies to the streams this relay accepts.
+  void set_admission_hold(std::chrono::milliseconds max_hold) override;
+  std::size_t release_admissions() override;
+  // Connections whose bootstrap the hold delayed, and those of them it released without a delivery
+  // rule for the peer (the hold ran out, or was turned off).
+  std::uint64_t total_admissions_held() const noexcept { return _admissions_held.load(); }
+  std::uint64_t total_admission_timeouts() const noexcept { return _admission_timeouts.load(); }
+  // See state_transport::set_inbound_gate. Applies to the streams this relay accepts afterwards.
+  void set_inbound_gate(std::shared_ptr<state_inbound_gate> gate) override;
+  std::uint64_t total_inbound_rejected() const override { return _inbound_rejected.load(); }
+  // Streams refused for a missing or wrong bearer token (auth_config).
+  std::uint64_t total_auth_rejected() const noexcept { return _auth_rejected.load(); }
+  std::uint64_t total_devices_verified() const override { return _devices_verified.load(); }
+  std::uint64_t total_device_proofs_refused() const override {
+    return _device_proofs_refused.load();
+  }
 
   // Diagnostics.
   std::size_t shard_count() const;
@@ -255,7 +323,8 @@ public:
   // Register `conn`, then send Hello and (if enabled) the backfill,
   // all while holding conn->write_mu so that a publish() racing on
   // another thread cannot slip a newer mutation in ahead of the
-  // older ones being replayed.
+  // older ones being replayed. Under the admission hold an accepted
+  // relay stream gets only the Hello here (release_admissions).
   void admit_connection(const std::shared_ptr<connection> &conn);
   void unregister_connection(connection *conn);
   // A server-side stream ended: fire the connection-closed handler for its peer (see
@@ -271,17 +340,44 @@ public:
   void increment_recv_messages() noexcept {
     _recv_messages.fetch_add(1, std::memory_order_relaxed);
   }
+  // The inbound gate a newly accepted stream is held to (set_inbound_gate), and a frame it dropped.
+  std::shared_ptr<state_inbound_gate> inbound_gate() const;
+  void note_inbound_rejected() noexcept {
+    _inbound_rejected.fetch_add(1, std::memory_order_relaxed);
+  }
+  void note_auth_rejected() noexcept { _auth_rejected.fetch_add(1, std::memory_order_relaxed); }
+  // Whether `id` is this transport's own node id or a registered shard's (a client never speaks
+  // as the relay).
+  bool is_local_id(const std::string &id) const;
+  // A client answering a relay's Hello nonce (DeviceProof), and a relay checking one.
+  void answer_device_challenge(connection &c, const std::string &nonce,
+                               const std::string &relay_node_id);
+  void on_device_proof(connection &c, const std::string &public_key, const std::string &signature);
 
 private:
   // Encode `m` to a Frame and write it to every live connection except `exclude` (a connection*;
-  // nullptr = all). Returns the number written. Backs publish_media_frame and fan_media.
-  std::size_t write_media(const media_frame &m, const void *exclude);
+  // nullptr = all), consulting the media gate when `gated`. Returns the number written. Backs
+  // publish_media_frame (ungated) and fan_media (gated).
+  std::size_t write_media(const media_frame &m, const void *exclude, bool gated);
+  // The relay interest gate for one received frame, given the local same-cluster shards that just
+  // ingested it (see set_relay_requires_interest).
+  bool relay_admits(const state_mutation &m,
+                    const std::vector<state_cluster_shard *> &shards) const;
+  bool relay_admits(const state_message &m, const std::vector<state_cluster_shard *> &shards) const;
   void send_hello_locked(connection &c);
-  void send_backfill_locked(connection &c, const std::vector<state_cluster_shard *> &shards);
+  // Replay each shard's journaled local writes (backfill on connect); with `view`, only the ones
+  // that rule delivers.
+  void send_backfill_locked(connection &c, const std::vector<state_cluster_shard *> &shards,
+                            const state_peer_registry::delivery_view *view);
   // Relay-only: push the full CURRENT snapshot of each shard to a newly admitted connection, so a
   // late joiner sees peers already present (the room tree is all remote-origin, so backfill carries
-  // nothing).
-  void send_snapshot_locked(connection &c, const std::vector<state_cluster_shard *> &shards);
+  // nothing). With `view`, only what that rule delivers.
+  void send_snapshot_locked(connection &c, const std::vector<state_cluster_shard *> &shards,
+                            const state_peer_registry::delivery_view *view);
+  // Bootstrap a held connection (backfill, then the snapshot through `view`) and let live traffic
+  // reach it. False when it was no longer held.
+  bool release_locked(connection &c, const std::vector<state_cluster_shard *> &shards,
+                      const state_peer_registry::delivery_view *view);
 
   struct impl;
   std::unique_ptr<impl> _impl;
@@ -302,6 +398,8 @@ private:
 
   std::atomic<bool> _backfill_on_connect{true};
   std::atomic<bool> _relay{false};
+  std::atomic<bool> _relay_requires_interest{false};
+  std::atomic<std::uint64_t> _relay_withheld{0};
   connection_closed_fn _on_conn_closed; // set before start(); read on RPC threads
 
   std::atomic<std::uint64_t> _backfilled{0};
@@ -316,6 +414,25 @@ private:
   std::atomic<std::uint64_t> _media_sent{0};
   std::atomic<std::uint64_t> _media_recv{0};
   std::atomic<std::uint64_t> _media_fwd{0};
+  // The media gate, swapped whole under _media_gate_mu and copied out once per frame: a reader
+  // thread keeps calling its own copy while another thread replaces the slot.
+  mutable std::mutex _media_gate_mu;
+  std::shared_ptr<const media_gate_fn> _media_gate;
+  std::shared_ptr<const media_shape_fn> _media_shaper; // under _media_gate_mu, like the gate
+  std::atomic<std::uint64_t> _media_shaped{0}, _media_shape_dropped{0};
+  std::atomic<std::uint64_t> _media_gated{0};
+  std::atomic<std::uint64_t> _media_stall_ns{0};
+  std::atomic<std::uint64_t> _media_stall_dropped{0};
+  std::atomic<std::int64_t> _admission_hold_ns{0}; // 0 = admit at once
+  std::atomic<std::uint64_t> _admissions_held{0};
+  std::atomic<std::uint64_t> _admission_timeouts{0};
+  // The inbound gate new accepted streams copy (each keeps its own, so a reader never locks this).
+  mutable std::mutex _inbound_gate_mu;
+  std::shared_ptr<state_inbound_gate> _inbound_gate;
+  std::atomic<std::uint64_t> _inbound_rejected{0};
+  std::atomic<std::uint64_t> _auth_rejected{0};
+  std::atomic<std::uint64_t> _devices_verified{0};
+  std::atomic<std::uint64_t> _device_proofs_refused{0};
 
   state_blob_store *_blob_store = nullptr;
 

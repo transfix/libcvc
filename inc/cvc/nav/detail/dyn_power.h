@@ -31,11 +31,22 @@
 // Every term is linear in its coefficient, so cvc::physics::fit_power fits them to a plant log's
 // per-tick energy by least squares (physics/plant_log.h). Off (all coefficients 0) the step costs
 // nothing. Header-only and allocation-free, like detail/dyn_bike.h.
+//
+// The tire term (power_step_tire): c_lat sees only cornering's lateral acceleration, and on a
+// dense scene tire slip is about half of what the engine supplies (docs/NAV_TRAINING.md, "Energy
+// in the loss"). So the model can also price what the dynamic vehicle's own tires lose to slip,
+// dyn_tire_power at the step's end state (vx, vy, r, delta, a):
+//
+//   E += dt (tire_lat P_lat + tire_lon P_lon)
+//
+// P_lat is each axle's lateral force times its slip velocity u sin(alpha), P_lon its drive or
+// brake force times its slip velocity. fit_power calibrates them to the ledger's `tire` term.
 
 #ifndef __CVC_NAV_DETAIL_DYN_POWER_H__
 #define __CVC_NAV_DETAIL_DYN_POWER_H__
 
 #include <cmath>
+#include <cvc/nav/detail/dyn_bike.h> // dyn_bike_params, dyn_plant's tires and the dual
 
 namespace cvc {
 namespace nav {
@@ -49,12 +60,16 @@ struct power_params {
   float c_v = 0.0f;    // source power per unit speed (kg length / s^2)
   float c_v3 = 0.0f;   // per unit speed cubed (kg / length): drag's share
   float c_lat = 0.0f;  // cornering: per m (vx r)^2 |vx| (s^2 / length)
+  // Source energy per unit of the dynamic vehicle's own tire dissipation (dyn_tire_power), lateral
+  // and longitudinal: power_step_tire. Dimensionless.
+  float tire_lat = 0.0f, tire_lon = 0.0f;
   float w = 0.0f;      // the parts' smoothing width, in power; <= 0: 1e-3 of the full power
   float v_eps = 0.0f;  // |vx|'s smoothing width (length / s); <= 0: 1e-3 length / s
   bool on() const {
     return k_pos != 0.0f || k_neg != 0.0f || p_idle != 0.0f || c_v != 0.0f || c_v3 != 0.0f ||
-           c_lat != 0.0f;
+           c_lat != 0.0f || has_tire();
   }
+  bool has_tire() const { return tire_lat != 0.0f || tire_lon != 0.0f; }
 };
 
 // The source power at full drive force a_max and speed vmax: the scale the trainer normalizes the
@@ -102,6 +117,85 @@ inline float power_step(const power_params &p, float vx, float a, float r, float
   dE_dr = dt * 2.0f * p.c_lat * p.m * vx * vx * r * speed;
   return dt * (p.k_pos * Ppos + p.k_neg * Pneg + p.p_idle + p.c_v * speed +
                p.c_v3 * speed * speed * speed + lat * speed);
+}
+
+// A smooth magnitude, sqrt(x^2 + w^2) - w: 0 at 0, |x| - w far from it.
+template <class S> CVC_HD inline S tire_abs(S x, S w) { return s_sqrt(x * x + w * w) - w; }
+
+// One axle's longitudinal slip power: |F| kappa u. kappa is the slip ratio at which the axle's
+// Pacejka curve, D = cap and the lateral B and C (a longitudinal stiffness like the lateral's),
+// gives F: kappa = tan(asin(|F| / cap) / C) / B, with |F| / cap held smoothly below 0.995 (where
+// asin is still finite and kappa is about 0.3 at B = 12). u is the speed with the slip angles'
+// floor, so a thrust at a standstill still slips.
+template <class S> CVC_HD inline S dyn_tire_lon(S F, S cap, S B, S C, S u) {
+  const S f = tire_abs(F, S(1e-3) * cap);
+  const S x = dyn_sat(f / cap, S(0.995));
+  const S as = s_atan2(x, s_sqrt(S(1) - x * x)); // asin(x)
+  const S kappa = s_tan(as / C) / B;
+  return f * kappa * u;
+}
+
+// The dynamic vehicle's tire dissipation at a state (normalized power): what dyn_plant's tires lose
+// to slip, from the same loads, force split, friction ellipse and Pacejka curves it integrates.
+// P_lat sums each axle's lateral force times the sideways slip velocity its slip angle implies,
+// u sin(alpha): Pacejka's force has alpha's sign (C < 2), so each product is >= 0 and smooth
+// everywhere, a crawl at full lock included (where the slip angles' speed floor makes the
+// geometric sideways velocity disagree with the force's sign). P_lon sums each axle's
+// dyn_tire_lon. `w` is unused by the lateral part, kept for the call's shape. The state is
+// dyn_state's: (vx, vy) at the centre of gravity, r, the road-wheel angle delta and the drive force
+// per unit mass a.
+template <class S>
+CVC_HD inline void dyn_tire_power(const dyn_bike_params &p, S vx, S vy, S r, S delta, S a, S w,
+                                  S &P_lat, S &P_lon) {
+  const S zero = S(0), one = S(1);
+  const S m = S(p.m), lf = S(p.lf), lr = S(p.lr), h = S(p.h), g = S(p.g), mu = S(p.mu);
+  const S Cp = S(p.C), L = lf + lr, Bf = S(p.B_f), Br = S(p.B_r);
+  const S fz_floor = S(p.fz_min) * m * g;
+  S Fzf = m * (g * lr - a * h) / L, Fzr = m * (g * lf + a * h) / L;
+  if (s_val(Fzf) < s_val(fz_floor))
+    Fzf = fz_floor;
+  if (s_val(Fzr) < s_val(fz_floor))
+    Fzr = fz_floor;
+  const S cap_f = mu * Fzf, cap_r = mu * Fzr;
+  const S F_drive = m * a;
+  const S share = S(s_val(a) >= s_val(zero) ? p.front_drive : p.front_brake);
+  const S Fxf = dyn_sat(F_drive * share, cap_f), Fxr = dyn_sat(F_drive * (one - share), cap_r);
+  const S Dyf = dyn_lateral_cap(Fxf, cap_f), Dyr = dyn_lateral_cap(Fxr, cap_r);
+  const S u = s_sqrt(vx * vx + S(p.eps) * S(p.eps)), sg = vx / u;
+  const S af = sg * delta - s_atan2(vy + lf * r, u), ar = -s_atan2(vy - lr * r, u);
+  const S Fyf = dyn_lateral(af, Bf, Cp, Dyf), Fyr = dyn_lateral(ar, Br, Cp, Dyr);
+  P_lat = Fyf * u * s_sin(af) + Fyr * u * s_sin(ar);
+  (void)w;
+  P_lon = dyn_tire_lon(Fxf, cap_f, Bf, Cp, u) + dyn_tire_lon(Fxr, cap_r, Br, Cp, u);
+}
+
+// power_step with the tire term (p.tire_lat, p.tire_lon) of `dyn`'s vehicle at the step's end
+// state, and the energy's derivatives in (vx, vy, r, delta, a), the tire term's by forward-mode
+// duals. Without a tire term it is power_step, with zero derivatives in vy and delta.
+inline float power_step_tire(const power_params &p, const dyn_bike_params &dyn, float vx, float vy,
+                             float r, float delta, float a, float dt, float w_default, float g[5]) {
+  float dvx, da, dr;
+  float E = power_step(p, vx, a, r, dt, w_default, dvx, da, dr);
+  g[0] = dvx;
+  g[1] = 0.0f;
+  g[2] = dr;
+  g[3] = 0.0f;
+  g[4] = da;
+  if (!p.has_tire())
+    return E;
+  const float w = p.w > 0.0f ? p.w : w_default;
+  const float in[5] = {vx, vy, r, delta, a};
+  for (int k = 0; k < 5; ++k) {
+    dual<float> x[5];
+    for (int j = 0; j < 5; ++j)
+      x[j] = dual<float>(in[j], j == k ? 1.0f : 0.0f);
+    dual<float> pl, po;
+    dyn_tire_power(dyn, x[0], x[1], x[2], x[3], x[4], dual<float>(w), pl, po);
+    g[k] += dt * (p.tire_lat * pl.d + p.tire_lon * po.d);
+    if (k == 0)
+      E += dt * (p.tire_lat * pl.v + p.tire_lon * po.v);
+  }
+  return E;
 }
 
 } // namespace diff

@@ -134,8 +134,23 @@ The plan, in order:
    - Done: `diff::power_step` (`detail/dyn_power.h`), fitted to the ledger by
      `cvc::physics::fit_power`, and `train_config::w_energy` in the dynamic rollout's loss
      (docs/NAV_TRAINING.md, "Energy in the loss").
-   - Open: the gate on Jolt (a policy trained with the energy term draws less per km for what it
-     gives up in reach, over paired seeds); the four-wheel plant's rollout; the torch twin.
+   - The gate on Jolt (a policy trained with the energy term draws less per km for what it
+     gives up in reach, over paired seeds) is measured and not met (docs/NAV_TRAINING.md,
+     "Energy in the loss"). The mean-power term teaches the policy to stop driving. Priced
+     against progress (`train_config::energy_ref`), it keeps driving and loses far less reach,
+     but still draws no less per km on Jolt.
+   - Why: on the gate's dense city the model misses 31-53% of the draw, mostly tire slip. The
+     priced policy brakes less and drives slower, which the model counts, but slips its tires
+     more, which it does not.
+   - The tire term (the dynamic model's own slip dissipation, calibrated to the ledger's
+     `tire`, fitted on the dense city too) cuts the model's miss to 4-13%. The gate is still not
+     met: the trained policies' tire slip on Jolt rises whatever the model predicts, most likely
+     from contacts and stalls, which the planar rollout cannot represent.
+   - ES on Jolt's measured Wh/km at held reach (`es_energy_at_held_reach`), over every weight:
+     +1.6 points of reach [+0.1, +3.1] and -0.13 Wh/km [-0.51, +0.21] on the held-out seeds. Both
+     move the right way for the first time, but the energy saving is still inside its CI.
+   - Open: that ES with more validation; then contact, wheel spin and yielding (below); the
+     four-wheel plant's rollout; the torch twin.
 
 ### P8a's vehicle fitted to Jolt (2026-10-20)
 
@@ -506,7 +521,49 @@ These are the targets a plant fitted to Jolt has to beat, bin by bin.
       within +1.4% (Humvee) and -1.4% (RoboRacer). The swerve alone misses by +9.0% and +17.7%.
     - The trainer's energy term passes its gradcheck. Over 60 steps it lowers the energy term
       0.970 -> 0.937, against 0.962 without it.
-    - Next: the Jolt gate, a policy trained with it against one without over paired seeds.
+    - The Jolt gate (`NavPlantConvergence.EnergyTrainedPolicyOnJolt`, 20 paired seeds,
+      `cvc::physics::score_on_plant` for reach, energy and distance) is not met:
+      - At lr 5e-5 and 150 steps the term changes nothing: +0.1 points of reach and
+        -0.03 Wh/km, both CIs across 0.
+      - At lr 2e-4 and 300 steps, w_energy 1 to 30 cuts the distance driven 2-8x. Reach falls
+        24-33 points against the same training without the term, and Wh/km does not fall
+        outside its CI.
+      - Pricing mean power over the window makes standing still the cheapest policy.
+    - Priced against progress (`train_config::energy_ref`, each step's energy above what its
+      progress covers at a reference Wh/km, hinged at 0; gradient-checked):
+      - At 4-16 Wh/km and w_energy 3-10, the reach loss shrinks to 5-14 points (from 24-33), and
+        the policy drives 1540-1800 m a seed (from 306-1095).
+      - Wh/km still does not fall: +0.05 to +0.35 against the policy trained without it, every
+        CI across 0.
+    - The model on the trained policies' own Jolt runs (`plant_reach_options::predict_energy`,
+      and each run's summed ledger in `plant_drive_score::ledger`):
+      - It under-predicts every policy on the gate's dense city by 31-53%, against ±1.4% on the
+        plant-log scenes it was fitted to.
+      - On the priced policy it predicts a saving of -0.30 Wh/km [-0.38, -0.24]; Jolt measures
+        +0.05.
+      - The ledger: tire slip is about half the engine's work. The priced policy's brakes fall
+        0.63 -> 0.34 Wh/km and its aero 0.17 -> 0.02, but its tire slip rises 1.34 -> 1.67, and
+        the model sees only the lateral part of slip, through c_lat.
+    - The tire term (`diff::dyn_tire_power`, `power_params::tire_lat` / `tire_lon`; gradient-
+      checked; calibrated to the ledger's per-tick `tire` by `fit_power`):
+      - Fitted with 8 seeds of the gate's own dense city, the model misses the gate's runs by
+        4-13% (from 31-40%). Its tire term explains the ledger's per-tick tire energy at r² 0.25.
+      - Trained against it, priced at 8 or 16 Wh/km: -9.1 and -5.0 points of reach, and -0.02
+        and +0.17 Wh/km on Jolt, both CIs across 0. The model predicted -0.26 and -0.27.
+      - The trained policies' tire slip on Jolt rises 1.34 -> 1.64-1.79 Wh/km in every setting.
+        That slip is not the planar vehicle's; most likely contacts and stalls.
+    - ES on Jolt's measured Wh/km at held reach (`es_options::fitness`,
+      `es_energy_at_held_reach`; 30 iterations x 12 pairs from the P8b gate's policy):
+      - Over every weight: reach +1.6 points [+0.1, +3.1], Wh/km -0.13 [-0.51, +0.21]. Tire
+        slip falls 2.10 -> 1.99. The first policy to move both the right way; energy still
+        inside its CI.
+      - The basin alone: +0.2 [-1.6, +1.9] and +0.07 [-0.33, +0.52], nothing.
+    - Next: more validation seeds and iterations for that ES; and the plan Joe set on
+      2026-10-24:
+      1. yielding in deployment (intent-aware, `sim_world::set_yield`, intents through an
+         `intent_channel`, over the DBG radios), gated on demo3-csma;
+      2. contact and wheel spin in the training model;
+      3. learned awareness of the other vehicles and their intents.
 - **P9, the plant by default (2026-10-18, Joe: "can't we use the actual jolt vehicle dimensions
   and physics?").**
   - What moved the agents: no default path used Jolt. Every default was the kinematic bicycle

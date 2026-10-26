@@ -146,8 +146,11 @@ planar_sample plant_log::sample(int i) const {
 void plant_log::start() {
   const int n = _plant.size();
   _runs.assign(static_cast<std::size_t>(n), {});
-  for (int i = 0; i < n; ++i)
+  _tire.assign(static_cast<std::size_t>(n), 0.0);
+  for (int i = 0; i < n; ++i) {
     _runs[i].push_back(sample(i));
+    _tire[i] = _plant.physics_world().vehicle_state(_plant.vehicle(i)).energy.tire;
+  }
 }
 
 void plant_log::record() {
@@ -167,6 +170,9 @@ void plant_log::record() {
     s.drive = std::min(std::max(s.accel_cmd, -d.max_decel), d.max_accel);
     s.contacts = _plant.static_contacts_step(i);
     s.energy = _plant.energy_step(i);
+    const double tire = _plant.physics_world().vehicle_state(_plant.vehicle(i)).energy.tire;
+    s.tire = tire - _tire[i];
+    _tire[i] = tire;
     // The centre of mass's acceleration over the tick, across the mean heading.
     const double c0 = std::cos(prev.psi), s0 = std::sin(prev.psi);
     const double c1 = std::cos(s.psi), s1 = std::sin(s.psi);
@@ -401,17 +407,21 @@ dyn_bike_fit fit_dyn_bike(const std::vector<std::vector<planar_sample>> &runs, d
 
 namespace {
 
-// The power model's six features at each tick of `runs`, in SI, each already times dt, so a
-// tick's energy is sum_j theta_j x_j with theta = (k_pos, k_neg, p_idle, c_v, c_v3, c_lat): the
-// smooth positive and negative parts of the drive power m a vx, the tick itself, the smooth speed,
-// its cube, and cornering's m (vx r)^2 |vx|. `a` is the drive force per unit mass the dynamic
-// vehicle `dyn` needs to make the motion the plant made: the measured acceleration less its
-// resistances (drag, rolling and grade), as diff::dyn_plant integrates vx' = a + F_res / m.
-constexpr int kPowerTerms = 6;
+// The power model's features at each tick of `runs`, in SI, each already times dt, so a tick's
+// energy is sum_j theta_j x_j with theta = (k_pos, k_neg, p_idle, c_v, c_v3, c_lat, tire_lat,
+// tire_lon): the smooth positive and negative parts of the drive power m a vx, the tick itself,
+// the smooth speed, its cube, cornering's m (vx r)^2 |vx|, and the dynamic vehicle's own lateral
+// and longitudinal tire dissipation at the tick's state (diff::dyn_tire_power). `a` is the drive
+// force per unit mass the dynamic vehicle `dyn` needs to make the motion the plant made: the
+// measured acceleration less its resistances (drag, rolling and grade), as diff::dyn_plant
+// integrates vx' = a + F_res / m.
+constexpr int kPowerTerms = 8;
+constexpr int kTireLat = 6, kTireLon = 7;
 
 struct power_ticks {
   std::vector<std::array<double, kPowerTerms>> x;
   std::vector<double> y;           // the ledger's energy, J
+  std::vector<double> tire;        // the ledger's tire term, J
   std::vector<std::size_t> run_of; // each tick's run
   std::vector<power_run> runs;     // measured_J, distance_m and seconds filled
   double width = 0.0;              // W, the smooth parts' width
@@ -419,49 +429,69 @@ struct power_ticks {
 
 constexpr double kPowerSpeedEps = 1e-3; // m/s: the smooth speed's width (diff::power_params)
 
-power_ticks power_features(const std::vector<std::vector<planar_sample>> &runs, double dt,
-                           const vehicle_desc &d, const cvc::nav::dyn_bike_si *dyn, double width) {
+// Over several sets of runs, each logged at its own tick dts[k].
+power_ticks power_features(const std::vector<power_runs> &sets, const vehicle_desc &d,
+                           const cvc::nav::dyn_bike_si *dyn, double width) {
   const cvc::nav::dyn_bike_si si = dyn ? *dyn : nav_plant::dyn_bike_si_of(d);
+  const cvc::nav::diff::dyn_bike_params tp =
+      cvc::nav::dyn_bike_params_of(si, cvc::world_units::normalized_frame{}); // in SI
   power_ticks t;
   double vmax = 1.0;
-  for (const auto &run : runs)
-    for (const planar_sample &s : run)
-      vmax = std::max(vmax, std::fabs(s.vx));
+  std::size_t nruns = 0;
+  for (const power_runs &set : sets) {
+    nruns += set.runs.size();
+    for (const auto &run : set.runs)
+      for (const planar_sample &s : run)
+        vmax = std::max(vmax, std::fabs(s.vx));
+  }
   // 1e-3 of the full positive drive power, as the trainer's default (diff::power_full).
   t.width = width > 0.0 ? width : 1e-3 * si.mass * d.max_accel * vmax;
-  t.runs.resize(runs.size());
-  for (std::size_t r = 0; r < runs.size(); ++r) {
-    const std::vector<planar_sample> &run = runs[r];
-    for (std::size_t k = 1; k < run.size(); ++k) {
-      const planar_sample &s0 = run[k - 1], &s = run[k];
-      const double v = 0.5 * (s0.vx + s.vx);
-      const double sg = v > 0.0 ? 1.0 : (v < 0.0 ? -1.0 : 0.0);
-      const double f_res = -si.drag * v * std::fabs(v) -
-                           si.rolling_resistance * si.mass * si.gravity * sg -
-                           si.mass * si.gravity * 0.5 * (s0.grade + s.grade);
-      const double a = s.a_lon - f_res / si.mass;
-      const double P = si.mass * a * s.vx;
-      float dd;
-      const double pos =
-          cvc::nav::diff::power_softplus(static_cast<float>(P), static_cast<float>(t.width), dd);
-      const double neg =
-          cvc::nav::diff::power_softplus(static_cast<float>(-P), static_cast<float>(t.width), dd);
-      const double speed = std::sqrt(s.vx * s.vx + kPowerSpeedEps * kPowerSpeedEps);
-      const double lat = si.mass * s.vx * s.vx * s.r * s.r * speed;
-      t.x.push_back({pos * dt, neg * dt, dt, speed * dt, speed * speed * speed * dt, lat * dt});
-      t.y.push_back(s.energy);
-      t.run_of.push_back(r);
-      t.runs[r].measured_J += s.energy;
-      t.runs[r].distance_m += std::hypot(s.x - s0.x, s.y - s0.y);
-      t.runs[r].seconds += dt;
+  t.runs.resize(nruns);
+  std::size_t r = 0;
+  for (const power_runs &set : sets)
+    for (std::size_t q = 0; q < set.runs.size(); ++q, ++r) {
+      const double dt = set.dt;
+      const std::vector<planar_sample> &run = set.runs[q];
+      for (std::size_t k = 1; k < run.size(); ++k) {
+        const planar_sample &s0 = run[k - 1], &s = run[k];
+        const double v = 0.5 * (s0.vx + s.vx);
+        const double sg = v > 0.0 ? 1.0 : (v < 0.0 ? -1.0 : 0.0);
+        const double f_res = -si.drag * v * std::fabs(v) -
+                             si.rolling_resistance * si.mass * si.gravity * sg -
+                             si.mass * si.gravity * 0.5 * (s0.grade + s.grade);
+        const double a = s.a_lon - f_res / si.mass;
+        const double P = si.mass * a * s.vx;
+        float dd;
+        const double pos =
+            cvc::nav::diff::power_softplus(static_cast<float>(P), static_cast<float>(t.width), dd);
+        const double neg =
+            cvc::nav::diff::power_softplus(static_cast<float>(-P), static_cast<float>(t.width), dd);
+        const double speed = std::sqrt(s.vx * s.vx + kPowerSpeedEps * kPowerSpeedEps);
+        const double lat = si.mass * s.vx * s.vx * s.r * s.r * speed;
+        double t_lat = 0.0, t_lon = 0.0;
+        cvc::nav::diff::dyn_tire_power(tp, s.vx, s.vy, s.r, s.steer, a, t.width, t_lat, t_lon);
+        t.x.push_back({pos * dt, neg * dt, dt, speed * dt, speed * speed * speed * dt, lat * dt,
+                       t_lat * dt, t_lon * dt});
+        t.y.push_back(s.energy);
+        t.tire.push_back(s.tire);
+        t.run_of.push_back(r);
+        t.runs[r].measured_J += s.energy;
+        t.runs[r].distance_m += std::hypot(s.x - s0.x, s.y - s0.y);
+        t.runs[r].seconds += dt;
+      }
     }
-  }
   return t;
+}
+
+power_ticks power_features(const std::vector<std::vector<planar_sample>> &runs, double dt,
+                           const vehicle_desc &d, const cvc::nav::dyn_bike_si *dyn, double width) {
+  return power_features(std::vector<power_runs>{{runs, dt}}, d, dyn, width);
 }
 
 void report_power(power_ticks &t, power_fit &f) {
   const auto &si = f.si;
-  const double th[kPowerTerms] = {si.k_pos, si.k_neg, si.p_idle, si.c_v, si.c_v3, si.c_lat};
+  const double th[kPowerTerms] = {si.k_pos, si.k_neg, si.p_idle,   si.c_v,
+                                  si.c_v3,  si.c_lat, si.tire_lat, si.tire_lon};
   double ybar = 0.0;
   for (double y : t.y)
     ybar += y;
@@ -494,7 +524,9 @@ void report_power(power_ticks &t, power_fit &f) {
 
 // Least squares over the coefficients in `free` (the others held at 0), by the normal equations
 // on unit-norm columns. Returns false if they are singular.
-bool power_lsq(const power_ticks &t, const bool free[kPowerTerms], double th[kPowerTerms]) {
+bool power_lsq(const power_ticks &t, const bool free[kPowerTerms], double th[kPowerTerms],
+               const std::vector<double> *target = nullptr) {
+  const std::vector<double> &y = target ? *target : t.y;
   int idx[kPowerTerms], n = 0;
   for (int j = 0; j < kPowerTerms; ++j)
     if (free[j])
@@ -514,7 +546,7 @@ bool power_lsq(const power_ticks &t, const bool free[kPowerTerms], double th[kPo
       const double xa = t.x[i][idx[a]] * scale[a];
       for (int b = 0; b < n; ++b)
         A[a][b] += xa * t.x[i][idx[b]] * scale[b];
-      A[a][n] += xa * t.y[i];
+      A[a][n] += xa * y[i];
     }
   for (int c = 0; c < n; ++c) { // Gauss-Jordan with partial pivoting
     int piv = c;
@@ -544,38 +576,88 @@ bool power_lsq(const power_ticks &t, const bool free[kPowerTerms], double th[kPo
 
 power_fit fit_power(const std::vector<std::vector<planar_sample>> &runs, double dt,
                     const vehicle_desc &d, const cvc::nav::dyn_bike_si *dyn) {
-  power_ticks t = power_features(runs, dt, d, dyn, 0.0);
-  // Non-negative least squares by every subset of the coefficients (k_neg <= 0, the others >= 0):
-  // the feasible solution with the least squared error.
+  return fit_power(std::vector<power_runs>{{runs, dt}}, d, dyn);
+}
+
+power_fit fit_power(const std::vector<power_runs> &sets, const vehicle_desc &d,
+                    const cvc::nav::dyn_bike_si *dyn) {
+  power_ticks t = power_features(sets, d, dyn, 0.0);
+  power_fit f;
+  // 1. The tire term, calibrated to the ledger's tire: non-negative least squares of the ticks'
+  // `tire` on the lateral and longitudinal dissipation, by every subset of the two.
+  double tire_ss = 0.0, cal[2] = {0.0, 0.0};
+  for (double y : t.tire)
+    tire_ss += y * y;
+  if (tire_ss > 0.0) {
+    double best_sse = std::numeric_limits<double>::infinity();
+    for (int mask = 1; mask < 4; ++mask) {
+      bool free[kPowerTerms] = {};
+      free[kTireLat] = mask & 1;
+      free[kTireLon] = (mask >> 1) & 1;
+      double th[kPowerTerms];
+      if (!power_lsq(t, free, th, &t.tire) || th[kTireLat] < 0.0 || th[kTireLon] < 0.0)
+        continue;
+      double sse = 0.0;
+      for (std::size_t i = 0; i < t.tire.size(); ++i) {
+        const double e =
+            th[kTireLat] * t.x[i][kTireLat] + th[kTireLon] * t.x[i][kTireLon] - t.tire[i];
+        sse += e * e;
+      }
+      if (sse < best_sse) {
+        best_sse = sse;
+        cal[0] = th[kTireLat];
+        cal[1] = th[kTireLon];
+      }
+    }
+    double ybar = 0.0;
+    for (double y : t.tire)
+      ybar += y / static_cast<double>(t.tire.size());
+    double ss_tot = 0.0;
+    for (double y : t.tire)
+      ss_tot += (y - ybar) * (y - ybar);
+    f.tire_r2 = ss_tot > 0.0 && std::isfinite(best_sse) ? 1.0 - best_sse / ss_tot : 0.0;
+  }
+  f.tire_cal_lat = cal[0];
+  f.tire_cal_lon = cal[1];
+  // 2. The energy: the calibrated tire dissipation is one column (kTireLat; kTireLon held at 0),
+  // and non-negative least squares by every subset of the seven (k_neg <= 0, the others >= 0)
+  // keeps the feasible solution with the least squared error.
+  power_ticks e = t;
+  for (auto &x : e.x) {
+    x[kTireLat] = cal[0] * x[kTireLat] + cal[1] * x[kTireLon];
+    x[kTireLon] = 0.0;
+  }
   double best[kPowerTerms] = {}, best_sse = std::numeric_limits<double>::infinity();
-  for (int mask = 1; mask < (1 << kPowerTerms); ++mask) {
-    bool free[kPowerTerms];
-    for (int j = 0; j < kPowerTerms; ++j)
+  for (int mask = 1; mask < (1 << (kPowerTerms - 1)); ++mask) {
+    bool free[kPowerTerms] = {};
+    for (int j = 0; j < kPowerTerms - 1; ++j)
       free[j] = (mask >> j) & 1;
     double th[kPowerTerms];
-    if (!power_lsq(t, free, th))
+    if (!power_lsq(e, free, th))
       continue;
-    if (th[0] < 0.0 || th[1] > 0.0 || th[2] < 0.0 || th[3] < 0.0 || th[4] < 0.0 || th[5] < 0.0)
+    if (th[0] < 0.0 || th[1] > 0.0 || th[2] < 0.0 || th[3] < 0.0 || th[4] < 0.0 || th[5] < 0.0 ||
+        th[kTireLat] < 0.0)
       continue;
     double sse = 0.0;
-    for (std::size_t i = 0; i < t.y.size(); ++i) {
-      double e = -t.y[i];
+    for (std::size_t i = 0; i < e.y.size(); ++i) {
+      double r = -e.y[i];
       for (int j = 0; j < kPowerTerms; ++j)
-        e += th[j] * t.x[i][j];
-      sse += e * e;
+        r += th[j] * e.x[i][j];
+      sse += r * r;
     }
     if (sse < best_sse) {
       best_sse = sse;
       std::copy(th, th + kPowerTerms, best);
     }
   }
-  power_fit f;
   f.si.k_pos = best[0];
   f.si.k_neg = best[1];
   f.si.p_idle = best[2];
   f.si.c_v = best[3];
   f.si.c_v3 = best[4];
   f.si.c_lat = best[5];
+  f.si.tire_lat = best[kTireLat] * cal[0];
+  f.si.tire_lon = best[kTireLat] * cal[1];
   f.si.width = t.width;
   report_power(t, f);
   return f;

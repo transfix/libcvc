@@ -24,6 +24,8 @@ void avatar_sim::step(const avatar_intent &in, double dt) {
   // double arithmetic (vec3 + and *), no trig, so it is bit-reproducible.
   _state.linear_velocity = in.move;
   _state.position = _state.position + in.move * dt;
+  // Facing: a rotation about +Z (Z-up). Trig here is fine: reconcile compares positions only.
+  _state.rotation = cvc::physics::quat{std::cos(0.5 * in.yaw), 0.0, 0.0, std::sin(0.5 * in.yaw)};
   _state.active = true;
 }
 
@@ -34,6 +36,8 @@ void predicted_avatar::predict(std::uint64_t tick, const avatar_intent &in, doub
   e.in = in;
   e.predicted = _sim.state();
   _log.push_back(e);
+  if (_log.size() > kMaxLog)
+    _log.pop_front();
 }
 
 bool predicted_avatar::reconcile(const cvc::physics::body_state &authoritative,

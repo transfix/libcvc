@@ -21,7 +21,10 @@ What is proved here, beyond "the names exist":
     callback raises comes back out of the call that started it, type intact;
   * C++ failures map to the natural Python exception: ValueError for bad
     arguments, IndexError for a bad rung, OSError for HDF5/store failures,
-    RuntimeError for a SHA-256 mismatch, TypeError for a non-bytes blob.
+    RuntimeError for a SHA-256 mismatch, TypeError for a non-bytes blob;
+  * the app outlives what borrows it: readers, writers and the compute pool
+    garbage-collected together with their app (as at interpreter exit) are
+    destroyed while it is still alive.
 
 Runs under pytest or as a plain script (ctest: pycvc_lod).
 """
@@ -408,7 +411,7 @@ def test_store_round_trip_through_bytes():
     # Every reader -- including open_verified's, a factory over a MOVE-ONLY type
     # -- is owned by Python and keeps the app it borrows alive.
     for r in readers:
-        assert type(r) is pycvc.scene_reader and r.thisown and r._pycvc_app is app
+        assert type(r) is pycvc.scene_reader and r.thisown and r._pycvc_app is app.this
     for r in readers:
         idx = {e.name: e for e in r.index()}
         assert len(idx) == len(tiles) + 1 and idx["albedo"].kind == "I" and idx["tile0"].kind == "M"
@@ -580,8 +583,32 @@ def test_thread_pool_handles():
     assert p.concurrency() == 4
     assert pycvc.thread_pool(1).concurrency() == 2  # one worker + the caller
     cp = app.compute_pool()
-    assert cp.concurrency() >= 1 and cp._pycvc_app is app
+    assert cp.concurrency() >= 1 and cp._pycvc_app is app.this
     print("  ok: thread_pool(n).concurrency() == n + 1; app.compute_pool()")
+
+
+def test_app_outlives_its_borrowers_in_one_collection():
+    """Readers, writers and the compute pool hold their app by C++ reference. When the app proxy
+    and its borrowers are garbage in one collection -- at interpreter exit, a module-level app and
+    anything left in a reference cycle (test_store_exceptions leaves its frame in one, through the
+    tracebacks it keeps) -- the collector may clear the app proxy first. What a borrower stashes
+    must keep the app alive anyway: the proxy's untracked `this`, not the proxy. When the stash
+    was the proxy, this collection freed the app under ~scene_reader (an access violation at exit
+    on Windows, after "pycvc LOD tests: OK")."""
+    for _ in range(3):
+        a = pycvc.make_app()
+        garbage = {"app": a, "pool": a.compute_pool()}
+        if pycvc.HAVE_LOD_STORE:
+            garbage["writer"] = w = pycvc.scene_writer(a)
+            garbage["reader"] = pycvc.scene_reader(a, w.to_blob())
+            del w
+        for name, b in garbage.items():
+            if name != "app":
+                assert b._pycvc_app is a.this and not gc.is_tracked(b._pycvc_app), name
+        garbage["self"] = garbage
+        del a, garbage, b
+        gc.collect()
+    print("  ok: the app outlives its readers / writers / pool when collected with them")
 
 
 if __name__ == "__main__":

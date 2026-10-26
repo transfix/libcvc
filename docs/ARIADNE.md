@@ -161,6 +161,36 @@ is wall-capped at `kResidentStepSeconds = 0.05`
 ([`ariadne.cpp:1497`](../src/cvc/ariadne/ariadne.cpp)). On teardown they are reaped as a
 group via their owner tag.
 
+### 2.4 Errors in actions and residents
+
+Handlers raise and catch exceptions like any state_exec program, with `try`/`catch`/`finally`,
+`raise` and `error` ([STATE_EXEC_EXCEPTIONS.md](STATE_EXEC_EXCEPTIONS.md)). A builtin's or a
+host intrinsic's error is an exception of its class too. An allocation an action's memory budget
+refuses is a `MemoryError`, for example, so a handler can catch it.
+
+**What the drain reports.** An exception a handler doesn't catch ends its process `failed`. The
+drain sweep warns once per message, through the warnings `take_reactive_warnings()` returns:
+
+| What ended | Warning |
+|---|---|
+| an action, by an exception | `ari: on: action program failed: Class: message (at <where>)` |
+| a resident, by an exception | `ari: resident [<channel>] failed: Class: message (at <where>)` |
+| an action, by a kill (its step or time cap, a syntax error found while reading it) | `ari: on: action program did not complete: <reason>` |
+| a resident, by a kill | `ari: resident [<channel>] stopped: <reason>` |
+
+`<where>` is the innermost line of the exception's traceback. An `init:` program that fails
+reports `failed: Class: message (at <where>)` to its caller.
+
+**Keeping a resident alive.** A resident is one process for the life of the document. An
+exception it doesn't catch ends it, and its channel goes unserved from then on. Catch inside the
+body to keep it running:
+
+```yaml
+on_key: |
+  (try (handle-key event)
+    (catch (e) (state-set "ui.last_error" (get-attr e "message"))))
+```
+
 ---
 
 ## 3. The per-frame (deferred-intent) contract
@@ -1118,17 +1148,22 @@ callables as DSL functions (§10). One `Exec` is driven by one thread — use a 
 - **`register_fn(name, callable)`** — *synchronous*. The callable runs inline on the
   `run()` thread with the GIL held and blocks the DSL program until it returns. Use for
   fast pure functions.
-- **`register_async_fn(name, callable)`** — offloads a **blocking** callable to the app's
-  compute pool and **parks** the calling DSL program until it finishes, so the scheduler
-  stays live. The callable runs on a pool worker with the GIL acquired for the call, so
-  `urllib`/`requests` or a GIL-releasing numpy compute runs truly concurrently. On a
-  raise the program resumes with a `{"__async_error__": <message>}` dict (a reserved key
-  a normal dict result cannot collide with).
+- **`register_async_fn(name, callable)`** — an *async function*
+  ([STATE_EXEC_EXCEPTIONS.md](STATE_EXEC_EXCEPTIONS.md) section 3): runs a **blocking**
+  callable on the app's background task pool and **parks** the calling DSL program until it
+  finishes, so the scheduler stays live. The callable runs on a pool thread with the GIL
+  acquired for the call, so `urllib`/`requests` or a GIL-releasing numpy compute runs truly
+  concurrently. It gets copies of its arguments. If it raises, the call raises a
+  `PythonError` (its `python_type` names the Python exception), which a `try` can catch;
+  uncaught, `Exec.run` re-raises the Python exception. `(name-async ...)` returns a future
+  for `(await f [seconds])` or `(await-all (list f ...))`. The call is charged to the
+  program's budget: its run time against `max_time`, its CPU time as steps.
 - **`register_async_coro(name, coro_fn)`** — registers an `async def`. Calling it
   schedules the coroutine on an asyncio loop the `Exec` owns and parks the DSL program.
   Unlike `register_async_fn`, the coroutine runs **on** the `run()` thread, cooperatively
   stepped one bounded slice per pump iteration, so it and the DSL march along together and
-  its `await asyncio.sleep(...)` / `aiohttp` progress between DSL slices.
+  its `await asyncio.sleep(...)` / `aiohttp` progress between DSL slices. A raise raises a
+  `PythonError` at the call, as for `register_async_fn`.
 
 > **The coroutine must yield.** The slice is cooperative — asyncio cannot preempt a
 > running step — so a coroutine that does CPU-bound work without awaiting holds the
@@ -1136,9 +1171,8 @@ callables as DSL functions (§10). One `Exec` is driven by one thread — use a 
 > `register_async_fn` (the pool), not in a coroutine. Passing an `async def` to
 > `register_fn` / `register_async_fn` is rejected and steered to `register_async_coro`.
 
-The nesting rule for both async forms: `(name ...)` must be nested inside an enclosing
-frame (e.g. `(begin (name ...))` or `(state-set "r" (name ...))`), never the whole
-program, so the park has a frame to suspend.
+An async call parks at any depth, the whole program included: the call's frame waits on the
+stack (the `await_call` phase) until its result is delivered.
 
 ```python
 ex = pycvc.Exec(app)
@@ -1149,7 +1183,7 @@ async def poll(url):
             return await r.text()
 
 ex.register_async_coro("poll", poll)
-ex.run('(begin (state-set "page" (poll "http://localhost:8080/status")))')
+ex.run('(state-set "page" (poll "http://localhost:8080/status"))')
 ```
 
 ### 10.2 The DSL network verbs
@@ -1163,9 +1197,14 @@ In an Ariadne document's action lane, the network verbs are (from
   default `Content-Type`). Query values are url-encoded for you; there are `url-encode` /
   `url-decode` core builtins if you need them directly.
 - The reply is a dict: `{ok, status, body, url, headers, error}` (`body` is raw bytes).
-- The `-async` verbs return a future you `await`; `launch_http` offloads the request onto
-  the compute pool and parks the program on a private reply channel, so the action lane
-  never blocks the frame.
+- They are async functions on the app's exec scheduler (`app::exec_async_host()`,
+  [STATE_EXEC_EXCEPTIONS.md](STATE_EXEC_EXCEPTIONS.md) section 3): the request runs on the
+  app's background task pool and the calling program parks at the call, at any depth, so the
+  action lane never blocks the frame. The `-async` verbs return a future you `await`
+  (optionally with a timeout in seconds) or pass to `await-all`.
+- A failed send is still a reply with `ok` `#f` and `error` set, not an exception. A call is
+  charged to its program's `max_time` while it waits, and a killed or reaped program's call is
+  cancelled.
 
 See [`ariadne-async-await-arc`] in the roadmap for how `await` threads through the drain
 lane. **Note (§11):** these verbs are currently registered only in the Ariadne action

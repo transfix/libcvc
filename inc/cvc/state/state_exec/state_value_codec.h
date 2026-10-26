@@ -9,6 +9,7 @@
 #ifndef CVC_STATE_EXEC_STATE_VALUE_CODEC_H
 #define CVC_STATE_EXEC_STATE_VALUE_CODEC_H
 
+#include <cvc/state/state_exec/process.h>
 #include <cvc/state/state_exec/stackless_evaluator.h>
 #include <cvc/state/state_exec/types.h>
 #include <string>
@@ -57,6 +58,28 @@ void encode_evaluator_state(cvc::state &node, const evaluator_state &es);
 
 /// Decode a full evaluator_state snapshot from a state subtree.
 evaluator_state decode_evaluator_state(cvc::state &node);
+
+// ---------------------------------------------------------------------------
+// Process codec
+// ---------------------------------------------------------------------------
+
+/// Encode a process for a snapshot: its evaluator state (as encode_evaluator_state), its name,
+/// identity, chroot, owner, priority, limits and signal handlers, and what it has used so far:
+/// its steps by kind, accumulated_time, cpu_time_charged, its message counts, and what its async
+/// calls were charged (async_calls, async_time, async_cpu_time, async_steps;
+/// docs/STATE_EXEC_EXCEPTIONS.md 3.8). A call in flight keeps what was charged for it so far;
+/// it can't resume after a restore. Not kept: on_complete, the inbox, watches, pending signals.
+void encode_process(cvc::state &node, const process &proc);
+
+/// Decode a process encode_process wrote, for a scheduler's restore(). Its status is `ready`,
+/// or what it ended with.
+process_ptr decode_process(cvc::state &node);
+
+/// Native functions aren't serialized: bind `natives`' own native functions again in the
+/// outermost scope of a decoded state's global scope and of each frame's scope, and have those
+/// scopes extend what `natives` extends (the shared stdlib scope). Pass the environment the
+/// process ran with (execute_options::env), or builtins::make_default_environment().
+void rebind_natives(evaluator_state &st, const environment_ptr &natives);
 
 } // namespace cvc::state_exec
 
