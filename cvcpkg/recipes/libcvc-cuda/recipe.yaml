@@ -58,6 +58,10 @@ depends:
     - name: boost
     - name: fftw3
     - name: gsl
+    # Eigen + libigl (header-only) for mesh_ops.h / fem.h; kept in lockstep with
+    # the CPU libcvc -- see that recipe for the note.
+    - name: eigen
+    - name: libigl
     - name: cgal
     # CGAL is header-only and declares gmp/mpfr as its own runtime deps rather
     # than vendoring them; the FLAT `cvcpkg install` does not auto-pull them, so

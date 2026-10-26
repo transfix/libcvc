@@ -217,6 +217,17 @@ depends:
     # Build-only: nothing in libcvc's public headers mentions it.
     - name: pocketfft
       platforms: [linux, macos, windows]
+    # Eigen 5 + libigl's MPL-2.0 core module, both header-only, back
+    # mesh_ops.h / fem.h (CVC_ENABLE_LIBIGL). Build-only like pocketfft: nothing
+    # under inc/cvc includes them, they compile into the private cvc_igl helper,
+    # and cvcTargets.cmake never names them. Declared under runtime for the same
+    # reason as pocketfft (build.sh only reads CVC_DEPS_PREFIX). Without them the
+    # option flips OFF and every mesh_ops/fem entry point throws
+    # mesh_ops_unavailable; CI asserts that did not happen.
+    - name: eigen
+      platforms: [linux, macos, windows]
+    - name: libigl
+      platforms: [linux, macos, windows]
     - name: gsl
       platforms: [linux, macos, windows]
     - name: cgal
