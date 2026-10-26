@@ -156,9 +156,9 @@ std::string room_participant_path(const std::string &room_id, const std::string 
 std::string room_join(cvc::app &app, const std::string &room_id, const std::string &pid,
                       const std::string &name) {
   const std::string sp = room_participant_path(room_id, pid);
-  // Write ONLY this participant's own subtree (the §5d client invariant, honoured voluntarily here;
-  // enforcement is Phase 2). presence.joined also materializes the <pid> node so the roster
-  // enumerates it even with no name.
+  // Write ONLY this participant's own subtree (the §5d client invariant; a relay with bound writes,
+  // room_write_gate, refuses anything else). presence.joined also materializes the <pid> node so
+  // the roster enumerates it even with no name.
   set_replicated(app, join_path({sp.c_str(), "presence", "joined"}), "1");
   if (!name.empty())
     set_replicated(app, join_path({sp.c_str(), "profile", "name"}), name);
@@ -279,7 +279,13 @@ void register_room_intrinsics(cvc::app &app) {
           for (const room_participant &p : room_roster(app, room_id)) {
             net_sample net;
             read_participant_net(app, room_id, p.pid, net);
+            // Its camera is off (it sends no frames: show "camera off", not its last frame), and
+            // the size the relay sends it video at ("" = not adapted yet).
+            bool video_off = false;
+            read_participant_video_off(app, room_id, p.pid, video_off);
             list.push_back(se::make_dict({
+                {"video_off", se::value_t(std::string(video_off ? "1" : "0"))},
+                {"video", se::value_t(read_relay_video_rung(app, room_id, p.pid))},
                 {"pid", se::value_t(p.pid)},
                 {"name", se::value_t(p.name)},
                 {"rtt_ms", se::value_t(net.rtt_ms)},

@@ -40,6 +40,7 @@
 #include <cvc/ariadne/conference/room_intrinsics.h> // room_join, room_leave, room_roster
 #include <cvc/ariadne/conference/room_net.h>        // the per-participant and relay net leaves
 #include <cvc/ariadne/conference/room_scene.h>
+#include <cvc/ariadne/conference/room_write_gate.h> // bound writes, as arisrv
 #include <cvc/ariadne/holon.h>
 #include <cvc/ariadne/holon_sync.h>
 #include <cvc/core/app.h>
@@ -158,12 +159,15 @@ struct counter {
 struct receive_counts {
   counter live_pose, live_intent, live_other; // live mutations: pose leaves, intents, the rest
   counter snapshot;                           // snapshot entries
-  std::uint64_t pushed_ticks = 0; // snapshot entries for a pose's server_tick (one per push)
-  counter camera, mic;            // media frames, payload bytes
+  std::uint64_t pushed_ticks = 0;   // snapshot entries for a pose's server_tick (one per push)
+  std::uint64_t foreign_intent = 0; // another participant's intent leaves, live or snapshot
+  counter camera, mic;              // media frames, payload bytes
 };
 
 class client_tap {
 public:
+  explicit client_tap(std::string self) : _self(std::move(self)) {}
+
   void on_applied(const cvc::state_mutation &m) {
     if (m.op != cvc::state_mutation_op::set_value)
       return;
@@ -178,6 +182,8 @@ public:
       hi = (std::max)(
           hi, static_cast<std::uint64_t>(std::strtoull(m.string_value.c_str(), nullptr, 10)));
     }
+    if (participant && family == "intent" && subject != _self)
+      ++_c.foreign_intent;
     if (!is_live) {
       _c.snapshot.add(bytes);
       if (tick)
@@ -205,6 +211,7 @@ public:
   }
 
 private:
+  const std::string _self;
   mutable std::mutex _mu;
   receive_counts _c;
   std::map<std::string, std::uint64_t> _max_tick;
@@ -219,6 +226,7 @@ receive_counts operator-(const receive_counts &a, const receive_counts &b) {
   d.pushed_ticks = a.pushed_ticks - b.pushed_ticks;
   d.camera = a.camera - b.camera;
   d.mic = a.mic - b.mic;
+  d.foreign_intent = a.foreign_intent - b.foreign_intent;
   return d;
 }
 
@@ -236,6 +244,9 @@ struct bench_config {
   bool media = true;
   bool move = true;
   long media_stall_ms = 40;
+  long admission_hold_ms = 2000;    // arisrv's --admission-hold-ms (with an area of interest)
+  std::string late_joiner = "join"; // join: as a client does; observe: connect and only listen
+  std::string bind_writes = "on";   // arisrv's --bind-writes (not an S7 switch)
   std::string json;
 };
 
@@ -245,6 +256,10 @@ public:
   explicit bench_relay(const bench_config &cfg) {
     gate = cfg.s7;
     trim = cfg.s7;
+    const std::chrono::milliseconds hold(cfg.s7 && cfg.aoi != "off" ? cfg.admission_hold_ms : 0);
+    std::shared_ptr<cvc::state_inbound_gate> bind_gate;
+    if (cfg.bind_writes == "on")
+      bind_gate = std::make_shared<cvc::ariadne::conference::room_write_gate>(kRoom);
     shard = std::make_unique<cvc::state_cluster_shard>(app, "conf", kRelayId);
     shard->add_interest("conf");
     shard->set_enforce_interest(true);
@@ -259,6 +274,8 @@ public:
     grpc.set_relay_requires_interest(gate);
     grpc.set_backfill_on_connect(!trim);
     grpc.set_media_stall_drop(std::chrono::milliseconds(cfg.s7 ? cfg.media_stall_ms : 0));
+    grpc.set_admission_hold(hold);
+    grpc.set_inbound_gate(bind_gate);
     grpc.start("127.0.0.1:0", kRelayId, "conf");
     grpc.set_relay(true);
     grpc.register_shard(shard.get());
@@ -269,6 +286,8 @@ public:
     ws.set_on_connection_closed(on_departed);
     ws.set_relay_requires_interest(gate);
     ws.set_backfill_on_connect(!trim);
+    ws.set_admission_hold(hold);
+    ws.set_inbound_gate(bind_gate);
     ws.start("127.0.0.1:0", kRelayId, "conf");
     ws.set_relay(true);
     ws.register_shard(shard.get());
@@ -403,6 +422,27 @@ public:
 #else
     return 0;
 #endif
+  }
+  // Admissions the hold delayed, and those it released without a filter (timed out).
+  std::uint64_t admissions_held() const {
+    std::uint64_t n = 0;
+#if defined(CVC_ENABLE_GRPC)
+    n += grpc.total_admissions_held();
+#endif
+#if defined(CVC_ENABLE_WS)
+    n += ws.total_admissions_held();
+#endif
+    return n;
+  }
+  std::uint64_t admission_timeouts() const {
+    std::uint64_t n = 0;
+#if defined(CVC_ENABLE_GRPC)
+    n += grpc.total_admission_timeouts();
+#endif
+#if defined(CVC_ENABLE_WS)
+    n += ws.total_admission_timeouts();
+#endif
+    return n;
   }
   std::uint64_t backfilled() const {
     std::uint64_t n = 0;
@@ -615,7 +655,7 @@ public:
   const std::string pid;
   const link_kind kind;
   cvc::app app;
-  client_tap tap;
+  client_tap tap{pid};
   std::unique_ptr<cvc::state_cluster_shard> shard;
   holon h{holon_role::client, cvc::ariadne::room_holon_config()};
   cvc::state_transport *tp = nullptr;
@@ -903,12 +943,14 @@ bool check_choice(const char *flag, const std::string &v, std::initializer_list<
 }
 
 void usage() {
-  std::fprintf(stderr,
-               "usage: arisrv_aoi_bench [--clients N] [--layout spawn|corners|clusters|ring|walk]\n"
-               "         [--scene default|large] [--aoi off|conference|hall] [--video-max K]\n"
-               "         [--seconds S] [--warmup W] [--video-bytes B] [--transport ws|grpc|mixed]\n"
-               "         [--s7 on|off] [--media on|off] [--move on|off] [--media-stall-ms N]\n"
-               "         [--json out.json]\n");
+  std::fprintf(
+      stderr,
+      "usage: arisrv_aoi_bench [--clients N] [--layout spawn|corners|clusters|ring|walk]\n"
+      "         [--scene default|large] [--aoi off|conference|hall] [--video-max K]\n"
+      "         [--seconds S] [--warmup W] [--video-bytes B] [--transport ws|grpc|mixed]\n"
+      "         [--s7 on|off] [--media on|off] [--move on|off] [--media-stall-ms N]\n"
+      "         [--admission-hold-ms N] [--late-joiner join|observe] [--bind-writes on|off]\n"
+      "         [--json out.json]\n");
 }
 
 std::string json_str(const std::string &s) {
@@ -970,6 +1012,12 @@ int main(int argc, char **argv) {
       move = next();
     else if (!std::strcmp(a, "--media-stall-ms"))
       cfg.media_stall_ms = (std::max)(0L, std::atol(next()));
+    else if (!std::strcmp(a, "--admission-hold-ms"))
+      cfg.admission_hold_ms = (std::max)(0L, std::atol(next()));
+    else if (!std::strcmp(a, "--late-joiner"))
+      cfg.late_joiner = next();
+    else if (!std::strcmp(a, "--bind-writes"))
+      cfg.bind_writes = next();
     else if (!std::strcmp(a, "--json"))
       cfg.json = next();
     else if (!std::strcmp(a, "--help") || !std::strcmp(a, "-h")) {
@@ -992,7 +1040,9 @@ int main(int argc, char **argv) {
       !check_choice("--aoi", cfg.aoi, {"off", "conference", "hall"}) ||
       !check_choice("--transport", cfg.transport, {"ws", "grpc", "mixed"}) ||
       !check_choice("--s7", s7, {"on", "off"}) || !check_choice("--media", media, {"on", "off"}) ||
-      !check_choice("--move", move, {"on", "off"}))
+      !check_choice("--move", move, {"on", "off"}) ||
+      !check_choice("--late-joiner", cfg.late_joiner, {"join", "observe"}) ||
+      !check_choice("--bind-writes", cfg.bind_writes, {"on", "off"}))
     return 2;
   cfg.s7 = s7 == "on";
   cfg.media = media == "on";
@@ -1085,14 +1135,19 @@ int main(int argc, char **argv) {
     st = relay.aoi->take_stats();
   const std::size_t journal_end = relay.shard->journal().size();
 
-  // A late joiner: connects (it never joins) and bootstraps; its bytes once its tree holds every
-  // participant's pose (to within half a metre of the relay's: they keep walking) and the scene.
+  // A late joiner: connects, joins as a client does (or with --late-joiner observe only listens),
+  // and bootstraps; its bytes once its tree holds every participant's pose (to within half a metre
+  // of the relay's: they keep walking) and the scene. Under the admission hold an observer gets
+  // its bootstrap only when the hold times out, unfiltered: it never becomes a participant.
   for (bench_client *c : cs)
     c->set_media(false);
   const std::uint64_t backfilled0 = relay.backfilled();
+  const std::uint64_t held0 = relay.admissions_held(), timeouts0 = relay.admission_timeouts();
   bench_client late("late", kinds[cs.size() % kinds.size()], cfg);
   const double tj = now_s();
   bool joined = late.connect(relay);
+  if (joined && cfg.late_joiner == "join")
+    late.join();
   const auto converged = [&] {
     for (bench_client *q : cs) {
       cvc::physics::body_state rs, ls;
@@ -1107,6 +1162,9 @@ int main(int argc, char **argv) {
   const double join_s = now_s() - tj;
   const std::uint64_t join_bytes = late.link().bytes_in;
   const std::uint64_t join_backfilled = relay.backfilled() - backfilled0;
+  const std::uint64_t join_foreign_intents = late.tap.counts().foreign_intent;
+  const std::uint64_t join_held = relay.admissions_held() - held0;
+  const std::uint64_t join_timeouts = relay.admission_timeouts() - timeouts0;
 
   // The report.
   std::uint64_t realigns = 0, ghosts = 0;
@@ -1195,10 +1253,13 @@ int main(int argc, char **argv) {
               static_cast<unsigned long long>(relay.withheld() - withheld0),
               static_cast<unsigned long long>(relay.media_gated() - gated0),
               static_cast<unsigned long long>(relay.stall_dropped() - stalled0));
-  std::printf("[bench] late join: %s in %.2f s, %llu bytes, %llu backfilled\n",
-              joined ? "converged" : "did NOT converge", join_s,
-              static_cast<unsigned long long>(join_bytes),
-              static_cast<unsigned long long>(join_backfilled));
+  std::printf(
+      "[bench] late join (%s): %s in %.2f s, %llu bytes, %llu backfilled, %llu other "
+      "participants' intent leaves | admission held %llu (timed out %llu)\n",
+      cfg.late_joiner.c_str(), joined ? "converged" : "did NOT converge", join_s,
+      static_cast<unsigned long long>(join_bytes), static_cast<unsigned long long>(join_backfilled),
+      static_cast<unsigned long long>(join_foreign_intents),
+      static_cast<unsigned long long>(join_held), static_cast<unsigned long long>(join_timeouts));
   std::printf("[bench] probes: realigns %llu | origin ghost frames %llu | outer-peer error m max "
               "%.3f p95 %.3f (%zu samples) | inner entry ms p50 %.1f p95 %.1f (%zu, %zu "
               "unresolved) | reconcile corrections %.3f m\n",
@@ -1218,12 +1279,15 @@ int main(int argc, char **argv) {
                  "{\n  \"config\": {\"clients\": %d, \"layout\": %s, \"scene\": %s, \"aoi\": %s, "
                  "\"video_max\": %d, \"seconds\": %.2f, \"warmup\": %.2f, \"video_bytes\": %zu, "
                  "\"transport\": %s, \"s7\": %s, \"media\": %s, \"move\": %s, "
-                 "\"media_stall_ms\": %ld},\n",
+                 "\"media_stall_ms\": %ld, \"admission_hold_ms\": %ld, \"late_joiner\": %s, "
+                 "\"bind_writes\": %s},\n",
                  cfg.clients, json_str(cfg.layout).c_str(), json_str(cfg.scene).c_str(),
                  json_str(cfg.aoi).c_str(), cfg.video_max, cfg.seconds, cfg.warmup, cfg.video_bytes,
                  json_str(cfg.transport).c_str(), cfg.s7 ? "true" : "false",
                  cfg.media ? "true" : "false", cfg.move ? "true" : "false",
-                 cfg.s7 ? cfg.media_stall_ms : 0L);
+                 cfg.s7 ? cfg.media_stall_ms : 0L,
+                 cfg.s7 && cfg.aoi != "off" ? cfg.admission_hold_ms : 0L,
+                 json_str(cfg.late_joiner).c_str(), cfg.bind_writes == "on" ? "true" : "false");
     std::fprintf(f, "  \"measured_seconds\": %.3f,\n  \"receivers\": [\n%s  ],\n", secs,
                  jr.c_str());
     std::fprintf(f,
@@ -1249,9 +1313,13 @@ int main(int argc, char **argv) {
                  static_cast<unsigned long long>(relay.stall_dropped() - stalled0), jl.c_str());
     std::fprintf(f,
                  "  \"late_join\": {\"converged\": %s, \"seconds\": %.3f, \"bytes\": %llu, "
-                 "\"backfilled\": %llu},\n",
+                 "\"backfilled\": %llu, \"foreign_intents\": %llu, \"held\": %llu, "
+                 "\"timeouts\": %llu},\n",
                  joined ? "true" : "false", join_s, static_cast<unsigned long long>(join_bytes),
-                 static_cast<unsigned long long>(join_backfilled));
+                 static_cast<unsigned long long>(join_backfilled),
+                 static_cast<unsigned long long>(join_foreign_intents),
+                 static_cast<unsigned long long>(join_held),
+                 static_cast<unsigned long long>(join_timeouts));
     std::fprintf(f,
                  "  \"probes\": {\"realigns\": %llu, \"origin_ghost_frames\": %llu, "
                  "\"outer_error_m\": {\"max\": %.4f, \"p95\": %.4f, \"samples\": %zu}, "

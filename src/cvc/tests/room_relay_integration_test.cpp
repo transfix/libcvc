@@ -39,15 +39,19 @@
 #include <cvc/ariadne/conference/room_aoi.h>
 #include <cvc/ariadne/conference/room_aoi_relay.h>
 #include <cvc/ariadne/conference/room_intrinsics.h> // room_join, room_leave, room_participant_path
+#include <cvc/ariadne/conference/room_net.h>        // room_device_tag, the device leaf
 #include <cvc/ariadne/conference/room_scene.h>      // seed_default_scene, seed_large_demo_scene
+#include <cvc/ariadne/conference/room_write_gate.h> // bound writes
 #include <cvc/ariadne/holon.h>
 #include <cvc/ariadne/holon_sync.h> // server_pump, client_pump, read_pose, write_intent
 #include <cvc/core/app.h>
 #include <cvc/media/media_frame.h>
 #include <cvc/media/media_router.h>
+#include <cvc/media/media_rungs.h>
 #include <cvc/physics/body.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_cluster_shard.h>
+#include <cvc/state/state_device_key.h>
 #include <cvc/state/state_transport.h>
 #if defined(CVC_ENABLE_GRPC)
 #include <cvc/state/state_transport_grpc.h>
@@ -226,18 +230,28 @@ struct relay_options {
   bool trim = true;         // trim the journal and no backfill on connect (--relay-journal trim)
   bool large_scene = false; // a 100 m plane instead of the 20 m room (where hall has room)
   bool ws_broadcast = true; // arisrv's ~1 Hz WebSocket re-broadcast of the room tree
+  bool hold = true;         // hold each admission for its filter (--admission-hold-ms; AOI only)
+  bool bind_writes = true;  // each client writes only its own participant (--bind-writes)
+  std::string room_token;   // admit only clients that present it (--room-token-file); "" = open
 };
 
 // The relay, as arisrv builds it, stepped by the test.
 class test_relay {
 public:
   explicit test_relay(relay_options o) : opt(std::move(o)) {
+    const std::chrono::milliseconds hold(opt.use_aoi && opt.hold ? 2000 : 0);
+    if (opt.bind_writes)
+      bind_gate = std::make_shared<ra::room_write_gate>(kRoom);
     shard = std::make_unique<cvc::state_cluster_shard>(app, "conf", kRelayId);
     shard->add_interest("conf");
     shard->set_enforce_interest(true);
     shard->attach();
     shard->install_as_default();
     shard->adapter().set_on_local_mutation([this](const cvc::state_mutation &m) { note_local(m); });
+    shard->adapter().set_on_remote_applied([this](const cvc::state_mutation &m) {
+      std::lock_guard<std::mutex> lk(_mu);
+      _applied[m.origin_node_id].push_back(m.path);
+    });
     // A closed connection is queued here (transport threads) and retracted on the next step.
     const auto on_departed = [this](const std::string &node_id) {
       std::lock_guard<std::mutex> lk(_mu);
@@ -247,6 +261,12 @@ public:
     grpc.set_on_connection_closed(on_departed);
     grpc.set_relay_requires_interest(opt.gate);
     grpc.set_backfill_on_connect(!opt.trim);
+    grpc.set_admission_hold(hold);
+    grpc.set_inbound_gate(bind_gate);
+    grpc.set_auth_config({opt.room_token, std::string()});
+    grpc.set_device_pins(pins);
+    grpc.set_media_shaper(
+        [this](const cvc::media_frame &f, const std::string &v) { return shaper.shape(f, v); });
     grpc.start("127.0.0.1:0", kRelayId, "conf");
     grpc.set_relay(true);
     grpc.register_shard(shard.get());
@@ -258,6 +278,12 @@ public:
     ws.set_relay_requires_interest(opt.gate);
     ws.set_backfill_on_connect(!opt.trim);
     ws.set_media_backlog_drop(0); // lossless media: the note by the frame sizes above
+    ws.set_admission_hold(hold);
+    ws.set_inbound_gate(bind_gate);
+    ws.set_auth_config({opt.room_token, std::string()});
+    ws.set_device_pins(pins);
+    ws.set_media_shaper(
+        [this](const cvc::media_frame &f, const std::string &v) { return shaper.shape(f, v); });
     ws.start("127.0.0.1:0", kRelayId, "conf");
     ws.set_relay(true);
     ws.register_shard(shard.get());
@@ -303,6 +329,7 @@ public:
     grpc.stop();
 #endif
     shard->adapter().set_on_local_mutation({});
+    shard->adapter().set_on_remote_applied({});
     shard->detach();
   }
 
@@ -346,6 +373,16 @@ public:
     for (auto it = _known.begin(); it != _known.end();)
       it = server.has_participant(*it) ? std::next(it) : _known.erase(it);
     ra::relay_room_step(*shard, planes, aoi.get(), server, now_s(), opt.trim);
+    // arisrv's device tags (its ~1 s link pass): each present participant's, from the link
+    // holding its pid.
+    {
+      std::vector<cvc::state_link_report> links;
+      for (const cvc::state_transport *tp : planes)
+        for (cvc::state_link_report &l : tp->link_reports())
+          links.push_back(std::move(l));
+      const std::vector<std::string> pids = server.participants();
+      ra::write_link_devices(app, kRoom, links, std::set<std::string>(pids.begin(), pids.end()));
+    }
     ++steps;
 #if defined(CVC_ENABLE_WS)
     if (opt.ws_broadcast && now_s() >= _next_broadcast) {
@@ -439,8 +476,72 @@ public:
 #endif
     return n;
   }
+  // Admissions the hold delayed, and those it released without a filter (timed out).
+  std::uint64_t admissions_held() const {
+    std::uint64_t n = 0;
+#if defined(CVC_ENABLE_GRPC)
+    n += grpc.total_admissions_held();
+#endif
+#if defined(CVC_ENABLE_WS)
+    n += ws.total_admissions_held();
+#endif
+    return n;
+  }
+  std::uint64_t admission_timeouts() const {
+    std::uint64_t n = 0;
+#if defined(CVC_ENABLE_GRPC)
+    n += grpc.total_admission_timeouts();
+#endif
+#if defined(CVC_ENABLE_WS)
+    n += ws.total_admission_timeouts();
+#endif
+    return n;
+  }
+  // The paths of the client mutations the relay applied, as their origin named them.
+  std::vector<std::string> applied_from(const std::string &origin) const {
+    std::lock_guard<std::mutex> lk(_mu);
+    const auto it = _applied.find(origin);
+    return it == _applied.end() ? std::vector<std::string>{} : it->second;
+  }
+  // Connections refused for the room token.
+  // Device proofs the planes verified, and refused.
+  std::uint64_t devices_verified() const {
+    std::uint64_t n = 0;
+    for (const cvc::state_transport *tp : planes)
+      n += tp->total_devices_verified();
+    return n;
+  }
+  std::uint64_t device_proofs_refused() const {
+    std::uint64_t n = 0;
+    for (const cvc::state_transport *tp : planes)
+      n += tp->total_device_proofs_refused();
+    return n;
+  }
+  std::uint64_t auth_rejected() const {
+    std::uint64_t n = 0;
+#if defined(CVC_ENABLE_GRPC)
+    n += grpc.total_auth_rejected();
+#endif
+#if defined(CVC_ENABLE_WS)
+    n += ws.total_auth_rejected();
+#endif
+    return n;
+  }
+  // Client frames the bound-writes gate refused.
+  std::uint64_t inbound_rejected() const {
+    std::uint64_t n = 0;
+    for (const cvc::state_transport *tp : planes)
+      n += tp->total_inbound_rejected();
+    return n;
+  }
 
   relay_options opt;
+  std::shared_ptr<cvc::state_inbound_gate> bind_gate; // one for both planes (null: off)
+  // Device-key pins, in memory, for both planes (arisrv keeps one always; --device-pins a file).
+  std::shared_ptr<cvc::state_device_pins> pins = std::make_shared<cvc::state_device_pins>();
+  // Each viewer's video rung on both planes, as arisrv shapes them (declared before the planes, so
+  // it outlives every fan that calls it). A test sets rungs directly; arisrv's controller does.
+  cvc::media_rung_shaper shaper;
   cvc::app app;
   std::unique_ptr<cvc::state_cluster_shard> shard;
 #if defined(CVC_ENABLE_GRPC)
@@ -471,6 +572,7 @@ private:
   mutable std::mutex _mu;
   std::vector<std::string> _departed;
   std::map<std::string, std::vector<std::uint64_t>> _pose_seq;
+  std::map<std::string, std::vector<std::string>> _applied; // remote origin -> applied paths
   std::uint64_t _pose_writes = 0;
   std::set<std::string> _known;
   std::map<std::string, double> _yaw;
@@ -503,6 +605,9 @@ public:
 #if defined(CVC_ENABLE_GRPC)
     if (kind == link_kind::grpc) {
       _grpc = std::make_unique<cvc::state_transport_grpc>();
+      _grpc->set_auth_config({std::string(), token});
+      _grpc->set_device_id(device);
+      _grpc->set_device_signer(cvc::state_device_signer::derive(seed, r.grpc.listen_address()));
       _grpc->start("127.0.0.1:0", pid, "conf"); // gRPC must start() even to dial
       _grpc->register_shard(shard.get());
       _grpc->set_on_media(on_media);
@@ -513,6 +618,9 @@ public:
 #if defined(CVC_ENABLE_WS)
     if (kind == link_kind::ws) {
       _ws = std::make_unique<cvc::state_transport_ws>();
+      _ws->set_auth_config({std::string(), token});
+      _ws->set_device_id(device);
+      _ws->set_device_signer(cvc::state_device_signer::derive(seed, r.ws.listen_address()));
       _ws->register_shard(shard.get());
       _ws->set_on_media(on_media);
       _ws->set_media_backlog_drop(0); // its uplink is lossless too
@@ -601,6 +709,9 @@ public:
   holon h{holon_role::client, cvc::ariadne::room_holon_config()};
   cvc::state_transport *tp = nullptr;
   bool echo = false; // write arigl's avatar marker matrices into ui.docs every frame
+  std::string token; // the room token its connection presents ("" = none)
+  std::string device; // the device id its Hello carries ("" = none)
+  std::string seed;   // its device key's 32-byte seed (state_device_key.h; "" = no key)
   std::uint64_t cam_sent = 0, mic_sent = 0;
 
 private:
@@ -944,7 +1055,8 @@ TEST(RoomRelayLoopbackTest, OuterPeerGetsPushesNotLiveFrames) {
     EXPECT_EQ(rc->tap.media("C", "camera"), 0u) << rc->pid;
     EXPECT_EQ(rc->tap.media("C", "mic"), 0u) << rc->pid;
   }
-  EXPECT_GT(C.cam_sent, 20u);
+  // C did send all along (a frame per loop pass at most: a Debug gRPC runner managed ~10 a second).
+  EXPECT_GE(C.cam_sent, 10u);
   EXPECT_GT(B.tap.media("A", "camera"), 0u) << "the inner peer's media still flows";
   EXPECT_GT(B.tap.media("A", "mic"), 0u);
 }
@@ -1118,7 +1230,7 @@ TEST(RoomRelayLoopbackTest, NoIntentOrUiDocsLeak) {
 
   const std::uint64_t filtered_a = A.shard->total_remote_filtered_out();
   const std::uint64_t filtered_b = B.shard->total_remote_filtered_out();
-  const std::uint64_t withheld = r.withheld();
+  const std::uint64_t refused = r.inbound_rejected();
   const std::uint64_t live_a = B.tap.live_pose("A");
   cvc::ariadne::avatar_intent walk;
   walk.move = {0.5, 0.0, 0.0};
@@ -1134,11 +1246,281 @@ TEST(RoomRelayLoopbackTest, NoIntentOrUiDocsLeak) {
     EXPECT_FALSE(cvc::ariadne::read_intent(rc->app, kRoom, "A", got)) << rc->pid;
     EXPECT_EQ(rc->tap.intents("A"), 0u) << rc->pid;
   }
-  EXPECT_GT(r.withheld(), withheld) << "the relay gate withheld D's echo";
+  // D's echo is a write outside its participant, so bound writes refuse it before the interest
+  // gate would withhold it.
+  EXPECT_GT(r.inbound_rejected(), refused) << "the relay refused D's echo";
   EXPECT_EQ(B.shard->total_remote_filtered_out(), filtered_b) << "no ui.docs frame reached B";
   EXPECT_EQ(A.shard->total_remote_filtered_out(), filtered_a) << "no ui.docs frame reached A";
   EXPECT_EQ(B.app.root().findDescendant("ui.docs"), nullptr);
   EXPECT_EQ(r.app.root().findDescendant("ui.docs"), nullptr) << "ingest keeps only the room";
+}
+
+// Bound writes (arisrv --bind-writes, on by default). M writes, from its own replica and through
+// its own transport like any client write, A's intent (a walk), A's authoritative pose (a
+// teleport), its own authoritative pose, the scene and the area of interest; and it sends, as raw
+// mutations, its own pose by paths the tree would normalise onto it ("..pose", "pose ") and A's
+// intent naming A as the origin. The relay applies none of it -- every client mutation it applied
+// from M lies in M's participant, outside its pose, and none from "A" touches A's intent -- and
+// forwards none of it: A stands still and never receives an intent for itself. M's own walk,
+// inside its participant, still works.
+TEST(RoomRelayLoopbackTest, ClientWritesOnlyItsOwnParticipant) {
+  test_relay r(relay_options{});
+  client_list own = make_clients({"A", "M"});
+  const std::vector<test_client *> cs = ptrs(own);
+  test_client &A = *cs[0], &M = *cs[1];
+  ASSERT_NO_FATAL_FAILURE(bring_up(r, cs));
+  ASSERT_TRUE(run_room(r, cs, 5.0, nullptr, [&] {
+    cvc::physics::body_state s;
+    std::uint64_t t = 0;
+    return M.tree_pose("A", s, t) && M.tree_pose("M", s, t);
+  })) << "M holds both poses";
+
+  const std::string a_part = ra::room_participant_path(kRoom, "A");
+  const std::string m_part = ra::room_participant_path(kRoom, "M");
+  const std::string a_pos = a_part + ".pose.pos.x";
+  const std::string m_pos = m_part + ".pose.pos.x";
+  const std::string rev = ra::room_scene_path(kRoom) + ".rev";
+  const std::string aoi_on = ra::room_aoi_path(kRoom) + ".enabled";
+  const auto relay_leaf = [&](const std::string &p) {
+    cvc::state *n = r.app.root().findDescendant(p);
+    return n ? n->value() : std::string("<absent>");
+  };
+  cvc::physics::body_state a0;
+  std::uint64_t tick = 0;
+  ASSERT_TRUE(cvc::ariadne::read_pose(r.app, kRoom, "A", a0, tick));
+  const std::string rev0 = relay_leaf(rev), aoi0 = relay_leaf(aoi_on);
+  ASSERT_NE(rev0, "<absent>");
+  ASSERT_NE(aoi0, "<absent>");
+  const std::uint64_t refused = r.inbound_rejected();
+
+  cvc::ariadne::avatar_intent push;
+  push.move = {0.9, 0.0, 0.0};
+  cvc::ariadne::write_intent(M.app, kRoom, "A", push);
+  M.app.root()(a_pos).value(std::string("50"));
+  M.app.root()(m_pos).value(std::string("50"));
+  M.app.root()(rev).value(std::string("999"));
+  M.app.root()(aoi_on).value(std::string(aoi0 == "1" ? "0" : "1"));
+  std::uint64_t seq = 1000000; // past anything M or A journals here, so never a duplicate
+  const auto send_raw = [&](const std::string &origin, const std::string &path,
+                            const std::string &v) {
+    cvc::state_mutation m;
+    m.cluster_id = "conf";
+    m.tree_id = "default";
+    m.origin_node_id = origin;
+    m.sequence = ++seq;
+    m.mutation_id = origin + ":" + std::to_string(m.sequence);
+    m.path = path;
+    m.op = cvc::state_mutation_op::set_value;
+    m.type_name = "std::string";
+    m.string_value = v;
+    M.tp->publish(m);
+  };
+  send_raw("M", m_part + "..pose.pos.x", "60");
+  send_raw("M", m_part + ".pose .pos.y", "60");
+  send_raw("A", a_part + ".intent.move.x", "0.9");
+  const std::uint64_t a_intents = A.tap.intents("A");
+  run_room(r, cs, 2.0);
+
+  for (const std::string &p : r.applied_from("M")) {
+    EXPECT_TRUE(cvc::state_peer_registry::prefix_matches(m_part, p)) << "applied from M: " << p;
+    EXPECT_EQ(p.find("pose"), std::string::npos) << "applied from M: " << p;
+  }
+  for (const std::string &p : r.applied_from("A"))
+    EXPECT_EQ(p.find("intent"), std::string::npos) << "applied as A: " << p;
+  cvc::ariadne::avatar_intent got;
+  EXPECT_FALSE(cvc::ariadne::read_intent(r.app, kRoom, "A", got) && got.move.x != 0.0)
+      << "the relay never took an intent for A";
+  cvc::physics::body_state a1;
+  ASSERT_TRUE(cvc::ariadne::read_pose(r.app, kRoom, "A", a1, tick));
+  EXPECT_NEAR(a1.position.x, a0.position.x, 1e-3) << "A did not walk";
+  EXPECT_EQ(A.tap.intents("A"), a_intents) << "nothing was forwarded to A as its intent";
+  EXPECT_EQ(relay_leaf(rev), rev0) << "the scene is the relay's";
+  EXPECT_EQ(relay_leaf(aoi_on), aoi0) << "so is the area of interest";
+  EXPECT_GE(r.inbound_rejected() - refused, 8u)
+      << "A's intent leaves, both poses, the scene, the area of interest and the raw frames";
+
+  cvc::physics::body_state m0, m1;
+  ASSERT_TRUE(cvc::ariadne::read_pose(r.app, kRoom, "M", m0, tick));
+  cvc::ariadne::avatar_intent walk;
+  walk.move = {0.5, 0.0, 0.0};
+  cvc::ariadne::write_intent(M.app, kRoom, "M", walk);
+  run_room(r, cs, 2.0);
+  ASSERT_TRUE(cvc::ariadne::read_pose(r.app, kRoom, "M", m1, tick));
+  EXPECT_GT(m1.position.x - m0.position.x, 0.3) << "M's own intent still moves M";
+}
+
+// A room token (arisrv --room-token-file): clients that present it join as before, and each one's
+// device shows in the room as its room-scoped tag, the same for every peer, once it proved its
+// device key. A client without the token, on each transport the build has, is refused before it
+// is sent anything: it never sees the room.
+TEST(RoomRelayLoopbackTest, RoomTokenAdmitsOnlyItsHolders) {
+  relay_options o;
+  o.room_token = "room-token-0123456789";
+  test_relay r(o);
+  client_list own = make_clients({"A", "B"});
+  const std::vector<test_client *> cs = ptrs(own);
+  test_client &A = *cs[0], &B = *cs[1];
+  A.token = B.token = o.room_token;
+  A.device = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  B.device = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+  A.seed = std::string(32, 'a');
+  B.seed = std::string(32, 'b');
+  ASSERT_NO_FATAL_FAILURE(bring_up(r, cs));
+  if (cvc::device_keys_available()) {
+    const std::string tag_a = ra::room_device_tag(kRoom, A.device);
+    const std::string tag_b = ra::room_device_tag(kRoom, B.device);
+    EXPECT_TRUE(run_room(r, cs, 5.0, {}, [&] {
+      return ra::read_participant_device(A.app, kRoom, "B") == tag_b &&
+             ra::read_participant_device(B.app, kRoom, "A") == tag_a;
+    })) << "each sees the other's device tag";
+    EXPECT_EQ(ra::read_participant_device(A.app, kRoom, "A"), tag_a) << "and its own";
+  }
+
+  const std::vector<link_kind> kinds = link_kinds();
+  client_list outsiders;
+  for (std::size_t i = 0; i < kinds.size(); ++i) {
+    outsiders.push_back(std::make_unique<test_client>("C" + std::to_string(i), kinds[i]));
+    (void)outsiders.back()->connect(r); // WS fails at once; gRPC opens a channel, then is refused
+  }
+  EXPECT_TRUE(run_room(r, cs, 3.0, {}, [&] { return r.auth_rejected() >= kinds.size(); }));
+  run_room(r, cs, 1.0);
+  for (const auto &c : outsiders) {
+    EXPECT_EQ(c->app.root().findDescendant(ra::room_participant_path(kRoom, "A")), nullptr)
+        << c->pid << " was sent nothing of the room";
+    for (const cvc::state_transport *tp : r.planes)
+      for (const cvc::state_link_report &l : tp->link_reports())
+        EXPECT_NE(l.remote_node_id, c->pid) << "and never admitted";
+  }
+}
+
+// A viewer's video rung (media_rungs.h) shapes what the relay sends it of every camera, on each
+// transport: off sends none (the mic still flows), thumb a couple of frames a second, full all of
+// them. (The synthetic frames are not real JPEGs, so half and quarter would send them as is; the
+// re-encoding has its own tests, MediaRungs.*.)
+TEST(RoomRelayLoopbackTest, AViewersVideoRungShapesWhatItGets) {
+  for (const link_kind kind : link_kinds()) {
+    SCOPED_TRACE(kind == link_kind::grpc ? "grpc" : "ws");
+    test_relay r(relay_options{});
+    test_client A("A", kind), B("B", kind);
+    const std::vector<test_client *> cs = {&A, &B};
+    ASSERT_NO_FATAL_FAILURE(bring_up(r, cs));
+    A.set_media(true);
+    const auto camera = [&] { return B.tap.media("A", "camera"); };
+    const auto mic = [&] { return B.tap.media("A", "mic"); };
+
+    r.shaper.set_rung("B", cvc::video_rung::off);
+    run_room(r, cs, 0.5); // what was in flight lands
+    std::uint64_t cam0 = camera(), mic0 = mic();
+    run_room(r, cs, 2.0);
+    EXPECT_EQ(camera() - cam0, 0u) << "off: no camera";
+    EXPECT_GT(mic() - mic0, 40u) << "but the mic flows";
+
+    r.shaper.set_rung("B", cvc::video_rung::thumb);
+    cam0 = camera();
+    run_room(r, cs, 3.0);
+    const std::uint64_t thumbs = camera() - cam0;
+    EXPECT_GE(thumbs, 3u) << "thumb: about 2 a second";
+    EXPECT_LE(thumbs, 9u);
+
+    r.shaper.set_rung("B", cvc::video_rung::full);
+    cam0 = camera();
+    run_room(r, cs, 2.0);
+    EXPECT_GT(camera() - cam0, 40u) << "full: every frame (30 a second)";
+  }
+}
+
+// The relay's ~1 Hz WebSocket re-broadcast never sends a client its own intent back. The client is
+// the source: the relay's copy is at best what the client holds, and older while the client's next
+// write is in flight -- the echo that made a walking client's own avatar jump (it predicted on its
+// previous intent until the next broadcast). Here the newer write is held back until after the
+// broadcast, so the relay still has the older one.
+TEST(RoomRelayLoopbackTest, ABroadcastNeverEchoesAClientsOwnIntent) {
+#if !defined(CVC_ENABLE_WS)
+  GTEST_SKIP() << "no WebSocket transport in this build";
+#else
+  test_relay r(relay_options{});
+  test_client A("A", link_kind::ws);
+  const std::vector<test_client *> cs = {&A};
+  ASSERT_NO_FATAL_FAILURE(bring_up(r, cs));
+  cvc::ariadne::avatar_intent first, second;
+  first.move = {0.5, 0.0, 0.0};
+  second.move = {0.0, 0.5, 0.0};
+  cvc::ariadne::write_intent(A.app, kRoom, "A", first, 100);
+  ASSERT_TRUE(run_room(r, cs, 3.0, {}, [&] {
+    cvc::ariadne::avatar_intent got;
+    return cvc::ariadne::read_intent(r.app, kRoom, "A", got) && got.move.x == 0.5;
+  })) << "the relay has A's first intent";
+
+  // A's second intent, not sent yet; then the relay re-broadcasts the room.
+  cvc::ariadne::write_intent(A.app, kRoom, "A", second, 200);
+  r.ws.broadcast_snapshot();
+  std::this_thread::sleep_for(std::chrono::milliseconds(400)); // A's reader applies what came
+  cvc::ariadne::avatar_intent got;
+  std::uint64_t stamp = 0;
+  ASSERT_TRUE(cvc::ariadne::read_intent(A.app, kRoom, "A", got, &stamp));
+  EXPECT_EQ(stamp, 200u) << "A still holds its second intent, not the relay's copy of its first";
+  EXPECT_DOUBLE_EQ(got.move.y, 0.5);
+  EXPECT_FALSE(cvc::ariadne::read_current_intent(A.app, kRoom, "A", 300, got))
+      << "and an intent older than A's last proposal is never taken as current";
+#endif
+}
+
+// Device keys (state_device_key.h): a device that proves its key gets its tag, on each transport
+// the build has. A second device showing the same id under another key (an impostor that learned
+// the id) is refused and gets none, nor does a device with an id and no key; and the first device
+// coming back with its key matches its pin and gets its tag again.
+TEST(RoomRelayLoopbackTest, OnlyAProvenDeviceGetsItsTag) {
+  if (!cvc::device_keys_available())
+    GTEST_SKIP() << "no device keys in this build";
+  const std::string dev = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const std::string tag = ra::room_device_tag(kRoom, dev);
+  const std::vector<link_kind> kinds = link_kinds();
+  for (const link_kind kind : kinds) {
+    SCOPED_TRACE(kind == link_kind::grpc ? "grpc" : "ws");
+    test_relay r(relay_options{});
+    auto A = std::make_unique<test_client>("A", kind);
+    auto I =
+        std::make_unique<test_client>("I", kinds.back() == kind ? kinds.front() : kinds.back());
+    auto N = std::make_unique<test_client>("N", kind);
+    A->device = I->device = dev;
+    A->seed = std::string(32, 'a');
+    I->seed = std::string(32, 'i');
+    N->device = "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn";
+    {
+      const std::vector<test_client *> first = {A.get()};
+      ASSERT_NO_FATAL_FAILURE(bring_up(r, first));
+      EXPECT_TRUE(run_room(r, first, 5.0, {}, [&] {
+        return ra::read_participant_device(A->app, kRoom, "A") == tag;
+      })) << "A proved its key and shows its tag";
+    }
+    const std::vector<test_client *> cs = {A.get(), I.get(), N.get()};
+    for (test_client *c : {I.get(), N.get()}) {
+      ASSERT_TRUE(c->connect(r));
+      c->join();
+    }
+    EXPECT_TRUE(run_room(r, cs, 5.0, {}, [&] {
+      return r.device_proofs_refused() >= 1 && r.server.has_participant("I") &&
+             r.server.has_participant("N");
+    })) << "the impostor's key is not A's pin";
+    run_room(r, cs, 1.5); // a link pass or more
+    for (const char *pid : {"I", "N"})
+      EXPECT_EQ(ra::read_participant_device(r.app, kRoom, pid), "") << pid << " has no tag";
+    EXPECT_EQ(ra::read_participant_device(r.app, kRoom, "A"), tag) << "while A keeps its own";
+    EXPECT_EQ(r.devices_verified(), 1u);
+
+    // The same device again, as a fresh process (which cannot rejoin under its old pid: see
+    // ReconnectUnderSamePidGetsZeroedIntent), proves its key against the pin.
+    A->disconnect();
+    run_room(r, {I.get(), N.get()}, 1.0);
+    auto A2 = std::make_unique<test_client>("A", kind);
+    A2->device = dev;
+    A2->seed = std::string(32, 'a');
+    ASSERT_TRUE(A2->connect(r));
+    EXPECT_TRUE(run_room(r, {A2.get(), I.get(), N.get()}, 5.0, {}, [&] {
+      return r.devices_verified() >= 2;
+    })) << "the device itself matches its pin";
+    EXPECT_EQ(r.device_proofs_refused(), 1u);
+  }
 }
 
 // A walks (an intent it proposed), then its connection drops. The relay retracts it and zeroes
@@ -1178,10 +1560,12 @@ TEST(RoomRelayLoopbackTest, ReconnectUnderSamePidGetsZeroedIntent) {
     return !r.server.has_participant("A") && relay_intent_x(x) && x == 0.0;
   })) << "the relay retracts A and zeroes its intent";
 
+  // It never joins, so no filter is installed for it and the admission hold releases it only when
+  // the hold (2 s) runs out, unfiltered.
   test_client again("A", kind);
   ASSERT_TRUE(again.connect(r));
   cvc::ariadne::avatar_intent got;
-  ASSERT_TRUE(run_room(r, cs, 3.0, {}, [&] {
+  ASSERT_TRUE(run_room(r, cs, 6.0, {}, [&] {
     return cvc::ariadne::read_intent(again.app, kRoom, "A", got);
   })) << "the bootstrap carries A's own intent";
   EXPECT_EQ(got.move.x, 0.0) << "zeroed, not the walk proposed before the drop";
@@ -1197,6 +1581,102 @@ TEST(RoomRelayLoopbackTest, ReconnectUnderSamePidGetsZeroedIntent) {
   EXPECT_LT(std::hypot(v.x, v.y), 0.05) << "the relaunch stands where it spawned";
   EXPECT_EQ(B.tap.intents("A"), 0u) << "B never received A's intent";
   EXPECT_EQ(B.tap.intents("A_2"), 0u);
+}
+
+namespace {
+
+struct bootstrap_run {
+  std::uint64_t intents = 0; // other participants' intent leaves the late joiner applied
+  std::uint64_t held = 0;    // its admission: held, and released by the timeout
+  std::uint64_t timeouts = 0;
+  bool knows_all = false;       // it came to hold every other participant's pose
+  double seconds = -1.0;        // from its join to that
+  double outer_error = -1.0;    // its view of the outer peer C against the relay's
+  std::uint64_t outer_live = 0; // live pose frames it got for C
+};
+
+// Hall preset: A and B walk (each proposing an intent) 4 m apart and C stands 30 m off; then D
+// joins between A and B, so they are inner for it and C is outer. HOLD: the relay holds each
+// admission for its filter, as arisrv does.
+bootstrap_run run_late_bootstrap(bool hold) {
+  bootstrap_run out;
+  relay_options o;
+  o.aoi = ra::hall_aoi_params();
+  o.large_scene = true;
+  o.hold = hold;
+  test_relay r(o);
+  client_list own = make_clients({"A", "B", "C", "D"});
+  test_client &A = *own[0], &B = *own[1], &C = *own[2], &D = *own[3];
+  r.place_on_join = {
+      {"A", {-2.0, 10.0}}, {"B", {2.0, 10.0}}, {"C", {32.0, 10.0}}, {"D", {0.0, 12.0}}};
+  std::vector<test_client *> cs{&A, &B, &C};
+  bring_up(r, cs);
+  if (::testing::Test::HasFatalFailure())
+    return out;
+  cvc::ariadne::avatar_intent walk;
+  walk.move = {0.3, 0.0, 0.0};
+  cvc::ariadne::write_intent(A.app, kRoom, "A", walk);
+  walk.move = {-0.3, 0.0, 0.0};
+  cvc::ariadne::write_intent(B.app, kRoom, "B", walk);
+  cvc::ariadne::avatar_intent got;
+  EXPECT_TRUE(run_room(r, cs, 3.0, {}, [&] {
+    return cvc::ariadne::read_intent(r.app, kRoom, "B", got) && got.move.x < -0.2;
+  })) << "the relay holds the walkers' intents";
+
+  const std::uint64_t held = r.admissions_held(), timeouts = r.admission_timeouts();
+  if (!D.connect(r)) {
+    ADD_FAILURE() << "D could not reach the relay";
+    return out;
+  }
+  D.join();
+  cs.push_back(&D);
+  const double t0 = now_s();
+  out.knows_all = run_room(r, cs, 4.0, {}, [&] {
+    return D.h.pose_known("A") && D.h.pose_known("B") && D.h.pose_known("C");
+  });
+  out.seconds = now_s() - t0;
+  run_room(r, cs, 0.3);
+  out.intents = D.tap.intents("A") + D.tap.intents("B") + D.tap.intents("C");
+  out.held = r.admissions_held() - held;
+  out.timeouts = r.admission_timeouts() - timeouts;
+  cvc::physics::body_state rs, ds;
+  std::uint64_t rt = 0, dt = 0;
+  if (r.tree_pose("C", rs, rt) && D.tree_pose("C", ds, dt))
+    out.outer_error = xy_distance(rs.position, ds.position);
+  out.outer_live = D.tap.live_pose("C");
+  EXPECT_EQ(r.tier("D", "C"), ra::aoi_tier::outer);
+  EXPECT_EQ(r.tier("D", "A"), ra::aoi_tier::inner);
+  return out;
+}
+
+} // namespace
+
+// A late joiner's admit snapshot is filtered like its live stream. Without the admission hold it
+// goes out before the relay knows who the joiner is, so it carries the walkers' intents (and the
+// outer peer's pose) once; with the hold it waits a step for the joiner's filter, then carries no
+// other participant's intent, and the outer peer arrives by the push its new outer pair is owed,
+// in the same step.
+TEST(RoomRelayLoopbackTest, LateJoinerBootstrapIsFiltered) {
+  const bootstrap_run off = run_late_bootstrap(false);
+  ASSERT_FALSE(HasFatalFailure());
+  const bootstrap_run on = run_late_bootstrap(true);
+  ASSERT_FALSE(HasFatalFailure());
+  std::printf("[ room ] late joiner: others' intent leaves %llu without the hold, %llu with it; "
+              "every pose in %.2f s, %.2f s\n",
+              static_cast<unsigned long long>(off.intents),
+              static_cast<unsigned long long>(on.intents), off.seconds, on.seconds);
+  EXPECT_GT(off.intents, 0u) << "without the hold the bootstrap carries the others' intents";
+  EXPECT_EQ(on.intents, 0u) << "with it, not one";
+  EXPECT_EQ(off.held, 0u);
+  EXPECT_EQ(on.held, 1u);
+  EXPECT_EQ(on.timeouts, 0u) << "its filter released it, not the timeout";
+  EXPECT_TRUE(on.knows_all);
+  // A step and a round trip: ~0.1 s here, ~1 s on a Debug gRPC CI runner. The filter, not the
+  // timeout, released it (timeouts above); this only bounds it well inside the 2 s hold.
+  EXPECT_LT(on.seconds, 1.5) << "a step and a round trip, well inside the 2 s hold";
+  EXPECT_GE(on.outer_error, 0.0);
+  EXPECT_LE(on.outer_error, 1e-4) << "the outer peer, from the push";
+  EXPECT_EQ(on.outer_live, 0u);
 }
 
 namespace {
@@ -1239,6 +1719,7 @@ late_join_run run_late_join(bool trim) {
   relay_options o;
   o.trim = trim;
   o.ws_broadcast = false; // only the joins' own bytes
+  o.hold = false;         // the joiners never join, so a hold would only wait out its 2 s
   test_relay r(o);
   const client_list own = make_clients({"A", "B"});
   const std::vector<test_client *> cs = ptrs(own);
@@ -1362,6 +1843,7 @@ double run_control_plane(bool s7) {
   o.use_aoi = s7;
   o.gate = s7;
   o.trim = s7;
+  o.bind_writes = s7; // the relay before S7 had no bound writes either (they too refuse the echo)
   o.ws_broadcast = false;
   test_relay r(o);
   const client_list own = make_clients({"A", "B", "C"}, s7 ? "conf" : "");

@@ -15,6 +15,8 @@
 #include <chrono>
 #include <cstdio> // the write watchdog's report
 #include <cvc/state/state_cluster_shard.h>
+#include <cvc/state/state_device_key.h>
+#include <cvc/state/state_identity.h> // constant_time_equal
 #include <cvc/state/state_message_bus.h>
 #include <cvc/state/state_transport_grpc.h>
 #include <functional>
@@ -300,6 +302,7 @@ public:
   // changes after that. Any other thread reads them only through peer_id().
   std::string remote_node_id;
   std::string remote_cluster_id;
+  std::string remote_device_id; // the device id of that Hello ("" when none), written the same way
   std::atomic<bool> identified{false};
 
   // The peer's node id once its Hello has arrived; nullptr before (an unknown peer, which the
@@ -314,7 +317,58 @@ public:
       return;
     remote_node_id = h.node_id();
     remote_cluster_id = h.cluster_id();
+    // An id that is not a valid_device_id (oversized, say) is ignored, not stored.
+    remote_device_id = valid_device_id(h.device_id()) ? h.device_id() : std::string();
     identified.store(true, std::memory_order_release);
+  }
+
+  // The inbound gate (state_transport::set_inbound_gate) this ACCEPTED stream is held to, copied
+  // before its first read; null for a dialed stream or an ungated relay. `bound`: it held its node
+  // id at its last check, and `displaced`: a later claim took it over since (set by the gate). Used
+  // only on this stream's reader thread, apart from `displaced`.
+  std::shared_ptr<state_inbound_gate> gate;
+  bool bound = false;
+  std::atomic<bool> displaced{false};
+  // Its Hello named one of the relay's own ids (the transport's or a shard's): never a client's.
+  bool local_id = false;
+  // Device proof (state_device_key.h), on an ACCEPTED stream:
+  //   - device_nonce: the challenge the relay's Hello carried, taken by the first proof checked
+  //     (guarded by proof_mu, as the Hello may go out on another thread);
+  //   - pending_*: a proof that came before the client's own Hello (its reader can answer ours
+  //     before its Hello is written), checked once that Hello names the device; reader only;
+  //   - device_verified: the proof checked out against the device id's pin.
+  std::mutex proof_mu;
+  std::string device_nonce;
+  bool proof_pending = false;
+  std::string pending_key, pending_signature;
+  std::atomic<bool> device_verified{false};
+  // Whether this stream may speak now: always without a gate; with one, once it has identified and
+  // holds its node id (a duplicate claim retries here until the holder closes or falls silent).
+  bool speaks() {
+    if (!gate)
+      return true;
+    if (local_id)
+      return false;
+    if (bound && displaced.load(std::memory_order_relaxed))
+      bound = false;
+    if (!bound) {
+      const std::string *pid = peer_id();
+      displaced.store(false, std::memory_order_relaxed);
+      bound = pid != nullptr && gate->bind(*pid, this, &last_rx_ns, &displaced);
+    }
+    return bound;
+  }
+  // As speaks(), naming its own node id as `origin`.
+  bool speaks_as(const std::string &origin) {
+    return speaks() && (!gate || origin == remote_node_id);
+  }
+  // Give the node id up at close. True when this close is that peer leaving: always without a
+  // gate; with one, when it held the id until now.
+  bool unbind() {
+    bound = false;
+    if (!gate)
+      return true;
+    return identified.load() && gate->release(remote_node_id, this);
   }
 
   // Link quality (state_link_stats): traffic both ways + the Ping/Pong round trip. `accepted` marks
@@ -331,11 +385,15 @@ public:
   std::atomic<std::int64_t> write_started_ns{0};
   std::mutex cancel_mu;
   std::function<void()> cancel;
+  // Waiting for its bootstrap (the admission hold): every write fails until release_locked clears
+  // it. Set and cleared only under write_mu, so a write that saw it set happened before the release
+  // took its snapshot, and so is in it.
+  std::atomic<bool> held{false};
 
   bool can_write() const { return static_cast<bool>(write_raw); }
 
   bool write_locked(const pb::Frame &f) {
-    if (!alive.load() || !write_raw)
+    if (!alive.load() || !write_raw || held.load(std::memory_order_relaxed))
       return false;
     const std::size_t bytes = f.ByteSizeLong();
     write_started_ns.store(link_now_ns(), std::memory_order_relaxed);
@@ -382,7 +440,8 @@ public:
 
   grpc::Status Channel(grpc::ServerContext *ctx,
                        grpc::ServerReaderWriter<pb::Frame, pb::Frame> *stream) override {
-    // Phase 5: bearer-token check.
+    // Phase 5: bearer-token check (a room token, §5f), before the stream is admitted, so a peer
+    // without it is sent nothing.
     const std::string &expected = _owner->auth().expected_token;
     if (!expected.empty()) {
       const auto &md = ctx->client_metadata();
@@ -390,16 +449,17 @@ public:
       bool ok = false;
       if (it != md.end()) {
         std::string got(it->second.data(), it->second.size());
-        std::string want = "Bearer " + expected;
-        if (got == want)
-          ok = true;
+        ok = constant_time_equal(got, "Bearer " + expected);
       }
-      if (!ok)
+      if (!ok) {
+        _owner->note_auth_rejected();
         return grpc::Status(grpc::StatusCode::UNAUTHENTICATED, "missing or invalid bearer token");
+      }
     }
 
     auto conn = std::make_shared<state_transport_grpc::connection>();
     conn->accepted = true;
+    conn->gate = _owner->inbound_gate();
     conn->opened_ns = link_now_ns();
     conn->last_rx_ns.store(conn->opened_ns);
     conn->cancel = [ctx] { ctx->TryCancel(); };
@@ -416,7 +476,22 @@ public:
       if (_owner->on_link_frame(*conn, in))
         continue;
       if (in.has_hello()) {
+        const bool first = !conn->identified.load(std::memory_order_relaxed);
         conn->on_hello(in.hello());
+        if (first && conn->gate && conn->identified.load(std::memory_order_relaxed)) {
+          conn->local_id = _owner->is_local_id(conn->remote_node_id);
+          (void)conn->speaks(); // claim the node id now
+        }
+        // A proof that came first can be checked now that the Hello names the device.
+        if (conn->proof_pending && conn->identified.load(std::memory_order_relaxed)) {
+          conn->proof_pending = false;
+          const std::string key = std::move(conn->pending_key);
+          const std::string signature = std::move(conn->pending_signature);
+          _owner->on_device_proof(*conn, key, signature);
+        }
+      } else if (in.has_device_proof()) {
+        _owner->on_device_proof(*conn, in.device_proof().public_key(),
+                                in.device_proof().signature());
       } else if (in.has_mutation()) {
         _owner->on_inbound_mutation(decode_mutation(in.mutation()), conn.get());
         _owner->increment_recv_mutations();
@@ -434,14 +509,28 @@ public:
         std::vector<unsigned char> data_vec(data_str.begin(), data_str.end());
         _owner->on_inbound_chunk_response(cr.request_id(), cr.found(), std::move(data_vec));
       } else if (in.has_snapshot_request()) {
+        // Under a gate, only a peer that speaks as itself is answered (so through its own rule).
+        if (!conn->speaks()) {
+          _owner->note_inbound_rejected();
+          continue;
+        }
         _owner->on_inbound_snapshot_request(conn.get(), in.snapshot_request().cluster_id(),
                                             in.snapshot_request().path_prefix(),
                                             in.snapshot_request().request_id());
       } else if (in.has_snapshot_response()) {
+        // A gated relay takes none from its clients (state_inbound_gate).
+        if (conn->gate) {
+          _owner->note_inbound_rejected();
+          continue;
+        }
         const auto &sr = in.snapshot_response();
         _owner->on_inbound_snapshot_response(sr.request_id(), read_snapshot_entries(sr),
                                              sr.final());
       } else if (in.has_heartbeat()) {
+        if (!conn->speaks_as(in.heartbeat().node_id())) {
+          _owner->note_inbound_rejected(); // a heartbeat for another peer
+          continue;
+        }
         _owner->on_inbound_heartbeat(in.heartbeat().node_id(), in.heartbeat().cluster_id());
       }
     }
@@ -457,8 +546,10 @@ public:
     ctx->TryCancel();
     { std::lock_guard<std::timed_mutex> wl(conn->write_mu); }
     _owner->unregister_connection(conn.get());
+    // Under an inbound gate, only the stream holding its node id leaves as that peer.
+    const bool left = conn->unbind();
     const std::string *pid = conn->peer_id();
-    _owner->notify_connection_closed(pid ? *pid : std::string());
+    _owner->notify_connection_closed(pid && left ? *pid : std::string());
     return grpc::Status::OK;
   }
 
@@ -607,14 +698,19 @@ bool state_transport_grpc::connect_to_peer(const std::string &target,
     if (ctx)
       ctx->TryCancel();
   };
-  conn->client_reader = std::thread([this, conn]() {
+  conn->client_reader = std::thread([this, conn, target]() {
     pb::Frame in;
     while (conn->alive.load() && conn->client_stream->Read(&in)) {
       increment_recv_frames();
       if (on_link_frame(*conn, in))
         continue;
       if (in.has_hello()) {
+        const bool first = !conn->identified.load(std::memory_order_relaxed);
         conn->on_hello(in.hello());
+        // A relay that verifies device keys challenges the clients it accepts; answer it.
+        if (first && conn->identified.load(std::memory_order_relaxed) &&
+            !in.hello().nonce().empty())
+          answer_device_challenge(*conn, in.hello().nonce(), in.hello().node_id());
       } else if (in.has_mutation()) {
         on_inbound_mutation(decode_mutation(in.mutation()), conn.get());
         increment_recv_mutations();
@@ -642,6 +738,13 @@ bool state_transport_grpc::connect_to_peer(const std::string &target,
         on_inbound_heartbeat(in.heartbeat().node_id(), in.heartbeat().cluster_id());
       }
     }
+    // A server sends its Hello first; a stream that ended without one was refused (a missing or
+    // wrong bearer token, most likely), though connect_to_peer reported the dial a success.
+    if (!conn->identified.load() && _running.load())
+      std::fprintf(stderr,
+                   "cvc: grpc: %s ended the stream before its Hello: refused (bearer/room token "
+                   "missing or wrong?)\n",
+                   target.c_str());
     conn->alive.store(false);
   });
 
@@ -859,6 +962,12 @@ state_transport_grpc::publish_message(const state_message &m) {
 }
 
 void state_transport_grpc::on_inbound_mutation(const state_mutation &m, connection *origin) {
+  // A gated relay takes from a client only what it may write as itself (state_inbound_gate).
+  if (origin != nullptr && origin->gate &&
+      !(origin->speaks_as(m.origin_node_id) && origin->gate->admit(origin->remote_node_id, m))) {
+    note_inbound_rejected();
+    return;
+  }
   std::vector<state_cluster_shard *> peers;
   {
     std::lock_guard<std::mutex> lk(_shards_mu);
@@ -915,6 +1024,11 @@ void state_transport_grpc::on_inbound_mutation(const state_mutation &m, connecti
 }
 
 void state_transport_grpc::on_inbound_message(const state_message &m, connection *origin) {
+  if (origin != nullptr && origin->gate &&
+      !(origin->speaks_as(m.origin_node_id) && origin->gate->admit(origin->remote_node_id, m))) {
+    note_inbound_rejected();
+    return;
+  }
   std::vector<state_cluster_shard *> peers;
   {
     std::lock_guard<std::mutex> lk(_shards_mu);
@@ -979,18 +1093,32 @@ bool state_transport_grpc::relay_admits(const state_message &m,
 
 std::size_t state_transport_grpc::write_media(const media_frame &m, const void *exclude,
                                               bool gated) {
+  const auto encode = [](const media_frame &src, pb::Frame &out) {
+    pb::MediaFrame *mf = out.mutable_media();
+    mf->set_origin_node_id(src.origin_node_id);
+    mf->set_stream_id(src.stream_id);
+    mf->set_codec(src.codec);
+    mf->set_width(src.width);
+    mf->set_height(src.height);
+    mf->set_seq(src.seq);
+    mf->set_pts_seconds(src.pts_seconds);
+    mf->set_sample_rate(src.sample_rate);
+    mf->set_channels(src.channels);
+    mf->set_payload(src.payload.data(), static_cast<int>(src.payload.size()));
+  };
   pb::Frame frame;
-  pb::MediaFrame *mf = frame.mutable_media();
-  mf->set_origin_node_id(m.origin_node_id);
-  mf->set_stream_id(m.stream_id);
-  mf->set_codec(m.codec);
-  mf->set_width(m.width);
-  mf->set_height(m.height);
-  mf->set_seq(m.seq);
-  mf->set_pts_seconds(m.pts_seconds);
-  mf->set_sample_rate(m.sample_rate);
-  mf->set_channels(m.channels);
-  mf->set_payload(m.payload.data(), static_cast<int>(m.payload.size()));
+  encode(m, frame);
+  // The shaper's variants, each encoded once for every receiver it serves. Each is held here for
+  // the whole fan: matched by address, a variant freed mid-fan could hand its address to another.
+  std::vector<std::pair<std::shared_ptr<const media_frame>, pb::Frame>> variants;
+  const auto variant_frame = [&](const std::shared_ptr<const media_frame> &v) -> const pb::Frame & {
+    for (const auto &e : variants)
+      if (e.first == v)
+        return e.second;
+    variants.emplace_back(v, pb::Frame());
+    encode(*v, variants.back().second);
+    return variants.back().second;
+  };
 
   std::vector<std::shared_ptr<connection>> conns;
   {
@@ -1000,16 +1128,21 @@ std::size_t state_transport_grpc::write_media(const media_frame &m, const void *
   // One copy of the gate for the whole frame: a concurrent set_media_gate swaps the slot, never
   // the function this loop is calling.
   std::shared_ptr<const media_gate_fn> gate;
+  std::shared_ptr<const media_shape_fn> shaper;
   if (gated) {
     std::lock_guard<std::mutex> lk(_media_gate_mu);
     gate = _media_gate;
+    shaper = _media_shaper;
   }
   const std::uint64_t stall_ns = _media_stall_ns.load(std::memory_order_relaxed);
   // Media is unreplicated, un-bridged (it crosses protocols via the media_router), and carries no
   // path. `exclude` (a connection*) skips the origin peer when a relay fans; nullptr sends to all.
   std::size_t n = 0;
   for (auto &c : conns) {
-    if (!c || c.get() == exclude || !c->alive.load() || !c->can_write())
+    // A held connection (the admission hold) gets no media yet; skipping it here, unlocked, also
+    // keeps the gate from spending a thumbnail on it.
+    if (!c || c.get() == exclude || !c->alive.load() || !c->can_write() ||
+        c->held.load(std::memory_order_relaxed))
       continue;
     std::unique_lock<std::timed_mutex> lk(c->write_mu, std::defer_lock);
     if (stall_ns != 0) {
@@ -1023,6 +1156,7 @@ std::size_t state_transport_grpc::write_media(const media_frame &m, const void *
            media_write_stalled(started, static_cast<std::uint64_t>(link_now_ns()), stall_ns)) ||
           !lk.try_lock_for(std::chrono::nanoseconds(stall_ns))) {
         _media_stall_dropped.fetch_add(1, std::memory_order_relaxed);
+        c->link.note_media_dropped();
         continue;
       }
     } else {
@@ -1037,8 +1171,24 @@ std::size_t state_transport_grpc::write_media(const media_frame &m, const void *
         continue;
       }
     }
-    if (c->write_locked(frame)) {
+    // Then its shape: the frame as sent, a smaller variant, or nothing. An unidentified receiver
+    // is shaped as "", a viewer the shaper has no rung for.
+    const pb::Frame *out = &frame;
+    if (shaper) {
+      const std::string *pid = c->peer_id();
+      const media_shape s = (*shaper)(m, pid ? *pid : std::string());
+      if (s.drop) {
+        _media_shape_dropped.fetch_add(1, std::memory_order_relaxed);
+        continue;
+      }
+      if (s.variant) {
+        out = &variant_frame(s.variant);
+        _media_shaped.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+    if (c->write_locked(*out)) {
       _sent_frames.fetch_add(1, std::memory_order_relaxed);
+      c->link.note_media_sent();
       ++n;
     }
   }
@@ -1065,6 +1215,16 @@ void state_transport_grpc::set_media_gate(media_gate_fn gate) {
   // mid-frame keeps its own copy alive).
 }
 
+void state_transport_grpc::set_media_shaper(media_shape_fn shaper) {
+  std::shared_ptr<const media_shape_fn> next;
+  if (shaper)
+    next = std::make_shared<const media_shape_fn>(std::move(shaper));
+  {
+    std::lock_guard<std::mutex> lk(_media_gate_mu);
+    _media_shaper.swap(next);
+  }
+}
+
 void state_transport_grpc::set_media_stall_drop(std::chrono::milliseconds ms) noexcept {
   const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(ms).count();
   _media_stall_ns.store(ns > 0 ? static_cast<std::uint64_t>(ns) : 0, std::memory_order_relaxed);
@@ -1088,6 +1248,10 @@ void state_transport_grpc::set_on_media(media_frame_fn cb) {
 
 void state_transport_grpc::on_inbound_media(const media_frame &m, connection *origin) {
   _media_recv.fetch_add(1, std::memory_order_relaxed);
+  if (origin != nullptr && !origin->speaks_as(m.origin_node_id)) {
+    note_inbound_rejected(); // media as another peer
+    return;
+  }
   if (_media_sink)
     _media_sink(m, /*src_conn=*/origin);
 }
@@ -1118,15 +1282,98 @@ void state_transport_grpc::admit_connection(const std::shared_ptr<connection> &c
   std::lock_guard<std::timed_mutex> wlk(conn->write_mu);
   register_connection(conn);
   send_hello_locked(*conn);
+  // The admission hold: an accepted relay stream gets its bootstrap, and live traffic, only once
+  // release_admissions() finds it ready, so the snapshot can go through the peer's delivery rule.
+  if (relay && conn->accepted && _admission_hold_ns.load(std::memory_order_relaxed) > 0) {
+    conn->held.store(true, std::memory_order_relaxed);
+    _admissions_held.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
   if (backfill && !shards.empty())
-    send_backfill_locked(*conn, shards);
+    send_backfill_locked(*conn, shards, nullptr);
   // A relay pushes its full current state so a LATE-joining client sees peers already in the room
   // (the live set_relay forwarding only carries writes that happen AFTER this client connects, and
   // the relay's room tree is all remote-origin so backfill's replay_local yields nothing). Mirrors
   // the WS relay's send_snapshot_locked — without it a native gRPC client joining a populated room
   // sees no one.
   if (relay && !shards.empty())
-    send_snapshot_locked(*conn, shards);
+    send_snapshot_locked(*conn, shards, nullptr);
+}
+
+void state_transport_grpc::set_admission_hold(std::chrono::milliseconds max_hold) {
+  // A day at most, so the nanosecond count cannot overflow (milliseconds::max() means "long").
+  const auto capped = (std::min)(max_hold, std::chrono::milliseconds(std::chrono::hours(24)));
+  const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(capped).count();
+  _admission_hold_ns.store(ns > 0 ? static_cast<std::int64_t>(ns) : 0, std::memory_order_relaxed);
+}
+
+void state_transport_grpc::set_inbound_gate(std::shared_ptr<state_inbound_gate> gate) {
+  std::lock_guard<std::mutex> lk(_inbound_gate_mu);
+  _inbound_gate = std::move(gate);
+}
+
+std::shared_ptr<state_inbound_gate> state_transport_grpc::inbound_gate() const {
+  std::lock_guard<std::mutex> lk(_inbound_gate_mu);
+  return _inbound_gate;
+}
+
+bool state_transport_grpc::is_local_id(const std::string &id) const {
+  if (id == _node_id)
+    return true;
+  std::lock_guard<std::mutex> lk(_shards_mu);
+  return std::any_of(_shards.begin(), _shards.end(), [&id](const state_cluster_shard *s) {
+    return s != nullptr && s->local_node_id() == id;
+  });
+}
+
+std::size_t state_transport_grpc::release_admissions() {
+  std::vector<std::shared_ptr<connection>> held;
+  {
+    std::lock_guard<std::mutex> lk(_conns_mu);
+    for (const auto &c : _conns)
+      if (c && c->alive.load() && c->held.load(std::memory_order_relaxed))
+        held.push_back(c);
+  }
+  if (held.empty())
+    return 0;
+  std::vector<state_cluster_shard *> shards;
+  {
+    std::lock_guard<std::mutex> lk(_shards_mu);
+    shards = _shards;
+  }
+  const std::int64_t hold = _admission_hold_ns.load(std::memory_order_relaxed);
+  const std::int64_t now = link_now_ns();
+  std::size_t n = 0;
+  for (const auto &c : held) {
+    // The rule is read before the write lock is taken (no path holds the registry's lock and a
+    // connection's write lock together).
+    state_peer_registry::delivery_view view;
+    const std::string *pid = c->peer_id();
+    if (pid)
+      view = _peers.view_of(*pid);
+    const bool ruled = view.filtered();
+    if (!ruled && hold > 0 && now - c->opened_ns < hold)
+      continue; // no rule for the peer yet, and the hold has time left
+    std::lock_guard<std::timed_mutex> wlk(c->write_mu);
+    if (!release_locked(*c, shards, ruled ? &view : nullptr))
+      continue;
+    if (!ruled)
+      _admission_timeouts.fetch_add(1, std::memory_order_relaxed);
+    ++n;
+  }
+  return n;
+}
+
+bool state_transport_grpc::release_locked(connection &c,
+                                          const std::vector<state_cluster_shard *> &shards,
+                                          const state_peer_registry::delivery_view *view) {
+  if (!c.held.exchange(false, std::memory_order_relaxed))
+    return false;
+  if (_backfill_on_connect.load(std::memory_order_acquire) && !shards.empty())
+    send_backfill_locked(c, shards, view);
+  if (_relay.load(std::memory_order_relaxed) && !shards.empty())
+    send_snapshot_locked(c, shards, view);
+  return true;
 }
 
 void state_transport_grpc::send_hello_locked(connection &c) {
@@ -1134,19 +1381,85 @@ void state_transport_grpc::send_hello_locked(connection &c) {
   auto *h = f.mutable_hello();
   h->set_node_id(_node_id);
   h->set_cluster_id(_cluster_id);
+  if (!_device_id.empty())
+    h->set_device_id(_device_id);
+  // A relay with a pin store challenges each client it accepts to prove its device key.
+  if (c.accepted && _device_pins && device_keys_available()) {
+    std::lock_guard<std::mutex> lk(c.proof_mu);
+    c.device_nonce = device_random_bytes(kDeviceNonceBytes);
+    h->set_nonce(c.device_nonce);
+  }
   c.write_locked(f);
 }
 
+void state_transport_grpc::answer_device_challenge(connection &c, const std::string &nonce,
+                                                   const std::string &relay_node_id) {
+  // Sign only a nonce of a sane size: the proof is for one relay's challenge, nothing larger.
+  if (!_device_signer || _device_id.empty() || nonce.size() > kDeviceNonceMaxBytes)
+    return;
+  pb::Frame f;
+  auto *p = f.mutable_device_proof();
+  p->set_public_key(_device_signer->public_key());
+  p->set_signature(
+      _device_signer->sign(device_proof_message(nonce, relay_node_id, _node_id, _device_id)));
+  if (p->signature().empty())
+    return;
+  if (c.write(f))
+    _sent_frames.fetch_add(1, std::memory_order_relaxed);
+}
+
+void state_transport_grpc::on_device_proof(connection &c, const std::string &public_key,
+                                           const std::string &signature) {
+  if (c.accepted && !c.identified.load(std::memory_order_relaxed) && !c.proof_pending) {
+    c.proof_pending = true; // checked when the Hello comes (the server's read loop)
+    c.pending_key = public_key;
+    c.pending_signature = signature;
+    return;
+  }
+  std::string nonce;
+  {
+    std::lock_guard<std::mutex> lk(c.proof_mu);
+    nonce.swap(c.device_nonce); // one proof per challenge
+  }
+  const std::string *pid = c.peer_id();
+  if (nonce.empty() || pid == nullptr || c.local_id || c.remote_device_id.empty() ||
+      !_device_pins) {
+    _device_proofs_refused.fetch_add(1, std::memory_order_relaxed); // unasked, or anonymous
+    return;
+  }
+  const std::string message = device_proof_message(nonce, _node_id, *pid, c.remote_device_id);
+  if (!verify_device_proof(public_key, message, signature)) {
+    _device_proofs_refused.fetch_add(1, std::memory_order_relaxed);
+    std::fprintf(stderr, "cvc: grpc device proof from %s did not verify\n", pid->c_str());
+    return;
+  }
+  const state_device_pins::verdict v = _device_pins->check(c.remote_device_id, public_key);
+  if (v != state_device_pins::verdict::pinned && v != state_device_pins::verdict::matched) {
+    _device_proofs_refused.fetch_add(1, std::memory_order_relaxed);
+    std::fprintf(
+        stderr,
+        "cvc: grpc device of %s was not pinned (another key, or a full store): unverified\n",
+        pid->c_str());
+    return;
+  }
+  c.device_verified.store(true, std::memory_order_relaxed);
+  _devices_verified.fetch_add(1, std::memory_order_relaxed);
+}
+
 void state_transport_grpc::send_backfill_locked(connection &c,
-                                                const std::vector<state_cluster_shard *> &shards) {
-  // The peer's Hello has not arrived yet, so there is no remote node
-  // id to filter on; send everything and let the receiver drop what
-  // does not match its cluster (on_inbound_mutation) or its interest
-  // set (ingest_remote), exactly as it would for live traffic.
+                                                const std::vector<state_cluster_shard *> &shards,
+                                                const state_peer_registry::delivery_view *view) {
+  // At admission the peer's Hello has not arrived yet, so there is no
+  // remote node id to filter on; send everything and let the receiver
+  // drop what does not match its cluster (on_inbound_mutation) or its
+  // interest set (ingest_remote), exactly as it would for live traffic.
+  // A release from the admission hold passes the peer's rule as `view`.
   for (auto *s : shards) {
     if (s == nullptr)
       continue;
     for (const auto &m : s->replay_local()) {
+      if (view != nullptr && !view->deliver(m.path))
+        continue;
       pb::Frame f;
       encode_mutation(m, f.mutable_mutation());
       if (!c.write_locked(f))
@@ -1158,7 +1471,8 @@ void state_transport_grpc::send_backfill_locked(connection &c,
 }
 
 void state_transport_grpc::send_snapshot_locked(connection &c,
-                                                const std::vector<state_cluster_shard *> &shards) {
+                                                const std::vector<state_cluster_shard *> &shards,
+                                                const state_peer_registry::delivery_view *view) {
   // Relay-only: push the full CURRENT snapshot of each shard as an unsolicited SnapshotResponse
   // (request_id 0), so a late joiner bootstraps the peers already present. replay_local() cannot do
   // this on a relay because the room tree it holds is all remote-origin (forwarded from clients).
@@ -1166,8 +1480,9 @@ void state_transport_grpc::send_snapshot_locked(connection &c,
   // (ingest_snapshot_ entry, a bulk initial load). Mirrors
   // state_transport_ws::send_snapshot_locked.
   //
-  // Unfiltered by design: this goes out before the peer's Hello, so there is no identity to look up
-  // in the registry; the receiver keeps only what its own interest takes.
+  // Without the admission hold this goes out before the peer's Hello, so there is no identity to
+  // look up in the registry and it is unfiltered: the receiver keeps only what its own interest
+  // takes. With it, release_admissions passes the peer's rule as `view`.
   for (auto *s : shards) {
     if (s == nullptr)
       continue;
@@ -1178,7 +1493,7 @@ void state_transport_grpc::send_snapshot_locked(connection &c,
     auto *rsp = f.mutable_snapshot_response();
     rsp->set_request_id(0);
     rsp->set_final(true);
-    fill_snapshot_response(rsp, snap, /*view=*/nullptr);
+    fill_snapshot_response(rsp, snap, view);
     if (!c.write_locked(f))
       return; // stream died mid-snapshot; the reader will reap it
     _sent_frames.fetch_add(1, std::memory_order_relaxed);
@@ -1211,8 +1526,12 @@ std::vector<state_link_report> state_transport_grpc::link_reports() const {
       continue;
     state_link_report r;
     r.transport = "grpc";
-    if (const std::string *pid = c->peer_id())
+    if (const std::string *pid = c->peer_id()) {
       r.remote_node_id = *pid;
+      r.remote_device_id = c->remote_device_id;
+      r.holds_id = !c->gate || c->gate->holder(*pid) == c.get();
+      r.device_verified = c->device_verified.load(std::memory_order_relaxed);
+    }
     r.accepted = c->accepted;
     r.age_s = static_cast<double>(now - c->opened_ns) * 1e-9;
     r.idle_s = static_cast<double>(now - c->last_rx_ns.load()) * 1e-9;

@@ -44,6 +44,9 @@ set(INCLUDE_FILES
   ../../inc/cvc/state/state_peer_registry.h
   ../../inc/cvc/state/state_link_stats.h
   ../../inc/cvc/state/state_write_policy.h
+  ../../inc/cvc/state/state_inbound_gate.h
+  ../../inc/cvc/state/state_identity.h
+  ../../inc/cvc/state/state_device_key.h
   ../../inc/cvc/state/state_distributed_metrics.h
   ../../inc/cvc/state/state_delegation_manager.h
   ../../inc/cvc/state/state_distributed_admin.h
@@ -88,6 +91,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/media/media_frame.h
   ../../inc/cvc/media/media_endpoint.h
   ../../inc/cvc/media/media_router.h
+  ../../inc/cvc/media/media_rungs.h
+  ../../inc/cvc/media/media_opus.h
   ../../inc/cvc/geometry/bunny.h
   ../../inc/cvc/volume/endians.h
   ../../inc/cvc/utility/utility.h
@@ -295,10 +300,15 @@ set(SOURCE_FILES
   state/state_transport_inproc.cpp
   state/state_transport_ipc.cpp
   media/media_router.cpp
+  media/media_rungs.cpp
+  media/media_opus.cpp
   state/state_message_bus.cpp
   state/state_peer_registry.cpp
   state/state_link_stats.cpp
   state/state_write_policy.cpp
+  state/state_inbound_gate.cpp
+  state/state_identity.cpp
+  state/state_device_key.cpp
   state/state_distributed_metrics.cpp
   state/state_delegation_manager.cpp
   state/state_distributed_admin.cpp
@@ -1336,7 +1346,7 @@ list(APPEND INCLUDE_FILES ../../inc/cvc/net/http_client.h)
 # the retained Widget tree, the Runtime + reconcile boundary, and direct
 # cvc::state binding, walking a pluggable Backend. It touches NO VTK/ImGui/GL —
 # the ImGui-over-VTK backend lives in cvcGL (src/cvcGL/ariadne). Roadmap §16.1.
-list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/requires.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp)
+list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/conference/room_write_gate.cpp ariadne/conference/room_rungs.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/requires.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp)
 list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/widget.h
   ../../inc/cvc/ariadne/backend.h
@@ -1362,8 +1372,10 @@ list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/conference/room_media_intrinsics.h
   ../../inc/cvc/ariadne/conference/room_scene.h
   ../../inc/cvc/ariadne/conference/room_net.h
+  ../../inc/cvc/ariadne/conference/room_rungs.h
   ../../inc/cvc/ariadne/conference/room_aoi.h
   ../../inc/cvc/ariadne/conference/room_aoi_relay.h
+  ../../inc/cvc/ariadne/conference/room_write_gate.h
   ../../inc/cvc/ariadne/state_io.h
   ../../inc/cvc/ariadne/scene.h
   ../../inc/cvc/ariadne/value.h
@@ -1524,6 +1536,70 @@ else()
   else()
     message(STATUS "cvc::net: no HTTP backend (libcurl not found) - http(s):// compiles to a stub")
   endif()
+endif()
+
+# Device keys (state_device_key.h): a device proves its id with an Ed25519 key the relay pins on
+# first use. OPTIONAL: built on OpenSSL's libcrypto (cvcpkg's openssl bundle, wasm included); without
+# it no proof is made or verified and every device is unverified.
+find_package(OpenSSL QUIET COMPONENTS Crypto)
+if(TARGET OpenSSL::Crypto)
+  target_compile_definitions(cvc PRIVATE CVC_HAVE_DEVICE_KEYS)
+  target_link_libraries(cvc PRIVATE OpenSSL::Crypto)
+  list(APPEND CVC_PRIVATE_LINK_PACKAGES OpenSSL)
+  message(STATUS "cvc::state: device keys ENABLED (OpenSSL ${OPENSSL_VERSION})")
+else()
+  message(STATUS "cvc::state: no device keys (OpenSSL not found) - every device is unverified")
+endif()
+
+# Per-viewer video rungs (media_rungs.h): a relay re-encodes a camera's MJPEG smaller for a viewer
+# whose link needs it. OPTIONAL: libjpeg-turbo's TurboJPEG (cvcGL's codec uses it too); without it
+# the smaller rungs send frames as is and only the thumbnail rate and "off" apply. Shared/native
+# prefixes export libjpeg-turbo::turbojpeg, static-only ones (the wasm closure) turbojpeg-static.
+find_package(libjpeg-turbo CONFIG QUIET)
+set(_cvc_core_turbojpeg "")
+if(TARGET libjpeg-turbo::turbojpeg)
+  set(_cvc_core_turbojpeg libjpeg-turbo::turbojpeg)
+elseif(TARGET libjpeg-turbo::turbojpeg-static)
+  set(_cvc_core_turbojpeg libjpeg-turbo::turbojpeg-static)
+endif()
+if(_cvc_core_turbojpeg)
+  target_link_libraries(cvc PRIVATE ${_cvc_core_turbojpeg})
+  target_compile_definitions(cvc PRIVATE CVC_HAVE_TURBOJPEG=1)
+  list(APPEND CVC_PRIVATE_LINK_PACKAGES libjpeg-turbo)
+  message(STATUS "cvc::media: video rungs transcode with ${_cvc_core_turbojpeg}")
+else()
+  message(STATUS "cvc::media: no libjpeg-turbo - video rungs only drop frames, never re-encode")
+endif()
+
+# Opus mics (media_opus.h): a sender encodes its mic in Opus, and a relay decodes it to f32 for the
+# viewers that cannot. OPTIONAL: libopus (cvcpkg `libopus`, BSD-3-Clause); without it every mic
+# stays f32. Found by header and library, since cvcpkg's autotools-built bundles ship no CMake
+# config, and linked through a synthesised imported target, as zstd is (below): a PRIVATE
+# absolute-path link would leak into a static cvc's export, and cvcConfig.cmake recreates the
+# target for a static consumer. On Windows the MinGW-built import library is opus.lib (libopus
+# cvc.8) or, in older bundles, libopus.dll.a; MSVC's link reads either.
+find_path(CVC_OPUS_INCLUDE_DIR NAMES opus/opus.h)
+if(MSVC)
+  # The import library only: CMake's MSVC search would also take libopus.a for `opus`, and that
+  # MinGW-compiled archive calls ___chkstk_ms, which no MSVC link resolves.
+  find_library(CVC_OPUS_LIBRARY NAMES opus.lib libopus.dll.a NAMES_PER_DIR)
+else()
+  find_library(CVC_OPUS_LIBRARY NAMES opus)
+endif()
+set(CVC_HAVE_OPUS OFF)
+if(CVC_OPUS_INCLUDE_DIR AND CVC_OPUS_LIBRARY)
+  set(CVC_HAVE_OPUS ON)
+  if(NOT TARGET CvcOpus::opus)
+    add_library(CvcOpus::opus INTERFACE IMPORTED)
+    set_target_properties(CvcOpus::opus PROPERTIES
+      INTERFACE_INCLUDE_DIRECTORIES "${CVC_OPUS_INCLUDE_DIR}"
+      INTERFACE_LINK_LIBRARIES "${CVC_OPUS_LIBRARY}")
+  endif()
+  target_link_libraries(cvc PRIVATE CvcOpus::opus)
+  target_compile_definitions(cvc PRIVATE CVC_HAVE_OPUS=1)
+  message(STATUS "cvc::media: Opus mics with ${CVC_OPUS_LIBRARY}")
+else()
+  message(STATUS "cvc::media: no libopus - mics stay f32")
 endif()
 
 # Ariadne FTXUI terminal backend — OPTIONAL (roadmap §16.4). When FTXUI is

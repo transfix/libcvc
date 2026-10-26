@@ -355,6 +355,11 @@ void room_aoi_relay::step(const cvc::ariadne::holon &server, double now_s) {
   }
   if (_aoi.update(present, tick, now_s))
     apply(_aoi.snapshot());
+  // A newcomer held at admission (state_transport::set_admission_hold) has its filter now: its
+  // bootstrap goes out through it, before the pushes, so the pushes its outer pairs owe from this
+  // step on reach it.
+  for (plane &pl : _book->planes)
+    pl.tp->release_admissions();
   // Every step, so the inner pairs' bookkeeping keeps up with the live stream.
   push_poses(tick);
 }
@@ -438,6 +443,10 @@ std::size_t relay_room_step(cvc::state_cluster_shard &shard,
                             const cvc::ariadne::holon &server, double now_s, bool trim_journal) {
   if (aoi)
     aoi->step(server, now_s);
+  // Held admissions the step did not release (no driver, or no rule yet, until the hold runs out).
+  for (cvc::state_transport *tp : planes)
+    if (tp)
+      tp->release_admissions();
   const std::vector<cvc::state_mutation> pending = shard.drain_local();
   for (const cvc::state_mutation &m : pending)
     for (cvc::state_transport *tp : planes)

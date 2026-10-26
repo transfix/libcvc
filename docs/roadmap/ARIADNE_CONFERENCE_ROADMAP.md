@@ -271,12 +271,15 @@ grants for the *client-local* document sandbox.
 
 **Must be built (the room's new security work):**
 1. **Connection↔identity binding** — admission maps a connection to a `pid`; intents/writes derive
-   authority from the connection, not a self-asserted `origin_node_id`.
+   authority from the connection, not a self-asserted `origin_node_id`. *Built without a credential
+   as bound writes (§5h.1, `state_inbound_gate` + `room_write_gate`): the pid is the one the Hello
+   claims, held by one live connection, and a client writes only its own participant as itself.
+   Proving the claim is §5f.*
 2. **Admission hook** — at join/snapshot: allocate `pid`, grant scope, check capacity/ban/role, and
    gate what subtree a peer may pull (snapshot currently serves everything). *S7 (§5h.1) shapes the gRPC
-   snapshot reply and the WebSocket broadcast by the requester's registry filter, but that is delivery
-   policy, not access control — a peer with no filter still gets everything — and the admit snapshot,
-   sent before Hello, is still unfiltered.*
+   snapshot reply, the WebSocket broadcast and, with the admission hold, a joiner's admit snapshot by
+   the receiver's registry filter. That is delivery policy, not access control: a peer that never gets
+   a filter (one that never joins) is still bootstrapped with everything once the hold times out.*
 3. **Server-mediated write path** — the intent channel + validator + sole-writer discipline (§5d).
 4. **Roster primitive** — immediate-children enumeration, `pid` allocation, presence/heartbeat reaping
    of participant subtrees (drive `expireAt`).
@@ -288,6 +291,79 @@ grants for the *client-local* document sandbox.
 Join carries a credential. v1: a room bearer token the server checks at admission, from which it mints
 the per-connection `pid` binding (§5d). Richer identity (OIDC via the existing SSO) and roles
 (host/moderator/guest, capacity, bans) are admission-time hooks layered on top.
+
+**Built (v1, after bound writes):** a room token and a default device identity, before usernames.
+- **Room token** (who may join). `arisrv --room-token-file PATH`, or `CVC_ARISRV_ROOM_TOKEN`; never
+  on the command line, which other users of the host can read.
+  - It is 16–256 characters of `[A-Za-z0-9._~-]`.
+  - gRPC carries it as `authorization: Bearer`, now compared in constant time.
+  - WebSocket carries it in `Sec-WebSocket-Protocol`, because a browser cannot set an
+    `Authorization` header. The client offers `cvc.v1,cvc-token.<token>`, and the relay refuses the
+    upgrade with HTTP 401 unless the token is offered. It answers `cvc.v1`, as a browser requires.
+  - Both checks run before the connection is admitted, so a client without the token is sent
+    nothing: no bootstrap, broadcast or media.
+  - arigl reads `CVC_ARIADNE_ROOM_TOKEN`. The browser page takes it from the invite link's URL
+    fragment (`#token=…`), which never reaches a server or its logs.
+  - No token configured is an open room, as before. A token asked for must be one: a flag with no
+    path, an unreadable or blank file, or a set but empty variable stops arisrv instead of opening
+    the room. arisrv counts refusals (`room token: refused N connection(s)`).
+  - Each accepted WebSocket connection does its handshake (and so its token check) on its own
+    thread, so one client that connects and sends nothing no longer holds up every join. A
+    handshake gets 10 s, and at most 64 wait at once.
+- **Device id** (which device is this). `Hello.device_id`, from `default_device_id()`.
+  - A native client's base id is a salted SHA-256 of the OS machine id, the host name and the user.
+  - A browser exposes no hardware id, so the page makes a random one once and keeps it in
+    `localStorage`, or for the page load only where storage is blocked. `CVC_DEVICE_ID` overrides
+    either.
+  - What a client sends is `scoped_device_id(base, relay URL)`, so two relays (two operators)
+    cannot match one device. A relay ignores a Hello device id that is not 1–64 characters of
+    `[A-Za-z0-9._-]`.
+  - The relay keeps the raw id to itself. It publishes `participants.<pid>.device`, a room-scoped
+    16-hex tag, from the link holding the pid (bound writes), once that device has proved its key
+    (below). Every peer sees the same tag for one device in one room across sessions, and nothing
+    links it to another room. The tag is relay-owned; `room_write_gate` refuses a client's write
+    to it.
+  - On its own the id is an **identifier, not a credential**: anyone who knows or observes the
+    inputs can compute it. The device key gives it authority.
+- **Device key** (the device id is this device's). `state_device_key.h`: Ed25519, on OpenSSL's
+  libcrypto.
+  - A device keeps one 32-byte seed. Natively it is `%LOCALAPPDATA%\cvc\device-key` (local, not
+    roaming: it should not sync to another machine), or
+    `$XDG_CONFIG_HOME/cvc/device-key` (`~/.config/cvc/device-key`), made on first use (owner-only
+    on POSIX). `CVC_DEVICE_KEY_FILE` names another file, and `CVC_DEVICE_KEY` (64 hex digits) gives
+    the seed itself. The page keeps one in `localStorage` (`cvc.device_key`) beside its device id.
+  - For each relay the device derives its own key: HMAC-SHA256 of the seed and the relay URL. Two
+    relays see unrelated public keys, as they see unrelated device ids.
+  - The relay's `Hello.nonce` is a fresh 32-byte challenge for each client it accepts. The client
+    answers with a `DeviceProof`: its public key and a signature over the nonce, both node ids and
+    its device id, each length-prefixed. One proof per challenge. A proof that reaches the relay
+    before the client's Hello (its reader may answer before its Hello is written) is checked when
+    the Hello comes.
+  - The relay pins the first key a device id shows (trust on first use). A later proof under that
+    key verifies the device. A proof under another key is refused (`device keys: refused N
+    proof(s)`), and so is one that does not verify. A refused device stays in the room, without a
+    tag. A pid taken over by a link that proved no key loses its tag, so the tag never outlives
+    the device that proved it.
+  - The pins are shared by both transports. They are kept in memory, or with `arisrv --device-pins
+    PATH` in a file (one `<device id> <key>` line each), so they outlive a restart. A store holds at
+    most 65,536 pins.
+  - Losing the seed: the page loses its id with it (both are site data), so it is simply a new
+    device. A native device keeps its id (it comes from the machine), so its new key is refused
+    until the operator deletes its line from the pin file. Running it once with another
+    `CVC_DEVICE_KEY` does the same.
+  - Roles and bans can now be keyed to a verified device; usernames come next.
+- **Limits:**
+  - One shared token per room, so revoking one person means rotating it for everyone. Roles and
+    per-person tokens come later.
+  - The separate gRPC media plane (`stream_relay`) does not check the token yet.
+  - Every connection that proves a key adds a pin, joined or not, and a full store refuses every
+    new device (fail closed). A client holding the room token (any client, in an open room) can
+    fill it. So can ordinary use, slowly: each private-window load is a new device. The remedy
+    today is the operator's: delete lines from the pin file, or run with pins in memory. Expiring
+    unused pins, or deriving the device id from the key so no pin is needed, would remove the
+    limit.
+  - Over plain `ws://` or insecure gRPC an active man-in-the-middle can relay the challenge, so
+    deploy behind `wss://` as for the token.
 
 ### 5g. Shared 3D scene + avatars (NEXT WORK — user-requested)
 
@@ -475,6 +551,18 @@ and the media gate is asked only once the stream is held, so a dropped frame spe
 write that starts and then blocks still holds its own thread until the 3 s watchdog; only an
 asynchronous write path would avoid that.)
 
+**Media defaults and the uplink.**
+- **Camera:** `conference_roster.ari` captures it at 320x240, 15 fps and JPEG q60
+  (`stream-capture-camera`'s `quality`). That is about 0.6 Mbit/s per receiver, against about 5 for the
+  former 640x480, q70 and 30 fps. Peer tiles are about 300 px wide.
+- **Silence is not sent:** arigl sends no mic chunk below -48 dBFS RMS more than 0.8 s after the last
+  louder one, so a silent or muted mic costs nothing, and it sends a muted camera at 1 fps.
+- **Browser uplink:** a browser's `send_backlog` is now the WebSocket's `bufferedAmount`. Its uplink
+  therefore drops media at the 32 KB threshold instead of queueing it without bound behind everything
+  else, the link probe included.
+- **Audio first:** on every WebSocket link, audio gets four times video's backlog allowance.
+- **Next:** Opus audio (the mic is still raw f32, about 1.5 Mbit/s while talking) and per-receiver rungs.
+
 **Transport and journal changes** (detail in DISTRIBUTED_STATE_ROADMAP.md, "Landed for the conference
 relay"): a deny-only per-peer delivery predicate on `state_peer_registry`; write-once connection
 identity (fixes a `remote_node_id` data race; a second Hello is ignored); the registry honoured on every
@@ -522,13 +610,20 @@ false)` is the old drain-and-publish exactly); arisrv and arigl turn them on.
 
 | Switch | Default | Effect |
 |---|---|---|
-| `arisrv --s7 on\|off` / `CVC_ARISRV_S7=0\|1\|on\|off` | on | **master kill switch**: off forces `--aoi off`, gate off, journal keep, stall drop 0 — the pre-S7 relay (plus the disabled `aoi.*` leaves) |
+| `arisrv --s7 on\|off` / `CVC_ARISRV_S7=0\|1\|on\|off` | on | **master kill switch**: off forces `--aoi off`, gate off, journal keep, stall drop 0, no admission hold — the pre-S7 relay (plus the disabled `aoi.*` leaves) |
 | `--aoi off\|conference\|hall` / `CVC_ARISRV_AOI` | conference (hall with `--scene large`) | off: no filters, pushes or media gate; `aoi.enabled` 0 |
 | `--aoi-video-max K` | 0 (all) | opt-in nearest-*K* full-rate cameras; the rest of the inner peers as thumbnails |
 | `--relay-gate on\|off` | on | off: forward every client frame |
 | `--relay-journal trim\|keep` | trim | keep: journal backfill on connect, no trim |
 | `--media-stall-ms N` | 40 | gRPC stall drop; 0 = off |
+| `--admission-hold-ms N` | 2000 (only with an AOI) | hold a joiner's bootstrap for its filter, at most N ms; 0 = off (the admit snapshot goes out unfiltered, before Hello) |
 | `--scene default\|large` | default | the seeded scene; not an S7 switch (honoured under `--s7 off`) |
+| `--bind-writes on\|off` | on | bound writes (below): each client writes only its own participant, as itself; off takes any client's writes. Not an S7 switch |
+| `--room-token-file PATH` / `CVC_ARISRV_ROOM_TOKEN` | unset (an open room) | admit only clients that present the room token (§5f). Not an S7 switch |
+| `--device-pins PATH` | unset (pins in memory) | keep the device-key pins in PATH, so they outlive a restart (§5f). Device keys are always checked. Not an S7 switch |
+| `--adapt on\|off` | on | adapt each viewer's video rung to its link (§5j); off: every viewer at `--video-max`. Not an S7 switch |
+| `--video-max RUNG` / `--video-floor RUNG` | full / thumb | the best rung any viewer gets, and the lowest adaptation goes (§5j) |
+| `--viewer-kbps-max N` | 0 (none) | a viewer's budget, kbit/s: above it, it steps down (§5j) |
 | `CVC_ARISRV_ROOM_DEBUG=1` | off | adds an `[arisrv] aoi` stats line every ~5 s |
 | `CVC_ARIGL_REPLICATE_ROOT` (arigl) | unset = `conf` | empty or `*`: replicate the whole tree (the S6 A/B) |
 | `CVC_ARIGL_LOD=0` (arigl) | LOD on | every room mesh at full detail (the LOD A/B) |
@@ -554,10 +649,85 @@ it from everyone else), plays every peer at gain 1, draws the large scene's bunn
 on their side) and pose-less peers at the origin. An S7 client on a pre-S7 relay finds no `aoi.*`
 subtree and plays at gain 1.
 
+**Admission hold** (after S7, stacked on it). The admit snapshot used to go out the moment a
+connection opened, before its Hello and before the relay had a filter for the joiner, so a late
+joiner saw every participant's *current* intent once, plus the non-inner poses and ghost leftovers
+the live filters withhold.
+- **How the hold works:** `state_transport::set_admission_hold` keeps an accepted relay connection
+  silent after the relay's Hello. It gets no bootstrap, push, live write, re-broadcast or media.
+- **When it is released:** the AOI's step installs the newcomer's filter, which happens once its join
+  arrives. Right after that, and before the step's pose pushes, `release_admissions()` sends the
+  admit snapshot through the filter, under the connection's write lock, and live traffic begins.
+- **What the joiner sees:** inner peers come from the snapshot. Outer peers come from the pushes a new
+  outer pair is owed on its first step, so they arrive in that same step.
+- **Timeout:** a connection whose peer never gets a filter, because it never joins, is bootstrapped
+  unfiltered once the hold (2 s) runs out. Such releases count as timeouts in `total_admission_timeouts()`
+  and in arisrv's AOI line.
+- **Tested by** `RoomRelayLoopbackTest.LateJoinerBootstrapIsFiltered`, and
+  `AdmissionHold*` in both transport suites.
+
+**Bound writes** (§5e item 1, after the admission hold). The relay used to apply and forward
+whatever a client sent: any participant's intent, the server holon's poses, the scene, a mutation
+naming another origin, even a snapshot pushed at it. `arisrv --bind-writes` (on by default, and not
+an S7 switch) installs one `room_write_gate` on both transports.
+- **Identity:** an accepted connection speaks only as the node id (the pid) of its first Hello, and
+  one live connection at a time holds a pid, on either transport: the first to claim it, until it
+  closes. A second connection claiming a held pid is refused until then, and its close is not that
+  participant leaving. A holder silent for 6 s (three missed link probes; a live client answers
+  every Ping) is taken over by the next claim. A dropped network leaves the old stream open on the
+  relay, gRPC's especially, which has no idle reaper, and the reconnect must not wait on it. The
+  displaced connection's close is not a departure either.
+- **Origin:** every mutation, message and media frame must name the connection's pid as its origin,
+  and a gRPC heartbeat must name it as its node. A SnapshotResponse from a client is never applied.
+- **The relay's own ids** (its transport's and its shards') are never a client's: a connection
+  whose Hello names one never speaks. Its frames would skip the relay's own ingest yet still be
+  fanned out, and could spend the relay's sequence numbers ahead of it.
+- **The room's rule:** a participant writes only inside `participants.<pid>`, with a value, touch
+  or `data()` op, and never the relay's keys there: `pose`, `net.relay` and, in SFU mode, each
+  `streams.<kind>.ready`. A pid must be one identifier, so `bob.pose` owns nothing of bob's. The
+  path must be canonical: no empty or whitespace-padded segment, which the tree would skip or trim
+  onto another key. It may be at most 16 segments and 512 bytes long, since the relay walks a
+  participant's whole subtree every tick. Every other path is the relay's. A gated relay answers a
+  snapshot request only from a peer speaking as itself.
+- **What is refused** is dropped (not applied, forwarded or bridged; over WS the next broadcast sends
+  the client the tree's value) and counted in `total_inbound_rejected()`; arisrv logs the count
+  when it grows. The rule matches every write clients make today, so a well-behaved room is
+  unchanged.
+- **Tested by** `RoomRelayLoopbackTest.ClientWritesOnlyItsOwnParticipant` (M writes A's intent and
+  pose, its own pose, the scene and the AOI; A never moves and the relay keeps its values),
+  `InboundGate*` in both transport suites, and `RoomWriteGate.*`.
+- **Limits:**
+  - Nothing authenticates a pid (§5f), so a client may claim any pid no one holds, a departed
+    participant's included.
+  - A refused gRPC client keeps its own wrong copy until the relay next writes that path.
+  - An impostor refused a held pid is still delivered that pid's filtered view.
+  - A reconnect that finds its old, silently dead stream still holding the pid is refused for up
+    to 6 s; arigl re-asserts its presence for 6 s after a reconnect.
+  - No size or rate limit: a client may still write many or large leaves inside its own
+    participant (Phase 7).
+  - Chunk responses are not checked against their request (no relay installs a hydrator).
+  - The separate gRPC media plane (`stream_relay`, routed by stream id) is not gated: any client
+    holding a stream's token can publish into it.
+
 **Known limits.**
-* The admit snapshot a connection gets before its Hello is unfiltered (there is no identity to filter
-  by yet), so a late joiner sees every participant's *current* intent once, and the non-inner poses
-  and ghost leftovers the live filters would withhold. Live traffic after that is filtered.
+* **Observers:** a connection that never joins waits out the admission hold, then gets the
+  unfiltered admit snapshot, as every joiner did before.
+* **What a held connection loses** (a step at most): anything that never reaches the tree. That
+  means `state_message`s and delegation ops sent during the hold, and the replies to its own Pings or
+  (over gRPC) snapshot requests. Over WebSocket a snapshot request only marks the connection for a
+  full refresh, which the first broadcast after the release sends. `distributed_state_session`'s
+  `snapshot_on_join` would wait out its timeout
+  against a holding relay. The room's clients use neither.
+* **Main-loop cost:** the release writes the bootstrap on the relay's main loop. A joiner slow to read
+  holds that step up to the 3 s write watchdog. Before the hold, the main loop's publish waited on the
+  joiner's write lock while the admit snapshot was written on the accept or handler thread, so the
+  stall itself is not new.
+* **The joiner's own leaves:** the bootstrap now arrives after the join, so it carries the joiner's
+  own leaves. A leaf the joiner rewrote in the meantime takes the relay's older copy locally, until
+  it next writes it. Snapshot entries carry no origin to skip them by. The relay is right and arigl
+  predicts from its holon.
+* **Filter-install race (not new):** a forward that checked the registry just before a newcomer's
+  filter was installed can still deliver one unfiltered frame just after the release.
 * A process that restarts under the node id of a live session has its writes ignored until the relay
   restarts (replication drops an `(origin, sequence)` it has seen), which is why arigl takes a fresh id
   per launch. An in-process reconnect keeps its id and its sequence, and works: the relay withholds the
@@ -612,13 +782,16 @@ reconcile-correction sum varies two-fold between identical runs, so it says noth
   server's.
 * Client- or camera-declared interest (a fly camera far from the avatar; a client want-list plus a relay
   clamp) and a grid-hash AOI broad phase for N > ~200 → **H3**, on S7's registry filter.
-* Admission-scoped bootstrap (the admit snapshot goes out before Hello, unfiltered) → **§5e item 2**.
-  Bootstrap ghost trim and hard reaping of departed subtrees → **Phase 2 / §5e item 4**.
+* Admission-scoped bootstrap as access control (a pid bound to its connection, a scope grant) → **§5e
+  items 1–2**. The *delivery* half, a filtered admit snapshot, landed with the admission hold above.
+  Hard reaping of departed subtrees → **Phase 2 / §5e item 4**.
 * A video subscription matching visible cam tiles, simulcast/resolution tiers, inter codecs, stereo
   panning, an "out of range" tile placeholder; peer-staleness hiding (reconciled with the 5 s outer
   refresh) → **Phase 7**.
-* Interest as access control, spoofed media `origin_node_id`, forwarding of authority-rejected writes →
-  **§5e items 1–2 / Phase 8**.
+* Interest as access control (what a peer may *read*) → **§5e item 2 / Phase 8**. ~~Spoofed media
+  `origin_node_id`, forwarding of authority-rejected writes~~ **done** as bound writes: the relay
+  drops media naming another origin, and a write outside the sender's participant is neither
+  applied nor forwarded.
 * Avatar frustum/screen-size culling, label nearest-*K* caps and the `cvc::vis` ViewParams adapter →
   **VISIBILITY-AND-LOD §4.1** follow-up (inert at room scale). Per-camera `RenderView`/`VisibilityMask`
   → **CVCGL-UI-DSL stage C**.
@@ -634,7 +807,10 @@ reconcile-correction sum varies two-fold between identical runs, so it says noth
   tree~~ **done**: `broadcast_snapshot` now sends each connection only the entries it does not already
   hold. Per connection it keeps a digest of what the last snapshot frame carried for each path, and
   forgets a path whenever any other frame touching it is written to that peer or arrives from it
-  (a live mutation, a push, the peer's own write). A missed live re-fan is still healed on the next
+  (a live mutation, a push, the peer's own write). A peer's own paths (`state_inbound_gate::sources`)
+  are never re-sent to it: the relay's copy is at best what the peer holds, and older while its next
+  write is in flight. That echo made a walking client predict on its previous intent. A missed live
+  re-fan is still healed on the next
   call, and an unchanged tree costs nothing. A client gets the whole tree only when it asks
   (`state_transport_ws::request_full_refresh`, a SnapshotRequest) — for state it dropped on its own
   side, which the relay cannot see. There is no periodic full snapshot. The broadcast still snapshots
@@ -678,6 +854,74 @@ roles, each already separable by existing machinery:
 - **D4 — Cross-injection + capability grants:** grant object + injection transport + host-side
   instantiation + accept policy + a **threat-model doc** (built on reduced-env / `apply_chroot` /
   channel-scoping #463–467 / §7.3–7.6 limits + `requires:`).
+
+### 5j. Per-viewer video rungs (adapted to each viewer's link)
+
+**Built:** the relay sends each viewer every camera at a **rung**.
+
+| Rung | What the viewer gets |
+|---|---|
+| `full` | the frame as its publisher sent it |
+| `half`, `quarter` | the frame re-encoded at 1/2 or 1/4 size |
+| `thumb` | quarter size at 2 fps |
+| `off` | no video; audio still flows |
+
+Each viewer's rung adapts to its link.
+
+- **Re-encoded on the relay, not sent at several sizes.** MJPEG frames stand alone, so the relay
+  makes a smaller rung itself (`cvc::media_rung_shaper`, `media_rungs.h`).
+  - It decodes the publisher's JPEG at 1/2 or 1/4 size. libjpeg-turbo scales in the DCT, so this is
+    cheaper than a full decode.
+  - It re-encodes the result once per frame and rung, and every viewer on that rung gets the same
+    bytes.
+  - So a publisher uploads one stream, old clients need no change, and the policy is the relay's
+    alone.
+  - The relay cannot fix a congested *publisher*. Only the sender can send less, and a browser's
+    uplink already sheds frames at its backlog (`send_backlog` is `bufferedAmount`).
+- **Where it runs:** media endpoints gain `set_media_shaper`, asked per receiver after the gate. It
+  returns the frame as sent, a variant, or nothing. Each variant is encoded once per fanned frame.
+  The camera's AOI tier still applies first.
+- **The controller:** `room_rung_controller` (`room_rungs.h`) runs once a second over the relay's
+  link reports. For each viewer it reads:
+  - the queueing delay: the round trip above its minimum;
+  - the share of media frames dropped for it (the new per-link `media_sent` / `media_dropped`
+    counters);
+  - what it was sent, against an optional budget.
+
+  It steps the viewer down one rung after two bad seconds (queueing over 150 ms, more than 5%
+  dropped, or over budget). It steps back up only after 10 good seconds (queueing under 50 ms,
+  nothing dropped). A step up that fails before its wait is over doubles the next wait, up to 60 s.
+- **What viewers see:** the rung is published as `participants.<pid>.net.relay.video`, a key only the
+  relay writes, and arisrv logs each change. The page shows it as "video in: half (adapted to your
+  link)".
+- **Server settings:**
+
+  | Flag | Default | Effect |
+  |---|---|---|
+  | `--adapt on\|off` | on | off puts every viewer at `--video-max` |
+  | `--video-max RUNG` | `full` | the best rung any viewer gets |
+  | `--video-floor RUNG` | `thumb` | the lowest adaptation goes; `off` allows audio only |
+  | `--viewer-kbps-max N` | 0 (none) | a per-viewer budget |
+- **Camera off is a flag, not frames.** A client with its camera off sends no frames at all and
+  publishes `participants.<pid>.video.off`. Viewers then show "camera off" instead of freezing on the
+  last frame they got.
+- **Opus mics.** A mic sent as raw f32 is 1.5 Mbit/s; in Opus at 32 kbit/s it is about 1/45 of
+  that (`cvc::opus_encoder` / `opus_decoder`, `media_opus.h`, over libopus).
+  - The sender re-chunks the mic's 1024-frame chunks into 20 ms (960-frame) packets, one
+    `media_frame` each (codec `opus`). Each packet gets its own `seq`, so a gap means a lost
+    packet. Silence suppression still applies, and a new talk spurt resets the encoder.
+  - A receiver decodes each peer with its own decoder, since Opus is stateful. It conceals up to
+    two lost packets, and cuts the result into mixer-sized chunks, because the mixer sums one chunk
+    per peer.
+  - The relay forwards a mic as sent, whatever its codec, so it needs no libopus. A client
+    without libopus sends f32, which every client plays. It cannot decode a peer's Opus, so it
+    logs once and that peer is silent to it. Older clients are not provided for; this is not
+    widely deployed.
+  - libopus is optional, found by header and library, as zstd is, because cvcpkg's autotools
+    bundles ship no CMake config. On Windows the MSVC build links the MinGW DLL's import library
+    (`opus.lib`, cvcpkg libopus cvc.8, or `libopus.dll.a`), never the MinGW `libopus.a`. The wasm
+    bundle is cy-pca/cvcpkg#467; the browser client needs it to hear Opus.
+  - Audio is not re-encoded per viewer: 32 kbit/s is already far below anything video sends.
 
 ---
 

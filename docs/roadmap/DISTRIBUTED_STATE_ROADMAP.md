@@ -88,11 +88,48 @@ control: a peer with no filter still receives everything.
   the WebSocket ~1 Hz `broadcast_snapshot` (each connection gets only the
   entries its view passes; since then the broadcast is also a per-connection
   diff, see `state_transport_ws.h`). A skip is counted by
-  `note_delivery_filtered`. The admit
-  snapshot (`send_snapshot_locked`) stays unfiltered by design: it goes out
-  before the peer's Hello. On the client side, unsolicited-snapshot ingest
+  `note_delivery_filtered`. The admit snapshot (`send_snapshot_locked`) goes
+  out before the peer's Hello, so it is unfiltered, unless the relay holds
+  admissions. With
+  `set_admission_hold(max)` an accepted relay connection gets its Hello and
+  nothing else (no bootstrap, push, live write, re-broadcast or media) until
+  `release_admissions()` finds its peer identified with a registry rule, or
+  `max` has passed. The release takes the snapshot through that rule under
+  the connection's write lock. The flag that holds a connection is checked
+  under that lock too, so a write the hold dropped is in the snapshot. The
+  counters are `total_admissions_held()` and `total_admission_timeouts()`.
+  On the client side, unsolicited-snapshot ingest
   now skips entries a shard with enforced interest would reject, so a
   relay's whole-tree snapshot no longer writes outside the client's interest.
+- **WebSocket bearer token + Hello device id** — `state_transport_ws::auth_config`
+  mirrors gRPC's. A browser cannot set an `Authorization` header, so a client
+  offers its token as the subprotocol `cvc-token.<token>` next to `cvc.v1`, and
+  a server with `expected_token` refuses the upgrade (HTTP 401) without it. That
+  happens before admission, so nothing is sent. It answers `cvc.v1` to a client
+  that offers it. gRPC's bearer compare is now constant-time, and both count
+  refusals in `total_auth_rejected()`. `Hello.device_id` (proto field 3) carries
+  `state_transport::set_device_id()`. A receiver reports it as the link's
+  `remote_device_id`, with `holds_id` saying whether the link holds its node id
+  at the inbound gate. `state_identity.h` has the token rule and
+  `default_device_id()`.
+- **Inbound gate (connection-bound identity)** —
+  `state_transport::set_inbound_gate(gate)` on gRPC and WS, with
+  `total_inbound_rejected()`. It holds each connection the transport
+  ACCEPTS afterwards (not one it dials, not the bridge) to a
+  `state_inbound_gate`. The connection speaks only as the node id of its
+  first Hello, and one live connection at a time holds a node id: the first
+  to claim it, until it closes or has been silent for `takeover_after()`
+  (6 s; a live peer answers every link probe), when the next claim takes it
+  over. Share one gate between a relay's transports so
+  the claim spans both. Every mutation, message and media frame must name that
+  node id as its origin (a gRPC heartbeat, as its node), and `admit()` decides
+  each mutation and message. A client's SnapshotResponse is never applied, and
+  one naming the relay's own id (its transport's or a shard's) never speaks. A
+  refused frame is not applied, forwarded or bridged. A connection that never
+  held its node id does not fire the connection-closed callback as that peer.
+  The conference's rule is `room_write_gate` (ARIADNE_CONFERENCE_ROADMAP
+  §5h.1, "Bound writes"). It is not authentication: a node id no one holds can
+  be claimed.
 - **Targeted snapshot push** — `state_transport::push_snapshot_to(node_id,
   entries)`. gRPC and WS write one final, `request_id` 0 `SnapshotResponse`
   holding exactly `entries` to every live connection identified as

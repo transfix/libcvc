@@ -13,7 +13,8 @@
 //                            verbs (stream-capture-camera / -audio, stream-play-audio) and the
 //                            `type: stream` scene node.
 //   register_window_widgets  the ImGui widgets: `stream_view` (a terminal host registers the
-//                            terminal one, cvc::ariadne::register_stream_view_widget).
+//                            terminal one, cvc::ariadne::register_stream_view_widget) and
+//                            `status_dot`.
 //   register_conference      a conference document's set: register_streaming, the room verbs
 //                            (room-join / roster / leave) and `stream_view`. The gRPC clustering
 //                            (state / media transports, the shard, stream_bridge) is not a

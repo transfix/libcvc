@@ -49,8 +49,18 @@ void state_link_stats::note_rtt(std::int64_t rtt_ns) noexcept {
     ++_rtt_count;
 }
 
+void state_link_stats::note_media_sent() noexcept {
+  _media_sent.fetch_add(1, std::memory_order_relaxed);
+}
+
+void state_link_stats::note_media_dropped() noexcept {
+  _media_dropped.fetch_add(1, std::memory_order_relaxed);
+}
+
 state_link_stats::counters state_link_stats::read() const noexcept {
   counters c;
+  c.media_sent = _media_sent.load(std::memory_order_relaxed);
+  c.media_dropped = _media_dropped.load(std::memory_order_relaxed);
   c.bytes_in = _bytes_in.load(std::memory_order_relaxed);
   c.bytes_out = _bytes_out.load(std::memory_order_relaxed);
   c.frames_in = _frames_in.load(std::memory_order_relaxed);

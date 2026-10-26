@@ -79,6 +79,13 @@ struct holon_config {
   // AHEAD of it (only delays what peers see) before it re-aligns.
   std::uint64_t lead_slack_behind_ticks = 6;
   std::uint64_t lead_slack_ahead_ticks = 24;
+  // CLIENT with a lead: a drift past the slack but within max_skew_ticks is closed by SLEWING the
+  // replica's clock -- running it this fraction faster (behind) or slower (ahead) than its scale --
+  // until it is within a tick of the target, instead of seeking, which drops the local avatar's
+  // logged inputs (the next sample then snaps it back a round trip: a visible jump). A lead moves
+  // with the round trip, so this is the common case. 0.05 closes 6 ticks in about a second; 0
+  // always seeks.
+  double lead_slew = 0.05;
   // CLIENT: the longest walk between two peer samples, in ticks. A server that publishes only
   // what changed (write_pose's heartbeat) leaves a long gap before a peer's first sample after
   // standing still; walking that sample in over the whole gap would leave the peer far behind.
@@ -230,10 +237,15 @@ public:
 
   // CLIENT: how many times apply_authoritative has re-aligned the replica's clock (each seek also
   // drops the local avatar's unacknowledged inputs: a visible jump). The first sample after
-  // joining is one; after that the count should stay flat, and a rising one means samples keep
+  // joining is one if the clock was not already in step; after that the count should stay flat
+  // (later drifts slew, clock_slews), and a rising one means samples keep
   // arriving with ticks far from the replica's (a stalled frame loop, or a sender stamping stale
   // ticks).
   std::uint64_t clock_realigns() const noexcept { return _realigns; }
+  // CLIENT: how many times it has started slewing its clock toward the lead target instead
+  // (holon_config::lead_slew), and whether it is slewing now.
+  std::uint64_t clock_slews() const noexcept { return _slews; }
+  bool clock_slewing() const noexcept { return _slewing; }
 
   // Advance the holon one frame. SERVER: drives its clock from wall time (wall_dt<0)
   // or an injected dt, then integrates every authoritative avatar over the quanta
@@ -266,8 +278,8 @@ private:
     bool local = false;
     // CLIENT: its pose is real (added with one, or a sample has arrived); see add_participant.
     bool pose_known = true;
-    avatar_sim sim;             // server authoritative integrator
-    avatar_intent intent;       // latest intent (server input / client-local input)
+    avatar_sim sim;       // server authoritative integrator
+    avatar_intent intent; // latest intent (server input / client-local input)
     // SERVER: stamped intents waiting for their tick (queue_intent), in tick order.
     std::deque<std::pair<std::uint64_t, avatar_intent>> queued;
     bool have_stamp = false;      // a stamped intent has been queued (last_stamp is meaningful)
@@ -277,8 +289,14 @@ private:
     // a heartbeat), so a sample already seen must not count as a clock reading.
     bool have_seen = false;
     std::uint64_t last_seen = 0;
-    predicted_avatar predicted; // client-local prediction + reconcile
+    predicted_avatar predicted;                   // client-local prediction + reconcile
     cvc::physics::vec3 correction{0.0, 0.0, 0.0}; // reconcile jumps not yet taken
+    // CLIENT-local: its state before the last quantum, so display_pose interpolates between the
+    // last two quanta by alpha as a peer is (a frame that falls between quanta otherwise shows the
+    // avatar standing still, then moving a whole quantum: judder the following camera spreads to
+    // the whole view). A reconcile shifts it with the correction.
+    bool have_render_prev = false;
+    cvc::physics::body_state render_prev;
     // peer interpolation: the last two authoritative samples + a monotonic guard
     // (mirroring predicted_avatar's stale/duplicate-ack rejection) so a reordered
     // or duplicate peer sample never rewinds or freezes the interpolation window.
@@ -322,6 +340,9 @@ private:
   std::unique_ptr<avatar_world> _world; // physics (holon_config::physics + a Jolt build)
   std::uint64_t _vetoes = 0;            // SERVER: intents sanitize_intent changed
   std::uint64_t _realigns = 0;          // CLIENT: clock seeks in apply_authoritative
+  std::uint64_t _slews = 0;             // CLIENT: slews started in apply_authoritative
+  bool _slewing = false;                // CLIENT: the clock runs off its scale toward the target
+  bool _synced = false;                 // CLIENT: a first sample has set (or found) the clock
   std::uint64_t _statics_rev = 0;
 };
 

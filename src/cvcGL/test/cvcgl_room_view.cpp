@@ -200,11 +200,12 @@ int main() {
       chk(rv.pick_ground(vs[0] - 1, vs[1] / 2, 0.0, g2) && g2[0] > g[0] + 0.5,
           "pick_ground: a pixel to the right lands further along +x");
 
-      // Turn A to face +y: the visor swings round to its +y side.
+      // Turn A to face +y: the visor swings round to its +y side. The local avatar is shown between
+      // its last two quanta (holon::display_pose), so the turn shows a quantum after it is taken.
       avatar_intent turn;
       turn.yaw = 0.5 * 3.14159265358979323846;
       h.set_intent("A", turn);
-      h.advance(dt);
+      h.advance(2.0 * dt);
       rv.update(h, dt);
       chk(node_xyz(sg, "avatar_A_visor", va) && near(va[0], 4.0, 1e-4) && near(va[1], 0.25, 1e-4),
           "the visor turns with the facing");
