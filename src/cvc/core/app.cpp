@@ -57,10 +57,12 @@
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
+#include <future> // tryStartWorker: a new worker waits until it is stored under its key
 #include <iostream>
 #include <iterator>
 #include <queue>
 #include <set>
+#include <utility>
 
 namespace cvc {
 // ---------------------
@@ -210,34 +212,54 @@ void app::registerDefaultHandlers() {
 // 09/02/2026 -- Joe R. -- Creation; the body used to be empty, so a
 //                         fixture-owned app could be destroyed out from
 //                         under a running handler thread.
+// 10/25/2026 -- Joe R. -- Close the background-task pool first, and sweep
+//                         again for threads started while we were joining.
 app::~app() {
-  // Copy and clear under the lock, then join without it: a worker winding
-  // down takes _threadsMutex itself, so joining while holding it deadlocks.
-  thread_map remaining;
+  // Nothing queued may start from here on: a pooled worker winding down
+  // would otherwise start the next task after the snapshot below, and that
+  // thread would run on into a destroyed app.  The dropped tasks are
+  // destroyed outside the lock, in case their captures call back in.
+  std::priority_queue<ThreadPoolTask> dropped;
   {
-    boost::mutex::scoped_lock lock(_threadsMutex);
-    remaining = _threads;
-    _threads.clear();
+    boost::mutex::scoped_lock lock(_threadPoolMutex);
+    _poolClosed = true;
+    dropped.swap(_pendingTasks);
   }
 
-  // Interrupt everything first, then join -- many algorithms have
-  // interruption checkpoints, so this is far quicker than serial joins.
-  BOOST_FOREACH (thread_map::value_type &val, remaining) {
-    if (!val.second)
-      continue;
-    try {
-      val.second->interrupt();
-    } catch (...) {
+  // Take the map and clear it under the lock, then join without it: a worker
+  // winding down takes _threadsMutex itself, so joining while holding it
+  // deadlocks.  Repeat while joining turned up more -- a worker that was
+  // already starting its successor when we closed the pool stores it after
+  // our snapshot -- bounded, so a thread that keeps spawning cannot hold the
+  // app hostage.
+  for (int sweep = 0; sweep < 8; ++sweep) {
+    thread_map remaining;
+    {
+      boost::mutex::scoped_lock lock(_threadsMutex);
+      remaining.swap(_threads);
     }
-  }
+    if (remaining.empty())
+      break;
 
-  BOOST_FOREACH (thread_map::value_type &val, remaining) {
-    if (!val.second)
-      continue;
-    try {
-      if (val.second->joinable())
-        val.second->try_join_for(boost::chrono::seconds(5));
-    } catch (...) {
+    // Interrupt everything first, then join -- many algorithms have
+    // interruption checkpoints, so this is far quicker than serial joins.
+    BOOST_FOREACH (thread_map::value_type &val, remaining) {
+      if (!val.second)
+        continue;
+      try {
+        val.second->interrupt();
+      } catch (...) {
+      }
+    }
+
+    BOOST_FOREACH (thread_map::value_type &val, remaining) {
+      if (!val.second)
+        continue;
+      try {
+        if (val.second->joinable())
+          val.second->try_join_for(boost::chrono::seconds(5));
+      } catch (...) {
+      }
     }
   }
 }
@@ -771,14 +793,45 @@ std::string app::threadKey() {
 
 void app::removeThread(const std::string &key) { threads(key, thread_ptr()); }
 
-std::string app::uniqueThreadKey(const std::string &hint) {
-  std::string h = hint.empty() ? "thread" : hint;
-  // Make a unique key name to use by adding a number to the key
-  std::string uniqueThreadKey = h;
+namespace {
+// The first of hint, hint0, hint1, ... that names neither a tracked thread nor
+// a key held for a queued job.  The caller holds _threadsMutex.
+std::string first_free_thread_key(const thread_map &threads, const std::set<std::string> &reserved,
+                                  const std::string &hint) {
+  const std::string h = hint.empty() ? "thread" : hint;
+  std::string key = h;
   unsigned int i = 0;
-  while (hasThread(uniqueThreadKey))
-    uniqueThreadKey = h + boost::lexical_cast<std::string>(i++);
-  return uniqueThreadKey;
+  while (threads.count(key) || reserved.count(key))
+    key = h + boost::lexical_cast<std::string>(i++);
+  return key;
+}
+} // namespace
+
+// 10/25/2026 -- Joe R. -- One lock for the whole search, and skip keys held
+//                         for queued pooled jobs (reserveThreadKey).
+std::string app::uniqueThreadKey(const std::string &hint) {
+  boost::this_thread::interruption_point();
+  boost::mutex::scoped_lock lock(_threadsMutex);
+  return first_free_thread_key(_threads, _reservedThreadKeys, hint);
+}
+
+// ---------------------
+// app::reserveThreadKey
+// ---------------------
+// Purpose:
+//   A unique key for a wait=false pooled job, held until tryStartWorker()
+//   stores the job's worker under it.  A queued job is not in _threads, so
+//   uniqueThreadKey() alone would hand every job queued behind a busy pool
+//   the same key, and starting the second would interrupt the first and
+//   replace its entry (see threads(key, val)).
+// ---- Change History ----
+// 10/25/2026 -- Joe R. -- Creation.
+std::string app::reserveThreadKey(const std::string &hint) {
+  boost::this_thread::interruption_point();
+  boost::mutex::scoped_lock lock(_threadsMutex);
+  std::string key = first_free_thread_key(_threads, _reservedThreadKeys, hint);
+  _reservedThreadKeys.insert(key);
+  return key;
 }
 
 void app::threadInfo(const std::string &key, const std::string &infostr) {
@@ -1038,8 +1091,7 @@ void app::setThreadPoolSize(unsigned int size) {
   _maxPoolSize = (size > 0) ? size : 1;
 
   // Try to start workers if we have pending tasks
-  while (!_pendingTasks.empty() && _activeWorkers < _maxPoolSize) {
-    tryStartWorker();
+  while (tryStartWorker()) {
   }
 }
 
@@ -1058,29 +1110,85 @@ unsigned int app::getPendingThreadCount() const {
   return _pendingTasks.size();
 }
 
-void app::tryStartWorker() {
+// 10/25/2026 -- Joe R. -- The worker waits until it is stored under its key,
+//                         reaches its task only through a slot it empties,
+//                         and the pool lock is re-taken on every exit path.
+bool app::tryStartWorker() {
   // Assumes _threadPoolMutex is already locked by caller
   boost::this_thread::interruption_point();
 
-  if (_pendingTasks.empty() || _activeWorkers >= _maxPoolSize)
-    return;
+  if (_poolClosed || _pendingTasks.empty() || _activeWorkers >= _maxPoolSize)
+    return false;
 
-  // Get the next task
-  ThreadPoolTask task = _pendingTasks.top();
+  // Get the next task.  The worker reaches it only through this slot and
+  // empties it when the task ends (threadPoolWorker): boost keeps its copy of
+  // the thread function for as long as the thread object lives, and that
+  // copy must not keep the task's captures alive with it.
+  const std::shared_ptr<ThreadPoolTask> slot =
+      std::make_shared<ThreadPoolTask>(_pendingTasks.top());
   _pendingTasks.pop();
 
+  // As in startThread(), the worker may not begin until its handle is stored
+  // under its key: keyed progress/info calls from inside the task would miss
+  // it otherwise, and a quick task could finish -- and retire -- before the
+  // app knew the thread.
+  const std::shared_ptr<std::promise<void>> gate = std::make_shared<std::promise<void>>();
+  const std::shared_future<void> stored = gate->get_future().share();
+  const thread_ptr worker(new boost::thread([this, slot, stored] {
+    stored.wait();
+    threadPoolWorker(slot);
+  }));
   _activeWorkers++;
 
-  // Start worker with the task's key for tracking
-  // The worker will execute the task directly in its thread
-  // We need to temporarily release the pool mutex to avoid deadlock
-  // when calling threads() which locks _threadsMutex
+  // Store it with the pool mutex released: threads() takes _threadsMutex (and
+  // joins a thread already under this key), and a worker winding down takes
+  // the pool mutex.  The guard re-takes it -- after releasing the key's
+  // reservation and opening the gate -- on every exit path.
+  struct storing {
+    app &a;
+    const ThreadPoolTask &task;
+    std::promise<void> &gate;
+    ~storing() {
+      if (task.reap_when_done) {
+        boost::mutex::scoped_lock lock(a._threadsMutex);
+        a._reservedThreadKeys.erase(task.key);
+      }
+      try {
+        gate.set_value();
+      } catch (...) {
+      }
+      a._threadPoolMutex.lock();
+    }
+  };
   _threadPoolMutex.unlock();
-  threads(task.key, thread_ptr(new boost::thread(boost::bind(&app::threadPoolWorker, this, task))));
-  _threadPoolMutex.lock();
+  storing guard{*this, *slot, *gate};
+  // Not an interruption point here: a worker that started but was never
+  // stored would run on unseen by ~app.
+  boost::this_thread::disable_interruption store_regardless;
+  threads(slot->key, worker);
+  return true;
 }
 
-void app::threadPoolWorker(ThreadPoolTask task) {
+void app::threadPoolWorker(const std::shared_ptr<ThreadPoolTask> &slot) {
+  ThreadPoolTask &task = *slot;
+
+  // The last thing this thread does with the app, on every exit path (after
+  // `ti` below has restored its info): destroy the task here, where it ran,
+  // and retire a wait=false job's thread so that a later worker reaps it.
+  struct retiring {
+    app &a;
+    ThreadPoolTask &task;
+    ~retiring() {
+      boost::this_thread::disable_interruption no_interruptions; // we are in a destructor
+      try {
+        task.task.clear();
+      } catch (...) {
+      }
+      if (task.reap_when_done)
+        a.retirePooledThread(task.key);
+    }
+  } retire{*this, task};
+
   thread_info ti(*this, "Processing: " + task.key);
 
   try {
@@ -1105,6 +1213,102 @@ void app::threadPoolWorker(ThreadPoolTask task) {
 
   // Try to start another worker if there are pending tasks
   tryStartWorker();
+}
+
+// -----------------------
+// app::retirePooledThread
+// -----------------------
+// Purpose:
+//   The last thing a wait=false pooled worker does with the app.  It cannot
+//   reap itself -- a thread cannot join itself, and dropping its own entry
+//   would detach a thread that still has code to run -- so it reaps the
+//   workers that finished before it and then records itself for the next
+//   one.  Reap first, record after: a recorded thread never joins anything,
+//   so two retiring workers can never end up joining each other.  Called
+//   with interruption disabled; throws nothing.
+// ---- Change History ----
+// 10/25/2026 -- Joe R. -- Creation.  Finished compute_async / wait=false
+//                         threads used to stay in _threads, with the functor
+//                         they ran, until the app was destroyed.
+void app::retirePooledThread(const std::string &key) {
+  reapFinishedPooledThreads();
+  try {
+    boost::mutex::scoped_lock lock(_threadsMutex);
+    // Only the entry this thread was stored as: if it has been replaced or
+    // removed, whoever did that has already dealt with it.
+    thread_map::iterator t = _threads.find(key);
+    if (t != _threads.end() && t->second && t->second->get_id() == boost::this_thread::get_id()) {
+      finished_pooled_thread rec;
+      rec.key = key;
+      rec.thread = t->second;
+      rec.id = boost::this_thread::get_id();
+      _finishedPooled.push_back(rec);
+    }
+  } catch (...) {
+  }
+}
+
+// ------------------------------
+// app::reapFinishedPooledThreads
+// ------------------------------
+// Purpose:
+//   Join and forget every retired pooled thread (retirePooledThread) whose
+//   entry is still the one it retired from and that nobody else holds a
+//   thread_ptr to: a holder may be joining it right now (wait_for_threads()
+//   copies the map), and two joins of one boost::thread race.  Those wait
+//   for a later pass.  A retired thread has nothing left to run but its
+//   exit, so the joins are short.  Throws nothing.
+// ---- Change History ----
+// 10/25/2026 -- Joe R. -- Creation.
+void app::reapFinishedPooledThreads() {
+  std::vector<std::pair<std::string, thread_ptr>> reaped;
+  try {
+    boost::mutex::scoped_lock lock(_threadsMutex);
+    for (std::vector<finished_pooled_thread>::iterator rec = _finishedPooled.begin();
+         rec != _finishedPooled.end();) {
+      const thread_ptr t = rec->thread.lock();
+      const thread_map::iterator entry = _threads.find(rec->key);
+      if (!t || entry == _threads.end() || entry->second != t) {
+        // Replaced or removed since (and joined by whoever did it): not ours.
+        rec = _finishedPooled.erase(rec);
+        continue;
+      }
+      if (t.use_count() > 2) { // anyone besides the map and `t`
+        ++rec;
+        continue;
+      }
+      // Its thread-id records go too, while the id is still its own: once it
+      // is joined, the id may be handed to a new thread.  Its key's records
+      // go so that a new job under the same key starts clean.
+      if (t->joinable()) {
+        _threadProgress.erase(rec->id);
+        _threadInfo.erase(rec->id);
+      }
+      _threadProgressByKey.erase(rec->key);
+      _threadInfoByKey.erase(rec->key);
+      reaped.push_back(std::make_pair(rec->key, t));
+      _threads.erase(entry);
+      rec = _finishedPooled.erase(rec);
+    }
+    if (!reaped.empty())
+      updateThreadKeys();
+  } catch (...) {
+  }
+
+  boost::this_thread::disable_interruption no_interruptions;
+  for (std::size_t i = 0; i < reaped.size(); ++i) {
+    try {
+      if (reaped[i].second->joinable())
+        reaped[i].second->join();
+    } catch (...) {
+    }
+  }
+  for (std::size_t i = 0; i < reaped.size(); ++i) {
+    try {
+      threadsChanged(reaped[i].first);
+    } catch (...) {
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------

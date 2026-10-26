@@ -836,6 +836,24 @@ add_executable(cvcgl_imgui_table_columns test/cvcgl_imgui_table_columns.cpp)
 target_link_libraries(cvcgl_imgui_table_columns PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_table_columns COMMAND cvcgl_imgui_table_columns)
 
+# The tf_editor transfer-function widget (ImGuiBackend::tf_editor) on a bare ImGui context, driven
+# by synthesized mouse input: drags, adds, deletes, the zoom strip, the context menu, commits.
+add_executable(cvcgl_tf_editor test/cvcgl_tf_editor.cpp)
+target_link_libraries(cvcgl_tf_editor PRIVATE cvcGL)
+add_test(NAME cvcgl_tf_editor COMMAND cvcgl_tf_editor)
+
+# The scene transfer-function bindings (tf_binding): a node's <id>.transfer_function model lowered
+# into volren / volslice / VolumeNode / fe_lab keys, its range and overlays published.
+add_executable(cvcgl_tf_binding test/cvcgl_tf_binding.cpp)
+target_link_libraries(cvcgl_tf_binding PRIVATE cvcGL)
+add_test(NAME cvcgl_tf_binding COMMAND cvcgl_tf_binding)
+
+# fe_lab's interval mesher (mesh.region: interval): the shell between two isovalues of a ball SDF,
+# its two boundary sheets and FEM solves, and the node's interval props and status.
+add_executable(cvcgl_fe_interval test/cvcgl_fe_interval.cpp)
+target_link_libraries(cvcgl_fe_interval PRIVATE cvcGL)
+add_test(NAME cvcgl_fe_interval COMMAND cvcgl_fe_interval)
+
 # Golden images of the Ariadne ImGui/VTK backend (roadmap §16.6 phase 1): each .ari in
 # test/golden runs through AriRuntime + ImGuiBackend offscreen and its frame is compared with the
 # PNG of the same name (made under Mesa llvmpipe, compared within a tolerance measured across
@@ -1086,6 +1104,9 @@ endif()
 # locked unless it is listed here as headless.
 get_property(_cvcgl_gl_tests DIRECTORY PROPERTY TESTS)
 list(REMOVE_ITEM _cvcgl_gl_tests
+  cvcgl_tf_editor # a bare ImGui context, no GL
+  cvcgl_tf_binding # scene nodes + state only, never renders
+  cvcgl_fe_interval # LBIE + cvc::fem + an fe_lab node's state, never renders
   cvcgl_smoke cvcgl_metadata_mirror cvcgl_volume_range cvcgl_traversal cvcgl_x11_macros
   cvcgl_grid_bounds cvcgl_bounds_walk cvcgl_scene_chrome cvcgl_remove
   cvcgl_teardown cvcgl_light_state_thread cvcgl_unattached_node_thread cvcgl_pose_echo

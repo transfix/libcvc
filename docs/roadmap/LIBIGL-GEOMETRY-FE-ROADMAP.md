@@ -359,6 +359,14 @@ The design copies the forest_trees idiom (seed keys from the node's props, poll 
   meshes `-v` above `-isovalue` by default (`mesh.inside: below`); that is what puts the tets
   inside the object (open question 8). Its `heat.kappa` is relative: the diffusivity passed to
   `cvc::fem::solve_heat` is κ·extent², so one setting behaves the same at any mesh scale.
+  `mesh.region: interval` meshes the shell between `fe.mesh.isovalue` and `fe.mesh.isovalue2`
+  (two isocontours of its transfer function, so a `tf_editor`'s bars drive both) through one
+  helper, `cvc::gl::ariadne::tetrahedralize_interval`: the Float volume `min(v − lo, hi − v)`
+  meshed at 0 by the single-isovalue `cvc::tetrahedralize`. It deliberately bypasses
+  `cvc::tetrahedralize2`'s interval overload, which on master never reaches LBIE's TETRA2 mode
+  and whose interval routine builds sliver fans and holes (transfix/libcvc#808 meshes layers the
+  same way); once that path is fixed the helper is meant to call it, with `cvcgl_fe_interval` as
+  its acceptance test.
 - **Host gaps found:**
   - `AriRuntime` never called `register_cvcgl_extensions`, so pycvc-hosted documents could not
     realize custom node types. This change adds the call.

@@ -12,6 +12,7 @@
 #include <cvc/core/app.h>
 #include <cvc/image/image.h>
 #include <cvc/state/state.h>
+#include <cvc/tf/model.h> // §10 the tf_editor's model
 #include <filesystem>
 #include <gtest/gtest.h>
 #include <string>
@@ -1264,4 +1265,85 @@ TEST(AriadneFtxui, TerminalTourDocumentRuns) {
   art.drain();
   EXPECT_TRUE(quit);
   clear_action_intrinsics(); // register_verb's provider is process-wide: drop it with this test
+}
+
+// ---- §10 tf_editor: the editor the core composes on a terminal --------------------------------
+
+namespace {
+
+// A small model with known nodes: colour at 0 / 0.5 / 1, opacity at 0 / 0.25 / 1, isocontour bone.
+std::string tf_sample_model() {
+  cvc::tf::model m;
+  m.color = {{0.0, 0.f, 0.f, 0.f}, {0.5, 1.f, 0.f, 0.f}, {1.0, 1.f, 1.f, 1.f}};
+  m.alpha = {{0.0, 0.f}, {0.25, 0.5f}, {1.0, 1.f}};
+  cvc::tf::isocontour bone;
+  bone.id = "bone";
+  bone.at = 0.6;
+  m.isocontours = {bone};
+  m.normalize();
+  return cvc::tf::to_string(m);
+}
+
+cvc::tf::model tf_model(cvc::app &app, const std::string &path) {
+  cvc::tf::model m;
+  EXPECT_TRUE(cvc::tf::from_string(val(app, path), m)) << val(app, path);
+  return m;
+}
+
+} // namespace
+
+TEST(AriadneFtxui, TfEditorComposesFromTerminalWidgets) {
+  REQUIRE_FTXUI();
+  Term t(group({tf_editor("Transfer", "tf")}));
+  EXPECT_EQ(val(t.app, "tf"), cvc::tf::to_string(cvc::tf::model::default_model()))
+      << "an empty key is seeded on the first walk";
+  cvc::state::instance(t.app)("tf").value(tf_sample_model());
+  t.height = 60; // a row or two per node: taller than the default screen
+  t.draw();
+  EXPECT_TRUE(t.shows("Transfer")) << t.screen;
+  EXPECT_TRUE(t.shows("domain: 0 .. 1")) << t.screen;
+  EXPECT_TRUE(t.shows("colour 1: at 0")) << t.screen;
+  EXPECT_TRUE(t.shows("colour 2 ")) << t.screen;
+  EXPECT_TRUE(t.shows("alpha 2 ")) << t.screen;
+  EXPECT_TRUE(t.shows("iso bone ")) << t.screen;
+  EXPECT_TRUE(t.shows("rgb: ")) << t.screen; // the terminal's own colour picker
+  EXPECT_TRUE(t.shows("[ x ]")) << t.screen;
+  EXPECT_TRUE(t.shows("[ + isocontour ]")) << t.screen;
+  EXPECT_TRUE(t.shows("[ reset ]")) << t.screen;
+  EXPECT_TRUE(t.shows("[x] histogram")) << t.screen; // the default layers
+  EXPECT_TRUE(t.shows("[ ] contour tree")) << t.screen;
+  EXPECT_EQ(val(t.app, "tf"), tf_sample_model()) << "drawing alone writes nothing";
+}
+
+TEST(AriadneFtxui, TfEditorMouseAndKeyEditsCommit) {
+  REQUIRE_FTXUI();
+  Term t(group({tf_editor("Transfer", "tf")}));
+  cvc::state::instance(t.app)("tf").value(tf_sample_model());
+  t.height = 60;
+  t.draw();
+  // Press and release at the far end of the isocontour's gauge: bone moves to the top of the
+  // domain (no data range is published, so the domain is [0, 1]).
+  int x = 0, y = 0;
+  ASSERT_TRUE(find_cell(t.screen, "iso bone ", x, y)) << t.screen;
+  const int gauge = x + 9; // the 20-cell gauge follows "iso bone "
+  t.mouse(TermEvent::Mouse::Press, gauge + 19, y);
+  t.draw();
+  EXPECT_NEAR(tf_model(t.app, "tf").isocontours.at(0).at, 0.6, 1e-6)
+      << "a held slider has not committed yet";
+  t.mouse(TermEvent::Mouse::Release, gauge + 19, y);
+  t.draw();
+  cvc::tf::model m = tf_model(t.app, "tf");
+  ASSERT_EQ(m.isocontours.size(), 1u);
+  EXPECT_EQ(m.isocontours[0].id, "bone");
+  const double dragged = m.isocontours[0].at;
+  EXPECT_GT(dragged, 0.9) << t.screen;
+  // The press focused the slider: Left steps it back by a hundredth of the domain, at once.
+  t.key("Left");
+  m = tf_model(t.app, "tf");
+  ASSERT_EQ(m.isocontours.size(), 1u);
+  EXPECT_NEAR(m.isocontours[0].at, dragged - 0.01, 1e-6);
+  // A button edits the model too: one more isocontour.
+  t.draw();
+  ASSERT_TRUE(t.click("[ + isocontour ]")) << t.screen;
+  EXPECT_EQ(tf_model(t.app, "tf").isocontours.size(), 2u);
 }
