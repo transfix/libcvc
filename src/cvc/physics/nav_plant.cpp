@@ -79,10 +79,10 @@ const detail::key_meta kPlantKeys[] = {
     {"plan.accel_margin", "knob", "1", 0.3, 1,
      "With plan.with_vehicle: the share of each vehicle's maximum acceleration the navigator "
      "plans with. Lower: gentler, with more in reserve. Default 0.8."},
-    {"plan.lateral_g", "knob", "g", 0.1, 1.2,
+    {"plan.lateral_mps2", "knob", "m/s^2", 1, 12,
      "With plan.with_vehicle: the sideways acceleration the navigator corners at, capped at "
      "plan.tip_margin of the vehicle's rollover threshold. Higher: faster through bends, closer "
-     "to sliding or rolling. Default 0.5."},
+     "to sliding or rolling. Default 4.9 (0.5 g)."},
     {"plan.tip_margin", "knob", "1", 0.3, 1,
      "With plan.with_vehicle: the share of each vehicle's rollover threshold (its static "
      "stability factor, half its track over its centre of gravity's height, in g) that "
@@ -117,7 +117,7 @@ const detail::key_meta kPlantKeys[] = {
      "Metres in one unit of nav's world frame."},
     {"settings.physics_steps", "build", "", kNone, kNone,
      "Physics steps per tick: nav's tick over the physics world's fixed step."},
-    {"settings.drift_bins_g", "build", "g", kNone, kNone,
+    {"settings.drift_bins_mps2", "build", "m/s^2", kNone, kNone,
      "The upper edges of the lateral-acceleration bins the drift summary sorts ticks into; a "
      "last, open bin holds the rest."},
     {"vehicles", "telemetry", "", kNone, kNone, "Vehicles the plant drives, one per agent."},
@@ -130,9 +130,10 @@ const detail::key_meta kPlantKeys[] = {
 
 // A drift bin's keys, relative to <prefix>.nav_plant.drift.<b>.
 const detail::key_meta kBinKeys[] = {
-    {"lo_g", "telemetry", "g", kNone, kNone,
+    {"lo_mps2", "telemetry", "m/s^2", kNone, kNone,
      "The bin's lower edge of lateral acceleration (the bicycle model's, each tick)."},
-    {"hi_g", "telemetry", "g", kNone, kNone, "The bin's upper edge; -1 for the open last bin."},
+    {"hi_mps2", "telemetry", "m/s^2", kNone, kNone,
+     "The bin's upper edge; -1 for the open last bin."},
     {"ticks", "telemetry", "", kNone, kNone,
      "Ticks in the bin, counting each vehicle's tick separately."},
     {"position_rms_m", "telemetry", "m", kNone, kNone,
@@ -162,7 +163,7 @@ const detail::key_meta kAgentKeys[] = {
      "This tick's heading drift: the vehicle's heading against the bicycle model's prediction."},
     {"drift.speed_mps", "telemetry", "m/s", kNone, kNone,
      "This tick's speed drift: the vehicle's speed against the bicycle model's prediction."},
-    {"drift.lateral_g", "telemetry", "g", kNone, kNone,
+    {"drift.lateral_mps2", "telemetry", "m/s^2", kNone, kNone,
      "The bicycle model's lateral acceleration this tick; it picks the drift summary's bin."},
     {"drift.stop_speed_mps", "telemetry", "m/s", kNone, kNone,
      "The stopping speed the tick's command respected: the speed from which the vehicle can "
@@ -635,7 +636,8 @@ void nav_plant::pull(cvc::app &ctx, const std::string &prefix) {
       set_plan_with_vehicle(v == 1.0);
   });
   read("plan.accel_margin", _o.accel_margin, [&](double v) { set_accel_margin(v); });
-  read("plan.lateral_g", _o.lateral_g, [&](double v) { set_lateral_g(v); });
+  // The tree has accelerations in m/s^2; the options keep the cornering in g (kG).
+  read("plan.lateral_mps2", _o.lateral_g * kG, [&](double v) { set_lateral_g(v / kG); });
   read("plan.tip_margin", _o.tip_margin, [&](double v) { set_tip_margin(v); });
   read("drift_nsub", static_cast<double>(_o.drift_nsub), [&](double v) {
     if (v == std::floor(v))
@@ -794,7 +796,7 @@ void nav_plant::publish(cvc::app &ctx, const std::string &prefix,
     write_val(ctx, k + "drift.position_m", a.drift.position_m);
     write_val(ctx, k + "drift.heading_rad", a.drift.heading_rad);
     write_val(ctx, k + "drift.speed_mps", a.drift.speed_mps);
-    write_val(ctx, k + "drift.lateral_g", a.drift.lateral_g);
+    write_val(ctx, k + "drift.lateral_mps2", a.drift.lateral_g * kG);
     write_val(ctx, k + "drift.stop_speed_mps", a.drift.stop_speed_mps);
     const cvc::nav::plant_state s = state(static_cast<int>(i));
     write_val(ctx, k + "tire_use", static_cast<double>(s.tire_use));
@@ -811,8 +813,8 @@ void nav_plant::publish(cvc::app &ctx, const std::string &prefix,
     const std::string kb = k + "drift." + std::to_string(b) + ".";
     if (_described.insert(kb).second)
       describe_keys(ctx, kb, kBinKeys);
-    write_val(ctx, kb + "lo_g", d.lo_g);
-    write_val(ctx, kb + "hi_g", std::isfinite(d.hi_g) ? d.hi_g : -1.0);
+    write_val(ctx, kb + "lo_mps2", d.lo_g * kG);
+    write_val(ctx, kb + "hi_mps2", std::isfinite(d.hi_g) ? d.hi_g * kG : -1.0);
     write_val(ctx, kb + "ticks", static_cast<std::int64_t>(d.ticks));
     write_val(ctx, kb + "position_rms_m", d.position_rms_m);
     write_val(ctx, kb + "position_max_m", d.position_max_m);
@@ -830,8 +832,8 @@ void nav_plant::publish(cvc::app &ctx, const std::string &prefix,
   {
     std::string bins;
     for (std::size_t b = 0; b < _o.drift_bins_g.size(); ++b)
-      bins += (b ? ", " : "") + std::to_string(_o.drift_bins_g[b]);
-    write_val(ctx, ks + "drift_bins_g", bins);
+      bins += (b ? ", " : "") + std::to_string(_o.drift_bins_g[b] * kG);
+    write_val(ctx, ks + "drift_bins_mps2", bins);
   }
   write_val(ctx, k + "vehicles", static_cast<std::int64_t>(_agents.size()));
   write_val(ctx, k + "advance_us", advance_us());

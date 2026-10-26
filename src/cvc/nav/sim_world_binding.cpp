@@ -41,7 +41,7 @@ const state_key_meta kNavKeys[] = {
     {"fov_rad", "knob", "rad", 0.5, kTwoPi,
      "The sensor's field of view, centred on the heading; 2 pi (6.28) sees all round. "
      "Default 2 pi."},
-    {"sense_every", "knob", "", 1, 30,
+    {"sense_every", "knob", "tick", 1, 30,
      "Ticks (one sim step each) between looks; the obstacle map is rebuilt after each. Higher: "
      "cheaper, but slower to notice a change. Default 4."},
     {"freeze_sense", "knob", "", 0, 1,
@@ -81,7 +81,7 @@ const state_key_meta kNavKeys[] = {
     {"min_gap_iters", "knob", "", 1, 16,
      "Push-apart passes per tick for min_gap. More: a long column settles fully, at more "
      "compute. Default 4."},
-    {"tick", "telemetry", "", kNone, kNone,
+    {"tick", "telemetry", "tick", kNone, kNone,
      "Ticks (one sim step each) stepped since the world was built."},
 };
 

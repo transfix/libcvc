@@ -588,7 +588,7 @@ TEST(NavPlant, PublishesTheDriftBinnedByLateralG) {
   for (std::size_t b = 0; b < plant.drift_summary().size(); ++b)
     ticks += std::stoull(st("physics.nav_plant.drift." + std::to_string(b) + ".ticks").value());
   EXPECT_EQ(ticks, 120u);
-  EXPECT_EQ(st("physics.nav_plant.drift.0.lo_g").value().substr(0, 1), "0");
+  EXPECT_EQ(st("physics.nav_plant.drift.0.lo_mps2").value().substr(0, 1), "0");
   EXPECT_FALSE(st("physics.vehicles.lead.nav.drift.stop_speed_mps").value().empty());
   // The fixed settings are written, the live ones seeded by pull() and applied from the tree;
   // an invalid one is ignored.
@@ -602,7 +602,12 @@ TEST(NavPlant, PublishesTheDriftBinnedByLateralG) {
   st("physics.nav_plant.drift_nsub").value(std::string("12"));
   st("physics.nav_plant.modulation.tire_gain").value(std::string("3"));
   st("physics.nav_plant.modulation.tip_onset").value(std::string("-1"));
+  // Accelerations in the tree are m/s^2: 0.5 g seeded as 4.9, and 2.94 m/s^2 applied as 0.3 g.
+  EXPECT_NEAR(std::stod(st("physics.nav_plant.plan.lateral_mps2").value()),
+              plant.options().lateral_g * 9.80665, 1e-6);
+  st("physics.nav_plant.plan.lateral_mps2").value(std::string("2.941995"));
   plant.pull(app, "physics");
+  EXPECT_NEAR(plant.options().lateral_g, 0.3, 1e-9);
   EXPECT_EQ(plant.modulation().tire_gain, 3.0f);
   EXPECT_EQ(plant.modulation().tip_onset, 0.4f) << "an onset is >= 0";
   EXPECT_EQ(plant.options().latency, 0.25);
