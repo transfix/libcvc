@@ -1269,6 +1269,8 @@ unsigned int app::getPendingThreadCount() const {
 //                         ones; interrupts ordered by the pool mutex; SRW-backed worker wakes.
 // 10/27/2026 -- Joe R. -- A new worker waits at a gate until it is registered, so an interrupt
 //                         reaches the first task it takes; submitPooled reports a drop.
+// 10/27/2026 -- Joe R. -- The hand-back to compute_async waits for the worker creations under
+//                         way: the job may rely on another call's, which can still fail.
 
 bool app::poolCanStartLocked() const {
   return !_poolStopping && !_pendingTasks.empty() && _activeWorkers < _maxPoolSize;
@@ -1329,6 +1331,7 @@ app::PoolSubmit app::enqueuePoolTask(ThreadPoolTask &task, bool handBackIfNoWork
   ThreadPoolTask keyed;
   PoolKick kick;
   std::uint64_t seq = 0;
+  bool reliesOnCreations = false;
   {
     boost::mutex::scoped_lock lock(_threadPoolMutex);
     if (_poolStopping)
@@ -1351,23 +1354,35 @@ app::PoolSubmit app::enqueuePoolTask(ThreadPoolTask &task, bool handBackIfNoWork
         keyed = takePoolTaskLocked();
     }
     kick = poolKickLocked();
+    // No worker runs yet, only creations are under way (this call's, or another's): the task has
+    // a worker only if one of them succeeds.
+    reliesOnCreations = handBackIfNoWorker && !task.keyed && _creatingWorkers > 0 &&
+                        _poolThreadCount == _creatingWorkers;
   }
-  const bool workersStarted = applyPoolKick(kick);
+  applyPoolKick(kick);
   if (keyed.keyed)
     startKeyedPoolThread(keyed);
-  if (!workersStarted && handBackIfNoWorker && !task.keyed) {
-    // A worker this call asked for could not be created. If the pool has no other, running or
-    // on its way, nothing will take the task until a later call manages to start one: hand it
-    // back instead. It is still queued then, since only a worker in _poolWorkers takes an
-    // anonymous task and there is none. (Best effort: another thread's claim on a new worker,
-    // still being created here and failing after this look, leaves the task queued.)
+  if (reliesOnCreations) {
+    // If every one of those creations failed, nothing will take the task until a later call
+    // manages to start a worker: hand it back instead. It is still queued then, since only a
+    // worker in _poolWorkers takes an anonymous task and there is none.
     boost::mutex::scoped_lock lock(_threadPoolMutex);
-    if (!_poolStopping && _poolThreadCount == 0 && _pendingTasks.take(seq, task)) {
+    if (poolHasNoWorkerLocked(lock) && _pendingTasks.take(seq, task)) {
       notifyPoolIdleLocked();
       return PoolSubmit::no_worker;
     }
   }
   return PoolSubmit::queued;
+}
+
+bool app::poolHasNoWorkerLocked(boost::mutex::scoped_lock &lock) {
+  // A worker, once created, runs until the pool stops, so the pool has one for good as soon as one
+  // runs; a creation under way may still fail. While none runs, wait for those to succeed or fail
+  // (bounded: a creation takes milliseconds at most), then look.
+  _poolWorkerAdmitted.wait_for(lock, std::chrono::seconds(5), [this] {
+    return _poolStopping || _creatingWorkers == 0 || _poolThreadCount > _creatingWorkers;
+  });
+  return !_poolStopping && _poolThreadCount == 0;
 }
 
 app::PoolKick app::poolKickLocked() {
@@ -1392,6 +1407,7 @@ app::PoolKick app::poolKickLocked() {
   for (; coming < startable && _poolThreadCount < _maxPoolSize; ++coming) {
     ++_poolThreadCount;
     ++_startingWorkers;
+    ++_creatingWorkers;
     ++kick.spawns;
   }
   return kick;
@@ -1417,11 +1433,15 @@ bool app::applyPoolKick(const PoolKick &kick) {
     } catch (...) {
       // No new thread (resources): the queued tasks wait for a running worker, or for the next
       // submission to try again (compute_async's caller hears of it if there is none:
-      // enqueuePoolTask).
-      boost::mutex::scoped_lock lock(_threadPoolMutex);
-      const unsigned int left = kick.spawns - i;
-      _startingWorkers -= std::min(_startingWorkers, left);
-      _poolThreadCount -= std::min(_poolThreadCount, left);
+      // enqueuePoolTask, which waits for the creations under way to tell).
+      {
+        boost::mutex::scoped_lock lock(_threadPoolMutex);
+        const unsigned int left = kick.spawns - i;
+        _startingWorkers -= std::min(_startingWorkers, left);
+        _creatingWorkers -= std::min(_creatingWorkers, left);
+        _poolThreadCount -= std::min(_poolThreadCount, left);
+      }
+      _poolWorkerAdmitted.notify_all(); // poolHasNoWorkerLocked
       return false;
     }
     if (_poolWorkerCreatedHook) {
@@ -1433,6 +1453,8 @@ bool app::applyPoolKick(const PoolKick &kick) {
     bool registered = false;
     {
       boost::mutex::scoped_lock lock(_threadPoolMutex);
+      if (_creatingWorkers > 0)
+        --_creatingWorkers; // this creation is over (the notify below tells poolHasNoWorkerLocked)
       if (!_poolStopping) {
         try {
           _poolWorkers.push_back(worker); // ~app joins it

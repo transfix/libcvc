@@ -1876,6 +1876,78 @@ TEST(AppPoolSpawnFailure, ComputeAsyncQueuesTheJobWhenAWorkerIsRunning) {
   EXPECT_TRUE(wait_pool_idle(a));
 }
 
+// compute_async decides whether to throw only once the worker creations it relies on have
+// succeeded or failed: its own, and those other calls have under way. Two calls on an app with no
+// worker, A's creation under way when B queues its job. In a pool of 2, B makes a creation of its
+// own, and A's fails while B's is under way; in a pool of 1, A's is the one for both jobs, and it
+// fails once B has queued its job. Both calls throw, and nothing is left queued. (A call that saw
+// another's creation under way used to take it for a worker on its way, leave its job queued and
+// return. That creation then failed, and the job waited, with no worker running or starting, for
+// a later submission; its caller was never told.)
+TEST(AppPoolSpawnFailure, ComputeAsyncThrowsWhenTheWorkerItReliedOnFailsLater) {
+  for (unsigned pool_size = 1; pool_size <= 2; pool_size++) {
+    SCOPED_TRACE(pool_size == 1 ? "B relies on A's creation" : "A's fails while B's is under way");
+    struct shared {
+      std::atomic<bool> a_in_creation{false}, b_in_creation{false}, a_returned{false},
+          b_returned{false}, go_a{false}, go_b{false};
+      std::atomic<int> a_threw{-1}, b_threw{-1}, ran{0};
+      std::atomic<std::thread::id> a_id, b_id;
+    };
+    auto s = std::make_shared<shared>();
+    probe_app a;
+    a.setThreadPoolSize(pool_size);
+    a.onWorkerSpawn([s, pool_size] {
+      const auto me = std::this_thread::get_id();
+      if (me == s->a_id.load()) {
+        s->a_in_creation = true;
+        if (pool_size == 1) {
+          // B makes no creation of its own: A's fails once B has queued its job and returned, or
+          // after 300 ms (B waiting for it).
+          for (int i = 0; i < 300 && !s->b_returned.load(); i++)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        } else {
+          for (int i = 0; i < 10000 && !s->b_in_creation.load(); i++)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+      } else if (me == s->b_id.load()) {
+        // B's fails once A has returned, or after 300 ms (A waiting for it).
+        s->b_in_creation = true;
+        for (int i = 0; i < 300 && !s->a_returned.load(); i++)
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+      throw boost::thread_resource_error();
+    });
+    const auto call = [&a, s](std::atomic<bool> &go, std::atomic<int> &threw,
+                              std::atomic<bool> &returned) {
+      while (!go.load())
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      try {
+        a.compute_async(1, [](int) {}, [s] { ++s->ran; });
+        threw = 0;
+      } catch (const boost::thread_resource_error &) {
+        threw = 1;
+      }
+      returned = true;
+    };
+    std::thread ta([&] { call(s->go_a, s->a_threw, s->a_returned); });
+    s->a_id = ta.get_id();
+    s->go_a = true;
+    for (int i = 0; i < 10000 && !s->a_in_creation.load(); i++)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    EXPECT_TRUE(s->a_in_creation.load());
+    std::thread tb([&] { call(s->go_b, s->b_threw, s->b_returned); });
+    s->b_id = tb.get_id();
+    s->go_b = true;
+    ta.join();
+    tb.join();
+    EXPECT_EQ(s->a_threw.load(), 1);
+    EXPECT_EQ(s->b_threw.load(), 1);
+    EXPECT_EQ(s->ran.load(), 0);
+    EXPECT_EQ(a.getPendingThreadCount(), 0u) << "a job waits for a worker nothing will start";
+    EXPECT_EQ(a.getActiveThreadCount(), 0u);
+  }
+}
+
 // ~app interrupts the threads in threads() before it joins the pool's workers, as it interrupts
 // everything before joining anything: a pool task waiting, with no interruption point, on
 // something a map thread holds until it is interrupted is released at once. (~app used to join

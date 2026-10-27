@@ -706,12 +706,15 @@ protected:
     no_worker // handed back in the argument, unrun (handBackIfNoWorker, below)
   };
   // Queue `task` (its contents are taken; a keyed one may start on this thread). With
-  // handBackIfNoWorker, an anonymous task is handed back instead of left in the queue when this
-  // call could not start a worker for it and the pool has none, running or starting (not even
-  // the pool's first thread could be created: thread resources are exhausted). Left queued, it
-  // would wait until a later call started one. compute_async throws then, so that its caller can
-  // do the work itself.
+  // handBackIfNoWorker, an anonymous task is handed back instead of left in the queue when the
+  // pool has no worker running for it and every worker creation it relied on, this call's or one
+  // another call had under way, failed (not even the pool's first thread could be created: thread
+  // resources are exhausted). Left queued, it would wait until a later call started one.
+  // compute_async throws then, so that its caller can do the work itself.
   PoolSubmit enqueuePoolTask(ThreadPoolTask &task, bool handBackIfNoWorker = false);
+  // _threadPoolMutex held (by `lock`): whether the pool has no worker, running or being created,
+  // once the creations under way (if no worker runs) have succeeded or failed. False once stopped.
+  bool poolHasNoWorkerLocked(boost::mutex::scoped_lock &lock);
   // What the pool must do, once _threadPoolMutex is released, so that every queued task that
   // may start has a worker on its way to it: idle workers to wake and new workers to start.
   struct PoolKick {
@@ -808,6 +811,7 @@ protected:
   unsigned int _idleWorkers = 0;        // waiting on _poolWorkerWake, not signalled
   unsigned int _signalledWorkers = 0;   // signalled, not yet back from their wait
   unsigned int _startingWorkers = 0;    // asked for, not yet at their first look at the queue
+  unsigned int _creatingWorkers = 0;    // asked for, their creation not yet over (failed or done)
   unsigned int _spawnRequests = 0;      // asked for by tryStartWorker, not yet being created
   // Bumped, under _threadPoolMutex, whenever the workers are interrupted (wait_for_threads,
   // ~app). A worker that sees it changed clears a request left over from then, under the
