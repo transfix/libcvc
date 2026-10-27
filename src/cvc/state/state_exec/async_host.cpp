@@ -85,8 +85,11 @@ bool async_call::cancelled() {
 }
 
 void async_call::post(const value_t &progress) {
-  if (progress_channel_.empty())
+  if (!has_progress_)
     return; // no process to post to (a bare evaluator)
+  std::call_once(progress_once_, [this] {
+    progress_channel_ = resolve_channel_key(progress_root_, name_ + ".progress");
+  });
   if (async_sched_) {
     async_sched_->post_message(progress_channel_, progress);
     return;
@@ -448,8 +451,10 @@ value_t async_host::call(const std::string &name, async_kernel kernel, const asy
   call->timeout_ = opts.timeout;
   call->alloc_limit_ = eval_alloc_limit(); // the calling step's
   call->sched_ = sched_;
-  if (proc)
-    call->progress_channel_ = resolve_channel_key(proc->root_path, name + ".progress");
+  if (proc) {
+    call->has_progress_ = true;
+    call->progress_root_ = proc->root_path;
+  }
 
   // On an executor only where the process can be charged and resumed: a step of the parking
   // scheduler, and, for a transparent call, at a point that can park.
@@ -550,16 +555,17 @@ void async_host::run_kernel(const std::shared_ptr<async_call> &call, async_kerne
       }
       call->end_kernel();
     }
-    // The kernel and what it captured go here, on its thread, before the host's count goes down
-    // (a host waiting for its calls to end may then free what they referenced).
-    kernel = nullptr;
-    // Past its timeout, the call raises TimeoutError whatever the kernel did once it saw
-    // cancelled(), as when the scheduler times it out first.
+    // Past its timeout when it ended, the call raises TimeoutError whatever the kernel did once it
+    // saw cancelled(), as when the scheduler times it out first. Settled before the kernel is
+    // freed: freeing what it captured (a large buffer, a Python callable) is not the call's time.
     const bool settled = call->past_timeout(clock::now())
                              ? call->settle_timeout()
                              : call->settle(std::move(value), std::move(error));
     if (settled)
       call->async_sched_->post_async_completion(call);
+    // The kernel and what it captured go here, on its thread, before the host's count goes down
+    // (a host waiting for its calls to end may then free what they referenced).
+    kernel = nullptr;
   }
   state.end(*call);
 }
@@ -609,7 +615,8 @@ std::shared_ptr<async_call> async_host::begin_external(const std::string &name, 
   call->sched_ = sched_;
   call->async_sched_ = async_sched_;
   call->external_ = true;
-  call->progress_channel_ = resolve_channel_key(proc->root_path, name + ".progress");
+  call->has_progress_ = true;
+  call->progress_root_ = proc->root_path;
   ++proc->async_calls;
   state_->add(call, false);
   async_sched_->track_async_call(call);

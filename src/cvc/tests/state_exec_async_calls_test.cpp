@@ -1128,6 +1128,29 @@ TEST(AsyncCalls, AFinishedCallKeepsNothingAlive) {
     EXPECT_TRUE(c.expired()) << "a finished call is still held";
 }
 
+// A call whose kernel returns within its timeout keeps its value however long freeing what the
+// kernel captured takes: the call is settled when the kernel ends, and the kernel freed after.
+TEST(AsyncCalls, FreeingAKernelsCapturesIsntCountedAgainstItsTimeout) {
+  world w(async_sched);
+  struct slow_to_free {
+    ~slow_to_free() { std::this_thread::sleep_for(400ms); }
+  };
+  async_options opts;
+  opts.timeout = 0.2;
+  register_async_fn(
+      w.env, *w.host, "slow-free-op",
+      [](std::span<const value_t>) -> async_kernel {
+        auto held = std::make_shared<slow_to_free>();
+        return [held](async_call &) -> value_t { return value_t(static_cast<int64_t>(7)); };
+      },
+      opts);
+  const int pid =
+      w.run_to_end(w.submit("(try (slow-free-op) (catch (TimeoutError e) \"timeout\"))"));
+  ASSERT_TRUE(w.result(pid));
+  EXPECT_EQ(show(*w.result(pid)), "7");
+  w.host->wait_idle();
+}
+
 // The host forgets finished calls in batches, but every call still in flight is cancelled at
 // shutdown, after any number of finished ones.
 TEST(AsyncCalls, ShutdownCancelsTheCallInFlightAfterManyFinished) {

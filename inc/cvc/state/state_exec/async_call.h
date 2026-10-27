@@ -192,8 +192,13 @@ private:
 
   std::string name_;
   int pid_;
-  std::string channel_;                    // the reply channel (threaded calls)
-  std::string progress_channel_;           // "<name>.progress", resolved for the process's root
+  std::string channel_; // the reply channel (threaded calls)
+  // "<name>.progress" resolved under the calling process's root: built on the first post()
+  // (most kernels never post), from the root path kept here (the process may be gone by then).
+  bool has_progress_ = false; // a process to post to (not a bare evaluator)
+  std::string progress_root_;
+  std::once_flag progress_once_;
+  std::string progress_channel_;
   scheduler_base *sched_ = nullptr;        // where progress goes (inline: on this thread)
   async_scheduler *async_sched_ = nullptr; // threaded: where the completion is posted
   std::optional<double> timeout_;
