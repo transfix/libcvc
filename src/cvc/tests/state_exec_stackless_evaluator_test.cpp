@@ -7,6 +7,7 @@
 #include <cvc/state/state_exec/scheduler.h>
 #include <cvc/state/state_exec/stackless_evaluator.h>
 #include <cvc/state/state_exec/types.h>
+#include <functional>
 #include <gtest/gtest.h>
 #include <memory>
 #include <set>
@@ -682,6 +683,69 @@ TEST(StacklessStepCounts, CountedFromAnotherThreadWhileTheEvaluatorSteps) {
   other.join();
   EXPECT_EQ(st.stats.get_step_count(), alone + counted.load());
   EXPECT_EQ(st.stats.steps(step_kind::eval), alone + counted.load());
+}
+
+TEST(StacklessStepCounts, CountedFromAnotherThreadWhileTheEvaluatorReadsAndWalksData) {
+  // The evaluator counts its read and data steps with increment_step() too, on the counter
+  // another thread's increment_step() adds to: both are locked adds, so a count made meanwhile
+  // isn't lost either.
+  std::string script = "(set l (list 1 2 3 4 5 6 7 8)) (set n 0)";
+  for (int i = 0; i < 2000; ++i)
+    script += " (set n (+ n (length (str (list l l)))))";
+  parse_options popts;
+  popts.step_tokens = 1; // a read step per token
+  struct counts {
+    uint64_t all, eval, read, data;
+  };
+  const auto run = [&] {
+    stackless_evaluator ev(builtins::make_default_environment());
+    evaluator_state st = ev.create_state(script, nullptr, popts);
+    st.data_step_nodes = 2;
+    while (!ev.step(st)) {
+    }
+    return counts{st.stats.get_step_count(), st.stats.steps(step_kind::eval),
+                  st.stats.steps(step_kind::read), st.stats.steps(step_kind::data)};
+  };
+  const counts alone = run();
+  ASSERT_GT(alone.read, 10000u);
+  ASSERT_GT(alone.data, 10000u);
+
+  stackless_evaluator ev(builtins::make_default_environment());
+  evaluator_state st = ev.create_state(script, nullptr, popts);
+  st.data_step_nodes = 2;
+  std::atomic<uint64_t> counted{0};
+  const auto counting_while = [&](const std::function<void()> &steps) {
+    std::atomic<bool> stepping{true};
+    const uint64_t before = counted.load();
+    std::thread other([&] {
+      while (stepping.load(std::memory_order_relaxed)) {
+        st.stats.increment_step();
+        counted.fetch_add(1, std::memory_order_relaxed);
+      }
+    });
+    while (counted.load() == before) // the steps overlap the other thread's counting
+      std::this_thread::yield();
+    steps();
+    stepping = false;
+    other.join();
+  };
+  // Every read step but the last, which ends the reading by moving the stats into the program's
+  // state, copying the counts (evaluation_stats::increment_step()); then the program's steps.
+  counting_while([&] {
+    for (uint64_t i = 1; i < alone.read; ++i)
+      ASSERT_FALSE(ev.step(st));
+  });
+  ASSERT_TRUE(st.reading);
+  ASSERT_FALSE(ev.step(st));
+  ASSERT_FALSE(st.reading);
+  counting_while([&] {
+    while (!ev.step(st)) {
+    }
+  });
+  EXPECT_EQ(st.stats.get_step_count(), alone.all + counted.load());
+  EXPECT_EQ(st.stats.steps(step_kind::eval), alone.eval + counted.load());
+  EXPECT_EQ(st.stats.steps(step_kind::read), alone.read);
+  EXPECT_EQ(st.stats.steps(step_kind::data), alone.data);
 }
 
 TEST_F(StacklessEvaluatorTest, PoppedFramesKeepNoValues) {

@@ -85,7 +85,11 @@ struct evaluation_stats {
   }
   /// Count a step, as spent on `kind`. Any thread may count, and read, at any time, also while an
   /// evaluator steps the state: this is a locked add of a counter the evaluators' own count
-  /// (count_eval_step()) doesn't write, so neither loses the other's steps.
+  /// (count_eval_step()) doesn't write, so neither loses the other's steps. Every other write to
+  /// that counter is a locked add too, the stackless evaluator's read and data steps included,
+  /// but for start() and a move of the stats, which copies the counts: a count made meanwhile is
+  /// lost. The stackless evaluator moves them in one step, the one that ends a script read in
+  /// slices (parse_options::step_tokens).
   void increment_step(step_kind kind = step_kind::eval) {
     step_count.fetch_add(1, std::memory_order_relaxed);
     if (kind != step_kind::eval) // eval steps are the rest, so the common step costs no more

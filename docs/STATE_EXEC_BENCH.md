@@ -705,8 +705,10 @@ suite was written.
   vectors a frame needs from ones kept per thread; the recursive one copies them into a vector it
   keeps; neither allocates for them. A lookup hashes the name once and skips empty scopes, call
   scopes are recycled per thread, and a call looks its function up once, at its init. The
-  evaluators count their own eval steps with a plain load and store (`count_eval_step()`);
-  `increment_step()`, for any other thread, is still a locked add, of another counter.
+  recursive and stackless evaluators count their own eval steps with a plain load and store of a
+  counter only they write (`count_eval_step()`). Every other count is still a locked add, of
+  another counter: `increment_step()` from any thread, which also counts the stackless
+  evaluator's read and data steps, and `add_steps()`.
 - **Function bodies and try forms rebuilt per use.** A closure body of more than one form is
   rebuilt as a `(begin ...)` list on every call (`stackless_evaluator.cpp:1679-1691`):
   `eval.closure_body` `forms=3` against `forms=1`. A `try` is re-parsed on entry
