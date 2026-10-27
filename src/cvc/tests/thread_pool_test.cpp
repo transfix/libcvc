@@ -258,3 +258,86 @@ TEST(ThreadPool, NestedTaskThrowPropagatesThroughOuterFanout) {
   pool.parallel_for(200, [&](int) { acc.fetch_add(1, std::memory_order_relaxed); });
   EXPECT_EQ(acc.load(), 200);
 }
+
+// Concurrent fan-outs run side by side: a fan-out started while another is in flight begins at
+// once (on its own caller, and on any free worker) instead of waiting for the first to drain.
+// Each of two fan-outs holds its chunks until it has seen the other one running; when fan-outs
+// serialized, the second caller blocked before running anything, so the first waited out the
+// deadline.
+TEST(ThreadPool, ConcurrentFanoutsOverlap) {
+  thread_pool pool(4);
+  std::atomic<bool> running[2] = {false, false};
+  std::atomic<bool> saw_other[2] = {false, false};
+  auto fanout = [&](int me) {
+    pool.parallel_for(
+        4,
+        [&, me](int) {
+          running[me].store(true);
+          const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+          while (!running[1 - me].load() && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::yield();
+          if (running[1 - me].load())
+            saw_other[me].store(true);
+        },
+        2);
+  };
+  std::thread a(fanout, 0);
+  std::thread b(fanout, 1);
+  a.join();
+  b.join();
+  EXPECT_TRUE(saw_other[0].load());
+  EXPECT_TRUE(saw_other[1].load());
+}
+
+// Every chunk of a fan-out runs under its own poster's fanout_context (state_exec charges a
+// kernel's chunks to its call through it), also when several fan-outs share the workers, and a
+// worker only joins a fan-out through run_chunks, at most as many as the fan-out's cap allows.
+namespace {
+struct counting_context final : cvc::fanout_context {
+  std::atomic<int> shares{0};
+  std::atomic<int> inside{0};
+  std::atomic<int> most_inside{0};
+  void run_chunks(const std::function<void()> &chunks) noexcept override {
+    shares.fetch_add(1);
+    const int now = inside.fetch_add(1) + 1;
+    int seen = most_inside.load();
+    while (now > seen && !most_inside.compare_exchange_weak(seen, now)) {
+    }
+    chunks();
+    inside.fetch_sub(1);
+  }
+};
+} // namespace
+
+TEST(ThreadPool, ConcurrentFanoutsKeepTheirOwnContexts) {
+  thread_pool pool(6);
+  constexpr int kPosters = 3;
+  constexpr int kIters = 200;
+  counting_context ctx[kPosters];
+  std::atomic<int> wrong{0};
+  std::atomic<long long> ran[kPosters] = {0, 0, 0};
+  std::vector<std::thread> posters;
+  for (int p = 0; p < kPosters; ++p)
+    posters.emplace_back([&, p] {
+      cvc::fanout_context_scope scope(&ctx[p]);
+      for (int r = 0; r < kIters; ++r)
+        pool.parallel_for(
+            32,
+            [&, p](int) {
+              if (cvc::current_fanout_context() != &ctx[p])
+                wrong.fetch_add(1);
+              ran[p].fetch_add(1);
+            },
+            3); // the caller and at most 2 workers
+    });
+  for (auto &t : posters)
+    t.join();
+  EXPECT_EQ(wrong.load(), 0);
+  for (int p = 0; p < kPosters; ++p) {
+    EXPECT_EQ(ran[p].load(), 32LL * kIters);
+    // Worker shares only (the caller's own chunks count as its own work), never more than the
+    // cap's 2 workers in one fan-out at a time (the poster runs its fan-outs one after another).
+    EXPECT_LE(ctx[p].most_inside.load(), 2);
+    EXPECT_LE(ctx[p].shares.load(), 2 * kIters);
+  }
+}
