@@ -1817,6 +1817,58 @@ TEST(TimeAfterTest, Saturates) {
   EXPECT_NEAR(std::chrono::duration<double>(d).count(), 1.5, 1e-6);
 }
 
+// The first clock tick at which the seconds have passed as async_call::past_timeout tests it
+// (the ticks elapsed as double seconds). time_after's point is near it, but for a long time
+// (~1e7 s and up) the doubles round over several ticks: the first point may be before
+// time_after's, or hundreds of ticks after it, where stepping up in doubling steps overshot it.
+TEST(FirstTimePassedTest, IsTheFirstTickAtWhichTheSecondsHavePassed) {
+  using clk = std::chrono::steady_clock;
+  const clk::time_point from = clk::now();
+  const clk::duration tick(1);
+  std::vector<double> times = {0.05, 0.3, 1.0 / 3.0, 1e-9, 1.5e-9, 2.5e-9};
+  times.insert(times.end(), {1e7, 1e8, 1500000000.343});
+  for (int k = 0; k < 2000; ++k) {
+    times.push_back(1e7 + 0.37 * k);
+    times.push_back(1e8 + 0.37 * k);
+  }
+  std::mt19937_64 rng(42);
+  std::uniform_real_distribution<double> short_time(0.0, 10.0), long_time(1e6, 5e9);
+  for (int k = 0; k < 4000; ++k) {
+    times.push_back(short_time(rng));
+    times.push_back(long_time(rng));
+  }
+  int before_time_after = 0, ticks_after_time_after = 0;
+  for (const double s : times) {
+    const std::optional<clk::time_point> t = detail::first_time_passed(from, s);
+    ASSERT_TRUE(t.has_value()) << s;
+    EXPECT_TRUE(detail::seconds_passed(from, *t, s)) << s;
+    EXPECT_FALSE(detail::seconds_passed(from, *t - tick, s)) << s << ": not the first";
+    const clk::time_point approx = detail::time_after(from, s);
+    before_time_after += *t < approx;
+    ticks_after_time_after += *t - approx > tick;
+  }
+  // The sweep has both kinds of time (it would be no test of the search without them).
+  EXPECT_GT(before_time_after, 0);
+  EXPECT_GT(ticks_after_time_after, 0);
+}
+
+TEST(FirstTimePassedTest, NeverForNanInfiniteOrOutOfRangeTimes) {
+  using clk = std::chrono::steady_clock;
+  const clk::time_point from = clk::now();
+  const double inf = std::numeric_limits<double>::infinity();
+  EXPECT_FALSE(detail::first_time_passed(from, std::nan("")).has_value());
+  EXPECT_FALSE(detail::first_time_passed(from, inf).has_value());
+  EXPECT_FALSE(detail::first_time_passed(from, 1e300).has_value());
+  EXPECT_FALSE(detail::first_time_passed(from, 1e12).has_value()); // past the clock's range
+  EXPECT_EQ(detail::first_time_passed(from, 0.0), from);
+  EXPECT_EQ(detail::first_time_passed(from, -5.0), from);
+  EXPECT_EQ(detail::first_time_passed(from, -inf), from);
+  // At the clock's last tick: there, exactly, or never.
+  const clk::time_point late = clk::time_point::max() - std::chrono::nanoseconds(1000);
+  EXPECT_EQ(detail::first_time_passed(late, 1e-6), clk::time_point::max());
+  EXPECT_FALSE(detail::first_time_passed(late, 1.0001e-6).has_value());
+}
+
 TEST(TimeBudgetTest, AWaitIsChargedAsRunTimeInBothHalves) {
   time_budget b(1.0); // halves of 0.5 s
   b.start();
@@ -2179,6 +2231,33 @@ TEST(AsyncWaitForWorkTest, ANanTimeoutNeitherEndsTheWaitNorTimesTheCallOut) {
   w.drive(pid, 10.0);
   ASSERT_TRUE(w.sched.get_result(pid).has_value());
   EXPECT_EQ(std::get<int64_t>(w.sched.get_result(pid)->v), 2);
+}
+
+// A call's timeout_point() is the first tick at which past_timeout() holds, for the long
+// timeouts whose first tick time_after misses: 1e7 s (the tick before time_after's point holds
+// already) and 1500000000.343 s (128 ticks after it, where a doubling step-up gave 255).
+TEST(AsyncWaitForWorkTest, ACallsTimeoutPointIsTheFirstTickPastItsTimeout) {
+  call_world w;
+  for (const auto &[name, timeout] : {std::pair<std::string, double>{"probe-a", 1e7},
+                                      std::pair<std::string, double>{"probe-b", 1500000000.343}}) {
+    async_options opts;
+    opts.timeout = timeout;
+    register_async_fn(
+        w.env, *w.host, name,
+        [](std::span<const value_t>) -> async_kernel {
+          return [](async_call &call) -> value_t {
+            const std::optional<async_call::clock::time_point> t = call.timeout_point();
+            const bool first = t && call.past_timeout(*t) &&
+                               !call.past_timeout(*t - async_call::clock::duration(1));
+            return value_t(int64_t(first ? 1 : 0));
+          };
+        },
+        opts);
+  }
+  const int pid = w.submit("(+ (probe-a) (* 10 (probe-b)))");
+  w.drive(pid, 10.0);
+  ASSERT_TRUE(w.sched.get_result(pid).has_value());
+  EXPECT_EQ(std::get<int64_t>(w.sched.get_result(pid)->v), 11); // 1 for each that is first
 }
 
 // A charge that reads the tree's rate may publish it, a write to the tree whose slots may kill or
