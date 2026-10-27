@@ -1948,6 +1948,64 @@ TEST(AppPoolSpawnFailure, ComputeAsyncThrowsWhenTheWorkerItReliedOnFailsLater) {
   }
 }
 
+// startThreadPooled(wait=true) throws boost::thread_resource_error when its task's own thread
+// can't be created (thread resources exhausted), as it did when every pooled task had a thread of
+// its own: the task doesn't run, what it captured is released, and nothing is registered under its
+// key. (The task used to be dropped without a word: startThreadPooled returned as if it had
+// registered it, and `if (hasThread(k)) threads(k)->join();` went on at once.) A keyed task that
+// waited in the queue, and whose thread can't be created when its turn comes, has no caller to
+// tell: it is dropped and logged, and the pool carries on.
+TEST(AppPoolSpawnFailure, AKeyedTaskWhoseThreadCantBeCreatedThrowsOrIsLogged) {
+  spawn_switch spawn; // before the app: its hook points here
+  probe_app a;
+  spawn.install(a);
+  const std::string log_key("pool_log");
+  a.data(log_key, std::string());
+  a.properties("system.log_output", log_key);
+  a.setThreadPoolSize(1);
+  std::atomic<int> ran(0);
+  auto held = std::make_shared<int>(1);
+  std::weak_ptr<int> weak = held;
+  spawn.fail = true;
+  EXPECT_THROW(a.startThreadPooled(
+                   "k1", [held, &ran] { ++ran; }, PRIORITY_NORMAL, /*wait=*/true),
+               boost::thread_resource_error);
+  held.reset();
+  EXPECT_TRUE(weak.expired()) << "a keyed task startThreadPooled threw for kept its captures";
+  EXPECT_FALSE(a.hasThread("k1"));
+  EXPECT_EQ(a.getActiveThreadCount(), 0u);
+  EXPECT_EQ(a.getPendingThreadCount(), 0u);
+
+  // Queued behind the full pool, then started, and failing, as the slot frees.
+  spawn.fail = false;
+  std::atomic<bool> started(false), release(false);
+  a.submitPooled([&started, &release] {
+    started = true;
+    while (!release.load())
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  });
+  for (int i = 0; i < 10000 && !started.load(); i++)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  ASSERT_TRUE(started.load());
+  held = std::make_shared<int>(2);
+  weak = held;
+  EXPECT_NO_THROW(a.startThreadPooled(
+      "k2", [held, &ran] { ++ran; }, PRIORITY_NORMAL, /*wait=*/true)); // queued
+  held.reset();
+  EXPECT_EQ(a.getPendingThreadCount(), 1u);
+  spawn.fail = true;
+  release = true;
+  EXPECT_TRUE(wait_pool_idle(a));
+  spawn.fail = false;
+  EXPECT_TRUE(weak.expired());
+  EXPECT_FALSE(a.hasThread("k2"));
+  EXPECT_EQ(ran.load(), 0);
+#ifndef USING_LOG4CPLUS_DEFAULT
+  const std::string logged = a.data<std::string>(log_key);
+  EXPECT_NE(logged.find("'k2'"), std::string::npos) << "the drop wasn't logged: " << logged;
+#endif
+}
+
 // ~app interrupts the threads in threads() before it joins the pool's workers, as it interrupts
 // everything before joining anything: a pool task waiting, with no interruption point, on
 // something a map thread holds until it is interrupted is released at once. (~app used to join

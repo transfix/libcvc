@@ -383,7 +383,11 @@ public:
   // and that entry stays after it ends, until replaced, removed or ~app, as with startThread.
   // When the pool has room for it and for every task already queued, it starts on the calling
   // thread and is in threads() when this returns. Otherwise (the pool is full) it waits in the
-  // queue and is registered when it starts.
+  // queue and is registered when it starts. If its thread can't be created (thread resources
+  // exhausted) as it starts here, this throws boost::thread_resource_error: the task hasn't run,
+  // what it captured is released, and nothing new is registered under `key` (a thread there from
+  // before stays, interrupted and joined). One that waited in the queue and whose thread can't be
+  // created when it starts is dropped unrun, and the drop logged.
   template <class T>
   void startThreadPooled(const std::string &key, const T &t,
                          thread_priority priority = PRIORITY_NORMAL, bool wait = true) {
@@ -761,7 +765,10 @@ protected:
   };
   void poolWorkerLoop(std::shared_ptr<PoolWorkerGate> gate);
   void runPoolTask(ThreadPoolTask &task);
-  void startKeyedPoolThread(ThreadPoolTask &task);
+  // Start a keyed task on a thread of its own, registered under its key. False if that thread
+  // couldn't be created: the task is dropped unrun, its slot freed, and the drop logged unless
+  // the caller reports it (logDrop false).
+  bool startKeyedPoolThread(ThreadPoolTask &task, bool logDrop = true);
   void runKeyedPoolTask(ThreadPoolTask &task);
   void interruptPoolWorkersLocked();
   // ~app's first step for the pool: close it (no queued task starts, and one submitted from now
@@ -817,9 +824,10 @@ protected:
   // exists and before it is registered, so a test can hold the creator in that window (app_test's
   // AppPoolTeardown tests). Set it before the pool starts a worker.
   std::function<void()> _poolWorkerCreatedHook;
-  // Test seam, empty in the library: called on the creating thread right before a new worker's
-  // thread is created. A throw counts as that creation failing (thread resources exhausted), so
-  // a test can make every new worker fail. Set it before the pool starts a worker.
+  // Test seam, empty in the library: called on the creating thread right before the pool creates
+  // a thread, a new worker's or a keyed task's own. A throw counts as that creation failing
+  // (thread resources exhausted), so a test can make every one fail. Set it before the pool
+  // starts a thread.
   std::function<void()> _poolWorkerSpawnHook;
   std::vector<thread_ptr> _poolWorkers; // persistent workers, started on demand
   unsigned int _idleWorkers = 0;        // waiting on _poolWorkerWake, not signalled

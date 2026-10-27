@@ -1280,6 +1280,8 @@ unsigned int app::getPendingThreadCount() const {
 //                         reaches the first task it takes; submitPooled reports a drop.
 // 10/27/2026 -- Joe R. -- The hand-back to compute_async waits for the worker creations under
 //                         way: the job may rely on another call's, which can still fail.
+// 10/27/2026 -- Joe R. -- startThreadPooled(wait=true) throws when its task's own thread can't
+//                         be created; a keyed task started later and failing so is logged.
 
 bool app::poolCanStartLocked() const {
   return !_poolStopping && !_pendingTasks.empty() && _activeWorkers < _maxPoolSize;
@@ -1386,8 +1388,17 @@ app::PoolSubmit app::enqueuePoolTask(ThreadPoolTask &task, bool handBackIfNoWork
                         _poolThreadCount == _creatingWorkers;
   }
   applyPoolKick(kick);
-  if (keyed.keyed)
-    startKeyedPoolThread(keyed);
+  if (keyed.keyed) {
+    // The caller's own keyed task (startThreadPooled with room for it): if its thread can't be
+    // created, the caller hears of it, as when every pooled task had a thread of its own. One
+    // taken off the head of the queue for another task has no caller here to tell: it is logged.
+    const bool own = keyed.seq == seq;
+    const std::string key = own ? keyed.key : std::string();
+    if (!startKeyedPoolThread(keyed, /*logDrop=*/!own) && own)
+      boost::throw_exception(boost::thread_resource_error(
+          static_cast<int>(boost::system::errc::resource_unavailable_try_again),
+          "cvc::app::startThreadPooled: no thread could be started for '" + key + "'"));
+  }
   if (reliesOnCreations) {
     // If every one of those creations failed, nothing will take the task until a later call
     // manages to start a worker: hand it back instead. It is still queued then, since only a
@@ -1614,7 +1625,7 @@ void app::runPoolTask(ThreadPoolTask &task) {
   }
 }
 
-void app::startKeyedPoolThread(ThreadPoolTask &task) {
+bool app::startKeyedPoolThread(ThreadPoolTask &task, bool logDrop) {
   // As startThread does: the thread waits at a gate until it is in threads() under its key, so
   // keyed progress and info calls from the task find it. Registering must not be interrupted
   // half way (the thread would wait at the gate forever), and a thread already running under
@@ -1630,6 +1641,8 @@ void app::startKeyedPoolThread(ThreadPoolTask &task) {
   const std::string key = owned->key;
   thread_ptr thread;
   try {
+    if (_poolWorkerSpawnHook)
+      _poolWorkerSpawnHook(); // a test making the creation fail (app.h)
     thread.reset(new boost::thread([this, ready, owned]() mutable {
       while (!ready->load(std::memory_order_acquire))
         boost::this_thread::yield();
@@ -1638,7 +1651,9 @@ void app::startKeyedPoolThread(ThreadPoolTask &task) {
       runKeyedPoolTask(*mine);
     }));
   } catch (...) {
-    // No thread: the task can't run. It is dropped, and its slot freed.
+    // No thread (resources): the task can't run. It is dropped, and its slot freed. The caller
+    // that submitted it hears of it (enqueuePoolTask); one started later is logged, as there is
+    // no caller to tell.
     owned.reset();
     PoolKick kick;
     {
@@ -1648,13 +1663,21 @@ void app::startKeyedPoolThread(ThreadPoolTask &task) {
       notifyPoolIdleLocked();
     }
     applyPoolKick(kick);
-    return;
+    if (logDrop) {
+      try {
+        log(0, "Thread pool: no thread could be started for keyed task '" + key +
+                   "': dropped unrun");
+      } catch (...) {
+      }
+    }
+    return false;
   }
   try {
     threads(key, thread);
   } catch (...) {
   }
   ready->store(true, std::memory_order_release);
+  return true;
 }
 
 void app::threadPoolWorker(ThreadPoolTask task) { runKeyedPoolTask(task); }

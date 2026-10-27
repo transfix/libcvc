@@ -23,7 +23,8 @@ For the full per-method reference, see
   and info, `thread_feedback`) also work for it. When the pool has room
   for it and for every task already queued, it is registered before
   `startThreadPooled` returns, so `if (app.hasThread(k))
-  app.threads(k)->join();` waits for it.
+  app.threads(k)->join();` waits for it; if its thread can't be created
+  then, `startThreadPooled` throws `boost::thread_resource_error`.
 - **Anonymous tasks run on persistent workers.** An anonymous task
   (`wait=false`, or `submitPooled`) runs on one of at most
   `getThreadPoolSize()` worker threads the pool starts on demand (a
@@ -61,7 +62,10 @@ For the full per-method reference, see
   submission or `setThreadPoolSize()` starts a worker. A pool that never
   got a worker can't run a queued async kernel, so `~app` drops those
   before it shuts down the async host, which would otherwise wait for
-  them for good.
+  them for good. A keyed task whose own thread can't be created as
+  `startThreadPooled` starts it makes that call throw
+  `boost::thread_resource_error`; one that waited in the queue is
+  dropped unrun when its thread can't be created, and the drop logged.
 - **Exception-safe.** Exceptions thrown by a task are logged and do not
   take down the pool or other workers.
 - **Dynamic resizing.** `setThreadPoolSize()` may be called while tasks

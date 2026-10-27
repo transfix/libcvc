@@ -115,7 +115,10 @@ for (int i = 0; i < 100; i++) {
    at submission for it and for every task already queued (anonymous ones
    included), it starts on the submitting thread and is registered before
    `startThreadPooled` returns; otherwise it is registered when it leaves the
-   queue. The entry stays after the task ends, like `startThread`'s.
+   queue. The entry stays after the task ends, like `startThread`'s. If its
+   thread can't be created as it starts on the submitting thread,
+   `startThreadPooled` throws `boost::thread_resource_error` and nothing new is
+   registered; one leaving the queue is dropped unrun then, and the drop logged.
 5. **Shutdown**: `wait()` interrupts the running tasks and waits (up to 5 s)
    for the pool to drain, so it is not a completion barrier: wait on the
    tasks' own completion for that. `~app` closes the pool first (after
