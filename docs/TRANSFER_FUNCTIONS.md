@@ -303,6 +303,17 @@ and the overlays, computed by a `schedule_overlays` task from a copy-on-write co
 (the histogram at once, the spectrum and tree on first request) and re-binned onto `T.range` when
 that differs from the range they were computed over.
 
+**Field colours: a colour ramp for a field, not a volume.** `mesh_lab` and `fe_lab` also colour
+the values they show (a curvature, a geodesic distance, a FEM solution, element sizes) through a
+model at `<node>.field_colors`, which the nodes follow themselves (no `tf_binding`): its colour
+ramp is baked into the table every GeometryNode showing the values maps through
+(`GeometryNode::setColorTable`), over the model's explicit domain or else the values' own range.
+The opacity curve and isocontours are not used, so the components' editors hide them
+(`show_opacity: false`, `show_isocontours: false`). The node publishes `field_colors.range` and a
+128-bin `field_colors.histogram` of the values beside it. The colormap key (`color.colormap`,
+`fe.view.colormap`) seeds the model and resets it to that colormap's ramp when it changes. See
+[ARIADNE.md](ARIADNE.md), "Field colours".
+
 **volslice: the TF is fixed in data units, the window is the LUT's span.** `VolSliceNode` samples
 the raw-unit tables over its window (else the data range), so the model's `auto` domain is the
 volume's range, not the window: moving the window re-lowers nothing, and the slices show the

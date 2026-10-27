@@ -53,7 +53,10 @@
 #include <cvc/gl/ariadne/mesh_nodes.h>
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/gl/ariadne/tf_binding.h> // the isovalue as an editable transfer-function isocontour
-#include <cvc/utility/algorithm.h>     // cvc::tetrahedralize (CVC_ENABLE_MESHER), element quality
+#include <cvc/state/state.h>
+#include <cvc/tf/model.h>          // field colours: a transfer function's colour ramp
+#include <cvc/tf/overlays.h>       // ... and the range / histogram its editor shows
+#include <cvc/utility/algorithm.h> // cvc::tetrahedralize (CVC_ENABLE_MESHER), element quality
 #include <cvc/volume/volume.h>
 #include <exception>
 #include <filesystem>
@@ -370,6 +373,131 @@ void hide_field(GeometryNode &node, bool single_color) {
   node.setUseSingleColor(single_color);
 }
 
+// --- field colours -------------------------------------------------------------------------------
+//
+// The colours a node's scalar field is drawn with, as a transfer function: the cvc::tf::model at
+// "<node>.field_colors" (one string; a tf_editor widget edits it). Its colour ramp is baked into
+// the table every GeometryNode showing the field maps through (setColorTable); its opacity curve
+// and isocontours are not used. A named colormap key (fe_lab's view.colormap, mesh_lab's
+// color.colormap) seeds it and resets it to that colormap's ramp whenever the key changes, so a
+// document or a combo still picks a colormap, and an edit in the editor stands until the next one.
+// An explicit domain in the model is the range the field is coloured over. Beside the key the node
+// publishes .range (what the colours span under an `auto` domain) and .histogram (the shown values
+// over it): the editor's axis and histogram.
+struct FieldColors {
+  std::string key;           // <node>.field_colors
+  std::string colormap_seen; // the colormap key's value as last followed
+  std::string model_seen;    // the model string last taken in
+  cvc::tf::model model;      // ... parsed (the last one that parsed)
+  std::vector<float> table;  // its colour ramp, baked: model.resolution RGB entries
+  std::string published;     // what .range / .histogram were last published from
+};
+
+constexpr int kFieldColorBins = 128;
+
+// A named colormap as a transfer function: its ramp sampled at 33 nodes, opaque.
+cvc::tf::model colormap_model(cvc::colormap_kind k) {
+  constexpr int kNodes = 33;
+  std::vector<double> t(kNodes);
+  for (int i = 0; i < kNodes; ++i)
+    t[std::size_t(i)] = double(i) / double(kNodes - 1);
+  const std::vector<unsigned char> rgb = cvc::colormap_rgb(t, k, 0.0, 1.0);
+  cvc::tf::model m;
+  if (rgb.size() == 3 * t.size())
+    for (std::size_t i = 0; i < t.size(); ++i)
+      m.color.push_back({t[i], rgb[3 * i] / 255.f, rgb[3 * i + 1] / 255.f, rgb[3 * i + 2] / 255.f});
+  m.alpha = {{0.0, 1.f}, {1.0, 1.f}};
+  m.normalize();
+  return m;
+}
+
+// Follow the colormap key (a change resets the model to that colormap's ramp) and the model (a
+// change re-bakes the table). True when the table or the model's domain changed; a model that does
+// not parse keeps the last good colours.
+bool follow_field_colors(cvc::app &a, FieldColors &fc, const std::string &colormap_key) {
+  const std::string cm = ari::read_or<std::string>(a, colormap_key, "viridis");
+  if (cm != fc.colormap_seen) {
+    fc.colormap_seen = cm;
+    ari::write<std::string>(a, fc.key, cvc::tf::to_string(colormap_model(colormap_or_viridis(cm))));
+  }
+  const std::string s = ari::read_or<std::string>(a, fc.key, "");
+  if (s == fc.model_seen)
+    return false;
+  fc.model_seen = s;
+  cvc::tf::model m;
+  if (!cvc::tf::from_string(s, m))
+    return false;
+  m.normalize();
+  const cvc::tf::domain_spec &d0 = fc.model.domain, &d1 = m.domain;
+  const bool domain_moved =
+      d0.automatic != d1.automatic || (!d1.automatic && (d0.min != d1.min || d0.max != d1.max));
+  std::vector<float> table;
+  for (const cvc::tf::rgba &c : m.bake(m.resolution))
+    table.insert(table.end(), {c.r, c.g, c.b});
+  const bool changed = fc.table.empty() || table != fc.table || domain_moved;
+  fc.model = std::move(m);
+  fc.table = std::move(table);
+  return changed;
+}
+
+// Seed <node>.field_colors with the colormap's ramp when it is empty (a value already there -- a
+// restored session, a hot reload's predecessor -- stands) and take it in.
+void init_field_colors(cvc::app &a, FieldColors &fc, const std::string &key,
+                       const std::string &colormap_key) {
+  fc.key = key;
+  fc.colormap_seen = ari::read_or<std::string>(a, colormap_key, "viridis");
+  if (ari::read_or<std::string>(a, key, "").empty())
+    ari::write<std::string>(
+        a, key, cvc::tf::to_string(colormap_model(colormap_or_viridis(fc.colormap_seen))));
+  follow_field_colors(a, fc, colormap_key);
+}
+
+// The range a field whose colours would otherwise span [lo, hi] is coloured over: the model's
+// explicit domain, else [lo, hi]. And a signature of that choice, for a view's colour signature.
+std::pair<double, double> field_colors_range(const FieldColors &fc, double lo, double hi) {
+  if (!fc.model.domain.automatic)
+    return {fc.model.domain.min, fc.model.domain.max};
+  return {lo, hi};
+}
+std::string field_colors_sig(const FieldColors &fc) {
+  return fc.model.domain.automatic
+             ? std::string("auto")
+             : cvc::tf::range_to_string(fc.model.domain.min, fc.model.domain.max);
+}
+
+// Publish .range = [lo, hi] (the colours' span under an `auto` domain) and .histogram (`values`
+// over it, kFieldColorBins bins) beside the key, unless they were last published from the same
+// range and `sig` (what names the values).
+void publish_field_colors(cvc::app &a, FieldColors &fc, const std::vector<double> &values,
+                          double lo, double hi, const std::string &sig) {
+  if (!std::isfinite(lo) || !std::isfinite(hi))
+    return;
+  if (hi < lo)
+    std::swap(lo, hi);
+  const std::string p = cvc::tf::range_to_string(lo, hi) + "|" + sig;
+  if (p == fc.published)
+    return;
+  fc.published = p;
+  cvc::tf::overlays ov;
+  ov.has_range = true;
+  ov.range_lo = lo;
+  ov.range_hi = hi;
+  ov.histogram.assign(kFieldColorBins, 0.0);
+  const double span = hi - lo;
+  for (const double v : values) {
+    if (!std::isfinite(v) || v < lo || v > hi)
+      continue;
+    const int b = span > 0.0 ? std::min(kFieldColorBins - 1,
+                                        static_cast<int>((v - lo) / span * kFieldColorBins))
+                             : kFieldColorBins / 2;
+    ov.histogram[std::size_t(b)] += 1.0;
+  }
+  try {
+    cvc::tf::publish_overlays(cvc::state::instance(a)(fc.key), ov);
+  } catch (const std::exception &) {
+  }
+}
+
 // Show or hide a child of a node. The document can bind only the node's own visibility, so a
 // hidden parent hides its children too. The key write is a no-op when unchanged, and
 // SceneNode::propagateVisible flips the child's flag without touching its key (showing the
@@ -652,6 +780,9 @@ struct MeshLabRT {
   cvc::index_t top_vertex = 0;
   std::string field_sig; // "<version>|<mode>[|<source or index>]" the shown colour was made for
   std::string colormap;  // the colormap last applied
+  FieldColors fc;        // <node>.field_colors: the colours the field maps through
+  double field_lo = std::numeric_limits<double>::quiet_NaN(); // the shown field's own range
+  double field_hi = std::numeric_limits<double>::quiet_NaN();
   std::shared_ptr<const cvc::geodesic_solver> solver;
   std::uint64_t solver_version = 0;
   std::shared_ptr<const cvc::fem::eigen_result> eigen;
@@ -862,9 +993,13 @@ void apply_mesh_job(MeshLabRT &rt, GeometryNode &node, MeshJob &j) {
     }
     if (!j.field.empty()) {
       rt.colormap = ari::read_or<std::string>(a, rt.k.colormap, "viridis");
-      show_field(node, j.field, colormap_or_viridis(rt.colormap), j.lo, j.hi);
-      ari::write<double>(a, rt.k.color_min, j.lo);
-      ari::write<double>(a, rt.k.color_max, j.hi);
+      rt.field_lo = j.lo;
+      rt.field_hi = j.hi;
+      const std::pair<double, double> r = field_colors_range(rt.fc, j.lo, j.hi);
+      show_field(node, j.field, colormap_or_viridis(rt.colormap), r.first, r.second);
+      ari::write<double>(a, rt.k.color_min, r.first);
+      ari::write<double>(a, rt.k.color_max, r.second);
+      publish_field_colors(a, rt.fc, j.field, j.lo, j.hi, rt.field_sig);
     }
   } else if (j.op == "load") {
     if (j.geom) {
@@ -898,14 +1033,21 @@ void follow_mesh_color(MeshLabRT &rt, GeometryNode &node) {
     if (!mode.empty() && mode != "none")
       ari::write<std::string>(a, rt.k.status, "unknown color.mode '" + mode + "'");
     hide_field(node, rt.single_color);
+    rt.field_lo = rt.field_hi = std::numeric_limits<double>::quiet_NaN();
     ari::write<std::string>(a, rt.k.color_min, "-");
     ari::write<std::string>(a, rt.k.color_max, "-");
   }
-  const std::string cm = ari::read_or<std::string>(a, rt.k.colormap, "viridis");
-  if (cm != rt.colormap) {
-    rt.colormap = cm;
-    if (node.hasScalarField())
-      node.setColorMap(colormap_or_viridis(cm));
+  // The field's colours: color.colormap resets <node>.field_colors to its ramp, and an edited
+  // ramp or domain recolours in place.
+  rt.colormap = ari::read_or<std::string>(a, rt.k.colormap, "viridis");
+  if (follow_field_colors(a, rt.fc, rt.k.colormap)) {
+    node.setColorTable(rt.fc.table);
+    if (node.hasScalarField() && std::isfinite(rt.field_lo)) {
+      const std::pair<double, double> r = field_colors_range(rt.fc, rt.field_lo, rt.field_hi);
+      node.setScalarRange(r.first, r.second);
+      ari::write<double>(a, rt.k.color_min, r.first);
+      ari::write<double>(a, rt.k.color_max, r.second);
+    }
   }
 }
 
@@ -1063,6 +1205,8 @@ std::shared_ptr<GraphicsNode> realize_mesh_lab(SceneGraph &sg, const ari::SceneN
   ari::write<std::string>(a, k.color_min, "-");
   ari::write<std::string>(a, k.color_max, "-");
   rt->colormap = ari::read_or<std::string>(a, k.colormap, "viridis");
+  init_field_colors(a, rt->fc, g->stateName("field_colors"), k.colormap);
+  g->setColorTable(rt->fc.table);
   // Keys written before the scene was realized (an init: program) name another source: read it.
   if (from_file && mesh_source_from_keys(*rt).sig() != rt->source_sig)
     ari::write<std::string>(a, k.request, "load");
@@ -1370,6 +1514,8 @@ struct FeLabRT {
   std::shared_ptr<const cvc::fem::eigen_result> eigen; // for the current mesh
   std::uint64_t mesh_version = 0, field_version = 0;
   std::string main_sig, color_sig, slice_sig, slice_cm, slice_rsig, cut_sig, ghost_sig;
+  FieldColors
+      fc; // <node>.field_colors: the colours the field, the cut and the elements map through
   std::shared_ptr<const Cutaway> cut;
   std::uint64_t cut_mesh_version = 0, cut_serial = 0;
   double opacity = -1.0, ghost_opacity = -1.0;
@@ -1950,9 +2096,22 @@ void follow_fe_view(FeLabRT &rt, GeometryNode &node, GeometryNode *slice, Geomet
   const bool fixed = ari::read_bool_or(a, rt.k.fixed_range, 0) != 0;
   const double rmin = ari::read_or<double>(a, rt.k.range_min, 0.0);
   const double rmax = ari::read_or<double>(a, rt.k.range_max, 1.0);
-  const std::string rsig = fixed ? fmt_g(rmin) + "," + fmt_g(rmax) : std::string("auto");
-  const auto range = [&](double lo, double hi) {
+  // The field's colours (view.colormap resets them to its ramp): a changed ramp recolours every
+  // node showing the field in place. The colour range: <node>.field_colors' explicit domain, else
+  // view.fixed_range's, else the values' own (auto_range, what the editor's axis spans).
+  if (follow_field_colors(a, rt.fc, rt.k.colormap)) {
+    node.setColorTable(rt.fc.table);
+    if (slice)
+      slice->setColorTable(rt.fc.table);
+  }
+  const std::string rsig = (fixed ? fmt_g(rmin) + "," + fmt_g(rmax) : std::string("auto")) + "|" +
+                           field_colors_sig(rt.fc);
+  const auto auto_range = [&](double lo, double hi) {
     return fixed ? std::make_pair(rmin, rmax) : std::make_pair(lo, hi);
+  };
+  const auto range = [&](double lo, double hi) {
+    const std::pair<double, double> r = auto_range(lo, hi);
+    return field_colors_range(rt.fc, r.first, r.second);
   };
 
   // A finished cut-away (of this mesh) replaces the shown one.
@@ -2002,6 +2161,9 @@ void follow_fe_view(FeLabRT &rt, GeometryNode &node, GeometryNode *slice, Geomet
       rt.color_sig = csig;
       const std::pair<double, double> r = range(rt.cut->lo, rt.cut->hi);
       show_field(node, rt.cut->values, cm, r.first, r.second);
+      const std::pair<double, double> ar = auto_range(rt.cut->lo, rt.cut->hi);
+      publish_field_colors(a, rt.fc, rt.cut->values, ar.first, ar.second,
+                           "e|" + std::to_string(rt.cut_serial));
     }
   } else if (rt.surface && show_surface) {
     const std::string csig =
@@ -2021,6 +2183,10 @@ void follow_fe_view(FeLabRT &rt, GeometryNode &node, GeometryNode *slice, Geomet
         } else {
           show_field(node, rt.field, cm, r.first, r.second);
         }
+        // The editor's histogram: the whole solution (the cut shows its inside too).
+        const std::pair<double, double> ar = auto_range(rt.field_lo, rt.field_hi);
+        publish_field_colors(a, rt.fc, rt.field, ar.first, ar.second,
+                             "f|" + std::to_string(rt.field_version));
       } else {
         hide_field(node, rt.single_color);
       }
@@ -2405,6 +2571,10 @@ std::shared_ptr<GraphicsNode> realize_fe_lab(SceneGraph &sg, const ari::SceneNod
   ari::write<std::string>(a, k.field_min, "-");
   ari::write<std::string>(a, k.field_max, "-");
   ari::write<std::string>(a, k.last_mesh, std::string());
+  init_field_colors(a, rt->fc, g->stateName("field_colors"), k.colormap);
+  g->setColorTable(rt->fc.table);
+  if (s)
+    s->setColorTable(rt->fc.table);
   // Keys written before the scene was realized (an init: program) name another source: load it
   // first. A seeded request (auto_mesh) runs after it. (A pending load reads the keys anyway.)
   if (!rt->load_pending && fe_source_from_keys(*rt).sig() != rt->source_sig) {

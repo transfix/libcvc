@@ -10,8 +10,10 @@
 # settles, and the editor shades the meshed interval; these sliders move the bars too, and wait for
 # Mesh. "Solve" runs a linear (P1) FEM Poisson, heat or eigenmode problem on that mesh (cvc::fem,
 # libigl assembly). The field is shown on the tet boundary surface and on a movable axis-aligned
-# cut, coloured by a colormap; the elements view shows the mesh itself, cut away, each element
-# coloured by its size or quality. Binds the fe.* keys
+# cut; the elements view shows the mesh itself, cut away, each element coloured by its size or
+# quality. Both are coloured through the node's field colours (graphics.root.children.domain
+# .field_colors, a transfer function: the Colours editor edits its ramp over the values' histogram,
+# and the Colormap combo resets it to a named ramp). Binds the fe.* keys
 # the cvcGL fe_lab realizer owns (state at "<scene>.graphics.root.children.domain.fe.*"). Commands
 # go through fe.request: the realizer consumes it and runs the job off the render thread; Stop
 # interrupts a heat solve at its next step, and is enabled only while one runs (fe.stoppable):
@@ -192,6 +194,15 @@ units:
       - combo: Colormap
         bind: graphics.root.children.domain.fe.view.colormap
         options: [viridis, magma, plasma, inferno, turbo, jet, parula, gray]
+        tooltip: "resets the colours below to this colormap's ramp"
+      - tf_editor: Colours
+        id: fe_field_colors
+        bind: graphics.root.children.domain.field_colors
+        height: 70
+        layers: [histogram]
+        show_opacity: false
+        show_isocontours: false
+        interactive_updates: true
       - checkbox: Boundary surface
         bind: graphics.root.children.domain.fe.view.show_surface
         visible_when: (!= (state-get "graphics.root.children.domain.fe.view.mode") "elements")
