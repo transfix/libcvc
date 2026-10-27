@@ -617,10 +617,22 @@ down), centres it in x and y, sits it on z = 0 and scales its largest extent to 
 | `decimate.target_faces` | triangle target for `cvc::simplify` | `target_faces` |
 | `repair.weld`, `repair.remove_degenerate`, `repair.remove_unreferenced`, `repair.orient` | `cvc::repair_params` | `weld`, `remove_degenerate`, `remove_unreferenced`, `orient` |
 | `color.mode` | `none`, `mean`, `gaussian`, `k1`, `k2`, `geodesic`, `modes` — followed live | `color_mode` |
-| `color.colormap` | `viridis`, `magma`, `plasma`, `inferno`, `turbo`, `jet`, `parula`, `gray` | `colormap` |
+| `color.colormap` | `viridis`, `magma`, `plasma`, `inferno`, `turbo`, `jet`, `parula`, `gray`: resets the field colours (below) to that ramp | `colormap` |
 | `geodesic.source` | source vertex for `geodesic` (clamped to #V-1; -1 is the highest vertex) | `geodesic_source` |
 | `modes.index` | the Laplace–Beltrami eigenfunction `modes` shows (`fem::laplacian_eigenmodes` on the surface; 1 is the first non-constant, up to 50) | `mode` |
-| `color.min`, `color.max` | the colour range used (2-98% percentiles for curvature) | — |
+| `color.min`, `color.max` | the colour range used: the field colours' explicit domain, else the values' (2-98% percentiles for curvature) | — |
+
+**Field colours (both node types).** The values a node shows are coloured through a transfer
+function at `<node>.field_colors` (a `cvc::tf::model` string, outside `mesh_ops.*` / `fe.*`), so
+a `tf_editor` edits the ramp: mesh_tools and fe_controls each hold one (`show_opacity: false`,
+`show_isocontours: false`). Only the colour ramp is used. The colormap key (`color.colormap`,
+`view.colormap`) seeds it and resets it to that colormap's ramp whenever it changes, so a
+document stepping through colormaps still works; an edit stands until the next change. An
+explicit domain in the model is the range the values are coloured over (in fe_lab it wins over
+`view.fixed_range`). Beside it the node publishes `field_colors.range` (the colours' span under
+an `auto` domain) and `field_colors.histogram` (128 bins of the values over it; fe_lab's is the
+whole solution in the field view, the shown elements' size or quality in the elements view): the
+editor's axis and histogram.
 
 `curvature` switches a non-curvature `color.mode` to `mean` (or recomputes the one shown).
 A geodesic solver is cached per mesh version, so moving the source is two
@@ -676,13 +688,13 @@ Keys under `<node>.fe.*`:
 | `modes.index` | the eigenmode `modes` solves for (1 is the first non-constant, up to 50) | `mode` |
 | `view.mode` | `field` or `elements` | `view` |
 | `view.boundary` | `input` (the smooth surface, when there is one) or `mesh` | `boundary` |
-| `view.colormap`, `view.show_surface`, `view.show_slice` | display | `colormap`, `show_surface`, `show_slice` |
+| `view.colormap`, `view.show_surface`, `view.show_slice` | display; `view.colormap` resets the field colours (above) to that ramp | `colormap`, `show_surface`, `show_slice` |
 | `view.slice_axis`, `view.slice_offset` | 0/1/2 and -1..1 across the mesh bounds: the cut, in both views | `slice_axis`, `slice_offset` |
 | `view.surface_opacity` | the boundary's opacity while a slice shows | `surface_opacity` |
 | `view.color_by` | the elements' colour: `size` or `quality` | `color_by` |
 | `view.cut_side` | the side of the cut the elements view keeps: 1 (+) or -1 (−) | `cut_side` |
 | `view.ghost` | the outer surface's opacity in the elements view (0 = off) | `ghost` |
-| `view.fixed_range`, `view.range_min`, `view.range_max` | colour over a fixed range instead of the data's (both views) | `fixed_range`, `range_min`, `range_max` |
+| `view.fixed_range`, `view.range_min`, `view.range_max` | colour over a fixed range instead of the data's (both views; an explicit field-colours domain wins) | `fixed_range`, `range_min`, `range_max` |
 
 The heat problem holds the boundary vertices in the lowest 5% of the height at 1 and
 insulates the rest; the body starts at 0. `auto.solve` solves after every mesh,

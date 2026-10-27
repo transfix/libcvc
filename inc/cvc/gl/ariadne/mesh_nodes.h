@@ -38,6 +38,7 @@
 //       geodesic.source (clamped to #V-1; -1 = the highest vertex), modes.index (the
 //       Laplace-Beltrami eigenfunction, >= 1)                         (followed live)
 //       color.min, color.max                                          (published)
+//     and <node>.field_colors (below).
 //
 //   type: fe_lab -- a volume read like a `volren` node (source: { file } or { sdf }), meshed
 //     with the LBIE mesher (cvc::tetrahedralize, tetrahedralize_interval below, hexahedralize)
@@ -82,6 +83,16 @@
 //     computed after realize: its load sets that default, unless mesh.isovalue2 was set first.)
 //     <node>.transfer_function is bound (tf_binding.h): its isocontours drive the bounds, over
 //     the range of the volume the last load brought.
+//
+//   Field colours (both types): "<node>.field_colors" holds a cvc::tf::model (a tf_editor widget
+//   edits it) whose colour ramp the shown values map through -- mesh_lab's colour field; fe_lab's
+//   field on the boundary and the cut, and its elements' size or quality -- over the range they
+//   are coloured with: the model's explicit domain, else (fe_lab) view.fixed_range's, else their
+//   own. Its opacity curve and isocontours are not used. The colormap key (color.colormap,
+//   view.colormap) seeds it and, whenever it changes, resets it to that colormap's ramp (auto
+//   domain); otherwise an edit stands. Beside it the node publishes .range (the colours' span
+//   under an auto domain) and .histogram (128 bins of the values over it; fe_lab: the whole
+//   solution, or the shown elements' values). mesh_lab's color.min / color.max are the range used.
 //
 // Counts and indices read from state are range-checked (NaN = the default): smooth.iterations
 // 1..1000, decimate.target_faces >= 1, mesh.improve 0..5, mesh.improve_iterations 0..100,
