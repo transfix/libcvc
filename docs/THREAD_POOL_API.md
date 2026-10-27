@@ -115,13 +115,20 @@ for (int i = 0; i < 100; i++) {
 5. **Shutdown**: `wait()` interrupts the running tasks and waits (up to 5 s)
    for the pool to drain, so it is not a completion barrier: wait on the
    tasks' own completion for that. `~app` interrupts the running tasks
-   (every task a worker has taken, however recently), drops the queued ones
-   and joins the workers
+   (every task a worker has taken, however recently: a new worker takes
+   no task until it is among the workers these interrupts go to), drops
+   the queued ones and joins the workers. A dropped task is destroyed
+   without running, and so is one submitted after that point
+   (`submitPooled` then returns `false`); a task whose submitter must
+   hear of it reports it from the destructor of something it captures, as
+   the async host, `launch_pool_task` and `compute_async`'s `on_error`
+   form do
 
 ## Notes
 
 - `submitPooled(std::function<void()>, priority)` is `startThreadPooled` with
-  `wait=false` without the key argument
+  `wait=false` without the key argument; it returns `false` only when the
+  app is being destroyed and the task was dropped unrun
 - Keyed tasks appear in the thread map and can be interrupted through it
 - `waitForHandlers()` in `state_object` waits for all handler threads
 - Thread pool workers are internal and don't appear in the thread map

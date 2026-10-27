@@ -371,11 +371,12 @@ with `ok: #f`, still returns that as a value; only a thrown error is an exceptio
 
 The app has two pools, and an async kernel uses the first:
 
-- **The background task pool** (`app::startThreadPooled`, which `compute_async` uses today):
+- **The background task pool** (`app::submitPooled`, which async kernels, `compute_async` and
+  `launch_pool_task` use):
   - a queue of whole tasks, with priorities (FIFO within one), run by at most
     `setThreadPoolSize` persistent worker threads (the core count by default); an async kernel
-    is an anonymous task (`app::submitPooled`), so a call creates no thread and its task is
-    destroyed on the worker once it ends;
+    is an anonymous task, so a call creates no thread and its task is destroyed on the worker
+    once it ends;
   - every async kernel runs here, CPU-bound or blocking (`executor::background`, the default);
   - a blocking request holds one of its threads while it waits, and nothing else.
 - **The fork-join compute pool** (`app::computePool()`):
@@ -412,6 +413,16 @@ Other places a kernel can run:
 A kernel checks it at convenient points and may stop early by throwing. A cancelled call's
 result is dropped. Host teardown (an `Exec`, an Ariadne document, the app's scheduler) cancels
 every in-flight kernel and waits for them before the scheduler goes, as `Exec` does today.
+
+A kernel its executor never runs still ends its call. Once `~app` has stopped the app's
+background pool, a kernel submitted to it (`app::submitPooled` returns false), or one still in
+its queue (`~app` drops the queue), is destroyed unrun, and so is a kernel a stopped lane
+refuses. Its call then raises `RuntimeError` at the call site ("`name`: not run: ..."), its
+kernel's captures go, and it leaves the host's count of calls in flight, so the process isn't
+left parked and `shutdown()` doesn't wait for it for good. That matters for a host bound to an
+app that `~app` doesn't shut down itself (one driven from a keyed thread, say): `~app` shuts down
+its own exec host before it stops the pool. `launch_pool_task` posts `on_error`'s value in the
+same case, and `compute_async`'s `on_error` form calls `on_error`.
 
 ### 3.7 Data crossing threads
 
