@@ -1431,8 +1431,7 @@ TEST(AsyncCalls, ACallLeftQueuedOnAPoolWithNoWorkerRaisesAndLeavesTheHost) {
   auto w = std::make_unique<world>(async_sched);
   hold_the_pool(w->app, release);
   const int pid = w->submit("(slow-op 1 10)");
-  ASSERT_TRUE(
-      w->pump([&] { return w->waiting(pid) && w->app.getPendingThreadCount() == 1; }, 5.0))
+  ASSERT_TRUE(w->pump([&] { return w->waiting(pid) && w->app.getPendingThreadCount() == 1; }, 5.0))
       << "the call's kernel wasn't queued";
   release_the_pool_failing(w->app, release);
   EXPECT_EQ(w->app.getPendingThreadCount(), 0u)

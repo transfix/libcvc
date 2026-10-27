@@ -2124,7 +2124,8 @@ TEST(AppPoolSpawnFailure, ComputeAsyncThrowsWhenAQueuedKeyedTaskItStartsLeavesNo
   // asked for as its slot is freed.
   auto held = std::make_shared<int>(1);
   std::weak_ptr<int> weak = held;
-  EXPECT_THROW(a.compute_async(1, [held](int) {}, [held, on_done] { on_done(); }),
+  EXPECT_THROW(a.compute_async(
+                   1, [held](int) {}, [held, on_done] { on_done(); }),
                boost::thread_resource_error);
   EXPECT_EQ(a.getPendingThreadCount(), 1u) << "k2 only";
   EXPECT_THROW(a.compute_async(
@@ -2315,8 +2316,8 @@ TEST(AppPoolSpawnFailure, AKeyedTaskWhoseThreadCantBeCreatedThrowsOrIsLogged) {
   ASSERT_TRUE(started.load());
   held = std::make_shared<int>(2);
   weak = held;
-  EXPECT_NO_THROW(a.startThreadPooled(
-      "k2", [held, &ran] { ++ran; }, PRIORITY_NORMAL, /*wait=*/true)); // queued
+  EXPECT_NO_THROW(
+      a.startThreadPooled("k2", [held, &ran] { ++ran; }, PRIORITY_NORMAL, /*wait=*/true)); // queued
   held.reset();
   EXPECT_EQ(a.getPendingThreadCount(), 1u);
 #ifndef USING_LOG4CPLUS_DEFAULT

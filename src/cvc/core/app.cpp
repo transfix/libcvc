@@ -1377,8 +1377,8 @@ app::PoolSubmit app::trySubmitPooled(std::function<void()> &task, thread_priorit
   return submitPooledHandingBack(task, priority, /*dropIfNoWorker=*/true);
 }
 
-app::PoolSubmit app::submitPooledHandingBack(std::function<void()> &task,
-                                             thread_priority priority, bool dropIfNoWorker) {
+app::PoolSubmit app::submitPooledHandingBack(std::function<void()> &task, thread_priority priority,
+                                             bool dropIfNoWorker) {
   if (!task)
     return PoolSubmit::queued;
   ThreadPoolTask t;
@@ -1838,8 +1838,8 @@ bool app::startKeyedPoolThread(ThreadPoolTask &task, bool logDrop) {
     owned.reset();
     if (logDrop) {
       try {
-        log(0, "Thread pool: no thread could be started for keyed task '" + key +
-                   "': dropped unrun");
+        log(0,
+            "Thread pool: no thread could be started for keyed task '" + key + "': dropped unrun");
       } catch (...) {
       }
     }
