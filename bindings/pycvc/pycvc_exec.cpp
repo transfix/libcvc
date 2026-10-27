@@ -593,7 +593,7 @@ std::string Exec::run(const std::string &src) {
       // it via call_python's PyGILState_Ensure, while an in-flight pool worker running a Python
       // async body is never starved of the GIL by a co-runnable process — the deadlock the review
       // found.
-      Py_BEGIN_ALLOW_THREADS sched.sync_run(kSliceSteps, kSliceSeconds);
+      Py_BEGIN_ALLOW_THREADS sched.sync_run_steps(kSliceSteps, kSliceSeconds); // reads get_result
       Py_END_ALLOW_THREADS
           // Coroutine leg: step the asyncio loop a bounded slice and deliver any completed
           // coroutine's result to its parked process (GIL held here). A no-op when no coroutine is
@@ -647,18 +647,21 @@ std::string Exec::run(const std::string &src) {
         break;
       }
       // Idle-wait with the GIL released (so a worker can take it and deliver) until there is
-      // work: a kernel's post or result, a sleeper's or timed wait's deadline, or the idle
-      // deadline. Coroutines on the asyncio loop and processes parked until the next pump
-      // (await) are this loop's to drive, so with any of them the wait is a 1 ms beat, as it
-      // was; and it is never longer than kMaxIdleWait, a backstop for work that arrives some
-      // other way.
-      clock::time_point until =
-          std::min(std::chrono::time_point_cast<clock::duration>(idle_deadline),
-                   clock::time_point(clock::now() + kMaxIdleWait));
-      if (!impl_->pending_coros.empty() || sched.awaiting_frame_count() > 0)
-        until = std::min(until, clock::now() + std::chrono::milliseconds(1));
-      Py_BEGIN_ALLOW_THREADS sched.wait_for_work(until);
-      Py_END_ALLOW_THREADS
+      // work: a kernel's post or result, a sleeper's or timed wait's deadline, a call's timeout
+      // or charge, or the idle deadline. Coroutines on the asyncio loop are this loop's to
+      // drive: while one is pending, drive_coros' slice of the asyncio loop above is the wait,
+      // as it was with the 1 ms sleep (a ~15.6 ms timer tick on Windows) after it. Processes
+      // parked until the next pump (await) make the wait a 1 ms beat, as it was. It is never
+      // longer than kMaxIdleWait, a backstop for work that arrives some other way.
+      if (impl_->pending_coros.empty()) {
+        clock::time_point until =
+            std::min(std::chrono::time_point_cast<clock::duration>(idle_deadline),
+                     clock::time_point(clock::now() + kMaxIdleWait));
+        if (sched.awaiting_frame_count() > 0)
+          until = std::min(until, clock::now() + std::chrono::milliseconds(1));
+        Py_BEGIN_ALLOW_THREADS sched.wait_for_work(until);
+        Py_END_ALLOW_THREADS
+      }
     }
   } catch (...) {
     sched.kill(pid); // cancels its calls in flight
