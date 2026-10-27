@@ -572,24 +572,25 @@ bool bucket_formula_holds() {
 // Zero (false: find()) until the check has run, should a lookup run during static initialization.
 const bool kBucketFormulaHolds = bucket_formula_holds();
 
-// Where `b` binds `name` (whose hash is `hash`), or null.
+// The binding of `name` (whose hash is `hash`) in `b`, or null.
 template <class Map>
-auto find_hashed(Map &b, const std::string &name,
-                 std::size_t hash) -> decltype(&b.begin()->second) {
+auto find_hashed(Map &b, const std::string &name, std::size_t hash) -> decltype(&*b.begin()) {
   if (!kBucketFormulaHolds) {
     auto it = b.find(name);
-    return it != b.end() ? &it->second : nullptr;
+    return it != b.end() ? &*it : nullptr;
   }
   const std::size_t n = bucket_of(hash, b.bucket_count());
   for (auto it = b.begin(n), end = b.end(n); it != end; ++it)
     if (it->first == name)
-      return &it->second;
+      return &*it;
   return nullptr;
 }
 
 // Walk the scope chain from `e` for `name`, hashing the name once (not once per scope) and
-// skipping empty scopes.
-template <class Env> auto lookup_in(Env *e, const std::string &name) -> decltype(e->lookup(name)) {
+// skipping empty scopes. The binding found, and in `scope` (if given) the scope it is in.
+template <class Env>
+auto binding_in(Env *e, const std::string &name, Env **scope = nullptr)
+    -> decltype(&*e->bindings.begin()) {
   std::size_t hash = 0;
   bool hashed = false;
   for (; e; e = e->outer.get()) {
@@ -599,8 +600,11 @@ template <class Env> auto lookup_in(Env *e, const std::string &name) -> decltype
       hash = std::hash<std::string>{}(name);
       hashed = true;
     }
-    if (auto *v = find_hashed(e->bindings, name, hash))
-      return v;
+    if (auto *binding = find_hashed(e->bindings, name, hash)) {
+      if (scope)
+        *scope = e;
+      return binding;
+    }
   }
   return nullptr;
 }
@@ -608,9 +612,20 @@ template <class Env> auto lookup_in(Env *e, const std::string &name) -> decltype
 
 environment::~environment() { detail::drop_owner(outer); }
 
-value_t *environment::lookup(const std::string &name) { return lookup_in(this, name); }
+value_t *environment::lookup(const std::string &name) {
+  auto *binding = binding_in(this, name);
+  return binding ? &binding->second : nullptr;
+}
 
-const value_t *environment::lookup(const std::string &name) const { return lookup_in(this, name); }
+const value_t *environment::lookup(const std::string &name) const {
+  auto *binding = binding_in(this, name);
+  return binding ? &binding->second : nullptr;
+}
+
+const std::pair<const std::string, value_t> *
+environment::find_binding(const std::string &name, const environment **scope) const {
+  return binding_in(this, name, scope);
+}
 
 void environment::set(const std::string &name, value_t val) {
   if (frozen)

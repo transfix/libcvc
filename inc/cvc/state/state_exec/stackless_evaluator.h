@@ -76,6 +76,15 @@ struct eval_frame {
   environment_ptr extra_env;
   /// The frame evaluates a DSL function's body: a `return` inside it unwinds no further.
   bool function_body = false;
+  /// A call's function, as found when the call was initialized, so that applying it needn't
+  /// look the name up again: the binding (a node of `callee_scope`'s bindings, which are never
+  /// removed from a live scope), the scope it is in, and the sum of the sizes of the scopes from
+  /// `env` to that one. A scope that gains a binding meanwhile (one that might shadow it) changes
+  /// the sum, and then the name is looked up again, as it is for a frame without one (a restored
+  /// frame). Not serialized; not part of what the frame means.
+  const std::pair<const std::string, value_t> *callee = nullptr;
+  const environment *callee_scope = nullptr;
+  std::size_t callee_stamp = 0;
 };
 
 /// Deep-data work a step left unfinished (data_options::step_nodes, or a job waiting on a call):

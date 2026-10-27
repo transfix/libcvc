@@ -205,6 +205,29 @@ void push_new_frame(std::vector<eval_frame> &stack, value_t &&expr, environment_
   f.env = std::move(env);
 }
 
+// The sum of the sizes of the scopes from `env` out to `scope`, which binds a call's function:
+// a scope that gains a binding (none loses one while it lives) changes it. Nullopt when `scope`
+// isn't on the chain.
+std::optional<std::size_t> scope_sizes(const environment *env, const environment *scope) {
+  std::size_t sizes = 0;
+  for (const environment *e = env; e; e = e->outer.get()) {
+    sizes += e->bindings.size();
+    if (e == scope)
+      return sizes;
+  }
+  return std::nullopt;
+}
+
+// The function a call frame applies: the binding its init found, while the frame's scopes are
+// as they were then and it still binds the call's head, else whatever the name finds now (as if
+// looked up again: a scope may have gained a binding of the name, or the head changed).
+const value_t *callee_of(const eval_frame &frame, const std::string &name) {
+  if (frame.callee && scope_sizes(frame.env.get(), frame.callee_scope) == frame.callee_stamp &&
+      frame.callee->first == name)
+    return &frame.callee->second;
+  return frame.env->lookup(name);
+}
+
 // A loop's body: the form at args[first], or, when there are several, all of them in order as a
 // (begin ...). A single-form body stays as it is, so its frames are what they always were.
 value_t loop_body(std::span<const value_t> args, std::size_t first) {
@@ -730,6 +753,7 @@ void stackless_evaluator::begin_expansion(evaluator_state &state, value_t expans
   frame.extra_strs.clear();
   frame.extra_lists.clear();
   frame.extra_env = nullptr;
+  frame.callee = nullptr;
 }
 
 bool stackless_evaluator::step(evaluator_state &state) {
@@ -1310,10 +1334,15 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
     return;
   }
 
-  // Built-in or user function
-  auto *func_val = env->lookup(name);
-  if (!func_val)
+  // Built-in or user function: it must exist now; the apply step uses what is found here unless
+  // the scopes changed meanwhile (callee_of).
+  const environment *scope = nullptr;
+  const auto *callee = env->find_binding(name, &scope);
+  if (!callee)
     throw dsl_error("NameError", "unknown function or special form: " + name);
+  frame.callee = callee;
+  frame.callee_scope = scope;
+  frame.callee_stamp = *scope_sizes(env.get(), scope);
 
   frame.phase = eval_phase::eval_args;
   fill_values(frame.extra_vals, args);
@@ -1351,7 +1380,7 @@ void stackless_evaluator::step_apply(evaluator_state &state, eval_frame &frame) 
   if (!head_sym)
     throw dsl_error("TypeError", "apply: no function head");
 
-  auto *func_val = frame.env->lookup(head_sym->name);
+  const value_t *func_val = callee_of(frame, head_sym->name);
   if (!func_val)
     throw dsl_error("NameError", "apply: undefined function: " + head_sym->name);
 

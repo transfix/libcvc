@@ -672,6 +672,48 @@ TEST_F(StacklessEvaluatorTest, PoppedFramesKeepNoValues) {
   EXPECT_TRUE(local.evaluate_script("(begin (set keep (mk)) (alive))").is_truthy());
 }
 
+// ─── A call's function, found once ─────────────────────────────────────────
+
+TEST_F(StacklessEvaluatorTest, CallSeesItsFunctionRebound) {
+  // The apply step uses the function its init found only while that is what a lookup would
+  // find: rebound in place, shadowed in a nearer scope, or bound for the first time meanwhile.
+  EXPECT_EQ(eval_int("(begin (defun f (x) 1) (f (begin (defun f (x) 2) 0)))"), 2);
+  EXPECT_EQ(eval_int("(begin (defun g (x) 1) "
+                     "(defun h () (g (begin (set g (lambda (y) 7)) 0))) (h))"),
+            7);
+  EXPECT_EQ(eval_int("(begin (defun k () 1) (defun m () (k)) "
+                     "(+ (m) (begin (defun k () 10) 0) (m)))"),
+            11);
+  try {
+    eval("(begin (defun g (x) 1) (defun h () (g (begin (set g 5) 0))) (h))");
+    FAIL() << "expected a TypeError";
+  } catch (const std::exception &e) {
+    EXPECT_NE(std::string(e.what()).find("apply: not callable: g"), std::string::npos)
+        << e.what();
+  }
+}
+
+TEST(StacklessCallee, NoteWhereTheFunctionIsAndCheckIt) {
+  // The frame a call's init leaves holds the binding it found; a frame whose scopes gained a
+  // binding since looks the name up again.
+  auto env = builtins::make_default_environment();
+  stackless_evaluator ev(env);
+  evaluator_state st = ev.create_state(parse("(+ 1 2)"));
+  ASSERT_FALSE(ev.step(st)); // init: (+ 1 2) waits for its arguments
+  const eval_frame &call = st.stack.front();
+  ASSERT_NE(call.callee, nullptr);
+  EXPECT_EQ(call.callee->first, "+");
+  EXPECT_TRUE(std::holds_alternative<native_fn>(call.callee->second.v));
+  EXPECT_EQ(call.callee_scope, env.get());
+  // A binding of + in the process scope, nearer than the builtins: the apply step finds it.
+  st.global_env->set("+", value_t{native_fn{[](std::span<const value_t>) -> value_t {
+                       return value_t(int64_t(99));
+                     }}});
+  while (!ev.step(st)) {
+  }
+  EXPECT_EQ(std::get<int64_t>(st.result.v), 99);
+}
+
 // ─── A closure's body, built once ──────────────────────────────────────────
 
 TEST(StacklessClosureBody, MadeOnceAndIgnoredWhenStale) {
