@@ -501,6 +501,56 @@ if (result) {
 }
 ```
 
+### How the Schedulers Pick, Wait and Forget
+
+Both schedulers keep their processes in a process table (`process_table.h`) with the indexes a
+step needs, so a step costs the same whether the scheduler holds one process or thousands:
+
+- **The pick.** `round_robin` steps the runnable (ready or running) processes in pid order: the
+  scheduler keeps an index, and each step takes the process at that index (modulo how many are
+  runnable) and moves the index on. `priority` steps the lowest pid among the best (lowest)
+  priority; `priority_rr` goes round robin among the best priority's. A process that becomes
+  runnable takes its place by pid, so the order in which a set of processes interleaves is fixed
+  by their pids, their statuses and their priorities, step by step. The run queue finds the pick
+  without scanning (order statistics over the processes in pid order).
+- **Sleeps and timed waits** wake from a timer heap, when their deadline comes; a message wakes
+  the processes waiting on its channel from an index of waiters by channel.
+- **The sync `run()` does not spin.** While nothing is ready and processes sleep (or wait for a
+  message with a time limit), it waits for the earliest deadline, burning no CPU, but never past
+  its `max_time`, at which it returns; each wait counts as one of `max_steps`. When only processes
+  waiting for a message with no time limit are left, nothing in a synchronous run can wake them:
+  `run()` returns at once when `max_steps` bounds it, else waits out `max_time`, else waits until
+  `stop()`.
+- **An idle host can wait for work.** `async_scheduler::wait_for_work(deadline)` blocks the
+  scheduler's thread until a `post_message()` or a settled async call arrives (from any thread), a
+  sleeper or timed wait is due, or the deadline passes; it returns at once when a process is
+  ready. Processes parked until the next frame (`(await ...)`, `awaiting_frame_count()`) are the
+  host's to wake with `wake_awaiting()`. pycvc's `Exec` waits this way instead of polling.
+
+  ```cpp
+  for (;;) {
+    sched.drain_ingress();
+    sched.wake_awaiting();          // once per frame, if the host has frames
+    if (sched.has_runnable())
+      sched.sync_run(200000, 0.05);
+    else
+      sched.wait_for_work(std::chrono::steady_clock::now() + std::chrono::seconds(1));
+  }
+  ```
+- **Finished processes** leave every index at once but stay in the table, so `get_result()`,
+  `get_process_info()` and `get_results()` still report them, until `reap(pid)` erases one (both
+  schedulers; a host that reaps from `on_complete` is fine: the process goes once its last step is
+  over).
+- **State watches** are read only when something under the watch root changed since the last
+  poll: the scheduler counts the root's change signals while processes have watches, so a quiet
+  tree costs a step nothing however many watches there are. Likewise the async scheduler reads
+  `limits.async_steps_per_cpu_ms` from the tree for its calls in flight only when the tree
+  changed, and a change still applies to the next charge.
+- **Time.** A step reads the steady clock once: within one `run()`, a step starts at the reading
+  the step before it ended at, unless something other than picking it ran in between (a handler
+  set up, a process finished, a watch poll, a cycle collection, an async-call charge), and every
+  time budget of the step uses that reading.
+
 ---
 
 ## 4. Process Management

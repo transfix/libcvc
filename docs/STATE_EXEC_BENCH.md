@@ -195,13 +195,14 @@ measures nothing.
 
 - **sync**: `scheduler::run(200000 steps)` slices, with no time budget, until every program has
   ended. The CLI calls `run()` with neither; the slices only let the bench check its timeout and
-  sweep. The sync scheduler has no reap.
+  sweep. The bench doesn't reap on the sync scheduler (it had no `reap()` when the suite was
+  written).
 - **async**: per pump iteration, `drain_ingress()`, `wake_awaiting()`, then, if `has_runnable()`,
   `sync_run(200000, 0.1)` (Ariadne's pump budget); then the finished programs are reaped
-  (`get_process_info`, then `reap`). The async scheduler has no wakeup signal, so when nothing is
-  runnable the driver either yields (`driver=spin`, for throughput) or sleeps 1 ms
-  (`driver=poll1ms`, what pycvc does when its program is parked). The record's `driver` param says
-  which.
+  (`get_process_info`, then `reap`). When nothing is runnable the driver either yields
+  (`driver=spin`, for throughput) or sleeps 1 ms (`driver=poll1ms`, what pycvc did when its
+  program was parked; it now blocks in `wait_for_work()`, which these drivers don't use, so the
+  numbers stay comparable with the first runs). The record's `driver` param says which.
 - **host**: by default (`host=bare`) the sweep looks only at the programs that just finished and no
   limits are armed: a lower bound. Ariadne arms `max_steps` 5000, `max_time` 0.1 s and `max_memory`
   4 MiB on every action and sweeps every live action with `get_process_info` on every pump
@@ -637,27 +638,33 @@ suite was written.
   (`scheduler.cpp:547-563`; twice per step on the async scheduler, `async_scheduler.cpp:314, 542`)
   and a `has_runnable()` scan per `run()` iteration (`scheduler.cpp:462, 477-489`). A step costs
   O(P log P) in the processes it holds: `sched.scaling` `ns_per_step` against `p`, and
-  `sched.bystanders` against parked processes.
+  `sched.bystanders` against parked processes. Since fixed: both schedulers pick from a run queue
+  (the same pick order) and wake from a timer heap and a receiver index (`process_table.h`).
 - **The sync scheduler never forgets a process.** It has no reap, so finished processes stay in
   every scan: `flood.stream` batch time against the batch index on `sync` (and `async reap=0`),
   `flood.small` `extra.processes_left`. First run: the 20th batch of 500 took 16 times the first
-  on `sync`, 14 times on `async reap=0`, and the same as the first with `reap=1`.
+  on `sync`, 14 times on `async reap=0`, and the same as the first with `reap=1`. Since fixed:
+  finished processes leave every per-step structure (they stay readable until reaped), and the
+  sync scheduler has `reap()`.
 - **The sync scheduler busy-spins while everything waits.** Its `has_runnable()` counts processes
   waiting on a message or a sleep as runnable (`scheduler.cpp:477-489`), so `run()` keeps calling
   `step()`, which finds nothing to run, at 100 % CPU: `sched.sleepers` on `sync`
   (`extra.driver_cpu_per_wall` about 1.0), and the cost of parked processes in `msg.pingpong
   bystanders=...` on `sync`. First run: 1000 processes sleeping 1 ms 20 times took 13 s on
-  `sync` (21 s on `async` with `driver=spin`, whose wake scans walk every process too).
+  `sync` (21 s on `async` with `driver=spin`, whose wake scans walk every process too). Since
+  fixed: `run()` waits for the earliest deadline (within its `max_time`) instead of spinning.
 - **Async scheduler step overhead.** Every step drains the ingress under a mutex even when it is
   empty (`async_scheduler.cpp:313, 523-543`) and runs through two heap-allocated coroutine frames
   consumed at once by `sync_wait` (`async_scheduler.cpp:229, 310`;
   `async_stackless_evaluator.cpp:40-44`): `sched.single.*` async against sync, and their
-  `allocs_per_step`.
+  `allocs_per_step`. Since fixed: one drain a step, no lock when the ingress is empty, and the
+  evaluator step called directly.
 - **In-flight async calls tax every step.** Each step copies the list of in-flight calls and, for
   each started one, charges it, reading `limits.async_steps_per_cpu_ms` from the state tree unless
   the process set it (`async_scheduler.cpp:590-618, 638-650`): `async.inflight_tax` `rate=tree`
   against `rate=opt`. First run: with 8 calls in flight an unrelated step cost ~25 us with the
-  tree read and ~1 us without it.
+  tree read and ~1 us without it. Since fixed: the list is walked in place and the tree read again
+  only when something under the watch root changed.
 - **The background async executor starts an OS thread per call and never forgets it.**
   `app::startThreadPooled` creates a `boost::thread` per task (`app.cpp:1075-1095`), keeps the entry
   in `_threads` until `~app` (`app.cpp:741-757`), finds a unique key by probing
@@ -692,7 +699,9 @@ suite was written.
   sleeps when idle (pycvc: `sleep_for(1 ms)`) waits for the OS timer; on Windows that is ~15.6 ms
   unless something raised the timer resolution (the header's `sleep_for(1ms) takes` line).
   `driver=poll1ms` against `driver=spin` in `async.flood.*`, `async.futures` and
-  `sched.sleepers` (`extra.lateness_ns`).
+  `sched.sleepers` (`extra.lateness_ns`). Since fixed in the runtime: `wait_for_work()` blocks an
+  idle host until a post, a settled call or the next deadline, and pycvc's `Exec` uses it (the
+  bench's drivers still poll, so their numbers stay comparable).
 - **Per-form argument copies and string dispatch.** Each call form copies its argument ASTs into a
   fresh vector (`stackless_evaluator.cpp:912`, `evaluator.cpp:248`) and finds special forms by up
   to 19-21 sequential string compares (`stackless_evaluator.cpp:921-1172`,
@@ -711,7 +720,9 @@ suite was written.
   (`builtins.cpp:575-599`): `eval.dict_ops` `k` 4, 64, 512.
 - **Guards cost clock reads.** With `max_time` armed a step reads the clock 6-8 times instead of 3
   (`scheduler.cpp:335, 346, 355, 399, 420`), and past half of `max_time` adds two thread-CPU reads
-  per step (`process.cpp:46-53`): `limits.max_time` and `limits.max_time_ariadne`. With
+  per step (`process.cpp:46-53`): `limits.max_time` and `limits.max_time_ariadne`. Since fixed in
+  the schedulers: one steady-clock reading starts a step and serves all its budgets (the step
+  deadline's own `time_budget` still reads once), and the thread-CPU reading is chained. With
   `max_memory` armed, an allocation guard per step and a heap measurement every
   `heap_check_steps`, one O(reachable) step re-run near the budget (`process.cpp:76-84`,
   `heap.cpp:265-281, 516-554`): `limits.max_memory_bigheap`. A deadline also adds a clock read per
