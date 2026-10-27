@@ -71,6 +71,10 @@ five times that.
 | `--priority high` | raise the process priority (`HIGH_PRIORITY_CLASS`; `nice -10` on POSIX, which needs privileges) |
 | `--timeout S` | give up on a rep after S seconds of driving (default 120); the record carries `ok:false`. A rep whose driver is blocked inside the runtime can't notice, so a watchdog ends the process 60 s past the timeout, after writing an `ok:false` "hung" record for the rep; a sweep point whose setup or teardown blocks (`~app` joins every thread it started) is ended the same way once it outlives all its reps' budgets. The exit code is then 3 |
 | `--bg-oversubscribe` | run background-pool points that make more calls at once than the app's pool has workers (skipped otherwise; they stall and can hang: "Known pathologies") |
+| `--sample PREFIX` | sample the driver's stack during the first measured rep of each point and, at the end of the run, write `PREFIX.<scenario>.<executor>.<point>.folded` and `.top.txt` (Windows x64; "Profiling") |
+| `--sample-us N` | the sampling interval in microseconds (default 1000, at least 100) |
+| `--sample-depth N` | frames kept per sample (default 64, at most 1024) |
+| `--sample-all-reps` | sample every measured rep, not just the first (files get `.repN`) |
 
 The header gives the compiler, whether `NDEBUG` is set, `sizeof` of `value_t`, `process`,
 `eval_frame`, `evaluator_state`, `environment`, `closure` and `native_fn`, the logical CPU count,
@@ -174,6 +178,7 @@ failure are recorded as rep -1). Fields that don't apply are left out.
 | `handle_count_before`, `handle_count_after`, `handle_count_teardown` | Windows handles; open file descriptors on POSIX |
 | `app_threads_before`, `app_threads_after`, `app_pool_active_after`, `app_pool_pending_after` | the app's thread map (`app::threads()`: entries it has not erased) and its background pool's active and pending counts, for the scenarios that use the background pool |
 | `extra` | scenario-specific figures (below) |
+| `sampled`, `sample_file`, `sample_top_file`, `samples`, `samples_waiting`, `samples_syscall`, `sample_interval_us`, `sample_timer`, `sample_depth`, `sample_held_us_mean`, `sample_held_us_max`, `samples_truncated`, `samples_unwind_stopped`, `samples_failed`, `samples_overwritten`, `sample_warning` | with `--sample` only: whether this rep was sampled, and for the sampled one its files, the stacks kept, those caught blocked in a wait and those in another system call, the mean achieved interval and the timer behind it, how long a sample held the driver suspended, and the stacks cut short ("Profiling") |
 | `pin_cpu`, `pin_sibling`, `logical_cpus`, `sleep_1ms_ns`, `smoke` | the run's conditions (`pin_cpu` -1: this point ran unpinned) |
 
 Thread counts include the OS's own worker threads (on Windows the loader's thread-pool workers come
@@ -218,6 +223,138 @@ measures nothing.
   than Ariadne, which gives each action a whole default environment (`ariadne.cpp:1657`): every
   builtin lookup walks one more scope. `env=own` (`flood.small`, `flood.small_host`) gives each
   process a whole default environment instead.
+
+## Profiling
+
+A record says how fast a point ran; `--sample` says where the time went. It is a sampling profiler
+inside the bench, because the system profilers need rights a developer box often lacks: WPR/xperf
+and the Visual Studio collector (`VSDiagnostics`) need elevation (its `stop` fails with
+`E_ACCESSDENIED` without it). An in-process sampler needs none, and it sees exactly the measured
+region and nothing else.
+
+```sh
+# The first measured rep of each point, sampled every 1 ms; files land next to the prefix when
+# the run ends:
+build/bin/state_exec_bench --scenario sched.single.arith_loop --executor sync \
+    --size n=200000 --reps 1 --sample prof/arith
+# -> prof/arith.sched.single.arith_loop.sync.n=200000.folded
+#    prof/arith.sched.single.arith_loop.sync.n=200000.top.txt
+```
+
+Use a build with symbols: Release flags plus PDBs (`/Zi` for the compiler, `/DEBUG` for the
+linker, so `/O2` code is what gets sampled). Without PDBs the stacks still come out, named by
+export or by `module+offset`.
+
+How it works. When the sampled rep's measured region begins (the meter's `begin()`, where its
+clocks start), a sampler thread started at launch wakes every `--sample-us`: it calls
+`SuspendThread` on the driver and `GetThreadContext` (control and integer registers only), unwinds
+the driver's stack in place with `RtlLookupFunctionEntry` (with a per-sample history table) and
+`RtlVirtualUnwind`, writes up to `--sample-depth` addresses into a ring allocated and faulted in at
+startup, and calls `ResumeThread`. Only the top frame may lack unwind info (a leaf, whose return
+address is at `[RSP]`); a deeper frame without it stops the walk, and the stack is marked
+`[unwind stopped]` rather than followed through a guessed address. The walk's own reads stay
+between the suspended `RSP` and the stack's base. While the driver is suspended the sampler
+allocates nothing, takes no lock and prints nothing, since the driver may hold the heap lock. A
+second thread watches each sample from the moment the driver is suspended until the sampler goes
+idle after the region: if one keeps the driver suspended over 50 ms (the unwinder waiting on a
+lock the driver holds, say), it resumes the driver, the unwind stops, the sample is dropped and
+sampling is off for the rest of the region; the record's `sample_warning` says so. A sample that
+would land after the region has ended (in the meter's closing probes) is dropped too. The handle
+on the driver is opened at launch, so the sampled rep's `handle_count` matches the others'.
+
+The interval comes from a high-resolution waitable timer (Windows 10 1803+), else
+`timeBeginPeriod(1)` and `Sleep`, else spinning on `QueryPerformanceCounter`, whichever first keeps
+the mean interval within 25 % at startup. With `timeBeginPeriod` the raised timer rate is on only
+while a sampled region runs (it makes every 1 ms sleep in the process last 1 ms instead of
+`sleep_1ms_ns`, so a `poll1ms` driver's sampled rep runs differently from its others). Ticks are
+paced against a schedule: the high-resolution timer fires on a ~0.5 ms grid, so a single 1 ms wait
+takes 1.5 ms, but a late tick shortens the next wait and the mean stays at 1 ms (the jitter also
+keeps the samples from locking onto a periodic loop). The header line names the timer and any it
+passed over; the records carry the achieved mean (`sample_interval_us`). Both threads start
+floating before the driver is pinned and are then moved off the driver's CPU and its SMT sibling,
+so a spinning sampler never competes with the driver for its core (the header says so).
+
+A sample whose RIP sits at the return of a system-call stub in `ntdll.dll` or `win32u.dll` (the
+bytes before it are `syscall`, the bytes at it the `ret; int 2Eh; ret` every x64 stub ends with,
+so a stray `0F 05` inside other code does not count) caught the driver in the kernel. The stub's
+export name says which kind: a wait (`NtWait*`, `NtSignalAndWait*`, `NtDelayExecution`,
+`NtRemoveIoCompletion*`, `NtReplyWait*`, `NtUserMsgWait*`, `NtUserWaitMessage`) counts in
+`samples_waiting`, its folded stack ends in `[waiting]`, its self time goes to `[waiting] <stub>`,
+and the top list breaks the waits down by caller (the first frame outside ntdll, KERNELBASE,
+KERNEL32 and win32u); any other system call (`NtAllocateVirtualMemory`, `NtYieldExecution`, ...)
+counts in `samples_syscall` and ends in `[syscall]`.
+
+When the run ends, with every point measured, the bench loads DbgHelp (at run time, so a run
+without `--sample` never loads `dbghelp.dll`), calls `SymInitialize` on the process, searching the
+exe's directory and the directory of the `cvc.dll` that was loaded, with `SYMOPT_UNDNAME |
+SYMOPT_DEFERRED_LOADS | SYMOPT_LOAD_LINES`, names each address (`SymFromAddr`, cached per address;
+a return address is looked up one byte back, at its call) and its module (`SymGetModuleBase64`),
+and writes for each sampled rep:
+
+- `<stem>.folded`: collapsed stacks, `outer;...;inner count`, one line per distinct stack. Names
+  lose `cvc::state_exec::`, template argument lists over 24 characters become `<...>`, and frames
+  outside `cvc.dll` and the bench carry their module (`ntdll!RtlAllocateHeap`). Functions are told
+  apart by module and full name: two that shorten to the same label get ` #2`, ` #3`, ... (in the
+  order the run met them), so overloads and instantiations stay separate. A stack cut at the depth
+  starts with `[truncated]`, one stopped at a frame without unwind info with `[unwind stopped]`.
+- `<stem>.top.txt`: the sample count and achieved interval, how long samples held the driver,
+  running versus waiting versus other system calls, the waits by caller, then the top 40 functions
+  by self samples, the top 40 by inclusive samples (a function counted once per stack it is on),
+  and the top 20 source lines by self samples (`SymGetLineFromAddr64`, per line and function), as
+  percent of the samples. A failed `SymInitialize` is a `WARNING` line here and on stderr.
+
+To view a folded file, drop it on [speedscope.app](https://www.speedscope.app) (it opens collapsed
+stacks as they are; "Left Heavy" and "Sandwich" are the useful views), or make an SVG with
+`flamegraph.pl stem.folded > stem.svg` from Brendan Gregg's FlameGraph scripts.
+
+Limits:
+
+- Windows x64 only (MSVC or clang-cl, which have `__try`). Elsewhere `--sample` says so on stderr
+  and the run goes on unsampled. On Linux use perf on the whole process, e.g.
+  `perf record -F 999 -g --call-graph dwarf -- build/bin/state_exec_bench --scenario ... --reps 1`,
+  then `perf script | stackcollapse-perf.pl` for the same folded format; it sees setup and
+  teardown too, so keep the sizes large enough that the region dominates.
+- Only the driver thread is sampled. Scenarios whose work runs on the app's pools or lanes
+  (`async.*`) show the driver waiting; their worker threads are not followed.
+- The sampled rep is slower (every sample stops the driver for a few to tens of microseconds) and
+  its `process_cpu_ns` includes the sampler's thread. Only the first measured rep is sampled unless
+  `--sample-all-reps` is given, so the other reps' timings stay clean; compare timings from
+  unsampled runs only.
+- `--sample` costs memory and handles for the whole run, sampled reps or not: the ring (33 MB at
+  the default depth), the two threads and their handles, so its records show two more threads,
+  about six more handles and about 35 MB more private memory than an unsampled run's. Each sampled
+  rep's stacks are copied out of the ring until the run ends (a few hundred KB per sampled
+  second), which later records' memory includes. DbgHelp and its PDBs (over 100 MB with `cvc.pdb`)
+  load only after the last point, so no record's memory, handles or peaks include them; the price
+  is that the files appear only at the end, and a run the hang watchdog ends (exit code 3) writes
+  none.
+- Without `--sample` nothing runs: no thread, no ring, no `dbghelp.dll` (it is loaded at run time,
+  not imported), one false flag tested per region.
+- A sample sees where the driver is, not whether it had a CPU: on a busy machine a driver preempted
+  in user code is sampled as running there. `[waiting]` only marks a driver blocked in a waiting
+  system call.
+- The ring holds about 65 s of 1 ms samples at depth 64 (4 Mi frame slots, never more than 1 Mi
+  samples); a longer region keeps the last ones (`samples_overwritten`). Stacks deeper than
+  `--sample-depth` (deep recursion in the recursive evaluator) lose their outer frames, so their
+  inclusive counts are low; raise the depth.
+- The stack is unwound in place while the driver is suspended, as asked of the design, rather than
+  copied and unwound after resuming it (as Chromium's sampler does). For code in loaded images
+  `RtlLookupFunctionEntry` reads the loader's tables without blocking, but code registered at run
+  time (dynamic function tables, JIT code) is looked up under a lock the driver may hold; the
+  watchdog is the backstop for that.
+- Inlined functions are attributed to the function they were inlined into (DbgHelp names the
+  physical function); source lines still point into the inlined code.
+- Without Windows' own PDBs, frames in `ntdll.dll` and the other system DLLs are named after the
+  nearest export. Where the image's `.pdata` puts the start of the function holding the address
+  past that export, the frame is named by that start instead, so a heap internal shows as, say,
+  `ntdll!RtlAllocateHeap+0x1200` (the function starting 0x1200 bytes past `RtlAllocateHeap`), and
+  distinct internals stay apart. Read them as "inside ntdll". `_NT_SYMBOL_PATH` (and
+  `_NT_ALT_SYMBOL_PATH`) are added to the search path, so a local symbol cache or a symbol server
+  there names them properly (a server also needs `symsrv.dll` beside the `dbghelp.dll` that gets
+  loaded).
+- The sampled rep's numbers carry the sampling: each sample holds the driver suspended for about
+  30 us (`sample_held_us_mean`; on the machine this was written on, about 3 % at 1 ms), and caches
+  disturbed by the sampler cost a little more.
 
 ## Scenarios
 

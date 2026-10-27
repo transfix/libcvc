@@ -20,6 +20,7 @@
 //   state_exec_bench --scenario 'eval.*' --reps 5 --pin auto --json base.jsonl
 //   state_exec_bench --scenario flood.small --size n=100,1000 --executor async
 //   state_exec_bench --smoke
+//   state_exec_bench --scenario eval.fib --executor stackless --reps 1 --sample prof/fib
 //
 // Every scenario checks what its programs returned: a record whose programs failed carries
 // ok:false and the exit code is 1. Numbers are only comparable between runs with the same pinning,
@@ -34,6 +35,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <dbghelp.h>
 #include <intrin.h>
 #include <psapi.h>
 #include <tlhelp32.h>
@@ -93,6 +95,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -940,6 +943,1164 @@ jobj percentiles(std::vector<int64_t> v) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The in-process sampler (--sample; docs/STATE_EXEC_BENCH.md, "Profiling"). Windows x64 only: WPR,
+// xperf and the Visual Studio profiler need elevation, this needs nothing. While a sampled rep's
+// measured region runs, a thread of its own suspends the driver every --sample-us, unwinds its
+// stack in place (RtlLookupFunctionEntry + RtlVirtualUnwind) into a ring allocated up front, and
+// resumes it. Nothing it does while the driver is suspended allocates, locks or prints: the driver
+// may hold the heap lock. A second thread resumes the driver if one sample holds it over 50 ms (a
+// lock the unwinder needs, held by the suspended driver) and turns sampling off for the region.
+// After the region, with the driver running freely, DbgHelp (loaded then and unloaded once the
+// rep's files are written) symbolizes the stacks into a folded file (flamegraph.pl, speedscope)
+// and a top list. Without --sample none of this exists: no thread, no buffer, no dbghelp.dll, one
+// false bool per region.
+// ---------------------------------------------------------------------------------------------
+
+struct sampler_opts {
+  std::string prefix; // output file prefix; "" = no sampling
+  int64_t interval_us = 1000;
+  int depth = 64;
+  bool all_reps = false;
+};
+
+#if defined(_WIN32) && defined(_M_X64) && defined(_MSC_VER)
+#define BENCH_SAMPLER 1
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+
+int64_t qpc_now() {
+  LARGE_INTEGER t;
+  QueryPerformanceCounter(&t);
+  return t.QuadPart;
+}
+
+int64_t qpc_freq() {
+  static const int64_t f = [] {
+    LARGE_INTEGER x;
+    QueryPerformanceFrequency(&x);
+    return x.QuadPart;
+  }();
+  return f;
+}
+
+// [base, end) of a loaded module, from its PE header; {0, 0} when it isn't loaded.
+std::pair<uintptr_t, uintptr_t> module_range(const wchar_t *name) {
+  const auto *base = reinterpret_cast<const unsigned char *>(GetModuleHandleW(name));
+  if (!base)
+    return {0, 0};
+  const auto *dos = reinterpret_cast<const IMAGE_DOS_HEADER *>(base);
+  const auto *nt = reinterpret_cast<const IMAGE_NT_HEADERS *>(base + dos->e_lfanew);
+  return {uintptr_t(base), uintptr_t(base) + nt->OptionalHeader.SizeOfImage};
+}
+
+// Unwind *ctx (the suspended driver's context) in place, writing up to `depth` code addresses to
+// out. RtlVirtualUnwind where the function has unwind info; the top frame alone may be a leaf
+// without any, whose return address is at [RSP]. A deeper frame without unwind info is not a leaf,
+// so the walk stops there (*stopped) instead of following a guessed PC, which would also send
+// RtlLookupFunctionEntry down its slow path (the dynamic function tables, under a lock). Its own
+// reads stay in [the suspended RSP, hi), off the stack's guard page. It stops at a null RIP, at an
+// RSP that fails to grow, and as soon as *busy no longer holds gen (the watchdog resumed the
+// driver, so the stack is live again). Allocates nothing and takes no lock of its own; a stack torn
+// under it can still fault, and __try turns that into a short stack, so this function holds no
+// C++ objects.
+int unwind_into(CONTEXT *ctx, uint64_t *out, int depth, uint64_t hi,
+                const std::atomic<uint64_t> *busy, uint64_t gen, bool *truncated, bool *stopped) {
+  int n = 0;
+  *truncated = *stopped = false;
+  const DWORD64 lo = ctx->Rsp;
+  UNWIND_HISTORY_TABLE history; // caches function entries across the frames of this one sample
+  std::memset(&history, 0, sizeof history);
+  __try {
+    for (;;) {
+      if (busy->load(std::memory_order_acquire) != gen)
+        break;
+      const DWORD64 pc = ctx->Rip;
+      if (pc < 0x10000)
+        break;
+      if (n == depth) {
+        *truncated = true;
+        break;
+      }
+      out[n++] = pc;
+      const DWORD64 sp = ctx->Rsp;
+      DWORD64 image = 0;
+      PRUNTIME_FUNCTION f = RtlLookupFunctionEntry(pc, &image, &history);
+      if (f) {
+        PVOID data = nullptr;
+        DWORD64 frame = 0;
+        RtlVirtualUnwind(UNW_FLAG_NHANDLER, image, pc, f, ctx, &data, &frame, nullptr);
+      } else if (n == 1) {
+        if (sp < lo || sp + 8 > hi)
+          break;
+        ctx->Rip = *reinterpret_cast<const DWORD64 *>(sp);
+        ctx->Rsp = sp + 8;
+      } else {
+        *stopped = true;
+        break;
+      }
+      if (ctx->Rsp <= sp || ctx->Rsp > hi)
+        break;
+    }
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+  }
+  return n;
+}
+
+// The start of the function holding pc, from its image's .pdata (following chained and indirect
+// entries back to the primary one), or 0 for a leaf without unwind info.
+uint64_t function_start(uint64_t pc) {
+  DWORD64 image = 0;
+  const RUNTIME_FUNCTION *f = RtlLookupFunctionEntry(pc, &image, nullptr);
+  for (int i = 0; f && i < 16; ++i) {
+    if (f->UnwindData & 1) { // indirect: it points at another entry
+      f = reinterpret_cast<const RUNTIME_FUNCTION *>(image + (f->UnwindData & ~DWORD(1)));
+      continue;
+    }
+    const auto *ui = reinterpret_cast<const unsigned char *>(image + f->UnwindData);
+    if (!((ui[0] >> 3) & UNW_FLAG_CHAININFO))
+      return image + f->BeginAddress;
+    const unsigned codes = (ui[2] + 1u) & ~1u; // the chained entry follows the (even) codes
+    f = reinterpret_cast<const RUNTIME_FUNCTION *>(ui + 4 + 2 * codes);
+  }
+  return 0;
+}
+
+// Whether a system-call stub blocks (a wait, a sleep, a completion-port dequeue) rather than
+// returning once its work is done (NtQueryInformationThread, NtAllocateVirtualMemory,
+// NtYieldExecution, ...). name is the stub's export: Nt/Zw in ntdll, NtUser/NtGdi in win32u.
+bool blocking_stub(std::string name) {
+  if (name.compare(0, 2, "Nt") == 0 || name.compare(0, 2, "Zw") == 0)
+    name.erase(0, 2);
+  if (name.compare(0, 4, "User") == 0)
+    name.erase(0, 4);
+  for (const char *w :
+       {"Wait", "SignalAndWait", "DelayExecution", "RemoveIoCompletion", "ReplyWait", "MsgWait"})
+    if (name.compare(0, std::strlen(w), w) == 0)
+      return true;
+  return false;
+}
+
+// The name of the last export at or below addr in the module at base, from its export directory
+// (no DbgHelp): ntdll and win32u export every system-call stub. Zw and Nt share an address; either
+// name may come back.
+std::string export_below(uintptr_t base, uintptr_t addr) {
+  if (!base)
+    return {};
+  const auto *b = reinterpret_cast<const unsigned char *>(base);
+  const auto *nt = reinterpret_cast<const IMAGE_NT_HEADERS *>(
+      b + reinterpret_cast<const IMAGE_DOS_HEADER *>(b)->e_lfanew);
+  const IMAGE_DATA_DIRECTORY &d = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+  if (!d.VirtualAddress)
+    return {};
+  const auto *ed = reinterpret_cast<const IMAGE_EXPORT_DIRECTORY *>(b + d.VirtualAddress);
+  const auto *names = reinterpret_cast<const DWORD *>(b + ed->AddressOfNames);
+  const auto *ords = reinterpret_cast<const WORD *>(b + ed->AddressOfNameOrdinals);
+  const auto *funcs = reinterpret_cast<const DWORD *>(b + ed->AddressOfFunctions);
+  const uintptr_t rva = addr - base;
+  DWORD best = 0;
+  const char *name = "";
+  for (DWORD i = 0; i < ed->NumberOfNames; ++i)
+    if (const DWORD f = funcs[ords[i]]; f <= rva && f >= best) {
+      best = f;
+      name = reinterpret_cast<const char *>(b + names[i]);
+    }
+  return name;
+}
+
+std::string narrow(const std::wstring &w) {
+  if (w.empty())
+    return {};
+  const int n =
+      WideCharToMultiByte(CP_UTF8, 0, w.data(), int(w.size()), nullptr, 0, nullptr, nullptr);
+  std::string s(static_cast<std::size_t>(n), '\0');
+  WideCharToMultiByte(CP_UTF8, 0, w.data(), int(w.size()), s.data(), n, nullptr, nullptr);
+  return s;
+}
+
+std::wstring module_path(HMODULE m) {
+  wchar_t buf[MAX_PATH * 2];
+  const DWORD n = GetModuleFileNameW(m, buf, DWORD(std::size(buf)));
+  return std::wstring(buf, n);
+}
+
+std::wstring dir_of(const std::wstring &path) {
+  const auto slash = path.find_last_of(L"\\/");
+  return slash == std::wstring::npos ? std::wstring() : path.substr(0, slash);
+}
+
+// A symbol as the folded files show it: without "cvc::state_exec::", with long template argument
+// lists cut to <...> and std::string spelled so, and with no ';' (the folded format's separator).
+std::string short_symbol(std::string s) {
+  const auto erase_all = [&s](const std::string &what, const std::string &with) {
+    for (std::size_t p; (p = s.find(what)) != std::string::npos;)
+      s.replace(p, what.size(), with);
+  };
+  erase_all("cvc::state_exec::", "");
+  erase_all("`anonymous namespace'::", "");
+  erase_all("std::basic_string<char,std::char_traits<char>,std::allocator<char> >", "std::string");
+  const auto ends_with = [](const std::string &a, const char *b) {
+    const std::size_t n = std::strlen(b);
+    return a.size() >= n && a.compare(a.size() - n, n, b) == 0;
+  };
+  std::string out;
+  for (std::size_t i = 0; i < s.size();) {
+    if (s[i] != '<' || ends_with(out, "operator") || ends_with(out, "operator<")) {
+      out += s[i] == ';' ? ':' : s[i];
+      ++i;
+      continue;
+    }
+    int depth = 0;
+    std::size_t j = i;
+    for (; j < s.size(); ++j) {
+      depth += s[j] == '<' ? 1 : s[j] == '>' ? -1 : 0;
+      if (depth == 0)
+        break;
+    }
+    if (j >= s.size()) { // unbalanced (DbgHelp cut a long name short)
+      out += "<...>";
+      break;
+    }
+    const std::string inner = s.substr(i + 1, j - i - 1);
+    out += inner.size() > 24 && inner.compare(0, 7, "lambda_") != 0
+               ? std::string("<...>")
+               : "<" + short_symbol(inner) + ">";
+    i = j + 1;
+  }
+  return out;
+}
+
+// The DbgHelp entry points the sampler uses, resolved at run time: a load-time import would load
+// dbghelp.dll into every run, sampled or not.
+struct dbghelp_api {
+  HMODULE dll = LoadLibraryW(L"dbghelp.dll");
+  decltype(&SymGetOptions) get_options = nullptr;
+  decltype(&SymSetOptions) set_options = nullptr;
+  decltype(&SymInitializeW) initialize = nullptr;
+  decltype(&SymCleanup) cleanup = nullptr;
+  decltype(&SymGetModuleBase64) module_base = nullptr;
+  decltype(&SymFromAddr) from_addr = nullptr;
+  decltype(&SymGetLineFromAddr64) line_from_addr = nullptr;
+  dbghelp_api() {
+    if (!dll)
+      return;
+    load(get_options, "SymGetOptions");
+    load(set_options, "SymSetOptions");
+    load(initialize, "SymInitializeW");
+    load(cleanup, "SymCleanup");
+    load(module_base, "SymGetModuleBase64");
+    load(from_addr, "SymFromAddr");
+    load(line_from_addr, "SymGetLineFromAddr64");
+  }
+  dbghelp_api(const dbghelp_api &) = delete;
+  dbghelp_api &operator=(const dbghelp_api &) = delete;
+  ~dbghelp_api() {
+    if (dll)
+      FreeLibrary(dll);
+  }
+  bool ok() const {
+    return get_options && set_options && initialize && cleanup && module_base && from_addr &&
+           line_from_addr;
+  }
+
+private:
+  template <class F> void load(F &fn, const char *name) {
+    fn = reinterpret_cast<F>(reinterpret_cast<void *>(GetProcAddress(dll, name)));
+  }
+};
+#endif
+
+class sampler {
+public:
+  sampler() = default;
+  sampler(const sampler &) = delete;
+  sampler &operator=(const sampler &) = delete;
+  ~sampler() {
+#if defined(BENCH_SAMPLER)
+    stop_threads();
+#endif
+  }
+
+  bool on() const { return on_; }
+  const sampler_opts &opts() const { return o_; }
+
+  // From main on the driver thread, before it is pinned (the threads start floating; avoid_cpus
+  // then keeps them off the driver's CPU). Returns the header line, or why sampling stays off.
+  std::string start(const sampler_opts &o) {
+    o_ = o;
+#if defined(BENCH_SAMPLER)
+    // 4 Mi frame slots (32 MB at most) for at most 1 Mi samples, faulted in now so no region's
+    // working set pays for them.
+    cap_ = std::clamp<int64_t>((int64_t(1) << 22) / o.depth, 1024, int64_t(1) << 20);
+    const std::size_t fbytes = std::size_t(cap_) * std::size_t(o.depth) * sizeof(uint64_t);
+    frames_ = static_cast<uint64_t *>(
+        VirtualAlloc(nullptr, fbytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    hdrs_ = static_cast<hdr *>(VirtualAlloc(nullptr, std::size_t(cap_) * sizeof(hdr),
+                                            MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    if (!frames_ || !hdrs_)
+      return "--sample: cannot allocate the sample ring; sampling off";
+    std::memset(frames_, 0, fbytes);
+    std::memset(hdrs_, 0, std::size_t(cap_) * sizeof(hdr));
+    if (!open_driver())
+      return "--sample: OpenThread on the driver failed; sampling off";
+    ntdll_ = module_range(L"ntdll.dll");
+    win32u_ = module_range(L"win32u.dll");
+    interval_ticks_ = std::max<int64_t>(1, o.interval_us * qpc_freq() / 1000000);
+    limit_ticks_ = qpc_freq() / 20; // 50 ms
+    go_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    go_wd_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    idle_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!go_ || !go_wd_ || !idle_)
+      return "--sample: CreateEvent failed; sampling off";
+    sampler_th_ = std::thread([this] { sample_main(); });
+    WaitForSingleObject(idle_, INFINITE); // calibrated
+    watch_th_ = std::thread([this] { watch_main(); });
+    on_ = true;
+    char b[512];
+    std::snprintf(b, sizeof b,
+                  "sampling the driver every %lld us (%s: calibrated mean %.0f us%s%s), depth %d, "
+                  "ring %lld samples, %s, to ",
+                  static_cast<long long>(o.interval_us), timer_name(), calibrated_us_,
+                  rejected_.empty() ? "" : "; ", rejected_.c_str(), o.depth,
+                  static_cast<long long>(cap_),
+                  o.all_reps ? "every measured rep" : "the first measured rep");
+    return b + o.prefix + ".*";
+#else
+    return "--sample is Windows x64 only (an in-process SuspendThread/RtlVirtualUnwind sampler); "
+           "on Linux use perf (perf record -F 999 -g --call-graph dwarf -- state_exec_bench ...). "
+           "Continuing unsampled";
+#endif
+  }
+
+  // From main once the driver is pinned to cpu (-1: not pinned): moves both threads off it and its
+  // SMT siblings, so the time-critical sampler (spinning, with the QPC fallback) never takes the
+  // driver's core. Returns what to add to the header line.
+  std::string avoid_cpus(int cpu, const std::string &siblings) {
+#if defined(BENCH_SAMPLER)
+    if (!on_ || cpu < 0 || cpu >= 64)
+      return "";
+    DWORD_PTR proc = 0, sys = 0;
+    if (!GetProcessAffinityMask(GetCurrentProcess(), &proc, &sys))
+      return "";
+    DWORD_PTR mask = proc & ~(DWORD_PTR(1) << cpu);
+    for (const char *p = siblings.c_str(); *p;) {
+      char *end = nullptr;
+      const long c = std::strtol(p, &end, 10);
+      if (end == p)
+        break;
+      if (c >= 0 && c < 64)
+        mask &= ~(DWORD_PTR(1) << c);
+      p = *end == ',' ? end + 1 : end;
+    }
+    if (!mask)
+      return "; the sampler shares the driver's CPU (no other is available)";
+    const bool ok = SetThreadAffinityMask(sampler_th_.native_handle(), mask) != 0 &&
+                    SetThreadAffinityMask(watch_th_.native_handle(), mask) != 0;
+    if (!ok)
+      return "; could not keep the sampler off the driver's CPU";
+    return siblings.empty() ? "; sampler kept off the driver's CPU"
+                            : "; sampler kept off the driver's CPU and its SMT sibling";
+#else
+    (void)cpu;
+    (void)siblings;
+    return "";
+#endif
+  }
+
+  // Whether the next measured region is sampled; arming clears the previous samples.
+  void arm(bool a) {
+    armed_ = a && on_;
+#if defined(BENCH_SAMPLER)
+    if (armed_) {
+      kept_ = failed_ = regions_ = region_ticks_ = 0;
+      held_n_ = held_ticks_ = held_max_ = 0;
+      tripped_ = false;
+      warning_.clear();
+      win32u_ = module_range(L"win32u.dll"); // it may have loaded since the last rep
+      if (!open_driver()) {
+        warning_ = "OpenThread on the driver failed";
+        armed_ = false;
+      }
+    }
+#endif
+  }
+
+  // The meter calls these: begin just before its clocks start, stop right after they stop, join
+  // after its last probe (it waits for the sampler to go idle).
+  void region_begin() {
+    if (!armed_)
+      return;
+#if defined(BENCH_SAMPLER)
+    if (GetCurrentThreadId() != driver_tid_) {
+      warning_ = "the measured region began on another thread than the rep";
+      return;
+    }
+    stack_hi_ = reinterpret_cast<uintptr_t>(reinterpret_cast<NT_TIB *>(NtCurrentTeb())->StackBase);
+    busy_ = 0;
+    ++regions_;
+    joining_ = true;
+    // The timeBeginPeriod(1) fallback raises the system timer rate for the region only: on for
+    // the whole run, it would make every rep's 1 ms sleeps last 1 ms.
+    if (timer_ == timer_kind::sleep && begin_period_)
+      period_on_ = begin_period_(1) == 0;
+    region_t0_ = qpc_now();
+    sampling_ = true;
+    active_ = true;
+    SetEvent(go_);
+    SetEvent(go_wd_);
+#endif
+  }
+  void region_stop() {
+#if defined(BENCH_SAMPLER)
+    if (active_) {
+      active_ = false;
+      region_ticks_ += qpc_now() - region_t0_;
+    }
+#endif
+  }
+  void region_join() {
+#if defined(BENCH_SAMPLER)
+    if (!joining_)
+      return;
+    joining_ = false;
+    if (WaitForSingleObject(idle_, 5000) != WAIT_OBJECT_0) {
+      warning_ = "the sampler thread did not go idle within 5 s; sampling off for the run";
+      stuck_ = true;
+      on_ = armed_ = false;
+    }
+    if (period_on_) {
+      end_period_(1);
+      period_on_ = false;
+    }
+#endif
+  }
+
+  // After a sampled rep, on the driver: copy its samples out of the ring and return the record's
+  // sample fields. finish() writes the files at the end of the run: DbgHelp loaded here would keep
+  // its PDBs (over 100 MB with cvc.pdb) and their handles in every later record's figures, and in
+  // the per-process peaks for good.
+  jobj write(const std::string &stem, const std::string &title) {
+    jobj j;
+    j.b("sampled", true);
+#if defined(BENCH_SAMPLER)
+    if (!regions_ || stuck_) { // stuck: the sampler may still be writing the ring
+      j.s("sample_warning", warning_.empty() ? "no measured region ran" : warning_);
+      return j;
+    }
+    pending_rep p;
+    p.stem = stem;
+    p.title = title;
+    const int64_t kept = std::min(kept_, cap_);
+    const int64_t first = kept_ > cap_ ? kept_ % cap_ : 0;
+    p.hdrs.reserve(std::size_t(kept));
+    int64_t t_first = 0, t_last = 0;
+    for (int64_t k = 0; k < kept; ++k) {
+      const int64_t slot = (first + k) % cap_;
+      hdr h = hdrs_[slot];
+      const uint64_t *f = frames_ + slot * o_.depth;
+      if (k == 0)
+        t_first = h.qpc;
+      t_last = h.qpc;
+      if (h.flags & f_syscall) {
+        // A wait or another system call, by the stub's export name (no DbgHelp needed).
+        auto it = stub_blocks_.find(f[0]);
+        if (it == stub_blocks_.end()) {
+          const auto &m = f[0] >= ntdll_.first && f[0] < ntdll_.second ? ntdll_ : win32u_;
+          it = stub_blocks_.emplace(f[0], blocking_stub(export_below(m.first, f[0]))).first;
+        }
+        if (it->second) {
+          h.flags |= f_wait;
+          ++p.waiting;
+        } else {
+          ++p.in_syscall;
+        }
+      }
+      p.truncated += h.flags & f_truncated ? 1 : 0;
+      p.stopped += h.flags & f_stopped ? 1 : 0;
+      p.frames.insert(p.frames.end(), f, f + h.n);
+      p.hdrs.push_back(h);
+    }
+    const double tick_us = 1e6 / double(qpc_freq());
+    p.kept = kept;
+    p.mean_us = kept > 1 ? double(t_last - t_first) * tick_us / double(kept - 1) : 0.0;
+    p.region_ms = double(region_ticks_) * tick_us / 1e3;
+    p.held_mean_us = held_n_ ? double(held_ticks_) * tick_us / double(held_n_) : 0.0;
+    p.held_max_us = double(held_max_) * tick_us;
+    p.failed = failed_;
+    p.overwritten = kept_ > cap_ ? kept_ - cap_ : 0;
+    if (tripped_) {
+      char b[200];
+      std::snprintf(b, sizeof b,
+                    "a sample held the driver suspended over 50 ms (%.1f ms); the driver was "
+                    "resumed and sampling stopped for the rest of the region",
+                    double(trip_ticks_.load()) * tick_us / 1e3);
+      warning_ = b;
+    }
+    p.warning = warning_;
+    j.s("sample_file", stem + ".folded").s("sample_top_file", stem + ".top.txt");
+    j.i("samples", kept).i("samples_waiting", p.waiting).i("samples_syscall", p.in_syscall);
+    j.d("sample_interval_us", p.mean_us);
+    j.s("sample_timer", timer_name()).i("sample_depth", o_.depth);
+    j.d("sample_held_us_mean", p.held_mean_us).d("sample_held_us_max", p.held_max_us);
+    if (p.truncated)
+      j.i("samples_truncated", p.truncated);
+    if (p.stopped)
+      j.i("samples_unwind_stopped", p.stopped);
+    if (p.failed)
+      j.i("samples_failed", p.failed);
+    if (p.overwritten)
+      j.i("samples_overwritten", p.overwritten);
+    if (!warning_.empty()) {
+      j.s("sample_warning", warning_);
+      std::fprintf(stderr, "state_exec_bench: warning: sampling: %s\n", warning_.c_str());
+    }
+    std::printf("    sampled: %lld samples, mean interval %.0f us, driver held %.1f us mean / %.0f "
+                "us max per sample, %.1f%% waiting -> %s.folded (written at the end of the run)\n",
+                static_cast<long long>(kept), p.mean_us, p.held_mean_us, p.held_max_us,
+                kept ? 100.0 * double(p.waiting) / double(kept) : 0.0, stem.c_str());
+    pending_.push_back(std::move(p));
+#else
+    (void)stem;
+    (void)title;
+#endif
+    return j;
+  }
+
+  // At the end of the run, every point measured: symbolize the sampled reps' stacks and write
+  // their <stem>.folded and <stem>.top.txt.
+  void finish() {
+#if defined(BENCH_SAMPLER)
+    if (pending_.empty())
+      return;
+    symbols sy;
+    if (!sy.error.empty())
+      std::fprintf(stderr, "state_exec_bench: warning: sampling: %s\n", sy.error.c_str());
+    int written = 0;
+    for (const pending_rep &p : pending_)
+      written += write_files(sy, p) ? 1 : 0;
+    std::printf("[state_exec_bench] wrote the sample files of %d sampled rep%s, %s.*\n", written,
+                written == 1 ? "" : "s", o_.prefix.c_str());
+    if (written < int(pending_.size()))
+      std::fprintf(stderr,
+                   "state_exec_bench: warning: sampling: %d sampled reps' files could not "
+                   "be written\n",
+                   int(pending_.size()) - written);
+    pending_.clear();
+#endif
+  }
+
+private:
+  bool on_ = false, armed_ = false;
+  sampler_opts o_;
+#if defined(BENCH_SAMPLER)
+  struct hdr {
+    int64_t qpc;
+    uint32_t n, flags;
+  };
+  // f_wait: a syscall stub that blocks, set by write() from the stub's export name.
+  enum : uint32_t { f_syscall = 1, f_truncated = 2, f_stopped = 4, f_wait = 8 };
+  enum class timer_kind { hr, sleep, spin };
+
+  struct sym_entry {
+    std::string label, module; // label: as shown; module: its file name
+    std::string name;          // the short symbol alone (a syscall stub's export name)
+  };
+  // DbgHelp, on the driver thread between regions only (DbgHelp is single-threaded). One per
+  // write(): its destructor unloads the PDBs and dbghelp.dll.
+  struct symbols {
+    dbghelp_api api;
+    HANDLE proc = GetCurrentProcess();
+    bool ok = false;
+    std::string error; // why frames are named module+offset, if they are
+    std::unordered_map<uint64_t, int> by_addr, line_by_addr;
+    std::vector<sym_entry> funcs;
+    std::map<std::string, int> by_key;     // module + '\n' + full name -> funcs index
+    std::map<std::string, int> label_uses; // how many functions show a short label
+    std::vector<std::string> lines;
+    std::map<std::string, int> by_line;
+    std::unordered_map<uint64_t, std::string> modules; // base -> file name
+    std::wstring exe_dir;
+    std::string exe_name;
+
+    symbols() {
+      const std::wstring exe = module_path(nullptr);
+      exe_dir = dir_of(exe);
+      exe_name = narrow(exe.substr(exe_dir.size() + (exe_dir.empty() ? 0 : 1)));
+      if (!api.ok()) {
+        error = "cannot load dbghelp.dll; frames are named module+offset";
+        return;
+      }
+      api.set_options(api.get_options() | SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS |
+                      SYMOPT_LOAD_LINES);
+      // The exe's directory and the directory of the cvc.dll the loader found on PATH.
+      std::wstring path = exe_dir;
+      std::wstring cvc;
+      if (HMODULE m = GetModuleHandleW(L"cvc.dll"))
+        cvc = module_path(m);
+      else {
+        wchar_t buf[MAX_PATH * 2];
+        const DWORD n =
+            SearchPathW(nullptr, L"cvc.dll", nullptr, DWORD(std::size(buf)), buf, nullptr);
+        if (n && n < std::size(buf))
+          cvc.assign(buf, n);
+      }
+      if (!cvc.empty() && _wcsicmp(dir_of(cvc).c_str(), exe_dir.c_str()) != 0)
+        path += L";" + dir_of(cvc);
+      // An explicit search path replaces DbgHelp's default, so keep the user's symbol paths (a
+      // symbol server there names ntdll's internals instead of their nearest export).
+      for (const wchar_t *var : {L"_NT_SYMBOL_PATH", L"_NT_ALT_SYMBOL_PATH"}) {
+        wchar_t buf[4096];
+        const DWORD n = GetEnvironmentVariableW(var, buf, DWORD(std::size(buf)));
+        if (n && n < std::size(buf))
+          path += L";" + std::wstring(buf, n);
+      }
+      ok = api.initialize(proc, path.c_str(), TRUE) != FALSE;
+      if (!ok)
+        error = "SymInitialize failed (error " + std::to_string(GetLastError()) +
+                "); frames are named module+offset";
+    }
+    ~symbols() {
+      if (ok)
+        api.cleanup(proc);
+    }
+    symbols(const symbols &) = delete;
+    symbols &operator=(const symbols &) = delete;
+
+    // One entry per (module, full name); a short label that two of them share gets " #2", ... on
+    // the later ones, so overloads and <...> instantiations stay apart.
+    int intern(const std::string &key, std::string label, const std::string &module,
+               const std::string &name) {
+      if (const auto it = by_key.find(key); it != by_key.end())
+        return it->second;
+      if (const int uses = ++label_uses[label]; uses > 1)
+        label += " #" + std::to_string(uses);
+      const int id = int(funcs.size());
+      funcs.push_back({label, module, name});
+      by_key.emplace(key, id);
+      return id;
+    }
+    int synthetic(const std::string &label, const std::string &module) {
+      return intern("\n" + label, label, module, label);
+    }
+    std::string module(uint64_t addr, uint64_t *base) {
+      *base = ok ? api.module_base(proc, addr) : 0;
+      if (!*base) {
+        HMODULE m = nullptr;
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                   GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               reinterpret_cast<LPCWSTR>(addr), &m))
+          *base = reinterpret_cast<uint64_t>(m);
+      }
+      if (!*base)
+        return "?";
+      auto it = modules.find(*base);
+      if (it == modules.end()) {
+        std::string name = narrow(module_path(reinterpret_cast<HMODULE>(*base)));
+        name = name.substr(name.find_last_of("\\/") + 1);
+        it = modules.emplace(*base, name.empty() ? "?" : name).first;
+      }
+      return it->second;
+    }
+    int func(uint64_t addr) {
+      if (const auto it = by_addr.find(addr); it != by_addr.end())
+        return it->second;
+      alignas(SYMBOL_INFO) char buf[sizeof(SYMBOL_INFO) + 1024];
+      auto *si = reinterpret_cast<SYMBOL_INFO *>(buf);
+      std::memset(si, 0, sizeof(SYMBOL_INFO));
+      si->SizeOfStruct = sizeof(SYMBOL_INFO);
+      si->MaxNameLen = 1024;
+      DWORD64 disp = 0;
+      uint64_t base = 0;
+      const std::string mod = module(addr, &base);
+      std::string key, label, name;
+      char b[96];
+      if (ok && api.from_addr(proc, addr, &disp, si)) {
+        key = std::string(si->Name, std::min<ULONG>(si->NameLen, 1023));
+        name = short_symbol(key);
+        if (si->Flags & SYMFLAG_EXPORT) {
+          // No PDB, so this is the nearest export below addr. When .pdata puts the start of the
+          // function holding addr elsewhere, it is an internal function: name it by its start.
+          const uint64_t start = function_start(addr);
+          if (start > si->Address) {
+            std::snprintf(b, sizeof b, "+0x%llx",
+                          static_cast<unsigned long long>(start - si->Address));
+            name += b;
+          } else if (start && start < si->Address) {
+            std::snprintf(b, sizeof b, "fn+0x%llx", static_cast<unsigned long long>(start - base));
+            name = b;
+          }
+          key = name;
+        }
+        // System and runtime modules carry their name, the bench's and cvc's code doesn't.
+        label =
+            _stricmp(mod.c_str(), "cvc.dll") == 0 || _stricmp(mod.c_str(), exe_name.c_str()) == 0
+                ? name
+                : mod.substr(0, mod.find_last_of('.')) + "!" + name;
+      } else {
+        if (base)
+          std::snprintf(b, sizeof b, "%s+0x%llx", mod.c_str(),
+                        static_cast<unsigned long long>(addr - base));
+        else
+          std::snprintf(b, sizeof b, "0x%llx", static_cast<unsigned long long>(addr));
+        key = label = name = b;
+      }
+      const int id = intern(mod + "\n" + key, label, mod, name);
+      by_addr.emplace(addr, id);
+      return id;
+    }
+    // "dir/file.cpp:123" for addr, or -1.
+    int line(uint64_t addr) {
+      if (const auto it = line_by_addr.find(addr); it != line_by_addr.end())
+        return it->second;
+      IMAGEHLP_LINE64 ln{};
+      ln.SizeOfStruct = sizeof ln;
+      DWORD disp = 0;
+      int id = -1;
+      if (ok && api.line_from_addr(proc, addr, &disp, &ln) && ln.FileName) {
+        std::string file = ln.FileName;
+        std::replace(file.begin(), file.end(), '\\', '/');
+        const auto last = file.find_last_of('/');
+        if (last != std::string::npos && last > 0) {
+          const auto prev = file.find_last_of('/', last - 1);
+          if (prev != std::string::npos)
+            file = file.substr(prev + 1);
+        }
+        const std::string key = file + ":" + std::to_string(ln.LineNumber);
+        const auto [it, fresh] = by_line.emplace(key, int(lines.size()));
+        if (fresh)
+          lines.push_back(key);
+        id = it->second;
+      }
+      line_by_addr.emplace(addr, id);
+      return id;
+    }
+  };
+
+  // One sampled rep's stacks, copied out of the ring by write(), and its figures.
+  struct pending_rep {
+    std::string stem, title, warning;
+    std::vector<hdr> hdrs;
+    std::vector<uint64_t> frames; // hdrs[i].n frames each, leaf first
+    int64_t kept = 0, waiting = 0, in_syscall = 0, truncated = 0, stopped = 0, failed = 0;
+    int64_t overwritten = 0;
+    double mean_us = 0, region_ms = 0, held_mean_us = 0, held_max_us = 0;
+  };
+
+  // Symbolize p and write <stem>.folded and <stem>.top.txt. Returns whether both were written.
+  bool write_files(symbols &sy, const pending_rep &p) {
+    std::map<std::string, int64_t> folded;
+    std::unordered_map<int, int64_t> self, incl;
+    std::map<std::pair<int, int>, int64_t> line_self; // (line, function) -> samples
+    std::map<std::string, int64_t> waits_by_caller;
+    std::vector<int> ids;
+    std::size_t at = 0;
+    for (const hdr &h : p.hdrs) {
+      const uint64_t *f = p.frames.data() + at;
+      at += h.n;
+      ids.clear();
+      for (uint32_t i = 0; i < h.n; ++i) // a return address points past its call: look up addr-1
+        ids.push_back(sy.func(i == 0 ? f[i] : f[i] - 1));
+      const bool wait = h.flags & f_wait, call = (h.flags & f_syscall) && !wait;
+      std::string stack = h.flags & f_truncated ? "[truncated]"
+                          : h.flags & f_stopped ? "[unwind stopped]"
+                                                : "";
+      for (std::size_t i = ids.size(); i-- > 0;)
+        stack += (stack.empty() ? "" : ";") + sy.funcs[std::size_t(ids[i])].label;
+      stack += wait ? ";[waiting]" : call ? ";[syscall]" : "";
+      ++folded[stack];
+      const sym_entry leaf = sy.funcs[std::size_t(ids[0])];
+      if (wait) {
+        // Who waited: the first frame outside the system's wait wrappers.
+        std::string caller = "?";
+        for (int id : ids) {
+          const std::string &m = sy.funcs[std::size_t(id)].module;
+          if (_stricmp(m.c_str(), "ntdll.dll") != 0 && _stricmp(m.c_str(), "KERNELBASE.dll") != 0 &&
+              _stricmp(m.c_str(), "KERNEL32.DLL") != 0 && _stricmp(m.c_str(), "win32u.dll") != 0) {
+            caller = sy.funcs[std::size_t(id)].label;
+            break;
+          }
+        }
+        ++waits_by_caller[caller];
+        ++self[sy.synthetic("[waiting] " + leaf.label, leaf.module)];
+      } else if (call) {
+        ++self[sy.synthetic("[syscall] " + leaf.label, leaf.module)];
+      } else {
+        ++self[ids[0]];
+      }
+      const int l = sy.line(f[0]);
+      if (l >= 0)
+        ++line_self[{l, ids[0]}];
+      std::sort(ids.begin(), ids.end());
+      ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+      for (int id : ids)
+        ++incl[id];
+    }
+
+    const std::string folded_path = p.stem + ".folded", top_path = p.stem + ".top.txt";
+    bool wrote = false;
+    if (std::FILE *out = std::fopen(folded_path.c_str(), "wb")) {
+      for (const auto &[stack, n] : folded)
+        std::fprintf(out, "%s %lld\n", stack.c_str(), static_cast<long long>(n));
+      wrote = std::fclose(out) == 0;
+    }
+    std::FILE *out = std::fopen(top_path.c_str(), "wb");
+    if (!out)
+      return false;
+    const int64_t kept = p.kept;
+    const auto pct = [kept](int64_t n) { return kept ? 100.0 * double(n) / double(kept) : 0.0; };
+    std::fprintf(out, "%s\n", p.title.c_str());
+    std::fprintf(out,
+                 "samples %lld over %.1f ms of region, mean interval %.1f us (asked %lld us, %s)\n",
+                 static_cast<long long>(kept), p.region_ms, p.mean_us,
+                 static_cast<long long>(o_.interval_us), timer_name());
+    std::fprintf(out, "driver held suspended per sample: mean %.1f us, max %.1f us\n",
+                 p.held_mean_us, p.held_max_us);
+    const int64_t running = kept - p.waiting - p.in_syscall;
+    std::fprintf(out,
+                 "running %lld (%.1f%%), blocked in a wait %lld (%.1f%%), in another system call "
+                 "%lld (%.1f%%)\n",
+                 static_cast<long long>(running), pct(running), static_cast<long long>(p.waiting),
+                 pct(p.waiting), static_cast<long long>(p.in_syscall), pct(p.in_syscall));
+    if (!waits_by_caller.empty()) {
+      std::vector<std::pair<int64_t, std::string>> v;
+      for (const auto &[caller, n] : waits_by_caller)
+        v.push_back({-n, caller});
+      std::sort(v.begin(), v.end());
+      std::fprintf(out, "waits by caller:");
+      for (std::size_t i = 0; i < v.size() && i < 10; ++i)
+        std::fprintf(out, "%s %s %lld", i ? "," : "", v[i].second.c_str(),
+                     static_cast<long long>(-v[i].first));
+      std::fprintf(out, "\n");
+    }
+    if (p.truncated)
+      std::fprintf(out, "stacks cut at depth %d: %lld (inclusive counts miss their outer frames)\n",
+                   o_.depth, static_cast<long long>(p.truncated));
+    if (p.stopped)
+      std::fprintf(out,
+                   "stacks stopped at a frame without unwind info: %lld (their outer frames are "
+                   "missing)\n",
+                   static_cast<long long>(p.stopped));
+    if (p.failed)
+      std::fprintf(out, "failed samples (SuspendThread/GetThreadContext): %lld\n",
+                   static_cast<long long>(p.failed));
+    if (p.overwritten)
+      std::fprintf(out, "ring wrapped: the first %lld samples were overwritten\n",
+                   static_cast<long long>(p.overwritten));
+    if (!p.warning.empty())
+      std::fprintf(out, "WARNING: %s\n", p.warning.c_str());
+    if (!sy.error.empty())
+      std::fprintf(out, "WARNING: %s\n", sy.error.c_str());
+    const auto table = [&](const char *heading, const std::unordered_map<int, int64_t> &m,
+                           std::size_t limit) {
+      std::vector<std::pair<int64_t, int>> v;
+      for (const auto &[id, n] : m)
+        v.push_back({-n, id});
+      std::sort(v.begin(), v.end());
+      std::fprintf(out, "\n%s\n  %7s %7s  %s\n", heading, "%", "samples", "function [module]");
+      for (std::size_t i = 0; i < v.size() && i < limit; ++i) {
+        const sym_entry &e = sy.funcs[std::size_t(v[i].second)];
+        std::fprintf(out, "  %6.2f%% %7lld  %s [%s]\n", pct(-v[i].first),
+                     static_cast<long long>(-v[i].first), e.label.c_str(), e.module.c_str());
+      }
+    };
+    table("top 40 by self samples", self, 40);
+    table("top 40 by inclusive samples", incl, 40);
+    std::vector<std::pair<int64_t, std::pair<int, int>>> lv;
+    for (const auto &[lf, n] : line_self)
+      lv.push_back({-n, lf});
+    std::sort(lv.begin(), lv.end());
+    std::fprintf(out, "\ntop 20 source lines by self samples\n  %7s %7s  %s\n", "%", "samples",
+                 "file:line  function");
+    for (std::size_t i = 0; i < lv.size() && i < 20; ++i)
+      std::fprintf(out, "  %6.2f%% %7lld  %s  %s\n", pct(-lv[i].first),
+                   static_cast<long long>(-lv[i].first),
+                   sy.lines[std::size_t(lv[i].second.first)].c_str(),
+                   sy.funcs[std::size_t(lv[i].second.second)].label.c_str());
+    return std::fclose(out) == 0 && wrote;
+  }
+
+  // The driver's handle: opened by start() outside any region (opened inside one, it would show
+  // in that rep's handle_count), and again by arm() only if the rep runs on another thread.
+  bool open_driver() {
+    const DWORD tid = GetCurrentThreadId();
+    if (driver_ && tid == driver_tid_)
+      return true;
+    if (driver_)
+      CloseHandle(driver_);
+    driver_ = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION,
+                         FALSE, tid);
+    driver_tid_ = driver_ ? tid : 0;
+    return driver_ != nullptr;
+  }
+
+  const char *timer_name() const {
+    switch (timer_) {
+    case timer_kind::hr:
+      return "high-resolution waitable timer";
+    case timer_kind::sleep:
+      return "timeBeginPeriod(1) + Sleep";
+    default:
+      return "spinning on QueryPerformanceCounter";
+    }
+  }
+
+  void wait_until(int64_t target) {
+    for (;;) {
+      const int64_t left = target - qpc_now();
+      if (left <= 0)
+        return;
+      if (timer_ == timer_kind::hr) {
+        LARGE_INTEGER due;
+        due.QuadPart = -std::max<int64_t>(1, left * 10000000 / qpc_freq()); // 100 ns, relative
+        if (!SetWaitableTimer(hr_, &due, 0, nullptr, nullptr, FALSE)) {
+          timer_ = timer_kind::spin;
+          continue;
+        }
+        WaitForSingleObject(hr_, INFINITE);
+      } else if (timer_ == timer_kind::sleep) {
+        Sleep(DWORD(std::max<int64_t>(1, left * 1000 / qpc_freq())));
+        return;
+      } else {
+        YieldProcessor();
+      }
+    }
+  }
+  // Wait for the next tick after `next` and return it. A late wake shortens the next wait (the
+  // high-resolution timer fires on a ~0.5 ms grid, so single waits of 1 ms take 1.5 ms but the
+  // ticks average 1 ms); one more than an interval late (the sampler was descheduled) starts over
+  // from now rather than bursting to catch up.
+  int64_t pace(int64_t next) {
+    next += interval_ticks_;
+    const int64_t now = qpc_now();
+    if (now - next > interval_ticks_)
+      next = now;
+    wait_until(next);
+    return next;
+  }
+  // The mean interval of 20 paced ticks with timer k, in us.
+  double try_timer(timer_kind k) {
+    timer_ = k;
+    const int64_t t0 = qpc_now();
+    int64_t next = t0;
+    for (int i = 0; i < 20; ++i)
+      next = pace(next);
+    return double(qpc_now() - t0) * 1e6 / double(qpc_freq()) / 20.0;
+  }
+  // The first timer that keeps the interval (within 25 % + 100 us): a high-resolution waitable
+  // timer (Windows 10 1803+), then timeBeginPeriod(1) + Sleep (whole milliseconds only; the period
+  // is raised again only while a sampled region runs), else spinning on QPC, which always does but
+  // costs a core.
+  void calibrate() {
+    const double ok = double(o_.interval_us) * 1.25 + 100.0;
+    const auto rejected = [this](const char *what) {
+      char b[96];
+      std::snprintf(b, sizeof b, "%s%s took %.0f us", rejected_.empty() ? "" : ", ", what,
+                    calibrated_us_);
+      rejected_ += b;
+    };
+    hr_ = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                 TIMER_ALL_ACCESS);
+    if (hr_) {
+      if ((calibrated_us_ = try_timer(timer_kind::hr)) <= ok)
+        return;
+      rejected("high-resolution timer");
+    }
+    if (o_.interval_us >= 1000) {
+      if (HMODULE winmm = LoadLibraryW(L"winmm.dll")) {
+        begin_period_ = reinterpret_cast<period_fn>(
+            reinterpret_cast<void *>(GetProcAddress(winmm, "timeBeginPeriod")));
+        end_period_ = reinterpret_cast<period_fn>(
+            reinterpret_cast<void *>(GetProcAddress(winmm, "timeEndPeriod")));
+        if (begin_period_ && end_period_ && begin_period_(1) == 0) {
+          calibrated_us_ = try_timer(timer_kind::sleep);
+          end_period_(1);
+          if (calibrated_us_ <= ok)
+            return;
+          rejected("timeBeginPeriod(1) + Sleep");
+        }
+        begin_period_ = end_period_ = nullptr;
+      }
+    }
+    calibrated_us_ = try_timer(timer_kind::spin);
+  }
+
+  // RIP at the return of a system-call stub in ntdll or win32u: the driver is in the kernel, not
+  // running user code. Read from the module's own code, so no guess: every x64 stub is
+  // "syscall; ret; int 2Eh; ret" (0F 05 C3 CD 2E C3), which a stray 0F 05 inside other code
+  // (RtlAllocateHeap has some) does not match. write() splits waits from other system calls.
+  bool at_syscall(uint64_t rip) const {
+    const bool in = (rip >= ntdll_.first + 2 && rip + 4 <= ntdll_.second) ||
+                    (rip >= win32u_.first + 2 && rip + 4 <= win32u_.second);
+    if (!in)
+      return false;
+    const auto *p = reinterpret_cast<const unsigned char *>(rip);
+    return p[-2] == 0x0F && p[-1] == 0x05 && p[0] == 0xC3 && p[1] == 0xCD && p[2] == 0x2E &&
+           p[3] == 0xC3;
+  }
+
+  // Resume the driver unless the watchdog already has: whoever clears busy_ owns the
+  // ResumeThread. Returns whether this call did.
+  bool release(uint64_t gen, int64_t t) {
+    uint64_t expect = gen;
+    if (!busy_.compare_exchange_strong(expect, 0))
+      return false;
+    ResumeThread(driver_);
+    const int64_t held = qpc_now() - t;
+    ++held_n_;
+    held_ticks_ += held;
+    held_max_ = std::max(held_max_, held);
+    return true;
+  }
+
+  // One sample, on the sampler thread. Between SuspendThread and ResumeThread: no allocation, no
+  // lock, no output.
+  void take_one() {
+    const uint64_t gen = ++gen_;
+    const int64_t t = qpc_now();
+    if (SuspendThread(driver_) == DWORD(-1)) {
+      ++failed_;
+      return;
+    }
+    // Watched only from here on. Published before SuspendThread, a sampler descheduled in between
+    // for 50 ms would let the watchdog "resume" a running driver, then suspend it with nobody left
+    // to resume it. Descheduled here instead, it resumes the driver once it runs again.
+    busy_since_ = qpc_now();
+    busy_ = gen;
+    if (!active_) { // the region ended since the last look: the driver is in end() or the join
+      release(gen, t);
+      return;
+    }
+    CONTEXT ctx;
+    ctx.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER; // RIP, RSP and the integer registers
+    const int64_t slot = kept_ % cap_;
+    uint64_t *out = frames_ + slot * o_.depth;
+    int n = 0;
+    uint32_t flags = 0;
+    if (GetThreadContext(driver_, &ctx)) {
+      if (at_syscall(ctx.Rip))
+        flags |= f_syscall;
+      bool trunc = false, stop = false;
+      n = unwind_into(&ctx, out, o_.depth, stack_hi_, &busy_, gen, &trunc, &stop);
+      flags |= (trunc ? f_truncated : 0) | (stop ? f_stopped : 0);
+    } else {
+      ++failed_;
+    }
+    if (!release(gen, t))
+      n = 0; // the watchdog resumed the driver mid-sample: the stack may be torn
+    if (n > 0) {
+      hdrs_[slot] = {t, uint32_t(n), flags};
+      ++kept_;
+    }
+  }
+
+  void sample_main() {
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+    calibrate();
+    SetEvent(idle_);
+    for (;;) {
+      WaitForSingleObject(go_, INFINITE);
+      if (quit_)
+        return;
+      int64_t next = qpc_now();
+      while (active_) {
+        next = pace(next);
+        if (!active_)
+          break;
+        if (!tripped_)
+          take_one();
+      }
+      sampling_ = false; // the watchdog watches until here, past the region's end
+      SetEvent(idle_);
+    }
+  }
+
+  // Resumes the driver when one sample has held it suspended over 50 ms, and stops sampling for
+  // the region. It watches until the sampler is done (sampling_), not just until the region ends:
+  // a sample taken as the region ends still suspends the driver.
+  void watch_main() {
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+    for (;;) {
+      WaitForSingleObject(go_wd_, INFINITE);
+      if (quit_)
+        return;
+      while (sampling_ && !quit_) {
+        Sleep(5);
+        const uint64_t g = busy_;
+        if (!g)
+          continue;
+        const int64_t since = busy_since_;
+        if (busy_ != g || qpc_now() - since < limit_ticks_)
+          continue;
+        uint64_t expect = g;
+        if (busy_.compare_exchange_strong(expect, 0)) {
+          ResumeThread(driver_);
+          trip_ticks_ = qpc_now() - since;
+          tripped_ = true;
+        }
+      }
+    }
+  }
+
+  void stop_threads() {
+    quit_ = true;
+    active_ = sampling_ = false;
+    if (go_)
+      SetEvent(go_);
+    if (go_wd_)
+      SetEvent(go_wd_);
+    // A sampler that never went idle may never return; with every watchdog disarmed at exit,
+    // joining it could hang the process.
+    if (stuck_) {
+      if (sampler_th_.joinable())
+        sampler_th_.detach();
+      if (watch_th_.joinable())
+        watch_th_.detach();
+    } else {
+      if (sampler_th_.joinable())
+        sampler_th_.join();
+      if (watch_th_.joinable())
+        watch_th_.join();
+    }
+    if (period_on_ && end_period_)
+      end_period_(1);
+  }
+
+  using period_fn = unsigned(WINAPI *)(unsigned);
+  int64_t cap_ = 0, interval_ticks_ = 1, limit_ticks_ = 1;
+  uint64_t *frames_ = nullptr;
+  hdr *hdrs_ = nullptr;
+  std::pair<uintptr_t, uintptr_t> ntdll_{0, 0}, win32u_{0, 0};
+  HANDLE go_ = nullptr, go_wd_ = nullptr, idle_ = nullptr, hr_ = nullptr;
+  HANDLE driver_ = nullptr;
+  DWORD driver_tid_ = 0;
+  uintptr_t stack_hi_ = 0;
+  timer_kind timer_ = timer_kind::spin;
+  double calibrated_us_ = 0;
+  std::string rejected_; // the timers calibrate() passed over, and what their interval took
+  period_fn begin_period_ = nullptr, end_period_ = nullptr;
+  bool period_on_ = false;
+  std::thread sampler_th_, watch_th_;
+  std::atomic<bool> quit_{false}, active_{false}, sampling_{false}, tripped_{false};
+  std::atomic<uint64_t> busy_{0};
+  std::atomic<int64_t> busy_since_{0}, trip_ticks_{0};
+  uint64_t gen_ = 0;
+  // Written by the sampler thread inside a region, read on the driver after region_join.
+  int64_t kept_ = 0, failed_ = 0;
+  int64_t held_n_ = 0, held_ticks_ = 0, held_max_ = 0; // how long samples held the driver
+  int64_t regions_ = 0, region_t0_ = 0, region_ticks_ = 0;
+  bool joining_ = false, stuck_ = false;
+  std::string warning_;
+  std::vector<pending_rep> pending_;               // sampled reps whose files finish() writes
+  std::unordered_map<uint64_t, bool> stub_blocks_; // syscall stub return -> blocking_stub()
+#endif
+};
+
+sampler &the_sampler() {
+  static sampler s;
+  return s;
+}
+
+// ---------------------------------------------------------------------------------------------
 // Scenario framework: sizes, sweep points, reps, the measured region, records.
 // ---------------------------------------------------------------------------------------------
 
@@ -1004,17 +2165,20 @@ struct meter {
     a.proc_cpu = process_cpu_ns();
     a.thread_cpu = static_cast<int64_t>(se::thread_cpu_seconds() * 1e9);
     begun = true;
+    the_sampler().region_begin(); // a no-op unless this rep is sampled (--sample)
     a.allocs = bench_alloc::count;
     a.wall = now_ns();
   }
   void end() {
     b.wall = now_ns();
+    the_sampler().region_stop();
     b.allocs = bench_alloc::count;
     b.thread_cpu = static_cast<int64_t>(se::thread_cpu_seconds() * 1e9);
     b.proc_cpu = process_cpu_ns();
     b.mem = memory(want_heap);
     probe(b);
     ended = true;
+    the_sampler().region_join();
   }
   int64_t wall() const { return b.wall - a.wall; }
 };
@@ -1049,6 +2213,7 @@ struct rep_out {
   std::optional<int64_t> programs, iterations, async_calls;
   std::vector<int64_t> latency_ns, async_latency_ns;
   jobj extra;
+  jobj sample; // the sampler's fields (--sample), top level in the record
   void fail(const std::string &why) {
     if (ok) {
       ok = false;
@@ -1204,6 +2369,8 @@ void point_ctx::record(int rep, const meter &m, rep_out &o) {
         .i("app_pool_pending_after", m.b.app_pending);
   if (!o.extra.body.empty())
     r.raw("extra", o.extra.str());
+  if (!o.sample.body.empty())
+    r.body += ", " + o.sample.body;
   r.i("pin_cpu", pin_cpu);
   if (pin_cpu >= 0 && !cfg.host.pin_sibling.empty())
     r.s("pin_sibling", cfg.host.pin_sibling);
@@ -1329,12 +2496,33 @@ std::string hung_record(const point_ctx &pc, int rep, const std::string &why) {
   return hung.str();
 }
 
+// Where a sampled rep's files go: <prefix>.<scenario>.<executor>.<point>[.repN], the part after
+// the prefix made safe for a file name.
+std::string sample_stem(const point_ctx &pc, int rep) {
+  std::string point;
+  for (const auto &[k, v] : pc.params)
+    point += (point.empty() ? "" : ",") + k + "=" + v;
+  std::string s = pc.sc.name + "." + (pc.executor.empty() ? "none" : pc.executor) + "." +
+                  (point.empty() ? "default" : point);
+  if (the_sampler().opts().all_reps)
+    s += ".rep" + std::to_string(rep);
+  for (char &c : s)
+    if (std::strchr("<>:\"/\\|?* ", c))
+      c = '_';
+  return the_sampler().opts().prefix + "." + s;
+}
+
 template <class F> void point_ctx::reps(F fn) {
   const int warm = cfg.warmup_set || sc.warmup < 0 ? cfg.warmup : sc.warmup;
   for (int n = 0; n < warm + cfg.reps; ++n) {
     meter m;
     m.want_heap = sc.want_heap;
     rep_out o;
+    // --sample: the first measured rep only (or every one with --sample-all-reps), so the other
+    // reps' timings stay clean.
+    const bool sampled =
+        the_sampler().on() && n >= warm && (the_sampler().opts().all_reps || n == warm);
+    the_sampler().arm(sampled);
     the_watchdog().arm(cfg.timeout + 60.0, sc.name + " " + executor + " " + params_text(params),
                        hung_record(*this, n < warm ? -1 : n - warm,
                                    "hung: the rep outlived --timeout by 60 s with the driver "
@@ -1345,6 +2533,16 @@ template <class F> void point_ctx::reps(F fn) {
       o.fail(std::string("exception: ") + e.what());
     }
     the_watchdog().disarm();
+    the_sampler().arm(false);
+    if (m.begun && !m.ended)
+      m.end(); // stops a sampled region the scenario left open
+    if (sampled)
+      o.sample =
+          the_sampler().write(sample_stem(*this, n - warm),
+                              "state_exec_bench --sample: " + sc.name + " " + executor + " " +
+                                  params_text(params) + " rep " + std::to_string(n - warm));
+    else if (the_sampler().on() && n >= warm)
+      o.sample.b("sampled", false);
     if (!m.begun)
       m.begin();
     if (!m.ended)
@@ -4248,6 +5446,7 @@ void usage() {
       "         [--reps N] [--warmup N] [--json FILE] [--smoke] [--size KEY=V[,V...]]...\n"
       "         [--pin auto|none|CPU] [--priority high] [--timeout SECONDS]\n"
       "         [--bg-oversubscribe]\n"
+      "         [--sample PREFIX [--sample-us N] [--sample-depth N] [--sample-all-reps]]\n"
       "  executors: recursive stackless sync async\n");
 }
 
@@ -4294,6 +5493,8 @@ int main(int argc, char **argv) {
   std::vector<std::string> patterns;
   bool list = false, list_json = false;
   std::string pin = "none", priority;
+  sampler_opts sampling;
+  bool sample_tuned = false; // --sample-us/-depth/-all-reps given
   const std::set<std::string> known_executors = {"recursive", "stackless", "sync", "async"};
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
@@ -4351,7 +5552,22 @@ int main(int argc, char **argv) {
       pin = value();
     else if (a == "--priority")
       priority = value();
-    else if (a == "--help" || a == "-h") {
+    else if (a == "--sample") {
+      sampling.prefix = value();
+      if (sampling.prefix.empty()) {
+        std::fprintf(stderr, "state_exec_bench: --sample needs a non-empty path prefix\n");
+        return 2;
+      }
+    } else if (a == "--sample-us") {
+      sampling.interval_us = int_option(a, value(), 100);
+      sample_tuned = true;
+    } else if (a == "--sample-depth") {
+      sampling.depth = static_cast<int>(std::min<int64_t>(int_option(a, value(), 1), 1024));
+      sample_tuned = true;
+    } else if (a == "--sample-all-reps") {
+      sampling.all_reps = true;
+      sample_tuned = true;
+    } else if (a == "--help" || a == "-h") {
       usage();
       return 0;
     } else {
@@ -4462,9 +5678,21 @@ int main(int argc, char **argv) {
     cvc::app probe;
     cfg.host.pool_workers = probe.getThreadPoolSize();
   }
+  if (sample_tuned && sampling.prefix.empty())
+    std::fprintf(stderr, "state_exec_bench: warning: --sample-us, --sample-depth and "
+                         "--sample-all-reps do nothing without --sample\n");
+  // The sampler's threads start before the driver is pinned, like the watchdog's.
+  std::string sample_line;
+  if (!sampling.prefix.empty()) {
+    sample_line = the_sampler().start(sampling);
+    if (!the_sampler().on())
+      std::fprintf(stderr, "state_exec_bench: %s\n", sample_line.c_str());
+  }
   cfg.host.pinned_cpu = pin_driver(pin);
   cfg.host.pin_how = pinning().how;
   cfg.host.pin_sibling = pinning().sibling;
+  if (the_sampler().on())
+    sample_line += the_sampler().avoid_cpus(cfg.host.pinned_cpu, cfg.host.pin_sibling);
   if (priority == "high")
     cfg.host.priority = raise_priority();
   else if (!priority.empty() && priority != "normal") {
@@ -4492,6 +5720,8 @@ int main(int argc, char **argv) {
               cfg.reps, cfg.warmup, cfg.smoke ? " | smoke" : "");
   std::printf("[state_exec_bench] allocations counted: %s | peak memory %s\n", bench_alloc::scope,
               cfg.host.peak_resets ? "reset per sweep point" : "per process (not resettable)");
+  if (the_sampler().on())
+    std::printf("[state_exec_bench] %s\n", sample_line.c_str());
   std::fflush(stdout);
 
   std::FILE *json = nullptr;
@@ -4607,6 +5837,7 @@ int main(int argc, char **argv) {
       }
     }
   }
+  the_sampler().finish(); // --sample: symbolize and write the sampled reps' files
   if (!any_point) {
     std::fprintf(stderr, "state_exec_bench: the selection runs no sweep point (check --executor "
                          "against the scenarios' executors)\n");
