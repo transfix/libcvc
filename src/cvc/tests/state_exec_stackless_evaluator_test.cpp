@@ -578,3 +578,96 @@ TEST_F(StacklessEvaluatorTest, RestrictedFormsStillGateOnlySpecialForms) {
   EXPECT_THROW(eval("(begin (while nil 1))"), std::exception);
   EXPECT_THROW(eval("(set x 1)"), std::exception);
 }
+
+// ─── Step counts ───────────────────────────────────────────────────────────
+//
+// Step counts are part of the semantics (max_steps budgets, the async step rate): a faster
+// evaluator must take exactly the steps it took before, of each kind. These were taken from the
+// evaluator before the single-thread performance work (and must not change).
+
+namespace {
+struct step_counts {
+  uint64_t all, eval, data;
+};
+
+step_counts count_steps(const std::string &script, std::size_t data_step_nodes) {
+  stackless_evaluator ev(builtins::make_default_environment());
+  evaluator_state st = ev.create_state(parse(script));
+  st.data_step_nodes = data_step_nodes;
+  while (!ev.step(st)) {
+  }
+  return {st.stats.get_step_count(), st.stats.steps(step_kind::eval),
+          st.stats.steps(step_kind::data)};
+}
+} // namespace
+
+TEST(StacklessStepCounts, ArePinned) {
+  struct pinned {
+    const char *script;
+    std::size_t data_step_nodes;
+    step_counts expected;
+  };
+  const std::vector<pinned> programs = {
+      {"(+ 1 2)", 0, {6, 6, 0}},
+      {"(begin (set s 0) (set i 0) (while (< i 10) (begin (set s (+ s i)) (set i (+ i 1)))) s)",
+       0,
+       {290, 290, 0}},
+      {"(begin (defun fib (n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2))))) (fib 8))",
+       0,
+       {1371, 1371, 0}},
+      {"(begin (defun f (a b) (set c (+ a b)) (set d (* c 2)) (- d a)) (set k 0) (set tot 0) "
+       "(while (< k 5) (begin (set tot (+ tot (f k 1))) (set k (+ k 1)))) tot)",
+       0,
+       {312, 312, 0}},
+      {"(begin (set s 0) (for x (list 1 2 3 4) (set s (+ s x))) s)", 0, {56, 56, 0}},
+      {"(let ((a 1) (b (+ 1 1))) (set c (+ a b)) (* c 2))", 0, {26, 26, 0}},
+      {"(begin (set r 0) (set r (+ r (try (raise (ValueError \"x\")) (catch (ValueError e) 1)))) "
+       "(set r (+ r (try 2 (catch (ValueError e) 0) (finally 3)))) r)",
+       0,
+       {39, 39, 0}},
+      {"(begin (defmacro inc (v) (set v (+ v 1))) (set z 0) (inc z) (inc z) z)", 0, {29, 29, 0}},
+      {"(begin (if nil 1) (list) (quote (a b)) (begin))", 0, {12, 12, 0}},
+      {"(begin (defclass A () (init (self) (set-attr self \"v\" 1) self) (get (self) "
+       "(get-attr self \"v\"))) (defclass B (A) (get (self) (+ 1 (super self get)))) "
+       "(set o (B)) (send o \"get\"))",
+       0,
+       {47, 43, 4}},
+      {"(begin (set s 0) (for x (range 5) (set s (+ s x))) s)", 0, {59, 59, 0}},
+      {"(begin (set s 0) (for x (generator (lambda () (yield 1) (yield 2))) (set s (+ s x))) s)",
+       0,
+       {47, 47, 0}},
+      {"(begin (set l (list 1 2 3 4 5 6 7 8 9 10)) (set m (list l l l)) (set q (str m)) "
+       "(set l nil) (set m nil) (length q))",
+       4,
+       {67, 57, 10}},
+      {"(begin (defun mk (n) (list n n n n n n)) (set i 0) (while (< i 4) (begin (mk i) "
+       "(set i (+ i 1)))) (collections.map (list 1 2 3) (lambda (x) (* x 2))))",
+       3,
+       {200, 196, 4}},
+  };
+  for (const pinned &p : programs) {
+    const step_counts got = count_steps(p.script, p.data_step_nodes);
+    EXPECT_EQ(got.all, p.expected.all) << p.script;
+    EXPECT_EQ(got.eval, p.expected.eval) << p.script;
+    EXPECT_EQ(got.data, p.expected.data) << p.script;
+  }
+}
+
+TEST_F(StacklessEvaluatorTest, PoppedFramesKeepNoValues) {
+  // A popped frame's vectors are kept for the next frames, empty: what the frame held is dropped
+  // when it pops, as before.
+  auto env = builtins::make_default_environment();
+  std::weak_ptr<std::vector<value_t>> made;
+  env->set("mk", value_t{native_fn{[&](std::span<const value_t>) -> value_t {
+             value_t l = make_list({value_t(int64_t(1)), value_t(int64_t(2))});
+             made = std::get<list_ptr>(l.v);
+             return l;
+           }}});
+  env->set("alive", value_t{native_fn{[&](std::span<const value_t>) -> value_t {
+             return value_t(!made.expired());
+           }}});
+  stackless_evaluator local(env);
+  EXPECT_FALSE(
+      local.evaluate_script("(begin (length (mk)) (if t (length (mk))) (alive))").is_truthy());
+  EXPECT_TRUE(local.evaluate_script("(begin (set keep (mk)) (alive))").is_truthy());
+}

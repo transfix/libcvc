@@ -376,7 +376,7 @@ private:
                     const std::vector<value_t> &args);
   // Push the frame that evaluates `cls`'s body in `local` (its parameters already bound).
   void push_closure_body(evaluator_state &state, const closure_ptr &cls, environment_ptr local);
-  void handle_defclass(evaluator_state &state, eval_frame &frame, const std::vector<value_t> &args);
+  void handle_defclass(evaluator_state &state, eval_frame &frame, std::span<const value_t> args);
 
   environment_ptr global_env_;
   std::shared_ptr<const std::set<std::string>>
