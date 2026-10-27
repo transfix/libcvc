@@ -25,6 +25,37 @@
 namespace cvc {
 namespace nav {
 
+double energy_residual_bound(double dt, double g, double gamma, double v, double F, double L_hat,
+                             double vt, double mass, double kappa_H) {
+  return kappa_H * 0.5 * dt * dt * (g * (g + gamma * v + F) / mass + L_hat * vt * vt);
+}
+
+step_books book_step(const book_step_args &a, double kappa_H) {
+  const auto dot = [](const double *p, const double *q) { return p[0] * q[0] + p[1] * q[1]; };
+  const auto norm = [&](const double *p) { return std::sqrt(dot(p, p)); };
+  const double m = a.mass, dt = a.dt;
+  const double vs[2] = {a.v[0] + a.vp[0], a.v[1] + a.vp[1]};    // v + v'
+  const double cut[2] = {a.vt[0] - a.vp[0], a.vt[1] - a.vp[1]}; // vt - v'
+  const double gr[2] = {a.g[0] + a.gamma * a.v[0] - a.F[0],     // g + gamma v - F
+                        a.g[1] + a.gamma * a.v[1] - a.F[1]};
+  step_books k;
+  k.kinetic = 0.5 * m * dot(a.vt, a.vt);
+  k.delta_H = k.kinetic - 0.5 * m * dot(a.v, a.v) + (a.U1 - a.U0);
+  k.w_damp = 0.5 * dt * a.gamma * dot(a.v, vs);
+  k.w_port = 0.5 * dt * dot(a.F, vs);
+  k.w_clamp = 0.5 * m * (dot(a.vp, a.vp) - dot(a.vt, a.vt));
+  k.w_cross = dt * dot(a.g, cut);
+  k.residual = k.delta_H + k.w_damp + k.w_clamp - k.w_port - k.w_cross;
+  if (!std::isnan(a.vHv))
+    k.residual_sharp = 0.5 * dt * dt * (a.vHv - dot(a.g, gr) / m);
+  const double dg[2] = {a.g1[0] - a.g[0], a.g1[1] - a.g[1]};
+  const double step = norm(a.dx);
+  const double L_hat = step > 0.0 ? norm(dg) / step : 0.0;
+  k.bound = energy_residual_bound(dt, norm(a.g), a.gamma, norm(a.v), norm(a.F), L_hat, norm(a.vt),
+                                  m, kappa_H);
+  return k;
+}
+
 void integrate_surrogate_material(
     float *o, float *v, const float *goal, const float *C, const float *R, const std::uint8_t *mask,
     const float *alphas, const float *beta, const float *gamma, const float *lam_soft,
@@ -64,7 +95,7 @@ void integrate_surrogate_material(
     float minclr = std::numeric_limits<float>::infinity();
     float cum = 0.0f, hard = 0.0f, arc = 0.0f;
     // U_nav at a state (rollout_energy), row k of agent b.
-    const auto log_potential = [&](int k, float px, float py) {
+    const auto log_potential = [&](int k, float px, float py, float pvx, float pvy) {
       const potential_terms u =
           detail::material_potential(px, py, gx, gy, Cb, Rb, mb, ab, N, be, ls, lh, dh, rr_eff,
                                      pr_risk, pr_phi, Hp, Wp, o0x, o0y, p.k_sharp, p.d_hat_sdf);
@@ -78,12 +109,72 @@ void integrate_surrogate_material(
         t[2] = u.soft;
         t[3] = u.hard;
       }
+      if (energy->kinetic)
+        energy->kinetic[row] = static_cast<float>(
+            0.5 * p.mass * (static_cast<double>(pvx) * pvx + static_cast<double>(pvy) * pvy));
     };
+    // The books of step s (rollout_energy, book_step) from the state (ox, oy, vx, vy) with port
+    // force F: the same step in double, U and the force from detail::material_energy.
+    const auto eval = [&](double px, double py) {
+      return detail::material_energy<double>(px, py, gx, gy, Cb, Rb, mb, ab, N, be, ls, lh, dh,
+                                             rr_eff, pr, Hp, Wp, o0x, o0y, p.k_sharp, p.d_hat_sdf);
+    };
+    const auto log_books = [&](int s, bool act, float px, float py, float pvx, float pvy,
+                               const float *F) {
+      step_books k;
+      if (act) {
+        book_step_args a;
+        a.dt = dtb;
+        a.mass = p.mass;
+        a.gamma = ga;
+        const double x0 = px, y0 = py;
+        a.v[0] = pvx;
+        a.v[1] = pvy;
+        a.F[0] = F[0];
+        a.F[1] = F[1];
+        const detail::material_eval<double> e0 = eval(x0, y0);
+        a.U0 = e0.U;
+        a.g[0] = -e0.fx;
+        a.g[1] = -e0.fy;
+        for (int c = 0; c < 2; ++c) {
+          a.vp[c] = a.v[c] + a.dt * (-a.g[c] - a.gamma * a.v[c] + a.F[c]) / a.mass;
+          a.vt[c] = a.vp[c]; // no speed clamp here
+          a.dx[c] = a.dt * a.vt[c];
+        }
+        const detail::material_eval<double> e1 = eval(x0 + a.dx[0], y0 + a.dx[1]);
+        a.U1 = e1.U;
+        a.g1[0] = -e1.fx;
+        a.g1[1] = -e1.fy;
+        if (energy->sharp && energy->residual_sharp) {
+          // vt' grad^2 U(x) vt from the force at x -+ dx/2, a central difference along the step.
+          const double h = 0.5 * a.dt;
+          const detail::material_eval<double> ep = eval(x0 + h * a.vt[0], y0 + h * a.vt[1]);
+          const detail::material_eval<double> em = eval(x0 - h * a.vt[0], y0 - h * a.vt[1]);
+          a.vHv = -(a.vt[0] * (ep.fx - em.fx) + a.vt[1] * (ep.fy - em.fy)) / (2.0 * h);
+        }
+        k = book_step(a);
+      } else if (energy->sharp) {
+        k.residual_sharp = 0.0; // a frozen step books zero
+      }
+      const std::size_t i = static_cast<std::size_t>(b) * max_H + s;
+      const auto put = [&](float *dst, double x) {
+        if (dst)
+          dst[i] = static_cast<float>(x);
+      };
+      put(energy->w_damp, k.w_damp);
+      put(energy->w_port, k.w_port);
+      put(energy->w_clamp, k.w_clamp);
+      put(energy->w_cross, k.w_cross);
+      put(energy->residual, k.residual);
+      put(energy->residual_sharp, k.residual_sharp);
+      put(energy->bound, k.bound);
+    };
+    const bool books = energy && energy->books();
 
     for (int s = 0; s < max_H; ++s) {
       const float active = (s < H[b]) ? 1.0f : 0.0f;
       if (energy)
-        log_potential(s, ox, oy);
+        log_potential(s, ox, oy, vx, vy);
       const float offx = ox - o0x, offy = oy - o0y;
       float risk_val = detail::patch_sample_channel(pr_risk, Hp, Wp, offx, offy);
       float sdf_val = detail::patch_sample_channel(pr_phi, Hp, Wp, offx, offy);
@@ -127,13 +218,16 @@ void integrate_surrogate_material(
         fc[0] = fgoal_x + fgeom_x + fsoft_x + fhard_x;
         fc[1] = fgoal_y + fgeom_y + fsoft_y + fhard_y;
       }
+      float Fe[2] = {0.0f, 0.0f};
       if (ext && s < H[b]) { // the external force, at the active steps
-        float Fe[2], Je[4];
+        float Je[4];
         int at;
         ea.at(s, ox, oy, Fe, Je, at);
         ftot_x = ftot_x + Fe[0];
         ftot_y = ftot_y + Fe[1];
       }
+      if (books)
+        log_books(s, s < H[b], ox, oy, vx, vy, Fe);
       const float ax = ftot_x / p.mass, ay = ftot_y / p.mass;
       const float vnx = vx + active * dtb * ax, vny = vy + active * dtb * ay;
       const float onx = ox + active * dtb * vnx, ony = oy + active * dtb * vny;
@@ -150,7 +244,7 @@ void integrate_surrogate_material(
       oy = ony;
     }
     if (energy)
-      log_potential(max_H, ox, oy);
+      log_potential(max_H, ox, oy, vx, vy);
 
     o[2 * b] = ox;
     o[2 * b + 1] = oy;

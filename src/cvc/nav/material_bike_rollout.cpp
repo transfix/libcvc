@@ -791,6 +791,9 @@ void integrate_bicycle_material(float *o, float *th, float *sp, const float *goa
                                 float *hard_count, float *arc_length, int num_threads,
                                 const material_ext *ext, rollout_energy *energy) {
   validate(v);
+  if (energy && energy->books())
+    throw std::invalid_argument("integrate_bicycle_material: the per-step energy books "
+                                "(rollout_energy) are the point mass's; this is a bicycle");
   const int max_H = max_horizon(H, B);
   if (ext)
     detail::validate_ext(*ext, B, max_H, nullptr, "integrate_bicycle_material");
@@ -1030,6 +1033,9 @@ void integrate_dynamic_material(
     const diff::dyn_bike_params &dyn, float *min_clear, float *cum_risk, float *hard_count,
     float *arc_length, int num_threads, const material_ext *ext, rollout_energy *energy) {
   validate_dyn(v, dyn);
+  if (energy && energy->books())
+    throw std::invalid_argument("integrate_dynamic_material: the per-step energy books "
+                                "(rollout_energy) are the point mass's; this is a vehicle");
   const int max_H = max_horizon(H, B);
   if (ext)
     detail::validate_ext(*ext, B, max_H, nullptr, "integrate_dynamic_material");
