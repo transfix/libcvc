@@ -1,9 +1,11 @@
 #include <algorithm>
+#include <cstddef>
 #include <cvc/state/state_exec/exceptions.h> // dsl_error: a refused allocation is MemoryError
 #include <cvc/state/state_exec/types.h>
 #include <new>
 #include <stdexcept>
 #include <time.h>
+#include <unordered_map>
 #include <utility>
 
 #ifdef _WIN32
@@ -408,30 +410,217 @@ std::string value_tag::type_name() const {
 
 // -- environment -------------------------------------------------------------
 
+namespace {
+using binding_map = decltype(environment::bindings);
+using binding_node = binding_map::node_type;
+
+// -- scopes recycled on this thread --
+//
+// A call scope (environment::extend) lives for one call, and a std::unordered_map is costly to
+// make: on MSVC its default constructor allocates a list sentinel and a bucket array, so a scope
+// cost three allocations before its first binding (the make_shared block, those two), and every
+// binding a node more. So a scope from extend() is not destroyed when its last owner drops it:
+// it is emptied, as its destructor would empty it, and kept on this thread for the next
+// extend(), its map's sentinel and buckets with it. The nodes of its bindings are kept too, for
+// the next set() of a new name; and the shared_ptr control block, which can't share the scope's
+// allocation once the scope outlives it, comes from a few blocks kept here.
+//
+// What is kept is bounded, and per thread, so nothing is shared between threads: a scope or
+// node made on one thread and dropped on another is kept by the other.
+constexpr std::size_t kKeptScopes = 64;
+constexpr std::size_t kKeptNodes = 128;
+constexpr std::size_t kKeptBlocks = 64;
+constexpr std::size_t kBlockBytes = 32; // a control block (vtable, two counts, the pointer)
+
+// A scope whose map has grown past this many buckets is freed rather than kept, so a kept scope
+// holds what a new one would after a few bindings.
+std::size_t buckets_kept() {
+  binding_map m;
+  for (const char *k : {"a", "b", "c", "d", "e", "f", "g", "h"})
+    m.emplace(k, value_t());
+  return std::max(binding_map().bucket_count(), m.bucket_count());
+}
+const std::size_t kKeptBuckets = buckets_kept();
+
+struct scope_pool {
+  environment *scopes[kKeptScopes];
+  std::size_t nscopes = 0;
+  binding_node nodes[kKeptNodes];
+  std::size_t nnodes = 0;
+  void *blocks[kKeptBlocks];
+  std::size_t nblocks = 0;
+
+  scope_pool() = default;
+  scope_pool(const scope_pool &) = delete;
+  scope_pool &operator=(const scope_pool &) = delete;
+  ~scope_pool();
+};
+
+// Set once the thread has destroyed its pool: scopes dropped later in the thread's exit (by
+// another thread_local's destructor) are freed.
+thread_local bool t_scope_pool_gone = false;
+thread_local scope_pool t_scope_pool;
+
+scope_pool *this_thread_pool() noexcept { return t_scope_pool_gone ? nullptr : &t_scope_pool; }
+
+scope_pool::~scope_pool() {
+  t_scope_pool_gone = true;
+  while (nscopes > 0)
+    delete scopes[--nscopes];
+  while (nblocks > 0)
+    ::operator delete(blocks[--nblocks]);
+  // The nodes go with the array.
+}
+
+// Allocates the control blocks of extend()'s scopes from the blocks this thread keeps.
+template <class T> struct block_allocator {
+  using value_type = T;
+  block_allocator() = default;
+  template <class U> block_allocator(const block_allocator<U> &) noexcept {}
+
+  T *allocate(std::size_t n) {
+    const std::size_t bytes = n * sizeof(T);
+    if (bytes > kBlockBytes || alignof(T) > alignof(std::max_align_t))
+      return std::allocator<T>().allocate(n);
+    if (scope_pool *pool = this_thread_pool(); pool && pool->nblocks > 0)
+      return static_cast<T *>(pool->blocks[--pool->nblocks]);
+    return static_cast<T *>(::operator new(kBlockBytes));
+  }
+  void deallocate(T *p, std::size_t n) noexcept {
+    const std::size_t bytes = n * sizeof(T);
+    if (bytes > kBlockBytes || alignof(T) > alignof(std::max_align_t)) {
+      std::allocator<T>().deallocate(p, n);
+      return;
+    }
+    if (scope_pool *pool = this_thread_pool(); pool && pool->nblocks < kKeptBlocks) {
+      pool->blocks[pool->nblocks++] = p;
+      return;
+    }
+    ::operator delete(static_cast<void *>(p));
+  }
+  template <class U> bool operator==(const block_allocator<U> &) const noexcept { return true; }
+  template <class U> bool operator!=(const block_allocator<U> &) const noexcept { return false; }
+};
+
+// Takes the place of the destructor for a scope extend() made: frees what the destructor would,
+// in its order (the enclosing scope, then each binding, through ~value_tag as the map's own
+// destruction would, so a release backlog sees the same owners), then keeps the empty scope.
+struct scope_recycler {
+  void operator()(environment *e) const noexcept {
+    detail::drop_owner(e->outer);
+    e->outer.reset();
+    scope_pool *pool = this_thread_pool();
+    if (!pool || e->bindings.bucket_count() > kKeptBuckets) {
+      delete e;
+      return;
+    }
+    binding_map &b = e->bindings;
+    while (!b.empty()) {
+      binding_node node = b.extract(b.begin());
+      { const value_t gone = std::move(node.mapped()); }
+      if (pool->nnodes < kKeptNodes)
+        pool->nodes[pool->nnodes++] = std::move(node);
+    }
+    if (pool->nscopes == kKeptScopes) {
+      delete e;
+      return;
+    }
+    e->frozen = false;
+    pool->scopes[pool->nscopes++] = e;
+  }
+};
+
+// Bind `name` to `val` in `b`, which doesn't have it: in a node this thread kept, if it has one.
+void bind_new(binding_map &b, const std::string &name, value_t &&val) {
+  scope_pool *pool = this_thread_pool();
+  if (!pool || pool->nnodes == 0) {
+    b.emplace(name, std::move(val));
+    return;
+  }
+  binding_node &node = pool->nodes[pool->nnodes - 1];
+  node.key() = name;
+  node.mapped() = std::move(val);
+  --pool->nnodes;
+  b.insert(std::move(node)); // the name is new, so it goes in (or the insert throws and the
+                             // node stays where it was, owned by its slot)
+}
+
+// The bucket of a hash in a map of `buckets` buckets: hash mod buckets, which the standard
+// libraries compute as a mask when the count is a power of two (MSVC's always is, libc++'s may
+// be) and as a remainder otherwise (libstdc++'s prime counts, libc++'s others). Checked against
+// the map's own bucket() at startup; if it doesn't hold, lookups use find().
+std::size_t bucket_of(std::size_t hash, std::size_t buckets) {
+  return (buckets & (buckets - 1)) == 0 ? (hash & (buckets - 1)) : hash % buckets;
+}
+
+bool bucket_formula_holds() {
+  binding_map m;
+  const std::hash<std::string> hasher;
+  for (int round = 0; round < 6; ++round) {
+    for (int i = 0; i < 64; ++i) {
+      const std::string key = "k" + std::to_string(i * 7919 + round);
+      const std::size_t buckets = m.bucket_count();
+      if (buckets > 0 && bucket_of(hasher(key), buckets) != m.bucket(key))
+        return false;
+    }
+    for (int i = 0; i < (8 << round); ++i)
+      m.emplace("n" + std::to_string(round) + "_" + std::to_string(i), value_t());
+  }
+  return true;
+}
+
+// Zero (false: find()) until the check has run, should a lookup run during static initialization.
+const bool kBucketFormulaHolds = bucket_formula_holds();
+
+// Where `b` binds `name` (whose hash is `hash`), or null.
+template <class Map>
+auto find_hashed(Map &b, const std::string &name,
+                 std::size_t hash) -> decltype(&b.begin()->second) {
+  if (!kBucketFormulaHolds) {
+    auto it = b.find(name);
+    return it != b.end() ? &it->second : nullptr;
+  }
+  const std::size_t n = bucket_of(hash, b.bucket_count());
+  for (auto it = b.begin(n), end = b.end(n); it != end; ++it)
+    if (it->first == name)
+      return &it->second;
+  return nullptr;
+}
+
+// Walk the scope chain from `e` for `name`, hashing the name once (not once per scope) and
+// skipping empty scopes.
+template <class Env> auto lookup_in(Env *e, const std::string &name) -> decltype(e->lookup(name)) {
+  std::size_t hash = 0;
+  bool hashed = false;
+  for (; e; e = e->outer.get()) {
+    if (e->bindings.empty())
+      continue;
+    if (!hashed) {
+      hash = std::hash<std::string>{}(name);
+      hashed = true;
+    }
+    if (auto *v = find_hashed(e->bindings, name, hash))
+      return v;
+  }
+  return nullptr;
+}
+} // namespace
+
 environment::~environment() { detail::drop_owner(outer); }
 
-value_t *environment::lookup(const std::string &name) {
-  for (environment *e = this; e; e = e->outer.get()) {
-    auto it = e->bindings.find(name);
-    if (it != e->bindings.end())
-      return &it->second;
-  }
-  return nullptr;
-}
+value_t *environment::lookup(const std::string &name) { return lookup_in(this, name); }
 
-const value_t *environment::lookup(const std::string &name) const {
-  for (const environment *e = this; e; e = e->outer.get()) {
-    auto it = e->bindings.find(name);
-    if (it != e->bindings.end())
-      return &it->second;
-  }
-  return nullptr;
-}
+const value_t *environment::lookup(const std::string &name) const { return lookup_in(this, name); }
 
 void environment::set(const std::string &name, value_t val) {
   if (frozen)
     throw std::logic_error("set: '" + name + "' in a frozen scope");
-  bindings[name] = std::move(val);
+  if (!bindings.empty())
+    if (auto it = bindings.find(name); it != bindings.end()) {
+      it->second = std::move(val);
+      return;
+    }
+  bind_new(bindings, name, std::move(val));
 }
 
 void environment::set_existing(const std::string &name, value_t val) {
@@ -448,13 +637,16 @@ void environment::set_existing(const std::string &name, value_t val) {
   }
   // Not bound in an unfrozen scope: bind it in the outermost one, which shadows a frozen
   // scope's binding of the same name rather than writing into the shared scope.
-  outermost->bindings[name] = std::move(val);
+  bind_new(outermost->bindings, name, std::move(val));
 }
 
 environment_ptr environment::extend(environment_ptr parent) {
-  auto child = std::make_shared<environment>();
+  scope_pool *pool = this_thread_pool();
+  environment *child =
+      pool && pool->nscopes > 0 ? pool->scopes[--pool->nscopes] : new environment();
   child->outer = std::move(parent);
-  return child;
+  // On failure the shared_ptr hands `child` to the recycler, which drops `parent` again.
+  return environment_ptr(child, scope_recycler{}, block_allocator<environment>{});
 }
 
 // to_string and values_equal are walks: see data_job.cpp.

@@ -299,3 +299,105 @@ TEST(StateExecTypesTest, EvalDeadlineIsSpentOnlyByRunning) {
   while (!eval_deadline_expired()) {
   }
 }
+
+// ─── Scopes from extend(): recycled per thread, looked up with one hash ───────
+
+TEST(StateExecTypesTest, ExtendedScopeComesBackEmpty) {
+  auto global = std::make_shared<environment>();
+  global->set("g", value_t(int64_t(1)));
+  const environment *first = nullptr;
+  {
+    auto scope = environment::extend(global);
+    first = scope.get();
+    scope->set("a", value_t(int64_t(2)));
+    scope->set("b", value_t(std::string(40, 'x'))); // a string past the small buffer
+    scope->set("a", value_t(int64_t(3)));           // set again: one binding, the new value
+    EXPECT_EQ(scope->bindings.size(), 2u);
+    EXPECT_EQ(std::get<int64_t>(scope->lookup("a")->v), 3);
+    scope->frozen = true; // a kept scope is unfrozen again
+  }
+  // The scope just dropped is the next one made on this thread, empty, and nothing it bound is
+  // visible through the new one.
+  auto again = environment::extend(global);
+  EXPECT_EQ(again.get(), first);
+  EXPECT_TRUE(again->bindings.empty());
+  EXPECT_FALSE(again->frozen);
+  EXPECT_EQ(again->outer, global);
+  EXPECT_EQ(again->lookup("a"), nullptr);
+  EXPECT_EQ(again->lookup("b"), nullptr);
+  EXPECT_EQ(std::get<int64_t>(again->lookup("g")->v), 1);
+  again->set("c", value_t(int64_t(4)));
+  EXPECT_EQ(std::get<int64_t>(again->lookup("c")->v), 4);
+  EXPECT_EQ(global->lookup("c"), nullptr);
+}
+
+TEST(StateExecTypesTest, ScopeDropsItsBindingsAsADestructorWould) {
+  // A last owner a recycled scope drops goes where a destroyed scope's would: to the release
+  // backlog routing this thread's drops (a slicing step frees it a slice at a time).
+  detail::release_backlog backlog;
+  std::weak_ptr<std::vector<value_t>> held;
+  {
+    auto scope = environment::extend(nullptr);
+    value_t list = make_list({value_t(int64_t(1)), value_t(int64_t(2))});
+    held = std::get<list_ptr>(list.v);
+    scope->set("l", std::move(list));
+    detail::backlog_scope routing(&backlog);
+    scope.reset();
+  }
+  EXPECT_FALSE(backlog.empty());
+  EXPECT_FALSE(held.expired());
+  backlog.drain(0);
+  EXPECT_TRUE(held.expired());
+}
+
+TEST(StateExecTypesTest, ScopeChainOutlivesItsLinks) {
+  // A long chain of scopes is freed a link at a time, recycled or not.
+  environment_ptr e = std::make_shared<environment>();
+  for (int i = 0; i < 200000; ++i)
+    e = environment::extend(e);
+  e.reset();
+  SUCCEED();
+}
+
+TEST(StateExecTypesTest, LookupFindsEveryNameInLargeAndNestedScopes) {
+  // Lookups hash a name once and walk each scope's bucket: check that against many names, scopes
+  // that grew through several rehashes, empty scopes in between, and shadowing.
+  auto outer = std::make_shared<environment>();
+  for (int i = 0; i < 5000; ++i)
+    outer->set("name_" + std::to_string(i), value_t(int64_t(i)));
+  auto empty = environment::extend(outer);
+  auto inner = environment::extend(empty);
+  for (int i = 0; i < 300; i += 3)
+    inner->set("name_" + std::to_string(i), value_t(int64_t(-i)));
+  inner->set("a_name_well_past_the_small_string_buffer", value_t(int64_t(7)));
+  for (int i = 0; i < 5000; ++i) {
+    const std::string n = "name_" + std::to_string(i);
+    const value_t *v = inner->lookup(n);
+    ASSERT_NE(v, nullptr) << n;
+    EXPECT_EQ(std::get<int64_t>(v->v), i < 300 && i % 3 == 0 ? -i : i) << n;
+    const environment &c = *inner;
+    EXPECT_EQ(c.lookup(n), v);
+  }
+  EXPECT_EQ(std::get<int64_t>(inner->lookup("a_name_well_past_the_small_string_buffer")->v), 7);
+  for (const char *missing : {"", "name_", "name_5000", "Name_1", "a_name_well_past_the_small"})
+    EXPECT_EQ(inner->lookup(missing), nullptr) << missing;
+}
+
+TEST(StateExecTypesTest, ScopeDroppedAtThreadExitAfterThePool) {
+  // A scope a thread_local destructor drops after the thread's pool is gone is freed, not kept.
+  struct holder {
+    environment_ptr scope;
+    ~holder() { scope.reset(); }
+  };
+  std::weak_ptr<environment> watched;
+  std::thread t([&] {
+    thread_local holder h; // made before the pool below, so destroyed after it
+    h.scope = nullptr;
+    auto scope = environment::extend(nullptr);
+    scope->set("x", value_t(int64_t(1)));
+    watched = scope;
+    h.scope = std::move(scope);
+  });
+  t.join();
+  EXPECT_TRUE(watched.expired());
+}
