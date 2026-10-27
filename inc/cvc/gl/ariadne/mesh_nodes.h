@@ -120,20 +120,21 @@ void register_mesh_node_types();
 
 // fe_lab's interval mesher (mesh.region: interval): a tet mesh of the shell
 // min(a, b) <= v <= max(a, b) of `vol` -- the bounds in either order -- whose boundary is both
-// isosurfaces, an outer and an inner sheet where the shell encloses a cavity. The interval is
+// isosurfaces, an outer and an inner sheet where the shell encloses a cavity. It is
+// cvc::tetrahedralize2's interval mesh, with the bounds chosen as follows. The interval is
 // inclusive: a voxel whose value equals a bound (integer or plateau data, a bar at an end of an
 // editor's axis) is inside it, so [1, 3] on a label volume keeps labels 1 and 3. Such a bound is
 // meshed half way to the nearest value beyond it -- on integer data the half-integer: [1, 3] on
-// labels gives the same mesh as [0.5, 3.5] -- and the surface passes no nearer than a quarter of a
-// grid edge to a voxel on a bound (LBIE folds tets that hug a grid point), so on continuous data
-// it bulges out by a fraction of a voxel at those voxels. A bound no voxel lies beyond (at or past
-// an end of the value range) bounds nothing: [0.5, 1] and [0.5, 2] mesh the same {v >= 0.5} of a
-// 0/1 mask, crossing at 0.5 like a solid mesh; with neither bound passed it is the whole box. The
-// tets come as LBIE writes them (orient them with cvc::orient_tets before a solve), at `vol`'s
-// positions. `improve` is a cvc::improvement_method, run `improve_iterations` times. Throws
-// std::runtime_error "no tets: the interval [lo, hi] ..." when the interval is empty or holds no
-// voxel (the message gives the volume's value range) or LBIE finds nothing in it, and "mesher
-// unavailable" in a build without CVC_ENABLE_MESHER. Available without CVC_ENABLE_LIBIGL.
+// labels gives the same mesh as [0.5, 3.5] (cvc::tetrahedralize2 itself counts a voxel on a bound
+// as outside). A bound no voxel lies beyond (at or past an end of the value range) bounds
+// nothing: [0.5, 1] and [0.5, 2] mesh the same {v >= 0.5} of a 0/1 mask, crossing at 0.5 like a
+// solid mesh; with neither bound passed it is the whole box. Values and bounds are compared in
+// float, as LBIE reads them. The tets come as LBIE writes them (orient them with cvc::orient_tets
+// before a solve), at `vol`'s positions. `improve` is a cvc::improvement_method, run
+// `improve_iterations` times. Throws std::runtime_error "no tets: the interval [lo, hi] ..." when
+// the interval is empty or holds no voxel (the message gives the volume's value range) or LBIE
+// finds nothing in it, and "mesher unavailable" in a build without CVC_ENABLE_MESHER. Available
+// without CVC_ENABLE_LIBIGL.
 cvc::geometry tetrahedralize_interval(const cvc::volume &vol, double a, double b, int improve = 0,
                                       int improve_iterations = 1);
 

@@ -120,129 +120,87 @@ std::string fe_mesh_signature(cvc::app &app, const std::string &fe_base) {
 
 // --- the interval mesher (fe_lab's mesh.region: interval) ----------------------------------------
 //
-// One helper for every interval mesh. It meshes the shell lo <= v <= hi as the solid
-// g = min(v - lo, hi - v) >= 0 with the single-isovalue cvc::tetrahedralize at 0 (LBIE meshes
-// {g > 0}), so both isosurfaces are the boundary (with the bounds adjusted for samples sitting
-// exactly on them, and dropped when no sample lies beyond: see below). cvc::tetrahedralize2's
-// interval overload is NOT used: on master it never reaches LBIE's TETRA2 mode (do_mesh_geometry
-// turns VOLUME_TET back into TETRA, so the one-surface tetrahedralizer sees only the first
-// isovalue), and the TETRA2 routine it was meant to reach, Octree::tetrahedralize_interval, builds
-// sliver fans and holes. The open transfix/libcvc#808 makes tetrahedralize2 mesh a layer the same
-// way, as min(v - lo, hi - v) >= 0. Once tetrahedralize2's interval path is fixed (a follow-up),
-// this helper is meant to call it -- cvc::tetrahedralize2(vol, lo, hi, DUALLIB, improve,
-// BSPLINE_CONVOLUTION, iterations) -- and cvcgl_fe_interval (and the fe_lab interval checks in
-// cvcgl_tf_binding) are its acceptance tests.
+// One helper for every interval mesh: cvc::tetrahedralize2's interval overload, which meshes the
+// shell lo <= v <= hi as the solid min(v - lo, hi - v) >= 0 (LBIE's TETRA2 mode, since
+// transfix/libcvc#808), so both isosurfaces are the boundary. The helper only chooses the two
+// bounds it passes, by fe_lab's rule (mesh_nodes.h, docs/TRANSFER_FUNCTIONS.md section 6):
+//  1. A bound no sample lies beyond -- at or past an end of the value range: a tf_editor bar at the
+//     end of its axis, `interval: [0.5, 2]` on a 0/1 mask -- bounds nothing: it adds no sheet and
+//     no crease, and the other bound's isosurface lies where the trilinear field crosses it, as a
+//     solid mesh's does. It is passed on moved far enough past the data that the other bound's
+//     side of min(v - lo, hi - v) wins at every sample. With neither bound passed every sample is
+//     inside: the whole box.
+//  2. The interval is inclusive. A bound samples sit exactly on (integer or plateau data at an
+//     integer bound, an SDF through a grid point) is passed on half way to the nearest value beyond
+//     it -- for integer data the half-integer, as a label mesher draws it: [1, 3] on labels is
+//     [0.5, 3.5] -- since LBIE counts a sample on its isovalue as outside.
+// LBIE reads the samples and the bounds as floats, so the helper compares them in float: "on a
+// bound" means equal to it in float.
 cvc::geometry tetrahedralize_interval(const cvc::volume &vol, double a, double b, int improve,
                                       int improve_iterations) {
   const double lo = std::min(a, b), hi = std::max(a, b);
   const std::string what = "the interval [" + fmt_value(lo) + ", " + fmt_value(hi) + "]";
-  if (!(hi > lo)) // equal bounds, or a NaN
+  const float flo = static_cast<float>(lo), fhi = static_cast<float>(hi);
+  if (!(fhi > flo)) // equal bounds (in float), or a NaN
     throw std::runtime_error("no tets: " + what + " is empty (the two isovalues are equal)");
 #ifdef CVC_ENABLE_MESHER
-  const std::uint64_t nx = vol.XDim(), ny = vol.YDim(), nz = vol.ZDim(), nxy = nx * ny,
-                      n = nxy * nz;
-  // Each sample against each bound, as LBIE will see it: in float (g is a Float volume), so "on a
-  // bound" means equal to it to float precision.
-  const auto off_lo = [lo](double v) { return static_cast<float>(v - lo); }; // < 0: below
-  const auto off_hi = [hi](double v) { return static_cast<float>(hi - v); }; // < 0: above
-  // Which bounds the data passes, whether samples sit exactly on them, and the nearest finite
-  // value beyond each.
+  // Which bounds the data passes, whether samples sit exactly on them, the nearest finite value
+  // beyond each, and how many samples lie in the interval.
   bool below = false, above = false, on_lo = false, on_hi = false;
-  double vmin = std::numeric_limits<double>::infinity(), vmax = -vmin;
-  double next_lo = -std::numeric_limits<double>::infinity(), next_hi = -next_lo;
+  float vmin = std::numeric_limits<float>::infinity(), vmax = -vmin;
+  float next_lo = -std::numeric_limits<float>::infinity(), next_hi = -next_lo;
+  std::uint64_t inside = 0;
+  const std::uint64_t n = vol.XDim() * vol.YDim() * vol.ZDim();
   for (std::uint64_t i = 0; i < n; ++i) {
-    const double v = vol(i);
+    const float v = static_cast<float>(vol(i));
+    if (std::isnan(v))
+      continue;
     const bool finite = std::isfinite(v);
     if (finite) {
       vmin = std::min(vmin, v);
       vmax = std::max(vmax, v);
     }
-    const float dl = off_lo(v), dh = off_hi(v);
-    if (dl < 0.f) {
+    if (v < flo) {
       below = true;
       if (finite)
         next_lo = std::max(next_lo, v);
-    }
-    if (dh < 0.f) {
+    } else if (v > fhi) {
       above = true;
       if (finite)
         next_hi = std::min(next_hi, v);
-    }
-    on_lo = on_lo || dl == 0.f;
-    on_hi = on_hi || dh == 0.f;
-  }
-  // The rule (mesh_nodes.h, docs/TRANSFER_FUNCTIONS.md section 6):
-  //  1. A bound no sample lies beyond -- at or past an end of the value range: a tf_editor bar at
-  //     the end of its axis, `interval: [0.5, 2]` on a 0/1 mask -- bounds nothing: it adds no sheet
-  //     and no crease, and the other bound's isosurface lies where the trilinear field crosses it,
-  //     as a solid mesh's does. With neither bound passed every sample is inside: the whole box.
-  //  2. The interval is inclusive. A bound samples sit exactly on (integer or plateau data at an
-  //     integer bound, an SDF through a grid point) is meshed half way to the nearest value beyond
-  //     it -- for integer data the half-integer, as a label mesher draws it: [1, 3] on labels is
-  //     [0.5, 3.5] -- so those samples are inside and none sits on LBIE's isovalue 0, which it
-  //     mishandles before transfix/libcvc#808 (its strict skip test and inclusive intersect test
-  //     disagree, the dual vertex lands voxels off and the shell cracks).
-  //  3. Each sample on a bound is then raised to at least a third of its steepest outside
-  //     neighbour along a grid edge, so the surface crosses that edge at least a quarter of the way
-  //     from it. Continuous data needs this: there the nearest value beyond is much nearer than the
-  //     neighbours' values, the half-way bound sits a hair from the on-bound sample's grid point,
-  //     and LBIE builds the tets between a crossing and an inside grid point that close flat, wound
-  //     at random (flipped normals). Integer data with unit steps is unchanged by it (its crossing
-  //     is already half way).
-  const double L = on_lo && below && std::isfinite(next_lo) ? 0.5 * (lo + next_lo) : lo;
-  const double H = on_hi && above && std::isfinite(next_hi) ? 0.5 * (hi + next_hi) : hi;
-  std::vector<float> g(n);
-  for (std::uint64_t i = 0; i < n; ++i) {
-    const double v = vol(i);
-    g[i] = static_cast<float>(below && above ? std::min(v - L, H - v)
-                              : below        ? v - L
-                              : above        ? H - v
-                                             : 1.0);
-  }
-  std::vector<std::pair<std::uint64_t, float>> raised;
-  for (std::uint64_t i = 0; i < n; ++i) {
-    const double v = vol(i);
-    if (!((below && off_lo(v) == 0.f) || (above && off_hi(v) == 0.f)))
-      continue; // not on a bound that bounds anything
-    float out = 0.f;
-    const auto edge = [&](std::uint64_t j) {
-      if (g[j] < 0.f && std::isfinite(g[j]))
-        out = std::max(out, -g[j]);
-    };
-    const std::uint64_t x = i % nx, y = (i / nx) % ny, z = i / nxy;
-    if (x > 0)
-      edge(i - 1);
-    if (x + 1 < nx)
-      edge(i + 1);
-    if (y > 0)
-      edge(i - nx);
-    if (y + 1 < ny)
-      edge(i + nx);
-    if (z > 0)
-      edge(i - nxy);
-    if (z + 1 < nz)
-      edge(i + nxy);
-    // (A gap to the next value below float resolution can leave it at 0: still inside.)
-    const float want = std::max(out / 3.f, std::numeric_limits<float>::min());
-    if (!(g[i] >= want))
-      raised.emplace_back(i, want);
-  }
-  for (const std::pair<std::uint64_t, float> &t : raised)
-    g[t.first] = t.second;
-  std::uint64_t inside = 0;
-  for (std::uint64_t i = 0; i < n; ++i)
-    if (g[i] > 0.f)
+    } else {
       ++inside;
+      on_lo = on_lo || v == flo;
+      on_hi = on_hi || v == fhi;
+    }
+  }
   if (inside == 0)
     throw std::runtime_error(
         "no tets: " + what + " does not cut the volume" +
         (vmin <= vmax ? " (its values span [" + fmt_value(vmin) + ", " + fmt_value(vmax) + "])"
                       : std::string()));
-  const cvc::volume gv(vol.ctx(), reinterpret_cast<const unsigned char *>(g.data()),
-                       vol.voxel_dimensions(), cvc::Float, vol.boundingBox());
+  // Rule 2: half way to the nearest value beyond (or that value itself when no float lies
+  // between: the samples on the bound stay inside, the ones beyond sit on LBIE's isovalue, out).
+  const auto halfway = [](float bound, float beyond) {
+    const float m = static_cast<float>(0.5 * (double(bound) + double(beyond)));
+    return m > std::min(bound, beyond) && m < std::max(bound, beyond) ? m : beyond;
+  };
+  double L = on_lo && below && std::isfinite(next_lo) ? halfway(flo, next_lo) : flo;
+  double H = on_hi && above && std::isfinite(next_hi) ? halfway(fhi, next_hi) : fhi;
+  // Rule 1: H - v >= v - L at every sample for H >= 2 vmax - L (and the same below), so the
+  // passed bound alone decides the shape.
+  if (!below && !above) {
+    const double s = std::max(double(vmax) - double(vmin), 1.0);
+    L = double(vmin) - s;
+    H = double(vmax) + s;
+  } else if (!above) {
+    H = 2.0 * double(vmax) - L;
+  } else if (!below) {
+    L = 2.0 * double(vmin) - H;
+  }
   cvc::geometry tm =
-      cvc::tetrahedralize(gv, 0.0, cvc::DUALLIB, static_cast<cvc::improvement_method>(improve),
-                          cvc::BSPLINE_CONVOLUTION, improve_iterations);
+      cvc::tetrahedralize2(vol, L, H, cvc::DUALLIB, static_cast<cvc::improvement_method>(improve),
+                           cvc::BSPLINE_CONVOLUTION, improve_iterations);
   if (tm.const_tets().empty())
     throw std::runtime_error("no tets: the mesher found nothing in " + what +
                              " (a shell thinner than a voxel?)");

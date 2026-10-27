@@ -19,23 +19,26 @@
 //     outer away from the centre, the inner into the cavity). Both radii are whole voxels, so
 //     grid points sit exactly on both bounds (ties: (0, 0, 10) has v = -2): the helper must keep
 //     the shell whole through them;
-//   - Poisson holds u = 0 on both sheets and nothing between them, and comes within 30% of the
-//     shell's analytic peak (today's LBIE leaves slivers by the concave inner sheet: ~22% low),
-//     and the heat problem's hot floor is held at 1;
+//   - Poisson holds u = 0 on both sheets and nothing between them, and comes within 10% of the
+//     shell's analytic peak with no slivers (before transfix/libcvc#808, LBIE left slivers by the
+//     concave inner sheet and the peak came out ~22% low), and the heat problem's hot floor is
+//     held at 1;
 //   - an interval that cuts no voxel, or an empty one, says so ("no tets: the interval ...");
 //   - the interval is inclusive on integer data: a 0/1 mask in [0.5, 1] (the bound on its
 //     maximum) meshes {v >= 0.5} -- the same mesh as [0.5, 2] and as [1, 2] (the lower bound on
 //     the 1s), one sheet crossing at 0.5 -- and labels [1, 3] keep labels 1 and 3, watertight (two
 //     sheets): a bound voxels sit on is meshed half way to the next value beyond it, so labels
-//     [1, 3] and [2, 3] are the meshes of [0.5, 3.5] and [1.5, 3.5];
+//     [1, 3] and [2, 3] are the meshes of [0.5, 3.5] and [1.5, 3.5]. cvc::tetrahedralize2 on its
+//     own keeps only label 2 there (LBIE counts a sample on its isovalue as outside), which is
+//     why the helper moves such a bound;
 //   - the fe_lab node meshes and solves the shell from `interval: [-6, -2]`, reports a miss in its
 //     status (keeping the last mesh), and region solid meshes the ball as before; a bound written
 //     in the same tick as the region keeps its value (the binding moves its bar to it);
 //   - a mask node from `interval: [0.5, 2]` keeps the bound past its data (its bar pinned at the
 //     axis' end) and meshes once; an editor drag followed by Tet-mesh within the remesh debounce
 //     meshes once, not again when that job ends.
-// These are also the acceptance tests for the follow-up that routes the helper through a fixed
-// cvc::tetrahedralize2 interval path.
+// The helper meshes through cvc::tetrahedralize2's interval path (LBIE's TETRA2 mode, fixed by
+// transfix/libcvc#808); it only chooses the bounds.
 //
 // No rendering: the node's tick is run directly. Plain main, non-zero on failure (NDEBUG is defined
 // in Release, so no assert()).
@@ -403,16 +406,15 @@ int main() {
       bmax = std::max(bmax, std::fabs(u[v]));
     // u'(r) = -r/3 - A/r^2 = 0 at r^3 = -3A = (a + b) a b / 2.
     const double peak = shell_poisson(std::cbrt((kRin + kRout) * kRin * kRout / 2.0), kRin, kRout);
-    // The bounds hold today's LBIE: its tets on the shell's concave inner sheet include slivers
-    // (counted below; the convex solid ball has none), which pull the discrete peak ~22% under the
-    // analytic one. A mesher with no slivers (transfix/libcvc#808, or the fixed tetrahedralize2)
-    // must land well inside them.
+    // Before transfix/libcvc#808 LBIE's tets on the shell's concave inner sheet included slivers
+    // (counted below), which pulled the discrete peak ~22% under the analytic one. With none, the
+    // P1 solution on this 33^3 mesh lands within a few percent.
     std::snprintf(buf, sizeof(buf),
                   "poisson: u = 0 on both sheets (max |u| there %.2g), u >= %.3f inside, peak %.3f "
                   "vs %.3f exact, mean error %.3f",
                   bmax, umin, umax, peak, err);
     chk(u.size() == tm.const_points().size() && bmax <= 1e-9 && umin >= -0.05 * peak &&
-            std::fabs(umax - peak) <= 0.3 * peak && err <= 0.25 * peak,
+            std::fabs(umax - peak) <= 0.1 * peak && err <= 0.1 * peak,
         buf);
     {
       std::size_t slivers = 0, near_inner = 0;
@@ -427,9 +429,11 @@ int main() {
             c[d] += 0.25 * tm.const_points()[tm.const_tets()[t][k]][d];
         near_inner += radius(c) < 0.5 * (kRin + kRout) ? 1 : 0;
       }
-      std::printf("     note: %zu slivers (under 1e-3 of the mean tet volume), %zu of them nearer "
-                  "the inner sheet\n",
-                  slivers, near_inner);
+      std::snprintf(buf, sizeof(buf),
+                    "slivers: %zu tets under 1e-3 of the mean tet volume, at most 0.1%% of them "
+                    "(%zu nearer the inner sheet)",
+                    slivers, near_inner);
+      chk(slivers * 1000 <= vols.size(), buf); // at most 0.1% of them
     }
 
     // Heat: the hot floor (the boundary's lowest 5%, which on a shell is the outer sheet's
@@ -608,6 +612,23 @@ int main() {
     };
     same_as(1.0, 3.0, 0.5, 3.5);
     same_as(2.0, 3.0, 1.5, 3.5);
+    {
+      // Why the helper moves such a bound: cvc::tetrahedralize2 on its own counts the voxels on
+      // either isovalue as outside (LBIE moves its isovalue off them), so [1, 3] is label 2 alone.
+      cvc::geometry raw;
+      std::string w;
+      try {
+        raw = cvc::tetrahedralize2(labels, 1.0, 3.0);
+      } catch (const std::exception &e) {
+        w = e.what();
+      }
+      const std::pair<double, double> r2 = corner_radii(raw);
+      std::snprintf(buf, sizeof(buf),
+                    "cvc::tetrahedralize2 alone keeps label 2 of labels [1, 3]: r in [%.2f, %.2f] "
+                    "(label 2: 6 <= r < 9)%s%s",
+                    r2.first, r2.second, w.empty() ? "" : " -- ", w.c_str());
+      chk(!raw.const_tets().empty() && r2.first > 4.5 && r2.second < 10.5, buf);
+    }
   }
 
 #ifdef CVC_ENABLE_LIBIGL
