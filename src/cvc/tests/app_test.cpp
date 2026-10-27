@@ -2053,6 +2053,98 @@ TEST(AppPoolSpawnFailure, ComputeAsyncJobsLeftWithNoWorkerAreDroppedOrWaitForOne
   EXPECT_TRUE(weak.expired());
 }
 
+// A compute_async call that starts a keyed task queued ahead of its job (the slot is free, and the
+// keyed task starts on the calling thread) still throws, running nothing and calling neither
+// callback, when that leaves the pool with no worker: the keyed task's thread can't be created,
+// nor the worker asked for as its slot is freed. That state comes about when the pool drops a job
+// queued ahead of keyed tasks for want of a worker: the first of them is then at the head, with
+// the slot free and nothing starting it. (The worker creation that failed inside the call used to
+// drop the call's own job there: the four-argument form's without a word, so that compute_async
+// returned as though it were queued, and the on_error form's with on_error called inside
+// compute_async instead of a throw.)
+TEST(AppPoolSpawnFailure, ComputeAsyncThrowsWhenAQueuedKeyedTaskItStartsLeavesNoWorker) {
+  struct outcome {
+    std::mutex m;
+    int done = 0;
+    std::vector<std::string> errors;
+  };
+  spawn_switch spawn; // before the app: its hook points here
+  probe_app a;
+  spawn.install(a);
+  a.computePool();
+  a.setThreadPoolSize(1);
+  std::atomic<bool> release(false);
+  a.startThreadPooled(
+      "hold",
+      [&release] {
+        const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+        while (!release.load() && std::chrono::steady_clock::now() < until)
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      },
+      PRIORITY_NORMAL, /*wait=*/true);
+  ASSERT_TRUE(a.hasThread("hold"));
+  auto o = std::make_shared<outcome>();
+  const auto on_done = [o] {
+    std::lock_guard<std::mutex> lk(o->m);
+    ++o->done;
+  };
+  const auto on_error = [o](const std::string &label) {
+    return [o, label](const std::string &e) {
+      std::lock_guard<std::mutex> lk(o->m);
+      o->errors.push_back(label + e);
+    };
+  };
+  a.compute_async(1, [](int) {}, on_done, on_error("first: "));
+  std::atomic<int> keyed_ran(0);
+  a.startThreadPooled("k1", [&keyed_ran] { ++keyed_ran; }, PRIORITY_NORMAL, /*wait=*/true);
+  a.startThreadPooled("k2", [&keyed_ran] { ++keyed_ran; }, PRIORITY_NORMAL, /*wait=*/true);
+  ASSERT_EQ(a.getPendingThreadCount(), 3u);
+
+  // The hold ends, and the worker its thread asks for can't be created: the first job is dropped,
+  // which leaves k1 at the head of the queue with the slot free.
+  spawn.fail = true;
+  release = true;
+  if (thread_ptr hold = a.threads("hold"))
+    hold->join();
+  ASSERT_EQ(a.getPendingThreadCount(), 2u);
+  ASSERT_EQ(a.getActiveThreadCount(), 0u);
+  {
+    std::lock_guard<std::mutex> lk(o->m);
+    ASSERT_EQ(o->errors.size(), 1u);
+    EXPECT_EQ(o->errors[0], "first: not run: no background worker could be started");
+  }
+
+  // Each call starts the keyed task at the head, whose thread can't be created, nor the worker
+  // asked for as its slot is freed.
+  auto held = std::make_shared<int>(1);
+  std::weak_ptr<int> weak = held;
+  EXPECT_THROW(a.compute_async(1, [held](int) {}, [held, on_done] { on_done(); }),
+               boost::thread_resource_error);
+  EXPECT_EQ(a.getPendingThreadCount(), 1u) << "k2 only";
+  EXPECT_THROW(a.compute_async(
+                   1, [held](int) {}, [held, on_done] { on_done(); }, on_error("third: ")),
+               boost::thread_resource_error);
+  held.reset();
+  EXPECT_TRUE(weak.expired()) << "a job compute_async threw for kept its captures";
+  EXPECT_EQ(a.getPendingThreadCount(), 0u);
+  EXPECT_EQ(a.getActiveThreadCount(), 0u);
+  {
+    std::lock_guard<std::mutex> lk(o->m);
+    EXPECT_EQ(o->errors.size(), 1u) << o->errors.back();
+  }
+
+  // Thread resources come back: a worker starts, and nothing of the jobs or keyed tasks runs.
+  spawn.fail = false;
+  std::promise<void> done;
+  std::future<void> done_f = done.get_future();
+  a.compute_async(1, [](int) {}, [&done] { done.set_value(); });
+  ASSERT_EQ(done_f.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+  ASSERT_TRUE(wait_pool_idle(a));
+  std::lock_guard<std::mutex> lk(o->m);
+  EXPECT_EQ(o->done, 0) << "a job compute_async threw for (or had dropped) ran";
+  EXPECT_EQ(keyed_ran.load(), 0);
+}
+
 // startThreadPooled(wait=true) throws boost::thread_resource_error when its task's own thread
 // can't be created (thread resources exhausted), as it did when every pooled task had a thread of
 // its own: the task doesn't run, what it captured is released, and nothing is registered under its

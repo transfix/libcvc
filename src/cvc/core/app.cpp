@@ -1327,6 +1327,8 @@ unsigned int app::getPendingThreadCount() const {
 //                         poolDropReason(), instead of waiting for a later submission.
 // 10/27/2026 -- Joe R. -- Not compute_async's job without on_error, which can't report it: it
 //                         waits.
+// 10/27/2026 -- Joe R. -- A trySubmitPooled call that starts a queued keyed task decides about its
+//                         own task, as one relying on a creation does.
 
 bool app::poolCanStartLocked() const {
   return !_poolStopping && !_pendingTasks.empty() && _activeWorkers < _maxPoolSize;
@@ -1428,6 +1430,7 @@ app::PoolSubmit app::enqueuePoolTask(ThreadPoolTask &task, bool handBackIfNoWork
   PoolKick kick;
   std::uint64_t seq = 0;
   bool reliesOnCreations = false;
+  bool deciding = false;
   {
     boost::mutex::scoped_lock lock(_threadPoolMutex);
     if (_poolStopping)
@@ -1451,13 +1454,19 @@ app::PoolSubmit app::enqueuePoolTask(ThreadPoolTask &task, bool handBackIfNoWork
         keyed = takePoolTaskLocked();
     }
     kick = poolKickLocked();
-    // No worker runs yet, only creations are under way (this call's, or another's): the task has
-    // a worker only if one of them succeeds. This call decides what becomes of it then (below),
-    // and no other drops it meanwhile (takeUnstartableLocked).
-    reliesOnCreations = handBackIfNoWorker && !task.keyed && _creatingWorkers > 0 &&
-                        _poolThreadCount == _creatingWorkers;
-    if (reliesOnCreations)
-      ++_handBackChecks;
+    if (handBackIfNoWorker && !task.keyed) {
+      // No worker runs yet, only creations are under way (this call's, or another's): the task
+      // has a worker only if one of them succeeds. Or a keyed task queued ahead of it starts here
+      // (below): if its thread can't be created, nor the worker asked for as it frees its slot,
+      // the task is left with no worker inside this call. Either way this call decides what
+      // becomes of it (below), and no other drops a task for want of a worker meanwhile
+      // (takeUnstartableLocked). Neither is so with a worker running: it runs until ~app.
+      const bool noRunningWorker = _poolThreadCount == _creatingWorkers;
+      reliesOnCreations = noRunningWorker && _creatingWorkers > 0;
+      deciding = noRunningWorker && (reliesOnCreations || keyed.keyed);
+      if (deciding)
+        ++_handBackChecks;
+    }
   }
   applyPoolKick(kick);
   if (keyed.keyed) {
@@ -1471,31 +1480,35 @@ app::PoolSubmit app::enqueuePoolTask(ThreadPoolTask &task, bool handBackIfNoWork
           static_cast<int>(boost::system::errc::resource_unavailable_try_again),
           "cvc::app::startThreadPooled: no thread could be started for '" + key + "'"));
   }
-  if (!reliesOnCreations)
+  if (!deciding)
     return PoolSubmit::queued;
-  // If every one of those creations failed, nothing will take the task until a later call
-  // manages to start a worker: hand it back instead. It is still queued then, since only a
-  // worker in _poolWorkers takes an anonymous task and there is none. The other dropIfNoWorker
-  // tasks queued go too (their submitters have returned): a creation that failed while this
-  // call was deciding left them to it.
+  // If every one of those creations failed, or the keyed task started here left the pool with no
+  // worker, nothing will take the task until a later call manages to start a worker: hand it back
+  // instead. It is still queued then, since only a worker in _poolWorkers takes an anonymous task
+  // and there is none. The other dropIfNoWorker tasks queued go too (their submitters have
+  // returned), once no other call is still deciding: a creation that failed meanwhile left them
+  // to it (_poolDropOwed).
   PoolSubmit submitted = PoolSubmit::queued;
   std::vector<std::function<void()>> unstartable;
   {
     boost::mutex::scoped_lock lock(_threadPoolMutex);
     bool noWorker = false;
     try {
-      noWorker = poolHasNoWorkerLocked(lock);
+      // The keyed task's start (on this thread, done by now) failing so is a creation that failed
+      // while this call was deciding: it set _poolDropOwed. Its thread created, the task waits for
+      // it to end, as any task queued behind a keyed thread holding the slot does.
+      noWorker = reliesOnCreations ? poolHasNoWorkerLocked(lock)
+                                   : _poolDropOwed && poolLeftWithNoWorkerLocked();
     } catch (...) {
-      --_handBackChecks;
+      --_handBackChecks; // a drop still owed is left to the next creation that fails
       throw;
     }
     --_handBackChecks;
-    if (noWorker) {
-      if (_pendingTasks.take(seq, task))
-        submitted = PoolSubmit::no_worker;
+    if (noWorker && _pendingTasks.take(seq, task))
+      submitted = PoolSubmit::no_worker;
+    if (noWorker || _poolDropOwed)
       takeUnstartableLocked(unstartable);
-      notifyPoolIdleLocked();
-    }
+    notifyPoolIdleLocked();
   }
   dropPoolTasks(unstartable, kPoolNoWorker);
   return submitted;
@@ -1511,14 +1524,24 @@ bool app::poolHasNoWorkerLocked(boost::mutex::scoped_lock &lock) {
   return !_poolStopping && _poolThreadCount == 0;
 }
 
+bool app::poolLeftWithNoWorkerLocked() const {
+  return !_poolStopping && _poolThreadCount == 0 && _creatingWorkers == 0;
+}
+
 void app::takeUnstartableLocked(std::vector<std::function<void()>> &out) {
   // With no worker running or being created, a queued anonymous task waits for a later submission
   // (or setThreadPoolSize) to start one, which may never come. That is so for a submitPooled
   // task (and a compute_async job with no on_error); a trySubmitPooled one's submitter must hear
   // of it, so the task is dropped, as it would have been handed back had the creation failed
   // while its submitter waited for it. Not while a trySubmitPooled call still decides about its
-  // own task: that call takes the rest once it has.
-  if (_poolStopping || _poolThreadCount != 0 || _creatingWorkers != 0 || _handBackChecks != 0)
+  // own task: the last such call takes the rest once it has (_poolDropOwed).
+  if (_handBackChecks != 0) {
+    if (poolLeftWithNoWorkerLocked())
+      _poolDropOwed = true;
+    return;
+  }
+  _poolDropOwed = false;
+  if (!poolLeftWithNoWorkerLocked())
     return;
   try {
     _pendingTasks.takeDroppable(out);
@@ -1593,9 +1616,10 @@ bool app::applyPoolKick(const PoolKick &kick) {
     if (!created) {
       // No new thread (resources): the queued tasks wait for a running worker, or for the next
       // submission to try again. With no worker left, running or being created, the
-      // trySubmitPooled tasks are dropped instead, here (takeUnstartableLocked): a submitter still
-      // waiting for this creation sees it fail (poolHasNoWorkerLocked) and hands its task back,
-      // and one that returned hears of it from the task's drop.
+      // trySubmitPooled tasks are dropped instead (takeUnstartableLocked), here, or by a
+      // trySubmitPooled call still deciding about its own task (one waiting for this creation
+      // sees it fail, in poolHasNoWorkerLocked, and hands its task back) once it has. A submitter
+      // that returned hears of it from its task's drop.
       std::vector<std::function<void()>> unstartable;
       {
         boost::mutex::scoped_lock lock(_threadPoolMutex);
