@@ -55,6 +55,7 @@
 #include <functional> // compute_async: the fan-out kernel + completion callback
 #include <map>
 #include <memory>
+#include <optional>
 #include <queue>
 #include <set>
 #include <string>
@@ -120,6 +121,11 @@ class async_host;
 } // namespace state_exec
 
 class app {
+  // ~app's hold on interruption (app.cpp), taken first thing in ~app. Declared before every other
+  // member, so it is destroyed after all of them: an interrupt pending on the thread destroying
+  // the app stays pending through the members' destructors too, and the caller has it.
+  std::optional<boost::this_thread::disable_interruption> _teardownHold;
+
 public:
   typedef boost::shared_ptr<app> app_ptr;
 

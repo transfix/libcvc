@@ -2259,6 +2259,40 @@ TEST(AppPoolTeardown, DroppingATaskKeepsAnInterruptPendingOnTheDroppingThread) {
   EXPECT_EQ(running_after_stop.load(), 0u) << "the stop skipped joining the worker";
 }
 
+// ~app holds interruption off until the last thing the app holds is destroyed, not only through
+// its own body: an interrupt pending on the thread destroying the app is still pending when ~app
+// returns, and isn't thrown at an interruption point in the destructor of something the app holds
+// (its data: the state tree joining a handler thread, a user object that joins one; a slot), where
+// it would be std::terminate. (Held off in the body only, it was thrown there, also when ~app had
+// workers to join.)
+TEST(AppPoolTeardown, AnInterruptPendingOnTheThreadDestroyingTheAppOutlivesIt) {
+  auto thrown = std::make_shared<std::atomic<int>>(0);
+  auto destroyed = std::make_shared<std::atomic<int>>(0);
+  std::atomic<bool> ready(false), pending_after(false), done(false);
+  boost::thread t([&] {
+    auto a = std::make_unique<app>();
+    std::atomic<bool> ran(false);
+    a->submitPooled([&ran] { ran = true; }); // a worker for ~app to join
+    while (!ran.load())
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    a->data("probe", std::make_shared<interrupt_probe>(thrown, destroyed));
+    ready = true;
+    while (!boost::this_thread::interruption_requested())
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    a.reset();
+    pending_after = boost::this_thread::interruption_requested();
+    done = true;
+  });
+  for (int i = 0; i < 10000 && !ready.load(); i++)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  t.interrupt();
+  t.join();
+  EXPECT_TRUE(done.load());
+  EXPECT_EQ(destroyed->load(), 1);
+  EXPECT_EQ(thrown->load(), 0) << "an interrupt was thrown in the destructor of the app's data";
+  EXPECT_TRUE(pending_after.load()) << "the interrupt didn't outlive the app";
+}
+
 // A keyed task (wait=true) that the pool has room for is in threads() under its key when
 // startThreadPooled returns, also right behind an anonymous task still waiting for its worker to
 // start (a fresh app) or to wake (a warm one); the documented join pattern,

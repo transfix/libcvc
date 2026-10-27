@@ -245,11 +245,17 @@ void app::registerDefaultHandlers() {
 //                         and the map is swept again after that join. A pool
 //                         with no worker is closed before the async host's
 //                         shutdown, which would wait for its queue for good.
+//                         Interruption is held off until the last member is
+//                         destroyed, not only through this body.
 app::~app() {
   // Not interruptible: an interrupt pending on the thread destroying the app would otherwise be
   // thrown in a join below and dropped by its catch, and that thread left running into a freed
-  // app. It stays pending instead.
-  boost::this_thread::disable_interruption keep_interrupt_pending;
+  // app. Nor while the members go, after this body: one of their destructors reaching an
+  // interruption point (the state tree in _data joining a handler thread, a user object there or
+  // in a slot that joins one) would have it thrown out of a destructor, which is std::terminate.
+  // The hold is a member destroyed last (app.h), so the interrupt is still pending for the caller
+  // once the app is gone.
+  _teardownHold.emplace();
 
   // Async calls first: their kernels run on the background pool and post to the exec scheduler,
   // so cancel them and wait for their kernels while both are still here (the pool is still open).
