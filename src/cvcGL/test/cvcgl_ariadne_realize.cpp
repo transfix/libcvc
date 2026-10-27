@@ -32,6 +32,8 @@
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/image/image.h>
 #include <cvc/state/state.h> // clock test: read/write the bound sim.* keys
+#include <cvc/tf/model.h>    // mesh_lab / fe_lab field colours
+#include <cvc/tf/overlays.h>
 #include <cvc/volume/volume.h>
 #include <cvc/volume/volume_file_io.h>
 #include <filesystem> // mesh_lab / fe_lab sources: a temp "document directory"
@@ -265,6 +267,52 @@ static void test_lab_sources(cvc::app &app) {
   ok = settle(mb);
   chk(ok && num(mb + ".color.max") > 0.0, "geodesic.source -1: from the highest vertex");
 
+  // Field colours (<node>.field_colors, a transfer function a tf_editor edits): its range and a
+  // histogram of the values are published beside it, the colormap key resets its ramp, and an
+  // explicit domain is the range the field is coloured over.
+  const auto field_colors = [&](const std::string &T, const std::string &cm_key,
+                                const std::string &min_key, const std::string &max_key,
+                                GeometryNode &node, const char *who) {
+    cvc::tf::model m;
+    double lo = 0.0, hi = 0.0;
+    std::vector<double> bins;
+    double total = 0.0;
+    const bool published = cvc::tf::from_string(val(T), m) && m.color.size() > 2 &&
+                           cvc::tf::range_from_string(val(T + ".range"), lo, hi) &&
+                           cvc::tf::histogram_from_string(val(T + ".histogram"), bins);
+    for (const double b : bins)
+      total += b;
+    chk(published && approx(lo, num(min_key)) && approx(hi, num(max_key)) && bins.size() == 128 &&
+            total > 0.0,
+        std::string(who) + ": field_colors holds a ramp; its range is the values' (" +
+            val(T + ".range") + ") and a 128-bin histogram is published");
+    set(cm_key, "gray");
+    tick();
+    float c0[3] = {1.f, 1.f, 1.f}, c1[3] = {0.f, 0.f, 0.f};
+    if (cvc::tf::from_string(val(T), m)) {
+      m.color_at(0.0, c0);
+      m.color_at(1.0, c1);
+    }
+    chk(c0[0] < 0.05f && c1[0] > 0.95f && m.domain.automatic,
+        std::string(who) + ": the colormap key gray resets field_colors to black..white");
+    m.domain.automatic = false;
+    m.domain.min = lo - 1.0;
+    m.domain.max = hi + 1.0;
+    set(T, cvc::tf::to_string(m));
+    tick();
+    const std::pair<double, double> r = node.scalarRange();
+    chk(node.hasScalarField() && approx(r.first, lo - 1.0) && approx(r.second, hi + 1.0),
+        std::string(who) + ": an explicit field_colors domain is the colour range (" +
+            std::to_string(r.first) + ".." + std::to_string(r.second) + ")");
+    set(cm_key, "viridis"); // back to the viridis ramp, auto domain
+    tick();
+    chk(node.hasScalarField() && approx(node.scalarRange().first, lo) &&
+            approx(node.scalarRange().second, hi),
+        std::string(who) + ": the colormap key resets the domain to auto");
+  };
+  field_colors(cvc::ariadne::resolve_bind("lsrc", "graphics.root.children.mesh.field_colors"),
+               mb + ".color.colormap", mb + ".color.min", mb + ".color.max", *mesh, "mesh_lab");
+
 #ifdef CVC_ENABLE_MESHER
   if (!domain) { // the SDF needs CVC_ENABLE_SDF
     printf("     (fe_lab skipped: no volume -- a build without CVC_ENABLE_SDF?)\n");
@@ -330,6 +378,9 @@ static void test_lab_sources(cvc::app &app) {
       "fe_lab: a chained request (mesh solve) runs both");
   chk(!val(fb + ".stats.work_ms").empty() && num(fb + ".stats.work_ms") >= 0.0,
       "fe_lab publishes stats.work_ms (" + val(fb + ".stats.work_ms") + ")");
+  tick();
+  field_colors(cvc::ariadne::resolve_bind("lsrc", "graphics.root.children.domain.field_colors"),
+               fb + ".view.colormap", fb + ".field.min", fb + ".field.max", *domain, "fe_lab");
 
   // Interval meshing: the shell between two densities is a solid layer with a hole.
   set(fb + ".mesh.region", "interval");
