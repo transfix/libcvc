@@ -448,6 +448,10 @@ int scheduler::step_once() {
     return 0;
   execute_process_step(*pp);
   ++total_steps_;
+  if (reap_after_step_ >= 0) {
+    procs_.erase(reap_after_step_);
+    reap_after_step_ = -1;
+  }
   return 1;
 }
 
@@ -1136,6 +1140,14 @@ void scheduler::raise_exit_exception(int pid) const {
 
 bool scheduler::reap(int pid) {
   detail::check_not_in_async_kernel("scheduler::reap");
+  if (pid == current_pid_) {
+    // The process stepping now (its on_complete reaping it): erased once its step is over.
+    const process *p = procs_.find(pid);
+    if (!p || !is_finished(p->status))
+      return false;
+    reap_after_step_ = pid;
+    return true;
+  }
   return procs_.erase(pid);
 }
 

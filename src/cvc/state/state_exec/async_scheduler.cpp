@@ -342,6 +342,10 @@ int async_scheduler::step_once() {
     return 0;
   execute_process_step(*pp);
   ++total_steps_;
+  if (reap_after_step_ >= 0) {
+    procs_.erase(reap_after_step_);
+    reap_after_step_ = -1;
+  }
   return 1;
 }
 
@@ -1254,8 +1258,12 @@ bool async_scheduler::reap(int pid) {
     return false; // never drop a still-live (ready/running/waiting/paused) process
   cancel_async_calls(pid);
   // Its env, state, watch_handlers and captured values (including any Python holders) all live on
-  // the process object, so erasing it frees them.
-  procs_.erase(pid);
+  // the process object, so erasing it frees them. The process stepping now (its on_complete
+  // reaping it) is erased once its step is over.
+  if (pid == current_pid_)
+    reap_after_step_ = pid;
+  else
+    procs_.erase(pid);
   return true;
 }
 

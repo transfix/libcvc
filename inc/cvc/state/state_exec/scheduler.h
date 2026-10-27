@@ -263,6 +263,7 @@ private:
   uint64_t total_steps_ = 0;
   int current_pid_ = -1;
   const process_ptr *current_proc_ = nullptr; // the stepping process's entry in procs_
+  int reap_after_step_ = -1; // reaped while it stepped: erased once the step is over
 
   stackless_evaluator evaluator_;
   memory_tracker mem_tracker_;

@@ -1679,3 +1679,23 @@ TEST(AsyncWaitForWorkTest, FrameWaitersAreTheDriversToWake) {
   EXPECT_EQ(sched.awaiting_frame_count(), 0u);
   EXPECT_TRUE(sched.wait_for_work(0.0));
 }
+
+// A host may reap a process from its on_complete, while its last step is still on the stack:
+// it is erased once that step is over.
+TYPED_TEST(SchedulerPickOrderTest, AProcessReapedFromItsOnCompleteIsErasedAfterItsStep) {
+  TypeParam sched;
+  int pid = -1;
+  bool reaped = false;
+  execute_options opts;
+  opts.on_complete = [&](value_t) { reaped = sched.reap(pid); };
+  pid = sched.execute(std::string("(+ 1 2)"), opts);
+  const int other = sched.execute(std::string("(begin 1 2 3)"));
+  if constexpr (std::is_same_v<TypeParam, scheduler>)
+    sched.run();
+  else
+    sched.sync_run();
+  EXPECT_TRUE(reaped);
+  EXPECT_FALSE(sched.get_process_info(pid).has_value());
+  EXPECT_TRUE(sched.get_result(other).has_value());
+  EXPECT_EQ(sched.process_count(), 1);
+}

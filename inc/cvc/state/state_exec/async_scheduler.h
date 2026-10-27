@@ -287,6 +287,7 @@ private:
   int current_pid_ = -1;
   uint32_t cycle_check_ = 0; // steps, for checking every 64th whether a cycle collection is due
   const process_ptr *current_proc_ = nullptr; // the stepping process's entry in procs_
+  int reap_after_step_ = -1; // reaped while it stepped: erased once the step is over
 
   // The scheduled evaluator IS the async_stackless_evaluator (roadmap §8.12). Its step never
   // suspends, so the scheduler calls its step_now() directly (no coroutine frame per step).
