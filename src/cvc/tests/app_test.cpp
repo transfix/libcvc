@@ -1574,6 +1574,12 @@ struct probe_app : app {
     boost::mutex::scoped_lock lock(_threadPoolMutex);
     return _poolInterruptGen;
   }
+  // trySubmitPooled calls deciding whether to hand their own task back (waiting on the worker
+  // creations it relies on, say).
+  unsigned int handBackChecks() {
+    boost::mutex::scoped_lock lock(_threadPoolMutex);
+    return _handBackChecks;
+  }
 };
 
 } // namespace
@@ -2143,6 +2149,127 @@ TEST(AppPoolSpawnFailure, ComputeAsyncThrowsWhenAQueuedKeyedTaskItStartsLeavesNo
   std::lock_guard<std::mutex> lk(o->m);
   EXPECT_EQ(o->done, 0) << "a job compute_async threw for (or had dropped) ran";
   EXPECT_EQ(keyed_ran.load(), 0);
+}
+
+// A trySubmitPooled call waiting on a worker creation that its own job relies on decides about
+// that job first: until it has, nothing else drops a task for want of a worker. When the creation
+// fails, the call hands its job back (compute_async throws), and then drops the tasks queued before
+// it that the failed creation left with no worker, on its own thread, before compute_async throws.
+// Here a keyed task holds the only slot, job A is queued behind it, and the creation asked for as
+// the keyed task ends is held until call B waits on it, and then fails.
+TEST(AppPoolSpawnFailure, AJobLeftWithNoWorkerWhileACallWaitsOnTheCreationIsDroppedByThatCall) {
+  struct gate {
+    std::mutex m;
+    std::condition_variable cv;
+    bool armed = false, in_creation = false, open = false;
+  };
+  struct outcome {
+    std::mutex m;
+    std::condition_variable cv;
+    int done = 0;
+    std::vector<std::string> errors;
+    std::thread::id error_thread;
+  };
+  auto g = std::make_shared<gate>();
+  probe_app a;
+  a.onWorkerSpawn([g] {
+    std::unique_lock<std::mutex> lk(g->m);
+    if (!g->armed)
+      return;
+    g->in_creation = true;
+    g->cv.notify_all();
+    g->cv.wait_for(lk, std::chrono::seconds(10), [&g] { return g->open; });
+    throw boost::thread_resource_error();
+  });
+  a.computePool();
+  a.setThreadPoolSize(1);
+  std::atomic<bool> release(false);
+  a.startThreadPooled(
+      "hold",
+      [&release] {
+        const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+        while (!release.load() && std::chrono::steady_clock::now() < until)
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      },
+      PRIORITY_NORMAL, /*wait=*/true);
+  ASSERT_TRUE(a.hasThread("hold"));
+  auto o = std::make_shared<outcome>();
+  const auto on_done = [o] {
+    std::lock_guard<std::mutex> lk(o->m);
+    ++o->done;
+    o->cv.notify_all();
+  };
+  const auto on_error = [o](const std::string &label) {
+    return [o, label](const std::string &e) {
+      std::lock_guard<std::mutex> lk(o->m);
+      o->errors.push_back(label + e);
+      o->error_thread = std::this_thread::get_id();
+      o->cv.notify_all();
+    };
+  };
+  a.compute_async(1, [](int) {}, on_done, on_error("A: "));
+  ASSERT_EQ(a.getPendingThreadCount(), 1u);
+
+  // The keyed task ends; the worker its thread asks for is held in its creation.
+  {
+    std::lock_guard<std::mutex> lk(g->m);
+    g->armed = true;
+  }
+  release = true;
+  bool in_creation = false;
+  {
+    std::unique_lock<std::mutex> lk(g->m);
+    in_creation = g->cv.wait_for(lk, std::chrono::seconds(10), [&g] { return g->in_creation; });
+  }
+  ASSERT_TRUE(in_creation);
+  // B's job relies on that creation: B waits for it to succeed or fail.
+  std::atomic<int> b_threw(-1);
+  std::thread b([&a, &b_threw, on_done, on_error] {
+    try {
+      a.compute_async(1, [](int) {}, on_done, on_error("B: "));
+      b_threw = 0;
+    } catch (const boost::thread_resource_error &) {
+      b_threw = 1;
+    }
+  });
+  const std::thread::id b_id = b.get_id();
+  const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  while (a.handBackChecks() == 0 && std::chrono::steady_clock::now() < until)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  const unsigned int checks = a.handBackChecks();
+  {
+    std::lock_guard<std::mutex> lk(g->m);
+    g->open = true; // the creation fails
+  }
+  g->cv.notify_all();
+  b.join();
+  if (thread_ptr hold = a.threads("hold"))
+    hold->join();
+  bool reported = false;
+  {
+    std::unique_lock<std::mutex> lk(o->m);
+    reported = o->cv.wait_for(lk, std::chrono::seconds(5),
+                              [&o] { return o->done > 0 || !o->errors.empty(); });
+  }
+  const unsigned int pending = a.getPendingThreadCount();
+  {
+    std::lock_guard<std::mutex> lk(g->m);
+    g->armed = false;
+  }
+  if (!reported)
+    a.submitPooled([] {}); // so that the test ends: a worker that can start runs A
+  EXPECT_EQ(checks, 1u) << "B did not wait on the creation";
+  EXPECT_TRUE(reported) << "A waits for a worker nothing will start";
+  EXPECT_EQ(b_threw.load(), 1);
+  EXPECT_EQ(pending, 0u);
+  {
+    std::lock_guard<std::mutex> lk(o->m);
+    EXPECT_EQ(o->done, 0);
+    ASSERT_EQ(o->errors.size(), 1u);
+    EXPECT_EQ(o->errors[0], "A: not run: no background worker could be started");
+    EXPECT_EQ(o->error_thread, b_id) << "A was not dropped by B's call";
+  }
+  EXPECT_TRUE(wait_pool_idle(a));
 }
 
 // startThreadPooled(wait=true) throws boost::thread_resource_error when its task's own thread
