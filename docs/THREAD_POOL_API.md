@@ -118,35 +118,76 @@ for (int i = 0; i < 100; i++) {
    queue. The entry stays after the task ends, like `startThread`'s. If its
    thread can't be created as it starts on the submitting thread,
    `startThreadPooled` throws `boost::thread_resource_error` and nothing new is
-   registered; one leaving the queue is dropped unrun then, and the drop logged.
+   registered; one leaving the queue is dropped unrun then, and the drop logged
+   before its slot is freed (so once `wait()` returns, or the pool's counts
+   are 0, it is in the log).
 5. **Shutdown**: `wait()` interrupts the running tasks and waits (up to 5 s)
    for the pool to drain, so it is not a completion barrier: wait on the
-   tasks' own completion for that. `~app` closes the pool first (after
-   only the async host): from then on no queued task starts. It
+   tasks' own completion for that. `~app` first shuts down its own exec
+   async host (`exec_async_host()`, if it was made): it cancels the
+   host's calls and waits for their kernels, which run on the pool, so
+   the pool is still open then. A pool with no worker, running or being
+   created, can't run a kernel still queued (one queued behind keyed
+   threads that hold every slot, say), and the host would wait for it
+   for good: `~app` then closes the pool before the host's shutdown,
+   which drops the kernel and ends its call. Otherwise it closes the
+   pool right after the host. From then on no queued task starts. It
    interrupts the running tasks (every task a worker has taken, however
    recently: a new worker takes no task until it is among the workers
    these interrupts go to) and drops the queued ones; then it interrupts
    every thread in `app.threads()`, keyed pool tasks included, and only
    then joins the workers and those threads, so a pool task waiting on
-   one of them isn't left waiting out a join. It sweeps the map again (a
-   bounded number of times) for a keyed thread that one winding down
-   registered after the first sweep. `wait()`, `~app` and a dropped
-   task's destruction hold interruption off, so an interrupt sent to the
-   thread doing them stays pending. A dropped task is destroyed
+   one of them isn't left waiting out a join. Once it has joined the
+   workers it sweeps the map again, also when the first sweep found it
+   empty: a worker it was joining may have registered a keyed thread
+   (one it took before the pool closed, or one its task started). It
+   sweeps for threads registered meanwhile a bounded number of times.
+   `wait()` and a dropped task's destruction hold interruption off, so
+   an interrupt sent to the thread doing them stays pending; `~app`
+   holds it off from its first step until its last member is destroyed,
+   so a member's destructor that reaches an interruption point doesn't
+   throw, and an interrupt pending on the thread destroying the app is
+   still pending once the app is gone. A dropped task is destroyed
    without running, and so is one submitted after that point
    (`submitPooled` then returns `false`); a task whose submitter must
    hear of it reports it from its destructor, as the async host,
-   `launch_pool_task` and `compute_async`'s `on_error` form do. Their
-   callables hold that state by value, so each task is one heap block:
-   a `shared_ptr` capture would add a block per task under libstdc++,
+   `launch_pool_task` and `compute_async`'s `on_error` form do, with
+   `app::poolDropReason()` (`app::kPoolStopped` here). Their callables
+   hold that state by value, so each task is one heap block: a
+   `shared_ptr` capture would add a block per task under libstdc++,
    whose `std::function` keeps only a trivially copyable callable in its
    own buffer
+6. **Thread creation failures**: a queued task waits for a running
+   worker when another one's thread can't be created. When the pool has
+   no worker at all (thread resources were exhausted before its first),
+   `trySubmitPooled` hands the task back unrun (`PoolSubmit::no_worker`)
+   once the worker creations it relied on have failed; while no worker
+   runs yet, it waits for those creations (up to 5 s) before it
+   returns. A `trySubmitPooled` task queued behind keyed threads that
+   hold every slot of a pool with no worker is dropped later, on the
+   thread whose worker creation failed, if the worker asked for as the
+   last of them ends can't be created either: it reports the drop with
+   `app::kPoolNoWorker` ("not run: no background worker could be
+   started"). A `submitPooled` task waits in the queue in both cases,
+   until a later submission or `setThreadPoolSize()` starts a worker
 
 ## Notes
 
 - `submitPooled(std::function<void()>, priority)` is `startThreadPooled` with
   `wait=false` without the key argument; it returns `false` only when the
   app is being destroyed and the task was dropped unrun
+- `trySubmitPooled(std::function<void()> &task, priority)` is `submitPooled`
+  for a submitter that must hear of a task no worker will run. It returns a
+  `PoolSubmit`: `queued` (the pool has it; `task` is left empty), `stopped`
+  (the app is being destroyed: the task was dropped unrun, as by
+  `submitPooled`) or `no_worker` (no worker could be started and the pool
+  has none: the task is handed back in `task`, unrun). A task it queued is
+  dropped later if the pool is left with no worker while it waits (item 6).
+  `compute_async`, the exec async host and `launch_pool_task` submit
+  through it
+- `app::poolDropReason()` is why the pool is destroying a task unrun on the
+  calling thread (`app::kPoolStopped` or `app::kPoolNoWorker`), for a
+  task that reports its drop from its destructor
 - Keyed tasks appear in the thread map and can be interrupted through it
 - `waitForHandlers()` in `state_object` waits for all handler threads
 - Thread pool workers are internal and don't appear in the thread map

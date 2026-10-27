@@ -43,12 +43,16 @@ For the full per-method reference, see
   while they keep their books, so an interrupt that arrives in them
   stays pending for the task's next interruption point instead of being
   swallowed. `wait()`, `~app` and the destructors of dropped tasks do
-  the same. `~app` closes the pool before anything else but the async
-  host: no queued task starts after that, the queued ones are dropped
-  without running, and from then on `submitPooled` drops a task at once
-  and returns `false`. A dropped task is destroyed, so it can report the
-  drop from its destructor (the async host fails the call with
-  `RuntimeError`, `launch_pool_task` posts `on_error`'s value).
+  the same, and `~app` holds interruption off until its last member is
+  destroyed. `~app` closes the pool before anything else but its async
+  host's shutdown (and before that too when the pool has no worker,
+  which could never run a kernel the host waits for): no queued task
+  starts after that, the queued ones are dropped without running, and
+  from then on `submitPooled` drops a task at once and returns `false`.
+  A dropped task is destroyed, so it can report the drop from its
+  destructor (the async host fails the call with `RuntimeError`,
+  `launch_pool_task` posts `on_error`'s value), saying why with
+  `app::poolDropReason()`.
 - **Thread creation failures.** If a new worker's thread can't be
   created, the queued tasks wait for a running worker. When the pool has
   none at all (thread resources were exhausted before its first worker),
@@ -58,14 +62,25 @@ For the full per-method reference, see
   can do the work itself (a threaded tf overlay task carries on
   cooperatively), an async call raises `RuntimeError` ("not run: no
   background worker could be started"), and `launch_pool_task` posts
-  `on_error`'s value. A `submitPooled` task stays queued until a later
-  submission or `setThreadPoolSize()` starts a worker. A pool that never
-  got a worker can't run a queued async kernel, so `~app` drops those
+  `on_error`'s value. While no worker runs yet, `trySubmitPooled` (and
+  so each of those) waits for the worker creations under way to succeed
+  or fail, up to 5 s, before it returns. A task it queued behind keyed
+  threads holding every slot of a pool with no worker is dropped unrun,
+  on the thread whose worker creation failed, when the worker asked for
+  as the last of them ends can't be created either: its async call
+  raises the same `RuntimeError`, `launch_pool_task` posts `on_error`'s
+  value, and `compute_async`'s `on_error` form calls `on_error` with
+  "not run: no background worker could be started" (its other form
+  calls neither callback). A `submitPooled` task stays queued until a
+  later submission or `setThreadPoolSize()` starts a worker. A pool
+  that never got a worker can't run a queued async kernel, so `~app`
+  drops those (a kernel queued behind keyed threads still running, say)
   before it shuts down the async host, which would otherwise wait for
   them for good. A keyed task whose own thread can't be created as
   `startThreadPooled` starts it makes that call throw
   `boost::thread_resource_error`; one that waited in the queue is
-  dropped unrun when its thread can't be created, and the drop logged.
+  dropped unrun when its thread can't be created, and the drop logged
+  before its slot is freed.
 - **Exception-safe.** Exceptions thrown by a task are logged and do not
   take down the pool or other workers.
 - **Dynamic resizing.** `setThreadPoolSize()` may be called while tasks

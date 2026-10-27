@@ -77,7 +77,9 @@ using pool_task_on_error = std::function<state_exec::value_t(const std::string &
 /// of them ended couldn't be created: app::trySubmitPooled).  `sched` is the scheduler the
 /// CALLER drives (so the delivery lands where the parked process will be resumed): the app-wide
 /// `a.exec_scheduler()` for an Ariadne host, or a private per-Exec scheduler for pycvc.  Returns
-/// immediately.
+/// without waiting for `work`; it waits for the pool only while the pool has no worker running
+/// yet, until the worker creations under way have succeeded or failed (up to 5 s, normally the
+/// time a thread takes to be created: app::trySubmitPooled).
 std::string launch_pool_task(app &a, state_exec::async_scheduler &sched, const std::string &root,
                              const std::string &chan_prefix, pool_task_work work,
                              pool_task_on_error on_error);

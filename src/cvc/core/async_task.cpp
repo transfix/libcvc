@@ -96,13 +96,14 @@ std::string launch_pool_task(app &a, se::async_scheduler &sched, const std::stri
   const std::string chan =
       chan_prefix + "#" + std::to_string(seq.fetch_add(1, std::memory_order_relaxed));
   const std::string done = se::resolve_channel_key(root, chan);
-  // submitPooled returns immediately; the task runs on one of the app's background-pool workers
+  // trySubmitPooled returns without waiting for the task (but for the wait app.h describes, while
+  // the pool has no worker running yet); the task runs on one of the app's background-pool workers
   // (no thread of its own; it used to go through compute_async(1, ...), which also built the
   // compute pool for a fan-out of one).  post_message is the thread-safe ingress `sched` drains on
   // its own driver thread, so the worker never touches the scheduler's internals — and it posts to
   // the SAME scheduler the caller drives, so the parked process is resumed there.  ALWAYS post
-  // exactly one value (on_error on a throw, or when the app drops the task unrun as it goes away)
-  // so a waiter can't hang.
+  // exactly one value (on_error on a throw, or when the app drops the task unrun: it goes away, or
+  // the task is left with no worker) so a waiter can't hang.
   // Refused, the task posts from its destructor before trySubmitPooled returns.
   std::function<void()> task(pool_task_post(sched, std::move(work), std::move(on_error), done));
   if (a.trySubmitPooled(task) == app::PoolSubmit::no_worker) {

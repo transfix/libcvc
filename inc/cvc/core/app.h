@@ -448,6 +448,14 @@ public:
   // empty on return but for no_worker. compute_async, the exec async host and launch_pool_task
   // submit through it, and fail their call at once on no_worker.
   //
+  // To know that, it may wait. While the pool has no worker running yet, only worker creations
+  // under way (the one it asks for itself, or one another caller asked for that its task now
+  // relies on), it waits until they have succeeded or failed, up to 5 s, before it returns:
+  // normally about as long as creating a thread takes, longer if another caller's creation is slow
+  // (a loaded machine). So do compute_async, an async call on the exec scheduler's thread and
+  // launch_pool_task, which submit through it, in that case. Once the pool has a worker, it
+  // returns at once, as submitPooled does.
+  //
   // A task it queues can still be left with no worker: keyed tasks, on threads of their own, held
   // every slot of a pool that has no worker, and when one of them ends, the worker it asks for
   // can't be created either. The pool then drops the task unrun, on the thread whose worker
@@ -489,21 +497,25 @@ public:
   cvc::thread_pool &computePool();
 
   // Run fn(i) for i in [0,n) as a data-parallel fan-out on computePool(), OFF the calling thread,
-  // then call on_done() once the fan-out joins — WITHOUT blocking the caller. A background pool
-  // worker (startThreadPooled, wait=false) owns the *blocking* parallel_for and runs on_done right
-  // after it completes. This is the async-schedule-safe way to drive a parallel_for from the
-  // scheduler / host thread: an Ariadne program `on:` / host intrinsic runs INLINE inside
-  // Runtime::drain() and must not block, so it calls compute_async and returns immediately; on_done
-  // hands the result back on the worker thread — typically through the one thread-safe seam,
-  // exec_scheduler().post_message(channel, value). Capture your own result accumulator in
-  // fn/on_done (e.g. a shared_ptr<std::atomic<int>>). parallel_for stays a plain blocking barrier —
-  // this only moves the wait off the caller's thread; it does not make the fan-out itself
-  // non-blocking. A throw from fn propagates on the worker and skips on_done; each call gets its
-  // own background job (an anonymous submitPooled task, with no thread key), so concurrent calls
-  // do not cancel each other, and calling this a few times a second does not grow threads(): the
-  // job is never in it, and its worker destroys it, with fn and on_done, as soon as it ends. A job
-  // the app drops unrun (submitted or still queued once ~app has stopped the pool, or queued and
-  // then left with no worker: trySubmitPooled) calls neither callback and releases both. Throws
+  // then call on_done() once the fan-out joins — WITHOUT the caller waiting for the fan-out. A
+  // background pool worker (startThreadPooled, wait=false) owns the *blocking* parallel_for and
+  // runs on_done right after it completes. This is the async-schedule-safe way to drive a
+  // parallel_for from the scheduler / host thread: an Ariadne program `on:` / host intrinsic runs
+  // INLINE inside Runtime::drain() and must not block, so it calls compute_async, which returns
+  // once the job is queued; on_done hands the result back on the worker thread — typically through
+  // the one thread-safe seam, exec_scheduler().post_message(channel, value). Queuing the job does
+  // not wait for the pool, with one exception: while the pool has no worker running yet, only
+  // worker creations under way, it waits until they have succeeded or failed, up to 5 s (normally
+  // the time a thread takes to be created), to know whether to throw (below; trySubmitPooled).
+  // Capture your own result accumulator in fn/on_done (e.g. a shared_ptr<std::atomic<int>>).
+  // parallel_for stays a plain blocking barrier — this only moves the wait off the caller's
+  // thread; it does not make the fan-out itself non-blocking. A throw from fn propagates on the
+  // worker and skips on_done; each call gets its own background job (an anonymous submitPooled
+  // task, with no thread key), so concurrent calls do not cancel each other, and calling this a
+  // few times a second does not grow threads(): the job is never in it, and its worker destroys
+  // it, with fn and on_done, as soon as it ends. A job the app drops unrun (submitted or still
+  // queued once ~app has stopped the pool, or queued and then left with no worker:
+  // trySubmitPooled) calls neither callback and releases both. Throws
   // boost::thread_resource_error, having called neither and released both, when no worker can be
   // started for the job and the pool has none (thread resources exhausted before its first
   // worker), so the caller can do the work itself (a threaded tf overlay task carries on
