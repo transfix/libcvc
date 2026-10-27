@@ -1,0 +1,103 @@
+# transfer_function.ari — the transfer-function editor (the port of VolumeRover2's ColorTable2) on
+# two volumes of the Stanford bunny: a raycast `volren` node and a sliced `volslice` node beside it.
+# Both volumes are the signed distance field of the embedded bunny MESH (no asset file), so a value
+# is a distance to the surface: negative inside, 0 on the surface, positive outside.
+#
+# Each node's `transfer_function:` block seeds its model (colour and opacity nodes positioned over
+# an explicit domain, plus isocontours with stable ids — the volren node draws each as an
+# isosurface). The shipped transfer_function component edits it live: drag a node or an
+# isocontour bar and the volume re-renders; right-click for add / delete / presets / layers. The
+# same component, included twice with different args, drives the two nodes independently — one as
+# its own window, one embedded as a bare widget in a document window — each with its own view
+# (zoom, layers) persisted under its id.
+#
+# Run from the repository root:
+#   arigl --component-path src/cvc/ariadne examples/ariadne/documents/transfer_function.ari
+#   ariadne_hello examples/ariadne/documents/transfer_function.ari --component-path src/cvc/ariadne
+
+meta:
+  name: Transfer function editor (Ariadne)
+  author: cvc
+  min_libcvc: 3.7.0
+
+import:
+  - cvc://components/stage_lighting.ari
+  - cvc://components/camera_controls.ari
+  - cvc://components/transfer_function.ari
+
+menubar:
+  - menu: Sim
+    items:
+      - menu_item: Quit
+        on: quit
+
+windows:
+  - include: stage_lighting
+    pos: [16, 16]
+    size: [370, 210]
+  - include: camera_controls
+    pos: [16, 234]
+    size: [370, 132]
+  # The raycast bunny's editor: the shipped window unit, retargeted at the node.
+  - include: transfer_function
+    args: { node: bunny_volume, title: Raycast transfer function }
+    pos: [400, 16]
+    size: [440, 330]
+  # The sliced bunny's editor: the bare widget unit in this document's own window, with its own
+  # instance id (its view persists at tree.slices_tf.view.*, apart from the raycast editor's).
+  - window: Slices
+    id: slices_window
+    pos: [400, 354]
+    size: [440, 260]
+    children:
+      - text: "the volslice bunny on the right"
+      - include: transfer_function_editor
+        args: { node: bunny_slices, id: slices_tf, label: Slice transfer function }
+
+scene:
+  chrome: false
+  background: { top: [0.10, 0.12, 0.16], bottom: [0.02, 0.02, 0.03] }
+  nodes:
+    # The raycast bunny. Over the domain [-8, 8], t = 0.5 is the surface and t = 0.625 a shell
+    # 2 units outside it; the opacity ramp paints a faint glow in the band just outside the surface.
+    - node: bunny_volume
+      type: volren
+      source: { sdf: { mesh: stanford.bunny, dim: 64 } }
+      fit: { height: 100, up: y }
+      volren:
+        distance_field: true
+        ambient: 0.35
+        steps: 384
+        resolution_scale: 0.6
+        transfer_function:
+          domain: [-8, 8]
+          color: [[0, 0.90, 0.60, 0.20], [0.5, 1.00, 0.95, 0.85], [1, 0.30, 0.50, 1.00]]
+          alpha: [[0, 0], [0.48, 0], [0.53, 0.30], [0.70, 0], [1, 0]]
+          isocontours:
+            - { id: surface, at: 0.5, rgb: [0.85, 0.82, 0.88] }
+            - { id: shell, at: 0.625, rgb: [0.40, 0.70, 1.00], opacity: 0.3 }
+        lights:
+          - { color: [1.0, 1.0, 1.0], direction: [-0.4, -0.3, -0.85] }
+    # The sliced bunny beside it: opaque deep inside, fading to transparent air across the surface
+    # (the volslice_bunny.ari ramp, as normalized nodes over [-6, 6]).
+    - node: bunny_slices
+      type: volslice
+      source: { sdf: { mesh: stanford.bunny, dim: 64 } }
+      fit: { height: 100, up: y }
+      transform: { position: [130, 0, 0] }
+      volslice:
+        quality: 0.6
+        opacity_correction: true
+        transfer_function:
+          domain: [-6, 6]
+          color: [[0, 0.90, 0.60, 0.20], [0.4583, 1.00, 0.85, 0.60], [0.5417, 1.00, 0.95, 0.85],
+                  [1, 1.00, 1.00, 1.00]]
+          alpha: [[0, 0.85], [0.4583, 0.45], [0.5417, 0.12], [1, 0]]
+    - node: ground
+      type: geometry
+      source: { plane: { size: 440 } }
+      material: { color: [0.18, 0.19, 0.22], ambient: 0.3, diffuse: 0.8 }
+
+  lights:
+    - rig: three_point
+      key: { intensity: 1.9, azimuth: -38, elevation: 52 }

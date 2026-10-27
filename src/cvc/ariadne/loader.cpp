@@ -20,6 +20,8 @@
 // (types.h) for the static msg-* channel references.
 #include <cvc/state/state_exec/parser.h>
 #include <cvc/state/state_exec/types.h>
+#include <cvc/tf/model.h> // tf_editor presets + the scene transfer_function: model
+#include <cvc/tf/vinay.h> // the scene transfer_function: vinay: import
 #include <filesystem> // §12 import: dirname of a resolved library for nested bases
 #include <functional>
 #include <iterator>
@@ -118,7 +120,10 @@ bool has_ari_block(const std::string &key) {
 // options an array of strings, …), while leaving the widget type-key and any
 // forward-compat keys unconstrained (additionalProperties defaults true) so a
 // newer document still validates its known structure. Exposed for tooling even
-// when the validator itself is not linked.
+// when the validator itself is not linked. A tf_editor (short form or `type:`) gets
+// its own config types ($defs/tf_editor): its `default:` may be a model string OR
+// the same document as a YAML map, and its flags take every spelling the loader's
+// flag() reads ($defs/flag); every other widget's `default:` is a string.
 namespace {
 const char *const kAriSchema = R"ARISCHEMA({
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -178,12 +183,51 @@ const char *const kAriSchema = R"ARISCHEMA({
         "def": {"type": ["number", "boolean", "string"]},
         "fmt": {"type": "string"},
         "options": {"type": ["array", "string"], "items": {"type": "string"}},
-        "default": {"type": "string"},
         "pos": {"type": "array", "items": {"type": "number"}},
         "size": {"type": ["array", "number"], "items": {"type": "number"}},
         "items": {"type": "array", "items": {"$ref": "#/$defs/widget"}},
         "children": {"type": "array", "items": {"$ref": "#/$defs/widget"}}
+      },
+      "if": {
+        "anyOf": [
+          {"required": ["tf_editor"]},
+          {"required": ["type"], "properties": {"type": {"const": "tf_editor"}}}
+        ]
+      },
+      "then": {"$ref": "#/$defs/tf_editor"},
+      "else": {"properties": {"default": {"type": "string"}}}
+    },
+    "tf_editor": {
+      "properties": {
+        "default": {"type": ["string", "object"]},
+        "preset": {"type": "string"},
+        "interactive_updates": {"$ref": "#/$defs/flag"},
+        "height": {"type": "number"},
+        "layers": {"type": "array", "items": {"type": "string"}},
+        "show_color": {"$ref": "#/$defs/flag"},
+        "show_opacity": {"$ref": "#/$defs/flag"},
+        "show_isocontours": {"$ref": "#/$defs/flag"},
+        "log_histogram": {"$ref": "#/$defs/flag"},
+        "info": {"$ref": "#/$defs/flag"},
+        "color": {"type": "array"},
+        "alpha": {"type": "array"},
+        "isocontours": {"type": "array", "items": {"type": ["number", "object"]}},
+        "domain": {"type": ["string", "array", "object"]},
+        "opacity_cubed": {"$ref": "#/$defs/flag"},
+        "resolution": {"type": "number"},
+        "range": {"type": "string"},
+        "histogram": {"type": "string"},
+        "contour_spectrum": {"type": "string"},
+        "contour_tree": {"type": "string"}
       }
+    },
+    "flag": {
+      "anyOf": [
+        {"type": "boolean"},
+        {"enum": [0, 1]},
+        {"type": "string",
+         "pattern": "^([Tt][Rr][Uu][Ee]|[Ff][Aa][Ll][Ss][Ee]|[Yy]([Ee][Ss])?|[Nn][Oo]?|[Oo]([Nn]|[Ff][Ff]))$"}
+      ]
     }
   }
 })ARISCHEMA";
@@ -244,10 +288,12 @@ bool sources_changed(const std::vector<std::string> &sources,
 namespace {
 // The widget types the loader builds itself (each is a .ari key: `slider_int: Speed`). Anything
 // else is a custom type, drawn by register_widget_type / a backend-native widget.
+// ORDER MATTERS: the short-form dispatch (widget_type) takes the FIRST of these present as a key,
+// so tf_editor precedes color — a tf_editor's own config may carry a `color:` node list.
 constexpr const char *kBuiltinWidgetTypes[] = {
-    "group",      "menubar",   "menu",     "menu_item",  "window",       "overlay",
-    "panel",      "text",      "checkbox", "slider_int", "slider_float", "combo",
-    "input_text", "input_int", "color",    "image",      "button",       "separator"};
+    "group",     "menubar",  "menu",       "menu_item",    "window",   "overlay",    "panel",
+    "text",      "checkbox", "slider_int", "slider_float", "combo",    "input_text", "input_int",
+    "tf_editor", "color",    "image",      "button",       "separator"};
 } // namespace
 
 bool is_builtin_widget_type(const std::string &type) {
@@ -383,6 +429,13 @@ std::vector<Widget> parse_seq(Ctx &ctx, const YAML::Node &seq) {
 }
 
 std::string widget_type(const YAML::Node &n, std::string &label) {
+  // An explicit `type:` naming a builtin wins over the short-form key scan: a tf_editor's config
+  // may carry a `color:` node list, which the scan would otherwise take for a colour picker.
+  if (const YAML::Node t = n["type"]; t && t.IsScalar() && is_builtin_widget_type(t.Scalar())) {
+    const YAML::Node v = n[t.Scalar()];
+    label = v && v.IsScalar() ? v.Scalar() : str(n, "title", str(n, "label", str(n, "widget")));
+    return t.Scalar();
+  }
   for (const char *k : kBuiltinWidgetTypes) {
     const YAML::Node v = n[k];
     if (v.IsDefined()) {
@@ -661,6 +714,34 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
       ctx.warn("ari: input_int '" + label + "' has lo > hi");
     return input_int(label, bind, lo, hi, static_cast<int>(num(n, "def", 0)), action(n));
   }
+  if (type == "tf_editor") { // §10 a transfer-function editor bound to a cvc::tf::model key
+    const std::string bind = str(n, "bind");
+    check_bind(ctx, "tf_editor", label, bind);
+    Widget w = tf_editor(label, bind);
+    w.on = action(n); // fired after each committed model write, like input_text's
+    // Every other key is the editor's config (interactive_updates, height, layers, preset, the
+    // overlay source overrides, ...): kept as props, which the Runtime reads each frame.
+    if (n.IsMap())
+      for (const auto &kv : n) {
+        if (!kv.first.IsScalar())
+          continue;
+        const std::string key = kv.first.Scalar();
+        if (key != "tf_editor" && !known_widget_key(key))
+          w.props.entries.emplace_back(key, to_value(kv.second));
+      }
+    if (const Value *layers = w.props.find("layers");
+        layers && layers->kind == Value::Kind::Sequence)
+      for (const Value &l : layers->items)
+        if (l.scalar != "histogram" && l.scalar != "contour_spectrum" && l.scalar != "contour_tree")
+          ctx.warn("ari: tf_editor '" + label + "' has an unknown layer '" + l.scalar +
+                   "' (histogram | contour_spectrum | contour_tree)");
+    if (const Value *preset = w.props.find("preset"); preset && !preset->scalar.empty()) {
+      const auto &names = cvc::tf::model::preset_names();
+      if (std::find(names.begin(), names.end(), preset->scalar) == names.end())
+        ctx.warn("ari: tf_editor '" + label + "' has an unknown preset '" + preset->scalar + "'");
+    }
+    return w;
+  }
   if (type == "color") { // §G7 an RGB picker bound to an "r,g,b" key
     const std::string bind = str(n, "bind");
     check_bind(ctx, "color", label, bind);
@@ -750,6 +831,11 @@ Widget parse_widget(Ctx &ctx, const YAML::Node &n) {
   // include node has none). Present-guarding preserves the template's fields; an include site
   // that DOES set one overrides for that instance.
   if (n.IsMap()) {
+    // `id:` names any widget (the window branch reads it too): the stable identity a backend keys
+    // per-instance state on and the core persists view state under (tree.<id>.*). An include site
+    // may override the unit's.
+    if (has(n, "id"))
+      w.id = str(n, "id");
     if (has(n, "visible_when"))
       w.visible_when = str(n, "visible_when");
     if (has(n, "enabled_when"))
@@ -912,13 +998,24 @@ Widget expand_include(Ctx &ctx, const YAML::Node &n) {
     ctx.warn("ari: include: recursive unit '" + name + "' — expansion refused");
     return group({});
   }
+  // A unit may declare its parameters with defaults (`args: {node: volume}` beside its widget
+  // keys), so a shipped component works with no include args and a document overrides only what
+  // it needs. Include-site args win; a token with neither stays literal.
   std::map<std::string, std::string> args;
-  const YAML::Node a = n["args"];
-  if (a && a.IsMap())
-    for (const auto &kv : a)
-      if (kv.first.IsScalar() && kv.second.IsScalar())
-        args[kv.first.Scalar()] = kv.second.Scalar();
+  const auto collect = [&args](const YAML::Node &a) {
+    if (a && a.IsMap())
+      for (const auto &kv : a)
+        if (kv.first.IsScalar() && kv.second.IsScalar())
+          args[kv.first.Scalar()] = kv.second.Scalar();
+  };
+  // A unit that is itself an include:/load: call keeps its args: as that call's arguments.
+  const bool declares = it->second.IsMap() && !it->second["include"] && !it->second["load"];
+  if (declares)
+    collect(it->second["args"]);
+  collect(n["args"]);
   YAML::Node inst = YAML::Clone(it->second); // never mutate the stored template
+  if (declares && inst["args"])
+    inst.remove("args"); // the declaration, not a widget key
   substitute_node(inst, args);
   Widget w = parse_widget(ctx, inst);
   ctx.expanding.erase(name);
@@ -1355,12 +1452,129 @@ ScenePhysics parse_scene_physics(const YAML::Node &p) {
   return ph;
 }
 
+// --- the scene transfer_function: model form (§10.1) ------------------------------------------
+
+bool tf_number(const YAML::Node &v, double &out) {
+  if (!v || !v.IsScalar())
+    return false;
+  try {
+    out = v.as<double>();
+    return true;
+  } catch (const std::exception &) {
+    return false;
+  }
+}
+
+// Three numbers r, g, b at v[first..first+2].
+bool tf_rgb(const YAML::Node &v, float out[3], std::size_t first = 0) {
+  if (!v || !v.IsSequence() || v.size() < first + 3)
+    return false;
+  double c[3];
+  for (std::size_t i = 0; i < 3; ++i)
+    if (!tf_number(v[first + i], c[i]))
+      return false;
+  for (int i = 0; i < 3; ++i)
+    out[i] = static_cast<float>(c[i]);
+  return true;
+}
+
+// [at, r, g, b] or {at: t, rgb: [r, g, b]}.
+bool tf_color_node(const YAML::Node &v, cvc::tf::color_node &out) {
+  float rgb[3];
+  if (v.IsSequence()) {
+    if (!tf_number(v[0], out.at) || !tf_rgb(v, rgb, 1))
+      return false;
+  } else if (v.IsMap()) {
+    if (!tf_number(v["at"], out.at) || !tf_rgb(v["rgb"], rgb))
+      return false;
+  } else {
+    return false;
+  }
+  out.r = rgb[0];
+  out.g = rgb[1];
+  out.b = rgb[2];
+  return true;
+}
+
+// [at, a] or {at: t, a: a}.
+bool tf_alpha_node(const YAML::Node &v, cvc::tf::alpha_node &out) {
+  double a = 0.0;
+  if (v.IsSequence() && v.size() >= 2) {
+    if (!tf_number(v[0], out.at) || !tf_number(v[1], a))
+      return false;
+  } else if (v.IsMap()) {
+    if (!tf_number(v["at"], out.at) || !tf_number(v["a"], a))
+      return false;
+  } else {
+    return false;
+  }
+  out.a = static_cast<float>(a);
+  return true;
+}
+
+// {id, at, rgb, opacity}, or a bare number (just the position).
+bool tf_isocontour(const YAML::Node &v, cvc::tf::isocontour &out) {
+  if (v.IsScalar())
+    return tf_number(v, out.at);
+  if (!v.IsMap() || !tf_number(v["at"], out.at))
+    return false;
+  out.id = str(v, "id");
+  float rgb[3];
+  if (v["rgb"]) {
+    if (!tf_rgb(v["rgb"], rgb))
+      return false;
+    out.has_rgb = true;
+    out.r = rgb[0];
+    out.g = rgb[1];
+    out.b = rgb[2];
+  }
+  double o = 1.0;
+  if (v["opacity"]) {
+    if (!tf_number(v["opacity"], o))
+      return false;
+    out.has_opacity = true;
+    out.opacity = static_cast<float>(o);
+  }
+  return true;
+}
+
 // A transfer function (§9): points [{value, color:[r,g,b,a]}], optional window and
 // auto_domain. Shared by volren + volslice (one TF vocabulary across renderers).
-SceneTransferFunction parse_scene_tf(const YAML::Node &t) {
+//
+// The §10.1 model form (domain, opacity_cubed, resolution, preset, vinay, color, alpha,
+// isocontours) sets has_model + a normalized model: `preset`, then the `vinay` file (resolved
+// against the document's directory and watched for hot-reload), give the starting point, and each
+// list given replaces that list. Positions are normalized [0,1]; an out-of-range one is almost
+// always a data value written where `at` belongs, so it is reported rather than silently dropped.
+// `where` names the node in the warnings.
+SceneTransferFunction parse_scene_tf(Ctx &ctx, const YAML::Node &t, const std::string &where) {
   SceneTransferFunction tf;
-  if (!t || !t.IsMap())
+  if (!t || t.IsNull())
     return tf;
+  const std::string pfx = "ari: scene node '" + where + "': transfer_function: ";
+  if (!t.IsMap()) {
+    ctx.warn(pfx + "must be a map — ignored");
+    return tf;
+  }
+  static const char *const kLegacyKeys[] = {"points", "window", "auto_domain"};
+  static const char *const kModelKeys[] = {"domain", "opacity_cubed", "resolution",
+                                           "preset", "vinay",         "color",
+                                           "alpha",  "isocontours",   "dims"};
+  for (const auto &kv : t) {
+    if (!kv.first.IsScalar())
+      continue;
+    const std::string key = kv.first.Scalar();
+    bool known = false;
+    for (const char *k : kLegacyKeys)
+      known = known || key == k;
+    for (const char *k : kModelKeys)
+      if (key == k)
+        known = tf.has_model = true;
+    if (!known)
+      ctx.warn(pfx + "unknown key '" + key +
+               "' (ignored; expected domain, opacity_cubed, resolution, preset, vinay, color, "
+               "alpha, isocontours, or the legacy points, window, auto_domain)");
+  }
   tf.auto_domain = flag(t, "auto_domain", true);
   const YAML::Node win = t["window"];
   if (win && win.IsSequence() && win.size() >= 2) {
@@ -1380,6 +1594,139 @@ SceneTransferFunction parse_scene_tf(const YAML::Node &t) {
           tp.color[i] = static_cast<float>(c[i].as<double>());
       tf.points.push_back(tp);
     }
+  if (!tf.has_model)
+    return tf;
+
+  if (!tf.points.empty())
+    ctx.warn(pfx + "the legacy points: are ignored beside the model keys (color/alpha/...)");
+  cvc::tf::model m = cvc::tf::model::default_model();
+  if (const YAML::Node p = t["preset"]) {
+    const std::string name = p.IsScalar() ? p.Scalar() : std::string();
+    const std::vector<std::string> &names = cvc::tf::model::preset_names();
+    if (std::find(names.begin(), names.end(), name) != names.end())
+      m = cvc::tf::model::preset(name);
+    else
+      ctx.warn(pfx + "unknown preset '" + name + "' (using the default)");
+  }
+  if (const YAML::Node v = t["vinay"]) {
+    const std::string uri = v.IsScalar() ? v.Scalar() : std::string();
+    const UriResult res = uri.empty() ? UriResult{} : resolve(uri, ctx.base_dir);
+    if (uri.empty()) {
+      ctx.warn(pfx + "vinay: must be a URI");
+    } else if (!res.ok) {
+      ctx.warn(pfx + "vinay '" + uri + "' could not be resolved: " + res.error);
+    } else {
+      note_source(ctx, res.canonical); // §12.5 hot-reload follows the colour table file too
+      try {
+        std::vector<std::string> vw;
+        const cvc::tf::model vm = cvc::tf::read_vinay_string(res.content, &vw);
+        for (const std::string &w : vw)
+          ctx.warn(pfx + "vinay '" + uri + "': " + w);
+        // The file holds nodes only: the preset's domain and flags stay.
+        m.color = vm.color;
+        m.alpha = vm.alpha;
+        m.isocontours = vm.isocontours;
+      } catch (const std::exception &e) {
+        ctx.warn(pfx + "vinay '" + uri + "': " + e.what());
+      }
+    }
+  }
+  const auto out_of_range = [](double at) { return !(at >= 0.0 && at <= 1.0); };
+  if (const YAML::Node c = t["color"]) {
+    std::vector<cvc::tf::color_node> nodes;
+    if (c.IsSequence())
+      for (const YAML::Node &e : c) {
+        cvc::tf::color_node cn;
+        if (!tf_color_node(e, cn))
+          ctx.warn(pfx + "a color: node is not [at, r, g, b] or {at, rgb: [r, g, b]} — skipped");
+        else if (out_of_range(cn.at))
+          ctx.warn(pfx + "color: node at " + std::to_string(cn.at) +
+                   " lies outside the normalized [0, 1] axis — dropped");
+        else
+          nodes.push_back(cn);
+      }
+    if (nodes.empty())
+      ctx.warn(pfx + "color: has no usable node (kept the starting colours)");
+    else
+      m.color = std::move(nodes);
+  }
+  if (const YAML::Node a = t["alpha"]) {
+    std::vector<cvc::tf::alpha_node> nodes;
+    if (a.IsSequence())
+      for (const YAML::Node &e : a) {
+        cvc::tf::alpha_node an;
+        if (!tf_alpha_node(e, an))
+          ctx.warn(pfx + "an alpha: node is not [at, a] or {at, a} — skipped");
+        else if (out_of_range(an.at))
+          ctx.warn(pfx + "alpha: node at " + std::to_string(an.at) +
+                   " lies outside the normalized [0, 1] axis — dropped");
+        else
+          nodes.push_back(an);
+      }
+    if (nodes.empty())
+      ctx.warn(pfx + "alpha: has no usable node (kept the starting opacities)");
+    else
+      m.alpha = std::move(nodes);
+  }
+  if (const YAML::Node is = t["isocontours"]) {
+    // An empty list is meaningful here (no isocontours), unlike colour / alpha.
+    std::vector<cvc::tf::isocontour> isos;
+    if (is.IsSequence())
+      for (const YAML::Node &e : is) {
+        cvc::tf::isocontour ic;
+        if (!tf_isocontour(e, ic)) {
+          ctx.warn(pfx + "an isocontour is not a number or {id, at, rgb, opacity} — skipped");
+          continue;
+        }
+        if (out_of_range(ic.at))
+          ctx.warn(pfx + "isocontour at " + std::to_string(ic.at) +
+                   " lies outside the normalized [0, 1] axis — clamped");
+        isos.push_back(ic);
+      }
+    else
+      ctx.warn(pfx + "isocontours: must be a list");
+    m.isocontours = std::move(isos);
+  }
+  if (const YAML::Node d = t["domain"]) {
+    double lo = 0.0, hi = 0.0;
+    if (d.IsScalar() && lowered(d.Scalar()) == "auto") {
+      m.domain.automatic = true;
+    } else if ((d.IsSequence() && d.size() == 2 && tf_number(d[0], lo) && tf_number(d[1], hi)) ||
+               (d.IsMap() && tf_number(d["min"], lo) && tf_number(d["max"], hi))) {
+      if (hi > lo) {
+        m.domain.automatic = false;
+        m.domain.min = lo;
+        m.domain.max = hi;
+      } else {
+        ctx.warn(pfx + "domain: max must exceed min (using auto)");
+        m.domain.automatic = true;
+      }
+    } else {
+      ctx.warn(pfx + "domain: must be auto or [min, max] (using auto)");
+    }
+  } else if (tf.has_window && tf.window_max > tf.window_min) {
+    // The legacy window is a domain statement too: honour it beside the model keys.
+    m.domain.automatic = false;
+    m.domain.min = tf.window_min;
+    m.domain.max = tf.window_max;
+  }
+  if (t["opacity_cubed"])
+    m.opacity_cubed = flag(t, "opacity_cubed", m.opacity_cubed);
+  if (const YAML::Node r = t["resolution"]) {
+    double res = 0.0;
+    if (tf_number(r, res) && res >= 2.0 && res <= 65536.0)
+      m.resolution = static_cast<int>(res);
+    else
+      ctx.warn(pfx + "resolution: must be a table size in [2, 65536] (kept " +
+               std::to_string(m.resolution) + ")");
+  }
+  if (const YAML::Node dm = t["dims"]) {
+    double dims = 0.0;
+    if (!tf_number(dm, dims) || dims != 1.0)
+      ctx.warn(pfx + "dims: only 1D transfer functions are supported (dims: 1)");
+  }
+  m.normalize();
+  tf.model = std::move(m);
   return tf;
 }
 
@@ -1470,7 +1817,7 @@ SceneClip parse_scene_clip(const YAML::Node &c) {
   return clip;
 }
 
-SceneNode parse_scene_node(const YAML::Node &n) {
+SceneNode parse_scene_node(Ctx &ctx, const YAML::Node &n) {
   SceneNode sn;
   sn.id = str(n, "node", str(n, "id"));
   sn.type = str(n, "type", "geometry");
@@ -1617,7 +1964,7 @@ SceneNode parse_scene_node(const YAML::Node &n) {
     sn.volren.ambient = static_cast<float>(num(vr, "ambient", 0.0));
     sn.volren.resolution_scale = static_cast<float>(num(vr, "resolution_scale", 0.5));
     sn.volren.backend = str(vr, "backend", "cpu");
-    sn.volren.tf = parse_scene_tf(vr["transfer_function"]);
+    sn.volren.tf = parse_scene_tf(ctx, vr["transfer_function"], sn.id);
     const YAML::Node iso = vr["isosurfaces"];
     if (iso && iso.IsSequence())
       for (const YAML::Node &s : iso) {
@@ -1648,7 +1995,7 @@ SceneNode parse_scene_node(const YAML::Node &n) {
     sn.volslice.near_plane = static_cast<float>(num(vsl, "near_plane", 0.0));
     sn.volslice.nearest_filter = (str(vsl, "filter", "linear") == "nearest");
     sn.volslice.opacity_correction = flag(vsl, "opacity_correction", false);
-    sn.volslice.tf = parse_scene_tf(vsl["transfer_function"]);
+    sn.volslice.tf = parse_scene_tf(ctx, vsl["transfer_function"], sn.id);
   }
   const YAML::Node vol = n["volume"];
   if (vol && vol.IsMap()) {
@@ -1657,7 +2004,7 @@ SceneNode parse_scene_node(const YAML::Node &n) {
       sn.volume.has_shaded = true;
       sn.volume.shaded = flag(vol, "shaded", true);
     }
-    sn.volume.tf = parse_scene_tf(vol["transfer_function"]);
+    sn.volume.tf = parse_scene_tf(ctx, vol["transfer_function"], sn.id);
   }
   if (const YAML::Node sh = n["shader"])
     sn.shader = parse_scene_shader(sh);
@@ -1677,7 +2024,7 @@ SceneNode parse_scene_node(const YAML::Node &n) {
   const YAML::Node kids = n["children"];
   if (kids && kids.IsSequence())
     for (const YAML::Node &c : kids)
-      sn.children.push_back(parse_scene_node(c));
+      sn.children.push_back(parse_scene_node(ctx, c));
   return sn;
 }
 
@@ -1729,14 +2076,14 @@ SceneLight parse_scene_light(const YAML::Node &n) {
   return sl;
 }
 
-Scene parse_scene(const YAML::Node &s) {
+Scene parse_scene(Ctx &ctx, const YAML::Node &s) {
   Scene sc;
   if (!s || !s.IsMap())
     return sc;
   const YAML::Node nodes = s["nodes"];
   if (nodes && nodes.IsSequence())
     for (const YAML::Node &n : nodes)
-      sc.nodes.push_back(parse_scene_node(n));
+      sc.nodes.push_back(parse_scene_node(ctx, n));
   const YAML::Node lights = s["lights"];
   if (lights && lights.IsSequence())
     for (const YAML::Node &l : lights)
@@ -2294,7 +2641,7 @@ LoadResult load_node(const YAML::Node &doc, const std::string &base_dir = std::s
   parse_units(ctx, doc); // §12: collect units: templates BEFORE the body (so include: resolves)
   r.root = parse_document(ctx, doc);
   if (doc.IsMap()) {
-    r.scene = parse_scene(doc["scene"]); // §9: the scene graph, alongside the widgets
+    r.scene = parse_scene(ctx, doc["scene"]); // §9: the scene graph, alongside the widgets
     // init: a state_exec script the host runs once at load (cvc::ariadne::run_init).
     // The loader only captures the text — it has no app and never runs the DSL.
     const YAML::Node in = doc["init"];

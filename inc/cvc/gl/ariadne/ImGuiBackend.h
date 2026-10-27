@@ -16,6 +16,7 @@
 #include <cvc/ariadne/backend.h>
 #include <cvc/image/image.h> // set_image publishes a cvc::image for the Kind::Image raster viewer
 #include <functional>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -83,6 +84,11 @@ public:
   cvc::ariadne::StringEdit input_text(const char *label, const char *key,
                                       const std::string &current) override;
   cvc::ariadne::ColorEdit color(const char *label, const float rgb[3]) override; // §G7 RGB picker
+  // §10 transfer-function editor: the ColorTable2 port drawn with the ImGui draw list (zoom strip,
+  // colour ramp, opacity curve, isocontour bars, histogram / contour spectrum / contour tree
+  // layers, context menu, colour picker, isocontour info). src/cvcGL/ariadne/tf_editor_imgui.cpp.
+  cvc::ariadne::TfEdit tf_editor(const char *label, const char *key,
+                                 const cvc::ariadne::TfEditorInput &in) override;
 
   // Novel-primitive custom widgets (§16.1b): a host registers a raw-ImGui draw fn for
   // a custom_type; custom_widget() dispatches to it. The draw fn gets the bound value
@@ -100,7 +106,7 @@ public:
   // cvc::image, updated each frame). The image is copied (COW) and uploaded to a GL texture lazily
   // inside draw_image (on the render thread, where the GL context is current). Call it from the
   // host loop; draw_image references it by the name a `- image:` widget's src/bind resolves to.
-  void set_image(const std::string &name, const cvc::image &img);
+  void set_image(const std::string &name, const cvc::image &img) override;
   bool draw_image(const char *name, float width) override; // §raster viewer (ImGui::Image over GL)
 
   // Convenience: install `rt`'s per-frame walk as `overlay`'s draw callback, so
@@ -116,6 +122,12 @@ public:
   static void setImGuiContext(ImGuiContext *ctx);
 
 private:
+  // Per-instance tf_editor state (the drag gesture, the working model while a delayed-update drag
+  // is in flight, popups), keyed by the editor's `key`. Defined in tf_editor_imgui.cpp; shared_ptr
+  // so this header needs only the declaration.
+  struct TfEditorSession;
+  std::unordered_map<std::string, std::shared_ptr<TfEditorSession>> m_tfSessions;
+
   // ImGui style vars pushed per open window (WindowBorderSize, §3.0.3b), popped
   // in end_window. A stack so window nesting is correct.
   std::vector<int> m_windowStylePushes;

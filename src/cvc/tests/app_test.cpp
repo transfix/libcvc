@@ -1872,6 +1872,164 @@ TEST_F(AppTest, ComputeAsyncRunsFanOutOffThreadThenCallsOnDone) {
   EXPECT_EQ(arrived->load(), 86); // i in [0,256), i%3==0 -> {0,3,...,255} = 86 indices
 }
 
+// ===========================
+// Finished compute_async / wait=false pooled threads are reaped
+// ===========================
+
+namespace {
+// Poll `pred` until it holds or `budget` runs out; returns whether it held.
+template <class Pred> bool eventually(Pred pred, std::chrono::milliseconds budget) {
+  const auto deadline = std::chrono::steady_clock::now() + budget;
+  while (!pred()) {
+    if (std::chrono::steady_clock::now() >= deadline)
+      return pred();
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  return true;
+}
+
+// Run one tiny compute_async and wait for its on_done.
+bool run_one_compute_async(app &ctx) {
+  auto done = std::make_shared<std::promise<void>>();
+  std::future<void> fut = done->get_future();
+  ctx.compute_async(2, [](int) {}, [done] { done->set_value(); });
+  return fut.wait_for(std::chrono::seconds(10)) == std::future_status::ready;
+}
+} // namespace
+
+// compute_async, like every wait=false startThreadPooled job, runs on a fresh pooled thread under
+// a unique key. Finished ones -- each still holding its boost::thread and the functor it ran --
+// used to stay in the app's thread map until the app was destroyed, so a host offloading a chunk
+// at a time (tf overlays, (http-get)/(fetch)) grew the map by one entry per call. A later worker
+// now joins and drops them, so the map stays bounded.
+TEST_F(AppTest, ComputeAsyncReapsFinishedWorkerThreads) {
+  ctx.computePool(); // warm the pool on this thread before the background jobs touch it
+  const int kCalls = 60;
+  for (int c = 0; c < kCalls; ++c)
+    ASSERT_TRUE(run_one_compute_async(ctx)) << "compute_async " << c << " never completed";
+
+  // The last worker is still winding down after its on_done; once it has, only it -- nobody was
+  // left to reap it -- may still be listed.
+  const std::size_t kStragglers = 4;
+  EXPECT_TRUE(
+      eventually([&] { return ctx.threads().size() <= kStragglers; }, std::chrono::seconds(5)))
+      << ctx.threads().size() << " threads still listed after " << kCalls
+      << " compute_async calls finished";
+}
+
+// The same with calls queued behind a small pool. A queued job is not in the thread map yet, so
+// its key must be held for it until it starts: two queued calls handed the same key would have
+// the second one interrupt the first and take over its entry. Every on_done runs exactly once,
+// on a thread nobody asked to stop, and the map is bounded again afterwards.
+TEST_F(AppTest, QueuedComputeAsyncCallsKeepDistinctKeysAndAreReaped) {
+  ctx.computePool();
+  ctx.setThreadPoolSize(2);
+  const int kCalls = 100;
+  auto runs = std::make_shared<std::vector<std::atomic<int>>>(kCalls);
+  auto total = std::make_shared<std::atomic<int>>(0);
+  auto interrupted = std::make_shared<std::atomic<int>>(0);
+  for (int c = 0; c < kCalls; ++c)
+    ctx.compute_async(
+        4, [](int) {},
+        [runs, total, interrupted, c] {
+          if (boost::this_thread::interruption_requested())
+            interrupted->fetch_add(1);
+          (*runs)[c].fetch_add(1);
+          total->fetch_add(1);
+        });
+
+  ASSERT_TRUE(eventually([&] { return total->load() >= kCalls; }, std::chrono::seconds(30)))
+      << "only " << total->load() << " of " << kCalls << " compute_async calls completed";
+  const std::size_t kStragglers = 4;
+  EXPECT_TRUE(
+      eventually([&] { return ctx.threads().size() <= kStragglers; }, std::chrono::seconds(5)))
+      << ctx.threads().size() << " threads still listed after " << kCalls
+      << " compute_async calls finished";
+  for (int c = 0; c < kCalls; ++c)
+    EXPECT_EQ((*runs)[c].load(), 1) << "on_done of call " << c;
+  EXPECT_EQ(interrupted->load(), 0) << "a queued call interrupted a running one";
+}
+
+// Reaping only ever takes a thread that has finished. A long wait=false pooled job keeps its
+// entry, stays joinable and still reports its info while finished compute_async workers come and
+// go around it -- and once it has finished, a later worker reaps it too.
+TEST_F(AppTest, ReapingLeavesARunningPooledThreadListed) {
+  ctx.computePool();
+  ctx.setThreadPoolSize(2);
+  const std::string key = "pool_reap_long_runner";
+  auto started = std::make_shared<std::atomic<bool>>(false);
+  auto release = std::make_shared<std::atomic<bool>>(false);
+  auto finished = std::make_shared<std::atomic<int>>(0);
+  struct release_on_exit {
+    std::shared_ptr<std::atomic<bool>> flag;
+    ~release_on_exit() { flag->store(true); } // an ASSERT below must not leave it spinning
+  } releaser{release};
+
+  ctx.startThreadPooled(
+      key,
+      [started, release, finished] {
+        started->store(true);
+        while (!release->load())
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        finished->fetch_add(1);
+      },
+      PRIORITY_NORMAL, /*wait=*/false);
+  ASSERT_TRUE(eventually([&] { return started->load(); }, std::chrono::seconds(10)));
+
+  // One at a time through the other worker: each one's worker reaps the one before it.
+  for (int i = 0; i < 20; ++i)
+    ASSERT_TRUE(run_one_compute_async(ctx)) << "compute_async " << i << " never completed";
+
+  // Sample with the runner still held; assert once it is released.
+  const bool listed = ctx.hasThread(key);
+  thread_ptr runner = ctx.threads(key);
+  const bool joinable = runner && runner->joinable();
+  const std::string info = ctx.threadInfo(key);
+  const std::size_t listed_total = ctx.threads().size();
+  runner.reset(); // a held copy would (rightly) keep it from being reaped below
+  release->store(true);
+
+  EXPECT_TRUE(listed) << "a running pooled thread was dropped from the thread map";
+  EXPECT_TRUE(joinable) << "a running pooled thread is no longer joinable";
+  EXPECT_EQ(info, "Processing: " + key);
+  EXPECT_LE(listed_total, 4u) << "finished compute_async workers were not reaped";
+  ASSERT_TRUE(eventually([&] { return finished->load() == 1; }, std::chrono::seconds(10)));
+
+  // Finished now: a worker winding down after it reaps it.
+  EXPECT_TRUE(eventually([&] { return run_one_compute_async(ctx) && !ctx.hasThread(key); },
+                         std::chrono::seconds(10)))
+      << "the finished pooled thread was never reaped";
+  EXPECT_EQ(finished->load(), 1);
+}
+
+// Destroying the app while compute_async work is queued, running and winding down must stay
+// clean: nothing queued starts any more, every worker is interrupted and joined -- including one
+// a worker was starting just as ~app took its snapshot -- and no on_done runs twice.
+TEST_F(AppTest, DestroyingAnAppWithComputeAsyncInFlightIsClean) {
+  const int kCalls = 32;
+  auto runs = std::make_shared<std::vector<std::atomic<int>>>(kCalls);
+  auto total = std::make_shared<std::atomic<int>>(0);
+  const auto t0 = std::chrono::steady_clock::now();
+  {
+    app local;
+    local.computePool();
+    local.setThreadPoolSize(2);
+    for (int c = 0; c < kCalls; ++c)
+      local.compute_async(
+          4, [](int) { std::this_thread::sleep_for(std::chrono::milliseconds(2)); },
+          [runs, total, c] {
+            (*runs)[c].fetch_add(1);
+            total->fetch_add(1);
+          });
+    // Let a few finish (and be reaped) so finished, running and queued work all meet ~app.
+    eventually([&] { return total->load() >= 3; }, std::chrono::seconds(10));
+  }
+  EXPECT_LT(std::chrono::steady_clock::now() - t0, std::chrono::seconds(20));
+  EXPECT_GE(total->load(), 3);
+  for (int c = 0; c < kCalls; ++c)
+    EXPECT_LE((*runs)[c].load(), 1) << "on_done of call " << c;
+}
+
 TEST_F(AppTest, WorldBasesAreNotGlobalSingletons) {
   // Two independent apps must own independent bases: mutating one is invisible to
   // the other. This is the whole point of the per-app model.

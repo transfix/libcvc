@@ -21,6 +21,7 @@
 #include <cvc/gl/VolSliceNode.h>
 #include <cvc/gl/VolumeNode.h>
 #include <cvc/gl/ariadne/scene_realize.h>
+#include <cvc/gl/ariadne/tf_binding.h>    // every volume node's editable transfer-function model
 #include <cvc/gl/physics_scene_binding.h> // body: the nodes physics moves
 #include <cvc/image/image.h>              // cvc::read_image — material: { texture: <uri> }
 #include <cvc/physics/world.h>            // physics: the scene's rigid-body world
@@ -412,8 +413,9 @@ void configure_volren(VolRenNode &vn, const cvc::ariadne::SceneVolRen &v, const 
   // control-point extent; author the domain via the control-point values. An explicit
   // arbitrary TF window for volren needs a tf_domain field in cvc::volren — a follow-up.
   vs.tf_auto_domain = v.tf.auto_domain;
-  for (const auto &p : v.tf.points)
-    vs.tf.add({p.value, p.color[0], p.color[1], p.color[2], p.color[3]});
+  if (!v.tf.has_model) // the model form reaches the renderer through its tf_binding instead
+    for (const auto &p : v.tf.points)
+      vs.tf.add({p.value, p.color[0], p.color[1], p.color[2], p.color[3]});
   for (const auto &s : v.isosurfaces) {
     cvc::volren::isosurface iso;
     iso.value = s.value;
@@ -423,7 +425,9 @@ void configure_volren(VolRenNode &vn, const cvc::ariadne::SceneVolRen &v, const 
     vs.isosurfaces.push_back(iso);
   }
   // Blank when there is no isosurface AND (no TF, or neither media pass is enabled).
-  if (v.isosurfaces.empty() && (v.tf.empty() || !(v.shaded || v.unshaded)))
+  const bool no_iso = v.isosurfaces.empty() && !(v.tf.has_model && !v.tf.model.isocontours.empty());
+  const bool no_tf = v.tf.has_model ? cvc::tf::transparent(v.tf.model) : v.tf.points.empty();
+  if (no_iso && (no_tf || !(v.shaded || v.unshaded)))
     warn(warnings,
          "ari: volren node '" + id +
              "' has nothing to render (no isosurfaces, and its transfer_function is empty or "
@@ -469,9 +473,10 @@ void configure_volslice(VolSliceNode &vn, const cvc::ariadne::SceneVolSlice &v,
     s.window_min = v.tf.window_min;
     s.window_max = v.tf.window_max;
   }
-  for (const auto &p : v.tf.points)
-    s.tf.add({p.value, p.color[0], p.color[1], p.color[2], p.color[3]});
-  if (v.tf.empty())
+  if (!v.tf.has_model) // the model form reaches the renderer through its tf_binding instead
+    for (const auto &p : v.tf.points)
+      s.tf.add({p.value, p.color[0], p.color[1], p.color[2], p.color[3]});
+  if (v.tf.has_model ? cvc::tf::transparent(v.tf.model) : v.tf.points.empty())
     warn(warnings,
          "ari: volslice node '" + id + "' has an empty transfer_function; it renders blank");
   vn.setConfig(s);
@@ -495,6 +500,187 @@ void apply_volume_transfer_function(cvc::gl::VolumeNode &vn,
     opacityTable.push_back(p.color[3]);
   }
   vn.setTransferFunction(colorTable, opacityTable);
+}
+
+// --- the editable transfer-function model (tf_binding) -------------------------------------------
+//
+// Every volume-type node gets a tf_binding whose model key is <node>.transfer_function, so a
+// `tf_editor` bound to graphics.root.children.<id>.transfer_function drives it. The seed is what
+// the node already draws: the document's model form (lowered by the binding at attach), or the
+// legacy points / isosurfaces / default, which the realizer has already handed the renderer above
+// -- those are seed_is_applied, so an existing document renders exactly as before until an edit.
+
+// What a node with no transfer function draws (nothing but its isosurfaces).
+cvc::tf::model transparent_model() {
+  cvc::tf::model m = cvc::tf::model::default_model();
+  m.alpha = {{0.0, 0.0f}, {1.0, 0.0f}};
+  m.isocontours.clear();
+  m.normalize();
+  return m;
+}
+
+// The legacy coupled points (raw data values) as a model over [lo, hi], exact inside it: the
+// endpoints are the piecewise-linear TF sampled there (held past the outer points, as every
+// renderer samples it), so normalize() never invents an endpoint and points outside the span only
+// shape it through those samples.
+cvc::tf::model model_from_points(const std::vector<cvc::ariadne::SceneTFPoint> &points, double lo,
+                                 double hi, bool explicit_domain) {
+  std::vector<cvc::ariadne::SceneTFPoint> p(points);
+  std::stable_sort(p.begin(), p.end(),
+                   [](const cvc::ariadne::SceneTFPoint &a, const cvc::ariadne::SceneTFPoint &b) {
+                     return a.value < b.value;
+                   });
+  const auto sample = [&p](double v, double out[4]) {
+    const auto hi_it =
+        std::upper_bound(p.begin(), p.end(), v,
+                         [](double x, const cvc::ariadne::SceneTFPoint &q) { return x < q.value; });
+    if (hi_it == p.begin() || hi_it == p.end()) {
+      const cvc::ariadne::SceneTFPoint &q = hi_it == p.begin() ? p.front() : p.back();
+      for (int c = 0; c < 4; ++c)
+        out[c] = q.color[c];
+      return;
+    }
+    const cvc::ariadne::SceneTFPoint &a = *(hi_it - 1), &b = *hi_it;
+    const double t = (v - a.value) / (b.value - a.value);
+    for (int c = 0; c < 4; ++c)
+      out[c] = a.color[c] + (b.color[c] - a.color[c]) * t;
+  };
+  std::vector<double> flat;
+  const auto push = [&flat](double v, const double c[4]) {
+    flat.insert(flat.end(), {v, c[0], c[1], c[2], c[3]});
+  };
+  double c[4];
+  sample(lo, c);
+  push(lo, c);
+  for (const cvc::ariadne::SceneTFPoint &q : p)
+    if (q.value > lo && q.value < hi) {
+      const double qc[4] = {q.color[0], q.color[1], q.color[2], q.color[3]};
+      push(q.value, qc);
+    }
+  sample(hi, c);
+  push(hi, c);
+  cvc::tf::model m = cvc::tf::from_coupled_points(flat, lo, hi);
+  m.domain.automatic = !explicit_domain;
+  if (explicit_domain) {
+    m.domain.min = lo;
+    m.domain.max = hi;
+  }
+  m.normalize();
+  return m;
+}
+
+void widen(double &lo, double &hi) {
+  if (!(hi > lo))
+    hi = lo + 1.0;
+}
+
+// volren: the document's model, else the legacy points over the domain volren bakes them over --
+// the data range (auto_domain, an `auto` model), or the points' own extent (auto_domain: false,
+// an explicit model; the TF is held past it) -- so the first unrelated edit lowers the very TF
+// volren drew. A legacy `window:` plays no part: configure_volren ignores it (the loader turns it
+// into auto_domain: false), so seeding over it would show, and the first edit would draw, a TF
+// held at the window's edges that volren never drew. Points at one value with auto_domain: false
+// give volren no extent to bake over -- it draws them transparent -- and so seed a transparent
+// model. The isosurfaces become isocontours with their colour/opacity as overrides and their
+// shininess kept by id.
+tf_binding_options volren_tf_options(const cvc::ariadne::SceneVolRen &v, const cvc::volume &vol,
+                                     const std::string &id, std::vector<std::string> *warnings) {
+  tf_binding_options o;
+  double vlo = vol.min(), vhi = vol.max();
+  widen(vlo, vhi);
+  const cvc::ariadne::SceneTransferFunction &tf = v.tf;
+  if (tf.has_model) {
+    o.seed = tf.model;
+  } else if (!tf.points.empty() && tf.auto_domain) {
+    o.seed = model_from_points(tf.points, vlo, vhi, false);
+    o.seed_is_applied = true;
+  } else if (!tf.points.empty()) {
+    const auto mm =
+        std::minmax_element(tf.points.begin(), tf.points.end(),
+                            [](const cvc::ariadne::SceneTFPoint &a,
+                               const cvc::ariadne::SceneTFPoint &b) { return a.value < b.value; });
+    o.seed = mm.second->value > mm.first->value
+                 ? model_from_points(tf.points, mm.first->value, mm.second->value, true)
+                 : transparent_model();
+    o.seed_is_applied = true;
+  } else {
+    o.seed = transparent_model();
+    o.seed_is_applied = true;
+  }
+  double lo = 0.0, hi = 1.0;
+  cvc::tf::effective_domain(o.seed, true, vlo, vhi, lo, hi);
+  for (const cvc::ariadne::SceneIsosurface &s : v.isosurfaces) {
+    cvc::tf::isocontour ic;
+    ic.id = o.seed.next_isocontour_id();
+    const double t = cvc::tf::to_normalized(s.value, lo, hi);
+    if (!(t >= 0.0 && t <= 1.0))
+      warn(warnings, "ari: volren node '" + id + "': isosurface " + std::to_string(s.value) +
+                         " lies outside its transfer-function domain [" + std::to_string(lo) +
+                         ", " + std::to_string(hi) + "]; an editor shows it clamped to the edge");
+    ic.at = std::clamp(t, 0.0, 1.0);
+    ic.has_rgb = true;
+    ic.r = s.color[0];
+    ic.g = s.color[1];
+    ic.b = s.color[2];
+    ic.has_opacity = true;
+    ic.opacity = s.opacity;
+    o.shininess[ic.id] = s.shininess;
+    o.seed.isocontours.push_back(ic);
+  }
+  o.seed.normalize();
+  return o;
+}
+
+// volslice: the document's model, else the legacy points over the window (an explicit domain:
+// the legacy window spans the LUT, so the TF is held past it) or over the data range (`auto`) --
+// VolSliceNode::effectiveWindow's choice. Either way the TF stays fixed in data units, as the
+// legacy renderer keeps it: a window written later is only the LUT's span (the binding's range is
+// the data range, so a moved window re-lowers nothing), and the binding never writes back over a
+// window someone else changed (tf_binding.h).
+tf_binding_options volslice_tf_options(const cvc::ariadne::SceneVolSlice &v,
+                                       const cvc::volume &vol) {
+  tf_binding_options o;
+  const cvc::ariadne::SceneTransferFunction &tf = v.tf;
+  if (tf.has_model) {
+    o.seed = tf.model;
+  } else if (!tf.points.empty()) {
+    const bool expl = tf.has_window && tf.window_max > tf.window_min;
+    double lo = expl ? tf.window_min : vol.min(), hi = expl ? tf.window_max : vol.max();
+    widen(lo, hi);
+    o.seed = model_from_points(tf.points, lo, hi, expl);
+    o.seed_is_applied = true;
+  } else {
+    o.seed = transparent_model();
+    o.seed_is_applied = true;
+  }
+  return o;
+}
+
+// volume (VTK): the document's model, else the legacy points (absolute values, so an explicit
+// domain) over the node's data range, else VolumeNode's default ramp -- black -> white, opacity
+// 0 -> 1 over the data range, an `auto` domain re-fitted to a reloaded volume like VolumeNode's own
+// default. That shape, not the tables VTK holds now: on a degenerate (empty or constant) volume
+// VolumeNode makes its ramp invisible (top opacity 0), and a seed copied from it would lower as
+// EMPTY tables over the real volume a host loads later (setVolume), blanking the ramp VolumeNode
+// re-fits there. The degenerate volume draws nothing either way (opacity 0 at its one value).
+tf_binding_options volume_tf_options(const cvc::ariadne::SceneTransferFunction &tf,
+                                     VolumeNode &vn) {
+  tf_binding_options o;
+  double lo = cvc::ariadne::read_or<double>(vn.app(), vn.stateName("data_min"), 0.0);
+  double hi = cvc::ariadne::read_or<double>(vn.app(), vn.stateName("data_max"), 1.0);
+  widen(lo, hi);
+  if (tf.has_model) {
+    o.seed = tf.model;
+  } else if (!tf.points.empty()) {
+    o.seed = model_from_points(tf.points, lo, hi, true);
+    o.seed_is_applied = true;
+  } else {
+    o.seed = cvc::tf::from_tables({lo, 0.0, 0.0, 0.0, hi, 1.0, 1.0, 1.0}, {lo, 0.0, hi, 1.0}, lo,
+                                  hi); // VolumeNode::setDefaultTransferFunction's ramp
+    o.seed.domain.automatic = true;
+    o.seed_is_applied = true;
+  }
+  return o;
 }
 
 // Realize one node under `parent` (null = a top-level node parented to the graphics
@@ -637,9 +823,12 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
       if (n.has_volume) {
         if (n.volume.has_shaded)
           vnode->setShading(n.volume.shaded);
-        if (!n.volume.tf.empty())
+        if (!n.volume.tf.has_model && !n.volume.tf.points.empty())
           apply_volume_transfer_function(*vnode, n.volume.tf);
       }
+      if (const cvc::volume *v = vnode->getVolume())
+        attach_transfer_function(out, vnode, tf_target::volume, *v,
+                                 volume_tf_options(n.volume.tf, *vnode), warnings);
     }
   } else if (n.type == "volren") {
     if (n.source_file.empty() && n.source_sdf_mesh.empty()) {
@@ -660,6 +849,8 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
       if (!parent)
         sg.registerGraphics(n.id, vn); // name-map parity + grid enclosure for a top-level node
       configure_volren(*vn, n.volren, vol, n.id, warnings);
+      attach_transfer_function(out, vn, tf_target::volren, vol,
+                               volren_tf_options(n.volren, vol, n.id, warnings), warnings);
     } catch (const std::exception &e) {
       warn(warnings, "ari: scene node '" + n.id + "': " + e.what());
       return;
@@ -681,6 +872,8 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
       if (!parent)
         sg.registerGraphics(n.id, vn);
       configure_volslice(*vn, n.volslice, vol, n.id, warnings);
+      attach_transfer_function(out, vn, tf_target::volslice, vol,
+                               volslice_tf_options(n.volslice, vol), warnings);
     } catch (const std::exception &e) {
       warn(warnings, "ari: scene node '" + n.id + "': " + e.what());
       return;

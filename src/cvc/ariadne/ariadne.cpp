@@ -7,6 +7,8 @@
 // backend reports the edit committed — so a slider drag costs one state write on
 // release, not one per frame (writes fan out to observers / replicated peers).
 
+#include "tf_editor_emit.h" // Kind::TfEditor (model / overlay / view state edges)
+
 #include <algorithm>
 #include <atomic>
 #include <charconv>
@@ -762,6 +764,47 @@ private:
   std::unique_ptr<se::stackless_evaluator> ev_;
   std::unordered_map<std::string, std::optional<se::value_t>> compiled_;
 };
+
+// The app's exec scheduler if something has built it, else nullptr; never builds it. app::
+// exec_scheduler() builds it on first call and cvc::app has no accessor that does not, so this
+// reads the same handle under the same mutex, through pointers to its protected members that a
+// class derived from cvc::app may form ([class.protected]). Once built, the scheduler lives as long
+// as its app, so a Runtime may keep the pointer.
+struct exec_scheduler_probe : cvc::app {
+  static cvc::state_exec::async_scheduler *built(cvc::app &a) {
+    boost::mutex::scoped_lock lock(a.*(&exec_scheduler_probe::_execSchedulerMutex));
+    return (a.*(&exec_scheduler_probe::_execScheduler)).get();
+  }
+};
+
+// The frame boundaries an app's Runtimes share. Each Runtime pumps the one app scheduler in its own
+// drain(), so with N Runtimes an app frame holds N pumps, and only one of them may re-ready the
+// (await …) frame-yielders, or an await would cross a 1/N of a frame. A pump starts the next frame
+// exactly when its own Runtime has pumped since the last boundary: every Runtime drains once a
+// frame, so its second pump since a boundary belongs to the next frame. There is no leader, so a
+// Runtime that stops drawing holds nothing up, and a lone Runtime starts a frame at every pump.
+// Kept in the app's data map (like the app's other per-app registries), so it dies with the app.
+struct exec_pump_clock {
+  std::mutex mutex;
+  std::uint64_t frames = 0; // boundaries started so far
+};
+
+std::shared_ptr<exec_pump_clock> pump_clock_of(cvc::app &app) {
+  static const char kKey[] = "__ariadne_exec_pump_clock";
+  const cvc::mutex_ptr guard = app.mutex(kKey); // check-then-create, as for the app's state root
+  boost::mutex::scoped_lock lock(*guard);
+  std::shared_ptr<exec_pump_clock> clock;
+  try {
+    clock = app.data<std::shared_ptr<exec_pump_clock>>(kKey);
+  } catch (const std::exception &) {
+    // not yet present
+  }
+  if (!clock) {
+    clock = std::make_shared<exec_pump_clock>();
+    app.data(kKey, clock);
+  }
+  return clock;
+}
 } // namespace
 
 struct Runtime::Impl {
@@ -848,6 +891,9 @@ struct Runtime::Impl {
   // bridges those skips so the list stays stable; a genuine count change is picked up on the next
   // unskipped frame.
   std::unordered_map<std::string, int> last_good_count;
+  // Kind::TfEditor parse caches, one per editor instance ("<model path>#<id>"): a state string is
+  // re-parsed only when it changes.
+  std::unordered_map<std::string, TfEditorCache> tf_caches;
 
   // §4.7 action lane: a unique owner tag for this Runtime's processes on the app-wide
   // scheduler (app.exec_scheduler()), so teardown reaps exactly this document's process
@@ -875,9 +921,17 @@ struct Runtime::Impl {
   // Submit a program `on:` as a process on the app-wide scheduler (owner-tagged, chrooted
   // to `prefix`), keeping its ActionContext alive in live_actions_. Returns immediately.
   void submit_action(const QueuedAction &action);
-  // Pump the app scheduler a bounded slice, then sweep finished actions out of
-  // live_actions_ (reporting a killed one; a still-parked one persists to a later frame).
-  void pump_and_sweep_actions();
+  // The scheduler drain() pumps, or nullptr to skip the pump: the app's, when this Runtime has
+  // submitted to it or any process is live on it (whoever submitted it). Never builds it.
+  cvc::state_exec::async_scheduler *scheduler_to_pump();
+  cvc::state_exec::async_scheduler *seen_scheduler_ = nullptr; // the app's, once something built it
+  // Whether this pump starts the next app frame (exec_pump_clock), advancing the shared clock.
+  bool starts_frame();
+  std::shared_ptr<exec_pump_clock> pump_clock_; // shared by the app's Runtimes; got at first pump
+  std::uint64_t pumped_at_ = 0; // the clock's frame count at this Runtime's last pump
+  // Pump `sched` a bounded slice, then sweep finished actions out of live_actions_ (reporting a
+  // killed one; a still-parked one persists to a later frame).
+  void pump_and_sweep_actions(cvc::state_exec::async_scheduler &sched);
 
   // §7.1 resident on:tick handler. tick_script_ is the author's per-frame body (empty = none).
   // ensure_tick_resident() submits ONE long-lived process (idempotent) that loops
@@ -1507,6 +1561,17 @@ void Runtime::Impl::emit_node(const Widget &w) {
       enqueue(w.on);
     break;
 
+  case Kind::TfEditor: {
+    TfEditorContext ctx{app,
+                        b,
+                        [this](const std::string &bind) { return resolve(bind); },
+                        [this](const std::string &event) { enqueue(event); },
+                        [this](const std::string &msg) { warn_once(msg); },
+                        tf_caches};
+    emit_tf_editor(ctx, w);
+    break;
+  }
+
   case Kind::Custom: {
     // Three ways a custom widget renders, in priority order:
     //  1. a COMPOSITIONAL fn (register_widget_type) — composes built-ins through a
@@ -1685,16 +1750,43 @@ void Runtime::Impl::submit_action(const QueuedAction &action) {
   }
 }
 
-void Runtime::Impl::pump_and_sweep_actions() {
+cvc::state_exec::async_scheduler *Runtime::Impl::scheduler_to_pump() {
   namespace se = cvc::state_exec;
-  auto &sched = app.exec_scheduler();
+  if (used_scheduler_)
+    return &app.exec_scheduler(); // this document's own processes: pumped every drain, as always
+  if (!seen_scheduler_)
+    seen_scheduler_ = exec_scheduler_probe::built(app);
+  if (!seen_scheduler_)
+    return nullptr; // nothing ever used it: nothing to pump, and it stays unbuilt
+  // Someone else's processes (a scene's overlay tasks, a host verb's): pumped while any is live.
+  // Messages posted while none is live wait in the ingress for the next one, in order.
+  const se::scheduler_stats s = seen_scheduler_->get_stats();
+  const int live = s.total_processes - s.terminated - s.killed - s.failed;
+  return live > 0 ? seen_scheduler_ : nullptr;
+}
+
+bool Runtime::Impl::starts_frame() {
+  if (!pump_clock_)
+    pump_clock_ = pump_clock_of(app);
+  std::lock_guard<std::mutex> lock(pump_clock_->mutex);
+  const bool next = pumped_at_ == pump_clock_->frames; // pumped since the last boundary?
+  if (next)
+    ++pump_clock_->frames;
+  pumped_at_ = pump_clock_->frames;
+  return next;
+}
+
+void Runtime::Impl::pump_and_sweep_actions(cvc::state_exec::async_scheduler &sched) {
+  namespace se = cvc::state_exec;
   // Apply any cross-thread post_message() deliveries FIRST, so a delivery that readies a parked
   // (msg-recv …) receiver is seen by sync_run's has_runnable() gate — otherwise, with everything
   // parked, sync_run would skip stepping and never drain the ingress itself.
   sched.drain_ingress();
-  // Frame boundary: re-ready any process parked by (await …) on a PRIOR drain. Called here (once
-  // per drain), NOT inside step()/sync_run, so an await crosses exactly one frame.
-  sched.wake_awaiting();
+  // Frame boundary: re-ready any process parked by (await …) in a PRIOR frame. Called here, once
+  // per app frame however many Runtimes pump (starts_frame), NOT inside step()/sync_run, so an
+  // await crosses exactly one frame.
+  if (starts_frame())
+    sched.wake_awaiting();
   // Pump a bounded slice: a quick (non-suspending) action completes within THIS drain (so a
   // fire-then-check interaction still sees its effect immediately), while an action that parks
   // on await/sleep/msg-recv yields and resumes on a later frame. Global step + time backstops
@@ -2017,10 +2109,13 @@ void Runtime::drain() {
   // §4.6 input residents (on_key/on_pointer): ensure they exist (idempotent; post_input also does,
   // but a host that set a program yet fed no input this frame still gets its resident submitted).
   m_->ensure_input_residents();
-  // Advance submitted actions + the resident — and anything still-parked from earlier frames — a
-  // bounded slice, then sweep the finished ones. Runs once used_scheduler_ latches.
-  if (m_->used_scheduler_)
-    m_->pump_and_sweep_actions();
+  // Advance submitted actions + the residents — and anything still-parked from earlier frames — a
+  // bounded slice, then sweep the finished ones. Every drain once this Runtime has used the app
+  // scheduler, and otherwise whenever any process is live on it: other components run processes
+  // there too (a scene's transfer-function overlay tasks, cvc/tf/overlay_tasks.h), and only a pump
+  // advances them, whatever host this is. An app nothing has used is not pumped (nor built).
+  if (cvc::state_exec::async_scheduler *sched = m_->scheduler_to_pump())
+    m_->pump_and_sweep_actions(*sched);
 }
 
 std::vector<std::string> Runtime::take_reactive_warnings() {
