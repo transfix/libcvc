@@ -428,19 +428,21 @@ using binding_node = binding_map::node_type;
 // the next set() of a new name.
 //
 // A scope and its shared_ptr control block are one allocation, as make_shared makes them: a
-// scope_block, whose slot for the control block its allocator hands out. So a long-lived scope
-// (a process's) costs one allocation, as before. The block is kept (or freed) when the control
-// block is deallocated, which is after the scope was emptied.
+// block with a slot for the control block, then the scope; the control block's allocator hands
+// out the slot. So a long-lived scope (a process's) costs one allocation, as before, 16 bytes
+// larger. The block is kept (or freed) when the control block is deallocated, which is after the
+// scope was emptied.
 //
 // What is kept is bounded, and per thread, so nothing is shared between threads: a scope or
 // node made on one thread and dropped on another is kept by the other. On 64-bit MSVC that is at
-// most 64 blocks of about 140 bytes, each with its empty map's sentinel and 8 buckets (about 150
+// most 64 blocks of 120 bytes, each with its empty map's sentinel and 8 buckets (about 150
 // bytes), and 128 nodes of about 130 bytes: under 35 KB per thread that steps a program.
 constexpr std::size_t kKeptScopes = 64;
 constexpr std::size_t kKeptNodes = 128;
-// Room for the control block of a scope_block: a vtable, two counts, the pointer and the
-// allocator (32 bytes with MSVC's and libstdc++'s, 40 with libc++'s).
-constexpr std::size_t kControlBytes = 48;
+// The slot for a scope's control block: a vtable, two counts and the pointer (24 bytes with
+// MSVC's and libstdc++'s shared_ptr, 32 with libc++'s; the deleter and allocator are empty).
+constexpr std::size_t kControlBytes = 32;
+static_assert(kControlBytes % alignof(environment) == 0);
 
 // A kept scope must be what a new one is: an empty map with a new map's bucket count, so that
 // how many buckets a scope has (which heap measurement counts, heap.h) never depends on what the
@@ -449,12 +451,30 @@ constexpr std::size_t kControlBytes = 48;
 // binding are kept, with the nodes of all of them.)
 const std::size_t kFreshBuckets = binding_map().bucket_count();
 
-struct scope_block : environment {
-  alignas(std::max_align_t) unsigned char control[kControlBytes];
-};
+// A block: the control block's slot, then the scope.
+environment *scope_in(void *block) noexcept {
+  return std::launder(
+      reinterpret_cast<environment *>(static_cast<unsigned char *>(block) + kControlBytes));
+}
+
+void *new_block() {
+  void *block = ::operator new(kControlBytes + sizeof(environment));
+  try {
+    ::new (static_cast<unsigned char *>(block) + kControlBytes) environment();
+  } catch (...) {
+    ::operator delete(block);
+    throw;
+  }
+  return block;
+}
+
+void free_block(void *block) noexcept {
+  scope_in(block)->~environment();
+  ::operator delete(block);
+}
 
 struct scope_pool {
-  scope_block *scopes[kKeptScopes];
+  void *scopes[kKeptScopes];
   std::size_t nscopes = 0;
   binding_node nodes[kKeptNodes];
   std::size_t nnodes = 0;
@@ -469,46 +489,49 @@ struct scope_pool {
 // another thread_local's destructor) are freed.
 thread_local bool t_scope_pool_gone = false;
 thread_local scope_pool t_scope_pool;
+// The block whose slot the next control block goes in: set by extend() just before it makes the
+// shared_ptr, which allocates the control block on this thread, at once.
+thread_local void *t_placing = nullptr;
 
 scope_pool *this_thread_pool() noexcept { return t_scope_pool_gone ? nullptr : &t_scope_pool; }
 
 scope_pool::~scope_pool() {
   t_scope_pool_gone = true;
   while (nscopes > 0)
-    delete scopes[--nscopes];
+    free_block(scopes[--nscopes]);
   // The nodes go with the array.
 }
 
-// Hands out the control block of a scope extend() made: the slot in its scope_block. Its
+// Hands out the control block of a scope extend() made: the slot at the start of its block. Its
 // deallocation is the block's end: the block is kept for the next extend(), or freed.
 template <class T> struct block_allocator {
   using value_type = T;
-  scope_block *home;
-  explicit block_allocator(scope_block *b) noexcept : home(b) {}
-  template <class U> block_allocator(const block_allocator<U> &o) noexcept : home(o.home) {}
+  block_allocator() = default;
+  template <class U> block_allocator(const block_allocator<U> &) noexcept {}
 
   T *allocate(std::size_t /*n: one control block*/) {
     static_assert(sizeof(T) <= kControlBytes && alignof(T) <= alignof(std::max_align_t),
                   "a scope's control block doesn't fit its slot: raise kControlBytes");
-    return reinterpret_cast<T *>(home->control);
+    void *slot = t_placing;
+    t_placing = nullptr;
+    if (!slot) // only extend() makes these, and it sets the slot first
+      throw std::bad_alloc();
+    return static_cast<T *>(slot);
   }
-  void deallocate(T * /*p: the slot*/, std::size_t) noexcept {
-    scope_block *b = home; // `this` may be in the slot (a copy the control block held)
+  void deallocate(T *p, std::size_t) noexcept {
+    void *block = p;
+    const environment *e = scope_in(block);
     scope_pool *pool = this_thread_pool();
-    if (pool && pool->nscopes < kKeptScopes && b->bindings.empty() &&
-        b->bindings.bucket_count() == kFreshBuckets) {
-      b->frozen = false;
-      pool->scopes[pool->nscopes++] = b;
+    if (pool && pool->nscopes < kKeptScopes && e->bindings.empty() &&
+        e->bindings.bucket_count() == kFreshBuckets) {
+      scope_in(block)->frozen = false;
+      pool->scopes[pool->nscopes++] = block;
       return;
     }
-    delete b; // ~environment of an empty scope with no enclosing one: frees only the map
+    free_block(block); // ~environment of an empty scope with no enclosing one: frees the map
   }
-  template <class U> bool operator==(const block_allocator<U> &o) const noexcept {
-    return home == o.home;
-  }
-  template <class U> bool operator!=(const block_allocator<U> &o) const noexcept {
-    return home != o.home;
-  }
+  template <class U> bool operator==(const block_allocator<U> &) const noexcept { return true; }
+  template <class U> bool operator!=(const block_allocator<U> &) const noexcept { return false; }
 };
 
 // Takes the place of the destructor for a scope extend() made: frees what the destructor would,
@@ -516,7 +539,7 @@ template <class T> struct block_allocator {
 // destruction would, so a release backlog sees the same owners), keeping the binding nodes of a
 // scope that will be kept. Its block goes with its control block (block_allocator::deallocate).
 struct scope_recycler {
-  void operator()(scope_block *e) const noexcept {
+  void operator()(environment *e) const noexcept {
     detail::drop_owner(e->outer);
     e->outer.reset();
     binding_map &b = e->bindings;
@@ -676,10 +699,11 @@ void environment::set_existing(const std::string &name, value_t val) {
 
 environment_ptr environment::extend(environment_ptr parent) {
   scope_pool *pool = this_thread_pool();
-  scope_block *child = pool && pool->nscopes > 0 ? pool->scopes[--pool->nscopes] : new scope_block;
+  void *block = pool && pool->nscopes > 0 ? pool->scopes[--pool->nscopes] : new_block();
+  environment *child = scope_in(block);
   child->outer = std::move(parent);
-  // Its control block is in the block, so making the shared_ptr can't fail.
-  return environment_ptr(child, scope_recycler{}, block_allocator<environment>(child));
+  t_placing = block; // its control block goes in the block, so making the shared_ptr can't fail
+  return environment_ptr(child, scope_recycler{}, block_allocator<environment>());
 }
 
 // to_string and values_equal are walks: see data_job.cpp.
