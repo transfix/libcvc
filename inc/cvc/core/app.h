@@ -847,8 +847,9 @@ protected:
   std::uint64_t _poolInterruptGen = 0;
   unsigned int _poolThreadCount = 0; // workers running or asked for
   std::uint64_t _poolSeq = 0;        // next ThreadPoolTask::seq
-  // Set by ~app (stopThreadPool), first thing after the async host: no pending task starts any
-  // more, and a task submitted from then on is dropped unrun.
+  // Set by ~app (closeThreadPool), right after the async host's shutdown (before it, when the
+  // pool has no worker): no pending task starts any more, and a task submitted from then on is
+  // dropped unrun.
   bool _poolStopping = false;
 
   // Shared fork-join compute pool (computePool()). Lazily built; the mutex guards
@@ -874,8 +875,10 @@ protected:
   // timeout). Call it (or wait()) from main() before exit if you spawned work;
   // there is no process-global auto-join — cvc::app carries no singleton.
   // It waits with interruption held off: an interrupt sent to the calling
-  // thread meanwhile stays pending until it returns (it used to be thrown in
-  // the wait and dropped).
+  // thread once it has begun stays pending until it returns (it used to be
+  // thrown in the wait and dropped). One already pending when it is called
+  // is thrown at once, before it does anything (threads() is an
+  // interruption point).
   void wait_for_threads();
 
 private:

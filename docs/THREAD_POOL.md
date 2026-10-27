@@ -159,8 +159,10 @@ Wait on the tasks' own completion, as here. `app.wait()` is a shutdown
 step, not a barrier: it first interrupts every running task (one that
 reaches an interruption point ends early, without an error) and then
 waits at most 5 s for the pool to drain, with a warning if it doesn't.
-It isn't interruptible itself: an interrupt sent to the thread calling
-it stays pending until it returns.
+An interrupt sent to the thread calling it once it has begun doesn't
+cut it short: it stays pending until `wait()` returns. One already
+pending when `wait()` is called is thrown at once, before it does
+anything.
 
 ### Inspecting the pool
 

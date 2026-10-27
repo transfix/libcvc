@@ -1273,7 +1273,7 @@ unsigned int app::getPendingThreadCount() const {
 // and are woken (a std::condition_variable_any) and created after it is released; a new worker
 // takes no task until its creator has put it in _poolWorkers, where the interrupts go. Once ~app
 // has stopped the pool, a task is dropped unrun: submitPooled returns false, and the queued
-// ones are destroyed in stopThreadPool.
+// ones are destroyed in closeThreadPool.
 //
 // 10/26/2026 -- Joe R. -- Persistent workers instead of a boost::thread per task; FIFO within a
 //                         priority; anonymous tasks out of the thread map. Fixes the stall and
