@@ -330,6 +330,8 @@ public:
   explicit time_budget(double seconds);
 
   void start();
+  /// start() at `now`, a steady_clock reading the caller already has.
+  void start(clock::time_point now);
   /// End the interval. Since its last check (spent(), or start()) it took `checks` steps,
   /// whose gaps the budget did not see: they count as that many gaps.
   void stop(std::uint64_t checks = 1);
@@ -370,6 +372,9 @@ private:
 class eval_deadline_guard {
 public:
   explicit eval_deadline_guard(std::optional<double> seconds);
+  /// The same, armed from `now`, a steady_clock reading the caller already has (a scheduler's
+  /// step start).
+  eval_deadline_guard(std::optional<double> seconds, std::chrono::steady_clock::time_point now);
   ~eval_deadline_guard();
   eval_deadline_guard(const eval_deadline_guard &) = delete;
   eval_deadline_guard &operator=(const eval_deadline_guard &) = delete;

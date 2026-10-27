@@ -195,7 +195,7 @@ void async_scheduler::execute_process_step(const process_ptr &pp) {
   // pump's own per-drain cap instead. Take the tighter of the two.
   if (proc.max_step_time > 0.0)
     step_budget = step_budget ? std::min(*step_budget, proc.max_step_time) : proc.max_step_time;
-  eval_deadline_guard step_deadline(step_budget);
+  eval_deadline_guard step_deadline(step_budget, step_start);
   // Bound what one native call in this step may allocate (see scheduler.cpp).
   // Armed only when it changes something (see scheduler.cpp).
   std::optional<eval_alloc_guard> step_alloc;

@@ -330,7 +330,7 @@ void scheduler::execute_process_step(const process_ptr &pp) {
   // between-steps max_time check (checked only after step() returns) cannot see. Arming the
   // cooperative deadline for this step lets that inner work abort at the budget too — the
   // same guarantee the read-lane's run() already has. max_time <= 0 means unlimited (nullopt).
-  eval_deadline_guard step_deadline(proc.time_left(start));
+  eval_deadline_guard step_deadline(proc.time_left(start), start);
   // Bound what one native call in this step may allocate: limits.max_alloc_bytes, tightened to
   // what is left of max_memory (its state-tree writes plus its measured heap share).
   // With no budget and the default cap, an armed guard would change nothing (the default applies
