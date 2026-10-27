@@ -121,7 +121,9 @@ private:
   std::size_t _col = 1;
   std::vector<frame> _frames; // innermost last; its size is the current nesting depth
   // Element vectors of closed lists, emptied, for the next lists to collect into: a list is
-  // then made with one allocation of its exact size, not grown an element at a time.
+  // then made with one allocation of its exact size, not grown an element at a time. Only
+  // vectors of up to kSpareElements values are kept (a longer list takes its own).
+  static constexpr std::size_t kSpareElements = 64;
   std::vector<std::vector<value_t>> _spare_elements;
 
   char peek() const;

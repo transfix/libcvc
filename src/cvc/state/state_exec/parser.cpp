@@ -174,13 +174,19 @@ parser::read_status parser::read(value_t &out, std::size_t &budget) {
       }
       if (c == ')' && !_frames.empty() && !_frames.back().quote) {
         advance();
-        // The list gets a vector of its exact size; the one it was collected in is kept.
+        // A short list gets a vector of its exact size, and the one it was collected in is kept
+        // for the next list; a long one takes the vector it was collected in, as it always did,
+        // so that the parser keeps no more than a few short vectors.
         std::vector<value_t> &elements = _frames.back().elements;
-        datum = make_list(std::vector<value_t>(std::make_move_iterator(elements.begin()),
-                                               std::make_move_iterator(elements.end())));
-        elements.clear();
-        if (_spare_elements.size() < _frames.capacity())
-          _spare_elements.push_back(std::move(elements));
+        if (elements.capacity() > kSpareElements) {
+          datum = make_list(std::move(elements));
+        } else {
+          datum = make_list(std::vector<value_t>(std::make_move_iterator(elements.begin()),
+                                                 std::make_move_iterator(elements.end())));
+          elements.clear();
+          if (_spare_elements.size() < _frames.capacity())
+            _spare_elements.push_back(std::move(elements));
+        }
         _frames.pop_back();
       } else if (c == '"') {
         datum = parse_string();

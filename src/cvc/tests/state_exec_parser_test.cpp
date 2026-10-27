@@ -464,3 +464,25 @@ TEST(StateExecParserTest, ListsHoldExactlyTheirElements) {
   EXPECT_EQ(lists, 7);
   EXPECT_EQ(to_string(v), "(a (b c) (d e f g h i j k l m n) () (q (r (s t u v w x))) z)");
 }
+
+TEST(StateExecParserTest, LongAndShortListsBetweenEachOther) {
+  // Short lists are made at their exact size from kept vectors; a long one takes the vector it
+  // was collected in. Either way each list has its own elements.
+  std::string src = "((a b) (";
+  for (int i = 0; i < 500; ++i)
+    src += std::to_string(i) + " (c " + std::to_string(i) + ") ";
+  src += ") (d e f))";
+  const value_t v = parse(src);
+  const auto &top = *std::get<list_ptr>(v.v);
+  ASSERT_EQ(top.size(), 3u);
+  EXPECT_EQ(to_string(top[0]), "(a b)");
+  EXPECT_EQ(to_string(top[2]), "(d e f)");
+  const auto &mid = *std::get<list_ptr>(top[1].v);
+  ASSERT_EQ(mid.size(), 1000u);
+  for (int i = 0; i < 500; ++i) {
+    EXPECT_EQ(std::get<int64_t>(mid[2 * i].v), i);
+    EXPECT_EQ(to_string(mid[2 * i + 1]), "(c " + std::to_string(i) + ")");
+  }
+  for (const value_t &e : top)
+    EXPECT_EQ(std::get<list_ptr>(e.v).use_count(), 1);
+}
