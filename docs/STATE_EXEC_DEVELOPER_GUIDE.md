@@ -542,11 +542,17 @@ it picks.)
   call whose process has a step or time limit is due (every millisecond while one runs: a kernel
   that never checks `cancelled()` is charged its run time as CPU time, and only a drain finds the
   limit reached, `docs/STATE_EXEC_EXCEPTIONS.md` 3.8), or the deadline passes; it returns at
-  once when a process is ready. Processes parked until the next frame (`(await ...)`,
-  `awaiting_frame_count()`) are the host's to wake with `wake_awaiting()`. pycvc's `Exec` waits
-  this way instead of polling. A process with no limits is charged for a call at the drains the
-  driver makes anyway (each settled call's final charge included), so a change to
-  `limits.async_steps_per_cpu_ms` applies to the next of those.
+  once when a process is ready. Only the calls of processes still running count: a call whose
+  process ended without awaiting it (an abandoned future) runs on, but no drain times it out or
+  charges it, so it doesn't end the wait either. Nor does a timeout that never passes (NaN or
+  infinite). Processes parked until the next frame (`(await ...)`, `awaiting_frame_count()`) are
+  the host's to wake with `wake_awaiting()`. pycvc's `Exec` waits this way instead of polling;
+  while a coroutine is pending, its asyncio slice is the wait where asyncio's clock is fine (the
+  slice blocks in the selector until its 5 ms stop timer), and a 5 ms beat follows a slice that
+  returned at once (Windows before Python 3.13, whose ~15.6 ms clock runs that timer at once). A
+  process with no limits is charged for a call at the drains the driver makes anyway (each
+  settled call's final charge included), so a change to `limits.async_steps_per_cpu_ms` applies
+  to the next of those.
 
   ```cpp
   for (;;) {
@@ -561,12 +567,17 @@ it picks.)
 - **Waits and the CPU.** A sleeper's deadline is kept to well under a millisecond. On Windows,
   whose high-resolution timer fires on a ~0.5 ms grid, that costs up to ~0.6 ms of spinning at
   the end of each such wait (`detail::wakeup`): a run of millisecond sleeps still uses about half
-  a core, against all of one while `run()` spun. Such a wait runs its thread at above-normal
-  priority (restored after it), so on a machine whose cores are all busy the thread gets one back
-  when its timer fires rather than a scheduler quantum later; even so a blocked wait there can
-  wake a few milliseconds late now and then, where the spin, which never gave its core up, did
-  not. Every other wait (a deadline of the caller's, a
-  call's timeout or charge, a budget's end) may end up to ~0.5 ms late and burns no CPU.
+  a core, against all of one while `run()` spun. Such a wait raises a thread at normal priority
+  to above normal, so on a machine whose cores are all busy the thread gets one back when its
+  timer fires rather than a scheduler quantum later; even so a blocked wait there can wake a few
+  milliseconds late now and then, where the spin, which never gave its core up, did not. The
+  thread is back at normal after the wait, unless its priority was changed meanwhile (that
+  change stands), and a thread the host gave another priority keeps it: one lowered to keep the
+  driver below the host's other threads isn't raised. Every other wait (a deadline of the
+  caller's, a call's timeout or charge, a budget's end) may end up to ~0.5 ms late and burns no
+  CPU. No wait ends before its time on the steady clock: when an OS timer fires early, the wait
+  reads the clock and waits the rest, and a sleeper wakes only once the clock has reached its
+  deadline.
 - **Finished processes** leave every index at once but stay in the table, so `get_result()`,
   `get_process_info()` and `get_results()` still report them, until `reap(pid)` erases one (both
   schedulers; a host that reaps from `on_complete` is fine: the process goes once its last step is
@@ -582,6 +593,9 @@ it picks.)
   poll would have seen it at once. Likewise the async scheduler reads
   `limits.async_steps_per_cpu_ms` from the tree for its calls in flight only when the tree
   changed (and `set_id()` makes it read again), and a change still applies to the next charge.
+  A drain reads it once, before it walks the calls in flight: a change of the rate is published
+  (`effective.async_steps_per_cpu_ms`), a tree write whose slots run there and then and may kill
+  or reap, so none runs while the calls are walked.
 - **Settings.** What a submission reads from the tree (the async scheduler's
   `limits.max_alloc_bytes`, `limits.heap_check_steps`, `parser.*` and `data.*`) and the sync
   scheduler's inline-call rate are read again only when something under the tree's `state_exec`

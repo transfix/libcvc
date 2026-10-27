@@ -529,7 +529,8 @@ What the background executor accumulates in one app, against a lane:
 
 `c` callers (0, 1, 4, 8; `--size c=20` for more) blocked in async calls that stay in flight (on the background pool, or on
 `c` lanes, one per caller), then one `arith_loop` process (`n` 10000) timed: its `ns_per_step`
-against `c`. `rate=tree` leaves the callers' step rate to the tree, read at every charge;
+against `c`. `rate=tree` leaves the callers' step rate to the tree, read live (the async
+scheduler reads it again at a charge only once something under the watch root changed);
 `rate=opt` sets `execute_options::async_steps_per_cpu_ms` on them. `watch=0` (sweepable) drops the
 watch root. The latch is released after the region and every caller must return its argument.
 
@@ -699,7 +700,8 @@ suite was written.
   `async.compute_fanout_herd` `extra.fanout_ns`.
 - **Per-call overhead of an async function.** About 30 allocations and 10 lock acquisitions before
   a kernel runs, even a no-op one (`async_host.cpp:386-430, 518-539`), and two state-tree reads of
-  the step rate on the inline path (`async_host.cpp:434, 465`): `async.flood.noop`.
+  the step rate on the inline path (`async_host.cpp:434, 465`): `async.flood.noop`. Since fixed in
+  the schedulers: the rate is read from the tree again only once a setting may have changed.
 - **Polling hosts sleep a timer tick.** The async scheduler has no wakeup signal, so a host that
   sleeps when idle (pycvc: `sleep_for(1 ms)`) waits for the OS timer; on Windows that is ~15.6 ms
   unless something raised the timer resolution (the header's `sleep_for(1ms) takes` line).
