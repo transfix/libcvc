@@ -2778,7 +2778,20 @@ an nD bake is "flat array of ∏(sizes) + per-axis [lo,hi] + lookup"). **Reality
 multiplier). So **2D/3D declarations will be authorable before the raycaster can consume them**
 — the DSL intentionally leads the renderer here; 1D is fully wired, nD reserves the shape.
 
-### 10.3 The editor widget is a first-class DSL widget (ColorTable2, coming)
+### 10.3 The editor widget is a first-class DSL widget (ColorTable2 — landed)
+
+> **Status (2026-10):** landed as the built-in `tf_editor` kind, documented in
+> [`docs/TRANSFER_FUNCTIONS.md`](../TRANSFER_FUNCTIONS.md). The 1D node model (`cvc::tf::model`),
+> the ImGui editor and a composed fallback for every other backend, `.vinay` read/write and `.ctbl`
+> export, the histogram / contour spectrum / contour tree layers (the spectrum and the tree ported
+> into libcvc from libContour and VolumeRover's `contourtree`, both resumable and computed on the
+> state_exec scheduler so single-threaded wasm needs no thread), per-node renderer bindings for
+> volren / volslice / the VTK volume / fe_lab, and the shipped `transfer_function` component.
+> One deviation from the text below: the model rides the **`value()`** channel as one JSON string,
+> not `data()` — `value()` is equality-guarded, persisted and replicated, which `data()` is not, and
+> a conference peer or a saved session must carry the transfer function. 2D/nD editing remains
+> future work.
+
 
 The forthcoming editor (the **ColorTable2** Qt widget from VolumeRover2, not yet ported) is a
 DSL **widget node** that **binds to a TF's `data()` channel** — the widget is a *view*, the TF

@@ -30,10 +30,13 @@ constexpr double kNone = std::numeric_limits<double>::quiet_NaN();
 // The host's keys, relative to <prefix>.nav_plant.
 const detail::key_meta kHostKeys[] = {
     {"vehicle", "knob", "", kNone, kNone,
-     "What the agents drive: kinematic (nav's bicycle), a vehicle preset (humvee, roboracer), or "
-     "a comma-separated list of presets, cycled over the agents. A change rebuilds the plant."},
+     "What the agents drive: kinematic (nav's bicycle), a vehicle preset on Jolt (humvee, "
+     "roboracer), a comma-separated list of presets cycled over the agents, or dynamic / "
+     "dynamic:<presets> for the presets' dynamic single-track model with no physics world. A "
+     "change rebuilds the plant."},
     {"driving", "telemetry", "", kNone, kNone,
-     "What the agents drive now: the vehicle asked for, or kinematic in a build without Jolt."},
+     "What the agents drive now: the vehicle asked for, or kinematic for Jolt presets in a build "
+     "without Jolt."},
     {"available", "build", "", kNone, kNone, "1 when this build has the Jolt physics backend."},
 };
 
@@ -48,6 +51,16 @@ std::string trim(const std::string &s) {
 bool is_kinematic(const std::string &name) {
   const std::string n = trim(name);
   return n.empty() || n == "kinematic";
+}
+
+constexpr const char *kDynamic = "dynamic";
+
+// The presets after "dynamic:", or the Humvee for "dynamic" alone.
+std::string dynamic_presets(const std::string &name) {
+  const std::string n = trim(name);
+  const std::string::size_type colon = n.find(':');
+  const std::string rest = colon == std::string::npos ? std::string() : trim(n.substr(colon + 1));
+  return rest.empty() ? std::string("humvee") : rest;
 }
 
 // The presets a vehicle string names, in order; throws on an unknown one.
@@ -75,6 +88,7 @@ plant_host::plant_host(plant_host_options options) : _o(std::move(options)) {}
 
 // The plant goes before its world: it is the world's vehicles' owner of record.
 plant_host::~plant_host() {
+  _dyn.reset();
   _plant.reset();
   _world.reset();
 }
@@ -83,17 +97,30 @@ bool plant_host::available() { return backend_available(backend::jolt); }
 
 std::vector<std::string> plant_host::presets() { return {"humvee", "roboracer"}; }
 
+bool plant_host::is_dynamic(const std::string &vehicle) {
+  const std::string n = trim(vehicle);
+  return n == kDynamic || n.rfind(std::string(kDynamic) + ":", 0) == 0;
+}
+
+cvc::nav::vehicle_plant *plant_host::active() {
+  if (_dyn)
+    return _dyn.get();
+  return _plant.get();
+}
+
 vehicle_desc plant_host::preset(const std::string &name) {
   if (name == "humvee")
     return vehicle_desc::humvee();
   if (name == "roboracer")
     return vehicle_desc::roboracer();
   throw cvc::physics_error("plant_host: no vehicle preset named '" + name +
-                           "' (humvee, roboracer, or kinematic)");
+                           "' (humvee, roboracer, kinematic, or dynamic[:presets])");
 }
 
 void plant_host::check(const std::string &vehicle) {
-  if (!is_kinematic(vehicle))
+  if (is_dynamic(vehicle))
+    descs_of(dynamic_presets(vehicle));
+  else if (!is_kinematic(vehicle))
     descs_of(vehicle);
 }
 
@@ -105,14 +132,31 @@ void plant_host::set_geometry(const cvc::world::world_geometry *g, std::vector<i
 std::string plant_host::use(cvc::nav::sim_world &sim, const std::string &vehicle) {
   if (is_kinematic(vehicle)) {
     sim.set_plant(nullptr);
+    _dyn.reset();
     _plant.reset();
     _world.reset();
     _asked = _driving = "kinematic";
     return _driving;
   }
+  if (is_dynamic(vehicle)) {
+    std::vector<vehicle_desc> descs = descs_of(dynamic_presets(vehicle)); // throws first
+    dyn_bike_plant_options o;
+    o.plant = _o.plant;
+    o.mu = _o.ground_mu;
+    auto d = std::make_unique<dyn_bike_plant>(std::move(descs), o);
+    sim.set_plant(nullptr);
+    _dyn.reset();
+    _plant.reset();
+    _world.reset();
+    _dyn = std::move(d);
+    sim.set_plant(_dyn.get());
+    _asked = _driving = trim(vehicle);
+    return _driving;
+  }
   std::vector<vehicle_desc> descs = descs_of(vehicle); // throws before anything changes
   if (!available()) {
     sim.set_plant(nullptr);
+    _dyn.reset();
     _plant.reset();
     _world.reset();
     _asked = trim(vehicle);
@@ -138,6 +182,7 @@ std::string plant_host::use(cvc::nav::sim_world &sim, const std::string &vehicle
   auto p = std::make_unique<nav_plant>(*w, std::move(descs), po);
   // Detach the old plant before its world goes; then attach the new one.
   sim.set_plant(nullptr);
+  _dyn.reset();
   _plant.reset();
   _world = std::move(w);
   _plant = std::move(p);

@@ -37,7 +37,7 @@ struct terrain_config {
   double max_grade = 0.6;   // tan of the steepest slope the vehicle climbs (0.6 = 60%, 31 deg)
   double tip_ratio = 0.0;   // static stability factor, track / (2 x CG height); 0 = no tip limit
   double tip_margin = 0.8;  // the share of the tip slope that is feasible
-  double sigma = 1.0;       // cells: the grade cost's blur (material_build)
+  double sigma = 1.0;       // cells: the grade cost's blur (material_build; the tree has metres)
   // Slope is a material risk, not a wall: the grade cost and the infeasible cells go through the
   // material channel like any other material, the grade cost's soft force leaning the drive
   // toward gentler ground and the infeasible cells its hard plane, a finite barrier the drive can

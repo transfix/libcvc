@@ -34,6 +34,7 @@
 #include <cvc/state/state.h> // clock test: read/write the bound sim.* keys
 #include <cvc/volume/volume.h>
 #include <cvc/volume/volume_file_io.h>
+#include <filesystem> // mesh_lab / fe_lab sources: a temp "document directory"
 #include <thread>
 #include <vtkActor.h> // LOD test: a rung's material
 #include <vtkLight.h>
@@ -92,6 +93,343 @@ static LightSurvey survey(vtkRenderer *r) {
   }
   return s;
 }
+
+#ifdef CVC_ENABLE_LIBIGL
+// ── mesh_lab / fe_lab: switching sources at run time, eigenmodes, interval and hex meshes, the
+// elements view. The data sits in a temp directory the nodes treat as the document's
+// (SceneNode::base_dir), named by relative paths.
+static void test_lab_sources(cvc::app &app) {
+  namespace fs = std::filesystem;
+  using cvc::gl::GeometryNode;
+  printf("== mesh_lab / fe_lab: sources, modes, intervals, elements ==\n");
+  std::error_code ec;
+  const fs::path dir = fs::temp_directory_path(ec) / "cvcgl_ari_lab_sources";
+  fs::create_directories(dir, ec);
+  // An ellipsoid twice as tall along y as it is wide (a lat-long mesh), and a density ball.
+  {
+    cvc::geometry g;
+    const int nu = 24, nv = 12;
+    g.points().push_back({0.0, 2.0, 0.0});
+    for (int v = 1; v < nv; ++v)
+      for (int u = 0; u < nu; ++u) {
+        const double th = 3.14159265358979 * v / nv, ph = 2.0 * 3.14159265358979 * u / nu;
+        g.points().push_back(
+            {std::sin(th) * std::cos(ph), 2.0 * std::cos(th), std::sin(th) * std::sin(ph)});
+      }
+    g.points().push_back({0.0, -2.0, 0.0});
+    const auto ring = [&](int v, int u) {
+      return static_cast<cvc::index_t>(1 + (v - 1) * nu + ((u + nu) % nu));
+    };
+    const auto bottom = static_cast<cvc::index_t>(g.points().size() - 1);
+    for (int u = 0; u < nu; ++u) {
+      g.tris().push_back({0, ring(1, u + 1), ring(1, u)});
+      for (int v = 1; v + 1 < nv; ++v) {
+        g.tris().push_back({ring(v, u), ring(v, u + 1), ring(v + 1, u + 1)});
+        g.tris().push_back({ring(v, u), ring(v + 1, u + 1), ring(v + 1, u)});
+      }
+      g.tris().push_back({bottom, ring(nv - 1, u), ring(nv - 1, u + 1)});
+    }
+    cvc::write_geometry(g, (dir / "egg.off").string());
+    const unsigned n = 24;
+    cvc::volume vol(app, cvc::dimension(n, n, n), cvc::Float,
+                    cvc::bounding_box(-1, -1, -1, 1, 1, 1));
+    for (unsigned k = 0; k < n; ++k)
+      for (unsigned j = 0; j < n; ++j)
+        for (unsigned i = 0; i < n; ++i) {
+          const double x = -1.0 + 2.0 * i / (n - 1), y = -1.0 + 2.0 * j / (n - 1),
+                       z = -1.0 + 2.0 * k / (n - 1);
+          const double r = std::sqrt(x * x + y * y + z * z);
+          vol(i, j, k, r >= 0.9 ? 0.0 : 1.0 - r / 0.9); // 1 at the centre, 0 at r = 0.9
+        }
+    vol.min(0.0);
+    vol.max(1.0);
+    cvc::writeVolumeFile(app, vol, (dir / "ball.rawiv").string());
+  }
+
+  cvc::state &st = cvc::state::instance(app);
+  SceneGraph sg(app, "lsrc");
+  SceneRenderer view(sg, 64, 64, /*offscreen=*/true, "main");
+  Scene scene;
+  SceneNode m;
+  m.id = "mesh";
+  m.type = "mesh_lab";
+  m.source_file = "x.bunny";
+  m.base_dir = dir.string();
+  scene.nodes.push_back(m);
+  SceneNode d;
+  d.id = "domain";
+  d.type = "fe_lab";
+  d.source_sdf_mesh = "x.bunny";
+  d.sdf_dim = 16;
+  d.has_fit = true;
+  d.fit_up_y = true;
+  d.fit_height = 100.0f;
+  d.base_dir = dir.string();
+  scene.nodes.push_back(d);
+  std::vector<std::string> warnings;
+  auto realized = cvc::gl::ariadne::realize_scene(sg, scene, "lsrc", &warnings);
+  for (const std::string &w : warnings)
+    printf("     warning: %s\n", w.c_str());
+  const std::string mb = cvc::ariadne::resolve_bind("lsrc", "graphics.root.children.mesh.mesh_ops");
+  const std::string fb = cvc::ariadne::resolve_bind("lsrc", "graphics.root.children.domain.fe");
+  auto val = [&](const std::string &path) { return st(path).value(); };
+  auto num = [&](const std::string &path) {
+    try {
+      return st(path).value<double>();
+    } catch (...) {
+      return std::nan("");
+    }
+  };
+  auto set = [&](const std::string &path, const std::string &v) { st(path).value(v); };
+  auto tick = [&]() { cvc::gl::ariadne::tick_scene(realized, view.renderer()); };
+  auto settle = [&](const std::string &base) {
+    for (int i = 0; i < 12000; ++i) {
+      tick();
+      if (val(base + ".request").empty() && val(base + ".busy") == "0")
+        return true;
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return false;
+  };
+  auto starts = [&](const std::string &path, const std::string &prefix) {
+    return val(path).compare(0, prefix.size(), prefix) == 0;
+  };
+  bool ok = false;
+  auto mesh = std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("mesh"));
+  auto domain = std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("domain"));
+  if (!mesh) {
+    chk(false, "mesh_lab realized");
+    return;
+  }
+  if (domain) // before any tick: the bounds are up, the field is the first tick's job
+    chk(starts(fb + ".status", "loading x.bunny") && domain->getGeometry() &&
+            domain->getGeometry()->num_lines() == 12,
+        "fe_lab realize: an SDF source shows its box at once, its field loads on the lane");
+  chk(val(mb + ".source.file") == "x.bunny" && val(mb + ".source.height") == "0",
+      "mesh_lab seeded source.* from source: (no fit: height 0)");
+
+  // mesh_lab: load another file, by a path relative to the document's directory, fitted.
+  set(mb + ".source.file", "egg.off");
+  set(mb + ".source.up", "y");
+  set(mb + ".source.height", "50");
+  set(mb + ".request", "load");
+  ok = settle(mb); // before the message: MSVC builds the arguments first
+  chk(ok && starts(mb + ".status", "loaded egg.off"),
+      "mesh_lab load: a relative source.file resolves against base_dir (status '" +
+          val(mb + ".status") + "')");
+  const auto zrange = [](const cvc::geometry &g) {
+    double lo = 1e300, hi = -1e300;
+    for (const auto &p : g.const_points()) {
+      lo = std::min(lo, p[2]);
+      hi = std::max(hi, p[2]);
+    }
+    return std::make_pair(lo, hi);
+  };
+  chk(mesh->getGeometry() && approx(num(mb + ".stats.vertices"), 24.0 * 11 + 2) &&
+          std::fabs(zrange(*mesh->getGeometry()).first) < 1e-6 &&
+          std::fabs(zrange(*mesh->getGeometry()).second - 50.0) < 1e-6,
+      "mesh_lab load: the egg turned y-up to z-up and fitted: z in [0, 50]");
+  set(mb + ".request", "load");
+  tick();
+  chk(val(mb + ".busy") == "0" && val(mb + ".status") == "the source mesh (unchanged)",
+      "mesh_lab load with unchanged source.* starts no job");
+  set(mb + ".smooth.iterations", "1");
+  set(mb + ".request", "load smooth");
+  ok = settle(mb);
+  chk(ok && starts(mb + ".status", "smoothed"),
+      "mesh_lab: a chained request (load smooth) runs both, in order (status '" +
+          val(mb + ".status") + "')");
+  set(mb + ".source.file", "no_such_mesh.off");
+  set(mb + ".request", "load");
+  ok = settle(mb);
+  chk(ok && starts(mb + ".status", "error:") && approx(num(mb + ".stats.vertices"), 24.0 * 11 + 2),
+      "mesh_lab load of a missing file reports an error and keeps the mesh");
+  set(mb + ".source.file", "egg.off");
+  set(mb + ".request", "load"); // the source keys match the loaded mesh again: a reset
+  ok = settle(mb);
+  chk(ok, "mesh_lab back to the egg");
+
+  // mesh_lab: Laplace-Beltrami eigenfunctions (followed like the other colour modes).
+  set(mb + ".modes.index", "2");
+  set(mb + ".color.mode", "modes");
+  ok = settle(mb);
+  chk(ok && starts(mb + ".status", "coloured by mode 2") && mesh->hasScalarField() &&
+          num(mb + ".color.min") < 0.0 && num(mb + ".color.max") > 0.0,
+      "color.mode modes: a surface eigenfunction, both signs (status '" + val(mb + ".status") +
+          "')");
+  set(mb + ".modes.index", "4");
+  ok = settle(mb);
+  chk(ok && starts(mb + ".status", "coloured by mode 4"), "modes.index 4 recolours");
+  set(mb + ".geodesic.source", "-1");
+  set(mb + ".color.mode", "geodesic");
+  ok = settle(mb);
+  chk(ok && num(mb + ".color.max") > 0.0, "geodesic.source -1: from the highest vertex");
+
+#ifdef CVC_ENABLE_MESHER
+  if (!domain) { // the SDF needs CVC_ENABLE_SDF
+    printf("     (fe_lab skipped: no volume -- a build without CVC_ENABLE_SDF?)\n");
+    fs::remove_all(dir, ec);
+    return;
+  }
+  chk(val(fb + ".source.type") == "sdf" && val(fb + ".source.file") == "x.bunny" &&
+          approx(num(fb + ".source.dim"), 16.0) && val(fb + ".source.up") == "y" &&
+          approx(num(fb + ".source.height"), 100.0),
+      "fe_lab seeded source.* from source: { sdf } and fit: (type, file, dim, up, height)");
+
+  // fe_lab: load a volume file (relative path), fitted, then mesh and solve on their own.
+  set(fb + ".source.type", "volume");
+  set(fb + ".source.file", "ball.rawiv");
+  set(fb + ".source.dim", "16");
+  set(fb + ".source.up", "z");
+  set(fb + ".source.height", "40");
+  set(fb + ".mesh.inside", "above");
+  set(fb + ".mesh.isovalue", "0.3");
+  set(fb + ".auto.mesh", "1");
+  set(fb + ".auto.solve", "1");
+  set(fb + ".problem", "poisson");
+  set(fb + ".request", "load");
+  ok = settle(fb);
+  chk(ok && starts(fb + ".status", "poisson: solved") && num(fb + ".stats.tets") > 0.0 &&
+          num(fb + ".field.max") > 0.0,
+      "fe_lab load: a volume file, then auto.mesh and auto.solve (status '" + val(fb + ".status") +
+          "', " + val(fb + ".stats.tets") + " tets)");
+  {
+    const auto z =
+        domain->getGeometry() ? zrange(*domain->getGeometry()) : std::make_pair(1e300, -1e300);
+    // The isosurface v = 0.3 of the ball (r = 0.63 of the box's half-width 1) sits inside the
+    // box, which the fit stands on z = 0 and scales to 40: z in about [7.4, 32.6].
+    chk(z.first > 3.0 && z.first < 12.0 && z.second > 28.0 && z.second < 37.0,
+        "fe_lab: a volume's fit: places its elements (z " + std::to_string(z.first) + ".." +
+            std::to_string(z.second) + ")");
+  }
+  const std::string tets = val(fb + ".stats.tets");
+  set(fb + ".request", "load");
+  ok = settle(fb);
+  chk(ok && val(fb + ".stats.tets") == tets && starts(fb + ".status", "poisson: solved"),
+      "fe_lab load with unchanged source and mesh keys only re-solves (auto.solve)");
+
+  // Vibration modes, the eigenpairs cached across modes.index.
+  set(fb + ".problem", "modes");
+  set(fb + ".modes.index", "1");
+  set(fb + ".request", "solve");
+  ok = settle(fb);
+  chk(ok && starts(fb + ".status", "modes: mode 1") && num(fb + ".field.min") < 0.0 &&
+          num(fb + ".field.max") > 0.0,
+      "problem modes: mode 1 of the solid, both signs (status '" + val(fb + ".status") + "')");
+  set(fb + ".modes.index", "3");
+  set(fb + ".request", "solve");
+  ok = settle(fb);
+  chk(ok && starts(fb + ".status", "modes: mode 3"), "modes.index 3 solves");
+
+  // A chained request: mesh, then solve, with auto.solve off.
+  set(fb + ".auto.solve", "0");
+  set(fb + ".problem", "poisson");
+  set(fb + ".request", "mesh solve");
+  ok = settle(fb);
+  chk(ok && starts(fb + ".status", "poisson: solved"),
+      "fe_lab: a chained request (mesh solve) runs both");
+  chk(!val(fb + ".stats.work_ms").empty() && num(fb + ".stats.work_ms") >= 0.0,
+      "fe_lab publishes stats.work_ms (" + val(fb + ".stats.work_ms") + ")");
+
+  // Interval meshing: the shell between two densities is a solid layer with a hole.
+  set(fb + ".mesh.region", "interval");
+  set(fb + ".mesh.isovalue2", "0.6");
+  set(fb + ".request", "mesh solve");
+  const bool interval_ok =
+      settle(fb) && num(fb + ".stats.tets") > 0.0 && starts(fb + ".status", "poisson: solved");
+  chk(interval_ok,
+      "mesh.region interval: the shell between isovalue and isovalue2 meshes and solves (" +
+          val(fb + ".stats.tets") + " tets, status '" + val(fb + ".status") + "')");
+  set(fb + ".mesh.region", "solid");
+
+  // Hexahedra: the elements view only. A solve is refused with a reason.
+  set(fb + ".mesh.elements", "hex");
+  set(fb + ".request", "mesh");
+  ok = settle(fb);
+  chk(ok && num(fb + ".stats.hexes") > 0.0 && approx(num(fb + ".stats.tets"), 0.0),
+      "mesh.elements hex: stats.hexes > 0, stats.tets 0 (" + val(fb + ".stats.hexes") + " hexes)");
+  chk(num(fb + ".stats.quality_min") <= num(fb + ".stats.quality_mean") &&
+          num(fb + ".stats.quality_mean") <= 1.0 + 1e-9,
+      "hex quality stats: the scaled Jacobian (min <= mean <= 1)");
+  set(fb + ".request", "solve");
+  tick();
+  chk(val(fb + ".busy") == "0" && val(fb + ".status").find("needs tetrahedra") != std::string::npos,
+      "a solve on hexahedra is refused (status '" + val(fb + ".status") + "')");
+
+  // The elements view: the cut-away elements on the node, outlined by <id>_edges.
+  auto edges = std::dynamic_pointer_cast<GeometryNode>(domain->findChildByName("domain_edges"));
+  auto ghost = std::dynamic_pointer_cast<GeometryNode>(domain->findChildByName("domain_ghost"));
+  chk(edges && ghost, "fe_lab made its <id>_edges and <id>_ghost children");
+  set(fb + ".view.mode", "elements");
+  set(fb + ".view.color_by", "quality");
+  set(fb + ".view.show_slice", "1");
+  set(fb + ".view.ghost", "0.2");
+  bool shown = false;
+  for (int i = 0; i < 3000 && !shown; ++i) {
+    tick();
+    shown = edges && edges->isVisible() && domain->hasScalarField();
+    if (!shown)
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  chk(shown && edges->getGeometry() && edges->getGeometry()->num_lines() > 0 && ghost->isVisible(),
+      "view.mode elements: coloured elements, their outlines and the ghost show");
+  const std::size_t cut_faces = domain->getGeometry() ? domain->getGeometry()->num_tris() : 0;
+  set(fb + ".view.show_slice", "0"); // no cut: every element is kept
+  bool whole = false;
+  for (int i = 0; i < 3000 && !whole; ++i) {
+    tick();
+    whole = domain->getGeometry() && domain->getGeometry()->num_tris() != cut_faces;
+    if (!whole)
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  chk(whole, "elements view: turning the cut off shows the whole element mesh");
+  set(fb + ".view.fixed_range", "1");
+  set(fb + ".view.range_min", "0");
+  set(fb + ".view.range_max", "1");
+  tick();
+  tick();
+  chk(approx(domain->scalarRange().first, 0.0) && approx(domain->scalarRange().second, 1.0),
+      "view.fixed_range maps the colours over [range_min, range_max]");
+  set(fb + ".view.mode", "field");
+  tick();
+  tick();
+  chk(!edges->isVisible() && !ghost->isVisible(), "view.mode field hides the outlines and ghost");
+  set(fb + ".mesh.elements", "tet");
+  set(fb + ".view.fixed_range", "0");
+
+  // An interval with hexahedra is refused by the mesh job (LBIE makes interval tetrahedra only).
+  set(fb + ".mesh.elements", "hex");
+  set(fb + ".mesh.region", "interval");
+  set(fb + ".request", "mesh");
+  ok = settle(fb);
+  chk(ok && starts(fb + ".status", "error: interval meshing makes tetrahedra"),
+      "interval + hex is refused (status '" + val(fb + ".status") + "')");
+  set(fb + ".mesh.elements", "tet");
+  set(fb + ".mesh.region", "solid");
+
+  // Back to an SDF source: load reads it again, and the old mesh is dropped meanwhile.
+  set(fb + ".source.type", "sdf");
+  set(fb + ".source.file", "egg.off");
+  set(fb + ".source.up", "y");
+  set(fb + ".source.dim", "16");
+  set(fb + ".source.height", "60");
+  set(fb + ".mesh.inside", "below");
+  set(fb + ".mesh.isovalue", "0");
+  set(fb + ".auto.solve", "1");
+  set(fb + ".request", "load");
+  tick(); // launches the load: the mesh is still there until it finishes
+  chk(val(fb + ".busy") == "1" && starts(fb + ".status", "loading egg.off"),
+      "fe_lab load runs on the lane (status '" + val(fb + ".status") + "')");
+  ok = settle(fb);
+  chk(ok && starts(fb + ".status", "poisson: solved") && num(fb + ".stats.tets") > 0.0,
+      "fe_lab: the SDF of a mesh file, meshed and solved (status '" + val(fb + ".status") + "')");
+#else
+  (void)domain;
+  (void)starts;
+#endif
+  fs::remove_all(dir, ec);
+}
+#endif
 
 int main() {
   cvc::app app;
@@ -1586,6 +1924,8 @@ int main() {
       }
     }
   }
+  if (cvc::gl::ariadne::has_scene_node_type("fe_lab"))
+    test_lab_sources(app);
 #endif
 
   printf("\n%s (%d failure%s)\n", fails ? "FAILED" : "PASSED", fails, fails == 1 ? "" : "s");

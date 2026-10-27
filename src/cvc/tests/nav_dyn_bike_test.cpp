@@ -686,24 +686,27 @@ TEST(DynBike, Golden) {
 }
 
 // ── The plant in port-Hamiltonian form (dyn_ph_*, doc 20's rungs 2 and 3) ─────────────────────
-// H = 1/2 p^T M^-1 p + V, p' = (J - D) v - dV + G u, u = (F_x, delta). These gates hold dyn_plant
-// to that form in the linear-tire regime, and report where the tires' tangent dissipation stops
-// being positive semi-definite past the Pacejka peak. dyn_plant itself is unchanged (DynBike.Golden
-// still pins it).
+// H = 1/2 p^T M^-1 p, p' = (J - R) v + G u + f_eps - m g grade e_x, u = (F_xf, F_xr), with R the
+// tires' secants, drag and rolling resistance. These gates hold dyn_plant to that form at every
+// slip, sliding included, book its steps, and report where the tires' tangent stops being
+// positive semi-definite past the Pacejka peak while the secant does not. dyn_plant's arithmetic
+// is unchanged (DynBike.Golden still pins it).
 
 namespace {
 
 constexpr double kTwoPi = 6.283185307179586; // M_PI is not portable (MSVC)
 
-// A Humvee state in the linear-tire regime: some speed, a small steer, small slip.
-dyn_state<double> linear_state(std::mt19937 &rng, const dyn_bike_params &p) {
+// A Humvee state anywhere in the envelope: forward or reversing, the wheel up to 0.5 rad, and
+// sideways and yaw rates well past the tires' peaks.
+dyn_state<double> sliding_state(std::mt19937 &rng) {
   std::uniform_real_distribution<double> u(-1.0, 1.0);
   dyn_state<double> s{};
-  s.vx = 11.0 + 6.0 * u(rng);
-  s.delta = 0.02 * u(rng);
-  s.r = s.vx * s.delta / (p.lf + p.lr) * (1.0 + 0.2 * u(rng));
-  s.vy = p.lr * s.r + 0.03 * u(rng);
-  s.a = 1.5 * u(rng);
+  const double speed = 3.0 + 25.0 * 0.5 * (1.0 + u(rng));
+  s.vx = u(rng) < -0.7 ? -std::min(speed, 8.0) : speed;
+  s.delta = 0.5 * u(rng);
+  s.vy = 4.0 * u(rng);
+  s.r = 1.2 * u(rng);
+  s.a = 5.0 * u(rng);
   s.psi = u(rng);
   return s;
 }
@@ -711,157 +714,216 @@ dyn_state<double> linear_state(std::mt19937 &rng, const dyn_bike_params &p) {
 // The tires' lateral force and the body-frame lateral acceleration Q_y / m at a state (dyn_plant's
 // step 4 at the state, its own a and delta): a_y = vy' + r vx.
 double lateral_g(const dyn_bike_params &p, const dyn_state<double> &s) {
-  double Dyf, Dyr;
-  diff::dyn_ph_grip(p, s, Dyf, Dyr);
-  const double u = std::sqrt(s.vx * s.vx + double(p.eps) * p.eps), sg = s.vx / u;
-  const double af = sg * s.delta - std::atan2(s.vy + p.lf * s.r, u);
-  const double ar = -std::atan2(s.vy - p.lr * s.r, u);
-  const double Fyf = diff::dyn_lateral<double>(af, p.B_f, p.C, Dyf);
-  const double Fyr = diff::dyn_lateral<double>(ar, p.B_r, p.C, Dyr);
-  return (Fyf * std::cos(s.delta) + Fyr) / (p.m * p.g);
+  diff::dyn_ph_parts<double> q;
+  diff::dyn_ph_parts_at(p, s, q);
+  return (q.Fyf * q.cd + q.Fyr) / (p.m * p.g);
+}
+
+// Whether either tire is past its peak (its tangent stiffness negative).
+bool past_peak(const dyn_bike_params &p, const dyn_state<double> &s) {
+  double Dt[2][2], kf, kr, af, ar;
+  diff::dyn_ph_tangent_D(p, s, Dt, kf, kr, af, ar);
+  return kf < 0.0 || kr < 0.0;
 }
 
 } // namespace
 
-TEST(DynBikePH, TheStructureIsPortHamiltonian) {
-  const dyn_bike_params p = humvee();
-  std::mt19937 rng(3);
-  std::uniform_real_distribution<double> u(-1.0, 1.0);
-  for (int k = 0; k < 200; ++k) {
-    dyn_state<double> s{};
-    s.vx = 20.0 * u(rng);
-    s.vy = 3.0 * u(rng);
-    s.r = u(rng);
-    s.delta = 0.5 * u(rng);
-    s.a = 4.0 * u(rng);
-    double pm[3], J[3][3], D[3][3];
-    diff::dyn_ph_momentum(p, s, pm);
-    diff::dyn_ph_J(pm, J);
-    diff::dyn_ph_D(p, s, D);
-    const double v[3] = {s.vx, s.vy, s.r};
-    double vJv = 0.0;
-    for (int i = 0; i < 3; ++i)
-      for (int j = 0; j < 3; ++j) {
-        EXPECT_EQ(J[i][j], -J[j][i]);
-        EXPECT_EQ(D[i][j], D[j][i]);
-        vJv += v[i] * J[i][j] * v[j];
+// J is skew and R is a sum of positive multiples of outer products at every slip, so R is
+// positive semi-definite sliding or not; with no axle force the inputs supply nothing, however the
+// wheel turns.
+TEST(DynBikePH, TheStructureIsPortHamiltonianAtEverySlip) {
+  for (const double mu : {0.9, 0.6}) {
+    const dyn_bike_params p = humvee(mu);
+    std::mt19937 rng(3);
+    std::uniform_real_distribution<double> u(-1.0, 1.0);
+    int past = 0;
+    for (int k = 0; k < 500; ++k) {
+      dyn_state<double> s = sliding_state(rng);
+      if (k % 5 == 0)
+        s.a = 0.0;
+      double pm[3], J[3][3], R[3][3];
+      diff::dyn_ph_momentum(p, s, pm);
+      diff::dyn_ph_J(pm, J);
+      diff::dyn_ph_R(p, s, R);
+      diff::dyn_ph_parts<double> q;
+      diff::dyn_ph_parts_at(p, s, q);
+      const double v[3] = {s.vx, s.vy, s.r};
+      double vJv = 0.0, norm = 0.0;
+      for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j) {
+          EXPECT_EQ(J[i][j], -J[j][i]);
+          EXPECT_EQ(R[i][j], R[j][i]);
+          vJv += v[i] * J[i][j] * v[j];
+          norm = std::max(norm, std::fabs(R[i][j]));
+        }
+      EXPECT_NEAR(vJv, 0.0, 1e-9 * (1.0 + pm[0] * pm[0]));
+      // The coefficients of R's three outer products are nonnegative: it is PSD.
+      EXPECT_GT(q.Dx, 0.0);
+      EXPECT_GE(q.Sf / q.cd, 0.0) << "front secant at vx " << s.vx << ", vy " << s.vy;
+      EXPECT_GE(q.Sr, 0.0) << "rear secant at vx " << s.vx << ", vy " << s.vy;
+      for (int t = 0; t < 4; ++t) {
+        const double w[3] = {u(rng), u(rng), u(rng)};
+        double wRw = 0.0;
+        for (int i = 0; i < 3; ++i)
+          for (int j = 0; j < 3; ++j)
+            wRw += w[i] * R[i][j] * w[j];
+        EXPECT_GE(wRw, -1e-12 * norm);
       }
-    EXPECT_NEAR(vJv, 0.0, 1e-9 * (1.0 + pm[0] * pm[0]));
-    // D is PSD: its 1x1 block is positive and its 2x2 block has a nonnegative trace and det.
-    EXPECT_GT(D[0][0], 0.0);
-    EXPECT_GE(D[1][1] + D[2][2], 0.0);
-    EXPECT_GE(D[1][1] * D[2][2] - D[1][2] * D[2][1], -1e-9 * D[1][1] * D[2][2]);
-    // dH/dp = v: the Hamiltonian's gradient in the momenta is the twist.
-    EXPECT_NEAR(diff::dyn_ph_hamiltonian(p, s), 0.5 * (pm[0] * s.vx + pm[1] * s.vy + pm[2] * s.r),
-                1e-9 * (1 + pm[0] * s.vx));
-  }
-}
-
-// One short dyn_plant step's momentum change against the port-Hamiltonian vector field, with the
-// actuators holding (commands equal to their state) so u is the state's own.
-TEST(DynBikePH, TheVectorFieldIsThePlantsInTheLinearRegime) {
-  const dyn_bike_params p = humvee();
-  bike_veh lim = plant_limits(p);
-  lim.hdt = 1e-4f;
-  std::mt19937 rng(5);
-  double worst = 0.0;
-  for (int k = 0; k < 300; ++k) {
-    const dyn_state<double> s = linear_state(rng, p);
-    const double grade = (k % 3) * 0.02;
-    dyn_state<double> o;
-    diff::dyn_plant<double>(p, lim, s, s.delta, s.a, grade, o);
-    double p0[3], p1[3], f[3];
-    diff::dyn_ph_momentum(p, s, p0);
-    diff::dyn_ph_momentum(p, o, p1);
-    diff::dyn_ph_rhs(p, s, grade, f);
-    // Relative to the forces' scale on each axis (m g on the momenta, m g L on the yaw).
-    const double scale[3] = {p.m * p.g, p.m * p.g, p.m * p.g * (p.lf + p.lr)};
-    for (int i = 0; i < 3; ++i) {
-      const double fd = (p1[i] - p0[i]) / lim.hdt;
-      const double rel = std::fabs(fd - f[i]) / scale[i];
-      worst = std::max(worst, rel);
-      EXPECT_LT(rel, 0.01) << "axis " << i << ": plant " << fd << ", pH " << f[i] << " at vx "
-                           << s.vx << ", delta " << s.delta;
+      // dH/dp = v: the Hamiltonian's gradient in the momenta is the twist.
+      EXPECT_NEAR(diff::dyn_ph_hamiltonian(p, s), 0.5 * (pm[0] * s.vx + pm[1] * s.vy + pm[2] * s.r),
+                  1e-9 * (1 + pm[0] * s.vx));
+      // Steering is not a port: with the axles' forces at zero nothing is supplied.
+      if (s.a == 0.0)
+        EXPECT_EQ(diff::dyn_ph_rates_at(p, s, 0.0).supplied, 0.0);
+      past += past_peak(p, s);
     }
+    std::printf("  mu %.1f: %d of 500 states have a tire past its peak\n", mu, past);
+    EXPECT_GT(past, 100) << "the states do not slide";
   }
-  std::printf("  vector field vs dyn_plant, linear regime: worst |dp/dt - pH| = %.2e m g\n", worst);
 }
 
-// The gate: along dyn_plant's own trajectories in the linear-tire regime, the change in H is the
-// supplied energy minus the dissipated one, Delta H = -int v^T D v + int y^T u (- int m g grade
-// vx). The actuators lag as they do in training; u is their output. Drive, brake and a weaving
-// steer at about 0.1-0.15 g, flat and on a 3% grade. The residual is the linearization's (the
-// Pacejka curve against its slope at zero slip, sin delta and cos delta against 0 and 1, which
-// put F_y sin delta on vx): it falls with the steering amplitude, and the integrator's step adds
-// nothing measurable to it (implicit Euler's own dissipation is on the small lateral energy).
-TEST(DynBikePH, EnergyBalanceInTheLinearRegime) {
-  const dyn_bike_params p = humvee();
-  const auto worst_at = [&](double hdt, double steer, bool verbose) {
-    bike_veh lim = plant_limits(p);
-    lim.hdt = static_cast<float>(hdt);
+// One very short dyn_plant step's momentum change against the port-Hamiltonian vector field at
+// every slip, forward and reversing, flat and on a 3% grade, with the actuators holding (commands
+// equal to their state) so u is the state's own. The low-speed blend is a per-step limiter, not
+// part of the field, so it is off here (dyn_plant_books charges it).
+TEST(DynBikePH, TheVectorFieldIsThePlantsAtEverySlip) {
+  for (const double mu : {0.9, 0.6}) {
+    dyn_bike_params p = humvee(mu);
+    p.v_blend = 0.0f;
+    bike_veh lim = plant_limits(p, true);
+    lim.hdt = 1e-5f;
+    std::mt19937 rng(5);
     double worst = 0.0;
-    for (int run = 0; run < 4; ++run) {
-      const double grade = run == 3 ? 0.03 : 0.0;
-      dyn_state<double> s = at_rest<double>(10.0 + 2.0 * run);
-      const int n = static_cast<int>(std::lround(8.0 / hdt));
-      double supplied = 0.0, dissipated = 0.0, gravity = 0.0, flow = 0.0;
-      const double h0 = diff::dyn_ph_hamiltonian(p, s);
-      for (int t = 0; t < n; ++t) {
-        const double time = t * hdt;
-        const double dcmd = steer * (1.0 + 0.25 * run) * std::sin(kTwoPi * time / (2.5 + run));
-        const double acmd = 1.2 * std::sin(kTwoPi * time / 4.0 + run);
-        dyn_state<double> o;
-        diff::dyn_plant<double>(p, lim, s, dcmd, acmd, grade, o);
-        // The step's power by the trapezoid between its ends, with the input it applied (the
-        // actuators' output, o's delta and a) at both.
-        dyn_state<double> s_in = s;
-        s_in.delta = o.delta;
-        s_in.a = o.a;
-        double d0, u0, d1, u1;
-        diff::dyn_ph_power(p, s_in, d0, u0);
-        diff::dyn_ph_power(p, o, d1, u1);
-        const double ds = 0.5 * hdt * (d0 + d1), us = 0.5 * hdt * (u0 + u1);
-        const double gs = 0.5 * hdt * p.m * p.g * grade * (s.vx + o.vx);
-        dissipated += ds;
-        supplied += us;
-        gravity += gs;
-        flow += std::fabs(ds) + std::fabs(us) + std::fabs(gs);
-        s = o;
+    for (int k = 0; k < 400; ++k) {
+      const dyn_state<double> s = sliding_state(rng);
+      const double grade = (k % 2) * 0.03;
+      dyn_state<double> o;
+      diff::dyn_plant<double>(p, lim, s, s.delta, s.a, grade, o);
+      double p0[3], p1[3], f[3];
+      diff::dyn_ph_momentum(p, s, p0);
+      diff::dyn_ph_momentum(p, o, p1);
+      diff::dyn_ph_rhs(p, s, grade, f);
+      // Relative to the forces' scale on each axis (m g on the momenta, m g L on the yaw).
+      const double scale[3] = {p.m * p.g, p.m * p.g, p.m * p.g * (p.lf + p.lr)};
+      for (int i = 0; i < 3; ++i) {
+        const double fd = (p1[i] - p0[i]) / lim.hdt;
+        const double rel = std::fabs(fd - f[i]) / scale[i];
+        worst = std::max(worst, rel);
+        EXPECT_LT(rel, 1e-3) << "axis " << i << ": plant " << fd << ", pH " << f[i] << " at vx "
+                             << s.vx << ", vy " << s.vy << ", r " << s.r << ", delta " << s.delta;
       }
-      const double dH = diff::dyn_ph_hamiltonian(p, s) - h0;
-      const double resid = std::fabs(dH - (supplied - dissipated - gravity)) / flow;
-      worst = std::max(worst, resid);
-      if (verbose)
-        std::printf("    run %d: dH %.4g J, supplied %.4g, dissipated %.4g, gravity %.4g, "
-                    "residual %.2e of the flow\n",
-                    run, dH, supplied, dissipated, gravity, resid);
     }
-    return worst;
-  };
-  for (const double hdt : {0.06, 0.02, 0.01, 0.005}) {
-    const double w = worst_at(hdt, 0.02, hdt == 0.01);
-    std::printf("  energy balance at hdt %.3f s, steer 0.02-0.035 rad: worst |dH - (supplied - "
-                "dissipated)| / flow = %.3e\n",
-                hdt, w);
-    EXPECT_LT(w, 0.02) << "hdt " << hdt;
-  }
-  double prev = 0.0;
-  for (const double steer : {0.04, 0.02, 0.01, 0.005}) {
-    const double w = worst_at(0.01, steer, false);
-    std::printf("  energy balance at hdt 0.010 s, steer x%.3f: %.3e\n", steer, w);
-    if (prev > 0.0)
-      EXPECT_LT(w, 0.6 * prev) << "the residual does not fall with the steering amplitude";
-    prev = w;
+    std::printf(
+        "  vector field vs dyn_plant at every slip, mu %.1f: worst |dp/dt - pH| = %.2e m g\n", mu,
+        worst);
   }
 }
 
-// The report: the tires' tangent dissipation (dyn_ph_tangent_D) along steer ramps to the lock and
-// swerves at several speeds, binned by lateral g like the plant's drift (D14). Below the peak it
-// is positive semi-definite; past the Pacejka peak a tire's force falls as its slip grows and the
-// tangent D loses definiteness. The bins say where. With the tires fitted to Jolt's (B C =
-// kJoltTireStiffness / tire_peak_slip_angle) the Humvee understeers: its front tire passes the
-// peak first, from about half its grip, and the ramps plateau short of mu g.
-TEST(DynBikePH, WhereTheTangentDissipationStopsBeingPSD) {
+namespace {
+
+// One run's books: per-step mean |residual|, and the sums.
+struct run_books {
+  double mean_abs_residual = 0.0, residual = 0.0, flow = 0.0, dH = 0.0, limiter = 0.0;
+  double dissipated = 0.0, supplied = 0.0;
+};
+
+// dyn_plant_books along a trajectory: `swerve` weaves at 0.7 Hz past the peak with the throttle
+// working; otherwise the Humvee brakes hard to a stop in a turn, so the speed clamp and the
+// low-speed blend act.
+run_books book_run(const dyn_bike_params &p, double hdt, bool swerve, double seconds) {
+  bike_veh lim = plant_limits(p);
+  lim.hdt = static_cast<float>(hdt);
+  dyn_state<double> s = at_rest<double>(swerve ? 15.0 : 9.0);
+  const int n = static_cast<int>(std::lround(seconds / hdt));
+  run_books rb;
+  const double h0 = diff::dyn_ph_hamiltonian(p, s);
+  for (int t = 0; t < n; ++t) {
+    const double time = t * hdt;
+    const double dcmd = swerve ? 0.3 * std::sin(kTwoPi * 0.7 * time) : 0.35;
+    const double acmd = swerve ? 1.5 * std::sin(kTwoPi * time / 3.0) : -6.0;
+    dyn_state<double> o;
+    diff::dyn_ph_books<double> b;
+    diff::dyn_plant_books<double>(p, lim, s, dcmd, acmd, 0.0, o, b);
+    rb.mean_abs_residual += std::fabs(b.residual);
+    rb.residual += b.residual;
+    rb.limiter += b.limiter;
+    rb.dissipated += b.dissipated;
+    rb.supplied += b.supplied;
+    rb.flow += std::fabs(b.dissipated) + std::fabs(b.supplied) + std::fabs(b.floor) +
+               std::fabs(b.grade) + std::fabs(b.limiter);
+    s = o;
+  }
+  rb.mean_abs_residual /= n;
+  rb.dH = diff::dyn_ph_hamiltonian(p, s) - h0;
+  return rb;
+}
+
+} // namespace
+
+// The gate: every step's books close but for the integrator's error, which is second order per
+// step (so first order over a run), sliding or not, with the limiters charged when they act. The
+// actuators lag as they do in training; u is their output.
+TEST(DynBikePH, StepBooksCloseToSecondOrder) {
+  const dyn_bike_params p = humvee(0.6);
+  // Per step, the residual falls by about 4 per halving of hdt.
+  double prev = 0.0;
+  for (const double hdt : {0.02, 0.01, 0.005, 0.0025}) {
+    const run_books rb = book_run(p, hdt, true, 6.0);
+    std::printf("  swerve past the peak, hdt %.4f s: dH %.4g J, supplied %.4g, dissipated %.4g, "
+                "mean |residual| per step %.3e J, |sum| / flow %.2e\n",
+                hdt, rb.dH, rb.supplied, rb.dissipated, rb.mean_abs_residual,
+                std::fabs(rb.residual) / rb.flow);
+    if (prev > 0.0) {
+      const double ratio = prev / rb.mean_abs_residual;
+      EXPECT_GT(ratio, 3.0) << "hdt " << hdt;
+      EXPECT_LT(ratio, 5.5) << "hdt " << hdt;
+    }
+    prev = rb.mean_abs_residual;
+    if (hdt <= 0.01)
+      EXPECT_LT(std::fabs(rb.residual) / rb.flow, 5e-3) << "hdt " << hdt;
+  }
+  // Braking to a stop in a turn: the clamp at zero speed and the blend take kinetic energy that
+  // the books charge to the limiters; the rest closes as before.
+  for (const double hdt : {0.01, 0.005}) {
+    const run_books rb = book_run(p, hdt, false, 3.0);
+    std::printf("  braking to a stop, hdt %.4f s: dH %.4g J, limiters %.4g J, |sum residual| / "
+                "flow %.2e\n",
+                hdt, rb.dH, rb.limiter, std::fabs(rb.residual) / rb.flow);
+    EXPECT_LT(rb.limiter, 0.0) << "the limiters did not act";
+    EXPECT_LT(std::fabs(rb.residual) / rb.flow, 5e-3) << "hdt " << hdt;
+  }
+}
+
+// f_eps is the speed floor's: it shrinks with the floor and is gone without it.
+TEST(DynBikePH, TheFloorTermVanishesWithTheFloor) {
+  dyn_bike_params p = humvee();
+  double prev = 1e300;
+  for (const double eps : {0.5, 0.05, 0.005, 1e-9}) {
+    p.eps = static_cast<float>(eps);
+    std::mt19937 rng(7);
+    double worst = 0.0;
+    for (int k = 0; k < 300; ++k) {
+      const dyn_state<double> s = sliding_state(rng);
+      const diff::dyn_ph_rates<double> r = diff::dyn_ph_rates_at(p, s, 0.0);
+      worst = std::max(worst, std::fabs(r.floor) / (r.dissipated + std::fabs(r.supplied) + 1.0));
+    }
+    std::printf("  speed floor %.0e m/s: worst |floor power| / (dissipated + |supplied|) = %.2e\n",
+                eps, worst);
+    EXPECT_LT(worst, prev);
+    prev = worst;
+  }
+  EXPECT_LT(prev, 1e-7);
+}
+
+// The report: the tires' tangent (dyn_ph_tangent_D), the linearization's damping, along steer
+// ramps to the lock and swerves at several speeds, binned by lateral g like the plant's drift
+// (D14). Below the peak it is positive semi-definite; past the Pacejka peak a tire's force falls
+// as its slip grows and the tangent loses definiteness, so the motion can be locally unstable
+// there. The secant, the energy's dissipation, stays positive semi-definite in every sample. With
+// the tires fitted to Jolt's (B C = kJoltTireStiffness / tire_peak_slip_angle) the Humvee
+// understeers: its front tire passes the peak first, from about half its grip, and the ramps
+// plateau short of mu g.
+TEST(DynBikePH, TheSecantStaysPSDWhereTheTangentDoesNot) {
   for (const double mu : {0.9, 0.6}) {
     const dyn_bike_params p = humvee(mu);
     bike_veh lim = plant_limits(p);
@@ -870,6 +932,7 @@ TEST(DynBikePH, WhereTheTangentDissipationStopsBeingPSD) {
     const int nb = 8;
     std::vector<int> count(nb, 0), indef(nb, 0), front(nb, 0), rear(nb, 0);
     std::vector<double> lam_min(nb, 1e300);
+    int secant_negative = 0;
     const auto record = [&](const dyn_state<double> &s) {
       const double g = std::fabs(lateral_g(p, s));
       int b = 0;
@@ -884,6 +947,9 @@ TEST(DynBikePH, WhereTheTangentDissipationStopsBeingPSD) {
       front[b] += kf < 0.0;
       rear[b] += kr < 0.0;
       lam_min[b] = std::min(lam_min[b], lmin / (p.m / 1.0));
+      diff::dyn_ph_parts<double> q;
+      diff::dyn_ph_parts_at(p, s, q);
+      secant_negative += q.Sf / q.cd < 0.0 || q.Sr < 0.0;
     };
     for (const double v : {8.0, 12.0, 16.0, 20.0}) {
       // A steady ramp of the steer to the lock, the speed held by the throttle: past the limit.
@@ -907,7 +973,7 @@ TEST(DynBikePH, WhereTheTangentDissipationStopsBeingPSD) {
         record(s);
       }
     }
-    std::printf("  tangent dissipation by lateral g (Humvee, mu %.1f):\n", mu);
+    std::printf("  tangent by lateral g (Humvee, mu %.1f):\n", mu);
     std::printf("    %-10s %8s %10s %8s %8s %14s\n", "g", "samples", "indefinite", "front", "rear",
                 "min lambda/m");
     for (int b = 0; b < nb; ++b) {
@@ -927,13 +993,15 @@ TEST(DynBikePH, WhereTheTangentDissipationStopsBeingPSD) {
       // Understeer: the rear tire never passes its peak.
       EXPECT_EQ(rear[b], 0) << "mu " << mu << ", bin " << lab;
     }
-    // Above half the grip the ramps take the front tire past its peak: the tangent D is
-    // indefinite there.
+    // Above half the grip the ramps take the front tire past its peak: the tangent is indefinite
+    // there.
     int top = 0;
     for (int b = 0; b < nb; ++b)
       if (edges[b] >= 0.5 * mu - 1e-9)
         top += indef[b];
     EXPECT_GT(top, 0) << "mu " << mu << ": the ramps never passed the peak";
+    // The secant never is.
+    EXPECT_EQ(secant_negative, 0) << "mu " << mu;
   }
 }
 

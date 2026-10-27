@@ -50,15 +50,22 @@ boost::mutex &library_lock::mutex() {
 
 library_lock::library_lock(app &ctx, const std::string &hdf5_filename, const std::string &info)
     : _ctx(ctx), _lock(mutex()) {
+  // mutexInfo() and threadKey() are interruption points.  Hold interruption
+  // off rather than swallow a thread_interrupted here: boost clears the
+  // request when it throws, so the interrupted thread (the background
+  // hierarchy builder, say) would never stop.  It stays pending for the next
+  // interruption point instead.
+  boost::this_thread::disable_interruption keep_interrupt_pending;
   try {
     _ctx.mutexInfo(name(), _ctx.threadKey() + ": " + hdf5_filename + " :: " + info);
   } catch (...) {
-    // mutexInfo() carries an interruption point.  Losing the diagnostic
-    // string is never a reason to give up the lock we just took.
+    // Losing the diagnostic string is never a reason to give up the lock we
+    // just took.
   }
 }
 
 library_lock::~library_lock() {
+  boost::this_thread::disable_interruption keep_interrupt_pending;
   try {
     _ctx.mutexInfo(name(), "");
   } catch (...) {

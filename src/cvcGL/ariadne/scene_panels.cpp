@@ -35,19 +35,28 @@ void register_scene_panels(ImGuiBackend &backend, SceneGraph &sg, StageLighting 
         return cvc::ariadne::CustomEdit{}; // handled set true by the backend
       });
 
+  // The same items without the panel ticks, which do nothing in a document that places no panels:
+  // what a host puts in a menu of its own (arigl's Settings).
+  backend.register_widget("scene_settings",
+                          [&sg](const std::string &, const cvc::ariadne::Widget &) {
+                            cvc::gl::ui::SceneMenuItems(sg, nullptr, nullptr);
+                            return cvc::ariadne::CustomEdit{};
+                          });
+
   backend.register_widget("scene_panel",
                           [&sg, flags](const std::string &, const cvc::ariadne::Widget &) {
                             cvc::gl::ui::ScenePanel(sg, &flags->scene); // its own window
                             return cvc::ariadne::CustomEdit{};
                           });
 
-  if (rig) {
-    backend.register_widget("stage_lighting_panel",
-                            [rig, flags](const std::string &, const cvc::ariadne::Widget &) {
+  // Registered with or without a rig: without one it draws nothing, and it replaces the panel of a
+  // document the host loaded before, whose rig went with that document's scene.
+  backend.register_widget("stage_lighting_panel",
+                          [rig, flags](const std::string &, const cvc::ariadne::Widget &) {
+                            if (rig)
                               cvc::gl::ui::StageLightingPanel(*rig, &flags->lighting);
-                              return cvc::ariadne::CustomEdit{};
-                            });
-  }
+                            return cvc::ariadne::CustomEdit{};
+                          });
 }
 
 } // namespace ariadne

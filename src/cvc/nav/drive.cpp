@@ -835,6 +835,7 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
       t.terms = tel_u;
       t.force_x = tel_fx;
       t.force_y = tel_fy;
+      t.potential_end = t.projection_work = t.context_work = 0.0f; // sim_world's books
     }
   });
 }

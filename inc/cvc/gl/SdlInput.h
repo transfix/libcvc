@@ -7,13 +7,17 @@
 // types, so a cvcGL consumer needs no SDL headers.
 //
 // Build gating: with SDL present (CVC_ENABLE_SDL, set by src/cvcGL/CMakeLists.txt when it finds
-// SDL3), SdlInput is live; without it, init() returns false and poll() returns {} (a host falls
-// back to the VTK interactor, as today). See cvcGLConfig / the cvcgl recipe's sdl3 dependency.
+// SDL3), SdlInput is live; without it, init() returns false and poll() returns only the VTK keys
+// attach() observes. See cvcGLConfig / the cvcgl recipe's sdl3 dependency.
 #ifndef CVC_GL_SDL_INPUT_H
 #define CVC_GL_SDL_INPUT_H
 
 #include <string>
 #include <vector>
+
+class vtkRenderWindow; // VTK (global namespace)
+class vtkRenderWindowInteractor;
+class vtkCallbackCommand;
 
 namespace cvc {
 namespace gl {
@@ -61,6 +65,16 @@ public:
   // True once init() succeeded (and this build has SDL).
   bool available() const;
 
+  // Take the keyboard (and pointer) of the VTK window a cvcGL host draws in. SDL only delivers keys
+  // to a window of its own, so on Windows this wraps the host's HWND, and in the browser listens on
+  // the page for the keys typed into VTK's canvas; the host's own input goes on as before. Where
+  // SDL cannot take VTK's window (X11, Wayland, macOS, a build without SDL, or with
+  // $CVC_SDLINPUT_VTK_KEYS=1), poll() returns VTK's own key events instead, named as SDL names
+  // them: the presses ImGuiOverlay leaves to the scene, every release, and no pointer.
+  // False until VTK has made its window and interactor: call again on a later frame.
+  bool attach(vtkRenderWindow *window);
+  bool attached() const;
+
   // Drain the SDL event queue, returning the translated keyboard/mouse events (other event types —
   // quit, window, etc. — are left for the host to handle). Empty when not available.
   std::vector<InputEvent> poll();
@@ -70,6 +84,14 @@ public:
 
 private:
   bool inited_ = false;
+  bool video_ = false;           // SDL_INIT_VIDEO, which attach() needs
+  void *window_ = nullptr;       // attach(): the SDL_Window wrapping the host's
+  std::vector<InputEvent> keys_; // the browser's keys (attach()'s event filter), or VTK's
+  vtkRenderWindowInteractor *vtkKeys_ = nullptr; // attach() without SDL's window: VTK's keys,
+  vtkCallbackCommand *vtkKeyCb_ = nullptr;       // observed by this
+  unsigned long vtkKeyTags_[2] = {0, 0};
+  std::vector<std::string> held_; // VTK's keys down, to mark a repeat
+  bool attach_vtk_keys(vtkRenderWindow *window);
 };
 
 } // namespace gl

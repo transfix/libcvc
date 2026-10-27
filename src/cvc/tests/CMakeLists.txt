@@ -6,6 +6,7 @@ add_executable(app_test app_test.cpp)
 add_executable(thread_pool_test thread_pool_test.cpp)
 add_executable(text_test text_test.cpp)
 add_executable(ariadne_loader_test ariadne_loader_test.cpp)
+add_executable(ariadne_scene_tf_test ariadne_scene_tf_test.cpp)
 add_executable(ariadne_runtime_test ariadne_runtime_test.cpp)
 add_executable(ariadne_bind_test ariadne_bind_test.cpp)
 add_executable(ariadne_ftxui_test ariadne_ftxui_test.cpp)
@@ -150,6 +151,16 @@ add_executable(physics_replay_test physics_replay.cpp) # plain main(); see ../CM
 cvc_setup_physics_replay(physics_replay_test)
 add_executable(physics_pose_tracker_test physics_pose_tracker_test.cpp)
 add_executable(physics_plant_host_test physics_plant_host_test.cpp)
+add_executable(physics_dyn_bike_plant_test physics_dyn_bike_plant_test.cpp)
+# StepsAsTheDynamicPlantDoes holds dyn_bike_plant (built with -ffp-contract=off) to dyn_plant called
+# inline here, bit for bit: build it the same way, or clang contracts this copy into FMAs on aarch64
+# (the macOS arm64 lanes) and the last bits differ.
+if(NOT MSVC)
+  set_source_files_properties(physics_dyn_bike_plant_test.cpp
+                              PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+else()
+  set_source_files_properties(physics_dyn_bike_plant_test.cpp PROPERTIES COMPILE_OPTIONS "/fp:precise")
+endif()
 # det_math is internal to libcvc, so its test compiles it in, with the same no-contraction flag.
 add_executable(physics_det_math_test physics_det_math_test.cpp
   ${PROJECT_SOURCE_DIR}/src/cvc/physics/det_math.cpp)
@@ -203,6 +214,12 @@ add_executable(volslice_test volslice_test.cpp)
 add_executable(volslice_state_test volslice_state_test.cpp)
 add_executable(procedural_geometry_test procedural_geometry_test.cpp)
 add_executable(volume_ops_test volume_ops_test.cpp)
+add_executable(contour_tree_test contour_tree_test.cpp)
+add_executable(contour_spectrum_test contour_spectrum_test.cpp)
+add_executable(tf_model_test tf_model_test.cpp)
+add_executable(tf_editor_test tf_editor_test.cpp)
+add_executable(tf_overlays_test tf_overlays_test.cpp)
+add_executable(tf_overlay_tasks_test tf_overlay_tasks_test.cpp)
 add_executable(volume_io_test volume_io_test.cpp)
 add_executable(volume_io_extra_test volume_io_extra_test.cpp)
 add_executable(image_test image_test.cpp)
@@ -272,6 +289,7 @@ set(TEST_TARGETS
   thread_pool_test
   text_test
   ariadne_loader_test
+  ariadne_scene_tf_test
   ariadne_runtime_test
   ariadne_bind_test
   ariadne_ftxui_test
@@ -358,6 +376,7 @@ set(TEST_TARGETS
   physics_pose_tracker_test
   physics_det_math_test
   physics_plant_host_test
+  physics_dyn_bike_plant_test
   geometry_height_field_test
   world_geometry_test
   nav_world_planes_test
@@ -380,6 +399,12 @@ set(TEST_TARGETS
   volume_test
   procedural_geometry_test
   volume_ops_test
+  contour_tree_test
+  contour_spectrum_test
+  tf_model_test
+  tf_editor_test
+  tf_overlays_test
+  tf_overlay_tasks_test
   volume_io_test
   volume_io_extra_test
   image_test
@@ -580,6 +605,13 @@ target_link_libraries(text_test
 )
 
 target_link_libraries(ariadne_loader_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(ariadne_scene_tf_test
   PRIVATE
     cvc
     GTest::gtest
@@ -855,6 +887,48 @@ target_link_libraries(procedural_geometry_test
 )
 
 target_link_libraries(volume_ops_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(contour_tree_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(contour_spectrum_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(tf_model_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(tf_editor_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(tf_overlays_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(tf_overlay_tasks_test
   PRIVATE
     cvc
     GTest::gtest
@@ -1898,6 +1972,12 @@ target_link_libraries(physics_plant_host_test
     GTest::gtest
     GTest::gtest_main
 )
+target_link_libraries(physics_dyn_bike_plant_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
 
 target_link_libraries(physics_pose_tracker_test
   PRIVATE
@@ -2241,6 +2321,7 @@ target_compile_features(physics_parity_test PRIVATE cxx_std_17)
 target_compile_features(physics_pose_tracker_test PRIVATE cxx_std_17)
 target_compile_features(physics_det_math_test PRIVATE cxx_std_17)
 target_compile_features(physics_plant_host_test PRIVATE cxx_std_17)
+target_compile_features(physics_dyn_bike_plant_test PRIVATE cxx_std_17)
 target_compile_features(geometry_height_field_test PRIVATE cxx_std_17)
 target_compile_features(world_geometry_test PRIVATE cxx_std_17)
 target_compile_features(nav_world_planes_test PRIVATE cxx_std_17)
@@ -2381,6 +2462,7 @@ cvc_discover_tests(app_test)
 cvc_discover_tests(thread_pool_test)
 cvc_discover_tests(text_test)
 cvc_discover_tests(ariadne_loader_test)
+cvc_discover_tests(ariadne_scene_tf_test)
 cvc_discover_tests(ariadne_runtime_test)
 cvc_discover_tests(ariadne_ftxui_test)
 cvc_discover_tests(ariadne_term_graphics_test)
@@ -2411,6 +2493,14 @@ if(TARGET algorithm_test)
   cvc_discover_tests(algorithm_test)
 endif()
 cvc_discover_tests(volume_ops_test)
+cvc_discover_tests(contour_tree_test)
+cvc_discover_tests(contour_spectrum_test)
+cvc_discover_tests(tf_model_test)
+cvc_discover_tests(tf_editor_test)
+cvc_discover_tests(tf_overlays_test)
+# RUN_SERIAL: these tests bound how long one scheduler pump takes (a frame must stay near its
+# slice), and parallel ctest jobs preempting the thread would stretch a pump past the bound.
+cvc_discover_tests(tf_overlay_tasks_test PROPERTIES RUN_SERIAL TRUE)
 cvc_discover_tests(volume_io_test)
 cvc_discover_tests(image_test)
 cvc_discover_tests(magick_bootstrap_test)
@@ -2728,6 +2818,7 @@ cvc_discover_tests(physics_parity_test)
 cvc_discover_tests(physics_pose_tracker_test)
 cvc_discover_tests(physics_det_math_test)
 cvc_discover_tests(physics_plant_host_test)
+cvc_discover_tests(physics_dyn_bike_plant_test)
 cvc_discover_tests(geometry_height_field_test)
 cvc_discover_tests(world_geometry_test)
 cvc_discover_tests(nav_world_planes_test)

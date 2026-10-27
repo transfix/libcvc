@@ -128,6 +128,7 @@ std::string format_host_info(const HostInfo &info, bool json, bool functions) {
       << ", \"probed\": " << (info.probed ? "true" : "false")
       << ", \"kitty\": " << (info.graphics.kitty ? "true" : "false")
       << ", \"sixel\": " << (info.graphics.sixel ? "true" : "false")
+      << ", \"iterm\": " << (info.graphics.iterm ? "true" : "false")
       << ", \"sixel_colors\": " << info.graphics.sixel_colors << ", \"cell_px\": ["
       << info.graphics.cell_w << ", " << info.graphics.cell_h << "]},\n"
       << "  \"built_with\": {\"yaml\": " << (info.yaml ? "true" : "false")
@@ -164,6 +165,7 @@ std::string format_host_info(const HostInfo &info, bool json, bool functions) {
       if (info.graphics.sixel && info.graphics.sixel_colors > 0)
         o << " (" << info.graphics.sixel_colors << " colours)";
       o << "\n";
+      o << "  iTerm2 images   " << yes(info.graphics.iterm) << "\n";
       if (info.graphics.cell_w > 0)
         o << "  cell            " << info.graphics.cell_w << " x " << info.graphics.cell_h
           << " px\n";

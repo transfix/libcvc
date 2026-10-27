@@ -23,10 +23,13 @@
 // write (which fans out to observers / replicated peers), not one per frame.
 
 #include <cvc/ariadne/widget.h> // Size / Layout / Extent (§3.0.3b) passed to the backend
+#include <cvc/tf/editor.h>      // tf_editor: the model + view the backend edits
+#include <cvc/tf/overlays.h>    // tf_editor: the histogram / contour spectrum / tree layers
 #include <string>
 #include <vector>
 
 namespace cvc {
+class image;
 namespace ariadne {
 
 struct BoolEdit {
@@ -81,6 +84,37 @@ struct ColorEdit {
   float rgb[3] = {0.0f, 0.0f, 0.0f};
 };
 
+// What the core hands a backend to draw a transfer-function editor (Kind::TfEditor). The core has
+// already read and parsed everything from cvc::state: the bound model, the overlays published
+// beside it, and this instance's persisted view (zoom window + layer toggles).
+struct TfEditorInput {
+  const cvc::tf::model *model = nullptr;       // the bound model (normalized)
+  const cvc::tf::overlays *overlays = nullptr; // published layers (members empty when absent)
+  double lo = 0.0, hi = 1.0;                   // the effective domain in data units (labels, info)
+  cvc::tf::view view;                          // this instance's persisted view
+  // Commit on every drag frame (ColorTable2's interactiveUpdates), or only on release.
+  bool interactive = true;
+  float height = 0.0f; // canvas height in px (0 = the backend's default)
+
+  // The interval a mesher builds from two isocontours (<tf>.interval, e.g. fe_lab's
+  // mesh.region: interval): the ids of the two isocontours bounding it, in either order, to shade
+  // the band between their bars. Both empty when none is published or either id is not in the
+  // model (cvc::tf::interval_isocontours).
+  std::string interval_a, interval_b;
+};
+
+// A transfer-function editor's edit. `drawn` = the backend rendered one (false on a backend with no
+// such widget — the core then composes one from sliders and buttons). `committed` is the model's
+// write edge; `view_changed` reports a zoom / layer-toggle change for the core to persist.
+struct TfEdit {
+  bool drawn = false;
+  bool changed = false;
+  bool committed = false;
+  cvc::tf::model model;
+  bool view_changed = false;
+  cvc::tf::view view;
+};
+
 // §11.4 runtime geometry persistence. The CORE owns the state (tree.<id>.geometry /
 // tree.<id>.tracks per §11.2); the backend only SEEDS a window / split-grid from a persisted
 // geometry and REPORTS the surface's current geometry back — the same value-in / report-out split
@@ -91,6 +125,9 @@ struct WindowGeom {
   bool has_pos = false;  // x,y carry a real on-screen position
   bool has_size = false; // w,h carry a real size
   float x = 0.0f, y = 0.0f, w = 0.0f, h = 0.0f;
+  // x,y are the document's own `pos:`, not a position the backend reported: relative to the
+  // backend's work area (below a main menu bar), where a persisted one is the backend's own.
+  bool authored = false;
 };
 
 // What a surface can and cannot do. AppRuntime::load checks a document's
@@ -157,6 +194,10 @@ public:
   // begin_window: the window's current on-screen geometry, so the core writes a user move / resize
   // back to state. Both default to no-op / {} — a backend with no movable windows persists nothing.
   virtual void seed_window_geometry(const WindowGeom &g) { (void)g; }
+  // A new document's tree is coming (Runtime::forget_layout): its windows are new to it even where
+  // the last document used the same ids, so a backend lays each one out afresh -- its authored
+  // place and size, or the backend's own layout -- at its first begin_window from now on.
+  virtual void reset_layout() {}
   virtual WindowGeom window_geometry() const { return {}; }
 
   // Raise/focus the NEXT window to the front. Called right before begin_window when the core sees a
@@ -292,6 +333,29 @@ public:
     (void)name;
     (void)width;
     return false;
+  }
+
+  // Publish/replace the image draw_image(name, ...) shows. The ImGui and terminal backends store
+  // it (the ImGui one uploads it to a texture lazily); the core uses it for raster previews it
+  // renders itself (the composed tf_editor). Default: dropped, matching a backend with no image
+  // path. Call on the render/host thread.
+  virtual void set_image(const std::string &name, const cvc::image &img) {
+    (void)name;
+    (void)img;
+  }
+
+  // A transfer-function editor (Kind::TfEditor; a port of VolumeRover2's ColorTable2): the colour
+  // ramp, opacity curve, isocontour bars and the overlay layers over a zoomable canvas. `key` is
+  // the stable per-instance id ("<resolved bind>#<instance id>") the backend keys its in-progress
+  // drag on, so two editors on one model keep their own drag and preview.
+  // NON-PURE: the default returns {drawn:false} and the core composes an editor from sliders,
+  // colour pickers and buttons instead (a terminal, a mock). A backend that draws it returns
+  // {drawn:true, ...} with the edited model; the core owns the state read/write.
+  virtual TfEdit tf_editor(const char *label, const char *key, const TfEditorInput &in) {
+    (void)label;
+    (void)key;
+    (void)in;
+    return {};
   }
 
   // An RGB colour picker bound to an "r,g,b" state key (each 0..1). NON-PURE: the default returns

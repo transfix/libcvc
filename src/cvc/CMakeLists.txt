@@ -128,6 +128,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/core/app.h
   ../../inc/cvc/core/async_task.h
   ../../inc/cvc/core/async_lane.h
+  ../../inc/cvc/core/process.h
   ../../inc/cvc/core/text.h
   ../../inc/cvc/core/thread_pool.h
   ../../inc/cvc/volume/volmagick.h
@@ -135,6 +136,13 @@ set(INCLUDE_FILES
   ../../inc/cvc/model/model.h
   ../../inc/cvc/model/model_file_io.h
   ../../inc/cvc/volume/volume_ops.h
+  ../../inc/cvc/volume/contour_tree.h
+  ../../inc/cvc/volume/contour_spectrum.h
+  ../../inc/cvc/tf/model.h
+  ../../inc/cvc/tf/vinay.h
+  ../../inc/cvc/tf/overlays.h
+  ../../inc/cvc/tf/editor.h
+  ../../inc/cvc/tf/overlay_tasks.h
   ../../inc/cvc/nav/grid_nav.h
   ../../inc/cvc/nav/vehicle_route.h
   ../../inc/cvc/nav/route_follower.h
@@ -210,6 +218,7 @@ set(SOURCE_FILES
   core/app.cpp
   core/async_task.cpp
   core/async_lane.cpp
+  core/process.cpp
   core/text.cpp
   core/thread_pool.cpp
   processing/bilateral_filter.cpp
@@ -282,6 +291,7 @@ set(SOURCE_FILES
   physics/physics_codec.cpp
   physics/binding_meta.cpp
   physics/nav_plant.cpp
+  physics/dyn_bike_plant.cpp
   physics/nav_eval.cpp
   physics/nav_es.cpp
   physics/plant_log.cpp
@@ -327,6 +337,13 @@ set(SOURCE_FILES
   volume/volume_file_io.cpp
   volume/volume_file_info.cpp
   volume/volume_ops.cpp
+  volume/contour_tree.cpp
+  volume/contour_spectrum.cpp
+  tf/model.cpp
+  tf/vinay.cpp
+  tf/overlays.cpp
+  tf/editor.cpp
+  tf/overlay_tasks.cpp
   volume/vtk_io.cpp
   nav/grid_nav.cpp
   nav/vehicle_route.cpp
@@ -491,7 +508,8 @@ endif()
 # null backend, as for nav and world above; the Jolt backend TUs get the same flag
 # on their own target (below).
 set(_cvc_physics_exact_sources physics/world.cpp physics/vehicle.cpp physics/field_step.cpp
-    physics/det_math.cpp physics/null_backend.cpp physics/nav_plant.cpp)
+    physics/det_math.cpp physics/null_backend.cpp physics/nav_plant.cpp
+    physics/dyn_bike_plant.cpp)
 if(NOT MSVC)
   set_source_files_properties(${_cvc_physics_exact_sources}
                               PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
@@ -784,6 +802,7 @@ if(CVC_ENABLE_MESHER)
       geometry/cvc-mesher/contour/edgehash.cpp
       geometry/cvc-mesher/contour/regprop2.cpp
       geometry/cvc-mesher/contour/spectrumtest.cpp
+      geometry/cvc-mesher/contour_spectrum_libcontour.cpp # cvc::compute_contour_spectrum_libcontour
       geometry/cvc-mesher/contour/ipqueue.cpp
       geometry/cvc-mesher/contour/seedcells.cpp
       geometry/cvc-mesher/contour/conplot3d.cpp
@@ -1346,7 +1365,7 @@ list(APPEND INCLUDE_FILES ../../inc/cvc/net/http_client.h)
 # the retained Widget tree, the Runtime + reconcile boundary, and direct
 # cvc::state binding, walking a pluggable Backend. It touches NO VTK/ImGui/GL —
 # the ImGui-over-VTK backend lives in cvcGL (src/cvcGL/ariadne). Roadmap §16.1.
-list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/conference/room_write_gate.cpp ariadne/conference/room_rungs.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/requires.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp)
+list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/conference/room_write_gate.cpp ariadne/conference/room_rungs.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/keys.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/requires.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp ariadne/tf_editor_emit.cpp)
 list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/widget.h
   ../../inc/cvc/ariadne/backend.h
@@ -1356,6 +1375,7 @@ list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/holon.h
   ../../inc/cvc/ariadne/holon_sync.h
   ../../inc/cvc/ariadne/app_runtime.h
+  ../../inc/cvc/ariadne/keys.h
   ../../inc/cvc/ariadne/doc_args.h
   ../../inc/cvc/ariadne/host_cli.h
   ../../inc/cvc/ariadne/host_signals.h

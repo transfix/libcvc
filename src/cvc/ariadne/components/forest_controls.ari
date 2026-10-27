@@ -2,7 +2,8 @@
 # The sliders bind the forest.* state keys that the cvcGL forest_trees realizer reads each frame;
 # the realizer SEEDS these keys from the node's authored .ari props, so the controls start at the
 # document's values and then drive the forest live. Structural changes (count / seed / species /
-# span / levels / branches / scale) re-grow the mesh on edit; Wind is applied every frame.
+# span / sea level / levels / branches / scale) re-grow the whole forest, so those sliders write
+# when they are let go (`commit: release`), not every frame of a drag; Wind is live.
 #
 # Use it:
 #     import: cvc://components/forest_controls.ari
@@ -16,10 +17,12 @@ units:
     children:
       - slider_int: Tree count
         bind: forest.count
+        commit: release
         lo: 1
         hi: 200
       - slider_int: Seed
         bind: forest.seed
+        commit: release
         lo: 0
         hi: 9999
       - combo: Species
@@ -28,25 +31,30 @@ units:
         values: [0, 1, 2]
       - slider_float: Scatter span
         bind: forest.span
+        commit: release
         lo: 10.0
         hi: 120.0
         fmt: "%.0f"
       - slider_float: Sea level
         bind: forest.sea_level
+        commit: release
         lo: -5.0
         hi: 20.0
         fmt: "%.1f"
       - separator
       - slider_int: Branchy levels
         bind: forest.levels
+        commit: release
         lo: 1
         hi: 6
       - slider_int: Branchy branches
         bind: forest.branches
+        commit: release
         lo: 2
         hi: 5
       - slider_float: Pine scale
         bind: forest.pine_scale
+        commit: release
         lo: 0.5
         hi: 3.0
         fmt: "%.2f"

@@ -22,6 +22,8 @@
 // Cinematic capture:            terrain_lab --capture fly --frames 900 --out frames
 
 #define _USE_MATH_DEFINES
+#include "demos_menu.h" // the gallery's Demos menu
+
 #include <algorithm>
 #include <boost/program_options.hpp>
 #include <chrono>
@@ -1549,6 +1551,7 @@ int main(int argc, char **argv) {
   bool uiScene = false, uiLighting = false;
   ui.setDrawCallback([&] {
     if (ImGui::BeginMainMenuBar()) {
+      cvc_examples::demos_menu("terrain_lab");
       if (ImGui::BeginMenu("Scene")) {
         cvc::gl::ui::SceneMenuItems(sg, &uiScene, &uiLighting);
         ImGui::EndMenu();
@@ -1718,7 +1721,7 @@ int main(int argc, char **argv) {
   // fixed 1/fps makes the frames reproducible.
   cvc::world_clock &clock = app.world_clock();
   cvc::world_clock_binding clockDrive(app, clock);
-  while (!view.windowClosed()) {
+  while (!view.windowClosed() && !cvc_examples::demo_switch_requested()) {
     double t, dt;
     if (capturing) {
       t = frame / fps;

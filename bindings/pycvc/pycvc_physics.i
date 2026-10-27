@@ -1004,11 +1004,16 @@ PyObject *nav_sim_world_set_plant(PyObject *handle, PyObject *plant) {
 // The ticks the sim_world has stepped.
 long nav_sim_world_tick(PyObject *handle) { return sim_world_from(handle)->tick(); }
 
-// "kinematic" or "jolt".
+// "kinematic", "jolt" or "dynamic".
 std::string nav_sim_world_plant_kind(PyObject *handle) {
-  return sim_world_from(handle)->plant_type() == cvc::nav::plant_kind::jolt
-             ? "jolt"
-             : "kinematic";
+  switch (sim_world_from(handle)->plant_type()) {
+  case cvc::nav::plant_kind::jolt:
+    return "jolt";
+  case cvc::nav::plant_kind::dynamic:
+    return "dynamic";
+  default:
+    return "kinematic";
+  }
 }
 
 // Terrain in the navigator's energy (P5): heights (rows, cols) in metres, row 0 at min y, and a

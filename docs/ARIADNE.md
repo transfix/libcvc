@@ -241,8 +241,10 @@ the reconcile, and all `cvc::state`; the Backend owns only the surface** — it 
 value handed to it and reports the edit, and never touches `cvc::state` itself.
 
 Each state-bound primitive returns `{changed, committed, value}`
-([`backend.h`](../inc/cvc/ariadne/backend.h)). Core writes state **only on
-`committed`**, so a slider drag is one write on release, not one write per frame.
+([`backend.h`](../inc/cvc/ariadne/backend.h)). Core writes state on `committed`, and a
+slider's on every `changed` too, so whatever it drives follows the drag. A slider with
+`commit: release` writes once, when the drag ends, for a key whose change is too costly to
+redo every frame (the forest controls' structural sliders, which regrow the whole forest).
 
 A backend advertises `Capabilities{windows, menubar, mouse, keyboard, color, glsl,
 view_embed, owns_loop, terminal, bitmap, kitty, sixel}`
@@ -292,8 +294,8 @@ Three backends ship:
     it shows whatever still image is published under the stream's name (`--image`).
 
   Commit edges match the ImGui backend: discrete widgets commit on the edit, a
-  mouse-dragged slider commits on release (arrow-key steps commit at once), a text field
-  commits on Enter or when focus leaves it. Authored px convert to cells by a nominal cell
+  mouse-dragged slider reports each move and commits on release (arrow-key steps commit at
+  once), a text field commits on Enter or when focus leaves it. Authored px convert to cells by a nominal cell
   size (`Options::cell_px_w/h`, 8 × 16), and reported geometry converts back, so a layout
   persisted under one backend holds under the other. Grid seams drag: a row split's
   panes and a `resizable` table's columns resize with the mouse; a row split persists
@@ -304,7 +306,8 @@ Three backends ship:
   `ariadne_ftxui_test` tests it); `run()` owns a real terminal.
 
   **Pixel graphics** ([`term_graphics.h`](../inc/cvc/ariadne/term_graphics.h)).
-  `Options::image_color` is `Auto`, `Kitty`, `Sixel`, `Color` (half-blocks) or `Mono`.
+  `Options::image_color` is `Auto`, `Kitty`, `Sixel`, `Iterm`, `Color` (half-blocks) or
+  `Mono`.
   `Auto` takes the best the terminal has, else half-blocks:
   - **Kitty** (kitty, Ghostty, WezTerm, Konsole). Each image is sent once, out of band,
     after the frame that first draws it (`a=T,U=1,f=24,q=2`, chunked base64), and is
@@ -324,6 +327,13 @@ Three backends ship:
     half-blocks underneath, and a pass after the whole frame keeps the cells still showing
     them, sent as one bitmap per rectangle. Colours go to a fixed 6 × 7 × 6 cube (fewer
     where the terminal reports fewer registers) with an ordered dither.
+  - **Iterm** (iTerm2's inline images: WezTerm, iTerm2, mintty, xterm.js's image addon).
+    Like Sixel, but each rectangle is a JPEG in an OSC 1337 escape that names its cells
+    (`width=` / `height=`, `doNotMoveCursor=1`), and the terminal scales it to them, so the
+    cell size need not be known. `Auto` picks it, after Kitty and Sixel, when
+    `$TERM_PROGRAM` names such a terminal (`gfx::iterm_terminal`: WezTerm, iTerm2, mintty)
+    and stdout is a tty, off Windows. A page with xterm.js's image addon asks for it
+    (`--graphics iterm`), as arigl_term's does.
   - **Detection.** `run()` asks the terminal before FTXUI takes it over, because FTXUI's
     input parser has no APC case and a late kitty reply would arrive as typed text: on
     `/dev/tty` in raw mode it sends a kitty query, `CSI 16 t` (the cell size in pixels)
@@ -341,8 +351,15 @@ Three backends ship:
     `take_graphics()` returns the bytes `run()` would write after that frame
     (`release_graphics()`: the deletions it sends on exit).
   - **Limits.** Hosted mode (the tvision desktop) always draws half-blocks, because
-    tvision owns the output. No probe runs on Windows or in the browser, so `Auto` stays
-    half-blocks there (`Kitty` / `Sixel` can still be asked for). Inside tmux the probe
+    tvision owns the output. No probe runs on Windows or in the browser, so `Auto` there is
+    half-blocks (`Kitty`, `Sixel` and `Iterm` can still be asked for). On Windows a console
+    program reaches its terminal through ConPTY,
+    which decides what gets through: Windows Terminal's (1.22 and later) passes Sixel on,
+    and `arigl --terminal --graphics sixel --cell-size WxH` draws real pixels there. The
+    ConPTY WezTerm 20240203 bundles, and the one in Windows itself, drop kitty's APC and
+    Sixel's DCS; they forward an iTerm2 image as it comes but redraw cells later on their
+    own, so a full-screen program's image lands at the wrong place and is painted over.
+    So kitty graphics need a terminal on Linux or macOS. Inside tmux the probe
     gets no kitty reply, so it falls back too (tmux passthrough is not wired). A Sixel
     bitmap never covers the screen's last row (a terminal that moves the cursor below a
     bitmap would scroll), and where its last six-pixel band would reach a covered row it
@@ -391,7 +408,7 @@ The built-in top-level keys (`is_builtin_block`,
 
 ```
 meta  menubar  windows  overlays  root (alias: children)  scene  customs  requires
-init  on_tick  on_key  on_pointer  on_signal  units  import  channels  lint  args
+init  on_tick  on_key  on_pointer  on_signal  keys  units  import  channels  lint  args
 ```
 
 Any **other** top-level key is dispatched to a parser registered via
@@ -443,6 +460,38 @@ the loader only *captures*. The host wires them:
         (begin (state-set "app.quit_armed" "1")
                (state-set "app.status" "Ctrl-C again to quit")))
   ```
+- **`keys:`** names the document's **rebindable** key actions
+  ([`keys.h`](../inc/cvc/ariadne/keys.h)): each has a label, its default key or keys, and an
+  `on:` (a program, or a host event). A binding's keys live in a state key, `keys.<id>`
+  (seeded from the defaults), and `Runtime::post_input` runs its `on:` on a key down that
+  matches one of them, in the next drain, as a button's runs. Key names compare whoever
+  spells them (`canonical_key`: SDL's `Left Shift` and VTK's `Shift_L` are one key). An
+  `on_key:` still sees every key, besides.
+
+  ```yaml
+  keys:
+    next:
+      label: Next item
+      key: [Right, PageDown]
+      on: (state-set "item" (+ (int (state-get "item")) 1))
+  ```
+
+  `AppRuntime` lists every binding, the document's and the host's
+  (`set_host_keys`: `arigl` adds its camera's fly keys), in a **Keys** window it puts in the
+  document: closed until `tree.ariadne_keys.open` is set (arigl's *Settings > Keys...*), a row
+  per binding with its keys and a **Change** button. Change writes the binding's id to
+  `tree.ariadne_keys.capture`; while the window is open the next key down becomes its key
+  (Escape keeps the old one; the comma key is stored as `Comma`), and no handler sees that key.
+  Closing the window drops a capture still waiting. In the terminal every key goes to the
+  capture, Tab and Return included. A group with an `id`, like each of those rows, scopes its
+  children's identities as a window does, so every row's Change is its own.
+
+  Documents a host loads in turn share its prefix, so a new document's `keys:` defaults replace
+  what an earlier document left at the same `keys.<id>`; a reload of the same file keeps the
+  keys the user chose. A new document also starts its layout afresh
+  (`Runtime::forget_layout`, `Backend::reset_layout`): each window's first frame takes its own
+  `pos:` and `size:`, not the last document's window of the same id. An authored `pos:` is
+  measured from the work area, below a main menu bar.
 
 A small, complete document (mirroring `nav_compute.ari`). A widget is a map whose
 **first key is its type** and whose value is its label (`slider_int: "N"`), with the
@@ -547,53 +596,128 @@ node's `fit:`. `algorithm` picks the `cvc::sdf` implementation: `v2` (the defaul
 or `igl` (exact AABB distance signed by the fast winding number, robust to holes); `igl`
 needs a `CVC_ENABLE_LIBIGL` build and falls back to `v2` with a warning without one.
 
+**`fit:`** stands a loaded mesh on the ground: `fit: { height: H, up: x | y | z, flip: true }`
+turns the dataset's own up axis to +z (`up: y` is a +90° turn about x, `up: x` the cyclic
+x→z), then with `flip` turns it upside down (a half turn about x, for a scan stored head
+down), centres it in x and y, sits it on z = 0 and scales its largest extent to H.
+
 **`type: mesh_lab`** ([`mesh_nodes.h`](../inc/cvc/gl/ariadne/mesh_nodes.h)) reads its
 `source:`/`fit:`/`material:` like a `geometry` node and processes the mesh with
 `cvc::mesh_ops`. Its keys live under the node's own state, `<node>.mesh_ops.*`:
 
 | key | meaning | seeded from prop |
 |---|---|---|
-| `request` | `smooth`, `decimate`, `repair`, `orient`, `curvature`, `reset` (§5.5) | — |
+| `request` | `smooth`, `decimate`, `repair`, `orient`, `curvature`, `reset`, `load`, `reload` (§5.5); several separated by spaces run in order, as in `load smooth` | — |
 | `busy`, `status`, `stats.vertices`, `stats.faces` | published | — |
+| `stats.work_ms` | published: the wall time of the last run of commands, from the first to idle | — |
+| `source.file` | the mesh `load` reads: a path or URI, a relative path resolved against the document's directory (`stanford.bunny` is built in) | `source: { file }` |
+| `source.up`, `source.flip`, `source.height` | the `fit:` `load` applies: up axis `x`/`y`/`z`, upside down, height (0 = no fit) | `fit:` |
 | `smooth.method` | `cotan` (implicit) / `uniform` / `taubin` | `smooth_method` |
 | `smooth.iterations`, `smooth.lambda`, `smooth.fix_boundary` | `cvc::smooth_params` | `smooth_iterations`, `smooth_lambda`, `fix_boundary` |
 | `decimate.target_faces` | triangle target for `cvc::simplify` | `target_faces` |
 | `repair.weld`, `repair.remove_degenerate`, `repair.remove_unreferenced`, `repair.orient` | `cvc::repair_params` | `weld`, `remove_degenerate`, `remove_unreferenced`, `orient` |
-| `color.mode` | `none`, `mean`, `gaussian`, `k1`, `k2`, `geodesic` — followed live | `color_mode` |
+| `color.mode` | `none`, `mean`, `gaussian`, `k1`, `k2`, `geodesic`, `modes` — followed live | `color_mode` |
 | `color.colormap` | `viridis`, `magma`, `plasma`, `inferno`, `turbo`, `jet`, `parula`, `gray` | `colormap` |
-| `geodesic.source` | source vertex for `geodesic` (clamped to #V-1) | `geodesic_source` |
+| `geodesic.source` | source vertex for `geodesic` (clamped to #V-1; -1 is the highest vertex) | `geodesic_source` |
+| `modes.index` | the Laplace–Beltrami eigenfunction `modes` shows (`fem::laplacian_eigenmodes` on the surface; 1 is the first non-constant, up to 50) | `mode` |
 | `color.min`, `color.max` | the colour range used (2-98% percentiles for curvature) | — |
 
 `curvature` switches a non-curvature `color.mode` to `mean` (or recomputes the one shown).
 A geodesic solver is cached per mesh version, so moving the source is two
-back-substitutions.
+back-substitutions; so are the eigenpairs (at least ten are computed), so stepping
+`modes.index` through the first few reuses one eigensolve. `load` reads the file again only
+when a `source.*` key changed since the last load; otherwise it goes back to the loaded mesh
+(undoing a smooth or a decimate), and keeps those caches when that mesh is still the one
+shown. `reload` always reads it. A failed load says why in `status` and keeps the mesh.
 
-**`type: fe_lab`** reads a volume like a `volren` node (`source: { file }` or `{ sdf }`),
-tet-meshes it with the in-tree LBIE mesher (`cvc::tetrahedralize`, `CVC_ENABLE_MESHER`),
-and solves linear (P1) finite-element problems with `cvc::fem`. The node itself shows the
-field on the tet boundary surface; its child `<id>_slice` shows it on an axis-aligned cut.
+**`type: fe_lab`** reads a volume like a `volren` node (`source: { file }` or `{ sdf }`) and
+meshes it with the in-tree LBIE mesher (`CVC_ENABLE_MESHER`): tetrahedra
+(`cvc::tetrahedralize`, or `tetrahedralize_interval` for the shell between two isovalues) or
+hexahedra (`cvc::hexahedralize`). It solves linear (P1) finite-element problems on the
+tetrahedra with `cvc::fem`. It has two views:
+
+- **field** (the default): the node shows the field on the boundary, translucent while its
+  child `<id>_slice` shows the field on an axis-aligned cut. The boundary is the smooth surface
+  the elements approximate (`view.boundary: input`): an `sdf` source's own mesh, or a volume's
+  isosurface (`cvc::iso`), the field sampled onto it from the elements' boundary. With
+  `view.boundary: mesh`, or for an interval mesh, it is the elements' own boundary.
+- **elements**: the node shows the elements on one side of the cut plane (the slice axis and
+  offset; all of them with the slice off). Each is kept whole and flat-coloured by its size
+  (log2 of its edge length, one band per octree level) or its quality (a tetrahedron's minimum
+  dihedral angle in degrees, a hexahedron's scaled Jacobian). The child `<id>_edges` outlines
+  each exposed face, and `<id>_ghost` draws the whole outer surface at `view.ghost` opacity.
+
 Keys under `<node>.fe.*`:
 
 | key | meaning | seeded from prop |
 |---|---|---|
-| `request` | `mesh`, `solve`, `stop` (`stop` interrupts a heat solve; any other job runs to the end and the status says so) | `auto_mesh: true` seeds `mesh` |
-| `busy`, `status`, `progress` (0-100), `stats.tets`, `stats.vertices`, `field.min`, `field.max` | published | — |
+| `request` | `load`, `reload`, `mesh`, `solve`, `stop` (`stop` interrupts a heat solve; any other job runs to the end and the status says so); several separated by spaces run in order | `auto_mesh: true` seeds `mesh` |
+| `busy`, `status`, `progress` (0-100), `stats.vertices`, `field.min`, `field.max` | published | — |
+| `stats.tets`, `stats.hexes` | published: the element count (the other is 0) | — |
+| `stats.quality_min`, `stats.quality_mean` | published: minimum dihedral angle (tetrahedra, degrees) or scaled Jacobian (hexahedra) | — |
+| `stats.work_ms` | published: the wall time of the last run of commands, from the first to idle | — |
 | `stoppable` | published: 1 while a heat solve runs (the Stop button's `enabled_when`), else 0 | — |
-| `mesh.isovalue` | the bounding level, in the volume's units | `isovalue` |
-| `mesh.inside` | `below` (an SDF: mesh where v < isovalue) or `above` (a density) | `inside` (default `below` for an `sdf` source, else `above`) |
-| `mesh.improve`, `mesh.improve_iterations` | `cvc::improvement_method` (0-5) and its passes | `improve`, `improve_iterations` |
-| `problem` | `poisson` (-Δu = f, u = 0 on the boundary) or `heat` (hot floor) | `problem` |
+| `last_mesh` | published: the region and bounds the last mesh job started with (`solid <isovalue>` or `interval <lo> <hi>`), `""` before the first | — |
+| `source.type` | `sdf` (the signed distance field of a mesh) or `volume` (a volume file) | `source:` |
+| `source.file` | the mesh or the volume: a path or URI, a relative path resolved against the document's directory (`stanford.bunny` is built in) | `source.sdf.mesh` / `source.file` |
+| `source.dim` | `sdf`: the grid's N; `volume`: resampled to N³ (0 = as stored) | `source.sdf.dim` / `resample` |
+| `source.algorithm` | `v1`, `v2` or `igl` for an `sdf` source | `source.sdf.algorithm` |
+| `source.up`, `source.flip`, `source.height` | the `fit:` applied to the elements: up axis, upside down, height (0 = none) | `fit:` |
+| `auto.mesh`, `auto.solve` | mesh after a load; solve after a mesh (or after a load that keeps the mesh) | `auto_mesh`, `auto_solve` |
+| `mesh.region` | `solid` (one side of `mesh.isovalue`) or `interval` (the shell between `mesh.isovalue` and `mesh.isovalue2`, in either order, whatever `mesh.inside` says; tetrahedra only) | `region` (default `solid`); `interval: [a, b]` is shorthand for `region: interval`, `isovalue: a`, `isovalue2: b` (`interval: true`: the region alone), and an explicit `region` / `isovalue` / `isovalue2` beside it wins |
+| `mesh.isovalue` | the bounding level, in the volume's units (an `sdf` source's are the mesh file's own) | `isovalue` |
+| `mesh.isovalue2` | an interval's second bound | `isovalue2`; absent, a tenth of the value range from `isovalue` on the side `mesh.inside` fills (an SDF's inner skin), at most half way to that end of the range, else on the other side (for an `sdf` source, set when its field has been computed) |
+| `mesh.inside` | `below` (an SDF: mesh where v < isovalue) or `above` (a density); a solid mesh's side | `inside` (default `below` for an `sdf` source, else `above`) |
+| `mesh.elements` | `tet` or `hex` (hexahedra show in the elements view; a solve refuses them) | `elements` |
+| `mesh.improve`, `mesh.improve_iterations` | `cvc::improvement_method` (0-5; 5 is optimization) and its passes | `improve`, `improve_iterations` |
+| `problem` | `poisson` (-Δu = f, u = 0 on the boundary), `heat` (hot floor) or `modes` (free-vibration eigenmodes of the solid) | `problem` |
 | `poisson.f` | the constant source | `poisson_f` |
 | `heat.kappa`, `heat.dt`, `heat.steps` | backward-Euler heat; κ is relative: the diffusivity used is κ·extent² | `heat_kappa`, `heat_dt`, `heat_steps` |
+| `modes.index` | the eigenmode `modes` solves for (1 is the first non-constant, up to 50) | `mode` |
+| `view.mode` | `field` or `elements` | `view` |
+| `view.boundary` | `input` (the smooth surface, when there is one) or `mesh` | `boundary` |
 | `view.colormap`, `view.show_surface`, `view.show_slice` | display | `colormap`, `show_surface`, `show_slice` |
-| `view.slice_axis`, `view.slice_offset` | 0/1/2 and -1..1 across the mesh bounds | `slice_axis`, `slice_offset` |
+| `view.slice_axis`, `view.slice_offset` | 0/1/2 and -1..1 across the mesh bounds: the cut, in both views | `slice_axis`, `slice_offset` |
 | `view.surface_opacity` | the boundary's opacity while a slice shows | `surface_opacity` |
+| `view.color_by` | the elements' colour: `size` or `quality` | `color_by` |
+| `view.cut_side` | the side of the cut the elements view keeps: 1 (+) or -1 (−) | `cut_side` |
+| `view.ghost` | the outer surface's opacity in the elements view (0 = off) | `ghost` |
+| `view.fixed_range`, `view.range_min`, `view.range_max` | colour over a fixed range instead of the data's (both views) | `fixed_range`, `range_min`, `range_max` |
 
 The heat problem holds the boundary vertices in the lowest 5% of the height at 1 and
-insulates the rest; the body starts at 0. `auto_solve: true` solves after every mesh,
+insulates the rest; the body starts at 0. `auto.solve` solves after every mesh,
 unless a request written during the mesh job is already waiting: that request runs instead
-(a waiting re-mesh auto-solves in its turn).
+(a waiting re-mesh auto-solves in its turn). Eigenpairs are cached per mesh (at least four),
+so stepping `modes.index` through the first few re-solves nothing.
 Until the first mesh the node shows the volume's bounds as lines.
+
+An interval mesh's boundary has two sheets, an outer and an inner one round the cavity, each
+wound (and lit) out of the shell; Poisson holds u = 0 on both, and the heat problem's hot
+floor is the lowest 5% of either (on a shell, the outer sheet's bottom cap). The interval is
+inclusive — a voxel exactly on a bound is inside: such a bound is meshed half way to the next
+value beyond it, so `[1, 3]` on integer labels meshes as `[0.5, 3.5]` — and a bound on or past an end of the volume's
+range bounds nothing (`[0.5, 2]` on a 0/1 mask meshes `{v ≥ 0.5}`). An interval that
+holds no voxel leaves the last mesh and says so in `status` ("error: no tets: the interval
+[lo, hi] does not cut the volume (its values span [min, max])"). The node's
+`<node>.transfer_function` holds the bounds as isocontours, so a `tf_editor` drives both (see
+[TRANSFER_FUNCTIONS.md](TRANSFER_FUNCTIONS.md) §6, "Meshing an interval from two isocontours").
+
+**Switching sources.** The node's `source:` and `fit:` seed the `source.*` keys. A volume file
+is read when the scene is realized; for an `sdf` source only the mesh is, so the scene frames
+its box at once, and the first tick computes the field on the lane (`status` says
+`loading ...`; requests wait for it). A `load` request reads the keys again on the lane, but only
+when one changed; then, with `auto.mesh`, it meshes when the source or a `mesh.*` key changed,
+and otherwise solves (`auto.solve`). So a document can step one node through several datasets
+and problems, re-reading, re-meshing and re-solving only what changed, as
+[`fem_gallery.ari`](../examples/ariadne/documents/fem_gallery.ari) does. `reload` always reads
+the source. `fit:` places an `sdf` source's elements after its SDF is taken in the mesh file's
+own units, as it places a volume's: LBIE refines its octree by an error in the volume's value
+units, so an SDF scaled to the fit height would refine a small model everywhere.
+
+**Relative paths** in the `source.*` keys of both node types resolve against the directory of
+the document that declared the node (`SceneNode::base_dir`); a path found only relative to the
+working directory is read from there. A built-in node's `source: { file }` still resolves
+against the working directory.
 
 Both node types run their kernels on one `cvc::async_lane` per node — off the render
 thread, or deferred onto it in a single-threaded wasm build — and apply results in their
@@ -762,6 +886,29 @@ so instantiation is order-free. A name-keyed expansion-stack guard
 ([`loader.cpp:863`](../src/cvc/ariadne/loader.cpp)) refuses recursion and fan-out; an
 unknown unit warns and renders empty. `include:` is the static counterpart of `repeat:`.
 
+A unit may declare its parameters with defaults in an `args:` map beside its widget keys; the
+include site's `args:` override them, and a `{token}` with neither stays literal. That is how a
+shipped component binds a sensible node when included bare and any node when told:
+
+```yaml
+units:
+  panel:
+    args: { node: volume, title: Volume }   # declared defaults
+    window: "{title}"
+    id: "{node}_panel"
+    children:
+      - tf_editor: Transfer function
+        bind: graphics.root.children.{node}.transfer_function
+windows:
+  - include: panel                # node=volume
+  - include: panel
+    args: { node: skull, title: Skull }
+```
+
+Any widget may carry an `id:` (not only windows): it names the instance a backend keys its
+per-instance state on and that the core persists view state under (`tree.<id>.*`). An include
+site may override the unit's `id:`, so two instances of one unit stay distinct.
+
 ### 6.2 `import:` — shared-scope library merge
 
 `process_imports` ([`loader.cpp:761`](../src/cvc/ariadne/loader.cpp)) resolves a URI (or
@@ -819,11 +966,15 @@ includes. Each binds state keys a C++ object owns, so it needs no host code;
 | `forest_controls`, `sea_controls`, `sky_controls` | `forest_trees` / `wave_sea` / `cloud_sky` nodes |
 | `mesh_tools` | a `mesh_lab` node named `mesh` (§5.4) |
 | `fe_controls` | an `fe_lab` node named `domain` (§5.4) |
+| `transfer_function`, `transfer_function_editor` | any node's `transfer_function` model (args `node`, `id`): the ColorTable2 editor with histogram / contour spectrum / contour tree layers — see [`TRANSFER_FUNCTIONS.md`](TRANSFER_FUNCTIONS.md) |
 
-Components that address one node use a fixed node id; copy the file and change the id to
-drive another node. `examples/ariadne/documents/mesh_lab.ari` uses the last two. Run it from
-the repository root, where both paths resolve:
-`ariadne_hello examples/ariadne/documents/mesh_lab.ari --component-path src/cvc/ariadne`.
+Most components that address one node use a fixed node id; copy the file and change the id to
+drive another node. `transfer_function` instead takes the node as an include arg (§6.1).
+`examples/ariadne/documents/mesh_lab.ari` uses the last two, and so does
+`examples/ariadne/documents/fem_gallery.ari`, which steps one `fe_lab` and one `mesh_lab`
+through the twenty items of [FEM_GALLERY.md](FEM_GALLERY.md). Run them from the repository
+root, where the component path resolves:
+`arigl run --component-path src/cvc/ariadne examples/ariadne/documents/fem_gallery.ari`.
 
 ---
 
@@ -979,6 +1130,33 @@ are reproducible. The cvcGL examples
 (`ariadne_hello`, `ariadne_stream`, `ariadne_conference`, `ariadne_terminal`) still build;
 `arigl` is meant to replace them once it does everything they do.
 
+**A gallery of documents.** With `CVC_ARIGL_GALLERY` naming a catalog of demos (JSON,
+[`src/arigl/gallery.h`](../src/arigl/gallery.h)), `arigl run`'s menu bar is its own and the same
+for every document: **Demos**, **Document** (the document's own menus, as submenus) and
+**Settings** (the scene's shadows, grid, origin axis, bounding boxes and extent labels, which
+`arigl` without a gallery adds after the document's menus). A demo picked from Demos that is a
+`.ari` document loads in place of the running one, in the same window; any other demo opens on
+its own (its page in the browser, its program natively). That is how the examples' browser gallery runs every `.ari` demo in one app
+(`<gallery>/arigl/?doc=<name>`). The catalogs come from `examples/web/demos.json`: the build tree
+and the `libcvc-examples` install get one (`share/libcvc-examples/gallery.json`), and the browser
+gallery writes one for what it deployed.
+
+Two `AppRuntime` pieces make that possible for any host:
+
+- `set_host_menus(menus)` puts the host's menus in every document it mounts, and gives a
+  document without a menubar one. Their `menu_action` events go to the host's `on()` handlers.
+  The document's own menus go where the list holds `AppRuntime::document_menus()`: given a
+  label, inside one menu of that name, so the bar keeps its shape from document to document (the
+  menu is greyed out for a document without menus); without one, in the bar as written, where a
+  host menu named like one of them adds its items to it. With no `document_menus()`, the host's
+  menus go first.
+- `set_host_keys(keys)` adds the host's key bindings to every document's, and gives each
+  document the Keys window (§5.3), even one with no keys of its own.
+- `load()` clears the last document's scene first (`SceneAdapter::clear()`: its nodes, free
+  lights, rigs, physics, and the background, shadows and chrome it set), whether it is a hot
+  reload or a switch to another document. A document without `channels:` also drops the last
+  one's channel policy.
+
 ### 9.1 Native (C++)
 
 The reference host is
@@ -1022,11 +1200,11 @@ general flags every runtime shares, parsed by
 document's (§5.6): `ari run doc.ari --help` prints the document's own usage. A general
 flag written after the document goes to the document, and `ari` points that out.
 
-Three of the general flags are for pictures. `--graphics auto|kitty|sixel|color|mono` sets
+Three of the general flags are for pictures. `--graphics auto|kitty|sixel|iterm|color|mono` sets
 how images draw (see *Pixel graphics* in §4), and `--image NAME=FILE` publishes a picture
 for the document's `image:` widgets with `src: NAME`
 ([`terminal_images.ari`](../examples/ariadne/terminal/terminal_images.ari) is an example).
-With `--ansi` and `--graphics kitty` or `sixel`, `snapshot` also prints the images, after
+With `--ansi` and `--graphics kitty`, `sixel` or `iterm`, `snapshot` also prints the images, after
 clearing the screen, at the terminal's cell size (`--cell-size WxH` where it can't be asked).
 
 `ari` is its own cvcpkg package (`cvcpkg install ari`, linux for now), built from
@@ -1109,6 +1287,18 @@ for one frame as text), as is the older example
 [`ariadne_terminal`](../examples/ariadne/hosts/ariadne_terminal.cpp);
 [`terminal_scene.ari`](../examples/ariadne/documents/terminal_scene.ari) is a small example. No display is needed: VTK picks X, EGL or OSMesa at run time
 (`VTK_DEFAULT_OPENGL_WINDOW=vtkEGLRenderWindow` forces EGL).
+
+In the browser the same host is `arigl_term` (`arigl_term.js` + `.wasm` + `.data` +
+`arigl_term.html`, built by name in a wasm build with FTXUI): `arigl run --terminal` behind an
+xterm.js page derived from `ari.html`. VTK renders the scene into a hidden `#canvas` in the page
+(WebGL; the scene reaches the terminal only through stdout), and the page loads xterm.js's image
+addon, so by default the scene is drawn as iTerm2 inline images at the cells' real pixels
+(`?gfx=iterm`), or as half-blocks (`?gfx=color`, `?gfx=mono`). `?doc=documents/terminal_scene`
+picks a document under `/ariadne`. The page writes the program's output once per animation
+frame, the text and the images after it together. FTXUI repaints every cell each frame, which
+deletes the image tiles under them, and the addon decodes each image asynchronously, so for a
+moment the half-block underlay can show through: the picture flickers between its real pixels
+and the half-block version, never to blank.
 
 ### 9.3 From Python (a full app via `AriRuntime`)
 
@@ -1260,11 +1450,16 @@ below (G17–G21 in the internal gap report) are tracked for reconciliation.
   ([`scene_realize.cpp`](../src/cvcGL/ariadne/scene_realize.cpp)). The decoders support
   memory (stb, ImageMagick `Blob`, assimp `ReadFileFromMemory`); exposing that is a
   planned follow-up.
-- **AriRuntime document-level `on_key` / `on_pointer` residents need a VTK event
-  producer.** The `post_key` / `post_pointer` forwarding is wired, but nothing yet
-  translates VTK interactor events into those calls, so stock-loop key/pointer residents
-  do not fire until a host feeds them
-  ([`AriRuntime.h`](../inc/cvc/gl/ariadne/AriRuntime.h)).
+- **AriRuntime document-level `on_key` / `on_pointer` residents need a host to feed them.**
+  The `post_key` / `post_pointer` forwarding is wired, and `arigl` feeds it from SDL3:
+  `cvc::gl::SdlInput::attach` wraps the window VTK made (its HWND; in the browser, a hidden
+  canvas of SDL's own, listening for the keys typed into VTK's canvas on the page's window),
+  and VTK keeps every event it had. On X11, Wayland and macOS SDL does not take VTK's window
+  (on X11 its XInput2 selection would take VTK's clicks), so the documents get VTK's own key
+  events, renamed as SDL names them, and no pointer. arigl hands the document neither the keys
+  typed into an ImGui field nor the clicks on a window. A host on AriRuntime's stock loop that
+  does not attach an `SdlInput` gets no key or pointer residents
+  ([`AriRuntime.h`](../inc/cvc/gl/ariadne/AriRuntime.h), [`SdlInput.h`](../inc/cvc/gl/SdlInput.h)).
 - **OS signals reach `on_signal` only where a host routes them.** `ari` and `arigl` do, in
   both of `arigl`'s modes (§9). `AriRuntime::post_signal` is the seam for other GL hosts;
   the `ariadne_hello` example routes none, and an embedding host that skips the

@@ -528,3 +528,32 @@ TEST(NavTerrain, TerrainRiskIsMaterialRisk) {
   wr.set_terrain(z.data(), tc);
   EXPECT_NO_THROW(wr.step());
 }
+
+// Turning block_infeasible off frees the ramp at once, on a frozen map too (freeze_sense: no sense
+// tick would ever recomposite it): planned as a wall the agent stops short of the ramp; freed, it
+// crosses to its goal on the terrace.
+TEST(NavTerrain, CellsTheTerrainFreesLeaveTheMapAtOnce) {
+  const auto terrace = [](double x, double) { return std::min(4.0, std::max(0.0, 0.8 * x)); };
+  const std::vector<float> z = heights(terrace);
+  std::vector<std::uint8_t> occ(static_cast<std::size_t>(R) * C, 0);
+  sim_world w = make(config(), occ, -40.0, 0.0, 40.0, 0.0);
+  ASSERT_TRUE(w.current_config().freeze_sense);
+  terrain_config tc;
+  tc.block_infeasible = true;
+  w.set_terrain(z.data(), tc);
+  for (int t = 0; t < 200; ++t)
+    w.step();
+  const double blocked_x = pose_of(w).x;
+  const int version = w.field_version();
+  tc.block_infeasible = false;
+  w.set_terrain_config(tc);
+  EXPECT_GT(w.field_version(), version) << "the planning field is rebuilt now";
+  double furthest = blocked_x;
+  for (int t = 0; t < 500; ++t) {
+    w.step();
+    furthest = std::max(furthest, static_cast<double>(pose_of(w).x));
+  }
+  std::printf("  held at x = %.1f by the wall; freed, it got to x = %.1f\n", blocked_x, furthest);
+  EXPECT_LT(blocked_x, 0.0) << "a wall it never crosses";
+  EXPECT_GT(furthest, 36.0) << "freed, it crosses to its goal";
+}
