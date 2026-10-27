@@ -345,7 +345,8 @@ private:
 
   // Frame management
   void pop_frame(evaluator_state &state, value_t result);
-  void push_frame(evaluator_state &state, value_t expr, environment_ptr env);
+  void push_frame(evaluator_state &state, const value_t &expr, const environment_ptr &env);
+  void push_frame(evaluator_state &state, value_t &&expr, environment_ptr &&env);
 
   // Step implementations — one per phase
   void step_init(evaluator_state &state, eval_frame &frame);

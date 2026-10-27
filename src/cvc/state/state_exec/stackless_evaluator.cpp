@@ -228,6 +228,33 @@ const value_t *callee_of(const eval_frame &frame, const std::string &name) {
   return frame.env->lookup(name);
 }
 
+// Pop the top frame with the value `v`, which goes to the frame below (or is the state's result).
+// It is put there before the top frame goes, since it may be in that frame, or in a scope only
+// that frame holds; the frame's parts are then freed as pop_frame frees them.
+void hand_up(evaluator_state &state, const value_t &v) {
+  std::vector<eval_frame> &stack = state.stack;
+  if (stack.size() > 1) {
+    stack[stack.size() - 2].results.push_back(v);
+    pop_top(stack);
+  } else {
+    state.result = v;
+    pop_top(stack);
+    state.done = true;
+  }
+}
+
+void hand_up(evaluator_state &state, value_t &&v) {
+  std::vector<eval_frame> &stack = state.stack;
+  if (stack.size() > 1) {
+    stack[stack.size() - 2].results.push_back(std::move(v));
+    pop_top(stack);
+  } else {
+    state.result = std::move(v);
+    pop_top(stack);
+    state.done = true;
+  }
+}
+
 // A loop's body: the form at args[first], or, when there are several, all of them in order as a
 // (begin ...). A single-form body stays as it is, so its frames are what they always were.
 value_t loop_body(std::span<const value_t> args, std::size_t first) {
@@ -982,7 +1009,21 @@ void stackless_evaluator::pop_frame(evaluator_state &state, value_t result) {
   }
 }
 
-void stackless_evaluator::push_frame(evaluator_state &state, value_t expr, environment_ptr env) {
+void stackless_evaluator::push_frame(evaluator_state &state, const value_t &expr,
+                                     const environment_ptr &env) {
+  // `expr` and `env` may be in the top frame, which a growing stack moves: copied in place only
+  // when the stack has room.
+  if (state.stack.size() < state.stack.capacity()) {
+    eval_frame &f = state.stack.emplace_back();
+    f.expr = expr;
+    f.env = env;
+  } else {
+    push_new_frame(state.stack, value_t(expr), environment_ptr(env));
+  }
+}
+
+void stackless_evaluator::push_frame(evaluator_state &state, value_t &&expr,
+                                     environment_ptr &&env) {
   push_new_frame(state.stack, std::move(expr), std::move(env));
 }
 
@@ -997,23 +1038,23 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
   // Symbol
   if (auto *sym = std::get_if<symbol>(&expr.v)) {
     if (sym->name == "nil") {
-      pop_frame(state, nil_value);
+      hand_up(state, nil_value);
       return;
     }
     if (sym->name == "t") {
-      pop_frame(state, true_value);
+      hand_up(state, true_value);
       return;
     }
     auto *val = env->lookup(sym->name);
     if (!val)
       throw dsl_error("NameError", "undefined symbol: " + sym->name);
-    pop_frame(state, *val);
+    hand_up(state, *val);
     return;
   }
 
-  // Non-list atom
+  // Non-list atom: its own value (the frame's copy of it goes with the frame)
   if (!std::holds_alternative<list_ptr>(expr.v)) {
-    pop_frame(state, expr);
+    hand_up(state, std::move(expr));
     return;
   }
 
@@ -1438,7 +1479,7 @@ void stackless_evaluator::step_if_cond(evaluator_state &state, eval_frame &frame
 }
 
 void stackless_evaluator::step_if_branch(evaluator_state &state, eval_frame &frame) {
-  pop_frame(state, frame.results.back());
+  hand_up(state, std::move(frame.results.back()));
 }
 
 // ---------------------------------------------------------------------------
@@ -1451,7 +1492,7 @@ void stackless_evaluator::step_begin_next(evaluator_state &state, eval_frame &fr
   if (static_cast<size_t>(frame.index) < args.size()) {
     push_frame(state, args[frame.index], frame.env);
   } else {
-    pop_frame(state, frame.results.back());
+    hand_up(state, std::move(frame.results.back()));
   }
 }
 
@@ -1620,7 +1661,7 @@ void stackless_evaluator::step_let_body(evaluator_state &state, eval_frame &fram
   if (static_cast<size_t>(frame.index) < frame.extra_vals.size()) {
     push_frame(state, frame.extra_vals[frame.index], frame.extra_env);
   } else {
-    pop_frame(state, frame.results.back());
+    hand_up(state, std::move(frame.results.back()));
   }
 }
 
