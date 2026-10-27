@@ -903,9 +903,14 @@ TEST_F(LbieMesherTest, QuadMeshesWithLevelChangesAreClosedAndAllQuads) {
 // The geoframe <-> geometry adapter read a hexahedron as quads[6h] and then quads[6h+1] in
 // order, and wrote it back the same way, but LBIE winds that second face the other way (see
 // hexa_corners). Every hexahedron cvc::hexahedralize returned was twisted -- corner k + 4 not
-// over corner k, the scaled Jacobian of this sphere's mesh 0 on average where it is ~0.8 -- and
-// cvc::geometry::quality_improve handed LBIE's optimizer twisted hexahedra. The adapter now reads
-// and writes LBIE's own layout.
+// over corner k -- and cvc::geometry::quality_improve handed LBIE's optimizer twisted hexahedra.
+// The adapter now reads and writes LBIE's own layout.
+//
+// This sphere's mesh is 27 hexahedra, a 3x3x3 block whose 56 outer vertices lie on the sphere
+// (#808 fitted them; before, the block was a cube inside it). Bending the block onto the sphere
+// makes its edge and corner hexahedra wedges, so the mean scaled Jacobian is 0.499, the worst
+// hexahedron 0.22. Read through the old twisted layout the same mesh has every hexahedron
+// inside out: mean -0.78.
 TEST_F(LbieMesherTest, AdapterKeepsLbiesHexahedronCorners) {
   LBIE::geoframe g = run_do_mesh(make_sphere_volume(ctx, 17, 0.5), 0.0f, 0.0f, kDefaultErr,
                                  kDefaultErrIn, LBIE::geoframe::HEXA);
@@ -940,8 +945,8 @@ TEST_F(LbieMesherTest, AdapterKeepsLbiesHexahedronCorners) {
     valid += sj > 0.0;
     sum += sj;
   }
-  EXPECT_GE(valid, 9 * n / 10) << "of " << n << " hexahedra have every corner right-handed";
-  EXPECT_GT(sum / n, 0.5) << "mean scaled Jacobian";
+  EXPECT_EQ(valid, n) << "of " << n << " hexahedra have every corner right-handed";
+  EXPECT_GT(sum / n, 0.4) << "mean scaled Jacobian";
 }
 
 // ---------------------------------------------------------------------------
