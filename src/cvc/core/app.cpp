@@ -1079,10 +1079,13 @@ cvc::state_exec::async_host &app::exec_async_host() {
 
 void app::setThreadPoolSize(unsigned int size) {
   boost::this_thread::interruption_point();
-  boost::mutex::scoped_lock lock(_threadPoolMutex);
-  _maxPoolSize = (size > 0) ? size : 1;
-  // A larger pool may start queued tasks now: the worker that takes one wakes the next.
-  tryStartWorker();
+  {
+    boost::mutex::scoped_lock lock(_threadPoolMutex);
+    _maxPoolSize = (size > 0) ? size : 1;
+    // A larger pool may start queued tasks now: the worker that takes one wakes the next.
+    tryStartWorker();
+  }
+  startRequestedWorkers();
 }
 
 unsigned int app::getThreadPoolSize() const {
@@ -1174,14 +1177,18 @@ void app::enqueuePoolTask(ThreadPoolTask &task) {
       keyed = takePoolTaskLocked();
     tryStartWorker();
   }
+  startRequestedWorkers();
   if (keyed.keyed)
     startKeyedPoolThread(keyed);
 }
 
 void app::tryStartWorker() {
   // _threadPoolMutex is held by the caller. If a queued task may start, wake an idle worker for
-  // it, or start a new one while the pool has fewer workers than its size. A worker that takes a
-  // task calls this again, so a burst wakes as many workers as it can use, one after another.
+  // it, or ask for a new one while the pool has fewer workers than its size (the caller starts
+  // it with startRequestedWorkers() once it has let the mutex go: creating a thread can take
+  // milliseconds on a loaded machine, and nobody else may wait for the pool that long). A worker
+  // that takes a task calls this again, so a burst wakes as many workers as it can use, one
+  // after another.
   if (!poolCanStartLocked())
     return;
   if (_idleWorkers > 0) {
@@ -1194,15 +1201,48 @@ void app::tryStartWorker() {
     return;
   // With _maxPoolSize workers and fewer than _maxPoolSize tasks running, some worker is between
   // tasks and takes this one before it waits.
-  if (_poolWorkers.size() >= _maxPoolSize)
+  if (_poolThreadCount >= _maxPoolSize)
     return;
-  try {
-    _poolWorkers.reserve(_poolWorkers.size() + 1); // so the push_back below can't throw
-    thread_ptr worker(new boost::thread(&app::poolWorkerLoop, this));
-    _poolWorkers.push_back(worker);
-    ++_startingWorkers; // the worker can't get past _threadPoolMutex, held here, before this
-  } catch (...) {
-    // No new thread (resources): the task waits for a running worker.
+  ++_poolThreadCount;
+  ++_startingWorkers;
+  ++_spawnRequests;
+}
+
+void app::startRequestedWorkers() {
+  // _threadPoolMutex is NOT held: start the workers tryStartWorker asked for.
+  for (;;) {
+    {
+      boost::mutex::scoped_lock lock(_threadPoolMutex);
+      if (_spawnRequests == 0)
+        return;
+      --_spawnRequests;
+    }
+    thread_ptr worker;
+    try {
+      worker.reset(new boost::thread(&app::poolWorkerLoop, this));
+    } catch (...) {
+      // No new thread (resources): the queued tasks wait for a running worker, or for the next
+      // submission to try again.
+      boost::mutex::scoped_lock lock(_threadPoolMutex);
+      if (_startingWorkers > 0)
+        --_startingWorkers;
+      --_poolThreadCount;
+      return;
+    }
+    bool stopping = false;
+    {
+      boost::mutex::scoped_lock lock(_threadPoolMutex);
+      stopping = _poolStopping;
+      if (!stopping)
+        _poolWorkers.push_back(worker); // ~app joins it
+    }
+    if (stopping) {
+      // ~app has taken the workers it joins already: this one sees the stop and ends.
+      try {
+        worker->join();
+      } catch (...) {
+      }
+    }
   }
 }
 
@@ -1224,6 +1264,7 @@ void app::poolWorkerLoop() {
     ThreadPoolTask task = takePoolTaskLocked();
     tryStartWorker(); // more work it may start: pass it on
     lock.unlock();
+    startRequestedWorkers();
     if (task.keyed) {
       startKeyedPoolThread(task); // its own thread counts itself out
       lock.lock();
@@ -1290,10 +1331,13 @@ void app::startKeyedPoolThread(ThreadPoolTask &task) {
   } catch (...) {
     // No thread: the task can't run. It is dropped, and its slot freed.
     owned.reset();
-    boost::mutex::scoped_lock lock(_threadPoolMutex);
-    --_activeWorkers;
-    tryStartWorker();
-    notifyPoolIdleLocked();
+    {
+      boost::mutex::scoped_lock lock(_threadPoolMutex);
+      --_activeWorkers;
+      tryStartWorker();
+      notifyPoolIdleLocked();
+    }
+    startRequestedWorkers();
     return;
   }
   try {
@@ -1324,6 +1368,7 @@ void app::runKeyedPoolTask(ThreadPoolTask &task) {
     tryStartWorker();
     notifyPoolIdleLocked();
   }
+  startRequestedWorkers();
   if (next.keyed)
     startKeyedPoolThread(next);
 }

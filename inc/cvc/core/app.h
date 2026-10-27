@@ -651,8 +651,10 @@ protected:
 
   // Queue `task` (its contents are taken; a keyed one may start on this thread).
   void enqueuePoolTask(ThreadPoolTask &task);
-  // _threadPoolMutex held: if a queued task may start, wake an idle worker or start one.
+  // _threadPoolMutex held: if a queued task may start, wake an idle worker or ask for a new one,
+  // which startRequestedWorkers() (called without the mutex) then starts.
   void tryStartWorker();
+  void startRequestedWorkers();
   // Run a keyed task on the calling thread, as its own thread does.
   void threadPoolWorker(ThreadPoolTask task);
   // The rest are called with _threadPoolMutex held where their name ends in Locked.
@@ -702,7 +704,9 @@ protected:
   boost::condition_variable _threadPoolIdle;      // nothing queued or running (wait_for_threads)
   std::vector<thread_ptr> _poolWorkers;           // persistent workers, started on demand
   unsigned int _idleWorkers = 0;                  // workers waiting on _threadPoolCondition
-  unsigned int _startingWorkers = 0;              // started, not yet at their first wait
+  unsigned int _startingWorkers = 0;              // asked for, not yet at their first wait
+  unsigned int _spawnRequests = 0;                // asked for, not yet being created
+  unsigned int _poolThreadCount = 0;              // workers running or asked for
   std::uint64_t _poolSeq = 0;                     // next ThreadPoolTask::seq
   bool _poolStopping = false;                     // ~app: run nothing more
 
