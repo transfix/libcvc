@@ -11,7 +11,7 @@ recipe:
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
-  description: "libcvc's examples as a WebAssembly browser gallery (share/libcvc-examples-web/web/): the cvcGL scene demos (terrain_lab, lsystem_forest, lsystem_coast, bunny_shadow, volren_bunny, volslice_bunny), the GRL-SNAM navigation demos (nav_city_swarm / nav_city_drive / nav_fog_ghost, on the real Austin scene with the trained policy) and the Ariadne .ari demos, with a card index and a page per demo. The single-threaded build (wasm) also has the `ari` terminal page and is what transfix.github.io/libcvc serves; the threaded build (wasm-mt) needs cross-origin isolation, which libcvc-examples' libcvc-examples-web launcher provides."
+  description: "libcvc's examples as a WebAssembly browser gallery (share/libcvc-examples-web/web/): the cvcGL scene demos (terrain_lab, lsystem_forest, lsystem_coast, bunny_shadow, volren_bunny, volslice_bunny), the GRL-SNAM navigation demos (nav_city_swarm / nav_city_drive / nav_fog_ghost, on the real Austin scene with the trained policy) and the Ariadne .ari demos, among them the FEM gallery, all run by arigl, with a card index, a page per demo, and a Demos menu in each. The single-threaded build (wasm) also has the `ari` terminal page and is what transfix.github.io/libcvc serves; the threaded build (wasm-mt) needs cross-origin isolation, which libcvc-examples' libcvc-examples-web launcher provides."
   homepage: https://github.com/transfix/libcvc
   # BSD-3-Clause: the demos link cvcGL statically, which carries code derived
   # from VTK 9.5.0. MIT: lsystem_coast's OceanFFT is a port of ABYSSAL. Both
@@ -63,6 +63,11 @@ depends:
     - name: libxml2
     # The demos' control panels (cvcGL's ImGuiOverlay is inert stubs without it).
     - name: imgui
+    # Keyboard and mouse for the documents' on_key / on_pointer (cvcGL's SdlInput seam).
+    - name: sdl3
+    # cvc's mesh_ops / fem (header-only), which the FEM gallery's fe_lab / mesh_lab nodes run on.
+    - name: eigen
+    - name: libigl
     # The `ari` page's terminal backend; only the single-threaded gallery has that page.
     - name: ftxui
       platforms: [wasm]

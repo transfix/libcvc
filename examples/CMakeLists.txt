@@ -21,6 +21,19 @@ get_filename_component(_cvc_root "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
 find_package(VTK REQUIRED COMPONENTS RenderingUI IOImage)
 find_package(Boost REQUIRED COMPONENTS program_options)
 
+# cvc_demos_menu -- the "Demos" menu each C++ demo puts first in its main menu bar, so any demo
+# opens any other (common/demos_menu.h); arigl, which runs the .ari demos, has its own over the same
+# list. common/demos.cmake makes the list from web/demos.json: the menu's table and arigl's catalog.
+include(common/demos.cmake)
+add_library(cvc_demos_menu STATIC common/demos_menu.cpp)
+target_include_directories(cvc_demos_menu PUBLIC common PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+target_link_libraries(cvc_demos_menu PUBLIC cvcGL)
+# Natively an .ari demo is arigl on its document, with the build tree's catalog and components.
+target_compile_definitions(cvc_demos_menu PRIVATE
+  CVC_EXAMPLES_DOCUMENTS="${CMAKE_CURRENT_SOURCE_DIR}/ariadne/documents"
+  CVC_EXAMPLES_COMPONENTS="${_cvc_root}/src/cvc/ariadne"
+  CVC_EXAMPLES_GALLERY="${_demos_gallery_json}")
+
 add_executable(lsystem_forest cvcgl/lsystem_forest.cpp)
 target_link_libraries(lsystem_forest PRIVATE cvcGL ${VTK_LIBRARIES} Boost::program_options)
 vtk_module_autoinit(TARGETS lsystem_forest MODULES ${VTK_LIBRARIES})
@@ -197,25 +210,10 @@ if(EMSCRIPTEN)
   set(_wasm_demos lsystem_forest lsystem_coast terrain_lab bunny_shadow volren_bunny volslice_bunny nav_city_swarm nav_city_drive nav_fog_ghost)
   set(_wasm_extra_demos ariadne_hello)
 
-  # Ariadne (.ari) demos as wasm: build the generic ariadne_hello host once per document, with that
-  # .ari baked in as the default doc (CVC_ARIADNE_WASM_DOC) and the shared component library embedded
-  # in MEMFS (--embed-file), so a pure-DSL demo runs in the browser with no argv. Distinct slugs
-  # (<name>_ari) so they sit ALONGSIDE the C++ volren_bunny/volslice_bunny demos, not replacing them.
-  # This is also the path for every future .ari demo (A/V, lsystem, …) to reach the web gallery.
-  set(_CVC_ARIADNE_COMPONENTS "${_cvc_root}/src/cvc/ariadne/components")
-  # lsystem_forest joins volren_bunny/volslice_bunny as a generic-host .ari demo: now that its
-  # trees/sea/sky are cvcGL node types + shader presets (register_cvcgl_extensions, which
-  # ariadne_hello calls), it needs no bespoke host — it builds from ariadne_hello like the others.
-  foreach(_ari volren_bunny volslice_bunny lsystem_forest)
-    add_executable(${_ari}_ari ariadne/hosts/ariadne_hello.cpp)
-    target_link_libraries(${_ari}_ari PRIVATE cvcGL ${VTK_LIBRARIES})
-    vtk_module_autoinit(TARGETS ${_ari}_ari MODULES ${VTK_LIBRARIES})
-    target_compile_definitions(${_ari}_ari PRIVATE CVC_ARIADNE_WASM_DOC="/${_ari}.ari")
-    target_link_options(${_ari}_ari PRIVATE
-      "--embed-file=${CMAKE_CURRENT_SOURCE_DIR}/ariadne/documents/${_ari}.ari@/${_ari}.ari"
-      "--embed-file=${_CVC_ARIADNE_COMPONENTS}@/components")
-    list(APPEND _wasm_demos ${_ari}_ari)
-  endforeach()
+  # The .ari demos (web/demos.json's "app": "arigl" entries) have no binaries of their own: they are
+  # arigl, the gallery's Ariadne app, opened on their documents. src/arigl/CMakeLists.txt builds
+  # arigl into this gallery with every document, the component library and data/ in its file
+  # system, and a Demos menu switches between them in place.
 
   # Optional runtime asset bundle for nav_city_swarm (Austin: terrain.json +
   # buildings.glb + satellite.png). When CVC_WASM_BUNDLE is set to a scene dir,
@@ -311,6 +309,10 @@ endif()
 option(LIBCVC_EXAMPLES_RPATH_USE_LINK_PATH
        "Add the link directories to the installed examples' RUNPATH (OFF for packaging)" ON)
 set(_cvcgl_example_bins lsystem_forest lsystem_coast terrain_lab bunny_shadow volren_bunny volslice_bunny nav_city_swarm nav_city_drive nav_fog_ghost nav_finale)
+# Every one of them has the gallery's Demos menu (common/demos_menu.h).
+foreach(_t ${_cvcgl_example_bins})
+  target_link_libraries(${_t} PRIVATE cvc_demos_menu)
+endforeach()
 # The three headless nav CLIs exist only in native builds (the wasm column has
 # no CLIs in the gallery), so they join the install list conditionally.
 if(NOT EMSCRIPTEN)
@@ -326,6 +328,13 @@ install(TARGETS ${_cvcgl_example_bins}
 #   ari run <prefix>/share/libcvc-examples/ariadne/terminal/terminal_tour.ari
 install(DIRECTORY ariadne/documents ariadne/terminal
         DESTINATION share/libcvc-examples/ariadne COMPONENT libcvc-examples)
+# The documents' data (the FEM gallery's head and CT), beside them as in the sources, and arigl's
+# catalog of the demos: CVC_ARIGL_GALLERY=<prefix>/share/libcvc-examples/gallery.json arigl run ...
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/data")
+  install(DIRECTORY data DESTINATION share/libcvc-examples COMPONENT libcvc-examples)
+endif()
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/gallery.installed.json" DESTINATION share/libcvc-examples
+        RENAME gallery.json COMPONENT libcvc-examples)
 # The bins carry third-party code whose notices a binary redistribution must
 # reproduce -- VTK-derived code in the statically linked cvcGL (BSD-3-Clause) and
 # lsystem_coast's OceanFFT, a port of ABYSSAL (MIT) -- so the component ships

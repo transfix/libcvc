@@ -12,6 +12,18 @@ Packaged, they are two cvcpkg packages. `libcvc-examples` has the native program
 documents (`share/libcvc-examples/ariadne/`). `libcvc-examples-web` has the browser gallery
 that [transfix.github.io/libcvc](https://transfix.github.io/libcvc/) serves.
 
+Every demo opens every other from its **Demos** menu, first in its menu bar
+([`common/demos_menu.h`](common/demos_menu.h)), over the gallery's list in
+[`web/demos.json`](web/demos.json). The `.ari` demos are documents that `arigl` runs: in the
+browser, `arigl` is the gallery's one Ariadne app (`arigl/?doc=<name>`), and its Demos menu
+switches documents in place (ARIADNE.md §9). Natively, run one with its catalog so it has the
+menu too:
+
+```sh
+CVC_ARIGL_GALLERY=build/src/cvcGL/examples/gallery.json \
+  arigl run --component-path src/cvc/ariadne examples/ariadne/documents/fem_gallery.ari
+```
+
 | directory | what is in it |
 |---|---|
 | [`cvcgl/`](cvcgl) | scene demos on the cvcGL scene graph: `lsystem_forest` ([LSYSTEM_FOREST.md](cvcgl/LSYSTEM_FOREST.md)), `lsystem_coast`, `terrain_lab`, and the `bunny_shadow` / `volren_bunny` / `volslice_bunny` benches |

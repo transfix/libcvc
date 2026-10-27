@@ -322,15 +322,23 @@ mesh's is the same isovalue — the slider's value becomes a normalized position
 a few ulps off (0.37 over [-1e5, 1e5] returns 4.7e-12 away) — so an unrelated edit after a slider
 move keeps the slider's exact value and runs no remesh.
 
+**fe_lab: the bars follow each load.** `fe_lab` loads its source on its lane — an `sdf` source's
+field after the scene is realized, another dataset on a `load` — so the binding follows the
+volume each load brings (`tf_binding_options::volume_source`). Until the first arrives there is
+no `T.range` and no overlay; each new volume is taken as a VolumeNode's `setVolume` is (its
+overlays recomputed, `T.range` re-published), and on its range the followed bars move to where
+the bounds' values sit. The keys keep their values — a range never rewrites them — and nothing
+re-meshes.
+
 **A bound past the volume's range shows as its bar pinned at that end.** A bound outside the
 data is legal (fe_controls' sliders span −10..10 whatever the data; `interval: [0.5, 2]` on a 0/1
 mask means "0.5 and up"), but the model holds positions in [0, 1] only. Such a bound's bar sits at
 that end of the axis, and a bar pinned at an end stands for any bound at or past that end: the key
 keeps its true value through attach and every later edit (another bar's drag, an opacity node),
 and nothing re-meshes for it. Dragging the bar off the end writes the bar's value, as any drag
-does. Attaching never re-meshes at all — `auto_mesh` or Tet-mesh meshes what the keys hold. The
+does. Attaching never re-meshes at all — `auto_mesh` or the Mesh button meshes what the keys hold. The
 debounced re-mesh is owed only until some mesh job starts with the region and bounds the keys
-hold: Tet-mesh pressed during the debounce (or a script's `fe.request = mesh`) does it, and the
+hold: the Mesh button pressed during the debounce (or a script's `fe.request = mesh`) does it, and the
 binding does not mesh again after it (fe_lab publishes each job's region and bounds at
 `fe.last_mesh`).
 
@@ -343,7 +351,7 @@ fe_controls' Isovalue 2 slider moves that bar. The bars may cross; the mesher so
 The two ids stay distinct: a deleted bound re-adopts the lowest isocontour that is not the other
 bound's, and in interval mode the model always holds both — switching to interval with fewer than
 two isocontours, or deleting one of only two, adds one at that bound's current isovalue (a
-switch never re-meshes by itself; Tet-mesh does). A bound written in the same tick as the region
+switch never re-meshes by itself; the Mesh button does). A bound written in the same tick as the region
 (a script, an `on:` action or a peer setting both) keeps its value and moves its bar; only a bound
 nobody wrote takes its bar's value. Switching back to `solid` stops following the
 second (it stays in the model). The pair in use is published as `T.interval` (`"<isovalue's

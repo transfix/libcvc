@@ -435,6 +435,56 @@ windows:
   EXPECT_TRUE(room->on.empty()); // on: is optional for input_text (no warning, unlike button)
 }
 
+// keys: -- each entry a rebindable action with its label, its default key(s) and its on:.
+TEST(AriadneLoader, KeysBlock) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+keys:
+  next:
+    label: Next item
+    key: [Right, PageDown]
+    on: (state-set "n" 1)
+  quit:
+    key: q
+    on: quit
+  idle:
+    label: Nothing yet
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.keys.size(), 3u);
+  EXPECT_EQ(r.keys[0].id, "next");
+  EXPECT_EQ(r.keys[0].label, "Next item");
+  EXPECT_EQ(r.keys[0].keys, (std::vector<std::string>{"Right", "PageDown"}));
+  EXPECT_EQ(r.keys[0].on, "(state-set \"n\" 1)");
+  EXPECT_EQ(r.keys[1].keys, std::vector<std::string>{"q"});
+  EXPECT_EQ(r.keys[1].on, "quit");
+  EXPECT_TRUE(has_warning(r, "keys.idle: no key:"));
+}
+
+// A slider's `commit:` -- live by default, `release` for a key too costly to write every frame; any
+// other value warns and stays live.
+TEST(AriadneLoader, SliderCommitPolicy) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+root:
+  - slider_float: Live
+    bind: a
+  - slider_int: Held
+    bind: b
+    commit: release
+  - slider_float: Typo
+    bind: c
+    commit: onrelease
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_FALSE(find(r.root, Kind::SliderFloat, "Live")->commit_on_release);
+  EXPECT_TRUE(find(r.root, Kind::SliderInt, "Held")->commit_on_release);
+  EXPECT_FALSE(find(r.root, Kind::SliderFloat, "Typo")->commit_on_release);
+  EXPECT_TRUE(has_warning(r, "commit: 'onrelease'"));
+}
+
 // §12/§3.0.3b: a window `include:` site may override the instantiated unit's geometry (pos/size/
 // layout/frame) without forking the shared unit — so a demo arranges reusable panels. An override
 // applies only to the keys present; the component stays layout-agnostic.
@@ -1020,6 +1070,48 @@ scene:
   ASSERT_TRUE(v->has_volren);
   ASSERT_EQ(v->volren.isosurfaces.size(), 1u);
   EXPECT_EQ(v->sdf_algorithm, "v2"); // the default
+}
+
+// fit: { up: x | y | z, flip } -- the dataset's up axis and an upside-down scan -- and the
+// document's directory on every node (SceneNode::base_dir: where a custom node's relative
+// paths resolve; empty for a document loaded from a string).
+TEST(AriadneScene, FitUpAxisFlipAndBaseDir) {
+  SKIP_WITHOUT_YAML();
+  const std::string doc = R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: ct
+      type: fe_lab
+      source: { file: ../data/ct.rawiv }
+      fit: { height: 100, up: X, flip: true }
+      children:
+        - node: inner
+          source: { file: stanford.bunny }
+          fit: { height: 10 }
+)";
+  LoadResult r = load_string(doc);
+  ASSERT_TRUE(r.ok) << r.error;
+  const SceneNode *ct = find_scene_node(r.scene.nodes, "ct");
+  ASSERT_NE(ct, nullptr);
+  EXPECT_EQ(ct->fit_up, "x"); // lower-cased
+  EXPECT_FALSE(ct->fit_up_y);
+  EXPECT_TRUE(ct->fit_flip);
+  EXPECT_TRUE(ct->base_dir.empty()); // from a string: no directory
+  ASSERT_EQ(ct->children.size(), 1u);
+  EXPECT_EQ(ct->children[0].fit_up, "z"); // the default
+  EXPECT_FALSE(ct->children[0].fit_flip);
+
+  const std::string path = write_temp_ari("fit_base_dir.ari", doc);
+  LoadResult f = load_file(path);
+  ASSERT_TRUE(f.ok) << f.error;
+  const SceneNode *fct = find_scene_node(f.scene.nodes, "ct");
+  ASSERT_NE(fct, nullptr);
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::weakly_canonical(fs::path(path)).parent_path();
+  EXPECT_EQ(fs::path(fct->base_dir), dir);
+  ASSERT_EQ(fct->children.size(), 1u);
+  EXPECT_EQ(fs::path(fct->children[0].base_dir), dir); // children too
 }
 
 // source: { sdf: { ..., algorithm: v1|v2|igl } } picks the cvc::sdf implementation; the loader

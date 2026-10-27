@@ -11,6 +11,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstdio>
+#include <cvc/ariadne/app_runtime.h> // AppRuntime: host menus, the scene between documents
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/backend.h>
 #include <cvc/ariadne/loader.h>            // §12 end-to-end load: mount through the real Runtime
@@ -166,6 +167,11 @@ struct MockBackend : Backend {
     rec("seed_window_geometry");
   }
   WindowGeom window_geometry() const override { return window_geom_ret; }
+  int layout_resets = 0;
+  void reset_layout() override {
+    ++layout_resets;
+    rec("reset_layout");
+  }
   std::vector<float> seeded_tracks;
   bool seeded_tracks_called = false;
   std::vector<float> grid_tracks_ret;
@@ -1046,6 +1052,172 @@ TEST(AriadneRuntime, SliderReadsLiveStateNotDefault) {
   rt.set_root(group({slider_int("N", "demo.n", 0, 100, 5)}));
   rt.render();
   EXPECT_TRUE(mb.saw("slider_int:N=42")); // the state value, not the widget default 5
+}
+
+// A slider writes its key on every change while it is dragged; with commit: release, only when the
+// drag ends.
+TEST(AriadneRuntime, SliderWritesWhileDraggedUnlessCommitOnRelease) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  Widget held = slider_int("Held", "demo.held", 0, 100, 5);
+  held.commit_on_release = true;
+  rt.set_root(group({slider_int("N", "demo.n", 0, 100, 5), held}));
+  mb.slider_int_ret = IntEdit{true, false, 37}; // mid-drag: changed, not yet released
+  rt.render();
+  EXPECT_EQ(cvc::state::instance(app)("demo.n").value(), "37");
+  EXPECT_EQ(cvc::state::instance(app)("demo.held").value(), "5"); // the seed, not the drag
+  mb.slider_int_ret = IntEdit{false, true, 40};                   // released
+  rt.render();
+  EXPECT_EQ(cvc::state::instance(app)("demo.held").value(), "40");
+}
+
+// Key names compare across spellings: SDL's ("Left Shift", "Space", "PageDown") and VTK's
+// ("Shift_L", "space", "Next"); letters fold to lower case.
+TEST(AriadneKeys, CanonicalNamesMatchAcrossSpellings) {
+  EXPECT_EQ(canonical_key("Left Shift"), canonical_key("Shift_L"));
+  EXPECT_EQ(canonical_key("Space"), canonical_key("space"));
+  EXPECT_EQ(canonical_key("PageDown"), canonical_key("Next"));
+  EXPECT_EQ(canonical_key("PageUp"), canonical_key("Prior"));
+  EXPECT_EQ(canonical_key("Left Ctrl"), canonical_key("Control_L"));
+  EXPECT_EQ(canonical_key("W"), canonical_key("w"));
+  EXPECT_NE(canonical_key("Left"), canonical_key("Right"));
+  EXPECT_EQ(canonical_key(","), canonical_key("comma"));
+  EXPECT_EQ(canonical_key(","), canonical_key("Comma"));
+  EXPECT_EQ(canonical_key("/"), canonical_key("slash"));
+  EXPECT_EQ(canonical_key("\\"), canonical_key("backslash"));
+  EXPECT_EQ(canonical_key("["), canonical_key("bracketleft"));
+  EXPECT_EQ(canonical_key("`"), canonical_key("grave"));
+  EXPECT_EQ(canonical_key("Keypad 1"), canonical_key("KP_1"));
+  EXPECT_EQ(canonical_key("Keypad +"), canonical_key("KP_Add"));
+  EXPECT_EQ(canonical_key("Keypad Enter"), canonical_key("KP_Enter"));
+  EXPECT_EQ(canonical_key("Numlock"), canonical_key("Num_Lock"));
+  EXPECT_EQ(canonical_key("PrintScreen"), canonical_key("Print"));
+  EXPECT_NE(canonical_key("Keypad 1"), canonical_key("1"));
+  EXPECT_NE(canonical_key("Keypad -"), canonical_key("-"));
+  EXPECT_EQ(canonical_key("_"), canonical_key("underscore"));
+  EXPECT_NE(canonical_key("_"), "") << "not a key with no name";
+  EXPECT_EQ(canonical_key("+"), canonical_key("plus"));
+  EXPECT_EQ(canonical_key("<"), canonical_key("less"));
+  EXPECT_EQ(canonical_key("'"), canonical_key("quoteright")) << "VTK's Win32 / Cocoa name";
+  EXPECT_EQ(canonical_key("`"), canonical_key("quoteleft"));
+  EXPECT_EQ(join_keys({"Right", ","}), "Right, Comma") << "a document's comma default";
+  EXPECT_TRUE(key_matches(join_keys({"Right", ","}), ","));
+  EXPECT_EQ(stored_key_name(","), "Comma") << "a comma would split the stored keys";
+  EXPECT_EQ(stored_key_name("Right"), "Right");
+  EXPECT_EQ(stored_key_name(""), "");
+  EXPECT_EQ(join_keys({"Right", "PageDown"}), "Right, PageDown");
+  EXPECT_EQ(split_keys(" Right ,PageDown,, "), (std::vector<std::string>{"Right", "PageDown"}));
+  EXPECT_TRUE(key_matches("Right, PageDown", "Next"));
+  EXPECT_FALSE(key_matches("Right, PageDown", "Left"));
+  EXPECT_FALSE(key_matches("", "Left"));
+}
+
+// A key down that matches a binding runs its action in the next drain; with the Keys window open
+// and its capture naming the binding, the next key down becomes its key instead (and runs
+// nothing), and Escape keeps the old one. Closing the window drops a capture still waiting.
+TEST(AriadneRuntime, KeyBindingsRunTheirActionAndRebind) {
+  cvc::app app;
+  Runtime rt(app, "ui.k");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  auto &st = cvc::state::instance(app);
+  st("ui.k.n").value(0);
+  st("ui.k.keys.next").value(std::string("Right, PageDown"));
+  rt.set_key_bindings({{"next",
+                        "Next",
+                        "",
+                        {"Right", "PageDown"},
+                        "(state-set \"n\" (+ (int (state-get \"n\")) 1))",
+                        ""}});
+  const auto press = [&](const std::string &key, bool down = true) {
+    InputEvent e;
+    e.kind = down ? InputEvent::Kind::KeyDown : InputEvent::Kind::KeyUp;
+    e.key = key;
+    rt.post_input(e);
+    rt.drain();
+  };
+  press("Right");
+  EXPECT_EQ(st("ui.k.n").value(), "1");
+  press("Next"); // VTK's name for PageDown
+  EXPECT_EQ(st("ui.k.n").value(), "2");
+  press("Right", /*down=*/false);
+  press("Left");
+  EXPECT_EQ(st("ui.k.n").value(), "2") << "a key up, and an unbound key, run nothing";
+
+  const std::string capture = "ui.k.tree.ariadne_keys.capture",
+                    open = "ui.k.tree.ariadne_keys.open";
+  st(open).value(1);
+  st(capture).value(std::string("next")); // the Keys window's Change
+  press("");
+  EXPECT_EQ(st(capture).value(), "next") << "a key with no name: still waiting";
+  press("Up");
+  EXPECT_EQ(st("ui.k.keys.next").value(), "Up");
+  EXPECT_EQ(st(capture).value(), "");
+  EXPECT_EQ(st("ui.k.n").value(), "2") << "the captured key is not a press";
+  press("Right");
+  EXPECT_EQ(st("ui.k.n").value(), "2");
+  press("Up");
+  EXPECT_EQ(st("ui.k.n").value(), "3");
+
+  st(capture).value(std::string("next"));
+  press("Escape");
+  EXPECT_EQ(st("ui.k.keys.next").value(), "Up") << "Escape keeps the old key";
+  EXPECT_EQ(st(capture).value(), "");
+
+  st(capture).value(std::string("next"));
+  press(",");
+  EXPECT_EQ(st("ui.k.keys.next").value(), "Comma") << "the comma key, stored so it can't split";
+  press(",");
+  EXPECT_EQ(st("ui.k.n").value(), "4") << "and it is the binding's key";
+
+  st(capture).value(std::string("next"));
+  st(open).value(0); // the user closed the Keys window instead
+  press("Space");
+  EXPECT_EQ(st("ui.k.keys.next").value(), "Comma") << "a closed window takes no key";
+  EXPECT_EQ(st(capture).value(), "") << "and drops the capture";
+  st(open).value(1);
+  press("Space");
+  EXPECT_EQ(st("ui.k.keys.next").value(), "Comma") << "reopened, it waits for a new Change";
+}
+
+// A document's key bindings live beside its other state, not among the Keys window's: a binding
+// named `capture` is the document's own.
+TEST(AriadneRuntime, ABindingNamedCaptureIsTheDocuments) {
+  cvc::app app;
+  Runtime rt(app, "ui.k");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  auto &st = cvc::state::instance(app);
+  st("ui.k.n").value(0);
+  st("ui.k.keys.capture").value(std::string("C"));
+  rt.set_key_bindings({{"capture", "", "", {"C"}, "(state-set \"n\" 7)", ""}});
+  EXPECT_FALSE(rt.key_capture_pending());
+  InputEvent e;
+  e.kind = InputEvent::Kind::KeyDown;
+  e.key = "C";
+  rt.post_input(e);
+  rt.drain();
+  EXPECT_EQ(st("ui.k.n").value(), "7");
+}
+
+// A group with an id scopes its children's identities, as a window does.
+TEST(AriadneRuntime, GroupIdScopesItsChildren) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  Widget a = group({button("Change", "a")});
+  a.id = "row_a";
+  rt.set_root(group({a, group({button("Change", "b")})}));
+  rt.render();
+  const auto at = [&](const std::string &e) {
+    return std::find(mb.log.begin(), mb.log.end(), e) - mb.log.begin();
+  };
+  EXPECT_LT(at("push_id:row_a"), at("button:Change"));
+  EXPECT_LT(at("button:Change"), at("pop_id"));
+  EXPECT_EQ(std::count(mb.log.begin(), mb.log.end(), "push_id:row_a"), 1);
 }
 
 TEST(AriadneRuntime, PrefixResolvesRelativeBinds) {
@@ -4515,4 +4687,346 @@ TEST(AriadneTfEditor, ComposedResetOfTheDefaultModelWritesNothing) {
   rt.drain();
   EXPECT_EQ(tf_val(app, "ui.tf"), "{}");
   EXPECT_EQ(fired, 0);
+}
+
+// ── AppRuntime: host menus and the scene between documents ──────────────────────────────────────
+
+namespace {
+
+// Counts the adapter calls AppRuntime::load makes, in order.
+struct LogSceneAdapter : SceneAdapter {
+  std::vector<std::string> log;
+  void realize(const Scene &, const std::string &, std::vector<std::string> *) override {
+    log.push_back("realize");
+  }
+  void clear() override { log.push_back("clear"); }
+  void sync_visibility(cvc::app &) override {}
+  void tick() override {}
+};
+
+std::string write_doc(const std::string &name, const std::string &text) {
+  const std::filesystem::path p = std::filesystem::temp_directory_path() / name;
+  std::ofstream(p) << text;
+  return p.string();
+}
+
+// The positions of the begin_menu calls in the walk, by label (-1: never begun).
+long menu_at(const MockBackend &mb, const std::string &label) {
+  const auto it = std::find(mb.log.begin(), mb.log.end(), "begin_menu:" + label);
+  return it == mb.log.end() ? -1 : static_cast<long>(it - mb.log.begin());
+}
+
+} // namespace
+
+// A host's menus (a gallery's Demos) go first in every document's menubar, and give a document
+// without one a menubar of their own; set_root gets them too.
+TEST(AriadneAppRuntime, HostMenusLeadEveryDocumentsMenubar) {
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  cvc::app app;
+  MockBackend mb;
+  AppRuntime art(app, "ui.docs.d");
+  art.set_backend(mb);
+  art.set_host_menus({menu("Demos", {menu_action("other", "gallery:1")})});
+
+  art.load(write_doc("host_menus_a.ari", "meta: {min_libcvc: 3.4.0}\n"
+                                         "menubar:\n"
+                                         "  - menu: File\n"
+                                         "    items:\n"
+                                         "      - menu_item: Quit\n"
+                                         "        on: quit\n"));
+  art.runtime().render();
+  ASSERT_GE(menu_at(mb, "Demos"), 0);
+  EXPECT_LT(menu_at(mb, "Demos"), menu_at(mb, "File"));
+  EXPECT_EQ(std::count(mb.log.begin(), mb.log.end(), "begin_menubar"), 1); // one bar, not two
+
+  mb.log.clear();
+  art.load(write_doc("host_menus_b.ari", "meta: {min_libcvc: 3.4.0}\n"
+                                         "root:\n"
+                                         "  - text: no menubar here\n"));
+  art.runtime().render();
+  EXPECT_TRUE(mb.saw("begin_menubar"));
+  EXPECT_GE(menu_at(mb, "Demos"), 0);
+  EXPECT_TRUE(mb.saw("menu_action:other"));
+
+  mb.log.clear();
+  art.set_root(group({text("built in C++")}));
+  art.runtime().render();
+  EXPECT_GE(menu_at(mb, "Demos"), 0);
+}
+
+// With document_menus("Document") among the host's menus the bar is the host's and the same for
+// every document: the document's menus are submenus of Document, which is greyed out (not dropped)
+// for a document without any.
+TEST(AriadneAppRuntime, HostMenuBarStaysTheSameAcrossDocuments) {
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  cvc::app app;
+  MockBackend mb;
+  AppRuntime art(app, "ui.docs.d");
+  art.set_backend(mb);
+  art.set_host_menus({menu("Demos", {menu_action("other", "gallery:1")}),
+                      AppRuntime::document_menus("Document"),
+                      menu("Settings", {menu_action("Grid", "grid")})});
+  art.load(write_doc("host_bar_a.ari", "meta: {min_libcvc: 3.4.0}\n"
+                                       "menubar:\n"
+                                       "  - menu: File\n"
+                                       "    items:\n"
+                                       "      - menu_item: Quit\n"
+                                       "        on: quit\n"
+                                       "  - menu: Gallery\n"
+                                       "    items:\n"
+                                       "      - menu_item: Next\n"
+                                       "        on: next\n"));
+  art.runtime().render();
+  const std::vector<std::string> top = {"Demos", "Document", "Settings"};
+  ASSERT_GE(menu_at(mb, "Demos"), 0);
+  EXPECT_LT(menu_at(mb, "Demos"), menu_at(mb, "Document"));
+  EXPECT_LT(menu_at(mb, "Document"), menu_at(mb, "File")); // inside Document, in order
+  EXPECT_LT(menu_at(mb, "File"), menu_at(mb, "Gallery"));
+  EXPECT_LT(menu_at(mb, "Gallery"), menu_at(mb, "Settings"));
+  EXPECT_FALSE(mb.saw("begin_disabled"));
+
+  mb.log.clear();
+  art.load(write_doc("host_bar_b.ari", "meta: {min_libcvc: 3.4.0}\n"
+                                       "root:\n"
+                                       "  - text: no menubar here\n"));
+  art.runtime().render();
+  for (const std::string &m : top)
+    EXPECT_GE(menu_at(mb, m), 0) << m;
+  EXPECT_EQ(menu_at(mb, "File"), -1);
+  const auto dis = std::find(mb.log.begin(), mb.log.end(), "begin_disabled");
+  ASSERT_NE(dis, mb.log.end());
+  EXPECT_EQ(*(dis + 1), "begin_menu:Document"); // the empty Document menu, greyed out
+}
+
+// With an unlabelled document_menus() the document's menus stand in the bar as written, among the
+// host's; a host menu named like one of them adds its items to it after a separator.
+TEST(AriadneAppRuntime, HostMenusBesideTheDocumentsOwn) {
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  cvc::app app;
+  MockBackend mb;
+  AppRuntime art(app, "ui.docs.d");
+  art.set_backend(mb);
+  art.set_host_menus(
+      {AppRuntime::document_menus(), menu("Settings", {menu_action("Grid", "grid")})});
+  art.load(write_doc("host_beside_a.ari", "meta: {min_libcvc: 3.4.0}\n"
+                                          "menubar:\n"
+                                          "  - menu: Sim\n"
+                                          "    items:\n"
+                                          "      - menu_item: Quit\n"
+                                          "        on: quit\n"
+                                          "  - menu: Settings\n"
+                                          "    items:\n"
+                                          "      - menu_item: Panel\n"
+                                          "        on: panel\n"));
+  art.runtime().render();
+  EXPECT_LT(menu_at(mb, "Sim"), menu_at(mb, "Settings"));
+  EXPECT_EQ(std::count(mb.log.begin(), mb.log.end(), "begin_menu:Settings"), 1);
+  const auto at = [&](const std::string &e) {
+    return std::find(mb.log.begin(), mb.log.end(), e) - mb.log.begin();
+  };
+  EXPECT_LT(at("menu_action:Panel"), at("separator"));
+  EXPECT_LT(at("separator"), at("menu_action:Grid"));
+
+  mb.log.clear();
+  art.load(write_doc("host_beside_b.ari", "meta: {min_libcvc: 3.4.0}\n"
+                                          "menubar:\n"
+                                          "  - menu: Sim\n"
+                                          "    items:\n"
+                                          "      - menu_item: Quit\n"
+                                          "        on: quit\n"));
+  art.runtime().render();
+  EXPECT_LT(menu_at(mb, "Sim"), menu_at(mb, "Settings")); // the host's own, after the document's
+  EXPECT_FALSE(mb.saw("separator"));
+}
+
+// Every document a host mounts after set_host_keys gets a Keys window: closed until
+// tree.ariadne_keys.open is set, a row per binding (the document's keys:, then the host's) whose
+// Change button names it in tree.ariadne_keys.capture, and each binding's default keys seeded.
+// With no keys at all it says so.
+TEST(AriadneAppRuntime, KeysWindowListsTheDocumentsAndTheHostsKeys) {
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  cvc::app app;
+  MockBackend mb;
+  AppRuntime art(app, "ui.docs.d");
+  art.set_backend(mb);
+  art.set_host_keys({{"camera_forward", "Forward", "Camera", {}, "", "/cam.keys.forward"}});
+  cvc::state::instance(app)("cam.keys.forward").value(std::string("w"));
+  art.load(write_doc("keys_window_a.ari", "meta: {min_libcvc: 3.4.0}\n"
+                                          "keys:\n"
+                                          "  next:\n"
+                                          "    label: Next item\n"
+                                          "    key: [Right, PageDown]\n"
+                                          "    on: (state-set \"n\" 1)\n"));
+  auto &st = cvc::state::instance(app);
+  EXPECT_EQ(st("ui.docs.d.keys.next").value(), "Right, PageDown");
+  art.runtime().render();
+  EXPECT_FALSE(mb.saw("begin_window:Keys(closable)")) << "closed until asked for";
+
+  st("ui.docs.d.tree.ariadne_keys.open").value(1);
+  mb.log.clear();
+  art.runtime().render();
+  ASSERT_TRUE(mb.saw("begin_window:Keys(closable)"));
+  EXPECT_TRUE(mb.saw("text_line:Next item"));
+  EXPECT_TRUE(mb.saw("text_value:=Right, PageDown"));
+  EXPECT_TRUE(mb.saw("text_line:Camera"));
+  EXPECT_TRUE(mb.saw("text_line:Forward"));
+  EXPECT_TRUE(mb.saw("text_value:=w"));
+  EXPECT_TRUE(mb.saw("push_id:key_next"));
+  EXPECT_TRUE(mb.saw("push_id:key_camera_forward"));
+  EXPECT_EQ(std::count(mb.log.begin(), mb.log.end(), "button:Change"), 2);
+
+  // Change names its binding in the capture -- the key post_input then reads.
+  mb.button_click = true; // the mock clicks every button: the last row's wins
+  art.runtime().render();
+  mb.button_click = false;
+  art.drain();
+  EXPECT_EQ(st("ui.docs.d.tree.ariadne_keys.capture").value(), "camera_forward");
+  EXPECT_TRUE(art.runtime().key_capture_pending());
+  art.drain(); // the row shows the wait from the next drain on (a bound text: nothing to evaluate)
+  mb.log.clear();
+  art.runtime().render();
+  EXPECT_TRUE(mb.saw(std::string("text_value:=") + kKeyPrompt));
+  EXPECT_TRUE(mb.saw("text_value:=Right, PageDown")) << "the other rows still show their keys";
+  InputEvent up;
+  up.kind = InputEvent::Kind::KeyDown;
+  up.key = "Up";
+  art.runtime().post_input(up);
+  art.drain();
+  EXPECT_EQ(st("cam.keys.forward").value(), "Up") << "the next key down is the binding's key";
+  EXPECT_EQ(st("ui.docs.d.tree.ariadne_keys.capture").value(), "");
+  mb.log.clear();
+  art.runtime().render();
+  EXPECT_TRUE(mb.saw("text_value:=Up")) << "and its row shows it";
+  EXPECT_FALSE(mb.saw(std::string("text_value:=") + kKeyPrompt));
+
+  art.set_host_keys({});
+  mb.log.clear();
+  art.load(write_doc("keys_window_b.ari", "meta: {min_libcvc: 3.4.0}\n"
+                                          "root:\n"
+                                          "  - text: no keys here\n"));
+  art.runtime().render();
+  EXPECT_TRUE(mb.saw("begin_window:Keys(closable)")) << "still open, and still there";
+  EXPECT_TRUE(mb.saw("text_line:No keys to change here."));
+}
+
+// Documents a host loads in turn share the prefix, so each new document's key defaults replace an
+// earlier one's for the same binding id, where a reload of the same file (under any spelling)
+// keeps the keys the user chose. A new document's windows are laid out afresh: the backend is told
+// (reset_layout), and each window's first frame takes no geometry persisted by the last document
+// -- only its own authored pos, marked as authored.
+TEST(AriadneAppRuntime, EachNewDocumentHasItsOwnKeyDefaultsAndLayout) {
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  cvc::app app;
+  MockBackend mb;
+  AppRuntime art(app, "ui.docs.e");
+  art.set_backend(mb);
+  auto &st = cvc::state::instance(app);
+  const std::string a = write_doc("own_keys_a.ari", "meta: {min_libcvc: 3.4.0}\n"
+                                                    "keys:\n"
+                                                    "  next:\n"
+                                                    "    key: Right\n"
+                                                    "    on: (state-set \"n\" 1)\n"
+                                                    "  toggle:\n"
+                                                    "    key: T\n"
+                                                    "    on: (state-set \"t\" 1)\n"
+                                                    "windows:\n"
+                                                    "  - window: Panel\n"
+                                                    "    children:\n"
+                                                    "      - text: a\n");
+  art.load(a);
+  EXPECT_EQ(st("ui.docs.e.keys.next").value(), "Right");
+  art.runtime().render();
+  EXPECT_EQ(mb.layout_resets, 0) << "the first document has nothing to forget";
+  st("ui.docs.e.keys.next").value(std::string("Up")); // the user's key
+
+  const std::filesystem::path pa(a);
+  art.load((pa.parent_path() / "." / pa.filename()).string()); // a reload, spelled otherwise
+  EXPECT_EQ(st("ui.docs.e.keys.next").value(), "Up") << "a reload keeps the user's key";
+  art.runtime().render();
+  EXPECT_EQ(mb.layout_resets, 0) << "and the windows where the user put them";
+
+  st("ui.docs.e.tree.Panel.geometry").value(std::string("300,400,200,100")); // a's Panel
+  st("ui.docs.e.tree.Split.tracks").value(std::string("40,50"));             // a's Split
+  art.load(write_doc("own_keys_b.ari", "meta: {min_libcvc: 3.4.0}\n"
+                                       "keys:\n"
+                                       "  next:\n"
+                                       "    key: Space\n"
+                                       "    on: (state-set \"n\" 2)\n"
+                                       "  toggle:\n"
+                                       "    label: Toggle\n"
+                                       "    on: (state-set \"t\" 2)\n"
+                                       "windows:\n"
+                                       "  - window: Panel\n"
+                                       "    pos: [5, 6]\n"
+                                       "    children:\n"
+                                       "      - text: b\n"
+                                       "  - window: Split\n"
+                                       "    layout:\n"
+                                       "      kind: grid\n"
+                                       "      row_heights: [90, auto]\n"
+                                       "      resizable: true\n"
+                                       "    children:\n"
+                                       "      - text: top\n"
+                                       "      - text: bottom\n"));
+  EXPECT_EQ(st("ui.docs.e.keys.next").value(), "Space") << "b's default, not a's key";
+  EXPECT_EQ(st("ui.docs.e.keys.toggle").value(), "") << "b's toggle has no key, not a's T";
+  mb.seeded_geom_called = false;
+  mb.seeded_tracks_called = false;
+  art.runtime().render();
+  EXPECT_FALSE(mb.seeded_tracks_called) << "a's Split's dragged panes are not b's";
+  EXPECT_EQ(mb.layout_resets, 1);
+  ASSERT_TRUE(mb.seeded_geom_called);
+  EXPECT_TRUE(mb.seeded_geom.authored) << "b's own pos, not a's persisted Panel";
+  EXPECT_FLOAT_EQ(mb.seeded_geom.x, 5.0f);
+  EXPECT_FLOAT_EQ(mb.seeded_geom.y, 6.0f);
+  mb.seeded_geom = WindowGeom{};
+  art.runtime().render();
+  EXPECT_EQ(mb.layout_resets, 1) << "once";
+  EXPECT_FALSE(mb.seeded_geom.authored) << "then what is persisted, as before";
+  EXPECT_FLOAT_EQ(mb.seeded_geom.x, 300.0f);
+}
+
+// A document's init: runs after its keys: defaults are in, so it can set a key of its own (from
+// the command line, say) -- on its first load as on any other.
+TEST(AriadneAppRuntime, InitCanSetAKeyOverItsDefault) {
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  cvc::app app;
+  MockBackend mb;
+  AppRuntime art(app, "ui.docs.i");
+  art.set_backend(mb);
+  art.load(write_doc("init_key.ari", "meta: {min_libcvc: 3.4.0}\n"
+                                     "init: (state-set \"keys.next\" \"Space\")\n"
+                                     "keys:\n"
+                                     "  next:\n"
+                                     "    key: Right\n"
+                                     "    on: (state-set \"n\" 1)\n"));
+  EXPECT_EQ(cvc::state::instance(app)("ui.docs.i.keys.next").value(), "Space");
+}
+
+// Every load clears the last document's scene before anything is realized -- a host switching
+// documents, or a reload -- and does so even when the new document declares no scene.
+TEST(AriadneAppRuntime, EachLoadClearsTheLastScene) {
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  cvc::app app;
+  MockBackend mb;
+  LogSceneAdapter scene;
+  AppRuntime art(app, "ui.docs.s", &scene);
+  art.set_backend(mb);
+  const std::string with_scene =
+      write_doc("clear_scene_a.ari", "meta: {min_libcvc: 3.4.0}\n"
+                                     "scene:\n"
+                                     "  nodes:\n"
+                                     "    - node: box\n"
+                                     "      source: { file: stanford.bunny }\n");
+  art.load(with_scene);
+  art.load(with_scene);
+  art.load(write_doc("clear_scene_b.ari", "meta: {min_libcvc: 3.4.0}\nroot:\n  - text: x\n"));
+  EXPECT_EQ(scene.log, (std::vector<std::string>{"clear", "realize", "clear", "realize", "clear"}));
 }

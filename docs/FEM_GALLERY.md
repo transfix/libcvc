@@ -22,6 +22,25 @@ fem_gallery --mesh stanford.bunny --up y --dim 128 --problem heat --steps 40 --s
 `fem_gallery` builds with `CVC_BUILD_EXAMPLES=ON` and `CVC_ENABLE_LIBIGL=ON`. `--help` lists its
 options.
 
+## The live gallery
+
+[`examples/ariadne/documents/fem_gallery.ari`](../examples/ariadne/documents/fem_gallery.ari)
+is the same twenty pictures as a live Ariadne document: you step through them, and each is
+computed in the scene when you reach it. Two scene nodes do the work, an `fe_lab` (the solid,
+its LBIE mesh and the FEM solve) and a `mesh_lab` (the surface); the document is a table of their
+keys ([ARIADNE.md §5.4](ARIADNE.md#54-scene-sources-and-custom-node-types)). Step with the
+Gallery menu, the Previous and Next buttons, or the arrow keys where the host passes keys to the
+document; the Windows menu opens the finite-element, mesh, lighting and camera controls for the
+item on screen.
+
+```bash
+arigl run --component-path src/cvc/ariadne examples/ariadne/documents/fem_gallery.ari
+```
+
+The data is in [`examples/data/fem`](../examples/data/fem/README.md). The live items use smaller
+grids than the pictures, so that each takes a few seconds at most: the bunny's and the head's
+SDFs at 48³ and the CT resampled to 64³. So their element counts differ from the ones below.
+
 ## How a picture is made
 
 1. **Get a solid.** A surface mesh's interior comes from a signed distance field (`cvc::sdf`,

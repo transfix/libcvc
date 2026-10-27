@@ -108,9 +108,9 @@ HostOptions parse_host_args(int argc, const char *const *argv,
     else if (a == "--png")
       o.png = value;
     else if (a == "--graphics") {
-      if (value != "auto" && value != "kitty" && value != "sixel" && value != "color" &&
-          value != "mono") {
-        o.error = "--graphics is auto, kitty, sixel, color or mono, not '" + value + "'";
+      if (value != "auto" && value != "kitty" && value != "sixel" && value != "iterm" &&
+          value != "color" && value != "mono") {
+        o.error = "--graphics is auto, kitty, sixel, iterm, color or mono, not '" + value + "'";
         return o;
       }
       o.graphics = value;
@@ -155,7 +155,7 @@ std::string host_flags_help() {
          "  --frames N             snapshot: frames to run before the capture\n"
          "  --ansi                 snapshot: keep colour escapes\n"
          "  --png FILE             snapshot: also write a PNG\n"
-         "  --graphics MODE        images in a terminal: auto, kitty, sixel, color or mono\n"
+         "  --graphics MODE        images in a terminal: auto, kitty, sixel, iterm, color or mono\n"
          "  --image NAME=FILE      publish FILE's picture as NAME, for image: widgets\n"
          "  --cell-size WxH        snapshot: a terminal cell's size in pixels\n";
 }

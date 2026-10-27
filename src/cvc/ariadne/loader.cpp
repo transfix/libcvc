@@ -22,7 +22,7 @@
 #include <cvc/state/state_exec/types.h>
 #include <cvc/tf/model.h> // tf_editor presets + the scene transfer_function: model
 #include <cvc/tf/vinay.h> // the scene transfer_function: vinay: import
-#include <filesystem> // §12 import: dirname of a resolved library for nested bases
+#include <filesystem>     // §12 import: dirname of a resolved library for nested bases
 #include <functional>
 #include <iterator>
 #include <map>
@@ -98,7 +98,7 @@ bool is_builtin_block(const std::string &k) {
   return k == "meta" || k == "menubar" || k == "windows" || k == "overlays" || k == "root" ||
          k == "children" || k == "scene" || k == "customs" || k == "init" || k == "on_tick" ||
          k == "on_key" || k == "on_pointer" || k == "on_signal" || k == "units" || k == "import" ||
-         k == "channels" || k == "lint" || k == "args" || k == "requires";
+         k == "channels" || k == "lint" || k == "args" || k == "requires" || k == "keys";
 }
 } // namespace
 
@@ -143,6 +143,17 @@ const char *const kAriSchema = R"ARISCHEMA({
       "required": ["min_libcvc"]
     },
     "menubar":  {"type": "array", "items": {"$ref": "#/$defs/widget"}},
+    "keys": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "label": {"type": "string"},
+          "key": {"type": ["string", "array"], "items": {"type": "string"}},
+          "on": {"type": "string"}
+        }
+      }
+    },
     "windows":  {"type": "array", "items": {"$ref": "#/$defs/widget"}},
     "overlays": {"type": "array", "items": {"$ref": "#/$defs/widget"}},
     "root":     {"type": "array", "items": {"$ref": "#/$defs/widget"}},
@@ -182,6 +193,7 @@ const char *const kAriSchema = R"ARISCHEMA({
         "hi": {"type": "number"},
         "def": {"type": ["number", "boolean", "string"]},
         "fmt": {"type": "string"},
+        "commit": {"enum": ["live", "release"]},
         "options": {"type": ["array", "string"], "items": {"type": "string"}},
         "pos": {"type": "array", "items": {"type": "number"}},
         "size": {"type": ["array", "number"], "items": {"type": "number"}},
@@ -420,6 +432,48 @@ inline bool known_widget_key(const std::string &k) {
          k == "repeat";
 }
 
+// keys: (keys.h) -- each entry a rebindable action: its label, its default key(s), its on:.
+std::vector<KeyBinding> parse_keys(Ctx &ctx, const YAML::Node &n) {
+  std::vector<KeyBinding> out;
+  if (!n)
+    return out;
+  if (!n.IsMap()) {
+    ctx.warn("ari: keys: must be a map of named actions — ignored");
+    return out;
+  }
+  for (const auto &kv : n) {
+    KeyBinding b;
+    b.id = kv.first.Scalar();
+    const YAML::Node &e = kv.second;
+    if (!e.IsMap()) {
+      ctx.warn("ari: keys." + b.id + ": must be a map (label, key, on) — ignored");
+      continue;
+    }
+    b.label = str(e, "label");
+    if (const YAML::Node k = e["key"]; k && k.IsSequence()) {
+      for (const YAML::Node &one : k)
+        if (one.IsScalar())
+          b.keys.push_back(one.Scalar());
+    } else if (k && k.IsScalar()) {
+      b.keys.push_back(k.Scalar());
+    }
+    if (b.keys.empty())
+      ctx.warn("ari: keys." + b.id + ": no key: — it does nothing until one is bound");
+    b.on = str(e, "on");
+    out.push_back(std::move(b));
+  }
+  return out;
+}
+
+// A slider's `commit:` — live (the default: every change while dragged) or release (once, at the
+// end of the drag).
+bool commit_on_release(Ctx &ctx, const YAML::Node &n, const std::string &label) {
+  const std::string c = str(n, "commit", "live");
+  if (c != "live" && c != "release")
+    ctx.warn("ari: slider '" + label + "' has commit: '" + c + "' (live or release) — live");
+  return c == "release";
+}
+
 std::vector<Widget> parse_seq(Ctx &ctx, const YAML::Node &seq) {
   std::vector<Widget> out;
   if (seq && seq.IsSequence())
@@ -654,7 +708,9 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     const int lo = static_cast<int>(num(n, "lo", 0)), hi = static_cast<int>(num(n, "hi", 100));
     if (lo >= hi)
       ctx.warn("ari: slider_int '" + label + "' has lo >= hi");
-    return slider_int(label, bind, lo, hi, static_cast<int>(num(n, "def", 0)));
+    Widget w = slider_int(label, bind, lo, hi, static_cast<int>(num(n, "def", 0)));
+    w.commit_on_release = commit_on_release(ctx, n, label);
+    return w;
   }
   if (type == "slider_float") {
     const std::string bind = str(n, "bind");
@@ -662,7 +718,9 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     const double lo = num(n, "lo", 0.0), hi = num(n, "hi", 1.0);
     if (lo >= hi)
       ctx.warn("ari: slider_float '" + label + "' has lo >= hi");
-    return slider_float(label, bind, lo, hi, num(n, "def", 0.0), str(n, "fmt", "%.3f"));
+    Widget w = slider_float(label, bind, lo, hi, num(n, "def", 0.0), str(n, "fmt", "%.3f"));
+    w.commit_on_release = commit_on_release(ctx, n, label);
+    return w;
   }
   if (type == "combo") {
     const std::string bind = str(n, "bind");
@@ -1936,7 +1994,9 @@ SceneNode parse_scene_node(Ctx &ctx, const YAML::Node &n) {
   if (fit && fit.IsMap()) {
     sn.has_fit = true;
     sn.fit_height = static_cast<float>(num(fit, "height", sn.fit_height));
-    sn.fit_up_y = (str(fit, "up", "z") == "y"); // up: y -> rotate a Y-up mesh to Z-up first
+    sn.fit_up = lowered(str(fit, "up", "z")); // the dataset's up axis: x | y | z
+    sn.fit_up_y = sn.fit_up == "y";           // up: y -> rotate a Y-up mesh to Z-up first
+    sn.fit_flip = flag(fit, "flip", false);   // then turn it upside down
   }
   const YAML::Node vis = n["visible"];
   if (vis) {
@@ -2074,6 +2134,14 @@ SceneLight parse_scene_light(const YAML::Node &n) {
     sl.rig_ambient = static_cast<float>(num(n, "ambient", sl.rig_ambient));
   }
   return sl;
+}
+
+// Every node (children included) records the document's directory: SceneNode::base_dir.
+void stamp_base_dir(std::vector<SceneNode> &nodes, const std::string &dir) {
+  for (SceneNode &n : nodes) {
+    n.base_dir = dir;
+    stamp_base_dir(n.children, dir);
+  }
 }
 
 Scene parse_scene(Ctx &ctx, const YAML::Node &s) {
@@ -2520,6 +2588,8 @@ void lint_channels(Ctx &ctx, LoadResult &r) {
   refs_from_script(r.on_key_script, refs);
   refs_from_script(r.on_pointer_script, refs);
   refs_from_script(r.on_signal_script, refs);
+  for (const KeyBinding &k : r.keys)
+    refs_from_script(k.on, refs);
   refs_from_widget(r.root, refs);
   for (const std::string &ch : refs) {
     if (ch.find('#') != std::string::npos)
@@ -2641,7 +2711,8 @@ LoadResult load_node(const YAML::Node &doc, const std::string &base_dir = std::s
   parse_units(ctx, doc); // §12: collect units: templates BEFORE the body (so include: resolves)
   r.root = parse_document(ctx, doc);
   if (doc.IsMap()) {
-    r.scene = parse_scene(ctx, doc["scene"]); // §9: the scene graph, alongside the widgets
+    r.scene = parse_scene(ctx, doc["scene"]);    // §9: the scene graph, alongside the widgets
+    stamp_base_dir(r.scene.nodes, ctx.base_dir); // relative paths in a node's keys resolve here
     // init: a state_exec script the host runs once at load (cvc::ariadne::run_init).
     // The loader only captures the text — it has no app and never runs the DSL.
     const YAML::Node in = doc["init"];
@@ -2676,6 +2747,7 @@ LoadResult load_node(const YAML::Node &doc, const std::string &base_dir = std::s
       r.on_signal_script = sg.Scalar();
     else if (sg && !sg.IsScalar())
       ctx.warn("ari: on_signal: must be a scalar state_exec script string — ignored");
+    r.keys = parse_keys(ctx, doc["keys"]);
   }
   // §12 channel lint (A): now that root + all scripts are populated, scan static msg-* refs
   // (only if the doc declared channels:). A strict violation fails the load (r.error set).

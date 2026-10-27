@@ -831,6 +831,11 @@ add_executable(cvcgl_room_view test/cvcgl_room_view.cpp)
 target_link_libraries(cvcgl_room_view PRIVATE cvcGL)
 add_test(NAME cvcgl_room_view COMMAND cvcgl_room_view)
 
+# AriRuntime switching documents (arigl's gallery): each load clears the last one's scene.
+add_executable(cvcgl_ari_switch test/cvcgl_ari_switch.cpp)
+target_link_libraries(cvcgl_ari_switch PRIVATE cvcGL)
+add_test(NAME cvcgl_ari_switch COMMAND cvcgl_ari_switch)
+
 # The terminal extension (TerminalScene, roadmap §16.6): a scene rendered offscreen becomes the
 # terminal backend's background under the widgets, and a background drag turns the camera.
 add_executable(cvcgl_terminal_scene test/cvcgl_terminal_scene.cpp)
@@ -868,6 +873,12 @@ set_tests_properties(cvcgl_tf_binding PROPERTIES RUN_SERIAL TRUE)
 add_executable(cvcgl_fe_interval test/cvcgl_fe_interval.cpp)
 target_link_libraries(cvcgl_fe_interval PRIVATE cvcGL)
 add_test(NAME cvcgl_fe_interval COMMAND cvcgl_fe_interval)
+# ImGuiBackend's window sizing and placement on a bare ImGui context: a window with no size fits
+# its widgets, windows with no pos stack instead of overlapping (until the user moves one), and a
+# sized window scrolls both ways. No window, no GL.
+add_executable(cvcgl_imgui_window_fit test/cvcgl_imgui_window_fit.cpp)
+target_link_libraries(cvcgl_imgui_window_fit PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_window_fit COMMAND cvcgl_imgui_window_fit)
 
 # Golden images of the Ariadne ImGui/VTK backend (roadmap §16.6 phase 1): each .ari in
 # test/golden runs through AriRuntime + ImGuiBackend offscreen and its frame is compared with the
@@ -1061,6 +1072,12 @@ endif()
 add_executable(cvcgl_sdl_input test/cvcgl_sdl_input.cpp)
 target_link_libraries(cvcgl_sdl_input PRIVATE cvcGL)
 add_test(NAME cvcgl_sdl_input COMMAND cvcgl_sdl_input)
+
+# SdlInput::attach on a real VTK window: SDL wraps the HWND VTK made, so a key sent to it reaches
+# SDL (a document's on_key) and still VTK's interactor. Windows only; SKIPs (rc 0) elsewhere.
+add_executable(cvcgl_sdl_attach test/cvcgl_sdl_attach.cpp)
+target_link_libraries(cvcgl_sdl_attach PRIVATE cvcGL)
+add_test(NAME cvcgl_sdl_attach COMMAND cvcgl_sdl_attach)
 
 # ── JavaScript tests (node) ──
 # The browser-side pieces cvcgl_wasm_app() links into a wasm app are plain JS, tested under node

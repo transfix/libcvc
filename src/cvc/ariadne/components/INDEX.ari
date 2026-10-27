@@ -97,14 +97,14 @@ catalog:
     file: mesh_tools.ari
     unit: mesh_tools
     binds: "<prefix>.graphics.root.children.mesh.mesh_ops.*"   # the cvcGL mesh_lab realizer
-    for: "a `type: mesh_lab` node (smooth / decimate / repair / orient, colour by curvature or geodesic distance)"
+    for: "a `type: mesh_lab` node (load a mesh; smooth / decimate / repair / orient; colour by curvature, geodesic distance or a Laplace-Beltrami eigenfunction)"
     args: []                               # convention: node id `mesh`; copy + rename for another
     note: "needs a CVC_ENABLE_LIBIGL build; commands are written to mesh_ops.request and run off the render thread"
   - component: fe_controls
     file: fe_controls.ari
     unit: fe_controls
     binds: "<prefix>.graphics.root.children.domain.fe.*"       # the cvcGL fe_lab realizer
-    for: "a `type: fe_lab` node (LBIE tet mesh of a solid or of the interval between two isovalues, P1 Poisson / heat solve, field on the boundary and a cut)"
+    for: "a `type: fe_lab` node (load an SDF or a volume; LBIE tet / hex mesh of a solid, or a tet mesh of the interval between two isovalues; P1 Poisson / heat / eigenmode solve; the field on the boundary and a cut, or the elements cut away)"
     args: []                               # convention: node id `domain`; copy + rename for another
     note: "needs a CVC_ENABLE_LIBIGL build (and CVC_ENABLE_MESHER to tet-mesh); commands go through fe.request"
   - component: transfer_function

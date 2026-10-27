@@ -28,7 +28,9 @@
 // the one it replaced, and its old layers are unpublished at once (as are a predecessor's at
 // attach); idle, overlay_status keeps every missing layer's reason; and a binding that stops for
 // good (destroyed, or its node removed) leaves no progress note behind unless a newer binding owns
-// the key.
+// the key. An fe_lab whose SDF is computed after realize, and later re-loaded, has its volume
+// followed the same way: the range is published as each load lands and the bars move to the keys'
+// values on it, the keys untouched.
 //
 // No rendering: the bindings' ticks are run directly (tick_scene would also tick the renderers,
 // which need a GL context), and nothing pumps app.exec_scheduler() but pump() and
@@ -1441,6 +1443,100 @@ int main() {
         tick(fr);
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
       }
+    }
+  }
+
+  // ── fe_lab with an SDF source: the volume arrives after the binding attached ─────────────────
+  // fe_lab computes an SDF on its lane after realize (and a `load` brings another volume), so the
+  // binding attaches with no volume: no range, no overlay. It follows each volume the loads bring:
+  // <tf>.range is published, the bars move to where the keys' values sit on its range, the keys
+  // keep their values and nothing re-meshes; mesh.isovalue2's default, which needs the range, is
+  // set by the first load.
+  if (cvc::gl::ariadne::has_scene_node_type("fe_lab")) {
+    std::printf("== fe_lab: an SDF source loads after the binding attached ==\n");
+    SceneGraph sg(app, "tfs");
+    Scene ss;
+    SceneNode d;
+    d.id = "domain";
+    d.type = "fe_lab";
+    d.source_sdf_mesh = "stanford.bunny";
+    d.sdf_dim = 16;
+    d.props.kind = Value::Kind::Map;
+    d.props.entries.emplace_back("interval", scalar("true"));
+    d.props.entries.emplace_back("isovalue", scalar("-0.005"));
+    d.props.entries.emplace_back("remesh_debounce", scalar("0.02"));
+    ss.nodes.push_back(d);
+    std::vector<std::string> sw;
+    RealizedScene sr = cvc::gl::ariadne::realize_scene(sg, ss, "tfs", &sw);
+    auto dn = sg.getGraphics("domain");
+    bool no_sdf = false;
+    for (const std::string &w : sw)
+      no_sdf = no_sdf || w.find("CVC_ENABLE_SDF") != std::string::npos;
+    if (!dn) {
+      if (no_sdf)
+        std::printf("     (skipped: a build without CVC_ENABLE_SDF)\n");
+      else
+        chk(false, "fe_lab realized an SDF source");
+    } else {
+      const std::string fb = dn->stateName("fe"), fT = dn->stateName("transfer_function");
+      const auto num = [&](const std::string &path) {
+        try {
+          return cvc::state::instance(app)(path).value<double>();
+        } catch (...) {
+          return std::nan("");
+        }
+      };
+      // Tick until the load job (the realize-time SDF, or a `load` request) has been applied.
+      const auto load = [&] {
+        for (int i = 0; i < 6000; ++i) {
+          tick(sr);
+          if (val(app, fb + ".busy") == "0" && val(app, fb + ".request").empty() &&
+              val(app, fb + ".status").compare(0, 7, "loading") != 0)
+            return val(app, fb + ".status").compare(0, 6, "loaded") == 0;
+          std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return false;
+      };
+      // The bars iso1 / iso2 stand at the keys' values over the published range.
+      const auto bars_at_keys = [&](double &lo, double &hi) {
+        cvc::tf::model m;
+        if (!cvc::tf::range_from_string(val(app, fT + ".range"), lo, hi) ||
+            !parse_model(val(app, fT), m) || m.find_isocontour("iso1") < 0 ||
+            m.find_isocontour("iso2") < 0)
+          return false;
+        const auto at = [&](const char *id) {
+          return m.isocontours[std::size_t(m.find_isocontour(id))].at;
+        };
+        const auto pos = [&](double v) {
+          return std::clamp(cvc::tf::to_normalized(v, lo, hi), 0.0, 1.0);
+        };
+        return near(at("iso1"), pos(num(fb + ".mesh.isovalue")), 1e-9) &&
+               near(at("iso2"), pos(num(fb + ".mesh.isovalue2")), 1e-9);
+      };
+      chk(val(app, fT + ".range").empty() && val(app, fb + ".mesh.isovalue2").empty() &&
+              val(app, fb + ".mesh.region") == "interval",
+          "before its SDF is computed: no range published, mesh.isovalue2's default not set yet");
+      const bool loaded = load();
+      double lo = 0.0, hi = 0.0;
+      const double iso2 = num(fb + ".mesh.isovalue2");
+      chk(loaded && bars_at_keys(lo, hi) && lo < -0.005 && -0.005 < hi &&
+              num(fb + ".mesh.isovalue") == -0.005 && iso2 < -0.005 && iso2 > lo,
+          "the SDF loaded: its range published, isovalue -0.005 kept, isovalue2's default below it "
+          "(" +
+              val(app, fb + ".mesh.isovalue2") + "), both bars at the keys' values (status '" +
+              val(app, fb + ".status") + "')");
+      put(app, fb + ".source.dim", "24");
+      put(app, fb + ".request", "load");
+      const bool reloaded = load();
+      double lo2 = 0.0, hi2 = 0.0;
+      chk(reloaded && bars_at_keys(lo2, hi2) && (lo2 != lo || hi2 != hi) &&
+              num(fb + ".mesh.isovalue") == -0.005 && num(fb + ".mesh.isovalue2") == iso2,
+          "a load of another SDF (24^3): the new range published, the keys kept, the bars moved to "
+          "them on it");
+      std::this_thread::sleep_for(std::chrono::milliseconds(60)); // past the remesh debounce
+      tick(sr, 3);
+      chk(val(app, fb + ".request").empty() && val(app, fb + ".busy") == "0",
+          "no load re-meshed (a range moves the bars, never the keys)");
     }
   }
 

@@ -242,10 +242,13 @@ struct tf_binding::impl {
   bool window_yielded = false;
   double window_lo = 0.0, window_hi = 0.0;
 
-  // volume: the node's volume as last followed, by its shared owner (VolumeNode::getSharedVolume)
-  // -- never by address: a setVolume can be handed the address of the volume it replaced, and the
-  // weak_ptr keeps that block (so its address) from being reused while the binding holds it.
+  // volume: the node's volume as last followed, by its shared owner (VolumeNode::getSharedVolume;
+  // fe_lab: opt.volume_source) -- never by address: a setVolume can be handed the address of the
+  // volume it replaced, and the weak_ptr keeps that block (so its address) from being reused while
+  // the binding holds it. has_volume: false while a volume_source has none yet (no range, no
+  // overlay task).
   std::weak_ptr<const cvc::volume> volume_seen;
+  bool has_volume = true;
 
   // fe_lab: the ids of the isocontours fe.mesh.isovalue (fe_isocontour) and, in interval mode,
   // fe.mesh.isovalue2 (fe_isocontour2) follow; each key as last read or written; fe.mesh.region as
@@ -280,6 +283,9 @@ struct tf_binding::impl {
   }
 
   void read_volume_range() {
+    vol_has_range = false;
+    if (!has_volume)
+      return;
     // min()/max() fill the volume's cached range here; the overlay tasks never write the cache.
     try {
       vol_lo = vol.min();
@@ -295,8 +301,8 @@ struct tf_binding::impl {
   // Start a task computing `bits` from the current volume. Its results come back through its
   // mailbox (take_results); it writes its own progress notes to <tf>.overlay_status meanwhile.
   void submit(unsigned bits) {
-    if (!bits || !app)
-      return;
+    if (!bits || !app || !has_volume)
+      return; // (with no volume yet, follow_volume submits them when one arrives)
     auto mailbox = std::make_shared<overlay_mailbox>();
     cvc::tf::overlay_task_options o;
     o.overlays = opt.overlays;
@@ -490,16 +496,27 @@ struct tf_binding::impl {
 
   // --- the auto domain ---
 
-  // volume: follow a reload (setVolume). Asked every tick, whatever data_min/data_max say -- a new
-  // volume with the same range (the next time step) re-publishes the same strings -- and by the
-  // node's shared owner of the volume, which a later volume can never alias. The old volume's
-  // layers are unpublished at once and recomputed from the new one.
+  // The volume to follow now, by its shared owner: a VolumeNode's (volume), opt.volume_source's
+  // (fe_lab), else null (`vol` for good).
+  std::shared_ptr<const cvc::volume> current_volume(GraphicsNode &n) const {
+    if (target == tf_target::volume) {
+      auto *vn = dynamic_cast<VolumeNode *>(&n);
+      return vn ? vn->getSharedVolume() : nullptr;
+    }
+    return opt.volume_source ? opt.volume_source() : nullptr;
+  }
+
+  // volume: follow a reload (setVolume); fe_lab: a load (opt.volume_source). Asked every tick,
+  // whatever data_min/data_max say -- a new volume with the same range (the next time step)
+  // re-publishes the same strings -- and by the shared owner of the volume, which a later volume
+  // can never alias. The old volume's layers are unpublished at once and recomputed from the new
+  // one.
   void follow_volume(GraphicsNode &n) {
-    auto *vn = dynamic_cast<VolumeNode *>(&n);
-    const std::shared_ptr<const cvc::volume> now = vn ? vn->getSharedVolume() : nullptr;
+    const std::shared_ptr<const cvc::volume> now = current_volume(n);
     if (!now || (!volume_seen.owner_before(now) && !now.owner_before(volume_seen)))
       return;
     volume_seen = now;
+    has_volume = true;
     cancel_tasks(); // computing from the volume the node no longer draws
     vol = *now;
     read_volume_range();
@@ -521,6 +538,8 @@ struct tf_binding::impl {
     case tf_target::volren:
     case tf_target::fe_lab:
     case tf_target::volslice:
+      if (opt.volume_source)
+        follow_volume(n); // fe_lab: the volume its last load brought
       // volslice too: its window is the slice LUT's span, not the transfer function's domain.
       // VolSliceNode samples the raw-unit tables over whatever window it has, so the TF stays
       // fixed in data units when the window moves -- the legacy renderer's semantics.
@@ -713,6 +732,8 @@ struct tf_binding::impl {
                      bool arm) {
     if (i < 0)
       return; // no isocontour: the mesh keeps the last isovalue
+    if (!has_volume)
+      return; // no volume yet, so no axis: the bars are placed from the keys when it arrives
     const double iv = cvc::tf::isovalues(model, lo, hi)[std::size_t(i)];
     const std::string k = key(rel);
     const double cur = ari::read_or<double>(*app, k, std::numeric_limits<double>::quiet_NaN());
@@ -822,6 +843,38 @@ struct tf_binding::impl {
     }
   }
 
+  // fe_lab: the range moved (a load brought another volume): the bars the bounds follow move to
+  // where the keys' values sit on it. The keys hold the bounds, so they are never rewritten for a
+  // range and nothing re-meshes; the model, which now agrees with them, is recorded as lowered.
+  void place_fe_bars() {
+    double lo = 0.0, hi = 1.0;
+    cvc::tf::effective_domain(model, has_range, range_lo, range_hi, lo, hi);
+    cvc::tf::model m = model;
+    bool moved = false;
+    const auto place = [&](int i, const char *rel) {
+      const double v =
+          ari::read_or<double>(*app, key(rel), std::numeric_limits<double>::quiet_NaN());
+      if (i < 0 || !std::isfinite(v))
+        return;
+      const double at = std::clamp(cvc::tf::to_normalized(v, lo, hi), 0.0, 1.0);
+      if (m.isocontours[std::size_t(i)].at != at) {
+        m.isocontours[std::size_t(i)].at = at;
+        moved = true;
+      }
+    };
+    const int first = fe_isocontour(m);
+    const int second = fe_isocontour2(m);
+    place(first, "fe.mesh.isovalue");
+    place(second, "fe.mesh.isovalue2");
+    if (!moved)
+      return;
+    m.normalize(); // may reorder the isocontours; the followed ones keep their ids
+    const std::string ms = cvc::tf::to_string(m);
+    ari::write<std::string>(*app, model_key, ms);
+    seen = applied = ari::read_or<std::string>(*app, model_key, ms);
+    model = std::move(m);
+  }
+
   // fe_lab: whether fe.mesh.region switched between solid and interval (fe_interval follows it).
   // To interval the second bound is followed from here on, to solid no longer; follow_fe brings
   // the keys and the model together after the bounds.
@@ -902,10 +955,19 @@ tf_binding::tf_binding(std::shared_ptr<GraphicsNode> node, tf_target target, con
   }
   d.opt.seed.normalize();
   d.seed_str = cvc::tf::to_string(d.opt.seed);
-  d.read_volume_range();
-  if (target == tf_target::volume)
+  if (target == tf_target::volume) {
     if (auto *vn = dynamic_cast<VolumeNode *>(node.get()))
       d.volume_seen = vn->getSharedVolume();
+  } else if (d.opt.volume_source) {
+    // fe_lab: the volume as its loads bring it -- none yet while an SDF is being computed.
+    const std::shared_ptr<const cvc::volume> v = d.opt.volume_source();
+    d.has_volume = v != nullptr;
+    if (v) {
+      d.volume_seen = v;
+      d.vol = *v;
+    }
+  }
+  d.read_volume_range();
   cvc::app &a = *d.app;
 
   // volslice: the realizer wrote an explicit seed domain as the node's window -- it is ours.
@@ -997,9 +1059,13 @@ void tf_binding::tick() {
   }
   const bool range_moved = d.refresh_range(*node);
   d.read_model();
-  if (d.model_ok && (d.dirty || (range_moved && d.model.domain.automatic)))
+  const bool fe_lab = d.target == tf_target::fe_lab;
+  const bool rescaled = range_moved && d.model_ok && d.model.domain.automatic;
+  if (fe_lab && rescaled)
+    d.place_fe_bars(); // fe_lab's bounds are its keys' values, wherever the range puts them
+  if (d.model_ok && (d.dirty || (rescaled && !fe_lab)))
     d.lower();
-  if (d.target == tf_target::fe_lab)
+  if (fe_lab)
     d.follow_fe();
   d.service_overlays();
 }

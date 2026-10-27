@@ -19,6 +19,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 struct ImGuiContext; // Dear ImGui (global namespace); forward-declared, the header stays imgui-free
@@ -46,6 +47,7 @@ public:
   void seed_window_geometry(const cvc::ariadne::WindowGeom &g) override; // §11.4 (pre begin_window)
   cvc::ariadne::WindowGeom window_geometry() const override; // §11.4 (post begin_window)
   void focus_next_window() override;                         // raise edge (pre begin_window)
+  void reset_layout() override; // a new document: each window is laid out afresh when next drawn
   bool begin_grid(const cvc::ariadne::Layout &layout, const char *id) override;
   void grid_next_cell() override;
   void end_grid() override;
@@ -166,6 +168,30 @@ private:
   std::vector<float> m_pendingColumns; // the same, for a resizable table's column widths
   bool m_haveColumns = false;
   std::vector<float> m_lastGridColumns;
+
+  // Windows that came with no place of their own (no authored pos, nothing persisted) flow down
+  // the left of the viewport, one under another, in columns. Each window id maps to where it was
+  // put last frame; one the user drags elsewhere leaves the flow. The cursor restarts each frame.
+  // The windows that stand where they are (authored, persisted or moved) are in the flow's way, as
+  // last frame drew them: a flowing window goes below one it would cover.
+  struct FlowSpot {
+    float x = -1.0f, y = -1.0f;
+    unsigned int window = 0; // its ImGuiID, to tell it from the windows in the flow's way
+  };
+  struct FlowRect {
+    float x0, y0, x1, y1;
+  };
+  std::unordered_map<std::string, FlowSpot> m_flow;
+  std::vector<FlowRect> m_flowObstacles;
+  int m_flowFrame = -1;
+  float m_flowX = 0.0f, m_flowY = 0.0f, m_flowColumnW = 0.0f;
+
+  // reset_layout(): the windows drawn since, by id. A window's first draw after it takes its
+  // authored place and size (or rejoins the flow) though ImGui still holds the last document's.
+  bool m_relayout = false;
+  std::unordered_set<std::string> m_relaid;
+  std::unordered_set<std::string> m_relaidGrids; // ... and grids: their authored sizes again
+  int m_resetFrame = -1; // the frame reset_layout() came before: nothing is in the flow's way yet
 
   // Host-registered raw-ImGui draw fns for custom widget types (register_widget).
   std::unordered_map<std::string, CustomDrawFn> m_customWidgets;

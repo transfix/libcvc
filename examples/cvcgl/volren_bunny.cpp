@@ -59,6 +59,8 @@
 // which the raycast volume cannot participate in yet), the second turns on
 // cvc::volren's own light-view pass inside the raycast.
 
+#include "demos_menu.h" // the gallery's Demos menu
+
 #include <cvc/core/app.h>
 #include <cvc/geometry/geometry_file_io.h>
 #include <cvc/gl/CameraController.h>
@@ -574,6 +576,7 @@ int main(int argc, char **argv) {
   bool uiScene = false, uiLighting = false, uiVolren = true;
   ui.setDrawCallback([&] {
     if (ImGui::BeginMainMenuBar()) {
+      cvc_examples::demos_menu("volren_bunny");
       if (ImGui::BeginMenu("Scene")) {
         cvc::gl::ui::SceneMenuItems(sg, &uiScene, &uiLighting);
         ImGui::Separator();
@@ -997,7 +1000,7 @@ int main(int argc, char **argv) {
   auto last_report = std::chrono::steady_clock::now();
   auto last_t = last_report;
 
-  while (!view.windowClosed()) {
+  while (!view.windowClosed() && !cvc_examples::demo_switch_requested()) {
     ++ticks;
     double dt;
     if (capturing) {

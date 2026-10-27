@@ -165,6 +165,27 @@ TEST(AriadneFtxui, UnusedKeysAreReportedForTheDocument) {
   EXPECT_TRUE(t.key("Return"));  // ... but the focused button takes Enter
 }
 
+// While the Keys window waits for a key, the terminal hands every key to the document -- the
+// capture -- rather than to the UI, where Tab would move the focus; a click still goes to the UI.
+TEST(AriadneFtxui, KeysGoToTheDocumentWhileTheKeysWindowWaits) {
+  REQUIRE_FTXUI();
+  Term t(group({button("One", "one"), button("Two", "two")}));
+  std::vector<std::string> doc;
+  const auto to_doc = [&](const TermEvent &e) { doc.push_back(e.key); };
+  t.be.route(t.rt, TermEvent::key_event("Tab"), {}, to_doc);
+  EXPECT_TRUE(doc.empty()) << "Tab moves the UI's focus";
+
+  auto &st = cvc::state::instance(t.app);
+  st("tree.ariadne_keys.open").value(1);
+  st("tree.ariadne_keys.capture").value(std::string("next"));
+  ASSERT_TRUE(t.rt.key_capture_pending());
+  t.be.route(t.rt, TermEvent::key_event("Tab"), {}, to_doc);
+  t.be.route(t.rt, TermEvent::key_event("Return"), {}, to_doc);
+  EXPECT_EQ(doc, (std::vector<std::string>{"Tab", "Return"}));
+  t.be.route(t.rt, TermEvent::mouse_event(TermEvent::Mouse::Press, 0, 0), {}, to_doc);
+  EXPECT_EQ(doc.size(), 2u) << "not a click";
+}
+
 TEST(AriadneFtxui, ButtonActionRunsOnDrain) {
   REQUIRE_FTXUI();
   Term t(group({button("Go", "go")}));
@@ -196,12 +217,30 @@ TEST(AriadneFtxui, SliderKeysCommitEachStep) {
   EXPECT_EQ(val(t.app, "n"), "1");
 }
 
-TEST(AriadneFtxui, SliderMouseDragCommitsOnRelease) {
+TEST(AriadneFtxui, SliderMouseDragWritesAsItMoves) {
   REQUIRE_FTXUI();
   Term t(group({slider_int("N", "n", 0, 10, 3)}));
   int x = 0, y = 0;
   ASSERT_TRUE(find_cell(t.screen, "N ", x, y)) << t.screen;
   const int gauge = x + 2; // the 20-cell gauge follows "N "
+  t.mouse(TermEvent::Mouse::Press, gauge + 10, y);
+  t.draw();
+  EXPECT_EQ(val(t.app, "n"), "5") << "a held slider writes as it goes";
+  t.mouse(TermEvent::Mouse::Move, gauge + 19, y);
+  t.draw();
+  EXPECT_EQ(val(t.app, "n"), "10");
+  t.mouse(TermEvent::Mouse::Release, gauge + 19, y);
+  EXPECT_EQ(val(t.app, "n"), "10");
+}
+
+TEST(AriadneFtxui, SliderCommitOnReleaseWaitsForTheRelease) {
+  REQUIRE_FTXUI();
+  Widget s = slider_int("N", "n", 0, 10, 3);
+  s.commit_on_release = true;
+  Term t(group({s}));
+  int x = 0, y = 0;
+  ASSERT_TRUE(find_cell(t.screen, "N ", x, y)) << t.screen;
+  const int gauge = x + 2;
   t.mouse(TermEvent::Mouse::Press, gauge + 10, y);
   t.draw();
   EXPECT_EQ(val(t.app, "n"), "3") << "a held slider has not committed yet";
@@ -376,6 +415,31 @@ TEST(AriadneFtxui, WindowDragPersistsGeometry) {
   EXPECT_EQ(geo.substr(0, geo.find(',', geo.find(',') + 1)),
             std::to_string((nx - 1) * 8) + "," + std::to_string(ny * 16))
       << geo;
+}
+
+// Another document's window of the same id is placed as a new one: the last document's drag
+// does not carry over.
+TEST(AriadneFtxui, ANewDocumentPlacesItsWindowsAfresh) {
+  REQUIRE_FTXUI();
+  Widget w = window("Win", {text("body")});
+  w.id = "win";
+  Term t(group({w}));
+  int x = 0, y = 0;
+  ASSERT_TRUE(find_cell(t.screen, " Win ", x, y)) << t.screen;
+  t.mouse(TermEvent::Mouse::Press, x + 1, y);
+  t.mouse(TermEvent::Mouse::Move, x + 11, y + 3);
+  t.mouse(TermEvent::Mouse::Release, x + 11, y + 3);
+  t.draw();
+  int nx = 0, ny = 0;
+  ASSERT_TRUE(find_cell(t.screen, " Win ", nx, ny)) << t.screen;
+  ASSERT_EQ(nx, x + 10);
+
+  t.rt.forget_layout();
+  t.rt.set_root(group({w}));
+  t.draw();
+  ASSERT_TRUE(find_cell(t.screen, " Win ", nx, ny)) << t.screen;
+  EXPECT_EQ(nx, x);
+  EXPECT_EQ(ny, y);
 }
 
 TEST(AriadneFtxui, PersistedGeometrySeedsTheWindow) {
@@ -893,6 +957,27 @@ TEST(AriadneFtxui, BackgroundImageFillsTheScreenUnderTheWidgets) {
   EXPECT_NE(t.be.render_to_string(t.rt, 20, 4, /*ansi=*/true), before);
 }
 
+// A menu bar over a picture behind the widgets is its own: no picture cells are left under it, so
+// its inverted titles don't take the picture's colours (often the same on both sides of a cell).
+TEST(AriadneFtxui, AMenuBarOverABackgroundImageIsItsOwn) {
+  REQUIRE_FTXUI();
+  const unsigned char px[] = {200, 20, 20, 20, 20, 200, 20, 200, 20, 200, 200, 20};
+  cvc::image img(2, 2, cvc::image::pixel_format::RGB, cvc::image::data_type::u8, px);
+  FtxuiBackend::Options o;
+  o.image_color = FtxuiBackend::Options::ImageColor::Color;
+  Term t(group({menubar({menu("File", {menu_action("Quit", "quit")})}), text("hello")}), o);
+  t.be.set_image("scene", img);
+  t.be.set_background("scene");
+  t.width = 20;
+  t.height = 4;
+  t.draw();
+  const std::string bar = t.screen.substr(0, t.screen.find('\n'));
+  EXPECT_NE(bar.find("File"), std::string::npos) << t.screen;
+  EXPECT_EQ(bar.find("\xe2\x96\x80"), std::string::npos) << "no picture under the bar\n"
+                                                         << t.screen;
+  EXPECT_NE(t.screen.find("\xe2\x96\x80"), std::string::npos) << "but below it\n" << t.screen;
+}
+
 // ---- pixel graphics (Kitty / Sixel) ----------------------------------------------------------
 
 namespace {
@@ -941,6 +1026,12 @@ TermGraphics kitty_term() {
   return g;
 }
 
+TermGraphics iterm_term() {
+  TermGraphics g;
+  g.iterm = true; // what $TERM_PROGRAM says; no cell size (Windows reports none)
+  return g;
+}
+
 TermGraphics sixel_term(int cell_h = 12) {
   TermGraphics g;
   g.sixel = true;
@@ -979,6 +1070,92 @@ TEST(AriadneFtxuiGraphics, AutoPicksKittyThenSixelThenHalfBlocks) {
   tv.set_terminal_graphics(both);
   EXPECT_NE(tv.image_mode(), ImageColor::Kitty);
   EXPECT_NE(tv.image_mode(), ImageColor::Sixel);
+}
+
+TEST(AriadneFtxuiGraphics, AutoPicksItermAfterKittyAndSixel) {
+  REQUIRE_FTXUI();
+  FtxuiBackend be;
+  be.set_terminal_graphics(iterm_term());
+  EXPECT_EQ(be.image_mode(), ImageColor::Iterm) << "needs no cell size: the terminal scales it";
+  TermGraphics also = sixel_term();
+  also.iterm = true;
+  be.set_terminal_graphics(also);
+  EXPECT_EQ(be.image_mode(), ImageColor::Sixel);
+  also.kitty = true;
+  be.set_terminal_graphics(also);
+  EXPECT_EQ(be.image_mode(), ImageColor::Kitty);
+  TvisionBackend tv;
+  tv.set_terminal_graphics(iterm_term());
+  EXPECT_NE(tv.image_mode(), ImageColor::Iterm);
+}
+
+TEST(AriadneFtxuiGraphics, ItermIsSentAfterEveryDrawScaledToTheUncoveredCells) {
+  REQUIRE_FTXUI();
+  FtxuiBackend::Options o;
+  o.image_color = ImageColor::Iterm;
+  Term t(group({text("hello")}), o);
+  t.be.set_terminal_graphics(iterm_term());
+  t.be.set_image("scene", solid(4, 4, 255, 0, 0));
+  t.be.set_background("scene");
+  t.width = 20;
+  t.height = 5;
+  t.draw();
+  EXPECT_EQ(count(t.screen, "\xe2\x96\x80"), 20 * 5 - 5) << "the half-block underlay";
+  const std::string g = t.be.take_graphics();
+  // As for Sixel: row 1 (1-based) from column 6, and rows 2..4 whole; but each image names its
+  // cells, so no band rounding.
+  const std::string inline_image = "\x1b]1337;File=inline=1;";
+  EXPECT_EQ(count(g, inline_image), 2) << g.substr(0, 120);
+  const std::size_t a = g.find(kSaveCursor + "\x1b[2;1H" + inline_image);
+  const std::size_t b = g.find(kSaveCursor + "\x1b[1;6H" + inline_image);
+  ASSERT_NE(a, std::string::npos);
+  ASSERT_NE(b, std::string::npos);
+  EXPECT_NE(g.find(";width=20;height=3;", a), std::string::npos);
+  EXPECT_NE(g.find(";width=15;height=1;", b), std::string::npos);
+  EXPECT_EQ(count(g, kRestoreCursor), 2);
+  t.draw();
+  EXPECT_EQ(t.be.take_graphics(), g) << "a repaint covers the image, so it is sent again";
+}
+
+// The same picture over the same cells, laid over a terminal of another size, is another share
+// of it: the cached bytes for that rectangle are not reused.
+TEST(AriadneFtxuiGraphics, ItermImageIsRemadeWhenTheTerminalResizes) {
+  REQUIRE_FTXUI();
+  const auto stripes = [] { // a row of each colour, top to bottom
+    const unsigned char rgb[4][3] = {{255, 0, 0}, {0, 255, 0}, {0, 0, 255}, {255, 255, 255}};
+    std::vector<unsigned char> px(4 * 4 * 3);
+    for (int y = 0; y < 4; ++y)
+      for (int x = 0; x < 4; ++x)
+        for (int c = 0; c < 3; ++c)
+          px[(y * 4 + x) * 3 + c] = rgb[y][c];
+    return cvc::image(4, 4, cvc::image::pixel_format::RGB, cvc::image::data_type::u8, px.data());
+  };
+  const auto first_row_image = [](const std::string &g) { // row 1, beside "hello"
+    const std::size_t at = g.find("\x1b[1;6H\x1b]1337;");
+    return at == std::string::npos ? std::string() : g.substr(at, g.find('\x07', at) - at);
+  };
+  FtxuiBackend::Options o;
+  o.image_color = ImageColor::Iterm;
+  const auto term = [&](int height) {
+    auto t = std::make_unique<Term>(group({text("hello")}), o);
+    t->be.set_terminal_graphics(iterm_term());
+    t->be.set_image("scene", stripes());
+    t->be.set_background("scene");
+    t->width = 20;
+    t->height = height;
+    t->draw();
+    return t;
+  };
+  auto t = term(5);
+  const std::string tall = first_row_image(t->be.take_graphics());
+  ASSERT_FALSE(tall.empty());
+  t->height = 2; // the first row is the same cells, but now half the picture's height
+  t->draw();
+  const std::string resized = first_row_image(t->be.take_graphics());
+  const std::string fresh = first_row_image(term(2)->be.take_graphics());
+  ASSERT_FALSE(fresh.empty());
+  EXPECT_NE(fresh, tall) << "the test needs the two shares to differ";
+  EXPECT_EQ(resized, fresh);
 }
 
 TEST(AriadneFtxuiGraphics, ImageRasterIsTheCellsRealPixels) {

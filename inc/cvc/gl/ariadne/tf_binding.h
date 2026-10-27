@@ -56,6 +56,11 @@
 //             stops following the second (it stays in the model). The
 //             pair in use is published as <tf>.interval = "<id of isovalue's>,<id of
 //             isovalue2's>" ("" in solid mode), so an editor can shade the meshed band.
+//             fe_lab loads its source on its lane (an SDF after realize, another file on a
+//             `load`), so its binding follows tf_binding_options::volume_source: until a volume
+//             arrives there is no range and no overlay; each new one is followed as a VolumeNode's
+//             setVolume is, and on its range the followed bars move to the keys' values (the keys
+//             are never rewritten for a range, and nothing re-meshes).
 //
 // and publishes <tf>.range (the `auto` domain: volren / volslice / fe_lab the volume's range,
 // volume the node's data_min/data_max), <tf>.histogram (started at attach), and
@@ -112,6 +117,7 @@
 #include <cvc/tf/overlay_tasks.h>
 #include <cvc/tf/overlays.h>
 #include <cvc/volume/volume.h>
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -151,6 +157,11 @@ struct tf_binding_options {
   // or absent: the adoption rule (the lowest isocontour; for the second bound, the lowest other
   // than the first bound's).
   std::string fe_isocontour, fe_isocontour2;
+  // fe_lab: the volume the node meshes now, asked every tick; null while it has none (an SDF still
+  // being computed: no range, no overlays). A new shared owner is a new volume, followed as a
+  // VolumeNode's setVolume is, and the bars the bounds follow move to where the keys' values sit
+  // on its range: the keys keep their values and nothing re-meshes. Unset: `vol` for good.
+  std::function<std::shared_ptr<const cvc::volume>()> volume_source;
 };
 
 class tf_binding;
