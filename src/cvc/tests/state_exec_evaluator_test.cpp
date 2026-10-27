@@ -326,3 +326,24 @@ TEST_F(EvaluatorTest, FunctionParameterCalledInTailPosition) {
             42);
 }
 
+// ─── Step counting ─────────────────────────────────────────────────────────
+
+TEST(EvaluationStatsTest, IncrementStepCountsFromAnyThread) {
+  // increment_step() may be called from several threads at once (pycvc wraps it): none is lost.
+  evaluation_stats stats;
+  stats.start();
+  constexpr int kEach = 100000;
+  std::thread a([&] {
+    for (int i = 0; i < kEach; ++i)
+      stats.increment_step();
+  });
+  std::thread b([&] {
+    for (int i = 0; i < kEach; ++i)
+      stats.increment_step(i % 2 ? step_kind::eval : step_kind::data);
+  });
+  a.join();
+  b.join();
+  EXPECT_EQ(stats.get_step_count(), 2u * kEach);
+  EXPECT_EQ(stats.steps(step_kind::data), uint64_t(kEach / 2));
+  EXPECT_EQ(stats.steps(step_kind::eval), uint64_t(kEach + kEach / 2));
+}

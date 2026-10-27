@@ -849,7 +849,7 @@ bool stackless_evaluator::step(evaluator_state &state) {
       state.done = true;
       return true;
     } else {
-      state.stats.increment_step();
+      state.stats.count_eval_step();
       step_frame(state);
       done = state.done;
     }

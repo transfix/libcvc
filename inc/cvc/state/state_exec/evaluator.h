@@ -63,6 +63,9 @@ struct evaluation_stats {
   evaluation_stats(const evaluation_stats &) = delete;
   evaluation_stats &operator=(const evaluation_stats &) = delete;
 
+  /// Start counting afresh. (Not while an evaluator steps the state on another thread: the
+  /// evaluators count their own eval steps without a locked add, see count_eval_step(), so a
+  /// reset made meanwhile can be lost.)
   void start() {
     std::lock_guard lk(mu);
     start_time = std::chrono::steady_clock::now();
@@ -80,13 +83,10 @@ struct evaluation_stats {
     end_time = std::chrono::steady_clock::now();
     complete = true;
   }
-  /// Count a step, as spent on `kind`. Only the thread stepping the state counts its steps, one
-  /// step at a time, so the common (eval) step is counted without a locked read-modify-write:
-  /// a load and a store of a counter of its own (anyone may still read it, any time).
+  /// Count a step, as spent on `kind`. Any thread may count, and read, at any time.
   void increment_step(step_kind kind = step_kind::eval) {
     if (kind == step_kind::eval) { // eval steps are the rest, so the common step costs no more
-      eval_step_count.store(eval_step_count.load(std::memory_order_relaxed) + 1,
-                            std::memory_order_relaxed);
+      eval_step_count.fetch_add(1, std::memory_order_relaxed);
     } else {
       step_count.fetch_add(1, std::memory_order_relaxed);
       kind_steps[static_cast<std::size_t>(kind)].fetch_add(1, std::memory_order_relaxed);
@@ -146,6 +146,16 @@ struct evaluation_stats {
   }
 
 private:
+  friend class evaluator;
+  friend class stackless_evaluator;
+  /// increment_step(step_kind::eval), by the evaluator stepping the state: the only thread that
+  /// counts the state's eval steps while it steps, one step at a time, so the count is a load and
+  /// a store of a counter of its own, not a locked read-modify-write (anyone may still read it).
+  void count_eval_step() {
+    eval_step_count.store(eval_step_count.load(std::memory_order_relaxed) + 1,
+                          std::memory_order_relaxed);
+    last_kind = step_kind::eval;
+  }
   static constexpr std::size_t kKinds = 4;
   void copy_counts(const evaluation_stats &o) {
     step_count.store(o.step_count.load(std::memory_order_relaxed), std::memory_order_relaxed);

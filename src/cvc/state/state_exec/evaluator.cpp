@@ -244,7 +244,7 @@ void evaluator::annotate(value_t &exc) {
 
 value_t evaluator::eval_form(const value_t &expr, const environment_ptr &env) {
   check_interrupted();
-  stats_.increment_step();
+  stats_.count_eval_step();
 
   // Symbol
   if (auto *sym = std::get_if<symbol>(&expr.v)) {
