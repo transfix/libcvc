@@ -116,7 +116,9 @@ namespace {
 // of the allocations a step made. A popped frame gives its (emptied) vectors back here instead,
 // kept by capacity, and the next frame takes one of exactly the capacity it needs: a frame holds
 // no more than it would have with a fresh vector, and the stack's memory (and its measurement,
-// heap.h) stays what it was. Per thread and bounded, like the scopes environment::extend() keeps.
+// heap.h) stays what it was. Per thread and bounded, like the scopes environment::extend() keeps:
+// at most 16 vectors of each capacity from 1 to 8 values (576 values of 72 bytes on 64-bit MSVC,
+// about 41 KB) and 16 one-string vectors, kept until the thread exits.
 struct frame_vectors {
   static constexpr std::size_t kMaxCapacity = 8; // larger vectors are freed
   static constexpr std::size_t kPerCapacity = 16;

@@ -143,8 +143,12 @@ void evaluator::check_interrupted() {
 namespace {
 // An empty vector of values with room for `n`, from `spares` (the vectors the evaluator keeps
 // between forms), given back to them emptied when it goes, so that a form's argument vectors
-// aren't allocated each time. A few small ones are kept.
+// aren't allocated each time. A few small ones are kept: at most kKept vectors of up to kRoom
+// values, so an evaluator keeps at most about 37 KB (64 x 8 values of 72 bytes, 64-bit MSVC)
+// until it is destroyed.
 struct spare_values {
+  static constexpr std::size_t kKept = 64;
+  static constexpr std::size_t kRoom = 8;
   spare_values(std::vector<std::vector<value_t>> &spares, std::size_t n) : spares(spares) {
     if (!spares.empty()) {
       values = std::move(spares.back());
@@ -154,7 +158,7 @@ struct spare_values {
   }
   ~spare_values() {
     values.clear();
-    if (values.capacity() <= 16 && spares.size() < 64) {
+    if (values.capacity() <= kRoom && spares.size() < kKept) {
       try {
         spares.push_back(std::move(values));
       } catch (...) { // out of memory: just free it

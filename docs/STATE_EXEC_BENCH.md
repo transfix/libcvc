@@ -582,11 +582,12 @@ and parking them, divided by `n`. The heap figure is the reliable one. The regio
 process has parked, so it holds no time with everything idle; `sched.sleepers` and
 `sched.bystanders` measure what idle processes cost.
 
-### footprint.closure, footprint.environment (stackless)
+### footprint.closure, footprint.closure_forms, footprint.environment (stackless)
 
-`n` closures kept in a list: sharing one environment (`closure`), or each over an environment of
-its own made by a call (`environment`). `extra.heap_bytes_per_item`; the difference between the two
-is what an environment costs.
+`n` closures kept in a list: sharing one environment (`closure`, a one-form body; `closure_forms`,
+a body of two forms, which a call evaluates as a `(begin ...)`), or each over an environment of its
+own made by a call (`environment`). `extra.heap_bytes_per_item`; the difference between `closure`
+and `environment` is what an environment costs.
 
 ### limits.* (sync, async)
 
