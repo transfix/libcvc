@@ -14,25 +14,30 @@
 // The reverse pass, for one Lie-IMEX step (se2_vehicle.h's notation, a and b the two implicit
 // systems' matrices and right-hand sides, hh = h / 2):
 //
+// clang-format off
 //   v' = a_2^-1 b_2:   bb_2 = a_2^-T dv',  dK_2 = -hh bb_2 v'^T,
-//                      dv += bb_2 - hh K_1^T bb_2,  de_1 += hh bb_2,  de_2 += hh bb_2,  dK_1 -= hh
-//                      bb_2 v^T
+//                      dv += bb_2 - hh K_1^T bb_2,  de_1 += hh bb_2,  de_2 += hh bb_2,
+//                      dK_1 -= hh bb_2 v^T
 //   psi', (x, y)':     dpsi += dpsi',  dr += hh dpsi',  dr_p += hh dpsi';  d(x, y) += d(x, y)',
 //                      ddxy_1 += hh d(x, y)',  ddxy_2 += hh d(x, y)'
 //   stage 2 (at the predictor) gives d(x, y)_p, dpsi_p, dv_p; then (x, y)_p and psi_p feed back:
-//                      d(x, y) += d(x, y)_p,  ddxy_1 += h d(x, y)_p,  dpsi += dpsi_p,  dr += h
-//                      dpsi_p
+//                      d(x, y) += d(x, y)_p,  ddxy_1 += h d(x, y)_p,  dpsi += dpsi_p,
+//                      dr += h dpsi_p
 //   v_p = a_1^-1 b_1:  bb_1 = a_1^-T dv_p,  dK_1 -= h bb_1 v_p^T,  dv += bb_1,  de_1 += h bb_1
 //   stage 1 (at the step's start).
+// clang-format on
 //
 // and for a stage (K = M^-1 D, e = M^-1 q, q = ad*_v p - body + G u, p = M v):
 //
+// clang-format off
 //   dM^-1 += dK D^T + de q^T - (M^-T dp) p^T;   dD = M^-T dK;   dq = M^-T de
-//   dG = dq u^T;   dlevels_D = spd's reverse of dD;   both GPs' reverse give dW and dz, dv += dz /
-//   scale ad*_v p's reverse gives dp and dv;   dv += M^-T dp body = R^T grad V:  d grad V = R
-//   dbody,  dpsi += dbody . (body_y, -body_x) grad V = level + sum_k f_k omega_k / ell_V:  dW_V,k
-//   and d(x, y) from d grad V (its Hessian) dxy = R v:  dv += R^T ddxy,  dpsi += ddxy . (-dxy_y,
-//   dxy_x)
+//   dG = dq u^T;   dlevels_D = spd's reverse of dD;   both GPs' reverse give dW and dz;
+//                  dv += dz / scale
+//   ad*_v p's reverse gives dp and dv;   dv += M^-T dp
+//   body = R^T grad V:  d grad V = R dbody,  dpsi += dbody . (body_y, -body_x)
+//   grad V = level + sum_k f_k omega_k / ell_V:  dW_V,k, and d(x, y) from d grad V (its Hessian)
+//   dxy = R v:  dv += R^T ddxy,  dpsi += ddxy . (-dxy_y, dxy_x)
+// clang-format on
 //
 // M^-1's gradient is collected as a 3x3 over the whole window and turned into its six levels
 // once. The reparameterization W = mean + e^log_std z gives dmean = dW, dlog_std = dW e^log_std z.
