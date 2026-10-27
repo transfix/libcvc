@@ -845,3 +845,35 @@ TEST(StacklessClosureBody, MadeOnceAndIgnoredWhenStale) {
   f->body.push_back(parse("(+ y 1)"));
   EXPECT_EQ(call("(f 4)"), 5);
 }
+
+TEST(StacklessClosureBody, SharedByTheClosuresOneFormMakes) {
+  // Closures made in a loop from one lambda form share one (begin ...): a closure costs no list
+  // of its own. Another form's closures have their own.
+  stackless_evaluator ev(builtins::make_default_environment());
+  const value_t made = ev.evaluate_script(
+      "(begin (set fs (list)) (set i 0) "
+      "(while (< i 5) (begin (append fs (lambda (x) (set y x) (+ y i))) (set i (+ i 1)))) "
+      "(append fs (lambda (x) (set y x) (+ y 1))) fs)");
+  const auto &fs = *std::get<list_ptr>(made.v);
+  ASSERT_EQ(fs.size(), 6u);
+  const list_ptr first = std::get<closure_ptr>(fs[0].v)->body_expr;
+  ASSERT_NE(first, nullptr);
+  for (std::size_t i = 1; i < 5; ++i)
+    EXPECT_EQ(std::get<closure_ptr>(fs[i].v)->body_expr, first) << i;
+  const list_ptr other = std::get<closure_ptr>(fs[5].v)->body_expr;
+  ASSERT_NE(other, nullptr);
+  EXPECT_NE(other, first);
+}
+
+TEST(StacklessClosureBody, EachGeneratorHasABodyOfItsOwn) {
+  // (root) in a generator is its body; one generator changing it changes no other's.
+  stackless_evaluator ev(builtins::make_default_environment());
+  const value_t got =
+      ev.evaluate_script("(defun body () (append (root) (quote (yield 99))) (yield 1))"
+                         " (set a (generator body)) (set b (generator body))"
+                         " (next a) (list (next b) (next b))");
+  const auto &l = *std::get<list_ptr>(got.v);
+  ASSERT_EQ(l.size(), 2u);
+  EXPECT_EQ(std::get<int64_t>(l[0].v), 1);
+  EXPECT_TRUE(l[1].is_nil()) << to_string(l[1]);
+}

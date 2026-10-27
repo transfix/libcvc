@@ -254,6 +254,28 @@ void hand_up(evaluator_state &state, value_t &&v) {
   }
 }
 
+// -- the (begin ...) bodies shared by closures (closure_body.h) --------------------------------
+//
+// One slot per lambda form, by its address, holding (weakly) the (begin ...) the last closure it
+// made shares. A slot whose form was freed and its address reused is harmless: what a slot holds
+// is used only while it is exactly (begin body...) for the new closure's body. Per thread, and
+// bounded (64 slots, each a weak reference: the list's block stays allocated while the slot
+// holds it, about 40 bytes, until the slot is reused).
+struct shared_bodies {
+  static constexpr std::size_t kSlots = 64;
+  struct slot {
+    const void *form = nullptr;
+    std::weak_ptr<std::vector<value_t>> expr;
+  };
+  slot slots[kSlots];
+  ~shared_bodies();
+};
+
+thread_local bool t_shared_bodies_gone = false;
+thread_local shared_bodies t_shared_bodies;
+
+shared_bodies::~shared_bodies() { t_shared_bodies_gone = true; }
+
 // A loop's body: the form at args[first], or, when there are several, all of them in order as a
 // (begin ...). A single-form body stays as it is, so its frames are what they always were.
 value_t loop_body(std::span<const value_t> args, std::size_t first) {
@@ -596,6 +618,25 @@ void push_await(evaluator_state &state, detail::await_request r, std::span<const
   state.stack.push_back(std::move(frame));
 }
 } // namespace
+
+list_ptr detail::shared_body_expr(const void *form, const std::vector<value_t> &body) {
+  if (body.size() < 2)
+    return nullptr;
+  shared_bodies::slot *slot = nullptr;
+  if (!t_shared_bodies_gone) {
+    slot = &t_shared_bodies
+                .slots[(reinterpret_cast<std::uintptr_t>(form) >> 4) % shared_bodies::kSlots];
+    if (slot->form == form)
+      if (list_ptr made = slot->expr.lock(); made && is_begin_of(*made, body))
+        return made;
+  }
+  list_ptr made = std::get<list_ptr>(begin_of(body).v);
+  if (slot) {
+    slot->form = form;
+    slot->expr = made;
+  }
+  return made;
+}
 
 bool can_await() {
   const await_slot *slot = t_await;
@@ -1173,7 +1214,7 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
     cls->params = std::move(params);
     cls->variadic = variadic;
     cls->body = std::vector<value_t>(args.begin() + 1, args.end());
-    detail::cache_body_expr(*cls);
+    cls->body_expr = detail::shared_body_expr(lp->get(), cls->body);
     cls->env_snapshot = env;
     track_captured_env(env); // bound back into env (or anything it holds), it is a cycle
     pop_frame(state, value_t{std::move(cls)});
@@ -1264,7 +1305,7 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
     cls->params = std::move(params);
     cls->variadic = variadic;
     cls->body = std::vector<value_t>(args.begin() + 2, args.end());
-    detail::cache_body_expr(*cls);
+    cls->body_expr = detail::shared_body_expr(lp->get(), cls->body);
     cls->env_snapshot = env;
     track_captured_env(env); // bound in the env it captured: a cycle
     env->set(name_sym->name, value_t{cls});
@@ -1975,7 +2016,7 @@ void stackless_evaluator::handle_defclass(evaluator_state &state, eval_frame &fr
     mcls->params = std::move(params);
     mcls->variadic = variadic;
     mcls->body = std::vector<value_t>(mlist.begin() + 2, mlist.end());
-    detail::cache_body_expr(*mcls);
+    mcls->body_expr = detail::shared_body_expr(&mlist, mcls->body);
     mcls->env_snapshot = env;
     track_captured_env(env); // the class is bound in env: a cycle candidate
 

@@ -43,27 +43,32 @@ inline value_t begin_of(const std::vector<value_t> &forms) {
   return make_list(std::move(exprs));
 }
 
-/// Make `cls.body_expr` for a body of several forms (when the evaluator makes the closure,
-/// before anything else can see it).
-inline void cache_body_expr(closure &cls) {
-  if (cls.body.size() > 1)
-    cls.body_expr = std::get<list_ptr>(begin_of(cls.body).v);
+/// Whether `expr` is (begin forms...), its forms the same as `forms` (same_form).
+inline bool is_begin_of(const std::vector<value_t> &expr, const std::vector<value_t> &forms) {
+  if (expr.size() != forms.size() + 1)
+    return false;
+  const auto *head = std::get_if<symbol>(&expr[0].v);
+  if (!head || head->name != "begin")
+    return false;
+  for (std::size_t i = 0; i < forms.size(); ++i)
+    if (!same_form(expr[i + 1], forms[i]))
+      return false;
+  return true;
 }
+
+/// The (begin ...) for `cls.body_expr`, when the stackless evaluator makes a closure of several
+/// body forms from the lambda form `form` (a defun's, a lambda's or a class method's list): one
+/// shared by the closures that form makes, kept by this thread while one of them lives (so a
+/// loop that makes closures adds no list per closure), else a new one. Null for one form.
+list_ptr shared_body_expr(const void *form, const std::vector<value_t> &body);
 
 /// The expression a call of `cls` evaluates: its one form, or (begin body...), the one made with
 /// the closure while it still matches the body (else a new one).
 inline value_t body_expr_of(const closure &cls) {
   if (cls.body.size() == 1)
     return cls.body[0];
-  if (cls.body_expr && cls.body_expr->size() == cls.body.size() + 1) {
-    const std::vector<value_t> &cached = *cls.body_expr;
-    const auto *head = std::get_if<symbol>(&cached[0].v);
-    bool current = head && head->name == "begin";
-    for (std::size_t i = 0; current && i < cls.body.size(); ++i)
-      current = same_form(cached[i + 1], cls.body[i]);
-    if (current)
-      return value_t(cls.body_expr);
-  }
+  if (cls.body_expr && is_begin_of(*cls.body_expr, cls.body))
+    return value_t(cls.body_expr);
   return begin_of(cls.body);
 }
 
