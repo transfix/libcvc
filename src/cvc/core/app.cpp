@@ -1195,7 +1195,8 @@ void app::compute_async(int n, std::function<void(int)> fn, std::function<void()
 void app::compute_async(int n, std::function<void(int)> fn, std::function<void()> on_done,
                         std::function<void(const std::string &)> on_error,
                         thread_priority priority) {
-  // A background pool worker owns the blocking parallel_for; the caller returns immediately. The
+  // A background pool worker owns the blocking parallel_for; the caller doesn't wait for it (only,
+  // while the pool has no worker yet, for the worker creations under way: trySubmitPooled). The
   // job holds fn/on_done by value, so a result accumulator they close over outlives this call.
   // Only a job with on_error hears of a drop: one without waits in the queue, should the pool be
   // left with no worker, rather than be dropped without a word (its caller may wait for on_done:
@@ -1470,17 +1471,27 @@ app::PoolSubmit app::enqueuePoolTask(ThreadPoolTask &task, bool handBackIfNoWork
         ++_handBackChecks;
     }
   }
-  applyPoolKick(kick);
-  if (keyed.keyed) {
-    // The caller's own keyed task (startThreadPooled with room for it): if its thread can't be
-    // created, the caller hears of it, as when every pooled task had a thread of its own. One
-    // taken off the head of the queue for another task has no caller here to tell: it is logged.
-    const bool own = keyed.seq == seq;
-    const std::string key = own ? keyed.key : std::string();
-    if (!startKeyedPoolThread(keyed, /*logDrop=*/!own) && own)
-      boost::throw_exception(boost::thread_resource_error(
-          static_cast<int>(boost::system::errc::resource_unavailable_try_again),
-          "cvc::app::startThreadPooled: no thread could be started for '" + key + "'"));
+  try {
+    applyPoolKick(kick);
+    if (keyed.keyed) {
+      // The caller's own keyed task (startThreadPooled with room for it): if its thread can't be
+      // created, the caller hears of it, as when every pooled task had a thread of its own. One
+      // taken off the head of the queue for another task has no caller here to tell: it is logged.
+      const bool own = keyed.seq == seq;
+      const std::string key = own ? keyed.key : std::string();
+      if (!startKeyedPoolThread(keyed, /*logDrop=*/!own) && own)
+        boost::throw_exception(boost::thread_resource_error(
+            static_cast<int>(boost::system::errc::resource_unavailable_try_again),
+            "cvc::app::startThreadPooled: no thread could be started for '" + key + "'"));
+    }
+  } catch (...) {
+    // Out of memory starting a thread: this call decides nothing, and must not leave the count
+    // raised, or no failed creation would drop a task for want of a worker again.
+    if (deciding) {
+      boost::mutex::scoped_lock lock(_threadPoolMutex);
+      --_handBackChecks; // a drop still owed is left to the next creation that fails
+    }
+    throw;
   }
   if (!deciding)
     return PoolSubmit::queued;
