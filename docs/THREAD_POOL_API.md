@@ -98,16 +98,27 @@ for (int i = 0; i < 100; i++) {
 
 ## Thread Pool Behavior
 
-1. **Task Submission**: Tasks are added to a priority queue
-2. **Worker Allocation**: Workers start when pool has capacity
-3. **Execution**: Highest priority task is executed next
-4. **Completion**: Worker processes next task or terminates if queue is empty
-5. **Thread Tracking**: Running tasks appear in `app.threads()` map with their keys
+1. **Task Submission**: Tasks are added to one queue, ordered by priority and,
+   within a priority, by submission (FIFO)
+2. **Admission**: At most `getThreadPoolSize()` tasks run at once
+   (`getActiveThreadCount()`); the rest wait (`getPendingThreadCount()`)
+3. **Anonymous tasks** (`wait=false`, `submitPooled`): run on persistent worker
+   threads, started on demand up to the pool size and kept until `~app`. A
+   finished task is destroyed on its worker before it counts as done, so it
+   keeps nothing alive. They have no key and never appear in `app.threads()`.
+4. **Keyed tasks** (`wait=true`): get a thread of their own, registered in
+   `app.threads()` under the key before the task runs (when the pool has room
+   at submission, before `startThreadPooled` returns). The entry stays after
+   the task ends, like `startThread`'s.
+5. **Shutdown**: `wait()` interrupts the running tasks and waits (up to 5 s)
+   for the pool to drain; `~app` interrupts the running tasks, drops the queued
+   ones and joins the workers
 
 ## Notes
 
-- The pool uses detached worker threads for management
-- Tasks still appear in the thread map and can be interrupted
+- `submitPooled(std::function<void()>, priority)` is `startThreadPooled` with
+  `wait=false` without the key argument
+- Keyed tasks appear in the thread map and can be interrupted through it
 - `waitForHandlers()` in `state_object` waits for all handler threads
 - Thread pool workers are internal and don't appear in the thread map
 - Pool size can be adjusted at runtime

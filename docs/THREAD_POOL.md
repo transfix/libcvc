@@ -14,14 +14,25 @@ For the full per-method reference, see
   submissions queue automatically.
 - **Four priority levels.** `PRIORITY_LOW`, `PRIORITY_NORMAL`,
   `PRIORITY_HIGH`, `PRIORITY_CRITICAL`. Higher-priority tasks run
-  before lower-priority ones when the pool is at capacity.
-- **Tracked threads.** Each pooled task is registered in the app's
-  thread map under a user-supplied key, so the same APIs that work for
-  `startThread` (`hasThread`, `threads(key)`, progress, interruption,
-  `thread_feedback`) also work for pooled tasks.
+  before lower-priority ones when the pool is at capacity, and tasks of
+  one priority start in the order they were submitted.
+- **Keyed tasks are tracked threads.** A keyed task (`wait=true`) gets a
+  thread of its own, registered in the app's thread map under its key
+  before it runs, so the same APIs that work for `startThread`
+  (`hasThread`, `threads(key)` to join or interrupt it, keyed progress
+  and info, `thread_feedback`) also work for it.
+- **Anonymous tasks run on persistent workers.** An anonymous task
+  (`wait=false`, or `submitPooled`) runs on one of at most
+  `getThreadPoolSize()` worker threads the pool starts on demand and
+  keeps until the app goes. It has no key and no thread-map entry, and
+  the pool destroys it, with everything it captured, as soon as it
+  returns. This is the path for many small tasks (state_exec's async
+  calls, `compute_async`): no thread is created per task.
 - **Cooperative interruption.** Tasks honor
   `boost::this_thread::interruption_point()` and shut down cleanly when
-  interrupted or when the application exits.
+  interrupted (`threads(key)->interrupt()` for a keyed one; `wait()` and
+  `~app` interrupt every running task). `~app` drops the tasks still
+  queued without running them.
 - **Exception-safe.** Exceptions thrown by a task are logged and do not
   take down the pool or other workers.
 - **Dynamic resizing.** `setThreadPoolSize()` may be called while tasks
@@ -95,6 +106,15 @@ app.startThreadPooled("import", [&app]() {
 }, cvc::PRIORITY_NORMAL, true);
 ```
 
+### Many small tasks
+
+```cpp
+// No key, no thread per task: runs on the pool's persistent workers.
+for (int i = 0; i < 10000; ++i)
+  app.submitPooled([i]() { process_item(i); }, cvc::PRIORITY_NORMAL);
+app.wait(); // until nothing is queued or running
+```
+
 ### Inspecting the pool
 
 ```cpp
@@ -112,13 +132,14 @@ unsigned int queued         = app.getPendingThreadCount();
 | Mixed priorities matter                          | All work is equal priority                 |
 | You want queuing instead of unbounded threads    | You want the thread to start immediately   |
 
-`startThreadPooled` and `startThread` share the same key namespace, so
-keys must be unique across both.
+Keyed `startThreadPooled` tasks and `startThread` share the same key
+namespace, so keys must be unique across both.
 
 ## Tips
 
-- **Unique keys.** Each concurrently-running task needs a unique key.
-  A common pattern is `prefix_<index>` or `prefix_<uuid>`.
+- **Unique keys.** Each concurrently-running keyed task needs a unique
+  key. A common pattern is `prefix_<index>` or `prefix_<uuid>`. If you
+  don't need to find the task by key, submit it anonymously instead.
 - **Don't block the calling thread holding pool resources.** If task A
   waits on task B, make sure the pool has room for both, or submit B
   first.

@@ -21,6 +21,8 @@
 #include <future> // compute_async: deterministic wait on on_done via a promise
 #include <gtest/gtest.h>
 #include <memory> // compute_async: shared accumulator captured by fn + on_done
+#include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -1307,6 +1309,186 @@ TEST_F(AppTest, ThreadPoolTaskChaining) {
   EXPECT_EQ(order.size(), 3);
 
   ctx.setThreadPoolSize(original_size);
+}
+
+// Spin for `us` microseconds without an interruption point (a kernel that never checks).
+static void spin_us(int us) {
+  const auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(us);
+  while (std::chrono::steady_clock::now() < until) {
+  }
+}
+
+// Regression (docs/STATE_EXEC_BENCH.md, "The background pool stalls, then hangs"): more
+// anonymous (wait=false) tasks than the pool has workers. The pool used to give every task queued
+// while it was full the same thread key, so a worker starting the next one interrupted and joined
+// (up to 5 s) the thread already holding that key; the interrupted worker then threw from the
+// interruption point at the top of app::threads() inside tryStartWorker, which had unlocked
+// _threadPoolMutex by hand, and the scoped lock of its caller unlocked it a second time. On
+// Windows that leaves the boost mutex looking locked with no owner, and every later locker
+// (workers, submitters, ~app) blocks forever. Every task must run, promptly, and the pool must
+// still answer afterwards.
+TEST_F(AppTest, ThreadPoolFloodPastPoolSizeCompletes) {
+  const unsigned int original_size = ctx.getThreadPoolSize();
+  ctx.setThreadPoolSize(4);
+  const int n = 1000;
+  const int spin = 20; // microseconds: no interruption point, like a kernel that never checks
+  std::atomic<int> done(0);
+  const auto t0 = std::chrono::steady_clock::now();
+  for (int i = 0; i < n; i++)
+    ctx.startThreadPooled(
+        "pool_flood",
+        [&done, spin] {
+          spin_us(spin);
+          done++;
+        },
+        PRIORITY_NORMAL, /*wait=*/false);
+  const auto deadline = t0 + std::chrono::seconds(10);
+  while (done.load() < n && std::chrono::steady_clock::now() < deadline)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  ASSERT_EQ(done.load(), n) << "the pool stranded tasks";
+  // 1000 x 20 us on 4 workers is ~5 ms of work: no 5 s stall per key collision.
+  EXPECT_LT(secs, 4.0);
+  // The pool still answers (its mutex is usable) and drains to idle.
+  for (int i = 0; i < 2000 && (ctx.getActiveThreadCount() != 0 || ctx.getPendingThreadCount() != 0);
+       i++)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  EXPECT_EQ(ctx.getActiveThreadCount(), 0u);
+  EXPECT_EQ(ctx.getPendingThreadCount(), 0u);
+  ctx.setThreadPoolSize(original_size);
+}
+
+// Wait until the background pool has nothing queued or running (bounded).
+static bool wait_pool_idle(app &a, int ms = 5000) {
+  for (int i = 0; i < ms; i++) {
+    if (a.getActiveThreadCount() == 0 && a.getPendingThreadCount() == 0)
+      return true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  return false;
+}
+
+// Anonymous tasks run on persistent workers: never more OS threads than the pool's size, the
+// same few threads reused, and nothing added to the thread map.
+TEST_F(AppTest, ThreadPoolAnonymousTasksReuseFewWorkersOutsideTheThreadMap) {
+  const unsigned int original_size = ctx.getThreadPoolSize();
+  ctx.setThreadPoolSize(3);
+  const std::size_t threads_before = ctx.threads().size();
+  std::mutex m;
+  std::set<std::thread::id> ids;
+  std::atomic<int> done(0);
+  for (int i = 0; i < 300; i++)
+    ctx.submitPooled([&] {
+      {
+        std::lock_guard<std::mutex> lk(m);
+        ids.insert(std::this_thread::get_id());
+      }
+      done++;
+    });
+  ASSERT_TRUE(wait_pool_idle(ctx));
+  EXPECT_EQ(done.load(), 300);
+  EXPECT_LE(ids.size(), 3u);
+  EXPECT_GE(ids.size(), 1u);
+  EXPECT_EQ(ctx.threads().size(), threads_before);
+  EXPECT_NE(ids.count(std::this_thread::get_id()), 1u); // off the submitting thread
+  ctx.setThreadPoolSize(original_size);
+}
+
+// Within a priority, tasks start in the order they were submitted.
+TEST_F(AppTest, ThreadPoolIsFifoWithinAPriority) {
+  const unsigned int original_size = ctx.getThreadPoolSize();
+  ctx.setThreadPoolSize(1);
+  std::atomic<bool> release(false);
+  std::atomic<bool> blocker_running(false);
+  ctx.submitPooled([&] {
+    blocker_running = true;
+    while (!release.load())
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  });
+  for (int i = 0; i < 2000 && !blocker_running.load(); i++)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  ASSERT_TRUE(blocker_running.load());
+  std::mutex m;
+  std::vector<int> order;
+  for (int i = 0; i < 40; i++)
+    ctx.submitPooled(
+        [&, i] {
+          std::lock_guard<std::mutex> lk(m);
+          order.push_back(i);
+        },
+        i % 2 ? PRIORITY_HIGH : PRIORITY_NORMAL);
+  EXPECT_EQ(ctx.getPendingThreadCount(), 40u);
+  release = true;
+  ASSERT_TRUE(wait_pool_idle(ctx));
+  ASSERT_EQ(order.size(), 40u);
+  // Every HIGH task (odd i, ascending) before every NORMAL one (even i, ascending).
+  for (int k = 0; k < 20; k++) {
+    EXPECT_EQ(order[k], 2 * k + 1) << "at " << k;
+    EXPECT_EQ(order[20 + k], 2 * k) << "at " << 20 + k;
+  }
+  ctx.setThreadPoolSize(original_size);
+}
+
+// A finished task keeps nothing alive: its captures go on the worker before it counts as done
+// (it used to stay in the thread map, with everything it captured, until ~app).
+TEST_F(AppTest, ThreadPoolFinishedTasksRetainNothing) {
+  std::vector<std::weak_ptr<std::string>> weak;
+  for (int i = 0; i < 50; i++) {
+    auto payload = std::make_shared<std::string>(1024, 'x');
+    weak.push_back(payload);
+    ctx.startThreadPooled(
+        "pool_retention", [payload] { EXPECT_EQ(payload->size(), 1024u); }, PRIORITY_NORMAL,
+        /*wait=*/false);
+  }
+  ASSERT_TRUE(wait_pool_idle(ctx));
+  for (const auto &w : weak)
+    EXPECT_TRUE(w.expired());
+}
+
+// wait() (wait_for_threads) waits for anonymous pool tasks that are queued or running.
+TEST_F(AppTest, WaitForThreadsWaitsForThePool) {
+  const unsigned int original_size = ctx.getThreadPoolSize();
+  ctx.setThreadPoolSize(2);
+  std::atomic<int> done(0);
+  for (int i = 0; i < 6; i++)
+    ctx.submitPooled([&done] {
+      spin_us(20000); // no interruption point: runs to the end
+      done++;
+    });
+  ctx.wait();
+  EXPECT_EQ(done.load(), 6);
+  EXPECT_EQ(ctx.getActiveThreadCount(), 0u);
+  EXPECT_EQ(ctx.getPendingThreadCount(), 0u);
+  ctx.setThreadPoolSize(original_size);
+}
+
+// ~app ends promptly with a full queue: the running task is interrupted, the queued ones are
+// dropped without running and release what they captured.
+TEST(AppPoolTeardown, DestroyingTheAppDropsQueuedTasksPromptly) {
+  auto payload = std::make_shared<int>(7);
+  std::weak_ptr<int> weak = payload;
+  std::atomic<int> ran(0);
+  std::atomic<bool> started(false);
+  const auto t0 = std::chrono::steady_clock::now();
+  {
+    app a;
+    a.setThreadPoolSize(1);
+    a.submitPooled([&started] {
+      started = true;
+      for (;;) {
+        boost::this_thread::sleep_for(boost::chrono::milliseconds(1)); // an interruption point
+      }
+    });
+    for (int i = 0; i < 100; i++)
+      a.submitPooled([payload, &ran] { ran++; });
+    payload.reset();
+    for (int i = 0; i < 2000 && !started.load(); i++)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    ASSERT_TRUE(started.load());
+  }
+  EXPECT_LT(std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(), 3.0);
+  EXPECT_EQ(ran.load(), 0);
+  EXPECT_TRUE(weak.expired());
 }
 
 TEST_F(AppTest, ThreadInfoAndProgressTracking) {

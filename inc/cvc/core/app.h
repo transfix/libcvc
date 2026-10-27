@@ -50,6 +50,7 @@
 #include <boost/thread.hpp>
 #include <boost/tuple/tuple.hpp>
 #include <boost/utility.hpp>
+#include <cstdint>
 #include <functional> // compute_async: the fan-out kernel + completion callback
 #include <map>
 #include <memory>
@@ -363,26 +364,48 @@ public:
     ready->store(true, std::memory_order_release);
   }
 
-  // Start a thread with priority using the thread pool
-  // Higher priority threads are scheduled before lower priority ones
-  // The pool limits concurrent threads to maxPoolSize (default: hardware concurrency)
+  // Run `t` on the app's background task pool. At most getThreadPoolSize() tasks run at once;
+  // queued ones start in priority order, and in submission order within a priority.
+  //
+  // wait=false: an anonymous task, the same as submitPooled(t, priority). It runs on one of the
+  // pool's persistent worker threads, has no thread key and no entry in threads() (so
+  // hasThread/threadInfo/threadProgress by key, threadKey() and threadsChanged don't see it), and
+  // `key` is not used. The pool destroys it, and with it everything it captured, on the worker
+  // as soon as it returns. wait_for_threads() and ~app interrupt it if it is running.
+  //
+  // wait=true: a keyed task. A running thread already under `key` is interrupted and joined
+  // first; the task then gets a thread of its own, registered under `key` in threads() before
+  // it runs (so threads(key) joins or interrupts it, and keyed threadInfo/threadProgress work),
+  // and that entry stays after it ends, until replaced, removed or ~app, as with startThread.
+  // If the pool is full it waits in the queue, and is registered when it starts.
   template <class T>
   void startThreadPooled(const std::string &key, const T &t,
                          thread_priority priority = PRIORITY_NORMAL, bool wait = true) {
     boost::this_thread::interruption_point();
 
-    // If waiting and thread exists, cancel it
-    if (wait && hasThread(key)) {
-      thread_ptr tptr = threads(key);
-      tptr->interrupt();
-      tptr->join();
+    if (!wait) {
+      submitPooled(std::function<void()>(t), priority);
+      return;
     }
 
-    std::string actual_key = wait ? key : uniqueThreadKey(key);
+    // Cancel a running thread with this key. (It may have been removed by another thread
+    // between hasThread() and threads().)
+    if (hasThread(key)) {
+      thread_ptr tptr = threads(key);
+      if (tptr) {
+        tptr->interrupt();
+        tptr->join();
+      }
+    }
 
-    // Submit to thread pool
-    submitToThreadPool(actual_key, t, priority);
+    submitToThreadPool(key, t, priority);
   }
+
+  // Queue an anonymous task on the background pool (startThreadPooled with wait=false): it runs
+  // on a persistent worker, in priority order and FIFO within a priority, and is destroyed on
+  // that worker once it returns. Thread-safe; returns at once. A task that throws is logged; an
+  // empty one is ignored; one submitted while the app is being destroyed is dropped.
+  void submitPooled(std::function<void()> task, thread_priority priority = PRIORITY_NORMAL);
 
   // Set the maximum number of concurrent threads in the pool
   // Default is hardware_concurrency() or 4 if unknown
@@ -398,9 +421,9 @@ public:
   // it is for tight data-parallel fan-out — split [0,n), run, join — such as the
   // cvc::nav sim tick. Subsystems that want to parallelize borrow this by
   // reference (e.g. sim_world::set_thread_pool); parallel_for is safe to call
-  // from several borrowers' threads at once (concurrent fan-outs serialize, one
-  // in flight at a time — see thread_pool.h). Lazily constructed on first use,
-  // sized to hardware_concurrency() - 1 background workers.
+  // from several borrowers' threads at once (concurrent fan-outs share the
+  // workers and run side by side — see thread_pool.h). Lazily constructed on first
+  // use, sized to hardware_concurrency() - 1 background workers.
   cvc::thread_pool &computePool();
 
   // Run fn(i) for i in [0,n) as a data-parallel fan-out on computePool(), OFF the calling thread,
@@ -598,36 +621,49 @@ protected:
   void propertyTreeTraverse(const boost::property_tree::ptree &pt,
                             const std::string &parentkey = std::string());
 
-  // Thread pool implementation
+  // Thread pool implementation (app.cpp, "The background task pool")
   struct ThreadPoolTask {
-    std::string key;
-    boost::function<void()> task;
-    thread_priority priority;
+    std::string key; // a keyed task's entry in threads(); empty for an anonymous one
+    std::function<void()> task;
+    thread_priority priority = PRIORITY_NORMAL;
+    bool keyed = false;    // a thread of its own under `key` (startThreadPooled, wait=true)
+    std::uint64_t seq = 0; // submission order: FIFO within a priority
 
-    // For priority queue ordering (higher priority first)
+    // For priority queue ordering: higher priority first, then the earlier submission.
     bool operator<(const ThreadPoolTask &other) const {
-      return priority < other.priority; // Note: less-than for priority_queue's max-heap
+      if (priority != other.priority)
+        return priority < other.priority; // Note: less-than for priority_queue's max-heap
+      return seq > other.seq;
     }
   };
 
+  // Queue a keyed task (startThreadPooled with wait=true).
   template <class T>
   void submitToThreadPool(const std::string &key, const T &task, thread_priority priority) {
     boost::this_thread::interruption_point();
-    boost::mutex::scoped_lock lock(_threadPoolMutex);
-
     ThreadPoolTask poolTask;
     poolTask.key = key;
     poolTask.task = task;
     poolTask.priority = priority;
-
-    _pendingTasks.push(poolTask);
-
-    // Try to start a worker if we're under the limit
-    tryStartWorker();
+    poolTask.keyed = true;
+    enqueuePoolTask(poolTask);
   }
 
+  // Queue `task` (its contents are taken; a keyed one may start on this thread).
+  void enqueuePoolTask(ThreadPoolTask &task);
+  // _threadPoolMutex held: if a queued task may start, wake an idle worker or start one.
   void tryStartWorker();
+  // Run a keyed task on the calling thread, as its own thread does.
   void threadPoolWorker(ThreadPoolTask task);
+  // The rest are called with _threadPoolMutex held where their name ends in Locked.
+  bool poolCanStartLocked() const;
+  ThreadPoolTask takePoolTaskLocked();
+  void notifyPoolIdleLocked();
+  void poolWorkerLoop();
+  void runPoolTask(ThreadPoolTask &task);
+  void startKeyedPoolThread(ThreadPoolTask &task);
+  void runKeyedPoolTask(ThreadPoolTask &task);
+  void stopThreadPool();
 
   data_map _data;
   data_type_name_map _dataTypeNames;
@@ -657,12 +693,17 @@ protected:
   mutex_map _mutexMap;
   boost::mutex _mutexMapMutex;
 
-  // Thread pool state
+  // Thread pool state, all guarded by _threadPoolMutex.
   std::priority_queue<ThreadPoolTask> _pendingTasks;
   unsigned int _maxPoolSize;
-  unsigned int _activeWorkers;
+  unsigned int _activeWorkers; // tasks running (anonymous and keyed)
   boost::mutex _threadPoolMutex;
-  boost::condition_variable _threadPoolCondition;
+  boost::condition_variable _threadPoolCondition; // idle workers wait here for a task
+  boost::condition_variable _threadPoolIdle;      // nothing queued or running (wait_for_threads)
+  std::vector<thread_ptr> _poolWorkers;           // persistent workers, started on demand
+  unsigned int _idleWorkers = 0;                  // workers waiting on _threadPoolCondition
+  std::uint64_t _poolSeq = 0;                     // next ThreadPoolTask::seq
+  bool _poolStopping = false;                     // ~app: run nothing more
 
   // Shared fork-join compute pool (computePool()). Lazily built; the mutex guards
   // that first construction. unique_ptr so app.h needs only a forward declaration.

@@ -52,6 +52,7 @@
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <boost/date_time/posix_time/posix_time.hpp>
 #include <boost/shared_array.hpp>
 #include <boost/thread/xtime.hpp>
@@ -97,6 +98,21 @@ void app::wait_for_threads() {
     }
   }
 
+  // The background pool's anonymous tasks aren't in the map: interrupt the ones running on its
+  // workers too, as when every pooled task had a thread in the map.
+  std::vector<thread_ptr> poolWorkers;
+  {
+    boost::mutex::scoped_lock lock(_threadPoolMutex);
+    poolWorkers = _poolWorkers;
+  }
+  BOOST_FOREACH (thread_ptr &w, poolWorkers) {
+    try {
+      if (w)
+        w->interrupt();
+    } catch (...) {
+    }
+  }
+
   // Phase 2: Attempt to join all threads with a timeout
   std::vector<std::string> failed_threads;
   BOOST_FOREACH (thread_map::value_type val, map) {
@@ -114,6 +130,18 @@ void app::wait_for_threads() {
     } catch (boost::thread_interrupted &) {
     } catch (...) {
     }
+  }
+
+  // ... and wait for the background pool to finish what is queued or running.
+  try {
+    boost::mutex::scoped_lock lock(_threadPoolMutex);
+    if (!_threadPoolIdle.timed_wait(lock, boost::posix_time::seconds(5), [this] {
+          return _poolStopping || (_activeWorkers == 0 && _pendingTasks.empty());
+        }))
+      failed_threads.push_back(str(boost::format("background pool (%d running, %d queued)") %
+                                   _activeWorkers % _pendingTasks.size()));
+  } catch (boost::thread_interrupted &) {
+  } catch (...) {
   }
 
   // Phase 3: Report any threads that failed to join
@@ -216,6 +244,10 @@ app::~app() {
   // so cancel them and wait for their kernels while both are still here.
   if (_execAsyncHost)
     _execAsyncHost->shutdown();
+
+  // The background pool next: nothing queued starts any more, running tasks are interrupted,
+  // and its workers are joined. (Keyed pool tasks have threads of their own in _threads, below.)
+  stopThreadPool();
 
   // Copy and clear under the lock, then join without it: a worker winding
   // down takes _threadsMutex itself, so joining while holding it deadlocks.
@@ -997,14 +1029,13 @@ void app::compute_async(int n, std::function<void(int)> fn, std::function<void()
                         thread_priority priority) {
   // A background pool worker owns the blocking parallel_for; the caller returns immediately. The
   // job captures fn/on_done by value, so a result accumulator they close over outlives this call.
-  startThreadPooled(
-      "compute-async",
+  submitPooled(
       [this, n, fn = std::move(fn), on_done = std::move(on_done)]() {
         computePool().parallel_for(n, fn);
         if (on_done)
           on_done();
       },
-      priority, /*wait=*/false);
+      priority);
 }
 
 cvc::world_clock &app::world_clock() {
@@ -1050,11 +1081,8 @@ void app::setThreadPoolSize(unsigned int size) {
   boost::this_thread::interruption_point();
   boost::mutex::scoped_lock lock(_threadPoolMutex);
   _maxPoolSize = (size > 0) ? size : 1;
-
-  // Try to start workers if we have pending tasks
-  while (!_pendingTasks.empty() && _activeWorkers < _maxPoolSize) {
-    tryStartWorker();
-  }
+  // A larger pool may start queued tasks now: the worker that takes one wakes the next.
+  tryStartWorker();
 }
 
 unsigned int app::getThreadPoolSize() const {
@@ -1069,56 +1097,254 @@ unsigned int app::getActiveThreadCount() const {
 
 unsigned int app::getPendingThreadCount() const {
   boost::mutex::scoped_lock lock(const_cast<boost::mutex &>(_threadPoolMutex));
-  return _pendingTasks.size();
+  return static_cast<unsigned int>(_pendingTasks.size());
+}
+
+// ---------------------------------------------------------------------------
+// The background task pool (startThreadPooled / submitPooled)
+// ---------------------------------------------------------------------------
+// One queue, ordered by priority and then by submission (FIFO within a priority), and at most
+// _maxPoolSize tasks running at once (_activeWorkers). Anonymous tasks (submitPooled,
+// startThreadPooled with wait=false) run on persistent worker threads (_poolWorkers, started on
+// demand up to the pool size and kept until ~app). A keyed task (startThreadPooled with
+// wait=true) still gets a thread of its own, registered under its key in threads() before it
+// runs, which counts itself out of the pool when it ends.
+//
+// Locking: _threadPoolMutex guards the queue, the counts, the workers and the stop flag. It is
+// never held while a task runs, while a thread is registered in threads() (_threadsMutex), or
+// while anything logs, and it is only ever released by the RAII lock that took it. Nothing that
+// can throw boost::thread_interrupted runs with interruption enabled while the pool's
+// bookkeeping is half done: workers and registrations disable interruption, and only a task
+// itself is interruptible.
+//
+// 10/26/2026 -- Joe R. -- Persistent workers instead of a boost::thread per task; FIFO within a
+//                         priority; anonymous tasks out of the thread map. Fixes the stall and
+//                         hang past the pool size (a double unlock of _threadPoolMutex after an
+//                         interruption_point() throw in tryStartWorker).
+
+bool app::poolCanStartLocked() const {
+  return !_poolStopping && !_pendingTasks.empty() && _activeWorkers < _maxPoolSize;
+}
+
+app::ThreadPoolTask app::takePoolTaskLocked() {
+  // Swap the parts out of the top rather than moving: a moved-from std::function may keep its
+  // callable (libc++ copies a small one), and this one must hold nothing once it is popped.
+  ThreadPoolTask &top = const_cast<ThreadPoolTask &>(_pendingTasks.top());
+  ThreadPoolTask task;
+  task.key.swap(top.key);
+  task.task.swap(top.task);
+  task.priority = top.priority;
+  task.keyed = top.keyed;
+  task.seq = top.seq;
+  _pendingTasks.pop(); // reorders by priority and seq, which the swap left alone
+  ++_activeWorkers;
+  return task;
+}
+
+void app::notifyPoolIdleLocked() {
+  if (_activeWorkers == 0 && _pendingTasks.empty())
+    _threadPoolIdle.notify_all();
+}
+
+void app::submitPooled(std::function<void()> task, thread_priority priority) {
+  if (!task)
+    return;
+  ThreadPoolTask t;
+  t.task.swap(task); // nothing of the callable stays in `task`
+  t.priority = priority;
+  enqueuePoolTask(t);
+}
+
+void app::enqueuePoolTask(ThreadPoolTask &task) {
+  ThreadPoolTask keyed;
+  {
+    boost::mutex::scoped_lock lock(_threadPoolMutex);
+    if (_poolStopping)
+      return; // the app is going away: the task is dropped (destroyed by the caller)
+    ThreadPoolTask queued;
+    queued.key.swap(task.key);
+    queued.task.swap(task.task);
+    queued.priority = task.priority;
+    queued.keyed = task.keyed;
+    queued.seq = _poolSeq++;
+    _pendingTasks.push(std::move(queued));
+    // A keyed task that can start now starts here, so that its thread is in threads() under its
+    // key when startThreadPooled returns (as it always was).
+    if (poolCanStartLocked() && _pendingTasks.top().keyed)
+      keyed = takePoolTaskLocked();
+    tryStartWorker();
+  }
+  if (keyed.keyed)
+    startKeyedPoolThread(keyed);
 }
 
 void app::tryStartWorker() {
-  // Assumes _threadPoolMutex is already locked by caller
-  boost::this_thread::interruption_point();
-
-  if (_pendingTasks.empty() || _activeWorkers >= _maxPoolSize)
+  // _threadPoolMutex is held by the caller. If a queued task may start, wake an idle worker for
+  // it, or start a new one while the pool has fewer workers than its size. A worker that takes a
+  // task calls this again, so a burst wakes as many workers as it can use, one after another.
+  if (!poolCanStartLocked())
     return;
-
-  // Get the next task
-  ThreadPoolTask task = _pendingTasks.top();
-  _pendingTasks.pop();
-
-  _activeWorkers++;
-
-  // Start worker with the task's key for tracking
-  // The worker will execute the task directly in its thread
-  // We need to temporarily release the pool mutex to avoid deadlock
-  // when calling threads() which locks _threadsMutex
-  _threadPoolMutex.unlock();
-  threads(task.key, thread_ptr(new boost::thread(boost::bind(&app::threadPoolWorker, this, task))));
-  _threadPoolMutex.lock();
+  if (_idleWorkers > 0) {
+    _threadPoolCondition.notify_one();
+    return;
+  }
+  // With _maxPoolSize workers and fewer than _maxPoolSize tasks running, some worker is between
+  // tasks and takes this one before it waits.
+  if (_poolWorkers.size() >= _maxPoolSize)
+    return;
+  try {
+    _poolWorkers.push_back(thread_ptr(new boost::thread(&app::poolWorkerLoop, this)));
+  } catch (...) {
+    // No new thread (resources): the task waits for a running worker.
+  }
 }
 
-void app::threadPoolWorker(ThreadPoolTask task) {
-  thread_info ti(*this, "Processing: " + task.key);
+void app::poolWorkerLoop() {
+  // Only a task may be interrupted (wait_for_threads, ~app). Idle and between tasks the worker
+  // ignores interruption; a request left over from then is dropped before its next task runs.
+  boost::this_thread::disable_interruption uninterruptible;
+  boost::unique_lock<boost::mutex> lock(_threadPoolMutex);
+  for (;;) {
+    while (!_poolStopping && !poolCanStartLocked()) {
+      ++_idleWorkers;
+      _threadPoolCondition.wait(lock);
+      --_idleWorkers;
+    }
+    if (_poolStopping)
+      return;
+    ThreadPoolTask task = takePoolTaskLocked();
+    tryStartWorker(); // more work it may start: pass it on
+    lock.unlock();
+    if (task.keyed) {
+      startKeyedPoolThread(task); // its own thread counts itself out
+      lock.lock();
+      continue;
+    }
+    {
+      boost::this_thread::restore_interruption interruptible(uninterruptible);
+      try {
+        boost::this_thread::interruption_point(); // a stale request: not this task's
+      } catch (boost::thread_interrupted &) {
+      }
+      runPoolTask(task);
+    }
+    // Its captures go here, on the worker, before it counts as done: nothing of a finished
+    // task outlives it.
+    task.task = nullptr;
+    lock.lock();
+    --_activeWorkers;
+    notifyPoolIdleLocked();
+  }
+}
 
+void app::runPoolTask(ThreadPoolTask &task) {
   try {
-    // Execute the task directly in this worker thread
     task.task();
   } catch (boost::thread_interrupted &) {
-    // Thread was interrupted, decrement worker count and exit
-    boost::mutex::scoped_lock lock(_threadPoolMutex);
-    _activeWorkers--;
-    throw; // Re-throw to properly exit
+    // Interrupted (wait_for_threads, ~app): the task ends.
   } catch (std::exception &e) {
-    // Log error
-    log(0, std::string("Thread pool task error: ") + e.what());
+    try {
+      log(0, std::string("Thread pool task error: ") + e.what());
+    } catch (...) {
+    }
   } catch (...) {
-    // Unknown error, log it
-    log(0, "Thread pool task encountered unknown error");
+    try {
+      log(0, "Thread pool task encountered unknown error");
+    } catch (...) {
+    }
   }
+}
 
-  // Task complete, decrement worker count
-  boost::mutex::scoped_lock lock(_threadPoolMutex);
-  _activeWorkers--;
+void app::startKeyedPoolThread(ThreadPoolTask &task) {
+  // As startThread does: the thread waits at a gate until it is in threads() under its key, so
+  // keyed progress and info calls from the task find it. Registering must not be interrupted
+  // half way (the thread would wait at the gate forever), and a thread already running under
+  // the key is replaced the way threads(key, ...) always does it.
+  boost::this_thread::disable_interruption uninterruptible;
+  auto ready = std::make_shared<std::atomic<bool>>(false);
+  auto owned = std::make_shared<ThreadPoolTask>();
+  owned->key.swap(task.key);
+  owned->task.swap(task.task);
+  owned->priority = task.priority;
+  owned->keyed = true;
+  owned->seq = task.seq;
+  const std::string key = owned->key;
+  thread_ptr thread;
+  try {
+    thread.reset(new boost::thread([this, ready, owned]() mutable {
+      while (!ready->load(std::memory_order_acquire))
+        boost::this_thread::yield();
+      std::shared_ptr<ThreadPoolTask> mine;
+      mine.swap(owned); // the thread object keeps nothing of the task once it is done
+      runKeyedPoolTask(*mine);
+    }));
+  } catch (...) {
+    // No thread: the task can't run. It is dropped, and its slot freed.
+    owned.reset();
+    boost::mutex::scoped_lock lock(_threadPoolMutex);
+    --_activeWorkers;
+    tryStartWorker();
+    notifyPoolIdleLocked();
+    return;
+  }
+  try {
+    threads(key, thread);
+  } catch (...) {
+  }
+  ready->store(true, std::memory_order_release);
+}
 
-  // Try to start another worker if there are pending tasks
-  tryStartWorker();
+void app::threadPoolWorker(ThreadPoolTask task) { runKeyedPoolTask(task); }
+
+void app::runKeyedPoolTask(ThreadPoolTask &task) {
+  {
+    thread_info ti(*this, "Processing: " + task.key);
+    runPoolTask(task);
+    task.task = nullptr; // its captures go before it counts as done
+  }
+  // The next task, if one may start: a keyed one starts here, before this thread ends, so that
+  // joining this thread and then looking up the next key finds it (a chain of keyed tasks on a
+  // full pool, as before); an anonymous one goes to a worker.
+  boost::this_thread::disable_interruption uninterruptible;
+  ThreadPoolTask next;
+  {
+    boost::mutex::scoped_lock lock(_threadPoolMutex);
+    --_activeWorkers;
+    if (poolCanStartLocked() && _pendingTasks.top().keyed)
+      next = takePoolTaskLocked();
+    tryStartWorker();
+    notifyPoolIdleLocked();
+  }
+  if (next.keyed)
+    startKeyedPoolThread(next);
+}
+
+void app::stopThreadPool() {
+  std::vector<thread_ptr> workers;
+  std::priority_queue<ThreadPoolTask> dropped;
+  {
+    boost::mutex::scoped_lock lock(_threadPoolMutex);
+    _poolStopping = true;
+    workers.swap(_poolWorkers);
+    dropped.swap(_pendingTasks); // queued tasks never run
+  }
+  _threadPoolCondition.notify_all();
+  _threadPoolIdle.notify_all();
+  // Interrupt the tasks still running, then wait for their workers.
+  for (thread_ptr &w : workers) {
+    try {
+      if (w)
+        w->interrupt();
+    } catch (...) {
+    }
+  }
+  for (thread_ptr &w : workers) {
+    try {
+      if (w && w->joinable())
+        w->try_join_for(boost::chrono::seconds(5));
+    } catch (...) {
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
