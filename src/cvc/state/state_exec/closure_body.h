@@ -47,7 +47,7 @@ inline value_t begin_of(const std::vector<value_t> &forms) {
 /// before anything else can see it).
 inline void cache_body_expr(closure &cls) {
   if (cls.body.size() > 1)
-    cls.body_expr = begin_of(cls.body);
+    cls.body_expr = std::get<list_ptr>(begin_of(cls.body).v);
 }
 
 /// The expression a call of `cls` evaluates: its one form, or (begin body...), the one made with
@@ -55,15 +55,14 @@ inline void cache_body_expr(closure &cls) {
 inline value_t body_expr_of(const closure &cls) {
   if (cls.body.size() == 1)
     return cls.body[0];
-  if (const auto *lp = std::get_if<list_ptr>(&cls.body_expr.v);
-      lp && *lp && (*lp)->size() == cls.body.size() + 1) {
-    const std::vector<value_t> &cached = **lp;
+  if (cls.body_expr && cls.body_expr->size() == cls.body.size() + 1) {
+    const std::vector<value_t> &cached = *cls.body_expr;
     const auto *head = std::get_if<symbol>(&cached[0].v);
     bool current = head && head->name == "begin";
     for (std::size_t i = 0; current && i < cls.body.size(); ++i)
       current = same_form(cached[i + 1], cls.body[i]);
     if (current)
-      return cls.body_expr;
+      return value_t(cls.body_expr);
   }
   return begin_of(cls.body);
 }

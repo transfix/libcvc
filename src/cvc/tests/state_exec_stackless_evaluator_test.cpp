@@ -723,12 +723,12 @@ TEST(StacklessClosureBody, MadeOnceAndIgnoredWhenStale) {
   }
   const closure_ptr f = std::get<closure_ptr>(st.result.v);
   ASSERT_EQ(f->body.size(), 2u);
-  const auto *made = std::get_if<list_ptr>(&f->body_expr.v);
-  ASSERT_NE(made, nullptr);
+  const list_ptr *made = &f->body_expr;
+  ASSERT_NE(*made, nullptr);
   ASSERT_EQ((*made)->size(), 3u);
   EXPECT_EQ(std::get<symbol>((**made)[0].v).name, "begin");
   EXPECT_EQ(std::get<list_ptr>((**made)[1].v), std::get<list_ptr>(f->body[0].v));
-  EXPECT_TRUE(std::get<closure_ptr>(st.global_env->lookup("g")->v)->body_expr.is_nil());
+  EXPECT_TRUE(std::get<closure_ptr>(st.global_env->lookup("g")->v)->body_expr == nullptr);
 
   auto call = [&](const char *script) {
     evaluator_state run = ev.create_state(parse(script), st.global_env);
