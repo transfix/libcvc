@@ -107,12 +107,16 @@ for (int i = 0; i < 100; i++) {
    finished task is destroyed on its worker before it counts as done, so it
    keeps nothing alive. They have no key and never appear in `app.threads()`.
 4. **Keyed tasks** (`wait=true`): get a thread of their own, registered in
-   `app.threads()` under the key before the task runs (when the pool has room
-   at submission, before `startThreadPooled` returns). The entry stays after
-   the task ends, like `startThread`'s.
+   `app.threads()` under the key before the task runs. When the pool has room
+   at submission for it and for every task already queued (anonymous ones
+   included), it starts on the submitting thread and is registered before
+   `startThreadPooled` returns; otherwise it is registered when it leaves the
+   queue. The entry stays after the task ends, like `startThread`'s.
 5. **Shutdown**: `wait()` interrupts the running tasks and waits (up to 5 s)
-   for the pool to drain; `~app` interrupts the running tasks, drops the queued
-   ones and joins the workers
+   for the pool to drain, so it is not a completion barrier: wait on the
+   tasks' own completion for that. `~app` interrupts the running tasks
+   (every task a worker has taken, however recently), drops the queued ones
+   and joins the workers
 
 ## Notes
 

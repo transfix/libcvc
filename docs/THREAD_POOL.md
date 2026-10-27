@@ -20,11 +20,15 @@ For the full per-method reference, see
   thread of its own, registered in the app's thread map under its key
   before it runs, so the same APIs that work for `startThread`
   (`hasThread`, `threads(key)` to join or interrupt it, keyed progress
-  and info, `thread_feedback`) also work for it.
+  and info, `thread_feedback`) also work for it. When the pool has room
+  for it and for every task already queued, it is registered before
+  `startThreadPooled` returns, so `if (app.hasThread(k))
+  app.threads(k)->join();` waits for it.
 - **Anonymous tasks run on persistent workers.** An anonymous task
   (`wait=false`, or `submitPooled`) runs on one of at most
-  `getThreadPoolSize()` worker threads the pool starts on demand and
-  keeps until the app goes. It has no key and no thread-map entry, and
+  `getThreadPoolSize()` worker threads the pool starts on demand (a
+  burst of N tasks starts min(N, pool size) of them at once) and keeps
+  until the app goes. It has no key and no thread-map entry, and
   the pool destroys it, with everything it captured, as soon as it
   returns. This is the path for many small tasks (state_exec's async
   calls, `compute_async`): no thread is created per task.
@@ -110,10 +114,22 @@ app.startThreadPooled("import", [&app]() {
 
 ```cpp
 // No key, no thread per task: runs on the pool's persistent workers.
-for (int i = 0; i < 10000; ++i)
-  app.submitPooled([i]() { process_item(i); }, cvc::PRIORITY_NORMAL);
-app.wait(); // until nothing is queued or running
+const int n = 10000;
+std::atomic<int> left(n);
+std::promise<void> all_done;
+for (int i = 0; i < n; ++i)
+  app.submitPooled([i, &left, &all_done]() {
+    process_item(i);
+    if (--left == 0)
+      all_done.set_value();
+  }, cvc::PRIORITY_NORMAL);
+all_done.get_future().wait(); // the tasks' own completion
 ```
+
+Wait on the tasks' own completion, as here. `app.wait()` is a shutdown
+step, not a barrier: it first interrupts every running task (one that
+reaches an interruption point ends early, without an error) and then
+waits at most 5 s for the pool to drain, with a warning if it doesn't.
 
 ### Inspecting the pool
 
