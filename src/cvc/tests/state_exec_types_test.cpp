@@ -308,7 +308,13 @@ TEST(StateExecTypesTest, EvalDeadlineIsSpentOnlyByRunning) {
 TEST(StateExecTypesTest, ExtendedScopeComesBackEmpty) {
   auto global = std::make_shared<environment>();
   global->set("g", value_t(int64_t(1)));
+  // Take every scope this thread kept, so that the pool has room for the one dropped below.
+  std::vector<environment_ptr> taken;
+  for (int i = 0; i < 64; ++i)
+    taken.push_back(environment::extend(nullptr));
+  const std::size_t fresh = decltype(environment::bindings)().bucket_count();
   const environment *first = nullptr;
+  bool keepable = false;
   {
     auto scope = environment::extend(global);
     first = scope.get();
@@ -318,11 +324,16 @@ TEST(StateExecTypesTest, ExtendedScopeComesBackEmpty) {
     EXPECT_EQ(scope->bindings.size(), 2u);
     EXPECT_EQ(std::get<int64_t>(scope->lookup("a")->v), 3);
     scope->frozen = true; // a kept scope is unfrozen again
+    // Kept only with a new map's buckets: on MSVC (8 buckets up to 8 bindings), not where a new
+    // map has none and the first binding allocates some (libstdc++, libc++).
+    keepable = scope->bindings.bucket_count() == fresh;
   }
-  // The scope just dropped is the next one made on this thread, empty, and nothing it bound is
-  // visible through the new one.
+  // The next scope made on this thread is empty, unfrozen and in the given scope, and nothing
+  // the dropped one bound is visible through it: when the dropped scope was kept, it is that
+  // scope.
   auto again = environment::extend(global);
-  EXPECT_EQ(again.get(), first);
+  if (keepable)
+    EXPECT_EQ(again.get(), first);
   EXPECT_TRUE(again->bindings.empty());
   EXPECT_FALSE(again->frozen);
   EXPECT_EQ(again->outer, global);
