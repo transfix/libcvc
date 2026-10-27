@@ -1951,6 +1951,101 @@ TEST(AppPoolSpawnFailure, ComputeAsyncThrowsWhenTheWorkerItReliedOnFailsLater) {
   }
 }
 
+// A compute_async job can be queued with no worker running or being created: keyed tasks, on
+// threads of their own, hold every slot of a pool that has never started a worker. When the last
+// of them ends and the worker its thread asks for can't be created, the job isn't left queued for
+// a later submission to start a worker: the pool drops it unrun, on that thread. The on_error form
+// calls on_error ("not run: no background worker could be started"); the four-argument form calls
+// neither and releases both. A submitPooled task queued with them waits for a worker, and runs
+// once a later submission starts one. (The jobs used to stay queued, with nothing running them and
+// their callers never told.)
+TEST(AppPoolSpawnFailure, ComputeAsyncJobsLeftWithNoWorkerAreDroppedAndReported) {
+  struct outcome {
+    std::mutex m;
+    std::condition_variable cv;
+    int done = 0;
+    std::vector<std::string> errors;
+  };
+  spawn_switch spawn; // before the app: its hook points here
+  probe_app a;
+  spawn.install(a);
+  a.computePool();
+  a.setThreadPoolSize(1);
+  std::atomic<bool> release(false);
+  // The pool's one slot, held by a keyed task on a thread of its own: no worker is started.
+  a.startThreadPooled(
+      "hold",
+      [&release] {
+        const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+        while (!release.load() && std::chrono::steady_clock::now() < until)
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      },
+      PRIORITY_NORMAL, /*wait=*/true);
+  ASSERT_TRUE(a.hasThread("hold"));
+  auto o = std::make_shared<outcome>();
+  auto held = std::make_shared<int>(1);
+  std::weak_ptr<int> weak = held;
+  a.compute_async(
+      4, [](int) {},
+      [o] {
+        std::lock_guard<std::mutex> lk(o->m);
+        ++o->done;
+        o->cv.notify_all();
+      },
+      [o](const std::string &e) {
+        std::lock_guard<std::mutex> lk(o->m);
+        o->errors.push_back(e);
+        o->cv.notify_all();
+      });
+  a.compute_async(
+      4, [held](int) {},
+      [o, held] {
+        std::lock_guard<std::mutex> lk(o->m);
+        ++o->done;
+        o->cv.notify_all();
+      });
+  held.reset();
+  std::atomic<int> ran(0);
+  EXPECT_TRUE(a.submitPooled([&ran] { ++ran; }));
+  EXPECT_EQ(a.getPendingThreadCount(), 3u);
+
+  // The keyed task ends, and the worker its thread asks for on the way out can't be created.
+  spawn.fail = true;
+  release = true;
+  if (thread_ptr hold = a.threads("hold"))
+    hold->join();
+  bool reported = false;
+  {
+    std::unique_lock<std::mutex> lk(o->m);
+    reported = o->cv.wait_for(lk, std::chrono::seconds(5),
+                              [&o] { return o->done > 0 || !o->errors.empty(); });
+  }
+  if (!reported) {
+    // So that the test ends: a worker that can start runs what is still queued.
+    spawn.fail = false;
+    a.submitPooled([] {});
+  }
+  EXPECT_TRUE(reported) << "the jobs wait for a worker nothing will start";
+  {
+    std::lock_guard<std::mutex> lk(o->m);
+    EXPECT_EQ(o->done, 0);
+    ASSERT_EQ(o->errors.size(), 1u);
+    EXPECT_EQ(o->errors[0], "not run: no background worker could be started");
+  }
+  EXPECT_TRUE(weak.expired()) << "the four-argument form's dropped job kept its captures";
+  EXPECT_EQ(a.getPendingThreadCount(), 1u) << "the submitPooled task waits for a worker";
+  EXPECT_EQ(a.getActiveThreadCount(), 0u);
+  EXPECT_EQ(ran.load(), 0);
+
+  spawn.fail = false;
+  std::promise<void> done;
+  std::future<void> done_f = done.get_future();
+  a.compute_async(1, [](int) {}, [&done] { done.set_value(); }); // starts a worker
+  ASSERT_EQ(done_f.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+  ASSERT_TRUE(wait_pool_idle(a));
+  EXPECT_EQ(ran.load(), 1);
+}
+
 // startThreadPooled(wait=true) throws boost::thread_resource_error when its task's own thread
 // can't be created (thread resources exhausted), as it did when every pooled task had a thread of
 // its own: the task doesn't run, what it captured is released, and nothing is registered under its

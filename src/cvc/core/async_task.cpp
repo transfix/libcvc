@@ -20,8 +20,9 @@ namespace {
 // value, so it costs one heap block on every standard library (a shared_ptr capture costs a block
 // of its own under libstdc++, which keeps only a trivially copyable callable in std::function's
 // buffer). It posts exactly one value to `done`, the work's or on_error's, also when the pool
-// destroys it unrun (it was submitted, or still queued, once ~app had stopped the pool) or hands
-// it back (no worker could be started for it: launch_pool_task).
+// destroys it unrun (it was submitted, or still queued, once ~app had stopped the pool, or it was
+// left queued with no worker: app::poolDropReason() says which) or hands it back (no worker could
+// be started for it: launch_pool_task).
 struct pool_task_post {
   se::async_scheduler &sched;
   pool_task_work work;
@@ -60,11 +61,11 @@ struct pool_task_post {
     if (!armed)
       return;
     // Not interruptible, as thread_info and thread_feedback keep their books: this runs on the
-    // thread that submitted the task or the one destroying the app, and an interrupt pending
-    // there must stay pending, not be thrown inside on_error or post_message and dropped by the
-    // catches below.
+    // thread that submitted the task, the one destroying the app or the one whose worker creation
+    // failed, and an interrupt pending there must stay pending, not be thrown inside on_error or
+    // post_message and dropped by the catches below.
     boost::this_thread::disable_interruption keep_interrupt_pending;
-    drop("not run: the app's background pool has stopped");
+    drop(app::poolDropReason());
   }
 
   // Not run: post on_error(msg)'s value. The caller holds interruption off.
@@ -110,7 +111,7 @@ std::string launch_pool_task(app &a, se::async_scheduler &sched, const std::stri
     // Interruption is held off, as the pool destroys every task.
     boost::this_thread::disable_interruption keep_interrupt_pending;
     if (pool_task_post *handed_back = task.target<pool_task_post>())
-      handed_back->drop("not run: no background worker could be started");
+      handed_back->drop(app::kPoolNoWorker);
     task = nullptr;
   }
   return done;

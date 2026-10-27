@@ -1091,11 +1091,37 @@ cvc::thread_pool &app::computePool() {
 
 namespace {
 
+// app::poolDropReason() on this thread: set by a pool_drop_scope while the pool destroys tasks
+// unrun here, null otherwise.
+thread_local const char *t_poolDropReason = nullptr;
+
+// Holds this thread's drop reason while the pool destroys tasks unrun, and puts back the one
+// before (a dropped task's destructor may lead to other drops: the call it ends, a callback).
+class pool_drop_scope {
+  const char *_previous;
+
+public:
+  explicit pool_drop_scope(const char *why) noexcept : _previous(t_poolDropReason) {
+    t_poolDropReason = why;
+  }
+  ~pool_drop_scope() { t_poolDropReason = _previous; }
+  pool_drop_scope(const pool_drop_scope &) = delete;
+  pool_drop_scope &operator=(const pool_drop_scope &) = delete;
+};
+
+} // namespace
+
+const char *app::poolDropReason() noexcept {
+  return t_poolDropReason ? t_poolDropReason : kPoolStopped;
+}
+
+namespace {
+
 // compute_async's pool task: the std::function's target itself, holding the job by value, so it
 // costs one heap block on every standard library (a shared_ptr capture costs a block of its own
 // under libstdc++, which keeps only a trivially copyable callable in std::function's buffer). If
-// the pool destroys it unrun (it was submitted, or still queued, once ~app had stopped the pool),
-// on_error hears of it.
+// the pool destroys it unrun (it was submitted, or still queued, once ~app had stopped the pool;
+// or it was left queued with no worker), on_error hears of it, with app::poolDropReason().
 struct compute_job {
   app &owner;
   int n;
@@ -1122,12 +1148,12 @@ struct compute_job {
     if (!armed || !on_error)
       return;
     // Not interruptible, as thread_info and thread_feedback keep their books: this runs on the
-    // thread that submitted the job or the one destroying the app, and an interrupt pending
-    // there (a keyed thread ~app has interrupted, say) must stay pending, not be thrown inside
-    // on_error and dropped by the catch below.
+    // thread that submitted the job, the one destroying the app or the one whose worker creation
+    // failed, and an interrupt pending there (a keyed thread ~app has interrupted, say) must stay
+    // pending, not be thrown inside on_error and dropped by the catch below.
     boost::this_thread::disable_interruption keep_interrupt_pending;
     try {
-      on_error("not run: the app's background pool has stopped");
+      on_error(app::poolDropReason());
     } catch (...) {
     }
   }
@@ -1273,7 +1299,9 @@ unsigned int app::getPendingThreadCount() const {
 // and are woken (a std::condition_variable_any) and created after it is released; a new worker
 // takes no task until its creator has put it in _poolWorkers, where the interrupts go. Once ~app
 // has stopped the pool, a task is dropped unrun: submitPooled returns false, and the queued
-// ones are destroyed in closeThreadPool.
+// ones are destroyed in closeThreadPool. A trySubmitPooled task left queued with no worker,
+// running or being created, is dropped as well (takeUnstartableLocked). A dropped task reports
+// the drop from its destructor, with poolDropReason() saying why.
 //
 // 10/26/2026 -- Joe R. -- Persistent workers instead of a boost::thread per task; FIFO within a
 //                         priority; anonymous tasks out of the thread map. Fixes the stall and
@@ -1289,6 +1317,9 @@ unsigned int app::getPendingThreadCount() const {
 // 10/27/2026 -- Joe R. -- startThreadPooled(wait=true) throws when its task's own thread can't
 //                         be created; a keyed task started later and failing so is logged.
 // 10/27/2026 -- Joe R. -- That drop is logged before its slot is freed: an idle pool has logged it.
+// 10/27/2026 -- Joe R. -- A trySubmitPooled task left queued with no worker (the creation asked
+//                         for as a keyed thread ends fails) is dropped, with kPoolNoWorker as
+//                         poolDropReason(), instead of waiting for a later submission.
 
 bool app::poolCanStartLocked() const {
   return !_poolStopping && !_pendingTasks.empty() && _activeWorkers < _maxPoolSize;
@@ -1325,6 +1356,7 @@ bool app::submitPooled(std::function<void()> task, thread_priority priority) {
   // Refused: `t` is destroyed unrun, here, with interruption held off, so that an interrupt
   // pending on this thread isn't thrown inside a destructor reporting the drop (and dropped).
   boost::this_thread::disable_interruption keep_interrupt_pending;
+  pool_drop_scope reason(kPoolStopped);
   t.task = nullptr;
   return false;
 }
@@ -1341,6 +1373,7 @@ app::PoolSubmit app::trySubmitPooled(std::function<void()> &task, thread_priorit
   } else if (submitted == PoolSubmit::stopped) {
     // Destroyed unrun here, with interruption held off, as submitPooled does.
     boost::this_thread::disable_interruption keep_interrupt_pending;
+    pool_drop_scope reason(kPoolStopped);
     t.task = nullptr;
   }
   return submitted;
@@ -1362,6 +1395,21 @@ bool app::PoolQueue::take(std::uint64_t seq, ThreadPoolTask &out) {
   return true;
 }
 
+void app::PoolQueue::takeHandBacks(std::vector<std::function<void()>> &out) {
+  const auto isHandBack = [](const ThreadPoolTask &t) { return t.handBack; };
+  const std::size_t n = std::count_if(c.begin(), c.end(), isHandBack);
+  if (n == 0)
+    return;
+  out.reserve(out.size() + n); // the one step that can throw: nothing is taken yet
+  for (ThreadPoolTask &t : c)
+    if (t.handBack) {
+      out.emplace_back();
+      out.back().swap(t.task); // swapped out, as takePoolTaskLocked does
+    }
+  c.erase(std::remove_if(c.begin(), c.end(), isHandBack), c.end());
+  std::make_heap(c.begin(), c.end(), comp);
+}
+
 app::PoolSubmit app::enqueuePoolTask(ThreadPoolTask &task, bool handBackIfNoWorker) {
   ThreadPoolTask keyed;
   PoolKick kick;
@@ -1376,6 +1424,7 @@ app::PoolSubmit app::enqueuePoolTask(ThreadPoolTask &task, bool handBackIfNoWork
     queued.task.swap(task.task);
     queued.priority = task.priority;
     queued.keyed = task.keyed;
+    queued.handBack = handBackIfNoWorker && !task.keyed;
     queued.seq = seq = _poolSeq++;
     if (queued.keyed && _activeWorkers + _pendingTasks.size() < _maxPoolSize) {
       // Room for it and for every task already queued, so it delays none of them: it starts
@@ -1390,9 +1439,12 @@ app::PoolSubmit app::enqueuePoolTask(ThreadPoolTask &task, bool handBackIfNoWork
     }
     kick = poolKickLocked();
     // No worker runs yet, only creations are under way (this call's, or another's): the task has
-    // a worker only if one of them succeeds.
+    // a worker only if one of them succeeds. This call decides what becomes of it then (below),
+    // and no other drops it meanwhile (takeUnstartableLocked).
     reliesOnCreations = handBackIfNoWorker && !task.keyed && _creatingWorkers > 0 &&
                         _poolThreadCount == _creatingWorkers;
+    if (reliesOnCreations)
+      ++_handBackChecks;
   }
   applyPoolKick(kick);
   if (keyed.keyed) {
@@ -1406,17 +1458,34 @@ app::PoolSubmit app::enqueuePoolTask(ThreadPoolTask &task, bool handBackIfNoWork
           static_cast<int>(boost::system::errc::resource_unavailable_try_again),
           "cvc::app::startThreadPooled: no thread could be started for '" + key + "'"));
   }
-  if (reliesOnCreations) {
-    // If every one of those creations failed, nothing will take the task until a later call
-    // manages to start a worker: hand it back instead. It is still queued then, since only a
-    // worker in _poolWorkers takes an anonymous task and there is none.
+  if (!reliesOnCreations)
+    return PoolSubmit::queued;
+  // If every one of those creations failed, nothing will take the task until a later call
+  // manages to start a worker: hand it back instead. It is still queued then, since only a
+  // worker in _poolWorkers takes an anonymous task and there is none. The other handBack tasks
+  // queued go too (their submitters have returned): a creation that failed while this call was
+  // deciding left them to it.
+  PoolSubmit submitted = PoolSubmit::queued;
+  std::vector<std::function<void()>> unstartable;
+  {
     boost::mutex::scoped_lock lock(_threadPoolMutex);
-    if (poolHasNoWorkerLocked(lock) && _pendingTasks.take(seq, task)) {
+    bool noWorker = false;
+    try {
+      noWorker = poolHasNoWorkerLocked(lock);
+    } catch (...) {
+      --_handBackChecks;
+      throw;
+    }
+    --_handBackChecks;
+    if (noWorker) {
+      if (_pendingTasks.take(seq, task))
+        submitted = PoolSubmit::no_worker;
+      takeUnstartableLocked(unstartable);
       notifyPoolIdleLocked();
-      return PoolSubmit::no_worker;
     }
   }
-  return PoolSubmit::queued;
+  dropPoolTasks(unstartable, kPoolNoWorker);
+  return submitted;
 }
 
 bool app::poolHasNoWorkerLocked(boost::mutex::scoped_lock &lock) {
@@ -1427,6 +1496,35 @@ bool app::poolHasNoWorkerLocked(boost::mutex::scoped_lock &lock) {
     return _poolStopping || _creatingWorkers == 0 || _poolThreadCount > _creatingWorkers;
   });
   return !_poolStopping && _poolThreadCount == 0;
+}
+
+void app::takeUnstartableLocked(std::vector<std::function<void()>> &out) {
+  // With no worker running or being created, a queued anonymous task waits for a later submission
+  // (or setThreadPoolSize) to start one, which may never come. That is so for a submitPooled
+  // task; a trySubmitPooled one's submitter must hear of it, so the task is dropped, as it would
+  // have been handed back had the creation failed while its submitter waited for it. Not while a
+  // trySubmitPooled call still decides about its own task: that call takes the rest once it has.
+  if (_poolStopping || _poolThreadCount != 0 || _creatingWorkers != 0 || _handBackChecks != 0)
+    return;
+  try {
+    _pendingTasks.takeHandBacks(out);
+  } catch (...) {
+    return; // out of memory: they stay queued
+  }
+  notifyPoolIdleLocked();
+}
+
+void app::dropPoolTasks(std::vector<std::function<void()>> &tasks, const char *why) {
+  if (tasks.empty())
+    return;
+  // Each reports its drop from its destructor, with `why` (poolDropReason()). Not interruptible:
+  // an interrupt pending on this thread (a keyed thread's, say) stays pending instead of being
+  // thrown in a task's destructor and dropped by its catch.
+  boost::this_thread::disable_interruption keep_interrupt_pending;
+  pool_drop_scope reason(why);
+  for (std::function<void()> &task : tasks)
+    task = nullptr;
+  tasks.clear();
 }
 
 app::PoolKick app::poolKickLocked() {
@@ -1469,23 +1567,32 @@ bool app::applyPoolKick(const PoolKick &kick) {
     // task on uninterrupted (and ~app could go while it still runs).
     std::shared_ptr<PoolWorkerGate> gate;
     thread_ptr worker;
+    bool created = true;
     try {
       if (_poolWorkerSpawnHook)
         _poolWorkerSpawnHook(); // a test making the creation fail (app.h)
       gate = std::make_shared<PoolWorkerGate>();
       worker.reset(new boost::thread(&app::poolWorkerLoop, this, gate));
     } catch (...) {
+      created = false;
+    }
+    if (!created) {
       // No new thread (resources): the queued tasks wait for a running worker, or for the next
-      // submission to try again (compute_async's caller hears of it if there is none:
-      // enqueuePoolTask, which waits for the creations under way to tell).
+      // submission to try again. With no worker left, running or being created, the
+      // trySubmitPooled tasks are dropped instead, here (takeUnstartableLocked): a submitter still
+      // waiting for this creation sees it fail (poolHasNoWorkerLocked) and hands its task back,
+      // and one that returned hears of it from the task's drop.
+      std::vector<std::function<void()>> unstartable;
       {
         boost::mutex::scoped_lock lock(_threadPoolMutex);
         const unsigned int left = kick.spawns - i;
         _startingWorkers -= std::min(_startingWorkers, left);
         _creatingWorkers -= std::min(_creatingWorkers, left);
         _poolThreadCount -= std::min(_poolThreadCount, left);
+        takeUnstartableLocked(unstartable);
       }
       _poolWorkerAdmitted.notify_all(); // poolHasNoWorkerLocked
+      dropPoolTasks(unstartable, kPoolNoWorker);
       return false;
     }
     if (_poolWorkerCreatedHook) {
@@ -1515,12 +1622,22 @@ bool app::applyPoolKick(const PoolKick &kick) {
       // at its gate without taking a task. Interrupted and joined with a bound all the same, and
       // without taking an interrupt meant for this thread.
       started = false;
-      boost::this_thread::disable_interruption uninterruptible;
-      try {
-        worker->interrupt();
-        worker->try_join_for(boost::chrono::seconds(5));
-      } catch (...) {
+      {
+        boost::this_thread::disable_interruption uninterruptible;
+        try {
+          worker->interrupt();
+          worker->try_join_for(boost::chrono::seconds(5));
+        } catch (...) {
+        }
       }
+      // Not recorded with the pool running on, it may have been the pool's one worker (it counted
+      // itself out as it ended): as when its creation fails.
+      std::vector<std::function<void()>> unstartable;
+      {
+        boost::mutex::scoped_lock lock(_threadPoolMutex);
+        takeUnstartableLocked(unstartable);
+      }
+      dropPoolTasks(unstartable, kPoolNoWorker);
     }
   }
   return started;
@@ -1647,6 +1764,7 @@ bool app::startKeyedPoolThread(ThreadPoolTask &task, bool logDrop) {
   owned->seq = task.seq;
   const std::string key = owned->key;
   thread_ptr thread;
+  bool created = true;
   try {
     if (_poolWorkerSpawnHook)
       _poolWorkerSpawnHook(); // a test making the creation fail (app.h)
@@ -1658,10 +1776,14 @@ bool app::startKeyedPoolThread(ThreadPoolTask &task, bool logDrop) {
       runKeyedPoolTask(*mine);
     }));
   } catch (...) {
+    created = false;
+  }
+  if (!created) {
     // No thread (resources): the task can't run. It is dropped, and its slot freed. The caller
     // that submitted it hears of it (enqueuePoolTask); one started later is logged, as there is
     // no caller to tell. Logged while it still holds its slot, so that a pool seen idle (wait(),
-    // the counts) has logged it.
+    // the counts) has logged it. (Out of the catch: the kick below may drop tasks, whose
+    // destructors call out.)
     owned.reset();
     if (logDrop) {
       try {
@@ -1751,6 +1873,7 @@ std::vector<thread_ptr> app::closeThreadPool() {
   // pending instead of being thrown in a task's destructor (and dropped by its catch).
   {
     boost::this_thread::disable_interruption keep_interrupt_pending;
+    pool_drop_scope reason(kPoolStopped);
     PoolQueue().swap(dropped);
   }
   return workers;

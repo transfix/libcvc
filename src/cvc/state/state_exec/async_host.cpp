@@ -576,10 +576,10 @@ void async_host::run_kernel(const std::shared_ptr<async_call> &call, async_kerne
 // copyable callable in std::function's buffer.) The call ends exactly once: by run_kernel when
 // the executor runs the task, or by drop() when the executor destroys it unrun. That is the case
 // when the executor refuses it (a stopped lane, an app whose pool has stopped), and when the
-// app's pool drops what is still queued as ~app stops it. A task the app's pool hands back (no
-// worker could be started for it: submit) is dropped the same way. The call then raises
-// RuntimeError, its kernel goes, and the host's count goes down, so the process isn't left parked
-// and shutdown() doesn't wait for good.
+// app's pool drops what is still queued as ~app stops it, or what it leaves queued with no worker
+// (cvc::app::trySubmitPooled). A task the app's pool hands back (no worker could be started for
+// it: submit) is dropped the same way. The call then raises RuntimeError, its kernel goes, and the
+// host's count goes down, so the process isn't left parked and shutdown() doesn't wait for good.
 struct async_host::kernel_task {
   std::shared_ptr<async_call> call;
   async_kernel kernel;
@@ -609,10 +609,11 @@ struct async_host::kernel_task {
   ~kernel_task() {
     if (!armed)
       return;
-    // Not interruptible: this runs on the thread that submitted the call or the one destroying
-    // the app, and an interrupt pending there stays pending (nothing in drop() may take it).
+    // Not interruptible: this runs on the thread that submitted the call, the one destroying the
+    // app or the one whose worker creation failed, and an interrupt pending there stays pending
+    // (nothing in drop() may take it).
     boost::this_thread::disable_interruption keep_interrupt_pending;
-    drop();
+    drop(cvc::app::poolDropReason());
   }
 
   void operator()() noexcept {
@@ -621,8 +622,8 @@ struct async_host::kernel_task {
   }
 
   // Not run: the call raises RuntimeError, naming the lane that refused it, or why the app's
-  // background pool didn't run it (`why`).
-  void drop(const char *why = "not run: the app's background pool has stopped") noexcept {
+  // background pool didn't run it (`why`: cvc::app::kPoolStopped or kPoolNoWorker).
+  void drop(const char *why) noexcept {
     armed = false;
     const std::string &name = call->function_name();
     std::exception_ptr error;
@@ -670,7 +671,7 @@ void async_host::submit(const std::shared_ptr<async_call> &call, async_kernel ke
       // destroys every task.
       boost::this_thread::disable_interruption keep_interrupt_pending;
       if (kernel_task *handed_back = task.target<kernel_task>())
-        handed_back->drop("not run: no background worker could be started");
+        handed_back->drop(cvc::app::kPoolNoWorker);
       task = nullptr;
     }
   } catch (...) {
