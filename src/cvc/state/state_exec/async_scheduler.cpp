@@ -441,16 +441,21 @@ async_scheduler::next_call_charge(clock::time_point now) const {
   // the next charge (3.8), which may find the limit reached: a kernel that never checks
   // cancelled() is charged its run time as CPU time, so only a drain stops it. A driver that
   // only drains while nothing is runnable keeps budgets and timeouts current this way.
+  // A call whose process ended (an abandoned future) or is gone is no drain's to charge or time
+  // out (charge_async_calls passes it over), so it must not end the wait either: the wait would
+  // return at once, again and again, until its kernel ended.
   constexpr auto kChargeBeat = std::chrono::milliseconds(1);
   std::optional<clock::time_point> next;
   for (const std::shared_ptr<async_call> &call : async_calls_) {
     if (call->finished())
       continue;
-    if (call->timeout_)
-      next = std::min(next.value_or(clock::time_point::max()),
-                      detail::time_after(call->created_, *call->timeout_));
     const process *proc = procs_.find(call->pid());
-    if (proc && !is_finished(proc->status) && (proc->max_time > 0.0 || proc->max_steps > 0))
+    if (!proc || is_finished(proc->status))
+      continue;
+    // When past_timeout holds, none for a timeout it never reaches (NaN, infinite).
+    if (const std::optional<clock::time_point> timeout = call->timeout_point())
+      next = std::min(next.value_or(clock::time_point::max()), *timeout);
+    if (proc->max_time > 0.0 || proc->max_steps > 0)
       next = std::min(next.value_or(clock::time_point::max()), now + kChargeBeat);
   }
   return next;
@@ -706,48 +711,43 @@ void async_scheduler::finish_async_call(const std::shared_ptr<async_call> &call)
 void async_scheduler::charge_async_calls(clock::time_point now) {
   // Every started call is charged its run and CPU time so far (3.8), then the processes it
   // charged are checked against their limits, all at the one reading `now` (they are waiting:
-  // their elapsed time doesn't depend on it). Walked in place: only a call's own timeout
-  // changes the list meanwhile, or a write to the tree (publishing the rate) whose slots kill
-  // or reap; from either on, the rest goes over a copy.
+  // their elapsed time doesn't depend on it). The tree's rate is read once, before the walk:
+  // reading it may publish it, a write to the tree whose slots may kill or reap, and none may
+  // run while the list is walked. So the walk is in place: only a call's own timeout changes
+  // the list then (its settling may kill), and from the first one on, the rest goes over a copy.
+  const std::optional<double> tree = tree_rate_for_calls();
   charged_.clear();
   for (std::size_t i = 0; i < async_calls_.size(); ++i) {
-    async_call *call = async_calls_[i].get();
-    const int pid = call->pid();
+    async_call &call = *async_calls_[i];
+    const int pid = call.pid();
     process *proc = procs_.find(pid);
     if (!proc || is_finished(proc->status))
       continue;
-    if (!call->finished() && call->past_timeout(now)) {
-      charge_async_calls_from(i, now);
+    if (!call.finished() && call.past_timeout(now)) {
+      charge_async_calls_from(i, now, tree);
       return;
     }
-    if (!call->started())
-      continue; // queued: waiting for a thread isn't charged
-    const uint64_t writes = rate_publications_;
-    const double rate = async_steps_per_cpu_ms(*proc);
-    if (writes != rate_publications_) {
-      charge_async_calls_from(i, now);
-      return;
-    }
-    detail::charge_async_call(*proc, *call, rate, false, now);
-    if (std::find_if(charged_.begin(), charged_.end(),
-                     [proc](const charged_process &c) { return c.proc == proc; }) == charged_.end())
-      charged_.push_back({proc, pid});
+    const std::optional<double> rate = walk_rate(*proc, call, tree);
+    if (!rate)
+      continue;
+    detail::charge_async_call(*proc, call, *rate, false, now);
+    if (std::find(charged_.begin(), charged_.end(), pid) == charged_.end())
+      charged_.push_back(pid);
   }
-  // At a limit the process is killed (2.5), and its calls cancelled.
-  for (const charged_process &c : charged_)
-    if (!is_finished(c.proc->status))
-      check_limits(*c.proc, now);
+  check_charged(now);
 }
 
-void async_scheduler::charge_async_calls_from(std::size_t first, clock::time_point now) {
-  // A copy: a kill, a timeout or a slot below changes the list. Processes are found again by
-  // pid after anything that may have reaped one.
-  const std::vector<std::shared_ptr<async_call>> calls(async_calls_.begin() + first,
-                                                       async_calls_.end());
+void async_scheduler::charge_async_calls_from(std::size_t first, clock::time_point now,
+                                              std::optional<double> tree) {
+  // A copy: a timeout settles its call, whose final charge may kill its process, and settling
+  // or killing may publish the rate, a write to the tree whose slots may change the list or
+  // reap. Processes are found again by pid after anything that may have reaped one.
+  const std::vector<std::shared_ptr<async_call>> calls(
+      async_calls_.begin() + static_cast<std::ptrdiff_t>(first), async_calls_.end());
   for (const std::shared_ptr<async_call> &call : calls) {
     const int pid = call->pid();
-    process *found = procs_.find(pid);
-    if (!found || is_finished(found->status))
+    process *proc = procs_.find(pid);
+    if (!proc || is_finished(proc->status))
       continue;
     if (!call->finished() && call->past_timeout(now) && call->settle_timeout()) {
       // Its own timeout: it raises TimeoutError at the call, and its kernel is told to stop.
@@ -755,20 +755,45 @@ void async_scheduler::charge_async_calls_from(std::size_t first, clock::time_poi
       finish_async_call(call);
       continue;
     }
-    if (!call->started())
-      continue; // queued: waiting for a thread isn't charged
-    const double rate = async_steps_per_cpu_ms(*found);
-    found = procs_.find(pid);
-    if (!found || is_finished(found->status))
+    const std::optional<double> rate = walk_rate(*proc, *call, tree);
+    if (!rate)
       continue;
-    detail::charge_async_call(*found, *call, rate, false, now);
-    if (std::find_if(charged_.begin(), charged_.end(),
-                     [pid](const charged_process &c) { return c.pid == pid; }) == charged_.end())
-      charged_.push_back({found, pid});
+    detail::charge_async_call(*proc, *call, *rate, false, now);
+    if (std::find(charged_.begin(), charged_.end(), pid) == charged_.end())
+      charged_.push_back(pid);
   }
-  // At a limit the process is killed (2.5), and its calls cancelled.
-  for (const charged_process &c : charged_) {
-    process *proc = procs_.find(c.pid);
+  check_charged(now);
+}
+
+std::optional<double> async_scheduler::tree_rate_for_calls() {
+  // The rate the calls without one of their own are charged at, when a started call of a live
+  // process needs it: read (and published) now, before the walk.
+  if (!watch_root_)
+    return kDefaultAsyncStepsPerCpuMs;
+  for (const std::shared_ptr<async_call> &call : async_calls_) {
+    if (!call->started())
+      continue;
+    const process *proc = procs_.find(call->pid());
+    if (proc && !is_finished(proc->status) && !proc->async_steps_per_cpu_ms)
+      return tree_rate();
+  }
+  return std::nullopt;
+}
+
+std::optional<double> async_scheduler::walk_rate(const process &proc, const async_call &call,
+                                                 std::optional<double> tree) {
+  if (!call.started())
+    return std::nullopt; // queued: waiting for a thread isn't charged
+  if (proc.async_steps_per_cpu_ms)
+    return *proc.async_steps_per_cpu_ms;
+  return tree; // nullopt: it started after the read, and is charged from the next drain on
+}
+
+void async_scheduler::check_charged(clock::time_point now) {
+  // At a limit the process is killed (2.5), and its calls cancelled. Found again by pid, and
+  // walked by index: cancelling may publish the rate, a write to the tree whose slots may reap.
+  for (std::size_t k = 0; k < charged_.size(); ++k) {
+    process *proc = procs_.find(charged_[k]);
     if (proc && !is_finished(proc->status))
       check_limits(*proc, now);
   }
@@ -778,23 +803,28 @@ void async_scheduler::cancel_async_calls(int pid) {
   if (std::none_of(async_calls_.begin(), async_calls_.end(),
                    [pid](const std::shared_ptr<async_call> &c) { return c->pid() == pid; }))
     return;
-  // The rate first: publishing it writes the tree, whose slots must not run mid-walk.
-  process *proc = procs_.find(pid);
-  const double rate = proc ? async_steps_per_cpu_ms(*proc) : 0.0;
-  proc = procs_.find(pid);
-  const auto now = std::chrono::steady_clock::now();
+  // Out of the list first, then the rate: reading it may publish it, a write to the tree whose
+  // slots may do anything, kill this process too (that kill finds no calls left to cancel, so it
+  // doesn't read the rate again and recurse), and none of them runs mid-walk.
+  std::vector<std::shared_ptr<async_call>> calls;
   for (auto it = async_calls_.begin(); it != async_calls_.end();) {
     if ((*it)->pid() != pid) {
       ++it;
       continue;
     }
-    std::shared_ptr<async_call> call = *it;
+    calls.push_back(std::move(*it));
     it = async_calls_.erase(it);
-    call->cancel();
-    // What it ran so far stays charged; its result, when it comes, is dropped.
-    if (proc)
-      detail::charge_async_call(*proc, *call, rate, true, now);
+    calls.back()->cancel();
   }
+  process *proc = procs_.find(pid);
+  const double rate = proc ? async_steps_per_cpu_ms(*proc) : 0.0;
+  proc = procs_.find(pid);
+  if (!proc)
+    return;
+  // What they ran so far stays charged; their results, when they come, are dropped.
+  const auto now = std::chrono::steady_clock::now();
+  for (const std::shared_ptr<async_call> &call : calls)
+    detail::charge_async_call(*proc, *call, rate, true, now);
 }
 
 double async_scheduler::async_steps_per_cpu_ms(const process &proc) {
@@ -816,8 +846,7 @@ double async_scheduler::tree_rate() {
     return rate_;
   const double rate = async_steps_per_cpu_ms_from_state(*watch_root_, id_);
   if (!id_.empty() && rate != published_rate_) {
-    ++rate_publications_; // a tree write: its slots may change the calls and processes
-    publish_async_steps_per_cpu_ms(*watch_root_, id_, rate);
+    publish_async_steps_per_cpu_ms(*watch_root_, id_, rate); // a tree write: its slots run now
     published_rate_ = rate;
   }
   rate_seen_ = seen;
@@ -1067,11 +1096,17 @@ void async_scheduler::terminate_process(process &proc, value_t result) {
 }
 
 void async_scheduler::kill_process(process &proc, const std::string &reason) {
-  cancel_async_calls(proc.pid); // its kernels see cancelled(), and their results are dropped
-  procs_.set_status(proc, process_status::killed);
-  proc.exit_error = reason;
-  proc.state.stats.mark_complete();
-  release_if_idle(proc);
+  const int pid = proc.pid;
+  cancel_async_calls(pid); // its kernels see cancelled(), and their results are dropped
+  // Cancelling may publish the rate, a write to the tree whose slots may have ended (or reaped)
+  // the process meanwhile: that stands.
+  process *const p = procs_.find(pid);
+  if (!p || is_finished(p->status))
+    return;
+  procs_.set_status(*p, process_status::killed);
+  p->exit_error = reason;
+  p->state.stats.mark_complete();
+  release_if_idle(*p);
 }
 
 void async_scheduler::fail_process(process &proc, value_t exc, std::exception_ptr original) {

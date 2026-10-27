@@ -334,7 +334,6 @@ private:
   uint64_t rate_seen_ = 0;
   bool rate_valid_ = false;
   double rate_ = kDefaultAsyncStepsPerCpuMs;
-  uint64_t rate_publications_ = 0; // tree writes publishing the effective rate
   void track_tree_changes();
   double tree_rate();
 
@@ -352,12 +351,8 @@ private:
   bool submit_valid_ = false;
   const submit_settings &settings_for_submit();
 
-  struct charged_process {
-    process *proc;
-    int pid;
-  };
-  std::vector<process *> woken_;         // reused by the waiter wakes
-  std::vector<charged_process> charged_; // reused by charge_async_calls
+  std::vector<process *> woken_; // reused by the waiter wakes
+  std::vector<int> charged_;     // the pids charge_async_calls charged (reused)
 
   static const process_ptr &no_process();
 
@@ -387,8 +382,17 @@ private:
   // When a drain next has work for the calls in flight (a timeout, a charge that may hit a
   // limit), or nullopt (wait_for_work).
   std::optional<clock::time_point> next_call_charge(clock::time_point now) const;
-  // charge_async_calls from the `i`th call on, over a copy of the list (a timeout changes it).
-  void charge_async_calls_from(std::size_t i, clock::time_point now);
+  // charge_async_calls from the `i`th call on, over a copy of the list (a timeout changes it),
+  // at the tree's rate `tree` as read before the walk.
+  void charge_async_calls_from(std::size_t i, clock::time_point now, std::optional<double> tree);
+  // The tree's rate for the walk, read before it when a started call needs it (else nullopt).
+  std::optional<double> tree_rate_for_calls();
+  // The rate a call is charged at in the walk: its process's own, else `tree`; nullopt when the
+  // call isn't started, or needs the tree's and it wasn't read.
+  static std::optional<double> walk_rate(const process &proc, const async_call &call,
+                                         std::optional<double> tree);
+  // Check the processes the walk charged against their limits.
+  void check_charged(clock::time_point now);
   // Cancel and drop the calls of `pid` (killed or reaped).
   void cancel_async_calls(int pid);
   // Resume the processes waiting on `channel` in the await_call phase.
