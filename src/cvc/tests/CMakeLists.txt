@@ -145,6 +145,15 @@ cvc_setup_physics_replay(physics_replay_test)
 add_executable(physics_pose_tracker_test physics_pose_tracker_test.cpp)
 add_executable(physics_plant_host_test physics_plant_host_test.cpp)
 add_executable(physics_dyn_bike_plant_test physics_dyn_bike_plant_test.cpp)
+# StepsAsTheDynamicPlantDoes holds dyn_bike_plant (built with -ffp-contract=off) to dyn_plant called
+# inline here, bit for bit: build it the same way, or clang contracts this copy into FMAs on aarch64
+# (the macOS arm64 lanes) and the last bits differ.
+if(NOT MSVC)
+  set_source_files_properties(physics_dyn_bike_plant_test.cpp
+                              PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+else()
+  set_source_files_properties(physics_dyn_bike_plant_test.cpp PROPERTIES COMPILE_OPTIONS "/fp:precise")
+endif()
 # det_math is internal to libcvc, so its test compiles it in, with the same no-contraction flag.
 add_executable(physics_det_math_test physics_det_math_test.cpp
   ${PROJECT_SOURCE_DIR}/src/cvc/physics/det_math.cpp)
