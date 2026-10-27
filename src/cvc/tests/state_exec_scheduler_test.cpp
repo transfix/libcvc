@@ -15,6 +15,7 @@
 #include <cvc/state/state_exec/scheduler.h>
 #include <cvc/state/state_exec/stackless_evaluator.h>
 #include <gtest/gtest.h>
+#include <iterator>
 #include <random>
 #include <string>
 #include <thread>

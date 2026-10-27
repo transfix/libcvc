@@ -618,14 +618,24 @@ bool wakeup::wait_until(clock::time_point t) {
     std::this_thread::sleep_until(t);
     return false;
   }
+  // The high-resolution timer fires on a ~0.5 ms grid, so it is set that much early and the
+  // last stretch is spent yielding (still watching the event): a wait ends on time, as the
+  // spinning it replaces did, for at most that much CPU.
+  constexpr long long kSpinNs = 600000;
   for (;;) {
     const clock::time_point now = clock::now();
     if (now >= t)
       return WaitForSingleObject(impl_->event, 0) == WAIT_OBJECT_0;
     const long long ns = std::chrono::duration_cast<std::chrono::nanoseconds>(t - now).count();
+    if (impl_->timer && ns <= kSpinNs) {
+      if (WaitForSingleObject(impl_->event, 0) == WAIT_OBJECT_0)
+        return true;
+      SwitchToThread();
+      continue;
+    }
     if (impl_->timer) {
       LARGE_INTEGER due;
-      due.QuadPart = -((ns + 99) / 100); // relative, in 100 ns units
+      due.QuadPart = -((ns - kSpinNs + 99) / 100); // relative, in 100 ns units
       if (SetWaitableTimer(impl_->timer, &due, 0, nullptr, nullptr, FALSE)) {
         const HANDLE handles[2] = {impl_->event, impl_->timer};
         if (WaitForMultipleObjects(2, handles, FALSE, INFINITE) == WAIT_OBJECT_0)
