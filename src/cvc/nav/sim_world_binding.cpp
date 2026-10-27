@@ -32,147 +32,266 @@ constexpr double kTwoPi = 6.283185307179586;
 
 // <prefix>.nav: sensing, belief, arrival and the crowd.
 const state_key_meta kNavKeys[] = {
-    {"range_m", "knob", "m", 5, 300, "The sensor's range."},
-    {"n_rays", "knob", "", 16, 1024, "Rays a sense casts per agent."},
-    {"fov_rad", "knob", "rad", 0.5, kTwoPi, "The sensor's field of view; 2 pi = all round."},
-    {"sense_every", "knob", "", 1, 30, "Ticks between senses (and belief rebuilds)."},
+    {"range_m", "knob", "m", 5, 300,
+     "How far each agent's sensor sees when it maps its surroundings. Higher: maps more per "
+     "look, at more compute. Default 60."},
+    {"n_rays", "knob", "", 16, 1024,
+     "Rays each agent casts per look, spread across its field of view. Higher: finer coverage, "
+     "fewer thin obstacles missed, at more compute. Default 240."},
+    {"fov_rad", "knob", "rad", 0.5, kTwoPi,
+     "The sensor's field of view, centred on the heading; 2 pi (6.28) sees all round. "
+     "Default 2 pi."},
+    {"sense_every", "knob", "tick", 1, 30,
+     "Ticks (one sim step each) between looks; the obstacle map is rebuilt after each. Higher: "
+     "cheaper, but slower to notice a change. Default 4."},
     {"freeze_sense", "knob", "", 0, 1,
-     "1: a static, known map; the sense and rebuild are skipped (add_obstacle is then inert)."},
-    {"l_occ", "knob", "1", 0.5, 5, "The log-odds a hit adds to a cell."},
-    {"l_free", "knob", "1", -5, -0.1, "The log-odds a ray passing through takes from a cell."},
-    {"optimistic", "knob", "", 0, 1, "1: unknown space plans as free; 0: as occupied."},
-    {"p_thresh", "knob", "1", 0.05, 0.95, "The occupancy probability a cell plans as blocked at."},
-    {"band", "knob", "1", 0, 0.5, "The hysteresis band around p_thresh."},
-    {"ttl_s", "knob", "s", 0, 60, "How long a dynamic obstacle (add_obstacle) lasts."},
-    {"reach_tol", "knob", "m", 0.5, 20, "How close to its goal an agent has arrived (and parks)."},
+     "1: the map is static and known, so sensing and map rebuilds are skipped and obstacles "
+     "added at run time never appear; 0: agents sense and map as they go. Default 0."},
+    {"l_occ", "knob", "1", 0.5, 5,
+     "How much one ray hit raises a cell's log-odds of being occupied. Higher: a cell becomes an "
+     "obstacle after fewer hits, and false hits stick more. Default 2.2."},
+    {"l_free", "knob", "1", -5, -0.1,
+     "How much a ray passing through a cell lowers its log-odds of being occupied (a negative "
+     "number). More negative: cells clear faster. Default -1.4."},
+    {"optimistic", "knob", "", 0, 1,
+     "1: unseen space plans as free (drive in, replan on discovery); 0: unseen space plans as "
+     "occupied. Default 1."},
+    {"p_thresh", "knob", "1", 0.05, 0.95,
+     "The occupancy probability above which a cell plans as an obstacle (with optimistic 0, a "
+     "cell plans as free below 1 - p_thresh). Lower: more cautious. Default 0.5."},
+    {"band", "knob", "1", 0, 0.5,
+     "Cells whose occupancy probability is within this of 0.5 count as unknown and follow "
+     "optimistic, whatever p_thresh says. Higher: more evidence needed to decide. "
+     "Default 0.15."},
+    {"ttl_s", "knob", "s", 0, 60,
+     "How long an obstacle added at run time stays on the map. Default 4."},
+    {"reach_tol", "knob", "m", 0.5, 20,
+     "How close to its goal an agent counts as arrived; it then stops and parks."},
     {"sep_radius", "knob", "m", 0, 20,
-     "Agents within this of each other nudge their carrots apart; 0 = off."},
-    {"sep_gain", "knob", "1", 0, 5, "How hard the carrots are nudged apart; 0 = off."},
+     "Agents closer than this push their carrots (the points they steer toward) apart, so a "
+     "crowd steers round itself. Needs sep_gain too. 0: off. Default 0."},
+    {"sep_gain", "knob", "m", 0, 10,
+     "How hard nearby agents push each other's carrots apart: how far a neighbour at contact "
+     "shifts an agent's carrot, falling off to nothing at sep_radius. Higher: wider spacing, more "
+     "weaving. 0: off. Default 0."},
     {"min_gap", "knob", "m", 0, 10,
-     "The hard de-overlap: no two agents' centres closer than this; 0 = off (skipped with a "
-     "plant, whose bodies collide)."},
-    {"min_gap_iters", "knob", "", 1, 16, "The de-overlap's relaxation sweeps a tick."},
-    {"tick", "telemetry", "", kNone, kNone, "Ticks stepped."},
+     "The closest two agents' centres may come: after each drive, closer pairs are pushed "
+     "apart to this (never into a wall). Skipped on a physics plant, whose bodies collide. "
+     "0: off. Default 0."},
+    {"min_gap_iters", "knob", "", 1, 16,
+     "Push-apart passes per tick for min_gap. More: a long column settles fully, at more "
+     "compute. Default 4."},
+    {"tick", "telemetry", "tick", kNone, kNone,
+     "Ticks (one sim step each) stepped since the world was built."},
 };
 
 // <prefix>.nav.vehicle: veh_params' scalars.
 const state_key_meta kVehicleKeys[] = {
-    {"vmax", "knob", "m/s", 0.5, 40, "The top speed."},
+    {"vmax", "knob", "m/s", 0.5, 40,
+     "The top speed. On a physics plant the vehicle drives at no more than the lower of this "
+     "and its own top speed."},
     {"a_max", "knob", "m/s^2", 0.5, 15,
-     "The acceleration and braking the drive commands and its stopping governor plans with."},
-    {"a_lat_max", "knob", "m/s^2", 0.5, 15, "The corner cap's lateral acceleration."},
-    {"wheelbase", "knob", "m", 0.2, 8, "The bicycle's wheelbase, L."},
-    {"delta_max", "knob", "rad", 0.1, 1, "The bicycle's steering lock."},
+     "The acceleration and braking the drive commands, and the braking its stopping speed limit "
+     "plans with. Higher: livelier, but brakes later."},
+    {"a_lat_max", "knob", "m/s^2", 0.5, 15,
+     "The sideways acceleration the corner speed limit allows. Higher: faster through bends, "
+     "less margin before sliding."},
+    {"wheelbase", "knob", "m", 0.2, 8,
+     "The distance between the axles in nav's bicycle model; with the steering lock it sets the "
+     "tightest turn. A physics plant uses each vehicle's own."},
+    {"delta_max", "knob", "rad", 0.1, 1,
+     "The steering lock: the largest angle the bicycle model's front wheel turns. Higher: "
+     "tighter turns. A physics plant's own lock caps it. Default 0.6."},
     {"track_width", "knob", "m", 0, 3,
-     "The track; the inner wheel's lock then limits the bicycle's angle. 0 = no track."},
-    {"k_steer", "knob", "1", 0, 2, "How much the barrier and material forces steer."},
-    {"nsub", "knob", "", 1, 16, "Integration substeps a tick."},
-    {"allow_reverse", "knob", "", 0, 1, "1: the drive may back up out of a dead end."},
-    {"rr", "knob", "m", 0.1, 5, "The single-disc footprint's radius (at the rear axle)."},
-    {"d_hat", "knob", "m", 0.5, 30, "How far from a wall its barrier reaches."},
-    {"body_rr", "knob", "m", 0, 5, "The multi-disc footprint's disc radius."},
+     "The distance between the left and right wheels. The inner wheel then reaches the lock "
+     "first, so the vehicle turns less tightly than delta_max allows. 0: no track. Default 0."},
+    {"k_steer", "knob", "rad", 0, 2,
+     "How much the push from walls, material and terrain adds to the steering: the most it can "
+     "add, in radians. Higher: swerves harder away. Default 0.8."},
+    {"nsub", "knob", "", 1, 16,
+     "Integration substeps per tick for the kinematic drive. More: more accurate at speed, at "
+     "more compute. A physics plant ignores it. Default 1."},
+    {"allow_reverse", "knob", "", 0, 1,
+     "1: the drive may back up, at up to a quarter of vmax, for example out of a dead end; "
+     "0: forward only. Default 1."},
+    {"rr", "knob", "m", 0.1, 5,
+     "The radius of the single-disc footprint, centred on the rear axle, that clearances to "
+     "walls are measured from. A multi-disc footprint (body_rr) replaces it."},
+    {"d_hat", "knob", "m", 0.5, 30,
+     "How far from a wall the barrier that pushes the vehicle away reaches; beyond it a wall "
+     "exerts no push. Higher: a wider berth, but more hesitation in narrow gaps."},
+    {"body_rr", "knob", "m", 0, 5,
+     "The disc radius of the multi-disc footprint (discs along the body), used in place of rr "
+     "when the app sets one up. A physics plant that knows its vehicles' size sets its own. "
+     "Default 0."},
     {"body_gain", "knob", "1", 0, 1,
-     "The summed barrier's scale; 1 / discs cancels the sum's gain on the learned alpha."},
+     "A scale on the multi-disc footprint's summed wall barrier. Set it to 1 / the number of "
+     "discs so the steering policy feels the push it was trained with; at 1 the vehicle is "
+     "timid. Default 1."},
     {"mass", "knob", "kg", 1, 20000,
-     "Carried for the fuel model and telemetry; the kinematic drive does not read it."},
+     "The vehicle's mass, carried for the fuel model and telemetry; the kinematic drive does "
+     "not use it. Default 1."},
     {"mu_lookahead", "knob", "m", 0, 40,
-     "How far ahead the grip feature probes; must match the net's training."},
-    {"mu_probes", "knob", "", 1, 8, "Probes along the grip feature's look-ahead."},
+     "How far toward its carrot (the point it steers toward) a vehicle looks for the worst "
+     "grip, for a grip-aware steering policy. Must match the policy's training."},
+    {"mu_probes", "knob", "", 1, 8,
+     "Grip samples along mu_lookahead. Must match the policy's training. Default 3."},
     {"risk_governor", "knob", "", 0, 1,
-     "1: material risk (the worse of the material's and the terrain's) caps the speed."},
-    {"risk_vmin", "knob", "m/s", 0, 40, "The risk governor's speed at risk 1."},
-    {"risk_onset", "knob", "1", 0, 0.95, "The risk below which the governor does not slow."},
+     "1: material risk (the worse of the material's and the terrain's) caps the speed, so "
+     "vehicles slow on and before risky ground; 0: risk only steers. Default 0."},
+    {"risk_vmin", "knob", "m/s", 0, 40,
+     "The risk governor's speed at risk 1. From risk_onset up to risk 1 the cap falls in a "
+     "straight line from vmax to this. Default 0."},
+    {"risk_onset", "knob", "1", 0, 0.95,
+     "The risk below which the risk governor does not slow the vehicle. Higher: slows only on "
+     "riskier ground. Default 0.3."},
     {"risk_lookahead", "knob", "m", 0, 80,
-     "How far ahead the risk governor probes, so the vehicle slows before it gets there."},
-    {"risk_probes", "knob", "", 1, 8, "Probes along the risk governor's look-ahead."},
+     "How far ahead along its travel the risk governor looks, so the vehicle slows before it "
+     "reaches risky ground. 0: underfoot only. Default 0."},
+    {"risk_probes", "knob", "", 1, 8,
+     "Risk samples along risk_lookahead. More: catches narrower risky patches. Default 3."},
 };
 
 // <prefix>.nav.material: the material force's weights.
 const state_key_meta kMaterialKeys[] = {
-    {"lam_soft", "knob", "1", 0, 10,
-     "The soft-risk force's weight (a net with a lam head overrides it per agent)."},
-    {"lam_hard", "knob", "1", 0, 10, "The hard-hazard barrier's weight."},
+    {"lam_soft", "knob", "m^2/s^2", 0, 4000,
+     "The weight of the soft force that steers vehicles off risky ground: the push, in m/s^2, "
+     "for each unit of risk gained per metre. Higher: wider detours round risk. A steering "
+     "policy that outputs its own weight replaces it per vehicle. 0: off."},
+    {"lam_hard", "knob", "m/s^2", 0, 200,
+     "The weight of the barrier that keeps vehicles off hazardous material: its push at full "
+     "strength. Higher: they keep further off it."},
     {"lam_soft_scale", "knob", "1", 0, 4,
-     "A multiplier on the soft weight, fixed or learned: the lever for a force-bias control."},
-    {"lam_hard_scale", "knob", "1", 0, 4, "A multiplier on the hard weight, fixed or learned."},
+     "A multiplier on the soft weight, whether fixed (lam_soft) or output by a trained policy, "
+     "so it turns a trained policy's risk avoidance up or down too. Default 1."},
+    {"lam_hard_scale", "knob", "1", 0, 4,
+     "A multiplier on the hard weight, whether fixed (lam_hard) or output by a trained policy. "
+     "Default 1."},
 };
 
 // <prefix>.nav.yield: agents out of each other's way (set_yield, nav/yield.h).
 const state_key_meta kYieldKeys[] = {
     {"horizon_s", "knob", "s", 0, 10,
-     "How far ahead intents reach and conflicts count; 0 = yielding off."},
+     "How far ahead agents announce the paths they mean to drive, and how soon a conflict on "
+     "one must come to count. Higher: they make way earlier. 0: yielding off. Default 0."},
     {"clearance", "knob", "m", 0, 30,
-     "The corridor's half-width round a path; 0 = 3 x the vehicle's rr."},
+     "The half-width of the corridor round an announced path that others move out of. "
+     "Higher: they make more room. 0: 3 x the vehicle's rr. Default 0."},
     {"gain", "knob", "1", 0, 4,
-     "How far an agent moves out of another's path, per unit intrusion."},
-    {"pass_gain", "knob", "1", 0, 4, "How far it steers round one in its own path."},
-    {"cooperation", "knob", "1", 0, 1, "How far a passer counts on the other moving aside."},
-    {"min_len", "knob", "m", 0, 100, "An intent's shortest path; 0 = 4 x clearance."},
-    {"min_speed", "knob", "m/s", 0, 10, "The speed floor arrival times are taken at."},
+     "How far an agent shifts its carrot (the point it steers toward) out of another's path, "
+     "per metre it is inside that path's corridor. Higher: pulls aside further. Default 1."},
+    {"pass_gain", "knob", "1", 0, 4,
+     "How far an agent shifts its carrot to steer round another in its own path, per metre "
+     "that one is inside its corridor. Higher: passes wider. Default 1."},
+    {"cooperation", "knob", "1", 0, 1,
+     "How far an agent passing another counts on that one moving aside. 0: it steers round "
+     "alone; 1: it leaves the other its full share. Default 0.5."},
+    {"min_len", "knob", "m", 0, 100,
+     "The shortest path an agent announces, however slowly it moves. 0: 4 x clearance. "
+     "Default 0."},
+    {"min_speed", "knob", "m/s", 0, 10,
+     "The speed below which arrival times are worked out as if at this speed, so a slow or "
+     "stopped agent's conflicts still count."},
     {"near_dist", "knob", "m", -1, 100,
-     "Along a path this close a conflict counts at any speed; 0 = 4 x clearance, < 0 = off."},
+     "Along a path this close, a conflict counts whatever the speeds, so a stopped column still "
+     "clears for one starting behind it. 0: 4 x clearance; negative: off (arrival times only). "
+     "Default 0."},
     {"steer_overrides", "knob", "", 0, 1,
-     "1: a forward override_command's steer (a route's pursuit) takes the shift too."},
-    {"steer_look_s", "knob", "s", 0, 5, "Seconds of speed the override correction looks ahead."},
+     "1: an agent the host steers itself (on a route, for example) also steers toward the "
+     "yielding shift while driving forward; 0: the host's steer is left as commanded. "
+     "Default 1."},
+    {"steer_look_s", "knob", "s", 0, 5,
+     "For an agent the host steers: how far ahead, in seconds at its speed, the yielding "
+     "correction aims. Shorter: sharper correction. Default 0.5."},
     {"pass_time_s", "knob", "s", 0, 10,
-     "The passing cap: no sooner at one in the path than this; it stops short of one that stays. "
-     "0 = off."},
+     "Speed cap with another in its path: an agent drives no faster than would bring it to "
+     "that one in this time, and stops short of one that stays put. Higher: more cautious. "
+     "0: off. Default 1.5."},
     {"pass_hold_s", "knob", "s", 0, 30,
-     "Held this long behind one standing still, the hold is released; 0 = never (the default)."},
+     "How long an agent held behind one standing still waits before it is released to drive "
+     "on (the higher priority first); released, it may push into the one ahead. 0: never. "
+     "Default 0."},
     {"creep_speed", "knob", "m/s", 0, 5,
-     "An agent asked to move aside from a standstill creeps forward at this; 0 = no creep."},
-    {"creep_need", "knob", "m", 0, 30, "The shift out of a path that calls for the creep; 0 = rr."},
+     "An agent that must move out of another's path but is stopped or held creeps forward at "
+     "this speed so it can steer aside. 0: no creep. Default 0."},
+    {"creep_need", "knob", "m", 0, 30,
+     "The smallest shift out of another's path that makes a stopped or held agent creep "
+     "(creep_speed). 0: the vehicle's rr. Default 0."},
 };
 
 // <prefix>.nav.terrain (P5).
 const state_key_meta kTerrainKeys[] = {
     {"max_grade", "knob", "1", 0.1, 1.5,
-     "The tangent of the steepest slope the vehicle climbs (0.6 = 60%, 31 deg); steeper cells are "
-     "infeasible. nav_plant::terrain_config_of gives a vehicle's."},
+     "The steepest slope the vehicle can climb, as rise over run (0.6 = 60%, 31 degrees); "
+     "steeper cells are infeasible. An app can derive it from the vehicle's tires and gearing. "
+     "Default 0.6."},
     {"tip_ratio", "knob", "1", 0, 2,
-     "The vehicle's static stability factor, its track over twice its centre of gravity's height; "
-     "0 = no tip limit."},
+     "The vehicle's static stability factor: its track over twice its centre of gravity's "
+     "height. Slopes it could roll over on become infeasible. 0: no rollover limit. Default 0."},
     {"tip_margin", "knob", "1", 0.5, 1,
-     "The share of the tip slope (the slope whose tangent is tip_ratio) that is feasible."},
-    {"sigma", "knob", "cell", 0, 3, "The grade cost's blur before its gradient is taken."},
-    {"lam_grade", "knob", "1", 0, 10,
-     "The soft grade force's weight: it leans the drive toward gentler ground (H1); 0 = off."},
-    {"lam_grade_hard", "knob", "1", 0, 10,
-     "The weight of the material-style barrier off infeasible slope (H1); 0 = off."},
-    {"k_sharp", "knob", "1/m", 0.25, 4, "The barrier's sharpness."},
-    {"d_hat_m", "knob", "m", 2, 30, "How far the barrier reaches."},
+     "The share of the rollover slope (the slope whose rise over run is tip_ratio) that counts "
+     "as feasible. Lower: more margin against rolling, less ground open. Default 0.8."},
+    {"sigma", "knob", "m", 0, 50,
+     "How far the grade cost (how near each cell's slope is to the limit) is blurred before the "
+     "force takes its gradient. Higher: a smoother push that starts further out. Default: one "
+     "map cell."},
+    {"lam_grade", "knob", "m^2/s^2", 0, 4000,
+     "The weight of the soft force that leans the drive toward gentler ground: the push, in "
+     "m/s^2, for each unit of grade cost gained per metre. Higher: a stronger preference for flat "
+     "ground, at the cost of longer paths. 0: off."},
+    {"lam_grade_hard", "knob", "m/s^2", 0, 200,
+     "The weight of the barrier that pushes vehicles off infeasible slope: its push at full "
+     "strength. Unlike a wall, a vehicle sent across such a cell can still cross it. Higher: "
+     "keeps further off. 0: off."},
+    {"k_sharp", "knob", "1/m", 0.25, 4,
+     "How sharply the infeasible-slope barrier rises around d_hat_m. Higher: a more sudden, "
+     "wall-like edge; lower: a gradual push. Default 1.25."},
+    {"d_hat_m", "knob", "m", 2, 30,
+     "The distance from infeasible slope at which its barrier is at half strength. Higher: "
+     "vehicles start keeping off from further away. Default 12."},
     {"block_infeasible", "knob", "", 0, 1,
-     "1: infeasible cells also plan as obstacles (they join the occupancy); 0 (the default): "
-     "slope is a material risk only (lam_grade, lam_grade_hard)."},
+     "1: infeasible cells also plan as obstacles, like walls; 0: slope is a material risk only "
+     "(lam_grade, lam_grade_hard). Default 0."},
     {"governors", "knob", "", 0, 1,
-     "1: the stopping and corner governors take gravity along and across the path (H2)."},
-    {"gravity", "build", "m/s^2", kNone, kNone, "The gravity the terrain's limits are in."},
+     "1: the stopping and corner speed limits allow for gravity along and across the slope "
+     "(less braking downhill); 0: they plan as on flat ground. Default 1."},
+    {"gravity", "build", "m/s^2", kNone, kNone,
+     "The gravity the slope-aware speed limits (governors) use. Default 9.80665."},
     {"limit", "telemetry", "1", kNone, kNone,
-     "The tangent of the steepest feasible slope: the lesser of max_grade and tip_margin x "
-     "tip_ratio."},
-    {"infeasible_cells", "telemetry", "", kNone, kNone, "Grid cells beyond the vehicle's limits."},
+     "The steepest feasible slope, as rise over run: the lesser of max_grade and tip_margin x "
+     "tip_ratio (max_grade alone when tip_ratio is 0)."},
+    {"infeasible_cells", "telemetry", "", kNone, kNone,
+     "Grid cells steeper than the vehicle's limit."},
 };
 const state_key_meta kTerrainActive[] = {
-    {"active", "telemetry", "", kNone, kNone, "1 while the world has a terrain."},
+    {"active", "telemetry", "", kNone, kNone, "1: the world has a terrain; 0: it is flat."},
 };
 
 // <prefix>.nav.settings: fixed when the world is built.
 const state_key_meta kSettingsKeys[] = {
-    {"rows", "build", "", kNone, kNone, "The grid's rows."},
-    {"cols", "build", "", kNone, kNone, "The grid's columns."},
-    {"min_x", "build", "m", kNone, kNone, "The grid's west edge."},
-    {"min_y", "build", "m", kNone, kNone, "The grid's south edge."},
-    {"max_x", "build", "m", kNone, kNone, "The grid's east edge."},
-    {"max_y", "build", "m", kNone, kNone, "The grid's north edge."},
-    {"cx", "build", "m", kNone, kNone, "The normalized frame's centre, x."},
-    {"cy", "build", "m", kNone, kNone, "The normalized frame's centre, y."},
-    {"scale", "build", "1/m", kNone, kNone, "Normalized units per metre (S)."},
-    {"l_clamp", "build", "1", kNone, kNone, "The belief's log-odds clamp."},
-    {"dt", "build", "s", kNone, kNone, "Seconds per tick."},
-    {"agents", "build", "", kNone, kNone, "Agents in the world."},
-    {"planes", "build", "", kNone, kNone, "Belief planes: 1 shared, one per group, or per agent."},
+    {"rows", "build", "", kNone, kNone, "Rows of the map grid (along y)."},
+    {"cols", "build", "", kNone, kNone, "Columns of the map grid (along x)."},
+    {"min_x", "build", "m", kNone, kNone, "The map grid's west edge (its smallest x)."},
+    {"min_y", "build", "m", kNone, kNone, "The map grid's south edge (its smallest y)."},
+    {"max_x", "build", "m", kNone, kNone, "The map grid's east edge (its largest x)."},
+    {"max_y", "build", "m", kNone, kNone, "The map grid's north edge (its largest y)."},
+    {"cx", "build", "m", kNone, kNone,
+     "The x of the world point nav's internal normalized frame is centred on."},
+    {"cy", "build", "m", kNone, kNone,
+     "The y of the world point nav's internal normalized frame is centred on."},
+    {"scale", "build", "1/m", kNone, kNone,
+     "Nav's internal normalized units per metre. The tree shows metres; a library default "
+     "given in normalized units is divided by this."},
+    {"l_clamp", "build", "1", kNone, kNone,
+     "The most a cell's log-odds of being occupied can reach either way; cells the prior map "
+     "marks start at plus this, the rest at minus this."},
+    {"dt", "build", "s", kNone, kNone, "Seconds of world time per tick (one sim step)."},
+    {"agents", "build", "", kNone, kNone, "Agents (vehicles) in the world."},
+    {"planes", "build", "", kNone, kNone,
+     "Belief maps: 1 shared by every agent, one per group, or one per agent."},
     {"plant", "build", nullptr, kNone, kNone,
-     "What integrates the agents: kinematic (nav's bicycle) or jolt (a physics plant)."},
+     "What moves the agents: kinematic (nav's own bicycle model) or jolt (a physics engine's "
+     "vehicles)."},
 };
 
 std::string join(const std::string &prefix, const char *rest) {
@@ -232,6 +351,8 @@ const char *plant_name(const vehicle_plant *p) {
   switch (p->kind()) {
   case plant_kind::jolt:
     return "jolt";
+  case plant_kind::dynamic:
+    return "dynamic";
   default:
     return "kinematic";
   }
@@ -269,8 +390,8 @@ void sim_world::pull(cvc::app &ctx, const std::string &prefix) {
            [&](double v) { c.reach_tol = static_cast<float>(v * S); });
     r.read("sep_radius", c.sep_radius * L, non_negative,
            [&](double v) { c.sep_radius = static_cast<float>(v * S); });
-    r.read("sep_gain", c.sep_gain, non_negative,
-           [&](double v) { c.sep_gain = static_cast<float>(v); });
+    r.read("sep_gain", c.sep_gain * L, non_negative,
+           [&](double v) { c.sep_gain = static_cast<float>(v * S); });
     r.read("min_gap", c.min_gap * L, non_negative,
            [&](double v) { c.min_gap = static_cast<float>(v * S); });
     r.read("min_gap_iters", c.min_gap_iters, whole,
@@ -346,13 +467,16 @@ void sim_world::pull(cvc::app &ctx, const std::string &prefix) {
     describe_state_keys(ctx, mb, kMaterialKeys, true);
     reader r(ctx, mb);
     material_config &m = mat_cfg_;
-    const auto weight = [&](const char *key, float &f) {
-      r.read(key, f, non_negative, [&](double x) { f = static_cast<float>(x); });
+    // unit: world per normalized. The soft force's weight multiplies a risk gradient per
+    // normalized unit into a normalized acceleration (L^2 to the world's m^2/s^2); the barrier's
+    // multiplies a unit direction (L to m/s^2). The scales are plain multipliers.
+    const auto weight = [&](const char *key, float &f, double unit) {
+      r.read(key, f * unit, non_negative, [&](double x) { f = static_cast<float>(x / unit); });
     };
-    weight("lam_soft", m.lam_soft);
-    weight("lam_hard", m.lam_hard);
-    weight("lam_soft_scale", m.lam_soft_scale);
-    weight("lam_hard_scale", m.lam_hard_scale);
+    weight("lam_soft", m.lam_soft, L * L);
+    weight("lam_hard", m.lam_hard, L);
+    weight("lam_soft_scale", m.lam_soft_scale, 1.0);
+    weight("lam_hard_scale", m.lam_hard_scale, 1.0);
   }
   if (terrain_on_) {
     const std::string tb = base + ".terrain";
@@ -363,8 +487,8 @@ void sim_world::pull(cvc::app &ctx, const std::string &prefix) {
     const auto value = [&](const char *key, double &d, bool (*ok)(double)) {
       changed |= r.read(key, d, ok, [&](double x) { d = x; });
     };
-    const auto weight = [&](const char *key, float &f, bool (*ok)(double)) {
-      changed |= r.read(key, f, ok, [&](double x) { f = static_cast<float>(x); });
+    const auto weight = [&](const char *key, float &f, double unit, bool (*ok)(double)) {
+      changed |= r.read(key, f * unit, ok, [&](double x) { f = static_cast<float>(x / unit); });
     };
     const auto toggle = [&](const char *key, bool &b) {
       changed |= r.read(key, b2d(b), flag, [&](double x) { b = x != 0.0; });
@@ -374,11 +498,15 @@ void sim_world::pull(cvc::app &ctx, const std::string &prefix) {
     changed |= r.read(
         "tip_margin", tc.tip_margin, [](double x) { return x > 0.0 && x <= 1.0; },
         [&](double x) { tc.tip_margin = x; });
-    value("sigma", tc.sigma, non_negative);
-    weight("lam_grade", tc.lam_grade, non_negative);
-    weight("lam_grade_hard", tc.lam_grade_hard, non_negative);
-    weight("k_sharp", tc.k_sharp, positive);
-    weight("d_hat_m", tc.d_hat_m, positive);
+    // The blur is kept in cells (material_build); the tree has it in metres.
+    const double cell_w = (cfg_.max_x - cfg_.min_x) / std::max(1, cols_ - 1);
+    changed |=
+        r.read("sigma", tc.sigma * cell_w, non_negative, [&](double x) { tc.sigma = x / cell_w; });
+    // The grade force's weights in world units, as the material's (L^2: m^2/s^2; L: m/s^2).
+    weight("lam_grade", tc.lam_grade, L * L, non_negative);
+    weight("lam_grade_hard", tc.lam_grade_hard, L, non_negative);
+    weight("k_sharp", tc.k_sharp, 1.0, positive);
+    weight("d_hat_m", tc.d_hat_m, 1.0, positive);
     toggle("block_infeasible", tc.block_infeasible);
     toggle("governors", tc.governors);
     if (changed)

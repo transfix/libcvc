@@ -30,6 +30,7 @@
 #include <cvc/ph/se2_vehicle.h>
 #include <filesystem>
 #include <gtest/gtest.h>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -220,7 +221,57 @@ TEST(PhSe2, EnergyBalanceIsExact) {
     }
     EXPECT_GE(dissipated, -1e-12); // D is positive definite by construction
     EXPECT_NEAR(dH, supplied - dissipated, 1e-11 * (1.0 + std::fabs(supplied) + dissipated));
+    // The supplied power is the output conjugate to the input: y . u, y = G(v)^T v.
+    double y[2];
+    veh.output(s.data(), y);
+    EXPECT_NEAR(y[0] * s[6] + y[1] * s[7], supplied, 1e-12 * (1.0 + std::fabs(supplied)));
   }
+}
+
+// M is the inverse of M^-1.
+TEST(PhSe2, MassInvertsTheInverseMass) {
+  const se2_model &m = golden_model();
+  const se2_vehicle<double> veh(m.setup, se2_draw<double>(m), m.twist_scale);
+  const mat3<double> I = mul(veh.mass(), veh.inverse_mass());
+  for (int i = 0; i < 3; ++i)
+    for (int j = 0; j < 3; ++j)
+      EXPECT_NEAR(I[3 * i + j], i == j ? 1.0 : 0.0, 1e-12);
+}
+
+// The diffusion's energy: over one short step, H's mean gain with the noise, less the step
+// without it, is noise_power() h. Antithetic pairs (z, -z) cancel the terms odd in the noise, so
+// what is left is the quadratic one the drift's balance does not book.
+TEST(PhSe2, NoisePowerIsTheEnergyTheDiffusionAdds) {
+  const se2_model &m = golden_model();
+  const se2_vehicle<double> veh(m.setup, se2_draw<double>(m), m.twist_scale);
+  const auto s = numbers(golden().get_child("forward").begin()->second, "state");
+  const double h = 1e-4;
+  double base[6];
+  veh.step(s.data(), s.data() + 6, h, nullptr, base);
+  const double h0 = veh.hamiltonian(base);
+  const auto &sigma = veh.weights().diffusion;
+  std::mt19937 rng(11);
+  std::normal_distribution<double> z(0.0, 1.0);
+  const int n = 20000;
+  double sum = 0.0, sum2 = 0.0;
+  for (int k = 0; k < n; ++k) {
+    double plus[3], minus[3], a[6], b[6];
+    for (int i = 0; i < 3; ++i) {
+      plus[i] = std::sqrt(h) * sigma[i] * z(rng);
+      minus[i] = -plus[i];
+    }
+    veh.step(s.data(), s.data() + 6, h, plus, a);
+    veh.step(s.data(), s.data() + 6, h, minus, b);
+    const double d = 0.5 * (veh.hamiltonian(a) + veh.hamiltonian(b)) - h0;
+    sum += d;
+    sum2 += d * d;
+  }
+  const double mean = sum / n, se = std::sqrt(std::max(0.0, sum2 / n - mean * mean) / n);
+  const double want = veh.noise_power() * h;
+  std::printf("  noise energy over %.0e s: %.4e J measured (se %.1e), noise_power h = %.4e J\n", h,
+              mean, se, want);
+  EXPECT_GT(want, 0.0);
+  EXPECT_NEAR(mean, want, 4.0 * se + 0.02 * want);
 }
 
 // With its GP weights zero and its levels set from a linear-tire bicycle frozen at 10 m/s, the

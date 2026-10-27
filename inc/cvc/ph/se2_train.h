@@ -44,8 +44,7 @@ namespace cvc {
 class thread_pool;
 namespace ph {
 
-// ── data
-// ──────────────────────────────────────────────────────────────────────────────────────────
+// ── data ──────────────────────────────────────────────────────────────────────────────────
 
 // Equal-length flights: rows [x, y, psi, v_x, v_y, r, u (control_dim)], row k's inputs acting
 // from t_k-1 to t_k (cvc::physics::plant_log's layout; row 0's inputs unused).

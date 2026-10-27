@@ -26,6 +26,7 @@ class vehicle_plant; // cvc/nav/vehicle_plant.h
 enum class plant_kind : std::uint8_t {
   kinematic, // the fused bicycle (no plant set): byte-identical to before the seam
   jolt,      // a cvc::physics world's vehicles
+  dynamic,   // the dynamic single-track vehicle (cvc::physics::dyn_bike_plant), no physics world
 };
 
 // One agent as nav reads it back: the rear axle (the point nav's bicycle tracks, which has

@@ -6,6 +6,7 @@
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/VolumeNode.h>
 #include <cvc/state/state.h>
+#include <cvc/tf/model.h> // parse_csv: the strict flat-CSV codec the TF keys share
 #include <cvc/volume/volume.h>
 #include <iomanip>
 #include <set>
@@ -21,6 +22,20 @@
 
 namespace cvc {
 namespace gl {
+
+namespace {
+// A VolumeNode's own mirror write of a transfer-function key, in progress on THIS thread. Scene
+// nodes run their state handlers synchronously on the writing thread, so the echo of the node's
+// own write arrives here, on the same thread, inside the write. Keeping the record per thread --
+// not one flag on the node -- is what lets a write another thread makes meanwhile (a peer, a
+// script) through: its handler runs on ITS thread, which has no such record.
+struct OwnTfWrite {
+  const VolumeNode *node;
+  const std::string *key;
+  const std::string *value;
+};
+thread_local std::vector<OwnTfWrite> t_ownTfWrites;
+} // namespace
 
 VolumeNode::VolumeNode(cvc::app &ctx, const std::string &statePath, const std::string &name)
     : GraphicsNode(ctx, statePath, name), m_hasVolume(false),
@@ -219,18 +234,37 @@ void VolumeNode::setVolume(const cvc::volume &vol) {
   // which VTK collapses to a single point applying to EVERY value: the volume
   // rendered as a solid opaque block no matter what was in it. The image data
   // cannot be stale here, because updateImageData just wrote it.
-  m_dataMin = vol.min();
-  m_dataMax = vol.max();
+  double lo = vol.min();
+  double hi = vol.max();
   if (m_imageData && m_imageData->GetNumberOfPoints() > 0) {
-    double range[2] = {m_dataMin, m_dataMax};
+    double range[2] = {lo, hi};
     m_imageData->GetScalarRange(range);
-    m_dataMin = range[0];
-    m_dataMax = range[1];
+    lo = range[0];
+    hi = range[1];
   }
 
-  // Update state tree with data range
-  getState("data_min").value(m_dataMin);
-  getState("data_max").value(m_dataMax);
+  // Publish the range, then adopt it. Each write runs this node's data_min/data_max handler INLINE
+  // (on the owner thread), and that handler re-reads BOTH keys: between the two writes it loads the
+  // new bound beside the OLD other one into m_dataMin/m_dataMax. Writing the second key from those
+  // members wrote the old maximum straight back, so data_max stayed stale whenever the minimum
+  // moved (a signed [-2, 3] volume on a node at the default [0, 1] published [-2, 1]). So write
+  // from the locals and set the members after. A range lying wholly above the old maximum writes
+  // its maximum first, so the pair in between is never inverted for whoever reads it.
+  double oldMax = hi;
+  try {
+    oldMax = getState("data_max").value<double>();
+  } catch (const boost::bad_lexical_cast &) {
+    // Not a number yet: either order is fine.
+  }
+  if (lo > oldMax) {
+    getState("data_max").value(hi);
+    getState("data_min").value(lo);
+  } else {
+    getState("data_min").value(lo);
+    getState("data_max").value(hi);
+  }
+  m_dataMin = lo;
+  m_dataMax = hi;
 
   app().log(3,
             "  Data range: [" + std::to_string(m_dataMin) + ", " + std::to_string(m_dataMax) + "]");
@@ -251,10 +285,17 @@ void VolumeNode::setVolume(const cvc::volume &vol) {
                    ", ScalarOpacityUnitDistance: " + std::to_string(diagonal / 100.0));
   m_volumeProperty->SetScalarOpacityUnitDistance(diagonal / 100.0);
 
-  // Set transfer function using actual data range
-  app().log(3, "  Setting default transfer function...");
-  setDefaultTransferFunction();
+  // Re-fit the default ramp to the new range; a transfer function someone authored (an editor's
+  // tf_binding, a script, setTransferFunction) is the user's and survives the reload.
+  if (transferFunctionIsDefault()) {
+    app().log(3, "  Setting default transfer function...");
+    setDefaultTransferFunction();
+  }
   updateTransferFunctions();
+  // A new volume: updateImageData marked the image (the voxels, so the 3D texture) modified; the
+  // mapper and the prop re-derive their input and extent from it.
+  m_mapper->Modified();
+  m_vtkVolume->Modified();
   updateMetadata(vol);
   m_hasVolume = true;
   // The volume's extent may have changed: cameras re-fit their clipping range.
@@ -404,32 +445,12 @@ void VolumeNode::setTransferFunction(const std::vector<double> &colorTable,
                      std::to_string(colorTable[7]) + ")");
   }
 
-  // Clear existing functions
-  m_colorFunc->RemoveAllPoints();
-  m_opacityFunc->RemoveAllPoints();
+  for (size_t i = 0; i < opacityTable.size() / 2 && i < 3; ++i) // Log first few points
+    app().log(3, "  Opacity[" + std::to_string(i) +
+                     "]: scalar=" + std::to_string(opacityTable[i * 2]) +
+                     ", opacity=" + std::to_string(opacityTable[i * 2 + 1]));
 
-  // Add color points (RGB triplets)
-  for (size_t i = 0; i < colorTable.size() / 4; ++i) {
-    double scalar = colorTable[i * 4 + 0];
-    double r = colorTable[i * 4 + 1];
-    double g = colorTable[i * 4 + 2];
-    double b = colorTable[i * 4 + 3];
-    m_colorFunc->AddRGBPoint(scalar, r, g, b);
-  }
-
-  // Add opacity points
-  for (size_t i = 0; i < opacityTable.size() / 2; ++i) {
-    double scalar = opacityTable[i * 2 + 0];
-    double opacity = opacityTable[i * 2 + 1];
-    m_opacityFunc->AddPoint(scalar, opacity);
-
-    if (i < 3) { // Log first few points
-      app().log(3, "  Opacity[" + std::to_string(i) + "]: scalar=" + std::to_string(scalar) +
-                       ", opacity=" + std::to_string(opacity));
-    }
-  }
-
-  updateTransferFunctions();
+  applyTablesToVTK(colorTable, opacityTable);
 
   // Save to state tree only if values changed
   // Build strings for comparison
@@ -445,16 +466,60 @@ void VolumeNode::setTransferFunction(const std::vector<double> &colorTable,
     opacityStr << std::fixed << std::setprecision(6) << opacityTable[i];
   }
 
-  // Only update state if values actually changed
-  std::string currentColorStr = getState("transfer_function.color").value();
-  std::string currentOpacityStr = getState("transfer_function.opacity").value();
+  // Only update state if values actually changed. VTK already holds the exact tables, so the
+  // handler must not re-apply this 6-decimal mirror (mirrorTfKey).
+  const std::string color = colorStr.str(), opacity = opacityStr.str();
+  if (color != getState("transfer_function.color").value())
+    mirrorTfKey("transfer_function.color", color);
+  if (opacity != getState("transfer_function.opacity").value())
+    mirrorTfKey("transfer_function.opacity", opacity);
+}
 
-  if (colorStr.str() != currentColorStr) {
-    getState("transfer_function.color").value(colorStr.str());
-  }
-  if (opacityStr.str() != currentOpacityStr) {
-    getState("transfer_function.opacity").value(opacityStr.str());
-  }
+void VolumeNode::mirrorTfKey(const std::string &key, const std::string &value) {
+  t_ownTfWrites.push_back({this, &key, &value});
+  struct Pop {
+    ~Pop() { t_ownTfWrites.pop_back(); }
+  } pop;
+  getState(key).value(value);
+}
+
+bool VolumeNode::isOwnTfEcho(const std::string &key) const {
+  for (const OwnTfWrite &w : t_ownTfWrites)
+    if (w.node == this && *w.key == key && getState(key).value() == *w.value)
+      return true;
+  return false;
+}
+
+void VolumeNode::applyTablesToVTK(const std::vector<double> &colorTable,
+                                  const std::vector<double> &opacityTable) {
+  m_colorFunc->RemoveAllPoints();
+  m_opacityFunc->RemoveAllPoints();
+  for (size_t i = 0; i + 3 < colorTable.size(); i += 4)
+    m_colorFunc->AddRGBPoint(colorTable[i], colorTable[i + 1], colorTable[i + 2],
+                             colorTable[i + 3]);
+  for (size_t i = 0; i + 1 < opacityTable.size(); i += 2)
+    m_opacityFunc->AddPoint(opacityTable[i], opacityTable[i + 1]);
+  updateTransferFunctions();
+}
+
+bool VolumeNode::applyTransferFunctionState() {
+  // An empty key is an empty table (a fully transparent transfer function), not an error.
+  const auto parse = [](const std::string &s, std::vector<double> &out) {
+    out.clear();
+    return s.empty() || cvc::tf::parse_csv(s, out);
+  };
+  std::vector<double> color, opacity;
+  if (!parse(getState("transfer_function.color").value(), color) ||
+      !parse(getState("transfer_function.opacity").value(), opacity) || color.size() % 4 != 0 ||
+      opacity.size() % 2 != 0)
+    return false;
+  applyTablesToVTK(color, opacity);
+  return true;
+}
+
+bool VolumeNode::transferFunctionIsDefault() const {
+  return getState("transfer_function.color").value() == m_defaultColorState &&
+         getState("transfer_function.opacity").value() == m_defaultOpacityState;
 }
 
 void VolumeNode::setDefaultTransferFunction() {
@@ -484,45 +549,38 @@ void VolumeNode::setDefaultTransferFunction() {
   m_opacityFunc->AddPoint(lo, 0.0);
   m_opacityFunc->AddPoint(hi, topOpacity);
 
-  // Save to state tree
+  // Save to state tree (VTK already has the exact ramp: mirrorTfKey keeps the handler off it)
   std::ostringstream colorStr, opacityStr;
   colorStr << lo << ",0,0,0," << hi << ",1,1,1";
   opacityStr << lo << ",0," << hi << "," << topOpacity;
-  getState("transfer_function.color").value(colorStr.str());
-  getState("transfer_function.opacity").value(opacityStr.str());
+  const std::string color = colorStr.str(), opacity = opacityStr.str();
+  m_defaultColorState = color;
+  m_defaultOpacityState = opacity;
+  mirrorTfKey("transfer_function.color", color);
+  mirrorTfKey("transfer_function.opacity", opacity);
 }
 
+// Read back from VTK, not the state mirror: the mirror can hold an edit the handler refused (a
+// malformed pair) or a value rounded to 6 decimals, and callers want what is drawn.
 std::vector<double> VolumeNode::getTransferFunctionColorTable() const {
-  std::string tableStr = getState("transfer_function.color").value();
   std::vector<double> table;
-
-  if (tableStr.empty()) {
-    return table;
-  }
-
-  std::istringstream iss(tableStr);
-  std::string value;
-  while (std::getline(iss, value, ',')) {
-    table.push_back(std::stod(value));
-  }
-
+  const int n = m_colorFunc->GetSize();
+  table.reserve(static_cast<std::size_t>(n) * 4);
+  double node[6];
+  for (int i = 0; i < n; ++i)
+    if (m_colorFunc->GetNodeValue(i, node) == 1)
+      table.insert(table.end(), {node[0], node[1], node[2], node[3]});
   return table;
 }
 
 std::vector<double> VolumeNode::getTransferFunctionOpacityTable() const {
-  std::string tableStr = getState("transfer_function.opacity").value();
   std::vector<double> table;
-
-  if (tableStr.empty()) {
-    return table;
-  }
-
-  std::istringstream iss(tableStr);
-  std::string value;
-  while (std::getline(iss, value, ',')) {
-    table.push_back(std::stod(value));
-  }
-
+  const int n = m_opacityFunc->GetSize();
+  table.reserve(static_cast<std::size_t>(n) * 2);
+  double node[4];
+  for (int i = 0; i < n; ++i)
+    if (m_opacityFunc->GetNodeValue(i, node) == 1)
+      table.insert(table.end(), {node[0], node[1]});
   return table;
 }
 
@@ -562,12 +620,13 @@ void VolumeNode::updateTransferFunctions() {
                      "]");
   }
 
+  // The transfer functions and the property holding them, nothing more: the GPU mapper rebuilds
+  // its 1D lookup tables from their MTimes. Never the image data -- its MTime is what makes the
+  // mapper re-upload the whole 3D scalar texture, which a TF edit (every frame of an editor drag)
+  // must not cost. setVolume and updateScalars mark the image themselves.
   m_colorFunc->Modified();
   m_opacityFunc->Modified();
   m_volumeProperty->Modified();
-  m_vtkVolume->Modified();
-  m_mapper->Modified();
-  m_imageData->Modified();
 }
 
 cvc::bounding_box VolumeNode::getBoundingBox() const {
@@ -669,15 +728,33 @@ void VolumeNode::handleStateChanged(const std::string &childState) {
   } else if (childState == "data_min" || childState == "data_max") {
     runOnMainThread([this]() {
       try {
-        // Data range changed - update transfer functions
+        // Data range changed: re-fit the default ramp, but leave an authored transfer function
+        // alone (its owner -- e.g. a tf_binding following an `auto` domain -- re-fits it).
         m_dataMin = getState("data_min").value<double>();
         m_dataMax = getState("data_max").value<double>();
-        setDefaultTransferFunction();
+        if (transferFunctionIsDefault())
+          setDefaultTransferFunction();
         updateTransferFunctions();
       } catch (const boost::bad_lexical_cast &) {
         // Ignore - state initialization may trigger before all components are set
       }
     });
+  } else if (childState == "transfer_function.color" || childState == "transfer_function.opacity") {
+    // A transfer function written through state (an editor, a script, a peer -- on any thread)
+    // applies live. Only the echo of our own mirror write is skipped: VTK already has those tables
+    // at full precision.
+    if (isOwnTfEcho(childState))
+      return;
+    runOnMainThread([this]() {
+      if (applyTransferFunctionState())
+        if (SceneGraph *sg = getSceneGraph())
+          sg->requestRender();
+    });
+  } else if (childState == "transfer_function" ||
+             childState.compare(0, 18, "transfer_function.") == 0) {
+    // The editable model and its overlays (tf_binding): they draw nothing until the binding
+    // lowers them into the two keys above.
+    return;
   } else {
     // Delegate to parent for common graphics fields
     GraphicsNode::handleStateChanged(childState);

@@ -2,9 +2,8 @@
 # cvcgl_ari_golden renders this offscreen and compares it with windows.png (see docs/ARIADNE.md,
 # "Golden-image tests"). Positions and sizes are px; keep everything inside 960 x 720.
 #
-# Every window here has a size: on purpose. A window with no size: stays at ImGui's 32 px minimum
-# today, because §11.4 persists its not-yet-fitted size on its first frame and seeds it back on the
-# next, which cancels ImGui's auto-fit. Add an auto-fit window here once that is fixed.
+# Every window here has a size:. One without fits its widgets (cvcgl_imgui_window_fit checks that,
+# with no GL); it can join this golden when windows.png is next made under llvmpipe.
 
 meta:
   name: golden windows
@@ -18,7 +17,7 @@ windows:
     children:
       - text: "A window with size: [320, 150]."
       - separator
-      - text: "Text wraps nowhere; it clips at the edge of the window body."
+      - text: "Text wraps nowhere: what runs past the window's edge scrolls into view."
 
   - window: Tinted text
     id: tinted

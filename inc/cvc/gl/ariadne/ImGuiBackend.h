@@ -16,8 +16,10 @@
 #include <cvc/ariadne/backend.h>
 #include <cvc/image/image.h> // set_image publishes a cvc::image for the Kind::Image raster viewer
 #include <functional>
+#include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 struct ImGuiContext; // Dear ImGui (global namespace); forward-declared, the header stays imgui-free
@@ -45,6 +47,7 @@ public:
   void seed_window_geometry(const cvc::ariadne::WindowGeom &g) override; // §11.4 (pre begin_window)
   cvc::ariadne::WindowGeom window_geometry() const override; // §11.4 (post begin_window)
   void focus_next_window() override;                         // raise edge (pre begin_window)
+  void reset_layout() override; // a new document: each window is laid out afresh when next drawn
   bool begin_grid(const cvc::ariadne::Layout &layout, const char *id) override;
   void grid_next_cell() override;
   void end_grid() override;
@@ -83,6 +86,11 @@ public:
   cvc::ariadne::StringEdit input_text(const char *label, const char *key,
                                       const std::string &current) override;
   cvc::ariadne::ColorEdit color(const char *label, const float rgb[3]) override; // §G7 RGB picker
+  // §10 transfer-function editor: the ColorTable2 port drawn with the ImGui draw list (zoom strip,
+  // colour ramp, opacity curve, isocontour bars, histogram / contour spectrum / contour tree
+  // layers, context menu, colour picker, isocontour info). src/cvcGL/ariadne/tf_editor_imgui.cpp.
+  cvc::ariadne::TfEdit tf_editor(const char *label, const char *key,
+                                 const cvc::ariadne::TfEditorInput &in) override;
 
   // Novel-primitive custom widgets (§16.1b): a host registers a raw-ImGui draw fn for
   // a custom_type; custom_widget() dispatches to it. The draw fn gets the bound value
@@ -100,7 +108,7 @@ public:
   // cvc::image, updated each frame). The image is copied (COW) and uploaded to a GL texture lazily
   // inside draw_image (on the render thread, where the GL context is current). Call it from the
   // host loop; draw_image references it by the name a `- image:` widget's src/bind resolves to.
-  void set_image(const std::string &name, const cvc::image &img);
+  void set_image(const std::string &name, const cvc::image &img) override;
   bool draw_image(const char *name, float width) override; // §raster viewer (ImGui::Image over GL)
 
   // Convenience: install `rt`'s per-frame walk as `overlay`'s draw callback, so
@@ -116,6 +124,12 @@ public:
   static void setImGuiContext(ImGuiContext *ctx);
 
 private:
+  // Per-instance tf_editor state (the drag gesture, the working model while a delayed-update drag
+  // is in flight, popups), keyed by the editor's `key`. Defined in tf_editor_imgui.cpp; shared_ptr
+  // so this header needs only the declaration.
+  struct TfEditorSession;
+  std::unordered_map<std::string, std::shared_ptr<TfEditorSession>> m_tfSessions;
+
   // ImGui style vars pushed per open window (WindowBorderSize, §3.0.3b), popped
   // in end_window. A stack so window nesting is correct.
   std::vector<int> m_windowStylePushes;
@@ -154,6 +168,30 @@ private:
   std::vector<float> m_pendingColumns; // the same, for a resizable table's column widths
   bool m_haveColumns = false;
   std::vector<float> m_lastGridColumns;
+
+  // Windows that came with no place of their own (no authored pos, nothing persisted) flow down
+  // the left of the viewport, one under another, in columns. Each window id maps to where it was
+  // put last frame; one the user drags elsewhere leaves the flow. The cursor restarts each frame.
+  // The windows that stand where they are (authored, persisted or moved) are in the flow's way, as
+  // last frame drew them: a flowing window goes below one it would cover.
+  struct FlowSpot {
+    float x = -1.0f, y = -1.0f;
+    unsigned int window = 0; // its ImGuiID, to tell it from the windows in the flow's way
+  };
+  struct FlowRect {
+    float x0, y0, x1, y1;
+  };
+  std::unordered_map<std::string, FlowSpot> m_flow;
+  std::vector<FlowRect> m_flowObstacles;
+  int m_flowFrame = -1;
+  float m_flowX = 0.0f, m_flowY = 0.0f, m_flowColumnW = 0.0f;
+
+  // reset_layout(): the windows drawn since, by id. A window's first draw after it takes its
+  // authored place and size (or rejoins the flow) though ImGui still holds the last document's.
+  bool m_relayout = false;
+  std::unordered_set<std::string> m_relaid;
+  std::unordered_set<std::string> m_relaidGrids; // ... and grids: their authored sizes again
+  int m_resetFrame = -1; // the frame reset_layout() came before: nothing is in the flow's way yet
 
   // Host-registered raw-ImGui draw fns for custom widget types (register_widget).
   std::unordered_map<std::string, CustomDrawFn> m_customWidgets;

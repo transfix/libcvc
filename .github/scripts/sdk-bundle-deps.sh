@@ -66,12 +66,12 @@ bundles() {
 }
 field() { tr -d '\r' <"$1" | sed -n "s/^$2: //p"; }
 
-# openssl ships on Linux and Windows, where cvc::net links cvcpkg's libcurl and
-# libcurl links openssl. On macOS libcvc uses the system libcurl, so nothing in
-# the SDK links openssl there.
-if [ "$(field "$lock" platform)" = macos ]; then
-  unused="$unused openssl "
-fi
+# openssl ships on every platform, macOS included: cvc::state's device keys link
+# its libcrypto (src/cvc/CMakeLists.txt). On Linux and Windows cvcpkg's libcurl
+# links it too; on macOS libcvc uses the system libcurl. Leaving it out of the
+# macOS SDK, as before device keys, left a shared libcvc needing
+# @rpath/libcrypto.3.dylib, and a static one's consumer finding whatever
+# libcrypto the host had (v3.7.1's Release run).
 
 pins=()
 while read -r name version; do

@@ -37,6 +37,7 @@
 
 #include <cstdint>
 #include <cvc/ariadne/doc_args.h>
+#include <cvc/ariadne/keys.h>
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/value.h>
 #include <cvc/ariadne/widget.h>
@@ -137,6 +138,10 @@ struct LoadResult {
   std::string on_key_script;
   std::string on_pointer_script;
   std::string on_signal_script;
+  // The document's `keys:` block (keys.h): its rebindable key actions, in document order. The host
+  // hands them to AppRuntime, which binds them (Runtime::set_key_bindings) and lists them in the
+  // Keys window.
+  std::vector<KeyBinding> keys;
   // The document's `args:` block (doc_args.h): what it accepts on the command line after its path.
   // `has_args_block` records presence; without the block the runtime checks nothing and the
   // document reads its raw argv. Only the outermost document's block counts.

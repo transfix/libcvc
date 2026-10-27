@@ -316,6 +316,13 @@ struct Host {
   }
 
   bool feed(const std::string &id, const TermEvent &e) {
+    // While the Keys window waits for a key, every key is the document's, as in the FTXUI loop
+    // (FtxuiBackend::route): Tab, the arrows and Return would otherwise move the body's focus.
+    if (e.kind != TermEvent::Kind::Mouse && unhandled && rt.key_capture_pending()) {
+      unhandled(e);
+      dirty = true;
+      return true;
+    }
     bool used = be.feed_window(rt, id, e);
     if (!used && id.empty() && opts.background_input && opts.background_input(e))
       used = true; // e.g. cvcGL's TerminalScene steering its camera from the desktop

@@ -23,6 +23,7 @@
 //   ffmpeg -framerate 30 -i /tmp/finale/frame_%05d.png -c:v libx264 -pix_fmt yuv420p finale.mp4
 // With no --bundle it falls back to a synthetic city so the scenario still runs.
 
+#include "demos_menu.h" // the gallery's Demos menu
 #include "nav_common.h"
 
 #include <algorithm>
@@ -700,6 +701,7 @@ int main(int argc, char **argv) {
   ImGui::SetCurrentContext(ui.imguiContext());
   ui.setDrawCallback([&] {
     if (ImGui::BeginMainMenuBar()) {
+      cvc_examples::demos_menu("nav_finale");
       if (ImGui::BeginMenu("Sim")) {
         // Pause is the clock's control (sim.paused): world time, the vehicles and the
         // targets all stop together.
@@ -821,7 +823,7 @@ int main(int argc, char **argv) {
                 rv.min_radius, rv.disc_offsets.size(), rv.disc_radius, reached, N, cusps, planMs);
   }
 
-  while (!view.windowClosed()) {
+  while (!view.windowClosed() && !cvc_examples::demo_switch_requested()) {
     double t, dt;
     if (capturing) {
       t = frame / fps;

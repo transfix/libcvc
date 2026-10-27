@@ -151,6 +151,19 @@ template __global__ void resize_trilinear_kernel<uint64>(const uint64 *, uint64 
                                                          uint64, uint64, uint64, uint64, double,
                                                          double, double);
 
+template __global__ void resize_trilinear_kernel<signed char>(const signed char *, signed char *,
+                                                              uint64, uint64, uint64, uint64,
+                                                              uint64, uint64, double, double,
+                                                              double);
+
+template __global__ void resize_trilinear_kernel<int>(const int *, int *, uint64, uint64, uint64,
+                                                      uint64, uint64, uint64, double, double,
+                                                      double);
+
+template __global__ void resize_trilinear_kernel<int64>(const int64 *, int64 *, uint64, uint64,
+                                                        uint64, uint64, uint64, uint64, double,
+                                                        double, double);
+
 // Host function to launch kernel with appropriate type
 extern "C" void cuda_resize_trilinear(void *src_data, void *dst_data, uint64 src_x, uint64 src_y,
                                       uint64 src_z, uint64 dst_x, uint64 dst_y, uint64 dst_z,
@@ -196,6 +209,24 @@ extern "C" void cuda_resize_trilinear(void *src_data, void *dst_data, uint64 src
   case UInt64:
     resize_trilinear_kernel<uint64><<<gridSize, blockSize>>>(
         static_cast<const uint64 *>(src_data), static_cast<uint64 *>(dst_data), src_x, src_y, src_z,
+        dst_x, dst_y, dst_z, inSpaceX, inSpaceY, inSpaceZ);
+    break;
+
+  case Char:
+    resize_trilinear_kernel<signed char><<<gridSize, blockSize>>>(
+        static_cast<const signed char *>(src_data), static_cast<signed char *>(dst_data), src_x,
+        src_y, src_z, dst_x, dst_y, dst_z, inSpaceX, inSpaceY, inSpaceZ);
+    break;
+
+  case Int:
+    resize_trilinear_kernel<int><<<gridSize, blockSize>>>(
+        static_cast<const int *>(src_data), static_cast<int *>(dst_data), src_x, src_y, src_z,
+        dst_x, dst_y, dst_z, inSpaceX, inSpaceY, inSpaceZ);
+    break;
+
+  case Int64:
+    resize_trilinear_kernel<int64><<<gridSize, blockSize>>>(
+        static_cast<const int64 *>(src_data), static_cast<int64 *>(dst_data), src_x, src_y, src_z,
         dst_x, dst_y, dst_z, inSpaceX, inSpaceY, inSpaceZ);
     break;
   }
@@ -326,6 +357,24 @@ extern "C" void cuda_resize_bbox_trilinear(void *src_data, void *dst_data, uint6
         static_cast<const uint64 *>(src_data), static_cast<uint64 *>(dst_data), dim_x, dim_y, dim_z,
         offset_x, offset_y, offset_z, scale_x, scale_y, scale_z);
     break;
+
+  case Char:
+    resize_bbox_trilinear_kernel<signed char><<<gridSize, blockSize>>>(
+        static_cast<const signed char *>(src_data), static_cast<signed char *>(dst_data), dim_x,
+        dim_y, dim_z, offset_x, offset_y, offset_z, scale_x, scale_y, scale_z);
+    break;
+
+  case Int:
+    resize_bbox_trilinear_kernel<int><<<gridSize, blockSize>>>(
+        static_cast<const int *>(src_data), static_cast<int *>(dst_data), dim_x, dim_y, dim_z,
+        offset_x, offset_y, offset_z, scale_x, scale_y, scale_z);
+    break;
+
+  case Int64:
+    resize_bbox_trilinear_kernel<int64><<<gridSize, blockSize>>>(
+        static_cast<const int64 *>(src_data), static_cast<int64 *>(dst_data), dim_x, dim_y, dim_z,
+        offset_x, offset_y, offset_z, scale_x, scale_y, scale_z);
+    break;
   }
 
   // Check for kernel launch errors
@@ -441,6 +490,21 @@ extern "C" double cuda_compute_min(void *data, uint64 off_x, uint64 off_y, uint6
         static_cast<const uint64 *>(data), d_block_mins, d_block_maxs, off_x, off_y, off_z, dim_x,
         dim_y, dim_z, vol_x, vol_y, vol_z);
     break;
+  case Char:
+    minmax_reduction_kernel<signed char><<<gridSize, blockSize, shared_mem_size>>>(
+        static_cast<const signed char *>(data), d_block_mins, d_block_maxs, off_x, off_y, off_z,
+        dim_x, dim_y, dim_z, vol_x, vol_y, vol_z);
+    break;
+  case Int:
+    minmax_reduction_kernel<int><<<gridSize, blockSize, shared_mem_size>>>(
+        static_cast<const int *>(data), d_block_mins, d_block_maxs, off_x, off_y, off_z, dim_x,
+        dim_y, dim_z, vol_x, vol_y, vol_z);
+    break;
+  case Int64:
+    minmax_reduction_kernel<int64><<<gridSize, blockSize, shared_mem_size>>>(
+        static_cast<const int64 *>(data), d_block_mins, d_block_maxs, off_x, off_y, off_z, dim_x,
+        dim_y, dim_z, vol_x, vol_y, vol_z);
+    break;
   }
 
   CUDA_CHECK(cudaGetLastError());
@@ -513,6 +577,21 @@ extern "C" double cuda_compute_max(void *data, uint64 off_x, uint64 off_y, uint6
   case UInt64:
     minmax_reduction_kernel<uint64><<<gridSize, blockSize, shared_mem_size>>>(
         static_cast<const uint64 *>(data), d_block_mins, d_block_maxs, off_x, off_y, off_z, dim_x,
+        dim_y, dim_z, vol_x, vol_y, vol_z);
+    break;
+  case Char:
+    minmax_reduction_kernel<signed char><<<gridSize, blockSize, shared_mem_size>>>(
+        static_cast<const signed char *>(data), d_block_mins, d_block_maxs, off_x, off_y, off_z,
+        dim_x, dim_y, dim_z, vol_x, vol_y, vol_z);
+    break;
+  case Int:
+    minmax_reduction_kernel<int><<<gridSize, blockSize, shared_mem_size>>>(
+        static_cast<const int *>(data), d_block_mins, d_block_maxs, off_x, off_y, off_z, dim_x,
+        dim_y, dim_z, vol_x, vol_y, vol_z);
+    break;
+  case Int64:
+    minmax_reduction_kernel<int64><<<gridSize, blockSize, shared_mem_size>>>(
+        static_cast<const int64 *>(data), d_block_mins, d_block_maxs, off_x, off_y, off_z, dim_x,
         dim_y, dim_z, vol_x, vol_y, vol_z);
     break;
   }
@@ -654,6 +733,18 @@ template __global__ void anisotropic_diffusion_slice_kernel<uint64>(const uint64
                                                                     uint64, uint64, uint64, uint64,
                                                                     double, double);
 
+template __global__ void anisotropic_diffusion_slice_kernel<signed char>(const signed char *,
+                                                                         signed char *, uint64,
+                                                                         uint64, uint64, uint64,
+                                                                         double, double);
+
+template __global__ void anisotropic_diffusion_slice_kernel<int>(const int *, int *, uint64, uint64,
+                                                                 uint64, uint64, double, double);
+
+template __global__ void anisotropic_diffusion_slice_kernel<int64>(const int64 *, int64 *, uint64,
+                                                                   uint64, uint64, uint64, double,
+                                                                   double);
+
 // Host function to launch anisotropic diffusion kernel for a single slice
 extern "C" void cuda_anisotropic_diffusion_slice(void *src_data, void *dst_data, uint64 xdim,
                                                  uint64 ydim, uint64 zdim, uint64 slice_idx,
@@ -699,6 +790,24 @@ extern "C" void cuda_anisotropic_diffusion_slice(void *src_data, void *dst_data,
     anisotropic_diffusion_slice_kernel<uint64><<<gridSize, blockSize>>>(
         static_cast<const uint64 *>(src_data), static_cast<uint64 *>(dst_data), xdim, ydim,
         slice_idx, zdim, K_para, Lambda_para);
+    break;
+
+  case Char:
+    anisotropic_diffusion_slice_kernel<signed char><<<gridSize, blockSize>>>(
+        static_cast<const signed char *>(src_data), static_cast<signed char *>(dst_data), xdim,
+        ydim, slice_idx, zdim, K_para, Lambda_para);
+    break;
+
+  case Int:
+    anisotropic_diffusion_slice_kernel<int>
+        <<<gridSize, blockSize>>>(static_cast<const int *>(src_data), static_cast<int *>(dst_data),
+                                  xdim, ydim, slice_idx, zdim, K_para, Lambda_para);
+    break;
+
+  case Int64:
+    anisotropic_diffusion_slice_kernel<int64><<<gridSize, blockSize>>>(
+        static_cast<const int64 *>(src_data), static_cast<int64 *>(dst_data), xdim, ydim, slice_idx,
+        zdim, K_para, Lambda_para);
     break;
   }
 
@@ -818,6 +927,18 @@ template __global__ void bilateral_filter_kernel<uint64>(const uint64 *, uint64 
                                                          uint64, const double *, const double *,
                                                          int, double);
 
+template __global__ void bilateral_filter_kernel<signed char>(const signed char *, signed char *,
+                                                              uint64, uint64, uint64,
+                                                              const double *, const double *, int,
+                                                              double);
+
+template __global__ void bilateral_filter_kernel<int>(const int *, int *, uint64, uint64, uint64,
+                                                      const double *, const double *, int, double);
+
+template __global__ void bilateral_filter_kernel<int64>(const int64 *, int64 *, uint64, uint64,
+                                                        uint64, const double *, const double *, int,
+                                                        double);
+
 // Host function to launch bilateral filter kernel
 extern "C" void cuda_bilateral_filter(void *src_data, void *dst_data, uint64 xdim, uint64 ydim,
                                       uint64 zdim, double radiometricSigma, double spatialSigma,
@@ -896,6 +1017,24 @@ extern "C" void cuda_bilateral_filter(void *src_data, void *dst_data, uint64 xdi
   case UInt64:
     bilateral_filter_kernel<uint64><<<gridSize, blockSize>>>(
         static_cast<const uint64 *>(src_data), static_cast<uint64 *>(dst_data), xdim, ydim, zdim,
+        d_radiometricTable, d_spatialMask, filterRadius, valueRange);
+    break;
+
+  case Char:
+    bilateral_filter_kernel<signed char><<<gridSize, blockSize>>>(
+        static_cast<const signed char *>(src_data), static_cast<signed char *>(dst_data), xdim,
+        ydim, zdim, d_radiometricTable, d_spatialMask, filterRadius, valueRange);
+    break;
+
+  case Int:
+    bilateral_filter_kernel<int><<<gridSize, blockSize>>>(
+        static_cast<const int *>(src_data), static_cast<int *>(dst_data), xdim, ydim, zdim,
+        d_radiometricTable, d_spatialMask, filterRadius, valueRange);
+    break;
+
+  case Int64:
+    bilateral_filter_kernel<int64><<<gridSize, blockSize>>>(
+        static_cast<const int64 *>(src_data), static_cast<int64 *>(dst_data), xdim, ydim, zdim,
         d_radiometricTable, d_spatialMask, filterRadius, valueRange);
     break;
   }
@@ -1006,6 +1145,23 @@ contrast_enhancement_stretching_kernel<uint64>(const uint64 *, const uint64 *, c
                                                const uint64 *, const uint64 *, const uint64 *,
                                                uint64 *, uint64, uint64, uint64, double, double);
 
+template __global__ void contrast_enhancement_stretching_kernel<signed char>(
+    const signed char *, const signed char *, const signed char *, const signed char *,
+    const signed char *, const signed char *, signed char *, uint64, uint64, uint64, double,
+    double);
+
+template __global__ void contrast_enhancement_stretching_kernel<int>(const int *, const int *,
+                                                                     const int *, const int *,
+                                                                     const int *, const int *,
+                                                                     int *, uint64, uint64, uint64,
+                                                                     double, double);
+
+template __global__ void contrast_enhancement_stretching_kernel<int64>(const int64 *, const int64 *,
+                                                                       const int64 *, const int64 *,
+                                                                       const int64 *, const int64 *,
+                                                                       int64 *, uint64, uint64,
+                                                                       uint64, double, double);
+
 // Host function to launch contrast enhancement stretching kernel
 extern "C" void cuda_contrast_enhancement_stretching(void *src_data, void *upmin_data,
                                                      void *upmax_data, void *downmin_data,
@@ -1074,6 +1230,32 @@ extern "C" void cuda_contrast_enhancement_stretching(void *src_data, void *upmin
         static_cast<const uint64 *>(upmax_data), static_cast<const uint64 *>(downmin_data),
         static_cast<const uint64 *>(downmax_data), static_cast<const uint64 *>(imgavg_data),
         static_cast<uint64 *>(result_data), xdim, ydim, zdim, lmin_global, lmax_global);
+    break;
+
+  case Char:
+    contrast_enhancement_stretching_kernel<signed char><<<gridSize, blockSize>>>(
+        static_cast<const signed char *>(src_data), static_cast<const signed char *>(upmin_data),
+        static_cast<const signed char *>(upmax_data),
+        static_cast<const signed char *>(downmin_data),
+        static_cast<const signed char *>(downmax_data),
+        static_cast<const signed char *>(imgavg_data), static_cast<signed char *>(result_data),
+        xdim, ydim, zdim, lmin_global, lmax_global);
+    break;
+
+  case Int:
+    contrast_enhancement_stretching_kernel<int><<<gridSize, blockSize>>>(
+        static_cast<const int *>(src_data), static_cast<const int *>(upmin_data),
+        static_cast<const int *>(upmax_data), static_cast<const int *>(downmin_data),
+        static_cast<const int *>(downmax_data), static_cast<const int *>(imgavg_data),
+        static_cast<int *>(result_data), xdim, ydim, zdim, lmin_global, lmax_global);
+    break;
+
+  case Int64:
+    contrast_enhancement_stretching_kernel<int64><<<gridSize, blockSize>>>(
+        static_cast<const int64 *>(src_data), static_cast<const int64 *>(upmin_data),
+        static_cast<const int64 *>(upmax_data), static_cast<const int64 *>(downmin_data),
+        static_cast<const int64 *>(downmax_data), static_cast<const int64 *>(imgavg_data),
+        static_cast<int64 *>(result_data), xdim, ydim, zdim, lmin_global, lmax_global);
     break;
   }
 
@@ -1251,6 +1433,11 @@ template __global__ void gdtv_gradient_kernel<double>(const double *, float *, u
                                                       uint64);
 template __global__ void gdtv_gradient_kernel<uint64>(const uint64 *, float *, uint64, uint64,
                                                       uint64);
+template __global__ void gdtv_gradient_kernel<signed char>(const signed char *, float *, uint64,
+                                                           uint64, uint64);
+template __global__ void gdtv_gradient_kernel<int>(const int *, float *, uint64, uint64, uint64);
+template __global__ void gdtv_gradient_kernel<int64>(const int64 *, float *, uint64, uint64,
+                                                     uint64);
 
 // Template instantiations for filter kernel
 template __global__ void gdtv_filter_kernel<unsigned char>(const unsigned char *, const float *,
@@ -1269,6 +1456,13 @@ template __global__ void gdtv_filter_kernel<double>(const double *, const float 
                                                     double *, uint64, uint64, uint64, float, float);
 template __global__ void gdtv_filter_kernel<uint64>(const uint64 *, const float *, const uint64 *,
                                                     uint64 *, uint64, uint64, uint64, float, float);
+template __global__ void gdtv_filter_kernel<signed char>(const signed char *, const float *,
+                                                         const signed char *, signed char *, uint64,
+                                                         uint64, uint64, float, float);
+template __global__ void gdtv_filter_kernel<int>(const int *, const float *, const int *, int *,
+                                                 uint64, uint64, uint64, float, float);
+template __global__ void gdtv_filter_kernel<int64>(const int64 *, const float *, const int64 *,
+                                                   int64 *, uint64, uint64, uint64, float, float);
 
 // Host function for GDTV gradient computation
 extern "C" void cuda_gdtv_gradient(void *input_data, void *grad_data, uint64 xdim, uint64 ydim,
@@ -1304,6 +1498,19 @@ extern "C" void cuda_gdtv_gradient(void *input_data, void *grad_data, uint64 xdi
   case UInt64:
     gdtv_gradient_kernel<uint64><<<gridSize, blockSize>>>(
         static_cast<const uint64 *>(input_data), static_cast<float *>(grad_data), xdim, ydim, zdim);
+    break;
+  case Char:
+    gdtv_gradient_kernel<signed char>
+        <<<gridSize, blockSize>>>(static_cast<const signed char *>(input_data),
+                                  static_cast<float *>(grad_data), xdim, ydim, zdim);
+    break;
+  case Int:
+    gdtv_gradient_kernel<int><<<gridSize, blockSize>>>(
+        static_cast<const int *>(input_data), static_cast<float *>(grad_data), xdim, ydim, zdim);
+    break;
+  case Int64:
+    gdtv_gradient_kernel<int64><<<gridSize, blockSize>>>(
+        static_cast<const int64 *>(input_data), static_cast<float *>(grad_data), xdim, ydim, zdim);
     break;
   }
 
@@ -1355,6 +1562,24 @@ extern "C" void cuda_gdtv_filter(void *input_data, void *grad_data, void *funcva
         static_cast<const uint64 *>(input_data), static_cast<const float *>(grad_data),
         static_cast<const uint64 *>(funcval_data), static_cast<uint64 *>(funcvalue_data), xdim,
         ydim, zdim, q, lbda);
+    break;
+  case Char:
+    gdtv_filter_kernel<signed char><<<gridSize, blockSize>>>(
+        static_cast<const signed char *>(input_data), static_cast<const float *>(grad_data),
+        static_cast<const signed char *>(funcval_data), static_cast<signed char *>(funcvalue_data),
+        xdim, ydim, zdim, q, lbda);
+    break;
+  case Int:
+    gdtv_filter_kernel<int><<<gridSize, blockSize>>>(
+        static_cast<const int *>(input_data), static_cast<const float *>(grad_data),
+        static_cast<const int *>(funcval_data), static_cast<int *>(funcvalue_data), xdim, ydim,
+        zdim, q, lbda);
+    break;
+  case Int64:
+    gdtv_filter_kernel<int64><<<gridSize, blockSize>>>(
+        static_cast<const int64 *>(input_data), static_cast<const float *>(grad_data),
+        static_cast<const int64 *>(funcval_data), static_cast<int64 *>(funcvalue_data), xdim, ydim,
+        zdim, q, lbda);
     break;
   }
 

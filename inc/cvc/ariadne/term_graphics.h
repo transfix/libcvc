@@ -4,7 +4,7 @@
 // Terminal pixel graphics: the encoders and the capability probe behind FtxuiBackend's Kitty and
 // Sixel image modes (roadmap §16.6).
 //
-// Two protocols put real pixels in a terminal:
+// Three protocols put real pixels in a terminal:
 //   - the kitty graphics protocol (kitty, Ghostty, WezTerm, Konsole). An image is sent once, out of
 //     band, in APC escapes (ESC _ G ... ESC \), and shown through Unicode PLACEHOLDER cells:
 //     U+10EEEE with combining diacritics that name the image row and column, in a foreground
@@ -13,6 +13,10 @@
 //   - DEC Sixel (xterm -ti vt340, foot, mlterm, WezTerm, Windows Terminal, ...). A bitmap is drawn
 //     at the cursor inside a DCS escape. It is not text, so it is re-sent after every repaint,
 //     clipped to the cells nothing covers.
+//   - iTerm2 inline images (iTerm2, WezTerm, mintty, Konsole, xterm.js's image addon): a PNG or
+//     JPEG in an OSC 1337 escape, drawn at the cursor and scaled to the cells it names. Re-sent
+//     like Sixel. It is the one of the three Windows' ConPTY passes on (it drops kitty's APC and
+//     Sixel's DCS), so it is how a Windows console program shows pixels in WezTerm.
 //
 // Everything here except probe_terminal() and cell_pixel_size() is a pure function of its
 // arguments, so it is testable without a terminal.
@@ -29,6 +33,7 @@ namespace ariadne {
 struct TermGraphics {
   bool kitty = false;         // answered a kitty graphics query
   bool sixel = false;         // its primary device attributes (DA1) list Sixel (4)
+  bool iterm = false;         // $TERM_PROGRAM names a terminal that shows iTerm2 inline images
   int cell_w = 0, cell_h = 0; // one cell's size in pixels; 0 = unknown
   int sixel_colors = 0;       // Sixel colour registers (XTSMGRAPHICS); 0 = unknown
   bool answered = false;      // the terminal answered at all (its DA1 reply arrived)
@@ -50,10 +55,12 @@ std::string sixel_colors_query();
 // does not recognise (keys typed meanwhile) are skipped.
 bool parse_probe_reply(const std::string &reply, std::uint32_t kitty_id, TermGraphics &into);
 
-// Ask the controlling terminal what it can draw. POSIX only: it opens /dev/tty, puts it in raw
-// mode for the exchange and restores it, so call it BEFORE anything else owns the terminal
-// (FtxuiBackend::run calls it before FTXUI starts). `timeout_ms` bounds the wait for a terminal
-// that never answers. Returns all-false where there is no terminal (or on Windows / wasm).
+// Ask the controlling terminal what it can draw. The queries are POSIX only: it opens /dev/tty,
+// puts it in raw mode for the exchange and restores it, so call it BEFORE anything else owns the
+// terminal (FtxuiBackend::run calls it before FTXUI starts). `timeout_ms` bounds the wait for a
+// terminal that never answers. `iterm` comes from $TERM_PROGRAM where stdout is a terminal, and
+// never on Windows (ConPTY misplaces a full-screen program's images). All-false where there is no
+// terminal (and, but for `iterm`, in the browser).
 TermGraphics probe_terminal(int timeout_ms = 300);
 
 // One cell's size in pixels from the tty's window size (TIOCGWINSZ ws_xpixel / ws_col). False
@@ -85,6 +92,18 @@ std::string kitty_transmit(const unsigned char *rgb, int w, int h, std::size_t s
 
 // Delete image `id` and free its data (a=d, d=I).
 std::string kitty_delete(std::uint32_t id);
+
+// ---- iTerm2 inline images ----
+
+// $TERM_PROGRAM's value for a terminal that shows iTerm2 inline images (WezTerm, iTerm.app,
+// mintty, ...): what probe_terminal() sets TermGraphics::iterm from.
+bool iterm_terminal(const std::string &term_program);
+
+// w x h RGB8 pixels (`stride` bytes per row, 0 = w * 3) as one inline image, drawn at the cursor
+// and scaled to cols x rows cells, the cursor left where it was (doNotMoveCursor, so an image at
+// the bottom does not scroll the screen): OSC 1337 File=inline with a JPEG of `quality` (1-100).
+std::string iterm_image(const unsigned char *rgb, int w, int h, std::size_t stride, int cols,
+                        int rows, int quality = 85);
 
 // ---- DEC Sixel ----
 

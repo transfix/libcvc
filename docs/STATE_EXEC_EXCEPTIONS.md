@@ -850,6 +850,9 @@ was added on 2026-10-19 (6):
      never sees it.
    - If slow requests are found to starve other kernels, a cap on concurrent blocking kernels
      in that pool comes first.
+   - Superseded from Stage 2 of `docs/STATE_EXEC_THREADED.md` (its Q9, decided 2026-10-26). Once
+     execution groups run on worker threads and compete with kernels for cores, the pool splits
+     into `background_cpu` and `background_io`. Until then this answer stands.
 5. **`await-all` waits for every future, then raises the first failure in list order** (3.3).
    It doesn't cancel the rest or raise at the first failure in time.
    - Why: the error reported is then the same however the timing falls, which keeps programs

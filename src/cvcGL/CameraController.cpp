@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib> // std::abs(int): click slop
+#include <cvc/ariadne/keys.h> // canonical_key: a binding may use SDL's key names or VTK's
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/SceneGraph.h>
@@ -249,9 +250,9 @@ struct CameraController::Impl {
   double moveSpeed = 5.0, sprintMultiplier = 4.0, sensitivity = 0.25;
   bool invertPitch = false, pointerCapture = false;
   double poseMirrorHz = 15.0;
-  // key bindings (VTK key syms)
-  std::string kForward = "w", kBackward = "s", kLeft = "a", kRight = "d";
-  std::string kUp = "space", kDown = "Control_L", kToggle = "Tab", kSprint = "Shift_L";
+  // key bindings, in SDL's names (canonical_key matches them with VTK's keysyms)
+  std::string kForward = "W", kBackward = "S", kLeft = "A", kRight = "D";
+  std::string kUp = "Space", kDown = "Left Ctrl", kToggle = "Tab", kSprint = "Left Shift";
 
   // cinematic track config (mirrored to state "track.*")
   std::string trackTarget;
@@ -315,7 +316,11 @@ struct CameraController::Impl {
   double mirror[kMirrored] = {};
 
   Basis basis() const { return basisFromUp(up); }
-  bool held_has(const std::string &k) const { return !k.empty() && held.count(k) > 0; }
+  // `k` is a binding: VTK's keysym ("space", "Shift_L") or SDL's name ("Space", "Left Shift"),
+  // which the Keys window writes. `held` holds canonical names.
+  bool held_has(const std::string &k) const {
+    return !k.empty() && held.count(cvc::ariadne::canonical_key(k)) > 0;
+  }
 };
 
 std::string CameraController::viewerStatePath(const std::string &scenePrefix,
@@ -955,20 +960,17 @@ bool CameraController::applyNeeded() const {
 }
 
 // ---- events ----
-static std::string normKey(std::string k) {
-  if (k.size() == 1 && k[0] >= 'A' && k[0] <= 'Z')
-    k[0] = static_cast<char>(k[0] - 'A' + 'a');
-  return k;
-}
 void CameraController::keyDown(const std::string &keySym) {
-  std::string k = normKey(keySym);
-  if (k == m_impl->kToggle) {
+  const std::string k = cvc::ariadne::canonical_key(keySym);
+  if (k == cvc::ariadne::canonical_key(m_impl->kToggle)) {
     toggleMode();
     return;
   }
   m_impl->held.insert(k);
 }
-void CameraController::keyUp(const std::string &keySym) { m_impl->held.erase(normKey(keySym)); }
+void CameraController::keyUp(const std::string &keySym) {
+  m_impl->held.erase(cvc::ariadne::canonical_key(keySym));
+}
 
 void CameraController::mouseLook(int dxPixels, int dyPixels) {
   Impl &s = *m_impl;
@@ -1146,9 +1148,7 @@ void CameraController::setPoseMirrorHz(double hz) {
 
 void CameraController::releaseHeldKeys() { m_impl->held.clear(); }
 
-bool CameraController::keyHeld(const std::string &keySym) const {
-  return m_impl->held_has(normKey(keySym));
-}
+bool CameraController::keyHeld(const std::string &keySym) const { return m_impl->held_has(keySym); }
 
 void CameraController::setPointerCapture(bool on) {
   Impl &s = *m_impl;

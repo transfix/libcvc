@@ -778,6 +778,32 @@ bool isColorBy(const std::string &s) {
   return s == "none" || s == "colors" || s == "function" || s == "k1" || s == "k2" || s == "mean" ||
          s == "gaussian";
 }
+
+// colormap_rgb through a colour table (setColorTable) instead of a colormap: entry i of the
+// table's n sits at lo + i (hi - lo) / (n - 1), linear between entries, clamped at the ends.
+std::vector<unsigned char> tableRgb(const std::vector<double> &values,
+                                    const std::vector<float> &table, double lo, double hi) {
+  const std::size_t n = table.size() / 3;
+  std::vector<unsigned char> rgb(3 * values.size());
+  const double span = hi - lo;
+  const auto byte = [](double c) {
+    return static_cast<unsigned char>(std::lround(255.0 * std::clamp(c, 0.0, 1.0)));
+  };
+  for (std::size_t i = 0; i < values.size(); ++i) {
+    unsigned char *out = &rgb[3 * i];
+    if (!std::isfinite(values[i])) {
+      out[0] = out[1] = out[2] = 128;
+      continue;
+    }
+    const double t = span > 0.0 ? std::clamp((values[i] - lo) / span, 0.0, 1.0) : 0.5;
+    const double x = t * static_cast<double>(n - 1);
+    const std::size_t a = std::min(static_cast<std::size_t>(x), n - 2);
+    const double f = x - static_cast<double>(a);
+    for (int c = 0; c < 3; ++c)
+      out[c] = byte((1.0 - f) * table[3 * a + c] + f * table[3 * (a + 1) + c]);
+  }
+  return rgb;
+}
 } // namespace
 
 void GeometryNode::setScalarField(const std::vector<double> &perVertex, cvc::colormap_kind cm,
@@ -821,6 +847,17 @@ void GeometryNode::setColorMap(cvc::colormap_kind cm) {
     writeScalarState();
     if (changed)
       recolor();
+  });
+}
+
+void GeometryNode::setColorTable(const std::vector<float> &rgb) {
+  runOnMainThread([this, table = rgb]() mutable {
+    if (table.size() < 6 || table.size() % 3 != 0)
+      table.clear();
+    if (table == m_colorTable)
+      return;
+    m_colorTable = std::move(table);
+    recolor();
   });
 }
 
@@ -1034,7 +1071,8 @@ void GeometryNode::applyVertexColors(const cvc::geometry &geom, bool inPlace) {
     }
     m_scalarRangeUsed = {lo, hi};
     if (!m_useSingleColor) {
-      rgb = cvc::colormap_rgb(field, m_colorMap, lo, hi);
+      rgb = m_colorTable.empty() ? cvc::colormap_rgb(field, m_colorMap, lo, hi)
+                                 : tableRgb(field, m_colorTable, lo, hi);
       if (rgb.size() != 3 * n)
         rgb.clear();
     }
