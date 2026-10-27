@@ -24,6 +24,10 @@
 //   - Asking for U changes nothing: every rollout is byte-identical with and without it.
 //   - On the point-mass material surrogate, U is the integrator's potential energy: KE + U falls
 //     by the damping's work to O(dt).
+//   - The per-step energy books (the white paper's Eq. 38): r_E is second order and its sharp
+//     check third; the clamp's cross term closes the books; an unlogged force fails the cheap
+//     bound and explicit Euler the sharp check. sim_world books context work across a tick and
+//     min_gap's push as projection work.
 //   - NavPotential.Golden writes or checks tests/data/nav_potential_golden.json, the values
 //     GRL-SNAM's torch twin (grl_snam/nav_potential.py) is held to.
 
@@ -42,12 +46,14 @@
 #include <cvc/nav/detail/nav_potential.h>
 #include <cvc/nav/drive.h>
 #include <cvc/nav/material.h>
+#include <cvc/nav/sim_world.h>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <gtest/gtest.h>
 #include <random>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -497,6 +503,32 @@ TEST(NavPotential, MaterialRolloutsAreByteIdenticalWithTheRecord) {
     only.potential = U2.data();
     run_site(f, site, &only);
     EXPECT_EQ(std::memcmp(U.data(), U2.data(), U.size() * 4), 0);
+    // The per-step books: the point mass keeps them, still byte-identical; the vehicles refuse.
+    std::vector<float> ke(U.size()), steps(7 * f.B * maxH);
+    rollout_energy books = e;
+    books.kinetic = ke.data();
+    float *col[7];
+    for (int c = 0; c < 7; ++c)
+      col[c] = steps.data() + c * f.B * maxH;
+    books.w_damp = col[0];
+    books.w_port = col[1];
+    books.w_clamp = col[2];
+    books.w_cross = col[3];
+    books.residual = col[4];
+    books.residual_sharp = col[5];
+    books.bound = col[6];
+    books.sharp = true;
+    if (site != mat_site::surrogate) {
+      EXPECT_THROW(run_site(f, site, &books), std::invalid_argument) << name_of(site);
+      continue;
+    }
+    const mat_run c = run_site(f, site, &books);
+    for (const auto &pr :
+         {std::make_pair(&a.o, &c.o), std::make_pair(&a.a, &c.a), std::make_pair(&a.mc, &c.mc),
+          std::make_pair(&a.cr, &c.cr), std::make_pair(&a.hc, &c.hc), std::make_pair(&a.al, &c.al)})
+      EXPECT_EQ(std::memcmp(pr.first->data(), pr.second->data(), pr.first->size() * 4), 0);
+    for (const float x : steps)
+      EXPECT_TRUE(std::isfinite(x));
   }
 }
 
@@ -543,6 +575,379 @@ TEST(NavPotential, MaterialSurrogateEnergyBalance) {
       EXPECT_LT(worst, 0.7 * err_prev) << "the balance error does not shrink with dt";
     EXPECT_LT(worst, 0.05);
     err_prev = worst;
+  }
+}
+
+// ── the per-step energy books (rollout_energy, book_step) ────────────────────────────────
+
+namespace {
+
+// One step (H = 1) of the material surrogate from the fixture's start at step dt, with the
+// per-step books and the sharp check, a port force F [B*2] on.
+struct step_record {
+  std::vector<float> U, Fc, ke, w_damp, w_port, w_clamp, w_cross, r, r_sharp, bound;
+};
+step_record surrogate_step_books(material_batch_fixture f, float dt, const std::vector<float> &F) {
+  for (int b = 0; b < f.B; ++b) {
+    f.dt[b] = dt;
+    f.H[b] = 1;
+  }
+  step_record k;
+  for (auto *x : {&k.w_damp, &k.w_port, &k.w_clamp, &k.w_cross, &k.r, &k.r_sharp, &k.bound})
+    x->assign(f.B, NAN);
+  k.U.assign(2 * f.B, NAN);
+  k.ke.assign(2 * f.B, NAN);
+  k.Fc.assign(2 * f.B, NAN);
+  rollout_energy e;
+  e.potential = k.U.data();
+  e.force = k.Fc.data();
+  e.kinetic = k.ke.data();
+  e.w_damp = k.w_damp.data();
+  e.w_port = k.w_port.data();
+  e.w_clamp = k.w_clamp.data();
+  e.w_cross = k.w_cross.data();
+  e.residual = k.r.data();
+  e.residual_sharp = k.r_sharp.data();
+  e.bound = k.bound.data();
+  e.sharp = true;
+  material_ext ext;
+  ext.F = F.data();
+  ext.steps = 1;
+  std::vector<float> o = f.o, v = f.v, mc(f.B), cr(f.B), hc(f.B), al(f.B);
+  integrate_surrogate_material(o.data(), v.data(), f.goal.data(), f.C.data(), f.R.data(),
+                               f.mask.data(), f.alphas.data(), f.beta.data(), f.gamma.data(),
+                               f.ls.data(), f.lh.data(), f.patch.data(), f.rr.data(), f.dh.data(),
+                               f.dt.data(), f.H.data(), f.B, f.N, f.Hp, f.Wp, f.p, mc.data(),
+                               cr.data(), hc.data(), al.data(), 1, &ext, &e);
+  return k;
+}
+
+double log2_ratio(double a, double b) { return std::log(a / b) / std::log(2.0); }
+
+} // namespace
+
+// The white paper's Eq. 38 on the material surrogate, one step from a moving start with damping
+// and a port: r_E scales as dt^2 and r_E - r_hat_E as dt^3, (r_E - r_hat_E)/dt^3 staying within
+// a factor of 2 of each agent's constant as dt halves from 0.02 to 0.0025.
+TEST(NavPotential, SurrogateEnergyIdentityPerStep) {
+  material_batch_fixture f(1, 29);
+  std::vector<float> F(2 * f.B);
+  for (int b = 0; b < f.B; ++b) {
+    f.v[2 * b] = 2.5f * std::cos(0.7f * b);
+    f.v[2 * b + 1] = 2.5f * std::sin(0.7f * b);
+    F[2 * b] = 0.8f * std::sin(1.3f * b);
+    F[2 * b + 1] = -0.6f * std::cos(0.9f * b);
+  }
+  // The books' double evaluator is the float rollout's potential and force law.
+  {
+    const step_record k = surrogate_step_books(f, 0.01f, F);
+    for (int b = 0; b < f.B; ++b) {
+      const detail::material_eval<double> e = detail::material_energy<double>(
+          f.o[2 * b], f.o[2 * b + 1], f.goal[2 * b], f.goal[2 * b + 1], &f.C[2 * b * f.N],
+          &f.R[b * f.N], &f.mask[b * f.N], &f.alphas[b * f.N], f.N, f.beta[b], f.ls[b], f.lh[b],
+          f.dh[b], f.p.margin_factor * f.rr[b], &f.patch[6 * b * f.Hp * f.Wp], f.Hp, f.Wp,
+          f.o[2 * b], f.o[2 * b + 1], f.p.k_sharp, f.p.d_hat_sdf);
+      EXPECT_NEAR(e.U, k.U[2 * b], 1e-5 * std::max(1.0, std::fabs(e.U))) << "agent " << b;
+      EXPECT_LE(rel_residual(e.fx, e.fy, -k.Fc[2 * b], -k.Fc[2 * b + 1], 1.0), 1e-5)
+          << "agent " << b;
+      const double vx = f.v[2 * b], vy = f.v[2 * b + 1];
+      EXPECT_NEAR(k.ke[2 * b], 0.5 * (vx * vx + vy * vy), 1e-6);
+      EXPECT_EQ(k.w_clamp[b], 0.0f); // no speed clamp in this rollout
+      EXPECT_EQ(k.w_cross[b], 0.0f);
+    }
+  }
+  const std::vector<float> dts = {0.02f, 0.01f, 0.005f, 0.0025f};
+  std::vector<step_record> rec;
+  for (const float dt : dts)
+    rec.push_back(surrogate_step_books(f, dt, F));
+  std::vector<double> sum_r(dts.size(), 0.0), sum_d(dts.size(), 0.0);
+  double port = 0.0;
+  for (std::size_t k = 0; k < dts.size(); ++k)
+    for (int b = 0; b < f.B; ++b) {
+      const double r = rec[k].r[b], d = r - rec[k].r_sharp[b];
+      EXPECT_LE(std::fabs(r), rec[k].bound[b]) << "dt " << dts[k] << ", agent " << b;
+      sum_r[k] += std::fabs(r);
+      sum_d[k] += std::fabs(d);
+      port += std::fabs(rec[k].w_port[b]);
+    }
+  EXPECT_GT(port, 0.0);
+  // Per agent: r_E / dt^2 and (r_E - r_hat_E) / dt^3 within a factor of 2 per halving of dt. The
+  // constants are the limits of Taylor expansions, so this asks the coarsest step to be in their
+  // range: at most a quarter of the velocity changed by it (two agents sit so deep in a barrier
+  // that they need a finer dt), and r_E / dt^2 not cancelling (|c2| above 5% of the bound's
+  // scale).
+  int checked2 = 0, checked3 = 0;
+  double worst2 = 1.0, worst3 = 1.0;
+  const double h_fine = dts.back();
+  for (int b = 0; b < f.B; ++b) {
+    const double ax = rec.back().Fc[2 * b] - f.gamma[b] * f.v[2 * b] + F[2 * b];
+    const double ay = rec.back().Fc[2 * b + 1] - f.gamma[b] * f.v[2 * b + 1] + F[2 * b + 1];
+    if (dts[0] * std::hypot(ax, ay) > 0.25 * std::hypot(f.v[2 * b], f.v[2 * b + 1]))
+      continue;
+    const auto c2 = [&](std::size_t k) { return rec[k].r[b] / (dts[k] * dts[k]); };
+    const auto c3 = [&](std::size_t k) {
+      return (rec[k].r[b] - static_cast<double>(rec[k].r_sharp[b])) / std::pow(dts[k], 3);
+    };
+    const bool cond2 =
+        std::fabs(c2(dts.size() - 1)) > 0.05 * rec.back().bound[b] / (h_fine * h_fine);
+    for (std::size_t k = 0; k + 1 < dts.size(); ++k) {
+      const double q2 = c2(k) / c2(k + 1), q3 = c3(k) / c3(k + 1);
+      if (cond2) {
+        EXPECT_GE(q2, 0.5) << "r_E / dt^2, agent " << b << ", dt " << dts[k];
+        EXPECT_LE(q2, 2.0) << "r_E / dt^2, agent " << b << ", dt " << dts[k];
+        worst2 = std::max(worst2, std::max(q2, 1.0 / q2));
+        ++checked2;
+      }
+      EXPECT_GE(q3, 0.5) << "(r_E - r_hat_E) / dt^3, agent " << b << ", dt " << dts[k];
+      EXPECT_LE(q3, 2.0) << "(r_E - r_hat_E) / dt^3, agent " << b << ", dt " << dts[k];
+      worst3 = std::max(worst3, std::max(q3, 1.0 / q3));
+      ++checked3;
+    }
+  }
+  EXPECT_GE(checked2, 3 * (2 * f.B / 3));
+  EXPECT_GE(checked3, 3 * (5 * f.B / 6));
+  for (std::size_t k = 0; k + 1 < dts.size(); ++k) {
+    const double p2 = log2_ratio(sum_r[k], sum_r[k + 1]), p3 = log2_ratio(sum_d[k], sum_d[k + 1]);
+    std::printf("  books, dt %.4f -> %.4f: order of r_E %.3f, of r_E - r_hat_E %.3f\n", dts[k],
+                dts[k + 1], p2, p3);
+    EXPECT_NEAR(p2, 2.0, 0.2);
+    EXPECT_NEAR(p3, 3.0, 0.3);
+  }
+  std::printf("  books: %d/%d agent-halvings checked; worst ratio %.3f (r_E/dt^2), %.3f "
+              "((r_E - r_hat_E)/dt^3)\n",
+              checked2, checked3, worst2, worst3);
+}
+
+namespace {
+
+// The coef_train surrogate's conservative force at o (F_bar + F_goal = -grad surr_potential), as
+// bike_control returns it.
+void surr_force(const diff::field &F, float ox, float oy, float gx, float gy, float al, float be,
+                const diff::bike_veh &bv, double &fx, double &fy) {
+  float force[2], dc, ac;
+  diff::bike_control(F, ox, oy, 0.3f, 0.2f, gx, gy, al, be, 1.0f, bv, dc, ac, force);
+  fx = force[0];
+  fy = force[1];
+}
+
+} // namespace
+
+// diff::surr_step with its vmax clamp cutting hard: the position moves with vt, not v', and the
+// identity closes only once W_cross (and W_clamp) are booked; left out, the step fails the bound.
+TEST(NavPotential, ClampWorkClosesTheBooks) {
+  const linear_sdf wall(0.6, -0.8, -3.0);
+  const diff::field F = wall.diff_field();
+  const float rr = 0.15f, d_hat = 0.35f, hdt = 0.03f, vmax = 0.5f, ga = 0.4f;
+  diff::bike_veh bv{};
+  bv.rr = rr;
+  bv.d_hat = d_hat;
+  bv.vmax = 50.0f;
+  bv.L = 0.035f;
+  bv.delta_max = 0.6f;
+  bv.a_max = 1.5f;
+  bv.a_lat_max = 1.0f;
+  bv.k_steer = 0.8f;
+  bv.hdt = hdt;
+  bv.allow_reverse = 1;
+  std::mt19937 rng(5);
+  std::uniform_real_distribution<float> u(-0.8f, 0.8f), co(0.2f, 3.0f), turn(-0.6f, 0.6f);
+  int n = 0, closes = 0, fails_without_cross = 0, near_wall = 0;
+  double worst = 0.0, worst_sharp = 0.0;
+  for (int k = 0; k < 400; ++k) {
+    const float ox = u(rng), oy = u(rng), gx = u(rng), gy = u(rng), al = co(rng), be = co(rng);
+    const float phi = diff::sample_fwd(F, ox, oy).phi;
+    if (phi - rr < 0.05f)
+      continue;
+    double f0x, f0y;
+    surr_force(F, ox, oy, gx, gy, al, be, bv, f0x, f0y);
+    const double fn = std::sqrt(f0x * f0x + f0y * f0y);
+    if (fn < 0.1)
+      continue;
+    // Moving at 3 vmax, roughly along the force, so the clamp cuts v' to a third.
+    const double a = std::atan2(f0y, f0x) + turn(rng);
+    const float vx = static_cast<float>(1.5 * std::cos(a)),
+                vy = static_cast<float>(1.5 * std::sin(a));
+    float ox1, oy1, vx1, vy1;
+    diff::surr_step(F, ox, oy, vx, vy, gx, gy, al, be, ga, rr, d_hat, vmax, hdt, ox1, oy1, vx1,
+                    vy1);
+    double f1x, f1y;
+    surr_force(F, ox1, oy1, gx, gy, al, be, bv, f1x, f1y);
+    book_step_args s;
+    s.dt = hdt;
+    s.gamma = ga;
+    s.v[0] = vx;
+    s.v[1] = vy;
+    s.vp[0] = vx + hdt * (f0x - ga * vx);
+    s.vp[1] = vy + hdt * (f0y - ga * vy);
+    s.vt[0] = vx1;
+    s.vt[1] = vy1;
+    s.dx[0] = static_cast<double>(ox1) - ox;
+    s.dx[1] = static_cast<double>(oy1) - oy;
+    s.g[0] = -f0x;
+    s.g[1] = -f0y;
+    s.g1[0] = -f1x;
+    s.g1[1] = -f1y;
+    s.U0 = diff::surr_potential(F, ox, oy, gx, gy, al, be, rr, d_hat).total();
+    s.U1 = diff::surr_potential(F, ox1, oy1, gx, gy, al, be, rr, d_hat).total();
+    // vt' grad^2 U vt from the force along vt, as the rollout's sharp check takes it.
+    const double h = 0.5 * hdt;
+    double fpx, fpy, fmx, fmy;
+    surr_force(F, static_cast<float>(ox + h * vx1), static_cast<float>(oy + h * vy1), gx, gy, al,
+               be, bv, fpx, fpy);
+    surr_force(F, static_cast<float>(ox - h * vx1), static_cast<float>(oy - h * vy1), gx, gy, al,
+               be, bv, fmx, fmy);
+    s.vHv = -(vx1 * (fpx - fmx) + vy1 * (fpy - fmy)) / (2.0 * h);
+    const step_books bk = book_step(s);
+    const double vp = std::hypot(s.vp[0], s.vp[1]);
+    EXPECT_GT(vp, 2.0 * vmax); // the clamp cut hard
+    EXPECT_NEAR(std::hypot(vx1, vy1), vmax, 1e-5);
+    EXPECT_GT(bk.w_clamp, 0.0);
+    closes += std::fabs(bk.residual) <= bk.bound;
+    fails_without_cross += std::fabs(bk.residual + bk.w_cross) > bk.bound;
+    worst = std::max(worst, std::fabs(bk.residual) / bk.bound);
+    worst_sharp = std::max(worst_sharp, std::fabs(bk.residual - bk.residual_sharp) / bk.bound);
+    near_wall += phi - rr < d_hat;
+    ++n;
+  }
+  EXPECT_GT(n, 200);
+  EXPECT_GT(near_wall, 20);
+  EXPECT_EQ(closes, n) << "with W_cross booked every clamped step closes within the bound";
+  EXPECT_GE(fails_without_cross, 9 * n / 10) << "left out, W_cross is work of order dt";
+  EXPECT_LT(worst_sharp, 0.25); // the sharp check: third order against the bound's second
+  std::printf("  clamp: %d steps (%d in the barrier); |r_E|/bound worst %.3f; without W_cross %d "
+              "fail; |r_E - r_hat_E|/bound worst %.3f\n",
+              n, near_wall, worst, fails_without_cross, worst_sharp);
+}
+
+// A port force the books leave out is work of order dt, against a bound of order dt^2: on the
+// material surrogate with F_ext booked every step closes within the bound, and with it unbooked
+// (r_E + W_port) the steps fail it.
+TEST(NavPotential, UnloggedForceRaisesTheAlarm) {
+  const int steps = 10;
+  material_batch_fixture f(steps, 13);
+  std::vector<float> F(2 * f.B * steps);
+  for (int b = 0; b < f.B; ++b) {
+    f.dt[b] = 0.002f;
+    const float c = std::cos(0.7f * b), s = std::sin(0.7f * b);
+    f.v[2 * b] = c;
+    f.v[2 * b + 1] = s;
+    for (int k = 0; k < steps; ++k) { // 3 units along the start's heading
+      F[2 * (b * steps + k)] = 3.0f * c;
+      F[2 * (b * steps + k) + 1] = 3.0f * s;
+    }
+  }
+  std::vector<float> r(f.B * steps), bound(f.B * steps), wp(f.B * steps);
+  rollout_energy e;
+  e.residual = r.data();
+  e.bound = bound.data();
+  e.w_port = wp.data();
+  material_ext ext;
+  ext.F = F.data();
+  ext.steps = steps;
+  std::vector<float> o = f.o, v = f.v, mc(f.B), cr(f.B), hc(f.B), al(f.B);
+  integrate_surrogate_material(o.data(), v.data(), f.goal.data(), f.C.data(), f.R.data(),
+                               f.mask.data(), f.alphas.data(), f.beta.data(), f.gamma.data(),
+                               f.ls.data(), f.lh.data(), f.patch.data(), f.rr.data(), f.dh.data(),
+                               f.dt.data(), f.H.data(), f.B, f.N, f.Hp, f.Wp, f.p, mc.data(),
+                               cr.data(), hc.data(), al.data(), 1, &ext, &e);
+  int booked = 0, alarms = 0;
+  double worst_unbooked = 1e30;
+  for (int k = 0; k < f.B * steps; ++k) {
+    booked += std::fabs(r[k]) <= bound[k];
+    const double unbooked = std::fabs(static_cast<double>(r[k]) + wp[k]) / bound[k];
+    alarms += unbooked > 1.0;
+    worst_unbooked = std::min(worst_unbooked, unbooked);
+  }
+  EXPECT_EQ(booked, f.B * steps);
+  EXPECT_GE(alarms, 95 * f.B * steps / 100);
+  std::printf("  unlogged port: %d/%d steps raise the alarm; smallest |r_E + W_port|/bound %.2f\n",
+              alarms, f.B * steps, worst_unbooked);
+}
+
+// The explicit Euler of the native multi-start rollout (integrate_surrogate_v2, semi_implicit
+// false) gains energy every step, by exactly w^2 dt^2 on a harmonic mode: a bias. Per step its
+// residual is second order like the semi-implicit one's, so the cheap bound does not see it; the
+// sharp check does, sitting dt^2 |g|^2 off r_E where the semi-implicit step meets it exactly (a
+// quadratic potential has a constant Hessian). Circular orbits of a goal spring, one period.
+TEST(NavPotential, ExplicitEulerRaisesTheAlarm) {
+  const int B = 8;
+  const float beta = 4.0f, dt = 0.02f; // w = 2, w dt = 0.04
+  const double w = std::sqrt(static_cast<double>(beta)), gain = w * w * dt * dt;
+  const int S = static_cast<int>(std::lround(6.283185307179586 / (w * dt)));
+  std::vector<float> o0(2 * B), v0(2 * B), goal(2 * B, 0.0f);
+  for (int b = 0; b < B; ++b) {
+    const float rad = 0.5f + 0.1f * b, a = 0.8f * b, sgn = b % 2 ? 1.0f : -1.0f;
+    o0[2 * b] = rad * std::cos(a);
+    o0[2 * b + 1] = rad * std::sin(a);
+    v0[2 * b] = -sgn * static_cast<float>(w) * rad * std::sin(a); // circular: |v| = w |x|
+    v0[2 * b + 1] = sgn * static_cast<float>(w) * rad * std::cos(a);
+  }
+  const std::vector<float> C(2 * B, 50.0f), R(B, 0.0f), al(B, 0.0f), be(B, beta), ga(B, 0.0f);
+  const std::vector<float> rr(B, 0.0f), dh(B, 1.0f), dtv(B, dt);
+  const std::vector<std::uint8_t> mask(B, 0); // no discs: U = beta/2 |x - g|^2
+  const std::vector<int> H(B, 1);
+  for (const bool semi : {false, true}) {
+    geom_rollout_params p;
+    p.semi_implicit = semi;
+    std::vector<float> o = o0, v = v0, mc(B);
+    std::vector<double> H0(B);
+    for (int b = 0; b < B; ++b)
+      H0[b] = 0.5 * (v[2 * b] * v[2 * b] + v[2 * b + 1] * v[2 * b + 1]) +
+              0.5 * beta * (o[2 * b] * o[2 * b] + o[2 * b + 1] * o[2 * b + 1]);
+    double worst_gain = 0.0, sharp_lo = 1e30, sharp_hi = 0.0, cheap_hi = 0.0;
+    int positive = 0, n = 0;
+    for (int s = 0; s < S; ++s) {
+      const std::vector<float> op = o, vp = v;
+      integrate_surrogate_v2(o.data(), v.data(), goal.data(), C.data(), R.data(), mask.data(),
+                             al.data(), be.data(), ga.data(), rr.data(), dh.data(), dtv.data(),
+                             H.data(), B, 1, p, mc.data());
+      for (int b = 0; b < B; ++b) {
+        book_step_args a;
+        a.dt = dt;
+        for (int c = 0; c < 2; ++c) {
+          a.v[c] = vp[2 * b + c];
+          a.vp[c] = a.vt[c] = v[2 * b + c];
+          a.dx[c] = static_cast<double>(o[2 * b + c]) - op[2 * b + c];
+          a.g[c] = beta * static_cast<double>(op[2 * b + c]);
+          a.g1[c] = beta * static_cast<double>(o[2 * b + c]);
+        }
+        const double x0 = op[2 * b], y0 = op[2 * b + 1], x1 = o[2 * b], y1 = o[2 * b + 1];
+        a.U0 = 0.5 * beta * (x0 * x0 + y0 * y0);
+        a.U1 = 0.5 * beta * (x1 * x1 + y1 * y1);
+        a.vHv = beta * (a.vt[0] * a.vt[0] + a.vt[1] * a.vt[1]);
+        const step_books k = book_step(a);
+        const double Hs = 0.5 * (a.v[0] * a.v[0] + a.v[1] * a.v[1]) + a.U0;
+        const double sharp = (k.residual - k.residual_sharp) / k.bound;
+        positive += k.residual > 0.0;
+        if (!semi)
+          worst_gain = std::max(worst_gain, std::fabs(k.delta_H / Hs - gain) / gain);
+        sharp_lo = std::min(sharp_lo, sharp);
+        sharp_hi = std::max(sharp_hi, std::fabs(sharp));
+        cheap_hi = std::max(cheap_hi, std::fabs(k.residual) / k.bound);
+        if (semi) {
+          EXPECT_LE(std::fabs(k.residual), k.bound) << "step " << s << ", agent " << b;
+        }
+        ++n;
+      }
+    }
+    double drift = 0.0;
+    for (int b = 0; b < B; ++b) {
+      const double H1 = 0.5 * (v[2 * b] * v[2 * b] + v[2 * b + 1] * v[2 * b + 1]) +
+                        0.5 * beta * (o[2 * b] * o[2 * b] + o[2 * b + 1] * o[2 * b + 1]);
+      drift = std::max(drift, std::fabs(H1 / H0[b] - (semi ? 1.0 : std::pow(1.0 + gain, S))));
+    }
+    if (!semi) {
+      EXPECT_EQ(positive, n) << "explicit Euler gains energy at every step";
+      EXPECT_LT(worst_gain, 2e-3) << "the gain per step is w^2 dt^2";
+      EXPECT_LT(drift, 1e-3); // (1 + w^2 dt^2)^S over the period
+      EXPECT_GT(sharp_lo, 0.3) << "the sharp check alarms at every step";
+    } else {
+      EXPECT_LT(sharp_hi, 1e-3) << "the semi-implicit step meets the sharp check";
+      EXPECT_LT(drift, 2.0 * w * dt); // the modified energy's O(dt) offset, not a gain
+    }
+    std::printf("  %s Euler, %d steps: |H_T/H_0 - expected| %.2e; (r_E - r_hat_E)/bound from "
+                "%.2e, |.| up to %.2e; |r_E|/bound up to %.3f\n",
+                semi ? "semi-implicit" : "explicit", S, drift, sharp_lo, sharp_hi, cheap_hi);
   }
 }
 
@@ -1080,4 +1485,126 @@ TEST(NavPotential, Golden) {
     EXPECT_LE(std::fabs(now[k] - golden[k]),
               1e-6 * std::max(1.0, std::max(std::fabs(now[k]), std::fabs(golden[k]))))
         << "value " << k << ": golden " << golden[k] << ", now " << now[k];
+}
+
+// ── the tick's books in sim_world (drive_telemetry) ─────────────────────────────────────────
+
+namespace {
+
+// An open 200 m field (the NavDriveTelemetry setup), normalized = world * 0.02.
+sim_world::config open_field() {
+  sim_world::config cfg;
+  cfg.rows = 64;
+  cfg.cols = 64;
+  cfg.min_x = cfg.min_y = -100;
+  cfg.max_x = cfg.max_y = 100;
+  cfg.scale = 0.02;
+  cfg.veh.rr = 3.0f;
+  cfg.veh.d_hat = 7.0f;
+  cfg.veh.dt = 0.06f;
+  cfg.veh.nsub = 1;
+  cfg.freeze_sense = true;
+  return cfg;
+}
+
+struct tick_run {
+  std::vector<drive_telemetry> first, before, after;
+  std::vector<float> pos;
+};
+
+// Three ticks, then (optionally) agents 0 and 2 retargeted 1 normalized unit ahead of where they
+// are, then one more tick.
+tick_run run_goal_change(bool capture, bool retarget) {
+  const sim_world::config cfg = open_field();
+  const int N = 4;
+  std::vector<std::uint8_t> occ(static_cast<std::size_t>(cfg.rows) * cfg.cols, 0);
+  sim_world w = sim_world::from_occupancy(cfg, occ.data(), coef_mlp::default_biased(), N, 7);
+  w.set_capture_drive_telemetry(capture);
+  tick_run r;
+  const auto tel = [&](std::vector<drive_telemetry> &out) {
+    if (capture)
+      out.assign(w.drive_telemetry_data(), w.drive_telemetry_data() + N);
+  };
+  w.step(1);
+  tel(r.first);
+  w.step(1);
+  w.step(1);
+  tel(r.before);
+  std::vector<float> pos(2 * N), hd(N), sp(N);
+  std::vector<int> md(N);
+  std::vector<std::uint8_t> rc(N);
+  if (retarget) {
+    w.snapshot(pos.data(), hd.data(), sp.data(), md.data(), rc.data());
+    for (const int i : {0, 2})
+      w.retarget(i, static_cast<float>(pos[2 * i] * cfg.scale) + 1.0f,
+                 static_cast<float>(pos[2 * i + 1] * cfg.scale));
+  }
+  w.step(1);
+  tel(r.after);
+  w.snapshot(pos.data(), hd.data(), sp.data(), md.data(), rc.data());
+  r.pos = pos;
+  return r;
+}
+
+} // namespace
+
+// A goal changed between two ticks is context work: U at the new tick's start pose with the new
+// context (drive_telemetry::potential) minus U at the same pose with the old one, which, with
+// nothing moving the agents between the ticks, is the old tick's potential_end bit for bit.
+// Capturing the books changes no output.
+TEST(NavPotential, SimWorldBooksTheContextWorkOfAGoalChange) {
+  const tick_run off = run_goal_change(false, true);
+  const tick_run on = run_goal_change(true, true);
+  const tick_run still = run_goal_change(true, false);
+  ASSERT_EQ(off.pos.size(), on.pos.size());
+  EXPECT_EQ(std::memcmp(off.pos.data(), on.pos.data(), on.pos.size() * 4), 0);
+  const int N = static_cast<int>(on.after.size());
+  for (int i = 0; i < N; ++i) {
+    EXPECT_EQ(on.first[i].context_work, 0.0f) << "no context before the first captured tick";
+    // No override, no min_gap: nothing moves an agent after the drive.
+    EXPECT_EQ(on.before[i].projection_work, 0.0f);
+    EXPECT_EQ(on.after[i].projection_work, 0.0f);
+    // The ledger closes across the tick boundary exactly.
+    EXPECT_EQ(on.after[i].context_work, on.after[i].potential - on.before[i].potential_end)
+        << "agent " << i;
+    EXPECT_EQ(still.after[i].context_work, still.after[i].potential - still.before[i].potential_end)
+        << "agent " << i;
+    const bool moved = i == 0 || i == 2;
+    std::printf("  agent %d%s: context work %+.4f (without the goal change %+.4f), U %.4f -> "
+                "%.4f\n",
+                i, moved ? " (retargeted)" : "", on.after[i].context_work,
+                still.after[i].context_work, on.before[i].potential_end, on.after[i].potential);
+    if (moved) {
+      // The carrot comes in from 1.8 to 1 unit: the goal spring's energy drops.
+      EXPECT_LT(on.after[i].context_work, 0.0f);
+      EXPECT_GT(std::fabs(on.after[i].context_work),
+                10.0f * std::fabs(still.after[i].context_work));
+    } else {
+      EXPECT_EQ(on.after[i].context_work, still.after[i].context_work);
+    }
+  }
+}
+
+// min_gap's push after the drive is projection work: potential_end minus U where the drive left
+// the agent, nonzero for the pushed pair and exactly zero for the rest.
+TEST(NavPotential, SimWorldBooksTheMinGapPushAsProjectionWork) {
+  sim_world::config cfg = open_field();
+  cfg.min_gap = 0.5f;
+  const int N = 4;
+  std::vector<std::uint8_t> occ(static_cast<std::size_t>(cfg.rows) * cfg.cols, 0);
+  sim_world w = sim_world::from_occupancy(cfg, occ.data(), coef_mlp::default_biased(), N, 7);
+  w.set_capture_drive_telemetry(true);
+  ASSERT_TRUE(w.set_pose(0, 0.0f, 0.0f, 0.0f));
+  ASSERT_TRUE(w.set_pose(1, 0.1f, 0.0f, 0.0f));
+  ASSERT_TRUE(w.set_pose(2, -1.5f, 1.5f, 0.0f));
+  ASSERT_TRUE(w.set_pose(3, 1.5f, -1.5f, 0.0f));
+  w.step(1);
+  const drive_telemetry *t = w.drive_telemetry_data();
+  ASSERT_NE(t, nullptr);
+  EXPECT_NE(t[0].projection_work, 0.0f);
+  EXPECT_NE(t[1].projection_work, 0.0f);
+  EXPECT_EQ(t[2].projection_work, 0.0f);
+  EXPECT_EQ(t[3].projection_work, 0.0f);
+  std::printf("  min_gap push: projection work %+.4f, %+.4f\n", t[0].projection_work,
+              t[1].projection_work);
 }

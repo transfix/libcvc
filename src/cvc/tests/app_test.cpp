@@ -627,6 +627,32 @@ TEST_F(AppTest, UniqueThreadKey) {
   ctx.threads(key1, thread_ptr());
 }
 
+// thread_info and thread_feedback call into the app, and each of those calls is an interruption
+// point. An interrupt that arrives while they keep their books must stay pending for the thread's
+// next interruption point. They used to throw it there and swallow it, which clears the request:
+// the thread kept running, and ~app gave up joining it and freed the app under it.
+TEST_F(AppTest, ThreadBookkeepingKeepsAnInterruptPending) {
+  std::atomic<bool> go{false};
+  std::atomic<bool> stopped{false};
+  boost::thread t([&]() {
+    while (!go.load()) // yield is not an interruption point
+      boost::this_thread::yield();
+    {
+      thread_feedback feedback(ctx); // and the thread_info inside it
+      thread_info info(ctx, "nested");
+    }
+    try {
+      boost::this_thread::interruption_point();
+    } catch (boost::thread_interrupted &) {
+      stopped = true;
+    }
+  });
+  t.interrupt(); // before the thread can reach any of the bookkeeping
+  go = true;
+  t.join();
+  EXPECT_TRUE(stopped.load());
+}
+
 // ===========================
 // Listify Tests
 // ===========================
