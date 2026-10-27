@@ -24,7 +24,9 @@
 #include <cvc/state/state_exec/state_value_codec.h>
 #include <gtest/gtest.h>
 #include <memory>
+#include <mutex>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -1047,4 +1049,99 @@ TEST(AsyncCalls, ThreadCpuClockReadsCpuTimeNotWallTime) {
   const double cpu1 = thread_cpu_seconds();
   spin(nullptr, 50, p);
   EXPECT_GE(thread_cpu_seconds() - cpu1, 0.049);
+}
+
+// ===========================================================================
+// The background executor: persistent workers, nothing retained
+// ===========================================================================
+
+// More calls in flight than the app's background pool has workers: every call completes,
+// promptly, on no more threads than the pool's size. (The pool used to start a thread per call,
+// give the calls queued while it was full one thread key, and stall 5 s per key collision before
+// hanging for good: docs/STATE_EXEC_BENCH.md, "The background pool stalls, then hangs".)
+TEST(AsyncCalls, MoreCallsThanPoolWorkersAllCompleteOnThePoolsWorkers) {
+  world w(async_sched);
+  w.app.setThreadPoolSize(2);
+  std::mutex m;
+  std::set<std::thread::id> threads;
+  register_async_fn(w.env, *w.host, "where-op", [&](std::span<const value_t> a) -> async_kernel {
+    const value_t x = a.empty() ? value_t{} : a[0];
+    return [&, x](async_call &) -> value_t {
+      {
+        std::lock_guard<std::mutex> lk(m);
+        threads.insert(std::this_thread::get_id());
+      }
+      std::this_thread::sleep_for(1ms);
+      return x;
+    };
+  });
+  const auto start = clock_type::now();
+  std::vector<int> pids;
+  for (int i = 0; i < 40; ++i)
+    pids.push_back(w.submit("(where-op " + std::to_string(i) + ")"));
+  ASSERT_TRUE(w.pump([&] {
+    return std::all_of(pids.begin(), pids.end(), [&](int pid) { return w.finished(pid); });
+  }));
+  for (int i = 0; i < 40; ++i)
+    EXPECT_EQ(show(*w.result(pids[i])), std::to_string(i));
+  EXPECT_LT(seconds_since(start), 5.0);
+  EXPECT_LE(threads.size(), 2u);
+  EXPECT_EQ(w.app.threads().size(), 0u); // pooled kernels have no thread-map entries
+  w.host->wait_idle();
+  EXPECT_EQ(w.host->in_flight(), 0u);
+}
+
+// Once a call is over, nothing keeps it or its kernel: the kernel's captures go on its thread
+// before the host's count drops, and the call itself (its result) once the scheduler and the
+// program are done with it. (Each pooled thread used to hold its task, and with it the call and
+// its result, until the app went.)
+TEST(AsyncCalls, AFinishedCallKeepsNothingAlive) {
+  world w(async_sched);
+  std::vector<std::weak_ptr<int>> captures;
+  std::vector<std::weak_ptr<async_call>> calls;
+  std::mutex m;
+  register_async_fn(w.env, *w.host, "keep-op", [&](std::span<const value_t>) -> async_kernel {
+    auto sentinel = std::make_shared<int>(1);
+    {
+      std::lock_guard<std::mutex> lk(m);
+      captures.push_back(sentinel);
+    }
+    return [&, sentinel](async_call &call) -> value_t {
+      std::lock_guard<std::mutex> lk(m);
+      calls.push_back(std::static_pointer_cast<async_call>(call.shared_from_this()));
+      return value_t(std::string(4096, 'x'));
+    };
+  });
+  for (int i = 0; i < 3; ++i) {
+    const int pid = w.run_to_end(w.submit("(length (keep-op))"));
+    EXPECT_EQ(show(*w.result(pid)), "4096");
+  }
+  const int fut = w.run_to_end(w.submit("(length (await (keep-op-async)))"));
+  EXPECT_EQ(show(*w.result(fut)), "4096");
+  w.host->wait_idle();
+  w.async->drain_ingress();
+  ASSERT_EQ(captures.size(), 4u);
+  ASSERT_EQ(calls.size(), 4u);
+  for (const auto &c : captures)
+    EXPECT_TRUE(c.expired()) << "a kernel's captures outlived its call";
+  for (const auto &c : calls)
+    EXPECT_TRUE(c.expired()) << "a finished call is still held";
+}
+
+// The host forgets finished calls in batches, but every call still in flight is cancelled at
+// shutdown, after any number of finished ones.
+TEST(AsyncCalls, ShutdownCancelsTheCallInFlightAfterManyFinished) {
+  auto w = std::make_unique<world>(async_sched);
+  const int quick = w->run_to_end(
+      w->submit("(begin (set i 0) (while (< i 300) (begin (slow-op i 0) (set i (+ i 1)))) i)"));
+  EXPECT_EQ(show(*w->result(quick)), "300");
+  w->p.started = false;
+  const int pid = w->submit("(slow-op 1 5000)");
+  ASSERT_TRUE(w->pump([&] { return w->waiting(pid) && w->p.started; }));
+  const auto start = clock_type::now();
+  w->host->shutdown();
+  EXPECT_EQ(w->host->in_flight(), 0u);
+  EXPECT_TRUE(w->p.cancelled_seen);
+  EXPECT_LT(seconds_since(start), 2.0);
+  w.reset();
 }

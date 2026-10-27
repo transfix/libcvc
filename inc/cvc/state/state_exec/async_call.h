@@ -55,8 +55,9 @@ using async_marshal = std::function<async_kernel(std::span<const value_t> args)>
 
 /// Where an async function's kernel runs (docs/STATE_EXEC_EXCEPTIONS.md 3.5).
 enum class executor_kind {
-  /// The app's background task pool (app::startThreadPooled), in the order of its priorities:
-  /// for every kernel, CPU-bound or blocking. A host without an app runs it inline.
+  /// The app's background task pool (app::submitPooled: its persistent workers), in the order
+  /// of its priorities, FIFO within one: for every kernel, CPU-bound or blocking. A host without
+  /// an app runs it inline.
   background,
   /// A named async_lane the host was given (async_host::add_lane): work that must stay on one
   /// thread.
@@ -203,9 +204,10 @@ private:
   // An external call (async_host::begin_external): the host's own loop settles it, so nothing
   // may block waiting for it.
   bool external_ = false;
-  // Inline calls: the process running it, for cancelled() to check its budget.
+  // Inline calls: the process running it, for cancelled() to check its budget, and the step
+  // rate that check uses (read on first need).
   process *inline_proc_ = nullptr;
-  double inline_rate_ = 0.0;
+  std::optional<double> inline_rate_;
 
   std::atomic<bool> cancel_{false};
   std::thread::id kernel_thread_;

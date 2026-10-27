@@ -33,6 +33,19 @@ int64_t to_ns(double seconds) { return static_cast<int64_t>(std::llround(seconds
 constexpr const char *kFutureKey = "__future__";
 constexpr const char *kCallKey = "__async_call__";
 
+// The `function` field of an async function's errors. Built only on the way to a throw: a call
+// that succeeds makes no vector.
+std::vector<std::pair<std::string, value_t>> function_fields(const std::string &name) {
+  return {{"function", value_t(name)}};
+}
+
+// A call's reply channel: '#' makes it the identity under channel scoping, and exempt from the
+// channel policy.
+std::string reply_channel(const std::string &name, const char *kind) {
+  static std::atomic<std::uint64_t> seq{0};
+  return name + kind + std::to_string(seq.fetch_add(1, std::memory_order_relaxed));
+}
+
 // The handle a future holds, if it is an async call's: its second entry.
 const value_t *future_handle(const value_t &v) {
   const dict_ptr *dp = std::get_if<dict_ptr>(&v.v);
@@ -97,7 +110,7 @@ bool async_call::wait(std::optional<double> seconds) {
     // Its host settles it from the loop that drives the scheduler: blocking here would wait
     // forever.
     throw dsl_error("RuntimeError", name_ + ": can't wait for its result here", "async",
-                    {{"function", value_t(name_)}});
+                    function_fields(name_));
   if (!seconds) {
     settled_cv_.wait(lk, [this] { return settled_; });
     return true;
@@ -111,7 +124,6 @@ value_t async_call::outcome() {
   // completion the scheduler hasn't taken yet is finished now.
   if (async_sched_ && !charged.closed)
     async_sched_->finish_async_call(shared_from_this());
-  const std::vector<std::pair<std::string, value_t>> fields = {{"function", value_t(name_)}};
   if (timed_out_) {
     std::string limit = "its timeout";
     if (timeout_) {
@@ -119,7 +131,8 @@ value_t async_call::outcome() {
       std::snprintf(buf, sizeof buf, "%g", *timeout_);
       limit = std::string(buf) + " s";
     }
-    throw dsl_error("TimeoutError", name_ + ": no result within " + limit, "async", fields);
+    throw dsl_error("TimeoutError", name_ + ": no result within " + limit, "async",
+                    function_fields(name_));
   }
   if (!error_)
     return value_;
@@ -229,9 +242,14 @@ bool async_call::over_budget_inline() {
   const process &p = *inline_proc_;
   const double run = run_seconds(clock::now());
   const double cpu = cpu_seconds();
-  if (p.max_steps > 0 &&
-      p.step_count() + static_cast<uint64_t>(cpu * 1000.0 * inline_rate_) >= p.max_steps)
-    return true;
+  if (p.max_steps > 0) {
+    // The step rate, read once per call and only for a step budget (it is a state-tree read
+    // where the process doesn't set it). This runs on the stepping thread: the kernel's.
+    if (!inline_rate_)
+      inline_rate_ = sched_->async_steps_per_cpu_ms(p);
+    if (p.step_count() + static_cast<uint64_t>(cpu * 1000.0 * *inline_rate_) >= p.max_steps)
+      return true;
+  }
   if (p.max_time > 0.0) {
     const double half = 0.5 * p.max_time;
     // Where the process was when the call began: its time so far (the step's slice, which
@@ -312,17 +330,23 @@ void detail::charge_async_call(process &proc, async_call &call, double rate, boo
 struct async_host::shared_state {
   mutable std::mutex m;
   std::condition_variable idle;
-  std::size_t running = 0; // kernels queued or running
-  bool stopped = false;
+  std::size_t running = 0;                      // kernels queued or running
+  std::atomic<bool> stopped{false};             // written under m; read without it by check_open
   std::vector<std::weak_ptr<async_call>> calls; // to cancel at shutdown
+  std::size_t prune_at = 64; // prune expired entries when calls reaches this size
 
   void add(const std::shared_ptr<async_call> &call, bool runs) {
     std::lock_guard<std::mutex> lk(m);
     if (runs)
       ++running;
-    calls.erase(std::remove_if(calls.begin(), calls.end(),
-                               [](const std::weak_ptr<async_call> &w) { return w.expired(); }),
-                calls.end());
+    // Expired entries go in batches, when the list has doubled since the last prune: amortized
+    // O(1) per call instead of a scan of every live call on every call.
+    if (calls.size() >= prune_at) {
+      calls.erase(std::remove_if(calls.begin(), calls.end(),
+                                 [](const std::weak_ptr<async_call> &w) { return w.expired(); }),
+                  calls.end());
+      prune_at = std::max<std::size_t>(64, 2 * calls.size());
+    }
     calls.push_back(call);
   }
   void end() {
@@ -346,7 +370,7 @@ void async_host::add_lane(const std::string &name, cvc::async_lane &lane) { lane
 
 void async_host::shutdown() {
   std::unique_lock<std::mutex> lk(state_->m);
-  state_->stopped = true;
+  state_->stopped.store(true, std::memory_order_release);
   for (const std::weak_ptr<async_call> &w : state_->calls)
     if (std::shared_ptr<async_call> call = w.lock())
       call->cancel();
@@ -365,10 +389,9 @@ std::size_t async_host::in_flight() const {
 }
 
 void async_host::check_open(const std::string &name) const {
-  std::lock_guard<std::mutex> lk(state_->m);
-  if (state_->stopped)
+  if (state_->stopped.load(std::memory_order_acquire))
     throw dsl_error("RuntimeError", name + ": its host has shut down", "async",
-                    {{"function", value_t(name)}});
+                    function_fields(name));
 }
 
 bool async_host::runs_threaded(const async_options &opts) const {
@@ -385,22 +408,18 @@ bool async_host::runs_threaded(const async_options &opts) const {
 
 value_t async_host::call(const std::string &name, async_kernel kernel, const async_options &opts,
                          bool future) {
-  const std::vector<std::pair<std::string, value_t>> fields = {{"function", value_t(name)}};
   if (parking_forbidden())
     throw dsl_error("RuntimeError",
                     name + ": an async function can't be called here (this context can't wait "
                            "for it)",
-                    "async", fields);
+                    "async", function_fields(name));
   check_open(name);
   if (opts.where.kind == executor_kind::lane && !lanes_.count(opts.where.lane))
     throw dsl_error("RuntimeError", name + ": its host has no lane named '" + opts.where.lane + "'",
-                    "async", fields);
+                    "async", function_fields(name));
 
   process *proc = sched_ && sched_->current_process() ? sched_->current_process().get() : nullptr;
   auto call = std::make_shared<async_call>(name, proc ? proc->pid : -1);
-  static std::atomic<std::uint64_t> seq{0};
-  // '#': the identity under channel scoping, and exempt from the channel policy.
-  call->channel_ = name + ".async#" + std::to_string(seq.fetch_add(1, std::memory_order_relaxed));
   call->timeout_ = opts.timeout;
   call->alloc_limit_ = eval_alloc_limit(); // the calling step's
   call->sched_ = sched_;
@@ -411,6 +430,10 @@ value_t async_host::call(const std::string &name, async_kernel kernel, const asy
   // scheduler, and, for a transparent call, at a point that can park.
   const bool threaded = proc && async_sched_ && async_sched_->current_pid() == proc->pid &&
                         runs_threaded(opts) && (future || can_await());
+  // The reply channel: what a parked process waits on, and a future's identity. A transparent
+  // inline call has neither.
+  if (threaded || future)
+    call->channel_ = reply_channel(name, ".async#");
   if (!threaded)
     return run_inline(call, kernel, proc, future);
 
@@ -423,7 +446,7 @@ value_t async_host::call(const std::string &name, async_kernel kernel, const asy
   if (!async_sched_->receive_message(proc->pid, call->channel_)) {
     call->cancel();
     throw dsl_error("RuntimeError", name + ": can't park process " + std::to_string(proc->pid),
-                    "async", fields);
+                    "async", function_fields(name));
   }
   request_await({call->channel_, name, detail::make_awaitable_handle(call)});
   return nil_value;
@@ -431,11 +454,11 @@ value_t async_host::call(const std::string &name, async_kernel kernel, const asy
 
 value_t async_host::run_inline(const std::shared_ptr<async_call> &call, const async_kernel &kernel,
                                process *proc, bool future) {
-  const double rate = proc ? sched_->async_steps_per_cpu_ms(*proc) : kDefaultAsyncStepsPerCpuMs;
   if (proc) {
     ++proc->async_calls;
     call->inline_proc_ = proc;
-    call->inline_rate_ = rate;
+    // The step rate is read when it is needed: by cancelled() for a step budget, and for the
+    // charge below (a change made meanwhile applies to that charge).
   }
   value_t value;
   std::exception_ptr error;
@@ -471,7 +494,7 @@ value_t async_host::run_inline(const std::shared_ptr<async_call> &call, const as
       return nil_value;
   } else if (detail::data_step_scope *data = detail::data_step_scope::current()) {
     // A bare evaluator: its steps are all there is to charge.
-    const double steps = call->cpu_seconds() * 1000.0 * rate;
+    const double steps = call->cpu_seconds() * 1000.0 * kDefaultAsyncStepsPerCpuMs;
     data->stats().add_steps(step_kind::async, std::max<uint64_t>(1, static_cast<uint64_t>(steps)));
   }
   if (future)
@@ -479,11 +502,9 @@ value_t async_host::run_inline(const std::shared_ptr<async_call> &call, const as
   return call->outcome();
 }
 
-void async_host::run_kernel(std::shared_ptr<async_call> call, std::shared_ptr<async_kernel> holder,
-                            std::shared_ptr<shared_state> state) noexcept {
+void async_host::run_kernel(const std::shared_ptr<async_call> &call, async_kernel &kernel,
+                            shared_state &state) noexcept {
   {
-    async_kernel kernel = std::move(*holder); // dies here, before the host's count goes down
-    holder.reset();
     value_t value;
     std::exception_ptr error;
     if (call->cancel_requested()) {
@@ -504,6 +525,9 @@ void async_host::run_kernel(std::shared_ptr<async_call> call, std::shared_ptr<as
       }
       call->end_kernel();
     }
+    // The kernel and what it captured go here, on its thread, before the host's count goes down
+    // (a host waiting for its calls to end may then free what they referenced).
+    kernel = nullptr;
     // Past its timeout, the call raises TimeoutError whatever the kernel did once it saw
     // cancelled(), as when the scheduler times it out first.
     const bool settled = call->past_timeout(clock::now())
@@ -512,23 +536,27 @@ void async_host::run_kernel(std::shared_ptr<async_call> call, std::shared_ptr<as
     if (settled)
       call->async_sched_->post_async_completion(call);
   }
-  state->end();
+  state.end();
 }
 
 void async_host::submit(const std::shared_ptr<async_call> &call, async_kernel kernel,
                         const async_options &opts) {
-  auto holder = std::make_shared<async_kernel>(std::move(kernel));
   std::shared_ptr<shared_state> state = state_;
   state->add(call, true);
-  auto task = [call, holder, state] { run_kernel(call, holder, state); };
+  // The executor runs, then destroys, this task; nothing else holds the kernel. (Moved and then
+  // cleared: a moved-from std::function may keep a copy of a small callable.)
+  std::function<void()> task = [call, kernel = std::move(kernel), state]() mutable {
+    run_kernel(call, kernel, *state);
+  };
+  kernel = nullptr;
   try {
     if (opts.where.kind == executor_kind::lane) {
-      if (!lanes_.at(opts.where.lane)->submit(task))
+      if (!lanes_.at(opts.where.lane)->submit(std::move(task)))
         throw std::runtime_error(call->function_name() + ": lane '" + opts.where.lane +
                                  "' is stopped");
     } else {
-      app_->startThreadPooled("state_exec.async." + call->function_name(), task, opts.priority,
-                              /*wait=*/false);
+      // An anonymous task on the background pool's persistent workers (no thread, no key).
+      app_->submitPooled(std::move(task), opts.priority);
     }
   } catch (...) {
     // Not queued: the call fails now.
@@ -540,21 +568,19 @@ void async_host::submit(const std::shared_ptr<async_call> &call, async_kernel ke
 
 std::shared_ptr<async_call> async_host::begin_external(const std::string &name, bool future,
                                                        value_t &result) {
-  const std::vector<std::pair<std::string, value_t>> fields = {{"function", value_t(name)}};
   if (parking_forbidden())
     throw dsl_error("RuntimeError",
                     name + ": an async function can't be called here (this context can't wait "
                            "for it)",
-                    "async", fields);
+                    "async", function_fields(name));
   check_open(name);
   process *proc = sched_ && sched_->current_process() ? sched_->current_process().get() : nullptr;
   if (!proc || !async_sched_ || async_sched_->current_pid() != proc->pid ||
       (!future && !can_await()))
-    throw dsl_error("RuntimeError", name + ": can't wait for its result here", "async", fields);
+    throw dsl_error("RuntimeError", name + ": can't wait for its result here", "async",
+                    function_fields(name));
   auto call = std::make_shared<async_call>(name, proc->pid);
-  static std::atomic<std::uint64_t> seq{0};
-  call->channel_ =
-      name + ".external#" + std::to_string(seq.fetch_add(1, std::memory_order_relaxed));
+  call->channel_ = reply_channel(name, ".external#");
   call->sched_ = sched_;
   call->async_sched_ = async_sched_;
   call->external_ = true;
@@ -567,7 +593,7 @@ std::shared_ptr<async_call> async_host::begin_external(const std::string &name, 
   } else {
     if (!async_sched_->receive_message(proc->pid, call->channel_))
       throw dsl_error("RuntimeError", name + ": can't park process " + std::to_string(proc->pid),
-                      "async", fields);
+                      "async", function_fields(name));
     request_await({call->channel_, name, detail::make_awaitable_handle(call)});
     result = nil_value;
   }

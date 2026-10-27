@@ -372,12 +372,15 @@ with `ok: #f`, still returns that as a value; only a thrown error is an exceptio
 The app has two pools, and an async kernel uses the first:
 
 - **The background task pool** (`app::startThreadPooled`, which `compute_async` uses today):
-  - a queue of whole tasks, with priorities, bounded to `setThreadPoolSize` threads (the core
-    count by default);
+  - a queue of whole tasks, with priorities (FIFO within one), run by at most
+    `setThreadPoolSize` persistent worker threads (the core count by default); an async kernel
+    is an anonymous task (`app::submitPooled`), so a call creates no thread and its task is
+    destroyed on the worker once it ends;
   - every async kernel runs here, CPU-bound or blocking (`executor::background`, the default);
   - a blocking request holds one of its threads while it waits, and nothing else.
 - **The fork-join compute pool** (`app::computePool()`):
-  - render, simulation and nav fan-outs share it through `parallel_for`;
+  - render, simulation and nav fan-outs share it through `parallel_for`, and fan-outs from
+    several threads (several kernels) run side by side on its workers;
   - a CPU-heavy kernel fans out through it the same way (a volume filter splitting its
     slabs), so a kernel's parallelism comes from the same workers as everyone else's;
   - a kernel never runs on its workers as a whole task, so a slow kernel can't stall a frame's

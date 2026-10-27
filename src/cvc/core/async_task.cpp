@@ -24,24 +24,23 @@ std::string launch_pool_task(app &a, se::async_scheduler &sched, const std::stri
   const std::string chan =
       chan_prefix + "#" + std::to_string(seq.fetch_add(1, std::memory_order_relaxed));
   const std::string done = se::resolve_channel_key(root, chan);
-  // compute_async returns immediately; the completion lambda runs on a pool worker.  post_message
-  // is the thread-safe ingress `sched` drains on its own driver thread, so the worker never touches
-  // the scheduler's internals — and it posts to the SAME scheduler the caller drives, so the parked
-  // process is resumed there.  ALWAYS post exactly one value (on_error on a throw) so a waiter
-  // can't hang.
-  a.compute_async(
-      1, [](int) {},
-      [&sched, work = std::move(work), on_error = std::move(on_error), done] {
-        se::value_t payload;
-        try {
-          payload = work();
-        } catch (const std::exception &e) {
-          payload = on_error(e.what());
-        } catch (...) {
-          payload = on_error("unknown error");
-        }
-        sched.post_message(done, payload);
-      });
+  // submitPooled returns immediately; the task runs on one of the app's background-pool workers
+  // (no thread of its own; it used to go through compute_async(1, ...), which also built the
+  // compute pool for a fan-out of one).  post_message is the thread-safe ingress `sched` drains on
+  // its own driver thread, so the worker never touches the scheduler's internals — and it posts to
+  // the SAME scheduler the caller drives, so the parked process is resumed there.  ALWAYS post
+  // exactly one value (on_error on a throw) so a waiter can't hang.
+  a.submitPooled([&sched, work = std::move(work), on_error = std::move(on_error), done] {
+    se::value_t payload;
+    try {
+      payload = work();
+    } catch (const std::exception &e) {
+      payload = on_error(e.what());
+    } catch (...) {
+      payload = on_error("unknown error");
+    }
+    sched.post_message(done, payload);
+  });
   return done;
 }
 
