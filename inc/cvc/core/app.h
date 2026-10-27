@@ -675,7 +675,14 @@ protected:
   bool poolCanStartLocked() const;
   ThreadPoolTask takePoolTaskLocked();
   void notifyPoolIdleLocked();
-  void poolWorkerLoop();
+  // A new worker's gate, guarded by _threadPoolMutex: its creator opens it once the worker is in
+  // _poolWorkers (registered), or will not be (the pool is stopping). The worker takes no task
+  // before, so an interrupt sent for a task it takes (wait_for_threads, ~app) reaches it.
+  struct PoolWorkerGate {
+    bool open = false;
+    bool registered = false;
+  };
+  void poolWorkerLoop(std::shared_ptr<PoolWorkerGate> gate);
   void runPoolTask(ThreadPoolTask &task);
   void startKeyedPoolThread(ThreadPoolTask &task);
   void runKeyedPoolTask(ThreadPoolTask &task);
@@ -720,6 +727,12 @@ protected:
   // Idle workers wait here for a task. Not a boost::condition_variable: on Windows that one
   // makes and closes a semaphore for every wait, and the workers never wait interruptibly.
   std::condition_variable_any _poolWorkerWake;
+  // A new worker's gate was opened (PoolWorkerGate).
+  std::condition_variable_any _poolWorkerAdmitted;
+  // Test seam, empty in the library: called on the creating thread once a new worker's thread
+  // exists and before it is registered, so a test can hold the creator in that window (app_test's
+  // AppPoolTeardown tests). Set it before the pool starts a worker.
+  std::function<void()> _poolWorkerCreatedHook;
   std::vector<thread_ptr> _poolWorkers; // persistent workers, started on demand
   unsigned int _idleWorkers = 0;        // waiting on _poolWorkerWake, not signalled
   unsigned int _signalledWorkers = 0;   // signalled, not yet back from their wait

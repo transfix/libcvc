@@ -12,6 +12,7 @@
 
 #include <atomic> // compute_async: the fan-out accumulator
 #include <chrono> // compute_async: bounded wait for the completion callback
+#include <condition_variable>
 #include <cvc/core/app.h>
 #include <cvc/core/world_clock.h>
 #include <cvc/core/world_clock_binding.h>
@@ -1528,6 +1529,126 @@ TEST(AppPoolTeardown, DestroyingTheAppRightAfterSubmittingInterruptsRunningTasks
     if (HasFailure())
       break;
   }
+}
+
+namespace {
+
+// An app whose pool internals a test can reach: ~app's first step for the pool, with the app
+// still there, and the window between a new worker's start and its registration.
+struct probe_app : app {
+  void stopPool() { stopThreadPool(); }
+  // Called on the thread creating a worker, once the worker runs and before it is registered.
+  void onWorkerCreated(std::function<void()> f) { _poolWorkerCreatedHook = std::move(f); }
+  std::uint64_t interruptsSent() {
+    boost::mutex::scoped_lock lock(_threadPoolMutex);
+    return _poolInterruptGen;
+  }
+};
+
+} // namespace
+
+// wait() interrupts a task that a just-created worker took, however soon after the worker's
+// start it comes. wait() and ~app interrupt the workers in the pool's worker list, and a new
+// worker could take and start a task before the thread that created it had put it there: the
+// interrupt then missed the task, wait() waited out the task (up to its 5 s), and ~app could
+// return while the task still ran. Here the creator is held in that window until the task has
+// started and wait() has sent its interrupt (or, the task not starting, for 300 ms); a new worker
+// now takes no task before it is in the list.
+TEST(AppPoolTeardown, AnInterruptRightAfterAWorkerStartsReachesItsTask) {
+  struct shared {
+    std::mutex m;
+    std::condition_variable cv;
+    bool started = false;
+    std::atomic<int> interrupted{0};
+  };
+  auto s = std::make_shared<shared>();
+  probe_app a;
+  a.setThreadPoolSize(2);
+  const std::uint64_t sent = a.interruptsSent();
+  a.onWorkerCreated([&a, s, sent] {
+    {
+      std::unique_lock<std::mutex> lk(s->m);
+      if (!s->cv.wait_for(lk, std::chrono::milliseconds(300), [&s] { return s->started; }))
+        return; // the new worker hasn't taken its task: it is waiting to be registered
+    }
+    // It took its task unregistered: hold the creator until wait() has interrupted the pool.
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (a.interruptsSent() == sent && std::chrono::steady_clock::now() < until)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  });
+  std::thread creator([&a, s] {
+    a.submitPooled([s] { // a fresh app: this creates the worker that takes it
+      {
+        std::lock_guard<std::mutex> lk(s->m);
+        s->started = true;
+      }
+      s->cv.notify_all();
+      try {
+        const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(4);
+        while (std::chrono::steady_clock::now() < until)
+          boost::this_thread::sleep_for(boost::chrono::milliseconds(1)); // interruption point
+      } catch (boost::thread_interrupted &) {
+        s->interrupted++;
+        throw;
+      }
+    });
+  });
+  bool started = false;
+  {
+    std::unique_lock<std::mutex> lk(s->m);
+    started = s->cv.wait_for(lk, std::chrono::seconds(10), [&s] { return s->started; });
+  }
+  const auto t0 = std::chrono::steady_clock::now();
+  a.wait(); // the task has started: this interrupts it
+  const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  creator.join();
+  EXPECT_TRUE(started);
+  EXPECT_EQ(s->interrupted.load(), 1);
+  EXPECT_LT(secs, 2.0);
+}
+
+// ~app stops the pool while a worker's creator is between starting it and registering it: the
+// worker, never registered, ends without taking a task (the task goes with the queue, unrun), and
+// the creator is not held up. (The worker used to take the task, which nothing interrupted, and
+// its creator then joined it with no interrupt and no time limit.)
+TEST(AppPoolTeardown, AWorkerStartedAsThePoolStopsTakesNoTask) {
+  struct shared {
+    std::mutex m;
+    std::condition_variable cv;
+    bool started = false;
+  };
+  auto s = std::make_shared<shared>();
+  auto payload = std::make_shared<int>(1);
+  std::weak_ptr<int> weak = payload;
+  probe_app a;
+  a.setThreadPoolSize(2);
+  a.onWorkerCreated([&a, s] {
+    {
+      // Give the new worker the time to take its task, were it allowed to before registration.
+      std::unique_lock<std::mutex> lk(s->m);
+      s->cv.wait_for(lk, std::chrono::milliseconds(300), [&s] { return s->started; });
+    }
+    a.stopPool(); // ~app's first step, with this worker not registered yet
+  });
+  const auto t0 = std::chrono::steady_clock::now();
+  a.submitPooled([s, payload] { // a fresh app: this creates the worker, and the hook stops it
+    {
+      std::lock_guard<std::mutex> lk(s->m);
+      s->started = true;
+    }
+    s->cv.notify_all();
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(4);
+    while (std::chrono::steady_clock::now() < until)
+      boost::this_thread::sleep_for(boost::chrono::milliseconds(1)); // interruption point
+  });
+  payload.reset();
+  const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  {
+    std::lock_guard<std::mutex> lk(s->m);
+    EXPECT_FALSE(s->started);
+  }
+  EXPECT_TRUE(weak.expired());
+  EXPECT_LT(secs, 2.0);
 }
 
 // A keyed task (wait=true) that the pool has room for is in threads() under its key when
