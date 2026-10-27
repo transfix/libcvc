@@ -579,8 +579,11 @@ Keys under `<node>.fe.*`:
 | `request` | `mesh`, `solve`, `stop` (`stop` interrupts a heat solve; any other job runs to the end and the status says so) | `auto_mesh: true` seeds `mesh` |
 | `busy`, `status`, `progress` (0-100), `stats.tets`, `stats.vertices`, `field.min`, `field.max` | published | — |
 | `stoppable` | published: 1 while a heat solve runs (the Stop button's `enabled_when`), else 0 | — |
+| `last_mesh` | published: the region and bounds the last mesh job started with (`solid <isovalue>` or `interval <lo> <hi>`), `""` before the first | — |
+| `mesh.region` | `solid` (one side of `mesh.isovalue`) or `interval` (the shell between `mesh.isovalue` and `mesh.isovalue2`, in either order, whatever `mesh.inside` says) | `region` (default `solid`); `interval: [a, b]` is shorthand for `region: interval`, `isovalue: a`, `isovalue2: b` (`interval: true`: the region alone), and an explicit `region` / `isovalue` / `isovalue2` beside it wins |
 | `mesh.isovalue` | the bounding level, in the volume's units | `isovalue` |
-| `mesh.inside` | `below` (an SDF: mesh where v < isovalue) or `above` (a density) | `inside` (default `below` for an `sdf` source, else `above`) |
+| `mesh.isovalue2` | an interval's second bound | `isovalue2`; absent, a tenth of the value range from `isovalue` on the side `mesh.inside` fills (an SDF's inner skin), at most half way to that end of the range, else on the other side |
+| `mesh.inside` | `below` (an SDF: mesh where v < isovalue) or `above` (a density); a solid mesh's side | `inside` (default `below` for an `sdf` source, else `above`) |
 | `mesh.improve`, `mesh.improve_iterations` | `cvc::improvement_method` (0-5) and its passes | `improve`, `improve_iterations` |
 | `problem` | `poisson` (-Δu = f, u = 0 on the boundary) or `heat` (hot floor) | `problem` |
 | `poisson.f` | the constant source | `poisson_f` |
@@ -594,6 +597,17 @@ insulates the rest; the body starts at 0. `auto_solve: true` solves after every 
 unless a request written during the mesh job is already waiting: that request runs instead
 (a waiting re-mesh auto-solves in its turn).
 Until the first mesh the node shows the volume's bounds as lines.
+
+An interval mesh's boundary has two sheets, an outer and an inner one round the cavity, each
+wound (and lit) out of the shell; Poisson holds u = 0 on both, and the heat problem's hot
+floor is the lowest 5% of either (on a shell, the outer sheet's bottom cap). The interval is
+inclusive — a voxel exactly on a bound is inside: such a bound is meshed half way to the next
+value beyond it, so `[1, 3]` on integer labels meshes as `[0.5, 3.5]` — and a bound on or past an end of the volume's
+range bounds nothing (`[0.5, 2]` on a 0/1 mask meshes `{v ≥ 0.5}`). An interval that
+holds no voxel leaves the last mesh and says so in `status` ("error: no tets: the interval
+[lo, hi] does not cut the volume (its values span [min, max])"). The node's
+`<node>.transfer_function` holds the bounds as isocontours, so a `tf_editor` drives both (see
+[TRANSFER_FUNCTIONS.md](TRANSFER_FUNCTIONS.md) §6, "Meshing an interval from two isocontours").
 
 Both node types run their kernels on one `cvc::async_lane` per node — off the render
 thread, or deferred onto it in a single-threaded wasm build — and apply results in their
@@ -762,6 +776,29 @@ so instantiation is order-free. A name-keyed expansion-stack guard
 ([`loader.cpp:863`](../src/cvc/ariadne/loader.cpp)) refuses recursion and fan-out; an
 unknown unit warns and renders empty. `include:` is the static counterpart of `repeat:`.
 
+A unit may declare its parameters with defaults in an `args:` map beside its widget keys; the
+include site's `args:` override them, and a `{token}` with neither stays literal. That is how a
+shipped component binds a sensible node when included bare and any node when told:
+
+```yaml
+units:
+  panel:
+    args: { node: volume, title: Volume }   # declared defaults
+    window: "{title}"
+    id: "{node}_panel"
+    children:
+      - tf_editor: Transfer function
+        bind: graphics.root.children.{node}.transfer_function
+windows:
+  - include: panel                # node=volume
+  - include: panel
+    args: { node: skull, title: Skull }
+```
+
+Any widget may carry an `id:` (not only windows): it names the instance a backend keys its
+per-instance state on and that the core persists view state under (`tree.<id>.*`). An include
+site may override the unit's `id:`, so two instances of one unit stay distinct.
+
 ### 6.2 `import:` — shared-scope library merge
 
 `process_imports` ([`loader.cpp:761`](../src/cvc/ariadne/loader.cpp)) resolves a URI (or
@@ -819,9 +856,10 @@ includes. Each binds state keys a C++ object owns, so it needs no host code;
 | `forest_controls`, `sea_controls`, `sky_controls` | `forest_trees` / `wave_sea` / `cloud_sky` nodes |
 | `mesh_tools` | a `mesh_lab` node named `mesh` (§5.4) |
 | `fe_controls` | an `fe_lab` node named `domain` (§5.4) |
+| `transfer_function`, `transfer_function_editor` | any node's `transfer_function` model (args `node`, `id`): the ColorTable2 editor with histogram / contour spectrum / contour tree layers — see [`TRANSFER_FUNCTIONS.md`](TRANSFER_FUNCTIONS.md) |
 
-Components that address one node use a fixed node id; copy the file and change the id to
-drive another node. `examples/ariadne/documents/mesh_lab.ari` uses the last two. Run it from
+Most components that address one node use a fixed node id; copy the file and change the id to
+drive another node. `transfer_function` instead takes the node as an include arg (§6.1). `examples/ariadne/documents/mesh_lab.ari` uses the last two. Run it from
 the repository root, where both paths resolve:
 `ariadne_hello examples/ariadne/documents/mesh_lab.ari --component-path src/cvc/ariadne`.
 

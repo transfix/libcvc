@@ -1,7 +1,7 @@
 schema_version: 1
 recipe:
   name: cvcgl
-  upstream_version: "3.7.0"
+  upstream_version: "3.7.1"
   # Bumped 1 -> 2: republish from post-#136 master. cvcGL gained the injected-app
   # SceneGraph(cvc::app&, statePrefix) ctor (no cvc:: singleton), and it links the
   # +cvc.2 libcvc (ABI change, #134). The published +cvc.1 predates all of this,
@@ -81,7 +81,8 @@ recipe:
   # the ImageMagick HDRI define (cvc::cvc's public MAGICKCORE_HDRI_ENABLE was 0 against the
   # Q16HDRI library). cvcGL source unchanged; it rebuilds against and re-pins that libcvc.
   # 3, not 2: native cvcgl is already at +cvc.2 on the catalog.
-  cvc_revision: 3
+  # Reset to 1 for the 3.7.1 upstream version: a version bump restarts cvc_revision.
+  cvc_revision: 1
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"

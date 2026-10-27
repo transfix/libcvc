@@ -95,6 +95,18 @@ add_executable(volslice_bunny cvcgl/volslice_bunny.cpp)
 target_link_libraries(volslice_bunny PRIVATE cvcGL ${VTK_LIBRARIES} Boost::program_options)
 vtk_module_autoinit(TARGETS volslice_bunny MODULES ${VTK_LIBRARIES})
 
+# fem_gallery -- renders cvc::fem / mesh_ops results on a dataset to a PNG: tet-mesh a mesh's
+# interior (SDF + LBIE) or a volume's isosurface region, solve Poisson / heat / eigenmodes (or a
+# surface curvature / geodesic / Laplace-Beltrami mode), colour the boundary and a cut, write the
+# image; or show LBIE's tet / hex elements themselves, cut away and coloured by size or quality.
+# Synchronous and offscreen, so it is a CLI for docs and figures (docs/FEM_GALLERY.md), not a
+# wasm demo.
+if(NOT EMSCRIPTEN)
+  add_executable(fem_gallery cvcgl/fem_gallery.cpp)
+  target_link_libraries(fem_gallery PRIVATE cvcGL ${VTK_LIBRARIES} Boost::program_options)
+  vtk_module_autoinit(TARGETS fem_gallery MODULES ${VTK_LIBRARIES})
+endif()
+
 # lsystem_coast — island + GPU FFT-ocean trial. Hosts OceanFFT (the ABYSSAL port
 # target, docs/roadmap/OCEAN-AND-VOLUMETRIC-TERRAIN-NOTES.md), which lives in
 # src/cvcGL/ocean beside the cvcGL test that checks it. A SEPARATE demo
@@ -302,7 +314,7 @@ set(_cvcgl_example_bins lsystem_forest lsystem_coast terrain_lab bunny_shadow vo
 # The three headless nav CLIs exist only in native builds (the wasm column has
 # no CLIs in the gallery), so they join the install list conditionally.
 if(NOT EMSCRIPTEN)
-  list(APPEND _cvcgl_example_bins nav_swarm_demo nav_train_demo nav_material_demo)
+  list(APPEND _cvcgl_example_bins nav_swarm_demo nav_train_demo nav_material_demo fem_gallery)
 endif()
 set_target_properties(${_cvcgl_example_bins} PROPERTIES
   INSTALL_RPATH "$ORIGIN/../lib"

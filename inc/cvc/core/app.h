@@ -50,7 +50,8 @@
 #include <boost/thread.hpp>
 #include <boost/tuple/tuple.hpp>
 #include <boost/utility.hpp>
-#include <functional> // compute_async: the fan-out kernel + completion callback
+#include <boost/weak_ptr.hpp> // retired pooled threads awaiting their reaper
+#include <functional>         // compute_async: the fan-out kernel + completion callback
 #include <map>
 #include <memory>
 #include <queue>
@@ -366,6 +367,13 @@ public:
   // Start a thread with priority using the thread pool
   // Higher priority threads are scheduled before lower priority ones
   // The pool limits concurrent threads to maxPoolSize (default: hardware concurrency)
+  //
+  // wait=true runs the job under `key` itself, first stopping a thread already there; its entry
+  // stays in threads() after it finishes, until something replaces or removes it.  wait=false is
+  // fire-and-forget: the job gets a key of its own (`key`, key0, key1, ... -- held for it while it
+  // is queued, so queued jobs never share one), and once it has finished, the next pooled worker
+  // to wind down joins it and drops its entry, so these do not pile up in threads().  A thread
+  // still running is never reaped, nor one someone else holds a thread_ptr to.
   template <class T>
   void startThreadPooled(const std::string &key, const T &t,
                          thread_priority priority = PRIORITY_NORMAL, bool wait = true) {
@@ -374,14 +382,15 @@ public:
     // If waiting and thread exists, cancel it
     if (wait && hasThread(key)) {
       thread_ptr tptr = threads(key);
-      tptr->interrupt();
-      tptr->join();
+      // It may have gone between hasThread() and threads().
+      if (tptr) {
+        tptr->interrupt();
+        tptr->join();
+      }
     }
 
-    std::string actual_key = wait ? key : uniqueThreadKey(key);
-
     // Submit to thread pool
-    submitToThreadPool(actual_key, t, priority);
+    submitToThreadPool(key, t, priority, /*reap_when_done=*/!wait);
   }
 
   // Set the maximum number of concurrent threads in the pool
@@ -414,7 +423,9 @@ public:
   // fn/on_done (e.g. a shared_ptr<std::atomic<int>>). parallel_for stays a plain blocking barrier —
   // this only moves the wait off the caller's thread; it does not make the fan-out itself
   // non-blocking. A throw from fn propagates on the worker and skips on_done; each call gets its
-  // own background job (wait=false → a unique key), so concurrent calls do not cancel each other.
+  // own background job (wait=false → a unique key), so concurrent calls do not cancel each other,
+  // and that job's finished thread is reaped (see startThreadPooled), so calling this a few times a
+  // second does not grow threads().
   void compute_async(int n, std::function<void(int)> fn, std::function<void()> on_done,
                      thread_priority priority = PRIORITY_NORMAL);
 
@@ -613,6 +624,9 @@ protected:
     std::string key;
     boost::function<void()> task;
     thread_priority priority;
+    // A wait=false job: `key` is reserved for it (reserveThreadKey) until its worker is stored
+    // under it, and once that worker has finished, a later one reaps it.
+    bool reap_when_done = false;
 
     // For priority queue ordering (higher priority first)
     bool operator<(const ThreadPoolTask &other) const {
@@ -620,24 +634,44 @@ protected:
     }
   };
 
+  // reap_when_done: `key` is only a hint; the job runs under a key reserved from it.
   template <class T>
-  void submitToThreadPool(const std::string &key, const T &task, thread_priority priority) {
+  void submitToThreadPool(const std::string &key, const T &task, thread_priority priority,
+                          bool reap_when_done = false) {
     boost::this_thread::interruption_point();
-    boost::mutex::scoped_lock lock(_threadPoolMutex);
 
     ThreadPoolTask poolTask;
-    poolTask.key = key;
+    poolTask.key = reap_when_done ? reserveThreadKey(key) : key;
     poolTask.task = task;
     poolTask.priority = priority;
+    poolTask.reap_when_done = reap_when_done;
 
+    boost::mutex::scoped_lock lock(_threadPoolMutex);
     _pendingTasks.push(poolTask);
 
     // Try to start a worker if we're under the limit
     tryStartWorker();
   }
 
-  void tryStartWorker();
-  void threadPoolWorker(ThreadPoolTask task);
+  // Starts the highest-priority pending task if the pool has room; false if it started none.
+  bool tryStartWorker();
+  void threadPoolWorker(const std::shared_ptr<ThreadPoolTask> &slot);
+
+  // uniqueThreadKey(hint), held for a job that is queued and so not in _threads yet: no other
+  // unique key is handed out the same until tryStartWorker() stores the job's worker under it.
+  std::string reserveThreadKey(const std::string &hint);
+  // A reap_when_done worker's last act: reap the finished ones, then record itself as finished.
+  void retirePooledThread(const std::string &key);
+  // Joins and drops every recorded finished pooled thread that nobody else holds.
+  void reapFinishedPooledThreads();
+
+  // A reap_when_done worker that has finished with the app. `thread` identifies the entry it
+  // was stored as, and `id` was its id while it ran.
+  struct finished_pooled_thread {
+    std::string key;
+    boost::weak_ptr<boost::thread> thread;
+    boost::thread::id id;
+  };
 
   data_map _data;
   data_type_name_map _dataTypeNames;
@@ -651,6 +685,10 @@ protected:
   thread_key_map _threadKeys;
   thread_info_map _threadInfo;
   thread_info_by_key_map _threadInfoByKey;
+  // Keys held for queued wait=false jobs, and those jobs' finished workers awaiting a reaper.
+  // Both guarded by _threadsMutex.
+  std::set<std::string> _reservedThreadKeys;
+  std::vector<finished_pooled_thread> _finishedPooled;
   void updateThreadKeys();
   boost::mutex _threadsMutex;
   boost::mutex _logMutex;
@@ -671,6 +709,7 @@ protected:
   std::priority_queue<ThreadPoolTask> _pendingTasks;
   unsigned int _maxPoolSize;
   unsigned int _activeWorkers;
+  bool _poolClosed = false; // set by ~app: no pending task starts any more
   boost::mutex _threadPoolMutex;
   boost::condition_variable _threadPoolCondition;
 

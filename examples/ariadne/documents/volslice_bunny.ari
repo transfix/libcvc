@@ -11,11 +11,13 @@ meta:
   min_libcvc: 3.4.0
 
 # Reusable control components (shared with the other bunny demos): the lighting rig + camera
-# navigation, plus the volume-slice panel. All declarative — no host C++ panels.
+# navigation, the volume-slice panel and the transfer-function editor. All declarative — no host
+# C++ panels.
 import:
   - cvc://components/stage_lighting.ari
   - cvc://components/camera_controls.ari
   - cvc://components/volslice_controls.ari
+  - cvc://components/transfer_function.ari
 
 menubar:
   - menu: Sim
@@ -25,8 +27,21 @@ menubar:
 
 windows:
   - include: stage_lighting
+    pos: [16, 16]
+    size: [370, 210]
   - include: camera_controls
+    pos: [16, 234]
+    size: [370, 132]
   - include: volslice_controls
+    pos: [16, 374]
+    size: [370, 150]
+  # The transfer-function editor (the ColorTable2 port) on the node's own model: drag a colour or
+  # opacity node and the slices re-colour, over a histogram of the field; right-click for presets,
+  # layers (histogram, contour spectrum, contour tree) and .vinay import / export.
+  - include: transfer_function
+    args: { node: bunny_volume, title: Slice transfer function }
+    pos: [400, 16]
+    size: [440, 300]
 
 scene:
   chrome: false
