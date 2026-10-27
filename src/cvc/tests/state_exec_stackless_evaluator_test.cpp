@@ -1,3 +1,4 @@
+#include <atomic>
 #include <chrono>
 #include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/state/state_exec/builtins.h>
@@ -653,6 +654,33 @@ TEST(StacklessStepCounts, ArePinned) {
     EXPECT_EQ(got.eval, p.expected.eval) << p.script;
     EXPECT_EQ(got.data, p.expected.data) << p.script;
   }
+}
+
+TEST(StacklessStepCounts, CountedFromAnotherThreadWhileTheEvaluatorSteps) {
+  // pycvc wraps evaluation_stats::increment_step() and releases the GIL while an evaluator
+  // steps: a count another thread makes meanwhile adds to the evaluator's own, neither losing the
+  // other's.
+  const char *const script =
+      "(begin (set s 0) (set i 0) (while (< i 20000) (begin (set s (+ s i)) (set i (+ i 1)))) s)";
+  const uint64_t alone = count_steps(script, 0).all;
+  stackless_evaluator ev(builtins::make_default_environment());
+  evaluator_state st = ev.create_state(parse(script));
+  std::atomic<bool> stepping{true};
+  std::atomic<uint64_t> counted{0};
+  std::thread other([&] {
+    while (stepping.load(std::memory_order_relaxed)) {
+      st.stats.increment_step();
+      counted.fetch_add(1, std::memory_order_relaxed);
+    }
+  });
+  while (counted.load() == 0) // stepping overlaps the other thread's counting
+    std::this_thread::yield();
+  while (!ev.step(st)) {
+  }
+  stepping = false;
+  other.join();
+  EXPECT_EQ(st.stats.get_step_count(), alone + counted.load());
+  EXPECT_EQ(st.stats.steps(step_kind::eval), alone + counted.load());
 }
 
 TEST_F(StacklessEvaluatorTest, PoppedFramesKeepNoValues) {

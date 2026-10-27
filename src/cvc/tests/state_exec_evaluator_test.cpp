@@ -347,3 +347,34 @@ TEST(EvaluationStatsTest, IncrementStepCountsFromAnyThread) {
   EXPECT_EQ(stats.steps(step_kind::data), uint64_t(kEach / 2));
   EXPECT_EQ(stats.steps(step_kind::eval), uint64_t(kEach + kEach / 2));
 }
+
+TEST(EvaluationStatsTest, IncrementStepCountsWhileTheEvaluatorSteps) {
+  // pycvc wraps increment_step() and releases the GIL while an evaluator runs: a count another
+  // thread makes meanwhile adds to the evaluator's own, neither losing the other's.
+  const char *const script =
+      "(begin (set s 0) (set i 0) (while (< i 20000) (begin (set s (+ s i)) (set i (+ i 1)))) s)";
+  uint64_t alone = 0;
+  {
+    evaluator ev(builtins::make_default_environment());
+    ev.evaluate_script(script);
+    alone = ev.stats().get_step_count();
+  }
+  ASSERT_GT(alone, 0u);
+  evaluator ev(builtins::make_default_environment());
+  std::atomic<bool> stepping{true};
+  std::atomic<uint64_t> counted{0};
+  std::thread other([&] {
+    // Only once the evaluation has started counting: evaluate() resets the counts first.
+    while (ev.stats().get_step_count() == 0)
+      std::this_thread::yield();
+    while (stepping.load(std::memory_order_relaxed)) {
+      ev.stats().increment_step();
+      counted.fetch_add(1, std::memory_order_relaxed);
+    }
+  });
+  ev.evaluate_script(script);
+  stepping = false;
+  other.join();
+  EXPECT_EQ(ev.stats().get_step_count(), alone + counted.load());
+  EXPECT_EQ(ev.stats().steps(step_kind::eval), alone + counted.load());
+}

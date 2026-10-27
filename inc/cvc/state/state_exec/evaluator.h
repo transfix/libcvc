@@ -83,14 +83,13 @@ struct evaluation_stats {
     end_time = std::chrono::steady_clock::now();
     complete = true;
   }
-  /// Count a step, as spent on `kind`. Any thread may count, and read, at any time.
+  /// Count a step, as spent on `kind`. Any thread may count, and read, at any time, also while an
+  /// evaluator steps the state: this is a locked add of a counter the evaluators' own count
+  /// (count_eval_step()) doesn't write, so neither loses the other's steps.
   void increment_step(step_kind kind = step_kind::eval) {
-    if (kind == step_kind::eval) { // eval steps are the rest, so the common step costs no more
-      eval_step_count.fetch_add(1, std::memory_order_relaxed);
-    } else {
-      step_count.fetch_add(1, std::memory_order_relaxed);
+    step_count.fetch_add(1, std::memory_order_relaxed);
+    if (kind != step_kind::eval) // eval steps are the rest, so the common step costs no more
       kind_steps[static_cast<std::size_t>(kind)].fetch_add(1, std::memory_order_relaxed);
-    }
     last_kind = kind;
   }
   /// Count `n` steps of `kind` that no evaluator step took: what an async call is charged
@@ -149,8 +148,9 @@ private:
   friend class evaluator;
   friend class stackless_evaluator;
   /// increment_step(step_kind::eval), by the evaluator stepping the state: the only thread that
-  /// counts the state's eval steps while it steps, one step at a time, so the count is a load and
-  /// a store of a counter of its own, not a locked read-modify-write (anyone may still read it).
+  /// writes eval_step_count while it steps, one step at a time, so the count is a load and a
+  /// store of that counter, not a locked read-modify-write (anyone may still read it; a count
+  /// another thread makes meanwhile goes to step_count).
   void count_eval_step() {
     eval_step_count.store(eval_step_count.load(std::memory_order_relaxed) + 1,
                           std::memory_order_relaxed);
@@ -173,8 +173,9 @@ private:
   mutable std::mutex mu;
   std::chrono::steady_clock::time_point start_time{};
   std::chrono::steady_clock::time_point end_time{};
-  std::atomic<uint64_t> step_count{0};      // steps counted by add_steps() or of a kind not eval
-  std::atomic<uint64_t> eval_step_count{0}; // eval steps the stepping thread counted
+  std::atomic<uint64_t> step_count{0}; // steps counted by increment_step() and add_steps()
+  // Eval steps the evaluator stepping the state counted (count_eval_step()): only it writes this.
+  std::atomic<uint64_t> eval_step_count{0};
   std::atomic<uint64_t> kind_steps[kKinds] = {};
   std::atomic<uint64_t> kind_ns[kKinds] = {};
   std::atomic<uint64_t> data_node_count{0};
