@@ -2,9 +2,9 @@
 
 Status: specification, 2026-10-27. Nothing here is built yet. It is the exact protocol behind
 [`docs/STATE_EXEC_LOCKS.md`](STATE_EXEC_LOCKS.md) (the design), section 8.6. `td` is
-[`docs/STATE_EXEC_THREADED.md`](STATE_EXEC_THREADED.md). A model checker implements it literally
-(test LT-5), and `lock_manager::check()` asserts the invariants section 6 lists for it after every
-operation in test builds.
+[`docs/STATE_EXEC_THREADED.md`](STATE_EXEC_THREADED.md); `Qn` are its decisions (td 9.2). A model
+checker implements it literally (test LT-5), and `lock_manager::check()` asserts the invariants
+section 6 lists for it after every operation in test builds.
 
 The protocol is the simplified core the lead engineer chose after two review rounds of the
 intention-mark design (100 confirmed findings, 42 major, most of them holes in kept marks, chains,
@@ -1168,9 +1168,9 @@ any key; an S grant's `gen` is the last X generation at its grant.
   exemption makes LK-27's nested request raise `DeadlockError`; re-examining only the dropped
   holds' keys, not a cancelled ticket's, leaves LK-25's reader queued while grantable (I6);
   skipping `relevel_all` in `cancel` leaves PI-3's boost (I8); letting `wake` carry an outcome
-  lets a stale wake resume a newer request (LX-11); testing `closed` outside `port.mu` (the
-  earlier reading of 2.3) lets a post land after the close (`port-race`); and keeping a detached
-  home's cache references leaves its nodes (I9).
+  lets a stale wake resume a newer request (LX-11); testing `closed` outside `port.mu` (a reading
+  2.3 rules out) lets a post land after the close (`port-race`); and keeping a detached home's
+  cache references leaves its nodes (I9).
 - **The design-time model.** Until the C++ test exists, a Python model checks this specification:
   [`tools/locks_model/`](../tools/locks_model/). It implements section 4's operations literally, as
   methods over the state of section 2 whose `check()` asserts section 6 after every operation, and
@@ -1218,7 +1218,7 @@ any key; an S grant's `gen` is the last X generation at its grant.
 
 ## 8. What the simplification removed
 
-From the round-2 design: intention modes (IS, IX) and the 5.2 compatibility table; per-entry
+From the round-2 design: intention modes (IS, IX) and their compatibility table; per-entry
 queues; kept marks, `applied` chains and `own_is`/`own_ix` on waiters; partial multi-key chains
 and their continuations; `lock_requeued`, `lock_fail`, `lock_reprio` and `lock_grant` posts;
 pass-on of orphaned grants; 64 shards, their lock order and lock-then-validate; cut and uncut
