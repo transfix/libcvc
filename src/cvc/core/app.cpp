@@ -241,7 +241,8 @@ void app::registerDefaultHandlers() {
 //                         again for threads started while we were joining.
 // 10/27/2026 -- Joe R. -- The pool is closed by closeThreadPool(), which also
 //                         interrupts its persistent workers' tasks; they are
-//                         joined once the map's threads are interrupted too.
+//                         joined once the map's threads are interrupted too,
+//                         and the map is swept again after that join.
 app::~app() {
   // Not interruptible: an interrupt pending on the thread destroying the app would otherwise be
   // thrown in a join below and dropped by its catch, and that thread left running into a freed
@@ -288,12 +289,19 @@ app::~app() {
     // The pool's workers are joined only now, with the first sweep's threads interrupted beside
     // their tasks: a pool task waiting, uninterruptibly, on something one of those threads holds
     // gets it once that thread stops, instead of holding ~app for its 5 s and then outliving it.
-    if (!poolWorkers.empty()) {
+    // A worker may register a thread while we join it (a keyed task it took before the pool
+    // closed, or one its task starts), after this sweep's snapshot: the next sweep takes the map
+    // again even when this one was empty.
+    const bool joinedPool = !poolWorkers.empty();
+    if (joinedPool) {
       joinPoolWorkers(poolWorkers);
       poolWorkers.clear();
     }
-    if (remaining.empty())
+    if (remaining.empty()) {
+      if (joinedPool)
+        continue;
       break;
+    }
 
     BOOST_FOREACH (thread_map::value_type &val, remaining) {
       if (!val.second)

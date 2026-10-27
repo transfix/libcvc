@@ -1931,6 +1931,50 @@ TEST(AppPoolTeardown, DestroyingTheAppInterruptsTheThreadMapBeforeJoiningThePool
   EXPECT_TRUE(s->released);
 }
 
+// A thread registered in threads() while ~app joins the pool's workers is interrupted and joined
+// too, also when the map was empty before: ~app takes the map again after that join. (A pool task
+// that starts a thread once it is interrupted, or a keyed task that a worker took just before the
+// pool closed, registered its thread after ~app's only look at the empty map: ~app returned
+// without interrupting or joining it, and the thread ran on into the freed app.)
+TEST(AppPoolTeardown, AThreadRegisteredWhileTheAppJoinsThePoolIsJoinedToo) {
+  struct shared {
+    std::atomic<bool> started{false}, late_done{false};
+  };
+  auto s = std::make_shared<shared>();
+  std::chrono::steady_clock::time_point t0;
+  {
+    app a;
+    a.submitPooled([s, &a] {
+      s->started = true;
+      try {
+        for (;;)
+          boost::this_thread::sleep_for(boost::chrono::milliseconds(1)); // until ~app
+      } catch (boost::thread_interrupted &) {
+        // ~app has closed the pool: let it take the (empty) map and start joining this worker.
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        // The thread touches nothing of the app, and ends by itself if it is never interrupted.
+        a.startThread("late", [s] {
+          try {
+            const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+            while (std::chrono::steady_clock::now() < until)
+              boost::this_thread::sleep_for(boost::chrono::milliseconds(1)); // interruption point
+          } catch (boost::thread_interrupted &) {
+            s->late_done = true;
+            throw;
+          }
+        });
+      }
+    });
+    for (int i = 0; i < 10000 && !s->started.load(); i++)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    ASSERT_TRUE(s->started.load());
+    t0 = std::chrono::steady_clock::now();
+  }
+  const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  EXPECT_TRUE(s->late_done.load()) << "~app returned without interrupting and joining the thread";
+  EXPECT_LT(secs, 3.0);
+}
+
 // wait() waits with interruption held off: an interrupt sent to the thread calling it stays
 // pending until it returns, and doesn't cut the wait for the pool short. (It used to be thrown in
 // the wait for the pool, dropped by the catch there, and wait() returned at once.)
