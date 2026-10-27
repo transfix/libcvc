@@ -120,6 +120,9 @@ private:
   std::size_t _line = 1;
   std::size_t _col = 1;
   std::vector<frame> _frames; // innermost last; its size is the current nesting depth
+  // Element vectors of closed lists, emptied, for the next lists to collect into: a list is
+  // then made with one allocation of its exact size, not grown an element at a time.
+  std::vector<std::vector<value_t>> _spare_elements;
 
   char peek() const;
   char advance();
@@ -131,6 +134,8 @@ private:
   value_t parse_string();
   value_t parse_bytes_string(); // SE-3: b"..." byte-string literal (\xNN = a raw byte, no \u)
   value_t parse_number_or_symbol(char first);
+  // Append the input from here up to `stop` (no quote or escape in it) to `into`, moving past it.
+  void skip_run(std::size_t stop, std::string &into);
 };
 
 /// Reads a whole script a slice at a time. A scheduler drives it from a process's steps when
