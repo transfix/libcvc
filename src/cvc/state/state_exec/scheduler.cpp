@@ -15,7 +15,13 @@ namespace cvc::state_exec {
 // ---------------------------------------------------------------------------
 
 scheduler::scheduler(scheduling_policy policy)
-    : policy_(policy), evaluator_(builtins::make_default_environment()) {}
+    : policy_(policy), evaluator_(builtins::make_default_environment()),
+      procs_(policy != scheduling_policy::round_robin) {}
+
+const process_ptr &scheduler::no_process() {
+  static const process_ptr none;
+  return none;
+}
 
 // ---------------------------------------------------------------------------
 // Settings — state-tree-backed configuration
@@ -168,7 +174,8 @@ uint64_t max_alloc_bytes_from_state(cvc::state &root, const std::string &schedul
 int scheduler::execute(const std::string &script, const execute_options &opts) {
   detail::check_not_in_async_kernel("scheduler::execute");
   int pid = next_pid_++;
-  process proc;
+  process_ptr pp = make_process(); // built in place: no move of its tables
+  process &proc = *pp;
   proc.pid = pid;
   proc.name = opts.name.empty() ? ("proc-" + std::to_string(pid)) : opts.name;
   proc.status = process_status::ready;
@@ -192,14 +199,15 @@ int scheduler::execute(const std::string &script, const execute_options &opts) {
   proc.state = evaluator_.create_state(script, opts.env, parse_options_);
   proc.state.data_step_nodes = data_options_.step_nodes;
   proc.state.stats.start();
-  processes_.emplace(pid, std::make_shared<process>(std::move(proc)));
+  procs_.insert(std::move(pp));
   return pid;
 }
 
 int scheduler::execute(const value_t &expr, const execute_options &opts) {
   detail::check_not_in_async_kernel("scheduler::execute");
   int pid = next_pid_++;
-  process proc;
+  process_ptr pp = make_process(); // built in place: no move of its tables
+  process &proc = *pp;
   proc.pid = pid;
   proc.name = opts.name.empty() ? ("proc-" + std::to_string(pid)) : opts.name;
   proc.status = process_status::ready;
@@ -223,7 +231,7 @@ int scheduler::execute(const value_t &expr, const execute_options &opts) {
   proc.state = evaluator_.create_state(expr, opts.env);
   proc.state.data_step_nodes = data_options_.step_nodes;
   proc.state.stats.start();
-  processes_.emplace(pid, std::make_shared<process>(std::move(proc)));
+  procs_.insert(std::move(pp));
   return pid;
 }
 
@@ -231,75 +239,47 @@ int scheduler::execute(const value_t &expr, const execute_options &opts) {
 // Process selection
 // ---------------------------------------------------------------------------
 
-process_ptr scheduler::select_process() {
-  std::vector<process *> runnable;
-  for (auto &[pid, proc] : processes_) {
-    if (proc->status == process_status::ready || proc->status == process_status::running) {
-      runnable.push_back(proc.get());
-    }
-  }
-  if (runnable.empty())
-    return nullptr;
-
-  // Sort by PID for deterministic ordering within policy
-  std::sort(runnable.begin(), runnable.end(),
-            [](const process *a, const process *b) { return a->pid < b->pid; });
-
-  switch (policy_) {
-  case scheduling_policy::round_robin: {
-    rr_index_ = rr_index_ % static_cast<int>(runnable.size());
-    auto *p = runnable[rr_index_];
-    rr_index_ = (rr_index_ + 1) % static_cast<int>(runnable.size());
-    return processes_.at(p->pid);
-  }
-  case scheduling_policy::priority: {
-    // Lower priority value = higher priority (like Unix nice)
-    std::sort(runnable.begin(), runnable.end(),
-              [](const process *a, const process *b) { return a->priority < b->priority; });
-    return processes_.at(runnable[0]->pid);
-  }
-  case scheduling_policy::priority_rr: {
-    // Sort by priority, then round-robin within highest priority
-    std::sort(runnable.begin(), runnable.end(), [](const process *a, const process *b) {
-      if (a->priority != b->priority)
-        return a->priority < b->priority;
-      return a->pid < b->pid;
-    });
-    int best = runnable[0]->priority;
-    std::vector<process *> same_prio;
-    for (auto *p : runnable) {
-      if (p->priority == best)
-        same_prio.push_back(p);
-    }
-    rr_index_ = rr_index_ % static_cast<int>(same_prio.size());
-    auto *p = same_prio[rr_index_];
-    rr_index_ = (rr_index_ + 1) % static_cast<int>(same_prio.size());
-    return processes_.at(p->pid);
-  }
-  }
-  return nullptr;
+// The pick is what it always was: the runnable processes in pid order, indexed by rr_index_
+// (round robin), the lowest pid of the best priority (priority), or rr_index_ among the best
+// priority's (priority_rr); the run queue finds it without scanning (process_table).
+const process_ptr *scheduler::select_process() {
+  if (policy_ == scheduling_policy::priority)
+    return procs_.pick_first();
+  return procs_.pick_round_robin(rr_index_);
 }
 
 // ---------------------------------------------------------------------------
 // Step execution
 // ---------------------------------------------------------------------------
 
-void scheduler::execute_process_step(process &proc) {
+scheduler::clock::time_point scheduler::now_for_step() {
+  if (!chain_valid_) {
+    chain_now_ = clock::now();
+    chain_cpu_ = -1.0;
+    chain_valid_ = true;
+  }
+  return chain_now_;
+}
+
+void scheduler::execute_process_step(const process_ptr &pp) {
+  process &proc = *pp;
   // Between steps: free the reference cycles programs leaked, once enough piled up (heap.h).
   // Checked every 64 steps: the check reads thread-local state.
-  if ((++cycle_check_ & 63) == 0 && cycle_collection_due())
+  if ((++cycle_check_ & 63) == 0 && cycle_collection_due()) {
     collect_cycles();
+    chain_valid_ = false;
+  }
 
   // Track which process is currently executing so intrinsics can query it.
   current_pid_ = proc.pid;
-  current_proc_ = processes_[proc.pid];
+  current_proc_ = &pp;
   // Ensure current_pid_ is reset even on early returns.
   struct guard {
     int &pid;
-    process_ptr &pp;
+    const process_ptr *&pp;
     ~guard() {
       pid = -1;
-      pp.reset();
+      pp = nullptr;
     }
   } reset_guard{current_pid_, current_proc_};
   // Once this step is over, a process it finished lets go of what it evaluated with.
@@ -320,19 +300,26 @@ void scheduler::execute_process_step(process &proc) {
 
   // 1. Handle pending signals first
   if (!proc.pending_signals.empty() && can_interrupt) {
+    chain_valid_ = false; // it copies the stack: not the next step's time
     handle_signal(proc);
     return; // Signal setup counts as a step
   }
 
   // 1b. Handle pending watch events
   if (!proc.pending_watch_events.empty() && can_interrupt) {
+    chain_valid_ = false;
     handle_watch_event(proc);
     return;
   }
 
-  // 2. Mark as running and track timing
-  proc.status = process_status::running;
-  proc.last_run_start = std::chrono::steady_clock::now();
+  // 2. Mark as running and track timing. Inside run() a step starts from the reading the step
+  // before it ended at, when nothing ran in between but the loop picking this process: one clock
+  // read a step. Every time budget of the step is computed from that one reading.
+  procs_.set_status(proc, process_status::running);
+  const clock::time_point start = now_for_step();
+  const double chained_cpu = chain_cpu_;
+  chain_valid_ = false; // until this step ends plainly
+  proc.last_run_start = start;
   // Async calls run inline in the step (3.5) and are charged as calls (3.8), not as the step.
   proc.step_async_wall = 0.0;
   proc.step_async_cpu = 0.0;
@@ -343,7 +330,7 @@ void scheduler::execute_process_step(process &proc) {
   // between-steps max_time check (checked only after step() returns) cannot see. Arming the
   // cooperative deadline for this step lets that inner work abort at the budget too — the
   // same guarantee the read-lane's run() already has. max_time <= 0 means unlimited (nullopt).
-  eval_deadline_guard step_deadline(proc.time_left());
+  eval_deadline_guard step_deadline(proc.time_left(start));
   // Bound what one native call in this step may allocate: limits.max_alloc_bytes, tightened to
   // what is left of max_memory (its state-tree writes plus its measured heap share).
   // With no budget and the default cap, an armed guard would change nothing (the default applies
@@ -352,8 +339,8 @@ void scheduler::execute_process_step(process &proc) {
   if (proc.max_memory > 0 || proc.max_alloc_bytes != kDefaultMaxAllocBytes)
     step_alloc.emplace(proc.alloc_limit(
         proc.max_memory > 0 ? mem_tracker_.current_bytes(proc.pid) + proc.heap_bytes : 0));
-  const bool charge_cpu = proc.charges_cpu_time();
-  const double cpu0 = charge_cpu ? thread_cpu_seconds() : 0.0;
+  const bool charge_cpu = proc.charges_cpu_time(start);
+  const double cpu0 = charge_cpu ? (chained_cpu >= 0.0 ? chained_cpu : thread_cpu_seconds()) : 0.0;
   bool done = false;
   try {
     done = evaluator_.step(proc.state);
@@ -396,12 +383,15 @@ void scheduler::execute_process_step(process &proc) {
   }
 
   // 4. Accumulate running time, and charge it to what the step was spent on
-  auto now = std::chrono::steady_clock::now();
-  const double step_seconds = std::chrono::duration<double>(now - proc.last_run_start).count();
+  const clock::time_point now = clock::now();
+  const double step_seconds = std::chrono::duration<double>(now - start).count();
   proc.accumulated_time += step_seconds;
   proc.state.stats.add_step_time(step_seconds - proc.step_async_wall);
-  if (charge_cpu)
-    proc.charge_cpu_time(std::max(0.0, thread_cpu_seconds() - cpu0 - proc.step_async_cpu));
+  double cpu1 = -1.0;
+  if (charge_cpu) {
+    cpu1 = thread_cpu_seconds();
+    proc.charge_cpu_time(std::max(0.0, cpu1 - cpu0 - proc.step_async_cpu));
+  }
   // Heap accounting: take a finished measurement, start the next when due (heap.h).
   if (proc.max_memory > 0 || proc.state.heap_measured)
     heap_after_step(proc, step_alloc ? step_alloc->allocated() : 0,
@@ -411,38 +401,52 @@ void scheduler::execute_process_step(process &proc) {
   if ((proc.in_signal_handler || proc.in_watch_handler) && proc.state.done) {
     restore_from_signal(proc);
     // Don't check done — we restored original evaluation
-    proc.status = process_status::ready;
-    check_limits(proc);
+    procs_.set_status(proc, process_status::ready);
+    check_limits(proc, now);
     return;
   }
 
   // 6. Check resource limits
-  check_limits(proc);
+  check_limits(proc, now);
   if (proc.status == process_status::killed)
     return;
 
   // 7. Check completion
   if (done) {
-    terminate_process(proc, proc.state.result);
-  } else if (proc.status == process_status::running) {
-    // Only reset to ready if the intrinsic didn't change the status
-    // (e.g. sleep or msg-recv set it to waiting).
-    proc.status = process_status::ready;
+    terminate_process(proc, proc.state.result); // runs on_complete: not the next step's time
+  } else {
+    if (proc.status == process_status::running) {
+      // Only reset to ready if the intrinsic didn't change the status
+      // (e.g. sleep or msg-recv set it to waiting).
+      procs_.set_status(proc, process_status::ready);
+    }
+    chain_now_ = now;
+    chain_cpu_ = cpu1;
+    chain_valid_ = true;
   }
 }
 
 int scheduler::step() {
+  chain_valid_ = false; // called from outside a run: what ran since the last step is no step's
+  return step_once();
+}
+
+int scheduler::step_once() {
   detail::check_not_in_async_kernel("scheduler::step");
-  // Wake sleeping processes whose deadline has passed.
-  wake_sleeping_processes();
+  // Wake sleeping processes (and timed waits) whose deadline has passed.
+  if (procs_.timed_count() > 0) {
+    const clock::time_point now = now_for_step();
+    if (procs_.timer_due(now))
+      procs_.wake_due(now);
+  }
 
   // Check for value changes on watched state paths.
   poll_watches();
 
-  auto proc = select_process();
-  if (!proc)
+  const process_ptr *pp = select_process();
+  if (!pp)
     return 0;
-  execute_process_step(*proc);
+  execute_process_step(*pp);
   ++total_steps_;
   return 1;
 }
@@ -451,54 +455,77 @@ std::unordered_map<int, value_t> scheduler::run(std::optional<uint64_t> max_step
                                                 std::optional<double> max_time) {
   running_ = true;
   stop_requested_ = false;
+  chain_valid_ = false;
   uint64_t steps = 0;
   // max_time is a time_budget: the run's own time, not time its thread spent descheduled.
   std::optional<time_budget> budget;
+  std::optional<clock::time_point> wall_end; // where an idle wait ends the run
   if (max_time) {
     budget.emplace(*max_time);
     budget->start();
+    wall_end = clock::now() + std::chrono::duration_cast<clock::duration>(
+                                  std::chrono::duration<double>(std::max(0.0, *max_time)));
   }
 
   while (!stop_requested_ && has_runnable()) {
     if (max_steps && steps >= *max_steps)
       break;
-    if (budget && budget->spent())
+    if (budget && budget->spent(now_for_step()))
       break;
-    step();
+    const int stepped = step_once();
     ++steps;
+    if (stepped == 0 && !idle_wait(max_steps.has_value(), wall_end))
+      break;
   }
 
   running_ = false;
+  chain_valid_ = false;
   return get_results();
+}
+
+bool scheduler::idle_wait(bool bounded_by_steps, std::optional<clock::time_point> wall_end) {
+  // Nothing is ready: only sleepers and processes waiting for messages are left (has_runnable).
+  // Spinning until a deadline passes is what run() did; a wait burns no CPU and wakes on time.
+  chain_valid_ = false;
+  if (!idle_)
+    idle_ = std::make_unique<detail::wakeup>();
+  // stop() may come meanwhile (from another thread, a signal handler): checked every 10 ms.
+  constexpr auto kStopCheck = std::chrono::milliseconds(10);
+  if (const std::optional<clock::time_point> next = procs_.next_timer()) {
+    const clock::time_point until = wall_end ? std::min(*next, *wall_end) : *next;
+    for (clock::time_point now = clock::now(); !stop_requested_ && now < until; now = clock::now())
+      idle_->wait_until(std::min(until, now + kStopCheck));
+    // Past the run's own time with still nothing to run: its budget is spent.
+    return !(wall_end && *wall_end <= *next && clock::now() >= *wall_end);
+  }
+  // Only message waiters with no time limit: nothing in a synchronous run can wake them.
+  if (bounded_by_steps)
+    return false; // what spinning through the rest of max_steps would come to
+  for (clock::time_point now = clock::now(); !stop_requested_ && (!wall_end || now < *wall_end);
+       now = clock::now())
+    idle_->wait_until(wall_end ? std::min(*wall_end, now + kStopCheck) : now + kStopCheck);
+  return false;
 }
 
 void scheduler::stop() { stop_requested_ = true; }
 
 bool scheduler::has_runnable() const {
-  for (const auto &[pid, proc] : processes_) {
-    if (proc->status == process_status::ready || proc->status == process_status::running)
-      return true;
-    // A sleeping process will become runnable when its deadline expires.
-    if (proc->status == process_status::waiting && proc->wake_time)
-      return true;
-    // A message-waiting process will become runnable when a message arrives.
-    if (proc->status == process_status::waiting && proc->recv_path)
-      return true;
-  }
-  return false;
+  // Ready or running, or waiting with a wake_time (a sleeper becomes runnable at its deadline),
+  // or waiting for a message (it becomes runnable when one arrives).
+  return procs_.runnable_count() > 0 || procs_.sleeping_count() > 0 || procs_.receiving_count() > 0;
 }
 
 void scheduler::queue_watch_event(int pid, process::watch_event evt) {
-  auto it = processes_.find(pid);
-  if (it == processes_.end())
+  auto it = procs_.all().find(pid);
+  if (it == procs_.all().end())
     return;
   it->second->pending_watch_events.push_back(std::move(evt));
 }
 
 void scheduler::register_watch_handler(int pid, int watch_id, value_t handler,
                                        const std::string &path) {
-  auto it = processes_.find(pid);
-  if (it == processes_.end())
+  auto it = procs_.all().find(pid);
+  if (it == procs_.all().end())
     return;
   // Capture current value so the first change can be detected by polling.
   std::string initial;
@@ -508,13 +535,21 @@ void scheduler::register_watch_handler(int pid, int watch_id, value_t handler,
       initial = node->value();
   }
   it->second->watch_handlers[watch_id] = {std::move(handler), path, initial};
+  procs_.update(*it->second);
 }
 
 void scheduler::unregister_watch_handler(int pid, int watch_id) {
-  auto it = processes_.find(pid);
-  if (it == processes_.end())
+  auto it = procs_.all().find(pid);
+  if (it == procs_.all().end())
     return;
   it->second->watch_handlers.erase(watch_id);
+  procs_.update(*it->second);
+}
+
+void scheduler::set_watch_root(cvc::state *root) {
+  if (root != watch_root_ && tree_changes_.root())
+    tree_changes_.watch(root); // counted afresh (a new root counts as a change)
+  watch_root_ = root;
 }
 
 // ---------------------------------------------------------------------------
@@ -522,11 +557,26 @@ void scheduler::unregister_watch_handler(int pid, int watch_id) {
 // ---------------------------------------------------------------------------
 
 void scheduler::poll_watches() {
+  // Only the processes with watches, and only when the tree under the watch root changed since
+  // the last poll (a write anywhere under it counts: tree_changes). A value the poll finds
+  // changed queues a watch event, as it always did.
   if (!watch_root_)
     return;
-  for (auto &[pid, proc] : processes_) {
-    if (is_finished(proc->status))
-      continue;
+  if (procs_.watchers().empty()) {
+    if (tree_changes_.root())
+      tree_changes_.watch(nullptr); // no slot on the tree while nothing watches it
+    return;
+  }
+  if (tree_changes_.root() != watch_root_) {
+    tree_changes_.watch(watch_root_);
+    watch_seen_ = tree_changes_.count() - 1; // poll once now: changes before it weren't counted
+  }
+  const uint64_t seen = tree_changes_.count();
+  if (seen == watch_seen_)
+    return;
+  watch_seen_ = seen;
+  chain_valid_ = false; // the reads below are no step's time
+  for (process *proc : procs_.watchers()) {
     for (auto &[wid, entry] : proc->watch_handlers) {
       auto *node = watch_root_->findDescendant(entry.path);
       if (!node)
@@ -536,28 +586,6 @@ void scheduler::poll_watches() {
         entry.last_value = cur;
         proc->pending_watch_events.push_back({wid});
       }
-    }
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Sleep / wake
-// ---------------------------------------------------------------------------
-
-void scheduler::wake_sleeping_processes() {
-  auto now = std::chrono::steady_clock::now();
-  for (auto &[pid, proc] : processes_) {
-    if (proc->status == process_status::waiting && proc->wake_time && now >= *proc->wake_time) {
-      proc->wake_time.reset();
-      proc->status = process_status::ready;
-    }
-    // A timed wait ((await f seconds)) that ran out: the waiting call raises TimeoutError.
-    if (proc->status == process_status::waiting && proc->recv_path && proc->recv_deadline &&
-        now >= *proc->recv_deadline) {
-      proc->recv_path.reset();
-      proc->recv_deadline.reset();
-      expire_await(proc->state);
-      proc->status = process_status::ready;
     }
   }
 }
@@ -654,8 +682,8 @@ void scheduler::handle_watch_event(process &proc) {
 }
 
 bool scheduler::send_signal(int pid, const std::string &signal) {
-  auto it = processes_.find(pid);
-  if (it == processes_.end())
+  auto it = procs_.all().find(pid);
+  if (it == procs_.all().end())
     return false;
   auto &proc = *it->second;
   if (is_finished(proc.status))
@@ -674,14 +702,16 @@ bool scheduler::send_signal(int pid, const std::string &signal) {
 // Resource limit checking
 // ---------------------------------------------------------------------------
 
-void scheduler::check_limits(process &proc) {
+void scheduler::check_limits(process &proc) { check_limits(proc, clock::now()); }
+
+void scheduler::check_limits(process &proc, clock::time_point now) {
   // max_steps
   if (proc.max_steps > 0 && proc.step_count() >= proc.max_steps) {
     kill_process(proc, "max_steps_exceeded");
     return;
   }
   // max_time
-  if (proc.over_time_limit()) {
+  if (proc.over_time_limit(now)) {
     kill_process(proc, "time_limit_exceeded");
     return;
   }
@@ -708,7 +738,7 @@ void scheduler::check_limits(process &proc) {
 // ---------------------------------------------------------------------------
 
 void scheduler::terminate_process(process &proc, value_t result) {
-  proc.status = process_status::terminated;
+  procs_.set_status(proc, process_status::terminated);
   proc.exit_code = std::move(result);
   proc.state.stats.mark_complete();
   if (proc.on_complete) {
@@ -718,14 +748,14 @@ void scheduler::terminate_process(process &proc, value_t result) {
 }
 
 void scheduler::kill_process(process &proc, const std::string &reason) {
-  proc.status = process_status::killed;
+  procs_.set_status(proc, process_status::killed);
   proc.exit_error = reason;
   proc.state.stats.mark_complete();
   release_if_idle(proc);
 }
 
 void scheduler::fail_process(process &proc, value_t exc, std::exception_ptr original) {
-  proc.status = process_status::failed;
+  procs_.set_status(proc, process_status::failed);
   proc.exit_error = exception_summary(exc);
   proc.exit_exception = std::move(exc);
   proc.exit_original = std::move(original);
@@ -741,8 +771,8 @@ void scheduler::release_if_idle(process &proc) {
 }
 
 bool scheduler::pause(int pid) {
-  auto it = processes_.find(pid);
-  if (it == processes_.end())
+  auto it = procs_.all().find(pid);
+  if (it == procs_.all().end())
     return false;
   auto &proc = *it->second;
   if (proc.status != process_status::ready && proc.status != process_status::running)
@@ -752,36 +782,34 @@ bool scheduler::pause(int pid) {
     auto now = std::chrono::steady_clock::now();
     proc.accumulated_time += std::chrono::duration<double>(now - proc.last_run_start).count();
   }
-  proc.status = process_status::paused;
+  procs_.set_status(proc, process_status::paused);
   return true;
 }
 
 bool scheduler::resume(int pid) {
-  auto it = processes_.find(pid);
-  if (it == processes_.end())
+  auto it = procs_.all().find(pid);
+  if (it == procs_.all().end())
     return false;
   auto &proc = *it->second;
   if (proc.status != process_status::paused)
     return false;
-  proc.status = process_status::ready;
+  procs_.set_status(proc, process_status::ready);
   return true;
 }
 
 bool scheduler::sleep(int pid, double seconds) {
-  auto it = processes_.find(pid);
-  if (it == processes_.end())
+  auto it = procs_.all().find(pid);
+  if (it == procs_.all().end())
     return false;
   auto &proc = *it->second;
   if (proc.status != process_status::ready && proc.status != process_status::running)
     return false;
-  if (proc.status == process_status::running) {
-    auto now = std::chrono::steady_clock::now();
+  const auto now = std::chrono::steady_clock::now();
+  if (proc.status == process_status::running)
     proc.accumulated_time += std::chrono::duration<double>(now - proc.last_run_start).count();
-  }
-  proc.wake_time = std::chrono::steady_clock::now() +
-                   std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-                       std::chrono::duration<double>(seconds));
-  proc.status = process_status::waiting;
+  proc.wake_time = now + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                             std::chrono::duration<double>(seconds));
+  procs_.set_status(proc, process_status::waiting); // a timer for wake_time
   return true;
 }
 
@@ -793,8 +821,8 @@ bool scheduler::yield_frame(int /*pid*/) {
 
 bool scheduler::receive_message(int pid, const std::string &path) {
   detail::check_not_in_async_kernel("scheduler::receive_message");
-  auto it = processes_.find(pid);
-  if (it == processes_.end())
+  auto it = procs_.all().find(pid);
+  if (it == procs_.all().end())
     return false;
   auto &proc = *it->second;
   if (proc.status != process_status::ready && proc.status != process_status::running)
@@ -805,37 +833,41 @@ bool scheduler::receive_message(int pid, const std::string &path) {
   }
   proc.recv_path = path;
   proc.recv_deadline.reset();
-  proc.status = process_status::waiting;
+  procs_.set_status(proc, process_status::waiting); // indexed under its channel
   return true;
 }
 
 bool scheduler::receive_message_until(int pid, const std::string &path, double seconds) {
   if (!receive_message(pid, path))
     return false;
-  processes_.at(pid)->recv_deadline =
-      std::chrono::steady_clock::now() +
-      std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-          std::chrono::duration<double>(std::max(0.0, seconds)));
+  process &proc = *procs_.find(pid);
+  proc.recv_deadline = std::chrono::steady_clock::now() +
+                       std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                           std::chrono::duration<double>(std::max(0.0, seconds)));
+  procs_.update(proc); // a timer for the deadline
   return true;
 }
 
 int scheduler::deliver_to_receivers(const std::string &path, const value_t &msg) {
   detail::check_not_in_async_kernel("scheduler::deliver_to_receivers");
-  int woken = 0;
-  for (auto &[pid, proc] : processes_) {
-    if (proc->status == process_status::waiting && proc->recv_path && *proc->recv_path == path) {
-      proc->recv_path.reset();
-      proc->recv_deadline.reset();
-      proc->state.result = msg;
-      // A call parked in the await_call phase takes the message; otherwise patch the nil
-      // placeholder that msg-recv left in the parent frame.
-      if (!deliver_await(proc->state, msg) && !proc->state.stack.empty() &&
-          !proc->state.stack.back().results.empty())
-        proc->state.stack.back().results.back() = msg;
-      proc->status = process_status::ready;
-      ++woken;
-    }
+  // The processes waiting on `path`, from the receiver index (no scan).
+  std::vector<process *> woken_list;
+  woken_list.swap(woken_);
+  procs_.take_receivers(path, woken_list);
+  for (process *proc : woken_list) {
+    proc->recv_path.reset();
+    proc->recv_deadline.reset();
+    proc->state.result = msg;
+    // A call parked in the await_call phase takes the message; otherwise patch the nil
+    // placeholder that msg-recv left in the parent frame.
+    if (!deliver_await(proc->state, msg) && !proc->state.stack.empty() &&
+        !proc->state.stack.back().results.empty())
+      proc->state.stack.back().results.back() = msg;
+    procs_.set_status(*proc, process_status::ready);
   }
+  const int woken = static_cast<int>(woken_list.size());
+  woken_list.clear();
+  woken_.swap(woken_list);
   // If no process was waiting, queue for later msg-recv calls.
   if (woken == 0) {
     auto &q = pending_messages_[path];
@@ -872,8 +904,8 @@ std::size_t scheduler::total_pending_messages() const {
 
 bool scheduler::kill(int pid) {
   detail::check_not_in_async_kernel("scheduler::kill");
-  auto it = processes_.find(pid);
-  if (it == processes_.end())
+  auto it = procs_.all().find(pid);
+  if (it == procs_.all().end())
     return false;
   auto &proc = *it->second;
   if (is_finished(proc.status))
@@ -892,13 +924,13 @@ int scheduler::restore(process_ptr proc) {
   proc->recv_deadline.reset();
   proc->awaiting_frame = false;
   proc->create_time = std::chrono::steady_clock::now();
-  processes_.emplace(pid, std::move(proc));
+  procs_.insert(std::move(proc));
   return pid;
 }
 
 bool scheduler::snapshot(int pid, cvc::state &node) const {
-  const auto it = processes_.find(pid);
-  if (it == processes_.end())
+  const auto it = procs_.all().find(pid);
+  if (it == procs_.all().end())
     return false;
   encode_process(node, *it->second);
   return true;
@@ -911,8 +943,8 @@ int scheduler::restore(cvc::state &node, environment_ptr natives) {
 }
 
 int scheduler::fork(int pid) {
-  auto it = processes_.find(pid);
-  if (it == processes_.end())
+  auto it = procs_.all().find(pid);
+  if (it == procs_.all().end())
     return -1;
   auto &parent = *it->second;
   if (parent.status != process_status::ready && parent.status != process_status::running)
@@ -964,7 +996,7 @@ int scheduler::fork(int pid) {
   parent.state.result = value_t(static_cast<int64_t>(child_pid));
   child->state.result = value_t(static_cast<int64_t>(0));
 
-  processes_.emplace(child_pid, std::move(child));
+  procs_.insert(std::move(child));
   return child_pid;
 }
 
@@ -973,48 +1005,49 @@ int scheduler::fork(int pid) {
 // ---------------------------------------------------------------------------
 
 bool scheduler::set_priority(int pid, int priority) {
-  auto it = processes_.find(pid);
-  if (it == processes_.end())
+  auto it = procs_.all().find(pid);
+  if (it == procs_.all().end())
     return false;
   it->second->priority = priority;
+  procs_.update(*it->second); // its run-queue level, under the priority policies
   return true;
 }
 
 bool scheduler::set_max_steps(int pid, uint64_t max_steps) {
-  auto it = processes_.find(pid);
-  if (it == processes_.end())
+  auto it = procs_.all().find(pid);
+  if (it == procs_.all().end())
     return false;
   it->second->max_steps = max_steps;
   return true;
 }
 
 bool scheduler::set_max_time(int pid, double seconds) {
-  auto it = processes_.find(pid);
-  if (it == processes_.end())
+  auto it = procs_.all().find(pid);
+  if (it == procs_.all().end())
     return false;
   it->second->max_time = seconds;
   return true;
 }
 
 bool scheduler::set_max_memory(int pid, uint64_t bytes) {
-  auto it = processes_.find(pid);
-  if (it == processes_.end())
+  auto it = procs_.all().find(pid);
+  if (it == procs_.all().end())
     return false;
   it->second->max_memory = bytes;
   return true;
 }
 
 bool scheduler::set_max_messages(int pid, uint64_t count) {
-  auto it = processes_.find(pid);
-  if (it == processes_.end())
+  auto it = procs_.all().find(pid);
+  if (it == procs_.all().end())
     return false;
   it->second->max_messages = count;
   return true;
 }
 
 bool scheduler::set_max_message_bytes(int pid, uint64_t bytes) {
-  auto it = processes_.find(pid);
-  if (it == processes_.end())
+  auto it = procs_.all().find(pid);
+  if (it == procs_.all().end())
     return false;
   it->second->max_message_bytes = bytes;
   return true;
@@ -1054,8 +1087,8 @@ process_info scheduler::make_info(const process &proc) const {
 
 std::vector<process_info> scheduler::list_processes() const {
   std::vector<process_info> result;
-  result.reserve(processes_.size());
-  for (const auto &[pid, proc] : processes_) {
+  result.reserve(procs_.size());
+  for (const auto &[pid, proc] : procs_.all()) {
     result.push_back(make_info(*proc));
   }
   // Sort by PID for deterministic ordering
@@ -1065,15 +1098,15 @@ std::vector<process_info> scheduler::list_processes() const {
 }
 
 std::optional<process_info> scheduler::get_process_info(int pid) const {
-  auto it = processes_.find(pid);
-  if (it == processes_.end())
+  auto it = procs_.all().find(pid);
+  if (it == procs_.all().end())
     return std::nullopt;
   return make_info(*it->second);
 }
 
 std::optional<value_t> scheduler::get_result(int pid) const {
-  auto it = processes_.find(pid);
-  if (it == processes_.end())
+  auto it = procs_.all().find(pid);
+  if (it == procs_.all().end())
     return std::nullopt;
   if (it->second->status != process_status::terminated)
     return std::nullopt;
@@ -1081,29 +1114,34 @@ std::optional<value_t> scheduler::get_result(int pid) const {
 }
 
 std::optional<std::string> scheduler::get_exit_error(int pid) const {
-  auto it = processes_.find(pid);
-  if (it == processes_.end())
+  auto it = procs_.all().find(pid);
+  if (it == procs_.all().end())
     return std::nullopt;
   return it->second->exit_error;
 }
 
 std::optional<value_t> scheduler::get_exit_exception(int pid) const {
-  auto it = processes_.find(pid);
-  if (it == processes_.end())
+  auto it = procs_.all().find(pid);
+  if (it == procs_.all().end())
     return std::nullopt;
   return it->second->exit_exception;
 }
 
 void scheduler::raise_exit_exception(int pid) const {
-  auto it = processes_.find(pid);
-  if (it == processes_.end() || !it->second->exit_exception)
+  auto it = procs_.all().find(pid);
+  if (it == procs_.all().end() || !it->second->exit_exception)
     return;
   throw dsl_exception(*it->second->exit_exception, it->second->exit_original);
 }
 
+bool scheduler::reap(int pid) {
+  detail::check_not_in_async_kernel("scheduler::reap");
+  return procs_.erase(pid);
+}
+
 std::unordered_map<int, value_t> scheduler::get_results() const {
   std::unordered_map<int, value_t> results;
-  for (const auto &[pid, proc] : processes_) {
+  for (const auto &[pid, proc] : procs_.all()) {
     if (proc->status == process_status::terminated) {
       results[pid] = proc->exit_code;
     }
@@ -1113,9 +1151,9 @@ std::unordered_map<int, value_t> scheduler::get_results() const {
 
 scheduler_stats scheduler::get_stats() const {
   scheduler_stats s;
-  s.total_processes = static_cast<int>(processes_.size());
+  s.total_processes = static_cast<int>(procs_.size());
   s.total_steps = total_steps_;
-  for (const auto &[pid, proc] : processes_) {
+  for (const auto &[pid, proc] : procs_.all()) {
     switch (proc->status) {
     case process_status::running:
       ++s.running;

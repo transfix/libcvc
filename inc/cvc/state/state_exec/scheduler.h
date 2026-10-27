@@ -14,6 +14,7 @@
 #include <cvc/state/state_exec/heap.h>
 #include <cvc/state/state_exec/memory_tracker.h>
 #include <cvc/state/state_exec/process.h>
+#include <cvc/state/state_exec/process_table.h>
 #include <cvc/state/state_exec/scheduler_base.h>
 #include <cvc/state/state_exec/stackless_evaluator.h>
 #include <cvc/state/state_exec/types.h>
@@ -62,6 +63,14 @@ public:
 
   /// Run until all processes complete or global limits reached.
   /// Returns map of pid → exit_code for terminated processes.
+  ///
+  /// While nothing is ready and processes sleep (or wait for a message with a time limit), run()
+  /// blocks until the earliest of their deadlines instead of spinning, never past `max_time`
+  /// (then it returns, as a spinning run would once its time budget ran out); each such wait
+  /// counts as one of `max_steps`. While only processes waiting for a message with no time
+  /// limit are left, nothing can wake them in a synchronous run: run() returns at once when
+  /// `max_steps` bounds it (as spinning through the rest of it would), else waits out
+  /// `max_time`, else waits until stop().
   std::unordered_map<int, value_t> run(std::optional<uint64_t> max_steps = std::nullopt,
                                        std::optional<double> max_time = std::nullopt);
 
@@ -70,6 +79,11 @@ public:
 
   /// Is the run loop active?
   bool is_running() const { return running_; }
+
+  /// Erase a finished (terminated, killed or failed) process, freeing what it kept (its
+  /// result, error and statistics). False for an unknown pid or a live one. Until then a
+  /// finished process stays readable (get_result, get_process_info, get_results).
+  bool reap(int pid);
 
   // --- Process control ---
 
@@ -152,7 +166,7 @@ public:
 
   scheduling_policy policy() const { return policy_; }
   const memory_tracker &mem_tracker() const { return mem_tracker_; }
-  int process_count() const { return static_cast<int>(processes_.size()); }
+  int process_count() const { return static_cast<int>(procs_.size()); }
 
   /// Check if any process is still runnable.
   bool has_runnable() const;
@@ -161,7 +175,9 @@ public:
   int current_pid() const { return current_pid_; }
 
   /// Process pointer of the process currently being stepped (nullptr if none).
-  const process_ptr &current_process() const { return current_proc_; }
+  const process_ptr &current_process() const {
+    return current_proc_ ? *current_proc_ : no_process();
+  }
 
   /// Queue a watch event for a process by PID.
   void queue_watch_event(int pid, process::watch_event evt);
@@ -173,7 +189,7 @@ public:
   void unregister_watch_handler(int pid, int watch_id);
 
   /// Set the state-tree root for watch polling.
-  void set_watch_root(cvc::state *root) { watch_root_ = root; }
+  void set_watch_root(cvc::state *root);
 
   /// Set a unique identifier for this scheduler instance.
   /// Used as the key under `state_exec.schedulers.<id>` in the state tree.
@@ -246,22 +262,45 @@ private:
   bool stop_requested_ = false;
   uint64_t total_steps_ = 0;
   int current_pid_ = -1;
-  process_ptr current_proc_;
+  const process_ptr *current_proc_ = nullptr; // the stepping process's entry in procs_
 
   stackless_evaluator evaluator_;
   memory_tracker mem_tracker_;
   cvc::state *watch_root_ = nullptr;
 
-  std::unordered_map<int, process_ptr> processes_;
+  /// Every process by pid (finished ones until reaped), its run queue, timers and waiters.
+  detail::process_table procs_;
+
+  /// A steady_clock reading the next step may start from: the end of the step before, when
+  /// nothing ran between the two but the scheduler's own bookkeeping (within one run()).
+  using clock = std::chrono::steady_clock;
+  clock::time_point chain_now_{};
+  bool chain_valid_ = false;
+  double chain_cpu_ = -1.0; // the thread's CPU time then, when it was read (else < 0)
+  clock::time_point now_for_step();
+
+  /// Counts tree changes under watch_root_ while processes have watches: poll_watches() reads
+  /// the watched nodes only when the count moved.
+  detail::tree_changes tree_changes_;
+  uint64_t watch_seen_ = 0;
+  std::unique_ptr<detail::wakeup> idle_; // run()'s idle wait, made on first use
+  std::vector<process *> woken_;         // reused by deliver_to_receivers
 
   /// Per-path FIFO queue for messages sent when no receiver is waiting.
   std::unordered_map<std::string, std::queue<value_t>> pending_messages_;
 
+  static const process_ptr &no_process();
+
   /// Select the next process to run based on scheduling policy.
-  process_ptr select_process();
+  const process_ptr *select_process();
+
+  /// One step of the run loop (step() starts a fresh clock chain).
+  int step_once();
+  /// run()'s wait while nothing is ready: false to end the run.
+  bool idle_wait(bool bounded_by_steps, std::optional<clock::time_point> wall_end);
 
   /// Execute one step on a specific process and check resource limits.
-  void execute_process_step(process &proc);
+  void execute_process_step(const process_ptr &pp);
 
   /// Handle pending signals for a process.
   void handle_signal(process &proc);
@@ -275,11 +314,10 @@ private:
   /// Poll all watch_handlers entries for value changes, queuing events.
   void poll_watches();
 
-  /// Wake sleeping processes whose deadline has passed.
-  void wake_sleeping_processes();
-
   /// Check resource limits after a step.  May kill the process.
   void check_limits(process &proc);
+  /// check_limits with the steady_clock reading the step ended at.
+  void check_limits(process &proc, clock::time_point now);
 
   /// Mark a process as terminated with a result.
   void terminate_process(process &proc, value_t result);
