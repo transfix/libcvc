@@ -1,10 +1,22 @@
 /// @file state_exec_scheduler_test.cpp
 /// @brief Tests for Phase 4: Process, MemoryTracker, Scheduler, AsyncScheduler.
 
+// clang-format off
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h> // thread priorities (WakeupPriorityTest)
+#endif
+// clang-format on
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_evaluator.h>
@@ -22,6 +34,7 @@
 #include <gtest/gtest.h>
 #include <iterator>
 #include <limits>
+#include <map>
 #include <random>
 #include <span>
 #include <stdexcept>
@@ -1554,16 +1567,21 @@ TEST(SchedulerIdleTest, RunSleepsUntilTheEarliestWakeInsteadOfSpinning) {
   const int b = sched.execute(std::string("(begin 4 5 6)"));
   sched.step();
   sched.step();
+  // Timed from before the sleeps, so b can't finish sooner than 0.3 s after t0. The CPU clock is
+  // read once first: its first reading in a process calibrates it for 5-20 ms (a Sleep(5),
+  // thread_cpu_seconds), which, between b's sleep and t0 (ctest runs each test in a process of
+  // its own), made the run look up to a Windows timer tick short of b's 0.3 s.
+  (void)thread_cpu_seconds();
+  const auto t0 = std::chrono::steady_clock::now();
   ASSERT_TRUE(sched.sleep(a, 0.15));
   ASSERT_TRUE(sched.sleep(b, 0.3));
   const double cpu0 = thread_cpu_seconds();
-  const auto t0 = std::chrono::steady_clock::now();
   auto results = sched.run();
   const double wall = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
   const double cpu = thread_cpu_seconds() - cpu0;
   EXPECT_EQ(std::get<int64_t>(results.at(a).v), 3);
   EXPECT_EQ(std::get<int64_t>(results.at(b).v), 6);
-  EXPECT_GE(wall, 0.29);
+  EXPECT_GE(wall, 0.3) << "b ran before its deadline";
   EXPECT_LT(cpu, 0.5 * wall) << "run() spun while the processes slept";
 }
 
@@ -1876,14 +1894,15 @@ TEST(SchedulerIdleTest, AStepBoundedRunWithStepsToSpareWaitsForTheSleeper) {
   scheduler sched;
   const int pid = sched.execute(std::string("(begin 1 2 7)"));
   sched.step();
+  (void)thread_cpu_seconds(); // calibrated (see RunSleepsUntilTheEarliestWakeInsteadOfSpinning)
+  const auto t0 = std::chrono::steady_clock::now();
   ASSERT_TRUE(sched.sleep(pid, 0.1));
   const double cpu0 = thread_cpu_seconds();
-  const auto t0 = std::chrono::steady_clock::now();
   const auto results = sched.run(10'000'000, 5.0);
   const double wall = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
   ASSERT_TRUE(results.count(pid));
   EXPECT_EQ(std::get<int64_t>(results.at(pid).v), 7);
-  EXPECT_GE(wall, 0.09);
+  EXPECT_GE(wall, 0.1) << "the process ran before its deadline";
   EXPECT_LT(thread_cpu_seconds() - cpu0, 0.5 * wall) << "run() spun while the process slept";
 }
 
@@ -1976,6 +1995,7 @@ struct call_world {
   intrinsics_context ictx;
   process_ptr ctx_proc = make_process();
   std::atomic<bool> nap_ended{false};
+  std::atomic<int> naps_started{0};
 
   explicit call_world(async_options opts = {}) {
     tree = &cvc::state::instance(app);
@@ -1992,6 +2012,7 @@ struct call_world {
         [this](std::span<const value_t> a) -> async_kernel {
           const int64_t ms = a.empty() ? 50 : std::get<int64_t>(a[0].v);
           return [this, ms](async_call &) -> value_t {
+            ++naps_started;
             std::this_thread::sleep_for(std::chrono::milliseconds(ms));
             nap_ended = true;
             return value_t(int64_t(2));
@@ -2044,6 +2065,14 @@ struct call_world {
   }
   double drive(int pid, double secs) {
     return drive(pid, secs, [] {});
+  }
+
+  // Until `n` blind-nap kernels have started (their calls are charged from then on).
+  bool await_naps_started(int n) {
+    const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (naps_started.load() < n && std::chrono::steady_clock::now() < end)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    return naps_started.load() >= n;
   }
 };
 
@@ -2113,3 +2142,308 @@ TEST(AsyncWaitForWorkTest, SwitchingTheIdMidCallAppliesToTheNextCharge) {
   // At A's rate throughout it would be ~300000; at B's from 50 ms on, about A's 50 ms of it.
   EXPECT_LT(info.async_steps, 200000u);
 }
+
+// A process that ends without awaiting a call (an abandoned future, STATE_EXEC_EXCEPTIONS.md 3.3)
+// leaves the call running. Past its timeout it is no drain's to time out (its process is over),
+// so it must not end the wait either: the driver would spin until the kernel ended.
+TEST(AsyncWaitForWorkTest, AnEndedProcesssCallPastItsTimeoutDoesntEndTheWait) {
+  async_options opts;
+  opts.timeout = 0.05;
+  call_world w(opts);
+  const int pid = w.submit("(begin (blind-nap-async 800) 1)");
+  w.drive(pid, 5.0);
+  ASSERT_EQ(w.sched.get_process_info(pid)->status, process_status::terminated);
+  std::this_thread::sleep_for(std::chrono::milliseconds(100)); // past the call's timeout
+  w.sched.drain_ingress();
+  const auto t0 = std::chrono::steady_clock::now();
+  EXPECT_FALSE(w.sched.wait_for_work(0.2));
+  EXPECT_GE(std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(), 0.19)
+      << "the wait ended at once, for a call no drain times out";
+  EXPECT_FALSE(w.nap_ended); // the kernel still runs: the wait had nothing else to end for
+}
+
+// A NaN timeout never passes (past_timeout never holds): it must not end the wait (time_after of
+// the call's creation and NaN is its creation, long past), nor time the call out.
+TEST(AsyncWaitForWorkTest, ANanTimeoutNeitherEndsTheWaitNorTimesTheCallOut) {
+  async_options opts;
+  opts.timeout = std::numeric_limits<double>::quiet_NaN();
+  call_world w(opts);
+  const int pid = w.submit("(blind-nap 500)");
+  w.sched.drain_ingress();
+  w.sched.sync_run(); // until it parks at the call
+  ASSERT_EQ(w.sched.get_process_info(pid)->status, process_status::waiting);
+  const auto t0 = std::chrono::steady_clock::now();
+  EXPECT_FALSE(w.sched.wait_for_work(0.15));
+  EXPECT_GE(std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(), 0.14)
+      << "the wait ended at once, for a timeout that never passes";
+  w.drive(pid, 10.0);
+  ASSERT_TRUE(w.sched.get_result(pid).has_value());
+  EXPECT_EQ(std::get<int64_t>(w.sched.get_result(pid)->v), 2);
+}
+
+// A charge that reads the tree's rate may publish it, a write to the tree whose slots may kill or
+// reap. The rate is read before the calls are walked, so a slot that kills every process with a
+// call in flight leaves the walk nothing to trip on. It used to go on from the index it had
+// reached, past the end of the emptied list.
+TEST(AsyncWaitForWorkTest, ASlotOfTheRatesPublicationMayKillEveryCaller) {
+  call_world w;
+  const std::string limit = "state_exec.schedulers.A.limits.async_steps_per_cpu_ms";
+  (*w.tree)(limit).value("1000");
+  w.sched.set_id("A");
+  execute_options own; // its call, first in the list, doesn't read the tree
+  own.async_steps_per_cpu_ms = 1000.0;
+  const int p1 = w.submit("(blind-nap 400)", own);
+  w.sched.drain_ingress();
+  w.sched.sync_run(); // parks at its call
+  const int p2 = w.submit("(let ((a (blind-nap-async 400)) (b (blind-nap-async 400)))"
+                          "  (+ (await a) (await b)))");
+  w.sched.sync_run(); // parks with two calls in flight
+  ASSERT_TRUE(w.await_naps_started(3));
+  w.sched.drain_ingress(); // charges them: reads the rate and publishes it
+  cvc::state &effective = (*w.tree)("state_exec.schedulers.A.effective.async_steps_per_cpu_ms");
+  ASSERT_EQ(effective.value(), "1000");
+  bool armed = true;
+  int fired = 0;
+  const boost::signals2::scoped_connection slot = effective.valueChanged.connect([&] {
+    if (!armed)
+      return;
+    armed = false;
+    ++fired;
+    w.sched.kill(p1);
+    w.sched.kill(p2);
+  });
+  (*w.tree)(limit).value("500"); // the next charge publishes 500
+  EXPECT_NO_THROW(w.sched.drain_ingress());
+  EXPECT_EQ(fired, 1);
+  EXPECT_EQ(w.sched.get_process_info(p1)->status, process_status::killed);
+  EXPECT_EQ(w.sched.get_process_info(p2)->status, process_status::killed);
+  EXPECT_EQ(effective.value(), "500");
+}
+
+// Cancelling a killed process's calls reads the rate, which may publish it. A slot of that
+// publication that kills the process again finds no calls left to cancel, so it doesn't read the
+// rate again. It used to, and a slot that also changed the rate each time recursed at each level.
+TEST(AsyncWaitForWorkTest, AKillFromTheRatesPublicationDoesntRecurse) {
+  call_world w;
+  const std::string limit = "state_exec.schedulers.A.limits.async_steps_per_cpu_ms";
+  (*w.tree)(limit).value("1000");
+  w.sched.set_id("A");
+  const int pid = w.submit("(blind-nap 400)");
+  w.sched.drain_ingress();
+  w.sched.sync_run(); // parks at its call
+  ASSERT_TRUE(w.await_naps_started(1));
+  w.sched.drain_ingress(); // publishes 1000
+  cvc::state &effective = (*w.tree)("state_exec.schedulers.A.effective.async_steps_per_cpu_ms");
+  ASSERT_EQ(effective.value(), "1000");
+  int fired = 0;
+  const boost::signals2::scoped_connection slot = effective.valueChanged.connect([&] {
+    if (++fired > 20)
+      return; // the bound of the recursion this guards against
+    (*w.tree)(limit).value(std::to_string(1000 + fired)); // the next read publishes again
+    w.sched.kill(pid);
+  });
+  (*w.tree)(limit).value("500");
+  EXPECT_TRUE(w.sched.kill(pid)); // cancelling its call publishes 500
+  EXPECT_EQ(fired, 1);
+  const process_info info = *w.sched.get_process_info(pid);
+  EXPECT_EQ(info.status, process_status::killed);
+  EXPECT_GE(info.async_steps, 1u); // the call's final charge
+}
+
+// ===========================================================================
+// A sleeper never runs before its deadline on the steady clock
+// ===========================================================================
+
+TEST(WakeupTest, AWaitNeverEndsBeforeItsTimeUnlessNotified) {
+  // However the OS wait under it ends (a timer may fire early), a wait that returns false has
+  // reached its time on the steady clock. Notifications at random moments end some waits early,
+  // and those return true.
+  detail::wakeup w;
+  std::atomic<bool> done{false};
+  std::thread notifier([&] {
+    detail::wakeup tick;
+    while (!done.load()) {
+      tick.wait_until(std::chrono::steady_clock::now() + std::chrono::microseconds(1700));
+      w.notify();
+    }
+  });
+  int timed = 0;
+  for (int i = 0; i < 120; ++i) {
+    const bool precise = i % 2 == 1;
+    const auto t = std::chrono::steady_clock::now() + std::chrono::microseconds(50 + 29 * (i % 40));
+    if (!w.wait_until(t, precise)) {
+      ++timed;
+      EXPECT_GE(std::chrono::steady_clock::now(), t) << "wait " << i << " ended early";
+    }
+  }
+  done = true;
+  notifier.join();
+  EXPECT_GT(timed, 0);
+}
+
+namespace {
+
+// Processes that each sleep `secs` `n` times, (stamp)ing the steady clock right before and right
+// after each (sleep secs): the sleep's deadline is at least the first stamp plus secs, and the
+// second stamp is taken once the process runs again, so it must be at least that.
+template <class Sched> struct stamped_sleepers {
+  Sched sched;
+  environment_ptr env = builtins::make_default_environment();
+  intrinsics_context ictx;
+  process_ptr ctx_proc = make_process();
+  std::map<int, std::vector<std::chrono::steady_clock::time_point>> stamps;
+  std::map<int, double> secs_of;
+
+  stamped_sleepers() {
+    ictx.sched = &sched;
+    ctx_proc->pid = 0;
+    ictx.proc = ctx_proc;
+    register_intrinsics(env, &ictx);
+    builtins::register_fn(env, "stamp", [this](std::span<const value_t>) -> value_t {
+      stamps[sched.current_pid()].push_back(std::chrono::steady_clock::now());
+      return nil_value;
+    });
+  }
+
+  void add(int n, double secs) {
+    execute_options opts;
+    opts.env = env;
+    char buf[32];
+    std::snprintf(buf, sizeof buf, "%.17g", secs);
+    const std::string script = "(let ((i 0)) (while (< i " + std::to_string(n) +
+                               ") (begin (stamp) (sleep " + buf + ") (stamp) (set i (+ i 1)))))";
+    const int pid = sched.execute(script, opts);
+    secs_of[pid] = secs;
+  }
+
+  bool all_ended() const {
+    for (const auto &[pid, secs] : secs_of)
+      if (!is_finished(sched.get_process_info(pid)->status))
+        return false;
+    return true;
+  }
+
+  void expect_none_early() {
+    for (const auto &[pid, secs] : secs_of) {
+      EXPECT_EQ(sched.get_process_info(pid)->status, process_status::terminated) << pid;
+      const std::vector<std::chrono::steady_clock::time_point> &s = stamps[pid];
+      ASSERT_EQ(s.size() % 2, 0u) << pid;
+      ASSERT_GT(s.size(), 0u) << pid;
+      // What a sleep of `secs` adds to its start (detail::time_after).
+      const auto d = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+          std::chrono::duration<double>(secs));
+      for (std::size_t k = 0; k + 1 < s.size(); k += 2)
+        EXPECT_GE(s[k + 1] - s[k], d) << "pid " << pid << ": sleep " << k / 2 << " woke early";
+    }
+  }
+};
+
+} // namespace
+
+TEST(SleeperDeadlineTest, TheSyncRunNeverWakesASleeperEarly) {
+  stamped_sleepers<scheduler> w;
+  w.add(12, 0.0007);
+  w.add(8, 0.0013);
+  w.add(5, 0.0031);
+  w.sched.run();
+  w.expect_none_early();
+}
+
+TEST(SleeperDeadlineTest, AnAsyncDriverWokenEarlyNeverWakesASleeperEarly) {
+  // The developer guide's driver loop, its waits ended early again and again by posts from
+  // another thread (to a channel nobody reads).
+  stamped_sleepers<async_scheduler> w;
+  w.add(12, 0.0007);
+  w.add(8, 0.0013);
+  w.add(5, 0.0031);
+  std::atomic<bool> done{false};
+  std::thread poster([&] {
+    detail::wakeup tick;
+    while (!done.load()) {
+      w.sched.post_message("noise", value_t(int64_t(1)));
+      tick.wait_until(std::chrono::steady_clock::now() + std::chrono::microseconds(300));
+    }
+  });
+  const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+  while (!w.all_ended() && std::chrono::steady_clock::now() < end) {
+    w.sched.drain_ingress();
+    if (w.sched.has_runnable())
+      w.sched.sync_run(10000, 0.05);
+    else
+      w.sched.wait_for_work(std::chrono::steady_clock::now() + std::chrono::seconds(1));
+  }
+  done = true;
+  poster.join();
+  w.expect_none_early();
+}
+
+#if defined(_WIN32)
+namespace {
+
+// The priorities this thread had while it waited precisely for `secs`, as another thread saw
+// them; `meddle(thread, seen)` runs at each look, and may change it.
+template <class Meddle>
+std::vector<int> priorities_during_a_precise_wait(double secs, Meddle meddle) {
+  HANDLE self = nullptr;
+  if (!DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &self,
+                       THREAD_QUERY_INFORMATION | THREAD_SET_INFORMATION, FALSE, 0))
+    return {};
+  std::atomic<bool> done{false};
+  std::vector<int> seen;
+  std::thread watcher([&] {
+    while (!done.load()) {
+      const int p = GetThreadPriority(self);
+      if (seen.empty() || seen.back() != p)
+        seen.push_back(p);
+      meddle(self, p);
+      std::this_thread::yield();
+    }
+  });
+  detail::wakeup w;
+  w.wait_until(std::chrono::steady_clock::now() +
+                   std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                       std::chrono::duration<double>(secs)),
+               true);
+  done = true;
+  watcher.join();
+  CloseHandle(self);
+  return seen;
+}
+
+struct normal_priority_after {
+  ~normal_priority_after() { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL); }
+};
+
+} // namespace
+
+TEST(WakeupPriorityTest, APreciseWaitRaisesANormalThreadAndRestoresIt) {
+  const normal_priority_after restore;
+  ASSERT_TRUE(SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL));
+  const std::vector<int> seen = priorities_during_a_precise_wait(0.1, [](HANDLE, int) {});
+  EXPECT_NE(std::find(seen.begin(), seen.end(), THREAD_PRIORITY_ABOVE_NORMAL), seen.end());
+  EXPECT_EQ(GetThreadPriority(GetCurrentThread()), THREAD_PRIORITY_NORMAL);
+}
+
+TEST(WakeupPriorityTest, APreciseWaitLeavesALoweredThreadAlone) {
+  // A host that lowered its driver thread (below its render or UI thread) keeps it lowered.
+  const normal_priority_after restore;
+  ASSERT_TRUE(SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST));
+  const std::vector<int> seen = priorities_during_a_precise_wait(0.1, [](HANDLE, int) {});
+  ASSERT_FALSE(seen.empty());
+  for (const int p : seen)
+    EXPECT_EQ(p, THREAD_PRIORITY_LOWEST);
+  EXPECT_EQ(GetThreadPriority(GetCurrentThread()), THREAD_PRIORITY_LOWEST);
+}
+
+TEST(WakeupPriorityTest, APriorityChangedDuringAPreciseWaitStands) {
+  const normal_priority_after restore;
+  ASSERT_TRUE(SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL));
+  bool changed = false;
+  priorities_during_a_precise_wait(0.1, [&](HANDLE thread, int seen) {
+    if (!changed && seen == THREAD_PRIORITY_ABOVE_NORMAL)
+      changed = SetThreadPriority(thread, THREAD_PRIORITY_BELOW_NORMAL) != 0;
+  });
+  ASSERT_TRUE(changed);
+  EXPECT_EQ(GetThreadPriority(GetCurrentThread()), THREAD_PRIORITY_BELOW_NORMAL);
+}
+#endif
