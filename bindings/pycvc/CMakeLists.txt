@@ -319,6 +319,7 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_state_exec_eval:test_pycvc_state_exec_eval.py
              pycvc_state_exec_data:test_pycvc_state_exec_data.py
              pycvc_state_exec_exceptions:test_pycvc_state_exec_exceptions.py
+             pycvc_state_exec_async:test_pycvc_state_exec_async.py
              pycvc_world_clock:test_pycvc_world_clock.py
              pycvc_world_units:test_pycvc_world_units.py
              pycvc_dataprep:test_pycvc_dataprep.py

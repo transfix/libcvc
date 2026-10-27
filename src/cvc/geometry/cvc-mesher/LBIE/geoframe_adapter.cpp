@@ -21,6 +21,30 @@ Week 5 Plan (True Zero-Copy):
 namespace LBIE
 {
 
+namespace {
+
+// A hexahedron in geoframe is its six faces, quads[6i .. 6i+5], in the layout the octree
+// mesher writes (Octree::add_hexa) and LBIE's hex code reads back (saveHexa, the quality
+// improvement in octree.cpp): face 1 is the face opposite face 0, wound the other way, so the
+// corner above face 0's corner k is face 1's corner (1, 0, 3, 2)[k]. In cvc's order -- bottom
+// 0-1-2-3, top 4-5-6-7, corner k + 4 above corner k, right-handed -- the faces are as below.
+const int kHexFaces[6][4] = {{0, 1, 2, 3}, {5, 4, 7, 6}, {0, 3, 7, 4},
+                             {1, 5, 6, 2}, {0, 4, 5, 1}, {3, 2, 6, 7}};
+
+void encode_hex(std::vector<geoframe::uint_4> &quads, std::size_t i,
+                const cvc::geometry::hex_t &hex) {
+  for (int f = 0; f < 6; ++f)
+    for (int k = 0; k < 4; ++k)
+      quads[i * 6 + f][k] = static_cast<unsigned int>(hex[kHexFaces[f][k]]);
+}
+
+cvc::geometry::hex_t decode_hex(const std::vector<geoframe::uint_4> &quads, std::size_t i) {
+  const geoframe::uint_4 &bottom = quads[i * 6], &top = quads[i * 6 + 1];
+  return {{bottom[0], bottom[1], bottom[2], bottom[3], top[1], top[0], top[3], top[2]}};
+}
+
+} // namespace
+
 geoframe_adapter::geoframe_adapter(cvc::geometry& geom)
   : geoframe(), _geom(geom), _dirty(false)
 {
@@ -163,39 +187,8 @@ void geoframe_adapter::sync_from_geometry()
     numquads = hexs.size() * 6;
     this->quads.resize(numquads);  // Use this->quads to get non-const member
     
-    for (size_t i = 0; i < hexs.size(); ++i) {
-      const auto& hex = hexs[i];
-      // Encode hex faces as quads
-      this->quads[i*6 + 0][0] = static_cast<unsigned int>(hex[0]);
-      this->quads[i*6 + 0][1] = static_cast<unsigned int>(hex[1]);
-      this->quads[i*6 + 0][2] = static_cast<unsigned int>(hex[2]);
-      this->quads[i*6 + 0][3] = static_cast<unsigned int>(hex[3]);
-      
-      this->quads[i*6 + 1][0] = static_cast<unsigned int>(hex[4]);
-      this->quads[i*6 + 1][1] = static_cast<unsigned int>(hex[5]);
-      this->quads[i*6 + 1][2] = static_cast<unsigned int>(hex[6]);
-      this->quads[i*6 + 1][3] = static_cast<unsigned int>(hex[7]);
-      
-      this->quads[i*6 + 2][0] = static_cast<unsigned int>(hex[0]);
-      this->quads[i*6 + 2][1] = static_cast<unsigned int>(hex[1]);
-      this->quads[i*6 + 2][2] = static_cast<unsigned int>(hex[5]);
-      this->quads[i*6 + 2][3] = static_cast<unsigned int>(hex[4]);
-      
-      this->quads[i*6 + 3][0] = static_cast<unsigned int>(hex[1]);
-      this->quads[i*6 + 3][1] = static_cast<unsigned int>(hex[2]);
-      this->quads[i*6 + 3][2] = static_cast<unsigned int>(hex[6]);
-      this->quads[i*6 + 3][3] = static_cast<unsigned int>(hex[5]);
-      
-      this->quads[i*6 + 4][0] = static_cast<unsigned int>(hex[2]);
-      this->quads[i*6 + 4][1] = static_cast<unsigned int>(hex[3]);
-      this->quads[i*6 + 4][2] = static_cast<unsigned int>(hex[7]);
-      this->quads[i*6 + 4][3] = static_cast<unsigned int>(hex[6]);
-      
-      this->quads[i*6 + 5][0] = static_cast<unsigned int>(hex[3]);
-      this->quads[i*6 + 5][1] = static_cast<unsigned int>(hex[0]);
-      this->quads[i*6 + 5][2] = static_cast<unsigned int>(hex[4]);
-      this->quads[i*6 + 5][3] = static_cast<unsigned int>(hex[7]);
-    }
+    for (size_t i = 0; i < hexs.size(); ++i)
+      encode_hex(this->quads, i, hexs[i]);
   }
   else if (has_tris && !has_quads) {
     // Triangle surface mesh
@@ -338,19 +331,8 @@ void geoframe_adapter::sync_to_geometry()
     hexs.clear();
     hexs.reserve(num_hexs);
     
-    for (int i = 0; i < num_hexs; ++i) {
-      cvc::geometry::hex_t hex;
-      // Decode from quad encoding
-      hex[0] = quads[i*6 + 0][0];
-      hex[1] = quads[i*6 + 0][1];
-      hex[2] = quads[i*6 + 0][2];
-      hex[3] = quads[i*6 + 0][3];
-      hex[4] = quads[i*6 + 1][0];
-      hex[5] = quads[i*6 + 1][1];
-      hex[6] = quads[i*6 + 1][2];
-      hex[7] = quads[i*6 + 1][3];
-      hexs.push_back(hex);
-    }
+    for (int i = 0; i < num_hexs; ++i)
+      hexs.push_back(decode_hex(quads, i));
     
     _geom.set_geometry_type(cvc::geometry::VOLUME_HEX);
   }
@@ -468,18 +450,8 @@ cvc::geometry to_geometry(const geoframe& gf)
     auto& hexs = geom.hexs();
     hexs.reserve(num_hexs);
     
-    for (int i = 0; i < num_hexs; ++i) {
-      cvc::geometry::hex_t hex;
-      hex[0] = gf.quads[i*6 + 0][0];
-      hex[1] = gf.quads[i*6 + 0][1];
-      hex[2] = gf.quads[i*6 + 0][2];
-      hex[3] = gf.quads[i*6 + 0][3];
-      hex[4] = gf.quads[i*6 + 1][0];
-      hex[5] = gf.quads[i*6 + 1][1];
-      hex[6] = gf.quads[i*6 + 1][2];
-      hex[7] = gf.quads[i*6 + 1][3];
-      hexs.push_back(hex);
-    }
+    for (int i = 0; i < num_hexs; ++i)
+      hexs.push_back(decode_hex(gf.quads, i));
     
     geom.set_geometry_type(cvc::geometry::VOLUME_HEX);
   }
@@ -621,38 +593,8 @@ geoframe to_geoframe(const cvc::geometry& geom)
     gf.numquads = hexs.size() * 6;
     gf.quads.resize(gf.numquads);
     
-    for (size_t i = 0; i < hexs.size(); ++i) {
-      const auto& hex = hexs[i];
-      gf.quads[i*6 + 0][0] = static_cast<unsigned int>(hex[0]);
-      gf.quads[i*6 + 0][1] = static_cast<unsigned int>(hex[1]);
-      gf.quads[i*6 + 0][2] = static_cast<unsigned int>(hex[2]);
-      gf.quads[i*6 + 0][3] = static_cast<unsigned int>(hex[3]);
-      
-      gf.quads[i*6 + 1][0] = static_cast<unsigned int>(hex[4]);
-      gf.quads[i*6 + 1][1] = static_cast<unsigned int>(hex[5]);
-      gf.quads[i*6 + 1][2] = static_cast<unsigned int>(hex[6]);
-      gf.quads[i*6 + 1][3] = static_cast<unsigned int>(hex[7]);
-      
-      gf.quads[i*6 + 2][0] = static_cast<unsigned int>(hex[0]);
-      gf.quads[i*6 + 2][1] = static_cast<unsigned int>(hex[1]);
-      gf.quads[i*6 + 2][2] = static_cast<unsigned int>(hex[5]);
-      gf.quads[i*6 + 2][3] = static_cast<unsigned int>(hex[4]);
-      
-      gf.quads[i*6 + 3][0] = static_cast<unsigned int>(hex[1]);
-      gf.quads[i*6 + 3][1] = static_cast<unsigned int>(hex[2]);
-      gf.quads[i*6 + 3][2] = static_cast<unsigned int>(hex[6]);
-      gf.quads[i*6 + 3][3] = static_cast<unsigned int>(hex[5]);
-      
-      gf.quads[i*6 + 4][0] = static_cast<unsigned int>(hex[2]);
-      gf.quads[i*6 + 4][1] = static_cast<unsigned int>(hex[3]);
-      gf.quads[i*6 + 4][2] = static_cast<unsigned int>(hex[7]);
-      gf.quads[i*6 + 4][3] = static_cast<unsigned int>(hex[6]);
-      
-      gf.quads[i*6 + 5][0] = static_cast<unsigned int>(hex[3]);
-      gf.quads[i*6 + 5][1] = static_cast<unsigned int>(hex[0]);
-      gf.quads[i*6 + 5][2] = static_cast<unsigned int>(hex[4]);
-      gf.quads[i*6 + 5][3] = static_cast<unsigned int>(hex[7]);
-    }
+    for (size_t i = 0; i < hexs.size(); ++i)
+      encode_hex(gf.quads, i, hexs[i]);
   }
   else if (has_tris && !has_quads) {
     // Copy triangles

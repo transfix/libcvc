@@ -127,11 +127,21 @@ per-activation caps ([`ariadne.cpp:1382`](../src/cvc/ariadne/ariadne.cpp)):
 
 | bound | source | value |
 |-------|--------|-------|
-| step cap | `kActionMaxSteps` | `5000` |
-| wall-time cap | `kActionMaxSeconds` | `0.1 s` |
+| step cap | tree setting `ariadne.limits.action_max_steps` | `5000` by default; `0` = no limit |
+| time cap | tree setting `ariadne.limits.action_max_time` | `0.1 s` by default; `0` = no limit |
 | memory budget | tree setting `ariadne.limits.action_max_memory` | `4 MiB` by default; `0` = no limit |
 
-The memory budget is read on every submission. It covers the action's state-tree writes and its
+The settings are read on every submission, from the app's tree: they are the host's, outside any
+document's prefix, so a document can't raise its own. A missing or unparsable value keeps the
+default.
+
+The step and time caps cover the action's async calls (§10.1; developer guide, "Async
+Functions"): a call's run time and CPU time count against the time cap, and its CPU time as steps
+at `limits.async_steps_per_cpu_ms` (2000 per CPU millisecond by default). At that rate the
+5000-step cap is 2.5 ms of a kernel's CPU, so a host whose documents call CPU-heavy async verbs
+raises the caps. An action that runs out is killed, and the kernel sees `cancelled()`.
+
+The memory budget covers the action's state-tree writes and its
 measured share of the values it holds (developer guide §7), and it bounds each native call's
 allocations: state_exec's per-step allocation limit takes what is left of `max_memory`
 (developer guide §11, "Allocation limit"). A finished action's process is reaped from the app
@@ -160,6 +170,36 @@ Residents have no total budget (they run for the life of the document), but each
 is wall-capped at `kResidentStepSeconds = 0.05`
 ([`ariadne.cpp:1497`](../src/cvc/ariadne/ariadne.cpp)). On teardown they are reaped as a
 group via their owner tag.
+
+### 2.4 Errors in actions and residents
+
+Handlers raise and catch exceptions like any state_exec program, with `try`/`catch`/`finally`,
+`raise` and `error` ([STATE_EXEC_EXCEPTIONS.md](STATE_EXEC_EXCEPTIONS.md)). A builtin's or a
+host intrinsic's error is an exception of its class too. An allocation an action's memory budget
+refuses is a `MemoryError`, for example, so a handler can catch it.
+
+**What the drain reports.** An exception a handler doesn't catch ends its process `failed`. The
+drain sweep warns once per message, through the warnings `take_reactive_warnings()` returns:
+
+| What ended | Warning |
+|---|---|
+| an action, by an exception | `ari: on: action program failed: Class: message (at <where>)` |
+| a resident, by an exception | `ari: resident [<channel>] failed: Class: message (at <where>)` |
+| an action, by a kill (its step or time cap, a syntax error found while reading it) | `ari: on: action program did not complete: <reason>` |
+| a resident, by a kill | `ari: resident [<channel>] stopped: <reason>` |
+
+`<where>` is the innermost line of the exception's traceback. An `init:` program that fails
+reports `failed: Class: message (at <where>)` to its caller.
+
+**Keeping a resident alive.** A resident is one process for the life of the document. An
+exception it doesn't catch ends it, and its channel goes unserved from then on. Catch inside the
+body to keep it running:
+
+```yaml
+on_key: |
+  (try (handle-key event)
+    (catch (e) (state-set "ui.last_error" (get-attr e "message"))))
+```
 
 ---
 
@@ -1124,7 +1164,7 @@ rt   = pycvc_gl.AriRuntime(view.scene(), view.camera(), view.overlay())
 rt.load("demo.ari")
 # Register a Python function as a DSL verb (host intrinsic on the app-wide scheduler):
 rt.register_verb("greet", lambda name: f"hello {name}")
-rt.register_async_verb("fetch_rows", slow_query)   # offloaded to the compute pool
+rt.register_async_verb("fetch_rows", slow_query)   # an async function: (fetch_rows) parks
 
 while not rt.should_close():
     rt.frame(dt)     # processUIEvents → cam.update → drain → visibility → tick
@@ -1133,7 +1173,12 @@ while not rt.should_close():
 
 `register_verb` / `register_async_verb` install exactly one `register_action_intrinsics`
 provider onto the app-wide scheduler, so the verbs are reachable from the document's
-action lane. `AriRuntime` also exposes `step`, `run`, `on`, `post_key`, `post_pointer`,
+action lane. An async verb is an async function on the app's async host
+([STATE_EXEC_EXCEPTIONS.md](STATE_EXEC_EXCEPTIONS.md) section 3): `(fetch_rows)` parks the
+action while `slow_query` runs on the app's background task pool, then returns `str()` of its
+result. If it raises, the call raises a `PythonError`, which a `try` can catch. The call is
+charged to the action's caps (§2.2). `register_async_verb(name, done_channel, fn)` also posts
+the result to `done_channel`, for documents that wait with `(msg-recv "done_channel")`. `AriRuntime` also exposes `step`, `run`, `on`, `post_key`, `post_pointer`,
 and `reload_if_changed`.
 
 ### 9.4 From Python (DSL only, via `pycvc.Exec`)
@@ -1156,17 +1201,25 @@ callables as DSL functions (§10). One `Exec` is driven by one thread — use a 
 - **`register_fn(name, callable)`** — *synchronous*. The callable runs inline on the
   `run()` thread with the GIL held and blocks the DSL program until it returns. Use for
   fast pure functions.
-- **`register_async_fn(name, callable)`** — offloads a **blocking** callable to the app's
-  compute pool and **parks** the calling DSL program until it finishes, so the scheduler
-  stays live. The callable runs on a pool worker with the GIL acquired for the call, so
-  `urllib`/`requests` or a GIL-releasing numpy compute runs truly concurrently. On a
-  raise the program resumes with a `{"__async_error__": <message>}` dict (a reserved key
-  a normal dict result cannot collide with).
+- **`register_async_fn(name, callable)`** — an *async function*
+  ([STATE_EXEC_EXCEPTIONS.md](STATE_EXEC_EXCEPTIONS.md) section 3): runs a **blocking**
+  callable on the app's background task pool and **parks** the calling DSL program until it
+  finishes, so the scheduler stays live. The callable runs on a pool thread with the GIL
+  acquired for the call, so `urllib`/`requests` or a GIL-releasing numpy compute runs truly
+  concurrently. It gets copies of its arguments. If it raises, the call raises a
+  `PythonError` (its `python_type` names the Python exception), which a `try` can catch;
+  uncaught, `Exec.run` re-raises the Python exception. `(name-async ...)` returns a future
+  for `(await f [seconds])` or `(await-all (list f ...))`. The call is charged to the
+  program's budget: its run time against `max_time`, its CPU time as steps.
+  `register_async_fn(name, callable, True)` passes the call's `pycvc.async_call` first,
+  before the arguments: `call.cancelled()` says whether to stop (the program was killed or
+  ran out of budget), and `call.post(value)` sends progress to `"<name>.progress"`.
 - **`register_async_coro(name, coro_fn)`** — registers an `async def`. Calling it
   schedules the coroutine on an asyncio loop the `Exec` owns and parks the DSL program.
   Unlike `register_async_fn`, the coroutine runs **on** the `run()` thread, cooperatively
   stepped one bounded slice per pump iteration, so it and the DSL march along together and
-  its `await asyncio.sleep(...)` / `aiohttp` progress between DSL slices.
+  its `await asyncio.sleep(...)` / `aiohttp` progress between DSL slices. A raise raises a
+  `PythonError` at the call, as for `register_async_fn`.
 
 > **The coroutine must yield.** The slice is cooperative — asyncio cannot preempt a
 > running step — so a coroutine that does CPU-bound work without awaiting holds the
@@ -1174,9 +1227,8 @@ callables as DSL functions (§10). One `Exec` is driven by one thread — use a 
 > `register_async_fn` (the pool), not in a coroutine. Passing an `async def` to
 > `register_fn` / `register_async_fn` is rejected and steered to `register_async_coro`.
 
-The nesting rule for both async forms: `(name ...)` must be nested inside an enclosing
-frame (e.g. `(begin (name ...))` or `(state-set "r" (name ...))`), never the whole
-program, so the park has a frame to suspend.
+An async call parks at any depth, the whole program included: the call's frame waits on the
+stack (the `await_call` phase) until its result is delivered.
 
 ```python
 ex = pycvc.Exec(app)
@@ -1187,7 +1239,7 @@ async def poll(url):
             return await r.text()
 
 ex.register_async_coro("poll", poll)
-ex.run('(begin (state-set "page" (poll "http://localhost:8080/status")))')
+ex.run('(state-set "page" (poll "http://localhost:8080/status"))')
 ```
 
 ### 10.2 The DSL network verbs
@@ -1201,9 +1253,14 @@ In an Ariadne document's action lane, the network verbs are (from
   default `Content-Type`). Query values are url-encoded for you; there are `url-encode` /
   `url-decode` core builtins if you need them directly.
 - The reply is a dict: `{ok, status, body, url, headers, error}` (`body` is raw bytes).
-- The `-async` verbs return a future you `await`; `launch_http` offloads the request onto
-  the compute pool and parks the program on a private reply channel, so the action lane
-  never blocks the frame.
+- They are async functions on the app's exec scheduler (`app::exec_async_host()`,
+  [STATE_EXEC_EXCEPTIONS.md](STATE_EXEC_EXCEPTIONS.md) section 3): the request runs on the
+  app's background task pool and the calling program parks at the call, at any depth, so the
+  action lane never blocks the frame. The `-async` verbs return a future you `await`
+  (optionally with a timeout in seconds) or pass to `await-all`.
+- A failed send is still a reply with `ok` `#f` and `error` set, not an exception. A call is
+  charged to its program's `max_time` while it waits, and a killed or reaped program's call is
+  cancelled.
 
 See [`ariadne-async-await-arc`] in the roadmap for how `await` threads through the drain
 lane. **Note (§11):** these verbs are currently registered only in the Ariadne action

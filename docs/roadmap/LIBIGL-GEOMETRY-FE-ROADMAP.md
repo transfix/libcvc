@@ -446,7 +446,7 @@ Nothing in libcvc used Eigen or libigl before this change. The only "eigen" code
 | `tet_faces` | `algorithm.cpp:860-916` | Faces keyed **and returned** as sorted indices, so winding is inconsistent (2 of a tet's 4 faces flipped) | `tet_boundary_surface` | landed (new API); fix planned (P2.2) |
 | `hex_faces` | `algorithm.cpp:919-993` (`:985-990`) | Returns sorted 4-tuples; a sorted quad such as (0,1,5,4) → (0,1,4,5) is a **bow-tie**. The test (`geometry_test.cpp:4079-4106`) checks only count and range. | key on the sorted tuple, emit the original cyclic order | planned (P2.2) |
 | `decode_tets_from_triangles` | `algorithm.cpp:997-1049` (`std::set` at `:1039-1046`) | Rebuilds each tet from a sorted set ("vertex order may not match original, but that's okay"), so about half the tets come out negatively oriented. Signed volumes and gradients need positive orientation. | decode from tri0 + 4th vertex; `orient_tets` as a safety net | `orient_tets` landed; source fix planned (P2.2) |
-| TETRA2 / DOUBLE | `algorithm.cpp:562-585` + `cvc-mesher/Mesher/mesher.cpp:143-149` | `TETRA2→VOLUME_TET→TETRA` and `DOUBLE→MIXED→SINGLE`: `tetrahedralize2` has never produced a TETRA2 mesh through the geometry API | carry the mesh type explicitly | planned (P2.2) |
+| TETRA2 / DOUBLE | `algorithm.cpp:562-585` + `cvc-mesher/Mesher/mesher.cpp:143-149` | `TETRA2→VOLUME_TET→TETRA` and `DOUBLE→MIXED→SINGLE`: `tetrahedralize2` had never produced a TETRA2 mesh through the geometry API | carry the mesh type explicitly | TETRA2 fixed (dual-contoured `VOLUME_TET` is TETRA2); DOUBLE planned (P2.2) |
 | `find_tets_containing_point` | `algorithm.cpp:1766-1926` (hexes `:1937+`) | O(n) per query; above 10,000 tets it builds `extract_surface` plus a **CGAL AABB tree per call** (`:1774-1797`); `do_intersect(Point_3)` tests on-surface, not the parity the comment claims (`:1801-1804`) | persistent `tet_locator` (`AABB` over V,T + `in_element`) | planned (P2.4) |
 | cvcraw writer | `src/cvc/volume/cvcraw_io.cpp:326-418` (`num_elems = tris.size()/4` at `:342`) | Ignores `tets()` / `hexs()`, so a `cvc::tetrahedralize()` result written to `.raw` loses every element | write the legacy encoding from `tets()`; add `.mesh` / `.msh` | planned (P2.2, P2.5) |
 | OFF I/O | `src/cvc/geometry/off_io.cpp:64-85, 173-183` | Rigid parser; the writer drops quads, colours and normals at `setprecision(6)` | `igl::readOFF` / `writeOFF` (optional) | planned, low |
@@ -536,7 +536,7 @@ shared bundles exist for linux/x86_64, macos/arm64 and windows/x86_64 (§7). Sni
 
 - `decode_tets_from_triangles`: decode from the first triangle plus the fourth vertex, or flip by
   signed volume. `orient_tets()` then becomes a safety net.
-- Carry TETRA2/DOUBLE through `geometry_type` (or confirm the downgrade is intentional).
+- Carry DOUBLE through `geometry_type` (or confirm the downgrade is intentional). TETRA2 is done.
 - Make the cvcraw writer emit `tets()` / `hexs()`.
 - Re-implement `tet_faces` on `boundary_facets` (outward winding) and make `hex_faces` emit the
   original cyclic order.

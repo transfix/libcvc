@@ -36,7 +36,10 @@
 #include <cstdio>
 #include <fstream>
 #include <geoframe_adapter.h>
+#include <map>
+#include <ostream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace LBIE {
@@ -89,6 +92,8 @@ namespace {
 // Mirrors LBIE::DEFAULT_ERR / DEFAULT_ERR_IN from LBIE_Mesher.h.
 const float kDefaultErr = 1.2501f;
 const float kDefaultErrIn = 0.0001f;
+
+const double kPi = 3.14159265358979323846;
 
 // Build an implicit-sphere scalar volume: f(x,y,z) = r - distance_to_center.
 // Positive inside the sphere, negative outside; isovalue 0 is the surface.
@@ -503,9 +508,9 @@ LBIE::geoframe make_hexa(const float (&corner)[8][3]) {
   return g;
 }
 
-// The condition number Octree::testHexa gives corner j of hexahedron h: 1 for a right-angled
-// corner, growing as the corner flattens, +inf once its three edges are coplanar.
-double corner_condition(const LBIE::geoframe &g, int h, int j) {
+// The scaled Jacobian of corner j of hexahedron h: 1 for a right-angled corner, 0 once its three
+// edges are coplanar, negative when the corner is inverted.
+double corner_jacobian(const LBIE::geoframe &g, int h, int j) {
   static const int edge_to[8][3] = {{3, 1, 4}, {0, 2, 5}, {1, 3, 6}, {2, 0, 7},
                                     {5, 7, 0}, {6, 4, 1}, {7, 5, 2}, {4, 6, 3}};
   const std::array<unsigned int, 8> v = hexa_corners(g, h);
@@ -519,10 +524,27 @@ double corner_condition(const LBIE::geoframe &g, int h, int j) {
     for (int i = 0; i < 3; ++i)
       e[k][i] /= std::sqrt(len);
   }
-  const double det = e[0][0] * (e[1][1] * e[2][2] - e[1][2] * e[2][1]) -
-                     e[0][1] * (e[1][0] * e[2][2] - e[1][2] * e[2][0]) +
-                     e[0][2] * (e[1][0] * e[2][1] - e[1][1] * e[2][0]);
-  return 1.0 / std::fabs(det);
+  return -(e[0][0] * (e[1][1] * e[2][2] - e[1][2] * e[2][1]) -
+           e[0][1] * (e[1][0] * e[2][2] - e[1][2] * e[2][0]) +
+           e[0][2] * (e[1][0] * e[2][1] - e[1][1] * e[2][0]));
+}
+
+// The condition number Octree::testHexa gives corner j of hexahedron h: 1 for a right-angled
+// corner, growing as the corner flattens, +inf once its three edges are coplanar.
+double corner_condition(const LBIE::geoframe &g, int h, int j) {
+  return 1.0 / std::fabs(corner_jacobian(g, h, j));
+}
+
+// The number of g's hexahedra with a corner that is inverted or flat.
+int inverted_hexahedra(const LBIE::geoframe &g) {
+  int inverted = 0;
+  for (int h = 0; h < g.numquads / 6; ++h)
+    for (int j = 0; j < 8; ++j)
+      if (!(corner_jacobian(g, h, j) > 0.0)) {
+        ++inverted;
+        break;
+      }
+  return inverted;
 }
 
 double worst_corner_condition(const LBIE::geoframe &g) {
@@ -560,6 +582,53 @@ TEST_F(LbieMesherTest, RefinementMakesAVertexPerEdgeAndFace) {
   EXPECT_FLOAT_EQ(g.verts[ac][1], 1.0f) << "a third of the way from a to c";
 }
 
+// Each vertex has 18 refine_edge slots, as many as a vertex of a uniform grid needs (6 edges and
+// 12 face diagonals). Once they were full, AddRefine_edgevtx_hex, AddRefine_edgevtx and
+// AddRefine_facevtx returned vertex 0, which is how hexahedra across a change of octree level got
+// vertex 0 for corners; QUAD meshes on the vh4 CT still had 32 such quads.
+TEST_F(LbieMesherTest, RefinementPastEighteenEdgesAtAVertexMakesNewVertices) {
+  LBIE::geoframe g;
+  float n[3] = {0.f, 0.f, 1.f}, zero[3] = {9.f, 9.f, 9.f}, o[3] = {0.f, 0.f, 0.f};
+  g.AddVert(zero, n); // vertex 0, which no refinement should hand out
+  const unsigned int centre = g.AddVert(o, n);
+  std::vector<unsigned int> others;
+  for (int k = 0; k < 24; ++k) {
+    float p[3] = {3.f * std::cos(0.25f * k), 3.f * std::sin(0.25f * k), 0.1f * k};
+    others.push_back(g.AddVert(p, n));
+  }
+  // Edges toward the odd ones, face diagonals toward the even ones: both kinds share the slots.
+  auto refine = [&](int k) {
+    return k % 2 ? g.AddRefine_edgevtx_hex(centre, others[k])
+                 : g.AddRefine_facevtx(centre, others[k], others[(k + 1) % 24],
+                                       others[(k + 23) % 24]);
+  };
+  std::vector<unsigned int> made;
+  for (int k = 0; k < 24; ++k)
+    made.push_back(refine(k));
+  std::vector<unsigned int> distinct(made);
+  std::sort(distinct.begin(), distinct.end());
+  EXPECT_EQ(std::unique(distinct.begin(), distinct.end()) - distinct.begin(), 24);
+  for (int k = 0; k < 24; ++k) {
+    EXPECT_GT(made[k], others.back()) << "refinement " << k << " reused vertex " << made[k];
+    EXPECT_EQ(refine(k), made[k]) << "refinement " << k << " made twice";
+  }
+  EXPECT_FLOAT_EQ(g.verts[made[21]][2], 0.7f) << "a third of the way out to others[21]";
+}
+
+// AddBound_edge filled every free slot with the first boundary edge it recorded at a vertex, so a
+// vertex kept only one, and CheckBound_edge missed the rest.
+TEST_F(LbieMesherTest, AVertexKeepsAllItsBoundaryEdges) {
+  LBIE::geoframe g;
+  float n[3] = {0.f, 0.f, 1.f};
+  float a[3] = {0.f, 0.f, 0.f}, b[3] = {1.f, 0.f, 0.f}, c[3] = {0.f, 1.f, 0.f};
+  const unsigned int va = g.AddVert(a, n), vb = g.AddVert(b, n), vc = g.AddVert(c, n);
+  g.AddBound_edge(va, vb);
+  g.AddBound_edge(vc, va);
+  EXPECT_EQ(g.CheckBound_edge(vb, va), 1);
+  EXPECT_EQ(g.CheckBound_edge(va, vc), 1);
+  EXPECT_EQ(g.CheckBound_edge(vb, vc), 0);
+}
+
 // Octree::optimization takes the corner with the largest condition number and moves its vertex down
 // the gradient. A corner whose edges are coplanar has condition +inf; cond_max + 1.0f - cond_max is
 // then NaN, the line search ran zero times, and its uninitialized result mmv4 was copied into the
@@ -584,9 +653,10 @@ TEST_F(LbieMesherTest, OptimizationLeavesAFlatCornerInPlace) {
 
 // Octree::optimization moved quads[6h+1][j-4] for a worst corner j >= 4, which is v5, v4, v7 or
 // v6, a neighbour of the corner and not the corner (and for j == 4 it took corner 1's edges). Here
-// corner 6 is the worst: the old code left v6 where it was and wrote v6's improved position onto
-// v7, then went on to move v0, v4 and v5 and ended with the worst corner barely better (5.475 from
-// 5.49). Moving v6 takes it to 3.10.
+// v6 sits inside the plane through its three neighbours, so corner 6 is inverted (scaled Jacobian
+// -0.18) and the worst. The old code left v6 where it was and wrote v6's new position onto v7.
+// Fixed, it still pushed v6 further in, to -0.32: testHexa's Jacobian is unsigned, and a corner
+// looked as good as its mirror image. Moving v6 out leaves the corner uninverted.
 TEST_F(LbieMesherTest, OptimizationMovesTheWorstCornersOwnVertex) {
   const float corner[8][3] = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0},          {0, 1, 0},
                               {0, 0, 1}, {1, 0, 1}, {0.6f, 0.6f, 0.7f}, {0, 1, 1}};
@@ -594,6 +664,7 @@ TEST_F(LbieMesherTest, OptimizationMovesTheWorstCornersOwnVertex) {
   const double before = worst_corner_condition(g);
   for (int j = 0; j < 8; ++j)
     ASSERT_LE(corner_condition(g, 0, j), corner_condition(g, 0, 6)) << "corner " << j;
+  ASSERT_LT(corner_jacobian(g, 0, 6), 0.0);
 
   LBIE::geoframe out = LBIE::quality_improve(ctx, g, LBIE::Mesher::OPTIMIZATION, 1);
   expect_geoframe_valid(out);
@@ -602,6 +673,7 @@ TEST_F(LbieMesherTest, OptimizationMovesTheWorstCornersOwnVertex) {
       << "the worst corner's vertex v6 did not move";
   for (int j = 0; j < 3; ++j)
     EXPECT_EQ(out.verts[7][j], corner[7][j]) << "v7 moved, coordinate " << j;
+  EXPECT_EQ(inverted_hexahedra(out), 0);
   const double after = worst_corner_condition(out);
   EXPECT_TRUE(std::isfinite(after));
   EXPECT_LT(after, before);
@@ -670,13 +742,10 @@ TEST_F(LbieMesherTest, QualityImproveGivesTheSameMeshInAnyUnits) {
   }
 }
 
-// The adaptive hexahedral mesh of a sphere that leaves its box refines cells near the surface.
-// Before the refine_edge fix 702 of its 729 hexahedra had vertex 0 in place of a corner.
-TEST_F(LbieMesherTest, AdaptiveHexahedraHaveEightDistinctCorners) {
-  volume v = make_sphere_volume(ctx, 17, 1.2);
-  LBIE::geoframe g = run_do_mesh(v, 0.0f, 0.0f, kDefaultErr, kDefaultErrIn, LBIE::geoframe::HEXA);
-  ASSERT_GT(g.numquads, 0);
-  expect_geoframe_valid(g);
+namespace {
+
+// The number of g's hexahedra that use one vertex for two or more corners.
+int hexahedra_with_repeated_corners(const LBIE::geoframe &g) {
   int repeated = 0;
   for (int h = 0; h < g.numquads / 6; ++h) {
     std::array<unsigned int, 8> v = hexa_corners(g, h);
@@ -684,7 +753,437 @@ TEST_F(LbieMesherTest, AdaptiveHexahedraHaveEightDistinctCorners) {
     if (std::adjacent_find(v.begin(), v.end()) != v.end())
       ++repeated;
   }
-  EXPECT_EQ(repeated, 0) << "of " << g.numquads / 6 << " hexahedra";
+  return repeated;
+}
+
+} // namespace
+
+// The adaptive hexahedral mesh of a sphere that leaves its box refines cells near the surface.
+// Before the refine_edge fix 702 of its 729 hexahedra had vertex 0 in place of a corner. The same
+// samples in a box whose voxels are 1 across (8 here) must give the same: that is where the
+// octree used to refine past the hexahedral grid.
+TEST_F(LbieMesherTest, AdaptiveHexahedraHaveEightDistinctCorners) {
+  for (double box_size : {1.0, 8.0}) {
+    volume v = make_sphere_volume(ctx, 17, 1.2, box_size);
+    LBIE::geoframe g = run_do_mesh(v, 0.0f, 0.0f, kDefaultErr, kDefaultErrIn, LBIE::geoframe::HEXA);
+    ASSERT_GT(g.numquads, 0) << "box " << box_size;
+    expect_geoframe_valid(g);
+    EXPECT_EQ(hexahedra_with_repeated_corners(g), 0)
+        << "box " << box_size << ": of " << g.numquads / 6 << " hexahedra";
+  }
+}
+
+// Octree::traverse_qef refined the octree past the hexahedral grid's level wherever a cell's QEF
+// error passed the tolerance. That error was in the volume's units (until interpRect3Dpts_* put
+// the crossings on the grid), so in a box 32 across, 2 units a voxel, this sphere's octree had
+// leaves two levels below the grid, and 3585 of its 8051 hexahedra
+// repeated a corner: where the level changes, min_vtx_hexa gave one coarse cell's vertex to several
+// corners, and AddRefine_* gave vertex 0 once a coarse vertex's 18 refine_edge slots were full.
+// fem_gallery's head.off at --dim 64 and the vh4.rawiv CT were about half collapsed. The grid now
+// stays uniform and only the templates refine it.
+TEST_F(LbieMesherTest, HexahedraHaveEightDistinctCornersWhereTheErrorIsLarge) {
+  volume v = make_sphere_volume(ctx, 17, 0.6, 16.0);
+  LBIE::geoframe g = run_do_mesh(v, 0.0f, 0.0f, kDefaultErr, kDefaultErrIn, LBIE::geoframe::HEXA);
+  ASSERT_GT(g.numquads, 0);
+  expect_geoframe_valid(g);
+  EXPECT_EQ(hexahedra_with_repeated_corners(g), 0) << "of " << g.numquads / 6 << " hexahedra";
+  // The grid's 4^3 cells have 27 interior vertices, one hexahedron each; any more are refinements.
+  EXPECT_GT(g.numquads / 6, 27) << "the templates refined no cell";
+}
+
+// The template for a hexahedron with one face refined puts four points halfway between its inner
+// points 21, 22, 25 and 26 and the four under them; the last took 41 for 42 and sat half a sub-cell
+// off, leaving one of the template's hexahedra flat and four skewed even in a cube.
+TEST_F(LbieMesherTest, OneFaceTemplatePutsItsMiddlePointsHalfwayDown) {
+  LBIE::geoframe g;
+  const float cube[8][3] = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0},
+                            {0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}};
+  unsigned int v[8], v_new[48];
+  for (int c = 0; c < 8; ++c) {
+    float p[3] = {cube[c][0], cube[c][1], cube[c][2]}, n[3] = {0.f, 0.f, 1.f};
+    v[c] = g.AddVert(p, n);
+  }
+  const int edge_id[6] = {0, 0, 0, 0, 0, 0};
+  g.AddVert_hexa_adaptive_2_4(v, edge_id, v_new);
+  // The refined face is v0 v1 v2 v3; the points sit under its inner points at thirds of the cube.
+  const float want[4][3] = {{1.f / 3, 1.f / 3, 0.5f},
+                            {2.f / 3, 1.f / 3, 0.5f},
+                            {1.f / 3, 2.f / 3, 0.5f},
+                            {2.f / 3, 2.f / 3, 0.5f}};
+  for (int k = 0; k < 4; ++k)
+    for (int i = 0; i < 3; ++i)
+      EXPECT_NEAR(g.verts[v_new[32 + k]][i], want[k][i], 1e-6f)
+          << "point " << k << ", coordinate " << i;
+}
+
+// get_vtx_new snaps the hexahedral mesh's boundary vertices onto the surface, walking each up to a
+// cell along its normal, and the templates place their vertices between snapped corners. That
+// inverted 12 of the 189 hexahedra of the 17^3 sphere and 101 of the 1389 at 33^3 (and the one-face
+// template's misplaced point 30 more in the box 32 across). Where snapping inverts a hexahedron its
+// vertices now stop short of the surface. Optimization inverted more (21 and 173), because its
+// measure could not tell a corner from its mirror image; it now never takes a corner below 0.01.
+TEST_F(LbieMesherTest, SnappingToTheSurfaceInvertsNoHexahedron) {
+  const struct {
+    unsigned int n;
+    double half_width;
+  } spheres[] = {{17, 1.0}, {33, 1.0}, {33, 16.0}};
+  for (const auto &s : spheres)
+    for (LBIE::Mesher::ImproveMethod im : {LBIE::Mesher::NO_IMPROVE, LBIE::Mesher::OPTIMIZATION}) {
+      const bool optimized = im == LBIE::Mesher::OPTIMIZATION;
+      LBIE::geoframe g =
+          run_do_mesh(make_sphere_volume(ctx, s.n, 0.6, s.half_width), 0.0f, 0.0f, kDefaultErr,
+                      kDefaultErrIn, LBIE::geoframe::HEXA, im, optimized ? 1 : 0);
+      ASSERT_GT(g.numquads, 0);
+      expect_geoframe_valid(g);
+      EXPECT_EQ(inverted_hexahedra(g), 0)
+          << s.n << "^3 in a box " << 2 * s.half_width << " across"
+          << (optimized ? ", optimized" : "") << ": of " << g.numquads / 6 << " hexahedra";
+    }
+}
+
+// A cube turned off the grid's axes, half a box across, sampled at n^3 in a box 2 * half_width
+// across. Its QEF points sit on its sharp edges and corners.
+volume make_turned_cube_volume(app &ctx, unsigned int n, double half_width) {
+  volume v = make_sphere_volume(ctx, n, 0.0, half_width);
+  const double dx = 2.0 / double(n - 1), c = std::cos(0.5), s = std::sin(0.5);
+  for (unsigned int k = 0; k < n; ++k)
+    for (unsigned int j = 0; j < n; ++j)
+      for (unsigned int i = 0; i < n; ++i) {
+        const double x = -1 + i * dx, y = -1 + j * dx, z = -1 + k * dx;
+        const double xr = c * x - s * y, yz = s * x + c * y;
+        const double yr = s * z + c * yz, zr = c * z - s * yz;
+        v(i, j, k, 0.45 - std::max({std::fabs(xr), std::fabs(yr), std::fabs(zr)}));
+      }
+  return v;
+}
+
+// untangle_snapped sends the vertices of an inverted hexahedron back to where the extraction puts
+// them without snapping. At QEF points, as on this cube's edges and corners, the dual hexahedra are
+// inverted already, and 22 of its 1323 kept an inverted corner. The reference now has every vertex
+// at its cell's centre, where none is inverted.
+TEST_F(LbieMesherTest, HexahedraOnSharpEdgesAreNotInverted) {
+  LBIE::geoframe g = run_do_mesh(make_turned_cube_volume(ctx, 33, 16.0), 0.0f, 0.0f, kDefaultErr,
+                                 kDefaultErrIn, LBIE::geoframe::HEXA);
+  ASSERT_GT(g.numquads, 0);
+  expect_geoframe_valid(g);
+  EXPECT_EQ(inverted_hexahedra(g), 0) << "of " << g.numquads / 6 << " hexahedra";
+}
+
+// Where the octree's level changes, polygonize_quad gave a quad two corners on one vertex, a
+// triangle (320 of this sphere's 7454 quads), and method 5's templates did not match up across the
+// change: 592 edges had one quad and 128 had three or more. The templates now refine only an octree
+// whose leaves are all on one level, and a mesh with triangles has each face split once into quads.
+TEST_F(LbieMesherTest, QuadMeshesWithLevelChangesAreClosedAndAllQuads) {
+  LBIE::geoframe g = run_do_mesh(make_sphere_volume(ctx, 33, 0.6, 16.0), 0.0f, 0.0f, kDefaultErr,
+                                 kDefaultErrIn, LBIE::geoframe::QUAD);
+  ASSERT_GT(g.quads.size(), 0u);
+  expect_geoframe_valid(g);
+  int repeated = 0;
+  std::map<std::pair<unsigned int, unsigned int>, int> quads_at;
+  for (const auto &f : g.quads) {
+    std::array<unsigned int, 4> c = {{f[0], f[1], f[2], f[3]}};
+    std::sort(c.begin(), c.end());
+    if (std::adjacent_find(c.begin(), c.end()) != c.end())
+      ++repeated;
+    for (int a = 0; a < 4; ++a)
+      quads_at[std::make_pair(std::min(f[a], f[(a + 1) % 4]), std::max(f[a], f[(a + 1) % 4]))]++;
+  }
+  EXPECT_EQ(repeated, 0) << "of " << g.quads.size() << " quads";
+  int open = 0, crowded = 0;
+  for (const auto &e : quads_at) {
+    if (e.second == 1)
+      ++open;
+    if (e.second > 2)
+      ++crowded;
+  }
+  EXPECT_EQ(open, 0) << "edges with one quad";
+  EXPECT_EQ(crowded, 0) << "edges with three or more quads";
+}
+
+// The geoframe <-> geometry adapter read a hexahedron as quads[6h] and then quads[6h+1] in
+// order, and wrote it back the same way, but LBIE winds that second face the other way (see
+// hexa_corners). Every hexahedron cvc::hexahedralize returned was twisted -- corner k + 4 not
+// over corner k, the scaled Jacobian of this sphere's mesh 0 on average where it is ~0.8 -- and
+// cvc::geometry::quality_improve handed LBIE's optimizer twisted hexahedra. The adapter now reads
+// and writes LBIE's own layout.
+TEST_F(LbieMesherTest, AdapterKeepsLbiesHexahedronCorners) {
+  LBIE::geoframe g = run_do_mesh(make_sphere_volume(ctx, 17, 0.5), 0.0f, 0.0f, kDefaultErr,
+                                 kDefaultErrIn, LBIE::geoframe::HEXA);
+  ASSERT_GT(g.numquads, 0);
+  const int n = g.numquads / 6;
+  geometry geom = LBIE::to_geometry(g);
+  ASSERT_EQ(geom.num_hexs(), std::size_t(n));
+  for (int h = 0; h < n; ++h) {
+    const std::array<unsigned int, 8> v = hexa_corners(g, h);
+    for (int k = 0; k < 8; ++k)
+      ASSERT_EQ(geom.const_hexs()[h][k], v[k]) << "hexahedron " << h << ", corner " << k;
+  }
+
+  const LBIE::geoframe back = LBIE::to_geoframe(geom);
+  ASSERT_EQ(back.numquads, g.numquads);
+  for (int h = 0; h < n; ++h)
+    ASSERT_EQ(hexa_corners(back, h), hexa_corners(g, h)) << "hexahedron " << h;
+  {
+    LBIE::geoframe_adapter adapter(geom);
+    ASSERT_EQ(adapter.numquads, g.numquads);
+    for (int h = 0; h < n; ++h)
+      ASSERT_EQ(hexa_corners(adapter, h), hexa_corners(g, h)) << "hexahedron " << h;
+  }
+
+  int valid = 0;
+  double sum = 0.0;
+  for (const auto &hex : geom.const_hexs()) {
+    geometry::point_t c[8];
+    for (int k = 0; k < 8; ++k)
+      c[k] = geom.const_points()[hex[k]];
+    const double sj = hex_scaled_jacobian(c);
+    valid += sj > 0.0;
+    sum += sj;
+  }
+  EXPECT_GE(valid, 9 * n / 10) << "of " << n << " hexahedra have every corner right-handed";
+  EXPECT_GT(sum / n, 0.5) << "mean scaled Jacobian";
+}
+
+// ---------------------------------------------------------------------------
+// Tetrahedral meshes of a sphere: boundary fit, geometric flow, interval layers
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// The vertices of the faces that belong to one tetrahedron only: the mesh's boundary.
+std::vector<unsigned int> tet_boundary_vertices(const geometry &g) {
+  static const int kFaces[4][3] = {{0, 1, 2}, {0, 1, 3}, {0, 2, 3}, {1, 2, 3}};
+  std::map<std::array<unsigned int, 3>, int> uses;
+  for (const geometry::tet_t &t : g.tets())
+    for (const auto &f : kFaces) {
+      std::array<unsigned int, 3> key = {(unsigned int)t[f[0]], (unsigned int)t[f[1]],
+                                         (unsigned int)t[f[2]]};
+      std::sort(key.begin(), key.end());
+      ++uses[key];
+    }
+  std::vector<char> on(g.num_points(), 0);
+  for (const auto &u : uses)
+    if (u.second == 1)
+      for (unsigned int v : u.first)
+        on[v] = 1;
+  std::vector<unsigned int> out;
+  for (unsigned int v = 0; v < on.size(); ++v)
+    if (on[v])
+      out.push_back(v);
+  return out;
+}
+
+// What a tet mesh of the samples make_sphere_volume() takes looks like, in voxels: how far the
+// boundary vertices are from the nearest of the spheres of the given radii (of [-1,1]^3), the
+// minimum dihedral angle, how many tets are inverted, and the tets' total volume.
+struct sphere_tet_report {
+  size_t tets = 0;
+  double max_boundary_distance = 0.0; // voxels
+  double min_dihedral = 0.0;          // degrees
+  double mean_dihedral = 0.0;
+  int inverted = 0;
+  double volume = 0.0; // of [-1,1]^3
+};
+
+sphere_tet_report report_sphere_tets(const geometry &g, unsigned int n, double box_size,
+                                     std::initializer_list<double> radii) {
+  sphere_tet_report r;
+  r.tets = g.num_tets();
+  const double voxel = 2.0 * box_size / double(n - 1);
+  for (unsigned int v : tet_boundary_vertices(g)) {
+    const geometry::point_t &p = g.points()[v];
+    const double d = std::sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
+    double nearest = HUGE_VAL;
+    for (double radius : radii)
+      nearest = std::min(nearest, std::fabs(d - radius * box_size));
+    r.max_boundary_distance = std::max(r.max_boundary_distance, nearest / voxel);
+  }
+  for (const geometry::tet_t &t : g.tets()) {
+    const double vol =
+        tet_volume(g.points()[t[0]], g.points()[t[1]], g.points()[t[2]], g.points()[t[3]]);
+    if (!(vol > 0.0))
+      ++r.inverted;
+    r.volume += std::fabs(vol) / (box_size * box_size * box_size);
+  }
+  const quality_stats q = compute_tet_quality_stats(g.tets(), g.points(), TET_MIN_ANGLE);
+  r.min_dihedral = q.min;
+  r.mean_dihedral = q.mean;
+  return r;
+}
+
+std::ostream &operator<<(std::ostream &os, const sphere_tet_report &r) {
+  return os << r.tets << " tets, boundary within " << r.max_boundary_distance
+            << " voxels, min dihedral " << r.min_dihedral << " (mean " << r.mean_dihedral << "), "
+            << r.inverted << " inverted, volume " << r.volume;
+}
+
+} // namespace
+
+// Octree::interpRect3Dpts_x/y/z placed each edge's crossing at span * grid index, where span is
+// the volume's voxel size, but the QEF solution built from those crossings is checked against the
+// cell in grid units (Octree::get_solution), so wherever the voxel size was not 1 the solution
+// "left its cell" and became the cell's centre. The same span^2 scaling kept the QEF error, which
+// drives refinement, under the tolerance. A tet mesh's boundary vertices are those QEF points, so
+// an SDF's tet mesh (voxels 0.003 across on the bunny) was uniform cubes with a staircase
+// boundary. Hexahedral meshes hid it: Octree::get_vtx_new walks each boundary vertex onto the
+// surface afterwards. The same samples now give the same mesh in any box, and its boundary is on
+// the surface. The tets' total volume checks that none overlap: where boundary cells of two sizes
+// met, Octree::tetrahedralize covered their shared faces twice, and this sphere's adaptive mesh had
+// 13% too much volume. Octree::traverse_qef now gives tets one boundary level.
+TEST_F(LbieMesherTest, TetraBoundaryFitsTheSurfaceInAnyUnits) {
+  const unsigned int n = 33;
+  const double radius = 0.6;
+  sphere_tet_report unit; // a box whose voxels are 1 across: the case that always worked
+  for (double box_size : {16.0, 1.0, 0.01}) {
+    geometry g = cvc::tetrahedralize(make_sphere_volume(ctx, n, radius, box_size), 0.0);
+    ASSERT_GT(g.num_tets(), 0u) << "box " << box_size;
+    const sphere_tet_report r = report_sphere_tets(g, n, box_size, {radius});
+    if (box_size == 16.0)
+      unit = r;
+    EXPECT_LT(r.max_boundary_distance, 0.5) << "box " << box_size << ": " << r;
+    EXPECT_EQ(r.tets, unit.tets) << "box " << box_size << ": " << r;
+    EXPECT_NEAR(r.volume, 4.0 / 3.0 * kPi * radius * radius * radius, 0.015) << r;
+  }
+}
+
+// Where the isosurface passes exactly through samples, LBIE disagreed with itself about them: a
+// coarse cell touching the surface only at such a sample was never refined and had no QEF point,
+// yet its edges counted as crossing, so it got a vertex at its centre, 3.4 voxels off a sphere of
+// radius 12 voxels (which meets the grid at its six poles). Integer data at an integer isovalue,
+// a CT's, is full of such samples. The isovalue now moves off them (Octree::collapse).
+TEST_F(LbieMesherTest, TetraMeshesAnIsovalueTheSamplesHit) {
+  const unsigned int n = 33;
+  {
+    const double radius = 0.75; // 12 voxels
+    geometry g = cvc::tetrahedralize(make_sphere_volume(ctx, n, radius, 16.0), 0.0);
+    ASSERT_GT(g.num_tets(), 0u);
+    const sphere_tet_report r = report_sphere_tets(g, n, 16.0, {radius});
+    EXPECT_LT(r.max_boundary_distance, 0.5) << r;
+  }
+  {
+    // 100 + 4 per voxel of r - d, rounded to unsigned chars; the surface is v = 100
+    const double radius = 0.6;
+    volume v(ctx, dimension(n, n, n), UChar, bounding_box(-16.0, -16.0, -16.0, 16.0, 16.0, 16.0));
+    for (unsigned int k = 0; k < n; ++k)
+      for (unsigned int j = 0; j < n; ++j)
+        for (unsigned int i = 0; i < n; ++i) {
+          const double x = -1.0 + 2.0 * i / (n - 1), y = -1.0 + 2.0 * j / (n - 1),
+                       z = -1.0 + 2.0 * k / (n - 1);
+          v(i, j, k,
+            std::round(100.0 + 4.0 * (radius - std::sqrt(x * x + y * y + z * z)) * (n - 1) / 2.0));
+        }
+    geometry g = cvc::tetrahedralize(v, 100.0);
+    ASSERT_GT(g.num_tets(), 0u);
+    const sphere_tet_report r = report_sphere_tets(g, n, 16.0, {radius});
+    EXPECT_LT(r.max_boundary_distance, 0.5) << r;
+    EXPECT_NEAR(r.volume, 4.0 / 3.0 * kPi * radius * radius * radius, 0.015) << r;
+  }
+}
+
+// The QEF error that drives refinement is a residual summed over the three axes, but
+// Octree::compute_qef and compute_qef_interval assigned instead of adding inside their axis loops,
+// so only the z term counted. The side of a cylinder along z has no z component in its normals, so
+// its residual was 0/0 and it never refined, while the same cylinder along x or y did. The same
+// capped cylinder along each axis now gives the same surface and the same tetrahedra.
+TEST_F(LbieMesherTest, RefinementIsTheSameAlongEveryAxis) {
+  const unsigned int n = 33;
+  const double radius = 0.4, half_length = 0.6;
+  int tris[3], tets[3];
+  for (int axis = 0; axis < 3; ++axis) {
+    volume v(ctx, dimension(n, n, n), Float, bounding_box(-1.0, -1.0, -1.0, 1.0, 1.0, 1.0));
+    for (unsigned int k = 0; k < n; ++k)
+      for (unsigned int j = 0; j < n; ++j)
+        for (unsigned int i = 0; i < n; ++i) {
+          const double p[3] = {-1.0 + 2.0 * i / (n - 1), -1.0 + 2.0 * j / (n - 1),
+                               -1.0 + 2.0 * k / (n - 1)};
+          const double a = p[(axis + 1) % 3], b = p[(axis + 2) % 3];
+          v(i, j, k, std::min(radius - std::sqrt(a * a + b * b), half_length - std::fabs(p[axis])));
+        }
+    LBIE::geoframe surface =
+        run_do_mesh(v, 0.0f, 0.0f, kDefaultErr, kDefaultErrIn, LBIE::geoframe::SINGLE);
+    LBIE::geoframe solid =
+        run_do_mesh(v, 0.0f, 0.0f, kDefaultErr, kDefaultErrIn, LBIE::geoframe::TETRA);
+    expect_geoframe_valid(surface);
+    expect_geoframe_valid(solid);
+    tris[axis] = surface.numtris;
+    tets[axis] = solid.numtris / 4;
+  }
+  EXPECT_GT(tris[0], 0);
+  for (int axis = 1; axis < 3; ++axis) {
+    EXPECT_EQ(tris[axis], tris[0]) << "triangles along axis " << axis << " vs x";
+    EXPECT_EQ(tets[axis], tets[0]) << "tets along axis " << axis << " vs x";
+  }
+}
+
+// GEO_FLOW on tetrahedra (Octree::geometric_flow_tet) moved every vertex 100 times per pass with
+// no check on the tets around it, so it could fold them; on the bunny's mesh the minimum dihedral
+// angle fell from 26.6 to 0.75 degrees and a boundary vertex flew far outside. It also read each
+// tet's corners in an order that made every volume negative, so only boundary vertices moved, and
+// their tangent move took the gradient of the volume's values for a unit normal: in a box 0.01
+// across the sphere's gradient is 100, and the flow sent every vertex to infinity. A move is now
+// taken only if every tet around the vertex keeps a positive volume and none gets a smaller
+// dihedral angle than the worst of them had. Here the minimum angle goes from 20 to 32 degrees.
+TEST_F(LbieMesherTest, TetraGeometricFlowNeverMakesTheWorstTetWorse) {
+  const unsigned int n = 17;
+  const double radius = 0.6;
+  // voxels 1 across with a gradient of 1/8, and voxels 1/800 across with a gradient of 10^4
+  for (std::pair<double, double> c : {std::make_pair(8.0, 1.0), std::make_pair(0.01, 100.0)}) {
+    const double box_size = c.first, value_scale = c.second;
+    volume v = make_sphere_volume(ctx, n, radius, box_size);
+    for (unsigned int k = 0; k < n; ++k)
+      for (unsigned int j = 0; j < n; ++j)
+        for (unsigned int i = 0; i < n; ++i)
+          v(i, j, k, v(i, j, k) * value_scale);
+    const sphere_tet_report before =
+        report_sphere_tets(cvc::tetrahedralize(v, 0.0), n, box_size, {radius});
+    const sphere_tet_report after =
+        report_sphere_tets(cvc::tetrahedralize(v, 0.0, DUALLIB, GEO_FLOW, BSPLINE_CONVOLUTION, 1),
+                           n, box_size, {radius});
+    const std::string where =
+        "box " + std::to_string(box_size) + ", values x" + std::to_string(value_scale);
+    ASSERT_EQ(after.tets, before.tets) << where;
+    EXPECT_EQ(after.inverted, 0) << where << ": " << after;
+    EXPECT_GT(after.min_dihedral, 1.5 * before.min_dihedral) << where << ": " << after;
+    EXPECT_GT(after.mean_dihedral, before.mean_dihedral) << where << ": " << after;
+    EXPECT_LT(after.max_boundary_distance, 0.5) << where << ": " << after;
+  }
+}
+
+// cvc::tetrahedralize2 asks for LBIE's TETRA2 mesh, but do_mesh_geometry turned VOLUME_TET back
+// into TETRA, so the layer went through the one-surface Octree::tetrahedralize on the interval's
+// octree: fans of slivers, holes, and tets on both sides of the inner surface.
+// Octree::tetrahedralize_interval itself was no better (see Mesher::do_duallib_extract). A layer is
+// now the solid min(v - lo, hi - v) >= 0 meshed by Octree::tetrahedralize, with either isovalue
+// first.
+TEST_F(LbieMesherTest, Tetrahedralize2MeshesTheLayerBetweenTwoIsosurfaces) {
+  const unsigned int n = 33;
+  const double radius = 0.6, half = 0.15; // the layer is radius +- half
+  const double r0 = radius - half, r1 = radius + half;
+  const double exact = 4.0 / 3.0 * kPi * (r1 * r1 * r1 - r0 * r0 * r0);
+  for (double box_size : {16.0, 0.01}) {
+    volume v = make_sphere_volume(ctx, n, radius, box_size);
+    for (bool upper_first : {true, false}) {
+      geometry g =
+          upper_first ? cvc::tetrahedralize2(v, half, -half) : cvc::tetrahedralize2(v, -half, half);
+      ASSERT_GT(g.num_tets(), 0u) << "box " << box_size;
+      const sphere_tet_report r = report_sphere_tets(g, n, box_size, {r0, r1});
+      const std::string where = "box " + std::to_string(box_size) +
+                                (upper_first ? ", upper isovalue first" : ", lower first");
+      EXPECT_LT(r.max_boundary_distance, 0.5) << where << ": " << r;
+      EXPECT_EQ(r.inverted, 0) << where << ": " << r;
+      EXPECT_NEAR(r.volume, exact, 0.03 * exact) << where << ": " << r;
+      // Every corner of every tet is in the layer (to half a voxel).
+      int outside = 0;
+      for (const geometry::tet_t &t : g.tets())
+        for (int c = 0; c < 4; ++c) {
+          const geometry::point_t &p = g.points()[t[c]];
+          const double d = std::sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]) / box_size;
+          if (d < r0 - 1.0 / (n - 1) || d > r1 + 1.0 / (n - 1))
+            ++outside;
+        }
+      EXPECT_EQ(outside, 0) << where << ": tet corners off the layer";
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1143,7 +1642,8 @@ TEST_F(LbieMesherTest, AdapterTetHexQuadRoundtrip) {
   EXPECT_EQ(hf.mesh_type, LBIE::geoframe::HEXA);
   EXPECT_EQ(hf.numquads, 6);
   geometry hback = LBIE::to_geometry(hf);
-  EXPECT_EQ(hback.num_hexs(), 1u);
+  ASSERT_EQ(hback.num_hexs(), 1u);
+  EXPECT_EQ(hback.const_hexs()[0], hexg.const_hexs()[0]);
 
   // Quad surface geometry.
   geometry quadg;
@@ -1289,14 +1789,20 @@ TEST_F(LbieMesherTest, HexUtilityFunctions) {
   EXPECT_NEAR(std::fabs(hex_volume(cube)), 1.0, 1e-9);
   double jac = hex_jacobian(cube);
   EXPECT_NEAR(std::fabs(jac), 0.125, 1e-9); // parametric-center determinant
-  // Note: hex_scaled_jacobian is documented as "1 = perfect cube" but the
-  // implementation normalizes by the max *pairwise* vertex distance cubed
-  // (includes the body diagonal), so a unit cube scores
-  // 0.125 / sqrt(3)^3 ~= 0.024 rather than 1.0.
+  // The scaled Jacobian is the worst corner's determinant of unit edges: 1 for a cube (it was
+  // the centre Jacobian over the space diagonal cubed, 1/sqrt(27)), 1/sqrt(5) for a cube
+  // sheared by twice its height, -1 for the cube's mirror image.
   double sj = hex_scaled_jacobian(cube);
-  EXPECT_NEAR(sj, jac / std::pow(std::sqrt(3.0), 3), 1e-9);
-  EXPECT_GT(sj, 0.0);
-  EXPECT_LE(sj, 1.0);
+  EXPECT_NEAR(sj, 1.0, 1e-12);
+  geometry::point_t sheared[8], mirrored[8];
+  for (int i = 0; i < 8; ++i) {
+    sheared[i] = cube[i];
+    sheared[i][0] += 2.0 * cube[i][2];
+    mirrored[i] = cube[i];
+    mirrored[i][0] = -cube[i][0];
+  }
+  EXPECT_NEAR(hex_scaled_jacobian(sheared), 1.0 / std::sqrt(5.0), 1e-12);
+  EXPECT_NEAR(hex_scaled_jacobian(mirrored), -1.0, 1e-12);
 
   geometry::point_t center = {{0.5, 0.5, 0.5}};
   std::array<double, 8> w = hex_trilinear(center, cube);
@@ -1334,11 +1840,10 @@ TEST_F(LbieMesherTest, HexUtilityFunctions) {
   geometry::point_t outside = {{9.0, 9.0, 9.0}};
   EXPECT_TRUE(find_hexs_containing_point(outside, hexs, pts).empty());
 
-  // A unit cube scores ~0.024 on the implemented scaled-jacobian metric,
-  // so the documented default threshold of 0.2 would reject it.
-  std::vector<size_t> keep = filter_hexs_by_quality(hexs, pts, 0.01, HEX_SCALED_JACOBIAN);
+  // The documented default threshold (0.2) keeps a cube; nothing beats 1.
+  std::vector<size_t> keep = filter_hexs_by_quality(hexs, pts);
   EXPECT_EQ(keep.size(), 1u);
-  std::vector<size_t> none = filter_hexs_by_quality(hexs, pts, 0.5, HEX_SCALED_JACOBIAN);
+  std::vector<size_t> none = filter_hexs_by_quality(hexs, pts, 1.0, HEX_SCALED_JACOBIAN);
   EXPECT_TRUE(none.empty());
 
   geometry hg;
@@ -1347,7 +1852,7 @@ TEST_F(LbieMesherTest, HexUtilityFunctions) {
   hg.hexs().push_back(hex);
   geometry surf = extract_surface(hg);
   EXPECT_EQ(surf.num_quads(), 6u);
-  geometry hq = extract_quality_elements(hg, 0.01, HEX_SCALED_JACOBIAN);
+  geometry hq = extract_quality_elements(hg, 0.2, HEX_SCALED_JACOBIAN);
   EXPECT_EQ(hq.num_hexs(), 1u);
   std::array<double, 6> bounds = compute_mesh_bounds(hg);
   EXPECT_DOUBLE_EQ(bounds[5], 1.0);

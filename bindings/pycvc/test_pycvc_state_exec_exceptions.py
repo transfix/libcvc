@@ -4,6 +4,7 @@ A registered Python function's exception is a PythonError in the DSL; a DSL exce
 Python raises pycvc.dsl_error, whose type derives from pycvc.dsl_class(name) for each class in the
 exception's chain; a PythonError that comes back unhandled re-raises the Python exception itself,
 with the dsl_error as its __cause__. A process ended by an exception it didn't catch is `failed`.
+The exceptions.h helpers, stackless_evaluator.raise_ and evaluator_state.uncaught are wrapped too.
 """
 
 import pycvc
@@ -157,6 +158,62 @@ def test_schedulers_end_the_process_failed():
         getattr(sched, run)()
         assert sched.get_exit_exception(good) is None
         sched.raise_exit_exception(good)  # not failed: nothing raised
+
+
+def test_exception_helpers():
+    names = pycvc.exception_class_names()
+    assert names[0] == "Exception" and "ValueError" in names and "PythonError" in names
+    assert pycvc.exception_class("Nope") is None
+    cls = pycvc.exception_class("ValueError")
+    assert cls["__name__"] == "ValueError"
+    # A class is a class dict, a constructor, or a built-in class's name.
+    assert pycvc.class_chain("ValueError") == ["ValueError", "Exception"]
+    assert pycvc.class_chain(cls) == ["ValueError", "Exception"]
+    assert pycvc.class_name(cls) == "ValueError"
+    env = pycvc.environment()
+    pycvc.register_exception_classes(env)
+    ctor = env.lookup("KeyError")
+    assert pycvc.class_name(pycvc.class_of_constructor(ctor)) == "KeyError"
+    assert pycvc.class_name(ctor) == "KeyError"
+    assert pycvc.class_of_constructor(5) is None
+    _raises(KeyError, pycvc.class_chain, "Nope")
+    _raises(TypeError, pycvc.class_chain, 5)
+
+    e = pycvc.make_exception("ValueError", "bad", {"k": 1})
+    assert (e["message"], e["data"], e["origin"]) == ("bad", {"k": 1}, "dsl")
+    assert pycvc.make_exception(cls, "plain")["data"] is None
+    # The copies match their classes by name chain.
+    assert pycvc.is_exception(e) and not pycvc.is_exception({"message": "no class"})
+    assert pycvc.is_instance(e, "Exception") and pycvc.is_instance(e, cls)
+    assert not pycvc.is_instance(e, "TypeError")
+    assert pycvc.class_name(pycvc.class_of_instance(e)) == "ValueError"
+    assert pycvc.class_of_instance(5) is None
+    assert pycvc.exception_message(e) == "bad"
+    assert pycvc.exception_summary(e) == "ValueError: bad"
+    assert pycvc.traceback_line(pycvc.parse("(+ 1 2)")) == "(+ 1 2)"
+    assert pycvc.kTracebackFrames == 64
+    assert pycvc.is_finished(process_status.failed) and pycvc.is_finished(process_status.killed)
+    assert not pycvc.is_finished(process_status.waiting)
+
+
+def test_raise_into_a_state():
+    ev = pycvc.stackless_evaluator(pycvc.builtins.make_default_environment())
+    st = ev.create_state(
+        '(try (begin (set i 0) (while (< i 1000) (set i (+ i 1))) "done") '
+        '(catch (KeyError e) (get-attr e "message")))'
+    )
+    ev.run(st, 30)
+    assert not st.done and st.uncaught is None
+    ev.raise_(st, pycvc.make_exception("KeyError", "from Python"))
+    assert ev.run(st) == "from Python"
+    # Nothing catches it: the state is done with it uncaught, and stepping raises it.
+    st = ev.create_state("(begin (set i 0) (while (< i 1000) (set i (+ i 1))))")
+    ev.run(st, 10)
+    ev.raise_(st, pycvc.make_exception("ValueError", "stop"))
+    assert st.done and st.uncaught["message"] == "stop"
+    e = _raises(pycvc.dsl_class("ValueError"), ev.step, st)
+    assert e.value["message"] == "stop"
+    _raises(RuntimeError, ev.raise_, st, 5)  # not an exception (std::invalid_argument)
 
 
 if __name__ == "__main__":

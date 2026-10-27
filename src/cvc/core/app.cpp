@@ -29,6 +29,7 @@
 #include <cvc/core/world_units.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/state/state.h>
+#include <cvc/state/state_exec/async_host.h>
 #include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/utility/utility.h>
 #include <cvc/volume/bounding_box.h>
@@ -215,6 +216,11 @@ void app::registerDefaultHandlers() {
 // 10/25/2026 -- Joe R. -- Close the background-task pool first, and sweep
 //                         again for threads started while we were joining.
 app::~app() {
+  // Async calls first: their kernels run on the background pool and post to the exec scheduler,
+  // so cancel them and wait for their kernels while both are still here (the pool is still open).
+  if (_execAsyncHost)
+    _execAsyncHost->shutdown();
+
   // Nothing queued may start from here on: a pooled worker winding down
   // would otherwise start the next task after the snapshot below, and that
   // thread would run on into a destroyed app.  The dropped tasks are
@@ -1083,6 +1089,14 @@ cvc::state_exec::async_scheduler &app::exec_scheduler() {
     _execScheduler->set_data_defaults(cvc::state_exec::async_scheduler::host_data_defaults());
   }
   return *_execScheduler;
+}
+
+cvc::state_exec::async_host &app::exec_async_host() {
+  cvc::state_exec::async_scheduler &sched = exec_scheduler();
+  boost::mutex::scoped_lock lock(_execSchedulerMutex);
+  if (!_execAsyncHost)
+    _execAsyncHost.reset(new cvc::state_exec::async_host(sched, this));
+  return *_execAsyncHost;
 }
 
 void app::setThreadPoolSize(unsigned int size) {

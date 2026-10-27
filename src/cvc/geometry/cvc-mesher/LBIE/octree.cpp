@@ -64,6 +64,7 @@ namespace LBIE
     vbit = oc.vbit;
     BSplineCoeff = oc.BSplineCoeff;
     minmax = oc.minmax;
+    snap_to_surface = oc.snap_to_surface;
     prop_flag = oc.prop_flag;
     interior_flag = oc.interior_flag;
     prop_fname = oc.prop_fname;
@@ -107,6 +108,7 @@ namespace LBIE
     vbit = oc.vbit;
     BSplineCoeff = oc.BSplineCoeff;
     minmax = oc.minmax;
+    snap_to_surface = oc.snap_to_surface;
     prop_flag = oc.prop_flag;
     interior_flag = oc.interior_flag;
     prop_fname = oc.prop_fname;
@@ -476,10 +478,29 @@ oc_idx++;
 }
 }
 
+// A sample exactly at the isovalue is on neither side of it, and the extraction does not agree
+// with itself about it: is_skipcell() says a cell that only touches the isosurface at such a sample
+// is not crossed, so the cell is never refined and has no QEF point, while is_intersect() makes
+// the sample's edges cross, so the cell still gets a vertex, at its centre, voxels off the surface.
+// That happens wherever integer data meets an integer isovalue (a CT at 45), or a sphere passes
+// through grid points. The isovalue moves off the samples, towards the inside (orig < iso), so
+// they count as outside.
+static float isovalue_off_samples(const std::vector<float>& vol, float iso, float vmin, float vmax)
+{
+	if(std::find(vol.begin(), vol.end(), iso) == vol.end()) return iso;
+	float eps = 1e-6f * std::max(vmax - vmin, std::fabs(iso));
+	if(!(eps > 0.0f)) eps = 1e-30f;
+	float moved = iso - eps;
+	while(std::find(vol.begin(), vol.end(), moved) != vol.end()) moved -= eps;
+	return moved;
+}
+
 void Octree::collapse()
 {
 	CellQueue prev_queue, cur_queue;
 	int i, oc_id, level;
+
+	iso_val = isovalue_off_samples(orig_vol, iso_val, vol_min, vol_max);
 
 	oc_id=0;
 
@@ -744,6 +765,16 @@ void Octree::get_qef_in(int child_idx,double* temp_sigma_ni_2,double* temp_sigma
 }
 
 
+// The QEF residual along one axis: sum w p^2 - (sum w p)^2 / sum w over the cell's edge crossings p,
+// with w the squared normal component on that axis. get_err() is the sum over the three axes, but
+// every caller assigned instead of adding inside its axis loop, so only z counted: a surface whose
+// normals have no z component (a cylinder along z) had a residual of 0/0 and never refined, while
+// the same surface along x did. An axis no normal has a component on constrains nothing and adds 0.
+static double qef_axis_residual(double w, double wp, double wp2)
+{
+	return w > 0.0 ? wp2 - wp*wp/w : 0.0;
+}
+
 void Octree::compute_qef()
 {
 	float norm[12][3], p[12][3];
@@ -789,7 +820,7 @@ void Octree::compute_qef()
 */
 		qef=0;
 		for (i=0;i<3;i++)
-			qef = sigma_ni_2_pi_2[i] - (sigma_ni_2_pi[i]*sigma_ni_2_pi[i]) / sigma_ni_2[i] ;
+			qef += qef_axis_residual(sigma_ni_2[i], sigma_ni_2_pi[i], sigma_ni_2_pi_2[i]);
 
 		put_qef(oc_id, sigma_ni_2, sigma_ni_2_pi, sigma_ni_2_pi_2, solution, qef);
 	}
@@ -825,7 +856,7 @@ void Octree::compute_qef()
 				solution[i] = sigma_ni_2_pi[i] / sigma_ni_2[i];
 			qef=0;
 			for (i=0;i<3;i++) 
-				qef = sigma_ni_2_pi_2[i] - (sigma_ni_2_pi[i]*sigma_ni_2_pi[i]) / sigma_ni_2[i] ;
+				qef += qef_axis_residual(sigma_ni_2[i], sigma_ni_2_pi[i], sigma_ni_2_pi_2[i]);
 			put_qef(oc_id,sigma_ni_2, sigma_ni_2_pi, sigma_ni_2_pi_2, solution, qef);
 
 		}
@@ -865,7 +896,7 @@ void Octree::compute_qef_interval()
 
 			qef=0;
 			for (i=0;i<3;i++)
-				qef = sigma_ni_2_pi_2[i] - (sigma_ni_2_pi[i]*sigma_ni_2_pi[i]) / sigma_ni_2[i] ;
+				qef += qef_axis_residual(sigma_ni_2[i], sigma_ni_2_pi[i], sigma_ni_2_pi_2[i]);
 
 			put_qef(oc_id, sigma_ni_2, sigma_ni_2_pi, sigma_ni_2_pi_2, solution, qef);
 		}
@@ -889,7 +920,7 @@ void Octree::compute_qef_interval()
 
 			qef=0;
 			for (i=0;i<3;i++)
-				qef = sigma_ni_2_pi_2[i] - (sigma_ni_2_pi[i]*sigma_ni_2_pi[i]) / sigma_ni_2[i] ;
+				qef += qef_axis_residual(sigma_ni_2[i], sigma_ni_2_pi[i], sigma_ni_2_pi_2[i]);
 
 			put_qef_in(oc_id, sigma_ni_2, sigma_ni_2_pi, sigma_ni_2_pi_2, solution, qef);
 		}
@@ -922,7 +953,7 @@ void Octree::compute_qef_interval()
 				solution[i] = sigma_ni_2_pi[i] / sigma_ni_2[i];
 			qef=0;
 			for (i=0;i<3;i++) 
-				qef = sigma_ni_2_pi_2[i] - (sigma_ni_2_pi[i]*sigma_ni_2_pi[i]) / sigma_ni_2[i];
+				qef += qef_axis_residual(sigma_ni_2[i], sigma_ni_2_pi[i], sigma_ni_2_pi_2[i]);
 			put_qef(oc_id,sigma_ni_2, sigma_ni_2_pi, sigma_ni_2_pi_2, solution, qef);
 
 			clear (temp_sigma_ni_2,temp_sigma_ni_2_pi,temp_sigma_ni_2_pi_2);
@@ -945,7 +976,7 @@ void Octree::compute_qef_interval()
 				solution[i] = sigma_ni_2_pi[i] / sigma_ni_2[i];
 			qef=0;
 			for (i=0;i<3;i++) 
-				qef = sigma_ni_2_pi_2[i] - (sigma_ni_2_pi[i]*sigma_ni_2_pi[i]) / sigma_ni_2[i];
+				qef += qef_axis_residual(sigma_ni_2[i], sigma_ni_2_pi[i], sigma_ni_2_pi_2[i]);
 			put_qef_in(oc_id,sigma_ni_2, sigma_ni_2_pi, sigma_ni_2_pi_2, solution, qef);
 
 		}
@@ -1892,8 +1923,6 @@ void Octree::traverse_qef(float err_tol)
 	int x, y, z, tx, ty, tz, cell_size;
 	float r, r_min, temp, center;
 
-	oc_id=0;
-	leaf_num=0;
 	center = (dim[0]-1.0f)/2.0f;
 
 	start_level = oct_depth - 3;	// - 3
@@ -1907,6 +1936,22 @@ void Octree::traverse_qef(float err_tol)
 		end_level = start_level + 1;
 	}
 
+	// Tetrahedra: every cell the surface crosses ends at one level. Where two such cells of different
+	// sizes meet, tetrahedralize() covers each piece of their shared face twice, once from each
+	// cell's QEF point, and those two tets overlap unless the segment between the points happens to
+	// pass through that piece (it always does for cell centres, so the interior can be adaptive). A
+	// sphere's adaptive tet mesh covered 5% of its inside twice. The first pass finds the finest
+	// level the error tolerance wants anywhere on the surface; the second refines the whole surface
+	// to it. (r < 60 kept refinement inside a sphere of 60 voxels around the centre, which only
+	// suited the volume the code was first written for; the tetrahedra leave it out.)
+	// Hexahedra stay on oct_depth-2 (see below). Quadrilaterals refine like a surface, and
+	// polygonize_quad's split_quads turns the triangles at their level changes back into quads.
+	const bool tetra = (flag_type == 1), hexa = (flag_type == 3);
+	int boundary_level = oct_depth;
+	for(int pass = 0; pass < (tetra ? 2 : 1); pass++) {
+	int finest_boundary = oct_depth-2;
+	oc_id=0;
+	leaf_num=0;
 	//memset(oct_array,0,sizeof(octcell)*octcell_num);
 	std::fill(oct_array.begin(),oct_array.end(),octcell());
 	prev_queue.Add(oc_id);
@@ -1953,6 +1998,11 @@ void Octree::traverse_qef(float err_tol)
 			if(temp > r) r = temp;
 			if(temp < r_min) r_min = temp;
 
+			// Hexahedra (flag_type 3) are built on a uniform grid of cells at oct_depth-2, and
+			// hexahedralize's templates refine that grid where the error is large. Refining the octree
+			// itself put level changes in the grid: across one, the dual hexahedron at a fine vertex took
+			// the coarse cell's vertex for several corners (min_vtx_hexa), and a coarse vertex shared by
+			// more refined edges and faces than its 18 refine_edge slots got vertex 0 from AddRefine_*.
 			//if (is_skipcell(oc_id)) {
 			if(minmax[oc_id].min > iso_val) {
 				continue;
@@ -1960,8 +2010,11 @@ void Octree::traverse_qef(float err_tol)
 			//} else if (level <= start_level || (get_err_grad(oc_id) > err_tol && level < end_level)) {    // head
 				
 				
-			} else if (level < oct_depth-2 || (is_skipcell(oc_id) == 0 && level < oct_depth-2) ||
-				(get_err(oc_id) > err_tol && r < 60.0f && level < oct_depth) ){
+			} else if (tetra ?
+				(level < oct_depth-2 || (is_skipcell(oc_id) == 0 && (pass == 0 ?
+					get_err(oc_id) > err_tol && level < oct_depth : level < boundary_level))) :
+				(level < oct_depth-2 || (is_skipcell(oc_id) == 0 && level < oct_depth-2) ||
+				(!hexa && get_err(oc_id) > err_tol && r < 60.0f && level < oct_depth)) ){
 
 			//} else if (level <= 3) {  //4 
 
@@ -1978,6 +2031,7 @@ void Octree::traverse_qef(float err_tol)
 				oct_array[oc_id].refine_flag=1;
 			} else {
 				cut_array[leaf_num++]=oc_id;
+				if(is_skipcell(oc_id) == 0 && level > finest_boundary) finest_boundary = level;
 			}
 		}
 		
@@ -1987,6 +2041,8 @@ void Octree::traverse_qef(float err_tol)
 				prev_queue.Add(child(oc_id,level,i));
 		}
 		
+	}
+	boundary_level = finest_boundary;
 	}
 }
 
@@ -2197,17 +2253,30 @@ void Octree::get_solution(int oc_id, float* pos)
 	  pos[2]=qef_array[oc_id] ? qef_array_in[oc_id][11] : 0.0;
 	}
 
-	// to be corrected
-	if (!(pos[0] > x*cell_size && pos[0] < (x+1)*cell_size)) {
+	// Quadrilaterals and hexahedra start each vertex at its cell's centre and walk it onto the
+	// surface along the normal (get_vtx_new). That is what every volume whose voxels are not 1 across
+	// gave them, since the QEF solution always fell outside its cell, and it makes better hexahedra
+	// than starting at the QEF point: a sphere's worst corner condition number is 15, not 35.
+	if (flag_type == 2 || flag_type == 3) {
 		pos[0] = x*cell_size + cell_size/2.;
-	}
-		
-	if (!(pos[1] > y*cell_size && pos[1] < (y+1)*cell_size)) {
 		pos[1] = y*cell_size + cell_size/2.;
-	}
-		
-	if (!(pos[2] > z*cell_size && pos[2] < (z+1)*cell_size)) {
 		pos[2] = z*cell_size + cell_size/2.;
+		return;
+	}
+
+	// The QEF solution is a weighted mean of the cell's edge crossings, so it lies in the closed
+	// cell, but on its boundary where every crossing is on one face, and it is NaN for a cell with
+	// none. A solution not strictly inside used to go to the cell's centre, half a cell off the
+	// surface; now only NaN does, and the rest stays inside the cell. A tetrahedron's corner needs
+	// room: one at a cell's face makes slivers of the tets between it and that face's grid edges.
+	// A fifth of a cell raised a sphere's minimum dihedral angle from 0.5 to 11 degrees and kept
+	// its boundary within 0.3 voxels of the surface.
+	const int corner[3] = {x, y, z};
+	const float inset = (flag_type == 1 ? 0.2f : 0.01f)*cell_size;
+	for (int k = 0; k < 3; k++) {
+		const float lo = corner[k]*cell_size, hi = lo + cell_size;
+		if (!(pos[k] == pos[k])) pos[k] = lo + cell_size/2.;
+		else pos[k] = std::min(std::max(pos[k], lo + inset), hi - inset);
 	}
 }
 
@@ -3410,19 +3479,26 @@ void Octree::interpRect3Dpts_x(int i1, int j1, int k1,
 	
 	cell_size = (dim[0]-1)/(1<<level);
 	
+	// The crossing in grid units, like the cells it is checked against (get_solution) and the
+	// vertices it becomes (do_duallib_extract maps them to the volume's box). It was span * grid
+	// index: where a voxel is not 1 across, every QEF solution then fell outside its cell and was
+	// replaced by the cell's centre, and the QEF error, which drives traverse_qef's refinement,
+	// shrank by span^2.
 	ival = (val - d1)/(d2 - d1);
-	pt[0] = orig[0] + span[0]*(i1 + ival)*cell_size;
-	pt[1] = orig[1] + span[1]*j1*cell_size;
-	pt[2] = orig[2] + span[2]*k1*cell_size;
+	pt[0] = (i1 + ival)*cell_size;
+	pt[1] = j1*cell_size;
+	pt[2] = k1*cell_size;
 	
 	//#ifdef GRAD
 	getVertGrad( (i1+ival)*cell_size   , j1*cell_size , k1*cell_size , g1);
 	getVertGrad( (i1+ival)*cell_size+1 , j1*cell_size , k1*cell_size , g2);
 	gval=(double)((i1+ival)*cell_size)-(double)((int)((i1+ival)*cell_size));
 	
-	norm[0] = g1[0]*(1-gval) + g2[0]*gval;
-	norm[1] = g1[1]*(1-gval) + g2[1]*gval;
-	norm[2] = g1[2]*(1-gval) + g2[2]*gval;
+	// getVertGrad gives the gradient in the volume's units; the QEF is solved on the grid, so
+	// weight it with the gradient there (the same direction where the voxels are cubes).
+	norm[0] = (g1[0]*(1-gval) + g2[0]*gval)*span[0];
+	norm[1] = (g1[1]*(1-gval) + g2[1]*gval)*span[1];
+	norm[2] = (g1[2]*(1-gval) + g2[2]*gval)*span[2];
 	
 	float len= sqrt(norm[0]*norm[0] + norm[1]*norm[1] + norm[2]*norm[2]);
 	norm[0]/=len;
@@ -3450,9 +3526,9 @@ void Octree::interpRect3Dpts_y(int i1, int j1, int k1,
 	cell_size = (dim[0]-1)/(1<<level);
 	
 	ival = (val - d1)/(d2 - d1);
-	pt[0] = orig[0] + span[0]*i1*cell_size;
-	pt[1] = orig[1] + span[1]*(j1 + ival)*cell_size;
-	pt[2] = orig[2] + span[2]*k1*cell_size;
+	pt[0] = i1*cell_size;	// in grid units: see interpRect3Dpts_x
+	pt[1] = (j1 + ival)*cell_size;
+	pt[2] = k1*cell_size;
 	
 	//#ifdef GRAD
 	// grad addtion
@@ -3463,9 +3539,9 @@ void Octree::interpRect3Dpts_y(int i1, int j1, int k1,
 	
 	
 
-	norm[0] = g1[0]*(1-gval) + g2[0]*gval;
-	norm[1] = g1[1]*(1-gval) + g2[1]*gval;
-	norm[2] = g1[2]*(1-gval) + g2[2]*gval;
+	norm[0] = (g1[0]*(1-gval) + g2[0]*gval)*span[0];	// on the grid: see interpRect3Dpts_x
+	norm[1] = (g1[1]*(1-gval) + g2[1]*gval)*span[1];
+	norm[2] = (g1[2]*(1-gval) + g2[2]*gval)*span[2];
 
 	float len= sqrt(norm[0]*norm[0] + norm[1]*norm[1] + norm[2]*norm[2]);
 	norm[0]/=len;
@@ -3492,9 +3568,9 @@ void Octree::interpRect3Dpts_z(int i1, int j1, int k1,
 	cell_size = (dim[0]-1)/(1<<level);
 	
 	ival = (val - d1)/(d2 - d1);
-	pt[0] = orig[0] + span[0]*i1*cell_size;
-	pt[1] = orig[1] + span[1]*j1*cell_size;
-	pt[2] = orig[2] + span[2]*(k1+ival)*cell_size;
+	pt[0] = i1*cell_size;	// in grid units: see interpRect3Dpts_x
+	pt[1] = j1*cell_size;
+	pt[2] = (k1+ival)*cell_size;
 	
 	//#ifdef GRAD
 	
@@ -3503,9 +3579,9 @@ void Octree::interpRect3Dpts_z(int i1, int j1, int k1,
 	gval=(double)((k1+ival)*cell_size)-(double)((int)((k1+ival)*cell_size));
 
 	
-	norm[0] = g1[0]*(1-gval) + g2[0]*gval;
-	norm[1] = g1[1]*(1-gval) + g2[1]*gval;
-	norm[2] = g1[2]*(1-gval) + g2[2]*gval;
+	norm[0] = (g1[0]*(1-gval) + g2[0]*gval)*span[0];	// on the grid: see interpRect3Dpts_x
+	norm[1] = (g1[1]*(1-gval) + g2[1]*gval)*span[1];
+	norm[2] = (g1[2]*(1-gval) + g2[2]*gval)*span[2];
 
 	float len= sqrt(norm[0]*norm[0] + norm[1]*norm[1] + norm[2]*norm[2]);
 	norm[0]/=len;
@@ -3839,178 +3915,186 @@ void Octree::geometric_flow_tri(geoframe& geofrm) {
 	//	fclose(output);
 }
 
+// The cosine of the smallest dihedral angle of the tet p0 p1 p2 p3 (the largest cosine, 1 for a
+// flat tet), and its volume, positive when it is right-handed as AddTetra stores tets.
+static float tet_worst_dihedral_cos(const float* p0, const float* p1, const float* p2, const float* p3,
+				     float& volume)
+{
+	const float* p[4] = {p0, p1, p2, p3};
+	// face k is opposite corner k, wound so its normal points out of a right-handed tet
+	static const int face[4][3] = {{1, 2, 3}, {0, 3, 2}, {0, 1, 3}, {0, 2, 1}};
+	float n[4][3];
+	int i, j, k;
+
+	float a[3], b[3], c[3];
+	for(j = 0; j < 3; j++) {
+		a[j] = p1[j] - p0[j];	b[j] = p2[j] - p0[j];	c[j] = p3[j] - p0[j];
+	}
+	volume = (a[0]*(b[1]*c[2] - b[2]*c[1]) - a[1]*(b[0]*c[2] - b[2]*c[0]) +
+		  a[2]*(b[0]*c[1] - b[1]*c[0])) / 6.0f;
+
+	for(k = 0; k < 4; k++) {
+		for(j = 0; j < 3; j++) {
+			a[j] = p[face[k][1]][j] - p[face[k][0]][j];
+			b[j] = p[face[k][2]][j] - p[face[k][0]][j];
+		}
+		n[k][0] = a[1]*b[2] - a[2]*b[1];
+		n[k][1] = a[2]*b[0] - a[0]*b[2];
+		n[k][2] = a[0]*b[1] - a[1]*b[0];
+		float len = (float) sqrt(n[k][0]*n[k][0] + n[k][1]*n[k][1] + n[k][2]*n[k][2]);
+		if(!(len > 0.0f)) return 1.0f;
+		for(j = 0; j < 3; j++) n[k][j] /= len;
+	}
+	float worst = -1.0f;
+	for(i = 0; i < 4; i++)
+		for(k = i+1; k < 4; k++) {
+			float cos_angle = -(n[i][0]*n[k][0] + n[i][1]*n[k][1] + n[i][2]*n[k][2]);
+			if(cos_angle > worst) worst = cos_angle;
+		}
+	return worst;
+}
+
 // quality improvement with geometric flow -- tet mesh
+//
+// Each of 100 rounds moves every vertex a step towards the volume-weighted centre of its tets, or,
+// on the boundary, towards the area-weighted centre of its boundary faces within the surface's
+// tangent plane. Three things made it wreck meshes (the bunny's minimum dihedral angle fell from
+// 26.6 to 0.75 degrees, and a vertex flew far outside):
+// - It read each tet's corners in an order that made volume_tet() negative for every tet, so every
+//   tet was skipped as "too small" and the interior vertices never moved.
+// - The tangent move took the vertex normal for a unit vector. It is the gradient of the volume's
+//   values, so a CT's (tens of units per voxel) pushed boundary vertices out along the normal and
+//   doubled the push every round.
+// - Nothing checked the tets around a vertex, so a move could fold them.
+// A move is now taken only if every tet around the vertex keeps a positive volume and none has a
+// smaller dihedral angle than the worst of them had, so a pass never makes the mesh's worst tet
+// worse.
 void Octree::geometric_flow_tet(geoframe& geofrm) {
 
-	int i, j, k, v0, v1, v2, v3, **neighbor;
-	int itet, index, maxIndex, bool_0, bool_1, bool_2, bool_3;
-	float mv0[3], mv1[3], mv2[3], mv3[3], p[3], volume;
-	float sum_0, delta_t, area, t;
-	//	FILE *output;
-
-	//	output = fopen("qimprove_temp", "w");
-
-	//	fprintf(output, "geometric flow tet\n");
+	int i, j, k, v[4], itet, index, maxIndex, nb;
+	float p[3], n[3], volume, sum_0, delta_t, area, t, len;
+	float old_pos[3], new_pos[3];
 
 	delta_t = 0.01f;
 	maxIndex = 100;
 
-	neighbor = 0;
-	neighbor = new int*[geofrm.numverts];
-
-	for(i = 0; i < geofrm.numverts; i++)	neighbor[i] = 0;
-	for(i = 0; i < geofrm.numverts; i++)	neighbor[i] = new int[50];
-	for(i = 0; i < geofrm.numverts; i++) {
-		for (j = 0; j < 50; j++)	neighbor[i][j] = -1;
-	}
-
+	// the tets around each vertex
+	std::vector< std::vector<int> > neighbor(geofrm.numverts);
 	for (i = 0; i < geofrm.numtris/4; i++) {
-		v0 = geofrm.triangles[4*i][0];
-		v2 = geofrm.triangles[4*i][1];
-		v1 = geofrm.triangles[4*i][2];
-		v3 = geofrm.triangles[4*i+1][2];
-
-		for(j = 0; j < 50; j++) {
-			if(neighbor[v0][j] == -1) {neighbor[v0][j] = i;	break;}
-		}
-		for(j = 0; j < 50; j++) {
-			if(neighbor[v1][j] == -1) {neighbor[v1][j] = i;	break;}
-		}
-		for(j = 0; j < 50; j++) {
-			if(neighbor[v2][j] == -1) {neighbor[v2][j] = i;	break;}
-		}
-		for(j = 0; j < 50; j++) {
-			if(neighbor[v3][j] == -1) {neighbor[v3][j] = i;	break;}
-		}
+		v[0] = geofrm.triangles[4*i][0];	v[1] = geofrm.triangles[4*i][1];
+		v[2] = geofrm.triangles[4*i][2];	v[3] = geofrm.triangles[4*i+1][2];
+		for(j = 0; j < 4; j++) neighbor[v[j]].push_back(i);
 	}
 
-	//	fprintf(output, "%d %d\n", geofrm.numverts, geofrm.numtris/4);
-	for(index = 0; index < maxIndex; index++) {
+	// face k of a tet is opposite corner k
+	static const int face[4][3] = {{1, 2, 3}, {0, 3, 2}, {0, 1, 3}, {0, 2, 1}};
 
-	  //		fprintf(output, "%d ", index);
-	  //		if(index % 20 == 0 && index > 0) fprintf(output, "\n");
+	// each tet's tet_worst_dihedral_cos and volume, kept up to date as its corners move
+	std::vector<float> tet_cos(geofrm.numtris/4), tet_vol(geofrm.numtris/4), moved_cos, moved_vol;
+	for (i = 0; i < geofrm.numtris/4; i++) {
+		v[0] = geofrm.triangles[4*i][0];	v[1] = geofrm.triangles[4*i][1];
+		v[2] = geofrm.triangles[4*i][2];	v[3] = geofrm.triangles[4*i+1][2];
+		tet_cos[i] = tet_worst_dihedral_cos(&geofrm.verts[v[0]][0], &geofrm.verts[v[1]][0],
+						    &geofrm.verts[v[2]][0], &geofrm.verts[v[3]][0], tet_vol[i]);
+	}
+
+	for(index = 0; index < maxIndex; index++) {
 
 		for(i = 0; i < geofrm.numverts; i++) {
 
+			if(neighbor[i].empty()) continue;
+			sum_0 = 0.0f;
+			for(j = 0; j < 3; j++) p[j] = 0.0f;
+
 			if(geofrm.bound_sign[i] == 1) {					// boundary vertex
 
-				// calculate the mass center p[3]
-				sum_0 = 0.0f;
-				for(j = 0; j < 3; j++) p[j] = 0.0f;
-				for(j = 0; j < 50; j++) {
-					itet = neighbor[i][j];
-					if(itet == -1) break;
-					v0 = geofrm.triangles[4*itet][0];	v2 = geofrm.triangles[4*itet][1];
-					v1 = geofrm.triangles[4*itet][2];	v3 = geofrm.triangles[4*itet+1][2];
-
-					bool_0 = geofrm.bound_sign[v0] + geofrm.bound_sign[v2] + geofrm.bound_sign[v1];
-					bool_1 = geofrm.bound_sign[v0] + geofrm.bound_sign[v1] + geofrm.bound_sign[v3];
-					bool_2 = geofrm.bound_sign[v1] + geofrm.bound_sign[v2] + geofrm.bound_sign[v3];
-					bool_3 = geofrm.bound_sign[v2] + geofrm.bound_sign[v0] + geofrm.bound_sign[v3];
-
-					if((i == v0 || i == v1 || i == v2) && bool_0 == 3) {
-						for(k = 0; k < 3; k++) {
-							mv0[k] = geofrm.verts[v0][k];	mv1[k] = geofrm.verts[v2][k];
-							mv2[k] = geofrm.verts[v1][k];		
-						}
-						area = area_tri(mv0, mv1, mv2);
+				// the area-weighted centre of the boundary faces around it
+				for(nb = 0; nb < (int)neighbor[i].size(); nb++) {
+					itet = neighbor[i][nb];
+					v[0] = geofrm.triangles[4*itet][0];	v[1] = geofrm.triangles[4*itet][1];
+					v[2] = geofrm.triangles[4*itet][2];	v[3] = geofrm.triangles[4*itet+1][2];
+					for(k = 0; k < 4; k++) {
+						const int a = v[face[k][0]], b = v[face[k][1]], c = v[face[k][2]];
+						if((a != i && b != i && c != i) ||
+						   geofrm.bound_sign[a] + geofrm.bound_sign[b] + geofrm.bound_sign[c] != 3) continue;
+						area = area_tri(&geofrm.verts[a][0], &geofrm.verts[b][0], &geofrm.verts[c][0]);
 						sum_0 += area;
-						for(k = 0; k < 3; k++) {
-							p[k] += (mv0[k] + mv1[k] + mv2[k])*area/3.0f;
-						}
+						for(j = 0; j < 3; j++)
+							p[j] += (geofrm.verts[a][j] + geofrm.verts[b][j] + geofrm.verts[c][j])*area/3.0f;
 					}
-					if((i == v0 || i == v1 || i == v3) && bool_1 == 3) { 
-						for(k = 0; k < 3; k++) {
-							mv0[k] = geofrm.verts[v0][k];	mv1[k] = geofrm.verts[v1][k];
-							mv2[k] = geofrm.verts[v3][k];	
-						}
-						area = area_tri(mv0, mv1, mv2);
-						sum_0 += area;
-						for(k = 0; k < 3; k++) {
-							p[k] += (mv0[k] + mv1[k] + mv2[k])*area/3.0f;
-						}
-					}
-					if((i == v1 || i == v2 || i == v3) && bool_2 == 3) {
-						for(k = 0; k < 3; k++) {
-							mv0[k] = geofrm.verts[v1][k];	mv1[k] = geofrm.verts[v2][k];
-							mv2[k] = geofrm.verts[v3][k];	
-						}
-						area = area_tri(mv0, mv1, mv2);
-						sum_0 += area;
-						for(k = 0; k < 3; k++) {
-							p[k] += (mv0[k] + mv1[k] + mv2[k])*area/3.0f;
-						}
-					}
-					if((i == v2 || i == v0 || i == v3) && bool_3 == 3) {
-						for(k = 0; k < 3; k++) {
-							mv0[k] = geofrm.verts[v2][k];	mv1[k] = geofrm.verts[v0][k];
-							mv2[k] = geofrm.verts[v3][k];	
-						}
-						area = area_tri(mv0, mv1, mv2);
-						sum_0 += area;
-						for(k = 0; k < 3; k++) {
-							p[k] += (mv0[k] + mv1[k] + mv2[k])*area/3.0f;
-						}
-					}
-
 				}
-				
-				for(j = 0; j < 3; j++) p[j] /= sum_0;
-				if(sum_0 == 0.0f) {printf("s%d ", i); continue;}
+				if(!(sum_0 > 0.0f)) continue;
 
-				// calculate the new position in tangent direction
-				// xi+1 = xi + delta_t*((m-xi) - (n, m-xi)n))
+				// xi+1 = xi + delta_t*((m-xi) - (n, m-xi)n)), with n the unit normal
+				len = 0.0f;
+				for(j = 0; j < 3; j++) {
+					n[j] = geofrm.normals[i][j];
+					len += n[j]*n[j];
+				}
+				len = (float) sqrt(len);
+				if(!(len > 0.0f)) continue;
 				t = 0.0f;
 				for(j = 0; j < 3; j++) {
-					p[j] -= geofrm.verts[i][j];
-					t += p[j]*geofrm.normals[i][j];
+					n[j] /= len;
+					p[j] = p[j]/sum_0 - geofrm.verts[i][j];
+					t += p[j]*n[j];
 				}
-				for(j = 0; j < 3; j++) {
-					//geofrm.verts[i][j] += delta_t*p[j];							// mass center
-					geofrm.verts[i][j] += delta_t*(p[j] - t*geofrm.normals[i][j]);		// tangent movement
-				}
-				
+				for(j = 0; j < 3; j++)
+					new_pos[j] = geofrm.verts[i][j] + delta_t*(p[j] - t*n[j]);		// tangent movement
+
 			}
 			else {									// interior vertex
 
-				// calculate the volume center p[3]
-				sum_0 = 0.0f;
-				for(j = 0; j < 3; j++) p[j] = 0.0f;
-				for(j = 0; j < 50; j++) {
-					itet = neighbor[i][j];
-					if(itet == -1) break;
-					v0 = geofrm.triangles[4*itet][0];	v2 = geofrm.triangles[4*itet][1];
-					v1 = geofrm.triangles[4*itet][2];	v3 = geofrm.triangles[4*itet+1][2];
-
-					for(k = 0; k < 3; k++) {
-						mv0[k] = geofrm.verts[v0][k];	mv1[k] = geofrm.verts[v1][k];
-						mv2[k] = geofrm.verts[v2][k];	mv3[k] = geofrm.verts[v3][k];
-					}
-					volume = volume_tet(mv0, mv1, mv2, mv3);
+				// the volume-weighted centre of its tets
+				for(nb = 0; nb < (int)neighbor[i].size(); nb++) {
+					itet = neighbor[i][nb];
+					v[0] = geofrm.triangles[4*itet][0];	v[1] = geofrm.triangles[4*itet][1];
+					v[2] = geofrm.triangles[4*itet][2];	v[3] = geofrm.triangles[4*itet+1][2];
+					volume = tet_vol[itet];
 					if(volume < 0.00001f) continue;
-					sum_0 += (float) volume;
-					for(k = 0; k < 3; k++) {
-						p[k] += (mv0[k] + mv1[k] + mv2[k] + mv3[k])*volume/4.0f;
-					}
+					sum_0 += volume;
+					for(k = 0; k < 3; k++)
+						p[k] += (geofrm.verts[v[0]][k] + geofrm.verts[v[1]][k] +
+							 geofrm.verts[v[2]][k] + geofrm.verts[v[3]][k])*volume/4.0f;
 				}
-
-				for(j = 0; j < 3; j++) p[j] /= sum_0;
-				//if(sum_0 <= 0.0f || sum_0 > 10000.0f) {printf("v%d %f\n", i, sum_0); continue;}
 				if(sum_0 < 0.00001f) continue;
-				for(j = 0; j < 3; j++) {
-					geofrm.verts[i][j] += delta_t*(p[j] - geofrm.verts[i][j]);					// volume center
-				}
+				for(j = 0; j < 3; j++)
+					new_pos[j] = geofrm.verts[i][j] + delta_t*(p[j]/sum_0 - geofrm.verts[i][j]);	// volume center
 
+			}
+
+			// take the move only if no tet around the vertex folds or gets worse than the worst of them
+			float worst_before = -1.0f;
+			for(nb = 0; nb < (int)neighbor[i].size(); nb++)
+				if(tet_cos[neighbor[i][nb]] > worst_before) worst_before = tet_cos[neighbor[i][nb]];
+			bool keep = true;
+			moved_cos.clear();
+			moved_vol.clear();
+			for(j = 0; j < 3; j++) {
+				old_pos[j] = geofrm.verts[i][j];
+				geofrm.verts[i][j] = new_pos[j];
+			}
+			for(nb = 0; nb < (int)neighbor[i].size() && keep; nb++) {
+				itet = neighbor[i][nb];
+				v[0] = geofrm.triangles[4*itet][0];	v[1] = geofrm.triangles[4*itet][1];
+				v[2] = geofrm.triangles[4*itet][2];	v[3] = geofrm.triangles[4*itet+1][2];
+				moved_cos.push_back(tet_worst_dihedral_cos(&geofrm.verts[v[0]][0], &geofrm.verts[v[1]][0],
+									   &geofrm.verts[v[2]][0], &geofrm.verts[v[3]][0], volume));
+				moved_vol.push_back(volume);
+				keep = volume > 0.0f && moved_cos.back() <= worst_before;
+			}
+			if(!keep) {
+				for(j = 0; j < 3; j++) geofrm.verts[i][j] = old_pos[j];
+				continue;
+			}
+			for(nb = 0; nb < (int)neighbor[i].size(); nb++) {
+				tet_cos[neighbor[i][nb]] = moved_cos[nb];
+				tet_vol[neighbor[i][nb]] = moved_vol[nb];
 			}
 
 		} // end of i loop
 
 	} // end of index loop
-
-	for(i = 0; i < geofrm.numverts; i++)	delete [] neighbor[i];
-	delete [] neighbor;
-
-	//	fclose(output);
 }
 
 // quality improvement with geometric flow -- quad mesh
@@ -5508,9 +5592,9 @@ void Octree::optimization(geoframe& geofrm, bool on_grid) {
 	int index, maxIndex, minAspIndx = 0, hexaIndx = 0, a_vert;
 	//int my_list[200], nlist;
 	int sum0, sum1, sum2, sum3, sum4, sum5, sum6, sum7, sum8, temp_i, temp_j;
-	float grad[3], step;
+	float grad[3];
 	float mv0[3], mv1[3], mv2[3], mv3[3], mv4[3], mv5[3], mv6[3], mv7[3], cond_max1;
-	float mmv0[3], mmv1[3], mmv2[3], mmv3[3], mmv4[3];
+	float mmv0[3], mmv1[3], mmv2[3], mmv3[3];
 	float jacobian, oddy, condition, jaco_min, jaco_max, oddy_min, oddy_max, cond_min, cond_max;
 	float *jacobianArr, *conditionArr, *oddyArr;
 	// Corner j of hexahedron i (v0..v7 below; v4..v7 lie over v0..v3) is vertex
@@ -5524,21 +5608,73 @@ void Octree::optimization(geoframe& geofrm, bool on_grid) {
 	                                      {5, 7, 0}, {6, 4, 1}, {7, 5, 2}, {4, 6, 3}};
 	// The hexahedra with a corner at a_vert, all of which move with it.
 	std::vector<int> around;
-	// The largest condition number of the corners of the hexahedra around a_vert, with a_vert at
-	// pos. A NaN counts as +inf.
-	auto worst_around = [&](const float* pos) {
-		float worst = 0.0f, p[8][3], jacob, cond, odd;
-		for(size_t n = 0; n < around.size(); n++) {
-			for(int c = 0; c < 8; c++) {
-				const unsigned int v = geofrm.quads[6*around[n] + corner_row[c]][corner_col[c]];
-				for(int d = 0; d < 3; d++) p[c][d] = int(v) == a_vert ? pos[d] : geofrm.verts[v][d];
+	// testHexa's Jacobian is the square root of the Gram determinant, so it is never negative and
+	// an inverted corner looks as good as its mirror image; and in float the Gram determinant of a
+	// nearly flat corner is noise. The line search moved vertices into inversions (one pass inverted
+	// 8 of a sphere's 189 hexahedra) and left corners at +5e-7, which the round trip through world
+	// coordinates between passes turned negative. corner_det is the signed determinant of corner c's
+	// unit edges, in double, and orientation makes it positive for most corners of the mesh,
+	// whichever way round its hexahedra are stored. A move may not take any corner around the
+	// vertex below min_corner, or below where it was if that was lower.
+	const double min_corner = 0.01;
+	auto corner_det = [](const float (&p)[8][3], int c) {
+		double e[3][3];
+		for(int k = 0; k < 3; k++) {
+			double len = 0.0;
+			for(int d = 0; d < 3; d++) {
+				e[k][d] = double(p[corner_edge[c][k]][d]) - double(p[c][d]);
+				len += e[k][d]*e[k][d];
 			}
+			if(len == 0.0) return 0.0;
+			for(int d = 0; d < 3; d++) e[k][d] /= sqrt(len);
+		}
+		return e[0][0]*(e[1][1]*e[2][2] - e[1][2]*e[2][1]) - e[0][1]*(e[1][0]*e[2][2] - e[1][2]*e[2][0]) +
+		       e[0][2]*(e[1][0]*e[2][1] - e[1][1]*e[2][0]);
+	};
+	auto hexa_points = [&](int h, const float* pos, float (&p)[8][3]) {
+		for(int c = 0; c < 8; c++) {
+			const unsigned int v = geofrm.quads[6*h + corner_row[c]][corner_col[c]];
+			for(int d = 0; d < 3; d++) p[c][d] = pos && int(v) == a_vert ? pos[d] : geofrm.verts[v][d];
+		}
+	};
+	double orientation = 1.0;
+	{
+		long positive = 0, negative = 0;
+		float p[8][3];
+		for(i = 0; i < geofrm.numquads/6; i++) {
+			hexa_points(i, nullptr, p);
 			for(int c = 0; c < 8; c++) {
-				testHexa(p[c], p[corner_edge[c][0]], p[corner_edge[c][1]], p[corner_edge[c][2]], jacob, cond, odd);
-				if(!(cond <= worst)) worst = std::isnan(cond) ? HUGE_VALF : cond;
+				const double det = corner_det(p, c);
+				if(det > 0.0) positive++;
+				else if(det < 0.0) negative++;
+			}
+		}
+		if(negative > positive) orientation = -1.0;
+	}
+	// The largest condition number of the corners of the hexahedra around a_vert, with a_vert at
+	// pos: testHexa's 1/Jacobian, from corner_det, and +inf for an inverted or flat corner.
+	auto worst_around = [&](const float* pos) {
+		float worst = 0.0f, p[8][3];
+		for(size_t n = 0; n < around.size(); n++) {
+			hexa_points(around[n], pos, p);
+			for(int c = 0; c < 8; c++) {
+				const double det = orientation*corner_det(p, c);
+				const float cond = det > 0.0 ? float(1.0/det) : HUGE_VALF;
+				if(!(cond <= worst)) worst = cond;
 			}
 		}
 		return worst;
+	};
+	// The oriented corner_det of the corners of the hexahedra around a_vert with a_vert at pos, 8 per
+	// hexahedron.
+	auto corners_around = [&](const float* pos) {
+		std::vector<double> det(8*around.size());
+		float p[8][3];
+		for(size_t n = 0; n < around.size(); n++) {
+			hexa_points(around[n], pos, p);
+			for(int c = 0; c < 8; c++) det[8*n + c] = orientation*corner_det(p, c);
+		}
+		return det;
 	};
 
 	//	FILE *output;
@@ -5575,6 +5711,10 @@ void Octree::optimization(geoframe& geofrm, bool on_grid) {
 	jaco_min = 1.0f;		jaco_max = -1.0f;
 	oddy_min = 1000.0f;		oddy_max = -1000.0f;
 	cond_min = 1000.0f;		cond_max = -1000.0f;
+	// The corner to improve: the worst one whose vertex is not stuck (its last move found nothing
+	// better), so that one corner that cannot be improved does not end the whole pass.
+	std::vector<char> stuck(geofrm.numverts, 0);
+	float pick = -1.0f;
 	float temp = 0.0f;
 	float temp0 = 0.0f;
 	float temp1 = 0.0f;
@@ -5609,15 +5749,14 @@ void Octree::optimization(geoframe& geofrm, bool on_grid) {
 			if(oddy > oddy_max) oddy_max = oddy;
 			if(condition < cond_min) {
 				cond_min = condition;	
-				if(condition < 0.0f) {minAspIndx = j; hexaIndx = i;}
 			}
 			if(condition > 0.0f && condition > cond_max) {
 			//if(condition > 0.0f && condition > 13.0f) {
 				cond_max = condition;
-				if(cond_min > 0.0f) {minAspIndx = j; hexaIndx = i;}
 				//if(cond_min > 0.0f) {minAspIndx = 2; hexaIndx = i;}
 			}
 			temp_i = 6*i + corner_row[j];	temp_j = corner_col[j];
+			if(!stuck[geofrm.quads[temp_i][temp_j]] && condition > pick) {pick = condition; minAspIndx = j; hexaIndx = i;}
 			if(conditionArr[geofrm.quads[temp_i][temp_j]] > 0.0f && condition > conditionArr[geofrm.quads[temp_i][temp_j]]) 
 				conditionArr[geofrm.quads[temp_i][temp_j]] = condition;
 			if(condition < 0.0f) conditionArr[geofrm.quads[temp_i][temp_j]] = condition;
@@ -5761,48 +5900,67 @@ void Octree::optimization(geoframe& geofrm, bool on_grid) {
 
 		getGrad(mmv0, mmv1, mmv2, mmv3, condition, grad);
 
-		// Line search for a position of the worst corner no worse than cond_max. mmv4 starts at the
-		// corner itself: a corner with collinear edges has Jacobian 0 and condition +inf, so
-		// cond_max + 1.0f - cond_max is NaN (or 0 once cond_max >= 2^24), the loop never runs, and
-		// mmv4 was copied into the mesh uninitialized (vertices like (7.4e24, 5.8e-43, 7.9e24)).
-		// Halving the step ends at 0 instead of looping forever when no step qualifies, and then the
-		// vertex stays where it was. A non-finite position (from a zero-length edge's NaN gradient) is
-		// never written.
+		// Search for a position of the corner's vertex that makes the worst corner around it better.
+		// The vertex stays where it is when nothing qualifies (an uninitialized position was once
+		// copied into the mesh, giving vertices like (7.4e24, 5.8e-43, 7.9e24)), and a non-finite
+		// position (from a zero-length edge's NaN gradient) never qualifies.
 		// The first step is half a grid cell: Mesher::qualityImprove gives every pass the mesh in grid
 		// units. (It passed world coordinates, where a cell of the bunny's volume is 0.01; a first step
-		// of 0.5 threw one of its vertices far outside the volume.) A position must also leave every
-		// other corner of the hexahedra around the vertex no worse than cond_max: checking only the
-		// worst corner let a move flatten its neighbours, so a pass could end with a worse mesh than it
-		// started from (the bunny's went from 169 to 191). And on the octree's grid a position off the
-		// grid does not qualify, so a vertex where the surface meets the volume's boundary is not pushed
-		// out of the volume.
-		around.clear();
-		for(i = 0; i < geofrm.numquads/6; i++)
-			for(j = 0; j < 8; j++)
-				if(int(geofrm.quads[6*i + corner_row[j]][corner_col[j]]) == a_vert) {around.push_back(i); break;}
-		for(j = 0; j < 3; j++) mmv4[j] = mmv0[j];
-		condition = cond_max + 1.0f;
-		step = 0.5f;
-		while(condition - cond_max > 1.0e-6 && step > 0.0f) {
-			for(j = 0; j < 3; j++) {
-				mmv4[j] = mmv0[j] - step*grad[j];
+		// of 0.5 threw one of its vertices far outside the volume.) A position is judged by every
+		// corner of the hexahedra around the vertex: checking only the worst corner let a move flatten
+		// its neighbours, so a pass could end with a worse mesh than it started from (the bunny's went
+		// from 169 to 191). And on the octree's grid a position off the grid does not qualify, so a
+		// vertex where the surface meets the volume's boundary is not pushed out of the volume.
+		// getGrad's direction is tried first, then the axes: its gradient mixes units and treats an
+		// inverted corner like its mirror image, so on its own it found few moves that did not invert
+		// a corner. The largest step at which some direction qualifies wins, taking the best of them.
+		// The corner's other three vertices shape it too: when its own vertex finds nothing, they
+		// are tried in turn.
+		auto improve = [&](int vert, const float* first) {
+			a_vert = vert;
+			around.clear();
+			for(int h = 0; h < geofrm.numquads/6; h++)
+				for(int c = 0; c < 8; c++)
+					if(int(geofrm.quads[6*h + corner_row[c]][corner_col[c]]) == a_vert) {around.push_back(h); break;}
+			const float from[3] = {geofrm.verts[vert][0], geofrm.verts[vert][1], geofrm.verts[vert][2]};
+			const std::vector<double> corners_before = corners_around(from);
+			const float bound = worst_around(from);
+			const float dirs[7][3] = {{first ? -first[0] : 0.0f, first ? -first[1] : 0.0f, first ? -first[2] : 0.0f},
+			                          {1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+			float best = bound, to[3] = {from[0], from[1], from[2]};
+			for(float st = 0.5f; st > 1.0f/4096.0f && !(best < bound); st /= 2.0f) {
+				for(int d = first ? 0 : 1; d < 7; d++) {
+					float trial[3];
+					bool ok = true;
+					for(int k = 0; k < 3; k++) {
+						trial[k] = from[k] + st*dirs[d][k];
+						if(!std::isfinite(trial[k]) || (on_grid && !(trial[k] >= 0.0f && trial[k] <= float(dim[k] - 1))))
+							ok = false;
+					}
+					if(!ok) continue;
+					const std::vector<double> corners = corners_around(trial);
+					for(size_t n = 0; n < corners.size() && ok; n++)
+						if(!(corners[n] >= std::min(min_corner, corners_before[n]))) ok = false;
+					if(!ok) continue;
+					const float worst = worst_around(trial);
+					if(worst < best) {
+						best = worst;
+						for(int k = 0; k < 3; k++) to[k] = trial[k];
+					}
+				}
 			}
-			getGrad(mmv4, mmv1, mmv2, mmv3, condition, grad);
-			const float worst = worst_around(mmv4);
-			if(!(worst <= condition)) condition = worst;
-			if(on_grid)
-				for(j = 0; j < 3; j++)
-					if(!(mmv4[j] >= 0.0f && mmv4[j] <= float(dim[j] - 1))) condition = HUGE_VALF;
-			if(condition > cond_max) step /= 2.0f;
+			if(!(best < bound)) return false;
+			for(int k = 0; k < 3; k++) geofrm.verts[vert][k] = to[k];
+			return true;
+		};
+		const int corner_vert = a_vert;
+		bool moved = improve(corner_vert, grad);
+		for(int k = 0; k < 3 && !moved; k++) {
+			const int c = corner_edge[minAspIndx][k];
+			moved = improve(int(geofrm.quads[6*hexaIndx + corner_row[c]][corner_col[c]]), nullptr);
 		}
-		if(condition - cond_max > 1.0e-6)
-			for(j = 0; j < 3; j++) mmv4[j] = mmv0[j];
-
-		if(std::isfinite(mmv4[0]) && std::isfinite(mmv4[1]) && std::isfinite(mmv4[2])) {
-			geofrm.verts[a_vert][0] = mmv4[0];
-			geofrm.verts[a_vert][1] = mmv4[1];
-			geofrm.verts[a_vert][2] = mmv4[2];
-		}
+		if(moved) std::fill(stuck.begin(), stuck.end(), 0);
+		else stuck[corner_vert] = 1;
 
 		//		fprintf(output, "average %d %f %f %f %f\n", a_vert, geofrm.verts[a_vert][0], geofrm.verts[a_vert][1], geofrm.verts[a_vert][2], step);
 
@@ -5813,6 +5971,7 @@ void Octree::optimization(geoframe& geofrm, bool on_grid) {
 		jaco_min = 1.0f;		jaco_max = -1.0f;
 		oddy_min = 1000.0f;		oddy_max = -1000.0f;
 		cond_min = 1000.0f;		cond_max = -1000.0f;
+		pick = -1.0f;
 		temp = 0.0f;	temp0 = 0.0f;	temp1 = 0.0f;	num = 0;
 		// Cannot parallelize: race conditions on min/max vars and array writes
 		for(i = 0; i < geofrm.numquads/6; i++) {
@@ -5850,16 +6009,15 @@ void Octree::optimization(geoframe& geofrm, bool on_grid) {
 				//}
 				if(condition < cond_min) {
 					cond_min = condition;	
-					if(condition < 0.0f) {minAspIndx = j; hexaIndx = i;}
 				}
 				if(condition > 0.0f && condition > cond_max) {
 				//if(condition > 0.0f && condition > 50.0f) {
 					cond_max = condition;
-					if(cond_min > 0.0f) {minAspIndx = j; hexaIndx = i;}
 					//if(cond_min > 0.0f) {minAspIndx = 4; hexaIndx = i;}
 				}
 				//if(condition > conditionArr[vertexArr[i][j]]) conditionArr[vertexArr[i][j]] = condition;
 				temp_i = 6*i + corner_row[j];	temp_j = corner_col[j];
+				if(!stuck[geofrm.quads[temp_i][temp_j]] && condition > pick) {pick = condition; minAspIndx = j; hexaIndx = i;}
 				if(conditionArr[geofrm.quads[temp_i][temp_j]] > 0.0f && condition > conditionArr[geofrm.quads[temp_i][temp_j]]) 
 					conditionArr[geofrm.quads[temp_i][temp_j]] = condition;
 				if(condition < 0.0f) conditionArr[geofrm.quads[temp_i][temp_j]] = condition;
@@ -5872,6 +6030,7 @@ void Octree::optimization(geoframe& geofrm, bool on_grid) {
 		}
 		
 		a_vert = geofrm.quads[6*hexaIndx + corner_row[minAspIndx]][corner_col[minAspIndx]];
+		if(pick < 0.0f) break;
 
 		//		fprintf(output, "min, max, a_vert = %f %f %f %f %f %f %d %d\n", jaco_min, jaco_max, 
 		//				oddy_min, oddy_max, cond_min, cond_max, a_vert, geofrm.bound_sign[a_vert]);
@@ -6012,8 +6171,18 @@ void Octree::polygonize_quad(geoframe& geofrm, float err_tol) {
 	in_out = 0;
 	for (k = 0; k < octcell_num; k++) {vtx_idx_arr[k] = -1;}
 
+	// Method 5's templates refine quads on a uniform grid of cells. Where the octree's level changes
+	// they did not match up and left cracks (192 open edges in the mesh of a closed sphere), so they
+	// refine nothing unless all the leaves are on one level; the octree adapts the mesh instead, and
+	// split_quads turns the triangles at its level changes into quads.
+	bool one_level = true;
+	for (i = 1; i < leaf_num && one_level; i++)
+		if (get_level(cut_array[i]) != get_level(cut_array[0])) one_level = false;
 	flag_method = 5;	// 1, 2, 3, 4, 5
-	if(flag_method == 5) assign_refine_sign_quad(geofrm, err_tol);
+	if(flag_method == 5) {
+		if (one_level) assign_refine_sign_quad(geofrm, err_tol);
+		else std::fill(vtx_idx_arr_refine.begin(), vtx_idx_arr_refine.end(), -1);
+	}
 
 	for (i = 0; i < leaf_num; i++ ) {
 		valid_leaf = cut_array[i] ;
@@ -6035,6 +6204,81 @@ void Octree::polygonize_quad(geoframe& geofrm, float err_tol) {
 			}
 		}	// end j
 	}		// end i
+
+	split_quads(geofrm);
+}
+
+// polygonize_quad's octree has cells on more than one level, and where the level changes a quad
+// takes the coarse cell's vertex for two neighbouring corners: it is a triangle (1243 of the head
+// SDF's 30191 quads, 9330 of the vh4 CT's 299205). If there is one, every face is split once around
+// its centre, quads into four and triangles into three, sharing the midpoints of their edges, so
+// that the mesh is all quads again and still conforming. The new vertices go onto the surface like
+// the others. A face left with fewer than three corners, or with two opposite corners on one
+// vertex, has no area and is dropped.
+void Octree::split_quads(geoframe& geofrm)
+{
+	bool degenerate = false;
+	for (size_t q = 0; q < geofrm.quads.size() && !degenerate; q++) {
+		const geoframe::uint_4 &f = geofrm.quads[q];
+		for (int a = 0; a < 4; a++)
+			if (f[a] == f[(a + 1)%4] || (a < 2 && f[a] == f[a + 2])) degenerate = true;
+	}
+	if (!degenerate) return;
+
+	const int fine = 1 << oct_depth;
+	auto add_point = [&](const float (&p)[3], const float (&n)[3]) {
+		float pos[3] = {p[0], p[1], p[2]}, norm[3] = {n[0], n[1], n[2]};
+		const float len = sqrtf(norm[0]*norm[0] + norm[1]*norm[1] + norm[2]*norm[2]);
+		if (len > 0.0f)
+			for (int i = 0; i < 3; i++) norm[i] /= len;
+		const unsigned int v = geofrm.AddVert(pos, norm);
+		geofrm.AddBound(v, 1);
+		int c[3];
+		for (int i = 0; i < 3; i++) {
+			c[i] = int(floorf(pos[i]));
+			c[i] = c[i] < 0 ? 0 : (c[i] >= fine ? fine - 1 : c[i]);
+		}
+		get_vtx_new(geofrm, xyz2octcell(c[0], c[1], c[2], oct_depth), v);
+		return v;
+	};
+	std::map<std::pair<unsigned int, unsigned int>, unsigned int> midpoint;
+	auto edge_point = [&](unsigned int a, unsigned int b) {
+		const std::pair<unsigned int, unsigned int> key(std::min(a, b), std::max(a, b));
+		std::map<std::pair<unsigned int, unsigned int>, unsigned int>::const_iterator it = midpoint.find(key);
+		if (it != midpoint.end()) return it->second;
+		float p[3], n[3];
+		for (int i = 0; i < 3; i++) {
+			p[i] = 0.5f*(geofrm.verts[a][i] + geofrm.verts[b][i]);
+			n[i] = geofrm.normals[a][i] + geofrm.normals[b][i];
+		}
+		const unsigned int v = add_point(p, n);
+		midpoint[key] = v;
+		return v;
+	};
+
+	const std::vector<geoframe::uint_4> faces = geofrm.quads;
+	geofrm.quads.clear();
+	geofrm.numquads = 0;
+	for (size_t q = 0; q < faces.size(); q++) {
+		const geoframe::uint_4 &f = faces[q];
+		unsigned int c[4];
+		int n = 0;
+		for (int a = 0; a < 4; a++)
+			if (f[a] != f[(a + 3)%4]) c[n++] = f[a];
+		if (n < 3 || (n == 4 && (c[0] == c[2] || c[1] == c[3]))) continue;
+		float p[3] = {0.0f, 0.0f, 0.0f}, nn[3] = {0.0f, 0.0f, 0.0f};
+		for (int a = 0; a < n; a++)
+			for (int i = 0; i < 3; i++) {
+				p[i] += geofrm.verts[c[a]][i]/n;
+				nn[i] += geofrm.normals[c[a]][i];
+			}
+		const unsigned int centre = add_point(p, nn);
+		for (int a = 0; a < n; a++) {
+			const unsigned int sub[4] = {c[a], edge_point(c[a], c[(a + 1)%n]), centre,
+			                             edge_point(c[(a + n - 1)%n], c[a])};
+			geofrm.AddQuad(sub, 4);
+		}
+	}
 }
 
 void Octree::get_VtxNorm(float* vtx, float* norm) 

@@ -933,7 +933,9 @@ TEST_F(GeometryTest, QualityImproveTetrahedralMesh) {
 
   // First create an SDF from the bunny
   std::cout << "Creating SDF from bunny mesh..." << std::endl;
-  dimension sdf_dim(64, 64, 64);
+  // At 64^3 the bunny is ~290k tets, and four GEO_FLOW passes over them timed out (300 s) in a
+  // Debug CI build.
+  dimension sdf_dim(32, 32, 32);
   volume sdf_vol = sdf(ctx, bunny, sdf_dim, bunny.extents(), SDF_V2);
 
   // Extract a tetrahedral mesh from the SDF
@@ -3417,7 +3419,9 @@ TEST_F(GeometryTest, TetrahedralizeMeshExtraction) {
 TEST_F(GeometryTest, TetrahedralizeWithImprovementMethods) {
   std::cout << "\n=== Testing Tetrahedralize with Different Improvement Methods ===" << std::endl;
 
-  dimension sdf_dim(32, 32, 32); // Smaller for faster testing
+  // LBIE meshes this on a 17^3 grid. On 33^3 (dims 17 to 32) the bunny is ~63k tets, and with six
+  // GEO_FLOW passes of 100 rounds over them this test took 178 s in a Debug CI build.
+  dimension sdf_dim(16, 16, 16);
   volume sdf_vol = sdf(ctx, bunny, sdf_dim, bunny.extents(), SDF_V2);
 
   struct MethodTest {
@@ -3521,44 +3525,21 @@ TEST_F(GeometryTest, Tetrahedralize2MeshExtraction) {
   dimension sdf_dim(32, 32, 32);
   volume sdf_vol = sdf(ctx, bunny, sdf_dim, bunny.extents(), SDF_V2);
 
-  // Extract tet2 mesh
+  // The single-isovalue overload meshes the solid above the isovalue as a layer with no upper
+  // surface: the region tetrahedralize() meshes (for an SDF, the outside out to the box). It used
+  // to ask for the layer up to LBIE's default inner isovalue, 9.5, which an SDF never reaches, and
+  // returned an empty mesh.
   geometry tet2_mesh = tetrahedralize2(sdf_vol, 0.0);
-
-  // NOTE: Tet2 (dual/interval tetrahedral meshing) requires TWO isovalues (inner and outer)
-  // to define a volumetric region between two isosurfaces. This is fundamentally different
-  // from standard SDF extraction which uses a single isovalue.
-  //
-  // The LBIE implementation exists but is designed for:
-  //   - Dual contouring between two isovalues (e.g., iso_val=0.5, iso_val_in=9.5)
-  //   - Creating a volumetric mesh between two surfaces
-  //
-  // For standard SDF mesh extraction (single isovalue=0.0), tet2 produces empty meshes
-  // because the interval [0.0, 9.5] doesn't intersect the SDF data range [-1, 1].
-  //
-  // To use tet2 properly, you would need to provide both inner and outer isovalues
-  // that define a valid interval within the SDF range, but our current API only
-  // supports a single isovalue parameter for consistency with other mesh types.
+  geometry tet_mesh = tetrahedralize(sdf_vol, 0.0);
 
   std::cout << "Extracted tet2 mesh with " << tet2_mesh.num_points() << " vertices and "
-            << tet2_mesh.num_tris() << " triangles" << std::endl;
+            << tet2_mesh.num_tets() << " tets" << std::endl;
 
-  if (tet2_mesh.num_points() > 0) {
-    std::cout << "  Tet2 extraction working!" << std::endl;
-
-    // Verify mesh properties
-    EXPECT_GT(tet2_mesh.num_tris(), 0) << "Tet2 mesh should have faces";
-
-    // Verify all vertices are valid
-    for (const auto &pt : tet2_mesh.points()) {
-      EXPECT_TRUE(std::isfinite(pt[0]) && std::isfinite(pt[1]) && std::isfinite(pt[2]))
-          << "All vertices should be finite";
-    }
-  } else {
-    std::cout << "  NOTE: Tet2 mesh extraction returned empty mesh" << std::endl;
-    std::cout << "  Tet2 requires dual isovalues (interval meshing), not compatible with"
-              << std::endl;
-    std::cout << "  single-isovalue SDF extraction. This is a design limitation, not a bug."
-              << std::endl;
+  EXPECT_GT(tet2_mesh.num_tets(), 0u) << "Tet2 mesh should have tets";
+  EXPECT_EQ(tet2_mesh.num_tets(), tet_mesh.num_tets());
+  for (const auto &pt : tet2_mesh.points()) {
+    EXPECT_TRUE(std::isfinite(pt[0]) && std::isfinite(pt[1]) && std::isfinite(pt[2]))
+        << "All vertices should be finite";
   }
 }
 
@@ -4558,10 +4539,9 @@ TEST_F(AlgorithmTest, HexJacobianMetric) {
   // Should be positive for valid hex
   EXPECT_GT(jac, 0.0);
 
-  // Scaled Jacobian should be close to 1 for perfect cube
+  // Scaled Jacobian is 1 for a perfect cube
   double scaled_jac = hex_scaled_jacobian(vertices);
-  EXPECT_GT(scaled_jac, 0.0);
-  EXPECT_LE(scaled_jac, 1.0);
+  EXPECT_NEAR(scaled_jac, 1.0, 1e-12);
 }
 
 TEST_F(AlgorithmTest, TetMeshQualityStatistics) {

@@ -219,6 +219,60 @@ TEST(StateInterestFilterTest, IngestRemoteMessageRespectsFilter) {
   EXPECT_EQ(sh.total_remote_filtered_out(), 1u);
 }
 
+// A relay asks admits() / admits_message() whether its own shard would take a frame before
+// re-fanning it, so each answer must match what ingest then does with the same frame.
+TEST(StateInterestFilterTest, AdmitsMirrorsIngestGate) {
+  cvc::app a;
+  cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
+  sh.attach();
+  sh.set_enforce_interest(true);
+  sh.add_interest("conf");
+
+  const auto check = [&](const cvc::state_mutation &m, bool want) {
+    EXPECT_EQ(sh.admits(m), want) << m.path;
+    auto r = sh.ingest_remote(m);
+    EXPECT_EQ(r.applied, want) << m.path << ": " << r.reject_reason;
+    EXPECT_EQ(r.rejected, !want) << m.path;
+  };
+
+  check(make_set_value("nodeB", 1, "conf.rooms.r.y", "v"), true);
+  check(make_set_value("nodeB", 2, "ui.docs.x", "v"), false);
+  check(make_set_value("nodeB", 3, "conference.x", "v"), false); // dot-segment boundary
+
+  // Delegation ops pass whatever their path, as on ingest's control-plane fast path.
+  cvc::state_mutation d = make_set_value("nodeB", 4, "ui.docs", "");
+  d.op = cvc::state_mutation_op::delegate_subtree;
+  d.string_value = "clusterB";
+  check(d, true);
+  cvc::state_mutation rv = make_set_value("nodeB", 5, "ui.docs", "");
+  rv.op = cvc::state_mutation_op::revoke_delegation;
+  check(rv, true);
+
+  // With enforcement off everything is admitted, as ingest then takes everything.
+  sh.set_enforce_interest(false);
+  check(make_set_value("nodeB", 6, "ui.docs.x", "v"), true);
+
+  // Messages: the cluster check, then interest.
+  sh.set_enforce_interest(true);
+  const auto check_message = [&](const std::string &id, const std::string &cluster,
+                                 const std::string &path, bool want) {
+    cvc::state_message msg;
+    msg.cluster_id = cluster;
+    msg.origin_node_id = "nodeB";
+    msg.message_id = id;
+    msg.path = path;
+    EXPECT_EQ(sh.admits_message(msg), want) << id;
+    EXPECT_EQ(sh.ingest_remote_message(msg), want) << id;
+  };
+  check_message("m1", "clusterA", "conf.event", true);
+  check_message("m2", "clusterA", "ui.event", false);
+  check_message("m3", "clusterB", "conf.event", false);
+  check_message("m4", "", "conf.event", true); // an unstamped message is this cluster's
+  sh.set_enforce_interest(false);
+  check_message("m5", "clusterA", "ui.event", true);
+  check_message("m6", "clusterB", "ui.event", false); // the cluster check is not interest
+}
+
 TEST(StateInterestFilterTest, DelegationOpsBypassInterestFilter) {
   // Control-plane mutations are routing metadata, not value
   // writes; they must always flow regardless of interest set.

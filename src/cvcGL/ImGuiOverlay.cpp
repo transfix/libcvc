@@ -312,6 +312,7 @@ struct ImGuiOverlay::Impl {
   vtkWeakPointer<vtkRenderWindowInteractor> interactor;
   vtkSmartPointer<vtkCallbackCommand> beginCmd, renderCmd, interceptCmd;
   std::function<void()> draw;
+  std::function<void()> sceneDraw; // setSceneDrawCallback: every frame, panels or not
   ImGuiContext *ctx = nullptr;
   bool ready = false;   // ImGui context created
   bool glReady = false; // GL backend initialized (deferred to first render)
@@ -393,6 +394,8 @@ struct ImGuiOverlay::Impl {
       if (shortSide < 700.0f)
         panelsOpen = false;
     }
+    if (sceneDraw) // scene annotations: under the UI, and shown with the panels hidden too
+      sceneDraw();
     // The toggle is drawn FIRST so it is always reachable, even when the panels
     // it hides would have covered this corner.
     if (showToggle) {
@@ -716,6 +719,9 @@ ImGuiOverlay::~ImGuiOverlay() {
 }
 
 void ImGuiOverlay::setDrawCallback(std::function<void()> draw) { m_impl->draw = std::move(draw); }
+void ImGuiOverlay::setSceneDrawCallback(std::function<void()> draw) {
+  m_impl->sceneDraw = std::move(draw);
+}
 ImGuiContext *ImGuiOverlay::imguiContext() const { return m_impl->ctx; }
 
 void ImGuiOverlay::setUiScale(float scale) {
@@ -787,6 +793,7 @@ ImGuiOverlay::~ImGuiOverlay() = default;
 void ImGuiOverlay::setUiFontPath(const std::string &) {}
 void ImGuiOverlay::setUiFontMemory(const void *, int, bool) {}
 void ImGuiOverlay::setDrawCallback(std::function<void()>) {}
+void ImGuiOverlay::setSceneDrawCallback(std::function<void()>) {}
 ImGuiContext *ImGuiOverlay::imguiContext() const { return nullptr; }
 // Every method in this block exists so consumers never need an #ifdef (see the
 // file header). attachCamera was the one omission: the nav demos call it

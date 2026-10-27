@@ -115,7 +115,8 @@ class state;
 // pulling the state_exec coroutine headers into everything that includes app.h.
 namespace state_exec {
 class async_scheduler;
-}
+class async_host;
+} // namespace state_exec
 
 class app {
 public:
@@ -451,6 +452,13 @@ public:
   // per-process chroot + per-document child env). See CVCGL-UI-DSL-ROADMAP §4.7.
   cvc::state_exec::async_scheduler &exec_scheduler();
 
+  // The async host for exec_scheduler() (docs/STATE_EXEC_EXCEPTIONS.md 3.2): an async function
+  // registered with it (state_exec::register_async_fn) parks its calling process while its
+  // kernel runs on this app's background task pool (startThreadPooled), and resumes it with the
+  // kernel's value or raises its error at the call. Lazily constructed, like exec_scheduler();
+  // ~app cancels its calls in flight and waits for their kernels before anything else goes.
+  cvc::state_exec::async_host &exec_async_host();
+
   // Used to easily manage saving/restoring thread info as we
   // traverse a threads stack.
   class thread_info {
@@ -711,6 +719,8 @@ protected:
   // guards first construction. unique_ptr so app.h needs only a forward declaration.
   std::unique_ptr<cvc::state_exec::async_scheduler> _execScheduler;
   boost::mutex _execSchedulerMutex;
+  // exec_async_host(): declared after the scheduler it posts to, so it goes first.
+  std::unique_ptr<cvc::state_exec::async_host> _execAsyncHost;
 
   // Interrupt and join this app's tracked threads (two-phase, per-thread
   // timeout). Call it (or wait()) from main() before exit if you spawned work;

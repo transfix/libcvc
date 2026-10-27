@@ -19,7 +19,9 @@
 #include <cvc/ariadne/conference/room_net.h>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
+#include <cvc/state/state_blob_store.h> // sha256_hex
 #include <initializer_list>
+#include <map>
 #include <string>
 
 namespace cvc {
@@ -55,6 +57,30 @@ void set_replicated(cvc::app &app, const std::string &path, const std::string &v
   n.value(val);
 }
 
+// Changed-only with ONE journaled mutation per change, for a leaf that flips often. touch() fires
+// valueChanged before value() fires it again, so set_replicated's touch would first re-send the
+// leaf's OLD value; it is only needed while the leaf is new or still empty (the attach race above).
+// A valued leaf is already observed: its first value was set after the touch that attached it, or
+// it arrived through replication (applying a remote node attaches it too).
+// FORCE re-sends an unchanged value (one touch) rather than writing nothing.
+void set_changed_once(cvc::app &app, const std::string &path, const std::string &val,
+                      bool force = false) {
+  cvc::state *n = app.root().findDescendant(path);
+  const std::string cur = n ? n->value() : std::string();
+  if (n && cur == val) {
+    if (force && !cur.empty())
+      n->touch();
+    return;
+  }
+  if (!cur.empty()) {
+    n->value(val);
+    return;
+  }
+  cvc::state &m = app.root()(path);
+  m.touch();
+  m.value(val);
+}
+
 double read_double(cvc::app &app, const std::string &path, double def) {
   cvc::state *n = app.root().findDescendant(path);
   return n && !n->value().empty() ? std::strtod(n->value().c_str(), nullptr) : def;
@@ -81,6 +107,18 @@ std::string participant_net(const std::string &room, const std::string &pid) {
 
 std::string server_net_path(const std::string &room) {
   return sub("conf", {"rooms", room.c_str(), "server", "net"});
+}
+
+std::string participant_talking(const std::string &room, const std::string &pid) {
+  return sub(room_participant_path(room, pid), {"voice", "talking"});
+}
+
+std::string participant_video_off(const std::string &room, const std::string &pid) {
+  return sub(room_participant_path(room, pid), {"video", "off"});
+}
+
+std::string relay_video_rung(const std::string &room, const std::string &pid) {
+  return sub(participant_net(room, pid), {"relay", "video"});
 }
 
 } // namespace
@@ -120,6 +158,94 @@ bool read_server_net(cvc::app &app, const std::string &room, server_net &out) {
   out.out_kbps = read_double(app, sub(base, {"out_kbps"}), 0.0);
   out.links = static_cast<int>(read_double(app, sub(base, {"links"}), 0.0));
   return true;
+}
+
+void write_participant_voice(cvc::app &app, const std::string &room, const std::string &pid,
+                             bool talking, bool force) {
+  set_changed_once(app, participant_talking(room, pid), talking ? "1" : "0", force);
+}
+
+bool read_participant_voice(cvc::app &app, const std::string &room, const std::string &pid,
+                            bool &talking) {
+  cvc::state *n = app.root().findDescendant(participant_talking(room, pid));
+  const std::string v = n ? n->value() : std::string();
+  if (v.empty())
+    return false;
+  talking = v == "1";
+  return true;
+}
+
+void write_participant_video_off(cvc::app &app, const std::string &room, const std::string &pid,
+                                 bool off, bool force) {
+  set_changed_once(app, participant_video_off(room, pid), off ? "1" : "0", force);
+}
+
+bool read_participant_video_off(cvc::app &app, const std::string &room, const std::string &pid,
+                                bool &off) {
+  cvc::state *n = app.root().findDescendant(participant_video_off(room, pid));
+  const std::string v = n ? n->value() : std::string();
+  if (v.empty())
+    return false;
+  off = v == "1";
+  return true;
+}
+
+void write_relay_video_rung(cvc::app &app, const std::string &room, const std::string &pid,
+                            const std::string &rung) {
+  set_changed_once(app, relay_video_rung(room, pid), rung);
+}
+
+std::string read_relay_video_rung(cvc::app &app, const std::string &room, const std::string &pid) {
+  cvc::state *n = app.root().findDescendant(relay_video_rung(room, pid));
+  return n ? n->value() : std::string();
+}
+
+std::string room_device_tag(const std::string &room, const std::string &device_id) {
+  if (device_id.empty())
+    return {};
+  // NUL-separated and salted, as default_device_id: 16 hex digits name a device within a room.
+  std::string in = "cvc-room-device/v1";
+  in.push_back('\0');
+  in += room;
+  in.push_back('\0');
+  in += device_id;
+  return cvc::sha256_hex(reinterpret_cast<const unsigned char *>(in.data()), in.size())
+      .substr(0, 16);
+}
+
+void write_participant_device(cvc::app &app, const std::string &room, const std::string &pid,
+                              const std::string &tag) {
+  const std::string path = sub(room_participant_path(room, pid), {"device"});
+  if (!tag.empty()) {
+    set_changed_once(app, path, tag);
+    return;
+  }
+  cvc::state *n = app.root().findDescendant(path);
+  if (n && !n->value().empty())
+    n->value(std::string()); // cleared, and only when there is a tag to clear
+}
+
+std::string read_participant_device(cvc::app &app, const std::string &room,
+                                    const std::string &pid) {
+  cvc::state *n = app.root().findDescendant(sub(room_participant_path(room, pid), {"device"}));
+  return n ? n->value() : std::string();
+}
+
+void write_link_devices(cvc::app &app, const std::string &room,
+                        const std::vector<cvc::state_link_report> &links,
+                        const std::set<std::string> &present) {
+  // Each present pid held by an accepted link: its verified device's tag, or "" when no link
+  // holding it proved a key, so a pid taken over by an unverified link loses its old tag.
+  std::map<std::string, std::string> held;
+  for (const cvc::state_link_report &r : links) {
+    if (!r.accepted || !r.holds_id || !present.count(r.remote_node_id))
+      continue;
+    std::string &tag = held[r.remote_node_id];
+    if (r.device_verified && !r.remote_device_id.empty())
+      tag = room_device_tag(room, r.remote_device_id);
+  }
+  for (const auto &[pid, tag] : held)
+    write_participant_device(app, room, pid, tag);
 }
 
 std::string format_rtt(double rtt_ms) {

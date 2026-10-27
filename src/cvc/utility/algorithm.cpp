@@ -57,6 +57,7 @@
 #include <boost/scoped_array.hpp>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <numeric>
 
@@ -847,15 +848,19 @@ geometry hexahedralize(const volume &vol, double isovalue, extraction_method met
 // tetrahedralize2
 // ---------------
 // Purpose:
-//   Extract a dual tetrahedral (tet2) volumetric mesh from a volume.
+//   Extract a dual tetrahedral (tet2) volumetric mesh from a volume: the solid above isovalue,
+//   meshed as a layer with no upper surface.
 // ---- Change History ----
 // 12/27/2025 -- Joe R. -- Creation.
 // 12/28/2025 -- Joe R. -- Adding normal_type parameter.
+// 10/24/2026 -- Joe R. -- The layer's other end is +inf, not LBIE's default inner isovalue
+//                         (9.5001, from the data LBIE was first written for).
 geometry tetrahedralize2(const volume &vol, double isovalue, extraction_method method,
                          improvement_method improve_method, normal_type normals,
                          int improve_iterations) {
   Arguments args;
   args["isovalue"] = float(isovalue);
+  args["isovalue_in"] = std::numeric_limits<float>::max();
   args["improve_iterations"] = improve_iterations;
   args["extraction_method_enum"] = static_cast<LBIE::Mesher::ExtractionMethod>(method);
   args["improvement_method_enum"] = static_cast<LBIE::Mesher::ImproveMethod>(improve_method);
@@ -865,6 +870,10 @@ geometry tetrahedralize2(const volume &vol, double isovalue, extraction_method m
   return cvc_mesher(vol, args);
 }
 
+// The layer between the two isovalues, given in either order.
+// ---- Change History ----
+// 12/27/2025 -- Joe R. -- Creation.
+// 10/24/2026 -- Joe R. -- Reaches LBIE's TETRA2 mesh (it was TETRA); either order.
 geometry tetrahedralize2(const volume &vol, double isovalue_outer, double isovalue_inner,
                          extraction_method method, improvement_method improve_method,
                          normal_type normals, int improve_iterations) {
@@ -1662,28 +1671,40 @@ double hex_jacobian(const geometry::point_t vertices[8]) {
 // Purpose:
 //   Compute scaled Jacobian quality metric for hexahedron.
 //   Range: [-1, 1], where 1 = perfect cube.
+//   The minimum over the 8 corners of the determinant of the corner's three
+//   unit edge vectors (the Verdict / CUBIT definition): 1 for a box, 1/sqrt(5)
+//   for a cube sheared by twice its height, <= 0 once a corner folds over.
 // ---- Change History ----
 // 12/28/2025 -- Joe R. -- Creation (Week 3 Option 3).
+// 10/24/2026 -- Joe R. -- Per-corner unit edges, so a cube really scores 1
+//                         (it scored 1/sqrt(27): the centre Jacobian over the
+//                         space diagonal cubed).
 double hex_scaled_jacobian(const geometry::point_t vertices[8]) {
-
-  // Compute Jacobian at center
-  double jac = hex_jacobian(vertices);
-
-  // Compute edge length scale
-  double max_edge = 0.0;
-  for (int i = 0; i < 8; ++i) {
-    for (int j = i + 1; j < 8; ++j) {
-      double dx = vertices[j][0] - vertices[i][0];
-      double dy = vertices[j][1] - vertices[i][1];
-      double dz = vertices[j][2] - vertices[i][2];
-      double len = std::sqrt(dx * dx + dy * dy + dz * dz);
-      max_edge = std::max(max_edge, len);
+  // The three edges leaving each corner, ordered so a right-handed hex is positive.
+  static const int kCornerEdges[8][3] = {{1, 3, 4}, {2, 0, 5}, {3, 1, 6}, {0, 2, 7},
+                                         {7, 5, 0}, {4, 6, 1}, {5, 7, 2}, {6, 4, 3}};
+  double worst = 1.0;
+  for (int c = 0; c < 8; ++c) {
+    double e[3][3];
+    bool degenerate = false;
+    for (int k = 0; k < 3 && !degenerate; ++k) {
+      double len = 0.0;
+      for (int j = 0; j < 3; ++j) {
+        e[k][j] = vertices[kCornerEdges[c][k]][j] - vertices[c][j];
+        len += e[k][j] * e[k][j];
+      }
+      len = std::sqrt(len);
+      degenerate = !(len > 1e-300);
+      for (int j = 0; j < 3 && !degenerate; ++j)
+        e[k][j] /= len;
     }
+    const double det = degenerate ? 0.0
+                                  : e[0][0] * (e[1][1] * e[2][2] - e[1][2] * e[2][1]) -
+                                        e[0][1] * (e[1][0] * e[2][2] - e[1][2] * e[2][0]) +
+                                        e[0][2] * (e[1][0] * e[2][1] - e[1][1] * e[2][0]);
+    worst = std::min(worst, det);
   }
-
-  // Scale Jacobian by edge length cubed
-  double scale = max_edge * max_edge * max_edge;
-  return (scale > 1e-15) ? (jac / scale) : 0.0;
+  return worst;
 }
 
 // ---------------------------

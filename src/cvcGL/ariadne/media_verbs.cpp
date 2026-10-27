@@ -186,8 +186,9 @@ void register_media_intrinsics() {
                        "' in this document — call (stream-open) first");
 
           // OPTS (all optional): device index (<0 or absent -> synthetic), synthetic frame size
-          // w/h, cadence hz, and an explicit synthetic:#t override (used by headless tests).
-          long device = -1, w = 640, h = 480;
+          // w/h, cadence hz, an explicit synthetic:#t override (used by headless tests), and the
+          // JPEG quality (1-100, default 70) when jpeg:#t.
+          long device = -1, w = 640, h = 480, quality = 70;
           double hz = 30.0;
           bool synthetic = false, jpeg = false;
           if (args.size() >= 2) {
@@ -198,7 +199,10 @@ void register_media_intrinsics() {
             synthetic = as_bool(dict_get(args[1], "synthetic"), false);
             jpeg =
                 as_bool(dict_get(args[1], "jpeg"), false); // encode to JPEG (stream codec "mjpeg")
+            quality = as_int(dict_get(args[1], "quality"), 70);
           }
+          if (quality < 1 || quality > 100)
+            return err("stream-capture-camera: 'quality' must be 1 to 100");
           if (w <= 0 || h <= 0)
             return err("stream-capture-camera: 'w' and 'h' must be positive");
           double used_hz = hz > 0.0 ? hz : 30.0;
@@ -248,7 +252,8 @@ void register_media_intrinsics() {
           // >= the inner rgba8 size; the subscriber's stream_view decodes it.
           if (jpeg)
             source = std::make_unique<cvc::gl::capture::jpeg_encode_source>(
-                std::move(source), static_cast<int>(w), static_cast<int>(h));
+                std::move(source), static_cast<int>(w), static_cast<int>(h),
+                static_cast<int>(quality));
 
           // Attach + start the producer thread on this (owner) thread. start_producer replaces any
           // existing producer (old stopped+joined first) and is a no-op if the source is unsized or

@@ -67,6 +67,9 @@ public:
   state_mutation append(const state_mutation &mutation);
   std::vector<state_mutation> snapshot() const;
   std::vector<state_mutation> replay_after(std::uint64_t sequence) const;
+  // Erase every entry with sequence <= `sequence`; returns how many were erased. Sequences keep
+  // counting up, so a later replay_after into the trimmed range returns only what survived.
+  std::size_t trim_through(std::uint64_t sequence);
   void clear();
 
   std::size_t size() const;

@@ -141,8 +141,7 @@ TEST_F(AlgorithmTest, HexahedralizeBasic) {
 TEST_F(AlgorithmTest, Tetrahedralize2Basic) {
   volume v = make_sphere_volume(ctx, 16, 0.5);
   geometry g;
-  // tetrahedralize2 uses LBIE::TETRA2 internally; on synthetic input it may
-  // legitimately return an empty mesh. Just exercise the code path.
+  // The single-isovalue overload meshes the solid above the isovalue (LBIE's TETRA2 path).
   ASSERT_NO_THROW(g = cvc::tetrahedralize2(v, 0.0, DUALLIB, NO_IMPROVE));
-  (void)g;
+  EXPECT_GT(g.num_tets(), 0u);
 }

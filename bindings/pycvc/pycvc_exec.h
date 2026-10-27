@@ -15,8 +15,9 @@
 namespace cvc {
 class app;
 namespace state_exec {
+class async_host;
 class async_scheduler;
-}
+} // namespace state_exec
 } // namespace cvc
 
 // Forward-declare PyObject so this SWIG-visible header needs no <Python.h>.
@@ -42,23 +43,27 @@ public:
   // register_async_fn for slow work that should not stall the scheduler.
   void register_fn(const std::string &name, PyObject *callable);
 
-  // Register a Python callable as an ASYNC DSL function named `name`. Calling
-  // (name args...) in a DSL program OFFLOADS the callable to the app's compute
-  // pool and PARKS the calling program until it finishes, so the scheduler stays
-  // live — other DSL processes (and other Python threads) run meanwhile. The
-  // program resumes with the callable's return value (converted back to a DSL
-  // value); if the callable raises, it resumes with a {"__async_error__":
-  // <message>} dict — a reserved key that a normal dict result cannot collide
-  // with, so a program can tell an error from data.
+  // Register a Python callable as an ASYNC DSL function named `name`, on this
+  // Exec's async host (async_host(); docs/STATE_EXEC_EXCEPTIONS.md 3). Calling
+  // (name args...) in a DSL program runs the callable on the app's background
+  // task pool and PARKS the calling program until it finishes, so the scheduler
+  // stays live — other DSL processes (and other Python threads) run meanwhile.
+  // The call works anywhere, the whole program included. The program resumes
+  // with the callable's return value (converted back to a DSL value); if the
+  // callable raises, the call raises a PythonError (`python_type` names the
+  // Python exception's type), which a (try ...) can catch; uncaught, run()
+  // re-raises the Python exception. (name-async args...) returns a future for
+  // (await f [seconds]) / (await-all (list ...)).
   //
-  // The callable runs on a pool WORKER thread with the GIL acquired for the call,
-  // so a blocking request (urllib/requests) or a GIL-releasing compute (numpy)
-  // runs truly concurrently. It must NOT call back into this Exec (run() /
+  // The callable runs on a pool thread with the GIL acquired for the call, so a
+  // blocking request (urllib/requests) or a GIL-releasing compute (numpy) runs
+  // truly concurrently; its wait for the GIL isn't charged to the program. It
+  // gets copies of its arguments. It must NOT call back into this Exec (run() /
   // register*) or touch the DSL/state tree — it receives its args and returns a
-  // value, nothing more. `(name ...)` must be nested (not the whole program) so
-  // the park has an enclosing frame — e.g. (begin (name ...)) or
-  // (state-set "r" (name ...)).
-  void register_async_fn(const std::string &name, PyObject *callable);
+  // value, nothing more. With `with_call`, it gets the call's pycvc.async_call
+  // handle first, before the arguments: call.cancelled() says whether to stop,
+  // and call.post(value) sends progress to "<name>.progress".
+  void register_async_fn(const std::string &name, PyObject *callable, bool with_call = false);
 
   // Register a Python COROUTINE function (an `async def`) as an async DSL function
   // named `name`. Calling (name args...) calls coro_fn(*args) to get a coroutine,
@@ -67,17 +72,20 @@ public:
   // callable to a pool WORKER), the coroutine runs ON the run() thread, cooperatively
   // stepped one slice per pump iteration — so it and the DSL march along together, and
   // its `await asyncio.sleep`/`aiohttp`/... progress between DSL slices. The program
-  // resumes with the coroutine's return value; a raise resumes it with a
-  // {"__async_error__": <message>} dict (do not return a dict using that reserved key).
+  // resumes with the coroutine's return value; a raise raises a PythonError at the
+  // call, as for register_async_fn. (name-async args...) returns a future.
   //
   // The coroutine MUST YIELD (use await). The slice is COOPERATIVE — asyncio cannot
   // preempt a running step — so a coroutine that does CPU-bound work without awaiting
   // (or an accidental non-awaiting loop) holds the run() thread and wedges the pump:
   // put blocking/CPU work in register_async_fn (the pool), not here. And, as with any
   // awaited async work, a coroutine whose await NEVER resolves leaves run() waiting
-  // (the same as a never-returning register_async_fn callable). Same nesting rule as
-  // register_async_fn.
+  // (the same as a never-returning register_async_fn callable).
   void register_async_coro(const std::string &name, PyObject *coro_fn);
+
+  // This Exec's async host: register more async functions on it with
+  // pycvc.builtins.register_async_fn(env, host, ...). In Python it keeps this Exec alive.
+  cvc::state_exec::async_host &async_host();
 
   // Execute a DSL program in this app's context; returns the rendered result
   // (strings raw, nil as "", others via the DSL's printed form). Throws on a

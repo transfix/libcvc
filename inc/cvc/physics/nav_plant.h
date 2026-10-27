@@ -111,6 +111,12 @@ public:
   int reference_substeps() const override;
   double energy_step(int i) const override;
   int static_contacts_step(int i) const override;
+  // Agent i's contact with the other agents' vehicles over the last tick: the other vehicle it
+  // touched (its agent index; -1 none; the one it touched deepest), and the deepest penetration
+  // (m). From the engine's contact events between two chassis, begun or persisting, so a vehicle
+  // resting against another counts every tick it does.
+  int vehicle_contact_step(int i) const;
+  double vehicle_contact_depth(int i) const;
   bool tracks_energy() const override { return true; }
   // The plant ledger's sample of agent i at the end of the last tick (at attach(), the vehicle
   // at rest and no command), from the vehicle's state then. The fields it shares with
@@ -255,6 +261,8 @@ private:
     double drawn = 0.0;         // energy drawn so far (J)
     double energy_step = 0.0;   // last tick (J)
     int contacts_step = 0;      // last tick
+    int touched = -1;           // the vehicle it touched deepest last tick (agent index); -1 none
+    double touch_depth = 0.0;   // that contact's penetration, m
     double steer_command = 0.0; // rad
     double accel_command = 0.0; // m/s^2 along the heading
     drift_si drift;

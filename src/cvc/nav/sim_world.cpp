@@ -551,6 +551,10 @@ void sim_world::step(int num_threads) {
     }
   }
 
+  // ── YIELDING (optional): out of each other's way, from the intents each heard ──
+  if (yield_cfg_.on() && n_ > 1)
+    yield_tick(fs, num_threads);
+
   lap(accSep);
 
   // ── MATERIAL GATE (optional): frame-wise witness per agent vs its own goal ──
@@ -710,23 +714,26 @@ void sim_world::step(int num_threads) {
 
   // ── override_command: the caller's command in place of the drive's, for this tick ──
   if (ov_any_) {
-    // The risk governor holds the caller's acceleration to its cap as it holds the drive's
-    // (risk_speed_cap): a route follower commands the vehicle in the drive's place, and without
-    // this drove a Humvee along a sidehill at full throttle with the governor on.
+    // The caller's acceleration is held to the speeds the drive's command is held to: the agent's
+    // top speed (vmax, on a plant the lower of the plant's and nav's) and, with the risk
+    // governor, its cap (risk_speed_cap). A route follower commands the vehicle in the drive's
+    // place at its own route speed: without this a Humvee on a route drove past nav's vmax, and
+    // along a sidehill at full throttle with the governor on.
     material_stack ov_ms;
     const material_stack *ov_mat = nullptr;
     if (vv.risk_governor && mat_on_) {
       ov_ms = material_view();
       ov_mat = &ov_ms;
     }
-    const auto risk_hold = [&](int i, float acc, const plant_state &s, float vmax_i, float a_b,
-                               float tau) {
-      if (!vv.risk_governor)
-        return acc;
-      const int plane = (ov_mat && ov_mat->M > 1) ? map_id_[i] : 0;
+    const auto speed_hold = [&](int i, float acc, const plant_state &s, float vmax_i, float a_b,
+                                float tau) {
       const float sgn = s.speed >= 0.0f ? 1.0f : -1.0f;
-      const float cap =
-          risk_speed_cap(vv, ov_mat, plane, s.x, s.y, s.heading, sgn, vmax_i, a_b, tau);
+      float cap = vmax_i;
+      if (vv.risk_governor) {
+        const int plane = (ov_mat && ov_mat->M > 1) ? map_id_[i] : 0;
+        cap = std::min(
+            cap, risk_speed_cap(vv, ov_mat, plane, s.x, s.y, s.heading, sgn, vmax_i, a_b, tau));
+      }
       const float dt = cfg_.veh.dt;
       if (s.speed >= 0.0f)
         return std::min(acc, std::max((cap - s.speed) / dt, -a_b));
@@ -739,18 +746,44 @@ void sim_world::step(int num_threads) {
       float lock = cfg_.veh.delta_max;
       if (plant_ && pl_max_steer_ > 0.0f)
         lock = std::min(lock, pl_max_steer_);
-      const float steer = std::min(std::max(ov_steer_[i], -lock), lock);
+      float steer_cmd = ov_steer_[i];
+      // Yielding on an override: pure pursuit's correction toward the agent's shift, forward only.
+      if (yield_cfg_.on() && yield_cfg_.steer_overrides &&
+          yield_need_.size() == static_cast<std::size_t>(2) * n_) {
+        const std::size_t need_n = static_cast<std::size_t>(2) * n_;
+        const float nx = yield_need_[2 * i], ny = yield_need_[2 * i + 1];
+        const float h = plant_ ? th_[i] : ov_start[i].heading;
+        const float v = plant_ ? sp_[i] : ov_start[i].speed;
+        // Forward: moving ahead, or about to (its own accel, or the creep yield_accel adds).
+        const float out = yield_out_.size() == need_n
+                              ? std::hypot(yield_out_[2 * i], yield_out_[2 * i + 1])
+                              : 0.0f;
+        const float creep_need = yield_cfg_.creep_need > 0.0f ? yield_cfg_.creep_need : cfg_.veh.rr;
+        const bool forward = v > 1e-3f || ov_accel_[i] >= -1e-6f ||
+                             (yield_cfg_.creep_speed > 0.0f && out >= creep_need);
+        if ((nx != 0.0f || ny != 0.0f) && v >= 0.0f && forward) {
+          const float C = yield_cfg_.clearance > 0.0f ? yield_cfg_.clearance : 3.0f * cfg_.veh.rr;
+          const float nd = yield_cfg_.near_dist > 0.0f ? yield_cfg_.near_dist : 4.0f * C;
+          const float d = std::min(std::max(std::fabs(v) * yield_cfg_.steer_look_s, 2.0f * C),
+                                   std::max(nd, 2.0f * C));
+          const float y = -std::sin(h) * nx + std::cos(h) * ny;
+          steer_cmd += std::atan(2.0f * L * y / (d * d));
+        }
+      }
+      const float steer = std::min(std::max(steer_cmd, -lock), lock);
       if (plant_) {
         pl_steer_cmd_[i] = steer;
         const float a_b = pl_a_brake_[i] > 0.0f ? pl_a_brake_[i] : pl_a_max_[i];
         pl_accel_cmd_[i] =
-            risk_hold(i, ov_accel_[i], pl_start_[i], pl_vmax_[i], a_b, pl_latency_[i]);
+            speed_hold(i, ov_accel_[i], pl_start_[i], pl_vmax_[i], a_b, pl_latency_[i]);
         parked_[i] = 0;
       } else {
         const float vmax_i = cfg_.veh.vmax_col ? cfg_.veh.vmax_col[i] : cfg_.veh.vmax;
         const float a_max_i = cfg_.veh.a_max_col ? cfg_.veh.a_max_col[i] : cfg_.veh.a_max;
         const float sp_min = cfg_.veh.allow_reverse ? -0.25f * vmax_i : 0.0f;
-        const float acc = risk_hold(i, ov_accel_[i], ov_start[i], vmax_i, a_max_i, 0.0f);
+        // The top speed and the risk governor's hold, then the yielding's caps on what it leaves.
+        const float acc = yield_accel(
+            i, ov_start[i].speed, speed_hold(i, ov_accel_[i], ov_start[i], vmax_i, a_max_i, 0.0f));
         const plant_state s = kinematic_step(ov_start[i], steer, acc, L, cfg_.veh.dt,
                                              std::max(1, cfg_.veh.nsub), sp_min, vmax_i);
         o_[2 * i] = s.x;
@@ -771,6 +804,7 @@ void sim_world::step(int num_threads) {
         const float sp0 = pl_start_[i].speed;
         pl_accel_cmd_[i] = std::min(std::max(-sp0 / dt, -a_max_i), a_max_i);
       }
+      pl_accel_cmd_[i] = yield_accel(i, pl_start_[i].speed, pl_accel_cmd_[i]);
       plant_->command(i, pl_steer_cmd_[i], pl_accel_cmd_[i]);
     }
     plant_->advance();
@@ -1275,6 +1309,264 @@ bool sim_world::infeasible_at(float onx, float ony) const {
   if (r < 0 || c < 0 || r >= rows_ || c >= cols_)
     return false;
   return ter_.infeasible[static_cast<std::size_t>(r * cols_ + c)] != 0;
+}
+
+float sim_world::yield_accel(int i, float v, float accel) const {
+  const yield_config &yc = yield_cfg_;
+  if (!yc.on() || yield_pass_.size() != static_cast<std::size_t>(n_) || i < 0 || i >= n_)
+    return accel;
+  const float dt = std::max(cfg_.veh.dt, 1e-3f), tau = std::max(dt, 0.5f);
+  // Creep: out of another's path from a standstill, where its footprint is clear of the walls.
+  const float rr = cfg_.veh.rr;
+  const float need = std::hypot(yield_out_[2 * i], yield_out_[2 * i + 1]);
+  const float creep = yc.creep_speed;
+  const bool clear = minclr_.size() != static_cast<std::size_t>(n_) || minclr_[i] > 0.5f * rr;
+  if (yc.creep_speed > 0.0f && need >= (yc.creep_need > 0.0f ? yc.creep_need : rr) && v < creep &&
+      clear)
+    accel = std::max(accel, (creep - v) / tau);
+  // Backing: stopping short of one behind it.
+  const bool backing = v < -1e-3f || (v <= 1e-3f && accel < 0.0f);
+  if (backing && yc.pass_time_s > 0.0f) {
+    const float h = th_[i], c = std::cos(h), s = std::sin(h);
+    float behind = -1.0f;
+    for (int j = 0; j < n_; ++j) {
+      if (j == i)
+        continue;
+      const float rx = o_[2 * j] - o_[2 * i], ry = o_[2 * j + 1] - o_[2 * i + 1];
+      const float along = -(rx * c + ry * s), across = std::fabs(-rx * s + ry * c);
+      if (along > 0.0f && across < 2.4f * rr && (behind < 0.0f || along < behind))
+        behind = along;
+    }
+    if (behind >= 0.0f) {
+      const float cap = std::max(0.0f, behind - 2.5f * rr) / yc.pass_time_s; // reverse speed
+      if (-v > cap)
+        accel = std::max(accel, (-cap - v) / tau);
+      else if (cap <= 0.0f)
+        accel = std::max(accel, 0.0f);
+    }
+    return accel;
+  }
+  // Passing: no sooner at the one in its path than pass_time_s; unless its hold was released.
+  if (yc.pass_time_s > 0.0f && yield_pass_[i] >= 0.0f &&
+      !(i < static_cast<int>(yield_release_.size()) && yield_release_[i])) {
+    // Stopping short of it: zero within 2.5 rr (the two bodies and a margin) of the one ahead.
+    const float cap = std::max(0.0f, yield_pass_[i] - 2.5f * rr) / yc.pass_time_s;
+    if (v > cap)
+      accel = std::min(accel, (cap - v) / tau);
+  }
+  return accel;
+}
+
+std::vector<route_corridor> sim_world::yield_corridors(int i, double radius_world, double cost_path,
+                                                       double cost_stand) const {
+  std::vector<route_corridor> out;
+  if (i < 0 || i >= n_ || yield_intents_.size() != static_cast<std::size_t>(n_))
+    return out;
+  const intent_channel &ch = yield_chan_ ? static_cast<const intent_channel &>(*yield_chan_)
+                                         : static_cast<const intent_channel &>(yield_perfect_);
+  std::vector<agent_intent> heard;
+  ch.heard(i, heard);
+  const agent_intent &self = yield_intents_[i];
+  const auto world = [&](float v, double c) { return static_cast<double>(v) / cfg_.scale + c; };
+  for (const agent_intent &a : heard) {
+    route_corridor c;
+    c.radius = radius_world;
+    c.xy = {world(a.x, cfg_.cx), world(a.y, cfg_.cy)};
+    if (a.priority > self.priority) { // its path, at full cost
+      c.cost = cost_path;
+      for (int k = 0; k < a.n_path; ++k) {
+        c.xy.push_back(world(a.path[2 * k], cfg_.cx));
+        c.xy.push_back(world(a.path[2 * k + 1], cfg_.cy));
+      }
+    } else { // where it stands: it will move
+      c.cost = cost_stand;
+    }
+    if (c.cost > 0.0)
+      out.push_back(std::move(c));
+  }
+  return out;
+}
+
+void sim_world::set_priority(int i, float priority) {
+  if (i < 0 || i >= n_)
+    throw std::out_of_range("cvc::nav::sim_world::set_priority: no agent " + std::to_string(i));
+  yield_prio_.resize(static_cast<std::size_t>(n_), 0.0f);
+  yield_prio_[i] = priority;
+}
+
+void sim_world::set_team(int i, int team) {
+  if (i < 0 || i >= n_)
+    throw std::out_of_range("cvc::nav::sim_world::set_team: no agent " + std::to_string(i));
+  yield_team_.resize(static_cast<std::size_t>(n_), 0);
+  yield_team_[i] = team;
+}
+
+void sim_world::set_intent_path(int i, const float *xy, int count) {
+  if (i < 0 || i >= n_)
+    throw std::out_of_range("cvc::nav::sim_world::set_intent_path: no agent " + std::to_string(i));
+  yield_path_.resize(static_cast<std::size_t>(n_));
+  if (count <= 0 || !xy)
+    yield_path_[i].clear();
+  else
+    yield_path_[i].assign(xy, xy + 2 * count);
+}
+
+namespace {
+
+// Walks the polyline from (x, y) through pts[0..n) for `len`, appending its points to `a` (at most
+// kIntentPathMax, the last one where the length runs out).
+void intent_walk(agent_intent &a, float x, float y, const float *pts, int n, float len) {
+  float ax = x, ay = y;
+  for (int k = 0; k < n && len > 0.0f && a.n_path < kIntentPathMax; ++k) {
+    const float bx = pts[2 * k], by = pts[2 * k + 1];
+    const float d = std::hypot(bx - ax, by - ay);
+    if (d < 1e-9f)
+      continue;
+    const float u = std::min(1.0f, len / d);
+    a.path[2 * a.n_path] = ax + u * (bx - ax);
+    a.path[2 * a.n_path + 1] = ay + u * (by - ay);
+    ++a.n_path;
+    len -= u * d;
+    ax = bx;
+    ay = by;
+  }
+}
+
+} // namespace
+
+void sim_world::yield_tick(const field_stack &fs, int num_threads) {
+  const yield_config &yc = yield_cfg_;
+  const float C = yc.clearance > 0.0f ? yc.clearance : 3.0f * cfg_.veh.rr;
+  if (!(C > 0.0f))
+    return;
+  const float min_len = yc.min_len > 0.0f ? yc.min_len : 4.0f * C;
+  const double t = static_cast<double>(gstep_) * cfg_.veh.dt;
+  yield_intents_.assign(static_cast<std::size_t>(n_), agent_intent{});
+  for (int i = 0; i < n_; ++i) {
+    agent_intent &a = yield_intents_[i];
+    a.agent = i;
+    a.team = i < static_cast<int>(yield_team_.size()) ? yield_team_[i] : 0;
+    a.t = t;
+    a.x = o_[2 * i];
+    a.y = o_[2 * i + 1];
+    a.heading = th_[i];
+    a.speed = sp_[i];
+    a.priority = i < static_cast<int>(yield_prio_.size()) ? yield_prio_[i] : 0.0f;
+    a.radius = cfg_.veh.rr;
+    const float len = std::max(std::fabs(sp_[i]) * yc.horizon_s, min_len);
+    const std::vector<float> *ov =
+        i < static_cast<int>(yield_path_.size()) && !yield_path_[i].empty() ? &yield_path_[i]
+                                                                            : nullptr;
+    if (ov) { // the host's path, from the agent's nearest point on it
+      const int np = static_cast<int>(ov->size() / 2);
+      int k0 = 0;
+      float best = 1e30f;
+      for (int k = 0; k < np; ++k) {
+        const float d = std::hypot((*ov)[2 * k] - a.x, (*ov)[2 * k + 1] - a.y);
+        if (d < best) {
+          best = d;
+          k0 = k;
+        }
+      }
+      intent_walk(a, a.x, a.y, ov->data() + 2 * k0, np - k0, len);
+    } else { // toward the carrot, then on toward the goal
+      const float pts[4] = {carrot_[2 * i], carrot_[2 * i + 1], goal_[2 * i], goal_[2 * i + 1]};
+      intent_walk(a, a.x, a.y, pts, 2, len);
+    }
+    if (a.n_path == 0) { // nowhere to go: straight ahead
+      a.path[0] = a.x + min_len * std::cos(a.heading);
+      a.path[1] = a.y + min_len * std::sin(a.heading);
+      a.n_path = 1;
+    }
+  }
+  intent_channel &ch = yield_chan_ ? *yield_chan_ : yield_perfect_;
+  ch.publish(yield_intents_.data(), n_, t);
+  const yield_resolver res = yield_res_ ? yield_res_ : priority_resolver();
+  yield_shift_.assign(static_cast<std::size_t>(2) * n_, 0.0f);
+  yield_need_.assign(static_cast<std::size_t>(2) * n_, 0.0f);
+  yield_out_.assign(static_cast<std::size_t>(2) * n_, 0.0f);
+  std::vector<int> j_before = yield_pass_j_;
+  yield_pass_.assign(static_cast<std::size_t>(n_), -1.0f);
+  yield_pass_j_.assign(static_cast<std::size_t>(n_), -1);
+  yield_held_.resize(static_cast<std::size_t>(n_), 0.0f);
+  yield_release_.resize(static_cast<std::size_t>(n_), 0);
+  std::vector<agent_intent> heard;
+  bool any = false;
+  for (int i = 0; i < n_; ++i) {
+    if (!active_.empty() && !active_[i])
+      continue;
+    ch.heard(i, heard);
+    const yield_shift sh = yield_agent(yc, C, yield_intents_[i], heard, t, res);
+    yield_shift_[2 * i] = sh.dx;
+    yield_shift_[2 * i + 1] = sh.dy;
+    yield_out_[2 * i] = sh.out_dx;
+    yield_out_[2 * i + 1] = sh.out_dy;
+    yield_pass_[i] = sh.pass_s;
+    yield_pass_j_[i] = sh.pass_j;
+    any = any || sh.conflicts > 0;
+  }
+  // Holds: how long each has stood still behind the one in its path, and whether it may go. A
+  // hold behind one standing still itself cannot end by waiting; after pass_hold_s it is released
+  // for the higher priority (then the lower index) of the two, so a pair holding each other does
+  // not both drive. Released until that one is no longer in its path.
+  const float dt = cfg_.veh.dt;
+  for (int i = 0; i < n_; ++i) {
+    const int j = yield_pass_j_[i];
+    if (j < 0 || j >= n_) {
+      yield_held_[i] = 0.0f;
+      yield_release_[i] = 0;
+      continue;
+    }
+    if (static_cast<int>(j_before.size()) > i && j_before[i] != j)
+      yield_release_[i] = 0; // another one: held anew
+    if (std::fabs(sp_[i]) < yc.min_speed)
+      yield_held_[i] += dt;
+    else if (!yield_release_[i])
+      yield_held_[i] = 0.0f;
+    const bool other_still = std::fabs(sp_[j]) < yc.min_speed;
+    const float pi = yield_intents_[i].priority, pj = yield_intents_[j].priority;
+    const bool first = pi > pj || (pi == pj && i < j);
+    if (yc.pass_hold_s > 0.0f && yield_held_[i] > yc.pass_hold_s && other_still &&
+        (first || yield_held_[i] > 2.0f * yc.pass_hold_s))
+      yield_release_[i] = 1;
+  }
+  if (!any)
+    return;
+  // Away from walls: the place each shift moves the agent toward, on its side and the other.
+  std::vector<float> pts(static_cast<std::size_t>(4) * n_), phi(2 * n_), nrm(4 * n_);
+  std::vector<int> mid(static_cast<std::size_t>(2) * n_);
+  for (int i = 0; i < n_; ++i) {
+    pts[4 * i] = o_[2 * i] + yield_shift_[2 * i];
+    pts[4 * i + 1] = o_[2 * i + 1] + yield_shift_[2 * i + 1];
+    pts[4 * i + 2] = o_[2 * i] - yield_shift_[2 * i];
+    pts[4 * i + 3] = o_[2 * i + 1] - yield_shift_[2 * i + 1];
+    mid[2 * i] = mid[2 * i + 1] = map_id_.empty() ? 0 : map_id_[i];
+  }
+  sdf_sample(fs, pts.data(), 2 * n_, mid.data(), phi.data(), nrm.data(), num_threads, pool_);
+  const float rr = cfg_.veh.rr;
+  for (int i = 0; i < n_; ++i) {
+    float &dx = yield_shift_[2 * i], &dy = yield_shift_[2 * i + 1];
+    if (dx == 0.0f && dy == 0.0f)
+      continue;
+    if (phi[2 * i] < rr) { // into a wall: the other side, if it is better
+      if (phi[2 * i + 1] > phi[2 * i]) {
+        dx = -dx;
+        dy = -dy;
+      } else {
+        dx = dy = 0.0f;
+      }
+    }
+    yield_need_[2 * i] = dx;
+    yield_need_[2 * i + 1] = dy;
+    // The shift is where the agent should be across the path; at the carrot, as far ahead as the
+    // carrot is in clearances, so the turn it asks for does not shrink with the lookahead.
+    const float ahead = std::hypot(carrot_[2 * i] - o_[2 * i], carrot_[2 * i + 1] - o_[2 * i + 1]);
+    const float k = std::max(1.0f, ahead / C);
+    dx *= k;
+    dy *= k;
+    carrot_[2 * i] += dx;
+    carrot_[2 * i + 1] += dy;
+  }
 }
 
 plant_kind sim_world::plant_type() const { return plant_ ? plant_->kind() : plant_kind::kinematic; }

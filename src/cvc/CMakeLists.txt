@@ -44,6 +44,9 @@ set(INCLUDE_FILES
   ../../inc/cvc/state/state_peer_registry.h
   ../../inc/cvc/state/state_link_stats.h
   ../../inc/cvc/state/state_write_policy.h
+  ../../inc/cvc/state/state_inbound_gate.h
+  ../../inc/cvc/state/state_identity.h
+  ../../inc/cvc/state/state_device_key.h
   ../../inc/cvc/state/state_distributed_metrics.h
   ../../inc/cvc/state/state_delegation_manager.h
   ../../inc/cvc/state/state_distributed_admin.h
@@ -88,6 +91,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/media/media_frame.h
   ../../inc/cvc/media/media_endpoint.h
   ../../inc/cvc/media/media_router.h
+  ../../inc/cvc/media/media_rungs.h
+  ../../inc/cvc/media/media_opus.h
   ../../inc/cvc/geometry/bunny.h
   ../../inc/cvc/volume/endians.h
   ../../inc/cvc/utility/utility.h
@@ -111,6 +116,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/state/state_exec/memory_tracker.h
   ../../inc/cvc/state/state_exec/scheduler_base.h
   ../../inc/cvc/state/state_exec/scheduler.h
+  ../../inc/cvc/state/state_exec/async_call.h
+  ../../inc/cvc/state/state_exec/async_host.h
   ../../inc/cvc/state/state_exec/async_scheduler.h
   ../../inc/cvc/state/state_exec/intrinsics.h
   ../../inc/cvc/state/state_exec/resource_policy.h
@@ -258,6 +265,7 @@ set(SOURCE_FILES
   state/state_exec/process.cpp
   state/state_exec/memory_tracker.cpp
   state/state_exec/scheduler.cpp
+  state/state_exec/async_host.cpp
   state/state_exec/async_scheduler.cpp
   state/state_exec/intrinsics.cpp
   state/state_exec/resource_policy.cpp
@@ -299,10 +307,15 @@ set(SOURCE_FILES
   state/state_transport_inproc.cpp
   state/state_transport_ipc.cpp
   media/media_router.cpp
+  media/media_rungs.cpp
+  media/media_opus.cpp
   state/state_message_bus.cpp
   state/state_peer_registry.cpp
   state/state_link_stats.cpp
   state/state_write_policy.cpp
+  state/state_inbound_gate.cpp
+  state/state_identity.cpp
+  state/state_device_key.cpp
   state/state_distributed_metrics.cpp
   state/state_delegation_manager.cpp
   state/state_distributed_admin.cpp
@@ -351,6 +364,7 @@ set(SOURCE_FILES
   nav/belief_occupancy.cpp
   nav/belief_material.cpp
   nav/sim_world.cpp
+  nav/yield.cpp
   nav/sim_world_binding.cpp
   nav/sim_thread.cpp
   nav/nav_stats.cpp
@@ -1347,12 +1361,13 @@ list(APPEND INCLUDE_FILES ../../inc/cvc/net/http_client.h)
 # the retained Widget tree, the Runtime + reconcile boundary, and direct
 # cvc::state binding, walking a pluggable Backend. It touches NO VTK/ImGui/GL —
 # the ImGui-over-VTK backend lives in cvcGL (src/cvcGL/ariadne). Roadmap §16.1.
-list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_net.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/requires.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/holon.cpp ariadne/holon_sync.cpp ariadne/tf_editor_emit.cpp)
+list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/conference/room_write_gate.cpp ariadne/conference/room_rungs.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/requires.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp ariadne/tf_editor_emit.cpp)
 list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/widget.h
   ../../inc/cvc/ariadne/backend.h
   ../../inc/cvc/ariadne/ariadne.h
   ../../inc/cvc/ariadne/avatar_sim.h
+  ../../inc/cvc/ariadne/avatar_physics.h
   ../../inc/cvc/ariadne/holon.h
   ../../inc/cvc/ariadne/holon_sync.h
   ../../inc/cvc/ariadne/app_runtime.h
@@ -1372,6 +1387,10 @@ list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/conference/room_media_intrinsics.h
   ../../inc/cvc/ariadne/conference/room_scene.h
   ../../inc/cvc/ariadne/conference/room_net.h
+  ../../inc/cvc/ariadne/conference/room_rungs.h
+  ../../inc/cvc/ariadne/conference/room_aoi.h
+  ../../inc/cvc/ariadne/conference/room_aoi_relay.h
+  ../../inc/cvc/ariadne/conference/room_write_gate.h
   ../../inc/cvc/ariadne/state_io.h
   ../../inc/cvc/ariadne/scene.h
   ../../inc/cvc/ariadne/value.h
@@ -1532,6 +1551,70 @@ else()
   else()
     message(STATUS "cvc::net: no HTTP backend (libcurl not found) - http(s):// compiles to a stub")
   endif()
+endif()
+
+# Device keys (state_device_key.h): a device proves its id with an Ed25519 key the relay pins on
+# first use. OPTIONAL: built on OpenSSL's libcrypto (cvcpkg's openssl bundle, wasm included); without
+# it no proof is made or verified and every device is unverified.
+find_package(OpenSSL QUIET COMPONENTS Crypto)
+if(TARGET OpenSSL::Crypto)
+  target_compile_definitions(cvc PRIVATE CVC_HAVE_DEVICE_KEYS)
+  target_link_libraries(cvc PRIVATE OpenSSL::Crypto)
+  list(APPEND CVC_PRIVATE_LINK_PACKAGES OpenSSL)
+  message(STATUS "cvc::state: device keys ENABLED (OpenSSL ${OPENSSL_VERSION})")
+else()
+  message(STATUS "cvc::state: no device keys (OpenSSL not found) - every device is unverified")
+endif()
+
+# Per-viewer video rungs (media_rungs.h): a relay re-encodes a camera's MJPEG smaller for a viewer
+# whose link needs it. OPTIONAL: libjpeg-turbo's TurboJPEG (cvcGL's codec uses it too); without it
+# the smaller rungs send frames as is and only the thumbnail rate and "off" apply. Shared/native
+# prefixes export libjpeg-turbo::turbojpeg, static-only ones (the wasm closure) turbojpeg-static.
+find_package(libjpeg-turbo CONFIG QUIET)
+set(_cvc_core_turbojpeg "")
+if(TARGET libjpeg-turbo::turbojpeg)
+  set(_cvc_core_turbojpeg libjpeg-turbo::turbojpeg)
+elseif(TARGET libjpeg-turbo::turbojpeg-static)
+  set(_cvc_core_turbojpeg libjpeg-turbo::turbojpeg-static)
+endif()
+if(_cvc_core_turbojpeg)
+  target_link_libraries(cvc PRIVATE ${_cvc_core_turbojpeg})
+  target_compile_definitions(cvc PRIVATE CVC_HAVE_TURBOJPEG=1)
+  list(APPEND CVC_PRIVATE_LINK_PACKAGES libjpeg-turbo)
+  message(STATUS "cvc::media: video rungs transcode with ${_cvc_core_turbojpeg}")
+else()
+  message(STATUS "cvc::media: no libjpeg-turbo - video rungs only drop frames, never re-encode")
+endif()
+
+# Opus mics (media_opus.h): a sender encodes its mic in Opus, and a relay decodes it to f32 for the
+# viewers that cannot. OPTIONAL: libopus (cvcpkg `libopus`, BSD-3-Clause); without it every mic
+# stays f32. Found by header and library, since cvcpkg's autotools-built bundles ship no CMake
+# config, and linked through a synthesised imported target, as zstd is (below): a PRIVATE
+# absolute-path link would leak into a static cvc's export, and cvcConfig.cmake recreates the
+# target for a static consumer. On Windows the MinGW-built import library is opus.lib (libopus
+# cvc.8) or, in older bundles, libopus.dll.a; MSVC's link reads either.
+find_path(CVC_OPUS_INCLUDE_DIR NAMES opus/opus.h)
+if(MSVC)
+  # The import library only: CMake's MSVC search would also take libopus.a for `opus`, and that
+  # MinGW-compiled archive calls ___chkstk_ms, which no MSVC link resolves.
+  find_library(CVC_OPUS_LIBRARY NAMES opus.lib libopus.dll.a NAMES_PER_DIR)
+else()
+  find_library(CVC_OPUS_LIBRARY NAMES opus)
+endif()
+set(CVC_HAVE_OPUS OFF)
+if(CVC_OPUS_INCLUDE_DIR AND CVC_OPUS_LIBRARY)
+  set(CVC_HAVE_OPUS ON)
+  if(NOT TARGET CvcOpus::opus)
+    add_library(CvcOpus::opus INTERFACE IMPORTED)
+    set_target_properties(CvcOpus::opus PROPERTIES
+      INTERFACE_INCLUDE_DIRECTORIES "${CVC_OPUS_INCLUDE_DIR}"
+      INTERFACE_LINK_LIBRARIES "${CVC_OPUS_LIBRARY}")
+  endif()
+  target_link_libraries(cvc PRIVATE CvcOpus::opus)
+  target_compile_definitions(cvc PRIVATE CVC_HAVE_OPUS=1)
+  message(STATUS "cvc::media: Opus mics with ${CVC_OPUS_LIBRARY}")
+else()
+  message(STATUS "cvc::media: no libopus - mics stay f32")
 endif()
 
 # Ariadne FTXUI terminal backend — OPTIONAL (roadmap §16.4). When FTXUI is
@@ -2038,7 +2121,8 @@ if(CVC_ENABLE_IMAGEMAGICK)
     # Prefer pkg-config (has the exact link line for a hermetic delegate), but
     # in cross-compile (emcmake) it isn't always available / correctly rooted,
     # so fall back to find_library — which DOES honor CMAKE_FIND_ROOT_PATH.
-    # NAME:libname pairs: pkg-config module + library basename.
+    # "module|libname[|libname...]": pkg-config module + the library basenames the
+    # find_library fallback tries, in order (MSVC spellings after the unix one).
     foreach(_pair
         "bzip2|bz2"
         "libjpeg|jpeg"
@@ -2061,15 +2145,36 @@ if(CVC_ENABLE_IMAGEMAGICK)
         "libbrotlicommon|brotlicommon"
         # MagickCore's own gz* blob I/O and libpng's inflate. Usually already on
         # the line through assimp, but the closure should not depend on that.
-        "zlib|z")
+        # zlib's own CMake names the MSVC import library zlib.lib, not z.lib.
+        "zlib|z|zlib")
       string(REPLACE "|" ";" _p "${_pair}")
       list(GET _p 0 _pcmod)
-      list(GET _p 1 _libname)
+      list(SUBLIST _p 1 -1 _libnames)
       string(MAKE_C_IDENTIFIER "_im_dep_${_pcmod}" _im_var)
       set(_pc_found FALSE)
       if(PkgConfig_FOUND)
         pkg_check_modules(${_im_var} QUIET IMPORTED_TARGET ${_pcmod})
-        if(${_im_var}_FOUND)
+        # pkg_check_modules() reports FOUND once the .pc file parses, even when
+        # find_library() could not resolve one of its `-l` names: FindPkgConfig then
+        # leaves that name BARE in <prefix>_LINK_LIBRARIES and in the imported
+        # target. link.exe turns a bare name into <name>.lib on LIB and fails, and
+        # that is what cvcpkg's zlib.pc (`Libs: -lz`) does to an MSVC build, whose
+        # import library is zlib.lib: LNK1181 "cannot open input file 'z.lib'" on
+        # cvc.dll. Only a box with an MSYS2 pkg-config on PATH gets that far (the
+        # GitHub windows-2022 image has none), so CI stays green. On MSVC, trust
+        # pkg-config only when every library resolved to a path; otherwise use the
+        # find_library fallback below, which knows the MSVC names. Leave other
+        # toolchains alone: their linkers search for a bare name themselves (the
+        # wasm libxml-2.0.pc lists `-lm`, which emcc resolves with no file behind it).
+        set(_im_pc_resolved TRUE)
+        if(MSVC)
+          foreach(_im_pc_lib IN LISTS ${_im_var}_LINK_LIBRARIES)
+            if(NOT IS_ABSOLUTE "${_im_pc_lib}")
+              set(_im_pc_resolved FALSE)
+            endif()
+          endforeach()
+        endif()
+        if(${_im_var}_FOUND AND _im_pc_resolved)
           # Never let the build-local PkgConfig::_im_dep_* imported targets reach
           # the exported cvcTargets.cmake: downstream find_package(cvc) fails
           # ("target PkgConfig::_im_dep_bzip2 not found") because the consumer
@@ -2092,7 +2197,10 @@ if(CVC_ENABLE_IMAGEMAGICK)
         endif()
       endif()
       if(NOT _pc_found)
-        find_library(${_im_var}_LIB NAMES ${_libname})
+        # NAMES_PER_DIR: the first directory holding the library under ANY of its
+        # names wins, so the cvcpkg prefix's zlib.lib is not passed over for a later
+        # directory that happens to match the unix spelling.
+        find_library(${_im_var}_LIB NAMES ${_libnames} NAMES_PER_DIR)
         if(${_im_var}_LIB)
           # A direct PRIVATE link of this absolute find_library path leaks into the
           # STATIC export — a static cvc propagates PRIVATE deps as

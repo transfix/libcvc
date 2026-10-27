@@ -111,6 +111,25 @@ struct process {
   // and wakes the process.
   std::optional<std::string> recv_path;
   std::queue<value_t> inbox;
+  /// A wait on recv_path with a time limit ((await f seconds)): past it the waiting call raises
+  /// TimeoutError (expire_await).
+  std::optional<std::chrono::steady_clock::time_point> recv_deadline;
+
+  // Async calls (docs/STATE_EXEC_EXCEPTIONS.md 3.8): what the process's calls of async functions
+  // were charged. Their run time is in accumulated_time too, their CPU time in cpu_time_charged
+  // (the part past max_time's halfway point), and their steps in the step count, as
+  // step_kind::async.
+  uint64_t async_calls = 0;    // calls made
+  double async_time = 0.0;     // their run time, seconds
+  double async_cpu_time = 0.0; // their CPU time, seconds, their compute-pool fan-out included
+  uint64_t async_steps = 0;    // the steps charged for them
+  /// The process's own limits.async_steps_per_cpu_ms (execute_options); unset: the tree's.
+  std::optional<double> async_steps_per_cpu_ms;
+  /// The run time and kernel-thread CPU time of the async calls that ran inline in the step
+  /// running now. They are charged as calls: the step's CPU charge (capped per step) and its
+  /// time by kind leave them out. (Its run time is in the step's slice of accumulated_time.)
+  double step_async_wall = 0.0;
+  double step_async_cpu = 0.0;
 
   // Completion
   value_t exit_code;

@@ -3,7 +3,9 @@
 #include <cstdlib>
 #include <cvc/state/state_change_journal.h>
 #include <gtest/gtest.h>
+#include <limits>
 #include <mutex>
+#include <random>
 #include <set>
 #include <thread>
 #include <vector>
@@ -97,6 +99,74 @@ TEST(StateChangeJournalTest, ClearDropsMutationsButKeepsMonotonicSequence) {
   EXPECT_EQ(journal.size(), 1u);
   EXPECT_EQ(stored.sequence, 3u);
   EXPECT_EQ(journal.last_sequence(), 3u);
+}
+
+TEST(StateChangeJournalTest, ReplayAfterMatchesLinearScan) {
+  // replay_after binary-searches the sequence; a linear scan of snapshot() is the reference.
+  // Occasional trims keep the journal from always starting at sequence 1.
+  state_change_journal journal("node_a");
+  std::mt19937 rng(20261024u);
+  std::uniform_int_distribution<int> appends_per_round(0, 8);
+  for (int round = 0; round < 200; ++round) {
+    for (int i = appends_per_round(rng); i > 0; --i)
+      journal.append(make_value_mutation("p." + std::to_string(round), std::to_string(i)));
+    if (round % 7 == 3)
+      journal.trim_through(
+          std::uniform_int_distribution<std::uint64_t>(0, journal.last_sequence())(rng));
+
+    const std::vector<state_mutation> all = journal.snapshot();
+    std::uniform_int_distribution<std::uint64_t> pick_cursor(0, journal.last_sequence() + 2);
+    for (int probe = 0; probe < 8; ++probe) {
+      const std::uint64_t cursor = pick_cursor(rng);
+      std::vector<std::uint64_t> want;
+      for (const state_mutation &m : all)
+        if (m.sequence > cursor)
+          want.push_back(m.sequence);
+      std::vector<std::uint64_t> got;
+      for (const state_mutation &m : journal.replay_after(cursor))
+        got.push_back(m.sequence);
+      ASSERT_EQ(got, want) << "cursor " << cursor << " in round " << round;
+    }
+  }
+
+  journal.append(make_value_mutation("p.last", "1")); // the last round may have trimmed it all
+  EXPECT_EQ(journal.replay_after(0).size(), journal.size());
+  EXPECT_TRUE(journal.replay_after(journal.last_sequence()).empty());
+  EXPECT_TRUE(journal.replay_after((std::numeric_limits<std::uint64_t>::max)()).empty());
+}
+
+TEST(StateChangeJournalTest, TrimThroughDropsPrefix) {
+  state_change_journal journal("node_a");
+  for (int i = 1; i <= 5; ++i)
+    journal.append(make_value_mutation("t", std::to_string(i)));
+
+  EXPECT_EQ(journal.trim_through(0), 0u); // no entry is at or below 0
+  EXPECT_EQ(journal.size(), 5u);
+
+  EXPECT_EQ(journal.trim_through(2), 2u);
+  std::vector<state_mutation> left = journal.snapshot();
+  ASSERT_EQ(left.size(), 3u);
+  EXPECT_EQ(left.front().sequence, 3u);
+  EXPECT_EQ(left.front().string_value, "3");
+  EXPECT_EQ(left.back().sequence, 5u);
+  EXPECT_EQ(journal.trim_through(2), 0u); // already gone
+
+  // A cursor inside the trimmed range replays only the survivors.
+  EXPECT_EQ(journal.replay_after(1).size(), 3u);
+  EXPECT_EQ(journal.replay_after(3).size(), 2u);
+
+  // Sequences keep counting from where they were.
+  EXPECT_EQ(journal.last_sequence(), 5u);
+  EXPECT_EQ(journal.append(make_value_mutation("t", "6")).sequence, 6u);
+
+  // Trimming past the end empties the journal and still leaves the numbering alone.
+  EXPECT_EQ(journal.trim_through(100), 4u);
+  EXPECT_EQ(journal.size(), 0u);
+  EXPECT_TRUE(journal.replay_after(0).empty());
+  EXPECT_EQ(journal.last_sequence(), 6u);
+  state_mutation next = journal.append(make_value_mutation("t", "7"));
+  EXPECT_EQ(next.sequence, 7u);
+  EXPECT_EQ(next.mutation_id, "node_a:7");
 }
 
 TEST(StateChangeJournalTest, PayloadHelpersRepresentInlineAndBlobData) {
