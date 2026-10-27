@@ -195,14 +195,15 @@ scheduler. They are also the ones whose fixes would put new concurrent code in t
 
 ### 2.4 What the single-thread tracks already change
 
-These branches are in progress. The stages below build on them and do not repeat their work.
+These branches, and the locks track, are in progress. The stages below build on them and do not
+repeat their work.
 
 | Branch | What it does | Blockers it settles |
 |---|---|---|
 | `perf/sched` | A process table with a run queue, a timer heap and waiter indexes, in both schedulers. One clock reading a step. One ingress drain a step, an atomic flag when empty. The evaluator step called directly, with no coroutine frames. `wait_for_work(deadline)`, woken by posts, completions and timers. Watch polling only when the tree changed (an atomic counter fed by the root's change signals). pycvc's `Exec` waits for work instead of sleeping 1 ms | B19; the O(P log P) selection; the per-step ingress mutex |
 | `perf/async` | Persistent background-pool workers, with anonymous tasks and no thread per task. A fix for the stall and hang. Concurrent `parallel_for` fan-outs side by side. Less per-call work in `async_host` | B23, B24 |
 | `perf/eval` | Cheaper steps: special forms by switch, a closure body built once, call scopes recycled per thread, one hash per lookup | none; a faster step makes per-pump costs relatively larger |
-| locks track ([`docs/STATE_EXEC_LOCKS.md`](STATE_EXEC_LOCKS.md) L0-L3, on `perf/sched`, `perf/eval` and `perf/async`) | Atomic single-node natives. `with-lock` on tree paths, a lock home per scheduler, lock waits as a process-table wait kind. The spawn context on one scheduler (B27's first part, L1b). `set-priority`, `get-priority`, the policy from `state_exec.policy`, priority inheritance. One app lock manager, under one mutex, shared by every scheduler and thread | Stage 1 extends L1b's spawn context to groups and gives each group a lock home over the app's manager (4.19) |
+| locks track ([`docs/STATE_EXEC_LOCKS.md`](STATE_EXEC_LOCKS.md) L0-L3, on `perf/sched`, `perf/eval` and `perf/async`) | Atomic single-node natives. `with-lock` on tree paths, a lock home per scheduler, lock waits as a process-table wait kind. The spawn context on one scheduler (B27's first part, L1b). `set-priority`, `get-priority`, the policy from `state_exec.policy`, priority inheritance. One app lock manager, under one mutex, shared by every scheduler and thread | B28 (L1); B27's single-scheduler part (L1b). Stage 1 extends L1b's spawn context to groups and gives each group a lock home over the app's manager (4.19) |
 
 `perf/eval` recycles call scopes in a per-thread cache. A scope is returned to the cache of the
 thread that drops it, and is reused only by that thread. Under groups, a scope is dropped only by
@@ -720,7 +721,8 @@ run queue keys on a process's effective priority (its base, or a lock-inheritanc
 
 **Stage 1: fork-join across groups.**
 - **Order.** `pump_all` orders groups longest-last-pump first (LPT), which approximates the
-  shortest makespan. Ties go to the group with the better `best_runnable` priority (4.19).
+  shortest makespan. From Stage 2, which publishes each group's `best_runnable` (4.5), ties go to
+  the group with the better one.
 - **Execution.** Workers and the caller take groups from a mutex-guarded list. The caller takes
   host-affinity groups first. The list mutex is the handoff edge.
 - **Each group keeps its own pump budget** (section 4.10). The frame's DSL time becomes the maximum
@@ -764,9 +766,9 @@ run queue keys on a process's effective priority (its base, or a lock-inheritanc
     about 9x the pump share of a nice-0 group, and none starves. Round-robin groups keep 1024.
   - `state_exec.groups.priority_weights` (default on) turns it off. It ships on only once
     `prio.groups_weighted` passes (6.3).
-  - The lock is taken about once per slice per worker (2 ms), so per-worker deques with stealing
-    are not needed at group granularity. They are a later option if `mt.groups.flood` shows
-    contention.
+  - The queue's mutex is taken about once per slice per worker (2 ms), so per-worker deques with
+    stealing are not needed at group granularity. They are a later option if `mt.groups.flood`
+    shows contention.
 - **Locality.** A group woken by a cross-group message from worker W goes into W's one-entry
   `next` slot, Go's `runnext`. A request-and-reply pair of groups therefore stays on one core when
   W is about to go idle. The slot is bypassed after 3 consecutive uses (Tokio's fairness valve).
@@ -972,8 +974,8 @@ itself gets faster, so placement keeps chatty pairs in one group.
   (`heap.cpp:565-566` still holds). Under invariant G every node the walk reaches is owned by the
   group or frozen.
   - Frozen environments are skipped (`heap.cpp:35-38`).
-  - The 13 class dicts and the stdlib scope are held from outside the group, so the census sees
-    `owners > internal` and keeps them live (`heap.cpp:612-618`).
+  - The built-in class dicts and the stdlib scope are held from outside the group, so the census
+    sees `owners > internal` and keeps them live (`heap.cpp:612-618`).
   - No other thread mutates or refcounts anything in the walked graph.
 - **Host references.** A host holding a group's value is an external owner, which keeps it live.
   Hosts read and drop such values only between pumps (fork-join) or under the token (continuous).
@@ -1149,8 +1151,9 @@ The tree is the one mutable structure all groups share. Stage 0 makes the DSL's 
 **Not kept between different groups:**
 1. Interleaving and relative progress. Deterministic mode reproduces them.
 2. The order of messages from different groups, and the position of a requeued message.
-3. The immediacy of cross-group kill, pause, resume and signal. They land at the target's next
-   step boundary, and cross-group `ps` can lag one slice.
+3. The immediacy of cross-group kill, pause, resume, signal and `set-priority`, and of a lock
+   grant to a waiter in another group. They land at the target's next step boundary (a grant at
+   its group's next drain), and cross-group `ps` can lag one slice.
 4. Strict priority across groups: each group's policy holds inside it. Between groups, Stage 2
    weights a group's pump share by its best runnable priority (4.4), and a lock boost raises a
    holder inside its own group.
@@ -1394,7 +1397,7 @@ no groups. Stage 1 then only extends it to groups and adds what follows from the
   - it copies the parent's `sched`, `host`, `root` (with its pin), `root_path`, `uid` and
     `channels`;
   - it builds `extend(base)` with the intrinsics registered against that context;
-  - the child gets the parent's `owner`.
+  - the child gets the parent's `owner`;
   - the child's intrinsics include `with-lock` and `set-priority`, so its lock keys resolve under
     the parent's chroot. The default also copies the parent context's `lock_default_timeout`
     and `lock_wait_allowed`, so a child an Ariadne init script spawns, stepped on the host
@@ -1433,10 +1436,9 @@ pool's rebalancer).
   - free of async calls in flight, state watches and fork family;
   - free of any object shared with another process, which the isolation walk proves: no shared
     env, generator or compound value.
-  - a lock holder is eligible: its holds name its pid and travel with it (4.19). A lock waiter is
-    parked, so it is not.
 
-  Isolated spawns usually qualify; a process that does not is simply not moved.
+  Isolated spawns usually qualify; a process that does not is simply not moved. A lock holder is
+  eligible: its holds name its pid and travel with it (4.19); a lock waiter is parked, so it is not.
 - **Group-relative resolution** (B31; B's graft). Processes made by `spawn-isolated` are created
   movable:
   - their context's `sched` points at a forwarder (`group_scheduler_ref : scheduler_base`), which
@@ -1533,7 +1535,7 @@ the judges' corrections. It is recorded here so the earlier stages do not close 
 | B4 | Same group: one thread. Across groups: subscription at the home with seq and re-send; Stage 4: atomic pop-or-register | 4.6; 4.16 |
 | B5 | Registry per group, bound by the pump scope; freed with the group; re-tracked on a move | 4.7; Stage 1 |
 | B6 | Unchanged: under invariant G the walk reaches only owned and frozen nodes | 4.7 |
-| B7 | The 13 class dicts refuse mutation (`TypeError`) | 4.3, 5; Stage 0 |
+| B7 | The built-in class dicts refuse mutation (`TypeError`) | 4.3, 5; Stage 0 |
 | B8 | Fork families stay in one group; `(fork)` fixed (B28); Stage 4: one domain | 4.15; 4.16 |
 | B9 | Inside a group, unchanged; across groups a fresh envelope per receiving group; Stage 4: per receiver | 4.6; 4.16 |
 | B10 | `state-data-set` stores an isolating copy; callables, generators, environments and futures refused at any depth | 4.3; Stage 0 |
@@ -1566,10 +1568,10 @@ the judges' corrections. It is recorded here so the earlier stages do not close 
 section says how they meet the groups.
 
 - **One manager.** Every group's scheduler is a *lock home* (key cache, the mirrors of its
-  processes' holds, a port) over the one `app::lock_manager()`, in shared mode. All lock state is
-  under the manager's one mutex: holds on absolute tree paths, each owned by (home, pid), the
-  waiting requests in arrival order, and a record per process. A request is granted all at once
-  or waits holding nothing new.
+  processes' holds, a port) over the one `app::lock_manager()` (in shared mode when several threads
+  use it; `single` at 0 threads without pycvc, 4.14). All lock state is under the manager's one
+  mutex: holds on absolute tree paths, each owned by (home, pid), the waiting requests in arrival
+  order, and a record per process. A request is granted all at once or waits holding nothing new.
 - **No domains.** Groups on disjoint prefixes share the mutex but no hold; a lock on a common
   ancestor (an unchrooted `docs`) excludes every document below it. If the mutex contends at high
   thread counts, the locks design's fallback is sharding the manager by subtree (its 3.3), measured
@@ -1612,9 +1614,9 @@ hardened: nothing here uses groups, and a cross-host restore is not an in-proces
   the target restores it. Today it ships metadata and the target starts `nil` (4.12).
 - **The codec gaps close here.** The inbox, watches and pending signals, which `encode_process`
   omits (`state_value_codec.h:66-71`), travel with the process.
-- **Eligibility:** ready, no async call in flight, no fork family (the same rules as Stage 3's
-  moves, stated here on their own). A lock waiter is never moved, since `pause` fails on a waiting
-  process.
+- **Eligibility:** ready, no async call in flight, no fork family (a subset of Stage 3's rules:
+  watches travel, and a codec copy needs no isolation walk). A lock waiter is never moved, since
+  `pause` fails on a waiting process.
 - **Pids are not portable across hosts.** The target assigns a new pid. The source answers control
   messages for the old pid with "moved to <node>, pid <new>" until it forgets the process.
 - **Never on two hosts.** The source kills its copy only after the target acknowledges the restore;
@@ -1802,7 +1804,7 @@ or refute it.
 - **Stage 2:**
   - `mt.groups` continuous at 8 threads at least 0.9x;
   - `mt.cross_group_msg` wake latency p50 under 50 us on Windows;
-  - `mt.groups.move` group-move cost under 5 us.
+  - `mt.groups.move` group-move cost under 5 us;
   - `mt.groups.locks` with disjoint keys within 5% of the same workload without `with-lock` in
     the same rep;
   - `prio.groups_weighted` within 20% of the CFS ratio expected for each configuration (about 9.3
@@ -1842,9 +1844,9 @@ Stage 0 has not landed (its L2). Stage M comes last.
     - pinned lookups and the pinned chroot;
     - a single-node `state-delete`;
     - the per-watch root;
-    - `(fork)` of `current_pid()`;
-  - `async_scheduler.cpp`: fork copies `owner`; an idempotent `finish_async_call`; atomic stop;
-    `post_control`;
+    - `(fork)` of `current_pid()`, unless the locks track's L1 landed it first;
+  - `async_scheduler.cpp`: fork copies `owner` (unless L1 landed it first); an idempotent
+    `finish_async_call`; atomic stop; `post_control`;
   - `scheduler.h`/`.cpp`: `post_control` (a mutex-guarded queue applied between steps), atomic stop
     flags;
   - `exec_coordinator.cpp`: control through `post_control`;
@@ -1858,7 +1860,8 @@ Stage 0 has not landed (its L2). Stage M comes last.
 - **Tests:** HZ-1 to HZ-14.
 - **Exit:** every state_exec, Ariadne and pycvc suite passes; the TSan job is clean; the
   compatibility scan of section 5 is in the PR.
-- **Risk:** low. The behaviour changes are items 1-5 of section 5.
+- **Risk:** low. The behaviour changes are items 1-5 of section 5 (item 5 only if the locks
+  track's L1 has not landed it).
 
 **Stage 1: groups and a fork-join pool** (3-4 weeks).
 - **Files:**
@@ -1873,6 +1876,10 @@ Stage 0 has not landed (its L2). Stage M comes last.
     `ictx.sched`/`ictx.host`, provider kinds;
   - `ariadne.cpp`: `drain_begin`/`drain_end`, isolated documents, its spawn context;
   - `bindings/pycvc`: `ExecPool`, the natives scope and spawn context.
+
+  If the locks track's L1b landed first, the spawn context (`spawn_context`, `make_spawn_context`,
+  Ariadne's and pycvc's callbacks, the natives scope) already exists on one scheduler, and Stage 1
+  only extends it to groups (4.15).
 - **Content:** besides the above:
   - LPT fork-join with adaptive helper wake and the frame deadline;
   - deterministic mode;
