@@ -550,7 +550,12 @@ struct scope_recycler {
     }
     while (!b.empty()) {
       binding_node node = b.extract(b.begin());
-      { const value_t gone = std::move(node.mapped()); }
+      // The value goes here, and the node is left holding nil, not a moved-from value: that may
+      // still hold what it held (libc++ moves a std::function whose callable fits in it by
+      // copying the callable), which a kept node would then keep alive.
+      {
+        const value_t gone = std::exchange(node.mapped(), value_t());
+      }
       if (pool->nnodes < kKeptNodes)
         pool->nodes[pool->nnodes++] = std::move(node);
     }

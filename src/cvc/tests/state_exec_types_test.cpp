@@ -350,6 +350,24 @@ TEST(StateExecTypesTest, ScopeDropsItsBindingsAsADestructorWould) {
   EXPECT_TRUE(held.expired());
 }
 
+TEST(StateExecTypesTest, ScopeLetsGoOfWhatANativeFunctionBoundInItCaptured) {
+  // A recycled scope keeps its binding nodes, not their values: a native function bound in it
+  // drops what it captured when the scope goes. (libc++ moves a std::function whose callable
+  // fits in it, as this one does, by copying the callable: a node left holding the moved-from
+  // value would keep the capture alive until the node was reused.)
+  auto captured = std::make_shared<int>(7);
+  const std::weak_ptr<int> watched = captured;
+  {
+    auto scope = environment::extend(nullptr);
+    scope->set("f", value_t{native_fn{[captured](std::span<const value_t>) -> value_t {
+                 return value_t(int64_t(*captured));
+               }}});
+    captured.reset();
+    EXPECT_FALSE(watched.expired());
+  }
+  EXPECT_TRUE(watched.expired());
+}
+
 TEST(StateExecTypesTest, ScopeChainOutlivesItsLinks) {
   // A long chain of scopes is freed a link at a time, recycled or not.
   environment_ptr e = std::make_shared<environment>();
