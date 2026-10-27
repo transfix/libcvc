@@ -648,20 +648,21 @@ std::string Exec::run(const std::string &src) {
       }
       // Idle-wait with the GIL released (so a worker can take it and deliver) until there is
       // work: a kernel's post or result, a sleeper's or timed wait's deadline, a call's timeout
-      // or charge, or the idle deadline. Coroutines on the asyncio loop are this loop's to
-      // drive: while one is pending, drive_coros' slice of the asyncio loop above is the wait,
-      // as it was with the 1 ms sleep (a ~15.6 ms timer tick on Windows) after it. Processes
-      // parked until the next pump (await) make the wait a 1 ms beat, as it was. It is never
-      // longer than kMaxIdleWait, a backstop for work that arrives some other way.
-      if (impl_->pending_coros.empty()) {
-        clock::time_point until =
-            std::min(std::chrono::time_point_cast<clock::duration>(idle_deadline),
-                     clock::time_point(clock::now() + kMaxIdleWait));
-        if (sched.awaiting_frame_count() > 0)
-          until = std::min(until, clock::now() + std::chrono::milliseconds(1));
-        Py_BEGIN_ALLOW_THREADS sched.wait_for_work(until);
-        Py_END_ALLOW_THREADS
-      }
+      // or charge, or the idle deadline; never longer than kMaxIdleWait, a backstop for work that
+      // arrives some other way. Coroutines on the asyncio loop are this loop's to drive, and
+      // drive_coros' slice of it doesn't wait (asyncio runs a timer due within its clock's
+      // resolution, ~15.6 ms on Windows, at once), so while one is pending the wait is a 5 ms
+      // beat: the old 1 ms sleep lasted a ~15.6 ms timer tick there. Processes parked until the
+      // next pump (await) make it a 1 ms beat, as it was. These beats burn no CPU (wakeup).
+      clock::time_point until =
+          std::min(std::chrono::time_point_cast<clock::duration>(idle_deadline),
+                   clock::time_point(clock::now() + kMaxIdleWait));
+      if (!impl_->pending_coros.empty())
+        until = std::min(until, clock::now() + std::chrono::milliseconds(5));
+      if (sched.awaiting_frame_count() > 0)
+        until = std::min(until, clock::now() + std::chrono::milliseconds(1));
+      Py_BEGIN_ALLOW_THREADS sched.wait_for_work(until);
+      Py_END_ALLOW_THREADS
     }
   } catch (...) {
     sched.kill(pid); // cancels its calls in flight
