@@ -419,9 +419,26 @@ public:
   // std::function's buffer.) Returns false only for such a drop. A drop destroys the task with
   // interruption held off, so an interrupt pending on the thread doing it stays pending. If not
   // even the pool's first worker can be started (thread resources exhausted), the task waits in
-  // the queue until a later submission or setThreadPoolSize() starts one (compute_async throws
-  // instead).
+  // the queue until a later submission or setThreadPoolSize() starts one (trySubmitPooled hands
+  // it back instead).
   bool submitPooled(std::function<void()> task, thread_priority priority = PRIORITY_NORMAL);
+
+  // What became of a task given to the background pool (trySubmitPooled).
+  enum class PoolSubmit {
+    queued,   // the pool has it: queued, or started
+    stopped,  // nothing taken: the pool has stopped (~app); the task is destroyed unrun
+    no_worker // handed back unrun: no worker could be started for it, and the pool has none
+  };
+  // submitPooled for a submitter that must hear of a task no worker will run: when no worker can
+  // be started for `task` and the pool has none, running or being created (thread resources
+  // exhausted before the pool's first worker), the task is handed back in `task`, unrun, and this
+  // returns PoolSubmit::no_worker, rather than leave it queued until a later submission starts a
+  // worker. A drop (the pool has stopped) destroys it here, as submitPooled does, and returns
+  // PoolSubmit::stopped; otherwise it returns PoolSubmit::queued (an empty task too). `task` is
+  // empty on return but for no_worker. compute_async, the exec async host and launch_pool_task
+  // submit through it, and fail their call at once on no_worker.
+  PoolSubmit trySubmitPooled(std::function<void()> &task,
+                             thread_priority priority = PRIORITY_NORMAL);
 
   // Set the maximum number of concurrent threads in the pool
   // Default is hardware_concurrency() or 4 if unknown
@@ -501,7 +518,9 @@ public:
   // registered with it (state_exec::register_async_fn) parks its calling process while its
   // kernel runs on this app's background task pool (startThreadPooled), and resumes it with the
   // kernel's value or raises its error at the call. Lazily constructed, like exec_scheduler();
-  // ~app cancels its calls in flight and waits for their kernels before anything else goes.
+  // ~app cancels its calls in flight and waits for their kernels before anything else goes. (A
+  // pool with no worker, none having been created, can't run a kernel still queued: ~app drops
+  // those first, and their calls raise RuntimeError.)
   cvc::state_exec::async_host &exec_async_host();
 
   // Used to easily manage saving/restoring thread info as we
@@ -699,18 +718,13 @@ protected:
     enqueuePoolTask(poolTask);
   }
 
-  // What became of a task given to enqueuePoolTask.
-  enum class PoolSubmit {
-    queued,   // the pool has it: queued, or started
-    stopped,  // nothing taken: the pool has stopped (~app); the caller destroys the task unrun
-    no_worker // handed back in the argument, unrun (handBackIfNoWorker, below)
-  };
   // Queue `task` (its contents are taken; a keyed one may start on this thread). With
   // handBackIfNoWorker, an anonymous task is handed back instead of left in the queue when the
   // pool has no worker running for it and every worker creation it relied on, this call's or one
   // another call had under way, failed (not even the pool's first thread could be created: thread
   // resources are exhausted). Left queued, it would wait until a later call started one.
-  // compute_async throws then, so that its caller can do the work itself.
+  // (trySubmitPooled.) Returns PoolSubmit::stopped, having taken nothing, once the pool has
+  // stopped; the caller destroys the task unrun.
   PoolSubmit enqueuePoolTask(ThreadPoolTask &task, bool handBackIfNoWorker = false);
   // _threadPoolMutex held (by `lock`): whether the pool has no worker, running or being created,
   // once the creations under way (if no worker runs) have succeeded or failed. False once stopped.

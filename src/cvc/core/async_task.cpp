@@ -20,7 +20,8 @@ namespace {
 // value, so it costs one heap block on every standard library (a shared_ptr capture costs a block
 // of its own under libstdc++, which keeps only a trivially copyable callable in std::function's
 // buffer). It posts exactly one value to `done`, the work's or on_error's, also when the pool
-// destroys it unrun (it was submitted, or still queued, once ~app had stopped the pool).
+// destroys it unrun (it was submitted, or still queued, once ~app had stopped the pool) or hands
+// it back (no worker could be started for it: launch_pool_task).
 struct pool_task_post {
   se::async_scheduler &sched;
   pool_task_work work;
@@ -63,7 +64,12 @@ struct pool_task_post {
     // there must stay pending, not be thrown inside on_error or post_message and dropped by the
     // catches below.
     boost::this_thread::disable_interruption keep_interrupt_pending;
-    const std::string msg = "not run: the app's background pool has stopped";
+    drop("not run: the app's background pool has stopped");
+  }
+
+  // Not run: post on_error(msg)'s value. The caller holds interruption off.
+  void drop(const std::string &msg) noexcept {
+    armed = false;
     try {
       se::value_t payload;
       try {
@@ -96,8 +102,17 @@ std::string launch_pool_task(app &a, se::async_scheduler &sched, const std::stri
   // the SAME scheduler the caller drives, so the parked process is resumed there.  ALWAYS post
   // exactly one value (on_error on a throw, or when the app drops the task unrun as it goes away)
   // so a waiter can't hang.
-  // Refused, the task posts from its destructor before submitPooled returns.
-  a.submitPooled(pool_task_post(sched, std::move(work), std::move(on_error), done));
+  // Refused, the task posts from its destructor before trySubmitPooled returns.
+  std::function<void()> task(pool_task_post(sched, std::move(work), std::move(on_error), done));
+  if (a.trySubmitPooled(task) == app::PoolSubmit::no_worker) {
+    // No worker could be started for it, and the pool has none (thread resources exhausted): it
+    // posts on_error's value now rather than wait for a later submission to start a worker.
+    // Interruption is held off, as the pool destroys every task.
+    boost::this_thread::disable_interruption keep_interrupt_pending;
+    if (pool_task_post *handed_back = task.target<pool_task_post>())
+      handed_back->drop("not run: no background worker could be started");
+    task = nullptr;
+  }
   return done;
 }
 

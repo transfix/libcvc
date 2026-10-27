@@ -417,9 +417,14 @@ every in-flight kernel and waits for them before the scheduler goes, as `Exec` d
 A kernel its executor never runs still ends its call. Once `~app` has stopped the app's
 background pool, a kernel submitted to it (`app::submitPooled` returns false), or one still in
 its queue (`~app` drops the queue), is destroyed unrun, and so is a kernel a stopped lane
-refuses (a lane runs every kernel it accepted before it stopped). Its call then raises
-`RuntimeError` at the call site with a message that names the cause: "`name`: not run: the
-app's background pool has stopped" for the pool, "`name`: lane '`lane`' is stopped" for a lane.
+refuses (a lane runs every kernel it accepted before it stopped). So is a kernel that no
+background worker can be started for (thread resources exhausted before the pool's first worker:
+`app::trySubmitPooled` hands it back rather than queue it). Its call then raises `RuntimeError`
+at the call site with a message that names the cause: "`name`: not run: the app's background
+pool has stopped" for the pool, "`name`: not run: no background worker could be started" when no
+worker could be started, "`name`: lane '`lane`' is stopped" for a lane. A pool that never got a
+worker can't run a kernel still queued (one queued behind keyed threads that held every slot):
+`~app` then drops the queue before it shuts down its host.
 Its kernel's captures go, and it leaves the host's count of calls in flight, so the process isn't
 left parked and `shutdown()` doesn't wait for it for good. That matters for a host bound to an
 app that `~app` doesn't shut down itself (one driven from a keyed thread, say): `~app` shuts down

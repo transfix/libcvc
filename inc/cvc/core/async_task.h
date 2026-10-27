@@ -68,7 +68,11 @@ using pool_task_on_error = std::function<state_exec::value_t(const std::string &
 /// (submitted, or still queued, once ~app has stopped its pool), it posts
 /// `on_error("not run: the app's background pool has stopped")` instead (the message itself if
 /// on_error throws), from the submitting thread or the one destroying the app; `sched` must still
-/// be there then, as for any post.  `sched` is the scheduler the
+/// be there then, as for any post.  If no worker can be started for the task and the pool has
+/// none (thread resources exhausted before its first worker), it posts
+/// `on_error("not run: no background worker could be started")` at once, from the calling thread,
+/// rather than leave the task queued for a later submission to start a worker.  `sched` is the
+/// scheduler the
 /// CALLER drives (so the delivery lands where the parked process will be resumed): the app-wide
 /// `a.exec_scheduler()` for an Ariadne host, or a private per-Exec scheduler for pycvc.  Returns
 /// immediately.

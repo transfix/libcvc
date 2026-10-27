@@ -576,9 +576,10 @@ void async_host::run_kernel(const std::shared_ptr<async_call> &call, async_kerne
 // copyable callable in std::function's buffer.) The call ends exactly once: by run_kernel when
 // the executor runs the task, or by drop() when the executor destroys it unrun. That is the case
 // when the executor refuses it (a stopped lane, an app whose pool has stopped), and when the
-// app's pool drops what is still queued as ~app stops it. The call then raises RuntimeError, its
-// kernel goes, and the host's count goes down, so the process isn't left parked and shutdown()
-// doesn't wait for good.
+// app's pool drops what is still queued as ~app stops it. A task the app's pool hands back (no
+// worker could be started for it: submit) is dropped the same way. The call then raises
+// RuntimeError, its kernel goes, and the host's count goes down, so the process isn't left parked
+// and shutdown() doesn't wait for good.
 struct async_host::kernel_task {
   std::shared_ptr<async_call> call;
   async_kernel kernel;
@@ -619,8 +620,9 @@ struct async_host::kernel_task {
       run_kernel(call, kernel, *state);
   }
 
-  // Not run: the call raises RuntimeError, naming the lane that refused it or the stopped pool.
-  void drop() noexcept {
+  // Not run: the call raises RuntimeError, naming the lane that refused it, or why the app's
+  // background pool didn't run it (`why`).
+  void drop(const char *why = "not run: the app's background pool has stopped") noexcept {
     armed = false;
     const std::string &name = call->function_name();
     std::exception_ptr error;
@@ -630,8 +632,7 @@ struct async_host::kernel_task {
             std::make_exception_ptr(std::runtime_error(name + ": lane '" + *lane + "' is stopped"));
       else
         error = std::make_exception_ptr(
-            dsl_error("RuntimeError", name + ": not run: the app's background pool has stopped",
-                      "async", function_fields(name)));
+            dsl_error("RuntimeError", name + ": " + why, "async", function_fields(name)));
     } catch (...) {
       error = std::current_exception();
     }
@@ -654,14 +655,24 @@ void async_host::submit(const std::shared_ptr<async_call> &call, async_kernel ke
   state_->add(call, true);
   try {
     // The executor runs, then destroys, this task; nothing else holds the kernel once it is
-    // queued. Refused, it is destroyed unrun before submit() or submitPooled() returns, and ends
-    // the call itself (kernel_task).
+    // queued. Refused, it is destroyed unrun before submit() or trySubmitPooled() returns, and
+    // ends the call itself (kernel_task).
     std::function<void()> task(kernel_task(call, std::move(kernel), state_, lane_name));
     kernel = nullptr; // a moved-from std::function may keep a copy of a small callable
-    if (lane)
+    if (lane) {
       lane->submit(std::move(task));
-    else // an anonymous task on the background pool's persistent workers: no thread, no key
-      app_->submitPooled(std::move(task), opts.priority);
+    } else if (app_->trySubmitPooled(task, opts.priority) == cvc::app::PoolSubmit::no_worker) {
+      // An anonymous task on the background pool's persistent workers (no thread, no key), but
+      // no worker could be started for it and the pool has none (thread resources exhausted):
+      // the call fails now, as it did when each kernel got a thread of its own and creating that
+      // failed, rather than its kernel waiting for a later submission to start a worker (and
+      // ~app's shutdown of this host waiting for it). Interruption is held off, as the pool
+      // destroys every task.
+      boost::this_thread::disable_interruption keep_interrupt_pending;
+      if (kernel_task *handed_back = task.target<kernel_task>())
+        handed_back->drop("not run: no background worker could be started");
+      task = nullptr;
+    }
   } catch (...) {
     // Thrown as the task was built or handed over (out of memory, say): it was destroyed unrun on
     // the way here, which ended the call, or it is queued and will end it.

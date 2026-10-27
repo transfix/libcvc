@@ -51,10 +51,17 @@ For the full per-method reference, see
 - **Thread creation failures.** If a new worker's thread can't be
   created, the queued tasks wait for a running worker. When the pool has
   none at all (thread resources were exhausted before its first worker),
-  `compute_async` throws `boost::thread_resource_error` and runs
-  nothing, so its caller can do the work itself (a threaded tf overlay
-  task carries on cooperatively); a `submitPooled` task stays queued
-  until a later submission or `setThreadPoolSize()` starts a worker.
+  `trySubmitPooled` hands the task back unrun, once any other worker
+  creation under way has succeeded or failed too: `compute_async` then
+  throws `boost::thread_resource_error` and runs nothing, so its caller
+  can do the work itself (a threaded tf overlay task carries on
+  cooperatively), an async call raises `RuntimeError` ("not run: no
+  background worker could be started"), and `launch_pool_task` posts
+  `on_error`'s value. A `submitPooled` task stays queued until a later
+  submission or `setThreadPoolSize()` starts a worker. A pool that never
+  got a worker can't run a queued async kernel, so `~app` drops those
+  before it shuts down the async host, which would otherwise wait for
+  them for good.
 - **Exception-safe.** Exceptions thrown by a task are logged and do not
   take down the pool or other workers.
 - **Dynamic resizing.** `setThreadPoolSize()` may be called while tasks

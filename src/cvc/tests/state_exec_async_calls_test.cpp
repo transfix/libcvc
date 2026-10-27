@@ -24,6 +24,7 @@
 #include <cvc/state/state_exec/scheduler.h>
 #include <cvc/state/state_exec/stackless_evaluator.h>
 #include <cvc/state/state_exec/state_value_codec.h>
+#include <future>
 #include <gtest/gtest.h>
 #include <memory>
 #include <mutex>
@@ -254,8 +255,17 @@ void register_kernels(const environment_ptr &env, async_host &host, cvc::app &ap
 }
 
 // A cvc::app whose background pool can be stopped as ~app first stops it, with the app still
-// there, so that what a host does with the pool stopped can be checked.
+// there, so that what a host does with the pool stopped can be checked; and whose pool can be made
+// unable to create a thread, as when thread resources are exhausted (a throw from the pool's test
+// seam counts as the creation failing).
 struct stoppable_app : cvc::app {
+  std::atomic<bool> fail_threads{false};
+  stoppable_app() {
+    _poolWorkerSpawnHook = [this] {
+      if (fail_threads.load())
+        throw boost::thread_resource_error();
+    };
+  }
   void stop_pool() { stopThreadPool(); }
 };
 
@@ -1315,4 +1325,122 @@ TEST(AsyncCalls, APoolTaskTheAppDropsStillPostsOnErrorsValue) {
     if (queued)
       w->run_to_end(first);
   }
+}
+
+// A call that no background worker can be started for (thread resources exhausted before the
+// pool's first worker) raises RuntimeError at the call, saying so, and leaves the host: the
+// process isn't left parked, and shutdown() doesn't wait for it. (The kernel used to wait in the
+// pool's queue for a later submission to start a worker, and the host's shutdown, ~app's first
+// step, waited for it for good.)
+TEST(AsyncCalls, ACallNoWorkerCanBeStartedForRaisesAndLeavesTheHost) {
+  auto w = std::make_unique<world>(async_sched);
+  w->app.fail_threads = true;
+  const int pid = w->submit("(slow-op 1 10)");
+  const bool ended = pump_or_leak(w, [&] { return w->finished(pid); });
+  if (!w)
+    return;
+  ASSERT_TRUE(ended) << "the call never ended";
+  const auto exc = w->exit_exception(pid);
+  ASSERT_TRUE(exc);
+  const outcome o = record(*exc);
+  EXPECT_EQ(o.cls, "RuntimeError");
+  EXPECT_NE(o.message.find("slow-op: not run: no background worker could be started"),
+            std::string::npos)
+      << o.message;
+  EXPECT_FALSE(w->p.started);
+  EXPECT_EQ(w->app.getPendingThreadCount(), 0u);
+  const auto start = clock_type::now();
+  w->host->shutdown();
+  EXPECT_LT(seconds_since(start), 1.0);
+}
+
+// launch_pool_task posts on_error's value at once when no background worker can be started for
+// its task (thread resources exhausted before the pool's first worker): the parked process
+// resumes with it rather than waiting for a later submission to start a worker.
+TEST(AsyncCalls, APoolTaskNoWorkerCanBeStartedForPostsOnErrorsValue) {
+  auto w = std::make_unique<world>(async_sched);
+  std::atomic<bool> ran(false);
+  async_scheduler &sched = *w->async;
+  builtins::register_fn(w->env, "pool-double", [&](std::span<const value_t> a) -> value_t {
+    const int64_t n = int_arg(a, 0, 0);
+    return cvc::park_on_pool_task(
+        w->app, sched, sched.current_process()->root_path, "pool-double.reply",
+        [n, &ran] {
+          ran = true;
+          return value_t(n * 2);
+        },
+        [](const std::string &e) { return value_t("err: " + e); });
+  });
+  w->app.fail_threads = true;
+  const int pid = w->submit("(begin (pool-double 21))"); // a top-level call can't park
+  const bool resumed = w->pump([&] { return w->finished(pid); }, 5.0);
+  if (!resumed)
+    w->app.stop_pool(); // the queued task posts its drop while the scheduler is still there
+  ASSERT_TRUE(resumed) << "the process never resumed";
+  if (const auto exc = w->exit_exception(pid))
+    FAIL() << "raised " << record(*exc).cls << ": " << record(*exc).message;
+  ASSERT_TRUE(w->result(pid));
+  EXPECT_EQ(show(*w->result(pid)), "err: not run: no background worker could be started");
+  EXPECT_FALSE(ran.load());
+  EXPECT_EQ(w->app.getPendingThreadCount(), 0u);
+}
+
+// An async call queued behind a full pool, whose worker then can't be created as the slot frees
+// (thread resources exhausted before the pool's first worker), doesn't hold ~app for good. ~app
+// cancels its own host's calls and waits for their kernels before it closes the pool, but a pool
+// with no worker can't run a queued kernel: ~app then closes the pool first, which drops the
+// kernel and ends its call. (~app used to wait in the host's shutdown for a kernel nothing would
+// ever run.)
+TEST(AsyncCalls, DestroyingTheAppEndsACallQueuedOnAPoolWithNoWorker) {
+  std::atomic<bool> started(false), release(false);
+  auto a = std::make_unique<stoppable_app>();
+  environment_ptr env = builtins::make_default_environment();
+  async_scheduler &sched = a->exec_scheduler();
+  register_async_fn(env, a->exec_async_host(), "op",
+                    [&started](std::span<const value_t>) -> async_kernel {
+                      return [&started](async_call &) -> value_t {
+                        started = true;
+                        return value_t(int64_t(2));
+                      };
+                    });
+  a->setThreadPoolSize(1);
+  // The pool's one slot, held by a keyed task on a thread of its own: no worker is started.
+  a->startThreadPooled(
+      "hold",
+      [&release] {
+        while (!release.load())
+          std::this_thread::sleep_for(1ms);
+      },
+      cvc::PRIORITY_NORMAL, /*wait=*/true);
+  execute_options opts;
+  opts.env = env;
+  const int pid = sched.execute(std::string("(op 1)"), opts);
+  bool queued = false;
+  for (const auto start = clock_type::now(); !queued && seconds_since(start) < 5.0;) {
+    sched.drain_ingress();
+    sched.sync_run(100000, 0.02);
+    queued = a->getPendingThreadCount() == 1;
+    std::this_thread::sleep_for(1ms);
+  }
+  EXPECT_TRUE(queued) << "the call's kernel wasn't queued";
+  EXPECT_EQ(sched.get_process_info(pid)->status, process_status::waiting);
+  // The keyed task ends, and the worker its thread asks for on the way out can't be created.
+  a->fail_threads = true;
+  release = true;
+  if (cvc::thread_ptr hold = a->threads("hold"))
+    hold->join();
+  EXPECT_EQ(a->getPendingThreadCount(), 1u);
+  EXPECT_EQ(a->getActiveThreadCount(), 0u);
+  stoppable_app *raw = a.get();
+  auto destroyed = std::async(std::launch::async, [&a] { a.reset(); });
+  const bool hung = destroyed.wait_for(4s) == std::future_status::timeout;
+  EXPECT_FALSE(hung) << "~app waits in its host's shutdown for a kernel no worker will run";
+  if (hung) {
+    // So that the test ends: the pool is still open (~app is in the host's shutdown), and a
+    // worker that can start runs the kernel, which sees its call cancelled.
+    raw->fail_threads = false;
+    raw->submitPooled([] {});
+  }
+  EXPECT_EQ(destroyed.wait_for(10s), std::future_status::ready);
+  EXPECT_FALSE(started.load());
 }
