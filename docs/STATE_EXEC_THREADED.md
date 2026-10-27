@@ -1,8 +1,9 @@
 # state_exec: running programs on several threads
 
-Status: design (2026-10-26). Nothing here is built yet. Tracked in the `state-exec-perf`
-workstream, as its third track. The first two are the benchmark suite (transfix/libcvc#834) and the
-single-thread optimizations (branches `perf/sched`, `perf/async` and `perf/eval`).
+Status: design, adopted 2026-10-26 with the decisions in section 9.2. Nothing here is built yet.
+Tracked in the `state-exec-perf` workstream, as its third track. The first two are the benchmark
+suite (transfix/libcvc#834) and the single-thread optimizations (branches `perf/sched`, `perf/async`
+and `perf/eval`).
 
 Today every state_exec scheduler steps its processes on one thread. This document designs how
 programs run in parallel when several native threads are available. The user asked for two families
@@ -477,7 +478,7 @@ models that avoid A's new engine.
 | From | Idea | Where |
 |---|---|---|
 | A (and all judges) | Decide the spawn environment now: a spawned child gets an intrinsics context and the parent's chroot, owner and channel policy, through a host callback | Stage 1, 4.15 |
-| C (all judges) | An isolating copy at every crossing between groups. Lists and dicts are copied; closures, natives, generators, environments and futures are refused at any depth (D's structured clone) rather than deep-copied (C's choice; open question Q3) | Stage 0 for `state-data-set`; Stage 1-3 for posts and arguments; 4.3 |
+| C (all judges) | An isolating copy at every crossing between groups. Lists and dicts are copied; closures, natives, generators, environments and futures are refused at any depth (D's structured clone) rather than deep-copied (C's choice; Q3) | Stage 0 for `state-data-set`; Stage 1-3 for posts and arguments; 4.3 |
 | B | The current group resolved through a thread-local, not through captured pointers: `intrinsics_context::sched` may point at a group-relative forwarder, and async natives resolve their host the same way | Stage 3, 4.15 |
 | B | One pump per frame across every Runtime: `drain_begin`, one app pump, `drain_end` | Stage 1, 4.12 |
 | B | A per-watch root instead of `set_watch_root` from a step | Stage 0, 4.8 |
@@ -509,8 +510,8 @@ models that avoid A's new engine.
   - It delays a group's own watch events by a pump, which breaks the per-group oracle.
   - It changes `cvc::state` core.
   - It reorders notifications against host writes.
-  - Host affinity plus an audit of subscribers is used instead (4.8), and the question stays open
-    (Q7).
+  - Host affinity plus an audit of subscribers is used instead (4.8). The sink is reconsidered only
+    if the audit leaves most documents on the host thread (Q7).
 - **Per-receiver envelopes and fork deep copies always on** (A, C, D). Within a group today's
   sharing is legal, so these wait for Stage 4, where several threads step one group.
 
@@ -649,7 +650,7 @@ with the natives inside, which capture an `intrinsics_context` (B11, B31).
 - The existing refusal's reasoning applies at every depth: a stored callable can outlive what it
   captures, and it is an invocation channel around an allowlist (`intrinsics.cpp:231-235`).
 - A nested closure in stored data was a hole, not a feature.
-- Copying closures stays open (Q3).
+- Closures are refused, not copied (Q3).
 
 **Debug enforcement** (`CVC_EXEC_VERIFY=1`):
 - every compound value posted across a boundary is tagged with its source group, and a second
@@ -675,8 +676,8 @@ orders are unchanged.
 - **Once per step:** `step()`, `++steps` with an exact `max_steps` compare, a status check, and a
   clock read every 16th step.
 - A process with `max_step_time` (Ariadne residents, `ariadne.cpp:1792`) keeps its guard per step.
-- `slice_steps = 1` is today's round robin exactly, and stays the default until the user decides
-  (Q10).
+- `slice_steps = 1` is today's round robin exactly, and stays the default. Hosts opt in to longer
+  runs (Q10).
 - Slices are a single-thread gain for every group, independent of the pool. After `perf/sched` they
   remove what is left of the per-step overhead: guard arming, thread-local setup and most clock
   reads.
@@ -1000,7 +1001,7 @@ The tree is the one mutable structure all groups share. Stage 0 makes the DSL's 
     - `background_io`, larger, for blocking kernels.
   - `executor::background` keeps meaning the first, and a registration option picks the second.
   - This reverses settled question 4 of `docs/STATE_EXEC_EXCEPTIONS.md` ("There's no separate I/O
-    pool", line 840; section 3.5), so it is the user's call (Q9).
+    pool", line 840; section 3.5) from Stage 2 on, as the user decided (Q9).
 - **Blocking steps** (B21). An inline kernel or a `call->wait` at a point that cannot park
   (`intrinsics.cpp:537-542`) blocks only the worker pumping that group.
   - Other workers keep pumping other groups, which is better than today, where it stalls everything.
@@ -1215,8 +1216,8 @@ The pool reads them when it is built. `threads` cannot change while groups are a
 | CLI | none (sync scheduler) | - |
 
 **A program opts in** with `(spawn-isolated script [name] [priority] [args])` (Stage 3), which
-returns the child's pid. Plain `spawn` stays in the caller's group. Placing plain spawns on spawn
-groups automatically (D's `auto_spawn`) is open (Q4).
+returns the child's pid. Plain `spawn` stays in the caller's group, and is never placed on a spawn
+group automatically (D's `auto_spawn` is not taken; Q4).
 
 **Debug knobs** (environment variables, read once):
 - `CVC_EXEC_DETERMINISTIC=1`: deterministic mode (4.4).
@@ -1500,8 +1501,8 @@ or refute it.
 - The 1.6x per-thread inflation at 8 threads: E-cores, the all-core clock, and the allocator.
 - A scalable allocator (mimalloc from cvcpkg, or the Windows segment heap) is the most likely next
   lever, since `malloc` is about 21% of a single-thread step. It is measured against
-  `mt.independent` raise/catch, whose per-thread time doubles at 8 threads, before worker defaults
-  are chosen (Q8).
+  `mt.independent` raise/catch, whose per-thread time doubles at 8 threads, before the worker count
+  for `auto` (4.1) is settled (Q8).
 
 ### 6.3 How the benchmark suite verifies it
 
@@ -1622,7 +1623,7 @@ is independent of the others.
   - `intrinsics.cpp:960-1015, 1167-1191`: `msg-send` and `msg-recv` through the router when the pool
     has more than one group;
   - `async_scheduler.cpp`: the ingress entry kinds;
-  - `app.cpp`/`async_host.cpp`: the split kernel pools (if Q9 says yes) and the long-step monitor;
+  - `app.cpp`/`async_host.cpp`: the split kernel pools (Q9) and the long-step monitor;
   - `exec_coordinator.cpp`: `attach_pool`, job groups.
 - **Tests:** PL-1 to PL-10, MS-1 to MS-12, AR-7, DT-3, ST-1 to ST-3.
 - **Exit:** the Stage 2 gate; the channel semantics matrix (MS-12) matches single-group outcomes.
@@ -1791,7 +1792,7 @@ Linux clang. Each stage turns its cases into gtest and pytest cases with these I
 | SL-5 | process A kills B in one group while B is mid-run | B takes no further step |
 | SL-6 | a watched node changes during a run | the handler fires at the watcher's next run |
 
-## 9. Risks and open questions
+## 9. Risks and decisions
 
 ### 9.1 Risks
 
@@ -1822,51 +1823,56 @@ Linux clang. Each stage turns its cases into gtest and pytest cases with these I
    threads. Defaults past 8 threads, and whether the allocator is the main cause, need P-core-only
    and allocator runs first.
 
-### 9.2 Questions for the user
+### 9.2 Decisions
 
-1. **Q1. The model.** All three judges ranked groups-first (E) first, by 119 points against 107 for
-   isolates. This document adopts it and keeps option A as Stage 4, to be built only on evidence.
-   Confirm, or say if parallelism inside one scheduler is needed sooner than Stage 3's
-   `spawn-isolated` would give it.
-2. **Q2. Built-in exception classes.** Freeze them (proposed; a behaviour change), or give each
-   group its own copies? Copies keep mutation, and stay catch-compatible because `is_instance`
-   matches by name chain (`exceptions.cpp:183-199`).
-3. **Q3. Callables in crossing values.** Refuse closures, natives, generators, environments and
-   futures at any depth (proposed, D's structured clone), or copy closures with their environments
-   (C)?
-4. **Q4. Spawn.** What should a spawned child inherit?
-   - The proposal is the parent's intrinsics, chroot, owner and channel policy, through a host
-     callback.
-   - Should a pycvc child also inherit the `Exec`'s Python natives (proposed: yes)?
-   - Should plain `spawn` ever be placed on a spawn group automatically (D's `auto_spawn`), or only
-     `spawn-isolated` (proposed)?
-5. **Q5. Cross-group control from programs.** Allow `kill`, `pause`, `ps` and `inspect` across
-   groups of the same owner only (proposed), not at all, or across all groups as today?
-6. **Q6. The router.** Should app-global channels be homed at group 0 (proposed), or by the first
-   receiver (D)? And should a remote receive be allowed at all (proposed), or should a receive be
-   confined to channels the group is home to (simpler, no subscription protocol)?
-7. **Q7. Ariadne.**
-   - Does any shipped host (tvision desktop, conference room, holon participants) run several
-     Runtimes in one process? That decides whether Stage 1's Ariadne half is worth building before
-     Stage 3.
-   - Which providers and subscribers must stay on the host thread? Each needs its owner's answer.
-   - If too many must, should the deferred-notification sink (rejected in 3.4) be built after all?
-8. **Q8. Defaults.** `state_exec.threads` 0 (proposed) or `auto`? Workers on P-cores only
-   (proposed), or all cores?
-9. **Q9. Kernel pools.** Split `background_cpu` and `background_io` once group workers compete for
-   cores (proposed for Stage 2)? That reverses settled question 4 of `docs/STATE_EXEC_EXCEPTIONS.md`.
-   The alternative is one pool with a cap on blocking kernels.
-10. **Q10. Slices.** Should Stage S's default `slice_steps` become 256 once the suites pass, or stay
-    1 with hosts opting in?
-11. **Q11. Pids.** One pid source per pool (proposed) keeps pids unique app-wide and stable across
-    moves. Should pids also widen to 64 bits now? Today's `int` wraps after 2^31 processes, about a
-    year at 60 actions a second.
-12. **Q12. `ExecPool`.** Reuse pooled `Exec`s, so top-level definitions persist per pooled `Exec`
-    (proposed default), or give each program a fresh env?
-13. **Q13. `exec_coordinator`.** Move its local path from the sync scheduler to async groups
-    entirely? The sync scheduler has no ingress, and it busy-waits on parked processes before
-    `perf/sched`.
-14. **Q14. Setting names.** Confirm:
+The user adopted this design on 2026-10-26, with the proposed answer to each question below. Four
+questions offered no proposal of their own (Q7, Q10, Q13, and Q11's width). Their answers are the
+plan the rest of this document already follows, marked "default".
+
+1. **Q1. The model: groups first (E).** Option A is kept as Stage 4, built only on evidence
+   (section 7). Parallelism inside one program comes from Stage 3's `spawn-isolated` and parallel
+   actions.
+2. **Q2. The built-in exception classes are made read-only** in Stage 0, not copied per group. This
+   is a behaviour change (section 5, item 1): `set-attr` and `del-attr` on one raise `TypeError`.
+   Per-group copies stay the fallback if `mt.groups` raise/catch shows refcount contention (B25).
+3. **Q3. Callables are refused at any depth** in a value crossing groups: closures, natives,
+   generators, environments and futures (D's structured clone). Closures are not copied with their
+   environments (4.3).
+4. **Q4. Spawn.**
+   - A spawned child inherits the parent's intrinsics, chroot, owner and channel policy, through a
+     host callback (4.15).
+   - A pycvc child also inherits the `Exec`'s Python natives.
+   - Only `spawn-isolated` places a child in another group. Plain `spawn` stays in the caller's
+     group; D's `auto_spawn` is not taken.
+5. **Q5. Cross-group control.** `kill`, `pause`, `ps` and `inspect` from a program reach other
+   groups only when they have the caller's owner (4.5). Documents stop seeing and killing each
+   other's processes.
+6. **Q6. The router.** App-global channels are homed at the pool's group 0. A receive on a channel
+   homed in another group is allowed, through the subscription protocol (4.6).
+7. **Q7. Ariadne (default).**
+   - Stage 1 builds its Ariadne half as planned.
+   - Stage 1's audit answers the questions for the owners: whether any shipped host (tvision
+     desktop, conference room, holon participants) runs several Runtimes in one process, and which
+     providers and subscribers must stay on the host thread. A doubtful one is `host_only` or not
+     thread-safe.
+   - The deferred-notification sink stays rejected (3.4). It is reconsidered only if the audit
+     leaves most documents on the host thread.
+8. **Q8. Defaults.** `state_exec.threads` defaults to 0, so nothing moves to workers until a host
+   or the app tree opts in. `state_exec.cpu_set` defaults to `performance`: workers on P-cores
+   only.
+9. **Q9. The kernel pools are split** in Stage 2, into `background_cpu` and `background_io` (4.9).
+   This reverses settled question 4 of `docs/STATE_EXEC_EXCEPTIONS.md` from Stage 2 on, and that
+   document says so.
+10. **Q10. Slices (default).** `slice_steps` stays 1 by default after Stage S, so the round robin
+    stays exact. Hosts opt in to longer runs.
+11. **Q11. Pids.** One pid source per pool (4.5). Pids stay `int` (default): widening them to
+    64 bits is a separate change, outside this design, and the wrap after 2^31 processes stays a
+    known limit.
+12. **Q12. `ExecPool` reuses its pooled `Exec`s**, so top-level definitions persist per pooled
+    `Exec`. `fresh_env=True` gives each program a fresh env (4.12).
+13. **Q13. `exec_coordinator` (default).** Its local jobs move to job groups through `attach_pool`
+    in Stage 2. The sync-scheduler path stays for the CLI (4.12).
+14. **Q14. The names** are as proposed:
     - `state_exec.threads`, `state_exec.cpu_set`, `state_exec.deterministic`,
       `state_exec.groups.ingress_cap`;
     - `ariadne.exec.isolate_documents`, `ariadne.exec.parallel_actions`;

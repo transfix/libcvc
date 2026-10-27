@@ -13,7 +13,7 @@ you can drop directly into a test or application.
 
 Every scheduler steps its processes on one thread today. The design for
 running programs on several threads is in
-[STATE_EXEC_THREADED.md](STATE_EXEC_THREADED.md) (a design, not yet built):
+[STATE_EXEC_THREADED.md](STATE_EXEC_THREADED.md) (adopted, not yet built):
 execution groups, each one scheduler stepped by one thread at a time, run in
 parallel on a shared worker pool, added in stages.
 
