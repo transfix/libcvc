@@ -66,6 +66,7 @@ struct evaluation_stats {
     std::lock_guard lk(mu);
     start_time = std::chrono::steady_clock::now();
     step_count.store(0, std::memory_order_relaxed);
+    eval_step_count.store(0, std::memory_order_relaxed);
     for (std::size_t k = 0; k < kKinds; ++k) {
       kind_steps[k].store(0, std::memory_order_relaxed);
       kind_ns[k].store(0, std::memory_order_relaxed);
@@ -78,11 +79,17 @@ struct evaluation_stats {
     end_time = std::chrono::steady_clock::now();
     complete = true;
   }
-  /// Count a step, as spent on `kind`.
+  /// Count a step, as spent on `kind`. Only the thread stepping the state counts its steps, one
+  /// step at a time, so the common (eval) step is counted without a locked read-modify-write:
+  /// a load and a store of a counter of its own (anyone may still read it, any time).
   void increment_step(step_kind kind = step_kind::eval) {
-    step_count.fetch_add(1, std::memory_order_relaxed);
-    if (kind != step_kind::eval) // eval steps are the rest, so the common step costs no more
+    if (kind == step_kind::eval) { // eval steps are the rest, so the common step costs no more
+      eval_step_count.store(eval_step_count.load(std::memory_order_relaxed) + 1,
+                            std::memory_order_relaxed);
+    } else {
+      step_count.fetch_add(1, std::memory_order_relaxed);
       kind_steps[static_cast<std::size_t>(kind)].fetch_add(1, std::memory_order_relaxed);
+    }
     last_kind = kind;
   }
   /// Count `n` steps of `kind` that no evaluator step took: what an async call is charged
@@ -94,7 +101,10 @@ struct evaluation_stats {
     if (kind != step_kind::eval)
       kind_steps[static_cast<std::size_t>(kind)].fetch_add(n, std::memory_order_relaxed);
   }
-  uint64_t get_step_count() const { return step_count.load(std::memory_order_relaxed); }
+  uint64_t get_step_count() const {
+    return step_count.load(std::memory_order_relaxed) +
+           eval_step_count.load(std::memory_order_relaxed);
+  }
   /// Steps spent on `kind`.
   uint64_t steps(step_kind kind) const {
     if (kind != step_kind::eval)
@@ -138,6 +148,8 @@ private:
   static constexpr std::size_t kKinds = 4;
   void copy_counts(const evaluation_stats &o) {
     step_count.store(o.step_count.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    eval_step_count.store(o.eval_step_count.load(std::memory_order_relaxed),
+                          std::memory_order_relaxed);
     for (std::size_t k = 0; k < kKinds; ++k) {
       kind_steps[k].store(o.kind_steps[k].load(std::memory_order_relaxed),
                           std::memory_order_relaxed);
@@ -150,7 +162,8 @@ private:
   mutable std::mutex mu;
   std::chrono::steady_clock::time_point start_time{};
   std::chrono::steady_clock::time_point end_time{};
-  std::atomic<uint64_t> step_count{0};
+  std::atomic<uint64_t> step_count{0};      // steps counted by add_steps() or of a kind not eval
+  std::atomic<uint64_t> eval_step_count{0}; // eval steps the stepping thread counted
   std::atomic<uint64_t> kind_steps[kKinds] = {};
   std::atomic<uint64_t> kind_ns[kKinds] = {};
   std::atomic<uint64_t> data_node_count{0};

@@ -1,8 +1,10 @@
+#include <atomic>
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/evaluator.h>
 #include <cvc/state/state_exec/parser.h>
 #include <cvc/state/state_exec/types.h>
 #include <gtest/gtest.h>
+#include <thread>
 
 using namespace cvc::state_exec;
 
@@ -250,4 +252,45 @@ TEST_F(EvaluatorTest, YieldAndBreakAreOrdinaryNamesHere) {
   // The recursive evaluator has no generators or loop breaks: these are functions like any.
   EXPECT_EQ(eval_int("(begin (defun yield (x) (* x 2)) (yield 21))"), 42);
   EXPECT_EQ(eval_int("(begin (defun break (x) (+ x 1)) (break 41))"), 42);
+}
+
+// ─── Step counting ─────────────────────────────────────────────────────────
+
+TEST(EvaluationStats, CountsEvalStepsAndChargedStepsExactlyWhileReadConcurrently) {
+  // The stepping thread counts its eval steps without a locked add; steps charged by add_steps()
+  // from another thread meanwhile, and readers, see exact totals.
+  evaluation_stats stats;
+  stats.start();
+  constexpr uint64_t kSteps = 200000, kCharged = 50000;
+  std::atomic<bool> go{false};
+  std::thread charger([&] {
+    while (!go.load())
+      std::this_thread::yield();
+    for (uint64_t i = 0; i < kCharged; ++i)
+      stats.add_steps(step_kind::async, 1);
+  });
+  std::thread reader([&] {
+    uint64_t last = 0;
+    while (!go.load())
+      std::this_thread::yield();
+    for (int i = 0; i < 100000; ++i) {
+      const uint64_t now = stats.get_step_count();
+      EXPECT_GE(now, last);
+      last = now;
+    }
+  });
+  go.store(true);
+  for (uint64_t i = 0; i < kSteps; ++i)
+    stats.increment_step(i % 10 == 0 ? step_kind::data : step_kind::eval);
+  charger.join();
+  reader.join();
+  EXPECT_EQ(stats.get_step_count(), kSteps + kCharged);
+  EXPECT_EQ(stats.steps(step_kind::data), kSteps / 10);
+  EXPECT_EQ(stats.steps(step_kind::async), kCharged);
+  EXPECT_EQ(stats.steps(step_kind::eval), kSteps - kSteps / 10);
+  evaluation_stats moved(std::move(stats));
+  EXPECT_EQ(moved.get_step_count(), kSteps + kCharged);
+  EXPECT_EQ(moved.steps(step_kind::eval), kSteps - kSteps / 10);
+  moved.start();
+  EXPECT_EQ(moved.get_step_count(), 0u);
 }
