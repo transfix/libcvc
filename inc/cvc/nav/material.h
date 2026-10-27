@@ -54,6 +54,7 @@
 #ifndef CVC_NAV_MATERIAL_H
 #define CVC_NAV_MATERIAL_H
 
+#include <cmath>
 #include <cstdint>
 #include <cvc/nav/detail/dyn_bike.h>
 #include <cvc/nav/drive.h>
@@ -283,11 +284,87 @@ struct material_ext {
 //   - terms [B*(max_H+1)*4]: its terms (goal, barrier, soft, hard) in that order.
 //   - force [B*max_H*2]: the conservative force step s applied (= -grad U at that state when the
 //     patch's gradient channels are its value channels' gradients in the batch's units).
+//
+// The point-mass surrogate (integrate_surrogate_material) also keeps the per-step energy books
+// (the white paper's Eq. 38; book_step below). kinetic has potential's rows; the rest are
+// [B*max_H], step s of agent b at b*max_H + s:
+//   - kinetic: m/2 |v|^2 at the state step s starts from, then at the end state.
+//   - w_damp, w_port, w_clamp, w_cross: the damping work, the port work of F_ext, the clamp loss
+//     and the clamp cross term (the last two are zero: this rollout has no speed clamp).
+//   - residual: r_E; bound: the cheap bound on |r_E| (energy_residual_bound), every step.
+//   - residual_sharp: the sharp check r_hat_E, two extra force evaluations a step, when `sharp`
+//     is set (NaN otherwise).
+// The books are those of the step taken from the rollout's state with its coefficients and F_ext,
+// evaluated in double (detail::material_energy): they resolve r_E - r_hat_E, of order dt^3, which
+// is below float round-off on U. So they leave out the rollout's own float rounding, O(eps) a
+// step, and a step's books end where the double step ends, within that rounding of the next
+// state. Steps past H[b] book zero. The bicycle and dynamic rollouts are not point masses:
+// they throw std::invalid_argument when any of these is set.
 struct rollout_energy {
   float *potential = nullptr;
   float *terms = nullptr;
   float *force = nullptr;
+  float *kinetic = nullptr;
+  float *w_damp = nullptr;
+  float *w_port = nullptr;
+  float *w_clamp = nullptr;
+  float *w_cross = nullptr;
+  float *residual = nullptr;
+  float *residual_sharp = nullptr;
+  float *bound = nullptr;
+  bool sharp = false;
+  // Any of the per-step books asked for (kinetic through bound).
+  bool books() const {
+    return kinetic || w_damp || w_port || w_clamp || w_cross || residual || residual_sharp || bound;
+  }
 };
+
+// ── the per-step energy books (the white paper's Eq. 38, its companion's Part V §3.3) ──────────
+// One semi-implicit step of a point mass m in a potential U fixed over the step (coefficients
+// frozen), with damping gamma, an external (port) force F and a speed clamp:
+//   v' = v + dt/m (-g - gamma v + F),  vt = clamp_vmax(v'),  x' = x + dt vt,  g = grad U(x).
+// With H = m/2 |v|^2 + U, it books
+//   W_gamma = dt/2 gamma v.(v + v'),       W_port  = dt/2 F.(v + v'),
+//   W_clamp = m/2 (|v'|^2 - |vt|^2) >= 0,   W_cross = dt g.(vt - v'),
+//   r_E = dH + W_gamma + W_clamp - W_port - W_cross
+//       = dt^2/2 [vt' Hbar vt - g.(g + gamma v - F)/m]   exactly,
+// Hbar the Hessian of U averaged along the step (2 int_0^1 (1-s) grad^2 U(x + s dx) ds). Two
+// checks: the cheap bound |r_E| <= energy_residual_bound(...), every step, with the secant
+// Lipschitz estimate L_hat = |grad U(x') - grad U(x)| / |x' - x|; and the sharp check
+//   r_hat_E = dt^2/2 [vt' grad^2 U(x) vt - g.(g + gamma v - F)/m],  r_E - r_hat_E = O(dt^3).
+// The bound catches work of order dt left out of the books (an unlogged force, a stale field,
+// an unbooked clamp); the sharp check catches anything beyond third order, such as explicit
+// Euler's systematic gain (x' = x + dt v: its r_E sits dt^2 g.(g + gamma v - F)/m above r_hat_E,
+// second order, the same order as the bound, which it therefore passes).
+struct book_step_args {
+  double dt = 0.0, mass = 1.0, gamma = 0.0;
+  double v[2] = {0.0, 0.0};  // velocity at the start
+  double vp[2] = {0.0, 0.0}; // v', before the clamp
+  double vt[2] = {0.0, 0.0}; // clamp_vmax(v'), the velocity the position stepped with
+  double dx[2] = {0.0, 0.0}; // x' - x
+  double g[2] = {0.0, 0.0};  // grad U(x)
+  double g1[2] = {0.0, 0.0}; // grad U(x'), for L_hat
+  double F[2] = {0.0, 0.0};  // the port force
+  double U0 = 0.0, U1 = 0.0; // U(x), U(x')
+  double vHv = NAN;          // vt' grad^2 U(x) vt for the sharp check; NaN skips it
+};
+
+struct step_books {
+  double kinetic = 0.0; // m/2 |vt|^2, the end state's
+  double delta_H = 0.0;
+  double w_damp = 0.0, w_port = 0.0, w_clamp = 0.0, w_cross = 0.0;
+  double residual = 0.0;       // r_E
+  double residual_sharp = NAN; // r_hat_E; NaN without vHv
+  double bound = 0.0;          // the cheap bound on |r_E|
+};
+
+step_books book_step(const book_step_args &a, double kappa_H = 2.0);
+
+// The cheap bound on |r_E|, from norms: kappa_H dt^2/2 [|g| (|g| + gamma |v| + |F|) / m +
+// L_hat |vt|^2]. A tolerance model, not a theorem: L_hat estimates the curvature, it does not
+// bound it; kappa_H = 2 is the companion's safety factor.
+double energy_residual_bound(double dt, double g, double gamma, double v, double F, double L_hat,
+                             double vt, double mass = 1.0, double kappa_H = 2.0);
 
 // ── obstacle-list material surrogate rollout ────────────────────────────────
 // The faithful torch-free port of the source method's differentiable

@@ -31,6 +31,7 @@
 #include <fstream>
 #include <gtest/gtest.h>
 #include <limits>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -51,14 +52,13 @@ namespace {
 
 // One immortal app shared by every test in this binary.
 //
-// Rationale: every cvc::app constructor re-registers the default volume file
-// I/O handlers into the process-wide handler map, and hdf5_io captures the
-// constructing app by reference for the lifetime of that map.  With a
-// per-test app, the first test's app would be destroyed while its hdf5_io
-// handler remains first in the dispatch list, so every later HDF5 operation
-// would run through a dangling app reference.  A single leaked app keeps all
-// handler references (and any background hierarchy threads) valid for the
-// whole process.
+// Every cvc::app constructor re-registers the default volume file I/O handlers
+// into the process-wide handler map, and the first hdf5_io registered serves
+// every later call.  This app was a workaround for hdf5_io keeping the app that
+// registered it: with a per-test app, every HDF5 operation after the first test
+// ran through a destroyed app.  hdf5_io now works through the app each call
+// passes (HierarchyThreadRunsOnTheCallersApp), so the sharing is no longer
+// needed for safety.
 app &sharedApp() {
   static app *ctx = new app; // intentionally leaked, see above
   return *ctx;
@@ -498,6 +498,65 @@ TEST_F(Hdf5VolumeTest, HierarchyDatasetsAfterWrite) {
   // Corners of the downsampled level interpolate back to the original corners.
   EXPECT_NEAR(coarse(0, 0, 0), out(0, 0, 0), 1.0);
   EXPECT_NEAR(coarse(3, 3, 3), out(15, 15, 15), 1.0);
+}
+
+// Every app registers an hdf5_io into the process-wide handler map, and the first one registered
+// serves every later call. hdf5_io used to keep the app that registered it and work through that
+// one, so a write from any other app started its hierarchy thread on the wrong app, and on freed
+// memory once that app was gone; the writer's ~app never saw the thread to join it. Here `own` is
+// not the app behind the first handler, so the thread, its results and its teardown must all be
+// its own.
+TEST_F(Hdf5VolumeTest, HierarchyThreadRunsOnTheCallersApp) {
+  const std::string threadKey = std::string("build_hierarchy_") + kDefaultDataSet;
+  const std::string p = path("callers_app.h5");
+
+  auto own = std::make_unique<app>();
+  EXPECT_EQ(own->properties("volmagick.hdf5_io.maxdim"), "128,128,128");
+  {
+    volume out = make_test_volume(*own, 4, 4, 4);
+    ASSERT_NO_THROW(out.write(p));
+  }
+  ASSERT_TRUE(own->hasThread(threadKey)) << "the hierarchy thread was started on another app";
+  thread_ptr t = own->threads(threadKey);
+  ASSERT_TRUE(t.get() != NULL);
+  t->join();
+  EXPECT_EQ(own->properties("volmagick.hdf5_io.buildhierarchy.latest"),
+            p + "|" + kDefaultDataSet + "_2x2x2");
+
+  // ~app stops and joins hierarchy work still in flight. Interrupted this early, the thread is in
+  // its bookkeeping or its initial one-second sleep; an interrupt lost in the bookkeeping kept it
+  // running past ~app's 5 s join, on the freed app.
+  {
+    volume out = make_test_volume(*own, 4, 4, 4, Float, 1.0);
+    ASSERT_NO_THROW(out.write(p));
+  }
+  t = own->threads(threadKey);
+  ASSERT_TRUE(t.get() != NULL);
+  ASSERT_TRUE(t->joinable());
+  own.reset();
+  EXPECT_FALSE(t->joinable());
+}
+
+// Every HDF5 call the hierarchy thread makes takes a library_lock, whose bookkeeping calls are
+// interruption points. An interrupt arriving there must stay pending, not be thrown and swallowed
+// (which clears it and leaves the thread running past its app's teardown).
+TEST_F(Hdf5VolumeTest, LibraryLockKeepsAnInterruptPending) {
+  std::atomic<bool> go{false};
+  std::atomic<bool> stopped{false};
+  boost::thread t([&]() {
+    while (!go.load()) // yield is not an interruption point
+      boost::this_thread::yield();
+    { hdf5_utils::library_lock lock(ctx, path("none.h5"), "test"); }
+    try {
+      boost::this_thread::interruption_point();
+    } catch (boost::thread_interrupted &) {
+      stopped = true;
+    }
+  });
+  t.interrupt(); // before the thread takes the lock
+  go = true;
+  t.join();
+  EXPECT_TRUE(stopped.load());
 }
 
 // ===========================================================================
