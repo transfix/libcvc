@@ -31,16 +31,22 @@ For the full per-method reference, see
   until the app goes. It has no key and no thread-map entry, and
   the pool destroys it, with everything it captured, as soon as it
   returns. This is the path for many small tasks (state_exec's async
-  calls, `compute_async`): no thread is created per task.
+  calls, `compute_async`): no thread is created per task, and however
+  many are submitted, `threads()` does not grow and no two of them
+  share a key or cancel each other.
 - **Cooperative interruption.** Tasks honor
   `boost::this_thread::interruption_point()` and shut down cleanly when
   interrupted (`threads(key)->interrupt()` for a keyed one; `wait()` and
   `~app` interrupt every running task, also one a worker started a
-  moment ago). `~app` drops the tasks still queued without running them,
-  and from then on `submitPooled` drops a task at once and returns
-  `false`. A dropped task is destroyed, so it can report the drop from
-  its destructor (the async host fails the call with `RuntimeError`,
-  `launch_pool_task` posts `on_error`'s value).
+  moment ago). `thread_feedback` and `thread_info` hold interruption off
+  while they keep their books, so an interrupt that arrives in them
+  stays pending for the task's next interruption point instead of being
+  swallowed. `~app` stops the pool before anything else but the async
+  host: no queued task starts after that, the queued ones are dropped
+  without running, and from then on `submitPooled` drops a task at once
+  and returns `false`. A dropped task is destroyed, so it can report the
+  drop from its destructor (the async host fails the call with
+  `RuntimeError`, `launch_pool_task` posts `on_error`'s value).
 - **Exception-safe.** Exceptions thrown by a task are logged and do not
   take down the pool or other workers.
 - **Dynamic resizing.** `setThreadPoolSize()` may be called while tasks

@@ -366,13 +366,16 @@ public:
   }
 
   // Run `t` on the app's background task pool. At most getThreadPoolSize() tasks run at once;
-  // queued ones start in priority order, and in submission order within a priority.
+  // queued ones start in priority order, and in submission order within a priority. Once ~app has
+  // begun stopping the pool, no queued task starts (see submitPooled for what happens to it).
   //
-  // wait=false: an anonymous task, the same as submitPooled(t, priority). It runs on one of the
-  // pool's persistent worker threads, has no thread key and no entry in threads() (so
-  // hasThread/threadInfo/threadProgress by key, threadKey() and threadsChanged don't see it), and
-  // `key` is not used. The pool destroys it, and with it everything it captured, on the worker
-  // as soon as it returns. wait_for_threads() and ~app interrupt it if it is running.
+  // wait=false: fire-and-forget, an anonymous task, the same as submitPooled(t, priority). It runs
+  // on one of the pool's persistent worker threads, has no thread key and no entry in threads()
+  // (so hasThread/threadInfo/threadProgress by key, threadKey() and threadsChanged don't see it),
+  // and `key` is not used. So these never pile up in threads(), however many are submitted, and
+  // two of them never share a key, or cancel each other through one, queued or running. The pool
+  // destroys it, and with it everything it captured, on the worker as soon as it returns.
+  // wait_for_threads() and ~app interrupt it if it is running.
   //
   // wait=true: a keyed task. A running thread already under `key` is interrupted and joined
   // first; the task then gets a thread of its own, registered under `key` in threads() before
@@ -391,8 +394,8 @@ public:
       return;
     }
 
-    // Cancel a running thread with this key. (It may have been removed by another thread
-    // between hasThread() and threads().)
+    // Cancel a running thread with this key. (It may have gone between hasThread() and
+    // threads(), removed or replaced by another thread.)
     if (hasThread(key)) {
       thread_ptr tptr = threads(key);
       if (tptr) {
@@ -446,9 +449,11 @@ public:
   // fn/on_done (e.g. a shared_ptr<std::atomic<int>>). parallel_for stays a plain blocking barrier —
   // this only moves the wait off the caller's thread; it does not make the fan-out itself
   // non-blocking. A throw from fn propagates on the worker and skips on_done; each call gets its
-  // own background job (an anonymous submitPooled task), so concurrent calls do not cancel each
-  // other. A job the app drops unrun (submitted or still queued once ~app has stopped the pool)
-  // calls neither callback and releases both.
+  // own background job (an anonymous submitPooled task, with no thread key), so concurrent calls
+  // do not cancel each other, and calling this a few times a second does not grow threads(): the
+  // job is never in it, and its worker destroys it, with fn and on_done, as soon as it ends. A job
+  // the app drops unrun (submitted or still queued once ~app has stopped the pool) calls neither
+  // callback and releases both.
   void compute_async(int n, std::function<void(int)> fn, std::function<void()> on_done,
                      thread_priority priority = PRIORITY_NORMAL);
   // The same, calling exactly one of on_done and on_error: on_error(message) instead of on_done
@@ -491,20 +496,28 @@ public:
 
   // Used to easily manage saving/restoring thread info as we
   // traverse a threads stack.
+  //
+  // thread_info and thread_feedback only keep books, so they hold off interruption while they
+  // call into the app (each of those calls is an interruption point).  An interrupt that arrives
+  // meanwhile stays pending for the thread's next interruption point.  Their catch-alls used to
+  // swallow it as a thread_interrupted, and boost clears the request when it throws, so a thread
+  // interrupted in here kept running: ~app gave up joining it after 5s and freed the app under it.
   class thread_info {
   public:
     // New: explicit app context
     thread_info(app &ctx, const std::string &info = "running") : _app(ctx) {
+      boost::this_thread::disable_interruption keep_interrupt_pending;
       try {
         _origInfo = _app.thisThreadInfo();
         _origProgress = _app.threadProgress();
         _app.thisThreadInfo(info);
       } catch (...) {
-        // Swallow exceptions during construction (thread may be interrupted)
+        // Bookkeeping never fails the caller.
       }
     }
 
     ~thread_info() {
+      boost::this_thread::disable_interruption keep_interrupt_pending;
       try {
         _app.thisThreadInfo(_origInfo);
       } catch (...) {
@@ -528,19 +541,21 @@ public:
     // New: explicit app context
     thread_feedback(app &ctx, const std::string &key = "")
         : _app(ctx), _threadInfo(ctx, key.empty() ? "running" : key), _key(key) {
+      boost::this_thread::disable_interruption keep_interrupt_pending;
       try {
         if (!_key.empty())
           _app.threadProgress(_key, 0.0);
         else
           _app.threadProgress(0.0);
       } catch (...) {
-        // Swallow exceptions during construction (thread may be interrupted)
+        // Bookkeeping never fails the caller.
       }
     }
 
     ~thread_feedback() {
-      // CRITICAL: Must catch exceptions in destructor to prevent std::terminate()
-      // finishThreadProgress() invokes interruption_point() which throws when interrupted
+      // Nothing may escape a destructor (std::terminate).  Interruption is held off, so the
+      // interruption points in these calls can't throw; the catch-all covers anything else.
+      boost::this_thread::disable_interruption keep_interrupt_pending;
       try {
         // Set status to "completed" and progress to 100%
         if (!_key.empty()) {
@@ -655,7 +670,8 @@ protected:
     }
   };
 
-  // Queue a keyed task (startThreadPooled with wait=true).
+  // Queue a keyed task (startThreadPooled with wait=true) under the caller's own key. (Anonymous
+  // tasks go through submitPooled and have no key, so none is reserved for a queued task.)
   template <class T>
   void submitToThreadPool(const std::string &key, const T &task, thread_priority priority) {
     boost::this_thread::interruption_point();
@@ -760,7 +776,9 @@ protected:
   std::uint64_t _poolInterruptGen = 0;
   unsigned int _poolThreadCount = 0; // workers running or asked for
   std::uint64_t _poolSeq = 0;        // next ThreadPoolTask::seq
-  bool _poolStopping = false;        // ~app: run nothing more
+  // Set by ~app (stopThreadPool), first thing after the async host: no pending task starts any
+  // more, and a task submitted from then on is dropped unrun.
+  bool _poolStopping = false;
 
   // Shared fork-join compute pool (computePool()). Lazily built; the mutex guards
   // that first construction. unique_ptr so app.h needs only a forward declaration.

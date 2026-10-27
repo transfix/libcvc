@@ -50,7 +50,9 @@ jobs:
       # grl-snam-weights lands here; --preload-file bakes the trained CoefMLP into
       # nav_city_swarm.data so the browser swarm drives with the published policy.
       CVC_WASM_NAV_WEIGHTS: /opt/cvc-wasm/deps-wasm-mt/share/grl-snam-weights/coef_sdf.cvcnav
-      DEMOS: 'terrain_lab lsystem_forest lsystem_forest_ari lsystem_coast volren_bunny volren_bunny_ari volslice_bunny volslice_bunny_ari ari nav_city_swarm nav_city_drive nav_fog_ghost bunny_shadow'
+      # The .ari demos (lsystem_forest_ari, volren_bunny_ari, volslice_bunny_ari, fem_gallery_ari) are
+      # arigl on their documents: arigl is the binary to expect, their own dirs only redirect to it.
+      DEMOS: 'terrain_lab lsystem_forest arigl lsystem_coast volren_bunny volslice_bunny ari arigl_term nav_city_swarm nav_city_drive nav_fog_ghost bunny_shadow'
     steps:
       - name: Checkout master
         uses: actions/checkout@v4
@@ -80,6 +82,15 @@ jobs:
           cvcpkg install pegtl --prefix "$CVC_WASM_DEPS" \
             --platform wasm --arch wasm32 --config release --link static \
             --no-fallback-to-source
+          # eigen + libigl (header-only): cvc's mesh_ops / fem, which the FEM gallery's fe_lab and
+          # mesh_lab nodes run on. Without them CVC_ENABLE_LIBIGL goes off and those nodes don't exist.
+          # sdl3: keyboard and mouse for the documents' on_key / on_pointer (cvcGL's SdlInput).
+          for p in eigen libigl sdl3; do
+            echo "=== $p ==="
+            cvcpkg install "$p" --prefix "$CVC_WASM_DEPS" \
+              --platform wasm --arch wasm32 --config release --link static \
+              --no-fallback-to-source
+          done
           # ftxui: the Ariadne terminal backend. build-wasm-demo.sh builds the `ari` page (an
           # .ari document in an xterm.js terminal) into the gallery only when it is here, and the
           # live check below expects ari, so it may not be skipped either.

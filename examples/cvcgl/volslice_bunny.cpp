@@ -24,6 +24,8 @@
 // no shadow (the shadow baker consumes opaque geometry only), and adding the
 // node flips its renderer to sequential translucency (UseOITOff — see
 // VolSliceNode.h; slice compositing is order-dependent).
+#include "demos_menu.h" // the gallery's Demos menu
+
 #include <cvc/core/app.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/geometry_file_io.h>
@@ -301,6 +303,10 @@ int main(int argc, char **argv) {
   ui.setDrawCallback([&]() {
     if (no_ui && !capturing)
       return;
+    if (ImGui::BeginMainMenuBar()) {
+      cvc_examples::demos_menu("volslice_bunny");
+      ImGui::EndMainMenuBar();
+    }
     ImGui::SetNextWindowPos(ImVec2(12, 12), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(330, 0), ImGuiCond_FirstUseEver);
     if (ImGui::Begin("volslice — VolumeRover2 slice renderer")) {
@@ -363,7 +369,7 @@ int main(int argc, char **argv) {
   auto last_report = std::chrono::steady_clock::now();
   auto last_t = last_report;
 
-  while (!view.windowClosed()) {
+  while (!view.windowClosed() && !cvc_examples::demo_switch_requested()) {
     ++ticks;
     double dt;
     if (capturing) {

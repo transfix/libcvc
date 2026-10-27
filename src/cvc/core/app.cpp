@@ -233,43 +233,58 @@ void app::registerDefaultHandlers() {
 // 09/02/2026 -- Joe R. -- Creation; the body used to be empty, so a
 //                         fixture-owned app could be destroyed out from
 //                         under a running handler thread.
+// 10/25/2026 -- Joe R. -- Close the background-task pool first, and sweep
+//                         again for threads started while we were joining.
+// 10/27/2026 -- Joe R. -- The pool is stopped by stopThreadPool(), which also
+//                         interrupts and joins its persistent workers.
 app::~app() {
   // Async calls first: their kernels run on the background pool and post to the exec scheduler,
-  // so cancel them and wait for their kernels while both are still here.
+  // so cancel them and wait for their kernels while both are still here (the pool is still open).
   if (_execAsyncHost)
     _execAsyncHost->shutdown();
 
-  // The background pool next: nothing queued starts any more, running tasks are interrupted,
-  // and its workers are joined. (Keyed pool tasks have threads of their own in _threads, below.)
+  // The background pool next: nothing queued starts any more (a pooled thread winding down would
+  // otherwise start the next task after the snapshot below, and that task would run on into a
+  // destroyed app), a task submitted from here on is dropped unrun, running anonymous tasks are
+  // interrupted, and the pool's workers are joined. The dropped tasks are destroyed outside the
+  // pool's lock, in case their captures call back in. (Keyed pool tasks have threads of their
+  // own in _threads, below.)
   stopThreadPool();
 
-  // Copy and clear under the lock, then join without it: a worker winding
-  // down takes _threadsMutex itself, so joining while holding it deadlocks.
-  thread_map remaining;
-  {
-    boost::mutex::scoped_lock lock(_threadsMutex);
-    remaining = _threads;
-    _threads.clear();
-  }
-
-  // Interrupt everything first, then join -- many algorithms have
-  // interruption checkpoints, so this is far quicker than serial joins.
-  BOOST_FOREACH (thread_map::value_type &val, remaining) {
-    if (!val.second)
-      continue;
-    try {
-      val.second->interrupt();
-    } catch (...) {
+  // Take the map and clear it under the lock, then join without it: a worker
+  // winding down takes _threadsMutex itself, so joining while holding it
+  // deadlocks.  Repeat while joining turned up more -- a keyed pool thread
+  // that had already taken its successor when we stopped the pool registers
+  // that one after our snapshot, as may any app thread that starts another --
+  // bounded, so a thread that keeps spawning cannot hold the app hostage.
+  for (int sweep = 0; sweep < 8; ++sweep) {
+    thread_map remaining;
+    {
+      boost::mutex::scoped_lock lock(_threadsMutex);
+      remaining.swap(_threads);
     }
-  }
+    if (remaining.empty())
+      break;
 
-  BOOST_FOREACH (thread_map::value_type &val, remaining) {
-    if (!val.second)
-      continue;
-    try {
-      if (val.second->joinable())
-        val.second->try_join_for(boost::chrono::seconds(5));
-    } catch (...) {
+    // Interrupt everything first, then join -- many algorithms have
+    // interruption checkpoints, so this is far quicker than serial joins.
+    BOOST_FOREACH (thread_map::value_type &val, remaining) {
+      if (!val.second)
+        continue;
+      try {
+        val.second->interrupt();
+      } catch (...) {
+      }
+    }
+
+    BOOST_FOREACH (thread_map::value_type &val, remaining) {
+      if (!val.second)
+        continue;
+      try {
+        if (val.second->joinable())
+          val.second->try_join_for(boost::chrono::seconds(5));
+      } catch (...) {
+      }
     }
   }
 }
@@ -803,14 +818,19 @@ std::string app::threadKey() {
 
 void app::removeThread(const std::string &key) { threads(key, thread_ptr()); }
 
+// The first of hint, hint0, hint1, ... that names no tracked thread.  (Queued
+// pooled jobs need no key held for them: an anonymous one has no key, and a
+// keyed one runs under its caller's.)
+// 10/25/2026 -- Joe R. -- One lock for the whole search.
 std::string app::uniqueThreadKey(const std::string &hint) {
-  std::string h = hint.empty() ? "thread" : hint;
-  // Make a unique key name to use by adding a number to the key
-  std::string uniqueThreadKey = h;
+  boost::this_thread::interruption_point();
+  boost::mutex::scoped_lock lock(_threadsMutex);
+  const std::string h = hint.empty() ? "thread" : hint;
+  std::string key = h;
   unsigned int i = 0;
-  while (hasThread(uniqueThreadKey))
-    uniqueThreadKey = h + boost::lexical_cast<std::string>(i++);
-  return uniqueThreadKey;
+  while (_threads.count(key))
+    key = h + boost::lexical_cast<std::string>(i++);
+  return key;
 }
 
 void app::threadInfo(const std::string &key, const std::string &infostr) {
@@ -1499,7 +1519,10 @@ void app::runKeyedPoolTask(ThreadPoolTask &task) {
   {
     thread_info ti(*this, "Processing: " + task.key);
     runPoolTask(task);
-    task.task = nullptr; // its captures go before it counts as done
+    // Its captures go before it counts as done, with interruption held off as on an anonymous
+    // task's worker: a destructor that reaches an interruption point (a join, say) must not throw.
+    boost::this_thread::disable_interruption destroying;
+    task.task = nullptr;
   }
   // The next task, if one may start: a keyed one starts here, before this thread ends, so that
   // joining this thread and then looking up the next key finds it (a chain of keyed tasks on a

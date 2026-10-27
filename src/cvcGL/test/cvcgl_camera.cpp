@@ -203,6 +203,16 @@ int main() {
   double ku[3];
   kc.getPose(ku, f, u);
   check("new key 'Up' moves forward", dist(kb, ku) > 1e-3);
+  // a binding in SDL's spelling matches VTK's keysym for the same key
+  kc.setKeyBinding("forward", "PageUp");
+  double kp[3];
+  kc.getPose(kp, f, u);
+  kc.keyDown("Prior"); // VTK's name for Page Up
+  kc.update(1.0);
+  kc.keyUp("Prior");
+  double kq[3];
+  kc.getPose(kq, f, u);
+  check("SDL's 'PageUp' binding moves on VTK's 'Prior'", dist(kp, kq) > 1e-3);
   // API rebind writes state
   kc.setKeyBinding("forward", "i");
   check("setKeyBinding writes state", root("test.kcam.keys.forward").value() == "i");

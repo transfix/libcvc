@@ -11,6 +11,9 @@
 //   type: scene_panel          -> cvc::gl::ui::ScenePanel(sg, &sceneOpen)          (its own window)
 //   type: stage_lighting_panel -> cvc::gl::ui::StageLightingPanel(*rig, &lightingOpen) (own window;
 //   needs rig)
+//   type: scene_settings       -> cvc::gl::ui::SceneMenuItems(sg, nullptr, nullptr)
+//                                  (shadows and the grid/axis/box chrome, without the panel ticks:
+//                                  for a host's own menu, over documents that place no panels)
 //
 // The panel open-flags are SHARED between scene_menu (which toggles them) and the panels (which
 // read them), so a menu tick opens/closes its panel — the exact wiring the demos hand-rolled. Every
@@ -19,8 +22,8 @@
 // Call AFTER realize_scene (so a realized StageLighting rig exists to pass) and BEFORE the render
 // loop. `backend`, `sg`, and `*rig` must outlive the backend's draw callbacks (the registered draw
 // fns hold them by reference / pointer). Pass rig = nullptr when the scene has no rig; then
-// `stage_lighting_panel` is simply not registered and a document using it draws the core
-// placeholder.
+// `stage_lighting_panel` draws nothing. A host that loads another document registers them again,
+// with that document's rig.
 //
 // ImGui-only. On a non-ImGui backend nothing here is registered; and built without CVC_ENABLE_IMGUI
 // the cvc::gl::ui:: composites are inert stubs, so this still links and no-ops. A document that

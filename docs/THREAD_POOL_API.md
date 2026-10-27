@@ -92,7 +92,7 @@ for (int i = 0; i < 100; i++) {
   app.startThreadPooled(key, [i]() {
     thread_feedback feedback("Processing batch " + std::to_string(i));
     // Do work...
-  }, priority, false); // false = don't wait, use unique key
+  }, priority, false); // false = anonymous: `key` is unused, nothing goes in threads()
 }
 ```
 
@@ -105,7 +105,9 @@ for (int i = 0; i < 100; i++) {
 3. **Anonymous tasks** (`wait=false`, `submitPooled`): run on persistent worker
    threads, started on demand up to the pool size and kept until `~app`. A
    finished task is destroyed on its worker before it counts as done, so it
-   keeps nothing alive. They have no key and never appear in `app.threads()`.
+   keeps nothing alive. They have no key and never appear in `app.threads()`,
+   so submitting many (`compute_async` a few times a second, say) does not
+   grow it, and none needs reaping once it ends.
 4. **Keyed tasks** (`wait=true`): get a thread of their own, registered in
    `app.threads()` under the key before the task runs. When the pool has room
    at submission for it and for every task already queued (anonymous ones
@@ -114,10 +116,15 @@ for (int i = 0; i < 100; i++) {
    queue. The entry stays after the task ends, like `startThread`'s.
 5. **Shutdown**: `wait()` interrupts the running tasks and waits (up to 5 s)
    for the pool to drain, so it is not a completion barrier: wait on the
-   tasks' own completion for that. `~app` interrupts the running tasks
-   (every task a worker has taken, however recently: a new worker takes
-   no task until it is among the workers these interrupts go to), drops
-   the queued ones and joins the workers. A dropped task is destroyed
+   tasks' own completion for that. `~app` stops the pool first (after
+   only the async host): from then on no queued task starts. It
+   interrupts the running tasks (every task a worker has taken, however
+   recently: a new worker takes no task until it is among the workers
+   these interrupts go to), drops the queued ones and joins the workers;
+   then it interrupts and joins every thread in `app.threads()`,
+   keyed pool tasks included, sweeping the map again (a bounded number
+   of times) for a keyed thread that one winding down registered after
+   the first sweep. A dropped task is destroyed
    without running, and so is one submitted after that point
    (`submitPooled` then returns `false`); a task whose submitter must
    hear of it reports it from its destructor, as the async host,

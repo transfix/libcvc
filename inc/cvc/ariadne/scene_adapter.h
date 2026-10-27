@@ -41,6 +41,12 @@ public:
   virtual void realize(const Scene &scene, const std::string &prefix,
                        std::vector<std::string> *warns) = 0;
 
+  // Take down what the last realize() built (its nodes, lights, physics, and the view properties
+  // it set), so the next document starts on an empty stage. AppRuntime::load() calls it before
+  // each load, when a host switches documents as much as on a hot reload. The default keeps
+  // everything, which is right only for an adapter that never realizes.
+  virtual void clear() {}
+
   // Mirror bound `visible:` state onto the realized scene's nodes. Called once per
   // AppRuntime::drain(). A no-op until something has been realized.
   virtual void sync_visibility(cvc::app &app) = 0;

@@ -21,6 +21,7 @@
 //                  --frames 300 --out /tmp/city && \
 //   ffmpeg -framerate 30 -i /tmp/city/frame_%05d.png -c:v libx264 -pix_fmt yuv420p city.mp4
 
+#include "demos_menu.h" // the gallery's Demos menu
 #include "nav_common.h"
 
 #include <algorithm> // std::nth_element / clamp / min / max for --lod partition
@@ -1737,6 +1738,7 @@ int main(int argc, char **argv) {
   ImGui::SetCurrentContext(ui.imguiContext());
   ui.setDrawCallback([&] {
     if (ImGui::BeginMainMenuBar()) {
+      cvc_examples::demos_menu("nav_city_swarm");
       if (ImGui::BeginMenu("Sim")) {
         // Pause and Step are the clock's controls (sim.paused, a step request), so they act
         // on world time itself: Step runs exactly one navigator step and stays paused.
@@ -2091,7 +2093,7 @@ int main(int argc, char **argv) {
   double last = 0.0;
   long frame = 0;
   double eye[3], focal[3];
-  while (!view.windowClosed()) {
+  while (!view.windowClosed() && !cvc_examples::demo_switch_requested()) {
     double t, dt;
     if (capturing) {
       t = frame / fps;

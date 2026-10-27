@@ -24,16 +24,20 @@
 #include <atomic>
 #include <boost/thread.hpp>
 #include <chrono>
+#include <cmath>
 #include <cvc/core/app.h>
 #include <cvc/core/exception.h>
 #include <cvc/core/types.h>
 #include <cvc/utility/composite_function.h>
 #include <cvc/volume/voxels.h>
+#include <fstream>
 #include <gtest/gtest.h>
 #include <iomanip>
 #include <iostream>
 #include <limits>
 #include <mutex>
+#include <sstream>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -458,6 +462,317 @@ TEST_F(VoxelsTest, Histogram) {
 
   EXPECT_EQ(size, 256u);
   EXPECT_NE(bins, nullptr);
+}
+
+namespace {
+// Compares a histogram with the bins it should hold, bin by bin.
+void expect_bins(const boost::tuple<const uint64 *, uint64> &h, const std::vector<uint64> &expected,
+                 const std::string &what) {
+  ASSERT_EQ(h.get<1>(), expected.size()) << what;
+  for (std::size_t b = 0; b < expected.size(); ++b)
+    EXPECT_EQ(h.get<0>()[b], expected[b]) << what << " bin " << b;
+}
+} // namespace
+
+TEST_F(VoxelsTest, HistogramSkipsNaNVoxels) {
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  for (const data_type type : {Float, Double}) {
+    // min 0 and max 1 come from the numbers; over 4 bins v goes to bin trunc(3v), and the NaN,
+    // in no bin, is not counted.
+    voxels v(ctx, dimension(4, 1, 1), type);
+    v(0, 0.0);
+    v(1, nan);
+    v(2, 1.0);
+    v(3, 0.5);
+    expect_bins(v.histogram(4), {1, 1, 0, 1}, v.voxelTypeStr());
+
+    // NaN at voxel 0 leaves min and max NaN (MinMaxSkipsNaNButNotAtVoxelZero): nothing is in range.
+    voxels w(ctx, dimension(4, 1, 1), type);
+    w(0, nan);
+    w(1, 0.0);
+    w(2, 1.0);
+    w(3, 0.5);
+    expect_bins(w.histogram(4), {0, 0, 0, 0}, std::string(w.voxelTypeStr()) + " NaN min/max");
+  }
+}
+
+TEST_F(VoxelsTest, HistogramSkipsVoxelsOutsideASetMinMax) {
+  // A min/max set narrower than the data, as a file header can: over [0, 7] and 8 bins, v goes to
+  // bin trunc(v). -0.5 and 7.5 are out of range and skipped, not counted into bins 0 and 7, where
+  // their bins truncate to.
+  voxels v(ctx, dimension(6, 1, 1), Float);
+  const double values[6] = {-0.5, 0.0, 1.75, 3.5, 7.0, 7.5};
+  for (uint64 i = 0; i < 6; ++i)
+    v(i, values[i]);
+  v.min(0.0);
+  v.max(7.0);
+  expect_bins(v.histogram(8), {1, 1, 0, 1, 0, 0, 0, 1}, "narrow");
+
+  // min == max: only the voxels equal to it, all in the middle bin.
+  voxels f(ctx, dimension(4, 1, 1), UChar);
+  f(0, 1.0);
+  f(1, 3.0);
+  f(2, 3.0);
+  f(3, 5.0);
+  f.min(3.0);
+  f.max(3.0);
+  expect_bins(f.histogram(5), {0, 0, 2, 0, 0}, "min == max");
+
+  // A constant volume still puts every voxel there.
+  voxels c(ctx, dimension(3, 2, 2), Int);
+  c.fill(-7.0);
+  expect_bins(c.histogram(5), {0, 0, 12, 0, 0}, "constant");
+}
+
+TEST_F(VoxelsTest, HistogramNeverIndexesOutsideItsBins) {
+  // Each of these computed an index outside the array: voxels far outside a set min/max, an
+  // infinite max (inf / inf is undefined), and zero bins.
+  voxels v(ctx, dimension(4, 1, 1), Double);
+  v(0, -100.0);
+  v(1, 2.0);
+  v(2, 100.0);
+  v(3, 1e300);
+  v.min(0.0);
+  v.max(8.0);
+  expect_bins(v.histogram(9), {0, 0, 1, 0, 0, 0, 0, 0, 0}, "far outside");
+
+  // max is inf: a finite voxel's bin is trunc(v / inf * 3) = 0, and the inf voxel's is undefined.
+  voxels inf(ctx, dimension(3, 1, 1), Float);
+  inf(0, 0.0);
+  inf(1, 1.0);
+  inf(2, std::numeric_limits<double>::infinity());
+  expect_bins(inf.histogram(4), {2, 0, 0, 0}, "infinite max");
+
+  expect_bins(v.histogram(0), {}, "zero bins");
+  expect_bins(v.histogram(9), {0, 0, 1, 0, 0, 0, 0, 0, 0}, "after zero bins");
+}
+
+// ============================================================================
+// Every Voxel Type: min/max, histogram, map
+// ============================================================================
+
+namespace {
+// One row per voxel type: the low, middle and high values a test volume holds, each exact in the
+// type and in double. The signed types go negative and the 32/64-bit types go past 2^31.
+struct type_values {
+  data_type type;
+  double lo, mid, hi;
+};
+const type_values kEveryType[] = {
+    {UChar, 3.0, 190.0, 250.0},
+    {UShort, 7.0, 49000.0, 65000.0},
+    {UInt, 5.0, 3000000000.0, 4000000000.0},
+    {Float, -1536.25, 3000.5, 4096.5},
+    {Double, -12345.678, 70000.25, 98765.4321},
+    {UInt64, 3.0, 3298534883328.0, 4398046511105.0}, // 3 * 2^40, 2^42 + 1
+    {Char, -120.0, 60.0, 117.0},
+    {Int, -2000000000.0, 1000000000.0, 2100000000.0},
+    {Int64, -2199023255563.0, 2199023255552.0, 4398046511107.0}, // -(2^41 + 11), 2^41, 2^42 + 3
+};
+static_assert(sizeof(kEveryType) / sizeof(kEveryType[0]) == Undefined, "one row per voxel type");
+
+// Voxels mid, lo, hi, mid, lo, hi, ...: a third each, and voxel 0 is mid, so a min/max that only
+// looks at voxel 0 reports min == max. mid sits 2/3 to 4/5 of the way up, in the middle of 3 bins.
+voxels make_three_value_volume(app &ctx, const type_values &t) {
+  voxels v(ctx, dimension(4, 3, 2), t.type);
+  const double values[3] = {t.mid, t.lo, t.hi};
+  for (uint64 i = 0; i < 24; ++i)
+    v(i, values[i % 3]);
+  return v;
+}
+} // namespace
+
+TEST_F(VoxelsTest, MinMaxScansEveryVoxelType) {
+  for (const type_values &t : kEveryType) {
+    voxels v = make_three_value_volume(ctx, t);
+    ASSERT_EQ(v(0), t.mid) << v.voxelTypeStr(); // stored exactly
+    ASSERT_EQ(v(1), t.lo) << v.voxelTypeStr();
+    ASSERT_EQ(v(2), t.hi) << v.voxelTypeStr();
+    EXPECT_EQ(v.min(), t.lo) << v.voxelTypeStr();
+    EXPECT_EQ(v.max(), t.hi) << v.voxelTypeStr();
+  }
+}
+
+TEST_F(VoxelsTest, HistogramSpansTheRangeForEveryVoxelType) {
+  for (const type_values &t : kEveryType) {
+    voxels v = make_three_value_volume(ctx, t);
+    auto three = v.histogram(3);
+    ASSERT_EQ(three.get<1>(), 3u);
+    const uint64 *bins = three.get<0>();
+    EXPECT_EQ(bins[0], 8u) << v.voxelTypeStr(); // lo
+    EXPECT_EQ(bins[1], 8u) << v.voxelTypeStr(); // mid
+    EXPECT_EQ(bins[2], 8u) << v.voxelTypeStr(); // hi
+
+    auto full = v.histogram(256);
+    ASSERT_EQ(full.get<1>(), 256u);
+    bins = full.get<0>();
+    EXPECT_EQ(bins[0], 8u) << v.voxelTypeStr();
+    EXPECT_EQ(bins[255], 8u) << v.voxelTypeStr();
+    uint64 total = 0;
+    for (uint64 b = 0; b < 256; ++b)
+      total += bins[b];
+    EXPECT_EQ(total, 24u) << v.voxelTypeStr();
+  }
+}
+
+TEST_F(VoxelsTest, MinMaxStartsSixtyFourBitTypesFromTheVoxelNotItsDouble) {
+  // Voxel 0 at the type's extreme: as a double it rounds up to 2^64 / 2^63, which does not convert
+  // back to the type.
+  voxels u(ctx, dimension(3, 2, 2), UInt64);
+  u.fill(12.0);
+  reinterpret_cast<uint64 *>(*u)[0] = std::numeric_limits<uint64>::max();
+  u(5, 9007199254740993.0); // 2^53 + 1 as a double: 2^53
+  EXPECT_EQ(u.min(), 12.0);
+  EXPECT_EQ(u.max(), static_cast<double>(std::numeric_limits<uint64>::max()));
+
+  voxels s(ctx, dimension(3, 2, 2), Int64);
+  s.fill(-12.0);
+  reinterpret_cast<int64 *>(*s)[0] = std::numeric_limits<int64>::max();
+  reinterpret_cast<int64 *>(*s)[7] = std::numeric_limits<int64>::min();
+  EXPECT_EQ(s.min(), static_cast<double>(std::numeric_limits<int64>::min()));
+  EXPECT_EQ(s.max(), static_cast<double>(std::numeric_limits<int64>::max()));
+}
+
+TEST_F(VoxelsTest, MinMaxSkipsNaNButNotAtVoxelZero) {
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  for (const data_type type : {Float, Double}) {
+    voxels v(ctx, dimension(4, 1, 1), type);
+    v(0, 2.0);
+    v(1, nan);
+    v(2, -5.0);
+    v(3, 9.0);
+    EXPECT_EQ(v.min(), -5.0) << v.voxelTypeStr();
+    EXPECT_EQ(v.max(), 9.0) << v.voxelTypeStr();
+
+    // NaN at voxel 0 starts both, and nothing compares below or above it.
+    voxels w(ctx, dimension(4, 1, 1), type);
+    w(0, nan);
+    w(1, -5.0);
+    w(2, 9.0);
+    EXPECT_TRUE(std::isnan(w.min())) << w.voxelTypeStr();
+    EXPECT_TRUE(std::isnan(w.max())) << w.voxelTypeStr();
+  }
+}
+
+TEST_F(VoxelsTest, MapWritesEveryVoxelType) {
+  // Voxel i holds i % 10, so map(lo, hi) sends it to lo + (i % 10) * step, step = (hi - lo) / 9;
+  // every step below is exact, and UInt and the 64-bit types go past 2^31.
+  struct target {
+    data_type type;
+    double lo, step;
+  };
+  const target targets[] = {
+      {UChar, 10.0, 10.0},
+      {UShort, 1000.0, 1000.0},
+      {UInt, 0.0, 268435456.0}, // 2^28
+      {Float, -9.0, 2.0},
+      {Double, -90.0, 10.0},
+      {UInt64, 0.0, 8589934592.0}, // 2^33
+      {Char, -90.0, 20.0},
+      {Int, -1207959552.0, 268435456.0},      // -9 * 2^27, 2^28
+      {Int64, -77309411328.0, 17179869184.0}, // -9 * 2^33, 2^34
+  };
+  static_assert(sizeof(targets) / sizeof(targets[0]) == Undefined, "one row per voxel type");
+  for (const target &t : targets) {
+    voxels v(ctx, dimension(5, 2, 2), t.type);
+    for (uint64 i = 0; i < 20; ++i)
+      v(i, double(i % 10));
+    const double hi = t.lo + 9.0 * t.step;
+    v.map(t.lo, hi);
+    for (uint64 i = 0; i < 20; ++i)
+      EXPECT_EQ(v(i), t.lo + double(i % 10) * t.step) << v.voxelTypeStr() << " voxel " << i;
+    v.unsetMinMax(); // the range of what was written, not the one map() set
+    EXPECT_EQ(v.min(), t.lo) << v.voxelTypeStr();
+    EXPECT_EQ(v.max(), hi) << v.voxelTypeStr();
+  }
+}
+
+// ============================================================================
+// CUDA Kernels: Every Voxel Type
+// ============================================================================
+
+namespace {
+// Each voxel type's case label and the element type its kernel must launch on: the one operator()
+// reads for that type (Char is signed char).
+struct voxel_case {
+  const char *label;
+  const char *element;
+};
+const voxel_case kEveryCase[] = {
+    {"case UChar:", "<unsigned char>"}, {"case UShort:", "<unsigned short>"},
+    {"case UInt:", "<unsigned int>"},   {"case Float:", "<float>"},
+    {"case Double:", "<double>"},       {"case UInt64:", "<uint64>"},
+    {"case Char:", "<signed char>"},    {"case Int:", "<int>"},
+    {"case Int64:", "<int64>"},
+};
+static_assert(sizeof(kEveryCase) / sizeof(kEveryCase[0]) == Undefined, "one row per voxel type");
+} // namespace
+
+TEST_F(VoxelsTest, CudaLaunchersHaveACaseForEveryVoxelType) {
+  // voxels_kernels.cu is compiled only with CUDA, so this reads its source: every launcher's switch
+  // over voxel_type needs a case per voxel type (without one it launched nothing, leaving a resize
+  // all zeros and a min/max reading uninitialised block results).
+  const std::string here = __FILE__;
+  const std::string cu =
+      here.substr(0, here.find_last_of("/\\") + 1) + "../volume/voxels_kernels.cu";
+  std::ifstream in(cu, std::ios::binary);
+  if (!in)
+    GTEST_SKIP() << "no source tree at " << cu;
+  std::ostringstream text;
+  text << in.rdbuf();
+  const std::string src = text.str();
+
+  const std::string kSwitch = "switch (voxel_type) {";
+  int launchers = 0;
+  for (std::string::size_type at = src.find(kSwitch); at != std::string::npos;
+       at = src.find(kSwitch, at + 1)) {
+    const std::string::size_type decl = src.rfind("extern \"C\"", at);
+    ASSERT_NE(decl, std::string::npos);
+    const std::string::size_type paren = src.find('(', decl);
+    const std::string::size_type name = src.find_last_of(' ', paren) + 1;
+    const std::string launcher = src.substr(name, paren - name);
+    const std::string::size_type end = src.find("\n  }", at); // the switch's closing brace
+    ASSERT_NE(end, std::string::npos) << launcher;
+    const std::string body = src.substr(at, end - at);
+    ++launchers;
+    for (const voxel_case &c : kEveryCase) {
+      const std::string::size_type label = body.find(c.label);
+      if (label == std::string::npos) {
+        ADD_FAILURE() << launcher << " has no " << c.label;
+        continue;
+      }
+      const std::string launch = body.substr(label, body.find("break;", label) - label);
+      EXPECT_NE(launch.find(c.element), std::string::npos)
+          << launcher << ": " << c.label << " does not launch on " << c.element;
+    }
+  }
+  EXPECT_GE(launchers, 9) << "the scan lost a launcher";
+}
+
+TEST_F(VoxelsTest, CudaResizeAndMinMaxMatchTheCpuForEveryVoxelType) {
+  // The same launchers run on a GPU, against the CPU (skipped without one).
+  if (!voxels::cuda_available())
+    GTEST_SKIP() << "CUDA not available";
+  const dimension whole(4, 3, 2), bigger(7, 5, 3);
+  for (const type_values &t : kEveryType) {
+    voxels cpu = make_three_value_volume(ctx, t);
+    voxels gpu = make_three_value_volume(ctx, t);
+    gpu.enableCUDA(0);
+    ASSERT_TRUE(gpu.using_cuda()) << gpu.voxelTypeStr();
+    EXPECT_EQ(gpu.min(0, 0, 0, whole), cpu.min(0, 0, 0, whole)) << gpu.voxelTypeStr();
+    EXPECT_EQ(gpu.max(0, 0, 0, whole), cpu.max(0, 0, 0, whole)) << gpu.voxelTypeStr();
+
+    cpu.resize(bigger);
+    gpu.resize(bigger);
+    ASSERT_TRUE(gpu.voxel_dimensions() == bigger) << gpu.voxelTypeStr();
+    for (uint64 i = 0; i < bigger.size(); ++i) {
+      // The GPU may fuse multiply-adds, so an integer type can truncate one step apart.
+      const double c = cpu(i);
+      EXPECT_NEAR(gpu(i), c, std::max(1.0, std::abs(c) * 1e-12))
+          << gpu.voxelTypeStr() << " voxel " << i;
+    }
+    gpu.disableCUDA();
+  }
 }
 
 // ============================================================================

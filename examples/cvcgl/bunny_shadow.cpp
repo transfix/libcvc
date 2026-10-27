@@ -18,6 +18,8 @@
 // Verify (offscreen):         bunny_shadow --offscreen --frames 1 --png bunny.png
 
 #define _USE_MATH_DEFINES
+#include "demos_menu.h" // the gallery's Demos menu
+
 #include <algorithm>
 #include <array>
 #include <boost/program_options.hpp>
@@ -224,6 +226,7 @@ int main(int argc, char **argv) {
   ui.setVisible(!no_ui && !capturing);
   ui.setDrawCallback([&] {
     if (ImGui::BeginMainMenuBar()) {
+      cvc_examples::demos_menu("bunny_shadow");
       if (ImGui::BeginMenu("Scene")) {
         cvc::gl::ui::SceneMenuItems(sg, &uiScene, &uiLighting);
         ImGui::EndMenu();
@@ -240,7 +243,7 @@ int main(int argc, char **argv) {
   const auto t0 = std::chrono::steady_clock::now();
   double last = 0.0;
   long frame = 0;
-  while (!view.windowClosed()) {
+  while (!view.windowClosed() && !cvc_examples::demo_switch_requested()) {
     double t, dt;
     if (capturing) {
       t = frame / fps;
