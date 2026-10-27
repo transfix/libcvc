@@ -146,11 +146,22 @@ double scheduler::async_steps_per_cpu_ms(const process &proc) {
     return *proc.async_steps_per_cpu_ms;
   if (!watch_root_)
     return kDefaultAsyncStepsPerCpuMs;
+  // Read live (3.8): a change applies to the next charge. The tree is read again only once
+  // something under its state_exec node changed (settings_changes), so an inline call doesn't
+  // walk the tree when nothing did.
+  const uint64_t seen = settings_changes_.version(watch_root_); // before the read: see below
+  if (rate_valid_ && seen == rate_seen_)
+    return rate_;
   const double rate = async_steps_per_cpu_ms_from_state(*watch_root_, id_);
   if (!id_.empty() && rate != published_rate_) {
-    publish_async_steps_per_cpu_ms(*watch_root_, id_, rate);
+    publish_async_steps_per_cpu_ms(*watch_root_, id_, rate); // moves the version: read once more
     published_rate_ = rate;
   }
+  // The version from before the read: a change during it (another thread's write, or the
+  // publication above) reads the tree again next time.
+  rate_seen_ = seen;
+  rate_valid_ = true;
+  rate_ = rate;
   return rate;
 }
 
@@ -436,8 +447,8 @@ int scheduler::step_once() {
   // Wake sleeping processes (and timed waits) whose deadline has passed.
   if (procs_.timed_count() > 0) {
     const clock::time_point now = now_for_step();
-    if (procs_.timer_due(now))
-      procs_.wake_due(now);
+    if (procs_.timer_due(now) && procs_.wake_due(now) > 0)
+      chain_valid_ = false; // the wakes are no step's time
   }
 
   // Check for value changes on watched state paths.
@@ -446,29 +457,39 @@ int scheduler::step_once() {
   const process_ptr *pp = select_process();
   if (!pp)
     return 0;
+  // A process its own on_complete reaped goes once its step is over, however the step ends.
+  struct reap_guard {
+    detail::process_table &procs;
+    int &pid;
+    ~reap_guard() {
+      if (pid >= 0) {
+        procs.erase(pid);
+        pid = -1;
+      }
+    }
+  } reap_deferred{procs_, reap_after_step_};
   execute_process_step(*pp);
   ++total_steps_;
-  if (reap_after_step_ >= 0) {
-    procs_.erase(reap_after_step_);
-    reap_after_step_ = -1;
-  }
   return 1;
 }
 
 std::unordered_map<int, value_t> scheduler::run(std::optional<uint64_t> max_steps,
                                                 std::optional<double> max_time) {
+  run_steps(max_steps, max_time);
+  return get_results();
+}
+
+uint64_t scheduler::run_steps(std::optional<uint64_t> max_steps, std::optional<double> max_time) {
   running_ = true;
   stop_requested_ = false;
   chain_valid_ = false;
-  uint64_t steps = 0;
+  uint64_t steps = 0; // the loop's iterations, idle ones included (max_steps counts them)
+  uint64_t taken = 0; // the process steps among them
   // max_time is a time_budget: the run's own time, not time its thread spent descheduled.
   std::optional<time_budget> budget;
-  std::optional<clock::time_point> wall_end; // where an idle wait ends the run
   if (max_time) {
     budget.emplace(*max_time);
     budget->start();
-    wall_end = clock::now() + std::chrono::duration_cast<clock::duration>(
-                                  std::chrono::duration<double>(std::max(0.0, *max_time)));
   }
 
   while (!stop_requested_ && has_runnable()) {
@@ -478,37 +499,65 @@ std::unordered_map<int, value_t> scheduler::run(std::optional<uint64_t> max_step
       break;
     const int stepped = step_once();
     ++steps;
-    if (stepped == 0 && !idle_wait(max_steps.has_value(), wall_end))
+    if (stepped != 0) {
+      ++taken;
+      continue;
+    }
+    if (!idle_wait(max_steps, steps, budget ? &*budget : nullptr))
       break;
   }
 
   running_ = false;
   chain_valid_ = false;
-  return get_results();
+  return taken;
 }
 
-bool scheduler::idle_wait(bool bounded_by_steps, std::optional<clock::time_point> wall_end) {
+bool scheduler::idle_wait(std::optional<uint64_t> max_steps, uint64_t &steps, time_budget *budget) {
   // Nothing is ready: only sleepers and processes waiting for messages are left (has_runnable).
-  // Spinning until a deadline passes is what run() did; a wait burns no CPU and wakes on time.
+  // run() used to spin here, each idle iteration one of max_steps, until a deadline passed or
+  // its budgets ran out. It waits instead, burning no CPU, and keeps both budgets as the spin
+  // spent them: the wait is charged to max_time as run time (time_budget::charge_wait), and to
+  // max_steps at kIdleStepSeconds an iteration, about what a spinning one took. So a run whose
+  // step budget would have run out before the next deadline (a host pumping run(N) for a
+  // frame) returns at once, as the spin did a few microseconds later, and one with steps to
+  // spare (a bounded run to completion) waits for the sleeper, as the spin did.
+  constexpr double kIdleStepSeconds = 100e-9;
   chain_valid_ = false;
+  const clock::time_point now = clock::now();
+  const std::optional<clock::time_point> next = procs_.next_timer();
+  const uint64_t steps_left = max_steps ? *max_steps - std::min(steps, *max_steps) : 0;
+  clock::time_point until = next ? *next : clock::time_point::max();
+  if (budget) {
+    budget->stop(); // what is left of it, as of now
+    until = std::min(until, detail::time_after(now, budget->remaining()));
+  }
+  // The step budget runs out first (or only message waiters without a time limit are left,
+  // whom nothing in a synchronous run can wake): what spinning through it would come to.
+  if (max_steps && (!next || detail::time_after(now, static_cast<double>(steps_left) *
+                                                         kIdleStepSeconds) < until)) {
+    if (budget)
+      budget->start(now);
+    return false;
+  }
   if (!idle_)
     idle_ = std::make_unique<detail::wakeup>();
-  // stop() may come meanwhile (from another thread, a signal handler): checked every 10 ms.
+  // stop() may come meanwhile (from another thread, a signal handler): checked every 10 ms. A
+  // sleeper's deadline is waited for precisely, the budget's end need not be.
   constexpr auto kStopCheck = std::chrono::milliseconds(10);
-  if (const std::optional<clock::time_point> next = procs_.next_timer()) {
-    const clock::time_point until = wall_end ? std::min(*next, *wall_end) : *next;
-    for (clock::time_point now = clock::now(); !stop_requested_ && now < until; now = clock::now())
-      idle_->wait_until(std::min(until, now + kStopCheck));
-    // Past the run's own time with still nothing to run: its budget is spent.
-    return !(wall_end && *wall_end <= *next && clock::now() >= *wall_end);
+  const bool for_timer = next && *next == until;
+  for (clock::time_point t = now; !stop_requested_ && t < until; t = clock::now()) {
+    const clock::time_point slice = until - t > kStopCheck ? t + kStopCheck : until;
+    idle_->wait_until(slice, for_timer && slice == until);
   }
-  // Only message waiters with no time limit: nothing in a synchronous run can wake them.
-  if (bounded_by_steps)
-    return false; // what spinning through the rest of max_steps would come to
-  for (clock::time_point now = clock::now(); !stop_requested_ && (!wall_end || now < *wall_end);
-       now = clock::now())
-    idle_->wait_until(wall_end ? std::min(*wall_end, now + kStopCheck) : now + kStopCheck);
-  return false;
+  const clock::time_point end = clock::now();
+  const double waited = std::chrono::duration<double>(end - now).count();
+  if (budget) {
+    budget->charge_wait(waited);
+    budget->start(end); // the loop's next check finds it spent if the wait used it up
+  }
+  if (max_steps && steps_left > 1)
+    steps += std::min(static_cast<uint64_t>(waited / kIdleStepSeconds), steps_left - 1);
+  return next.has_value(); // only message waiters: the budget ran out or stop() came
 }
 
 void scheduler::stop() { stop_requested_ = true; }
@@ -553,6 +602,8 @@ void scheduler::unregister_watch_handler(int pid, int watch_id) {
 void scheduler::set_watch_root(cvc::state *root) {
   if (root != watch_root_ && tree_changes_.root())
     tree_changes_.watch(root); // counted afresh (a new root counts as a change)
+  if (root != watch_root_)
+    rate_valid_ = false;
   watch_root_ = root;
 }
 
@@ -567,13 +618,16 @@ void scheduler::poll_watches() {
   if (!watch_root_)
     return;
   if (procs_.watchers().empty()) {
-    if (tree_changes_.root())
+    if (tree_changes_.root()) {
       tree_changes_.watch(nullptr); // no slot on the tree while nothing watches it
+      chain_valid_ = false;
+    }
     return;
   }
   if (tree_changes_.root() != watch_root_) {
     tree_changes_.watch(watch_root_);
     watch_seen_ = tree_changes_.count() - 1; // poll once now: changes before it weren't counted
+    chain_valid_ = false;                    // connecting is no step's time
   }
   const uint64_t seen = tree_changes_.count();
   if (seen == watch_seen_)
@@ -811,9 +865,8 @@ bool scheduler::sleep(int pid, double seconds) {
   const auto now = std::chrono::steady_clock::now();
   if (proc.status == process_status::running)
     proc.accumulated_time += std::chrono::duration<double>(now - proc.last_run_start).count();
-  proc.wake_time = now + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-                             std::chrono::duration<double>(seconds));
-  procs_.set_status(proc, process_status::waiting); // a timer for wake_time
+  proc.wake_time = detail::time_after(now, seconds); // saturating: a huge sleep doesn't wrap
+  procs_.set_status(proc, process_status::waiting);  // a timer for wake_time
   return true;
 }
 
@@ -845,9 +898,7 @@ bool scheduler::receive_message_until(int pid, const std::string &path, double s
   if (!receive_message(pid, path))
     return false;
   process &proc = *procs_.find(pid);
-  proc.recv_deadline = std::chrono::steady_clock::now() +
-                       std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-                           std::chrono::duration<double>(std::max(0.0, seconds)));
+  proc.recv_deadline = detail::time_after(std::chrono::steady_clock::now(), seconds);
   procs_.update(proc); // a timer for the deadline
   return true;
 }

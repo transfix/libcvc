@@ -64,15 +64,24 @@ public:
   /// Run until all processes complete or global limits reached.
   /// Returns map of pid → exit_code for terminated processes.
   ///
-  /// While nothing is ready and processes sleep (or wait for a message with a time limit), run()
-  /// blocks until the earliest of their deadlines instead of spinning, never past `max_time`
-  /// (then it returns, as a spinning run would once its time budget ran out); each such wait
-  /// counts as one of `max_steps`. While only processes waiting for a message with no time
-  /// limit are left, nothing can wake them in a synchronous run: run() returns at once when
-  /// `max_steps` bounds it (as spinning through the rest of it would), else waits out
-  /// `max_time`, else waits until stop().
+  /// `max_steps` counts the loop's iterations, the idle ones (nothing ready) included, and
+  /// `max_time` the run's own time (a time_budget). While nothing is ready and processes sleep
+  /// (or wait for a message with a time limit), run() blocks until the earliest of their
+  /// deadlines instead of spinning, burning no CPU, and charges the wait to both budgets as the
+  /// spin it replaces spent them: to `max_time` as run time, to `max_steps` at 100 ns an idle
+  /// iteration. So it returns at once when the step budget would run out before the deadline
+  /// (a frame's run(N) pump), waits when it would not (a bounded run to completion), and
+  /// returns when the time budget runs out first. While only processes waiting for a message
+  /// with no time limit are left, nothing can wake them in a synchronous run: run() returns at
+  /// once when `max_steps` bounds it, else waits out `max_time`, else waits until stop().
   std::unordered_map<int, value_t> run(std::optional<uint64_t> max_steps = std::nullopt,
                                        std::optional<double> max_time = std::nullopt);
+
+  /// run() without collecting the results: for a host that pumps the scheduler and reads the
+  /// results it needs (get_result) or none, so a run doesn't cost a map entry for every
+  /// finished process not yet reaped. Returns the process steps it took.
+  uint64_t run_steps(std::optional<uint64_t> max_steps = std::nullopt,
+                     std::optional<double> max_time = std::nullopt);
 
   /// Stop the run loop.
   void stop();
@@ -193,7 +202,10 @@ public:
 
   /// Set a unique identifier for this scheduler instance.
   /// Used as the key under `state_exec.schedulers.<id>` in the state tree.
-  void set_id(const std::string &id) { id_ = id; }
+  void set_id(const std::string &id) {
+    id_ = id;
+    rate_valid_ = false; // the id decides which limits.async_steps_per_cpu_ms applies
+  }
   const std::string &id() const { return id_; }
 
   /// Load settings from the state tree.
@@ -233,6 +245,8 @@ public:
   /// The steps a CPU millisecond of `proc`'s async calls is charged: its own
   /// execute_options::async_steps_per_cpu_ms, else limits.async_steps_per_cpu_ms read from the
   /// tree now (no load_settings() needed: async_steps_per_cpu_ms_from_state), else the default.
+  /// The tree's value is read again only once something under its `state_exec` node changed
+  /// since the last read, so a change applies to the next call while a quiet tree costs no read.
   /// The sync scheduler runs a call's kernel inline, in the step that makes it.
   double async_steps_per_cpu_ms(const process &proc) override;
 
@@ -284,6 +298,11 @@ private:
   /// the watched nodes only when the count moved.
   detail::tree_changes tree_changes_;
   uint64_t watch_seen_ = 0;
+  /// limits.async_steps_per_cpu_ms as last read from the tree, and the settings version then.
+  detail::settings_changes settings_changes_;
+  uint64_t rate_seen_ = 0;
+  bool rate_valid_ = false;
+  double rate_ = kDefaultAsyncStepsPerCpuMs;
   std::unique_ptr<detail::wakeup> idle_; // run()'s idle wait, made on first use
   std::vector<process *> woken_;         // reused by deliver_to_receivers
 
@@ -297,8 +316,9 @@ private:
 
   /// One step of the run loop (step() starts a fresh clock chain).
   int step_once();
-  /// run()'s wait while nothing is ready: false to end the run.
-  bool idle_wait(bool bounded_by_steps, std::optional<clock::time_point> wall_end);
+  /// run()'s wait while nothing is ready, charged to its budgets (`steps`, the loop's
+  /// iterations so far, and `budget`, running): false to end the run.
+  bool idle_wait(std::optional<uint64_t> max_steps, uint64_t &steps, time_budget *budget);
 
   /// Execute one step on a specific process and check resource limits.
   void execute_process_step(const process_ptr &pp);
