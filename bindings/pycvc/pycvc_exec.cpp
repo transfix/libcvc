@@ -235,10 +235,16 @@ struct pending_coro {
 // coroutine's call with its result (or its exception, which the call raises at its call site) and
 // post it to the parked DSL process. Runs on the run() thread with the GIL held; a no-op when no
 // coroutine is pending, so a coro-free Exec pays nothing. Each Task is DECREF'd when collected.
-void drive_coros(PyObject *loop, std::vector<pending_coro> &pending, async_host &host,
+// Returns whether the slice waited: whether asyncio blocked in its selector (until the stop timer,
+// or I/O) for most of it. Where its clock is fine (Linux, macOS, Windows on Python 3.13+) it does.
+// Where the clock is coarse (Windows before 3.13: ~15.6 ms), asyncio runs a timer due within that
+// resolution at once, the stop timer included, and the slice returns without waiting.
+bool drive_coros(PyObject *loop, std::vector<pending_coro> &pending, async_host &host,
                  double budget_secs) {
   if (loop == nullptr || pending.empty())
-    return;
+    return false;
+  using clock = std::chrono::steady_clock;
+  bool waited = false;
   // Step the loop until a call_later(budget) stops it: ready coroutine steps + timers/IO due within
   // the slice advance, then control returns to the DSL pump. Public asyncio API only. NOTE: the
   // slice is COOPERATIVE — asyncio cannot preempt a running coroutine step, so the budget is
@@ -252,9 +258,11 @@ void drive_coros(PyObject *loop, std::vector<pending_coro> &pending, async_host 
     if (h != nullptr) {
       Py_DECREF(h);
       // run_forever ONLY when a stop timer is armed — otherwise it would never return.
+      const clock::time_point from = clock::now();
       if (PyObject *r = PyObject_CallMethod(loop, "run_forever", nullptr)) {
         Py_DECREF(r);
         step_failed = false;
+        waited = clock::now() - from >= std::chrono::duration<double>(0.5 * budget_secs);
       }
     }
   }
@@ -268,7 +276,7 @@ void drive_coros(PyObject *loop, std::vector<pending_coro> &pending, async_host 
       Py_DECREF(pc.task);
     }
     pending.clear();
-    return;
+    return false;
   }
   PyErr_Clear(); // a stray (already-handled) error from stepping must not leak into the next call
   for (auto it = pending.begin(); it != pending.end();) {
@@ -304,6 +312,7 @@ void drive_coros(PyObject *loop, std::vector<pending_coro> &pending, async_host 
     Py_DECREF(task);
     it = pending.erase(it);
   }
+  return waited;
 }
 
 // Wait until no kernel of `host` is queued or running, WITH THE GIL RELEASED so a kernel calling
@@ -598,7 +607,8 @@ std::string Exec::run(const std::string &src) {
           // Coroutine leg: step the asyncio loop a bounded slice and deliver any completed
           // coroutine's result to its parked process (GIL held here). A no-op when no coroutine is
           // pending, so a coro-free Exec is unaffected.
-          drive_coros(impl_->loop, impl_->pending_coros, host, kCoroSliceSeconds);
+          const bool coros_waited =
+              drive_coros(impl_->loop, impl_->pending_coros, host, kCoroSliceSeconds);
       result = sched.get_result(pid);
       if (result)
         break; // the program terminated
@@ -649,11 +659,14 @@ std::string Exec::run(const std::string &src) {
       // Idle-wait with the GIL released (so a worker can take it and deliver) until there is
       // work: a kernel's post or result, a sleeper's or timed wait's deadline, a call's timeout
       // or charge, or the idle deadline; never longer than kMaxIdleWait, a backstop for work that
-      // arrives some other way. Coroutines on the asyncio loop are this loop's to drive, and
-      // drive_coros' slice of it doesn't wait (asyncio runs a timer due within its clock's
-      // resolution, ~15.6 ms on Windows, at once), so while one is pending the wait is a 5 ms
-      // beat: the old 1 ms sleep lasted a ~15.6 ms timer tick there. Processes parked until the
-      // next pump (await) make it a 1 ms beat, as it was. These beats burn no CPU (wakeup).
+      // arrives some other way. Coroutines on the asyncio loop are this loop's to drive: while one
+      // is pending, a slice that waited (coros_waited) was this iteration's wait, and the loop
+      // goes on at once (another wait here would hold asyncio off for as long). A slice that
+      // returned at once gets a 5 ms beat instead, so the loop doesn't spin: the old 1 ms sleep
+      // lasted a ~15.6 ms timer tick there. Processes parked until the next pump (await) make it
+      // a 1 ms beat, as it was. These beats burn no CPU (wakeup).
+      if (!impl_->pending_coros.empty() && coros_waited)
+        continue;
       clock::time_point until =
           std::min(std::chrono::time_point_cast<clock::duration>(idle_deadline),
                    clock::time_point(clock::now() + kMaxIdleWait));

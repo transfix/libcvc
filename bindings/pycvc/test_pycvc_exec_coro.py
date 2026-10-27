@@ -9,6 +9,7 @@ register_async_coro runs the coroutine ON the run() thread, cooperatively.
 """
 
 import asyncio
+import time
 
 import pycvc
 
@@ -139,6 +140,73 @@ def test_reentrant_run_is_rejected():
         assert "re-entrant" in str(e), str(e)
     # The Exec is still usable after the contained re-entrancy error.
     assert ex.run("(+ 2 3)") == "5"
+
+
+def _pump_slices(clock_resolution):
+    """Run a program parked on a coroutine that sleeps 0.25 s, on an Exec whose asyncio loop takes
+    `clock_resolution` as its clock's (asyncio runs a timer due within it at once). Returns when
+    each of the pump's asyncio slices began and ended (time.perf_counter())."""
+    real_new_event_loop = asyncio.new_event_loop
+    slices = []
+
+    def new_event_loop():
+        loop = real_new_event_loop()
+        loop._clock_resolution = clock_resolution
+        run_forever = loop.run_forever
+
+        def timed_run_forever():
+            # A callback ready as the slice starts, as the Proactor loop (Windows' default) has at
+            # each run_forever: its first iteration polls without waiting.
+            loop.call_soon(lambda: None)
+            began = time.perf_counter()
+            try:
+                return run_forever()
+            finally:
+                slices.append((began, time.perf_counter()))
+
+        loop.run_forever = timed_run_forever
+        return loop
+
+    asyncio.new_event_loop = new_event_loop  # what the Exec makes its loop with
+    try:
+        ex = pycvc.Exec(pycvc.make_app())
+
+        async def nap():
+            await asyncio.sleep(0.25)
+            return 7
+
+        ex.register_async_coro("nap", nap)
+        assert ex.run("(nap)") == "7"
+    finally:
+        asyncio.new_event_loop = real_new_event_loop
+    return slices
+
+
+def _median(xs):
+    xs = sorted(xs)
+    return xs[len(xs) // 2]
+
+
+def test_a_waiting_asyncio_slice_is_the_pumps_wait():
+    # Where asyncio's clock is fine (Linux, macOS, Windows on Python 3.13+), its 5 ms slice waits in
+    # its selector until the stop timer: that is the pump's wait, and the next slice follows at
+    # once. A 5 ms beat after each slice used to hold asyncio off half the time.
+    slices = _pump_slices(1e-9)
+    assert len(slices) >= 5, slices
+    assert _median(end - began for began, end in slices) >= 0.004  # the slices waited
+    gaps = [b[0] - a[1] for a, b in zip(slices, slices[1:])]
+    assert _median(gaps) < 0.002, gaps
+
+
+def test_an_asyncio_slice_that_returns_at_once_gets_a_beat():
+    # Where asyncio's clock is coarse (Windows before Python 3.13: ~15.6 ms), it runs the slice's
+    # stop timer at once, and the slice returns without waiting: the pump waits a 5 ms beat (no
+    # CPU) between slices instead of spinning through them.
+    slices = _pump_slices(0.05)
+    assert _median(end - began for began, end in slices) < 0.0025  # the slices didn't wait
+    gaps = [b[0] - a[1] for a, b in zip(slices, slices[1:])]
+    assert _median(gaps) >= 0.002, gaps
+    assert len(slices) < 200, len(slices)
 
 
 if __name__ == "__main__":
