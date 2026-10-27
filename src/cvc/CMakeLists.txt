@@ -282,6 +282,7 @@ set(SOURCE_FILES
   physics/physics_codec.cpp
   physics/binding_meta.cpp
   physics/nav_plant.cpp
+  physics/dyn_bike_plant.cpp
   physics/nav_eval.cpp
   physics/nav_es.cpp
   physics/plant_log.cpp
@@ -491,7 +492,8 @@ endif()
 # null backend, as for nav and world above; the Jolt backend TUs get the same flag
 # on their own target (below).
 set(_cvc_physics_exact_sources physics/world.cpp physics/vehicle.cpp physics/field_step.cpp
-    physics/det_math.cpp physics/null_backend.cpp physics/nav_plant.cpp)
+    physics/det_math.cpp physics/null_backend.cpp physics/nav_plant.cpp
+    physics/dyn_bike_plant.cpp)
 if(NOT MSVC)
   set_source_files_properties(${_cvc_physics_exact_sources}
                               PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
