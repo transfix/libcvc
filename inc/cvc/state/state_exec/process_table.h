@@ -194,8 +194,9 @@ public:
   /// Block until notify() (true; the notification is consumed) or `t` (false). A `precise`
   /// wait (a sleeper's deadline) ends on time: on Windows, whose high-resolution timer fires on
   /// a ~0.5 ms grid, its timer is set early and the last stretch (at most ~0.6 ms) is spent
-  /// spinning on the CPU, watching for a notify(). Any other wait may end up to that grid late
-  /// and burns no CPU.
+  /// spinning on the CPU, watching for a notify(), and the thread runs at above-normal priority
+  /// meanwhile (restored after), so a busy machine hands its core back when the timer fires.
+  /// Any other wait may end up to that grid late and burns no CPU.
   bool wait_until(clock::time_point t, bool precise = false);
 
 private:

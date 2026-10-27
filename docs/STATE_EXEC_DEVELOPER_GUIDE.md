@@ -561,7 +561,11 @@ it picks.)
 - **Waits and the CPU.** A sleeper's deadline is kept to well under a millisecond. On Windows,
   whose high-resolution timer fires on a ~0.5 ms grid, that costs up to ~0.6 ms of spinning at
   the end of each such wait (`detail::wakeup`): a run of millisecond sleeps still uses about half
-  a core, against all of one while `run()` spun. Every other wait (a deadline of the caller's, a
+  a core, against all of one while `run()` spun. Such a wait runs its thread at above-normal
+  priority (restored after it), so on a machine whose cores are all busy the thread gets one back
+  when its timer fires rather than a scheduler quantum later; even so a blocked wait there can
+  wake a few milliseconds late now and then, where the spin, which never gave its core up, did
+  not. Every other wait (a deadline of the caller's, a
   call's timeout or charge, a budget's end) may end up to ~0.5 ms late and burns no CPU.
 - **Finished processes** leave every index at once but stay in the table, so `get_result()`,
   `get_process_info()` and `get_results()` still report them, until `reap(pid)` erases one (both

@@ -653,6 +653,25 @@ bool wakeup::wait_until(clock::time_point t, bool precise) {
   // wake comes that late. Any other wait just takes the timer.
   constexpr long long kSpinNs = 600000;
   const long long early = precise ? kSpinNs : 0;
+  // A precise wait runs above normal priority, so on a machine whose cores are all busy the
+  // thread gets one back when its timer fires instead of a scheduler quantum later (a spinning
+  // thread never gave its core up). It blocks or spins for at most the wait; restored after.
+  struct priority_raise {
+    HANDLE thread = GetCurrentThread();
+    int was = THREAD_PRIORITY_ERROR_RETURN;
+    explicit priority_raise(bool on) {
+      if (!on)
+        return;
+      const int p = GetThreadPriority(thread);
+      if (p != THREAD_PRIORITY_ERROR_RETURN && p < THREAD_PRIORITY_ABOVE_NORMAL &&
+          SetThreadPriority(thread, THREAD_PRIORITY_ABOVE_NORMAL))
+        was = p;
+    }
+    ~priority_raise() {
+      if (was != THREAD_PRIORITY_ERROR_RETURN)
+        SetThreadPriority(thread, was);
+    }
+  } raise(precise);
   for (;;) {
     const clock::time_point now = clock::now();
     if (now >= t)
