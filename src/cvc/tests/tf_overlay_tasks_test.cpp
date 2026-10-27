@@ -153,7 +153,9 @@ struct frame_log {
 TEST(TfOverlayTasksBuild, ThreadsAreAvailableNatively) { EXPECT_TRUE(threads_available()); }
 
 TEST_F(TfOverlayTasks, CooperativeTaskSlicesAcrossFramesAndMatchesCompute) {
-  const cvc::volume vol = make_volume(app, 64, 64, 64, blobs);
+  // 96^3: the progress notes come at most ~10 Hz, so the task must run well past 300 ms for notes
+  // from both slow layers. A 64^3 one took ~200 ms on a CI runner and showed only two.
+  const cvc::volume vol = make_volume(app, 96, 96, 96, blobs);
   overlay_task_options opt;
   opt.threading = overlay_threading::cooperative;
   opt.slice_ms = 4.0;
@@ -183,7 +185,7 @@ TEST_F(TfOverlayTasks, CooperativeTaskSlicesAcrossFramesAndMatchesCompute) {
     ASSERT_LT(ms_since(start), 120000.0) << "the task never finished";
   }
   const double wall = ms_since(start);
-  std::printf("[cooperative] 64^3, slice %.1f ms: %d frames, max pump %.2f ms, mean pump %.2f ms, "
+  std::printf("[cooperative] 96^3, slice %.1f ms: %d frames, max pump %.2f ms, mean pump %.2f ms, "
               "%.0f ms wall, %zu progress notes (last \"%s\")\n",
               opt.slice_ms, log.frames, log.max_ms, log.total_ms / log.frames, wall,
               log.notes.size(), log.notes.empty() ? "" : log.notes.back().c_str());
@@ -197,7 +199,7 @@ TEST_F(TfOverlayTasks, CooperativeTaskSlicesAcrossFramesAndMatchesCompute) {
                 frames[slowest[k]].first, frames[slowest[k]].second.c_str());
 
   expect_published(app, tf, ref);
-  EXPECT_GT(log.frames, 20) << "a 64^3 task should take many 4 ms frames";
+  EXPECT_GT(log.frames, 20) << "a 96^3 task should take many 4 ms frames";
   EXPECT_LT(log.max_ms, 20.0 * opt.slice_ms) << "a frame ran far past its slice";
   // Progress was visible while it ran, from more than one layer, at most ~10 Hz.
   ASSERT_GE(log.notes.size(), 3u);
@@ -416,9 +418,10 @@ TEST_F(TfOverlayTasks, DeliverHookReplacesPublishing) {
 }
 
 TEST_F(TfOverlayTasks, TwoTasksOnDifferentKeysRunSideBySide) {
-  // Both big enough to take many 4 ms frames (the spectrum is the slow layer).
-  const cvc::volume a = make_volume(app, 48, 48, 48, blobs);
-  const cvc::volume b = make_volume(app, 48, 40, 36, ripples);
+  // Both big enough to take many 4 ms frames (the spectrum is the slow layer), even on a fast
+  // runner: 48x40x36 finished in 10 frames on one.
+  const cvc::volume a = make_volume(app, 64, 64, 64, blobs);
+  const cvc::volume b = make_volume(app, 64, 56, 48, ripples);
   overlay_task_options opt;
   opt.threading = overlay_threading::cooperative;
   const std::string ta = "tasks_test.pair.a", tb = "tasks_test.pair.b";
