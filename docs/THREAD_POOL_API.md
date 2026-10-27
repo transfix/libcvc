@@ -79,20 +79,22 @@ unsigned int pending = app.getPendingThreadCount();
 ## Example: Batch Processing
 
 ```cpp
-// Configure pool for 4 concurrent threads
+// Configure pool for 4 concurrent tasks
 app.setThreadPoolSize(4);
+
+// Count finished batches yourself: an anonymous task has no key and no entry in app.threads(),
+// so keyed threadProgress/threadInfo don't see it.
+auto done = std::make_shared<std::atomic<int>>(0);
 
 // Submit 100 tasks - only 4 run concurrently
 for (int i = 0; i < 100; i++) {
-  std::string key = "batch_" + std::to_string(i);
-  
   // Critical tasks processed first
-  thread_priority priority = (i < 10) ? PRIORITY_CRITICAL : PRIORITY_NORMAL;
-  
-  app.startThreadPooled(key, [i]() {
-    thread_feedback feedback("Processing batch " + std::to_string(i));
-    // Do work...
-  }, priority, false); // false = anonymous: `key` is unused, nothing goes in threads()
+  cvc::thread_priority priority = (i < 10) ? cvc::PRIORITY_CRITICAL : cvc::PRIORITY_NORMAL;
+
+  app.startThreadPooled("batch", [i, done]() {
+    // Do work on batch i...
+    ++*done;
+  }, priority, false); // false = anonymous, as app.submitPooled(task, priority): "batch" is unused
 }
 ```
 

@@ -2237,10 +2237,11 @@ struct scenario {
   int warmup = -1; // the scenario's own default warmup (-1: the run's)
   // The size that counts concurrent calls on the app's background pool, if any. A point with more
   // of them than the pool has workers runs only with --bg-oversubscribe (with --smoke it is
-  // clamped to the pool size): tasks queued past the pool get the same thread key
-  // (app::uniqueThreadKey sees only started threads), and starting one waits up to 5 s for its
-  // namesake (app::threads), which can also hang the pool outright (docs/STATE_EXEC_BENCH.md,
-  // "Known pathologies").
+  // clamped to the pool size). The persistent-worker pool queues such calls without trouble (an
+  // anonymous task has no thread key), but on builds before it, tasks queued past the pool got
+  // the same thread key (app::uniqueThreadKey saw only started threads), and starting one waited
+  // up to 5 s for its namesake (app::threads), which could also hang the pool outright
+  // (docs/STATE_EXEC_BENCH.md, "Known pathologies"); the skip keeps runs comparable with them.
   std::string bg_calls_key;
   // The driver starts threads inside the measured region (background kernels, the bench's own
   // threads), which on Linux would inherit a pinned driver's CPU: such points run unpinned there.
@@ -5789,8 +5790,8 @@ int main(int argc, char **argv) {
                 v = istr(std::max<unsigned>(1, cfg.host.pool_workers));
           } else if (!cfg.bg_oversubscribe) {
             std::printf("  %-28s %-9s %-34s skipped: %s background calls at once exceed the app "
-                        "pool's %u workers (5 s key-collision stalls, possible hang); run it "
-                        "with --bg-oversubscribe\n",
+                        "pool's %u workers (which stalls or hangs builds before the "
+                        "persistent-worker pool); run it with --bg-oversubscribe\n",
                         sc.name.c_str(), exec.c_str(), params_text(pt).c_str(),
                         pc.s(sc.bg_calls_key).c_str(), cfg.host.pool_workers);
             continue;
