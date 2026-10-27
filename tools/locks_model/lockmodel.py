@@ -1,10 +1,10 @@
 """Executable model of docs/STATE_EXEC_LOCKS_PROTOCOL.md (its round-5 revision of 2026-10-27).
 
-Revision 5b of the model (round-5 spec; protocol 7 names it): lock-query's generation is the
+Revision 5b of the model (round-5 spec; README.md names it): lock-query's generation is the
 largest gen among the X holds with the key (4.13, mutation 'query-first-gen'), checked by the world
 at quiescence; L4's group teardown (5.7) is a world configuration.
 
-Revision 5 of the model (round-4 spec; protocol 7 names it): a home's entry carries its progress
+Revision 5 of the model (round-4 spec; README.md names it): a home's entry carries its progress
 cell (2.1), attach_home takes it and makes the home's empty key-cache entry (4.4), ref requires an
 attached home and unref keeps the entry (4.15), detach_home reads no port and deletes the entry
 (4.11; the closed assertion is the world's destroy action's), blocking_sinks returns (Pid, time)

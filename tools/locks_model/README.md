@@ -10,7 +10,8 @@ code lands.
 operation over the state of section 2, and its `check()` asserts the manager-side invariants of
 section 6 after every operation. `world.py` adds the homes, processes, ports and posts of section
 5 as a step relation, and checks the home-side invariants after every action. The other scripts
-drive that world. This is revision 5b of the model, the one protocol section 7 names.
+drive that world. This is revision 5b of the model, the one the design's review ran, with one
+later fix (see "Revisions" below).
 
 What the model abstracts (shared mode only, no time, canonical keys, the parts of section 5 that
 are not modelled, and so on) is listed in protocol section 7 and is not repeated here.
@@ -139,7 +140,18 @@ deadlines on waits, unless it says otherwise.
 manager holds records of its processes), `group_teardown`, `post_dropped_closed_port`,
 `posted_wake`, `posted_relevel`, `stale_wake_ignored`, `boosted` and `deadlock_len_N`.
 
-## Changes since the revision 5b runs
+## Revisions
+
+`lockmodel.py`'s docstring lists every revision of the model. The design's review ran revision
+5b. Revision 5 added protocol 2.1's `progress` cell; 4.4's `attach_home` with its fourth argument
+and its empty `cache_refs` entry; 4.11's `detach_home`, which reads no port (the closed assertion
+sits in the destroy action, outside the operation); 4.13's `(Pid, time)` sinks; 4.15's `unref`,
+which keeps the home's entry; I9's entry exactly for each attached home; and the one-home
+configurations. Revision 5b added 4.13's mode and generation check and the group teardown
+(`gdestroy`, half of the random worlds with two or three homes, and half of the scripted destroy
+pairs). Runs of earlier revisions do not cover those clauses.
+
+### Changes since the revision 5b runs
 
 `explore_scripts.py`'s `nested` mode drew a destroy flag for about 30% of its combinations but
 used the default fault kinds, which have no `destroy`, so none of its runs destroyed a home. Its

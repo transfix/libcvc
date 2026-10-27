@@ -1208,13 +1208,14 @@ any key; an S grant's `gen` is the last X generation at its grant.
   the bound (every body finishes, every post is applied, and no process may stay parked), not as
   weak fairness over cycles of the state graph.
 
-  Revision 5b is the one that follows this text. Revision 5 added 2.1's `progress` cell; 4.4's
-  `attach_home` with its fourth argument and its empty `cache_refs` entry; 4.11's `detach_home`,
-  which reads no port (the closed assertion sits in the destroy action, outside the operation);
-  4.13's `(Pid, time)` sinks; 4.15's `unref`, which keeps the home's entry; I9's entry exactly for
-  each attached home; and the one-home configurations. Revision 5b adds 4.13's mode and generation
-  check and the group teardown (`gdestroy`, half of the random worlds with two or three homes, and
-  half of the scripted destroy pairs). Earlier revisions' runs do not cover those clauses.
+  The model follows this text, including 2.1's `progress` cell; 4.4's `attach_home` with its
+  fourth argument and its empty `cache_refs` entry; 4.11's `detach_home`, which reads no port (the
+  closed assertion sits in the destroy action, outside the operation); 4.13's `(Pid, time)` sinks
+  and its mode and generation check; 4.15's `unref`, which keeps the home's entry; I9's entry
+  exactly for each attached home; and the group teardown (`gdestroy`, half of the random worlds
+  with two or three homes, and half of the scripted destroy pairs).
+  [`tools/locks_model/README.md`](../tools/locks_model/README.md) records the model's revisions,
+  the runs the design's review made, and the changes since.
 
 ## 8. What the simplification removed
 
