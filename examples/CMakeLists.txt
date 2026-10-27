@@ -84,10 +84,11 @@ add_executable(nav_convoy ariadne/nav_convoy/nav_convoy.cpp)
 target_link_libraries(nav_convoy PRIVATE cvcGL ${VTK_LIBRARIES})
 vtk_module_autoinit(TARGETS nav_convoy MODULES ${VTK_LIBRARIES})
 
-# nav_compute — the cross-thread async story (roadmap item 2): an .ari button binds one host verb
-# (nav-step-async) that runs a nav step on app.compute_async() off the render thread and posts
-# "nav.done"; the .ari action parks on (msg-recv "nav.done") and resumes on a later frame, so the UI
-# never blocks. Core mechanism covered headlessly by AppTest.ComputeAsync* + AriadneAction gtests.
+# nav_compute — the cross-thread async story (roadmap item 2): an .ari button calls one host verb,
+# (nav-step), an async function on the app's async host. The action parks at the call while the
+# step runs on the background task pool and fans out over the compute pool, then resumes with the
+# result on a later frame, so the UI never blocks. Covered headlessly by
+# AriadneAction.NavStepAsAnAsyncFunctionReturnsItsResult.
 add_executable(nav_compute ariadne/nav_compute/nav_compute.cpp)
 target_link_libraries(nav_compute PRIVATE cvcGL ${VTK_LIBRARIES})
 vtk_module_autoinit(TARGETS nav_compute MODULES ${VTK_LIBRARIES})

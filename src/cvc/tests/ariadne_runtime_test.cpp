@@ -7,7 +7,10 @@
 #include <atomic> // item 2: the nav-step worker's arrived-count accumulator
 #include <boost/any.hpp>
 #include <chrono>
+#include <clocale> // §10 tf_editor: the inline seed under a decimal-comma LC_NUMERIC
+#include <cmath>
 #include <condition_variable>
+#include <cstdio>
 #include <cvc/ariadne/app_runtime.h> // AppRuntime: host menus, the scene between documents
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/backend.h>
@@ -17,7 +20,7 @@
 #include <cvc/ariadne/uri.h>               // §13.8 (fetch uri): register a custom scheme handler
 #include <cvc/ariadne/widget.h>
 #include <cvc/core/app.h>
-#include <cvc/core/async_task.h> // launch_pool_task generalization test
+#include <cvc/core/async_task.h>  // launch_pool_task generalization test
 #include <cvc/core/thread_pool.h> // item 2: full type for app.computePool().parallel_for
 #include <cvc/net/http_client.h>  // §13.8: swap the transport for a fake in the http-get test
 #include <cvc/state/state.h>
@@ -27,11 +30,15 @@
 #include <cvc/state/state_exec/heap.h>            // collect_cycles / tracked_objects
 #include <cvc/state/state_exec/intrinsics.h>      // intrinsics_context.root_path (pool-task test)
 #include <cvc/state/state_exec/types.h>           // value_t
+#include <cvc/tf/model.h>                         // §10 tf_editor: the model the widget edits
+#include <cvc/tf/overlays.h>                      // §10 tf_editor: the layers published beside it
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <string>
 #include <thread>
@@ -60,10 +67,12 @@ struct MockBackend : Backend {
     return static_cast<int>(std::count(log.begin(), log.end(), s));
   }
 
+  bool caps_bitmap = false; // report real pixels (the composed tf_editor then shows a preview)
   Capabilities capabilities() const override {
     Capabilities c;
     c.windows = true;
     c.menubar = true;
+    c.bitmap = caps_bitmap;
     return c;
   }
   void begin_frame() override { rec("begin_frame"); }
@@ -117,9 +126,10 @@ struct MockBackend : Backend {
     rec(std::string("text_value_colored:") + l + "=" + v);
   }
   void separator() override { rec("separator"); }
+  std::string click_button; // a button LABEL that reports a click (besides button_click)
   bool button(const char *l) override {
     rec(std::string("button:") + l);
-    return button_click;
+    return button_click || (!click_button.empty() && click_button == l);
   }
   bool menu_item_action(const char *l) override {
     rec(std::string("menu_action:") + l);
@@ -184,18 +194,22 @@ struct MockBackend : Backend {
     rec(std::string("toggle:") + l);
     return {};
   }
+  std::map<std::string, BoolEdit> checkbox_by_label; // per-label returns (else checkbox_ret)
   BoolEdit checkbox(const char *l, bool) override {
     rec(std::string("checkbox:") + l);
-    return checkbox_ret;
+    const auto it = checkbox_by_label.find(l);
+    return it != checkbox_by_label.end() ? it->second : checkbox_ret;
   }
   IntEdit slider_int(const char *l, const char *, int cur, int, int) override {
     rec(std::string("slider_int:") + l + "=" + std::to_string(cur));
     return slider_int_ret;
   }
-  DoubleEdit slider_double(const char *l, const char *, double, double, double,
+  std::map<std::string, DoubleEdit> slider_double_ret; // programmable returns, by slider KEY
+  DoubleEdit slider_double(const char *l, const char *key, double, double, double,
                            const char *) override {
     rec(std::string("slider_double:") + l);
-    return {};
+    const auto it = slider_double_ret.find(key ? key : "");
+    return it != slider_double_ret.end() ? it->second : DoubleEdit{};
   }
   IndexEdit combo_ret{}; // programmable return (a select) for the next combo()
   IndexEdit combo(const char *l, int idx, const std::vector<std::string> &) override {
@@ -230,6 +244,27 @@ struct MockBackend : Backend {
   CustomEdit custom_widget(const char *type, const std::string &current, const Widget &) override {
     rec(std::string("custom_widget:") + type + "=" + current);
     return custom_ret;
+  }
+  void set_image(const std::string &name, const cvc::image &) override { rec("set_image:" + name); }
+  // §10 tf_editor: a copy of what the core handed the backend (TfEditorInput's pointers do not
+  // outlive the call), and a programmable edit. The default {drawn:false} makes the core compose
+  // the editor from the leaves above.
+  TfEdit tf_ret{};
+  int tf_calls = 0;
+  std::string last_tf_key;
+  TfEditorInput last_tf_in;
+  cvc::tf::model last_tf_model;
+  cvc::tf::overlays last_tf_overlays;
+  TfEdit tf_editor(const char *l, const char *key, const TfEditorInput &in) override {
+    ++tf_calls;
+    last_tf_key = key ? key : "";
+    last_tf_in = in;
+    last_tf_in.model = nullptr;
+    last_tf_in.overlays = nullptr;
+    last_tf_model = in.model ? *in.model : cvc::tf::model();
+    last_tf_overlays = in.overlays ? *in.overlays : cvc::tf::overlays();
+    rec(std::string("tf_editor:") + l + "@" + last_tf_key);
+    return tf_ret;
   }
 };
 
@@ -464,9 +499,10 @@ TEST(AriadneAction, ProgramActionCapturesDeliveredValueFromMsgRecv) {
 // (HostIntrinsicCallableFromProgram) with the worker-delivers park/resume path
 // (ProgramActionParksOnMsgRecvAndResumesWhenWorkerDelivers). msg-recv is race-free either way: it
 // pops any already-buffered pending message before parking, so worker-posts-early also delivers.
-// NB the nav_compute demo drives this through app.compute_async (which wraps exactly this
-// background-thread → parallel_for → post_message); here we hand-roll a joinable std::thread so the
-// test can join() deterministically before asserting (compute_async is fire-and-forget by design).
+// This is the raw cross-thread primitive (a worker posts, msg-recv wakes). A host verb is better
+// written as an async function, which parks at the call and is charged to the action: see
+// NavStepAsAnAsyncFunctionReturnsItsResult, the nav_compute demo's verb. Here we hand-roll a
+// joinable std::thread so the test can join() deterministically before asserting.
 TEST(AriadneAction, IntrinsicRunsNavStepOnComputePoolAndWakesMsgRecv) {
   namespace se = cvc::state_exec;
   cvc::app app;
@@ -572,6 +608,119 @@ TEST(AriadneResident, ClearingTickProgramStopsIt) {
   rt.drain();
   rt.drain();
   EXPECT_EQ(cvc::state::instance(app)("tick.flag").value(), "0"); // no longer firing
+}
+
+namespace {
+// Another component's process on the app scheduler, as cvc::tf::schedule_overlays submits one: a
+// frame-yielding loop that writes how many frames it has resumed from (await #f) to `key`.
+struct ForeignAwaitLoop {
+  cvc::app &app;
+  cvc::state_exec::memory_tracker tracker;
+  cvc::state_exec::intrinsics_context ictx;
+  cvc::state_exec::environment_ptr env;
+  int pid = -1;
+  ForeignAwaitLoop(cvc::app &a, const std::string &key) : app(a) {
+    namespace se = cvc::state_exec;
+    se::async_scheduler &sched = app.exec_scheduler();
+    ictx.sched = &sched;
+    ictx.root = &cvc::state::instance(app);
+    ictx.tracker = &tracker;
+    ictx.proc = se::make_process(); // a placeholder: intrinsics reach the running process
+    ictx.proc->status = se::process_status::ready;
+    env = se::builtins::make_default_environment();
+    se::register_intrinsics(env, &ictx);
+    se::execute_options opts;
+    opts.env = env;
+    opts.owner = "component";
+    pid =
+        sched.execute("(begin (set n 0) (while t (begin (await #f) (set n (+ n 1)) (state-set \"" +
+                          key + "\" (str n)))))",
+                      opts);
+  }
+  ~ForeignAwaitLoop() { app.exec_scheduler().kill(pid); } // before ictx goes
+  std::optional<cvc::state_exec::process_status> status() const {
+    auto info = app.exec_scheduler().get_process_info(pid);
+    return info ? std::optional<cvc::state_exec::process_status>(info->status) : std::nullopt;
+  }
+};
+
+// A cvc::app that can say whether its exec scheduler was built, without building it.
+struct SchedulerProbeApp : cvc::app {
+  bool scheduler_built() {
+    boost::mutex::scoped_lock lock(_execSchedulerMutex);
+    return _execScheduler != nullptr;
+  }
+};
+} // namespace
+
+// Every Runtime pumps the app scheduler while a process is live on it, whoever submitted it: a
+// document that runs no program, in a host that never called set_scene_capable (ariadne_hello,
+// nav_convoy, ...), still advances a scene's overlay tasks. Its teardown leaves them alone (it
+// reaps only its own processes).
+TEST(AriadneScheduler, ARuntimeThatRanNoProgramAdvancesAnotherComponentsProcess) {
+  cvc::app app;
+  ForeignAwaitLoop loop(app, "pump.n");
+  {
+    Runtime rt(app, "ui");
+    MockBackend mb;
+    rt.set_backend(&mb);
+    rt.set_root(group({text("hi")}));
+    for (int frame = 0; frame < 4; ++frame) {
+      rt.render();
+      rt.drain();
+    }
+    // The first drain runs it to its first (await #f); each later one resumes it once.
+    EXPECT_EQ(cvc::state::instance(app)("pump.n").value(), "3");
+  }
+  ASSERT_TRUE(loop.status().has_value());
+  EXPECT_EQ(*loop.status(), cvc::state_exec::process_status::waiting); // parked, not killed
+}
+
+// Several Runtimes on one app share one frame boundary: each drains once a frame, in either order,
+// and an (await #f) still resumes once a frame, not once per Runtime.
+TEST(AriadneScheduler, SeveralRuntimesResumeAnAwaitOncePerFrame) {
+  cvc::app app;
+  ForeignAwaitLoop loop(app, "pump.n");
+  Runtime a(app, "a");
+  Runtime b(app, "b");
+  MockBackend ma, mb;
+  a.set_backend(&ma);
+  b.set_backend(&mb);
+  a.set_tick_program("(state-set \"ticked\" \"1\")"); // both run programs of their own too
+  b.set_tick_program("(state-set \"ticked\" \"1\")");
+  for (int frame = 0; frame < 5; ++frame) {
+    if (frame < 3) {
+      a.drain();
+      b.drain();
+    } else {
+      b.drain();
+      a.drain();
+    }
+  }
+  EXPECT_EQ(cvc::state::instance(app)("pump.n").value(), "4");
+  EXPECT_EQ(cvc::state::instance(app)("a.ticked").value(), "1");
+  EXPECT_EQ(cvc::state::instance(app)("b.ticked").value(), "1");
+  // One Runtime that stops drawing holds nothing up: the other alone still resumes it each frame.
+  for (int frame = 0; frame < 3; ++frame)
+    a.drain();
+  EXPECT_EQ(cvc::state::instance(app)("pump.n").value(), "7");
+}
+
+// A document that never touches the scheduler, in an app where nothing else did either, pumps
+// nothing and never builds it (exec_scheduler() is lazy).
+TEST(AriadneScheduler, DrainNeverBuildsAnUnusedScheduler) {
+  SchedulerProbeApp app;
+  {
+    Runtime rt(app, "ui");
+    MockBackend mb;
+    rt.set_backend(&mb);
+    rt.set_root(group({text("hi")}));
+    for (int frame = 0; frame < 3; ++frame) {
+      rt.render();
+      rt.drain();
+    }
+  }
+  EXPECT_FALSE(app.scheduler_built());
 }
 
 // §4.6 input seam: set_key_program submits a resident that receives events posted via post_input,
@@ -2825,6 +2974,45 @@ template <class Pred> bool pump_until(Runtime &rt, Pred pred, int budget_ms = 50
   return pred();
 }
 
+// The nav_compute demo's verb: (nav-step) is an async function on the app's async host. The action
+// parks at the call while the kernel runs on the background task pool and fans out over the compute
+// pool, then resumes with the call's value. No channel, no msg-recv.
+TEST(AriadneAction, NavStepAsAnAsyncFunctionReturnsItsResult) {
+  namespace se = cvc::state_exec;
+  cvc::app app;
+  app.computePool();
+  app.exec_scheduler();
+  app.exec_async_host(); // warm them on THIS thread
+  register_action_intrinsics(
+      [&app](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
+        se::register_async_fn(env, app.exec_async_host(), "nav-step",
+                              [&app](std::span<const se::value_t>) -> se::async_kernel {
+                                return [&app](se::async_call &) -> se::value_t {
+                                  std::atomic<int> arrived{0};
+                                  app.computePool().parallel_for(256, [&arrived](int i) {
+                                    if ((i % 3) == 0)
+                                      arrived.fetch_add(1, std::memory_order_relaxed);
+                                  });
+                                  return se::value_t(std::to_string(arrived.load()));
+                                };
+                              });
+      });
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({button("Go", "(state-set \"nav.result\" (nav-step))")}));
+  mb.button_click = true;
+  rt.render();
+  rt.drain();
+  mb.button_click = false;
+  const bool resumed =
+      pump_until(rt, [&] { return !cvc::state::instance(app)("nav.result").value().empty(); });
+  clear_action_intrinsics();
+  ASSERT_TRUE(resumed) << "the parked action never resumed";
+  EXPECT_EQ(cvc::state::instance(app)("nav.result").value(), "86");
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+}
+
 std::string node_data_string(cvc::app &app, const char *path) {
   const boost::any d = cvc::state::instance(app)(path).data();
   const std::string *s = boost::any_cast<std::string>(&d);
@@ -3308,6 +3496,72 @@ TEST(AriadneAsyncFn, ActionCallsResumeAndTheReactiveLaneCantReachThem) {
   EXPECT_FALSE(rt.take_reactive_warnings().empty());            // and reported
 }
 
+// §7.4 an action's step and time caps are tree settings (ariadne.limits.action_max_steps, default
+// 5000; ariadne.limits.action_max_time, default 0.1 s), read on every submission. The action's
+// async calls are charged to them (docs/STATE_EXEC_EXCEPTIONS.md 3.8), so a CPU-heavy verb kills an
+// action at the default caps, and a host whose documents need it raises them.
+TEST(AriadneAsyncFn, ActionCapsAreTreeSettingsAndChargeAsyncCalls) {
+  namespace se = cvc::state_exec;
+  cvc::app app;
+  app.exec_async_host();
+  // About 20 ms of CPU: some 40,000 steps at the default rate, far over the default 5000.
+  register_action_intrinsics(
+      [&app](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
+        se::register_async_fn(env, app.exec_async_host(), "spin",
+                              [](std::span<const se::value_t>) -> se::async_kernel {
+                                return [](se::async_call &call) -> se::value_t {
+                                  const double until = se::thread_cpu_seconds() + 0.02;
+                                  volatile std::uint64_t x = 0;
+                                  while (se::thread_cpu_seconds() < until && !call.cancelled())
+                                    for (int i = 0; i < 1000; ++i)
+                                      x = x + static_cast<std::uint64_t>(i);
+                                  return se::value_t(std::string("spun"));
+                                };
+                              });
+      });
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  auto &root = cvc::state::instance(app);
+  rt.set_root(group({button("Loop", "(begin (set i 0) (while (< i 200) (set i (+ i 1))) "
+                                    "(state-set \"r.loop\" (str i)))"),
+                     button("Spin", "(state-set \"r.spin\" (spin))")}));
+  const auto click = [&](const char *key) {
+    root(key).value(std::string("-"));
+    mb.button_click = true;
+    rt.render();
+    rt.drain();
+    mb.button_click = false;
+    pump_until(rt, [&] { return root(key).value() != "-"; }, 1000);
+    for (int i = 0; i < 3; ++i) { // let the sweep report a kill
+      rt.render();
+      rt.drain();
+    }
+    return root(key).value();
+  };
+
+  // The defaults: the loop fits in 5000 steps; the spin's CPU doesn't.
+  EXPECT_EQ(click("r.loop"), "200");
+  EXPECT_EQ(click("r.spin"), "-");
+  auto warns = rt.take_reactive_warnings();
+  ASSERT_FALSE(warns.empty());
+  EXPECT_NE(warns.back().find("max_steps_exceeded"), std::string::npos) << warns.back();
+
+  // A step cap below the loop's needs kills it too.
+  root("ariadne.limits.action_max_steps").value(std::string("100"));
+  EXPECT_EQ(click("r.loop"), "-");
+  // No limit on either: the spin finishes.
+  root("ariadne.limits.action_max_steps").value(std::string("0"));
+  root("ariadne.limits.action_max_time").value(std::string("0"));
+  EXPECT_EQ(click("r.spin"), "spun");
+  // Unparsable values keep the defaults.
+  root("ariadne.limits.action_max_steps").value(std::string("lots"));
+  root("ariadne.limits.action_max_time").value(std::string("soon"));
+  EXPECT_EQ(click("r.loop"), "200");
+  EXPECT_EQ(click("r.spin"), "-");
+  clear_action_intrinsics();
+}
+
 // A `closable: true` window renders with a close button, persists tree.<id>.open, is skipped once
 // closed, and re-renders when the key is set back (what a Settings menu_toggle does).
 TEST(AriadneRuntime, ClosableWindowClosesAndReopens) {
@@ -3485,6 +3739,954 @@ TEST(AriadneStreamIntrinsics, OpenOnTheInitLaneFailsWithoutADocumentScope) {
   EXPECT_NE(cvc::state::instance(app)("demo.t.err").value().find("no document scope"),
             std::string::npos);
   EXPECT_EQ(cvc::state::instance(app)("demo.streams.cam0").value(), ""); // nothing was opened
+}
+
+// ---- §10 tf_editor: the core's model / overlay / view edges, through the mock -----------------
+
+namespace {
+
+std::string tf_val(cvc::app &app, const std::string &path) {
+  return cvc::state::instance(app)(path).value();
+}
+
+void tf_set(cvc::app &app, const std::string &path, const std::string &v) {
+  cvc::state::instance(app)(path).value(v);
+}
+
+cvc::tf::model tf_parse(const std::string &s) {
+  cvc::tf::model m;
+  EXPECT_TRUE(cvc::tf::from_string(s, m)) << s;
+  return m;
+}
+
+// A small model with known nodes: colour at 0 / 0.5 / 1, opacity at 0 / 0.25 / 1, isocontour bone.
+cvc::tf::model tf_sample() {
+  cvc::tf::model m;
+  m.color = {{0.0, 0.f, 0.f, 0.f}, {0.5, 1.f, 0.f, 0.f}, {1.0, 1.f, 1.f, 1.f}};
+  m.alpha = {{0.0, 0.f}, {0.25, 0.5f}, {1.0, 1.f}};
+  cvc::tf::isocontour bone;
+  bone.id = "bone";
+  bone.at = 0.6;
+  m.isocontours = {bone};
+  m.normalize();
+  return m;
+}
+
+Value tf_scalar(const std::string &s) {
+  Value v;
+  v.scalar = s;
+  return v;
+}
+
+Value tf_list(std::initializer_list<const char *> items) {
+  Value v;
+  v.kind = Value::Kind::Sequence;
+  for (const char *i : items)
+    v.items.push_back(tf_scalar(i));
+  return v;
+}
+
+Widget tf_with(Widget w, const std::string &key, Value v) {
+  w.props.entries.emplace_back(key, std::move(v));
+  return w;
+}
+
+int tf_count(const std::vector<std::string> &warns, const std::string &needle) {
+  return static_cast<int>(std::count_if(warns.begin(), warns.end(), [&](const std::string &w) {
+    return w.find(needle) != std::string::npos;
+  }));
+}
+
+// A fragment file for the load: mount tests (a fresh path per test).
+std::filesystem::path tf_fragment(const std::string &dir, const std::string &content) {
+  namespace fs = std::filesystem;
+  const fs::path d = fs::temp_directory_path() / dir;
+  fs::create_directories(d);
+  const fs::path frag = d / "tf_panel.ari";
+  std::ofstream(frag) << content;
+  return frag;
+}
+
+} // namespace
+
+TEST(AriadneTfEditor, SeedsAnEmptyKeyWithTheDefaultModel) {
+  cvc::app app;
+  Runtime rt(app, "ui");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  mb.tf_ret.drawn = true; // a native editor: nothing composed
+  rt.set_root(group({tf_editor("TF", "tf")}));
+  rt.render();
+  const std::string seeded = cvc::tf::to_string(cvc::tf::model::default_model());
+  EXPECT_EQ(tf_val(app, "ui.tf"), seeded);
+  EXPECT_EQ(mb.tf_calls, 1);
+  EXPECT_EQ(mb.last_tf_key, "ui.tf#TF"); // the resolved bind + the instance id
+  EXPECT_EQ(cvc::tf::to_string(mb.last_tf_model), seeded);
+  EXPECT_TRUE(mb.last_tf_in.interactive); // interactive_updates defaults on
+  EXPECT_EQ(mb.last_tf_in.height, 0.0f);
+  EXPECT_DOUBLE_EQ(mb.last_tf_in.lo, 0.0); // an auto domain with no published range: [0, 1]
+  EXPECT_DOUBLE_EQ(mb.last_tf_in.hi, 1.0);
+  EXPECT_FALSE(mb.saw("text_line:TF")); // drawn natively: no composed rows
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+}
+
+TEST(AriadneTfEditor, SeedsFromADefaultOrAPresetProp) {
+  cvc::app app;
+  Runtime rt(app, "ui");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  mb.tf_ret.drawn = true;
+  const cvc::tf::model custom = tf_sample();
+  rt.set_root(group({
+      tf_with(tf_editor("A", "a"), "preset", tf_scalar("hot")),
+      tf_with(tf_with(tf_editor("B", "b"), "default", tf_scalar(cvc::tf::to_string(custom))),
+              "preset", tf_scalar("hot")),
+      tf_with(tf_with(tf_editor("C", "c"), "default", tf_scalar("{not a model")), "preset",
+              tf_scalar("cool")),
+  }));
+  rt.render();
+  rt.render();
+  EXPECT_EQ(tf_val(app, "ui.a"), cvc::tf::to_string(cvc::tf::model::preset("hot")));
+  EXPECT_EQ(tf_val(app, "ui.b"), cvc::tf::to_string(custom)); // default: wins over preset:
+  EXPECT_EQ(tf_val(app, "ui.c"), cvc::tf::to_string(cvc::tf::model::preset("cool")));
+  const std::vector<std::string> warns = rt.take_reactive_warnings();
+  EXPECT_EQ(warns.size(), 1u); // the broken default:, once
+  EXPECT_EQ(tf_count(warns, "'C'"), 1);
+  EXPECT_EQ(tf_count(warns, "default"), 1);
+}
+
+// The scene transfer_function: vocabulary on the widget itself: a standalone editor's starting
+// model, the lists replacing their part of the preset.
+TEST(AriadneTfEditor, SeedsInlineListsOverThePreset) {
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  cvc::app app;
+  Runtime rt(app, "ui");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  mb.tf_ret.drawn = true;
+  LoadResult lr = load_string(R"(
+windows:
+  - window: W
+    children:
+      - tf_editor: TF
+        bind: tf
+        preset: grayscale
+        alpha: [[0, 0], [0.5, 0.25], [1, 0.5]]
+        isocontours: [{id: bone, at: 0.6, rgb: [1, 0.5, 0]}, 0.3]
+        domain: [-1, 3]
+        opacity_cubed: true
+)");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  const cvc::tf::model base = cvc::tf::model::preset("grayscale");
+  const cvc::tf::model m = tf_parse(tf_val(app, "ui.tf"));
+  ASSERT_EQ(m.color.size(), base.color.size()); // the preset's colour ramp, untouched
+  for (std::size_t i = 0; i < m.color.size(); ++i) {
+    EXPECT_NEAR(m.color[i].at, base.color[i].at, 1e-6);
+    EXPECT_NEAR(m.color[i].r, base.color[i].r, 1e-4);
+    EXPECT_NEAR(m.color[i].g, base.color[i].g, 1e-4);
+    EXPECT_NEAR(m.color[i].b, base.color[i].b, 1e-4);
+  }
+  ASSERT_EQ(m.alpha.size(), 3u);
+  EXPECT_NEAR(m.alpha[1].at, 0.5, 1e-6);
+  EXPECT_NEAR(m.alpha[1].a, 0.25, 1e-4);
+  EXPECT_NEAR(m.alpha[2].a, 0.5, 1e-4);
+  ASSERT_EQ(m.isocontours.size(), 2u); // sorted: the bare 0.3 first, given a fresh id
+  EXPECT_NEAR(m.isocontours[0].at, 0.3, 1e-6);
+  EXPECT_FALSE(m.isocontours[0].id.empty());
+  EXPECT_EQ(m.isocontours[1].id, "bone");
+  EXPECT_TRUE(m.isocontours[1].has_rgb);
+  EXPECT_NEAR(m.isocontours[1].g, 0.5f, 1e-4);
+  EXPECT_FALSE(m.domain.automatic);
+  EXPECT_DOUBLE_EQ(m.domain.min, -1.0);
+  EXPECT_DOUBLE_EQ(m.domain.max, 3.0);
+  EXPECT_TRUE(m.opacity_cubed);
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+}
+
+TEST(AriadneTfEditor, RespectsAnExistingModel) {
+  cvc::app app;
+  Runtime rt(app, "ui");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  mb.tf_ret.drawn = true;
+  const cvc::tf::model custom = tf_sample();
+  tf_set(app, "ui.tf", cvc::tf::to_string(custom));
+  rt.set_root(group({tf_with(tf_editor("TF", "tf"), "preset", tf_scalar("hot"))}));
+  rt.render();
+  EXPECT_EQ(tf_val(app, "ui.tf"), cvc::tf::to_string(custom)); // not re-seeded
+  EXPECT_EQ(cvc::tf::to_string(mb.last_tf_model), cvc::tf::to_string(custom));
+  // A valid non-canonical spelling (the roadmap's map nodes) is read, and left as written.
+  const std::string map_form = R"({"color":[{"at":0,"rgb":[0,0,0]},{"at":1,"rgb":[1,1,1]}],)"
+                               R"("alpha":[{"at":0,"a":0},{"at":1,"a":1}]})";
+  tf_set(app, "ui.tf", map_form);
+  rt.render();
+  EXPECT_EQ(tf_val(app, "ui.tf"), map_form);
+  ASSERT_EQ(mb.last_tf_model.color.size(), 2u);
+  EXPECT_NEAR(mb.last_tf_model.color[1].r, 1.f, 1e-6);
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+}
+
+TEST(AriadneTfEditor, BackendCommitWritesTheNormalizedModelAndFiresOn) {
+  cvc::app app;
+  Runtime rt(app, "ui");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  mb.tf_ret.drawn = true;
+  Widget w = tf_editor("TF", "tf");
+  w.on = "tf_changed";
+  int fired = 0;
+  rt.on("tf_changed", [&] { ++fired; });
+  rt.set_root(group({w}));
+  rt.render(); // seeds
+  rt.drain();
+  EXPECT_EQ(fired, 0); // seeding is not an edit
+  cvc::tf::model edit; // unsorted, no endpoints: the core normalizes before it writes
+  edit.color = {{0.7, 0.f, 0.f, 1.f}, {0.2, 1.f, 0.f, 0.f}};
+  edit.alpha = {{0.5, 0.5f}};
+  mb.tf_ret.changed = mb.tf_ret.committed = true;
+  mb.tf_ret.model = edit;
+  rt.render();
+  rt.drain();
+  cvc::tf::model expect = edit;
+  expect.normalize();
+  EXPECT_EQ(tf_val(app, "ui.tf"), cvc::tf::to_string(expect));
+  EXPECT_EQ(fired, 1);
+  // The same commit again changes nothing: no write, no second on:.
+  rt.render();
+  rt.drain();
+  EXPECT_EQ(fired, 1);
+  EXPECT_EQ(cvc::tf::to_string(mb.last_tf_model), cvc::tf::to_string(expect)); // what it draws
+}
+
+TEST(AriadneTfEditor, UncommittedEditDoesNotWrite) {
+  cvc::app app;
+  Runtime rt(app, "ui");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  mb.tf_ret.drawn = true;
+  rt.set_root(
+      group({tf_with(tf_with(tf_editor("TF", "tf"), "interactive_updates", tf_scalar("false")),
+                     "height", tf_scalar("140"))}));
+  rt.render();
+  EXPECT_FALSE(mb.last_tf_in.interactive); // commit on release
+  EXPECT_EQ(mb.last_tf_in.height, 140.0f);
+  const std::string seeded = tf_val(app, "ui.tf");
+  mb.tf_ret.changed = true; // a drag in flight: the backend holds the working model
+  mb.tf_ret.model = tf_sample();
+  rt.render();
+  EXPECT_EQ(tf_val(app, "ui.tf"), seeded);
+}
+
+TEST(AriadneTfEditor, ViewIsSeededAndPersistedUnderTreeId) {
+  cvc::app app;
+  Runtime rt(app, "ui");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  mb.tf_ret.drawn = true;
+  Widget w = tf_with(tf_editor("TF", "tf"), "layers", tf_list({"contour_tree"}));
+  w.id = "skull_tf";
+  rt.set_root(group({w}));
+  rt.render();
+  const std::string v = "ui.tree.skull_tf.view.";
+  EXPECT_EQ(mb.last_tf_key, "ui.tf#skull_tf");
+  EXPECT_EQ(tf_val(app, v + "histogram"), "0"); // layers: replaces the default layer set
+  EXPECT_EQ(tf_val(app, v + "contour_tree"), "1");
+  EXPECT_EQ(tf_val(app, v + "contour_spectrum"), "0");
+  EXPECT_EQ(tf_val(app, v + "color"), "1");
+  EXPECT_EQ(tf_val(app, v + "opacity"), "1");
+  EXPECT_EQ(tf_val(app, v + "zoom"), cvc::tf::range_to_string(0.0, 1.0));
+  EXPECT_TRUE(mb.last_tf_in.view.show_contour_tree);
+  EXPECT_FALSE(mb.last_tf_in.view.show_histogram);
+  // A zoom / layer change the backend reports persists ...
+  mb.tf_ret.view_changed = true;
+  mb.tf_ret.view = mb.last_tf_in.view;
+  mb.tf_ret.view.zoom_lo = 0.25;
+  mb.tf_ret.view.zoom_hi = 0.75;
+  mb.tf_ret.view.show_histogram = true;
+  rt.render();
+  EXPECT_EQ(tf_val(app, v + "zoom"), cvc::tf::range_to_string(0.25, 0.75));
+  EXPECT_EQ(tf_val(app, v + "histogram"), "1");
+  // ... and is what the backend gets next frame: the state, not props, is the authority.
+  mb.tf_ret.view_changed = false;
+  rt.render();
+  EXPECT_NEAR(mb.last_tf_in.view.zoom_lo, 0.25, 1e-9);
+  EXPECT_NEAR(mb.last_tf_in.view.zoom_hi, 0.75, 1e-9);
+  EXPECT_TRUE(mb.last_tf_in.view.show_histogram);
+  // A write from outside the editor (a checkbox bound to the key) reaches it too.
+  tf_set(app, v + "histogram", "0");
+  rt.render();
+  EXPECT_FALSE(mb.last_tf_in.view.show_histogram);
+}
+
+TEST(AriadneTfEditor, LazyOverlaysAreRequestedOnceAndTheRequestOnlyGrows) {
+  cvc::app app;
+  Runtime rt(app, "ui");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  mb.tf_ret.drawn = true;
+  rt.set_root(group({tf_with(tf_editor("A", "tf"), "layers", tf_list({"contour_spectrum"})),
+                     tf_with(tf_editor("B", "tf"), "layers", tf_list({"histogram"}))}));
+  rt.render();
+  rt.render();
+  const std::string req = "ui.tf.overlay_request";
+  // Only the costly layer an editor shows is asked for (the histogram is always published).
+  EXPECT_EQ(tf_val(app, req), cvc::tf::overlay_bits_to_csv(cvc::tf::overlay_contour_spectrum));
+  // B turns its contour tree on (a checkbox bound to its view key): the request grows.
+  tf_set(app, "ui.tree.B.view.contour_tree", "1");
+  rt.render();
+  const unsigned both = cvc::tf::overlay_contour_spectrum | cvc::tf::overlay_contour_tree;
+  EXPECT_EQ(cvc::tf::overlay_bits_from_csv(tf_val(app, req)), both);
+  // A hides its spectrum: the request never shrinks (another editor may still show the layer).
+  tf_set(app, "ui.tree.A.view.contour_spectrum", "0");
+  rt.render();
+  EXPECT_EQ(cvc::tf::overlay_bits_from_csv(tf_val(app, req)), both);
+  // Once the producer has published the layers nobody asks again (here it cleared the request).
+  cvc::tf::spectrum_overlay s;
+  s.area = s.min_volume = s.max_volume = s.gradient = {0.0, 1.0, 2.0, 1.0};
+  cvc::tf::tree_overlay t;
+  t.vertices = {{0.5f, 0.0}, {0.5f, 1.0}};
+  t.edges = {{0, 1}};
+  tf_set(app, "ui.tf.contour_spectrum", cvc::tf::spectrum_to_string(s));
+  tf_set(app, "ui.tf.contour_tree", cvc::tf::tree_to_string(t));
+  tf_set(app, req, "");
+  tf_set(app, "ui.tree.A.view.contour_spectrum", "1");
+  rt.render();
+  EXPECT_EQ(tf_val(app, req), "");
+  EXPECT_EQ(mb.last_tf_overlays.spectrum.size(), 4u); // and the layers reached the backend
+  EXPECT_FALSE(mb.last_tf_overlays.tree.empty());
+}
+
+TEST(AriadneTfEditor, MalformedModelKeepsTheLastGoodOneAndWarnsOnce) {
+  cvc::app app;
+  Runtime rt(app, "ui");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  mb.tf_ret.drawn = true;
+  const cvc::tf::model good = tf_sample();
+  tf_set(app, "ui.tf", cvc::tf::to_string(good));
+  rt.set_root(group({tf_editor("TF", "tf")}));
+  rt.render();
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+  const std::string bad = "{\"color\": oops";
+  tf_set(app, "ui.tf", bad);
+  rt.render();
+  rt.render();
+  rt.render();
+  EXPECT_EQ(cvc::tf::to_string(mb.last_tf_model), cvc::tf::to_string(good));
+  EXPECT_EQ(tf_val(app, "ui.tf"), bad); // never clobbered by the widget
+  const std::vector<std::string> warns = rt.take_reactive_warnings();
+  ASSERT_EQ(warns.size(), 1u);
+  EXPECT_NE(warns[0].find("does not parse"), std::string::npos) << warns[0];
+  // A good model written later is picked up.
+  const cvc::tf::model next = cvc::tf::model::preset("hot");
+  tf_set(app, "ui.tf", cvc::tf::to_string(next));
+  rt.render();
+  EXPECT_EQ(cvc::tf::to_string(mb.last_tf_model), cvc::tf::to_string(next));
+}
+
+TEST(AriadneTfEditor, AModelThatNeverParsedShowsTheSeedWithoutWritingIt) {
+  cvc::app app;
+  Runtime rt(app, "ui");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  mb.tf_ret.drawn = true;
+  tf_set(app, "ui.tf", "garbage");
+  rt.set_root(group({tf_with(tf_editor("TF", "tf"), "preset", tf_scalar("hot"))}));
+  rt.render();
+  rt.render();
+  EXPECT_EQ(tf_val(app, "ui.tf"), "garbage");
+  EXPECT_EQ(cvc::tf::to_string(mb.last_tf_model),
+            cvc::tf::to_string(cvc::tf::model::preset("hot")));
+  EXPECT_EQ(rt.take_reactive_warnings().size(), 1u);
+}
+
+TEST(AriadneTfEditor, ComposedFallbackEmitsARowPerNode) {
+  cvc::app app;
+  Runtime rt(app, "ui");
+  MockBackend mb; // tf_ret.drawn == false: no native editor
+  rt.set_backend(&mb);
+  const std::string src = cvc::tf::to_string(tf_sample());
+  tf_set(app, "ui.tf", src);
+  rt.set_root(group({tf_editor("TF", "tf")}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("tf_editor:TF@ui.tf#TF")); // the backend is asked first ...
+  EXPECT_TRUE(mb.saw("text_line:TF"));          // ... then the core composes the editor
+  EXPECT_TRUE(mb.saw("text_value:domain=0 .. 1"));
+  EXPECT_TRUE(mb.saw("text_value:colour 1=at 0")); // an endpoint is pinned: no position slider
+  EXPECT_TRUE(mb.saw("slider_double:colour 2"));
+  EXPECT_TRUE(mb.saw("text_value:colour 3=at 1"));
+  EXPECT_EQ(mb.times("color:rgb"), 3);
+  EXPECT_TRUE(mb.saw_prefix("text_value:rgb=")); // this backend draws no picker: the value as text
+  EXPECT_TRUE(mb.saw("slider_double:alpha 1 at 0"));
+  EXPECT_TRUE(mb.saw("slider_double:alpha 2"));
+  EXPECT_EQ(mb.times("slider_double:opacity"), 1);
+  EXPECT_TRUE(mb.saw("slider_double:alpha 3 at 1"));
+  EXPECT_TRUE(mb.saw("slider_double:iso bone"));
+  EXPECT_EQ(mb.times("button:x"), 3); // colour 2, alpha 2 and bone: endpoints cannot be deleted
+  for (const char *b : {"button:+ colour", "button:+ alpha", "button:+ isocontour", "button:reset"})
+    EXPECT_TRUE(mb.saw(b)) << b;
+  for (const char *c : {"checkbox:opacity cubed", "checkbox:histogram", "checkbox:contour spectrum",
+                        "checkbox:contour tree"})
+    EXPECT_TRUE(mb.saw(c)) << c;
+  EXPECT_FALSE(mb.saw_prefix("set_image:")); // no pixels on this backend: no preview
+  EXPECT_EQ(tf_val(app, "ui.tf"), src);      // drawing alone writes nothing
+}
+
+TEST(AriadneTfEditor, ComposedSlidersAndButtonsEditTheModel) {
+  cvc::app app;
+  Runtime rt(app, "ui");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  tf_set(app, "ui.tf", cvc::tf::to_string(tf_sample()));
+  Widget w = tf_editor("TF", "tf");
+  w.on = "tf_changed";
+  int fired = 0;
+  rt.on("tf_changed", [&] { ++fired; });
+  rt.set_root(group({w}));
+  rt.render();
+  const std::string k = "ui.tf#TF#"; // a composed row's slider key: <backend key>#<row>
+  // Slide the isocontour (no data range is published: data units = the normalized axis).
+  mb.slider_double_ret[k + "ibone"] = {true, true, 0.8};
+  rt.render();
+  rt.drain();
+  mb.slider_double_ret.clear();
+  cvc::tf::model m = tf_parse(tf_val(app, "ui.tf"));
+  ASSERT_EQ(m.isocontours.size(), 1u);
+  EXPECT_EQ(m.isocontours[0].id, "bone");
+  EXPECT_NEAR(m.isocontours[0].at, 0.8, 1e-6);
+  EXPECT_EQ(fired, 1);
+  // The second opacity node's opacity, and the middle colour node's position, in one frame.
+  mb.slider_double_ret[k + "a1a"] = {true, true, 0.9};
+  mb.slider_double_ret[k + "c1"] = {true, true, 0.3};
+  rt.render();
+  mb.slider_double_ret.clear();
+  m = tf_parse(tf_val(app, "ui.tf"));
+  ASSERT_EQ(m.alpha.size(), 3u);
+  EXPECT_NEAR(m.alpha[1].a, 0.9, 1e-4);
+  EXPECT_NEAR(m.alpha[1].at, 0.25, 1e-6); // the opacity slider leaves the position alone
+  ASSERT_EQ(m.color.size(), 3u);
+  EXPECT_NEAR(m.color[1].at, 0.3, 1e-6);
+  // + isocontour adds one (in the widest gap); x deletes a non-endpoint node.
+  mb.click_button = "+ isocontour";
+  rt.render();
+  m = tf_parse(tf_val(app, "ui.tf"));
+  ASSERT_EQ(m.isocontours.size(), 2u);
+  EXPECT_NE(m.isocontours[0].id, m.isocontours[1].id);
+  EXPECT_GT(std::abs(m.isocontours[0].at - m.isocontours[1].at), 0.1);
+  mb.click_button = "x"; // every row's x reports a click: one delete per list this frame
+  rt.render();
+  mb.click_button.clear();
+  m = tf_parse(tf_val(app, "ui.tf"));
+  ASSERT_EQ(m.color.size(), 2u); // the endpoints survive
+  EXPECT_DOUBLE_EQ(m.color[0].at, 0.0);
+  EXPECT_DOUBLE_EQ(m.color[1].at, 1.0);
+  EXPECT_EQ(m.alpha.size(), 2u);
+  EXPECT_EQ(m.isocontours.size(), 1u);
+}
+
+TEST(AriadneTfEditor, ComposedSlidersWorkInDataUnits) {
+  cvc::app app;
+  Runtime rt(app, "ui");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  tf_set(app, "ui.tf", cvc::tf::to_string(tf_sample()));
+  tf_set(app, "ui.tf.range", cvc::tf::range_to_string(-10.0, 10.0)); // the auto domain
+  rt.set_root(group({tf_editor("TF", "tf")}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("text_value:domain=-10 .. 10"));
+  EXPECT_TRUE(mb.saw("text_value:colour 1=at -10"));
+  mb.slider_double_ret["ui.tf#TF#ibone"] = {true, true, 5.0}; // the isovalue, in data units
+  rt.render();
+  const cvc::tf::model m = tf_parse(tf_val(app, "ui.tf"));
+  ASSERT_EQ(m.isocontours.size(), 1u);
+  EXPECT_NEAR(m.isocontours[0].at, 0.75, 1e-6); // stored normalized
+}
+
+TEST(AriadneTfEditor, ComposedResetKeepsTheDomain) {
+  cvc::app app;
+  Runtime rt(app, "ui");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  cvc::tf::model start = tf_sample();
+  start.domain.automatic = false;
+  start.domain.min = -8.0;
+  start.domain.max = 8.0;
+  start.resolution = 512;
+  tf_set(app, "ui.tf", cvc::tf::to_string(start));
+  rt.set_root(group({tf_editor("TF", "tf")}));
+  rt.render();
+  mb.click_button = "reset";
+  rt.render();
+  mb.click_button.clear();
+  cvc::tf::model expect = cvc::tf::model::default_model();
+  expect.domain = start.domain;
+  expect.resolution = 512;
+  EXPECT_EQ(tf_val(app, "ui.tf"), cvc::tf::to_string(expect));
+}
+
+TEST(AriadneTfEditor, ComposedTogglesLayersAndOpacityCubed) {
+  cvc::app app;
+  Runtime rt(app, "ui");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  tf_set(app, "ui.tf", cvc::tf::to_string(tf_sample()));
+  rt.set_root(group({tf_editor("TF", "tf")}));
+  rt.render();
+  EXPECT_EQ(tf_val(app, "ui.tree.TF.view.contour_tree"), "0");
+  EXPECT_EQ(tf_val(app, "ui.tf.overlay_request"), "");
+  mb.checkbox_by_label["contour tree"] = {true, true, true};
+  mb.checkbox_by_label["opacity cubed"] = {true, true, true};
+  rt.render();
+  mb.checkbox_by_label.clear();
+  EXPECT_EQ(tf_val(app, "ui.tree.TF.view.contour_tree"), "1");
+  EXPECT_EQ(tf_val(app, "ui.tf.overlay_request"),
+            cvc::tf::overlay_bits_to_csv(cvc::tf::overlay_contour_tree));
+  EXPECT_TRUE(tf_parse(tf_val(app, "ui.tf")).opacity_cubed);
+}
+
+TEST(AriadneTfEditor, ComposedPreviewIsRasterizedOnlyWhenItChanges) {
+  cvc::app app;
+  Runtime rt(app, "ui");
+  MockBackend mb;
+  mb.caps_bitmap = true; // a backend that shows pixels gets the preview raster
+  rt.set_backend(&mb);
+  tf_set(app, "ui.tf", cvc::tf::to_string(tf_sample()));
+  rt.set_root(group({tf_editor("TF", "tf")}));
+  rt.render();
+  rt.render();
+  const std::string img = "tf_editor:ui.tf#TF";
+  EXPECT_EQ(mb.times("set_image:" + img), 1); // rasterized once ...
+  EXPECT_EQ(mb.times("image:" + img), 2);     // ... and drawn every frame
+  tf_set(app, "ui.tf", cvc::tf::to_string(cvc::tf::model::preset("hot")));
+  rt.render();
+  EXPECT_EQ(mb.times("set_image:" + img), 2); // a new model re-rasterizes
+  tf_set(app, "ui.tf.histogram", cvc::tf::histogram_to_string({1.0, 2.0, 3.0}));
+  rt.render();
+  EXPECT_EQ(mb.times("set_image:" + img), 3); // so does a newly published layer
+  rt.render();
+  EXPECT_EQ(mb.times("set_image:" + img), 3);
+}
+
+TEST(AriadneTfEditor, PublishedOverlaysReachTheBackend) {
+  cvc::app app;
+  Runtime rt(app, "ui");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  mb.tf_ret.drawn = true;
+  tf_set(app, "ui.tf", cvc::tf::to_string(tf_sample()));
+  tf_set(app, "ui.tf.range", cvc::tf::range_to_string(-2.0, 6.0));
+  tf_set(app, "ui.tf.histogram", cvc::tf::histogram_to_string({1.0, 2.0, 3.0, 4.0}));
+  tf_set(app, "ui.tf.overlay_status", "computing the contour tree");
+  rt.set_root(group({tf_editor("TF", "tf")}));
+  rt.render();
+  EXPECT_TRUE(mb.last_tf_overlays.has_range);
+  EXPECT_NEAR(mb.last_tf_in.lo, -2.0, 1e-9); // the auto domain follows the published range
+  EXPECT_NEAR(mb.last_tf_in.hi, 6.0, 1e-9);
+  EXPECT_EQ(mb.last_tf_overlays.histogram.size(), 4u);
+  EXPECT_EQ(mb.last_tf_overlays.status, "computing the contour tree");
+  // A later publish reaches it the next frame.
+  tf_set(app, "ui.tf.histogram", cvc::tf::histogram_to_string({5.0, 6.0}));
+  rt.render();
+  EXPECT_EQ(mb.last_tf_overlays.histogram.size(), 2u);
+  // An explicit domain wins over the published range.
+  cvc::tf::model fixed = tf_sample();
+  fixed.domain.automatic = false;
+  fixed.domain.min = 0.0;
+  fixed.domain.max = 10.0;
+  tf_set(app, "ui.tf", cvc::tf::to_string(fixed));
+  rt.render();
+  EXPECT_NEAR(mb.last_tf_in.lo, 0.0, 1e-9);
+  EXPECT_NEAR(mb.last_tf_in.hi, 10.0, 1e-9);
+}
+
+// A mesher's interval (fe_lab publishes <tf>.interval = "<id_a>,<id_b>") reaches the backend as the
+// two isocontour ids, only while both are in the model; and the composed preview re-renders for it.
+TEST(AriadneTfEditor, TheMeshedIntervalReachesTheBackend) {
+  cvc::app app;
+  Runtime rt(app, "ui");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  mb.tf_ret.drawn = true;
+  cvc::tf::model m = tf_sample(); // bone at 0.6
+  cvc::tf::isocontour skin, lung;
+  skin.id = "skin";
+  skin.at = 0.3;
+  lung.id = "lung";
+  lung.at = 0.1;
+  m.isocontours.push_back(skin);
+  m.isocontours.push_back(lung);
+  m.normalize();
+  tf_set(app, "ui.tf", cvc::tf::to_string(m));
+  rt.set_root(group({tf_editor("TF", "tf")}));
+  rt.render();
+  EXPECT_TRUE(mb.last_tf_in.interval_a.empty()); // nothing published
+  EXPECT_TRUE(mb.last_tf_in.interval_b.empty());
+  tf_set(app, "ui.tf.interval", "bone,skin");
+  rt.render();
+  EXPECT_EQ(mb.last_tf_in.interval_a, "bone");
+  EXPECT_EQ(mb.last_tf_in.interval_b, "skin");
+  tf_set(app, "ui.tf.interval", "skin,bone"); // the order is the mesher's (isovalue, isovalue2)
+  rt.render();
+  EXPECT_EQ(mb.last_tf_in.interval_a, "skin");
+  EXPECT_EQ(mb.last_tf_in.interval_b, "bone");
+  // An id the model no longer has (deleted, the mesher not yet caught up): no band.
+  tf_set(app, "ui.tf.interval", "skin,gone");
+  rt.render();
+  EXPECT_TRUE(mb.last_tf_in.interval_a.empty());
+  EXPECT_TRUE(mb.last_tf_in.interval_b.empty());
+  tf_set(app, "ui.tf.interval", "");
+  rt.render();
+  EXPECT_TRUE(mb.last_tf_in.interval_a.empty());
+
+  // The composed editor's preview: a published interval re-rasterizes it, an unchanged one not.
+  cvc::app app2;
+  Runtime rt2(app2, "ui");
+  MockBackend mc;
+  mc.caps_bitmap = true;
+  rt2.set_backend(&mc);
+  tf_set(app2, "ui.tf", cvc::tf::to_string(m));
+  rt2.set_root(group({tf_editor("TF", "tf")}));
+  rt2.render();
+  const std::string img = "set_image:tf_editor:ui.tf#TF";
+  EXPECT_EQ(mc.times(img), 1);
+  tf_set(app2, "ui.tf.interval", "lung,bone");
+  rt2.render();
+  EXPECT_EQ(mc.times(img), 2);
+  rt2.render();
+  EXPECT_EQ(mc.times(img), 2);
+}
+
+// Through a load: link hole the interval is read beside the hole's TARGET, like the overlays.
+TEST(AriadneTfEditor, ALinkHoleReachesTheParentsInterval) {
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  const std::filesystem::path frag =
+      tf_fragment("ariadne_tf_interval_hole", "root:\n  - tf_editor: TF\n    bind: tf\n");
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  mb.tf_ret.drawn = true;
+  const std::string parent = "ui.demo.scene.domain.transfer_function";
+  cvc::tf::model m = tf_sample();
+  cvc::tf::isocontour skin;
+  skin.id = "skin";
+  skin.at = 0.3;
+  m.isocontours.push_back(skin);
+  m.normalize();
+  tf_set(app, parent, cvc::tf::to_string(m));
+  tf_set(app, parent + ".interval", "skin,bone");
+  LoadResult lr =
+      load_string("windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
+                  "\n        as: rf\n        link:\n          tf: "
+                  "scene.domain.transfer_function\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  EXPECT_EQ(mb.last_tf_in.interval_a, "skin");
+  EXPECT_EQ(mb.last_tf_in.interval_b, "bone");
+}
+
+TEST(AriadneTfEditor, PropsRedirectTheOverlaySources) {
+  cvc::app app;
+  Runtime rt(app, "ui");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  mb.tf_ret.drawn = true;
+  tf_set(app, "ui.tf", cvc::tf::to_string(tf_sample()));
+  tf_set(app, "ui.tf.range", cvc::tf::range_to_string(0.0, 1000.0)); // not read: redirected
+  tf_set(app, "ui.stats.range", cvc::tf::range_to_string(5.0, 15.0));
+  tf_set(app, "ui.stats.hist", cvc::tf::histogram_to_string({1.0, 1.0, 1.0}));
+  rt.set_root(group({tf_with(tf_with(tf_editor("TF", "tf"), "range", tf_scalar("stats.range")),
+                             "histogram", tf_scalar("stats.hist"))}));
+  rt.render();
+  EXPECT_NEAR(mb.last_tf_in.lo, 5.0, 1e-9); // the redirect is a bind, resolved in the scope
+  EXPECT_NEAR(mb.last_tf_in.hi, 15.0, 1e-9);
+  EXPECT_EQ(mb.last_tf_overlays.histogram.size(), 3u);
+}
+
+TEST(AriadneTfEditor, TwoEditorsOnOneModelKeepTheirOwnKeyAndView) {
+  cvc::app app;
+  Runtime rt(app, "ui");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  mb.tf_ret.drawn = true;
+  rt.set_root(group({tf_editor("Main", "tf"),
+                     tf_with(tf_editor("Inset", "tf"), "layers", tf_list({"contour_tree"}))}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("tf_editor:Main@ui.tf#Main")); // one model, two gestures
+  EXPECT_TRUE(mb.saw("tf_editor:Inset@ui.tf#Inset"));
+  EXPECT_EQ(tf_val(app, "ui.tree.Main.view.contour_tree"), "0");
+  EXPECT_EQ(tf_val(app, "ui.tree.Inset.view.contour_tree"), "1");
+  // An edit through one is what the other draws: both report it, it is written once.
+  const cvc::tf::model cool = cvc::tf::model::preset("cool");
+  mb.tf_ret.committed = mb.tf_ret.changed = true;
+  mb.tf_ret.model = cool;
+  rt.render();
+  mb.tf_ret.committed = mb.tf_ret.changed = false;
+  mb.log.clear();
+  rt.render();
+  EXPECT_EQ(tf_val(app, "ui.tf"), cvc::tf::to_string(cool));
+  EXPECT_EQ(cvc::tf::to_string(mb.last_tf_model), cvc::tf::to_string(cool)); // Inset's frame
+}
+
+TEST(AriadneTfEditor, BindsResolveInsideALoadMount) {
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  const std::filesystem::path frag =
+      tf_fragment("ariadne_tf_mount", "root:\n  - tf_editor: TF\n    bind: tf\n"
+                                      "    layers: [contour_spectrum]\n");
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  mb.tf_ret.drawn = true;
+  LoadResult lr =
+      load_string("windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
+                  "\n        as: rf\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  const std::string sub = "ui.demo.includes.rf.";
+  EXPECT_EQ(tf_val(app, sub + "tf"), cvc::tf::to_string(cvc::tf::model::default_model()));
+  EXPECT_EQ(mb.last_tf_key, sub + "tf#TF");
+  EXPECT_EQ(tf_val(app, sub + "tree.TF.view.contour_spectrum"), "1");
+  EXPECT_EQ(tf_val(app, sub + "tf.overlay_request"),
+            cvc::tf::overlay_bits_to_csv(cvc::tf::overlay_contour_spectrum));
+  EXPECT_EQ(tf_val(app, "ui.demo.tf"), ""); // nothing at the document scope
+}
+
+// A module given a parent's model through ONE link hole still sees the layers published beside the
+// target (keys under a hole are its own children, not the target's) and asks the target's producer.
+TEST(AriadneTfEditor, ALinkHoleReachesTheParentsModelAndLayers) {
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  const std::filesystem::path frag =
+      tf_fragment("ariadne_tf_hole", "root:\n  - tf_editor: TF\n    bind: tf\n"
+                                     "    layers: [contour_spectrum]\n");
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  mb.tf_ret.drawn = true;
+  const std::string parent = "ui.demo.scene.vol.transfer_function";
+  tf_set(app, parent, cvc::tf::to_string(tf_sample()));
+  tf_set(app, parent + ".range", cvc::tf::range_to_string(-4.0, 4.0));
+  tf_set(app, parent + ".histogram", cvc::tf::histogram_to_string({1.0, 2.0}));
+  LoadResult lr =
+      load_string("windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
+                  "\n        as: rf\n        link:\n          tf: scene.vol.transfer_function\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  EXPECT_EQ(cvc::tf::to_string(mb.last_tf_model), cvc::tf::to_string(tf_sample()));
+  EXPECT_NEAR(mb.last_tf_in.lo, -4.0, 1e-9);
+  EXPECT_NEAR(mb.last_tf_in.hi, 4.0, 1e-9);
+  EXPECT_EQ(mb.last_tf_overlays.histogram.size(), 2u);
+  EXPECT_EQ(tf_val(app, parent + ".overlay_request"),
+            cvc::tf::overlay_bits_to_csv(cvc::tf::overlay_contour_spectrum));
+  // An edit writes through the (read-write) hole to the parent's model.
+  const cvc::tf::model hot = cvc::tf::model::preset("hot");
+  mb.tf_ret.committed = mb.tf_ret.changed = true;
+  mb.tf_ret.model = hot;
+  rt.render();
+  EXPECT_EQ(tf_val(app, parent), cvc::tf::to_string(hot));
+}
+
+// ---- §10 tf_editor: props typing, locale and no-op commits (review C6/C7/C8) -------------------
+
+namespace {
+
+Value tf_seq(std::vector<Value> items) {
+  Value v;
+  v.kind = Value::Kind::Sequence;
+  v.items = std::move(items);
+  return v;
+}
+
+Value tf_map(std::vector<std::pair<std::string, Value>> entries) {
+  Value v;
+  v.kind = Value::Kind::Map;
+  v.entries = std::move(entries);
+  return v;
+}
+
+// LC_NUMERIC switched to a decimal-comma locale for one scope (inactive when the host has none).
+class DecimalCommaLocale {
+public:
+  DecimalCommaLocale() {
+    if (const char *cur = std::setlocale(LC_NUMERIC, nullptr))
+      saved_ = cur;
+    for (const char *name : {"de_DE.UTF-8", "de_DE.utf8", "de_DE", "de-DE", "German_Germany.1252",
+                             "fr_FR.UTF-8", "fr-FR", "French_France.1252"}) {
+      if (!std::setlocale(LC_NUMERIC, name))
+        continue;
+      char buf[16];
+      std::snprintf(buf, sizeof(buf), "%.1f", 0.5);
+      if (std::string(buf) == "0,5") {
+        active_ = true;
+        return;
+      }
+    }
+    restore();
+  }
+  ~DecimalCommaLocale() { restore(); }
+  DecimalCommaLocale(const DecimalCommaLocale &) = delete;
+  DecimalCommaLocale &operator=(const DecimalCommaLocale &) = delete;
+  bool active() const { return active_; }
+
+private:
+  void restore() { std::setlocale(LC_NUMERIC, saved_.empty() ? "C" : saved_.c_str()); }
+  std::string saved_;
+  bool active_ = false;
+};
+
+} // namespace
+
+// The inline seed lists and a YAML-map default: become model JSON in the core. A decimal-comma C
+// locale must not reach that JSON ("0,5" splits one number into two and drops the whole seed).
+TEST(AriadneTfEditor, InlineSeedIsLocaleIndependent) {
+  DecimalCommaLocale comma;
+  if (!comma.active())
+    GTEST_SKIP() << "no decimal-comma locale on this host";
+  cvc::app app;
+  Runtime rt(app, "ui");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  mb.tf_ret.drawn = true;
+  Widget a = tf_with(tf_editor("A", "a"), "alpha",
+                     tf_seq({tf_list({"0", "0"}), tf_list({"0.5", "0.25"}), tf_list({"1", "1"})}));
+  a = tf_with(std::move(a), "isocontours",
+              tf_seq({tf_map({{"id", tf_scalar("bone")}, {"at", tf_scalar("0.6")}})}));
+  a = tf_with(std::move(a), "domain", tf_list({"-1.5", "2.5"}));
+  const Value dflt =
+      tf_map({{"color", tf_seq({tf_list({"0", "0", "0", "0"}), tf_list({"0.5", "1", "0", "0"}),
+                                tf_list({"1", "1", "1", "1"})})},
+              {"domain", tf_scalar("auto")}});
+  rt.set_root(group({a, tf_with(tf_editor("B", "b"), "default", dflt)}));
+  rt.render();
+  const cvc::tf::model ma = tf_parse(tf_val(app, "ui.a"));
+  ASSERT_EQ(ma.alpha.size(), 3u);
+  EXPECT_NEAR(ma.alpha[1].at, 0.5, 1e-9);
+  EXPECT_NEAR(ma.alpha[1].a, 0.25, 1e-6);
+  ASSERT_EQ(ma.isocontours.size(), 1u);
+  EXPECT_EQ(ma.isocontours[0].id, "bone");
+  EXPECT_NEAR(ma.isocontours[0].at, 0.6, 1e-9);
+  EXPECT_FALSE(ma.domain.automatic);
+  EXPECT_DOUBLE_EQ(ma.domain.min, -1.5);
+  EXPECT_DOUBLE_EQ(ma.domain.max, 2.5);
+  const cvc::tf::model mb_model = tf_parse(tf_val(app, "ui.b"));
+  ASSERT_EQ(mb_model.color.size(), 3u);
+  EXPECT_NEAR(mb_model.color[1].at, 0.5, 1e-9);
+  EXPECT_NEAR(mb_model.color[1].r, 1.f, 1e-6);
+  EXPECT_TRUE(mb_model.domain.automatic);
+  const std::vector<std::string> warns = rt.take_reactive_warnings();
+  EXPECT_TRUE(warns.empty()) << warns.front();
+}
+
+// Props keep no YAML type, so the core types each value by the model's schema, not by its text: an
+// isocontour id is a string however it reads, a flag takes the loader's flag() spellings (any
+// case; an unknown one keeps the default), a number is a number.
+TEST(AriadneTfEditor, PropsAreTypedByTheSchemaNotGuessedFromTheText) {
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  cvc::app app;
+  Runtime rt(app, "ui");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  mb.tf_ret.drawn = true;
+  LoadResult lr = load_string(R"(
+windows:
+  - window: W
+    children:
+      - tf_editor: TF
+        bind: tf
+        opacity_cubed: True
+        alpha: [[0, 0], [0.5, 0.25], [1, 1]]
+        isocontours: [{id: "01", at: 0.25}, {id: 7, at: 0.75}]
+        domain: AUTO
+        interactive_updates: True
+        show_color: YES
+        show_opacity: Off
+        show_isocontours: maybe
+        log_histogram: TRUE
+        info: On
+)");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  const cvc::tf::model m = tf_parse(tf_val(app, "ui.tf"));
+  EXPECT_TRUE(m.opacity_cubed);  // `True` is a YAML boolean, as the scene loader reads it
+  ASSERT_EQ(m.alpha.size(), 3u); // ... so the rest of the inline seed is not thrown away
+  EXPECT_NEAR(m.alpha[1].a, 0.25, 1e-6);
+  ASSERT_EQ(m.isocontours.size(), 2u);
+  EXPECT_EQ(m.isocontours[0].id, "01"); // a string, not the number 1
+  EXPECT_EQ(m.isocontours[1].id, "7");
+  EXPECT_TRUE(m.domain.automatic);
+  EXPECT_TRUE(mb.last_tf_in.interactive);
+  EXPECT_TRUE(mb.last_tf_in.view.show_color);
+  EXPECT_FALSE(mb.last_tf_in.view.show_opacity);
+  EXPECT_TRUE(mb.last_tf_in.view.show_isocontours); // not a boolean: the default stays
+  EXPECT_TRUE(mb.last_tf_in.view.log_histogram);
+  EXPECT_TRUE(mb.last_tf_in.view.show_info);
+  const std::vector<std::string> warns = rt.take_reactive_warnings();
+  EXPECT_TRUE(warns.empty()) << warns.front();
+}
+
+// A commit that leaves the model as it is writes nothing and fires nothing, even when the key holds
+// a valid spelling that to_string does not reproduce (the roadmap's map nodes, "{}", a script's).
+TEST(AriadneTfEditor, ANoOpCommitLeavesANonCanonicalKeyAlone) {
+  cvc::app app;
+  Runtime rt(app, "ui");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  mb.tf_ret.drawn = true;
+  Widget w = tf_editor("TF", "tf");
+  w.on = "tf_changed";
+  int fired = 0;
+  rt.on("tf_changed", [&] { ++fired; });
+  const std::string map_form = R"({"color":[{"at":0,"rgb":[0,0,0]},{"at":1,"rgb":[1,1,1]}],)"
+                               R"("alpha":[{"at":0,"a":0},{"at":1,"a":1}]})";
+  tf_set(app, "ui.tf", map_form);
+  rt.set_root(group({w}));
+  rt.render();
+  // The backend commits exactly what it was shown (ImGui's Reset or Presets > the current one).
+  mb.tf_ret.changed = mb.tf_ret.committed = true;
+  mb.tf_ret.model = mb.last_tf_model;
+  rt.render();
+  rt.drain();
+  EXPECT_EQ(tf_val(app, "ui.tf"), map_form);
+  EXPECT_EQ(fired, 0);
+  // A real change still writes the canonical string and fires once.
+  const cvc::tf::model hot = cvc::tf::model::preset("hot");
+  mb.tf_ret.model = hot;
+  rt.render();
+  rt.drain();
+  EXPECT_EQ(tf_val(app, "ui.tf"), cvc::tf::to_string(hot));
+  EXPECT_EQ(fired, 1);
+}
+
+TEST(AriadneTfEditor, ComposedResetOfTheDefaultModelWritesNothing) {
+  cvc::app app;
+  Runtime rt(app, "ui");
+  MockBackend mb; // no native editor: the core composes one
+  rt.set_backend(&mb);
+  Widget w = tf_editor("TF", "tf");
+  w.on = "tf_changed";
+  int fired = 0;
+  rt.on("tf_changed", [&] { ++fired; });
+  tf_set(app, "ui.tf", "{}"); // the default model, spelled by a script
+  rt.set_root(group({w}));
+  rt.render();
+  mb.click_button = "reset";
+  rt.render();
+  mb.click_button.clear();
+  rt.drain();
+  EXPECT_EQ(tf_val(app, "ui.tf"), "{}");
+  EXPECT_EQ(fired, 0);
 }
 
 // ── AppRuntime: host menus and the scene between documents ──────────────────────────────────────

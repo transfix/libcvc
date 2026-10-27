@@ -3,6 +3,7 @@
 
 #include <cvc/gl/GraphicsNode.h>
 #include <memory>
+#include <string>
 #include <vector>
 #include <vtkSmartPointer.h>
 
@@ -55,11 +56,21 @@ public:
   void updateScalars(const std::vector<float> &data);
   bool hasVolume() const { return m_hasVolume; }
   const cvc::volume *getVolume() const { return m_volume.get(); }
+  // The same volume by its shared owner (null before setVolume). Each setVolume makes a new one,
+  // so a weak_ptr to it tells a replaced volume from the one it saw even when the new one lands at
+  // the old one's address (a raw pointer cannot).
+  std::shared_ptr<const cvc::volume> getSharedVolume() const { return m_volume; }
 
+  // The transfer function is two-way: these setters apply the tables and mirror them into the
+  // `transfer_function.color` ("s,r,g,b,...") / `transfer_function.opacity` ("s,a,...") keys, and
+  // a write to those keys (an editor's tf_binding, a script, a replicated peer) is applied live.
+  // A volume reload (setVolume) or a data_min/data_max change re-fits only the DEFAULT ramp; a
+  // transfer function anyone authored survives it.
   void setTransferFunction(const std::vector<double> &colorTable,
                            const std::vector<double> &opacityTable);
   void setDefaultTransferFunction();
 
+  // What VTK draws (its control points, sorted, a duplicate scalar collapsed), as the flat tables.
   std::vector<double> getTransferFunctionColorTable() const;
   std::vector<double> getTransferFunctionOpacityTable() const;
 
@@ -126,6 +137,19 @@ protected:
   void onDataChanged();
 
 private:
+  // The tables -> the VTK functions only (no state write).
+  void applyTablesToVTK(const std::vector<double> &colorTable,
+                        const std::vector<double> &opacityTable);
+  // Re-read transfer_function.color/.opacity and apply them; false (VTK untouched) when either
+  // is malformed, so a half-written pair never reaches the mapper.
+  bool applyTransferFunctionState();
+  bool transferFunctionIsDefault() const;
+  // Write one transfer_function.color/.opacity mirror key as this node's OWN write, and recognise
+  // its echo: the handler call for that key, on this thread, during the write, while the key still
+  // holds what we wrote. Anything else -- another thread's write above all -- is applied.
+  void mirrorTfKey(const std::string &key, const std::string &value);
+  bool isOwnTfEcho(const std::string &key) const;
+
   bool m_hasVolume;
   std::shared_ptr<cvc::volume> m_volume;
 
@@ -138,6 +162,9 @@ private:
 
   double m_dataMin;
   double m_dataMax;
+
+  // The state strings setDefaultTransferFunction last wrote (what "still the default" means).
+  std::string m_defaultColorState, m_defaultOpacityState;
 
   // Volume rendering properties
   bool m_shading;

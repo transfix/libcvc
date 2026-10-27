@@ -332,14 +332,15 @@ static void test_lab_sources(cvc::app &app) {
       "fe_lab publishes stats.work_ms (" + val(fb + ".stats.work_ms") + ")");
 
   // Interval meshing: the shell between two densities is a solid layer with a hole.
-  set(fb + ".mesh.interval", "1");
+  set(fb + ".mesh.region", "interval");
   set(fb + ".mesh.isovalue2", "0.6");
   set(fb + ".request", "mesh solve");
   const bool interval_ok =
       settle(fb) && num(fb + ".stats.tets") > 0.0 && starts(fb + ".status", "poisson: solved");
-  chk(interval_ok, "mesh.interval: the layer between isovalue and isovalue2 meshes and solves (" +
-                       val(fb + ".stats.tets") + " tets, status '" + val(fb + ".status") + "')");
-  set(fb + ".mesh.interval", "0");
+  chk(interval_ok,
+      "mesh.region interval: the shell between isovalue and isovalue2 meshes and solves (" +
+          val(fb + ".stats.tets") + " tets, status '" + val(fb + ".status") + "')");
+  set(fb + ".mesh.region", "solid");
 
   // Hexahedra: the elements view only. A solve is refused with a reason.
   set(fb + ".mesh.elements", "hex");
@@ -398,13 +399,13 @@ static void test_lab_sources(cvc::app &app) {
 
   // An interval with hexahedra is refused by the mesh job (LBIE makes interval tetrahedra only).
   set(fb + ".mesh.elements", "hex");
-  set(fb + ".mesh.interval", "1");
+  set(fb + ".mesh.region", "interval");
   set(fb + ".request", "mesh");
   ok = settle(fb);
   chk(ok && starts(fb + ".status", "error: interval meshing makes tetrahedra"),
       "interval + hex is refused (status '" + val(fb + ".status") + "')");
   set(fb + ".mesh.elements", "tet");
-  set(fb + ".mesh.interval", "0");
+  set(fb + ".mesh.region", "solid");
 
   // Back to an SDF source: load reads it again, and the old mesh is dropped meanwhile.
   set(fb + ".source.type", "sdf");

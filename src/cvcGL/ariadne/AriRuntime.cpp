@@ -243,6 +243,10 @@ void AriRuntime::register_verb(const std::string &name, std::function<void()> fn
   app_rt_.register_verb(name, std::move(fn));
 }
 
+void AriRuntime::register_async_verb(const std::string &name, std::function<std::string()> work) {
+  app_rt_.register_async_verb(name, std::move(work));
+}
+
 void AriRuntime::register_async_verb(const std::string &name, const std::string &done_channel,
                                      std::function<std::string()> work) {
   app_rt_.register_async_verb(name, done_channel, std::move(work));

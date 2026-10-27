@@ -11,6 +11,7 @@
 #include <cvc/ariadne/requires.h> // requires:, free_heads (what a document needs from its host)
 #include <cvc/ariadne/uri.h>      // register_cvc_uri_handler
 #include <cvc/core/app.h>
+#include <cvc/state/state_exec/async_host.h>      // register_async_fn
 #include <cvc/state/state_exec/async_scheduler.h> // exec_scheduler().post_message
 #include <cvc/state/state_exec/builtins.h>        // register_fn
 #include <cvc/state/state_exec/intrinsics.h>      // intrinsics_context, resolve_channel_key
@@ -203,6 +204,10 @@ void AppRuntime::register_verb(const std::string &name, std::function<void()> fn
   rt_.refresh_program_names(); // has? / requires: see the new verb
 }
 
+void AppRuntime::register_async_verb(const std::string &name, std::function<std::string()> work) {
+  register_async_verb(name, std::string(), std::move(work));
+}
+
 void AppRuntime::register_async_verb(const std::string &name, const std::string &done_channel,
                                      std::function<std::string()> work) {
   verbs_->async.emplace_back(name, done_channel, std::move(work));
@@ -215,6 +220,7 @@ void AppRuntime::ensure_intrinsics() {
     return;
   intrinsicsRegistered_ = true;
   cvc::app *app = &app_;
+  app->exec_async_host(); // build the host on this thread, before a program env needs it
   // register_action_intrinsics providers run each time a program env is built. Share the verb
   // table rather than copy it, so every verb registered so far is bound, not only the first.
   std::shared_ptr<Verbs> verbs = verbs_;
@@ -230,26 +236,22 @@ void AppRuntime::ensure_intrinsics() {
     }
     const std::string root = ictx.root_path;
     for (const auto &v : verbs->async) {
-      const std::string chan = se::resolve_channel_key(root, std::get<1>(v));
+      // An async function on the app's host: (name) parks the program while `work` runs on the
+      // background task pool, charged to its budget, and returns `work`'s string or raises its
+      // exception. The done channel, if any, is resolved here on the scheduler thread (a kernel
+      // never walks the state tree), and the result is posted to it too.
+      const std::string chan =
+          std::get<1>(v).empty() ? std::string() : se::resolve_channel_key(root, std::get<1>(v));
       std::function<std::string()> work = std::get<2>(v);
-      // (name ...) kicks `work` on a pool worker and posts its string result to done_channel;
-      // the .ari program reads it with (msg-recv "<done_channel>"). resolve the channel on the
-      // scheduler thread (never walk state from a worker).
-      se::builtins::register_fn(
-          env, std::get<0>(v), [app, chan, work](std::span<const se::value_t>) -> se::value_t {
-            app->compute_async(
-                1, [](int) {},
-                [app, chan, work] {
-                  std::string result;
-                  try {
-                    result = work();
-                  } catch (...) {
-                    result = "";
-                  }
-                  app->exec_scheduler().post_message(chan, se::value_t(result));
-                });
-            return se::value_t(std::monostate{});
-          });
+      se::register_async_fn(env, app->exec_async_host(), std::get<0>(v),
+                            [app, chan, work](std::span<const se::value_t>) -> se::async_kernel {
+                              return [app, chan, work](se::async_call &) -> se::value_t {
+                                std::string result = work();
+                                if (!chan.empty())
+                                  app->exec_scheduler().post_message(chan, se::value_t(result));
+                                return se::value_t(std::move(result));
+                              };
+                            });
     }
   });
 }

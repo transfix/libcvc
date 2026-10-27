@@ -887,7 +887,12 @@ A complete receiver that waits for messages and accumulates results:
 
 Slow native work must not run inside a process step: the step deadline is
 cooperative, so a blocking native function freezes the thread that pumps the
-scheduler. `cvc::async_lane` (`cvc/core/async_lane.h`) is a persistent named
+scheduler. For a native function a program calls and waits on, prefer an
+async function ([Async Functions](#async-functions-register_async_fn), next):
+it parks at the call, raises its errors there, and is charged to the process.
+The helpers here post to a channel instead.
+
+`cvc::async_lane` (`cvc/core/async_lane.h`) is a persistent named
 worker thread with a FIFO job queue. `launch_lane_task`, `park_on_lane_task`,
 `future_lane_task` and `post_lane_task` run a kernel on a lane and post its
 value (or `on_error(message)` if it throws) to a channel that a process,
@@ -917,6 +922,178 @@ cvc::pump_exec_frame(sched, {&sim_lane});
 - `stop()` (also called by the destructor) runs every queued job, then joins.
 - On Emscripten without `-pthread`, lanes run their jobs on the pump thread
   inside `pump_exec_frame` (`lane_mode::deferred`).
+
+### Async Functions (`register_async_fn`)
+
+An **async function** is a native function whose work runs on a host
+executor, not in the step that called it
+(`docs/STATE_EXEC_EXCEPTIONS.md` section 3). From the program's side,
+`(volume-blur v 3)` is an ordinary call that takes a while:
+
+1. The call's **marshal step** runs on the scheduler's thread, in the calling
+   step, with the arguments, and returns the **kernel**.
+2. The kernel runs on an executor thread. The calling process parks at the
+   call, and the scheduler goes on stepping every other process.
+3. The process resumes at the call with the kernel's value, or the kernel's
+   exception raises there.
+
+#### Registering (C++)
+
+`register_async_fn` (`cvc/state/state_exec/async_host.h`) registers `name`, and
+`name-async`, which returns a future. The host is the app's
+(`app.exec_async_host()`, for `exec_scheduler()`) or one you build:
+
+```cpp
+#include <cvc/state/state_exec/async_host.h>
+
+namespace se = cvc::state_exec;
+
+// (blur v radius): the kernel runs on the app's background task pool.
+se::register_async_fn(
+    env, app.exec_async_host(), "blur",
+    [](std::span<const se::value_t> args) -> se::async_kernel {
+      // The scheduler's thread: read the arguments (already private copies).
+      se::value_t volume = args[0];
+      const int64_t radius = std::get<int64_t>(args[1].v);
+      return [volume, radius](se::async_call &call) -> se::value_t {
+        // An executor thread: do the work; check for cancellation now and then.
+        for (int64_t slab = 0; slab < 64; ++slab) {
+          if (call.cancelled())
+            throw std::runtime_error("cancelled"); // the result is dropped anyway
+          blur_slab(volume, slab, radius);
+          call.post(se::value_t(slab)); // progress, to "blur.progress"
+        }
+        return volume;
+      };
+    });
+```
+
+`async_options` (the last argument) sets:
+- `where`: `executor::background()` (the default), `executor::on_lane(name)`, or
+  `executor::inline_call()`;
+- `priority`: the kernel's place in the background pool's queue;
+- `timeout`: seconds, past which the call raises `TimeoutError`;
+- `future_variant`: whether to register `<name>-async` too (the default).
+
+A host without a parking scheduler (`async_host(&sched)` on the sync scheduler,
+`async_host(nullptr)` for a bare evaluator) runs every kernel inline, in the
+step. The value or exception is the same, and the step blocks.
+
+#### Registering (Python)
+
+```python
+host = pycvc.async_host(sched, app)  # or Exec.async_host()
+
+def blur(call, volume, radius):  # with_call: the handle comes first
+    for slab in range(64):
+        if call.cancelled():
+            raise RuntimeError("cancelled")
+        blur_slab(volume, slab, radius)
+        call.post(slab)
+    return volume
+
+# env, host, name, fn, executor, timeout, future_variant, with_call (positional)
+pycvc.builtins.register_async_fn(env, host, "blur", blur, "background", None, True, True)
+exe.register_async_fn("blur", blur, True)  # an Exec: its own host, background pool
+```
+
+The callable runs on an executor thread and takes the GIL for its call; the
+wait for the GIL isn't charged. Without `with_call` it gets only the arguments.
+Call the handle only from the kernel, on its thread. `executor` is
+`"background"`, `"inline"` or `"lane:<name>"`, a lane given to
+`host.add_lane(name, pycvc.async_lane(name))`; the host keeps the lane alive.
+
+#### Calling
+
+- `(name args...)` parks and returns the value. It works at any depth: as the
+  whole program, inside a `try`, inside a function a native called.
+- `(name-async args...)` returns a future at once:
+  - `(await f)` parks until it finishes and returns its value or raises;
+  - `(await f seconds)` raises `TimeoutError` if it hasn't finished by then,
+    and the future can be awaited again;
+  - `(await-all (list f1 f2))` returns every value in order, or raises the
+    first failure in list order once all have finished;
+  - a future never awaited still finishes, and its result is dropped.
+- `is_async_future(v)` (C++ and pycvc) says whether a value is such a future.
+- Where a process can't park (Ariadne's reactive lane), the call raises
+  `RuntimeError` naming the function.
+
+#### Errors
+
+A kernel that throws raises at the call, with `origin` `"async"` and
+`function` set: a C++ exception maps by its type, a Python one becomes a
+`PythonError` that keeps it, and a timeout is a `TimeoutError`.
+
+```lisp
+(try (blur v 3)
+  (catch (MemoryError e) "too big")
+  (catch (e) (str (get-attr e "function") ": " (get-attr e "message"))))
+```
+
+A result that describes a failure (an HTTP reply with `ok` `#f`) is a value,
+not an exception.
+
+#### What a kernel may touch
+
+- **Arguments:** private copies. DSL lists and dicts are copied before the
+  marshal step (as deep-data work, charged); a `data_object` (a volume, a mesh)
+  is shared and read-only.
+- **The result:** a fresh value.
+- **Never:** the state tree, the evaluator, or a DSL value the program holds.
+  Resolve tree paths and channels in the marshal step.
+
+#### Cancellation, progress, teardown
+
+- `call.cancelled()` turns true when the process is killed or reaped
+  (including by its budget running out while the call runs), the call times
+  out, its owner group is reaped, or the host shuts down. A cancelled call's
+  result is dropped.
+- `call.post(value)` sends `value` to `<name>.progress` under the process's
+  root, for `msg-recv` or a resident. Nothing waits for it; a full queue drops
+  it.
+- `host.shutdown()` (also `~app` and `~Exec`) cancels every call in flight and
+  waits for its kernel.
+- A snapshot records a pending call, but it can't resume: the restored process
+  raises `RuntimeError` at the call.
+
+#### Budgets
+
+A call is charged to the process that made it, as if the process had done the
+work (`docs/STATE_EXEC_EXCEPTIONS.md` 3.8):
+
+- **Run time** (the kernel's wall time, not its time queued) counts toward the
+  first half of `max_time`, and its **CPU time** (its thread's, plus its
+  `computePool().parallel_for` chunks') toward the second.
+- **Steps:** the CPU time at `limits.async_steps_per_cpu_ms` steps per CPU
+  millisecond (default 2000; at least one step per call), against `max_steps`.
+  The rate is read live; the first of these that is set wins:
+  `execute_options::async_steps_per_cpu_ms`,
+  `state_exec.schedulers.<id>.limits.async_steps_per_cpu_ms`,
+  `state_exec.defaults.limits.async_steps_per_cpu_ms`.
+- **Memory:** the kernel runs under the process's allocation limit. Report
+  large allocations with `eval_alloc_check(bytes, who)`; past the limit the call
+  raises `MemoryError`.
+- At `max_time` or `max_steps` the process is killed, as for a step, and the
+  kernel sees `cancelled()`. Each `cancelled()` call also records the thread's
+  CPU time; a kernel that never checks is stopped by its run time.
+- `process_info` reports `async_calls`, `async_time`, `async_cpu_time` and
+  `async_steps`.
+
+A short budget limits what a call can do: at the default rate, 5000 steps are
+2.5 ms of CPU. Ariadne's actions run with `ariadne.limits.action_max_steps`
+(5000) and `ariadne.limits.action_max_time` (0.1 s), app-wide settings a
+document can't change, so a host whose documents call heavy async verbs
+raises them (`docs/ARIADNE.md` 2.2).
+
+#### Ariadne verbs
+
+`AppRuntime::register_async_verb(name, work)` makes a host verb an async
+function on the app's host: `(name)` parks the action while `work` runs on the
+background task pool, and returns its string or raises its exception. The
+overload with a done channel also posts the result there, for documents that
+wait with `msg-recv`. A verb that needs arguments, progress or cancellation
+registers with `register_async_fn` through `register_action_intrinsics`, as
+the nav_compute example does.
 
 ---
 

@@ -2858,7 +2858,7 @@ TEST(AriadneComponents, ShippedComponentsLoadClean) {
     EXPECT_NE(index.find("file: " + file), std::string::npos) << "INDEX.ari does not list " << file;
     ++checked;
   }
-  EXPECT_GE(checked, 13); // the 13 components shipped with mesh_tools / fe_controls
+  EXPECT_GE(checked, 14); // the 14 components shipped with transfer_function
   std::error_code ec;
   fs::remove_all(decoy, ec);
 }
@@ -4226,4 +4226,504 @@ TEST(AriadneLoader, ComboOptionsMayBeAReactiveExpression) {
   ASSERT_TRUE(r.ok) << r.error;
   for (const std::string &w : r.warnings)
     EXPECT_EQ(w.find("schema:"), std::string::npos) << w;
+}
+
+// ---- §10 tf_editor: the transfer-function editor widget, and the loader seams it needs ---------
+
+namespace {
+
+// Depth-first search for the first widget with `id`.
+const Widget *find_id(const Widget &w, const std::string &id) {
+  if (w.id == id)
+    return &w;
+  for (const Widget &c : w.children)
+    if (const Widget *r = find_id(c, id))
+      return r;
+  return nullptr;
+}
+
+// Every widget of a kind, in document order.
+void collect(const Widget &w, Kind k, std::vector<const Widget *> &out) {
+  if (w.kind == k)
+    out.push_back(&w);
+  for (const Widget &c : w.children)
+    collect(c, k, out);
+}
+
+} // namespace
+
+TEST(AriadneTfEditor, ShortFormIsABuiltinKindWithItsConfigInProps) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+windows:
+  - window: W
+    children:
+      - tf_editor: Skull TF
+        bind: graphics.root.children.skull.transfer_function
+        interactive_updates: false
+        height: 140
+        layers: [histogram, contour_tree]
+        on: tf_changed
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(r.warnings.empty()) << r.warnings.front();
+  EXPECT_TRUE(is_builtin_widget_type("tf_editor")); // so requires: / (has? "tf_editor") see it
+  const Widget *tf = find(r.root, Kind::TfEditor);
+  ASSERT_NE(tf, nullptr);
+  EXPECT_EQ(tf->label, "Skull TF");
+  EXPECT_EQ(tf->bind, "graphics.root.children.skull.transfer_function");
+  EXPECT_EQ(tf->on, "tf_changed");
+  EXPECT_TRUE(tf->props.is_map());
+  EXPECT_FALSE(tf->props.flag("interactive_updates", true));
+  EXPECT_EQ(tf->props.num("height"), 140.0);
+  const Value *layers = tf->props.find("layers");
+  ASSERT_NE(layers, nullptr);
+  ASSERT_TRUE(layers->is_seq());
+  ASSERT_EQ(layers->items.size(), 2u);
+  EXPECT_EQ(layers->items[0].scalar, "histogram");
+  EXPECT_EQ(layers->items[1].scalar, "contour_tree");
+  // The keys the loader consumes are fields, not config.
+  EXPECT_FALSE(tf->props.has("tf_editor"));
+  EXPECT_FALSE(tf->props.has("bind"));
+  EXPECT_FALSE(tf->props.has("on"));
+}
+
+TEST(AriadneTfEditor, TypeFormIsTheSameBuiltinKind) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+windows:
+  - window: W
+    children:
+      - type: tf_editor
+        label: TF
+        bind: tf
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(r.warnings.empty()) << r.warnings.front(); // no "no registered handler"
+  const Widget *tf = find(r.root, Kind::TfEditor);
+  ASSERT_NE(tf, nullptr);
+  EXPECT_EQ(tf->label, "TF");
+  EXPECT_EQ(tf->bind, "tf");
+  EXPECT_EQ(find(r.root, Kind::Custom), nullptr);
+  EXPECT_FALSE(tf->props.has("type"));
+}
+
+// The model vocabulary (color: / alpha: / isocontours: / domain:) on a tf_editor is config. A
+// `color:` key would otherwise make the short-form scan build a builtin colour picker.
+TEST(AriadneTfEditor, ModelListsDoNotHijackTheDispatchAndLandInProps) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+windows:
+  - window: W
+    children:
+      - tf_editor: TF
+        bind: tf
+        color: [[0, 0,0,0], [1, 1,1,1]]
+        alpha: [[0, 0], [0.5, 0.25], [1, 1]]
+        isocontours: [{id: bone, at: 0.6}, 0.3]
+        domain: [0, 255]
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(r.warnings.empty()) << r.warnings.front();
+  EXPECT_EQ(count(r.root, Kind::Color), 0);
+  const Widget *tf = find(r.root, Kind::TfEditor, "TF");
+  ASSERT_NE(tf, nullptr);
+  const Value *color = tf->props.find("color");
+  ASSERT_NE(color, nullptr);
+  ASSERT_TRUE(color->is_seq());
+  ASSERT_EQ(color->items.size(), 2u);
+  ASSERT_TRUE(color->items[1].is_seq());
+  EXPECT_EQ(color->items[1].items.size(), 4u);
+  const Value *alpha = tf->props.find("alpha");
+  ASSERT_NE(alpha, nullptr);
+  EXPECT_EQ(alpha->items.size(), 3u);
+  const Value *iso = tf->props.find("isocontours");
+  ASSERT_NE(iso, nullptr);
+  ASSERT_EQ(iso->items.size(), 2u);
+  EXPECT_TRUE(iso->items[0].is_map());
+  EXPECT_EQ(iso->items[0].str("id"), "bone");
+  EXPECT_EQ(iso->items[1].scalar, "0.3");
+  const Value *domain = tf->props.find("domain");
+  ASSERT_NE(domain, nullptr);
+  EXPECT_EQ(domain->items.size(), 2u);
+}
+
+// The same with `type: tf_editor`: the explicit type must win over a `color:` config key.
+// Needs widget_type() (loader.cpp) to let a `type:` naming a builtin precede the short-form scan.
+TEST(AriadneTfEditor, TypeFormWithAColorListStaysATfEditor) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+windows:
+  - window: W
+    children:
+      - type: tf_editor
+        label: TF
+        bind: tf
+        color: [[0, 0,0,0], [1, 1,1,1]]
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(count(r.root, Kind::Color), 0);
+  const Widget *tf = find(r.root, Kind::TfEditor);
+  ASSERT_NE(tf, nullptr);
+  EXPECT_EQ(tf->label, "TF");
+  EXPECT_TRUE(tf->props.has("color"));
+}
+
+TEST(AriadneTfEditor, LayerAndPresetTyposWarn) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+windows:
+  - window: W
+    children:
+      - tf_editor: Typos
+        bind: a
+        layers: [histogram, isolines]
+        preset: nope
+      - tf_editor: Fine
+        bind: b
+        layers: [contour_spectrum, contour_tree]
+        preset: rainbow
+      - tf_editor: Unbound
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(has_warning(r, "unknown layer 'isolines'"));
+  EXPECT_TRUE(has_warning(r, "unknown preset 'nope'"));
+  EXPECT_TRUE(has_warning(r, "tf_editor 'Unbound' has no bind"));
+  EXPECT_FALSE(has_warning(r, "'Fine'"));
+  EXPECT_EQ(count(r.root, Kind::TfEditor), 3);
+}
+
+// The Layer-2 schema types a tf_editor's own config: the documented YAML-map default: (and a model
+// string), the flags in any spelling the loader's flag() reads, height, layers and the inline seed
+// keys pass; a default: that is neither, a non-numeric height or an unreadable flag is caught, and
+// another widget's default: is still a string.
+TEST(AriadneTfEditor, SchemaTypesTheEditorsConfig) {
+  if (!have_yaml() || !have_jsonschema())
+    GTEST_SKIP() << "libcvc built without yaml-cpp or json-schema-validator";
+  const LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+windows:
+  - window: W
+    children:
+      - tf_editor: TF
+        bind: tf
+        default: {color: [[0, 0,0,0], [1, 1,1,1]], domain: auto}
+        interactive_updates: True
+        height: 140
+        layers: [histogram, contour_tree]
+        preset: rainbow
+        alpha: [[0, 0], [1, 1]]
+        isocontours: [{id: bone, at: 0.6}, 0.3]
+        domain: [0, 255]
+        opacity_cubed: yes
+        resolution: 512
+        show_color: false
+        show_opacity: 1
+        info: On
+        range: stats.range
+      - type: tf_editor
+        label: Typed
+        bind: tf2
+        default: {alpha: [[0, 0], [1, 0.5]]}
+      - tf_editor: Text
+        bind: tf3
+        default: '{"domain":"auto"}'
+      - input_text: Name
+        bind: name
+        default: someone
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  for (const std::string &w : r.warnings)
+    EXPECT_EQ(w.find("schema:"), std::string::npos) << w;
+  EXPECT_EQ(count(r.root, Kind::TfEditor), 3);
+
+  const LoadResult bad = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+windows:
+  - window: W
+    children:
+      - tf_editor: TF
+        bind: tf
+        default: [1, 2]
+        height: tall
+        interactive_updates: maybe
+        layers: histogram
+      - input_text: Name
+        bind: name
+        default: {a: 1}
+)");
+  ASSERT_TRUE(bad.ok) << bad.error;
+  EXPECT_TRUE(has_warning(bad, "schema: /windows/0/children/0/default"));
+  EXPECT_TRUE(has_warning(bad, "schema: /windows/0/children/0/height"));
+  EXPECT_TRUE(has_warning(bad, "schema: /windows/0/children/0/interactive_updates"));
+  EXPECT_TRUE(has_warning(bad, "schema: /windows/0/children/0/layers"));
+  EXPECT_TRUE(has_warning(bad, "schema: /windows/0/children/1/default"));
+}
+
+// id: names any widget (not only a window), so a backend / the core can key per-instance state.
+TEST(AriadneLoader, IdIsParsedForEveryKind) {
+  SKIP_WITHOUT_YAML();
+  register_widget_type("tf_test_gauge", [](const Widget &, const WidgetEmitContext &) {});
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+windows:
+  - window: W
+    id: w1
+    children:
+      - checkbox: C
+        id: c1
+        bind: c
+      - slider_float: S
+        id: s1
+        bind: s
+      - text: T
+        id: t1
+      - button: B
+        id: b1
+        on: go
+      - combo: M
+        id: m1
+        bind: m
+        options: [a, b]
+      - tf_editor: TF
+        id: tf1
+        bind: tf
+      - type: tf_test_gauge
+        id: g1
+      - id: grp
+        children:
+          - text: inner
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(r.warnings.empty()) << r.warnings.front();
+  const struct {
+    const char *id;
+    Kind kind;
+  } want[] = {{"w1", Kind::Window},    {"c1", Kind::Checkbox}, {"s1", Kind::SliderFloat},
+              {"t1", Kind::Text},      {"b1", Kind::Button},   {"m1", Kind::Combo},
+              {"tf1", Kind::TfEditor}, {"g1", Kind::Custom},   {"grp", Kind::Group}};
+  for (const auto &x : want) {
+    SCOPED_TRACE(x.id);
+    const Widget *w = find_id(r.root, x.id);
+    ASSERT_NE(w, nullptr);
+    EXPECT_EQ(w->kind, x.kind);
+  }
+  // An id stays out of a custom widget's props (it is a field).
+  const Widget *g = find_id(r.root, "g1");
+  ASSERT_NE(g, nullptr);
+  EXPECT_FALSE(g->props.has("id"));
+}
+
+TEST(AriadneModularity, IncludeSiteOverridesTheUnitId) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+units:
+  editor:
+    tf_editor: TF
+    id: editor
+    bind: tf
+  panel:
+    window: Panel
+    id: panel
+    children:
+      - include: editor
+windows:
+  - include: panel
+  - include: panel
+    id: second_panel
+  - window: W
+    children:
+      - include: editor
+      - include: editor
+        id: second_editor
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(r.warnings.empty()) << r.warnings.front();
+  std::vector<const Widget *> windows, editors;
+  collect(r.root, Kind::Window, windows);
+  collect(r.root, Kind::TfEditor, editors);
+  ASSERT_EQ(windows.size(), 3u);
+  EXPECT_EQ(windows[0]->id, "panel"); // the unit's own id
+  EXPECT_EQ(windows[1]->id, "second_panel");
+  ASSERT_EQ(editors.size(), 4u);
+  EXPECT_EQ(editors[0]->id, "editor");
+  EXPECT_EQ(editors[1]->id, "editor"); // the site overrode the WINDOW's id, not its children's
+  EXPECT_EQ(editors[2]->id, "editor");
+  EXPECT_EQ(editors[3]->id, "second_editor");
+}
+
+// A unit declares its parameters with defaults (`args:` beside its widget keys): a bare include
+// uses them, a site arg overrides one, an unknown token stays literal, and the declaration is not
+// a widget key (it never reaches props).
+TEST(AriadneModularity, UnitDefaultArgs) {
+  SKIP_WITHOUT_YAML();
+  register_widget_type("tf_test_gauge", [](const Widget &, const WidgetEmitContext &) {});
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+units:
+  editor:
+    args: { node: volume, label: Transfer function }
+    tf_editor: "{label}"
+    bind: graphics.root.children.{node}.transfer_function
+    tooltip: "{node} / {unknown}"
+  gauge:
+    args: { v: "0.5" }
+    type: tf_test_gauge
+    value: "{v}"
+windows:
+  - window: W
+    children:
+      - include: editor
+      - include: editor
+        args: { node: skull }
+      - include: editor
+        args: { label: Mine, extra: unused }
+      - include: gauge
+      - include: gauge
+        args: { v: "0.9" }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(r.warnings.empty()) << r.warnings.front();
+  std::vector<const Widget *> editors, gauges;
+  collect(r.root, Kind::TfEditor, editors);
+  collect(r.root, Kind::Custom, gauges);
+  ASSERT_EQ(editors.size(), 3u);
+  EXPECT_EQ(editors[0]->label, "Transfer function"); // both defaults
+  EXPECT_EQ(editors[0]->bind, "graphics.root.children.volume.transfer_function");
+  EXPECT_EQ(editors[0]->tooltip, "volume / {unknown}"); // an unknown token stays literal
+  EXPECT_EQ(editors[1]->label, "Transfer function");    // the other default is kept
+  EXPECT_EQ(editors[1]->bind, "graphics.root.children.skull.transfer_function"); // the site wins
+  EXPECT_EQ(editors[2]->label, "Mine");
+  EXPECT_EQ(editors[2]->bind, "graphics.root.children.volume.transfer_function");
+  for (const Widget *e : editors)
+    EXPECT_FALSE(e->props.has("args"));
+  ASSERT_EQ(gauges.size(), 2u);
+  EXPECT_EQ(gauges[0]->props.str("value"), "0.5");
+  EXPECT_EQ(gauges[1]->props.str("value"), "0.9");
+  for (const Widget *g : gauges)
+    EXPECT_FALSE(g->props.has("args"));
+}
+
+// A unit that IS an include (an alias with fixed args) passes its args on to the inner unit: its
+// `args:` is the call's, not a parameter declaration (likewise a unit that is a `load:`).
+TEST(AriadneModularity, AUnitThatIsAnIncludeKeepsItsCallArgs) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+units:
+  flag:
+    checkbox: "{name}"
+    bind: "flags.{name}"
+  wire_flag:
+    include: flag
+    args: { name: wire }
+windows:
+  - window: W
+    children:
+      - include: wire_flag
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *cb = find(r.root, Kind::Checkbox);
+  ASSERT_NE(cb, nullptr);
+  EXPECT_EQ(cb->label, "wire");
+  EXPECT_EQ(cb->bind, "flags.wire");
+}
+
+namespace {
+
+// Register cvc:// against this source tree's component library only (as ShippedComponentsLoadClean
+// does); returns false when the sources are not beside this file.
+bool register_source_components() {
+  namespace fs = std::filesystem;
+  const fs::path ariadne_dir = fs::path(__FILE__).parent_path().parent_path() / "ariadne";
+  if (!fs::is_directory(ariadne_dir / "components"))
+    return false;
+  ScopedEnv hermetic("CVC_ARIADNE_PATH", nullptr);
+  register_cvc_uri_handler({ariadne_dir.string()});
+  return true;
+}
+
+} // namespace
+
+TEST(AriadneComponents, TransferFunctionUnitsTakeArgsWithDefaults) {
+  SKIP_WITHOUT_YAML();
+  if (!register_source_components())
+    GTEST_SKIP() << "component sources not found";
+  SchemeGuard g{"cvc"};
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+import: cvc://components/transfer_function.ari
+windows:
+  - include: transfer_function
+  - include: transfer_function
+    args: { node: skull, title: Skull, id: skull_tf }
+  - window: Slices
+    children:
+      - include: transfer_function_editor
+      - include: transfer_function_editor
+        args: { node: slices, id: slices_tf, label: Slice TF }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(r.warnings.empty()) << r.warnings.front();
+  std::vector<const Widget *> windows, editors;
+  collect(r.root, Kind::Window, windows);
+  collect(r.root, Kind::TfEditor, editors);
+  ASSERT_EQ(windows.size(), 3u);
+  EXPECT_EQ(windows[0]->label, "Transfer Function");
+  EXPECT_EQ(windows[0]->id, "transfer_function");
+  EXPECT_EQ(windows[1]->label, "Skull");
+  EXPECT_EQ(windows[1]->id, "skull_tf");
+  ASSERT_EQ(editors.size(), 4u);
+  EXPECT_EQ(editors[0]->bind, "graphics.root.children.volume.transfer_function");
+  EXPECT_EQ(editors[0]->id, "transfer_function");
+  EXPECT_EQ(editors[1]->bind, "graphics.root.children.skull.transfer_function");
+  EXPECT_EQ(editors[1]->id, "skull_tf"); // the window and its editor share the instance id
+  EXPECT_EQ(editors[2]->bind, "graphics.root.children.volume.transfer_function");
+  EXPECT_EQ(editors[2]->id, "transfer_function_editor");
+  EXPECT_EQ(editors[2]->label, "Transfer function");
+  EXPECT_EQ(editors[3]->bind, "graphics.root.children.slices.transfer_function");
+  EXPECT_EQ(editors[3]->id, "slices_tf");
+  EXPECT_EQ(editors[3]->label, "Slice TF");
+  for (const Widget *e : editors) {
+    EXPECT_TRUE(e->props.flag("interactive_updates", false));
+    const Value *layers = e->props.find("layers");
+    ASSERT_NE(layers, nullptr);
+    ASSERT_EQ(layers->items.size(), 1u);
+    EXPECT_EQ(layers->items[0].scalar, "histogram");
+    EXPECT_GT(e->props.num("height"), 0.0);
+    EXPECT_FALSE(e->props.has("args"));
+  }
+}
+
+TEST(AriadneComponents, TransferFunctionDemoLoadsClean) {
+  SKIP_WITHOUT_YAML();
+  namespace fs = std::filesystem;
+  const fs::path doc = fs::path(__FILE__).parent_path().parent_path().parent_path().parent_path() /
+                       "examples" / "ariadne" / "documents" / "transfer_function.ari";
+  if (!fs::exists(doc))
+    GTEST_SKIP() << "demo not found at " << doc.string();
+  if (!register_source_components())
+    GTEST_SKIP() << "component sources not found";
+  SchemeGuard g{"cvc"};
+  LoadResult r = load_file(doc.string());
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(r.warnings.empty()) << r.warnings.front();
+  std::vector<const Widget *> editors;
+  collect(r.root, Kind::TfEditor, editors);
+  ASSERT_EQ(editors.size(), 2u); // one per volume node, each its own instance
+  EXPECT_EQ(editors[0]->bind, "graphics.root.children.bunny_volume.transfer_function");
+  EXPECT_EQ(editors[1]->bind, "graphics.root.children.bunny_slices.transfer_function");
+  EXPECT_NE(editors[0]->id, editors[1]->id);
+  const Widget *w = find(r.root, Kind::Window, "Raycast transfer function");
+  ASSERT_NE(w, nullptr);
+  EXPECT_TRUE(w->has_pos);
+  ASSERT_EQ(r.scene.nodes.size(), 3u);
+  EXPECT_TRUE(r.scene.nodes[0].has_volren);
+  EXPECT_TRUE(r.scene.nodes[1].has_volslice);
 }

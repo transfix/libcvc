@@ -9,6 +9,7 @@
 // each prop a reactive state key (§9.1) — this struct just says what to create.
 
 #include <cvc/ariadne/value.h>
+#include <cvc/tf/model.h>
 #include <string>
 #include <vector>
 
@@ -24,12 +25,22 @@ struct SceneTFPoint {
 };
 
 // A transfer function for a volume renderer. Empty ⇒ nothing drawn.
+//
+// Two forms. The legacy one (`points:`, `window:`, `auto_domain:`) is raw: coupled colour+opacity
+// points in data units, which the realizer feeds to the renderer as before and converts into a
+// model over the node's data range (or the window) only to seed the node's editable
+// `<node>.transfer_function` key. The roadmap §10.1 form (`domain:`, `opacity_cubed:`,
+// `resolution:`, `preset:`, `vinay:`, `color:`, `alpha:`, `isocontours:`) sets has_model and a
+// normalized `model`, which the realizer's tf_binding lowers into the renderer's keys. With
+// has_model the legacy `points` are ignored (the loader warns when both are given).
 struct SceneTransferFunction {
   std::vector<SceneTFPoint> points;
   bool auto_domain = true; // bake over the volume's data range (vs an explicit window)
   bool has_window = false; // explicit value window instead of the data range
   double window_min = 0.0, window_max = 0.0; // raw value domain — double like the renderer
-  bool empty() const { return points.empty(); }
+  bool has_model = false;
+  cvc::tf::model model; // normalized; meaningful only with has_model
+  bool empty() const { return !has_model && points.empty(); }
 };
 
 // One volren isosurface (mirrors cvc::volren::isosurface).

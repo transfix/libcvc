@@ -127,11 +127,21 @@ per-activation caps ([`ariadne.cpp:1382`](../src/cvc/ariadne/ariadne.cpp)):
 
 | bound | source | value |
 |-------|--------|-------|
-| step cap | `kActionMaxSteps` | `5000` |
-| wall-time cap | `kActionMaxSeconds` | `0.1 s` |
+| step cap | tree setting `ariadne.limits.action_max_steps` | `5000` by default; `0` = no limit |
+| time cap | tree setting `ariadne.limits.action_max_time` | `0.1 s` by default; `0` = no limit |
 | memory budget | tree setting `ariadne.limits.action_max_memory` | `4 MiB` by default; `0` = no limit |
 
-The memory budget is read on every submission. It covers the action's state-tree writes and its
+The settings are read on every submission, from the app's tree: they are the host's, outside any
+document's prefix, so a document can't raise its own. A missing or unparsable value keeps the
+default.
+
+The step and time caps cover the action's async calls (§10.1; developer guide, "Async
+Functions"): a call's run time and CPU time count against the time cap, and its CPU time as steps
+at `limits.async_steps_per_cpu_ms` (2000 per CPU millisecond by default). At that rate the
+5000-step cap is 2.5 ms of a kernel's CPU, so a host whose documents call CPU-heavy async verbs
+raises the caps. An action that runs out is killed, and the kernel sees `cancelled()`.
+
+The memory budget covers the action's state-tree writes and its
 measured share of the values it holds (developer guide §7), and it bounds each native call's
 allocations: state_exec's per-step allocation limit takes what is left of `max_memory`
 (developer guide §11, "Allocation limit"). A finished action's process is reaped from the app
@@ -622,7 +632,7 @@ shown. `reload` always reads it. A failed load says why in `status` and keeps th
 
 **`type: fe_lab`** reads a volume like a `volren` node (`source: { file }` or `{ sdf }`) and
 meshes it with the in-tree LBIE mesher (`CVC_ENABLE_MESHER`): tetrahedra
-(`cvc::tetrahedralize`, or `cvc::tetrahedralize2` for the layer between two isovalues) or
+(`cvc::tetrahedralize`, or `tetrahedralize_interval` for the shell between two isovalues) or
 hexahedra (`cvc::hexahedralize`). It solves linear (P1) finite-element problems on the
 tetrahedra with `cvc::fem`. It has two views:
 
@@ -647,15 +657,17 @@ Keys under `<node>.fe.*`:
 | `stats.quality_min`, `stats.quality_mean` | published: minimum dihedral angle (tetrahedra, degrees) or scaled Jacobian (hexahedra) | — |
 | `stats.work_ms` | published: the wall time of the last run of commands, from the first to idle | — |
 | `stoppable` | published: 1 while a heat solve runs (the Stop button's `enabled_when`), else 0 | — |
+| `last_mesh` | published: the region and bounds the last mesh job started with (`solid <isovalue>` or `interval <lo> <hi>`), `""` before the first | — |
 | `source.type` | `sdf` (the signed distance field of a mesh) or `volume` (a volume file) | `source:` |
 | `source.file` | the mesh or the volume: a path or URI, a relative path resolved against the document's directory (`stanford.bunny` is built in) | `source.sdf.mesh` / `source.file` |
 | `source.dim` | `sdf`: the grid's N; `volume`: resampled to N³ (0 = as stored) | `source.sdf.dim` / `resample` |
 | `source.algorithm` | `v1`, `v2` or `igl` for an `sdf` source | `source.sdf.algorithm` |
 | `source.up`, `source.flip`, `source.height` | the `fit:` applied to the elements: up axis, upside down, height (0 = none) | `fit:` |
 | `auto.mesh`, `auto.solve` | mesh after a load; solve after a mesh (or after a load that keeps the mesh) | `auto_mesh`, `auto_solve` |
+| `mesh.region` | `solid` (one side of `mesh.isovalue`) or `interval` (the shell between `mesh.isovalue` and `mesh.isovalue2`, in either order, whatever `mesh.inside` says; tetrahedra only) | `region` (default `solid`); `interval: [a, b]` is shorthand for `region: interval`, `isovalue: a`, `isovalue2: b` (`interval: true`: the region alone), and an explicit `region` / `isovalue` / `isovalue2` beside it wins |
 | `mesh.isovalue` | the bounding level, in the volume's units (an `sdf` source's are the mesh file's own) | `isovalue` |
-| `mesh.inside` | `below` (an SDF: mesh where v < isovalue) or `above` (a density) | `inside` (default `below` for an `sdf` source, else `above`) |
-| `mesh.interval`, `mesh.isovalue2` | mesh the layer between the two isovalues (tetrahedra only), in either order | `interval`, `isovalue2` |
+| `mesh.isovalue2` | an interval's second bound | `isovalue2`; absent, a tenth of the value range from `isovalue` on the side `mesh.inside` fills (an SDF's inner skin), at most half way to that end of the range, else on the other side (for an `sdf` source, set when its field has been computed) |
+| `mesh.inside` | `below` (an SDF: mesh where v < isovalue) or `above` (a density); a solid mesh's side | `inside` (default `below` for an `sdf` source, else `above`) |
 | `mesh.elements` | `tet` or `hex` (hexahedra show in the elements view; a solve refuses them) | `elements` |
 | `mesh.improve`, `mesh.improve_iterations` | `cvc::improvement_method` (0-5; 5 is optimization) and its passes | `improve`, `improve_iterations` |
 | `problem` | `poisson` (-Δu = f, u = 0 on the boundary), `heat` (hot floor) or `modes` (free-vibration eigenmodes of the solid) | `problem` |
@@ -678,6 +690,17 @@ unless a request written during the mesh job is already waiting: that request ru
 (a waiting re-mesh auto-solves in its turn). Eigenpairs are cached per mesh (at least four),
 so stepping `modes.index` through the first few re-solves nothing.
 Until the first mesh the node shows the volume's bounds as lines.
+
+An interval mesh's boundary has two sheets, an outer and an inner one round the cavity, each
+wound (and lit) out of the shell; Poisson holds u = 0 on both, and the heat problem's hot
+floor is the lowest 5% of either (on a shell, the outer sheet's bottom cap). The interval is
+inclusive — a voxel exactly on a bound is inside: such a bound is meshed half way to the next
+value beyond it, so `[1, 3]` on integer labels meshes as `[0.5, 3.5]` — and a bound on or past an end of the volume's
+range bounds nothing (`[0.5, 2]` on a 0/1 mask meshes `{v ≥ 0.5}`). An interval that
+holds no voxel leaves the last mesh and says so in `status` ("error: no tets: the interval
+[lo, hi] does not cut the volume (its values span [min, max])"). The node's
+`<node>.transfer_function` holds the bounds as isocontours, so a `tf_editor` drives both (see
+[TRANSFER_FUNCTIONS.md](TRANSFER_FUNCTIONS.md) §6, "Meshing an interval from two isocontours").
 
 **Switching sources.** The node's `source:` and `fit:` seed the `source.*` keys. A volume file
 is read when the scene is realized; for an `sdf` source only the mesh is, so the scene frames
@@ -863,6 +886,29 @@ so instantiation is order-free. A name-keyed expansion-stack guard
 ([`loader.cpp:863`](../src/cvc/ariadne/loader.cpp)) refuses recursion and fan-out; an
 unknown unit warns and renders empty. `include:` is the static counterpart of `repeat:`.
 
+A unit may declare its parameters with defaults in an `args:` map beside its widget keys; the
+include site's `args:` override them, and a `{token}` with neither stays literal. That is how a
+shipped component binds a sensible node when included bare and any node when told:
+
+```yaml
+units:
+  panel:
+    args: { node: volume, title: Volume }   # declared defaults
+    window: "{title}"
+    id: "{node}_panel"
+    children:
+      - tf_editor: Transfer function
+        bind: graphics.root.children.{node}.transfer_function
+windows:
+  - include: panel                # node=volume
+  - include: panel
+    args: { node: skull, title: Skull }
+```
+
+Any widget may carry an `id:` (not only windows): it names the instance a backend keys its
+per-instance state on and that the core persists view state under (`tree.<id>.*`). An include
+site may override the unit's `id:`, so two instances of one unit stay distinct.
+
 ### 6.2 `import:` — shared-scope library merge
 
 `process_imports` ([`loader.cpp:761`](../src/cvc/ariadne/loader.cpp)) resolves a URI (or
@@ -920,9 +966,11 @@ includes. Each binds state keys a C++ object owns, so it needs no host code;
 | `forest_controls`, `sea_controls`, `sky_controls` | `forest_trees` / `wave_sea` / `cloud_sky` nodes |
 | `mesh_tools` | a `mesh_lab` node named `mesh` (§5.4) |
 | `fe_controls` | an `fe_lab` node named `domain` (§5.4) |
+| `transfer_function`, `transfer_function_editor` | any node's `transfer_function` model (args `node`, `id`): the ColorTable2 editor with histogram / contour spectrum / contour tree layers — see [`TRANSFER_FUNCTIONS.md`](TRANSFER_FUNCTIONS.md) |
 
-Components that address one node use a fixed node id; copy the file and change the id to
-drive another node. `examples/ariadne/documents/mesh_lab.ari` uses the last two, and so does
+Most components that address one node use a fixed node id; copy the file and change the id to
+drive another node. `transfer_function` instead takes the node as an include arg (§6.1).
+`examples/ariadne/documents/mesh_lab.ari` uses the last two, and so does
 `examples/ariadne/documents/fem_gallery.ari`, which steps one `fe_lab` and one `mesh_lab`
 through the twenty items of [FEM_GALLERY.md](FEM_GALLERY.md). Run them from the repository
 root, where the component path resolves:
@@ -1268,7 +1316,7 @@ rt   = pycvc_gl.AriRuntime(view.scene(), view.camera(), view.overlay())
 rt.load("demo.ari")
 # Register a Python function as a DSL verb (host intrinsic on the app-wide scheduler):
 rt.register_verb("greet", lambda name: f"hello {name}")
-rt.register_async_verb("fetch_rows", slow_query)   # offloaded to the compute pool
+rt.register_async_verb("fetch_rows", slow_query)   # an async function: (fetch_rows) parks
 
 while not rt.should_close():
     rt.frame(dt)     # processUIEvents → cam.update → drain → visibility → tick
@@ -1277,7 +1325,12 @@ while not rt.should_close():
 
 `register_verb` / `register_async_verb` install exactly one `register_action_intrinsics`
 provider onto the app-wide scheduler, so the verbs are reachable from the document's
-action lane. `AriRuntime` also exposes `step`, `run`, `on`, `post_key`, `post_pointer`,
+action lane. An async verb is an async function on the app's async host
+([STATE_EXEC_EXCEPTIONS.md](STATE_EXEC_EXCEPTIONS.md) section 3): `(fetch_rows)` parks the
+action while `slow_query` runs on the app's background task pool, then returns `str()` of its
+result. If it raises, the call raises a `PythonError`, which a `try` can catch. The call is
+charged to the action's caps (§2.2). `register_async_verb(name, done_channel, fn)` also posts
+the result to `done_channel`, for documents that wait with `(msg-recv "done_channel")`. `AriRuntime` also exposes `step`, `run`, `on`, `post_key`, `post_pointer`,
 and `reload_if_changed`.
 
 ### 9.4 From Python (DSL only, via `pycvc.Exec`)
@@ -1310,6 +1363,9 @@ callables as DSL functions (§10). One `Exec` is driven by one thread — use a 
   uncaught, `Exec.run` re-raises the Python exception. `(name-async ...)` returns a future
   for `(await f [seconds])` or `(await-all (list f ...))`. The call is charged to the
   program's budget: its run time against `max_time`, its CPU time as steps.
+  `register_async_fn(name, callable, True)` passes the call's `pycvc.async_call` first,
+  before the arguments: `call.cancelled()` says whether to stop (the program was killed or
+  ran out of budget), and `call.post(value)` sends progress to `"<name>.progress"`.
 - **`register_async_coro(name, coro_fn)`** — registers an `async def`. Calling it
   schedules the coroutine on an asyncio loop the `Exec` owns and parks the DSL program.
   Unlike `register_async_fn`, the coroutine runs **on** the `run()` thread, cooperatively

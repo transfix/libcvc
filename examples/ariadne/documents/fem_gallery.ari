@@ -199,7 +199,7 @@ init: |
     (defun inside (i side iso) (begin (fe i "mesh.inside" side) (fe i "mesh.isovalue" iso)))
     (defun mesh (i elements solve)
       (begin
-        (fe i "mesh.elements" elements) (fe i "mesh.interval" 0) (fe i "mesh.isovalue2" 0)
+        (fe i "mesh.elements" elements) (fe i "mesh.region" "solid") (fe i "mesh.isovalue2" 0)
         (fe i "mesh.improve" 0) (fe i "mesh.improve_iterations" 1)
         (fe i "auto.mesh" 1) (fe i "auto.solve" solve)))
     (defun view (i mode colormap slice)

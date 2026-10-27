@@ -60,8 +60,10 @@ public:
   // truly concurrently; its wait for the GIL isn't charged to the program. It
   // gets copies of its arguments. It must NOT call back into this Exec (run() /
   // register*) or touch the DSL/state tree — it receives its args and returns a
-  // value, nothing more.
-  void register_async_fn(const std::string &name, PyObject *callable);
+  // value, nothing more. With `with_call`, it gets the call's pycvc.async_call
+  // handle first, before the arguments: call.cancelled() says whether to stop,
+  // and call.post(value) sends progress to "<name>.progress".
+  void register_async_fn(const std::string &name, PyObject *callable, bool with_call = false);
 
   // Register a Python COROUTINE function (an `async def`) as an async DSL function
   // named `name`. Calling (name args...) calls coro_fn(*args) to get a coroutine,

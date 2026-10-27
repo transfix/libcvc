@@ -47,6 +47,10 @@ public:
   void add_component_path(const std::string &dir);
   void on(const std::string &event, std::function<void()> handler);
   void register_verb(const std::string &name, std::function<void()> fn);
+  // An async function: (name) parks the program while `work` runs on the app's background task
+  // pool and returns its string (AppRuntime::register_async_verb). With a done_channel the
+  // result is also posted there, for documents that wait with msg-recv.
+  void register_async_verb(const std::string &name, std::function<std::string()> work);
   void register_async_verb(const std::string &name, const std::string &done_channel,
                            std::function<std::string()> work);
 

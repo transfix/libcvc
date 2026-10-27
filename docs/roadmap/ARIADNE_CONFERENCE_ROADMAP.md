@@ -1198,7 +1198,8 @@ though it shipped in **#636** — now corrected). The statuses below are **verif
   streamed-source zero-copy + clipping, Unicode, backend split + AppRuntime.
 
 **Genuinely remaining — VERIFY each in code before scheduling (the doc can't be trusted); all retained:**
-* Transfer-function editor + `data()`-channel authoring (§10) — *no code found.*
+* ~~Transfer-function editor (§10)~~ — **landed** as the built-in `tf_editor` widget
+  ([`docs/TRANSFER_FUNCTIONS.md`](../TRANSFER_FUNCTIONS.md)); the model rides `value()`, not `data()`.
 * `state_exec` program modularity `(include/load "uri")` (§19) — *no code found.*
 * pycvc URI-scheme handler override + bytes branch (§14.2) — *not found; verify.*
 * Full YAML-free s-expr `.ari` **document** dialect (§18) — exprs land in binds/scripts; the whole-document

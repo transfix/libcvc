@@ -52,7 +52,8 @@
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/ariadne/mesh_nodes.h>
 #include <cvc/gl/ariadne/scene_realize.h>
-#include <cvc/utility/algorithm.h> // cvc::tetrahedralize (CVC_ENABLE_MESHER), element quality
+#include <cvc/gl/ariadne/tf_binding.h> // the isovalue as an editable transfer-function isocontour
+#include <cvc/utility/algorithm.h>     // cvc::tetrahedralize (CVC_ENABLE_MESHER), element quality
 #include <cvc/volume/volume.h>
 #include <exception>
 #include <filesystem>
@@ -68,6 +69,188 @@
 namespace cvc {
 namespace gl {
 namespace ariadne {
+
+namespace {
+
+// A value for a status line: %g, six significant digits.
+std::string fmt_value(double v) {
+  char buf[32];
+  std::snprintf(buf, sizeof(buf), "%g", v);
+  return buf;
+}
+
+// The region and bounds a mesh job meshes, read from fe.* as fe_lab reads them for the job
+// (fe_mesh_signature and launch_fe_job share this, so the two never disagree).
+struct FeBounds {
+  bool interval = false;
+  double isovalue = 0.0, isovalue2 = 0.0;
+};
+FeBounds read_fe_bounds(cvc::app &a, const std::string &region, const std::string &isovalue,
+                        const std::string &isovalue2) {
+  FeBounds b;
+  b.interval = cvc::ariadne::read_or<std::string>(a, region, "solid") == "interval";
+  b.isovalue = cvc::ariadne::read_or<double>(a, isovalue, 0.0);
+  b.isovalue2 = cvc::ariadne::read_or<double>(a, isovalue2, b.isovalue);
+  return b;
+}
+// "solid <isovalue>" or "interval <lo> <hi>" (sorted, as the mesher sorts them), exact (%.17g).
+std::string bounds_signature(const FeBounds &b) {
+  const auto exact = [](double v) {
+    char buf[40];
+    std::snprintf(buf, sizeof(buf), "%.17g", v);
+    return std::string(buf);
+  };
+  if (!b.interval)
+    return "solid " + exact(b.isovalue);
+  return "interval " + exact(std::min(b.isovalue, b.isovalue2)) + " " +
+         exact(std::max(b.isovalue, b.isovalue2));
+}
+
+} // namespace
+
+std::string fe_mesh_signature(cvc::app &app, const std::string &fe_base) {
+  using cvc::ariadne::resolve_bind;
+  return bounds_signature(read_fe_bounds(app, resolve_bind(fe_base, "mesh.region"),
+                                         resolve_bind(fe_base, "mesh.isovalue"),
+                                         resolve_bind(fe_base, "mesh.isovalue2")));
+}
+
+// --- the interval mesher (fe_lab's mesh.region: interval) ----------------------------------------
+//
+// One helper for every interval mesh. It meshes the shell lo <= v <= hi as the solid
+// g = min(v - lo, hi - v) >= 0 with the single-isovalue cvc::tetrahedralize at 0 (LBIE meshes
+// {g > 0}), so both isosurfaces are the boundary (with the bounds adjusted for samples sitting
+// exactly on them, and dropped when no sample lies beyond: see below). cvc::tetrahedralize2's
+// interval overload is NOT used: on master it never reaches LBIE's TETRA2 mode (do_mesh_geometry
+// turns VOLUME_TET back into TETRA, so the one-surface tetrahedralizer sees only the first
+// isovalue), and the TETRA2 routine it was meant to reach, Octree::tetrahedralize_interval, builds
+// sliver fans and holes. The open transfix/libcvc#808 makes tetrahedralize2 mesh a layer the same
+// way, as min(v - lo, hi - v) >= 0. Once tetrahedralize2's interval path is fixed (a follow-up),
+// this helper is meant to call it -- cvc::tetrahedralize2(vol, lo, hi, DUALLIB, improve,
+// BSPLINE_CONVOLUTION, iterations) -- and cvcgl_fe_interval (and the fe_lab interval checks in
+// cvcgl_tf_binding) are its acceptance tests.
+cvc::geometry tetrahedralize_interval(const cvc::volume &vol, double a, double b, int improve,
+                                      int improve_iterations) {
+  const double lo = std::min(a, b), hi = std::max(a, b);
+  const std::string what = "the interval [" + fmt_value(lo) + ", " + fmt_value(hi) + "]";
+  if (!(hi > lo)) // equal bounds, or a NaN
+    throw std::runtime_error("no tets: " + what + " is empty (the two isovalues are equal)");
+#ifdef CVC_ENABLE_MESHER
+  const std::uint64_t nx = vol.XDim(), ny = vol.YDim(), nz = vol.ZDim(), nxy = nx * ny,
+                      n = nxy * nz;
+  // Each sample against each bound, as LBIE will see it: in float (g is a Float volume), so "on a
+  // bound" means equal to it to float precision.
+  const auto off_lo = [lo](double v) { return static_cast<float>(v - lo); }; // < 0: below
+  const auto off_hi = [hi](double v) { return static_cast<float>(hi - v); }; // < 0: above
+  // Which bounds the data passes, whether samples sit exactly on them, and the nearest finite
+  // value beyond each.
+  bool below = false, above = false, on_lo = false, on_hi = false;
+  double vmin = std::numeric_limits<double>::infinity(), vmax = -vmin;
+  double next_lo = -std::numeric_limits<double>::infinity(), next_hi = -next_lo;
+  for (std::uint64_t i = 0; i < n; ++i) {
+    const double v = vol(i);
+    const bool finite = std::isfinite(v);
+    if (finite) {
+      vmin = std::min(vmin, v);
+      vmax = std::max(vmax, v);
+    }
+    const float dl = off_lo(v), dh = off_hi(v);
+    if (dl < 0.f) {
+      below = true;
+      if (finite)
+        next_lo = std::max(next_lo, v);
+    }
+    if (dh < 0.f) {
+      above = true;
+      if (finite)
+        next_hi = std::min(next_hi, v);
+    }
+    on_lo = on_lo || dl == 0.f;
+    on_hi = on_hi || dh == 0.f;
+  }
+  // The rule (mesh_nodes.h, docs/TRANSFER_FUNCTIONS.md section 6):
+  //  1. A bound no sample lies beyond -- at or past an end of the value range: a tf_editor bar at
+  //     the end of its axis, `interval: [0.5, 2]` on a 0/1 mask -- bounds nothing: it adds no sheet
+  //     and no crease, and the other bound's isosurface lies where the trilinear field crosses it,
+  //     as a solid mesh's does. With neither bound passed every sample is inside: the whole box.
+  //  2. The interval is inclusive. A bound samples sit exactly on (integer or plateau data at an
+  //     integer bound, an SDF through a grid point) is meshed half way to the nearest value beyond
+  //     it -- for integer data the half-integer, as a label mesher draws it: [1, 3] on labels is
+  //     [0.5, 3.5] -- so those samples are inside and none sits on LBIE's isovalue 0, which it
+  //     mishandles before transfix/libcvc#808 (its strict skip test and inclusive intersect test
+  //     disagree, the dual vertex lands voxels off and the shell cracks).
+  //  3. Each sample on a bound is then raised to at least a third of its steepest outside
+  //     neighbour along a grid edge, so the surface crosses that edge at least a quarter of the way
+  //     from it. Continuous data needs this: there the nearest value beyond is much nearer than the
+  //     neighbours' values, the half-way bound sits a hair from the on-bound sample's grid point,
+  //     and LBIE builds the tets between a crossing and an inside grid point that close flat, wound
+  //     at random (flipped normals). Integer data with unit steps is unchanged by it (its crossing
+  //     is already half way).
+  const double L = on_lo && below && std::isfinite(next_lo) ? 0.5 * (lo + next_lo) : lo;
+  const double H = on_hi && above && std::isfinite(next_hi) ? 0.5 * (hi + next_hi) : hi;
+  std::vector<float> g(n);
+  for (std::uint64_t i = 0; i < n; ++i) {
+    const double v = vol(i);
+    g[i] = static_cast<float>(below && above ? std::min(v - L, H - v)
+                              : below        ? v - L
+                              : above        ? H - v
+                                             : 1.0);
+  }
+  std::vector<std::pair<std::uint64_t, float>> raised;
+  for (std::uint64_t i = 0; i < n; ++i) {
+    const double v = vol(i);
+    if (!((below && off_lo(v) == 0.f) || (above && off_hi(v) == 0.f)))
+      continue; // not on a bound that bounds anything
+    float out = 0.f;
+    const auto edge = [&](std::uint64_t j) {
+      if (g[j] < 0.f && std::isfinite(g[j]))
+        out = std::max(out, -g[j]);
+    };
+    const std::uint64_t x = i % nx, y = (i / nx) % ny, z = i / nxy;
+    if (x > 0)
+      edge(i - 1);
+    if (x + 1 < nx)
+      edge(i + 1);
+    if (y > 0)
+      edge(i - nx);
+    if (y + 1 < ny)
+      edge(i + nx);
+    if (z > 0)
+      edge(i - nxy);
+    if (z + 1 < nz)
+      edge(i + nxy);
+    // (A gap to the next value below float resolution can leave it at 0: still inside.)
+    const float want = std::max(out / 3.f, std::numeric_limits<float>::min());
+    if (!(g[i] >= want))
+      raised.emplace_back(i, want);
+  }
+  for (const std::pair<std::uint64_t, float> &t : raised)
+    g[t.first] = t.second;
+  std::uint64_t inside = 0;
+  for (std::uint64_t i = 0; i < n; ++i)
+    if (g[i] > 0.f)
+      ++inside;
+  if (inside == 0)
+    throw std::runtime_error(
+        "no tets: " + what + " does not cut the volume" +
+        (vmin <= vmax ? " (its values span [" + fmt_value(vmin) + ", " + fmt_value(vmax) + "])"
+                      : std::string()));
+  const cvc::volume gv(vol.ctx(), reinterpret_cast<const unsigned char *>(g.data()),
+                       vol.voxel_dimensions(), cvc::Float, vol.boundingBox());
+  cvc::geometry tm =
+      cvc::tetrahedralize(gv, 0.0, cvc::DUALLIB, static_cast<cvc::improvement_method>(improve),
+                          cvc::BSPLINE_CONVOLUTION, improve_iterations);
+  if (tm.const_tets().empty())
+    throw std::runtime_error("no tets: the mesher found nothing in " + what +
+                             " (a shell thinner than a voxel?)");
+  return tm;
+#else
+  (void)vol;
+  (void)improve;
+  (void)improve_iterations;
+  throw std::runtime_error("mesher unavailable");
+#endif
+}
 
 #ifdef CVC_ENABLE_LIBIGL
 namespace {
@@ -1088,7 +1271,7 @@ std::vector<double> apply_transfer(const Transfer &t, const std::vector<double> 
 struct FeParams {
   double isovalue = 0.0, isovalue2 = 0.0;
   bool inside_below = true; // mesh {v < isovalue} (an SDF, negative inside) vs {v > isovalue}
-  bool interval = false;    // mesh the layer between isovalue and isovalue2
+  bool interval = false;    // mesh the shell between isovalue and isovalue2 instead
   bool hex = false;         // hexahedra (the elements view only) instead of tetrahedra
   int improve = 0;
   int improve_iterations = 1;
@@ -1149,10 +1332,10 @@ struct CutJob {
 
 struct FeKeys {
   std::string request, busy, stoppable, status, progress, tets, hexes, nv, quality_min,
-      quality_mean, field_min, field_max, work_ms;
+      quality_mean, field_min, field_max, work_ms, last_mesh;
   std::string source_type, source_file, source_dim, source_algorithm, source_up, source_flip,
       source_height, auto_mesh, auto_solve;
-  std::string isovalue, inside, improve, improve_iterations, elements, interval, isovalue2;
+  std::string region, isovalue, isovalue2, inside, improve, improve_iterations, elements;
   std::string problem, poisson_f, heat_kappa, heat_dt, heat_steps, mode_index;
   std::string colormap, show_surface, show_slice, slice_axis, slice_offset, surface_opacity;
   std::string view_mode, color_by, cut_side, ghost, fixed_range, range_min, range_max, boundary;
@@ -1165,6 +1348,8 @@ struct FeLabRT {
   std::string base_dir;
   bool single_color = true;
   cvc::volume volume;
+  // `volume`'s shared owner, a new one per load: the transfer-function binding follows it.
+  std::shared_ptr<const cvc::volume> shared_volume;
   bool have_volume = false;  // false until a source has loaded
   bool load_pending = false; // the realize-time SDF, computed by the first tick's load
   Placement place;
@@ -1296,17 +1481,18 @@ void run_fe_mesh(FeJob &job, const cvc::volume &vol, const FeParams &p) {
   if (p.hex && p.interval)
     throw std::runtime_error("interval meshing makes tetrahedra (mesh.elements: tet)");
   // LBIE meshes {v > isovalue}. For the inside of an SDF (negative inside) mesh -v above
-  // -isovalue, so the isovalues stay in the volume's own units either way.
-  const cvc::volume v = p.inside_below ? negated(vol) : vol;
+  // -isovalue, so mesh.isovalue stays in the volume's own units either way. An interval is meshed
+  // in the volume's own units whatever mesh.inside says.
+  const cvc::volume v = p.inside_below && !p.interval ? negated(vol) : vol;
   const double a = p.inside_below ? -p.isovalue : p.isovalue;
   const auto improve = static_cast<cvc::improvement_method>(p.improve);
   auto tm = std::make_shared<cvc::geometry>();
+  std::string where;
   if (p.interval) {
-    // The layer between the two isosurfaces. LBIE takes the interval's UPPER isovalue first
-    // (in the negated space for an inside below).
-    const double b = p.inside_below ? -p.isovalue2 : p.isovalue2;
-    *tm = cvc::tetrahedralize2(v, std::max(a, b), std::min(a, b), cvc::DUALLIB, improve,
-                               cvc::BSPLINE_CONVOLUTION, p.improve_iterations);
+    // The shell between the two isovalues (it throws, saying why, when there is none).
+    *tm = tetrahedralize_interval(vol, p.isovalue, p.isovalue2, p.improve, p.improve_iterations);
+    where = " in [" + fmt_value(std::min(p.isovalue, p.isovalue2)) + ", " +
+            fmt_value(std::max(p.isovalue, p.isovalue2)) + "]";
   } else if (p.hex) {
     *tm = cvc::hexahedralize(v, a, cvc::DUALLIB, improve, cvc::BSPLINE_CONVOLUTION,
                              p.improve_iterations);
@@ -1316,8 +1502,8 @@ void run_fe_mesh(FeJob &job, const cvc::volume &vol, const FeParams &p) {
   }
   const std::size_t n = p.hex ? tm->const_hexs().size() : tm->const_tets().size();
   if (n == 0)
-    throw std::runtime_error(p.interval ? "no elements: the interval does not cut the volume"
-                                        : "no elements: the isovalue does not cut the volume");
+    throw std::runtime_error(p.hex ? "no hexes: the isovalue does not cut the volume"
+                                   : "no tets: the isovalue does not cut the volume");
   p.place.apply(*tm);
   std::shared_ptr<cvc::geometry> surf;
   cvc::quality_stats q{};
@@ -1348,8 +1534,11 @@ void run_fe_mesh(FeJob &job, const cvc::volume &vol, const FeParams &p) {
       }
     }
   }
-  cvc::compute_vertex_normals(*surf); // LBIE's gradient normals point the wrong way on -v
-  job.status = "meshed: " + std::to_string(n) + (p.hex ? " hexes" : " tets");
+  // The normals come from the faces' windings: LBIE's gradient normals point the wrong way on -v,
+  // and an interval's boundary has two sheets, each wound outward from the shell (the inner
+  // sheet's normals face the cavity), where g = min(v - lo, hi - v) has a crease.
+  cvc::compute_vertex_normals(*surf);
+  job.status = "meshed: " + std::to_string(n) + (p.hex ? " hexes" : " tets") + where;
   job.tetmesh = tm;
   job.surface = surf;
   job.hex = p.hex;
@@ -1486,18 +1675,19 @@ std::string fe_mesh_sig(const FeLabRT &rt) {
   };
   return std::to_string(rt.source_version) + "|" + num(rt.k.isovalue, 0.0) + "|" +
          ari::read_or<std::string>(a, rt.k.inside, "below") + "|" +
-         std::to_string(ari::read_bool_or(a, rt.k.interval, 0)) + "|" + num(rt.k.isovalue2, 0.0) +
-         "|" + (hex_elements(a, rt.k) ? "hex" : "tet") + "|" + num(rt.k.improve, 0.0) + "|" +
+         ari::read_or<std::string>(a, rt.k.region, "solid") + "|" + num(rt.k.isovalue2, 0.0) + "|" +
+         (hex_elements(a, rt.k) ? "hex" : "tet") + "|" + num(rt.k.improve, 0.0) + "|" +
          num(rt.k.improve_iterations, 1.0);
 }
 
 void launch_fe_job(FeLabRT &rt, const std::string &op) {
   cvc::app &a = *rt.app;
   FeParams p;
-  p.isovalue = ari::read_or<double>(a, rt.k.isovalue, 0.0);
-  p.isovalue2 = ari::read_or<double>(a, rt.k.isovalue2, 0.0);
+  const FeBounds b = read_fe_bounds(a, rt.k.region, rt.k.isovalue, rt.k.isovalue2);
+  p.isovalue = b.isovalue;
   p.inside_below = ari::read_or<std::string>(a, rt.k.inside, "below") != "above";
-  p.interval = ari::read_bool_or(a, rt.k.interval, 0) != 0;
+  p.interval = b.interval;
+  p.isovalue2 = b.isovalue2;
   p.hex = hex_elements(a, rt.k);
   p.improve = to_int_clamped(ari::read_or<double>(a, rt.k.improve, 0), 0, 5, 0);
   p.improve_iterations =
@@ -1531,6 +1721,8 @@ void launch_fe_job(FeLabRT &rt, const std::string &op) {
   ari::write<int>(a, rt.k.stoppable, job->stoppable ? 1 : 0);
   ari::write<int>(a, rt.k.progress, 0);
   ari::write<std::string>(a, rt.k.status, job->running);
+  if (op == "mesh") // whoever asked: the transfer-function binding's debounced remesh compares it
+    ari::write<std::string>(a, rt.k.last_mesh, bounds_signature(b));
   const cvc::volume vol = rt.volume;
   std::shared_ptr<const cvc::geometry> tm = rt.tetmesh;
   cvc::app *app = rt.app;
@@ -1591,8 +1783,50 @@ void clear_fe_mesh(FeLabRT &rt) {
   publish_fe_stats(rt, 0.0, 0.0);
 }
 
+// The source volume's value range: [0, 1] before one has loaded, at least 1 wide.
+void fe_value_range(FeLabRT &rt, double &lo, double &hi) {
+  lo = 0.0;
+  hi = 1.0;
+  if (rt.have_volume) {
+    try {
+      lo = rt.volume.min();
+      hi = rt.volume.max();
+    } catch (...) {
+    }
+  }
+  if (!(hi > lo))
+    hi = lo + 1.0;
+}
+
+// The default second bound: a tenth of the value range from the isovalue on the side a solid mesh
+// fills (below it for inside below -- an SDF's inner skin -- above it for a density), but no more
+// than half way to that end of the range; the other side when the isovalue sits at (or past) that
+// end.
+double default_isovalue2(FeLabRT &rt) {
+  cvc::app &a = *rt.app;
+  double vlo = 0.0, vhi = 1.0;
+  fe_value_range(rt, vlo, vhi);
+  const double iso = ari::read_or<double>(a, rt.k.isovalue, 0.0);
+  const bool below = ari::read_or<std::string>(a, rt.k.inside, "below") != "above";
+  const double d = 0.1 * (vhi - vlo);
+  const auto step = [&](bool down) {
+    const double room = down ? iso - vlo : vhi - iso;
+    return room > 0.0 ? std::min(d, 0.5 * room) : 0.0;
+  };
+  bool down = below;
+  double s = step(down);
+  if (!(s > 0.0)) {
+    down = !down;
+    s = step(down);
+  }
+  if (!(s > 0.0))
+    s = d;
+  return down ? iso - s : iso + s;
+}
+
 void apply_fe_loaded(FeLabRT &rt, const FeLoaded &L) {
   rt.volume = *L.volume;
+  rt.shared_volume = L.volume;
   rt.have_volume = true;
   rt.input = L.input;
   rt.place = L.place;
@@ -1600,6 +1834,9 @@ void apply_fe_loaded(FeLabRT &rt, const FeLoaded &L) {
   rt.source_sig = L.sig;
   ++rt.source_version;
   clear_fe_mesh(rt);
+  // An SDF computed after realize: mesh.isovalue2's default needed its range (realize_fe_lab).
+  if (ari::read_or<std::string>(*rt.app, rt.k.isovalue2, "").empty())
+    ari::write<double>(*rt.app, rt.k.isovalue2, default_isovalue2(rt));
 }
 
 void apply_fe_mesh(FeLabRT &rt, const FeJob &j) {
@@ -2029,6 +2266,7 @@ std::shared_ptr<GraphicsNode> realize_fe_lab(SceneGraph &sg, const ari::SceneNod
         spec.type == "sdf" ? frame_sdf_source(spec) : load_fe_source(*rt->app, spec);
     if (loaded->volume) {
       rt->volume = *loaded->volume;
+      rt->shared_volume = loaded->volume;
       rt->have_volume = true;
       rt->source_sig = loaded->sig;
     } else {
@@ -2093,6 +2331,7 @@ std::shared_ptr<GraphicsNode> realize_fe_lab(SceneGraph &sg, const ari::SceneNod
   k.field_min = ari::resolve_bind(base, "field.min");
   k.field_max = ari::resolve_bind(base, "field.max");
   k.work_ms = ari::resolve_bind(base, "stats.work_ms");
+  k.last_mesh = ari::resolve_bind(base, "last_mesh");
   k.source_type = seed_str(a, base, "source.type", spec.type);
   k.source_file = seed_str(a, base, "source.file", spec.file);
   k.source_dim = seed_num(a, base, "source.dim", spec.dim);
@@ -2102,15 +2341,41 @@ std::shared_ptr<GraphicsNode> realize_fe_lab(SceneGraph &sg, const ari::SceneNod
   k.source_height = seed_num(a, base, "source.height", spec.height);
   k.auto_mesh = seed_bool(a, base, "auto.mesh", pr.flag("auto_mesh"));
   k.auto_solve = seed_bool(a, base, "auto.solve", pr.flag("auto_solve"));
-  k.isovalue = seed_num(a, base, "mesh.isovalue", pr.num("isovalue", 0.0));
+  // `interval: [a, b]` is shorthand for region interval + both bounds (`interval: true`, region
+  // interval alone); explicit region / isovalue / isovalue2 props win over it.
+  bool ivl_region = false, ivl_bounds = false;
+  double ivl[2] = {0.0, 0.0};
+  if (const ari::Value *iv = pr.find("interval")) {
+    bool ok = false;
+    if (iv->is_seq() && iv->items.size() == 2) {
+      ivl[0] = iv->items[0].as_double(std::nan(""));
+      ivl[1] = iv->items[1].as_double(std::nan(""));
+      ok = ivl_region = ivl_bounds = std::isfinite(ivl[0]) && std::isfinite(ivl[1]);
+    } else if (iv->is_scalar()) {
+      for (const char *f : {"true", "yes", "on", "1", "false", "no", "off", "0"})
+        ok = ok || iv->scalar == f;
+      ivl_region = ok && iv->as_bool();
+    }
+    if (!ok)
+      warn("interval: wants [lo, hi] (two numbers) or a flag; ignored");
+  }
+  k.region =
+      seed_str(a, base, "mesh.region", prop_str(pr, "region", ivl_region ? "interval" : "solid"));
+  k.isovalue = seed_num(a, base, "mesh.isovalue", pr.num("isovalue", ivl_bounds ? ivl[0] : 0.0));
   k.inside = seed_str(a, base, "mesh.inside",
                       prop_str(pr, "inside", n.source_sdf_mesh.empty() ? "above" : "below"));
+  // The second bound: the prop, the b of `interval: [a, b]`, or default_isovalue2 -- which needs
+  // the volume's range, so for an SDF still to be computed its load sets it (apply_fe_loaded)
+  // unless someone has by then.
+  if (pr.find("isovalue2") || ivl_bounds || rt->have_volume)
+    k.isovalue2 = seed_num(a, base, "mesh.isovalue2",
+                           pr.num("isovalue2", ivl_bounds ? ivl[1] : default_isovalue2(*rt)));
+  else
+    k.isovalue2 = ari::resolve_bind(base, "mesh.isovalue2");
   k.improve = seed_num(a, base, "mesh.improve", pr.num("improve", 0));
   k.improve_iterations =
       seed_num(a, base, "mesh.improve_iterations", pr.num("improve_iterations", 1));
   k.elements = seed_str(a, base, "mesh.elements", prop_str(pr, "elements", "tet"));
-  k.interval = seed_bool(a, base, "mesh.interval", pr.flag("interval"));
-  k.isovalue2 = seed_num(a, base, "mesh.isovalue2", pr.num("isovalue2", 0.0));
   k.problem = seed_str(a, base, "problem", prop_str(pr, "problem", "poisson"));
   k.poisson_f = seed_num(a, base, "poisson.f", pr.num("poisson_f", 1.0));
   k.heat_kappa = seed_num(a, base, "heat.kappa", pr.num("heat_kappa", 1.0));
@@ -2139,6 +2404,7 @@ std::shared_ptr<GraphicsNode> realize_fe_lab(SceneGraph &sg, const ari::SceneNod
       a, k.status, rt->load_pending ? "loading " + spec.file + "..." : std::string("volume ready"));
   ari::write<std::string>(a, k.field_min, "-");
   ari::write<std::string>(a, k.field_max, "-");
+  ari::write<std::string>(a, k.last_mesh, std::string());
   // Keys written before the scene was realized (an init: program) name another source: load it
   // first. A seeded request (auto_mesh) runs after it. (A pending load reads the keys anyway.)
   if (!rt->load_pending && fe_source_from_keys(*rt).sig() != rt->source_sig) {
@@ -2147,6 +2413,46 @@ std::shared_ptr<GraphicsNode> realize_fe_lab(SceneGraph &sg, const ari::SceneNod
   }
 
   out.custom_ticks.push_back([rt](vtkRenderer *) { tick_fe_lab(*rt); });
+
+  // <node>.transfer_function: the isovalue as isocontour "iso1" over the source volume's range --
+  // and, for an interval, isovalue2 as "iso2" -- so a tf_editor moves them (and, debounced,
+  // re-meshes). Colour and opacity stay transparent: fe_lab colours its field by a named colormap,
+  // not by a transfer function. Attached after fe_lab's own tick, so a remesh request it writes is
+  // taken on the next frame. The binding follows the volume each load brings (an SDF computed
+  // after this, a `load` of another source): the bars move to where the keys' values sit on its
+  // range.
+  {
+    double vlo = 0.0, vhi = 1.0;
+    fe_value_range(*rt, vlo, vhi);
+    tf_binding_options o;
+    o.seed = cvc::tf::model::default_model();
+    o.seed.alpha = {{0.0, 0.0f}, {1.0, 0.0f}};
+    // A bound past the volume's range (legal: `interval: [0.5, 2]` is "0.5 and up" on a 0/1 mask)
+    // is a bar pinned at that end of the axis, which the binding takes as standing for it: the key
+    // keeps its true value (tf_binding.h).
+    const auto bar = [&](const char *id, const std::string &key) {
+      cvc::tf::isocontour iso;
+      iso.id = id;
+      iso.at =
+          std::clamp(cvc::tf::to_normalized(ari::read_or<double>(a, key, 0.0), vlo, vhi), 0.0, 1.0);
+      return iso;
+    };
+    o.seed.isocontours = {bar("iso1", k.isovalue)};
+    if (ari::read_or<std::string>(a, k.region, "solid") == "interval")
+      o.seed.isocontours.push_back(bar("iso2", k.isovalue2));
+    o.seed.normalize();
+    o.seed_is_applied = true; // fe.mesh.isovalue (and isovalue2) already hold them
+    o.fe_isocontour = "iso1";
+    o.fe_isocontour2 = "iso2";
+    o.auto_remesh = pr.flag("auto_remesh", o.auto_remesh);
+    o.remesh_debounce = pr.num("remesh_debounce", o.remesh_debounce);
+    const std::weak_ptr<FeLabRT> wrt = rt;
+    o.volume_source = [wrt]() -> std::shared_ptr<const cvc::volume> {
+      const std::shared_ptr<FeLabRT> r = wrt.lock();
+      return r ? r->shared_volume : nullptr;
+    };
+    attach_transfer_function(out, g, tf_target::fe_lab, rt->volume, std::move(o), warnings);
+  }
   return g;
 }
 

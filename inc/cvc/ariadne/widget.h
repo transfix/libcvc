@@ -42,6 +42,7 @@ enum class Kind {
   Color,          // bound "r,g,b" state (an RGB picker; §G7)
   Image,          // a host-published image viewer (a live raster); src / bound name
   Button,         // a fire-once button -> raises `on` event
+  TfEditor,       // a transfer-function editor bound to a cvc::tf::model key (§10; props = config)
   Custom,         // a registered custom widget type (custom_type + props); §extensibility
 };
 
@@ -447,6 +448,19 @@ inline Widget image_widget(std::string label, std::string src, double size = 256
   w.label = std::move(label);
   w.src = std::move(src);
   w.img_size = size;
+  return w;
+}
+
+// A transfer-function editor (§10) bound to a cvc::tf::model state key — the ColorTable2 port.
+// Overlay layers are read from keys beside `bind` (bind.histogram, bind.contour_spectrum, ...);
+// `props` carries the optional config (interactive_updates, height, layers, preset, ...; see
+// docs/TRANSFER_FUNCTIONS.md).
+inline Widget tf_editor(std::string label, std::string bind) {
+  Widget w;
+  w.kind = Kind::TfEditor;
+  w.label = std::move(label);
+  w.bind = std::move(bind);
+  w.props.kind = Value::Kind::Map;
   return w;
 }
 

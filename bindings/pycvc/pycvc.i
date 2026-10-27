@@ -3082,6 +3082,52 @@ PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::collect_cycles)
 %naturalvar cvc::state_exec::resource_policy::enforce;
 %naturalvar cvc::state_exec::channel_policy::declared;
 %naturalvar cvc::state_exec::channel_policy::global;
+// ── async_lane (cvc/core/async_lane.h): a persistent worker thread, as an async host's executor
+// (async_host.add_lane). stop() and the destructor wait for the lane's jobs: without the GIL, which
+// a Python kernel on the lane needs to finish. ──
+%{
+#include <cvc/core/async_lane.h>
+%}
+PYCVC_STATE_EXEC_NOGIL(cvc::async_lane::stop)
+PYCVC_STATE_EXEC_NOGIL(cvc::async_lane::~async_lane)
+namespace cvc {
+class async_lane {
+public:
+  explicit async_lane(std::string name);
+  ~async_lane();
+  void stop();
+  const std::string &name() const;
+  bool threaded() const;
+  bool stopped() const;
+  size_t pending() const;
+  size_t in_flight() const;
+  unsigned long long completed() const;
+  unsigned long long failed() const;
+  std::string last_error() const;
+  double last_job_ms() const;
+};
+} // namespace cvc
+
+// ── async_call: a Python kernel's handle (register_async_fn(..., with_call=True)) ──
+// Shared: the handle keeps the call's record alive. cancelled() says whether to stop (and records
+// the CPU time used so far, for the process's budget); post(value) sends progress to
+// "<name>.progress"; add_wait(seconds) is time spent waiting on the host, not charged.
+%shared_ptr(cvc::state_exec::async_call)
+%nodefaultctor cvc::state_exec::async_call;
+%{
+namespace pycvc {
+PyObject *async_call_to_py(std::shared_ptr<cvc::state_exec::async_call> call) {
+  static swig_type_info *type = SWIG_TypeQuery("std::shared_ptr< cvc::state_exec::async_call > *");
+  if (type == nullptr) {
+    PyErr_SetString(PyExc_RuntimeError, "pycvc: the async_call type isn't registered");
+    return nullptr;
+  }
+  return SWIG_NewPointerObj(new std::shared_ptr<cvc::state_exec::async_call>(std::move(call)),
+                            type, SWIG_POINTER_OWN);
+}
+} // namespace pycvc
+%}
+
 %rename(global_) cvc::state_exec::channel_policy::global; // `global` is a Python keyword
 %rename(raise_) cvc::state_exec::stackless_evaluator::raise; // `raise` is one too
 // process::watch_event and process::watch_handler_entry are pycvc.watch_event and
@@ -3791,12 +3837,27 @@ PYCVC_STATE_EXEC_NOGIL(async_host::wait_idle)
 // kernel needs to finish.
 PYCVC_STATE_EXEC_NOGIL(async_host::~async_host)
 %nodefaultctor async_host;
+// add_lane keeps the lane alive as long as the host: the host's calls need it.
+%pythonappend async_host::add_lane %{
+  self.__dict__.setdefault("_pycvc_lanes", []).append(lane)
+%}
 class async_host {
 public:
   void shutdown();
   void wait_idle();
   size_t in_flight() const;
+  void add_lane(const std::string &name, cvc::async_lane &lane);
 };
+class async_call {
+public:
+  const std::string &function_name() const;
+  bool cancelled();
+  void post(const value_t &progress);
+  void add_wait(double seconds);
+  bool finished() const;
+};
+// Whether `v` is a future that held an async call ((name-async ...)'s value).
+bool is_async_future(const value_t &v);
 %extend async_host {
   async_host() { return new cvc::state_exec::async_host(); }
   async_host(scheduler *sched) { return new cvc::state_exec::async_host(sched); }
@@ -3807,17 +3868,18 @@ public:
   }
 }
 
-// register_async_fn(env, host, name, fn, executor="background", timeout=None, future_variant=True):
-// fn, a Python callable, is the kernel: it runs on an executor thread with copies of the
-// arguments, taking the GIL for its call, and its value or exception is the call's
+// register_async_fn(env, host, name, fn, executor="background", timeout=None, future_variant=True,
+// with_call=False): fn, a Python callable, is the kernel: it runs on an executor thread with copies
+// of the arguments, taking the GIL for its call, and its value or exception is the call's
 // (docs/STATE_EXEC_EXCEPTIONS.md 3.2). executor is "background" (the app's background task pool;
-// "compute" means the same), "inline", or "lane:<name>"; timeout is seconds.
+// "compute" means the same), "inline", or "lane:<name>" (a lane given to host.add_lane); timeout
+// is seconds. With with_call, fn gets the call's pycvc.async_call first, before the arguments.
 %extend builtins {
   static void register_async_fn(environment_ptr env, cvc::state_exec::async_host &host,
                                 const std::string &name, PyObject *fn,
                                 const std::string &executor = "background",
                                 std::optional<double> timeout = std::nullopt,
-                                bool future_variant = true) {
+                                bool future_variant = true, bool with_call = false) {
     namespace se = cvc::state_exec;
     if (!env)
       throw std::invalid_argument("pycvc.builtins.register_async_fn: env is None");
@@ -3834,9 +3896,10 @@ public:
                                   executor + "\"");
     opts.timeout = timeout;
     opts.future_variant = future_variant;
-    se::register_async_fn(env, host, name,
-                          pycvc::python_async_marshal("pycvc.builtins.register_async_fn", name, fn),
-                          std::move(opts));
+    se::register_async_fn(
+        env, host, name,
+        pycvc::python_async_marshal("pycvc.builtins.register_async_fn", name, fn, with_call),
+        std::move(opts));
   }
 }
 

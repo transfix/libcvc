@@ -145,6 +145,14 @@ public:
 
   // Run every queued action event's handler, then clear the queue. Call once per
   // frame in the host loop, BEFORE your sim tick and OUTSIDE render().
+  //
+  // drain() is also where the app's state_exec scheduler (app.exec_scheduler()) advances: it pumps
+  // it a bounded slice every drain once this Runtime has submitted to it (an `on:` program, a
+  // resident), and otherwise whenever any process is live on it, whoever submitted it (e.g. a
+  // scene's transfer-function overlay tasks, cvc/tf/overlay_tasks.h). An app's Runtimes share one
+  // frame boundary: with each drained once a frame, in any order, an (await …) resumes once a
+  // frame, not once per Runtime. While nothing has used the scheduler it is neither pumped nor
+  // built. A host with no Runtime pumps it itself (cvc::pump_exec_frame, cvc/core/async_lane.h).
   void drain();
 
   // Drain the §4 read-lane diagnostics accumulated during render() — one message per

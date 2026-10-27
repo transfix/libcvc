@@ -80,11 +80,20 @@ public:
   void set_host_keys(std::vector<KeyBinding> keys);
 
   // Register a host verb the .ari program can call. register_verb is SYNCHRONOUS (fn runs
-  // inline on the drain thread, no args/return). register_async_verb OFFLOADS `work` to the
-  // app compute pool and posts its string result to `done_channel`; the program parks on
-  // (msg-recv "done_channel") and resumes under drain()'s slice budget (the nav_compute
-  // pattern).
+  // inline on the drain thread, no args/return).
+  //
+  // register_async_verb makes `name` an async function on the app's async host
+  // (docs/STATE_EXEC_EXCEPTIONS.md 3):
+  // - (name) parks the calling program while `work` runs on the app's background task pool,
+  //   then returns `work`'s string;
+  // - an exception `work` throws raises at the call;
+  // - (name-async) returns a future for (await f);
+  // - the work is charged to the calling action's budget (ariadne.limits.action_max_steps and
+  //   action_max_time).
+  // With a `done_channel`, the result is also posted there. That keeps documents that wait with
+  // (msg-recv "done_channel") working: the old nav_compute pattern.
   void register_verb(const std::string &name, std::function<void()> fn);
+  void register_async_verb(const std::string &name, std::function<std::string()> work);
   void register_async_verb(const std::string &name, const std::string &done_channel,
                            std::function<std::string()> work);
 

@@ -1,11 +1,17 @@
 # fe_controls.ari — a REUSABLE Ariadne component: finite elements on a `type: fe_lab` node.
 # The node holds a volume: the signed distance field of a mesh, or a volume file (a CT, say). "Load"
-# reads the source again from these keys, so one node can switch datasets. "Tet-mesh" builds a
-# tetrahedral (or hexahedral) mesh of it with the in-tree LBIE mesher (cvc::tetrahedralize, or
-# tetrahedralize2 for the layer between two isovalues); "Solve" runs a linear (P1) FEM Poisson, heat
-# or eigenmode problem on that mesh (cvc::fem, libigl assembly). The field is shown on the tet
-# boundary surface and on a movable axis-aligned cut, coloured by a colormap; the elements view
-# shows the mesh itself, cut away, each element coloured by its size or quality. Binds the fe.* keys
+# reads the source again from these keys, so one node can switch datasets. "Mesh" builds a
+# tetrahedral (or hexahedral) mesh of it with the in-tree LBIE mesher (cvc::tetrahedralize): Mesh
+# region "Solid" fills one side of Isovalue (Inside is: below for an SDF, above for a density);
+# "Interval" fills the shell between Isovalue and Isovalue 2, in either order, whatever Inside is
+# says (fe.mesh.region, fe.mesh.isovalue2; tetrahedra only). The node's transfer function
+# (graphics.root.children.domain.transfer_function, edited by the transfer_function component)
+# holds the bounds as isocontours: dragging a bar moves its isovalue and re-meshes once the drag
+# settles, and the editor shades the meshed interval; these sliders move the bars too, and wait for
+# Mesh. "Solve" runs a linear (P1) FEM Poisson, heat or eigenmode problem on that mesh (cvc::fem,
+# libigl assembly). The field is shown on the tet boundary surface and on a movable axis-aligned
+# cut, coloured by a colormap; the elements view shows the mesh itself, cut away, each element
+# coloured by its size or quality. Binds the fe.* keys
 # the cvcGL fe_lab realizer owns (state at "<scene>.graphics.root.children.domain.fe.*"). Commands
 # go through fe.request: the realizer consumes it and runs the job off the render thread; Stop
 # interrupts a heat solve at its next step, and is enabled only while one runs (fe.stoppable):
@@ -29,6 +35,7 @@
 #         - node: domain
 #           type: fe_lab
 #           source: { sdf: { mesh: stanford.bunny, dim: 32 } }
+#           # interval: [-0.02, 0]   # start with a shell: region interval, isovalue, isovalue2
 
 units:
   fe_controls:
@@ -80,25 +87,29 @@ units:
         tooltip: "read the source again when these keys changed (then mesh and solve as ticked)"
       - separator
       - text: "1. Mesh the volume (LBIE)"
+      - combo: Mesh region
+        bind: graphics.root.children.domain.fe.mesh.region
+        options: [Solid (one side of the isovalue), Interval (between two isovalues)]
+        values: [solid, interval]
+        tooltip: "interval: the shell between Isovalue and Isovalue 2 (in either order; tetrahedra only); a transfer-function editor's two isocontour bars drive both"
       - slider_float: Isovalue
         bind: graphics.root.children.domain.fe.mesh.isovalue
         lo: -10.0
         hi: 255.0
         fmt: "%.2f"
         tooltip: "the surface that bounds the mesh, in the volume's units (0 = the surface of an SDF); ctrl-click to type"
-      - combo: Inside is
-        bind: graphics.root.children.domain.fe.mesh.inside
-        options: [Below the isovalue (SDF), Above the isovalue (density)]
-        values: [below, above]
-      - checkbox: Interval
-        bind: graphics.root.children.domain.fe.mesh.interval
-        tooltip: "mesh the layer between two isovalues (tetrahedra only)"
-      - slider_float: Second isovalue
+      - slider_float: Isovalue 2
         bind: graphics.root.children.domain.fe.mesh.isovalue2
         lo: -10.0
         hi: 255.0
         fmt: "%.2f"
-        visible_when: (= (state-get "graphics.root.children.domain.fe.mesh.interval") "1")
+        tooltip: "the interval's other bound, in the volume's units; ctrl-click to type"
+        visible_when: (= (state-get "graphics.root.children.domain.fe.mesh.region") "interval")
+      - combo: Inside is
+        bind: graphics.root.children.domain.fe.mesh.inside
+        options: [Below the isovalue (SDF), Above the isovalue (density)]
+        values: [below, above]
+        visible_when: (not (= (state-get "graphics.root.children.domain.fe.mesh.region") "interval"))
       - combo: Elements
         bind: graphics.root.children.domain.fe.mesh.elements
         options: [Tetrahedra, Hexahedra (elements view only)]

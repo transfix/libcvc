@@ -40,7 +40,7 @@
 //       color.min, color.max                                          (published)
 //
 //   type: fe_lab -- a volume read like a `volren` node (source: { file } or { sdf }), meshed
-//     with the LBIE mesher (cvc::tetrahedralize, tetrahedralize2 for an interval, hexahedralize)
+//     with the LBIE mesher (cvc::tetrahedralize, tetrahedralize_interval below, hexahedralize)
 //     and solved with P1 finite elements (cvc::fem). The node shows the field on the boundary (the
 //     surface the elements approximate, or their own boundary); a child GeometryNode
 //     "<id>_slice" shows it on an axis-aligned cut (cvc::slice_tets). In the elements view the
@@ -56,17 +56,32 @@
 //       busy, stoppable (1 while the running job honours stop), status, progress (0-100),
 //       stats.tets, stats.hexes, stats.vertices, stats.quality_min, stats.quality_mean,
 //       stats.work_ms, field.min, field.max                            (published)
+//       last_mesh (published: the region and bounds the last mesh job started with, as
+//       fe_mesh_signature writes them; "" before the first)
 //       source.type (sdf | volume), source.file, source.dim, source.algorithm (v1 | v2 | igl),
 //       source.up, source.flip, source.height, auto.mesh, auto.solve
-//       mesh.isovalue, mesh.inside (below | above: which side of the isovalue is meshed),
-//       mesh.interval, mesh.isovalue2, mesh.elements (tet | hex),
-//       mesh.improve (cvc::improvement_method), mesh.improve_iterations,
+//       mesh.region (solid | interval: what is meshed), mesh.isovalue,
+//       mesh.inside (below | above: which side of the isovalue a solid mesh fills),
+//       mesh.isovalue2 (an interval's second bound: the inclusive shell between the two
+//       isovalues, in either order, whatever mesh.inside says; a bound may lie past the volume's
+//       range -- see tetrahedralize_interval), mesh.elements (tet | hex; an interval is
+//       tetrahedra only), mesh.improve (cvc::improvement_method), mesh.improve_iterations,
 //       problem (poisson | heat | modes), poisson.f, heat.kappa, heat.dt, heat.steps,
 //       modes.index, view.mode (field | elements), view.boundary (input | mesh),
 //       view.colormap, view.show_surface, view.show_slice, view.slice_axis (0 | 1 | 2),
 //       view.slice_offset (-1..1 across the mesh bounds), view.surface_opacity,
 //       view.color_by (size | quality), view.cut_side (1 | -1), view.ghost, view.fixed_range,
 //       view.range_min, view.range_max
+//     The mesh keys are seeded from props: region (default solid), isovalue (0), isovalue2, inside
+//     (below for an sdf source, else above), and `interval: [a, b]`, shorthand for region interval,
+//     isovalue a, isovalue2 b (`interval: true` alone is region interval); an explicit region /
+//     isovalue / isovalue2 prop beside it wins. With no isovalue2 the second bound is a tenth of
+//     the volume's value range from isovalue on the side a solid mesh fills (below it for inside
+//     below: an SDF's inner skin; above it for a density), but no more than half way to that end
+//     of the range; on the other side when isovalue sits at (or past) that end. (An SDF source is
+//     computed after realize: its load sets that default, unless mesh.isovalue2 was set first.)
+//     <node>.transfer_function is bound (tf_binding.h): its isocontours drive the bounds, over
+//     the range of the volume the last load brought.
 //
 // Counts and indices read from state are range-checked (NaN = the default): smooth.iterations
 // 1..1000, decimate.target_faces >= 1, mesh.improve 0..5, mesh.improve_iterations 0..100,
@@ -78,7 +93,12 @@
 #ifndef CVC_GL_ARIADNE_MESH_NODES_H
 #define CVC_GL_ARIADNE_MESH_NODES_H
 
+#include <cvc/geometry/geometry.h>
+#include <cvc/volume/volume.h>
+#include <string>
+
 namespace cvc {
+class app;
 namespace gl {
 namespace ariadne {
 
@@ -86,6 +106,31 @@ namespace ariadne {
 // CVC_ENABLE_LIBIGL, so a document that declares them in `customs:` with `required: true` fails
 // fast there. Idempotent; call before realize_scene (register_cvcgl_extensions does).
 void register_mesh_node_types();
+
+// fe_lab's interval mesher (mesh.region: interval): a tet mesh of the shell
+// min(a, b) <= v <= max(a, b) of `vol` -- the bounds in either order -- whose boundary is both
+// isosurfaces, an outer and an inner sheet where the shell encloses a cavity. The interval is
+// inclusive: a voxel whose value equals a bound (integer or plateau data, a bar at an end of an
+// editor's axis) is inside it, so [1, 3] on a label volume keeps labels 1 and 3. Such a bound is
+// meshed half way to the nearest value beyond it -- on integer data the half-integer: [1, 3] on
+// labels gives the same mesh as [0.5, 3.5] -- and the surface passes no nearer than a quarter of a
+// grid edge to a voxel on a bound (LBIE folds tets that hug a grid point), so on continuous data
+// it bulges out by a fraction of a voxel at those voxels. A bound no voxel lies beyond (at or past
+// an end of the value range) bounds nothing: [0.5, 1] and [0.5, 2] mesh the same {v >= 0.5} of a
+// 0/1 mask, crossing at 0.5 like a solid mesh; with neither bound passed it is the whole box. The
+// tets come as LBIE writes them (orient them with cvc::orient_tets before a solve), at `vol`'s
+// positions. `improve` is a cvc::improvement_method, run `improve_iterations` times. Throws
+// std::runtime_error "no tets: the interval [lo, hi] ..." when the interval is empty or holds no
+// voxel (the message gives the volume's value range) or LBIE finds nothing in it, and "mesher
+// unavailable" in a build without CVC_ENABLE_MESHER. Available without CVC_ENABLE_LIBIGL.
+cvc::geometry tetrahedralize_interval(const cvc::volume &vol, double a, double b, int improve = 0,
+                                      int improve_iterations = 1);
+
+// fe_lab: the region and bounds the keys under `fe_base` ("<node>.fe") hold now, read as fe_lab
+// reads them for a mesh job: "solid <isovalue>" or "interval <lo> <hi>" (the bounds sorted; %.17g).
+// fe_lab publishes it at <fe_base>.last_mesh for each mesh job it starts, whoever asked for it, so
+// the transfer-function binding drops a debounced remesh some other request already did.
+std::string fe_mesh_signature(cvc::app &app, const std::string &fe_base);
 
 } // namespace ariadne
 } // namespace gl

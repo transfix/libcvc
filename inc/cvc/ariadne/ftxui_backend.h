@@ -194,7 +194,7 @@ public:
   // Publish (or replace) the image a Kind::Image widget named `name` shows — the terminal
   // counterpart of cvc::gl::ImGuiBackend::set_image. Any pixel format / data type; it is converted
   // to 8-bit RGB once here and box-filtered to the cell grid at draw time.
-  void set_image(const std::string &name, const cvc::image &img);
+  void set_image(const std::string &name, const cvc::image &img) override;
   void clear_image(const std::string &name);
 
   // Draw the published image `name` behind everything, stretched over the whole screen: the

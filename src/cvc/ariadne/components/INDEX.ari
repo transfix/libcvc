@@ -7,6 +7,10 @@
 #     windows:
 #       - include: <unit>            # or, parametrized:  { include: <unit>, args: { node: myNode } }
 #
+# A parametrized unit declares its args with defaults (an entry's `args:` map lists them), so a bare
+# include loads and an include site overrides only what it needs. A few components also ship a
+# bare-widget unit (no window) to embed in a document's own window.
+#
 # Every control binds a two-way cvc::state key the corresponding C++ object owns, so a component
 # drives the live scene/camera/renderer with NO host C++ — the declarative replacement for the
 # hand-written C++ panels (cvc::gl::ui::*). This file is data-only (a catalog tooling/pycvc can read
@@ -100,6 +104,19 @@ catalog:
     file: fe_controls.ari
     unit: fe_controls
     binds: "<prefix>.graphics.root.children.domain.fe.*"       # the cvcGL fe_lab realizer
-    for: "a `type: fe_lab` node (load an SDF or a volume; LBIE tet / hex / interval mesh; P1 Poisson / heat / eigenmode solve; the field on the boundary and a cut, or the elements cut away)"
+    for: "a `type: fe_lab` node (load an SDF or a volume; LBIE tet / hex mesh of a solid, or a tet mesh of the interval between two isovalues; P1 Poisson / heat / eigenmode solve; the field on the boundary and a cut, or the elements cut away)"
     args: []                               # convention: node id `domain`; copy + rename for another
     note: "needs a CVC_ENABLE_LIBIGL build (and CVC_ENABLE_MESHER to tet-mesh); commands go through fe.request"
+  - component: transfer_function
+    file: transfer_function.ari
+    unit: transfer_function
+    binds: "<prefix>.graphics.root.children.{node}.transfer_function (+ .range / .histogram / .contour_spectrum / .contour_tree / .overlay_request) and <prefix>.tree.{id}.view.*"
+    for: "a volume-type node (volren / volslice / volume) or an fe_lab node: colour ramp, opacity curve and isocontours over histogram / contour spectrum / contour tree layers"
+    args: { node: volume, title: Transfer Function, id: transfer_function }   # defaults
+    note: "a window holding the tf_editor widget (the ColorTable2 port); every volume node publishes the model and the layers, so no host C++ is needed"
+  - component: transfer_function_editor
+    file: transfer_function.ari
+    unit: transfer_function_editor
+    binds: "<prefix>.graphics.root.children.{node}.transfer_function (+ the layers beside it) and <prefix>.tree.{id}.view.*"
+    for: "the same editor without a window, to embed in a document's own window (several in one document: give each its own id)"
+    args: { node: volume, label: Transfer function, id: transfer_function_editor }   # defaults
