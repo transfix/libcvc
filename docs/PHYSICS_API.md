@@ -539,13 +539,17 @@ Positions, speeds and accelerations cross nav's normalized frame and SI only her
 
 - `last_drift(i)` and `drift_summary()`, in SI;
 - with `publish(ctx, prefix, names)`, `<prefix>.vehicles.<name>.nav.{steer_command,
-  accel_command, drift.{position_m, heading_rad, speed_mps, lateral_g, stop_speed_mps}}`, next
+  accel_command, drift.{position_m, heading_rad, speed_mps, lateral_mps2, stop_speed_mps}}`, next
   to the physics binding's `vehicles.<name>.*` and its energy keys;
-- `<prefix>.nav_plant.drift.<b>.{lo_g, hi_g, ticks, position_rms_m, position_max_m,
+- `<prefix>.nav_plant.drift.<b>.{lo_mps2, hi_mps2, ticks, position_rms_m, position_max_m,
   heading_rms_rad, heading_max_rad, speed_rms_mps, speed_max_mps}`;
 - `<prefix>.nav_plant.{vehicles, advance_us, advance_us_per_vehicle}`, the cost;
 - `<prefix>.nav_plant.settings.{step_world, ground_z, spawn_height, metres_per_world_unit,
-  physics_steps, drift_bins_g}`, the settings fixed at construction.
+  physics_steps, drift_bins_mps2}`, the settings fixed at construction.
+
+Accelerations in the tree are in m/s², like every other quantity there. The C++ options, the drift
+summaries and the plant log keep lateral acceleration in g (9.80665 m/s²): `lateral_g`,
+`drift_bins_g`, `lo_g` / `hi_g`.
 
 **Knobs.** `pull(ctx, prefix)` reads `<prefix>.nav_plant.{latency, brake_margin, drift_nsub}`.
 These are seeded with the plant's values, applied when they change, and an invalid one is
