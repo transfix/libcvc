@@ -105,7 +105,8 @@ input had been truncated. With all five judged, the decision changed (section 3.
   `310-322`).
 - **Async calls.** An async call marshals on the scheduler thread, then runs its kernel on the
   app's background pool or a lane. Its completion comes back through the scheduler's ingress, the
-  only thread-safe entry (`async_scheduler.cpp:516-556`; `docs/STATE_EXEC_EXCEPTIONS.md` 3.1).
+  only thread-safe entry (`async_scheduler.cpp:516-556`;
+  [`docs/STATE_EXEC_EXCEPTIONS.md`](STATE_EXEC_EXCEPTIONS.md) 3.1).
 - **Ariadne.** It pumps the app scheduler from every `Runtime::drain` (`ariadne.cpp:2021-2023` ->
   `1688-1706`). The sequence is `drain_ingress`, then `wake_awaiting`, then
   `sync_run(200000, 0.1)`, then the sweep. Every document shares that one scheduler, one pid space
@@ -591,7 +592,8 @@ That is three stores and three restores per pump, and nothing per step.
     host-affinity groups itself and helps with the rest. It returns when all are done.
   - Outside a `pump_all` no worker touches any group. Host code (sweeps, `get_process_info`,
     `reap`, `kill_owner`) runs as today, without the token.
-  - Render never overlaps a pump, so it stays a pure reader (`docs/ARIADNE.md` section 3).
+  - Render never overlaps a pump, so it stays a pure reader ([`docs/ARIADNE.md`](ARIADNE.md)
+    section 3).
 - **Continuous** (Stage 2; pycvc servers, `exec_coordinator`, headless hosts):
   - Attached groups are pumped whenever they have work, a slice at a time (section 4.4).
   - A host call that touches a group's scheduler takes the token (`with_group`), or goes through a
@@ -616,7 +618,8 @@ That is three stores and three restores per pump, and nothing per step.
 - the built-in exception class dicts, made read-only in Stage 0 (13 today; 16 once the locks track
   adds `LockError`, `DeadlockError` and `PermissionError`);
 - strings, numbers and bytes, which the variant holds by value (`types.h:154-155`);
-- read-only `data_object` payloads (`docs/STATE_EXEC_EXCEPTIONS.md` 3.7);
+- read-only `data_object` payloads ([`docs/STATE_EXEC_EXCEPTIONS.md`](STATE_EXEC_EXCEPTIONS.md)
+  3.7);
 - the state tree, through its own locks (section 4.8);
 - the app's lock manager (`app::lock_manager()`), synchronized internally by one mutex (4.19);
 - the kernel pools.
@@ -1082,8 +1085,9 @@ The tree is the one mutable structure all groups share. Stage 0 makes the DSL's 
     - `background_cpu`, sized to the cores minus the group workers;
     - `background_io`, larger, for blocking kernels.
   - `executor::background` keeps meaning the first, and a registration option picks the second.
-  - This reverses settled question 4 of `docs/STATE_EXEC_EXCEPTIONS.md` ("There's no separate I/O
-    pool", line 840; section 3.5) from Stage 2 on, as the user decided (Q9).
+  - This reverses settled question 4 of
+    [`docs/STATE_EXEC_EXCEPTIONS.md`](STATE_EXEC_EXCEPTIONS.md) ("There's no separate I/O pool",
+    line 840; section 3.5) from Stage 2 on, as the user decided (Q9).
 - **Blocking steps** (B21). An inline kernel or a `call->wait` at a point that cannot park
   (`intrinsics.cpp:537-542`) blocks only the worker pumping that group.
   - Other workers keep pumping other groups, which is better than today, where it stalls everything.
@@ -1095,8 +1099,9 @@ The tree is the one mutable structure all groups share. Stage 0 makes the DSL's 
 ### 4.10 Budgets and time accounting
 
 - **Per process: unchanged.** `max_steps`, `max_time`, `max_memory`, `max_alloc_bytes`,
-  `max_step_time`, the message limits and async charges (`docs/STATE_EXEC_EXCEPTIONS.md` 3.8) all
-  have one writer, the group's pumping thread.
+  `max_step_time`, the message limits and async charges
+  ([`docs/STATE_EXEC_EXCEPTIONS.md`](STATE_EXEC_EXCEPTIONS.md) 3.8) all have one writer, the
+  group's pumping thread.
   - A step runs wholly on one thread, so `thread_cpu_seconds()` deltas stay valid
     (`process.h:182-186`; `types.h:322-324`).
   - With Stage S slices, a run is on one thread too. A group changes threads only between pumps.
@@ -1110,7 +1115,7 @@ The tree is the one mutable structure all groups share. Stage 0 makes the DSL's 
 - **Per pump.** Each group gets its own pump budget: Ariadne's 200000 steps and 0.1 s
   (`ariadne.cpp:1704-1705`), or `Exec`'s slice (`pycvc_exec.cpp:574-575`). `time_budget` charges
   thread CPU past its half-way point, so a pump descheduled by oversubscription still completes its
-  quick work (`types.cpp:94-110`; `docs/ARIADNE.md` 2.2).
+  quick work (`types.cpp:94-110`; [`docs/ARIADNE.md`](ARIADNE.md) 2.2).
 - **Per frame** (new). `pump_all(groups, budget)` also takes a wall deadline: Ariadne passes 0.1 s.
   - A group starts only if the deadline has not passed, and its pump's time budget is the smaller
     of its own and the time left.
@@ -1330,7 +1335,7 @@ out first, and otherwise it waits for a timer, a lock post or the end of its tim
 ### 4.13 Configuration and opting in
 
 From highest to lowest precedence, following the settings rules of
-`docs/STATE_EXEC_EXCEPTIONS.md` 3.8:
+[`docs/STATE_EXEC_EXCEPTIONS.md`](STATE_EXEC_EXCEPTIONS.md) 3.8:
 1. the `pool_options` a host passes;
 2. the app tree's `state_exec.threads`, `state_exec.cpu_set` and `state_exec.deterministic`;
 3. the built-in defaults: threads 0, P-cores, not deterministic.
@@ -1852,8 +1857,8 @@ Stage 0 has not landed (its L2). Stage M comes last.
   - `exec_coordinator.cpp`: control through `post_control`;
   - `state.cpp:1606-1607`: the pinned path in `sendMessage`;
   - `builtins.cpp:688-707`: line-atomic `print`;
-  - docs: `STATE_EXEC_DEVELOPER_GUIDE.md`, `STATE_EXEC_EXCEPTIONS.md` (the class and data-channel
-    rules).
+  - docs: [`STATE_EXEC_DEVELOPER_GUIDE.md`](STATE_EXEC_DEVELOPER_GUIDE.md),
+    [`STATE_EXEC_EXCEPTIONS.md`](STATE_EXEC_EXCEPTIONS.md) (the class and data-channel rules).
 - **CI:** a Linux clang TSan job (ubuntu-24.04, `-fsanitize=thread`, RelWithDebInfo) running the
   state_exec tests, `ariadne_runtime_test`, `state_exec_coordinator_test` and `mt.multi_exec`. Its
   suppressions file covers boost.thread and signals2 internals only.
@@ -2195,8 +2200,9 @@ plan the rest of this document already follows, marked "default".
    or the app tree opts in. `state_exec.cpu_set` defaults to `performance`: workers on P-cores
    only.
 9. **Q9. The kernel pools are split** in Stage 2, into `background_cpu` and `background_io` (4.9).
-   This reverses settled question 4 of `docs/STATE_EXEC_EXCEPTIONS.md` from Stage 2 on, and that
-   document says so.
+   This reverses settled question 4 of
+   [`docs/STATE_EXEC_EXCEPTIONS.md`](STATE_EXEC_EXCEPTIONS.md) from Stage 2 on, and that document
+   says so.
 10. **Q10. Slices (default).** `slice_steps` stays 1 by default after Stage S, so the round robin
     stays exact. Hosts opt in to longer runs.
 11. **Q11. Pids.** One pid source per pool (4.5). Pids stay `int` (default): widening them to
