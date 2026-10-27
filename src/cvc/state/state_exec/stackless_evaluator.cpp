@@ -1,3 +1,4 @@
+#include "closure_body.h"
 #include "closure_natives.h"
 #include "special_forms.h"
 
@@ -1112,6 +1113,7 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
     cls->params = std::move(params);
     cls->variadic = variadic;
     cls->body = std::vector<value_t>(args.begin() + 1, args.end());
+    detail::cache_body_expr(*cls);
     cls->env_snapshot = env;
     track_captured_env(env); // bound back into env (or anything it holds), it is a cycle
     pop_frame(state, value_t{std::move(cls)});
@@ -1202,6 +1204,7 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
     cls->params = std::move(params);
     cls->variadic = variadic;
     cls->body = std::vector<value_t>(args.begin() + 2, args.end());
+    detail::cache_body_expr(*cls);
     cls->env_snapshot = env;
     track_captured_env(env); // bound in the env it captured: a cycle
     env->set(name_sym->name, value_t{cls});
@@ -1796,15 +1799,7 @@ void stackless_evaluator::call_closure(evaluator_state &state, eval_frame & /*fr
 
 void stackless_evaluator::push_closure_body(evaluator_state &state, const closure_ptr &cls,
                                             environment_ptr local) {
-  if (cls->body.size() == 1) {
-    push_frame(state, cls->body[0], std::move(local));
-  } else {
-    std::vector<value_t> begin_exprs;
-    begin_exprs.reserve(1 + cls->body.size());
-    begin_exprs.push_back(value_t{symbol{"begin"}});
-    begin_exprs.insert(begin_exprs.end(), cls->body.begin(), cls->body.end());
-    push_frame(state, make_list(std::move(begin_exprs)), std::move(local));
-  }
+  push_frame(state, detail::body_expr_of(*cls), std::move(local));
   state.stack.back().function_body = true; // a `return` in it returns from here
 }
 
@@ -1907,6 +1902,7 @@ void stackless_evaluator::handle_defclass(evaluator_state &state, eval_frame &fr
     mcls->params = std::move(params);
     mcls->variadic = variadic;
     mcls->body = std::vector<value_t>(mlist.begin() + 2, mlist.end());
+    detail::cache_body_expr(*mcls);
     mcls->env_snapshot = env;
     track_captured_env(env); // the class is bound in env: a cycle candidate
 

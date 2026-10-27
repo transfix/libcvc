@@ -671,3 +671,34 @@ TEST_F(StacklessEvaluatorTest, PoppedFramesKeepNoValues) {
       local.evaluate_script("(begin (length (mk)) (if t (length (mk))) (alive))").is_truthy());
   EXPECT_TRUE(local.evaluate_script("(begin (set keep (mk)) (alive))").is_truthy());
 }
+
+// ─── A closure's body, built once ──────────────────────────────────────────
+
+TEST(StacklessClosureBody, MadeOnceAndIgnoredWhenStale) {
+  stackless_evaluator ev(builtins::make_default_environment());
+  evaluator_state st =
+      ev.create_state(parse("(begin (defun f (x) (set y x) (* y 2)) (defun g (x) (* x 3)) f)"));
+  while (!ev.step(st)) {
+  }
+  const closure_ptr f = std::get<closure_ptr>(st.result.v);
+  ASSERT_EQ(f->body.size(), 2u);
+  const auto *made = std::get_if<list_ptr>(&f->body_expr.v);
+  ASSERT_NE(made, nullptr);
+  ASSERT_EQ((*made)->size(), 3u);
+  EXPECT_EQ(std::get<symbol>((**made)[0].v).name, "begin");
+  EXPECT_EQ(std::get<list_ptr>((**made)[1].v), std::get<list_ptr>(f->body[0].v));
+  EXPECT_TRUE(std::get<closure_ptr>(st.global_env->lookup("g")->v)->body_expr.is_nil());
+
+  auto call = [&](const char *script) {
+    evaluator_state run = ev.create_state(parse(script), st.global_env);
+    while (!ev.step(run)) {
+    }
+    return std::get<int64_t>(run.result.v);
+  };
+  EXPECT_EQ(call("(f 4)"), 8);
+  // A body changed after the closure was made: the call runs the body it has now.
+  f->body[1] = parse("(* y 5)");
+  EXPECT_EQ(call("(f 4)"), 20);
+  f->body.push_back(parse("(+ y 1)"));
+  EXPECT_EQ(call("(f 4)"), 5);
+}

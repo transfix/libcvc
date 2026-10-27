@@ -217,6 +217,11 @@ struct closure {
   bool variadic = false; // &rest parameter
   std::vector<value_t> body;
   environment_ptr env_snapshot;
+  /// `body` as one expression when it has several forms, (begin body...), made once with the
+  /// closure so that each call needn't build it again. Only a cache: nil when nobody made it (a
+  /// one-form body, a closure built elsewhere), and ignored once it no longer matches `body`.
+  /// Not serialized, printed or compared.
+  value_t body_expr;
 };
 
 /// Lexically-scoped environment chain.
