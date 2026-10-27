@@ -294,3 +294,22 @@ TEST(EvaluationStats, CountsEvalStepsAndChargedStepsExactlyWhileReadConcurrently
   moved.start();
   EXPECT_EQ(moved.get_step_count(), 0u);
 }
+
+TEST(EvaluatorSpareVectors, KeepNoValues) {
+  // A form's argument vectors are kept for the next forms, empty: what they held is dropped when
+  // the form is done, as before.
+  auto env = builtins::make_default_environment();
+  std::weak_ptr<std::vector<value_t>> made;
+  env->set("mk", value_t{native_fn{[&](std::span<const value_t>) -> value_t {
+             value_t l = make_list({value_t(int64_t(1)), value_t(int64_t(2))});
+             made = std::get<list_ptr>(l.v);
+             return l;
+           }}});
+  env->set("alive", value_t{native_fn{[&](std::span<const value_t>) -> value_t {
+             return value_t(!made.expired());
+           }}});
+  evaluator ev(env);
+  EXPECT_FALSE(
+      ev.evaluate_script("(begin (length (mk)) (if t (length (mk))) (alive))").is_truthy());
+  EXPECT_TRUE(ev.evaluate_script("(begin (set keep (mk)) (alive))").is_truthy());
+}

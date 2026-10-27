@@ -18,6 +18,7 @@
 #include <functional>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -214,28 +215,28 @@ public:
 
 private:
   // Evaluate `expr`, keeping it on the trail meanwhile (an exception's traceback).
-  value_t eval_internal(const value_t &expr, environment_ptr env);
-  value_t eval_form(const value_t &expr, environment_ptr env);
+  value_t eval_internal(const value_t &expr, const environment_ptr &env);
+  value_t eval_form(const value_t &expr, const environment_ptr &env);
   void check_interrupted();
 
   // Special form handlers
-  value_t do_if(const std::vector<value_t> &args, environment_ptr env);
-  value_t do_begin(const std::vector<value_t> &args, environment_ptr env);
-  value_t do_while(const std::vector<value_t> &args, environment_ptr env);
-  value_t do_for(const std::vector<value_t> &args, environment_ptr env);
-  value_t do_set(const std::vector<value_t> &args, environment_ptr env);
+  value_t do_if(const std::vector<value_t> &args, const environment_ptr &env);
+  value_t do_begin(std::span<const value_t> args, const environment_ptr &env);
+  value_t do_while(const std::vector<value_t> &args, const environment_ptr &env);
+  value_t do_for(const std::vector<value_t> &args, const environment_ptr &env);
+  value_t do_set(const std::vector<value_t> &args, const environment_ptr &env);
   value_t do_quote(const std::vector<value_t> &args);
-  value_t do_lambda(const std::vector<value_t> &args, environment_ptr env);
-  value_t do_return(const std::vector<value_t> &args, environment_ptr env);
-  value_t do_let(const std::vector<value_t> &args, environment_ptr env);
-  value_t do_super(const std::vector<value_t> &args, environment_ptr env);
-  value_t do_defun(const std::vector<value_t> &args, environment_ptr env);
-  value_t do_defclass(const std::vector<value_t> &args, environment_ptr env);
-  value_t do_defmacro(const std::vector<value_t> &args, environment_ptr env);
-  value_t do_eval(const std::vector<value_t> &args, environment_ptr env);
+  value_t do_lambda(const std::vector<value_t> &args, const environment_ptr &env);
+  value_t do_return(const std::vector<value_t> &args, const environment_ptr &env);
+  value_t do_let(const std::vector<value_t> &args, const environment_ptr &env);
+  value_t do_super(const std::vector<value_t> &args, const environment_ptr &env);
+  value_t do_defun(const std::vector<value_t> &args, const environment_ptr &env);
+  value_t do_defclass(const std::vector<value_t> &args, const environment_ptr &env);
+  value_t do_defmacro(const std::vector<value_t> &args, const environment_ptr &env);
+  value_t do_eval(const std::vector<value_t> &args, const environment_ptr &env);
   value_t do_root();
-  value_t do_try(const std::vector<value_t> &args, environment_ptr env);
-  value_t do_raise(const std::vector<value_t> &args, environment_ptr env);
+  value_t do_try(const std::vector<value_t> &args, const environment_ptr &env);
+  value_t do_raise(const std::vector<value_t> &args, const environment_ptr &env);
 
   // Exceptions (docs/STATE_EXEC_EXCEPTIONS.md). Where one is raised is recorded once, by a
   // raise or by the first trail guard unwinding passes (record_raise_point), and the exception
@@ -255,6 +256,8 @@ private:
   value_t root_expr_;
   macro_map user_macros_;
   evaluation_stats stats_;
+  // Emptied vectors of values kept between forms (a form's arguments and their values).
+  std::vector<std::vector<value_t>> spare_vectors_;
 
   // The expressions being evaluated, innermost last: an exception's traceback.
   std::vector<const value_t *> trail_;
