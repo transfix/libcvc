@@ -39,7 +39,7 @@ University of Texas at Austin for a different license.
 #if defined(_MSC_VER)
 // Only MSVC before VS2015 lacks snprintf/vsnprintf. Remapping them on a newer one turns every
 // later std::snprintf into std::_snprintf (C2039) in anything that includes this header after
-// <cstdio>: cvc/volume/volmagick.h -> cvc/utility/utility.h -> XmlRpc.h, e.g. cvcGL's mesh_nodes.cpp.
+// <cstdio>, e.g. cvcGL's mesh_nodes.cpp (volmagick.h -> cvc/utility/utility.h -> XmlRpc.h).
 #if _MSC_VER < 1900
 #define snprintf _snprintf
 #define vsnprintf _vsnprintf
