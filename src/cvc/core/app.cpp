@@ -1188,12 +1188,19 @@ void app::tryStartWorker() {
     _threadPoolCondition.notify_one();
     return;
   }
+  // A worker on its way up takes this task (and passes the next one on) before it waits: start
+  // another only when none is, so a burst of short tasks doesn't start a thread per task.
+  if (_startingWorkers > 0)
+    return;
   // With _maxPoolSize workers and fewer than _maxPoolSize tasks running, some worker is between
   // tasks and takes this one before it waits.
   if (_poolWorkers.size() >= _maxPoolSize)
     return;
   try {
-    _poolWorkers.push_back(thread_ptr(new boost::thread(&app::poolWorkerLoop, this)));
+    _poolWorkers.reserve(_poolWorkers.size() + 1); // so the push_back below can't throw
+    thread_ptr worker(new boost::thread(&app::poolWorkerLoop, this));
+    _poolWorkers.push_back(worker);
+    ++_startingWorkers; // the worker can't get past _threadPoolMutex, held here, before this
   } catch (...) {
     // No new thread (resources): the task waits for a running worker.
   }
@@ -1204,6 +1211,8 @@ void app::poolWorkerLoop() {
   // ignores interruption; a request left over from then is dropped before its next task runs.
   boost::this_thread::disable_interruption uninterruptible;
   boost::unique_lock<boost::mutex> lock(_threadPoolMutex);
+  if (_startingWorkers > 0)
+    --_startingWorkers;
   for (;;) {
     while (!_poolStopping && !poolCanStartLocked()) {
       ++_idleWorkers;
