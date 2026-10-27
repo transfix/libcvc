@@ -14,7 +14,7 @@
 #include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/intrinsics.h> // resolve_channel_key
 #include <cvc/state/state_exec/process.h>
-#include <cvc/state/state_exec/process_table.h> // detail::time_after
+#include <cvc/state/state_exec/process_table.h> // detail::time_after, first_time_passed
 #include <cvc/state/state_exec/scheduler_base.h>
 #include <stdexcept>
 #include <utility>
@@ -142,24 +142,13 @@ value_t async_call::outcome() {
 }
 
 bool async_call::past_timeout(clock::time_point now) const {
-  return timeout_ && std::chrono::duration<double>(now - created_).count() >= *timeout_;
+  return timeout_ && detail::seconds_passed(created_, now, *timeout_);
 }
 
 std::optional<clock::time_point> async_call::timeout_point() const {
-  if (!timeout_ || std::isnan(*timeout_))
-    return std::nullopt; // past_timeout never holds
-  clock::time_point t = detail::time_after(created_, *timeout_);
-  // time_after truncates to the clock's ticks, and past_timeout compares double seconds: step up
-  // to where it holds (a few ticks at most), so a wait until this point finds the call timed out.
-  clock::duration step(1);
-  while (!past_timeout(t)) {
-    if (t == clock::time_point::max())
-      return std::nullopt; // infinite, or beyond the clock
-    t = step < clock::time_point::max() - t ? t + step : clock::time_point::max();
-    if (step < clock::duration::max() / 2)
-      step *= 2;
-  }
-  return t;
+  // past_timeout's own test, searched for its first time point: a wait until it finds the call
+  // timed out, and none earlier would.
+  return timeout_ ? detail::first_time_passed(created_, *timeout_) : std::nullopt;
 }
 
 bool async_call::settle(value_t value, std::exception_ptr error) {

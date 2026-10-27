@@ -43,6 +43,15 @@ namespace cvc::state_exec::detail {
 /// point (a plain duration_cast of one overflows), a negative or NaN one gives `t`.
 std::chrono::steady_clock::time_point time_after(std::chrono::steady_clock::time_point t,
                                                  double seconds);
+/// Whether `seconds` have passed from `from` to `now`, the elapsed time compared as double
+/// seconds (async_call::past_timeout()). Never for a NaN `seconds`.
+bool seconds_passed(std::chrono::steady_clock::time_point from,
+                    std::chrono::steady_clock::time_point now, double seconds);
+/// The first time point from `from` on at which seconds_passed(from, it, seconds) holds: `from`
+/// for zero or negative `seconds`, nullopt when there is none (NaN, infinite, or past the clock's
+/// last time point). time_after(from, seconds) is near it, but may be on either side of it.
+std::optional<std::chrono::steady_clock::time_point>
+first_time_passed(std::chrono::steady_clock::time_point from, double seconds);
 
 class process_table {
 public:

@@ -139,8 +139,10 @@ public:
   bool cancel_requested() const { return cancel_.load(std::memory_order_acquire); }
   /// Whether the call's timeout has passed at `now`.
   bool past_timeout(clock::time_point now) const;
-  /// The first time point at which past_timeout() holds, or nullopt when there is none: no
-  /// timeout, or one it never reaches (NaN, infinite, or past the clock's range).
+  /// The first time point from the call's creation on at which past_timeout() holds (exactly:
+  /// past_timeout() is false one clock tick before it, unless it is the creation itself), or
+  /// nullopt when there is none: no timeout, or one it never reaches (NaN, infinite, or past the
+  /// clock's range). See detail::first_time_passed.
   std::optional<clock::time_point> timeout_point() const;
 
   /// Settle the call: its outcome is the kernel's value or `error`. Only the first settling

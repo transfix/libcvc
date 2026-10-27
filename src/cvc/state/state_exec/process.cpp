@@ -12,6 +12,7 @@
 #include <boost/signals2.hpp>
 #include <chrono>
 #include <climits>
+#include <cmath>
 #include <condition_variable>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/heap.h>
@@ -143,6 +144,60 @@ std::chrono::steady_clock::time_point time_after(std::chrono::steady_clock::time
   const clock::duration d =
       std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(seconds));
   return d >= clock::time_point::max() - t ? clock::time_point::max() : t + d;
+}
+
+bool seconds_passed(std::chrono::steady_clock::time_point from,
+                    std::chrono::steady_clock::time_point now, double seconds) {
+  return std::chrono::duration<double>(now - from).count() >= seconds;
+}
+
+std::optional<std::chrono::steady_clock::time_point>
+first_time_passed(std::chrono::steady_clock::time_point from, double seconds) {
+  using clock = std::chrono::steady_clock;
+  if (std::isnan(seconds))
+    return std::nullopt;
+  if (seconds_passed(from, from, seconds))
+    return from; // zero or negative
+  // time_after truncates seconds * ticks-per-second, rounded as a double, to whole ticks, and
+  // seconds_passed rounds the ticks elapsed to a double: for a long time (~1e7 s and up) both
+  // round over several ticks, and the first point may be before time_after's or a few ticks
+  // after it. seconds_passed only goes from false to true as `now` grows, so bracket the point
+  // in steps that double from there, then halve the bracket.
+  clock::time_point lo = from; // seconds_passed fails here
+  clock::time_point hi = time_after(from, seconds);
+  clock::duration step(1);
+  if (seconds_passed(from, hi, seconds)) {
+    for (;;) {
+      const clock::time_point t = hi - from > step ? hi - step : from;
+      if (!seconds_passed(from, t, seconds)) {
+        lo = t;
+        break;
+      }
+      hi = t;
+      if (step < clock::duration::max() / 2)
+        step *= 2;
+    }
+  } else {
+    lo = hi;
+    for (;;) {
+      if (lo == clock::time_point::max())
+        return std::nullopt; // infinite, or beyond the clock
+      const clock::time_point t =
+          step < clock::time_point::max() - lo ? lo + step : clock::time_point::max();
+      if (seconds_passed(from, t, seconds)) {
+        hi = t;
+        break;
+      }
+      lo = t;
+      if (step < clock::duration::max() / 2)
+        step *= 2;
+    }
+  }
+  while (hi - lo > clock::duration(1)) {
+    const clock::time_point mid = lo + (hi - lo) / 2;
+    (seconds_passed(from, mid, seconds) ? hi : lo) = mid;
+  }
+  return hi;
 }
 
 namespace {
