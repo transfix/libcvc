@@ -493,6 +493,70 @@ def test_wait_for_work_wakes_on_a_post_without_holding_the_gil():
     assert a.wake_awaiting() == 1 and a.awaiting_frame_count() == 0
 
 
+def test_wait_for_work_wakes_for_a_calls_timeout_and_its_charges():
+    # A driver that idles in wait_for_work() while a call is in flight still sees the call's
+    # registration timeout, and the charge that kills its process at max_time (3.8: a kernel
+    # that never checks is charged its run time as CPU time), on time.
+    app = pycvc.make_app()
+    root = pycvc.State.instance(app)
+    a = pycvc.async_scheduler()
+    host = pycvc.async_host(a, app)
+    a.set_watch_root(root)
+    ctx = pycvc.intrinsics_context()
+    ctx.sched = a
+    ctx.root = root
+    env = pycvc.builtins.make_default_environment()
+    pycvc.register_intrinsics(env, ctx)
+
+    def nap():
+        time.sleep(1.0)
+        return 2
+
+    pycvc.builtins.register_async_fn(env, host, "nap", nap, "background", None, True, False)
+    pycvc.builtins.register_async_fn(env, host, "nap-to", nap, "background", 0.05, True, False)
+
+    def drive(pid):
+        t0 = time.perf_counter()
+        while time.perf_counter() - t0 < 10.0:
+            a.drain_ingress()
+            a.wake_awaiting()
+            if a.has_runnable():
+                a.sync_run(200000, 0.05)
+            if a.get_process_info(pid).status in (process_status.terminated,
+                                                  process_status.killed, process_status.failed):
+                break
+            if not a.has_runnable():
+                a.wait_for_work(3.0)
+        return time.perf_counter() - t0
+
+    o = pycvc.execute_options()
+    o.env = env
+    pid = a.execute('(try (nap-to) (catch (TimeoutError e) "timeout"))', o)
+    took = drive(pid)
+    assert a.get_result(pid) == "timeout"
+    assert took < 0.6, took
+    o = pycvc.execute_options()
+    o.env = env
+    o.max_time = 0.1
+    pid = a.execute("(nap)", o)
+    took = drive(pid)
+    info = a.get_process_info(pid)
+    assert info.status == process_status.killed
+    assert info.exit_error == "time_limit_exceeded"
+    assert took < 0.7, took
+    host.shutdown()
+
+
+def test_run_with_an_infinite_max_time_waits_for_a_sleeper():
+    s = pycvc.scheduler()
+    pid = s.execute("(begin 1 2 3)")
+    s.step()
+    assert s.sleep(pid, 0.1)
+    t0 = time.perf_counter()
+    assert s.run(None, float("inf"))[pid] == 3
+    assert time.perf_counter() - t0 >= 0.09
+
+
 def test_the_sync_scheduler_reaps_finished_processes():
     s = pycvc.scheduler()
     done = s.execute("(+ 1 2)")

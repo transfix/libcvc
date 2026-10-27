@@ -2,13 +2,18 @@
 /// @brief Tests for Phase 4: Process, MemoryTracker, Scheduler, AsyncScheduler.
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cvc/core/app.h>
+#include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_evaluator.h>
+#include <cvc/state/state_exec/async_host.h>
 #include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/state/state_exec/async_stackless_evaluator.h>
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/evaluator.h>
+#include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/memory_tracker.h>
 #include <cvc/state/state_exec/process.h>
 #include <cvc/state/state_exec/process_table.h>
@@ -16,7 +21,10 @@
 #include <cvc/state/state_exec/stackless_evaluator.h>
 #include <gtest/gtest.h>
 #include <iterator>
+#include <limits>
 #include <random>
+#include <span>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <tuple>
@@ -1699,4 +1707,409 @@ TYPED_TEST(SchedulerPickOrderTest, AProcessReapedFromItsOnCompleteIsErasedAfterI
   EXPECT_FALSE(sched.get_process_info(pid).has_value());
   EXPECT_TRUE(sched.get_result(other).has_value());
   EXPECT_EQ(sched.process_count(), 1);
+}
+
+// A process reaped from its on_complete is erased once its step is over, even when the step ends
+// by throwing (an on_complete may throw, and the scheduler re-throws it to the caller).
+TYPED_TEST(SchedulerPickOrderTest, AProcessReapedFromAThrowingOnCompleteIsStillErased) {
+  TypeParam sched;
+  int pid = -1;
+  execute_options opts;
+  opts.on_complete = [&](value_t) {
+    sched.reap(pid);
+    throw std::runtime_error("on_complete failed");
+  };
+  pid = sched.execute(std::string("(+ 1 2)"), opts);
+  bool threw = false;
+  try {
+    if constexpr (std::is_same_v<TypeParam, scheduler>)
+      sched.run();
+    else
+      sched.sync_run();
+  } catch (const std::runtime_error &) {
+    threw = true;
+  }
+  EXPECT_TRUE(threw);
+  EXPECT_FALSE(sched.get_process_info(pid).has_value());
+  EXPECT_EQ(sched.process_count(), 0);
+  // A later process reaped the same way goes too: nothing was left pending.
+  int second = -1;
+  execute_options opts2;
+  opts2.on_complete = [&](value_t) { sched.reap(second); };
+  second = sched.execute(std::string("(+ 3 4)"), opts2);
+  if constexpr (std::is_same_v<TypeParam, scheduler>)
+    sched.run();
+  else
+    sched.sync_run();
+  EXPECT_FALSE(sched.get_process_info(second).has_value());
+  EXPECT_EQ(sched.process_count(), 0);
+}
+
+// Under `priority`, the pick among processes tied at the best priority is the lowest pid, however
+// many there are. (Before the run queue it came from an unstable std::sort, so ties went to the
+// lowest pid only while the runnable set was small enough for the sort's insertion pass: 32 on
+// MSVC, 16 on libstdc++.)
+TYPED_TEST(SchedulerPickOrderTest, PriorityPicksTheLowestPidAmongManyTies) {
+  TypeParam sched(scheduling_policy::priority);
+  std::vector<int> pids;
+  for (int i = 0; i < 100; ++i) {
+    execute_options opts;
+    opts.priority = i % 3 == 0 ? 0 : 1; // 34 tied at the best priority, the rest after them
+    pids.push_back(sched.execute(std::string("(begin 1 2 3)"), opts));
+  }
+  std::vector<int> first_steps; // the order in which processes take their first step
+  std::vector<uint64_t> seen(pids.size(), 0);
+  for (int s = 0; s < 20000 && first_steps.size() < pids.size(); ++s) {
+    if constexpr (std::is_same_v<TypeParam, scheduler>)
+      sched.step();
+    else
+      sched.sync_step();
+    for (std::size_t i = 0; i < pids.size(); ++i) {
+      const auto info = sched.get_process_info(pids[i]);
+      if (info && info->step_count > 0 && seen[i] == 0) {
+        seen[i] = 1;
+        first_steps.push_back(pids[i]);
+      }
+    }
+  }
+  std::vector<int> want;
+  for (int i = 0; i < 100; i += 3)
+    want.push_back(pids[i]);
+  for (int i = 0; i < 100; ++i)
+    if (i % 3 != 0)
+      want.push_back(pids[i]);
+  EXPECT_EQ(first_steps, want);
+}
+
+// ===========================================================================
+// Time arithmetic that must not overflow: an infinite or huge time is "never"
+// ===========================================================================
+
+TEST(TimeAfterTest, Saturates) {
+  using clk = std::chrono::steady_clock;
+  const clk::time_point t = clk::now();
+  const double inf = std::numeric_limits<double>::infinity();
+  EXPECT_EQ(detail::time_after(t, inf), clk::time_point::max());
+  EXPECT_EQ(detail::time_after(t, 1e300), clk::time_point::max());
+  EXPECT_EQ(detail::time_after(t, 1e12), clk::time_point::max()); // past the clock's range
+  EXPECT_EQ(detail::time_after(t, std::nan("")), t);
+  EXPECT_EQ(detail::time_after(t, -5.0), t);
+  EXPECT_EQ(detail::time_after(t, 0.0), t);
+  const auto d = detail::time_after(t, 1.5) - t;
+  EXPECT_NEAR(std::chrono::duration<double>(d).count(), 1.5, 1e-6);
+}
+
+TEST(TimeBudgetTest, AWaitIsChargedAsRunTimeInBothHalves) {
+  time_budget b(1.0); // halves of 0.5 s
+  b.start();
+  b.stop();
+  b.charge_wait(0.3);
+  EXPECT_NEAR(b.remaining(), 0.7, 0.05); // still on the steady clock: 0.2 + the 0.5 CPU half
+  b.charge_wait(0.4);                    // 0.2 ends the first half, 0.2 is CPU time
+  EXPECT_NEAR(b.remaining(), 0.3, 0.05);
+  b.start();
+  EXPECT_FALSE(b.spent());
+  b.stop();
+  b.charge_wait(0.3);
+  EXPECT_TRUE(b.spent());
+  EXPECT_EQ(b.remaining(), 0.0);
+}
+
+TEST(TimeBudgetTest, AnInfiniteBudgetNeverRunsOut) {
+  time_budget b(std::numeric_limits<double>::infinity());
+  b.start();
+  EXPECT_FALSE(b.spent());
+  b.stop();
+  b.charge_wait(1e9);
+  EXPECT_FALSE(b.spent());
+}
+
+// ===========================================================================
+// The sync run(): budgets and idle waits
+// ===========================================================================
+
+TEST(SchedulerIdleTest, RunWithAnInfiniteOrHugeMaxTimeWaitsForTheSleeper) {
+  for (const double max_time : {std::numeric_limits<double>::infinity(), 1e12}) {
+    scheduler sched;
+    const int pid = sched.execute(std::string("(begin 1 2 3)"));
+    sched.step();
+    ASSERT_TRUE(sched.sleep(pid, 0.1));
+    const auto t0 = std::chrono::steady_clock::now();
+    const auto results = sched.run(std::nullopt, max_time);
+    EXPECT_GE(std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(), 0.09)
+        << max_time;
+    ASSERT_TRUE(results.count(pid)) << max_time;
+    EXPECT_EQ(std::get<int64_t>(results.at(pid).v), 3);
+  }
+}
+
+TEST(SchedulerIdleTest, AnInfiniteSleepNeverWakesAndDoesntWrap) {
+  scheduler sched;
+  const int pid = sched.execute(std::string("(begin 1 2 3)"));
+  sched.step();
+  ASSERT_TRUE(sched.sleep(pid, std::numeric_limits<double>::infinity()));
+  const auto t0 = std::chrono::steady_clock::now();
+  sched.run(1000);
+  sched.run(std::nullopt, 0.05);
+  EXPECT_LT(std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(), 5.0);
+  EXPECT_EQ(sched.get_process_info(pid)->status, process_status::waiting);
+}
+
+// A host pumping run(N) once a frame (N small) gets control back at once while the processes
+// sleep, as when run() spun through its N steps; one that runs to completion with steps to
+// spare (Ariadne's init: 10M steps, 5 s) waits for the sleeper, as the spin did.
+TEST(SchedulerIdleTest, AStepBoundedRunReturnsAtOnceWhenItsStepsWouldRunOutFirst) {
+  scheduler sched;
+  const int pid = sched.execute(std::string("(begin 1 2 7)"));
+  sched.step();
+  ASSERT_TRUE(sched.sleep(pid, 1.0));
+  const auto t0 = std::chrono::steady_clock::now();
+  auto results = sched.run(20);
+  results = sched.run(1000);
+  results = sched.run(20, 0.3);
+  EXPECT_LT(std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(), 0.2);
+  EXPECT_FALSE(results.count(pid));
+  EXPECT_EQ(sched.get_process_info(pid)->status, process_status::waiting);
+}
+
+TEST(SchedulerIdleTest, AStepBoundedRunWithStepsToSpareWaitsForTheSleeper) {
+  scheduler sched;
+  const int pid = sched.execute(std::string("(begin 1 2 7)"));
+  sched.step();
+  ASSERT_TRUE(sched.sleep(pid, 0.1));
+  const double cpu0 = thread_cpu_seconds();
+  const auto t0 = std::chrono::steady_clock::now();
+  const auto results = sched.run(10'000'000, 5.0);
+  const double wall = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  ASSERT_TRUE(results.count(pid));
+  EXPECT_EQ(std::get<int64_t>(results.at(pid).v), 7);
+  EXPECT_GE(wall, 0.09);
+  EXPECT_LT(thread_cpu_seconds() - cpu0, 0.5 * wall) << "run() spun while the process slept";
+}
+
+TEST(SchedulerIdleTest, RunStepsTakesTheStepsRunDoesWithoutTheResults) {
+  scheduler a, b;
+  for (scheduler *s : {&a, &b})
+    for (int i = 0; i < 5; ++i)
+      s->execute(std::string("(begin 1 2 3 (+ 4 5))"));
+  const uint64_t taken = a.run_steps();
+  const auto results = b.run();
+  EXPECT_EQ(taken, b.get_stats().total_steps);
+  EXPECT_EQ(a.get_stats().total_steps, b.get_stats().total_steps);
+  EXPECT_EQ(results.size(), 5u);
+  for (const auto &[pid, v] : results)
+    EXPECT_EQ(std::get<int64_t>(a.get_result(pid)->v), std::get<int64_t>(v.v));
+}
+
+// ===========================================================================
+// The tree's settings, read again only when something under state_exec changed
+// ===========================================================================
+
+template <class Sched> class SchedulerRateTest : public ::testing::Test {};
+TYPED_TEST_SUITE(SchedulerRateTest, PickOrderSchedulers);
+
+TYPED_TEST(SchedulerRateTest, TheRateFollowsTheTreeAndTheId) {
+  cvc::app app;
+  cvc::state &root = cvc::state::instance(app);
+  TypeParam sched;
+  sched.set_watch_root(&root);
+  const process_ptr proc = make_process();
+  EXPECT_EQ(sched.async_steps_per_cpu_ms(*proc), kDefaultAsyncStepsPerCpuMs);
+  root("state_exec.schedulers.A.limits.async_steps_per_cpu_ms").value("1000");
+  root("state_exec.schedulers.B.limits.async_steps_per_cpu_ms").value("0");
+  sched.set_id("A");
+  EXPECT_EQ(sched.async_steps_per_cpu_ms(*proc), 1000.0);
+  EXPECT_EQ(sched.async_steps_per_cpu_ms(*proc), 1000.0);
+  root("elsewhere.v").value("1"); // not a setting
+  EXPECT_EQ(sched.async_steps_per_cpu_ms(*proc), 1000.0);
+  // A new id applies at once, though the tree didn't change, and is published under it.
+  sched.set_id("B");
+  EXPECT_EQ(sched.async_steps_per_cpu_ms(*proc), 0.0);
+  EXPECT_EQ(root("state_exec.schedulers.B.effective.async_steps_per_cpu_ms").value(), "0");
+  root("state_exec.schedulers.B.limits.async_steps_per_cpu_ms").value("7");
+  EXPECT_EQ(sched.async_steps_per_cpu_ms(*proc), 7.0);
+  root("state_exec.defaults.limits.async_steps_per_cpu_ms").value("5");
+  sched.set_id("C");
+  EXPECT_EQ(sched.async_steps_per_cpu_ms(*proc), 5.0);
+}
+
+TEST(AsyncSubmitSettingsTest, ASettingChangeAppliesToTheNextSubmission) {
+  cvc::app app;
+  cvc::state &root = cvc::state::instance(app);
+  async_scheduler sched;
+  sched.set_watch_root(&root);
+  const std::string deep = "(+ 1 (+ 2 (+ 3 (+ 4 (+ 5 6)))))";
+  EXPECT_NO_THROW(sched.execute(deep)); // no state_exec node yet: the defaults
+  root("state_exec.defaults.parser.max_depth").value("3");
+  EXPECT_THROW(sched.execute(deep), std::exception);
+  EXPECT_THROW(sched.execute(deep), std::exception);
+  root("unrelated.node").value("x");
+  EXPECT_THROW(sched.execute(deep), std::exception);
+  root("state_exec.defaults.parser.max_depth").value("100");
+  EXPECT_NO_THROW(sched.execute(deep));
+  root("state_exec.defaults.parser.max_depth").value("3");
+  sched.set_watch_root(nullptr); // no tree: its own defaults
+  EXPECT_NO_THROW(sched.execute(deep));
+  sched.set_watch_root(&root);
+  EXPECT_THROW(sched.execute(deep), std::exception);
+  parse_options defaults;
+  defaults.max_depth = 2;
+  root("state_exec.defaults.parser.max_depth").value("");
+  sched.set_parser_defaults(defaults); // the scheduler's own defaults apply at once too
+  EXPECT_THROW(sched.execute(std::string("(+ 1 (+ 2 (+ 3 4)))")), std::exception);
+}
+
+// ===========================================================================
+// wait_for_work and the async calls in flight: their timeouts and charges end the wait
+// ===========================================================================
+
+namespace {
+
+// An async scheduler with an async host on an app's pool, and (blind-nap ms) (sleeps without
+// checking cancelled(); returns 2) and (busy ms) (ms of CPU time, checking cancelled()).
+struct call_world {
+  cvc::app app;
+  cvc::state *tree = nullptr;
+  async_scheduler sched;
+  std::unique_ptr<async_host> host;
+  environment_ptr env = builtins::make_default_environment();
+  intrinsics_context ictx;
+  process_ptr ctx_proc = make_process();
+  std::atomic<bool> nap_ended{false};
+
+  explicit call_world(async_options opts = {}) {
+    tree = &cvc::state::instance(app);
+    app.computePool();
+    sched.set_watch_root(tree);
+    host = std::make_unique<async_host>(sched, &app);
+    ictx.sched = &sched;
+    ictx.root = tree;
+    ctx_proc->pid = 0;
+    ictx.proc = ctx_proc;
+    register_intrinsics(env, &ictx);
+    register_async_fn(
+        env, *host, "blind-nap",
+        [this](std::span<const value_t> a) -> async_kernel {
+          const int64_t ms = a.empty() ? 50 : std::get<int64_t>(a[0].v);
+          return [this, ms](async_call &) -> value_t {
+            std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+            nap_ended = true;
+            return value_t(int64_t(2));
+          };
+        },
+        opts);
+    register_async_fn(
+        env, *host, "busy",
+        [](std::span<const value_t> a) -> async_kernel {
+          const int64_t ms = a.empty() ? 50 : std::get<int64_t>(a[0].v);
+          return [ms](async_call &call) -> value_t {
+            const double cpu0 = thread_cpu_seconds();
+            volatile uint64_t sink = 0;
+            while (thread_cpu_seconds() - cpu0 < 1e-3 * double(ms)) {
+              for (int i = 0; i < 20000; ++i)
+                sink = sink + uint64_t(i);
+              if (call.cancelled())
+                throw std::runtime_error("busy: cancelled");
+            }
+            return value_t(ms);
+          };
+        },
+        opts);
+  }
+  ~call_world() { host->shutdown(); }
+
+  int submit(const std::string &script, execute_options opts = {}) {
+    opts.env = env;
+    return sched.execute(script, opts);
+  }
+
+  // The developer guide's driver loop, idling in wait_for_work(idle): until `pid` ends or `secs`
+  // pass. `between` runs once an iteration.
+  template <class Between> double drive(int pid, double secs, Between between, double idle = 3.0) {
+    const auto t0 = std::chrono::steady_clock::now();
+    const auto end = t0 + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                              std::chrono::duration<double>(secs));
+    while (std::chrono::steady_clock::now() < end) {
+      sched.drain_ingress();
+      sched.wake_awaiting();
+      if (sched.has_runnable())
+        sched.sync_run(200000, 0.05);
+      between();
+      if (is_finished(sched.get_process_info(pid)->status))
+        break;
+      if (!sched.has_runnable())
+        sched.wait_for_work(idle);
+    }
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  }
+  double drive(int pid, double secs) {
+    return drive(pid, secs, [] {});
+  }
+};
+
+} // namespace
+
+TEST(AsyncWaitForWorkTest, ACallsRegistrationTimeoutEndsTheWait) {
+  async_options opts;
+  opts.timeout = 0.05;
+  call_world w(opts);
+  const int pid =
+      w.submit("(try (blind-nap 1000) (catch (TimeoutError e) (get-attr e \"function\")))");
+  const double took = w.drive(pid, 10.0);
+  ASSERT_TRUE(w.sched.get_result(pid).has_value());
+  EXPECT_EQ(std::get<std::string>(w.sched.get_result(pid)->v), "blind-nap");
+  EXPECT_LT(took, 0.5) << "the driver slept through the call's timeout";
+}
+
+TEST(AsyncWaitForWorkTest, AChargeKillsAProcessPastItsMaxTimeWhileItsCallRuns) {
+  call_world w;
+  execute_options opts;
+  opts.max_time = 0.1;
+  const int pid = w.submit("(blind-nap 1000)", opts);
+  const double took = w.drive(pid, 10.0);
+  const process_info info = *w.sched.get_process_info(pid);
+  EXPECT_EQ(info.status, process_status::killed);
+  EXPECT_EQ(info.exit_error.value_or(""), "time_limit_exceeded");
+  EXPECT_LT(took, 0.6) << "the driver slept through the charges";
+}
+
+TEST(AsyncWaitForWorkTest, AnInfiniteWaitStillWakesAtASleepersDeadline) {
+  async_scheduler sched;
+  const int pid = sched.execute(std::string("(begin 1 2 3)"));
+  sched.sync_step();
+  ASSERT_TRUE(sched.sleep(pid, 0.05));
+  const auto t0 = std::chrono::steady_clock::now();
+  EXPECT_TRUE(sched.wait_for_work(std::numeric_limits<double>::infinity()));
+  const double waited =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  EXPECT_GE(waited, 0.045);
+  EXPECT_LT(waited, 10.0);
+}
+
+// AS-27 with the scheduler's id switched while a call runs: the charges after the switch use the
+// new id's rate (3.8: a change applies to the next charge), though the tree didn't change.
+TEST(AsyncWaitForWorkTest, SwitchingTheIdMidCallAppliesToTheNextCharge) {
+  call_world w;
+  (*w.tree)("state_exec.schedulers.A.limits.async_steps_per_cpu_ms").value("1000");
+  (*w.tree)("state_exec.schedulers.B.limits.async_steps_per_cpu_ms").value("0");
+  w.sched.set_id("A");
+  const int pid = w.submit("(busy 300)");
+  const auto t0 = std::chrono::steady_clock::now();
+  bool switched = false;
+  // A driver that drains every millisecond (as pycvc's Exec did), so the call is charged as it
+  // runs: no limit of the process's asks wait_for_work to wake for the charges.
+  w.drive(
+      pid, 20.0,
+      [&] {
+        if (!switched && std::chrono::steady_clock::now() - t0 > std::chrono::milliseconds(50)) {
+          w.sched.set_id("B");
+          switched = true;
+        }
+      },
+      0.001);
+  ASSERT_TRUE(switched);
+  const process_info info = *w.sched.get_process_info(pid);
+  EXPECT_EQ(info.status, process_status::terminated);
+  // At A's rate throughout it would be ~300000; at B's from 50 ms on, about A's 50 ms of it.
+  EXPECT_LT(info.async_steps, 200000u);
 }

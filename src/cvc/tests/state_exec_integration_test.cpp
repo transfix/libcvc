@@ -17,6 +17,7 @@
 #include <cvc/state/state_exec/state_value_codec.h>
 #include <cvc/state/state_exec/stdlib.h>
 #include <cvc/state/state_exec/types.h>
+#include <cvc/state/state_list.h>
 #include <cvc/state/state_message.h>
 #include <cvc/state/state_message_bus.h>
 #include <deque> // §12 channel-scope test: stable-address per-doc intrinsics contexts
@@ -1466,6 +1467,36 @@ TEST_F(StateWatchTest, AWriteOfTheSameValueOrElsewhereFiresNothing) {
   auto result = sched.get_result(pid);
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ(std::get<bool>(result->v), false);
+}
+
+// state_list::pop_back clears the last element without firing its signals (reset with
+// fireCallbacks=false), then writes the list's size, which does: the poll that write triggers
+// sees the element's value gone. (The scheduler polls watches on the tree's change signals.)
+TEST_F(StateWatchTest, WatchSeesAStateListElementPoppedOff) {
+  cvc::state &root = *ictx.root;
+  cvc::state_list list(root("wl"));
+  list.push_back().value("a");
+  list.push_back().value("b");
+  const std::string last = "wl." + std::string(5, '0') + "1";
+  ASSERT_EQ(root(last).value(), "b");
+  int pid = exec(R"(
+        (begin
+          (state-watch ")" +
+                 last + R"(" (lambda (path val) (state-set "wl_seen" "yes")))
+          (set n 0)
+          (while (and (not (state-exists "wl_seen")) (< n 100000))
+            (set n (+ n 1)))
+          (state-get "wl_seen"))
+    )");
+  sched.run(200); // registered, and looping
+  ASSERT_FALSE(sched.get_result(pid).has_value());
+  list.pop_back();
+  ASSERT_EQ(root(last).value(), "");
+  sched.run();
+  auto result = sched.get_result(pid);
+  ASSERT_TRUE(result.has_value());
+  ASSERT_TRUE(std::holds_alternative<std::string>(result->v));
+  EXPECT_EQ(std::get<std::string>(result->v), "yes");
 }
 
 TEST(AsyncStateWatchTest, WatchFiresWhenTheHostChangesTheValueBetweenSteps) {
