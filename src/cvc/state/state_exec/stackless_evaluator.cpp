@@ -1330,9 +1330,14 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
     // (try body... (catch (Type var) handler...)... (finally cleanup...))
     try_form form = parse_try(args);
     frame.phase = eval_phase::try_body;
-    frame.extra_vals = {body_of(form.body), std::move(form.cleanup), nil_value};
-    frame.extra_strs = {""};
-    frame.extra_lists = {std::move(form.catches)};
+    make_room(frame.extra_vals, 3); // moved in, not copied from an initializer list
+    frame.extra_vals.push_back(body_of(form.body));
+    frame.extra_vals.push_back(std::move(form.cleanup));
+    frame.extra_vals.push_back(nil_value);
+    set_one_string(frame.extra_strs, std::string());
+    frame.extra_lists.clear();
+    frame.extra_lists.push_back(std::move(form.catches));
+    make_room(frame.results, 1);
     push_frame(state, frame.extra_vals[try_body_slot], env);
     return;
   }
@@ -1458,7 +1463,7 @@ void stackless_evaluator::apply_native(evaluator_state &state, eval_frame &frame
                    state.data_work, false);
     return;
   }
-  pop_frame(state, std::move(result));
+  hand_up(state, std::move(result));
 }
 
 // ---------------------------------------------------------------------------
@@ -1618,9 +1623,9 @@ void stackless_evaluator::advance_generator(evaluator_state &state, eval_frame &
 // ---------------------------------------------------------------------------
 
 void stackless_evaluator::step_set_value(evaluator_state &state, eval_frame &frame) {
-  auto val = frame.results.back();
-  frame.env->set(frame.extra_strs[0], val);
-  pop_frame(state, val);
+  // The value is bound (a copy) and passed on (moved): its own copy goes with the frame.
+  frame.env->set(frame.extra_strs[0], frame.results.back());
+  hand_up(state, std::move(frame.results.back()));
 }
 
 // ---------------------------------------------------------------------------
