@@ -564,20 +564,22 @@ it picks.)
       sched.wait_for_work(std::chrono::steady_clock::now() + std::chrono::seconds(1));
   }
   ```
-- **Waits and the CPU.** A sleeper's deadline is kept to well under a millisecond. On Windows,
-  whose high-resolution timer fires on a ~0.5 ms grid, that costs up to ~0.6 ms of spinning at
-  the end of each such wait (`detail::wakeup`): a run of millisecond sleeps still uses about half
-  a core, against all of one while `run()` spun. Such a wait raises a thread at normal priority
-  to above normal, so on a machine whose cores are all busy the thread gets one back when its
-  timer fires rather than a scheduler quantum later; even so a blocked wait there can wake a few
-  milliseconds late now and then, where the spin, which never gave its core up, did not. The
-  thread is back at normal after the wait, unless its priority was changed meanwhile (that
-  change stands), and a thread the host gave another priority keeps it: one lowered to keep the
-  driver below the host's other threads isn't raised. Every other wait (a deadline of the
+- **Waits and the CPU.** A deadline of the timer heap, a sleeper's or a timed wait's (an
+  `(await ...)` or a message wait with a time limit), is kept to well under a millisecond. On
+  Windows, whose high-resolution timer fires on a ~0.5 ms grid, that costs up to ~0.6 ms of
+  spinning at the end of each such wait (`detail::wakeup`): a run of millisecond sleeps still uses
+  about half a core, against all of one while `run()` spun. Such a wait raises a thread at normal
+  priority to above normal, so on a machine whose cores are all busy the thread gets one back
+  when its timer fires rather than a scheduler quantum later; even so a blocked wait there can
+  wake a few milliseconds late now and then, where the spin, which never gave its core up, did
+  not. The thread is back at normal after the wait, unless its priority was changed meanwhile
+  (that change stands), and a thread the host gave another priority keeps it: one lowered to keep
+  the driver below the host's other threads isn't raised. Every other wait (a deadline of the
   caller's, a call's timeout or charge, a budget's end) may end up to ~0.5 ms late and burns no
   CPU. No wait ends before its time on the steady clock: when an OS timer fires early, the wait
-  reads the clock and waits the rest, and a sleeper wakes only once the clock has reached its
-  deadline.
+  reads the clock and waits the rest, and a sleeper or a timed wait wakes only once the clock has
+  reached its deadline. A call's timeout is waited for until the first clock tick at which the
+  call counts as timed out (`async_call::timeout_point()`).
 - **Finished processes** leave every index at once but stay in the table, so `get_result()`,
   `get_process_info()` and `get_results()` still report them, until `reap(pid)` erases one (both
   schedulers; a host that reaps from `on_complete` is fine: the process goes once its last step is

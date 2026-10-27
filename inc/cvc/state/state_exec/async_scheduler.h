@@ -129,9 +129,13 @@ public:
   /// first. Returns at once when a process is ready or such work is already waiting. True when
   /// there is work; false when `deadline` passed with none. Processes parked until the next
   /// frame (yield_frame) are the driver's to wake (wake_awaiting): they don't end the wait (see
-  /// awaiting_frame_count()). A sleeper's deadline is kept to well under a millisecond, which
-  /// on Windows costs up to ~0.6 ms of spinning at its end (detail::wakeup); the other
-  /// deadlines may be met up to ~0.5 ms late, burning no CPU.
+  /// awaiting_frame_count()). A call's timeout and charges count only while its process still
+  /// runs: a call whose process ended without awaiting it (an abandoned future) is no drain's
+  /// to time out or charge, so it doesn't end the wait, and a NaN or infinite timeout never
+  /// does. A sleeper's or a timed wait's deadline is kept to well under a millisecond, which on
+  /// Windows costs up to ~0.6 ms of spinning at its end, at above-normal priority for a thread
+  /// at normal (detail::wakeup); the other deadlines may be met up to ~0.5 ms late, burning no
+  /// CPU. The wait never ends before a deadline on the steady clock.
   bool wait_for_work(std::chrono::steady_clock::time_point deadline);
   /// wait_for_work() for at most `seconds` (infinity: no deadline of its own).
   bool wait_for_work(double seconds);

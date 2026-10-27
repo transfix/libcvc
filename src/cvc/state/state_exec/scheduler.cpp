@@ -542,7 +542,7 @@ bool scheduler::idle_wait(std::optional<uint64_t> max_steps, uint64_t &steps, ti
   if (!idle_)
     idle_ = std::make_unique<detail::wakeup>();
   // stop() may come meanwhile (from another thread, a signal handler): checked every 10 ms. A
-  // sleeper's deadline is waited for precisely, the budget's end need not be.
+  // sleeper's or a timed wait's deadline is waited for precisely, the budget's end need not be.
   constexpr auto kStopCheck = std::chrono::milliseconds(10);
   const bool for_timer = next && *next == until;
   for (clock::time_point t = now; !stop_requested_ && t < until; t = clock::now()) {
