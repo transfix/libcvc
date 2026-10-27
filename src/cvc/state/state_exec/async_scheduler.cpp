@@ -49,20 +49,15 @@ int async_scheduler::execute(const std::string &script, const execute_options &o
   proc.max_message_bytes = opts.max_message_bytes;
   if (opts.async_steps_per_cpu_ms && *opts.async_steps_per_cpu_ms >= 0.0)
     proc.async_steps_per_cpu_ms = opts.async_steps_per_cpu_ms;
-  // No load_settings() here: read the allocation limit from the tree on every submission.
-  proc.max_alloc_bytes =
-      watch_root_ ? max_alloc_bytes_from_state(*watch_root_, {}) : kDefaultMaxAllocBytes;
-  proc.heap_check_steps =
-      (watch_root_ ? heap_options_from_state(*watch_root_) : heap_options{}).check_steps;
+  // No load_settings() here: the tree's settings as of this submission (submit_settings).
+  const submit_settings &set = settings_for_submit();
+  proc.max_alloc_bytes = set.max_alloc_bytes;
+  proc.heap_check_steps = set.heap_check_steps;
   proc.signal_handlers = opts.signal_handlers;
   proc.on_complete = opts.on_complete;
   proc.create_time = std::chrono::steady_clock::now();
-  // No load_settings() here: read the parser settings from the tree on every submission, over
-  // this scheduler's own defaults (set_parser_defaults).
-  const parse_options popts =
-      watch_root_ ? parse_options_from_state(*watch_root_, {}, parser_defaults_) : parser_defaults_;
-  proc.state = evaluator_.create_state(script, opts.env, popts);
-  proc.state.data_step_nodes = data_settings().step_nodes;
+  proc.state = evaluator_.create_state(script, opts.env, set.parse);
+  proc.state.data_step_nodes = set.data_step_nodes;
   proc.state.stats.start();
   procs_.insert(std::move(pp));
   return pid;
@@ -89,19 +84,40 @@ int async_scheduler::execute(const value_t &expr, const execute_options &opts) {
   proc.max_message_bytes = opts.max_message_bytes;
   if (opts.async_steps_per_cpu_ms && *opts.async_steps_per_cpu_ms >= 0.0)
     proc.async_steps_per_cpu_ms = opts.async_steps_per_cpu_ms;
-  // No load_settings() here: read the allocation limit from the tree on every submission.
-  proc.max_alloc_bytes =
-      watch_root_ ? max_alloc_bytes_from_state(*watch_root_, {}) : kDefaultMaxAllocBytes;
-  proc.heap_check_steps =
-      (watch_root_ ? heap_options_from_state(*watch_root_) : heap_options{}).check_steps;
+  // No load_settings() here: the tree's settings as of this submission (submit_settings).
+  const submit_settings &set = settings_for_submit();
+  proc.max_alloc_bytes = set.max_alloc_bytes;
+  proc.heap_check_steps = set.heap_check_steps;
   proc.signal_handlers = opts.signal_handlers;
   proc.on_complete = opts.on_complete;
   proc.create_time = std::chrono::steady_clock::now();
   proc.state = evaluator_.create_state(expr, opts.env);
-  proc.state.data_step_nodes = data_settings().step_nodes;
+  proc.state.data_step_nodes = set.data_step_nodes;
   proc.state.stats.start();
   procs_.insert(std::move(pp));
   return pid;
+}
+
+const async_scheduler::submit_settings &async_scheduler::settings_for_submit() {
+  // Read from the tree on every submission, as before, but only when a setting under its
+  // state_exec node may have changed since the last read (settings_changes): a write there, or
+  // the node coming or going. A change still applies to the next submission.
+  if (!watch_root_) {
+    submit_ = submit_settings{kDefaultMaxAllocBytes, heap_options{}.check_steps, parser_defaults_,
+                              data_defaults_.step_nodes};
+    submit_valid_ = false;
+    return submit_;
+  }
+  const uint64_t seen = settings_changes_.version(watch_root_); // before the reads
+  if (submit_valid_ && seen == submit_seen_)
+    return submit_;
+  submit_.max_alloc_bytes = max_alloc_bytes_from_state(*watch_root_, {});
+  submit_.heap_check_steps = heap_options_from_state(*watch_root_).check_steps;
+  submit_.parse = parse_options_from_state(*watch_root_, {}, parser_defaults_);
+  submit_.data_step_nodes = data_options_from_state(*watch_root_, {}, data_defaults_).step_nodes;
+  submit_seen_ = seen;
+  submit_valid_ = true;
+  return submit_;
 }
 
 // ---------------------------------------------------------------------------
@@ -326,13 +342,15 @@ void async_scheduler::drain(bool in_step) {
   // Sleepers and timed waits ((await f seconds)) that are due wake, on the heap's deadlines.
   if (procs_.timed_count() > 0) {
     const clock::time_point now = in_step ? now_for_step() : clock::now();
-    if (procs_.timer_due(now))
-      procs_.wake_due(now);
+    if (procs_.timer_due(now) && procs_.wake_due(now) > 0)
+      chain_valid_ = false; // the wakes are no step's time
   }
 }
 
 int async_scheduler::step_once() {
-  detail::check_not_in_async_kernel("async_scheduler::step");
+  // A step drains the ingress first (the check is drain_ingress's, as it always was: a step
+  // used to begin by calling it).
+  detail::check_not_in_async_kernel("async_scheduler::drain_ingress");
   // Apply any cross-thread post_message() deliveries on THIS (scheduler) thread, wake sleeping
   // processes whose deadline has passed, then poll watched paths: once a step.
   drain(true);
@@ -340,12 +358,19 @@ int async_scheduler::step_once() {
   const process_ptr *pp = select_process();
   if (!pp)
     return 0;
+  // A process its own on_complete reaped goes once its step is over, however the step ends.
+  struct reap_guard {
+    detail::process_table &procs;
+    int &pid;
+    ~reap_guard() {
+      if (pid >= 0) {
+        procs.erase(pid);
+        pid = -1;
+      }
+    }
+  } reap_deferred{procs_, reap_after_step_};
   execute_process_step(*pp);
   ++total_steps_;
-  if (reap_after_step_ >= 0) {
-    procs_.erase(reap_after_step_);
-    reap_after_step_ = -1;
-  }
   return 1;
 }
 
@@ -354,8 +379,8 @@ task<int> async_scheduler::step() {
   co_return step_once();
 }
 
-std::unordered_map<int, value_t> async_scheduler::run_loop(std::optional<uint64_t> max_steps,
-                                                           std::optional<double> max_time) {
+uint64_t async_scheduler::run_loop(std::optional<uint64_t> max_steps,
+                                   std::optional<double> max_time) {
   running_ = true;
   stop_requested_ = false;
   chain_valid_ = false;
@@ -368,23 +393,25 @@ std::unordered_map<int, value_t> async_scheduler::run_loop(std::optional<uint64_
     budget->start();
   }
 
+  uint64_t taken = 0;
   while (!stop_requested_ && has_runnable()) {
     if (max_steps && steps >= *max_steps)
       break;
     if (budget && budget->spent(now_for_step()))
       break;
-    step_once();
+    taken += static_cast<uint64_t>(step_once());
     ++steps;
   }
 
   running_ = false;
   chain_valid_ = false;
-  return get_results();
+  return taken;
 }
 
 task<std::unordered_map<int, value_t>> async_scheduler::run(std::optional<uint64_t> max_steps,
                                                             std::optional<double> max_time) {
-  co_return run_loop(max_steps, max_time);
+  run_loop(max_steps, max_time);
+  co_return get_results();
 }
 
 int async_scheduler::sync_step() {
@@ -394,6 +421,12 @@ int async_scheduler::sync_step() {
 
 std::unordered_map<int, value_t> async_scheduler::sync_run(std::optional<uint64_t> max_steps,
                                                            std::optional<double> max_time) {
+  run_loop(max_steps, max_time);
+  return get_results();
+}
+
+uint64_t async_scheduler::sync_run_steps(std::optional<uint64_t> max_steps,
+                                         std::optional<double> max_time) {
   return run_loop(max_steps, max_time);
 }
 
@@ -401,8 +434,34 @@ void async_scheduler::stop() { stop_requested_ = true; }
 
 bool async_scheduler::has_runnable() const { return procs_.runnable_count() > 0; }
 
+std::optional<async_scheduler::clock::time_point>
+async_scheduler::next_call_charge(clock::time_point now) const {
+  // When the next drain has work for the calls in flight: the earliest registration timeout
+  // (async_call::past_timeout), and, while a call runs for a process with a step or time limit,
+  // the next charge (3.8), which may find the limit reached: a kernel that never checks
+  // cancelled() is charged its run time as CPU time, so only a drain stops it. A driver that
+  // only drains while nothing is runnable keeps budgets and timeouts current this way.
+  constexpr auto kChargeBeat = std::chrono::milliseconds(1);
+  std::optional<clock::time_point> next;
+  for (const std::shared_ptr<async_call> &call : async_calls_) {
+    if (call->finished())
+      continue;
+    if (call->timeout_)
+      next = std::min(next.value_or(clock::time_point::max()),
+                      detail::time_after(call->created_, *call->timeout_));
+    const process *proc = procs_.find(call->pid());
+    if (proc && !is_finished(proc->status) && (proc->max_time > 0.0 || proc->max_steps > 0))
+      next = std::min(next.value_or(clock::time_point::max()), now + kChargeBeat);
+  }
+  return next;
+}
+
 bool async_scheduler::wait_for_work(clock::time_point deadline) {
   detail::check_not_in_async_kernel("async_scheduler::wait_for_work");
+  // The calls' next charge or timeout, from when the wait began (the beat must not move on with
+  // each wake-up of the loop below).
+  const std::optional<clock::time_point> charge =
+      async_calls_.empty() ? std::nullopt : next_call_charge(clock::now());
   for (;;) {
     if (procs_.runnable_count() > 0 || ingress_pending_.load(std::memory_order_acquire))
       return true;
@@ -410,21 +469,26 @@ bool async_scheduler::wait_for_work(clock::time_point deadline) {
     const clock::time_point now = clock::now();
     if (timer && *timer <= now)
       return true;
+    if (charge && *charge <= now)
+      return true;
     if (now >= deadline)
       return false;
-    const clock::time_point until = timer ? std::min(*timer, deadline) : deadline;
+    clock::time_point until = timer ? std::min(*timer, deadline) : deadline;
+    if (charge)
+      until = std::min(until, *charge);
+    // A sleeper's or timed wait's deadline is kept precisely; the others need not be.
+    const bool precise = timer && *timer == until;
     // Announce the wait, then look at the ingress once more: a post either lands before this
     // look (seen here) or sees idle_waiting_ and notifies (both sides are seq_cst).
     idle_waiting_.store(true, std::memory_order_seq_cst);
     if (!ingress_pending_.load(std::memory_order_seq_cst))
-      wakeup_->wait_until(until);
+      wakeup_->wait_until(until, precise);
     idle_waiting_.store(false, std::memory_order_relaxed);
   }
 }
 
 bool async_scheduler::wait_for_work(double seconds) {
-  return wait_for_work(clock::now() + std::chrono::duration_cast<clock::duration>(
-                                          std::chrono::duration<double>(std::max(0.0, seconds))));
+  return wait_for_work(detail::time_after(clock::now(), seconds));
 }
 
 void async_scheduler::notify_work() {
@@ -447,9 +511,8 @@ bool async_scheduler::sleep(int pid, double seconds) {
   const auto now = std::chrono::steady_clock::now();
   if (proc.status == process_status::running)
     proc.accumulated_time += std::chrono::duration<double>(now - proc.last_run_start).count();
-  proc.wake_time = now + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-                             std::chrono::duration<double>(seconds));
-  procs_.set_status(proc, process_status::waiting); // a timer for wake_time
+  proc.wake_time = detail::time_after(now, seconds); // saturating: a huge sleep doesn't wrap
+  procs_.set_status(proc, process_status::waiting);  // a timer for wake_time
   return true;
 }
 
@@ -505,9 +568,7 @@ bool async_scheduler::receive_message_until(int pid, const std::string &path, do
   if (!receive_message(pid, path))
     return false;
   process &proc = *procs_.find(pid);
-  proc.recv_deadline = std::chrono::steady_clock::now() +
-                       std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-                           std::chrono::duration<double>(std::max(0.0, seconds)));
+  proc.recv_deadline = detail::time_after(std::chrono::steady_clock::now(), seconds);
   procs_.update(proc); // a timer for the deadline
   return true;
 }
@@ -570,11 +631,11 @@ void async_scheduler::post_message(const std::string &path, const value_t &msg) 
   // Callable from any thread — the ONLY thread-safe entry point into messaging. Just enqueue
   // under the lock; delivery happens on the scheduler thread in drain_ingress(). A driver
   // blocked in wait_for_work() wakes.
-  {
-    std::lock_guard<std::mutex> lock(ingress_mutex_);
-    ingress_.emplace_back(path, msg);
-    ingress_pending_.store(true, std::memory_order_seq_cst);
-  }
+  // The wait is notified under the lock: once the poster lets go of it, it touches the scheduler
+  // no more, so a scheduler thread that drains this post may destroy the scheduler.
+  std::lock_guard<std::mutex> lock(ingress_mutex_);
+  ingress_.emplace_back(path, msg);
+  ingress_pending_.store(true, std::memory_order_seq_cst);
   notify_work();
 }
 
@@ -596,11 +657,9 @@ void async_scheduler::track_async_call(std::shared_ptr<async_call> call) {
 }
 
 void async_scheduler::post_async_completion(std::shared_ptr<async_call> call) {
-  {
-    std::lock_guard<std::mutex> lock(ingress_mutex_);
-    completions_.push_back(std::move(call));
-    ingress_pending_.store(true, std::memory_order_seq_cst);
-  }
+  std::lock_guard<std::mutex> lock(ingress_mutex_); // notified under it: see post_message
+  completions_.push_back(std::move(call));
+  ingress_pending_.store(true, std::memory_order_seq_cst);
   notify_work();
 }
 
@@ -624,14 +683,20 @@ void async_scheduler::finish_async_call(const std::shared_ptr<async_call> &call)
     return; // dropped already: its process was killed or reaped, or it was finished
   async_calls_.erase(it);
   process *proc = procs_.find(call->pid());
+  double rate = 0.0;
+  if (proc && !is_finished(proc->status)) {
+    // Read before charging: publishing the rate writes the tree, whose slots may kill or reap.
+    rate = async_steps_per_cpu_ms(*proc);
+    proc = procs_.find(call->pid());
+  }
   if (proc && !is_finished(proc->status)) {
     // The rest of the call is charged before its process resumes (3.8): a call that used up
     // the budget kills the process instead.
-    detail::charge_async_call(*proc, *call, async_steps_per_cpu_ms(*proc), true,
-                              std::chrono::steady_clock::now());
+    const clock::time_point now = clock::now();
+    detail::charge_async_call(*proc, *call, rate, true, now);
     if (proc->max_memory > 0)
       proc->heap_alloc_bytes += call->alloc_bytes();
-    check_limits(*proc);
+    check_limits(*proc, now);
   } else {
     call->charged.closed = true;
   }
@@ -640,39 +705,50 @@ void async_scheduler::finish_async_call(const std::shared_ptr<async_call> &call)
 
 void async_scheduler::charge_async_calls(clock::time_point now) {
   // Every started call is charged its run and CPU time so far (3.8), then the processes it
-  // charged are checked against their limits. Walked in place: only a call's own timeout
-  // changes the list meanwhile, and from there on the rest goes over a copy.
+  // charged are checked against their limits, all at the one reading `now` (they are waiting:
+  // their elapsed time doesn't depend on it). Walked in place: only a call's own timeout
+  // changes the list meanwhile, or a write to the tree (publishing the rate) whose slots kill
+  // or reap; from either on, the rest goes over a copy.
   charged_.clear();
   for (std::size_t i = 0; i < async_calls_.size(); ++i) {
-    async_call &call = *async_calls_[i];
-    process *proc = procs_.find(call.pid());
+    async_call *call = async_calls_[i].get();
+    const int pid = call->pid();
+    process *proc = procs_.find(pid);
     if (!proc || is_finished(proc->status))
       continue;
-    if (!call.finished() && call.past_timeout(now)) {
+    if (!call->finished() && call->past_timeout(now)) {
       charge_async_calls_from(i, now);
       return;
     }
-    if (!call.started())
+    if (!call->started())
       continue; // queued: waiting for a thread isn't charged
-    detail::charge_async_call(*proc, call, async_steps_per_cpu_ms(*proc), false, now);
-    if (std::find(charged_.begin(), charged_.end(), proc) == charged_.end())
-      charged_.push_back(proc);
+    const uint64_t writes = rate_publications_;
+    const double rate = async_steps_per_cpu_ms(*proc);
+    if (writes != rate_publications_) {
+      charge_async_calls_from(i, now);
+      return;
+    }
+    detail::charge_async_call(*proc, *call, rate, false, now);
+    if (std::find_if(charged_.begin(), charged_.end(),
+                     [proc](const charged_process &c) { return c.proc == proc; }) == charged_.end())
+      charged_.push_back({proc, pid});
   }
   // At a limit the process is killed (2.5), and its calls cancelled.
-  for (process *proc : charged_)
-    if (!is_finished(proc->status))
-      check_limits(*proc);
+  for (const charged_process &c : charged_)
+    if (!is_finished(c.proc->status))
+      check_limits(*c.proc, now);
 }
 
 void async_scheduler::charge_async_calls_from(std::size_t first, clock::time_point now) {
-  // A copy: a kill or a timeout below changes the list.
+  // A copy: a kill, a timeout or a slot below changes the list. Processes are found again by
+  // pid after anything that may have reaped one.
   const std::vector<std::shared_ptr<async_call>> calls(async_calls_.begin() + first,
                                                        async_calls_.end());
   for (const std::shared_ptr<async_call> &call : calls) {
-    process *found = procs_.find(call->pid());
+    const int pid = call->pid();
+    process *found = procs_.find(pid);
     if (!found || is_finished(found->status))
       continue;
-    process &proc = *found;
     if (!call->finished() && call->past_timeout(now) && call->settle_timeout()) {
       // Its own timeout: it raises TimeoutError at the call, and its kernel is told to stop.
       call->cancel();
@@ -681,20 +757,31 @@ void async_scheduler::charge_async_calls_from(std::size_t first, clock::time_poi
     }
     if (!call->started())
       continue; // queued: waiting for a thread isn't charged
-    detail::charge_async_call(proc, *call, async_steps_per_cpu_ms(proc), false, now);
-    if (std::find(charged_.begin(), charged_.end(), &proc) == charged_.end())
-      charged_.push_back(&proc);
+    const double rate = async_steps_per_cpu_ms(*found);
+    found = procs_.find(pid);
+    if (!found || is_finished(found->status))
+      continue;
+    detail::charge_async_call(*found, *call, rate, false, now);
+    if (std::find_if(charged_.begin(), charged_.end(),
+                     [pid](const charged_process &c) { return c.pid == pid; }) == charged_.end())
+      charged_.push_back({found, pid});
   }
   // At a limit the process is killed (2.5), and its calls cancelled.
-  for (process *proc : charged_)
-    if (!is_finished(proc->status))
-      check_limits(*proc);
+  for (const charged_process &c : charged_) {
+    process *proc = procs_.find(c.pid);
+    if (proc && !is_finished(proc->status))
+      check_limits(*proc, now);
+  }
 }
 
 void async_scheduler::cancel_async_calls(int pid) {
-  if (async_calls_.empty())
+  if (std::none_of(async_calls_.begin(), async_calls_.end(),
+                   [pid](const std::shared_ptr<async_call> &c) { return c->pid() == pid; }))
     return;
-  const auto pit = procs_.all().find(pid);
+  // The rate first: publishing it writes the tree, whose slots must not run mid-walk.
+  process *proc = procs_.find(pid);
+  const double rate = proc ? async_steps_per_cpu_ms(*proc) : 0.0;
+  proc = procs_.find(pid);
   const auto now = std::chrono::steady_clock::now();
   for (auto it = async_calls_.begin(); it != async_calls_.end();) {
     if ((*it)->pid() != pid) {
@@ -705,9 +792,8 @@ void async_scheduler::cancel_async_calls(int pid) {
     it = async_calls_.erase(it);
     call->cancel();
     // What it ran so far stays charged; its result, when it comes, is dropped.
-    if (pit != procs_.all().end())
-      detail::charge_async_call(*pit->second, *call, async_steps_per_cpu_ms(*pit->second), true,
-                                now);
+    if (proc)
+      detail::charge_async_call(*proc, *call, rate, true, now);
   }
 }
 
@@ -730,6 +816,7 @@ double async_scheduler::tree_rate() {
     return rate_;
   const double rate = async_steps_per_cpu_ms_from_state(*watch_root_, id_);
   if (!id_.empty() && rate != published_rate_) {
+    ++rate_publications_; // a tree write: its slots may change the calls and processes
     publish_async_steps_per_cpu_ms(*watch_root_, id_, rate);
     published_rate_ = rate;
   }
@@ -747,11 +834,16 @@ void async_scheduler::track_tree_changes() {
   if (tree_changes_.root() == want)
     return;
   tree_changes_.watch(want);
+  chain_valid_ = false; // connecting is no step's time
   rate_valid_ = false;
   watch_seen_ = tree_changes_.count() - 1; // poll the watches once: changes before weren't counted
 }
 
 void async_scheduler::set_watch_root(cvc::state *root) {
+  if (root != watch_root_) {
+    rate_valid_ = false;
+    submit_valid_ = false;
+  }
   watch_root_ = root;
   track_tree_changes();
 }

@@ -68,6 +68,11 @@ public:
   int sync_step();
   std::unordered_map<int, value_t> sync_run(std::optional<uint64_t> max_steps = std::nullopt,
                                             std::optional<double> max_time = std::nullopt);
+  /// sync_run() without collecting the results: for a host that pumps the scheduler and reads
+  /// the results it needs (get_result) or none, so a run doesn't cost a map entry for every
+  /// finished process not yet reaped. Returns the steps it took.
+  uint64_t sync_run_steps(std::optional<uint64_t> max_steps = std::nullopt,
+                          std::optional<double> max_time = std::nullopt);
 
   void stop();
   bool is_running() const { return running_; }
@@ -118,12 +123,17 @@ public:
 
   /// Block the calling (scheduler) thread until there is work for the next drain_ingress() and
   /// run: a post_message() or a settled async call (from any thread), a sleeper's or a timed
-  /// wait's deadline, or `deadline`, whichever comes first. Returns at once when a process is
-  /// ready or such work is already waiting. True when there is work; false when `deadline`
-  /// passed with none. Processes parked until the next frame (yield_frame) are the driver's to
-  /// wake (wake_awaiting): they don't end the wait (see awaiting_frame_count()).
+  /// wait's deadline, an async call's registration timeout, the next charge of a call whose
+  /// process has a step or time limit (every millisecond while one runs: the charge may find
+  /// the limit reached, docs/STATE_EXEC_EXCEPTIONS.md 3.8), or `deadline`, whichever comes
+  /// first. Returns at once when a process is ready or such work is already waiting. True when
+  /// there is work; false when `deadline` passed with none. Processes parked until the next
+  /// frame (yield_frame) are the driver's to wake (wake_awaiting): they don't end the wait (see
+  /// awaiting_frame_count()). A sleeper's deadline is kept to well under a millisecond, which
+  /// on Windows costs up to ~0.6 ms of spinning at its end (detail::wakeup); the other
+  /// deadlines may be met up to ~0.5 ms late, burning no CPU.
   bool wait_for_work(std::chrono::steady_clock::time_point deadline);
-  /// wait_for_work() for at most `seconds`.
+  /// wait_for_work() for at most `seconds` (infinity: no deadline of its own).
   bool wait_for_work(double seconds);
   /// Processes parked until the next frame (yield_frame), which the next wake_awaiting() readies.
   std::size_t awaiting_frame_count() const { return procs_.awaiting_count(); }
@@ -159,7 +169,10 @@ public:
   /// A unique identifier for this scheduler, the key under `state_exec.schedulers.<id>` its
   /// live settings are read from (limits.async_steps_per_cpu_ms) and the effective values
   /// published to (`effective.*`). Empty: the defaults only, nothing published.
-  void set_id(const std::string &id) { id_ = id; }
+  void set_id(const std::string &id) {
+    id_ = id;
+    rate_valid_ = false; // the id decides which limits.async_steps_per_cpu_ms applies
+  }
   const std::string &id() const { return id_; }
 
   /// Adopt a process decoded from a snapshot (decode_process): it gets a new pid and is ready,
@@ -232,7 +245,10 @@ public:
   /// This scheduler's built-in parser settings: what a submitted script is parsed with when the
   /// watch root's `state_exec.defaults.parser.*` keys don't say otherwise. parse_options{} (parse
   /// at submit) unless the host sets it.
-  void set_parser_defaults(const parse_options &defaults) { parser_defaults_ = defaults; }
+  void set_parser_defaults(const parse_options &defaults) {
+    parser_defaults_ = defaults;
+    submit_valid_ = false;
+  }
   const parse_options &parser_defaults() const { return parser_defaults_; }
 
   /// The parser defaults libcvc's own hosts give their async schedulers, so a script behaves the
@@ -251,7 +267,10 @@ public:
   /// This scheduler's built-in deep-data settings: what a submitted process runs with when the
   /// watch root's `state_exec.defaults.data.*` keys don't say otherwise. data_options{} (no
   /// slicing) unless the host sets it.
-  void set_data_defaults(const data_options &defaults) { data_defaults_ = defaults; }
+  void set_data_defaults(const data_options &defaults) {
+    data_defaults_ = defaults;
+    submit_valid_ = false;
+  }
   const data_options &data_defaults() const { return data_defaults_; }
 
   /// The deep-data settings a process submitted now gets: the watch root's keys over
@@ -315,11 +334,30 @@ private:
   uint64_t rate_seen_ = 0;
   bool rate_valid_ = false;
   double rate_ = kDefaultAsyncStepsPerCpuMs;
+  uint64_t rate_publications_ = 0; // tree writes publishing the effective rate
   void track_tree_changes();
   double tree_rate();
 
-  std::vector<process *> woken_;   // reused by the waiter wakes
-  std::vector<process *> charged_; // reused by charge_async_calls
+  /// What a submission reads from the tree (the allocation limit, the heap check, the parser
+  /// and deep-data settings), read again only when settings_changes_ moved.
+  struct submit_settings {
+    uint64_t max_alloc_bytes = kDefaultMaxAllocBytes;
+    std::size_t heap_check_steps = 0;
+    parse_options parse;
+    std::size_t data_step_nodes = 0;
+  };
+  detail::settings_changes settings_changes_;
+  submit_settings submit_;
+  uint64_t submit_seen_ = 0;
+  bool submit_valid_ = false;
+  const submit_settings &settings_for_submit();
+
+  struct charged_process {
+    process *proc;
+    int pid;
+  };
+  std::vector<process *> woken_;         // reused by the waiter wakes
+  std::vector<charged_process> charged_; // reused by charge_async_calls
 
   static const process_ptr &no_process();
 
@@ -346,6 +384,9 @@ private:
   void finish_async_call(const std::shared_ptr<async_call> &call);
   // Charge the calls still running, time them out, kill the processes past their budget.
   void charge_async_calls(clock::time_point now);
+  // When a drain next has work for the calls in flight (a timeout, a charge that may hit a
+  // limit), or nullopt (wait_for_work).
+  std::optional<clock::time_point> next_call_charge(clock::time_point now) const;
   // charge_async_calls from the `i`th call on, over a copy of the list (a timeout changes it).
   void charge_async_calls_from(std::size_t i, clock::time_point now);
   // Cancel and drop the calls of `pid` (killed or reaped).
@@ -358,8 +399,7 @@ private:
   int step_once();
   // What a step does before picking a process: the ingress, the calls, the due timers.
   void drain(bool in_step);
-  std::unordered_map<int, value_t> run_loop(std::optional<uint64_t> max_steps,
-                                            std::optional<double> max_time);
+  uint64_t run_loop(std::optional<uint64_t> max_steps, std::optional<double> max_time);
   void execute_process_step(const process_ptr &pp);
   void handle_signal(process &proc);
   void handle_watch_event(process &proc);
