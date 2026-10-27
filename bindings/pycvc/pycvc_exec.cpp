@@ -8,6 +8,7 @@
 
 #include "pycvc_value.h" // the shared value_t <-> Python conversion
 
+#include <algorithm>
 #include <chrono>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
@@ -577,6 +578,7 @@ std::string Exec::run(const std::string &src) {
   static constexpr double kCoroSliceSeconds = 0.005; // asyncio-loop slice per pump iteration
   static constexpr double kIdleTimeoutSecs = 60.0; // parked with NO pending work this long -> bail
   using clock = std::chrono::steady_clock;
+  static constexpr auto kMaxIdleWait = std::chrono::milliseconds(50);
   auto idle_deadline = clock::now() + std::chrono::duration<double>(kIdleTimeoutSecs);
   std::optional<value_t> result;
   std::optional<std::string> error; // set -> throw AFTER the pool is quiesced
@@ -644,8 +646,18 @@ std::string Exec::run(const std::string &src) {
         error = "pycvc.Exec.run: parked with no pending work (pid " + std::to_string(pid) + ")";
         break;
       }
-      // Idle-wait a beat with the GIL released so a worker can acquire it and deliver.
-      Py_BEGIN_ALLOW_THREADS std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      // Idle-wait with the GIL released (so a worker can take it and deliver) until there is
+      // work: a kernel's post or result, a sleeper's or timed wait's deadline, or the idle
+      // deadline. Coroutines on the asyncio loop and processes parked until the next pump
+      // (await) are this loop's to drive, so with any of them the wait is a 1 ms beat, as it
+      // was; and it is never longer than kMaxIdleWait, a backstop for work that arrives some
+      // other way.
+      clock::time_point until =
+          std::min(std::chrono::time_point_cast<clock::duration>(idle_deadline),
+                   clock::time_point(clock::now() + kMaxIdleWait));
+      if (!impl_->pending_coros.empty() || sched.awaiting_frame_count() > 0)
+        until = std::min(until, clock::now() + std::chrono::milliseconds(1));
+      Py_BEGIN_ALLOW_THREADS sched.wait_for_work(until);
       Py_END_ALLOW_THREADS
     }
   } catch (...) {

@@ -3040,6 +3040,7 @@ PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::scheduler::step)
 PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::scheduler::run)
 PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::async_scheduler::sync_step)
 PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::async_scheduler::sync_run)
+PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::async_scheduler::wait_for_work)
 // The evaluators, likewise.
 PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::stackless_evaluator::step)
 PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::stackless_evaluator::run)
@@ -3769,6 +3770,7 @@ public:
   void set_id(const std::string &id);
   std::string id() const;
   void load_settings();
+  bool reap(int pid);
   parse_options parser_settings() const;
   data_options data_settings() const;
   unsigned long long max_alloc_bytes() const;
@@ -3796,6 +3798,8 @@ public:
   int wake_awaiting();
   void post_message(const std::string &path, const value_t &msg);
   void drain_ingress();
+  bool wait_for_work(double seconds);
+  size_t awaiting_frame_count() const;
   size_t async_calls_in_flight() const;
   void set_id(const std::string &id);
   std::string id() const;

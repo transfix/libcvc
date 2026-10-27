@@ -468,6 +468,42 @@ def test_post_message_from_another_thread():
     assert a.sync_run()[pid] == 5
 
 
+def test_wait_for_work_wakes_on_a_post_without_holding_the_gil():
+    a = pycvc.async_scheduler()
+    pid = a.execute("(begin 1 2 3 4 5)")
+    a.sync_step()
+    assert a.wait_for_work(0.0)  # a process is ready
+    assert a.receive_message(pid, "chan.y")
+    assert not a.wait_for_work(0.02)  # nothing to do: times out
+    # A Python thread posts while the scheduler thread waits: the wait releases the GIL (or the
+    # poster could never run) and the post wakes it long before the 30 s deadline.
+    worker = threading.Thread(target=lambda: (time.sleep(0.05), a.post_message("chan.y", "go")))
+    worker.start()
+    t0 = time.perf_counter()
+    assert a.wait_for_work(30.0)
+    assert time.perf_counter() - t0 < 10.0
+    worker.join()
+    a.drain_ingress()
+    assert a.sync_run()[pid] == 5
+    # Frame waiters are the driver's: they don't end a wait, wake_awaiting readies them.
+    b = a.execute("(begin 1 2)")
+    a.sync_step()
+    assert a.yield_frame(b) and a.awaiting_frame_count() == 1
+    assert not a.wait_for_work(0.01)
+    assert a.wake_awaiting() == 1 and a.awaiting_frame_count() == 0
+
+
+def test_the_sync_scheduler_reaps_finished_processes():
+    s = pycvc.scheduler()
+    done = s.execute("(+ 1 2)")
+    live = s.execute("(while 1 1)")
+    s.run(100)
+    assert s.get_result(done) == 3
+    assert not s.reap(live) and not s.reap(999)
+    assert s.reap(done) and s.process_count() == 1
+    assert s.get_process_info(done) is None
+
+
 def test_run_releases_the_gil():
     # A Python thread keeps running while a scheduler runs a long program: run() and
     # sync_run() release the GIL around the C++ call.
