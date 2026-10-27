@@ -98,12 +98,17 @@ JSON: `steps`, `episodes`, `violations`, `soft` and `coverage`.
 
     sh run_long.sh                    # or PY=/path/to/python sh run_long.sh
 
+The script checks first that `PY` (by default `python3`, else `python`, on `PATH`) runs Python 3.8
+or later, and stops if it does not. On Windows the `python3` on `PATH` is often the Microsoft
+Store's stub, so set `PY` to a real interpreter there.
+
 It takes about 2 hours on 22 cores and about 15 GB of memory at the peak (the bound-5 runs keep
 every state they visit). `B4_JOBS`, `W` and `OVERLAP` trade time for cores and memory; the
-script's header describes them. It writes one file per run into `results/` (or `$R`), and
-`results/SUMMARY.txt` checks them all: its last line is `0 unexpected` when every scenario is ok,
-every mutation is caught, every exploration is complete and no result has a violation except
-`splitpost_mut`'s expected `port-race`.
+script's header describes them. It writes one file per run into `results/` (or `$R`; a relative
+`R` is taken from this directory, where the script runs), and `SUMMARY.txt` there checks them
+all: its last line is `0 unexpected` when every scenario is ok, every mutation is caught, every
+exploration is complete and no result has a violation except `splitpost_mut`'s expected
+`port-race`. The script exits 0 only then.
 
 ## The configurations of explore.py
 

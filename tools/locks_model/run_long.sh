@@ -13,8 +13,10 @@
 # Cost with the defaults: about 2 hours on 22 cores, and about 15 GB of memory at the peak (the
 # bound-5 explorations keep every state they visit).
 #
-#   PY       the Python 3 interpreter (default: python3, else python on PATH)
-#   R        the results directory (default: results, here; not committed)
+#   PY       the Python interpreter, 3.8 or later (default: python3, else python, on PATH, if it
+#            runs). On Windows the PATH's python3 is often the Store's stub, so set PY there
+#   R        the results directory (default: results; not committed). The script runs in its own
+#            directory, so a relative R is resolved against it
 #   B4_JOBS  bound-4 explorations at once, and the first random run's workers (default 12)
 #   W        workers for phases 2-5 (default 16: with the seven bound-5 runs, 23 processes)
 #   OVERLAP  1 (default): phases 2-5 start beside the bound-5 runs; 0: they wait for them
@@ -22,8 +24,24 @@
 # Expected: every scenario ok and every mutation caught by the violation it names (scenarios.py's
 # last line reports 0 unexpected); no violation in any result except splitpost_mut's port-race
 # (the mutation 'post-test-outside-mu'); every exploration complete; every result file present.
-PY=${PY:-$(command -v python3 || command -v python)}
-[ -n "$PY" ] || { echo "run_long.sh: set PY to a Python 3 interpreter" >&2; exit 1; }
+# The exit status is 0 only then: SUMMARY.txt's last line is '0 unexpected'.
+py_ok() {
+  v=$("$1" -I -c 'import sys; print(sys.version_info >= (3, 8))' 2>/dev/null | tr -d '\r')
+  [ "$v" = True ]
+}
+if [ -z "${PY:-}" ]; then
+  for c in python3 python; do
+    if py_ok "$c"; then PY=$c; break; fi
+  done
+  if [ -z "${PY:-}" ]; then
+    echo "run_long.sh: neither python3 nor python on PATH runs Python 3.8 or later; set PY" >&2
+    exit 1
+  fi
+elif ! py_ok "$PY"; then
+  echo "run_long.sh: PY=$PY does not run Python 3.8 or later" >&2; exit 1
+fi
+# a relative PY names a file from the caller's directory; the script changes directory below
+case $PY in /* | ?:*) ;; */*) PY=$(pwd)/$PY ;; esac
 B4_JOBS=${B4_JOBS:-12}
 W=${W:-16}
 OVERLAP=${OVERLAP:-1}
@@ -32,40 +50,41 @@ R=${R:-results}
 B5="cache l2 handlers core destroy gdestroy attach"
 B4="wide l2 priority cache three grantseeds coalesce l1 core two2 handlers noinh foreign destroy gdestroy splitpost2 attach splitpost splitpost_mut"
 cd "$(dirname "$0")"
-mkdir -p $R
+mkdir -p "$R"
 export PY R B4 B5
-date > $R/START
-$PY -I scenarios.py > $R/scenarios.txt 2>&1
+date > "$R/START"
+"$PY" -I scenarios.py > "$R/scenarios.txt" 2>&1
 # phase 1: the bound-5 runs first (cache and l2 are the longest), in the background
 (
   for c in $B5; do
-    $PY -I explore.py $c 5 > $R/free_${c}5.json 2> $R/free_${c}5.err &
+    "$PY" -I explore.py $c 5 > "$R/free_${c}5.json" 2> "$R/free_${c}5.err" &
   done
   wait
-  echo done > $R/PHASE1B
+  echo done > "$R/PHASE1B"
 ) &
 B5PID=$!
 # beside them, bound 4 for every configuration, longest first, B4_JOBS at a time
 for c in $B4; do
   echo $c
-done | xargs -P $B4_JOBS -I{} sh -c '$PY -I explore.py {} 4 > $R/free_{}4.json 2> $R/free_{}4.err'
+done | xargs -P "$B4_JOBS" -I{} \
+  sh -c '"$PY" -I explore.py "$1" 4 > "$R/free_${1}4.json" 2> "$R/free_${1}4.err"' sh {}
 # then the first long random run
-$PY -I random_runs.py 6000000 $B4_JOBS 7 > $R/random.json 2> $R/random.err
-echo done > $R/PHASE1A
+"$PY" -I random_runs.py 6000000 "$B4_JOBS" 7 > "$R/random.json" 2> "$R/random.err"
+echo done > "$R/PHASE1A"
 [ "$OVERLAP" = 1 ] || wait $B5PID
 # phase 2-4: every interleaving of scripted processes with faults
-$PY -I explore_scripts.py single 0 1 $W > $R/single.json 2> $R/single.err
-echo done > $R/PHASE2
-$PY -I explore_scripts.py nested 1500 2 $W > $R/nested.json 2> $R/nested.err
-echo done > $R/PHASE3
-$PY -I explore_scripts.py pairs 1200 3 $W > $R/pairs.json 2> $R/pairs.err
-echo done > $R/PHASE4
+"$PY" -I explore_scripts.py single 0 1 "$W" > "$R/single.json" 2> "$R/single.err"
+echo done > "$R/PHASE2"
+"$PY" -I explore_scripts.py nested 1500 2 "$W" > "$R/nested.json" 2> "$R/nested.err"
+echo done > "$R/PHASE3"
+"$PY" -I explore_scripts.py pairs 1200 3 "$W" > "$R/pairs.json" 2> "$R/pairs.err"
+echo done > "$R/PHASE4"
 # phase 5: two more long random runs, other seeds
-$PY -I random_runs.py 4000000 $W 101 > $R/random2.json 2> $R/random2.err
-$PY -I random_runs.py 4000000 $W 9001 > $R/random3.json 2> $R/random3.err
+"$PY" -I random_runs.py 4000000 "$W" 101 > "$R/random2.json" 2> "$R/random2.err"
+"$PY" -I random_runs.py 4000000 "$W" 9001 > "$R/random3.json" 2> "$R/random3.err"
 wait $B5PID
 # summary: every result, flagging anything unexpected
-$PY -I - $R > $R/SUMMARY.txt 2>&1 <<'EOF'
+"$PY" -I - "$R" > "$R/SUMMARY.txt" 2>&1 <<'EOF'
 import glob, json, os, sys
 R = sys.argv[1]
 bad = 0
@@ -111,4 +130,8 @@ for f in sorted(glob.glob(os.path.join(R, '*.json'))):
           % (name, 'ok' if ok else 'UNEXPECTED', size, d.get('seconds'), done, v, note))
 print('%d unexpected' % bad)
 EOF
-date > $R/ALLDONE
+date > "$R/ALLDONE"
+# the summary's last line, without the CR a Windows Python writes
+last=$(tail -n 1 "$R/SUMMARY.txt" | tr -d '\r')
+echo "run_long.sh: $last (see $R/SUMMARY.txt)"
+[ "$last" = "0 unexpected" ]
