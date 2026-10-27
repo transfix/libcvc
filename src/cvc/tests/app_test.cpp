@@ -1896,24 +1896,27 @@ TEST(AppPoolSpawnFailure, ComputeAsyncThrowsWhenTheWorkerItReliedOnFailsLater) {
     auto s = std::make_shared<shared>();
     probe_app a;
     a.setThreadPoolSize(pool_size);
-    a.onWorkerSpawn([s, pool_size] {
+    // Bounded by the clock: a 1 ms sleep can take a timer tick (~15 ms) on Windows.
+    const auto wait_for = [](const std::atomic<bool> &flag, int ms) {
+      const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+      while (!flag.load() && std::chrono::steady_clock::now() < until)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    };
+    a.onWorkerSpawn([s, pool_size, wait_for] {
       const auto me = std::this_thread::get_id();
       if (me == s->a_id.load()) {
         s->a_in_creation = true;
         if (pool_size == 1) {
           // B makes no creation of its own: A's fails once B has queued its job and returned, or
           // after 300 ms (B waiting for it).
-          for (int i = 0; i < 300 && !s->b_returned.load(); i++)
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+          wait_for(s->b_returned, 300);
         } else {
-          for (int i = 0; i < 10000 && !s->b_in_creation.load(); i++)
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+          wait_for(s->b_in_creation, 10000);
         }
       } else if (me == s->b_id.load()) {
         // B's fails once A has returned, or after 300 ms (A waiting for it).
         s->b_in_creation = true;
-        for (int i = 0; i < 300 && !s->a_returned.load(); i++)
-          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        wait_for(s->a_returned, 300);
       }
       throw boost::thread_resource_error();
     });
