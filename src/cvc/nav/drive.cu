@@ -622,6 +622,7 @@ __device__ inline void d_bicycle(const dev_field &f, int plane, float &ox, float
     tel->terms = tel_u;
     tel->force_x = tel_fx;
     tel->force_y = tel_fy;
+    tel->potential_end = tel->projection_work = tel->context_work = 0.0f; // sim_world's books
   }
 }
 

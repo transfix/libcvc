@@ -461,20 +461,28 @@ public:
 
   // Used to easily manage saving/restoring thread info as we
   // traverse a threads stack.
+  //
+  // thread_info and thread_feedback only keep books, so they hold off interruption while they
+  // call into the app (each of those calls is an interruption point).  An interrupt that arrives
+  // meanwhile stays pending for the thread's next interruption point.  Their catch-alls used to
+  // swallow it as a thread_interrupted, and boost clears the request when it throws, so a thread
+  // interrupted in here kept running: ~app gave up joining it after 5s and freed the app under it.
   class thread_info {
   public:
     // New: explicit app context
     thread_info(app &ctx, const std::string &info = "running") : _app(ctx) {
+      boost::this_thread::disable_interruption keep_interrupt_pending;
       try {
         _origInfo = _app.thisThreadInfo();
         _origProgress = _app.threadProgress();
         _app.thisThreadInfo(info);
       } catch (...) {
-        // Swallow exceptions during construction (thread may be interrupted)
+        // Bookkeeping never fails the caller.
       }
     }
 
     ~thread_info() {
+      boost::this_thread::disable_interruption keep_interrupt_pending;
       try {
         _app.thisThreadInfo(_origInfo);
       } catch (...) {
@@ -498,19 +506,21 @@ public:
     // New: explicit app context
     thread_feedback(app &ctx, const std::string &key = "")
         : _app(ctx), _threadInfo(ctx, key.empty() ? "running" : key), _key(key) {
+      boost::this_thread::disable_interruption keep_interrupt_pending;
       try {
         if (!_key.empty())
           _app.threadProgress(_key, 0.0);
         else
           _app.threadProgress(0.0);
       } catch (...) {
-        // Swallow exceptions during construction (thread may be interrupted)
+        // Bookkeeping never fails the caller.
       }
     }
 
     ~thread_feedback() {
-      // CRITICAL: Must catch exceptions in destructor to prevent std::terminate()
-      // finishThreadProgress() invokes interruption_point() which throws when interrupted
+      // Nothing may escape a destructor (std::terminate).  Interruption is held off, so the
+      // interruption points in these calls can't throw; the catch-all covers anything else.
+      boost::this_thread::disable_interruption keep_interrupt_pending;
       try {
         // Set status to "completed" and progress to 100%
         if (!_key.empty()) {
