@@ -1,7 +1,10 @@
 #include <chrono>
+#include <cstdint>
 #include <cvc/state/state_exec/types.h>
 #include <gtest/gtest.h>
+#include <memory>
 #include <thread>
+#include <vector>
 
 using namespace cvc::state_exec;
 
@@ -366,6 +369,34 @@ TEST(StateExecTypesTest, ScopeLetsGoOfWhatANativeFunctionBoundInItCaptured) {
     EXPECT_FALSE(watched.expired());
   }
   EXPECT_TRUE(watched.expired());
+}
+
+TEST(StateExecTypesTest, AScopeMadeInADroppedOnesBlockIsAnotherScope) {
+  // extend() hands out the block the scope dropped last left, so a new scope is likely at that
+  // scope's address: its serial tells the two apart (a call record checks scopes by both).
+  std::vector<environment_ptr> taken; // room in this thread's pool for the scope dropped below
+  for (int i = 0; i < 64; ++i)
+    taken.push_back(environment::extend(nullptr));
+  const environment *was = nullptr;
+  std::uint32_t serial = 0;
+  {
+    auto scope = environment::extend(nullptr); // never bound: kept on every platform
+    was = scope.get();
+    serial = scope->serial.value;
+  }
+  auto again = environment::extend(nullptr);
+  EXPECT_EQ(again.get(), was);
+  EXPECT_NE(again->serial.value, serial);
+  // A scope made, copied or assigned has a serial no other has.
+  auto made = std::make_shared<environment>();
+  EXPECT_NE(made->serial.value, again->serial.value);
+  EXPECT_NE(made->serial.value, serial);
+  detail::scope_serial copied = made->serial;
+  EXPECT_NE(copied.value, made->serial.value);
+  const std::uint32_t before = copied.value;
+  copied = again->serial;
+  EXPECT_NE(copied.value, before);
+  EXPECT_NE(copied.value, again->serial.value);
 }
 
 TEST(StateExecTypesTest, ScopeChainOutlivesItsLinks) {

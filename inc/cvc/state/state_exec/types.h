@@ -225,6 +225,27 @@ struct closure {
   list_ptr body_expr;
 };
 
+namespace detail {
+/// A serial for a new scope. The scopes made on every thread draw from one count (a thread takes
+/// a run of serials at a time), so no other scope has it until 2^32 more have been made.
+std::uint32_t new_scope_serial() noexcept;
+
+/// Which scope an environment is, to the evaluators' call records (eval_frame), which can't go by
+/// its address alone: a scope made where a dropped one was (environment::extend() hands out the
+/// block the last dropped scope left) has the same address. A scope gets a new serial when it is
+/// made, copied or assigned, and when extend() makes it in a dropped scope's block.
+struct scope_serial {
+  std::uint32_t value = new_scope_serial();
+
+  scope_serial() = default;
+  scope_serial(const scope_serial &) noexcept : value(new_scope_serial()) {}
+  scope_serial &operator=(const scope_serial &) noexcept {
+    value = new_scope_serial();
+    return *this;
+  }
+};
+} // namespace detail
+
 /// Lexically-scoped environment chain.
 struct environment {
   std::unordered_map<std::string, value_t> bindings;
@@ -233,6 +254,10 @@ struct environment {
   /// default environment links to). set() refuses it, and set_existing() never writes into it: a
   /// name bound there is shadowed in the outermost unfrozen scope instead.
   bool frozen = false;
+  /// Which scope this is (detail::scope_serial), for the evaluators: not part of what the scope
+  /// means, so not serialized or compared. (It fits in the padding after `frozen`: a scope is no
+  /// larger for it.)
+  detail::scope_serial serial;
 
   /// Drops `outer` through detail::drop_owner, so a long scope chain is not freed recursively.
   ~environment();

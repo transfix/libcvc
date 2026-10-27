@@ -1,6 +1,7 @@
 #include "scope_mark.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cvc/state/state_exec/exceptions.h> // dsl_error: a refused allocation is MemoryError
@@ -662,6 +663,24 @@ detail::find_marked(const environment *e, const std::string &name, scope_mark &m
   return nullptr;
 }
 
+namespace {
+// The count scope serials are drawn from, a run at a time, and this thread's run: one locked add
+// per kSerialRun scopes. (Constant-initialized, so usable at any point of a thread's life.)
+constexpr std::uint32_t kSerialRun = 1024;
+std::atomic<std::uint32_t> g_next_serial_run{0};
+thread_local std::uint32_t t_next_serial = 0;
+thread_local std::uint32_t t_serials_left = 0;
+} // namespace
+
+std::uint32_t detail::new_scope_serial() noexcept {
+  if (t_serials_left == 0) {
+    t_next_serial = g_next_serial_run.fetch_add(kSerialRun, std::memory_order_relaxed);
+    t_serials_left = kSerialRun;
+  }
+  --t_serials_left;
+  return t_next_serial++;
+}
+
 environment::~environment() { detail::drop_owner(outer); }
 
 value_t *environment::lookup(const std::string &name) {
@@ -704,7 +723,15 @@ void environment::set_existing(const std::string &name, value_t val) {
 
 environment_ptr environment::extend(environment_ptr parent) {
   scope_pool *pool = this_thread_pool();
-  void *block = pool && pool->nscopes > 0 ? pool->scopes[--pool->nscopes] : new_block();
+  void *block = nullptr;
+  if (pool && pool->nscopes > 0) {
+    block = pool->scopes[--pool->nscopes];
+    // A new scope, at the address of the one dropped last: a serial of its own tells the two
+    // apart (scope_mark.h). A block from new_block() has a new scope's already.
+    scope_in(block)->serial.value = detail::new_scope_serial();
+  } else {
+    block = new_block();
+  }
   environment *child = scope_in(block);
   child->outer = std::move(parent);
   t_placing = block; // its control block goes in the block, so making the shared_ptr can't fail

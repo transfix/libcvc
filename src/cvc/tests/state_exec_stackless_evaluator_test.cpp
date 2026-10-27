@@ -11,6 +11,7 @@
 #include <memory>
 #include <set>
 #include <thread>
+#include <vector>
 
 using namespace cvc::state_exec;
 
@@ -767,6 +768,42 @@ TEST(StacklessCallee, ARewiredChainIsLookedUpAgain) {
   while (st.stack.size() < 2)
     ASSERT_FALSE(ev.step(st)); // past the call's init: its argument is being evaluated
   E->outer = M;
+  while (!ev.step(st)) {
+  }
+  EXPECT_EQ(std::get<int64_t>(st.result.v), 2);
+}
+
+TEST(StacklessCallee, AScopeMadeWhereADroppedOneWasIsLookedUpAgain) {
+  // E -> O -> G, O binding f, and the call (f ...) initialized in E. A host (as pycvc can) then
+  // drops O, setting E's outer to None, makes O2 in G with as many bindings, f among them (a dict
+  // assigned to its bindings: nodes of its own), and makes it E's outer. O2 is likely in O's
+  // block, at O's address (extend() hands out the block the last dropped scope left), while the
+  // node that bound O's f is kept for reuse, or freed: the apply step looks f up again.
+  auto G = builtins::make_default_environment();
+  stackless_evaluator ev(G);
+  const auto returns = [](int64_t r) {
+    return value_t{native_fn{[r](std::span<const value_t>) -> value_t { return value_t(r); }}};
+  };
+  std::vector<environment_ptr> taken; // room in this thread's pool for O
+  for (int i = 0; i < 64; ++i)
+    taken.push_back(environment::extend(nullptr));
+  auto E = environment::extend(environment::extend(G));
+  E->outer->set("f", returns(1));
+  E->outer->set("pad", value_t(int64_t(0)));
+  evaluator_state st = ev.create_state(parse("(f (+ 0 0))"), E);
+  while (st.stack.size() < 2)
+    ASSERT_FALSE(ev.step(st)); // past the call's init: its argument is being evaluated
+  ASSERT_NE(st.stack.front().callee, nullptr);
+  const environment *was = E->outer.get();
+  const bool kept =
+      was->bindings.bucket_count() == decltype(environment::bindings)().bucket_count();
+  E->outer = nullptr; // O goes
+  auto O2 = environment::extend(G);
+  O2->bindings.emplace("f", returns(2));
+  O2->bindings.emplace("pad", value_t(int64_t(0)));
+  if (kept)
+    EXPECT_EQ(O2.get(), was); // what this is about: O2 in O's block (on MSVC)
+  E->outer = O2;
   while (!ev.step(st)) {
   }
   EXPECT_EQ(std::get<int64_t>(st.result.v), 2);

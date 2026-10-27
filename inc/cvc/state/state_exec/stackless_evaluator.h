@@ -79,10 +79,11 @@ struct eval_frame {
   bool function_body = false;
   /// A call's function, as found when the call was initialized, so that applying it needn't
   /// look the name up again: the scopes that lookup walked, from `env` out to the one that binds
-  /// it (how many, 0 for no record, and a stamp of their sizes and addresses), and the binding (a
-  /// node of that scope's `bindings`). The apply step uses the binding only while those scopes
-  /// are as they were: a scope that gained a binding meanwhile (one that might shadow it), or a
-  /// chain a host rewired, makes it look the name up again, as a frame without a record does (a
+  /// it (how many, 0 for no record, and a stamp of their sizes and identities: address and
+  /// environment::serial), and the binding (a node of that scope's `bindings`). The apply step
+  /// uses the binding only while those scopes are as they were: a scope that gained a binding
+  /// meanwhile (one that might shadow it), or a chain a host rewired (even to a scope made where
+  /// a dropped one was), makes it look the name up again, as a frame without a record does (a
   /// restored one). Not serialized; not part of what the frame means. (A host that erases a
   /// name from a scope's `bindings`, rather than adding or setting one, must first clear the
   /// record of every frame waiting to apply a function found in that scope.)
