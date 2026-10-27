@@ -116,15 +116,18 @@ for (int i = 0; i < 100; i++) {
    queue. The entry stays after the task ends, like `startThread`'s.
 5. **Shutdown**: `wait()` interrupts the running tasks and waits (up to 5 s)
    for the pool to drain, so it is not a completion barrier: wait on the
-   tasks' own completion for that. `~app` stops the pool first (after
+   tasks' own completion for that. `~app` closes the pool first (after
    only the async host): from then on no queued task starts. It
    interrupts the running tasks (every task a worker has taken, however
    recently: a new worker takes no task until it is among the workers
-   these interrupts go to), drops the queued ones and joins the workers;
-   then it interrupts and joins every thread in `app.threads()`,
-   keyed pool tasks included, sweeping the map again (a bounded number
-   of times) for a keyed thread that one winding down registered after
-   the first sweep. A dropped task is destroyed
+   these interrupts go to) and drops the queued ones; then it interrupts
+   every thread in `app.threads()`, keyed pool tasks included, and only
+   then joins the workers and those threads, so a pool task waiting on
+   one of them isn't left waiting out a join. It sweeps the map again (a
+   bounded number of times) for a keyed thread that one winding down
+   registered after the first sweep. `wait()`, `~app` and a dropped
+   task's destruction hold interruption off, so an interrupt sent to the
+   thread doing them stays pending. A dropped task is destroyed
    without running, and so is one submitted after that point
    (`submitPooled` then returns `false`); a task whose submitter must
    hear of it reports it from its destructor, as the async host,

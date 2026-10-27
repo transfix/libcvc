@@ -296,7 +296,9 @@ se::value_t task_step(task_record &rec) {
     try {
       return launch_chunk(rec);
     } catch (const std::exception &) {
-      rec.threaded = false; // no worker could be started: carry on cooperatively
+      // No worker could be started (compute_async throws when the background pool has none and
+      // can't create one; a pool with a worker queues the chunk instead): carry on cooperatively.
+      rec.threaded = false;
     }
   }
   if (!run_for(rec.box->job, rec.opt.slice_ms, rec.box->pace))

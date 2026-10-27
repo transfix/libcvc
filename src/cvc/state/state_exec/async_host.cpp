@@ -606,8 +606,12 @@ struct async_host::kernel_task {
   kernel_task &operator=(kernel_task &&) = delete;
 
   ~kernel_task() {
-    if (armed)
-      drop();
+    if (!armed)
+      return;
+    // Not interruptible: this runs on the thread that submitted the call or the one destroying
+    // the app, and an interrupt pending there stays pending (nothing in drop() may take it).
+    boost::this_thread::disable_interruption keep_interrupt_pending;
+    drop();
   }
 
   void operator()() noexcept {

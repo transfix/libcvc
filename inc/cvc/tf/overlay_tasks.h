@@ -39,15 +39,16 @@
 //   threaded     (native, or wasm built with -pthread and served cross-origin isolated): each
 //                (tf-overlay-step) launches about chunk_ms of the job on a background worker
 //                (app::compute_async, an app background-pool task as cvc::future_pool_task's is)
-//                and returns the future of its
-//                reply; the process parks on it (it costs the scheduler nothing meanwhile) and the
-//                step after the last chunk returns #t. Chunking keeps the progress note live, and a
-//                cancel lands within one job step (~2 ms). The chunk touches only the job, never
-//                state, and reaches the scheduler only through post_message, its thread-safe
-//                ingress (and only while the task still waits for the reply). (app::compute_async
-//                runs each chunk on one of the app's background-pool workers, not on the compute
-//                pool, so this works whatever the size of the app's compute pool, even with no
-//                workers; if the launch throws, the task carries on cooperatively.)
+//                and returns the future of its reply; the process parks on it (it costs the
+//                scheduler nothing meanwhile) and the step after the last chunk returns #t.
+//                Chunking keeps the progress note live, and a cancel lands within one job step
+//                (~2 ms). The chunk touches only the job, never state, and reaches the scheduler
+//                only through post_message, its thread-safe ingress (and only while the task
+//                still waits for the reply). (app::compute_async runs each chunk on one of the
+//                app's background-pool workers, not on the compute pool, so this works whatever
+//                the size of the app's compute pool, even with no workers. If no thread can be
+//                started -- compute_async throws when the background pool has no worker and
+//                cannot create one -- the task carries on cooperatively.)
 //
 // Either way the results reach state through (tf-overlay-publish), on the scheduler thread --
 // never from a worker -- and between steps the task writes its progress to <tf>.overlay_status
@@ -84,7 +85,7 @@ namespace tf {
 enum class overlay_threading {
   automatic,   // threaded where threads exist (native, wasm-mt), else cooperative
   cooperative, // always sliced on the scheduler thread
-  threaded     // always on the compute pool (falls back to cooperative where no threads exist)
+  threaded     // always on the background pool (cooperative where no threads exist or start)
 };
 
 // Whether this build can run work on other threads: false exactly under Emscripten without

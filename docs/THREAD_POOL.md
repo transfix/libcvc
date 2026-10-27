@@ -41,12 +41,20 @@ For the full per-method reference, see
   moment ago). `thread_feedback` and `thread_info` hold interruption off
   while they keep their books, so an interrupt that arrives in them
   stays pending for the task's next interruption point instead of being
-  swallowed. `~app` stops the pool before anything else but the async
+  swallowed. `wait()`, `~app` and the destructors of dropped tasks do
+  the same. `~app` closes the pool before anything else but the async
   host: no queued task starts after that, the queued ones are dropped
   without running, and from then on `submitPooled` drops a task at once
   and returns `false`. A dropped task is destroyed, so it can report the
   drop from its destructor (the async host fails the call with
   `RuntimeError`, `launch_pool_task` posts `on_error`'s value).
+- **Thread creation failures.** If a new worker's thread can't be
+  created, the queued tasks wait for a running worker. When the pool has
+  none at all (thread resources were exhausted before its first worker),
+  `compute_async` throws `boost::thread_resource_error` and runs
+  nothing, so its caller can do the work itself (a threaded tf overlay
+  task carries on cooperatively); a `submitPooled` task stays queued
+  until a later submission or `setThreadPoolSize()` starts a worker.
 - **Exception-safe.** Exceptions thrown by a task are logged and do not
   take down the pool or other workers.
 - **Dynamic resizing.** `setThreadPoolSize()` may be called while tasks
@@ -140,6 +148,8 @@ Wait on the tasks' own completion, as here. `app.wait()` is a shutdown
 step, not a barrier: it first interrupts every running task (one that
 reaches an interruption point ends early, without an error) and then
 waits at most 5 s for the pool to drain, with a warning if it doesn't.
+It isn't interruptible itself: an interrupt sent to the thread calling
+it stays pending until it returns.
 
 ### Inspecting the pool
 

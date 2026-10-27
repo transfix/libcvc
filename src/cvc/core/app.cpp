@@ -78,6 +78,8 @@ namespace cvc {
 // 02/24/2012 -- Joe R. -- Moved to class App so we can support checking whether the main
 //                         thread has quit.
 // 12/12/2025 -- Joe R. -- Two-phase shutdown: interrupt all, then join with timeout.
+// 10/27/2026 -- Joe R. -- Waits with interruption held off, so an interrupt sent to the caller
+//                         stays pending.
 void app::wait_for_threads() {
   using namespace cvc;
 
@@ -107,7 +109,11 @@ void app::wait_for_threads() {
     interruptPoolWorkersLocked();
   }
 
-  // Phase 2: Attempt to join all threads with a timeout
+  // Phase 2: Attempt to join all threads with a timeout. Not interruptible, as thread_info and
+  // thread_feedback keep their books: an interrupt sent to this thread meanwhile stays pending
+  // until we return, where it used to be thrown in a join or the pool wait and dropped by the
+  // catch there. (The 5 s bounds still end the wait.)
+  boost::this_thread::disable_interruption keep_interrupt_pending;
   std::vector<std::string> failed_threads;
   BOOST_FOREACH (thread_map::value_type val, map) {
     try {
@@ -121,7 +127,6 @@ void app::wait_for_threads() {
           failed_threads.push_back(val.first);
         }
       }
-    } catch (boost::thread_interrupted &) {
     } catch (...) {
     }
   }
@@ -134,7 +139,6 @@ void app::wait_for_threads() {
         }))
       failed_threads.push_back(str(boost::format("background pool (%d running, %d queued)") %
                                    _activeWorkers % _pendingTasks.size()));
-  } catch (boost::thread_interrupted &) {
   } catch (...) {
   }
 
@@ -235,9 +239,15 @@ void app::registerDefaultHandlers() {
 //                         under a running handler thread.
 // 10/25/2026 -- Joe R. -- Close the background-task pool first, and sweep
 //                         again for threads started while we were joining.
-// 10/27/2026 -- Joe R. -- The pool is stopped by stopThreadPool(), which also
-//                         interrupts and joins its persistent workers.
+// 10/27/2026 -- Joe R. -- The pool is closed by closeThreadPool(), which also
+//                         interrupts its persistent workers' tasks; they are
+//                         joined once the map's threads are interrupted too.
 app::~app() {
+  // Not interruptible: an interrupt pending on the thread destroying the app would otherwise be
+  // thrown in a join below and dropped by its catch, and that thread left running into a freed
+  // app. It stays pending instead.
+  boost::this_thread::disable_interruption keep_interrupt_pending;
+
   // Async calls first: their kernels run on the background pool and post to the exec scheduler,
   // so cancel them and wait for their kernels while both are still here (the pool is still open).
   if (_execAsyncHost)
@@ -245,11 +255,11 @@ app::~app() {
 
   // The background pool next: nothing queued starts any more (a pooled thread winding down would
   // otherwise start the next task after the snapshot below, and that task would run on into a
-  // destroyed app), a task submitted from here on is dropped unrun, running anonymous tasks are
-  // interrupted, and the pool's workers are joined. The dropped tasks are destroyed outside the
-  // pool's lock, in case their captures call back in. (Keyed pool tasks have threads of their
-  // own in _threads, below.)
-  stopThreadPool();
+  // destroyed app), a task submitted from here on is dropped unrun, and running anonymous tasks
+  // are interrupted. The dropped tasks are destroyed outside the pool's lock, in case their
+  // captures call back in. The workers are joined below, once the threads in _threads have been
+  // interrupted as well. (Keyed pool tasks have threads of their own in _threads.)
+  std::vector<thread_ptr> poolWorkers = closeThreadPool();
 
   // Take the map and clear it under the lock, then join without it: a worker
   // winding down takes _threadsMutex itself, so joining while holding it
@@ -263,8 +273,6 @@ app::~app() {
       boost::mutex::scoped_lock lock(_threadsMutex);
       remaining.swap(_threads);
     }
-    if (remaining.empty())
-      break;
 
     // Interrupt everything first, then join -- many algorithms have
     // interruption checkpoints, so this is far quicker than serial joins.
@@ -276,6 +284,16 @@ app::~app() {
       } catch (...) {
       }
     }
+
+    // The pool's workers are joined only now, with the first sweep's threads interrupted beside
+    // their tasks: a pool task waiting, uninterruptibly, on something one of those threads holds
+    // gets it once that thread stops, instead of holding ~app for its 5 s and then outliving it.
+    if (!poolWorkers.empty()) {
+      joinPoolWorkers(poolWorkers);
+      poolWorkers.clear();
+    }
+    if (remaining.empty())
+      break;
 
     BOOST_FOREACH (thread_map::value_type &val, remaining) {
       if (!val.second)
@@ -1071,6 +1089,11 @@ struct compute_job {
   ~compute_job() {
     if (!armed || !on_error)
       return;
+    // Not interruptible, as thread_info and thread_feedback keep their books: this runs on the
+    // thread that submitted the job or the one destroying the app, and an interrupt pending
+    // there (a keyed thread ~app has interrupted, say) must stay pending, not be thrown inside
+    // on_error and dropped by the catch below.
+    boost::this_thread::disable_interruption keep_interrupt_pending;
     try {
       on_error("not run: the app's background pool has stopped");
     } catch (...) {
@@ -1115,8 +1138,32 @@ void app::compute_async(int n, std::function<void(int)> fn, std::function<void()
                         thread_priority priority) {
   // A background pool worker owns the blocking parallel_for; the caller returns immediately. The
   // job holds fn/on_done by value, so a result accumulator they close over outlives this call.
-  submitPooled(compute_job(*this, n, std::move(fn), std::move(on_done), std::move(on_error)),
-               priority);
+  ThreadPoolTask t;
+  {
+    std::function<void()> job(
+        compute_job(*this, n, std::move(fn), std::move(on_done), std::move(on_error)));
+    t.task.swap(job); // nothing of the job stays in `job`
+  }
+  t.priority = priority;
+  const PoolSubmit submitted = enqueuePoolTask(t, /*handBackIfNoWorker=*/true);
+  if (submitted == PoolSubmit::queued)
+    return;
+  // Not run. Destroyed here with interruption held off, as the pool destroys every task.
+  boost::this_thread::disable_interruption keep_interrupt_pending;
+  if (submitted == PoolSubmit::stopped) {
+    t.task = nullptr; // dropped: on_error, if any, hears of it
+    return;
+  }
+  // No worker could be started for it, and the pool has none: as when compute_async started a
+  // thread per job and that failed, the caller hears of it by an exception (a threaded tf
+  // overlay task then carries on cooperatively) rather than the job waiting for a later
+  // submission to start a worker. The callbacks are released without being called.
+  if (compute_job *job = t.task.target<compute_job>())
+    job->armed = false;
+  t.task = nullptr;
+  boost::throw_exception(boost::thread_resource_error(
+      static_cast<int>(boost::system::errc::resource_unavailable_try_again),
+      "cvc::app::compute_async: no background worker could be started"));
 }
 
 cvc::world_clock &app::world_clock() {
@@ -1245,22 +1292,45 @@ bool app::submitPooled(std::function<void()> task, thread_priority priority) {
   ThreadPoolTask t;
   t.task.swap(task); // nothing of the callable stays in `task`
   t.priority = priority;
-  return enqueuePoolTask(t); // refused: `t` is destroyed unrun as this returns
+  if (enqueuePoolTask(t) == PoolSubmit::queued)
+    return true;
+  // Refused: `t` is destroyed unrun, here, with interruption held off, so that an interrupt
+  // pending on this thread isn't thrown inside a destructor reporting the drop (and dropped).
+  boost::this_thread::disable_interruption keep_interrupt_pending;
+  t.task = nullptr;
+  return false;
 }
 
-bool app::enqueuePoolTask(ThreadPoolTask &task) {
+bool app::PoolQueue::take(std::uint64_t seq, ThreadPoolTask &out) {
+  const auto it =
+      std::find_if(c.begin(), c.end(), [seq](const ThreadPoolTask &t) { return t.seq == seq; });
+  if (it == c.end())
+    return false;
+  // Swapped out, as takePoolTaskLocked does: nothing of the task stays behind.
+  out.key.swap(it->key);
+  out.task.swap(it->task);
+  out.priority = it->priority;
+  out.keyed = it->keyed;
+  out.seq = it->seq;
+  c.erase(it);
+  std::make_heap(c.begin(), c.end(), comp);
+  return true;
+}
+
+app::PoolSubmit app::enqueuePoolTask(ThreadPoolTask &task, bool handBackIfNoWorker) {
   ThreadPoolTask keyed;
   PoolKick kick;
+  std::uint64_t seq = 0;
   {
     boost::mutex::scoped_lock lock(_threadPoolMutex);
     if (_poolStopping)
-      return false; // the app is going away: the task is dropped (destroyed by the caller)
+      return PoolSubmit::stopped; // the app is going away: the caller drops the task
     ThreadPoolTask queued;
     queued.key.swap(task.key);
     queued.task.swap(task.task);
     queued.priority = task.priority;
     queued.keyed = task.keyed;
-    queued.seq = _poolSeq++;
+    queued.seq = seq = _poolSeq++;
     if (queued.keyed && _activeWorkers + _pendingTasks.size() < _maxPoolSize) {
       // Room for it and for every task already queued, so it delays none of them: it starts
       // here, and its thread is in threads() under its key when startThreadPooled returns.
@@ -1274,10 +1344,22 @@ bool app::enqueuePoolTask(ThreadPoolTask &task) {
     }
     kick = poolKickLocked();
   }
-  applyPoolKick(kick);
+  const bool workersStarted = applyPoolKick(kick);
   if (keyed.keyed)
     startKeyedPoolThread(keyed);
-  return true;
+  if (!workersStarted && handBackIfNoWorker && !task.keyed) {
+    // A worker this call asked for could not be created. If the pool has no other, running or
+    // on its way, nothing will take the task until a later call manages to start one: hand it
+    // back instead. It is still queued then, since only a worker in _poolWorkers takes an
+    // anonymous task and there is none. (Best effort: another thread's claim on a new worker,
+    // still being created here and failing after this look, leaves the task queued.)
+    boost::mutex::scoped_lock lock(_threadPoolMutex);
+    if (!_poolStopping && _poolThreadCount == 0 && _pendingTasks.take(seq, task)) {
+      notifyPoolIdleLocked();
+      return PoolSubmit::no_worker;
+    }
+  }
+  return PoolSubmit::queued;
 }
 
 app::PoolKick app::poolKickLocked() {
@@ -1307,11 +1389,12 @@ app::PoolKick app::poolKickLocked() {
   return kick;
 }
 
-void app::applyPoolKick(const PoolKick &kick) {
+bool app::applyPoolKick(const PoolKick &kick) {
   // _threadPoolMutex is NOT held. A worker counted as idle is in (or entering) its wait, which
   // releases _threadPoolMutex only once it can be signalled, so a signal sent now reaches it.
   for (unsigned int i = 0; i < kick.wakes; ++i)
     _poolWorkerWake.notify_one();
+  bool started = true;
   for (unsigned int i = 0; i < kick.spawns; ++i) {
     // The new worker waits at its gate until it is in _poolWorkers: wait_for_threads and ~app
     // interrupt only the workers there, so one that took a task before it was would run that
@@ -1319,16 +1402,19 @@ void app::applyPoolKick(const PoolKick &kick) {
     std::shared_ptr<PoolWorkerGate> gate;
     thread_ptr worker;
     try {
+      if (_poolWorkerSpawnHook)
+        _poolWorkerSpawnHook(); // a test making the creation fail (app.h)
       gate = std::make_shared<PoolWorkerGate>();
       worker.reset(new boost::thread(&app::poolWorkerLoop, this, gate));
     } catch (...) {
       // No new thread (resources): the queued tasks wait for a running worker, or for the next
-      // submission to try again.
+      // submission to try again (compute_async's caller hears of it if there is none:
+      // enqueuePoolTask).
       boost::mutex::scoped_lock lock(_threadPoolMutex);
       const unsigned int left = kick.spawns - i;
       _startingWorkers -= std::min(_startingWorkers, left);
       _poolThreadCount -= std::min(_poolThreadCount, left);
-      return;
+      return false;
     }
     if (_poolWorkerCreatedHook) {
       try {
@@ -1354,6 +1440,7 @@ void app::applyPoolKick(const PoolKick &kick) {
       // ~app has taken the workers it joins already (or this one couldn't be recorded): it ends
       // at its gate without taking a task. Interrupted and joined with a bound all the same, and
       // without taking an interrupt meant for this thread.
+      started = false;
       boost::this_thread::disable_interruption uninterruptible;
       try {
         worker->interrupt();
@@ -1362,6 +1449,7 @@ void app::applyPoolKick(const PoolKick &kick) {
       }
     }
   }
+  return started;
 }
 
 void app::tryStartWorker() {
@@ -1556,9 +1644,9 @@ void app::interruptPoolWorkersLocked() {
   }
 }
 
-void app::stopThreadPool() {
+std::vector<thread_ptr> app::closeThreadPool() {
   std::vector<thread_ptr> workers;
-  std::priority_queue<ThreadPoolTask> dropped;
+  PoolQueue dropped;
   {
     boost::mutex::scoped_lock lock(_threadPoolMutex);
     _poolStopping = true;
@@ -1570,10 +1658,21 @@ void app::stopThreadPool() {
   _poolWorkerWake.notify_all();
   _poolWorkerAdmitted.notify_all(); // a worker whose gate is open but not yet signalled
   _threadPoolIdle.notify_all();
-  // The queued tasks go first, unrun, without the mutex: what they captured may report the drop
-  // (async_host settles its call, launch_pool_task posts on_error), and no stuck task delays that.
-  std::priority_queue<ThreadPoolTask>().swap(dropped);
-  // ... then wait for their workers.
+  // The queued tasks go before anything is joined, unrun, without the mutex: what they captured
+  // may report the drop (async_host settles its call, launch_pool_task posts on_error), and no
+  // stuck task delays that. Not interruptible: an interrupt pending on this thread stays
+  // pending instead of being thrown in a task's destructor (and dropped by its catch).
+  {
+    boost::this_thread::disable_interruption keep_interrupt_pending;
+    PoolQueue().swap(dropped);
+  }
+  return workers;
+}
+
+void app::joinPoolWorkers(std::vector<thread_ptr> &workers) {
+  // Not interruptible: an interrupt pending on this thread would cut a join short (and be dropped
+  // by the catch below). It stays pending instead.
+  boost::this_thread::disable_interruption keep_interrupt_pending;
   for (thread_ptr &w : workers) {
     try {
       if (w && w->joinable())
@@ -1581,6 +1680,11 @@ void app::stopThreadPool() {
     } catch (...) {
     }
   }
+}
+
+void app::stopThreadPool() {
+  std::vector<thread_ptr> workers = closeThreadPool();
+  joinPoolWorkers(workers);
 }
 
 // ---------------------------------------------------------------------------

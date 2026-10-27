@@ -416,7 +416,11 @@ public:
   // it from its destructor, as async_host, launch_pool_task and compute_async's on_error form do:
   // their callables hold their state by value, so a task stays one heap block. (A shared_ptr
   // capture would add a block under libstdc++, which keeps only a trivially copyable callable in
-  // std::function's buffer.) Returns false only for such a drop.
+  // std::function's buffer.) Returns false only for such a drop. A drop destroys the task with
+  // interruption held off, so an interrupt pending on the thread doing it stays pending. If not
+  // even the pool's first worker can be started (thread resources exhausted), the task waits in
+  // the queue until a later submission or setThreadPoolSize() starts one (compute_async throws
+  // instead).
   bool submitPooled(std::function<void()> task, thread_priority priority = PRIORITY_NORMAL);
 
   // Set the maximum number of concurrent threads in the pool
@@ -453,13 +457,19 @@ public:
   // do not cancel each other, and calling this a few times a second does not grow threads(): the
   // job is never in it, and its worker destroys it, with fn and on_done, as soon as it ends. A job
   // the app drops unrun (submitted or still queued once ~app has stopped the pool) calls neither
-  // callback and releases both.
+  // callback and releases both. Throws boost::thread_resource_error, having called neither and
+  // released both, when no worker can be started for the job and the pool has none (thread
+  // resources exhausted before its first worker), so the caller can do the work itself (a
+  // threaded tf overlay task carries on cooperatively); with a worker running, the job waits for
+  // it instead.
   void compute_async(int n, std::function<void(int)> fn, std::function<void()> on_done,
                      thread_priority priority = PRIORITY_NORMAL);
   // The same, calling exactly one of on_done and on_error: on_error(message) instead of on_done
   // when fn throws (with what(); "interrupted" when wait()/~app interrupts the job) and when the
   // app drops the job unrun ("not run: the app's background pool has stopped"). A dropped job's
-  // on_error runs on the thread that submits it or the one destroying the app.
+  // on_error runs on the thread that submits it or the one destroying the app, with interruption
+  // held off (an interrupt pending there stays pending). It throws as the form above does, calling
+  // neither.
   void compute_async(int n, std::function<void(int)> fn, std::function<void()> on_done,
                      std::function<void(const std::string &)> on_error,
                      thread_priority priority = PRIORITY_NORMAL);
@@ -670,6 +680,12 @@ protected:
     }
   };
 
+  // The queue: a priority_queue that can also give one task back (enqueuePoolTask).
+  struct PoolQueue : std::priority_queue<ThreadPoolTask> {
+    // Move the task submitted as `seq` into `out` and drop its place; false if it isn't queued.
+    bool take(std::uint64_t seq, ThreadPoolTask &out);
+  };
+
   // Queue a keyed task (startThreadPooled with wait=true) under the caller's own key. (Anonymous
   // tasks go through submitPooled and have no key, so none is reserved for a queued task.)
   template <class T>
@@ -683,9 +699,19 @@ protected:
     enqueuePoolTask(poolTask);
   }
 
-  // Queue `task` (its contents are taken; a keyed one may start on this thread). Returns false,
-  // taking nothing, once the pool has stopped (~app): the caller then destroys the task unrun.
-  bool enqueuePoolTask(ThreadPoolTask &task);
+  // What became of a task given to enqueuePoolTask.
+  enum class PoolSubmit {
+    queued,   // the pool has it: queued, or started
+    stopped,  // nothing taken: the pool has stopped (~app); the caller destroys the task unrun
+    no_worker // handed back in the argument, unrun (handBackIfNoWorker, below)
+  };
+  // Queue `task` (its contents are taken; a keyed one may start on this thread). With
+  // handBackIfNoWorker, an anonymous task is handed back instead of left in the queue when this
+  // call could not start a worker for it and the pool has none, running or starting (not even
+  // the pool's first thread could be created: thread resources are exhausted). Left queued, it
+  // would wait until a later call started one. compute_async throws then, so that its caller can
+  // do the work itself.
+  PoolSubmit enqueuePoolTask(ThreadPoolTask &task, bool handBackIfNoWorker = false);
   // What the pool must do, once _threadPoolMutex is released, so that every queued task that
   // may start has a worker on its way to it: idle workers to wake and new workers to start.
   struct PoolKick {
@@ -695,8 +721,10 @@ protected:
   // _threadPoolMutex held: count the workers the tasks that may start now still need, and claim
   // them (idle ones first, then new ones up to the pool size). It neither blocks nor signals.
   PoolKick poolKickLocked();
-  // _threadPoolMutex NOT held: wake and start what poolKickLocked() claimed.
-  void applyPoolKick(const PoolKick &kick);
+  // _threadPoolMutex NOT held: wake and start what poolKickLocked() claimed. False when a new
+  // worker's thread could not be created (its claim is given up, and the queued tasks wait for
+  // a running worker or the next kick).
+  bool applyPoolKick(const PoolKick &kick);
   // _threadPoolMutex held: poolKickLocked(), waking at once and leaving the new workers to
   // startRequestedWorkers() (called without the mutex).
   void tryStartWorker();
@@ -719,6 +747,13 @@ protected:
   void startKeyedPoolThread(ThreadPoolTask &task);
   void runKeyedPoolTask(ThreadPoolTask &task);
   void interruptPoolWorkersLocked();
+  // ~app's first step for the pool: close it (no queued task starts, and one submitted from now
+  // on is dropped), interrupt the running anonymous tasks, destroy the queued tasks unrun (with
+  // the mutex released and interruption held off), and return the workers, which ~app joins
+  // (joinPoolWorkers) once it has interrupted the threads in threads() too.
+  std::vector<thread_ptr> closeThreadPool();
+  static void joinPoolWorkers(std::vector<thread_ptr> &workers);
+  // Both steps at once: closeThreadPool(), then joinPoolWorkers().
   void stopThreadPool();
 
   data_map _data;
@@ -750,7 +785,7 @@ protected:
   boost::mutex _mutexMapMutex;
 
   // Thread pool state, all guarded by _threadPoolMutex.
-  std::priority_queue<ThreadPoolTask> _pendingTasks;
+  PoolQueue _pendingTasks;
   unsigned int _maxPoolSize;
   unsigned int _activeWorkers; // tasks running (anonymous and keyed)
   boost::mutex _threadPoolMutex;
@@ -765,6 +800,10 @@ protected:
   // exists and before it is registered, so a test can hold the creator in that window (app_test's
   // AppPoolTeardown tests). Set it before the pool starts a worker.
   std::function<void()> _poolWorkerCreatedHook;
+  // Test seam, empty in the library: called on the creating thread right before a new worker's
+  // thread is created. A throw counts as that creation failing (thread resources exhausted), so
+  // a test can make every new worker fail. Set it before the pool starts a worker.
+  std::function<void()> _poolWorkerSpawnHook;
   std::vector<thread_ptr> _poolWorkers; // persistent workers, started on demand
   unsigned int _idleWorkers = 0;        // waiting on _poolWorkerWake, not signalled
   unsigned int _signalledWorkers = 0;   // signalled, not yet back from their wait
@@ -802,6 +841,9 @@ protected:
   // Interrupt and join this app's tracked threads (two-phase, per-thread
   // timeout). Call it (or wait()) from main() before exit if you spawned work;
   // there is no process-global auto-join — cvc::app carries no singleton.
+  // It waits with interruption held off: an interrupt sent to the calling
+  // thread meanwhile stays pending until it returns (it used to be thrown in
+  // the wait and dropped).
   void wait_for_threads();
 
 private:

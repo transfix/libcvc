@@ -58,6 +58,11 @@ struct pool_task_post {
   ~pool_task_post() {
     if (!armed)
       return;
+    // Not interruptible, as thread_info and thread_feedback keep their books: this runs on the
+    // thread that submitted the task or the one destroying the app, and an interrupt pending
+    // there must stay pending, not be thrown inside on_error or post_message and dropped by the
+    // catches below.
+    boost::this_thread::disable_interruption keep_interrupt_pending;
     const std::string msg = "not run: the app's background pool has stopped";
     try {
       se::value_t payload;
