@@ -120,10 +120,11 @@ jobs:
             -DCVC_FFT_PROVIDER=none -DCVC_ENABLE_ASSIMP=ON \
             -DCVC_ENABLE_MESHER=OFF -DCVC_ENABLE_SDF=ON \
             -DCVC_BUILD_CVCGL=ON -DCVC_BUILD_EXAMPLES=OFF -DCVC_WASM_PTHREADS=ON \
-            -DCVC_BUILD_ARI=OFF
-          # CVC_BUILD_ARI=OFF: this SDK bundle is the libraries; the `ari` runner is not built
-          # here (only cvc + cvcGL are), and with the option on, cmake --install fails on its
-          # missing bin/ari.js. The browser `ari` page ships with the gh-pages gallery instead.
+            -DCVC_BUILD_ARI=OFF -DCVC_BUILD_ARIGL=OFF
+          # CVC_BUILD_ARI=OFF, CVC_BUILD_ARIGL=OFF: this SDK bundle is the libraries; the `ari` and
+          # `arigl` runners are not built here (only cvc + cvcGL are), and with either option on,
+          # cmake --install fails on its missing bin/ari.js or bin/arigl.js (v3.7.1's tag run did,
+          # on arigl). Both browser pages ship with the gh-pages gallery instead.
           cmake --build build-wasm --target cvc cvcGL -j"$(nproc)"
           cmake --install build-wasm
           test -f "$INST/lib/libcvc.a" && test -f "$INST/lib/libcvcGL.a" \
