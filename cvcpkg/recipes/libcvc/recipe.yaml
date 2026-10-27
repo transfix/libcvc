@@ -1,7 +1,7 @@
 schema_version: 1
 recipe:
   name: libcvc
-  upstream_version: "3.7.0"
+  upstream_version: "3.7.1"
   # Bumped 1 -> 2: the host-only libcvc ABI changed (voxels::_cuda_unified_ptr is
   # now always std::shared_ptr<void>, +8 bytes, to match the CUDA build and make
   # cvc::volume's layout variant-invariant). The new CPU bundle is not ABI-
@@ -147,7 +147,8 @@ recipe:
   # FindImageMagick tier ran. Native bundles are unchanged. 3, not 2: native is already at
   # +cvc.2 on the catalog and the wasm-mt publish packs verbatim at this revision. cvcgl bumps
   # in lockstep (1 -> 3) and re-pins this build.
-  cvc_revision: 3
+  # Reset to 1 for the 3.7.1 upstream version: a version bump restarts cvc_revision.
+  cvc_revision: 1
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
