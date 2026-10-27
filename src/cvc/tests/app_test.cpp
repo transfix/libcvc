@@ -1491,6 +1491,124 @@ TEST(AppPoolTeardown, DestroyingTheAppDropsQueuedTasksPromptly) {
   EXPECT_TRUE(weak.expired());
 }
 
+// ~app interrupts every task a worker has taken, however soon after the submission it comes. (An
+// interrupt that reached a worker after it took a task but before the task started was once
+// dropped as stale, and ~app then waited 5 s for a task that never stopped.)
+TEST(AppPoolTeardown, DestroyingTheAppRightAfterSubmittingInterruptsRunningTasks) {
+  for (int iter = 0; iter < 64; iter++) {
+    // Shared, and the loop bounded, so that a task that is never interrupted ends by itself
+    // (after ~app's 5 s join gives up on it) without touching anything freed.
+    struct counts {
+      std::atomic<int> started{0};
+      std::atomic<int> interrupted{0};
+    };
+    auto c = std::make_shared<counts>();
+    const auto t0 = std::chrono::steady_clock::now();
+    {
+      app a;
+      a.setThreadPoolSize(2);
+      for (int t = 0; t < 2; t++)
+        a.submitPooled([c] {
+          c->started++;
+          try {
+            const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+            while (std::chrono::steady_clock::now() < until)
+              boost::this_thread::sleep_for(boost::chrono::milliseconds(1)); // interruption point
+          } catch (boost::thread_interrupted &) {
+            c->interrupted++;
+            throw;
+          }
+        });
+      spin_us((iter % 16) * 20); // 0..300 us: ~app lands at every stage of the tasks' start
+    }
+    const double secs =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    EXPECT_LT(secs, 3.0) << "iteration " << iter;
+    EXPECT_EQ(c->interrupted.load(), c->started.load()) << "iteration " << iter;
+    if (HasFailure())
+      break;
+  }
+}
+
+// A keyed task (wait=true) that the pool has room for is in threads() under its key when
+// startThreadPooled returns, also right behind an anonymous task still waiting for its worker to
+// start (a fresh app) or to wake (a warm one); the documented join pattern,
+// `if (hasThread(k)) threads(k)->join();`, then waits for it.
+TEST(AppPoolKeyed, AKeyedTaskWithRoomIsRegisteredOnReturnBehindAnonymousTasks) {
+  for (int warm = 0; warm < 2; warm++) {
+    for (int iter = 0; iter < 50; iter++) {
+      app a;
+      a.setThreadPoolSize(4);
+      if (warm) {
+        std::atomic<int> w(0);
+        for (int k = 0; k < 8; k++)
+          a.submitPooled([&w] { w++; });
+        ASSERT_TRUE(wait_pool_idle(a));
+        ASSERT_EQ(w.load(), 8);
+      }
+      std::atomic<bool> release(false);
+      std::atomic<bool> keyed_ran(false);
+      a.startThreadPooled("anon", [] {}, PRIORITY_NORMAL, /*wait=*/false);
+      a.startThreadPooled(
+          "keyed",
+          [&] {
+            while (!release.load())
+              std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            keyed_ran = true;
+          },
+          PRIORITY_NORMAL, /*wait=*/true);
+      EXPECT_TRUE(a.hasThread("keyed")) << "warm=" << warm << " iteration " << iter;
+      release = true;
+      if (a.hasThread("keyed")) {
+        thread_ptr t = a.threads("keyed");
+        if (t)
+          t->join();
+      }
+      EXPECT_TRUE(keyed_ran.load()) << "warm=" << warm << " iteration " << iter;
+      ASSERT_TRUE(wait_pool_idle(a));
+      if (HasFailure())
+        return;
+    }
+  }
+}
+
+// A burst runs on as many workers as it has tasks, up to the pool's size, from its first task:
+// eight tasks that each wait until all eight are running all finish promptly, on a fresh app
+// (no worker yet) and on a warm one (idle workers). Starting one worker at a time ran such a
+// burst on one to three threads under load.
+TEST(AppPoolBurst, ABurstStartsAWorkerPerTaskUpToThePoolSize) {
+  for (int warm = 0; warm < 2; warm++) {
+    app a;
+    a.setThreadPoolSize(8);
+    if (warm) {
+      std::atomic<int> w(0);
+      for (int k = 0; k < 8; k++)
+        a.submitPooled([&w] {
+          spin_us(2000);
+          w++;
+        });
+      ASSERT_TRUE(wait_pool_idle(a));
+    }
+    std::atomic<int> arrived(0);
+    std::atomic<int> all_met(0);
+    const auto t0 = std::chrono::steady_clock::now();
+    for (int k = 0; k < 8; k++)
+      a.submitPooled([&] {
+        arrived++;
+        const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (arrived.load() < 8 && std::chrono::steady_clock::now() < until)
+          std::this_thread::sleep_for(std::chrono::microseconds(200));
+        if (arrived.load() == 8)
+          all_met++;
+      });
+    ASSERT_TRUE(wait_pool_idle(a, 15000));
+    const double secs =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    EXPECT_EQ(all_met.load(), 8) << "warm=" << warm;
+    EXPECT_LT(secs, 4.0) << "warm=" << warm;
+  }
+}
+
 TEST_F(AppTest, ThreadInfoAndProgressTracking) {
   std::string thread_key = "test.progress.tracking";
   std::atomic<bool> thread_started(false);

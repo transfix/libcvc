@@ -50,6 +50,7 @@
 #include <boost/thread.hpp>
 #include <boost/tuple/tuple.hpp>
 #include <boost/utility.hpp>
+#include <condition_variable>
 #include <cstdint>
 #include <functional> // compute_async: the fan-out kernel + completion callback
 #include <map>
@@ -377,7 +378,9 @@ public:
   // first; the task then gets a thread of its own, registered under `key` in threads() before
   // it runs (so threads(key) joins or interrupts it, and keyed threadInfo/threadProgress work),
   // and that entry stays after it ends, until replaced, removed or ~app, as with startThread.
-  // If the pool is full it waits in the queue, and is registered when it starts.
+  // When the pool has room for it and for every task already queued, it starts on the calling
+  // thread and is in threads() when this returns. Otherwise (the pool is full) it waits in the
+  // queue and is registered when it starts.
   template <class T>
   void startThreadPooled(const std::string &key, const T &t,
                          thread_priority priority = PRIORITY_NORMAL, bool wait = true) {
@@ -651,8 +654,19 @@ protected:
 
   // Queue `task` (its contents are taken; a keyed one may start on this thread).
   void enqueuePoolTask(ThreadPoolTask &task);
-  // _threadPoolMutex held: if a queued task may start, wake an idle worker or ask for a new one,
-  // which startRequestedWorkers() (called without the mutex) then starts.
+  // What the pool must do, once _threadPoolMutex is released, so that every queued task that
+  // may start has a worker on its way to it: idle workers to wake and new workers to start.
+  struct PoolKick {
+    unsigned int wakes = 0;
+    unsigned int spawns = 0;
+  };
+  // _threadPoolMutex held: count the workers the tasks that may start now still need, and claim
+  // them (idle ones first, then new ones up to the pool size). It neither blocks nor signals.
+  PoolKick poolKickLocked();
+  // _threadPoolMutex NOT held: wake and start what poolKickLocked() claimed.
+  void applyPoolKick(const PoolKick &kick);
+  // _threadPoolMutex held: poolKickLocked(), waking at once and leaving the new workers to
+  // startRequestedWorkers() (called without the mutex).
   void tryStartWorker();
   void startRequestedWorkers();
   // Run a keyed task on the calling thread, as its own thread does.
@@ -665,6 +679,7 @@ protected:
   void runPoolTask(ThreadPoolTask &task);
   void startKeyedPoolThread(ThreadPoolTask &task);
   void runKeyedPoolTask(ThreadPoolTask &task);
+  void interruptPoolWorkersLocked();
   void stopThreadPool();
 
   data_map _data;
@@ -700,15 +715,23 @@ protected:
   unsigned int _maxPoolSize;
   unsigned int _activeWorkers; // tasks running (anonymous and keyed)
   boost::mutex _threadPoolMutex;
-  boost::condition_variable _threadPoolCondition; // idle workers wait here for a task
+  boost::condition_variable _threadPoolCondition; // unused: workers wait on _poolWorkerWake
   boost::condition_variable _threadPoolIdle;      // nothing queued or running (wait_for_threads)
-  std::vector<thread_ptr> _poolWorkers;           // persistent workers, started on demand
-  unsigned int _idleWorkers = 0;                  // workers waiting on _threadPoolCondition
-  unsigned int _startingWorkers = 0;              // asked for, not yet at their first wait
-  unsigned int _spawnRequests = 0;                // asked for, not yet being created
-  unsigned int _poolThreadCount = 0;              // workers running or asked for
-  std::uint64_t _poolSeq = 0;                     // next ThreadPoolTask::seq
-  bool _poolStopping = false;                     // ~app: run nothing more
+  // Idle workers wait here for a task. Not a boost::condition_variable: on Windows that one
+  // makes and closes a semaphore for every wait, and the workers never wait interruptibly.
+  std::condition_variable_any _poolWorkerWake;
+  std::vector<thread_ptr> _poolWorkers; // persistent workers, started on demand
+  unsigned int _idleWorkers = 0;        // waiting on _poolWorkerWake, not signalled
+  unsigned int _signalledWorkers = 0;   // signalled, not yet back from their wait
+  unsigned int _startingWorkers = 0;    // asked for, not yet at their first look at the queue
+  unsigned int _spawnRequests = 0;      // asked for by tryStartWorker, not yet being created
+  // Bumped, under _threadPoolMutex, whenever the workers are interrupted (wait_for_threads,
+  // ~app). A worker that sees it changed clears a request left over from then, under the
+  // mutex, before it takes its next task; an interrupt sent once a task is taken is that task's.
+  std::uint64_t _poolInterruptGen = 0;
+  unsigned int _poolThreadCount = 0; // workers running or asked for
+  std::uint64_t _poolSeq = 0;        // next ThreadPoolTask::seq
+  bool _poolStopping = false;        // ~app: run nothing more
 
   // Shared fork-join compute pool (computePool()). Lazily built; the mutex guards
   // that first construction. unique_ptr so app.h needs only a forward declaration.
