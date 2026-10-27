@@ -422,33 +422,39 @@ using binding_node = binding_map::node_type;
 // binding a node more. So a scope from extend() is not destroyed when its last owner drops it:
 // it is emptied, as its destructor would empty it, and kept on this thread for the next
 // extend(), its map's sentinel and buckets with it. The nodes of its bindings are kept too, for
-// the next set() of a new name; and the shared_ptr control block, which can't share the scope's
-// allocation once the scope outlives it, comes from a few blocks kept here.
+// the next set() of a new name.
+//
+// A scope and its shared_ptr control block are one allocation, as make_shared makes them: a
+// scope_block, whose slot for the control block its allocator hands out. So a long-lived scope
+// (a process's) costs one allocation, as before. The block is kept (or freed) when the control
+// block is deallocated, which is after the scope was emptied.
 //
 // What is kept is bounded, and per thread, so nothing is shared between threads: a scope or
-// node made on one thread and dropped on another is kept by the other.
+// node made on one thread and dropped on another is kept by the other. On 64-bit MSVC that is at
+// most 64 blocks of about 140 bytes, each with its empty map's sentinel and 8 buckets (about 150
+// bytes), and 128 nodes of about 130 bytes: under 35 KB per thread that steps a program.
 constexpr std::size_t kKeptScopes = 64;
 constexpr std::size_t kKeptNodes = 128;
-constexpr std::size_t kKeptBlocks = 64;
-constexpr std::size_t kBlockBytes = 32; // a control block (vtable, two counts, the pointer)
+// Room for the control block of a scope_block: a vtable, two counts, the pointer and the
+// allocator (32 bytes with MSVC's and libstdc++'s, 40 with libc++'s).
+constexpr std::size_t kControlBytes = 48;
 
-// A scope whose map has grown past this many buckets is freed rather than kept, so a kept scope
-// holds what a new one would after a few bindings.
-std::size_t buckets_kept() {
-  binding_map m;
-  for (const char *k : {"a", "b", "c", "d", "e", "f", "g", "h"})
-    m.emplace(k, value_t());
-  return std::max(binding_map().bucket_count(), m.bucket_count());
-}
-const std::size_t kKeptBuckets = buckets_kept();
+// A kept scope must be what a new one is: an empty map with a new map's bucket count, so that
+// how many buckets a scope has (which heap measurement counts, heap.h) never depends on what the
+// thread did before. (MSVC's maps start at 8 buckets and keep them up to 8 bindings; libstdc++'s
+// and libc++'s allocate none until the first binding, so there only scopes that never had a
+// binding are kept, with the nodes of all of them.)
+const std::size_t kFreshBuckets = binding_map().bucket_count();
+
+struct scope_block : environment {
+  alignas(std::max_align_t) unsigned char control[kControlBytes];
+};
 
 struct scope_pool {
-  environment *scopes[kKeptScopes];
+  scope_block *scopes[kKeptScopes];
   std::size_t nscopes = 0;
   binding_node nodes[kKeptNodes];
   std::size_t nnodes = 0;
-  void *blocks[kKeptBlocks];
-  std::size_t nblocks = 0;
 
   scope_pool() = default;
   scope_pool(const scope_pool &) = delete;
@@ -467,66 +473,61 @@ scope_pool::~scope_pool() {
   t_scope_pool_gone = true;
   while (nscopes > 0)
     delete scopes[--nscopes];
-  while (nblocks > 0)
-    ::operator delete(blocks[--nblocks]);
   // The nodes go with the array.
 }
 
-// Allocates the control blocks of extend()'s scopes from the blocks this thread keeps.
+// Hands out the control block of a scope extend() made: the slot in its scope_block. Its
+// deallocation is the block's end: the block is kept for the next extend(), or freed.
 template <class T> struct block_allocator {
   using value_type = T;
-  block_allocator() = default;
-  template <class U> block_allocator(const block_allocator<U> &) noexcept {}
+  scope_block *home;
+  explicit block_allocator(scope_block *b) noexcept : home(b) {}
+  template <class U> block_allocator(const block_allocator<U> &o) noexcept : home(o.home) {}
 
-  T *allocate(std::size_t n) {
-    const std::size_t bytes = n * sizeof(T);
-    if (bytes > kBlockBytes || alignof(T) > alignof(std::max_align_t))
-      return std::allocator<T>().allocate(n);
-    if (scope_pool *pool = this_thread_pool(); pool && pool->nblocks > 0)
-      return static_cast<T *>(pool->blocks[--pool->nblocks]);
-    return static_cast<T *>(::operator new(kBlockBytes));
+  T *allocate(std::size_t /*n: one control block*/) {
+    static_assert(sizeof(T) <= kControlBytes && alignof(T) <= alignof(std::max_align_t),
+                  "a scope's control block doesn't fit its slot: raise kControlBytes");
+    return reinterpret_cast<T *>(home->control);
   }
-  void deallocate(T *p, std::size_t n) noexcept {
-    const std::size_t bytes = n * sizeof(T);
-    if (bytes > kBlockBytes || alignof(T) > alignof(std::max_align_t)) {
-      std::allocator<T>().deallocate(p, n);
+  void deallocate(T * /*p: the slot*/, std::size_t) noexcept {
+    scope_block *b = home; // `this` may be in the slot (a copy the control block held)
+    scope_pool *pool = this_thread_pool();
+    if (pool && pool->nscopes < kKeptScopes && b->bindings.empty() &&
+        b->bindings.bucket_count() == kFreshBuckets) {
+      b->frozen = false;
+      pool->scopes[pool->nscopes++] = b;
       return;
     }
-    if (scope_pool *pool = this_thread_pool(); pool && pool->nblocks < kKeptBlocks) {
-      pool->blocks[pool->nblocks++] = p;
-      return;
-    }
-    ::operator delete(static_cast<void *>(p));
+    delete b; // ~environment of an empty scope with no enclosing one: frees only the map
   }
-  template <class U> bool operator==(const block_allocator<U> &) const noexcept { return true; }
-  template <class U> bool operator!=(const block_allocator<U> &) const noexcept { return false; }
+  template <class U> bool operator==(const block_allocator<U> &o) const noexcept {
+    return home == o.home;
+  }
+  template <class U> bool operator!=(const block_allocator<U> &o) const noexcept {
+    return home != o.home;
+  }
 };
 
 // Takes the place of the destructor for a scope extend() made: frees what the destructor would,
 // in its order (the enclosing scope, then each binding, through ~value_tag as the map's own
-// destruction would, so a release backlog sees the same owners), then keeps the empty scope.
+// destruction would, so a release backlog sees the same owners), keeping the binding nodes of a
+// scope that will be kept. Its block goes with its control block (block_allocator::deallocate).
 struct scope_recycler {
-  void operator()(environment *e) const noexcept {
+  void operator()(scope_block *e) const noexcept {
     detail::drop_owner(e->outer);
     e->outer.reset();
+    binding_map &b = e->bindings;
     scope_pool *pool = this_thread_pool();
-    if (!pool || e->bindings.bucket_count() > kKeptBuckets) {
-      delete e;
+    if (!pool) {
+      b.clear(); // as the map's destructor would
       return;
     }
-    binding_map &b = e->bindings;
     while (!b.empty()) {
       binding_node node = b.extract(b.begin());
       { const value_t gone = std::move(node.mapped()); }
       if (pool->nnodes < kKeptNodes)
         pool->nodes[pool->nnodes++] = std::move(node);
     }
-    if (pool->nscopes == kKeptScopes) {
-      delete e;
-      return;
-    }
-    e->frozen = false;
-    pool->scopes[pool->nscopes++] = e;
   }
 };
 
@@ -537,12 +538,12 @@ void bind_new(binding_map &b, const std::string &name, value_t &&val) {
     b.emplace(name, std::move(val));
     return;
   }
-  binding_node &node = pool->nodes[pool->nnodes - 1];
+  // Out of the pool first: should the key's copy or the insert throw, the node (with the value,
+  // if it got that far) is freed here, as a failed emplace frees its own.
+  binding_node node = std::move(pool->nodes[--pool->nnodes]);
   node.key() = name;
   node.mapped() = std::move(val);
-  --pool->nnodes;
-  b.insert(std::move(node)); // the name is new, so it goes in (or the insert throws and the
-                             // node stays where it was, owned by its slot)
+  b.insert(std::move(node)); // the name is new, so it goes in
 }
 
 // The bucket of a hash in a map of `buckets` buckets: hash mod buckets, which the standard
@@ -657,11 +658,10 @@ void environment::set_existing(const std::string &name, value_t val) {
 
 environment_ptr environment::extend(environment_ptr parent) {
   scope_pool *pool = this_thread_pool();
-  environment *child =
-      pool && pool->nscopes > 0 ? pool->scopes[--pool->nscopes] : new environment();
+  scope_block *child = pool && pool->nscopes > 0 ? pool->scopes[--pool->nscopes] : new scope_block;
   child->outer = std::move(parent);
-  // On failure the shared_ptr hands `child` to the recycler, which drops `parent` again.
-  return environment_ptr(child, scope_recycler{}, block_allocator<environment>{});
+  // Its control block is in the block, so making the shared_ptr can't fail.
+  return environment_ptr(child, scope_recycler{}, block_allocator<environment>(child));
 }
 
 // to_string and values_equal are walks: see data_job.cpp.

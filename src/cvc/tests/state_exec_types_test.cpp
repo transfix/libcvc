@@ -401,3 +401,38 @@ TEST(StateExecTypesTest, ScopeDroppedAtThreadExitAfterThePool) {
   t.join();
   EXPECT_TRUE(watched.expired());
 }
+
+TEST(StateExecTypesTest, KeptScopeHasANewScopesBuckets) {
+  // A scope is kept for the next extend() only while its map has the buckets a new map has, so
+  // a scope's bucket count (which heap measurement counts) never depends on earlier scopes.
+  const std::size_t fresh = decltype(environment::bindings)().bucket_count();
+  {
+    auto grown = environment::extend(nullptr);
+    for (int i = 0; i < 40; ++i)
+      grown->set("v" + std::to_string(i), value_t(int64_t(i)));
+    EXPECT_GT(grown->bindings.bucket_count(), fresh);
+  }
+  for (int i = 0; i < 3; ++i) {
+    auto scope = environment::extend(nullptr);
+    EXPECT_EQ(scope->bindings.bucket_count(), fresh) << i;
+    EXPECT_TRUE(scope->bindings.empty());
+    scope->set("a", value_t(int64_t(1)));
+  }
+}
+
+TEST(StateExecTypesTest, ScopeIsKeptOnlyOnceNoWeakReferenceRemains) {
+  // A scope and its control block are one block: kept for reuse only when both are done with.
+  std::weak_ptr<environment> watched;
+  const environment *was = nullptr;
+  {
+    auto scope = environment::extend(nullptr);
+    watched = scope;
+    was = scope.get();
+  }
+  EXPECT_TRUE(watched.expired());
+  auto other = environment::extend(nullptr);
+  EXPECT_NE(other.get(), was); // still the weak reference's
+  watched.reset();
+  auto again = environment::extend(nullptr);
+  EXPECT_EQ(again.get(), was); // kept once the weak reference went, and taken next
+}
