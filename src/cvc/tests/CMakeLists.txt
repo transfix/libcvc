@@ -2467,7 +2467,9 @@ cvc_discover_tests(contour_spectrum_test)
 cvc_discover_tests(tf_model_test)
 cvc_discover_tests(tf_editor_test)
 cvc_discover_tests(tf_overlays_test)
-cvc_discover_tests(tf_overlay_tasks_test)
+# RUN_SERIAL: these tests bound how long one scheduler pump takes (a frame must stay near its
+# slice), and parallel ctest jobs preempting the thread would stretch a pump past the bound.
+cvc_discover_tests(tf_overlay_tasks_test PROPERTIES RUN_SERIAL TRUE)
 cvc_discover_tests(volume_io_test)
 cvc_discover_tests(image_test)
 cvc_discover_tests(magick_bootstrap_test)

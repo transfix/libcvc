@@ -859,6 +859,9 @@ add_test(NAME cvcgl_tf_editor COMMAND cvcgl_tf_editor)
 add_executable(cvcgl_tf_binding test/cvcgl_tf_binding.cpp)
 target_link_libraries(cvcgl_tf_binding PRIVATE cvcGL)
 add_test(NAME cvcgl_tf_binding COMMAND cvcgl_tf_binding)
+# RUN_SERIAL: it bounds how long one cooperative scheduler pump takes, which parallel ctest
+# jobs preempting the thread would stretch.
+set_tests_properties(cvcgl_tf_binding PROPERTIES RUN_SERIAL TRUE)
 
 # fe_lab's interval mesher (mesh.region: interval): the shell between two isovalues of a ball SDF,
 # its two boundary sheets and FEM solves, and the node's interval props and status.
