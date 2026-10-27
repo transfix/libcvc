@@ -624,6 +624,9 @@ delivers as the host, not the kernel. The state tree isn't checked: Ariadne's `f
 - `async_scheduler::drain_ingress()` takes completions, charges the calls still running, applies
   registration timeouts, kills at the limits, and wakes due sleepers and timed waits, so a driver
   that only drains while nothing is runnable (pycvc's `Exec`) keeps budgets and timeouts current.
+  A driver that idles in `async_scheduler::wait_for_work()` between drains does too: the wait
+  ends at a call's registration timeout, and every millisecond while a call runs for a process
+  with a step or time limit, for the charge that may find it reached.
 - The effective rate is published at `state_exec.schedulers.<id>.effective.async_steps_per_cpu_ms`,
   not at the scheduler's `limits.` key: that one is an input with precedence over the defaults,
   so writing the effective value there would pin it and break the live reading. The async

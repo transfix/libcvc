@@ -2955,13 +2955,14 @@ struct drive_cfg {
   bool sleepers = false; // processes sleep: idle stretches are expected
 };
 
-// Pump w's scheduler until done(). The sync scheduler runs in run(slice_steps) slices with no
-// time budget, as the CLI's run() has none (a budget would add a clock read per step); the
+// Pump w's scheduler until done(). The sync scheduler runs in run_steps(slice_steps) slices with
+// no time budget, as the CLI's run() has none (a budget would add a clock read per step); the
 // slicing only lets after() and the timeout check run. The async one is pumped as Ariadne's
 // pump_and_sweep_actions and pycvc's Exec::run pump it: drain_ingress (the kernels' results and
-// posts), wake_awaiting, then a sync_run slice; it has no wakeup signal, so when nothing is
-// runnable the driver yields (spin) or sleeps 1 ms (poll1ms, like pycvc). after() runs after
-// every slice. Returns "" or why it gave up.
+// posts), wake_awaiting, then a sync_run_steps slice (what pycvc's Exec runs: done() reads the
+// results it needs, so no slice builds the map of every finished process); it has no wakeup
+// signal, so when nothing is runnable the driver yields (spin) or sleeps 1 ms (poll1ms, as
+// pycvc did). after() runs after every slice. Returns "" or why it gave up.
 template <class Done, class After>
 std::string drive(world &w, const drive_cfg &d, Done done, After after) {
   const auto deadline = clk::now() + std::chrono::duration<double>(d.timeout);
@@ -2969,7 +2970,7 @@ std::string drive(world &w, const drive_cfg &d, Done done, After after) {
     while (!done()) {
       if (!w.sync->has_runnable())
         return "stalled: nothing runnable";
-      w.sync->run(d.slice_steps, std::nullopt);
+      w.sync->run_steps(d.slice_steps, std::nullopt); // results read by done(), not the map
       after();
       if (!done() && clk::now() > deadline)
         return "timeout";
@@ -2983,7 +2984,7 @@ std::string drive(world &w, const drive_cfg &d, Done done, After after) {
     a.wake_awaiting();
     const bool runnable = a.has_runnable();
     if (runnable)
-      a.sync_run(d.slice_steps, d.slice_secs);
+      a.sync_run_steps(d.slice_steps, d.slice_secs);
     after();
     if (done())
       break;

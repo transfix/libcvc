@@ -193,12 +193,15 @@ measures nothing.
 
 ### How the schedulers are driven
 
-- **sync**: `scheduler::run(200000 steps)` slices, with no time budget, until every program has
-  ended. The CLI calls `run()` with neither; the slices only let the bench check its timeout and
-  sweep. The bench doesn't reap on the sync scheduler (it had no `reap()` when the suite was
+- **sync**: `scheduler::run_steps(200000 steps)` slices, with no time budget, until every program
+  has ended. The CLI calls `run()` with neither; the slices only let the bench check its timeout
+  and sweep. (`run_steps()` is `run()` without the map of results: the bench reads the results it
+  needs. Before it existed the driver called `run()`, whose map of every finished process is most
+  of what `flood.stream` measured on `sync` once the scans were gone.) The bench doesn't reap on the sync scheduler (it had no `reap()` when the suite was
   written).
 - **async**: per pump iteration, `drain_ingress()`, `wake_awaiting()`, then, if `has_runnable()`,
-  `sync_run(200000, 0.1)` (Ariadne's pump budget); then the finished programs are reaped
+  `sync_run_steps(200000, 0.1)` (Ariadne's pump budget; `sync_run()` without its map of results,
+  as pycvc's `Exec` runs it); then the finished programs are reaped
   (`get_process_info`, then `reap`). When nothing is runnable the driver either yields
   (`driver=spin`, for throughput) or sleeps 1 ms (`driver=poll1ms`, what pycvc did when its
   program was parked; it now blocks in `wait_for_work()`, which these drivers don't use, so the
@@ -645,7 +648,9 @@ suite was written.
   `flood.small` `extra.processes_left`. First run: the 20th batch of 500 took 16 times the first
   on `sync`, 14 times on `async reap=0`, and the same as the first with `reap=1`. Since fixed:
   finished processes leave every per-step structure (they stay readable until reaped), and the
-  sync scheduler has `reap()`.
+  sync scheduler has `reap()`. What is left grows with the finished processes kept: `run()` and
+  `sync_run()` return a map with one entry per finished process not yet reaped, built on every
+  call; `run_steps()` and `sync_run_steps()` don't build it, and the drivers use them.
 - **The sync scheduler busy-spins while everything waits.** Its `has_runnable()` counts processes
   waiting on a message or a sleep as runnable (`scheduler.cpp:477-489`), so `run()` keeps calling
   `step()`, which finds nothing to run, at 100 % CPU: `sched.sleepers` on `sync`

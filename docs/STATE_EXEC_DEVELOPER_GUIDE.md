@@ -504,28 +504,49 @@ if (result) {
 ### How the Schedulers Pick, Wait and Forget
 
 Both schedulers keep their processes in a process table (`process_table.h`) with the indexes a
-step needs, so a step costs the same whether the scheduler holds one process or thousands:
+step needs, so no step scans, rebuilds or sorts the processes. (A step still gets dearer as the
+processes grow from one to thousands, two to three times over, from cache misses on the process
+it picks.)
 
 - **The pick.** `round_robin` steps the runnable (ready or running) processes in pid order: the
   scheduler keeps an index, and each step takes the process at that index (modulo how many are
   runnable) and moves the index on. `priority` steps the lowest pid among the best (lowest)
-  priority; `priority_rr` goes round robin among the best priority's. A process that becomes
+  priority, however many are tied there (before the run queue the tie went to whatever an
+  unstable `std::sort` left first, which was the lowest pid only while the runnable set fit the
+  sort's insertion pass: 32 processes on MSVC, 16 on libstdc++); `priority_rr` goes round robin
+  among the best priority's. A process that becomes
   runnable takes its place by pid, so the order in which a set of processes interleaves is fixed
   by their pids, their statuses and their priorities, step by step. The run queue finds the pick
   without scanning (order statistics over the processes in pid order).
 - **Sleeps and timed waits** wake from a timer heap, when their deadline comes; a message wakes
   the processes waiting on its channel from an index of waiters by channel.
-- **The sync `run()` does not spin.** While nothing is ready and processes sleep (or wait for a
-  message with a time limit), it waits for the earliest deadline, burning no CPU, but never past
-  its `max_time`, at which it returns; each wait counts as one of `max_steps`. When only processes
-  waiting for a message with no time limit are left, nothing in a synchronous run can wake them:
-  `run()` returns at once when `max_steps` bounds it, else waits out `max_time`, else waits until
-  `stop()`.
+- **The sync `run()` does not spin.** `max_steps` counts the run loop's iterations, the idle ones
+  (nothing ready) included, and `max_time` the run's own time. While nothing is ready and
+  processes sleep (or wait for a message with a time limit), `run()` used to spin through idle
+  iterations until a deadline came or a budget ran out. It waits for the earliest deadline instead
+  and charges the wait to both budgets as the spin spent them: to `max_time` as run time
+  (`time_budget::charge_wait`), to `max_steps` at 100 ns an idle iteration, about what a spinning
+  one took. So a host that pumps `run(N)` a frame gets control back at once when its N steps
+  would run out before the next deadline (as the spin did, a few microseconds later), a bounded
+  run to completion with steps to spare (Ariadne's init scripts: 10M steps, 5 s) waits for the
+  sleeper, as the spin did, and a run whose `max_time` runs out first returns then. When only
+  processes waiting for a message with no time limit are left, nothing in a synchronous run can
+  wake them: `run()` returns at once when `max_steps` bounds it, else waits out `max_time`, else
+  waits until `stop()`. An infinite (or huge) `max_time` or sleep is "never" (the time arithmetic
+  saturates). `run_steps()` is `run()` without the map of results it returns: a host that reads
+  only the results it needs (`get_result`) saves a map entry per finished process not yet reaped
+  on every call (`async_scheduler::sync_run_steps()` likewise).
 - **An idle host can wait for work.** `async_scheduler::wait_for_work(deadline)` blocks the
   scheduler's thread until a `post_message()` or a settled async call arrives (from any thread), a
-  sleeper or timed wait is due, or the deadline passes; it returns at once when a process is
-  ready. Processes parked until the next frame (`(await ...)`, `awaiting_frame_count()`) are the
-  host's to wake with `wake_awaiting()`. pycvc's `Exec` waits this way instead of polling.
+  sleeper or timed wait is due, an async call's registration timeout passes, the next charge of a
+  call whose process has a step or time limit is due (every millisecond while one runs: a kernel
+  that never checks `cancelled()` is charged its run time as CPU time, and only a drain finds the
+  limit reached, `docs/STATE_EXEC_EXCEPTIONS.md` 3.8), or the deadline passes; it returns at
+  once when a process is ready. Processes parked until the next frame (`(await ...)`,
+  `awaiting_frame_count()`) are the host's to wake with `wake_awaiting()`. pycvc's `Exec` waits
+  this way instead of polling. A process with no limits is charged for a call at the drains the
+  driver makes anyway (each settled call's final charge included), so a change to
+  `limits.async_steps_per_cpu_ms` applies to the next of those.
 
   ```cpp
   for (;;) {
@@ -537,19 +558,37 @@ step needs, so a step costs the same whether the scheduler holds one process or 
       sched.wait_for_work(std::chrono::steady_clock::now() + std::chrono::seconds(1));
   }
   ```
+- **Waits and the CPU.** A sleeper's deadline is kept to well under a millisecond. On Windows,
+  whose high-resolution timer fires on a ~0.5 ms grid, that costs up to ~0.6 ms of spinning at
+  the end of each such wait (`detail::wakeup`): a run of millisecond sleeps still uses about half
+  a core, against all of one while `run()` spun. Every other wait (a deadline of the caller's, a
+  call's timeout or charge, a budget's end) may end up to ~0.5 ms late and burns no CPU.
 - **Finished processes** leave every index at once but stay in the table, so `get_result()`,
   `get_process_info()` and `get_results()` still report them, until `reap(pid)` erases one (both
   schedulers; a host that reaps from `on_complete` is fine: the process goes once its last step is
   over).
 - **State watches** are read only when something under the watch root changed since the last
   poll: the scheduler counts the root's change signals while processes have watches, so a quiet
-  tree costs a step nothing however many watches there are. Likewise the async scheduler reads
+  tree costs a step nothing however many watches there are. This relies on writes firing the
+  tree's signals, as `value()` writes do. Two kinds don't: `state::reset(..., fireCallbacks =
+  false)`, and a node `operator()` creates. `state_list`'s `pop_back`, `erase`, `insert` and
+  `clear` reset elements that way, but each then writes the list's size, which fires, so a watch
+  on an element still sees it change (`WatchSeesAStateListElementPoppedOff`). A host that resets
+  silently and writes nothing after it is seen at its next write that fires; the old every-step
+  poll would have seen it at once. Likewise the async scheduler reads
   `limits.async_steps_per_cpu_ms` from the tree for its calls in flight only when the tree
-  changed, and a change still applies to the next charge.
+  changed (and `set_id()` makes it read again), and a change still applies to the next charge.
+- **Settings.** What a submission reads from the tree (the async scheduler's
+  `limits.max_alloc_bytes`, `limits.heap_check_steps`, `parser.*` and `data.*`) and the sync
+  scheduler's inline-call rate are read again only when something under the tree's `state_exec`
+  node changed (a count of that node's change signals, `detail::settings_changes`), so a
+  submission doesn't walk the tree four times when nothing did, and writes elsewhere in the tree
+  pay nothing for it. A change still applies to the next submission.
 - **Time.** A step reads the steady clock once: within one `run()`, a step starts at the reading
   the step before it ended at, unless something other than picking it ran in between (a handler
-  set up, a process finished, a watch poll, a cycle collection, an async-call charge), and every
-  time budget of the step uses that reading.
+  set up, a process finished, a watch poll, a cycle collection, an async-call charge, a sleeper's
+  or timed wait's wake, connecting or disconnecting the watch count), and every time budget of
+  the step uses that reading.
 
 ---
 
