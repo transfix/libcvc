@@ -91,6 +91,9 @@ public:
 
 private:
   struct shared_state;
+  // What an executor runs for a threaded call (run_kernel), and what ends the call if the
+  // executor destroys it unrun instead.
+  struct kernel_task;
 
   value_t run_inline(const std::shared_ptr<async_call> &call, const async_kernel &kernel,
                      process *proc, bool future);

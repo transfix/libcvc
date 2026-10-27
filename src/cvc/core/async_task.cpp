@@ -14,6 +14,55 @@ namespace cvc {
 
 namespace se = state_exec;
 
+namespace {
+
+// launch_pool_task's task, shared by the copies of its pool task: it posts exactly one value to
+// `done`, the work's or on_error's, also when the pool destroys it unrun (it was submitted, or
+// still queued, once ~app had stopped the pool).
+struct pool_task_post {
+  se::async_scheduler &sched;
+  pool_task_work work;
+  pool_task_on_error on_error;
+  std::string done;
+  bool ran = false;
+
+  pool_task_post(se::async_scheduler &s, pool_task_work w, pool_task_on_error e, std::string d)
+      : sched(s), work(std::move(w)), on_error(std::move(e)), done(std::move(d)) {}
+  pool_task_post(const pool_task_post &) = delete;
+  pool_task_post &operator=(const pool_task_post &) = delete;
+
+  void run() {
+    ran = true;
+    se::value_t payload;
+    try {
+      payload = work();
+    } catch (const std::exception &e) {
+      payload = on_error(e.what());
+    } catch (...) {
+      payload = on_error("unknown error");
+    }
+    sched.post_message(done, payload);
+  }
+
+  ~pool_task_post() {
+    if (ran)
+      return;
+    const std::string msg = "not run: the app's background pool has stopped";
+    try {
+      se::value_t payload;
+      try {
+        payload = on_error(msg);
+      } catch (...) {
+        payload = se::value_t(msg); // on_error failed too: the waiter still gets a value
+      }
+      sched.post_message(done, payload);
+    } catch (...) {
+    }
+  }
+};
+
+} // namespace
+
 std::string launch_pool_task(app &a, se::async_scheduler &sched, const std::string &root,
                              const std::string &chan_prefix, pool_task_work work,
                              pool_task_on_error on_error) {
@@ -29,18 +78,11 @@ std::string launch_pool_task(app &a, se::async_scheduler &sched, const std::stri
   // compute pool for a fan-out of one).  post_message is the thread-safe ingress `sched` drains on
   // its own driver thread, so the worker never touches the scheduler's internals — and it posts to
   // the SAME scheduler the caller drives, so the parked process is resumed there.  ALWAYS post
-  // exactly one value (on_error on a throw) so a waiter can't hang.
-  a.submitPooled([&sched, work = std::move(work), on_error = std::move(on_error), done] {
-    se::value_t payload;
-    try {
-      payload = work();
-    } catch (const std::exception &e) {
-      payload = on_error(e.what());
-    } catch (...) {
-      payload = on_error("unknown error");
-    }
-    sched.post_message(done, payload);
-  });
+  // exactly one value (on_error on a throw, or when the app drops the task unrun as it goes away)
+  // so a waiter can't hang.
+  auto task = std::make_shared<pool_task_post>(sched, std::move(work), std::move(on_error), done);
+  // The pool task owns it: refused, it posts from its destructor before submitPooled returns.
+  a.submitPooled([task = std::move(task)] { task->run(); });
   return done;
 }
 

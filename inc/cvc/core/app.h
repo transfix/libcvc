@@ -407,8 +407,12 @@ public:
   // Queue an anonymous task on the background pool (startThreadPooled with wait=false): it runs
   // on a persistent worker, in priority order and FIFO within a priority, and is destroyed on
   // that worker once it returns. Thread-safe; returns at once. A task that throws is logged; an
-  // empty one is ignored; one submitted while the app is being destroyed is dropped.
-  void submitPooled(std::function<void()> task, thread_priority priority = PRIORITY_NORMAL);
+  // empty one is ignored. Once ~app has stopped the pool, a task is dropped: destroyed without
+  // running, here when it is submitted (this then returns false) or in ~app when it was still
+  // queued. A task whose submitter must hear of that (a call to settle, a waiter to post to) does
+  // it from the destructor of something it captures, as async_host, launch_pool_task and
+  // compute_async's on_error form do. Returns false only for such a drop.
+  bool submitPooled(std::function<void()> task, thread_priority priority = PRIORITY_NORMAL);
 
   // Set the maximum number of concurrent threads in the pool
   // Default is hardware_concurrency() or 4 if unknown
@@ -440,8 +444,17 @@ public:
   // fn/on_done (e.g. a shared_ptr<std::atomic<int>>). parallel_for stays a plain blocking barrier —
   // this only moves the wait off the caller's thread; it does not make the fan-out itself
   // non-blocking. A throw from fn propagates on the worker and skips on_done; each call gets its
-  // own background job (wait=false → a unique key), so concurrent calls do not cancel each other.
+  // own background job (an anonymous submitPooled task), so concurrent calls do not cancel each
+  // other. A job the app drops unrun (submitted or still queued once ~app has stopped the pool)
+  // calls neither callback and releases both.
   void compute_async(int n, std::function<void(int)> fn, std::function<void()> on_done,
+                     thread_priority priority = PRIORITY_NORMAL);
+  // The same, calling exactly one of on_done and on_error: on_error(message) instead of on_done
+  // when fn throws (with what(); "interrupted" when wait()/~app interrupts the job) and when the
+  // app drops the job unrun ("not run: the app's background pool has stopped"). A dropped job's
+  // on_error runs on the thread that submits it or the one destroying the app.
+  void compute_async(int n, std::function<void(int)> fn, std::function<void()> on_done,
+                     std::function<void(const std::string &)> on_error,
                      thread_priority priority = PRIORITY_NORMAL);
 
   // This application's simulation clock and world-unit base. Both are owned by
@@ -652,8 +665,9 @@ protected:
     enqueuePoolTask(poolTask);
   }
 
-  // Queue `task` (its contents are taken; a keyed one may start on this thread).
-  void enqueuePoolTask(ThreadPoolTask &task);
+  // Queue `task` (its contents are taken; a keyed one may start on this thread). Returns false,
+  // taking nothing, once the pool has stopped (~app): the caller then destroys the task unrun.
+  bool enqueuePoolTask(ThreadPoolTask &task);
   // What the pool must do, once _threadPoolMutex is released, so that every queued task that
   // may start has a worker on its way to it: idle workers to wake and new workers to start.
   struct PoolKick {

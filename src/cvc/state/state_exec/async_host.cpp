@@ -570,30 +570,75 @@ void async_host::run_kernel(const std::shared_ptr<async_call> &call, async_kerne
   state.end(*call);
 }
 
+// Shared by the copies of a threaded call's executor task. The call ends exactly once: by
+// run_kernel when the executor runs the task, or by drop() when it never will. That is the case
+// when the executor refuses the task (a stopped lane, an app whose pool has stopped), and when it
+// destroys the task unrun (an app's pool drops what is still queued when ~app stops it): the
+// call then raises RuntimeError, its kernel goes, and the host's count goes down, so the process
+// isn't left parked and shutdown() doesn't wait for good.
+struct async_host::kernel_task {
+  std::shared_ptr<async_call> call;
+  async_kernel kernel;
+  std::shared_ptr<shared_state> state;
+  std::atomic<bool> claimed{false}; // run, or dropped
+
+  kernel_task(std::shared_ptr<async_call> c, async_kernel k, std::shared_ptr<shared_state> s)
+      : call(std::move(c)), kernel(std::move(k)), state(std::move(s)) {}
+  kernel_task(const kernel_task &) = delete;
+  kernel_task &operator=(const kernel_task &) = delete;
+
+  ~kernel_task() {
+    if (claimed.load(std::memory_order_acquire))
+      return;
+    std::exception_ptr error;
+    try {
+      error = std::make_exception_ptr(
+          dsl_error("RuntimeError", call->function_name() + ": not run: its executor stopped",
+                    "async", function_fields(call->function_name())));
+    } catch (...) {
+      error = std::current_exception();
+    }
+    drop(std::move(error));
+  }
+
+  void run() noexcept {
+    if (!claimed.exchange(true, std::memory_order_acq_rel))
+      run_kernel(call, kernel, *state);
+  }
+
+  void drop(std::exception_ptr error) noexcept {
+    if (claimed.exchange(true, std::memory_order_acq_rel))
+      return;
+    kernel = nullptr; // what it captured goes before the host's count does
+    if (call->settle({}, std::move(error)))
+      call->async_sched_->post_async_completion(call);
+    state->end(*call);
+  }
+};
+
 void async_host::submit(const std::shared_ptr<async_call> &call, async_kernel kernel,
                         const async_options &opts) {
-  std::shared_ptr<shared_state> state = state_;
-  state->add(call, true);
-  // The executor runs, then destroys, this task; nothing else holds the kernel. (Moved and then
-  // cleared: a moved-from std::function may keep a copy of a small callable.)
-  std::function<void()> task = [call, kernel = std::move(kernel), state]() mutable {
-    run_kernel(call, kernel, *state);
-  };
-  kernel = nullptr;
+  state_->add(call, true);
+  // The executor runs, then destroys, this task; nothing else holds the kernel once it is queued.
+  // (Its one capture fits std::function's own buffer, so the task allocates only the kernel_task.)
+  auto pending = std::make_shared<kernel_task>(call, std::move(kernel), state_);
+  kernel = nullptr; // a moved-from std::function may keep a copy of a small callable
+  std::function<void()> task = [pending] { pending->run(); };
   try {
     if (opts.where.kind == executor_kind::lane) {
       if (!lanes_.at(opts.where.lane)->submit(std::move(task)))
         throw std::runtime_error(call->function_name() + ": lane '" + opts.where.lane +
                                  "' is stopped");
-    } else {
-      // An anonymous task on the background pool's persistent workers (no thread, no key).
-      app_->submitPooled(std::move(task), opts.priority);
+    } else if (!app_->submitPooled(std::move(task), opts.priority)) {
+      // An anonymous task on the background pool's persistent workers (no thread, no key), or
+      // dropped: the app is going away.
+      throw dsl_error("RuntimeError",
+                      call->function_name() + ": not run: the app's background pool has stopped",
+                      "async", function_fields(call->function_name()));
     }
   } catch (...) {
     // Not queued: the call fails now.
-    if (call->settle({}, std::current_exception()))
-      async_sched_->post_async_completion(call);
-    state->end(*call);
+    pending->drop(std::current_exception());
   }
 }
 

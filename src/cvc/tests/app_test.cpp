@@ -1651,6 +1651,111 @@ TEST(AppPoolTeardown, AWorkerStartedAsThePoolStopsTakesNoTask) {
   EXPECT_LT(secs, 2.0);
 }
 
+// Once ~app has stopped the pool, a task submitted to it is not run: submitPooled says so, and
+// the task, with what it captured, is gone when it returns (async_host and launch_pool_task
+// report the drop from there).
+TEST(AppPoolTeardown, ATaskSubmittedOnceThePoolHasStoppedIsDroppedAndReported) {
+  probe_app a;
+  EXPECT_TRUE(a.submitPooled([] {}));
+  ASSERT_TRUE(wait_pool_idle(a));
+  a.stopPool();
+  auto payload = std::make_shared<int>(1);
+  std::weak_ptr<int> weak = payload;
+  std::atomic<bool> ran(false);
+  EXPECT_FALSE(a.submitPooled([payload, &ran] { ran = true; }));
+  payload.reset();
+  EXPECT_TRUE(weak.expired());
+  EXPECT_FALSE(ran.load());
+  EXPECT_EQ(a.getPendingThreadCount(), 0u);
+}
+
+// compute_async's on_error form calls exactly one of its callbacks: on_done when the fan-out
+// joins, on_error with the message when fn throws, and on_error when the app drops the job unrun
+// (submitted once the pool has stopped, or still queued when ~app stops it). The four-argument
+// form calls neither for a dropped job, and releases both.
+TEST(AppPoolTeardown, ComputeAsyncReportsAThrowOrADroppedJobToOnError) {
+  struct outcome {
+    std::mutex m;
+    std::condition_variable cv;
+    int done = 0;
+    std::vector<std::string> errors;
+    void add(int d, const std::string *e) {
+      {
+        std::lock_guard<std::mutex> lk(m);
+        done += d;
+        if (e)
+          errors.push_back(*e);
+      }
+      cv.notify_all();
+    }
+    bool wait_for(std::size_t n) {
+      std::unique_lock<std::mutex> lk(m);
+      return cv.wait_for(lk, std::chrono::seconds(10),
+                         [&] { return std::size_t(done) + errors.size() >= n; });
+    }
+  };
+  const std::string dropped = "not run: the app's background pool has stopped";
+  {
+    app a;
+    a.computePool(); // built on this thread, as in ComputeAsyncRunsFanOutOffThreadThenCallsOnDone
+    auto o = std::make_shared<outcome>();
+    auto on_done = [o] { o->add(1, nullptr); };
+    auto on_error = [o](const std::string &e) { o->add(0, &e); };
+    a.compute_async(8, [](int) {}, on_done, on_error);
+    ASSERT_TRUE(o->wait_for(1));
+    a.compute_async(
+        8, [](int i) { throw std::runtime_error("chunk " + std::to_string(i)); }, on_done,
+        on_error);
+    ASSERT_TRUE(o->wait_for(2));
+    std::lock_guard<std::mutex> lk(o->m);
+    EXPECT_EQ(o->done, 1);
+    ASSERT_EQ(o->errors.size(), 1u);
+    EXPECT_EQ(o->errors[0].rfind("chunk ", 0), 0u) << o->errors[0];
+  }
+  {
+    // Submitted once the pool has stopped: on_error before compute_async returns.
+    probe_app a;
+    a.stopPool();
+    auto o = std::make_shared<outcome>();
+    a.compute_async(
+        8, [](int) {}, [o] { o->add(1, nullptr); }, [o](const std::string &e) { o->add(0, &e); });
+    std::lock_guard<std::mutex> lk(o->m);
+    EXPECT_EQ(o->done, 0);
+    ASSERT_EQ(o->errors.size(), 1u);
+    EXPECT_EQ(o->errors[0], dropped);
+  }
+  {
+    // Still queued when ~app stops the pool: on_error from ~app; the four-argument form's job
+    // calls nothing and releases its callbacks.
+    auto o = std::make_shared<outcome>();
+    auto held = std::make_shared<int>(1);
+    std::weak_ptr<int> weak = held;
+    {
+      app a;
+      a.setThreadPoolSize(1);
+      std::atomic<bool> started(false);
+      a.submitPooled([&started] {
+        started = true;
+        for (;;)
+          boost::this_thread::sleep_for(boost::chrono::milliseconds(1)); // until ~app
+      });
+      for (int i = 0; i < 5000 && !started.load(); i++)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      ASSERT_TRUE(started.load());
+      a.compute_async(
+          8, [](int) {}, [o] { o->add(1, nullptr); }, [o](const std::string &e) { o->add(0, &e); });
+      a.compute_async(8, [held](int) {}, [o, held] { o->add(1, nullptr); });
+      held.reset();
+      EXPECT_EQ(a.getPendingThreadCount(), 2u);
+    }
+    EXPECT_TRUE(weak.expired());
+    std::lock_guard<std::mutex> lk(o->m);
+    EXPECT_EQ(o->done, 0);
+    ASSERT_EQ(o->errors.size(), 1u);
+    EXPECT_EQ(o->errors[0], dropped);
+  }
+}
+
 // A keyed task (wait=true) that the pool has room for is in threads() under its key when
 // startThreadPooled returns, also right behind an anonymous task still waiting for its worker to
 // start (a fresh app) or to wake (a warm one); the documented join pattern,
