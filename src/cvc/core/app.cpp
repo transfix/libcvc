@@ -1288,6 +1288,7 @@ unsigned int app::getPendingThreadCount() const {
 //                         way: the job may rely on another call's, which can still fail.
 // 10/27/2026 -- Joe R. -- startThreadPooled(wait=true) throws when its task's own thread can't
 //                         be created; a keyed task started later and failing so is logged.
+// 10/27/2026 -- Joe R. -- That drop is logged before its slot is freed: an idle pool has logged it.
 
 bool app::poolCanStartLocked() const {
   return !_poolStopping && !_pendingTasks.empty() && _activeWorkers < _maxPoolSize;
@@ -1659,8 +1660,16 @@ bool app::startKeyedPoolThread(ThreadPoolTask &task, bool logDrop) {
   } catch (...) {
     // No thread (resources): the task can't run. It is dropped, and its slot freed. The caller
     // that submitted it hears of it (enqueuePoolTask); one started later is logged, as there is
-    // no caller to tell.
+    // no caller to tell. Logged while it still holds its slot, so that a pool seen idle (wait(),
+    // the counts) has logged it.
     owned.reset();
+    if (logDrop) {
+      try {
+        log(0, "Thread pool: no thread could be started for keyed task '" + key +
+                   "': dropped unrun");
+      } catch (...) {
+      }
+    }
     PoolKick kick;
     {
       boost::mutex::scoped_lock lock(_threadPoolMutex);
@@ -1669,13 +1678,6 @@ bool app::startKeyedPoolThread(ThreadPoolTask &task, bool logDrop) {
       notifyPoolIdleLocked();
     }
     applyPoolKick(kick);
-    if (logDrop) {
-      try {
-        log(0, "Thread pool: no thread could be started for keyed task '" + key +
-                   "': dropped unrun");
-      } catch (...) {
-      }
-    }
     return false;
   }
   try {

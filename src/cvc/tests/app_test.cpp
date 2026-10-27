@@ -1957,7 +1957,9 @@ TEST(AppPoolSpawnFailure, ComputeAsyncThrowsWhenTheWorkerItReliedOnFailsLater) {
 // key. (The task used to be dropped without a word: startThreadPooled returned as if it had
 // registered it, and `if (hasThread(k)) threads(k)->join();` went on at once.) A keyed task that
 // waited in the queue, and whose thread can't be created when its turn comes, has no caller to
-// tell: it is dropped and logged, and the pool carries on.
+// tell: it is dropped and logged, and the pool carries on. The drop is logged before its slot is
+// freed, so a pool found idle (wait(), or the counts at 0) has logged it. (It used to be logged
+// after the slot was freed: a test that read the log as soon as the pool was idle could miss it.)
 TEST(AppPoolSpawnFailure, AKeyedTaskWhoseThreadCantBeCreatedThrowsOrIsLogged) {
   spawn_switch spawn; // before the app: its hook points here
   probe_app a;
@@ -1996,6 +1998,16 @@ TEST(AppPoolSpawnFailure, AKeyedTaskWhoseThreadCantBeCreatedThrowsOrIsLogged) {
       "k2", [held, &ran] { ++ran; }, PRIORITY_NORMAL, /*wait=*/true)); // queued
   held.reset();
   EXPECT_EQ(a.getPendingThreadCount(), 1u);
+#ifndef USING_LOG4CPLUS_DEFAULT
+  // What the pool's counts were as the drop was logged (the log is a data key: its change
+  // signal comes from inside log(), on the thread logging).
+  std::atomic<int> logged_while_idle(-1);
+  boost::signals2::scoped_connection on_log =
+      a.dataChanged.connect([&a, &log_key, &logged_while_idle](const std::string &key) {
+        if (key == log_key)
+          logged_while_idle = a.getActiveThreadCount() == 0 && a.getPendingThreadCount() == 0;
+      });
+#endif
   spawn.fail = true;
   release = true;
   EXPECT_TRUE(wait_pool_idle(a));
@@ -2006,6 +2018,8 @@ TEST(AppPoolSpawnFailure, AKeyedTaskWhoseThreadCantBeCreatedThrowsOrIsLogged) {
 #ifndef USING_LOG4CPLUS_DEFAULT
   const std::string logged = a.data<std::string>(log_key);
   EXPECT_NE(logged.find("'k2'"), std::string::npos) << "the drop wasn't logged: " << logged;
+  EXPECT_EQ(logged_while_idle.load(), 0)
+      << "the drop was logged once its slot was freed (-1: not logged at all)";
 #endif
 }
 

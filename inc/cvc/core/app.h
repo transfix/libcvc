@@ -772,8 +772,8 @@ protected:
   void poolWorkerLoop(std::shared_ptr<PoolWorkerGate> gate);
   void runPoolTask(ThreadPoolTask &task);
   // Start a keyed task on a thread of its own, registered under its key. False if that thread
-  // couldn't be created: the task is dropped unrun, its slot freed, and the drop logged unless
-  // the caller reports it (logDrop false).
+  // couldn't be created: the task is dropped unrun, the drop logged unless the caller reports it
+  // (logDrop false), and only then its slot freed, so that a pool seen idle has logged it.
   bool startKeyedPoolThread(ThreadPoolTask &task, bool logDrop = true);
   void runKeyedPoolTask(ThreadPoolTask &task);
   void interruptPoolWorkersLocked();
