@@ -1357,9 +1357,41 @@ void sim_world::set_terrain(const float *height_m, const terrain_config &tc) {
 void sim_world::set_terrain_config(const terrain_config &tc) {
   if (!terrain_on_)
     return;
+  const bool blocked = ter_cfg_.block_infeasible;
   const std::vector<int> entries = ter_entries_;
   set_terrain(ter_height_.data(), tc);
   ter_entries_ = entries;
+  // Cells that were infeasible and are no longer (block_infeasible off, or a looser limit) leave
+  // the occupancy now, not at the next sense tick (never, on a frozen map).
+  if (blocked)
+    recomposite_occupancy();
+}
+
+void sim_world::recomposite_occupancy() {
+  const long hw = static_cast<long>(rows_) * cols_;
+  const double t_now = gstep_ * static_cast<double>(cfg_.veh.dt);
+  const unknown_policy pol =
+      cfg_.optimistic ? unknown_policy::optimistic : unknown_policy::pessimistic;
+  std::vector<std::uint8_t> occ2(static_cast<std::size_t>(hw));
+  bool any = false;
+  for (int m = 0; m < M_; ++m) {
+    const long off = static_cast<long>(m) * hw;
+    composite_occupancy(logodds_.data() + off, rows_, cols_, pol, cfg_.p_thresh, cfg_.band,
+                        dyn_stamp_.data() + off, t_now, cfg_.ttl_s, occ2.data());
+    if (terrain_on_ && ter_cfg_.block_infeasible)
+      for (long k = 0; k < hw; ++k)
+        occ2[k] = static_cast<std::uint8_t>(occ2[k] | ter_.infeasible[k]);
+    if (std::equal(occ2.begin(), occ2.end(), occ_.begin() + off))
+      continue;
+    std::copy(occ2.begin(), occ2.end(), occ_.begin() + off);
+    rebuild_plane(m);
+    ++raster_version_[m];
+    if (static_cast<int>(mat_gate_dirty_.size()) > m)
+      mat_gate_dirty_[m] = 1;
+    any = true;
+  }
+  if (any)
+    ++field_ver_;
 }
 
 void sim_world::clear_terrain() {

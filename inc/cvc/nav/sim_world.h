@@ -570,7 +570,8 @@ public:
   void set_terrain(const float *height_m, const terrain_config &tc);
   // A new config for the terrain set last (no-op without one): rebuilds its planes from the same
   // heights and keeps the entry counts. Cells it newly makes infeasible join the occupancy at
-  // once; cells it frees leave it at the next recomposite (a frozen map keeps them).
+  // once, and cells it frees (block_infeasible off, or a looser limit) leave it at once, a frozen
+  // map's too.
   void set_terrain_config(const terrain_config &tc);
   void clear_terrain();
   bool has_terrain() const { return terrain_on_; }
@@ -783,6 +784,9 @@ private:
   material_stack material_view() const;
   void rebuild_all_fields(); // build every plane's SDF from its occ
   void rebuild_plane(int m); // build plane m's SDF from occ_ plane m
+  // Composite every plane's occupancy from its log-odds now (and the infeasible cells, when they
+  // block), rebuilding each plane that changed: set_terrain_config's, so freed cells leave.
+  void recomposite_occupancy();
 };
 
 } // namespace nav
