@@ -120,9 +120,12 @@ for (int i = 0; i < 100; i++) {
    the queued ones and joins the workers. A dropped task is destroyed
    without running, and so is one submitted after that point
    (`submitPooled` then returns `false`); a task whose submitter must
-   hear of it reports it from the destructor of something it captures, as
-   the async host, `launch_pool_task` and `compute_async`'s `on_error`
-   form do
+   hear of it reports it from its destructor, as the async host,
+   `launch_pool_task` and `compute_async`'s `on_error` form do. Their
+   callables hold that state by value, so each task is one heap block:
+   a `shared_ptr` capture would add a block per task under libstdc++,
+   whose `std::function` keeps only a trivially copyable callable in its
+   own buffer
 
 ## Notes
 

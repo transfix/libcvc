@@ -38,9 +38,9 @@ For the full per-method reference, see
   `~app` interrupt every running task, also one a worker started a
   moment ago). `~app` drops the tasks still queued without running them,
   and from then on `submitPooled` drops a task at once and returns
-  `false`. A dropped task is destroyed, so what it captured can report
-  the drop from its destructor (the async host fails the call with
-  `RuntimeError`, `launch_pool_task` posts `on_error`'s value).
+  `false`. A dropped task is destroyed, so it can report the drop from
+  its destructor (the async host fails the call with `RuntimeError`,
+  `launch_pool_task` posts `on_error`'s value).
 - **Exception-safe.** Exceptions thrown by a task are logged and do not
   take down the pool or other workers.
 - **Dynamic resizing.** `setThreadPoolSize()` may be called while tasks
