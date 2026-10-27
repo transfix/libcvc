@@ -1,8 +1,10 @@
 #include "closure_body.h"
 #include "closure_natives.h"
+#include "scope_mark.h"
 #include "special_forms.h"
 
 #include <chrono>
+#include <cstdint>
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/generator.h>
 #include <cvc/state/state_exec/heap.h>
@@ -205,40 +207,36 @@ void push_new_frame(std::vector<eval_frame> &stack, value_t &&expr, environment_
   f.env = std::move(env);
 }
 
-// The sum of the sizes of the scopes from `env` out to `scope`, which binds a call's function:
-// a scope that gains a binding (none loses one while it lives) changes it. Nullopt when `scope`
-// isn't on the chain.
-std::optional<std::size_t> scope_sizes(const environment *env, const environment *scope) {
-  std::size_t sizes = 0;
-  for (const environment *e = env; e; e = e->outer.get()) {
-    sizes += e->bindings.size();
-    if (e == scope)
-      return sizes;
-  }
-  return std::nullopt;
+// Push the frame that evaluates a DSL function's body: a `return` inside it returns from here.
+void push_body_frame(std::vector<eval_frame> &stack, value_t &&body, environment_ptr &&local) {
+  push_new_frame(stack, std::move(body), std::move(local));
+  stack.back().function_body = true;
 }
 
-// The function a call frame applies: the binding its init found, while the frame's scopes are
-// as they were then and it still binds the call's head, else whatever the name finds now (as if
+// The function a call frame applies: the binding its init found, while the scopes it walked are
+// as they were and it still binds the call's head, else whatever the name finds now (as if
 // looked up again: a scope may have gained a binding of the name, or the head changed).
 const value_t *callee_of(const eval_frame &frame, const std::string &name) {
-  if (frame.callee && scope_sizes(frame.env.get(), frame.callee_scope) == frame.callee_stamp &&
+  if (frame.callee &&
+      detail::mark_holds(frame.env.get(), {frame.callee_depth, frame.callee_stamp}) &&
       frame.callee->first == name)
     return &frame.callee->second;
   return frame.env->lookup(name);
 }
 
 // Pop the top frame with the value `v`, which goes to the frame below (or is the state's result).
-// It is put there before the top frame goes, since it may be in that frame, or in a scope only
-// that frame holds; the frame's parts are then freed as pop_frame frees them.
+// It is taken before the top frame goes, since it may be in that frame, or in a scope only that
+// frame holds; the frame's parts are then freed as pop_frame frees them, and for the last frame
+// before the state's old result is (what pop_frame did: a release backlog sees the same order).
 void hand_up(evaluator_state &state, const value_t &v) {
   std::vector<eval_frame> &stack = state.stack;
   if (stack.size() > 1) {
     stack[stack.size() - 2].results.push_back(v);
     pop_top(stack);
   } else {
-    state.result = v;
+    value_t result = v;
     pop_top(stack);
+    state.result = std::move(result);
     state.done = true;
   }
 }
@@ -249,8 +247,9 @@ void hand_up(evaluator_state &state, value_t &&v) {
     stack[stack.size() - 2].results.push_back(std::move(v));
     pop_top(stack);
   } else {
-    state.result = std::move(v);
+    value_t result = std::move(v);
     pop_top(stack);
+    state.result = std::move(result);
     state.done = true;
   }
 }
@@ -1011,15 +1010,11 @@ void stackless_evaluator::pop_frame(evaluator_state &state, value_t result) {
 
 void stackless_evaluator::push_frame(evaluator_state &state, const value_t &expr,
                                      const environment_ptr &env) {
-  // `expr` and `env` may be in the top frame, which a growing stack moves: copied in place only
-  // when the stack has room.
-  if (state.stack.size() < state.stack.capacity()) {
-    eval_frame &f = state.stack.emplace_back();
-    f.expr = expr;
-    f.env = env;
-  } else {
-    push_new_frame(state.stack, value_t(expr), environment_ptr(env));
-  }
+  // Copied before the stack grows: `expr` and `env` may be in the top frame, which growing moves,
+  // and a copy that throws (out of memory) leaves the stack as it was.
+  value_t e = expr;
+  environment_ptr scope = env;
+  push_new_frame(state.stack, std::move(e), std::move(scope));
 }
 
 void stackless_evaluator::push_frame(evaluator_state &state, value_t &&expr,
@@ -1382,13 +1377,13 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
 
   // Built-in or user function: it must exist now; the apply step uses what is found here unless
   // the scopes changed meanwhile (callee_of).
-  const environment *scope = nullptr;
-  const auto *callee = env->find_binding(name, &scope);
+  detail::scope_mark mark;
+  const auto *callee = detail::find_marked(env.get(), name, mark);
   if (!callee)
     throw dsl_error("NameError", "unknown function or special form: " + name);
   frame.callee = callee;
-  frame.callee_scope = scope;
-  frame.callee_stamp = *scope_sizes(env.get(), scope);
+  frame.callee_depth = mark.depth;
+  frame.callee_stamp = mark.stamp;
 
   frame.phase = eval_phase::eval_args;
   fill_values(frame.extra_vals, args);
@@ -1865,17 +1860,20 @@ void stackless_evaluator::step_super_args(evaluator_state &state, eval_frame &fr
 
 void stackless_evaluator::call_closure(evaluator_state &state, eval_frame & /*frame*/,
                                        const closure_ptr &cls, const std::vector<value_t> &args) {
-  environment_ptr local = bind_closure_args(cls, args); // before the pop: args are the frame's
+  // Everything the call needs is taken from `cls` and `args` before the frame goes: they may be
+  // in it, or in a scope only it holds (a function passed as a parameter, called in tail
+  // position: its binding is in the scope this frame evaluates in).
+  environment_ptr local = bind_closure_args(cls, args);
+  value_t body = detail::body_expr_of(*cls);
 
   // Replace current frame with body evaluation
   pop_top(state.stack);
-  push_closure_body(state, cls, std::move(local));
+  push_body_frame(state.stack, std::move(body), std::move(local));
 }
 
 void stackless_evaluator::push_closure_body(evaluator_state &state, const closure_ptr &cls,
                                             environment_ptr local) {
-  push_frame(state, detail::body_expr_of(*cls), std::move(local));
-  state.stack.back().function_body = true; // a `return` in it returns from here
+  push_body_frame(state.stack, detail::body_expr_of(*cls), std::move(local));
 }
 
 // ---------------------------------------------------------------------------

@@ -240,11 +240,6 @@ struct environment {
   value_t *lookup(const std::string &name);
   const value_t *lookup(const std::string &name) const;
 
-  /// lookup(), also saying where the name is bound: the binding (an entry of a scope's
-  /// `bindings`), and in `scope` (if given) the scope that has it. Null when nothing binds it.
-  const std::pair<const std::string, value_t> *
-  find_binding(const std::string &name, const environment **scope = nullptr) const;
-
   /// Set a binding in this scope. Throws std::logic_error when this scope is frozen.
   void set(const std::string &name, value_t val);
 

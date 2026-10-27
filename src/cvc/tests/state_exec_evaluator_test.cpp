@@ -313,3 +313,16 @@ TEST(EvaluatorSpareVectors, KeepNoValues) {
       ev.evaluate_script("(begin (length (mk)) (if t (length (mk))) (alive))").is_truthy());
   EXPECT_TRUE(ev.evaluate_script("(begin (set keep (mk)) (alive))").is_truthy());
 }
+
+// ─── A function passed as a parameter, called in tail position ────────────
+
+TEST_F(EvaluatorTest, FunctionParameterCalledInTailPosition) {
+  EXPECT_EQ(eval_int("(begin (defun inc (n) (+ n 1)) (defun twice (f x) (f (f x))) "
+                     "(twice inc 5))"),
+            7);
+  EXPECT_EQ(eval_int("(begin (defun call-it (h) (h)) (call-it (lambda () 42)))"), 42);
+  EXPECT_EQ(eval_int("(begin (defun call-it (h) (h 1)) "
+                     "(call-it (lambda (a) (set b (+ a 1)) (* b 21))))"),
+            42);
+}
+

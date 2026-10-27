@@ -1,7 +1,9 @@
 #include <chrono>
+#include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/generator.h>
 #include <cvc/state/state_exec/parser.h>
+#include <cvc/state/state_exec/scheduler.h>
 #include <cvc/state/state_exec/stackless_evaluator.h>
 #include <cvc/state/state_exec/types.h>
 #include <gtest/gtest.h>
@@ -692,9 +694,11 @@ TEST_F(StacklessEvaluatorTest, CallSeesItsFunctionRebound) {
   }
 }
 
+#include "../state/state_exec/scope_mark.h"
+
 TEST(StacklessCallee, NoteWhereTheFunctionIsAndCheckIt) {
-  // The frame a call's init leaves holds the binding it found; a frame whose scopes gained a
-  // binding since looks the name up again.
+  // The frame a call's init leaves holds the binding it found and marks the scopes it walked; a
+  // frame whose scopes gained a binding since looks the name up again.
   auto env = builtins::make_default_environment();
   stackless_evaluator ev(env);
   evaluator_state st = ev.create_state(parse("(+ 1 2)"));
@@ -703,14 +707,112 @@ TEST(StacklessCallee, NoteWhereTheFunctionIsAndCheckIt) {
   ASSERT_NE(call.callee, nullptr);
   EXPECT_EQ(call.callee->first, "+");
   EXPECT_TRUE(std::holds_alternative<native_fn>(call.callee->second.v));
-  EXPECT_EQ(call.callee_scope, env.get());
+  ASSERT_GE(call.callee_depth, 1u);
+  const environment *last = call.env.get();
+  for (std::uint32_t i = 1; i < call.callee_depth; ++i)
+    last = last->outer.get();
+  EXPECT_EQ(last, env.get()); // the walk ended at the scope that binds +
+  EXPECT_TRUE(detail::mark_holds(call.env.get(), {call.callee_depth, call.callee_stamp}));
   // A binding of + in the process scope, nearer than the builtins: the apply step finds it.
   st.global_env->set("+", value_t{native_fn{[](std::span<const value_t>) -> value_t {
                        return value_t(int64_t(99));
                      }}});
+  EXPECT_FALSE(detail::mark_holds(call.env.get(), {call.callee_depth, call.callee_stamp}));
   while (!ev.step(st)) {
   }
   EXPECT_EQ(std::get<int64_t>(st.result.v), 99);
+}
+
+TEST(StacklessCallee, ARewiredChainIsLookedUpAgain) {
+  // E -> X -> G, G binding f, and the call (f ...) initialized in E. A host then makes E's
+  // enclosing scope M, which binds f too and has as many bindings as X: the apply step finds M's.
+  auto G = builtins::make_default_environment();
+  stackless_evaluator ev(G);
+  ev.evaluate_script("(defun f (x) 1)", G);
+  const value_t two = ev.evaluate_script("(lambda (x) 2)", G);
+  auto X = environment::extend(G);
+  X->set("pad", value_t(int64_t(0)));
+  auto M = environment::extend(G);
+  M->set("f", two);
+  auto E = environment::extend(X);
+  evaluator_state st = ev.create_state(parse("(f (+ 0 0))"), E);
+  while (st.stack.size() < 2)
+    ASSERT_FALSE(ev.step(st)); // past the call's init: its argument is being evaluated
+  E->outer = M;
+  while (!ev.step(st)) {
+  }
+  EXPECT_EQ(std::get<int64_t>(st.result.v), 2);
+}
+
+// ─── A function passed as a parameter, called in tail position ────────────
+//
+// The call's frame is then the only owner of the scope that binds the function: the call must
+// take what it needs from the closure before that frame goes.
+
+namespace {
+const char *const kTailCalls[][2] = {
+    {"(begin (defun inc (n) (+ n 1)) (defun twice (f x) (f (f x))) (twice inc 5))", "7"},
+    {"(begin (defun call-it (h) (h)) (call-it (lambda () 42)))", "42"},
+    {"(begin (defun call-it (h) (h 1)) (call-it (lambda (a) (set b (+ a 1)) (* b 21))))", "42"},
+    {"(begin (defun app (g v) (g v)) (app (lambda (v) (app (lambda (w) (* w 6)) v)) 7))", "42"},
+};
+} // namespace
+
+TEST_F(StacklessEvaluatorTest, FunctionParameterCalledInTailPosition) {
+  for (const auto &[script, want] : kTailCalls)
+    EXPECT_EQ(std::to_string(eval_int(script)), want) << script;
+}
+
+TEST(StacklessTailCall, FunctionParameterCalledInTailPositionInAScheduler) {
+  for (const auto &[script, want] : kTailCalls) {
+    {
+      scheduler sched;
+      const int pid = sched.execute(std::string(script));
+      auto results = sched.run();
+      EXPECT_EQ(std::to_string(std::get<int64_t>(results.at(pid).v)), want) << script;
+    }
+    {
+      async_scheduler sched;
+      const int pid = sched.execute(std::string(script));
+      auto results = sched.sync_run();
+      EXPECT_EQ(std::to_string(std::get<int64_t>(results.at(pid).v)), want) << script;
+    }
+  }
+}
+
+// ─── The last frame's parts go before the state's old result ──────────────
+
+TEST(StacklessLastFrame, PartsAreDroppedBeforeTheOldResult) {
+  // As pop_frame drops them: what the last frame held first, then the result it replaces (with
+  // a release backlog, that order decides how freeing is split across data steps).
+  std::vector<std::string> dropped;
+  struct note {
+    std::vector<std::string> *log = nullptr;
+    std::string name;
+    ~note() {
+      if (log)
+        log->push_back(name);
+    }
+  };
+  auto noted = [&](const char *name) {
+    auto n = std::make_shared<note>();
+    n->log = &dropped;
+    n->name = name;
+    return value_t{native_fn{[n](std::span<const value_t>) -> value_t { return value_t(); }}};
+  };
+  auto env = builtins::make_default_environment();
+  env->set("mk",
+           value_t{native_fn{[&](std::span<const value_t>) -> value_t { return noted("frame"); }}});
+  stackless_evaluator ev(env);
+  for (const char *script : {"(begin (mk) 1)", "(if (mk) 1 2)"}) {
+    dropped.clear();
+    evaluator_state st = ev.create_state(parse(script));
+    st.result = noted("result"); // as a generator's last yielded value would be
+    while (!ev.step(st)) {
+    }
+    EXPECT_EQ(std::get<int64_t>(st.result.v), 1) << script;
+    EXPECT_EQ(dropped, (std::vector<std::string>{"frame", "result"})) << script;
+  }
 }
 
 // ─── A closure's body, built once ──────────────────────────────────────────

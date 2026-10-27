@@ -1,5 +1,8 @@
+#include "scope_mark.h"
+
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <cvc/state/state_exec/exceptions.h> // dsl_error: a refused allocation is MemoryError
 #include <cvc/state/state_exec/types.h>
 #include <new>
@@ -588,10 +591,9 @@ auto find_hashed(Map &b, const std::string &name, std::size_t hash) -> decltype(
 }
 
 // Walk the scope chain from `e` for `name`, hashing the name once (not once per scope) and
-// skipping empty scopes. The binding found, and in `scope` (if given) the scope it is in.
+// skipping empty scopes. The binding found, or null.
 template <class Env>
-auto binding_in(Env *e, const std::string &name,
-                Env **scope = nullptr) -> decltype(&*e->bindings.begin()) {
+auto binding_in(Env *e, const std::string &name) -> decltype(&*e->bindings.begin()) {
   std::size_t hash = 0;
   bool hashed = false;
   for (; e; e = e->outer.get()) {
@@ -601,15 +603,36 @@ auto binding_in(Env *e, const std::string &name,
       hash = std::hash<std::string>{}(name);
       hashed = true;
     }
+    if (auto *binding = find_hashed(e->bindings, name, hash))
+      return binding;
+  }
+  return nullptr;
+}
+} // namespace
+
+const std::pair<const std::string, value_t> *
+detail::find_marked(const environment *e, const std::string &name, scope_mark &mark) {
+  mark = scope_mark{};
+  std::size_t hash = 0;
+  bool hashed = false;
+  std::uint64_t depth = 0, stamp = 0;
+  for (; e; e = e->outer.get()) {
+    ++depth;
+    stamp = stamp_with(stamp, e);
+    if (e->bindings.empty())
+      continue;
+    if (!hashed) {
+      hash = std::hash<std::string>{}(name);
+      hashed = true;
+    }
     if (auto *binding = find_hashed(e->bindings, name, hash)) {
-      if (scope)
-        *scope = e;
+      if (depth <= UINT32_MAX)
+        mark = scope_mark{static_cast<std::uint32_t>(depth), stamp};
       return binding;
     }
   }
   return nullptr;
 }
-} // namespace
 
 environment::~environment() { detail::drop_owner(outer); }
 
@@ -621,11 +644,6 @@ value_t *environment::lookup(const std::string &name) {
 const value_t *environment::lookup(const std::string &name) const {
   auto *binding = binding_in(this, name);
   return binding ? &binding->second : nullptr;
-}
-
-const std::pair<const std::string, value_t> *
-environment::find_binding(const std::string &name, const environment **scope) const {
-  return binding_in(this, name, scope);
 }
 
 void environment::set(const std::string &name, value_t val) {

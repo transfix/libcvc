@@ -14,6 +14,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <cvc/state/state_exec/data_job.h>
 #include <cvc/state/state_exec/evaluator.h>
 #include <cvc/state/state_exec/exceptions.h>
@@ -77,14 +78,17 @@ struct eval_frame {
   /// The frame evaluates a DSL function's body: a `return` inside it unwinds no further.
   bool function_body = false;
   /// A call's function, as found when the call was initialized, so that applying it needn't
-  /// look the name up again: the binding (a node of `callee_scope`'s bindings, which are never
-  /// removed from a live scope), the scope it is in, and the sum of the sizes of the scopes from
-  /// `env` to that one. A scope that gains a binding meanwhile (one that might shadow it) changes
-  /// the sum, and then the name is looked up again, as it is for a frame without one (a restored
-  /// frame). Not serialized; not part of what the frame means.
+  /// look the name up again: the scopes that lookup walked, from `env` out to the one that binds
+  /// it (how many, 0 for no record, and a stamp of their sizes and addresses), and the binding (a
+  /// node of that scope's `bindings`). The apply step uses the binding only while those scopes
+  /// are as they were: a scope that gained a binding meanwhile (one that might shadow it), or a
+  /// chain a host rewired, makes it look the name up again, as a frame without a record does (a
+  /// restored one). Not serialized; not part of what the frame means. (A host that erases a
+  /// name from a scope's `bindings`, rather than adding or setting one, must first clear the
+  /// record of every frame waiting to apply a function found in that scope.)
+  std::uint32_t callee_depth = 0;
+  std::uint64_t callee_stamp = 0;
   const std::pair<const std::string, value_t> *callee = nullptr;
-  const environment *callee_scope = nullptr;
-  std::size_t callee_stamp = 0;
 };
 
 /// Deep-data work a step left unfinished (data_options::step_nodes, or a job waiting on a call):
