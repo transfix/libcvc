@@ -130,6 +130,21 @@ std::optional<std::size_t> process::alloc_limit(std::size_t used_bytes) const {
 
 namespace detail {
 
+std::chrono::steady_clock::time_point time_after(std::chrono::steady_clock::time_point t,
+                                                 double seconds) {
+  using clock = std::chrono::steady_clock;
+  if (!(seconds > 0.0)) // also NaN
+    return t;
+  // The seconds left before the clock's last time point, as a double: anything at or past it
+  // saturates (a cast of a double too big for the clock's integer ticks is undefined).
+  const double room = std::chrono::duration<double>(clock::time_point::max() - t).count();
+  if (seconds >= room)
+    return clock::time_point::max();
+  const clock::duration d =
+      std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(seconds));
+  return d >= clock::time_point::max() - t ? clock::time_point::max() : t + d;
+}
+
 namespace {
 bool runnable_status(process_status s) {
   return s == process_status::ready || s == process_status::running;
@@ -362,9 +377,22 @@ const process_ptr *process_table::pick_round_robin(int &rr_index) {
   if (!l)
     return nullptr;
   const int n = static_cast<int>(l->count);
-  const int k = rr_index % n;
-  rr_index = (k + 1) % n;
-  return slots_[kth(*l, static_cast<std::uint32_t>(k))];
+  if (n == 1) {
+    // One runnable process (a lone program): when it is the one picked last, it is picked again
+    // without the descent. The index comes out as below (any index mod 1 is 0).
+    rr_index = 0;
+    if (last_pick_ < slots_.size() && slots_[last_pick_]) {
+      const process::table_entry &e = (*slots_[last_pick_])->table;
+      if (e.queued && e.level == l->key)
+        return slots_[last_pick_];
+    }
+    last_pick_ = kth(*l, 0);
+    return slots_[last_pick_];
+  }
+  const int k = rr_index >= 0 && rr_index < n ? rr_index : rr_index % n;
+  rr_index = k + 1 < n ? k + 1 : 0;
+  last_pick_ = kth(*l, static_cast<std::uint32_t>(k));
+  return slots_[last_pick_];
 }
 
 const process_ptr *process_table::pick_first() {
@@ -613,37 +641,48 @@ void wakeup::notify() {
     SetEvent(impl_->event);
 }
 
-bool wakeup::wait_until(clock::time_point t) {
+bool wakeup::wait_until(clock::time_point t, bool precise) {
   if (!impl_->event) {
     std::this_thread::sleep_until(t);
     return false;
   }
-  // The high-resolution timer fires on a ~0.5 ms grid, so it is set that much early and the
-  // last stretch is spent yielding (still watching the event): a wait ends on time, as the
-  // spinning it replaces did, for at most that much CPU.
+  // The high-resolution timer fires on a ~0.5 ms grid. A precise wait sets it that much early
+  // and spins through the last stretch on the CPU (still watching the event): it ends on time,
+  // as the spinning it replaces did, for at most that much CPU. It spins rather than yields: a
+  // yield on a loaded machine can give the core away for a whole scheduler quantum, and the
+  // wake comes that late. Any other wait just takes the timer.
   constexpr long long kSpinNs = 600000;
+  const long long early = precise ? kSpinNs : 0;
   for (;;) {
     const clock::time_point now = clock::now();
     if (now >= t)
       return WaitForSingleObject(impl_->event, 0) == WAIT_OBJECT_0;
-    const long long ns = std::chrono::duration_cast<std::chrono::nanoseconds>(t - now).count();
-    if (impl_->timer && ns <= kSpinNs) {
+    const long long ns =
+        t == clock::time_point::max()
+            ? LLONG_MAX
+            : std::chrono::duration_cast<std::chrono::nanoseconds>(t - now).count();
+    if (impl_->timer && ns <= early) {
       if (WaitForSingleObject(impl_->event, 0) == WAIT_OBJECT_0)
         return true;
-      SwitchToThread();
+      for (int i = 0; i < 64; ++i)
+        YieldProcessor(); // a pause: the core stays ours
       continue;
     }
-    if (impl_->timer) {
+    if (impl_->timer && ns < LLONG_MAX / 2) {
       LARGE_INTEGER due;
-      due.QuadPart = -((ns - kSpinNs + 99) / 100); // relative, in 100 ns units
+      due.QuadPart = -((ns - early + 99) / 100); // relative, in 100 ns units
       if (SetWaitableTimer(impl_->timer, &due, 0, nullptr, nullptr, FALSE)) {
         const HANDLE handles[2] = {impl_->event, impl_->timer};
         if (WaitForMultipleObjects(2, handles, FALSE, INFINITE) == WAIT_OBJECT_0)
           return true;
-        continue; // the timer: due (the loop checks)
+        if (!precise)
+          return WaitForSingleObject(impl_->event, 0) == WAIT_OBJECT_0; // the timer: due
+        continue; // the timer: the spin (the loop checks)
       }
     }
-    const DWORD ms = static_cast<DWORD>((ns + 999999) / 1000000);
+    const DWORD ms = ns >= static_cast<long long>(INFINITE - 1) * 1000000
+                         ? INFINITE - 1
+                         : static_cast<DWORD>((ns + 999999) / 1000000);
     if (WaitForSingleObject(impl_->event, ms) == WAIT_OBJECT_0)
       return true;
   }
@@ -666,7 +705,12 @@ void wakeup::notify() {
   impl_->cv.notify_one();
 }
 
-bool wakeup::wait_until(clock::time_point t) {
+bool wakeup::wait_until(clock::time_point t, bool /*precise*/) {
+  // A far deadline (time_point::max(): none) is waited for an hour at a time, so no standard
+  // library converts it to its own clock with an overflow; the callers wait again.
+  const clock::time_point now = clock::now();
+  if (t - now > std::chrono::hours(1))
+    t = now + std::chrono::hours(1);
   std::unique_lock<std::mutex> lock(impl_->mu);
   impl_->cv.wait_until(lock, t, [this] { return impl_->signaled; });
   const bool signaled = impl_->signaled;
@@ -690,7 +734,7 @@ tree_changes::tree_changes() : impl_(std::make_unique<impl>()) {}
 tree_changes::~tree_changes() = default;
 
 void tree_changes::watch(cvc::state *root) {
-  if (root == root_)
+  if (root == root_ && (!root || attached()))
     return;
   impl_->child.disconnect();
   impl_->value.disconnect();
@@ -705,7 +749,21 @@ void tree_changes::watch(cvc::state *root) {
   impl_->value = root->valueChanged.connect([c]() { c->fetch_add(1, std::memory_order_release); });
 }
 
+bool tree_changes::attached() const { return impl_->child.connected(); }
+
 std::uint64_t tree_changes::count() const { return impl_->count->load(std::memory_order_acquire); }
+
+// ---------------------------------------------------------------------------
+// detail::settings_changes
+// ---------------------------------------------------------------------------
+
+std::uint64_t settings_changes::version(cvc::state *root) {
+  // The node the settings live under (scheduler::settings_root); a different node than the one
+  // counted, or none, counts as a change (tree_changes::watch).
+  cvc::state *const node = root ? root->findDescendant("state_exec") : nullptr;
+  changes_.watch(node);
+  return changes_.count();
+}
 
 } // namespace detail
 

@@ -86,9 +86,17 @@ double thread_cpu_seconds() {
 }
 
 namespace {
+// Saturating: a budget of infinite (or astronomically many) seconds never runs out, where a
+// plain cast of the seconds to the clock's integer ticks would overflow.
 time_budget::clock::time_point after(time_budget::clock::time_point t, double seconds) {
-  return t + std::chrono::duration_cast<time_budget::clock::duration>(
-                 std::chrono::duration<double>(seconds));
+  using clock = time_budget::clock;
+  if (!(seconds > 0.0))
+    return t;
+  if (seconds >= std::chrono::duration<double>(clock::time_point::max() - t).count())
+    return clock::time_point::max();
+  const clock::duration d =
+      std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(seconds));
+  return d >= clock::time_point::max() - t ? clock::time_point::max() : t + d;
 }
 } // namespace
 
@@ -159,6 +167,22 @@ bool time_budget::spent(clock::time_point now) {
   // spent sooner than this.
   next_ = after(now, half_ - cpu_);
   return false;
+}
+
+void time_budget::charge_wait(double seconds) {
+  if (running_ || !(seconds > 0.0) || half_ <= 0.0)
+    return;
+  if (!on_cpu_) {
+    const double w = std::min(seconds, half_ - wall_);
+    wall_ += w;
+    seconds -= w;
+    if (wall_ >= half_) {
+      wall_ = half_;
+      on_cpu_ = true;
+    }
+  }
+  if (on_cpu_ && seconds > 0.0)
+    cpu_ += seconds;
 }
 
 double time_budget::remaining() const {

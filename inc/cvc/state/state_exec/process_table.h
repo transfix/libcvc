@@ -39,6 +39,11 @@ class state;
 
 namespace cvc::state_exec::detail {
 
+/// `t` plus `seconds`, saturating: an infinite or huge `seconds` gives the clock's last time
+/// point (a plain duration_cast of one overflows), a negative or NaN one gives `t`.
+std::chrono::steady_clock::time_point time_after(std::chrono::steady_clock::time_point t,
+                                                 double seconds);
+
 class process_table {
 public:
   using clock = std::chrono::steady_clock;
@@ -158,6 +163,7 @@ private:
   std::uint32_t dead_ = 0;
   std::vector<level> levels_; // sorted by key
   std::size_t queued_ = 0;
+  std::uint32_t last_pick_ = none; // the slot pick_round_robin returned last (a hint)
 
   std::size_t sleeping_ = 0;
   std::size_t receiving_ = 0;
@@ -185,8 +191,12 @@ public:
   wakeup &operator=(const wakeup &) = delete;
   /// Any thread: wake a wait_until() in progress, or the next one.
   void notify();
-  /// Block until notify() (true; the notification is consumed) or `t` (false).
-  bool wait_until(clock::time_point t);
+  /// Block until notify() (true; the notification is consumed) or `t` (false). A `precise`
+  /// wait (a sleeper's deadline) ends on time: on Windows, whose high-resolution timer fires on
+  /// a ~0.5 ms grid, its timer is set early and the last stretch (at most ~0.6 ms) is spent
+  /// spinning on the CPU, watching for a notify(). Any other wait may end up to that grid late
+  /// and burns no CPU.
+  bool wait_until(clock::time_point t, bool precise = false);
 
 private:
   struct impl;
@@ -203,15 +213,35 @@ public:
   ~tree_changes();
   tree_changes(const tree_changes &) = delete;
   tree_changes &operator=(const tree_changes &) = delete;
-  /// Count the changes under `root` from now on (nullptr: stop counting).
+  /// Count the changes under `root` from now on (nullptr: stop counting). Watching the root
+  /// it already watches does nothing, unless that node went away meanwhile (see attached()).
   void watch(cvc::state *root);
   cvc::state *root() const { return root_; }
+  /// Whether the slots are still connected to root()'s signals: false once that node is gone
+  /// (its signals destroyed), even if another node now has its address.
+  bool attached() const;
   std::uint64_t count() const;
 
 private:
   struct impl;
   std::unique_ptr<impl> impl_;
   cvc::state *root_ = nullptr;
+};
+
+/// The schedulers' settings live under the `state_exec` node of their tree (state_exec.defaults.*
+/// and state_exec.schedulers.<id>.*). version() is a number that moves whenever one of them may
+/// have changed: a write under that node (its change signals), or the node coming, going or
+/// being replaced. A scheduler re-reads its settings only when it moved, so a submission or a
+/// charge doesn't walk the tree for each setting, and writes elsewhere in the tree pay nothing.
+/// It costs one lookup of the `state_exec` node per call. Like the watches, it relies on writes
+/// firing the tree's signals: one that doesn't (state::reset with fireCallbacks=false, a node
+/// operator() creates without a value) is seen at the next write under the node that does.
+class settings_changes {
+public:
+  std::uint64_t version(cvc::state *root);
+
+private:
+  tree_changes changes_;
 };
 
 } // namespace cvc::state_exec::detail
