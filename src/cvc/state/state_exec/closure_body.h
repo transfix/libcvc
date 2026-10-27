@@ -3,6 +3,8 @@
 #ifndef CVC_STATE_EXEC_CLOSURE_BODY_H
 #define CVC_STATE_EXEC_CLOSURE_BODY_H
 
+#include <cstdint>
+#include <cstring>
 #include <cvc/state/state_exec/types.h>
 #include <memory>
 #include <type_traits>
@@ -11,8 +13,18 @@
 
 namespace cvc::state_exec::detail {
 
+/// Whether two numbers are the same bits: 0.0 and -0.0 are different forms (they evaluate to
+/// different numbers), and a NaN is the same form as itself.
+inline bool same_bits(double x, double y) noexcept {
+  std::uint64_t a = 0, b = 0;
+  std::memcpy(&a, &x, sizeof a);
+  std::memcpy(&b, &y, sizeof b);
+  return a == b;
+}
+
 /// Whether `a` is `b` as a body form: the same object for a list (or anything else held by
-/// pointer), an equal atom otherwise. (A native function can't be compared: never.)
+/// pointer), an atom that evaluates to the same value otherwise (a number of the same bits, an
+/// equal string or symbol). (A native function can't be compared: never.)
 inline bool same_form(const value_t &a, const value_t &b) {
   if (a.v.index() != b.v.index())
     return false;
@@ -28,6 +40,8 @@ inline bool same_form(const value_t &a, const value_t &b) {
                            std::is_same_v<T, closure_ptr> || std::is_same_v<T, data_object_ptr> ||
                            std::is_same_v<T, generator_ptr>)
           return x.get() == y.get();
+        else if constexpr (std::is_same_v<T, double>)
+          return same_bits(x, y); // not ==, which takes -0.0 for 0.0
         else
           return x == y;
       },

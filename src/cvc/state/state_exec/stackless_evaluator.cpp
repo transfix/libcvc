@@ -260,9 +260,10 @@ void hand_up(evaluator_state &state, value_t &&v) {
 //
 // One slot per lambda form, by its address, holding (weakly) the (begin ...) the last closure it
 // made shares. A slot whose form was freed and its address reused is harmless: what a slot holds
-// is used only while it is exactly (begin body...) for the new closure's body. Per thread, and
-// bounded (64 slots, each a weak reference: the list's block stays allocated while the slot
-// holds it, about 40 bytes, until the slot is reused).
+// is used only while it is exactly (begin body...) for the new closure's body, each form the same
+// object or an atom that evaluates the same (same_form: a number bit for bit, so -0.0 is not
+// 0.0). Per thread, and bounded (64 slots, each a weak reference: the list's block stays
+// allocated while the slot holds it, about 40 bytes, until the slot is reused).
 struct shared_bodies {
   static constexpr std::size_t kSlots = 64;
   struct slot {

@@ -905,3 +905,47 @@ TEST(StacklessClosureBody, EachGeneratorHasABodyOfItsOwn) {
   EXPECT_EQ(std::get<int64_t>(l[0].v), 1);
   EXPECT_TRUE(l[1].is_nil()) << to_string(l[1]);
 }
+
+#include "../state/state_exec/closure_body.h"
+
+#include <cmath>
+
+TEST(StacklessClosureBody, FormsAreTheSameOnlyIfTheyEvaluateTheSame) {
+  // A number is the same form only bit for bit: 0.0 and -0.0 are equal numbers but different
+  // forms, and a NaN is the same form as itself.
+  EXPECT_TRUE(detail::same_form(value_t(0.0), value_t(0.0)));
+  EXPECT_FALSE(detail::same_form(value_t(0.0), value_t(-0.0)));
+  EXPECT_FALSE(detail::same_form(value_t(-0.0), value_t(0.0)));
+  EXPECT_TRUE(detail::same_form(value_t(std::nan("")), value_t(std::nan(""))));
+  EXPECT_FALSE(detail::same_form(value_t(1.0), value_t(int64_t(1))));
+  EXPECT_TRUE(detail::same_form(value_t(int64_t(3)), value_t(int64_t(3))));
+  EXPECT_TRUE(detail::same_form(value_t(symbol{"x"}), value_t(symbol{"x"})));
+  EXPECT_TRUE(detail::same_form(value_t(std::string("s")), value_t(std::string("s"))));
+  EXPECT_FALSE(detail::same_form(parse("(a)"), parse("(a)"))); // lists: the same object only
+}
+
+TEST(StacklessClosureBody, ABodyIsSharedOnlyWithFormsThatEvaluateTheSame) {
+  // A lambda form at the address of a freed one, whose body differs only in the sign of a zero,
+  // gets a (begin ...) of its own, not the freed form's.
+  const std::vector<value_t> negative = {value_t(), value_t(-0.0)};
+  const std::vector<value_t> positive = {value_t(), value_t(0.0)};
+  const int form = 0; // stands in for the lambda form's list: both at this address
+  const list_ptr made = detail::shared_body_expr(&form, negative);
+  ASSERT_NE(made, nullptr);
+  EXPECT_EQ(detail::shared_body_expr(&form, negative).get(), made.get());
+  const list_ptr other = detail::shared_body_expr(&form, positive);
+  ASSERT_NE(other, nullptr);
+  EXPECT_NE(other.get(), made.get());
+  ASSERT_EQ(other->size(), 3u);
+  EXPECT_FALSE(std::signbit(std::get<double>((*other)[2].v)));
+
+  // The same through a program: each expansion of the macro is a new lambda form, likely at the
+  // address of the last one, freed by then.
+  stackless_evaluator ev(builtins::make_default_environment());
+  const value_t got = ev.evaluate_script(
+      "(defmacro k (v) (lambda () nil v)) (set a (k -0.0)) (set b (k 0.0)) (list (a) (b))");
+  const auto &l = *std::get<list_ptr>(got.v);
+  ASSERT_EQ(l.size(), 2u);
+  EXPECT_TRUE(std::signbit(std::get<double>(l[0].v)));
+  EXPECT_FALSE(std::signbit(std::get<double>(l[1].v)));
+}
