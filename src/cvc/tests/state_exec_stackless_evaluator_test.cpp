@@ -523,3 +523,58 @@ TEST_F(StacklessEvaluatorTest, SlicedReadingOfAnEmptyScriptFinishesWithNil) {
   EXPECT_TRUE(st.done);
   EXPECT_TRUE(st.result.is_nil());
 }
+
+// ─── Special-form dispatch (special_forms.h) ──────────────────────────────
+
+#include "../state/state_exec/special_forms.h"
+
+TEST(SpecialFormOf, NamesEachSpecialFormAndNothingElse) {
+  using detail::special_form;
+  std::set<special_form> seen;
+  for (const std::string &name : stackless_evaluator::all_special_forms()) {
+    const special_form f = detail::special_form_of(name);
+    EXPECT_NE(f, special_form::none) << name;
+    EXPECT_TRUE(seen.insert(f).second) << name << " shares its form with another name";
+    // Every one-letter change, insertion and deletion is not that form (it may be another).
+    for (std::size_t i = 0; i <= name.size(); ++i) {
+      for (char c : std::string("abcdefghijklmnopqrstuvwxyz-!?.")) {
+        std::vector<std::string> near;
+        if (i < name.size()) {
+          std::string changed = name;
+          changed[i] = c;
+          near.push_back(changed);
+        }
+        near.push_back(name.substr(0, i) + c + name.substr(i));
+        for (const std::string &n : near)
+          if (n != name && !stackless_evaluator::all_special_forms().count(n))
+            EXPECT_EQ(detail::special_form_of(n), special_form::none) << n;
+      }
+      if (i < name.size()) {
+        const std::string shorter = name.substr(0, i) + name.substr(i + 1);
+        if (!stackless_evaluator::all_special_forms().count(shorter))
+          EXPECT_EQ(detail::special_form_of(shorter), special_form::none) << shorter;
+      }
+    }
+  }
+  EXPECT_EQ(seen.size(), stackless_evaluator::all_special_forms().size());
+  for (const char *n : {"", "i", "IF", "If", "begin ", "defmacrox", "defclas", "defxlass", "rot"})
+    EXPECT_EQ(detail::special_form_of(n), special_form::none) << n;
+}
+
+TEST_F(StacklessEvaluatorTest, SpecialFormsComeBeforeMacrosAndBindings) {
+  // A macro or a binding can't take a special form's name; a name that only looks like one is an
+  // ordinary function.
+  EXPECT_EQ(eval_int("(begin (defmacro if (a b c) c) (if t 1 2))"), 1);
+  EXPECT_EQ(eval_int("(begin (set while 5) (set i 0) (while (< i 3) (set i (+ i 1))) i)"), 3);
+  EXPECT_EQ(eval_int("(begin (defun bxgin (x) (* x 2)) (bxgin 21))"), 42);
+  EXPECT_EQ(eval_int("(begin (defun defclasx (x) (+ x 1)) (defclasx 41))"), 42);
+  EXPECT_EQ(eval_int("(begin (defmacro sett (v) (set v 7)) (sett y) y)"), 7);
+}
+
+TEST_F(StacklessEvaluatorTest, RestrictedFormsStillGateOnlySpecialForms) {
+  ev->restrict_special_forms(
+      std::make_shared<const std::set<std::string>>(std::set<std::string>{"begin", "defun", "if"}));
+  EXPECT_EQ(eval_int("(begin (defun whilex (x) (if x 1 2)) (whilex t))"), 1);
+  EXPECT_THROW(eval("(begin (while nil 1))"), std::exception);
+  EXPECT_THROW(eval("(set x 1)"), std::exception);
+}

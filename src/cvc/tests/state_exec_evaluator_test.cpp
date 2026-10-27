@@ -236,3 +236,18 @@ TEST_F(EvaluatorTest, Fibonacci) {
                      "  (fib 10))"),
             55);
 }
+
+// ─── Special-form dispatch ─────────────────────────────────────────────────
+
+TEST_F(EvaluatorTest, SpecialFormsComeBeforeMacrosAndBindings) {
+  EXPECT_EQ(eval_int("(begin (defmacro if (a b c) c) (if t 1 2))"), 1);
+  EXPECT_EQ(eval_int("(begin (set while 5) (set i 0) (while (< i 3) (set i (+ i 1))) i)"), 3);
+  EXPECT_EQ(eval_int("(begin (defun bxgin (x) (* x 2)) (bxgin 21))"), 42);
+  EXPECT_EQ(eval_int("(begin (defmacro sett (v) (set v 7)) (sett y) y)"), 7);
+}
+
+TEST_F(EvaluatorTest, YieldAndBreakAreOrdinaryNamesHere) {
+  // The recursive evaluator has no generators or loop breaks: these are functions like any.
+  EXPECT_EQ(eval_int("(begin (defun yield (x) (* x 2)) (yield 21))"), 42);
+  EXPECT_EQ(eval_int("(begin (defun break (x) (+ x 1)) (break 41))"), 42);
+}

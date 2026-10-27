@@ -1,4 +1,5 @@
 #include "closure_natives.h" // detail::class_constructor
+#include "special_forms.h"
 
 #include <atomic>
 #include <cvc/state/state_exec/builtins.h>
@@ -6,7 +7,6 @@
 #include <cvc/state/state_exec/evaluator.h>
 #include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/parser.h>
-#include <cvc/state/state_exec/stackless_evaluator.h> // all_special_forms
 #include <thread>
 
 namespace cvc::state_exec {
@@ -209,7 +209,7 @@ void evaluator::annotate(value_t &exc) {
   if (!lp || !*lp || (*lp)->empty())
     return;
   if (const auto *head = std::get_if<symbol>(&(**lp)[0].v);
-      head && !stackless_evaluator::all_special_forms().count(head->name))
+      head && detail::special_form_of(head->name) == detail::special_form::none)
     set_field(exc, "function", value_t(head->name));
 }
 
@@ -247,44 +247,51 @@ value_t evaluator::eval_form(const value_t &expr, environment_ptr env) {
   const auto &name = head->name;
   std::vector<value_t> args(elems.begin() + 1, elems.end());
 
-  // --- Special forms ---
-  if (name == "if")
+  // --- Special forms --- (all of the stackless evaluator's but yield and break)
+  switch (detail::special_form_of(name)) {
+  case detail::special_form::if_:
     return do_if(args, env);
-  if (name == "begin")
+  case detail::special_form::begin:
     return do_begin(args, env);
-  if (name == "while")
+  case detail::special_form::while_:
     return do_while(args, env);
-  if (name == "for")
+  case detail::special_form::for_:
     return do_for(args, env);
-  if (name == "set")
+  case detail::special_form::set:
     return do_set(args, env);
-  if (name == "quote")
+  case detail::special_form::quote:
     return do_quote(args);
-  if (name == "lambda")
+  case detail::special_form::lambda:
     return do_lambda(args, env);
-  if (name == "return")
+  case detail::special_form::return_:
     return do_return(args, env);
-  if (name == "let")
+  case detail::special_form::let:
     return do_let(args, env);
-  if (name == "super")
+  case detail::special_form::super:
     return do_super(args, env);
-  if (name == "defun")
+  case detail::special_form::defun:
     return do_defun(args, env);
-  if (name == "defclass")
+  case detail::special_form::defclass:
     return do_defclass(args, env);
-  if (name == "defmacro")
+  case detail::special_form::defmacro:
     return do_defmacro(args, env);
-  if (name == "eval")
+  case detail::special_form::eval:
     return do_eval(args, env);
-  if (name == "root")
+  case detail::special_form::root:
     return do_root();
-  if (name == "try")
+  case detail::special_form::try_:
     return do_try(args, env);
-  if (name == "raise")
+  case detail::special_form::raise:
     return do_raise(args, env);
+  case detail::special_form::none:
+  case detail::special_form::yield:
+  case detail::special_form::break_:
+    break;
+  }
 
   // --- User macros ---
-  if (auto it = user_macros_.find(name); it != user_macros_.end()) {
+  if (auto it = user_macros_.empty() ? user_macros_.end() : user_macros_.find(name);
+      it != user_macros_.end()) {
     auto &[params, body] = it->second;
     std::unordered_map<std::string, value_t> subst;
     for (size_t i = 0; i < params.size(); ++i)

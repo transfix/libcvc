@@ -1,4 +1,5 @@
 #include "closure_natives.h"
+#include "special_forms.h"
 
 #include <chrono>
 #include <cvc/state/state_exec/builtins.h>
@@ -910,15 +911,19 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
 
   const auto &name = head->name;
   std::vector<value_t> args(elems.begin() + 1, elems.end());
+  const detail::special_form form = detail::special_form_of(name);
 
   // --- Special-form gate (capability control) ---
   // If this evaluator is restricted, a special form NOT on the allowlist is refused. A
   // non-special-form head falls through to normal application (the environment governs it).
-  if (allowed_forms_ && all_special_forms().count(name) && !allowed_forms_->count(name))
+  if (allowed_forms_ && form != detail::special_form::none && !allowed_forms_->count(name))
     throw dsl_error("RuntimeError", "special form '" + name + "' is not permitted in this context");
 
   // --- Special forms ---
-  if (name == "if") {
+  switch (form) {
+  case detail::special_form::none:
+    break;
+  case detail::special_form::if_: {
     if (args.size() < 2 || args.size() > 3)
       throw dsl_error("TypeError", "if: expected a condition, a then branch and an optional else "
                                    "branch, got " +
@@ -928,7 +933,7 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
     push_frame(state, frame.extra_vals[0], env);
     return;
   }
-  if (name == "begin") {
+  case detail::special_form::begin: {
     if (args.empty()) {
       pop_frame(state, nil_value);
       return;
@@ -939,7 +944,7 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
     push_frame(state, frame.extra_vals[0], env);
     return;
   }
-  if (name == "while") {
+  case detail::special_form::while_: {
     if (args.size() < 2)
       throw dsl_error("TypeError", "while: expected a condition and a body");
     frame.phase = eval_phase::while_cond;
@@ -947,7 +952,7 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
     push_frame(state, frame.extra_vals[0], env);
     return;
   }
-  if (name == "for") {
+  case detail::special_form::for_: {
     if (args.size() < 3)
       throw dsl_error("TypeError", "for: expected a variable, a collection and a body");
     auto *var_sym = std::get_if<symbol>(&args[0].v);
@@ -956,12 +961,12 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
     frame.phase = eval_phase::for_body;
     frame.extra_strs = {var_sym->name};
     frame.extra_vals = {loop_body(args, 2)}; // body expression
-    frame.extra_lists = {};          // will hold iterator
-    frame.index = -1;                // -1 = still evaluating collection
-    push_frame(state, args[1], env); // evaluate collection
+    frame.extra_lists = {};                  // will hold iterator
+    frame.index = -1;                        // -1 = still evaluating collection
+    push_frame(state, args[1], env);         // evaluate collection
     return;
   }
-  if (name == "set") {
+  case detail::special_form::set: {
     if (args.size() != 2)
       throw dsl_error("TypeError", "set: expected 2 args");
     auto *var_sym = std::get_if<symbol>(&args[0].v);
@@ -972,13 +977,13 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
     push_frame(state, args[1], env);
     return;
   }
-  if (name == "quote") {
+  case detail::special_form::quote: {
     if (args.size() != 1)
       throw dsl_error("TypeError", "quote: expected 1 arg");
     pop_frame(state, args[0]);
     return;
   }
-  if (name == "lambda") {
+  case detail::special_form::lambda: {
     if (args.size() < 2)
       throw dsl_error("TypeError", "lambda: expected at least 2 args");
     std::vector<symbol> params;
@@ -1004,21 +1009,21 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
     pop_frame(state, value_t{std::move(cls)});
     return;
   }
-  if (name == "return") {
+  case detail::special_form::return_: {
     if (args.size() != 1)
       throw dsl_error("TypeError", "return: expected 1 arg, got " + std::to_string(args.size()));
     frame.phase = eval_phase::return_value;
     push_frame(state, args[0], env);
     return;
   }
-  if (name == "yield") {
+  case detail::special_form::yield: {
     if (args.size() != 1)
       throw dsl_error("TypeError", "yield: expected 1 arg, got " + std::to_string(args.size()));
     frame.phase = eval_phase::yield_value;
     push_frame(state, args[0], env);
     return;
   }
-  if (name == "break") {
+  case detail::special_form::break_: {
     if (args.size() > 1)
       throw dsl_error("TypeError",
                       "break: expected at most 1 arg, got " + std::to_string(args.size()));
@@ -1034,7 +1039,7 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
     // Fall through to step_break_unwind on next step
     return;
   }
-  if (name == "let") {
+  case detail::special_form::let: {
     if (args.size() < 2)
       throw dsl_error("TypeError", "let: expected at least 2 args");
     auto *bindings_lp = std::get_if<list_ptr>(&args[0].v);
@@ -1064,7 +1069,7 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
     }
     return;
   }
-  if (name == "defun") {
+  case detail::special_form::defun: {
     if (args.size() < 3)
       throw dsl_error("TypeError", "defun: expected at least 3 args");
     auto *name_sym = std::get_if<symbol>(&args[0].v);
@@ -1095,7 +1100,7 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
     pop_frame(state, value_t{std::move(cls)});
     return;
   }
-  if (name == "defmacro") {
+  case detail::special_form::defmacro: {
     if (args.size() < 3)
       throw dsl_error("TypeError", "defmacro: expected at least 3 args");
     auto *name_sym = std::get_if<symbol>(&args[0].v);
@@ -1119,18 +1124,18 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
     pop_frame(state, value_t{symbol{name_sym->name}});
     return;
   }
-  if (name == "eval") {
+  case detail::special_form::eval: {
     if (args.size() != 1)
       throw dsl_error("TypeError", "eval: expected 1 arg");
     frame.phase = eval_phase::eval_inner;
     push_frame(state, args[0], env);
     return;
   }
-  if (name == "root") {
+  case detail::special_form::root: {
     pop_frame(state, state.root_expr);
     return;
   }
-  if (name == "super") {
+  case detail::special_form::super: {
     if (args.size() < 2)
       throw dsl_error("TypeError", "super: expected at least 2 args");
     auto *method_sym = std::get_if<symbol>(&args[1].v);
@@ -1141,11 +1146,11 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
     push_frame(state, args[0], env); // evaluate self
     return;
   }
-  if (name == "defclass") {
+  case detail::special_form::defclass: {
     handle_defclass(state, frame, args);
     return;
   }
-  if (name == "try") {
+  case detail::special_form::try_: {
     // (try body... (catch (Type var) handler...)... (finally cleanup...))
     try_form form = parse_try(args);
     frame.phase = eval_phase::try_body;
@@ -1155,7 +1160,7 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
     push_frame(state, frame.extra_vals[try_body_slot], env);
     return;
   }
-  if (name == "raise") {
+  case detail::special_form::raise: {
     if (args.size() > 1)
       throw dsl_error("TypeError",
                       "raise: expected at most 1 arg, got " + std::to_string(args.size()));
@@ -1170,9 +1175,11 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
     push_frame(state, args[0], env);
     return;
   }
+  }
 
   // User macros — expand then re-evaluate
-  if (auto it = state.user_macros.find(name); it != state.user_macros.end()) {
+  if (auto it = state.user_macros.empty() ? state.user_macros.end() : state.user_macros.find(name);
+      it != state.user_macros.end()) {
     auto &[macro_params, body] = it->second;
     std::unordered_map<std::string, value_t> subst;
     for (size_t i = 0; i < macro_params.size(); ++i)
