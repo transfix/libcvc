@@ -5023,7 +5023,10 @@ std::vector<scenario> make_scenarios() {
             "it must still finish",
             {"sync", "async"},
             {{"n", {"8000"}}},
-            {{"n", {"300"}}}},
+            // A Debug build runs the loop ~50 times slower: 300 iterations take ~150 ms on the
+            // async scheduler there, past the budget, and the process is killed. The smoke run
+            // only checks that the scenario works.
+            {{"n", {"30"}}}},
            {"max_memory",
             "max_memory = 1 GiB (alloc guard, heap accounting)",
             {"sync", "async"},

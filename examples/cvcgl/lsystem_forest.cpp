@@ -23,6 +23,8 @@
 //   --width 1920 --height 1080 --out frames   (also --capture orbit; then encode `frames/`)
 
 #define _USE_MATH_DEFINES // MSVC: make <cmath> define M_PI (and friends)
+#include "demos_menu.h"   // the gallery's Demos menu
+
 #include <algorithm>
 #include <boost/program_options.hpp>
 #include <cctype>
@@ -1279,6 +1281,7 @@ int main(int argc, char **argv) {
   bool uiLighting = true; // the StageLightingPanel window
   ui.setDrawCallback([&] {
     if (ImGui::BeginMainMenuBar()) {
+      cvc_examples::demos_menu("lsystem_forest");
       if (ImGui::BeginMenu("Scene")) {
         // The library's menu: shadows, shadow-map resolution, bake interval and
         // the diagnostic chrome, all read back from the scene rather than from
@@ -1402,7 +1405,7 @@ int main(int argc, char **argv) {
   // capture's fixed 1/fps makes the frames reproducible.
   cvc::world_clock &clock = app.world_clock();
   cvc::world_clock_binding clockDrive(app, clock);
-  while (!view.windowClosed()) {
+  while (!view.windowClosed() && !cvc_examples::demo_switch_requested()) {
     double t, dt;
     if (capturing) { // fixed synthetic clock -> real-time playback of the animation
       t = frame / fps;

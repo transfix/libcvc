@@ -1,0 +1,66 @@
+# transfer_function.ari — a REUSABLE Ariadne component: the transfer-function editor (the port of
+# VolumeRover2's ColorTable2) for any volume-type scene node (volren / volslice / volume) or an
+# fe_lab node. Every such node publishes its renderer-agnostic transfer-function model at
+# "<scene>.graphics.root.children.<node>.transfer_function" (one cvc::tf::model string) and the
+# overlay layers beside it, so the editor drives the renderer — colour ramp, opacity curve and
+# isocontours (isosurfaces; fe_lab's meshing isovalue) — with NO host C++.
+#
+# Two units, parametrized by include args; every arg has a default, so a bare include loads:
+#   transfer_function          a window holding the editor
+#       args: node (volume), title (Transfer Function), id (transfer_function)
+#   transfer_function_editor   just the widget, to embed in a document's own window
+#       args: node (volume), label (Transfer function), id (transfer_function_editor)
+# `node` is the scene node id. `id` names the instance: the window's geometry
+# (tree.<id>.geometry) and the editor's view — its zoom window and layer toggles — persist under
+# it, so give each include its own id when a document shows several editors.
+#
+# Use it:
+#     import: cvc://components/transfer_function.ari
+#     windows:
+#       - include: transfer_function
+#         args: { node: skull }               # the scene node the editor drives
+#         pos: [400, 16]                      # placement / size at the include site, as usual
+#         size: [440, 330]
+#       - window: Slices
+#         children:
+#           - include: transfer_function_editor
+#             args: { node: slices, id: slices_tf }
+#
+# State, with T = graphics.root.children.<node>.transfer_function:
+#   T                    the model: {"color":[[at,r,g,b],..],"alpha":[[at,a],..],
+#                        "isocontours":[{"id":..,"at":..},..],"domain":"auto"|[min,max],
+#                        "opacity_cubed":false,"resolution":256} — positions normalized to [0,1]
+#                        over the domain; a document seeds it with the node's transfer_function:
+#   T.range              the node's data range (the `auto` domain), published by the node
+#   T.histogram          bin counts over T.range, published by the node
+#   T.contour_spectrum   isosurface area / volumes / gradient over T.range, computed on request
+#   T.contour_tree       the contour tree, computed on request
+#   T.overlay_request    the costly layers an editor shows (the editor appends; the node computes)
+#   T.interval           "<id>,<id>": the two isocontours an fe_lab node meshes the interval
+#                        between (mesh.region: interval); the editor shades the band between them
+#   tree.<id>.view.*     this instance's view: histogram, contour_spectrum, contour_tree, color,
+#                        opacity, isocontours, info, log_histogram (0/1) and zoom ("lo,hi") — a
+#                        checkbox bound to one of these toggles the layer from outside the editor
+# See docs/TRANSFER_FUNCTIONS.md.
+
+units:
+  transfer_function:
+    args: { node: volume, title: Transfer Function, id: transfer_function }
+    window: "{title}"
+    id: "{id}"
+    children:
+      - tf_editor: Transfer function
+        id: "{id}"
+        bind: graphics.root.children.{node}.transfer_function
+        height: 160
+        layers: [histogram]
+        interactive_updates: true # re-render on every drag frame (false: on release)
+
+  transfer_function_editor:
+    args: { node: volume, label: Transfer function, id: transfer_function_editor }
+    tf_editor: "{label}"
+    id: "{id}"
+    bind: graphics.root.children.{node}.transfer_function
+    height: 120
+    layers: [histogram]
+    interactive_updates: true

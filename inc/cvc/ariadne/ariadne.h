@@ -22,6 +22,7 @@
 // scene binding, validation) is docs/roadmap/CVCGL-UI-DSL-ROADMAP.md.
 
 #include <cvc/ariadne/input.h> // InputEvent — Runtime::post_input feeds on_key/on_pointer (§4.6)
+#include <cvc/ariadne/keys.h>  // KeyBinding — set_key_bindings
 #include <cvc/ariadne/requires.h> // HostFacts — what this host provides (requires:, has?)
 #include <cvc/ariadne/widget.h>
 #include <functional>
@@ -89,6 +90,21 @@ public:
   void set_key_program(std::string script);
   void set_pointer_program(std::string script);
 
+  // Rebindable key actions (keys.h). A key down post_input gets that matches one of a binding's
+  // keys -- read from its state key each time, so a rebinding takes effect at once -- runs the
+  // binding's `on` in the next drain(), as a button's on: runs. While keys.capture names a binding
+  // (the Keys window's Change button), the next key down is that binding's new key instead
+  // (Escape keeps the old one), and on_key does not see it. Replaces the last set; {} clears them.
+  void set_key_bindings(std::vector<KeyBinding> bindings);
+  // The Keys window is waiting for a key: a host that would use keys itself first (a terminal's
+  // focus keys) hands them to post_input instead.
+  bool key_capture_pending() const;
+
+  // The next tree is a different document (AppRuntime::load): each window's first frame from the
+  // next render() on ignores the geometry persisted at tree.<id>.geometry -- the last document's,
+  // where it used the same id -- and the backend lays it out afresh (Backend::reset_layout).
+  void forget_layout();
+
   // Document-level signal handler — a state_exec PROGRAM run per signal the host routes here (the
   // .ari on_signal: block; pass LoadResult::on_signal_script). Like on_key it is ONE resident,
   // woken with `event` bound to {kind: "signal", signal: <name>, source: <who raised it>}; names
@@ -129,6 +145,14 @@ public:
 
   // Run every queued action event's handler, then clear the queue. Call once per
   // frame in the host loop, BEFORE your sim tick and OUTSIDE render().
+  //
+  // drain() is also where the app's state_exec scheduler (app.exec_scheduler()) advances: it pumps
+  // it a bounded slice every drain once this Runtime has submitted to it (an `on:` program, a
+  // resident), and otherwise whenever any process is live on it, whoever submitted it (e.g. a
+  // scene's transfer-function overlay tasks, cvc/tf/overlay_tasks.h). An app's Runtimes share one
+  // frame boundary: with each drained once a frame, in any order, an (await …) resumes once a
+  // frame, not once per Runtime. While nothing has used the scheduler it is neither pumped nor
+  // built. A host with no Runtime pumps it itself (cvc::pump_exec_frame, cvc/core/async_lane.h).
   void drain();
 
   // Drain the §4 read-lane diagnostics accumulated during render() — one message per

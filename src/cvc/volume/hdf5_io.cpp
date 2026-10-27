@@ -61,6 +61,9 @@ namespace {
 //                         Also added chunk_size property.
 // 10/09/2011 -- Joe R. -- Using startThread
 // 01/17/2014 -- Joe R. -- using TIME_UTC_
+// 10/26/2026 -- Joe R. -- Runs on the app of the writeVolumeFile call that starts it, which
+//                         tracks it and joins it in ~app.  It used to run on the app that
+//                         registered the hdf5_io handler, which may already be gone.
 class build_hierarchy {
 public:
   build_hierarchy(cvc::app &ctx, const std::string &threadKey, const std::string &hdf5_filename,
@@ -267,14 +270,16 @@ struct hdf5_io : public volume_file_io {
   // 09/17/2011 -- Joe R. -- Maxdim is now on the property map.
   // 09/30/2011 -- Joe R. -- Checking that the maxdim property doesn't exist
   //                         before setting it.
-  hdf5_io(cvc::app &ctx) : _ctx(ctx), _id("hdf5_io : v1.0") {
+  // 10/26/2026 -- Joe R. -- Keeps no app.  The handler map is process-wide and the first
+  //                         hdf5_io registered serves every app, so it works through the app
+  //                         each call passes.  It kept the app that registered it, and once that
+  //                         app was destroyed every HDF5 call ran through freed memory.  The
+  //                         maxdim default moved to register_hdf5_io.
+  hdf5_io() : _id("hdf5_io : v1.0") {
     _extensions.push_back(".h5");
     _extensions.push_back(".hdf5");
     _extensions.push_back(".hdf");
     _extensions.push_back(".cvc");
-
-    if (!_ctx.hasProperty("volmagick.hdf5_io.maxdim"))
-      _ctx.properties("volmagick.hdf5_io.maxdim", "128,128,128");
   }
 
   // -----------
@@ -327,52 +332,52 @@ struct hdf5_io : public volume_file_io {
     bool oldVolMagick = false;
     try {
       uint64 vm_version;
-      getAttribute(_ctx, actualFileName, objectName, "VolMagick_version", vm_version);
+      getAttribute(ctx, actualFileName, objectName, "VolMagick_version", vm_version);
       oldVolMagick = true;
     } catch (hdf5_exception &) {
       std::string version;
-      getAttribute(_ctx, actualFileName, objectName, "libcvc_version", version);
+      getAttribute(ctx, actualFileName, objectName, "libcvc_version", version);
       oldVolMagick = false;
     }
 
     uint64 numVariables, numTimesteps;
     if (!oldVolMagick) {
-      _ctx.log(6, str(boost::format("%s :: using new (Aug2011) VolMagick cvc-hdf5 format\n") %
-                      BOOST_CURRENT_FUNCTION));
+      ctx.log(6, str(boost::format("%s :: using new (Aug2011) VolMagick cvc-hdf5 format\n") %
+                     BOOST_CURRENT_FUNCTION));
 
-      d._boundingBox = getObjectBoundingBox(_ctx, actualFileName, objectName);
-      d._dimension = getObjectDimension(_ctx, actualFileName, objectName);
+      d._boundingBox = getObjectBoundingBox(ctx, actualFileName, objectName);
+      d._dimension = getObjectDimension(ctx, actualFileName, objectName);
 
-      getAttribute(_ctx, actualFileName, objectName, "numVariables", numVariables);
-      getAttribute(_ctx, actualFileName, objectName, "numTimesteps", numTimesteps);
+      getAttribute(ctx, actualFileName, objectName, "numVariables", numVariables);
+      getAttribute(ctx, actualFileName, objectName, "numTimesteps", numTimesteps);
       d._numVariables = numVariables;
       d._numTimesteps = numTimesteps;
 
-      getAttribute(_ctx, actualFileName, objectName, "min_time", d._tmin);
-      getAttribute(_ctx, actualFileName, objectName, "max_time", d._tmax);
+      getAttribute(ctx, actualFileName, objectName, "min_time", d._tmin);
+      getAttribute(ctx, actualFileName, objectName, "max_time", d._tmax);
     } else {
-      _ctx.log(5, str(boost::format("%s :: using old VolMagick cvc-hdf5 format\n") %
-                      BOOST_CURRENT_FUNCTION));
+      ctx.log(5, str(boost::format("%s :: using old VolMagick cvc-hdf5 format\n") %
+                     BOOST_CURRENT_FUNCTION));
 
       // some older files will have attributes named like this...
-      getAttribute(_ctx, actualFileName, objectName, "XMin", d._boundingBox.minx);
-      getAttribute(_ctx, actualFileName, objectName, "YMin", d._boundingBox.miny);
-      getAttribute(_ctx, actualFileName, objectName, "ZMin", d._boundingBox.minz);
-      getAttribute(_ctx, actualFileName, objectName, "XMax", d._boundingBox.maxx);
-      getAttribute(_ctx, actualFileName, objectName, "YMax", d._boundingBox.maxy);
-      getAttribute(_ctx, actualFileName, objectName, "ZMax", d._boundingBox.maxz);
+      getAttribute(ctx, actualFileName, objectName, "XMin", d._boundingBox.minx);
+      getAttribute(ctx, actualFileName, objectName, "YMin", d._boundingBox.miny);
+      getAttribute(ctx, actualFileName, objectName, "ZMin", d._boundingBox.minz);
+      getAttribute(ctx, actualFileName, objectName, "XMax", d._boundingBox.maxx);
+      getAttribute(ctx, actualFileName, objectName, "YMax", d._boundingBox.maxy);
+      getAttribute(ctx, actualFileName, objectName, "ZMax", d._boundingBox.maxz);
 
-      getAttribute(_ctx, actualFileName, objectName, "XDim", d._dimension.xdim);
-      getAttribute(_ctx, actualFileName, objectName, "YDim", d._dimension.ydim);
-      getAttribute(_ctx, actualFileName, objectName, "ZDim", d._dimension.zdim);
+      getAttribute(ctx, actualFileName, objectName, "XDim", d._dimension.xdim);
+      getAttribute(ctx, actualFileName, objectName, "YDim", d._dimension.ydim);
+      getAttribute(ctx, actualFileName, objectName, "ZDim", d._dimension.zdim);
 
-      getAttribute(_ctx, actualFileName, objectName, "numVariables", numVariables);
-      getAttribute(_ctx, actualFileName, objectName, "numTimesteps", numTimesteps);
+      getAttribute(ctx, actualFileName, objectName, "numVariables", numVariables);
+      getAttribute(ctx, actualFileName, objectName, "numTimesteps", numTimesteps);
       d._numVariables = numVariables;
       d._numTimesteps = numTimesteps;
 
-      getAttribute(_ctx, actualFileName, objectName, "min_time", d._tmin);
-      getAttribute(_ctx, actualFileName, objectName, "max_time", d._tmax);
+      getAttribute(ctx, actualFileName, objectName, "min_time", d._tmin);
+      getAttribute(ctx, actualFileName, objectName, "max_time", d._tmax);
     }
 
     d._minIsSet.resize(numVariables);
@@ -384,7 +389,7 @@ struct hdf5_io : public volume_file_io {
 
     // The current hdf5_io implementation prefers storing 3D datasets in groups.
     // Check if the object is a group.  If not, read it as a 1 var 1 timestep lone dataset.
-    if (isGroup(_ctx, actualFileName, objectName)) {
+    if (isGroup(ctx, actualFileName, objectName)) {
       for (unsigned int i = 0; i < d._numVariables; i++) {
         d._minIsSet[i].resize(numTimesteps);
         d._min[i].resize(numTimesteps);
@@ -395,24 +400,24 @@ struct hdf5_io : public volume_file_io {
           std::string volume_name = boost::str(boost::format("%1%/%2%:%3%:%4%") % objectName %
                                                DEFAULT_VOLUME_NAME % i % j);
 
-          d._min[i][j] = getDataSetMinimum(_ctx, actualFileName, volume_name);
+          d._min[i][j] = getDataSetMinimum(ctx, actualFileName, volume_name);
           d._minIsSet[i][j] = true;
-          d._max[i][j] = getDataSetMaximum(_ctx, actualFileName, volume_name);
+          d._max[i][j] = getDataSetMaximum(ctx, actualFileName, volume_name);
           d._maxIsSet[i][j] = true;
-          d._names[i] = getDataSetInfo(_ctx, actualFileName, volume_name);
+          d._names[i] = getDataSetInfo(ctx, actualFileName, volume_name);
           uint64 voxelType;
           if (oldVolMagick)
-            getAttribute(_ctx, actualFileName, volume_name, "voxelType", voxelType);
+            getAttribute(ctx, actualFileName, volume_name, "voxelType", voxelType);
           else
-            getAttribute(_ctx, actualFileName, volume_name, "dataType", voxelType);
+            getAttribute(ctx, actualFileName, volume_name, "dataType", voxelType);
           d._voxelTypes[i] = data_type(voxelType);
         }
       }
     } else {
       if (numVariables > 1 || numTimesteps > 1)
-        _ctx.log(1, str(boost::format("%s :: WARNING - hdf5_io doesn't yet support lone datasets "
-                                      "with more than one variable or timestep!\n") %
-                        BOOST_CURRENT_FUNCTION));
+        ctx.log(1, str(boost::format("%s :: WARNING - hdf5_io doesn't yet support lone datasets "
+                                     "with more than one variable or timestep!\n") %
+                       BOOST_CURRENT_FUNCTION));
 
       std::string volume_name = objectName;
       unsigned int i = 0, j = 0;
@@ -430,16 +435,16 @@ struct hdf5_io : public volume_file_io {
       d._maxIsSet[i].resize(numTimesteps);
       d._max[i].resize(numTimesteps);
 
-      d._min[i][j] = getDataSetMinimum(_ctx, actualFileName, volume_name);
+      d._min[i][j] = getDataSetMinimum(ctx, actualFileName, volume_name);
       d._minIsSet[i][j] = true;
-      d._max[i][j] = getDataSetMaximum(_ctx, actualFileName, volume_name);
+      d._max[i][j] = getDataSetMaximum(ctx, actualFileName, volume_name);
       d._maxIsSet[i][j] = true;
-      d._names[i] = getDataSetInfo(_ctx, actualFileName, volume_name);
+      d._names[i] = getDataSetInfo(ctx, actualFileName, volume_name);
       uint64 voxelType;
       if (oldVolMagick)
-        getAttribute(_ctx, actualFileName, volume_name, "voxelType", voxelType);
+        getAttribute(ctx, actualFileName, volume_name, "voxelType", voxelType);
       else
-        getAttribute(_ctx, actualFileName, volume_name, "dataType", voxelType);
+        getAttribute(ctx, actualFileName, volume_name, "dataType", voxelType);
       d._voxelTypes[i] = data_type(voxelType);
     }
   }
@@ -473,7 +478,7 @@ struct hdf5_io : public volume_file_io {
 
     std::string volume_name;
 
-    if (isGroup(_ctx, actualFileName, objectName)) {
+    if (isGroup(ctx, actualFileName, objectName)) {
       // Name of actual dataset.  The group name in 'objectName' can contain several
       // instances of the same dataset at various resolutions.  This function assumes
       // you want the highest resolution dataset, which uses the following naming convention.
@@ -482,9 +487,9 @@ struct hdf5_io : public volume_file_io {
     } else // Ungrouped dataset
     {
       if (var > 0 || time > 0)
-        _ctx.log(1, str(boost::format("%s :: WARNING - hdf5_io doesn't yet support lone datasets "
-                                      "with more than one variable or timestep!\n") %
-                        BOOST_CURRENT_FUNCTION));
+        ctx.log(1, str(boost::format("%s :: WARNING - hdf5_io doesn't yet support lone datasets "
+                                     "with more than one variable or timestep!\n") %
+                       BOOST_CURRENT_FUNCTION));
       var = 0;
       time = 0;
       volume_name = objectName;
@@ -518,11 +523,11 @@ struct hdf5_io : public volume_file_io {
     // set the vol's min/max if it is to be the same size as the
     // volume in the file.
     if (off_x == 0 && off_y == 0 && off_z == 0 && vfi.voxel_dimensions() == subvoldim) {
-      vol.min(getDataSetMinimum(_ctx, actualFileName, volume_name));
-      vol.max(getDataSetMaximum(_ctx, actualFileName, volume_name));
+      vol.min(getDataSetMinimum(ctx, actualFileName, volume_name));
+      vol.max(getDataSetMaximum(ctx, actualFileName, volume_name));
     }
 
-    readDataSet(_ctx, actualFileName, volume_name, off_x, off_y, off_z, subvoldim, vol.voxelType(),
+    readDataSet(ctx, actualFileName, volume_name, off_x, off_y, off_z, subvoldim, vol.voxelType(),
                 *vol);
   }
 
@@ -553,12 +558,12 @@ struct hdf5_io : public volume_file_io {
     boost::tie(actualFileName, objectName) = splitRawFilename(filename);
 
     std::string volume_name;
-    if (isGroup(_ctx, actualFileName, objectName)) {
+    if (isGroup(ctx, actualFileName, objectName)) {
       // The group name in 'objectName' can contain several instances of the same dataset
       // at various resolutions.
 
       // get the maximum dimensions to extract
-      std::vector<uint64> maxdim_vec = _ctx.listProperty<uint64>("volmagick.hdf5_io.maxdim");
+      std::vector<uint64> maxdim_vec = ctx.listProperty<uint64>("volmagick.hdf5_io.maxdim");
       while (maxdim_vec.size() < 3)
         maxdim_vec.push_back(128);
       dimension maxdim(maxdim_vec);
@@ -571,20 +576,20 @@ struct hdf5_io : public volume_file_io {
       std::string filter = str(boost::format("%1%:%2%") % var % time);
 
       std::vector<std::string> hierarchy_objects =
-          getChildObjects(_ctx, actualFileName, objectName, filter);
+          getChildObjects(ctx, actualFileName, objectName, filter);
       if (hierarchy_objects.empty())
         throw hdf5_exception(
             str(boost::format("%s :: no child objects!") % BOOST_CURRENT_FUNCTION));
 
       dimension dim = getDataSetDimensionForBoundingBox(
-          _ctx, actualFileName, objectName + "/" + hierarchy_objects[0], subvolbox);
+          ctx, actualFileName, objectName + "/" + hierarchy_objects[0], subvolbox);
       std::string hierarchy_object = hierarchy_objects[0];
 
       // find the first non dirty dataset
       BOOST_FOREACH (std::string obj, hierarchy_objects) {
         int isDirty = 0;
         try {
-          getAttribute(_ctx, actualFileName, objectName + "/" + obj, "dirty", isDirty);
+          getAttribute(ctx, actualFileName, objectName + "/" + obj, "dirty", isDirty);
         } catch (std::exception &) {
         }
         if (!isDirty) {
@@ -595,16 +600,16 @@ struct hdf5_io : public volume_file_io {
 
       // now select a dataset
       BOOST_FOREACH (std::string obj, hierarchy_objects) {
-        _ctx.log(3, str(boost::format("%s: %s\n") % BOOST_CURRENT_FUNCTION % obj));
+        ctx.log(3, str(boost::format("%s: %s\n") % BOOST_CURRENT_FUNCTION % obj));
 
         // if this object is dirty, lets skip it for now.
         int isDirty = 0;
         try {
-          getAttribute(_ctx, actualFileName, objectName + "/" + obj, "dirty", isDirty);
+          getAttribute(ctx, actualFileName, objectName + "/" + obj, "dirty", isDirty);
         } catch (std::exception &) {
         }
 
-        dimension newdim = getDataSetDimensionForBoundingBox(_ctx, actualFileName,
+        dimension newdim = getDataSetDimensionForBoundingBox(ctx, actualFileName,
                                                              objectName + "/" + obj, subvolbox);
         if (!isDirty && std::abs(int64(newdim.size()) - int64(maxdim.size())) <
                             std::abs(int64(dim.size()) - int64(maxdim.size()))) {
@@ -613,16 +618,16 @@ struct hdf5_io : public volume_file_io {
         }
       }
 
-      _ctx.log(2, str(boost::format("%s: selected object %s\n") % BOOST_CURRENT_FUNCTION %
-                      hierarchy_object));
+      ctx.log(2, str(boost::format("%s: selected object %s\n") % BOOST_CURRENT_FUNCTION %
+                     hierarchy_object));
 
       volume_name = objectName + "/" + hierarchy_object;
     } else // Ungrouped dataset
     {
       if (var > 0 || time > 0)
-        _ctx.log(1, str(boost::format("%s :: WARNING - hdf5_io doesn't yet support lone datasets "
-                                      "with more than one variable or timestep!\n") %
-                        BOOST_CURRENT_FUNCTION));
+        ctx.log(1, str(boost::format("%s :: WARNING - hdf5_io doesn't yet support lone datasets "
+                                     "with more than one variable or timestep!\n") %
+                       BOOST_CURRENT_FUNCTION));
       var = 0;
       time = 0;
       volume_name = objectName;
@@ -637,15 +642,15 @@ struct hdf5_io : public volume_file_io {
     // set the vol's min/max if it is to be the same size as the
     // volume in the file.
     if (vfi.boundingBox() == subvolbox) {
-      vol.min(getDataSetMinimum(_ctx, actualFileName, volume_name));
-      vol.max(getDataSetMaximum(_ctx, actualFileName, volume_name));
+      vol.min(getDataSetMinimum(ctx, actualFileName, volume_name));
+      vol.max(getDataSetMaximum(ctx, actualFileName, volume_name));
     }
 
     boost::shared_array<unsigned char> data;
     dimension dim;
 
     boost::tie(data, dim) =
-        readDataSet(_ctx, actualFileName, volume_name, subvolbox, vol.voxelType());
+        readDataSet(ctx, actualFileName, volume_name, subvolbox, vol.voxelType());
 
     vol.voxel_dimensions(dim);
     std::memcpy(*vol, data.get(), dim.size() * vol.voxelSize());
@@ -684,25 +689,24 @@ struct hdf5_io : public volume_file_io {
     // create it if it doesn't exist, else just reuse the file.
     fs::path full_path(actualFileName);
     if (!fs::exists(full_path))
-      createHDF5File(_ctx, actualFileName);
+      createHDF5File(ctx, actualFileName);
 
-    createGroup(_ctx, actualFileName, objectName, true);
-    setAttribute(_ctx, actualFileName, objectName, "objectType", "cvc::volume");
-    setAttribute(_ctx, actualFileName, objectName, "libcvc_version", CVC_VERSION_STRING);
-    setObjectBoundingBox(_ctx, actualFileName, objectName, boundingBox);
-    setObjectDimension(_ctx, actualFileName, objectName, dimension);
-    setAttribute(_ctx, actualFileName, objectName, "dataTypes", voxelTypes.size(),
-                 &(voxelTypes[0]));
-    setAttribute(_ctx, actualFileName, objectName, "numVariables", numVariables);
-    setAttribute(_ctx, actualFileName, objectName, "numTimesteps", numTimesteps);
-    setAttribute(_ctx, actualFileName, objectName, "min_time", min_time);
-    setAttribute(_ctx, actualFileName, objectName, "max_time", max_time);
+    createGroup(ctx, actualFileName, objectName, true);
+    setAttribute(ctx, actualFileName, objectName, "objectType", "cvc::volume");
+    setAttribute(ctx, actualFileName, objectName, "libcvc_version", CVC_VERSION_STRING);
+    setObjectBoundingBox(ctx, actualFileName, objectName, boundingBox);
+    setObjectDimension(ctx, actualFileName, objectName, dimension);
+    setAttribute(ctx, actualFileName, objectName, "dataTypes", voxelTypes.size(), &(voxelTypes[0]));
+    setAttribute(ctx, actualFileName, objectName, "numVariables", numVariables);
+    setAttribute(ctx, actualFileName, objectName, "numTimesteps", numTimesteps);
+    setAttribute(ctx, actualFileName, objectName, "min_time", min_time);
+    setAttribute(ctx, actualFileName, objectName, "max_time", max_time);
 
     unsigned int steps = numVariables * numTimesteps;
     unsigned int cur_step = 0;
     for (unsigned int var = 0; var < numVariables; var++)
       for (unsigned int time = 0; time < numTimesteps; time++) {
-        _ctx.threadProgress(float(cur_step) / float(steps));
+        ctx.threadProgress(float(cur_step) / float(steps));
 
         // Name of actual dataset.  The group name in 'objectName' can contain several
         // instances of the same dataset at various resolutions.  This function just makes space
@@ -714,10 +718,10 @@ struct hdf5_io : public volume_file_io {
         if (voxelTypes.size() <= var)
           throw invalid_hdf5_file("voxelTypes array not large enough!");
 
-        createDataSet(_ctx, actualFileName, volume_name, boundingBox, dimension, voxelTypes[var]);
+        createDataSet(ctx, actualFileName, volume_name, boundingBox, dimension, voxelTypes[var]);
       }
 
-    _ctx.threadProgress(1.0);
+    ctx.threadProgress(1.0);
   }
 
   // ------------------------
@@ -750,7 +754,7 @@ struct hdf5_io : public volume_file_io {
 
     std::string volume_name;
     bool doBuildHierarchy = false;
-    if (isGroup(_ctx, actualFileName, objectName)) {
+    if (isGroup(ctx, actualFileName, objectName)) {
       // Name of actual dataset.  The group name in 'objectName' can contain several
       // instances of the same dataset at various resolutions.  This function assumes
       // you want the highest resolution dataset, which uses the following naming convention.
@@ -761,15 +765,15 @@ struct hdf5_io : public volume_file_io {
 
       // If we have a thread running already computing the hierarchy, stop it!
       std::string threadKey(volume_name + " hierarchy_thread");
-      if (_ctx.hasThread(threadKey)) {
-        thread_ptr t = _ctx.threads(threadKey);
+      if (ctx.hasThread(threadKey)) {
+        thread_ptr t = ctx.threads(threadKey);
         t->interrupt(); // initiate thread quit
         t->join();      // wait for it to quit
       }
 
       // Now mark all of the hierarchy datasets dirty, creating them if they don't exist.
       // The build_hierarchy thread fills these in with proper data later.
-      dimension prevDim(getObjectDimension(_ctx, actualFileName, objectName));
+      dimension prevDim(getObjectDimension(ctx, actualFileName, objectName));
       while (1) {
         uint64 maxdim = std::max(prevDim.xdim, std::max(prevDim.ydim, prevDim.zdim));
         maxdim = upToPowerOfTwo(maxdim) >> 1; // power of 2 less than maxdim
@@ -782,36 +786,36 @@ struct hdf5_io : public volume_file_io {
         std::string hier_volume_name =
             str(boost::format("%1%_%2%x%3%x%4%") % volume_name % curDim[0] % curDim[1] % curDim[2]);
 
-        _ctx.log(10, str(boost::format("%1% :: marking %2% dirty\n") % BOOST_CURRENT_FUNCTION %
-                         hier_volume_name));
+        ctx.log(10, str(boost::format("%1% :: marking %2% dirty\n") % BOOST_CURRENT_FUNCTION %
+                        hier_volume_name));
 
-        if (!isDataSet(_ctx, actualFileName, hier_volume_name))
-          createVolumeDataSet(_ctx, actualFileName, hier_volume_name,
-                              getObjectBoundingBox(_ctx, actualFileName, volume_name), curDim,
+        if (!isDataSet(ctx, actualFileName, hier_volume_name))
+          createVolumeDataSet(ctx, actualFileName, hier_volume_name,
+                              getObjectBoundingBox(ctx, actualFileName, volume_name), curDim,
                               wvol.voxelType());
-        setAttribute(_ctx, actualFileName, hier_volume_name, "dirty", 1);
+        setAttribute(ctx, actualFileName, hier_volume_name, "dirty", 1);
 
         prevDim = curDim;
       }
     } else // Ungrouped dataset
     {
       if (var > 0 || time > 0)
-        _ctx.log(1, str(boost::format("%s :: WARNING - hdf5_io doesn't yet support lone datasets "
-                                      "with more than one variable or timestep!\n") %
-                        BOOST_CURRENT_FUNCTION));
+        ctx.log(1, str(boost::format("%s :: WARNING - hdf5_io doesn't yet support lone datasets "
+                                     "with more than one variable or timestep!\n") %
+                       BOOST_CURRENT_FUNCTION));
       var = 0;
       time = 0;
       volume_name = objectName;
     }
 
-    writeDataSet(_ctx, actualFileName, volume_name, off_x, off_y, off_z, wvol.voxel_dimensions(),
+    writeDataSet(ctx, actualFileName, volume_name, off_x, off_y, off_z, wvol.voxel_dimensions(),
                  wvol.voxelType(), *wvol, wvol.min(), wvol.max());
 
-    setAttribute(_ctx, actualFileName, volume_name, "info", wvol.desc());
+    setAttribute(ctx, actualFileName, volume_name, "info", wvol.desc());
 
     if (doBuildHierarchy) {
       std::string threadKey("build_hierarchy_" + volume_name);
-      build_hierarchy::start(_ctx, threadKey, actualFileName, volume_name);
+      build_hierarchy::start(ctx, threadKey, actualFileName, volume_name);
     }
   }
 
@@ -834,13 +838,13 @@ struct hdf5_io : public volume_file_io {
 
     boost::tie(actualFileName, objectName) = splitRawFilename(filename);
 
-    if (isGroup(_ctx, actualFileName, objectName)) {
-      std::vector<std::string> children = getChildObjects(_ctx, actualFileName, objectName);
+    if (isGroup(ctx, actualFileName, objectName)) {
+      std::vector<std::string> children = getChildObjects(ctx, actualFileName, objectName);
       BOOST_FOREACH (std::string val, children)
-        setObjectBoundingBox(_ctx, actualFileName, objectName + "/" + val, bbox);
+        setObjectBoundingBox(ctx, actualFileName, objectName + "/" + val, bbox);
     }
 
-    setObjectBoundingBox(_ctx, actualFileName, objectName, bbox);
+    setObjectBoundingBox(ctx, actualFileName, objectName, bbox);
   }
 
   // ----------------------------
@@ -870,7 +874,6 @@ struct hdf5_io : public volume_file_io {
   }
 
 protected:
-  cvc::app &_ctx;
   std::string _id;
   extension_list _extensions;
 };
@@ -878,6 +881,8 @@ protected:
 
 namespace cvc {
 void register_hdf5_io(cvc::app &ctx) {
-  volume_file_io::insertHandler(volume_file_io::ptr(new hdf5_io(ctx)));
+  if (!ctx.hasProperty("volmagick.hdf5_io.maxdim"))
+    ctx.properties("volmagick.hdf5_io.maxdim", "128,128,128");
+  volume_file_io::insertHandler(volume_file_io::ptr(new hdf5_io));
 }
 } // namespace cvc

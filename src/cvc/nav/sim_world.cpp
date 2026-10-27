@@ -285,6 +285,68 @@ void sim_world::rebuild_all_fields() {
   ++field_ver_;
 }
 
+// The plant arm: the same controller, writing its command for the plant instead of
+// integrating (veh_params::plant). Without a plant or terrain the drive reads cfg_.veh itself.
+const veh_params &sim_world::drive_vehicle(veh_params &vplant, plant_drive &pdrive) {
+  const bool own_veh = plant_ != nullptr || terrain_on_;
+  if (!own_veh)
+    return cfg_.veh;
+  vplant = cfg_.veh;
+  if (terrain_on_) {
+    if (ter_cfg_.governors) {
+      vplant.slope = &ter_slope_;
+      vplant.gravity = static_cast<float>(ter_cfg_.gravity * cfg_.scale);
+    }
+    vplant.terrain = &ter_drive_; // the forces apply only with a weight; the slope feature reads it
+  }
+  if (plant_) {
+    pdrive.latency = pl_latency_.data();
+    pdrive.a_brake = pl_a_brake_.data();
+    pdrive.steer_now = pl_steer_now_.data();
+    pdrive.steer_rate = pl_steer_rate_.data();
+    pdrive.max_steer = pl_max_steer_;
+    pdrive.steer_cmd = pl_steer_cmd_.data();
+    pdrive.accel_cmd = pl_accel_cmd_.data();
+    pdrive.v_stop = pl_v_stop_.data();
+    if (pl_mod_.tire_gain > 0.0f || pl_mod_.tip_gain > 0.0f)
+      pdrive.gamma_scale = pl_gamma_scale_.data();
+    if (pl_mod_.tip_gain > 0.0f)
+      pdrive.hard_scale = pl_hard_scale_.data();
+    vplant.plant = &pdrive;
+    vplant.L_col = pl_L_.data();
+    // Each vehicle's own envelope and size (plant_limits), where its plant gives them.
+    if (pl_has_a_max_)
+      vplant.a_max_col = pl_a_max_.data();
+    if (pl_has_vmax_)
+      vplant.vmax_col = pl_vmax_.data();
+    if (pl_has_a_lat_)
+      pdrive.a_lat = pl_a_lat_.data();
+    if (pl_fp_) {
+      vplant.n_body = kPlantDiscs;
+      vplant.body_offsets = nullptr;
+      vplant.body_offsets_col = pl_body_off_.data();
+      vplant.body_rr_col = pl_body_rr_.data();
+      vplant.body_gain = 1.0f / static_cast<float>(kPlantDiscs);
+    }
+  }
+  return vplant;
+}
+
+float sim_world::tel_potential(const field_stack &f, const veh_params &v, const material_stack *ms,
+                               int i) const {
+  material_drive md;
+  if (ms) {
+    md.stack = ms;
+    md.k_sharp = mat_cfg_.k_sharp;
+    md.d_hat_m = mat_cfg_.d_hat_m;
+  }
+  const drive_telemetry &t = tel_[i];
+  return drive_potential(f, o_[2 * i], o_[2 * i + 1], th_[i], carrot_[2 * i], carrot_[2 * i + 1], i,
+                         map_id_.data(), v, t.alpha, t.beta, ms ? &md : nullptr, t.lam_soft,
+                         t.lam_hard)
+      .total();
+}
+
 void sim_world::step(int num_threads) {
   const long hw = static_cast<long>(rows_) * cols_;
 
@@ -312,6 +374,24 @@ void sim_world::step(int num_threads) {
   // ── THE PLANT (P4): each agent where the plant has it at the tick's start ──
   if (plant_)
     plant_read();
+
+  // ── The telemetry's context work: U at each agent's pose with last tick's context (tel_'s
+  // coefficients, its carrot, and the field and material planes before this tick's sense
+  // rebuilds them); the drive below books the new context's U as drive_telemetry::potential ──
+  tel_ctx_u_.clear();
+  if (capture_tel_ && tel_prev_ && static_cast<int>(tel_.size()) == n_ &&
+      carrot_.size() == static_cast<std::size_t>(2) * n_) {
+    veh_params vprev;
+    plant_drive pprev;
+    const veh_params &vp = drive_vehicle(vprev, pprev);
+    material_stack ms;
+    if (mat_on_)
+      ms = material_view();
+    const field_stack f0 = field_view();
+    tel_ctx_u_.resize(static_cast<std::size_t>(n_));
+    for (int i = 0; i < n_; ++i)
+      tel_ctx_u_[i] = tel_potential(f0, vp, mat_on_ ? &ms : nullptr, i);
+  }
 
   if (!cfg_.freeze_sense && (gstep_ % cfg_.sense_every == 0)) {
     // ── SENSE (each agent into its own plane map_id[i]) ──
@@ -631,51 +711,16 @@ void sim_world::step(int num_threads) {
       tel_.assign(n_, {});
     telp = tel_.data();
   }
-  // The plant arm: the same controller, writing its command for the plant instead of
-  // integrating (veh_params::plant). Without a plant the drive reads cfg_.veh itself.
   veh_params vplant;
   plant_drive pdrive;
-  const bool own_veh = plant_ != nullptr || terrain_on_;
-  if (own_veh)
-    vplant = cfg_.veh;
-  if (terrain_on_) {
-    if (ter_cfg_.governors) {
-      vplant.slope = &ter_slope_;
-      vplant.gravity = static_cast<float>(ter_cfg_.gravity * cfg_.scale);
-    }
-    vplant.terrain = &ter_drive_; // the forces apply only with a weight; the slope feature reads it
+  const veh_params &vv = drive_vehicle(vplant, pdrive);
+  // The telemetry's books read U against this tick's field and material planes.
+  material_stack tel_ms;
+  const material_stack *tel_mat = nullptr;
+  if (telp && mat_on_) {
+    tel_ms = material_view();
+    tel_mat = &tel_ms;
   }
-  if (plant_) {
-    pdrive.latency = pl_latency_.data();
-    pdrive.a_brake = pl_a_brake_.data();
-    pdrive.steer_now = pl_steer_now_.data();
-    pdrive.steer_rate = pl_steer_rate_.data();
-    pdrive.max_steer = pl_max_steer_;
-    pdrive.steer_cmd = pl_steer_cmd_.data();
-    pdrive.accel_cmd = pl_accel_cmd_.data();
-    pdrive.v_stop = pl_v_stop_.data();
-    if (pl_mod_.tire_gain > 0.0f || pl_mod_.tip_gain > 0.0f)
-      pdrive.gamma_scale = pl_gamma_scale_.data();
-    if (pl_mod_.tip_gain > 0.0f)
-      pdrive.hard_scale = pl_hard_scale_.data();
-    vplant.plant = &pdrive;
-    vplant.L_col = pl_L_.data();
-    // Each vehicle's own envelope and size (plant_limits), where its plant gives them.
-    if (pl_has_a_max_)
-      vplant.a_max_col = pl_a_max_.data();
-    if (pl_has_vmax_)
-      vplant.vmax_col = pl_vmax_.data();
-    if (pl_has_a_lat_)
-      pdrive.a_lat = pl_a_lat_.data();
-    if (pl_fp_) {
-      vplant.n_body = kPlantDiscs;
-      vplant.body_offsets = nullptr;
-      vplant.body_offsets_col = pl_body_off_.data();
-      vplant.body_rr_col = pl_body_rr_.data();
-      vplant.body_gain = 1.0f / static_cast<float>(kPlantDiscs);
-    }
-  }
-  const veh_params &vv = own_veh ? vplant : cfg_.veh;
   if (mat_on_) {
     const material_stack ms = material_view();
     material_drive md;
@@ -711,6 +756,17 @@ void sim_world::step(int num_threads) {
     drive_step(fs, o_.data(), th_.data(), sp_.data(), carrot_.data(), model_, n_, map_id_.data(),
                vv, minclr_.data(), num_threads, pool_, telp);
   }
+
+  // The telemetry's books: U where the drive left each agent (on a plant, where the plant does,
+  // below), before override_command and min_gap move it (projection_work).
+  std::vector<float> tel_u_moved;
+  const auto tel_book_moved = [&] {
+    tel_u_moved.resize(static_cast<std::size_t>(n_));
+    for (int i = 0; i < n_; ++i)
+      tel_u_moved[i] = tel_potential(fs, vv, tel_mat, i);
+  };
+  if (telp && !plant_)
+    tel_book_moved();
 
   // ── override_command: the caller's command in place of the drive's, for this tick ──
   if (ov_any_) {
@@ -839,6 +895,8 @@ void sim_world::step(int num_threads) {
     } else {
       pl_sample_.clear();
     }
+    if (telp)
+      tel_book_moved();
   }
 
   lap(accDrive);
@@ -913,6 +971,19 @@ void sim_world::step(int num_threads) {
       if (!moved)
         break;
     }
+  }
+
+  // ── The telemetry's books against U (drive_telemetry): where the tick ends, what moved the
+  // agents after the drive, and the context's change since last tick ──
+  if (telp) {
+    const bool had_ctx = tel_ctx_u_.size() == static_cast<std::size_t>(n_);
+    for (int i = 0; i < n_; ++i) {
+      drive_telemetry &t = tel_[i];
+      t.potential_end = tel_potential(fs, vv, tel_mat, i);
+      t.projection_work = t.potential_end - tel_u_moved[i];
+      t.context_work = had_ctx ? t.potential - tel_ctx_u_[i] : 0.0f;
+    }
+    tel_prev_ = true;
   }
 
   // ── TERRAIN: the ticks a footprint touched an infeasible cell ──
@@ -1230,6 +1301,7 @@ void sim_world::min_clearance_world(float *out) const {
 
 void sim_world::set_capture_drive_telemetry(bool on) {
   capture_tel_ = on;
+  tel_prev_ = false; // no context to book against until a captured tick has run
   if (on)
     tel_.assign(n_, {}); // size to the current agent count; step() keeps it in sync
   else
@@ -1285,9 +1357,41 @@ void sim_world::set_terrain(const float *height_m, const terrain_config &tc) {
 void sim_world::set_terrain_config(const terrain_config &tc) {
   if (!terrain_on_)
     return;
+  const bool blocked = ter_cfg_.block_infeasible;
   const std::vector<int> entries = ter_entries_;
   set_terrain(ter_height_.data(), tc);
   ter_entries_ = entries;
+  // Cells that were infeasible and are no longer (block_infeasible off, or a looser limit) leave
+  // the occupancy now, not at the next sense tick (never, on a frozen map).
+  if (blocked)
+    recomposite_occupancy();
+}
+
+void sim_world::recomposite_occupancy() {
+  const long hw = static_cast<long>(rows_) * cols_;
+  const double t_now = gstep_ * static_cast<double>(cfg_.veh.dt);
+  const unknown_policy pol =
+      cfg_.optimistic ? unknown_policy::optimistic : unknown_policy::pessimistic;
+  std::vector<std::uint8_t> occ2(static_cast<std::size_t>(hw));
+  bool any = false;
+  for (int m = 0; m < M_; ++m) {
+    const long off = static_cast<long>(m) * hw;
+    composite_occupancy(logodds_.data() + off, rows_, cols_, pol, cfg_.p_thresh, cfg_.band,
+                        dyn_stamp_.data() + off, t_now, cfg_.ttl_s, occ2.data());
+    if (terrain_on_ && ter_cfg_.block_infeasible)
+      for (long k = 0; k < hw; ++k)
+        occ2[k] = static_cast<std::uint8_t>(occ2[k] | ter_.infeasible[k]);
+    if (std::equal(occ2.begin(), occ2.end(), occ_.begin() + off))
+      continue;
+    std::copy(occ2.begin(), occ2.end(), occ_.begin() + off);
+    rebuild_plane(m);
+    ++raster_version_[m];
+    if (static_cast<int>(mat_gate_dirty_.size()) > m)
+      mat_gate_dirty_[m] = 1;
+    any = true;
+  }
+  if (any)
+    ++field_ver_;
 }
 
 void sim_world::clear_terrain() {

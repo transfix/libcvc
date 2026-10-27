@@ -143,131 +143,89 @@ void voxels::voxelType(data_type vt) {
     (*this)(i, bak(i));
 }
 
+namespace {
+// calcMinMax's scan for one voxel type T. min and max start at voxel 0 and are compared in T, so a
+// 64-bit integer is exact (a round trip through double would overflow near the type's limits), and
+// a NaN compares false either way: skipped anywhere but voxel 0, where it leaves both NaN.
+template <typename T>
+void scan_min_max(app &ctx, const byte *raw, uint64 len, uint64 slice, uint64 zdim, double &lo,
+                  double &hi) {
+  const T *data = reinterpret_cast<const T *>(raw);
+  T tmin = data[0], tmax = data[0];
+  for (uint64 i = 0; i < len; i++) {
+    const T v = data[i];
+    if (v < tmin)
+      tmin = v;
+    if (v > tmax)
+      tmax = v;
+    if ((i % slice) == 0)
+      ctx.threadProgress(float(i / slice) / float(zdim));
+  }
+  lo = static_cast<double>(tmin);
+  hi = static_cast<double>(tmax);
+}
+} // namespace
+
 void voxels::calcMinMax() const {
   thread_info ti(_ctx, BOOST_CURRENT_FUNCTION);
 
-  double val;
-  size_t len = XDim() * YDim() * ZDim();
+  const uint64 len = XDim() * YDim() * ZDim();
   if (len == 0)
     return;
-  val = (*this)(0, 0, 0);
-  _min = _max = val;
+  const uint64 slice = XDim() * YDim();
+  const byte *data = get_data_ptr(); // the buffer operator() reads
 
   switch (voxelType()) {
-  case UChar: {
-    unsigned char uchar_min = static_cast<unsigned char>(_min);
-    unsigned char uchar_max = static_cast<unsigned char>(_max);
-    unsigned char *data = reinterpret_cast<unsigned char *>(_voxels.get());
-    for (size_t i = 0; i < len; i++) {
-      unsigned char v = data[i];
-      if (v < uchar_min)
-        uchar_min = v;
-      if (v > uchar_max)
-        uchar_max = v;
-      if ((i % (XDim() * YDim())) == 0) {
-        _ctx.threadProgress(float(i / (XDim() * YDim())) / float(ZDim()));
-      }
-    }
-    _min = double(uchar_min);
-    _max = double(uchar_max);
+  case UChar:
+    scan_min_max<unsigned char>(_ctx, data, len, slice, ZDim(), _min, _max);
     break;
-  }
-  case UShort: {
-    unsigned short ushort_min = static_cast<unsigned short>(_min);
-    unsigned short ushort_max = static_cast<unsigned short>(_max);
-    unsigned short *data = reinterpret_cast<unsigned short *>(_voxels.get());
-    for (size_t i = 0; i < len; i++) {
-      unsigned short v = data[i];
-      if (v < ushort_min)
-        ushort_min = v;
-      if (v > ushort_max)
-        ushort_max = v;
-      if ((i % (XDim() * YDim())) == 0) {
-        _ctx.threadProgress(float(i / (XDim() * YDim())) / float(ZDim()));
-      }
-    }
-    _min = double(ushort_min);
-    _max = double(ushort_max);
+  case UShort:
+    scan_min_max<unsigned short>(_ctx, data, len, slice, ZDim(), _min, _max);
     break;
-  }
-  case UInt: {
-    unsigned int uint_min = static_cast<unsigned int>(_min);
-    unsigned int uint_max = static_cast<unsigned int>(_max);
-    unsigned int *data = reinterpret_cast<unsigned int *>(_voxels.get());
-    for (size_t i = 0; i < len; i++) {
-      unsigned int v = data[i];
-      if (v < uint_min)
-        uint_min = v;
-      if (v > uint_max)
-        uint_max = v;
-      if ((i % (XDim() * YDim())) == 0) {
-        _ctx.threadProgress(float(i / (XDim() * YDim())) / float(ZDim()));
-      }
-    }
-    _min = double(uint_min);
-    _max = double(uint_max);
+  case UInt:
+    scan_min_max<unsigned int>(_ctx, data, len, slice, ZDim(), _min, _max);
     break;
-  }
-  case Float: {
-    float float_min = static_cast<float>(_min);
-    float float_max = static_cast<float>(_max);
-    float *data = reinterpret_cast<float *>(_voxels.get());
-    for (size_t i = 0; i < len; i++) {
-      float v = data[i];
-      if (v < float_min)
-        float_min = v;
-      if (v > float_max)
-        float_max = v;
-      if ((i % (XDim() * YDim())) == 0) {
-        _ctx.threadProgress(float(i / (XDim() * YDim())) / float(ZDim()));
-      }
-    }
-    _min = double(float_min);
-    _max = double(float_max);
+  case Float:
+    scan_min_max<float>(_ctx, data, len, slice, ZDim(), _min, _max);
     break;
-  }
-  case Double: {
-    double double_min = _min;
-    double double_max = _max;
-    double *data = reinterpret_cast<double *>(_voxels.get());
-    for (size_t i = 0; i < len; i++) {
-      double v = data[i];
-      if (v < double_min)
-        double_min = v;
-      if (v > double_max)
-        double_max = v;
-      if ((i % (XDim() * YDim())) == 0) {
-        _ctx.threadProgress(float(i / (XDim() * YDim())) / float(ZDim()));
-      }
-    }
-    _min = double_min;
-    _max = double_max;
+  case Double:
+    scan_min_max<double>(_ctx, data, len, slice, ZDim(), _min, _max);
     break;
-  }
-  case UInt64: {
-    uint64 uint64_min = static_cast<uint64>(_min);
-    uint64 uint64_max = static_cast<uint64>(_max);
-    uint64 *data = reinterpret_cast<uint64 *>(_voxels.get());
-    for (size_t i = 0; i < len; i++) {
-      uint64 v = data[i];
-      if (v < uint64_min)
-        uint64_min = v;
-      if (v > uint64_max)
-        uint64_max = v;
-      if ((i % (XDim() * YDim())) == 0) {
-        _ctx.threadProgress(float(i / (XDim() * YDim())) / float(ZDim()));
-      }
-    }
-    _min = double(uint64_min);
-    _max = double(uint64_max);
+  case UInt64:
+    scan_min_max<uint64>(_ctx, data, len, slice, ZDim(), _min, _max);
     break;
-  }
+  case Char:
+    scan_min_max<signed char>(_ctx, data, len, slice, ZDim(), _min, _max);
+    break;
+  case Int:
+    scan_min_max<int>(_ctx, data, len, slice, ZDim(), _min, _max);
+    break;
+  case Int64:
+    scan_min_max<int64>(_ctx, data, len, slice, ZDim(), _min, _max);
+    break;
+  case Undefined:
+    _min = _max = 0.0; // no storage: what operator() reads for it
+    break;
   }
 
   _minIsSet = _maxIsSet = true;
   _ctx.threadProgress(1.0f);
 }
 
+// ------------------------
+// voxels::calcHistogram
+// ------------------------
+// Purpose:
+//   Bins the voxels over [min(), max()] into `size` bins. A voxel v in range goes to bin
+//   trunc((v - min) / (max - min) * (size - 1)), or to the middle bin, size / 2, when min == max.
+//   Only voxels in [min, max] are counted. Every other voxel is skipped, never clamped into an end
+//   bin, so the bins sum to the number of voxels in range and no index leaves the array:
+//     - a NaN voxel (it compares false against both ends), and every voxel when min or max is NaN
+//       (calcMinMax leaves both NaN when voxel 0 is);
+//     - a voxel outside a min/max that was set narrower than the data (e.g. from a file header);
+//     - a voxel whose bin is undefined (inf / inf), which only an infinite min, max or max - min
+//       can produce.
+//   A size of 0 counts nothing.
 void voxels::calcHistogram(uint64 size) const {
   thread_info ti(_ctx, BOOST_CURRENT_FUNCTION);
 
@@ -277,21 +235,19 @@ void voxels::calcHistogram(uint64 size) const {
   _histogramSize = size;
   _histogram.reset(new uint64[size]);
   memset(_histogram.get(), 0, sizeof(uint64) * size);
-
-  // Compute min/max BEFORE parallel region to avoid race conditions
-  // on _min/_max member variables when called from multiple threads
-  double current_min = min();
-  double current_max = max();
-  double range = current_max - current_min;
-
-  // Handle degenerate case where all values are the same
-  if (range == 0.0) {
-    // All values are the same, put everything in the middle bin
-    _histogram[size / 2] = XDim() * YDim() * ZDim();
+  if (size == 0) {
     _histogramDirty = false;
     _ctx.threadProgress(1.0f);
     return;
   }
+
+  // Compute min/max BEFORE parallel region to avoid race conditions
+  // on _min/_max member variables when called from multiple threads
+  const double current_min = min();
+  const double current_max = max();
+  const double range = current_max - current_min;
+  const double last = double(size - 1);
+  const bool flat = current_min == current_max; // every voxel in range is in the middle bin
 
   for (uint64 k = 0; k < ZDim(); k++) {
 #ifdef _OPENMP
@@ -299,7 +255,16 @@ void voxels::calcHistogram(uint64 size) const {
 #endif
     for (uint64 j = 0; j < YDim(); j++)
       for (uint64 i = 0; i < XDim(); i++) {
-        uint64 offset = uint64((((*this)(i, j, k) - current_min) / range) * double(size - 1));
+        const double v = (*this)(i, j, k);
+        if (!(v >= current_min && v <= current_max))
+          continue; // NaN, or outside a narrowed min/max
+        uint64 offset = size / 2;
+        if (!flat) {
+          const double bin = ((v - current_min) / range) * last;
+          if (!(bin >= 0.0 && bin <= last))
+            continue; // undefined (inf / inf)
+          offset = uint64(bin);
+        }
 #ifdef _OPENMP
 #pragma omp atomic
 #endif
@@ -572,7 +537,6 @@ voxels &voxels::map(double min_, double max_) {
   preWrite();
 
   uint64 xdim = XDim(), ydim = YDim(), zdim = ZDim();
-  byte *data = get_data_ptr(); // Get pointer once, reuse in parallel region
 
   for (uint64 k = 0; k < zdim; k++) {
 #ifdef _OPENMP
@@ -583,19 +547,9 @@ voxels &voxels::map(double min_, double max_) {
         uint64 idx = k * xdim * ydim + j * xdim + i;
         double new_val = min_ + ((*this)(idx)-current_min) * scale;
 
-        // Direct write bypassing operator() to avoid preWrite() calls
-        switch (voxelType()) {
-        case Float:
-          reinterpret_cast<float *>(data)[idx] = static_cast<float>(new_val);
-          break;
-        case Double:
-          reinterpret_cast<double *>(data)[idx] = static_cast<double>(new_val);
-          break;
-        default:
-          // For integer types, cast appropriately
-          reinterpret_cast<unsigned char *>(data)[idx] = static_cast<unsigned char>(new_val);
-          break;
-        }
+        // Direct write bypassing operator() to avoid preWrite() calls, encoded for every voxel
+        // type (an integer volume other than UChar must not be written as bytes)
+        setValueRaw(idx, new_val);
       }
     _ctx.threadProgress(float(k) / float(zdim));
   }

@@ -355,6 +355,21 @@ struct drive_telemetry {
   float potential = 0;
   potential_terms terms;
   float force_x = 0, force_y = 0;
+  // The tick's books against U_nav (the white paper's context work, Eq. 35), filled by
+  // sim_world::step while it captures telemetry; the drive_step* entry points leave them zero.
+  // All three use drive_potential with this tick's coefficients and carrot unless stated.
+  //   potential_end:   U at the pose the tick ends at, after the drive, override_command and the
+  //                    min_gap de-overlap, against the tick's field.
+  //   projection_work: U's change across override_command (on the kinematic arm, which replaces
+  //                    the drive's step) and min_gap: potential_end minus U where the drive (or
+  //                    the plant) left the agent.
+  //   context_work:    potential minus U at the same pose with last tick's context (its
+  //                    coefficients, carrot, field and material planes), evaluated as step()
+  //                    begins: the sense, field rebuild, re-predicted coefficients and new goal
+  //                    between the two. Zero on the first captured tick. Equal to potential minus
+  //                    last tick's potential_end unless the agent was moved or the scene edited
+  //                    between the ticks.
+  float potential_end = 0, projection_work = 0, context_work = 0;
 };
 
 // The whole per-agent drive for one tick, fused: sample -> coef_feats ->

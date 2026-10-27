@@ -22,7 +22,8 @@
 // colours it bakes into the polydata's 3-channel uchar array must equal
 // cvc::colormap_rgb of the field, survive use_single_color and render-mode
 // rebuilds, change in place (same colour array, no cell rebuild) for a range
-// or colormap change, and a size mismatch must no-op. Under a texture the
+// or colormap change, and a size mismatch must no-op. A colour table
+// (setColorTable) replaces the colormap until it is cleared. Under a texture the
 // geometry's colours stay off whatever is recoloured; a field still shows. The
 // polydata is reached
 // through SceneNode::prop() -> vtkActor -> mapper input. Headless except the
@@ -30,6 +31,7 @@
 // (skipped where nothing rasterises, unless CVC_REQUIRE_RENDER=1). Explicit
 // checks + non-zero return (assert() is a no-op under Release).
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -274,6 +276,33 @@ void testScalarField(cvc::app &app) {
   setStateKey(*node, "colormap", "no-such-map");
   check(colorsOf(*node) == magma, "an unknown colormap name is ignored");
   check(noRebuild(), "state-key recolours: still no rebuild");
+
+  // A colour table replaces the colormap (a transfer function's baked ramp): entries uniform over
+  // the range, linear between them. Black -> red -> white over [-5, 5]: x = 0 is pure red.
+  const std::vector<float> table = {0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 1.f, 1.f, 1.f};
+  std::vector<unsigned char> want(3 * n);
+  for (size_t i = 0; i < n; ++i) {
+    const double t = std::min(1.0, std::max(0.0, (x[i] + 5.0) / 10.0));
+    const double r = std::min(1.0, 2.0 * t), gb = std::max(0.0, 2.0 * t - 1.0);
+    want[3 * i] = static_cast<unsigned char>(std::lround(255.0 * r));
+    want[3 * i + 1] = want[3 * i + 2] = static_cast<unsigned char>(std::lround(255.0 * gb));
+  }
+  node->setColorTable(table);
+  check(colorsOf(*node) == want, "setColorTable: the field maps through the table");
+  check(noRebuild(), "setColorTable: recoloured in place");
+  node->setColorMap(colormap_kind::VIRIDIS);
+  node->setScalarField(x, colormap_kind::GRAY, -5.0, 5.0);
+  check(colorsOf(*node) == want, "the table stays across setColorMap and setScalarField");
+  node->setColorTable({0.f, 0.f, 0.f, 1.f}); // fewer than two entries: none
+  check(colorsOf(*node) == cvc::colormap_rgb(x, colormap_kind::GRAY, -5.0, 5.0),
+        "a table of fewer than two entries goes back to the colormap");
+  node->setColorTable(table);
+  node->setColorTable({});
+  check(colorsOf(*node) == cvc::colormap_rgb(x, colormap_kind::GRAY, -5.0, 5.0),
+        "an empty table goes back to the colormap");
+  setStateKey(*node, "colormap", "magma"); // as before the table checks: magma, auto range
+  setStateKey(*node, "scalar_min", "");
+  setStateKey(*node, "scalar_max", "");
 
   // use_single_color hides the field; switching it off brings the field back.
   node->setUseSingleColor(true);

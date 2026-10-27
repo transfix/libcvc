@@ -135,6 +135,12 @@ public:
                       double hi = std::numeric_limits<double>::quiet_NaN());
   void setScalarRange(double lo, double hi);
   void setColorMap(cvc::colormap_kind cm);
+  // A colour table the field maps through instead of the colormap: `rgb` holds n >= 2 entries
+  // (3n floats, each channel 0..1) uniform over [lo, hi], sampled linearly between entries (a
+  // transfer function's baked ramp, cvc::tf::model::bake). It stays across setScalarField,
+  // setColorMap and clearScalarField; an empty (or shorter) table goes back to the colormap.
+  // Recolours in place. NaN values draw mid-gray, as with a colormap.
+  void setColorTable(const std::vector<float> &rgb);
   void clearScalarField();
   // True while the mesh has a scalar field to colour by (an explicit one, or a
   // color_by field this geometry carries), shown or hidden by use_single_color.
@@ -315,6 +321,7 @@ private:
   std::vector<double> m_scalarField; // ... and its values
   std::string m_colorBy = "none";    // the color_by state key
   cvc::colormap_kind m_colorMap = cvc::colormap_kind::VIRIDIS;
+  std::vector<float> m_colorTable; // setColorTable: replaces m_colorMap while it has >= 2 entries
   double m_scalarMin, m_scalarMax; // scalar_min / scalar_max; NaN = auto
   bool m_scalarActive = false;     // the last recolour mapped a field
   std::pair<double, double> m_scalarRangeUsed;

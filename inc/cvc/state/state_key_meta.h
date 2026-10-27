@@ -15,7 +15,8 @@
 //   knob       read by every pull(), applied when it changes
 //   command    an input the object acts on when it changes (a drive command, pedals)
 //   telemetry  written by publish() or push()
-// Numeric keys get a "unit" (SI; "1" for a ratio, "" for a count or a flag), and knobs and
+// Numeric keys get a "unit" (SI; "1" for a ratio, "" for a count or a flag, "tick" for a count of
+// the binding's steps, whose length it publishes), and knobs and
 // commands a recommended "min" and "max": what a UI's slider or a validator should offer. They
 // are recommendations, not limits the object enforces (it validates on its own).
 

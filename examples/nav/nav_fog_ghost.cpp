@@ -15,6 +15,7 @@
 //   nav_fog_ghost --capture orbit --offscreen --frames 400 --out /tmp/ghost && \
 //   ffmpeg -framerate 30 -i /tmp/ghost/frame_%05d.png -c:v libx264 -pix_fmt yuv420p ghost.mp4
 
+#include "demos_menu.h" // the gallery's Demos menu
 #include "nav_common.h"
 
 #include <algorithm>
@@ -592,6 +593,7 @@ int main(int argc, char **argv) {
   ImGui::SetCurrentContext(ui.imguiContext());
   ui.setDrawCallback([&] {
     if (ImGui::BeginMainMenuBar()) {
+      cvc_examples::demos_menu("nav_fog_ghost");
       if (ImGui::BeginMenu("Scenario")) {
         const char *sc[] = {"ghost", "dynamic"};
         for (const char *n : sc)
@@ -730,7 +732,7 @@ int main(int argc, char **argv) {
 
   replan(sx, sy); // initial belief route: the phantom bends it around from t=0
 
-  while (!view.windowClosed()) {
+  while (!view.windowClosed() && !cvc_examples::demo_switch_requested()) {
     double t, dt;
     if (capturing) {
       t = frame / fps;
