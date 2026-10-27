@@ -671,11 +671,18 @@ suite was written.
   entry, and are destroyed on the worker as soon as they end. `extra.kernel_threads`,
   `threads_created` and `app_threads_after` in `async.flood.*` `where=background` against `lane`;
   the cost of a call against the calls the app has made in `async.pool_aging` (`last_over_first`)
-  and `async.pool_batches`. Baseline: the last 10 % of 3000 sequential calls took 15-17 times as
-  long each as the first 10 % (a lane: flat), and `async.pool_retention` kept ~1 MiB per call,
-  every call's result, until the app went. Now: `last_over_first` ~1.1 at k=3000 (6.7 s -> 0.11 s
-  for the 3000 calls), ~200 bytes per call left after `pool_retention`, `app_threads_after` 0, and
-  a burst of 10 no-op calls starts 2 threads instead of 10.
+  and `async.pool_batches`. Baseline: the last 10 % of 3000 sequential calls took about 3 to 17
+  times as long each as the first 10 %, depending on load (median 12 in the final A/B; a lane:
+  flat), and `async.pool_retention` kept ~1 MiB per call, every call's result, until the app
+  went. Now: `last_over_first` ~1.0 at k=3000 (4.9 s -> 0.09 s for the 3000 calls), a few hundred
+  bytes per call left after `pool_retention` (105 MB -> 41 KB for 100 calls), `app_threads_after`
+  0. A burst starts as many workers as it has tasks, up to the pool size, at once (each worker
+  once per app): a burst of 10 `sleep1ms` calls on a fresh app runs on 10 threads (min 9), as the
+  baseline's thread per call did, where starting one worker at a time ran it on 1-8. Idle
+  workers wait on a `std::condition_variable_any`, signalled after the pool's mutex is released:
+  `boost::condition_variable` makes and closes a semaphore per wait on Windows, and its
+  `notify_one` was ~17 % of the driver's samples in `async.pool_aging` k=5000 `where=background`;
+  the wake is now ~4 %, and `async_host::call` fell from ~19 % to ~7 % inclusive.
 - **The background pool stalled, then hung, past its size** (fixed). `uniqueThreadKey` only saw
   threads that had started, so calls queued while the pool was full got the same key. A worker
   that finished started the next queued task from its own thread (`threadPoolWorker` calling
@@ -691,21 +698,27 @@ suite was written.
   tasks keys, never unlocks a mutex it doesn't own through RAII, and runs its bookkeeping with
   interruption disabled. `AppTest.ThreadPoolFloodPastPoolSizeCompletes` floods 1000 tasks onto 4
   workers (before: hung, or 14 of 1000 done after 10 s); `--bg-oversubscribe` n=100 now finishes
-  in ~4 ms, where the baseline hits the watchdog.
+  in ~3.6 ms (18 of 18 reps), where the baseline stalls or hangs intermittently (in the final
+  A/B 3 of its 6 reps failed, the others took ~9 ms; how often depends on the driver and load).
 - **Concurrent compute-pool fan-outs serialized** (fixed). `thread_pool::parallel_for` held one
   job slot and woke every worker on each post. Jobs now go on a list that free workers join,
   oldest first, and a post wakes only as many idle workers as it can enlist:
   `async.compute_fanout_narrow` `extra.fanout_stretch` against `m` (m=4: ~2.4-3.6 -> ~1.07), and
-  `async.compute_fanout_herd` (stretch ~5.5-6.7 -> ~2.1-2.9). Fan-outs that each saturate the pool
-  (`async.compute_fanout`) now share it, so a single one takes longer while others run (its
-  stretch rises) and the pool's efficiency rises with `m`.
+  `async.compute_fanout_herd` (stretch ~5.5-6.7 -> ~1.7-2.9). Fan-outs that each saturate the pool
+  (`async.compute_fanout`) now share it: all `m` of them finish 23-25 % sooner (m=4, m=16), and
+  a single one's stretch at m=4 moves with load (3.1 -> 3.5 in one A/B, 2.1 -> 4.1 in another),
+  since it now runs beside the others instead of after them.
 - **Per-call overhead of an async function.** About 30 allocations and 10 lock acquisitions before
   a kernel ran, even a no-op one, and two state-tree reads of the step rate on the inline path:
   `async.flood.noop`, `allocs_driver`. Now the error-field vectors are built only on a throw, the
   reply channel only for a call that parks or returns a future, the inline path reads the rate
-  once (at its charge) unless a step budget needs it during the kernel, the host-open check is an
-  atomic, and a call leaves the host's cancel list in O(1): -13 to -20 % driver allocations per
-  program inline, about -23 % on the background pool.
+  once (at its charge) unless a step budget needs it during the kernel, the progress channel's
+  key is built on the first post, the host-open check is an atomic, and a call leaves the host's
+  cancel list in O(1): -15 to -23 % `allocs_driver` on the inline points (`async.flood.noop`,
+  `async.futures` `where=inline`), about -22 % on the background pool with `driver=poll1ms`.
+  Quote allocation savings from inline points or normalized by `driver_cpu_ns`: a `driver=spin`
+  threaded point mostly counts idle pump iterations, so its `allocs_driver` follows whether the
+  pinned driver spun or yielded, not the per-call cost.
 - **Polling hosts sleep a timer tick.** The async scheduler has no wakeup signal, so a host that
   sleeps when idle (pycvc: `sleep_for(1 ms)`) waits for the OS timer; on Windows that is ~15.6 ms
   unless something raised the timer resolution (the header's `sleep_for(1ms) takes` line).
