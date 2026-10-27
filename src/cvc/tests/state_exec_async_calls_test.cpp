@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cvc/core/app.h>
+#include <cvc/core/async_lane.h>
 #include <cvc/core/async_task.h>
 #include <cvc/core/thread_pool.h>
 #include <cvc/state/state.h>
@@ -1221,7 +1222,8 @@ TEST(AsyncCalls, ACallMadeOnceTheAppsPoolHasStoppedRaisesAndLeavesTheHost) {
 }
 
 // A kernel still queued when the pool stops (~app drops the queue) is dropped the same way: its
-// call raises RuntimeError and leaves the host. The kernel already running finishes.
+// call raises RuntimeError, naming the stopped pool as the cause, and leaves the host. The kernel
+// already running finishes.
 TEST(AsyncCalls, ACallStillQueuedWhenTheAppsPoolStopsRaisesAndLeavesTheHost) {
   auto w = std::make_unique<world>(async_sched);
   w->app.setThreadPoolSize(1);
@@ -1240,8 +1242,36 @@ TEST(AsyncCalls, ACallStillQueuedWhenTheAppsPoolStopsRaisesAndLeavesTheHost) {
   ASSERT_TRUE(exc);
   const outcome o = record(*exc);
   EXPECT_EQ(o.cls, "RuntimeError");
-  EXPECT_NE(o.message.find("slow-op: not run"), std::string::npos) << o.message;
+  EXPECT_NE(o.message.find("slow-op: not run: the app's background pool has stopped"),
+            std::string::npos)
+      << o.message;
   EXPECT_FALSE(w->p.started);
+}
+
+// A kernel for a lane that has stopped is refused, and its call says so: it raises RuntimeError
+// naming the lane (its name in the host, not the lane thread's), and leaves the host.
+TEST(AsyncCalls, ACallToAStoppedLaneRaisesAndLeavesTheHost) {
+  cvc::async_lane lane("work-thread"); // outlives the world, as a host's lanes must
+  async_options opts;
+  opts.where = executor::on_lane("work");
+  auto w = std::make_unique<world>(async_sched, opts);
+  w->host->add_lane("work", lane);
+  lane.stop();
+  const int pid = w->submit("(slow-op 1 10)");
+  const bool ended = pump_or_leak(w, [&] { return w->finished(pid); });
+  if (!w)
+    return;
+  ASSERT_TRUE(ended) << "the call never ended";
+  const auto exc = w->exit_exception(pid);
+  ASSERT_TRUE(exc);
+  const outcome o = record(*exc);
+  EXPECT_EQ(o.cls, "RuntimeError");
+  EXPECT_NE(o.message.find("slow-op: lane 'work' is stopped"), std::string::npos) << o.message;
+  EXPECT_FALSE(w->p.started);
+  EXPECT_EQ(lane.completed(), 0u);
+  const auto start = clock_type::now();
+  w->host->shutdown();
+  EXPECT_LT(seconds_since(start), 1.0);
 }
 
 // launch_pool_task posts exactly one value, also for a task the app drops: submitted once the

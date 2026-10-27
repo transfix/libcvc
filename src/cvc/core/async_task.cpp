@@ -16,23 +16,34 @@ namespace se = state_exec;
 
 namespace {
 
-// launch_pool_task's task, shared by the copies of its pool task: it posts exactly one value to
-// `done`, the work's or on_error's, also when the pool destroys it unrun (it was submitted, or
-// still queued, once ~app had stopped the pool).
+// launch_pool_task's pool task: the std::function's target itself, holding what it needs by
+// value, so it costs one heap block on every standard library (a shared_ptr capture costs a block
+// of its own under libstdc++, which keeps only a trivially copyable callable in std::function's
+// buffer). It posts exactly one value to `done`, the work's or on_error's, also when the pool
+// destroys it unrun (it was submitted, or still queued, once ~app had stopped the pool).
 struct pool_task_post {
   se::async_scheduler &sched;
   pool_task_work work;
   pool_task_on_error on_error;
   std::string done;
-  bool ran = false;
+  bool armed = true; // this object still owes `done` its value; a move or a copy takes that over
 
   pool_task_post(se::async_scheduler &s, pool_task_work w, pool_task_on_error e, std::string d)
       : sched(s), work(std::move(w)), on_error(std::move(e)), done(std::move(d)) {}
-  pool_task_post(const pool_task_post &) = delete;
+  pool_task_post(pool_task_post &&o) noexcept
+      : sched(o.sched), work(std::move(o.work)), on_error(std::move(o.on_error)),
+        done(std::move(o.done)), armed(std::exchange(o.armed, false)) {}
+  // std::function needs a copy constructor. The pool never copies a task (it moves or swaps the
+  // std::function, which hands over a target this large by pointer); a copy takes the task over
+  // as a move does, so only one object can ever post.
+  pool_task_post(const pool_task_post &o) noexcept
+      : pool_task_post(std::move(const_cast<pool_task_post &>(o))) {}
   pool_task_post &operator=(const pool_task_post &) = delete;
+  pool_task_post &operator=(pool_task_post &&) = delete;
 
-  void run() {
-    ran = true;
+  void operator()() {
+    if (!std::exchange(armed, false))
+      return;
     se::value_t payload;
     try {
       payload = work();
@@ -45,7 +56,7 @@ struct pool_task_post {
   }
 
   ~pool_task_post() {
-    if (ran)
+    if (!armed)
       return;
     const std::string msg = "not run: the app's background pool has stopped";
     try {
@@ -80,9 +91,8 @@ std::string launch_pool_task(app &a, se::async_scheduler &sched, const std::stri
   // the SAME scheduler the caller drives, so the parked process is resumed there.  ALWAYS post
   // exactly one value (on_error on a throw, or when the app drops the task unrun as it goes away)
   // so a waiter can't hang.
-  auto task = std::make_shared<pool_task_post>(sched, std::move(work), std::move(on_error), done);
-  // The pool task owns it: refused, it posts from its destructor before submitPooled returns.
-  a.submitPooled([task = std::move(task)] { task->run(); });
+  // Refused, the task posts from its destructor before submitPooled returns.
+  a.submitPooled(pool_task_post(sched, std::move(work), std::move(on_error), done));
   return done;
 }
 

@@ -410,8 +410,10 @@ public:
   // empty one is ignored. Once ~app has stopped the pool, a task is dropped: destroyed without
   // running, here when it is submitted (this then returns false) or in ~app when it was still
   // queued. A task whose submitter must hear of that (a call to settle, a waiter to post to) does
-  // it from the destructor of something it captures, as async_host, launch_pool_task and
-  // compute_async's on_error form do. Returns false only for such a drop.
+  // it from its destructor, as async_host, launch_pool_task and compute_async's on_error form do:
+  // their callables hold their state by value, so a task stays one heap block. (A shared_ptr
+  // capture would add a block under libstdc++, which keeps only a trivially copyable callable in
+  // std::function's buffer.) Returns false only for such a drop.
   bool submitPooled(std::function<void()> task, thread_priority priority = PRIORITY_NORMAL);
 
   // Set the maximum number of concurrent threads in the pool

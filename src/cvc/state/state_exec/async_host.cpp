@@ -570,45 +570,67 @@ void async_host::run_kernel(const std::shared_ptr<async_call> &call, async_kerne
   state.end(*call);
 }
 
-// Shared by the copies of a threaded call's executor task. The call ends exactly once: by
-// run_kernel when the executor runs the task, or by drop() when it never will. That is the case
-// when the executor refuses the task (a stopped lane, an app whose pool has stopped), and when it
-// destroys the task unrun (an app's pool drops what is still queued when ~app stops it): the
-// call then raises RuntimeError, its kernel goes, and the host's count goes down, so the process
-// isn't left parked and shutdown() doesn't wait for good.
+// A threaded call's executor task: the std::function's target itself, holding the call, kernel
+// and host state by value, so the task costs one heap block on every standard library. (A
+// shared_ptr capture costs a block of its own under libstdc++, which keeps only a trivially
+// copyable callable in std::function's buffer.) The call ends exactly once: by run_kernel when
+// the executor runs the task, or by drop() when the executor destroys it unrun. That is the case
+// when the executor refuses it (a stopped lane, an app whose pool has stopped), and when the
+// app's pool drops what is still queued as ~app stops it. The call then raises RuntimeError, its
+// kernel goes, and the host's count goes down, so the process isn't left parked and shutdown()
+// doesn't wait for good.
 struct async_host::kernel_task {
   std::shared_ptr<async_call> call;
   async_kernel kernel;
   std::shared_ptr<shared_state> state;
-  std::atomic<bool> claimed{false}; // run, or dropped
+  // The lane's name (its key in the host's lanes_), or null for the app's background pool. A lane
+  // runs every job it accepts (stop() drains its queue), so it destroys this task unrun only as
+  // its submit() refuses it, inside async_host::submit, while the name is there.
+  const std::string *lane;
+  bool armed = true; // this object still owes the call its end; a move or a copy takes that over
 
-  kernel_task(std::shared_ptr<async_call> c, async_kernel k, std::shared_ptr<shared_state> s)
-      : call(std::move(c)), kernel(std::move(k)), state(std::move(s)) {}
-  kernel_task(const kernel_task &) = delete;
+  kernel_task(std::shared_ptr<async_call> c, async_kernel k, std::shared_ptr<shared_state> s,
+              const std::string *l) noexcept
+      : call(std::move(c)), kernel(std::move(k)), state(std::move(s)), lane(l) {}
+  kernel_task(kernel_task &&o) noexcept
+      : call(std::move(o.call)), kernel(std::move(o.kernel)), state(std::move(o.state)),
+        lane(o.lane), armed(std::exchange(o.armed, false)) {
+    o.kernel = nullptr; // a moved-from std::function may keep a copy of a small callable
+  }
+  // std::function needs a copy constructor. No executor copies its task: they move or swap the
+  // std::function, which hands over a target this large by pointer. A copy takes the task over
+  // as a move does, so only one object can ever end the call.
+  kernel_task(const kernel_task &o) noexcept
+      : kernel_task(std::move(const_cast<kernel_task &>(o))) {}
   kernel_task &operator=(const kernel_task &) = delete;
+  kernel_task &operator=(kernel_task &&) = delete;
 
   ~kernel_task() {
-    if (claimed.load(std::memory_order_acquire))
-      return;
-    std::exception_ptr error;
-    try {
-      error = std::make_exception_ptr(
-          dsl_error("RuntimeError", call->function_name() + ": not run: its executor stopped",
-                    "async", function_fields(call->function_name())));
-    } catch (...) {
-      error = std::current_exception();
-    }
-    drop(std::move(error));
+    if (armed)
+      drop();
   }
 
-  void run() noexcept {
-    if (!claimed.exchange(true, std::memory_order_acq_rel))
+  void operator()() noexcept {
+    if (std::exchange(armed, false))
       run_kernel(call, kernel, *state);
   }
 
-  void drop(std::exception_ptr error) noexcept {
-    if (claimed.exchange(true, std::memory_order_acq_rel))
-      return;
+  // Not run: the call raises RuntimeError, naming the lane that refused it or the stopped pool.
+  void drop() noexcept {
+    armed = false;
+    const std::string &name = call->function_name();
+    std::exception_ptr error;
+    try {
+      if (lane)
+        error =
+            std::make_exception_ptr(std::runtime_error(name + ": lane '" + *lane + "' is stopped"));
+      else
+        error = std::make_exception_ptr(
+            dsl_error("RuntimeError", name + ": not run: the app's background pool has stopped",
+                      "async", function_fields(name)));
+    } catch (...) {
+      error = std::current_exception();
+    }
     kernel = nullptr; // what it captured goes before the host's count does
     if (call->settle({}, std::move(error)))
       call->async_sched_->post_async_completion(call);
@@ -618,27 +640,27 @@ struct async_host::kernel_task {
 
 void async_host::submit(const std::shared_ptr<async_call> &call, async_kernel kernel,
                         const async_options &opts) {
+  cvc::async_lane *lane = nullptr;
+  const std::string *lane_name = nullptr;
+  if (opts.where.kind == executor_kind::lane) {
+    const auto it = lanes_.find(opts.where.lane); // call() checked that it is there
+    lane = it->second;
+    lane_name = &it->first;
+  }
   state_->add(call, true);
-  // The executor runs, then destroys, this task; nothing else holds the kernel once it is queued.
-  // (Its one capture fits std::function's own buffer, so the task allocates only the kernel_task.)
-  auto pending = std::make_shared<kernel_task>(call, std::move(kernel), state_);
-  kernel = nullptr; // a moved-from std::function may keep a copy of a small callable
-  std::function<void()> task = [pending] { pending->run(); };
   try {
-    if (opts.where.kind == executor_kind::lane) {
-      if (!lanes_.at(opts.where.lane)->submit(std::move(task)))
-        throw std::runtime_error(call->function_name() + ": lane '" + opts.where.lane +
-                                 "' is stopped");
-    } else if (!app_->submitPooled(std::move(task), opts.priority)) {
-      // An anonymous task on the background pool's persistent workers (no thread, no key), or
-      // dropped: the app is going away.
-      throw dsl_error("RuntimeError",
-                      call->function_name() + ": not run: the app's background pool has stopped",
-                      "async", function_fields(call->function_name()));
-    }
+    // The executor runs, then destroys, this task; nothing else holds the kernel once it is
+    // queued. Refused, it is destroyed unrun before submit() or submitPooled() returns, and ends
+    // the call itself (kernel_task).
+    std::function<void()> task(kernel_task(call, std::move(kernel), state_, lane_name));
+    kernel = nullptr; // a moved-from std::function may keep a copy of a small callable
+    if (lane)
+      lane->submit(std::move(task));
+    else // an anonymous task on the background pool's persistent workers: no thread, no key
+      app_->submitPooled(std::move(task), opts.priority);
   } catch (...) {
-    // Not queued: the call fails now.
-    pending->drop(std::current_exception());
+    // Thrown as the task was built or handed over (out of memory, say): it was destroyed unrun on
+    // the way here, which ended the call, or it is queued and will end it.
   }
 }
 

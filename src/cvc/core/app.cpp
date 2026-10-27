@@ -63,6 +63,7 @@
 #include <iterator>
 #include <queue>
 #include <set>
+#include <utility>
 
 namespace cvc {
 // ---------------------
@@ -1020,22 +1021,65 @@ cvc::thread_pool &app::computePool() {
 
 namespace {
 
-// compute_async's job, shared by the copies of its pool task. If the pool destroys it unrun (it
-// was submitted, or still queued, once ~app had stopped the pool), on_error hears of it.
+// compute_async's pool task: the std::function's target itself, holding the job by value, so it
+// costs one heap block on every standard library (a shared_ptr capture costs a block of its own
+// under libstdc++, which keeps only a trivially copyable callable in std::function's buffer). If
+// the pool destroys it unrun (it was submitted, or still queued, once ~app had stopped the pool),
+// on_error hears of it.
 struct compute_job {
-  int n = 0;
+  app &owner;
+  int n;
   std::function<void(int)> fn;
   std::function<void()> on_done;
   std::function<void(const std::string &)> on_error;
-  bool ran = false;
+  bool armed = true; // still owes the job its run or its drop (a move or a copy takes that over)
+
+  compute_job(app &a, int count, std::function<void(int)> f, std::function<void()> done,
+              std::function<void(const std::string &)> err)
+      : owner(a), n(count), fn(std::move(f)), on_done(std::move(done)), on_error(std::move(err)) {}
+  compute_job(compute_job &&o) noexcept
+      : owner(o.owner), n(o.n), fn(std::move(o.fn)), on_done(std::move(o.on_done)),
+        on_error(std::move(o.on_error)), armed(std::exchange(o.armed, false)) {}
+  // std::function needs a copy constructor. The pool never copies a task (it moves or swaps the
+  // std::function, which hands over a target this large by pointer); a copy takes the job over as
+  // a move does, so it runs, or reports its drop, once.
+  compute_job(const compute_job &o) noexcept
+      : compute_job(std::move(const_cast<compute_job &>(o))) {}
+  compute_job &operator=(const compute_job &) = delete;
+  compute_job &operator=(compute_job &&) = delete;
 
   ~compute_job() {
-    if (ran || !on_error)
+    if (!armed || !on_error)
       return;
     try {
       on_error("not run: the app's background pool has stopped");
     } catch (...) {
     }
+  }
+
+  void operator()() {
+    if (!std::exchange(armed, false))
+      return;
+    // Without on_error, a throw goes to the pool (which logs it) and on_done is skipped.
+    try {
+      owner.computePool().parallel_for(n, fn);
+    } catch (boost::thread_interrupted &) {
+      if (on_error)
+        on_error("interrupted");
+      throw;
+    } catch (const std::exception &e) {
+      if (!on_error)
+        throw;
+      on_error(e.what());
+      return;
+    } catch (...) {
+      if (!on_error)
+        throw;
+      on_error("unknown error");
+      return;
+    }
+    if (on_done)
+      on_done();
   }
 };
 
@@ -1050,37 +1094,9 @@ void app::compute_async(int n, std::function<void(int)> fn, std::function<void()
                         std::function<void(const std::string &)> on_error,
                         thread_priority priority) {
   // A background pool worker owns the blocking parallel_for; the caller returns immediately. The
-  // job captures fn/on_done by value, so a result accumulator they close over outlives this call.
-  auto job = std::make_shared<compute_job>();
-  job->n = n;
-  job->fn = std::move(fn);
-  job->on_done = std::move(on_done);
-  job->on_error = std::move(on_error);
-  submitPooled(
-      [this, job = std::move(job)]() {
-        job->ran = true;
-        // Without on_error, a throw goes to the pool (which logs it) and on_done is skipped.
-        try {
-          computePool().parallel_for(job->n, job->fn);
-        } catch (boost::thread_interrupted &) {
-          if (job->on_error)
-            job->on_error("interrupted");
-          throw;
-        } catch (const std::exception &e) {
-          if (!job->on_error)
-            throw;
-          job->on_error(e.what());
-          return;
-        } catch (...) {
-          if (!job->on_error)
-            throw;
-          job->on_error("unknown error");
-          return;
-        }
-        if (job->on_done)
-          job->on_done();
-      },
-      priority);
+  // job holds fn/on_done by value, so a result accumulator they close over outlives this call.
+  submitPooled(compute_job(*this, n, std::move(fn), std::move(on_done), std::move(on_error)),
+               priority);
 }
 
 cvc::world_clock &app::world_clock() {
