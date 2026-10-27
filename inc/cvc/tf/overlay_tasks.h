@@ -48,7 +48,10 @@
 //                app's background-pool workers, not on the compute pool, so this works whatever
 //                the size of the app's compute pool, even with no workers. If no thread can be
 //                started -- compute_async throws when the background pool has no worker and
-//                cannot create one -- the task carries on cooperatively.)
+//                cannot create one, or drops a chunk it queued once the pool is left with no
+//                worker, as when a keyed task held the only slot of a pool with none and the
+//                worker asked for as it ended couldn't be created -- the task carries on
+//                cooperatively.)
 //
 // Either way the results reach state through (tf-overlay-publish), on the scheduler thread --
 // never from a worker -- and between steps the task writes its progress to <tf>.overlay_status

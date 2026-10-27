@@ -138,6 +138,9 @@ struct chunk_reply {
   std::mutex mu;
   bool abandoned = false; // the task let go of the chunk (release_job)
   bool posted = false;    // the chunk posted its reply to `channel`
+  // The pool dropped the chunk unrun, its queue left with no worker (app::kPoolNoWorker): the
+  // reply posted says so, and the task carries on cooperatively.
+  bool no_worker = false;
   std::string channel;
 };
 
@@ -253,7 +256,11 @@ void write_progress(task_record &rec) {
 // (the pool destroys it on the worker as soon as it returns; compute_async jobs never enter the
 // app's thread map, so nothing of them is left to reap), and a chunk may wait in the pool's queue
 // behind other jobs first, so a strong capture would keep a stopped task's job alive until its
-// chunk got a worker and ran.
+// chunk got a worker and ran. A chunk queued and then left with no worker (the pool had none, and
+// the one it asked for as a keyed thread holding its slot ended couldn't be created) is dropped
+// unrun: compute_async's on_error hears of it, and the reply it posts sends the task on
+// cooperatively, as when compute_async throws. (Without on_error the chunk would wait in the queue
+// for a later submission to start a worker, and the task with it.)
 se::value_t launch_chunk(task_record &rec) {
   static std::atomic<std::uint64_t> seq{0};
   auto reply = std::make_shared<chunk_reply>();
@@ -278,6 +285,18 @@ se::value_t launch_chunk(task_record &rec) {
           sched->post_message(reply->channel, se::value_t(ok));
           reply->posted = true;
         }
+      },
+      [reply, sched](const std::string &why) {
+        // Only a chunk left with no worker: one dropped as ~app stops the pool, or interrupted
+        // by wait() or ~app, posts nothing, as the four-argument form's did.
+        if (why != cvc::app::kPoolNoWorker)
+          return;
+        std::lock_guard<std::mutex> lk(reply->mu);
+        if (!reply->abandoned) {
+          reply->no_worker = true;
+          sched->post_message(reply->channel, se::value_t(false));
+          reply->posted = true;
+        }
       });
   rec.chunk = reply;
   return se::make_future(reply->channel);
@@ -287,7 +306,13 @@ se::value_t launch_chunk(task_record &rec) {
 // finished it; else #f after a cooperative slice, or the future of the pool chunk just launched.
 se::value_t task_step(task_record &rec) {
   // The process calls again only once the last chunk's reply was delivered to it: that chunk is
-  // over, and its reply taken.
+  // over, and its reply taken. One the pool dropped for want of a worker sends the task on
+  // cooperatively.
+  if (rec.chunk) {
+    std::lock_guard<std::mutex> lk(rec.chunk->mu);
+    if (rec.chunk->no_worker)
+      rec.threaded = false;
+  }
   rec.chunk.reset();
   if (!rec.box || rec.box->job.done())
     return se::value_t(true);
