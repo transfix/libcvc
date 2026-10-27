@@ -514,12 +514,14 @@ public:
   // task, with no thread key), so concurrent calls do not cancel each other, and calling this a
   // few times a second does not grow threads(): the job is never in it, and its worker destroys
   // it, with fn and on_done, as soon as it ends. A job the app drops unrun (submitted or still
-  // queued once ~app has stopped the pool, or queued and then left with no worker:
-  // trySubmitPooled) calls neither callback and releases both. Throws
+  // queued once ~app has stopped the pool) calls neither callback and releases both. Throws
   // boost::thread_resource_error, having called neither and released both, when no worker can be
   // started for the job and the pool has none (thread resources exhausted before its first
-  // worker), so the caller can do the work itself (a threaded tf overlay task carries on
-  // cooperatively); with a worker running, the job waits for it instead.
+  // worker), so the caller can do the work itself; with a worker running, the job waits for it
+  // instead. A job queued and then left with no worker (trySubmitPooled) is not dropped, since
+  // nothing would tell its caller: it waits in the queue, as a submitPooled task does, until a
+  // later submission or setThreadPoolSize() starts a worker. The on_error form hears of that
+  // instead (a threaded tf overlay task uses it, and carries on cooperatively either way).
   void compute_async(int n, std::function<void(int)> fn, std::function<void()> on_done,
                      thread_priority priority = PRIORITY_NORMAL);
   // The same, calling exactly one of on_done and on_error: on_error(message) instead of on_done
@@ -732,9 +734,9 @@ protected:
     std::function<void()> task;
     thread_priority priority = PRIORITY_NORMAL;
     bool keyed = false; // a thread of its own under `key` (startThreadPooled, wait=true)
-    // Queued by trySubmitPooled: dropped unrun if the pool is left with no worker while it waits
-    // (takeUnstartableLocked). Read only while the task is queued.
-    bool handBack = false;
+    // Queued by trySubmitPooled, for a submitter that hears of a drop: dropped unrun if the pool
+    // is left with no worker while it waits (takeUnstartableLocked). Read only while queued.
+    bool dropIfNoWorker = false;
     std::uint64_t seq = 0; // submission order: FIFO within a priority
 
     // For priority queue ordering: higher priority first, then the earlier submission.
@@ -749,10 +751,18 @@ protected:
   struct PoolQueue : std::priority_queue<ThreadPoolTask> {
     // Move the task submitted as `seq` into `out` and drop its place; false if it isn't queued.
     bool take(std::uint64_t seq, ThreadPoolTask &out);
-    // Move the callables of the handBack tasks onto `out` and drop their places. Throws (out of
-    // memory) only before it has taken any.
-    void takeHandBacks(std::vector<std::function<void()>> &out);
+    // Move the callables of the dropIfNoWorker tasks onto `out` and drop their places. Throws (out
+    // of memory) only before it has taken any.
+    void takeDroppable(std::vector<std::function<void()>> &out);
   };
+
+  // trySubmitPooled, saying whether the task, once queued, is dropped if the pool is left with no
+  // worker (dropIfNoWorker: its submitter hears of a drop, as trySubmitPooled's must) or waits in
+  // the queue for a later submission to start one, as a submitPooled task does (compute_async's
+  // four-argument form, whose job has no way to report a drop). Handed back as trySubmitPooled
+  // says either way.
+  PoolSubmit submitPooledHandingBack(std::function<void()> &task, thread_priority priority,
+                                     bool dropIfNoWorker);
 
   // Queue a keyed task (startThreadPooled with wait=true) under the caller's own key. (Anonymous
   // tasks go through submitPooled and have no key, so none is reserved for a queued task.)
@@ -772,7 +782,7 @@ protected:
   // pool has no worker running for it and every worker creation it relied on, this call's or one
   // another call had under way, failed (not even the pool's first thread could be created: thread
   // resources are exhausted). Left queued, it would wait until a later call started one.
-  // (trySubmitPooled.) Queued, such a task is a handBack one: dropped unrun if the pool is left
+  // (trySubmitPooled.) A task queued with dropIfNoWorker is dropped unrun if the pool is left
   // with no worker while it waits. Returns PoolSubmit::stopped, having taken nothing, once the
   // pool has stopped; the caller destroys the task unrun.
   PoolSubmit enqueuePoolTask(ThreadPoolTask &task, bool handBackIfNoWorker = false);
@@ -781,8 +791,8 @@ protected:
   bool poolHasNoWorkerLocked(boost::mutex::scoped_lock &lock);
   // _threadPoolMutex held: if the pool has no worker, running or being created (one could not be
   // created), and no trySubmitPooled call is still deciding whether to hand its own task back,
-  // move the queued handBack tasks' callables onto `out`. Nothing would run them until a later
-  // call started a worker; the caller drops them (dropPoolTasks, kPoolNoWorker) once it has
+  // move the queued dropIfNoWorker tasks' callables onto `out`. Nothing would run them until a
+  // later call started a worker; the caller drops them (dropPoolTasks, kPoolNoWorker) once it has
   // released the mutex.
   void takeUnstartableLocked(std::vector<std::function<void()>> &out);
   // _threadPoolMutex NOT held: destroy `tasks` unrun, with interruption held off and `why` as
@@ -799,8 +809,8 @@ protected:
   PoolKick poolKickLocked();
   // _threadPoolMutex NOT held: wake and start what poolKickLocked() claimed. False when a new
   // worker's thread could not be created (its claim is given up, and the queued tasks wait for
-  // a running worker or the next kick; if the pool is left with no worker, the handBack ones are
-  // dropped here, as takeUnstartableLocked says).
+  // a running worker or the next kick; if the pool is left with no worker, the dropIfNoWorker ones
+  // are dropped here, as takeUnstartableLocked says).
   bool applyPoolKick(const PoolKick &kick);
   // _threadPoolMutex held: poolKickLocked(), waking at once and leaving the new workers to
   // startRequestedWorkers() (called without the mutex).

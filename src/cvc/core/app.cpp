@@ -1196,10 +1196,15 @@ void app::compute_async(int n, std::function<void(int)> fn, std::function<void()
                         thread_priority priority) {
   // A background pool worker owns the blocking parallel_for; the caller returns immediately. The
   // job holds fn/on_done by value, so a result accumulator they close over outlives this call.
+  // Only a job with on_error hears of a drop: one without waits in the queue, should the pool be
+  // left with no worker, rather than be dropped without a word (its caller may wait for on_done:
+  // a threaded tf overlay task did).
+  const bool reports_drop = static_cast<bool>(on_error);
   std::function<void()> job(
       compute_job(*this, n, std::move(fn), std::move(on_done), std::move(on_error)));
   // Queued, or dropped (the pool has stopped: on_error, if any, has heard of it).
-  if (trySubmitPooled(job, priority) != PoolSubmit::no_worker)
+  if (submitPooledHandingBack(job, priority, /*dropIfNoWorker=*/reports_drop) !=
+      PoolSubmit::no_worker)
     return;
   // No worker could be started for it, and the pool has none: as when compute_async started a
   // thread per job and that failed, the caller hears of it by an exception (a threaded tf
@@ -1320,6 +1325,8 @@ unsigned int app::getPendingThreadCount() const {
 // 10/27/2026 -- Joe R. -- A trySubmitPooled task left queued with no worker (the creation asked
 //                         for as a keyed thread ends fails) is dropped, with kPoolNoWorker as
 //                         poolDropReason(), instead of waiting for a later submission.
+// 10/27/2026 -- Joe R. -- Not compute_async's job without on_error, which can't report it: it
+//                         waits.
 
 bool app::poolCanStartLocked() const {
   return !_poolStopping && !_pendingTasks.empty() && _activeWorkers < _maxPoolSize;
@@ -1362,11 +1369,17 @@ bool app::submitPooled(std::function<void()> task, thread_priority priority) {
 }
 
 app::PoolSubmit app::trySubmitPooled(std::function<void()> &task, thread_priority priority) {
+  return submitPooledHandingBack(task, priority, /*dropIfNoWorker=*/true);
+}
+
+app::PoolSubmit app::submitPooledHandingBack(std::function<void()> &task,
+                                             thread_priority priority, bool dropIfNoWorker) {
   if (!task)
     return PoolSubmit::queued;
   ThreadPoolTask t;
   t.task.swap(task); // nothing of the callable stays in `task`
   t.priority = priority;
+  t.dropIfNoWorker = dropIfNoWorker;
   const PoolSubmit submitted = enqueuePoolTask(t, /*handBackIfNoWorker=*/true);
   if (submitted == PoolSubmit::no_worker) {
     t.task.swap(task); // handed back, unrun
@@ -1395,18 +1408,18 @@ bool app::PoolQueue::take(std::uint64_t seq, ThreadPoolTask &out) {
   return true;
 }
 
-void app::PoolQueue::takeHandBacks(std::vector<std::function<void()>> &out) {
-  const auto isHandBack = [](const ThreadPoolTask &t) { return t.handBack; };
-  const std::size_t n = std::count_if(c.begin(), c.end(), isHandBack);
+void app::PoolQueue::takeDroppable(std::vector<std::function<void()>> &out) {
+  const auto droppable = [](const ThreadPoolTask &t) { return t.dropIfNoWorker; };
+  const std::size_t n = std::count_if(c.begin(), c.end(), droppable);
   if (n == 0)
     return;
   out.reserve(out.size() + n); // the one step that can throw: nothing is taken yet
   for (ThreadPoolTask &t : c)
-    if (t.handBack) {
+    if (t.dropIfNoWorker) {
       out.emplace_back();
       out.back().swap(t.task); // swapped out, as takePoolTaskLocked does
     }
-  c.erase(std::remove_if(c.begin(), c.end(), isHandBack), c.end());
+  c.erase(std::remove_if(c.begin(), c.end(), droppable), c.end());
   std::make_heap(c.begin(), c.end(), comp);
 }
 
@@ -1424,7 +1437,7 @@ app::PoolSubmit app::enqueuePoolTask(ThreadPoolTask &task, bool handBackIfNoWork
     queued.task.swap(task.task);
     queued.priority = task.priority;
     queued.keyed = task.keyed;
-    queued.handBack = handBackIfNoWorker && !task.keyed;
+    queued.dropIfNoWorker = task.dropIfNoWorker && !task.keyed;
     queued.seq = seq = _poolSeq++;
     if (queued.keyed && _activeWorkers + _pendingTasks.size() < _maxPoolSize) {
       // Room for it and for every task already queued, so it delays none of them: it starts
@@ -1462,9 +1475,9 @@ app::PoolSubmit app::enqueuePoolTask(ThreadPoolTask &task, bool handBackIfNoWork
     return PoolSubmit::queued;
   // If every one of those creations failed, nothing will take the task until a later call
   // manages to start a worker: hand it back instead. It is still queued then, since only a
-  // worker in _poolWorkers takes an anonymous task and there is none. The other handBack tasks
-  // queued go too (their submitters have returned): a creation that failed while this call was
-  // deciding left them to it.
+  // worker in _poolWorkers takes an anonymous task and there is none. The other dropIfNoWorker
+  // tasks queued go too (their submitters have returned): a creation that failed while this
+  // call was deciding left them to it.
   PoolSubmit submitted = PoolSubmit::queued;
   std::vector<std::function<void()>> unstartable;
   {
@@ -1501,13 +1514,14 @@ bool app::poolHasNoWorkerLocked(boost::mutex::scoped_lock &lock) {
 void app::takeUnstartableLocked(std::vector<std::function<void()>> &out) {
   // With no worker running or being created, a queued anonymous task waits for a later submission
   // (or setThreadPoolSize) to start one, which may never come. That is so for a submitPooled
-  // task; a trySubmitPooled one's submitter must hear of it, so the task is dropped, as it would
-  // have been handed back had the creation failed while its submitter waited for it. Not while a
-  // trySubmitPooled call still decides about its own task: that call takes the rest once it has.
+  // task (and a compute_async job with no on_error); a trySubmitPooled one's submitter must hear
+  // of it, so the task is dropped, as it would have been handed back had the creation failed
+  // while its submitter waited for it. Not while a trySubmitPooled call still decides about its
+  // own task: that call takes the rest once it has.
   if (_poolStopping || _poolThreadCount != 0 || _creatingWorkers != 0 || _handBackChecks != 0)
     return;
   try {
-    _pendingTasks.takeHandBacks(out);
+    _pendingTasks.takeDroppable(out);
   } catch (...) {
     return; // out of memory: they stay queued
   }

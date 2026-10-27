@@ -1952,18 +1952,19 @@ TEST(AppPoolSpawnFailure, ComputeAsyncThrowsWhenTheWorkerItReliedOnFailsLater) {
 }
 
 // A compute_async job can be queued with no worker running or being created: keyed tasks, on
-// threads of their own, hold every slot of a pool that has never started a worker. When the last
-// of them ends and the worker its thread asks for can't be created, the job isn't left queued for
-// a later submission to start a worker: the pool drops it unrun, on that thread. The on_error form
-// calls on_error ("not run: no background worker could be started"); the four-argument form calls
-// neither and releases both. A submitPooled task queued with them waits for a worker, and runs
-// once a later submission starts one. (The jobs used to stay queued, with nothing running them and
-// their callers never told.)
-TEST(AppPoolSpawnFailure, ComputeAsyncJobsLeftWithNoWorkerAreDroppedAndReported) {
+// threads of their own, hold every slot of a pool that has never started a worker. When one of
+// them ends and the worker its thread asks for can't be created, the on_error form's job isn't
+// left queued for a later submission to start a worker: the pool drops it unrun, on that thread,
+// and on_error hears of it ("not run: no background worker could be started"). The four-argument
+// form's job has no way to hear of a drop, so it waits in the queue, as a submitPooled task does,
+// and runs once a later submission starts a worker. (Before, every job stayed queued with its
+// caller never told; then the four-argument form's job was dropped too, without a word, and a
+// threaded tf overlay task waiting for its chunk's reply waited for good.)
+TEST(AppPoolSpawnFailure, ComputeAsyncJobsLeftWithNoWorkerAreDroppedOrWaitForOne) {
   struct outcome {
     std::mutex m;
     std::condition_variable cv;
-    int done = 0;
+    int done = 0, four_done = 0;
     std::vector<std::string> errors;
   };
   spawn_switch spawn; // before the app: its hook points here
@@ -2001,7 +2002,7 @@ TEST(AppPoolSpawnFailure, ComputeAsyncJobsLeftWithNoWorkerAreDroppedAndReported)
       4, [held](int) {},
       [o, held] {
         std::lock_guard<std::mutex> lk(o->m);
-        ++o->done;
+        ++o->four_done;
         o->cv.notify_all();
       });
   held.reset();
@@ -2020,30 +2021,36 @@ TEST(AppPoolSpawnFailure, ComputeAsyncJobsLeftWithNoWorkerAreDroppedAndReported)
     reported = o->cv.wait_for(lk, std::chrono::seconds(5),
                               [&o] { return o->done > 0 || !o->errors.empty(); });
   }
-  if (!reported) {
-    // So that the test ends: a worker that can start runs what is still queued.
-    spawn.fail = false;
-    a.submitPooled([] {});
-  }
-  EXPECT_TRUE(reported) << "the jobs wait for a worker nothing will start";
+  const unsigned int pending = a.getPendingThreadCount();
+  const bool four_kept = !weak.expired();
+  spawn.fail = false;
+  EXPECT_TRUE(reported) << "the on_error job waits for a worker nothing will start";
   {
     std::lock_guard<std::mutex> lk(o->m);
     EXPECT_EQ(o->done, 0);
     ASSERT_EQ(o->errors.size(), 1u);
     EXPECT_EQ(o->errors[0], "not run: no background worker could be started");
+    EXPECT_EQ(o->four_done, 0);
   }
-  EXPECT_TRUE(weak.expired()) << "the four-argument form's dropped job kept its captures";
-  EXPECT_EQ(a.getPendingThreadCount(), 1u) << "the submitPooled task waits for a worker";
+  EXPECT_TRUE(four_kept) << "the four-argument form's job was dropped without a word";
+  EXPECT_EQ(pending, 2u) << "the four-argument job and the submitPooled task wait for a worker";
   EXPECT_EQ(a.getActiveThreadCount(), 0u);
   EXPECT_EQ(ran.load(), 0);
 
-  spawn.fail = false;
+  // A later submission starts a worker (this also ends the test when a job is still queued).
   std::promise<void> done;
   std::future<void> done_f = done.get_future();
-  a.compute_async(1, [](int) {}, [&done] { done.set_value(); }); // starts a worker
+  a.compute_async(1, [](int) {}, [&done] { done.set_value(); });
   ASSERT_EQ(done_f.wait_for(std::chrono::seconds(10)), std::future_status::ready);
   ASSERT_TRUE(wait_pool_idle(a));
   EXPECT_EQ(ran.load(), 1);
+  {
+    std::lock_guard<std::mutex> lk(o->m);
+    EXPECT_EQ(o->four_done, 1) << "the four-argument form's job never ran";
+    EXPECT_EQ(o->done, 0);
+    EXPECT_EQ(o->errors.size(), 1u);
+  }
+  EXPECT_TRUE(weak.expired());
 }
 
 // startThreadPooled(wait=true) throws boost::thread_resource_error when its task's own thread
