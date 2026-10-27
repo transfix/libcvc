@@ -1532,7 +1532,11 @@ built by the one-surface tetrahedralizer on the interval's octree, with fans of 
 its cell rather than by the edge, gave an edge that crosses both isosurfaces a pyramid whose apex
 lies outside the layer, and did not share grid vertices between neighbouring tets. A layer is now
 the solid `min(v - lo, hi - v) >= 0`, meshed like any other solid. A layer thinner than a voxel
-can break up, since the samples on either side of it are both outside.
+can break up, since the samples on either side of it are both outside. A sample exactly on either
+isovalue also counts as outside (LBIE moves its isovalue off such samples), so `[1, 3]` on integer
+labels meshes label 2 alone; pass `[0.5, 3.5]` to keep labels 1 and 3. fe_lab's interval mesher
+(`cvc::gl::ariadne::tetrahedralize_interval`) does that for any data: it moves a bound samples sit
+on half way to the nearest value beyond it.
 
 ### Complete Volumetric Mesh Example
 

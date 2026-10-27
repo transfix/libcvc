@@ -369,16 +369,13 @@ second (it stays in the model). The pair in use is published as `T.interval` (`"
 id>,<isovalue2's id>"`, `""` in solid mode), and both editors shade the band between the two
 bars — translucent magenta over the ramp and histogram, under the curves, through the zoom
 window — and mark the bounds in the isocontour tooltip and the information table. The mesh is
-the solid `g = min(v − lo, hi − v) ≥ 0` (one Float volume, the single-isovalue LBIE path at 0),
-so its boundary is both isosurfaces: an outer and an inner sheet, each wound out of the shell.
+`cvc::tetrahedralize2`'s layer, the solid `min(v − lo, hi − v) ≥ 0` (LBIE's TETRA2 mode), so its
+boundary is both isosurfaces: an outer and an inner sheet, each wound out of the shell.
 The shell is inclusive: a voxel whose value equals a bound is inside it, so `[1, 3]` on a label
 volume keeps labels 1 and 3, and a bar at either end of the axis — exactly the data's minimum or
-maximum — keeps the voxels there. Voxels can't sit exactly on LBIE's isovalue (it cracks the shell
-there), so a bound voxels sit on is meshed half way to the nearest value beyond it: on integer
-data the half-integer, as a label mesher draws it (`[1, 3]` on labels is the same mesh as
-`[0.5, 3.5]`). The surface also keeps at least a quarter of a grid edge away from each voxel on a
-bound (LBIE folds the tets of a crossing that hugs an inside grid point), so on continuous data
-it bulges out by a fraction of a voxel there; unit-step integer data is unchanged by that. A
+maximum — keeps the voxels there. LBIE counts a voxel exactly on its isovalue as outside, so a
+bound voxels sit on is meshed half way to the nearest value beyond it: on integer data the
+half-integer, as a label mesher draws it (`[1, 3]` on labels is the same mesh as `[0.5, 3.5]`). A
 bound no voxel lies beyond (on or past an end of the range) bounds nothing and adds no sheet:
 `[0.5, 1]` and `[0.5, 2]` on a 0/1 mask both mesh `{v ≥ 0.5}`, crossing at 0.5 like a solid
 mesh, a CT's `[200, 255]` keeps its saturated 255s, and with neither bound passed the whole box

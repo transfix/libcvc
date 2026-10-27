@@ -501,9 +501,9 @@ int main(int argc, char **argv) {
       const cvc::volume v = below ? negated(vol) : vol;
       const double a = below ? -iso : iso, b = below ? -iso2 : iso2;
       cvc::geometry tm;
-      if (interval) // LBIE takes the interval's upper isovalue first
-        tm = cvc::tetrahedralize2(v, std::max(a, b), std::min(a, b), cvc::DUALLIB, improve_method,
-                                  cvc::BSPLINE_CONVOLUTION, improve_iters);
+      if (interval) // the layer between the two isovalues, given in either order
+        tm = cvc::tetrahedralize2(v, a, b, cvc::DUALLIB, improve_method, cvc::BSPLINE_CONVOLUTION,
+                                  improve_iters);
       else if (hex)
         tm = cvc::hexahedralize(v, a, cvc::DUALLIB, improve_method, cvc::BSPLINE_CONVOLUTION,
                                 improve_iters);
