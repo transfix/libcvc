@@ -191,12 +191,15 @@ public:
   wakeup &operator=(const wakeup &) = delete;
   /// Any thread: wake a wait_until() in progress, or the next one.
   void notify();
-  /// Block until notify() (true; the notification is consumed) or `t` (false). A `precise`
-  /// wait (a sleeper's deadline) ends on time: on Windows, whose high-resolution timer fires on
-  /// a ~0.5 ms grid, its timer is set early and the last stretch (at most ~0.6 ms) is spent
-  /// spinning on the CPU, watching for a notify(), and the thread runs at above-normal priority
-  /// meanwhile (restored after), so a busy machine hands its core back when the timer fires.
-  /// Any other wait may end up to that grid late and burns no CPU.
+  /// Block until notify() (true; the notification is consumed) or `t` (false). It never returns
+  /// false before `t` on the steady clock, whatever the OS wait it uses does (a timer may fire
+  /// early): it reads the clock and waits the rest. A `precise` wait (a sleeper's deadline) ends
+  /// on time: on Windows, whose high-resolution timer fires on a ~0.5 ms grid, its timer is set
+  /// early and the last stretch (at most ~0.6 ms) is spent spinning on the CPU, watching for a
+  /// notify(). A thread at normal priority runs above it meanwhile, so a busy machine hands its
+  /// core back when the timer fires; it is back to normal after, unless its priority changed
+  /// meanwhile, and a thread at any other priority keeps it. Any other wait may end up to that
+  /// grid late and burns no CPU.
   bool wait_until(clock::time_point t, bool precise = false);
 
 private:

@@ -653,23 +653,21 @@ bool wakeup::wait_until(clock::time_point t, bool precise) {
   // wake comes that late. Any other wait just takes the timer.
   constexpr long long kSpinNs = 600000;
   const long long early = precise ? kSpinNs : 0;
-  // A precise wait runs above normal priority, so on a machine whose cores are all busy the
-  // thread gets one back when its timer fires instead of a scheduler quantum later (a spinning
-  // thread never gave its core up). It blocks or spins for at most the wait; restored after.
+  // A precise wait on a thread at normal priority runs above it, so on a machine whose cores are
+  // all busy the thread gets one back when its timer fires instead of a scheduler quantum later
+  // (a spinning thread never gave its core up). It blocks or spins for at most the wait. A thread
+  // its host gave another priority keeps it: a lowered one stays below its host's other threads.
+  // Back to normal after, unless the priority changed meanwhile (the host's change stands).
   struct priority_raise {
     HANDLE thread = GetCurrentThread();
-    int was = THREAD_PRIORITY_ERROR_RETURN;
+    bool raised = false;
     explicit priority_raise(bool on) {
-      if (!on)
-        return;
-      const int p = GetThreadPriority(thread);
-      if (p != THREAD_PRIORITY_ERROR_RETURN && p < THREAD_PRIORITY_ABOVE_NORMAL &&
-          SetThreadPriority(thread, THREAD_PRIORITY_ABOVE_NORMAL))
-        was = p;
+      raised = on && GetThreadPriority(thread) == THREAD_PRIORITY_NORMAL &&
+               SetThreadPriority(thread, THREAD_PRIORITY_ABOVE_NORMAL);
     }
     ~priority_raise() {
-      if (was != THREAD_PRIORITY_ERROR_RETURN)
-        SetThreadPriority(thread, was);
+      if (raised && GetThreadPriority(thread) == THREAD_PRIORITY_ABOVE_NORMAL)
+        SetThreadPriority(thread, THREAD_PRIORITY_NORMAL);
     }
   } raise(precise);
   for (;;) {
@@ -694,9 +692,9 @@ bool wakeup::wait_until(clock::time_point t, bool precise) {
         const HANDLE handles[2] = {impl_->event, impl_->timer};
         if (WaitForMultipleObjects(2, handles, FALSE, INFINITE) == WAIT_OBJECT_0)
           return true;
-        if (!precise)
-          return WaitForSingleObject(impl_->event, 0) == WAIT_OBJECT_0; // the timer: due
-        continue; // the timer: the spin (the loop checks)
+        // The timer: the loop reads the clock again, so a timer that fired early never ends a
+        // wait before `t` (it waits the rest), and a precise wait spins its last stretch.
+        continue;
       }
     }
     const DWORD ms = ns >= static_cast<long long>(INFINITE - 1) * 1000000
@@ -726,15 +724,19 @@ void wakeup::notify() {
 
 bool wakeup::wait_until(clock::time_point t, bool /*precise*/) {
   // A far deadline (time_point::max(): none) is waited for an hour at a time, so no standard
-  // library converts it to its own clock with an overflow; the callers wait again.
-  const clock::time_point now = clock::now();
-  if (t - now > std::chrono::hours(1))
-    t = now + std::chrono::hours(1);
+  // library converts it to its own clock with an overflow. The clock is read again after each
+  // wait: none ends before `t` unless notified.
   std::unique_lock<std::mutex> lock(impl_->mu);
-  impl_->cv.wait_until(lock, t, [this] { return impl_->signaled; });
-  const bool signaled = impl_->signaled;
-  impl_->signaled = false;
-  return signaled;
+  for (;;) {
+    if (impl_->signaled) {
+      impl_->signaled = false;
+      return true;
+    }
+    const clock::time_point now = clock::now();
+    if (now >= t)
+      return false;
+    impl_->cv.wait_until(lock, t - now > std::chrono::hours(1) ? now + std::chrono::hours(1) : t);
+  }
 }
 #endif
 
