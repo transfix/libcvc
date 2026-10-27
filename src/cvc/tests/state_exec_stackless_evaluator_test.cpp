@@ -688,8 +688,7 @@ TEST_F(StacklessEvaluatorTest, CallSeesItsFunctionRebound) {
     eval("(begin (defun g (x) 1) (defun h () (g (begin (set g 5) 0))) (h))");
     FAIL() << "expected a TypeError";
   } catch (const std::exception &e) {
-    EXPECT_NE(std::string(e.what()).find("apply: not callable: g"), std::string::npos)
-        << e.what();
+    EXPECT_NE(std::string(e.what()).find("apply: not callable: g"), std::string::npos) << e.what();
   }
 }
 

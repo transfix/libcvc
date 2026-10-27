@@ -589,8 +589,8 @@ auto find_hashed(Map &b, const std::string &name, std::size_t hash) -> decltype(
 // Walk the scope chain from `e` for `name`, hashing the name once (not once per scope) and
 // skipping empty scopes. The binding found, and in `scope` (if given) the scope it is in.
 template <class Env>
-auto binding_in(Env *e, const std::string &name, Env **scope = nullptr)
-    -> decltype(&*e->bindings.begin()) {
+auto binding_in(Env *e, const std::string &name,
+                Env **scope = nullptr) -> decltype(&*e->bindings.begin()) {
   std::size_t hash = 0;
   bool hashed = false;
   for (; e; e = e->outer.get()) {

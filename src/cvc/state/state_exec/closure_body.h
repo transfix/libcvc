@@ -25,8 +25,7 @@ inline bool same_form(const value_t &a, const value_t &b) {
         else if constexpr (std::is_same_v<T, std::monostate>)
           return true;
         else if constexpr (std::is_same_v<T, list_ptr> || std::is_same_v<T, dict_ptr> ||
-                           std::is_same_v<T, closure_ptr> ||
-                           std::is_same_v<T, data_object_ptr> ||
+                           std::is_same_v<T, closure_ptr> || std::is_same_v<T, data_object_ptr> ||
                            std::is_same_v<T, generator_ptr>)
           return x.get() == y.get();
         else
