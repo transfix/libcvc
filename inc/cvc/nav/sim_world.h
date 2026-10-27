@@ -690,6 +690,16 @@ private:
   // null (byte-identical); on => tel_ is sized [n] and filled each step().
   bool capture_tel_ = false;
   std::vector<drive_telemetry> tel_;
+  // The telemetry's context work (drive_telemetry::context_work): tel_ holds a captured tick's
+  // coefficients, and the U at each agent's pose with them, evaluated as the next step() begins.
+  bool tel_prev_ = false;
+  std::vector<float> tel_ctx_u_;
+  // The vehicle the drive reads this tick: cfg_.veh, or a copy with the terrain and the plant arm,
+  // pointing into vplant's and pdrive's storage.
+  const veh_params &drive_vehicle(veh_params &vplant, plant_drive &pdrive);
+  // U_nav at agent i's pose now with the coefficients and carrot in tel_ / carrot_.
+  float tel_potential(const field_stack &f, const veh_params &v, const material_stack *ms,
+                      int i) const;
 
   // Opt-in base nav_stats collector + its per-tick scratch (members = no per-step
   // allocation). null stats_ = disarmed. See begin_nav_stats / the fold in step().
