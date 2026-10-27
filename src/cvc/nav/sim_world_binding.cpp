@@ -350,6 +350,8 @@ const char *plant_name(const vehicle_plant *p) {
   switch (p->kind()) {
   case plant_kind::jolt:
     return "jolt";
+  case plant_kind::dynamic:
+    return "dynamic";
   default:
     return "kinematic";
   }
