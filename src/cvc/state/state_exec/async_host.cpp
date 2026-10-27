@@ -610,8 +610,9 @@ struct async_host::kernel_task {
     if (!armed)
       return;
     // Not interruptible: this runs on the thread that submitted the call, the one destroying the
-    // app or the one whose worker creation failed, and an interrupt pending there stays pending
-    // (nothing in drop() may take it).
+    // app, the one whose worker creation failed or a trySubmitPooled caller that was deciding
+    // about its own task then, and an interrupt pending there stays pending (nothing in drop()
+    // may take it).
     boost::this_thread::disable_interruption keep_interrupt_pending;
     drop(cvc::app::poolDropReason());
   }

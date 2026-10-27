@@ -161,15 +161,27 @@ for (int i = 0; i < 100; i++) {
    worker when another one's thread can't be created. When the pool has
    no worker at all (thread resources were exhausted before its first),
    `trySubmitPooled` hands the task back unrun (`PoolSubmit::no_worker`)
-   once the worker creations it relied on have failed; while no worker
-   runs yet, it waits for those creations (up to 5 s) before it
-   returns. A `trySubmitPooled` task queued behind keyed threads that
-   hold every slot of a pool with no worker is dropped later, on the
-   thread whose worker creation failed, if the worker asked for as the
-   last of them ends can't be created either: it reports the drop with
-   `app::kPoolNoWorker` ("not run: no background worker could be
-   started"). A `submitPooled` task waits in the queue in both cases,
-   until a later submission or `setThreadPoolSize()` starts a worker
+   once the worker creations it relied on have failed, or when a keyed
+   task queued ahead of it that it starts (on the calling thread) can't
+   get a thread, nor can the worker asked for as that frees its slot;
+   while no worker runs yet, it waits for those creations (up to 5 s)
+   before it returns. A `trySubmitPooled` task queued behind keyed
+   threads that hold every slot of a pool with no worker is dropped
+   later, once a worker creation fails and leaves the pool with no
+   worker running or being created: the one asked for as one of those
+   threads ends, say, even while the others still hold their slots. It
+   reports the drop with `app::kPoolNoWorker` ("not run: no background
+   worker could be started"). The drop runs on the thread whose worker
+   creation failed or, if a `trySubmitPooled` call was still deciding
+   about its own task then (waiting on that creation, or starting a
+   keyed task), on that call's thread before it returns, so another
+   submitter's report of a drop (an async call's `RuntimeError`,
+   `launch_pool_task`'s post, `compute_async`'s `on_error`) can run
+   inside a `compute_async` call, an async call or `launch_pool_task`. A
+   `submitPooled` task, and a job of `compute_async`'s form without
+   `on_error` (it has no way to report a drop), waits in the queue
+   instead, until a later submission or `setThreadPoolSize()` starts a
+   worker
 
 ## Notes
 
@@ -184,7 +196,8 @@ for (int i = 0; i < 100; i++) {
   has none: the task is handed back in `task`, unrun). A task it queued is
   dropped later if the pool is left with no worker while it waits (item 6).
   `compute_async`, the exec async host and `launch_pool_task` submit
-  through it
+  through it (`compute_async`'s form without `on_error` has its job handed
+  back, but never dropped later: item 6)
 - `app::poolDropReason()` is why the pool is destroying a task unrun on the
   calling thread (`app::kPoolStopped` or `app::kPoolNoWorker`), for a
   task that reports its drop from its destructor

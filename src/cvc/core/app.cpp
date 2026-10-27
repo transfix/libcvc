@@ -1148,9 +1148,10 @@ struct compute_job {
     if (!armed || !on_error)
       return;
     // Not interruptible, as thread_info and thread_feedback keep their books: this runs on the
-    // thread that submitted the job, the one destroying the app or the one whose worker creation
-    // failed, and an interrupt pending there (a keyed thread ~app has interrupted, say) must stay
-    // pending, not be thrown inside on_error and dropped by the catch below.
+    // thread that submitted the job, the one destroying the app, the one whose worker creation
+    // failed or a trySubmitPooled caller that was deciding about its own task then, and an
+    // interrupt pending there (a keyed thread ~app has interrupted, say) must stay pending, not be
+    // thrown inside on_error and dropped by the catch below.
     boost::this_thread::disable_interruption keep_interrupt_pending;
     try {
       on_error(app::poolDropReason());
@@ -1322,9 +1323,10 @@ unsigned int app::getPendingThreadCount() const {
 // 10/27/2026 -- Joe R. -- startThreadPooled(wait=true) throws when its task's own thread can't
 //                         be created; a keyed task started later and failing so is logged.
 // 10/27/2026 -- Joe R. -- That drop is logged before its slot is freed: an idle pool has logged it.
-// 10/27/2026 -- Joe R. -- A trySubmitPooled task left queued with no worker (the creation asked
-//                         for as a keyed thread ends fails) is dropped, with kPoolNoWorker as
-//                         poolDropReason(), instead of waiting for a later submission.
+// 10/27/2026 -- Joe R. -- A trySubmitPooled task left queued with no worker (a worker creation
+//                         fails, as a keyed thread ends, say, and leaves none running or being
+//                         created) is dropped, with kPoolNoWorker as poolDropReason(), instead of
+//                         waiting for a later submission.
 // 10/27/2026 -- Joe R. -- Not compute_async's job without on_error, which can't report it: it
 //                         waits.
 // 10/27/2026 -- Joe R. -- A trySubmitPooled call that starts a queued keyed task decides about its

@@ -1419,8 +1419,8 @@ void start_a_worker(stoppable_app &a) {
 } // namespace
 
 // An async call can be queued with no worker running or being created: keyed tasks, on threads of
-// their own, hold every slot of a pool that has never started a worker. When the last of them
-// ends and the worker its thread asks for can't be created (thread resources exhausted), the
+// their own, hold every slot of a pool that has never started a worker. When one of them ends
+// and the worker its thread asks for can't be created (thread resources exhausted), the
 // kernel isn't left queued for a later submission to start a worker: the pool drops it unrun, and
 // its call raises RuntimeError ("not run: no background worker could be started") and leaves the
 // host. A host bound to the app that shuts down before ~app (as pycvc's Exec's does) isn't held

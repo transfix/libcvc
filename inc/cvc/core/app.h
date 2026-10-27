@@ -460,10 +460,16 @@ public:
   //
   // A task it queues can still be left with no worker: keyed tasks, on threads of their own, held
   // every slot of a pool that has no worker, and when one of them ends, the worker it asks for
-  // can't be created either. The pool then drops the task unrun, on the thread whose worker
-  // creation failed, with poolDropReason() kPoolNoWorker there while it is destroyed (so it
-  // reports the drop as it does when the pool has stopped), rather than leave it queued until a
-  // later submission starts a worker. A submitPooled task left so stays queued.
+  // can't be created either. Once a worker creation fails and leaves the pool with no worker
+  // running or being created (also while other keyed threads still hold their slots), the pool
+  // drops the task unrun, with poolDropReason() kPoolNoWorker while it is destroyed (so it reports
+  // the drop as it does when the pool has stopped), rather than leave it queued until a later
+  // submission starts a worker. The drop runs on the thread whose worker creation failed or, if a
+  // trySubmitPooled call was then still deciding about its own task (waiting on that creation, or
+  // starting a keyed task as above), on that call's thread once it has, before it returns: a
+  // drop's report (an async call ending, launch_pool_task's post, compute_async's on_error) can
+  // so run inside another submitter's compute_async, async call or launch_pool_task. A
+  // submitPooled task left so stays queued.
   PoolSubmit trySubmitPooled(std::function<void()> &task,
                              thread_priority priority = PRIORITY_NORMAL);
 
@@ -531,9 +537,10 @@ public:
   // app drops the job unrun: with kPoolStopped ("not run: the app's background pool has stopped")
   // once ~app has stopped the pool, kPoolNoWorker ("not run: no background worker could be
   // started") when the job was queued and then left with no worker (trySubmitPooled). A dropped
-  // job's on_error runs on the thread that submits it, the one destroying the app or the one whose
-  // worker creation failed, with interruption held off (an interrupt pending there stays pending).
-  // It throws as the form above does, calling neither.
+  // job's on_error runs on the thread that submits it, the one destroying the app, the one whose
+  // worker creation failed or a trySubmitPooled caller that was deciding about its own task then
+  // (another compute_async call, say), with interruption held off (an interrupt pending there
+  // stays pending). It throws as the form above does, calling neither.
   void compute_async(int n, std::function<void(int)> fn, std::function<void()> on_done,
                      std::function<void(const std::string &)> on_error,
                      thread_priority priority = PRIORITY_NORMAL);

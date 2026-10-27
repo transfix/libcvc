@@ -420,9 +420,13 @@ its queue (`~app` drops the queue), is destroyed unrun, and so is a kernel a sto
 refuses (a lane runs every kernel it accepted before it stopped). So is a kernel that no
 background worker can be started for (thread resources exhausted before the pool's first worker:
 `app::trySubmitPooled` hands it back rather than queue it), and one queued behind keyed threads
-that held every slot of a pool with no worker, when the worker asked for as the last of them
-ends can't be created either (the pool drops it then, on that thread). Its call then raises
-`RuntimeError` at the call site with a message that names the cause: "`name`: not run: the app's
+that held every slot of a pool with no worker, once a worker creation fails and leaves the pool
+with no worker running or being created (the one asked for as one of those threads ends, say,
+even while the others still hold their slots). The pool drops it then, on the thread whose
+creation failed or, if a `trySubmitPooled` call was still deciding about its own task (waiting on
+that creation, say), on that call's thread before it returns: another async call made on the
+scheduler's thread, a `launch_pool_task` or a `compute_async` call can so end it. Its call then
+raises `RuntimeError` at the call site with a message that names the cause: "`name`: not run: the app's
 background pool has stopped" for the pool, "`name`: not run: no background worker could be
 started" when no worker could be started, "`name`: lane '`lane`' is stopped" for a lane. The
 pool's drops say why through `app::poolDropReason()`, which the kernel's task reads as it is

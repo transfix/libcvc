@@ -72,11 +72,14 @@ using pool_task_on_error = std::function<state_exec::value_t(const std::string &
 /// none (thread resources exhausted before its first worker), it posts
 /// `on_error("not run: no background worker could be started")` at once, from the calling thread,
 /// rather than leave the task queued for a later submission to start a worker.  It posts the same
-/// from the thread whose worker creation failed if the task is queued and then left with no
-/// worker (keyed threads held every slot of a pool with none, and the worker asked for as the last
-/// of them ended couldn't be created: app::trySubmitPooled).  `sched` is the scheduler the
-/// CALLER drives (so the delivery lands where the parked process will be resumed): the app-wide
-/// `a.exec_scheduler()` for an Ariadne host, or a private per-Exec scheduler for pycvc.  Returns
+/// later if the task is queued and then left with no worker (keyed threads held every slot of a
+/// pool with none, and the worker asked for as one of them ended couldn't be created, even with
+/// others still holding their slots: app::trySubmitPooled), from the thread whose worker creation
+/// failed, or from a trySubmitPooled caller that was then deciding about its own task (another
+/// launch_pool_task, async call or compute_async call, say), before that call returns.  `sched`
+/// is the scheduler the CALLER drives (so the delivery lands where the parked process will be
+/// resumed): the app-wide `a.exec_scheduler()` for an Ariadne host, or a private per-Exec
+/// scheduler for pycvc.  Returns
 /// without waiting for `work`; it waits for the pool only while the pool has no worker running
 /// yet, until the worker creations under way have succeeded or failed (up to 5 s, normally the
 /// time a thread takes to be created: app::trySubmitPooled).

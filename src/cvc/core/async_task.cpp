@@ -61,9 +61,10 @@ struct pool_task_post {
     if (!armed)
       return;
     // Not interruptible, as thread_info and thread_feedback keep their books: this runs on the
-    // thread that submitted the task, the one destroying the app or the one whose worker creation
-    // failed, and an interrupt pending there must stay pending, not be thrown inside on_error or
-    // post_message and dropped by the catches below.
+    // thread that submitted the task, the one destroying the app, the one whose worker creation
+    // failed or a trySubmitPooled caller that was deciding about its own task then, and an
+    // interrupt pending there must stay pending, not be thrown inside on_error or post_message and
+    // dropped by the catches below.
     boost::this_thread::disable_interruption keep_interrupt_pending;
     drop(app::poolDropReason());
   }

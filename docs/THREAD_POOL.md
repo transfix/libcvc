@@ -57,26 +57,37 @@ For the full per-method reference, see
   created, the queued tasks wait for a running worker. When the pool has
   none at all (thread resources were exhausted before its first worker),
   `trySubmitPooled` hands the task back unrun, once any other worker
-  creation under way has succeeded or failed too: `compute_async` then
-  throws `boost::thread_resource_error` and runs nothing, so its caller
-  can do the work itself (a threaded tf overlay task carries on
-  cooperatively), an async call raises `RuntimeError` ("not run: no
-  background worker could be started"), and `launch_pool_task` posts
-  `on_error`'s value. While no worker runs yet, `trySubmitPooled` (and
-  so each of those) waits for the worker creations under way to succeed
-  or fail, up to 5 s, before it returns. A task it queued behind keyed
-  threads holding every slot of a pool with no worker is dropped unrun,
-  on the thread whose worker creation failed, when the worker asked for
-  as the last of them ends can't be created either: its async call
-  raises the same `RuntimeError`, `launch_pool_task` posts `on_error`'s
-  value, and `compute_async`'s `on_error` form calls `on_error` with
-  "not run: no background worker could be started" (its other form
-  calls neither callback). A `submitPooled` task stays queued until a
-  later submission or `setThreadPoolSize()` starts a worker. A pool
-  that never got a worker can't run a queued async kernel, so `~app`
-  drops those (a kernel queued behind keyed threads still running, say)
-  before it shuts down the async host, which would otherwise wait for
-  them for good. A keyed task whose own thread can't be created as
+  creation under way has succeeded or failed too (or when a keyed task
+  queued ahead of it, which it starts on the calling thread, can't get a
+  thread, nor can the worker asked for as that frees its slot):
+  `compute_async` then throws `boost::thread_resource_error` and runs
+  nothing, so its caller can do the work itself (a threaded tf overlay
+  task carries on cooperatively), an async call raises `RuntimeError`
+  ("not run: no background worker could be started"), and
+  `launch_pool_task` posts `on_error`'s value. While no worker runs yet,
+  `trySubmitPooled` (and so each of those) waits for the worker
+  creations under way to succeed or fail, up to 5 s, before it returns.
+  A task it queued can still be left with no worker: keyed threads held
+  every slot of a pool with none, and the worker asked for as one of
+  them ends can't be created either. Once a worker creation fails and
+  leaves the pool with no worker running or being created (also while
+  other keyed threads still hold their slots), such a task is dropped
+  unrun: its async call raises the same `RuntimeError`,
+  `launch_pool_task` posts `on_error`'s value, and `compute_async`'s
+  `on_error` form calls `on_error` with "not run: no background worker
+  could be started" (a threaded tf overlay task then carries on
+  cooperatively). The drop runs on the thread whose worker creation
+  failed or, if a `trySubmitPooled` call was still deciding about its
+  own task then (waiting on that creation, or starting a keyed task),
+  on that call's thread before it returns, so another submitter's
+  `on_error` or post can run inside a `compute_async` call, an async
+  call or `launch_pool_task`. `compute_async`'s other form has no way
+  to report a drop, so its job, like a `submitPooled` task, stays
+  queued until a later submission or `setThreadPoolSize()` starts a
+  worker. A pool that never got a worker can't run a queued async
+  kernel, so `~app` drops those (a kernel queued behind keyed threads
+  still running, say) before it shuts down the async host, which would
+  otherwise wait for them for good. A keyed task whose own thread can't be created as
   `startThreadPooled` starts it makes that call throw
   `boost::thread_resource_error`; one that waited in the queue is
   dropped unrun when its thread can't be created, and the drop logged
