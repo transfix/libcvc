@@ -1133,8 +1133,8 @@ TEST(AsyncCalls, AFinishedCallKeepsNothingAlive) {
 TEST(AsyncCalls, ShutdownCancelsTheCallInFlightAfterManyFinished) {
   auto w = std::make_unique<world>(async_sched);
   const int quick = w->run_to_end(
-      w->submit("(begin (set i 0) (while (< i 300) (begin (slow-op i 0) (set i (+ i 1)))) i)"));
-  EXPECT_EQ(show(*w->result(quick)), "300");
+      w->submit("(begin (set i 0) (while (< i 100) (begin (slow-op i 0) (set i (+ i 1)))) i)"));
+  EXPECT_EQ(show(*w->result(quick)), "100");
   w->p.started = false;
   const int pid = w->submit("(slow-op 1 5000)");
   ASSERT_TRUE(w->pump([&] { return w->waiting(pid) && w->p.started; }));

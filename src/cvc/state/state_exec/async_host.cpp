@@ -330,28 +330,53 @@ void detail::charge_async_call(process &proc, async_call &call, double rate, boo
 struct async_host::shared_state {
   mutable std::mutex m;
   std::condition_variable idle;
-  std::size_t running = 0;                      // kernels queued or running
-  std::atomic<bool> stopped{false};             // written under m; read without it by check_open
-  std::vector<std::weak_ptr<async_call>> calls; // to cancel at shutdown
-  std::size_t prune_at = 64; // prune expired entries when calls reaches this size
+  std::size_t running = 0;          // kernels queued or running
+  std::atomic<bool> stopped{false}; // written under m; read without it by check_open
+  // The calls to cancel at shutdown: each call's host_slot_ is its index here. A threaded call
+  // leaves when its kernel ends (end), an external one when its outcome is posted (forget).
+  std::vector<std::weak_ptr<async_call>> calls;
+  std::size_t prune_at = 64; // drop expired entries (calls that never left) at this size
 
   void add(const std::shared_ptr<async_call> &call, bool runs) {
     std::lock_guard<std::mutex> lk(m);
     if (runs)
       ++running;
-    // Expired entries go in batches, when the list has doubled since the last prune: amortized
-    // O(1) per call instead of a scan of every live call on every call.
+    // Only a call that died without leaving can expire here: drop those in batches, when the
+    // list has doubled since the last time (amortized O(1) per call).
     if (calls.size() >= prune_at) {
       calls.erase(std::remove_if(calls.begin(), calls.end(),
                                  [](const std::weak_ptr<async_call> &w) { return w.expired(); }),
                   calls.end());
+      for (std::size_t i = 0; i < calls.size(); ++i)
+        if (std::shared_ptr<async_call> c = calls[i].lock())
+          c->host_slot_ = i;
       prune_at = std::max<std::size_t>(64, 2 * calls.size());
     }
+    call->host_slot_ = calls.size();
     calls.push_back(call);
   }
-  void end() {
+  // Take `call` out of the list in O(1) (the last entry moves into its slot). m is held.
+  void remove_locked(async_call &call) {
+    const std::size_t slot = call.host_slot_;
+    call.host_slot_ = async_call::kNoSlot;
+    if (slot >= calls.size())
+      return;
+    if (slot + 1 != calls.size()) {
+      calls[slot] = std::move(calls.back());
+      if (std::shared_ptr<async_call> moved = calls[slot].lock())
+        moved->host_slot_ = slot;
+    }
+    calls.pop_back();
+  }
+  void forget(async_call &call) {
+    std::lock_guard<std::mutex> lk(m);
+    remove_locked(call);
+  }
+  // A threaded call's kernel has ended (or never will run).
+  void end(async_call &call) {
     {
       std::lock_guard<std::mutex> lk(m);
+      remove_locked(call);
       --running;
     }
     idle.notify_all();
@@ -536,7 +561,7 @@ void async_host::run_kernel(const std::shared_ptr<async_call> &call, async_kerne
     if (settled)
       call->async_sched_->post_async_completion(call);
   }
-  state.end();
+  state.end(*call);
 }
 
 void async_host::submit(const std::shared_ptr<async_call> &call, async_kernel kernel,
@@ -562,7 +587,7 @@ void async_host::submit(const std::shared_ptr<async_call> &call, async_kernel ke
     // Not queued: the call fails now.
     if (call->settle({}, std::current_exception()))
       async_sched_->post_async_completion(call);
-    state->end();
+    state->end(*call);
   }
 }
 
@@ -601,7 +626,11 @@ std::shared_ptr<async_call> async_host::begin_external(const std::string &name, 
 }
 
 void async_host::finish(const std::shared_ptr<async_call> &call) {
-  if (call && call->async_sched_)
+  if (!call)
+    return;
+  if (call->external_)
+    state_->forget(*call); // settled: nothing to cancel any more
+  if (call->async_sched_)
     call->async_sched_->post_async_completion(call);
 }
 

@@ -204,6 +204,9 @@ private:
   // An external call (async_host::begin_external): the host's own loop settles it, so nothing
   // may block waiting for it.
   bool external_ = false;
+  // Its index in its host's list of calls to cancel at shutdown (guarded by the host's lock).
+  static constexpr std::size_t kNoSlot = static_cast<std::size_t>(-1);
+  std::size_t host_slot_ = kNoSlot;
   // Inline calls: the process running it, for cancelled() to check its budget, and the step
   // rate that check uses (read on first need).
   process *inline_proc_ = nullptr;
