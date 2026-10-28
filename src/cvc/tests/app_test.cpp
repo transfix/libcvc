@@ -19,6 +19,7 @@
 #include <cvc/core/world_clock_binding.h>
 #include <cvc/core/world_units.h>
 #include <cvc/state/state.h>
+#include <cvc/state/state_exec/async_scheduler.h> // PR05: the policy exec_scheduler() has
 #include <filesystem>
 #include <future> // compute_async: deterministic wait on on_done via a promise
 #include <gtest/gtest.h>
@@ -3625,4 +3626,58 @@ TEST_F(AppTest, ClockKeysUnderAPrefixMatchThePrefixConstructor) {
   cvc::world_clock_binding b(ctx, ctx.world_clock(), "a.sim");
   EXPECT_EQ(b.keys().realized_speed, "a.sim.realized_speed");
   EXPECT_EQ(b.key("custom"), "a.sim.custom");
+}
+
+// PR-5 (docs/STATE_EXEC_LOCKS.md 7.3, 7.4): app::exec_scheduler() is built with the policy
+// state_exec.policy names, round_robin when it is unset (today's), and fixed then. An unknown
+// value is logged and round_robin used. state_exec.process_class is read then too, and its
+// result, or an unknown value, logged.
+TEST(AppExecScheduler, PR05_PolicySetting) {
+  using cvc::state_exec::scheduling_policy;
+  {
+    app a;
+    EXPECT_EQ(a.exec_scheduler().policy(), scheduling_policy::round_robin);
+  }
+  for (const auto &[name, policy] :
+       {std::pair<const char *, scheduling_policy>{"round_robin", scheduling_policy::round_robin},
+        {"priority", scheduling_policy::priority},
+        {"priority_rr", scheduling_policy::priority_rr}}) {
+    app a;
+    cvc::state::instance(a)("state_exec.policy").value(name);
+    EXPECT_EQ(a.exec_scheduler().policy(), policy) << name;
+    // Fixed when built: no runtime set_policy (7.3).
+    cvc::state::instance(a)("state_exec.policy").value("round_robin");
+    EXPECT_EQ(a.exec_scheduler().policy(), policy) << name;
+  }
+  {
+    app a;
+    const std::string log_key("pr05_log");
+    a.data(log_key, std::string());
+    a.properties("system.log_output", log_key);
+    cvc::state::instance(a)("state_exec.policy").value("fifo");
+    cvc::state::instance(a)("state_exec.process_class").value("idle");
+    EXPECT_EQ(a.exec_scheduler().policy(), scheduling_policy::round_robin);
+#ifndef USING_LOG4CPLUS_DEFAULT
+    const std::string logged = a.data<std::string>(log_key);
+    EXPECT_NE(logged.find("state_exec.policy: unknown value 'fifo'"), std::string::npos) << logged;
+    EXPECT_NE(logged.find("state_exec.process_class: unknown value 'idle'"), std::string::npos)
+        << logged;
+#endif
+  }
+  {
+    // normal, the one class a test process can take without slowing the tests after it (never
+    // above normal): the result is logged, applied or refused (on Linux a process started below
+    // normal can't come back up unprivileged).
+    app a;
+    const std::string log_key("pr05_class_log");
+    a.data(log_key, std::string());
+    a.properties("system.log_output", log_key);
+    cvc::state::instance(a)("state_exec.process_class").value("normal");
+    a.exec_scheduler();
+#ifndef USING_LOG4CPLUS_DEFAULT
+    const std::string logged = a.data<std::string>(log_key);
+    EXPECT_NE(logged.find("state_exec.process_class: "), std::string::npos) << logged;
+    EXPECT_NE(logged.find("normal"), std::string::npos) << logged;
+#endif
+  }
 }

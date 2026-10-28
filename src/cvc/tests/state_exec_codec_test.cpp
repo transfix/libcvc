@@ -3,6 +3,8 @@
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/evaluator.h>
 #include <cvc/state/state_exec/parser.h>
+#include <cvc/state/state_exec/process.h>
+#include <cvc/state/state_exec/scheduler.h>
 #include <cvc/state/state_exec/stackless_evaluator.h>
 #include <cvc/state/state_exec/state_value_codec.h>
 #include <cvc/state/state_exec/types.h>
@@ -715,4 +717,55 @@ TEST_F(CrossEvaluatorTest, Fibonacci) {
                           "    (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2))))) "
                           "  (fib 10))"),
             55);
+}
+
+// ===========================================================================
+// The lock phases' fields (docs/STATE_EXEC_LOCKS.md)
+// ===========================================================================
+
+// The priority floor (7.2; locks plan L2.6) and whether a host gave it: written beside the
+// priority and read back, through a scheduler's snapshot and restore too. A snapshot without them
+// (older than the floor, or of a process no scheduler submitted) reads the decoded priority as its
+// floor, not an explicit one.
+TEST(LockCodec, FloorRoundTrips) {
+  cvc::app ctx;
+  scheduler sched;
+  execute_options explicit_floor;
+  explicit_floor.priority = 4;
+  explicit_floor.priority_floor = 2;
+  const int pid = sched.execute(std::string("(+ 1 2)"), explicit_floor);
+  execute_options submit_floor;
+  submit_floor.priority = 5;
+  const int pid2 = sched.execute(std::string("(+ 1 2)"), submit_floor);
+
+  auto &node = ctx.root()("__floor_explicit__");
+  ASSERT_TRUE(sched.snapshot(pid, node));
+  EXPECT_EQ(node("priority").value(), "4");
+  EXPECT_EQ(node("priority_floor").value(), "2");
+  EXPECT_EQ(node("priority_floor_explicit").value(), "1");
+  const process_ptr decoded = decode_process(node);
+  EXPECT_EQ(decoded->priority, 4);
+  EXPECT_EQ(decoded->priority_floor, std::optional<int>(2));
+  EXPECT_TRUE(decoded->priority_floor_explicit);
+  const int restored = sched.restore(node);
+  EXPECT_EQ(sched.get_priority(restored)->floor, 2);
+
+  auto &node2 = ctx.root()("__floor_submit__");
+  ASSERT_TRUE(sched.snapshot(pid2, node2));
+  EXPECT_EQ(node2("priority_floor").value(), "5");
+  EXPECT_EQ(node2("priority_floor_explicit").value(), "0");
+  const process_ptr decoded2 = decode_process(node2);
+  EXPECT_EQ(decoded2->priority_floor, std::optional<int>(5));
+  EXPECT_FALSE(decoded2->priority_floor_explicit);
+
+  // No floor: a process no scheduler submitted writes none, and reads its priority back.
+  process_ptr bare = make_process();
+  bare->priority = 7;
+  auto &node3 = ctx.root()("__floor_none__");
+  encode_process(node3, *bare);
+  EXPECT_EQ(node3.findDescendant("priority_floor"), nullptr);
+  const process_ptr decoded3 = decode_process(node3);
+  EXPECT_EQ(decoded3->priority, 7);
+  EXPECT_EQ(decoded3->priority_floor, std::optional<int>(7));
+  EXPECT_FALSE(decoded3->priority_floor_explicit);
 }

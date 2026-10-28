@@ -382,10 +382,12 @@ void async_scheduler::drain(bool in_step) {
   if (ingress_pending_.load(std::memory_order_acquire)) {
     std::vector<std::pair<std::string, value_t>> batch;
     std::vector<std::shared_ptr<async_call>> finished;
+    std::vector<std::pair<int, control_cmd>> controls;
     {
       std::lock_guard<std::mutex> lock(ingress_mutex_);
       batch.swap(ingress_);
       finished.swap(completions_);
+      controls.swap(controls_);
       ingress_pending_.store(false, std::memory_order_relaxed);
     }
     // On the scheduler thread now: deliver_to_receivers mutates process state, which is safe
@@ -395,6 +397,9 @@ void async_scheduler::drain(bool in_step) {
       deliver_to_receivers(path, msg);
     for (const std::shared_ptr<async_call> &call : finished)
       finish_async_call(call);
+    // Commands posted from other threads (post_control), in the order they came.
+    for (auto &[pid, cmd] : controls)
+      apply_control(pid, cmd);
     chain_valid_ = false;
   }
   if (!async_calls_.empty()) {
@@ -1422,7 +1427,28 @@ void async_scheduler::note_priority_clamped() {
   ++priority_clamped_;
 }
 
-bool async_scheduler::post_control(int, control_cmd) { return false; }
+bool async_scheduler::post_control(int pid, control_cmd cmd) {
+  // Any thread. Queued with the ingress and applied by the next drain, on the scheduler thread
+  // (apply_control): the posting thread may not read procs_, so an unknown pid is found, and
+  // ignored, there. Notified under the lock, as post_message is.
+  std::lock_guard<std::mutex> lock(ingress_mutex_);
+  controls_.emplace_back(pid, std::move(cmd));
+  ingress_pending_.store(true, std::memory_order_seq_cst);
+  notify_work();
+  return true;
+}
+
+void async_scheduler::apply_control(int pid, control_cmd &cmd) {
+  switch (cmd.what) {
+  case control_cmd::kind::set_priority:
+    set_priority(pid, cmd.value); // the host path, unchecked (design 7.4); false for a gone pid
+    break;
+  case control_cmd::kind::query:
+    if (cmd.query)
+      cmd.query(*this);
+    break;
+  }
+}
 
 bool async_scheduler::set_max_steps(int pid, uint64_t max_steps) {
   auto it = procs_.all().find(pid);

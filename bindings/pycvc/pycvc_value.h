@@ -29,6 +29,10 @@
 struct _object;
 typedef _object PyObject;
 
+namespace cvc::state_exec {
+struct priority_info;
+}
+
 namespace pycvc {
 
 /// A new reference, or nullptr with a Python exception set.
@@ -62,6 +66,15 @@ cvc::state_exec::async_marshal python_async_marshal(const std::string &who, cons
 /// A new pycvc.async_call holding `call` (a kernel's handle), or nullptr with a Python error set.
 /// Defined in the SWIG wrapper, which owns the type. Call with the GIL held.
 PyObject *async_call_to_py(std::shared_ptr<cvc::state_exec::async_call> call);
+
+/// The pycvc.scheduling_policy IntEnum (borrowed; null before the module's init). Defined in the
+/// SWIG wrapper.
+PyObject *scheduling_policy_type();
+
+/// A new dict {"base", "effective", "floor", "policy"} (policy a pycvc.scheduling_policy), or
+/// nullptr with a Python error set: get_priority's answer. Defined in the SWIG wrapper. Call with
+/// the GIL held.
+PyObject *priority_info_to_py(const cvc::state_exec::priority_info &info);
 
 /// An execute_options::on_complete that calls `callable` with the process's result and ignores
 /// what it returns. A Python exception becomes a C++ error, thrown from the scheduler call that

@@ -135,6 +135,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/core/process.h
   ../../inc/cvc/core/text.h
   ../../inc/cvc/core/thread_pool.h
+  ../../inc/cvc/core/thread_class.h
   ../../inc/cvc/volume/volmagick.h
   ../../inc/cvc/geometry/geometry_file_io.h
   ../../inc/cvc/model/model.h
@@ -225,6 +226,7 @@ set(SOURCE_FILES
   core/process.cpp
   core/text.cpp
   core/thread_pool.cpp
+  core/thread_class.cpp
   processing/bilateral_filter.cpp
   processing/contrast_enhancement.cpp
   volume/cvcraw_io.cpp

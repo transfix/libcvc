@@ -1500,6 +1500,7 @@ class AsyncStateObserver(state_observer):
 #include <cvc/state/state_exec/state_value_codec.h>
 #include <cvc/state/state_exec/stdlib.h>
 #include <cvc/state/state_exec/types.h>
+#include <cvc/core/thread_class.h>
 #include "pycvc_value.h"
 #include <algorithm>
 #include <functional>
@@ -2016,6 +2017,21 @@ bool py_to_value_map(PyObject *o, value_map &out) {
     if (pycvc_opt) {
       $result = SWIG_NewPointerObj(new cvc::state_exec::process_info(*pycvc_opt),
                                    $descriptor(cvc::state_exec::process_info *), SWIG_POINTER_OWN);
+      if (!$result)
+        SWIG_fail;
+    } else {
+      $result = Py_None;
+      Py_INCREF(Py_None);
+    }
+  }
+%}
+// A scheduler's get_priority: a dict {"base", "effective", "floor", "policy"} (policy a
+// pycvc.scheduling_policy), or None for a pid it doesn't have, as Exec.get_priority returns.
+%typemap(out) std::optional<cvc::state_exec::priority_info> %{
+  { // a block, so the wrapper's later `goto fail` doesn't jump over this initialization
+    const std::optional<cvc::state_exec::priority_info> &pycvc_opt = $1;
+    if (pycvc_opt) {
+      $result = pycvc::priority_info_to_py(*pycvc_opt);
       if (!$result)
         SWIG_fail;
     } else {
@@ -2553,6 +2569,96 @@ PYCVC_STATE_EXEC_ENUM(cvc::state_exec::scheduling_policy, pycvc_enum_scheduling_
 %pythoncode %{
 process_status = _pycvc.process_status
 scheduling_policy = _pycvc.scheduling_policy
+%}
+
+// pycvc.thread_class (pycvc.set_thread_class, docs/STATE_EXEC_LOCKS.md 7.6) is an IntEnum too.
+%{
+static PyObject *pycvc_enum_thread_class = nullptr;
+%}
+PYCVC_STATE_EXEC_ENUM(cvc::thread_class, pycvc_enum_thread_class, "thread_class")
+%init %{
+  pycvc_enum_thread_class = pycvc_make_int_enum(
+      "thread_class", {{"background", static_cast<int>(cvc::thread_class::background)},
+                       {"utility", static_cast<int>(cvc::thread_class::utility)},
+                       {"normal", static_cast<int>(cvc::thread_class::normal)}});
+  if (pycvc_enum_thread_class != NULL)
+    PyDict_SetItemString(d, "thread_class", pycvc_enum_thread_class);
+%}
+%pythoncode %{
+thread_class = _pycvc.thread_class
+%}
+
+// An optional int member (resource_policy.priority_floor, execute_options.priority_floor) reads
+// and writes as an int or None.
+%{
+namespace pycvc {
+// The member's new value: None (empty) or an int that fits. Throws std::invalid_argument, naming
+// `what`, for anything else.
+std::optional<int> optional_int_from_py(PyObject *v, const char *what) {
+  if (v == Py_None)
+    return std::nullopt;
+  int overflow = 0;
+  const long n = PyLong_Check(v) && !PyBool_Check(v) ? PyLong_AsLongAndOverflow(v, &overflow) : -1;
+  if (!PyLong_Check(v) || PyBool_Check(v) || overflow != 0 || (n == -1 && PyErr_Occurred()) ||
+      n < INT_MIN || n > INT_MAX) {
+    PyErr_Clear();
+    throw std::invalid_argument(std::string(what) + ": an int or None");
+  }
+  return static_cast<int>(n);
+}
+
+PyObject *optional_int_to_py(const std::optional<int> &v) {
+  if (!v)
+    Py_RETURN_NONE;
+  return PyLong_FromLong(*v);
+}
+} // namespace pycvc
+%}
+
+// pycvc.priority_change (a scheduler's set_priority_checked, docs/STATE_EXEC_LOCKS.md 7.4) is an
+// IntEnum too; get_priority's answer (a scheduler's and Exec's) is a dict.
+%{
+static PyObject *pycvc_enum_priority_change = nullptr;
+
+namespace pycvc {
+PyObject *scheduling_policy_type() { return pycvc_enum_scheduling_policy; }
+
+PyObject *priority_info_to_py(const cvc::state_exec::priority_info &info) {
+  PyObject *d = PyDict_New();
+  if (d == nullptr)
+    return nullptr;
+  const std::pair<const char *, PyObject *> items[] = {
+      {"base", PyLong_FromLong(info.base)},
+      {"effective", PyLong_FromLong(info.effective)},
+      {"floor", PyLong_FromLong(info.floor)},
+      {"policy", PyObject_CallFunction(pycvc_enum_scheduling_policy, "i",
+                                       static_cast<int>(info.policy))}};
+  bool ok = true;
+  for (const auto &[key, value] : items) {
+    ok = ok && value != nullptr && PyDict_SetItemString(d, key, value) == 0;
+    Py_XDECREF(value);
+  }
+  if (!ok) {
+    Py_DECREF(d);
+    return nullptr;
+  }
+  return d;
+}
+} // namespace pycvc
+%}
+PYCVC_STATE_EXEC_ENUM(cvc::state_exec::priority_change, pycvc_enum_priority_change,
+                      "priority_change")
+%init %{
+  pycvc_enum_priority_change = pycvc_make_int_enum(
+      "priority_change",
+      {{"applied", static_cast<int>(cvc::state_exec::priority_change::applied)},
+       {"unknown", static_cast<int>(cvc::state_exec::priority_change::unknown)},
+       {"refused", static_cast<int>(cvc::state_exec::priority_change::refused)}});
+  if (pycvc_enum_priority_change != NULL)
+    PyDict_SetItemString(d, "priority_change", pycvc_enum_priority_change);
+%}
+%pythoncode %{
+priority_change = _pycvc.priority_change
 %}
 
 // eval_phase, step_kind, and resource_policy::mode (pycvc.resource_policy.mode, set on the class
@@ -3114,6 +3220,16 @@ public:
 };
 } // namespace cvc
 
+// ── thread classes (cvc/core/thread_class.h, docs/STATE_EXEC_LOCKS.md 7.6) ──
+// pycvc.set_thread_class(cls) puts the calling thread in a pycvc.thread_class (background, utility,
+// normal), as far as the OS allows, and returns whether it did. On Linux an unprivileged thread
+// can't raise itself back once lowered: that returns False.
+%rename(set_thread_class) cvc::set_current_thread_class;
+namespace cvc {
+enum class thread_class;
+bool set_current_thread_class(thread_class cls);
+} // namespace cvc
+
 // ── async_call: a Python kernel's handle (register_async_fn(..., with_call=True)) ──
 // Shared: the handle keeps the call's record alive. cancelled() says whether to stop (and records
 // the CPU time used so far, for the process's budget); post(value) sends progress to
@@ -3454,6 +3570,7 @@ struct execute_options {
   unsigned long long max_message_bytes;
   std::unordered_map<std::string, value_t> signal_handlers;
   environment_ptr env;
+  int parent_pid;
 };
 %define PYCVC_STATE_EXEC_ON_COMPLETE(CLASS)
 %extend CLASS {
@@ -3503,6 +3620,16 @@ PYCVC_STATE_EXEC_ON_COMPLETE(execute_options)
     async_steps_per_cpu_ms = property(_async_steps_get, _async_steps_set)
   %}
 }
+// priority_floor is an int, or None (unset: the submit priority; docs/STATE_EXEC_LOCKS.md 7.2).
+%extend execute_options {
+  PyObject *_priority_floor_get() const { return pycvc::optional_int_to_py($self->priority_floor); }
+  void _priority_floor_set(PyObject *floor) {
+    $self->priority_floor = pycvc::optional_int_from_py(floor, "execute_options.priority_floor");
+  }
+  %pythoncode %{
+    priority_floor = property(_priority_floor_get, _priority_floor_set)
+  %}
+}
 
 struct process_info {
   int pid;
@@ -3545,6 +3672,10 @@ struct process_info {
   // (docs/STATE_EXEC_LOCKS.md 5.10).
   unsigned long long locks_held;
   std::optional<std::string> waiting_on;
+  // The priority it is picked by (its base, or better while it holds a lock a better process
+  // waits for, under a priority policy), and its floor (docs/STATE_EXEC_LOCKS.md 7.2).
+  int effective_priority;
+  int priority_floor;
 };
 %extend process_info {
   // A failed process's exception (docs/STATE_EXEC_EXCEPTIONS.md 2.6), or None.
@@ -3570,6 +3701,7 @@ struct scheduler_stats {
   int killed;
   int failed;
   unsigned long long total_steps;
+  unsigned long long priority_clamped;
 };
 %extend scheduler_stats {
   %pythoncode %{
@@ -3691,6 +3823,11 @@ process.watch_handler_entry = watch_handler_entry
 typedef std::shared_ptr<process> process_ptr;
 process_ptr make_process();
 
+// get_priority's answer is a dict or None (the typemap above); set_priority_checked's a
+// pycvc.priority_change.
+struct priority_info;
+enum class priority_change;
+
 // The common base of the two schedulers, which intrinsics_context.sched points to. Its members are
 // on the two concrete classes.
 %nodefaultctor scheduler_base;
@@ -3720,6 +3857,8 @@ class scheduler_base {};
   size_t total_pending_messages() const;
   size_t max_pending_messages;
   bool set_priority(int pid, int priority);
+  std::optional<priority_info> get_priority(int pid) const;
+  priority_change set_priority_checked(int caller_pid, int pid, int priority);
   bool set_max_steps(int pid, unsigned long long max_steps);
   bool set_max_time(int pid, double seconds);
   bool set_max_memory(int pid, unsigned long long bytes);
@@ -3939,6 +4078,16 @@ struct resource_policy {
   unsigned long long max_total_memory;
   cvc::state_exec::resource_policy::mode enforce;
 };
+// priority_floor is an int, or None (no floor of the policy's).
+%extend resource_policy {
+  PyObject *_priority_floor_get() const { return pycvc::optional_int_to_py($self->priority_floor); }
+  void _priority_floor_set(PyObject *floor) {
+    $self->priority_floor = pycvc::optional_int_from_py(floor, "resource_policy.priority_floor");
+  }
+  %pythoncode %{
+    priority_floor = property(_priority_floor_get, _priority_floor_set)
+  %}
+}
 %pythoncode %{
 resource_policy.mode = _pycvc._resource_policy_mode
 %}
@@ -4243,6 +4392,18 @@ def register_intrinsics(env, ctx):
 %pythonappend pycvc::Exec::async_host %{
   val._pycvc_exec = self
 %}
+// Exec(app, policy=None, idle_timeout=60.0) takes keywords (docs/STATE_EXEC_LOCKS.md 7.4): the
+// module enables none, and SWIG takes them only on a function that isn't overloaded, so the
+// constructor is one declaration. A policy or idle_timeout it can't take raises ValueError.
+%feature("kwargs") pycvc::Exec::Exec;
+%exception pycvc::Exec::Exec {
+  try {
+    $action
+  } catch (const std::invalid_argument &e) {
+    SWIG_exception(SWIG_ValueError, e.what());
+  }
+  PYCVC_STATE_EXEC_CATCH
+}
 
 // ── Phase 4: DSL execution + Python-authored DSL functions ──────────────
 // pycvc.Exec(app) runs state_exec DSL programs over app's state root and lets a

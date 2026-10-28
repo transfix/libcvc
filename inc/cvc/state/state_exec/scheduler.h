@@ -10,6 +10,7 @@
 #ifndef CVC_STATE_EXEC_SCHEDULER_H
 #define CVC_STATE_EXEC_SCHEDULER_H
 
+#include <atomic>
 #include <chrono>
 #include <cvc/state/state_exec/detail/lock_home.h>
 #include <cvc/state/state_exec/heap.h>
@@ -21,6 +22,7 @@
 #include <cvc/state/state_exec/stackless_evaluator.h>
 #include <cvc/state/state_exec/types.h>
 #include <functional>
+#include <mutex>
 #include <optional>
 #include <queue>
 #include <string>
@@ -161,8 +163,10 @@ public:
   std::optional<priority_info> get_priority_as(int caller_pid, int pid) const override;
   bool set_priority_floor(int pid, int floor) override;
   void note_priority_clamped() override;
-  /// Thread-safe: `cmd` for process `pid`, applied between steps (unknown pids are ignored when
-  /// it is applied). True once queued.
+  /// Thread-safe: `cmd` for process `pid`, applied between steps, at the top of the next step
+  /// (step(), or run()'s next iteration: an idle run() applies it once its wait ends).
+  /// set_priority applies through the host path (unchecked); an unknown pid is found, and ignored,
+  /// then. A query runs its function on the scheduler thread, and must not throw. True once queued.
   bool post_control(int pid, control_cmd cmd);
   bool set_max_steps(int pid, uint64_t max_steps);
   bool set_max_time(int pid, double seconds);
@@ -393,6 +397,14 @@ private:
   /// Made by locks() or set_lock_manager(); null until a with-lock needs it.
   std::unique_ptr<detail::lock_home> home_;
   std::vector<process *> lock_expired_; // reused by step_once's lock expiries
+
+  /// post_control's commands, from any thread: guarded by control_mutex_, applied at the top of
+  /// step_once. control_pending_ is set (under the mutex) while there are any, so a step finds
+  /// none without the lock.
+  std::mutex control_mutex_;
+  std::vector<std::pair<int, control_cmd>> controls_;
+  std::atomic<bool> control_pending_{false};
+  void apply_controls();
 };
 
 /// limits.max_alloc_bytes from the state tree under `root`:

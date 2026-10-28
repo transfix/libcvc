@@ -272,6 +272,50 @@ spawns (`(spawn "...")`) sees the intrinsics and every function registered with
 definitions. Registered functions live in a scope under the programs' own, so a
 program that rebinds a registered name shadows it.
 
+### Scheduling policy, priorities and threads
+
+`Exec(app, policy=None, idle_timeout=60.0)` takes keywords
+(`docs/STATE_EXEC_LOCKS.md` 7.3, 7.4). `policy` fixes the scheduler's policy for
+its life: `None` reads the app tree's `state_exec.policy` (`round_robin` when it is
+unset, as for the app's exec scheduler; an unknown value is logged and
+`round_robin` used), or pass a `pycvc.scheduling_policy` member or its name
+(`"round_robin"`, `"priority"`, `"priority_rr"`). `idle_timeout` is how long, in
+seconds, `run()` waits while its program is parked with nothing pending before it
+kills it. Anything else, or a negative or NaN `idle_timeout`, raises `ValueError`.
+
+```python
+ex = pycvc.Exec(app, policy="priority_rr")    # or policy=pycvc.scheduling_policy.priority_rr
+ex.scheduler().policy()                       # scheduling_policy.priority_rr
+ex.set_priority(pid, 5)                       # True; False for a pid it doesn't have
+ex.get_priority(pid)   # {'base': 5, 'effective': 5, 'floor': 0, 'policy': scheduling_policy.priority_rr}
+```
+
+`set_priority(pid, p)` changes a process's base priority as a host does, unchecked
+(lower is better; the DSL's `set-priority` is the checked one). `get_priority(pid)`
+returns the dict above, or `None` for a pid the scheduler doesn't have (a reaped one
+included). Under `round_robin` a change is stored and reported and changes no pick.
+
+They are the two `Exec` calls any thread may make:
+
+- With no `run()` active, they act at once.
+- From inside `run()` (a registered function, coroutine or callback), they act at once.
+- From another thread while `run()` pumps, the call is posted to the scheduler and
+  `run()` answers it between steps; the caller waits with the GIL released. A call
+  still waiting when `run()` ends is answered by `run()` before it returns.
+- From a thread running another `Exec`'s `run()` (its registered function, say), they
+  raise `RuntimeError("Exec.run is active on another thread")` at once, so two
+  `Exec`s whose functions call each other never wait for each other.
+
+`run()` itself stays one thread's: a second `run()` of the same `Exec`, from any
+thread (a kernel's included), raises `RuntimeError` until the first has returned.
+
+`pycvc.set_thread_class(cls)` puts the calling thread in a `pycvc.thread_class`
+(`background`, `utility`, `normal`) as far as the OS allows, and returns whether it
+did (`docs/THREAD_POOL.md`, "Thread classes"). On Linux an unprivileged thread
+can't raise itself back once lowered: that returns `False`. The app tree's
+`state_exec.process_class` sets the whole process's class when the app's exec
+scheduler is first built.
+
 The rest of state_exec is the C++ API under the C++ names
 (`docs/PYCVC_STATE_EXEC_PARITY.md` lists what is wrapped and what comes next):
 

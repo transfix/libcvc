@@ -4,6 +4,9 @@ cmake_minimum_required(VERSION 3.15)
 # Test executables
 add_executable(app_test app_test.cpp)
 add_executable(thread_pool_test thread_pool_test.cpp)
+# The OS thread and process classes (PR-9): an executable of its own, since a process class can't
+# be undone unprivileged on Linux.
+add_executable(thread_class_test thread_class_test.cpp)
 add_executable(text_test text_test.cpp)
 add_executable(ariadne_loader_test ariadne_loader_test.cpp)
 add_executable(ariadne_scene_tf_test ariadne_scene_tf_test.cpp)
@@ -293,6 +296,7 @@ add_executable(world_bundle_test world_bundle_test.cpp)
 set(TEST_TARGETS
   app_test
   thread_pool_test
+  thread_class_test
   text_test
   ariadne_loader_test
   ariadne_scene_tf_test
@@ -600,6 +604,13 @@ target_link_libraries(app_test
 )
 
 target_link_libraries(thread_pool_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(thread_class_test
   PRIVATE
     cvc
     GTest::gtest
@@ -2493,6 +2504,7 @@ endfunction()
 
 cvc_discover_tests(app_test)
 cvc_discover_tests(thread_pool_test)
+cvc_discover_tests(thread_class_test)
 cvc_discover_tests(text_test)
 cvc_discover_tests(ariadne_loader_test)
 cvc_discover_tests(ariadne_scene_tf_test)
