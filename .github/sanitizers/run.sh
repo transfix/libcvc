@@ -24,10 +24,7 @@ case "$kind" in
     ;;
   asan-ubsan)
     lib=libasan
-    # detect_stack_use_after_return=0 until transfix/libcvc#866 lands: the check moves locals to
-    # a "fake stack" off the thread's stack, and libcvc's native-nesting guard measured the stack
-    # from a local, so every nested native call threw "nested too deeply (0 levels)".
-    export ASAN_OPTIONS="detect_leaks=1:exitcode=66:detect_stack_use_after_return=0"
+    export ASAN_OPTIONS="detect_leaks=1:exitcode=66"
     export LSAN_OPTIONS="suppressions=$here/lsan.supp:print_suppressions=0"
     export UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1:exitcode=66"
     # pycvc scripts not run under ASan, which can't suppress a report and stops a process at its
