@@ -5,10 +5,13 @@
 */
 
 #include <chrono>
+#include <cvc/core/app.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/builtins.h>
+#include <cvc/state/state_exec/detail/lock_home.h>
 #include <cvc/state/state_exec/exec_coordinator.h>
 #include <cvc/state/state_exec/intrinsics.h>
+#include <cvc/state/state_exec/lock_manager.h>
 #include <cvc/state/state_exec/memory_tracker.h>
 #include <cvc/state/state_exec/process.h>
 #include <cvc/state/state_exec/resource_policy.h>
@@ -16,6 +19,7 @@
 #include <cvc/state/state_exec/state_value_codec.h>
 #include <cvc/state/state_message.h>
 #include <cvc/state/state_message_bus.h>
+#include <deque>
 #include <gtest/gtest.h>
 #include <string>
 #include <thread>
@@ -1248,4 +1252,79 @@ TEST_F(TwoCoordinatorTest, HandoffBetweenNodes) {
 
   EXPECT_FALSE(coord1.is_leader());
   EXPECT_TRUE(coord2.is_leader());
+}
+
+// ===========================================================================
+// with-lock and migrate (docs/STATE_EXEC_LOCKS.md 5.6, 10; locks plan L1 section 3, LW-8)
+// ===========================================================================
+
+namespace {
+
+void set_env_var_for_locks(const char *name, const char *value) {
+#ifdef _WIN32
+  _putenv_s(name, value);
+#else
+  setenv(name, value, 1);
+#endif
+}
+
+// Every lock manager operation checks the manager's invariants (gap G-4); the library reads the
+// variable once, when the first manager is made.
+[[maybe_unused]] const bool g_lock_self_check = [] {
+  set_env_var_for_locks("CVC_STATE_EXEC_CHECK", "1");
+  return true;
+}();
+
+} // namespace
+
+// LW-8: today's migrate moves metadata only and kills the source process: the kill releases an X
+// holder's lock, and the next X grant on the key reports it abandoned.
+TEST_F(CoordinatorTest, LW08_MetadataMigrateReleases) {
+  coord.start();
+  coord.on_message(state_message::make_text(
+      "__state_exec.cluster-1.election", "{\"type\":\"election-victory\",\"node_id\":\"node-A\"}",
+      MIME_EXEC_ELECTION));
+  std::deque<intrinsics_context> contexts;
+  const auto env_of = [&]() {
+    intrinsics_context &ctx = contexts.emplace_back();
+    ctx.sched = &sched;
+    ctx.root = &cvc::state::instance(app_ctx);
+    ctx.proc = make_process();
+    environment_ptr env = builtins::make_default_environment();
+    register_intrinsics(env, &ctx);
+    return env;
+  };
+  execute_options opts;
+  opts.env = env_of();
+  // A holder running inside its section (migrate pauses it first: it must be ready or running).
+  const auto sr = coord.submit(
+      "(with-lock \"k\" (begin (state-set \"in\" \"1\") (while t (set i (+ 1 1)))))", opts);
+  ASSERT_TRUE(sr.accepted);
+  const int pid = sr.pid;
+  for (int i = 0; i < 10000 && sched.get_process_info(pid)->locks_held == 0; ++i)
+    sched.step();
+  ASSERT_EQ(sched.get_process_info(pid)->locks_held, 1u);
+
+  const auto r = coord.migrate(pid, "node-B");
+  EXPECT_TRUE(r.success) << r.error;
+  const auto info = sched.get_process_info(pid);
+  EXPECT_EQ(info->status, process_status::killed);
+  EXPECT_EQ(info->locks_held, 0u);
+  EXPECT_TRUE(sched.locks()->manager().query("", nullptr, "").held.empty());
+
+  // The next X grant on k reports the abandoned section, once.
+  const auto abandoned = [&] {
+    execute_options o;
+    o.env = env_of();
+    const int p =
+        sched.execute(std::string("(with-lock \"k\" :as g (get-attr g \"abandoned\"))"), o);
+    for (int i = 0; i < 10000 && !is_finished(sched.get_process_info(p)->status); ++i)
+      sched.step();
+    const auto v = sched.get_result(p);
+    return v && std::holds_alternative<bool>(v->v) && std::get<bool>(v->v);
+  };
+  EXPECT_TRUE(abandoned());
+  EXPECT_FALSE(abandoned());
+  EXPECT_NO_THROW(sched.locks()->manager().check());
+  EXPECT_TRUE(sched.locks()->manager().table().empty());
 }
