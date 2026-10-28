@@ -2080,6 +2080,12 @@ void stackless_evaluator::lock_acquire(evaluator_state &state, std::size_t fi, c
         value_t(static_cast<int64_t>(r.hold));
     if (as_value)
       fill_as(*as_value, r.gen, r.abandoned);
+    // Test builds: an error injected after a fast grant (LX-8) comes once the frame records the
+    // grant, so the failed step's unwind (fail_step) gives it back.
+    if (r.what == detail::enter_result::kind::granted)
+      if (const detail::lock_test_hooks *hooks = detail::lock_test_hooks_get();
+          hooks && hooks->after_grant)
+        hooks->after_grant(p.pid);
     lock_body_begins(state, fi);
     return;
   }

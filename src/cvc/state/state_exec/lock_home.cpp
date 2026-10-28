@@ -362,8 +362,10 @@ enter_result lock_home::try_enter(process &p, home_request &req, std::string_vie
   made.abandoned = g->abandoned;
   made.in_handler = in_handler;
   pl.holds.push_back(std::move(made));
-  if (const lock_test_hooks *hooks = lock_test_hooks_get(); hooks && hooks->after_grant)
-    hooks->after_grant(p.pid);
+  // The after_grant test hook runs in the evaluator, once the lock frame records this grant
+  // (stackless_evaluator.cpp lock_acquire): an error it injects then fails a step whose unwind
+  // gives the grant back (LX-8). Called here, it fired before any frame held the grant, and the
+  // hold outlived the failed step.
   return {enter_result::kind::granted, g->hold, g->gen, g->abandoned};
 }
 
