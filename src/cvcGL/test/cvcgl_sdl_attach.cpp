@@ -6,8 +6,8 @@
 // queue; and an SdlInput that is not attached leaves the window's events alone. On Windows a key
 // message sent to SDL's window goes the OS's way, through SDL's window procedure, to both. With
 // $CVCGL_SDL_WINDOW=0 the window is VTK's own, and SdlInput reads VTK's key events instead (checked
-// on Windows, where a key message can be sent to VTK's window). SKIPs (rc 0) without SDL or where
-// SDL opens no window.
+// on Windows, where a key message can be sent to VTK's window). Without SDL, or where SDL opens no
+// window, it skips: exit 77, which ctest reports as skipped.
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -91,7 +91,7 @@ void setenv_(const char *k, const char *v) {
 int main() {
 #ifndef CVC_ENABLE_SDL
   std::printf("SKIP: cvcGL built without SDL\n");
-  return 0;
+  return 77;
 #else
   cvc::app app;
   cvc::gl::SceneGraph sg(app, "sdl_attach");
@@ -102,7 +102,7 @@ int main() {
   SDL_Window *sw = win ? static_cast<SDL_Window *>(win->GetGenericWindowId()) : nullptr;
   if (!win || !iren || !sw || std::string(win->GetClassName()) != "SdlGLRenderWindow") {
     std::printf("SKIP: no SDL window here (%s)\n", win ? win->GetClassName() : "none");
-    return 0;
+    return 77;
   }
   chk(win->GetSize()[0] > 0 && win->GetSize()[1] > 0, "VTK renders into SDL's window");
 

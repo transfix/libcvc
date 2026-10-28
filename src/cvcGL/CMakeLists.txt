@@ -1077,11 +1077,13 @@ add_test(NAME cvcgl_sdl_input COMMAND cvcgl_sdl_input)
 # cvcGL's onscreen window on SDL3 (SdlWindow.h), on a real window: pushed SDL events reach VTK's
 # interactor as VTK events (keysyms, CharEvent, clicks y up) and SdlInput in SDL's names; a resize
 # sets VTK's size; VTK timers tick; two windows each get their own events; $CVCGL_SDL_WINDOW=0
-# falls back to VTK's window (whose keys SdlInput reads, checked on Windows). SKIPs (rc 0) without
-# SDL or where SDL opens no window.
+# falls back to VTK's window (whose keys SdlInput reads, checked on Windows). Without SDL, or where
+# SDL opens no window, it exits 77, which ctest reports as skipped (so a lane that should exercise
+# the window cannot pass it silently).
 add_executable(cvcgl_sdl_attach test/cvcgl_sdl_attach.cpp)
 target_link_libraries(cvcgl_sdl_attach PRIVATE cvcGL)
 add_test(NAME cvcgl_sdl_attach COMMAND cvcgl_sdl_attach)
+set_tests_properties(cvcgl_sdl_attach PROPERTIES SKIP_RETURN_CODE 77)
 
 # ── JavaScript tests (node) ──
 # The browser-side pieces cvcgl_wasm_app() links into a wasm app are plain JS, tested under node
