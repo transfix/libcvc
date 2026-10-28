@@ -12,7 +12,9 @@
 
 #include <atomic> // compute_async: the fan-out accumulator
 #include <chrono> // compute_async: bounded wait for the completion callback
+#include <condition_variable>
 #include <cvc/core/app.h>
+#include <cvc/core/async_task.h> // launch_pool_task: a dropped task posts on_error's value
 #include <cvc/core/world_clock.h>
 #include <cvc/core/world_clock_binding.h>
 #include <cvc/core/world_units.h>
@@ -21,8 +23,11 @@
 #include <future> // compute_async: deterministic wait on on_done via a promise
 #include <gtest/gtest.h>
 #include <memory> // compute_async: shared accumulator captured by fn + on_done
+#include <mutex>
+#include <set>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 using namespace cvc;
@@ -1335,6 +1340,1377 @@ TEST_F(AppTest, ThreadPoolTaskChaining) {
   ctx.setThreadPoolSize(original_size);
 }
 
+// Spin for `us` microseconds without an interruption point (a kernel that never checks).
+static void spin_us(int us) {
+  const auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(us);
+  while (std::chrono::steady_clock::now() < until) {
+  }
+}
+
+// Regression (docs/STATE_EXEC_BENCH.md, "The background pool stalls, then hangs"): more
+// anonymous (wait=false) tasks than the pool has workers. The pool used to give every task queued
+// while it was full the same thread key, so a worker starting the next one interrupted and joined
+// (up to 5 s) the thread already holding that key; the interrupted worker then threw from the
+// interruption point at the top of app::threads() inside tryStartWorker, which had unlocked
+// _threadPoolMutex by hand, and the scoped lock of its caller unlocked it a second time. On
+// Windows that leaves the boost mutex looking locked with no owner, and every later locker
+// (workers, submitters, ~app) blocks forever. Every task must run, promptly, and the pool must
+// still answer afterwards.
+TEST_F(AppTest, ThreadPoolFloodPastPoolSizeCompletes) {
+  const unsigned int original_size = ctx.getThreadPoolSize();
+  ctx.setThreadPoolSize(4);
+  const int n = 1000;
+  const int spin = 20; // microseconds: no interruption point, like a kernel that never checks
+  std::atomic<int> done(0);
+  const auto t0 = std::chrono::steady_clock::now();
+  for (int i = 0; i < n; i++)
+    ctx.startThreadPooled(
+        "pool_flood",
+        [&done, spin] {
+          spin_us(spin);
+          done++;
+        },
+        PRIORITY_NORMAL, /*wait=*/false);
+  const auto deadline = t0 + std::chrono::seconds(10);
+  while (done.load() < n && std::chrono::steady_clock::now() < deadline)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  ASSERT_EQ(done.load(), n) << "the pool stranded tasks";
+  // 1000 x 20 us on 4 workers is ~5 ms of work: no 5 s stall per key collision.
+  EXPECT_LT(secs, 4.0);
+  // The pool still answers (its mutex is usable) and drains to idle.
+  for (int i = 0; i < 2000 && (ctx.getActiveThreadCount() != 0 || ctx.getPendingThreadCount() != 0);
+       i++)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  EXPECT_EQ(ctx.getActiveThreadCount(), 0u);
+  EXPECT_EQ(ctx.getPendingThreadCount(), 0u);
+  ctx.setThreadPoolSize(original_size);
+}
+
+// Wait until the background pool has nothing queued or running (bounded).
+static bool wait_pool_idle(app &a, int ms = 5000) {
+  for (int i = 0; i < ms; i++) {
+    if (a.getActiveThreadCount() == 0 && a.getPendingThreadCount() == 0)
+      return true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  return false;
+}
+
+// Anonymous tasks run on persistent workers: never more OS threads than the pool's size, the
+// same few threads reused, and nothing added to the thread map.
+TEST_F(AppTest, ThreadPoolAnonymousTasksReuseFewWorkersOutsideTheThreadMap) {
+  const unsigned int original_size = ctx.getThreadPoolSize();
+  ctx.setThreadPoolSize(3);
+  const std::size_t threads_before = ctx.threads().size();
+  std::mutex m;
+  std::set<std::thread::id> ids;
+  std::atomic<int> done(0);
+  for (int i = 0; i < 300; i++)
+    ctx.submitPooled([&] {
+      {
+        std::lock_guard<std::mutex> lk(m);
+        ids.insert(std::this_thread::get_id());
+      }
+      done++;
+    });
+  ASSERT_TRUE(wait_pool_idle(ctx));
+  EXPECT_EQ(done.load(), 300);
+  EXPECT_LE(ids.size(), 3u);
+  EXPECT_GE(ids.size(), 1u);
+  EXPECT_EQ(ctx.threads().size(), threads_before);
+  EXPECT_NE(ids.count(std::this_thread::get_id()), 1u); // off the submitting thread
+  ctx.setThreadPoolSize(original_size);
+}
+
+// Within a priority, tasks start in the order they were submitted.
+TEST_F(AppTest, ThreadPoolIsFifoWithinAPriority) {
+  const unsigned int original_size = ctx.getThreadPoolSize();
+  ctx.setThreadPoolSize(1);
+  std::atomic<bool> release(false);
+  std::atomic<bool> blocker_running(false);
+  ctx.submitPooled([&] {
+    blocker_running = true;
+    while (!release.load())
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  });
+  for (int i = 0; i < 2000 && !blocker_running.load(); i++)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  ASSERT_TRUE(blocker_running.load());
+  std::mutex m;
+  std::vector<int> order;
+  for (int i = 0; i < 40; i++)
+    ctx.submitPooled(
+        [&, i] {
+          std::lock_guard<std::mutex> lk(m);
+          order.push_back(i);
+        },
+        i % 2 ? PRIORITY_HIGH : PRIORITY_NORMAL);
+  EXPECT_EQ(ctx.getPendingThreadCount(), 40u);
+  release = true;
+  ASSERT_TRUE(wait_pool_idle(ctx));
+  ASSERT_EQ(order.size(), 40u);
+  // Every HIGH task (odd i, ascending) before every NORMAL one (even i, ascending).
+  for (int k = 0; k < 20; k++) {
+    EXPECT_EQ(order[k], 2 * k + 1) << "at " << k;
+    EXPECT_EQ(order[20 + k], 2 * k) << "at " << 20 + k;
+  }
+  ctx.setThreadPoolSize(original_size);
+}
+
+// A finished task keeps nothing alive: its captures go on the worker before it counts as done
+// (it used to stay in the thread map, with everything it captured, until ~app).
+TEST_F(AppTest, ThreadPoolFinishedTasksRetainNothing) {
+  std::vector<std::weak_ptr<std::string>> weak;
+  for (int i = 0; i < 50; i++) {
+    auto payload = std::make_shared<std::string>(1024, 'x');
+    weak.push_back(payload);
+    ctx.startThreadPooled(
+        "pool_retention", [payload] { EXPECT_EQ(payload->size(), 1024u); }, PRIORITY_NORMAL,
+        /*wait=*/false);
+  }
+  ASSERT_TRUE(wait_pool_idle(ctx));
+  for (const auto &w : weak)
+    EXPECT_TRUE(w.expired());
+}
+
+// wait() (wait_for_threads) waits for anonymous pool tasks that are queued or running.
+TEST_F(AppTest, WaitForThreadsWaitsForThePool) {
+  const unsigned int original_size = ctx.getThreadPoolSize();
+  ctx.setThreadPoolSize(2);
+  std::atomic<int> done(0);
+  for (int i = 0; i < 6; i++)
+    ctx.submitPooled([&done] {
+      spin_us(20000); // no interruption point: runs to the end
+      done++;
+    });
+  ctx.wait();
+  EXPECT_EQ(done.load(), 6);
+  EXPECT_EQ(ctx.getActiveThreadCount(), 0u);
+  EXPECT_EQ(ctx.getPendingThreadCount(), 0u);
+  ctx.setThreadPoolSize(original_size);
+}
+
+// ~app ends promptly with a full queue: the running task is interrupted, the queued ones are
+// dropped without running and release what they captured.
+TEST(AppPoolTeardown, DestroyingTheAppDropsQueuedTasksPromptly) {
+  auto payload = std::make_shared<int>(7);
+  std::weak_ptr<int> weak = payload;
+  std::atomic<int> ran(0);
+  std::atomic<bool> started(false);
+  const auto t0 = std::chrono::steady_clock::now();
+  {
+    app a;
+    a.setThreadPoolSize(1);
+    a.submitPooled([&started] {
+      started = true;
+      for (;;) {
+        boost::this_thread::sleep_for(boost::chrono::milliseconds(1)); // an interruption point
+      }
+    });
+    for (int i = 0; i < 100; i++)
+      a.submitPooled([payload, &ran] { ran++; });
+    payload.reset();
+    for (int i = 0; i < 2000 && !started.load(); i++)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    ASSERT_TRUE(started.load());
+  }
+  EXPECT_LT(std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(), 3.0);
+  EXPECT_EQ(ran.load(), 0);
+  EXPECT_TRUE(weak.expired());
+}
+
+// ~app interrupts every task a worker has taken, however soon after the submission it comes. (An
+// interrupt that reached a worker after it took a task but before the task started was once
+// dropped as stale, and ~app then waited 5 s for a task that never stopped.)
+TEST(AppPoolTeardown, DestroyingTheAppRightAfterSubmittingInterruptsRunningTasks) {
+  for (int iter = 0; iter < 64; iter++) {
+    // Shared, and the loop bounded, so that a task that is never interrupted ends by itself
+    // (after ~app's 5 s join gives up on it) without touching anything freed.
+    struct counts {
+      std::atomic<int> started{0};
+      std::atomic<int> interrupted{0};
+    };
+    auto c = std::make_shared<counts>();
+    const auto t0 = std::chrono::steady_clock::now();
+    {
+      app a;
+      a.setThreadPoolSize(2);
+      for (int t = 0; t < 2; t++)
+        a.submitPooled([c] {
+          c->started++;
+          try {
+            const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+            while (std::chrono::steady_clock::now() < until)
+              boost::this_thread::sleep_for(boost::chrono::milliseconds(1)); // interruption point
+          } catch (boost::thread_interrupted &) {
+            c->interrupted++;
+            throw;
+          }
+        });
+      spin_us((iter % 16) * 20); // 0..300 us: ~app lands at every stage of the tasks' start
+    }
+    const double secs =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    EXPECT_LT(secs, 3.0) << "iteration " << iter;
+    EXPECT_EQ(c->interrupted.load(), c->started.load()) << "iteration " << iter;
+    if (HasFailure())
+      break;
+  }
+}
+
+namespace {
+
+// An app whose pool internals a test can reach: ~app's first step for the pool, with the app
+// still there, and the window between a new worker's start and its registration.
+struct probe_app : app {
+  void stopPool() { stopThreadPool(); }
+  // Called on the thread creating a worker, once the worker runs and before it is registered.
+  void onWorkerCreated(std::function<void()> f) { _poolWorkerCreatedHook = std::move(f); }
+  // Called on the thread creating a worker, right before its thread is created; a throw makes
+  // that creation fail, as when thread resources are exhausted.
+  void onWorkerSpawn(std::function<void()> f) { _poolWorkerSpawnHook = std::move(f); }
+  std::uint64_t interruptsSent() {
+    boost::mutex::scoped_lock lock(_threadPoolMutex);
+    return _poolInterruptGen;
+  }
+  // trySubmitPooled calls deciding whether to hand their own task back (waiting on the worker
+  // creations it relies on, say).
+  unsigned int handBackChecks() {
+    boost::mutex::scoped_lock lock(_threadPoolMutex);
+    return _handBackChecks;
+  }
+};
+
+} // namespace
+
+// wait() interrupts a task that a just-created worker took, however soon after the worker's
+// start it comes. wait() and ~app interrupt the workers in the pool's worker list, and a new
+// worker could take and start a task before the thread that created it had put it there: the
+// interrupt then missed the task, wait() waited out the task (up to its 5 s), and ~app could
+// return while the task still ran. Here the creator is held in that window until the task has
+// started and wait() has sent its interrupt (or, the task not starting, for 300 ms); a new worker
+// now takes no task before it is in the list.
+TEST(AppPoolTeardown, AnInterruptRightAfterAWorkerStartsReachesItsTask) {
+  struct shared {
+    std::mutex m;
+    std::condition_variable cv;
+    bool started = false;
+    std::atomic<int> interrupted{0};
+  };
+  auto s = std::make_shared<shared>();
+  probe_app a;
+  a.setThreadPoolSize(2);
+  const std::uint64_t sent = a.interruptsSent();
+  a.onWorkerCreated([&a, s, sent] {
+    {
+      std::unique_lock<std::mutex> lk(s->m);
+      if (!s->cv.wait_for(lk, std::chrono::milliseconds(300), [&s] { return s->started; }))
+        return; // the new worker hasn't taken its task: it is waiting to be registered
+    }
+    // It took its task unregistered: hold the creator until wait() has interrupted the pool.
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (a.interruptsSent() == sent && std::chrono::steady_clock::now() < until)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  });
+  std::thread creator([&a, s] {
+    a.submitPooled([s] { // a fresh app: this creates the worker that takes it
+      {
+        std::lock_guard<std::mutex> lk(s->m);
+        s->started = true;
+      }
+      s->cv.notify_all();
+      try {
+        const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(4);
+        while (std::chrono::steady_clock::now() < until)
+          boost::this_thread::sleep_for(boost::chrono::milliseconds(1)); // interruption point
+      } catch (boost::thread_interrupted &) {
+        s->interrupted++;
+        throw;
+      }
+    });
+  });
+  bool started = false;
+  {
+    std::unique_lock<std::mutex> lk(s->m);
+    started = s->cv.wait_for(lk, std::chrono::seconds(10), [&s] { return s->started; });
+  }
+  const auto t0 = std::chrono::steady_clock::now();
+  a.wait(); // the task has started: this interrupts it
+  const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  creator.join();
+  EXPECT_TRUE(started);
+  EXPECT_EQ(s->interrupted.load(), 1);
+  EXPECT_LT(secs, 2.0);
+}
+
+// ~app stops the pool while a worker's creator is between starting it and registering it: the
+// worker, never registered, ends without taking a task (the task goes with the queue, unrun), and
+// the creator is not held up. (The worker used to take the task, which nothing interrupted, and
+// its creator then joined it with no interrupt and no time limit.)
+TEST(AppPoolTeardown, AWorkerStartedAsThePoolStopsTakesNoTask) {
+  struct shared {
+    std::mutex m;
+    std::condition_variable cv;
+    bool started = false;
+  };
+  auto s = std::make_shared<shared>();
+  auto payload = std::make_shared<int>(1);
+  std::weak_ptr<int> weak = payload;
+  probe_app a;
+  a.setThreadPoolSize(2);
+  a.onWorkerCreated([&a, s] {
+    {
+      // Give the new worker the time to take its task, were it allowed to before registration.
+      std::unique_lock<std::mutex> lk(s->m);
+      s->cv.wait_for(lk, std::chrono::milliseconds(300), [&s] { return s->started; });
+    }
+    a.stopPool(); // ~app's first step, with this worker not registered yet
+  });
+  const auto t0 = std::chrono::steady_clock::now();
+  a.submitPooled([s, payload] { // a fresh app: this creates the worker, and the hook stops it
+    {
+      std::lock_guard<std::mutex> lk(s->m);
+      s->started = true;
+    }
+    s->cv.notify_all();
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(4);
+    while (std::chrono::steady_clock::now() < until)
+      boost::this_thread::sleep_for(boost::chrono::milliseconds(1)); // interruption point
+  });
+  payload.reset();
+  const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  {
+    std::lock_guard<std::mutex> lk(s->m);
+    EXPECT_FALSE(s->started);
+  }
+  EXPECT_TRUE(weak.expired());
+  EXPECT_LT(secs, 2.0);
+}
+
+// Once ~app has stopped the pool, a task submitted to it is not run: submitPooled says so, and
+// the task, with what it captured, is gone when it returns (async_host and launch_pool_task
+// report the drop from there).
+TEST(AppPoolTeardown, ATaskSubmittedOnceThePoolHasStoppedIsDroppedAndReported) {
+  probe_app a;
+  EXPECT_TRUE(a.submitPooled([] {}));
+  ASSERT_TRUE(wait_pool_idle(a));
+  a.stopPool();
+  auto payload = std::make_shared<int>(1);
+  std::weak_ptr<int> weak = payload;
+  std::atomic<bool> ran(false);
+  EXPECT_FALSE(a.submitPooled([payload, &ran] { ran = true; }));
+  payload.reset();
+  EXPECT_TRUE(weak.expired());
+  EXPECT_FALSE(ran.load());
+  EXPECT_EQ(a.getPendingThreadCount(), 0u);
+}
+
+// compute_async's on_error form calls exactly one of its callbacks: on_done when the fan-out
+// joins, on_error with the message when fn throws, and on_error when the app drops the job unrun
+// (submitted once the pool has stopped, or still queued when ~app stops it). The four-argument
+// form calls neither for a dropped job, and releases both.
+TEST(AppPoolTeardown, ComputeAsyncReportsAThrowOrADroppedJobToOnError) {
+  struct outcome {
+    std::mutex m;
+    std::condition_variable cv;
+    int done = 0;
+    std::vector<std::string> errors;
+    void add(int d, const std::string *e) {
+      {
+        std::lock_guard<std::mutex> lk(m);
+        done += d;
+        if (e)
+          errors.push_back(*e);
+      }
+      cv.notify_all();
+    }
+    bool wait_for(std::size_t n) {
+      std::unique_lock<std::mutex> lk(m);
+      return cv.wait_for(lk, std::chrono::seconds(10),
+                         [&] { return std::size_t(done) + errors.size() >= n; });
+    }
+  };
+  const std::string dropped = "not run: the app's background pool has stopped";
+  {
+    app a;
+    a.computePool(); // built on this thread, as in ComputeAsyncRunsFanOutOffThreadThenCallsOnDone
+    auto o = std::make_shared<outcome>();
+    auto on_done = [o] { o->add(1, nullptr); };
+    auto on_error = [o](const std::string &e) { o->add(0, &e); };
+    a.compute_async(8, [](int) {}, on_done, on_error);
+    ASSERT_TRUE(o->wait_for(1));
+    a.compute_async(
+        8, [](int i) { throw std::runtime_error("chunk " + std::to_string(i)); }, on_done,
+        on_error);
+    ASSERT_TRUE(o->wait_for(2));
+    std::lock_guard<std::mutex> lk(o->m);
+    EXPECT_EQ(o->done, 1);
+    ASSERT_EQ(o->errors.size(), 1u);
+    EXPECT_EQ(o->errors[0].rfind("chunk ", 0), 0u) << o->errors[0];
+  }
+  {
+    // Submitted once the pool has stopped: on_error before compute_async returns.
+    probe_app a;
+    a.stopPool();
+    auto o = std::make_shared<outcome>();
+    a.compute_async(
+        8, [](int) {}, [o] { o->add(1, nullptr); }, [o](const std::string &e) { o->add(0, &e); });
+    std::lock_guard<std::mutex> lk(o->m);
+    EXPECT_EQ(o->done, 0);
+    ASSERT_EQ(o->errors.size(), 1u);
+    EXPECT_EQ(o->errors[0], dropped);
+  }
+  {
+    // Still queued when ~app stops the pool: on_error from ~app; the four-argument form's job
+    // calls nothing and releases its callbacks.
+    auto o = std::make_shared<outcome>();
+    auto held = std::make_shared<int>(1);
+    std::weak_ptr<int> weak = held;
+    {
+      app a;
+      a.setThreadPoolSize(1);
+      std::atomic<bool> started(false);
+      a.submitPooled([&started] {
+        started = true;
+        for (;;)
+          boost::this_thread::sleep_for(boost::chrono::milliseconds(1)); // until ~app
+      });
+      for (int i = 0; i < 5000 && !started.load(); i++)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      ASSERT_TRUE(started.load());
+      a.compute_async(
+          8, [](int) {}, [o] { o->add(1, nullptr); }, [o](const std::string &e) { o->add(0, &e); });
+      a.compute_async(8, [held](int) {}, [o, held] { o->add(1, nullptr); });
+      held.reset();
+      EXPECT_EQ(a.getPendingThreadCount(), 2u);
+    }
+    EXPECT_TRUE(weak.expired());
+    std::lock_guard<std::mutex> lk(o->m);
+    EXPECT_EQ(o->done, 0);
+    ASSERT_EQ(o->errors.size(), 1u);
+    EXPECT_EQ(o->errors[0], dropped);
+  }
+}
+
+namespace {
+
+// What a probe_app's failing worker creation saw: how many creations were tried, and whether
+// they fail.
+struct spawn_switch {
+  std::atomic<bool> fail{false};
+  std::atomic<int> attempts{0};
+  void install(probe_app &a) {
+    a.onWorkerSpawn([this] {
+      ++attempts;
+      if (fail.load())
+        throw boost::thread_resource_error();
+    });
+  }
+};
+
+} // namespace
+
+// When no worker can be started for a compute_async job and the pool has none, compute_async
+// throws and runs nothing, as it did when each job had a thread of its own and creating it failed:
+// a threaded tf overlay task relies on that to carry on cooperatively. Both forms call neither
+// callback and release what they captured, and nothing is left queued. A submitPooled task waits
+// in the queue instead, and runs once a later submission manages to start a worker.
+TEST(AppPoolSpawnFailure, ComputeAsyncThrowsWhenNoWorkerCanBeStarted) {
+  spawn_switch spawn; // before the app: its hook points here
+  probe_app a;
+  spawn.install(a);
+  a.computePool(); // built on this thread, as in ComputeAsyncRunsFanOutOffThreadThenCallsOnDone
+  spawn.fail = true;
+  auto held = std::make_shared<int>(1);
+  std::weak_ptr<int> weak = held;
+  std::atomic<int> calls(0);
+  EXPECT_THROW(a.compute_async(
+                   4, [held](int) {}, [held, &calls] { ++calls; }),
+               boost::thread_resource_error);
+  EXPECT_THROW(a.compute_async(
+                   4, [held](int) {}, [held, &calls] { ++calls; },
+                   [held, &calls](const std::string &) { ++calls; }),
+               boost::thread_resource_error);
+  held.reset();
+  EXPECT_TRUE(weak.expired()) << "a job compute_async threw for kept its captures";
+  EXPECT_EQ(calls.load(), 0);
+  EXPECT_GE(spawn.attempts.load(), 2);
+  EXPECT_EQ(a.getPendingThreadCount(), 0u);
+  EXPECT_EQ(a.getActiveThreadCount(), 0u);
+
+  std::atomic<int> ran(0);
+  EXPECT_TRUE(a.submitPooled([&ran] { ++ran; }));
+  EXPECT_EQ(a.getPendingThreadCount(), 1u) << "a submitPooled task waits for a worker";
+  EXPECT_EQ(ran.load(), 0);
+
+  spawn.fail = false;
+  std::promise<void> done;
+  std::future<void> done_f = done.get_future();
+  a.compute_async(1, [](int) {}, [&done] { done.set_value(); }); // starts a worker
+  ASSERT_EQ(done_f.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+  ASSERT_TRUE(wait_pool_idle(a));
+  EXPECT_EQ(ran.load(), 1);
+}
+
+// With a worker running, a failed creation of another one only queues the job: the running worker
+// takes it once it is free, and compute_async does not throw.
+TEST(AppPoolSpawnFailure, ComputeAsyncQueuesTheJobWhenAWorkerIsRunning) {
+  spawn_switch spawn; // before the app: its hook points here
+  probe_app a;
+  spawn.install(a);
+  a.setThreadPoolSize(2);
+  a.computePool();
+  std::atomic<bool> started(false), release(false);
+  a.submitPooled([&started, &release] {
+    started = true;
+    while (!release.load())
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  });
+  for (int i = 0; i < 10000 && !started.load(); i++)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  ASSERT_TRUE(started.load());
+  spawn.fail = true;
+  const int before = spawn.attempts.load();
+  std::promise<void> done;
+  std::future<void> done_f = done.get_future();
+  EXPECT_NO_THROW(a.compute_async(1, [](int) {}, [&done] { done.set_value(); }));
+  EXPECT_GT(spawn.attempts.load(), before) << "the pool had room: it should try a second worker";
+  EXPECT_EQ(a.getPendingThreadCount(), 1u);
+  release = true;
+  EXPECT_EQ(done_f.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+  EXPECT_TRUE(wait_pool_idle(a));
+}
+
+// compute_async decides whether to throw only once the worker creations it relies on have
+// succeeded or failed: its own, and those other calls have under way. Two calls on an app with no
+// worker, A's creation under way when B queues its job. In a pool of 2, B makes a creation of its
+// own, and A's fails while B's is under way; in a pool of 1, A's is the one for both jobs, and it
+// fails once B has queued its job. Both calls throw, and nothing is left queued. (A call that saw
+// another's creation under way used to take it for a worker on its way, leave its job queued and
+// return. That creation then failed, and the job waited, with no worker running or starting, for
+// a later submission; its caller was never told.)
+TEST(AppPoolSpawnFailure, ComputeAsyncThrowsWhenTheWorkerItReliedOnFailsLater) {
+  for (unsigned pool_size = 1; pool_size <= 2; pool_size++) {
+    SCOPED_TRACE(pool_size == 1 ? "B relies on A's creation" : "A's fails while B's is under way");
+    struct shared {
+      std::atomic<bool> a_in_creation{false}, b_in_creation{false}, a_returned{false},
+          b_returned{false}, go_a{false}, go_b{false};
+      std::atomic<int> a_threw{-1}, b_threw{-1}, ran{0};
+      std::atomic<std::thread::id> a_id, b_id;
+    };
+    auto s = std::make_shared<shared>();
+    probe_app a;
+    a.setThreadPoolSize(pool_size);
+    // Bounded by the clock: a 1 ms sleep can take a timer tick (~15 ms) on Windows.
+    const auto wait_for = [](const std::atomic<bool> &flag, int ms) {
+      const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+      while (!flag.load() && std::chrono::steady_clock::now() < until)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    };
+    a.onWorkerSpawn([s, pool_size, wait_for] {
+      const auto me = std::this_thread::get_id();
+      if (me == s->a_id.load()) {
+        s->a_in_creation = true;
+        if (pool_size == 1) {
+          // B makes no creation of its own: A's fails once B has queued its job and returned, or
+          // after 300 ms (B waiting for it).
+          wait_for(s->b_returned, 300);
+        } else {
+          wait_for(s->b_in_creation, 10000);
+        }
+      } else if (me == s->b_id.load()) {
+        // B's fails once A has returned, or after 300 ms (A waiting for it).
+        s->b_in_creation = true;
+        wait_for(s->a_returned, 300);
+      }
+      throw boost::thread_resource_error();
+    });
+    const auto call = [&a, s](std::atomic<bool> &go, std::atomic<int> &threw,
+                              std::atomic<bool> &returned) {
+      while (!go.load())
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      try {
+        a.compute_async(1, [](int) {}, [s] { ++s->ran; });
+        threw = 0;
+      } catch (const boost::thread_resource_error &) {
+        threw = 1;
+      }
+      returned = true;
+    };
+    std::thread ta([&] { call(s->go_a, s->a_threw, s->a_returned); });
+    s->a_id = ta.get_id();
+    s->go_a = true;
+    for (int i = 0; i < 10000 && !s->a_in_creation.load(); i++)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    EXPECT_TRUE(s->a_in_creation.load());
+    std::thread tb([&] { call(s->go_b, s->b_threw, s->b_returned); });
+    s->b_id = tb.get_id();
+    s->go_b = true;
+    ta.join();
+    tb.join();
+    EXPECT_EQ(s->a_threw.load(), 1);
+    EXPECT_EQ(s->b_threw.load(), 1);
+    EXPECT_EQ(s->ran.load(), 0);
+    EXPECT_EQ(a.getPendingThreadCount(), 0u) << "a job waits for a worker nothing will start";
+    EXPECT_EQ(a.getActiveThreadCount(), 0u);
+  }
+}
+
+// A compute_async job can be queued with no worker running or being created: keyed tasks, on
+// threads of their own, hold every slot of a pool that has never started a worker. When one of
+// them ends and the worker its thread asks for can't be created, the on_error form's job isn't
+// left queued for a later submission to start a worker: the pool drops it unrun, on that thread,
+// and on_error hears of it ("not run: no background worker could be started"). The four-argument
+// form's job has no way to hear of a drop, so it waits in the queue, as a submitPooled task does,
+// and runs once a later submission starts a worker. (Before, every job stayed queued with its
+// caller never told; then the four-argument form's job was dropped too, without a word, and a
+// threaded tf overlay task waiting for its chunk's reply waited for good.)
+TEST(AppPoolSpawnFailure, ComputeAsyncJobsLeftWithNoWorkerAreDroppedOrWaitForOne) {
+  struct outcome {
+    std::mutex m;
+    std::condition_variable cv;
+    int done = 0, four_done = 0;
+    std::vector<std::string> errors;
+  };
+  spawn_switch spawn; // before the app: its hook points here
+  probe_app a;
+  spawn.install(a);
+  a.computePool();
+  a.setThreadPoolSize(1);
+  std::atomic<bool> release(false);
+  // The pool's one slot, held by a keyed task on a thread of its own: no worker is started.
+  a.startThreadPooled(
+      "hold",
+      [&release] {
+        const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+        while (!release.load() && std::chrono::steady_clock::now() < until)
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      },
+      PRIORITY_NORMAL, /*wait=*/true);
+  ASSERT_TRUE(a.hasThread("hold"));
+  auto o = std::make_shared<outcome>();
+  auto held = std::make_shared<int>(1);
+  std::weak_ptr<int> weak = held;
+  a.compute_async(
+      4, [](int) {},
+      [o] {
+        std::lock_guard<std::mutex> lk(o->m);
+        ++o->done;
+        o->cv.notify_all();
+      },
+      [o](const std::string &e) {
+        std::lock_guard<std::mutex> lk(o->m);
+        o->errors.push_back(e);
+        o->cv.notify_all();
+      });
+  a.compute_async(
+      4, [held](int) {},
+      [o, held] {
+        std::lock_guard<std::mutex> lk(o->m);
+        ++o->four_done;
+        o->cv.notify_all();
+      });
+  held.reset();
+  std::atomic<int> ran(0);
+  EXPECT_TRUE(a.submitPooled([&ran] { ++ran; }));
+  EXPECT_EQ(a.getPendingThreadCount(), 3u);
+
+  // The keyed task ends, and the worker its thread asks for on the way out can't be created.
+  spawn.fail = true;
+  release = true;
+  if (thread_ptr hold = a.threads("hold"))
+    hold->join();
+  bool reported = false;
+  {
+    std::unique_lock<std::mutex> lk(o->m);
+    reported = o->cv.wait_for(lk, std::chrono::seconds(5),
+                              [&o] { return o->done > 0 || !o->errors.empty(); });
+  }
+  const unsigned int pending = a.getPendingThreadCount();
+  const bool four_kept = !weak.expired();
+  spawn.fail = false;
+  EXPECT_TRUE(reported) << "the on_error job waits for a worker nothing will start";
+  {
+    std::lock_guard<std::mutex> lk(o->m);
+    EXPECT_EQ(o->done, 0);
+    ASSERT_EQ(o->errors.size(), 1u);
+    EXPECT_EQ(o->errors[0], "not run: no background worker could be started");
+    EXPECT_EQ(o->four_done, 0);
+  }
+  EXPECT_TRUE(four_kept) << "the four-argument form's job was dropped without a word";
+  EXPECT_EQ(pending, 2u) << "the four-argument job and the submitPooled task wait for a worker";
+  EXPECT_EQ(a.getActiveThreadCount(), 0u);
+  EXPECT_EQ(ran.load(), 0);
+
+  // A later submission starts a worker (this also ends the test when a job is still queued).
+  std::promise<void> done;
+  std::future<void> done_f = done.get_future();
+  a.compute_async(1, [](int) {}, [&done] { done.set_value(); });
+  ASSERT_EQ(done_f.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+  ASSERT_TRUE(wait_pool_idle(a));
+  EXPECT_EQ(ran.load(), 1);
+  {
+    std::lock_guard<std::mutex> lk(o->m);
+    EXPECT_EQ(o->four_done, 1) << "the four-argument form's job never ran";
+    EXPECT_EQ(o->done, 0);
+    EXPECT_EQ(o->errors.size(), 1u);
+  }
+  EXPECT_TRUE(weak.expired());
+}
+
+// A compute_async call that starts a keyed task queued ahead of its job (the slot is free, and the
+// keyed task starts on the calling thread) still throws, running nothing and calling neither
+// callback, when that leaves the pool with no worker: the keyed task's thread can't be created,
+// nor the worker asked for as its slot is freed. That state comes about when the pool drops a job
+// queued ahead of keyed tasks for want of a worker: the first of them is then at the head, with
+// the slot free and nothing starting it. (The worker creation that failed inside the call used to
+// drop the call's own job there: the four-argument form's without a word, so that compute_async
+// returned as though it were queued, and the on_error form's with on_error called inside
+// compute_async instead of a throw.)
+TEST(AppPoolSpawnFailure, ComputeAsyncThrowsWhenAQueuedKeyedTaskItStartsLeavesNoWorker) {
+  struct outcome {
+    std::mutex m;
+    int done = 0;
+    std::vector<std::string> errors;
+  };
+  spawn_switch spawn; // before the app: its hook points here
+  probe_app a;
+  spawn.install(a);
+  a.computePool();
+  a.setThreadPoolSize(1);
+  std::atomic<bool> release(false);
+  a.startThreadPooled(
+      "hold",
+      [&release] {
+        const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+        while (!release.load() && std::chrono::steady_clock::now() < until)
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      },
+      PRIORITY_NORMAL, /*wait=*/true);
+  ASSERT_TRUE(a.hasThread("hold"));
+  auto o = std::make_shared<outcome>();
+  const auto on_done = [o] {
+    std::lock_guard<std::mutex> lk(o->m);
+    ++o->done;
+  };
+  const auto on_error = [o](const std::string &label) {
+    return [o, label](const std::string &e) {
+      std::lock_guard<std::mutex> lk(o->m);
+      o->errors.push_back(label + e);
+    };
+  };
+  a.compute_async(1, [](int) {}, on_done, on_error("first: "));
+  std::atomic<int> keyed_ran(0);
+  a.startThreadPooled("k1", [&keyed_ran] { ++keyed_ran; }, PRIORITY_NORMAL, /*wait=*/true);
+  a.startThreadPooled("k2", [&keyed_ran] { ++keyed_ran; }, PRIORITY_NORMAL, /*wait=*/true);
+  ASSERT_EQ(a.getPendingThreadCount(), 3u);
+
+  // The hold ends, and the worker its thread asks for can't be created: the first job is dropped,
+  // which leaves k1 at the head of the queue with the slot free.
+  spawn.fail = true;
+  release = true;
+  if (thread_ptr hold = a.threads("hold"))
+    hold->join();
+  ASSERT_EQ(a.getPendingThreadCount(), 2u);
+  ASSERT_EQ(a.getActiveThreadCount(), 0u);
+  {
+    std::lock_guard<std::mutex> lk(o->m);
+    ASSERT_EQ(o->errors.size(), 1u);
+    EXPECT_EQ(o->errors[0], "first: not run: no background worker could be started");
+  }
+
+  // Each call starts the keyed task at the head, whose thread can't be created, nor the worker
+  // asked for as its slot is freed.
+  auto held = std::make_shared<int>(1);
+  std::weak_ptr<int> weak = held;
+  EXPECT_THROW(a.compute_async(
+                   1, [held](int) {}, [held, on_done] { on_done(); }),
+               boost::thread_resource_error);
+  EXPECT_EQ(a.getPendingThreadCount(), 1u) << "k2 only";
+  EXPECT_THROW(a.compute_async(
+                   1, [held](int) {}, [held, on_done] { on_done(); }, on_error("third: ")),
+               boost::thread_resource_error);
+  held.reset();
+  EXPECT_TRUE(weak.expired()) << "a job compute_async threw for kept its captures";
+  EXPECT_EQ(a.getPendingThreadCount(), 0u);
+  EXPECT_EQ(a.getActiveThreadCount(), 0u);
+  {
+    std::lock_guard<std::mutex> lk(o->m);
+    EXPECT_EQ(o->errors.size(), 1u) << o->errors.back();
+  }
+
+  // Thread resources come back: a worker starts, and nothing of the jobs or keyed tasks runs.
+  spawn.fail = false;
+  std::promise<void> done;
+  std::future<void> done_f = done.get_future();
+  a.compute_async(1, [](int) {}, [&done] { done.set_value(); });
+  ASSERT_EQ(done_f.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+  ASSERT_TRUE(wait_pool_idle(a));
+  std::lock_guard<std::mutex> lk(o->m);
+  EXPECT_EQ(o->done, 0) << "a job compute_async threw for (or had dropped) ran";
+  EXPECT_EQ(keyed_ran.load(), 0);
+}
+
+// A trySubmitPooled call waiting on a worker creation that its own job relies on decides about
+// that job first: until it has, nothing else drops a task for want of a worker. When the creation
+// fails, the call hands its job back (compute_async throws), and then drops the tasks queued before
+// it that the failed creation left with no worker, on its own thread, before compute_async throws.
+// Here a keyed task holds the only slot, job A is queued behind it, and the creation asked for as
+// the keyed task ends is held until call B waits on it, and then fails.
+TEST(AppPoolSpawnFailure, AJobLeftWithNoWorkerWhileACallWaitsOnTheCreationIsDroppedByThatCall) {
+  struct gate {
+    std::mutex m;
+    std::condition_variable cv;
+    bool armed = false, in_creation = false, open = false;
+  };
+  struct outcome {
+    std::mutex m;
+    std::condition_variable cv;
+    int done = 0;
+    std::vector<std::string> errors;
+    std::thread::id error_thread;
+  };
+  auto g = std::make_shared<gate>();
+  probe_app a;
+  a.onWorkerSpawn([g] {
+    std::unique_lock<std::mutex> lk(g->m);
+    if (!g->armed)
+      return;
+    g->in_creation = true;
+    g->cv.notify_all();
+    g->cv.wait_for(lk, std::chrono::seconds(10), [&g] { return g->open; });
+    throw boost::thread_resource_error();
+  });
+  a.computePool();
+  a.setThreadPoolSize(1);
+  std::atomic<bool> release(false);
+  a.startThreadPooled(
+      "hold",
+      [&release] {
+        const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+        while (!release.load() && std::chrono::steady_clock::now() < until)
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      },
+      PRIORITY_NORMAL, /*wait=*/true);
+  ASSERT_TRUE(a.hasThread("hold"));
+  auto o = std::make_shared<outcome>();
+  const auto on_done = [o] {
+    std::lock_guard<std::mutex> lk(o->m);
+    ++o->done;
+    o->cv.notify_all();
+  };
+  const auto on_error = [o](const std::string &label) {
+    return [o, label](const std::string &e) {
+      std::lock_guard<std::mutex> lk(o->m);
+      o->errors.push_back(label + e);
+      o->error_thread = std::this_thread::get_id();
+      o->cv.notify_all();
+    };
+  };
+  a.compute_async(1, [](int) {}, on_done, on_error("A: "));
+  ASSERT_EQ(a.getPendingThreadCount(), 1u);
+
+  // The keyed task ends; the worker its thread asks for is held in its creation.
+  {
+    std::lock_guard<std::mutex> lk(g->m);
+    g->armed = true;
+  }
+  release = true;
+  bool in_creation = false;
+  {
+    std::unique_lock<std::mutex> lk(g->m);
+    in_creation = g->cv.wait_for(lk, std::chrono::seconds(10), [&g] { return g->in_creation; });
+  }
+  ASSERT_TRUE(in_creation);
+  // B's job relies on that creation: B waits for it to succeed or fail.
+  std::atomic<int> b_threw(-1);
+  std::thread b([&a, &b_threw, on_done, on_error] {
+    try {
+      a.compute_async(1, [](int) {}, on_done, on_error("B: "));
+      b_threw = 0;
+    } catch (const boost::thread_resource_error &) {
+      b_threw = 1;
+    }
+  });
+  const std::thread::id b_id = b.get_id();
+  const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  while (a.handBackChecks() == 0 && std::chrono::steady_clock::now() < until)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  const unsigned int checks = a.handBackChecks();
+  {
+    std::lock_guard<std::mutex> lk(g->m);
+    g->open = true; // the creation fails
+  }
+  g->cv.notify_all();
+  b.join();
+  if (thread_ptr hold = a.threads("hold"))
+    hold->join();
+  bool reported = false;
+  {
+    std::unique_lock<std::mutex> lk(o->m);
+    reported = o->cv.wait_for(lk, std::chrono::seconds(5),
+                              [&o] { return o->done > 0 || !o->errors.empty(); });
+  }
+  const unsigned int pending = a.getPendingThreadCount();
+  {
+    std::lock_guard<std::mutex> lk(g->m);
+    g->armed = false;
+  }
+  if (!reported)
+    a.submitPooled([] {}); // so that the test ends: a worker that can start runs A
+  EXPECT_EQ(checks, 1u) << "B did not wait on the creation";
+  EXPECT_TRUE(reported) << "A waits for a worker nothing will start";
+  EXPECT_EQ(b_threw.load(), 1);
+  EXPECT_EQ(pending, 0u);
+  {
+    std::lock_guard<std::mutex> lk(o->m);
+    EXPECT_EQ(o->done, 0);
+    ASSERT_EQ(o->errors.size(), 1u);
+    EXPECT_EQ(o->errors[0], "A: not run: no background worker could be started");
+    EXPECT_EQ(o->error_thread, b_id) << "A was not dropped by B's call";
+  }
+  EXPECT_TRUE(wait_pool_idle(a));
+}
+
+// startThreadPooled(wait=true) throws boost::thread_resource_error when its task's own thread
+// can't be created (thread resources exhausted), as it did when every pooled task had a thread of
+// its own: the task doesn't run, what it captured is released, and nothing is registered under its
+// key. (The task used to be dropped without a word: startThreadPooled returned as if it had
+// registered it, and `if (hasThread(k)) threads(k)->join();` went on at once.) A keyed task that
+// waited in the queue, and whose thread can't be created when its turn comes, has no caller to
+// tell: it is dropped and logged, and the pool carries on. The drop is logged before its slot is
+// freed, so a pool found idle (wait(), or the counts at 0) has logged it. (It used to be logged
+// after the slot was freed: a test that read the log as soon as the pool was idle could miss it.)
+TEST(AppPoolSpawnFailure, AKeyedTaskWhoseThreadCantBeCreatedThrowsOrIsLogged) {
+  spawn_switch spawn; // before the app: its hook points here
+  probe_app a;
+  spawn.install(a);
+  const std::string log_key("pool_log");
+  a.data(log_key, std::string());
+  a.properties("system.log_output", log_key);
+  a.setThreadPoolSize(1);
+  std::atomic<int> ran(0);
+  auto held = std::make_shared<int>(1);
+  std::weak_ptr<int> weak = held;
+  spawn.fail = true;
+  EXPECT_THROW(a.startThreadPooled(
+                   "k1", [held, &ran] { ++ran; }, PRIORITY_NORMAL, /*wait=*/true),
+               boost::thread_resource_error);
+  held.reset();
+  EXPECT_TRUE(weak.expired()) << "a keyed task startThreadPooled threw for kept its captures";
+  EXPECT_FALSE(a.hasThread("k1"));
+  EXPECT_EQ(a.getActiveThreadCount(), 0u);
+  EXPECT_EQ(a.getPendingThreadCount(), 0u);
+
+  // Queued behind the full pool, then started, and failing, as the slot frees.
+  spawn.fail = false;
+  std::atomic<bool> started(false), release(false);
+  a.submitPooled([&started, &release] {
+    started = true;
+    while (!release.load())
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  });
+  for (int i = 0; i < 10000 && !started.load(); i++)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  ASSERT_TRUE(started.load());
+  held = std::make_shared<int>(2);
+  weak = held;
+  EXPECT_NO_THROW(
+      a.startThreadPooled("k2", [held, &ran] { ++ran; }, PRIORITY_NORMAL, /*wait=*/true)); // queued
+  held.reset();
+  EXPECT_EQ(a.getPendingThreadCount(), 1u);
+#ifndef USING_LOG4CPLUS_DEFAULT
+  // What the pool's counts were as the drop was logged (the log is a data key: its change
+  // signal comes from inside log(), on the thread logging).
+  std::atomic<int> logged_while_idle(-1);
+  boost::signals2::scoped_connection on_log =
+      a.dataChanged.connect([&a, &log_key, &logged_while_idle](const std::string &key) {
+        if (key == log_key)
+          logged_while_idle = a.getActiveThreadCount() == 0 && a.getPendingThreadCount() == 0;
+      });
+#endif
+  spawn.fail = true;
+  release = true;
+  EXPECT_TRUE(wait_pool_idle(a));
+  spawn.fail = false;
+  EXPECT_TRUE(weak.expired());
+  EXPECT_FALSE(a.hasThread("k2"));
+  EXPECT_EQ(ran.load(), 0);
+#ifndef USING_LOG4CPLUS_DEFAULT
+  const std::string logged = a.data<std::string>(log_key);
+  EXPECT_NE(logged.find("'k2'"), std::string::npos) << "the drop wasn't logged: " << logged;
+  EXPECT_EQ(logged_while_idle.load(), 0)
+      << "the drop was logged once its slot was freed (-1: not logged at all)";
+#endif
+}
+
+// ~app interrupts the threads in threads() before it joins the pool's workers, as it interrupts
+// everything before joining anything: a pool task waiting, with no interruption point, on
+// something a map thread holds until it is interrupted is released at once. (~app used to join
+// the workers first: it waited out the 5 s join, then left the worker running into a freed app.)
+TEST(AppPoolTeardown, DestroyingTheAppInterruptsTheThreadMapBeforeJoiningThePool) {
+  struct shared {
+    std::mutex m;
+    std::condition_variable cv;
+    bool held = false, released = false, waiting = false;
+    std::atomic<bool> pool_task_done{false};
+  };
+  auto s = std::make_shared<shared>();
+  std::chrono::steady_clock::time_point t0;
+  {
+    app a;
+    a.startThread("holder", [s] {
+      {
+        std::lock_guard<std::mutex> lk(s->m);
+        s->held = true;
+      }
+      s->cv.notify_all();
+      try {
+        for (;;)
+          boost::this_thread::sleep_for(boost::chrono::milliseconds(1)); // an interruption point
+      } catch (boost::thread_interrupted &) {
+        {
+          std::lock_guard<std::mutex> lk(s->m);
+          s->released = true;
+        }
+        s->cv.notify_all();
+        throw;
+      }
+    });
+    a.submitPooled([s] {
+      std::unique_lock<std::mutex> lk(s->m);
+      s->waiting = true;
+      s->cv.notify_all();
+      // A std::condition_variable: no interruption point. Bounded, so that the test ends if the
+      // holder is never interrupted.
+      s->cv.wait_for(lk, std::chrono::seconds(8), [&s] { return s->released; });
+      s->pool_task_done = true;
+    });
+    std::unique_lock<std::mutex> lk(s->m);
+    ASSERT_TRUE(
+        s->cv.wait_for(lk, std::chrono::seconds(10), [&s] { return s->held && s->waiting; }));
+    lk.unlock();
+    t0 = std::chrono::steady_clock::now();
+  }
+  const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  EXPECT_LT(secs, 3.0);
+  EXPECT_TRUE(s->pool_task_done.load()) << "~app returned with the pool task still running";
+  std::lock_guard<std::mutex> lk(s->m);
+  EXPECT_TRUE(s->released);
+}
+
+// A thread registered in threads() while ~app joins the pool's workers is interrupted and joined
+// too, also when the map was empty before: ~app takes the map again after that join. (A pool task
+// that starts a thread once it is interrupted, or a keyed task that a worker took just before the
+// pool closed, registered its thread after ~app's only look at the empty map: ~app returned
+// without interrupting or joining it, and the thread ran on into the freed app.)
+TEST(AppPoolTeardown, AThreadRegisteredWhileTheAppJoinsThePoolIsJoinedToo) {
+  struct shared {
+    std::atomic<bool> started{false}, late_done{false};
+  };
+  auto s = std::make_shared<shared>();
+  std::chrono::steady_clock::time_point t0;
+  {
+    app a;
+    a.submitPooled([s, &a] {
+      s->started = true;
+      try {
+        for (;;)
+          boost::this_thread::sleep_for(boost::chrono::milliseconds(1)); // until ~app
+      } catch (boost::thread_interrupted &) {
+        // ~app has closed the pool: let it take the (empty) map and start joining this worker.
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        // The thread touches nothing of the app, and ends by itself if it is never interrupted.
+        a.startThread("late", [s] {
+          try {
+            const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+            while (std::chrono::steady_clock::now() < until)
+              boost::this_thread::sleep_for(boost::chrono::milliseconds(1)); // interruption point
+          } catch (boost::thread_interrupted &) {
+            s->late_done = true;
+            throw;
+          }
+        });
+      }
+    });
+    for (int i = 0; i < 10000 && !s->started.load(); i++)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    ASSERT_TRUE(s->started.load());
+    t0 = std::chrono::steady_clock::now();
+  }
+  const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  EXPECT_TRUE(s->late_done.load()) << "~app returned without interrupting and joining the thread";
+  EXPECT_LT(secs, 3.0);
+}
+
+// wait() waits with interruption held off: an interrupt sent to the thread calling it stays
+// pending until it returns, and doesn't cut the wait for the pool short. (It used to be thrown in
+// the wait for the pool, dropped by the catch there, and wait() returned at once.)
+TEST(AppPoolTeardown, WaitKeepsAnInterruptSentToItsCallerPending) {
+  app a;
+  a.setThreadPoolSize(1);
+  std::atomic<bool> started(false);
+  a.submitPooled([&started] {
+    started = true;
+    spin_us(800000); // no interruption point: wait()'s interrupt doesn't end it
+  });
+  for (int i = 0; i < 10000 && !started.load(); i++)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  ASSERT_TRUE(started.load());
+  std::atomic<bool> in_wait(false), interrupted_out(false), pending(false);
+  std::atomic<int> running_after(-1);
+  boost::thread waiter([&] {
+    in_wait = true;
+    try {
+      a.wait();
+    } catch (boost::thread_interrupted &) {
+      interrupted_out = true; // reached before wait() began waiting: the test didn't happen
+      return;
+    }
+    running_after = static_cast<int>(a.getActiveThreadCount());
+    pending = boost::this_thread::interruption_requested();
+  });
+  for (int i = 0; i < 10000 && !in_wait.load(); i++)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  std::this_thread::sleep_for(std::chrono::milliseconds(300)); // into the wait for the pool
+  waiter.interrupt();
+  waiter.join();
+  ASSERT_FALSE(interrupted_out.load());
+  EXPECT_TRUE(pending.load()) << "wait() dropped the interrupt sent to its caller";
+  EXPECT_EQ(running_after.load(), 0) << "the interrupt cut wait() short";
+}
+
+namespace {
+
+// A pool task whose destruction reaches an interruption point, and records whether it threw
+// there. Only the object the pool holds probes: moving or copying hands that over, as the pool's
+// own drop-reporting tasks do.
+struct interrupt_probe {
+  std::shared_ptr<std::atomic<int>> thrown, destroyed;
+  bool armed = true;
+  interrupt_probe(std::shared_ptr<std::atomic<int>> t, std::shared_ptr<std::atomic<int>> d)
+      : thrown(std::move(t)), destroyed(std::move(d)) {}
+  interrupt_probe(interrupt_probe &&o) noexcept
+      : thrown(o.thrown), destroyed(o.destroyed), armed(std::exchange(o.armed, false)) {}
+  interrupt_probe(const interrupt_probe &o) noexcept
+      : interrupt_probe(std::move(const_cast<interrupt_probe &>(o))) {}
+  interrupt_probe &operator=(const interrupt_probe &) = delete;
+  void operator()() { armed = false; }
+  ~interrupt_probe() {
+    if (!armed)
+      return;
+    ++*destroyed;
+    try {
+      boost::this_thread::interruption_point();
+    } catch (boost::thread_interrupted &) {
+      ++*thrown; // and the interrupt is gone
+    }
+  }
+};
+
+} // namespace
+
+// A task the pool drops unrun is destroyed with interruption held off, wherever that happens, so
+// an interrupt pending on the thread doing it stays pending instead of being thrown inside a
+// callback reporting the drop and swallowed there: compute_async's on_error, launch_pool_task's
+// on_error (both refused at submission), a plain task refused at submission, and the queued tasks
+// and worker joins of the pool's stop (a keyed thread ~app interrupted might be the one there).
+TEST(AppPoolTeardown, DroppingATaskKeepsAnInterruptPendingOnTheDroppingThread) {
+  auto thrown = std::make_shared<std::atomic<int>>(0);
+  auto destroyed = std::make_shared<std::atomic<int>>(0);
+  probe_app stopped;
+  state_exec::async_scheduler &sched = stopped.exec_scheduler(); // built here, posted to below
+  stopped.stopPool();
+  std::atomic<int> on_errors(0), threw_in_on_error(0);
+  std::atomic<bool> pending_after_compute(false), pending_after_post(false),
+      pending_after_task(false), refused(false);
+  boost::thread t([&] {
+    while (!boost::this_thread::interruption_requested())
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    stopped.compute_async(
+        1, [](int) {}, [] {},
+        [&](const std::string &) {
+          ++on_errors;
+          try {
+            boost::this_thread::interruption_point();
+          } catch (boost::thread_interrupted &) {
+            ++threw_in_on_error;
+            throw;
+          }
+        });
+    pending_after_compute = boost::this_thread::interruption_requested();
+    cvc::launch_pool_task(
+        stopped, sched, std::string(), "probe.reply", [] { return state_exec::value_t(true); },
+        [&](const std::string &e) {
+          ++on_errors;
+          try {
+            boost::this_thread::interruption_point();
+          } catch (boost::thread_interrupted &) {
+            ++threw_in_on_error;
+            throw;
+          }
+          return state_exec::value_t(e);
+        });
+    pending_after_post = boost::this_thread::interruption_requested();
+    refused = !stopped.submitPooled(std::function<void()>(interrupt_probe(thrown, destroyed)));
+    pending_after_task = boost::this_thread::interruption_requested();
+  });
+  t.interrupt();
+  t.join();
+  EXPECT_EQ(on_errors.load(), 2);
+  EXPECT_EQ(threw_in_on_error.load(), 0);
+  EXPECT_TRUE(pending_after_compute.load());
+  EXPECT_TRUE(pending_after_post.load());
+  EXPECT_TRUE(refused.load());
+  EXPECT_TRUE(pending_after_task.load());
+  EXPECT_EQ(destroyed->load(), 1);
+  EXPECT_EQ(thrown->load(), 0);
+
+  // The pool's stop on an interrupted thread: the queued task's destruction and the joins.
+  probe_app b;
+  b.setThreadPoolSize(1);
+  std::atomic<bool> started(false);
+  b.submitPooled([&started] {
+    started = true;
+    for (;;)
+      boost::this_thread::sleep_for(boost::chrono::milliseconds(1)); // until the stop
+  });
+  for (int i = 0; i < 10000 && !started.load(); i++)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  ASSERT_TRUE(started.load());
+  EXPECT_TRUE(b.submitPooled(std::function<void()>(interrupt_probe(thrown, destroyed))));
+  EXPECT_EQ(b.getPendingThreadCount(), 1u);
+  std::atomic<bool> pending_after_stop(false);
+  std::atomic<unsigned> running_after_stop(99);
+  boost::thread stopper([&] {
+    while (!boost::this_thread::interruption_requested())
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    b.stopPool();
+    running_after_stop = b.getActiveThreadCount();
+    pending_after_stop = boost::this_thread::interruption_requested();
+  });
+  stopper.interrupt();
+  stopper.join();
+  EXPECT_EQ(destroyed->load(), 2);
+  EXPECT_EQ(thrown->load(), 0);
+  EXPECT_TRUE(pending_after_stop.load());
+  EXPECT_EQ(running_after_stop.load(), 0u) << "the stop skipped joining the worker";
+}
+
+// ~app holds interruption off until the last thing the app holds is destroyed, not only through
+// its own body: an interrupt pending on the thread destroying the app is still pending when ~app
+// returns, and isn't thrown at an interruption point in the destructor of something the app holds
+// (its data: the state tree joining a handler thread, a user object that joins one; a slot), where
+// it would be std::terminate. (Held off in the body only, it was thrown there, also when ~app had
+// workers to join.)
+TEST(AppPoolTeardown, AnInterruptPendingOnTheThreadDestroyingTheAppOutlivesIt) {
+  auto thrown = std::make_shared<std::atomic<int>>(0);
+  auto destroyed = std::make_shared<std::atomic<int>>(0);
+  std::atomic<bool> ready(false), pending_after(false), done(false);
+  boost::thread t([&] {
+    auto a = std::make_unique<app>();
+    std::atomic<bool> ran(false);
+    a->submitPooled([&ran] { ran = true; }); // a worker for ~app to join
+    while (!ran.load())
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    a->data("probe", std::make_shared<interrupt_probe>(thrown, destroyed));
+    ready = true;
+    while (!boost::this_thread::interruption_requested())
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    a.reset();
+    pending_after = boost::this_thread::interruption_requested();
+    done = true;
+  });
+  for (int i = 0; i < 10000 && !ready.load(); i++)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  t.interrupt();
+  t.join();
+  EXPECT_TRUE(done.load());
+  EXPECT_EQ(destroyed->load(), 1);
+  EXPECT_EQ(thrown->load(), 0) << "an interrupt was thrown in the destructor of the app's data";
+  EXPECT_TRUE(pending_after.load()) << "the interrupt didn't outlive the app";
+}
+
+// A keyed task (wait=true) that the pool has room for is in threads() under its key when
+// startThreadPooled returns, also right behind an anonymous task still waiting for its worker to
+// start (a fresh app) or to wake (a warm one); the documented join pattern,
+// `if (hasThread(k)) threads(k)->join();`, then waits for it.
+TEST(AppPoolKeyed, AKeyedTaskWithRoomIsRegisteredOnReturnBehindAnonymousTasks) {
+  for (int warm = 0; warm < 2; warm++) {
+    for (int iter = 0; iter < 50; iter++) {
+      app a;
+      a.setThreadPoolSize(4);
+      if (warm) {
+        std::atomic<int> w(0);
+        for (int k = 0; k < 8; k++)
+          a.submitPooled([&w] { w++; });
+        ASSERT_TRUE(wait_pool_idle(a));
+        ASSERT_EQ(w.load(), 8);
+      }
+      std::atomic<bool> release(false);
+      std::atomic<bool> keyed_ran(false);
+      a.startThreadPooled("anon", [] {}, PRIORITY_NORMAL, /*wait=*/false);
+      a.startThreadPooled(
+          "keyed",
+          [&] {
+            while (!release.load())
+              std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            keyed_ran = true;
+          },
+          PRIORITY_NORMAL, /*wait=*/true);
+      EXPECT_TRUE(a.hasThread("keyed")) << "warm=" << warm << " iteration " << iter;
+      release = true;
+      if (a.hasThread("keyed")) {
+        thread_ptr t = a.threads("keyed");
+        if (t)
+          t->join();
+      }
+      EXPECT_TRUE(keyed_ran.load()) << "warm=" << warm << " iteration " << iter;
+      ASSERT_TRUE(wait_pool_idle(a));
+      if (HasFailure())
+        return;
+    }
+  }
+}
+
+// A burst runs on as many workers as it has tasks, up to the pool's size, from its first task:
+// eight tasks that each wait until all eight are running all finish promptly, on a fresh app
+// (no worker yet) and on a warm one (idle workers). Starting one worker at a time ran such a
+// burst on one to three threads under load.
+TEST(AppPoolBurst, ABurstStartsAWorkerPerTaskUpToThePoolSize) {
+  for (int warm = 0; warm < 2; warm++) {
+    app a;
+    a.setThreadPoolSize(8);
+    if (warm) {
+      std::atomic<int> w(0);
+      for (int k = 0; k < 8; k++)
+        a.submitPooled([&w] {
+          spin_us(2000);
+          w++;
+        });
+      ASSERT_TRUE(wait_pool_idle(a));
+    }
+    std::atomic<int> arrived(0);
+    std::atomic<int> all_met(0);
+    const auto t0 = std::chrono::steady_clock::now();
+    for (int k = 0; k < 8; k++)
+      a.submitPooled([&] {
+        arrived++;
+        const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (arrived.load() < 8 && std::chrono::steady_clock::now() < until)
+          std::this_thread::sleep_for(std::chrono::microseconds(200));
+        if (arrived.load() == 8)
+          all_met++;
+      });
+    ASSERT_TRUE(wait_pool_idle(a, 15000));
+    const double secs =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    EXPECT_EQ(all_met.load(), 8) << "warm=" << warm;
+    EXPECT_LT(secs, 4.0) << "warm=" << warm;
+  }
+}
+
 TEST_F(AppTest, ThreadInfoAndProgressTracking) {
   std::string thread_key = "test.progress.tracking";
   std::atomic<bool> thread_started(false);
@@ -1873,7 +3249,7 @@ TEST_F(AppTest, ComputeAsyncRunsFanOutOffThreadThenCallsOnDone) {
 }
 
 // ===========================
-// Finished compute_async / wait=false pooled threads are reaped
+// compute_async / wait=false pooled jobs leave nothing behind in threads()
 // ===========================
 
 namespace {
@@ -1897,33 +3273,45 @@ bool run_one_compute_async(app &ctx) {
 }
 } // namespace
 
-// compute_async, like every wait=false startThreadPooled job, runs on a fresh pooled thread under
-// a unique key. Finished ones -- each still holding its boost::thread and the functor it ran --
-// used to stay in the app's thread map until the app was destroyed, so a host offloading a chunk
-// at a time (tf overlays, (http-get)/(fetch)) grew the map by one entry per call. A later worker
-// now joins and drops them, so the map stays bounded.
-TEST_F(AppTest, ComputeAsyncReapsFinishedWorkerThreads) {
+// compute_async used to run each call on a fresh pooled thread under a unique key, and finished
+// ones -- each still holding its boost::thread and the functor it ran -- stayed in the app's thread
+// map until the app was destroyed, so a host offloading a chunk at a time (tf overlays,
+// (http-get)/(fetch)) grew the map by one entry per call; #827 had a later worker reap them. Each
+// call is now an anonymous pool task: never in the map, not even for a moment, and destroyed on its
+// worker, with everything fn and on_done captured, as soon as it ends.
+TEST_F(AppTest, ComputeAsyncCallsDoNotGrowTheThreadMap) {
   ctx.computePool(); // warm the pool on this thread before the background jobs touch it
+  const std::size_t threads_before = ctx.threads().size();
   const int kCalls = 60;
-  for (int c = 0; c < kCalls; ++c)
-    ASSERT_TRUE(run_one_compute_async(ctx)) << "compute_async " << c << " never completed";
+  std::vector<std::weak_ptr<int>> captures;
+  for (int c = 0; c < kCalls; ++c) {
+    auto payload = std::make_shared<int>(c);
+    captures.push_back(payload);
+    auto done = std::make_shared<std::promise<void>>();
+    std::future<void> fut = done->get_future();
+    ctx.compute_async(2, [payload](int) {}, [payload, done] { done->set_value(); });
+    payload.reset();
+    ASSERT_EQ(fut.wait_for(std::chrono::seconds(10)), std::future_status::ready)
+        << "compute_async " << c << " never completed";
+    // Right after each on_done, while its job is still winding down: no entry, no straggler.
+    EXPECT_EQ(ctx.threads().size(), threads_before) << "after compute_async " << c;
+  }
 
-  // The last worker is still winding down after its on_done; once it has, only it -- nobody was
-  // left to reap it -- may still be listed.
-  const std::size_t kStragglers = 4;
-  EXPECT_TRUE(
-      eventually([&] { return ctx.threads().size() <= kStragglers; }, std::chrono::seconds(5)))
-      << ctx.threads().size() << " threads still listed after " << kCalls
-      << " compute_async calls finished";
+  // A job's captures go on its worker before it counts as done.
+  ASSERT_TRUE(wait_pool_idle(ctx));
+  for (int c = 0; c < kCalls; ++c)
+    EXPECT_TRUE(captures[c].expired()) << "compute_async " << c << " still holds its captures";
+  EXPECT_EQ(ctx.threads().size(), threads_before);
 }
 
-// The same with calls queued behind a small pool. A queued job is not in the thread map yet, so
-// its key must be held for it until it starts: two queued calls handed the same key would have
-// the second one interrupt the first and take over its entry. Every on_done runs exactly once,
-// on a thread nobody asked to stop, and the map is bounded again afterwards.
-TEST_F(AppTest, QueuedComputeAsyncCallsKeepDistinctKeysAndAreReaped) {
+// The same with calls queued behind a small pool. A queued job used to need a key held for it
+// until it started: two queued calls handed the same key had the second interrupt the first and
+// take over its entry. An anonymous job has no key to share. Every on_done runs exactly once, on a
+// thread nobody asked to stop, and the map does not grow while they queue or after.
+TEST_F(AppTest, QueuedComputeAsyncCallsEachRunOnceUninterrupted) {
   ctx.computePool();
   ctx.setThreadPoolSize(2);
+  const std::size_t threads_before = ctx.threads().size();
   const int kCalls = 100;
   auto runs = std::make_shared<std::vector<std::atomic<int>>>(kCalls);
   auto total = std::make_shared<std::atomic<int>>(0);
@@ -1937,74 +3325,94 @@ TEST_F(AppTest, QueuedComputeAsyncCallsKeepDistinctKeysAndAreReaped) {
           (*runs)[c].fetch_add(1);
           total->fetch_add(1);
         });
+  const std::size_t threads_while_queued = ctx.threads().size();
 
   ASSERT_TRUE(eventually([&] { return total->load() >= kCalls; }, std::chrono::seconds(30)))
       << "only " << total->load() << " of " << kCalls << " compute_async calls completed";
-  const std::size_t kStragglers = 4;
-  EXPECT_TRUE(
-      eventually([&] { return ctx.threads().size() <= kStragglers; }, std::chrono::seconds(5)))
-      << ctx.threads().size() << " threads still listed after " << kCalls
-      << " compute_async calls finished";
+  ASSERT_TRUE(wait_pool_idle(ctx));
+  EXPECT_EQ(threads_while_queued, threads_before) << "queued compute_async calls were listed";
+  EXPECT_EQ(ctx.threads().size(), threads_before)
+      << "finished compute_async calls were left in the thread map";
   for (int c = 0; c < kCalls; ++c)
     EXPECT_EQ((*runs)[c].load(), 1) << "on_done of call " << c;
   EXPECT_EQ(interrupted->load(), 0) << "a queued call interrupted a running one";
+  EXPECT_EQ(runs.use_count(), 1) << "a finished call still holds its captures";
 }
 
-// Reaping only ever takes a thread that has finished. A long wait=false pooled job keeps its
-// entry, stays joinable and still reports its info while finished compute_async workers come and
-// go around it -- and once it has finished, a later worker reaps it too.
-TEST_F(AppTest, ReapingLeavesARunningPooledThreadListed) {
+// A pooled job that is still running is left alone while compute_async calls come and go around
+// it. (When wait=false jobs were listed and finished workers reaped them, this checked that reaping
+// only ever took a finished thread.) A wait=false job is never in the thread map, so nothing can
+// drop it from there: it runs on, uninterrupted, to its end, holding its captures until then and
+// not after. A keyed (wait=true) job is the listed kind: it keeps its entry, stays joinable and
+// reports its info throughout, and its entry stays once it has ended, until replaced or removed.
+// The calls around them add nothing to the map.
+TEST_F(AppTest, ComputeAsyncChurnLeavesRunningPooledJobsAlone) {
   ctx.computePool();
-  ctx.setThreadPoolSize(2);
-  const std::string key = "pool_reap_long_runner";
-  auto started = std::make_shared<std::atomic<bool>>(false);
+  ctx.setThreadPoolSize(3); // the two long jobs, and a worker for the compute_async calls
+  const std::size_t threads_before = ctx.threads().size();
+  const std::string anon_key = "pool_long_runner_anonymous";
+  const std::string keyed_key = "pool_long_runner_keyed";
+  auto started = std::make_shared<std::atomic<int>>(0);
   auto release = std::make_shared<std::atomic<bool>>(false);
   auto finished = std::make_shared<std::atomic<int>>(0);
+  auto interrupted = std::make_shared<std::atomic<int>>(0);
   struct release_on_exit {
     std::shared_ptr<std::atomic<bool>> flag;
-    ~release_on_exit() { flag->store(true); } // an ASSERT below must not leave it spinning
+    ~release_on_exit() { flag->store(true); } // an ASSERT below must not leave them spinning
   } releaser{release};
+  const auto long_job = [started, release, finished, interrupted] {
+    started->fetch_add(1);
+    while (!release->load()) // sleep_for is not an interruption point
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    if (boost::this_thread::interruption_requested())
+      interrupted->fetch_add(1);
+    finished->fetch_add(1);
+  };
 
+  auto payload = std::make_shared<int>(42);
+  const std::weak_ptr<int> anon_capture = payload;
   ctx.startThreadPooled(
-      key,
-      [started, release, finished] {
-        started->store(true);
-        while (!release->load())
-          std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        finished->fetch_add(1);
-      },
-      PRIORITY_NORMAL, /*wait=*/false);
-  ASSERT_TRUE(eventually([&] { return started->load(); }, std::chrono::seconds(10)));
+      anon_key, [long_job, payload] { long_job(); }, PRIORITY_NORMAL, /*wait=*/false);
+  payload.reset();
+  ctx.startThreadPooled(keyed_key, long_job, PRIORITY_NORMAL, /*wait=*/true);
+  ASSERT_TRUE(eventually([&] { return started->load() == 2; }, std::chrono::seconds(10)));
 
-  // One at a time through the other worker: each one's worker reaps the one before it.
   for (int i = 0; i < 20; ++i)
     ASSERT_TRUE(run_one_compute_async(ctx)) << "compute_async " << i << " never completed";
 
-  // Sample with the runner still held; assert once it is released.
-  const bool listed = ctx.hasThread(key);
-  thread_ptr runner = ctx.threads(key);
+  // Sample with both still held; assert once they are released.
+  const bool anon_listed = ctx.hasThread(anon_key);
+  const bool anon_capture_held = !anon_capture.expired();
+  const bool keyed_listed = ctx.hasThread(keyed_key);
+  thread_ptr runner = ctx.threads(keyed_key);
   const bool joinable = runner && runner->joinable();
-  const std::string info = ctx.threadInfo(key);
+  const std::string info = ctx.threadInfo(keyed_key);
   const std::size_t listed_total = ctx.threads().size();
-  runner.reset(); // a held copy would (rightly) keep it from being reaped below
   release->store(true);
 
-  EXPECT_TRUE(listed) << "a running pooled thread was dropped from the thread map";
-  EXPECT_TRUE(joinable) << "a running pooled thread is no longer joinable";
-  EXPECT_EQ(info, "Processing: " + key);
-  EXPECT_LE(listed_total, 4u) << "finished compute_async workers were not reaped";
-  ASSERT_TRUE(eventually([&] { return finished->load() == 1; }, std::chrono::seconds(10)));
+  EXPECT_FALSE(anon_listed) << "a wait=false job was given a thread-map entry";
+  EXPECT_TRUE(anon_capture_held) << "a running wait=false job lost its captures";
+  EXPECT_TRUE(keyed_listed) << "a running keyed pooled thread was dropped from the thread map";
+  EXPECT_TRUE(joinable) << "a running keyed pooled thread is no longer joinable";
+  EXPECT_EQ(info, "Processing: " + keyed_key);
+  EXPECT_EQ(listed_total, threads_before + 1) << "compute_async calls were left in the thread map";
 
-  // Finished now: a worker winding down after it reaps it.
-  EXPECT_TRUE(eventually([&] { return run_one_compute_async(ctx) && !ctx.hasThread(key); },
-                         std::chrono::seconds(10)))
-      << "the finished pooled thread was never reaped";
-  EXPECT_EQ(finished->load(), 1);
+  if (runner)
+    runner->join();
+  ASSERT_TRUE(eventually([&] { return finished->load() == 2; }, std::chrono::seconds(10)));
+  ASSERT_TRUE(wait_pool_idle(ctx));
+  EXPECT_EQ(interrupted->load(), 0) << "a running pooled job was interrupted";
+  EXPECT_TRUE(anon_capture.expired()) << "a finished wait=false job still holds its captures";
+  EXPECT_TRUE(ctx.hasThread(keyed_key))
+      << "a finished keyed job's entry went before it was removed";
+  EXPECT_EQ(ctx.threads().size(), threads_before + 1);
+  EXPECT_EQ(finished->load(), 2);
 }
 
-// Destroying the app while compute_async work is queued, running and winding down must stay
-// clean: nothing queued starts any more, every worker is interrupted and joined -- including one
-// a worker was starting just as ~app took its snapshot -- and no on_done runs twice.
+// Destroying the app while compute_async work is queued, running and finished must stay clean:
+// nothing queued starts any more, every running job is interrupted and its worker joined --
+// including a worker started just as ~app stopped the pool, which takes no task -- no on_done runs
+// twice, and every job, run or dropped, has released what it captured once ~app returns.
 TEST_F(AppTest, DestroyingAnAppWithComputeAsyncInFlightIsClean) {
   const int kCalls = 32;
   auto runs = std::make_shared<std::vector<std::atomic<int>>>(kCalls);
@@ -2021,13 +3429,15 @@ TEST_F(AppTest, DestroyingAnAppWithComputeAsyncInFlightIsClean) {
             (*runs)[c].fetch_add(1);
             total->fetch_add(1);
           });
-    // Let a few finish (and be reaped) so finished, running and queued work all meet ~app.
+    // Let a few finish (and be destroyed on their workers) so finished, running and queued work
+    // all meet ~app.
     eventually([&] { return total->load() >= 3; }, std::chrono::seconds(10));
   }
   EXPECT_LT(std::chrono::steady_clock::now() - t0, std::chrono::seconds(20));
   EXPECT_GE(total->load(), 3);
   for (int c = 0; c < kCalls; ++c)
     EXPECT_LE((*runs)[c].load(), 1) << "on_done of call " << c;
+  EXPECT_EQ(runs.use_count(), 1) << "a job the app ran or dropped still holds its captures";
 }
 
 TEST_F(AppTest, WorldBasesAreNotGlobalSingletons) {

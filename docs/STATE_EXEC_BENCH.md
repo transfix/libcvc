@@ -70,7 +70,7 @@ five times that.
 | `--pin auto\|none\|CPU` | pin the driver thread (below) |
 | `--priority high` | raise the process priority (`HIGH_PRIORITY_CLASS`; `nice -10` on POSIX, which needs privileges) |
 | `--timeout S` | give up on a rep after S seconds of driving (default 120); the record carries `ok:false`. A rep whose driver is blocked inside the runtime can't notice, so a watchdog ends the process 60 s past the timeout, after writing an `ok:false` "hung" record for the rep; a sweep point whose setup or teardown blocks (`~app` joins every thread it started) is ended the same way once it outlives all its reps' budgets. The exit code is then 3 |
-| `--bg-oversubscribe` | run background-pool points that make more calls at once than the app's pool has workers (skipped otherwise; they stall and can hang: "Known pathologies") |
+| `--bg-oversubscribe` | run background-pool points that make more calls at once than the app's pool has workers (skipped otherwise: on builds before the persistent-worker pool they stall and can hang, "Known pathologies") |
 | `--sample PREFIX` | sample the driver's stack during the first measured rep of each point and, at the end of the run, write `PREFIX.<scenario>.<executor>.<point>.folded` and `.top.txt` (Windows x64; "Profiling") |
 | `--sample-us N` | the sampling interval in microseconds (default 1000, at least 100) |
 | `--sample-depth N` | frames kept per sample (default 64, at most 1024) |
@@ -218,8 +218,8 @@ measures nothing.
 - A sweep point gets one `cvc::app`, created before its reps and destroyed after them, and each rep
   a fresh scheduler, host and environment (outside the measured region). The scenarios on the
   app's background pool (`async.*`) build a fresh app per rep instead, outside the region, because
-  the pool accumulates state (see "Known pathologies"); a shared app would make the reps a trend,
-  not samples. `async.pool_aging` and `async.pool_batches` measure that accumulation on purpose.
+  the pool accumulated state up to the baseline and starts its workers on demand (see "Known
+  pathologies"); a shared app would make the reps a trend, not samples. `async.pool_aging` and `async.pool_batches` measure that accumulation on purpose.
 - Processes run in their own scope over one shared environment (`environment::extend`): the
   builtins, intrinsics and natives are shared, while each process's top-level `set`s stay its own,
   so concurrent programs don't clobber each other's globals. That is one scope level more than
@@ -493,17 +493,20 @@ CPU (`cpu100us`). `where` picks the executor:
 
 Both drivers run on the async scheduler. `async_latency_ns` is the time from a kernel's end to its
 caller's end (the completion path: ingress, drain, wake, resume). `extra.kernel_threads` is the
-number of distinct OS threads the kernels ran on (one per call on the background pool, one for a
-lane); `threads_created` and `app_threads_after` show the same from the process and the app.
+number of distinct OS threads the kernels ran on (on the background pool: its persistent workers
+that took a call, at most its size; one per call before them; one for a lane); `threads_created`
+and `app_threads_after` show the same from the process and the app (pooled kernels have no entry
+in the app's thread map any more, so `app_threads_after` is 0).
 
 With `where=background`, a point that makes more calls at once than the app's background pool has
 workers (`app::getThreadPoolSize()`, the hardware concurrency) is skipped unless
 `--bg-oversubscribe` is given (`n` here, `k` for `async.futures`, `b` for `async.pool_batches`, `c`
-for `async.inflight_tax`, `m` for `async.compute_fanout*`): past the pool size the pool stalls 5 s
-per key collision and can hang (see "Known pathologies"). The skip is printed. With `--smoke` the
-count is clamped to the pool size instead, so hosted CI runners with 2-4 workers still run the path.
-To measure it: `--scenario async.flood.noop --size n=100 --executor async --bg-oversubscribe
---timeout 60`; the watchdog ends the process if it hangs.
+for `async.inflight_tax`, `m` for `async.compute_fanout*`): on builds before the persistent-worker
+pool, the pool stalls 5 s per key collision past its size and can hang (see "Known pathologies"),
+so the skip keeps those builds comparable. The skip is printed. With `--smoke` the count is clamped
+to the pool size instead, so hosted CI runners with 2-4 workers still run the path. To measure it:
+`--scenario async.flood.noop --size n=100 --executor async --bg-oversubscribe --timeout 60`; the
+watchdog ends the process if it hangs.
 
 ### async.futures (async, sync)
 
@@ -672,37 +675,65 @@ suite was written.
   against `rate=opt`. First run: with 8 calls in flight an unrelated step cost ~25 us with the
   tree read and ~1 us without it. Since fixed: the list is walked in place and the tree read again
   only when something under the watch root changed.
-- **The background async executor starts an OS thread per call and never forgets it.**
-  `app::startThreadPooled` creates a `boost::thread` per task (`app.cpp:1075-1095`), keeps the entry
-  in `_threads` until `~app` (`app.cpp:741-757`), finds a unique key by probing
-  `state_exec.async.<fn>0`, `1`, ... under a mutex (`app.cpp:780-788`) and rebuilds the key map on
-  every start (`app.cpp:594-635, 915-948`); `async_host` submits with `wait=false`
-  (`async_host.cpp:530`). `extra.kernel_threads`, `threads_created` and `app_threads_after` in
-  `async.flood.*` `where=background` against `lane`; the cost of a call against the calls the app
-  has made in `async.pool_aging` (`last_over_first`) and `async.pool_batches`. First run: the last
-  10 % of 3000 sequential calls took 17 times as long each as the first 10 % (a lane: flat), and
-  `async.pool_retention` kept ~1 MiB per call, every call's result, until the app went.
-- **The background pool stalls, then hangs, past its size.** `uniqueThreadKey` only sees threads
-  that have started (`app.cpp:780-788`), so calls queued while the pool is full can get the same
-  key. A worker that finishes starts the next queued task from its own thread
-  (`threadPoolWorker` calling `tryStartWorker`, `app.cpp:1075-1120`), and `app::threads(key, ...)`
-  interrupts and waits up to 5 s for the thread already holding that key (`app.cpp:594-620`);
-  two workers doing that to each other each wait the full 5 s ("did not stop in 5s" in the log).
-  Found by this suite: on a 22-thread machine, `async.flood.noop --size n=100` on the background
-  pool logged eight such stalls and then hung for good, the driver thread idle (no CPU time)
-  inside the runtime. A likely cause, not yet confirmed in a debugger: the
-  `interruption_point()` at the top of `app::threads` throws in an interrupted worker after
-  `tryStartWorker` has released `_threadPoolMutex` (`app.cpp:1092`), so the caller's lock guard
-  unlocks it a second time and later lockers block forever. Default sizes stay under the pool
-  size (`--bg-oversubscribe` runs past it); the watchdog turns a hang into a failed record.
-- **Concurrent compute-pool fan-outs serialize.** `thread_pool::parallel_for` holds one job slot
-  (`thread_pool.cpp:170`) and wakes every worker on each post (`thread_pool.cpp:192-195`):
-  `async.compute_fanout_narrow` `extra.fanout_stretch` against `m`, and
-  `async.compute_fanout_herd` `extra.fanout_ns`.
+- **The background async executor started an OS thread per call and never forgot it** (fixed:
+  persistent workers). Up to the baseline (a7b966f0) `app::startThreadPooled` created a
+  `boost::thread` per task, kept the entry in `_threads` until `~app`, found a unique key by
+  probing `state_exec.async.<fn>0`, `1`, ... under a mutex and rebuilt the key map on every start;
+  `async_host` submitted with `wait=false`. Anonymous tasks (`wait=false`, `app::submitPooled`,
+  which `async_host`, `compute_async` and `launch_pool_task` use) now run on at most
+  `getThreadPoolSize()` persistent workers, FIFO within a priority, with no key and no thread-map
+  entry, and are destroyed on the worker as soon as they end. `extra.kernel_threads`,
+  `threads_created` and `app_threads_after` in `async.flood.*` `where=background` against `lane`;
+  the cost of a call against the calls the app has made in `async.pool_aging` (`last_over_first`)
+  and `async.pool_batches`. Baseline: the last 10 % of 3000 sequential calls took about 3 to 17
+  times as long each as the first 10 %, depending on load (median 12 in the final A/B; a lane:
+  flat), and `async.pool_retention` kept ~1 MiB per call, every call's result, until the app
+  went. Now: `last_over_first` ~1.0 at k=3000 (4.9 s -> 0.09 s for the 3000 calls), a few hundred
+  bytes per call left after `pool_retention` (105 MB -> 41 KB for 100 calls), `app_threads_after`
+  0. A burst starts as many workers as it has tasks, up to the pool size, at once (each worker
+  once per app): a burst of 10 `sleep1ms` calls on a fresh app runs on 10 threads (min 9), as the
+  baseline's thread per call did, where starting one worker at a time ran it on 1-8. Idle
+  workers wait on a `std::condition_variable_any`, signalled after the pool's mutex is released:
+  `boost::condition_variable` makes and closes a semaphore per wait on Windows, and its
+  `notify_one` was ~17 % of the driver's samples in `async.pool_aging` k=5000 `where=background`;
+  the wake is now ~4 %, and `async_host::call` fell from ~19 % to ~7 % inclusive.
+- **The background pool stalled, then hung, past its size** (fixed). `uniqueThreadKey` only saw
+  threads that had started, so calls queued while the pool was full got the same key. A worker
+  that finished started the next queued task from its own thread (`threadPoolWorker` calling
+  `tryStartWorker`), and `app::threads(key, ...)` interrupted and waited up to 5 s for the thread
+  already holding that key; two workers doing that to each other each waited the full 5 s ("did
+  not stop in 5s" in the log). Found by this suite: on a 22-thread machine,
+  `async.flood.noop --size n=100` on the background pool logged eight such stalls and then hung
+  for good. Cause, confirmed with a probe: `tryStartWorker` unlocked `_threadPoolMutex` by hand
+  around `threads(key, ...)`, whose interruption points (its top, `hasThread`, the `timed_join`)
+  threw `thread_interrupted` in a worker another worker had just interrupted; the caller's
+  `scoped_lock` then unlocked the mutex a second time, which on Windows leaves `boost::mutex`
+  locked with no owner, and every later locker blocks forever. The pool no longer gives anonymous
+  tasks keys, never unlocks a mutex it doesn't own through RAII, and runs its bookkeeping with
+  interruption disabled. `AppTest.ThreadPoolFloodPastPoolSizeCompletes` floods 1000 tasks onto 4
+  workers (before: hung, or 14 of 1000 done after 10 s); `--bg-oversubscribe` n=100 now finishes
+  in ~3.6 ms (18 of 18 reps), where the baseline stalls or hangs intermittently (in the final
+  A/B 3 of its 6 reps failed, the others took ~9 ms; how often depends on the driver and load).
+- **Concurrent compute-pool fan-outs serialized** (fixed). `thread_pool::parallel_for` held one
+  job slot and woke every worker on each post. Jobs now go on a list that free workers join,
+  oldest first, and a post wakes only as many idle workers as it can enlist:
+  `async.compute_fanout_narrow` `extra.fanout_stretch` against `m` (m=4: ~2.4-3.6 -> ~1.07), and
+  `async.compute_fanout_herd` (stretch ~5.5-6.7 -> ~1.7-2.9). Fan-outs that each saturate the pool
+  (`async.compute_fanout`) now share it: all `m` of them finish 23-25 % sooner (m=4, m=16), and
+  a single one's stretch at m=4 moves with load (3.1 -> 3.5 in one A/B, 2.1 -> 4.1 in another),
+  since it now runs beside the others instead of after them.
 - **Per-call overhead of an async function.** About 30 allocations and 10 lock acquisitions before
-  a kernel runs, even a no-op one (`async_host.cpp:386-430, 518-539`), and two state-tree reads of
-  the step rate on the inline path (`async_host.cpp:434, 465`): `async.flood.noop`. Since fixed in
-  the schedulers: the rate is read from the tree again only once a setting may have changed.
+  a kernel ran, even a no-op one, and two state-tree reads of the step rate on the inline path:
+  `async.flood.noop`, `allocs_driver`. Now the error-field vectors are built only on a throw, the
+  reply channel only for a call that parks or returns a future, the inline path reads the rate
+  once (at its charge) unless a step budget needs it during the kernel, the progress channel's
+  key is built on the first post, the host-open check is an atomic, and a call leaves the host's
+  cancel list in O(1): -15 to -23 % `allocs_driver` on the inline points (`async.flood.noop`,
+  `async.futures` `where=inline`), about -22 % on the background pool with `driver=poll1ms`.
+  Quote allocation savings from inline points or normalized by `driver_cpu_ns`: a `driver=spin`
+  threaded point mostly counts idle pump iterations, so its `allocs_driver` follows whether the
+  pinned driver spun or yielded, not the per-call cost. The schedulers read the rate from the tree
+  again only once a setting may have changed.
 - **Polling hosts sleep a timer tick.** The async scheduler has no wakeup signal, so a host that
   sleeps when idle (pycvc: `sleep_for(1 ms)`) waits for the OS timer; on Windows that is ~15.6 ms
   unless something raised the timer resolution (the header's `sleep_for(1ms) takes` line).

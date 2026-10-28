@@ -3,6 +3,7 @@
   Tests geometry operations using the Stanford Bunny mesh.
 */
 
+#include <algorithm>
 #include <atomic>
 #include <boost/thread.hpp>
 #include <chrono>
@@ -4719,18 +4720,37 @@ TEST_F(AlgorithmTest, FindTetsContainingPointPerformanceLargeMesh) {
             << std::endl;
   std::cout << "  Total tets found: " << total_found << std::endl;
 
-  // Performance expectations
-  if (tet_mesh.num_tets() > 1000) {
-    std::cout << "  Using pre-computed bbox acceleration (>1000 tets)" << std::endl;
+  // The same answer as testing every tet: its own box, then its barycentric weights. The mesh is
+  // the solid above the isovalue, here the space between the bunny and its box, which the line
+  // crosses at both ends. (Until 10/2026 a broken mesh-box test returned nothing for points off
+  // the mesh's boundary; "found some" passed on the few points lying on a box face.)
+  const auto &tets = tet_mesh.const_tets();
+  const auto &pts = tet_mesh.points();
+  size_t expected = 0, located = 0, expected_points = 0;
+  for (const auto &p : query_points) {
+    size_t here = 0;
+    for (const auto &t : tets) {
+      bool in_box = true;
+      for (int a = 0; a < 3 && in_box; ++a) {
+        const double lo = std::min({pts[t[0]][a], pts[t[1]][a], pts[t[2]][a], pts[t[3]][a]});
+        const double hi = std::max({pts[t[0]][a], pts[t[1]][a], pts[t[2]][a], pts[t[3]][a]});
+        in_box = p[a] >= lo && p[a] <= hi;
+      }
+      if (!in_box)
+        continue;
+      const auto w = tet_barycentric(p, pts[t[0]], pts[t[1]], pts[t[2]], pts[t[3]]);
+      if (w[0] >= -1e-10 && w[1] >= -1e-10 && w[2] >= -1e-10 && w[3] >= -1e-10)
+        ++here;
+    }
+    expected += here;
+    expected_points += here ? 1 : 0;
+    located += find_tets_containing_point(p, tets, pts).empty() ? 0 : 1;
   }
-#ifndef DISABLE_CGAL
-  if (tet_mesh.num_tets() > 10000) {
-    std::cout << "  Using CGAL AABB tree acceleration (>10000 tets)" << std::endl;
-  }
-#endif
-
-  // Just verify it found some tets (actual performance varies by hardware)
-  EXPECT_GT(total_found, 0);
+  std::cout << "  Every tet tested: " << expected << " tets, " << expected_points << " of "
+            << query_points.size() << " points in the mesh" << std::endl;
+  EXPECT_EQ(total_found, expected);
+  EXPECT_EQ(located, expected_points);
+  EXPECT_GT(expected_points, 10u);
 }
 
 TEST_F(AlgorithmTest, FindHexsContainingPointPerformanceLargeMesh) {
@@ -4834,16 +4854,45 @@ TEST_F(AlgorithmTest, FindHexsContainingPointPerformanceLargeMesh) {
             << std::endl;
   std::cout << "  Total hexs found: " << total_found << std::endl;
 
-  if (hex_mesh.num_hexs() > 1000) {
-    std::cout << "  Using pre-computed bbox acceleration (>1000 hexs)" << std::endl;
-  }
-#ifndef DISABLE_CGAL
-  if (hex_mesh.num_hexs() > 10000) {
-    std::cout << "  Using CGAL AABB tree acceleration (>10000 hexs)" << std::endl;
-  }
-#endif
-
   EXPECT_GT(hex_mesh.num_hexs(), 0); // Should have created some hexs
+
+  // The same answer as testing every hex: its own box, then its trilinear weights (within the
+  // library's [-0.1, 1.1]). The hexes are the voxels inside the bunny, which the line crosses.
+  const auto &hexs = hex_mesh.const_hexs();
+  const auto &pts = hex_mesh.points();
+  size_t expected = 0, located = 0, expected_points = 0;
+  for (const auto &p : query_points) {
+    size_t here = 0;
+    for (const auto &h : hexs) {
+      geometry::point_t corners[8];
+      bool in_box = true;
+      for (int c = 0; c < 8; ++c)
+        corners[c] = pts[h[c]];
+      for (int a = 0; a < 3 && in_box; ++a) {
+        double lo = corners[0][a], hi = corners[0][a];
+        for (int c = 1; c < 8; ++c) {
+          lo = std::min(lo, corners[c][a]);
+          hi = std::max(hi, corners[c][a]);
+        }
+        in_box = p[a] >= lo && p[a] <= hi;
+      }
+      if (!in_box)
+        continue;
+      const auto w = hex_trilinear(p, corners);
+      bool inside = true;
+      for (int c = 0; c < 8; ++c)
+        inside = inside && w[c] >= -0.1 && w[c] <= 1.1;
+      here += inside ? 1 : 0;
+    }
+    expected += here;
+    expected_points += here ? 1 : 0;
+    located += find_hexs_containing_point(p, hexs, pts).empty() ? 0 : 1;
+  }
+  std::cout << "  Every hex tested: " << expected << " hexs, " << expected_points << " of "
+            << query_points.size() << " points in the mesh" << std::endl;
+  EXPECT_EQ(total_found, expected);
+  EXPECT_EQ(located, expected_points);
+  EXPECT_GT(expected_points, 10u);
 }
 
 // ============================================================================
