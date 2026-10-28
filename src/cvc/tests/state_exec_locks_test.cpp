@@ -92,10 +92,34 @@ struct locks_world {
     return false;
   }
 
+  // Step until `done()` holds or `seconds` pass, sleeping briefly whenever nothing stepped (a lock
+  // deadline or a sleeper's comes due meanwhile). True when done() held.
+  template <class Pred> bool step_until(Pred done, double seconds = 10.0) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::duration<double>(seconds);
+    while (!done()) {
+      if (std::chrono::steady_clock::now() >= deadline)
+        return false;
+      int stepped;
+      if (sync) {
+        stepped = sync->step();
+      } else {
+        async->drain_ingress();
+        stepped = async->sync_step();
+      }
+      if (!stepped)
+        std::this_thread::sleep_for(std::chrono::microseconds(200));
+    }
+    return true;
+  }
+
+  process_status status(int pid) { return base().get_process_info(pid)->status; }
+  bool finished(int pid) { return is_finished(status(pid)); }
+  bool parked(int pid) { return status(pid) == process_status::waiting; }
+
   // `script` submitted and driven to its end; its result.
   value_t run(const std::string &script) {
     const int pid = submit(script);
-    EXPECT_TRUE(drive()) << "did not finish: " << script;
+    EXPECT_TRUE(step_until([&] { return finished(pid); }, 30.0)) << "did not finish: " << script;
     return result(pid);
   }
 
@@ -428,4 +452,105 @@ TEST(AtomicsFormat, FormatShortestFallback) {
     ASSERT_EQ(detail::format_number_shortest_fallback(d), std::string(buf, tc.ptr));
   }
 #endif
+}
+
+// ===========================================================================
+// with-lock end to end (docs/STATE_EXEC_LOCKS.md 4.1): a first pass over the form on both
+// schedulers; the LK/LX/LW/LD suites follow the design's section 13 in full.
+// ===========================================================================
+
+namespace {
+class LocksSmoke : public ::testing::TestWithParam<std::string> {
+protected:
+  locks_world w{GetParam()};
+};
+INSTANTIATE_TEST_SUITE_P(Schedulers, LocksSmoke, ::testing::Values("sync", "async"),
+                         [](const auto &info) { return info.param; });
+} // namespace
+
+TEST_P(LocksSmoke, ValueAndLocksHeld) {
+  const auto r = as_list(w.run(R"((list (with-lock "k" (list (locks-held) 7)) (locks-held)))"));
+  ASSERT_EQ(r.size(), 2u);
+  const auto inside = as_list(r[0]);
+  ASSERT_EQ(inside.size(), 2u);
+  EXPECT_EQ(as_int(inside[1]), 7);
+  const auto held = as_list(inside[0]);
+  ASSERT_EQ(held.size(), 1u);
+  EXPECT_EQ(to_string(held[0]),
+            R"({"key": "k", "mode": "exclusive", "count": 1, "generation": 1})");
+  EXPECT_TRUE(as_list(r[1]).empty());
+}
+
+TEST_P(LocksSmoke, WaiterParksAndIsGrantedOnRelease) {
+  const int holder = w.submit(R"((with-lock "k" (begin (msg-recv "go") 1)))");
+  ASSERT_TRUE(w.step_until([&] { return w.parked(holder); }));
+  const int waiter = w.submit(R"((with-lock "k" 42))");
+  ASSERT_TRUE(w.step_until([&] { return w.parked(waiter); }));
+  const auto info = w.base().get_process_info(waiter);
+  ASSERT_TRUE(info->waiting_on.has_value());
+  EXPECT_EQ(*info->waiting_on, "lock /k");
+  const int sender = w.submit(R"((msg-send "go" "x"))");
+  ASSERT_TRUE(w.step_until([&] { return w.finished(holder) && w.finished(waiter); }));
+  EXPECT_EQ(as_int(w.result(holder)), 1);
+  EXPECT_EQ(as_int(w.result(waiter)), 42);
+  (void)sender;
+  const value_t q = w.run(R"((lock-query))");
+  EXPECT_EQ(to_string(q), R"({"held": (), "waiting": ()})");
+}
+
+TEST_P(LocksSmoke, DeadlockIsRaisedInTheCloser) {
+  const int a = w.submit(R"((with-lock "a" (begin (msg-recv "a1") (with-lock "b" 1))))");
+  const int b = w.submit(R"((with-lock "b" (begin (msg-recv "b1")
+                              (try (with-lock "a" 2) (catch (DeadlockError e) "deadlock")))))");
+  ASSERT_TRUE(w.step_until([&] { return w.parked(a) && w.parked(b); }));
+  w.submit(R"((msg-send "a1" "x"))");
+  ASSERT_TRUE(w.step_until([&] {
+    return w.parked(a) &&
+           w.base().get_process_info(a)->waiting_on == std::optional<std::string>("lock /b");
+  }));
+  w.submit(R"((msg-send "b1" "x"))");
+  ASSERT_TRUE(w.step_until([&] { return w.finished(a) && w.finished(b); }));
+  EXPECT_EQ(as_str(w.result(b)), "deadlock");
+  EXPECT_EQ(as_int(w.result(a)), 1);
+}
+
+TEST_P(LocksSmoke, TimeoutAndIfAvailable) {
+  const int holder = w.submit(R"((with-lock "k" (msg-recv "go")))");
+  ASSERT_TRUE(w.step_until([&] { return w.parked(holder); }));
+  const auto t0 = std::chrono::steady_clock::now();
+  const int waiter =
+      w.submit(R"((try (with-lock "k" :timeout 0.2 1) (catch (TimeoutError e) "timed out")))");
+  ASSERT_TRUE(w.step_until([&] { return w.finished(waiter); }));
+  const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  std::printf("timeout after %.3f s\n", took);
+  EXPECT_GE(took, 0.2);
+  EXPECT_EQ(as_str(w.result(waiter)), "timed out");
+  EXPECT_EQ(as_str(w.run(R"((with-lock "k" :if-available :else "busy" 1))")), "busy");
+  EXPECT_EQ(as_str(w.run(R"((try (with-lock "k" :timeout 0 1) (catch (TimeoutError e) "now")))")),
+            "now");
+  w.submit(R"((msg-send "go" "x"))");
+  ASSERT_TRUE(w.step_until([&] { return w.finished(holder); }));
+  EXPECT_EQ(as_int(w.run(R"((with-lock "k" :if-available :else "busy" 1))")), 1);
+}
+
+TEST_P(LocksSmoke, OptionErrorsAndCovered) {
+  for (const char *form :
+       {R"((with-lock "k" :bogus 1))", R"((with-lock "k" :timeout 1 :timeout 2 1))",
+        R"((with-lock "k" :shared :exclusive 1))", R"((with-lock "k" :else 2 1))",
+        R"((with-lock "k" :timeout))", R"((with-lock "k" :as 3 1))"}) {
+    EXPECT_EQ(as_str(w.run(std::string("(try ") + form + R"( (catch (ValueError e) "bad")))")),
+              "bad")
+        << form;
+  }
+  // A nested request under an own X hold is covered: one hold, count 2.
+  const auto r = as_list(w.run(R"((with-lock "a" (with-lock "a.b" :shared (locks-held))))"));
+  ASSERT_EQ(r.size(), 1u);
+  EXPECT_NE(to_string(r[0]).find(R"("count": 2)"), std::string::npos) << to_string(r[0]);
+  // Upgrade refused.
+  EXPECT_EQ(as_str(w.run(R"((with-lock "a" :shared
+                               (try (with-lock "a.b" 1) (catch (LockError e) (get-attr e "reason")))))")),
+            "upgrade");
+  // :as: the canonical keys; the second X grant of this world (an S grant takes the last X's).
+  EXPECT_EQ(to_string(w.run(R"((with-lock (list "b" "a" "a.x") :as g g))")),
+            R"({"key": ("a" "b"), "mode": "exclusive", "generation": 2, "abandoned": #f})");
 }
