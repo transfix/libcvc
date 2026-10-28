@@ -86,11 +86,11 @@ public:
   const render_settings &settings() const { return _settings; }
 
   // Borrow a pool for tile parallelism.  By default (nullptr) the raycaster
-  // lazily creates its OWN pool rather than borrowing ctx.computePool():
-  // cvc::thread_pool supports only one in-flight parallel_for per pool, so
-  // sharing the app-wide pool with another fan-out (e.g. cvc::nav) can
-  // deadlock.  Inject a pool only when nothing else runs parallel_for on it
-  // concurrently.  render_settings::threads == 1 forces serial.
+  // lazily creates its OWN pool rather than borrowing ctx.computePool(), so a
+  // render never competes for workers with another subsystem's fan-out (e.g.
+  // cvc::nav).  Concurrent parallel_for calls on one cvc::thread_pool run side
+  // by side, sharing its workers, so borrowing a shared pool is safe; it just
+  // shares the workers.  render_settings::threads == 1 forces serial.
   void set_thread_pool(cvc::thread_pool *pool) { _pool = pool; }
 
   // Backend selection.  Defaults to backend::cpu, so the GPU path is strictly

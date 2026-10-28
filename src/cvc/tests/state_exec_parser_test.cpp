@@ -1,5 +1,7 @@
 #include <cvc/state/state_exec/parser.h>
+#include <cvc/state/state_exec/types.h>
 #include <gtest/gtest.h>
+#include <vector>
 
 using namespace cvc::state_exec;
 
@@ -377,4 +379,110 @@ TEST(StateExecParserTest, ReadCountsTokensAgainstTheBudget) {
   EXPECT_EQ(p.read(v, budget), parser::read_status::datum);
   EXPECT_EQ(to_string(v), "c");
   EXPECT_EQ(p.read(v, budget), parser::read_status::end);
+}
+
+// -- Tokens and strings read in runs --
+
+TEST(StateExecParserTest, TokensReadAsBefore) {
+  // A token is a number only if all of it is one (strtod's forms included); everything else is
+  // a symbol of the whole token.
+  struct expect {
+    const char *token;
+    char kind; // i int, f float, s symbol, t true, n nil
+  };
+  for (const expect &e : std::vector<expect>{
+           {"42", 'i'},       {"-7", 'i'},      {"+3", 'f'},    {"3.5", 'f'},   {".5", 'f'},
+           {"-.5", 'f'},      {"1e3", 'f'},     {"1E-2", 'f'},  {"inf", 'f'},   {"-inf", 'f'},
+           {"Infinity", 'f'}, {"nan", 'f'},     {"NaN", 'f'},   {"0x10", 'f'},  {"0x1p3", 'f'},
+           {"-", 's'},        {"+", 's'},       {"...", 's'},   {"1abc", 's'},  {"x1", 's'},
+           {"in", 's'},       {"nil?", 's'},    {"n", 's'},     {"i", 's'},     {"#t", 't'},
+           {"true", 't'},     {"#f", 'n'},      {"false", 'n'}, {"nil", 'n'},   {"e5", 's'},
+           {"a.b", 's'},      {"math.pi", 's'}, {"<=", 's'},    {"&rest", 's'}, {"café", 's'}}) {
+    const value_t v = parse(e.token);
+    switch (e.kind) {
+    case 'i':
+      EXPECT_TRUE(std::holds_alternative<int64_t>(v.v)) << e.token;
+      break;
+    case 'f':
+      EXPECT_TRUE(std::holds_alternative<double>(v.v)) << e.token;
+      break;
+    case 's':
+      ASSERT_TRUE(std::holds_alternative<symbol>(v.v)) << e.token;
+      EXPECT_EQ(std::get<symbol>(v.v).name, e.token);
+      break;
+    case 't':
+      EXPECT_TRUE(std::get<bool>(v.v)) << e.token;
+      break;
+    case 'n':
+      EXPECT_TRUE(v.is_nil()) << e.token;
+      break;
+    }
+  }
+  const auto forms = parse_all("(f x1 -2 3.5)(g)");
+  ASSERT_EQ(forms.size(), 2u);
+  EXPECT_EQ(to_string(forms[0]), "(f x1 -2 3.5)");
+}
+
+TEST(StateExecParserTest, LinesAndColumnsCountedAcrossTokensAndStrings) {
+  // An error after a long token and a string spanning lines points where it did.
+  try {
+    parse("(a_long_symbol_name \"one\ntwo\nthree\" 12345 \"x\\ny\" b\n  \"unterminated");
+    FAIL() << "expected a parse_error";
+  } catch (const parse_error &e) {
+    EXPECT_EQ(e.line(), 4u);
+    EXPECT_EQ(e.col(), 16u);
+  }
+  try {
+    parse("(f \"ab\ncd\" b\"x\ny\" sym\n   ");
+    FAIL() << "expected a parse_error";
+  } catch (const parse_error &e) {
+    EXPECT_EQ(e.line(), 4u);
+    EXPECT_EQ(e.col(), 4u);
+  }
+  const value_t s = parse("\"plain run \\t then\nmore\"");
+  EXPECT_EQ(std::get<std::string>(s.v), "plain run \t then\nmore");
+  const value_t b = parse("b\"raw\\x41 run\"");
+  EXPECT_EQ(std::get<bytes_value>(b.v).data, "rawA run");
+}
+
+TEST(StateExecParserTest, ListsHoldExactlyTheirElements) {
+  // Each list is made at its exact size (its elements are collected in a reused vector first),
+  // so a parsed program holds no spare capacity.
+  const value_t v = parse("(a (b c) (d e f g h i j k l m n) () (q (r (s t u v w x))) z)");
+  std::vector<const value_t *> todo{&v};
+  int lists = 0;
+  while (!todo.empty()) {
+    const value_t *x = todo.back();
+    todo.pop_back();
+    if (const auto *lp = std::get_if<list_ptr>(&x->v)) {
+      ++lists;
+      EXPECT_EQ((*lp)->capacity(), (*lp)->size()) << to_string(*x);
+      for (const value_t &e : **lp)
+        todo.push_back(&e);
+    }
+  }
+  EXPECT_EQ(lists, 7);
+  EXPECT_EQ(to_string(v), "(a (b c) (d e f g h i j k l m n) () (q (r (s t u v w x))) z)");
+}
+
+TEST(StateExecParserTest, LongAndShortListsBetweenEachOther) {
+  // Short lists are made at their exact size from kept vectors; a long one takes the vector it
+  // was collected in. Either way each list has its own elements.
+  std::string src = "((a b) (";
+  for (int i = 0; i < 500; ++i)
+    src += std::to_string(i) + " (c " + std::to_string(i) + ") ";
+  src += ") (d e f))";
+  const value_t v = parse(src);
+  const auto &top = *std::get<list_ptr>(v.v);
+  ASSERT_EQ(top.size(), 3u);
+  EXPECT_EQ(to_string(top[0]), "(a b)");
+  EXPECT_EQ(to_string(top[2]), "(d e f)");
+  const auto &mid = *std::get<list_ptr>(top[1].v);
+  ASSERT_EQ(mid.size(), 1000u);
+  for (int i = 0; i < 500; ++i) {
+    EXPECT_EQ(std::get<int64_t>(mid[2 * i].v), i);
+    EXPECT_EQ(to_string(mid[2 * i + 1]), "(c " + std::to_string(i) + ")");
+  }
+  for (const value_t &e : top)
+    EXPECT_EQ(std::get<list_ptr>(e.v).use_count(), 1);
 }

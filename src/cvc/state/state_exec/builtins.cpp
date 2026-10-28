@@ -1,3 +1,5 @@
+#include "closure_body.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cvc/state/state_exec/builtins.h>
@@ -723,17 +725,9 @@ value_t builtin_generator(std::span<const value_t> args) {
 
   // Set up evaluator state to run the closure body
   auto env = environment::extend(cls.env_snapshot);
-  value_t body_expr;
-  if (cls.body.size() == 1) {
-    body_expr = cls.body[0];
-  } else {
-    std::vector<value_t> begin_exprs;
-    begin_exprs.reserve(1 + cls.body.size());
-    begin_exprs.push_back(value_t{symbol{"begin"}});
-    begin_exprs.insert(begin_exprs.end(), cls.body.begin(), cls.body.end());
-    body_expr = make_list(std::move(begin_exprs));
-  }
-  gen->state = gen->evaluator.create_state(body_expr, env);
+  // A body of its own: (root) in the generator returns it, and a program may change it.
+  gen->state = gen->evaluator.create_state(
+      cls.body.size() == 1 ? cls.body[0] : detail::begin_of(cls.body), env);
   gen->state.stats.start();
   track_captured_env(env); // bound back where the closure can reach, it is a cycle
 

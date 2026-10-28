@@ -1,4 +1,5 @@
 #include "closure_natives.h" // detail::class_constructor
+#include "special_forms.h"
 
 #include <atomic>
 #include <cvc/state/state_exec/builtins.h>
@@ -6,7 +7,6 @@
 #include <cvc/state/state_exec/evaluator.h>
 #include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/parser.h>
-#include <cvc/state/state_exec/stackless_evaluator.h> // all_special_forms
 #include <thread>
 
 namespace cvc::state_exec {
@@ -29,9 +29,7 @@ value_t evaluator::evaluate(const value_t &expr, environment_ptr env,
   root_expr_ = expr;
   stats_.start();
 
-  auto run_env = env ? env : environment::extend(global_env_);
-  if (!env)
-    run_env = environment::extend(global_env_);
+  const environment_ptr run_env = env ? env : environment::extend(global_env_);
 
   try {
     value_t result;
@@ -142,21 +140,56 @@ void evaluator::check_interrupted() {
 // core eval
 // ---------------------------------------------------------------------------
 
-value_t evaluator::eval_internal(const value_t &expr, environment_ptr env) {
+namespace {
+// An empty vector of values with room for `n`, from `spares` (the vectors the evaluator keeps
+// between forms), given back to them emptied when it goes, so that a form's argument vectors
+// aren't allocated each time. A few small ones are kept: at most kKept vectors of up to kRoom
+// values, so an evaluator keeps at most about 37 KB (64 x 8 values of 72 bytes, 64-bit MSVC)
+// until it is destroyed.
+struct spare_values {
+  static constexpr std::size_t kKept = 64;
+  static constexpr std::size_t kRoom = 8;
+  spare_values(std::vector<std::vector<value_t>> &spares, std::size_t n) : spares(spares) {
+    if (!spares.empty()) {
+      values = std::move(spares.back());
+      spares.pop_back();
+    }
+    values.reserve(n);
+  }
+  ~spare_values() {
+    values.clear();
+    if (values.capacity() <= kRoom && spares.size() < kKept) {
+      try {
+        spares.push_back(std::move(values));
+      } catch (...) { // out of memory: just free it
+      }
+    }
+  }
+  spare_values(const spare_values &) = delete;
+  spare_values &operator=(const spare_values &) = delete;
+
+  std::vector<std::vector<value_t>> &spares;
+  std::vector<value_t> values;
+};
+} // namespace
+
+value_t evaluator::eval_internal(const value_t &expr, const environment_ptr &env) {
   ++generation_;
   trail_.push_back(&expr);
-  // Pops the trail on the way out. The first one an exception unwinds records where it was
-  // raised, while the trail still has it.
+  // Pops the trail on the way out. The first one an exception unwinds (eval_form didn't return)
+  // records where it was raised, while the trail still has it.
   struct trail_guard {
     evaluator &ev;
-    const int unwinding = std::uncaught_exceptions();
+    bool returned = false;
     ~trail_guard() {
-      if (std::uncaught_exceptions() > unwinding && ev.raise_generation_ != ev.generation_)
+      if (!returned && ev.raise_generation_ != ev.generation_)
         ev.record_raise_point();
       ev.trail_.pop_back();
     }
   } guard{*this};
-  return eval_form(expr, std::move(env));
+  value_t result = eval_form(expr, env);
+  guard.returned = true; // (returning `result` moves it, which can't throw)
+  return result;
 }
 
 void evaluator::record_raise_point() noexcept {
@@ -209,13 +242,13 @@ void evaluator::annotate(value_t &exc) {
   if (!lp || !*lp || (*lp)->empty())
     return;
   if (const auto *head = std::get_if<symbol>(&(**lp)[0].v);
-      head && !stackless_evaluator::all_special_forms().count(head->name))
+      head && detail::special_form_of(head->name) == detail::special_form::none)
     set_field(exc, "function", value_t(head->name));
 }
 
-value_t evaluator::eval_form(const value_t &expr, environment_ptr env) {
+value_t evaluator::eval_form(const value_t &expr, const environment_ptr &env) {
   check_interrupted();
-  stats_.increment_step();
+  stats_.count_eval_step();
 
   // Symbol
   if (auto *sym = std::get_if<symbol>(&expr.v)) {
@@ -245,46 +278,57 @@ value_t evaluator::eval_form(const value_t &expr, environment_ptr env) {
     throw dsl_error("TypeError", "invalid expression head: " + to_string(elems[0]));
 
   const auto &name = head->name;
-  std::vector<value_t> args(elems.begin() + 1, elems.end());
+  // A copy of the arguments (the program may change its own code while they run), in a vector
+  // this evaluator keeps between forms.
+  spare_values args_copy(spare_vectors_, elems.size() - 1);
+  std::vector<value_t> &args = args_copy.values;
+  args.assign(elems.begin() + 1, elems.end());
 
-  // --- Special forms ---
-  if (name == "if")
+  // --- Special forms --- (all of the stackless evaluator's but yield and break)
+  switch (detail::special_form_of(name)) {
+  case detail::special_form::if_:
     return do_if(args, env);
-  if (name == "begin")
+  case detail::special_form::begin:
     return do_begin(args, env);
-  if (name == "while")
+  case detail::special_form::while_:
     return do_while(args, env);
-  if (name == "for")
+  case detail::special_form::for_:
     return do_for(args, env);
-  if (name == "set")
+  case detail::special_form::set:
     return do_set(args, env);
-  if (name == "quote")
+  case detail::special_form::quote:
     return do_quote(args);
-  if (name == "lambda")
+  case detail::special_form::lambda:
     return do_lambda(args, env);
-  if (name == "return")
+  case detail::special_form::return_:
     return do_return(args, env);
-  if (name == "let")
+  case detail::special_form::let:
     return do_let(args, env);
-  if (name == "super")
+  case detail::special_form::super:
     return do_super(args, env);
-  if (name == "defun")
+  case detail::special_form::defun:
     return do_defun(args, env);
-  if (name == "defclass")
+  case detail::special_form::defclass:
     return do_defclass(args, env);
-  if (name == "defmacro")
+  case detail::special_form::defmacro:
     return do_defmacro(args, env);
-  if (name == "eval")
+  case detail::special_form::eval:
     return do_eval(args, env);
-  if (name == "root")
+  case detail::special_form::root:
     return do_root();
-  if (name == "try")
+  case detail::special_form::try_:
     return do_try(args, env);
-  if (name == "raise")
+  case detail::special_form::raise:
     return do_raise(args, env);
+  case detail::special_form::none:
+  case detail::special_form::yield:
+  case detail::special_form::break_:
+    break;
+  }
 
   // --- User macros ---
-  if (auto it = user_macros_.find(name); it != user_macros_.end()) {
+  if (auto it = user_macros_.empty() ? user_macros_.end() : user_macros_.find(name);
+      it != user_macros_.end()) {
     auto &[params, body] = it->second;
     std::unordered_map<std::string, value_t> subst;
     for (size_t i = 0; i < params.size(); ++i)
@@ -298,8 +342,8 @@ value_t evaluator::eval_form(const value_t &expr, environment_ptr env) {
     throw dsl_error("NameError", "unknown function: " + name);
 
   // Evaluate arguments
-  std::vector<value_t> evaled;
-  evaled.reserve(args.size());
+  spare_values evaled_values(spare_vectors_, args.size());
+  std::vector<value_t> &evaled = evaled_values.values;
   for (auto &a : args)
     evaled.push_back(eval_internal(a, env));
 
@@ -318,7 +362,7 @@ value_t evaluator::eval_form(const value_t &expr, environment_ptr env) {
 // special forms
 // ---------------------------------------------------------------------------
 
-value_t evaluator::do_if(const std::vector<value_t> &args, environment_ptr env) {
+value_t evaluator::do_if(const std::vector<value_t> &args, const environment_ptr &env) {
   check_interrupted();
   if (args.size() < 2 || args.size() > 3)
     throw dsl_error("TypeError", "if: expected a condition, a then branch and an optional else "
@@ -331,7 +375,7 @@ value_t evaluator::do_if(const std::vector<value_t> &args, environment_ptr env) 
   return nil_value;
 }
 
-value_t evaluator::do_begin(const std::vector<value_t> &args, environment_ptr env) {
+value_t evaluator::do_begin(std::span<const value_t> args, const environment_ptr &env) {
   if (args.empty())
     return nil_value;
   value_t result = nil_value;
@@ -342,7 +386,7 @@ value_t evaluator::do_begin(const std::vector<value_t> &args, environment_ptr en
   return result;
 }
 
-value_t evaluator::do_while(const std::vector<value_t> &args, environment_ptr env) {
+value_t evaluator::do_while(const std::vector<value_t> &args, const environment_ptr &env) {
   if (args.size() < 2)
     throw dsl_error("TypeError", "while: expected a condition and a body");
   while (eval_internal(args[0], env).is_truthy()) {
@@ -353,7 +397,7 @@ value_t evaluator::do_while(const std::vector<value_t> &args, environment_ptr en
   return nil_value;
 }
 
-value_t evaluator::do_for(const std::vector<value_t> &args, environment_ptr env) {
+value_t evaluator::do_for(const std::vector<value_t> &args, const environment_ptr &env) {
   if (args.size() < 3)
     throw dsl_error("TypeError", "for: expected a variable, a collection and a body");
   auto *var_sym = std::get_if<symbol>(&args[0].v);
@@ -372,7 +416,7 @@ value_t evaluator::do_for(const std::vector<value_t> &args, environment_ptr env)
   return nil_value;
 }
 
-value_t evaluator::do_set(const std::vector<value_t> &args, environment_ptr env) {
+value_t evaluator::do_set(const std::vector<value_t> &args, const environment_ptr &env) {
   if (args.size() != 2)
     throw dsl_error("TypeError", "set: expected 2 arguments");
   auto *sym = std::get_if<symbol>(&args[0].v);
@@ -389,7 +433,7 @@ value_t evaluator::do_quote(const std::vector<value_t> &args) {
   return args[0];
 }
 
-value_t evaluator::do_lambda(const std::vector<value_t> &args, environment_ptr env) {
+value_t evaluator::do_lambda(const std::vector<value_t> &args, const environment_ptr &env) {
   if (args.size() < 2)
     throw dsl_error("TypeError", "lambda: expected at least 2 arguments");
   // Parse parameter list
@@ -423,7 +467,7 @@ value_t evaluator::do_lambda(const std::vector<value_t> &args, environment_ptr e
   return value_t{std::move(cls)};
 }
 
-value_t evaluator::do_return(const std::vector<value_t> &args, environment_ptr env) {
+value_t evaluator::do_return(const std::vector<value_t> &args, const environment_ptr &env) {
   if (args.size() > 1)
     throw dsl_error("TypeError",
                     "return: expected at most 1 argument, got " + std::to_string(args.size()));
@@ -432,7 +476,7 @@ value_t evaluator::do_return(const std::vector<value_t> &args, environment_ptr e
   throw return_exception(eval_internal(args[0], env));
 }
 
-value_t evaluator::do_let(const std::vector<value_t> &args, environment_ptr env) {
+value_t evaluator::do_let(const std::vector<value_t> &args, const environment_ptr &env) {
   if (args.size() < 2)
     throw dsl_error("TypeError", "let: expected at least 2 arguments");
   auto local = environment::extend(env);
@@ -449,12 +493,11 @@ value_t evaluator::do_let(const std::vector<value_t> &args, environment_ptr env)
       throw dsl_error("TypeError", "let: binding name must be symbol");
     local->set(sym->name, eval_internal((**bp)[1], local));
   }
-  // Evaluate body expressions
-  std::vector<value_t> body(args.begin() + 1, args.end());
-  return do_begin(body, local);
+  // Evaluate body expressions (the arguments are this form's own copy)
+  return do_begin(std::span<const value_t>(args).subspan(1), local);
 }
 
-value_t evaluator::do_super(const std::vector<value_t> &args, environment_ptr env) {
+value_t evaluator::do_super(const std::vector<value_t> &args, const environment_ptr &env) {
   if (args.size() < 2)
     throw dsl_error("TypeError", "super: expected at least 2 arguments");
   auto self_val = eval_internal(args[0], env);
@@ -530,7 +573,7 @@ value_t evaluator::do_super(const std::vector<value_t> &args, environment_ptr en
   throw dsl_error("KeyError", "super: method '" + method_name + "' not found");
 }
 
-value_t evaluator::do_defun(const std::vector<value_t> &args, environment_ptr env) {
+value_t evaluator::do_defun(const std::vector<value_t> &args, const environment_ptr &env) {
   if (args.size() < 3)
     throw dsl_error("TypeError", "defun: expected at least 3 arguments");
   auto *name_sym = std::get_if<symbol>(&args[0].v);
@@ -544,7 +587,7 @@ value_t evaluator::do_defun(const std::vector<value_t> &args, environment_ptr en
   return func;
 }
 
-value_t evaluator::do_defclass(const std::vector<value_t> &args, environment_ptr env) {
+value_t evaluator::do_defclass(const std::vector<value_t> &args, const environment_ptr &env) {
   if (args.empty())
     throw dsl_error("TypeError", "defclass: expected at least a name");
   auto *name_sym = std::get_if<symbol>(&args[0].v);
@@ -707,7 +750,7 @@ value_t evaluator::do_defclass(const std::vector<value_t> &args, environment_ptr
   return env->lookup(name) ? *env->lookup(name) : nil_value;
 }
 
-value_t evaluator::do_defmacro(const std::vector<value_t> &args, environment_ptr env) {
+value_t evaluator::do_defmacro(const std::vector<value_t> &args, const environment_ptr &env) {
   if (args.size() < 3)
     throw dsl_error("TypeError", "defmacro: expected at least 3 arguments");
   auto *name_sym = std::get_if<symbol>(&args[0].v);
@@ -735,7 +778,7 @@ value_t evaluator::do_defmacro(const std::vector<value_t> &args, environment_ptr
   return value_t{symbol{name_sym->name}};
 }
 
-value_t evaluator::do_eval(const std::vector<value_t> &args, environment_ptr env) {
+value_t evaluator::do_eval(const std::vector<value_t> &args, const environment_ptr &env) {
   if (args.size() != 1)
     throw dsl_error("TypeError", "eval: expected 1 argument");
   auto code = eval_internal(args[0], env);
@@ -758,7 +801,7 @@ struct handling_scope {
 };
 } // namespace
 
-value_t evaluator::do_try(const std::vector<value_t> &args, environment_ptr env) {
+value_t evaluator::do_try(const std::vector<value_t> &args, const environment_ptr &env) {
   // (try body... (catch (Type var) handler...)... (finally cleanup...)). Handlers and the cleanup
   // run after the catch that stopped the exception has finished, so the stack is unwound first.
   const try_form form = parse_try(args);
@@ -829,7 +872,7 @@ value_t evaluator::do_try(const std::vector<value_t> &args, environment_ptr env)
   return result;
 }
 
-value_t evaluator::do_raise(const std::vector<value_t> &args, environment_ptr env) {
+value_t evaluator::do_raise(const std::vector<value_t> &args, const environment_ptr &env) {
   if (args.size() > 1)
     throw dsl_error("TypeError",
                     "raise: expected at most 1 arg, got " + std::to_string(args.size()));

@@ -14,6 +14,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <cvc/state/state_exec/data_job.h>
 #include <cvc/state/state_exec/evaluator.h>
 #include <cvc/state/state_exec/exceptions.h>
@@ -76,6 +77,19 @@ struct eval_frame {
   environment_ptr extra_env;
   /// The frame evaluates a DSL function's body: a `return` inside it unwinds no further.
   bool function_body = false;
+  /// A call's function, as found when the call was initialized, so that applying it needn't
+  /// look the name up again: the scopes that lookup walked, from `env` out to the one that binds
+  /// it (how many, 0 for no record, and a stamp of their sizes and identities: address and
+  /// environment::serial), and the binding (a node of that scope's `bindings`). The apply step
+  /// uses the binding only while those scopes are as they were: a scope that gained a binding
+  /// meanwhile (one that might shadow it), or a chain a host rewired (even to a scope made where
+  /// a dropped one was), makes it look the name up again, as a frame without a record does (a
+  /// restored one). Not serialized; not part of what the frame means. (A host that erases a
+  /// name from a scope's `bindings`, rather than adding or setting one, must first clear the
+  /// record of every frame waiting to apply a function found in that scope.)
+  std::uint32_t callee_depth = 0;
+  std::uint64_t callee_stamp = 0;
+  const std::pair<const std::string, value_t> *callee = nullptr;
 };
 
 /// Deep-data work a step left unfinished (data_options::step_nodes, or a job waiting on a call):
@@ -336,7 +350,8 @@ private:
 
   // Frame management
   void pop_frame(evaluator_state &state, value_t result);
-  void push_frame(evaluator_state &state, value_t expr, environment_ptr env);
+  void push_frame(evaluator_state &state, const value_t &expr, const environment_ptr &env);
+  void push_frame(evaluator_state &state, value_t &&expr, environment_ptr &&env);
 
   // Step implementations — one per phase
   void step_init(evaluator_state &state, eval_frame &frame);
@@ -376,7 +391,7 @@ private:
                     const std::vector<value_t> &args);
   // Push the frame that evaluates `cls`'s body in `local` (its parameters already bound).
   void push_closure_body(evaluator_state &state, const closure_ptr &cls, environment_ptr local);
-  void handle_defclass(evaluator_state &state, eval_frame &frame, const std::vector<value_t> &args);
+  void handle_defclass(evaluator_state &state, eval_frame &frame, std::span<const value_t> args);
 
   environment_ptr global_env_;
   std::shared_ptr<const std::set<std::string>>

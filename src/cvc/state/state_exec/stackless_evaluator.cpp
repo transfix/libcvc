@@ -1,6 +1,10 @@
+#include "closure_body.h"
 #include "closure_natives.h"
+#include "scope_mark.h"
+#include "special_forms.h"
 
 #include <chrono>
+#include <cstdint>
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/generator.h>
 #include <cvc/state/state_exec/heap.h>
@@ -105,9 +109,179 @@ bool stackless_evaluator::step_read(evaluator_state &state) {
 }
 
 namespace {
+// -- frame vectors recycled on this thread ----------------------------------------------------
+//
+// Nearly every list form gives its frame a vector or two: the call's arguments, the values its
+// children return, a set's name. Allocated for the frame and freed when it pops, they were most
+// of the allocations a step made. A popped frame gives its (emptied) vectors back here instead,
+// kept by capacity, and the next frame takes one of exactly the capacity it needs: a frame holds
+// no more than it would have with a fresh vector, and the stack's memory (and its measurement,
+// heap.h) stays what it was. Per thread and bounded, like the scopes environment::extend() keeps:
+// at most 16 vectors of each capacity from 1 to 8 values (576 values of 72 bytes on 64-bit MSVC,
+// about 41 KB) and 16 one-string vectors, kept until the thread exits.
+struct frame_vectors {
+  static constexpr std::size_t kMaxCapacity = 8; // larger vectors are freed
+  static constexpr std::size_t kPerCapacity = 16;
+  std::vector<value_t> values[kMaxCapacity + 1][kPerCapacity];
+  std::size_t nvalues[kMaxCapacity + 1] = {};
+  std::vector<std::string> strings[kPerCapacity]; // capacity 1: a set's or a for's name
+  std::size_t nstrings = 0;
+  ~frame_vectors();
+};
+
+// Set once the thread has destroyed its vectors: a frame popped later in the thread's exit frees
+// its own.
+thread_local bool t_frame_vectors_gone = false;
+thread_local frame_vectors t_frame_vectors;
+
+frame_vectors::~frame_vectors() { t_frame_vectors_gone = true; }
+
+frame_vectors *kept_vectors() noexcept { return t_frame_vectors_gone ? nullptr : &t_frame_vectors; }
+
+// An empty vector with room for `n` values: a kept one of capacity n, if there is one.
+std::vector<value_t> take_values(std::size_t n) {
+  if (n - 1 < frame_vectors::kMaxCapacity)
+    if (frame_vectors *kept = kept_vectors(); kept && kept->nvalues[n] > 0)
+      return std::move(kept->values[n][--kept->nvalues[n]]);
+  std::vector<value_t> v;
+  v.reserve(n);
+  return v;
+}
+
+// Keep `v` (emptied) for a frame to take, or free it.
+void give_values(std::vector<value_t> &v) noexcept {
+  const std::size_t n = v.capacity();
+  if (n - 1 < frame_vectors::kMaxCapacity)
+    if (frame_vectors *kept = kept_vectors();
+        kept && kept->nvalues[n] < frame_vectors::kPerCapacity)
+      kept->values[n][kept->nvalues[n]++] = std::move(v); // v is empty: nothing is dropped
+}
+
+// Make `v` (empty) able to hold `n` values without growing: a kept vector if it has no room.
+void make_room(std::vector<value_t> &v, std::size_t n) {
+  if (v.capacity() >= n)
+    return;
+  if (v.capacity() == 0)
+    v = take_values(n);
+  else
+    v.reserve(n);
+}
+
+// Fill `v` (empty) with copies of `from`.
+void fill_values(std::vector<value_t> &v, std::span<const value_t> from) {
+  make_room(v, from.size());
+  v.assign(from.begin(), from.end());
+}
+
+// Set `strs` (empty) to the one string `s`.
+void set_one_string(std::vector<std::string> &strs, const std::string &s) {
+  if (strs.capacity() == 0)
+    if (frame_vectors *kept = kept_vectors(); kept && kept->nstrings > 0)
+      strs = std::move(kept->strings[--kept->nstrings]);
+  strs.push_back(s);
+}
+
+void give_strings(std::vector<std::string> &strs) noexcept {
+  if (strs.capacity() == 1)
+    if (frame_vectors *kept = kept_vectors(); kept && kept->nstrings < frame_vectors::kPerCapacity)
+      kept->strings[kept->nstrings++] = std::move(strs);
+}
+
+// Pop the top frame, keeping its vectors. Its parts are freed in the order its destructor frees
+// them (the last member first), so the owners it drops reach a release backlog in the same order.
+void pop_top(std::vector<eval_frame> &stack) {
+  eval_frame &f = stack.back();
+  f.extra_env.reset();
+  f.extra_lists.clear();
+  f.extra_strs.clear();
+  give_strings(f.extra_strs);
+  f.extra_vals.clear();
+  give_values(f.extra_vals);
+  f.results.clear();
+  give_values(f.results);
+  stack.pop_back(); // env, then expr
+}
+
+// Push a frame evaluating `expr` in `env`, built in place.
+void push_new_frame(std::vector<eval_frame> &stack, value_t &&expr, environment_ptr &&env) {
+  eval_frame &f = stack.emplace_back();
+  f.expr = std::move(expr);
+  f.env = std::move(env);
+}
+
+// Push the frame that evaluates a DSL function's body: a `return` inside it returns from here.
+void push_body_frame(std::vector<eval_frame> &stack, value_t &&body, environment_ptr &&local) {
+  push_new_frame(stack, std::move(body), std::move(local));
+  stack.back().function_body = true;
+}
+
+// The function a call frame applies: the binding its init found, while the scopes it walked are
+// as they were and it still binds the call's head, else whatever the name finds now (as if
+// looked up again: a scope may have gained a binding of the name, or the head changed).
+const value_t *callee_of(const eval_frame &frame, const std::string &name) {
+  if (frame.callee &&
+      detail::mark_holds(frame.env.get(), {frame.callee_depth, frame.callee_stamp}) &&
+      frame.callee->first == name)
+    return &frame.callee->second;
+  return frame.env->lookup(name);
+}
+
+// Pop the top frame with the value `v`, which goes to the frame below (or is the state's result).
+// It is taken before the top frame goes, since it may be in that frame, or in a scope only that
+// frame holds; the frame's parts are then freed as pop_frame frees them, and for the last frame
+// before the state's old result is (what pop_frame did: a release backlog sees the same order).
+void hand_up(evaluator_state &state, const value_t &v) {
+  std::vector<eval_frame> &stack = state.stack;
+  if (stack.size() > 1) {
+    stack[stack.size() - 2].results.push_back(v);
+    pop_top(stack);
+  } else {
+    value_t result = v;
+    pop_top(stack);
+    state.result = std::move(result);
+    state.done = true;
+  }
+}
+
+void hand_up(evaluator_state &state, value_t &&v) {
+  std::vector<eval_frame> &stack = state.stack;
+  if (stack.size() > 1) {
+    stack[stack.size() - 2].results.push_back(std::move(v));
+    pop_top(stack);
+  } else {
+    value_t result = std::move(v);
+    pop_top(stack);
+    state.result = std::move(result);
+    state.done = true;
+  }
+}
+
+// -- the (begin ...) bodies shared by closures (closure_body.h) --------------------------------
+//
+// One slot per lambda form, by its address, holding (weakly) the (begin ...) the last closure it
+// made shares. A slot whose form was freed and its address reused is harmless: what a slot holds
+// is used only while it is exactly (begin body...) for the new closure's body, each form the same
+// object or an atom that evaluates the same (same_form: a number bit for bit, so -0.0 is not
+// 0.0). Per thread, and bounded (64 slots, each a weak reference: the list's block stays
+// allocated while the slot holds it, about 40 bytes, until the slot is reused).
+struct shared_bodies {
+  static constexpr std::size_t kSlots = 64;
+  struct slot {
+    const void *form = nullptr;
+    std::weak_ptr<std::vector<value_t>> expr;
+  };
+  slot slots[kSlots];
+  ~shared_bodies();
+};
+
+thread_local bool t_shared_bodies_gone = false;
+thread_local shared_bodies t_shared_bodies;
+
+shared_bodies::~shared_bodies() { t_shared_bodies_gone = true; }
+
 // A loop's body: the form at args[first], or, when there are several, all of them in order as a
 // (begin ...). A single-form body stays as it is, so its frames are what they always were.
-value_t loop_body(const std::vector<value_t> &args, std::size_t first) {
+value_t loop_body(std::span<const value_t> args, std::size_t first) {
   if (args.size() == first + 1)
     return args[first];
   std::vector<value_t> forms;
@@ -448,6 +622,25 @@ void push_await(evaluator_state &state, detail::await_request r, std::span<const
 }
 } // namespace
 
+list_ptr detail::shared_body_expr(const void *form, const std::vector<value_t> &body) {
+  if (body.size() < 2)
+    return nullptr;
+  shared_bodies::slot *slot = nullptr;
+  if (!t_shared_bodies_gone) {
+    slot = &t_shared_bodies
+                .slots[(reinterpret_cast<std::uintptr_t>(form) >> 4) % shared_bodies::kSlots];
+    if (slot->form == form)
+      if (list_ptr made = slot->expr.lock(); made && is_begin_of(*made, body))
+        return made;
+  }
+  list_ptr made = std::get<list_ptr>(begin_of(body).v);
+  if (slot) {
+    slot->form = form;
+    slot->expr = made;
+  }
+  return made;
+}
+
 bool can_await() {
   const await_slot *slot = t_await;
   return slot && slot->enabled && !slot->request && !t_park_forbidden &&
@@ -630,6 +823,7 @@ void stackless_evaluator::begin_expansion(evaluator_state &state, value_t expans
   frame.extra_strs.clear();
   frame.extra_lists.clear();
   frame.extra_env = nullptr;
+  frame.callee = nullptr;
 }
 
 bool stackless_evaluator::step(evaluator_state &state) {
@@ -658,7 +852,7 @@ bool stackless_evaluator::step(evaluator_state &state) {
       state.done = true;
       return true;
     } else {
-      state.stats.increment_step();
+      state.stats.count_eval_step();
       step_frame(state);
       done = state.done;
     }
@@ -849,7 +1043,7 @@ void stackless_evaluator::check_interrupted() {
 // ---------------------------------------------------------------------------
 
 void stackless_evaluator::pop_frame(evaluator_state &state, value_t result) {
-  state.stack.pop_back();
+  pop_top(state.stack);
   if (!state.stack.empty()) {
     state.stack.back().results.push_back(std::move(result));
   } else {
@@ -858,8 +1052,18 @@ void stackless_evaluator::pop_frame(evaluator_state &state, value_t result) {
   }
 }
 
-void stackless_evaluator::push_frame(evaluator_state &state, value_t expr, environment_ptr env) {
-  state.stack.push_back({.expr = std::move(expr), .env = std::move(env)});
+void stackless_evaluator::push_frame(evaluator_state &state, const value_t &expr,
+                                     const environment_ptr &env) {
+  // Copied before the stack grows: `expr` and `env` may be in the top frame, which growing moves,
+  // and a copy that throws (out of memory) leaves the stack as it was.
+  value_t e = expr;
+  environment_ptr scope = env;
+  push_new_frame(state.stack, std::move(e), std::move(scope));
+}
+
+void stackless_evaluator::push_frame(evaluator_state &state, value_t &&expr,
+                                     environment_ptr &&env) {
+  push_new_frame(state.stack, std::move(expr), std::move(env));
 }
 
 // ---------------------------------------------------------------------------
@@ -873,23 +1077,23 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
   // Symbol
   if (auto *sym = std::get_if<symbol>(&expr.v)) {
     if (sym->name == "nil") {
-      pop_frame(state, nil_value);
+      hand_up(state, nil_value);
       return;
     }
     if (sym->name == "t") {
-      pop_frame(state, true_value);
+      hand_up(state, true_value);
       return;
     }
     auto *val = env->lookup(sym->name);
     if (!val)
       throw dsl_error("NameError", "undefined symbol: " + sym->name);
-    pop_frame(state, *val);
+    hand_up(state, *val);
     return;
   }
 
-  // Non-list atom
+  // Non-list atom: its own value (the frame's copy of it goes with the frame)
   if (!std::holds_alternative<list_ptr>(expr.v)) {
-    pop_frame(state, expr);
+    hand_up(state, std::move(expr));
     return;
   }
 
@@ -909,76 +1113,90 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
     throw dsl_error("TypeError", "invalid expression head: " + to_string(elems[0]));
 
   const auto &name = head->name;
-  std::vector<value_t> args(elems.begin() + 1, elems.end());
+  // The form's arguments, read in place: what a frame keeps across steps it copies (a program
+  // may change its own code meanwhile, and a frame evaluates the form as it was).
+  const std::span<const value_t> args(elems.data() + 1, elems.size() - 1);
+  const detail::special_form form = detail::special_form_of(name);
 
   // --- Special-form gate (capability control) ---
   // If this evaluator is restricted, a special form NOT on the allowlist is refused. A
   // non-special-form head falls through to normal application (the environment governs it).
-  if (allowed_forms_ && all_special_forms().count(name) && !allowed_forms_->count(name))
+  if (allowed_forms_ && form != detail::special_form::none && !allowed_forms_->count(name))
     throw dsl_error("RuntimeError", "special form '" + name + "' is not permitted in this context");
 
   // --- Special forms ---
-  if (name == "if") {
+  switch (form) {
+  case detail::special_form::none:
+    break;
+  case detail::special_form::if_: {
     if (args.size() < 2 || args.size() > 3)
       throw dsl_error("TypeError", "if: expected a condition, a then branch and an optional else "
                                    "branch, got " +
                                        std::to_string(args.size()) + " args");
     frame.phase = eval_phase::if_cond;
-    frame.extra_vals = std::move(args);
+    fill_values(frame.extra_vals, args);
+    make_room(frame.results, 2); // the condition's value, then the branch's
     push_frame(state, frame.extra_vals[0], env);
     return;
   }
-  if (name == "begin") {
+  case detail::special_form::begin: {
     if (args.empty()) {
       pop_frame(state, nil_value);
       return;
     }
     frame.phase = eval_phase::begin_next;
-    frame.extra_vals = std::move(args);
+    fill_values(frame.extra_vals, args);
+    make_room(frame.results, args.size());
     frame.index = 0;
     push_frame(state, frame.extra_vals[0], env);
     return;
   }
-  if (name == "while") {
+  case detail::special_form::while_: {
     if (args.size() < 2)
       throw dsl_error("TypeError", "while: expected a condition and a body");
     frame.phase = eval_phase::while_cond;
-    frame.extra_vals = {args[0], loop_body(args, 1)}; // [0]=cond, [1]=body
+    make_room(frame.extra_vals, 2);
+    frame.extra_vals.push_back(args[0]);            // [0]=cond
+    frame.extra_vals.push_back(loop_body(args, 1)); // [1]=body
+    make_room(frame.results, 1);
     push_frame(state, frame.extra_vals[0], env);
     return;
   }
-  if (name == "for") {
+  case detail::special_form::for_: {
     if (args.size() < 3)
       throw dsl_error("TypeError", "for: expected a variable, a collection and a body");
     auto *var_sym = std::get_if<symbol>(&args[0].v);
     if (!var_sym)
       throw dsl_error("TypeError", "for: first arg must be symbol");
     frame.phase = eval_phase::for_body;
-    frame.extra_strs = {var_sym->name};
-    frame.extra_vals = {loop_body(args, 2)}; // body expression
-    frame.extra_lists = {};          // will hold iterator
+    set_one_string(frame.extra_strs, var_sym->name);
+    make_room(frame.extra_vals, 1);
+    frame.extra_vals.push_back(loop_body(args, 2)); // body expression
+    frame.extra_lists.clear();                      // will hold iterator
+    make_room(frame.results, 1);
     frame.index = -1;                // -1 = still evaluating collection
     push_frame(state, args[1], env); // evaluate collection
     return;
   }
-  if (name == "set") {
+  case detail::special_form::set: {
     if (args.size() != 2)
       throw dsl_error("TypeError", "set: expected 2 args");
     auto *var_sym = std::get_if<symbol>(&args[0].v);
     if (!var_sym)
       throw dsl_error("TypeError", "set: first arg must be symbol");
     frame.phase = eval_phase::set_value;
-    frame.extra_strs = {var_sym->name};
+    set_one_string(frame.extra_strs, var_sym->name);
+    make_room(frame.results, 1);
     push_frame(state, args[1], env);
     return;
   }
-  if (name == "quote") {
+  case detail::special_form::quote: {
     if (args.size() != 1)
       throw dsl_error("TypeError", "quote: expected 1 arg");
     pop_frame(state, args[0]);
     return;
   }
-  if (name == "lambda") {
+  case detail::special_form::lambda: {
     if (args.size() < 2)
       throw dsl_error("TypeError", "lambda: expected at least 2 args");
     std::vector<symbol> params;
@@ -999,26 +1217,27 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
     cls->params = std::move(params);
     cls->variadic = variadic;
     cls->body = std::vector<value_t>(args.begin() + 1, args.end());
+    cls->body_expr = detail::shared_body_expr(lp->get(), cls->body);
     cls->env_snapshot = env;
     track_captured_env(env); // bound back into env (or anything it holds), it is a cycle
     pop_frame(state, value_t{std::move(cls)});
     return;
   }
-  if (name == "return") {
+  case detail::special_form::return_: {
     if (args.size() != 1)
       throw dsl_error("TypeError", "return: expected 1 arg, got " + std::to_string(args.size()));
     frame.phase = eval_phase::return_value;
     push_frame(state, args[0], env);
     return;
   }
-  if (name == "yield") {
+  case detail::special_form::yield: {
     if (args.size() != 1)
       throw dsl_error("TypeError", "yield: expected 1 arg, got " + std::to_string(args.size()));
     frame.phase = eval_phase::yield_value;
     push_frame(state, args[0], env);
     return;
   }
-  if (name == "break") {
+  case detail::special_form::break_: {
     if (args.size() > 1)
       throw dsl_error("TypeError",
                       "break: expected at most 1 arg, got " + std::to_string(args.size()));
@@ -1034,7 +1253,7 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
     // Fall through to step_break_unwind on next step
     return;
   }
-  if (name == "let") {
+  case detail::special_form::let: {
     if (args.size() < 2)
       throw dsl_error("TypeError", "let: expected at least 2 args");
     auto *bindings_lp = std::get_if<list_ptr>(&args[0].v);
@@ -1042,7 +1261,7 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
       throw dsl_error("TypeError", "let: first arg must be binding list");
     auto local = environment::extend(env);
     frame.phase = eval_phase::let_bindings;
-    frame.extra_vals = std::vector<value_t>(args.begin(), args.end()); // [0]=bindings, [1..]=body
+    fill_values(frame.extra_vals, args); // [0]=bindings, [1..]=body
     frame.extra_env = local;
     frame.index = 0;
     if (!(**bindings_lp).empty()) {
@@ -1064,7 +1283,7 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
     }
     return;
   }
-  if (name == "defun") {
+  case detail::special_form::defun: {
     if (args.size() < 3)
       throw dsl_error("TypeError", "defun: expected at least 3 args");
     auto *name_sym = std::get_if<symbol>(&args[0].v);
@@ -1089,13 +1308,14 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
     cls->params = std::move(params);
     cls->variadic = variadic;
     cls->body = std::vector<value_t>(args.begin() + 2, args.end());
+    cls->body_expr = detail::shared_body_expr(lp->get(), cls->body);
     cls->env_snapshot = env;
     track_captured_env(env); // bound in the env it captured: a cycle
     env->set(name_sym->name, value_t{cls});
     pop_frame(state, value_t{std::move(cls)});
     return;
   }
-  if (name == "defmacro") {
+  case detail::special_form::defmacro: {
     if (args.size() < 3)
       throw dsl_error("TypeError", "defmacro: expected at least 3 args");
     auto *name_sym = std::get_if<symbol>(&args[0].v);
@@ -1119,43 +1339,48 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
     pop_frame(state, value_t{symbol{name_sym->name}});
     return;
   }
-  if (name == "eval") {
+  case detail::special_form::eval: {
     if (args.size() != 1)
       throw dsl_error("TypeError", "eval: expected 1 arg");
     frame.phase = eval_phase::eval_inner;
     push_frame(state, args[0], env);
     return;
   }
-  if (name == "root") {
+  case detail::special_form::root: {
     pop_frame(state, state.root_expr);
     return;
   }
-  if (name == "super") {
+  case detail::special_form::super: {
     if (args.size() < 2)
       throw dsl_error("TypeError", "super: expected at least 2 args");
     auto *method_sym = std::get_if<symbol>(&args[1].v);
     frame.phase = eval_phase::super_args;
     frame.extra_strs = {method_sym ? method_sym->name : ""};
-    frame.extra_vals = std::vector<value_t>(args.begin() + 2, args.end());
+    fill_values(frame.extra_vals, args.subspan(2));
     frame.index = 0;
     push_frame(state, args[0], env); // evaluate self
     return;
   }
-  if (name == "defclass") {
+  case detail::special_form::defclass: {
     handle_defclass(state, frame, args);
     return;
   }
-  if (name == "try") {
+  case detail::special_form::try_: {
     // (try body... (catch (Type var) handler...)... (finally cleanup...))
     try_form form = parse_try(args);
     frame.phase = eval_phase::try_body;
-    frame.extra_vals = {body_of(form.body), std::move(form.cleanup), nil_value};
-    frame.extra_strs = {""};
-    frame.extra_lists = {std::move(form.catches)};
+    make_room(frame.extra_vals, 3); // moved in, not copied from an initializer list
+    frame.extra_vals.push_back(body_of(form.body));
+    frame.extra_vals.push_back(std::move(form.cleanup));
+    frame.extra_vals.push_back(nil_value);
+    set_one_string(frame.extra_strs, std::string());
+    frame.extra_lists.clear();
+    frame.extra_lists.push_back(std::move(form.catches));
+    make_room(frame.results, 1);
     push_frame(state, frame.extra_vals[try_body_slot], env);
     return;
   }
-  if (name == "raise") {
+  case detail::special_form::raise: {
     if (args.size() > 1)
       throw dsl_error("TypeError",
                       "raise: expected at most 1 arg, got " + std::to_string(args.size()));
@@ -1170,9 +1395,11 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
     push_frame(state, args[0], env);
     return;
   }
+  }
 
   // User macros — expand then re-evaluate
-  if (auto it = state.user_macros.find(name); it != state.user_macros.end()) {
+  if (auto it = state.user_macros.empty() ? state.user_macros.end() : state.user_macros.find(name);
+      it != state.user_macros.end()) {
     auto &[macro_params, body] = it->second;
     std::unordered_map<std::string, value_t> subst;
     for (size_t i = 0; i < macro_params.size(); ++i)
@@ -1192,13 +1419,19 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
     return;
   }
 
-  // Built-in or user function
-  auto *func_val = env->lookup(name);
-  if (!func_val)
+  // Built-in or user function: it must exist now; the apply step uses what is found here unless
+  // the scopes changed meanwhile (callee_of).
+  detail::scope_mark mark;
+  const auto *callee = detail::find_marked(env.get(), name, mark);
+  if (!callee)
     throw dsl_error("NameError", "unknown function or special form: " + name);
+  frame.callee = callee;
+  frame.callee_depth = mark.depth;
+  frame.callee_stamp = mark.stamp;
 
   frame.phase = eval_phase::eval_args;
-  frame.extra_vals = std::move(args);
+  fill_values(frame.extra_vals, args);
+  make_room(frame.results, args.size()); // the arguments' values
   frame.index = 0;
   if (!frame.extra_vals.empty()) {
     push_frame(state, frame.extra_vals[0], env);
@@ -1232,7 +1465,7 @@ void stackless_evaluator::step_apply(evaluator_state &state, eval_frame &frame) 
   if (!head_sym)
     throw dsl_error("TypeError", "apply: no function head");
 
-  auto *func_val = frame.env->lookup(head_sym->name);
+  const value_t *func_val = callee_of(frame, head_sym->name);
   if (!func_val)
     throw dsl_error("NameError", "apply: undefined function: " + head_sym->name);
 
@@ -1269,7 +1502,7 @@ void stackless_evaluator::apply_native(evaluator_state &state, eval_frame &frame
                    state.data_work, false);
     return;
   }
-  pop_frame(state, std::move(result));
+  hand_up(state, std::move(result));
 }
 
 // ---------------------------------------------------------------------------
@@ -1290,7 +1523,7 @@ void stackless_evaluator::step_if_cond(evaluator_state &state, eval_frame &frame
 }
 
 void stackless_evaluator::step_if_branch(evaluator_state &state, eval_frame &frame) {
-  pop_frame(state, frame.results.back());
+  hand_up(state, std::move(frame.results.back()));
 }
 
 // ---------------------------------------------------------------------------
@@ -1303,7 +1536,7 @@ void stackless_evaluator::step_begin_next(evaluator_state &state, eval_frame &fr
   if (static_cast<size_t>(frame.index) < args.size()) {
     push_frame(state, args[frame.index], frame.env);
   } else {
-    pop_frame(state, frame.results.back());
+    hand_up(state, std::move(frame.results.back()));
   }
 }
 
@@ -1366,7 +1599,9 @@ void stackless_evaluator::step_for_body(evaluator_state &state, eval_frame &fram
       auto *lp = std::get_if<list_ptr>(&collection.v);
       if (!lp)
         throw dsl_error("TypeError", "for: collection must be a list or generator");
-      frame.extra_lists = {std::vector<value_t>((*lp)->begin(), (*lp)->end())};
+      // The list as it is now (one copy: the loop sees later changes to it no more than before).
+      frame.extra_lists.clear();
+      frame.extra_lists.emplace_back((*lp)->begin(), (*lp)->end());
       frame.index = 0;
       frame.results.clear();
     }
@@ -1427,9 +1662,9 @@ void stackless_evaluator::advance_generator(evaluator_state &state, eval_frame &
 // ---------------------------------------------------------------------------
 
 void stackless_evaluator::step_set_value(evaluator_state &state, eval_frame &frame) {
-  auto val = frame.results.back();
-  frame.env->set(frame.extra_strs[0], val);
-  pop_frame(state, val);
+  // The value is bound (a copy) and passed on (moved): its own copy goes with the frame.
+  frame.env->set(frame.extra_strs[0], frame.results.back());
+  hand_up(state, std::move(frame.results.back()));
 }
 
 // ---------------------------------------------------------------------------
@@ -1470,7 +1705,7 @@ void stackless_evaluator::step_let_body(evaluator_state &state, eval_frame &fram
   if (static_cast<size_t>(frame.index) < frame.extra_vals.size()) {
     push_frame(state, frame.extra_vals[frame.index], frame.extra_env);
   } else {
-    pop_frame(state, frame.results.back());
+    hand_up(state, std::move(frame.results.back()));
   }
 }
 
@@ -1669,25 +1904,20 @@ void stackless_evaluator::step_super_args(evaluator_state &state, eval_frame &fr
 
 void stackless_evaluator::call_closure(evaluator_state &state, eval_frame & /*frame*/,
                                        const closure_ptr &cls, const std::vector<value_t> &args) {
-  environment_ptr local = bind_closure_args(cls, args); // before the pop: args are the frame's
+  // Everything the call needs is taken from `cls` and `args` before the frame goes: they may be
+  // in it, or in a scope only it holds (a function passed as a parameter, called in tail
+  // position: its binding is in the scope this frame evaluates in).
+  environment_ptr local = bind_closure_args(cls, args);
+  value_t body = detail::body_expr_of(*cls);
 
   // Replace current frame with body evaluation
-  state.stack.pop_back();
-  push_closure_body(state, cls, std::move(local));
+  pop_top(state.stack);
+  push_body_frame(state.stack, std::move(body), std::move(local));
 }
 
 void stackless_evaluator::push_closure_body(evaluator_state &state, const closure_ptr &cls,
                                             environment_ptr local) {
-  if (cls->body.size() == 1) {
-    push_frame(state, cls->body[0], local);
-  } else {
-    std::vector<value_t> begin_exprs;
-    begin_exprs.reserve(1 + cls->body.size());
-    begin_exprs.push_back(value_t{symbol{"begin"}});
-    begin_exprs.insert(begin_exprs.end(), cls->body.begin(), cls->body.end());
-    push_frame(state, make_list(std::move(begin_exprs)), local);
-  }
-  state.stack.back().function_body = true; // a `return` in it returns from here
+  push_body_frame(state.stack, detail::body_expr_of(*cls), std::move(local));
 }
 
 // ---------------------------------------------------------------------------
@@ -1695,7 +1925,7 @@ void stackless_evaluator::push_closure_body(evaluator_state &state, const closur
 // ---------------------------------------------------------------------------
 
 void stackless_evaluator::handle_defclass(evaluator_state &state, eval_frame &frame,
-                                          const std::vector<value_t> &args) {
+                                          std::span<const value_t> args) {
   if (args.empty())
     throw dsl_error("TypeError", "defclass: expected at least a name");
   auto *name_sym = std::get_if<symbol>(&args[0].v);
@@ -1789,6 +2019,7 @@ void stackless_evaluator::handle_defclass(evaluator_state &state, eval_frame &fr
     mcls->params = std::move(params);
     mcls->variadic = variadic;
     mcls->body = std::vector<value_t>(mlist.begin() + 2, mlist.end());
+    mcls->body_expr = detail::shared_body_expr(&mlist, mcls->body);
     mcls->env_snapshot = env;
     track_captured_env(env); // the class is bound in env: a cycle candidate
 

@@ -68,22 +68,22 @@
 // Overlays are computed by overlay tasks on the app's state_exec scheduler
 // (cvc::tf::schedule_overlays, cvc/tf/overlay_tasks.h) from a copy-on-write copy of the volume,
 // with no thread of the binding's own: sliced across frames on the scheduler thread in a
-// single-threaded wasm build (or with overlay_threading = cooperative), in compute-pool chunks the
-// task parks on elsewhere. So something must pump app.exec_scheduler() for overlays to arrive --
-// every Ariadne Runtime does, in its drain(), while any process is live on the scheduler, once per
-// app frame however many Runtimes there are (an AppRuntime drains it before the scene's tick); a
-// host with no Runtime pumps it itself each frame (cvc::pump_exec_frame, cvc/core/async_lane.h),
-// and a test or a headless tool calls wait_overlays(). Each
-// task's results reach the binding through a mutex-guarded mailbox its deliver hook fills (on the
-// scheduler's thread); tick() takes them in and publishes them. A volume the node replaces
-// (volume: a setVolume, told by the node's shared owner of the volume -- whatever its range, and
-// never by an address a new volume could reuse) cancels the tasks computing from the old one, drops
-// any of their results still waiting, and unpublishes the old layers at once
-// (cvc::tf::clear_overlays): none is drawn on the new range, or left beside a layer the new volume
-// lacks. Attaching clears the layers already beside the key the same way (a hot reload's
-// predecessor's: they need not describe this volume). Overlays are re-binned onto <tf>.range when
-// it differs from the range they were computed over, so a layer is always uniform over the range
-// published beside it.
+// single-threaded wasm build (or with overlay_threading = cooperative), elsewhere in chunks on the
+// app's background pool that the task parks on. So something must pump app.exec_scheduler() for
+// overlays to arrive -- every Ariadne Runtime does, in its drain(), while any process is live on
+// the scheduler, once per app frame however many Runtimes there are (an AppRuntime drains it
+// before the scene's tick); a host with no Runtime pumps it itself each frame
+// (cvc::pump_exec_frame, cvc/core/async_lane.h), and a test or a headless tool calls
+// wait_overlays(). Each task's results reach the binding through a mutex-guarded mailbox its
+// deliver hook fills (on the scheduler's thread); tick() takes them in and publishes them. A
+// volume the node replaces (volume: a setVolume, told by the node's shared owner of the volume --
+// whatever its range, and never by an address a new volume could reuse) cancels the tasks
+// computing from the old one, drops any of their results still waiting, and unpublishes the old
+// layers at once (cvc::tf::clear_overlays): none is drawn on the new range, or left beside a layer
+// the new volume lacks. Attaching clears the layers already beside the key the same way (a hot
+// reload's predecessor's: they need not describe this volume). Overlays are re-binned onto
+// <tf>.range when it differs from the range they were computed over, so a layer is always uniform
+// over the range published beside it.
 //
 // <tf>.overlay_status: while a task runs it is the task's -- the binding writes "computing
 // <layers>..." once when it starts one, then the task's own progress notes ("contour tree:
@@ -145,7 +145,7 @@ struct tf_binding_options {
   std::map<std::string, float> shininess;
   // Overlay computation (thumbnail size, bins, samples).
   cvc::tf::overlay_options overlays;
-  // How the overlay tasks run: automatic = threaded (compute-pool chunks) where threads exist,
+  // How the overlay tasks run: automatic = threaded (background-pool chunks) where threads exist,
   // else cooperative (sliced across frames on the scheduler thread); see cvc/tf/overlay_tasks.h.
   cvc::tf::overlay_threading overlay_threading = cvc::tf::overlay_threading::automatic;
   // fe_lab: wait this long after the last isovalue change before re-meshing (seconds).
