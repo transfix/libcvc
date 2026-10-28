@@ -209,7 +209,8 @@ A process ended by its host or its budget is killed. It is not raised to:
 - `interrupt()` and an `evaluate()` timeout.
 
 Nothing in the program runs after a kill, and its status is `killed` with `exit_error` naming
-the reason, as today. A program must not be able to catch its own budget or its host's
+the reason, as today. Its `with-lock` sections are not unwound, but their locks are released
+(docs/STATE_EXEC_LOCKS.md 5.6): the next exclusive section on such a key sees `abandoned: #t`. A program must not be able to catch its own budget or its host's
 decision to stop it. The per-call allocation limit is different: it refuses one call, so it is
 the catchable `MemoryError`.
 
@@ -275,6 +276,10 @@ The codec writes a dict once for each value that holds it, so after a restore an
 `__class__` is a copy of the class dict the program names. `catch` and `isinstance` match such
 a copy by its chain of class names (P2). Without that, an exception made before the snapshot,
 re-raised after it, wouldn't be caught by its own class.
+
+A process inside a `with-lock` section can't be snapshotted: the snapshot is refused, naming its
+keys (docs/STATE_EXEC_LOCKS.md 5.8). A process waiting for a lock can: restored, it asks again, at
+the back of the queue, with what was left of its timeout.
 
 ### 2.8 The recursive evaluator
 
