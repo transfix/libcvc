@@ -1500,6 +1500,7 @@ class AsyncStateObserver(state_observer):
 #include <cvc/state/state_exec/state_value_codec.h>
 #include <cvc/state/state_exec/stdlib.h>
 #include <cvc/state/state_exec/types.h>
+#include <cvc/core/thread_class.h>
 #include "pycvc_value.h"
 #include <algorithm>
 #include <functional>
@@ -2555,6 +2556,23 @@ process_status = _pycvc.process_status
 scheduling_policy = _pycvc.scheduling_policy
 %}
 
+// pycvc.thread_class (pycvc.set_thread_class, docs/STATE_EXEC_LOCKS.md 7.6) is an IntEnum too.
+%{
+static PyObject *pycvc_enum_thread_class = nullptr;
+%}
+PYCVC_STATE_EXEC_ENUM(cvc::thread_class, pycvc_enum_thread_class, "thread_class")
+%init %{
+  pycvc_enum_thread_class = pycvc_make_int_enum(
+      "thread_class", {{"background", static_cast<int>(cvc::thread_class::background)},
+                       {"utility", static_cast<int>(cvc::thread_class::utility)},
+                       {"normal", static_cast<int>(cvc::thread_class::normal)}});
+  if (pycvc_enum_thread_class != NULL)
+    PyDict_SetItemString(d, "thread_class", pycvc_enum_thread_class);
+%}
+%pythoncode %{
+thread_class = _pycvc.thread_class
+%}
+
 // eval_phase, step_kind, and resource_policy::mode (pycvc.resource_policy.mode, set on the class
 // below).
 %{
@@ -3112,6 +3130,16 @@ public:
   std::string last_error() const;
   double last_job_ms() const;
 };
+} // namespace cvc
+
+// ── thread classes (cvc/core/thread_class.h, docs/STATE_EXEC_LOCKS.md 7.6) ──
+// pycvc.set_thread_class(cls) puts the calling thread in a pycvc.thread_class (background, utility,
+// normal), as far as the OS allows, and returns whether it did. On Linux an unprivileged thread
+// can't raise itself back once lowered: that returns False.
+%rename(set_thread_class) cvc::set_current_thread_class;
+namespace cvc {
+enum class thread_class;
+bool set_current_thread_class(thread_class cls);
 } // namespace cvc
 
 // ── async_call: a Python kernel's handle (register_async_fn(..., with_call=True)) ──

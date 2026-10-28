@@ -23,6 +23,7 @@
 /* $Id: App.cpp 5881 2012-07-20 19:34:04Z edwardsj $ */
 
 #include <cvc/core/app.h>
+#include <cvc/core/thread_class.h>
 #include <cvc/core/thread_pool.h>
 #include <cvc/core/types.h>
 #include <cvc/core/world_clock.h>
@@ -1236,23 +1237,73 @@ cvc::world_units &app::world_units() {
   return *_worldUnits;
 }
 
+namespace {
+
+// The text of the setting at `path` under `root`, or "" when it isn't set.
+std::string setting_text(cvc::state &root, const char *path) {
+  const cvc::state *node = root.findDescendant(path);
+  return node ? const_cast<cvc::state *>(node)->value() : std::string();
+}
+
+} // namespace
+
 cvc::state_exec::async_scheduler &app::exec_scheduler() {
-  boost::mutex::scoped_lock lock(_execSchedulerMutex);
-  if (!_execScheduler) {
-    _execScheduler.reset(new cvc::state_exec::async_scheduler());
-    // Wire it to this app's state root so state-watches (state-watch/on_change:)
-    // resolve against the app tree. Processes are chrooted per-owner on submit.
-    _execScheduler->set_watch_root(&root());
-    // Read submitted scripts inside their processes, like pycvc's Exec (see host_parser_defaults
-    // for why 1024 tokens a step). state_exec.defaults.parser.* on this tree overrides it.
-    _execScheduler->set_parser_defaults(cvc::state_exec::async_scheduler::host_parser_defaults());
-    // Deep-data work a slice per step too (host_data_defaults); state_exec.defaults.data.*
-    // overrides it.
-    _execScheduler->set_data_defaults(cvc::state_exec::async_scheduler::host_data_defaults());
-    // Its with-lock table is the app's (docs/STATE_EXEC_LOCKS.md 8.4: an eager home).
-    _execScheduler->set_lock_manager(lock_manager_locked());
+  cvc::state_exec::async_scheduler *sched = nullptr;
+  // What building the scheduler has to log, and the process class to apply: both done once the
+  // scheduler's mutex is released.
+  std::vector<std::pair<unsigned int, std::string>> notes;
+  std::optional<thread_class> process_class;
+  std::string process_class_name;
+  {
+    boost::mutex::scoped_lock lock(_execSchedulerMutex);
+    if (!_execScheduler) {
+      // The policy is fixed now (docs/STATE_EXEC_LOCKS.md 7.3): state_exec.policy, else
+      // round_robin, today's. An unknown value is logged, and round_robin used.
+      bool unknown = false;
+      const cvc::state_exec::scheduling_policy policy = cvc::state_exec::policy_from_state(
+          root(), cvc::state_exec::scheduling_policy::round_robin, &unknown);
+      if (unknown)
+        notes.emplace_back(1, "state_exec.policy: unknown value '" +
+                                  setting_text(root(), "state_exec.policy") +
+                                  "' (round_robin, priority or priority_rr); using round_robin");
+      _execScheduler.reset(new cvc::state_exec::async_scheduler(policy));
+      // Wire it to this app's state root so state-watches (state-watch/on_change:)
+      // resolve against the app tree. Processes are chrooted per-owner on submit.
+      _execScheduler->set_watch_root(&root());
+      // Read submitted scripts inside their processes, like pycvc's Exec (see host_parser_defaults
+      // for why 1024 tokens a step). state_exec.defaults.parser.* on this tree overrides it.
+      _execScheduler->set_parser_defaults(cvc::state_exec::async_scheduler::host_parser_defaults());
+      // Deep-data work a slice per step too (host_data_defaults); state_exec.defaults.data.*
+      // overrides it.
+      _execScheduler->set_data_defaults(cvc::state_exec::async_scheduler::host_data_defaults());
+      // Its with-lock table is the app's (docs/STATE_EXEC_LOCKS.md 8.4: an eager home).
+      _execScheduler->set_lock_manager(lock_manager_locked());
+      // state_exec.process_class (7.6) is read once, here, and applied on this thread: no setting
+      // exists at app start (gap G-19). On Linux the class reaches every thread that exists now
+      // and every library worker started later.
+      process_class_name = setting_text(root(), "state_exec.process_class");
+      if (process_class_name == "background")
+        process_class = thread_class::background;
+      else if (process_class_name == "utility")
+        process_class = thread_class::utility;
+      else if (process_class_name == "normal")
+        process_class = thread_class::normal;
+      else if (!process_class_name.empty())
+        notes.emplace_back(1, "state_exec.process_class: unknown value '" + process_class_name +
+                                  "' (background, utility or normal); ignored");
+    }
+    sched = _execScheduler.get();
   }
-  return *_execScheduler;
+  if (process_class) {
+    if (set_process_class(*process_class))
+      notes.emplace_back(2, "state_exec.process_class: the process is now " + process_class_name);
+    else
+      notes.emplace_back(1, "state_exec.process_class: the OS refused " + process_class_name +
+                                " for the process (or one of its threads)");
+  }
+  for (const auto &[level, text] : notes)
+    log(level, text);
+  return *sched;
 }
 
 std::shared_ptr<cvc::state_exec::lock_manager> app::lock_manager_locked() {
@@ -1727,6 +1778,8 @@ void app::startRequestedWorkers() {
 }
 
 void app::poolWorkerLoop(std::shared_ptr<PoolWorkerGate> gate) {
+  // A process class set before this worker started (Linux, where the class is per thread).
+  detail::apply_process_class_here();
   // Only a task may be interrupted (wait_for_threads, ~app). Idle and between tasks the worker
   // ignores interruption. Interrupts are sent under _threadPoolMutex, to the workers in
   // _poolWorkers, and bump _poolInterruptGen: one sent before the worker takes its next task is
