@@ -1063,8 +1063,13 @@ struct lock_table::impl {
     for (key_ref &k : req.keys)
       if (k.ref)
         k.node = ref(h, k);
-    for (lock_node *n : refs.drop)
+    for (lock_node *n : refs.drop) {
+      if (opts.self_check)
+        for (const key_ref &k : req.keys)
+          if (k.node == n)
+            violation("4.15", "refs.drop names a key of the request: '" + n->key + "'");
       unref(h, n);
+    }
   }
 
   // -- 4.2, 4.3 ---------------------------------------------------------------------------------
@@ -2063,13 +2068,11 @@ lock_manager::lock_manager(options opts) : opts_(opts) {
 
 lock_manager::~lock_manager() = default;
 
-lock_query_result lock_manager::query(std::string_view abs_prefix,
-                                      const detail::lock_home *viewer,
+lock_query_result lock_manager::query(std::string_view abs_prefix, const detail::lock_home *viewer,
                                       std::string_view owner) const {
   // Pids are shown only for the viewer's own home (and owner): pids repeat across schedulers.
-  return table_->query(abs_prefix, viewer ? std::optional<detail::home_id>(viewer->id())
-                                          : std::nullopt,
-                       owner);
+  return table_->query(abs_prefix,
+                       viewer ? std::optional<detail::home_id>(viewer->id()) : std::nullopt, owner);
 }
 
 lock_stats lock_manager::stats() const { return table_->stats(); }
