@@ -62,6 +62,12 @@ void check_global(const intrinsics_context &ctx, const std::string &key, const c
                   "dsl", {{"key", value_t("/" + key)}});
 }
 
+// Whether a key as written is app-global ('/' first, after the spaces resolve_lock_key trims).
+bool is_global_key(std::string_view written) {
+  const std::string_view w = trim(written);
+  return !w.empty() && w.front() == '/';
+}
+
 const std::string &key_text(const value_t &v, const char *who) {
   if (const auto *s = std::get_if<std::string>(&v.v))
     return *s;
@@ -154,6 +160,10 @@ void build_request(home_request &req, lock_home &home, const intrinsics_context 
     rk.node = home.lookup(scope, rk.written);
     if (!rk.node)
       rk.absolute = resolve_lock_key(ctx, rk.written, "with-lock");
+    else if (is_global_key(rk.written))
+      // The cache is keyed by chroot and text, not by channel policy, which decides whether a '/'
+      // key is allowed (gap G-15): a hit is checked as a miss is.
+      (void)resolve_lock_key(ctx, rk.written, "with-lock");
     req.keys.push_back(std::move(rk));
   };
   if (const auto *l = std::get_if<list_ptr>(&key.v)) {

@@ -180,6 +180,11 @@ struct intrinsics_context {
   /// How a child spawned from this context is set up (td 4.15): its environment and context. Unset:
   /// the child gets the bare builtins, as before.
   std::function<spawn_setup(const intrinsics_context &parent)> spawn_context;
+
+  /// Called with the pid of each child the running program forks, once it exists. A forked child
+  /// shares this context (its natives point at it), so a host that frees the context when its
+  /// process ends (Ariadne's actions) keeps it while the children live. Unset: nothing is called.
+  std::function<void(int pid)> on_child;
 };
 
 /// Register all DSL intrinsics into an environment.

@@ -492,6 +492,38 @@ TEST(AriadneAction, ProgramActionCapturesDeliveredValueFromMsgRecv) {
   EXPECT_EQ(cvc::state::instance(app)("async.value").value(), "delivered");
 }
 
+// An action's (fork) child shares the action's intrinsics context, so the context outlives the
+// action while the child runs: the action ends in its first drain, the child sleeps past it and
+// then writes through the context. Once the child ends it is reaped, and the context with it.
+TEST(AriadneAction, ForkedChildOutlivesTheAction) {
+  cvc::app app;
+  cvc::state &root = cvc::state::instance(app);
+  Runtime rt(app, "doc");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({button("Go", "(begin (set c (fork)) (if (= c 0) (begin (sleep 0.05) "
+                                  "(state-set \"x\" \"1\")) (state-set \"child\" (str c))))")}));
+  mb.button_click = true;
+  rt.render();
+  rt.drain(); // the action forks and ends; its child sleeps
+  mb.button_click = false;
+  ASSERT_FALSE(root("doc.child").value().empty());
+  const int child = std::stoi(root("doc.child").value());
+  EXPECT_TRUE(root("doc.x").value().empty());
+  for (int frame = 0; frame < 500 && root("doc.x").value().empty(); ++frame) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    rt.render();
+    rt.drain();
+  }
+  EXPECT_EQ(root("doc.x").value(), "1");
+  for (int frame = 0; frame < 50 && app.exec_scheduler().get_process_info(child); ++frame) {
+    rt.render();
+    rt.drain();
+  }
+  EXPECT_FALSE(app.exec_scheduler().get_process_info(child).has_value());
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+}
+
 // item 2 — the compute-pool async story, headless (no ImGui/GL): a HOST INTRINSIC launches an
 // off-thread nav step on app.computePool() and hands the result back through the ONE thread-safe
 // seam a worker may touch — exec_scheduler().post_message — waking a parked (msg-recv "nav.done")

@@ -1993,6 +1993,22 @@ process &stepping_process(const detail::lock_ops &ops) {
   return *ops.ctx->sched->current_process();
 }
 
+// The lock form a lock frame acts through: its ops slot, or, for a frame decoded from a snapshot
+// (the codec writes the slot as nil), what with-lock is bound to in the frame's environment, the
+// restoring context's, which the slot then keeps. A natives scope with no lock intrinsics, or a
+// program's own with-lock, leaves none (gap G-44).
+value_t frame_lock_ops(eval_frame &frame) {
+  value_t &slot = frame.extra_vals[lock_slot(detail::lock_frame_slot::ops)];
+  if (!detail::lock_ops_of(slot)) {
+    const value_t *bound = frame.env ? frame.env->lookup("with-lock") : nullptr;
+    if (!bound || !detail::lock_ops_of(*bound))
+      lock_refused("restore", "with-lock: the restored lock form has no with-lock in its "
+                              "environment");
+    slot = *bound;
+  }
+  return slot;
+}
+
 } // namespace
 
 void stackless_evaluator::begin_lock_form(evaluator_state &state, std::size_t fi,
@@ -2022,8 +2038,12 @@ void stackless_evaluator::begin_lock_form(evaluator_state &state, std::size_t fi
   for (std::size_t i = f.body; i < args.size(); ++i)
     frame.extra_vals.push_back(args[i]);
 
+  // Left to right: a :timeout symbol is looked up only once KEY has its value (a call KEY may
+  // bind it).
   const value_t *key = lock_operand(args[0], *frame.env);
-  const value_t *timeout = f.timeout ? lock_operand(args[f.timeout], *frame.env) : &nil_value;
+  const value_t *timeout = !key        ? nullptr
+                           : f.timeout ? lock_operand(args[f.timeout], *frame.env)
+                                       : &nil_value;
   if (key && timeout) {
     lock_acquire(state, fi, *key, lock_timeout_of(*timeout));
     return;
@@ -2045,7 +2065,7 @@ void stackless_evaluator::begin_lock_form(evaluator_state &state, std::size_t fi
 void stackless_evaluator::lock_acquire(evaluator_state &state, std::size_t fi, const value_t &key,
                                        std::optional<double> timeout) {
   eval_frame &frame = state.stack[fi];
-  const value_t ops_value = frame.extra_vals[lock_slot(detail::lock_frame_slot::ops)];
+  const value_t ops_value = frame_lock_ops(frame); // a restored frame at index 0 or 1 too
   const detail::lock_ops &ops = *detail::lock_ops_of(ops_value);
   intrinsics_context &ctx = *ops.ctx;
   process &p = stepping_process(ops);
@@ -2175,7 +2195,7 @@ void stackless_evaluator::step_lock_enter(evaluator_state &state, eval_frame &fr
       detail::outcome_of(frame.extra_vals[lock_slot(detail::lock_frame_slot::wait_or_outcome)]);
   if (!o)
     lock_refused("woken without a grant", "with-lock: woken without a grant");
-  const value_t ops_value = frame.extra_vals[lock_slot(detail::lock_frame_slot::ops)];
+  const value_t ops_value = frame_lock_ops(frame); // restored with a failed outcome too
   const detail::lock_ops &ops = *detail::lock_ops_of(ops_value);
   process &p = stepping_process(ops);
   if (const detail::lock_test_hooks *hooks = detail::lock_test_hooks_get();
@@ -2205,21 +2225,33 @@ void stackless_evaluator::step_lock_enter(evaluator_state &state, eval_frame &fr
 
 void stackless_evaluator::resume_lock_wait(evaluator_state &state) {
   const std::size_t fi = state.stack.size() - 2;
-  eval_frame &enter = state.stack[fi];
-  value_t &ops_slot = enter.extra_vals[lock_slot(detail::lock_frame_slot::ops)];
-  if (!detail::lock_ops_of(ops_slot)) {
-    // Decoded: the lock form is what with-lock is bound to here, in the restoring context. A
-    // natives scope with no lock intrinsics, or a program's own with-lock, leaves none (gap G-44).
-    const value_t *bound = enter.env ? enter.env->lookup("with-lock") : nullptr;
-    if (!bound || !detail::lock_ops_of(*bound))
-      lock_refused("restore", "with-lock: the restored wait has no lock form in its environment");
-    ops_slot = *bound;
-  }
-  const value_t ops_value = ops_slot;
+  const value_t ops_value = frame_lock_ops(state.stack[fi]);
   const detail::lock_ops &ops = *detail::lock_ops_of(ops_value);
   if (!ops.ctx || !ops.ctx->sched || ops.ctx->sched->current_pid() < 0 ||
       !ops.ctx->sched->current_process())
     lock_refused("no process", "with-lock: no process is stepping");
+  {
+    // The restoring context's rules (protocol 5.1): where it allows no wait, or no time is left,
+    // the request is tried once, as a first request is: the wait child goes, and the lock form
+    // enters again with the remaining TIMEOUT as its own.
+    const std::vector<value_t> &args = state.stack.back().extra_lists[0]; // KEYS, MODE, TIMEOUT
+    std::optional<double> left; // as lock_wait_call reads it: nil (no deadline) or the seconds
+    if (args.size() == 3) {
+      if (const auto *i = std::get_if<int64_t>(&args[2].v))
+        left = static_cast<double>(*i);
+      else if (const auto *d = std::get_if<double>(&args[2].v))
+        left = *d;
+    }
+    if (args.size() == 3 && (!ops.ctx->lock_wait_allowed || (left && *left <= 0))) {
+      value_t keys = args[0];
+      state.stack.pop_back();
+      eval_frame &enter = state.stack[fi];
+      value_t &flags = enter.extra_vals[lock_slot(detail::lock_frame_slot::flags)];
+      flags = value_t(std::get<int64_t>(flags.v) | lock_timeout_given);
+      lock_acquire(state, fi, keys, left);
+      return;
+    }
+  }
   eval_frame &wait = state.stack.back();
   wait.phase = eval_phase::apply;
   wait.index = 0;

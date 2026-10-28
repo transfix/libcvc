@@ -1149,6 +1149,7 @@ int scheduler::fork(int pid) {
   child->signal_handlers = parent.signal_handlers;
   child->create_time = std::chrono::steady_clock::now();
   child->parent_pid = pid;
+  child->keep_alive = parent.keep_alive; // it shares the parent's context (td 4.15)
 
   // Deep copy evaluator state
   child->state.root_expr = parent.state.root_expr;
@@ -1164,6 +1165,21 @@ int scheduler::fork(int pid) {
     child_env->outer = parent.state.global_env->outer;
   }
   child->state.global_env = child_env;
+  detail::fork_scopes(child->state, parent.state.global_env, child_env);
+  // Forked from inside its own step (the DSL's (fork), td B28): the top frame is the call that
+  // applies fork, which the parent finishes with the child's pid. The child's copy is finished
+  // here with 0, as hand_up finishes a call, so the child goes on after the call instead of
+  // calling fork again.
+  if (pid == current_pid() && !child->state.stack.empty()) {
+    std::vector<eval_frame> &stack = child->state.stack;
+    stack.pop_back();
+    if (!stack.empty()) {
+      stack.back().results.push_back(value_t(static_cast<int64_t>(0)));
+    } else {
+      child->state.result = value_t(static_cast<int64_t>(0));
+      child->state.done = true;
+    }
+  }
   child->state.stats.start();
 
   // Child result = 0, parent result = child_pid

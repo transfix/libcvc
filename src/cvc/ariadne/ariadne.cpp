@@ -948,6 +948,8 @@ struct Runtime::Impl {
     cvc::state_exec::process_ptr proc;
     cvc::state_exec::environment_ptr env;
     cvc::state_exec::intrinsics_context ictx;
+    bool ended = false;        // the action's own process has ended and been reaped
+    std::vector<int> children; // pids it forked that may still be running (they share ictx)
   };
   std::unordered_map<int, std::shared_ptr<ActionContext>> live_actions_;
   // Pids of the children actions and residents spawned (spawn_child), reaped once they finish.
@@ -1789,6 +1791,9 @@ Runtime::Impl::~Impl() {
     // A child's process holds its context, which points into this Runtime: erase them now.
     for (const int pid : spawned_children_)
       sched.reap(pid);
+    for (const auto &[pid, ac] : live_actions_)
+      for (const int child : ac->children)
+        sched.reap(child);
   }
 }
 
@@ -1825,6 +1830,8 @@ Runtime::Impl::spawn_child(const cvc::state_exec::intrinsics_context &parent) {
       make_action_context(parent.root_path, parent.lock_default_timeout);
   ac->ictx.lock_wait_allowed = parent.lock_wait_allowed;
   ac->ictx.spawn_context = parent.spawn_context; // grandchildren get one too
+  // A child it forks shares `ac`, which the fork's process keeps alive too (process::keep_alive).
+  ac->ictx.on_child = [this](int pid) { spawned_children_.push_back(pid); };
   // Recorded so the drain reaps it once it finishes: its process keeps `ac` alive.
   return cvc::state_exec::spawn_setup{ac->env, ac,
                                       [this](int pid) { spawned_children_.push_back(pid); }};
@@ -1860,6 +1867,8 @@ void Runtime::Impl::submit_action(const QueuedAction &action) {
       f.emplace_back("button", se::value_t(static_cast<int64_t>(action.ebutton)));
       ac->env->set("event", se::make_dict(std::move(f)));
     }
+    // A child the action forks shares this context: recorded, so the context stays until it ends.
+    ac->ictx.on_child = [raw = ac.get()](int pid) { raw->children.push_back(pid); };
     se::execute_options opts;
     opts.env = ac->env;
     opts.owner = owner_; // so ~Impl's kill_owner reaps exactly this document's processes
@@ -1867,7 +1876,8 @@ void Runtime::Impl::submit_action(const QueuedAction &action) {
     opts.max_time = action_max_time(root);
     opts.max_memory = max_bytes;
     const int pid = sched.execute(script, opts); // throws se::parse_error on a syntax error
-    live_actions_[pid] = std::move(ac);          // keep the context alive until the process ends
+    live_actions_[pid] = std::move(ac); // keep the context alive until the process (and the
+                                        // children it forked) end
   } catch (const std::exception &e) {
     warn_once(std::string("ari: on: action program failed: ") + e.what() + " [" + script + "]");
   }
@@ -1919,45 +1929,38 @@ void Runtime::Impl::pump_and_sweep_actions(cvc::state_exec::async_scheduler &sch
   static constexpr uint64_t kPumpMaxSteps = 200000;
   static constexpr double kPumpMaxSeconds = 0.1;
   sched.sync_run(kPumpMaxSteps, kPumpMaxSeconds);
-  // Sweep: drop finished actions, report a killed or failed one, keep a still-parked one for a
-  // later frame.
-  for (auto it = live_actions_.begin(); it != live_actions_.end();) {
-    auto info = sched.get_process_info(it->first);
-    if (!info || info->status == se::process_status::terminated) {
-      sched.reap(it->first);        // nothing reads a finished action's result: free its process
-      it = live_actions_.erase(it); // normal completion (or already reaped from the process map)
-    } else if (info->status == se::process_status::killed) {
-      // The exit error says why: a syntax error (scripts are read inside the process), a runtime
-      // error or a resource limit.
-      warn_once("ari: on: action program did not complete: " +
-                sched.get_exit_error(it->first).value_or("killed"));
-      sched.reap(it->first);
-      it = live_actions_.erase(it);
-    } else if (info->status == se::process_status::failed) {
-      // An exception the program didn't catch: its class, message and where it was raised.
-      warn_once("ari: on: action program failed: " +
-                failure_report(info->exit_exception, info->exit_error));
-      sched.reap(it->first);
-      it = live_actions_.erase(it);
-    } else {
-      ++it; // ready/running/waiting — still in flight (e.g. suspended on await/msg-recv/sleep)
-    }
-  }
-  // Spawned children: nothing reads a finished child's result either, and its process keeps the
-  // child's whole context alive, so a finished one is reaped here; a failure is reported once.
-  std::erase_if(spawned_children_, [&](int pid) {
+  // Sweep: a finished process is reaped (nothing reads its result), a killed or failed one is
+  // reported, and a still-parked one is kept for a later frame.
+  const auto reap_ended = [&](int pid, const char *what) {
     const auto info = sched.get_process_info(pid);
     if (info && !se::is_finished(info->status))
-      return false;
+      return false; // ready/running/waiting — still in flight (e.g. parked on await/msg-recv)
     if (info && info->status == se::process_status::killed)
-      warn_once("ari: spawned program did not complete: " +
-                sched.get_exit_error(pid).value_or("killed"));
+      // The exit error says why: a syntax error (scripts are read inside the process), a runtime
+      // error or a resource limit.
+      warn_once(std::string("ari: on: ") + what +
+                " did not complete: " + sched.get_exit_error(pid).value_or("killed"));
     else if (info && info->status == se::process_status::failed)
-      warn_once("ari: spawned program failed: " +
-                failure_report(info->exit_exception, info->exit_error));
+      // An exception the program didn't catch: its class, message and where it was raised.
+      warn_once(std::string("ari: on: ") + what +
+                " failed: " + failure_report(info->exit_exception, info->exit_error));
     sched.reap(pid);
     return true;
-  });
+  };
+  for (auto it = live_actions_.begin(); it != live_actions_.end();) {
+    ActionContext &ac = *it->second;
+    if (!ac.ended)
+      ac.ended = reap_ended(it->first, "action program");
+    // The children it forked share its context, so the context stays until they end too.
+    std::erase_if(ac.children, [&](int pid) { return reap_ended(pid, "forked program"); });
+    if (ac.ended && ac.children.empty())
+      it = live_actions_.erase(it);
+    else
+      ++it;
+  }
+  // Spawned children, and what they and the residents fork: a finished one's process would keep
+  // its context (an environment with every intrinsic) for the app's life.
+  std::erase_if(spawned_children_, [&](int pid) { return reap_ended(pid, "spawned program"); });
   // A resident never finishes on its own, so one that was killed (a syntax error in its body,
   // read inside the process; its per-step cap) or failed (an exception it didn't catch) is
   // reported, once per reason.
@@ -1988,10 +1991,12 @@ void Runtime::Impl::ensure_resident(const std::string &channel, const std::strin
     // Resident writes confined to the document prefix. A resident has no with-lock default
     // (docs/STATE_EXEC_LOCKS.md 14.2 Q1): a request with no :timeout waits as long as it takes.
     std::shared_ptr<ActionContext> ac = make_action_context(prefix, std::nullopt);
-    // A child it spawns runs in the document's scope, as the resident does.
+    // A child it spawns runs in the document's scope, as the resident does; one it forks shares
+    // the resident's context, which lives until the Runtime does. Both are reaped once they end.
     ac->ictx.spawn_context = [this](const se::intrinsics_context &parent) {
       return spawn_child(parent);
     };
+    ac->ictx.on_child = [this](int pid) { spawned_children_.push_back(pid); };
     // Park-then-run loop on `channel`: msg-recv parks the process between deliveries and BINDS each
     // delivered value as `event`, so an on_key/on_pointer body reads (get-attr event "key");
     // on:tick simply ignores `event`. The body runs once per delivery, then loops back to park. No
