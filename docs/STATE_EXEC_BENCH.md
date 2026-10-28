@@ -154,6 +154,28 @@ How the lock gates use these:
 `tools/bench/test_state_exec_bench.py` tests these rules on synthetic records. CTest runs it as
 `state_exec_bench_tool_test` when a Python 3 is found.
 
+### Gates in CTest
+
+The gates that count rather than time hold on any machine and under any load, so CTest runs them
+as `state_exec_bench_gates` (`src/cvc/tests/state_exec_bench_gates.cmake`, a `cmake -P` script):
+
+- `lock.uncontended --size n=2000` (one rep, no warmup, one timing round), then `gate --scenario
+  lock.uncontended --where form=single` on `extra.steps_per_lock --max 0` and on
+  `extra.allocs_per_lock --max 0`: an uncontended lock adds no step and no allocation over
+  `(begin ...)` (docs/STATE_EXEC_LOCKS.md 8.8), at every depth, mode, chroot and owner, on both
+  schedulers;
+- `sched.single.*` (one rep, no warmup), then `gate --metric steps_total --min N --max N` for
+  `sched.single.arith_loop` (n 40000) and `sched.single.tail_rec` (n 1000, 10000, 100000), the
+  same N on both schedulers. A deliberate change to one of these step counts updates the script
+  in the same commit, with the reason.
+
+Every command must exit 0. The test is registered where the tool test is (a working Python 3),
+and only for Release and RelWithDebInfo: MSVC's Debug STL allocates for its iterator debugging,
+so the allocation count is a Release number. With a single-config generator it exists only when
+`CMAKE_BUILD_TYPE` is one of the two, and `ctest` runs it only with `-C` naming it (CI passes
+`--build-config`): `ctest --test-dir build -C Release -R state_exec_bench_gates
+--output-on-failure`. It takes 30-40 s on the machine this was written on.
+
 ## Getting stable numbers
 
 - **Pin the driver to a performance core.** `--pin auto` (the runner's default) picks, on
@@ -765,8 +787,9 @@ Every run with the lock is checked: n grants, all on the fast path, no wait, not
 end.
 
 The gates (design 11.2) are on the `form=single` points; the `form=nested` points are recorded.
-The two counts hold at every depth, mode, chroot, owner and executor. The time, at most 60 ns
-over `begin` for the flat key on the sync scheduler, needs a Release build and 5 reps or more:
+The two counts hold at every depth, mode, chroot, owner and executor, and CTest runs them ("Gates
+in CTest"). The time, at most 60 ns over `begin` for the flat key on the sync scheduler, needs a
+Release build and 5 reps or more:
 
 ```sh
 python3 tools/bench/state_exec_bench.py gate run.jsonl --scenario lock.uncontended \
@@ -1042,7 +1065,7 @@ suite was written.
   `stackless_evaluator.cpp`'s `step_init`; `lock_body_begins` doesn't), so every lock form, a
   covered one included, allocates that vector: `lock.uncontended` `extra.allocs_per_lock` is 1 at
   every `form=single` point and 2 at every `form=nested` one, on both schedulers, against the 0 of
-  design 8.8, so the allocation gate fails. Steps per lock are 0, as designed. A body of two
+  design 8.8, so `state_exec_bench_gates` fails. Steps per lock are 0, as designed. A body of two
   forms makes 3: the results vector grows twice, and the frame's `extra_vals` (7 slots and the
   body) passes the 8 values the per-thread vector pools keep.
 
