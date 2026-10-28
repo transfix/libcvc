@@ -1399,23 +1399,26 @@ std::size_t random_ops_regular() {
 }
 constexpr std::size_t kRandomOpsStress = 100000;
 
-// Seeded random programs: sections on paths of depth 1-8 in a 3-ary tree (shallow ones likelier,
-// so requests meet), single- and multi-key, S and X, with and without timeouts, some nested.
+// Seeded random programs: sections on paths of depth 1-8 in a 3-ary tree, single- and multi-key,
+// S and X, with and without timeouts, some nested. The paths come from a pool drawn once (20 of
+// each depth), so requests meet often at every depth, and the default key cache holds them all
+// while a cache of 4 evicts on most requests. (Fresh random paths would fill the default cache
+// and the trie with keys used once, whose checks after every step then dominate the run.)
 struct random_programs {
   std::mt19937_64 rng;
   std::size_t ops = 0; // lock requests generated so far (executed or not)
-  explicit random_programs(std::uint64_t seed) : rng(seed) {}
-  int pick(int n) { return std::uniform_int_distribution<int>(0, n - 1)(rng); }
-  std::string key() {
+  std::vector<std::string> pool;
+  explicit random_programs(std::uint64_t seed) : rng(seed) {
     static const char *const seg[] = {"a", "b", "c"};
-    int depth = 1;
-    while (depth < 8 && pick(100) < 45)
-      ++depth;
-    std::string k = seg[pick(3)];
-    for (int i = 1; i < depth; ++i)
-      k += std::string(".") + seg[pick(3)];
-    return "\"" + k + "\"";
+    for (int i = 0; i < 160; ++i) {
+      std::string k = seg[pick(3)];
+      for (int d = 1, depth = 1 + i % 8; d < depth; ++d)
+        k += std::string(".") + seg[pick(3)];
+      pool.push_back("\"" + k + "\"");
+    }
   }
+  int pick(int n) { return std::uniform_int_distribution<int>(0, n - 1)(rng); }
+  std::string key() { return pool[static_cast<std::size_t>(pick(static_cast<int>(pool.size())))]; }
   std::string keys() {
     if (pick(4) != 0)
       return key();
@@ -1512,19 +1515,21 @@ void run_random_operations(const std::string &kind, std::size_t target_ops,
   }
   EXPECT_TRUE(live.empty()) << live.size() << " processes still running after " << max_seconds
                             << " s";
+  const std::size_t trie_at_end = v.stats().trie_nodes;
   for (int pid : live)
     v.kill(pid);
   const lock_stats s = v.stats();
   std::printf("LK-18 %s cache %zu: %zu operations (%zu generated), %llu rounds, %llu kills, %llu "
               "ended; grants %llu "
-              "(fast %llu), waits %llu, timeouts %llu, deadlocks %llu, abandoned %llu; %.2f s\n",
+              "(fast %llu), waits %llu, timeouts %llu, deadlocks %llu, abandoned %llu; trie %zu "
+              "nodes; %.2f s\n",
               kind.c_str(), v.home().cache_capacity(), done_ops(), gen.ops,
               static_cast<unsigned long long>(rounds), static_cast<unsigned long long>(kills),
               static_cast<unsigned long long>(ended), static_cast<unsigned long long>(s.grants),
               static_cast<unsigned long long>(s.fast_grants),
               static_cast<unsigned long long>(s.waits), static_cast<unsigned long long>(s.timeouts),
               static_cast<unsigned long long>(s.deadlocks),
-              static_cast<unsigned long long>(s.abandoned), seconds_since(t0));
+              static_cast<unsigned long long>(s.abandoned), trie_at_end, seconds_since(t0));
   EXPECT_GE(done_ops(), target_ops);
   EXPECT_GT(s.waits, 0u);
   EXPECT_GT(s.timeouts, 0u);
