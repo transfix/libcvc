@@ -264,6 +264,16 @@ using process_ptr = std::shared_ptr<process>;
 /// Create a new managed process.
 inline process_ptr make_process() { return std::make_shared<process>(); }
 
+namespace detail {
+/// A forked child's scopes (td B28). Every scope the child's copied frames run in, from the
+/// innermost up to the parent's global scope, is copied once (its bindings, and its outer
+/// remapped to the copies), the global scope's copy being `child_global`, and the frames run in
+/// the copies: a set in the child never lands in the parent's scopes. The scopes above the
+/// global (the builtins), and any scope not under it, stay shared, as values (closures) do.
+void fork_scopes(evaluator_state &child, const environment_ptr &parent_global,
+                 const environment_ptr &child_global);
+} // namespace detail
+
 } // namespace cvc::state_exec
 
 #endif // CVC_STATE_EXEC_PROCESS_H

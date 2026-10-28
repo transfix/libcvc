@@ -20,6 +20,8 @@
 #include <cvc/state/state_exec/process_table.h>
 #include <mutex>
 #include <thread>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace cvc::state_exec {
 
@@ -130,6 +132,48 @@ std::optional<std::size_t> process::alloc_limit(std::size_t used_bytes) const {
 // ---------------------------------------------------------------------------
 
 namespace detail {
+
+void fork_scopes(evaluator_state &child, const environment_ptr &parent_global,
+                 const environment_ptr &child_global) {
+  if (!parent_global)
+    return;
+  // Each scope copied so far, by the parent's scope; and the scopes known not to be under the
+  // global. Iterative: a scope chain can be long.
+  std::unordered_map<const environment *, environment_ptr> copies{
+      {parent_global.get(), child_global}};
+  std::unordered_set<const environment *> shared;
+  const auto remap = [&](const environment_ptr &e) -> environment_ptr {
+    if (!e || shared.count(e.get()))
+      return e;
+    // The scopes from e up to the first one already copied (the global at the latest).
+    std::vector<environment *> chain;
+    environment *p = e.get();
+    while (p && !copies.count(p)) {
+      if (shared.count(p))
+        break;
+      chain.push_back(p);
+      p = p->outer.get();
+    }
+    if (!p || shared.count(p)) {
+      for (environment *q : chain)
+        shared.insert(q);
+      return e;
+    }
+    // Copy them, outermost first, each under its outer's copy.
+    for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+      auto c = std::make_shared<environment>();
+      c->bindings = (*it)->bindings;
+      c->frozen = (*it)->frozen;
+      c->outer = copies.at((*it)->outer.get());
+      copies.emplace(*it, std::move(c));
+    }
+    return copies.at(e.get());
+  };
+  for (eval_frame &f : child.stack) {
+    f.env = remap(f.env);
+    f.extra_env = remap(f.extra_env);
+  }
+}
 
 std::chrono::steady_clock::time_point time_after(std::chrono::steady_clock::time_point t,
                                                  double seconds) {

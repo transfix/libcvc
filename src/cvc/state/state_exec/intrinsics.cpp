@@ -554,6 +554,8 @@ value_t intrinsic_fork(intrinsics_context *ctx, std::span<const value_t> args) {
     throw dsl_error("LockError", "fork: not inside with-lock", "dsl",
                     {{"reason", value_t(std::string("fork"))}});
   int child = ctx->sched->fork(pid);
+  if (child >= 0 && ctx->on_child)
+    ctx->on_child(child);
   return value_t(static_cast<int64_t>(child));
 }
 

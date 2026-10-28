@@ -1320,6 +1320,21 @@ int async_scheduler::fork(int pid) {
     child_env->outer = parent.state.global_env->outer;
   }
   child->state.global_env = child_env;
+  detail::fork_scopes(child->state, parent.state.global_env, child_env);
+  // Forked from inside its own step (the DSL's (fork), td B28): the top frame is the call that
+  // applies fork, which the parent finishes with the child's pid. The child's copy is finished
+  // here with 0, as hand_up finishes a call, so the child goes on after the call instead of
+  // calling fork again.
+  if (pid == current_pid() && !child->state.stack.empty()) {
+    std::vector<eval_frame> &stack = child->state.stack;
+    stack.pop_back();
+    if (!stack.empty()) {
+      stack.back().results.push_back(value_t(static_cast<int64_t>(0)));
+    } else {
+      child->state.result = value_t(static_cast<int64_t>(0));
+      child->state.done = true;
+    }
+  }
   child->state.stats.start();
 
   parent.state.result = value_t(static_cast<int64_t>(child_pid));

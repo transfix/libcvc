@@ -164,6 +164,11 @@ struct intrinsics_context {
   // request is as :timeout 0, as Ariadne's init lane wants).
   std::optional<double> lock_default_timeout;
   bool lock_wait_allowed = true;
+
+  /// Called with the pid of each child the running program forks, once it exists. A forked child
+  /// shares this context (its natives point at it), so a host that frees the context when its
+  /// process ends (Ariadne's actions) keeps it while the children live. Unset: nothing is called.
+  std::function<void(int pid)> on_child;
 };
 
 /// Register all DSL intrinsics into an environment.

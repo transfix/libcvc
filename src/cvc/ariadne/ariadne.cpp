@@ -18,13 +18,13 @@
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/backend.h>
 #include <cvc/ariadne/bind.h>
-#include <cvc/ariadne/input.h> // §4.6 InputEvent — Runtime::post_input feeds on_key/on_pointer
+#include <cvc/ariadne/input.h>  // §4.6 InputEvent — Runtime::post_input feeds on_key/on_pointer
 #include <cvc/ariadne/loader.h> // is_builtin_widget_type (has?)
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_scheduler.h> // §4.7 app-wide action scheduler (exec_scheduler)
 #include <cvc/state/state_exec/builtins.h>
-#include <cvc/state/state_exec/evaluator.h> // evaluation_timeout / evaluation_interrupted
+#include <cvc/state/state_exec/evaluator.h>  // evaluation_timeout / evaluation_interrupted
 #include <cvc/state/state_exec/exceptions.h> // dsl_error (has?)
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/parser.h> // parse, parse_error
@@ -757,8 +757,8 @@ private:
       data_step_nodes_ = host.step_nodes;
   }
 
-  static constexpr uint64_t kMaxSteps = 100'000;       // per-eval step cap (a predicate is tiny)
-  static constexpr double kMaxSeconds = 0.005;         // per-eval time cap (5 ms)
+  static constexpr uint64_t kMaxSteps = 100'000; // per-eval step cap (a predicate is tiny)
+  static constexpr double kMaxSeconds = 0.005;   // per-eval time cap (5 ms)
   // Aggregate reactive-eval time across ALL predicates in a frame. This is a runaway guard, not a
   // normal operating point: a handful of scalar predicates finish in well under a millisecond. It
   // was 10 ms, but a live conference re-evaluates ~5-7 predicates PER PEER every frame (roster
@@ -935,6 +935,8 @@ struct Runtime::Impl {
     cvc::state_exec::process_ptr proc;
     cvc::state_exec::environment_ptr env;
     cvc::state_exec::intrinsics_context ictx;
+    bool ended = false;        // the action's own process has ended and been reaped
+    std::vector<int> children; // pids it forked that may still be running (they share ictx)
   };
   std::unordered_map<int, std::unique_ptr<ActionContext>> live_actions_;
   bool used_scheduler_ = false; // did we ever submit to the app scheduler? (gate teardown reap)
@@ -1800,6 +1802,8 @@ void Runtime::Impl::submit_action(const QueuedAction &action) {
       f.emplace_back("button", se::value_t(static_cast<int64_t>(action.ebutton)));
       ac->env->set("event", se::make_dict(std::move(f)));
     }
+    // A child the action forks shares this context: recorded, so the context stays until it ends.
+    ac->ictx.on_child = [raw = ac.get()](int pid) { raw->children.push_back(pid); };
     se::execute_options opts;
     opts.env = ac->env;
     opts.owner = owner_; // so ~Impl's kill_owner reaps exactly this document's processes
@@ -1807,7 +1811,8 @@ void Runtime::Impl::submit_action(const QueuedAction &action) {
     opts.max_time = action_max_time(root);
     opts.max_memory = max_bytes;
     const int pid = sched.execute(script, opts); // throws se::parse_error on a syntax error
-    live_actions_[pid] = std::move(ac);          // keep the context alive until the process ends
+    live_actions_[pid] = std::move(ac); // keep the context alive until the process (and the
+                                        // children it forked) end
   } catch (const std::exception &e) {
     warn_once(std::string("ari: on: action program failed: ") + e.what() + " [" + script + "]");
   }
@@ -1861,27 +1866,33 @@ void Runtime::Impl::pump_and_sweep_actions(cvc::state_exec::async_scheduler &sch
   sched.sync_run(kPumpMaxSteps, kPumpMaxSeconds);
   // Sweep: drop finished actions, report a killed or failed one, keep a still-parked one for a
   // later frame.
-  for (auto it = live_actions_.begin(); it != live_actions_.end();) {
-    auto info = sched.get_process_info(it->first);
-    if (!info || info->status == se::process_status::terminated) {
-      sched.reap(it->first);        // nothing reads a finished action's result: free its process
-      it = live_actions_.erase(it); // normal completion (or already reaped from the process map)
-    } else if (info->status == se::process_status::killed) {
+  // A finished process is reaped (nothing reads its result); a killed or failed one is reported.
+  const auto reap_ended = [&](int pid, const char *what) {
+    const auto info = sched.get_process_info(pid);
+    if (info && !se::is_finished(info->status))
+      return false; // ready/running/waiting — still in flight (e.g. parked on await/msg-recv)
+    if (info && info->status == se::process_status::killed)
       // The exit error says why: a syntax error (scripts are read inside the process), a runtime
       // error or a resource limit.
-      warn_once("ari: on: action program did not complete: " +
-                sched.get_exit_error(it->first).value_or("killed"));
-      sched.reap(it->first);
-      it = live_actions_.erase(it);
-    } else if (info->status == se::process_status::failed) {
+      warn_once(std::string("ari: on: ") + what +
+                " did not complete: " + sched.get_exit_error(pid).value_or("killed"));
+    else if (info && info->status == se::process_status::failed)
       // An exception the program didn't catch: its class, message and where it was raised.
-      warn_once("ari: on: action program failed: " +
-                failure_report(info->exit_exception, info->exit_error));
-      sched.reap(it->first);
+      warn_once(std::string("ari: on: ") + what +
+                " failed: " + failure_report(info->exit_exception, info->exit_error));
+    sched.reap(pid);
+    return true;
+  };
+  for (auto it = live_actions_.begin(); it != live_actions_.end();) {
+    ActionContext &ac = *it->second;
+    if (!ac.ended)
+      ac.ended = reap_ended(it->first, "action program");
+    // The children it forked share its context, so the context stays until they end too.
+    std::erase_if(ac.children, [&](int pid) { return reap_ended(pid, "forked program"); });
+    if (ac.ended && ac.children.empty())
       it = live_actions_.erase(it);
-    } else {
-      ++it; // ready/running/waiting — still in flight (e.g. suspended on await/msg-recv/sleep)
-    }
+    else
+      ++it;
   }
   // A resident never finishes on its own, so one that was killed (a syntax error in its body,
   // read inside the process; its per-step cap) or failed (an exception it didn't catch) is
