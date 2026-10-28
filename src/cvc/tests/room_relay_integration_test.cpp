@@ -30,10 +30,8 @@
 // are, so a loaded runner does not fail them.
 
 #include <algorithm>
-#include <atomic>
 #include <chrono>
 #include <cmath>
-#include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>                  // std::strtoull
@@ -98,38 +96,6 @@ double now_s() {
   return std::chrono::duration<double>(std::chrono::steady_clock::now() - epoch).count();
 }
 
-// DIAGNOSTIC (temporary, StillOuterPeerReentryNoRealignNoFreeze): a timestamped event log, off
-// unless a test turns it on, dumped when the realign check fails.
-struct diag_log {
-  std::atomic<bool> on{false};
-  std::mutex mu;
-  std::vector<std::string> lines;
-  void add(const char *fmt, ...) {
-    if (!on.load())
-      return;
-    char buf[1024];
-    va_list ap;
-    va_start(ap, fmt);
-    std::vsnprintf(buf, sizeof buf, fmt, ap);
-    va_end(ap);
-    char head[32];
-    std::snprintf(head, sizeof head, "[diag %9.4f] ", now_s());
-    std::lock_guard<std::mutex> lk(mu);
-    if (lines.size() < 20000)
-      lines.push_back(std::string(head) + buf);
-  }
-  void dump() {
-    std::lock_guard<std::mutex> lk(mu);
-    for (const std::string &l : lines)
-      std::fprintf(stderr, "%s\n", l.c_str());
-    std::fflush(stderr);
-  }
-};
-diag_log &diag() {
-  static diag_log d;
-  return d;
-}
-
 double xy_distance(const cvc::physics::vec3 &a, const cvc::physics::vec3 &b) {
   return std::hypot(a.x - b.x, a.y - b.y);
 }
@@ -189,10 +155,6 @@ public:
     if (!split_participant_path(m.path, subject, family))
       return;
     const bool is_live = !m.origin_node_id.empty();
-    if (diag_on && family == "pose" && ends_with(m.path, ".pose.server_tick"))
-      diag().add("tap %s subj=%s tick=%s live=%d origin=%s seq=%llu", owner.c_str(),
-                 subject.c_str(), m.string_value.c_str(), is_live ? 1 : 0, m.origin_node_id.c_str(),
-                 static_cast<unsigned long long>(m.sequence));
     std::lock_guard<std::mutex> lk(_mu);
     if (family == "pose") {
       const bool tick = ends_with(m.path, ".pose.server_tick");
@@ -217,9 +179,6 @@ public:
     std::lock_guard<std::mutex> lk(_mu);
     ++_media[{f.origin_node_id, f.stream_id}];
   }
-
-  std::string owner;                // DIAGNOSTIC
-  std::atomic<bool> diag_on{false}; // DIAGNOSTIC
 
   // Live pose mutations applied for SUBJECT.
   std::uint64_t live_pose(const std::string &subject) const { return get(_live_pose, subject); }
@@ -382,9 +341,6 @@ public:
   // place_on_join is moved there on the step that adds it, before the area of interest first
   // sees it, and its pose re-written, so it appears there and never on the spawn ring.
   void step() {
-    const double diag_w0 = now_s();
-    const std::uint64_t diag_k0 = server.tick();
-    bool diag_bcast = false;
     std::vector<std::string> gone;
     {
       std::lock_guard<std::mutex> lk(_mu);
@@ -432,29 +388,8 @@ public:
     if (opt.ws_broadcast && now_s() >= _next_broadcast) {
       ws.broadcast_snapshot();
       _next_broadcast = now_s() + 1.0;
-      diag_bcast = true;
     }
 #endif
-    if (diag().on.load()) {
-      std::string trees;
-      const std::vector<std::string> ps = server.participants();
-      for (const std::string &pid : ps) {
-        cvc::physics::body_state s;
-        std::uint64_t t = 0;
-        const bool ok = cvc::ariadne::read_pose(app, kRoom, pid, s, t);
-        trees += " " + pid + "=" + (ok ? std::to_string(t) : std::string("-")) + "@" +
-                 std::to_string(server.state(pid).position.x);
-      }
-      std::string tiers;
-      for (std::size_t i = 0; i < ps.size(); ++i)
-        for (std::size_t j = i + 1; j < ps.size(); ++j)
-          tiers += " " + ps[i] + ps[j] + "=" + std::to_string(static_cast<int>(tier(ps[i], ps[j])));
-      diag().add("step %llu tick %llu->%llu dropped=%llu took=%.4f bcast=%d tree:%s tiers:%s",
-                 static_cast<unsigned long long>(steps), static_cast<unsigned long long>(diag_k0),
-                 static_cast<unsigned long long>(server.tick()),
-                 static_cast<unsigned long long>(server.clock().total_dropped()), now_s() - diag_w0,
-                 diag_bcast ? 1 : 0, trees.c_str(), tiers.c_str());
-    }
   }
 
   // The authority moves PID: teleported to (X, Y) standing still, or walking at (VX, VY) m/s.
@@ -650,7 +585,6 @@ class test_client {
 public:
   test_client(std::string id, link_kind k, std::string root = "conf")
       : pid(std::move(id)), kind(k) {
-    tap.owner = pid;
     shard = std::make_unique<cvc::state_cluster_shard>(app, "conf", pid, std::move(root));
     shard->add_interest("conf");
     shard->set_enforce_interest(true);
@@ -726,25 +660,7 @@ public:
   // One client frame: the holon against the replicated room, the marker echo when on, then this
   // frame's own writes sent.
   void frame() {
-    const bool d = tap.diag_on.load();
-    const std::uint64_t t0 = h.tick(), r0 = h.clock_realigns();
-    std::string samples;
-    if (d)
-      for (const ra::room_participant &p : ra::room_roster(app, kRoom)) {
-        cvc::physics::body_state s;
-        std::uint64_t t = 0;
-        const bool ok = cvc::ariadne::read_pose(app, kRoom, p.pid, s, t);
-        samples += " " + p.pid + "=" + (ok ? std::to_string(t) : std::string("-"));
-      }
     cvc::ariadne::client_pump(h, app, kRoom, pid);
-    if (d)
-      diag().add(
-          "frame %s tick %llu->%llu dropped=%llu realigns=%llu%s server=%llu tree:%s", pid.c_str(),
-          static_cast<unsigned long long>(t0), static_cast<unsigned long long>(h.tick()),
-          static_cast<unsigned long long>(h.clock().total_dropped()),
-          static_cast<unsigned long long>(h.clock_realigns()),
-          h.clock_realigns() != r0 ? " REALIGN" : "",
-          static_cast<unsigned long long>(diag_server ? diag_server->tick() : 0), samples.c_str());
     if (echo)
       write_echo();
     if (tp)
@@ -792,12 +708,11 @@ public:
   std::unique_ptr<cvc::state_cluster_shard> shard;
   holon h{holon_role::client, cvc::ariadne::room_holon_config()};
   cvc::state_transport *tp = nullptr;
-  bool echo = false;  // write arigl's avatar marker matrices into ui.docs every frame
-  std::string token;  // the room token its connection presents ("" = none)
+  bool echo = false; // write arigl's avatar marker matrices into ui.docs every frame
+  std::string token; // the room token its connection presents ("" = none)
   std::string device; // the device id its Hello carries ("" = none)
   std::string seed;   // its device key's 32-byte seed (state_device_key.h; "" = no key)
   std::uint64_t cam_sent = 0, mic_sent = 0;
-  const holon *diag_server = nullptr; // DIAGNOSTIC
 
 private:
   void send(const char *stream, const char *codec, std::size_t bytes, std::uint64_t seq) {
@@ -950,12 +865,21 @@ bool settled(test_relay &r, const std::vector<test_client *> &cs) {
   return true;
 }
 
-// Connect and join every client, then run the room until it settles.
+// Connect and join every client, then run the room until it settles. A room that starts with its
+// clients starts their replicas' clocks with the relay's (whose clock starts on its first step's
+// server_pump), as clients up when their server starts. Started at each client's first frame
+// instead, after that step -- the joins make it slow, 0.4 to 0.6 s in a Debug gRPC build -- a
+// replica ran 50 to 70 ticks behind the relay: its first sample, stamped during the step, was
+// within max_skew_ticks, so holon::apply_authoritative left it there until a fresh sample showed
+// the whole lag and re-aligned it.
 void bring_up(test_relay &r, const std::vector<test_client *> &cs) {
   for (test_client *c : cs) {
     ASSERT_TRUE(c->connect(r)) << c->pid << " could not reach the relay";
     c->join();
   }
+  if (r.steps == 0)
+    for (test_client *c : cs)
+      c->h.advance();
   ASSERT_TRUE(run_room(r, cs, 8.0, {}, [&] { return settled(r, cs); })) << "the room never settled";
 }
 
@@ -1150,7 +1074,8 @@ TEST(RoomRelayLoopbackTest, OuterPeerGetsPushesNotLiveFrames) {
 // to it. On the step the pair turns inner the relay pushes C's whole pose stamped with its CURRENT
 // tick, ahead of that step's live writes: within two steps B's tree has C exactly as the relay
 // does, with a tick at least that fresh, and B's replica never re-aligns its clock (a stale tick
-// would make it seek, and rubber-band its own avatar).
+// would make it seek, and rubber-band its own avatar). B's clock runs in step with the relay's
+// (bring_up), so a heartbeat-old tick is well past max_skew_ticks from it.
 TEST(RoomRelayLoopbackTest, StillOuterPeerReentryNoRealignNoFreeze) {
   relay_options o;
   o.aoi = ra::hall_aoi_params();
@@ -1159,17 +1084,13 @@ TEST(RoomRelayLoopbackTest, StillOuterPeerReentryNoRealignNoFreeze) {
   const client_list own = make_clients({"B", "C"});
   const std::vector<test_client *> cs = ptrs(own);
   test_client &B = *cs[0];
-  diag().on = true;
-  B.tap.diag_on = true;
-  B.diag_server = &r.server;
-  diag().add("B kind=%d C kind=%d", static_cast<int>(B.kind), static_cast<int>(cs[1]->kind));
   // 18 m apart: outer (beyond middle_enter 16 m), about two seconds' walk from inner (10 m).
   r.place_on_join = {{"B", {14.0, 10.0}}, {"C", {32.0, 10.0}}};
   ASSERT_NO_FATAL_FAILURE(bring_up(r, cs));
   ASSERT_EQ(r.tier("B", "C"), ra::aoi_tier::outer);
-  run_room(r, cs, 0.5); // the replicas' clocks settle on the relay's first samples
+  run_room(r, cs, 0.5);
   const std::uint64_t realigns = B.h.clock_realigns();
-  diag().add("baseline realigns=%llu", static_cast<unsigned long long>(realigns));
+  const auto lag = static_cast<long long>(r.server.tick()) - static_cast<long long>(B.h.tick());
 
   r.walk("B", 4.0, 0.0); // the veto's cap
   bool entered = false;
@@ -1196,8 +1117,6 @@ TEST(RoomRelayLoopbackTest, StillOuterPeerReentryNoRealignNoFreeze) {
         // Runs before each step: the previous step's snapshot, and the tick it pushed with. That
         // step's push may have landed already, so the count to beat is the one from before it.
         if (!entered && r.tier("B", "C") == ra::aoi_tier::inner) {
-          diag().add("entered at server tick %llu",
-                     static_cast<unsigned long long>(r.server.tick()));
           entered = true;
           entered_tick = r.server.tick();
           entered_step = r.steps;
@@ -1213,14 +1132,9 @@ TEST(RoomRelayLoopbackTest, StillOuterPeerReentryNoRealignNoFreeze) {
   EXPECT_GT(B.tap.pushed_ticks("C"), pushed_before) << "the entry pose came as a push";
 
   run_room(r, cs, 0.5); // inner now: live writes
-  EXPECT_EQ(B.h.clock_realigns(), realigns) << "a pushed tick never re-aligns the replica";
-  diag().add("end: B dropped=%llu server dropped=%llu",
-             static_cast<unsigned long long>(B.h.clock().total_dropped()),
-             static_cast<unsigned long long>(r.server.clock().total_dropped()));
-  diag().on = false;
-  diag().dump();
-  ADD_FAILURE() << "DIAGNOSTIC: always fails, so ctest prints every attempt's log (realigns "
-                << B.h.clock_realigns() << " vs baseline " << realigns << ")";
+  EXPECT_EQ(B.h.clock_realigns(), realigns)
+      << "a pushed tick never re-aligns the replica (B's clock was " << lag
+      << " ticks behind the relay's before the walk)";
   EXPECT_TRUE(B.h.pose_known("C"));
   cvc::physics::body_state rs;
   std::uint64_t rt = 0;
