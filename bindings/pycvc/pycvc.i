@@ -3824,7 +3824,7 @@ public:
   static data_options host_data_defaults();
 };
 PYCVC_STATE_EXEC_SCHEDULER_EXTEND(async_scheduler)
-const double kDefaultAsyncStepsPerCpuMs = 2000.0;
+const double kDefaultAsyncStepsPerCpuMs = 8000.0;
 double async_steps_per_cpu_ms_from_state(cvc::state &root, const std::string &scheduler_id);
 void publish_async_steps_per_cpu_ms(cvc::state &root, const std::string &scheduler_id,
                                     double rate);
