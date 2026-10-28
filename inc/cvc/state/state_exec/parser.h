@@ -13,6 +13,7 @@
 
 #include <cstddef>
 #include <cvc/state/state_exec/types.h>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -164,6 +165,13 @@ private:
   parser _parser;
   std::vector<value_t> _forms;
 };
+
+namespace detail {
+/// The DSL's number tokens: the whole of `token` as an int64 (std::from_chars), else as a double
+/// (strtod, for a token that may be one), else nothing. The parser reads number literals with it,
+/// and state-incr reads a node's text with it, so both agree on what a number is.
+std::optional<value_t> read_number_text(std::string_view token);
+} // namespace detail
 
 } // namespace cvc::state_exec
 

@@ -461,6 +461,32 @@ static bool may_be_float(std::string_view token) {
   return (c >= '0' && c <= '9') || c == '.' || c == 'i' || c == 'I' || c == 'n' || c == 'N';
 }
 
+namespace detail {
+
+std::optional<value_t> read_number_text(std::string_view token) {
+  if (token.empty())
+    return std::nullopt;
+  // An integer: the whole token, in int64 range.
+  {
+    int64_t ival = 0;
+    auto [ptr, ec] = std::from_chars(token.data(), token.data() + token.size(), ival);
+    if (ec == std::errc{} && ptr == token.data() + token.size())
+      return value_t(ival);
+  }
+  // A float: the whole token. std::from_chars for double may not be available everywhere; strtod
+  // is.
+  if (may_be_float(token)) {
+    const std::string text(token);
+    char *stop = nullptr;
+    const double dval = std::strtod(text.c_str(), &stop);
+    if (stop == text.c_str() + text.size() && stop != text.c_str())
+      return value_t(dval);
+  }
+  return std::nullopt;
+}
+
+} // namespace detail
+
 value_t parser::parse_number_or_symbol(char first) {
   // The token is `first` (just read) and the symbol characters after it, read in one go: none is
   // a newline, so the column moves on by the token's length.
@@ -479,28 +505,10 @@ value_t parser::parse_number_or_symbol(char first) {
   if (token == "#f" || token == "false" || token == "nil")
     return nil_value;
 
-  // Try integer
-  {
-    int64_t ival = 0;
-    auto [ptr, ec] = std::from_chars(token.data(), token.data() + token.size(), ival);
-    if (ec == std::errc{} && ptr == token.data() + token.size())
-      return value_t(ival);
-  }
-
-  std::string text(token);
-
-  // Try float
-  if (may_be_float(token)) {
-    // std::from_chars for double may not be available everywhere;
-    // fall back to strtod for robustness
-    char *stop = nullptr;
-    double dval = std::strtod(text.c_str(), &stop);
-    if (stop == text.c_str() + text.size() && stop != text.c_str())
-      return value_t(dval);
-  }
-
-  // It's a symbol
-  return value_t(symbol{std::move(text)});
+  // A number (an integer, else a float), or a symbol.
+  if (auto number = detail::read_number_text(token))
+    return std::move(*number);
+  return value_t(symbol{std::string(token)});
 }
 
 } // namespace cvc::state_exec
