@@ -145,6 +145,9 @@ struct intrinsics_context;
 struct spawn_setup {
   environment_ptr env;
   std::shared_ptr<void> context;
+  /// Called with the child's pid once it is submitted: a host that reaps its finished children
+  /// (their processes keep `context` alive) records them here. Optional.
+  std::function<void(int pid)> spawned;
 };
 
 struct intrinsics_context {

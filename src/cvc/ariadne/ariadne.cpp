@@ -950,6 +950,8 @@ struct Runtime::Impl {
     cvc::state_exec::intrinsics_context ictx;
   };
   std::unordered_map<int, std::shared_ptr<ActionContext>> live_actions_;
+  // Pids of the children actions and residents spawned (spawn_child), reaped once they finish.
+  std::vector<int> spawned_children_;
   bool used_scheduler_ = false; // did we ever submit to the app scheduler? (gate teardown reap)
 
   // The context an action, a resident or a child of one runs in: the app scheduler, a placeholder
@@ -1781,8 +1783,13 @@ Runtime::Impl::~Impl() {
   // lingers on the shared app scheduler after its Runtime is gone; the children its actions and
   // residents spawned carry the same owner, so they go too. Only touch the scheduler if
   // we ever used it (exec_scheduler() lazily builds it — don't force it at teardown otherwise).
-  if (used_scheduler_)
-    app.exec_scheduler().kill_owner(owner_);
+  if (used_scheduler_) {
+    auto &sched = app.exec_scheduler();
+    sched.kill_owner(owner_);
+    // A child's process holds its context, which points into this Runtime: erase them now.
+    for (const int pid : spawned_children_)
+      sched.reap(pid);
+  }
 }
 
 std::shared_ptr<Runtime::Impl::ActionContext>
@@ -1818,7 +1825,9 @@ Runtime::Impl::spawn_child(const cvc::state_exec::intrinsics_context &parent) {
       make_action_context(parent.root_path, parent.lock_default_timeout);
   ac->ictx.lock_wait_allowed = parent.lock_wait_allowed;
   ac->ictx.spawn_context = parent.spawn_context; // grandchildren get one too
-  return cvc::state_exec::spawn_setup{ac->env, ac};
+  // Recorded so the drain reaps it once it finishes: its process keeps `ac` alive.
+  return cvc::state_exec::spawn_setup{ac->env, ac,
+                                      [this](int pid) { spawned_children_.push_back(pid); }};
 }
 
 void Runtime::Impl::submit_action(const QueuedAction &action) {
@@ -1934,6 +1943,21 @@ void Runtime::Impl::pump_and_sweep_actions(cvc::state_exec::async_scheduler &sch
       ++it; // ready/running/waiting — still in flight (e.g. suspended on await/msg-recv/sleep)
     }
   }
+  // Spawned children: nothing reads a finished child's result either, and its process keeps the
+  // child's whole context alive, so a finished one is reaped here; a failure is reported once.
+  std::erase_if(spawned_children_, [&](int pid) {
+    const auto info = sched.get_process_info(pid);
+    if (info && !se::is_finished(info->status))
+      return false;
+    if (info && info->status == se::process_status::killed)
+      warn_once("ari: spawned program did not complete: " +
+                sched.get_exit_error(pid).value_or("killed"));
+    else if (info && info->status == se::process_status::failed)
+      warn_once("ari: spawned program failed: " +
+                failure_report(info->exit_exception, info->exit_error));
+    sched.reap(pid);
+    return true;
+  });
   // A resident never finishes on its own, so one that was killed (a syntax error in its body,
   // read inside the process; its per-step cap) or failed (an exception it didn't catch) is
   // reported, once per reason.

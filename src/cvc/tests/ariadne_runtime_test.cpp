@@ -5081,10 +5081,28 @@ TEST(SpawnContext, IS01_ActionChildMessagesAndWrites) {
     EXPECT_EQ(info->status, se::process_status::waiting); // parked on "never"
     EXPECT_TRUE(rt.take_reactive_warnings().empty());
   }
-  const auto info = app.exec_scheduler().get_process_info(child);
-  ASSERT_TRUE(info.has_value());
-  EXPECT_EQ(info->status, se::process_status::killed);
-  EXPECT_EQ(info->exit_error.value_or(""), "owner_reaped");
+  // The teardown killed the parked child and erased it (its process held the document's context).
+  EXPECT_FALSE(app.exec_scheduler().get_process_info(child).has_value());
+}
+
+// A finished child is reaped by the next drain, as a finished action is: its process would
+// otherwise keep its whole context (an environment with every intrinsic) for the app's life.
+TEST(SpawnContext, FinishedChildIsReaped) {
+  cvc::app app;
+  cvc::state &root = cvc::state::instance(app);
+  Runtime rt(app, "doc");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({button("Go", R"S((state-set "child" (spawn "(+ 1 2)")))S")}));
+  rt.drain();
+  click_once(rt, mb);
+  for (int frame = 0; frame < 50 && root("doc.child").value().empty(); ++frame)
+    rt.drain();
+  ASSERT_FALSE(root("doc.child").value().empty());
+  const int child = std::stoi(root("doc.child").value());
+  for (int frame = 0; frame < 50 && app.exec_scheduler().get_process_info(child); ++frame)
+    rt.drain();
+  EXPECT_FALSE(app.exec_scheduler().get_process_info(child).has_value());
 }
 
 // LK-31 (docs/STATE_EXEC_LOCKS.md 13.2): a child an action spawns inherits the action's with-lock

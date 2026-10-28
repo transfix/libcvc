@@ -543,13 +543,17 @@ value_t intrinsic_spawn(intrinsics_context *ctx, std::span<const value_t> args) 
     opts.owner = ctx->proc->owner;
   // The host's spawn context (td 4.15) gives the child an environment and a context of its own,
   // which the child's process keeps alive. Without one the child gets the bare builtins.
+  std::function<void(int)> spawned;
   if (ctx->spawn_context) {
     spawn_setup s = ctx->spawn_context(*ctx);
     opts.env = std::move(s.env);
     opts.keep_alive = std::move(s.context);
     opts.root_path = ctx->root_path;
+    spawned = std::move(s.spawned);
   }
   int pid = ctx->sched->execute(script, opts);
+  if (spawned && pid >= 0)
+    spawned(pid);
   return value_t(static_cast<int64_t>(pid));
 }
 
