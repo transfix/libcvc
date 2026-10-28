@@ -27,10 +27,10 @@
 //   kinetic now = kinetic at attach + drive - brake - dissipated + floor + grade + limiter
 //                 + residual
 // drive and brake are the axles' forces where they push and where they hold back, dissipated the
-// tires' slip, drag and rolling resistance, floor the slips' speed floor, limiter the kinetic
-// energy the speed clamp and the low-speed blend took, and residual the integrator's error (second
-// order per step). Positions, speeds and accelerations cross into nav's normalized frame through
-// world_units with the sim_world's frame, as nav_plant's do.
+// tires' slip, drag and rolling resistance, floor what the tires' secants leave (round-off),
+// limiter the kinetic energy the speed clamp and the low-speed blend took, and residual the
+// integrator's error (second order per step). Positions, speeds and accelerations cross into
+// nav's normalized frame through world_units with the sim_world's frame, as nav_plant's do.
 
 #ifndef __CVC_PHYSICS_DYN_BIKE_PLANT_H__
 #define __CVC_PHYSICS_DYN_BIKE_PLANT_H__
@@ -61,7 +61,7 @@ struct dyn_bike_books {
   double drive = 0.0;      // the axles' forces where they push (>= 0)
   double brake = 0.0;      // where they hold back (>= 0)
   double dissipated = 0.0; // the tires' slip, drag and rolling resistance (>= 0)
-  double floor = 0.0;      // the slips' speed floor
+  double floor = 0.0;      // what the tires' secants leave: round-off
   double grade = 0.0;      // gravity along the heading (0 on this flat plant)
   double limiter = 0.0;    // the speed clamp's and the low-speed blend's (<= 0 as a rule)
   double residual = 0.0;   // the integrator's
