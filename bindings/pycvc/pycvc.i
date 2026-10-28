@@ -182,13 +182,23 @@ def _keepalive(obj):
     ~scene_reader at exit, for an app). A SwigPyObject is not GC-tracked, so only the borrower's
     own reference keeps it alive, and the borrower's `this` (set first) goes before it.
 
+    When `obj` keeps objects of its own (its `_pycvc_*` stashes: a SceneRenderer its scene, a
+    scene its app), the stash is a tuple of those and then `obj.this`. `this` alone would keep
+    the C++ object alive past its proxy, and that proxy, released or cleared by the collector
+    first, takes its own stashes with it: the scene, then the app, freed under a live renderer.
+    A tuple has no tp_clear, so the collector never empties it, and it releases its items last
+    first, so `obj` goes before what it borrows. It holds what `obj` kept when it was taken.
+
     A proxy that does not own its C++ object (a reference into another one, such as
     Viewport.camera()) is returned as is: its own stash of that owner is what keeps it valid.
     Not for a director class (a node type Python can subclass): there the C++ object calls back
     into its Python half, which `this` alone does not keep alive. Stash the proxy for those.
     """
     this = getattr(obj, "this", None)
-    return this if this is not None and this.own() else obj
+    if this is None or not this.own():
+        return obj
+    kept = tuple(v for k, v in vars(obj).items() if k.startswith("_pycvc_"))
+    return kept + (this,) if kept else this
 %}
 // Keep the app alive for as long as a volume/geometry built from it lives: the
 // C++ voxels/geometry hold the app by RAW reference (app& _ctx), so without this

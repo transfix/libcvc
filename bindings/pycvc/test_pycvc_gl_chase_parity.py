@@ -12,7 +12,6 @@ Needs the built pycvc_gl extension for the native side; if it cannot construct
 """
 
 import math
-import os
 import sys
 
 import pycvc
@@ -46,8 +45,7 @@ try:
     native = NativeChaseCamera(**params, app=pycvc.make_app(), state_path="parity.cam")
 except Exception as e:  # extension missing / no headless controller
     print("SKIP: native chase camera unavailable — %s" % e)
-    sys.stdout.flush()
-    os._exit(0)
+    sys.exit(0)
 
 # A continuous, varying-speed wander (dips toward a near-stop, never teleports),
 # on irregular tick spacing — the same shape as the C++ parity test.
@@ -67,6 +65,4 @@ print("  max abs pose error over 200 frames: %.3e" % max_err)
 check("native chase camera matches pure-Python ChaseCamera", max_err < 1e-6)
 
 print("\n%s (%d failures)" % ("ALL PASS" if fails == 0 else "FAILED", fails))
-# Hard-exit past cvcGL's harmless static-teardown race, like the other pycvc_gl tests.
-sys.stdout.flush()
-os._exit(1 if fails else 0)
+sys.exit(1 if fails else 0)
