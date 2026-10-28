@@ -1304,6 +1304,8 @@ struct pycvc_py_conversion {
 %ignore cvc::state::lastMod;             // boost::posix_time::ptime
 %ignore cvc::state::ptree;               // boost::property_tree
 %ignore cvc::state::traverse;            // boost::function callback param
+%ignore cvc::state::updateValue;         // std::function callback param (compareAndSetValue and
+                                         // exchangeValue are wrapped)
 %ignore cvc::state::valueData;           // template
 %ignore cvc::state::wait_for_value;      // template + boost::chrono
 %ignore cvc::state::wait_for_data;       // template + boost::chrono

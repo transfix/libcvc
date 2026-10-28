@@ -185,6 +185,32 @@ if (state::instance(app)("optional.key").initialized()) {
 std::string raw = state::instance(app)("count").value();  // "42"
 ```
 
+**Atomic updates.** Three members compare, or compute, and assign under one hold of the node's
+mutex. Another thread's write can't land between the read and the write. They back the DSL's
+`state-cas`, `state-swap` and `state-incr` (docs/STATE_EXEC_LOCKS.md, section 4.4).
+
+```cpp
+state &owner = state::instance(app)("jobs.j7.owner");
+bool claimed = owner.compareAndSetValue("", "worker-3");  // true when it was "", now "worker-3"
+std::string before = owner.exchangeValue("worker-4");      // "worker-3"
+
+// f runs under the node's mutex: it must not touch the node. If f throws, the node is unchanged.
+std::string hits = state::instance(app)("stats.hits").updateValue([](const std::string &old) {
+  return std::to_string((old.empty() ? 0 : std::stoll(old)) + 1);
+});
+```
+
+- **Signals.** A write that changes the value fires `valueChanged` and the parent's `childChanged`
+  once, after the lock is released. A new value equal to the old one succeeds without writing and
+  fires nothing. A changed value's type name becomes `std::string`.
+- **Links.** These members write the node a read through a transparent link sees. A writable
+  transparent link writes its target, as `value(v)` does. A transparent link that is not
+  writable, or that can't be resolved, throws `read_only_error` instead of taking the write on the
+  link node (where `value(v)` would write it). An opaque link is its own node.
+- **Read-only nodes** throw `read_only_error`.
+- **pycvc** wraps `compareAndSetValue` and `exchangeValue`. `updateValue` takes a C++ function,
+  so it is not wrapped.
+
 ### Data Operations
 
 ```cpp

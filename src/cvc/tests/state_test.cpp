@@ -5225,6 +5225,137 @@ TEST_F(StateObjectFixture, StateObjectInstanceThreadingBatching) {
   obj.getState().reset();
 }
 
+// ===========================
+// Atomic single-node updates: compareAndSetValue, exchangeValue, updateValue
+// ===========================
+
+namespace {
+// Counts a node's valueChanged signals and its parent's child signals for `name`.
+struct atomic_signals {
+  int changed = 0;
+  int child = 0;
+  boost::signals2::scoped_connection a, b;
+  atomic_signals(state &node, state &parent, const std::string &name)
+      : a(node.valueChanged.connect([this] { ++changed; })),
+        b(parent.childChanged.connect([this, name](const std::string &n) {
+          if (n == name)
+            ++child;
+        })) {}
+};
+} // namespace
+
+using StateAtomicMembers = StateTestFixture;
+
+TEST_F(StateAtomicMembers, CompareAndSetTrueThenFalse) {
+  state &n = state::instance(ctx)("cas");
+  n.value("a");
+  EXPECT_TRUE(n.compareAndSetValue("a", "b"));
+  EXPECT_EQ(n.value(), "b");
+  EXPECT_FALSE(n.compareAndSetValue("a", "c"));
+  EXPECT_EQ(n.value(), "b");
+}
+
+TEST_F(StateAtomicMembers, EqualDesiredSucceedsWithoutASignal) {
+  state &root = state::instance(ctx);
+  state &n = root("same");
+  n.value("x");
+  atomic_signals sig(n, root, "same");
+  EXPECT_TRUE(n.compareAndSetValue("x", "x"));
+  EXPECT_EQ(n.exchangeValue("x"), "x");
+  EXPECT_EQ(n.updateValue([](const std::string &old) { return old; }), "x");
+  EXPECT_EQ(sig.changed, 0);
+  EXPECT_EQ(sig.child, 0);
+}
+
+TEST_F(StateAtomicMembers, ExchangeReturnsTheOldValue) {
+  state &n = state::instance(ctx)("swap");
+  EXPECT_EQ(n.exchangeValue("one"), "");
+  EXPECT_EQ(n.exchangeValue("two"), "one");
+  EXPECT_EQ(n.value(), "two");
+  EXPECT_EQ(n.valueTypeName(), "std::string");
+}
+
+TEST_F(StateAtomicMembers, UpdateThatThrowsLeavesTheNode) {
+  state &root = state::instance(ctx);
+  state &n = root("upd");
+  n.value("5");
+  atomic_signals sig(n, root, "upd");
+  EXPECT_THROW(
+      n.updateValue([](const std::string &) -> std::string { throw std::runtime_error("no"); }),
+      std::runtime_error);
+  EXPECT_EQ(n.value(), "5");
+  EXPECT_EQ(sig.changed, 0);
+  EXPECT_EQ(n.updateValue([](const std::string &old) { return old + "0"; }), "50");
+  EXPECT_EQ(sig.changed, 1);
+}
+
+TEST_F(StateAtomicMembers, OneSignalOfEachPerChange) {
+  state &root = state::instance(ctx);
+  state &n = root("sig");
+  atomic_signals sig(n, root, "sig");
+  EXPECT_TRUE(n.compareAndSetValue("", "1"));
+  n.exchangeValue("2");
+  n.updateValue([](const std::string &) { return std::string("3"); });
+  EXPECT_EQ(sig.changed, 3);
+  EXPECT_EQ(sig.child, 3);
+}
+
+TEST_F(StateAtomicMembers, WritableTransparentLinkWritesTheTarget) {
+  state &root = state::instance(ctx);
+  root("t.v").value("1");
+  state &link = root("l");
+  link.linkTo("t.v", state::link_mode::transparent);
+  link.setLinkWritable(true);
+  EXPECT_TRUE(link.compareAndSetValue("1", "2"));
+  EXPECT_EQ(link.exchangeValue("3"), "2");
+  EXPECT_EQ(link.updateValue([](const std::string &old) { return old + "!"; }), "3!");
+  EXPECT_EQ(root("t.v").value(), "3!");
+  EXPECT_EQ(link.value(), "");
+}
+
+TEST_F(StateAtomicMembers, NonWritableTransparentLinkThrowsAndChangesNothing) {
+  state &root = state::instance(ctx);
+  root("t.v").value("1");
+  state &link = root("l");
+  link.linkTo("t.v", state::link_mode::transparent);
+  EXPECT_THROW(link.compareAndSetValue("1", "2"), read_only_error);
+  EXPECT_THROW(link.exchangeValue("2"), read_only_error);
+  EXPECT_THROW(link.updateValue([](const std::string &) { return std::string("2"); }),
+               read_only_error);
+  EXPECT_EQ(root("t.v").value(), "1");
+  EXPECT_EQ(link.value(), "");
+}
+
+TEST_F(StateAtomicMembers, UnresolvableWritableLinkThrows) {
+  state &root = state::instance(ctx);
+  state &link = root("dangling");
+  link.linkTo("no.such.node", state::link_mode::transparent);
+  link.setLinkWritable(true);
+  EXPECT_THROW(link.exchangeValue("x"), read_only_error);
+  EXPECT_EQ(link.value(), "");
+}
+
+TEST_F(StateAtomicMembers, OpaqueLinkIsItsOwnNode) {
+  state &root = state::instance(ctx);
+  root("t.v").value("1");
+  state &link = root("o");
+  link.linkTo("t.v", state::link_mode::opaque);
+  EXPECT_EQ(link.exchangeValue("own"), "");
+  EXPECT_EQ(link.value(), "own");
+  EXPECT_EQ(root("t.v").value(), "1");
+}
+
+TEST_F(StateAtomicMembers, ReadOnlyNodeThrows) {
+  state &n = state::instance(ctx)("ro");
+  n.value("5");
+  n.readOnly(true);
+  EXPECT_THROW(n.compareAndSetValue("5", "6"), read_only_error);
+  EXPECT_THROW(n.exchangeValue("6"), read_only_error);
+  EXPECT_THROW(n.updateValue([](const std::string &) { return std::string("6"); }),
+               read_only_error);
+  EXPECT_EQ(n.value(), "5");
+}
+
 // Main function to handle custom flags
 int main(int argc, char **argv) {
   // Parse custom flags before GoogleTest removes them
