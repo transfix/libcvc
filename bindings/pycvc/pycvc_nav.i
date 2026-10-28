@@ -371,6 +371,73 @@ inline cvc::nav::follower_options follower_from(PyObject *d) {
 } // namespace pycvc_routes
 %}
 
+// drive_telemetry for N agents as a dict of (N,) arrays named as its fields: f32, binding uint8,
+// U_nav's terms as u_goal, u_barrier, u_soft, u_hard, u_terrain. potential_end, projection_work
+// and context_work are the tick's books, which only sim_world::step fills (zero elsewhere).
+%{
+namespace pycvc_telemetry {
+
+inline PyObject *to_dict(const cvc::nav::drive_telemetry *tel, int N) {
+  using T = cvc::nav::drive_telemetry;
+  npy_intp d1 = N;
+  PyObject *dict = PyDict_New();
+  if (!dict)
+    throw std::runtime_error("pycvc.nav: telemetry dict alloc failed");
+  auto set = [&](const char *key, PyObject *a) {
+    if (!a) {
+      Py_DECREF(dict);
+      throw std::runtime_error("pycvc.nav: telemetry array alloc failed");
+    }
+    PyDict_SetItemString(dict, key, a);
+    Py_DECREF(a);
+  };
+  auto put = [&](const char *key, float (*get)(const T &)) {
+    PyObject *a = PyArray_SimpleNew(1, &d1, NPY_FLOAT);
+    if (a) {
+      float *ad = static_cast<float *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(a)));
+      for (int i = 0; i < N; ++i)
+        ad[i] = get(tel[i]);
+    }
+    set(key, a);
+  };
+  put("alpha", [](const T &t) { return t.alpha; });
+  put("beta", [](const T &t) { return t.beta; });
+  put("gamma", [](const T &t) { return t.gamma; });
+  put("lam_soft", [](const T &t) { return t.lam_soft; });
+  put("lam_hard", [](const T &t) { return t.lam_hard; });
+  put("mu", [](const T &t) { return t.mu; });
+  put("mrisk", [](const T &t) { return t.mrisk; });
+  put("v_risk", [](const T &t) { return t.v_risk; });
+  put("ext_fx", [](const T &t) { return t.ext_fx; });
+  put("ext_fy", [](const T &t) { return t.ext_fy; });
+  put("steer", [](const T &t) { return t.steer; });
+  put("curvature", [](const T &t) { return t.curvature; });
+  put("clearance", [](const T &t) { return t.clearance; });
+  put("potential", [](const T &t) { return t.potential; });
+  put("u_goal", [](const T &t) { return t.terms.goal; });
+  put("u_barrier", [](const T &t) { return t.terms.barrier; });
+  put("u_soft", [](const T &t) { return t.terms.soft; });
+  put("u_hard", [](const T &t) { return t.terms.hard; });
+  put("u_terrain", [](const T &t) { return t.terms.terrain; });
+  put("force_x", [](const T &t) { return t.force_x; });
+  put("force_y", [](const T &t) { return t.force_y; });
+  put("potential_end", [](const T &t) { return t.potential_end; });
+  put("projection_work", [](const T &t) { return t.projection_work; });
+  put("context_work", [](const T &t) { return t.context_work; });
+  PyObject *b = PyArray_SimpleNew(1, &d1, NPY_UINT8);
+  if (b) {
+    std::uint8_t *bd =
+        static_cast<std::uint8_t *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(b)));
+    for (int i = 0; i < N; ++i)
+      bd[i] = tel[i].binding;
+  }
+  set("binding", b);
+  return dict;
+}
+
+} // namespace pycvc_telemetry
+%}
+
 %inline %{
   namespace pycvc {
 
@@ -1261,6 +1328,26 @@ inline cvc::nav::follower_options follower_from(PyObject *d) {
   PyObject *nav_sim_world_retarget(PyObject *handle, int i, double gx_n, double gy_n) {
     sim_world_from(handle)->retarget(i, static_cast<float>(gx_n), static_cast<float>(gy_n));
     Py_RETURN_NONE;
+  }
+
+  // ── the drive telemetry of the last tick (sim_world::drive_telemetry_data) ──────
+  // Off by default; turn it on before the step()s to read (the world steps bit for bit the same
+  // either way). nav_sim_world_drive_telemetry returns the last captured tick as a dict of (N,)
+  // arrays named as drive_telemetry's fields (as nav_drive_step_material_cuda's telemetry), with
+  // the tick's books against U_nav that only a world fills: potential_end, projection_work and
+  // context_work (zero on the first captured tick). None while capture is off; from turning it on
+  // until the first captured step() the arrays hold drive_telemetry's defaults.
+  PyObject *nav_sim_world_set_capture_drive_telemetry(PyObject *handle, int on) {
+    sim_world_from(handle)->set_capture_drive_telemetry(on != 0);
+    Py_RETURN_NONE;
+  }
+
+  PyObject *nav_sim_world_drive_telemetry(PyObject *handle) {
+    cvc::nav::sim_world *sw = sim_world_from(handle);
+    const cvc::nav::drive_telemetry *tel = sw->drive_telemetry_data();
+    if (!tel)
+      Py_RETURN_NONE;
+    return pycvc_telemetry::to_dict(tel, sw->size());
   }
 
   // ── base nav_stats on the sim_world (internal collector) ────────────────────
@@ -3156,44 +3243,7 @@ inline cvc::nav::follower_options follower_from(PyObject *d) {
     if (!telemetry) {
       tuple = PyTuple_Pack(4, oo, to, so, mc);
     } else {
-      PyObject *dict = PyDict_New();
-      auto put = [&](const char *key, auto get) {
-        PyObject *a = PyArray_SimpleNew(1, &d1, NPY_FLOAT);
-        float *ad = static_cast<float *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(a)));
-        for (int i = 0; i < N; ++i)
-          ad[i] = get(tel[i]);
-        PyDict_SetItemString(dict, key, a);
-        Py_DECREF(a);
-      };
-      using T = cvc::nav::drive_telemetry;
-      put("alpha", [](const T &t) { return t.alpha; });
-      put("beta", [](const T &t) { return t.beta; });
-      put("gamma", [](const T &t) { return t.gamma; });
-      put("lam_soft", [](const T &t) { return t.lam_soft; });
-      put("lam_hard", [](const T &t) { return t.lam_hard; });
-      put("mu", [](const T &t) { return t.mu; });
-      put("mrisk", [](const T &t) { return t.mrisk; });
-      put("v_risk", [](const T &t) { return t.v_risk; });
-      put("ext_fx", [](const T &t) { return t.ext_fx; });
-      put("ext_fy", [](const T &t) { return t.ext_fy; });
-      put("steer", [](const T &t) { return t.steer; });
-      put("curvature", [](const T &t) { return t.curvature; });
-      put("clearance", [](const T &t) { return t.clearance; });
-      put("potential", [](const T &t) { return t.potential; });
-      put("u_goal", [](const T &t) { return t.terms.goal; });
-      put("u_barrier", [](const T &t) { return t.terms.barrier; });
-      put("u_soft", [](const T &t) { return t.terms.soft; });
-      put("u_hard", [](const T &t) { return t.terms.hard; });
-      put("u_terrain", [](const T &t) { return t.terms.terrain; });
-      put("force_x", [](const T &t) { return t.force_x; });
-      put("force_y", [](const T &t) { return t.force_y; });
-      PyObject *b = PyArray_SimpleNew(1, &d1, NPY_UINT8);
-      std::uint8_t *bd =
-          static_cast<std::uint8_t *>(PyArray_DATA(reinterpret_cast<PyArrayObject *>(b)));
-      for (int i = 0; i < N; ++i)
-        bd[i] = tel[i].binding;
-      PyDict_SetItemString(dict, "binding", b);
-      Py_DECREF(b);
+      PyObject *dict = pycvc_telemetry::to_dict(tel.data(), N);
       tuple = PyTuple_Pack(5, oo, to, so, mc, dict);
       Py_DECREF(dict);
     }
