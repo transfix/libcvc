@@ -77,10 +77,19 @@ void clear_wait_fields(process &p) {
 // ---------------------------------------------------------------------------------------------
 
 void canonicalize(home_request &r) {
-  std::stable_sort(r.keys.begin(), r.keys.end(),
-                   [](const home_request::key &a, const home_request::key &b) {
-                     return key_less(a.text(), b.text());
-                   });
+  // A stable sort by absolute key. A request has a few keys: an insertion sort, which allocates
+  // nothing (libstdc++'s std::stable_sort takes a temporary buffer even for one key, an
+  // allocation on every uncontended section).
+  const auto less = [](const home_request::key &a, const home_request::key &b) {
+    return key_less(a.text(), b.text());
+  };
+  if (r.keys.size() > 16) {
+    std::stable_sort(r.keys.begin(), r.keys.end(), less);
+  } else {
+    for (std::size_t i = 1; i < r.keys.size(); ++i)
+      for (std::size_t j = i; j > 0 && less(r.keys[j], r.keys[j - 1]); --j)
+        std::swap(r.keys[j], r.keys[j - 1]);
+  }
   // Sorted, an ancestor (or an equal key) comes right before what it covers, so it is enough
   // to compare each key with the last one kept.
   std::size_t kept = 0;
