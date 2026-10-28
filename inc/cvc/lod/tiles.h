@@ -230,9 +230,9 @@ typedef std::function<void(std::size_t tile_index, const tile &t, const mesh_pyr
 // thread_pool::parallel_for documents.
 //
 // Pool occupancy: the call blocks until every tile is built, and a pooled call
-// is ONE parallel_for over all the tiles. thread_pool runs one fan-out at a
-// time, so for that whole (possibly multi-second) build every other thread's
-// parallel_for on the same pool waits its turn. For a progressive build behind a
+// is ONE parallel_for over all the tiles. Other threads' fan-outs on the same
+// pool run beside it, but they share its workers, so for that whole (possibly
+// multi-second) build they get fewer of them. For a progressive build behind a
 // running render or sim loop, call this from a loader thread with a pool of its
 // own (a small cvc::thread_pool the loader owns), not app::computePool() shared
 // with per-frame work. (A parallel_for issued from inside on_tile on this pool

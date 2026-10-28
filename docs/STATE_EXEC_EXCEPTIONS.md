@@ -371,13 +371,17 @@ with `ok: #f`, still returns that as a value; only a thrown error is an exceptio
 
 The app has two pools, and an async kernel uses the first:
 
-- **The background task pool** (`app::startThreadPooled`, which `compute_async` uses today):
-  - a queue of whole tasks, with priorities, bounded to `setThreadPoolSize` threads (the core
-    count by default);
+- **The background task pool** (`app::submitPooled`, which async kernels, `compute_async` and
+  `launch_pool_task` use):
+  - a queue of whole tasks, with priorities (FIFO within one), run by at most
+    `setThreadPoolSize` persistent worker threads (the core count by default); an async kernel
+    is an anonymous task, so a call creates no thread and its task is destroyed on the worker
+    once it ends;
   - every async kernel runs here, CPU-bound or blocking (`executor::background`, the default);
   - a blocking request holds one of its threads while it waits, and nothing else.
 - **The fork-join compute pool** (`app::computePool()`):
-  - render, simulation and nav fan-outs share it through `parallel_for`;
+  - render, simulation and nav fan-outs share it through `parallel_for`, and fan-outs from
+    several threads (several kernels) run side by side on its workers;
   - a CPU-heavy kernel fans out through it the same way (a volume filter splitting its
     slabs), so a kernel's parallelism comes from the same workers as everyone else's;
   - a kernel never runs on its workers as a whole task, so a slow kernel can't stall a frame's
@@ -409,6 +413,33 @@ Other places a kernel can run:
 A kernel checks it at convenient points and may stop early by throwing. A cancelled call's
 result is dropped. Host teardown (an `Exec`, an Ariadne document, the app's scheduler) cancels
 every in-flight kernel and waits for them before the scheduler goes, as `Exec` does today.
+
+A kernel its executor never runs still ends its call. Once `~app` has stopped the app's
+background pool, a kernel submitted to it (`app::submitPooled` returns false), or one still in
+its queue (`~app` drops the queue), is destroyed unrun, and so is a kernel a stopped lane
+refuses (a lane runs every kernel it accepted before it stopped). So is a kernel that no
+background worker can be started for (thread resources exhausted before the pool's first worker:
+`app::trySubmitPooled` hands it back rather than queue it), and one queued behind keyed threads
+that held every slot of a pool with no worker, once a worker creation fails and leaves the pool
+with no worker running or being created (the one asked for as one of those threads ends, say,
+even while the others still hold their slots). The pool drops it then, on the thread whose
+creation failed or, if a `trySubmitPooled` call was still deciding about its own task (waiting on
+that creation, say), on that call's thread before it returns: another async call made on the
+scheduler's thread, a `launch_pool_task` or a `compute_async` call can so end it. Its call then
+raises `RuntimeError` at the call site with a message that names the cause: "`name`: not run: the app's
+background pool has stopped" for the pool, "`name`: not run: no background worker could be
+started" when no worker could be started, "`name`: lane '`lane`' is stopped" for a lane. The
+pool's drops say why through `app::poolDropReason()`, which the kernel's task reads as it is
+destroyed. A pool that never got a worker can't run a kernel still queued (one queued behind
+keyed threads that still hold every slot): `~app` then drops the queue before it shuts down its
+host. While the pool has no worker running yet, a call made on the scheduler's thread waits for
+the worker creations under way to succeed or fail (up to 5 s, normally the time a thread takes to
+be created) before it parks or raises.
+Its kernel's captures go, and it leaves the host's count of calls in flight, so the process isn't
+left parked and `shutdown()` doesn't wait for it for good. That matters for a host bound to an
+app that `~app` doesn't shut down itself (one driven from a keyed thread, say): `~app` shuts down
+its own exec host before it stops the pool. `launch_pool_task` posts `on_error`'s value in the
+same case, and `compute_async`'s `on_error` form calls `on_error`.
 
 ### 3.7 Data crossing threads
 
@@ -443,14 +474,16 @@ limits what that process can make the app do for it.
        default);
     2. `state_exec.schedulers.<id>.limits.async_steps_per_cpu_ms`;
     3. `state_exec.defaults.limits.async_steps_per_cpu_ms`;
-    4. the built-in default, 2000. P3 measured what a step costs and set it from that: about
-       0.4 to 0.45 CPU microseconds on the async scheduler (Ariadne's and `Exec`'s) and 0.26
-       to 0.3 on the sync one, on a loop of arithmetic, DSL function calls and list and dict
-       work (MSVC Release, x64; `StepCostSetsTheDefaultRate` in
-       `state_exec_async_calls_test`, which, in an optimized build, fails if the default
-       drifts beyond a factor of four of either; a debug build's steps cost 20 to 40 times
-       more). 2000 rounds the async scheduler's 2,200 to 2,500 steps per CPU
-       millisecond down. (The first draft's 1000 was provisional.)
+    4. the built-in default, 8000. It is set from what a step costs: since the evaluator
+       work of transfix/libcvc#844, about 0.09 to 0.13 CPU microseconds on the async scheduler
+       (Ariadne's and `Exec`'s) and 0.08 to 0.1 on the sync one, on a loop of arithmetic, DSL
+       function calls and list and dict work (MSVC Release, x64, 2026-10-28;
+       `StepCostSetsTheDefaultRate` in `state_exec_async_calls_test`, which, in an optimized
+       build, fails if the default drifts beyond a factor of four of either; a debug build's
+       steps cost 20 to 40 times more). 8000 rounds the async scheduler's 7,700 to 11,400
+       steps per CPU millisecond down; a macOS arm64 runner measured 8,100 to 8,700. (P3 set
+       2000 from the 2,200 to 2,500 that steps cost before #844; the first draft's 1000 was
+       provisional.)
   - The value is a non-negative decimal number; a fraction is allowed, `0.5` being a step every
     2 CPU ms. A node that isn't one falls through to the next level.
   - The scheduler publishes the effective value under its own subtree, as it does its other
@@ -803,7 +836,7 @@ them into gtest and pytest cases with these IDs.
 | AS-15 | a snapshot of a process parked in a call, restored | raises `RuntimeError` at the call (the call can't resume) |
 | AS-16 | `Exec.register_async_fn` raising | raises at the call site, no `__async_error__` dict (the compatibility change) |
 | AS-17 | an async function called from Ariadne's reactive lane | not reachable (action seam only); if called, `RuntimeError` |
-| AS-18 | a 200 ms CPU-bound kernel | `async_calls` 1, `async_time` and `async_cpu_time` about 0.2 s, `async_steps` about 400,000 at the default rate; `elapsed_time` includes the 0.2 s |
+| AS-18 | a 200 ms CPU-bound kernel | `async_calls` 1, `async_time` and `async_cpu_time` about 0.2 s, `async_steps` about 1,600,000 at the default rate; `elapsed_time` includes the 0.2 s |
 | AS-19 | `max_time` 0.1 s, a 1 s CPU-bound kernel that checks `cancelled()`, the call inside a `try` | `killed`, `time_limit_exceeded`, well before 1 s; the catch didn't run; the kernel sees `cancelled()` |
 | AS-20 | `max_steps` 1000, a 50 ms CPU-bound kernel | `killed`, `max_steps_exceeded`; with `limits.async_steps_per_cpu_ms` 0, it finishes |
 | AS-21 | a kernel that sleeps 200 ms (blocking, almost no CPU) | `async_time` about 0.2 s, charged to `max_time`; `async_cpu_time` near 0; a step or a few |
@@ -812,7 +845,7 @@ them into gtest and pytest cases with these IDs.
 | AS-24 | two futures in flight from one process, 100 ms each | `async_time` about 0.2 s, though about 0.1 s passed |
 | AS-25 | a kernel that never checks `cancelled()`, past `max_time` | the process is killed when its run time reaches the limit; the late result is dropped |
 | AS-26 | the AS-18 kernel inline (sync scheduler) | the same charges as AS-18, not the step's capped charge |
-| AS-27 | two 50 ms kernels in a row; between them `state_exec.defaults.limits.async_steps_per_cpu_ms` is set to `0`, with no `load_settings()` | the first call is charged about 100,000 steps and the second one |
+| AS-27 | two 50 ms kernels in a row; between them `state_exec.defaults.limits.async_steps_per_cpu_ms` is set to `0`, with no `load_settings()` | the first call is charged about 400,000 steps and the second one |
 | AS-28 | the rate set to 10 in `state_exec.defaults.limits` and to 100 in `state_exec.schedulers.<id>.limits` | a 50 ms kernel is charged about 5,000 steps (the scheduler's node wins); with `execute_options::async_steps_per_cpu_ms` 1, about 50 |
 | AS-29 | AS-21's sleeping kernel, on Windows | `async_cpu_time` near 0 and a step or a few, as on Linux and macOS (the thread CPU clock) |
 | AS-30 | `max_memory` 1 MiB, a kernel that reports allocating 4 MiB through `eval_alloc_check`, the call inside a `try` | `MemoryError` at the call site, caught; `heap_alloc_bytes` grew by what the kernel reported before the refusal |

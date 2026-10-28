@@ -22,23 +22,24 @@
 
 // thread_pool.cpp — see thread_pool.h.
 //
-// Sync model: workers park on _wake until _epoch advances (a job posted). Each
-// participant (the caller and every enlisted worker) claims indices from the
-// job's atomic cursor until it is drained, then decrements the job's `remaining`
-// participant count with release semantics; the caller waits on _done for
-// `remaining` to reach 0 (acquire), which establishes happens-before between the
-// workers' writes and the caller's return. The job lives on the caller's stack:
-// a worker only touches it between waking and its final decrement, and the caller
-// clears _job only after `remaining` hits 0, so no worker races the stack unwind.
+// Sync model: a parallel_for links its job (on the caller's stack) into a FIFO list under _mtx
+// and wakes at most as many idle workers as the job may enlist. A worker, under _mtx, joins the
+// oldest linked job that still has room under its cap and unclaimed indices: it bumps the job's
+// `joined` and its `remaining` participant count, then, without the lock, claims indices from
+// the job's atomic cursor until it drains, and decrements `remaining` with release semantics.
+// Once the caller has run out of indices itself it unlinks the job under _mtx (no worker can
+// join after that, and every join happened before it, under the same mutex), drops its own share
+// of `remaining`, and waits on _done for it to reach 0 (acquire), which establishes
+// happens-before between the workers' writes and the caller's return. A worker never touches a
+// job after its final decrement (the last one out only locks _mtx to notify _done), so the
+// caller's stack unwind cannot race it.
 //
-// There is ONE job slot, so `remaining` can only drain if every enlisted worker
-// eventually wakes and adopts the job that is still in the slot. _post_mtx keeps
-// that invariant across orchestrator threads: a caller holds it from posting its
-// job until the job has drained and the slot is cleared, so a second concurrent
-// parallel_for blocks rather than overwriting _job/_epoch out from under a
-// slow-to-wake worker (which would strand the first caller in _done.wait), and a
-// finishing caller's `_job = nullptr` can never stomp a freshly posted job.
+// Several jobs may be linked at once: concurrent orchestrators no longer wait for one another.
+// Each caller always runs its own job's indices, so every fan-out makes progress even when every
+// worker is busy in an older one; workers that finish a job move to the next joinable one before
+// they sleep.
 
+#include <algorithm>
 #include <cvc/core/thread_pool.h>
 #include <exception>
 
@@ -104,23 +105,45 @@ void thread_pool::run_indices(job &j) noexcept {
   }
 }
 
-void thread_pool::worker_loop(int worker_index) {
-  std::uint64_t seen = 0;
+thread_pool::job *thread_pool::joinable_job_locked() const {
+  for (job *j = _head; j; j = j->next)
+    if (j->joined < j->enlisted && j->cursor.load(std::memory_order_relaxed) < j->n)
+      return j;
+  return nullptr;
+}
+
+void thread_pool::unlink_locked(job &j) {
+  job *prev = nullptr;
+  for (job *p = _head; p; prev = p, p = p->next) {
+    if (p != &j)
+      continue;
+    (prev ? prev->next : _head) = p->next;
+    if (_tail == p)
+      _tail = prev;
+    p->next = nullptr;
+    return;
+  }
+}
+
+void thread_pool::worker_loop(int /*worker_index*/) {
   for (;;) {
     job *j = nullptr;
     {
       std::unique_lock<std::mutex> lk(_mtx);
-      _wake.wait(lk, [&] { return _stop || _epoch != seen; });
-      if (_stop)
-        return;
-      seen = _epoch;
-      j = _job;
-      // Not enlisted for this job (a capped fan-out): go back to sleep.
-      if (j && worker_index >= j->enlisted)
-        j = nullptr;
+      for (;;) {
+        if (_stop)
+          return;
+        j = joinable_job_locked();
+        if (j)
+          break;
+        ++_idle;
+        _wake.wait(lk);
+        --_idle;
+      }
+      // Joined under the lock, while the job is linked: its caller can't have begun waiting.
+      ++j->joined;
+      j->remaining.fetch_add(1, std::memory_order_relaxed);
     }
-    if (!j)
-      continue;
 
     const thread_pool *prev = t_active_pool;
     t_active_pool = this;
@@ -135,10 +158,11 @@ void thread_pool::worker_loop(int worker_index) {
     }
     t_active_pool = prev;
 
-    // Last participant out wakes the caller. (No j access past this point.)
+    // Last participant out wakes the callers. (No j access past this point.) _done is shared by
+    // every caller waiting on its own job, so wake them all; each re-checks its own count.
     if (j->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
       std::lock_guard<std::mutex> lk(_mtx);
-      _done.notify_one();
+      _done.notify_all();
     }
   }
 }
@@ -165,11 +189,7 @@ void thread_pool::parallel_for(int n, const std::function<void(int)> &fn, int ma
     return;
   }
 
-  // One posted job at a time: concurrent orchestrators serialize here, each
-  // holding the lock until its job has fully drained and the slot is cleared.
-  std::lock_guard<std::mutex> post_lk(_post_mtx);
-
-  // Enlist workers besides the caller: capped by the pool size, by max_par (which
+  // Workers that may join besides the caller: capped by the pool size, by max_par (which
   // counts the caller), and by the work available (no idle wakeups).
   int enlisted = static_cast<int>(_workers.size());
   if (max_par > 0 && max_par - 1 < enlisted)
@@ -183,30 +203,37 @@ void thread_pool::parallel_for(int n, const std::function<void(int)> &fn, int ma
   j.n = n;
   j.fn = &fn;
   j.cursor.store(0, std::memory_order_relaxed);
-  j.remaining.store(enlisted + 1, std::memory_order_relaxed); // + the caller
+  j.remaining.store(1, std::memory_order_relaxed); // the caller; workers add themselves
   j.enlisted = enlisted;
   j.ctx = t_fanout_context;
 
-  {
-    std::lock_guard<std::mutex> lk(_mtx);
-    _job = &j;
-    ++_epoch;
+  if (enlisted > 0) {
+    unsigned wake = 0;
+    {
+      std::lock_guard<std::mutex> lk(_mtx);
+      (_tail ? _tail->next : _head) = &j;
+      _tail = &j;
+      wake = std::min<unsigned>(_idle, static_cast<unsigned>(enlisted));
+    }
+    // Wake only the workers the job can use; busy ones find it when they finish theirs.
+    if (wake >= _workers.size())
+      _wake.notify_all();
+    else
+      for (unsigned w = 0; w < wake; ++w)
+        _wake.notify_one();
   }
-  _wake.notify_all();
 
   const thread_pool *prev = t_active_pool;
   t_active_pool = this;
   run_indices(j); // noexcept: task throws are latched into j, re-thrown below once joined
   t_active_pool = prev;
 
-  // If the caller isn't the last one out, wait for the workers to drain.
-  if (j.remaining.fetch_sub(1, std::memory_order_acq_rel) != 1) {
+  if (enlisted > 0) {
+    // No worker joins from here on; then wait for the ones that did.
     std::unique_lock<std::mutex> lk(_mtx);
-    _done.wait(lk, [&] { return j.remaining.load(std::memory_order_acquire) == 0; });
-  }
-  {
-    std::lock_guard<std::mutex> lk(_mtx);
-    _job = nullptr;
+    unlink_locked(j);
+    if (j.remaining.fetch_sub(1, std::memory_order_acq_rel) != 1)
+      _done.wait(lk, [&] { return j.remaining.load(std::memory_order_acquire) == 0; });
   }
 
   // The whole fan-out has joined (remaining hit 0, which the acquire load above

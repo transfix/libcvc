@@ -827,8 +827,7 @@ TEST_F(VolrenRenderTest, IsosurfaceSilhouetteHasNoHoles) {
 }
 
 // Two raycasters rendering concurrently must not interfere: each defaults to
-// its own thread pool (cvc::thread_pool allows only one in-flight
-// parallel_for per pool).
+// its own thread pool (fan-outs on one pool would share its workers).
 TEST_F(VolrenRenderTest, ConcurrentRendersOnSeparateRaycastersComplete) {
   transfer_function tf;
   tf.add({-0.5, 0.2f, 0.4f, 0.8f, 0.1f});

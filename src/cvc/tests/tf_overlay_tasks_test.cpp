@@ -13,6 +13,7 @@
 // Runtime pumps it (drain_ingress, wake_awaiting, sync_run(200000, 0.1)), in both modes.
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -524,4 +525,111 @@ TEST_F(TfOverlayTasks, ATaskThatCannotStartReturnsMinusOne) {
   ASSERT_TRUE(wait_overlays(app, pid, 10.0));
   EXPECT_EQ(value_at(app, "tasks_test.empty.transfer_function.overlay_status"),
             compute_overlays(none).status);
+}
+
+namespace {
+
+// An app whose background pool can create no thread, as when thread resources are exhausted (a
+// throw from the pool's test seam counts as the creation failing).
+struct no_thread_app : cvc::app {
+  std::atomic<int> attempts{0};
+  no_thread_app() {
+    _poolWorkerSpawnHook = [this] {
+      ++attempts;
+      throw boost::thread_resource_error();
+    };
+  }
+};
+
+} // namespace
+
+// A threaded task carries on cooperatively when no worker can be started for its chunk (the app's
+// background pool has none and can't create one, so compute_async throws), and publishes what
+// compute_overlays gives. (The chunk used to wait in the pool's queue for a worker that never came,
+// and the task with it.)
+TEST(TfOverlayTasksNoThreads, ThreadedTaskCarriesOnCooperativelyWhenNoWorkerCanStart) {
+  no_thread_app app;
+  const cvc::volume vol = make_volume(app, 32, 32, 32, ripples);
+  overlay_task_options opt;
+  opt.threading = overlay_threading::threaded;
+  const overlays ref = compute_overlays(vol, overlay_all, opt.overlays);
+  const std::string tf = "tasks_test.no_threads.transfer_function";
+  const int pid = schedule_overlays(app, tf, vol, overlay_all, opt);
+  ASSERT_GT(pid, 0);
+  EXPECT_TRUE(wait_overlays(app, pid, 60.0)) << "the task waited for a chunk no worker will run";
+  expect_published(app, tf, ref);
+  EXPECT_GE(app.attempts.load(), 1) << "no chunk was launched";
+  EXPECT_EQ(app.getPendingThreadCount(), 0u);
+  EXPECT_EQ(app.getActiveThreadCount(), 0u);
+}
+
+namespace {
+
+// An app whose background pool can create no thread while `fail` is set.
+struct switch_app : cvc::app {
+  std::atomic<bool> fail{false};
+  switch_app() {
+    _poolWorkerSpawnHook = [this] {
+      if (fail.load())
+        throw boost::thread_resource_error();
+    };
+  }
+};
+
+} // namespace
+
+// A threaded task whose chunk was queued, and then left with no worker, carries on cooperatively
+// and publishes what compute_overlays gives, with no later submission starting a worker: a keyed
+// task held the only slot of a pool that had no worker, and as it ended, the worker it asked for
+// couldn't be created. The pool drops the chunk, and the task hears of it. (The chunk used to be
+// dropped without a word, its reply never posted, and the task waited for it for good; before
+// that, the chunk waited in the queue, and the task with it, until a later submission started a
+// worker.)
+TEST(TfOverlayTasksNoThreads, AThreadedTaskWhoseChunkIsLeftWithNoWorkerCarriesOnCooperatively) {
+  switch_app app;
+  const cvc::volume vol = make_volume(app, 32, 32, 32, ripples);
+  app.setThreadPoolSize(1);
+  std::atomic<bool> release(false);
+  app.startThreadPooled(
+      "hold",
+      [&release] {
+        const steady::time_point until = steady::now() + std::chrono::seconds(20);
+        while (!release.load() && steady::now() < until)
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      },
+      cvc::PRIORITY_NORMAL, /*wait=*/true);
+  ASSERT_TRUE(app.hasThread("hold"));
+  overlay_task_options opt;
+  opt.threading = overlay_threading::threaded;
+  const overlays ref = compute_overlays(vol, overlay_all, opt.overlays);
+  const std::string tf = "tasks_test.left_with_no_worker.transfer_function";
+  const int pid = schedule_overlays(app, tf, vol, overlay_all, opt);
+  ASSERT_GT(pid, 0);
+  // Pump, as a Runtime does, until the task's first chunk is queued behind the keyed task.
+  se::async_scheduler &sched = app.exec_scheduler();
+  const steady::time_point t0 = steady::now();
+  while (app.getPendingThreadCount() == 0 && ms_since(t0) < 10000.0) {
+    sched.drain_ingress();
+    sched.wake_awaiting();
+    sched.sync_run(200000, 0.1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  ASSERT_EQ(app.getPendingThreadCount(), 1u) << "no chunk was queued";
+
+  app.fail = true;
+  release = true;
+  if (cvc::thread_ptr hold = app.threads("hold"))
+    hold->join();
+  const bool finished = wait_overlays(app, pid, 20.0);
+  if (!finished) {
+    // So that the test ends: a worker that can start runs a chunk still queued.
+    app.fail = false;
+    app.submitPooled([] {});
+    if (!wait_overlays(app, pid, 20.0))
+      cancel_overlays(app, pid);
+  }
+  EXPECT_TRUE(finished) << "the task waited for a chunk nothing will run";
+  if (finished)
+    expect_published(app, tf, ref);
+  EXPECT_EQ(app.getActiveThreadCount(), 0u);
 }

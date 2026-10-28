@@ -211,10 +211,12 @@ public:
 };
 
 /// limits.async_steps_per_cpu_ms when nothing sets it: what the steps cost, a step being about
-/// 0.4 to 0.45 CPU microseconds on the async scheduler and 0.26 to 0.3 on the sync one (a loop of
-/// arithmetic, DSL function calls, list and dict work; MSVC Release, x64, 2026-10-24: the
-/// StepCostSetsTheDefaultRate case of state_exec_async_calls_test), rounded down.
-inline constexpr double kDefaultAsyncStepsPerCpuMs = 2000.0;
+/// 0.09 to 0.13 CPU microseconds on the async scheduler and 0.08 to 0.1 on the sync one (a loop
+/// of arithmetic, DSL function calls, list and dict work; MSVC Release, x64, 2026-10-28, after
+/// the evaluator's hot-path work: the StepCostSetsTheDefaultRate case of
+/// state_exec_async_calls_test), rounded down. A macOS arm64 runner measured 8,100 to 8,700 steps
+/// per CPU millisecond.
+inline constexpr double kDefaultAsyncStepsPerCpuMs = 8000.0;
 
 /// limits.async_steps_per_cpu_ms from the state tree under `root`:
 /// `state_exec.schedulers.<scheduler_id>.limits.async_steps_per_cpu_ms` (when scheduler_id is
