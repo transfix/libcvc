@@ -707,6 +707,36 @@ Programs can manage other processes using DSL intrinsics:
 (scheduler-stats)  ;; => {total: N, running: N, ...}
 ```
 
+**What a spawned child sees.** A child always keeps its parent's `owner`, so a host that reaps
+a document's processes with `kill_owner` reaps its children too. Its environment depends on the
+host (docs/STATE_EXEC_THREADED.md 4.15):
+
+- With no spawn context, the child gets the bare builtins: no intrinsics, so `(state-get ...)`
+  in the child is a `NameError`. This is what a context built by hand gets unless it sets one.
+- With a spawn context (`intrinsics_context::spawn_context`), the callback gives the child its
+  environment and a context of its own. The child's process keeps that context alive until the
+  process is reaped. Ariadne's actions, residents and init scripts, pycvc's `Exec` and
+  `make_spawn_context` all install one.
+
+A C++ host that registers the plain intrinsics installs the ready-made callback:
+
+```cpp
+intrinsics_context ictx;  // sched, root (apply_chroot), uid, channels, lock fields, ...
+ictx.spawn_context = make_spawn_context();  // or make_spawn_context(base, after_register)
+register_intrinsics(env, &ictx);
+```
+
+Each child then gets a context copying the parent's:
+
+- scheduler, root and chroot, and tracker;
+- identity, channel policy and document;
+- lock fields (`lock_wait_allowed`, `lock_default_timeout`);
+- the callback itself, so grandchildren get one too.
+
+The child's environment is `environment::extend(base)` with the intrinsics registered in it,
+then `after_register(env, ctx)`, the host's own bindings. A null `base` is one default
+environment, shared by the callback's children.
+
 ---
 
 ## 5. The State Tree

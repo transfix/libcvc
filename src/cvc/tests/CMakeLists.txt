@@ -2940,6 +2940,23 @@ if(_cvc_bench_python)
                      "${PROJECT_SOURCE_DIR}/tools/bench/test_state_exec_bench.py")
   endif()
 endif()
+# The deterministic bench gates (state_exec_bench_gates.cmake): 0 steps and 0 allocations per
+# uncontended lock, and pinned steps_total for two sched.single.* programs, read from short runs
+# with the runner's `gate`. Same Python rule as the tool test. Release and RelWithDebInfo only:
+# MSVC's Debug STL allocates for its iterator debugging, so the allocation count is a Release
+# number; on a single-config generator the build type decides, on a multi-config one ctest's -C.
+get_property(_cvc_bench_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+if(TARGET state_exec_bench AND _cvc_bench_python AND _cvc_bench_python_rc EQUAL 0
+   AND (_cvc_bench_multi_config OR CMAKE_BUILD_TYPE MATCHES "^(Release|RelWithDebInfo)$"))
+  add_test(NAME state_exec_bench_gates
+           COMMAND "${CMAKE_COMMAND}"
+                   "-DBENCH=$<TARGET_FILE:state_exec_bench>"
+                   "-DPYTHON=${_cvc_bench_python}"
+                   "-DRUNNER=${PROJECT_SOURCE_DIR}/tools/bench/state_exec_bench.py"
+                   "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/state_exec_bench_gates"
+                   -P "${CMAKE_CURRENT_SOURCE_DIR}/state_exec_bench_gates.cmake"
+           CONFIGURATIONS Release RelWithDebInfo)
+endif()
 if(TARGET hdf5_test)
   cvc_discover_tests(hdf5_test)
 endif()

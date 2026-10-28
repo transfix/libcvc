@@ -77,10 +77,19 @@ void clear_wait_fields(process &p) {
 // ---------------------------------------------------------------------------------------------
 
 void canonicalize(home_request &r) {
-  std::stable_sort(r.keys.begin(), r.keys.end(),
-                   [](const home_request::key &a, const home_request::key &b) {
-                     return key_less(a.text(), b.text());
-                   });
+  // A stable sort by absolute key. A request has a few keys: an insertion sort, which allocates
+  // nothing (libstdc++'s std::stable_sort takes a temporary buffer even for one key, an
+  // allocation on every uncontended section).
+  const auto less = [](const home_request::key &a, const home_request::key &b) {
+    return key_less(a.text(), b.text());
+  };
+  if (r.keys.size() > 16) {
+    std::stable_sort(r.keys.begin(), r.keys.end(), less);
+  } else {
+    for (std::size_t i = 1; i < r.keys.size(); ++i)
+      for (std::size_t j = i; j > 0 && less(r.keys[j], r.keys[j - 1]); --j)
+        std::swap(r.keys[j], r.keys[j - 1]);
+  }
   // Sorted, an ancestor (or an equal key) comes right before what it covers, so it is enough
   // to compare each key with the last one kept.
   std::size_t kept = 0;
@@ -197,15 +206,22 @@ void lock_home::free_entry(std::size_t slot) {
   free_.push_back(slot);
 }
 
-std::optional<std::size_t> lock_home::victim() {
+std::optional<std::size_t> lock_home::victim(const home_request &req) {
   // CLOCK: a used entry gets a second chance; an entry of this request (pinned, or reserved for
-  // one of its misses) is never taken. Twice round the clock finds one if any can go.
+  // one of its misses) is never taken, nor one whose node is a key of the request under another
+  // spelling ("x" and "x " both name x). Twice round the clock finds one if any can go.
+  const auto names_a_key = [&req](const lock_node *node) {
+    for (const home_request::key &k : req.keys)
+      if (k.node ? k.node == node : node->key == k.absolute)
+        return true;
+    return false;
+  };
   const std::size_t n = entries_.size();
   for (std::size_t tries = 0; tries < 2 * n; ++tries) {
     const std::size_t slot = hand_;
     hand_ = (hand_ + 1) % n;
     entry &e = entries_[slot];
-    if (!e.live || !e.node || e.pinned == pin_epoch_)
+    if (!e.live || !e.node || e.pinned == pin_epoch_ || names_a_key(e.node))
       continue;
     if (e.used) {
       e.used = false;
@@ -233,7 +249,7 @@ void lock_home::build_table_request(const home_request &req, lock_request &treq,
       if (!free_.empty()) {
         slot = free_.back();
         free_.pop_back();
-      } else if ((slot = victim())) {
+      } else if ((slot = victim(req))) {
         delta.drop.push_back(entries_[*slot].node);
         entry &old = entries_[*slot];
         index_.erase(cache_key{old.scope, old.written});

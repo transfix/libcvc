@@ -20,7 +20,7 @@
 #include <cvc/ariadne/uri.h>               // §13.8 (fetch uri): register a custom scheme handler
 #include <cvc/ariadne/widget.h>
 #include <cvc/core/app.h>
-#include <cvc/core/async_task.h> // launch_pool_task generalization test
+#include <cvc/core/async_task.h>  // launch_pool_task generalization test
 #include <cvc/core/thread_pool.h> // item 2: full type for app.computePool().parallel_for
 #include <cvc/net/http_client.h>  // §13.8: swap the transport for a fake in the http-get test
 #include <cvc/state/state.h>
@@ -490,6 +490,38 @@ TEST(AriadneAction, ProgramActionCapturesDeliveredValueFromMsgRecv) {
   rt.render();
   rt.drain(); // wakes + resumes; the delivered value flows into state-set
   EXPECT_EQ(cvc::state::instance(app)("async.value").value(), "delivered");
+}
+
+// An action's (fork) child shares the action's intrinsics context, so the context outlives the
+// action while the child runs: the action ends in its first drain, the child sleeps past it and
+// then writes through the context. Once the child ends it is reaped, and the context with it.
+TEST(AriadneAction, ForkedChildOutlivesTheAction) {
+  cvc::app app;
+  cvc::state &root = cvc::state::instance(app);
+  Runtime rt(app, "doc");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({button("Go", "(begin (set c (fork)) (if (= c 0) (begin (sleep 0.05) "
+                                  "(state-set \"x\" \"1\")) (state-set \"child\" (str c))))")}));
+  mb.button_click = true;
+  rt.render();
+  rt.drain(); // the action forks and ends; its child sleeps
+  mb.button_click = false;
+  ASSERT_FALSE(root("doc.child").value().empty());
+  const int child = std::stoi(root("doc.child").value());
+  EXPECT_TRUE(root("doc.x").value().empty());
+  for (int frame = 0; frame < 500 && root("doc.x").value().empty(); ++frame) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    rt.render();
+    rt.drain();
+  }
+  EXPECT_EQ(root("doc.x").value(), "1");
+  for (int frame = 0; frame < 50 && app.exec_scheduler().get_process_info(child); ++frame) {
+    rt.render();
+    rt.drain();
+  }
+  EXPECT_FALSE(app.exec_scheduler().get_process_info(child).has_value());
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
 }
 
 // item 2 — the compute-pool async story, headless (no ImGui/GL): a HOST INTRINSIC launches an
@@ -5029,4 +5061,166 @@ TEST(AriadneAppRuntime, EachLoadClearsTheLastScene) {
   art.load(with_scene);
   art.load(write_doc("clear_scene_b.ari", "meta: {min_libcvc: 3.4.0}\nroot:\n  - text: x\n"));
   EXPECT_EQ(scene.log, (std::vector<std::string>{"clear", "realize", "clear", "realize", "clear"}));
+}
+
+// --- the spawn context (docs/STATE_EXEC_THREADED.md 4.15) and its locks -------------------------
+
+namespace {
+double seconds_since(std::chrono::steady_clock::time_point t0) {
+  return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+}
+
+// Click the document's button once: render() queues its program, drain() submits and pumps it.
+void click_once(Runtime &rt, MockBackend &mb) {
+  mb.button_click = true;
+  rt.render();
+  mb.button_click = false;
+  rt.drain();
+}
+} // namespace
+
+// IS-1 (docs/STATE_EXEC_THREADED.md 8.5): a child an action spawns runs in the document's scope.
+// Its msg-send on a document channel reaches a resident, its state-set lands under the document's
+// prefix, and tearing the Runtime down reaps it with the document (kill_owner): it parks for good,
+// so only the teardown ends it.
+TEST(SpawnContext, IS01_ActionChildMessagesAndWrites) {
+  namespace se = cvc::state_exec;
+  cvc::app app;
+  cvc::state &root = cvc::state::instance(app);
+  int child = -1;
+  {
+    Runtime rt(app, "doc");
+    MockBackend mb;
+    rt.set_backend(&mb);
+    // The tick resident parks on the document channel "box" (doc.channels.box), and writes the
+    // payload of the envelope msg-send delivers.
+    rt.set_tick_program(R"S((state-set "got" (get-attr (msg-recv "box") "payload")))S");
+    rt.set_root(group({button("Go", R"S((state-set "child" (spawn "(begin (state-set \"w\" \"1\")
+                                         (msg-send \"box\" \"hello\") (msg-recv \"never\"))")))S")}));
+    rt.drain(); // the resident starts and parks on "box"
+    const auto t0 = std::chrono::steady_clock::now();
+    click_once(rt, mb);
+    for (int frame = 0; frame < 50 && root("doc.got").value() != "hello"; ++frame)
+      rt.drain();
+    std::printf("IS-1: %.3f ms from the click to the resident's write\n", 1e3 * seconds_since(t0));
+    EXPECT_EQ(root("doc.got").value(), "hello");
+    EXPECT_EQ(root("doc.w").value(), "1");
+    EXPECT_EQ(root.findDescendant("w"), nullptr); // nothing outside the document's prefix
+    EXPECT_EQ(root.findDescendant("got"), nullptr);
+    child = std::stoi(root("doc.child").value());
+    const auto info = app.exec_scheduler().get_process_info(child);
+    ASSERT_TRUE(info.has_value());
+    EXPECT_EQ(info->status, se::process_status::waiting); // parked on "never"
+    EXPECT_TRUE(rt.take_reactive_warnings().empty());
+  }
+  // The teardown killed the parked child and erased it (its process held the document's context).
+  EXPECT_FALSE(app.exec_scheduler().get_process_info(child).has_value());
+}
+
+// A finished child is reaped by the next drain, as a finished action is: its process would
+// otherwise keep its whole context (an environment with every intrinsic) for the app's life.
+TEST(SpawnContext, FinishedChildIsReaped) {
+  cvc::app app;
+  cvc::state &root = cvc::state::instance(app);
+  Runtime rt(app, "doc");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({button("Go", R"S((state-set "child" (spawn "(+ 1 2)")))S")}));
+  rt.drain();
+  click_once(rt, mb);
+  for (int frame = 0; frame < 50 && root("doc.child").value().empty(); ++frame)
+    rt.drain();
+  ASSERT_FALSE(root("doc.child").value().empty());
+  const int child = std::stoi(root("doc.child").value());
+  for (int frame = 0; frame < 50 && app.exec_scheduler().get_process_info(child); ++frame)
+    rt.drain();
+  EXPECT_FALSE(app.exec_scheduler().get_process_info(child).has_value());
+}
+
+// LK-31 (docs/STATE_EXEC_LOCKS.md 13.2): a child an action spawns inherits the action's with-lock
+// default. The tick resident takes k and parks holding it; an action's child asks for k with no
+// :timeout and gives up with TimeoutError after ariadne.exec.lock_timeout (1 s by default). With
+// the setting at 30 the same child is still waiting after 2 s, so the 1 s came from the setting.
+TEST(Locks, LK31_ActionChildTimesOutOnResidentsLock) {
+  namespace se = cvc::state_exec;
+  const std::string spawn_child =
+      R"S((state-set "child" (spawn "(try (begin (with-lock \"k\" 1) (state-set \"r\" \"granted\"))
+                                       (catch (TimeoutError e) (state-set \"r\" \"timeout\")))")))S";
+  {
+    cvc::app app;
+    cvc::state &root = cvc::state::instance(app);
+    Runtime rt(app, "doc");
+    MockBackend mb;
+    rt.set_backend(&mb);
+    rt.set_tick_program(R"S((with-lock "k" (msg-recv "release")))S");
+    rt.set_root(group({button("Go", spawn_child)}));
+    rt.drain(); // the resident takes k and parks holding it
+    const auto t0 = std::chrono::steady_clock::now();
+    click_once(rt, mb);
+    while (root("doc.r").value().empty() && seconds_since(t0) < 10.0) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      rt.drain();
+    }
+    const double took = seconds_since(t0);
+    std::printf("LK-31: the action's child timed out after %.3f s (ariadne.exec.lock_timeout 1)\n",
+                took);
+    EXPECT_EQ(root("doc.r").value(), "timeout");
+    EXPECT_GE(took, 1.0);
+    EXPECT_LT(took, 10.0);
+    EXPECT_TRUE(rt.take_reactive_warnings().empty());
+  }
+  {
+    cvc::app app;
+    cvc::state &root = cvc::state::instance(app);
+    root("ariadne.exec.lock_timeout").value(std::string("30"));
+    Runtime rt(app, "doc");
+    MockBackend mb;
+    rt.set_backend(&mb);
+    rt.set_tick_program(R"S((with-lock "k" (msg-recv "release")))S");
+    rt.set_root(group({button("Go", spawn_child)}));
+    rt.drain();
+    const auto t0 = std::chrono::steady_clock::now();
+    click_once(rt, mb);
+    while (seconds_since(t0) < 2.0) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      rt.drain();
+    }
+    EXPECT_EQ(root("doc.r").value(), "");
+    const int child = std::stoi(root("doc.child").value());
+    const auto info = app.exec_scheduler().get_process_info(child);
+    ASSERT_TRUE(info.has_value());
+    EXPECT_EQ(info->status, se::process_status::waiting);
+    // inspect, from the document, shows the wait relative to its prefix.
+    rt.set_root(group({button("Look", "(state-set \"seen\" (get-attr (inspect " +
+                                          std::to_string(child) + ") \"waiting_on\"))")}));
+    click_once(rt, mb);
+    std::printf(
+        "LK-31: with ariadne.exec.lock_timeout 30 the child still waits after %.3f s (%s)\n",
+        seconds_since(t0), root("doc.seen").value().c_str());
+    EXPECT_EQ(root("doc.seen").value(), "lock k");
+    EXPECT_TRUE(rt.take_reactive_warnings().empty());
+  }
+}
+
+// LW-9, the L1b part (docs/STATE_EXEC_LOCKS.md 5.5): an init script's child never waits for a lock.
+// The init script holds k on its own scheduler (and private lock manager) while its child asks for
+// k with :timeout 30. The child inherited lock_wait_allowed false, so it raises TimeoutError at
+// once and writes r under the document's prefix, and the init succeeds. A child that waited would
+// take 30 s, against the 10 s ceiling (the init lane's 5 s cap would stop it first, with no r).
+TEST(Locks, LW09_InitChildNeverWaits) {
+  cvc::app app;
+  cvc::state &root = cvc::state::instance(app);
+  std::vector<std::string> errs;
+  const auto t0 = std::chrono::steady_clock::now();
+  const bool ok = run_init(app, "doc", R"S((with-lock "k"
+      (spawn "(try (with-lock \"k\" :timeout 30 1) (catch (TimeoutError e) (state-set \"r\" \"timeout\")))")
+      (sleep 0.05)))S",
+                           &errs);
+  const double took = seconds_since(t0);
+  std::printf("LW-9: the init script and its child took %.3f s (a child that waited: 30 s)\n",
+              took);
+  EXPECT_TRUE(ok) << ::testing::PrintToString(errs);
+  EXPECT_EQ(root("doc.r").value(), "timeout");
+  EXPECT_EQ(root.findDescendant("r"), nullptr);
+  EXPECT_LT(took, 10.0);
 }

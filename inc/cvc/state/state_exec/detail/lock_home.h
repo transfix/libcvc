@@ -308,7 +308,10 @@ private:
   void commit_misses(const lock_request &treq) noexcept;
   /// The table call threw: the reserved slots go back.
   void abandon_misses() noexcept;
-  std::optional<std::size_t> victim();
+  /// An entry to evict for a miss of `req`: never one of `req`'s own (pinned, reserved, or naming
+  /// one of its keys' nodes through another spelling), so refs.drop never names a key of the
+  /// request (protocol 4.15).
+  std::optional<std::size_t> victim(const home_request &req);
   void free_entry(std::size_t slot);
   /// 5.9's collect: resume the ticket and keep the outcome; a grant joins the mirror.
   frame_outcome collect(process &p, std::uint64_t tid);

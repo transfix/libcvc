@@ -75,9 +75,11 @@
 #include <cvc/state/state_exec/async_host.h>
 #include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/state/state_exec/builtins.h>
+#include <cvc/state/state_exec/detail/lock_home.h>
 #include <cvc/state/state_exec/evaluator.h>
 #include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/intrinsics.h>
+#include <cvc/state/state_exec/lock_manager.h>
 #include <cvc/state/state_exec/parser.h>
 #include <cvc/state/state_exec/process.h>
 #include <cvc/state/state_exec/scheduler.h>
@@ -90,6 +92,7 @@
 #include <mutex>
 #include <new>
 #include <optional>
+#include <random>
 #include <set>
 #include <span>
 #include <sstream>
@@ -2678,8 +2681,10 @@ se::scheduling_policy policy_of(const std::string &name) {
   throw std::invalid_argument("unknown policy '" + name + "' (rr, priority, priority_rr)");
 }
 
-// How a world's scheduler is built: its policy, and which lock manager it gets (`none` is the
-// scheduler as every existing suite builds it; the lock phases add `private` and `shared`).
+// How a world's scheduler is built: its policy, and which lock manager it gets. `none` is the
+// scheduler as every existing suite builds it (no manager: a scheduler makes its private one only
+// at its first lock request); `private` attaches a single-mode manager of its own through
+// set_lock_manager before anything runs (docs/STATE_EXEC_LOCKS.md 11.2); `shared` is phase L3's.
 struct world_opts {
   se::scheduling_policy policy = se::scheduling_policy::round_robin;
   std::string locks = "none";
@@ -2701,16 +2706,23 @@ struct world {
   se::intrinsics_context ictx;
   se::process_ptr ctx_proc = se::make_process();
   se::environment_ptr env = se::builtins::make_default_environment();
+  std::shared_ptr<se::lock_manager> lock_mgr; // locks=private: the scheduler's own manager
 
   // `exec` is "sync" or "async"; `a` gives the scheduler the app's tree as its watch root and the
   // intrinsics their root, as app::exec_scheduler() and pycvc's Exec do.
   world(const std::string &exec, cvc::app *a, const world_opts &o = {}) : app(a) {
     if (app)
       tree = &cvc::state::instance(*app);
+    if (o.locks == "private")
+      lock_mgr = std::make_shared<se::lock_manager>();
+    else if (o.locks != "none")
+      throw std::invalid_argument("locks=" + o.locks + ": this build has none and private");
     if (exec == "sync") {
       sync = std::make_unique<se::scheduler>(o.policy);
       if (tree)
         sync->set_watch_root(tree);
+      if (lock_mgr)
+        sync->set_lock_manager(lock_mgr);
       ictx.sched = sync.get();
     } else {
       async = std::make_unique<se::async_scheduler>(o.policy);
@@ -2720,6 +2732,8 @@ struct world {
       async->set_data_defaults(se::async_scheduler::host_data_defaults());
       if (tree)
         async->set_watch_root(tree);
+      if (lock_mgr)
+        async->set_lock_manager(lock_mgr);
       ictx.sched = async.get();
     }
     add_bench_natives(env);
@@ -2794,6 +2808,17 @@ struct world {
   }
   int process_count() const { return sync ? sync->process_count() : async->process_count(); }
   bool kill(int pid) { return sync ? sync->kill(pid) : async->kill(pid); }
+  // The scheduler's lock home (made by set_lock_manager for locks=private).
+  se::detail::lock_home *lock_home() { return sync ? sync->locks() : async->locks(); }
+  se::lock_stats lock_stats() const { return lock_mgr ? lock_mgr->stats() : se::lock_stats{}; }
+  // One scheduler step, as a pump would take it (the async one wakes the frame waiters first).
+  // Returns whether a process stepped.
+  bool step_one() {
+    if (sync)
+      return sync->step() != 0;
+    async->wake_awaiting();
+    return async->sync_step() != 0;
+  }
 };
 
 // Register the async functions the async scenarios call, on w's host, run `where`.
@@ -3591,8 +3616,9 @@ int current_cpu_efficiency() {
 
 // The policy and locks sweep keys (docs/STATE_EXEC_BENCH.md), on the scenarios that build their
 // world with world_opts::of: the scheduler's policy, and which lock manager it gets. Both run at
-// their default (rr, none) unless swept, e.g. --size policy=rr,priority_rr. A locks value this
-// build has no manager for is skipped, not mis-measured.
+// their default (rr, none) unless swept, e.g. --size policy=rr,priority_rr or
+// --size locks=none,private. A locks value this build has no manager for (shared, phase L3's) is
+// skipped, not mis-measured.
 void add_policy_and_locks(scenario &sc) {
   for (sizes_t *s : {&sc.sizes, &sc.smoke}) {
     s->push_back({"policy", {"rr"}});
@@ -3600,13 +3626,161 @@ void add_policy_and_locks(scenario &sc) {
   }
   sc.accept = [prev = std::move(sc.accept)](const std::string &exec, const point_ctx &pc) {
     const std::string locks = pc.s("locks", "none");
-    if (locks != "none") {
-      std::printf("  %-28s %-9s %-34s skipped: locks=%s needs the lock manager (phase L1/L3)\n",
+    if (locks != "none" && locks != "private") {
+      std::printf("  %-28s %-9s %-34s skipped: locks=%s needs a lock manager this build lacks "
+                  "(shared: phase L3)\n",
                   pc.sc.name.c_str(), exec.c_str(), params_text(pc.params).c_str(), locks.c_str());
       return false;
     }
     return !prev || prev(exec, pc);
   };
+}
+
+// ---------------------------------------------------------------------------------------------
+// The lock scenarios' pieces (group M, docs/STATE_EXEC_LOCKS.md 11.2)
+// ---------------------------------------------------------------------------------------------
+
+// Every lock scenario's world: a private single-mode manager attached before anything runs
+// (locks=private), so no lock request pays for making the home.
+world_opts lock_world() {
+  world_opts o;
+  o.locks = "private";
+  return o;
+}
+
+// `body` in a loop that runs far longer than any measurement (the process is killed once measured).
+std::string lock_forever(const std::string &body) {
+  return "(begin (set i 0) (while (< i 1000000000) (begin " + body + " (set i (+ i 1)))) i)";
+}
+
+// `s` as a DSL string literal.
+std::string dsl_string(const std::string &s) {
+  std::string out = "\"";
+  for (const char c : s) {
+    if (c == '"' || c == '\\')
+      out += '\\';
+    out += c;
+  }
+  return out + "\"";
+}
+
+// The fastest run of each side of a lock_with_and_without.
+struct lock_timing {
+  int64_t best_base = INT64_MAX, best_with = INT64_MAX;
+  uint64_t base_steps = 0, with_steps = 0;
+};
+
+// The native.* method for a lock form: `rounds` runs of the loop without the lock (`base`) and
+// with it, alternated, each in a fresh world with its own manager (`setup` prepares it, `tune` the
+// process's options), the fastest of each kept. The record's meter is the fastest run with the
+// lock. `after_with` sees each world the lock loop ran in, to check it.
+lock_timing lock_with_and_without(point_ctx &pc, meter &m, rep_out &o, cvc::app *app,
+                                  const se::value_t &base, const se::value_t &with,
+                                  const std::string &expect,
+                                  const std::function<void(world &)> &setup,
+                                  const std::function<void(se::execute_options &)> &tune,
+                                  const std::function<void(world &, rep_out &)> &after_with) {
+  lock_timing t;
+  const int64_t rounds = std::max<int64_t>(1, pc.i("rounds", 1));
+  for (int64_t r = 0; r < rounds && o.ok; ++r) {
+    {
+      world w(pc.executor, app, lock_world());
+      if (setup)
+        setup(w);
+      meter bm;
+      rep_out bo;
+      run_single(w, pc, bm, bo, base, expect, tune);
+      if (!bo.ok)
+        o.fail("the loop without the lock: " + bo.error);
+      if (bm.wall() < t.best_base) {
+        t.best_base = bm.wall();
+        t.base_steps = bo.steps_total.value_or(0);
+      }
+    }
+    world w(pc.executor, app, lock_world());
+    if (setup)
+      setup(w);
+    meter wm;
+    wm.want_heap = m.want_heap;
+    rep_out wo;
+    run_single(w, pc, wm, wo, with, expect, tune);
+    if (!wo.ok)
+      o.fail(wo.error);
+    else if (after_with)
+      after_with(w, o);
+    if (wm.wall() < t.best_with) {
+      t.best_with = wm.wall();
+      t.with_steps = wo.steps_total.value_or(0);
+      m = wm; // the record is the fastest run with the lock
+      o.steps_total = wo.steps_total;
+      o.kinds = wo.kinds;
+    }
+  }
+  return t;
+}
+
+// The driver thread's allocations over one run of `ast` in a fresh world: submit through
+// completion, the window run_single's meter counts over, without the meter's probes (thread and
+// handle counts, memory), which take longer than the run at the sizes the gates use.
+int64_t lock_run_allocs(point_ctx &pc, rep_out &o, cvc::app *app, const se::value_t &ast,
+                        const std::string &expect, const std::function<void(world &)> &setup,
+                        const std::function<void(se::execute_options &)> &tune) {
+  world w(pc.executor, app, lock_world());
+  if (setup)
+    setup(w);
+  tracker t(1);
+  se::execute_options opts;
+  opts.env = w.process_env("extend");
+  opts.on_complete = t.hook(0);
+  if (tune)
+    tune(opts);
+  const uint64_t before = bench_alloc::count;
+  t.pid[0] = w.submit(ast, opts);
+  const std::string why = drive(w, driver_of(pc), [&] { return t.all_done(); }, [] {});
+  const uint64_t after = bench_alloc::count;
+  if (!why.empty() || !t.finish_ns[0])
+    o.fail("allocation run: " + (why.empty() ? std::string() : why + ": ") +
+           end_reason(w, t.pid[0]));
+  else if (se::to_string(t.result[0]) != expect)
+    o.fail("allocation run: returned " + se::to_string(t.result[0]) + ", expected " + expect);
+  return static_cast<int64_t>(after - before);
+}
+
+// Park a holder of `key` (exclusive, parked on a channel nobody sends to), then `b` waiters
+// queued behind it, each (with-lock key 1). Outside any region. Returns "" or why not.
+std::string park_lock_queue(world &w, const std::string &key, int64_t b, double timeout) {
+  const std::string holder = "(with-lock \"" + key + "\" (msg-recv \"bench.never\"))";
+  std::string why = park_bystanders(w, 1, [&](int64_t) { return holder; }, timeout);
+  if (!why.empty())
+    return "the holder: " + why;
+  const std::string waiter = "(with-lock \"" + key + "\" 1)";
+  why = park_bystanders(w, b, [&](int64_t) { return waiter; }, timeout);
+  if (!why.empty())
+    return "the waiters: " + why;
+  return "";
+}
+
+// Submit one process of `ast` per entry, each in its own scope, outside any region.
+std::vector<int> submit_all(world &w, const std::vector<se::value_t> &asts) {
+  std::vector<int> pids;
+  for (const se::value_t &ast : asts) {
+    se::execute_options opts;
+    opts.env = w.process_env("extend");
+    pids.push_back(w.submit(ast, opts));
+  }
+  return pids;
+}
+
+// Fail the rep unless every process in `pids` is still running (an endless loop that ended
+// failed), then kill them all.
+void check_alive_and_kill(world &w, rep_out &o, const std::vector<int> &pids) {
+  for (int pid : pids) {
+    auto info = w.info(pid);
+    if (!info || se::is_finished(info->status))
+      o.fail("pid " + istr(pid) + " ended: " + end_reason(w, pid));
+  }
+  for (int pid : pids)
+    w.kill(pid);
 }
 
 std::vector<scenario> make_scenarios() {
@@ -5471,6 +5645,636 @@ std::vector<scenario> make_scenarios() {
         o.extra.i("bytes", int64_t(src.size()))
             .d("ns_per_byte", wall / double(r * int64_t(src.size())))
             .d("mb_per_s", double(r * int64_t(src.size())) / (wall / 1e9) / 1e6);
+      });
+    };
+    all.push_back(std::move(sc));
+  }
+  // M. lock.*: the state_exec locks (docs/STATE_EXEC_LOCKS.md 11.2). Every world gets a private
+  // single-mode manager (locks=private, lock_world).
+  {
+    scenario sc;
+    sc.name = "lock.uncontended";
+    sc.what = "an uncontended (with-lock K (set s (+ s 1))) against (begin (set s (+ s 1))) in "
+              "the same loop, `rounds` of each alternated in every rep (the native.* method), and "
+              "the allocations per lock from runs of n and 2n sections; K has `depth` segments, "
+              "under a chroot (chroot=1) or not, mode x or s, a one-form body (form=single) or a "
+              "covered section nested in it (nested), the process's owner \"\" or 40 characters";
+    sc.executors = both_sched;
+    sc.sizes = {{"n", {"10000"}},
+                {"depth", {"1", "2", "4"}},
+                {"mode", {"x", "s"}},
+                {"chroot", {"0", "1"}},
+                {"form", {"single", "nested"}},
+                {"owner", {"short", "long"}},
+                {"threading", {"single"}},
+                {"rounds", {"3"}},
+                {"driver", {"spin"}}};
+    // Each point is 6 runs of the loop: the smoke keeps the long owner only (the short one is the
+    // plain path, which the default sizes run).
+    sc.smoke = {{"n", {"200"}},
+                {"depth", {"2"}},
+                {"mode", {"x", "s"}},
+                {"chroot", {"0", "1"}},
+                {"form", {"single", "nested"}},
+                {"owner", {"long"}},
+                {"threading", {"single"}},
+                {"rounds", {"1"}},
+                {"driver", {"spin"}}};
+    sc.async_only = {"driver"};
+    sc.accept = [](const std::string &exec, const point_ctx &pc) {
+      if (pc.s("threading", "single") == "single")
+        return true;
+      std::printf("  %-28s %-9s %-34s skipped: threading=%s needs the shared lock manager "
+                  "(phase L3)\n",
+                  pc.sc.name.c_str(), exec.c_str(), params_text(pc.params).c_str(),
+                  pc.s("threading").c_str());
+      return false;
+    };
+    sc.run = [](point_ctx &pc) {
+      const int64_t n = std::max<int64_t>(1, pc.i("n"));
+      std::string key;
+      for (int64_t d = 1; d <= std::max<int64_t>(1, pc.i("depth")); ++d)
+        key += (d > 1 ? ".k" : "k") + istr(d);
+      const std::string open =
+          "(with-lock \"" + key + "\"" + (pc.s("mode") == "s" ? " :shared " : " ");
+      const std::string body = "(set s (+ s 1))";
+      const bool nested = pc.s("form") == "nested";
+      const std::string with_section = nested ? open + open + body + "))" : open + body + ")";
+      const std::string base_section =
+          nested ? "(begin (begin " + body + "))" : "(begin " + body + ")";
+      const auto loop = [](int64_t count, const std::string &section) {
+        return se::parse(loop_src(count, "(set s 0)", section, "s"));
+      };
+      const se::value_t with1 = loop(n, with_section), base1 = loop(n, base_section);
+      const se::value_t with2 = loop(2 * n, with_section), base2 = loop(2 * n, base_section);
+      const bool chroot = pc.i("chroot") != 0;
+      // 40 characters, the length of an Ariadne owner: a copy of it would not fit a std::string's
+      // small buffer.
+      const std::string owner =
+          pc.s("owner") == "long" ? "bench.owner." + std::string(28, 'x') : std::string();
+      const std::function<void(world &)> setup = [chroot](world &w) {
+        if (chroot)
+          se::apply_chroot(w.ictx, *w.tree, "bench.doc");
+      };
+      const std::function<void(se::execute_options &)> tune = [owner](se::execute_options &opts) {
+        opts.owner = owner;
+      };
+      // Every section takes one grant on the fast path (a nested one is covered: no manager call)
+      // and leaves nothing held.
+      const std::function<void(world &, rep_out &)> check = [n](world &w, rep_out &o) {
+        const se::lock_stats s = w.lock_stats();
+        if (s.fast_grants != uint64_t(n) || s.grants != uint64_t(n) || s.waits || s.holds)
+          o.fail("lock stats: " + istr(int64_t(s.grants)) + " grants (" +
+                 istr(int64_t(s.fast_grants)) + " fast), " + istr(int64_t(s.waits)) + " waits, " +
+                 istr(int64_t(s.holds)) + " held; expected " + istr(n) + " fast grants");
+      };
+      auto app = make_app();
+      pc.reps([&](meter &m, rep_out &o) {
+        o.iterations = n;
+        o.programs = 1;
+        const lock_timing t =
+            lock_with_and_without(pc, m, o, app.get(), base1, with1, istr(n), setup, tune, check);
+        if (!o.ok || !t.base_steps)
+          return;
+        const double ns_per_lock = double(t.best_with - t.best_base) / double(n);
+        const double steps_per_lock = (double(t.with_steps) - double(t.base_steps)) / double(n);
+        o.extra.i("baseline_wall_ns", t.best_base)
+            .i("baseline_steps", int64_t(t.base_steps))
+            .d("ns_per_lock", ns_per_lock)
+            .d("steps_per_lock", steps_per_lock)
+            .i("rounds", std::max<int64_t>(1, pc.i("rounds", 1)));
+        if (!bench_alloc::active)
+          return;
+        // After the timed runs, so the evaluator's per-thread pools are as warm in each run of a
+        // pair as in the other. A run makes its process's first lock and its key's first use
+        // once, whatever its length: they cancel out of the difference.
+        const int64_t w1 = lock_run_allocs(pc, o, app.get(), with1, istr(n), setup, tune);
+        const int64_t w2 = lock_run_allocs(pc, o, app.get(), with2, istr(2 * n), setup, tune);
+        const int64_t b1 = lock_run_allocs(pc, o, app.get(), base1, istr(n), setup, tune);
+        const int64_t b2 = lock_run_allocs(pc, o, app.get(), base2, istr(2 * n), setup, tune);
+        o.extra.i("allocs_lock_n", w1)
+            .i("allocs_lock_2n", w2)
+            .i("allocs_begin_n", b1)
+            .i("allocs_begin_2n", b2)
+            .d("allocs_per_lock", double((w2 - w1) - (b2 - b1)) / double(n));
+      });
+    };
+    all.push_back(std::move(sc));
+  }
+  {
+    scenario sc;
+    sc.name = "lock.handoff";
+    sc.what = "p processes looping for ever on one key, a (sleep 0) in the body; per x p handoffs "
+              "timed after a warm-up: handoffs per second, each grant's wait from its request, "
+              "and the spread of grants between processes (fairness_spread, most minus fewest); "
+              "workers=spawn: one host-submitted parent spawns them, each with a context of its "
+              "own (the spawn context)";
+    sc.executors = both_sched;
+    sc.sizes = {{"p", {"2", "8", "64"}},
+                {"per", {"200"}},
+                {"workers", {"host", "spawn"}},
+                {"driver", {"spin"}}};
+    sc.smoke = {
+        {"p", {"2", "8"}}, {"per", {"10"}}, {"workers", {"host", "spawn"}}, {"driver", {"spin"}}};
+    sc.async_only = {"driver"};
+    sc.run = [](point_ctx &pc) {
+      const int64_t p = std::max<int64_t>(1, pc.i("p")), per = std::max<int64_t>(1, pc.i("per"));
+      const bool spawned = pc.s("workers", "host") == "spawn";
+      std::vector<std::string> srcs;
+      std::vector<se::value_t> progs;
+      for (int64_t j = 0; j < p; ++j) {
+        srcs.push_back(lock_forever("(bench-req " + istr(j) +
+                                    ") (with-lock \"bench.h\" (bench-got " + istr(j) +
+                                    ") (sleep 0))"));
+        progs.push_back(se::parse(srcs.back()));
+      }
+      auto app = make_app();
+      pc.reps([&](meter &m, rep_out &o) {
+        // What the natives record: each process's last request time and its grants, and the
+        // wait of every grant whose request came after the region began (one spanning
+        // m.begin() would carry the meter's probes). Declared before the world, whose natives
+        // point at them.
+        std::vector<int64_t> req_ns(std::size_t(p), 0), grants(std::size_t(p), 0), waits;
+        waits.reserve(std::size_t(per * p + 1000));
+        int64_t total = 0;
+        int64_t region_t0 = INT64_MAX;
+        world w(pc.executor, app.get(), lock_world());
+        const auto at = [p](std::span<const se::value_t> a) {
+          return std::size_t(std::clamp<int64_t>(int_arg(a, 0, 0), 0, p - 1));
+        };
+        se::builtins::register_fn(w.env, "bench-req", [&](std::span<const se::value_t> a) {
+          req_ns[at(a)] = now_ns();
+          return se::value_t(int64_t(0));
+        });
+        se::builtins::register_fn(w.env, "bench-got", [&](std::span<const se::value_t> a) {
+          const std::size_t j = at(a);
+          ++grants[j];
+          ++total;
+          if (req_ns[j] >= region_t0)
+            waits.push_back(now_ns() - req_ns[j]);
+          return se::value_t(int64_t(0));
+        });
+        // workers=spawn: the world's context makes each child a context of its own over the
+        // world's environment (which has the bench natives); the workers are every process but
+        // the parent, which ends once it has spawned them.
+        std::vector<int> pids;
+        int parent = -1;
+        if (spawned) {
+          w.ictx.spawn_context = se::make_spawn_context(w.env);
+          std::string src = "(list";
+          for (const std::string &s : srcs)
+            src += " (spawn " + dsl_string(s) + ")";
+          se::execute_options opts;
+          opts.env = w.process_env("extend");
+          parent = w.submit(src + ")", opts);
+        } else {
+          pids = submit_all(w, progs);
+        }
+        drive_cfg d = driver_of(pc);
+        d.sleepers = true;    // (sleep 0) and the lock waits park everyone at times
+        d.slice_steps = 1000; // done() is read between slices: keep the overshoot small
+        std::string why = drive(w, d, [&] { return total >= 2 * p; }, [] {});
+        if (spawned) {
+          for (const se::process_info &pi : w.base().list_processes())
+            if (pi.pid != parent)
+              pids.push_back(pi.pid);
+          if (int64_t(pids.size()) != p && why.empty())
+            why = "the parent spawned " + std::to_string(pids.size()) + " of " + istr(p);
+        }
+        if (!why.empty()) {
+          o.fail("warm-up: " + why);
+          check_alive_and_kill(w, o, pids);
+          return;
+        }
+        const std::vector<int64_t> g0 = grants;
+        const int64_t total0 = total;
+        const uint64_t steps0 = w.total_steps();
+        m.begin();
+        region_t0 = now_ns();
+        why = drive(w, d, [&] { return total >= total0 + per * p; }, [] {});
+        m.end();
+        region_t0 = INT64_MAX;
+        o.steps_total = w.total_steps() - steps0;
+        if (!why.empty())
+          o.fail(why);
+        check_alive_and_kill(w, o, pids);
+        int64_t lo = INT64_MAX, hi = 0;
+        for (std::size_t j = 0; j < grants.size(); ++j) {
+          lo = std::min(lo, grants[j] - g0[j]);
+          hi = std::max(hi, grants[j] - g0[j]);
+        }
+        const int64_t handoffs = total - total0;
+        o.iterations = handoffs;
+        o.programs = p;
+        o.extra.i("handoffs", handoffs)
+            .d("handoffs_per_s", m.wall() > 0 ? double(handoffs) * 1e9 / double(m.wall()) : 0.0)
+            .i("grants_min", lo)
+            .i("grants_max", hi)
+            .i("fairness_spread", hi - lo)
+            .raw("wait_ns", percentiles(waits).str());
+      });
+    };
+    all.push_back(std::move(sc));
+  }
+  {
+    scenario sc;
+    sc.name = "lock.rw";
+    sc.what = "r readers (:shared) and w writers on one key, each looping for ever with a "
+              "(sleep 0) in its section, until the writers made `sections` sections each: the "
+              "writers' wait from request to grant, the readers' sections, and the writers' wait "
+              "p99 over the longest reader section (gate at 64/1: at most 2)";
+    sc.executors = both_sched;
+    sc.sizes = {{"rw", {"8/1", "64/1", "8/8"}}, {"sections", {"100"}}, {"driver", {"spin"}}};
+    sc.smoke = {{"rw", {"4/1", "4/2"}}, {"sections", {"5"}}, {"driver", {"spin"}}};
+    sc.async_only = {"driver"};
+    sc.run = [](point_ctx &pc) {
+      const std::string rw = pc.s("rw", "8/1");
+      const auto slash = rw.find('/');
+      const int64_t r = std::max<int64_t>(0, std::atoll(rw.c_str()));
+      const int64_t wr =
+          slash == std::string::npos ? 1 : std::max<int64_t>(1, std::atoll(rw.c_str() + slash + 1));
+      const int64_t sections = std::max<int64_t>(1, pc.i("sections"));
+      std::vector<se::value_t> progs;
+      for (int64_t j = 0; j < r; ++j)
+        progs.push_back(
+            se::parse(lock_forever("(with-lock \"bench.rw\" :shared (bench-rin " + istr(j) +
+                                   ") (sleep 0) (bench-rout " + istr(j) + "))")));
+      for (int64_t j = 0; j < wr; ++j)
+        progs.push_back(se::parse(lock_forever("(bench-wq " + istr(j) +
+                                               ") (with-lock \"bench.rw\" (bench-win " + istr(j) +
+                                               ") (sleep 0))")));
+      auto app = make_app();
+      pc.reps([&](meter &m, rep_out &o) {
+        std::vector<int64_t> rin(std::size_t(std::max<int64_t>(1, r)), 0), wq(std::size_t(wr), 0),
+            reader_ns, writer_ns;
+        int64_t writer_sections = 0, reader_sections = 0;
+        // A section or wait counts when it began after the region did (lock.handoff).
+        int64_t region_t0 = INT64_MAX;
+        world w(pc.executor, app.get(), lock_world());
+        const auto at = [](std::span<const se::value_t> a, std::size_t size) {
+          return std::size_t(std::clamp<int64_t>(int_arg(a, 0, 0), 0, int64_t(size) - 1));
+        };
+        se::builtins::register_fn(w.env, "bench-rin", [&](std::span<const se::value_t> a) {
+          rin[at(a, rin.size())] = now_ns();
+          return se::value_t(int64_t(0));
+        });
+        se::builtins::register_fn(w.env, "bench-rout", [&](std::span<const se::value_t> a) {
+          const int64_t in = rin[at(a, rin.size())];
+          if (in >= region_t0) {
+            reader_ns.push_back(now_ns() - in);
+            ++reader_sections;
+          }
+          return se::value_t(int64_t(0));
+        });
+        se::builtins::register_fn(w.env, "bench-wq", [&](std::span<const se::value_t> a) {
+          wq[at(a, wq.size())] = now_ns();
+          return se::value_t(int64_t(0));
+        });
+        se::builtins::register_fn(w.env, "bench-win", [&](std::span<const se::value_t> a) {
+          ++writer_sections;
+          const int64_t asked = wq[at(a, wq.size())];
+          if (asked >= region_t0)
+            writer_ns.push_back(now_ns() - asked);
+          return se::value_t(int64_t(0));
+        });
+        const std::vector<int> pids = submit_all(w, progs);
+        drive_cfg d = driver_of(pc);
+        d.sleepers = true;
+        d.slice_steps = 1000;
+        std::string why = drive(w, d, [&] { return writer_sections >= 2 * wr; }, [] {});
+        if (!why.empty()) {
+          o.fail("warm-up: " + why);
+          check_alive_and_kill(w, o, pids);
+          return;
+        }
+        const int64_t w0 = writer_sections;
+        const uint64_t steps0 = w.total_steps();
+        m.begin();
+        region_t0 = now_ns();
+        why = drive(w, d, [&] { return writer_sections >= w0 + sections * wr; }, [] {});
+        m.end();
+        region_t0 = INT64_MAX;
+        o.steps_total = w.total_steps() - steps0;
+        if (!why.empty())
+          o.fail(why);
+        check_alive_and_kill(w, o, pids);
+        o.iterations = writer_sections - w0;
+        o.programs = r + wr;
+        o.extra.i("readers", r).i("writers", wr).i("writer_sections", writer_sections - w0);
+        o.extra.i("reader_sections", reader_sections)
+            .raw("writer_wait_ns", percentiles(writer_ns).str())
+            .raw("reader_section_ns", percentiles(reader_ns).str());
+        if (!writer_ns.empty() && !reader_ns.empty()) {
+          std::sort(writer_ns.begin(), writer_ns.end());
+          const int64_t longest = *std::max_element(reader_ns.begin(), reader_ns.end());
+          o.extra.i("reader_section_max_ns", longest)
+              .d("writer_wait_p99_over_reader_max",
+                 longest > 0 ? double(pct_at(writer_ns, 0.99)) / double(longest) : 0.0);
+        }
+      });
+    };
+    all.push_back(std::move(sc));
+  }
+  {
+    scenario sc;
+    sc.name = "lock.many_keys";
+    sc.what = "uncontended locks on keys drawn at random (fixed seed) out of k under one parent, "
+              "one key or two per request (req), against the same loop with begin (the native.* "
+              "method): ns per lock against k past the home's key cache (1024 entries), the live "
+              "trie nodes and the cache's entries";
+    sc.executors = both_sched;
+    sc.sizes = {{"k", {"10", "1000", "100000"}},
+                {"req", {"single", "pair"}},
+                {"n", {"10000"}},
+                {"rounds", {"3"}},
+                {"driver", {"spin"}}};
+    sc.smoke = {{"k", {"10", "3000"}},
+                {"req", {"single", "pair"}},
+                {"n", {"300"}},
+                {"rounds", {"1"}},
+                {"driver", {"spin"}}};
+    sc.async_only = {"driver"};
+    sc.run = [](point_ctx &pc) {
+      const int64_t k = std::max<int64_t>(2, pc.i("k")), n = std::max<int64_t>(1, pc.i("n"));
+      const bool pair = pc.s("req") == "pair";
+      // The keys of the n requests, drawn once per point: a string, or a list of two different
+      // keys. (bench-key i) hands out a copy (a shared list, a string within the small buffer).
+      std::mt19937_64 rng(0x6c6f636bu + uint64_t(k));
+      const auto draw = [&] { return "mk." + istr(int64_t(rng() % uint64_t(k))); };
+      std::vector<se::value_t> keys;
+      keys.reserve(std::size_t(n));
+      for (int64_t i = 0; i < n; ++i) {
+        if (!pair) {
+          keys.emplace_back(draw());
+          continue;
+        }
+        std::string a = draw(), b = draw();
+        while (b == a)
+          b = draw();
+        keys.push_back(se::make_list({se::value_t(a), se::value_t(b)}));
+      }
+      const se::value_t with = se::parse(
+          loop_src(n, "(set s 0)", "(set kk (bench-key i)) (with-lock kk (set s (+ s 1)))", "s"));
+      const se::value_t base = se::parse(
+          loop_src(n, "(set s 0)", "(set kk (bench-key i)) (begin (set s (+ s 1)))", "s"));
+      const std::function<void(world &)> setup = [&keys](world &w) {
+        se::builtins::register_fn(w.env, "bench-key", [&keys](std::span<const se::value_t> a) {
+          return keys[std::size_t(int_arg(a, 0, 0)) % keys.size()];
+        });
+      };
+      int64_t trie_nodes = 0, cache_entries = 0, cache_capacity = 0;
+      const std::function<void(world &, rep_out &)> check = [&, n](world &w, rep_out &o) {
+        const se::lock_stats s = w.lock_stats();
+        if (s.fast_grants != uint64_t(n) || s.waits || s.holds)
+          o.fail("lock stats: " + istr(int64_t(s.fast_grants)) + " fast grants, " +
+                 istr(int64_t(s.waits)) + " waits, " + istr(int64_t(s.holds)) + " held; expected " +
+                 istr(n) + " fast grants");
+        trie_nodes = int64_t(s.trie_nodes);
+        if (se::detail::lock_home *home = w.lock_home()) {
+          cache_entries = int64_t(home->cache_size());
+          cache_capacity = int64_t(home->cache_capacity());
+        }
+      };
+      auto app = make_app();
+      pc.reps([&](meter &m, rep_out &o) {
+        o.iterations = n;
+        o.programs = 1;
+        const lock_timing t =
+            lock_with_and_without(pc, m, o, app.get(), base, with, istr(n), setup, nullptr, check);
+        if (!o.ok || !t.base_steps)
+          return;
+        o.extra.i("baseline_wall_ns", t.best_base)
+            .i("baseline_steps", int64_t(t.base_steps))
+            .d("ns_per_lock", double(t.best_with - t.best_base) / double(n))
+            .d("steps_per_lock", (double(t.with_steps) - double(t.base_steps)) / double(n))
+            .i("trie_nodes", trie_nodes)
+            .i("cache_entries", cache_entries)
+            .i("cache_capacity", cache_capacity)
+            .i("rounds", std::max<int64_t>(1, pc.i("rounds", 1)));
+      });
+    };
+    all.push_back(std::move(sc));
+  }
+  {
+    scenario sc;
+    sc.name = "lock.bystanders";
+    sc.what = "sched.single.arith_loop's program beside one holder parked in its section and b "
+              "waiters queued behind it: the loop's ns/step against b (a lock waiter is not in "
+              "the run queue)";
+    sc.executors = both_sched;
+    sc.sizes = {{"b", {"0", "100", "1000"}}, {"n", {"40000"}}, {"driver", {"spin"}}};
+    sc.smoke = {{"b", {"0", "10"}}, {"n", {"300"}}, {"driver", {"spin"}}};
+    sc.async_only = {"driver"};
+    sc.run = [](point_ctx &pc) {
+      const eval_prog *arith = nullptr;
+      for (const eval_prog &p : eval_programs())
+        if (p.name == "arith_loop")
+          arith = &p;
+      const se::value_t ast = se::parse(arith->src(pc));
+      const std::string expect = arith->expect(pc);
+      const int64_t b = pc.i("b");
+      auto app = make_app();
+      pc.reps([&](meter &m, rep_out &o) {
+        world w(pc.executor, app.get(), lock_world());
+        const std::string why = park_lock_queue(w, "bench.by", b, pc.cfg.timeout);
+        if (!why.empty()) {
+          o.fail("parking: " + why);
+          return;
+        }
+        o.iterations = arith->iters(pc);
+        o.programs = 1;
+        run_single(w, pc, m, o, ast, expect);
+        const se::lock_stats s = w.lock_stats();
+        if (waiting_count(w) != b + 1 || s.holds != 1 || s.queued != std::size_t(b))
+          o.fail(istr(waiting_count(w)) + " processes parked, " + istr(int64_t(s.holds)) +
+                 " held, " + istr(int64_t(s.queued)) + " queued; expected " + istr(b + 1) +
+                 ", 1 and " + istr(b));
+        o.extra.i("queued", int64_t(s.queued));
+      });
+    };
+    all.push_back(std::move(sc));
+  }
+  {
+    scenario sc;
+    sc.name = "lock.timeout";
+    sc.what = "p waiters with a 1 ms :timeout behind a parked holder, each submitted and stepped "
+              "until it queues, then all driven until every one has caught its TimeoutError: "
+              "the lateness of each catch past its deadline (from the step that queued it)";
+    sc.executors = both_sched;
+    sc.sizes = {{"p", {"10", "1000"}}, {"driver", {"spin"}}};
+    sc.smoke = {{"p", {"5", "50"}}, {"driver", {"spin"}}};
+    sc.async_only = {"driver"};
+    sc.run = [](point_ctx &pc) {
+      const int64_t p = std::max<int64_t>(1, pc.i("p"));
+      std::vector<se::value_t> progs;
+      for (int64_t j = 0; j < p; ++j)
+        progs.push_back(se::parse("(try (with-lock \"bench.to\" :timeout 0.001 0) (catch "
+                                  "(TimeoutError e) (bench-expired " +
+                                  istr(j) + ")))"));
+      auto app = make_app();
+      pc.reps([&](meter &m, rep_out &o) {
+        std::vector<int64_t> queued_ns(std::size_t(p), 0), caught_ns(std::size_t(p), 0);
+        world w(pc.executor, app.get(), lock_world());
+        se::builtins::register_fn(w.env, "bench-expired", [&](std::span<const se::value_t> a) {
+          caught_ns[std::size_t(std::clamp<int64_t>(int_arg(a, 0, 0), 0, p - 1))] = now_ns();
+          return se::value_t(int64_t(1));
+        });
+        const std::string why = park_lock_queue(w, "bench.to", 0, pc.cfg.timeout);
+        if (!why.empty()) {
+          o.fail("parking: " + why);
+          return;
+        }
+        tracker t(static_cast<std::size_t>(p));
+        const se::lock_stats s0 = w.lock_stats();
+        const uint64_t steps0 = w.total_steps();
+        drive_cfg d = driver_of(pc);
+        d.sleepers = true;
+        m.begin();
+        // One at a time, stepped until it queues (the lock stats count the queued request), so
+        // the time it queued (its deadline less 1 ms, to within the rest of that step) is known.
+        // The waiters queued before it that time out meanwhile step too.
+        for (int64_t j = 0; j < p && o.ok; ++j) {
+          se::execute_options opts;
+          opts.env = w.process_env("extend");
+          opts.on_complete = t.hook(std::size_t(j));
+          t.submit_ns[std::size_t(j)] = now_ns();
+          t.pid[std::size_t(j)] = w.submit(progs[std::size_t(j)], opts);
+          const uint64_t waits = w.lock_stats().waits;
+          for (int k = 0; k < 100000 && w.lock_stats().waits == waits; ++k)
+            w.step_one();
+          if (w.lock_stats().waits == waits)
+            o.fail("waiter " + istr(j) + " never queued: " + end_reason(w, t.pid[std::size_t(j)]));
+          queued_ns[std::size_t(j)] = now_ns();
+        }
+        const std::string drove = drive(w, d, [&] { return t.all_done(); }, [] {});
+        m.end();
+        o.steps_total = w.total_steps() - steps0;
+        if (!drove.empty())
+          o.fail(drove + ": " + first_failure(w, t));
+        std::vector<int64_t> late;
+        for (std::size_t j = 0; j < t.pid.size(); ++j) {
+          if (!t.finish_ns[j])
+            continue;
+          if (se::to_string(t.result[j]) != "1")
+            o.fail("waiter " + istr(int64_t(j)) + " returned " + se::to_string(t.result[j]) +
+                   ", expected 1 (its TimeoutError caught)");
+          o.latency_ns.push_back(t.finish_ns[j] - t.submit_ns[j]);
+          if (caught_ns[j] && queued_ns[j])
+            late.push_back(caught_ns[j] - queued_ns[j] - 1000000);
+        }
+        const se::lock_stats s = w.lock_stats();
+        if (s.timeouts - s0.timeouts != uint64_t(p))
+          o.fail(istr(int64_t(s.timeouts - s0.timeouts)) + " timeouts, expected " + istr(p));
+        o.programs = p;
+        o.extra.i("timeouts", int64_t(s.timeouts - s0.timeouts))
+            .raw("lateness_ns", percentiles(late).str());
+      });
+    };
+    all.push_back(std::move(sc));
+  }
+  {
+    scenario sc;
+    sc.name = "lock.deadlock";
+    sc.what = "n processes in a cycle (each holds its key, then asks for the next one's), formed "
+              "`cycles` times, beside q unrelated waiters queued on another key; stepped one step "
+              "at a time: the step that detects each cycle (ns_per_detection, its median), the "
+              "steps that queue a request, and the time per cycle";
+    sc.executors = both_sched;
+    sc.sizes = {{"n", {"2", "8"}}, {"q", {"0", "1000"}}, {"cycles", {"200"}}, {"driver", {"spin"}}};
+    sc.smoke = {{"n", {"2", "3"}}, {"q", {"0", "10"}}, {"cycles", {"5"}}, {"driver", {"spin"}}};
+    sc.async_only = {"driver"};
+    sc.run = [](point_ctx &pc) {
+      const int64_t n = std::max<int64_t>(2, pc.i("n")), q = pc.i("q");
+      const int64_t cycles = std::max<int64_t>(1, pc.i("cycles"));
+      // Each member holds its key, says it is ready, waits for go, then asks for the next key;
+      // the last of the n to ask closes the cycle and catches the DeadlockError. The coordinator
+      // sends go only once all n are ready, so each round forms exactly one cycle.
+      std::vector<se::value_t> progs;
+      std::string gos;
+      for (int64_t j = 0; j < n; ++j) {
+        progs.push_back(se::parse("(begin (set r 0) (set dead 0) (while (< r " + istr(cycles) +
+                                  ") (begin (with-lock \"bench.dl.k" + istr(j) +
+                                  "\" (msg-send \"bench.dl.ready\" \"r\") (msg-recv \"bench.dl.go" +
+                                  istr(j) + "\") (set dead (+ dead (try (with-lock \"bench.dl.k" +
+                                  istr((j + 1) % n) +
+                                  "\" 0) (catch (DeadlockError e) 1))))) (set r (+ r 1)))) dead)"));
+        gos += " (msg-send \"bench.dl.go" + istr(j) + "\" \"go\")";
+      }
+      progs.push_back(se::parse("(begin (set r 0) (while (< r " + istr(cycles) +
+                                ") (begin (set j 0) (while (< j " + istr(n) +
+                                ") (begin (msg-recv \"bench.dl.ready\") (set j (+ j 1))))" + gos +
+                                " (set r (+ r 1)))) r)"));
+      auto app = make_app();
+      pc.reps([&](meter &m, rep_out &o) {
+        world w(pc.executor, app.get(), lock_world());
+        const std::string why = park_lock_queue(w, "bench.dlq", q, pc.cfg.timeout);
+        if (!why.empty()) {
+          o.fail("parking: " + why);
+          return;
+        }
+        tracker t(progs.size());
+        std::vector<int64_t> detect_ns, queue_ns;
+        const se::lock_stats s0 = w.lock_stats();
+        const uint64_t steps0 = w.total_steps();
+        const auto deadline = clk::now() + std::chrono::duration<double>(pc.cfg.timeout);
+        m.begin();
+        for (std::size_t j = 0; j < progs.size(); ++j) {
+          se::execute_options opts;
+          opts.env = w.process_env("extend");
+          opts.on_complete = t.hook(j);
+          t.submit_ns[j] = now_ns();
+          t.pid[j] = w.submit(progs[j], opts);
+        }
+        // One step at a time, each timed, sorted by what the lock stats say it did. Something can
+        // always step until the cycles are done (no timer, no other thread): a step that finds
+        // nothing runnable means a program failed.
+        for (uint64_t iter = 0; !t.all_done(); ++iter) {
+          const se::lock_stats a = w.lock_stats();
+          const int64_t t0 = now_ns();
+          const bool stepped = w.step_one();
+          const int64_t dt = now_ns() - t0;
+          const se::lock_stats b = w.lock_stats();
+          if (b.deadlocks > a.deadlocks)
+            detect_ns.push_back(dt);
+          else if (b.waits > a.waits)
+            queue_ns.push_back(dt);
+          if (!stepped) {
+            o.fail("stalled: nothing runnable: " + first_failure(w, t));
+            break;
+          }
+          if ((iter & 4095) == 0 && clk::now() > deadline) {
+            o.fail("timeout: " + first_failure(w, t));
+            break;
+          }
+        }
+        m.end();
+        o.steps_total = w.total_steps() - steps0;
+        int64_t dead = 0;
+        for (std::size_t j = 0; j < t.pid.size(); ++j) {
+          if (!t.finish_ns[j])
+            continue;
+          const auto *v = std::get_if<int64_t>(&t.result[j].v);
+          if (!v)
+            o.fail("program " + istr(int64_t(j)) + " returned " + se::to_string(t.result[j]));
+          else if (j + 1 < t.pid.size())
+            dead += *v;
+          else if (*v != cycles)
+            o.fail("the coordinator returned " + istr(*v) + ", expected " + istr(cycles));
+        }
+        const se::lock_stats s = w.lock_stats();
+        if (dead != cycles || s.deadlocks - s0.deadlocks != uint64_t(cycles))
+          o.fail("caught " + istr(dead) + " DeadlockErrors, the manager counted " +
+                 istr(int64_t(s.deadlocks - s0.deadlocks)) + "; expected " + istr(cycles));
+        if (s.queued != std::size_t(q))
+          o.fail(istr(int64_t(s.queued)) + " requests queued after the cycles, expected " +
+                 istr(q));
+        o.iterations = cycles;
+        o.programs = int64_t(progs.size());
+        o.extra.i("deadlocks", int64_t(s.deadlocks - s0.deadlocks))
+            .i("ns_per_detection", median_of(detect_ns))
+            .raw("detection_step_ns", percentiles(detect_ns).str())
+            .raw("queue_step_ns", percentiles(queue_ns).str())
+            .d("ns_per_cycle", double(m.wall()) / double(cycles));
       });
     };
     all.push_back(std::move(sc));
