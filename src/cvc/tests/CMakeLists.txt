@@ -152,14 +152,17 @@ cvc_setup_physics_replay(physics_replay_test)
 add_executable(physics_pose_tracker_test physics_pose_tracker_test.cpp)
 add_executable(physics_plant_host_test physics_plant_host_test.cpp)
 add_executable(physics_dyn_bike_plant_test physics_dyn_bike_plant_test.cpp)
-# StepsAsTheDynamicPlantDoes holds dyn_bike_plant (built with -ffp-contract=off) to dyn_plant called
-# inline here, bit for bit: build it the same way, or clang contracts this copy into FMAs on aarch64
-# (the macOS arm64 lanes) and the last bits differ.
+add_executable(physics_dyn_4w_plant_test physics_dyn_4w_plant_test.cpp)
+# StepsAsTheDynamicPlantDoes (and the four-wheel StepsAsTheFourWheelPlantDoes) hold the plant
+# (built with -ffp-contract=off) to its model called inline here, bit for bit: build them the same
+# way, or clang contracts this copy into FMAs on aarch64 (the macOS arm64 lanes) and the last bits
+# differ.
 if(NOT MSVC)
-  set_source_files_properties(physics_dyn_bike_plant_test.cpp
+  set_source_files_properties(physics_dyn_bike_plant_test.cpp physics_dyn_4w_plant_test.cpp
                               PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 else()
-  set_source_files_properties(physics_dyn_bike_plant_test.cpp PROPERTIES COMPILE_OPTIONS "/fp:precise")
+  set_source_files_properties(physics_dyn_bike_plant_test.cpp physics_dyn_4w_plant_test.cpp
+                              PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
 # det_math is internal to libcvc, so its test compiles it in, with the same no-contraction flag.
 add_executable(physics_det_math_test physics_det_math_test.cpp
@@ -377,6 +380,7 @@ set(TEST_TARGETS
   physics_det_math_test
   physics_plant_host_test
   physics_dyn_bike_plant_test
+  physics_dyn_4w_plant_test
   geometry_height_field_test
   world_geometry_test
   nav_world_planes_test
@@ -1978,6 +1982,12 @@ target_link_libraries(physics_dyn_bike_plant_test
     GTest::gtest
     GTest::gtest_main
 )
+target_link_libraries(physics_dyn_4w_plant_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
 
 target_link_libraries(physics_pose_tracker_test
   PRIVATE
@@ -2322,6 +2332,7 @@ target_compile_features(physics_pose_tracker_test PRIVATE cxx_std_17)
 target_compile_features(physics_det_math_test PRIVATE cxx_std_17)
 target_compile_features(physics_plant_host_test PRIVATE cxx_std_17)
 target_compile_features(physics_dyn_bike_plant_test PRIVATE cxx_std_17)
+target_compile_features(physics_dyn_4w_plant_test PRIVATE cxx_std_17)
 target_compile_features(geometry_height_field_test PRIVATE cxx_std_17)
 target_compile_features(world_geometry_test PRIVATE cxx_std_17)
 target_compile_features(nav_world_planes_test PRIVATE cxx_std_17)
@@ -2819,6 +2830,7 @@ cvc_discover_tests(physics_pose_tracker_test)
 cvc_discover_tests(physics_det_math_test)
 cvc_discover_tests(physics_plant_host_test)
 cvc_discover_tests(physics_dyn_bike_plant_test)
+cvc_discover_tests(physics_dyn_4w_plant_test)
 cvc_discover_tests(geometry_height_field_test)
 cvc_discover_tests(world_geometry_test)
 cvc_discover_tests(nav_world_planes_test)

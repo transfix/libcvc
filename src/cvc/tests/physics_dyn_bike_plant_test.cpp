@@ -12,6 +12,7 @@
 // vehicle as their live plant. Its steps are dyn_plant's, its energy books close, and plant_host
 // puts a sim_world's agents on it by name, with or without Jolt in the build.
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -21,6 +22,7 @@
 #include <cvc/physics/dyn_bike_plant.h>
 #include <cvc/physics/plant_host.h>
 #include <gtest/gtest.h>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -75,7 +77,32 @@ float east_of(const sim_world &sim, int i) {
 double identity_gap(const dyn_bike_plant &plant, int i) {
   const dyn_bike_books &b = plant.books(i);
   return b.kinetic - plant.kinetic_at_attach(i) -
-         (b.drive - b.brake - b.dissipated + b.floor + b.grade + b.limiter + b.residual);
+         (b.drive - b.brake - b.dissipated + b.floor + b.grade + b.limiter + b.contact +
+          b.residual);
+}
+
+// A ramp rising `slope` per metre eastward.
+nav_plant_options ramp(double slope) {
+  nav_plant_options o;
+  o.ground_height = [slope](double x, double) { return slope * x; };
+  return o;
+}
+
+// A world with a flat ground at z = 0 and a wall across the road at x = wall_x (its west face),
+// for the chassis to hit. `ground` gets the ground's body.
+std::unique_ptr<world> walled_world(double wall_x, body_id &ground) {
+  auto w = std::make_unique<world>();
+  body_desc g;
+  g.shape = box{{500.0, 500.0, 0.5}};
+  g.motion = motion_type::static_;
+  g.position = {0.0, 0.0, -0.5};
+  ground = w->add_body(g);
+  body_desc wall;
+  wall.shape = box{{0.5, 20.0, 3.0}};
+  wall.motion = motion_type::static_;
+  wall.position = {wall_x + 0.5, 0.0, 3.0};
+  w->add_body(wall);
+  return w;
 }
 
 } // namespace
@@ -159,9 +186,88 @@ TEST(DynBikePlant, TheBooksClose) {
   }
 }
 
-// "dynamic" puts every agent on the Humvee's dynamic bicycle, which drives to its goal, with no
-// physics world and whether or not this build has Jolt; "dynamic:<presets>" cycles presets; an
-// unknown preset throws and changes nothing; "kinematic" takes them off again.
+// Up a 5% ramp the vehicle loses g sin(slope) of acceleration against the same commands on flat
+// ground, the books gain the potential energy it climbed as their grade line, and they close.
+TEST(DynBikePlant, ClimbsTheGround) {
+  const double slope = 0.05;
+  dyn_bike_plant_options flat_o, ramp_o;
+  ramp_o.plant = ramp(slope);
+  dyn_bike_plant flat({vehicle_desc::humvee()}, flat_o), up({vehicle_desc::humvee()}, ramp_o);
+  cvc::nav::plant_state start; // at the origin, heading east: uphill
+  flat.attach(1, &start, trained_frame(), 0.06);
+  up.attach(1, &start, trained_frame(), 0.06);
+  const int ticks = 100; // 6 s
+  for (int t = 0; t < ticks; ++t) {
+    const float accel = static_cast<float>(1.5 * kS);
+    flat.command(0, 0.0f, accel);
+    up.command(0, 0.0f, accel);
+    flat.advance();
+    up.advance();
+  }
+  const double lost = flat.body(0).vx - up.body(0).vx;
+  const double expect = 9.80665 * slope / std::sqrt(1.0 + slope * slope) * ticks * 0.06;
+  const dyn_bike_books &b = up.books(0);
+  const double climbed = slope * up.body(0).x; // m
+  const double m = vehicle_desc::humvee().mass;
+  std::printf("  6 s up a 5%% ramp: %.3f m/s slower than on the flat (g sin(slope) t = %.3f); "
+              "grade %.4g J against m g dz = %.4g J\n",
+              lost, expect, b.grade, -m * 9.80665 * climbed);
+  EXPECT_NEAR(lost, expect, 0.03 * expect);
+  EXPECT_NEAR(b.grade, -m * 9.80665 * climbed, 0.02 * m * 9.80665 * climbed);
+  EXPECT_NEAR(identity_gap(up, 0), 0.0, 1e-9 * b.flow());
+  EXPECT_EQ(flat.books(0).grade, 0.0);
+  EXPECT_FALSE(up.collides());
+}
+
+// In a world, the chassis meets a wall across its road: it stops at the wall's face instead of
+// driving through it as it does without the world, the collisions take energy out on the books'
+// contact line, and the books still close.
+TEST(DynBikePlant, CollidesWithTheWorld) {
+  if (!plant_host::available())
+    GTEST_SKIP() << "no Jolt in this build";
+  const double wall_x = 30.0;
+  body_id ground;
+  auto w = walled_world(wall_x, ground);
+  dyn_bike_plant_options o;
+  o.physics = w.get();
+  o.ground_bodies = {ground};
+  dyn_bike_plant walled({vehicle_desc::humvee()}, o), open({vehicle_desc::humvee()});
+  cvc::nav::plant_state start;
+  walled.attach(1, &start, trained_frame(), 0.06);
+  open.attach(1, &start, trained_frame(), 0.06);
+  EXPECT_TRUE(walled.collides());
+  EXPECT_TRUE(walled.chassis(0).valid());
+  const vehicle_desc d = vehicle_desc::humvee();
+  const double front = d.half_extents.x - [&] {
+    double rear = 0.0;
+    for (const axle_desc &a : d.axles)
+      if (!a.steered)
+        rear = std::min(rear, a.x);
+    return rear;
+  }(); // the box's nose ahead of the rear axle
+  for (int t = 0; t < 200; ++t) { // 12 s at 2 m/s^2: well into the wall
+    walled.command(0, 0.0f, static_cast<float>(2.0 * kS));
+    open.command(0, 0.0f, static_cast<float>(2.0 * kS));
+    walled.advance();
+    open.advance();
+  }
+  const dyn_bike_books &b = walled.books(0);
+  const double nose = walled.body(0).x + front;
+  std::printf("  into a wall at %.0f m: the nose stops at %.3f m (%ld colliding substeps, contact "
+              "%.4g J, drive %.4g J); without the world it reaches %.1f m\n",
+              wall_x, nose, walled.collisions(0), b.contact, b.drive, open.body(0).x + front);
+  EXPECT_GT(open.body(0).x + front, wall_x + 10.0);
+  EXPECT_LT(nose, wall_x + 0.05);
+  EXPECT_GT(nose, wall_x - 1.0);
+  EXPECT_GT(walled.collisions(0), 0);
+  EXPECT_LT(b.contact, 0.0);
+  EXPECT_LT(std::fabs(walled.body(0).vx), 0.5);
+  EXPECT_NEAR(identity_gap(walled, 0), 0.0, 1e-9 * b.flow());
+}
+
+// "dynamic" puts every agent on the Humvee's dynamic bicycle, which drives to its goal, in a
+// physics world when the build has Jolt and without one otherwise; "dynamic:<presets>" cycles
+// presets; an unknown preset throws and changes nothing; "kinematic" takes them off again.
 TEST(DynBikePlant, PlantHostPutsTheAgentsOnItByName) {
   sim_world sim = open_sim();
   plant_host host;
@@ -178,7 +284,9 @@ TEST(DynBikePlant, PlantHostPutsTheAgentsOnItByName) {
   ASSERT_NE(host.dynamic(), nullptr);
   EXPECT_EQ(host.active(), host.dynamic());
   EXPECT_EQ(host.plant(), nullptr);
-  EXPECT_EQ(host.physics(), nullptr);
+  EXPECT_EQ(host.physics() != nullptr, plant_host::available());
+  EXPECT_EQ(host.dynamic()->collides(), plant_host::available());
+  EXPECT_EQ(host.dynamic4w(), nullptr);
   EXPECT_EQ(host.dynamic()->size(), 3);
   EXPECT_EQ(host.dynamic()->desc(1).mass, vehicle_desc::humvee().mass);
 
