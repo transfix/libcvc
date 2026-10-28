@@ -8,6 +8,8 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
+#include "dyn_world.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cvc/core/exception.h>
@@ -35,14 +37,6 @@ double rear_axle_x(const vehicle_desc &d) {
   return rear;
 }
 
-double wrap(double a) {
-  while (a > kPi)
-    a -= 2.0 * kPi;
-  while (a <= -kPi)
-    a += 2.0 * kPi;
-  return a;
-}
-
 void add(dyn_bike_books &to, const dyn_bike_books &d) {
   to.drive += d.drive;
   to.brake += d.brake;
@@ -50,6 +44,7 @@ void add(dyn_bike_books &to, const dyn_bike_books &d) {
   to.floor += d.floor;
   to.grade += d.grade;
   to.limiter += d.limiter;
+  to.contact += d.contact;
   to.residual += d.residual;
 }
 
@@ -57,13 +52,14 @@ void add(dyn_bike_books &to, const dyn_bike_books &d) {
 
 double dyn_bike_books::flow() const {
   return std::fabs(drive) + std::fabs(brake) + std::fabs(dissipated) + std::fabs(floor) +
-         std::fabs(grade) + std::fabs(limiter);
+         std::fabs(grade) + std::fabs(limiter) + std::fabs(contact);
 }
 
 dyn_bike_plant::dyn_bike_plant(std::vector<vehicle_desc> descs, dyn_bike_plant_options options)
     : _descs(std::move(descs)), _o(std::move(options)),
       _units(
-          cvc::world_units::config{cvc::world_units::system::si, _o.plant.metres_per_world_unit}) {
+          cvc::world_units::config{cvc::world_units::system::si, _o.plant.metres_per_world_unit}),
+      _chassis(std::make_unique<dyn::dyn_chassis>()) {
   if (_descs.empty())
     throw cvc::physics_error("dyn_bike_plant: needs at least one vehicle_desc");
   if (!(_o.plant.metres_per_world_unit > 0.0) || !std::isfinite(_o.plant.metres_per_world_unit))
@@ -74,6 +70,14 @@ dyn_bike_plant::dyn_bike_plant(std::vector<vehicle_desc> descs, dyn_bike_plant_o
     throw cvc::physics_error("dyn_bike_plant: mu must be > 0");
 }
 
+dyn_bike_plant::~dyn_bike_plant() = default;
+
+bool dyn_bike_plant::collides() const { return _chassis->on(); }
+
+body_id dyn_bike_plant::chassis(int i) const {
+  return _chassis->on() ? _chassis->box(i) : body_id{};
+}
+
 void dyn_bike_plant::attach(int n, const cvc::nav::plant_state *start,
                             const cvc::world_units::normalized_frame &frame, double dt) {
   frame.validate();
@@ -81,18 +85,30 @@ void dyn_bike_plant::attach(int n, const cvc::nav::plant_state *start,
     throw cvc::physics_error("dyn_bike_plant::attach: needs n >= 0 starts");
   if (!(dt > 0.0))
     throw cvc::physics_error("dyn_bike_plant::attach: the tick must be > 0");
+  if (_o.physics) {
+    // One world step per substep: nav's tick must be a whole number of them.
+    const double k = dt / _o.physics->config().fixed_dt;
+    _nsub = static_cast<int>(std::lround(k));
+    if (_nsub < 1 || std::fabs(k - _nsub) > 1e-6)
+      throw cvc::physics_error("dyn_bike_plant::attach: nav's tick must be a whole number of the "
+                               "world's steps");
+  } else {
+    _nsub = std::max(1, static_cast<int>(std::ceil(dt / _o.substep - 1e-9)));
+  }
   _frame = frame;
   _dt = dt;
-  _nsub = std::max(1, static_cast<int>(std::ceil(dt / _o.substep - 1e-9)));
   const double h = dt / _nsub;
   cvc::world_units::normalized_frame si;
   si.scale = 1.0;
+  _chassis->reset(_o.physics, _o.ground_bodies);
   _agents.clear();
   _agents.reserve(static_cast<std::size_t>(n));
   for (int i = 0; i < n; ++i) {
     agent a;
     a.desc = _descs[static_cast<std::size_t>(i) % _descs.size()];
     a.rear_x = rear_axle_x(a.desc);
+    for (const axle_desc &ax : a.desc.axles)
+      a.half_track = std::max(a.half_track, ax.half_track);
     a.p = cvc::nav::dyn_bike_params_of(
         nav_plant::dyn_bike_si_of(a.desc, _o.mu, 1.0, _o.drive_lag, _o.gravity), si);
     a.lim.L = a.p.lf + a.p.lr;
@@ -108,8 +124,30 @@ void dyn_bike_plant::attach(int n, const cvc::nav::plant_state *start,
     a.kinetic0 = 0.0;
     a.total = a.tick = dyn_bike_books{};
     measure(a, 0.0, 0.0, a.s.psi, false);
+    if (_chassis->on()) {
+      vec3 pos;
+      quat rot;
+      chassis_pose(a, a.s, pos, rot);
+      _chassis->add(a.desc, pos, rot);
+    }
     _agents.push_back(a);
   }
+}
+
+void dyn_bike_plant::chassis_pose(const agent &a, const diff::dyn_state<double> &s, vec3 &position,
+                                  quat &rotation) const {
+  const double c = std::cos(s.psi), sn = std::sin(s.psi);
+  const double L = a.p.lf + a.p.lr;
+  const double cgx = s.x + a.p.lr * c, cgy = s.y + a.p.lr * sn;
+  const double hr = dyn::ground_at(_o.plant, s.x, s.y),
+               hf = dyn::ground_at(_o.plant, s.x + L * c, s.y + L * sn);
+  const double t = a.half_track > 0.0 ? a.half_track : 0.5;
+  const double hl = dyn::ground_at(_o.plant, cgx - t * sn, cgy + t * c),
+               hrt = dyn::ground_at(_o.plant, cgx + t * sn, cgy - t * c);
+  const double th = std::atan2(hr - hf, L), phi = std::atan2(hl - hrt, 2.0 * t);
+  rotation = dyn::attitude(s.psi, th, phi);
+  const double cgz = dyn::ground_at(_o.plant, cgx, cgy) + a.p.h;
+  position = {s.x - a.rear_x * c, s.y - a.rear_x * sn, cgz - a.desc.center_of_mass.z};
 }
 
 cvc::nav::plant_state dyn_bike_plant::state(int i) const {
@@ -118,7 +156,7 @@ cvc::nav::plant_state dyn_bike_plant::state(int i) const {
   const cvc::world_units::xyz n = _units.si_point_to_normalized(a.s.x, a.s.y, 0.0, _frame);
   s.x = static_cast<float>(n.x);
   s.y = static_cast<float>(n.y);
-  s.heading = static_cast<float>(wrap(a.s.psi));
+  s.heading = static_cast<float>(dyn::wrap(a.s.psi));
   s.speed = static_cast<float>(_units.to_normalized(a.s.vx, dim::velocity, _frame));
   s.steer = static_cast<float>(a.s.delta);
   // The most used tire: its slip angle over the Pacejka peak's, tan(pi / 2C) / B.
@@ -175,13 +213,47 @@ void dyn_bike_plant::command(int i, float steer, float accel) {
 }
 
 void dyn_bike_plant::advance() {
-  for (agent &a : _agents) {
-    const double vx0 = a.s.vx, vy0 = a.s.vy, psi0 = a.s.psi;
+  const std::size_t n = _agents.size();
+  std::vector<double> vx0(n), vy0(n), psi0(n);
+  std::vector<diff::dyn_state<double>> next(n);
+  std::vector<diff::dyn_ph_books<double>> books(n);
+  for (std::size_t i = 0; i < n; ++i) {
+    agent &a = _agents[i];
+    vx0[i] = a.s.vx;
+    vy0[i] = a.s.vy;
+    psi0[i] = a.s.psi;
     a.tick = dyn_bike_books{};
-    for (int k = 0; k < _nsub; ++k) {
-      diff::dyn_state<double> o;
-      diff::dyn_ph_books<double> b;
-      diff::dyn_plant_books<double>(a.p, a.lim, a.s, a.steer_cmd, a.accel_cmd, 0.0, o, b);
+    a.hits_tick = 0;
+  }
+  const bool world = _chassis->on();
+  for (int k = 0; k < _nsub; ++k) {
+    for (std::size_t i = 0; i < n; ++i) {
+      agent &a = _agents[i];
+      // The slope along the heading under the centre of gravity, over a wheelbase.
+      const double c = std::cos(a.s.psi), sn = std::sin(a.s.psi);
+      const double grade = dyn::grade_at(_o.plant, a.s.x + a.p.lr * c, a.s.y + a.p.lr * sn, a.s.psi,
+                                         static_cast<double>(a.p.lf + a.p.lr));
+      diff::dyn_plant_books<double>(a.p, a.lim, a.s, a.steer_cmd, a.accel_cmd, grade, next[i],
+                                    books[i]);
+      if (world) {
+        // The box where this substep starts, moving as the model moved: its centre's velocity is
+        // the centre of gravity's plus the yaw rate's sweep of the offset along the heading.
+        vec3 pos;
+        quat rot;
+        chassis_pose(a, a.s, pos, rot);
+        const diff::dyn_state<double> &o = next[i];
+        const double c1 = std::cos(o.psi), s1 = std::sin(o.psi);
+        const double off = -a.rear_x - a.p.lr; // from the centre of gravity to the box's centre
+        const vec3 v{c1 * o.vx - s1 * o.vy - o.r * off * s1, s1 * o.vx + c1 * o.vy + o.r * off * c1,
+                     0.0};
+        _chassis->put(static_cast<int>(i), pos, rot, v, {0.0, 0.0, o.r});
+      }
+    }
+    if (world)
+      _chassis->step();
+    for (std::size_t i = 0; i < n; ++i) {
+      agent &a = _agents[i];
+      const diff::dyn_ph_books<double> &b = books[i];
       dyn_bike_books d;
       (b.supplied >= 0.0 ? d.drive : d.brake) = std::fabs(b.supplied);
       d.dissipated = b.dissipated;
@@ -189,13 +261,36 @@ void dyn_bike_plant::advance() {
       d.grade = b.grade;
       d.limiter = b.limiter;
       d.residual = b.residual;
+      diff::dyn_state<double> o = next[i];
+      if (world && _chassis->touched(static_cast<int>(i))) {
+        // The world's pose and twist, back into the model; the energy they changed is the
+        // contact's. The actuators keep the model's.
+        const body_state m = _chassis->moved(static_cast<int>(i));
+        const double before = diff::dyn_ph_hamiltonian(a.p, o);
+        o.psi += dyn::wrap(dyn::yaw_of(m.rotation) - o.psi);
+        const double c1 = std::cos(o.psi), s1 = std::sin(o.psi);
+        const double off = -a.rear_x - a.p.lr;
+        o.x = m.position.x + a.rear_x * c1;
+        o.y = m.position.y + a.rear_x * s1;
+        o.r = m.angular_velocity.z;
+        const double vgx = m.linear_velocity.x + o.r * off * s1,
+                     vgy = m.linear_velocity.y - o.r * off * c1;
+        o.vx = c1 * vgx + s1 * vgy;
+        o.vy = -s1 * vgx + c1 * vgy;
+        d.contact = diff::dyn_ph_hamiltonian(a.p, o) - before;
+        ++a.hits_tick;
+      }
       add(a.tick, d);
       a.s = o;
     }
+  }
+  for (std::size_t i = 0; i < n; ++i) {
+    agent &a = _agents[i];
+    a.hits += a.hits_tick;
     a.tick.kinetic = diff::dyn_ph_hamiltonian(a.p, a.s);
     add(a.total, a.tick);
     a.total.kinetic = a.tick.kinetic;
-    measure(a, vx0, vy0, psi0, true);
+    measure(a, vx0[i], vy0[i], psi0[i], true);
   }
 }
 
@@ -223,7 +318,7 @@ void dyn_bike_plant::measure(agent &a, double vx0, double vy0, double psi0, bool
                  s1 = std::sin(a.s.psi);
     const double dvx = (c1 * a.s.vx - s1 * a.s.vy) - (c0 * vx0 - s0 * vy0);
     const double dvy = (s1 * a.s.vx + c1 * a.s.vy) - (s0 * vx0 + c0 * vy0);
-    const double pm = psi0 + 0.5 * wrap(a.s.psi - psi0);
+    const double pm = psi0 + 0.5 * dyn::wrap(a.s.psi - psi0);
     const double cm = std::cos(pm), sm = std::sin(pm);
     s.a_lat = (-dvx * sm + dvy * cm) / _dt;
     s.a_lon = (dvx * cm + dvy * sm) / _dt;
