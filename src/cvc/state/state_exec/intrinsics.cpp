@@ -536,6 +536,19 @@ value_t intrinsic_spawn(intrinsics_context *ctx, std::span<const value_t> args) 
   if (args.size() > 2)
     opts.priority = static_cast<int>(as_int(args[2], "spawn"));
   opts.uid = ctx->uid;
+  // A child keeps its parent's owner (design 7.2; td 5 item 6), so a host's kill_owner reaps it.
+  if (const process_ptr &running = ctx->sched->current_process())
+    opts.owner = running->owner;
+  else if (ctx->proc)
+    opts.owner = ctx->proc->owner;
+  // The host's spawn context (td 4.15) gives the child an environment and a context of its own,
+  // which the child's process keeps alive. Without one the child gets the bare builtins.
+  if (ctx->spawn_context) {
+    spawn_setup s = ctx->spawn_context(*ctx);
+    opts.env = std::move(s.env);
+    opts.keep_alive = std::move(s.context);
+    opts.root_path = ctx->root_path;
+  }
   int pid = ctx->sched->execute(script, opts);
   return value_t(static_cast<int64_t>(pid));
 }
@@ -1261,10 +1274,32 @@ void register_intrinsics(environment_ptr env, intrinsics_context *ctx) {
 std::function<spawn_setup(const intrinsics_context &)> make_spawn_context(
     environment_ptr base,
     std::function<void(const environment_ptr &, intrinsics_context &)> after_register) {
-  // Built in phase L1b (locks plan L1b.1); until then children keep the bare builtins.
-  (void)base;
-  (void)after_register;
-  return {};
+  if (!base)
+    base = builtins::make_default_environment();
+  return [base = std::move(base),
+          after_register = std::move(after_register)](const intrinsics_context &parent) {
+    auto child = std::make_shared<intrinsics_context>();
+    child->sched = parent.sched;
+    child->root = parent.root;
+    child->tracker = parent.tracker;
+    child->root_path = parent.root_path;
+    child->uid = parent.uid;
+    child->cluster_id = parent.cluster_id;
+    child->node_id = parent.node_id;
+    child->channels = parent.channels;
+    child->document = parent.document;
+    child->lock_default_timeout = parent.lock_default_timeout;
+    child->lock_wait_allowed = parent.lock_wait_allowed;
+    child->spawn_context = parent.spawn_context; // grandchildren get one too
+    // A placeholder, as hosts give: the intrinsics act for the running process.
+    child->proc = make_process();
+    child->pid = -1;
+    environment_ptr env = environment::extend(base);
+    register_intrinsics(env, child.get());
+    if (after_register)
+      after_register(env, *child);
+    return spawn_setup{env, child};
+  };
 }
 
 namespace detail {
