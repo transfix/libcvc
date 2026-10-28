@@ -135,6 +135,30 @@ TEST_F(CoordinatorTest, ElectionVictoryMessage) {
   EXPECT_EQ(coord.leader_node_id(), "node-B");
 }
 
+// The bus hands a message to its subscribers on the thread that admits it, with the bus's lock
+// held, and a subscriber may answer at once. Here one answers start()'s election with a victory
+// for node-B, which reaches accept_leader, and so leader_mu_, from inside start(). start() used
+// to hold leader_mu_ across its announcement, so this relocked it: glibc deadlocks, and MSVC
+// throws, which the bus swallows along with the victory. Across two threads (one in start(),
+// one admitting a victory) it was a lock-order inversion with the bus's lock.
+TEST_F(CoordinatorTest, StartAcceptsAVictoryAnsweredDuringItsElection) {
+  auto answer = bus.subscribe("__state_exec.cluster-1.election", [this](const state_message &m) {
+    if (m.string_value.find("\"election-start\"") == std::string::npos)
+      return;
+    auto victory = state_message::make_text(
+        "__state_exec.cluster-1.election", "{\"type\":\"election-victory\",\"node_id\":\"node-B\"}",
+        MIME_EXEC_ELECTION);
+    victory.cluster_id = "cluster-1";
+    bus.admit(victory);
+  });
+
+  coord.start();
+  bus.unsubscribe(answer);
+
+  EXPECT_FALSE(coord.is_leader());
+  EXPECT_EQ(coord.leader_node_id(), "node-B");
+}
+
 TEST_F(CoordinatorTest, ElectionBullyHigherIdWins) {
   coord.start();
 

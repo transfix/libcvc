@@ -1180,7 +1180,7 @@ work (`docs/STATE_EXEC_EXCEPTIONS.md` 3.8):
   first half of `max_time`, and its **CPU time** (its thread's, plus its
   `computePool().parallel_for` chunks') toward the second.
 - **Steps:** the CPU time at `limits.async_steps_per_cpu_ms` steps per CPU
-  millisecond (default 2000; at least one step per call), against `max_steps`.
+  millisecond (default 8000; at least one step per call), against `max_steps`.
   The rate is read live; the first of these that is set wins:
   `execute_options::async_steps_per_cpu_ms`,
   `state_exec.schedulers.<id>.limits.async_steps_per_cpu_ms`,
@@ -1195,7 +1195,7 @@ work (`docs/STATE_EXEC_EXCEPTIONS.md` 3.8):
   `async_steps`.
 
 A short budget limits what a call can do: at the default rate, 5000 steps are
-2.5 ms of CPU. Ariadne's actions run with `ariadne.limits.action_max_steps`
+0.625 ms of CPU. Ariadne's actions run with `ariadne.limits.action_max_steps`
 (5000) and `ariadne.limits.action_max_time` (0.1 s), app-wide settings a
 document can't change, so a host whose documents call heavy async verbs
 raises them (`docs/ARIADNE.md` 2.2).
