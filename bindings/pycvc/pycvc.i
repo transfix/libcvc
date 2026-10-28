@@ -182,13 +182,23 @@ def _keepalive(obj):
     ~scene_reader at exit, for an app). A SwigPyObject is not GC-tracked, so only the borrower's
     own reference keeps it alive, and the borrower's `this` (set first) goes before it.
 
+    When `obj` keeps objects of its own (its `_pycvc_*` stashes: a SceneRenderer its scene, a
+    scene its app), the stash is a tuple of those and then `obj.this`. `this` alone would keep
+    the C++ object alive past its proxy, and that proxy, released or cleared by the collector
+    first, takes its own stashes with it: the scene, then the app, freed under a live renderer.
+    A tuple has no tp_clear, so the collector never empties it, and it releases its items last
+    first, so `obj` goes before what it borrows. It holds what `obj` kept when it was taken.
+
     A proxy that does not own its C++ object (a reference into another one, such as
     Viewport.camera()) is returned as is: its own stash of that owner is what keeps it valid.
     Not for a director class (a node type Python can subclass): there the C++ object calls back
     into its Python half, which `this` alone does not keep alive. Stash the proxy for those.
     """
     this = getattr(obj, "this", None)
-    return this if this is not None and this.own() else obj
+    if this is None or not this.own():
+        return obj
+    kept = tuple(v for k, v in vars(obj).items() if k.startswith("_pycvc_"))
+    return kept + (this,) if kept else this
 %}
 // Keep the app alive for as long as a volume/geometry built from it lives: the
 // C++ voxels/geometry hold the app by RAW reference (app& _ctx), so without this
@@ -3305,8 +3315,9 @@ struct eval_frame {
 };
 
 // The recursive evaluator. user_macros() returns a copy of the macro map: a dict of name ->
-// (params, body).
-%pythonappend cvc::state_exec::evaluator::stats %{
+// (params, body). stats() keeps the evaluator alive. (Inside this namespace block, a feature
+// names its declaration relative to it: SWIG silently ignores cvc::state_exec::evaluator::stats.)
+%pythonappend evaluator::stats %{
   val._pycvc_owner = self
 %}
 class evaluator {
@@ -3330,7 +3341,7 @@ public:
 
 // A stackless evaluator's whole state. The members read and write as copies; stats is a reference
 // into the state.
-%pythonappend cvc::state_exec::evaluator_state::_stats %{
+%pythonappend evaluator_state::_stats %{
   val._pycvc_owner = self
 %}
 struct evaluator_state {
@@ -3585,7 +3596,7 @@ std::optional<size_t> eval_alloc_limit();
 void eval_alloc_check(size_t bytes, const char *who);
 size_t alloc_bytes(size_t count, size_t each);
 void eval_alloc_note(size_t bytes); // (#667) report bytes allocated, for the heap's re-measures
-%pythonappend cvc::state_exec::process::_state %{
+%pythonappend process::_state %{
   val._pycvc_owner = self
 %}
 struct process {

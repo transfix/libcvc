@@ -71,12 +71,18 @@ if(CVC_BUILD_TESTS AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
   # macOS: defer discovery to test time (PRE_TEST) with a generous timeout so the
   # debug build's slow cold dyld-load of libcvc's dylib closure can't blow the
   # 5 s POST_BUILD DISCOVERY_TIMEOUT (empty --gtest_list_tests → ParseTestList
-  # aborts the build). macOS-only, so Linux/Windows are untouched; see the full
-  # note in src/cvc/tests/CMakeLists.txt. _gtest_discover_tests is the shadowed
-  # original module command.
+  # aborts the build). Windows keeps POST_BUILD with the same timeout: the 5 s
+  # default failed cvc_cli_test's discovery under the parallel CUDA build on
+  # package-windows (TEST_DISCOVERY_TIMEOUT=5 in the failing step). See the full
+  # note in src/cvc/tests/CMakeLists.txt, whose test targets already do both.
+  # _gtest_discover_tests is the shadowed original module command.
   if(APPLE)
     macro(gtest_discover_tests)
       _gtest_discover_tests(${ARGV} DISCOVERY_MODE PRE_TEST DISCOVERY_TIMEOUT 120)
+    endmacro()
+  elseif(WIN32)
+    macro(gtest_discover_tests)
+      _gtest_discover_tests(${ARGV} DISCOVERY_TIMEOUT 120)
     endmacro()
   endif()
   gtest_discover_tests(cvc_cli_test
