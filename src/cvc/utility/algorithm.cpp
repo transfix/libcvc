@@ -25,12 +25,6 @@
 #include <cvc/utility/algorithm.h>
 #include <cvc/utility/utility.h>
 
-#ifndef DISABLE_CGAL
-#include <CGAL/Bbox_3.h>
-#include <CGAL/Point_3.h>
-#include <CGAL/Simple_cartesian.h>
-#endif
-
 #ifdef CVC_ENABLE_SDF
 #include <SDF/SignDistanceFunction/sdfLib.h>
 
@@ -61,23 +55,24 @@
 #include <map>
 #include <numeric>
 
-#ifndef DISABLE_CGAL
-#include <CGAL/AABB_traits.h>
-#include <CGAL/AABB_tree.h>
-#include <CGAL/AABB_triangle_primitive.h>
-
 namespace {
-typedef CGAL::Simple_cartesian<double> K;
-typedef K::Point_3 Point_3;
-typedef K::Triangle_3 Triangle_3;
-typedef std::vector<Triangle_3>::iterator Iterator;
-typedef CGAL::AABB_triangle_primitive<K, Iterator> Primitive;
-typedef CGAL::AABB_traits<K, Primitive> AABB_traits;
-typedef CGAL::AABB_tree<AABB_traits> Tree;
-} // namespace
-#endif
+// Whether p lies in the axis-aligned box of `v`. Not by adding up one bounding_box per point: a
+// box around one point has no volume, so it isNull(), and a sum of null boxes stays null.
+bool within_bounds(const cvc::geometry::point_t &p, const cvc::geometry::points_t &v) {
+  if (v.empty())
+    return false;
+  double lo[3] = {v[0][0], v[0][1], v[0][2]}, hi[3] = {lo[0], lo[1], lo[2]};
+  for (const auto &q : v)
+    for (int a = 0; a < 3; ++a) {
+      lo[a] = std::min(lo[a], q[a]);
+      hi[a] = std::max(hi[a], q[a]);
+    }
+  for (int a = 0; a < 3; ++a)
+    if (p[a] < lo[a] || p[a] > hi[a])
+      return false;
+  return true;
+}
 
-namespace {
 // Wrapper for tet with index and bbox
 struct TetElement {
   size_t index;
@@ -1829,94 +1824,26 @@ quality_stats compute_hex_quality_stats(const geometry::hexs_t &hexs,
 // -----------------------------
 // Purpose:
 //   Find all tets that contain a given point.
-//   Uses CGAL bbox spatial indexing for O(n) with highly efficient rejection.
+//   O(n): above 1000 elements, a point outside the mesh's box returns at once, and only
+//   the elements whose own box holds the point are tested.
 // ---- Change History ----
 // 12/28/2025 -- Joe R. -- Creation (Week 3 Option 4).
 // 12/28/2025 -- Joe R. -- Added CGAL bbox spatial acceleration.
+// 10/27/2026 -- Joe R. -- Above 10000 elements, the mesh-box test summed null
+//                          one-point boxes and returned nothing for any point off the
+//                          boundary surface. The box is computed directly, and the
+//                          per-call surface + AABB tree that only fed it is gone.
 std::vector<size_t> find_tets_containing_point(const geometry::point_t &p,
                                                const geometry::tets_t &tets,
                                                const geometry::points_t &vertices) {
 
   std::vector<size_t> result;
 
-#ifndef DISABLE_CGAL
-  // For very large meshes, use CGAL AABB tree with surface triangles for O(log n)
-  if (tets.size() > 10000) {
-    // Extract surface triangles from tets
-    geometry geom;
-    geom.points() = vertices;
-    geom.tets() = tets;
-    geometry surface = extract_surface(geom);
-
-    // Build CGAL triangles from surface
-    std::vector<Triangle_3> triangles;
-    triangles.reserve(surface.const_tris().size());
-
-    for (const auto &tri : surface.const_tris()) {
-      Point_3 p0(surface.points()[tri[0]][0], surface.points()[tri[0]][1],
-                 surface.points()[tri[0]][2]);
-      Point_3 p1(surface.points()[tri[1]][0], surface.points()[tri[1]][1],
-                 surface.points()[tri[1]][2]);
-      Point_3 p2(surface.points()[tri[2]][0], surface.points()[tri[2]][1],
-                 surface.points()[tri[2]][2]);
-      triangles.emplace_back(p0, p1, p2);
-    }
-
-    // Build AABB tree
-    Tree tree(triangles.begin(), triangles.end());
-    tree.accelerate_distance_queries();
-
-    Point_3 query(p[0], p[1], p[2]);
-
-    // Quick inside/outside test - if outside, return empty
-    // Use ray casting: count intersections with surface
-    // Even count = outside, odd count = inside
-    if (!tree.do_intersect(query)) {
-      // Point is far from surface, do bbox test on full mesh
-      bounding_box mesh_bbox;
-      for (const auto &pt : vertices) {
-        bounding_box pt_bbox(pt[0], pt[1], pt[2], pt[0], pt[1], pt[2]);
-        mesh_bbox += pt_bbox;
-      }
-      if (!mesh_bbox.contains(p[0], p[1], p[2])) {
-        return result; // Outside mesh entirely
-      }
-    }
-
-    // Point might be inside - fall through to bbox-accelerated search
-    // but with pre-computed bboxes
-    std::vector<TetElement> elements;
-    elements.reserve(tets.size());
-    for (size_t i = 0; i < tets.size(); ++i) {
-      elements.emplace_back(i, tets, vertices);
-    }
-
-    for (const auto &elem : elements) {
-      if (elem.bbox.contains(p[0], p[1], p[2])) {
-        const auto &tet = tets[elem.index];
-        auto weights = tet_barycentric(p, vertices[tet[0]], vertices[tet[1]], vertices[tet[2]],
-                                       vertices[tet[3]]);
-
-        bool inside = true;
-        for (int j = 0; j < 4; ++j) {
-          if (weights[j] < -1e-10) {
-            inside = false;
-            break;
-          }
-        }
-
-        if (inside) {
-          result.push_back(elem.index);
-        }
-      }
-    }
-
-    return result;
-  }
-#endif
-
-  // Use pre-computed bboxes for large meshes (1000-10000)
+  // Large meshes: a point outside the mesh's box is in no tet; otherwise test the tets whose
+  // own box holds it.
   if (tets.size() > 1000) {
+    if (!within_bounds(p, vertices))
+      return result;
     std::vector<TetElement> elements;
     elements.reserve(tets.size());
     for (size_t i = 0; i < tets.size(); ++i) {
@@ -2000,95 +1927,26 @@ std::vector<size_t> find_tets_containing_point(const geometry::point_t &p,
 // -----------------------------
 // Purpose:
 //   Find all hexs that contain a given point.
-//   Uses CGAL bbox spatial indexing for O(n) with highly efficient rejection.
+//   O(n): above 1000 elements, a point outside the mesh's box returns at once, and only
+//   the elements whose own box holds the point are tested.
 // ---- Change History ----
 // 12/28/2025 -- Joe R. -- Creation (Week 3 Option 4).
 // 12/28/2025 -- Joe R. -- Added CGAL bbox spatial acceleration.
+// 10/27/2026 -- Joe R. -- Above 10000 elements, the mesh-box test summed null
+//                          one-point boxes and returned nothing for any point off the
+//                          boundary surface. The box is computed directly, and the
+//                          per-call surface + AABB tree that only fed it is gone.
 std::vector<size_t> find_hexs_containing_point(const geometry::point_t &p,
                                                const geometry::hexs_t &hexs,
                                                const geometry::points_t &vertices) {
 
   std::vector<size_t> result;
 
-#ifndef DISABLE_CGAL
-  // For very large meshes, use CGAL AABB tree with surface triangles
-  if (hexs.size() > 10000) {
-    // Extract surface triangles from hexs
-    geometry geom;
-    geom.points() = vertices;
-    geom.hexs() = hexs;
-    geometry surface = extract_surface(geom);
-
-    // Build CGAL triangles
-    std::vector<Triangle_3> triangles;
-    triangles.reserve(surface.const_tris().size());
-
-    for (const auto &tri : surface.const_tris()) {
-      Point_3 p0(surface.points()[tri[0]][0], surface.points()[tri[0]][1],
-                 surface.points()[tri[0]][2]);
-      Point_3 p1(surface.points()[tri[1]][0], surface.points()[tri[1]][1],
-                 surface.points()[tri[1]][2]);
-      Point_3 p2(surface.points()[tri[2]][0], surface.points()[tri[2]][1],
-                 surface.points()[tri[2]][2]);
-      triangles.emplace_back(p0, p1, p2);
-    }
-
-    // Build AABB tree
-    Tree tree(triangles.begin(), triangles.end());
-    tree.accelerate_distance_queries();
-
-    Point_3 query(p[0], p[1], p[2]);
-
-    // Quick inside/outside test
-    if (!tree.do_intersect(query)) {
-      bounding_box mesh_bbox;
-      for (const auto &pt : vertices) {
-        bounding_box pt_bbox(pt[0], pt[1], pt[2], pt[0], pt[1], pt[2]);
-        mesh_bbox += pt_bbox;
-      }
-      if (!mesh_bbox.contains(p[0], p[1], p[2])) {
-        return result;
-      }
-    }
-
-    // Use bbox-accelerated search with pre-computed bboxes
-    std::vector<HexElement> elements;
-    elements.reserve(hexs.size());
-    for (size_t i = 0; i < hexs.size(); ++i) {
-      elements.emplace_back(i, hexs, vertices);
-    }
-
-    for (const auto &elem : elements) {
-      if (elem.bbox.contains(p[0], p[1], p[2])) {
-        const auto &hex = hexs[elem.index];
-
-        geometry::point_t hex_verts[8];
-        for (int j = 0; j < 8; ++j) {
-          hex_verts[j] = vertices[hex[j]];
-        }
-
-        auto weights = hex_trilinear(p, hex_verts);
-
-        bool inside = true;
-        for (int j = 0; j < 8; ++j) {
-          if (weights[j] < -0.1 || weights[j] > 1.1) {
-            inside = false;
-            break;
-          }
-        }
-
-        if (inside) {
-          result.push_back(elem.index);
-        }
-      }
-    }
-
-    return result;
-  }
-#endif
-
-  // Use pre-computed bboxes for large meshes (1000-10000)
+  // Large meshes: a point outside the mesh's box is in no hex; otherwise test the hexs whose
+  // own box holds it.
   if (hexs.size() > 1000) {
+    if (!within_bounds(p, vertices))
+      return result;
     std::vector<HexElement> elements;
     elements.reserve(hexs.size());
     for (size_t i = 0; i < hexs.size(); ++i) {
