@@ -22,11 +22,11 @@
 // This is the ONLY sanctioned host for a long-running publish() loop. It owns a
 // raw std::thread with a self-managed run flag and joins deterministically in
 // stop()/dtor, mirroring cvc::nav::sim_thread. It must NOT be a compute-pool job
-// and must NOT be submitted to app::startThreadPooled: the compute pool runs one
-// job at a time and holds its post mutex until the job drains, so a
-// never-returning producer loop would deadlock the entire compute subsystem
-// (nav ticks, http/fetch, every launch_pool_task); the bounded background-task
-// pool would likewise be starved of a slot.
+// and must NOT be submitted to app::startThreadPooled: a never-returning
+// producer loop would hold a compute-pool worker (and a fan-out that never
+// joins) for good, taking it from every other fan-out (nav ticks, http/fetch),
+// and on the bounded background-task pool it would hold one of its slots and
+// workers for good (async kernels, every launch_pool_task).
 //
 // The per-tick callback returns true to keep running (false to stop). It runs on
 // the dedicated thread and must be self-contained: acquire+fill a pool slab,

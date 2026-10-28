@@ -86,12 +86,13 @@ private:
 // that are busy with the outer job.
 //
 // parallel_for() is safe to call from any number of threads concurrently — the
-// intended use for a shared pool like app::computePool(). The pool runs ONE
-// fan-out at a time: concurrent orchestrators serialize, each later caller
-// blocking until the in-flight job drains before its own is posted (they do not
-// lend their thread to the in-flight job while they wait). Total throughput is
-// bounded by the pool's workers either way; the serialization only adds latency
-// when several threads fan out at once.
+// intended use for a shared pool like app::computePool(). Concurrent fan-outs run
+// side by side: each posted job joins a FIFO list, and a free worker takes part in
+// the oldest job that still has unclaimed indices and room under its cap, so a
+// fan-out started while another is in flight begins at once on its own caller and
+// on whatever workers are free (or become free), instead of waiting for the first
+// to drain. A post wakes only as many idle workers as the job can enlist (a capped
+// fan-out does not wake the whole pool).
 class thread_pool {
 public:
   // Create `n_workers` background workers. 0 (the default) picks
@@ -124,18 +125,22 @@ public:
 private:
   void worker_loop(int worker_index);
 
-  // One fan-out. Lives on the caller's stack for the duration of a parallel_for;
-  // workers only touch it between the wake and their final `remaining` decrement.
+  // One fan-out. Lives on the caller's stack for the duration of a parallel_for. A worker
+  // joins it only while it is linked into the pool's job list (under _mtx), and touches it
+  // only between joining and its final `remaining` decrement; the caller unlinks it before it
+  // waits for `remaining` to drain, so no worker can join once the caller's wait begins.
   struct job {
     int n = 0;
     const std::function<void(int)> *fn = nullptr;
     std::atomic<int> cursor{0};       // next index to claim
-    std::atomic<int> remaining{0};    // participants (caller + enlisted workers) still running
-    int enlisted = 0;                 // worker indices [0, enlisted) take part
+    std::atomic<int> remaining{0};    // participants (caller + joined workers) still running
+    int enlisted = 0;                 // most workers that may join (guarded by _mtx)
+    int joined = 0;                   // workers that have joined (guarded by _mtx)
     std::atomic<bool> aborted{false}; // a task threw; remaining indices drain without running fn
     std::exception_ptr eptr;          // first exception thrown by any task (guarded by emtx)
     std::mutex emtx;                  // guards eptr's one-time set
     fanout_context *ctx = nullptr;    // the poster's context: workers run their chunks under it
+    job *next = nullptr;              // the job list (guarded by _mtx)
   };
 
   // Claim and run indices from `j` on the calling thread until the cursor drains.
@@ -146,13 +151,18 @@ private:
   // would unwind the caller's stack job while workers still reference it).
   void run_indices(job &j) noexcept;
 
+  // The oldest linked job a worker may still join (room under its cap, indices left), or null.
+  // Caller holds _mtx.
+  job *joinable_job_locked() const;
+  void unlink_locked(job &j);
+
   std::vector<std::thread> _workers;
-  std::mutex _post_mtx; // serializes orchestrators: held from job post to drain+clear
   std::mutex _mtx;
-  std::condition_variable _wake; // workers park here until a job is posted
-  std::condition_variable _done; // parallel_for parks here until the job drains
-  job *_job = nullptr;           // current job (points into the caller's stack)
-  std::uint64_t _epoch = 0;      // bumped per posted job so a worker detects a new one
+  std::condition_variable _wake; // idle workers park here until a joinable job is posted
+  std::condition_variable _done; // parallel_for parks here until its job drains
+  job *_head = nullptr;          // posted jobs, oldest first (each on its caller's stack)
+  job *_tail = nullptr;
+  unsigned _idle = 0; // workers parked on _wake
   bool _stop = false;
 };
 

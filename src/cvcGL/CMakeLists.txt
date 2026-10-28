@@ -831,6 +831,11 @@ add_executable(cvcgl_room_view test/cvcgl_room_view.cpp)
 target_link_libraries(cvcgl_room_view PRIVATE cvcGL)
 add_test(NAME cvcgl_room_view COMMAND cvcgl_room_view)
 
+# AriRuntime switching documents (arigl's gallery): each load clears the last one's scene.
+add_executable(cvcgl_ari_switch test/cvcgl_ari_switch.cpp)
+target_link_libraries(cvcgl_ari_switch PRIVATE cvcGL)
+add_test(NAME cvcgl_ari_switch COMMAND cvcgl_ari_switch)
+
 # The terminal extension (TerminalScene, roadmap §16.6): a scene rendered offscreen becomes the
 # terminal backend's background under the widgets, and a background drag turns the camera.
 add_executable(cvcgl_terminal_scene test/cvcgl_terminal_scene.cpp)
@@ -847,16 +852,38 @@ add_test(NAME cvcgl_imgui_table_columns COMMAND cvcgl_imgui_table_columns)
 add_executable(cvcgl_imgui_grid_slider test/cvcgl_imgui_grid_slider.cpp)
 target_link_libraries(cvcgl_imgui_grid_slider PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_grid_slider COMMAND cvcgl_imgui_grid_slider)
-# A window with no size: fits its content when it first appears, inside the viewport, and scrolls
-# what does not fit; windows with no pos: flow instead of stacking (§3.0.3b). No window, no GL.
-add_executable(cvcgl_imgui_window_fit test/cvcgl_imgui_window_fit.cpp)
-target_link_libraries(cvcgl_imgui_window_fit PRIVATE cvcGL)
-add_test(NAME cvcgl_imgui_window_fit COMMAND cvcgl_imgui_window_fit)
 # A window closed with its X comes back from the built-in Windows menu (§5.9), clicked through
-# ImGui's own input. No window, no GL.
+# ImGui's own input, and takes a place among the others again. No window, no GL.
 add_executable(cvcgl_imgui_windows_menu test/cvcgl_imgui_windows_menu.cpp)
 target_link_libraries(cvcgl_imgui_windows_menu PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_windows_menu COMMAND cvcgl_imgui_windows_menu)
+
+# The tf_editor transfer-function widget (ImGuiBackend::tf_editor) on a bare ImGui context, driven
+# by synthesized mouse input: drags, adds, deletes, the zoom strip, the context menu, commits.
+add_executable(cvcgl_tf_editor test/cvcgl_tf_editor.cpp)
+target_link_libraries(cvcgl_tf_editor PRIVATE cvcGL)
+add_test(NAME cvcgl_tf_editor COMMAND cvcgl_tf_editor)
+
+# The scene transfer-function bindings (tf_binding): a node's <id>.transfer_function model lowered
+# into volren / volslice / VolumeNode / fe_lab keys, its range and overlays published.
+add_executable(cvcgl_tf_binding test/cvcgl_tf_binding.cpp)
+target_link_libraries(cvcgl_tf_binding PRIVATE cvcGL)
+add_test(NAME cvcgl_tf_binding COMMAND cvcgl_tf_binding)
+# RUN_SERIAL: it bounds how long one cooperative scheduler pump takes, which parallel ctest
+# jobs preempting the thread would stretch.
+set_tests_properties(cvcgl_tf_binding PROPERTIES RUN_SERIAL TRUE)
+
+# fe_lab's interval mesher (mesh.region: interval): the shell between two isovalues of a ball SDF,
+# its two boundary sheets and FEM solves, and the node's interval props and status.
+add_executable(cvcgl_fe_interval test/cvcgl_fe_interval.cpp)
+target_link_libraries(cvcgl_fe_interval PRIVATE cvcGL)
+add_test(NAME cvcgl_fe_interval COMMAND cvcgl_fe_interval)
+# ImGuiBackend's window sizing and placement on a bare ImGui context: a window with no size fits
+# its widgets, windows with no pos stack instead of overlapping (until the user moves one), and a
+# sized window scrolls both ways. No window, no GL.
+add_executable(cvcgl_imgui_window_fit test/cvcgl_imgui_window_fit.cpp)
+target_link_libraries(cvcgl_imgui_window_fit PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_window_fit COMMAND cvcgl_imgui_window_fit)
 
 # Golden images of the Ariadne ImGui/VTK backend (roadmap §16.6 phase 1): each .ari in
 # test/golden runs through AriRuntime + ImGuiBackend offscreen and its frame is compared with the
@@ -1051,6 +1078,12 @@ add_executable(cvcgl_sdl_input test/cvcgl_sdl_input.cpp)
 target_link_libraries(cvcgl_sdl_input PRIVATE cvcGL)
 add_test(NAME cvcgl_sdl_input COMMAND cvcgl_sdl_input)
 
+# SdlInput::attach on a real VTK window: SDL wraps the HWND VTK made, so a key sent to it reaches
+# SDL (a document's on_key) and still VTK's interactor. Windows only; SKIPs (rc 0) elsewhere.
+add_executable(cvcgl_sdl_attach test/cvcgl_sdl_attach.cpp)
+target_link_libraries(cvcgl_sdl_attach PRIVATE cvcGL)
+add_test(NAME cvcgl_sdl_attach COMMAND cvcgl_sdl_attach)
+
 # ── JavaScript tests (node) ──
 # The browser-side pieces cvcgl_wasm_app() links into a wasm app are plain JS, tested under node
 # against mock WebGL contexts -- no browser and no wasm build needed. node must come from the
@@ -1108,6 +1141,9 @@ endif()
 # locked unless it is listed here as headless.
 get_property(_cvcgl_gl_tests DIRECTORY PROPERTY TESTS)
 list(REMOVE_ITEM _cvcgl_gl_tests
+  cvcgl_tf_editor # a bare ImGui context, no GL
+  cvcgl_tf_binding # scene nodes + state only, never renders
+  cvcgl_fe_interval # LBIE + cvc::fem + an fe_lab node's state, never renders
   cvcgl_smoke cvcgl_metadata_mirror cvcgl_volume_range cvcgl_traversal cvcgl_x11_macros
   cvcgl_grid_bounds cvcgl_bounds_walk cvcgl_scene_chrome cvcgl_remove
   cvcgl_teardown cvcgl_light_state_thread cvcgl_unattached_node_thread cvcgl_pose_echo

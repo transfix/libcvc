@@ -91,6 +91,8 @@ cvc::ariadne::FtxuiBackend::Options::ImageColor image_mode(const std::string &s)
     return Mode::Kitty;
   if (s == "sixel")
     return Mode::Sixel;
+  if (s == "iterm")
+    return Mode::Iterm;
   if (s == "color")
     return Mode::Color;
   if (s == "mono")
@@ -109,7 +111,7 @@ cvc::ariadne::TermGraphics probe_terminal(cvc::ariadne::FtxuiBackend &backend,
                                           const cvc::ariadne::HostOptions &o) {
   using Mode = cvc::ariadne::FtxuiBackend::Options::ImageColor;
   const Mode m = image_mode(o.graphics);
-  if (m != Mode::Auto && m != Mode::Kitty && m != Mode::Sixel)
+  if (m != Mode::Auto && m != Mode::Kitty && m != Mode::Sixel && m != Mode::Iterm)
     return {};
   cvc::ariadne::TermGraphics g = cvc::ariadne::gfx::probe_terminal();
   if (o.cell_w > 0) {
@@ -278,7 +280,8 @@ int main(int argc, char **argv) {
   if (cmd == "snapshot") {
     using Mode = ari::FtxuiBackend::Options::ImageColor;
     const bool pixels =
-        o.ansi && (look.image_color == Mode::Kitty || look.image_color == Mode::Sixel);
+        o.ansi && (look.image_color == Mode::Kitty || look.image_color == Mode::Sixel ||
+                   look.image_color == Mode::Iterm);
     if (pixels) { // the cell size the images are drawn at: the terminal's, or --cell-size
       ari::TermGraphics g = ari::gfx::probe_terminal();
       if (o.cell_w > 0) {

@@ -55,8 +55,9 @@ using async_marshal = std::function<async_kernel(std::span<const value_t> args)>
 
 /// Where an async function's kernel runs (docs/STATE_EXEC_EXCEPTIONS.md 3.5).
 enum class executor_kind {
-  /// The app's background task pool (app::startThreadPooled), in the order of its priorities:
-  /// for every kernel, CPU-bound or blocking. A host without an app runs it inline.
+  /// The app's background task pool (app::submitPooled: its persistent workers), in the order
+  /// of its priorities, FIFO within one: for every kernel, CPU-bound or blocking. A host without
+  /// an app runs it inline.
   background,
   /// A named async_lane the host was given (async_host::add_lane): work that must stay on one
   /// thread.
@@ -139,6 +140,11 @@ public:
   bool cancel_requested() const { return cancel_.load(std::memory_order_acquire); }
   /// Whether the call's timeout has passed at `now`.
   bool past_timeout(clock::time_point now) const;
+  /// The first time point from the call's creation on at which past_timeout() holds (exactly:
+  /// past_timeout() is false one clock tick before it, unless it is the creation itself), or
+  /// nullopt when there is none: no timeout, or one it never reaches (NaN, infinite, or past the
+  /// clock's range). See detail::first_time_passed.
+  std::optional<clock::time_point> timeout_point() const;
 
   /// Settle the call: its outcome is the kernel's value or `error`. Only the first settling
   /// counts (a timeout or a cancellation may come first); returns whether this one did.
@@ -191,8 +197,13 @@ private:
 
   std::string name_;
   int pid_;
-  std::string channel_;                    // the reply channel (threaded calls)
-  std::string progress_channel_;           // "<name>.progress", resolved for the process's root
+  std::string channel_; // the reply channel (threaded calls)
+  // "<name>.progress" resolved under the calling process's root: built on the first post()
+  // (most kernels never post), from the root path kept here (the process may be gone by then).
+  bool has_progress_ = false; // a process to post to (not a bare evaluator)
+  std::string progress_root_;
+  std::once_flag progress_once_;
+  std::string progress_channel_;
   scheduler_base *sched_ = nullptr;        // where progress goes (inline: on this thread)
   async_scheduler *async_sched_ = nullptr; // threaded: where the completion is posted
   std::optional<double> timeout_;
@@ -203,9 +214,13 @@ private:
   // An external call (async_host::begin_external): the host's own loop settles it, so nothing
   // may block waiting for it.
   bool external_ = false;
-  // Inline calls: the process running it, for cancelled() to check its budget.
+  // Its index in its host's list of calls to cancel at shutdown (guarded by the host's lock).
+  static constexpr std::size_t kNoSlot = static_cast<std::size_t>(-1);
+  std::size_t host_slot_ = kNoSlot;
+  // Inline calls: the process running it, for cancelled() to check its budget, and the step
+  // rate that check uses (read on first need).
   process *inline_proc_ = nullptr;
-  double inline_rate_ = 0.0;
+  std::optional<double> inline_rate_;
 
   std::atomic<bool> cancel_{false};
   std::thread::id kernel_thread_;

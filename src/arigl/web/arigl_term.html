@@ -1,0 +1,201 @@
+<!doctype html>
+<!--
+  arigl_term.html — arigl --terminal in the browser: a .ari document's widgets in an xterm.js
+  terminal, its 3D scene rendered by cvcGL (VTK, WebGL) and drawn behind them. The build writes
+  this page next to arigl_term.js (src/arigl/CMakeLists.txt); build-pages.py serves it as
+  arigl_term/index.html in the demo gallery.
+
+  ?doc=documents/terminal_scene picks the document (a path under /ariadne, without .ari), and
+  ?gfx=iterm|color|mono how the scene is drawn: iterm (the default) as iTerm2 inline images,
+  which xterm.js's image addon shows at the cells' real pixels; color as half-block cells.
+
+  The wiring is the module's stdio, which is all FTXUI's Emscripten screen talks to:
+    stdin  <- every byte xterm.js produces: keys, and SGR mouse reports once the program turns
+              them on
+    stdout -> xterm.js, one write per animation frame. FTXUI ends its text with a NUL, but the
+              scene's image follows it, so flushing at the NUL would split the two.
+    resize -> _ftxui_on_resize(cols, rows), FTXUI's hook for the terminal size.
+  VTK renders into the hidden #canvas below (it needs a canvas in the page); the scene reaches
+  the terminal only through stdout.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>arigl terminal</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css"
+      integrity="sha384-8Xk9wy/gzEDUKrXtrmCFa2bBuK3BpjpDuL/p0SeKQX19Khl/M+lHOgD/CyYf7efP"
+      crossorigin="anonymous">
+<style>
+  :root { --bg: #0f1115; --fg: #c9ced6; --dim: #7d8590; --accent: #d4a373; }
+  html, body { height: 100%; margin: 0; background: var(--bg); color: var(--fg);
+               font: 13px/1.4 system-ui, sans-serif; }
+  body { display: flex; flex-direction: column; }
+  header { display: flex; gap: 16px; align-items: baseline; flex-wrap: wrap;
+           padding: 6px 12px; border-bottom: 1px solid #1f242c; }
+  header b { color: var(--accent); font-weight: 600; }
+  header .hint { color: var(--dim); }
+  header #status { margin-left: auto; color: var(--dim); }
+  header a { color: var(--accent); }
+  header select, header button { font: inherit; color: var(--fg); background: #1f242c;
+                                 border: 1px solid #2d333b; border-radius: 4px; padding: 1px 8px; }
+  header button { cursor: pointer; }
+  #term { flex: 1; min-height: 0; padding: 4px 0 0 6px; }
+  /* VTK's WebGL canvas: rendered into, read back, never shown. */
+  #canvas { position: fixed; left: -100000px; top: 0; width: 640px; height: 384px; }
+</style>
+</head>
+<body>
+<header>
+  <span><b>arigl --terminal</b> <span id="doc"></span></span>
+  <label class="hint">scene as
+    <select id="gfx">
+      <option value="iterm">images</option>
+      <option value="color">half-blocks</option>
+      <option value="mono">mono</option>
+    </select>
+  </label>
+  <span class="hint">Tab / Enter / arrows · drag to orbit · F10 menu · Ctrl-C asks, twice quits</span>
+  <a id="gallery" href="../" hidden>all examples</a>
+  <span id="status">loading…</span>
+</header>
+<div id="term"></div>
+<canvas id="canvas" width="640" height="384" tabindex="-1"></canvas>
+
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js"
+        integrity="sha384-M169f14mRZOXm3hD/v2Ti0ThIT/RnAQagXA9nlE15yHAtrW19gdePJh/HaTzUOe/"
+        crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js"
+        integrity="sha384-iF+jqbuti4XlB64clWgFWYEscb+UnSRv3VgVikGYZu+otNFnSHr7y7NcKfBnGizn"
+        crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-webgl@0.18.0/lib/addon-webgl.js"
+        integrity="sha384-AkzdQDeATxpW8V7I2EPcwg17qAoLQMjEFHb//1QaAAIyIlbDAHGKno5+huH7RKxq"
+        crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-image@0.8.0/lib/addon-image.js"
+        integrity="sha384-c8cp6ttBbOCWdIK+9ah6WF5Z9Kl9UMfuRUneie8t3tsEPIBD3TkSP3e5CyNT22kI"
+        crossorigin="anonymous"></script>
+<script>
+  const statusEl = document.getElementById('status');
+  const setStatus = (text) => { statusEl.textContent = text; };
+  // In the wasm demo gallery this page is arigl_term/index.html (build-pages.py): link back to it.
+  if (location.pathname.endsWith('/')) document.getElementById('gallery').hidden = false;
+
+  // The document and the scene's drawing, from the URL. A document is a path under /ariadne, as
+  // the gallery names them ("documents/terminal_scene"); nothing else reaches the command line.
+  const params = new URLSearchParams(location.search);
+  const docParam = params.get('doc') || 'documents/terminal_scene';
+  const doc = /^[\w-]+\/[\w-]+$/.test(docParam) ? docParam : 'documents/terminal_scene';
+  const gfxParam = params.get('gfx') || 'iterm';
+  const gfx = ['iterm', 'color', 'mono'].includes(gfxParam) ? gfxParam : 'iterm';
+  document.getElementById('doc').textContent = doc.split('/').pop() + '.ari';
+  const gfxEl = document.getElementById('gfx');
+  gfxEl.value = gfx;
+  gfxEl.onchange = () => {
+    params.set('gfx', gfxEl.value);
+    location.search = params.toString();
+  };
+
+  const term = new Terminal({
+    fontFamily: '"DejaVu Sans Mono", Menlo, Consolas, "Liberation Mono", monospace',
+    fontSize: 14,
+    scrollback: 0,
+    macOptionIsMeta: true,
+    theme: { background: '#0f1115' },
+  });
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  const termEl = document.getElementById('term');
+  term.open(termEl);
+  try {
+    const webgl = new WebglAddon.WebglAddon();
+    webgl.onContextLoss(() => webgl.dispose());
+    term.loadAddon(webgl);
+  } catch (e) {
+    console.warn('arigl: WebGL renderer unavailable, using the DOM renderer:', e);
+  }
+  // iTerm2 inline images (OSC 1337), each scaled to the cells it names. Sixel is off: arigl draws
+  // iTerm2 images here, which need no cell size in pixels.
+  term.loadAddon(new ImageAddon.ImageAddon({ sixelSupport: false, iipSupport: true }));
+  term.focus();
+
+  // stdin: what xterm.js produces, as bytes.
+  const stdin = [];
+  const utf8 = new TextEncoder();
+  term.onData((s) => { for (const b of utf8.encode(s)) stdin.push(b); });
+  term.onBinary((s) => { for (let i = 0; i < s.length; ++i) stdin.push(s.charCodeAt(i) & 0xff); });
+
+  // stdout: everything a frame wrote, the text and the images after it, in one terminal write
+  // at the next animation frame.
+  let frame = [];
+  const flush = () => {
+    if (frame.length) {
+      term.write(new Uint8Array(frame));
+      frame = [];
+    }
+  };
+  const flushEachFrame = () => {
+    flush();
+    requestAnimationFrame(flushEachFrame);
+  };
+  requestAnimationFrame(flushEachFrame);
+  let errLine = [];
+
+  let started = false;
+  const resize = () => {
+    const dims = fit.proposeDimensions();
+    if (!dims || !dims.cols || !dims.rows) return; // hidden or not laid out
+    if (dims.cols !== term.cols || dims.rows !== term.rows) term.resize(dims.cols, dims.rows);
+    if (started && Module._ftxui_on_resize) Module._ftxui_on_resize(term.cols, term.rows);
+  };
+
+  var Module = {
+    arguments: ['run', '--terminal', '--graphics', gfx, '--component-path', '/',
+                '/ariadne/' + doc + '.ari'],
+    canvas: document.getElementById('canvas'),
+    stdin: () => (stdin.length ? stdin.shift() : null),
+    stdout: (c) => { if (c !== 0) frame.push(c); },
+    stderr: (c) => {
+      if (c === 10) {
+        console.warn(new TextDecoder().decode(new Uint8Array(errLine)));
+        errLine = [];
+      } else {
+        errLine.push(c);
+      }
+    },
+    setStatus: (text) => { if (text) setStatus(text); },
+    onRuntimeInitialized() {
+      // Runs before main: FTXUI sizes its screen from this.
+      started = true;
+      resize();
+      new ResizeObserver(resize).observe(termEl);
+      setStatus('running');
+    },
+    onExit(code) {
+      flush();
+      term.write('\r\n\x1b[2m[arigl exited with status ' + code + ']\x1b[0m\r\n');
+      statusEl.innerHTML = '';
+      const again = document.createElement('button');
+      again.textContent = 'run again';
+      again.onclick = () => location.reload();
+      statusEl.append('exited ', again);
+    },
+    onAbort(what) {
+      flush();
+      setStatus('aborted: ' + what);
+    },
+  };
+</script>
+<script>
+  // Start the program only once the terminal has its real size: xterm.css and the font must be in
+  // before fit can measure a cell. The glue loads arigl_term.wasm and arigl_term.data (the
+  // documents and components) from beside this page.
+  window.addEventListener('load', () => document.fonts.ready.then(() => {
+    fit.fit();
+    const script = document.createElement('script');
+    script.src = 'arigl_term.js';
+    script.onerror = () => setStatus('load failed: arigl_term.js');
+    document.body.append(script);
+  }));
+</script>
+</body>
+</html>

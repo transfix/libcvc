@@ -1,5 +1,6 @@
 #include <iostream>
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
 #include <vector>
 
@@ -105,10 +106,44 @@ namespace LBIE
     _geoframe.setSpan(_octree.spans[0],_octree.spans[1],_octree.spans[2]);
     _geoframe.setMin(_octree.minext[0],_octree.minext[1],_octree.minext[2]);
     
-    if(!_octree_volume_updated)
+    if(_meshType != TETRA2 && !_octree_volume_updated)
       set_octree_volume(_contourExtractor.getVolume());
     
-    if(!_dual)
+    if(_meshType == TETRA2)
+      {
+	// A layer of tetrahedra between two isovalues lo < hi is the solid min(v - lo, hi - v) >= 0,
+	// whose boundary is both isosurfaces, meshed like any other solid. Octree::tetrahedralize_interval
+	// built the layer from the interval's octree directly, and wrongly: it chose which isosurface an
+	// edge crosses by its cell, not by the edge, gave an edge that crosses both a pyramid whose apex
+	// is outside the layer, and made a new grid vertex for every pyramid, so neighbouring tets did
+	// not share their corners.
+	const double lo = std::min(isovalue(), isovalue_in()), hi = std::max(isovalue(), isovalue_in());
+	VolMagick::Volume layer(_contourExtractor.getVolume());
+	layer.voxelType(VolMagick::Float);
+	const cvc::uint64 n = layer.XDim()*layer.YDim()*layer.ZDim();
+	for(cvc::uint64 i = 0; i < n; i++)
+	  {
+	    const double v = layer(i);
+	    layer(i, std::min(v - lo, hi - v));
+	  }
+	set_octree_volume(layer);
+	_octree_volume_updated = false; // the octree holds the layer, not the volume
+	_octree.set_isovalue(0.0f);
+	_octree.set_isovalue_in(-FLT_MAX); // no inner isovalue: min_vtx() asks it of a cell
+	_octree.setMeshType(int(TETRA));
+	_octree.collapse();
+	cerr << "LBIE::Mesher::extractMesh(): finished collapse" << endl;
+	_octree.compute_qef();
+	cerr << "LBIE::Mesher::extractMesh(): finished compute qef" << endl;
+	_octree.traverse_qef(_err);
+	cerr << "LBIE::Mesher::extractMesh(): finished traverse qef" << endl;
+	_octree.mesh_extract(_geoframe,_err);
+	cerr << "LBIE::Mesher::extractMesh(): finished mesh extraction" << endl;
+	_octree.set_isovalue(_isovalue);
+	_octree.set_isovalue_in(_isovalue_in);
+	_octree.setMeshType(int(_meshType));
+      }
+    else if(!_dual)
       {
 	_octree.collapse();
 	cerr << "LBIE::Mesher::extractMesh(): finished collapse" << endl;

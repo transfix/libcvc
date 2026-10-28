@@ -182,13 +182,23 @@ def _keepalive(obj):
     ~scene_reader at exit, for an app). A SwigPyObject is not GC-tracked, so only the borrower's
     own reference keeps it alive, and the borrower's `this` (set first) goes before it.
 
+    When `obj` keeps objects of its own (its `_pycvc_*` stashes: a SceneRenderer its scene, a
+    scene its app), the stash is a tuple of those and then `obj.this`. `this` alone would keep
+    the C++ object alive past its proxy, and that proxy, released or cleared by the collector
+    first, takes its own stashes with it: the scene, then the app, freed under a live renderer.
+    A tuple has no tp_clear, so the collector never empties it, and it releases its items last
+    first, so `obj` goes before what it borrows. It holds what `obj` kept when it was taken.
+
     A proxy that does not own its C++ object (a reference into another one, such as
     Viewport.camera()) is returned as is: its own stash of that owner is what keeps it valid.
     Not for a director class (a node type Python can subclass): there the C++ object calls back
     into its Python half, which `this` alone does not keep alive. Stash the proxy for those.
     """
     this = getattr(obj, "this", None)
-    return this if this is not None and this.own() else obj
+    if this is None or not this.own():
+        return obj
+    kept = tuple(v for k, v in vars(obj).items() if k.startswith("_pycvc_"))
+    return kept + (this,) if kept else this
 %}
 // Keep the app alive for as long as a volume/geometry built from it lives: the
 // C++ voxels/geometry hold the app by RAW reference (app& _ctx), so without this
@@ -3040,6 +3050,7 @@ PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::scheduler::step)
 PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::scheduler::run)
 PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::async_scheduler::sync_step)
 PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::async_scheduler::sync_run)
+PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::async_scheduler::wait_for_work)
 // The evaluators, likewise.
 PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::stackless_evaluator::step)
 PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::stackless_evaluator::run)
@@ -3082,6 +3093,52 @@ PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::collect_cycles)
 %naturalvar cvc::state_exec::resource_policy::enforce;
 %naturalvar cvc::state_exec::channel_policy::declared;
 %naturalvar cvc::state_exec::channel_policy::global;
+// ── async_lane (cvc/core/async_lane.h): a persistent worker thread, as an async host's executor
+// (async_host.add_lane). stop() and the destructor wait for the lane's jobs: without the GIL, which
+// a Python kernel on the lane needs to finish. ──
+%{
+#include <cvc/core/async_lane.h>
+%}
+PYCVC_STATE_EXEC_NOGIL(cvc::async_lane::stop)
+PYCVC_STATE_EXEC_NOGIL(cvc::async_lane::~async_lane)
+namespace cvc {
+class async_lane {
+public:
+  explicit async_lane(std::string name);
+  ~async_lane();
+  void stop();
+  const std::string &name() const;
+  bool threaded() const;
+  bool stopped() const;
+  size_t pending() const;
+  size_t in_flight() const;
+  unsigned long long completed() const;
+  unsigned long long failed() const;
+  std::string last_error() const;
+  double last_job_ms() const;
+};
+} // namespace cvc
+
+// ── async_call: a Python kernel's handle (register_async_fn(..., with_call=True)) ──
+// Shared: the handle keeps the call's record alive. cancelled() says whether to stop (and records
+// the CPU time used so far, for the process's budget); post(value) sends progress to
+// "<name>.progress"; add_wait(seconds) is time spent waiting on the host, not charged.
+%shared_ptr(cvc::state_exec::async_call)
+%nodefaultctor cvc::state_exec::async_call;
+%{
+namespace pycvc {
+PyObject *async_call_to_py(std::shared_ptr<cvc::state_exec::async_call> call) {
+  static swig_type_info *type = SWIG_TypeQuery("std::shared_ptr< cvc::state_exec::async_call > *");
+  if (type == nullptr) {
+    PyErr_SetString(PyExc_RuntimeError, "pycvc: the async_call type isn't registered");
+    return nullptr;
+  }
+  return SWIG_NewPointerObj(new std::shared_ptr<cvc::state_exec::async_call>(std::move(call)),
+                            type, SWIG_POINTER_OWN);
+}
+} // namespace pycvc
+%}
+
 %rename(global_) cvc::state_exec::channel_policy::global; // `global` is a Python keyword
 %rename(raise_) cvc::state_exec::stackless_evaluator::raise; // `raise` is one too
 // process::watch_event and process::watch_handler_entry are pycvc.watch_event and
@@ -3258,8 +3315,9 @@ struct eval_frame {
 };
 
 // The recursive evaluator. user_macros() returns a copy of the macro map: a dict of name ->
-// (params, body).
-%pythonappend cvc::state_exec::evaluator::stats %{
+// (params, body). stats() keeps the evaluator alive. (Inside this namespace block, a feature
+// names its declaration relative to it: SWIG silently ignores cvc::state_exec::evaluator::stats.)
+%pythonappend evaluator::stats %{
   val._pycvc_owner = self
 %}
 class evaluator {
@@ -3283,7 +3341,7 @@ public:
 
 // A stackless evaluator's whole state. The members read and write as copies; stats is a reference
 // into the state.
-%pythonappend cvc::state_exec::evaluator_state::_stats %{
+%pythonappend evaluator_state::_stats %{
   val._pycvc_owner = self
 %}
 struct evaluator_state {
@@ -3538,7 +3596,7 @@ std::optional<size_t> eval_alloc_limit();
 void eval_alloc_check(size_t bytes, const char *who);
 size_t alloc_bytes(size_t count, size_t each);
 void eval_alloc_note(size_t bytes); // (#667) report bytes allocated, for the heap's re-measures
-%pythonappend cvc::state_exec::process::_state %{
+%pythonappend process::_state %{
   val._pycvc_owner = self
 %}
 struct process {
@@ -3723,6 +3781,7 @@ public:
   void set_id(const std::string &id);
   std::string id() const;
   void load_settings();
+  bool reap(int pid);
   parse_options parser_settings() const;
   data_options data_settings() const;
   unsigned long long max_alloc_bytes() const;
@@ -3750,6 +3809,8 @@ public:
   int wake_awaiting();
   void post_message(const std::string &path, const value_t &msg);
   void drain_ingress();
+  bool wait_for_work(double seconds);
+  size_t awaiting_frame_count() const;
   size_t async_calls_in_flight() const;
   void set_id(const std::string &id);
   std::string id() const;
@@ -3791,12 +3852,27 @@ PYCVC_STATE_EXEC_NOGIL(async_host::wait_idle)
 // kernel needs to finish.
 PYCVC_STATE_EXEC_NOGIL(async_host::~async_host)
 %nodefaultctor async_host;
+// add_lane keeps the lane alive as long as the host: the host's calls need it.
+%pythonappend async_host::add_lane %{
+  self.__dict__.setdefault("_pycvc_lanes", []).append(lane)
+%}
 class async_host {
 public:
   void shutdown();
   void wait_idle();
   size_t in_flight() const;
+  void add_lane(const std::string &name, cvc::async_lane &lane);
 };
+class async_call {
+public:
+  const std::string &function_name() const;
+  bool cancelled();
+  void post(const value_t &progress);
+  void add_wait(double seconds);
+  bool finished() const;
+};
+// Whether `v` is a future that held an async call ((name-async ...)'s value).
+bool is_async_future(const value_t &v);
 %extend async_host {
   async_host() { return new cvc::state_exec::async_host(); }
   async_host(scheduler *sched) { return new cvc::state_exec::async_host(sched); }
@@ -3807,17 +3883,18 @@ public:
   }
 }
 
-// register_async_fn(env, host, name, fn, executor="background", timeout=None, future_variant=True):
-// fn, a Python callable, is the kernel: it runs on an executor thread with copies of the
-// arguments, taking the GIL for its call, and its value or exception is the call's
+// register_async_fn(env, host, name, fn, executor="background", timeout=None, future_variant=True,
+// with_call=False): fn, a Python callable, is the kernel: it runs on an executor thread with copies
+// of the arguments, taking the GIL for its call, and its value or exception is the call's
 // (docs/STATE_EXEC_EXCEPTIONS.md 3.2). executor is "background" (the app's background task pool;
-// "compute" means the same), "inline", or "lane:<name>"; timeout is seconds.
+// "compute" means the same), "inline", or "lane:<name>" (a lane given to host.add_lane); timeout
+// is seconds. With with_call, fn gets the call's pycvc.async_call first, before the arguments.
 %extend builtins {
   static void register_async_fn(environment_ptr env, cvc::state_exec::async_host &host,
                                 const std::string &name, PyObject *fn,
                                 const std::string &executor = "background",
                                 std::optional<double> timeout = std::nullopt,
-                                bool future_variant = true) {
+                                bool future_variant = true, bool with_call = false) {
     namespace se = cvc::state_exec;
     if (!env)
       throw std::invalid_argument("pycvc.builtins.register_async_fn: env is None");
@@ -3834,9 +3911,10 @@ public:
                                   executor + "\"");
     opts.timeout = timeout;
     opts.future_variant = future_variant;
-    se::register_async_fn(env, host, name,
-                          pycvc::python_async_marshal("pycvc.builtins.register_async_fn", name, fn),
-                          std::move(opts));
+    se::register_async_fn(
+        env, host, name,
+        pycvc::python_async_marshal("pycvc.builtins.register_async_fn", name, fn, with_call),
+        std::move(opts));
   }
 }
 

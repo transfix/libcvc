@@ -786,6 +786,504 @@ TEST(Dyn4, Golden) {
         << now[k];
 }
 
+// ── The plant in port-Hamiltonian form (dyn4_ph_*) ────────────────────────────────────────────
+// DynBikePH's gates (nav_dyn_bike_test) on four wheels with suspension. x = (q, p): the body's
+// heave, roll and pitch and the momenta of its twist; H the kinetic energy, the corners' springs
+// and gravity on heave; x' = (J - R) dH/dx + G u + f_lever, u the wheels' drive and brake forces,
+// R the tires' secants, drag, rolling resistance and the dampers. The slips are in each wheel's
+// frame, so no speed-floor term is left; f_lever is the tires' lateral forces' moments on roll and
+// pitch, which the slips do not feel. These gates hold dyn4_plant to that form at every slip,
+// sliding included, on flat and uneven ground, and book its steps. dyn4_plant's arithmetic is
+// unchanged (Dyn4.Golden still pins it).
+
+namespace {
+
+constexpr double kTwoPi = 6.283185307179586; // M_PI is not portable (MSVC)
+
+// A straight ramp up along +x: height s wx.
+struct ramp_ground {
+  double mu = 0.9, s = 0.05;
+  template <class S> void at(S wx, S, S &mu_out, S &height) const {
+    mu_out = S(mu);
+    height = S(s) * wx;
+  }
+};
+
+// Rolling hills everywhere: height A sin(wx / lx) cos(wy / ly), one friction.
+struct rolling_ground {
+  double mu = 0.6, A = 0.05, lx = 1.3, ly = 1.7;
+  template <class S> void at(S wx, S wy, S &mu_out, S &height) const {
+    mu_out = S(mu);
+    height = S(A) * diff::s_sin(wx / S(lx)) * diff::s_cos(wy / S(ly));
+  }
+};
+
+// A Humvee state anywhere in the envelope: forward or reversing, the wheel up to 0.5 rad,
+// sideways and yaw rates well past the tires' peaks, the body heaving, rolling and pitching, and
+// anywhere on golden_ground's split and bump.
+dyn4_state<double> sliding4(std::mt19937 &rng) {
+  std::uniform_real_distribution<double> u(-1.0, 1.0);
+  dyn4_state<double> s{};
+  const double speed = 3.0 + 25.0 * 0.5 * (1.0 + u(rng));
+  s.vx = u(rng) < -0.7 ? -std::min(speed, 8.0) : speed;
+  s.delta = 0.5 * u(rng);
+  s.vy = 4.0 * u(rng);
+  s.r = 1.2 * u(rng);
+  s.a = 5.0 * u(rng);
+  s.x = 4.0 + 2.0 * u(rng);
+  s.y = 2.0 * u(rng) + (u(rng) > 0.0 ? 3.0 : 0.0);
+  s.psi = 3.0 * u(rng);
+  s.z = 0.03 * u(rng);
+  s.zd = 0.2 * u(rng);
+  s.phi = 0.03 * u(rng);
+  s.phid = 0.2 * u(rng);
+  s.th = 0.02 * u(rng);
+  s.thd = 0.2 * u(rng);
+  return s;
+}
+
+// How many of the tires are past their peak (the force falling as the slip grows).
+int tires_past_peak(const dyn4_params &p, const diff::dyn4_ph_parts<double> &q) {
+  int n = 0;
+  for (int i = 0; i < 4; ++i) {
+    const double B = i < 2 ? p.B_f : p.B_r, alpha = -std::atan2(q.w[i], q.ui[i]);
+    n += std::cos(p.C * std::atan(B * alpha)) < 0.0;
+  }
+  return n;
+}
+
+// The least eigenvalue of a symmetric 9 x 9 matrix's trailing block from row lo, by cyclic
+// Jacobi rotations.
+double least_eigenvalue(const double M[9][9], int lo = 0) {
+  double A[9][9];
+  for (int a = 0; a < 9; ++a)
+    for (int b = 0; b < 9; ++b)
+      A[a][b] = M[a][b];
+  for (int sweep = 0; sweep < 50; ++sweep) {
+    double off = 0.0, diag = 0.0;
+    for (int a = lo; a < 9; ++a) {
+      diag += A[a][a] * A[a][a];
+      for (int b = a + 1; b < 9; ++b)
+        off += A[a][b] * A[a][b];
+    }
+    if (off <= 1e-32 * diag)
+      break;
+    for (int p = lo; p < 9; ++p)
+      for (int q = p + 1; q < 9; ++q) {
+        if (A[p][q] == 0.0)
+          continue;
+        const double theta = (A[q][q] - A[p][p]) / (2.0 * A[p][q]);
+        const double t = (theta >= 0.0 ? 1.0 : -1.0) / (std::fabs(theta) + std::hypot(theta, 1.0));
+        const double c = 1.0 / std::sqrt(t * t + 1.0), s = t * c;
+        for (int k = lo; k < 9; ++k) {
+          const double kp = A[k][p], kq = A[k][q];
+          A[k][p] = c * kp - s * kq;
+          A[k][q] = s * kp + c * kq;
+        }
+        for (int k = lo; k < 9; ++k) {
+          const double pk = A[p][k], qk = A[q][k];
+          A[p][k] = c * pk - s * qk;
+          A[q][k] = s * pk + c * qk;
+        }
+      }
+  }
+  double lam = A[lo][lo];
+  for (int a = lo + 1; a < 9; ++a)
+    lam = std::min(lam, A[a][a]);
+  return lam;
+}
+
+// x's coordinates as the state's: q = (z, phi, th), then the twist (vx, vy, r, zd, phid, thd),
+// and each twist coordinate's mass.
+const int kCoord[9] = {6, 8, 10, 3, 4, 5, 7, 9, 11};
+double coord_mass(const dyn4_params &p, int a) {
+  const double M[9] = {1.0, 1.0, 1.0, p.m, p.m, p.Iz, p.m, p.Ix, p.Iy};
+  return M[a];
+}
+
+// The structure at 500 states on one ground: J skew, R symmetric positive semi-definite (its
+// secants >= 0), dH/dx = (dH/dq, xi) against H's central differences, and nothing supplied with
+// the wheels' forces at zero, however they turn.
+template <class G> void structure_gate(const dyn4_params &p, const G &ground, const char *label) {
+  const bike_veh v = limits(p.lf + p.lr);
+  std::mt19937 rng(3);
+  int past = 0;
+  double least_twist = 1e300, worst_grad = 0.0;
+  for (int k = 0; k < 500; ++k) {
+    dyn4_state<double> s = sliding4(rng);
+    if (k % 5 == 0)
+      s.a = 0.0;
+    double x[9], e[9], J[9][9], R[9][9];
+    diff::dyn4_ph_coords(p, s, x);
+    diff::dyn4_ph_grad(p, v, ground, s, e);
+    diff::dyn4_ph_J(x, J);
+    diff::dyn4_ph_R(p, v, ground, s, R);
+    diff::dyn4_ph_parts<double> q;
+    diff::dyn4_ph_parts_at(p, v, ground, s, q);
+    double eJe = 0.0, eJe_abs = 0.0, norm = 0.0;
+    for (int a = 0; a < 9; ++a)
+      for (int b = 0; b < 9; ++b) {
+        EXPECT_EQ(J[a][b], -J[b][a]);
+        EXPECT_EQ(R[a][b], R[b][a]);
+        eJe += e[a] * J[a][b] * e[b];
+        eJe_abs += std::fabs(e[a] * J[a][b] * e[b]);
+        norm += R[a][b] * R[a][b];
+      }
+    norm = std::sqrt(norm);
+    EXPECT_LE(std::fabs(eJe), 1e-12 * eJe_abs);
+    // R's coefficients are nonnegative, and so is its spectrum.
+    EXPECT_GT(q.cx, 0.0);
+    for (int i = 0; i < 4; ++i) {
+      EXPECT_GE(q.Sw[i], 0.0) << label << ": tire " << i << " at w " << q.w[i];
+      EXPECT_GT(q.W.c[i], 0.0);
+    }
+    EXPECT_GE(least_eigenvalue(R), -1e-9 * norm) << label << " at vx " << s.vx << ", vy " << s.vy;
+    // q's block is zero; on the twist the resistances, the four tires and the four dampers span.
+    least_twist = std::min(least_twist, least_eigenvalue(R, 3) / norm);
+    // dH/dx: in q directly, in p through the twist (p = M xi).
+    for (int a = 0; a < 9; ++a) {
+      const double dq = 1e-6;
+      dyn4_state<double> sp = s, sm = s;
+      sp[kCoord[a]] += dq;
+      sm[kCoord[a]] -= dq;
+      const double fd = (diff::dyn4_ph_hamiltonian(p, v, ground, sp) -
+                         diff::dyn4_ph_hamiltonian(p, v, ground, sm)) /
+                        (2.0 * dq * coord_mass(p, a));
+      const double scale = a < 3 ? p.m * p.g * (p.lf + p.lr) : 1.0 + std::fabs(e[a]);
+      worst_grad = std::max(worst_grad, std::fabs(fd - e[a]) / scale);
+      EXPECT_NEAR(fd, e[a], 1e-6 * scale) << label << ": coordinate " << a;
+    }
+    // Steering is not a port: with the wheels' forces at zero nothing is supplied.
+    if (s.a == 0.0)
+      EXPECT_EQ(diff::dyn4_ph_rates_at(p, v, ground, s).supplied, 0.0);
+    past += tires_past_peak(p, q) > 0;
+  }
+  std::printf("  %s: %d of 500 states have a tire past its peak; R's least eigenvalue on the "
+              "twist %.2e |R|; dH/dx within %.1e of H's differences\n",
+              label, past, least_twist, worst_grad);
+  EXPECT_GT(past, 100) << label << ": the states do not slide";
+}
+
+} // namespace
+
+// J is skew and R a sum of nonnegative multiples of outer products at every slip, on flat ground
+// of two frictions and on golden_ground's split and bump, sprung and with rigid corners: R is
+// positive semi-definite sliding or not, at any steering angle.
+TEST(Dyn4PH, TheStructureIsPortHamiltonianAtEverySlip) {
+  const dyn4_params sprung = humvee4();
+  dyn4_params rigid = sprung;
+  rigid.k_f = rigid.k_r = rigid.c_f = rigid.c_r = 0.0f;
+  diff::flat_ground grippy, slick;
+  grippy.mu = 0.9f;
+  slick.mu = 0.6f;
+  structure_gate(sprung, grippy, "flat, mu 0.9");
+  structure_gate(sprung, slick, "flat, mu 0.6");
+  structure_gate(sprung, golden_ground(), "split and bump");
+  structure_gate(rigid, golden_ground(), "split and bump, rigid");
+}
+
+// One very short dyn4_plant step's change in x against the port-Hamiltonian vector field at every
+// slip, forward and reversing, on flat ground and on golden_ground (there with and without the
+// grade force), with the actuators holding (commands equal to their state) so u is the state's
+// own. The low-speed blend is a per-step limiter, not part of the field, so it is off here
+// (dyn4_plant_books charges it).
+TEST(Dyn4PH, TheVectorFieldIsThePlantsAtEverySlip) {
+  dyn4_params p = humvee4();
+  p.v_blend = 0.0f;
+  dyn4_params pg = p;
+  pg.grade_force = 1;
+  bike_veh lim = limits(p.lf + p.lr);
+  lim.allow_reverse = 1;
+  lim.hdt = 1e-5f;
+  const double mg = p.m * p.g, L = p.lf + p.lr, t = std::max(p.tf, p.tr);
+  // Relative to each row's scale: 1 m/s (rad/s) on q, the forces' on the momenta.
+  const double scale[9] = {1.0, 1.0, 1.0, mg, mg, mg * L, mg, mg * t, mg * L};
+  const auto gate = [&](const dyn4_params &pp, const auto &ground, const char *label) {
+    std::mt19937 rng(5);
+    double worst = 0.0;
+    for (int k = 0; k < 400; ++k) {
+      const dyn4_state<double> s = sliding4(rng);
+      dyn4_state<double> o;
+      diff::dyn4_plant<double>(pp, lim, ground, s, s.delta, s.a, o);
+      double x0[9], x1[9], f[9];
+      diff::dyn4_ph_coords(pp, s, x0);
+      diff::dyn4_ph_coords(pp, o, x1);
+      diff::dyn4_ph_rhs(pp, lim, ground, s, f);
+      for (int a = 0; a < 9; ++a) {
+        const double fd = (x1[a] - x0[a]) / lim.hdt;
+        const double rel = std::fabs(fd - f[a]) / scale[a];
+        worst = std::max(worst, rel);
+        EXPECT_LT(rel, 1e-3) << label << ", coordinate " << a << ": plant " << fd << ", pH " << f[a]
+                             << " at vx " << s.vx << ", vy " << s.vy << ", r " << s.r << ", delta "
+                             << s.delta;
+      }
+    }
+    std::printf("  vector field vs dyn4_plant at every slip, %s: worst |dx/dt - pH| = %.2e of "
+                "its scale\n",
+                label, worst);
+  };
+  diff::flat_ground slick;
+  slick.mu = 0.6f;
+  gate(p, slick, "flat, mu 0.6");
+  gate(p, golden_ground(), "split and bump");
+  gate(pg, golden_ground(), "split and bump, grade force");
+}
+
+namespace {
+
+// One run's books: per-step mean |residual|, the sums, and the steps with a tire past its peak.
+struct run_books4 {
+  double mean_abs_residual = 0.0, residual = 0.0, flow = 0.0, dH = 0.0, limiter = 0.0;
+  double limiter_abs = 0.0, dissipated = 0.0, supplied = 0.0, lever = 0.0, ground = 0.0;
+  double grade = 0.0, exchange_abs = 0.0; // the grade line, and sum |ground + grade| per step
+  int steps = 0, past = 0;
+};
+
+// dyn4_plant_books along a trajectory: `swerve` weaves at 0.2 Hz from nearly full lock to full
+// lock (the steering slews at 0.35 rad/s), the tires sliding well past their peak, with the
+// throttle working; otherwise the Humvee brakes hard to a stop in a turn, so the speed clamp and
+// the low-speed blend act.
+template <class G>
+run_books4 book_run4(const dyn4_params &p, const G &ground, double hdt, bool swerve,
+                     double seconds) {
+  bike_veh lim = limits(p.lf + p.lr);
+  lim.hdt = static_cast<float>(hdt);
+  dyn4_state<double> s = rolling(swerve ? 15.0 : 9.0);
+  const int n = static_cast<int>(std::lround(seconds / hdt));
+  run_books4 rb;
+  rb.steps = n;
+  const double h0 = diff::dyn4_ph_hamiltonian(p, lim, ground, s);
+  for (int t = 0; t < n; ++t) {
+    const double time = t * hdt;
+    const double dcmd = swerve ? 0.5 * std::tanh(3.0 * std::sin(kTwoPi * 0.2 * time)) : 0.35;
+    const double acmd = swerve ? 1.5 * std::sin(kTwoPi * time / 3.0) : -6.0;
+    dyn4_state<double> o;
+    diff::dyn4_ph_books<double> b;
+    diff::dyn4_plant_books<double>(p, lim, ground, s, dcmd, acmd, o, b);
+    rb.mean_abs_residual += std::fabs(b.residual);
+    rb.residual += b.residual;
+    rb.limiter += b.limiter;
+    rb.limiter_abs += std::fabs(b.limiter);
+    rb.dissipated += b.dissipated;
+    rb.supplied += b.supplied;
+    rb.lever += b.lever;
+    rb.ground += b.ground;
+    rb.grade += b.grade;
+    rb.exchange_abs += std::fabs(b.ground + b.grade);
+    rb.flow += std::fabs(b.dissipated) + std::fabs(b.supplied) + std::fabs(b.lever) +
+               std::fabs(b.grade) + std::fabs(b.ground) + std::fabs(b.limiter);
+    diff::dyn4_ph_parts<double> q;
+    diff::dyn4_ph_parts_at(p, lim, ground, o, q);
+    rb.past += tires_past_peak(p, q) > 0;
+    s = o;
+  }
+  rb.mean_abs_residual /= n;
+  rb.dH = diff::dyn4_ph_hamiltonian(p, lim, ground, s) - h0;
+  return rb;
+}
+
+} // namespace
+
+// The gate: every step's books close but for the integrator's error, which is second order per
+// step (so first order over a run), sliding or not, on flat ground and over hills, with the
+// limiters and the ground's new heights charged when they act. The actuators lag as they do in
+// training; u is their output.
+TEST(Dyn4PH, StepBooksCloseToSecondOrder) {
+  const dyn4_params p = humvee4();
+  diff::flat_ground slick;
+  slick.mu = 0.6f;
+  const rolling_ground hills;
+  const auto swerves = [&](const auto &ground, const char *label) {
+    // Per step, the residual falls by about 4 per halving of hdt.
+    double prev = 0.0;
+    for (const double hdt : {0.02, 0.01, 0.005, 0.0025}) {
+      const run_books4 rb = book_run4(p, ground, hdt, true, 8.0);
+      std::printf("  %s, swerving, hdt %.4f s: dH %.4g J, supplied %.4g, dissipated %.4g, lever "
+                  "%.4g, ground %.4g; mean |residual| per step %.3e J, |sum| / flow %.2e; %d of "
+                  "%d steps past the peak\n",
+                  label, hdt, rb.dH, rb.supplied, rb.dissipated, rb.lever, rb.ground,
+                  rb.mean_abs_residual, std::fabs(rb.residual) / rb.flow, rb.past, rb.steps);
+      EXPECT_GT(rb.past, rb.steps / 5) << label << ": the swerve does not slide";
+      if (prev > 0.0) {
+        const double ratio = prev / rb.mean_abs_residual;
+        EXPECT_GT(ratio, 3.0) << label << ", hdt " << hdt;
+        EXPECT_LT(ratio, 5.0) << label << ", hdt " << hdt;
+      }
+      prev = rb.mean_abs_residual;
+      if (hdt <= 0.01)
+        EXPECT_LT(std::fabs(rb.residual) / rb.flow, 5e-3) << label << ", hdt " << hdt;
+    }
+  };
+  swerves(slick, "flat, mu 0.6");
+  swerves(hills, "hills, mu 0.6");
+  // On flat ground the ground adds nothing; over hills it does.
+  EXPECT_EQ(book_run4(p, slick, 0.01, true, 8.0).ground, 0.0);
+  EXPECT_NE(book_run4(p, hills, 0.01, true, 8.0).ground, 0.0);
+  // Braking to a stop in a turn: the books charge the limiters what they change. The low-speed
+  // blend adds yaw on the way down (the kinematic bicycle turns harder than the sliding tires
+  // let it) and the clamp at zero speed takes what the brakes would push past it, so their sum's
+  // sign depends on how long the vehicle stands; the rest closes as before.
+  for (const double hdt : {0.01, 0.005}) {
+    const run_books4 rb = book_run4(p, slick, hdt, false, 3.0);
+    std::printf("  braking to a stop, hdt %.4f s: dH %.4g J, limiters %.4g J (|.| %.4g J), |sum "
+                "residual| / flow %.2e\n",
+                hdt, rb.dH, rb.limiter, rb.limiter_abs, std::fabs(rb.residual) / rb.flow);
+    EXPECT_GT(rb.limiter_abs, 100.0) << "the limiters did not act";
+    EXPECT_LT(std::fabs(rb.residual) / rb.flow, 5e-3) << "hdt " << hdt;
+  }
+  // The lever is the centre of gravity's height: on the ground it is gone, and the books close
+  // without it.
+  dyn4_params low = p;
+  low.h = 0.0f;
+  const run_books4 rb = book_run4(low, slick, 0.005, true, 8.0);
+  std::printf("  centre of gravity on the ground, hdt 0.0050 s: lever %.4g J, |sum residual| / "
+              "flow %.2e\n",
+              rb.lever, std::fabs(rb.residual) / rb.flow);
+  EXPECT_EQ(rb.lever, 0.0);
+  EXPECT_LT(std::fabs(rb.residual) / rb.flow, 5e-3);
+}
+
+// With grade_force, gravity along the ground is minus the gradient of H's springs in the pose,
+// through the ground under the wheels, as a force and yaw moment at the centre of gravity:
+// dyn4_ph_grade against H's central differences in (x, y, psi), on golden_ground's bump and on
+// rolling hills. Without it f_grade is zero.
+TEST(Dyn4PH, TheGradeForceIsMinusTheSpringsGradientInThePose) {
+  dyn4_params p = humvee4();
+  p.grade_force = 1;
+  const bike_veh v = limits(p.lf + p.lr);
+  const double mg = p.m * p.g, L = p.lf + p.lr;
+  const auto gate = [&](const auto &ground, const char *label) {
+    std::mt19937 rng(9);
+    double worst = 0.0, biggest = 0.0;
+    for (int k = 0; k < 300; ++k) {
+      const dyn4_state<double> s = sliding4(rng);
+      double f[9], dH[3];
+      diff::dyn4_ph_grade(p, v, ground, s, f);
+      for (int a = 0; a < 3; ++a) {
+        const double d = 1e-6;
+        dyn4_state<double> sp = s, sm = s;
+        sp[a] += d;
+        sm[a] -= d;
+        dH[a] = (diff::dyn4_ph_hamiltonian(p, v, ground, sp) -
+                 diff::dyn4_ph_hamiltonian(p, v, ground, sm)) /
+                (2.0 * d);
+      }
+      // From the rear axle's (x, y) and psi to the force and moment at the centre of gravity.
+      const double c = std::cos(s.psi), sn = std::sin(s.psi);
+      const double want[3] = {-(c * dH[0] + sn * dH[1]), -(c * dH[1] - sn * dH[0]),
+                              -dH[2] + p.lr * (c * dH[1] - sn * dH[0])};
+      const double scale[3] = {mg, mg, mg * L};
+      for (int a = 0; a < 3; ++a) {
+        worst = std::max(worst, std::fabs(f[3 + a] - want[a]) / scale[a]);
+        biggest = std::max(biggest, std::fabs(want[a]) / scale[a]);
+        EXPECT_NEAR(f[3 + a], want[a], 1e-5 * scale[a]) << label << ", component " << a;
+      }
+      for (const int a : {0, 1, 2, 6, 7, 8})
+        EXPECT_EQ(f[a], 0.0);
+    }
+    std::printf("  %s: the grade force is within %.1e m g of -dH/dpose (largest %.3f m g)\n", label,
+                worst, biggest);
+    EXPECT_GT(biggest, 0.01) << label << ": the ground is too flat to test";
+  };
+  gate(golden_ground(), "split and bump");
+  gate(rolling_ground(), "hills");
+  dyn4_params off = p;
+  off.grade_force = 0;
+  double f[9];
+  diff::dyn4_ph_grade(off, v, rolling_ground(), rolling(10.0), f);
+  for (const double x : f)
+    EXPECT_EQ(x, 0.0);
+}
+
+// The difference the grade force makes. Without it the terrain only lifts the springs: the books'
+// ground line is energy from outside, and a vehicle coasting up a ramp keeps its speed while H
+// rises. With it gravity along the ground pulls the body and the grade line cancels the ground
+// line but for the step's error (second order per step): the terrain's energy is in H, and the
+// coast slows at g times the slope. The books close either way.
+TEST(Dyn4PH, TheGradeForcePutsTheTerrainInH) {
+  const dyn4_params off = humvee4();
+  dyn4_params on = off;
+  on.grade_force = 1;
+  const rolling_ground hills;
+  double prev = 0.0;
+  for (const double hdt : {0.02, 0.01, 0.005, 0.0025}) {
+    const run_books4 a = book_run4(off, hills, hdt, true, 8.0);
+    const run_books4 b = book_run4(on, hills, hdt, true, 8.0);
+    const double exchange = b.exchange_abs / b.steps;
+    std::printf("  hills, swerving, hdt %.4f s: without the grade force ground %.4g J, grade %.4g; "
+                "with it ground %.4g J, grade %.4g, mean |ground + grade| per step %.3e J; |sum "
+                "residual| / flow %.2e, %.2e\n",
+                hdt, a.ground, a.grade, b.ground, b.grade, exchange, std::fabs(a.residual) / a.flow,
+                std::fabs(b.residual) / b.flow);
+    EXPECT_EQ(a.grade, 0.0);
+    EXPECT_GT(b.past, b.steps / 5) << "hdt " << hdt << ": the swerve does not slide";
+    if (prev > 0.0) {
+      const double ratio = prev / exchange;
+      EXPECT_GT(ratio, 3.0) << "hdt " << hdt;
+      EXPECT_LT(ratio, 5.0) << "hdt " << hdt;
+    }
+    prev = exchange;
+    if (hdt <= 0.01) {
+      EXPECT_LT(std::fabs(b.ground + b.grade), 0.05 * std::fabs(b.ground)) << "hdt " << hdt;
+      EXPECT_LT(std::fabs(b.residual) / b.flow, 5e-3) << "hdt " << hdt;
+    }
+  }
+  // Coasting straight up a 5% ramp from 10 m/s for 2 s, settled on it, without drag, rolling
+  // resistance or the dampers (nearly: 0 means critical). The plant's dampers act on the body's own
+  // vertical rate, not on its rate relative to the ground, so a steady climb would pay them too
+  // (c zd^2 a corner; over the hills above they act). The step holds the ground at its start, so
+  // the springs trail the ramp by about half a step's climb: an error first order in hdt.
+  const ramp_ground ramp;
+  const double slope = ramp.s, seconds = 2.0;
+  const auto coast = [&](dyn4_params p, double hdt, run_books4 &books, double &climb) {
+    p.drag = p.c_rr = 0.0f;
+    p.c_f = p.c_r = 1e-3f;
+    bike_veh lim = limits(p.lf + p.lr);
+    lim.hdt = static_cast<float>(hdt);
+    dyn4_state<double> s = rolling(10.0);
+    s.z = slope * p.lr; // the rear axle at x = 0: the body on the ramp, its springs at rest
+    s.zd = slope * s.vx;
+    s.th = -slope;
+    const double h0 = diff::dyn4_ph_hamiltonian(p, lim, ramp, s), x0 = s.x;
+    for (int t = 0; t < static_cast<int>(std::lround(seconds / hdt)); ++t) {
+      dyn4_state<double> o;
+      diff::dyn4_ph_books<double> b;
+      diff::dyn4_plant_books<double>(p, lim, ramp, s, 0.0, 0.0, o, b);
+      books.residual += b.residual;
+      books.ground += b.ground;
+      books.grade += b.grade;
+      s = o;
+    }
+    books.dH = diff::dyn4_ph_hamiltonian(p, lim, ramp, s) - h0;
+    climb = slope * (s.x - x0);
+    return s.vx;
+  };
+  const double mg = off.m * off.g, want = off.g * slope * seconds;
+  double prev_err = 0.0;
+  for (const double hdt : {0.01, 0.0025}) {
+    run_books4 ra, rb;
+    double climb_a = 0.0, climb_b = 0.0;
+    const double v_off = coast(off, hdt, ra, climb_a), v_on = coast(on, hdt, rb, climb_b);
+    std::printf("  coasting up a 5%% ramp for 2 s from 10 m/s, hdt %.4f s: without the grade force "
+                "%.4f m/s, dH %.4g J (ground %.4g, m g climb %.4g); with it %.4f m/s (lost %.4f, "
+                "g s t %.4f), dH %.4g J (ground %.4g, grade %.4g)\n",
+                hdt, v_off, ra.dH, ra.ground, mg * climb_a, v_on, v_off - v_on, want, rb.dH,
+                rb.ground, rb.grade);
+    // Without it the climb is free: the speed holds and H gains m g times the climb, all from the
+    // ground line. With it the climb is paid from the speed, and H holds.
+    EXPECT_NEAR(v_off, 10.0, 1e-6);
+    EXPECT_LT(std::fabs(rb.ground + rb.grade), 0.01 * rb.ground) << "hdt " << hdt;
+    const double err = std::max(
+        {std::fabs(ra.dH / (mg * climb_a) - 1.0), std::fabs(ra.ground / (mg * climb_a) - 1.0),
+         std::fabs((v_off - v_on) / want - 1.0), std::fabs(rb.dH / (mg * climb_b))});
+    if (prev_err > 0.0) {
+      EXPECT_LT(err, 0.01) << "hdt " << hdt;
+      EXPECT_LT(err, prev_err / 2.0) << "the step's error does not shrink with it";
+    }
+    prev_err = err;
+  }
+}
+
 // ── The external-force port on the four-wheel plant (ext_in, dyn4_rollout_ext) ─────────────────
 
 namespace {

@@ -108,6 +108,8 @@ template <class F> void node_edges(node_kind k, const void *p, F &f) {
     env_edge(c.env_snapshot, f);
     for (const value_t &v : c.body)
       value_edges(v, f);
+    if (c.body_expr) // the (begin ...) of a body of several forms, if made
+      f(node_kind::list, c.body_expr);
     break;
   }
   case node_kind::list:
@@ -446,6 +448,7 @@ void clear_garbage(node_kind k, void *p) {
     auto &c = *static_cast<closure *>(p);
     c.env_snapshot.reset();
     c.body.clear();
+    c.body_expr.reset();
     break;
   }
   case node_kind::list:

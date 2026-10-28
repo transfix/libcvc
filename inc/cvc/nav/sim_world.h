@@ -267,7 +267,8 @@ public:
   // out-param stays null — the same null-off house pattern ext_force/material use), because
   // capturing costs a per-agent write. Turn it on with set_capture_drive_telemetry(true) BEFORE the
   // step()s you want to read; the pointer is valid until the next step()/reconfigure. Returns
-  // [size()] (the last captured tick) or nullptr when capture is off or no captured step() has run.
+  // [size()] (the last captured tick; drive_telemetry's defaults from turning capture on until the
+  // first captured step()) or nullptr when capture is off.
   // A stats consumer maps each entry to the reducible nav_stats drive_sample POD (see nav_stats.h)
   // to feed nav_samplers::drive.
   void set_capture_drive_telemetry(bool on);
@@ -570,7 +571,8 @@ public:
   void set_terrain(const float *height_m, const terrain_config &tc);
   // A new config for the terrain set last (no-op without one): rebuilds its planes from the same
   // heights and keeps the entry counts. Cells it newly makes infeasible join the occupancy at
-  // once; cells it frees leave it at the next recomposite (a frozen map keeps them).
+  // once, and cells it frees (block_infeasible off, or a looser limit) leave it at once, a frozen
+  // map's too.
   void set_terrain_config(const terrain_config &tc);
   void clear_terrain();
   bool has_terrain() const { return terrain_on_; }
@@ -690,6 +692,16 @@ private:
   // null (byte-identical); on => tel_ is sized [n] and filled each step().
   bool capture_tel_ = false;
   std::vector<drive_telemetry> tel_;
+  // The telemetry's context work (drive_telemetry::context_work): tel_ holds a captured tick's
+  // coefficients, and the U at each agent's pose with them, evaluated as the next step() begins.
+  bool tel_prev_ = false;
+  std::vector<float> tel_ctx_u_;
+  // The vehicle the drive reads this tick: cfg_.veh, or a copy with the terrain and the plant arm,
+  // pointing into vplant's and pdrive's storage.
+  const veh_params &drive_vehicle(veh_params &vplant, plant_drive &pdrive);
+  // U_nav at agent i's pose now with the coefficients and carrot in tel_ / carrot_.
+  float tel_potential(const field_stack &f, const veh_params &v, const material_stack *ms,
+                      int i) const;
 
   // Opt-in base nav_stats collector + its per-tick scratch (members = no per-step
   // allocation). null stats_ = disarmed. See begin_nav_stats / the fold in step().
@@ -773,6 +785,9 @@ private:
   material_stack material_view() const;
   void rebuild_all_fields(); // build every plane's SDF from its occ
   void rebuild_plane(int m); // build plane m's SDF from occ_ plane m
+  // Composite every plane's occupancy from its log-odds now (and the infeasible cells, when they
+  // block), rebuilding each plane that changed: set_terrain_config's, so freed cells leave.
+  void recomposite_occupancy();
 };
 
 } // namespace nav

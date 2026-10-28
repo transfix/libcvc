@@ -217,7 +217,34 @@ struct closure {
   bool variadic = false; // &rest parameter
   std::vector<value_t> body;
   environment_ptr env_snapshot;
+  /// `body` as one expression when it has several forms, the list (begin body...), so that each
+  /// call needn't build it again: made when the stackless evaluator makes the closure, and shared
+  /// by the closures one lambda form makes. Only a cache: null when nobody made it (a one-form
+  /// body, a closure built elsewhere), and ignored once it no longer matches `body`. Not
+  /// serialized, printed or compared.
+  list_ptr body_expr;
 };
+
+namespace detail {
+/// A serial for a new scope. The scopes made on every thread draw from one count (a thread takes
+/// a run of serials at a time), so no other scope has it until 2^32 more have been made.
+std::uint32_t new_scope_serial() noexcept;
+
+/// Which scope an environment is, to the evaluators' call records (eval_frame), which can't go by
+/// its address alone: a scope made where a dropped one was (environment::extend() hands out the
+/// block the last dropped scope left) has the same address. A scope gets a new serial when it is
+/// made, copied or assigned, and when extend() makes it in a dropped scope's block.
+struct scope_serial {
+  std::uint32_t value = new_scope_serial();
+
+  scope_serial() = default;
+  scope_serial(const scope_serial &) noexcept : value(new_scope_serial()) {}
+  scope_serial &operator=(const scope_serial &) noexcept {
+    value = new_scope_serial();
+    return *this;
+  }
+};
+} // namespace detail
 
 /// Lexically-scoped environment chain.
 struct environment {
@@ -227,6 +254,10 @@ struct environment {
   /// default environment links to). set() refuses it, and set_existing() never writes into it: a
   /// name bound there is shadowed in the outermost unfrozen scope instead.
   bool frozen = false;
+  /// Which scope this is (detail::scope_serial), for the evaluators: not part of what the scope
+  /// means, so not serialized or compared. (It fits in the padding after `frozen`: a scope is no
+  /// larger for it.)
+  detail::scope_serial serial;
 
   /// Drops `outer` through detail::drop_owner, so a long scope chain is not freed recursively.
   ~environment();
@@ -330,6 +361,8 @@ public:
   explicit time_budget(double seconds);
 
   void start();
+  /// start() at `now`, a steady_clock reading the caller already has.
+  void start(clock::time_point now);
   /// End the interval. Since its last check (spent(), or start()) it took `checks` steps,
   /// whose gaps the budget did not see: they count as that many gaps.
   void stop(std::uint64_t checks = 1);
@@ -339,6 +372,11 @@ public:
   /// Seconds left as of the last stop(): the first half's unspent steady-clock time plus the
   /// second half, then the second half's unspent CPU time; 0 once spent.
   double remaining() const;
+  /// Between intervals (after stop()): charge `seconds` its owner spent waiting for work, with
+  /// nothing to run, as time it ran: on the steady clock in the first half, the rest as CPU time
+  /// in the second. An owner that would otherwise have polled through the wait (a scheduler
+  /// run whose processes all sleep) spends its budget as the polling would have.
+  void charge_wait(double seconds);
 
 private:
   void gap(clock::time_point now, std::uint64_t gaps = 1); // the second half: a check at `now`
@@ -370,6 +408,9 @@ private:
 class eval_deadline_guard {
 public:
   explicit eval_deadline_guard(std::optional<double> seconds);
+  /// The same, armed from `now`, a steady_clock reading the caller already has (a scheduler's
+  /// step start).
+  eval_deadline_guard(std::optional<double> seconds, std::chrono::steady_clock::time_point now);
   ~eval_deadline_guard();
   eval_deadline_guard(const eval_deadline_guard &) = delete;
   eval_deadline_guard &operator=(const eval_deadline_guard &) = delete;

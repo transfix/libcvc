@@ -5,13 +5,18 @@
 #     decimate, repair, reset, and colour by curvature or geodesic distance;
 #   - `domain` (type: fe_lab): the signed distance field of the same bunny, tet-meshed with the LBIE
 #     mesher and solved as a Poisson or heat problem from the fe_controls component; the field shows
-#     on the boundary (translucent while a slice is on) and on a movable cut.
+#     on the boundary (translucent while a slice is on) and on a movable cut. It starts as an
+#     INTERVAL mesh -- the bunny's skin, the shell between two isovalues of the SDF -- whose bounds
+#     are the two isocontour bars of the transfer_function editor bound to the node: drag either
+#     bar and the shell re-meshes (and re-solves) once the drag settles; the editor shades the
+#     meshed band between them. Mesh region: Solid in fe_controls meshes the whole bunny again.
 # Every control is a reusable component bound to the nodes' own state keys: no host C++. Both node
 # types exist only in a libcvc built with CVC_ENABLE_LIBIGL, so `customs:` makes a build without it
 # refuse the document up front instead of showing an empty scene.
 #
 # Run from the repository root:
 #   ariadne_hello examples/ariadne/documents/mesh_lab.ari --component-path src/cvc/ariadne
+#   arigl run --component-path src/cvc/ariadne examples/ariadne/documents/mesh_lab.ari
 
 meta:
   name: Mesh lab (Ariadne + libigl)
@@ -29,6 +34,7 @@ import:
   - cvc://components/camera_controls.ari
   - cvc://components/mesh_tools.ari
   - cvc://components/fe_controls.ari
+  - cvc://components/transfer_function.ari
 
 menubar:
   - menu: File
@@ -38,9 +44,23 @@ menubar:
 
 windows:
   - include: mesh_tools
+    pos: [16, 32]
+    size: [340, 330]
   - include: fe_controls
+    pos: [16, 372]
+    size: [360, 520]
+  # The FE domain's transfer function: its two isocontour bars are the interval's bounds (the
+  # editor shades the meshed band between them).
+  - include: transfer_function
+    args: { node: domain, title: FE mesh bounds, id: domain_tf }
+    pos: [960, 32]
+    size: [420, 300]
   - include: stage_lighting
+    pos: [960, 600]
+    size: [420, 160]
   - include: camera_controls
+    pos: [960, 770]
+    size: [420, 120]
 
 scene:
   chrome: false
@@ -57,12 +77,15 @@ scene:
       color_mode: mean
       colormap: viridis
     # The FE domain: a coarse SDF of the bunny beside it, meshed and solved as soon as it loads.
+    # interval: [a, b] is shorthand for mesh.region interval, isovalue a, isovalue2 b -- here the
+    # skin from the surface (0) to 10 units inside it (the SDF is in the fitted units).
     - node: domain
       type: fe_lab
       source: { sdf: { mesh: stanford.bunny, dim: 32 } }
       fit: { height: 100, up: y }
       transform: { position: [130, 0, 0] }
       material: { color: [0.75, 0.78, 0.85], ambient: 0.25, diffuse: 0.85 }
+      interval: [0, -10]
       problem: poisson
       auto_mesh: true
       auto_solve: true

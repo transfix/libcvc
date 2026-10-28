@@ -44,6 +44,24 @@ int main() {
   ari::FtxuiBackend backend;
   rt.set_backend(&backend);
 
+  // One drain pumps the scheduler for a bounded slice (0.1 s, its second half on this thread's CPU
+  // clock), and a tick program that needs more goes on in the next frame's drain. In a Debug,
+  // coverage-instrumented build on a busy runner the programs below can need more than one slice
+  // (package-linux debug lanes failed "the deep-graph program ran" on all 3 attempts of a run), so
+  // drain frames until the program has set its key, for 10 s at most.
+  const auto drain_until_set = [&](const char *key) {
+    cvc::state &root = cvc::state::instance(app);
+    const auto t0 = std::chrono::steady_clock::now();
+    int frames = 0;
+    do {
+      rt.drain();
+      ++frames;
+    } while (root(key).value() != "1" &&
+             std::chrono::steady_clock::now() - t0 < std::chrono::seconds(10));
+    if (frames > 1)
+      std::printf("%s after %d drains\n", key, frames);
+  };
+
   // Open an AUDIO stream (codec "f32", 48 kHz mono, 256-frame chunks) and attach a hardware-free
   // graph: a MIX of a 440 Hz and a 660 Hz tone. The capture SPEC's rate/ch/frames match the open.
   // 256-frame chunks at 48 kHz -> ~187 chunks/s, so frames arrive within a few ms.
@@ -57,7 +75,7 @@ int main() {
                       "            \"mix\" (list (dict \"tone\" (dict \"hz\" 440))"
                       "                          (dict \"tone\" (dict \"hz\" 660)))))"
                       "    (state-set \"cap.done\" \"1\")))");
-  rt.drain(); // runs once: audio stream opened + a mix producer thread started
+  drain_until_set("cap.done"); // runs once: audio stream opened + a mix producer thread started
 
   for (const std::string &w : rt.take_reactive_warnings())
     std::printf("warn: %s\n", w.c_str());
@@ -115,7 +133,7 @@ int main() {
       "    (state-set \"deep.ok\" (get-attr ok \"ok\"))"
       "    (state-set \"deep.error\" (get-attr no \"error\"))"
       "    (state-set \"deep.done\" \"1\")))");
-  rt.drain();
+  drain_until_set("deep.done");
   for (const std::string &w : rt.take_reactive_warnings())
     std::printf("warn: %s\n", w.c_str());
   cvc::state &root = cvc::state::instance(app);

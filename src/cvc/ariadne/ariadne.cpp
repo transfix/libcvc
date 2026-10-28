@@ -7,11 +7,14 @@
 // backend reports the edit committed — so a slider drag costs one state write on
 // release, not one per frame (writes fan out to observers / replicated peers).
 
+#include "tf_editor_emit.h" // Kind::TfEditor (model / overlay / view state edges)
+
 #include <algorithm>
 #include <atomic>
 #include <charconv>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/backend.h>
 #include <cvc/ariadne/bind.h>
@@ -303,19 +306,45 @@ void clear_action_intrinsics() {
 }
 
 namespace {
+// The unsigned integer the tree setting `key` holds; `fallback` when it's missing or unparsable.
+uint64_t limit_setting(cvc::state &root, const char *key, uint64_t fallback) {
+  cvc::state *node = root.findDescendant(key);
+  if (!node)
+    return fallback;
+  const std::string v = node->value();
+  uint64_t n = 0;
+  const auto [end, ec] = std::from_chars(v.data(), v.data() + v.size(), n);
+  return !v.empty() && ec == std::errc() && end == v.data() + v.size() ? n : fallback;
+}
+
 // §7.4 an action's memory budget: the tree setting ariadne.limits.action_max_memory (bytes;
 // 0 = no limit), read on every submission so a host can tune it live. It also bounds each
 // native call's allocations in the action (state_exec's per-step allocation limit takes what
 // is left of max_memory). A missing or unparsable value keeps the 4 MiB default.
 uint64_t action_max_memory(cvc::state &root) {
-  constexpr uint64_t kDefault = uint64_t{4} << 20;
-  cvc::state *node = root.findDescendant("ariadne.limits.action_max_memory");
+  return limit_setting(root, "ariadne.limits.action_max_memory", uint64_t{4} << 20);
+}
+
+// §7.4 an action's step and time caps: the tree settings ariadne.limits.action_max_steps (default
+// 5000) and ariadne.limits.action_max_time (seconds, default 0.1), read on every submission like
+// the memory budget; 0 = no limit. The action's async calls are charged to both
+// (docs/STATE_EXEC_EXCEPTIONS.md 3.8), so a host whose documents call long-running async verbs
+// raises them. They are app-wide, outside any document's prefix, so a document can't raise its
+// own. A missing or unparsable value keeps the default.
+uint64_t action_max_steps(cvc::state &root) {
+  return limit_setting(root, "ariadne.limits.action_max_steps", 5000);
+}
+
+double action_max_time(cvc::state &root) {
+  constexpr double kDefault = 0.1;
+  cvc::state *node = root.findDescendant("ariadne.limits.action_max_time");
   if (!node)
     return kDefault;
   const std::string v = node->value();
-  uint64_t bytes = 0;
-  const auto [end, ec] = std::from_chars(v.data(), v.data() + v.size(), bytes);
-  return !v.empty() && ec == std::errc() && end == v.data() + v.size() ? bytes : kDefault;
+  char *end = nullptr;
+  const double seconds = v.empty() ? -1.0 : std::strtod(v.c_str(), &end);
+  return end == v.c_str() + v.size() && std::isfinite(seconds) && seconds >= 0.0 ? seconds
+                                                                                 : kDefault;
 }
 } // namespace
 
@@ -735,6 +764,47 @@ private:
   std::unique_ptr<se::stackless_evaluator> ev_;
   std::unordered_map<std::string, std::optional<se::value_t>> compiled_;
 };
+
+// The app's exec scheduler if something has built it, else nullptr; never builds it. app::
+// exec_scheduler() builds it on first call and cvc::app has no accessor that does not, so this
+// reads the same handle under the same mutex, through pointers to its protected members that a
+// class derived from cvc::app may form ([class.protected]). Once built, the scheduler lives as long
+// as its app, so a Runtime may keep the pointer.
+struct exec_scheduler_probe : cvc::app {
+  static cvc::state_exec::async_scheduler *built(cvc::app &a) {
+    boost::mutex::scoped_lock lock(a.*(&exec_scheduler_probe::_execSchedulerMutex));
+    return (a.*(&exec_scheduler_probe::_execScheduler)).get();
+  }
+};
+
+// The frame boundaries an app's Runtimes share. Each Runtime pumps the one app scheduler in its own
+// drain(), so with N Runtimes an app frame holds N pumps, and only one of them may re-ready the
+// (await …) frame-yielders, or an await would cross a 1/N of a frame. A pump starts the next frame
+// exactly when its own Runtime has pumped since the last boundary: every Runtime drains once a
+// frame, so its second pump since a boundary belongs to the next frame. There is no leader, so a
+// Runtime that stops drawing holds nothing up, and a lone Runtime starts a frame at every pump.
+// Kept in the app's data map (like the app's other per-app registries), so it dies with the app.
+struct exec_pump_clock {
+  std::mutex mutex;
+  std::uint64_t frames = 0; // boundaries started so far
+};
+
+std::shared_ptr<exec_pump_clock> pump_clock_of(cvc::app &app) {
+  static const char kKey[] = "__ariadne_exec_pump_clock";
+  const cvc::mutex_ptr guard = app.mutex(kKey); // check-then-create, as for the app's state root
+  boost::mutex::scoped_lock lock(*guard);
+  std::shared_ptr<exec_pump_clock> clock;
+  try {
+    clock = app.data<std::shared_ptr<exec_pump_clock>>(kKey);
+  } catch (const std::exception &) {
+    // not yet present
+  }
+  if (!clock) {
+    clock = std::make_shared<exec_pump_clock>();
+    app.data(kKey, clock);
+  }
+  return clock;
+}
 } // namespace
 
 struct Runtime::Impl {
@@ -821,6 +891,9 @@ struct Runtime::Impl {
   // bridges those skips so the list stays stable; a genuine count change is picked up on the next
   // unskipped frame.
   std::unordered_map<std::string, int> last_good_count;
+  // Kind::TfEditor parse caches, one per editor instance ("<model path>#<id>"): a state string is
+  // re-parsed only when it changes.
+  std::unordered_map<std::string, TfEditorCache> tf_caches;
 
   // §4.7 action lane: a unique owner tag for this Runtime's processes on the app-wide
   // scheduler (app.exec_scheduler()), so teardown reaps exactly this document's process
@@ -848,9 +921,17 @@ struct Runtime::Impl {
   // Submit a program `on:` as a process on the app-wide scheduler (owner-tagged, chrooted
   // to `prefix`), keeping its ActionContext alive in live_actions_. Returns immediately.
   void submit_action(const QueuedAction &action);
-  // Pump the app scheduler a bounded slice, then sweep finished actions out of
-  // live_actions_ (reporting a killed one; a still-parked one persists to a later frame).
-  void pump_and_sweep_actions();
+  // The scheduler drain() pumps, or nullptr to skip the pump: the app's, when this Runtime has
+  // submitted to it or any process is live on it (whoever submitted it). Never builds it.
+  cvc::state_exec::async_scheduler *scheduler_to_pump();
+  cvc::state_exec::async_scheduler *seen_scheduler_ = nullptr; // the app's, once something built it
+  // Whether this pump starts the next app frame (exec_pump_clock), advancing the shared clock.
+  bool starts_frame();
+  std::shared_ptr<exec_pump_clock> pump_clock_; // shared by the app's Runtimes; got at first pump
+  std::uint64_t pumped_at_ = 0; // the clock's frame count at this Runtime's last pump
+  // Pump `sched` a bounded slice, then sweep finished actions out of live_actions_ (reporting a
+  // killed one; a still-parked one persists to a later frame).
+  void pump_and_sweep_actions(cvc::state_exec::async_scheduler &sched);
 
   // §7.1 resident on:tick handler. tick_script_ is the author's per-frame body (empty = none).
   // ensure_tick_resident() submits ONE long-lived process (idempotent) that loops
@@ -880,6 +961,26 @@ struct Runtime::Impl {
   // Deliver one input event: serialize it to a dict and post_message it (NO coalesce — a burst in
   // one frame must all arrive) onto the key channel (keyboard) or pointer channel (mouse).
   void deliver_input(const InputEvent &ev);
+
+  // set_key_bindings. post_input (any thread) queues key downs; drain() (the host thread) rebinds
+  // or runs them, so a key's action is queued like a button's.
+  std::vector<KeyBinding> key_bindings_;
+  std::atomic<bool> have_key_bindings_{false};
+  std::mutex pressed_mutex_;
+  std::vector<std::string> pressed_keys_;
+  // The Keys window waits for a key: a Change button named a binding, and the window is open (a
+  // capture left over in a closed window is cleared by the next drain).
+  bool key_capture_pending() const {
+    return !read_or<std::string>(app, resolve_bind(prefix, kKeyCapture), "").empty() &&
+           read_bool_or(app, resolve_bind(prefix, kKeysWindowOpen), 0) != 0;
+  }
+  void run_key_bindings();
+
+  // forget_layout(): applied at the next render. Each window's and grid's first frame after it
+  // (by its tree.<id>.geometry / .tracks / .columns path) seeds only what the document authored.
+  bool forget_layout_pending = false;
+  bool windows_forgotten = false;
+  std::set<std::string> laid_out;
 
   // §12: the active mount scope during emit. Empty stack = the document prefix; each entry is
   // a composed sub-prefix pushed when the walk enters a mounted subtree (Widget::scope) and
@@ -960,14 +1061,19 @@ struct Runtime::Impl {
     bool placed = false; // the document's menubar places it itself (a windows_menu entry)
     bool has_menubar = false;
     bool any_closable = false;
+    // The menubar already has a menu of this title (fem_gallery.ari's own "Windows"): the items go
+    // at the end of that one, after a separator, rather than in a second menu of the same name.
+    bool merged = false;
     // The windows no menu item of the document already toggles: title, resolved open-state path.
     std::vector<std::pair<std::string, std::string>> items;
   };
   WindowsMenuPlan windows_menu;
   int menubar_depth = 0;           // > 0 while a menubar's items are being drawn
+  int menu_depth = 0;              // > 0 while a menu's items are being drawn
   bool windows_menu_drawn = false; // this frame
   void plan_windows_menu();
   void emit_windows_menu(const std::string &title);
+  void emit_windows_menu_items();
 
   // §4 read-lane: is `w` shown this frame? True when it has no visible_when; otherwise
   // the predicate's result (fail-safe HIDDEN on a broken predicate).
@@ -1153,15 +1259,21 @@ void Runtime::Impl::emit_container(const Widget &w) {
     const bool split = w.layout.is_row_split();
     const bool table = w.layout.resizable && !split;
     std::string tracks_path, columns_path;
+    // After forget_layout(), as for a window: the first frame takes no sizes the last document
+    // persisted.
+    const auto persisted = [&](const std::string &path) {
+      const bool fresh = windows_forgotten && laid_out.insert(path).second;
+      return fresh ? std::vector<float>{} : parse_tracks(read_string(app, path));
+    };
     if (split) {
       tracks_path = resolve("tree." + id + ".tracks");
-      const std::vector<float> seed = parse_tracks(read_string(app, tracks_path));
+      const std::vector<float> seed = persisted(tracks_path);
       if (!seed.empty())
         b.seed_grid_tracks(seed);
     }
     if (table) {
       columns_path = resolve("tree." + id + ".columns");
-      const std::vector<float> seed = parse_tracks(read_string(app, columns_path));
+      const std::vector<float> seed = persisted(columns_path);
       if (!seed.empty())
         b.seed_grid_columns(seed);
     }
@@ -1258,12 +1370,24 @@ void Runtime::Impl::emit_node(const Widget &w) {
       emit_windows_menu(w.label.empty() ? windows_menu.title : w.label);
     break;
 
-  case Kind::Menu:
+  case Kind::Menu: {
+    // §5.9: a menu straight in the bar with the Windows menu's title takes its items.
+    const bool merge = windows_menu.merged && menubar_depth > 0 && menu_depth == 0 &&
+                       w.label == windows_menu.title;
     if (b.begin_menu(label)) {
+      ++menu_depth;
       emit_children(w);
+      --menu_depth;
+      if (merge && windows_menu.on && !windows_menu.items.empty() && !windows_menu_drawn) {
+        b.separator();
+        emit_windows_menu_items();
+      }
       b.end_menu();
     }
+    if (merge)
+      windows_menu_drawn = true; // open or not, it stands for the Windows menu this frame
     break;
+  }
 
   case Kind::MenuItemToggle: {
     const std::string path = resolve(w.bind);
@@ -1298,7 +1422,9 @@ void Runtime::Impl::emit_node(const Widget &w) {
     // the authority next frame. The backend never touches cvc::state; it only seeds/reports.
     const std::string geo_path = resolve("tree." + id + ".geometry");
     WindowGeom seed;
-    bool have_seed = parse_geom(read_string(app, geo_path), seed);
+    // After forget_layout(), a window's first frame ignores what is persisted: the last document's.
+    const bool fresh = windows_forgotten && laid_out.insert(geo_path).second;
+    bool have_seed = !fresh && parse_geom(read_string(app, geo_path), seed);
     // §3.0.3b first placement: with no persisted geometry yet, seed the window's INITIAL position
     // from the authored `pos:` (ImGui otherwise stacks every new window at the same default spot,
     // so a declared pos would be dead). Seed as FirstUseEver — the user's drag then persists via
@@ -1308,6 +1434,7 @@ void Runtime::Impl::emit_node(const Widget &w) {
       seed.has_pos = true;
       seed.x = w.pos_x;
       seed.y = w.pos_y;
+      seed.authored = true;
       have_seed = true;
     }
     if (have_seed)
@@ -1354,7 +1481,13 @@ void Runtime::Impl::emit_node(const Widget &w) {
   }
 
   case Kind::Group:
+    // A group with an id scopes its children's identities, as a window does: two groups can each
+    // hold a "Change" button.
+    if (!w.id.empty())
+      b.push_id(w.id.c_str());
     emit_container(w); // §3.0.3b: a group honours w.layout (grid / vertical)
+    if (!w.id.empty())
+      b.pop_id();
     break;
 
   case Kind::Text:
@@ -1395,7 +1528,7 @@ void Runtime::Impl::emit_node(const Widget &w) {
     const std::string path = resolve(w.bind);
     const int cur = read_or_seed<int>(app, path, w.idef);
     const IntEdit e = b.slider_int(label, path.c_str(), cur, w.ilo, w.ihi);
-    if (e.committed)
+    if (e.committed || (e.changed && !w.commit_on_release)) // live while dragged, by default
       write<int>(app, path, e.value);
     break;
   }
@@ -1404,7 +1537,7 @@ void Runtime::Impl::emit_node(const Widget &w) {
     const std::string path = resolve(w.bind);
     const double cur = read_or_seed<double>(app, path, w.def);
     const DoubleEdit e = b.slider_double(label, path.c_str(), cur, w.lo, w.hi, w.fmt.c_str());
-    if (e.committed)
+    if (e.committed || (e.changed && !w.commit_on_release))
       write<double>(app, path, e.value);
     break;
   }
@@ -1505,6 +1638,17 @@ void Runtime::Impl::emit_node(const Widget &w) {
       enqueue(w.on);
     break;
 
+  case Kind::TfEditor: {
+    TfEditorContext ctx{app,
+                        b,
+                        [this](const std::string &bind) { return resolve(bind); },
+                        [this](const std::string &event) { enqueue(event); },
+                        [this](const std::string &msg) { warn_once(msg); },
+                        tf_caches};
+    emit_tf_editor(ctx, w);
+    break;
+  }
+
   case Kind::Custom: {
     // Three ways a custom widget renders, in priority order:
     //  1. a COMPOSITIONAL fn (register_widget_type) — composes built-ins through a
@@ -1601,6 +1745,12 @@ void Runtime::Impl::render() {
     planted_holes.clear();
     wired_mounts.clear();
   }
+  if (forget_layout_pending) { // a new document: its windows are laid out afresh
+    forget_layout_pending = false;
+    laid_out.clear();
+    windows_forgotten = true;
+    backend->reset_layout();
+  }
   if (reactive)
     reactive->begin_frame(); // §4: reset the per-frame reactive eval budget
   frame_instances = 0;       // §3: reset the per-frame repeat-expansion budget
@@ -1623,7 +1773,8 @@ void Runtime::Impl::render() {
 
 void Runtime::Impl::plan_windows_menu() {
   WindowsMenuPlan p;
-  std::set<std::string> toggled; // open-state paths a menu item of the document already toggles
+  std::set<std::string> toggled;   // open-state paths a menu item of the document already toggles
+  std::set<std::string> bar_menus; // the titles of the menus straight in a menubar
   std::vector<std::pair<std::string, std::string>> windows;
   // Walk the tree with the scope each node resolves its binds in (a load: mount scopes its
   // children, §12). A repeated widget is made per frame, so a repeated window is not listed.
@@ -1636,6 +1787,9 @@ void Runtime::Impl::plan_windows_menu() {
         case Kind::Menubar:
           p.has_menubar = true;
           in_menubar = true;
+          for (const Widget &c : w.children)
+            if (c.kind == Kind::Menu)
+              bar_menus.insert(c.label);
           break;
         case Kind::MenuItemToggle:
           if (!w.bind.empty() && !is_expr(w.bind))
@@ -1667,6 +1821,7 @@ void Runtime::Impl::plan_windows_menu() {
   for (auto &win : windows)
     if (!toggled.count(win.second))
       p.items.push_back(std::move(win));
+  p.merged = !p.placed && bar_menus.count(p.title) != 0;
   windows_menu = std::move(p);
 }
 
@@ -1677,13 +1832,18 @@ void Runtime::Impl::emit_windows_menu(const std::string &title) {
   Backend &b = *backend;
   if (!b.begin_menu(title.c_str()))
     return;
+  emit_windows_menu_items();
+  b.end_menu();
+}
+
+void Runtime::Impl::emit_windows_menu_items() {
+  Backend &b = *backend;
   for (const auto &item : windows_menu.items) {
     const bool cur = read_bool_or_seed(app, item.second, 1) != 0;
     const BoolEdit e = b.menu_item_toggle(item.first.c_str(), cur);
     if (e.committed)
       write<int>(app, item.second, e.value ? 1 : 0);
   }
-  b.end_menu();
 }
 
 // --------------------------------------------------------------------------
@@ -1709,12 +1869,11 @@ void Runtime::Impl::submit_action(const QueuedAction &action) {
   namespace se = cvc::state_exec;
   const std::string &action_prefix = action.prefix;
   const std::string &script = action.event;
-  // §7.4 per-activation caps (same as the old synchronous action lane): the STEP cap is the
-  // deterministic guard on an action's real work; time (a se::time_budget, which time the
-  // thread spends descheduled cannot use up) is a generous anti-hang backstop; memory the §7.4
-  // cap. Full env, writes chrooted to the action's mount prefix.
-  static constexpr uint64_t kActionMaxSteps = 5000;
-  static constexpr double kActionMaxSeconds = 0.1;
+  // §7.4 per-activation caps, tree settings read on every submission (action_max_steps,
+  // action_max_time, action_max_memory): the STEP cap is the deterministic guard on an action's
+  // real work, its async calls' included; time (a se::time_budget, which time the thread spends
+  // descheduled cannot use up) is a generous anti-hang backstop; memory the §7.4 cap. Full env,
+  // writes chrooted to the action's mount prefix.
   try {
     auto &sched = app.exec_scheduler();
     used_scheduler_ = true;
@@ -1750,8 +1909,8 @@ void Runtime::Impl::submit_action(const QueuedAction &action) {
     se::execute_options opts;
     opts.env = ac->env;
     opts.owner = owner_; // so ~Impl's kill_owner reaps exactly this document's processes
-    opts.max_steps = kActionMaxSteps;
-    opts.max_time = kActionMaxSeconds;
+    opts.max_steps = action_max_steps(root);
+    opts.max_time = action_max_time(root);
     opts.max_memory = max_bytes;
     const int pid = sched.execute(script, opts); // throws se::parse_error on a syntax error
     live_actions_[pid] = std::move(ac);          // keep the context alive until the process ends
@@ -1760,16 +1919,43 @@ void Runtime::Impl::submit_action(const QueuedAction &action) {
   }
 }
 
-void Runtime::Impl::pump_and_sweep_actions() {
+cvc::state_exec::async_scheduler *Runtime::Impl::scheduler_to_pump() {
   namespace se = cvc::state_exec;
-  auto &sched = app.exec_scheduler();
+  if (used_scheduler_)
+    return &app.exec_scheduler(); // this document's own processes: pumped every drain, as always
+  if (!seen_scheduler_)
+    seen_scheduler_ = exec_scheduler_probe::built(app);
+  if (!seen_scheduler_)
+    return nullptr; // nothing ever used it: nothing to pump, and it stays unbuilt
+  // Someone else's processes (a scene's overlay tasks, a host verb's): pumped while any is live.
+  // Messages posted while none is live wait in the ingress for the next one, in order.
+  const se::scheduler_stats s = seen_scheduler_->get_stats();
+  const int live = s.total_processes - s.terminated - s.killed - s.failed;
+  return live > 0 ? seen_scheduler_ : nullptr;
+}
+
+bool Runtime::Impl::starts_frame() {
+  if (!pump_clock_)
+    pump_clock_ = pump_clock_of(app);
+  std::lock_guard<std::mutex> lock(pump_clock_->mutex);
+  const bool next = pumped_at_ == pump_clock_->frames; // pumped since the last boundary?
+  if (next)
+    ++pump_clock_->frames;
+  pumped_at_ = pump_clock_->frames;
+  return next;
+}
+
+void Runtime::Impl::pump_and_sweep_actions(cvc::state_exec::async_scheduler &sched) {
+  namespace se = cvc::state_exec;
   // Apply any cross-thread post_message() deliveries FIRST, so a delivery that readies a parked
   // (msg-recv …) receiver is seen by sync_run's has_runnable() gate — otherwise, with everything
   // parked, sync_run would skip stepping and never drain the ingress itself.
   sched.drain_ingress();
-  // Frame boundary: re-ready any process parked by (await …) on a PRIOR drain. Called here (once
-  // per drain), NOT inside step()/sync_run, so an await crosses exactly one frame.
-  sched.wake_awaiting();
+  // Frame boundary: re-ready any process parked by (await …) in a PRIOR frame. Called here, once
+  // per app frame however many Runtimes pump (starts_frame), NOT inside step()/sync_run, so an
+  // await crosses exactly one frame.
+  if (starts_frame())
+    sched.wake_awaiting();
   // Pump a bounded slice: a quick (non-suspending) action completes within THIS drain (so a
   // fire-then-check interaction still sees its effect immediately), while an action that parks
   // on await/sleep/msg-recv yields and resumes on a later frame. Global step + time backstops
@@ -2061,14 +2247,76 @@ void Runtime::post_input(const InputEvent &ev) {
   // deliver it. The pump in drain() steps the resident; feed input BEFORE drain() for same-frame
   // delivery (see the header contract).
   m_->ensure_input_residents();
+  if (ev.kind == InputEvent::Kind::KeyDown && m_->have_key_bindings_.load()) {
+    const bool capture = m_->key_capture_pending();
+    {
+      std::lock_guard<std::mutex> lock(m_->pressed_mutex_);
+      m_->pressed_keys_.push_back(ev.key);
+    }
+    if (capture)
+      return; // a new key for the Keys window, not a key press for the document
+  }
   m_->deliver_input(ev);
+}
+
+bool Runtime::key_capture_pending() const { return m_->key_capture_pending(); }
+
+void Runtime::forget_layout() { m_->forget_layout_pending = true; }
+
+void Runtime::set_key_bindings(std::vector<KeyBinding> bindings) {
+  m_->key_bindings_ = std::move(bindings);
+  m_->have_key_bindings_.store(!m_->key_bindings_.empty());
+}
+
+void Runtime::Impl::run_key_bindings() {
+  std::vector<std::string> keys;
+  {
+    std::lock_guard<std::mutex> lock(pressed_mutex_);
+    keys.swap(pressed_keys_);
+  }
+  const std::string capture_path = resolve_bind(prefix, kKeyCapture);
+  if (!key_capture_pending() && !read_or<std::string>(app, capture_path, "").empty())
+    write<std::string>(app, capture_path, ""); // the Keys window closed while it waited
+  for (const std::string &key : keys) {
+    if (key_capture_pending()) {
+      const std::string capture = read_or<std::string>(app, capture_path, "");
+      const std::string stored = stored_key_name(key);
+      if (stored.empty())
+        continue; // a key with no name can't be bound: still waiting
+      if (canonical_key(key) != "escape")
+        for (const KeyBinding &b : key_bindings_)
+          if (b.id == capture)
+            write<std::string>(app, resolve_bind(prefix, key_binding_path(b)), stored);
+      write<std::string>(app, capture_path, "");
+      continue;
+    }
+    for (const KeyBinding &b : key_bindings_)
+      if (!b.on.empty() &&
+          key_matches(read_or<std::string>(app, resolve_bind(prefix, key_binding_path(b)), ""),
+                      key))
+        queued_events.push_back({b.on, prefix});
+  }
+  // What the Keys window shows for each binding, written only when it changes.
+  const std::string waiting =
+      key_capture_pending() ? read_or<std::string>(app, capture_path, "") : std::string();
+  for (const KeyBinding &b : key_bindings_) {
+    const std::string shown =
+        !waiting.empty() && b.id == waiting
+            ? std::string(kKeyPrompt)
+            : read_or<std::string>(app, resolve_bind(prefix, key_binding_path(b)), "");
+    const std::string path = resolve_bind(prefix, key_shown_path(b));
+    if (read_or<std::string>(app, path, std::string(1, '\x01')) != shown) // \x01: not there yet
+      write<std::string>(app, path, shown);
+  }
 }
 
 void Runtime::render() { m_->render(); }
 
 void Runtime::drain() {
   // Run the queued action events on the host thread, then clear. Never called
-  // from inside render() (the deferred intent-buffer discipline, §7.2/§4.7).
+  // from inside render() (the deferred intent-buffer discipline, §7.2/§4.7). The keys pressed since
+  // the last drain queue theirs first.
+  m_->run_key_bindings();
   std::vector<Impl::QueuedAction> events;
   events.swap(m_->queued_events);
   for (const Impl::QueuedAction &a : events) {
@@ -2092,10 +2340,13 @@ void Runtime::drain() {
   // §4.6 input residents (on_key/on_pointer): ensure they exist (idempotent; post_input also does,
   // but a host that set a program yet fed no input this frame still gets its resident submitted).
   m_->ensure_input_residents();
-  // Advance submitted actions + the resident — and anything still-parked from earlier frames — a
-  // bounded slice, then sweep the finished ones. Runs once used_scheduler_ latches.
-  if (m_->used_scheduler_)
-    m_->pump_and_sweep_actions();
+  // Advance submitted actions + the residents — and anything still-parked from earlier frames — a
+  // bounded slice, then sweep the finished ones. Every drain once this Runtime has used the app
+  // scheduler, and otherwise whenever any process is live on it: other components run processes
+  // there too (a scene's transfer-function overlay tasks, cvc/tf/overlay_tasks.h), and only a pump
+  // advances them, whatever host this is. An app nothing has used is not pumped (nor built).
+  if (cvc::state_exec::async_scheduler *sched = m_->scheduler_to_pump())
+    m_->pump_and_sweep_actions(*sched);
 }
 
 std::vector<std::string> Runtime::take_reactive_warnings() {

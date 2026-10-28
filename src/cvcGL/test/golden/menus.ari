@@ -33,7 +33,7 @@ menubar:
 windows:
   - window: Under the menu
     id: under
-    pos: [24, 120]
+    pos: [24, 60] # below the menu bar, so the open File menu draws over the window's top
     size: [360, 120]
     children:
       - text: "The open File menu draws over this window."

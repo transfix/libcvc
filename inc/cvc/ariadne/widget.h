@@ -42,6 +42,7 @@ enum class Kind {
   Color,          // bound "r,g,b" state (an RGB picker; §G7)
   Image,          // a host-published image viewer (a live raster); src / bound name
   Button,         // a fire-once button -> raises `on` event
+  TfEditor,       // a transfer-function editor bound to a cvc::tf::model key (§10; props = config)
   Custom,         // a registered custom widget type (custom_type + props); §extensibility
   WindowsMenu,    // the built-in Windows menu (reopen a closed window): placed here in a menubar,
                   // or, outside one, the document's setting for it (bdef false: no such menu)
@@ -193,6 +194,10 @@ struct Widget {
   int ilo = 0, ihi = 100, idef = 0;     // SliderInt
   bool bdef = false;                    // Checkbox / MenuItemToggle default
   std::string fmt = "%.3f";             // SliderFloat printf format
+  // A slider writes its key on every change while it is dragged, so what it drives follows the
+  // drag. `commit: release` (true here) writes once, when the drag ends: for a key whose change is
+  // too costly to redo every frame.
+  bool commit_on_release = false;
   std::string sdef; // Combo default (an option label, or — with `values` — a value)
   std::vector<std::string> options; // Combo options (the DISPLAYED labels)
   // §4 Combo value mapping: a parallel list the same length as `options`, so the bound key holds
@@ -456,6 +461,19 @@ inline Widget image_widget(std::string label, std::string src, double size = 256
   w.label = std::move(label);
   w.src = std::move(src);
   w.img_size = size;
+  return w;
+}
+
+// A transfer-function editor (§10) bound to a cvc::tf::model state key — the ColorTable2 port.
+// Overlay layers are read from keys beside `bind` (bind.histogram, bind.contour_spectrum, ...);
+// `props` carries the optional config (interactive_updates, height, layers, preset, ...; see
+// docs/TRANSFER_FUNCTIONS.md).
+inline Widget tf_editor(std::string label, std::string bind) {
+  Widget w;
+  w.kind = Kind::TfEditor;
+  w.label = std::move(label);
+  w.bind = std::move(bind);
+  w.props.kind = Value::Kind::Map;
   return w;
 }
 

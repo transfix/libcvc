@@ -9,6 +9,7 @@
 // each prop a reactive state key (§9.1) — this struct just says what to create.
 
 #include <cvc/ariadne/value.h>
+#include <cvc/tf/model.h>
 #include <string>
 #include <vector>
 
@@ -24,12 +25,22 @@ struct SceneTFPoint {
 };
 
 // A transfer function for a volume renderer. Empty ⇒ nothing drawn.
+//
+// Two forms. The legacy one (`points:`, `window:`, `auto_domain:`) is raw: coupled colour+opacity
+// points in data units, which the realizer feeds to the renderer as before and converts into a
+// model over the node's data range (or the window) only to seed the node's editable
+// `<node>.transfer_function` key. The roadmap §10.1 form (`domain:`, `opacity_cubed:`,
+// `resolution:`, `preset:`, `vinay:`, `color:`, `alpha:`, `isocontours:`) sets has_model and a
+// normalized `model`, which the realizer's tf_binding lowers into the renderer's keys. With
+// has_model the legacy `points` are ignored (the loader warns when both are given).
 struct SceneTransferFunction {
   std::vector<SceneTFPoint> points;
   bool auto_domain = true; // bake over the volume's data range (vs an explicit window)
   bool has_window = false; // explicit value window instead of the data range
   double window_min = 0.0, window_max = 0.0; // raw value domain — double like the renderer
-  bool empty() const { return points.empty(); }
+  bool has_model = false;
+  cvc::tf::model model; // normalized; meaningful only with has_model
+  bool empty() const { return !has_model && points.empty(); }
 };
 
 // One volren isosurface (mirrors cvc::volren::isosurface).
@@ -267,6 +278,15 @@ struct SceneNode {
   bool has_fit = false;
   float fit_height = 1.0f;
   bool fit_up_y = false; // fit: { up: y } — rotate the Y-up mesh +90° about X to Z-up first
+  // fit: { up: x | y | z, flip: true }: the dataset's own up axis, turned to +z first (fit_up_y
+  // is the `y` case, kept for code that sets it directly), then a half turn about x when flip
+  // is set (a scan stored upside down).
+  std::string fit_up = "z";
+  bool fit_flip = false;
+
+  // The directory of the .ari file that declared this node (empty for a document loaded from a
+  // string). A custom realizer resolves a relative path in its own state keys against it.
+  std::string base_dir;
 
   bool has_transform = false;
   float position[3] = {0.0f, 0.0f, 0.0f};

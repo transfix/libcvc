@@ -162,12 +162,19 @@ TEST(NavBinding, MaterialWeightsAreKnobsOnceAMaterialIsSet) {
   material_config mc;
   w.set_material(risk.data(), hard.data(), mc);
   w.pull(app, "scene");
-  EXPECT_NEAR(num(st, "scene.nav.material.lam_soft"), mc.lam_soft, 1e-6);
+  // The weights in world units: the soft one in m^2/s^2 (normalized / scale^2), the barrier's in
+  // m/s^2 (normalized / scale).
+  EXPECT_NEAR(num(st, "scene.nav.material.lam_soft"), mc.lam_soft / (kS * kS), 1e-3);
+  EXPECT_NEAR(num(st, "scene.nav.material.lam_hard"), mc.lam_hard / kS, 1e-4);
+  EXPECT_EQ(st("scene.nav.material.lam_soft").property("unit"), "m^2/s^2");
+  st("scene.nav.material.lam_hard").value(std::string("40"));
+  w.pull(app, "scene");
+  EXPECT_NEAR(w.material_lam_hard(), 40.0 * kS, 1e-6);
   st("scene.nav.material.lam_soft_scale").value(std::string("0.5"));
   st("scene.nav.material.lam_hard").value(std::string("-1"));
   w.pull(app, "scene");
   EXPECT_EQ(w.material_lam_soft_scale(), 0.5f);
-  EXPECT_EQ(w.material_lam_hard(), mc.lam_hard) << "a weight is >= 0";
+  EXPECT_NEAR(w.material_lam_hard(), 40.0 * kS, 1e-6) << "a weight is >= 0";
   EXPECT_FALSE(st("scene.nav.material.lam_soft").comment().empty());
 }
 
@@ -200,16 +207,59 @@ TEST(NavBinding, TerrainSettingsRebuildThePlanes) {
   st("scene.nav.terrain.max_grade").value(std::string("1.5"));
   st("scene.nav.terrain.tip_ratio").value(std::string("0"));
   st("scene.nav.terrain.tip_margin").value(std::string("3"));
-  st("scene.nav.terrain.lam_grade").value(std::string("2"));
+  st("scene.nav.terrain.lam_grade").value(std::string("800")); // m^2/s^2: 2 normalized
   w.pull(app, "scene");
   w.publish(app, "scene");
   EXPECT_EQ(w.terrain_settings().max_grade, 1.5);
   EXPECT_EQ(w.terrain_settings().tip_margin, 0.8) << "3 is not a share";
-  EXPECT_EQ(w.terrain_settings().lam_grade, 2.0f);
+  EXPECT_NEAR(w.terrain_settings().lam_grade, 2.0f, 1e-5);
   EXPECT_LT(std::stol(st("scene.nav.terrain.infeasible_cells").value()), blocked / 4);
   EXPECT_NEAR(num(st, "scene.nav.terrain.limit"), 1.5, 1e-9);
   w.step();
   EXPECT_EQ(st("scene.nav.terrain.max_grade").property("max"), "1.5");
   EXPECT_EQ(st("scene.nav.terrain.d_hat_m").property("unit"), "m");
   EXPECT_EQ(st("scene.nav.terrain.limit").property("access"), "telemetry");
+}
+
+// Every length crosses the tree in metres, whatever the scale or the map's cell size: the
+// carrot separation's strength (a shift, normalized inside) and the grade cost's blur (cells
+// inside) too. Here 1 normalized unit is 20 m and a cell is 2 m.
+TEST(NavBinding, EveryLengthIsInMetres) {
+  constexpr int r2 = 41, c2 = 41; // 2 m cells over the same 80 m
+  sim_world::config c;
+  c.rows = r2;
+  c.cols = c2;
+  c.min_x = c.min_y = kLo;
+  c.max_x = c.max_y = kHi;
+  c.scale = kS;
+  c.veh.rr = 0.15f;
+  c.veh.d_hat = 0.35f;
+  c.veh.dt = 0.06f;
+  c.sep_radius = static_cast<float>(10.0 * kS);
+  c.sep_gain = static_cast<float>(4.0 * kS);
+  c.freeze_sense = true;
+  std::vector<std::uint8_t> occ(static_cast<std::size_t>(r2) * c2, 0);
+  const float o[2] = {0.0f, 0.0f}, goal[2] = {static_cast<float>(20.0 * kS), 0.0f};
+  const float color[3] = {1.0f, 1.0f, 1.0f};
+  sim_world w(c, occ.data(), occ.data(), coef_mlp::default_biased(), o, goal, color, 1);
+  std::vector<float> z(static_cast<std::size_t>(r2) * c2, 0.0f);
+  terrain_config tc;
+  tc.sigma = 1.5; // cells
+  w.set_terrain(z.data(), tc);
+  cvc::app app;
+  cvc::state &st = cvc::state::instance(app);
+  w.pull(app, "scene");
+  EXPECT_NEAR(num(st, "scene.nav.sep_gain"), 4.0, 1e-5) << "seeded in metres";
+  EXPECT_EQ(st("scene.nav.sep_gain").property("unit"), "m");
+  EXPECT_NEAR(num(st, "scene.nav.terrain.sigma"), 3.0, 1e-9) << "1.5 cells of 2 m";
+  EXPECT_EQ(st("scene.nav.terrain.sigma").property("unit"), "m");
+  st("scene.nav.sep_gain").value(std::string("6"));
+  st("scene.nav.terrain.sigma").value(std::string("5"));
+  w.pull(app, "scene");
+  EXPECT_NEAR(w.current_config().sep_gain, 6.0 * kS, 1e-6);
+  EXPECT_NEAR(w.terrain_settings().sigma, 2.5, 1e-9) << "5 m is 2.5 cells";
+  // Read back unchanged: a pull with nothing changed applies nothing.
+  w.pull(app, "scene");
+  EXPECT_NEAR(num(st, "scene.nav.sep_gain"), 6.0, 1e-5);
+  EXPECT_NEAR(w.terrain_settings().sigma, 2.5, 1e-9);
 }

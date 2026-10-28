@@ -1,7 +1,7 @@
 schema_version: 1
 recipe:
   name: libcvc
-  upstream_version: "3.7.0"
+  upstream_version: "3.7.1"
   # Bumped 1 -> 2: the host-only libcvc ABI changed (voxels::_cuda_unified_ptr is
   # now always std::shared_ptr<void>, +8 bytes, to match the CUDA build and make
   # cvc::volume's layout variant-invariant). The new CPU bundle is not ABI-
@@ -147,7 +147,8 @@ recipe:
   # FindImageMagick tier ran. Native bundles are unchanged. 3, not 2: native is already at
   # +cvc.2 on the catalog and the wasm-mt publish packs verbatim at this revision. cvcgl bumps
   # in lockstep (1 -> 3) and re-pins this build.
-  cvc_revision: 3
+  # Reset to 1 for the 3.7.1 upstream version: a version bump restarts cvc_revision.
+  cvc_revision: 1
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
@@ -216,6 +217,17 @@ depends:
     # landed on consumers' link lines whether they used the feature or not.
     # Build-only: nothing in libcvc's public headers mentions it.
     - name: pocketfft
+      platforms: [linux, macos, windows]
+    # Eigen 5 + libigl's MPL-2.0 core module, both header-only, back
+    # mesh_ops.h / fem.h (CVC_ENABLE_LIBIGL). Build-only like pocketfft: nothing
+    # under inc/cvc includes them, they compile into the private cvc_igl helper,
+    # and cvcTargets.cmake never names them. Declared under runtime for the same
+    # reason as pocketfft (build.sh only reads CVC_DEPS_PREFIX). Without them the
+    # option flips OFF and every mesh_ops/fem entry point throws
+    # mesh_ops_unavailable; CI asserts that did not happen.
+    - name: eigen
+      platforms: [linux, macos, windows]
+    - name: libigl
       platforms: [linux, macos, windows]
     - name: gsl
       platforms: [linux, macos, windows]

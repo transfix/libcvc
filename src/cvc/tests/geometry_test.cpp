@@ -3,6 +3,7 @@
   Tests geometry operations using the Stanford Bunny mesh.
 */
 
+#include <algorithm>
 #include <atomic>
 #include <boost/thread.hpp>
 #include <chrono>
@@ -933,7 +934,9 @@ TEST_F(GeometryTest, QualityImproveTetrahedralMesh) {
 
   // First create an SDF from the bunny
   std::cout << "Creating SDF from bunny mesh..." << std::endl;
-  dimension sdf_dim(64, 64, 64);
+  // At 64^3 the bunny is ~290k tets, and four GEO_FLOW passes over them timed out (300 s) in a
+  // Debug CI build.
+  dimension sdf_dim(32, 32, 32);
   volume sdf_vol = sdf(ctx, bunny, sdf_dim, bunny.extents(), SDF_V2);
 
   // Extract a tetrahedral mesh from the SDF
@@ -3417,7 +3420,9 @@ TEST_F(GeometryTest, TetrahedralizeMeshExtraction) {
 TEST_F(GeometryTest, TetrahedralizeWithImprovementMethods) {
   std::cout << "\n=== Testing Tetrahedralize with Different Improvement Methods ===" << std::endl;
 
-  dimension sdf_dim(32, 32, 32); // Smaller for faster testing
+  // LBIE meshes this on a 17^3 grid. On 33^3 (dims 17 to 32) the bunny is ~63k tets, and with six
+  // GEO_FLOW passes of 100 rounds over them this test took 178 s in a Debug CI build.
+  dimension sdf_dim(16, 16, 16);
   volume sdf_vol = sdf(ctx, bunny, sdf_dim, bunny.extents(), SDF_V2);
 
   struct MethodTest {
@@ -3521,44 +3526,21 @@ TEST_F(GeometryTest, Tetrahedralize2MeshExtraction) {
   dimension sdf_dim(32, 32, 32);
   volume sdf_vol = sdf(ctx, bunny, sdf_dim, bunny.extents(), SDF_V2);
 
-  // Extract tet2 mesh
+  // The single-isovalue overload meshes the solid above the isovalue as a layer with no upper
+  // surface: the region tetrahedralize() meshes (for an SDF, the outside out to the box). It used
+  // to ask for the layer up to LBIE's default inner isovalue, 9.5, which an SDF never reaches, and
+  // returned an empty mesh.
   geometry tet2_mesh = tetrahedralize2(sdf_vol, 0.0);
-
-  // NOTE: Tet2 (dual/interval tetrahedral meshing) requires TWO isovalues (inner and outer)
-  // to define a volumetric region between two isosurfaces. This is fundamentally different
-  // from standard SDF extraction which uses a single isovalue.
-  //
-  // The LBIE implementation exists but is designed for:
-  //   - Dual contouring between two isovalues (e.g., iso_val=0.5, iso_val_in=9.5)
-  //   - Creating a volumetric mesh between two surfaces
-  //
-  // For standard SDF mesh extraction (single isovalue=0.0), tet2 produces empty meshes
-  // because the interval [0.0, 9.5] doesn't intersect the SDF data range [-1, 1].
-  //
-  // To use tet2 properly, you would need to provide both inner and outer isovalues
-  // that define a valid interval within the SDF range, but our current API only
-  // supports a single isovalue parameter for consistency with other mesh types.
+  geometry tet_mesh = tetrahedralize(sdf_vol, 0.0);
 
   std::cout << "Extracted tet2 mesh with " << tet2_mesh.num_points() << " vertices and "
-            << tet2_mesh.num_tris() << " triangles" << std::endl;
+            << tet2_mesh.num_tets() << " tets" << std::endl;
 
-  if (tet2_mesh.num_points() > 0) {
-    std::cout << "  Tet2 extraction working!" << std::endl;
-
-    // Verify mesh properties
-    EXPECT_GT(tet2_mesh.num_tris(), 0) << "Tet2 mesh should have faces";
-
-    // Verify all vertices are valid
-    for (const auto &pt : tet2_mesh.points()) {
-      EXPECT_TRUE(std::isfinite(pt[0]) && std::isfinite(pt[1]) && std::isfinite(pt[2]))
-          << "All vertices should be finite";
-    }
-  } else {
-    std::cout << "  NOTE: Tet2 mesh extraction returned empty mesh" << std::endl;
-    std::cout << "  Tet2 requires dual isovalues (interval meshing), not compatible with"
-              << std::endl;
-    std::cout << "  single-isovalue SDF extraction. This is a design limitation, not a bug."
-              << std::endl;
+  EXPECT_GT(tet2_mesh.num_tets(), 0u) << "Tet2 mesh should have tets";
+  EXPECT_EQ(tet2_mesh.num_tets(), tet_mesh.num_tets());
+  for (const auto &pt : tet2_mesh.points()) {
+    EXPECT_TRUE(std::isfinite(pt[0]) && std::isfinite(pt[1]) && std::isfinite(pt[2]))
+        << "All vertices should be finite";
   }
 }
 
@@ -4558,10 +4540,9 @@ TEST_F(AlgorithmTest, HexJacobianMetric) {
   // Should be positive for valid hex
   EXPECT_GT(jac, 0.0);
 
-  // Scaled Jacobian should be close to 1 for perfect cube
+  // Scaled Jacobian is 1 for a perfect cube
   double scaled_jac = hex_scaled_jacobian(vertices);
-  EXPECT_GT(scaled_jac, 0.0);
-  EXPECT_LE(scaled_jac, 1.0);
+  EXPECT_NEAR(scaled_jac, 1.0, 1e-12);
 }
 
 TEST_F(AlgorithmTest, TetMeshQualityStatistics) {
@@ -4739,18 +4720,37 @@ TEST_F(AlgorithmTest, FindTetsContainingPointPerformanceLargeMesh) {
             << std::endl;
   std::cout << "  Total tets found: " << total_found << std::endl;
 
-  // Performance expectations
-  if (tet_mesh.num_tets() > 1000) {
-    std::cout << "  Using pre-computed bbox acceleration (>1000 tets)" << std::endl;
+  // The same answer as testing every tet: its own box, then its barycentric weights. The mesh is
+  // the solid above the isovalue, here the space between the bunny and its box, which the line
+  // crosses at both ends. (Until 10/2026 a broken mesh-box test returned nothing for points off
+  // the mesh's boundary; "found some" passed on the few points lying on a box face.)
+  const auto &tets = tet_mesh.const_tets();
+  const auto &pts = tet_mesh.points();
+  size_t expected = 0, located = 0, expected_points = 0;
+  for (const auto &p : query_points) {
+    size_t here = 0;
+    for (const auto &t : tets) {
+      bool in_box = true;
+      for (int a = 0; a < 3 && in_box; ++a) {
+        const double lo = std::min({pts[t[0]][a], pts[t[1]][a], pts[t[2]][a], pts[t[3]][a]});
+        const double hi = std::max({pts[t[0]][a], pts[t[1]][a], pts[t[2]][a], pts[t[3]][a]});
+        in_box = p[a] >= lo && p[a] <= hi;
+      }
+      if (!in_box)
+        continue;
+      const auto w = tet_barycentric(p, pts[t[0]], pts[t[1]], pts[t[2]], pts[t[3]]);
+      if (w[0] >= -1e-10 && w[1] >= -1e-10 && w[2] >= -1e-10 && w[3] >= -1e-10)
+        ++here;
+    }
+    expected += here;
+    expected_points += here ? 1 : 0;
+    located += find_tets_containing_point(p, tets, pts).empty() ? 0 : 1;
   }
-#ifndef DISABLE_CGAL
-  if (tet_mesh.num_tets() > 10000) {
-    std::cout << "  Using CGAL AABB tree acceleration (>10000 tets)" << std::endl;
-  }
-#endif
-
-  // Just verify it found some tets (actual performance varies by hardware)
-  EXPECT_GT(total_found, 0);
+  std::cout << "  Every tet tested: " << expected << " tets, " << expected_points << " of "
+            << query_points.size() << " points in the mesh" << std::endl;
+  EXPECT_EQ(total_found, expected);
+  EXPECT_EQ(located, expected_points);
+  EXPECT_GT(expected_points, 10u);
 }
 
 TEST_F(AlgorithmTest, FindHexsContainingPointPerformanceLargeMesh) {
@@ -4854,16 +4854,45 @@ TEST_F(AlgorithmTest, FindHexsContainingPointPerformanceLargeMesh) {
             << std::endl;
   std::cout << "  Total hexs found: " << total_found << std::endl;
 
-  if (hex_mesh.num_hexs() > 1000) {
-    std::cout << "  Using pre-computed bbox acceleration (>1000 hexs)" << std::endl;
-  }
-#ifndef DISABLE_CGAL
-  if (hex_mesh.num_hexs() > 10000) {
-    std::cout << "  Using CGAL AABB tree acceleration (>10000 hexs)" << std::endl;
-  }
-#endif
-
   EXPECT_GT(hex_mesh.num_hexs(), 0); // Should have created some hexs
+
+  // The same answer as testing every hex: its own box, then its trilinear weights (within the
+  // library's [-0.1, 1.1]). The hexes are the voxels inside the bunny, which the line crosses.
+  const auto &hexs = hex_mesh.const_hexs();
+  const auto &pts = hex_mesh.points();
+  size_t expected = 0, located = 0, expected_points = 0;
+  for (const auto &p : query_points) {
+    size_t here = 0;
+    for (const auto &h : hexs) {
+      geometry::point_t corners[8];
+      bool in_box = true;
+      for (int c = 0; c < 8; ++c)
+        corners[c] = pts[h[c]];
+      for (int a = 0; a < 3 && in_box; ++a) {
+        double lo = corners[0][a], hi = corners[0][a];
+        for (int c = 1; c < 8; ++c) {
+          lo = std::min(lo, corners[c][a]);
+          hi = std::max(hi, corners[c][a]);
+        }
+        in_box = p[a] >= lo && p[a] <= hi;
+      }
+      if (!in_box)
+        continue;
+      const auto w = hex_trilinear(p, corners);
+      bool inside = true;
+      for (int c = 0; c < 8; ++c)
+        inside = inside && w[c] >= -0.1 && w[c] <= 1.1;
+      here += inside ? 1 : 0;
+    }
+    expected += here;
+    expected_points += here ? 1 : 0;
+    located += find_hexs_containing_point(p, hexs, pts).empty() ? 0 : 1;
+  }
+  std::cout << "  Every hex tested: " << expected << " hexs, " << expected_points << " of "
+            << query_points.size() << " points in the mesh" << std::endl;
+  EXPECT_EQ(total_found, expected);
+  EXPECT_EQ(located, expected_points);
+  EXPECT_GT(expected_points, 10u);
 }
 
 // ============================================================================

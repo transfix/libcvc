@@ -1,7 +1,7 @@
 schema_version: 1
 recipe:
   name: libcvc-cuda
-  upstream_version: "3.7.0"
+  upstream_version: "3.7.1"
   # Bumped 1 -> 2: this bundle no longer ships the `cvc` CLI (it moved to its own
   # cvc-cli / cvc-cli-cuda packages so it lands deliberately in a user's PATH).
   # Dropping the binary changes bundle contents, and +cvc.1 was already published
@@ -58,6 +58,10 @@ depends:
     - name: boost
     - name: fftw3
     - name: gsl
+    # Eigen + libigl (header-only) for mesh_ops.h / fem.h; kept in lockstep with
+    # the CPU libcvc -- see that recipe for the note.
+    - name: eigen
+    - name: libigl
     - name: cgal
     # CGAL is header-only and declares gmp/mpfr as its own runtime deps rather
     # than vendoring them; the FLAT `cvcpkg install` does not auto-pull them, so

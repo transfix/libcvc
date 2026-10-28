@@ -99,8 +99,9 @@ int main() {
   kitty.kitty = true;
   kitty.cell_w = 9;
   kitty.cell_h = 18;
-  for (const Mode mode : {Mode::Kitty, Mode::Sixel}) {
+  for (const Mode mode : {Mode::Kitty, Mode::Sixel, Mode::Iterm}) {
     const bool k = mode == Mode::Kitty;
+    const char *name = k ? "kitty" : mode == Mode::Sixel ? "sixel" : "iterm";
     ari::FtxuiBackend::Options po;
     po.image_color = mode;
     ari::FtxuiBackend pbe(po);
@@ -114,8 +115,7 @@ int main() {
     pbe.set_screen_size(40, 12);
     pscene.tick();
     chk(pscene.view().frameWidth() == 40 * 9 && pscene.view().frameHeight() == 12 * 18,
-        k ? "kitty: the scene renders at the cells' real pixels"
-          : "sixel: the scene renders at the cells' real pixels");
+        (std::string(name) + ": the scene renders at the cells' real pixels").c_str());
     const std::string pf = pbe.render_to_string(prt, 40, 12);
     chk(pf.find("hud") != std::string::npos, "the widgets still draw over it");
     const std::string g = pbe.take_graphics();
@@ -137,7 +137,9 @@ int main() {
       }
       chk(resent == 0, "kitty: an unchanged frame is not sent again");
     } else {
-      chk(g.find("\x1bP0;1;0q") != std::string::npos, "sixel: the frame goes out as a bitmap");
+      chk(g.find(mode == Mode::Sixel ? "\x1bP0;1;0q" : "\x1b]1337;File=inline=1;") !=
+              std::string::npos,
+          (std::string(name) + ": the frame goes out as a bitmap").c_str());
     }
   }
 

@@ -232,17 +232,18 @@ public:
   // The live settings, read by pull() and seeded with the plant's values when unset (an
   // invalid value is ignored):
   //   <prefix>.nav_plant.{latency, brake_margin, drift_nsub}
-  //   <prefix>.nav_plant.plan.{with_vehicle, accel_margin, lateral_g, tip_margin}
+  //   <prefix>.nav_plant.plan.{with_vehicle, accel_margin, lateral_mps2, tip_margin}
   //   <prefix>.nav_plant.modulation.{tire_onset, tire_gain, tip_onset, tip_gain}
   // and the rest, which are fixed, written by publish():
   //   <prefix>.nav_plant.settings.{step_world, ground_z, spawn_height, metres_per_world_unit,
-  //     physics_steps, drift_bins_g}
+  //     physics_steps, drift_bins_mps2}
+  // Accelerations in the tree are m/s^2 (the options and drift summaries keep g: x kG).
   void pull(cvc::app &ctx, const std::string &prefix);
   // Agent i's nav keys beside the physics binding's vehicles.<name>.* (world_binding:
   // publish_vehicle(names[i], vehicle(i))), and the drift summary and cost:
   //   <prefix>.vehicles.<names[i]>.nav.{steer_command, accel_command}   rad, m/s^2
   //   <prefix>.vehicles.<names[i]>.nav.{tire_use, load_transfer, pitch_rad, roll_rad}
-  //   <prefix>.vehicles.<names[i]>.nav.drift.{position_m, heading_rad, speed_mps, lateral_g,
+  //   <prefix>.vehicles.<names[i]>.nav.drift.{position_m, heading_rad, speed_mps, lateral_mps2,
   //     stop_speed_mps}
   //   <prefix>.nav_plant.drift.<b>.{lo_g, hi_g, ticks, position_rms_m, position_max_m,
   //     heading_rms_rad, heading_max_rad, speed_rms_mps, speed_max_mps}

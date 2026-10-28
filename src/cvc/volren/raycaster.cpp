@@ -1704,9 +1704,9 @@ frame raycaster::render() {
       _ctx.threadProgress(double(tid + 1) / double(ntiles));
     }
   } else {
-    // Default to a raycaster-owned pool: cvc::thread_pool supports only one
-    // in-flight parallel_for, so borrowing the app-wide computePool() could
-    // deadlock against another subsystem's concurrent fan-out.
+    // Default to a raycaster-owned pool, so a render doesn't share the
+    // app-wide computePool()'s workers with other subsystems' fan-outs
+    // (concurrent fan-outs on one pool run side by side and share them).
     if (!_pool && !_own_pool)
       _own_pool = std::make_unique<cvc::thread_pool>();
     cvc::thread_pool &pool = _pool ? *_pool : *_own_pool;

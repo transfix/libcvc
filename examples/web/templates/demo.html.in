@@ -17,6 +17,9 @@
            border-bottom: 1px solid #232a33; flex: none; }
   header h1 { font-size: 14px; margin: 0; color: #e8eef4; font-weight: 600; }
   header a { color: #5aa9e6; text-decoration: none; }
+  header select { margin-left: auto; max-width: 14em; background: #1d2530; color: #cdd6e0;
+                  border: 1px solid #2c3542; border-radius: 6px; padding: 3px 6px; font: inherit; }
+  header select + button { margin-left: 8px !important; }
   header button { margin-left: auto; background: #1d2530; color: #cdd6e0;
                   border: 1px solid #2c3542; border-radius: 6px; padding: 4px 12px;
                   font: inherit; cursor: pointer; }
@@ -48,8 +51,10 @@
     <b>pinch</b> to zoom &middot; <b>click</b> to focus &middot; <b>Tab</b> orbit/fly &middot;
     <b>WASD</b> + mouse fly &middot; <b>Esc</b> release pointer &middot;
     <a href="../">all examples</a></span>
+  <select id="demos" title="Open another demo" aria-label="Demos"></select>
   <button id="fs" title="Fullscreen (best on a phone)">⛶ Fullscreen</button>
 </header>
+<script src="../gallery.js"></script>
 <div id="stage">
   <div id="canvas-wrap"><canvas id="canvas" tabindex="0"></canvas></div>
   <div id="overlay">
@@ -106,6 +111,19 @@
       statusEl.textContent = 'Aborted: ' + what;
     },
   };
+  // A demo that runs documents (arigl, the gallery's Ariadne app) boots from demos.json's "boot":
+  // its command line, with {doc} the ?doc= document (else boot.doc); its environment; and files
+  // fetched before the module loads and written into its file system before main.
+  const BOOT = {{BOOT}};
+  const bootFiles = {};
+  if (BOOT) {
+    const doc = new URLSearchParams(location.search).get('doc') || BOOT.doc;
+    Module.arguments = BOOT.args.map(a => a.replace('{doc}', doc));
+    Module.preRun = [() => {
+      for (const [k, v] of Object.entries(BOOT.env || {})) ENV[k] = v;
+      for (const [path, text] of Object.entries(bootFiles)) FS.writeFile(path, text);
+    }];
+  }
   // Cache-buster keyed to the ACTUAL wasm content (a short hash baked in at
   // page-generation time), not document.lastModified: build-pages.py emits
   // byte-identical index.html each deploy, so its mtime never moves and the old
@@ -113,6 +131,13 @@
   const V = '{{ASSET_V}}';
   async function boot() {
     try {
+      for (const [path, url] of Object.entries((BOOT && BOOT.files) || {})) {
+        const r = await fetch(url, {cache: 'no-cache'});
+        if (r.ok)
+          bootFiles[path] = await r.text();
+        else
+          console.warn('cvcGL demo: no ' + url + ' (HTTP ' + r.status + ')');
+      }
       const resp = await fetch(DEMO + '.wasm?v=' + V, {cache: 'no-cache'});
       if (!resp.ok) throw new Error('HTTP ' + resp.status + ' fetching ' + DEMO + '.wasm');
       const reader = resp.body.getReader();

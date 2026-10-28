@@ -1,22 +1,24 @@
-// ImGuiBackend's §3.0.3b window sizing on a bare ImGui context (no GL): a window with no size fits
-// its content when it first appears (it used to stay at ImGui's 32 px minimum, because §11.4
-// persisted the size ImGui had before it measured and seeded it back), within the viewport, and
-// scrolls when its content does not fit. Windows with no position flow down the left edge instead
-// of stacking. An authored size and a persisted geometry still win.
+// ImGuiBackend's window sizing and placement on a bare ImGui context (no window, no GL):
+//  - a window with no size: fits its widgets, though §11.4 persists its geometry every frame (the
+//    size persisted after its first, unmeasured frame used to stop the fit at ImGui's 32 px);
+//  - windows with no pos: stack down the left of the viewport instead of on top of one another,
+//    until the user moves one; below a window that stands where it is; never past the right edge;
+//  - a window with a size keeps it and scrolls both ways when its widgets need more;
+//  - a split-pane window with no size is as wide as its panes' widgets;
+//  - after Runtime::forget_layout (a new document), windows ImGui already has are laid out again;
+//  - an authored pos is below the main menu bar, from the first frame.
 #include <cstdio>
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/widget.h>
 #include <cvc/core/app.h>
 #include <cvc/gl/ariadne/ImGuiBackend.h>
-#include <cvc/state/state.h>
 #include <functional>
-#include <map>
-#include <sstream>
 #include <string>
 #include <vector>
+
 #ifdef CVC_ENABLE_IMGUI
 #include <imgui.h>
-#include <imgui_internal.h> // ImGuiWindow: a window's rect, content size and scroll range
+#include <imgui_internal.h> // ImGuiWindow: size, position, scrollbars
 #endif
 
 namespace ari = cvc::ariadne;
@@ -32,132 +34,33 @@ void chk(bool ok, const std::string &what) {
 }
 
 #ifdef CVC_ENABLE_IMGUI
-// What a test reads back about one window after the last frame.
-struct Win {
-  bool found = false;
-  float x = 0, y = 0, w = 0, h = 0;
-  bool scroll_x = false, scroll_y = false; // a scrollbar is showing
-  float scroll_max_x = 0, scroll_max_y = 0;
-  std::string geometry; // the persisted tree.<id>.geometry
-  std::string str() const {
-    std::ostringstream os;
-    os << "[" << x << "," << y << " " << w << "x" << h << (scroll_x ? " sx" : "")
-       << (scroll_y ? " sy" : "") << " geom=" << geometry << "]";
-    return os.str();
-  }
-};
-
-// The stage_lighting component's shape: a heading, ten labeled sliders, a separator.
-ari::Widget lighting(const std::string &id) {
-  std::vector<ari::Widget> kids{ari::text("Key light")};
-  const char *labels[] = {"Intensity", "Azimuth", "Elevation", "Cone",        "Fill",
-                          "Back",      "Ambient", "Warmth",    "Environment", "Stage radius"};
-  for (const char *l : labels)
-    kids.push_back(ari::slider_float(l, std::string("lighting.") + l, 0.0, 1.0));
-  kids.push_back(ari::separator());
-  kids.push_back(ari::text("Fill / back / ambient"));
-  ari::Widget w = ari::window("Stage lighting", kids);
+ari::Widget panel(const std::string &title, const std::string &id, int sliders,
+                  const std::string &label = "Setting number ") {
+  std::vector<ari::Widget> kids;
+  for (int i = 0; i < sliders; ++i)
+    kids.push_back(
+        ari::slider_float(label + std::to_string(i), id + ".s" + std::to_string(i), 0.0, 1.0, 0.5));
+  ari::Widget w = ari::window(title, std::move(kids));
   w.id = id;
   return w;
 }
 
-ari::Widget camera(const std::string &id) {
-  ari::Widget w =
-      ari::window("Camera", {ari::slider_float("Look sensitivity", "cam.look", 0.02, 2.0),
-                             ari::slider_float("Move speed", "cam.move", 1.0, 100.0),
-                             ari::slider_float("Field of view", "cam.fov", 20.0, 120.0),
-                             ari::separator(), ari::checkbox("Invert pitch", "cam.invert"),
-                             ari::checkbox("Drag pans", "cam.pans"),
-                             ari::combo("Projection", "cam.proj", {"perspective", "orthographic"}),
-                             ari::color_widget("Background", "cam.bg")});
-  w.id = id;
+ImGuiWindow *find(const char *id) {
+  return ImGui::FindWindowByName((std::string("###") + id).c_str());
+}
+
+bool overlap(const ImGuiWindow *a, const ImGuiWindow *b) {
+  return a->Pos.x < b->Pos.x + b->Size.x && b->Pos.x < a->Pos.x + a->Size.x &&
+         a->Pos.y < b->Pos.y + b->Size.y && b->Pos.y < a->Pos.y + a->Size.y;
+}
+
+ari::Widget placed(ari::Widget w, float x, float y, float width, float height) {
+  w.has_pos = true;
+  w.pos_x = x;
+  w.pos_y = y;
+  w.size.w = ari::Extent{ari::Unit::Px, width};
+  w.size.h = ari::Extent{ari::Unit::Px, height};
   return w;
-}
-
-ari::Widget volren(const std::string &id) {
-  ari::Widget w =
-      ari::window("Volume raycast", {ari::slider_int("Steps", "vr.steps", 64, 1024),
-                                     ari::slider_float("Ambient", "vr.ambient", 0, 1),
-                                     ari::slider_int("Supersample (AA)", "vr.ss", 1, 4),
-                                     ari::checkbox("Volumetric shadows", "vr.shadows")});
-  w.id = id;
-  return w;
-}
-
-ari::Extent px(float v) { return ari::Extent{ari::Unit::Px, v}; }
-
-// Run `root` for `frames` frames on a fresh `dw` x `dh` context. `setup` may preset state before
-// the first frame; `each` runs before every frame (frame index). Returns every window in `ids`.
-std::map<std::string, Win> run(const ari::Widget &root, const std::vector<std::string> &ids,
-                               float dw = 1400.0f, float dh = 820.0f, int frames = 6,
-                               const std::function<void(cvc::app &)> &setup = {},
-                               const std::function<void(cvc::app &, int)> &each = {}) {
-  ImGuiContext *ctx = ImGui::CreateContext();
-  // libcvcGL may carry its own copy of imgui (a static imgui, as on Windows): hand it this context.
-  cvc::gl::ImGuiBackend::setImGuiContext(ctx);
-  ImGuiIO &io = ImGui::GetIO();
-  io.DisplaySize = ImVec2(dw, dh);
-  io.IniFilename = nullptr;
-  unsigned char *pixels = nullptr;
-  int tw = 0, th = 0;
-  io.Fonts->GetTexDataAsRGBA32(&pixels, &tw, &th); // builds the font atlas; no renderer needed
-  std::map<std::string, Win> out;
-  {
-    cvc::app app;
-    ari::Runtime rt(app, "ui");
-    cvc::gl::ImGuiBackend be;
-    rt.set_backend(&be);
-    if (setup)
-      setup(app);
-    rt.set_root(root);
-    for (int f = 0; f < frames; ++f) {
-      if (each)
-        each(app, f);
-      io.DeltaTime = 1.0f / 60.0f;
-      ImGui::NewFrame();
-      rt.render();
-      ImGui::Render();
-    }
-    for (const std::string &id : ids) {
-      Win w;
-      for (ImGuiWindow *iw : GImGui->Windows) {
-        // Ariadne names a window "title###id"; match on the stable id part.
-        const std::string n = iw->Name;
-        const std::size_t at = n.find("###");
-        if (at == std::string::npos || n.substr(at + 3) != id)
-          continue;
-        w.found = iw->WasActive;
-        w.x = iw->Pos.x;
-        w.y = iw->Pos.y;
-        w.w = iw->Size.x;
-        w.h = iw->Size.y;
-        w.scroll_x = iw->ScrollbarX;
-        w.scroll_y = iw->ScrollbarY;
-        w.scroll_max_x = iw->ScrollMax.x;
-        w.scroll_max_y = iw->ScrollMax.y;
-      }
-      w.geometry = cvc::state::instance(app)("ui.tree." + id + ".geometry").value();
-      out[id] = w;
-    }
-  }
-  cvc::gl::ImGuiBackend::setImGuiContext(nullptr); // with a shared imgui this clears ours too
-  ImGui::DestroyContext(ctx);
-  return out;
-}
-
-bool overlaps(const Win &a, const Win &b) {
-  return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
-}
-
-bool on_screen(const Win &w, float dw, float dh) {
-  return w.x >= 0 && w.y >= 0 && w.x + w.w <= dw + 0.5f && w.y + w.h <= dh + 0.5f;
-}
-
-std::string geom_of(const Win &w) {
-  std::ostringstream os;
-  os << static_cast<long>(w.x + 0.5f) << "," << static_cast<long>(w.y + 0.5f) << ","
-     << static_cast<long>(w.w + 0.5f) << "," << static_cast<long>(w.h + 0.5f);
-  return os.str();
 }
 #endif
 
@@ -168,118 +71,130 @@ int main() {
   std::printf("skip: cvcGL built without ImGui\n");
   return 0;
 #else
-  // The repro (volren_bunny.ari's three component windows, none with a pos: or a size:): each one
-  // opens at its content's size, shows all of it, and none hides another.
+  ImGuiContext *ctx = ImGui::CreateContext();
+  // libcvcGL may carry its own copy of imgui (a static imgui, as on Windows): hand it this context.
+  cvc::gl::ImGuiBackend::setImGuiContext(ctx);
+  ImGuiIO &io = ImGui::GetIO();
+  io.DisplaySize = ImVec2(800.0f, 600.0f);
+  io.IniFilename = nullptr;
+  unsigned char *px = nullptr;
+  int w = 0, h = 0;
+  io.Fonts->GetTexDataAsRGBA32(&px, &w, &h); // builds the font atlas; no renderer needed
   {
-    const auto r = run(ari::group({lighting("lighting"), camera("camera"), volren("volren")}),
-                       {"lighting", "camera", "volren"});
-    for (const auto &kv : r) {
-      const Win &w = kv.second;
-      chk(w.found, kv.first + ": drawn");
-      chk(w.w > 200 && w.h > 100,
-          kv.first + ": opens at its content's size, not a stub " + w.str());
-      chk(w.scroll_max_x == 0 && w.scroll_max_y == 0,
-          kv.first + ": shows all of its content (nothing to scroll) " + w.str());
-      chk(on_screen(w, 1400, 820), kv.first + ": inside the viewport " + w.str());
-      chk(w.geometry == geom_of(w),
-          kv.first + ": persists the size it fitted to (" + w.geometry + ")");
-    }
-    chk(!overlaps(r.at("lighting"), r.at("camera")) &&
-            !overlaps(r.at("lighting"), r.at("volren")) &&
-            !overlaps(r.at("camera"), r.at("volren")),
-        "windows with no pos: do not stack on each other");
-  }
-
-  // A persisted geometry still wins over the fit.
-  {
-    const auto r = run(ari::group({lighting("W")}), {"W"}, 1400, 820, 6, [](cvc::app &app) {
-      cvc::state::instance(app)("ui.tree.W.geometry").value(std::string("100,120,300,200"));
-    });
-    const Win &w = r.at("W");
-    chk(w.x == 100 && w.y == 120 && w.w == 300 && w.h == 200,
-        "a persisted geometry places and sizes the window " + w.str());
-    chk(w.scroll_y, "and content taller than it scrolls " + w.str());
-  }
-
-  // An authored size wins too, and content that does not fit it scrolls, both ways.
-  {
-    ari::Widget win = lighting("S");
-    win.size.w = px(180);
-    win.size.h = px(140);
-    win.children.push_back(ari::text("a line of text much wider than the window it is drawn in"));
-    const Win w = run(ari::group({win}), {"S"}).at("S");
-    chk(w.w == 180 && w.h == 140, "an authored size: sizes the window " + w.str());
-    chk(w.scroll_y && w.scroll_max_y > 0, "taller content scrolls vertically " + w.str());
-    chk(w.scroll_x && w.scroll_max_x > 0, "wider content scrolls horizontally " + w.str());
-  }
-
-  // A viewport too small for the content: the window fits the viewport and scrolls.
-  {
-    const Win w = run(ari::group({lighting("T")}), {"T"}, 420, 200).at("T");
-    chk(on_screen(w, 420, 200), "a window fits a small viewport " + w.str());
-    chk(w.h > 100, "using the room it has " + w.str());
-    chk(w.scroll_y, "and scrolls the rest " + w.str());
-    chk(w.scroll_max_x == 0, "its scrollbar does not cover the content's width " + w.str());
-  }
-
-  // An authored pos: with no size: the window opens there, at its content's size.
-  {
-    ari::Widget win = camera("P");
-    win.has_pos = true;
-    win.pos_x = 500;
-    win.pos_y = 300;
-    const Win w = run(ari::group({win}), {"P"}).at("P");
-    chk(w.x == 500 && w.y == 300, "an authored pos: places a fitted window " + w.str());
-    chk(w.w > 200 && w.scroll_max_x == 0 && w.scroll_max_y == 0,
-        "which fits its content " + w.str());
-  }
-
-  // Windows that first appear later (closable, opened at frames 8 and 11) fit too, and take the
-  // next places in the flow, after the windows already open, though they come first in the
-  // document.
-  {
-    ari::Widget later = volren("later");
-    ari::Widget later2 = camera("later2");
-    later.closable = later2.closable = true;
-    auto open = [](cvc::app &app, const char *id, const char *v) {
-      cvc::state::instance(app)(std::string("ui.tree.") + id + ".open").value(std::string(v));
+    cvc::app app;
+    ari::Runtime rt(app, "ui");
+    cvc::gl::ImGuiBackend be;
+    rt.set_backend(&be);
+    ari::Widget sized = panel("Sized", "sized", 12, "A label too long for this window, number ");
+    sized.size.w = ari::Extent{ari::Unit::Px, 200.0f};
+    sized.size.h = ari::Extent{ari::Unit::Px, 90.0f};
+    sized.has_pos = true;
+    sized.pos_x = 500.0f;
+    sized.pos_y = 20.0f;
+    rt.set_root(ari::group({panel("First", "fit_a", 3), panel("Second", "fit_b", 6),
+                            panel("Third", "fit_c", 2), sized}));
+    const auto frames = [&](int n, const std::function<void()> &before = {}) {
+      for (int f = 0; f < n; ++f) {
+        io.DeltaTime = 1.0f / 60.0f;
+        ImGui::NewFrame();
+        if (before)
+          before();
+        rt.render();
+        ImGui::Render();
+      }
     };
-    const auto r = run(
-        ari::group({later2, later, lighting("first")}), {"first", "later", "later2"}, 1400, 820, 16,
-        [&](cvc::app &app) {
-          open(app, "later", "0");
-          open(app, "later2", "0");
-        },
-        [&](cvc::app &app, int f) {
-          if (f == 8)
-            open(app, "later", "1");
-          if (f == 11)
-            open(app, "later2", "1");
-        });
-    const Win &a = r.at("first"), &b = r.at("later"), &c = r.at("later2");
-    chk(b.found && b.w > 200 && b.scroll_max_y == 0, "a window opened later fits " + b.str());
-    chk(c.found && c.w > 200 && c.scroll_max_y == 0, "so does one opened after it " + c.str());
-    chk(!overlaps(a, b) && !overlaps(a, c) && !overlaps(b, c),
-        "and none lands on another " + a.str() + " " + b.str() + " " + c.str());
-  }
+    frames(4);
 
-  // A row split in a window with no size: the panes keep their heights and get a usable width.
-  {
-    ari::Widget g = ari::group({ari::slider_float("Top slider", "s.top", 0, 1),
-                                ari::slider_float("Bottom slider", "s.bottom", 0, 1)});
-    g.id = "split";
-    g.layout.kind = ari::LayoutKind::Grid;
-    g.layout.resizable = true;
-    g.layout.row_heights = {ari::Track{ari::Unit::Px, 60.0f}, ari::Track{ari::Unit::Px, 90.0f}};
-    ari::Widget win = ari::window("Split", {g});
-    win.id = "SW";
-    const Win w = run(ari::group({win}), {"SW"}).at("SW");
-    chk(w.w > 250, "a row split is as wide as a fitted slider row " + w.str());
-    chk(w.h >= 150, "and as tall as its panes " + w.str());
-    chk(w.scroll_max_y == 0, "with nothing to scroll " + w.str());
-  }
+    ImGuiWindow *a = find("fit_a"), *b = find("fit_b"), *c = find("fit_c"), *s = find("sized");
+    chk(a && b && c && s, "every window was drawn");
+    if (!(a && b && c && s))
+      return 1;
+    for (ImGuiWindow *x : {a, b, c})
+      chk(x->Size.x > 200.0f && x->Size.y > 60.0f && !x->ScrollbarX && !x->ScrollbarY,
+          std::string(x->Name) + " fits its sliders: " + std::to_string(int(x->Size.x)) + " x " +
+              std::to_string(int(x->Size.y)) + " px, no scrollbars");
+    chk(b->Size.y > a->Size.y, "the window with more sliders is the taller one");
+    chk(!overlap(a, b) && !overlap(b, c) && !overlap(a, c),
+        "the windows with no pos stand apart, not on top of one another");
+    chk(a->Pos.x == b->Pos.x && a->Pos.y < b->Pos.y && b->Pos.y < c->Pos.y,
+        "they stack down one column, in document order");
 
-  std::printf("%s\n", failures ? "FAILED" : "PASSED");
+    chk(s->Size.x == 200.0f && s->Size.y == 90.0f, "the sized window keeps its size");
+    chk(s->Pos.x == 500.0f && s->Pos.y == 20.0f, "and its authored pos");
+    chk(s->ScrollbarY, "and scrolls down to the sliders it cannot show");
+    chk(s->ScrollbarX, "and across to the labels it cannot show");
+
+    // The user drags the second window away: it stays where they put it, and the third moves up
+    // into its place.
+    const ImVec2 b_was = b->Pos, c_was = c->Pos;
+    const ImVec2 dropped(300.0f, 300.0f);
+    frames(1, [&] { ImGui::SetWindowPos("###fit_b", dropped); });
+    frames(3);
+    chk(b->Pos.x == dropped.x && b->Pos.y == dropped.y, "a window the user moved stays put");
+    chk(c->Pos.x == b_was.x && c->Pos.y == b_was.y && c_was.y > b_was.y,
+        "the flow closes up behind it: the third window is where the second was");
+
+    // A window with a place of its own is in the flow's way: the flow goes below it.
+    rt.set_root(ari::group({placed(panel("Fixed", "fixed", 1), 10.0f, 10.0f, 260.0f, 120.0f),
+                            panel("Flowing", "flowing", 2)}));
+    frames(4);
+    ImGuiWindow *fixed = find("fixed"), *flowing = find("flowing");
+    chk(fixed && flowing, "the fixed and the flowing window were drawn");
+    if (!(fixed && flowing))
+      return 1;
+    chk(fixed->Pos.x == 10.0f && fixed->Pos.y == 10.0f, "the fixed window stands where it is");
+    chk(!overlap(fixed, flowing) && flowing->Pos.y >= fixed->Pos.y + fixed->Size.y,
+        "the flowing window goes below it, not over it");
+
+    // More windows than columns fit in: the last column overlaps rather than leave the screen.
+    io.DisplaySize = ImVec2(400.0f, 300.0f);
+    rt.set_root(ari::group({panel("Tall one", "tall_1", 8), panel("Tall two", "tall_2", 8),
+                            panel("Tall three", "tall_3", 8), panel("Tall four", "tall_4", 8)}));
+    frames(5);
+    for (const char *id : {"tall_1", "tall_2", "tall_3", "tall_4"}) {
+      const ImGuiWindow *t = find(id);
+      chk(t && t->Pos.x >= 0.0f && t->Pos.x + t->Size.x <= io.DisplaySize.x + 0.5f,
+          std::string(id) + " is on screen: x " + (t ? std::to_string(int(t->Pos.x)) : "?") +
+              " .. " + (t ? std::to_string(int(t->Pos.x + t->Size.x)) : "?"));
+    }
+    io.DisplaySize = ImVec2(800.0f, 600.0f);
+
+    // A split-pane window with no size: its panes fit their widgets, and so it fits them.
+    ari::Widget split = panel("Split", "split", 2);
+    split.layout.row_heights = {ari::Track{ari::Unit::Px, 60.0f}, ari::Track{ari::Unit::Px, 60.0f}};
+    split.layout.resizable = true;
+    rt.set_root(ari::group({split}));
+    frames(4);
+    const ImGuiWindow *sp = find("split");
+    chk(sp && sp->Size.x > 200.0f, "a split-pane window with no size fits its panes' widgets: " +
+                                       (sp ? std::to_string(int(sp->Size.x)) : std::string("?")) +
+                                       " px wide");
+
+    // A new document whose windows ImGui already has, from the last one: its authored pos and
+    // size apply, and a window the user moved out of the flow is back in it.
+    frames(1, [&] { ImGui::SetWindowPos("###fit_a", ImVec2(500.0f, 400.0f)); });
+    rt.forget_layout();
+    rt.set_root(ari::group({panel("First", "fit_a", 3),
+                            placed(panel("Sized", "sized", 2), 200.0f, 150.0f, 220.0f, 120.0f)}));
+    frames(4);
+    chk(a->Pos.x == 10.0f && a->Pos.y == 10.0f, "the moved window is back at the top of the flow");
+    chk(s->Pos.x == 200.0f && s->Pos.y == 150.0f, "the other takes its new authored pos");
+    chk(s->Size.x == 220.0f && s->Size.y == 120.0f, "and its new authored size");
+
+    // An authored pos is in the work area: below the main menu bar, from the very first frame.
+    rt.forget_layout();
+    rt.set_root(ari::group({ari::menubar({ari::menu("File", {ari::menu_action("Quit", "quit")})}),
+                            placed(panel("Below", "below_bar", 1), 24.0f, 6.0f, 200.0f, 80.0f)}));
+    frames(2); // placed in the first; the second's WorkPos has the bar (it lags a frame)
+    const ImGuiWindow *below = find("below_bar");
+    const float bar = ImGui::GetMainViewport()->WorkPos.y;
+    chk(below && bar > 0.0f && below->Pos.y == bar + 6.0f && below->Pos.x == 24.0f,
+        "the authored pos is under the menu bar (" + std::to_string(int(bar)) + " px): y " +
+            (below ? std::to_string(int(below->Pos.y)) : std::string("?")));
+  }
+  cvc::gl::ImGuiBackend::setImGuiContext(nullptr); // with a shared imgui this clears ours too
+  ImGui::DestroyContext(ctx);
+  std::printf("cvcgl_imgui_window_fit: %s\n", failures ? "FAILED" : "PASSED");
   return failures ? 1 : 0;
 #endif
 }

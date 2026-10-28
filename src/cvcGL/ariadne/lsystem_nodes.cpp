@@ -219,8 +219,8 @@ std::shared_ptr<GraphicsNode> realize_forest_trees(SceneGraph &sg, const ari::Sc
 
   // Procedural params: authored in the .ari (props) AND live via forest_controls.ari (binds
   // forest.*). Seed the keys from the props, grow the initial forest, then the tick re-reads them
-  // and REGENERATES the mesh when a structural param changes (sliders commit on release → one regen
-  // per edit). `wind` is cheap and applied every frame.
+  // and REGENERATES the mesh when a structural param changes (forest_controls' structural sliders
+  // are `commit: release` → one regen per edit). `wind` is cheap and applied every frame.
   auto rt = std::make_shared<ForestRT>();
   rt->app = &sg.appContext();
   rt->base.seed = static_cast<std::uint64_t>(n.props.num("seed", 1337.0));

@@ -443,18 +443,18 @@ state node (`ui.docs.<doc>.tree.<id>`, §11.2), propagated one frame behind for 
 > first walk persisting a natural pane as 16 px. Tests: `ariadne_runtime_test`, `ariadne_ftxui_test`,
 > `cvcgl_imgui_table_columns`.
 >
-> **✅ Increment 5 (windows fit their content, 2026-10-26).** A window with no `size:` used to stay at
+> **✅ Increment 5 (windows fit their content, 2026-10-27).** A window with no `size:` used to stay at
 > ImGui's 32 px minimum: §11.4 persisted the size it had on its hidden measuring frame and seeded it
-> back, which stopped ImGui's auto-fit. The ImGui backend now reports no geometry until a window has
-> settled, measures labeled widgets at ImGui's auto-resize width while it fits, stops the fit at the
-> view's edge, and gives every window a horizontal scroll bar as well as the vertical one. A window
-> with no position flows down the view's left edge in columns instead of stacking at ImGui's (60, 60).
-> The FTXUI backend stops a window at the screen's edge and scrolls its body (with a scroll bar) when
-> its content does not fit. The rule is ARIADNE.md §5.8. Tests: `cvcgl_imgui_window_fit`,
-> `ariadne_runtime_test`, `ariadne_ftxui_test`. The same change adds the core's built-in **Windows
-> menu** (ARIADNE.md §5.9): a ticked item per window, bound to `tree.<id>.open`, for the windows the
-> document's own menus don't already toggle, so a closed window can always be opened again; every
-> window now honours `tree.<id>.open`. Placed with a `windows_menu` menubar entry, off with a
+> back, which stopped ImGui's auto-fit. In the ImGui backend such a window now fits its widgets every
+> frame, up to the view's edge, and takes no size from its persisted geometry; a window with a size
+> scrolls both ways; windows with no position stack down the view's left edge in columns instead of
+> at ImGui's (60, 60) (`cvcgl_imgui_window_fit`, #820). A labeled combo or colour widget reserves
+> room for its label like a slider or an input. The FTXUI backend stops a window at the screen's edge
+> and scrolls its body (with a scroll bar) when its content does not fit (`ariadne_ftxui_test`). The
+> rule is ARIADNE.md §5.8. The core also has a built-in **Windows menu** (ARIADNE.md §5.9): a ticked
+> item per window, bound to `tree.<id>.open`, for the windows the document's own menus (and a host's,
+> `AppRuntime::set_host_menus`) don't already toggle, so a closed window can always be opened again;
+> every window now honours `tree.<id>.open`. Placed with a `windows_menu` menubar entry, off with a
 > top-level `windows_menu: false`. Tests: `cvcgl_imgui_windows_menu`, `ariadne_runtime_test`,
 > `ariadne_loader_test`, `ariadne_ftxui_test`.
 
@@ -2793,7 +2793,20 @@ an nD bake is "flat array of ∏(sizes) + per-axis [lo,hi] + lookup"). **Reality
 multiplier). So **2D/3D declarations will be authorable before the raycaster can consume them**
 — the DSL intentionally leads the renderer here; 1D is fully wired, nD reserves the shape.
 
-### 10.3 The editor widget is a first-class DSL widget (ColorTable2, coming)
+### 10.3 The editor widget is a first-class DSL widget (ColorTable2 — landed)
+
+> **Status (2026-10):** landed as the built-in `tf_editor` kind, documented in
+> [`docs/TRANSFER_FUNCTIONS.md`](../TRANSFER_FUNCTIONS.md). The 1D node model (`cvc::tf::model`),
+> the ImGui editor and a composed fallback for every other backend, `.vinay` read/write and `.ctbl`
+> export, the histogram / contour spectrum / contour tree layers (the spectrum and the tree ported
+> into libcvc from libContour and VolumeRover's `contourtree`, both resumable and computed on the
+> state_exec scheduler so single-threaded wasm needs no thread), per-node renderer bindings for
+> volren / volslice / the VTK volume / fe_lab, and the shipped `transfer_function` component.
+> One deviation from the text below: the model rides the **`value()`** channel as one JSON string,
+> not `data()` — `value()` is equality-guarded, persisted and replicated, which `data()` is not, and
+> a conference peer or a saved session must carry the transfer function. 2D/nD editing remains
+> future work.
+
 
 The forthcoming editor (the **ColorTable2** Qt widget from VolumeRover2, not yet ported) is a
 DSL **widget node** that **binds to a TF's `data()` channel** — the widget is a *view*, the TF
@@ -2929,8 +2942,7 @@ two-way edge): the walk reads those to seed `SetNextWindowPos/Size/Collapsed` / 
 present, then writes the post-interaction values back at end-of-frame, so the state node is the
 authority next frame. ✅ **Landed for `geometry` (window pos+size) and `tracks` (split-pane sizes)** —
 the ImGui backend seeds with `FirstUseEver` (never re-forced, §16.2) and reports the current geometry
-back through a state-free backend seam — but not while a window is still fitting its content, whose
-size is not final (§3.0.3b increment 5); the core owns the `cvc::state` read/seed/write and rounds to px
+back through a state-free backend seam; the core owns the `cvc::state` read/seed/write and rounds to px
 so a static surface no-ops the write. `collapsed` folds into the geometry back-fill (a collapsed window
 keeps its stored content size); a distinct `visible`/`collapsed` key is a follow-up.
 `layout`/`size_policy` are authored keys a handler *may* rewrite to re-flow live. Cross-run persistence

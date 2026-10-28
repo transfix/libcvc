@@ -16,9 +16,15 @@
 // State s = (x, y, psi, v) with v = (v_x, v_y, r) the body twist, inputs u (control_dim of them,
 // divided by their training RMS); momenta p = M v and H = 1/2 p . M^-1 p + V(x, y):
 //
+// clang-format off
 //   d(x, y) = R(psi) (v_x, v_y) dt,   dpsi = r dt
-//   dp = ( ad*_v p - [R(psi)^T grad V; 0] - D(v) v + G(v) u ) dt,   ad*_v p = (p_y r, -p_x r, p_x
-//   v_y - p_y v_x) dv = M^-1 dp + Sigma dW            (Sigma diagonal: 3 numbers)
+//   dp = ( ad*_v p - [R(psi)^T grad V; 0] - D(v) v + G(v) u ) dt,
+//   ad*_v p = (p_y r, -p_x r, p_x v_y - p_y v_x)
+//   dv = M^-1 dp + Sigma dW                                  (Sigma diagonal: 3 numbers)
+// clang-format on
+//
+// The drift's energy balance is dH/dt = -v^T D v + y^T u, y = G(v)^T v (output()); the noise adds
+// noise_power() on average.
 //
 // ad*_v p is SE(2)'s coadjoint action: the r v_y and -r v_x terms of a vehicle's body-frame
 // equations. Each piece is a learned level plus a Gaussian-process residual on random features
@@ -37,9 +43,15 @@
 // so the heading stays a continuous angle). With e = M^-1 (ad*_v p - body + G u) and K = M^-1 D(v)
 // at each stage, and the twist increment eta = sqrt(h) Sigma z:
 //
-//   (I + h K_1) v_p = v + h e_1 + eta,             (x, y)_p = (x, y) + h R(psi) v,       psi_p =
-//   psi + h r (I + h/2 K_2) v' = v + h/2 (e_1 + e_2 - K_1 v) + eta, (x, y)' = (x, y) + h/2 (R(psi)
-//   v + R(psi_p) v_p),                                    psi' = psi + h/2 (r + r_p)
+// clang-format off
+//   (I + h K_1) v_p = v + h e_1 + eta,
+//   (x, y)_p = (x, y) + h R(psi) v,                          psi_p = psi + h r
+//   (I + h/2 K_2) v' = v + h/2 (e_1 + e_2 - K_1 v) + eta,
+//   (x, y)' = (x, y) + h/2 (R(psi) v + R(psi_p) v_p),        psi' = psi + h/2 (r + r_p)
+// clang-format on
+//
+// It is second order (a Heun predictor-corrector with the damping implicit), not structure-
+// preserving: it keeps no discrete energy identity.
 //
 // se2_vehicle evaluates one weight draw (the posterior mean, or a sample) and is templated on the
 // scalar, so the same code runs in float and double. Parity with the JAX package is a test
@@ -307,6 +319,46 @@ public:
     const vec3<T> v{state[3], state[4], state[5]};
     const vec3<T> p = solve3(minv_, v);
     return T(0.5) * (p[0] * v[0] + p[1] * v[1] + p[2] * v[2]) + potential(state[0], state[1]);
+  }
+
+  // M = (M^-1)^-1, row-major (symmetric).
+  mat3<T> mass() const {
+    mat3<T> m{};
+    for (int j = 0; j < 3; ++j) {
+      vec3<T> e{};
+      e[j] = T(1);
+      const vec3<T> col = solve3(minv_, e);
+      for (int i = 0; i < 3; ++i)
+        m[3 * i + j] = col[i];
+    }
+    return m;
+  }
+
+  // y = G(v)^T v at the state's twist (control_dim outputs, into y): the output conjugate to the
+  // input, so y . u is the power G u supplies.
+  void output(const T *state, T *y) const {
+    const vec3<T> v{state[3], state[4], state[5]};
+    std::array<T, 3 * kSe2MaxControls> G{};
+    control_matrix_at(v, G.data());
+    const int nu = w_.control_dim;
+    for (int j = 0; j < nu; ++j) {
+      T acc = T(0);
+      for (int i = 0; i < 3; ++i)
+        acc += G[nu * i + j] * v[i];
+      y[j] = acc;
+    }
+  }
+
+  // The power the diffusion injects on average, 1/2 tr(Sigma^T M Sigma): the increment is added
+  // to the twist, so dH = v^T M dv + 1/2 dv^T M dv and, Sigma constant (Ito and Stratonovich
+  // agree), E[dH] = (-v^T D v + y^T u + noise_power()) dt. Pathwise the drift alone is passive;
+  // the noise is booked here, not by D.
+  T noise_power() const {
+    const mat3<T> m = mass();
+    T acc = T(0);
+    for (int i = 0; i < 3; ++i)
+      acc += m[4 * i] * w_.diffusion[i] * w_.diffusion[i];
+    return T(0.5) * acc;
   }
 
   // Every piece of the drift at (state, u); st's feature buffers are sized here.

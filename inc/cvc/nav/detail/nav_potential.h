@@ -22,7 +22,10 @@
 // at every call site).
 //
 // Host and device (CVC_NP_HD), float, side-effect free. Nothing here is on a force path: the
-// rollouts evaluate U only when a caller asks for it, so their outputs are unchanged.
+// rollouts evaluate U only when a caller asks for it, so their outputs are unchanged. The *_t
+// templates are the same formulas in any precision: the float functions are their float
+// instantiations, op for op, and the per-step energy books (rollout_energy, material.h) evaluate
+// them in double.
 
 #ifndef CVC_NAV_DETAIL_NAV_POTENTIAL_H
 #define CVC_NAV_DETAIL_NAV_POTENTIAL_H
@@ -51,11 +54,21 @@ struct potential_terms {
 
 namespace detail {
 
+// The C math functions by precision: logf etc. for float (the functions below always called),
+// log etc. for double.
+CVC_NP_HD inline float np_log(float x) { return logf(x); }
+CVC_NP_HD inline double np_log(double x) { return log(x); }
+CVC_NP_HD inline float np_log1p(float x) { return log1pf(x); }
+CVC_NP_HD inline double np_log1p(double x) { return log1p(x); }
+CVC_NP_HD inline float np_exp(float x) { return expf(x); }
+CVC_NP_HD inline double np_exp(double x) { return exp(x); }
+
 // -(d - dh)^2 ln(d / dh), the IPC barrier on (0, dh).
-CVC_NP_HD inline float ipc_b_core(float d, float dh) {
-  const float A = d - dh;
-  return -(A * A) * logf(d / dh);
+template <class T> CVC_NP_HD inline T ipc_b_core_t(T d, T dh) {
+  const T A = d - dh;
+  return -(A * A) * np_log(d / dh);
 }
+CVC_NP_HD inline float ipc_b_core(float d, float dh) { return ipc_b_core_t<float>(d, dh); }
 
 // The potential of diff::ipc_ and drive.cpp's ipc_dbdd: b(d) on [1e-6, dh) and 0 from dh up.
 // Below 1e-6 those hold b'(1e-6), so b continues linearly with that slope.
@@ -90,25 +103,29 @@ CVC_NP_HD inline double ipc_pw_knee(double dh, double max_grad = 200.0) {
 // The potential of material_rollout.h's ipc_dbdd_pw: b(d) where its derivative is within the
 // [-200, 200] clamp, continued linearly with slope -200 below the knee (and through d <= 1e-9,
 // whose -500 the clamp also makes -200). Zero from dh up.
-CVC_NP_HD inline float ipc_b_pw(float d, float dh) {
-  const float eps = 1e-9f, max_grad = 200.0f;
+template <class T> CVC_NP_HD inline T ipc_b_pw_t(T d, T dh) {
+  const T eps = T(1e-9f), max_grad = T(200.0f);
   if (!(d < dh))
-    return 0.0f;
+    return T(0);
   if (d > eps) {
-    const float bp = -(2.0f * (d - dh) * logf(d / dh) + (d - dh) * (d - dh) / d);
+    const T bp = -(T(2) * (d - dh) * np_log(d / dh) + (d - dh) * (d - dh) / d);
     if (!(bp < -max_grad))
-      return ipc_b_core(d, dh);
+      return ipc_b_core_t<T>(d, dh);
   }
-  const float knee = static_cast<float>(ipc_pw_knee(static_cast<double>(dh)));
-  return ipc_b_core(knee, dh) + max_grad * (knee - d);
+  const T knee = static_cast<T>(ipc_pw_knee(static_cast<double>(dh)));
+  return ipc_b_core_t<T>(knee, dh) + max_grad * (knee - d);
 }
+CVC_NP_HD inline float ipc_b_pw(float d, float dh) { return ipc_b_pw_t<float>(d, dh); }
 
 // The potential of sdf_barrier_db = -sigmoid(k (d_hat - phi)): b_sp(phi) = softplus(k (d_hat -
 // phi)) / k, in phi's units.
-CVC_NP_HD inline float sdf_barrier_b(float phi, float k_sharp, float d_hat) {
-  const float x = k_sharp * (d_hat - phi);
-  const float sp = x > 0.0f ? x + log1pf(expf(-x)) : log1pf(expf(x));
+template <class T> CVC_NP_HD inline T sdf_barrier_b_t(T phi, T k_sharp, T d_hat) {
+  const T x = k_sharp * (d_hat - phi);
+  const T sp = x > T(0) ? x + np_log1p(np_exp(-x)) : np_log1p(np_exp(x));
   return sp / k_sharp;
+}
+CVC_NP_HD inline float sdf_barrier_b(float phi, float k_sharp, float d_hat) {
+  return sdf_barrier_b_t<float>(phi, k_sharp, d_hat);
 }
 
 } // namespace detail

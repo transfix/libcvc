@@ -102,12 +102,13 @@ public:
     int cell_px_w = 8;
     int cell_px_h = 16;
     // How draw_image and set_background paint. Color draws coloured half-blocks (two pixels per
-    // cell), Mono a luminance ramp; both work on any terminal. Kitty and Sixel draw real pixels
-    // (term_graphics.h): Kitty as Unicode placeholder cells for an image sent once, Sixel as a
-    // bitmap re-sent after each draw. Auto picks Kitty, else Sixel, from what run() detects in the
+    // cell), Mono a luminance ramp; both work on any terminal. Kitty, Sixel and Iterm draw real
+    // pixels (term_graphics.h): Kitty as Unicode placeholder cells for an image sent once, Sixel
+    // and Iterm (an iTerm2 inline image, which Windows' ConPTY passes on) as a bitmap re-sent
+    // after each draw. Auto picks Kitty, else Sixel, else Iterm, from what run() detects in the
     // terminal (terminal_graphics()), else Color, or Mono on a terminal with no colour. Hosted mode
     // (the tvision desktop, which owns the output) always draws half-blocks.
-    enum class ImageColor { Auto, Mono, Color, Kitty, Sixel };
+    enum class ImageColor { Auto, Mono, Color, Kitty, Sixel, Iterm };
     ImageColor image_color = ImageColor::Auto;
     // A Kitty image bigger than this many pixels is sent scaled down, and the terminal scales it
     // back up to its cells. It bounds what an image that changes every frame (a 3D scene) costs.
@@ -137,6 +138,7 @@ public:
                     bool *p_open = nullptr) override;
   void end_window() override;
   void seed_window_geometry(const WindowGeom &g) override;
+  void reset_layout() override; // a new document: windows placed afresh, as when first drawn
   WindowGeom window_geometry() const override;
   void push_id(const char *id) override;
   void pop_id() override;
@@ -192,7 +194,7 @@ public:
   // Publish (or replace) the image a Kind::Image widget named `name` shows — the terminal
   // counterpart of cvc::gl::ImGuiBackend::set_image. Any pixel format / data type; it is converted
   // to 8-bit RGB once here and box-filtered to the cell grid at draw time.
-  void set_image(const std::string &name, const cvc::image &img);
+  void set_image(const std::string &name, const cvc::image &img) override;
   void clear_image(const std::string &name);
 
   // Draw the published image `name` behind everything, stretched over the whole screen: the
@@ -241,6 +243,14 @@ public:
   // drawn) and run a walk so the widget it lands on reports its edit to the core. Returns whether
   // the UI used the event; an unused key is what a host forwards to the document's on_key.
   bool feed(Runtime &rt, const TermEvent &ev);
+
+  // What the terminal loop does with each event it reads: the UI first (feed), then `background`,
+  // then `unhandled` (the document's on_key / on_pointer). While the Keys window waits for a key
+  // (Runtime::key_capture_pending) every key goes straight to `unhandled`: Tab, the arrows and
+  // Return would otherwise move the UI's focus or press a button.
+  void route(Runtime &rt, const TermEvent &ev,
+             const std::function<bool(const TermEvent &)> &background,
+             const std::function<void(const TermEvent &)> &unhandled);
 
   // ---- hosted chrome ----
   // With Options::hosted this backend draws no window frames and no menu bar. It keeps each

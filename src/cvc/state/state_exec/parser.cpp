@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cctype>
 #include <charconv>
 #include <cstring>
@@ -5,6 +6,7 @@
 #include <cvc/state/state_exec/parser.h>
 #include <cvc/state/state_exec/scheduler.h> // defaults_prefix / sched_prefix
 #include <cvc/state/state_exec/utf8.h> // SE-2: \u/\x escapes -> UTF-8, and UTF-8 identifier bytes
+#include <iterator>
 #include <optional>
 #include <sstream>
 
@@ -133,7 +135,18 @@ void parser::open_frame(bool quote) {
   if (_frames.size() >= _opts.max_depth)
     error("nesting deeper than " + std::to_string(_opts.max_depth) +
           " levels (state_exec setting parser.max_depth)");
-  _frames.push_back(frame{quote, {}});
+  frame f{quote, {}};
+  if (!quote) {
+    // Collect the elements in a kept vector, or one with room for a typical form's, so that
+    // collecting doesn't grow it an element at a time.
+    if (!_spare_elements.empty()) {
+      f.elements = std::move(_spare_elements.back());
+      _spare_elements.pop_back();
+    } else {
+      f.elements.reserve(8);
+    }
+  }
+  _frames.push_back(std::move(f));
 }
 
 parser::read_status parser::read(value_t &out, std::size_t &budget) {
@@ -161,7 +174,19 @@ parser::read_status parser::read(value_t &out, std::size_t &budget) {
       }
       if (c == ')' && !_frames.empty() && !_frames.back().quote) {
         advance();
-        datum = make_list(std::move(_frames.back().elements));
+        // A short list gets a vector of its exact size, and the one it was collected in is kept
+        // for the next list; a long one takes the vector it was collected in, as it always did,
+        // so that the parser keeps no more than a few short vectors.
+        std::vector<value_t> &elements = _frames.back().elements;
+        if (elements.capacity() > kSpareElements) {
+          datum = make_list(std::move(elements));
+        } else {
+          datum = make_list(std::vector<value_t>(std::make_move_iterator(elements.begin()),
+                                                 std::make_move_iterator(elements.end())));
+          elements.clear();
+          if (_spare_elements.size() < _frames.capacity())
+            _spare_elements.push_back(std::move(elements));
+        }
         _frames.pop_back();
       } else if (c == '"') {
         datum = parse_string();
@@ -292,11 +317,28 @@ value_t parser::parse_string() {
         break;
       }
     } else {
-      result += c;
-      advance();
+      // A run of plain characters up to the next quote or escape, added at once.
+      std::size_t stop = _pos + 1;
+      while (stop < _input.size() && _input[stop] != '"' && _input[stop] != '\\')
+        ++stop;
+      skip_run(stop, result);
     }
   }
   error("unterminated string literal");
+}
+
+void parser::skip_run(std::size_t stop, std::string &into) {
+  const std::string_view run = _input.substr(_pos, stop - _pos);
+  into.append(run);
+  // The line and column advance() would have left.
+  const std::size_t last_newline = run.rfind('\n');
+  if (last_newline == std::string_view::npos) {
+    _col += run.size();
+  } else {
+    _line += static_cast<std::size_t>(std::count(run.begin(), run.end(), '\n'));
+    _col = 1 + (run.size() - last_newline - 1);
+  }
+  _pos = stop;
 }
 
 // SE-3: b"..." bytes literal. Unlike parse_string (text), escapes are BYTE-valued: \xNN is a raw
@@ -356,8 +398,10 @@ value_t parser::parse_bytes_string() {
         break;
       }
     } else {
-      bytes += c;
-      advance();
+      std::size_t stop = _pos + 1;
+      while (stop < _input.size() && _input[stop] != '"' && _input[stop] != '\\')
+        ++stop;
+      skip_run(stop, bytes);
     }
   }
   error("unterminated bytes literal");
@@ -406,12 +450,28 @@ static bool is_symbol_char(char c) {
   }
 }
 
-value_t parser::parse_number_or_symbol(char first) {
-  std::string token(1, first);
+// Whether strtod could read a number from the whole of `token` (symbol characters only): it
+// reads an optional sign, then digits, a '.', "inf"/"infinity" or "nan" (any case), or a hex
+// "0x" number, so a token starting otherwise is a symbol without asking it.
+static bool may_be_float(std::string_view token) {
+  std::size_t i = token[0] == '+' || token[0] == '-' ? 1 : 0;
+  if (i >= token.size())
+    return false;
+  const char c = token[i];
+  return (c >= '0' && c <= '9') || c == '.' || c == 'i' || c == 'I' || c == 'n' || c == 'N';
+}
 
-  while (_pos < _input.size() && is_symbol_char(peek())) {
-    token += advance();
-  }
+value_t parser::parse_number_or_symbol(char first) {
+  // The token is `first` (just read) and the symbol characters after it, read in one go: none is
+  // a newline, so the column moves on by the token's length.
+  (void)first;
+  const std::size_t start = _pos - 1;
+  std::size_t end = _pos;
+  while (end < _input.size() && is_symbol_char(_input[end]))
+    ++end;
+  _col += end - _pos;
+  _pos = end;
+  const std::string_view token = _input.substr(start, end - start);
 
   // Check for boolean literals
   if (token == "#t" || token == "true")
@@ -427,18 +487,20 @@ value_t parser::parse_number_or_symbol(char first) {
       return value_t(ival);
   }
 
+  std::string text(token);
+
   // Try float
-  {
+  if (may_be_float(token)) {
     // std::from_chars for double may not be available everywhere;
     // fall back to strtod for robustness
-    char *end = nullptr;
-    double dval = std::strtod(token.c_str(), &end);
-    if (end == token.c_str() + token.size() && end != token.c_str())
+    char *stop = nullptr;
+    double dval = std::strtod(text.c_str(), &stop);
+    if (stop == text.c_str() + text.size() && stop != text.c_str())
       return value_t(dval);
   }
 
   // It's a symbol
-  return value_t(symbol{std::move(token)});
+  return value_t(symbol{std::move(text)});
 }
 
 } // namespace cvc::state_exec

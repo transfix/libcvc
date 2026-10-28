@@ -42,6 +42,12 @@
 // pixels (default 1024 x 768), writing the last one to --png FILE; with --terminal, the last frame
 // as text (--ansi keeps its colours), plus the rendered scene as --png if given.
 // check loads the document as run would, offscreen, and prints its warnings.
+//
+// run in a window adds a Settings menu after the document's own (the scene's shadows, grid, axis
+// and bounding boxes). A gallery: with $CVC_ARIGL_GALLERY naming a catalog of demos (gallery.h),
+// the menu bar is arigl's, the same for every document: Demos, Document (the document's own menus)
+// and Settings. A demo picked from Demos that is a .ari document replaces the running one in the
+// same window; any other opens on its own (its page in the browser, its program natively).
 
 #include <algorithm>
 #include <cctype> // std::isalnum / std::isdigit — sanitize the conference node id
@@ -106,6 +112,8 @@
 #include <cvc/gl/state_publisher.h> // single-thread wasm: flush the publisher at frame cadence
 #include <emscripten.h>             // emscripten_sleep — yield the asyncify loop to the browser
 #endif
+#include "gallery.h" // the Demos menu over $CVC_ARIGL_GALLERY
+
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/ImGuiOverlay.h>
 #include <cvc/gl/SceneGraph.h>
@@ -124,6 +132,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <utility> // std::exchange
 #include <vector>
 #include <vtkRenderWindow.h> // arigl info: the GL it renders with
 
@@ -151,7 +160,11 @@ int usage(int code) {
                "info prints what this host provides, in a window or with --terminal: the GL it\n"
                "renders with, the terminal (size, colours, kitty / Sixel), what libcvc was built\n"
                "with, the capabilities a document's requires: and (has? ...) see, and how many\n"
-               "functions programs can call (--functions lists them; --json prints JSON).\n",
+               "functions programs can call (--functions lists them; --json prints JSON).\n"
+               "\n"
+               "With CVC_ARIGL_GALLERY naming a catalog of demos (JSON), run adds a Demos menu\n"
+               "and puts the document's own menus under Document; a .ari demo picked from Demos\n"
+               "replaces the document in this window.\n",
                ari::host_flags_help().c_str());
   return code;
 }
@@ -202,6 +215,8 @@ ari::FtxuiBackend::Options::ImageColor image_mode(const std::string &s) {
     return Mode::Kitty;
   if (s == "sixel")
     return Mode::Sixel;
+  if (s == "iterm")
+    return Mode::Iterm;
   if (s == "color")
     return Mode::Color;
   if (s == "mono")
@@ -226,6 +241,30 @@ template <class Backend> bool publish_images(Backend &backend, const ari::HostOp
 // stream's producer has time to deliver frames into them. The window's scene clock stays fixed.
 std::chrono::duration<double> snapshot_period(const ari::HostOptions &o) {
   return std::chrono::duration<double>(1.0 / (o.fps > 0 ? o.fps : 20));
+}
+
+// Settings' item that opens the Keys window AppRuntime puts in every document.
+ari::Widget keys_menu_item() {
+  return ari::menu_toggle("Keys...", std::string("tree.") + ari::kKeysWindow + ".open");
+}
+
+// The camera's fly keys, for the Keys window: the camera reads them from its own state, so the
+// bindings have no `on`.
+std::vector<ari::KeyBinding> camera_keys(const cvc::gl::CameraController &cam) {
+  const std::string at = "/" + cam.stateName() + ".keys.";
+  const std::string group = "Camera (fly mode; Tab switches)";
+  std::vector<ari::KeyBinding> keys;
+  for (const auto &[key, label] :
+       std::vector<std::pair<const char *, const char *>>{{"forward", "Forward"},
+                                                          {"backward", "Back"},
+                                                          {"strafe_left", "Left"},
+                                                          {"strafe_right", "Right"},
+                                                          {"up", "Up"},
+                                                          {"down", "Down"},
+                                                          {"sprint", "Faster"},
+                                                          {"toggle_mode", "Orbit / fly"}})
+    keys.push_back({std::string("camera_") + key, label, group, {}, "", at + key});
+  return keys;
 }
 
 // The SDL-free cvc::gl::InputEvent, as the runtime's cvc::ariadne::InputEvent.
@@ -1498,7 +1537,9 @@ int run_window(const ari::HostOptions &o) {
 
   cvc::app app;
   cvc::gl::SceneGraph sg(app, o.prefix.empty() ? kDefaultPrefix : o.prefix);
-  cvc::gl::SceneRenderer view(sg, width, height, offscreen, "arigl");
+  // The viewer is "main", as the shared components expect: camera_controls binds
+  // viewers.main.camera.settings.*.
+  cvc::gl::SceneRenderer view(sg, width, height, offscreen, "main");
   view.setBackground(0.09, 0.10, 0.12);
   cvc::gl::CameraController cam(view);
   cam.setMode(cvc::gl::CameraController::Mode::Orbit);
@@ -1538,15 +1579,63 @@ int run_window(const ari::HostOptions &o) {
     info.gl = describe_gl(view, info.gl_info);
     return print_info(std::move(info), o);
   }
+  // A gallery ($CVC_ARIGL_GALLERY): a demo picked from its Demos menu that is a document loads in
+  // this window between frames (the run loop below).
+  std::string gallery_error;
+  const arigl::gallery gallery = arigl::gallery::load(
+      std::getenv("CVC_ARIGL_GALLERY") ? std::getenv("CVC_ARIGL_GALLERY") : "", &gallery_error);
+  if (!gallery_error.empty())
+    std::fprintf(stderr, "arigl: CVC_ARIGL_GALLERY: %s\n", gallery_error.c_str());
+  std::string gallery_next;  // a document the Demos menu asked for
+  bool gallery_left = false; // the Demos menu started another program
+  // arigl's menus: Settings after the document's own; with a gallery, a menu bar of arigl's that
+  // stays the same from document to document, the document's menus under Document. Settings opens
+  // the Keys window (every document's keys, and the camera's) and holds the scene's display
+  // settings.
+  const auto host_menus = [&](const std::string &doc) {
+    std::vector<ari::Widget> menus;
+    if (!gallery.empty())
+      menus.push_back(gallery.menu(doc));
+    menus.push_back(ari::AppRuntime::document_menus(gallery.empty() ? "" : "Document"));
+    menus.push_back(
+        ari::menu("Settings", {keys_menu_item(), ari::separator(), ari::custom("scene_settings")}));
+    return menus;
+  };
+  rt.app_runtime().set_host_menus(host_menus(o.doc));
+  rt.app_runtime().set_host_keys(camera_keys(cam));
+  if (!gallery.empty())
+    gallery.install(rt.app_runtime(), &gallery_next, &gallery_left);
   if (const int status = load_document(rt, o); status >= 0)
     return status;
   note_misplaced(rt.app_runtime(), o);
   // The rich scene panels (scene_panel / stage_lighting_panel / scene_menu), for a document that
-  // uses them rather than the declarative components. They need the realized lighting rig.
-  if (const gla::RealizedScene *realized = rt.realized()) {
-    cvc::gl::StageLighting *rig = realized->rigs.empty() ? nullptr : realized->rigs.front().get();
+  // uses them rather than the declarative components, and Settings' scene_settings. They need the
+  // realized lighting rig, so a document loaded later registers them again.
+  const auto register_panels = [&] {
+    const gla::RealizedScene *realized = rt.realized();
+    cvc::gl::StageLighting *rig =
+        realized && !realized->rigs.empty() ? realized->rigs.front().get() : nullptr;
     gla::register_scene_panels(rt.backend(), sg, rig);
-  }
+  };
+  register_panels();
+  // Between frames: load the document the Demos menu picked, in place of this one. A document that
+  // fails to load leaves the current one running.
+  const auto switch_document = [&] {
+    if (gallery_left)
+      rt.request_close();
+    if (gallery_next.empty())
+      return;
+    const std::string next = std::exchange(gallery_next, std::string());
+    rt.app_runtime().set_host_menus(host_menus(next));
+    rt.app_runtime().set_document_args({}, "arigl run " + next);
+    try {
+      print_warnings(rt.load(next));
+      register_panels();
+      arigl::gallery::show_in_url(next);
+    } catch (const std::exception &e) {
+      std::fprintf(stderr, "arigl: %s\n", e.what());
+    }
+  };
   if (o.command == "check")
     return 0;
 
@@ -1569,16 +1658,27 @@ int run_window(const ari::HostOptions &o) {
     return 0;
   }
 
-  // Input the VTK interactor does not carry: touch navigation, SDL events (a wasm canvas), and the
-  // OS signals trapped below. Fed before the drain, so the document sees them this frame.
+  // Input the VTK interactor does not carry: touch navigation, SDL's keys and pointer (the
+  // documents' on_key / on_pointer), and the OS signals trapped below. Fed before the drain, so
+  // the document sees them this frame.
   cvc::gl::SdlInput sdl;
   sdl.init();
   std::string exit_signal;
   rt.set_input_pump([&] {
     conf.pump(); // push this frame's room-tree writes (room-join + roster) to the relay
     touch.update();
-    for (const cvc::gl::InputEvent &e : sdl.poll())
+    if (!sdl.attached())
+      sdl.attach(view.renderWindow()); // once VTK has made its window
+    // What ImGui takes -- the keys typed into a field, a click on a window -- is not the
+    // document's. A release always is, so nothing the document saw go down stays held.
+    for (const cvc::gl::InputEvent &e : sdl.poll()) {
+      using K = cvc::gl::InputEvent::Kind;
+      if ((e.kind == K::KeyDown && ui.wantsKeyboard()) ||
+          ((e.kind == K::MouseMove || e.kind == K::MouseButtonDown || e.kind == K::MouseWheel) &&
+           ui.wantsMouse()))
+        continue;
       rt.post_input(to_ari(e));
+    }
     for (std::string sig = ari::take_trapped_signal(); !sig.empty();
          sig = ari::take_trapped_signal())
       if (!rt.post_signal(sig, "os")) { // no on_signal: the host's default is to stop
@@ -1598,6 +1698,7 @@ int run_window(const ari::HostOptions &o) {
     // browser throttles requestAnimationFrame; FrameYield::App above keeps VTK from yielding twice.
     rt.step(1.0 / fps);
     print_warnings(rt.take_warnings());
+    switch_document();
 #ifndef __EMSCRIPTEN_PTHREADS__
     sg.publisher().flush(); // single-thread wasm: no worker drains publishes, so do it per frame
 #endif
@@ -1606,6 +1707,7 @@ int run_window(const ari::HostOptions &o) {
     const auto start = std::chrono::steady_clock::now();
     rt.step(1.0 / fps);
     print_warnings(rt.take_warnings());
+    switch_document();
     std::this_thread::sleep_until(start + period);
 #endif
   }
@@ -1665,6 +1767,10 @@ int run_terminal(const ari::HostOptions &o) {
     rt.add_component_path(d);
   rt.on("quit", [&] { rt.request_close(); });
   rt.register_verb("quit", [&] { rt.request_close(); });
+  // As in a window, Settings after the document's own menus opens the Keys window (the terminal's
+  // camera has no keys to list; the scene's display settings are ImGui's).
+  rt.set_host_menus({ari::AppRuntime::document_menus(), ari::menu("Settings", {keys_menu_item()})});
+  rt.set_host_keys({});
   rt.set_document_args(o.doc_args, "arigl " + o.command + " --terminal " + o.doc,
                        /*validate=*/o.command != "check");
   // Ask the terminal what it can draw before the load, so requires: / (has? "term.kitty") see it
@@ -1676,7 +1782,8 @@ int run_terminal(const ari::HostOptions &o) {
                      term.tty &&
                      (look.image_color == ari::FtxuiBackend::Options::ImageColor::Auto ||
                       look.image_color == ari::FtxuiBackend::Options::ImageColor::Kitty ||
-                      look.image_color == ari::FtxuiBackend::Options::ImageColor::Sixel);
+                      look.image_color == ari::FtxuiBackend::Options::ImageColor::Sixel ||
+                      look.image_color == ari::FtxuiBackend::Options::ImageColor::Iterm);
   if (probe) {
     graphics = ari::gfx::probe_terminal();
     if (o.cell_w > 0) {
@@ -1707,7 +1814,8 @@ int run_terminal(const ari::HostOptions &o) {
     const int height = std::max(4, o.height ? o.height : 30);
     using Mode = ari::FtxuiBackend::Options::ImageColor;
     const bool pixels =
-        o.ansi && (look.image_color == Mode::Kitty || look.image_color == Mode::Sixel);
+        o.ansi && (look.image_color == Mode::Kitty || look.image_color == Mode::Sixel ||
+                   look.image_color == Mode::Iterm);
     if (pixels) { // the cell size images are drawn at: the terminal's, or --cell-size
       ari::TermGraphics g = ari::gfx::probe_terminal();
       if (o.cell_w > 0) {
@@ -1759,6 +1867,20 @@ int run_terminal(const ari::HostOptions &o) {
 } // namespace
 
 int main(int argc, char **argv) {
+#ifdef CVC_ARIGL_WASM_TERMINAL
+  // arigl_term, the browser terminal (web/arigl_term.html): the page passes the command line, and
+  // opened without one it runs terminal_scene. Always in the terminal: its canvas is the scene's.
+  const char *baked[] = {"arigl",      "run",
+                         "--terminal", "--component-path",
+                         "/",          "/ariadne/documents/terminal_scene.ari"};
+  if (argc < 2) {
+    argc = static_cast<int>(sizeof baked / sizeof *baked);
+    argv = const_cast<char **>(baked);
+  }
+  constexpr bool kTerminalOnly = true;
+#else
+  constexpr bool kTerminalOnly = false;
+#endif
   const ari::HostOptions o =
       ari::parse_host_args(argc, argv, {"--terminal", "--json", "--functions"});
   if (o.help)
@@ -1776,7 +1898,7 @@ int main(int argc, char **argv) {
     std::fprintf(stderr, "arigl: --backend is ftxui or tvision, not '%s'\n", o.backend.c_str());
     return 2;
   }
-  const bool terminal = has_flag(o, "--terminal");
+  const bool terminal = kTerminalOnly || has_flag(o, "--terminal");
   if (o.command != "info" && (has_flag(o, "--json") || has_flag(o, "--functions"))) {
     std::fprintf(stderr, "arigl: --json and --functions are for arigl info\n");
     return usage(2);

@@ -5,10 +5,12 @@
  *
  * WHAT A LANE IS
  *   One long-lived worker thread draining a FIFO of std::function<void()> jobs, in submission
- *   order, one at a time. It is the persistent counterpart of the per-call compute-pool offload in
- *   async_task.h: launch_pool_task starts a fresh pool thread per call (fine for an occasional HTTP
- *   request or volume filter, ruinous for a per-frame sim tick, and an on-demand Worker spawn per
- *   call on wasm). A lane is created once, so a per-tick job is a queue push plus a wake, and
+ *   order, one at a time. It is the dedicated counterpart of the per-call offload in
+ *   async_task.h: launch_pool_task queues each call on the app's shared background pool, whose
+ *   persistent workers run whatever is queued in priority order (fine for an occasional HTTP
+ *   request or volume filter, but a per-frame sim tick then waits behind other work and runs on
+ *   whichever worker is free). A lane is created once, so a per-tick job is a queue push plus a
+ *   wake of its own thread, and
  *   because a lane runs ONE job at a time, state a lane's jobs own (a sim world, a geometry diff
  *   baseline) is touched by one thread with no locking.
  *

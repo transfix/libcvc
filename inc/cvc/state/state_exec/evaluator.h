@@ -18,6 +18,7 @@
 #include <functional>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -62,10 +63,14 @@ struct evaluation_stats {
   evaluation_stats(const evaluation_stats &) = delete;
   evaluation_stats &operator=(const evaluation_stats &) = delete;
 
+  /// Start counting afresh. (Not while an evaluator steps the state on another thread: the
+  /// evaluators count their own eval steps without a locked add, see count_eval_step(), so a
+  /// reset made meanwhile can be lost.)
   void start() {
     std::lock_guard lk(mu);
     start_time = std::chrono::steady_clock::now();
     step_count.store(0, std::memory_order_relaxed);
+    eval_step_count.store(0, std::memory_order_relaxed);
     for (std::size_t k = 0; k < kKinds; ++k) {
       kind_steps[k].store(0, std::memory_order_relaxed);
       kind_ns[k].store(0, std::memory_order_relaxed);
@@ -78,7 +83,13 @@ struct evaluation_stats {
     end_time = std::chrono::steady_clock::now();
     complete = true;
   }
-  /// Count a step, as spent on `kind`.
+  /// Count a step, as spent on `kind`. Any thread may count, and read, at any time, also while an
+  /// evaluator steps the state: this is a locked add of a counter the evaluators' own count
+  /// (count_eval_step()) doesn't write, so neither loses the other's steps. Every other write to
+  /// that counter is a locked add too, the stackless evaluator's read and data steps included,
+  /// but for start() and a move of the stats, which copies the counts: a count made meanwhile is
+  /// lost. The stackless evaluator moves them in one step, the one that ends a script read in
+  /// slices (parse_options::step_tokens).
   void increment_step(step_kind kind = step_kind::eval) {
     step_count.fetch_add(1, std::memory_order_relaxed);
     if (kind != step_kind::eval) // eval steps are the rest, so the common step costs no more
@@ -94,7 +105,10 @@ struct evaluation_stats {
     if (kind != step_kind::eval)
       kind_steps[static_cast<std::size_t>(kind)].fetch_add(n, std::memory_order_relaxed);
   }
-  uint64_t get_step_count() const { return step_count.load(std::memory_order_relaxed); }
+  uint64_t get_step_count() const {
+    return step_count.load(std::memory_order_relaxed) +
+           eval_step_count.load(std::memory_order_relaxed);
+  }
   /// Steps spent on `kind`.
   uint64_t steps(step_kind kind) const {
     if (kind != step_kind::eval)
@@ -135,9 +149,22 @@ struct evaluation_stats {
   }
 
 private:
+  friend class evaluator;
+  friend class stackless_evaluator;
+  /// increment_step(step_kind::eval), by the evaluator stepping the state: the only thread that
+  /// writes eval_step_count while it steps, one step at a time, so the count is a load and a
+  /// store of that counter, not a locked read-modify-write (anyone may still read it; a count
+  /// another thread makes meanwhile goes to step_count).
+  void count_eval_step() {
+    eval_step_count.store(eval_step_count.load(std::memory_order_relaxed) + 1,
+                          std::memory_order_relaxed);
+    last_kind = step_kind::eval;
+  }
   static constexpr std::size_t kKinds = 4;
   void copy_counts(const evaluation_stats &o) {
     step_count.store(o.step_count.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    eval_step_count.store(o.eval_step_count.load(std::memory_order_relaxed),
+                          std::memory_order_relaxed);
     for (std::size_t k = 0; k < kKinds; ++k) {
       kind_steps[k].store(o.kind_steps[k].load(std::memory_order_relaxed),
                           std::memory_order_relaxed);
@@ -150,7 +177,9 @@ private:
   mutable std::mutex mu;
   std::chrono::steady_clock::time_point start_time{};
   std::chrono::steady_clock::time_point end_time{};
-  std::atomic<uint64_t> step_count{0};
+  std::atomic<uint64_t> step_count{0}; // steps counted by increment_step() and add_steps()
+  // Eval steps the evaluator stepping the state counted (count_eval_step()): only it writes this.
+  std::atomic<uint64_t> eval_step_count{0};
   std::atomic<uint64_t> kind_steps[kKinds] = {};
   std::atomic<uint64_t> kind_ns[kKinds] = {};
   std::atomic<uint64_t> data_node_count{0};
@@ -201,28 +230,28 @@ public:
 
 private:
   // Evaluate `expr`, keeping it on the trail meanwhile (an exception's traceback).
-  value_t eval_internal(const value_t &expr, environment_ptr env);
-  value_t eval_form(const value_t &expr, environment_ptr env);
+  value_t eval_internal(const value_t &expr, const environment_ptr &env);
+  value_t eval_form(const value_t &expr, const environment_ptr &env);
   void check_interrupted();
 
   // Special form handlers
-  value_t do_if(const std::vector<value_t> &args, environment_ptr env);
-  value_t do_begin(const std::vector<value_t> &args, environment_ptr env);
-  value_t do_while(const std::vector<value_t> &args, environment_ptr env);
-  value_t do_for(const std::vector<value_t> &args, environment_ptr env);
-  value_t do_set(const std::vector<value_t> &args, environment_ptr env);
+  value_t do_if(const std::vector<value_t> &args, const environment_ptr &env);
+  value_t do_begin(std::span<const value_t> args, const environment_ptr &env);
+  value_t do_while(const std::vector<value_t> &args, const environment_ptr &env);
+  value_t do_for(const std::vector<value_t> &args, const environment_ptr &env);
+  value_t do_set(const std::vector<value_t> &args, const environment_ptr &env);
   value_t do_quote(const std::vector<value_t> &args);
-  value_t do_lambda(const std::vector<value_t> &args, environment_ptr env);
-  value_t do_return(const std::vector<value_t> &args, environment_ptr env);
-  value_t do_let(const std::vector<value_t> &args, environment_ptr env);
-  value_t do_super(const std::vector<value_t> &args, environment_ptr env);
-  value_t do_defun(const std::vector<value_t> &args, environment_ptr env);
-  value_t do_defclass(const std::vector<value_t> &args, environment_ptr env);
-  value_t do_defmacro(const std::vector<value_t> &args, environment_ptr env);
-  value_t do_eval(const std::vector<value_t> &args, environment_ptr env);
+  value_t do_lambda(const std::vector<value_t> &args, const environment_ptr &env);
+  value_t do_return(const std::vector<value_t> &args, const environment_ptr &env);
+  value_t do_let(const std::vector<value_t> &args, const environment_ptr &env);
+  value_t do_super(const std::vector<value_t> &args, const environment_ptr &env);
+  value_t do_defun(const std::vector<value_t> &args, const environment_ptr &env);
+  value_t do_defclass(const std::vector<value_t> &args, const environment_ptr &env);
+  value_t do_defmacro(const std::vector<value_t> &args, const environment_ptr &env);
+  value_t do_eval(const std::vector<value_t> &args, const environment_ptr &env);
   value_t do_root();
-  value_t do_try(const std::vector<value_t> &args, environment_ptr env);
-  value_t do_raise(const std::vector<value_t> &args, environment_ptr env);
+  value_t do_try(const std::vector<value_t> &args, const environment_ptr &env);
+  value_t do_raise(const std::vector<value_t> &args, const environment_ptr &env);
 
   // Exceptions (docs/STATE_EXEC_EXCEPTIONS.md). Where one is raised is recorded once, by a
   // raise or by the first trail guard unwinding passes (record_raise_point), and the exception
@@ -242,6 +271,8 @@ private:
   value_t root_expr_;
   macro_map user_macros_;
   evaluation_stats stats_;
+  // Emptied vectors of values kept between forms (a form's arguments and their values).
+  std::vector<std::vector<value_t>> spare_vectors_;
 
   // The expressions being evaluated, innermost last: an exception's traceback.
   std::vector<const value_t *> trail_;

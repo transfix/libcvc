@@ -120,10 +120,11 @@ jobs:
             -DCVC_FFT_PROVIDER=none -DCVC_ENABLE_ASSIMP=ON \
             -DCVC_ENABLE_MESHER=OFF -DCVC_ENABLE_SDF=ON \
             -DCVC_BUILD_CVCGL=ON -DCVC_BUILD_EXAMPLES=OFF -DCVC_WASM_PTHREADS=ON \
-            -DCVC_BUILD_ARI=OFF
-          # CVC_BUILD_ARI=OFF: this SDK bundle is the libraries; the `ari` runner is not built
-          # here (only cvc + cvcGL are), and with the option on, cmake --install fails on its
-          # missing bin/ari.js. The browser `ari` page ships with the gh-pages gallery instead.
+            -DCVC_BUILD_ARI=OFF -DCVC_BUILD_ARIGL=OFF
+          # CVC_BUILD_ARI=OFF, CVC_BUILD_ARIGL=OFF: this SDK bundle is the libraries; the `ari` and
+          # `arigl` runners are not built here (only cvc + cvcGL are), and with either option on,
+          # cmake --install fails on its missing bin/ari.js or bin/arigl.js (v3.7.1's tag run did,
+          # on arigl). Both browser pages ship with the gh-pages gallery instead.
           cmake --build build-wasm --target cvc cvcGL -j"$(nproc)"
           cmake --install build-wasm
           test -f "$INST/lib/libcvc.a" && test -f "$INST/lib/libcvcGL.a" \
@@ -243,10 +244,16 @@ jobs:
           test -f "$WEB/index.html" \
             || { echo "::error::libcvc-examples-web gallery missing web/index.html"; exit 1; }
           # The whole gallery, not a subset: every wasm-demos target has its page and module.
-          for d in terrain_lab lsystem_forest lsystem_forest_ari lsystem_coast volren_bunny \
-                   volren_bunny_ari volslice_bunny volslice_bunny_ari nav_city_swarm nav_city_drive \
-                   nav_fog_ghost bunny_shadow; do
+          for d in terrain_lab lsystem_forest lsystem_coast volren_bunny volslice_bunny \
+                   nav_city_swarm nav_city_drive nav_fog_ghost bunny_shadow arigl; do
             test -f "$WEB/$d/$d.wasm" || { echo "::error::gallery has no $d"; exit 1; }
+          done
+          # The _ari demos are documents (demos.json "app" + "doc"), not binaries: each is arigl's
+          # page opened on its .ari, and its own directory only redirects there (build-pages.py).
+          # Since #820 they have no .wasm, so this checks the redirect (v3.7.1's tag run failed here).
+          for d in lsystem_forest_ari volren_bunny_ari volslice_bunny_ari fem_gallery_ari; do
+            grep -q "url=../arigl/?doc=" "$WEB/$d/index.html" 2>/dev/null \
+              || { echo "::error::gallery has no $d (arigl document page)"; exit 1; }
           done
           # Every gallery demo is a cvcgl_wasm_app: the state shim is in its module JS.
           grep -q __cvcGlShadow "$WEB/nav_city_drive/nav_city_drive.js" \

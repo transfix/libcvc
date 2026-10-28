@@ -27,7 +27,7 @@ endif()
 # What the host itself draws with, beyond what cvcGL links: VTK's window/interactor and image IO.
 find_package(VTK REQUIRED COMPONENTS RenderingUI IOImage)
 
-add_executable(arigl main.cpp)
+add_executable(arigl main.cpp gallery.cpp)
 target_link_libraries(arigl PRIVATE cvc::cvcGL ${VTK_LIBRARIES})
 vtk_module_autoinit(TARGETS arigl MODULES ${VTK_LIBRARIES})
 # Installed bin/arigl finds libcvc, cvcGL and their dependencies in ../lib.
@@ -83,7 +83,7 @@ if(EMSCRIPTEN)
   set(CVC_ARIGL_WASM_DOC "${CMAKE_CURRENT_SOURCE_DIR}/../../examples/ariadne/documents/conference_roster.ari"
       CACHE FILEPATH "The .ari document cyprty, arigl's browser build, embeds")
   get_filename_component(_arigl_doc_name "${CVC_ARIGL_WASM_DOC}" NAME)
-  add_executable(cyprty EXCLUDE_FROM_ALL main.cpp)
+  add_executable(cyprty EXCLUDE_FROM_ALL main.cpp gallery.cpp)
   target_link_libraries(cyprty PRIVATE cvc::cvcGL ${VTK_LIBRARIES})
   vtk_module_autoinit(TARGETS cyprty MODULES ${VTK_LIBRARIES})
   # The same link options as the gallery demos (examples/CMakeLists.txt): each keeps its own loop
@@ -116,5 +116,76 @@ if(EMSCRIPTEN)
        INPUT "${CMAKE_CURRENT_SOURCE_DIR}/web/cyprty.html")
   if(TARGET wasm-extra-demos)
     add_dependencies(wasm-extra-demos cyprty)
+  endif()
+
+  # arigl itself, in the examples' browser gallery (examples/web), is the gallery's Ariadne app:
+  # every .ari demo there is arigl opened on its document (<gallery>/arigl/?doc=<name>), and its
+  # Demos menu switches between them in place. So the documents, the component library and their
+  # data go into its file system, under the paths examples/web/demos.json's "arigl" boot entry and
+  # build-pages.py's gallery.json name, and it joins the gallery's wasm-demos. A wasm build without
+  # the examples leaves arigl as it is.
+  set(_arigl_examples "${CMAKE_CURRENT_SOURCE_DIR}/../../examples")
+  if(TARGET wasm-demos AND EXISTS "${_arigl_examples}/ariadne/documents")
+    target_link_options(arigl PRIVATE
+      # One arigl.data package beside it (build-pages.py ships it): Emscripten won't mix
+      # --preload-file with --embed-file, and the datasets are too big to embed in the module.
+      "--preload-file=${_arigl_examples}/ariadne/documents@/ariadne/documents"
+      "--preload-file=${CMAKE_CURRENT_SOURCE_DIR}/../cvc/ariadne/components@/components"
+      -sASYNCIFY=1
+      -sASYNCIFY_STACK_SIZE=131072
+      -sALLOW_MEMORY_GROWTH=1
+      -sMAXIMUM_MEMORY=4GB
+      -sSTACK_SIZE=2097152
+      -sEXIT_RUNTIME=0
+      -sFETCH=1)
+    if(EXISTS "${_arigl_examples}/data") # the FEM gallery's datasets
+      target_link_options(arigl PRIVATE "--preload-file=${_arigl_examples}/data@/data")
+    endif()
+    if(CVC_WASM_PTHREADS)
+      target_link_options(arigl PRIVATE -sPTHREAD_POOL_SIZE=4)
+    endif()
+    # Re-embed when a document or component changes.
+    file(GLOB _arigl_embedded CONFIGURE_DEPENDS "${_arigl_examples}/ariadne/documents/*.ari"
+         "${CMAKE_CURRENT_SOURCE_DIR}/../cvc/ariadne/components/*.ari")
+    set_property(TARGET arigl APPEND PROPERTY LINK_DEPENDS ${_arigl_embedded})
+    if(COMMAND cvcgl_wasm_app)
+      cvcgl_wasm_app(arigl)
+    endif()
+    add_dependencies(wasm-demos arigl)
+
+    # arigl_term: `arigl run --terminal` in the browser, behind an xterm.js page (web/
+    # arigl_term.html, from ari's): the widgets through FTXUI's Emscripten screen on the module's
+    # stdio, the scene rendered by VTK into a hidden canvas and drawn behind them, as iTerm2 inline
+    # images (xterm.js's image addon) or half-blocks. The page picks the document (?doc=) and the
+    # drawing (?gfx=); the documents and components are preloaded as for arigl, without the
+    # datasets. Built by name (not part of wasm-demos), and only defined where FTXUI is found: it
+    # exports FTXUI's resize hook. (libcvc found FTXUI in its own directory; its targets aren't
+    # visible here.)
+    find_package(ftxui CONFIG QUIET)
+    if(TARGET ftxui::screen)
+      add_executable(arigl_term EXCLUDE_FROM_ALL main.cpp gallery.cpp)
+      target_link_libraries(arigl_term PRIVATE cvc::cvcGL ${VTK_LIBRARIES})
+      vtk_module_autoinit(TARGETS arigl_term MODULES ${VTK_LIBRARIES})
+      target_compile_definitions(arigl_term PRIVATE CVC_ARIGL_WASM_TERMINAL=1)
+      target_link_options(arigl_term PRIVATE
+        "--preload-file=${_arigl_examples}/ariadne/documents@/ariadne/documents"
+        "--preload-file=${_arigl_examples}/ariadne/terminal@/ariadne/terminal"
+        "--preload-file=${CMAKE_CURRENT_SOURCE_DIR}/../cvc/ariadne/components@/components"
+        -sASYNCIFY=1
+        -sASYNCIFY_STACK_SIZE=131072
+        -sALLOW_MEMORY_GROWTH=1
+        -sMAXIMUM_MEMORY=4GB
+        -sSTACK_SIZE=2097152
+        -sEXIT_RUNTIME=1
+        -sFETCH=1
+        -sEXPORTED_FUNCTIONS=_main,_ftxui_on_resize)
+      set_property(TARGET arigl_term APPEND PROPERTY LINK_DEPENDS ${_arigl_embedded})
+      if(COMMAND cvcgl_wasm_app)
+        # The state shim patches every WebGL context on the page, xterm.js's renderer's too.
+        cvcgl_wasm_app(arigl_term STATE_SHIM OFF)
+      endif()
+      file(GENERATE OUTPUT "$<TARGET_FILE_DIR:arigl_term>/arigl_term.html"
+           INPUT "${CMAKE_CURRENT_SOURCE_DIR}/web/arigl_term.html")
+    endif()
   endif()
 endif()

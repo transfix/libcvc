@@ -1475,17 +1475,17 @@ geometry tetrahedralize2(const volume& vol,
 ```
 
 (There is also a single-isovalue overload, `tetrahedralize2(vol, isovalue, method,
-improve_method, normals, improve_iterations)`. Both overloads request LBIE's TETRA2 mesh type,
-but the request passes through `geometry_type`, which maps TETRA2 to `VOLUME_TET` and back to
-plain TETRA, with dual contouring forced. See P2.2 of
-[the libigl roadmap](roadmap/LIBIGL-GEOMETRY-FE-ROADMAP.md).)
+improve_method, normals, improve_iterations)`: the solid above `isovalue`, the region
+`tetrahedralize()` meshes, as a layer with no upper surface.)
 
-Creates a tetrahedral mesh of the **layer/shell** between two isosurfaces. This is a dual-isovalue interval meshing technique unique to the LBIE mesher.
+Creates a tetrahedral mesh of the **layer/shell** between two isosurfaces: the region where
+`min <= v <= max` of the two isovalues, which may come in either order. LBIE meshes it as the
+solid `min(v - lo, hi - v) >= 0` (`lo` and `hi` the two isovalues), whose boundary is both
+isosurfaces, with the same mesher as `tetrahedralize()`.
 
 **Parameters:**
 - `vol`: Input volume (SDF)
-- `isovalue_outer`: Outer surface isovalue (more positive = further outside)
-- `isovalue_inner`: Inner surface isovalue (more negative = further inside)
+- `isovalue_outer`, `isovalue_inner`: the two isovalues bounding the layer, in either order
 - `method`: Extraction algorithm
 - `improve_method`: Quality improvement method
 - `improve_iterations`: Number of improvement passes
@@ -1525,15 +1525,18 @@ geometry thick_shell = tetrahedralize2(sdf_vol,
 
 **Implementation Notes:**
 
-The tet2 interval meshing implementation had several bugs that were fixed in December 2025:
-
-1. **Skip Condition Bug** (Fixed): `traverse_qef_interval()` had backwards logic for filtering octree cells. It was keeping only cells that fully spanned both isovalues (extremely restrictive), rather than cells that overlapped the interval.
-   
-2. **Infinite Refinement Bug** (Fixed): Missing octree depth check caused infinite subdivision when cells reached maximum depth.
-   
-3. **Intersection Handling Bug** (Fixed): `tetrahedralize_interval()` only processed intersection types ±1 (edge crosses one isovalue) but ignored type ±3 (edge crosses through entire interval), which is the most common case for interval meshing.
-
-**Current Status:** Fully functional as of December 27, 2025. Generates high-quality volumetric meshes of layers between isosurfaces.
+Until October 2026 `tetrahedralize2()` never reached LBIE's interval mesher: the request for
+TETRA2 went through `geometry_type`, which turned `VOLUME_TET` back into TETRA, so the layer was
+built by the one-surface tetrahedralizer on the interval's octree, with fans of slivers and holes.
+`Octree::tetrahedralize_interval()` was no better: it chose which isosurface an edge crosses by
+its cell rather than by the edge, gave an edge that crosses both isosurfaces a pyramid whose apex
+lies outside the layer, and did not share grid vertices between neighbouring tets. A layer is now
+the solid `min(v - lo, hi - v) >= 0`, meshed like any other solid. A layer thinner than a voxel
+can break up, since the samples on either side of it are both outside. A sample exactly on either
+isovalue also counts as outside (LBIE moves its isovalue off such samples), so `[1, 3]` on integer
+labels meshes label 2 alone; pass `[0.5, 3.5]` to keep labels 1 and 3. fe_lab's interval mesher
+(`cvc::gl::ariadne::tetrahedralize_interval`) does that for any data: it moves a bound samples sit
+on half way to the nearest value beyond it.
 
 ### Complete Volumetric Mesh Example
 
@@ -2009,14 +2012,11 @@ Returns indices of all elements that contain the query point.
 - **Multi-tier acceleration strategy** (adaptive based on mesh size):
   - **Small meshes** (<100 elements): Direct barycentric/trilinear tests, minimal overhead
   - **Medium meshes** (100-1000 elements): Manual bounding box pre-filtering
-  - **Large meshes** (1000-10000 elements): Pre-computed `bounding_box` structures for fast spatial filtering
-  - **Very large meshes** (>10000 elements with CGAL): CGAL AABB tree with surface triangles for O(log n) inside/outside test + bbox acceleration
-  - **CGAL disabled**: Always uses `bounding_box`-accelerated linear search
+  - **Large meshes** (over 1000 elements): a point outside the mesh's box returns at once; otherwise pre-computed `bounding_box` structures filter the elements
 - **Performance**:
   - Small meshes: O(n), minimal overhead
   - Medium meshes: O(n) with 5-10x speedup via bbox rejection
   - Large meshes: O(n) with 10-50x speedup via pre-computed `bounding_box` structures
-  - Very large meshes with CGAL AABB tree: O(log n) surface test + O(n) bbox search with high rejection rate
 
 **Implementation Details:**
 
@@ -2025,25 +2025,18 @@ Returns indices of all elements that contain the query point.
    - No external dependencies - works with or without CGAL
    - Pre-computes element bboxes once for large meshes (amortized cost)
    - Fast `contains()` test (6 comparisons) eliminates most elements
-
-2. **CGAL AABB Tree** (very large meshes only, >10000 elements):
-   - Extracts surface triangles using `extract_surface()`
-   - Builds CGAL AABB tree for O(log n) spatial queries
-   - Uses `do_intersect()` for quick inside/outside determination
-   - Falls back to bbox-accelerated search only for nearby elements
-   - Provides 100x+ speedup on meshes with millions of elements
+   - The mesh's own box is compared coordinate by coordinate. A `bounding_box` around one point
+     has no volume, so it `isNull()`, and a sum of them stays null: until 10/2026 the path above
+     10,000 elements built its mesh box that way and returned nothing for any point off the
+     mesh's boundary surface.
 
 **Memory Usage:**
 - Small/medium: No additional storage
-- Large (1000-10000): ~64 bytes per element (pre-computed bbox + index)
-- Very large with AABB tree: Surface mesh memory + tree structure (~100-200 bytes/element)
+- Large (over 1000): ~64 bytes per element (pre-computed bbox + index)
 
-**Known limitations:** nothing is cached between calls. Above 10,000 elements every call
-re-extracts the boundary surface and rebuilds the CGAL tree before the linear bbox scan. The
-tree's `do_intersect(Point_3)` tests whether the point lies *on* the surface, not inside/outside
-parity. Each query is therefore O(n) plus a tree build. A persistent locator built once per mesh
-(`igl::AABB` + `in_element`) is planned; see P2.4 of
-[the libigl roadmap](roadmap/LIBIGL-GEOMETRY-FE-ROADMAP.md).
+**Known limitations:** nothing is cached between calls, so every query is O(n) and rebuilds
+the element boxes. A persistent locator built once per mesh (`igl::AABB` + `in_element`) is
+planned; see P2.4 of [the libigl roadmap](roadmap/LIBIGL-GEOMETRY-FE-ROADMAP.md).
 
 **Example:**
 

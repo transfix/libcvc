@@ -1,7 +1,7 @@
 // ImGuiBackend + the built-in Windows menu (docs/ARIADNE.md §5.9) on a bare ImGui context (no GL):
 // a window closed with its X is not drawn, and clicking its item in the Windows menu (mouse events
-// through ImGui, as a user would) opens it again. A document with a closable window and no menubar
-// gets a menubar for it.
+// through ImGui, as a user would) opens it again, in its place among the windows with no pos:. A
+// document with a closable window and no menubar gets a menubar for it.
 #include <cstdio>
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/widget.h>
@@ -49,14 +49,24 @@ struct RecordingBackend : cvc::gl::ImGuiBackend {
   }
 };
 
-bool drawn(const std::string &id) {
+ImGuiWindow *window_of(const std::string &id) {
   for (ImGuiWindow *w : GImGui->Windows) {
     const std::string n = w->Name;
     const std::size_t at = n.find("###");
     if (at != std::string::npos && n.substr(at + 3) == id)
-      return w->WasActive && w->Active;
+      return w;
   }
-  return false;
+  return nullptr;
+}
+
+bool drawn(const std::string &id) {
+  const ImGuiWindow *w = window_of(id);
+  return w && w->WasActive && w->Active;
+}
+
+bool overlap(const ImGuiWindow *a, const ImGuiWindow *b) {
+  return a->Pos.x < b->Pos.x + b->Size.x && b->Pos.x < a->Pos.x + a->Size.x &&
+         a->Pos.y < b->Pos.y + b->Size.y && b->Pos.y < a->Pos.y + a->Size.y;
 }
 
 struct Session {
@@ -145,6 +155,10 @@ int main() {
     s.frame(ImVec2(990.0f, 690.0f), false);
     s.frame(ImVec2(990.0f, 690.0f), false);
     chk(drawn("alpha"), "and Alpha is drawn again");
+    // Neither has a pos:, so both stack down the left (ARIADNE.md §5.8): Alpha comes back to its
+    // place in that column, and Beta, which moved up while it was closed, moves down again.
+    const ImGuiWindow *a = window_of("alpha"), *b = window_of("beta");
+    chk(a && b && !overlap(a, b), "Alpha takes its place in the column again, not over Beta");
 
     // The menu closes a window as well.
     chk(s.click("Windows") && s.click("Beta"), "untick Beta in the Windows menu");
@@ -157,6 +171,9 @@ int main() {
     chk(s.be.at.count("Windows") == 1, "a menubar with just the Windows menu");
     const ImGuiWindow *bar = ImGui::FindWindowByName("##MainMenuBar");
     chk(bar && bar->Active, "drawn as ImGui's main menu bar");
+    const ImGuiWindow *solo = window_of("solo");
+    chk(bar && solo && solo->Pos.y >= bar->Pos.y + bar->Size.y,
+        "and the window stands below it, not under it");
   }
 
   std::printf("%s\n", failures ? "FAILED" : "PASSED");

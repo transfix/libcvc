@@ -35,6 +35,7 @@
 
 #define _USE_MATH_DEFINES // MSVC: make <cmath> define M_PI (and friends)
 #include "OceanFFT.h"
+#include "demos_menu.h" // the gallery's Demos menu
 
 #include <algorithm>
 #include <boost/program_options.hpp>
@@ -1458,6 +1459,7 @@ int main(int argc, char **argv) {
   bool uiPaused = knob("coast.clock.paused", 0.0) > 0.5;
   ui.setDrawCallback([&] {
     if (ImGui::BeginMainMenuBar()) {
+      cvc_examples::demos_menu("lsystem_coast");
       if (ImGui::BeginMenu("Scene")) {
         // The library's menu: shadows, shadow-map resolution, bake interval and
         // the diagnostic chrome, all read back from the scene rather than from
@@ -1595,7 +1597,7 @@ int main(int argc, char **argv) {
   // roughly halves the wind's per-frame cost. The GPU ocean evolves every frame (its
   // FFT is a handful of fragment passes — cheap — and any stride would stutter it).
   const int WIND_STRIDE = 2, CLOUD_STRIDE = 8, SHADOW_STRIDE = 16;
-  while (!view.windowClosed()) {
+  while (!view.windowClosed() && !cvc_examples::demo_switch_requested()) {
     double t, dt;
     if (capturing) { // fixed synthetic clock -> real-time playback of the animation
       t = frame / fps;

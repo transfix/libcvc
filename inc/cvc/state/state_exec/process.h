@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <cvc/state/state_exec/stackless_evaluator.h>
 #include <cvc/state/state_exec/types.h>
 #include <exception>
@@ -172,20 +173,48 @@ struct process {
   // Forking
   int parent_pid = -1;
 
+  /// Where the scheduler holding the process has it indexed (detail::process_table: its run
+  /// queue, timers, receivers by channel, frame waiters and watchers). The scheduler's
+  /// bookkeeping, not the process's state: not snapshotted, and a process a scheduler adopts
+  /// (execute, fork, restore) starts with none.
+  struct table_entry {
+    static constexpr std::uint32_t none = UINT32_MAX;
+    std::uint32_t slot = none;        // run-queue slot (slots are in pid order); none once ended
+    std::uint32_t recv_bucket = none; // the receiver bucket of its recv_path
+    std::uint32_t recv_pos = none;    // its place in that bucket
+    std::uint32_t await_pos = none;   // its place among the frame waiters
+    std::uint32_t watch_pos = none;   // its place among the processes with watches
+    int level = 0;                    // the run-queue level it is counted in
+    bool queued = false;              // counted in the run queue (ready or running)
+    bool sleeping = false;            // counted among the sleepers (waiting with a wake_time)
+    bool timer = false;               // a timer entry for timer_at is live
+    std::chrono::steady_clock::time_point timer_at{};
+  };
+  table_entry table;
+
   /// Elapsed running time (only while status == running).
   double elapsed_time() const;
+  /// elapsed_time() as of `now` (a steady_clock reading the caller already has).
+  double elapsed_time(std::chrono::steady_clock::time_point now) const;
 
   /// max_time is charged like a time_budget: elapsed_time() up to half of it, then the CPU
   /// time of the steps run from there (cpu_time_charged) for the other half, each step charging
   /// at most a sixteenth of it -- so a stall in a step, however long (descheduled on a loaded
   /// machine), never runs a process out of time. Whether the next step's CPU time is charged:
   bool charges_cpu_time() const { return max_time > 0.0 && elapsed_time() >= 0.5 * max_time; }
+  bool charges_cpu_time(std::chrono::steady_clock::time_point now) const {
+    return max_time > 0.0 && elapsed_time(now) >= 0.5 * max_time;
+  }
   /// Charge a step's CPU time.
   void charge_cpu_time(double seconds) { cpu_time_charged += std::min(seconds, max_time / 32.0); }
   /// Whether max_time is used up (never, when it is 0: unlimited).
   bool over_time_limit() const { return charges_cpu_time() && cpu_time_charged >= 0.5 * max_time; }
+  bool over_time_limit(std::chrono::steady_clock::time_point now) const {
+    return charges_cpu_time(now) && cpu_time_charged >= 0.5 * max_time;
+  }
   /// Seconds of max_time left (nullopt when unlimited): the budget of the next step's deadline.
   std::optional<double> time_left() const;
+  std::optional<double> time_left(std::chrono::steady_clock::time_point now) const;
 
   /// The allocation limit for the next step's eval_alloc_guard (nullopt when unlimited): the
   /// tighter of max_alloc_bytes and what is left of max_memory once `used_bytes` (the memory

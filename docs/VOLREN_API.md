@@ -232,9 +232,9 @@ public:
   render_settings &settings();
 
   void set_thread_pool(cvc::thread_pool *pool);  // borrowed; default: a private pool
-                                                 // (cvc::thread_pool allows one in-flight
-                                                 // parallel_for, so the shared computePool
-                                                 // is unsafe to borrow blindly)
+                                                 // (fan-outs on one cvc::thread_pool run side
+                                                 // by side and share its workers; a private
+                                                 // pool keeps renders off the shared one's)
 
   void set_backend(backend b);   // cpu (default) / cuda / automatic
   backend backend_used() const;  // what the LAST render actually ran on

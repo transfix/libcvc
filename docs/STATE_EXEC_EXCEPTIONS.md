@@ -371,13 +371,17 @@ with `ok: #f`, still returns that as a value; only a thrown error is an exceptio
 
 The app has two pools, and an async kernel uses the first:
 
-- **The background task pool** (`app::startThreadPooled`, which `compute_async` uses today):
-  - a queue of whole tasks, with priorities, bounded to `setThreadPoolSize` threads (the core
-    count by default);
+- **The background task pool** (`app::submitPooled`, which async kernels, `compute_async` and
+  `launch_pool_task` use):
+  - a queue of whole tasks, with priorities (FIFO within one), run by at most
+    `setThreadPoolSize` persistent worker threads (the core count by default); an async kernel
+    is an anonymous task, so a call creates no thread and its task is destroyed on the worker
+    once it ends;
   - every async kernel runs here, CPU-bound or blocking (`executor::background`, the default);
   - a blocking request holds one of its threads while it waits, and nothing else.
 - **The fork-join compute pool** (`app::computePool()`):
-  - render, simulation and nav fan-outs share it through `parallel_for`;
+  - render, simulation and nav fan-outs share it through `parallel_for`, and fan-outs from
+    several threads (several kernels) run side by side on its workers;
   - a CPU-heavy kernel fans out through it the same way (a volume filter splitting its
     slabs), so a kernel's parallelism comes from the same workers as everyone else's;
   - a kernel never runs on its workers as a whole task, so a slow kernel can't stall a frame's
@@ -410,6 +414,33 @@ A kernel checks it at convenient points and may stop early by throwing. A cancel
 result is dropped. Host teardown (an `Exec`, an Ariadne document, the app's scheduler) cancels
 every in-flight kernel and waits for them before the scheduler goes, as `Exec` does today.
 
+A kernel its executor never runs still ends its call. Once `~app` has stopped the app's
+background pool, a kernel submitted to it (`app::submitPooled` returns false), or one still in
+its queue (`~app` drops the queue), is destroyed unrun, and so is a kernel a stopped lane
+refuses (a lane runs every kernel it accepted before it stopped). So is a kernel that no
+background worker can be started for (thread resources exhausted before the pool's first worker:
+`app::trySubmitPooled` hands it back rather than queue it), and one queued behind keyed threads
+that held every slot of a pool with no worker, once a worker creation fails and leaves the pool
+with no worker running or being created (the one asked for as one of those threads ends, say,
+even while the others still hold their slots). The pool drops it then, on the thread whose
+creation failed or, if a `trySubmitPooled` call was still deciding about its own task (waiting on
+that creation, say), on that call's thread before it returns: another async call made on the
+scheduler's thread, a `launch_pool_task` or a `compute_async` call can so end it. Its call then
+raises `RuntimeError` at the call site with a message that names the cause: "`name`: not run: the app's
+background pool has stopped" for the pool, "`name`: not run: no background worker could be
+started" when no worker could be started, "`name`: lane '`lane`' is stopped" for a lane. The
+pool's drops say why through `app::poolDropReason()`, which the kernel's task reads as it is
+destroyed. A pool that never got a worker can't run a kernel still queued (one queued behind
+keyed threads that still hold every slot): `~app` then drops the queue before it shuts down its
+host. While the pool has no worker running yet, a call made on the scheduler's thread waits for
+the worker creations under way to succeed or fail (up to 5 s, normally the time a thread takes to
+be created) before it parks or raises.
+Its kernel's captures go, and it leaves the host's count of calls in flight, so the process isn't
+left parked and `shutdown()` doesn't wait for it for good. That matters for a host bound to an
+app that `~app` doesn't shut down itself (one driven from a keyed thread, say): `~app` shuts down
+its own exec host before it stops the pool. `launch_pool_task` posts `on_error`'s value in the
+same case, and `compute_async`'s `on_error` form calls `on_error`.
+
 ### 3.7 Data crossing threads
 
 - **Arguments:** the marshal step copies what the kernel needs. DSL lists and dicts are copied,
@@ -435,9 +466,10 @@ limits what that process can make the app do for it.
   chunks it runs for the kernel (a thread-local), and each chunk adds its thread's CPU time.
 - **Steps:** the CPU time converted at `limits.async_steps_per_cpu_ms` steps per CPU
   millisecond, at least one step per call.
-  - The rate is a state-tree setting, read live: the host reads it at every charge, so a
-    change applies to the next charge, including calls already running, with no
-    `load_settings()` or resubmission. The first of these that is set wins:
+  - The rate is a state-tree setting, read live: a change applies to the next charge, including
+    calls already running, with no `load_settings()` or resubmission (the schedulers read the
+    tree again only once something under it changed, so a quiet tree isn't walked at each
+    charge). The first of these that is set wins:
     1. the process's own override, `execute_options::async_steps_per_cpu_ms` (unset by
        default);
     2. `state_exec.schedulers.<id>.limits.async_steps_per_cpu_ms`;
@@ -574,9 +606,14 @@ from Python, with AS-4, AS-16 and AS-32), and `AriadneAsyncFn` in `ariadne_runti
 - pycvc: `pycvc.async_host()` (inline, no scheduler), `pycvc.async_host(scheduler)`,
   `pycvc.async_host(async_scheduler, app)`, `Exec.async_host()`, and
   `pycvc.builtins.register_async_fn(env, host, name, fn, executor="background", timeout=None,
-  future_variant=True)`. pycvc takes no keyword arguments, so these are positional. `executor` is
-  `"background"` (`"compute"`, the sketch's name, means the same), `"inline"` or
-  `"lane:<name>"`.
+  future_variant=True, with_call=False)`. pycvc takes no keyword arguments, so these are
+  positional. `executor` is `"background"` (`"compute"`, the sketch's name, means the same),
+  `"inline"` or `"lane:<name>"`, a `pycvc.async_lane` given to `host.add_lane(name, lane)`.
+  With `with_call` (also `Exec.register_async_fn(name, fn, with_call)`), `fn` gets the call's
+  `pycvc.async_call` (`function_name()`, `cancelled()`, `post(value)`, `add_wait(seconds)`,
+  `finished()`) before the arguments. `pycvc.is_async_future(v)` too. `begin_external`/`finish`
+  and `make_async_future` aren't bound: an external call's outcome comes from C++ host code
+  (`register_async_coro` is pycvc's), and a future is made by `(name-async ...)`.
 
 **Calling (3.3, 3.9).**
 - A native the stackless evaluator applies at its own level, in the outermost evaluator step on
@@ -619,6 +656,11 @@ delivers as the host, not the kernel. The state tree isn't checked: Ariadne's `f
 - `async_scheduler::drain_ingress()` takes completions, charges the calls still running, applies
   registration timeouts, kills at the limits, and wakes due sleepers and timed waits, so a driver
   that only drains while nothing is runnable (pycvc's `Exec`) keeps budgets and timeouts current.
+  A driver that idles in `async_scheduler::wait_for_work()` between drains does too: the wait
+  ends at a call's registration timeout, and every millisecond while a call runs for a process
+  with a step or time limit, for the charge that may find it reached. Both count only for a
+  process still running: a call whose process ended without awaiting it is neither timed out
+  nor charged by a drain, so it doesn't end the wait.
 - The effective rate is published at `state_exec.schedulers.<id>.effective.async_steps_per_cpu_ms`,
   not at the scheduler's `limits.` key: that one is an input with precedence over the defaults,
   so writing the effective value there would pin it and break the live reading. The async
@@ -626,9 +668,10 @@ delivers as the host, not the kernel. The state tree isn't checked: Ariadne's `f
 - `process_info` also gains `heap_alloc_bytes` (what natives and kernels reported allocating
   since the last heap measurement), and `(inspect pid)` and `(budget-usage)` add the four
   `async_*` counters.
-- A Python kernel has no handle to the call, so it can't check `cancelled()` or `post()`; its run
-  time stops it, as for any kernel that doesn't check. A coroutine (`register_async_coro`) is an
-  external call: its run time isn't charged, only its one step.
+- A Python kernel registered without `with_call` has no handle to the call, so it can't check
+  `cancelled()` or `post()`; its run time stops it, as for any kernel that doesn't check. A
+  coroutine (`register_async_coro`) is an external call: its run time isn't charged, only its
+  one step.
 - The Windows thread CPU clock calibrates the time-stamp counter's rate against the performance
   counter once, over 5 ms, where the processor reports an invariant TSC.
 
@@ -640,7 +683,13 @@ async call decodes empty, so a restored call or future raises `RuntimeError`.
 **Ariadne.** `http-get`, `http-request` and `fetch` (with their `-async` forms) are async functions
 on `app::exec_async_host()`. A failed send is still a reply with `ok` `#f`, as they document. The
 reactive lane arms `park_forbidden_scope`. `launch_pool_task` and the lane helpers stay for the
-hosts that use them.
+hosts that use them. After P3:
+- `AppRuntime::register_async_verb` (and `AriRuntime`'s, and pycvc_gl's) registers an async
+  function on the app's host, so a host verb parks at the call, raises there and is charged to the
+  action; the done-channel form also posts its result. The nav_compute example's verb is
+  `(nav-step)`, an async function.
+- An action's step and time caps are the tree settings `ariadne.limits.action_max_steps` (5000)
+  and `ariadne.limits.action_max_time` (0.1 s), read on every submission, `0` = no limit.
 
 ## 4. Phases
 
@@ -832,6 +881,9 @@ was added on 2026-10-19 (6):
      never sees it.
    - If slow requests are found to starve other kernels, a cap on concurrent blocking kernels
      in that pool comes first.
+   - Superseded from Stage 2 of `docs/STATE_EXEC_THREADED.md` (its Q9, decided 2026-10-26). Once
+     execution groups run on worker threads and compete with kernels for cores, the pool splits
+     into `background_cpu` and `background_io`. Until then this answer stands.
 5. **`await-all` waits for every future, then raises the first failure in list order** (3.3).
    It doesn't cancel the rest or raise at the first failure in time.
    - Why: the error reported is then the same however the timing falls, which keeps programs

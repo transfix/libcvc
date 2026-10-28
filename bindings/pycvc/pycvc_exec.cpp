@@ -8,6 +8,7 @@
 
 #include "pycvc_value.h" // the shared value_t <-> Python conversion
 
+#include <algorithm>
 #include <chrono>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
@@ -139,15 +140,35 @@ python_exception take_py_exception(const std::string &what) {
 // its message prefixed with `what`. With `want_result` false the return value
 // is ignored (an on_complete callback, whose exception stays a runtime_error
 // thrown from the scheduler call) and nil returned. For an async function's kernel,
-// `call` is its call: the wait for the GIL isn't charged as its run time (3.8).
+// `call` is its call: the wait for the GIL isn't charged as its run time (3.8), and with
+// `with_call` the callable gets its pycvc.async_call handle before the arguments.
 value_t call_python(const std::shared_ptr<PyObject> &holder, std::span<const value_t> args,
-                    const std::string &what, bool want_result = true, async_call *call = nullptr) {
+                    const std::string &what, bool want_result = true, async_call *call = nullptr,
+                    bool with_call = false) {
   const auto wait_start = std::chrono::steady_clock::now();
   PyGILState_STATE gil = PyGILState_Ensure();
   if (call != nullptr)
     call->add_wait(
         std::chrono::duration<double>(std::chrono::steady_clock::now() - wait_start).count());
   PyObject *pyargs = values_to_py_tuple(args); // nullptr (error set) if an arg can't convert
+  if (pyargs != nullptr && with_call && call != nullptr) {
+    // (handle, *args)
+    PyObject *handle = async_call_to_py(call->shared_from_this());
+    const Py_ssize_t n = PyTuple_GET_SIZE(pyargs);
+    PyObject *with = handle != nullptr ? PyTuple_New(n + 1) : nullptr;
+    if (with != nullptr) {
+      PyTuple_SET_ITEM(with, 0, handle);
+      for (Py_ssize_t i = 0; i < n; ++i) {
+        PyObject *item = PyTuple_GET_ITEM(pyargs, i);
+        Py_INCREF(item);
+        PyTuple_SET_ITEM(with, i + 1, item);
+      }
+    } else {
+      Py_XDECREF(handle);
+    }
+    Py_DECREF(pyargs);
+    pyargs = with;
+  }
   PyObject *res = pyargs ? PyObject_CallObject(holder.get(), pyargs) : nullptr;
   Py_XDECREF(pyargs);
   if (res == nullptr) {
@@ -214,10 +235,16 @@ struct pending_coro {
 // coroutine's call with its result (or its exception, which the call raises at its call site) and
 // post it to the parked DSL process. Runs on the run() thread with the GIL held; a no-op when no
 // coroutine is pending, so a coro-free Exec pays nothing. Each Task is DECREF'd when collected.
-void drive_coros(PyObject *loop, std::vector<pending_coro> &pending, async_host &host,
+// Returns whether the slice waited: whether asyncio blocked in its selector (until the stop timer,
+// or I/O) for most of it. Where its clock is fine (Linux, macOS, Windows on Python 3.13+) it does.
+// Where the clock is coarse (Windows before 3.13: ~15.6 ms), asyncio runs a timer due within that
+// resolution at once, the stop timer included, and the slice returns without waiting.
+bool drive_coros(PyObject *loop, std::vector<pending_coro> &pending, async_host &host,
                  double budget_secs) {
   if (loop == nullptr || pending.empty())
-    return;
+    return false;
+  using clock = std::chrono::steady_clock;
+  bool waited = false;
   // Step the loop until a call_later(budget) stops it: ready coroutine steps + timers/IO due within
   // the slice advance, then control returns to the DSL pump. Public asyncio API only. NOTE: the
   // slice is COOPERATIVE — asyncio cannot preempt a running coroutine step, so the budget is
@@ -231,9 +258,11 @@ void drive_coros(PyObject *loop, std::vector<pending_coro> &pending, async_host 
     if (h != nullptr) {
       Py_DECREF(h);
       // run_forever ONLY when a stop timer is armed — otherwise it would never return.
+      const clock::time_point from = clock::now();
       if (PyObject *r = PyObject_CallMethod(loop, "run_forever", nullptr)) {
         Py_DECREF(r);
         step_failed = false;
+        waited = clock::now() - from >= std::chrono::duration<double>(0.5 * budget_secs);
       }
     }
   }
@@ -247,7 +276,7 @@ void drive_coros(PyObject *loop, std::vector<pending_coro> &pending, async_host 
       Py_DECREF(pc.task);
     }
     pending.clear();
-    return;
+    return false;
   }
   PyErr_Clear(); // a stray (already-handled) error from stepping must not leak into the next call
   for (auto it = pending.begin(); it != pending.end();) {
@@ -283,6 +312,7 @@ void drive_coros(PyObject *loop, std::vector<pending_coro> &pending, async_host 
     Py_DECREF(task);
     it = pending.erase(it);
   }
+  return waited;
 }
 
 // Wait until no kernel of `host` is queued or running, WITH THE GIL RELEASED so a kernel calling
@@ -316,7 +346,7 @@ void python_on_complete::operator()(value_t result) const {
 }
 
 async_marshal python_async_marshal(const std::string &who, const std::string &name,
-                                   PyObject *callable) {
+                                   PyObject *callable, bool with_call) {
   if (callable == nullptr || !PyCallable_Check(callable))
     throw std::invalid_argument(who + ": '" + name + "' is not callable");
   if (is_coroutine_function(callable))
@@ -327,10 +357,10 @@ async_marshal python_async_marshal(const std::string &who, const std::string &na
   const std::string what = "python DSL fn '" + name + "'";
   // The arguments are private copies already (register_async_fn copies lists and dicts), so the
   // kernel keeps them; it converts them to Python on its own thread, with the GIL.
-  return [holder, what](std::span<const value_t> args) -> async_kernel {
-    return [holder, what,
+  return [holder, what, with_call](std::span<const value_t> args) -> async_kernel {
+    return [holder, what, with_call,
             argv = std::vector<value_t>(args.begin(), args.end())](async_call &call) -> value_t {
-      return call_python(holder, argv, what, true, &call);
+      return call_python(holder, argv, what, true, &call, with_call);
     };
   };
 }
@@ -435,14 +465,14 @@ void Exec::register_fn(const std::string &name, PyObject *callable) {
                         python_native_fn("pycvc.Exec.register_fn", name, callable));
 }
 
-void Exec::register_async_fn(const std::string &name, PyObject *callable) {
+void Exec::register_async_fn(const std::string &name, PyObject *callable, bool with_call) {
   // An async function on this Exec's host (docs/STATE_EXEC_EXCEPTIONS.md 3): (name args...) parks
   // the program while the callable runs on the app's background task pool, then resumes it with
   // the value or raises the callable's exception at the call (a PythonError). (name-async ...)
   // returns a future.
   cvc::state_exec::register_async_fn(
       impl_->env, *impl_->host, name,
-      python_async_marshal("pycvc.Exec.register_async_fn", name, callable));
+      python_async_marshal("pycvc.Exec.register_async_fn", name, callable, with_call));
 }
 
 cvc::state_exec::async_host &Exec::async_host() { return *impl_->host; }
@@ -557,6 +587,7 @@ std::string Exec::run(const std::string &src) {
   static constexpr double kCoroSliceSeconds = 0.005; // asyncio-loop slice per pump iteration
   static constexpr double kIdleTimeoutSecs = 60.0; // parked with NO pending work this long -> bail
   using clock = std::chrono::steady_clock;
+  static constexpr auto kMaxIdleWait = std::chrono::milliseconds(50);
   auto idle_deadline = clock::now() + std::chrono::duration<double>(kIdleTimeoutSecs);
   std::optional<value_t> result;
   std::optional<std::string> error; // set -> throw AFTER the pool is quiesced
@@ -571,12 +602,13 @@ std::string Exec::run(const std::string &src) {
       // it via call_python's PyGILState_Ensure, while an in-flight pool worker running a Python
       // async body is never starved of the GIL by a co-runnable process — the deadlock the review
       // found.
-      Py_BEGIN_ALLOW_THREADS sched.sync_run(kSliceSteps, kSliceSeconds);
+      Py_BEGIN_ALLOW_THREADS sched.sync_run_steps(kSliceSteps, kSliceSeconds); // reads get_result
       Py_END_ALLOW_THREADS
           // Coroutine leg: step the asyncio loop a bounded slice and deliver any completed
           // coroutine's result to its parked process (GIL held here). A no-op when no coroutine is
           // pending, so a coro-free Exec is unaffected.
-          drive_coros(impl_->loop, impl_->pending_coros, host, kCoroSliceSeconds);
+          const bool coros_waited =
+              drive_coros(impl_->loop, impl_->pending_coros, host, kCoroSliceSeconds);
       result = sched.get_result(pid);
       if (result)
         break; // the program terminated
@@ -624,8 +656,25 @@ std::string Exec::run(const std::string &src) {
         error = "pycvc.Exec.run: parked with no pending work (pid " + std::to_string(pid) + ")";
         break;
       }
-      // Idle-wait a beat with the GIL released so a worker can acquire it and deliver.
-      Py_BEGIN_ALLOW_THREADS std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      // Idle-wait with the GIL released (so a worker can take it and deliver) until there is
+      // work: a kernel's post or result, a sleeper's or timed wait's deadline, a call's timeout
+      // or charge, or the idle deadline; never longer than kMaxIdleWait, a backstop for work that
+      // arrives some other way. Coroutines on the asyncio loop are this loop's to drive: while one
+      // is pending, a slice that waited (coros_waited) was this iteration's wait, and the loop
+      // goes on at once (another wait here would hold asyncio off for as long). A slice that
+      // returned at once gets a 5 ms beat instead, so the loop doesn't spin: the old 1 ms sleep
+      // lasted a ~15.6 ms timer tick there. Processes parked until the next pump (await) make it
+      // a 1 ms beat, as it was. These beats burn no CPU (wakeup).
+      if (!impl_->pending_coros.empty() && coros_waited)
+        continue;
+      clock::time_point until =
+          std::min(std::chrono::time_point_cast<clock::duration>(idle_deadline),
+                   clock::time_point(clock::now() + kMaxIdleWait));
+      if (!impl_->pending_coros.empty())
+        until = std::min(until, clock::now() + std::chrono::milliseconds(5));
+      if (sched.awaiting_frame_count() > 0)
+        until = std::min(until, clock::now() + std::chrono::milliseconds(1));
+      Py_BEGIN_ALLOW_THREADS sched.wait_for_work(until);
       Py_END_ALLOW_THREADS
     }
   } catch (...) {
