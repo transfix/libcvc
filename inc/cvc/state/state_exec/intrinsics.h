@@ -2,10 +2,12 @@
  * @file intrinsics.h
  * @brief State-tree and system intrinsic functions for the DSL.
  *
- * Provides 35 intrinsic functions that bridge DSL programs to the
- * cvc::state tree (get/set/delete/exists/keys/subscribe/wait-for),
- * scheduler operations (spawn/send/recv/self/sleep/yield/exit/ps/kill),
- * and I/O (print/println/format/error/type-of/to-string/gensym).
+ * Provides the intrinsic functions that bridge DSL programs to the
+ * cvc::state tree (get/set/children/exists/delete, data, json, watch,
+ * expiry, and the atomic single-node updates state-incr, state-cas and
+ * state-swap), scheduler operations (spawn/fork/kill/pause/resume/sleep/
+ * await/ps/inspect), resource queries, system identity and messaging
+ * (msg-send/msg-recv/msg-pending). register_intrinsics() lists them.
  */
 #ifndef CVC_STATE_EXEC_INTRINSICS_H
 #define CVC_STATE_EXEC_INTRINSICS_H
@@ -210,6 +212,16 @@ value_t park_on_channel(scheduler_base *sched, process *proc, int pid, const std
 // shared convention so producers and consumers never disagree on the tag.
 value_t make_future(const std::string &channel);
 std::optional<std::string> future_channel_of(const value_t &v);
+
+namespace detail {
+/// The shortest text that reads back as `d`, in std::to_chars(char*, char*, double)'s exact form:
+/// the shortest round-trip digits (the closest such string when two have the same length), written
+/// fixed or scientific (`e`, a sign, at least two exponent digits), whichever is shorter, fixed on
+/// a tie. state-incr stores floats with std::to_chars where the library has it; libc++ builds
+/// without floating to_chars (older macOS targets, Emscripten) use this, so a node's text is the
+/// same on every platform. Built everywhere, so every platform's tests check it against to_chars.
+std::string format_number_shortest_fallback(double d);
+} // namespace detail
 
 } // namespace cvc::state_exec
 

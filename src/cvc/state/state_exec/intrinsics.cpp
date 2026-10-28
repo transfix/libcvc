@@ -2,16 +2,22 @@
 #include <boost/date_time/posix_time/posix_time.hpp>
 #include <boost/lexical_cast.hpp>
 #include <boost/property_tree/json_parser/error.hpp>
+#include <charconv>
 #include <chrono>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_host.h> // async calls' futures, for await/await-all
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/data_job.h>
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/memory_tracker.h>
+#include <cvc/state/state_exec/parser.h> // detail::read_number_text, for state-incr
 #include <cvc/state/state_exec/process.h>
 #include <cvc/state/state_exec/scheduler.h>
 #include <cvc/state/state_json.h>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -92,6 +98,29 @@ std::string coerce_state_string(const value_t &v) {
   return to_string(v); // list/dict/symbol/closure — readable fallback
 }
 
+// A scalar for an atomic native's compare or store (design 4.4): nil is "", so a nil `expected`
+// matches an absent or empty node and a nil `new` empties it; a list or dict is a TypeError;
+// anything else is coerce_state_string's text.
+std::string atomic_scalar(const value_t &v, const char *name) {
+  if (v.is_nil())
+    return std::string();
+  if (is_compound(v))
+    throw dsl_error("TypeError", std::string(name) + ": expected a scalar, got " + v.type_name());
+  return coerce_state_string(v);
+}
+
+// The shortest text that reads back as `d` (state-incr's floats): std::to_chars where the library
+// has it for floating point, else the same text built by hand.
+std::string format_number_shortest(double d) {
+#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L
+  char buf[32];
+  const auto r = std::to_chars(buf, buf + sizeof(buf), d);
+  return std::string(buf, r.ptr);
+#else
+  return detail::format_number_shortest_fallback(d);
+#endif
+}
+
 void require_root(const intrinsics_context *ctx, const char *name) {
   if (!ctx->root)
     throw std::runtime_error(std::string(name) + ": no state root bound");
@@ -156,6 +185,85 @@ value_t intrinsic_state_set(intrinsics_context *ctx, std::span<const value_t> ar
   // operator() creates child nodes as needed
   (*ctx->root)(path).value(coerce_state_string(args[1]));
   return nil_value;
+}
+
+// The node an atomic native writes: `path` under the chroot, made when absent.
+cvc::state &atomic_node(intrinsics_context *ctx, const std::string &path) {
+  if (cvc::state *node = ctx->root->findDescendant(path))
+    return *node;
+  return (*ctx->root)(path);
+}
+
+// (state-cas path expected new): #t when the value equalled `expected` and is now `new` (an equal
+// `new` succeeds without writing), else #f. An absent node matches only a nil (or "") expected, and
+// is made only then.
+value_t intrinsic_state_cas(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 3, "state-cas");
+  require_root(ctx, "state-cas");
+  const auto &path = as_string(args[0], "state-cas");
+  const std::string expected = atomic_scalar(args[1], "state-cas");
+  const std::string desired = atomic_scalar(args[2], "state-cas");
+  cvc::state *node = ctx->root->findDescendant(path);
+  if (!node) {
+    if (!expected.empty())
+      return value_t(false);
+    node = &(*ctx->root)(path);
+  }
+  return value_t(node->compareAndSetValue(expected, desired));
+}
+
+// (state-swap path new): the value it replaced, nil when the node was absent or "".
+value_t intrinsic_state_swap(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 2, "state-swap");
+  require_root(ctx, "state-swap");
+  const auto &path = as_string(args[0], "state-swap");
+  const std::string desired = atomic_scalar(args[1], "state-swap");
+  std::string old = atomic_node(ctx, path).exchangeValue(desired);
+  return old.empty() ? nil_value : value_t(std::move(old));
+}
+
+// (state-incr path [delta]): adds `delta` (default 1) to the node's number and returns the new one.
+// An absent or empty node counts as 0. The node's text is read as a DSL number token
+// (detail::read_number_text); anything else is a ValueError and the node is left as it was. An int
+// plus an int stays an int (an overflow is an ArithmeticError); otherwise the sum is a float,
+// stored in its shortest round-trip form.
+value_t intrinsic_state_incr(intrinsics_context *ctx, std::span<const value_t> args) {
+  if (args.empty() || args.size() > 2)
+    throw std::runtime_error("state-incr: expected 1 or 2 argument(s), got " +
+                             std::to_string(args.size()));
+  require_root(ctx, "state-incr");
+  const auto &path = as_string(args[0], "state-incr");
+  value_t delta(int64_t(1));
+  if (args.size() == 2) {
+    if (!std::holds_alternative<int64_t>(args[1].v) && !std::holds_alternative<double>(args[1].v))
+      throw dsl_error("ValueError",
+                      "state-incr: the delta must be a number, got " + args[1].type_name());
+    delta = args[1];
+  }
+  value_t result;
+  atomic_node(ctx, path).updateValue([&](const std::string &old) {
+    value_t cur(int64_t(0));
+    if (!old.empty()) {
+      std::optional<value_t> number = detail::read_number_text(old);
+      if (!number)
+        throw dsl_error("ValueError", "state-incr: not a number: '" + old + "'");
+      cur = std::move(*number);
+    }
+    const auto *a = std::get_if<int64_t>(&cur.v);
+    const auto *b = std::get_if<int64_t>(&delta.v);
+    if (a && b) {
+      if ((*b > 0 && *a > std::numeric_limits<int64_t>::max() - *b) ||
+          (*b < 0 && *a < std::numeric_limits<int64_t>::min() - *b))
+        throw dsl_error("ArithmeticError",
+                        "state-incr: integer overflow: " + old + " + " + std::to_string(*b));
+      result = value_t(*a + *b);
+      return std::to_string(*a + *b);
+    }
+    const double sum = as_number(cur, "state-incr") + as_number(delta, "state-incr");
+    result = value_t(sum);
+    return format_number_shortest(sum);
+  });
+  return result;
 }
 
 value_t intrinsic_state_children(intrinsics_context *ctx, std::span<const value_t> args) {
@@ -1078,6 +1186,9 @@ void register_intrinsics(environment_ptr env, intrinsics_context *ctx) {
   reg("state-root-path", intrinsic_state_root_path);
   reg("state-watch", intrinsic_state_watch);
   reg("state-unwatch", intrinsic_state_unwatch);
+  reg("state-incr", intrinsic_state_incr);
+  reg("state-cas", intrinsic_state_cas);
+  reg("state-swap", intrinsic_state_swap);
 
   // Scheduler
   reg("spawn", intrinsic_spawn);
@@ -1123,6 +1234,89 @@ void register_intrinsics(environment_ptr env, intrinsics_context *ctx) {
   reg("msg-recv", intrinsic_msg_recv);
   reg("msg-pending", intrinsic_msg_pending);
 }
+
+namespace detail {
+
+namespace {
+// `digits` (a decimal digit string) plus `dir` (+1 or -1) in the last place, or "" when that
+// changes how many digits it has.
+std::string step_last_digit(std::string digits, int dir) {
+  for (std::size_t i = digits.size(); i-- > 0;) {
+    if (dir > 0 && digits[i] == '9') {
+      digits[i] = '0';
+    } else if (dir < 0 && digits[i] == '0') {
+      digits[i] = '9';
+    } else {
+      digits[i] = static_cast<char>(digits[i] + dir);
+      return digits[0] == '0' ? std::string() : digits;
+    }
+  }
+  return std::string();
+}
+} // namespace
+
+std::string format_number_shortest_fallback(double d) {
+  if (std::isnan(d))
+    return std::signbit(d) ? "-nan" : "nan";
+  if (std::isinf(d))
+    return d < 0 ? "-inf" : "inf";
+  const std::string sign = std::signbit(d) ? "-" : "";
+  const double mag = std::fabs(d);
+  if (mag == 0)
+    return sign + "0";
+
+  // The shortest digits that read back as `mag`, and the power of ten of the first. %.*e gives
+  // the correctly rounded p digits. Where `mag` sits at a power of two its rounding interval is
+  // lopsided, so those may miss while the p-digit neighbour on the other side reads back: that
+  // one is then the shortest, and the one to_chars writes. Candidates are read back as
+  // "<digits>e<exp>", with no radix character, so the locale does not matter.
+  std::string digits;
+  int exp10 = 0;
+  for (int p = 1; p <= 17 && digits.empty(); ++p) {
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%.*e", p - 1, mag);
+    std::string m;
+    const char *c = buf;
+    for (; *c && *c != 'e' && *c != 'E'; ++c)
+      if (*c >= '0' && *c <= '9')
+        m += *c;
+    const int e = *c ? std::atoi(c + 1) : 0;
+    const auto reads_back = [&](const std::string &cand) {
+      const std::string text = cand + "e" + std::to_string(e - (p - 1));
+      return std::strtod(text.c_str(), nullptr) == mag;
+    };
+    for (const std::string &cand : {m, step_last_digit(m, -1), step_last_digit(m, +1)})
+      if (!cand.empty() && reads_back(cand)) {
+        digits = cand;
+        exp10 = e;
+        break;
+      }
+  }
+  while (digits.size() > 1 && digits.back() == '0')
+    digits.pop_back();
+
+  const int n = static_cast<int>(digits.size());
+  const int ae = exp10 < 0 ? -exp10 : exp10;
+  std::string sci = digits.substr(0, 1);
+  if (n > 1)
+    sci += "." + digits.substr(1);
+  sci += std::string(exp10 < 0 ? "e-" : "e+") + (ae < 10 ? "0" : "") + std::to_string(ae);
+  std::string fixed;
+  if (exp10 >= n - 1) {
+    // A whole number. Its exact digits are as long as the shortest digits padded with zeros, and
+    // of texts of one length to_chars writes the closest, so the exact value (%.0f prints it, and
+    // has no radix character).
+    char whole[400];
+    std::snprintf(whole, sizeof(whole), "%.0f", mag);
+    fixed = whole;
+  } else if (exp10 >= 0)
+    fixed = digits.substr(0, exp10 + 1) + "." + digits.substr(exp10 + 1);
+  else
+    fixed = "0." + std::string(static_cast<std::size_t>(-exp10 - 1), '0') + digits;
+  return sign + (fixed.size() <= sci.size() ? fixed : sci);
+}
+
+} // namespace detail
 
 void apply_chroot(intrinsics_context &ctx, cvc::state &tree_root, const std::string &root_path) {
   if (root_path.empty()) {

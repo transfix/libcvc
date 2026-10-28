@@ -84,6 +84,7 @@ add_executable(state_exec_pegtl_test state_exec_pegtl_test.cpp)
 add_executable(state_exec_async_test state_exec_async_test.cpp)
 add_executable(async_lane_test async_lane_test.cpp)
 add_executable(state_exec_scheduler_test state_exec_scheduler_test.cpp)
+add_executable(state_exec_locks_test state_exec_locks_test.cpp)
 add_executable(state_exec_intrinsics_test state_exec_intrinsics_test.cpp)
 add_executable(state_exec_coordinator_test state_exec_coordinator_test.cpp)
 add_executable(state_exec_bench_test state_exec_bench_test.cpp)
@@ -502,6 +503,7 @@ list(APPEND TEST_TARGETS
   state_exec_async_test
   async_lane_test
   state_exec_scheduler_test
+  state_exec_locks_test
   state_exec_intrinsics_test
   state_exec_coordinator_test
   state_exec_bench_test
@@ -1677,6 +1679,13 @@ target_link_libraries(state_exec_scheduler_test
     GTest::gtest_main
 )
 
+target_link_libraries(state_exec_locks_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(state_exec_intrinsics_test
   PRIVATE
     cvc
@@ -2265,6 +2274,7 @@ target_compile_features(state_exec_pegtl_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_async_test PRIVATE cxx_std_20)
 target_compile_features(async_lane_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_scheduler_test PRIVATE cxx_std_20)
+target_compile_features(state_exec_locks_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_intrinsics_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_coordinator_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_bench_test PRIVATE cxx_std_20)
@@ -2761,6 +2771,7 @@ cvc_discover_tests(state_exec_pegtl_test)
 cvc_discover_tests(state_exec_async_test)
 cvc_discover_tests(async_lane_test)
 cvc_discover_tests(state_exec_scheduler_test)
+cvc_discover_tests(state_exec_locks_test)
 cvc_discover_tests(state_exec_intrinsics_test)
 cvc_discover_tests(state_exec_coordinator_test)
 cvc_discover_tests(state_exec_bench_test)
