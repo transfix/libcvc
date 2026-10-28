@@ -289,6 +289,35 @@ public:
   /// Count a hold left at a normal termination (protocol 5.6; lock_stats::leaked_at_exit).
   void note_leaked_at_exit() { ++leaked_at_exit_; }
 
+  // -- reads for checks -------------------------------------------------------------------------
+  struct rec_view {
+    std::string owner;
+    int base = 0;
+    std::vector<std::uint64_t> holds; // sorted
+    std::optional<std::uint64_t> ticket;
+    int inh = lock_inf;
+  };
+  /// p's record, or nullopt when p has none.
+  std::optional<rec_view> rec_of(lock_pid p) const;
+  struct ticket_view {
+    lock_pid pid;
+    ticket_state state = ticket_state::queued;
+    std::optional<std::uint64_t> hold;
+  };
+  /// A ticket, or nullopt when it is gone.
+  std::optional<ticket_view> ticket_of(std::uint64_t tid) const;
+  struct hold_view {
+    lock_pid pid;
+    lock_mode mode = lock_mode::exclusive;
+    std::uint64_t gen = 0;
+    bool body_started = false;
+  };
+  /// A hold, or nullopt when it is gone.
+  std::optional<hold_view> hold_of(std::uint64_t id) const;
+  /// Home h's key-cache references on node n (0 if none), and every reference h holds.
+  std::size_t home_cache_refs(home_id h, const lock_node *n) const;
+  std::size_t home_cache_refs(home_id h) const;
+
   // -- checks ---------------------------------------------------------------------------------
   lock_stats stats() const;
   /// The manager's clauses of protocol section 6 (I1; I2, I3, I4 manager clauses; I6 first half;

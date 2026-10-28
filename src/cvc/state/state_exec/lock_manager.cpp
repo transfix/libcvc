@@ -59,6 +59,11 @@ lock_query_result lock_table::query(std::string_view, std::optional<home_id>,
 void lock_table::ref_nodes(home_id, std::span<key_ref>) { not_built(); }
 void lock_table::unref_nodes(home_id, std::span<lock_node *const>) { not_built(); }
 std::span<lock_node *const> lock_table::hold_keys(std::uint64_t) const { not_built(); }
+std::optional<lock_table::rec_view> lock_table::rec_of(lock_pid) const { not_built(); }
+std::optional<lock_table::ticket_view> lock_table::ticket_of(std::uint64_t) const { not_built(); }
+std::optional<lock_table::hold_view> lock_table::hold_of(std::uint64_t) const { not_built(); }
+std::size_t lock_table::home_cache_refs(home_id, const lock_node *) const { not_built(); }
+std::size_t lock_table::home_cache_refs(home_id) const { not_built(); }
 lock_stats lock_table::stats() const { return {}; }
 void lock_table::check() const {}
 bool lock_table::empty() const { return true; }

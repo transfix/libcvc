@@ -945,6 +945,12 @@ void stackless_evaluator::step_frame(evaluator_state &state) {
   case eval_phase::await_call:
     step_await_call(state, frame);
     break;
+  case eval_phase::lock_enter:
+    step_lock_enter(state, frame);
+    break;
+  case eval_phase::lock_body:
+    step_lock_body(state, frame);
+    break;
   }
 }
 
@@ -1774,6 +1780,16 @@ void stackless_evaluator::step_raise_value(evaluator_state & /*state*/, eval_fra
 // ---------------------------------------------------------------------------
 // step: eval
 // ---------------------------------------------------------------------------
+
+// with-lock's steps (docs/STATE_EXEC_LOCKS.md 8.5). Nothing makes a lock frame before the lock
+// form is bound (locks plan L1.6).
+void stackless_evaluator::step_lock_enter(evaluator_state &, eval_frame &) {
+  throw dsl_error("LockError", "with-lock: not available yet");
+}
+
+void stackless_evaluator::step_lock_body(evaluator_state &, eval_frame &) {
+  throw dsl_error("LockError", "with-lock: not available yet");
+}
 
 void stackless_evaluator::step_await_call(evaluator_state &state, eval_frame &frame) {
   const std::string function = frame.extra_strs[await_function];

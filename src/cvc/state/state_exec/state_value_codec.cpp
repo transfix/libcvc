@@ -756,6 +756,10 @@ std::string phase_to_string(eval_phase p) {
     return "raise_value";
   case eval_phase::await_call:
     return "await_call";
+  case eval_phase::lock_enter:
+    return "lock_enter";
+  case eval_phase::lock_body:
+    return "lock_body";
   }
   return "init";
 }
@@ -805,6 +809,10 @@ eval_phase string_to_phase(const std::string &s) {
     return eval_phase::raise_value;
   if (s == "await_call")
     return eval_phase::await_call;
+  if (s == "lock_enter")
+    return eval_phase::lock_enter;
+  if (s == "lock_body")
+    return eval_phase::lock_body;
   return eval_phase::init;
 }
 

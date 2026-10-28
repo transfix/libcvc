@@ -127,6 +127,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/state/state_exec/utf8.h
   ../../inc/cvc/state/state_exec/lock_manager.h
   ../../inc/cvc/state/state_exec/detail/lock_table.h
+  ../../inc/cvc/state/state_exec/detail/lock_home.h
   ../../inc/cvc/core/app.h
   ../../inc/cvc/core/async_task.h
   ../../inc/cvc/core/async_lane.h
@@ -276,6 +277,7 @@ set(SOURCE_FILES
   state/state_exec/stdlib.cpp
   state/state_exec/exec_coordinator.cpp
   state/state_exec/lock_manager.cpp
+  state/state_exec/lock_home.cpp
   core/world_clock.cpp
   core/world_clock_binding.cpp
   core/clock_driver.cpp
