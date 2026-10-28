@@ -109,6 +109,50 @@ A point whose checks failed on either side is reported as `CHECK FAILED` rather 
 a point only the base has is reported as `only in base`; `--fail-on-worse` exits 1 on a regression,
 a failed candidate point or a missing one.
 
+More `compare` rules, for gates:
+
+- **Implicit defaults.** Some sweep keys were added after records existed: `policy` and `locks`
+  (on `sched.single.*`, `flood.small` and `msg.*`). Every point ran at `policy=rr`, `locks=none`
+  before them. A param at its implicit default is left out of the match, so a record from an older
+  binary (no such param) and one at the default are the same point.
+- **`--pair KEY=A:B`** compares the base's points whose `KEY` is `A` with the candidate's whose
+  `KEY` is `B`, matched without `KEY`. Both files may be the same run: `compare run.jsonl run.jsonl
+  --pair op=set:incr` compares two points of one sweep. A point at neither value is left out.
+- **`--max-noise P`**: a point whose noise is above `P` percent gets `INCONCLUSIVE` instead of a
+  verdict. It cannot rule out a change of the size asked for.
+- **`--fail-on-change`** exits 1 on any change beyond the noise, in either direction, and on a
+  failed or missing point. Use it for `steps_total`, where a drop is as wrong as a rise
+  (`--fail-on-worse` would pass a drop as `better`). A base of 0 that the candidate left counts as
+  a change (`CHANGED (base 0)`).
+- **Exit status:** 1 when anything fails under the rule asked for; otherwise 2 when any point is
+  `INCONCLUSIVE`; otherwise 0. An exit of 2 means repeat the run on a quieter machine. It is never
+  a pass.
+
+`gate RUN --scenario GLOB --metric M [--max X] [--min X]` checks an absolute bound on one run:
+for each matching point it takes a statistic (`--stat median|min|max`, default median) of `M`
+over the measured reps and prints `PASS` or `FAIL`. Options:
+
+- `--executor E` and `--where K=V` (repeatable; implicit defaults apply) narrow the points.
+- `--min X --max X` together pin a value, such as a step count.
+- `--max-noise P` makes a point noisier than `P` percent `INCONCLUSIVE`.
+
+It exits 1 when a point fails, a matching point has a failed rep, or nothing matches. Otherwise it
+exits 2 when a point is inconclusive, and 0 when every point passes. Gates that are a ratio between
+two points (one sweep value against another) are `compare --pair` runs instead. Gates on a count
+(steps, allocations) take no noise rule.
+
+How the lock gates use these:
+
+- **Paired gates** take two runs, the second with the paired values in reverse order (`--size
+  op=set,incr`, then `--size op=incr,set`). A sweep's values run in the order given, so load that
+  starts between them would bias one side. The two runs are concatenated and compared with
+  `--pair`.
+- **Regression gates** use `--fail-on-worse --max-noise 3` on time, and `--metric steps_total
+  --threshold 0 --fail-on-change` on the deterministic families.
+
+`tools/bench/test_state_exec_bench.py` tests these rules on synthetic records. CTest runs it as
+`state_exec_bench_tool_test` when a Python 3 is found.
+
 ## Getting stable numbers
 
 - **Pin the driver to a performance core.** `--pin auto` (the runner's default) picks, on
@@ -403,6 +447,18 @@ scheduler, submitted as a pre-parsed AST. The difference from `eval.*.stackless`
 per-step guards and clock reads, and on the async scheduler the ingress drain and the coroutine
 frames.
 
+`sched.single.*`, `flood.small` and `msg.*` have two more sweep keys, both at one value by default:
+
+- `policy`: the scheduler's policy. `rr` (round robin, the default), `priority` or `priority_rr`.
+- `locks`: which lock manager the scheduler gets. `none` (the default) is the scheduler every
+  existing suite builds. The state_exec lock phases add `private` and `shared`
+  (docs/STATE_EXEC_LOCKS.md, section 11). A build without them skips such a point and prints
+  `locks=X needs the lock manager`.
+
+Sweep them with `--size policy=rr,priority_rr` or `--size locks=none,private`, and compare the two
+sides of a sweep with `compare --pair` ("Runner options"). Records from binaries that predate the
+keys still match, because both are implicit defaults.
+
 ### flood.small (sync, async)
 
 `n` tiny programs, half `(+ 1 2)` and half a 10-iteration loop, submitted at once as source text
@@ -415,7 +471,7 @@ every process the scheduler holds, so a flood submitted at once costs O(n^2) on 
 (n=1000 takes 2-3 s a rep; n=10000 several minutes). Sweep further with
 `--size n=3000,10000 --timeout 900`. Since everything is submitted at once, most processes are
 live for most of the run whether or not they are reaped; `flood.stream` separates the cost of
-finished processes kept.
+finished processes kept. It takes the `policy` and `locks` keys (`sched.single.*`).
 
 ### flood.small_host (async)
 
@@ -566,6 +622,8 @@ Kernels that run `parallel_for` over `app.computePool()`:
   channel, no gate (a send to a receiver that isn't parked queues): `extra.ns_per_delivery`.
 - `ingress`: `t` native threads (1, 4) calling `async_scheduler::post_message`, the thread-safe
   entry, into `r` parked receivers: `extra.messages_per_s` and `extra.post_to_receive_ns`.
+
+All of them take the `policy` and `locks` keys (`sched.single.*`).
 
 ### native.* (sync, async)
 

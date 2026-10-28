@@ -11,6 +11,8 @@
   state_exec_bench.py run [--exe PATH] [--scenario GLOB]... [--reps 5] [--pin auto] --out base.jsonl
   state_exec_bench.py table base.jsonl
   state_exec_bench.py compare base.jsonl cand.jsonl [--metric wall_ns] [--threshold 3]
+                      [--pair KEY=A:B] [--max-noise P] [--fail-on-worse | --fail-on-change]
+  state_exec_bench.py gate run.jsonl --scenario GLOB --metric M (--max X | --min X) [--stat median]
 
 `run` starts the executable once per scenario (with --split, once per scenario, executor and sweep
 point), so the thread count and the handle count a record carries belong to that scenario alone and
@@ -24,7 +26,16 @@ to --out as JSON lines, one per rep, then summarized as a table. A process that 
 side and the noise of each side (half the min-max range, and 3 x the scaled MAD, relative to the
 median), and flags a change whose size exceeds both the noise and --threshold percent. A point
 whose checks failed on either side, or that only the base has, is reported as such and counts as a
-regression for --fail-on-worse.
+regression for --fail-on-worse. A param at its implicit default (IMPLICIT_DEFAULTS) is left out of
+the match, so records from binaries that predate the param still match. --pair KEY=A:B compares
+the points whose KEY is A in the base with those whose KEY is B in the candidate (one run against
+itself, say). With --max-noise P, a point noisier than P percent is INCONCLUSIVE rather than judged.
+Exit status: 1 when a point fails under --fail-on-worse or --fail-on-change; else 2 when a point is
+INCONCLUSIVE (repeat the run on a quieter machine; never a pass); else 0.
+
+`gate` checks one statistic of a metric against an absolute bound on every matching point of one
+run (a gate the design states in nanoseconds, steps or allocations rather than as a change), with
+the same exit statuses.
 
 Standard library only.
 """
@@ -92,8 +103,21 @@ def load(path):
     return recs
 
 
-def key_of(r):
-    params = r.get("params", {})
+# Sweep keys some scenarios gained after records existed, at the value every point ran at before
+# them. A param at its implicit default is left out of a record's match key, so a record from a
+# binary without the key and one from a binary with it at its default are the same point.
+IMPLICIT_DEFAULTS = {"policy": "rr", "locks": "none"}
+
+
+def param(r, name):
+    """A record's value of param `name` as text: its implicit default when the record has none."""
+    v = r.get("params", {}).get(name)
+    return str(v) if v is not None else IMPLICIT_DEFAULTS.get(name)
+
+
+def key_of(r, drop=()):
+    params = {k: str(v) for k, v in r.get("params", {}).items()
+              if k not in drop and IMPLICIT_DEFAULTS.get(k) != str(v)}
     return (r.get("scenario", "?"), r.get("executor", ""),
             " ".join(f"{k}={params[k]}" for k in sorted(params)))
 
@@ -107,12 +131,12 @@ def metric(r, name):
     return cur if isinstance(cur, (int, float)) and not isinstance(cur, bool) else None
 
 
-def group(recs):
+def group(recs, drop=()):
     groups = {}
     for r in recs:
         if r.get("rep", 0) < 0 and r.get("ok", True):
             continue
-        groups.setdefault(key_of(r), []).append(r)
+        groups.setdefault(key_of(r, drop), []).append(r)
     return groups
 
 
@@ -172,9 +196,19 @@ def table(recs, out=sys.stdout):
                 print(f"    error: {e}", file=out)
 
 
-def compare(base, cand, metrics, threshold):
-    gb, gc = group(base), group(cand)
-    flagged = worse = 0
+def compare(base, cand, metrics, threshold, pair=None, max_noise=None):
+    """Print the comparison; return the counts of worse, changed (any verdict but ~), inconclusive
+    and failed (failed its checks or missing in the candidate) points."""
+    drop = ()
+    if pair:
+        # The base side keeps the points at A, the candidate side those at B, matched without the
+        # key; a point at neither value is left out.
+        key, a, b = pair
+        base = [r for r in base if param(r, key) == a]
+        cand = [r for r in cand if param(r, key) == b]
+        drop = (key,)
+    gb, gc = group(base, drop), group(cand, drop)
+    flagged = worse = inconclusive = 0
     failed_keys = set()
     for name in metrics:
         better_up = name in HIGHER_IS_BETTER
@@ -208,15 +242,23 @@ def compare(base, cand, metrics, threshold):
             mb, mc = statistics.median(vb), statistics.median(vc)
             noise = 100.0 * max(noise_of(vb), noise_of(vc))
             if mb == 0:
-                # No relative change to speak of.
+                # No relative change to speak of; a value that left zero still changed.
+                verdict = "n/a (base 0)"
+                if mc != 0:
+                    verdict = "CHANGED (base 0)"
+                    flagged += 1
                 print(f"{key[0]:<28} {key[1]:<9} {key[2][:36]:<36} {mb:>12.6g} {mc:>12.6g} "
-                      f"{'n/a':>8} {noise:>7.1f}  n/a (base 0)")
+                      f"{'n/a':>8} {noise:>7.1f}  {verdict}")
                 continue
             # Relative to |base|, so a negative base (a derived difference such as
             # extra.ns_per_call) doesn't flip the sign of the change.
             delta = 100.0 * (mc - mb) / abs(mb)
             verdict = "~"
-            if abs(delta) > max(noise, threshold):
+            if max_noise is not None and noise > max_noise:
+                # Too noisy to rule a change in or out at the size asked for.
+                verdict = "INCONCLUSIVE"
+                inconclusive += 1
+            elif abs(delta) > max(noise, threshold):
                 improved = (delta > 0) == better_up
                 verdict = "better" if improved else "WORSE"
                 flagged += 1
@@ -224,8 +266,66 @@ def compare(base, cand, metrics, threshold):
             print(f"{key[0]:<28} {key[1]:<9} {key[2][:36]:<36} {mb:>12.6g} {mc:>12.6g} "
                   f"{delta:>+8.1f} {noise:>7.1f}  {verdict}")
     print(f"\n{flagged} change(s) beyond the noise, {worse} of them worse; "
-          f"{len(failed_keys)} point(s) failed or missing in the candidate")
-    return worse + len(failed_keys)
+          f"{len(failed_keys)} point(s) failed or missing in the candidate"
+          + (f"; {inconclusive} inconclusive (noise above {max_noise:g}%)"
+             if max_noise is not None else ""))
+    return {"worse": worse, "changed": flagged, "inconclusive": inconclusive,
+            "failed": len(failed_keys)}
+
+
+def parse_pair(text):
+    """KEY=A:B -> (KEY, A, B)."""
+    key, sep, vals = text.partition("=")
+    a, sep2, b = vals.partition(":")
+    if not (key and sep and sep2 and a and b) or a == b:
+        raise ValueError(f"--pair wants KEY=A:B with A != B, not {text!r}")
+    return key, a, b
+
+
+def gate(recs, scenario, metric_name, lo=None, hi=None, stat="median", executor=None,
+         where=None, max_noise=None, out=sys.stdout):
+    """Check `stat` of `metric_name` over each matching point's measured reps against [lo, hi].
+    Return 1 when a point fails, a matching point has a failed rep, or nothing matches; else 2
+    when a point is inconclusive (noisier than max_noise percent); else 0."""
+    where = where or {}
+    picked = [r for r in recs
+              if fnmatch.fnmatchcase(r.get("scenario", ""), scenario)
+              and (executor is None or r.get("executor", "") == executor)
+              and all(param(r, k) == v for k, v in where.items())]
+    groups = group(picked)
+    bound = " and ".join(([f">= {lo:g}"] if lo is not None else []) +
+                         ([f"<= {hi:g}"] if hi is not None else []))
+    print(f"gate {stat}({metric_name}) {bound}"
+          + (f", noise at most {max_noise:g}%" if max_noise is not None else ""), file=out)
+    if not groups:
+        print("  no point matches", file=out)
+        return 1
+    stat_fn = {"median": statistics.median, "min": min, "max": max}[stat]
+    failed = inconclusive = 0
+    for key in sorted(groups):
+        rs = groups[key]
+        label = f"  {key[0]:<28} {key[1]:<9} {key[2][:40]:<40}"
+        if not all(r.get("ok", False) for r in rs):
+            print(f"{label} {'':>12} {'':>7}  FAIL (a rep failed its checks)", file=out)
+            failed += 1
+            continue
+        vals = [v for v in (metric(r, metric_name) for r in rs) if v is not None]
+        if not vals:
+            print(f"{label} {'':>12} {'':>7}  FAIL (no {metric_name})", file=out)
+            failed += 1
+            continue
+        v = stat_fn(vals)
+        noise = 100.0 * noise_of(vals)
+        if max_noise is not None and noise > max_noise:
+            verdict = "INCONCLUSIVE"
+            inconclusive += 1
+        elif (lo is None or v >= lo) and (hi is None or v <= hi):
+            verdict = "PASS"
+        else:
+            verdict = "FAIL"
+            failed += 1
+        print(f"{label} {v:>12.6g} {noise:>7.1f}  {verdict}", file=out)
+    return 1 if failed else (2 if inconclusive else 0)
 
 
 def expand_points(sc, sizes_over, executors, smoke):
@@ -397,15 +497,60 @@ def main():
     c.add_argument("--fail-on-worse", action="store_true",
                    help="exit 1 when any change beyond the noise is a regression, or a point "
                         "failed its checks or is missing in the candidate")
+    c.add_argument("--fail-on-change", action="store_true",
+                   help="exit 1 when any point changed beyond the noise in either direction, or "
+                        "failed its checks or is missing in the candidate (for metrics such as "
+                        "steps_total, where a drop is as wrong as a rise)")
+    c.add_argument("--pair", metavar="KEY=A:B",
+                   help="compare the base's points at KEY=A with the candidate's at KEY=B, "
+                        "matched without KEY (both files may be the same run)")
+    c.add_argument("--max-noise", type=float, metavar="P",
+                   help="a point noisier than P percent is INCONCLUSIVE, not judged (exit 2)")
+    g = sub.add_parser("gate", help="check a metric of one run against an absolute bound")
+    g.add_argument("run")
+    g.add_argument("--scenario", required=True, help="name or glob")
+    g.add_argument("--executor", help="only this executor's points")
+    g.add_argument("--where", action="append", metavar="K=V",
+                   help="only points whose param K is V (implicit defaults apply); repeatable")
+    g.add_argument("--metric", required=True, help="record field, dotted for nested")
+    g.add_argument("--max", type=float, help="the statistic must be at most this")
+    g.add_argument("--min", type=float, help="the statistic must be at least this")
+    g.add_argument("--stat", choices=["median", "min", "max"], default="median",
+                   help="over the measured reps (default median)")
+    g.add_argument("--max-noise", type=float, metavar="P",
+                   help="a point noisier than P percent is INCONCLUSIVE, not judged (exit 2)")
     args = ap.parse_args()
     if args.cmd == "run":
         return cmd_run(args)
     if args.cmd == "table":
         table(load(args.file))
         return 0
+    if args.cmd == "gate":
+        if args.max is None and args.min is None:
+            ap.error("gate: give --max, --min or both")
+        where = {}
+        for kv in args.where or []:
+            k, sep, v = kv.partition("=")
+            if not (k and sep):
+                ap.error(f"gate: --where wants K=V, not {kv!r}")
+            where[k] = v
+        return gate(load(args.run), args.scenario, args.metric, lo=args.min, hi=args.max,
+                    stat=args.stat, executor=args.executor, where=where,
+                    max_noise=args.max_noise)
+    pair = None
+    if args.pair:
+        try:
+            pair = parse_pair(args.pair)
+        except ValueError as e:
+            ap.error(str(e))
     metrics = args.metric or ["wall_ns", "ns_per_step"]
-    worse = compare(load(args.base), load(args.cand), metrics, args.threshold)
-    return 1 if (args.fail_on_worse and worse) else 0
+    res = compare(load(args.base), load(args.cand), metrics, args.threshold, pair=pair,
+                  max_noise=args.max_noise)
+    if args.fail_on_change and (res["changed"] or res["failed"]):
+        return 1
+    if args.fail_on_worse and (res["worse"] or res["failed"]):
+        return 1
+    return 2 if res["inconclusive"] else 0
 
 
 if __name__ == "__main__":
