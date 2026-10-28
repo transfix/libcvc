@@ -839,17 +839,21 @@ struct hooks_scope {
   hooks_scope &operator=(const hooks_scope &) = delete;
 };
 
+// How checked_world submits a program. At namespace scope, not nested: GCC refuses a `= {}`
+// default argument of a nested class with member initializers inside the class that encloses it.
+struct checked_submit_options {
+  execute_options opts;
+  std::string chroot;
+  const channel_policy *policy = nullptr;
+  std::optional<double> lock_default_timeout;
+  bool lock_wait_allowed = true;
+  std::optional<int> ctx_pid; // what the context's pid says (a host's placeholder); else the pid
+};
+
 // One app and one scheduler of the given kind, its lock home made at once (on a private manager
 // unless one is given), one intrinsics context per program, and the checked driver.
 struct checked_world {
-  struct submit_options {
-    execute_options opts;
-    std::string chroot;
-    const channel_policy *policy = nullptr;
-    std::optional<double> lock_default_timeout;
-    bool lock_wait_allowed = true;
-    std::optional<int> ctx_pid; // what the context's pid says (a host's placeholder); else the pid
-  };
+  using submit_options = checked_submit_options;
 
   std::string kind;
   cvc::app app;
