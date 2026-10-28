@@ -90,6 +90,8 @@ struct lock_node {
   std::uint32_t subw = 0;            // wq.size() over this node and every descendant
   bool abandoned = false;            // the key is in M.abandoned
   std::uint32_t refs = 0;            // key-cache references, over every home
+  bool live = false;                 // in the trie (false while on the table's free list)
+  bool free_pending = false;         // queued for the end-of-operation free check (2.4)
 };
 
 /// Whether key node `a` is node `b` or one of its ancestors (protocol 1's prefix).
@@ -216,8 +218,9 @@ public:
     unref_pops_entry = 1u << 3,             // 'unref-pops-entry': unref erases an emptied entry
     cancel_marks_failed = 1u << 4,          // 'cancel-marks-failed': a timeout marks failed
     query_first_gen = 1u << 5,              // 'query-first-gen': query shows the first X gen
-    plant_divergence = 1u << 6,             // no protocol meaning: the next release skips its
-                                            // grants count (the lockstep test's own check)
+    plant_divergence = 1u << 6,             // no protocol meaning: the first grant a release
+                                            // makes is left out of the grants count, once (the
+                                            // lockstep test's own check)
     // Phase L2: cancel_skips_relevel ('no-relevel-cancel'), coalesce_no_clear
     // ('coalesce-no-clear'), impl_note_after_only ('impl-note-after-only').
   };
@@ -289,7 +292,7 @@ public:
   /// Count a hold left at a normal termination (protocol 5.6; lock_stats::leaked_at_exit).
   void note_leaked_at_exit() { ++leaked_at_exit_; }
 
-  // -- reads for checks -------------------------------------------------------------------------
+  // -- reads for checks (lock_home::check_quiescent's home-side clauses) -----------------------
   struct rec_view {
     std::string owner;
     int base = 0;
@@ -297,14 +300,14 @@ public:
     std::optional<std::uint64_t> ticket;
     int inh = lock_inf;
   };
-  /// p's record, or nullopt when p has none.
+  /// P's record; nullopt when P has none.
   std::optional<rec_view> rec_of(lock_pid p) const;
   struct ticket_view {
     lock_pid pid;
     ticket_state state = ticket_state::queued;
     std::optional<std::uint64_t> hold;
   };
-  /// A ticket, or nullopt when it is gone.
+  /// A ticket; nullopt when it is gone.
   std::optional<ticket_view> ticket_of(std::uint64_t tid) const;
   struct hold_view {
     lock_pid pid;
@@ -312,10 +315,11 @@ public:
     std::uint64_t gen = 0;
     bool body_started = false;
   };
-  /// A hold, or nullopt when it is gone.
+  /// A hold; nullopt when it is gone.
   std::optional<hold_view> hold_of(std::uint64_t id) const;
-  /// Home h's key-cache references on node n (0 if none), and every reference h holds.
+  /// Home h's key-cache references on node n (0 if none).
   std::size_t home_cache_refs(home_id h, const lock_node *n) const;
+  /// Every key-cache reference home h holds.
   std::size_t home_cache_refs(home_id h) const;
 
   // -- checks ---------------------------------------------------------------------------------
@@ -338,9 +342,11 @@ public:
   ///   (<home>,<pid>) owner="<owner>" base=<base> holds=[<id>,...] ticket=<tid|-> inh=<inh|INF>
   ///   holds
   ///   <id> pid=(<home>,<pid>) keys=[<key>,...] mode=<S|X> gen=<gen> started=<0|1>
-  ///   taken=[<key>,...] tickets <tid> pid=(<home>,<pid>) keys=[<key>,...] mode=<S|X>
-  ///   state=<queued|granted|cancelled|failed>
-  ///       hold=<id|-> error=<-|DeadlockError[(<pid|nil>:<key>),...]>   (one line)
+  ///       taken=[<key>,...]                                                 (one line)
+  ///   tickets
+  ///   <tid> pid=(<home>,<pid>) keys=[<key>,...] mode=<S|X>
+  ///       state=<queued|granted|cancelled|failed> hold=<id|->
+  ///       error=<-|TimeoutError|DeadlockError[(<pid|nil>:<key>),...]>       (one line)
   ///   queue=[<tid>,...]
   ///   abandoned=[<key>,...]
   ///   next seq=<n> hold=<n> gen=<n>
