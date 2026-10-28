@@ -14,14 +14,84 @@ For the full per-method reference, see
   submissions queue automatically.
 - **Four priority levels.** `PRIORITY_LOW`, `PRIORITY_NORMAL`,
   `PRIORITY_HIGH`, `PRIORITY_CRITICAL`. Higher-priority tasks run
-  before lower-priority ones when the pool is at capacity.
-- **Tracked threads.** Each pooled task is registered in the app's
-  thread map under a user-supplied key, so the same APIs that work for
-  `startThread` (`hasThread`, `threads(key)`, progress, interruption,
-  `thread_feedback`) also work for pooled tasks.
+  before lower-priority ones when the pool is at capacity, and tasks of
+  one priority start in the order they were submitted.
+- **Keyed tasks are tracked threads.** A keyed task (`wait=true`) gets a
+  thread of its own, registered in the app's thread map under its key
+  before it runs, so the same APIs that work for `startThread`
+  (`hasThread`, `threads(key)` to join or interrupt it, keyed progress
+  and info, `thread_feedback`) also work for it. When the pool has room
+  for it and for every task already queued, it is registered before
+  `startThreadPooled` returns, so `if (app.hasThread(k))
+  app.threads(k)->join();` waits for it; if its thread can't be created
+  then, `startThreadPooled` throws `boost::thread_resource_error`.
+- **Anonymous tasks run on persistent workers.** An anonymous task
+  (`wait=false`, or `submitPooled`) runs on one of at most
+  `getThreadPoolSize()` worker threads the pool starts on demand (a
+  burst of N tasks starts min(N, pool size) of them at once) and keeps
+  until the app goes. It has no key and no thread-map entry, and
+  the pool destroys it, with everything it captured, as soon as it
+  returns. This is the path for many small tasks (state_exec's async
+  calls, `compute_async`): no thread is created per task, and however
+  many are submitted, `threads()` does not grow and no two of them
+  share a key or cancel each other.
 - **Cooperative interruption.** Tasks honor
   `boost::this_thread::interruption_point()` and shut down cleanly when
-  interrupted or when the application exits.
+  interrupted (`threads(key)->interrupt()` for a keyed one; `wait()` and
+  `~app` interrupt every running task, also one a worker started a
+  moment ago). `thread_feedback` and `thread_info` hold interruption off
+  while they keep their books, so an interrupt that arrives in them
+  stays pending for the task's next interruption point instead of being
+  swallowed. `wait()`, `~app` and the destructors of dropped tasks do
+  the same, and `~app` holds interruption off until its last member is
+  destroyed. `~app` closes the pool before anything else but its async
+  host's shutdown (and before that too when the pool has no worker,
+  which could never run a kernel the host waits for): no queued task
+  starts after that, the queued ones are dropped without running, and
+  from then on `submitPooled` drops a task at once and returns `false`.
+  A dropped task is destroyed, so it can report the drop from its
+  destructor (the async host fails the call with `RuntimeError`,
+  `launch_pool_task` posts `on_error`'s value), saying why with
+  `app::poolDropReason()`.
+- **Thread creation failures.** If a new worker's thread can't be
+  created, the queued tasks wait for a running worker. When the pool has
+  none at all (thread resources were exhausted before its first worker),
+  `trySubmitPooled` hands the task back unrun, once any other worker
+  creation under way has succeeded or failed too (or when a keyed task
+  queued ahead of it, which it starts on the calling thread, can't get a
+  thread, nor can the worker asked for as that frees its slot):
+  `compute_async` then throws `boost::thread_resource_error` and runs
+  nothing, so its caller can do the work itself (a threaded tf overlay
+  task carries on cooperatively), an async call raises `RuntimeError`
+  ("not run: no background worker could be started"), and
+  `launch_pool_task` posts `on_error`'s value. While no worker runs yet,
+  `trySubmitPooled` (and so each of those) waits for the worker
+  creations under way to succeed or fail, up to 5 s, before it returns.
+  A task it queued can still be left with no worker: keyed threads held
+  every slot of a pool with none, and the worker asked for as one of
+  them ends can't be created either. Once a worker creation fails and
+  leaves the pool with no worker running or being created (also while
+  other keyed threads still hold their slots), such a task is dropped
+  unrun: its async call raises the same `RuntimeError`,
+  `launch_pool_task` posts `on_error`'s value, and `compute_async`'s
+  `on_error` form calls `on_error` with "not run: no background worker
+  could be started" (a threaded tf overlay task then carries on
+  cooperatively). The drop runs on the thread whose worker creation
+  failed or, if a `trySubmitPooled` call was still deciding about its
+  own task then (waiting on that creation, or starting a keyed task),
+  on that call's thread before it returns, so another submitter's
+  `on_error` or post can run inside a `compute_async` call, an async
+  call or `launch_pool_task`. `compute_async`'s other form has no way
+  to report a drop, so its job, like a `submitPooled` task, stays
+  queued until a later submission or `setThreadPoolSize()` starts a
+  worker. A pool that never got a worker can't run a queued async
+  kernel, so `~app` drops those (a kernel queued behind keyed threads
+  still running, say) before it shuts down the async host, which would
+  otherwise wait for them for good. A keyed task whose own thread can't be created as
+  `startThreadPooled` starts it makes that call throw
+  `boost::thread_resource_error`; one that waited in the queue is
+  dropped unrun when its thread can't be created, and the drop logged
+  before its slot is freed.
 - **Exception-safe.** Exceptions thrown by a task are logged and do not
   take down the pool or other workers.
 - **Dynamic resizing.** `setThreadPoolSize()` may be called while tasks
@@ -95,6 +165,31 @@ app.startThreadPooled("import", [&app]() {
 }, cvc::PRIORITY_NORMAL, true);
 ```
 
+### Many small tasks
+
+```cpp
+// No key, no thread per task: runs on the pool's persistent workers.
+const int n = 10000;
+std::atomic<int> left(n);
+std::promise<void> all_done;
+for (int i = 0; i < n; ++i)
+  app.submitPooled([i, &left, &all_done]() {
+    process_item(i);
+    if (--left == 0)
+      all_done.set_value();
+  }, cvc::PRIORITY_NORMAL);
+all_done.get_future().wait(); // the tasks' own completion
+```
+
+Wait on the tasks' own completion, as here. `app.wait()` is a shutdown
+step, not a barrier: it first interrupts every running task (one that
+reaches an interruption point ends early, without an error) and then
+waits at most 5 s for the pool to drain, with a warning if it doesn't.
+An interrupt sent to the thread calling it once it has begun doesn't
+cut it short: it stays pending until `wait()` returns. One already
+pending when `wait()` is called is thrown at once, before it does
+anything.
+
 ### Inspecting the pool
 
 ```cpp
@@ -112,13 +207,14 @@ unsigned int queued         = app.getPendingThreadCount();
 | Mixed priorities matter                          | All work is equal priority                 |
 | You want queuing instead of unbounded threads    | You want the thread to start immediately   |
 
-`startThreadPooled` and `startThread` share the same key namespace, so
-keys must be unique across both.
+Keyed `startThreadPooled` tasks and `startThread` share the same key
+namespace, so keys must be unique across both.
 
 ## Tips
 
-- **Unique keys.** Each concurrently-running task needs a unique key.
-  A common pattern is `prefix_<index>` or `prefix_<uuid>`.
+- **Unique keys.** Each concurrently-running keyed task needs a unique
+  key. A common pattern is `prefix_<index>` or `prefix_<uuid>`. If you
+  don't need to find the task by key, submit it anonymously instead.
 - **Don't block the calling thread holding pool resources.** If task A
   waits on task B, make sure the pool has room for both, or submit B
   first.

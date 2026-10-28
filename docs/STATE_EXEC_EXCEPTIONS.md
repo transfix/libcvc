@@ -371,13 +371,17 @@ with `ok: #f`, still returns that as a value; only a thrown error is an exceptio
 
 The app has two pools, and an async kernel uses the first:
 
-- **The background task pool** (`app::startThreadPooled`, which `compute_async` uses today):
-  - a queue of whole tasks, with priorities, bounded to `setThreadPoolSize` threads (the core
-    count by default);
+- **The background task pool** (`app::submitPooled`, which async kernels, `compute_async` and
+  `launch_pool_task` use):
+  - a queue of whole tasks, with priorities (FIFO within one), run by at most
+    `setThreadPoolSize` persistent worker threads (the core count by default); an async kernel
+    is an anonymous task, so a call creates no thread and its task is destroyed on the worker
+    once it ends;
   - every async kernel runs here, CPU-bound or blocking (`executor::background`, the default);
   - a blocking request holds one of its threads while it waits, and nothing else.
 - **The fork-join compute pool** (`app::computePool()`):
-  - render, simulation and nav fan-outs share it through `parallel_for`;
+  - render, simulation and nav fan-outs share it through `parallel_for`, and fan-outs from
+    several threads (several kernels) run side by side on its workers;
   - a CPU-heavy kernel fans out through it the same way (a volume filter splitting its
     slabs), so a kernel's parallelism comes from the same workers as everyone else's;
   - a kernel never runs on its workers as a whole task, so a slow kernel can't stall a frame's
@@ -409,6 +413,33 @@ Other places a kernel can run:
 A kernel checks it at convenient points and may stop early by throwing. A cancelled call's
 result is dropped. Host teardown (an `Exec`, an Ariadne document, the app's scheduler) cancels
 every in-flight kernel and waits for them before the scheduler goes, as `Exec` does today.
+
+A kernel its executor never runs still ends its call. Once `~app` has stopped the app's
+background pool, a kernel submitted to it (`app::submitPooled` returns false), or one still in
+its queue (`~app` drops the queue), is destroyed unrun, and so is a kernel a stopped lane
+refuses (a lane runs every kernel it accepted before it stopped). So is a kernel that no
+background worker can be started for (thread resources exhausted before the pool's first worker:
+`app::trySubmitPooled` hands it back rather than queue it), and one queued behind keyed threads
+that held every slot of a pool with no worker, once a worker creation fails and leaves the pool
+with no worker running or being created (the one asked for as one of those threads ends, say,
+even while the others still hold their slots). The pool drops it then, on the thread whose
+creation failed or, if a `trySubmitPooled` call was still deciding about its own task (waiting on
+that creation, say), on that call's thread before it returns: another async call made on the
+scheduler's thread, a `launch_pool_task` or a `compute_async` call can so end it. Its call then
+raises `RuntimeError` at the call site with a message that names the cause: "`name`: not run: the app's
+background pool has stopped" for the pool, "`name`: not run: no background worker could be
+started" when no worker could be started, "`name`: lane '`lane`' is stopped" for a lane. The
+pool's drops say why through `app::poolDropReason()`, which the kernel's task reads as it is
+destroyed. A pool that never got a worker can't run a kernel still queued (one queued behind
+keyed threads that still hold every slot): `~app` then drops the queue before it shuts down its
+host. While the pool has no worker running yet, a call made on the scheduler's thread waits for
+the worker creations under way to succeed or fail (up to 5 s, normally the time a thread takes to
+be created) before it parks or raises.
+Its kernel's captures go, and it leaves the host's count of calls in flight, so the process isn't
+left parked and `shutdown()` doesn't wait for it for good. That matters for a host bound to an
+app that `~app` doesn't shut down itself (one driven from a keyed thread, say): `~app` shuts down
+its own exec host before it stops the pool. `launch_pool_task` posts `on_error`'s value in the
+same case, and `compute_async`'s `on_error` form calls `on_error`.
 
 ### 3.7 Data crossing threads
 
