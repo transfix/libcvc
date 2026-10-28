@@ -1086,8 +1086,12 @@ jobs:
         include:
           - name: tsan
             flags: -fsanitize=thread
+          # No vptr check: it references the typeinfo of every polymorphic class it checks.
+          # Jolt is built without RTTI, as are the two libcvc files that subclass its classes
+          # (src/cvc/CMakeLists.txt), so that typeinfo exists nowhere and libcvc.so fails to
+          # link ("undefined reference to `typeinfo for JPH::GroupFilter'").
           - name: asan-ubsan
-            flags: -fsanitize=address,undefined -fno-sanitize-recover=undefined
+            flags: -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-sanitize=vptr
     concurrency:
       group: ci-${{ github.ref }}-sanitizers-${{ matrix.name }}
       cancel-in-progress: true

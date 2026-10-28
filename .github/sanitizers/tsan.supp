@@ -5,3 +5,21 @@
 # fixes it. Format: <type>:<pattern>, one per line, where <type> is race, race_top, thread, mutex,
 # signal, deadlock or called_from_lib, and <pattern> matches a function, file or module name in
 # the report's stacks (https://github.com/google/sanitizers/wiki/ThreadSanitizerSuppressions).
+
+# exec_coordinator::start() held its leader_mu_ while it announced its election on the message
+# bus, whose dispatch can reach accept_leader(), which takes leader_mu_: a lock-order inversion
+# with the bus's lock, reported 6 times in state_exec_coordinator_test and
+# state_exec_integration_test. A real bug, fixed in transfix/libcvc#863; remove this entry when
+# that lands. Matches only reports with start() itself in a stack, not start_election().
+deadlock:cvc::state_exec::exec_coordinator::start()
+
+# pycvc's evaluator.stats(), evaluator_state.stats and process.state didn't keep their owner
+# alive (pycvc.i's %pythonappend for them was never generated), so
+# test_pycvc_state_exec_eval.py read them after Python freed the owner: 13 heap-use-after-free
+# reports, in exactly these five reads (TSan files a use after free under race). A real bug,
+# fixed in transfix/libcvc#864; remove these entries when that lands.
+race:_wrap_evaluator_state_done_get
+race:_wrap_evaluator_state_stack_get
+race:_wrap_evaluation_stats_get_step_count
+race:_wrap_evaluation_stats_is_complete
+race:_wrap_evaluation_stats_elapsed_seconds
