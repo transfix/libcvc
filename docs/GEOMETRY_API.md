@@ -2012,14 +2012,11 @@ Returns indices of all elements that contain the query point.
 - **Multi-tier acceleration strategy** (adaptive based on mesh size):
   - **Small meshes** (<100 elements): Direct barycentric/trilinear tests, minimal overhead
   - **Medium meshes** (100-1000 elements): Manual bounding box pre-filtering
-  - **Large meshes** (1000-10000 elements): Pre-computed `bounding_box` structures for fast spatial filtering
-  - **Very large meshes** (>10000 elements with CGAL): CGAL AABB tree with surface triangles for O(log n) inside/outside test + bbox acceleration
-  - **CGAL disabled**: Always uses `bounding_box`-accelerated linear search
+  - **Large meshes** (over 1000 elements): a point outside the mesh's box returns at once; otherwise pre-computed `bounding_box` structures filter the elements
 - **Performance**:
   - Small meshes: O(n), minimal overhead
   - Medium meshes: O(n) with 5-10x speedup via bbox rejection
   - Large meshes: O(n) with 10-50x speedup via pre-computed `bounding_box` structures
-  - Very large meshes with CGAL AABB tree: O(log n) surface test + O(n) bbox search with high rejection rate
 
 **Implementation Details:**
 
@@ -2028,25 +2025,18 @@ Returns indices of all elements that contain the query point.
    - No external dependencies - works with or without CGAL
    - Pre-computes element bboxes once for large meshes (amortized cost)
    - Fast `contains()` test (6 comparisons) eliminates most elements
-
-2. **CGAL AABB Tree** (very large meshes only, >10000 elements):
-   - Extracts surface triangles using `extract_surface()`
-   - Builds CGAL AABB tree for O(log n) spatial queries
-   - Uses `do_intersect()` for quick inside/outside determination
-   - Falls back to bbox-accelerated search only for nearby elements
-   - Provides 100x+ speedup on meshes with millions of elements
+   - The mesh's own box is compared coordinate by coordinate. A `bounding_box` around one point
+     has no volume, so it `isNull()`, and a sum of them stays null: until 10/2026 the path above
+     10,000 elements built its mesh box that way and returned nothing for any point off the
+     mesh's boundary surface.
 
 **Memory Usage:**
 - Small/medium: No additional storage
-- Large (1000-10000): ~64 bytes per element (pre-computed bbox + index)
-- Very large with AABB tree: Surface mesh memory + tree structure (~100-200 bytes/element)
+- Large (over 1000): ~64 bytes per element (pre-computed bbox + index)
 
-**Known limitations:** nothing is cached between calls. Above 10,000 elements every call
-re-extracts the boundary surface and rebuilds the CGAL tree before the linear bbox scan. The
-tree's `do_intersect(Point_3)` tests whether the point lies *on* the surface, not inside/outside
-parity. Each query is therefore O(n) plus a tree build. A persistent locator built once per mesh
-(`igl::AABB` + `in_element`) is planned; see P2.4 of
-[the libigl roadmap](roadmap/LIBIGL-GEOMETRY-FE-ROADMAP.md).
+**Known limitations:** nothing is cached between calls, so every query is O(n) and rebuilds
+the element boxes. A persistent locator built once per mesh (`igl::AABB` + `in_element`) is
+planned; see P2.4 of [the libigl roadmap](roadmap/LIBIGL-GEOMETRY-FE-ROADMAP.md).
 
 **Example:**
 
