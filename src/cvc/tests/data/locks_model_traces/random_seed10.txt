@@ -1,0 +1,358 @@
+# random_runs.py seed 10 (coalescing on): 200 steps then the fair drain; procs [(1, 1, 'o1', -1), (1, 2, 'o2', 0), (1, 3, 'o1', 2), (1, 4, 'o2', -2), (1, 5, 'o2', -2), (1, 6, 'o1', 2)], cache 2, inheritance True
+config inheritance=1 coalesce=1 one_home=1 mutations=-
+attach_home 0 -> 0 |
+query - 0 o1 -> held waiting |
+query - 0 o2 -> held waiting |
+try_acquire 0 3 o1 2 X a.c,b,c a.c,b,c a.c -> granted 1 1 0 |
+query - 0 o1 -> held a.c/X/3/1/1/0 b/X/3/1/1/0 c/X/3/1/1/0 waiting |
+query - 0 o2 -> held a.c/X/-/1/1/0 b/X/-/1/1/0 c/X/-/1/1/0 waiting |
+try_acquire 0 4 o2 -2 S b.e b.e b -> busy |
+block 0 4 o2 -2 S b.e - - -> 1 queued |
+query - 0 o1 -> held a.c/X/3/1/1/0 b/X/3/1/1/0 c/X/3/1/1/0 waiting b.e/S/- |
+query - 0 o2 -> held a.c/X/-/1/1/0 b/X/-/1/1/0 c/X/-/1/1/0 waiting b.e/S/4 |
+try_acquire 0 1 o1 -1 S a.c,b.e a.c c -> busy |
+try_acquire 0 5 o2 -2 S a.b.d,c a.b.d,c b.e,a.c -> busy |
+block 0 5 o2 -2 S a.b.d,c - - -> 2 queued |
+query - 0 o1 -> held a.c/X/3/1/1/0 b/X/3/1/1/0 c/X/3/1/1/0 waiting b.e/S/- a.b.d,c/S/- |
+query - 0 o2 -> held a.c/X/-/1/1/0 b/X/-/1/1/0 c/X/-/1/1/0 waiting b.e/S/4 a.b.d,c/S/5 |
+try_acquire 0 6 o1 2 S b,c b a.b.d -> busy |
+block 0 6 o1 2 S b,c - - -> 3 queued |
+query - 0 o1 -> held a.c/X/3/1/1/0 b/X/3/1/1/0 c/X/3/1/1/0 waiting b.e/S/- a.b.d,c/S/- b,c/S/6 |
+query - 0 o2 -> held a.c/X/-/1/1/0 b/X/-/1/1/0 c/X/-/1/1/0 waiting b.e/S/4 a.b.d,c/S/5 b,c/S/- |
+try_acquire 0 1 o1 -1 X a,b.e,c a,b.e,c c,b,a -> busy |
+cancel 0 1 1 -> none |
+try_acquire 0 1 o1 -1 X a.b.d,b.e a.b.d,b.e b.e,c -> busy |
+try_acquire 0 2 o2 0 X a.b,b,c a.b,b,c a.b.d,b.e,a.b -> busy |
+try_acquire 0 2 o2 0 S a.b.d,a.c,b a.b.d,a.c,b b,c,a.b.d -> busy |
+try_acquire 0 1 o1 -1 S a.b,a.c,b a.b,a.c,b a.c,b,a.b -> busy |
+cancel 0 3 4 -> none |
+release 0 3 1 -> ok | wake(0,4,1) wake(0,5,2) wake(0,6,3)
+resume 0 4 1 -> granted 2 1 0 |
+resume 0 5 2 -> granted 3 1 0 |
+resume 0 6 3 -> granted 4 1 0 |
+query - 0 o1 -> held a.b.d/S/-/1/-/0 b/S/6/1/-/0 b.e/S/-/1/-/0 c/S/6/2/-/0 waiting |
+query - 0 o2 -> held a.b.d/S/5/1/-/0 b/S/-/1/-/0 b.e/S/4/1/-/0 c/S/5/2/-/0 waiting |
+try_acquire 0 1 o1 -1 S a.b,a.c,c a.b,a.c,c a.c,b,a.b -> granted 5 1 0 |
+query - 0 o1 -> held a.b/S/1/1/-/0 a.b.d/S/-/1/-/0 a.c/S/1/1/-/0 b/S/6/1/-/0 b.e/S/-/1/-/0 c/S/6,1/3/-/0 waiting |
+query - 0 o2 -> held a.b/S/-/1/-/0 a.b.d/S/5/1/-/0 a.c/S/-/1/-/0 b/S/-/1/-/0 b.e/S/4/1/-/0 c/S/5/3/-/0 waiting |
+start_body 0 4 2 -> ok |
+query - 0 o1 -> held a.b/S/1/1/-/0 a.b.d/S/-/1/-/0 a.c/S/1/1/-/0 b/S/6/1/-/0 b.e/S/-/1/-/0 c/S/6,1/3/-/0 waiting |
+query - 0 o2 -> held a.b/S/-/1/-/0 a.b.d/S/5/1/-/0 a.c/S/-/1/-/0 b/S/-/1/-/0 b.e/S/4/1/-/0 c/S/5/3/-/0 waiting |
+start_body 0 6 4 -> ok |
+query - 0 o1 -> held a.b/S/1/1/-/0 a.b.d/S/-/1/-/0 a.c/S/1/1/-/0 b/S/6/1/-/0 b.e/S/-/1/-/0 c/S/6,1/3/-/0 waiting |
+query - 0 o2 -> held a.b/S/-/1/-/0 a.b.d/S/5/1/-/0 a.c/S/-/1/-/0 b/S/-/1/-/0 b.e/S/4/1/-/0 c/S/5/3/-/0 waiting |
+release 0 1 5 -> ok |
+query - 0 o1 -> held a.b.d/S/-/1/-/0 b/S/6/1/-/0 b.e/S/-/1/-/0 c/S/6/2/-/0 waiting |
+query - 0 o2 -> held a.b.d/S/5/1/-/0 b/S/-/1/-/0 b.e/S/4/1/-/0 c/S/5/2/-/0 waiting |
+release 0 4 2 -> ok |
+query - 0 o1 -> held a.b.d/S/-/1/-/0 b/S/6/1/-/0 c/S/6/2/-/0 waiting |
+query - 0 o2 -> held a.b.d/S/5/1/-/0 b/S/-/1/-/0 c/S/5/2/-/0 waiting |
+try_acquire 0 3 o1 2 X a.b,a.c a.b,a.c a.c,c -> busy |
+block 0 3 o1 2 X a.b,a.c - - -> 4 queued |
+query - 0 o1 -> held a.b.d/S/-/1/-/0 b/S/6/1/-/0 c/S/6/2/-/0 waiting a.b,a.c/X/3 |
+query - 0 o2 -> held a.b.d/S/5/1/-/0 b/S/-/1/-/0 c/S/5/2/-/0 waiting a.b,a.c/X/- |
+try_acquire 0 1 o1 -1 S a.c,b.e,c b.e,c a.b,a.c -> busy |
+try_acquire 0 1 o1 -1 X a.b.d,c a.b.d b.e -> busy |
+block 0 1 o1 -1 X a.b.d,c - - -> 5 queued |
+query - 0 o1 -> held a.b.d/S/-/1/-/0 b/S/6/1/-/0 c/S/6/2/-/0 waiting a.b,a.c/X/3 a.b.d,c/X/1 |
+query - 0 o2 -> held a.b.d/S/5/1/-/0 b/S/-/1/-/0 c/S/5/2/-/0 waiting a.b,a.c/X/- a.b.d,c/X/- |
+try_acquire 0 6 o1 2 S a.c,b a.c,b c,a.b.d -> busy |
+end 0 5 1 -> ok | wake(0,3,4)
+resume 0 3 4 -> granted 6 2 0 |
+query - 0 o1 -> held a.b/X/3/1/2/0 a.c/X/3/1/2/0 b/S/6/1/-/0 c/S/6/1/-/0 waiting a.b.d,c/X/1 |
+query - 0 o2 -> held a.b/X/-/1/2/0 a.c/X/-/1/2/0 b/S/-/1/-/0 c/S/-/1/-/0 waiting a.b.d,c/X/- |
+start_body 0 3 6 -> ok |
+query - 0 o1 -> held a.b/X/3/1/2/0 a.c/X/3/1/2/0 b/S/6/1/-/0 c/S/6/1/-/0 waiting a.b.d,c/X/1 |
+query - 0 o2 -> held a.b/X/-/1/2/0 a.c/X/-/1/2/0 b/S/-/1/-/0 c/S/-/1/-/0 waiting a.b.d,c/X/- |
+try_acquire 0 4 o2 -2 X a.b.d,b a.b.d a.c -> busy |
+try_acquire 0 2 o2 0 S b - - -> granted 7 2 0 |
+query - 0 o1 -> held a.b/X/3/1/2/0 a.c/X/3/1/2/0 b/S/6/2/-/0 c/S/6/1/-/0 waiting a.b.d,c/X/1 |
+query - 0 o2 -> held a.b/X/-/1/2/0 a.c/X/-/1/2/0 b/S/2/2/-/0 c/S/-/1/-/0 waiting a.b.d,c/X/- |
+try_acquire 0 2 o2 0 S a.b.d,b,c c b -> busy |
+release 0 3 6 -> ok |
+query - 0 o1 -> held b/S/6/2/-/0 c/S/6/1/-/0 waiting a.b.d,c/X/1 |
+query - 0 o2 -> held b/S/2/2/-/0 c/S/-/1/-/0 waiting a.b.d,c/X/- |
+try_acquire 0 4 o2 -2 S a.c,b.e a.c,b.e a.b.d,c -> granted 8 2 0 |
+query - 0 o1 -> held a.c/S/-/1/-/0 b/S/6/2/-/0 b.e/S/-/1/-/0 c/S/6/1/-/0 waiting a.b.d,c/X/1 |
+query - 0 o2 -> held a.c/S/4/1/-/0 b/S/2/2/-/0 b.e/S/4/1/-/0 c/S/-/1/-/0 waiting a.b.d,c/X/- |
+try_acquire 0 6 o1 2 S a.b.d,b.e a.b.d a.c -> granted 9 2 0 |
+query - 0 o1 -> held a.b.d/S/6/1/-/0 a.c/S/-/1/-/0 b/S/6/2/-/0 b.e/S/6/2/-/0 c/S/6/1/-/0 waiting a.b.d,c/X/1 |
+query - 0 o2 -> held a.b.d/S/-/1/-/0 a.c/S/4/1/-/0 b/S/2/2/-/0 b.e/S/4/2/-/0 c/S/-/1/-/0 waiting a.b.d,c/X/- |
+try_acquire 0 6 o1 2 S a.b,b a.b,b b.e,a.b.d -> granted 10 2 0 |
+query - 0 o1 -> held a.b/S/6/1/-/0 a.b.d/S/6/1/-/0 a.c/S/-/1/-/0 b/S/6,6/3/-/0 b.e/S/6/2/-/0 c/S/6/1/-/0 waiting a.b.d,c/X/1 |
+query - 0 o2 -> held a.b/S/-/1/-/0 a.b.d/S/-/1/-/0 a.c/S/4/1/-/0 b/S/2/3/-/0 b.e/S/4/2/-/0 c/S/-/1/-/0 waiting a.b.d,c/X/- |
+try_acquire 0 3 o1 2 S a.c,b a.c a.b -> granted 11 2 0 |
+query - 0 o1 -> held a.b/S/6/1/-/0 a.b.d/S/6/1/-/0 a.c/S/3/2/-/0 b/S/6,6,3/4/-/0 b.e/S/6/2/-/0 c/S/6/1/-/0 waiting a.b.d,c/X/1 |
+query - 0 o2 -> held a.b/S/-/1/-/0 a.b.d/S/-/1/-/0 a.c/S/4/2/-/0 b/S/2/4/-/0 b.e/S/4/2/-/0 c/S/-/1/-/0 waiting a.b.d,c/X/- |
+release 0 1 9 -> ok |
+try_acquire 0 3 o1 2 S a,b.e a,b.e b,a.c -> busy |
+try_acquire 0 3 o1 2 S a - - -> busy |
+block 0 3 o1 2 S a - - -> 6 queued |
+query - 0 o1 -> held a.b/S/6/1/-/0 a.b.d/S/6/1/-/0 a.c/S/3/2/-/0 b/S/6,6,3/4/-/0 b.e/S/6/2/-/0 c/S/6/1/-/0 waiting a.b.d,c/X/1 a/S/3 |
+query - 0 o2 -> held a.b/S/-/1/-/0 a.b.d/S/-/1/-/0 a.c/S/4/2/-/0 b/S/2/4/-/0 b.e/S/4/2/-/0 c/S/-/1/-/0 waiting a.b.d,c/X/- a/S/- |
+cancel 0 3 6 -> cancelled |
+resume 0 3 6 -> timeout |
+query - 0 o1 -> held a.b/S/6/1/-/0 a.b.d/S/6/1/-/0 a.c/S/3/2/-/0 b/S/6,6,3/4/-/0 b.e/S/6/2/-/0 c/S/6/1/-/0 waiting a.b.d,c/X/1 |
+query - 0 o2 -> held a.b/S/-/1/-/0 a.b.d/S/-/1/-/0 a.c/S/4/2/-/0 b/S/2/4/-/0 b.e/S/4/2/-/0 c/S/-/1/-/0 waiting a.b.d,c/X/- |
+cancel 0 6 7 -> none |
+try_acquire 0 4 o2 -2 S a.b.d,a.c,c a.b.d,a.c,c a,b.e,a.b.d -> busy |
+release 0 6 10 -> ok |
+query - 0 o1 -> held a.b.d/S/6/1/-/0 a.c/S/3/2/-/0 b/S/6,3/3/-/0 b.e/S/6/2/-/0 c/S/6/1/-/0 waiting a.b.d,c/X/1 |
+query - 0 o2 -> held a.b.d/S/-/1/-/0 a.c/S/4/2/-/0 b/S/2/3/-/0 b.e/S/4/2/-/0 c/S/-/1/-/0 waiting a.b.d,c/X/- |
+end 0 4 1 -> ok |
+query - 0 o1 -> held a.b.d/S/6/1/-/0 a.c/S/3/1/-/0 b/S/6,3/3/-/0 b.e/S/6/1/-/0 c/S/6/1/-/0 waiting a.b.d,c/X/1 |
+query - 0 o2 -> held a.b.d/S/-/1/-/0 a.c/S/-/1/-/0 b/S/2/3/-/0 b.e/S/-/1/-/0 c/S/-/1/-/0 waiting a.b.d,c/X/- |
+try_acquire 0 2 o2 0 S a,b.e,c a,b.e,c a.c,c,a -> busy |
+block 0 2 o2 0 S a,b.e,c a,b.e,c b.e,c,a -> 7 queued |
+query - 0 o1 -> held a.b.d/S/6/1/-/0 a.c/S/3/1/-/0 b/S/6,3/3/-/0 b.e/S/6/1/-/0 c/S/6/1/-/0 waiting a.b.d,c/X/1 a,b.e,c/S/- |
+query - 0 o2 -> held a.b.d/S/-/1/-/0 a.c/S/-/1/-/0 b/S/2/3/-/0 b.e/S/-/1/-/0 c/S/-/1/-/0 waiting a.b.d,c/X/- a,b.e,c/S/2 |
+release 0 3 11 -> ok |
+query - 0 o1 -> held a.b.d/S/6/1/-/0 b/S/6/2/-/0 b.e/S/6/1/-/0 c/S/6/1/-/0 waiting a.b.d,c/X/1 a,b.e,c/S/- |
+query - 0 o2 -> held a.b.d/S/-/1/-/0 b/S/2/2/-/0 b.e/S/-/1/-/0 c/S/-/1/-/0 waiting a.b.d,c/X/- a,b.e,c/S/2 |
+try_acquire 0 3 o1 2 S b.e - - -> granted 12 2 0 |
+query - 0 o1 -> held a.b.d/S/6/1/-/0 b/S/6/2/-/0 b.e/S/6,3/2/-/0 c/S/6/1/-/0 waiting a.b.d,c/X/1 a,b.e,c/S/- |
+query - 0 o2 -> held a.b.d/S/-/1/-/0 b/S/2/2/-/0 b.e/S/-/2/-/0 c/S/-/1/-/0 waiting a.b.d,c/X/- a,b.e,c/S/2 |
+release 0 3 12 -> ok |
+query - 0 o1 -> held a.b.d/S/6/1/-/0 b/S/6/2/-/0 b.e/S/6/1/-/0 c/S/6/1/-/0 waiting a.b.d,c/X/1 a,b.e,c/S/- |
+query - 0 o2 -> held a.b.d/S/-/1/-/0 b/S/2/2/-/0 b.e/S/-/1/-/0 c/S/-/1/-/0 waiting a.b.d,c/X/- a,b.e,c/S/2 |
+try_acquire 0 6 o1 2 S a.b.d,a.c a.b.d,a.c b.e,c -> granted 13 2 0 |
+query - 0 o1 -> held a.b.d/S/6,6/2/-/0 a.c/S/6/1/-/0 b/S/6/2/-/0 b.e/S/6/1/-/0 c/S/6/1/-/0 waiting a.b.d,c/X/1 a,b.e,c/S/- |
+query - 0 o2 -> held a.b.d/S/-/2/-/0 a.c/S/-/1/-/0 b/S/2/2/-/0 b.e/S/-/1/-/0 c/S/-/1/-/0 waiting a.b.d,c/X/- a,b.e,c/S/2 |
+try_acquire 0 3 o1 2 X a.c,c c a.b.d -> busy |
+cancel 0 2 7 -> cancelled |
+resume 0 2 7 -> timeout |
+query - 0 o1 -> held a.b.d/S/6,6/2/-/0 a.c/S/6/1/-/0 b/S/6/2/-/0 b.e/S/6/1/-/0 c/S/6/1/-/0 waiting a.b.d,c/X/1 |
+query - 0 o2 -> held a.b.d/S/-/2/-/0 a.c/S/-/1/-/0 b/S/2/2/-/0 b.e/S/-/1/-/0 c/S/-/1/-/0 waiting a.b.d,c/X/- |
+release 0 6 13 -> ok |
+query - 0 o1 -> held a.b.d/S/6/1/-/0 b/S/6/2/-/0 b.e/S/6/1/-/0 c/S/6/1/-/0 waiting a.b.d,c/X/1 |
+query - 0 o2 -> held a.b.d/S/-/1/-/0 b/S/2/2/-/0 b.e/S/-/1/-/0 c/S/-/1/-/0 waiting a.b.d,c/X/- |
+try_acquire 0 3 o1 2 X a,b.e a,b.e a.c,c -> busy |
+block 0 3 o1 2 X a,b.e - - -> 8 queued |
+query - 0 o1 -> held a.b.d/S/6/1/-/0 b/S/6/2/-/0 b.e/S/6/1/-/0 c/S/6/1/-/0 waiting a.b.d,c/X/1 a,b.e/X/3 |
+query - 0 o2 -> held a.b.d/S/-/1/-/0 b/S/2/2/-/0 b.e/S/-/1/-/0 c/S/-/1/-/0 waiting a.b.d,c/X/- a,b.e/X/- |
+unref_nodes 0 a,b.e -> ok |
+try_acquire 0 6 o1 2 X a a - -> granted 14 3 0 |
+query - 0 o1 -> held a/X/6/1/3/0 a.b.d/S/6/1/-/0 b/S/6/2/-/0 b.e/S/6/1/-/0 c/S/6/1/-/0 waiting a.b.d,c/X/1 a,b.e/X/3 |
+query - 0 o2 -> held a/X/-/1/3/0 a.b.d/S/-/1/-/0 b/S/2/2/-/0 b.e/S/-/1/-/0 c/S/-/1/-/0 waiting a.b.d,c/X/- a,b.e/X/- |
+cancel 0 1 5 -> cancelled |
+resume 0 1 5 -> timeout |
+query - 0 o1 -> held a/X/6/1/3/0 a.b.d/S/6/1/-/0 b/S/6/2/-/0 b.e/S/6/1/-/0 c/S/6/1/-/0 waiting a,b.e/X/3 |
+query - 0 o2 -> held a/X/-/1/3/0 a.b.d/S/-/1/-/0 b/S/2/2/-/0 b.e/S/-/1/-/0 c/S/-/1/-/0 waiting a,b.e/X/- |
+try_acquire 0 2 o2 0 S a.b.d,a.c,b a.b.d,a.c,b a,a.b.d -> busy |
+block 0 2 o2 0 S a.b.d,a.c,b a.b.d,a.c,b a.c,b,a.b.d -> 9 queued |
+query - 0 o1 -> held a/X/6/1/3/0 a.b.d/S/6/1/-/0 b/S/6/2/-/0 b.e/S/6/1/-/0 c/S/6/1/-/0 waiting a,b.e/X/3 a.b.d,a.c,b/S/- |
+query - 0 o2 -> held a/X/-/1/3/0 a.b.d/S/-/1/-/0 b/S/2/2/-/0 b.e/S/-/1/-/0 c/S/-/1/-/0 waiting a,b.e/X/- a.b.d,a.c,b/S/2 |
+release 0 6 14 -> ok | wake(0,2,9)
+resume 0 2 9 -> granted 15 3 0 |
+query - 0 o1 -> held a.b.d/S/6/2/-/0 a.c/S/-/1/-/0 b/S/6/3/-/0 b.e/S/6/1/-/0 c/S/6/1/-/0 waiting a,b.e/X/3 |
+query - 0 o2 -> held a.b.d/S/2/2/-/0 a.c/S/2/1/-/0 b/S/2,2/3/-/0 b.e/S/-/1/-/0 c/S/-/1/-/0 waiting a,b.e/X/- |
+release 0 6 9 -> ok |
+query - 0 o1 -> held a.b.d/S/-/1/-/0 a.c/S/-/1/-/0 b/S/6/3/-/0 c/S/6/1/-/0 waiting a,b.e/X/3 |
+query - 0 o2 -> held a.b.d/S/2/1/-/0 a.c/S/2/1/-/0 b/S/2,2/3/-/0 c/S/-/1/-/0 waiting a,b.e/X/- |
+try_acquire 0 1 o1 -1 X a.b.d,c a.b.d,c a.c,b -> busy |
+try_acquire 0 6 o1 2 S a a a.b.d -> granted 16 3 0 |
+query - 0 o1 -> held a/S/6/1/-/0 a.b.d/S/-/1/-/0 a.c/S/-/1/-/0 b/S/6/3/-/0 c/S/6/1/-/0 waiting a,b.e/X/3 |
+query - 0 o2 -> held a/S/-/1/-/0 a.b.d/S/2/1/-/0 a.c/S/2/1/-/0 b/S/2,2/3/-/0 c/S/-/1/-/0 waiting a,b.e/X/- |
+cancel 0 3 8 -> cancelled |
+resume 0 3 8 -> timeout |
+query - 0 o1 -> held a/S/6/1/-/0 a.b.d/S/-/1/-/0 a.c/S/-/1/-/0 b/S/6/3/-/0 c/S/6/1/-/0 waiting |
+query - 0 o2 -> held a/S/-/1/-/0 a.b.d/S/2/1/-/0 a.c/S/2/1/-/0 b/S/2,2/3/-/0 c/S/-/1/-/0 waiting |
+release 0 6 16 -> ok |
+query - 0 o1 -> held a.b.d/S/-/1/-/0 a.c/S/-/1/-/0 b/S/6/3/-/0 c/S/6/1/-/0 waiting |
+query - 0 o2 -> held a.b.d/S/2/1/-/0 a.c/S/2/1/-/0 b/S/2,2/3/-/0 c/S/-/1/-/0 waiting |
+start_body 0 2 15 -> ok |
+query - 0 o1 -> held a.b.d/S/-/1/-/0 a.c/S/-/1/-/0 b/S/6/3/-/0 c/S/6/1/-/0 waiting |
+query - 0 o2 -> held a.b.d/S/2/1/-/0 a.c/S/2/1/-/0 b/S/2,2/3/-/0 c/S/-/1/-/0 waiting |
+release 0 6 4 -> ok |
+query - 0 o1 -> held a.b.d/S/-/1/-/0 a.c/S/-/1/-/0 b/S/-/2/-/0 waiting |
+query - 0 o2 -> held a.b.d/S/2/1/-/0 a.c/S/2/1/-/0 b/S/2,2/2/-/0 waiting |
+try_acquire 0 3 o1 2 S a.b.d,c a.b.d,c c,a -> granted 17 3 0 |
+query - 0 o1 -> held a.b.d/S/3/2/-/0 a.c/S/-/1/-/0 b/S/-/2/-/0 c/S/3/1/-/0 waiting |
+query - 0 o2 -> held a.b.d/S/2/2/-/0 a.c/S/2/1/-/0 b/S/2,2/2/-/0 c/S/-/1/-/0 waiting |
+try_acquire 0 6 o1 2 S a.b,b.e,c a.b,b.e,c a.b.d,c,a.b -> granted 18 3 0 |
+query - 0 o1 -> held a.b/S/6/1/-/0 a.b.d/S/3/2/-/0 a.c/S/-/1/-/0 b/S/-/2/-/0 b.e/S/6/1/-/0 c/S/3,6/2/-/0 waiting |
+query - 0 o2 -> held a.b/S/-/1/-/0 a.b.d/S/2/2/-/0 a.c/S/2/1/-/0 b/S/2,2/2/-/0 b.e/S/-/1/-/0 c/S/-/2/-/0 waiting |
+try_acquire 0 1 o1 -1 S a.b,a.c,b.e a.b,a.c,b.e b.e,c,a.b -> granted 19 3 0 |
+query - 0 o1 -> held a.b/S/6,1/2/-/0 a.b.d/S/3/2/-/0 a.c/S/1/2/-/0 b/S/-/2/-/0 b.e/S/6,1/2/-/0 c/S/3,6/2/-/0 waiting |
+query - 0 o2 -> held a.b/S/-/2/-/0 a.b.d/S/2/2/-/0 a.c/S/2/2/-/0 b/S/2,2/2/-/0 b.e/S/-/2/-/0 c/S/-/2/-/0 waiting |
+release 0 6 18 -> ok |
+query - 0 o1 -> held a.b/S/1/1/-/0 a.b.d/S/3/2/-/0 a.c/S/1/2/-/0 b/S/-/2/-/0 b.e/S/1/1/-/0 c/S/3/1/-/0 waiting |
+query - 0 o2 -> held a.b/S/-/1/-/0 a.b.d/S/2/2/-/0 a.c/S/2/2/-/0 b/S/2,2/2/-/0 b.e/S/-/1/-/0 c/S/-/1/-/0 waiting |
+release 0 3 17 -> ok |
+query - 0 o1 -> held a.b/S/1/1/-/0 a.b.d/S/-/1/-/0 a.c/S/1/2/-/0 b/S/-/2/-/0 b.e/S/1/1/-/0 waiting |
+query - 0 o2 -> held a.b/S/-/1/-/0 a.b.d/S/2/1/-/0 a.c/S/2/2/-/0 b/S/2,2/2/-/0 b.e/S/-/1/-/0 waiting |
+try_acquire 0 6 o1 2 X a.c,b.e,c c a.c -> busy |
+block 0 6 o1 2 X a.c,b.e,c a.c,b.e,c b.e,c,a.c -> 10 queued |
+query - 0 o1 -> held a.b/S/1/1/-/0 a.b.d/S/-/1/-/0 a.c/S/1/2/-/0 b/S/-/2/-/0 b.e/S/1/1/-/0 waiting a.c,b.e,c/X/6 |
+query - 0 o2 -> held a.b/S/-/1/-/0 a.b.d/S/2/1/-/0 a.c/S/2/2/-/0 b/S/2,2/2/-/0 b.e/S/-/1/-/0 waiting a.c,b.e,c/X/- |
+release 0 1 19 -> ok |
+query - 0 o1 -> held a.b.d/S/-/1/-/0 a.c/S/-/1/-/0 b/S/-/2/-/0 waiting a.c,b.e,c/X/6 |
+query - 0 o2 -> held a.b.d/S/2/1/-/0 a.c/S/2/1/-/0 b/S/2,2/2/-/0 waiting a.c,b.e,c/X/- |
+release 0 2 15 -> ok |
+query - 0 o1 -> held b/S/-/1/-/0 waiting a.c,b.e,c/X/6 |
+query - 0 o2 -> held b/S/2/1/-/0 waiting a.c,b.e,c/X/- |
+try_acquire 0 1 o1 -1 X a.b.d,a.c,c a.b.d,a.c,c b.e,c,a.b.d -> busy |
+block 0 1 o1 -1 X a.b.d,a.c,c a.b.d,a.c,c a.c,c,a.b.d -> 11 queued |
+query - 0 o1 -> held b/S/-/1/-/0 waiting a.c,b.e,c/X/6 a.b.d,a.c,c/X/1 |
+query - 0 o2 -> held b/S/2/1/-/0 waiting a.c,b.e,c/X/- a.b.d,a.c,c/X/- |
+try_acquire 0 3 o1 2 S c - - -> busy |
+block 0 3 o1 2 S c - - -> 12 queued |
+query - 0 o1 -> held b/S/-/1/-/0 waiting a.c,b.e,c/X/6 a.b.d,a.c,c/X/1 c/S/3 |
+query - 0 o2 -> held b/S/2/1/-/0 waiting a.c,b.e,c/X/- a.b.d,a.c,c/X/- c/S/- |
+cancel 0 1 11 -> cancelled |
+resume 0 1 11 -> timeout |
+query - 0 o1 -> held b/S/-/1/-/0 waiting a.c,b.e,c/X/6 c/S/3 |
+query - 0 o2 -> held b/S/2/1/-/0 waiting a.c,b.e,c/X/- c/S/- |
+try_acquire 0 1 o1 -1 S a.b,a.c,b.e a.b,a.c,b.e a.c,c,a.b -> busy |
+cancel 0 6 10 -> cancelled | wake(0,3,12)
+resume 0 3 12 -> granted 20 3 0 |
+resume 0 6 10 -> timeout |
+query - 0 o1 -> held b/S/-/1/-/0 c/S/3/1/-/0 waiting |
+query - 0 o2 -> held b/S/2/1/-/0 c/S/-/1/-/0 waiting |
+start_body 0 3 20 -> ok |
+query - 0 o1 -> held b/S/-/1/-/0 c/S/3/1/-/0 waiting |
+query - 0 o2 -> held b/S/2/1/-/0 c/S/-/1/-/0 waiting |
+try_acquire 0 3 o1 2 X a,b.e a a.c -> busy |
+block 0 3 o1 2 X a,b.e - - -> 13 queued |
+query - 0 o1 -> held b/S/-/1/-/0 c/S/3/1/-/0 waiting a,b.e/X/3 |
+query - 0 o2 -> held b/S/2/1/-/0 c/S/-/1/-/0 waiting a,b.e/X/- |
+release 0 2 7 -> ok | wake(0,3,13)
+resume 0 3 13 -> granted 21 4 0 |
+query - 0 o1 -> held a/X/3/1/4/0 b.e/X/3/1/4/0 c/S/3/1/-/0 waiting |
+query - 0 o2 -> held a/X/-/1/4/0 b.e/X/-/1/4/0 c/S/-/1/-/0 waiting |
+try_acquire 0 2 o2 0 S a.b a.b b.e -> busy |
+try_acquire 0 2 o2 0 X a.b.d,b.e,c a.b.d,b.e,c a,a.b,a.b.d -> busy |
+block 0 2 o2 0 X a.b.d,b.e,c a.b.d,b.e,c b.e,c,a.b.d -> 14 queued |
+query - 0 o1 -> held a/X/3/1/4/0 b.e/X/3/1/4/0 c/S/3/1/-/0 waiting a.b.d,b.e,c/X/- |
+query - 0 o2 -> held a/X/-/1/4/0 b.e/X/-/1/4/0 c/S/-/1/-/0 waiting a.b.d,b.e,c/X/2 |
+start_body 0 3 21 -> ok |
+query - 0 o1 -> held a/X/3/1/4/0 b.e/X/3/1/4/0 c/S/3/1/-/0 waiting a.b.d,b.e,c/X/- |
+query - 0 o2 -> held a/X/-/1/4/0 b.e/X/-/1/4/0 c/S/-/1/-/0 waiting a.b.d,b.e,c/X/2 |
+try_acquire 0 1 o1 -1 X a.c,c a.c b.e -> busy |
+block 0 1 o1 -1 X a.c,c - - -> 15 queued |
+query - 0 o1 -> held a/X/3/1/4/0 b.e/X/3/1/4/0 c/S/3/1/-/0 waiting a.b.d,b.e,c/X/- a.c,c/X/1 |
+query - 0 o2 -> held a/X/-/1/4/0 b.e/X/-/1/4/0 c/S/-/1/-/0 waiting a.b.d,b.e,c/X/2 a.c,c/X/- |
+try_acquire 0 6 o1 2 S a.b.d,b.e a.b.d,b.e c,a.c -> busy |
+block 0 6 o1 2 S a.b.d,b.e - - -> 16 queued |
+query - 0 o1 -> held a/X/3/1/4/0 b.e/X/3/1/4/0 c/S/3/1/-/0 waiting a.b.d,b.e,c/X/- a.c,c/X/1 a.b.d,b.e/S/6 |
+query - 0 o2 -> held a/X/-/1/4/0 b.e/X/-/1/4/0 c/S/-/1/-/0 waiting a.b.d,b.e,c/X/2 a.c,c/X/- a.b.d,b.e/S/- |
+release 0 3 21 -> ok |
+query - 0 o1 -> held c/S/3/1/-/0 waiting a.b.d,b.e,c/X/- a.c,c/X/1 a.b.d,b.e/S/6 |
+query - 0 o2 -> held c/S/-/1/-/0 waiting a.b.d,b.e,c/X/2 a.c,c/X/- a.b.d,b.e/S/- |
+cancel 0 1 15 -> cancelled |
+resume 0 1 15 -> timeout |
+query - 0 o1 -> held c/S/3/1/-/0 waiting a.b.d,b.e,c/X/- a.b.d,b.e/S/6 |
+query - 0 o2 -> held c/S/-/1/-/0 waiting a.b.d,b.e,c/X/2 a.b.d,b.e/S/- |
+try_acquire 0 1 o1 -1 X a,b.e,c a,c a.b.d,b.e -> busy |
+block 0 1 o1 -1 X a,b.e,c b.e a -> 17 queued |
+query - 0 o1 -> held c/S/3/1/-/0 waiting a.b.d,b.e,c/X/- a.b.d,b.e/S/6 a,b.e,c/X/1 |
+query - 0 o2 -> held c/S/-/1/-/0 waiting a.b.d,b.e,c/X/2 a.b.d,b.e/S/- a,b.e,c/X/- |
+try_acquire 0 3 o1 2 X a.c a.c c -> granted 22 5 0 |
+query - 0 o1 -> held a.c/X/3/1/5/0 c/S/3/1/-/0 waiting a.b.d,b.e,c/X/- a.b.d,b.e/S/6 a,b.e,c/X/1 |
+query - 0 o2 -> held a.c/X/-/1/5/0 c/S/-/1/-/0 waiting a.b.d,b.e,c/X/2 a.b.d,b.e/S/- a,b.e,c/X/- |
+release 0 3 22 -> ok |
+query - 0 o1 -> held c/S/3/1/-/0 waiting a.b.d,b.e,c/X/- a.b.d,b.e/S/6 a,b.e,c/X/1 |
+query - 0 o2 -> held c/S/-/1/-/0 waiting a.b.d,b.e,c/X/2 a.b.d,b.e/S/- a,b.e,c/X/- |
+release 0 3 20 -> ok | wake(0,2,14)
+resume 0 2 14 -> granted 23 6 0 |
+query - 0 o1 -> held a.b.d/X/-/1/6/0 b.e/X/-/1/6/0 c/X/-/1/6/0 waiting a.b.d,b.e/S/6 a,b.e,c/X/1 |
+query - 0 o2 -> held a.b.d/X/2/1/6/0 b.e/X/2/1/6/0 c/X/2/1/6/0 waiting a.b.d,b.e/S/- a,b.e,c/X/- |
+try_acquire 0 3 o1 2 S a.b,a.c,c a.b,c b.e,a.c -> busy |
+block 0 3 o1 2 S a.b,a.c,c a.c a.b -> 18 queued |
+query - 0 o1 -> held a.b.d/X/-/1/6/0 b.e/X/-/1/6/0 c/X/-/1/6/0 waiting a.b.d,b.e/S/6 a,b.e,c/X/1 a.b,a.c,c/S/3 |
+query - 0 o2 -> held a.b.d/X/2/1/6/0 b.e/X/2/1/6/0 c/X/2/1/6/0 waiting a.b.d,b.e/S/- a,b.e,c/X/- a.b,a.c,c/S/- |
+start_body 0 2 23 -> ok |
+query - 0 o1 -> held a.b.d/X/-/1/6/0 b.e/X/-/1/6/0 c/X/-/1/6/0 waiting a.b.d,b.e/S/6 a,b.e,c/X/1 a.b,a.c,c/S/3 |
+query - 0 o2 -> held a.b.d/X/2/1/6/0 b.e/X/2/1/6/0 c/X/2/1/6/0 waiting a.b.d,b.e/S/- a,b.e,c/X/- a.b,a.c,c/S/- |
+try_acquire 0 2 o2 0 S a.b,c a.b,c c,a.c -> granted 24 6 0 |
+query - 0 o1 -> held a.b/S/-/1/-/0 a.b.d/X/-/1/6/0 b.e/X/-/1/6/0 c/X/-/2/6/0 waiting a.b.d,b.e/S/6 a,b.e,c/X/1 a.b,a.c,c/S/3 |
+query - 0 o2 -> held a.b/S/2/1/-/0 a.b.d/X/2/1/6/0 b.e/X/2/1/6/0 c/X/2,2/2/6/0 waiting a.b.d,b.e/S/- a,b.e,c/X/- a.b,a.c,c/S/- |
+try_acquire 0 2 o2 0 S b b a.b -> granted 25 6 0 |
+query - 0 o1 -> held a.b/S/-/1/-/0 a.b.d/X/-/1/6/0 b/S/-/1/-/0 b.e/X/-/1/6/0 c/X/-/2/6/0 waiting a.b.d,b.e/S/6 a,b.e,c/X/1 a.b,a.c,c/S/3 |
+query - 0 o2 -> held a.b/S/2/1/-/0 a.b.d/X/2/1/6/0 b/S/2/1/-/0 b.e/X/2/1/6/0 c/X/2,2/2/6/0 waiting a.b.d,b.e/S/- a,b.e,c/X/- a.b,a.c,c/S/- |
+release 0 2 25 -> ok |
+query - 0 o1 -> held a.b/S/-/1/-/0 a.b.d/X/-/1/6/0 b.e/X/-/1/6/0 c/X/-/2/6/0 waiting a.b.d,b.e/S/6 a,b.e,c/X/1 a.b,a.c,c/S/3 |
+query - 0 o2 -> held a.b/S/2/1/-/0 a.b.d/X/2/1/6/0 b.e/X/2/1/6/0 c/X/2,2/2/6/0 waiting a.b.d,b.e/S/- a,b.e,c/X/- a.b,a.c,c/S/- |
+release 0 2 24 -> ok |
+query - 0 o1 -> held a.b.d/X/-/1/6/0 b.e/X/-/1/6/0 c/X/-/1/6/0 waiting a.b.d,b.e/S/6 a,b.e,c/X/1 a.b,a.c,c/S/3 |
+query - 0 o2 -> held a.b.d/X/2/1/6/0 b.e/X/2/1/6/0 c/X/2/1/6/0 waiting a.b.d,b.e/S/- a,b.e,c/X/- a.b,a.c,c/S/- |
+try_acquire 0 2 o2 0 X b - - -> granted 26 7 0 |
+query - 0 o1 -> held a.b.d/X/-/1/6/0 b/X/-/1/7/0 b.e/X/-/1/6/0 c/X/-/1/6/0 waiting a.b.d,b.e/S/6 a,b.e,c/X/1 a.b,a.c,c/S/3 |
+query - 0 o2 -> held a.b.d/X/2/1/6/0 b/X/2/1/7/0 b.e/X/2/1/6/0 c/X/2/1/6/0 waiting a.b.d,b.e/S/- a,b.e,c/X/- a.b,a.c,c/S/- |
+release 0 2 26 -> ok |
+query - 0 o1 -> held a.b.d/X/-/1/6/0 b.e/X/-/1/6/0 c/X/-/1/6/0 waiting a.b.d,b.e/S/6 a,b.e,c/X/1 a.b,a.c,c/S/3 |
+query - 0 o2 -> held a.b.d/X/2/1/6/0 b.e/X/2/1/6/0 c/X/2/1/6/0 waiting a.b.d,b.e/S/- a,b.e,c/X/- a.b,a.c,c/S/- |
+release 0 2 23 -> ok | wake(0,6,16)
+resume 0 6 16 -> granted 27 7 0 |
+query - 0 o1 -> held a.b.d/S/6/1/-/0 b.e/S/6/1/-/0 waiting a,b.e,c/X/1 a.b,a.c,c/S/3 |
+query - 0 o2 -> held a.b.d/S/-/1/-/0 b.e/S/-/1/-/0 waiting a,b.e,c/X/- a.b,a.c,c/S/- |
+start_body 0 6 27 -> ok |
+query - 0 o1 -> held a.b.d/S/6/1/-/0 b.e/S/6/1/-/0 waiting a,b.e,c/X/1 a.b,a.c,c/S/3 |
+query - 0 o2 -> held a.b.d/S/-/1/-/0 b.e/S/-/1/-/0 waiting a,b.e,c/X/- a.b,a.c,c/S/- |
+release 0 6 27 -> ok | wake(0,1,17)
+resume 0 1 17 -> granted 28 8 0 |
+query - 0 o1 -> held a/X/1/1/8/0 b.e/X/1/1/8/0 c/X/1/1/8/0 waiting a.b,a.c,c/S/3 |
+query - 0 o2 -> held a/X/-/1/8/0 b.e/X/-/1/8/0 c/X/-/1/8/0 waiting a.b,a.c,c/S/- |
+cancel 0 3 18 -> cancelled |
+resume 0 3 18 -> timeout |
+query - 0 o1 -> held a/X/1/1/8/0 b.e/X/1/1/8/0 c/X/1/1/8/0 waiting |
+query - 0 o2 -> held a/X/-/1/8/0 b.e/X/-/1/8/0 c/X/-/1/8/0 waiting |
+try_acquire 0 6 o1 2 X a.b,a.c a.b,a.c c,b -> busy |
+block 0 6 o1 2 X a.b,a.c - - -> 19 queued |
+query - 0 o1 -> held a/X/1/1/8/0 b.e/X/1/1/8/0 c/X/1/1/8/0 waiting a.b,a.c/X/6 |
+query - 0 o2 -> held a/X/-/1/8/0 b.e/X/-/1/8/0 c/X/-/1/8/0 waiting a.b,a.c/X/- |
+start_body 0 1 28 -> ok |
+query - 0 o1 -> held a/X/1/1/8/0 b.e/X/1/1/8/0 c/X/1/1/8/0 waiting a.b,a.c/X/6 |
+query - 0 o2 -> held a/X/-/1/8/0 b.e/X/-/1/8/0 c/X/-/1/8/0 waiting a.b,a.c/X/- |
+release 0 1 28 -> ok | wake(0,6,19)
+resume 0 6 19 -> granted 29 9 0 |
+query - 0 o1 -> held a.b/X/6/1/9/0 a.c/X/6/1/9/0 waiting |
+query - 0 o2 -> held a.b/X/-/1/9/0 a.c/X/-/1/9/0 waiting |
+start_body 0 6 29 -> ok |
+query - 0 o1 -> held a.b/X/6/1/9/0 a.c/X/6/1/9/0 waiting |
+query - 0 o2 -> held a.b/X/-/1/9/0 a.c/X/-/1/9/0 waiting |
+try_acquire 0 2 o2 0 S a.b,b,c b,c a.b,a.c -> busy |
+try_acquire 0 1 o1 -1 S b.e b.e b -> granted 30 9 0 |
+query - 0 o1 -> held a.b/X/6/1/9/0 a.c/X/6/1/9/0 b.e/S/1/1/-/0 waiting |
+query - 0 o2 -> held a.b/X/-/1/9/0 a.c/X/-/1/9/0 b.e/S/-/1/-/0 waiting |
+try_acquire 0 1 o1 -1 S c - - -> granted 31 9 0 |
+query - 0 o1 -> held a.b/X/6/1/9/0 a.c/X/6/1/9/0 b.e/S/1/1/-/0 c/S/1/1/-/0 waiting |
+query - 0 o2 -> held a.b/X/-/1/9/0 a.c/X/-/1/9/0 b.e/S/-/1/-/0 c/S/-/1/-/0 waiting |
+try_acquire 0 6 o1 2 S a.b.d,b.e a.b.d c -> granted 32 9 0 |
+query - 0 o1 -> held a.b/X/6/1/9/0 a.b.d/S/6/1/-/0 a.c/X/6/1/9/0 b.e/S/1,6/2/-/0 c/S/1/1/-/0 waiting |
+query - 0 o2 -> held a.b/X/-/1/9/0 a.b.d/S/-/1/-/0 a.c/X/-/1/9/0 b.e/S/-/2/-/0 c/S/-/1/-/0 waiting |
+release 0 6 32 -> ok |
+query - 0 o1 -> held a.b/X/6/1/9/0 a.c/X/6/1/9/0 b.e/S/1/1/-/0 c/S/1/1/-/0 waiting |
+query - 0 o2 -> held a.b/X/-/1/9/0 a.c/X/-/1/9/0 b.e/S/-/1/-/0 c/S/-/1/-/0 waiting |
+release 0 1 31 -> ok |
+query - 0 o1 -> held a.b/X/6/1/9/0 a.c/X/6/1/9/0 b.e/S/1/1/-/0 waiting |
+query - 0 o2 -> held a.b/X/-/1/9/0 a.c/X/-/1/9/0 b.e/S/-/1/-/0 waiting |
+try_acquire 0 6 o1 2 S a.b,b.e a.b,b.e b.e,a.b.d -> granted 33 9 0 |
+query - 0 o1 -> held a.b/X/6,6/2/9/0 a.c/X/6/1/9/0 b.e/S/1,6/2/-/0 waiting |
+query - 0 o2 -> held a.b/X/-/2/9/0 a.c/X/-/1/9/0 b.e/S/-/2/-/0 waiting |
+release 0 6 33 -> ok |
+query - 0 o1 -> held a.b/X/6/1/9/0 a.c/X/6/1/9/0 b.e/S/1/1/-/0 waiting |
+query - 0 o2 -> held a.b/X/-/1/9/0 a.c/X/-/1/9/0 b.e/S/-/1/-/0 waiting |
+release 0 1 30 -> ok |
+query - 0 o1 -> held a.b/X/6/1/9/0 a.c/X/6/1/9/0 waiting |
+query - 0 o2 -> held a.b/X/-/1/9/0 a.c/X/-/1/9/0 waiting |
+try_acquire 0 3 o1 2 S a.c,b,c a.c,b,c a.b,b.e,a.c -> busy |
+block 0 3 o1 2 S a.c,b,c a.c,b,c b,c,a.c -> 20 queued |
+query - 0 o1 -> held a.b/X/6/1/9/0 a.c/X/6/1/9/0 waiting a.c,b,c/S/3 |
+query - 0 o2 -> held a.b/X/-/1/9/0 a.c/X/-/1/9/0 waiting a.c,b,c/S/- |
+release 0 6 29 -> ok | wake(0,3,20)
+resume 0 3 20 -> granted 34 9 0 |
+query - 0 o1 -> held a.c/S/3/1/-/0 b/S/3/1/-/0 c/S/3/1/-/0 waiting |
+query - 0 o2 -> held a.c/S/-/1/-/0 b/S/-/1/-/0 c/S/-/1/-/0 waiting |
+try_acquire 0 1 o1 -1 S a,b a,b b,c -> granted 35 9 0 |
+query - 0 o1 -> held a/S/1/1/-/0 a.c/S/3/1/-/0 b/S/3,1/2/-/0 c/S/3/1/-/0 waiting |
+query - 0 o2 -> held a/S/-/1/-/0 a.c/S/-/1/-/0 b/S/-/2/-/0 c/S/-/1/-/0 waiting |
+release 0 1 35 -> ok |
+query - 0 o1 -> held a.c/S/3/1/-/0 b/S/3/1/-/0 c/S/3/1/-/0 waiting |
+query - 0 o2 -> held a.c/S/-/1/-/0 b/S/-/1/-/0 c/S/-/1/-/0 waiting |
+start_body 0 3 34 -> ok |
+query - 0 o1 -> held a.c/S/3/1/-/0 b/S/3/1/-/0 c/S/3/1/-/0 waiting |
+query - 0 o2 -> held a.c/S/-/1/-/0 b/S/-/1/-/0 c/S/-/1/-/0 waiting |
+release 0 3 34 -> ok |
+query - 0 o1 -> held waiting |
+query - 0 o2 -> held waiting |

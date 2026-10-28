@@ -31,6 +31,7 @@ to `results/`, which is not committed.
 | `explore_scripts.py` | every interleaving of scripted processes, with a fault budget |
 | `random_runs.py` | long random runs over larger worlds |
 | `run_long.sh` | the long run: all of the above at their full sizes |
+| `export_traces.py` | the manager operations of one-home scenarios and random runs, as traces the C++ model check replays |
 
 ## Running it
 
@@ -144,6 +145,144 @@ deadlines on waits, unless it says otherwise.
 `destroy_with_lock_state` and `detach_with_lock_state` (a home destroyed, or detached, while the
 manager holds records of its processes), `group_teardown`, `post_dropped_closed_port`,
 `posted_wake`, `posted_relevel`, `stale_wake_ignored`, `boosted` and `deadlock_len_N`.
+
+## The C++ model check (LT-5)
+
+`src/cvc/tests/state_exec_locks_model_test.cpp` (suites `LocksModel` and `LocksModelStress`, in
+the `state_exec_locks_model_test` executable) ports this model to C++ and runs it against the real
+lock table, `detail::lock_table` (locks plan L1.3). It was written from the protocol and from these
+files, not from the table's code. Phase L1 runs it on one home; L2.3 and L3.4 extend it.
+
+- **The spec oracle** (`spec_manager`) is `lockmodel.py`'s `Manager`: protocol 2-4 over sets and
+  maps, without the trie. It takes `lock_table::mutation`'s bits, its `check()` asserts section
+  6's manager clauses as `Manager.check()` does, and its `canonical()` writes the state in the
+  format of `lock_table::canonical()` (`detail/lock_table.h`).
+- **The lockstep** (`lockstep`) runs every manager operation on the oracle and on the real table,
+  the way a lock home calls the table: a key the home's cache holds passes its trie node, a miss
+  passes its key with a reference (4.15's `refs.add`), an eviction passes the evicted node. The
+  results, the notification lists and the two `canonical()` dumps must be equal, then both
+  `check()`s run, and the table's `stats()` counts of holds, queued tickets, grants and cache
+  references must match the oracle's. The table runs with `self_check` on, so its grant-time
+  assertions of I5 and I15 run too. A finding is a `lock_violation` named as here (`I6`,
+  `4.13`, `lockstep`, ...).
+- **The world** (`world`) is `world.py`: homes, processes, frames, key caches, ports and posts,
+  the per-action micro-operations, and the world's invariants, plus three checks of the table
+  alone: a mirror hold's keys against `hold_keys()`; I4's home clause, one reference of the home
+  on each cached key's node and none other (`home_cache_refs()`); and at I9's points `empty()`
+  and a trie of only the flagged and cached keys and their ancestors (`stats().trie_nodes`). Its key cache
+  pins a request's entries, as the implementation does (protocol 4.15, design 8.4): a probe never
+  evicts a key of the request it builds, and a key that finds every entry pinned passes uncached.
+  `world.py`'s plain FIFO, which may evict a key of the same request, is an option (`pin`), used
+  for the state counts below.
+- **The explorer** (`explore()`) is `explore.py`'s 0-1 BFS (external events cost 1, home steps
+  and posts 0) with a fair drain at the bound. States are deduplicated on a 128-bit fingerprint
+  of a dump of the world (the oracle's `canonical()` and every field `World.key()` has), and kept
+  as (parent, action): a state over the real table is rebuilt by replaying its path into a fresh
+  world, since the table cannot be copied; on the oracle alone it is copied. The shortest trace
+  of each violation is printed.
+
+### Its configurations and tests
+
+`l1` is `explore.py`'s `l1`. `l1x` adds what locks plan L1 section 3 (LT-5 item 4) lists and
+`l1` lacks: one signal per process, whose handler may lock and raise, and foreign release and
+cancel calls (I12). `LocksModel.L1Bounded` explores `l1x`; `LocksModel.RandomL1` runs
+`random_runs.py`'s episodes restricted to one home of prio false (phase L1).
+
+The scenarios of `scenarios.py` that L1 can run are `TEST(LocksModel, ...)` cases, each on one
+home, except LX-10 and LX-11, which need a post between two homes: they run with `one_home` off,
+which the L1 table honours (were a table to refuse a second home whatever the option, they would
+run on the oracle alone and say so). The L1 mutations each report exactly the violation `scenarios.py` names: the manager's
+(`no_exemption`, `cancel_reexamines_holds_only`, `keep_detached_refs`, `unref_pops_entry`,
+`cancel_marks_failed`, `query_first_gen`) on the oracle and the table together, the world's
+(`wake_carries_outcome`, `cache_miss_unreferenced`) in the world. Two scenarios differ from
+`scenarios.py` because of the single home: `cycle_other_home_pid` becomes
+`CycleOtherOwnerPid` (a pid is `nil` for another owner), and the cache scenarios check one home's
+references.
+
+`LocksModel.PortMatchesPythonStateCounts` ties the port to this model: on the oracle alone and
+with `world.py`'s FIFO cache, `l1`, `l1x` (as `explore.py`'s `l1` with `signals=1` and
+`foreign=True`) and `explore.py`'s two-home `core` must have exactly the distinct states and the
+transitions `explore.py` counts, both copied and replayed:
+
+| Configuration | Bound 1 | Bound 2 | Bound 3 (`LocksModelStress`) |
+|---|---|---|---|
+| `l1` | 73 states, 132 transitions | 1,633, 2,412 | 26,834, 43,572 |
+| `l1x` | 85, 168 | 1,921, 3,552 | 34,266, 68,514 |
+| `core` | 25, 24 | 776, 871 | 15,746, 23,201 |
+
+At bound 4, `l1` with `world.py`'s cache has 324,347 states and 586,802 transitions in both. With the implementation's
+pinned cache the counts are lower (`l1` at bound 3: 26,744 states; `l1x`: 34,176): pinning removes
+the states in which a request evicted one of its own keys.
+
+`LocksModel.LockstepCatchesPlantedDivergence` checks the check: with `plant_divergence` on the
+table only, exploring `l1` must report one violation, a `lockstep` mismatch of the
+`counters grants=` line at a `release`.
+
+### The traces of the Python model
+
+`export_traces.py` runs `scenarios.py`'s scenarios with their homes merged into one home of prio
+false (the ones that need several homes or L2's inheritance are left out, and listed), and
+`random_runs.py`'s episodes of the first seeds whose world is one home of prio false, four with
+coalescing off and four with it on, 200 steps each and the fair drain. It records every manager
+operation the world makes, with its result and notifications, one per line; its docstring
+specifies the format. `LocksModel.PythonTraces` replays every file into the oracle and into the
+table and requires the recorded results and notifications. Regenerate the committed files after
+a change to the model (the output does not depend on the hash seed):
+
+    python -I export_traces.py ../../src/cvc/tests/data/locks_model_traces
+
+A request in these traces may evict one of its own keys (the model's FIFO cache); the lockstep
+passes such an eviction to the table as an `unref_nodes` right after the request, since the
+table's `cache_delta` never names a key of the request.
+
+### Sizes
+
+Each test reads its size from the environment, with defaults that depend on the build (locks plan
+L1 section 3, "Sizes, by lane"):
+
+| Variable | Read by | Default: Release / Debug / `CVC_LOCKS_SANITIZER=1` | `LocksModelStress` |
+|---|---|---|---|
+| `CVC_LOCKS_MODEL_BOUND` | `L1Bounded`, `L1Bound4` | 3 / 2 / 2 | 4 (5 in `locks-deep.yml`) |
+| `CVC_LOCKS_MODEL_STEPS` | `RandomL1` | 2*10^4 / 5*10^3 / 2*10^3 | 2*10^5 |
+
+"Debug" is a build without `NDEBUG`. Two more variables serve development:
+`CVC_LOCKS_MODEL_REAL=0` runs every test on the oracle alone (the tests that need the table skip
+while it is the interface commit's stub, which throws "not built yet"), and
+`CVC_LOCKS_MODEL_TRACES` names another trace directory. `LocksModelStress.DISABLED_Measure`
+measures the explorer: run it with `--gtest_also_run_disabled_tests` and
+`CVC_LOCKS_MODEL_MEASURE=CONFIG:BOUND[:replay]` (comma-separated; one per process gives each its
+own peak memory).
+
+### Measurements
+
+Taken on 2026-10-28 on the Windows builder (MSVC 19.44, 22 cores), not in a quiet window: other
+builds ran beside them, so the seconds are indicative. Peak memory is the process's peak working
+set. "Copied" is the explorer on the oracle alone, each state copied; "replayed" rebuilds each
+state by replaying its path, as it must over the real table; "table" is the explorer over the
+real table (replayed, both managers, both dumps and both `check()`s after every operation).
+
+Release (`/O2`), the explorer:
+
+| Configuration, bound | States | Transitions | Copied | Replayed | Table | Peak |
+|---|---|---|---|---|---|---|
+| `l1`, 3 | 26,744 | 43,572 | 1.2 s | 1.3 s | | 18 MB |
+| `l1`, 4 | 321,206 | 583,532 | 28 s | 33 s | | 52 MB |
+| `l1`, 5 | 2,804,085 | 5,581,613 | 261 s | | | 303 MB |
+| `l1x`, 3 | 34,176 | 68,514 | 2.0 s | 3.8 s | 5.6 s | 19 MB |
+| `l1x`, 4 | 457,451 | 1,032,001 | 47 s | 40 s | 99 s | 59 MB |
+| `l1x`, 5 | 4,645,893 | 11,688,379 | 429 s | | 1,823 s | 508 MB |
+
+`explore.py` takes 22 s for `l1` at bound 3 and 262 s at bound 4.
+
+Without optimization (`/Od`, asserts on; the test file alone, linked against the Release library,
+so the table's own share runs optimized): `l1x` at bound 2 takes 0.45 s on the oracle alone and
+0.71 s over the table; at bound 3, 12 s on the oracle alone. The whole regular suite (`LocksModel.*`)
+takes 9.4 s in Release over the table, and about 9 s unoptimized at its Debug sizes (measured
+beside a bound-5 run and other builds). So the defaults above, the locks plan's, stand: they leave
+room under the 60 s budget for a Debug build's unoptimized table and coverage, which bound 3 in a
+Debug lane would not (12 s on the oracle alone, before the table). In a build without `NDEBUG`,
+`LockstepCatchesPlantedDivergence` stops at its first violation instead of exploring all of `l1`
+at bound 3 (7 s unoptimized).
 
 ## Revisions
 
