@@ -4,7 +4,10 @@ on:
   pull_request:
     branches: [ main, master, develop ]
   push:
-    branches: [ main, master ]
+    # ci/full/**: a branch pushed there gets master's push run, heavy suites included, which
+    # pull_request runs skip. For proving a change to those suites, or to how they run, before
+    # it merges.
+    branches: [ main, master, 'ci/full/**' ]
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+*'
 
@@ -1660,9 +1663,24 @@ jobs:
           # See linux ctest step for rationale.
           $stressRegex = '(Stress|Convergence|Benchmark|Performance|BunnySDF_IsoRoundtrip|QualityImproveAllMethods|Integration)'
           if ('${{ github.event_name }}' -eq 'push') {
+            # The rest in parallel, then the heavy suites SERIALLY, as on Linux and macOS. Run
+            # all at once, the Jolt convergence suites and the large-tree benchmarks held the
+            # 4-vCPU runner for hours (some to the 3600 s timeout, three times), and the tests
+            # beside them starved. Master 83b60200 failed 21-25 of the 48 StateTransportGrpc
+            # tests per gRPC lane (connect_to_peer missing its 2 s deadline), RoomRelay and
+            # StreamBridge loopbacks, and cvcgl_lod_cache's threaded teardown (906 ms against
+            # one 120 ms build). PR runs, which skip the heavy suites, pass all of them. Both
+            # passes run even if the first fails, so one push reports both.
+            ctest --test-dir build --build-config ${{ matrix.build_type }} `
+                  --output-on-failure --parallel --repeat until-pass:3 --timeout 3600 `
+                  -E "$stressRegex"
+            $rest = $LASTEXITCODE
             $env:CVC_DISTRIBUTED_STATE_BENCH = '1'
             ctest --test-dir build --build-config ${{ matrix.build_type }} `
-                  --output-on-failure --parallel --repeat until-pass:3 --timeout 3600
+                  --output-on-failure --parallel 1 --repeat until-pass:3 --timeout 3600 `
+                  -R "$stressRegex"
+            $heavy = $LASTEXITCODE
+            if ($rest -ne 0 -or $heavy -ne 0) { exit 1 }
           } else {
             ctest --test-dir build --build-config ${{ matrix.build_type }} `
                   --output-on-failure --parallel --repeat until-pass:3 --timeout 300 `
