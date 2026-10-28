@@ -556,8 +556,145 @@ TEST_P(LocksSmoke, OptionErrorsAndCovered) {
 }
 
 // ===========================================================================
+// What the L1 reviews found (R1a, R1b, R1d): restored lock frames, a restored wait under the
+// restoring context's rules, the order KEY and :timeout are read in, a '/' key on a cache hit,
+// and a cache eviction for a request.
+// ===========================================================================
+
+namespace {
+class LocksReview : public ::testing::TestWithParam<std::string> {
+protected:
+  locks_world w{GetParam()};
+
+  // An environment of its own over a context of its own (kept by the world), `setup` applied to
+  // the context before the intrinsics are registered.
+  environment_ptr make_env(const std::function<void(intrinsics_context &)> &setup = {}) {
+    intrinsics_context &ctx = w.contexts.emplace_back();
+    ctx.sched = &w.base();
+    ctx.root = &w.tree;
+    ctx.proc = make_process();
+    ctx.uid = "test";
+    if (setup)
+      setup(ctx);
+    environment_ptr env = builtins::make_default_environment();
+    register_intrinsics(env, &ctx);
+    return env;
+  }
+
+  int submit(const std::string &script, const environment_ptr &env) {
+    execute_options opts;
+    opts.env = env;
+    return w.base().execute(script, opts);
+  }
+
+  // Snapshot `pid`, kill it, and restore the snapshot with `natives`: the copy's pid.
+  int snapshot_and_restore(int pid, const environment_ptr &natives) {
+    cvc::state &node = w.tree("snap.p" + std::to_string(pid));
+    EXPECT_TRUE(w.sync ? w.sync->snapshot(pid, node) : w.async->snapshot(pid, node));
+    w.base().kill(pid);
+    return w.sync ? w.sync->restore(node, natives) : w.async->restore(node, natives);
+  }
+};
+INSTANTIATE_TEST_SUITE_P(Schedulers, LocksReview, ::testing::Values("sync", "async"),
+                         [](const auto &info) { return info.param; });
+} // namespace
+
+// R1b: a lock frame restored while KEY is still being evaluated reads its lock form from the
+// restoring environment (the codec writes the slot as nil).
+TEST_P(LocksReview, RestoredWhileKeyEvaluates) {
+  const environment_ptr env = make_env();
+  const int p = submit(R"S((with-lock (begin (sleep 0.05) "k") 42))S", env);
+  ASSERT_TRUE(w.step_until([&] { return w.parked(p); }));
+  const int q = snapshot_and_restore(p, env);
+  ASSERT_TRUE(w.step_until([&] { return w.finished(q); }));
+  EXPECT_EQ(as_int(w.result(q)), 42);
+}
+
+// R1b: a lock frame restored with a failed outcome raises it at the form.
+TEST_P(LocksReview, RestoredWithAFailedOutcome) {
+  const int h = w.submit(R"S((with-lock "k" (msg-recv "never")))S");
+  ASSERT_TRUE(w.step_until([&] { return w.parked(h); }));
+  const environment_ptr env = make_env();
+  const int p = submit(
+      R"S((try (with-lock "k" :timeout 0.05 1) (catch (TimeoutError e) "timed out")))S", env);
+  ASSERT_TRUE(w.step_until([&] { return w.parked(p); }));
+  ASSERT_TRUE(w.step_until([&] { return !w.parked(p); })); // its deadline passed: the outcome
+  ASSERT_FALSE(w.finished(p));
+  const int q = snapshot_and_restore(p, env);
+  ASSERT_TRUE(w.step_until([&] { return w.finished(q); }));
+  EXPECT_EQ(as_str(w.result(q)), "timed out");
+  w.base().kill(h);
+}
+
+// R1d: a restored wait follows the restoring context's rules. Where no wait is allowed (as on
+// Ariadne's init lane), the request is tried once and refused, not queued again.
+TEST_P(LocksReview, RestoredWaitFollowsTheRestoringContext) {
+  const int h = w.submit(R"S((with-lock "k" (msg-recv "never")))S");
+  ASSERT_TRUE(w.step_until([&] { return w.parked(h); }));
+  const environment_ptr env = make_env();
+  const int p = submit(R"S((try (with-lock "k" 1) (catch (TimeoutError e) "refused")))S", env);
+  ASSERT_TRUE(w.step_until([&] { return w.parked(p); }));
+  const environment_ptr strict =
+      make_env([](intrinsics_context &c) { c.lock_wait_allowed = false; });
+  const int q = snapshot_and_restore(p, strict);
+  ASSERT_TRUE(w.step_until([&] { return w.finished(q); }, 5.0));
+  EXPECT_EQ(as_str(w.result(q)), "refused");
+  w.base().kill(h);
+}
+
+// td B28: (fork) inside a step forks the running process. The parent's call returns the child's
+// pid and the child's returns 0; the child goes on after the call, so it does not fork again.
+TEST_P(LocksReview, ForkInAStepReturnsZeroInTheChild) {
+  const int p = w.submit(R"S((begin (set c (fork)) (if (= c 0) "child" c)))S");
+  ASSERT_TRUE(w.step_until([&] { return w.finished(p); }));
+  const int child = static_cast<int>(as_int(w.result(p)));
+  ASSERT_TRUE(w.step_until([&] { return w.finished(child); }));
+  EXPECT_EQ(as_str(w.result(child)), "child");
+  EXPECT_EQ(w.base().list_processes().size(), 2u); // no runaway chain of forks
+}
+
+// R1b: KEY is evaluated before :timeout's symbol is looked up (left to right).
+TEST_P(LocksReview, TimeoutIsReadAfterKey) {
+  EXPECT_EQ(as_int(w.run(R"S((with-lock (begin (set tmo 5) "k") :timeout tmo 42))S")), 42);
+}
+
+// R1a: the key cache is keyed by chroot and text, not by channel policy, so a '/' key found in
+// it is still checked against the requesting context's policy (gap G-15).
+TEST_P(LocksReview, GlobalKeyIsCheckedOnACacheHit) {
+  EXPECT_EQ(as_int(w.run(R"S((with-lock "/g" 1))S")), 1); // no policy: allowed, and cached
+  channel_policy strict;
+  strict.enforce = true; // declares no global
+  const environment_ptr env = make_env([&](intrinsics_context &c) { c.channels = &strict; });
+  const int p = submit(R"S((try (with-lock "/g" 1) (catch (PermissionError e) "denied")))S", env);
+  ASSERT_TRUE(w.step_until([&] { return w.finished(p); }));
+  EXPECT_EQ(as_str(w.result(p)), "denied");
+}
+
+// R1a: a miss's eviction never names a key of its own request (protocol 4.15), even through
+// another spelling: "x" and "x " name one node. A cache of two entries and a manager that checks
+// every operation, which reports such a drop as a violation.
+TEST_P(LocksReview, EvictionNeverDropsAKeyOfTheRequest) {
+  static const detail::lock_test_hooks hooks{.home_cache_capacity = 2};
+  struct hooks_guard {
+    hooks_guard() { detail::set_lock_test_hooks(&hooks); }
+    ~hooks_guard() { detail::set_lock_test_hooks(nullptr); }
+  } guard;
+  lock_manager::options o;
+  o.self_check = true;
+  const auto mgr = std::make_shared<lock_manager>(o);
+  if (w.sync)
+    w.sync->set_lock_manager(mgr);
+  else
+    w.async->set_lock_manager(mgr);
+  EXPECT_EQ(as_int(w.run(R"S((with-lock "x" 1))S")), 1);
+  EXPECT_EQ(as_int(w.run(R"S((with-lock "x " 2))S")), 2);           // a second entry, the same node
+  EXPECT_EQ(as_int(w.run(R"S((with-lock (list "x" "c") 3))S")), 3); // c's miss may evict neither
+  EXPECT_NO_THROW(mgr->check());
+}
+
+// ===========================================================================
 // Locks under the spawn context (locks plan L1b; td 4.15)
-// ====================================================================
+// ===========================================================================
 
 namespace {
 class LocksSpawn : public ::testing::TestWithParam<std::string> {
@@ -637,139 +774,4 @@ TEST_P(LocksSpawn, LK24_SpawnedChildrenLockUnderTheParentsChroot) {
   EXPECT_EQ(w.node("doc.q.n"), total);
   EXPECT_EQ(w.node("doc.q.m"), total);
   EXPECT_EQ(w.tree.findDescendant("q"), nullptr);
-  == == == =
-               // What the L1 reviews found (R1a, R1b, R1d): restored lock frames, a restored wait
-               // under the restoring context's rules, the order KEY and :timeout are read in, a '/'
-               // key on a cache hit, and a cache eviction for a request.
-               // ===========================================================================
-
-      namespace {
-    class LocksReview : public ::testing::TestWithParam<std::string> {
-    protected:
-      locks_world w{GetParam()};
-
-      // An environment of its own over a context of its own (kept by the world), `setup` applied to
-      // the context before the intrinsics are registered.
-      environment_ptr make_env(const std::function<void(intrinsics_context &)> &setup = {}) {
-        intrinsics_context &ctx = w.contexts.emplace_back();
-        ctx.sched = &w.base();
-        ctx.root = &w.tree;
-        ctx.proc = make_process();
-        ctx.uid = "test";
-        if (setup)
-          setup(ctx);
-        environment_ptr env = builtins::make_default_environment();
-        register_intrinsics(env, &ctx);
-        return env;
-      }
-
-      int submit(const std::string &script, const environment_ptr &env) {
-        execute_options opts;
-        opts.env = env;
-        return w.base().execute(script, opts);
-      }
-
-      // Snapshot `pid`, kill it, and restore the snapshot with `natives`: the copy's pid.
-      int snapshot_and_restore(int pid, const environment_ptr &natives) {
-        cvc::state &node = w.tree("snap.p" + std::to_string(pid));
-        EXPECT_TRUE(w.sync ? w.sync->snapshot(pid, node) : w.async->snapshot(pid, node));
-        w.base().kill(pid);
-        return w.sync ? w.sync->restore(node, natives) : w.async->restore(node, natives);
-      }
-    };
-    INSTANTIATE_TEST_SUITE_P(Schedulers, LocksReview, ::testing::Values("sync", "async"),
-                             [](const auto &info) { return info.param; });
-  } // namespace
-
-  // R1b: a lock frame restored while KEY is still being evaluated reads its lock form from the
-  // restoring environment (the codec writes the slot as nil).
-  TEST_P(LocksReview, RestoredWhileKeyEvaluates) {
-    const environment_ptr env = make_env();
-    const int p = submit(R"S((with-lock (begin (sleep 0.05) "k") 42))S", env);
-    ASSERT_TRUE(w.step_until([&] { return w.parked(p); }));
-    const int q = snapshot_and_restore(p, env);
-    ASSERT_TRUE(w.step_until([&] { return w.finished(q); }));
-    EXPECT_EQ(as_int(w.result(q)), 42);
-  }
-
-  // R1b: a lock frame restored with a failed outcome raises it at the form.
-  TEST_P(LocksReview, RestoredWithAFailedOutcome) {
-    const int h = w.submit(R"S((with-lock "k" (msg-recv "never")))S");
-    ASSERT_TRUE(w.step_until([&] { return w.parked(h); }));
-    const environment_ptr env = make_env();
-    const int p = submit(
-        R"S((try (with-lock "k" :timeout 0.05 1) (catch (TimeoutError e) "timed out")))S", env);
-    ASSERT_TRUE(w.step_until([&] { return w.parked(p); }));
-    ASSERT_TRUE(w.step_until([&] { return !w.parked(p); })); // its deadline passed: the outcome
-    ASSERT_FALSE(w.finished(p));
-    const int q = snapshot_and_restore(p, env);
-    ASSERT_TRUE(w.step_until([&] { return w.finished(q); }));
-    EXPECT_EQ(as_str(w.result(q)), "timed out");
-    w.base().kill(h);
-  }
-
-  // R1d: a restored wait follows the restoring context's rules. Where no wait is allowed (as on
-  // Ariadne's init lane), the request is tried once and refused, not queued again.
-  TEST_P(LocksReview, RestoredWaitFollowsTheRestoringContext) {
-    const int h = w.submit(R"S((with-lock "k" (msg-recv "never")))S");
-    ASSERT_TRUE(w.step_until([&] { return w.parked(h); }));
-    const environment_ptr env = make_env();
-    const int p = submit(R"S((try (with-lock "k" 1) (catch (TimeoutError e) "refused")))S", env);
-    ASSERT_TRUE(w.step_until([&] { return w.parked(p); }));
-    const environment_ptr strict =
-        make_env([](intrinsics_context &c) { c.lock_wait_allowed = false; });
-    const int q = snapshot_and_restore(p, strict);
-    ASSERT_TRUE(w.step_until([&] { return w.finished(q); }, 5.0));
-    EXPECT_EQ(as_str(w.result(q)), "refused");
-    w.base().kill(h);
-  }
-
-  // td B28: (fork) inside a step forks the running process. The parent's call returns the child's
-  // pid and the child's returns 0; the child goes on after the call, so it does not fork again.
-  TEST_P(LocksReview, ForkInAStepReturnsZeroInTheChild) {
-    const int p = w.submit(R"S((begin (set c (fork)) (if (= c 0) "child" c)))S");
-    ASSERT_TRUE(w.step_until([&] { return w.finished(p); }));
-    const int child = static_cast<int>(as_int(w.result(p)));
-    ASSERT_TRUE(w.step_until([&] { return w.finished(child); }));
-    EXPECT_EQ(as_str(w.result(child)), "child");
-    EXPECT_EQ(w.base().list_processes().size(), 2u); // no runaway chain of forks
-  }
-
-  // R1b: KEY is evaluated before :timeout's symbol is looked up (left to right).
-  TEST_P(LocksReview, TimeoutIsReadAfterKey) {
-    EXPECT_EQ(as_int(w.run(R"S((with-lock (begin (set tmo 5) "k") :timeout tmo 42))S")), 42);
-  }
-
-  // R1a: the key cache is keyed by chroot and text, not by channel policy, so a '/' key found in
-  // it is still checked against the requesting context's policy (gap G-15).
-  TEST_P(LocksReview, GlobalKeyIsCheckedOnACacheHit) {
-    EXPECT_EQ(as_int(w.run(R"S((with-lock "/g" 1))S")), 1); // no policy: allowed, and cached
-    channel_policy strict;
-    strict.enforce = true; // declares no global
-    const environment_ptr env = make_env([&](intrinsics_context &c) { c.channels = &strict; });
-    const int p = submit(R"S((try (with-lock "/g" 1) (catch (PermissionError e) "denied")))S", env);
-    ASSERT_TRUE(w.step_until([&] { return w.finished(p); }));
-    EXPECT_EQ(as_str(w.result(p)), "denied");
-  }
-
-  // R1a: a miss's eviction never names a key of its own request (protocol 4.15), even through
-  // another spelling: "x" and "x " name one node. A cache of two entries and a manager that checks
-  // every operation, which reports such a drop as a violation.
-  TEST_P(LocksReview, EvictionNeverDropsAKeyOfTheRequest) {
-    static const detail::lock_test_hooks hooks{.home_cache_capacity = 2};
-    struct hooks_guard {
-      hooks_guard() { detail::set_lock_test_hooks(&hooks); }
-      ~hooks_guard() { detail::set_lock_test_hooks(nullptr); }
-    } guard;
-    lock_manager::options o;
-    o.self_check = true;
-    const auto mgr = std::make_shared<lock_manager>(o);
-    if (w.sync)
-      w.sync->set_lock_manager(mgr);
-    else
-      w.async->set_lock_manager(mgr);
-    EXPECT_EQ(as_int(w.run(R"S((with-lock "x" 1))S")), 1);
-    EXPECT_EQ(as_int(w.run(R"S((with-lock "x " 2))S")), 2); // a second entry, the same node
-    EXPECT_EQ(as_int(w.run(R"S((with-lock (list "x" "c") 3))S")), 3); // c's miss may evict neither
-    EXPECT_NO_THROW(mgr->check());
-  }
+}
