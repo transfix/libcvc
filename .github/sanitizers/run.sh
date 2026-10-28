@@ -31,11 +31,9 @@ case "$kind" in
     export LSAN_OPTIONS="suppressions=$here/lsan.supp:print_suppressions=0"
     export UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1:exitcode=66"
     # pycvc scripts not run under ASan, which can't suppress a report and stops a process at its
-    # first. Each names what it would report and the PR that fixes it; take it out when that lands.
-    # - test_pycvc_state_exec_eval.py: heap-use-after-free through evaluator.stats(),
-    #   evaluator_state.stats and process.state, which didn't keep their owner alive
-    #   (transfix/libcvc#864; TSan's report of it is suppressed in tsan.supp).
-    py_skip="test_pycvc_state_exec_eval.py"
+    # first, space-separated. Give each a comment naming what it would report and the PR that
+    # fixes it, and take it out when that lands. (#864 needed one until it did.)
+    py_skip=""
     ;;
   *)
     echo "unknown sanitizer '$kind' (tsan or asan-ubsan)" >&2
