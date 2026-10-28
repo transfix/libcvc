@@ -330,6 +330,8 @@ public:
   explicit time_budget(double seconds);
 
   void start();
+  /// start() at `now`, a steady_clock reading the caller already has.
+  void start(clock::time_point now);
   /// End the interval. Since its last check (spent(), or start()) it took `checks` steps,
   /// whose gaps the budget did not see: they count as that many gaps.
   void stop(std::uint64_t checks = 1);
@@ -339,6 +341,11 @@ public:
   /// Seconds left as of the last stop(): the first half's unspent steady-clock time plus the
   /// second half, then the second half's unspent CPU time; 0 once spent.
   double remaining() const;
+  /// Between intervals (after stop()): charge `seconds` its owner spent waiting for work, with
+  /// nothing to run, as time it ran: on the steady clock in the first half, the rest as CPU time
+  /// in the second. An owner that would otherwise have polled through the wait (a scheduler
+  /// run whose processes all sleep) spends its budget as the polling would have.
+  void charge_wait(double seconds);
 
 private:
   void gap(clock::time_point now, std::uint64_t gaps = 1); // the second half: a check at `now`
@@ -370,6 +377,9 @@ private:
 class eval_deadline_guard {
 public:
   explicit eval_deadline_guard(std::optional<double> seconds);
+  /// The same, armed from `now`, a steady_clock reading the caller already has (a scheduler's
+  /// step start).
+  eval_deadline_guard(std::optional<double> seconds, std::chrono::steady_clock::time_point now);
   ~eval_deadline_guard();
   eval_deadline_guard(const eval_deadline_guard &) = delete;
   eval_deadline_guard &operator=(const eval_deadline_guard &) = delete;

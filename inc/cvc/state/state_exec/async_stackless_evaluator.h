@@ -42,6 +42,11 @@ public:
   /// Single step as a coroutine — yields after the step.
   task<bool> step(evaluator_state &state);
 
+  /// The same step, run to its end on the calling thread with no coroutine frame: what the
+  /// scheduler calls (the step never suspends inside; step() only yields after it). True when
+  /// the program is done.
+  bool step_now(evaluator_state &state) { return inner_.step(state); }
+
   /// Raise `exc` in `state` where it is evaluating (stackless_evaluator::raise).
   void raise(evaluator_state &state, value_t exc) { inner_.raise(state, std::move(exc)); }
 

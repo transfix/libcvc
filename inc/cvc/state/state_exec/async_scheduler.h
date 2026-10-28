@@ -9,13 +9,17 @@
 #ifndef CVC_STATE_EXEC_ASYNC_SCHEDULER_H
 #define CVC_STATE_EXEC_ASYNC_SCHEDULER_H
 
+#include <atomic>
+#include <chrono>
 #include <cvc/state/state_exec/async_stackless_evaluator.h>
 #include <cvc/state/state_exec/memory_tracker.h>
 #include <cvc/state/state_exec/process.h>
+#include <cvc/state/state_exec/process_table.h>
 #include <cvc/state/state_exec/scheduler.h>
 #include <cvc/state/state_exec/scheduler_base.h>
 #include <cvc/state/state_exec/task.h>
 #include <cvc/state/state_exec/types.h>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <queue>
@@ -34,9 +38,9 @@ class async_call;
 
 /// Async process scheduler using C++20 coroutines.
 ///
-/// Same semantics as the sync scheduler but all stepping methods are
-/// coroutines that yield between steps via suspend_point, enabling
-/// cooperative multitasking in a coroutine executor.
+/// Same semantics as the sync scheduler. step() and run() are coroutines for a coroutine
+/// executor to await; a step never suspends inside (a process's step runs to its end on the
+/// calling thread), so sync_step() and sync_run() step without making a coroutine frame.
 ///
 /// Implements scheduler_base — the intrinsic-facing surface — so the DSL
 /// intrinsics (spawn/sleep/msg-send/msg-recv/self/ps/kill/pause/resume + the
@@ -53,17 +57,22 @@ public:
 
   // --- Stepping (coroutines) ---
 
-  /// Execute one step as a coroutine.
+  /// Execute one step as a coroutine (the same step as sync_step()).
   task<int> step();
 
   /// Run until all done or limits.
   task<std::unordered_map<int, value_t>> run(std::optional<uint64_t> max_steps = std::nullopt,
                                              std::optional<double> max_time = std::nullopt);
 
-  /// Blocking wrappers.
+  /// Blocking wrappers: the same steps, with no coroutine frame.
   int sync_step();
   std::unordered_map<int, value_t> sync_run(std::optional<uint64_t> max_steps = std::nullopt,
                                             std::optional<double> max_time = std::nullopt);
+  /// sync_run() without collecting the results: for a host that pumps the scheduler and reads
+  /// the results it needs (get_result) or none, so a run doesn't cost a map entry for every
+  /// finished process not yet reaped. Returns the steps it took.
+  uint64_t sync_run_steps(std::optional<uint64_t> max_steps = std::nullopt,
+                          std::optional<double> max_time = std::nullopt);
 
   void stop();
   bool is_running() const { return running_; }
@@ -112,6 +121,27 @@ public:
   /// threads must use this, only the scheduler thread may call deliver_to_receivers.
   void post_message(const std::string &path, const value_t &msg);
 
+  /// Block the calling (scheduler) thread until there is work for the next drain_ingress() and
+  /// run: a post_message() or a settled async call (from any thread), a sleeper's or a timed
+  /// wait's deadline, an async call's registration timeout, the next charge of a call whose
+  /// process has a step or time limit (every millisecond while one runs: the charge may find
+  /// the limit reached, docs/STATE_EXEC_EXCEPTIONS.md 3.8), or `deadline`, whichever comes
+  /// first. Returns at once when a process is ready or such work is already waiting. True when
+  /// there is work; false when `deadline` passed with none. Processes parked until the next
+  /// frame (yield_frame) are the driver's to wake (wake_awaiting): they don't end the wait (see
+  /// awaiting_frame_count()). A call's timeout and charges count only while its process still
+  /// runs: a call whose process ended without awaiting it (an abandoned future) is no drain's
+  /// to time out or charge, so it doesn't end the wait, and a NaN or infinite timeout never
+  /// does. A sleeper's or a timed wait's deadline is kept to well under a millisecond, which on
+  /// Windows costs up to ~0.6 ms of spinning at its end, at above-normal priority for a thread
+  /// at normal (detail::wakeup); the other deadlines may be met up to ~0.5 ms late, burning no
+  /// CPU. The wait never ends before a deadline on the steady clock.
+  bool wait_for_work(std::chrono::steady_clock::time_point deadline);
+  /// wait_for_work() for at most `seconds` (infinity: no deadline of its own).
+  bool wait_for_work(double seconds);
+  /// Processes parked until the next frame (yield_frame), which the next wake_awaiting() readies.
+  std::size_t awaiting_frame_count() const { return procs_.awaiting_count(); }
+
   /// Apply any queued post_message() deliveries NOW, on the calling (scheduler) thread.
   /// step() calls this, but a driver must ALSO call it before a run whose has_runnable()
   /// gate would otherwise be false — a delivery can READY a parked receiver, and
@@ -132,12 +162,21 @@ public:
   /// Async calls tracked and not yet finished.
   std::size_t async_calls_in_flight() const { return async_calls_.size(); }
 
+  /// The steps a CPU millisecond of `proc`'s async calls is charged: its own
+  /// execute_options::async_steps_per_cpu_ms, else limits.async_steps_per_cpu_ms from the tree
+  /// (async_steps_per_cpu_ms_from_state). The tree's value is read again only once something
+  /// under the watch root changed since it was last read, so a change applies to the next charge
+  /// while a quiet tree costs no read.
+
   double async_steps_per_cpu_ms(const process &proc) override;
 
   /// A unique identifier for this scheduler, the key under `state_exec.schedulers.<id>` its
   /// live settings are read from (limits.async_steps_per_cpu_ms) and the effective values
   /// published to (`effective.*`). Empty: the defaults only, nothing published.
-  void set_id(const std::string &id) { id_ = id; }
+  void set_id(const std::string &id) {
+    id_ = id;
+    rate_valid_ = false; // the id decides which limits.async_steps_per_cpu_ms applies
+  }
   const std::string &id() const { return id_; }
 
   /// Adopt a process decoded from a snapshot (decode_process): it gets a new pid and is ready,
@@ -189,13 +228,15 @@ public:
 
   scheduling_policy policy() const { return policy_; }
   const memory_tracker &mem_tracker() const { return mem_tracker_; }
-  int process_count() const { return static_cast<int>(processes_.size()); }
+  int process_count() const { return static_cast<int>(procs_.size()); }
   bool has_runnable() const;
 
   /// PID / process pointer of the process currently being stepped (-1 / nullptr
   /// if none).  Set around evaluator_.step() so intrinsics can query `self`.
   int current_pid() const override { return current_pid_; }
-  const process_ptr &current_process() const override { return current_proc_; }
+  const process_ptr &current_process() const override {
+    return current_proc_ ? *current_proc_ : no_process();
+  }
 
   void queue_watch_event(int pid, process::watch_event evt);
 
@@ -203,12 +244,15 @@ public:
                               const std::string &path) override;
   void unregister_watch_handler(int pid, int watch_id) override;
 
-  void set_watch_root(cvc::state *root) override { watch_root_ = root; }
+  void set_watch_root(cvc::state *root) override;
 
   /// This scheduler's built-in parser settings: what a submitted script is parsed with when the
   /// watch root's `state_exec.defaults.parser.*` keys don't say otherwise. parse_options{} (parse
   /// at submit) unless the host sets it.
-  void set_parser_defaults(const parse_options &defaults) { parser_defaults_ = defaults; }
+  void set_parser_defaults(const parse_options &defaults) {
+    parser_defaults_ = defaults;
+    submit_valid_ = false;
+  }
   const parse_options &parser_defaults() const { return parser_defaults_; }
 
   /// The parser defaults libcvc's own hosts give their async schedulers, so a script behaves the
@@ -227,7 +271,10 @@ public:
   /// This scheduler's built-in deep-data settings: what a submitted process runs with when the
   /// watch root's `state_exec.defaults.data.*` keys don't say otherwise. data_options{} (no
   /// slicing) unless the host sets it.
-  void set_data_defaults(const data_options &defaults) { data_defaults_ = defaults; }
+  void set_data_defaults(const data_options &defaults) {
+    data_defaults_ = defaults;
+    submit_valid_ = false;
+  }
   const data_options &data_defaults() const { return data_defaults_; }
 
   /// The deep-data settings a process submitted now gets: the watch root's keys over
@@ -262,18 +309,56 @@ private:
 
   int current_pid_ = -1;
   uint32_t cycle_check_ = 0; // steps, for checking every 64th whether a cycle collection is due
-  process_ptr current_proc_;
+  const process_ptr *current_proc_ = nullptr; // the stepping process's entry in procs_
+  int reap_after_step_ = -1; // reaped while it stepped: erased once the step is over
 
-  // The scheduled evaluator IS the async_stackless_evaluator (roadmap §8.12): a coroutine
-  // wrapper whose step() yields a suspend_point, so the scheduler's task<> step chain can
-  // interleave processes cooperatively when driven from a coroutine executor.
+  // The scheduled evaluator IS the async_stackless_evaluator (roadmap §8.12). Its step never
+  // suspends, so the scheduler calls its step_now() directly (no coroutine frame per step).
   async_stackless_evaluator evaluator_;
   memory_tracker mem_tracker_;
   cvc::state *watch_root_ = nullptr;
   parse_options parser_defaults_;
   data_options data_defaults_;
 
-  std::unordered_map<int, process_ptr> processes_;
+  /// Every process by pid (finished ones until reaped), its run queue, timers and waiters.
+  detail::process_table procs_;
+
+  /// A steady_clock reading the next step may start from (see scheduler.h).
+  using clock = std::chrono::steady_clock;
+  clock::time_point chain_now_{};
+  bool chain_valid_ = false;
+  double chain_cpu_ = -1.0;
+  clock::time_point now_for_step();
+
+  /// Counts tree changes under watch_root_ while processes have watches or async calls are in
+  /// flight: poll_watches() reads the watched nodes, and async_steps_per_cpu_ms() the rate, only
+  /// once the count moved.
+  detail::tree_changes tree_changes_;
+  uint64_t watch_seen_ = 0;
+  uint64_t rate_seen_ = 0;
+  bool rate_valid_ = false;
+  double rate_ = kDefaultAsyncStepsPerCpuMs;
+  void track_tree_changes();
+  double tree_rate();
+
+  /// What a submission reads from the tree (the allocation limit, the heap check, the parser
+  /// and deep-data settings), read again only when settings_changes_ moved.
+  struct submit_settings {
+    uint64_t max_alloc_bytes = kDefaultMaxAllocBytes;
+    std::size_t heap_check_steps = 0;
+    parse_options parse;
+    std::size_t data_step_nodes = 0;
+  };
+  detail::settings_changes settings_changes_;
+  submit_settings submit_;
+  uint64_t submit_seen_ = 0;
+  bool submit_valid_ = false;
+  const submit_settings &settings_for_submit();
+
+  std::vector<process *> woken_; // reused by the waiter wakes
+  std::vector<int> charged_;     // the pids charge_async_calls charged (reused)
+
+  static const process_ptr &no_process();
 
   /// Per-path FIFO for messages sent when no receiver is waiting (mirrors sync scheduler).
   std::unordered_map<std::string, std::queue<value_t>> pending_messages_;
@@ -283,26 +368,53 @@ private:
   std::mutex ingress_mutex_;
   std::vector<std::pair<std::string, value_t>> ingress_;
   std::vector<std::shared_ptr<async_call>> completions_; // settled calls, guarded likewise
+  /// Set (under ingress_mutex_) while ingress_ or completions_ holds something, so a drain finds
+  /// an empty ingress without the lock.
+  std::atomic<bool> ingress_pending_{false};
+  /// A wait_for_work() is (about to be) blocked: a post notifies wakeup_.
+  std::atomic<bool> idle_waiting_{false};
+  std::unique_ptr<detail::wakeup> wakeup_;
+  // Notify a wait_for_work() in progress (any thread, after ingress_pending_ is set).
+  void notify_work();
 
   /// The async calls in flight (scheduler thread only).
   std::vector<std::shared_ptr<async_call>> async_calls_;
   // A settled call: its final charge, then wake who waits for it.
   void finish_async_call(const std::shared_ptr<async_call> &call);
   // Charge the calls still running, time them out, kill the processes past their budget.
-  void charge_async_calls();
+  void charge_async_calls(clock::time_point now);
+  // When a drain next has work for the calls in flight (a timeout, a charge that may hit a
+  // limit), or nullopt (wait_for_work).
+  std::optional<clock::time_point> next_call_charge(clock::time_point now) const;
+  // charge_async_calls from the `i`th call on, over a copy of the list (a timeout changes it),
+  // at the tree's rate `tree` as read before the walk.
+  void charge_async_calls_from(std::size_t i, clock::time_point now, std::optional<double> tree);
+  // The tree's rate for the walk, read before it when a started call needs it (else nullopt).
+  std::optional<double> tree_rate_for_calls();
+  // The rate a call is charged at in the walk: its process's own, else `tree`; nullopt when the
+  // call isn't started, or needs the tree's and it wasn't read.
+  static std::optional<double> walk_rate(const process &proc, const async_call &call,
+                                         std::optional<double> tree);
+  // Check the processes the walk charged against their limits.
+  void check_charged(clock::time_point now);
   // Cancel and drop the calls of `pid` (killed or reaped).
   void cancel_async_calls(int pid);
   // Resume the processes waiting on `channel` in the await_call phase.
   void wake_async_waiters(const std::string &channel);
 
-  process_ptr select_process();
-  void execute_process_step(process &proc);
+  const process_ptr *select_process();
+  // One step of the run loop (sync_step() and step() start a fresh clock chain).
+  int step_once();
+  // What a step does before picking a process: the ingress, the calls, the due timers.
+  void drain(bool in_step);
+  uint64_t run_loop(std::optional<uint64_t> max_steps, std::optional<double> max_time);
+  void execute_process_step(const process_ptr &pp);
   void handle_signal(process &proc);
   void handle_watch_event(process &proc);
   void restore_from_signal(process &proc);
   void poll_watches();
-  void wake_sleeping_processes();
   void check_limits(process &proc);
+  void check_limits(process &proc, clock::time_point now);
   void terminate_process(process &proc, value_t result);
   void kill_process(process &proc, const std::string &reason);
   // End a process `failed` with the exception it didn't catch (docs/STATE_EXEC_EXCEPTIONS.md 2.6).

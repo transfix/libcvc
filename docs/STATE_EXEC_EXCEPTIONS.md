@@ -466,9 +466,10 @@ limits what that process can make the app do for it.
   chunks it runs for the kernel (a thread-local), and each chunk adds its thread's CPU time.
 - **Steps:** the CPU time converted at `limits.async_steps_per_cpu_ms` steps per CPU
   millisecond, at least one step per call.
-  - The rate is a state-tree setting, read live: the host reads it at every charge, so a
-    change applies to the next charge, including calls already running, with no
-    `load_settings()` or resubmission. The first of these that is set wins:
+  - The rate is a state-tree setting, read live: a change applies to the next charge, including
+    calls already running, with no `load_settings()` or resubmission (the schedulers read the
+    tree again only once something under it changed, so a quiet tree isn't walked at each
+    charge). The first of these that is set wins:
     1. the process's own override, `execute_options::async_steps_per_cpu_ms` (unset by
        default);
     2. `state_exec.schedulers.<id>.limits.async_steps_per_cpu_ms`;
@@ -655,6 +656,11 @@ delivers as the host, not the kernel. The state tree isn't checked: Ariadne's `f
 - `async_scheduler::drain_ingress()` takes completions, charges the calls still running, applies
   registration timeouts, kills at the limits, and wakes due sleepers and timed waits, so a driver
   that only drains while nothing is runnable (pycvc's `Exec`) keeps budgets and timeouts current.
+  A driver that idles in `async_scheduler::wait_for_work()` between drains does too: the wait
+  ends at a call's registration timeout, and every millisecond while a call runs for a process
+  with a step or time limit, for the charge that may find it reached. Both count only for a
+  process still running: a call whose process ended without awaiting it is neither timed out
+  nor charged by a drain, so it doesn't end the wait.
 - The effective rate is published at `state_exec.schedulers.<id>.effective.async_steps_per_cpu_ms`,
   not at the scheduler's `limits.` key: that one is an input with precedence over the defaults,
   so writing the effective value there would pin it and break the live reading. The async
