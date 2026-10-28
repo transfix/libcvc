@@ -295,6 +295,7 @@ private:
   bool running_ = false;
   bool stop_requested_ = false;
   uint64_t total_steps_ = 0;
+  uint64_t priority_clamped_ = 0; // spawns clamped to the spawner's floor (note_priority_clamped)
   int current_pid_ = -1;
   const process_ptr *current_proc_ = nullptr; // the stepping process's entry in procs_
   int reap_after_step_ = -1; // reaped while it stepped: erased once the step is over

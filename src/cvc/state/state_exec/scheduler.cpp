@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/builtins.h>
+#include <cvc/state/state_exec/detail/priority.h>
 #include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/scheduler.h>
 #include <cvc/state/state_exec/state_value_codec.h> // snapshot / restore
@@ -1139,6 +1140,8 @@ int scheduler::fork(int pid) {
   child->gid = parent.gid;
   child->root_path = parent.root_path;
   child->owner = parent.owner; // td B28: a host reaps the child with its parent (kill_owner)
+  child->priority_floor = parent.priority_floor; // design 7.2: fork copies the floor
+  child->priority_floor_explicit = parent.priority_floor_explicit;
   child->max_steps = parent.max_steps;
   child->max_time = parent.max_time;
   child->max_memory = parent.max_memory;
@@ -1191,22 +1194,53 @@ bool scheduler::set_priority(int pid, int priority) {
 }
 
 // ---------------------------------------------------------------------------
-// Priorities (docs/STATE_EXEC_LOCKS.md 7.4): declared now, built in phase L2
+// Priorities (docs/STATE_EXEC_LOCKS.md 7.4)
 // ---------------------------------------------------------------------------
+
+namespace {
+// The effective priority get-priority and inspect report: the one the pick uses, which under
+// round_robin is the base (design 7.1).
+int reported_effective(const process &p, scheduling_policy policy) {
+  return policy == scheduling_policy::round_robin ? p.priority : p.effective_priority();
+}
+
+// The descent walk's lookup (design 7.2): a live process of `procs`.
+std::function<const process *(int)> live_in(const detail::process_table &procs) {
+  return [&procs](int pid) -> const process * {
+    const process *p = procs.find(pid);
+    return p && !is_finished(p->status) ? p : nullptr;
+  };
+}
+} // namespace
 
 std::optional<priority_info> scheduler::get_priority(int pid) const {
   const process *p = procs_.find(pid);
   if (!p)
     return std::nullopt;
-  return priority_info{p->priority,
-                       policy_ == scheduling_policy::round_robin ? p->priority
-                                                                 : p->effective_priority(),
-                       p->priority_floor.value_or(p->priority), policy_};
+  return priority_info{p->priority, reported_effective(*p, policy_), detail::floor_of(*p), policy_};
 }
 
-priority_change scheduler::set_priority_checked(int, int, int) { return priority_change::unknown; }
+priority_change scheduler::set_priority_checked(int caller_pid, int pid, int priority) {
+  const process *caller = procs_.find(caller_pid);
+  const process *target = procs_.find(pid);
+  if (!caller || !target)
+    return priority_change::unknown;
+  const priority_change r =
+      detail::check_priority_change(*caller, *target, priority, live_in(procs_));
+  if (r == priority_change::applied)
+    set_priority(pid, priority);
+  return r;
+}
 
-std::optional<priority_info> scheduler::get_priority_as(int, int) const { return std::nullopt; }
+std::optional<priority_info> scheduler::get_priority_as(int caller_pid, int pid) const {
+  if (caller_pid != pid) { // a caller's own pid is always visible to it
+    const process *caller = procs_.find(caller_pid);
+    const process *target = procs_.find(pid);
+    if (!caller || !target || !detail::visible_to(*caller, *target, live_in(procs_)))
+      return std::nullopt;
+  }
+  return get_priority(pid);
+}
 
 bool scheduler::set_priority_floor(int pid, int floor) {
   process *p = procs_.find(pid);
@@ -1217,7 +1251,10 @@ bool scheduler::set_priority_floor(int pid, int floor) {
   return true;
 }
 
-void scheduler::note_priority_clamped() {}
+void scheduler::note_priority_clamped() {
+  // The count is the record: state_exec has no log sink to tell once (gap G-5).
+  ++priority_clamped_;
+}
 
 bool scheduler::post_control(int, control_cmd) { return false; }
 
@@ -1291,6 +1328,8 @@ process_info scheduler::make_info(const process &proc) const {
   info.exit_error = proc.exit_error;
   info.exit_exception = proc.exit_exception;
   info.locks_held = proc.locks ? proc.locks->holds.size() : 0;
+  info.effective_priority = reported_effective(proc, policy_);
+  info.priority_floor = detail::floor_of(proc);
   if (proc.status == process_status::waiting) {
     if (proc.lock_waiting)
       info.waiting_on = "lock /" + detail::lock_home::waiting_key(proc);
@@ -1380,6 +1419,7 @@ scheduler_stats scheduler::get_stats() const {
   scheduler_stats s;
   s.total_processes = static_cast<int>(procs_.size());
   s.total_steps = total_steps_;
+  s.priority_clamped = priority_clamped_;
   for (const auto &[pid, proc] : procs_.all()) {
     switch (proc->status) {
     case process_status::running:
