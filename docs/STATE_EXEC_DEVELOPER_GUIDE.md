@@ -1180,7 +1180,7 @@ work (`docs/STATE_EXEC_EXCEPTIONS.md` 3.8):
   first half of `max_time`, and its **CPU time** (its thread's, plus its
   `computePool().parallel_for` chunks') toward the second.
 - **Steps:** the CPU time at `limits.async_steps_per_cpu_ms` steps per CPU
-  millisecond (default 2000; at least one step per call), against `max_steps`.
+  millisecond (default 5000; at least one step per call), against `max_steps`.
   The rate is read live; the first of these that is set wins:
   `execute_options::async_steps_per_cpu_ms`,
   `state_exec.schedulers.<id>.limits.async_steps_per_cpu_ms`,

@@ -137,8 +137,8 @@ default.
 
 The step and time caps cover the action's async calls (§10.1; developer guide, "Async
 Functions"): a call's run time and CPU time count against the time cap, and its CPU time as steps
-at `limits.async_steps_per_cpu_ms` (2000 per CPU millisecond by default). At that rate the
-5000-step cap is 2.5 ms of a kernel's CPU, so a host whose documents call CPU-heavy async verbs
+at `limits.async_steps_per_cpu_ms` (5000 per CPU millisecond by default). At that rate the
+5000-step cap is 1 ms of a kernel's CPU, so a host whose documents call CPU-heavy async verbs
 raises the caps. An action that runs out is killed, and the kernel sees `cancelled()`.
 
 The memory budget covers the action's state-tree writes and its

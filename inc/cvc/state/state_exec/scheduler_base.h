@@ -210,11 +210,13 @@ public:
   virtual double async_steps_per_cpu_ms(const process &proc) = 0;
 };
 
-/// limits.async_steps_per_cpu_ms when nothing sets it: what the steps cost, a step being about
-/// 0.4 to 0.45 CPU microseconds on the async scheduler and 0.26 to 0.3 on the sync one (a loop of
-/// arithmetic, DSL function calls, list and dict work; MSVC Release, x64, 2026-10-24: the
-/// StepCostSetsTheDefaultRate case of state_exec_async_calls_test), rounded down.
-inline constexpr double kDefaultAsyncStepsPerCpuMs = 2000.0;
+/// limits.async_steps_per_cpu_ms when nothing sets it: what a step costs, at the slow end. Since
+/// #843's cheaper steps, the async scheduler runs 4,960 to 10,700 steps per CPU millisecond and
+/// the sync one 5,390 to 10,550 (a loop of arithmetic, DSL function calls, list and dict work:
+/// the StepCostSetsTheDefaultRate case of state_exec_async_calls_test; MSVC Release x64 on a
+/// loaded 22-thread box, and CI's Windows and macOS Release runners, 2026-10-28). P3's 2000
+/// rounded down the async scheduler's 2,200 to 2,500 then.
+inline constexpr double kDefaultAsyncStepsPerCpuMs = 5000.0;
 
 /// limits.async_steps_per_cpu_ms from the state tree under `root`:
 /// `state_exec.schedulers.<scheduler_id>.limits.async_steps_per_cpu_ms` (when scheduler_id is
