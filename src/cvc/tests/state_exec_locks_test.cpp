@@ -3365,3 +3365,93 @@ TEST(LockHome, WaitExpiredTakesFlagged) {
   hw.check();
   EXPECT_TRUE(hw.mgr->table().empty());
 }
+
+// ---------------------------------------------------------------------------
+// The L1 reviews' findings, as tests (the fixes are the lead's, on perf/locks-l1)
+// ---------------------------------------------------------------------------
+
+// Finding 4: a '/' key found in the home's key cache still obeys the requester's channel policy.
+// An unrestricted program caches "/jobs" first; a program under a policy that doesn't declare it
+// is refused all the same.
+TEST_P(Locks, LK11b_CachedGlobalKeyStillNeedsPolicy) {
+  GTEST_SKIP() << "known: review finding 4, a key-cache hit skips check_global (the lead's fix, "
+                  "perf/locks-l1); fails today: the cached /jobs is granted";
+  EXPECT_EQ(as_int(w.run(R"((with-lock "/jobs" 1))")), 1); // cached now
+  channel_policy &pol = w.policies.emplace_back();
+  pol.enforce = true;
+  pol.global = {"shared"};
+  EXPECT_EQ(as_str(w.run(R"((try (with-lock "/jobs" 2) (catch (PermissionError e) "denied")))",
+                         {.policy = &pol})),
+            "denied");
+  EXPECT_TRUE(w.mgr->table().empty());
+}
+
+// Finding 3: KEY is evaluated before :timeout, so a :timeout symbol is read after a KEY call ran.
+TEST_P(Locks, LK14c_TimeoutReadAfterKey) {
+  GTEST_SKIP() << "known: review finding 3, :timeout's symbol is read before a KEY call runs (the "
+                  "lead's fix, perf/locks-l1); fails today with NameError t";
+  EXPECT_EQ(as_int(w.run(R"((with-lock (begin (set t 0.5) "k") :timeout t 1))")), 1);
+}
+
+// Finding 1: a lock frame restored while its KEY call was being evaluated (its lock form decoded
+// as nil) takes the restoring environment's lock form, or refuses with LockError("restore"); and
+// one restored with a failed outcome raises it (or the same refusal). Never a null lock form.
+TEST_P(Locks, LW07c_RestoredLockFramesOutsideTheWait) {
+  GTEST_SKIP() << "known: review finding 1, a restored lock frame's nil lock form is dereferenced "
+                  "(the lead's fix, perf/locks-l1); today an access violation";
+  {
+    const int p = w.submit(R"((try (with-lock (begin (msg-recv "key.go") "k") (+ 1 0))
+                      (catch (LockError e) (get-attr e "reason"))))");
+    ASSERT_TRUE(w.step_until([&] { return w.parked(p); }));
+    cvc::state &node = w.tree("snap.key");
+    ASSERT_TRUE(w.snapshot(p, node));
+    const int r = w.restore(node, w.envs.at(p));
+    w.kill(p);
+    ASSERT_TRUE(w.step_until([&] { return w.parked(r); }));
+    w.send("key.go");
+    ASSERT_TRUE(w.step_until([&] { return w.finished(r); }));
+    const std::string out = to_string(w.result(r));
+    EXPECT_TRUE(out == "1" || out == R"("restore")") << out;
+  }
+  {
+    const int h = w.holder("\"k\"", "", "H");
+    const int p = w.submit(R"((try (with-lock "k" :timeout 0.1 1)
+                                 (catch (TimeoutError e) "timeout")
+                                 (catch (LockError e) (get-attr e "reason"))))");
+    ASSERT_TRUE(w.step_until([&] { return w.lock_waiting(p); }));
+    ASSERT_TRUE(w.step_until([&] { return !w.lock_waiting(p); })); // timed out, not stepped
+    cvc::state &node = w.tree("snap.failed");
+    ASSERT_TRUE(w.snapshot(p, node));
+    const int r = w.restore(node, w.envs.at(p));
+    ASSERT_TRUE(w.step_until([&] { return w.finished(r) && w.finished(p); }));
+    const std::string out = to_string(w.result(r));
+    EXPECT_TRUE(out == R"("timeout")" || out == R"("restore")") << out;
+    EXPECT_EQ(as_str(w.result(p)), "timeout");
+    w.release(h);
+    ASSERT_TRUE(w.step_until([&] { return w.finished(h); }));
+  }
+  EXPECT_TRUE(w.mgr->table().empty());
+}
+
+// Finding 2: a restored wait obeys the restoring context: where lock waits are not allowed (as
+// in Ariadne's init lane), the busy request raises TimeoutError at once instead of queueing.
+TEST_P(Locks, LW07d_RestoredWaitObeysTheRestoringContext) {
+  GTEST_SKIP() << "known: review finding 2, a restored wait ignores the restoring context's "
+                  "lock_wait_allowed (the lead's fix, perf/locks-l1); today it queues";
+  const int h = w.holder("\"k\"", "", "H");
+  const int q = w.submit(R"((try (with-lock "k" 1) (catch (TimeoutError e) "timeout")))");
+  ASSERT_TRUE(w.step_until([&] { return w.lock_waiting(q); }));
+  cvc::state &node = w.tree("snap.q");
+  ASSERT_TRUE(w.snapshot(q, node));
+  checked_world::submit_options so;
+  so.lock_wait_allowed = false;
+  const int r = w.restore(node, w.natives(so));
+  ASSERT_TRUE(w.step_until([&] { return w.finished(r) || w.lock_waiting(r); }));
+  EXPECT_TRUE(w.finished(r)) << "the restored wait queued where waits are not allowed";
+  if (w.finished(r))
+    EXPECT_EQ(as_str(w.result(r)), "timeout");
+  w.kill(r);
+  w.release(h);
+  ASSERT_TRUE(w.step_until([&] { return w.all_finished({h, q}); }));
+  EXPECT_TRUE(w.mgr->table().empty());
+}
