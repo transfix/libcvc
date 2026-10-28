@@ -3504,7 +3504,7 @@ TEST(AriadneAsyncFn, ActionCapsAreTreeSettingsAndChargeAsyncCalls) {
   namespace se = cvc::state_exec;
   cvc::app app;
   app.exec_async_host();
-  // About 20 ms of CPU: some 100,000 steps at the default rate, far over the default 5000.
+  // About 20 ms of CPU: some 40,000 steps at the default rate, far over the default 5000.
   register_action_intrinsics(
       [&app](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
         se::register_async_fn(env, app.exec_async_host(), "spin",

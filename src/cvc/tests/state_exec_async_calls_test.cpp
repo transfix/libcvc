@@ -771,9 +771,8 @@ TEST(AsyncCalls, AS18_AS26_ACpuBoundCallsCharges) {
     EXPECT_GE(i.async_cpu_time, 0.19);
     EXPECT_LT(i.async_cpu_time, 0.4);
     EXPECT_GE(i.async_time, i.async_cpu_time - 0.02);
-    // 0.2 CPU s at the default rate, kDefaultAsyncStepsPerCpuMs steps per CPU ms
-    EXPECT_GE(i.async_steps, uint64_t(180 * kDefaultAsyncStepsPerCpuMs));
-    EXPECT_LT(i.async_steps, uint64_t(400 * kDefaultAsyncStepsPerCpuMs));
+    EXPECT_GE(i.async_steps, 360000u); // 0.2 CPU s at the default 2000 steps per CPU ms
+    EXPECT_LT(i.async_steps, 800000u);
     EXPECT_GE(i.step_count, i.async_steps); // they count in step_count
     EXPECT_GE(i.elapsed_time, i.async_time - 1e-3);
   });
@@ -827,7 +826,7 @@ TEST(AsyncCalls, AS21_AS29_ASleepingCallIsChargedItsRunTimeButNoCpu) {
     EXPECT_GE(i.elapsed_time, 0.19); // charged to max_time's first half
     EXPECT_LT(i.async_cpu_time, 0.03);
     EXPECT_GE(i.async_steps, 1u);
-    EXPECT_LT(i.async_steps, uint64_t(30 * kDefaultAsyncStepsPerCpuMs)); // 0.03 CPU s at most
+    EXPECT_LT(i.async_steps, 60000u);
   });
 }
 
@@ -894,9 +893,8 @@ TEST(AsyncCalls, AS27_TheStepRateIsReadAtEveryCharge) {
     const value_t v = parse(o.value);
     const auto &l = *std::get<list_ptr>(v.v);
     const int64_t first = std::get<int64_t>(l[0].v), second = std::get<int64_t>(l[1].v);
-    // 50 CPU ms at the default rate, kDefaultAsyncStepsPerCpuMs steps per CPU ms
-    EXPECT_GE(first, int64_t(40 * kDefaultAsyncStepsPerCpuMs));
-    EXPECT_LT(first, int64_t(100 * kDefaultAsyncStepsPerCpuMs));
+    EXPECT_GE(first, 80000); // 50 CPU ms at the default 2000 steps per CPU ms
+    EXPECT_LT(first, 200000);
     EXPECT_EQ(second, 1);
   });
 }
