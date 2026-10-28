@@ -90,6 +90,12 @@ int async_scheduler::execute(const std::string &script, const execute_options &o
   proc.gid = opts.gid;
   proc.root_path = opts.root_path;
   proc.owner = opts.owner;
+  // The floor (design 7.2): a host's, explicit, or the submit priority; and what the process
+  // keeps alive (a spawned child's context, td 4.15).
+  proc.priority_floor = opts.priority_floor.value_or(opts.priority);
+  proc.priority_floor_explicit = opts.priority_floor.has_value();
+  proc.parent_pid = opts.parent_pid;
+  proc.keep_alive = opts.keep_alive;
   proc.max_steps = opts.max_steps;
   proc.max_time = opts.max_time;
   proc.max_step_time = opts.max_step_time;
@@ -125,6 +131,12 @@ int async_scheduler::execute(const value_t &expr, const execute_options &opts) {
   proc.gid = opts.gid;
   proc.root_path = opts.root_path;
   proc.owner = opts.owner;
+  // The floor (design 7.2): a host's, explicit, or the submit priority; and what the process
+  // keeps alive (a spawned child's context, td 4.15).
+  proc.priority_floor = opts.priority_floor.value_or(opts.priority);
+  proc.priority_floor_explicit = opts.priority_floor.has_value();
+  proc.parent_pid = opts.parent_pid;
+  proc.keep_alive = opts.keep_alive;
   proc.max_steps = opts.max_steps;
   proc.max_time = opts.max_time;
   proc.max_step_time = opts.max_step_time;
@@ -1343,6 +1355,41 @@ bool async_scheduler::set_priority(int pid, int priority) {
     home_->set_base(*it->second); // the manager's mirror of the base (protocol 5.8, I8)
   return true;
 }
+
+// ---------------------------------------------------------------------------
+// Priorities (docs/STATE_EXEC_LOCKS.md 7.4): declared now, built in phase L2
+// ---------------------------------------------------------------------------
+
+std::optional<priority_info> async_scheduler::get_priority(int pid) const {
+  const process *p = procs_.find(pid);
+  if (!p)
+    return std::nullopt;
+  return priority_info{p->priority,
+                       policy_ == scheduling_policy::round_robin ? p->priority
+                                                                 : p->effective_priority(),
+                       p->priority_floor.value_or(p->priority), policy_};
+}
+
+priority_change async_scheduler::set_priority_checked(int, int, int) {
+  return priority_change::unknown;
+}
+
+std::optional<priority_info> async_scheduler::get_priority_as(int, int) const {
+  return std::nullopt;
+}
+
+bool async_scheduler::set_priority_floor(int pid, int floor) {
+  process *p = procs_.find(pid);
+  if (!p)
+    return false;
+  p->priority_floor = floor;
+  p->priority_floor_explicit = true;
+  return true;
+}
+
+void async_scheduler::note_priority_clamped() {}
+
+bool async_scheduler::post_control(int, control_cmd) { return false; }
 
 bool async_scheduler::set_max_steps(int pid, uint64_t max_steps) {
   auto it = procs_.all().find(pid);

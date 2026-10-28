@@ -138,6 +138,15 @@ private:
   std::unordered_map<std::string, entry> slots_;
 };
 
+struct intrinsics_context;
+
+/// A spawned child's environment and the context its intrinsics use, which the child's process
+/// keeps alive (td 4.15).
+struct spawn_setup {
+  environment_ptr env;
+  std::shared_ptr<void> context;
+};
+
 struct intrinsics_context {
   scheduler_base *sched = nullptr;   // Non-owning; outlives context (sync or async scheduler)
   cvc::state *root = nullptr;        // Non-owning; app-scoped lifetime
@@ -164,6 +173,10 @@ struct intrinsics_context {
   // request is as :timeout 0, as Ariadne's init lane wants).
   std::optional<double> lock_default_timeout;
   bool lock_wait_allowed = true;
+
+  /// How a child spawned from this context is set up (td 4.15): its environment and context. Unset:
+  /// the child gets the bare builtins, as before.
+  std::function<spawn_setup(const intrinsics_context &parent)> spawn_context;
 };
 
 /// Register all DSL intrinsics into an environment.
@@ -172,6 +185,15 @@ struct intrinsics_context {
 /// that uses the returned environment.  Typically, the scheduler creates one
 /// context per process and injects intrinsics before execution begins.
 void register_intrinsics(environment_ptr env, intrinsics_context *ctx);
+
+/// The spawn_context callback for a host that registers the plain intrinsics: each child gets a
+/// context copying the parent's (scheduler, root, chroot, identity, channel policy, document, lock
+/// fields and this callback, so grandchildren get one too) and `environment::extend(base)` with
+/// the intrinsics registered over it, then `after_register` (the host's own bindings). A null
+/// `base` is one default environment, made with the callback and shared by its children.
+std::function<spawn_setup(const intrinsics_context &)> make_spawn_context(
+    environment_ptr base = nullptr,
+    std::function<void(const environment_ptr &, intrinsics_context &)> after_register = {});
 
 /// Resolve `root_path` against `tree_root` and apply chroot to `ctx`.
 ///

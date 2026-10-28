@@ -1258,6 +1258,15 @@ void register_intrinsics(environment_ptr env, intrinsics_context *ctx) {
   detail::register_lock_intrinsics(env, ctx);
 }
 
+std::function<spawn_setup(const intrinsics_context &)> make_spawn_context(
+    environment_ptr base,
+    std::function<void(const environment_ptr &, intrinsics_context &)> after_register) {
+  // Built in phase L1b (locks plan L1b.1); until then children keep the bare builtins.
+  (void)base;
+  (void)after_register;
+  return {};
+}
+
 namespace detail {
 
 namespace {
