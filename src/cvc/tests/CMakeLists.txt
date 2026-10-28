@@ -85,6 +85,10 @@ add_executable(state_exec_async_test state_exec_async_test.cpp)
 add_executable(async_lane_test async_lane_test.cpp)
 add_executable(state_exec_scheduler_test state_exec_scheduler_test.cpp)
 add_executable(state_exec_locks_test state_exec_locks_test.cpp)
+# The lock manager's table: its directed cases (state_exec_lock_table_test.cpp) and the model check
+# (state_exec_locks_model_test.cpp), one executable with two authors (locks plan L1.2, L1.3).
+add_executable(state_exec_locks_model_test state_exec_locks_model_test.cpp
+                                           state_exec_lock_table_test.cpp)
 add_executable(state_exec_intrinsics_test state_exec_intrinsics_test.cpp)
 add_executable(state_exec_coordinator_test state_exec_coordinator_test.cpp)
 add_executable(state_exec_bench_test state_exec_bench_test.cpp)
@@ -504,6 +508,7 @@ list(APPEND TEST_TARGETS
   async_lane_test
   state_exec_scheduler_test
   state_exec_locks_test
+  state_exec_locks_model_test
   state_exec_intrinsics_test
   state_exec_coordinator_test
   state_exec_bench_test
@@ -1686,6 +1691,13 @@ target_link_libraries(state_exec_locks_test
     GTest::gtest_main
 )
 
+target_link_libraries(state_exec_locks_model_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(state_exec_intrinsics_test
   PRIVATE
     cvc
@@ -2275,6 +2287,7 @@ target_compile_features(state_exec_async_test PRIVATE cxx_std_20)
 target_compile_features(async_lane_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_scheduler_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_locks_test PRIVATE cxx_std_20)
+target_compile_features(state_exec_locks_model_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_intrinsics_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_coordinator_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_bench_test PRIVATE cxx_std_20)
@@ -2772,6 +2785,7 @@ cvc_discover_tests(state_exec_async_test)
 cvc_discover_tests(async_lane_test)
 cvc_discover_tests(state_exec_scheduler_test)
 cvc_discover_tests(state_exec_locks_test)
+cvc_discover_tests(state_exec_locks_model_test)
 cvc_discover_tests(state_exec_intrinsics_test)
 cvc_discover_tests(state_exec_coordinator_test)
 cvc_discover_tests(state_exec_bench_test)

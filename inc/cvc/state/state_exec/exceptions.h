@@ -72,7 +72,7 @@ private:
 
 /// The built-in exception class named `name` (Exception, RuntimeError, TypeError, ValueError,
 /// NameError, KeyError, IndexError, ArithmeticError, MemoryError, ParseError, TimeoutError,
-/// NativeError, PythonError), or null.
+/// NativeError, PythonError, LockError, DeadlockError, PermissionError), or null.
 dict_ptr exception_class(std::string_view name);
 
 /// The built-in exception class names, parents before children.

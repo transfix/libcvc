@@ -163,6 +163,9 @@ All are bound in every default environment.
 | `TimeoutError` | `Exception` | an async call or `await` that ran past its timeout |
 | `NativeError` | `RuntimeError` | a C++ exception of any other type; `native_type` names it |
 | `PythonError` | `RuntimeError` | a Python exception from a registered Python function; `python_type` names it |
+| `LockError` | `RuntimeError` | a `with-lock` refused: `reason` is `"upgrade"`, `"handler"`, `"generator"`, `"fork"`, `"no process"`, `"cannot wait here"` or `"restore"`; `key` and `mode` name the request (docs/STATE_EXEC_LOCKS.md 4.1) |
+| `DeadlockError` | `LockError` | a `with-lock` whose wait would close a cycle; `cycle` lists its edges, `{pid key}` each |
+| `PermissionError` | `Exception` | a `/` lock key (app-global) where the channel policy doesn't allow it |
 
 Mapping a C++ exception thrown by a native function:
 - `cvc::state_exec::dsl_exception` carries a class already;
