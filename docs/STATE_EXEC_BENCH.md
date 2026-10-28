@@ -34,7 +34,8 @@ The executable lands in the build tree's `bin` directory: `build/bin` with the C
 # What is there, with default and smoke sizes:
 build/bin/state_exec_bench --list
 
-# Every scenario at tiny sizes, about 8 s; fails if any program returns the wrong thing:
+# Every scenario at tiny sizes, about 10-12 s (the lock.* scenarios about 3 s of it); fails if
+# any program returns the wrong thing:
 build/bin/state_exec_bench --smoke
 
 # A real run: a fresh process per scenario, 5 reps after 1 warmup, the driver pinned to a P-core:
@@ -52,8 +53,8 @@ python3 tools/bench/state_exec_bench.py compare base.jsonl cand.jsonl
 On Windows use `python` and the executable needs the cvcpkg DLLs on `PATH`. Run it from an
 environment that has them, or pass `--dll-dir` to the runner (repeatable). The runner puts the
 executable's own directory on `PATH` for you. A full default run (`--reps 1`) takes about
-15 minutes on the 22-thread machine this suite was written on; `--reps 5` about
-five times that.
+15 minutes on the 22-thread machine this suite was written on, and the `lock.*` scenarios add
+about 5 more (`lock.uncontended`'s 96 points most of it); `--reps 5` about five times that.
 
 ### Executable options
 
@@ -152,6 +153,28 @@ How the lock gates use these:
 
 `tools/bench/test_state_exec_bench.py` tests these rules on synthetic records. CTest runs it as
 `state_exec_bench_tool_test` when a Python 3 is found.
+
+### Gates in CTest
+
+The gates that count rather than time hold on any machine and under any load, so CTest runs them
+as `state_exec_bench_gates` (`src/cvc/tests/state_exec_bench_gates.cmake`, a `cmake -P` script):
+
+- `lock.uncontended --size n=2000` (one rep, no warmup, one timing round), then `gate --scenario
+  lock.uncontended --where form=single` on `extra.steps_per_lock --max 0` and on
+  `extra.allocs_per_lock --max 0`: an uncontended lock adds no step and no allocation over
+  `(begin ...)` (docs/STATE_EXEC_LOCKS.md 8.8), at every depth, mode, chroot and owner, on both
+  schedulers;
+- `sched.single.*` (one rep, no warmup), then `gate --metric steps_total --min N --max N` for
+  `sched.single.arith_loop` (n 40000) and `sched.single.tail_rec` (n 1000, 10000, 100000), the
+  same N on both schedulers. A deliberate change to one of these step counts updates the script
+  in the same commit, with the reason.
+
+Every command must exit 0. The test is registered where the tool test is (a working Python 3),
+and only for Release and RelWithDebInfo: MSVC's Debug STL allocates for its iterator debugging,
+so the allocation count is a Release number. With a single-config generator it exists only when
+`CMAKE_BUILD_TYPE` is one of the two, and `ctest` runs it only with `-C` naming it (CI passes
+`--build-config`): `ctest --test-dir build -C Release -R state_exec_bench_gates
+--output-on-failure`. It takes 30-40 s on the machine this was written on.
 
 ## Getting stable numbers
 
@@ -450,10 +473,14 @@ frames.
 `sched.single.*`, `flood.small` and `msg.*` have two more sweep keys, both at one value by default:
 
 - `policy`: the scheduler's policy. `rr` (round robin, the default), `priority` or `priority_rr`.
-- `locks`: which lock manager the scheduler gets. `none` (the default) is the scheduler every
-  existing suite builds. The state_exec lock phases add `private` and `shared`
-  (docs/STATE_EXEC_LOCKS.md, section 11). A build without them skips such a point and prints
-  `locks=X needs the lock manager`.
+- `locks`: which lock manager the scheduler gets (docs/STATE_EXEC_LOCKS.md 11.2). `none` (the
+  default) passes none: the scheduler every existing suite builds, which makes its private manager
+  and lock home only at its first lock request, so programs that never lock run as they did
+  before the locks. `private` gives the scheduler a single-mode manager of its own through
+  `set_lock_manager`, which attaches the home at once, so its points carry an attached home's
+  per-step costs (design 8.8). `shared` (a shared-mode manager) is phase L3's: this build skips
+  such a point and prints `locks=shared needs a lock manager this build lacks`, as it does for any
+  other value.
 
 Sweep them with `--size policy=rr,priority_rr` or `--size locks=none,private`, and compare the two
 sides of a sweep with `compare --pair` ("Runner options"). Records from binaries that predate the
@@ -714,6 +741,176 @@ refcounts on a shared AST, the global exception class tables and the allocator u
 (defuns with strings, floats, nesting and dict calls) `r` times. `extra.ns_per_byte` and
 `extra.mb_per_s`. No executor.
 
+### lock.* (sync, async)
+
+The state_exec locks (docs/STATE_EXEC_LOCKS.md, section 11.2). Every world these scenarios build
+gets a single-mode lock manager of its own through `set_lock_manager` before anything runs, as
+`locks=private` gives the scenarios that take the `locks` key, so no lock request pays for making
+the scheduler's lock home. Several scenarios time with natives they register (`bench-req`,
+`bench-got`, ...), which run on the driver thread. A wait or a section counts only when it began
+after the region did, so none of them carries the meter's probes at the region's start.
+
+#### lock.uncontended
+
+`(with-lock K (set s (+ s 1)))` in the arithmetic loop against `(begin (set s (+ s 1)))` in the
+same loop, by the `native.*` method: `rounds` (3) runs of each, alternated within every rep, each
+in a fresh world with its own manager, the fastest of each kept. The record is the fastest run with
+the lock. The sweep:
+
+- `depth` (1, 2, 4): K's segments as written (`k1`, `k1.k2`, `k1.k2.k3.k4`);
+- `mode`: `x` (no option: exclusive) or `s` (`:shared`);
+- `chroot`: 1 runs the process under the chroot `bench.doc` (`apply_chroot`), so the manager sees
+  `bench.doc.K` and every request resolves its scope;
+- `form`: `single`, the one-form body above, or `nested`: `(with-lock K (with-lock K (set s (+ s
+  1))))` against `(begin (begin (set s (+ s 1))))`. The inner section is covered by the outer
+  hold, so it never reaches the manager;
+- `owner`: the process's `execute_options::owner`, `short` (`""`) or `long` (40 characters, an
+  Ariadne owner's length, past `std::string`'s small buffer);
+- `threading`: `single` only. `shared` is phase L3's, and a point asking for it is skipped;
+- `n` (10000): sections per loop.
+
+Extras:
+
+- `ns_per_lock`: the two fastest walls' difference over n, per section (a nested section's two
+  forms count as one section);
+- `steps_per_lock`: the two runs' difference in steps over n;
+- `allocs_per_lock`: the driver's allocations in runs of n and 2n sections with the lock, less the
+  same difference with `begin`, over n: `((lock 2n - lock n) - (begin 2n - begin n)) / n`, from
+  `allocs_lock_n`, `allocs_lock_2n`, `allocs_begin_n` and `allocs_begin_2n`, which the record
+  keeps. These four runs come after the timed ones, so the evaluator's per-thread vector pools are
+  as warm in each run as in its pair. Every run makes its process's first lock and its key's
+  first use (the lock record, the key's cache entry and trie node) once, whatever its length, so
+  they cancel out of the difference: what is left is the steady state design 8.8 promises;
+- `baseline_wall_ns`, `baseline_steps`, `rounds`.
+
+Every run with the lock is checked: n grants, all on the fast path, no wait, nothing held at the
+end.
+
+The gates (design 11.2) are on the `form=single` points; the `form=nested` points are recorded.
+The two counts hold at every depth, mode, chroot, owner and executor, and CTest runs them ("Gates
+in CTest"). The time, at most 60 ns over `begin` for the flat key on the sync scheduler, needs a
+Release build and 5 reps or more:
+
+```sh
+python3 tools/bench/state_exec_bench.py gate run.jsonl --scenario lock.uncontended \
+    --where form=single --metric extra.steps_per_lock --max 0
+python3 tools/bench/state_exec_bench.py gate run.jsonl --scenario lock.uncontended \
+    --where form=single --metric extra.allocs_per_lock --max 0
+python3 tools/bench/state_exec_bench.py gate run.jsonl --scenario lock.uncontended \
+    --executor sync --where depth=1 --where chroot=0 --where form=single --where owner=short \
+    --metric extra.ns_per_lock --max 60 --max-noise 10
+```
+
+#### lock.handoff
+
+`p` (2, 8, 64) processes, each looping for ever on `(bench-req j)`, then
+`(with-lock "bench.h" (bench-got j) (sleep 0))`. The `(sleep 0)` parks the holder until the
+scheduler's next timer check, so the others queue behind it, and each release hands the lock to
+the waiter that queued first. After a warm-up of 2 x p grants the region runs until `per` (200) x p
+more (the drive checks between slices of 1000 steps, so a few more may land). Extras:
+
+- `handoffs`: grants in the region (also `iterations`, so `ns_per_iter` is per handoff), and
+  `handoffs_per_s`;
+- `grants_min`, `grants_max` and `fairness_spread`, the most grants one process got in the region
+  less the fewest;
+- `wait_ns`: p50/p90/p99/max of each grant's wait, from `bench-req` to `bench-got`. The request
+  is two of the process's steps after `bench-req`, so a wait also holds the turns of the other
+  runnable processes in between.
+
+Every process must still be running at the end; then they are killed. Gate: `gate RUN --scenario
+lock.handoff --metric extra.fairness_spread --max 1` (the queue hands the lock round in order).
+
+#### lock.rw
+
+`rw` readers/writers: `8/1`, `64/1`, `8/8`. A reader loops on
+`(with-lock "bench.rw" :shared (bench-rin j) (sleep 0) (bench-rout j))`, a writer on
+`(bench-wq j) (with-lock "bench.rw" (bench-win j) (sleep 0))`. The readers hold the key nearly all
+the time. A reader that asks while a writer is queued waits behind it (the queue is FIFO among
+conflicting requests), so a writer waits for the sections in progress when it asked, not for the
+readers to stop. After a warm-up of 2 sections a writer, the region runs until the writers made
+`sections` (100) sections each. Extras:
+
+- `writer_wait_ns`: p50/p90/p99/max, `bench-wq` to `bench-win`;
+- `reader_section_ns`: p50/p90/p99/max, `bench-rin` to `bench-rout`, and `reader_section_max_ns`;
+- `writer_wait_p99_over_reader_max`: the gate's ratio;
+- `readers`, `writers`, `writer_sections` (also `iterations`), `reader_sections`.
+
+Gate (design 11.2, made an L1 exit): at 64/1 the writers' wait p99 is at most twice the longest
+reader section:
+
+```sh
+python3 tools/bench/state_exec_bench.py gate run.jsonl --scenario lock.rw --where rw=64/1 \
+    --metric extra.writer_wait_p99_over_reader_max --max 2
+```
+
+Both sides are timed by DSL calls. A writer's `bench-wq` runs two of its steps before its request,
+with the runnable readers stepping in between, and a reader's section runs from its body's first
+form to its last, about two turns of the runnable processes as well.
+
+#### lock.many_keys
+
+Uncontended locks on keys drawn at random (a fixed seed per `k`) out of `k` (10, 1000, 100000)
+keys `mk.<j>` under one parent: `req=single` asks for one key, `req=pair` for a list of two
+different ones in one request. `(set kk (bench-key i)) (with-lock kk (set s (+ s 1)))` against the
+same loop with `(begin ...)`, by the `native.*` method (`n` 10000, `rounds` 3). `bench-key` hands
+out the i-th key drawn (a shared list, or a string within the small buffer), the same in both
+loops, and a symbol KEY is read inline, so it adds no step. Past the home's key cache (1024
+entries, CLOCK eviction; design 8.4) keys miss: an entry is evicted and the key's trie node made
+again. Extras: `ns_per_lock`, `steps_per_lock`, `trie_nodes` (`lock_manager::stats()` after the
+last run with the lock: the root, `mk`, and the keys the cache still references),
+`cache_entries` and `cache_capacity` (`lock_home::cache_size()`, `cache_capacity()`),
+`baseline_wall_ns`, `baseline_steps`, `rounds`. The home keeps no count of hits and misses, so
+the record has no hit rate: at k 10 and 1000 every key fits the cache (every lookup after a key's
+first use hits), at k 100000 at most about 1 % of lookups can (1024 / 100000).
+
+#### lock.bystanders
+
+`sched.single.arith_loop`'s program (`n` 40000) beside one holder parked in
+`(with-lock "bench.by" (msg-recv "bench.never"))` and `b` (0, 100, 1000) waiters
+`(with-lock "bench.by" 1)` queued behind it, all parked before the region. A lock waiter is not in
+the run queue and has no timer, so the loop's `ns_per_step` should not move with `b`. Checked: the
+loop's result, and after it b + 1 processes parked, one hold and b queued requests
+(`extra.queued`). Gate (a paired one): at b = 1000 within 3 % (and the noise) of b = 0:
+
+```sh
+build/bin/state_exec_bench --scenario lock.bystanders --size b=0,100,1000 --json pooled.jsonl
+build/bin/state_exec_bench --scenario lock.bystanders --size b=1000,100,0 --json pooled.jsonl
+python3 tools/bench/state_exec_bench.py compare pooled.jsonl pooled.jsonl --pair b=0:1000 \
+    --metric ns_per_step --max-noise 3 --fail-on-worse
+```
+
+#### lock.timeout
+
+`p` (10, 1000) waiters, each
+`(try (with-lock "bench.to" :timeout 0.001 0) (catch (TimeoutError e) (bench-expired j)))`, behind
+a holder parked in its section. The region submits them one at a time, and steps the scheduler one
+step at a time until that waiter's request queues (the manager's `waits` count goes up), then notes
+the time: the request's deadline is 1 ms after it, to within the rest of that step. Waiters that
+time out meanwhile step too. Then it drives every waiter to its end. Extras: `lateness_ns`
+(p50/p90/p99/max of `bench-expired`'s time less the deadline: the scheduler noticing the expiry, the
+cancel, and the waiter's steps to its catch) and `timeouts` (checked: p). `latency_ns` is each
+waiter's submit to end. Recorded, no gate. The drivers add to it: the spin driver yields when
+nothing is runnable, and the sync scheduler's idle wait sleeps until the next deadline.
+
+#### lock.deadlock
+
+`n` (2, 8) processes in a cycle, formed `cycles` (200) times, beside `q` (0, 1000) unrelated
+waiters queued on `bench.dlq` behind a parked holder. Member j holds `bench.dl.k<j>`, sends to
+`bench.dl.ready`, waits on `bench.dl.go<j>`, then asks for `bench.dl.k<j+1 mod n>`. A coordinator
+sends the go messages once all n are ready, so each round forms exactly one cycle. Whichever member
+asks last closes it and catches the `DeadlockError`; leaving its section lets the others finish in
+turn. The region steps the scheduler one step at a time and times each step. Extras:
+
+- `ns_per_detection`: the median of `detection_step_ns`, the steps in which the manager's
+  `deadlocks` count went up: the with-lock entry, the busy path, `block`'s search and the failure
+  collected into the frame (raising it is the next step);
+- `queue_step_ns`: the steps in which a request queued without a cycle, its search included;
+- `ns_per_cycle`: the region over the cycles; `deadlocks`.
+
+Checked: the members' caught errors add up to `cycles`, the manager counted as many, the
+coordinator returned `cycles`, and q requests are still queued at the end. Each step reads the clock
+and the lock stats around it: the per-step times leave that out, the region's wall includes it.
+
 ## Known pathologies the suite exposes
 
 Each names the scenario that shows it; the file:line references are to the runtime at the time this
@@ -863,6 +1060,14 @@ suite was written.
   `stackless_evaluator`, state and environment (`builtins.cpp:772-811`): `eval.range_create`.
 - **No tail calls.** A self call in tail position still pushes a frame: `eval.tail_rec` and
   `sched.single.tail_rec` `heap_delta_bytes` against `n`.
+- **An uncontended with-lock allocates.** A lock frame's body hands its value up into the frame's
+  `results`, which the lock form never reserves (`begin` does, `make_room(frame.results, ...)` in
+  `stackless_evaluator.cpp`'s `step_init`; `lock_body_begins` doesn't), so every lock form, a
+  covered one included, allocates that vector: `lock.uncontended` `extra.allocs_per_lock` is 1 at
+  every `form=single` point and 2 at every `form=nested` one, on both schedulers, against the 0 of
+  design 8.8, so `state_exec_bench_gates` fails. Steps per lock are 0, as designed. A body of two
+  forms makes 3: the results vector grows twice, and the frame's `extra_vals` (7 slots and the
+  body) passes the 8 values the per-thread vector pools keep.
 
 ## Adding a scenario
 
@@ -875,4 +1080,4 @@ region, and a `run` that builds what the point needs, then calls `pc.reps` with 
 does one rep: set up, `m.begin()`, the work, `m.end()`, then check the results with `o.fail(...)`
 and fill `rep_out`. `run_flood`, `run_single`, `run_batch` and `park_bystanders` submit, drive,
 reap and check programs for the scheduler scenarios. Keep a default-size rep under ~10 s and the
-whole `--smoke` run under ~10 s; `--smoke` runs in CTest.
+whole `--smoke` run near ~10 s; `--smoke` runs in CTest.

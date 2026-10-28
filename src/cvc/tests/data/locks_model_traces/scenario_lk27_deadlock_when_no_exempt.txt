@@ -1,0 +1,12 @@
+# scenarios.py scenario_lk27_deadlock_when_no_exempt, its homes merged into one home of prio false
+config inheritance=1 coalesce=0 one_home=1 mutations=no-exempt
+attach_home 0 -> 0 |
+try_acquire 0 1 o 0 S a.x - - -> granted 1 0 0 |
+query - 0 o -> held a.x/S/1/1/-/0 waiting |
+try_acquire 0 2 o 0 X a - - -> busy |
+block 0 2 o 0 X a - - -> 1 queued |
+query - 0 o -> held a.x/S/1/1/-/0 waiting a/X/2 |
+try_acquire 0 1 o 0 X a.y - - -> busy |
+block 0 1 o 0 X a.y - - -> 2 failed |
+resume 0 1 2 -> deadlock 1:a.y,2:a |
+query - 0 o -> held a.x/S/1/1/-/0 waiting a/X/2 |
