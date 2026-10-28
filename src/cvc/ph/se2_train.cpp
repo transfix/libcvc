@@ -32,7 +32,7 @@
 // clang-format off
 //   dM^-1 += dK D^T + de q^T - (M^-T dp) p^T;   dD = M^-T dK;   dq = M^-T de
 //   dG = dq u^T;   dlevels_D = spd's reverse of dD;   both GPs' reverse give dW and dz;
-//                  dv += dz / scale
+//                  dv += dz / scale   (dz's modulation entries are dropped: they are data)
 //   ad*_v p's reverse gives dp and dv;   dv += M^-T dp
 //   body = R^T grad V:  d grad V = R dbody,  dpsi += dbody . (body_y, -body_x)
 //   grad V = level + sum_k f_k omega_k / ell_V:  dW_V,k, and d(x, y) from d grad V (its Hessian)
@@ -133,7 +133,7 @@ void stage_vjp(const se2_vehicle<double> &veh, const se2_stage<double> &st,
       dG[i * nu + j] = dq[i] * st.u[j];
       g.g_level[i * nu + j] += dG[i * nu + j];
     }
-  V3 dz{};
+  std::array<double, 3 + kSe2MaxModulations> dz{}; // the GP input's: the twist's, the modulations'
   s.G.gp_vjp(st.theta_G.data(), w.wG.data(), 3 * nu, dG.data(), g.wG.data(), dz.data());
   // D = spd(level + GP_D(z))
   double dl[6] = {};
@@ -410,7 +410,7 @@ se2_draw_noise se2_draw_noise::standard_normal(const se2_model &m, rng &r) {
 se2_objective se2_rollout_objective(const se2_model &m, const se2_windows &w,
                                     const std::vector<std::size_t> *idx, const se2_draw_noise *z,
                                     double beta_scale, se2_params *grad, cvc::thread_pool *pool) {
-  if (w.width != 6 + m.setup.control_dim)
+  if (w.width != 6 + m.setup.input_dim())
     throw std::invalid_argument("se2_rollout_objective: the windows' inputs are not the model's");
   const se2_vehicle<double> veh(m.setup,
                                 z ? se2_draw<double>(m, z->zD.data(), z->zG.data(), z->zV.data())
@@ -570,7 +570,7 @@ void se2_train_rollout(se2_model &m, const se2_windows &train, const se2_windows
                        const std::function<void(const se2_train_event &)> &on_step) {
   if (train.count == 0)
     throw std::invalid_argument("se2_train_rollout: no training windows");
-  if (train.width != 6 + m.setup.control_dim || (test && test->width != train.width))
+  if (train.width != 6 + m.setup.input_dim() || (test && test->width != train.width))
     throw std::invalid_argument("se2_train_rollout: the windows' inputs are not the model's");
   // threads 1: inline, no pool (a pool of 0 workers means "hardware concurrency - 1")
   std::unique_ptr<cvc::thread_pool> owned;

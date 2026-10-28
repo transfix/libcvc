@@ -46,16 +46,18 @@ namespace ph {
 
 // ── data ──────────────────────────────────────────────────────────────────────────────────
 
-// Equal-length flights: rows [x, y, psi, v_x, v_y, r, u (control_dim)], row k's inputs acting
-// from t_k-1 to t_k (cvc::physics::plant_log's layout; row 0's inputs unused).
+// Equal-length flights: rows [x, y, psi, v_x, v_y, r, inputs], row k's inputs acting from t_k-1
+// to t_k (cvc::physics::plant_log's layout: drive, then steering; row 0's inputs unused). A model
+// reads the inputs as its control_dim ports, then its modulation_dim modulations, so plant logs
+// fit with steering as a modulation take control_dim 1 and modulation_dim 1.
 struct se2_flights {
   std::size_t count = 0, rows = 0;
-  int width = 8;            // 6 + control_dim
+  int width = 8;            // 6 + the inputs
   std::vector<double> data; // [count x rows x width]
   std::vector<int> seed;    // each flight's seed, when known
   double dt = 0.02;         // s between rows
 
-  int control_dim() const { return width - 6; }
+  int control_dim() const { return width - 6; } // every input: a model's ports and modulations
   const double *flight(std::size_t f) const { return data.data() + f * rows * width; }
 };
 

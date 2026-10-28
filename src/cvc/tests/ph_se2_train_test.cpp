@@ -19,6 +19,9 @@
 //   (tests/data/ph_optim_golden.json).
 // - The objective is the same bit for bit on one thread or many, and a short fit to flights of a
 //   known model lowers the loss.
+// - With steering a modulation (modulation_dim 1): the gradient against central differences and a
+//   short fit, as above; and both forms fit to nav's dynamic bicycle, where the reference form's
+//   steering share of the supplied power is reported (the bicycle's own is zero).
 
 #include <algorithm>
 #include <boost/property_tree/json_parser.hpp>
@@ -26,6 +29,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cvc/core/thread_pool.h>
+#include <cvc/nav/detail/dyn_bike.h>
 #include <cvc/ph/se2_train.h>
 #include <filesystem>
 #include <gtest/gtest.h>
@@ -102,11 +106,27 @@ se2_windows synthetic_windows(const se2_model &truth, int flights, int rows, dou
   return cut_windows(noise > 0 ? add_observation_noise(f, noise, seed + 1) : f, rows, rows);
 }
 
-// The analytic gradient against central differences, on every level and on a sample of the
-// weights and log-scales, with a draw and the KL term on.
-TEST(PhSe2Train, GradientMatchesFiniteDifferences) {
-  const se2_model m0 = small_model(3);
-  const se2_windows w = synthetic_windows(small_model(4), 3, 16, 0.02, 5);
+// small_model's shape with steering a modulation: one port (the drive), one modulation.
+se2_model small_modulated_model(std::uint64_t seed) {
+  se2_init init;
+  init.control_dim = 1;
+  init.modulation_dim = 1;
+  init.features = 8;
+  init.initial_randomness = 0.3;
+  init.initial_control_gp_mean_scale = 1.0;
+  init.initial_log_std = -2.0;
+  se2_model m = se2_model::initialize(init, seed, {6.0, 0.5, 0.3}, {1.0, 1.0}, 0.02);
+  rng r(seed + 99);
+  for (se2_gp *g : {&m.params.D, &m.params.G, &m.params.V})
+    for (auto &x : g->mean)
+      x = 0.3 * r.normal();
+  m.setup.v_length = 5.0;
+  return m;
+}
+
+// The analytic gradient of m0's objective on w against central differences, on every level and on
+// a sample of the weights and log-scales, with a draw and the KL term on.
+void check_gradient(const se2_model &m0, const se2_windows &w, const char *what) {
   rng r(6);
   const se2_draw_noise z = se2_draw_noise::standard_normal(m0, r);
   const double beta_scale = 0.01;
@@ -146,7 +166,18 @@ TEST(PhSe2Train, GradientMatchesFiniteDifferences) {
     }
     ++leaf;
   });
-  std::printf("  %d entries against central differences: worst relative %.2e\n", checked, worst);
+  std::printf("  %s: %d entries against central differences: worst relative %.2e\n", what, checked,
+              worst);
+}
+
+TEST(PhSe2Train, GradientMatchesFiniteDifferences) {
+  check_gradient(small_model(3), synthetic_windows(small_model(4), 3, 16, 0.02, 5), "reference");
+}
+
+// The reverse pass with steering a modulation: the GP inputs carry it, its own gradient is dropped.
+TEST(PhSe2Train, ModulatedGradientMatchesFiniteDifferences) {
+  check_gradient(small_modulated_model(3),
+                 synthetic_windows(small_modulated_model(4), 3, 16, 0.02, 5), "modulated");
 }
 
 // JAX's autodiff of the same objective, on the Humvee fit and two held-out windows.
@@ -376,6 +407,146 @@ TEST(PhSe2Train, ShortFitLowersTheLoss) {
   // and the fitted model survives its file
   const se2_model back = se2_model::from_json(m.to_json());
   EXPECT_EQ(se2_rollout_objective(back, test, nullptr, nullptr, 0.0).rollout, after);
+}
+
+// The training loop with ShortFitLowersTheLoss's settings (Adam's learning rate `lr`): the
+// held-out rollout loss after it.
+double fit(se2_model &m, const se2_windows &train, const se2_windows &test, int steps,
+           double lr = 3e-3) {
+  se2_train_config cfg;
+  cfg.seed = 16;
+  cfg.total_steps = steps;
+  cfg.batch_size = 8;
+  cfg.kl_anneal_steps = 100;
+  cfg.eval_every = steps;
+  cfg.eval_windows = 10;
+  cfg.threads = 4;
+  cfg.optimizer.learning_rate = lr;
+  se2_train_rollout(m, train, &test, cfg, nullptr);
+  return se2_rollout_objective(m, test, nullptr, nullptr, 0.0).rollout;
+}
+
+// ShortFitLowersTheLoss with steering a modulation, truth and fit alike.
+TEST(PhSe2Train, ModulatedShortFitLowersTheLoss) {
+  const se2_model truth = small_modulated_model(12);
+  const se2_windows train = synthetic_windows(truth, 40, 26, 0.01, 13);
+  const se2_windows test = synthetic_windows(truth, 10, 26, 0.01, 14);
+  se2_init init;
+  init.control_dim = 1;
+  init.modulation_dim = 1;
+  init.features = 8;
+  se2_model m = se2_model::initialize(init, 15, truth.twist_scale, {1.0, 1.0}, truth.interval);
+  m.setup.v_length = truth.setup.v_length;
+  const double before = se2_rollout_objective(m, test, nullptr, nullptr, 0.0).rollout;
+  const double after = fit(m, train, test, 1200);
+  std::printf("  modulated: held-out rollout loss %.4f -> %.4f\n", before, after);
+  EXPECT_LT(after, 0.1 * before);
+  const se2_model back = se2_model::from_json(m.to_json());
+  EXPECT_EQ(se2_rollout_objective(back, test, nullptr, nullptr, 0.0).rollout, after);
+}
+
+// Flights of nav's dynamic single-track vehicle (diff::dyn_plant in double), as
+// cvc::physics::plant_log records a vehicle: the centre of gravity, the heading and the body
+// twist, then the drive (m/s^2) and the road-wheel angle that acted over the interval ending at
+// the row. A mid-size car at 9-13 m/s on smooth drive and steering sweeps, about 0.3 g at most.
+se2_flights dyn_bike_flights(int flights, int rows, std::uint64_t seed) {
+  namespace d = cvc::nav::diff;
+  d::dyn_bike_params p;
+  p.m = 1500.0f;
+  p.Iz = 2500.0f;
+  p.lf = 1.2f;
+  p.lr = 1.4f;
+  p.h = 0.5f;
+  p.mu = 0.9f;
+  p.B_f = p.B_r = 10.0f;
+  p.C = 1.3f;
+  p.drag = 0.4f;
+  p.c_rr = 0.01f;
+  d::bike_veh lim{};
+  lim.L = p.lf + p.lr;
+  lim.vmax = 40.0f;
+  lim.hdt = 0.01f;
+  const int sub = 2; // plant steps per 0.02 s row
+  se2_flights f;
+  f.count = flights;
+  f.rows = rows;
+  f.width = 8;
+  f.dt = 0.02;
+  f.data.resize(static_cast<std::size_t>(flights) * rows * 8);
+  rng r(seed);
+  for (int fl = 0; fl < flights; ++fl) {
+    d::dyn_state<double> s{};
+    s.psi = r.normal();
+    s.vx = 9.0 + 4.0 * r.uniform();
+    const double wa = 0.5 + r.uniform(), wd = 0.4 + 0.8 * r.uniform();
+    const double pa = 6.283185307179586 * r.uniform(), pd = 6.283185307179586 * r.uniform();
+    for (int k = 0; k < rows; ++k) {
+      double *row = f.data.data() + (static_cast<std::size_t>(fl) * rows + k) * 8;
+      if (k > 0) {
+        const double t = 0.02 * (k - 1);
+        const double a_cmd = 1.2 * std::sin(wa * t + pa), d_cmd = 0.04 * std::sin(wd * t + pd);
+        for (int j = 0; j < sub; ++j) {
+          d::dyn_state<double> o;
+          d::dyn_plant<double>(p, lim, s, d_cmd, a_cmd, 0.0, o);
+          s = o;
+        }
+      }
+      const double c = std::cos(s.psi), sn = std::sin(s.psi);
+      const double cg[8] = {s.x + p.lr * c, s.y + p.lr * sn,  s.psi, s.vx, s.vy, s.r,
+                            k ? s.a : 0.0,  k ? s.delta : 0.0};
+      std::copy(cg, cg + 8, row);
+    }
+  }
+  return f;
+}
+
+// Both forms fit to the dynamic bicycle's flights. The plant they learn from supplies power only
+// through its axle forces (steering does no work on its body: dyn_ph_G), but the reference form
+// books power through its steering input too; the modulated form books the drive's alone. Both
+// fit well here; how well is not the point (at Adam's default 3e-3 the reference fit's gradient
+// blew up on this data, hence 1e-3). Gated: both fits learn, the reference fit's steering supplies
+// power and the modulated fit's supplies none. Reported: the held-out losses, the steering's share
+// of |y.u| over the held-out steps, and how often the steering alone supplies energy.
+TEST(PhSe2Train, BothFormsFitTheDynamicBicycle) {
+  const se2_flights train_f = dyn_bike_flights(40, 26, 31), test_f = dyn_bike_flights(10, 26, 32);
+  const std::array<double, 3> twist = twist_rms(train_f);
+  const std::vector<double> scale = control_rms(train_f);
+  const se2_windows train = cut_windows(scale_controls(train_f, scale), 26, 26);
+  const se2_windows test = cut_windows(scale_controls(test_f, scale), 26, 26);
+  for (const int modulations : {0, 1}) {
+    se2_init init;
+    init.control_dim = 2 - modulations;
+    init.modulation_dim = modulations;
+    init.features = 16;
+    init.v_gp = false; // flat ground
+    se2_model m = se2_model::initialize(init, 33, twist, scale, 0.02);
+    const double before = se2_rollout_objective(m, test, nullptr, nullptr, 0.0).rollout;
+    const double after = fit(m, train, test, 1500, 1e-3);
+    const se2_vehicle<double> veh(m.setup, se2_draw<double>(m), m.twist_scale);
+    double steer_abs = 0.0, all_abs = 0.0;
+    int steps = 0, steer_gains = 0;
+    for (std::size_t w = 0; w < test.count; ++w)
+      for (int k = 1; k < test.points; ++k) {
+        const double *start = test.window(w) + static_cast<std::size_t>(k - 1) * test.width;
+        const double *in = test.window(w) + static_cast<std::size_t>(k) * test.width + 6;
+        double y[2] = {0.0, 0.0};
+        veh.output(start, y, modulations ? in + 1 : nullptr);
+        const double drive = y[0] * in[0], steer = modulations ? 0.0 : y[1] * in[1];
+        steer_abs += std::fabs(steer);
+        all_abs += std::fabs(drive) + std::fabs(steer);
+        steer_gains += steer > 0.0;
+        ++steps;
+      }
+    std::printf("  %s form on the dynamic bicycle: held-out rollout loss %.4f -> %.4f; steering's "
+                "share of |y.u| %.3f, supplying energy at %d of %d steps\n",
+                modulations ? "modulated" : "reference", before, after, steer_abs / all_abs,
+                steer_gains, steps);
+    EXPECT_LT(after, 0.01 * before) << (modulations ? "modulated" : "reference");
+    if (modulations)
+      EXPECT_EQ(steer_abs, 0.0);
+    else
+      EXPECT_GT(steer_abs, 0.0);
+  }
 }
 
 TEST(PhSe2Train, CutsWindowsAsLieSphgpDoes) {
