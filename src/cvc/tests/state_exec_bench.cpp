@@ -4964,6 +4964,9 @@ std::vector<scenario> make_scenarios() {
   };
   for (const footprint_kind &fk : std::initializer_list<footprint_kind>{
            {"closure", "n closures sharing one environment, kept in a list", "", "(lambda (x) x)"},
+           {"closure_forms",
+            "n closures of a two-form body sharing one environment, kept in a list", "",
+            "(lambda (x) (+ x 1) x)"},
            {"environment",
             "n closures each over an environment of its own (a call's), kept in a list",
             "(set mk (lambda (x) (lambda () x))) ", "(mk i)"}}) {

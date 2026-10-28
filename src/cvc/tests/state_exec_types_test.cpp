@@ -1,7 +1,10 @@
 #include <chrono>
+#include <cstdint>
 #include <cvc/state/state_exec/types.h>
 #include <gtest/gtest.h>
+#include <memory>
 #include <thread>
+#include <vector>
 
 using namespace cvc::state_exec;
 
@@ -298,4 +301,198 @@ TEST(StateExecTypesTest, EvalDeadlineIsSpentOnlyByRunning) {
   }
   while (!eval_deadline_expired()) {
   }
+}
+
+// ─── Scopes from extend(): recycled per thread, looked up with one hash ───────
+
+TEST(StateExecTypesTest, ExtendedScopeComesBackEmpty) {
+  auto global = std::make_shared<environment>();
+  global->set("g", value_t(int64_t(1)));
+  // Take every scope this thread kept, so that the pool has room for the one dropped below.
+  std::vector<environment_ptr> taken;
+  for (int i = 0; i < 64; ++i)
+    taken.push_back(environment::extend(nullptr));
+  const std::size_t fresh = decltype(environment::bindings)().bucket_count();
+  const environment *first = nullptr;
+  bool keepable = false;
+  {
+    auto scope = environment::extend(global);
+    first = scope.get();
+    scope->set("a", value_t(int64_t(2)));
+    scope->set("b", value_t(std::string(40, 'x'))); // a string past the small buffer
+    scope->set("a", value_t(int64_t(3)));           // set again: one binding, the new value
+    EXPECT_EQ(scope->bindings.size(), 2u);
+    EXPECT_EQ(std::get<int64_t>(scope->lookup("a")->v), 3);
+    scope->frozen = true; // a kept scope is unfrozen again
+    // Kept only with a new map's buckets: on MSVC (8 buckets up to 8 bindings), not where a new
+    // map has none and the first binding allocates some (libstdc++, libc++).
+    keepable = scope->bindings.bucket_count() == fresh;
+  }
+  // The next scope made on this thread is empty, unfrozen and in the given scope, and nothing
+  // the dropped one bound is visible through it: when the dropped scope was kept, it is that
+  // scope.
+  auto again = environment::extend(global);
+  if (keepable)
+    EXPECT_EQ(again.get(), first);
+  EXPECT_TRUE(again->bindings.empty());
+  EXPECT_FALSE(again->frozen);
+  EXPECT_EQ(again->outer, global);
+  EXPECT_EQ(again->lookup("a"), nullptr);
+  EXPECT_EQ(again->lookup("b"), nullptr);
+  EXPECT_EQ(std::get<int64_t>(again->lookup("g")->v), 1);
+  again->set("c", value_t(int64_t(4)));
+  EXPECT_EQ(std::get<int64_t>(again->lookup("c")->v), 4);
+  EXPECT_EQ(global->lookup("c"), nullptr);
+}
+
+TEST(StateExecTypesTest, ScopeDropsItsBindingsAsADestructorWould) {
+  // A last owner a recycled scope drops goes where a destroyed scope's would: to the release
+  // backlog routing this thread's drops (a slicing step frees it a slice at a time).
+  detail::release_backlog backlog;
+  std::weak_ptr<std::vector<value_t>> held;
+  {
+    auto scope = environment::extend(nullptr);
+    value_t list = make_list({value_t(int64_t(1)), value_t(int64_t(2))});
+    held = std::get<list_ptr>(list.v);
+    scope->set("l", std::move(list));
+    detail::backlog_scope routing(&backlog);
+    scope.reset();
+  }
+  EXPECT_FALSE(backlog.empty());
+  EXPECT_FALSE(held.expired());
+  backlog.drain(0);
+  EXPECT_TRUE(held.expired());
+}
+
+TEST(StateExecTypesTest, ScopeLetsGoOfWhatANativeFunctionBoundInItCaptured) {
+  // A recycled scope keeps its binding nodes, not their values: a native function bound in it
+  // drops what it captured when the scope goes. (libc++ moves a std::function whose callable
+  // fits in it, as this one does, by copying the callable: a node left holding the moved-from
+  // value would keep the capture alive until the node was reused.)
+  auto captured = std::make_shared<int>(7);
+  const std::weak_ptr<int> watched = captured;
+  {
+    auto scope = environment::extend(nullptr);
+    scope->set("f", value_t{native_fn{[captured](std::span<const value_t>) -> value_t {
+                 return value_t(int64_t(*captured));
+               }}});
+    captured.reset();
+    EXPECT_FALSE(watched.expired());
+  }
+  EXPECT_TRUE(watched.expired());
+}
+
+TEST(StateExecTypesTest, AScopeMadeInADroppedOnesBlockIsAnotherScope) {
+  // extend() hands out the block the scope dropped last left, so a new scope is likely at that
+  // scope's address: its serial tells the two apart (a call record checks scopes by both).
+  std::vector<environment_ptr> taken; // room in this thread's pool for the scope dropped below
+  for (int i = 0; i < 64; ++i)
+    taken.push_back(environment::extend(nullptr));
+  const environment *was = nullptr;
+  std::uint32_t serial = 0;
+  {
+    auto scope = environment::extend(nullptr); // never bound: kept on every platform
+    was = scope.get();
+    serial = scope->serial.value;
+  }
+  auto again = environment::extend(nullptr);
+  EXPECT_EQ(again.get(), was);
+  EXPECT_NE(again->serial.value, serial);
+  // A scope made, copied or assigned has a serial no other has.
+  auto made = std::make_shared<environment>();
+  EXPECT_NE(made->serial.value, again->serial.value);
+  EXPECT_NE(made->serial.value, serial);
+  detail::scope_serial copied = made->serial;
+  EXPECT_NE(copied.value, made->serial.value);
+  const std::uint32_t before = copied.value;
+  copied = again->serial;
+  EXPECT_NE(copied.value, before);
+  EXPECT_NE(copied.value, again->serial.value);
+}
+
+TEST(StateExecTypesTest, ScopeChainOutlivesItsLinks) {
+  // A long chain of scopes is freed a link at a time, recycled or not.
+  environment_ptr e = std::make_shared<environment>();
+  for (int i = 0; i < 200000; ++i)
+    e = environment::extend(e);
+  e.reset();
+  SUCCEED();
+}
+
+TEST(StateExecTypesTest, LookupFindsEveryNameInLargeAndNestedScopes) {
+  // Lookups hash a name once and walk each scope's bucket: check that against many names, scopes
+  // that grew through several rehashes, empty scopes in between, and shadowing.
+  auto outer = std::make_shared<environment>();
+  for (int i = 0; i < 5000; ++i)
+    outer->set("name_" + std::to_string(i), value_t(int64_t(i)));
+  auto empty = environment::extend(outer);
+  auto inner = environment::extend(empty);
+  for (int i = 0; i < 300; i += 3)
+    inner->set("name_" + std::to_string(i), value_t(int64_t(-i)));
+  inner->set("a_name_well_past_the_small_string_buffer", value_t(int64_t(7)));
+  for (int i = 0; i < 5000; ++i) {
+    const std::string n = "name_" + std::to_string(i);
+    const value_t *v = inner->lookup(n);
+    ASSERT_NE(v, nullptr) << n;
+    EXPECT_EQ(std::get<int64_t>(v->v), i < 300 && i % 3 == 0 ? -i : i) << n;
+    const environment &c = *inner;
+    EXPECT_EQ(c.lookup(n), v);
+  }
+  EXPECT_EQ(std::get<int64_t>(inner->lookup("a_name_well_past_the_small_string_buffer")->v), 7);
+  for (const char *missing : {"", "name_", "name_5000", "Name_1", "a_name_well_past_the_small"})
+    EXPECT_EQ(inner->lookup(missing), nullptr) << missing;
+}
+
+TEST(StateExecTypesTest, ScopeDroppedAtThreadExitAfterThePool) {
+  // A scope a thread_local destructor drops after the thread's pool is gone is freed, not kept.
+  struct holder {
+    environment_ptr scope;
+    ~holder() { scope.reset(); }
+  };
+  std::weak_ptr<environment> watched;
+  std::thread t([&] {
+    thread_local holder h; // made before the pool below, so destroyed after it
+    h.scope = nullptr;
+    auto scope = environment::extend(nullptr);
+    scope->set("x", value_t(int64_t(1)));
+    watched = scope;
+    h.scope = std::move(scope);
+  });
+  t.join();
+  EXPECT_TRUE(watched.expired());
+}
+
+TEST(StateExecTypesTest, KeptScopeHasANewScopesBuckets) {
+  // A scope is kept for the next extend() only while its map has the buckets a new map has, so
+  // a scope's bucket count (which heap measurement counts) never depends on earlier scopes.
+  const std::size_t fresh = decltype(environment::bindings)().bucket_count();
+  {
+    auto grown = environment::extend(nullptr);
+    for (int i = 0; i < 40; ++i)
+      grown->set("v" + std::to_string(i), value_t(int64_t(i)));
+    EXPECT_GT(grown->bindings.bucket_count(), fresh);
+  }
+  for (int i = 0; i < 3; ++i) {
+    auto scope = environment::extend(nullptr);
+    EXPECT_EQ(scope->bindings.bucket_count(), fresh) << i;
+    EXPECT_TRUE(scope->bindings.empty());
+    scope->set("a", value_t(int64_t(1)));
+  }
+}
+
+TEST(StateExecTypesTest, ScopeIsKeptOnlyOnceNoWeakReferenceRemains) {
+  // A scope and its control block are one block: kept for reuse only when both are done with.
+  std::weak_ptr<environment> watched;
+  const environment *was = nullptr;
+  {
+    auto scope = environment::extend(nullptr);
+    watched = scope;
+    was = scope.get();
+  }
+  EXPECT_TRUE(watched.expired());
+  auto other = environment::extend(nullptr);
+  EXPECT_NE(other.get(), was); // still the weak reference's
+  watched.reset();
+  auto again = environment::extend(nullptr);
+  EXPECT_EQ(again.get(), was); // kept once the weak reference went, and taken next
 }

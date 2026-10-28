@@ -1,8 +1,10 @@
+#include <atomic>
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/evaluator.h>
 #include <cvc/state/state_exec/parser.h>
 #include <cvc/state/state_exec/types.h>
 #include <gtest/gtest.h>
+#include <thread>
 
 using namespace cvc::state_exec;
 
@@ -235,4 +237,144 @@ TEST_F(EvaluatorTest, Fibonacci) {
                      "      (+ (fib (- n 1)) (fib (- n 2))))) "
                      "  (fib 10))"),
             55);
+}
+
+// ─── Special-form dispatch ─────────────────────────────────────────────────
+
+TEST_F(EvaluatorTest, SpecialFormsComeBeforeMacrosAndBindings) {
+  EXPECT_EQ(eval_int("(begin (defmacro if (a b c) c) (if t 1 2))"), 1);
+  EXPECT_EQ(eval_int("(begin (set while 5) (set i 0) (while (< i 3) (set i (+ i 1))) i)"), 3);
+  EXPECT_EQ(eval_int("(begin (defun bxgin (x) (* x 2)) (bxgin 21))"), 42);
+  EXPECT_EQ(eval_int("(begin (defmacro sett (v) (set v 7)) (sett y) y)"), 7);
+}
+
+TEST_F(EvaluatorTest, YieldAndBreakAreOrdinaryNamesHere) {
+  // The recursive evaluator has no generators or loop breaks: these are functions like any.
+  EXPECT_EQ(eval_int("(begin (defun yield (x) (* x 2)) (yield 21))"), 42);
+  EXPECT_EQ(eval_int("(begin (defun break (x) (+ x 1)) (break 41))"), 42);
+}
+
+// ─── Step counting ─────────────────────────────────────────────────────────
+
+TEST(EvaluationStats, CountsEvalStepsAndChargedStepsExactlyWhileReadConcurrently) {
+  // The stepping thread counts its eval steps without a locked add; steps charged by add_steps()
+  // from another thread meanwhile, and readers, see exact totals.
+  evaluation_stats stats;
+  stats.start();
+  constexpr uint64_t kSteps = 200000, kCharged = 50000;
+  std::atomic<bool> go{false};
+  std::thread charger([&] {
+    while (!go.load())
+      std::this_thread::yield();
+    for (uint64_t i = 0; i < kCharged; ++i)
+      stats.add_steps(step_kind::async, 1);
+  });
+  std::thread reader([&] {
+    uint64_t last = 0;
+    while (!go.load())
+      std::this_thread::yield();
+    for (int i = 0; i < 100000; ++i) {
+      const uint64_t now = stats.get_step_count();
+      EXPECT_GE(now, last);
+      last = now;
+    }
+  });
+  go.store(true);
+  for (uint64_t i = 0; i < kSteps; ++i)
+    stats.increment_step(i % 10 == 0 ? step_kind::data : step_kind::eval);
+  charger.join();
+  reader.join();
+  EXPECT_EQ(stats.get_step_count(), kSteps + kCharged);
+  EXPECT_EQ(stats.steps(step_kind::data), kSteps / 10);
+  EXPECT_EQ(stats.steps(step_kind::async), kCharged);
+  EXPECT_EQ(stats.steps(step_kind::eval), kSteps - kSteps / 10);
+  evaluation_stats moved(std::move(stats));
+  EXPECT_EQ(moved.get_step_count(), kSteps + kCharged);
+  EXPECT_EQ(moved.steps(step_kind::eval), kSteps - kSteps / 10);
+  moved.start();
+  EXPECT_EQ(moved.get_step_count(), 0u);
+}
+
+TEST(EvaluatorSpareVectors, KeepNoValues) {
+  // A form's argument vectors are kept for the next forms, empty: what they held is dropped when
+  // the form is done, as before.
+  auto env = builtins::make_default_environment();
+  std::weak_ptr<std::vector<value_t>> made;
+  env->set("mk", value_t{native_fn{[&](std::span<const value_t>) -> value_t {
+             value_t l = make_list({value_t(int64_t(1)), value_t(int64_t(2))});
+             made = std::get<list_ptr>(l.v);
+             return l;
+           }}});
+  env->set("alive", value_t{native_fn{[&](std::span<const value_t>) -> value_t {
+             return value_t(!made.expired());
+           }}});
+  evaluator ev(env);
+  EXPECT_FALSE(
+      ev.evaluate_script("(begin (length (mk)) (if t (length (mk))) (alive))").is_truthy());
+  EXPECT_TRUE(ev.evaluate_script("(begin (set keep (mk)) (alive))").is_truthy());
+}
+
+// ─── A function passed as a parameter, called in tail position ────────────
+
+TEST_F(EvaluatorTest, FunctionParameterCalledInTailPosition) {
+  EXPECT_EQ(eval_int("(begin (defun inc (n) (+ n 1)) (defun twice (f x) (f (f x))) "
+                     "(twice inc 5))"),
+            7);
+  EXPECT_EQ(eval_int("(begin (defun call-it (h) (h)) (call-it (lambda () 42)))"), 42);
+  EXPECT_EQ(eval_int("(begin (defun call-it (h) (h 1)) "
+                     "(call-it (lambda (a) (set b (+ a 1)) (* b 21))))"),
+            42);
+}
+
+// ─── Step counting ─────────────────────────────────────────────────────────
+
+TEST(EvaluationStatsTest, IncrementStepCountsFromAnyThread) {
+  // increment_step() may be called from several threads at once (pycvc wraps it): none is lost.
+  evaluation_stats stats;
+  stats.start();
+  constexpr int kEach = 100000;
+  std::thread a([&] {
+    for (int i = 0; i < kEach; ++i)
+      stats.increment_step();
+  });
+  std::thread b([&] {
+    for (int i = 0; i < kEach; ++i)
+      stats.increment_step(i % 2 ? step_kind::eval : step_kind::data);
+  });
+  a.join();
+  b.join();
+  EXPECT_EQ(stats.get_step_count(), 2u * kEach);
+  EXPECT_EQ(stats.steps(step_kind::data), uint64_t(kEach / 2));
+  EXPECT_EQ(stats.steps(step_kind::eval), uint64_t(kEach + kEach / 2));
+}
+
+TEST(EvaluationStatsTest, IncrementStepCountsWhileTheEvaluatorSteps) {
+  // pycvc wraps increment_step() and releases the GIL while an evaluator runs: a count another
+  // thread makes meanwhile adds to the evaluator's own, neither losing the other's.
+  const char *const script =
+      "(begin (set s 0) (set i 0) (while (< i 20000) (begin (set s (+ s i)) (set i (+ i 1)))) s)";
+  uint64_t alone = 0;
+  {
+    evaluator ev(builtins::make_default_environment());
+    ev.evaluate_script(script);
+    alone = ev.stats().get_step_count();
+  }
+  ASSERT_GT(alone, 0u);
+  evaluator ev(builtins::make_default_environment());
+  std::atomic<bool> stepping{true};
+  std::atomic<uint64_t> counted{0};
+  std::thread other([&] {
+    // Only once the evaluation has started counting: evaluate() resets the counts first.
+    while (ev.stats().get_step_count() == 0)
+      std::this_thread::yield();
+    while (stepping.load(std::memory_order_relaxed)) {
+      ev.stats().increment_step();
+      counted.fetch_add(1, std::memory_order_relaxed);
+    }
+  });
+  ev.evaluate_script(script);
+  stepping = false;
+  other.join();
+  EXPECT_EQ(ev.stats().get_step_count(), alone + counted.load());
+  EXPECT_EQ(ev.stats().steps(step_kind::eval), alone + counted.load());
 }

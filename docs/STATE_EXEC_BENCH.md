@@ -382,7 +382,7 @@ The bare evaluators, run to completion on a pre-parsed AST: `evaluator::evaluate
 | `generators` | `next` on `(range n)` until it returns nil |
 | `for_range` | `for` over `(range n)` (stackless only: the recursive `for` takes lists only) |
 | `native_calls` | a registered trivial native, `(bench-inc s)` |
-| `closure_body` | a call of a `defun` of `p` parameters (0, 1, 4) whose body is 1 or 3 forms (`forms`): a binding per parameter, and a body of more than one form rebuilt as a `(begin ...)` list on every call |
+| `closure_body` | a call of a `defun` of `p` parameters (0, 1, 4) whose body is 1 or 3 forms (`forms`): a binding per parameter, and a body of more than one form evaluated as a `(begin ...)` list (rebuilt on every call when this suite was written; see "Known pathologies") |
 | `lookup_depth` | the arith loop over globals run `depth` scopes down (0, 4, 16 nested closures), so each reference walks `depth + 1` scopes; `names=long` uses 24-character names |
 | `try_noraise` | a `try` whose body doesn't raise: the form's setup alone |
 | `raise_depth` | a `raise` `d` calls deep (0, 16, 64), caught at the top: traceback capture and unwinding |
@@ -587,11 +587,12 @@ and parking them, divided by `n`. The heap figure is the reliable one. The regio
 process has parked, so it holds no time with everything idle; `sched.sleepers` and
 `sched.bystanders` measure what idle processes cost.
 
-### footprint.closure, footprint.environment (stackless)
+### footprint.closure, footprint.closure_forms, footprint.environment (stackless)
 
-`n` closures kept in a list: sharing one environment (`closure`), or each over an environment of
-its own made by a call (`environment`). `extra.heap_bytes_per_item`; the difference between the two
-is what an environment costs.
+`n` closures kept in a list: sharing one environment (`closure`, a one-form body; `closure_forms`,
+a body of two forms, which a call evaluates as a `(begin ...)`), or each over an environment of its
+own made by a call (`environment`). `extra.heap_bytes_per_item`; the difference between `closure`
+and `environment` is what an environment costs.
 
 ### limits.* (sync, async)
 
@@ -715,11 +716,22 @@ suite was written.
   `evaluator.cpp:251-284`); environment lookups hash the name again at every scope
   (`types.cpp:413-420`): `eval.lookup_depth`; every step does an atomic increment of the step count
   (`evaluator.h:82-87`). This is the floor under every `eval.*` `ns_per_step` and
-  `allocs_per_step`.
+  `allocs_per_step`. Since fixed: special forms are found by a switch on the name
+  (`special_forms.h`). The stackless evaluator reads a call's arguments in place and takes the
+  vectors a frame needs from ones kept per thread; the recursive one copies them into a vector it
+  keeps; neither allocates for them. A lookup hashes the name once and skips empty scopes, call
+  scopes are recycled per thread, and a call looks its function up once, at its init. The
+  recursive and stackless evaluators count their own eval steps with a plain load and store of a
+  counter only they write (`count_eval_step()`). Every other count is still a locked add, of
+  another counter: `increment_step()` from any thread, which also counts the stackless
+  evaluator's read and data steps, and `add_steps()`.
 - **Function bodies and try forms rebuilt per use.** A closure body of more than one form is
   rebuilt as a `(begin ...)` list on every call (`stackless_evaluator.cpp:1679-1691`):
   `eval.closure_body` `forms=3` against `forms=1`. A `try` is re-parsed on entry
-  (`stackless_evaluator.cpp:1148-1157`): `eval.try_noraise`.
+  (`stackless_evaluator.cpp:1148-1157`): `eval.try_noraise`. Since fixed for bodies: a closure
+  keeps its body's `(begin ...)`, made once and shared by the closures one lambda form makes
+  (`closure_body.h`); a generator gets one of its own. A `try` is still parsed on entry, but its
+  clauses are moved into its frame, not copied.
 - **Exceptions in the recursive evaluator.** `return` and `raise` are C++ throws, and the first
   unwinding trail guard copies up to 64 traceback values (`evaluator.cpp:162-172, 426-433`):
   `eval.exceptions` and `eval.raise_depth` recursive against stackless.

@@ -1,9 +1,15 @@
+#include "scope_mark.h"
+
 #include <algorithm>
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
 #include <cvc/state/state_exec/exceptions.h> // dsl_error: a refused allocation is MemoryError
 #include <cvc/state/state_exec/types.h>
 #include <new>
 #include <stdexcept>
 #include <time.h>
+#include <unordered_map>
 #include <utility>
 
 #ifdef _WIN32
@@ -444,30 +450,292 @@ std::string value_tag::type_name() const {
 
 // -- environment -------------------------------------------------------------
 
-environment::~environment() { detail::drop_owner(outer); }
+namespace {
+using binding_map = decltype(environment::bindings);
+using binding_node = binding_map::node_type;
 
-value_t *environment::lookup(const std::string &name) {
-  for (environment *e = this; e; e = e->outer.get()) {
-    auto it = e->bindings.find(name);
-    if (it != e->bindings.end())
-      return &it->second;
+// -- scopes recycled on this thread --
+//
+// A call scope (environment::extend) lives for one call, and a std::unordered_map is costly to
+// make: on MSVC its default constructor allocates a list sentinel and a bucket array, so a scope
+// cost three allocations before its first binding (the make_shared block, those two), and every
+// binding a node more. So a scope from extend() is not destroyed when its last owner drops it:
+// it is emptied, as its destructor would empty it, and kept on this thread for the next
+// extend(), its map's sentinel and buckets with it. The nodes of its bindings are kept too, for
+// the next set() of a new name.
+//
+// A scope and its shared_ptr control block are one allocation, as make_shared makes them: a
+// block with a slot for the control block, then the scope; the control block's allocator hands
+// out the slot. So a long-lived scope (a process's) costs one allocation, as before, 16 bytes
+// larger. The block is kept (or freed) when the control block is deallocated, which is after the
+// scope was emptied.
+//
+// What is kept is bounded, and per thread, so nothing is shared between threads: a scope or
+// node made on one thread and dropped on another is kept by the other. On 64-bit MSVC that is at
+// most 64 blocks of 120 bytes, each with its empty map's sentinel and 8 buckets (about 150
+// bytes), and 128 nodes of about 130 bytes: under 35 KB per thread that steps a program.
+constexpr std::size_t kKeptScopes = 64;
+constexpr std::size_t kKeptNodes = 128;
+// The slot for a scope's control block: a vtable, two counts and the pointer (24 bytes with
+// MSVC's and libstdc++'s shared_ptr, 32 with libc++'s; the deleter and allocator are empty).
+constexpr std::size_t kControlBytes = 32;
+static_assert(kControlBytes % alignof(environment) == 0);
+
+// A kept scope must be what a new one is: an empty map with a new map's bucket count, so that
+// how many buckets a scope has (which heap measurement counts, heap.h) never depends on what the
+// thread did before. (MSVC's maps start at 8 buckets and keep them up to 8 bindings; libstdc++'s
+// and libc++'s allocate none until the first binding, so there only scopes that never had a
+// binding are kept, with the nodes of all of them.)
+const std::size_t kFreshBuckets = binding_map().bucket_count();
+
+// A block: the control block's slot, then the scope.
+environment *scope_in(void *block) noexcept {
+  return std::launder(
+      reinterpret_cast<environment *>(static_cast<unsigned char *>(block) + kControlBytes));
+}
+
+void *new_block() {
+  void *block = ::operator new(kControlBytes + sizeof(environment));
+  try {
+    ::new (static_cast<unsigned char *>(block) + kControlBytes) environment();
+  } catch (...) {
+    ::operator delete(block);
+    throw;
+  }
+  return block;
+}
+
+void free_block(void *block) noexcept {
+  scope_in(block)->~environment();
+  ::operator delete(block);
+}
+
+struct scope_pool {
+  void *scopes[kKeptScopes];
+  std::size_t nscopes = 0;
+  binding_node nodes[kKeptNodes];
+  std::size_t nnodes = 0;
+
+  scope_pool() = default;
+  scope_pool(const scope_pool &) = delete;
+  scope_pool &operator=(const scope_pool &) = delete;
+  ~scope_pool();
+};
+
+// Set once the thread has destroyed its pool: scopes dropped later in the thread's exit (by
+// another thread_local's destructor) are freed.
+thread_local bool t_scope_pool_gone = false;
+thread_local scope_pool t_scope_pool;
+// The block whose slot the next control block goes in: set by extend() just before it makes the
+// shared_ptr, which allocates the control block on this thread, at once.
+thread_local void *t_placing = nullptr;
+
+scope_pool *this_thread_pool() noexcept { return t_scope_pool_gone ? nullptr : &t_scope_pool; }
+
+scope_pool::~scope_pool() {
+  t_scope_pool_gone = true;
+  while (nscopes > 0)
+    free_block(scopes[--nscopes]);
+  // The nodes go with the array.
+}
+
+// Hands out the control block of a scope extend() made: the slot at the start of its block. Its
+// deallocation is the block's end: the block is kept for the next extend(), or freed.
+template <class T> struct block_allocator {
+  using value_type = T;
+  block_allocator() = default;
+  template <class U> block_allocator(const block_allocator<U> &) noexcept {}
+
+  T *allocate(std::size_t /*n: one control block*/) {
+    static_assert(sizeof(T) <= kControlBytes && alignof(T) <= alignof(std::max_align_t),
+                  "a scope's control block doesn't fit its slot: raise kControlBytes");
+    void *slot = t_placing;
+    t_placing = nullptr;
+    if (!slot) // only extend() makes these, and it sets the slot first
+      throw std::bad_alloc();
+    return static_cast<T *>(slot);
+  }
+  void deallocate(T *p, std::size_t) noexcept {
+    void *block = p;
+    const environment *e = scope_in(block);
+    scope_pool *pool = this_thread_pool();
+    if (pool && pool->nscopes < kKeptScopes && e->bindings.empty() &&
+        e->bindings.bucket_count() == kFreshBuckets) {
+      scope_in(block)->frozen = false;
+      pool->scopes[pool->nscopes++] = block;
+      return;
+    }
+    free_block(block); // ~environment of an empty scope with no enclosing one: frees the map
+  }
+  template <class U> bool operator==(const block_allocator<U> &) const noexcept { return true; }
+  template <class U> bool operator!=(const block_allocator<U> &) const noexcept { return false; }
+};
+
+// Takes the place of the destructor for a scope extend() made: frees what the destructor would,
+// in its order (the enclosing scope, then each binding, through ~value_tag as the map's own
+// destruction would, so a release backlog sees the same owners), keeping the binding nodes of a
+// scope that will be kept. Its block goes with its control block (block_allocator::deallocate).
+struct scope_recycler {
+  void operator()(environment *e) const noexcept {
+    detail::drop_owner(e->outer);
+    e->outer.reset();
+    binding_map &b = e->bindings;
+    scope_pool *pool = this_thread_pool();
+    if (!pool) {
+      b.clear(); // as the map's destructor would
+      return;
+    }
+    while (!b.empty()) {
+      binding_node node = b.extract(b.begin());
+      // The value goes here, and the node is left holding nil, not a moved-from value: that may
+      // still hold what it held (libc++ moves a std::function whose callable fits in it by
+      // copying the callable), which a kept node would then keep alive.
+      { const value_t gone = std::exchange(node.mapped(), value_t()); }
+      if (pool->nnodes < kKeptNodes)
+        pool->nodes[pool->nnodes++] = std::move(node);
+    }
+  }
+};
+
+// Bind `name` to `val` in `b`, which doesn't have it: in a node this thread kept, if it has one.
+void bind_new(binding_map &b, const std::string &name, value_t &&val) {
+  scope_pool *pool = this_thread_pool();
+  if (!pool || pool->nnodes == 0) {
+    b.emplace(name, std::move(val));
+    return;
+  }
+  // Out of the pool first: should the key's copy or the insert throw, the node (with the value,
+  // if it got that far) is freed here, as a failed emplace frees its own.
+  binding_node node = std::move(pool->nodes[--pool->nnodes]);
+  node.key() = name;
+  node.mapped() = std::move(val);
+  b.insert(std::move(node)); // the name is new, so it goes in
+}
+
+// The bucket of a hash in a map of `buckets` buckets: hash mod buckets, which the standard
+// libraries compute as a mask when the count is a power of two (MSVC's always is, libc++'s may
+// be) and as a remainder otherwise (libstdc++'s prime counts, libc++'s others). Checked against
+// the map's own bucket() at startup; if it doesn't hold, lookups use find().
+std::size_t bucket_of(std::size_t hash, std::size_t buckets) {
+  return (buckets & (buckets - 1)) == 0 ? (hash & (buckets - 1)) : hash % buckets;
+}
+
+bool bucket_formula_holds() {
+  binding_map m;
+  const std::hash<std::string> hasher;
+  for (int round = 0; round < 6; ++round) {
+    for (int i = 0; i < 64; ++i) {
+      const std::string key = "k" + std::to_string(i * 7919 + round);
+      const std::size_t buckets = m.bucket_count();
+      if (buckets > 0 && bucket_of(hasher(key), buckets) != m.bucket(key))
+        return false;
+    }
+    for (int i = 0; i < (8 << round); ++i)
+      m.emplace("n" + std::to_string(round) + "_" + std::to_string(i), value_t());
+  }
+  return true;
+}
+
+// Zero (false: find()) until the check has run, should a lookup run during static initialization.
+const bool kBucketFormulaHolds = bucket_formula_holds();
+
+// The binding of `name` (whose hash is `hash`) in `b`, or null.
+template <class Map>
+auto find_hashed(Map &b, const std::string &name, std::size_t hash) -> decltype(&*b.begin()) {
+  if (!kBucketFormulaHolds) {
+    auto it = b.find(name);
+    return it != b.end() ? &*it : nullptr;
+  }
+  const std::size_t n = bucket_of(hash, b.bucket_count());
+  for (auto it = b.begin(n), end = b.end(n); it != end; ++it)
+    if (it->first == name)
+      return &*it;
+  return nullptr;
+}
+
+// Walk the scope chain from `e` for `name`, hashing the name once (not once per scope) and
+// skipping empty scopes. The binding found, or null.
+template <class Env>
+auto binding_in(Env *e, const std::string &name) -> decltype(&*e->bindings.begin()) {
+  std::size_t hash = 0;
+  bool hashed = false;
+  for (; e; e = e->outer.get()) {
+    if (e->bindings.empty())
+      continue;
+    if (!hashed) {
+      hash = std::hash<std::string>{}(name);
+      hashed = true;
+    }
+    if (auto *binding = find_hashed(e->bindings, name, hash))
+      return binding;
+  }
+  return nullptr;
+}
+} // namespace
+
+const std::pair<const std::string, value_t> *
+detail::find_marked(const environment *e, const std::string &name, scope_mark &mark) {
+  mark = scope_mark{};
+  std::size_t hash = 0;
+  bool hashed = false;
+  std::uint64_t depth = 0, stamp = 0;
+  for (; e; e = e->outer.get()) {
+    ++depth;
+    stamp = stamp_with(stamp, e);
+    if (e->bindings.empty())
+      continue;
+    if (!hashed) {
+      hash = std::hash<std::string>{}(name);
+      hashed = true;
+    }
+    if (auto *binding = find_hashed(e->bindings, name, hash)) {
+      if (depth <= UINT32_MAX)
+        mark = scope_mark{static_cast<std::uint32_t>(depth), stamp};
+      return binding;
+    }
   }
   return nullptr;
 }
 
-const value_t *environment::lookup(const std::string &name) const {
-  for (const environment *e = this; e; e = e->outer.get()) {
-    auto it = e->bindings.find(name);
-    if (it != e->bindings.end())
-      return &it->second;
+namespace {
+// The count scope serials are drawn from, a run at a time, and this thread's run: one locked add
+// per kSerialRun scopes. (Constant-initialized, so usable at any point of a thread's life.)
+constexpr std::uint32_t kSerialRun = 1024;
+std::atomic<std::uint32_t> g_next_serial_run{0};
+thread_local std::uint32_t t_next_serial = 0;
+thread_local std::uint32_t t_serials_left = 0;
+} // namespace
+
+std::uint32_t detail::new_scope_serial() noexcept {
+  if (t_serials_left == 0) {
+    t_next_serial = g_next_serial_run.fetch_add(kSerialRun, std::memory_order_relaxed);
+    t_serials_left = kSerialRun;
   }
-  return nullptr;
+  --t_serials_left;
+  return t_next_serial++;
+}
+
+environment::~environment() { detail::drop_owner(outer); }
+
+value_t *environment::lookup(const std::string &name) {
+  auto *binding = binding_in(this, name);
+  return binding ? &binding->second : nullptr;
+}
+
+const value_t *environment::lookup(const std::string &name) const {
+  auto *binding = binding_in(this, name);
+  return binding ? &binding->second : nullptr;
 }
 
 void environment::set(const std::string &name, value_t val) {
   if (frozen)
     throw std::logic_error("set: '" + name + "' in a frozen scope");
-  bindings[name] = std::move(val);
+  if (!bindings.empty())
+    if (auto it = bindings.find(name); it != bindings.end()) {
+      it->second = std::move(val);
+      return;
+    }
+  bind_new(bindings, name, std::move(val));
 }
 
 void environment::set_existing(const std::string &name, value_t val) {
@@ -484,13 +752,24 @@ void environment::set_existing(const std::string &name, value_t val) {
   }
   // Not bound in an unfrozen scope: bind it in the outermost one, which shadows a frozen
   // scope's binding of the same name rather than writing into the shared scope.
-  outermost->bindings[name] = std::move(val);
+  bind_new(outermost->bindings, name, std::move(val));
 }
 
 environment_ptr environment::extend(environment_ptr parent) {
-  auto child = std::make_shared<environment>();
+  scope_pool *pool = this_thread_pool();
+  void *block = nullptr;
+  if (pool && pool->nscopes > 0) {
+    block = pool->scopes[--pool->nscopes];
+    // A new scope, at the address of the one dropped last: a serial of its own tells the two
+    // apart (scope_mark.h). A block from new_block() has a new scope's already.
+    scope_in(block)->serial.value = detail::new_scope_serial();
+  } else {
+    block = new_block();
+  }
+  environment *child = scope_in(block);
   child->outer = std::move(parent);
-  return child;
+  t_placing = block; // its control block goes in the block, so making the shared_ptr can't fail
+  return environment_ptr(child, scope_recycler{}, block_allocator<environment>());
 }
 
 // to_string and values_equal are walks: see data_job.cpp.
