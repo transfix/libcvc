@@ -14,6 +14,11 @@
 // parameters by subnetwork, the twist and control scales, the sample interval. Arrays are flat
 // and row-major. Numbers are written with 17 significant digits, so a save and load round-trips
 // every double exactly.
+//
+// A model with modulations (se2_setup::modulation_dim > 0) is written as "cvc-ph-se2/2": the same
+// layout plus "modulation_dim", with D's and G's features reading the twist and the modulations
+// ("D_input" and "G_input": "twist+modulation") and one control scale per input. A reader of /1
+// refuses it rather than misreading it; a model without modulations is still written as /1.
 
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
@@ -32,6 +37,7 @@ namespace {
 namespace pt = boost::property_tree;
 
 constexpr const char *kFormat = "cvc-ph-se2/1";
+constexpr const char *kFormatModulated = "cvc-ph-se2/2";
 
 // Random streams, one per purpose (rng::derive tags).
 enum stream : std::uint64_t { features_D = 1, features_G, features_V, levels, means };
@@ -132,15 +138,18 @@ se2_model se2_model::initialize(const se2_init &init, std::uint64_t seed,
                                 const std::array<double, 3> &twist_scale,
                                 const std::vector<double> &control_scale, double interval,
                                 int substeps) {
-  if (init.control_dim < 1 || init.control_dim > kSe2MaxControls)
-    throw std::invalid_argument("se2_model: control_dim must be 1-4");
-  if (static_cast<int>(control_scale.size()) != init.control_dim)
+  if (init.control_dim < 1 || init.modulation_dim < 0 || init.modulation_dim > kSe2MaxModulations ||
+      init.control_dim + init.modulation_dim > kSe2MaxControls)
+    throw std::invalid_argument(
+        "se2_model: control_dim must be 1-4, modulation_dim 0-2, and 4 inputs in all at most");
+  if (static_cast<int>(control_scale.size()) != init.control_dim + init.modulation_dim)
     throw std::invalid_argument("se2_model: one control scale per input");
   if (init.features < 1 || interval <= 0.0 || substeps < 1)
     throw std::invalid_argument("se2_model: features, interval and substeps must be positive");
   se2_model m;
   se2_setup &s = m.setup;
   s.control_dim = init.control_dim;
+  s.modulation_dim = init.modulation_dim;
   s.features = init.features;
   s.matern_nu = init.matern_nu;
   s.matern_length = init.matern_length;
@@ -148,11 +157,11 @@ se2_model se2_model::initialize(const se2_init &init, std::uint64_t seed,
   s.v_length = init.v_length;
   {
     rng r = rng::derive(seed, features_D);
-    s.D = rff::draw(r, 3, init.features, init.matern_nu, init.matern_length);
+    s.D = rff::draw(r, s.gp_inputs(), init.features, init.matern_nu, init.matern_length);
   }
   {
     rng r = rng::derive(seed, features_G);
-    s.G = rff::draw(r, 3, init.features, init.matern_nu, init.matern_length);
+    s.G = rff::draw(r, s.gp_inputs(), init.features, init.matern_nu, init.matern_length);
   }
   {
     rng r = rng::derive(seed, features_V);
@@ -204,12 +213,19 @@ se2_model se2_model::initialize(const se2_init &init, std::uint64_t seed,
 
 std::string se2_model::to_json() const {
   std::ostringstream o;
-  o << "{\"format\":\"" << kFormat << "\",\"provenance\":{";
+  const bool modulated = setup.modulation_dim > 0;
+  o << "{\"format\":\"" << (modulated ? kFormatModulated : kFormat) << "\",\"provenance\":{";
   for (std::size_t i = 0; i < provenance.size(); ++i)
     o << (i ? "," : "") << quoted(provenance[i].first) << ':' << quoted(provenance[i].second);
-  o << "},\"control_dim\":" << setup.control_dim << ",\"feature_count\":" << setup.features
-    << ",\"G_input\":\"twist\",\"V_gp\":" << (setup.v_gp ? "true" : "false")
-    << ",\"V_length_scale\":";
+  o << "},\"control_dim\":" << setup.control_dim;
+  if (modulated)
+    o << ",\"modulation_dim\":" << setup.modulation_dim;
+  o << ",\"feature_count\":" << setup.features;
+  if (modulated)
+    o << ",\"D_input\":\"twist+modulation\",\"G_input\":\"twist+modulation\"";
+  else
+    o << ",\"G_input\":\"twist\"";
+  o << ",\"V_gp\":" << (setup.v_gp ? "true" : "false") << ",\"V_length_scale\":";
   put_number(o, setup.v_length);
   o << ",\"matern_smoothness\":";
   put_number(o, setup.matern_nu);
@@ -276,22 +292,31 @@ se2_model se2_model::from_json(const std::string &text) {
   }
   // A golden file wraps the model in "model".
   const pt::ptree &node = root.get_child_optional("model") ? root.get_child("model") : root;
-  if (node.get<std::string>("format", "") != kFormat)
-    throw std::runtime_error(std::string("se2_model: not a ") + kFormat + " model");
-  if (node.get<std::string>("G_input", "twist") != "twist")
-    throw std::runtime_error("se2_model: only G_input twist is supported");
+  const std::string format = node.get<std::string>("format", "");
+  const bool modulated = format == kFormatModulated;
+  if (format != kFormat && !modulated)
+    throw std::runtime_error(std::string("se2_model: not a ") + kFormat + " or " +
+                             kFormatModulated + " model");
+  const std::string gp_in = modulated ? "twist+modulation" : "twist";
+  if (node.get<std::string>("G_input", gp_in) != gp_in ||
+      node.get<std::string>("D_input", gp_in) != gp_in)
+    throw std::runtime_error("se2_model: " + format + " needs D_input and G_input " + gp_in);
   se2_model m;
   se2_setup &s = m.setup;
   s.control_dim = node.get<int>("control_dim");
+  s.modulation_dim = modulated ? node.get<int>("modulation_dim") : 0;
   s.features = node.get<int>("feature_count");
-  if (s.control_dim < 1 || s.control_dim > kSe2MaxControls || s.features < 1)
-    throw std::runtime_error("se2_model: control_dim 1-4 and a positive feature count");
+  if (s.control_dim < 1 || s.input_dim() > kSe2MaxControls || s.features < 1 ||
+      (modulated && (s.modulation_dim < 1 || s.modulation_dim > kSe2MaxModulations)))
+    throw std::runtime_error("se2_model: control_dim 1-4, modulation_dim 1-2 in a " +
+                             std::string(kFormatModulated) +
+                             " model, 4 inputs in all at most, and a positive feature count");
   s.v_gp = node.get<bool>("V_gp");
   s.v_length = node.get<double>("V_length_scale");
   s.matern_nu = node.get<double>("matern_smoothness", 2.5);
   s.matern_length = node.get<double>("matern_length_scale", 1.0);
-  s.D = get_rff(node, "D", 3, s.features);
-  s.G = get_rff(node, "G", 3, s.features);
+  s.D = get_rff(node, "D", s.gp_inputs(), s.features);
+  s.G = get_rff(node, "G", s.gp_inputs(), s.features);
   s.V = get_rff(node, "V", 2, s.features);
   const std::size_t n = static_cast<std::size_t>(s.features);
   se2_params &p = m.params;
@@ -308,7 +333,7 @@ se2_model se2_model::from_json(const std::string &text) {
     p.likelihood_log_sigma = get_array(node, "params.likelihood.log_sigma", 4);
   const auto ts = get_array(node, "twist_scale", 3);
   std::copy(ts.begin(), ts.end(), m.twist_scale.begin());
-  m.control_scale = get_array(node, "control_scale", static_cast<std::size_t>(s.control_dim));
+  m.control_scale = get_array(node, "control_scale", static_cast<std::size_t>(s.input_dim()));
   m.interval = node.get<double>("interval");
   m.substeps = node.get<int>("substeps", 1);
   if (const auto prov = node.get_child_optional("provenance"))
