@@ -60,7 +60,8 @@ struct execute_options {
   uint64_t max_message_bytes = 0;
   /// The process's own limits.async_steps_per_cpu_ms (docs/STATE_EXEC_EXCEPTIONS.md 3.8): the
   /// steps a CPU millisecond of its async calls is charged, ahead of the tree's settings.
-  /// Unset: the tree's, read at every charge (async_steps_per_cpu_ms_from_state).
+  /// Unset: the tree's, read live (async_steps_per_cpu_ms_from_state): a change applies to the
+  /// next charge.
   std::optional<double> async_steps_per_cpu_ms;
   std::unordered_map<std::string, value_t> signal_handlers;
   std::function<void(value_t)> on_complete;

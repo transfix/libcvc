@@ -14,6 +14,7 @@
 #include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/intrinsics.h> // resolve_channel_key
 #include <cvc/state/state_exec/process.h>
+#include <cvc/state/state_exec/process_table.h> // detail::time_after, first_time_passed
 #include <cvc/state/state_exec/scheduler_base.h>
 #include <stdexcept>
 #include <utility>
@@ -141,7 +142,13 @@ value_t async_call::outcome() {
 }
 
 bool async_call::past_timeout(clock::time_point now) const {
-  return timeout_ && std::chrono::duration<double>(now - created_).count() >= *timeout_;
+  return timeout_ && detail::seconds_passed(created_, now, *timeout_);
+}
+
+std::optional<clock::time_point> async_call::timeout_point() const {
+  // past_timeout's own test, searched for its first time point: a wait until it finds the call
+  // timed out, and none earlier would.
+  return timeout_ ? detail::first_time_passed(created_, *timeout_) : std::nullopt;
 }
 
 bool async_call::settle(value_t value, std::exception_ptr error) {

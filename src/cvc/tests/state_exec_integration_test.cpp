@@ -17,11 +17,13 @@
 #include <cvc/state/state_exec/state_value_codec.h>
 #include <cvc/state/state_exec/stdlib.h>
 #include <cvc/state/state_exec/types.h>
+#include <cvc/state/state_list.h>
 #include <cvc/state/state_message.h>
 #include <cvc/state/state_message_bus.h>
 #include <deque> // §12 channel-scope test: stable-address per-doc intrinsics contexts
 #include <gtest/gtest.h>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace cvc::state_exec;
@@ -1402,6 +1404,134 @@ TEST_F(StateWatchTest, WatchReceivesPathArgument) {
   auto result = sched.get_result(pid);
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ(std::get<std::string>(result->v), "notify.path");
+}
+
+// The scheduler polls the watched nodes only when something under the watch root changed since
+// the last poll (it counts the root's change signals). A write from anywhere counts: the host
+// between steps, another thread while the program runs, the program itself (above).
+TEST_F(StateWatchTest, WatchFiresWhenTheHostChangesTheValueBetweenSteps) {
+  int pid = exec(std::string(R"(
+        (begin
+          (state-watch "host.v" (lambda (path val) (state-set "host.seen" "yes")))
+          (set n 0)
+          (while (and (not (state-exists "host.seen")) (< n 100000))
+            (set n (+ n 1)))
+          (state-get "host.seen"))
+    )"));
+  sched.run(200); // registered, and looping
+  ASSERT_FALSE(sched.get_result(pid).has_value());
+  (*ictx.root)("host.v").value("changed");
+  sched.run();
+  auto result = sched.get_result(pid);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(std::get<std::string>(result->v), "yes");
+}
+
+TEST_F(StateWatchTest, WatchFiresWhenAnotherThreadChangesTheValue) {
+  int pid = exec(std::string(R"(
+        (begin
+          (state-watch "thread.v" (lambda (path val) (state-set "thread.seen" "yes")))
+          (state-set "thread.ready" "1")
+          (set n 0)
+          (while (and (not (state-exists "thread.seen")) (< n 5000000))
+            (set n (+ n 1)))
+          (state-get "thread.seen"))
+    )"));
+  cvc::state &root = *ictx.root;
+  std::thread writer([&root] {
+    // Once the watch is registered (the program says so), change the value.
+    for (int i = 0; i < 5000 && root("thread.ready").value().empty(); ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    root("thread.v").value("changed");
+  });
+  sched.run();
+  writer.join();
+  auto result = sched.get_result(pid);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(std::get<std::string>(result->v), "yes");
+}
+
+TEST_F(StateWatchTest, AWriteOfTheSameValueOrElsewhereFiresNothing) {
+  int pid = exec(std::string(R"(
+        (begin
+          (state-watch "same.v" (lambda (path val) (state-set "same.seen" "yes")))
+          (set n 0)
+          (while (< n 3000) (set n (+ n 1)))
+          (state-exists "same.seen"))
+    )"));
+  (*ictx.root)("same.v").value("x"); // before the watch: its initial value
+  sched.run(200);
+  (*ictx.root)("same.v").value("x");      // the same value
+  (*ictx.root)("elsewhere.v").value("y"); // another node
+  sched.run();
+  auto result = sched.get_result(pid);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(std::get<bool>(result->v), false);
+}
+
+// state_list::pop_back clears the last element without firing its signals (reset with
+// fireCallbacks=false), then writes the list's size, which does: the poll that write triggers
+// sees the element's value gone. (The scheduler polls watches on the tree's change signals.)
+TEST_F(StateWatchTest, WatchSeesAStateListElementPoppedOff) {
+  cvc::state &root = *ictx.root;
+  cvc::state_list list(root("wl"));
+  list.push_back().value("a");
+  list.push_back().value("b");
+  const std::string last = "wl." + std::string(5, '0') + "1";
+  ASSERT_EQ(root(last).value(), "b");
+  int pid = exec(R"(
+        (begin
+          (state-watch ")" +
+                 last + R"(" (lambda (path val) (state-set "wl_seen" "yes")))
+          (set n 0)
+          (while (and (not (state-exists "wl_seen")) (< n 100000))
+            (set n (+ n 1)))
+          (state-get "wl_seen"))
+    )");
+  sched.run(200); // registered, and looping
+  ASSERT_FALSE(sched.get_result(pid).has_value());
+  list.pop_back();
+  ASSERT_EQ(root(last).value(), "");
+  sched.run();
+  auto result = sched.get_result(pid);
+  ASSERT_TRUE(result.has_value());
+  ASSERT_TRUE(std::holds_alternative<std::string>(result->v));
+  EXPECT_EQ(std::get<std::string>(result->v), "yes");
+}
+
+TEST(AsyncStateWatchTest, WatchFiresWhenTheHostChangesTheValueBetweenSteps) {
+  cvc::app app_ctx;
+  async_scheduler sched;
+  memory_tracker tracker;
+  intrinsics_context ictx;
+  process_ptr proc = make_process();
+  proc->pid = 1;
+  ictx.sched = &sched;
+  ictx.root = &cvc::state::instance(app_ctx);
+  ictx.tracker = &tracker;
+  ictx.proc = proc;
+  ictx.pid = 1;
+  sched.set_watch_root(ictx.root);
+  environment_ptr env = builtins::make_default_environment();
+  register_intrinsics(env, &ictx);
+  execute_options opts;
+  opts.env = env;
+  const int pid = sched.execute(std::string(R"(
+        (begin
+          (state-watch "ahost.v" (lambda (path val) (state-set "ahost.seen" "yes")))
+          (set n 0)
+          (while (and (not (state-exists "ahost.seen")) (< n 100000))
+            (set n (+ n 1)))
+          (state-get "ahost.seen"))
+    )"),
+                                opts);
+  sched.sync_run(200);
+  ASSERT_FALSE(sched.get_result(pid).has_value());
+  (*ictx.root)("ahost.v").value("changed");
+  sched.sync_run();
+  auto result = sched.get_result(pid);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(std::get<std::string>(result->v), "yes");
 }
 
 // ===========================================================================
