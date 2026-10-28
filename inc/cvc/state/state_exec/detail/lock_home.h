@@ -113,7 +113,8 @@ void build_request(home_request &req, lock_home &home, const intrinsics_context 
 /// %lock-wait's body (protocol 5.2): KEYS as written, MODE ("exclusive" or "shared"), TIMEOUT
 /// (nil, or seconds). LockError where the process cannot wait, or with no lock-enter token.
 value_t lock_wait_call(const lock_ops &ops, std::span<const value_t> args);
-/// Bind with-lock, locks-held, lock-query and %lock-wait in `env` (register_intrinsics does).
+/// Bind with-lock, locks-held, lock-query and %lock-wait, and set-priority and get-priority, in
+/// `env` (register_intrinsics does).
 void register_lock_intrinsics(environment_ptr env, intrinsics_context *ctx);
 
 // ---------------------------------------------------------------------------------------------
