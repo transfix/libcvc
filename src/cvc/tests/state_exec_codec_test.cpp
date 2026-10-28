@@ -1,7 +1,11 @@
+#include <chrono>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/builtins.h>
+#include <cvc/state/state_exec/detail/lock_home.h>
 #include <cvc/state/state_exec/evaluator.h>
+#include <cvc/state/state_exec/intrinsics.h>
+#include <cvc/state/state_exec/lock_manager.h>
 #include <cvc/state/state_exec/parser.h>
 #include <cvc/state/state_exec/process.h>
 #include <cvc/state/state_exec/scheduler.h>
@@ -9,7 +13,10 @@
 #include <cvc/state/state_exec/state_value_codec.h>
 #include <cvc/state/state_exec/types.h>
 #include <cvc/state/state_list.h>
+#include <deque>
 #include <gtest/gtest.h>
+#include <optional>
+#include <thread>
 
 using namespace cvc::state_exec;
 
@@ -717,6 +724,266 @@ TEST_F(CrossEvaluatorTest, Fibonacci) {
                           "    (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2))))) "
                           "  (fib 10))"),
             55);
+}
+
+// ===========================================================================
+// with-lock in snapshots (docs/STATE_EXEC_LOCKS.md 5.8; locks plan L1.6, L1.7, L1.10): the lock
+// phases, the lock_ops marker, the holder refusal, rebind_natives, the wait's handle and the
+// remaining timeout.
+// ===========================================================================
+
+namespace {
+
+// A sync scheduler with one intrinsics context per program (chroot optional).
+struct lock_codec_world {
+  cvc::app app;
+  cvc::state &tree;
+  scheduler sched;
+  std::deque<intrinsics_context> contexts;
+
+  lock_codec_world() : tree(cvc::state::instance(app)) { sched.set_watch_root(&tree); }
+
+  environment_ptr natives(const std::string &chroot = "") {
+    intrinsics_context &ctx = contexts.emplace_back();
+    ctx.sched = &sched;
+    ctx.root = &tree;
+    if (!chroot.empty())
+      apply_chroot(ctx, tree, chroot);
+    ctx.proc = make_process();
+    environment_ptr env = builtins::make_default_environment();
+    register_intrinsics(env, &ctx);
+    return env;
+  }
+  int submit(const std::string &script, environment_ptr env = nullptr) {
+    execute_options opts;
+    opts.env = env ? env : natives();
+    return sched.execute(script, opts);
+  }
+  template <class Pred> bool step_until(Pred done, double seconds = 10.0) {
+    const auto until = std::chrono::steady_clock::now() +
+                       std::chrono::milliseconds(static_cast<int>(seconds * 1000));
+    while (!done()) {
+      if (std::chrono::steady_clock::now() >= until)
+        return false;
+      if (!sched.step())
+        std::this_thread::sleep_for(std::chrono::microseconds(200));
+    }
+    return true;
+  }
+  process_status status(int pid) { return sched.get_process_info(pid)->status; }
+  bool finished(int pid) { return is_finished(status(pid)); }
+  std::string waiting_on(int pid) {
+    const auto i = sched.get_process_info(pid);
+    return i && i->waiting_on ? *i->waiting_on : std::string();
+  }
+  bool lock_waiting(int pid) {
+    return status(pid) == process_status::waiting && waiting_on(pid).rfind("lock ", 0) == 0;
+  }
+  bool inside(int pid) {
+    return status(pid) == process_status::waiting && sched.get_process_info(pid)->locks_held > 0 &&
+           waiting_on(pid).rfind("msg ", 0) == 0;
+  }
+  void send(const std::string &channel) {
+    sched.deliver_to_receivers(channel, value_t(std::string("go")));
+  }
+  std::vector<std::string> held_keys() {
+    std::vector<std::string> out;
+    for (const lock_info &i : sched.locks()->manager().query("", nullptr, "").held)
+      out.push_back(i.key);
+    return out;
+  }
+  // Every node under `node` whose data_object type is `type`.
+  std::vector<cvc::state *> data_objects(cvc::state &node, const std::string &type) {
+    static const std::string tag = ".__data_type__";
+    std::vector<cvc::state *> out;
+    for (const std::string &full : node.children())
+      if (full.size() > tag.size() &&
+          full.compare(full.size() - tag.size(), tag.size(), tag) == 0 &&
+          tree(full).value() == type)
+        out.push_back(&tree(full.substr(0, full.size() - tag.size())));
+    return out;
+  }
+};
+
+eval_frame lock_frame(eval_phase phase) {
+  eval_frame f;
+  f.phase = phase;
+  f.expr = parse("(with-lock \"k\" 1)");
+  f.extra_vals.assign(7, nil_value);
+  f.extra_vals.push_back(value_t(int64_t(1))); // the body
+  return f;
+}
+
+} // namespace
+
+TEST(LockCodec, PhasesRoundTrip) {
+  cvc::app app;
+  cvc::state &node = cvc::state::instance(app)("snap");
+  evaluator_state st;
+  st.root_expr = parse("(with-lock \"k\" 1)");
+  st.global_env = builtins::make_default_environment();
+  st.stack.push_back(lock_frame(eval_phase::lock_enter));
+  st.stack.push_back(lock_frame(eval_phase::lock_body));
+  for (eval_frame &f : st.stack)
+    f.env = st.global_env;
+  encode_evaluator_state(node, st);
+  const evaluator_state back = decode_evaluator_state(node);
+  ASSERT_EQ(back.stack.size(), 2u);
+  EXPECT_EQ(back.stack[0].phase, eval_phase::lock_enter);
+  EXPECT_EQ(back.stack[1].phase, eval_phase::lock_body);
+  EXPECT_EQ(back.stack[1].extra_vals.size(), 8u);
+}
+
+TEST(LockCodec, LockOpsDecodesNil) {
+  cvc::app app;
+  cvc::state &node = cvc::state::instance(app)("snap");
+  intrinsics_context ctx;
+  const value_t ops = detail::make_lock_ops(&ctx);
+  ASSERT_NE(detail::lock_ops_of(ops), nullptr);
+  encode_value(node, ops);
+  EXPECT_EQ(node("__data_type__").value(), "lock_ops");
+  EXPECT_TRUE(node.data().empty()); // no payload: the context pointer isn't written
+  EXPECT_TRUE(decode_value(node).is_nil());
+  // Inside a list too.
+  cvc::state &node2 = cvc::state::instance(app)("snap2");
+  encode_value(node2, make_list({value_t(int64_t(1)), ops}));
+  const value_t back = decode_value(node2);
+  const auto &l = *std::get<list_ptr>(back.v);
+  ASSERT_EQ(l.size(), 2u);
+  EXPECT_TRUE(l[1].is_nil());
+}
+
+// A process with the intrinsics, snapshotted where it never locked, and restored with another
+// context's natives: no node holds a lock_ops payload, and the restored with-lock is the
+// restoring context's (its chroot names the key).
+TEST(LockCodec, NoLockOpsPayload) {
+  lock_codec_world w;
+  const int pid = w.submit(R"((begin (msg-recv "go") (with-lock "k" (msg-recv "go2"))))");
+  ASSERT_TRUE(w.step_until([&] { return w.status(pid) == process_status::waiting; }));
+  // (The search finds an encoded lock_ops.)
+  encode_value(w.tree("probe"), make_list({detail::make_lock_ops(&w.contexts.front())}));
+  ASSERT_EQ(w.data_objects(w.tree("probe"), "lock_ops").size(), 1u);
+  cvc::state &node = w.tree("snap");
+  ASSERT_TRUE(w.sched.snapshot(pid, node));
+  for (cvc::state *n : w.data_objects(node, "lock_ops"))
+    EXPECT_TRUE(n->data().empty()) << n->fullName();
+  const int r = w.sched.restore(node, w.natives("r2"));
+  w.sched.kill(pid);
+  w.send(resolve_channel_key("r2", "go"));
+  ASSERT_TRUE(w.step_until([&] { return w.inside(r); }));
+  EXPECT_EQ(w.held_keys(), (std::vector<std::string>{"r2.k"}));
+  w.send(resolve_channel_key("r2", "go2"));
+  ASSERT_TRUE(w.step_until([&] { return w.finished(r); }));
+  EXPECT_TRUE(w.held_keys().empty());
+}
+
+TEST(LockCodec, HolderRefused) {
+  lock_codec_world w;
+  const int pid = w.submit(R"((with-lock (list "m.n" "k") (msg-recv "go")))");
+  ASSERT_TRUE(w.step_until([&] { return w.inside(pid); }));
+  cvc::state &node = w.tree("snap");
+  try {
+    w.sched.snapshot(pid, node);
+    ADD_FAILURE() << "a holder was snapshotted";
+  } catch (const std::runtime_error &e) {
+    EXPECT_EQ(std::string(e.what()),
+              "snapshot: process " + std::to_string(pid) + " holds locks: /k, /m.n");
+  }
+  EXPECT_EQ(node.numChildren(), 0u); // nothing written for the process
+  EXPECT_EQ(node.value(), "");
+  w.send("go");
+  ASSERT_TRUE(w.step_until([&] { return w.finished(pid); }));
+}
+
+TEST(LockCodec, RebindReplacesStaleLockOps) {
+  lock_codec_world w;
+  intrinsics_context stale;
+  const environment_ptr natives = w.natives();
+  const detail::lock_ops *fresh = detail::lock_ops_of(*natives->lookup("with-lock"));
+  ASSERT_NE(fresh, nullptr);
+  stackless_evaluator ev(builtins::make_default_environment());
+  const value_t closure = ev.evaluate_script("(lambda (k b) 0)");
+  struct row {
+    const char *name;
+    std::optional<value_t> bound; // nullopt: unbound
+    bool replaced;
+  };
+  for (const row &r : {row{"unbound", std::nullopt, true}, row{"nil", nil_value, true},
+                       row{"stale", detail::make_lock_ops(&stale), true},
+                       row{"a program's own", closure, false}}) {
+    SCOPED_TRACE(r.name);
+    evaluator_state st;
+    st.global_env = std::make_shared<environment>();
+    if (r.bound)
+      st.global_env->set("with-lock", *r.bound);
+    rebind_natives(st, natives);
+    const value_t *now = st.global_env->lookup("with-lock");
+    ASSERT_NE(now, nullptr);
+    const detail::lock_ops *ops = detail::lock_ops_of(*now);
+    if (r.replaced) {
+      ASSERT_NE(ops, nullptr);
+      EXPECT_EQ(ops->ctx, fresh->ctx);
+    } else {
+      EXPECT_EQ(ops, nullptr);
+      EXPECT_TRUE(std::holds_alternative<closure_ptr>(now->v));
+    }
+  }
+}
+
+// A parked waiter's snapshot writes its wait's handle as nil, in the await frame and in the
+// lock_enter frame's slot, with no payload anywhere; restored (L1.10), the copy queues afresh, and
+// the original is still queued and granted on release.
+TEST(LockCodec, LockWaitHandleEncodesNil) {
+  lock_codec_world w;
+  const int h = w.submit(R"((with-lock "k" (msg-recv "go")))");
+  ASSERT_TRUE(w.step_until([&] { return w.inside(h); }));
+  const environment_ptr env = w.natives();
+  const int q = w.submit(R"((with-lock "k" "q"))", env);
+  ASSERT_TRUE(w.step_until([&] { return w.lock_waiting(q); }));
+  cvc::state &node = w.tree("snap");
+  ASSERT_TRUE(w.sched.snapshot(q, node));
+  EXPECT_TRUE(w.data_objects(node, "lock_wait").empty());
+  const process_ptr pp = decode_process(node);
+  const auto &st = pp->state.stack;
+  ASSERT_GE(st.size(), 2u);
+  ASSERT_EQ(st.back().phase, eval_phase::await_call);
+  EXPECT_TRUE(st.back().extra_vals.at(0).is_nil()); // the handle
+  ASSERT_EQ(st[st.size() - 2].phase, eval_phase::lock_enter);
+  EXPECT_TRUE(st[st.size() - 2].extra_vals.at(3).is_nil()); // wait_or_outcome
+  const int r = w.sched.restore(node, env);
+  ASSERT_TRUE(w.step_until([&] { return w.lock_waiting(r); })); // queued afresh
+  EXPECT_TRUE(w.lock_waiting(q));
+  EXPECT_EQ(w.sched.locks()->manager().stats().queued, 2u);
+  w.send("go");
+  ASSERT_TRUE(w.step_until([&] { return w.finished(q) && w.finished(r); }));
+  EXPECT_EQ(to_string(*w.sched.get_result(q)), R"("q")");
+  EXPECT_EQ(to_string(*w.sched.get_result(r)), R"("q")");
+  EXPECT_TRUE(w.sched.locks()->manager().table().empty());
+}
+
+TEST(LockCodec, RemainingTimeoutWritten) {
+  lock_codec_world w;
+  const int h = w.submit(R"((with-lock "k" (msg-recv "go")))");
+  ASSERT_TRUE(w.step_until([&] { return w.inside(h); }));
+  const int t30 = w.submit(R"((with-lock "k" :timeout 30 1))");
+  const int forever = w.submit(R"((with-lock "k" 1))");
+  ASSERT_TRUE(w.step_until([&] { return w.lock_waiting(t30) && w.lock_waiting(forever); }));
+  const auto timeout_written = [&](int pid) {
+    cvc::state &node = w.tree("snap." + std::to_string(pid));
+    EXPECT_TRUE(w.sched.snapshot(pid, node));
+    const process_ptr pp = decode_process(node);
+    const eval_frame &wait = pp->state.stack.back();
+    EXPECT_EQ(wait.phase, eval_phase::await_call);
+    EXPECT_EQ(wait.extra_lists.size(), 1u);
+    return wait.extra_lists.at(0).at(2);
+  };
+  const value_t left = timeout_written(t30);
+  ASSERT_TRUE(std::holds_alternative<double>(left.v)) << to_string(left);
+  EXPECT_GT(std::get<double>(left.v), 0.0);
+  EXPECT_LE(std::get<double>(left.v), 30.0);
+  EXPECT_TRUE(timeout_written(forever).is_nil());
+  w.send("go");
+  ASSERT_TRUE(w.step_until([&] { return w.finished(t30) && w.finished(forever); }));
 }
 
 // ===========================================================================

@@ -31,6 +31,7 @@
 #include <cvc/state/state_exec/process_table.h>
 #include <cvc/state/state_exec/scheduler.h>
 #include <cvc/state/state_exec/stackless_evaluator.h>
+#include <deque>
 #include <gtest/gtest.h>
 #include <iterator>
 #include <limits>
@@ -2657,3 +2658,125 @@ TEST(WakeupPriorityTest, APriorityChangedDuringAPreciseWaitStands) {
   EXPECT_EQ(GetThreadPriority(GetCurrentThread()), THREAD_PRIORITY_BELOW_NORMAL);
 }
 #endif
+
+// ===========================================================================
+// Lock waiters and the schedulers' own run loops (docs/STATE_EXEC_LOCKS.md 6.1, 8.7; locks plan
+// L1 risks: has_runnable on the sync scheduler)
+// ===========================================================================
+
+namespace {
+
+// Programs with one intrinsics context each, on one scheduler.
+struct lock_run_world {
+  cvc::app app;
+  cvc::state &tree;
+  std::deque<intrinsics_context> contexts;
+  explicit lock_run_world() : tree(cvc::state::instance(app)) {}
+  int submit(scheduler_base &sched, const std::string &script) {
+    intrinsics_context &ctx = contexts.emplace_back();
+    ctx.sched = &sched;
+    ctx.root = &tree;
+    ctx.proc = make_process();
+    environment_ptr env = builtins::make_default_environment();
+    register_intrinsics(env, &ctx);
+    execute_options opts;
+    opts.env = env;
+    return sched.execute(script, opts);
+  }
+};
+
+std::string waiting_on(scheduler_base &sched, int pid) {
+  const auto i = sched.get_process_info(pid);
+  return i && i->waiting_on ? *i->waiting_on : std::string();
+}
+
+} // namespace
+
+// The sync scheduler counts lock waiters among what may still run (a host loop that steps while
+// has_runnable() keeps servicing their deadlines); async_scheduler, whose drain services them,
+// counts them as it counts message waiters: not.
+TEST(SchedulerLocks, HasRunnableCountsLockWaitersOnTheSyncScheduler) {
+  {
+    lock_run_world w;
+    scheduler sched;
+    const int h = w.submit(sched, R"((with-lock "k" (msg-recv "go")))");
+    const int q = w.submit(sched, R"((with-lock "k" 1))");
+    for (int i = 0;
+         i < 1000 && (waiting_on(sched, q) != "lock /k" || waiting_on(sched, h) != "msg go"); ++i)
+      sched.step();
+    ASSERT_EQ(waiting_on(sched, q), "lock /k");
+    ASSERT_EQ(waiting_on(sched, h), "msg go");
+    EXPECT_TRUE(sched.has_runnable());
+    EXPECT_TRUE(sched.check_tables());
+  }
+  {
+    lock_run_world w;
+    async_scheduler sched;
+    const int h = w.submit(sched, R"((with-lock "k" (msg-recv "go")))");
+    const int q = w.submit(sched, R"((with-lock "k" 1))");
+    for (int i = 0;
+         i < 1000 && (waiting_on(sched, q) != "lock /k" || waiting_on(sched, h) != "msg go"); ++i)
+      sched.sync_step();
+    ASSERT_EQ(waiting_on(sched, q), "lock /k");
+    ASSERT_EQ(waiting_on(sched, h), "msg go");
+    EXPECT_FALSE(sched.has_runnable());
+    EXPECT_TRUE(sched.check_tables());
+  }
+}
+
+// A run bounded by steps, left with only a lock waiter whose holder waits for a message and no
+// timer set, returns at once (design 6.1), the waiter still waiting.
+TEST(SchedulerLocks, BoundedRunReturnsWithOnlyLockWaiters) {
+  lock_run_world w;
+  scheduler sched;
+  const int h = w.submit(sched, R"((with-lock "k" (msg-recv "go")))");
+  const int q = w.submit(sched, R"((with-lock "k" 1))");
+  const auto t0 = std::chrono::steady_clock::now();
+  sched.run(100000);
+  const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  std::printf("a bounded run left with a lock waiter returned after %.3f s\n", took);
+  EXPECT_LT(took, 10.0);
+  EXPECT_EQ(waiting_on(sched, q), "lock /k");
+  sched.deliver_to_receivers("go", value_t(std::string("go")));
+  sched.run(100000);
+  EXPECT_TRUE(is_finished(sched.get_process_info(h)->status));
+  ASSERT_TRUE(is_finished(sched.get_process_info(q)->status));
+  EXPECT_EQ(std::get<int64_t>(sched.get_result(q)->v), 1);
+  EXPECT_TRUE(sched.check_tables());
+}
+
+// run() with a holder that sleeps: it waits for the sleeper's timer, then the release grants the
+// waiter, and run() returns with both done.
+TEST(SchedulerLocks, RunWaitsForTheHolderThenGrants) {
+  lock_run_world w;
+  scheduler sched;
+  const int h = w.submit(sched, R"((with-lock "k" (sleep 0.2)))");
+  const int q = w.submit(sched, R"((with-lock "k" 7))");
+  sched.run(std::nullopt, 20.0);
+  ASSERT_TRUE(is_finished(sched.get_process_info(h)->status));
+  ASSERT_TRUE(is_finished(sched.get_process_info(q)->status));
+  EXPECT_EQ(std::get<int64_t>(sched.get_result(q)->v), 7);
+  EXPECT_TRUE(sched.check_tables());
+}
+
+// A run whose steps would last longer than the waiter's deadline waits for the deadline (a timer
+// of the process table) and times the wait out; the run then returns, its holder still waiting
+// for a message.
+TEST(SchedulerLocks, RunServicesALockDeadline) {
+  lock_run_world w;
+  scheduler sched;
+  const int h = w.submit(sched, R"((with-lock "k" (msg-recv "go")))");
+  const int q =
+      w.submit(sched, R"((try (with-lock "k" :timeout 0.2 1) (catch (TimeoutError e) "timeout")))");
+  const auto t0 = std::chrono::steady_clock::now();
+  sched.run(uint64_t(1) << 40, 20.0);
+  const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  std::printf("the run timed the lock wait out and returned after %.3f s\n", took);
+  ASSERT_TRUE(is_finished(sched.get_process_info(q)->status));
+  EXPECT_EQ(std::get<std::string>(sched.get_result(q)->v), "timeout");
+  EXPECT_GE(took, 0.2);
+  EXPECT_LT(took, 20.0);
+  EXPECT_FALSE(is_finished(sched.get_process_info(h)->status));
+  EXPECT_TRUE(sched.check_tables());
+  sched.kill(h);
+}

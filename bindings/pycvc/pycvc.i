@@ -3186,6 +3186,7 @@ PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::collect_cycles)
 %naturalvar cvc::state_exec::process::recv_path;
 %naturalvar cvc::state_exec::process::exit_error;
 %naturalvar cvc::state_exec::process_info::exit_error;
+%naturalvar cvc::state_exec::process_info::waiting_on;
 %naturalvar cvc::state_exec::process::signal_handlers;
 %naturalvar cvc::state_exec::process::pending_signals;
 %naturalvar cvc::state_exec::process::saved_stack;
