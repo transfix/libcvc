@@ -4881,7 +4881,13 @@ std::vector<scenario> make_scenarios() {
            {"msg_send",
             "msg-send with no receiver (queued, then dropped past max_pending_messages)",
             {{"n", {"20000"}}},
-            {{"n", {"300"}}}}}) {
+            {{"n", {"300"}}}},
+           {"state_atomic",
+            "an update of a tree node `depth` levels down, by `op`: set (state-set P (+ i 1)), "
+            "incr (state-incr P) or cas (state-cas P i (+ i 1)), the node starting at 0 (the "
+            "gate of docs/STATE_EXEC_LOCKS.md 11.2: incr and cas at most 1.1x set)",
+            {{"n", {"20000"}}, {"depth", {"1", "4"}}, {"op", {"set", "incr", "cas"}}},
+            {{"n", {"300"}}, {"depth", {"1", "4"}}, {"op", {"set", "incr", "cas"}}}}}) {
     scenario sc;
     sc.name = std::string("native.") + nk.name;
     sc.what = std::string("per-call cost of ") + nk.what +
@@ -4912,6 +4918,12 @@ std::vector<scenario> make_scenarios() {
         call = "(state-set \"" + path + "\" i)";
       else if (kind == "state_delete")
         call = "(state-set \"bench.k\" i) (state-delete \"bench.k\")";
+      else if (kind == "state_atomic" && pc.s("op") == "incr")
+        call = "(state-incr \"" + path + "\")";
+      else if (kind == "state_atomic" && pc.s("op") == "cas")
+        call = "(state-cas \"" + path + "\" i (+ i 1))"; // succeeds every time: the node is i
+      else if (kind == "state_atomic")
+        call = "(state-set \"" + path + "\" (+ i 1))";
       else
         call = "(msg-send \"bench.sink\" \"x\")";
       const se::value_t with = se::parse(loop_src(n, "", call, "i"));
@@ -4937,6 +4949,8 @@ std::vector<scenario> make_scenarios() {
               base_steps = bo.steps_total.value_or(0);
             }
           }
+          if (kind == "state_atomic")
+            root(path).value("0"); // each op takes the node from 0 to n
           world w(pc.executor, app.get());
           meter wm;
           wm.want_heap = m.want_heap;
@@ -4944,6 +4958,8 @@ std::vector<scenario> make_scenarios() {
           run_single(w, pc, wm, wo, with, istr(n));
           if (!wo.ok)
             o.fail(wo.error);
+          if (kind == "state_atomic" && root(path).value() != istr(n))
+            o.fail("the node ended at " + root(path).value() + ", not " + istr(n));
           if (wm.wall() < best_with) {
             best_with = wm.wall();
             with_steps = wo.steps_total.value_or(0);

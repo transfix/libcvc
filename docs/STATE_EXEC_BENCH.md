@@ -640,6 +640,27 @@ sends to a channel nobody receives on, so messages queue up to `max_pending_mess
 are then dropped. These are differences of two timed loops: use 5 reps or more before reading a
 change in them.
 
+`native.state_atomic` times the atomic updates against `state-set`, on a node `depth` levels down
+(1, 4). The node starts at 0 before each timed loop and must end at `n`. `op` picks the loop body:
+
+- `set`: `(state-set P (+ i 1))`;
+- `incr`: `(state-incr P)`;
+- `cas`: `(state-cas P i (+ i 1))`, which succeeds and writes on every iteration.
+
+Its gate (docs/STATE_EXEC_LOCKS.md, 11.2) is `incr` and `cas` each at most 1.1x `set` in
+`extra.ns_per_call`, on both schedulers and both depths. It is a paired gate: take two runs, the
+second with the order reversed (`--size op=set,incr,cas`, then `--size op=cas,incr,set`), pool
+them, and run
+
+```sh
+python3 tools/bench/state_exec_bench.py compare pooled.jsonl pooled.jsonl --pair op=set:incr \
+    --metric extra.ns_per_call --threshold 10 --max-noise 10 --fail-on-worse
+```
+
+and the same with `--pair op=set:cas`. `cas` takes one more argument than `set` and `incr` one
+fewer. `extra.steps_per_call` shows the difference in evaluator steps, so a `WORSE` verdict can be
+told apart from an extra argument's lookup.
+
 ### footprint.idle_process (sync, async)
 
 `n` processes (1000, 3000) parked on `msg-recv`: `extra.heap_bytes_per_process`,
