@@ -208,8 +208,10 @@ public:
   std::optional<priority_info> get_priority_as(int caller_pid, int pid) const override;
   bool set_priority_floor(int pid, int floor) override;
   void note_priority_clamped() override;
-  /// Thread-safe: `cmd` for process `pid`, applied between steps (unknown pids are ignored when
-  /// it is applied). True once queued.
+  /// Thread-safe: `cmd` for process `pid`, applied between steps by the next drain (a step's, or
+  /// drain_ingress()'s), as post_message's posts are; a driver blocked in wait_for_work() wakes.
+  /// set_priority applies through the host path (unchecked); an unknown pid is found, and ignored,
+  /// then. A query runs its function on the scheduler thread, and must not throw. True once queued.
   bool post_control(int pid, control_cmd cmd);
   bool set_max_steps(int pid, uint64_t max_steps);
   bool set_max_time(int pid, double seconds);
@@ -406,8 +408,9 @@ private:
   std::mutex ingress_mutex_;
   std::vector<std::pair<std::string, value_t>> ingress_;
   std::vector<std::shared_ptr<async_call>> completions_; // settled calls, guarded likewise
-  /// Set (under ingress_mutex_) while ingress_ or completions_ holds something, so a drain finds
-  /// an empty ingress without the lock.
+  std::vector<std::pair<int, control_cmd>> controls_;    // post_control's, guarded likewise
+  /// Set (under ingress_mutex_) while ingress_, completions_ or controls_ holds something, so a
+  /// drain finds an empty ingress without the lock.
   std::atomic<bool> ingress_pending_{false};
   /// A wait_for_work() is (about to be) blocked: a post notifies wakeup_.
   std::atomic<bool> idle_waiting_{false};
@@ -445,6 +448,8 @@ private:
   int step_once();
   // What a step does before picking a process: the ingress, the calls, the due timers.
   void drain(bool in_step);
+  // Apply one post_control command (scheduler thread).
+  void apply_control(int pid, control_cmd &cmd);
   uint64_t run_loop(std::optional<uint64_t> max_steps, std::optional<double> max_time);
   void execute_process_step(const process_ptr &pp);
   void handle_signal(process &proc);

@@ -525,6 +525,9 @@ int scheduler::step() {
 
 int scheduler::step_once() {
   detail::check_not_in_async_kernel("scheduler::step");
+  // Commands posted from other threads (post_control), between steps.
+  if (control_pending_.load(std::memory_order_acquire))
+    apply_controls();
   // Wake sleeping processes (and timed waits) whose deadline has passed; time out the lock waits
   // whose deadline passed (a program with no timer pays nothing for them).
   if (procs_.timed_count() > 0) {
@@ -1219,7 +1222,36 @@ bool scheduler::set_priority_floor(int pid, int floor) {
 
 void scheduler::note_priority_clamped() {}
 
-bool scheduler::post_control(int, control_cmd) { return false; }
+bool scheduler::post_control(int pid, control_cmd cmd) {
+  // Any thread: queued, and applied at the top of the next step (apply_controls), on the
+  // scheduler's thread. The posting thread may not read procs_, so an unknown pid is found, and
+  // ignored, there. An idle run() is not woken: it applies the command once its wait ends.
+  std::lock_guard<std::mutex> lock(control_mutex_);
+  controls_.emplace_back(pid, std::move(cmd));
+  control_pending_.store(true, std::memory_order_release);
+  return true;
+}
+
+void scheduler::apply_controls() {
+  std::vector<std::pair<int, control_cmd>> controls;
+  {
+    std::lock_guard<std::mutex> lock(control_mutex_);
+    controls.swap(controls_);
+    control_pending_.store(false, std::memory_order_relaxed);
+  }
+  chain_valid_ = false; // a query's time is no step's
+  for (auto &[pid, cmd] : controls) {
+    switch (cmd.what) {
+    case control_cmd::kind::set_priority:
+      set_priority(pid, cmd.value); // the host path, unchecked (design 7.4); false for a gone pid
+      break;
+    case control_cmd::kind::query:
+      if (cmd.query)
+        cmd.query(*this);
+      break;
+    }
+  }
+}
 
 bool scheduler::set_max_steps(int pid, uint64_t max_steps) {
   auto it = procs_.all().find(pid);

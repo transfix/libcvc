@@ -554,6 +554,8 @@ submit_result exec_coordinator::submit(const std::string &script, const execute_
   jkv(os, "script", script, f);
   jkv(os, "name", opts.name, f);
   jkv(os, "priority", opts.priority, f);
+  if (opts.priority_floor)
+    jkv(os, "priority_floor", *opts.priority_floor, f);
   jkv(os, "uid", opts.uid, f);
   jkv(os, "gid", opts.gid, f);
   jkv(os, "max_steps", opts.max_steps, f);
@@ -594,6 +596,7 @@ submit_result exec_coordinator::submit_local(const std::string &script,
   validated_opts.max_time = validated.max_time;
   validated_opts.max_memory = validated.max_memory;
   validated_opts.max_messages = validated.max_messages;
+  apply_priority_floor(validated_opts);
 
   // Check process count limit
   if (policy_.max_processes > 0 && sched_->process_count() >= policy_.max_processes) {
@@ -623,6 +626,7 @@ submit_result exec_coordinator::submit_local(const value_t &expr, const execute_
   validated_opts.max_time = validated.max_time;
   validated_opts.max_memory = validated.max_memory;
   validated_opts.max_messages = validated.max_messages;
+  apply_priority_floor(validated_opts);
 
   if (policy_.max_processes > 0 && sched_->process_count() >= policy_.max_processes) {
     std::lock_guard lk(stats_mu_);
@@ -640,6 +644,22 @@ submit_result exec_coordinator::submit_local(const value_t &expr, const execute_
   }
 
   return {pid, true, "", node_id_};
+}
+
+void exec_coordinator::apply_priority_floor(execute_options &opts) {
+  if (!policy_.priority_floor)
+    return;
+  // The policy's floor is a host's (docs/STATE_EXEC_LOCKS.md 7.2): the process gets it, or the
+  // stricter floor it came with, and a better priority is clamped to it. The count is the record
+  // (state_exec has no log of its own, gap G-5).
+  const int floor =
+      std::max(*policy_.priority_floor, opts.priority_floor.value_or(*policy_.priority_floor));
+  opts.priority_floor = floor;
+  if (opts.priority < floor) {
+    opts.priority = floor;
+    std::lock_guard lk(stats_mu_);
+    ++stats_.priority_clamped;
+  }
 }
 
 void exec_coordinator::handle_submit(const cvc::state_message &msg) {
@@ -671,6 +691,9 @@ void exec_coordinator::handle_submit(const cvc::state_message &msg) {
     execute_options opts;
     opts.name = std::move(name);
     opts.priority = priority;
+    int floor = 0;
+    if (xint(json, "priority_floor", floor))
+      opts.priority_floor = floor; // the submitter's; submit_local applies this node's policy too
     opts.uid = std::move(uid);
     opts.gid = std::move(gid);
     opts.max_steps = max_steps;
@@ -816,6 +839,10 @@ std::string exec_coordinator::serialize_process_for_migration(int pid) {
   bool f = true;
   jkv(os, "name", pi->name, f);
   jkv(os, "priority", pi->priority, f);
+  // The floor goes with the base (docs/STATE_EXEC_LOCKS.md 7.2); the target applies its own
+  // policy's floor over it.
+  if (const std::optional<priority_info> prio = sched_->get_priority(pid))
+    jkv(os, "priority_floor", prio->floor, f);
   jkv(os, "uid", pi->uid, f);
   jkv(os, "gid", pi->gid, f);
   jkv(os, "max_memory", pi->max_memory, f);
@@ -857,6 +884,11 @@ int exec_coordinator::ingest_migrated_process(const std::string &data) {
   execute_options opts;
   opts.name = name.empty() ? "migrated" : name;
   opts.priority = priority;
+  int floor = 0;
+  if (xint(data, "priority_floor", floor))
+    opts.priority_floor = floor; // the source's (absent from a source older than the floor)
+  // The target re-applies its own floor: no better base or floor than its policy allows (PR-11).
+  apply_priority_floor(opts);
   opts.uid = uid;
   opts.gid = gid;
   opts.max_memory = max_memory;
@@ -995,6 +1027,35 @@ bool exec_coordinator::admin_kill(int pid, const std::string &node_id) {
   return true;
 }
 
+bool exec_coordinator::admin_set_priority(int pid, const std::string &node_id, int priority) {
+  {
+    std::lock_guard lk(stats_mu_);
+    ++stats_.admin_commands;
+  }
+
+  if (node_id.empty() || node_id == node_id_) {
+    if (!sched_)
+      return false;
+    // Posted, not applied here: the caller need not be the scheduler's thread (td B17).
+    control_cmd cmd;
+    cmd.what = control_cmd::kind::set_priority;
+    cmd.value = priority;
+    return sched_->post_control(pid, std::move(cmd));
+  }
+
+  std::ostringstream os;
+  os << '{';
+  bool f = true;
+  jkv(os, "command", std::string("set_priority"), f);
+  jkv(os, "pid", static_cast<int64_t>(pid), f);
+  jkv(os, "priority", priority, f);
+  jkv(os, "from", node_id_, f);
+  os << '}';
+
+  send_message(make_path(cluster_id_, "control." + node_id), MIME_EXEC_CONTROL, os.str());
+  return true;
+}
+
 bool exec_coordinator::admin_set_policy(const resource_policy &policy,
                                         const std::string &target_cluster) {
   {
@@ -1067,6 +1128,16 @@ void exec_coordinator::handle_control(const cvc::state_message &msg) {
     std::string signal;
     xstr(json, "signal", signal);
     sched_->send_signal(pid, signal);
+  } else if (command == "set_priority") {
+    // A bus thread is not the scheduler's: the change is posted and applied between its steps
+    // (post_control). pause, resume, kill and send_signal stay direct calls until td Stage 0.
+    int priority = 0;
+    if (xint(json, "priority", priority)) {
+      control_cmd cmd;
+      cmd.what = control_cmd::kind::set_priority;
+      cmd.value = priority;
+      sched_->post_control(pid, std::move(cmd));
+    }
   }
 }
 
@@ -1316,6 +1387,8 @@ std::string exec_coordinator::serialize_resource_policy(const resource_policy &p
   jkv(os, "max_processes", p.max_processes, f);
   jkv(os, "max_total_memory", p.max_total_memory, f);
   jkv(os, "enforce", static_cast<int64_t>(static_cast<int>(p.enforce)), f);
+  if (p.priority_floor)
+    jkv(os, "priority_floor", *p.priority_floor, f);
   os << '}';
   return os.str();
 }
@@ -1340,6 +1413,9 @@ bool exec_coordinator::deserialize_resource_policy(const std::string &json, reso
   int enforce_int = 0;
   if (xint(json, "enforce", enforce_int))
     p.enforce = static_cast<resource_policy::mode>(enforce_int);
+  int floor = 0;
+  if (xint(json, "priority_floor", floor))
+    p.priority_floor = floor;
   return true;
 }
 

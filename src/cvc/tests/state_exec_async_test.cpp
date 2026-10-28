@@ -8,6 +8,7 @@
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/memory_tracker.h>
 #include <cvc/state/state_exec/process.h>
+#include <cvc/state/state_exec/scheduler.h> // SyncPostControl
 #include <cvc/state/state_exec/task.h>
 #include <cvc/state/state_exec/types.h>
 #include <gtest/gtest.h>
@@ -774,4 +775,89 @@ TEST(AppExecScheduler, IsAppWideSingletonAndUsable) {
   auto it = results.find(pid);
   ASSERT_NE(it, results.end());
   EXPECT_EQ(std::get<int64_t>(it->second.v), 5);
+}
+
+// post_control (docs/STATE_EXEC_LOCKS.md 7.4; locks plan L2.6): a command posted from another
+// thread is applied by the scheduler's next drain, between steps, in the order posted, and wakes a
+// driver blocked in wait_for_work(). set_priority goes through the host path (unchecked; an
+// unknown pid is ignored) and a query runs on the scheduler's thread.
+TEST(AsyncPostControl, AppliedByTheNextDrainFromAnyThread) {
+  async_scheduler sched(scheduling_policy::priority_rr);
+  const int pid = sched.execute(std::string("(+ 1 2)"));
+  std::thread::id query_thread;
+  int seen = -100;
+  std::thread poster([&] {
+    control_cmd set;
+    set.what = control_cmd::kind::set_priority;
+    set.value = 4;
+    EXPECT_TRUE(sched.post_control(pid, std::move(set)));
+    control_cmd unknown;
+    unknown.what = control_cmd::kind::set_priority;
+    unknown.value = 1;
+    EXPECT_TRUE(sched.post_control(9999, std::move(unknown))); // queued: the pid is looked up later
+    control_cmd query;
+    query.what = control_cmd::kind::query;
+    query.query = [&](scheduler_base &s) {
+      query_thread = std::this_thread::get_id();
+      seen = s.get_priority(pid)->base;
+    };
+    EXPECT_TRUE(sched.post_control(pid, std::move(query)));
+  });
+  poster.join();
+  EXPECT_EQ(sched.get_priority(pid)->base, 0); // not applied on the posting thread
+  sched.drain_ingress();
+  EXPECT_EQ(sched.get_priority(pid)->base, 4);
+  EXPECT_EQ(seen, 4); // after the set_priority posted before it
+  EXPECT_EQ(query_thread, std::this_thread::get_id());
+
+  // A step drains too.
+  control_cmd again;
+  again.what = control_cmd::kind::set_priority;
+  again.value = 2;
+  sched.post_control(pid, std::move(again));
+  EXPECT_EQ(sched.sync_step(), 1);
+  EXPECT_EQ(sched.get_priority(pid)->base, 2);
+
+  // A driver blocked in wait_for_work() with nothing to do wakes for a post.
+  async_scheduler idle;
+  bool ran = false;
+  std::thread later([&] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    control_cmd query;
+    query.what = control_cmd::kind::query;
+    query.query = [&](scheduler_base &) { ran = true; };
+    idle.post_control(-1, std::move(query));
+  });
+  const auto t0 = std::chrono::steady_clock::now();
+  EXPECT_TRUE(idle.wait_for_work(10.0));
+  const double waited =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  later.join();
+  EXPECT_LT(waited, 10.0) << "wait_for_work woke after " << waited << " s";
+  EXPECT_FALSE(ran);
+  idle.drain_ingress();
+  EXPECT_TRUE(ran);
+}
+
+// The synchronous scheduler's post_control: queued under its own mutex and applied at the top of
+// its next step, on the stepping thread.
+TEST(SyncPostControl, AppliedAtTheTopOfTheNextStep) {
+  scheduler sched(scheduling_policy::priority_rr);
+  const int pid = sched.execute(std::string("(begin (set i 0) (while (< i 100) (set i (+ i 1))))"));
+  std::thread::id query_thread;
+  std::thread poster([&] {
+    control_cmd set;
+    set.what = control_cmd::kind::set_priority;
+    set.value = -3;
+    EXPECT_TRUE(sched.post_control(pid, std::move(set)));
+    control_cmd query;
+    query.what = control_cmd::kind::query;
+    query.query = [&](scheduler_base &) { query_thread = std::this_thread::get_id(); };
+    EXPECT_TRUE(sched.post_control(pid, std::move(query)));
+  });
+  poster.join();
+  EXPECT_EQ(sched.get_priority(pid)->base, 0);
+  EXPECT_EQ(sched.step(), 1);
+  EXPECT_EQ(sched.get_priority(pid)->base, -3);
+  EXPECT_EQ(query_thread, std::this_thread::get_id());
 }

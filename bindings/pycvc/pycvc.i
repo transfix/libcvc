@@ -2573,6 +2573,33 @@ PYCVC_STATE_EXEC_ENUM(cvc::thread_class, pycvc_enum_thread_class, "thread_class"
 thread_class = _pycvc.thread_class
 %}
 
+// An optional int member (resource_policy.priority_floor, execute_options.priority_floor) reads
+// and writes as an int or None.
+%{
+namespace pycvc {
+// The member's new value: None (empty) or an int that fits. Throws std::invalid_argument, naming
+// `what`, for anything else.
+std::optional<int> optional_int_from_py(PyObject *v, const char *what) {
+  if (v == Py_None)
+    return std::nullopt;
+  int overflow = 0;
+  const long n = PyLong_Check(v) && !PyBool_Check(v) ? PyLong_AsLongAndOverflow(v, &overflow) : -1;
+  if (!PyLong_Check(v) || PyBool_Check(v) || overflow != 0 || (n == -1 && PyErr_Occurred()) ||
+      n < INT_MIN || n > INT_MAX) {
+    PyErr_Clear();
+    throw std::invalid_argument(std::string(what) + ": an int or None");
+  }
+  return static_cast<int>(n);
+}
+
+PyObject *optional_int_to_py(const std::optional<int> &v) {
+  if (!v)
+    Py_RETURN_NONE;
+  return PyLong_FromLong(*v);
+}
+} // namespace pycvc
+%}
+
 // eval_phase, step_kind, and resource_policy::mode (pycvc.resource_policy.mode, set on the class
 // below).
 %{
@@ -3967,6 +3994,16 @@ struct resource_policy {
   unsigned long long max_total_memory;
   cvc::state_exec::resource_policy::mode enforce;
 };
+// priority_floor is an int, or None (no floor of the policy's).
+%extend resource_policy {
+  PyObject *_priority_floor_get() const { return pycvc::optional_int_to_py($self->priority_floor); }
+  void _priority_floor_set(PyObject *floor) {
+    $self->priority_floor = pycvc::optional_int_from_py(floor, "resource_policy.priority_floor");
+  }
+  %pythoncode %{
+    priority_floor = property(_priority_floor_get, _priority_floor_set)
+  %}
+}
 %pythoncode %{
 resource_policy.mode = _pycvc._resource_policy_mode
 %}
