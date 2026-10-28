@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <cvc/state/state_exec/detail/lock_table.h>
 #include <cvc/state/state_exec/lock_manager.h>
+#include <cvc/state/state_exec/scheduler_base.h>
 #include <cvc/state/state_exec/types.h>
 #include <functional>
 #include <map>
@@ -152,7 +153,7 @@ struct lock_sched_ops {
   virtual bool park_lock(process &p) = 0;
   /// A lock waiter's wait is over: ready it.
   virtual void ready_lock_waiter(process &p) = 0;
-  /// Its inherited priority changed: re-level it in the run queue (phase L2).
+  /// Its inherited priority changed: re-level it in the run queue (protocol 5.9).
   virtual void relevel(process &p) = 0;
   /// The process table's flagged lock expiries (wake_due with no vector).
   virtual std::size_t lock_expired_count() const = 0;
@@ -204,8 +205,10 @@ struct frame_outcome {
 
 class lock_home {
 public:
-  /// Attach a home to `mgr` for a scheduler (`ops`). Phase L1: no priority policy, no port.
-  lock_home(std::shared_ptr<lock_manager> mgr, lock_sched_ops &ops);
+  /// Attach a home to `mgr` for a scheduler (`ops`) of `policy`: the home applies priorities
+  /// (protocol 2.1's prio) exactly when the policy is priority or priority_rr (design 12). No port
+  /// before phase L3.
+  lock_home(std::shared_ptr<lock_manager> mgr, lock_sched_ops &ops, scheduling_policy policy);
   /// Protocol 5.7: detach (every process of the home ended with abandon), then clear every
   /// process's lock fields. Runs before any other scheduler member is destroyed.
   ~lock_home();
@@ -213,6 +216,8 @@ public:
   lock_home &operator=(const lock_home &) = delete;
 
   home_id id() const { return id_; }
+  /// Whether the home applies priorities (its scheduler's policy is not round_robin).
+  bool applies_priorities() const { return prio_; }
   lock_manager &manager() { return *mgr_; }
   const std::shared_ptr<lock_manager> &manager_ptr() const { return mgr_; }
 
@@ -247,8 +252,11 @@ public:
   void wait_expired(std::vector<process *> &expired);
   /// 5.8: `p`'s base priority changed (p.priority).
   void set_base(process &p);
-  /// 4.14: apply notifications (phase L1: every one is this home's, applied at once).
+  /// 4.14: apply notifications (before phase L3 every one is this home's, applied at once).
   void deliver(const lock_notes &notes);
+  /// 5.9: apply one post to this home's process: a wake (stale ones ignored), or a relevel, which
+  /// reads the manager's current value and re-levels the process only when it changed.
+  void apply_post(const lock_post &post);
 
   // -- reads
   // ---------------------------------------------------------------------------------------
@@ -265,8 +273,8 @@ public:
   // -- checks
   // ---------------------------------------------------------------------------------------
   /// The home-side clauses of protocol section 6 (I2, I3, I4 home clauses, I6 second half, I8's
-  /// base clause) over every process of the home, and the key cache against the manager's
-  /// references. Throws lock_violation. For tests, at quiescent points.
+  /// base and quiescent clauses) over every process of the home, and the key cache against the
+  /// manager's references. Throws lock_violation. For tests, at quiescent points.
   void check_quiescent() const;
   /// The key cache's capacity and how many entries it holds.
   std::size_t cache_capacity() const { return entries_.size(); }
@@ -324,6 +332,7 @@ private:
   lock_table &table_;
   lock_sched_ops &ops_;
   home_id id_ = 0;
+  bool prio_ = false; // protocol 2.1's Home.prio
 
   std::vector<entry> entries_;
   std::unordered_map<cache_key, std::size_t, cache_hash, cache_eq> index_;

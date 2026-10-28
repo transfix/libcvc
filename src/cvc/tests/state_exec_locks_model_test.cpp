@@ -18,11 +18,13 @@
 ///      (parent, action) and rebuilt by replaying its path into a fresh world; a fair drain at
 ///      the bound; the shortest trace per violation.
 ///   5. Random runs (random_runs.py on one home), scenarios.py's scenarios on one home (the
-///      stale-wake ones on two), the L1 mutations, and the replay of the Python model's traces
-///      (tools/locks_model/export_traces.py, src/cvc/tests/data/locks_model_traces/).
+///      stale-wake ones on two), the L1 and L2 mutations, and the replay of the Python model's
+///      traces (tools/locks_model/export_traces.py, src/cvc/tests/data/locks_model_traces/).
 ///
-/// Sizes come from CVC_LOCKS_MODEL_BOUND, CVC_LOCKS_MODEL_STEPS and CVC_LOCKS_SANITIZER; see
-/// tools/locks_model/README.md.
+/// The configurations: 'l1' and 'l1x' (phase L1, one round_robin home), 'l2' and 'noinh1' (phase
+/// L2, one priority_rr home with set-priority, inheritance on and off), and explore.py's 'core'
+/// on the oracle alone. Sizes come from CVC_LOCKS_MODEL_BOUND, CVC_LOCKS_MODEL_STEPS and
+/// CVC_LOCKS_SANITIZER; see tools/locks_model/README.md.
 
 #include <algorithm>
 #include <chrono>
@@ -310,6 +312,7 @@ public:
   key_set abandoned;
   std::uint64_t next_seq = 0, next_hold = 0, next_gen = 0;
   std::uint64_t grants = 0; // the counters line of canonical(): every grant
+  std::uint64_t relevels = 0, relevels_coalesced = 0; // lock_stats' (not in canonical())
   std::map<home_id, std::map<std::string, int, key_cmp>> cache_refs;
   home_id next_home = 0; // attach_home hands out 0, 1, ... (lock_table's home ids)
   // ghosts (lockmodel.py): abandonment reports not yet seen, the last X generation, the largest
@@ -435,7 +438,27 @@ public:
     return std::nullopt;
   }
 
-  // -- 3.3 inheritance (L2's: lending is false throughout L1, so every inh is INF) ---------------
+  /// Every process within `depth` edges downstream of s0 in g, and s0 (lockmodel.py's
+  /// reach_depth).
+  static std::set<lock_pid> reach_depth(const graph_t &g, const std::set<lock_pid> &s0, int depth) {
+    std::set<lock_pid> seen = s0;
+    std::vector<lock_pid> frontier(s0.begin(), s0.end());
+    for (int d = 0; d < depth; ++d) {
+      std::vector<lock_pid> nxt;
+      for (auto a : frontier) {
+        auto it = g.find(a);
+        if (it == g.end())
+          continue;
+        for (auto b : it->second)
+          if (seen.insert(b).second)
+            nxt.push_back(b);
+      }
+      frontier = std::move(nxt);
+    }
+    return seen;
+  }
+
+  // -- 3.3 inheritance ---------------------------------------------------------------------------
   using pred_t = std::map<lock_pid, std::set<lock_pid>>;
   static pred_t pred_of(const graph_t &g) {
     pred_t pred;
@@ -631,6 +654,13 @@ public:
     start_inh_.clear();
     for (const auto &[P, r] : recs)
       start_inh_[P] = r.inh;
+    seeds_.clear();
+    lending_before_ = lending();
+    // the graph before, for 4.3's implementation note (lockmodel.py takes it in every _begin; it
+    // is read only when lending is true before and after)
+    start_graph_.clear();
+    if (lending_before_)
+      start_graph_ = graph();
   }
 
   // -- 4.2 / 4.3
@@ -667,18 +697,26 @@ public:
     all.insert(G.begin(), G.end());
     for (auto P : all)
       maybe_drop_rec(P);
+    seeds_.insert(G.begin(), G.end()); // 4.3's note: the processes granted are seeds too
     relevel_all(skip);
   }
+  /// 4.3's reference loop, then lockmodel.py's check of the implementation note against it.
   void relevel_all(const std::set<lock_pid> &skip) {
+    if (in_cancel_ && has(mutation::cancel_skips_relevel))
+      return; // 'no-relevel-cancel'
     bool lend = lending();
+    graph_t g;
     pred_t pred;
-    if (lend)
-      pred = pred_of(graph());
+    if (lend) {
+      g = graph();
+      pred = pred_of(g);
+    }
     std::set<lock_pid> xs;
     for (const auto &kv : start_inh_)
       xs.insert(kv.first);
     for (const auto &kv : recs)
       xs.insert(kv.first);
+    std::vector<lock_pid> changed, posted;
     for (auto x : xs) {
       auto si = start_inh_.find(x);
       int old = si == start_inh_.end() ? INF : si->second;
@@ -686,14 +724,69 @@ public:
       int nw = r != recs.end() ? inh_formula(x, pred, lend) : INF;
       if (r != recs.end())
         r->second.inh = nw;
-      if (nw != old && !skip.count(x) && applies(x)) { // left to right, as 4.3 says
-        if (opts.coalesce && r != recs.end() && r->second.rl)
+      if (nw == old)
+        continue;
+      changed.push_back(x);
+      if (!skip.count(x) && applies(x)) { // left to right, as 4.3 says
+        if (opts.coalesce && r != recs.end() && r->second.rl) {
+          ++relevels_coalesced;
           continue;
+        }
         if (opts.coalesce && r != recs.end())
           r->second.rl = true;
         N_.push_back({x.home, dt::lock_post{dt::lock_post::kind::relevel, x.pid, 0}});
+        posted.push_back(x);
+        ++relevels;
       }
     }
+    impl_note_check(changed, posted, g, lend);
+  }
+  /// 4.3's implementation note, its four lending cases, against the reference loop
+  /// (lockmodel.py's _impl_note_check).
+  void impl_note_check(const std::vector<lock_pid> &changed, const std::vector<lock_pid> &posted,
+                       const graph_t &g_after, bool lend) const {
+    auto list = [](const std::vector<lock_pid> &v) {
+      std::string s;
+      for (auto p : v)
+        s += (s.empty() ? "" : " ") + pid_str(p);
+      return "[" + s + "]";
+    };
+    if (!lending_before_ && !lend) {
+      std::vector<lock_pid> bad = changed;
+      for (const auto &[P, r] : recs)
+        if (r.inh != INF)
+          bad.push_back(P);
+      if (!bad.empty())
+        fail("impl-note", "lending false before and after, but the reference changed or holds a "
+                          "non-INF inh for " +
+                              list(bad));
+      return;
+    }
+    if (lending_before_ && !lend) {
+      std::vector<lock_pid> bad;
+      for (const auto &[P, r] : recs)
+        if (r.inh != INF)
+          bad.push_back(P);
+      if (!bad.empty() || !posted.empty())
+        fail("impl-note", "lending true before, false after: reference inh non-INF for " +
+                              list(bad) + ", posts " + list(posted) +
+                              "; the note sets INF and posts nothing");
+      return;
+    }
+    if (!lending_before_)
+      return; // it runs the reference loop over every rec
+    std::set<lock_pid> A = reach_depth(g_after, seeds_, 8);
+    if (!has(mutation::impl_note_after_only)) {
+      auto before = reach_depth(start_graph_, seeds_, 8);
+      A.insert(before.begin(), before.end());
+    }
+    std::vector<lock_pid> missing;
+    for (auto x : changed)
+      if (!A.count(x))
+        missing.push_back(x);
+    if (!missing.empty())
+      fail("impl-note", "inh of " + list(missing) + " changed but they are not in A (seeds " +
+                            list(std::vector<lock_pid>(seeds_.begin(), seeds_.end())) + ")");
   }
 
   // -- 4.4
@@ -781,6 +874,7 @@ public:
     tickets[s] = std::move(T);
     recs.at(P).ticket = s;
     queue.insert(s);
+    seeds_ = {P};
     relevel_all({});
     out = N_;
     return {s, ticket_state::queued};
@@ -950,14 +1044,18 @@ public:
       T->second.error.kind = spec_error::timeout;
     }
     key_set region(T->second.keys.begin(), T->second.keys.end());
+    seeds_ = {P};
     region_is_ticket_ = true;
+    in_cancel_ = true;
     try {
       finish(region, {P}, {});
     } catch (...) {
       region_is_ticket_ = false;
+      in_cancel_ = false;
       throw;
     }
     region_is_ticket_ = false;
+    in_cancel_ = false;
     out = N_;
     return ticket_state::cancelled;
   }
@@ -971,6 +1069,7 @@ public:
     if (h == holds.end() || h->second.pid != P)
       return;
     auto keys = drop_hold(hid, false);
+    seeds_ = {P};
     finish(key_set(keys.begin(), keys.end()), {P}, {});
     out = N_;
   }
@@ -1001,6 +1100,7 @@ public:
   }
   void end(lock_pid P, bool abandon, spec_notes &out) {
     begin();
+    seeds_ = {P};
     auto region = end_locked(P, abandon);
     finish(region, {}, {P});
     out = N_;
@@ -1030,6 +1130,7 @@ public:
         ended.insert(P);
       }
     homes.erase(H);
+    seeds_ = ended;
     finish(region, {}, ended);
     for (const auto &n : N_)
       if (n.home == H)
@@ -1046,6 +1147,7 @@ public:
     if (r == recs.end())
       return;
     r->second.base = base;
+    seeds_ = {P};
     relevel_all({});
     out = N_;
   }
@@ -1056,7 +1158,8 @@ public:
     auto r = recs.find(P);
     if (r == recs.end())
       return INF;
-    r->second.rl = false; // 4.3 coalescing: the apply clears the flag under M.mu
+    if (!has(mutation::coalesce_no_clear))
+      r->second.rl = false; // 4.3 coalescing: the apply clears the flag under M.mu
     return r->second.inh;
   }
   int peek_inh(lock_pid P) const {
@@ -1339,6 +1442,12 @@ private:
   spec_notes N_;
   std::map<lock_pid, int> start_inh_;
   bool region_is_ticket_ = false;
+  bool in_cancel_ = false; // cancel_skips_relevel's test
+  // 4.3's implementation note: the operation's seeds (its process, the processes it ended, and
+  // the processes granted), lending and the wait-for graph when it started
+  std::set<lock_pid> seeds_;
+  bool lending_before_ = false;
+  graph_t start_graph_;
 };
 
 // =============================================================================================
@@ -1520,8 +1629,12 @@ public:
                                        const key_list &drop) {
     const std::string desc =
         "try_acquire " + pid_str(P) + " " + req_str(keys, mode) + refs_desc(add, drop);
-    auto r =
-        spec_call(desc, [&] { return spec.try_acquire(P, owner, base, keys, mode, add, drop); });
+    auto r = spec_call(
+        desc, [&] { return spec.try_acquire(P, owner, base, keys, mode, add, drop); },
+        [&] {
+          auto rq = build(P.home, keys, mode, add, drop);
+          real->try_acquire(P, dt::rec_info{owner, base}, rq.req, rq.delta);
+        });
     if (real) {
       auto rq = build(P.home, keys, mode, add, drop);
       auto rr = real_call(
@@ -1538,7 +1651,13 @@ public:
                          lock_mode mode, const key_list &add, const key_list &drop, spec_notes &N) {
     const std::string desc =
         "block " + pid_str(P) + " " + req_str(keys, mode) + refs_desc(add, drop);
-    auto r = spec_call(desc, [&] { return spec.block(P, owner, base, keys, mode, add, drop, N); });
+    auto r = spec_call(
+        desc, [&] { return spec.block(P, owner, base, keys, mode, add, drop, N); },
+        [&] {
+          auto rq = build(P.home, keys, mode, add, drop);
+          dt::lock_notes rn;
+          real->block(P, dt::rec_info{owner, base}, rq.req, rq.delta, rn);
+        });
     if (real) {
       auto rq = build(P.home, keys, mode, add, drop);
       dt::lock_notes rn;
@@ -1555,7 +1674,7 @@ public:
 
   spec_outcome resume(lock_pid P, std::uint64_t tid) {
     const std::string desc = "resume " + pid_str(P) + " ticket " + std::to_string(tid);
-    auto r = spec_call(desc, [&] { return spec.resume(P, tid); });
+    auto r = spec_call(desc, [&] { return spec.resume(P, tid); }, [&] { real->resume(P, tid); });
     if (real) {
       auto rr = real_call(desc, [&] { return real->resume(P, tid); });
       auto a = fmt_outcome(to_outcome(r)), b = fmt_outcome(rr);
@@ -1568,10 +1687,13 @@ public:
 
   void start_body(lock_pid P, std::uint64_t hid) {
     const std::string desc = "start_body " + pid_str(P) + " hold " + std::to_string(hid);
-    spec_call(desc, [&] {
-      spec.start_body(P, hid);
-      return 0;
-    });
+    spec_call(
+        desc,
+        [&] {
+          spec.start_body(P, hid);
+          return 0;
+        },
+        [&] { real->start_body(P, hid); });
     if (real)
       real_call(desc, [&] { real->start_body(P, hid); });
     after(desc);
@@ -1621,10 +1743,16 @@ public:
 
   void detach_home(home_id H, spec_notes &N) {
     const std::string desc = "detach_home H" + std::to_string(H);
-    spec_call(desc, [&] {
-      spec.detach_home(H, N);
-      return 0;
-    });
+    spec_call(
+        desc,
+        [&] {
+          spec.detach_home(H, N);
+          return 0;
+        },
+        [&] {
+          dt::lock_notes rn;
+          real->detach_home(H, rn);
+        });
     if (real) {
       dt::lock_notes rn;
       real_call(desc, [&] { real->detach_home(H, rn); });
@@ -1677,10 +1805,18 @@ public:
 
   void ref_nodes(home_id H, const key_list &keys) {
     const std::string desc = "ref_nodes H" + std::to_string(H) + " " + keys_br(keys);
-    spec_call(desc, [&] {
-      spec.ref_nodes(H, keys);
-      return 0;
-    });
+    spec_call(
+        desc,
+        [&] {
+          spec.ref_nodes(H, keys);
+          return 0;
+        },
+        [&] {
+          std::vector<dt::key_ref> refs;
+          for (const auto &k : keys)
+            refs.push_back(dt::key_ref{nullptr, k, true});
+          real->ref_nodes(H, std::span<dt::key_ref>(refs));
+        });
     if (real) {
       std::vector<dt::key_ref> refs;
       for (const auto &k : keys) {
@@ -1704,10 +1840,20 @@ public:
 
   void unref_nodes(home_id H, const key_list &keys) {
     const std::string desc = "unref_nodes H" + std::to_string(H) + " " + keys_br(keys);
-    spec_call(desc, [&] {
-      spec.unref_nodes(H, keys);
-      return 0;
-    });
+    spec_call(
+        desc,
+        [&] {
+          spec.unref_nodes(H, keys);
+          return 0;
+        },
+        [&] {
+          // the node of each key as the home knows it; a key the home holds no reference on
+          // passes another home's node of it, or null (the table refuses both, 4.15)
+          std::vector<dt::lock_node *> ns;
+          for (const auto &k : keys)
+            ns.push_back(any_node(H, k));
+          real->unref_nodes(H, std::span<dt::lock_node *const>(ns));
+        });
     if (real) {
       auto &m = nodes_[H];
       std::vector<dt::lock_node *> ns;
@@ -1833,6 +1979,37 @@ private:
       throw lock_violation(v.invariant(), "[oracle] " + desc + ": " + v.what());
     }
   }
+  /// spec_call, and when the oracle refuses (a 'require' of the protocol), the same operation on
+  /// the table (`real_op`), which must refuse too: with a lock_violation naming the clause whose
+  /// precondition fails, or 4.4's std::logic_error. The oracle's refusal is then rethrown.
+  template <class F, class G>
+  auto spec_call(const std::string &desc, F &&f, G &&real_op) -> decltype(f()) {
+    try {
+      return f();
+    } catch (const lock_violation &v) {
+      if (v.invariant() != "require")
+        throw lock_violation(v.invariant(), "[oracle] " + desc + ": " + v.what());
+      if (real) {
+        bool refused = false;
+        try {
+          real_op();
+        } catch (const lock_violation &) {
+          refused = true;
+        } catch (const std::logic_error &e) {
+          if (is_stub(e))
+            throw not_built(e.what());
+          refused = true;
+        }
+        if (!refused)
+          fail("lockstep",
+               desc + ": the oracle refuses (" + v.what() + ") but the table accepted it");
+        if (checked) // both refused at the same point, so their states are still equal
+          compare_canonical(desc + " (refused)", spec.canonical(), real->canonical());
+      }
+      dirty_ = true;
+      throw;
+    }
+  }
   template <class F> auto real_call(const std::string &desc, F &&f) -> decltype(f()) {
     try {
       return f();
@@ -1898,6 +2075,8 @@ private:
       chk("queued", st.queued, spec.queue.size());
       chk("grants", st.grants, spec.grants);
       chk("cache_refs", st.cache_refs, spec.total_cache_refs());
+      chk("relevels", st.relevels, spec.relevels);
+      chk("relevels_coalesced", st.relevels_coalesced, spec.relevels_coalesced);
     }
   }
 
@@ -1969,6 +2148,17 @@ private:
       unref_local(m, k);
     }
   }
+  /// The node of key k that home H holds a reference on, else one another home does, else null.
+  dt::lock_node *any_node(home_id H, const std::string &k) const {
+    auto h = nodes_.find(H);
+    if (h != nodes_.end())
+      if (auto it = h->second.find(k); it != h->second.end() && it->second.node)
+        return it->second.node;
+    for (const auto &[other, m] : nodes_)
+      if (auto it = m.find(k); it != m.end() && it->second.node)
+        return it->second.node;
+    return nullptr;
+  }
   static void unref_local(std::map<std::string, node_ref> &m, const std::string &k) {
     auto it = m.find(k);
     if (it == m.end())
@@ -2001,6 +2191,7 @@ const char *rkind_name(rkind k) {
 enum world_mutation : std::uint32_t {
   wake_carries_outcome = 1u << 0,    // ('wake-no-tid-check') a wake resumes whatever waits now
   cache_miss_unreferenced = 1u << 1, // ('cache-miss-unreferenced') a miss cached with no reference
+  no_set_base = 1u << 2,             // ('no-set-base') set-priority skips the home's set_base
 };
 
 struct proc_cfg {
@@ -2036,9 +2227,10 @@ struct config {
   bool cache_choice = false;
   bool cache_clear = false;
   bool one_home = false;
-  /// The implementation's pinning (protocol 4.15, design 8.4): a probe never evicts a key of the
-  /// request it builds, and a key that finds every entry pinned passes uncached. false: world.py's
-  /// FIFO, which may evict a key of the same request (the Python state counts).
+  /// The implementation's pinning (protocol 4.15, design 8.4): the probe looks up every key of the
+  /// request it builds before it makes any miss, so a miss never evicts a key of the request, an
+  /// earlier or a later one, and a key that finds every entry pinned passes uncached. false:
+  /// world.py's FIFO, which may evict a key of the same request (the Python state counts).
   bool pin = true;
   bool real = true;
   /// Set when the table refused this configuration's homes (one_home off, a second home): the
@@ -2490,6 +2682,14 @@ public:
   /// The world's state: the manager's canonical dump, then every field world.py's key() has.
   std::string dump() {
     std::string o = M.canonical();
+    if (cfg.coalesce) {
+      // 4.3's coalescing flags: in World.key() (Rec.key()), not in the canonical dump of 2.1
+      o += "rl[";
+      for (const auto &[P, r] : M.spec.recs)
+        if (r.rl)
+          o += pid_str(P);
+      o += "]\n";
+    }
     o += "world cap=" + (cache_cap ? std::to_string(*cache_cap) : std::string("?")) + "\n";
     for (const auto &h : homes) {
       o += "H" + std::to_string(h.hid) + " p" + (h.prio ? "1" : "0") + " c" +
@@ -2966,12 +3166,15 @@ private:
       return pl;
     pl.cache = homes.at(std::size_t(hid)).cache;
     if (cfg.pin) {
+      // as lock_home builds a request: every key is looked up first, each hit pinned; then each
+      // miss takes a free entry or evicts the oldest unpinned one, and its new entry is pinned
       key_list pinned;
-      for (const auto &k : keys) {
-        if (contains(pl.cache, k)) {
+      for (const auto &k : keys)
+        if (contains(pl.cache, k))
           pinned.push_back(k);
-          continue;
-        }
+      for (const auto &k : keys) {
+        if (contains(pinned, k))
+          continue; // a hit
         if (int(pl.cache.size()) < cap) {
           pl.cache.push_back(k);
           pl.add.push_back(k);
@@ -3491,7 +3694,7 @@ private:
     auto &p = procs.at(pid);
     --p.prio_left;
     p.priority = v;
-    if (!p.locks.empty() || p.lock_ticket) {
+    if ((!p.locks.empty() || p.lock_ticket) && !wmut(no_set_base)) {
       spec_notes N;
       auto b = snap();
       M.set_base(p.P(), v, N);
@@ -3961,6 +4164,42 @@ config l1x_config() {
   return c;
 }
 
+/// explore.py's 'l2' (protocol 7, phase L2): one priority_rr home of three processes of bases 0,
+/// 2 and -2, the requests of 'l1', nesting depth 2, waits with deadlines, kills, the home's
+/// destruction, one set-priority per process over -2..2, and key caches of 0-3 entries. Relevels
+/// coalesce, the production setting (G-39); on one home every relevel is applied right after its
+/// operation, so coalescing changes no notification list, and explore.py's states are the same
+/// with it on or off.
+config l2_config() {
+  config c;
+  c.name = "l2";
+  c.homes = {true};
+  c.procs = {{0, 1, "o1", 0}, {0, 2, "o1", 2}, {0, 3, "o2", -2}};
+  c.requests = {{{kA}, X}, {{kAB}, S}, {{kAC}, X}, {{kAB, kB}, X}};
+  c.kinds = {rkind::wait_dl};
+  c.kills = {true};
+  c.prio_values = {-2, -1, 0, 1, 2};
+  c.prio_changes = 1;
+  c.destroy = true;
+  c.req_per_proc = 2;
+  c.cache = {0, 1, 2, 3};
+  c.cache_choice = true;
+  c.coalesce = true;
+  c.one_home = true;
+  c.real = use_real();
+  return c;
+}
+
+/// 'l2' with inheritance off (lock_manager::options::inheritance, the lock.inherit bench's off
+/// points, design 6.2): nothing lends, every inh stays INF and no relevel is sent, while bases
+/// change. explore.py's 'l2' with inheritance=False has its states.
+config noinh1_config() {
+  config c = l2_config();
+  c.name = "noinh1";
+  c.inheritance = false;
+  return c;
+}
+
 /// explore.py's 'core' (L3's: two homes, one of them priority_rr), for the measurement test's
 /// cross-check of the parts 'l1' never runs: posts between homes, inheritance and relevels.
 config core_config() {
@@ -3985,7 +4224,7 @@ config core_config() {
 /// scenarios.py's mk: every request kind, nesting 3 (2 in a handler), two signals, kills and
 /// terminations, priorities, five requests per process.
 world mk(std::vector<bool> homes, std::vector<proc_cfg> procs, std::uint32_t mut = 0,
-         std::uint32_t wmut = 0, int cache = 0, bool cache_clear = false) {
+         std::uint32_t wmut = 0, int cache = 0, bool cache_clear = false, bool coalesce = false) {
   config c;
   c.name = "scenario";
   c.homes = std::move(homes);
@@ -4003,6 +4242,7 @@ world mk(std::vector<bool> homes, std::vector<proc_cfg> procs, std::uint32_t mut
   c.req_per_proc = 5;
   c.cache = {cache};
   c.cache_clear = cache_clear;
+  c.coalesce = coalesce;
   c.one_home = c.homes.size() == 1;
   c.real = use_real();
   return world(std::move(c));
@@ -4303,8 +4543,9 @@ std::string scenario_one_home_refusal() {
 }
 
 std::string scenario_ref_nodes() {
-  // 4.15: ref_nodes requires an attached home; unref_nodes requires a reference (the refusals on
-  // the oracle alone: the table's are preconditions)
+  // 4.15: ref_nodes requires an attached home; unref_nodes requires a reference. Each refusal is
+  // the oracle's 'require', and the lockstep requires the table to refuse the same call (its
+  // 4.15 precondition)
   lockstep::options o;
   o.real = use_real();
   lockstep M(o);
@@ -4314,14 +4555,12 @@ std::string scenario_ref_nodes() {
   MODEL_ASSERT(M.spec.cache_refs.at(0).at("a.b") == 1 && M.spec.expected_trie_nodes() == 3, "");
   M.unref_nodes(0, {"a.b"});
   MODEL_ASSERT(M.spec.cache_refs.at(0).empty() && M.spec.expected_trie_nodes() == 1, "");
-  spec_manager alone(spec_manager::options{});
-  alone.attach_home(false, N);
   for (int i = 0; i < 2; ++i) {
     try {
       if (i == 0)
-        alone.ref_nodes(2, {"a"});
+        M.ref_nodes(2, {"a"});
       else
-        alone.unref_nodes(0, {"a"});
+        M.unref_nodes(0, {"a"});
     } catch (const lock_violation &v) {
       MODEL_ASSERT(v.invariant() == "require", v.what());
       continue;
@@ -4329,11 +4568,123 @@ std::string scenario_ref_nodes() {
     throw scenario_failure(i == 0 ? "ref_nodes of a home that is not attached was accepted"
                                   : "unref_nodes of a key with no reference was accepted");
   }
+  M.check_now();
+  MODEL_ASSERT(M.spec.cache_refs.at(0).empty() && M.spec.expected_trie_nodes() == 1, "");
+  return "ok";
+}
+
+// -- phase L2: scenarios.py's inheritance scenarios, their homes merged into one priority_rr home
+// (protocol 7: on one home every relevel is applied right after its operation, 4.14) -----------
+
+int inh_of(world &w, int pid) { return w.procs.at(pid).inherited; }
+
+std::string scenario_l2_one_home() {
+  // protocol 7, L2: one home under priority_rr: a waiter boosts the holder, applied at once on the
+  // same home (4.14), and a set-priority re-levels it
+  auto w = mk({true}, {{0, 1, "o", 5}, {0, 2, "o", -5}}, 0, 0, 1);
+  run(w, {R(w, 1, {"a"}, X), R(w, 2, {"a"}, X)});
+  MODEL_ASSERT(inh_of(w, 1) == -5 && w.homes[0].port.empty(), inh_str(inh_of(w, 1)));
+  run(w, {act(ak::prio, 2, 2)});
+  MODEL_ASSERT(inh_of(w, 1) == 2, inh_str(inh_of(w, 1)));
+  w.drain();
+  return "ok";
+}
+
+std::string scenario_pi9() {
+  // PI-9: H (10) holds X a.b; V (10) queues X a; W (-10) queues S a.c: H and V boosted to -10, H
+  // through W's waiter edge to V; V granted within H's section, W after V's
+  auto w = mk({true}, {{0, 1, "o", 10}, {0, 2, "o", 10}, {0, 3, "o", -10}});
+  run(w, {R(w, 1, {"a.b"}, X), R(w, 2, {"a"}, X), R(w, 3, {"a.c"}, S)});
+  MODEL_ASSERT(inh_of(w, 1) == -10 && inh_of(w, 2) == -10,
+               inh_str(inh_of(w, 1)) + " " + inh_str(inh_of(w, 2)));
+  run(w, {act(ak::finish, 1)});
+  MODEL_ASSERT(w.procs.at(2).status == pstatus::run && w.procs.at(3).status == pstatus::parked, "");
+  w.drain();
+  return "ok";
+}
+
+std::string scenario_pi11(std::uint32_t mut = 0) {
+  // PI-11: P (5) holds X a.b, R (5) holds S a.c; P queues X a; W (-10) queues X a, then times
+  // out: P and R boosted to -10, then both back to 5
+  auto w = mk({true}, {{0, 1, "o", 5}, {0, 2, "o", 5}, {0, 3, "o", -10}}, mut);
+  run(w, {R(w, 1, {"a.b"}, X), R(w, 2, {"a.c"}, S), R(w, 1, {"a"}, X),
+          R(w, 3, {"a"}, X, rkind::wait_dl)});
+  MODEL_ASSERT(inh_of(w, 1) == -10 && inh_of(w, 2) == -10,
+               inh_str(inh_of(w, 1)) + " " + inh_str(inh_of(w, 2)));
+  run(w, {act(ak::deadline, 3)});
+  const auto eff = [&](int pid) { return std::min(w.procs.at(pid).priority, inh_of(w, pid)); };
+  MODEL_ASSERT(eff(1) == 5 && eff(2) == 5, inh_str(inh_of(w, 1)) + " " + inh_str(inh_of(w, 2)));
+  w.drain();
+  return "ok";
+}
+
+std::string scenario_chain_cap8() {
+  // p_i holds X k_i and nests X k_(i+1); p10 holds k10. p1 (base -5) reaches p2..p9 (1..8 edges),
+  // not p10 (9 edges), which inherits 3 from p2..p9; p1's kill withdraws its share down the chain
+  const int n = 10;
+  std::vector<proc_cfg> procs;
+  for (int i = 1; i <= n; ++i)
+    procs.push_back({0, i, "o", i == 1 ? -5 : 3});
+  auto w = mk({true}, procs);
+  for (int i = n; i >= 1; --i)
+    run(w, {R(w, i, {"k" + std::to_string(i)}, X)});
+  for (int i = n - 1; i >= 1; --i)
+    run(w, {R(w, i, {"k" + std::to_string(i + 1)}, X)});
+  auto inh = [&] {
+    std::string s;
+    for (int i = 1; i <= n; ++i)
+      s += (i > 1 ? " " : "") + inh_str(inh_of(w, i));
+    return s;
+  };
+  for (int i = 2; i <= 9; ++i)
+    MODEL_ASSERT(inh_of(w, i) == -5, inh());
+  MODEL_ASSERT(inh_of(w, 1) == INF && inh_of(w, 10) == 3, inh());
+  run(w, {act(ak::kill, 1, 1)});
+  MODEL_ASSERT(inh_of(w, 2) == INF, inh());
+  for (int i = 3; i <= n; ++i)
+    MODEL_ASSERT(inh_of(w, i) == 3, inh());
+  std::string r = inh();
+  w.drain();
+  return "ok " + r;
+}
+
+std::string scenario_coalesce(std::uint32_t mut = 0) {
+  // P1 (5) holds X a; P2 (-1) queues X a: P1 boosted by a relevel; P2 times out: P1's boost must
+  // go, through a second relevel that coalescing must not swallow
+  auto w = mk({true}, {{0, 1, "o", 5}, {0, 2, "o", -1}}, mut, 0, 0, false, true);
+  run(w, {R(w, 1, {"a"}, X), R(w, 2, {"a"}, X, rkind::wait_dl)});
+  MODEL_ASSERT(inh_of(w, 1) == -1, inh_str(inh_of(w, 1)));
+  run(w, {act(ak::deadline, 2)});
+  MODEL_ASSERT(inh_of(w, 1) == INF, inh_str(inh_of(w, 1)));
+  w.drain();
+  return "ok";
+}
+
+std::string scenario_impl_note(std::uint32_t mut = 0) {
+  // Q holds X a; P (10) queues X a; W (-5) queues X a, then times out: P's inh changes, and P is
+  // downstream of the seed W only in the graph before the cancel
+  auto w = mk({true}, {{0, 1, "o", 0}, {0, 2, "o", 10}, {0, 3, "o", -5}}, mut);
+  run(w, {R(w, 1, {"a"}, X), R(w, 2, {"a"}, X), R(w, 3, {"a"}, X, rkind::wait_dl)});
+  MODEL_ASSERT(inh_of(w, 2) == -5, inh_str(inh_of(w, 2)));
+  run(w, {act(ak::deadline, 3)});
+  MODEL_ASSERT(inh_of(w, 2) == INF, inh_str(inh_of(w, 2)));
+  w.drain();
+  return "ok";
+}
+
+std::string scenario_set_base_l2(std::uint32_t wmut = 0) {
+  // I8's base clause on a priority_rr home: a holder's set-priority reaches its rec (5.8), and the
+  // waiter's boost of it stays
+  auto w = mk({true}, {{0, 1, "o", 5}, {0, 2, "o", 0}}, 0, wmut);
+  run(w, {R(w, 1, {"a"}, X), R(w, 2, {"a"}, X), act(ak::prio, 1, -2)});
+  MODEL_ASSERT(w.M.spec.recs.at(lock_pid{0, 1}).base == -2, "");
+  MODEL_ASSERT(inh_of(w, 1) == 0, inh_str(inh_of(w, 1)));
+  w.drain();
   return "ok";
 }
 
 // =============================================================================================
-// 8. Random runs (random_runs.py, one home of prio false: phase L1)
+// 8. Random runs (random_runs.py on one home: of prio false, phase L1, or prio true, phase L2)
 // =============================================================================================
 
 const std::vector<std::string> kRandomKeys = {"a", "a.b", "a.c", "a.b.d", "b", "b.e", "c"};
@@ -4398,13 +4749,13 @@ double weight(ak k) {
   return 1;
 }
 
-config random_config(std::mt19937_64 &rnd, std::uint64_t seed) {
+config random_config(std::mt19937_64 &rnd, std::uint64_t seed, bool prio) {
   auto randint = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rnd); };
   auto random01 = [&] { return std::uniform_real_distribution<double>(0, 1)(rnd); };
   int variant = int(seed % 3);
   config c;
   c.name = "random seed " + std::to_string(seed);
-  c.homes = {false};
+  c.homes = {prio};
   int np = variant < 2 ? randint(3, 8) : randint(10, 14);
   for (int i = 0; i < np; ++i)
     c.procs.push_back({0, i + 1, randint(0, 1) ? "o2" : "o1", randint(-2, 2)});
@@ -4417,6 +4768,8 @@ config random_config(std::mt19937_64 &rnd, std::uint64_t seed) {
   c.signals = 1000000000;
   c.kills = {true, false};
   c.destroy = true;
+  if (prio)
+    c.prio_values = {-2, -1, 0, 1, 2}; // set-priority only under a priority policy (L1 has none)
   c.prio_changes = 1000000000;
   c.req_per_proc = 1000000000;
   c.coalesce = (seed / 3) % 2 == 1;
@@ -4453,13 +4806,14 @@ struct random_failure {
 
 /// Episodes of up to 400 random steps from seeds seed0, seed0 + 1000003, ..., each checked after
 /// every step and ended by the fair drain, until `total` steps ran. The first failure stops it.
-std::optional<random_failure> random_runs(std::uint64_t seed0, long total, long *steps_out,
-                                          long *episodes_out) {
+/// `prio`: the one home applies priorities (phase L2) or not (phase L1).
+std::optional<random_failure> random_runs(std::uint64_t seed0, long total, bool prio,
+                                          long *steps_out, long *episodes_out) {
   long steps = 0, eps = 0;
   std::uint64_t seed = seed0;
   while (steps < total) {
     std::mt19937_64 rnd(seed);
-    config cfg = random_config(rnd, seed);
+    config cfg = random_config(rnd, seed, prio);
     std::vector<action> trace;
     bool draining = false;
     try {
@@ -4523,6 +4877,12 @@ std::uint32_t python_mutation(const std::string &name) {
     return m::cancel_marks_failed;
   if (name == "query-first-gen")
     return m::query_first_gen;
+  if (name == "no-relevel-cancel")
+    return m::cancel_skips_relevel;
+  if (name == "coalesce-no-clear")
+    return m::coalesce_no_clear;
+  if (name == "impl-note-after-only")
+    return m::impl_note_after_only;
   fail("trace", "unknown mutation " + name);
 }
 
@@ -4723,12 +5083,12 @@ void run_bounded(config cfg, int bound) {
   EXPECT_TRUE(r.violations.empty()) << report(cfg, r.violations);
 }
 
-void run_random(long total) {
+void run_random(long total, bool prio) {
   long steps = 0, eps = 0;
   auto t0 = std::chrono::steady_clock::now();
   std::optional<random_failure> f;
   try {
-    f = random_runs(7, total, &steps, &eps);
+    f = random_runs(prio ? 11 : 7, total, prio, &steps, &eps);
   } catch (const not_built &e) {
     GTEST_SKIP() << kStubSkip << " (" << e.what() << ")";
   }
@@ -4758,21 +5118,59 @@ TEST(LocksModelStress, L1Bound4) {
   run_bounded(l1x_config(), stress_bound());
 }
 
+TEST(LocksModel, L2Bounded) {
+  LT5_NEEDS_TABLE();
+  run_bounded(l2_config(), regular_bound());
+}
+
+TEST(LocksModel, NoInheritance) {
+  LT5_NEEDS_TABLE();
+  run_bounded(noinh1_config(), regular_bound());
+}
+
+TEST(LocksModelStress, L2Bound4) {
+  LT5_NEEDS_TABLE();
+  run_bounded(l2_config(), stress_bound());
+}
+
 namespace {
 
 /// explore.py's counts (revision 5b of the model) of distinct states and of transitions. 'l1x' is
 /// explore.py's 'l1' with signals=1 and foreign=True (tools/locks_model/README.md, "The C++ model
-/// check"); 'core' is explore.py's own, two homes with posts between them and inheritance.
+/// check"); 'core' is explore.py's own, two homes with posts between them and inheritance; 'l2' is
+/// explore.py's (the same with coalesce=True, as here); 'noinh1' is explore.py's 'l2' with
+/// inheritance=False. explore.py deduplicates states on hash(World.key()), and CPython's
+/// hash(-1) == hash(-2), so two states that differ only in a priority of -1 against -2 collide
+/// and one of them is never explored: the counts of 'l2' and 'noinh1', whose set-priority values
+/// include both, are explore.py's run with states deduplicated on World.key() itself
+/// (tools/locks_model/README.md, "The C++ model check"). The others are the same either way.
 struct python_count {
   const char *config;
   int bound;
   std::size_t states, transitions;
 };
 constexpr python_count kPythonCounts[] = {
-    {"l1", 1, 73, 132},  {"l1", 2, 1633, 2412},  {"l1", 3, 26834, 43572},
-    {"l1x", 1, 85, 168}, {"l1x", 2, 1921, 3552}, {"l1x", 3, 34266, 68514},
-    {"core", 1, 25, 24}, {"core", 2, 776, 871},  {"core", 3, 15746, 23201},
+    {"l1", 1, 73, 132},      {"l1", 2, 1633, 2412},     {"l1", 3, 26834, 43572},
+    {"l1x", 1, 85, 168},     {"l1x", 2, 1921, 3552},    {"l1x", 3, 34266, 68514},
+    {"core", 1, 25, 24},     {"core", 2, 776, 871},     {"core", 3, 15746, 23201},
+    {"l2", 1, 121, 120},     {"l2", 2, 2587, 3624},     {"l2", 3, 42075, 63798},
+    {"noinh1", 1, 121, 120}, {"noinh1", 2, 2323, 3360}, {"noinh1", 3, 33297, 55020},
 };
+
+/// A configuration by name: l1, l1x, l2, noinh1 or core.
+config config_named(const std::string &name) {
+  if (name == "core")
+    return core_config();
+  if (name == "l1x")
+    return l1x_config();
+  if (name == "l2")
+    return l2_config();
+  if (name == "noinh1")
+    return noinh1_config();
+  if (name == "l1")
+    return l1_config();
+  fail("model", "no configuration named " + name);
+}
 
 /// The world and the oracle against the Python model: on the oracle alone and with explore.py's
 /// FIFO cache (no pinning), each configuration must have exactly the states and transitions
@@ -4782,9 +5180,7 @@ void expect_python_counts(int min_bound, int max_bound, bool replay_too) {
   for (const auto &pc : kPythonCounts) {
     if (pc.bound < min_bound || pc.bound > max_bound)
       continue;
-    config cfg = std::string(pc.config) == "core"  ? core_config()
-                 : std::string(pc.config) == "l1x" ? l1x_config()
-                                                   : l1_config();
+    config cfg = config_named(pc.config);
     cfg.pin = false;
     cfg.real = false;
     for (bool replay : {false, true}) {
@@ -4810,22 +5206,23 @@ TEST(LocksModel, PortMatchesPythonStateCounts) { expect_python_counts(1, 2, true
 TEST(LocksModelStress, PortMatchesPythonStateCountsBound3) { expect_python_counts(3, 3, false); }
 
 /// The explorer's cost, for fixing the sizes (locks plan L1.3: states, seconds and peak memory on
-/// l1 at bounds 3, 4 and 5). Disabled: run it with --gtest_also_run_disabled_tests, one
-/// configuration per process so the peak is that run's, e.g. CVC_LOCKS_MODEL_MEASURE=l1x:4.
-/// The form is CONFIG:BOUND[:replay]: CONFIG is l1 or l1x, l1py or l1xpy for the same with
-/// explore.py's cache (their states are explore.py's for 'l1' and for 'l1' with signals=1 and
-/// foreign=True), or core (explore.py's, on the oracle alone); ':replay' rebuilds every state by
-/// replay even on the oracle alone, which is what the explorer does over the real table.
+/// l1 at bounds 3, 4 and 5; L2.3 the same on l2). Disabled: run it with
+/// --gtest_also_run_disabled_tests, one configuration per process so the peak is that run's, e.g.
+/// CVC_LOCKS_MODEL_MEASURE=l1x:4. The form is CONFIG:BOUND[:replay]: CONFIG is l1, l1x, l2 or
+/// noinh1, the same with 'py' appended for explore.py's cache (their states are explore.py's for
+/// 'l1', 'l1' with signals=1 and foreign=True, 'l2', and 'l2' with inheritance=False), or core
+/// (explore.py's, on the oracle alone); ':replay' rebuilds every state by replay even on the
+/// oracle alone, which is what the explorer does over the real table. CVC_LOCKS_MODEL_REAL=0
+/// measures the oracle alone.
 TEST(LocksModelStress, DISABLED_Measure) {
   LT5_NEEDS_TABLE();
   const char *e = std::getenv("CVC_LOCKS_MODEL_MEASURE");
   for (const auto &item : split(e && *e ? e : "l1:3,l1x:3", ',')) {
     auto f = split(item, ':');
     ASSERT_GE(f.size(), 2u) << item;
-    config cfg = f[0] == "core"                     ? core_config()
-                 : f[0] == "l1x" || f[0] == "l1xpy" ? l1x_config()
-                                                    : l1_config();
-    if (f[0] == "l1py" || f[0] == "l1xpy") {
+    const bool py = f[0].size() > 2 && f[0].compare(f[0].size() - 2, 2, "py") == 0;
+    config cfg = config_named(py ? f[0].substr(0, f[0].size() - 2) : f[0]);
+    if (py) {
       cfg.pin = false;
       cfg.name += " (explore.py's cache)";
     }
@@ -4843,12 +5240,22 @@ TEST(LocksModelStress, DISABLED_Measure) {
 
 TEST(LocksModel, RandomL1) {
   LT5_NEEDS_TABLE();
-  run_random(regular_steps());
+  run_random(regular_steps(), false);
 }
 
 TEST(LocksModelStress, RandomL1) {
   LT5_NEEDS_TABLE();
-  run_random(stress_steps());
+  run_random(stress_steps(), false);
+}
+
+TEST(LocksModel, RandomL2) {
+  LT5_NEEDS_TABLE();
+  run_random(regular_steps(), true);
+}
+
+TEST(LocksModelStress, RandomL2) {
+  LT5_NEEDS_TABLE();
+  run_random(stress_steps(), true);
 }
 
 // -- the Python model's traces
@@ -4973,6 +5380,38 @@ TEST(LocksModel, RefNodes) {
   expect_ok([] { return scenario_ref_nodes(); });
 }
 
+// -- the inheritance scenarios (phase L2, one priority_rr home)
+// ------------------------------------------
+
+TEST(LocksModel, L2OneHome) {
+  LT5_NEEDS_TABLE();
+  expect_ok([] { return scenario_l2_one_home(); });
+}
+TEST(LocksModel, PI09BoostThroughWaiterEdge) {
+  LT5_NEEDS_TABLE();
+  expect_ok([] { return scenario_pi9(); });
+}
+TEST(LocksModel, PI11MultiHolderBoostAndWithdraw) {
+  LT5_NEEDS_TABLE();
+  expect_ok([] { return scenario_pi11(); });
+}
+TEST(LocksModel, PIChainCappedAt8) {
+  LT5_NEEDS_TABLE();
+  expect_ok([] { return scenario_chain_cap8(); });
+}
+TEST(LocksModel, PICoalesce) {
+  LT5_NEEDS_TABLE();
+  expect_ok([] { return scenario_coalesce(); });
+}
+TEST(LocksModel, PIImplNote) {
+  LT5_NEEDS_TABLE();
+  expect_ok([] { return scenario_impl_note(); });
+}
+TEST(LocksModel, SetBaseL2) {
+  LT5_NEEDS_TABLE();
+  expect_ok([] { return scenario_set_base_l2(); });
+}
+
 // -- the mutations (locks plan L1 section 3, LT-5 item 5)
 // ------------------------------------------------------
 
@@ -5014,4 +5453,30 @@ TEST(LocksModel, MutationWakeCarriesOutcome) {
 TEST(LocksModel, MutationCacheMissUnreferenced) {
   LT5_NEEDS_TABLE();
   expect_violation("I4", [] { return scenario_cache_detach(0, cache_miss_unreferenced); });
+}
+
+// The L2 mutations (locks plan L2.3; protocol 7): each on the table and the oracle together, or
+// in the world, and each must report its own violation.
+
+TEST(LocksModel, Mutation_CancelSkipsRelevel) {
+  LT5_NEEDS_TABLE();
+  // PI-11's timeout keeps the boost of P and R (I8)
+  expect_violation("I8", [] { return scenario_pi11(dt::lock_table::cancel_skips_relevel); });
+}
+TEST(LocksModel, Mutation_CoalesceNoClear) {
+  LT5_NEEDS_TABLE();
+  // the flag is never cleared, so the relevel that would withdraw P1's boost is coalesced away and
+  // the boost is kept for ever (I8's quiescent clause)
+  expect_violation("I8", [] { return scenario_coalesce(dt::lock_table::coalesce_no_clear); });
+}
+TEST(LocksModel, Mutation_ImplNoteAfterOnly) {
+  LT5_NEEDS_TABLE();
+  // the set A without the graph before misses P and Q, whose inh the timeout changes
+  expect_violation("impl-note",
+                   [] { return scenario_impl_note(dt::lock_table::impl_note_after_only); });
+}
+TEST(LocksModel, Mutation_NoSetBase) {
+  LT5_NEEDS_TABLE();
+  // set-priority skips the home's set_base: the rec's base is stale (I8's base clause)
+  expect_violation("I8", [] { return scenario_set_base_l2(no_set_base); });
 }
