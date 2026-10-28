@@ -1,8 +1,10 @@
 name: CI/CD
 
 on:
+  # perf/** too: the state_exec lock phases are reviewed as drafts stacked on perf/locks-*
+  # branches, and they need the full set of jobs, the sanitizer jobs included.
   pull_request:
-    branches: [ main, master, develop ]
+    branches: [ main, master, develop, 'perf/**' ]
   push:
     # ci/full/**: a branch pushed there gets master's push run, heavy suites included, which
     # pull_request runs skip. For proving a change to those suites, or to how they run, before
@@ -1144,6 +1146,125 @@ jobs:
                /^[0-9]+\/[0-9]+ Test: / { t = $3 }
                tolower($0) ~ /^ *(\[skip\]|skip[: ])/ { print t ": " $0; n++ }
                END { if (!n) print "no skips" }' "$log"
+
+  # ── Sanitizers: TSan, and ASan with UBSan, over the threaded state_exec suites ──
+  # No lane ran a race detector or an address checker, and the state_exec lock work
+  # (docs/STATE_EXEC_LOCKS.md) adds code that runs on several threads. Its tests need one, and
+  # there is no local Linux box to run them on. So these two jobs build libcvc itself with gcc's
+  # -fsanitize=thread, or -fsanitize=address,undefined. The cvcpkg deps stay uninstrumented.
+  #
+  # Each job builds only the targets it runs. It runs the C++ suites that already use threads,
+  # whole, one process per executable. It also runs pycvc's exec scripts, with the sanitizer
+  # runtime preloaded into the uninstrumented interpreter. That way any race or leak already in
+  # the tree is fixed or suppressed before lock code lands. Suppressions go in
+  # .github/sanitizers/*.supp, each with a comment naming what it hides. Each lock phase appends
+  # its suites to the two lists below.
+  sanitizers:
+    name: sanitizers / ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: tsan
+            flags: -fsanitize=thread
+          # No vptr check: it references the typeinfo of every polymorphic class it checks.
+          # Jolt is built without RTTI, as are the two libcvc files that subclass its classes
+          # (src/cvc/CMakeLists.txt), so that typeinfo exists nowhere and libcvc.so fails to
+          # link ("undefined reference to `typeinfo for JPH::GroupFilter'").
+          - name: asan-ubsan
+            flags: -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-sanitize=vptr
+    concurrency:
+      group: ci-${{ github.ref }}-sanitizers-${{ matrix.name }}
+      cancel-in-progress: true
+    env:
+      # C++ test executables (build/bin/<name>).
+      SAN_CXX_TESTS: >-
+        state_exec_scheduler_test state_exec_async_test state_exec_integration_test
+        state_exec_coordinator_test ariadne_runtime_test thread_pool_test async_lane_test
+      # pycvc test scripts (bindings/pycvc/<name>).
+      SAN_PY_TESTS: >-
+        test_pycvc_exec.py test_pycvc_exec_async.py test_pycvc_exec_coro.py
+        test_pycvc_state_exec.py test_pycvc_state_exec_async.py test_pycvc_state_exec_data.py
+        test_pycvc_state_exec_eval.py test_pycvc_state_exec_exceptions.py
+        test_pycvc_state_exec_sched.py
+      # The lock tests read this and run their smaller sanitizer sizes.
+      CVC_LOCKS_SANITIZER: '1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch libcvc-deps
+        id: libcvc-deps
+        uses: ./.github/actions/fetch-libcvc-deps
+        with:
+          build_type: Release
+          link: shared
+
+      - name: Install build tools (cvcpkg)
+        uses: ./.github/actions/cvcpkg-build-tools
+
+      # Its own prefix, as in pycvc-linux: the interpreter bundle's zlib, openssl and friends must
+      # not shadow the deps bundle's.
+      - name: Install Python, numpy and SWIG (cvcpkg)
+        shell: bash
+        run: |
+          set -euo pipefail
+          py_prefix="$RUNNER_TEMP/py312"
+          cvcpkg install python312 numpy-cp312 swig --prefix "$py_prefix" --config release --link shared
+          "$py_prefix/bin/python3.12" -c "import numpy, sys; print(sys.version, 'numpy', numpy.__version__)"
+          echo "PY_PREFIX=$py_prefix" >> "$GITHUB_ENV"
+
+      # ubuntu-24.04's kernel randomizes mmap with 32 bits, more than gcc 13's sanitizer runtimes
+      # can map around ("FATAL: ThreadSanitizer: unexpected memory mapping").
+      - name: Narrow mmap randomization for the sanitizer runtimes
+        run: sudo sysctl vm.mmap_rnd_bits=28
+
+      # RelWithDebInfo, for line numbers in the reports. CUDA, OpenMP and cvcGL are off: nothing
+      # under test uses them, and libgomp's uninstrumented barriers would only add TSan noise.
+      - name: Configure
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${{ steps.libcvc-deps.outputs.path }}" ]; then
+            deps="${{ steps.libcvc-deps.outputs.path }}"
+          else
+            deps="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
+          fi
+          export LD_LIBRARY_PATH="$deps/lib:$PY_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+          flags="${{ matrix.flags }} -fno-omit-frame-pointer"
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_PREFIX_PATH="$deps;$PY_PREFIX" \
+            -DCMAKE_C_FLAGS="$flags" \
+            -DCMAKE_CXX_FLAGS="$flags" \
+            -DCMAKE_EXE_LINKER_FLAGS="$flags" \
+            -DCMAKE_SHARED_LINKER_FLAGS="$flags" \
+            -DCMAKE_MODULE_LINKER_FLAGS="$flags" \
+            -DCVC_BUILD_TESTS=ON \
+            -DCVC_BUILD_CVCGL=OFF \
+            -DCVC_ENABLE_CUDA=OFF \
+            -DCVC_ENABLE_OPENMP=OFF \
+            -DCVC_BUILD_PYCVC=ON \
+            -DCVC_BUILD_PYCVC_GL=OFF \
+            -DPython3_EXECUTABLE="$PY_PREFIX/bin/python3.12" \
+            -DSWIG_EXECUTABLE="$PY_PREFIX/bin/swig"
+
+      - name: Build
+        run: cmake --build build --parallel --target $SAN_CXX_TESTS pycvc
+
+      - name: Run the suites under ${{ matrix.name }}
+        shell: bash
+        run: bash .github/sanitizers/run.sh "${{ matrix.name }}"
+
+      - name: Upload the sanitizer logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sanitizers-${{ matrix.name }}-logs
+          path: san-logs/
+          if-no-files-found: ignore
 
   package-macos:
     runs-on: macos-latest
