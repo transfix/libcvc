@@ -1218,8 +1218,9 @@ TEST(RoomRelayLoopbackTest, StillOuterPeerReentryNoRealignNoFreeze) {
              static_cast<unsigned long long>(B.h.clock().total_dropped()),
              static_cast<unsigned long long>(r.server.clock().total_dropped()));
   diag().on = false;
-  if (B.h.clock_realigns() != realigns)
-    diag().dump();
+  diag().dump();
+  ADD_FAILURE() << "DIAGNOSTIC: always fails, so ctest prints every attempt's log (realigns "
+                << B.h.clock_realigns() << " vs baseline " << realigns << ")";
   EXPECT_TRUE(B.h.pose_known("C"));
   cvc::physics::body_state rs;
   std::uint64_t rt = 0;
