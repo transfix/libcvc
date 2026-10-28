@@ -1,0 +1,8 @@
+# LeakSanitizer suppressions for ci.yml's `sanitizers / asan-ubsan` job
+# (.github/sanitizers/run.sh).
+#
+# An entry hides a leak report that is not a leak in libcvc (an allocation a dependency keeps for
+# the life of the process, say), or a known leak that has its own fix in flight. Each entry gets a
+# comment saying which report it hides and why that is safe, or which PR fixes it. Format:
+# leak:<pattern>, one per line, where <pattern> matches a function, file or module name in the
+# leak's allocation stack.

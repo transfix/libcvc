@@ -1,0 +1,7 @@
+# ThreadSanitizer suppressions for ci.yml's `sanitizers / tsan` job (.github/sanitizers/run.sh).
+#
+# An entry hides a report that is not a race in libcvc, or a known race that has its own fix in
+# flight. Each entry gets a comment saying which report it hides and why that is safe, or which PR
+# fixes it. Format: <type>:<pattern>, one per line, where <type> is race, race_top, thread, mutex,
+# signal, deadlock or called_from_lib, and <pattern> matches a function, file or module name in
+# the report's stacks (https://github.com/google/sanitizers/wiki/ThreadSanitizerSuppressions).
