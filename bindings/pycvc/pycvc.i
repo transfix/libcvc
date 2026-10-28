@@ -1487,6 +1487,7 @@ class AsyncStateObserver(state_observer):
 #include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/data_job.h>
+#include <cvc/state/state_exec/detail/lock_home.h>
 #include <cvc/state/state_exec/evaluator.h>
 #include <cvc/state/state_exec/heap.h>
 #include <cvc/state/state_exec/intrinsics.h>
@@ -3974,7 +3975,33 @@ struct intrinsics_context {
   std::string node_id;
   std::string root_path;
   const channel_policy *channels;
+  // with-lock (docs/STATE_EXEC_LOCKS.md 5.5): False makes every busy request as :timeout 0.
+  bool lock_wait_allowed;
 };
+// lock_default_timeout: the timeout of a with-lock that names none, a float, or None (wait as
+// long as it takes).
+%extend intrinsics_context {
+  PyObject *_lock_default_timeout_get() const {
+    if (!$self->lock_default_timeout)
+      Py_RETURN_NONE;
+    return PyFloat_FromDouble(*$self->lock_default_timeout);
+  }
+  void _lock_default_timeout_set(PyObject *seconds) {
+    if (seconds == Py_None) {
+      $self->lock_default_timeout.reset();
+      return;
+    }
+    const double v = PyFloat_AsDouble(seconds);
+    if (v == -1.0 && PyErr_Occurred()) {
+      PyErr_Clear();
+      throw std::invalid_argument("intrinsics_context.lock_default_timeout: a number or None");
+    }
+    $self->lock_default_timeout = v;
+  }
+  %pythoncode %{
+    lock_default_timeout = property(_lock_default_timeout_get, _lock_default_timeout_set)
+  %}
+}
 %extend intrinsics_context {
   %pythoncode %{
     def _get_sched(self):
@@ -4176,6 +4203,14 @@ void register_intrinsics_keeping(cvc::state_exec::environment_ptr env,
   for (auto &[name, v] : scratch->bindings) {
     const auto *fn = std::get_if<native_fn>(&v.v);
     if (fn == nullptr) {
+      // The lock form: a copy that keeps the context and its Python owner too (LK-23). It stays
+      // a lock_ops object, so the evaluator and a restored wait still find it (gap G-41).
+      if (detail::lock_ops_of(v)) {
+        auto held = std::make_shared<
+            std::pair<std::shared_ptr<intrinsics_context>, std::shared_ptr<PyObject>>>(ctx, keep);
+        env->set(name, detail::make_lock_ops(ctx.get(), std::move(held)));
+        continue;
+      }
       env->set(name, v);
       continue;
     }
