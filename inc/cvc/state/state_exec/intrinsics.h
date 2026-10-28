@@ -158,6 +158,12 @@ struct intrinsics_context {
     std::function<void()> disconnect; // Disconnects from boost signal
   };
   std::unordered_map<int, watch_entry> watches;
+
+  // with-lock (docs/STATE_EXEC_LOCKS.md 5.5): the timeout of a request that names none (nullopt:
+  // wait as long as it takes), and whether a lock wait is allowed at all (false: every busy
+  // request is as :timeout 0, as Ariadne's init lane wants).
+  std::optional<double> lock_default_timeout;
+  bool lock_wait_allowed = true;
 };
 
 /// Register all DSL intrinsics into an environment.

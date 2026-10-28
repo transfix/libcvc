@@ -112,6 +112,11 @@ struct process_info {
   std::optional<std::string> exit_error;
   /// A failed process's exception (docs/STATE_EXEC_EXCEPTIONS.md 2.6).
   std::optional<value_t> exit_exception;
+  /// Its holds (docs/STATE_EXEC_LOCKS.md 5.10), and what it waits for while waiting: "lock
+  /// /<absolute key>" (the request's first key; inspect shows it relative to the caller), "msg
+  /// <channel>", "sleep" or "frame" (gap G-17).
+  std::size_t locks_held = 0;
+  std::optional<std::string> waiting_on;
 };
 
 /// Fill `info`'s budget-by-kind fields from a process's evaluation stats.

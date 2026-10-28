@@ -1036,6 +1036,18 @@ bool scheduler::kill(int pid) {
 }
 
 int scheduler::restore(process_ptr proc) {
+  // A stack that holds a lock (a lock_body with its hold, or a lock_enter woken with a grant)
+  // can't be restored: no snapshot makes one, and its hold is no restored process's (protocol
+  // 5.11; LW-12).
+  for (const eval_frame &f : proc->state.stack) {
+    const bool body = f.phase == eval_phase::lock_body;
+    const bool enter = f.phase == eval_phase::lock_enter;
+    if (!(body || enter) || f.extra_vals.size() < 7)
+      continue;
+    const std::size_t slot = body ? 6 : 3; // lock_frame_slot::hold / wait_or_outcome
+    if (std::holds_alternative<int64_t>(f.extra_vals[slot].v))
+      throw std::invalid_argument("restore: the process's stack holds a lock");
+  }
   const int pid = next_pid_++;
   proc->pid = pid;
   if (!is_finished(proc->status))
@@ -1215,6 +1227,17 @@ process_info scheduler::make_info(const process &proc) const {
   info.parent_pid = proc.parent_pid;
   info.exit_error = proc.exit_error;
   info.exit_exception = proc.exit_exception;
+  info.locks_held = proc.locks ? proc.locks->holds.size() : 0;
+  if (proc.status == process_status::waiting) {
+    if (proc.lock_waiting)
+      info.waiting_on = "lock /" + detail::lock_home::waiting_key(proc);
+    else if (proc.recv_path)
+      info.waiting_on = "msg " + *proc.recv_path;
+    else if (proc.wake_time)
+      info.waiting_on = std::string("sleep");
+    else if (proc.awaiting_frame)
+      info.waiting_on = std::string("frame");
+  }
   return info;
 }
 

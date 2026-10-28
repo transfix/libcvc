@@ -32,11 +32,15 @@ namespace cvc::state_exec {
 
 struct process;
 struct eval_frame;
+struct evaluator_state;
 struct intrinsics_context;
 
 namespace detail {
 
 using lock_clock = std::chrono::steady_clock;
+
+struct home_request;
+class lock_home;
 
 // ---------------------------------------------------------------------------------------------
 // The lock frames (design 8.5)
@@ -72,6 +76,45 @@ struct lock_ops {
 
 /// The lock_ops a value holds (one variant-index test, then the type name), or null.
 const lock_ops *lock_ops_of(const value_t &v);
+/// The with-lock binding for `ctx`; `keep` stays alive with it.
+value_t make_lock_ops(intrinsics_context *ctx, std::shared_ptr<void> keep = nullptr);
+
+/// The lock-enter token (design 8.5): armed by the evaluator around the one call that applies
+/// %lock-wait for a lock form, so the wait can reach that form's lock_enter frame, and a direct
+/// call of %lock-wait by a program finds none (LW-2). It never outlives that call.
+struct lock_enter_token {
+  evaluator_state *state = nullptr;
+  std::size_t frame = 0; // the lock_enter frame's index
+  int pid = -1;          // the process applying it
+};
+const lock_enter_token *lock_enter_token_get();
+/// RAII: arm `token` on this thread while alive.
+class lock_enter_scope {
+public:
+  explicit lock_enter_scope(const lock_enter_token *token);
+  ~lock_enter_scope();
+  lock_enter_scope(const lock_enter_scope &) = delete;
+  lock_enter_scope &operator=(const lock_enter_scope &) = delete;
+
+private:
+  const lock_enter_token *outer_;
+};
+
+/// A lock key as a program wrote it, made absolute (design 4.1): split on '.', each segment
+/// trimmed, empty ones dropped; an empty key, or a '#' in it, is a ValueError. A leading '/' is
+/// app-global, allowed where a '/' channel is (else PermissionError; gap G-15); any other key is
+/// under the chroot (ctx.root_path).
+std::string resolve_lock_key(const intrinsics_context &ctx, std::string_view written,
+                             const char *who);
+/// The canonical request for KEY (a string, or a list of strings) as written, each key found in
+/// `home`'s key cache or resolved (resolve_lock_key). Call home.begin_request() first.
+void build_request(home_request &req, lock_home &home, const intrinsics_context &ctx,
+                   const value_t &key, lock_mode mode);
+/// %lock-wait's body (protocol 5.2): KEYS as written, MODE ("exclusive" or "shared"), TIMEOUT
+/// (nil, or seconds). LockError where the process cannot wait, or with no lock-enter token.
+value_t lock_wait_call(const lock_ops &ops, std::span<const value_t> args);
+/// Bind with-lock, locks-held, lock-query and %lock-wait in `env` (register_intrinsics does).
+void register_lock_intrinsics(environment_ptr env, intrinsics_context *ctx);
 
 // ---------------------------------------------------------------------------------------------
 // The private state of protocol 2.2

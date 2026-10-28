@@ -3540,6 +3540,10 @@ struct process_info {
   unsigned long long async_steps;
   // Why it ended, if not normally: the kill reason, or a failed process's "Class: message".
   std::optional<std::string> exit_error;
+  // Its holds, and what it waits for: "lock /<key>", "msg <channel>", "sleep" or "frame"
+  // (docs/STATE_EXEC_LOCKS.md 5.10).
+  unsigned long long locks_held;
+  std::optional<std::string> waiting_on;
 };
 %extend process_info {
   // A failed process's exception (docs/STATE_EXEC_EXCEPTIONS.md 2.6), or None.

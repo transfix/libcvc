@@ -278,6 +278,7 @@ set(SOURCE_FILES
   state/state_exec/exec_coordinator.cpp
   state/state_exec/lock_manager.cpp
   state/state_exec/lock_home.cpp
+  state/state_exec/lock_intrinsics.cpp
   core/world_clock.cpp
   core/world_clock_binding.cpp
   core/clock_driver.cpp

@@ -4,11 +4,16 @@
 #include "special_forms.h"
 
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cvc/state/state_exec/builtins.h>
+#include <cvc/state/state_exec/detail/lock_home.h>
 #include <cvc/state/state_exec/generator.h>
 #include <cvc/state/state_exec/heap.h>
+#include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/parser.h>
+#include <cvc/state/state_exec/process.h>
+#include <cvc/state/state_exec/scheduler_base.h>
 #include <cvc/state/state_exec/stackless_evaluator.h>
 #include <iterator>
 #include <set>
@@ -450,6 +455,58 @@ void start_finally(evaluator_state &state, eval_frame &frame, const char *way, v
   state.stack.push_back({.expr = std::move(cleanup), .env = std::move(env)}); // last: moves frame
 }
 
+// -- with-lock's frames (docs/STATE_EXEC_LOCKS.md 8.5; protocol 5.4) ---------------------------
+
+constexpr std::size_t lock_slot(detail::lock_frame_slot s) { return static_cast<std::size_t>(s); }
+constexpr std::size_t kLockFixed = lock_slot(detail::lock_frame_slot::body);
+
+// The flags slot of a lock frame.
+enum lock_flag : int64_t {
+  lock_shared = 1,
+  lock_if_available = 2,
+  lock_timeout_given = 4,
+  lock_as = 8,
+};
+
+bool is_lock_frame(const eval_frame &f) {
+  return (f.phase == eval_phase::lock_enter || f.phase == eval_phase::lock_body) &&
+         f.extra_vals.size() >= kLockFixed;
+}
+
+// A lock frame ends: its body completed, or an unwind passes it. A lock_body gives its hold
+// back; a lock_enter gives back a grant it was woken with but never began, and withdraws a ticket
+// still queued (the defensive path). The process is the one stepping: a frame of another
+// process's (a restored copy) finds nothing of its own in the mirror. noexcept.
+void release_lock_frame(eval_frame &f) noexcept {
+  if (!is_lock_frame(f))
+    return;
+  const detail::lock_ops *ops =
+      detail::lock_ops_of(f.extra_vals[lock_slot(detail::lock_frame_slot::ops)]);
+  if (!ops || !ops->ctx || !ops->ctx->sched)
+    return;
+  scheduler_base &sched = *ops->ctx->sched;
+  const process_ptr &pp = sched.current_process();
+  if (!pp || !pp->locks)
+    return; // no home: nothing of this process's was ever held or queued
+  std::optional<std::uint64_t> hold;
+  const bool enter = f.phase == eval_phase::lock_enter;
+  if (enter) {
+    if (const auto o =
+            detail::outcome_of(f.extra_vals[lock_slot(detail::lock_frame_slot::wait_or_outcome)]);
+        o && o->hold)
+      hold = o->hold;
+  } else if (const auto *h =
+                 std::get_if<int64_t>(&f.extra_vals[lock_slot(detail::lock_frame_slot::hold)].v)) {
+    hold = static_cast<std::uint64_t>(*h);
+  }
+  if (detail::lock_home *home = sched.locks())
+    home->release_frame(*pp, hold, enter);
+  // Given back: the frame holds nothing now, however often it is passed again.
+  f.extra_vals[lock_slot(detail::lock_frame_slot::hold)] = nil_value;
+  if (enter)
+    f.extra_vals[lock_slot(detail::lock_frame_slot::wait_or_outcome)] = nil_value;
+}
+
 // Unwind `exc` from the top frame to the nearest try that handles it: a try running its body
 // tries its catches, and one with a finally runs it on the way out. With none, the state is
 // done, the exception uncaught.
@@ -495,6 +552,7 @@ void unwind_exception(evaluator_state &state, value_t exc) {
       start_finally(state, top, "raise", std::move(exc));
       return;
     }
+    release_lock_frame(top); // before the frames below see the exception: LIFO with finally
     state.stack.pop_back();
   }
 }
@@ -516,6 +574,7 @@ void unwind_jump(evaluator_state &state, bool is_return, value_t value) {
                                : top.phase == eval_phase::while_cond ||
                                      top.phase == eval_phase::while_body ||
                                      top.phase == eval_phase::for_body;
+    release_lock_frame(top);
     state.stack.pop_back();
     if (out)
       break;
@@ -962,8 +1021,10 @@ void stackless_evaluator::fail_step(evaluator_state &state, const std::exception
     state.converted_original = std::move(original);
   }
   annotate(state, exc);
-  if (!state.stack.empty())
+  if (!state.stack.empty()) {
+    release_lock_frame(state.stack.back());
     state.stack.pop_back(); // the frame that raised it
+  }
   unwind_exception(state, std::move(exc));
 }
 
@@ -1435,6 +1496,13 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
   frame.callee_depth = mark.depth;
   frame.callee_stamp = mark.stamp;
 
+  // with-lock: a soft form, recognized by what its head is bound to (design 4.2). A user macro,
+  // defun or set of the name wins: those are no lock_ops object.
+  if (detail::lock_ops_of(callee->second)) {
+    begin_lock_form(state, state.stack.size() - 1, callee->second);
+    return;
+  }
+
   frame.phase = eval_phase::eval_args;
   fill_values(frame.extra_vals, args);
   make_room(frame.results, args.size()); // the arguments' values
@@ -1781,14 +1849,400 @@ void stackless_evaluator::step_raise_value(evaluator_state & /*state*/, eval_fra
 // step: eval
 // ---------------------------------------------------------------------------
 
-// with-lock's steps (docs/STATE_EXEC_LOCKS.md 8.5). Nothing makes a lock frame before the lock
-// form is bound (locks plan L1.6).
-void stackless_evaluator::step_lock_enter(evaluator_state &, eval_frame &) {
-  throw dsl_error("LockError", "with-lock: not available yet");
+// ---------------------------------------------------------------------------
+// with-lock (docs/STATE_EXEC_LOCKS.md 4.1, 8.5; protocol 5.1-5.4)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+[[noreturn]] void lock_refused(const std::string &reason, const std::string &message) {
+  throw dsl_error("LockError", message, "dsl", {{"reason", value_t(reason)}});
 }
 
-void stackless_evaluator::step_lock_body(evaluator_state &, eval_frame &) {
-  throw dsl_error("LockError", "with-lock: not available yet");
+[[noreturn]] void lock_option_error(const std::string &what) {
+  throw dsl_error("ValueError", "with-lock: " + what);
+}
+
+// Where a lock form's parts are among its arguments (0 for an option not given).
+struct lock_form_parts {
+  std::size_t timeout = 0, else_form = 0, as = 0;
+  std::size_t body = 1; // the first body form
+  int64_t flags = 0;
+};
+
+// Read the options left to right, before anything is evaluated or the manager sees anything
+// (design 4.1; I13): an unknown option, an option given twice (the mode is one option), :else
+// without :if-available, an option missing its form, and :as without a symbol are ValueErrors.
+lock_form_parts parse_lock_form(std::span<const value_t> args) {
+  if (args.empty())
+    lock_option_error("expected a key");
+  lock_form_parts f;
+  bool mode = false, if_available = false;
+  std::size_t i = 1;
+  while (i < args.size()) {
+    const auto *sym = std::get_if<symbol>(&args[i].v);
+    if (!sym || sym->name.size() < 2 || sym->name[0] != ':')
+      break;
+    const std::string &o = sym->name;
+    const auto form_after = [&]() {
+      if (i + 1 >= args.size())
+        lock_option_error(o + " needs a form after it");
+      return i + 1;
+    };
+    const auto once = [&](bool seen) {
+      if (seen)
+        lock_option_error(o + " given twice");
+    };
+    if (o == ":exclusive" || o == ":shared") {
+      if (mode)
+        lock_option_error("the mode given twice");
+      mode = true;
+      if (o == ":shared")
+        f.flags |= lock_shared;
+      i += 1;
+    } else if (o == ":timeout") {
+      once(f.timeout != 0);
+      f.timeout = form_after();
+      f.flags |= lock_timeout_given;
+      i += 2;
+    } else if (o == ":if-available") {
+      once(if_available);
+      if_available = true;
+      f.flags |= lock_if_available;
+      i += 1;
+    } else if (o == ":else") {
+      once(f.else_form != 0);
+      f.else_form = form_after();
+      i += 2;
+    } else if (o == ":as") {
+      once(f.as != 0);
+      f.as = form_after();
+      if (!std::holds_alternative<symbol>(args[f.as].v))
+        lock_option_error(":as needs a symbol");
+      f.flags |= lock_as;
+      i += 2;
+    } else {
+      lock_option_error("unknown option " + o);
+    }
+  }
+  if (f.else_form && !if_available)
+    lock_option_error(":else needs :if-available");
+  f.body = i;
+  return f;
+}
+
+// KEY's or :timeout's value without a step of its own: a literal is itself, a symbol its
+// binding. Null when the form needs evaluating (a call).
+const value_t *lock_operand(const value_t &form, const environment &env) {
+  if (std::holds_alternative<list_ptr>(form.v))
+    return nullptr;
+  if (const auto *s = std::get_if<symbol>(&form.v)) {
+    const value_t *v = env.lookup(s->name);
+    if (!v)
+      throw dsl_error("NameError", "undefined symbol: " + s->name);
+    return v;
+  }
+  return &form;
+}
+
+// :timeout's value: nil is none, an infinite one none either; negative or NaN is a ValueError
+// (as await's, gap G-36).
+std::optional<double> lock_timeout_of(const value_t &v) {
+  if (v.is_nil())
+    return std::nullopt;
+  double s;
+  if (const auto *i = std::get_if<int64_t>(&v.v))
+    s = static_cast<double>(*i);
+  else if (const auto *d = std::get_if<double>(&v.v))
+    s = *d;
+  else
+    throw dsl_error("ValueError", "with-lock: :timeout must be a number, got " + v.type_name());
+  if (std::isnan(s) || s < 0)
+    throw dsl_error("ValueError", "with-lock: :timeout must be non-negative");
+  if (std::isinf(s))
+    return std::nullopt;
+  return s;
+}
+
+const char *lock_mode_name(lock_mode m) {
+  return m == lock_mode::exclusive ? "exclusive" : "shared";
+}
+
+// shown(keys) of a request (protocol 5.10): a string for one key, a list for several.
+value_t shown_request(const detail::home_request &req, std::string_view root) {
+  if (req.keys.size() == 1)
+    return value_t(detail::lock_home::show(req.keys[0].text(), root));
+  std::vector<value_t> out;
+  for (const auto &k : req.keys)
+    out.emplace_back(detail::lock_home::show(k.text(), root));
+  return make_list(std::move(out));
+}
+
+// The :as value's generation and abandoned fields, set in place (no allocation after a grant).
+void fill_as(value_t &as, std::uint64_t gen, bool abandoned) {
+  if (const auto *d = std::get_if<dict_ptr>(&as.v); d && *d)
+    for (auto &[k, v] : **d) {
+      if (k == "generation")
+        v = value_t(static_cast<int64_t>(gen));
+      else if (k == "abandoned")
+        v = value_t(abandoned);
+    }
+}
+
+process &stepping_process(const detail::lock_ops &ops) {
+  return *ops.ctx->sched->current_process();
+}
+
+} // namespace
+
+void stackless_evaluator::begin_lock_form(evaluator_state &state, std::size_t fi,
+                                          const value_t &ops_value) {
+  if (state.in_generator)
+    lock_refused("generator", "with-lock: not inside a generator");
+  const detail::lock_ops &ops = *detail::lock_ops_of(ops_value);
+  if (!ops.ctx || !ops.ctx->sched || ops.ctx->sched->current_pid() < 0 ||
+      !ops.ctx->sched->current_process())
+    lock_refused("no process", "with-lock: no process is stepping");
+  eval_frame &frame = state.stack[fi];
+  const auto &elems = *std::get<list_ptr>(frame.expr.v);
+  const std::span<const value_t> args(elems.data() + 1, elems.size() - 1);
+  const lock_form_parts f = parse_lock_form(args);
+
+  // The frame's layout (design 8.5), made before anything runs: the body forms are copies, so the
+  // frame evaluates the form as it was. A one-form body fits a recycled vector (8 values).
+  const std::size_t nbody = args.size() - f.body;
+  make_room(frame.extra_vals, kLockFixed + nbody);
+  frame.extra_vals.push_back(ops_value);                                   // ops
+  frame.extra_vals.push_back(nil_value);                                   // keys
+  frame.extra_vals.push_back(f.else_form ? args[f.else_form] : nil_value); // else_form
+  frame.extra_vals.push_back(nil_value);                                   // wait_or_outcome
+  frame.extra_vals.push_back(value_t(f.flags));                            // flags
+  frame.extra_vals.push_back(f.as ? args[f.as] : nil_value);               // as_name
+  frame.extra_vals.push_back(nil_value);                                   // hold
+  for (std::size_t i = f.body; i < args.size(); ++i)
+    frame.extra_vals.push_back(args[i]);
+
+  const value_t *key = lock_operand(args[0], *frame.env);
+  const value_t *timeout = f.timeout ? lock_operand(args[f.timeout], *frame.env) : &nil_value;
+  if (key && timeout) {
+    lock_acquire(state, fi, *key, lock_timeout_of(*timeout));
+    return;
+  }
+  // KEY or :timeout is a call: evaluated first, in lock_enter steps (index 0: KEY, 1: :timeout).
+  frame.phase = eval_phase::lock_enter;
+  frame.extra_lists.assign(1, {args[0], f.timeout ? args[f.timeout] : nil_value});
+  make_room(frame.results, 2);
+  if (!key) {
+    frame.index = 0;
+    push_frame(state, frame.extra_lists[0][0], frame.env);
+  } else {
+    frame.results.push_back(*key);
+    frame.index = 1;
+    push_frame(state, frame.extra_lists[0][1], frame.env);
+  }
+}
+
+void stackless_evaluator::lock_acquire(evaluator_state &state, std::size_t fi, const value_t &key,
+                                       std::optional<double> timeout) {
+  eval_frame &frame = state.stack[fi];
+  const value_t ops_value = frame.extra_vals[lock_slot(detail::lock_frame_slot::ops)];
+  const detail::lock_ops &ops = *detail::lock_ops_of(ops_value);
+  intrinsics_context &ctx = *ops.ctx;
+  process &p = stepping_process(ops);
+  detail::lock_home &home = *ctx.sched->locks();
+  const int64_t flags =
+      std::get<int64_t>(frame.extra_vals[lock_slot(detail::lock_frame_slot::flags)].v);
+  const lock_mode mode = (flags & lock_shared) ? lock_mode::shared : lock_mode::exclusive;
+
+  home.begin_request();
+  detail::home_request req;
+  detail::build_request(req, home, ctx, key, mode);
+
+  // :as: its scope and its value are made before the grant, which then only fills them in
+  // (nothing after a grant may throw, protocol 5.1).
+  value_t *as_value = nullptr;
+  if (flags & lock_as) {
+    const std::string &name =
+        std::get<symbol>(frame.extra_vals[lock_slot(detail::lock_frame_slot::as_name)].v).name;
+    environment_ptr scope = environment::extend(frame.env);
+    scope->set(name, make_dict({{"key", shown_request(req, ctx.root_path)},
+                                {"mode", value_t(std::string(lock_mode_name(mode)))},
+                                {"generation", value_t(int64_t(0))},
+                                {"abandoned", value_t(false)}}));
+    as_value = scope->lookup(name);
+    frame.extra_env = std::move(scope);
+  }
+
+  const detail::enter_result r = home.try_enter(p, req, ctx.root_path);
+  if (r.what != detail::enter_result::kind::busy) {
+    frame.phase = eval_phase::lock_body;
+    frame.extra_vals[lock_slot(detail::lock_frame_slot::hold)] =
+        value_t(static_cast<int64_t>(r.hold));
+    if (as_value)
+      fill_as(*as_value, r.gen, r.abandoned);
+    lock_body_begins(state, fi);
+    return;
+  }
+  if (flags & lock_if_available) {
+    // Busy, :if-available: :else is the body, holding nothing; :as is nil in it.
+    if (as_value)
+      *as_value = nil_value;
+    value_t else_form = frame.extra_vals[lock_slot(detail::lock_frame_slot::else_form)];
+    frame.extra_vals.resize(kLockFixed);
+    frame.extra_vals.push_back(std::move(else_form));
+    frame.phase = eval_phase::lock_body;
+    lock_body_begins(state, fi);
+    return;
+  }
+  const std::optional<double> wait_for =
+      (flags & lock_timeout_given) ? timeout : ctx.lock_default_timeout;
+  if (!ctx.lock_wait_allowed || (wait_for && *wait_for <= 0))
+    throw dsl_error("TimeoutError", "with-lock: not granted at once", "dsl",
+                    {{"key", shown_request(req, ctx.root_path)},
+                     {"mode", value_t(std::string(lock_mode_name(mode)))}});
+
+  // Busy, and it may wait (protocol 5.2): the frame waits in lock_enter on a %lock-wait child,
+  // which keeps KEYS as written (a restore resolves them in the restoring chroot), MODE and the
+  // TIMEOUT. The child is applied by index once pushed (the push may move `frame`), with the
+  // lock-enter token armed, through the frame's own lock form rather than the environment.
+  frame.phase = eval_phase::lock_enter;
+  frame.index = 2;
+  frame.extra_vals[lock_slot(detail::lock_frame_slot::keys)] = key;
+  const value_t mode_value(std::string(lock_mode_name(mode)));
+  const value_t timeout_value = wait_for ? value_t(*wait_for) : nil_value;
+  {
+    value_t call = make_list({value_t(symbol{"%lock-wait"}), key, mode_value, timeout_value});
+    environment_ptr env = frame.env;
+    push_new_frame(state.stack, std::move(call), std::move(env));
+  }
+  eval_frame &wait = state.stack.back();
+  wait.phase = eval_phase::apply;
+  wait.results.assign({state.stack[fi].extra_vals[lock_slot(detail::lock_frame_slot::keys)],
+                       mode_value, timeout_value});
+  const detail::lock_enter_token token{&state, fi, p.pid};
+  const detail::lock_enter_scope armed(&token);
+  const native_fn wait_native = [&ops](std::span<const value_t> a) {
+    return detail::lock_wait_call(ops, a);
+  };
+  apply_native(state, state.stack.back(), wait_native, state.stack.back().results);
+}
+
+void stackless_evaluator::lock_body_begins(evaluator_state &state, std::size_t fi) {
+  eval_frame &frame = state.stack[fi];
+  frame.results.clear();
+  frame.index = 0;
+  if (frame.extra_vals.size() == kLockFixed) {
+    // No body: acquire and release in the same step, value nil (as (begin)).
+    release_lock_frame(frame);
+    hand_up(state, nil_value);
+    return;
+  }
+  environment_ptr env = frame.extra_env ? frame.extra_env : frame.env;
+  push_frame(state, frame.extra_vals[kLockFixed], std::move(env));
+}
+
+void stackless_evaluator::step_lock_enter(evaluator_state &state, eval_frame &frame) {
+  const std::size_t fi = state.stack.size() - 1;
+  if (frame.index == 0 || frame.index == 1) {
+    // KEY (index 0) or :timeout (index 1) has its value.
+    if (frame.index == 0) {
+      const value_t &tform = frame.extra_lists[0][1];
+      const value_t *t = tform.is_nil() ? &nil_value : lock_operand(tform, *frame.env);
+      if (!t) {
+        frame.index = 1;
+        push_frame(state, frame.extra_lists[0][1], frame.env);
+        return;
+      }
+      const std::optional<double> timeout = lock_timeout_of(*t);
+      value_t key = std::move(frame.results[0]);
+      frame.results.clear();
+      frame.extra_lists.clear();
+      lock_acquire(state, fi, key, timeout);
+      return;
+    }
+    const std::optional<double> timeout = lock_timeout_of(frame.results.back());
+    value_t key = std::move(frame.results[0]);
+    frame.results.clear();
+    frame.extra_lists.clear();
+    lock_acquire(state, fi, key, timeout);
+    return;
+  }
+
+  // Index 2: the wait child returned (protocol 5.3); its outcome is in the frame.
+  const std::optional<detail::frame_outcome> o =
+      detail::outcome_of(frame.extra_vals[lock_slot(detail::lock_frame_slot::wait_or_outcome)]);
+  if (!o)
+    lock_refused("woken without a grant", "with-lock: woken without a grant");
+  const value_t ops_value = frame.extra_vals[lock_slot(detail::lock_frame_slot::ops)];
+  const detail::lock_ops &ops = *detail::lock_ops_of(ops_value);
+  process &p = stepping_process(ops);
+  if (const detail::lock_test_hooks *hooks = detail::lock_test_hooks_get();
+      hooks && hooks->in_step_lock_enter)
+    hooks->in_step_lock_enter(p.pid);
+  if (!o->hold)
+    throw dsl_exception(o->error); // TimeoutError or DeadlockError, raised at the form
+
+  // :as from the mirror's hold, made before the body begins; then the body begins.
+  const int64_t flags =
+      std::get<int64_t>(frame.extra_vals[lock_slot(detail::lock_frame_slot::flags)].v);
+  if ((flags & lock_as) && frame.extra_env && p.locks) {
+    const std::string &name =
+        std::get<symbol>(frame.extra_vals[lock_slot(detail::lock_frame_slot::as_name)].v).name;
+    for (const detail::mhold &h : p.locks->holds)
+      if (h.id == *o->hold)
+        if (value_t *as_value = frame.extra_env->lookup(name))
+          fill_as(*as_value, h.gen, h.abandoned);
+  }
+  ops.ctx->sched->locks()->start_body(p, *o->hold);
+  frame.phase = eval_phase::lock_body;
+  frame.extra_vals[lock_slot(detail::lock_frame_slot::hold)] =
+      value_t(static_cast<int64_t>(*o->hold));
+  frame.extra_vals[lock_slot(detail::lock_frame_slot::wait_or_outcome)] = nil_value;
+  lock_body_begins(state, fi);
+}
+
+void stackless_evaluator::resume_lock_wait(evaluator_state &state) {
+  const std::size_t fi = state.stack.size() - 2;
+  eval_frame &enter = state.stack[fi];
+  value_t &ops_slot = enter.extra_vals[lock_slot(detail::lock_frame_slot::ops)];
+  if (!detail::lock_ops_of(ops_slot)) {
+    // Decoded: the lock form is what with-lock is bound to here, in the restoring context. A
+    // natives scope with no lock intrinsics, or a program's own with-lock, leaves none (gap G-44).
+    const value_t *bound = enter.env ? enter.env->lookup("with-lock") : nullptr;
+    if (!bound || !detail::lock_ops_of(*bound))
+      lock_refused("restore", "with-lock: the restored wait has no lock form in its environment");
+    ops_slot = *bound;
+  }
+  const value_t ops_value = ops_slot;
+  const detail::lock_ops &ops = *detail::lock_ops_of(ops_value);
+  if (!ops.ctx || !ops.ctx->sched || ops.ctx->sched->current_pid() < 0 ||
+      !ops.ctx->sched->current_process())
+    lock_refused("no process", "with-lock: no process is stepping");
+  eval_frame &wait = state.stack.back();
+  wait.phase = eval_phase::apply;
+  wait.index = 0;
+  wait.results = std::move(wait.extra_lists[0]);
+  wait.extra_lists.clear();
+  wait.extra_vals.clear();
+  wait.extra_strs.clear();
+  const detail::lock_enter_token token{&state, fi, ops.ctx->sched->current_pid()};
+  const detail::lock_enter_scope armed(&token);
+  const native_fn wait_native = [&ops](std::span<const value_t> a) {
+    return detail::lock_wait_call(ops, a);
+  };
+  apply_native(state, state.stack.back(), wait_native, state.stack.back().results);
+}
+
+void stackless_evaluator::step_lock_body(evaluator_state &state, eval_frame &frame) {
+  frame.index++;
+  if (kLockFixed + static_cast<std::size_t>(frame.index) < frame.extra_vals.size()) {
+    environment_ptr env = frame.extra_env ? frame.extra_env : frame.env;
+    push_frame(state, frame.extra_vals[kLockFixed + frame.index], std::move(env));
+    return;
+  }
+  value_t v = std::move(frame.results.back());
+  release_lock_frame(frame);
+  hand_up(state, std::move(v));
 }
 
 void stackless_evaluator::step_await_call(evaluator_state &state, eval_frame &frame) {
@@ -1808,6 +2262,20 @@ void stackless_evaluator::step_await_call(evaluator_state &state, eval_frame &fr
   // Stepped while it waits on a channel (restored from a snapshot): apply the call again, and it
   // waits again.
   const bool again = frame.index == 0 && on_channel;
+  // A lock wait restored from a snapshot (design 5.8, 8.5): its wait child is applied again, in
+  // this step, through the lock form below it (never the environment's %lock-wait: pycvc re-wraps
+  // natives, gap G-41), with the lock-enter token armed. It queues afresh, at the tail.
+  if (again && frame.extra_strs[await_retry] != "retry" && state.stack.size() >= 2) {
+    const auto *head = std::get_if<list_ptr>(&frame.expr.v);
+    const symbol *sym =
+        head && *head && !(*head)->empty() ? std::get_if<symbol>(&(**head)[0].v) : nullptr;
+    eval_frame &below = state.stack[state.stack.size() - 2];
+    if (sym && sym->name == "%lock-wait" && below.phase == eval_phase::lock_enter &&
+        below.extra_vals.size() >= kLockFixed) {
+      resume_lock_wait(state);
+      return;
+    }
+  }
   if (again || frame.extra_strs[await_retry] == "retry") {
     if (frame.index == 1 && frame.extra_strs.size() > await_item &&
         !frame.extra_strs[await_item].empty()) {

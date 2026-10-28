@@ -385,6 +385,16 @@ private:
   // with-lock (docs/STATE_EXEC_LOCKS.md 8.5): a lock form's entry, its wait's step and its body.
   void step_lock_enter(evaluator_state &state, eval_frame &frame);
   void step_lock_body(evaluator_state &state, eval_frame &frame);
+  /// The frame at `frame_index` calls the lock form `ops` (a lock_ops object): parse its options,
+  /// lay the frame out, and acquire (or evaluate KEY and :timeout first).
+  void begin_lock_form(evaluator_state &state, std::size_t frame_index, const value_t &ops);
+  /// Protocol 5.1 steps 1-5 for the lock frame at `frame_index`, KEY and :timeout known.
+  void lock_acquire(evaluator_state &state, std::size_t frame_index, const value_t &key,
+                    std::optional<double> timeout);
+  /// The lock frame at `frame_index` holds what it asked for (or runs :else): push its body.
+  void lock_body_begins(evaluator_state &state, std::size_t frame_index);
+  /// A restored lock wait (the top frame, its lock_enter frame below): apply its wait again.
+  void resume_lock_wait(evaluator_state &state);
 
   // Exceptions (docs/STATE_EXEC_EXCEPTIONS.md)
   // The step that raised `e` (the top frame's) failed: raise its exception from that frame.
