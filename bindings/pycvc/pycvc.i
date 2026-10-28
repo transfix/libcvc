@@ -3315,8 +3315,9 @@ struct eval_frame {
 };
 
 // The recursive evaluator. user_macros() returns a copy of the macro map: a dict of name ->
-// (params, body).
-%pythonappend cvc::state_exec::evaluator::stats %{
+// (params, body). stats() keeps the evaluator alive. (Inside this namespace block, a feature
+// names its declaration relative to it: SWIG silently ignores cvc::state_exec::evaluator::stats.)
+%pythonappend evaluator::stats %{
   val._pycvc_owner = self
 %}
 class evaluator {
@@ -3340,7 +3341,7 @@ public:
 
 // A stackless evaluator's whole state. The members read and write as copies; stats is a reference
 // into the state.
-%pythonappend cvc::state_exec::evaluator_state::_stats %{
+%pythonappend evaluator_state::_stats %{
   val._pycvc_owner = self
 %}
 struct evaluator_state {
@@ -3595,7 +3596,7 @@ std::optional<size_t> eval_alloc_limit();
 void eval_alloc_check(size_t bytes, const char *who);
 size_t alloc_bytes(size_t count, size_t each);
 void eval_alloc_note(size_t bytes); // (#667) report bytes allocated, for the heap's re-measures
-%pythonappend cvc::state_exec::process::_state %{
+%pythonappend process::_state %{
   val._pycvc_owner = self
 %}
 struct process {

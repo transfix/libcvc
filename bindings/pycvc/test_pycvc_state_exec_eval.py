@@ -12,6 +12,7 @@ docs/PYCVC_STATE_EXEC_PARITY.md has the inventory.
 import gc
 import threading
 import time
+import weakref
 
 import pycvc
 from pycvc import eval_phase, process_status, symbol
@@ -88,17 +89,30 @@ def test_state_reading_its_script_in_slices():
 
 
 def test_stats_is_a_reference_that_keeps_its_owner():
+    # A weak reference to the owner shows it is still there: reading the stats of a freed owner
+    # usually returns the right numbers anyway (only a sanitizer sees it), so the reads alone
+    # don't show it. Once the reference goes, so does its owner.
     st = pycvc.stackless_evaluator(_builtins()).create_state("(+ 1 2)")
     stats = st.stats
+    owner = weakref.ref(st)
     del st
     gc.collect()
+    assert owner() is not None
     assert stats.get_step_count() == 0 and not stats.is_complete()
+    del stats
+    gc.collect()
+    assert owner() is None
     rec = pycvc.evaluator(_builtins())
     rec.evaluate_script("(+ 1 2)")
     s = rec.stats()
+    owner = weakref.ref(rec)
     del rec
     gc.collect()
+    assert owner() is not None
     assert s.get_step_count() > 0 and s.elapsed_seconds() >= 0.0
+    del s
+    gc.collect()
+    assert owner() is None
     own = pycvc.evaluation_stats()
     own.start()
     own.increment_step()
@@ -258,9 +272,14 @@ def test_process_struct():
     p.on_complete = seen.append
     assert p.on_complete == seen.append
     state = p.state  # a reference into the process, which it keeps alive
+    owner = weakref.ref(p)
     del p
     gc.collect()
+    assert owner() is not None
     assert not state.done and state.stack == []
+    del state
+    gc.collect()
+    assert owner() is None
 
 
 def test_current_process_during_a_run():
