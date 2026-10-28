@@ -2137,6 +2137,8 @@ void stackless_evaluator::lock_body_begins(evaluator_state &state, std::size_t f
     hand_up(state, nil_value);
     return;
   }
+  // Room for every body form's value, as begin makes, so an uncontended section allocates nothing.
+  make_room(frame.results, frame.extra_vals.size() - kLockFixed);
   environment_ptr env = frame.extra_env ? frame.extra_env : frame.env;
   push_frame(state, frame.extra_vals[kLockFixed], std::move(env));
 }
