@@ -622,7 +622,11 @@ jobs:
           # imgui: cvcGL's ImGuiOverlay and the Ariadne ImGui backend. Without it both
           # compile to inert stubs and cvcgl_ari_golden (the backend's golden images,
           # docs/ARIADNE.md section 12) has nothing to render.
-          cvcpkg install imgui --prefix "$prefix" --config release --link shared
+          # sdl3: cvcGL's onscreen window (SdlWindow.h: SDL owns the window and its GL
+          # context, here on Xvfb) and the SdlInput / capture seam, as the shipped cvcgl
+          # recipe has them. Without it cvcGL falls back to VTK's window and
+          # cvcgl_sdl_attach skips.
+          cvcpkg install imgui sdl3 --prefix "$prefix" --config release --link shared
 
       - name: Configure
         run: |
@@ -688,13 +692,16 @@ jobs:
       # backends compile to stubs and the AriadneFtxui / AriadneTvision tests SKIP instead of
       # failing, which is how the macOS and Windows lanes ran them until the libcvc recipe declared
       # ftxui there. Make a missing backend a failure.
-      - name: Assert the Ariadne terminal backends are configured
+      # Likewise SDL3: without it cvcGL's onscreen window is VTK's and cvcgl_sdl_attach skips.
+      - name: Assert the Ariadne terminal backends and cvcGL's SDL3 are configured
         shell: bash
         run: |
           for want in "Ariadne: FTXUI terminal backend ENABLED" "Ariadne: tvision terminal backend ENABLED"; do
             grep -qF "$want" configure.log \
               || { echo "::error::the configure did not print '$want': the Ariadne terminal tests would only skip"; exit 1; }
           done
+          grep -qF "cvcGL: SDL3 input/peripheral seam ENABLED" configure.log \
+            || { echo "::error::the configure found no SDL3: cvcGL's SDL window would go untested"; exit 1; }
 
       - name: Build
         run: cmake --build build --parallel
@@ -1230,8 +1237,9 @@ jobs:
           cvcpkg install vtk --prefix "$prefix" --config release --link shared
           # imgui (cvcGL's ImGui overlay + the Ariadne ImGui backend) and yaml-cpp (the
           # .ari loader): without them cvcgl_ari_golden has nothing to render
-          # (docs/ARIADNE.md section 12). See the Linux job's VTK step.
-          cvcpkg install imgui yaml-cpp --prefix "$prefix" --config release --link shared
+          # (docs/ARIADNE.md section 12). sdl3: cvcGL's onscreen window (Cocoa through
+          # SDL). See the Linux job's VTK step.
+          cvcpkg install imgui yaml-cpp sdl3 --prefix "$prefix" --config release --link shared
 
       # gRPC probe: provision grpc+protobuf (shared) for the enable_grpc matrix entry, as on Linux.
       - name: Provision gRPC via cvcpkg
@@ -1269,13 +1277,16 @@ jobs:
       # backends compile to stubs and the AriadneFtxui / AriadneTvision tests SKIP instead of
       # failing, which is how the macOS and Windows lanes ran them until the libcvc recipe declared
       # ftxui there. Make a missing backend a failure.
-      - name: Assert the Ariadne terminal backends are configured
+      # Likewise SDL3: without it cvcGL's onscreen window is VTK's and cvcgl_sdl_attach skips.
+      - name: Assert the Ariadne terminal backends and cvcGL's SDL3 are configured
         shell: bash
         run: |
           for want in "Ariadne: FTXUI terminal backend ENABLED" "Ariadne: tvision terminal backend ENABLED"; do
             grep -qF "$want" configure.log \
               || { echo "::error::the configure did not print '$want': the Ariadne terminal tests would only skip"; exit 1; }
           done
+          grep -qF "cvcGL: SDL3 input/peripheral seam ENABLED" configure.log \
+            || { echo "::error::the configure found no SDL3: cvcGL's SDL window would go untested"; exit 1; }
 
       - name: Build
         run: cmake --build build --parallel
@@ -1523,9 +1534,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "cvcpkg install vtk failed ($LASTEXITCODE)" }
           # imgui (cvcGL's ImGui overlay + the Ariadne ImGui backend) and yaml-cpp (the
           # .ari loader): without them cvcgl_ari_golden has nothing to render
-          # (docs/ARIADNE.md section 12).
-          cvcpkg install imgui yaml-cpp --prefix "$prefix" --config release --link shared
-          if ($LASTEXITCODE -ne 0) { throw "cvcpkg install imgui yaml-cpp failed ($LASTEXITCODE)" }
+          # (docs/ARIADNE.md section 12). sdl3: cvcGL's onscreen window (see the Linux job).
+          cvcpkg install imgui yaml-cpp sdl3 --prefix "$prefix" --config release --link shared
+          if ($LASTEXITCODE -ne 0) { throw "cvcpkg install imgui yaml-cpp sdl3 failed ($LASTEXITCODE)" }
 
       # gRPC probe: provision grpc+protobuf (shared) for the enable_grpc matrix entry, as on Linux.
       - name: Provision gRPC via cvcpkg (Windows)
@@ -1576,13 +1587,16 @@ jobs:
       # backends compile to stubs and the AriadneFtxui / AriadneTvision tests SKIP instead of
       # failing, which is how the macOS and Windows lanes ran them until the libcvc recipe declared
       # ftxui there. Make a missing backend a failure.
-      - name: Assert the Ariadne terminal backends are configured
+      # Likewise SDL3: without it cvcGL's onscreen window is VTK's and cvcgl_sdl_attach skips.
+      - name: Assert the Ariadne terminal backends and cvcGL's SDL3 are configured
         shell: bash
         run: |
           for want in "Ariadne: FTXUI terminal backend ENABLED" "Ariadne: tvision terminal backend ENABLED"; do
             grep -qF "$want" configure.log \
               || { echo "::error::the configure did not print '$want': the Ariadne terminal tests would only skip"; exit 1; }
           done
+          grep -qF "cvcGL: SDL3 input/peripheral seam ENABLED" configure.log \
+            || { echo "::error::the configure found no SDL3: cvcGL's SDL window would go untested"; exit 1; }
 
       - name: Build
         shell: pwsh
