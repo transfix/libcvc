@@ -1005,6 +1005,201 @@ TEST(DynBikePH, TheSecantStaysPSDWhereTheTangentDoesNot) {
   }
 }
 
+// The values GRL-SNAM's torch twin of the form and its books is held to, on DynBike.Golden's
+// Humvee (lags and the low-speed blend). Per case: the parts (dyn_ph_parts_at) and the rates
+// (dyn_ph_rates_at) at its state; one dyn_plant_books step from it, with the twist the step
+// reached before its limiters (dyn_step_free) and its books; and the gradient of a fixed weighting
+// of the books on the state and the commands, by forward-mode duals (the twin's is autograd). The
+// cases are DynBike.Golden's, and a stop at the speed clamp. CVC_DYN_BIKE_PH_GOLDEN_WRITE=1
+// rewrites tests/data/dyn_bike_ph_golden.json; otherwise this build must reproduce it to 1e-9.
+TEST(DynBikePH, Golden) {
+  namespace fs = std::filesystem;
+  const fs::path path = fs::path(__FILE__).parent_path() / "data" / "dyn_bike_ph_golden.json";
+  dyn_bike_params p = humvee();
+  p.tau_steer = 0.05f;
+  p.v_blend = 1.0f;
+  p.v_width = 0.3f;
+  struct gcase {
+    const char *name;
+    double s[8], dcmd, acmd, grade;
+    bool reverse;
+  };
+  const gcase cases[] = {
+      {"cruising", {0.0, 0.0, 0.0, 12.0, 0.1, 0.05, 0.02, 0.5}, 0.05, 1.0, 0.0, false},
+      {"hard corner", {1.0, -2.0, 0.3, 15.0, -1.2, 0.6, 0.25, 0.0}, 0.3, 0.0, 0.02, false},
+      {"trail braking", {-3.0, 4.0, -1.1, 14.0, 0.8, 0.4, 0.15, -4.0}, 0.15, -6.0, -0.03, false},
+      {"past the peak", {2.0, 2.0, 2.5, 10.0, 2.5, 1.1, 0.4, 1.0}, 0.45, 2.0, 0.0, false},
+      {"backing up", {0.5, 0.5, 0.2, -2.0, 0.05, -0.1, 0.2, -0.5}, 0.25, -0.8, 0.0, true},
+      {"creeping", {0.0, 0.0, 0.0, 0.6, 0.02, 0.05, 0.3, 0.3}, 0.35, 0.5, 0.0, false},
+      {"pulling away", {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0}, 0.1, 2.0, 0.0, false},
+      {"stopping at the clamp", {0.0, 0.0, 0.0, 0.3, 0.0, 0.05, 0.2, -6.0}, 0.2, -6.0, 0.0, false},
+  };
+  const char *const part_keys[] = {"u",  "sg",  "Fxf", "Fxr", "Fyf", "Fyr", "wf",
+                                   "wr", "w0f", "Sf",  "Sr",  "Dx",  "cd"};
+  const char *const rate_keys[] = {"dissipated", "supplied", "floor", "grade"};
+  const char *const free_keys[] = {"vx", "vy", "r"};
+  const char *const book_keys[] = {"dH",    "dissipated", "supplied", "floor",
+                                   "grade", "limiter",    "residual"};
+  const double g_books[7] = {0.9, -0.4, 0.7, 1.3, -0.6, 0.8, 1.1};
+  // Every value this build computes, in the file's order, and what it is: per case, parts[13],
+  // rates[4], next[8], free[3], books[7], g_state[8], g_delta_cmd, g_a_cmd.
+  std::vector<double> now;
+  std::vector<std::string> what;
+  std::ostringstream js;
+  const auto num = [](double x) {
+    char b[40];
+    std::snprintf(b, sizeof b, "%.17g", x);
+    return std::string(b);
+  };
+  const auto arr = [&](const double *v, int n) {
+    std::string out = "[";
+    for (int k = 0; k < n; ++k)
+      out += (k ? ", " : "") + num(v[k]);
+    return out + "]";
+  };
+  const auto obj = [&](const char *const *keys, const double *v, int n) {
+    std::string out = "{";
+    for (int k = 0; k < n; ++k)
+      out += std::string(k ? ", " : "") + "\"" + keys[k] + "\": " + num(v[k]);
+    return out + "}";
+  };
+  const auto record = [&](const char *name, const char *group, const char *const *keys,
+                          const double *v, int n) {
+    for (int k = 0; k < n; ++k) {
+      now.push_back(v[k]);
+      std::string label = std::string(name) + " " + group;
+      if (n > 1)
+        label += "." + (keys ? std::string(keys[k]) : std::to_string(k));
+      what.push_back(label);
+    }
+  };
+  js << "{\n \"format\": \"cvc-dyn-bike-ph-golden-1\",\n";
+  js << " \"order\": [\"x\", \"y\", \"psi\", \"vx\", \"vy\", \"r\", \"delta\", \"a\"],\n";
+  js << " \"params\": {";
+  const std::pair<const char *, float> params[] = {{"m", p.m},
+                                                   {"Iz", p.Iz},
+                                                   {"lf", p.lf},
+                                                   {"lr", p.lr},
+                                                   {"h", p.h},
+                                                   {"g", p.g},
+                                                   {"mu", p.mu},
+                                                   {"B_f", p.B_f},
+                                                   {"B_r", p.B_r},
+                                                   {"C", p.C},
+                                                   {"front_drive", p.front_drive},
+                                                   {"front_brake", p.front_brake},
+                                                   {"drag", p.drag},
+                                                   {"c_rr", p.c_rr},
+                                                   {"tau_steer", p.tau_steer},
+                                                   {"steer_rate", p.steer_rate},
+                                                   {"tau_drive", p.tau_drive},
+                                                   {"v_blend", p.v_blend},
+                                                   {"v_width", p.v_width},
+                                                   {"eps", p.eps},
+                                                   {"fz_min", p.fz_min}};
+  bool first = true;
+  for (const auto &kv : params) {
+    js << (first ? "" : ", ") << "\"" << kv.first << "\": " << num(kv.second);
+    first = false;
+  }
+  js << ", \"iters\": " << p.iters << "},\n \"g_books\": " << arr(g_books, 7)
+     << ",\n \"cases\": [\n";
+  const int ncase = static_cast<int>(sizeof cases / sizeof cases[0]);
+  for (int c = 0; c < ncase; ++c) {
+    const gcase &gc = cases[c];
+    const bike_veh lim = plant_limits(p, gc.reverse);
+    dyn_state<double> s;
+    for (int k = 0; k < 8; ++k)
+      s[k] = gc.s[k];
+    diff::dyn_ph_parts<double> q;
+    diff::dyn_ph_parts_at(p, s, q);
+    const double parts[] = {q.u,  q.sg,  q.Fxf, q.Fxr, q.Fyf, q.Fyr, q.wf,
+                            q.wr, q.w0f, q.Sf,  q.Sr,  q.Dx,  q.cd};
+    const diff::dyn_ph_rates<double> rt = diff::dyn_ph_rates_at(p, s, gc.grade);
+    const double rates[] = {rt.dissipated, rt.supplied, rt.floor, rt.grade};
+    dyn_state<double> o, o_books;
+    diff::dyn_step_free<double> seen;
+    diff::dyn_plant<double>(p, lim, s, gc.dcmd, gc.acmd, gc.grade, o, &seen);
+    diff::dyn_ph_books<double> b;
+    diff::dyn_plant_books<double>(p, lim, s, gc.dcmd, gc.acmd, gc.grade, o_books, b);
+    for (int k = 0; k < 8; ++k)
+      EXPECT_EQ(o_books[k], o[k]) << gc.name << ": the books' step is not dyn_plant's";
+    const double next[] = {o.x, o.y, o.psi, o.vx, o.vy, o.r, o.delta, o.a};
+    const double twist[] = {seen.vx, seen.vy, seen.r};
+    const double books[] = {b.dH,    b.dissipated, b.supplied, b.floor,
+                            b.grade, b.limiter,    b.residual};
+    // d(g_books . books) / d(state, delta_cmd, a_cmd), one dual pass per input.
+    typedef diff::dual<double> D;
+    double grad[10];
+    for (int j = 0; j < 10; ++j) {
+      dyn_state<D> ds, od;
+      for (int k = 0; k < 8; ++k)
+        ds[k] = D(gc.s[k], k == j ? 1.0 : 0.0);
+      diff::dyn_ph_books<D> bd;
+      diff::dyn_plant_books<D>(p, lim, ds, D(gc.dcmd, j == 8 ? 1.0 : 0.0),
+                               D(gc.acmd, j == 9 ? 1.0 : 0.0), D(gc.grade), od, bd);
+      const D bv[] = {bd.dH,    bd.dissipated, bd.supplied, bd.floor,
+                      bd.grade, bd.limiter,    bd.residual};
+      grad[j] = 0.0;
+      for (int k = 0; k < 7; ++k)
+        grad[j] += g_books[k] * bv[k].d;
+    }
+    record(gc.name, "parts", part_keys, parts, 13);
+    record(gc.name, "rates", rate_keys, rates, 4);
+    record(gc.name, "next", nullptr, next, 8);
+    record(gc.name, "free", free_keys, twist, 3);
+    record(gc.name, "books", book_keys, books, 7);
+    record(gc.name, "g_state", nullptr, grad, 8);
+    record(gc.name, "g_delta_cmd", nullptr, grad + 8, 1);
+    record(gc.name, "g_a_cmd", nullptr, grad + 9, 1);
+    js << "  {\"name\": \"" << gc.name << "\", \"state\": " << arr(gc.s, 8)
+       << ", \"delta_cmd\": " << num(gc.dcmd) << ", \"a_cmd\": " << num(gc.acmd)
+       << ", \"grade\": " << num(gc.grade) << ",\n   \"limits\": {\"L\": " << num(lim.L)
+       << ", \"vmax\": " << num(lim.vmax) << ", \"hdt\": " << num(lim.hdt)
+       << ", \"allow_reverse\": " << lim.allow_reverse << "}"
+       << ",\n   \"parts\": " << obj(part_keys, parts, 13)
+       << ",\n   \"rates\": " << obj(rate_keys, rates, 4) << ",\n   \"next\": " << arr(next, 8)
+       << ",\n   \"free\": " << obj(free_keys, twist, 3)
+       << ",\n   \"books\": " << obj(book_keys, books, 7) << ",\n   \"g_state\": " << arr(grad, 8)
+       << ",\n   \"g_delta_cmd\": " << num(grad[8]) << ", \"g_a_cmd\": " << num(grad[9]) << "}"
+       << (c + 1 < ncase ? "," : "") << "\n";
+  }
+  js << " ]\n}\n";
+  const char *write = std::getenv("CVC_DYN_BIKE_PH_GOLDEN_WRITE");
+  if (write && std::string(write) == "1") {
+    std::ofstream(path, std::ios::binary) << js.str();
+    std::printf("  wrote %s\n", path.string().c_str());
+    return;
+  }
+  boost::property_tree::ptree want;
+  ASSERT_NO_THROW(boost::property_tree::read_json(path.string(), want)) << path;
+  std::vector<double> golden;
+  for (const auto &c : want.get_child("cases")) {
+    const boost::property_tree::ptree &gc = c.second;
+    const auto named = [&](const char *group, const char *const *keys, int n) {
+      for (int k = 0; k < n; ++k)
+        golden.push_back(gc.get<double>(std::string(group) + "." + keys[k]));
+    };
+    const auto listed = [&](const char *key) {
+      for (const auto &v : gc.get_child(key))
+        golden.push_back(v.second.get_value<double>());
+    };
+    named("parts", part_keys, 13);
+    named("rates", rate_keys, 4);
+    listed("next");
+    named("free", free_keys, 3);
+    named("books", book_keys, 7);
+    listed("g_state");
+    golden.push_back(gc.get<double>("g_delta_cmd"));
+    golden.push_back(gc.get<double>("g_a_cmd"));
+  }
+  ASSERT_EQ(golden.size(), now.size());
+  for (std::size_t k = 0; k < now.size(); ++k)
+    EXPECT_LE(std::fabs(now[k] - golden[k]),
+              1e-9 * std::max(1.0, std::max(std::fabs(now[k]), std::fabs(golden[k]))))
+        << what[k] << ": golden " << golden[k] << ", now " << now[k];
+}
+
 // ── The external-force port: the deployed drive's ext_force in the differentiable rollout ──
 
 namespace {
