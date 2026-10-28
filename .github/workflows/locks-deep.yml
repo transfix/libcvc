@@ -1,0 +1,114 @@
+name: state_exec locks (deep)
+
+# The deep sizes of the state_exec lock tests (docs/STATE_EXEC_LOCKS.md, section 13). ci.yml runs
+# their regular sizes on every PR. This workflow runs the sizes too slow for that:
+#   - the C++ model check at bounds 4 and 5;
+#   - the `LocksModelStress` and `LocksStress` suites, which ci.yml's STRESS_REGEX keeps off PRs.
+# It uses a Release Linux build of the lock test targets only.
+#
+# It runs daily on master. While the lock phases are in review, run it on their branches by hand:
+#   gh workflow run locks-deep.yml --ref <branch>
+# GitHub dispatches only workflows that exist on the default branch, so this file lands before
+# the tests it runs. On a ref without the lock tests it stops after the checkout. Each lock phase
+# adds its deep runs to the last step.
+
+on:
+  schedule:
+    - cron: '41 6 * * *'
+  workflow_dispatch: {}
+
+concurrency:
+  group: locks-deep-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deep:
+    name: locks deep (Release, Linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    env:
+      LOCK_TARGETS: >-
+        state_exec_locks_test state_exec_locks_model_test state_exec_priority_test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Look for the lock tests
+        id: have
+        shell: bash
+        run: |
+          set -euo pipefail
+          targets=""
+          for t in $LOCK_TARGETS; do
+            if [ -f "src/cvc/tests/$t.cpp" ]; then targets="$targets $t"; fi
+          done
+          targets="${targets# }"
+          if [ -z "$targets" ]; then
+            echo "::notice::${{ github.ref }} has none of the lock tests ($LOCK_TARGETS); nothing to run"
+          fi
+          echo "targets=$targets" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch libcvc-deps
+        if: steps.have.outputs.targets != ''
+        id: libcvc-deps
+        uses: ./.github/actions/fetch-libcvc-deps
+        with:
+          build_type: Release
+          link: shared
+
+      - name: Install build tools (cvcpkg)
+        if: steps.have.outputs.targets != ''
+        uses: ./.github/actions/cvcpkg-build-tools
+
+      - name: Configure
+        if: steps.have.outputs.targets != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${{ steps.libcvc-deps.outputs.path }}" ]; then
+            deps="${{ steps.libcvc-deps.outputs.path }}"
+          else
+            deps="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
+          fi
+          echo "LD_LIBRARY_PATH=$deps/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$deps" \
+            -DCVC_BUILD_TESTS=ON \
+            -DCVC_BUILD_CVCGL=OFF \
+            -DCVC_ENABLE_CUDA=OFF
+
+      - name: Build
+        if: steps.have.outputs.targets != ''
+        run: cmake --build build --parallel --target ${{ steps.have.outputs.targets }}
+
+      # One run per deep size; a phase that adds a deep size adds its run here.
+      - name: Run the deep sizes
+        if: steps.have.outputs.targets != ''
+        shell: bash
+        run: |
+          set -uo pipefail
+          bin=build/bin
+          failed=0
+          run() { # title command...
+            local title=$1 t0=$SECONDS
+            shift
+            echo "::group::$title"
+            "$@"
+            local st=$?
+            echo "::endgroup::"
+            echo "$title: exit $st, $((SECONDS - t0)) s"
+            echo "| $title | $st | $((SECONDS - t0)) |" >> "$GITHUB_STEP_SUMMARY"
+            if [ "$st" -ne 0 ]; then failed=1; echo "::error::$title failed (exit $st)"; fi
+          }
+          echo "| run | exit | seconds |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          if [ -x "$bin/state_exec_locks_model_test" ]; then
+            for b in 4 5; do
+              run "model check, bound $b" env CVC_LOCKS_MODEL_BOUND=$b \
+                "$bin/state_exec_locks_model_test" --gtest_filter='LocksModelStress.*'
+            done
+          fi
+          if [ -x "$bin/state_exec_locks_test" ]; then
+            run "LocksStress" "$bin/state_exec_locks_test" --gtest_filter='LocksStress.*'
+          fi
+          exit "$failed"

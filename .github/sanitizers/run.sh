@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# Runs the suites of ci.yml's `sanitizers` jobs, from the repository root, after the build:
+#   - every executable named in SAN_CXX_TESTS, from build/bin, whole, one process each;
+#   - every pycvc script named in SAN_PY_TESTS, with the sanitizer runtime the build linked
+#     preloaded into the interpreter, which was not built with it.
+# Each run's output goes to san-logs/<name>.log, and a table of the runs to the job summary.
+# Exits 1 when any run failed or printed a sanitizer report.
+#
+# Usage: run.sh tsan|asan-ubsan
+set -uo pipefail
+
+kind=${1:?usage: run.sh tsan|asan-ubsan}
+here=$(cd "$(dirname "$0")" && pwd)
+bin=build/bin
+py="${PY_PREFIX:?PY_PREFIX is not set}/bin/python3.12"
+mkdir -p san-logs
+
+case "$kind" in
+  tsan)
+    lib=libtsan
+    export TSAN_OPTIONS="suppressions=$here/tsan.supp:second_deadlock_stack=1:history_size=4:exitcode=66"
+    ;;
+  asan-ubsan)
+    lib=libasan
+    export ASAN_OPTIONS="detect_leaks=1:exitcode=66"
+    export LSAN_OPTIONS="suppressions=$here/lsan.supp:print_suppressions=0"
+    export UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1:exitcode=66"
+    ;;
+  *)
+    echo "unknown sanitizer '$kind' (tsan or asan-ubsan)" >&2
+    exit 2
+    ;;
+esac
+
+set -- $SAN_CXX_TESTS
+rt=$(ldd "$bin/$1" | awk -v l="$lib" 'index($1, l) == 1 { print $3; exit }')
+if [ -z "$rt" ] || [ ! -f "$rt" ]; then
+  echo "::error::$bin/$1 does not link $lib"
+  exit 1
+fi
+echo "sanitizer runtime: $rt"
+
+# A report's first line, for each sanitizer. UBSan's carries the source position, so a test's
+# own output that happens to say "runtime error" is not counted.
+pattern='WARNING: ThreadSanitizer|ERROR: AddressSanitizer|ERROR: LeakSanitizer|\.(c|cc|cpp|cxx|h|hh|hpp|hxx|ipp|inl):[0-9]+:[0-9]+: runtime error:'
+failed=0
+rows=()
+
+run_one() { # name command...
+  local name=$1 log="san-logs/$1.log" t0=$SECONDS st reports
+  shift
+  echo "::group::$name"
+  timeout 3600 "$@" 2>&1 | tee "$log"
+  st=${PIPESTATUS[0]}
+  echo "::endgroup::"
+  reports=$(grep -cE "$pattern" "$log" || true)
+  if [ "$st" -ne 0 ] || [ "$reports" -ne 0 ]; then
+    failed=1
+    echo "::error::$name: exit $st, $reports sanitizer report(s); the log is in the sanitizers-$kind-logs artifact"
+  fi
+  rows+=("| $name | $st | $reports | $((SECONDS - t0)) |")
+}
+
+for t in $SAN_CXX_TESTS; do
+  run_one "$t" "$bin/$t"
+done
+
+# CPython frees little at exit, so the leak check is off under the interpreter (the C++ suites
+# keep it), and PYTHONMALLOC=malloc lets ASan see the interpreter's own allocations.
+for s in $SAN_PY_TESTS; do
+  case "$kind" in
+    tsan)
+      run_one "$s" env LD_PRELOAD="$rt" PYTHONPATH=build/bindings/pycvc \
+        "$py" "bindings/pycvc/$s"
+      ;;
+    asan-ubsan)
+      run_one "$s" env LD_PRELOAD="$rt" PYTHONPATH=build/bindings/pycvc PYTHONMALLOC=malloc \
+        ASAN_OPTIONS="$ASAN_OPTIONS:detect_leaks=0" "$py" "bindings/pycvc/$s"
+      ;;
+  esac
+done
+
+{
+  echo "### sanitizers / $kind"
+  echo
+  echo "| run | exit | reports | seconds |"
+  echo "|---|---|---|---|"
+  printf '%s\n' "${rows[@]}"
+} >> "${GITHUB_STEP_SUMMARY:-/dev/stdout}"
+exit "$failed"
