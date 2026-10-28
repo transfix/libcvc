@@ -335,6 +335,23 @@ uint64_t action_max_steps(cvc::state &root) {
   return limit_setting(root, "ariadne.limits.action_max_steps", 5000);
 }
 
+// An action's with-lock default timeout (docs/STATE_EXEC_LOCKS.md 5.5, 14.2 Q1): the tree setting
+// ariadne.exec.lock_timeout (seconds, default 1.0), read on every submission like the limits. An
+// action and the children it spawns that name no :timeout give up after it (TimeoutError), so a
+// document never hangs on another's lock. 0 never waits. A missing or unparsable value keeps
+// the default.
+double action_lock_timeout(cvc::state &root) {
+  constexpr double kDefault = 1.0;
+  cvc::state *node = root.findDescendant("ariadne.exec.lock_timeout");
+  if (!node)
+    return kDefault;
+  const std::string v = node->value();
+  char *end = nullptr;
+  const double seconds = v.empty() ? -1.0 : std::strtod(v.c_str(), &end);
+  return end == v.c_str() + v.size() && std::isfinite(seconds) && seconds >= 0.0 ? seconds
+                                                                                 : kDefault;
+}
+
 double action_max_time(cvc::state &root) {
   constexpr double kDefault = 0.1;
   cvc::state *node = root.findDescendant("ariadne.limits.action_max_time");
@@ -394,6 +411,10 @@ std::string run_scoped_program(cvc::app &app, const std::string &prefix, const s
     ictx.tracker = &tracker;
     ictx.proc = proc;
     ictx.pid = 1;
+    // The init lane never waits for a lock (docs/STATE_EXEC_LOCKS.md 5.5): a busy request is as
+    // :timeout 0 (TimeoutError, or :else with :if-available).
+    ictx.lock_wait_allowed = false;
+    ictx.lock_default_timeout = 0.0;
     se::apply_chroot(ictx, root, prefix); // scope writes under the document/mount prefix
     auto env = se::builtins::make_default_environment();
     se::register_intrinsics(env, &ictx);
@@ -1760,6 +1781,7 @@ void Runtime::Impl::submit_action(const QueuedAction &action) {
     se::apply_chroot(ac->ictx, root, action_prefix); // confine writes to the document/mount subtree
     ac->ictx.channels = &channel_policy_; // §12 channel enforcement (no-op unless strict)
     ac->ictx.document = &doc_scope_;      // per-document owner for (stream-open) & friends
+    ac->ictx.lock_default_timeout = action_lock_timeout(root); // with-lock with no :timeout
     ac->env = se::builtins::make_default_environment();
     se::register_intrinsics(ac->env, &ac->ictx);
     // Host program-lane intrinsics (nav verbs, …), AFTER the standard ones (add or override).
