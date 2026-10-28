@@ -267,7 +267,8 @@ public:
   // out-param stays null — the same null-off house pattern ext_force/material use), because
   // capturing costs a per-agent write. Turn it on with set_capture_drive_telemetry(true) BEFORE the
   // step()s you want to read; the pointer is valid until the next step()/reconfigure. Returns
-  // [size()] (the last captured tick) or nullptr when capture is off or no captured step() has run.
+  // [size()] (the last captured tick; drive_telemetry's defaults from turning capture on until the
+  // first captured step()) or nullptr when capture is off.
   // A stats consumer maps each entry to the reducible nav_stats drive_sample POD (see nav_stats.h)
   // to feed nav_samplers::drive.
   void set_capture_drive_telemetry(bool on);
