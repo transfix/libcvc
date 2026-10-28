@@ -1443,6 +1443,137 @@ TEST(ProcessTableTest, ATimedWaitThatRunsOutBecomesReady) {
   EXPECT_TRUE(table.check());
 }
 
+// Lock waits (docs/STATE_EXEC_LOCKS.md 8.7): a lock waiter is counted, its deadline is a timer,
+// and an expired deadline is handed to the lock home rather than readying the process.
+namespace {
+process_ptr lock_waiter(int pid, std::optional<std::chrono::steady_clock::time_point> deadline) {
+  auto p = make_process();
+  p->pid = pid;
+  p->status = process_status::waiting;
+  p->lock_waiting = true;
+  p->lock_deadline = deadline;
+  return p;
+}
+} // namespace
+
+TEST(ProcessTableTest, LockDeadlineIsClearedAndNotRepushed) {
+  detail::process_table table;
+  const auto t0 = std::chrono::steady_clock::now();
+  table.insert(lock_waiter(1, t0 + std::chrono::milliseconds(5)));
+  EXPECT_EQ(table.lock_waiting_count(), 1u);
+  EXPECT_EQ(table.timed_count(), 1u);
+  EXPECT_EQ(table.next_timer(), t0 + std::chrono::milliseconds(5));
+  std::vector<process *> expired;
+  EXPECT_EQ(table.wake_due(t0, &expired), 0u);
+  EXPECT_TRUE(expired.empty());
+  EXPECT_EQ(table.wake_due(t0 + std::chrono::milliseconds(5), &expired), 1u);
+  ASSERT_EQ(expired.size(), 1u);
+  const process &p = *table.find(1);
+  EXPECT_EQ(expired[0], &p);
+  // Still waiting for its home to time it out; the spent deadline left the heap for good.
+  EXPECT_EQ(p.status, process_status::waiting);
+  EXPECT_TRUE(p.lock_waiting);
+  EXPECT_FALSE(p.lock_deadline.has_value());
+  EXPECT_FALSE(p.lock_expired_pending);
+  EXPECT_EQ(table.timed_count(), 0u);
+  EXPECT_FALSE(table.next_timer().has_value());
+  EXPECT_EQ(table.wake_due(t0 + std::chrono::seconds(10), &expired), 0u);
+  EXPECT_EQ(expired.size(), 1u);
+  EXPECT_EQ(table.lock_waiting_count(), 1u);
+  EXPECT_EQ(table.runnable_count(), 0u);
+  EXPECT_TRUE(table.check());
+}
+
+TEST(ProcessTableTest, LockExpiryWithoutVectorIsFlaggedAndCounted) {
+  detail::process_table table;
+  const auto t0 = std::chrono::steady_clock::now();
+  table.insert(lock_waiter(1, t0));
+  table.insert(lock_waiter(2, std::nullopt)); // no timeout: never expires
+  EXPECT_EQ(table.lock_waiting_count(), 2u);
+  EXPECT_EQ(table.timed_count(), 1u);
+  EXPECT_EQ(table.wake_due(t0), 1u);
+  EXPECT_TRUE(table.find(1)->lock_expired_pending);
+  EXPECT_FALSE(table.find(2)->lock_expired_pending);
+  EXPECT_EQ(table.lock_expired_count(), 1u);
+  EXPECT_TRUE(table.check());
+  // A flagged waiter that ends leaves the count.
+  table.set_status(*table.find(1), process_status::killed);
+  EXPECT_EQ(table.lock_expired_count(), 0u);
+  EXPECT_EQ(table.lock_waiting_count(), 1u);
+  EXPECT_TRUE(table.check());
+}
+
+TEST(ProcessTableTest, TakeLockExpiredCollectsFlagged) {
+  detail::process_table table;
+  const auto t0 = std::chrono::steady_clock::now();
+  table.insert(lock_waiter(1, t0));
+  table.insert(lock_waiter(2, t0 + std::chrono::milliseconds(1)));
+  table.insert(lock_waiter(3, t0 + std::chrono::seconds(60)));
+  EXPECT_EQ(table.wake_due(t0 + std::chrono::milliseconds(1)), 2u);
+  EXPECT_EQ(table.lock_expired_count(), 2u);
+  std::vector<process *> out;
+  table.take_lock_expired(out);
+  ASSERT_EQ(out.size(), 2u);
+  std::vector<int> pids{out[0]->pid, out[1]->pid};
+  std::sort(pids.begin(), pids.end());
+  EXPECT_EQ(pids, (std::vector<int>{1, 2}));
+  for (const process *p : out)
+    EXPECT_FALSE(p->lock_expired_pending);
+  EXPECT_EQ(table.lock_expired_count(), 0u);
+  EXPECT_EQ(table.timed_count(), 1u); // pid 3's deadline is still ahead
+  EXPECT_TRUE(table.check());
+}
+
+TEST(ProcessTableTest, WakeDueCountsUnchangedWithoutLockWaiters) {
+  // With no lock waiter the vector is never touched and the counts are the timers' alone.
+  detail::process_table table;
+  const auto t0 = std::chrono::steady_clock::now();
+  for (int i = 1; i <= 3; ++i) {
+    auto p = make_process();
+    p->pid = i;
+    p->status = process_status::waiting;
+    p->wake_time = t0 + std::chrono::milliseconds(i);
+    table.insert(std::move(p));
+  }
+  std::vector<process *> expired;
+  EXPECT_EQ(table.wake_due(t0 + std::chrono::milliseconds(2), &expired), 2u);
+  EXPECT_TRUE(expired.empty());
+  EXPECT_EQ(table.lock_waiting_count(), 0u);
+  EXPECT_EQ(table.lock_expired_count(), 0u);
+  EXPECT_TRUE(table.check());
+}
+
+TEST(ProcessTableTest, CheckSeesLockWaiters) {
+  detail::process_table table;
+  const auto t0 = std::chrono::steady_clock::now();
+  table.insert(lock_waiter(1, t0 + std::chrono::seconds(1)));
+  EXPECT_TRUE(table.check());
+  // A lock field changed without update(): the table no longer agrees.
+  process &p = *table.find(1);
+  p.lock_waiting = false;
+  EXPECT_FALSE(table.check());
+  table.update(p);
+  EXPECT_TRUE(table.check());
+  EXPECT_EQ(table.lock_waiting_count(), 0u);
+  EXPECT_EQ(table.timed_count(), 0u); // no lock wait, no lock deadline timer
+  // A flag on a process that is not a lock waiter is refused by check().
+  p.lock_expired_pending = true;
+  table.update(p);
+  EXPECT_FALSE(table.check());
+  p.lock_expired_pending = false;
+  table.update(p);
+  EXPECT_TRUE(table.check());
+  // A lock waiter is not runnable, and resumes the run queue when readied.
+  p.lock_waiting = true;
+  table.update(p);
+  EXPECT_EQ(table.runnable_count(), 0u);
+  p.lock_waiting = false;
+  p.lock_deadline.reset();
+  table.set_status(p, process_status::ready);
+  EXPECT_EQ(table.runnable_count(), 1u);
+  EXPECT_TRUE(table.check());
+}
+
 TEST(ProcessTableTest, EndedProcessesLeaveEveryIndexButStayReadable) {
   detail::process_table table;
   for (int pid = 1; pid <= 1000; ++pid) {

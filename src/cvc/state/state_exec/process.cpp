@@ -204,7 +204,8 @@ namespace {
 bool runnable_status(process_status s) {
   return s == process_status::ready || s == process_status::running;
 }
-// The deadline a waiting process's timer is for: its wake_time, else a timed wait's deadline.
+// The deadline a waiting process's timer is for: its wake_time, else a timed wait's deadline,
+// else a lock wait's.
 std::optional<std::chrono::steady_clock::time_point> deadline_of(const process &p) {
   if (p.status != process_status::waiting)
     return std::nullopt;
@@ -212,6 +213,8 @@ std::optional<std::chrono::steady_clock::time_point> deadline_of(const process &
     return p.wake_time;
   if (p.recv_path && p.recv_deadline)
     return p.recv_deadline;
+  if (p.lock_waiting && p.lock_deadline)
+    return p.lock_deadline;
   return std::nullopt;
 }
 struct timer_later {
@@ -254,7 +257,7 @@ void process_table::update(process &p) {
       release_slot(p);
   } else {
     const bool want = runnable_status(p.status);
-    const int key = by_priority_ ? p.priority : 0;
+    const int key = level_key(p);
     if (e.queued && (!want || e.level != key))
       dequeue(p);
     if (want && !e.queued && e.slot != none)
@@ -268,6 +271,18 @@ void process_table::update(process &p) {
   if (sleeping != e.sleeping) {
     e.sleeping = sleeping;
     sleeping ? ++sleeping_ : --sleeping_;
+  }
+
+  // Lock waiters, and lock expiries flagged for take_lock_expired.
+  const bool lock_waiting = waiting && p.lock_waiting;
+  if (lock_waiting != e.lock_waiting) {
+    e.lock_waiting = lock_waiting;
+    lock_waiting ? ++lock_waiting_ : --lock_waiting_;
+  }
+  const bool lock_expired = !finished && p.lock_expired_pending;
+  if (lock_expired != e.lock_expired) {
+    e.lock_expired = lock_expired;
+    lock_expired ? ++lock_expired_ : --lock_expired_;
   }
 
   // Receivers by channel.
@@ -551,7 +566,7 @@ std::optional<process_table::clock::time_point> process_table::next_timer() {
   return std::nullopt;
 }
 
-std::size_t process_table::wake_due(clock::time_point now) {
+std::size_t process_table::wake_due(clock::time_point now, std::vector<process *> *lock_expired) {
   std::size_t woken = 0;
   while (!heap_.empty() && heap_.front().at <= now) {
     const timer_entry t = heap_.front();
@@ -574,6 +589,17 @@ std::size_t process_table::wake_due(clock::time_point now) {
       expire_await(p.state);
       set_status(p, process_status::ready);
       ++woken;
+    } else if (p.status == process_status::waiting && p.lock_waiting && p.lock_deadline &&
+               now >= *p.lock_deadline) {
+      // A lock wait that ran out: its home cancels the ticket and wakes the process
+      // (lock_home::wait_expired). The deadline is spent, so update() pushes no timer again.
+      p.lock_deadline.reset();
+      if (lock_expired)
+        lock_expired->push_back(&p);
+      else
+        p.lock_expired_pending = true;
+      update(p);
+      ++woken;
     } else {
       update(p); // not due after all: keep its timer
     }
@@ -581,10 +607,23 @@ std::size_t process_table::wake_due(clock::time_point now) {
   return woken;
 }
 
+void process_table::take_lock_expired(std::vector<process *> &out) {
+  for (const auto &[pid, pp] : map_) {
+    process &p = *pp;
+    if (!p.lock_expired_pending)
+      continue;
+    p.lock_expired_pending = false;
+    update(p);
+    if (!is_finished(p.status))
+      out.push_back(&p);
+  }
+}
+
 // --- Invariants ------------------------------------------------------------
 
 bool process_table::check() const {
   std::size_t queued = 0, sleeping = 0, receiving = 0, timed = 0, awaiting = 0, watching = 0;
+  std::size_t lock_waiting = 0, lock_expired = 0;
   int last_pid = INT32_MIN;
   for (std::uint32_t s = 0; s < slots_.size(); ++s) {
     if (!slots_[s])
@@ -604,10 +643,19 @@ bool process_table::check() const {
         (e.slot >= slots_.size() || slots_[e.slot] == nullptr || slots_[e.slot]->get() != &p))
       return false;
     const bool want_q = !finished && runnable_status(p.status);
-    if (e.queued != want_q || (want_q && e.level != (by_priority_ ? p.priority : 0)))
+    if (e.queued != want_q || (want_q && e.level != level_key(p)))
       return false;
     queued += e.queued;
     const bool waiting = p.status == process_status::waiting;
+    if (e.lock_waiting != (waiting && p.lock_waiting))
+      return false;
+    lock_waiting += e.lock_waiting;
+    // A flagged lock expiry is a lock waiter's, and is counted while the process lives.
+    if (p.lock_expired_pending && !finished && !(waiting && p.lock_waiting))
+      return false;
+    if (e.lock_expired != (!finished && p.lock_expired_pending))
+      return false;
+    lock_expired += e.lock_expired;
     if (e.sleeping != (waiting && p.wake_time.has_value()))
       return false;
     sleeping += e.sleeping;
@@ -642,7 +690,8 @@ bool process_table::check() const {
     watching += w;
   }
   if (queued != queued_ || sleeping != sleeping_ || receiving != receiving_ || timed != timed_ ||
-      awaiting != awaiting_.size() || watching != watchers_.size())
+      awaiting != awaiting_.size() || watching != watchers_.size() ||
+      lock_waiting != lock_waiting_ || lock_expired != lock_expired_)
     return false;
   // The trees: each level's count, and its prefix sums against the slots.
   std::size_t level_total = 0;
