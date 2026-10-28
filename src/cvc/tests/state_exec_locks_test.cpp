@@ -75,8 +75,7 @@ struct locks_world {
 
   // Step until no process is left to run, or `seconds` pass. True when nothing is left.
   bool drive(double seconds = 30.0) {
-    const auto deadline =
-        std::chrono::steady_clock::now() + std::chrono::duration<double>(seconds);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::duration<double>(seconds);
     while (std::chrono::steady_clock::now() < deadline) {
       if (sync) {
         if (!sync->has_runnable())
@@ -165,8 +164,8 @@ INSTANTIATE_TEST_SUITE_P(Schedulers, Atomics, ::testing::Values("sync", "async")
 
 // AT-1: an absent node counts as 0; int + int stays an int; a float delta makes a float.
 TEST_P(Atomics, AT01_IncrAbsentThenIntThenFloat) {
-  const auto r = as_list(
-      w.run(R"((list (state-incr "n") (state-incr "n" 5) (state-incr "n" 0.5)))"));
+  const auto r =
+      as_list(w.run(R"((list (state-incr "n") (state-incr "n" 5) (state-incr "n" 0.5)))"));
   ASSERT_EQ(r.size(), 3u);
   EXPECT_EQ(as_int(r[0]), 1);
   EXPECT_EQ(as_int(r[1]), 6);
@@ -178,8 +177,7 @@ TEST_P(Atomics, AT01_IncrAbsentThenIntThenFloat) {
 TEST_P(Atomics, AT02_IncrNotANumber) {
   w.tree("n").value("abc");
   change_counter changes(w.tree("n"));
-  const value_t r =
-      w.run(R"((try (state-incr "n")
+  const value_t r = w.run(R"((try (state-incr "n")
                    (catch (ValueError e) (str-concat "caught: " (get-attr e "message")))))");
   EXPECT_EQ(as_str(r).rfind("caught: ", 0), 0u) << to_string(r);
   EXPECT_NE(as_str(r).find("not a number"), std::string::npos) << to_string(r);
@@ -209,8 +207,8 @@ TEST_P(Atomics, AT05_ThroughWritableLinkAndReadOnly) {
   w.tree("target.n").value("1");
   w.tree("lnk").linkTo("target.n", cvc::state::link_mode::transparent);
   w.tree("lnk").setLinkWritable(true);
-  const auto r = as_list(w.run(
-      R"((list (state-incr "lnk") (state-cas "lnk" "2" "7") (state-swap "lnk" "9")))"));
+  const auto r = as_list(
+      w.run(R"((list (state-incr "lnk") (state-cas "lnk" "2" "7") (state-swap "lnk" "9")))"));
   ASSERT_EQ(r.size(), 3u);
   EXPECT_EQ(as_int(r[0]), 2);
   EXPECT_TRUE(as_bool(r[1]));
@@ -220,12 +218,12 @@ TEST_P(Atomics, AT05_ThroughWritableLinkAndReadOnly) {
 
   w.tree("ro").value("5");
   w.tree("ro").readOnly(true);
-  for (const char *call : {R"((state-incr "ro"))", R"((state-cas "ro" "5" "6"))",
-                           R"((state-swap "ro" "6"))"}) {
+  for (const char *call :
+       {R"((state-incr "ro"))", R"((state-cas "ro" "5" "6"))", R"((state-swap "ro" "6"))"}) {
     const value_t got = w.run(std::string("(try ") + call +
                               R"( (catch (NativeError e) (get-attr e "native_type"))))");
-    EXPECT_NE(as_str(got).find("read_only_error"), std::string::npos) << call << ": "
-                                                                        << to_string(got);
+    EXPECT_NE(as_str(got).find("read_only_error"), std::string::npos)
+        << call << ": " << to_string(got);
   }
   EXPECT_EQ(w.node("ro"), "5");
 }
@@ -325,8 +323,8 @@ TEST_P(Atomics, AT12_NonWritableLink) {
                            R"((state-swap "ro-link" "2"))"}) {
     const value_t got = w.run(std::string("(try ") + call +
                               R"( (catch (NativeError e) (get-attr e "native_type"))))");
-    EXPECT_NE(as_str(got).find("read_only_error"), std::string::npos) << call << ": "
-                                                                        << to_string(got);
+    EXPECT_NE(as_str(got).find("read_only_error"), std::string::npos)
+        << call << ": " << to_string(got);
   }
   EXPECT_EQ(w.node("t.v"), "1");
   EXPECT_EQ(w.tree("ro-link").value(), "");
