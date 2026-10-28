@@ -497,7 +497,7 @@ def test_a_sleeping_call_is_charged_its_run_time_but_no_cpu():
     i = w.info(w.run("(slow-op 1 200)"))
     assert i.async_time >= 0.19
     assert i.async_cpu_time < 0.05
-    assert 1 <= i.async_steps < 100000
+    assert 1 <= i.async_steps < 50 * pycvc.kDefaultAsyncStepsPerCpuMs  # under 50 CPU ms
     w.close()
 
 

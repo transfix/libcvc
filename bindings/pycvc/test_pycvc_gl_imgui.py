@@ -6,8 +6,7 @@ ui_* widgets/panels, whose bodies run inside cvcGL against the overlay's context
 
 Binding-surface assertions always run (no GL). Constructing an ImGuiOverlay needs
 an offscreen viewer, so that block is SKIP-guarded; the ui_* widgets are NEVER
-invoked here (they need a live ImGui frame). os._exit avoids the known, harmless
-boost::lock_error in cvcGL's static teardown at interpreter exit.
+invoked here (they need a live ImGui frame).
 """
 
 import os
@@ -144,11 +143,10 @@ try:
     ov.attachCamera(pycvc_gl.CameraController(view))
     check("attachCamera stashes keepalive", getattr(ov, "_pycvc_camera", None) is not None)
 except Exception as e:  # noqa: BLE001 — offscreen GL may be unavailable
-    print("  [SKIP] ImGuiOverlay offscreen path (GL unavailable): %s" % e)
+    if os.environ.get("CVC_REQUIRE_RENDER", "0") not in ("", "0"):
+        check("offscreen GL available (CVC_REQUIRE_RENDER): %s" % e, False)
+    else:
+        print("  [SKIP] ImGuiOverlay offscreen path (GL unavailable): %s" % e)
 
 print("\n%s (%d failures)" % ("ALL PASS" if fails == 0 else "FAILED", fails))
-
-# cvcGL's static GL/state teardown races at interpreter exit (harmless
-# boost::lock_error after results print); exit hard with the real status.
-sys.stdout.flush()
-os._exit(1 if fails else 0)
+sys.exit(1 if fails else 0)
