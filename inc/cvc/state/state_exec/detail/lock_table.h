@@ -197,7 +197,9 @@ using lock_notes = small_vector<lock_note, 4>;
 /// each point. The tests install a set through the exported functions below, never through a
 /// global (the Windows DLL exports functions only).
 struct lock_test_hooks {
-  void (*after_grant)(int pid) = nullptr;        // a grant joined the mirror (5.1, 5.9)
+  void (*after_grant)(int pid) = nullptr; // a grant is recorded: on the fast path once its lock
+                                          // frame holds it (5.1), after a wait when it is
+                                          // collected into the mirror (5.9)
   void (*in_step_lock_enter)(int pid) = nullptr; // inside the lock_enter step, before start_body
   void (*before_terminate_end)(process &) = nullptr; // terminate_process, before the end hook
   std::size_t home_cache_capacity = 0;               // 0: the default (1024); read once per home
