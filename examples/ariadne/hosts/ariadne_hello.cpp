@@ -127,11 +127,12 @@ int main(int argc, char **argv) {
   rt.on("reset", [&] { std::printf("[ariadne_hello] reset pressed\n"); });
 
   // §4.6 input source: SDL feeds keyboard/mouse events to the on_key/on_pointer residents each
-  // frame. NB SDL delivers OS input only through an SDL window, so this yields events on the
-  // wasm/wasm-mt build (VTK's WebAssembly interactor shares the SDL canvas) — on a native VTK
-  // window the SDL queue is empty and input arrives via VTK's interactor -> ImGui (which also
-  // drives widget-level on_click/on_hover). Harmless either way; a translation copies the
-  // SDL-free cvc::gl::InputEvent to the runtime's cvc::ariadne::InputEvent.
+  // frame. Attached to the view's window (below, once it exists): cvcGL's onscreen window is SDL's,
+  // and its interactor hands SdlInput every key and pointer event it turns into VTK's (in the
+  // browser SDL listens on the page for the canvas's keys; under VTK's own window,
+  // $CVCGL_SDL_WINDOW=0, SdlInput reads VTK's keys). Widget-level on_click/on_hover still come
+  // through VTK's interactor -> ImGui. A translation copies the SDL-free cvc::gl::InputEvent to
+  // the runtime's cvc::ariadne::InputEvent.
   cvc::gl::SdlInput sdl;
   sdl.init();
   auto to_ari = [](const cvc::gl::InputEvent &e) {
@@ -315,6 +316,8 @@ int main(int argc, char **argv) {
     cam.update(dt);
     // Feed this frame's input to the on_key/on_pointer residents BEFORE drain(), so it is delivered
     // this same frame (post_input queues onto the scheduler ingress; drain() drains + pumps).
+    if (!sdl.attached() && !offscreen)
+      sdl.attach(view.renderWindow()); // once the window and its interactor exist
     for (const cvc::gl::InputEvent &e : sdl.poll())
       rt.post_input(to_ari(e));
     rt.drain(); // run queued Ariadne action events (incl. program on:) on the host thread
