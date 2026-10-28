@@ -1,6 +1,7 @@
 # state_exec: locks on the state tree, and process priority changes
 
-Status: design, 2026-10-27. Nothing here is built yet. Tracked in the `state-exec-perf` workstream,
+Status: design, 2026-10-27. L0 (the atomic natives, section 4.4) is built; nothing else here is yet.
+Tracked in the `state-exec-perf` workstream,
 beside the threaded design ([`docs/STATE_EXEC_THREADED.md`](STATE_EXEC_THREADED.md)), which this
 document extends. The exact lock protocol is
 [`docs/STATE_EXEC_LOCKS_PROTOCOL.md`](STATE_EXEC_LOCKS_PROTOCOL.md).

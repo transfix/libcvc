@@ -91,7 +91,8 @@ Reactive slots — `visible_when`, `enabled_when` / `disabled_when`, computed `b
   [`ariadne.cpp:433`](../src/cvc/ariadne/ariadne.cpp)).
 
 Nothing that writes state, schedules, watches, sends messages, or does I/O is
-reachable. An off-allowlist symbol does not error loudly — it **fails safe**: the slot
+reachable. That includes the atomic updates `state-incr`, `state-cas` and `state-swap`: they
+write, so they are not on the allowlist (actions may use them). An off-allowlist symbol does not error loudly — it **fails safe**: the slot
 degrades to hidden / disabled / empty / last-good value and the frame records a
 one-shot warning (`take_reactive_warnings`,
 [`ariadne.cpp:1682`](../src/cvc/ariadne/ariadne.cpp)). state_exec is always built (there is

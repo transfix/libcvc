@@ -780,6 +780,43 @@ does. It sets every non-empty string, number, `true`, `false` and `null` at its 
 nil. It checks the whole document before it sets anything, so a malformed document changes
 nothing. Its errors name the line, as in `state-from-json: line 3: expected ':'`.
 
+#### Atomic single-node updates
+
+Three natives read and write one node in one step, under one hold of the node's mutex. No other
+writer can land between the read and the write: not another process, not another thread, not
+the host.
+
+```lisp
+(state-incr "stats.hits")              ;; => 1, then 2, ...: the new number
+(state-incr "stats.load" 0.5)          ;; a float delta makes a float
+(state-cas "jobs.j7.owner" nil "me")   ;; => #t when it was absent or "", and is now "me"
+(state-cas "jobs.j7.owner" "me" nil)   ;; => #t: released, so it can be claimed again
+(state-swap "config.mode" "fast")      ;; => the value it replaced (nil when absent or "")
+```
+
+- **Paths and links.** Each resolves its path under the program's chroot, and through a
+  transparent link exactly as `state-get` reads it. A writable transparent link writes its
+  target. A transparent link that isn't writable raises the read-only error (a `NativeError`
+  whose `native_type` names `read_only_error`) instead of writing the link node as `state-set`
+  would. So a compare and its write always see the same node. A read-only node raises the same
+  error.
+- **Absent nodes.** An absent node is made when the native writes: `state-swap` and `state-incr`
+  always, and `state-cas` only when its `expected` is `nil`.
+- **`nil`.** A `nil` `expected` matches a node that is absent or `""`. A `nil` new value stores
+  `""`. Other scalars are compared and stored as `state-set` stores them (`10` as `"10"`). A list
+  or dict is a `TypeError`.
+- **`state-incr`.** It reads the node's text as a DSL number (the parser's rules: the whole text
+  an integer, else a float). An absent or empty node is 0. Anything else is a `ValueError`, and
+  the node is left as it was. An int plus an int (the default delta is 1) stays an int, and an
+  overflow is an `ArithmeticError`. Otherwise the sum is a float, stored in its shortest
+  round-trip form: `1000000` plus `0.5` stores `"1000000.5"`, not six digits.
+- **Signals.** A write that changes the value fires watches and `valueChanged` once. A
+  compare-and-set or swap whose new value equals the old one succeeds without writing, and fires
+  nothing.
+
+**Which tool.** One node: these three. Several nodes that must change together, or a section
+that spans a park: `with-lock` (docs/STATE_EXEC_LOCKS.md). A queue between programs: channels.
+
 ### State Expiry
 
 ```lisp
