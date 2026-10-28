@@ -29,7 +29,8 @@
 //     bound and explicit Euler the sharp check. sim_world books context work across a tick and
 //     min_gap's push as projection work.
 //   - NavPotential.Golden writes or checks tests/data/nav_potential_golden.json, the values
-//     GRL-SNAM's torch twin (grl_snam/nav_potential.py) is held to.
+//     GRL-SNAM's torch twin (grl_snam/nav_potential.py) is held to; NavPotential.BooksGolden
+//     does the same for the books, tests/data/nav_energy_books_golden.json.
 
 #include <algorithm>
 #include <boost/property_tree/json_parser.hpp>
@@ -1247,6 +1248,67 @@ TEST(NavPotential, DriveForceOnTheCityScene) {
 }
 
 // ── the golden for GRL-SNAM's torch twin ─────────────────────────────────────────────
+
+namespace {
+
+// The goldens' material surrogate: 3 agents, 3 discs (one padded), 6 steps (agent 2 stops after
+// 4), on a curved 9x9 patch whose gradient channels are not its values' gradients.
+struct golden_surrogate {
+  int B = 3, N = 3, Hp = 9, Wp = 9, Hs = 6;
+  std::vector<float> patch;
+  std::vector<float> o0 = {0.0f, 0.0f, 1.0f, -0.5f, -1.0f, 0.8f};
+  std::vector<float> v0 = {0.2f, -0.1f, 0.0f, 0.0f, -0.3f, 0.2f};
+  std::vector<float> goal = {6.0f, 3.0f, -4.0f, 5.0f, 2.0f, -6.0f};
+  std::vector<float> C = {2.5f,  0.5f, -1.5f, -2.0f, 0.5f, 3.5f, 3.0f,  1.0f,  0.0f,
+                          -2.5f, 1.0f, 2.0f,  -2.5f, 2.0f, 1.0f, -1.5f, -3.0f, 2.0f};
+  std::vector<float> R = {0.8f, 0.6f, 1.0f, 0.7f, 0.9f, 0.5f, 0.6f, 0.6f, 0.8f};
+  std::vector<std::uint8_t> mask = {1, 1, 1, 1, 1, 0, 1, 1, 1};
+  std::vector<float> alphas = {1.2f, 0.7f, 2.0f, 0.9f, 1.5f, 3.0f, 0.4f, 1.1f, 0.8f};
+  std::vector<float> beta = {0.15f, 0.08f, 0.2f}, gamma = {1.0f, 2.0f, 0.5f};
+  std::vector<float> ls = {1.5f, 0.5f, 2.5f}, lh = {2.0f, 1.0f, 0.5f};
+  std::vector<float> rr = {1.0f, 1.2f, 0.8f}, dh = {3.0f, 2.5f, 3.5f};
+  std::vector<float> dt = {0.05f, 0.05f, 0.05f};
+  std::vector<int> H = {6, 6, 4};
+  surrogate_material_params p;
+  golden_surrogate() : patch(B * 6 * Hp * Wp) {
+    for (int b = 0; b < B; ++b)
+      for (int r = 0; r < Hp; ++r)
+        for (int c = 0; c < Wp; ++c) {
+          const float x = c - 4.0f, y = r - 4.0f;
+          float *pb = &patch[b * 6 * Hp * Wp];
+          const int k = r * Wp + c, hw = Hp * Wp;
+          pb[k] = 0.5f + 0.4f * std::sin(0.35f * x + 0.2f * b) * std::cos(0.25f * y);
+          pb[hw + k] = 2.0f + 0.05f * (x - 1.0f) * (x - 1.0f) + 0.3f * y + 0.1f * b;
+          pb[2 * hw + k] = 0.14f * std::cos(0.35f * x + 0.2f * b) * std::cos(0.25f * y);
+          pb[3 * hw + k] = -0.1f * std::sin(0.35f * x + 0.2f * b) * std::sin(0.25f * y);
+          pb[4 * hw + k] = 0.1f * (x - 1.0f);
+          pb[5 * hw + k] = 0.3f;
+        }
+  }
+  // Linear channels whose gradient channels are their values' gradients (linear_patch), so the
+  // force is -grad U exactly and the books see only the integrator: with the curved patch a step
+  // books the gap between the two, work of order dt.
+  void use_linear_patch() {
+    patch.clear();
+    for (int b = 0; b < B; ++b) {
+      const std::vector<float> one =
+          linear_patch(Hp, Wp, 0.5f, 0.03f, -0.02f, 2.0f + 0.1f * b, 0.1f, 0.3f);
+      patch.insert(patch.end(), one.begin(), one.end());
+    }
+  }
+  // The rollout from (o, v) in place, with an optional port force and energy record.
+  void run(std::vector<float> &o, std::vector<float> &v, const material_ext *ext,
+           rollout_energy *e) const {
+    std::vector<float> mc(B), cr(B), hc(B), al(B);
+    integrate_surrogate_material(o.data(), v.data(), goal.data(), C.data(), R.data(), mask.data(),
+                                 alphas.data(), beta.data(), gamma.data(), ls.data(), lh.data(),
+                                 patch.data(), rr.data(), dh.data(), dt.data(), H.data(), B, N, Hp,
+                                 Wp, p, mc.data(), cr.data(), hc.data(), al.data(), 1, ext, e);
+  }
+};
+
+} // namespace
+
 // The values grl_snam/nav_potential.py is held to (float tier): the barrier potentials on a sweep,
 // U along a material surrogate rollout (potential, terms, force per step) on a curved patch, and
 // drive_potential on a small curved field with a material stack and a footprint.
@@ -1308,64 +1370,35 @@ TEST(NavPotential, Golden) {
 
   // 2. A material surrogate rollout on a curved patch: 3 agents, 3 discs, 6 steps.
   {
-    const int B = 3, N = 3, Hp = 9, Wp = 9, Hs = 6;
-    std::vector<float> patch(B * 6 * Hp * Wp);
-    for (int b = 0; b < B; ++b)
-      for (int r = 0; r < Hp; ++r)
-        for (int c = 0; c < Wp; ++c) {
-          const float x = c - 4.0f, y = r - 4.0f;
-          float *pb = &patch[b * 6 * Hp * Wp];
-          const int k = r * Wp + c, hw = Hp * Wp;
-          pb[k] = 0.5f + 0.4f * std::sin(0.35f * x + 0.2f * b) * std::cos(0.25f * y);
-          pb[hw + k] = 2.0f + 0.05f * (x - 1.0f) * (x - 1.0f) + 0.3f * y + 0.1f * b;
-          pb[2 * hw + k] = 0.14f * std::cos(0.35f * x + 0.2f * b) * std::cos(0.25f * y);
-          pb[3 * hw + k] = -0.1f * std::sin(0.35f * x + 0.2f * b) * std::sin(0.25f * y);
-          pb[4 * hw + k] = 0.1f * (x - 1.0f);
-          pb[5 * hw + k] = 0.3f;
-        }
-    std::vector<float> o = {0.0f, 0.0f, 1.0f, -0.5f, -1.0f, 0.8f};
-    std::vector<float> v = {0.2f, -0.1f, 0.0f, 0.0f, -0.3f, 0.2f};
-    const std::vector<float> goal = {6.0f, 3.0f, -4.0f, 5.0f, 2.0f, -6.0f};
-    const std::vector<float> C = {2.5f,  0.5f, -1.5f, -2.0f, 0.5f, 3.5f, 3.0f,  1.0f,  0.0f,
-                                  -2.5f, 1.0f, 2.0f,  -2.5f, 2.0f, 1.0f, -1.5f, -3.0f, 2.0f};
-    const std::vector<float> R = {0.8f, 0.6f, 1.0f, 0.7f, 0.9f, 0.5f, 0.6f, 0.6f, 0.8f};
-    const std::vector<std::uint8_t> mask = {1, 1, 1, 1, 1, 0, 1, 1, 1};
-    const std::vector<float> alphas = {1.2f, 0.7f, 2.0f, 0.9f, 1.5f, 3.0f, 0.4f, 1.1f, 0.8f};
-    const std::vector<float> beta = {0.15f, 0.08f, 0.2f}, gamma = {1.0f, 2.0f, 0.5f};
-    const std::vector<float> ls = {1.5f, 0.5f, 2.5f}, lh = {2.0f, 1.0f, 0.5f};
-    const std::vector<float> rr = {1.0f, 1.2f, 0.8f}, dh = {3.0f, 2.5f, 3.5f};
-    const std::vector<float> dt = {0.05f, 0.05f, 0.05f};
-    const std::vector<int> H = {6, 6, 4};
-    surrogate_material_params p;
-    std::vector<float> mc(B), cr(B), hc(B), al(B);
+    const golden_surrogate g;
+    const int B = g.B, N = g.N, Hp = g.Hp, Wp = g.Wp, Hs = g.Hs;
+    std::vector<float> o = g.o0, v = g.v0;
     std::vector<float> U(B * (Hs + 1)), T(4 * B * (Hs + 1)), Fc(2 * B * Hs);
     rollout_energy e;
     e.potential = U.data();
     e.terms = T.data();
     e.force = Fc.data();
-    const std::vector<float> o0 = o, v0 = v;
-    integrate_surrogate_material(o.data(), v.data(), goal.data(), C.data(), R.data(), mask.data(),
-                                 alphas.data(), beta.data(), gamma.data(), ls.data(), lh.data(),
-                                 patch.data(), rr.data(), dh.data(), dt.data(), H.data(), B, N, Hp,
-                                 Wp, p, mc.data(), cr.data(), hc.data(), al.data(), 1, nullptr, &e);
-    std::vector<int> maski(mask.begin(), mask.end());
+    g.run(o, v, nullptr, &e);
+    std::vector<int> maski(g.mask.begin(), g.mask.end());
     js << " \"material_rollout\": {\"B\": " << B << ", \"N\": " << N << ", \"Hp\": " << Hp
-       << ", \"Wp\": " << Wp << ", \"margin_factor\": " << num(p.margin_factor)
-       << ", \"mass\": " << num(p.mass) << ", \"d_hat_sdf\": " << num(p.d_hat_sdf)
-       << ", \"k_sharp\": " << num(p.k_sharp) << ",\n  \"o0\": " << arr(o0.data(), o0.size(), false)
-       << ", \"v0\": " << arr(v0.data(), v0.size(), false)
-       << ",\n  \"goal\": " << arr(goal.data(), goal.size(), false)
-       << ",\n  \"C\": " << arr(C.data(), C.size(), false)
-       << ",\n  \"R\": " << arr(R.data(), R.size(), false)
+       << ", \"Wp\": " << Wp << ", \"margin_factor\": " << num(g.p.margin_factor)
+       << ", \"mass\": " << num(g.p.mass) << ", \"d_hat_sdf\": " << num(g.p.d_hat_sdf)
+       << ", \"k_sharp\": " << num(g.p.k_sharp)
+       << ",\n  \"o0\": " << arr(g.o0.data(), g.o0.size(), false)
+       << ", \"v0\": " << arr(g.v0.data(), g.v0.size(), false)
+       << ",\n  \"goal\": " << arr(g.goal.data(), g.goal.size(), false)
+       << ",\n  \"C\": " << arr(g.C.data(), g.C.size(), false)
+       << ",\n  \"R\": " << arr(g.R.data(), g.R.size(), false)
        << ", \"mask\": " << arri(maski.data(), maski.size())
-       << ",\n  \"alphas\": " << arr(alphas.data(), alphas.size(), false)
-       << ",\n  \"beta\": " << arr(beta.data(), B, false)
-       << ", \"gamma\": " << arr(gamma.data(), B, false)
-       << ", \"lam_soft\": " << arr(ls.data(), B, false)
-       << ", \"lam_hard\": " << arr(lh.data(), B, false)
-       << ",\n  \"rr\": " << arr(rr.data(), B, false) << ", \"d_hat\": " << arr(dh.data(), B, false)
-       << ", \"dt\": " << arr(dt.data(), B, false) << ", \"H\": " << arri(H.data(), B)
-       << ",\n  \"patch\": " << arr(patch.data(), patch.size(), false)
+       << ",\n  \"alphas\": " << arr(g.alphas.data(), g.alphas.size(), false)
+       << ",\n  \"beta\": " << arr(g.beta.data(), B, false)
+       << ", \"gamma\": " << arr(g.gamma.data(), B, false)
+       << ", \"lam_soft\": " << arr(g.ls.data(), B, false)
+       << ", \"lam_hard\": " << arr(g.lh.data(), B, false)
+       << ",\n  \"rr\": " << arr(g.rr.data(), B, false)
+       << ", \"d_hat\": " << arr(g.dh.data(), B, false)
+       << ", \"dt\": " << arr(g.dt.data(), B, false) << ", \"H\": " << arri(g.H.data(), B)
+       << ",\n  \"patch\": " << arr(g.patch.data(), g.patch.size(), false)
        << ",\n  \"potential\": " << arr(U.data(), U.size(), true)
        << ",\n  \"terms\": " << arr(T.data(), T.size(), true)
        << ",\n  \"force\": " << arr(Fc.data(), Fc.size(), true)
@@ -1485,6 +1518,400 @@ TEST(NavPotential, Golden) {
     EXPECT_LE(std::fabs(now[k] - golden[k]),
               1e-6 * std::max(1.0, std::max(std::fabs(now[k]), std::fabs(golden[k]))))
         << "value " << k << ": golden " << golden[k] << ", now " << now[k];
+}
+
+namespace {
+
+// The coef_train surrogate's conservative force at o, F_bar + F_goal, in surr_step's op order.
+void surr_force_at(const diff::field &F, float ox, float oy, float gx, float gy, float al, float be,
+                   float rr, float d_hat, float &fx, float &fy) {
+  const diff::sample s = diff::sample_fwd(F, ox, oy);
+  const float ipc = diff::ipc_(s.phi - rr, d_hat);
+  fx = -(al * ipc) * s.nx - be * (ox - gx);
+  fy = -(al * ipc) * s.ny - be * (oy - gy);
+}
+
+} // namespace
+
+// The values the torch twin's books are held to (tests/data/nav_energy_books_golden.json):
+//   - bound: energy_residual_bound on a sweep, mass and kappa_H included (double).
+//   - clamp: a diff::surr_step rollout whose vmax clamp cuts every step, booked per step as
+//     ClampWorkClosesTheBooks books it: the states (float), book_step's arguments and its books
+//     (double), so the twin's book_step is held to them exactly.
+//   - sharp: the material surrogate of NavPotential.Golden on a linear patch, with a port force
+//     and the sharp check: every book rollout_energy has (agent 2 stops early: its frozen steps
+//     book zero).
+//   - unlogged: the same rollout at dt 0.002 under a strong port force, where leaving W_port out
+//     of the books fails the bound at every step (the alarm).
+// CVC_NAV_ENERGY_BOOKS_GOLDEN_WRITE=1 rewrites the file; otherwise this build must reproduce it
+// to 1e-6 relative: of max(1, |x|) for states, potentials and kinetic energies, as
+// NavPotential.Golden, and of max(|x|, the step's bound) for the books.
+TEST(NavPotential, BooksGolden) {
+  namespace fs = std::filesystem;
+  const fs::path path = fs::path(__FILE__).parent_path() / "data" / "nav_energy_books_golden.json";
+  struct checked {
+    std::string sect, key;
+    std::vector<double> now, floor;
+  };
+  std::vector<checked> now; // every computed value, by section and key
+  std::ostringstream js;
+  const auto num = [](double x, int digits) {
+    char b[40];
+    std::snprintf(b, sizeof b, "%.*g", digits, x);
+    return std::string(b);
+  };
+  const auto arr = [&](const auto *v, std::size_t n, int digits) {
+    std::string out = "[";
+    for (std::size_t k = 0; k < n; ++k)
+      out += (k ? ", " : "") + num(static_cast<double>(v[k]), digits);
+    return out + "]";
+  };
+  // "key": [...], its values checked against max(|x|, floor(k)).
+  const auto put = [&](const char *sect, const char *key, const auto *v, std::size_t n, int digits,
+                       const std::function<double(std::size_t)> &floor) {
+    checked c{sect, key, {}, {}};
+    for (std::size_t k = 0; k < n; ++k) {
+      c.now.push_back(static_cast<double>(v[k]));
+      c.floor.push_back(floor(k));
+    }
+    now.push_back(c);
+    return "\"" + std::string(key) + "\": " + arr(v, n, digits);
+  };
+  const auto one = [](std::size_t) { return 1.0; };
+  const auto none = [](std::size_t) { return 0.0; };
+  js << "{\n \"format\": \"cvc-nav-energy-books-golden-1\",\n";
+
+  // 1. energy_residual_bound.
+  {
+    std::vector<double> dt, g, ga, v, F, L, vt, m, kh, out;
+    for (int k = 0; k < 12; ++k) {
+      dt.push_back(k % 3 == 0 ? 0.002 : (k % 3 == 1 ? 0.01 : 0.05));
+      g.push_back(0.3 + 0.7 * k);
+      ga.push_back(0.25 * (k % 4));
+      v.push_back(0.5 + 0.2 * k);
+      F.push_back(k % 2 ? 0.0 : 1.5 + 0.1 * k);
+      L.push_back(0.1 * k * k);
+      vt.push_back(0.4 + 0.15 * k);
+      m.push_back(k % 4 == 3 ? 2.5 : 1.0);
+      kh.push_back(k % 5 == 4 ? 3.0 : 2.0);
+      out.push_back(
+          energy_residual_bound(dt[k], g[k], ga[k], v[k], F[k], L[k], vt[k], m[k], kh[k]));
+    }
+    js << " \"bound\": {\"dt\": " << arr(dt.data(), dt.size(), 17)
+       << ", \"g\": " << arr(g.data(), g.size(), 17)
+       << ",\n  \"gamma\": " << arr(ga.data(), ga.size(), 17)
+       << ", \"v\": " << arr(v.data(), v.size(), 17)
+       << ",\n  \"F\": " << arr(F.data(), F.size(), 17)
+       << ", \"L_hat\": " << arr(L.data(), L.size(), 17)
+       << ",\n  \"vt\": " << arr(vt.data(), vt.size(), 17)
+       << ", \"mass\": " << arr(m.data(), m.size(), 17)
+       << ", \"kappa_H\": " << arr(kh.data(), kh.size(), 17) << ",\n  "
+       << put("bound", "bound", out.data(), out.size(), 17, none) << "},\n";
+  }
+
+  // 2. diff::surr_step with its vmax clamp, on ClampWorkClosesTheBooks' wall (exact on any grid,
+  // so a 5x5 one; phi = 0.6 x - 0.8 y + 0.3 normalized): three agents in its barrier band moving
+  // along it and one clear of it, starting at 3 vmax with the goal spring along their motion, so
+  // the clamp cuts every step.
+  {
+    const int B = 4, S = 8, Hf = 5, Wf = 5, hw = Hf * Wf;
+    const float hdt = 0.03f, vmax = 0.5f, rr = 0.15f, d_hat = 0.35f;
+    std::vector<float> field(3 * hw);
+    for (int r = 0; r < Hf; ++r)
+      for (int c = 0; c < Wf; ++c) {
+        const double wx = -10.0 + 20.0 * c / (Wf - 1), wy = -10.0 + 20.0 * r / (Hf - 1);
+        field[r * Wf + c] = static_cast<float>(0.1 * (0.6 * wx - 0.8 * wy + 3.0));
+        field[hw + r * Wf + c] = 0.6f;
+        field[2 * hw + r * Wf + c] = -0.8f;
+      }
+    field_stack fsx;
+    fsx.data = field.data();
+    fsx.M = 1;
+    fsx.H = Hf;
+    fsx.W = Wf;
+    fsx.mnx = fsx.mny = -10.0;
+    fsx.mxx = fsx.mxy = 10.0;
+    fsx.cx = fsx.cy = 0.0;
+    fsx.S = 0.1;
+    const diff::field F = linear_sdf::to_diff(fsx);
+    const std::vector<float> o0 = {0.1f, 0.0f, -0.1f, -0.05f, 0.3f, 0.1f, 0.6f, -0.3f};
+    const std::vector<float> goal = {0.9f, 0.6f, -0.9f, -0.65f, -0.42f, -0.44f, -0.4f, 0.5f};
+    const std::vector<float> al = {1.0f, 2.0f, 0.6f, 1.5f}, be = {2.5f, 2.0f, 3.0f, 1.5f};
+    const std::vector<float> ga = {0.4f, 0.2f, 0.6f, 0.3f};
+    std::vector<float> v0(2 * B);
+    for (int b = 0; b < B; ++b) {
+      const float ex = goal[2 * b] - o0[2 * b], ey = goal[2 * b + 1] - o0[2 * b + 1];
+      const float n = std::sqrt(ex * ex + ey * ey);
+      v0[2 * b] = 3.0f * vmax * ex / n;
+      v0[2 * b + 1] = 3.0f * vmax * ey / n;
+    }
+    // Per (agent, step): the states, book_step's arguments and its books.
+    std::vector<float> os(2 * B * (S + 1)), vs(2 * B * (S + 1));
+    std::vector<double> av, avp, avt, adx, ag, ag1, aU0, aU1, avHv;
+    std::vector<double> kin, dH, wd, wp, wc, wx, res, rsh, bnd;
+    int in_band = 0;
+    for (int b = 0; b < B; ++b) {
+      float ox = o0[2 * b], oy = o0[2 * b + 1], vx = v0[2 * b], vy = v0[2 * b + 1];
+      const float gx = goal[2 * b], gy = goal[2 * b + 1];
+      for (int s = 0; s <= S; ++s) {
+        const std::size_t row = static_cast<std::size_t>(b) * (S + 1) + s;
+        os[2 * row] = ox;
+        os[2 * row + 1] = oy;
+        vs[2 * row] = vx;
+        vs[2 * row + 1] = vy;
+        if (s == S)
+          break;
+        in_band += diff::sample_fwd(F, ox, oy).phi - rr < d_hat;
+        float f0x, f0y, f1x, f1y, ox1, oy1, vx1, vy1;
+        surr_force_at(F, ox, oy, gx, gy, al[b], be[b], rr, d_hat, f0x, f0y);
+        diff::surr_step(F, ox, oy, vx, vy, gx, gy, al[b], be[b], ga[b], rr, d_hat, vmax, hdt, ox1,
+                        oy1, vx1, vy1);
+        surr_force_at(F, ox1, oy1, gx, gy, al[b], be[b], rr, d_hat, f1x, f1y);
+        book_step_args a;
+        a.dt = hdt;
+        a.gamma = ga[b];
+        const float f0[2] = {f0x, f0y}, f1[2] = {f1x, f1y}, v[2] = {vx, vy}, vt[2] = {vx1, vy1};
+        const float x0[2] = {ox, oy}, x1[2] = {ox1, oy1};
+        for (int c = 0; c < 2; ++c) {
+          a.v[c] = v[c];
+          a.vp[c] = a.v[c] + a.dt * (static_cast<double>(f0[c]) - a.gamma * a.v[c]);
+          a.vt[c] = vt[c];
+          a.dx[c] = static_cast<double>(x1[c]) - x0[c];
+          a.g[c] = -static_cast<double>(f0[c]);
+          a.g1[c] = -static_cast<double>(f1[c]);
+        }
+        a.U0 = diff::surr_potential(F, ox, oy, gx, gy, al[b], be[b], rr, d_hat).total();
+        a.U1 = diff::surr_potential(F, ox1, oy1, gx, gy, al[b], be[b], rr, d_hat).total();
+        // vt' grad^2 U vt from the force at x -+ vt dt/2 (float positions), as the clamp test.
+        const double h = 0.5 * a.dt;
+        float fpx, fpy, fmx, fmy;
+        surr_force_at(F, static_cast<float>(ox + h * vx1), static_cast<float>(oy + h * vy1), gx, gy,
+                      al[b], be[b], rr, d_hat, fpx, fpy);
+        surr_force_at(F, static_cast<float>(ox - h * vx1), static_cast<float>(oy - h * vy1), gx, gy,
+                      al[b], be[b], rr, d_hat, fmx, fmy);
+        a.vHv = -(a.vt[0] * (static_cast<double>(fpx) - fmx) +
+                  a.vt[1] * (static_cast<double>(fpy) - fmy)) /
+                (2.0 * h);
+        const step_books k = book_step(a);
+        EXPECT_GT(k.w_clamp, 0.0) << "agent " << b << ", step " << s << ": the clamp is off";
+        EXPECT_LE(std::fabs(k.residual), k.bound) << "agent " << b << ", step " << s;
+        for (int c = 0; c < 2; ++c) {
+          av.push_back(a.v[c]);
+          avp.push_back(a.vp[c]);
+          avt.push_back(a.vt[c]);
+          adx.push_back(a.dx[c]);
+          ag.push_back(a.g[c]);
+          ag1.push_back(a.g1[c]);
+        }
+        aU0.push_back(a.U0);
+        aU1.push_back(a.U1);
+        avHv.push_back(a.vHv);
+        kin.push_back(k.kinetic);
+        dH.push_back(k.delta_H);
+        wd.push_back(k.w_damp);
+        wp.push_back(k.w_port);
+        wc.push_back(k.w_clamp);
+        wx.push_back(k.w_cross);
+        res.push_back(k.residual);
+        rsh.push_back(k.residual_sharp);
+        bnd.push_back(k.bound);
+        ox = ox1;
+        oy = oy1;
+        vx = vx1;
+        vy = vy1;
+      }
+    }
+    EXPECT_GE(in_band, 2 * S); // the barrier is engaged along the way
+    const auto by_bound = [&](std::size_t k) { return bnd[k]; };
+    js << " \"clamp\": {\"B\": " << B << ", \"steps\": " << S << ", \"H\": " << Hf
+       << ", \"W\": " << Wf << ", \"bounds\": [-10, -10, 10, 10], \"center\": [0, 0], \"S\": 0.1"
+       << ",\n  \"field\": " << arr(field.data(), field.size(), 9)
+       << ",\n  \"hdt\": " << num(hdt, 9) << ", \"vmax\": " << num(vmax, 9)
+       << ", \"rr\": " << num(rr, 9) << ", \"d_hat\": " << num(d_hat, 9)
+       << ",\n  \"o0\": " << arr(o0.data(), o0.size(), 9)
+       << ", \"v0\": " << arr(v0.data(), v0.size(), 9)
+       << ",\n  \"goal\": " << arr(goal.data(), goal.size(), 9)
+       << ", \"alpha\": " << arr(al.data(), B, 9) << ", \"beta\": " << arr(be.data(), B, 9)
+       << ", \"gamma\": " << arr(ga.data(), B, 9) << ",\n  "
+       << put("clamp", "o", os.data(), os.size(), 9, one) << ",\n  "
+       << put("clamp", "v", vs.data(), vs.size(), 9, one)
+       << ",\n  \"args\": {\"v\": " << arr(av.data(), av.size(), 17)
+       << ",\n   \"vp\": " << arr(avp.data(), avp.size(), 17)
+       << ",\n   \"vt\": " << arr(avt.data(), avt.size(), 17)
+       << ",\n   \"dx\": " << arr(adx.data(), adx.size(), 17)
+       << ",\n   \"g\": " << arr(ag.data(), ag.size(), 17)
+       << ",\n   \"g1\": " << arr(ag1.data(), ag1.size(), 17)
+       << ",\n   \"U0\": " << arr(aU0.data(), aU0.size(), 17)
+       << ",\n   \"U1\": " << arr(aU1.data(), aU1.size(), 17)
+       << ",\n   \"vHv\": " << arr(avHv.data(), avHv.size(), 17) << "},\n  \"books\": {"
+       << put("clamp", "kinetic", kin.data(), kin.size(), 17, one) << ",\n   "
+       << put("clamp", "delta_H", dH.data(), dH.size(), 17, by_bound) << ",\n   "
+       << put("clamp", "w_damp", wd.data(), wd.size(), 17, by_bound) << ",\n   "
+       << put("clamp", "w_port", wp.data(), wp.size(), 17, by_bound) << ",\n   "
+       << put("clamp", "w_clamp", wc.data(), wc.size(), 17, by_bound) << ",\n   "
+       << put("clamp", "w_cross", wx.data(), wx.size(), 17, by_bound) << ",\n   "
+       << put("clamp", "residual", res.data(), res.size(), 17, by_bound) << ",\n   "
+       << put("clamp", "residual_sharp", rsh.data(), rsh.size(), 17, by_bound) << ",\n   "
+       << put("clamp", "bound", bnd.data(), bnd.size(), 17, by_bound) << "}},\n";
+  }
+
+  // 3 and 4. The material surrogate's books from its energy hook.
+  struct books_run {
+    std::vector<float> U, ke, wd, wp, wc, wx, r, rs, bound, o, v;
+  };
+  golden_surrogate g;
+  g.use_linear_patch();
+  const auto run_books = [&](const golden_surrogate &gs, const std::vector<float> &v0,
+                             const std::vector<float> &Fext, bool sharp) {
+    books_run k;
+    const int B = gs.B, S = *std::max_element(gs.H.begin(), gs.H.end());
+    k.U.assign(B * (S + 1), NAN);
+    k.ke.assign(B * (S + 1), NAN);
+    for (auto *x : {&k.wd, &k.wp, &k.wc, &k.wx, &k.r, &k.rs, &k.bound})
+      x->assign(B * S, NAN);
+    rollout_energy e;
+    e.potential = k.U.data();
+    e.kinetic = k.ke.data();
+    e.w_damp = k.wd.data();
+    e.w_port = k.wp.data();
+    e.w_clamp = k.wc.data();
+    e.w_cross = k.wx.data();
+    e.residual = k.r.data();
+    e.residual_sharp = sharp ? k.rs.data() : nullptr;
+    e.bound = k.bound.data();
+    e.sharp = sharp;
+    material_ext ext;
+    ext.F = Fext.data();
+    ext.steps = S;
+    k.o = gs.o0;
+    k.v = v0;
+    gs.run(k.o, k.v, &ext, &e);
+    return k;
+  };
+  const auto material_inputs = [&](const golden_surrogate &gs, const std::vector<float> &v0,
+                                   const std::vector<float> &Fext) {
+    std::vector<int> maski(gs.mask.begin(), gs.mask.end());
+    std::ostringstream s;
+    s << "\"B\": " << gs.B << ", \"N\": " << gs.N << ", \"Hp\": " << gs.Hp << ", \"Wp\": " << gs.Wp
+      << ", \"margin_factor\": " << num(gs.p.margin_factor, 9)
+      << ", \"mass\": " << num(gs.p.mass, 9) << ", \"d_hat_sdf\": " << num(gs.p.d_hat_sdf, 9)
+      << ", \"k_sharp\": " << num(gs.p.k_sharp, 9)
+      << ",\n  \"o0\": " << arr(gs.o0.data(), gs.o0.size(), 9)
+      << ", \"v0\": " << arr(v0.data(), v0.size(), 9)
+      << ",\n  \"goal\": " << arr(gs.goal.data(), gs.goal.size(), 9)
+      << ",\n  \"C\": " << arr(gs.C.data(), gs.C.size(), 9)
+      << ",\n  \"R\": " << arr(gs.R.data(), gs.R.size(), 9)
+      << ", \"mask\": " << arr(maski.data(), maski.size(), 9)
+      << ",\n  \"alphas\": " << arr(gs.alphas.data(), gs.alphas.size(), 9)
+      << ",\n  \"beta\": " << arr(gs.beta.data(), gs.B, 9)
+      << ", \"gamma\": " << arr(gs.gamma.data(), gs.B, 9)
+      << ", \"lam_soft\": " << arr(gs.ls.data(), gs.B, 9)
+      << ", \"lam_hard\": " << arr(gs.lh.data(), gs.B, 9)
+      << ",\n  \"rr\": " << arr(gs.rr.data(), gs.B, 9)
+      << ", \"d_hat\": " << arr(gs.dh.data(), gs.B, 9) << ", \"dt\": " << arr(gs.dt.data(), gs.B, 9)
+      << ", \"H\": " << arr(gs.H.data(), gs.B, 9)
+      << ",\n  \"F_ext\": " << arr(Fext.data(), Fext.size(), 9)
+      << ",\n  \"patch\": " << arr(gs.patch.data(), gs.patch.size(), 9);
+    return s.str();
+  };
+  const auto books_json = [&](const char *sect, const books_run &k, bool sharp) {
+    const auto by_bound = [&k](std::size_t i) { return static_cast<double>(k.bound[i]); };
+    std::string out = put(sect, "potential", k.U.data(), k.U.size(), 9, one) + ",\n  " +
+                      put(sect, "kinetic", k.ke.data(), k.ke.size(), 9, one) + ",\n  " +
+                      put(sect, "w_damp", k.wd.data(), k.wd.size(), 9, by_bound) + ",\n  " +
+                      put(sect, "w_port", k.wp.data(), k.wp.size(), 9, by_bound) + ",\n  " +
+                      put(sect, "w_clamp", k.wc.data(), k.wc.size(), 9, by_bound) + ",\n  " +
+                      put(sect, "w_cross", k.wx.data(), k.wx.size(), 9, by_bound) + ",\n  " +
+                      put(sect, "residual", k.r.data(), k.r.size(), 9, by_bound) + ",\n  ";
+    if (sharp)
+      out += put(sect, "residual_sharp", k.rs.data(), k.rs.size(), 9, by_bound) + ",\n  ";
+    return out + put(sect, "bound", k.bound.data(), k.bound.size(), 9, by_bound) + ",\n  " +
+           put(sect, "oT", k.o.data(), k.o.size(), 9, one) + ", " +
+           put(sect, "vT", k.v.data(), k.v.size(), 9, one);
+  };
+
+  // 3. A port force and the sharp check.
+  {
+    const int B = g.B, S = g.Hs;
+    std::vector<float> Fext(2 * B * S);
+    for (int b = 0; b < B; ++b)
+      for (int s = 0; s < S; ++s) {
+        Fext[2 * (b * S + s)] = 0.8f * std::sin(1.3f * b + 0.4f * s);
+        Fext[2 * (b * S + s) + 1] = -0.6f * std::cos(0.9f * b + 0.3f * s);
+      }
+    const books_run k = run_books(g, g.v0, Fext, true);
+    for (int b = 0; b < B; ++b)
+      for (int s = 0; s < S; ++s) {
+        const int i = b * S + s;
+        EXPECT_EQ(k.wc[i], 0.0f);
+        EXPECT_EQ(k.wx[i], 0.0f);
+        if (s < g.H[b]) {
+          EXPECT_LE(std::fabs(k.r[i]), k.bound[i]) << "agent " << b << ", step " << s;
+          EXPECT_NE(k.wp[i], 0.0f);
+        } else { // frozen
+          for (const float x : {k.wd[i], k.wp[i], k.r[i], k.rs[i], k.bound[i]})
+            EXPECT_EQ(x, 0.0f) << "agent " << b << ", step " << s;
+        }
+      }
+    js << " \"sharp\": {" << material_inputs(g, g.v0, Fext) << ",\n  "
+       << books_json("sharp", k, true) << "},\n";
+  }
+
+  // 4. An unlogged port: 3 units of force along each agent's heading at dt 0.002, booked as W_port
+  // (every step closes within the bound) and then left out (r_E + W_port fails it every step).
+  {
+    golden_surrogate gs = g;
+    const int B = gs.B, S = 10;
+    std::vector<float> v0(2 * B), Fext(2 * B * S);
+    for (int b = 0; b < B; ++b) {
+      gs.dt[b] = 0.002f;
+      gs.H[b] = S;
+      const float c = std::cos(0.7f * b), s = std::sin(0.7f * b);
+      v0[2 * b] = c;
+      v0[2 * b + 1] = s;
+      for (int k = 0; k < S; ++k) {
+        Fext[2 * (b * S + k)] = 3.0f * c;
+        Fext[2 * (b * S + k) + 1] = 3.0f * s;
+      }
+    }
+    const books_run k = run_books(gs, v0, Fext, false);
+    std::vector<int> alarm(B * S);
+    double smallest = 1e30;
+    for (int i = 0; i < B * S; ++i) {
+      EXPECT_LE(std::fabs(k.r[i]), k.bound[i]) << "step " << i;
+      const double unbooked = std::fabs(static_cast<double>(k.r[i]) + k.wp[i]) / k.bound[i];
+      alarm[i] = unbooked > 1.0;
+      smallest = std::min(smallest, unbooked);
+    }
+    EXPECT_GT(smallest, 3.0) << "every step alarms, with a margin"; // measured: 6.6
+    std::printf("  books golden: unlogged port, smallest |r_E + W_port|/bound %.1f\n", smallest);
+    js << " \"unlogged\": {" << material_inputs(gs, v0, Fext) << ",\n  "
+       << books_json("unlogged", k, false)
+       << ",\n  \"alarm\": " << arr(alarm.data(), alarm.size(), 9) << "}\n}\n";
+  }
+
+  const char *write = std::getenv("CVC_NAV_ENERGY_BOOKS_GOLDEN_WRITE");
+  if (write && std::string(write) == "1") {
+    std::ofstream(path, std::ios::binary) << js.str();
+    std::printf("  wrote %s\n", path.string().c_str());
+    return;
+  }
+  boost::property_tree::ptree want;
+  ASSERT_NO_THROW(boost::property_tree::read_json(path.string(), want)) << path;
+  for (const checked &c : now) {
+    boost::property_tree::ptree sect = want.get_child(c.sect);
+    if (c.sect == "clamp" && c.key != "o" && c.key != "v")
+      sect = sect.get_child("books");
+    std::vector<double> golden;
+    for (const auto &x : sect.get_child(c.key))
+      golden.push_back(x.second.get_value<double>());
+    ASSERT_EQ(golden.size(), c.now.size()) << c.sect << "." << c.key;
+    for (std::size_t k = 0; k < golden.size(); ++k)
+      EXPECT_LE(std::fabs(c.now[k] - golden[k]),
+                1e-6 * std::max({std::fabs(c.now[k]), std::fabs(golden[k]), c.floor[k]}))
+          << c.sect << "." << c.key << "[" << k << "]: golden " << golden[k] << ", now "
+          << c.now[k];
+  }
 }
 
 // ── the tick's books in sim_world (drive_telemetry) ─────────────────────────────────────────
