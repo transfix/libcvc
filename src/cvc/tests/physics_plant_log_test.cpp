@@ -797,11 +797,42 @@ TEST(PlantLogPowerConvergence, FitsTheLedgerAndPredictsHeldOutSeeds) {
                 veh, f.si.k_pos, f.si.k_neg, f.si.p_idle, f.si.c_v, f.si.c_v3, f.si.c_lat, f.r2,
                 100.0 * f.worst_run_error, h.r2, 100.0 * h.total_error, 100.0 * hs.total_error,
                 100.0 * hc.total_error, 100.0 * h.worst_run_error, h.runs.size());
-    if (std::getenv("CVC_POWER_FIT_RUNS"))
-      for (const power_run &r : h.runs)
-        std::printf("  held run: %.0f s %.0f m (%.2f m/s) measured %.4g J model %.4g J (%+.1f%%)\n",
-                    r.seconds, r.distance_m, r.distance_m / std::max(r.seconds, 1e-9), r.measured_J,
-                    r.model_J, 100.0 * (r.model_J - r.measured_J) / r.measured_J);
+    if (std::getenv("CVC_POWER_FIT_RUNS") || !(h.r2 > 0.8) || !(std::fabs(h.total_error) < 0.10)) {
+      std::size_t k = 0;
+      for (const power_run &r : h.runs) {
+        std::printf("  held run %zu (%s): %.0f s %.0f m (%.2f m/s) measured %.4g J model %.4g J "
+                    "(%+.1f%%)\n",
+                    k, k < held[0].size() ? "swerve" : "city", r.seconds, r.distance_m,
+                    r.distance_m / std::max(r.seconds, 1e-9), r.measured_J, r.model_J,
+                    100.0 * (r.model_J - r.measured_J) / r.measured_J);
+        ++k;
+      }
+      for (const auto *set : {&held[0], &held[1]}) {
+        const power_fit one = evaluate_power(*set, dt, d, f.si);
+        std::printf("  held %s: r2 %.3f total %+.2f%% worst run %.1f%%\n",
+                    set == &held[0] ? "swerve" : "city", one.r2, 100.0 * one.total_error,
+                    100.0 * one.worst_run_error);
+      }
+      // Per run: the tick r2 of that run alone, and its largest tick.
+      for (std::size_t q = 0; q < all_held.size(); ++q) {
+        const power_fit one = evaluate_power({all_held[q]}, dt, d, f.si);
+        const std::vector<planar_sample> &run = all_held[q];
+        std::size_t big = 1;
+        double sum = 0.0;
+        for (std::size_t t = 1; t < run.size(); ++t) {
+          sum += run[t].energy;
+          if (std::fabs(run[t].energy) > std::fabs(run[big].energy))
+            big = t;
+        }
+        if (run.size() > 1)
+          std::printf("  held run %zu: tick r2 %.3f, %zu ticks; mean tick %.4g J, largest %.4g J "
+                      "(tire %.4g J) at tick %zu, vx %.3f -> %.3f m/s, a_lon %.3f, contacts %d, "
+                      "wheels down %d/%d\n",
+                      q, one.r2, one.ticks, sum / double(run.size() - 1), run[big].energy,
+                      run[big].tire, big, run[big - 1].vx, run[big].vx, run[big].a_lon,
+                      run[big].contacts, run[big].wheels_down, run[big].wheels);
+      }
+    }
     EXPECT_GT(f.si.k_pos, 0.0) << veh;
     EXPECT_GT(h.r2, 0.8) << veh;
     EXPECT_LT(std::fabs(h.total_error), 0.10) << veh;
