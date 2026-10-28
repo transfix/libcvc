@@ -27,12 +27,13 @@ void scheduler::set_lock_manager(std::shared_ptr<lock_manager> mgr) {
         throw std::logic_error("set_lock_manager: process " + std::to_string(pid) +
                                " holds or waits for a lock");
   home_.reset();
-  home_ = std::make_unique<detail::lock_home>(std::move(mgr), lock_ops_);
+  home_ = std::make_unique<detail::lock_home>(std::move(mgr), lock_ops_, policy_);
 }
 
 detail::lock_home *scheduler::locks() {
   if (!home_)
-    home_ = std::make_unique<detail::lock_home>(std::make_shared<lock_manager>(), lock_ops_);
+    home_ =
+        std::make_unique<detail::lock_home>(std::make_shared<lock_manager>(), lock_ops_, policy_);
   return home_.get();
 }
 
