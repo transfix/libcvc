@@ -248,6 +248,9 @@ void dyn_4w_plant::advance() {
     psi0[i] = a.s.psi;
     a.tick = dyn_4w_books{};
     a.hits_tick = 0;
+    a.statics_tick = 0;
+    a.touched = -1;
+    a.touch_depth = 0.0;
   }
   const bool world = _chassis->on();
   const double h = _dt / _nsub;
@@ -313,6 +316,8 @@ void dyn_4w_plant::advance() {
         o.vy = -s1 * vgx + c1 * vgy;
         d.contact = diff::dyn4_ph_hamiltonian(a.p, a.lim, ground, o) - before;
         ++a.hits_tick;
+        dyn::count_contacts(*_chassis, static_cast<int>(i), a.statics_tick, a.touched,
+                            a.touch_depth);
       }
       add(a.tick, d);
       dyn::measured(a.driver, a.s.vx, o.vx, h);
@@ -331,6 +336,10 @@ void dyn_4w_plant::advance() {
 
 double dyn_4w_plant::energy_step(int i) const {
   return _agents.at(static_cast<std::size_t>(i)).tick.drive;
+}
+
+int dyn_4w_plant::static_contacts_step(int i) const {
+  return _agents.at(static_cast<std::size_t>(i)).statics_tick;
 }
 
 cvc::nav::plant_sample dyn_4w_plant::sample(int i) const {
@@ -356,7 +365,28 @@ void dyn_4w_plant::measure(agent &a, double vx0, double vy0, double psi0, bool t
     s.a_lat = (-dvx * sm + dvy * cm) / _dt;
     s.a_lon = (dvx * cm + dvy * sm) / _dt;
   }
-  s.wheels = s.wheels_down = 4;
+  dyn::attitude_of(dyn::attitude(a.s.psi, a.s.th, a.s.phi), s);
+  s.roll_rate = a.s.phid;
+  // The wheels' loads: left (+y) against right, and which carry any. A load is its spring's force
+  // floored smoothly at e (softplus, e log(1 + exp(F / e))), so a wheel whose spring pushes
+  // nothing (F <= 0) carries e log 2 or less: it is off the ground.
+  diff::dyn4_wheels<double> w;
+  diff::dyn4_wheel_state(a.p, a.lim, ground_sampler{this}, a.s, w);
+  const double off = static_cast<double>(a.p.fz_min) * a.p.m * a.p.g * std::log(2.0);
+  double left = 0.0, right = 0.0;
+  s.wheels = 4;
+  for (int k = 0; k < 4; ++k) {
+    (w.yi[k] >= 0.0 ? left : right) += w.Fz[k];
+    if (w.Fz[k] > off)
+      ++s.wheels_down;
+  }
+  s.ltr = left + right > 0.0 ? (left - right) / (left + right) : 0.0;
+  s.contacts = tick ? a.statics_tick : 0;
+  s.vehicle_contact = tick ? a.touched : -1;
+  s.measured = cvc::nav::plant_sample::has_all;
+  if (!_chassis->on())
+    s.measured &=
+        ~(cvc::nav::plant_sample::has_contacts | cvc::nav::plant_sample::has_vehicle_contact);
   a.sample = s;
 }
 

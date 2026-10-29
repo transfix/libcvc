@@ -131,7 +131,14 @@ public:
   int reference_substeps() const override { return _nsub; }
   // The drive energy of agent i's last tick (J): what its axles' forces delivered.
   double energy_step(int i) const override;
+  // The contacts agent i's chassis began with static geometry over the last tick (0 without a
+  // world), as nav_plant counts them.
+  int static_contacts_step(int i) const override;
   bool tracks_energy() const override { return true; }
+  // Agent i's last tick as nav's plant ledger takes it: the body's attitude is the ground's
+  // under it (the single track has no roll or pitch of its own), and with a world its contacts
+  // with the buildings and the other vehicles. It has no load transfer, roll rate or wheels off
+  // the ground (plant_sample::measured leaves them out).
   cvc::nav::plant_sample sample(int i) const override;
   bool tracks_samples() const override { return true; }
   cvc::nav::plant_modulation modulation() const override { return _o.plant.modulation; }
@@ -160,6 +167,9 @@ public:
   // The substeps of agent i's last tick in which it collided, and all since attach().
   int collisions_tick(int i) const { return _agents.at(i).hits_tick; }
   long collisions(int i) const { return _agents.at(i).hits; }
+  // Of them, the other agent whose chassis agent i touched over the last tick (the deepest
+  // contact's; -1 none), as nav_plant::vehicle_contact_step.
+  int vehicle_contact_step(int i) const { return _agents.at(i).touched; }
 
   const dyn_bike_plant_options &options() const { return _o; }
 
@@ -177,6 +187,9 @@ private:
     double kinetic0 = 0.0;   // J
     int hits_tick = 0;
     long hits = 0;
+    int statics_tick = 0;     // contacts begun with static geometry over the last tick
+    int touched = -1;         // the agent it touched deepest over the last tick; -1 none
+    double touch_depth = 0.0; // m
     dyn_bike_books tick, total;
     cvc::nav::plant_sample sample;
   };

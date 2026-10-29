@@ -234,8 +234,14 @@ struct veh_nav_stats {
   // with two or more wheels off the ground. a_lat_max_g = the largest |lateral acceleration| in g.
   // Control use: steer_cmd_abs_mean (rad), steer_sat_share = share of ticks nav steered at
   // params.steer_sat of the lock or more, accel_cmd_mean (m/s^2), brake_share = share of ticks it
-  // asked to slow (accel_cmd < 0).
+  // asked to slow (accel_cmd < 0). Its body against the other vehicles' (plant_sample::
+  // vehicle_contact: the plant's collisions, not veh_contacts' min_gap distance): vehicle_hits =
+  // the contacts it began (a tick touching a vehicle it was not touching the tick before),
+  // vehicle_hit_s = the time it touched one. plant_measured = the plant_sample::measured bits of
+  // every sample: an item reduced from a field its plant does not measure is not applicable
+  // (cvc/nav/plant_ledger.h), stays at its default here and is null in the JSON.
   bool plant_tracked = false;
+  std::uint32_t plant_measured = plant_sample::has_all;
   long plant_steps = 0;
   bool rolled_over = false;
   double rolled_over_s = -1;
@@ -249,6 +255,8 @@ struct veh_nav_stats {
   double steer_sat_share = 0;
   double accel_cmd_mean = 0;
   double brake_share = 0;
+  int vehicle_hits = 0;
+  double vehicle_hit_s = 0;
   // formation holding (0 unless a formation_slot sampler is provided) — distance to this vehicle's
   // slot, and whether it ended in it. The continuous formation-holding measure, distinct from the
   // mission-arrival latch above (a deep-formation slot is legitimately far from the objective
@@ -327,10 +335,14 @@ struct episode_nav_stats {
   int total_infeasible_slope_steps = 0;
   // the plant ledger's fleet view, when a plant fed it (veh_nav_stats::plant_tracked; otherwise
   // these defaults and left out of the JSON): the vehicles that rolled over, and when the first
-  // did (< 0 = none)
+  // did (< 0 = none); the contacts the vehicles began with each other (each vehicle's
+  // vehicle_hits, so a collision of two counts twice); and the plant_sample::measured bits every
+  // vehicle's samples had
   bool plant_tracked = false;
   int vehicles_rolled = 0;
   double first_roll_s = -1;
+  int total_vehicle_hits = 0;
+  std::uint32_t plant_measured = plant_sample::has_all;
   // fleet belief coverage (all zero unless the caller fills it via compute_coverage). Episode-level
   // because the belief rasters are shared across the fleet; per-plane detail lives in the rasters
   // themselves (published for visualization), not here.
@@ -385,6 +397,7 @@ private:
   // plant-ledger accumulators (active only when nav_samplers.plant is provided)
   std::vector<long> tipped_n_; // ticks each has been tipped past roll_up_z, now
   std::vector<long> steer_sat_n_, brake_n_;
+  std::vector<int> touching_; // the vehicle each touched last tick (-1 none)
 };
 
 // ── Scorecard: aggregate a CORPUS of episodes for training-fitness tracking ──
@@ -448,11 +461,14 @@ struct nav_scorecard {
   // The plant ledger, over the vehicle-runs (and episodes) a plant fed (plant_runs > 0; otherwise
   // all 0 and left out of the JSON, byte-unchanged): rollover_rate = the share of those runs that
   // rolled over, episode_rollover_rate = the share of those episodes with any rollover, and the
-  // runs' means of tilt_max_deg, ltr_max, lift_s, a_lat_max_g, steer_sat_share and brake_share.
+  // runs' means of tilt_max_deg, ltr_max, lift_s, a_lat_max_g, steer_sat_share, brake_share and
+  // vehicle_hits. Each is over the runs (episodes) whose plant measured what it is reduced from
+  // (veh_nav_stats::plant_measured); with none, NaN (null in the JSON): not applicable.
   int plant_runs = 0;
   double rollover_rate = 0, episode_rollover_rate = 0;
   double mean_tilt_max_deg = 0, mean_ltr_max = 0, mean_lift_s = 0, mean_a_lat_max_g = 0;
   double mean_steer_sat_share = 0, mean_brake_share = 0;
+  double mean_vehicle_hits = 0;
 
   std::string to_json() const;
 };
