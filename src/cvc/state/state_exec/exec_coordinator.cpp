@@ -257,13 +257,16 @@ void exec_coordinator::start() {
 
   running_ = true;
 
-  // If no leader known, start election
+  // If no leader known, start election. leader_mu_ is released first: the announcement goes
+  // through the bus, which hands it to its subscribers with its own lock held, and a victory
+  // delivered there (on this thread or another) takes leader_mu_ in accept_leader.
+  bool no_leader;
   {
     std::lock_guard lk(leader_mu_);
-    if (leader_node_id_.empty()) {
-      start_election();
-    }
+    no_leader = leader_node_id_.empty();
   }
+  if (no_leader)
+    start_election();
 }
 
 void exec_coordinator::stop() {

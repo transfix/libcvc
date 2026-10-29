@@ -62,6 +62,16 @@ bool have_jolt() { return backend_available(backend::jolt); }
   if (!have_jolt())                                                                                \
   GTEST_SKIP() << "this libcvc was built without Jolt"
 
+// The ES runs on Jolt are experiments, not checks. Their one assertion, best >= start, holds by
+// construction (es_finetune_on_plant keeps the start), NavPlant.EsFinetuneOnPlantMechanics covers
+// the mechanics in every build, and each run takes 30 to 60+ minutes on a hosted CI runner:
+// EsFinetuneOnJoltReach never finished inside ctest's hour on package-linux, and repeated three
+// times on every push. They run when CVC_NAV_ES_EXPERIMENTS=1.
+#define REQUIRE_ES_EXPERIMENTS()                                                                   \
+  if (!std::getenv("CVC_NAV_ES_EXPERIMENTS") ||                                                    \
+      std::string(std::getenv("CVC_NAV_ES_EXPERIMENTS")) != "1")                                   \
+  GTEST_SKIP() << "an ES experiment: set CVC_NAV_ES_EXPERIMENTS=1 to run it"
+
 constexpr double kS = 0.05; // the trained metric: 1 normalized unit = 20 m
 constexpr double kG = 9.80665;
 
@@ -1487,6 +1497,7 @@ TEST(NavPlant, EsFinetuneOnPlantMechanics) {
 // P8C_ES_PAIRS (12), P8C_ES_SIGMA (0.02), P8C_ES_LR (0.005), P8C_ES_TAIL (0: every weight),
 // P8C_ES_PRICE (Wh/km per point of reach, 0.1) and P8C_ES_SLACK (points, 1) override it.
 TEST(NavPlantConvergence, EsEnergyAtHeldReachOnJolt) {
+  REQUIRE_ES_EXPERIMENTS();
   REQUIRE_JOLT();
   const cvc::nav::training_scene sc = cvc::nav::city_scene(96);
   const vehicle_desc rr = vehicle_desc::roboracer();
@@ -1579,6 +1590,7 @@ TEST(NavPlantConvergence, EsEnergyAtHeldReachOnJolt) {
 // override es_options; P8B_ES_START=seed starts from coef_mlp::default_biased() instead (use it
 // with P8B_ES_TAIL=3, the basin).
 TEST(NavPlantConvergence, EsFinetuneOnJoltReach) {
+  REQUIRE_ES_EXPERIMENTS();
   REQUIRE_JOLT();
   const cvc::nav::training_scene sc = cvc::nav::city_scene(96);
   const vehicle_desc rr = vehicle_desc::roboracer();

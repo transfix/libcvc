@@ -7,7 +7,8 @@ process — not a catchable Python exception — so the render body runs in a CH
 process and the parent decides:
   * child rendered OK        -> pass (exit 0)
   * child hit a real assert  -> fail (exit 1)   (child exits 3)
-  * child aborted / no GL    -> SKIP (exit 0)   (any other non-zero)
+  * child aborted / no GL    -> SKIP (exit 0)   (any other non-zero; a fail under
+                                                 CVC_REQUIRE_RENDER=1)
 So it is a no-op locally (no GL) and a real render check in CI (Xvfb + llvmpipe).
 """
 
@@ -66,6 +67,10 @@ def main():
         # A GL context WAS created (or a real assertion tripped), so a subsequent failure is a genuine
         # bug — do NOT mask it as a skip.
         print("pycvc AriRuntime test: FAILED (rc=%d)\n%s" % (p.returncode, p.stderr))
+        sys.exit(1)
+    elif os.environ.get("CVC_REQUIRE_RENDER", "0") not in ("", "0"):
+        print("pycvc AriRuntime test: FAILED, no usable GL context under CVC_REQUIRE_RENDER "
+              "(child rc=%d)\n%s" % (p.returncode, p.stderr))
         sys.exit(1)
     else:
         # No usable GL context (the render-window construction aborted) — skip, like the native

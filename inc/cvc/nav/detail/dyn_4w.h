@@ -39,6 +39,11 @@
 //      front_brake), then evenly left and right; each wheel saturates smoothly at mu_i Fz_i and
 //      leaves the friction ellipse's remainder for cornering (P8a's dyn_sat, dyn_lateral_cap).
 //      The speed is predicted from these and the resistances, then corrected after step 4.
+//      With grade_force (off by default) gravity along the ground acts on the body as well: each
+//      spring's horizontal reaction on the slope under its wheel, -F_i grad h there, F_i its
+//      linear spring force (step 5's) and grad h the ground's, by central differences over
+//      1e-3 L (dyn4_grade). It acts on (vx, vy, r) only, from the step's start. Without it the
+//      ground only lifts the springs: the vehicle does not roll down a hill.
 //   4. Lateral and yaw. Each front wheel's angle is the Ackermann angle for the virtual one:
 //      tan delta_i = L tan delta / (L - y_i tan delta). A wheel's lateral velocity in its own
 //      frame is w_i = -(vx - r y_i) sin delta_i + (vy + r x_i) cos delta_i, its slip
@@ -54,6 +59,9 @@
 // check the two agree).
 //
 // Left out: wheel spin, the unsprung masses, camber and the anti-roll bars.
+//
+// The plant in port-Hamiltonian form, and each step's energy books: dyn4_ph_* and
+// dyn4_plant_books, below.
 
 #ifndef __CVC_NAV_DETAIL_DYN_4W_H__
 #define __CVC_NAV_DETAIL_DYN_4W_H__
@@ -86,6 +94,7 @@ struct dyn4_params {
   float v_blend = 0.0f, v_width = 1.0f, eps = 0.1f;
   float fz_min = 0.02f; // the load floor's width, as a fraction of m g
   int iters = 3;
+  int grade_force = 0; // 1: gravity along the ground's slope acts on the body (opt-in; see step 3)
 };
 
 template <class S> struct dyn4_state {
@@ -171,10 +180,41 @@ template <class S> CVC_HD inline S dyn4_ackermann(S L, S y, S tan_delta) {
   return s_atan(L * tan_delta / (L - y * tan_delta));
 }
 
-// One step of the plant; see the header comment.
+// Gravity along the ground, for grade_force: each spring's horizontal reaction on the slope under
+// its wheel, -F_i grad h(P_i), as a force and yaw moment on the body, f = (F_x, F_y, M_z) on
+// (vx, vy, r). F_i = Fz0_i + k_i (hg_i - c_i . q) is the spring's linear force, so f is minus the
+// gradient of the springs' energy in the pose (dyn4_ph_hamiltonian): conservative. The slope is
+// the ground's, by central differences over 1e-3 L, so any sampler serves. w is
+// dyn4_wheel_state's at s.
+template <class S, class G>
+CVC_HD inline void dyn4_grade(const dyn4_params &p, const G &ground, const dyn4_state<S> &s,
+                              const dyn4_wheels<S> &w, S f[3]) {
+  const S lr = S(p.lr), e = S(1e-3) * (S(p.lf) + lr);
+  const S cps = s_cos(s.psi), sps = s_sin(s.psi);
+  const S cgx = s.x + lr * cps, cgy = s.y + lr * sps;
+  f[0] = f[1] = f[2] = S(0);
+  for (int i = 0; i < 4; ++i) {
+    const S wx = cgx + w.xi[i] * cps - w.yi[i] * sps, wy = cgy + w.xi[i] * sps + w.yi[i] * cps;
+    S mu, h_xp, h_xm, h_yp, h_ym;
+    ground.at(wx + e, wy, mu, h_xp);
+    ground.at(wx - e, wy, mu, h_xm);
+    ground.at(wx, wy + e, mu, h_yp);
+    ground.at(wx, wy - e, mu, h_ym);
+    const S gx = (h_xp - h_xm) / (S(2) * e), gy = (h_yp - h_ym) / (S(2) * e);
+    const S Fs = w.Fz0[i] + w.k[i] * (w.hg[i] - (s.z + w.yi[i] * s.phi - w.xi[i] * s.th));
+    const S fx = -Fs * (cps * gx + sps * gy), fy = -Fs * (cps * gy - sps * gx);
+    f[0] = f[0] + fx;
+    f[1] = f[1] + fy;
+    f[2] = f[2] + w.xi[i] * fy - w.yi[i] * fx;
+  }
+}
+
+// One step of the plant; see the header comment. `seen`, when given, gets the twist the step
+// reached before its limiters (dyn_step_free, for dyn4_plant_books).
 template <class S, class G>
 CVC_HD inline void dyn4_plant(const dyn4_params &p, const bike_veh &v, const G &ground,
-                              const dyn4_state<S> &s, S delta_cmd, S a_cmd, dyn4_state<S> &o) {
+                              const dyn4_state<S> &s, S delta_cmd, S a_cmd, dyn4_state<S> &o,
+                              dyn_step_free<S> *seen = nullptr) {
   const S hdt = S(v.hdt), one = S(1), zero = S(0);
   const S m = S(p.m), Iz = S(p.Iz), Ix = S(p.Ix), Iy = S(p.Iy), lf = S(p.lf), lr = S(p.lr);
   const S h = S(p.h), g = S(p.g), Cp = S(p.C), L = lf + lr;
@@ -195,6 +235,10 @@ CVC_HD inline void dyn4_plant(const dyn4_params &p, const bike_veh &v, const G &
   dyn4_wheel_state(p, v, ground, s, W);
   const S *xi = W.xi, *yi = W.yi, *Fz0 = W.Fz0, *k = W.k, *c = W.c, *mu_i = W.mu, *hg = W.hg;
   const S *Fz = W.Fz;
+  // Gravity along the ground, when asked.
+  S Fg[3] = {zero, zero, zero};
+  if (p.grade_force)
+    dyn4_grade(p, ground, s, W, Fg);
 
   // 3. Longitudinal: each wheel's drive or brake force within its grip, and what that leaves.
   const S F_drive = m * a1;
@@ -218,7 +262,10 @@ CVC_HD inline void dyn4_plant(const dyn4_params &p, const bike_veh &v, const G &
   S FXlong = zero;
   for (int i = 0; i < 4; ++i)
     FXlong = FXlong + Fx[i] * cdw[i];
-  const S vx_p = dyn_clamp(s.vx + hdt * ((FXlong + F_res) / m), sp_min, vmax);
+  S FXpred = FXlong + F_res;
+  if (p.grade_force)
+    FXpred = FXpred + Fg[0];
+  const S vx_p = dyn_clamp(s.vx + hdt * (FXpred / m), sp_min, vmax);
 
   // 4. Lateral and yaw: implicit Euler for (vy, r), four tires.
   const S u = s_sqrt(vx_p * vx_p + eps2), sg = vx_p / u;
@@ -252,6 +299,10 @@ CVC_HD inline void dyn4_plant(const dyn4_params &p, const bike_veh &v, const G &
       J21 = J21 + (xi[i] * dfy_y - yi[i] * dfx_y) * dwdvy[i];
       J22 = J22 + (xi[i] * dfy_y - yi[i] * dfx_y) * dwdr[i];
     }
+    if (p.grade_force) {
+      FY = FY + Fg[1];
+      MZ = MZ + Fg[2];
+    }
     const S f_vy = FY / m - r1 * vx_p, f_r = MZ / Iz;
     const S A11 = one - hdt * (J11 / m), A12 = -hdt * (J12 / m - vx_p);
     const S A21 = -hdt * (J21 / Iz), A22 = one - hdt * (J22 / Iz);
@@ -272,7 +323,16 @@ CVC_HD inline void dyn4_plant(const dyn4_params &p, const bike_veh &v, const G &
     FXb = FXb + Fx[i] * cdw[i] - Fy_applied[i] * sdw[i];
     FYb = FYb + Fy_applied[i] * cdw[i] + Fx[i] * sdw[i];
   }
-  const S vx1 = dyn_clamp(s.vx + hdt * (FXb / m + r1 * vy1), sp_min, vmax);
+  S FXv = FXb; // with gravity along the ground, which does not pitch the body (step 5)
+  if (p.grade_force)
+    FXv = FXb + Fg[0];
+  const S vx1_free = s.vx + hdt * (FXv / m + r1 * vy1);
+  const S vx1 = dyn_clamp(vx1_free, sp_min, vmax);
+  if (seen) {
+    seen->vx = vx1_free;
+    seen->vy = vy1;
+    seen->r = r1;
+  }
 
   // 5. Vertical: implicit Euler on (z, phi, th) with the corners' linear springs and dampers.
   // M qdd = sum_i c_i (Fz0_i + k_i (hg_i - c_i . q) - c_i' (c_i . qd)) - (m g, 0, 0)
@@ -370,6 +430,362 @@ CVC_HD inline void dyn4_plant_vjp(const dyn4_params &p, const bike_veh &v, const
     else
       g_a_cmd = acc;
   }
+}
+
+// ── The plant in port-Hamiltonian form ────────────────────────────────────────────────────
+// dyn_bike.h's form (dyn_ph_*) on four wheels with suspension, at every slip. The body's state is
+// its vertical displacement q = (z, phi, th) and the momenta p = M xi of its twist
+// xi = (vx, vy, r, zd, phid, thd), M = diag(m, m, Iz, m, Ix, Iy); the pose (x, y, psi) enters only
+// through the ground under the wheels. In x = (q, p), nine coordinates, dyn4_plant's vector field
+// (its step as hdt -> 0, the actuators holding) is exactly
+//
+//   H = 1/2 xi^T M xi + sum_i 1/2 k_i l_i^2 + m g z,   l_i = Fz0_i / k_i + hg_i - c_i . q
+//   x' = (J(p) - R) dH/dx + G u + f_lever,   dH/dx = (dH/dq, xi),   u = (F_x1, ..., F_x4),
+//   y = G^T dH/dx
+//
+//   H     the kinetic energy, the corners' springs (l_i a spring's compression; the vertical step's
+//         springs are linear, the softplus floor is only on the tires' loads; a rigid corner's k_i
+//         is dyn4_rigid_k's, set by hdt) and gravity on heave. sum_i c_i Fz0_i = (m g, 0, 0): the
+//         preloads hold the body at q = 0 on flat ground.
+//   J     [[0, 0, I], [0, J_h(p_h), 0], [-I, 0, 0]] over (q, p_h, p_v): canonical in the vertical,
+//         SE(2)'s coadjoint action in the horizontal (dyn_ph_J). Skew, so it moves no energy.
+//   R     blockdiag(0, R_h, R_v). R_h = c_x e_x e_x^T + sum_i S_i n_i n_i^T: c_x = drag u +
+//         c_rr m g / u, drag and rolling resistance on vx (u = sqrt(vx^2 + eps^2)); n_i =
+//         (-sin d_i, cos d_i, x_i cos d_i + y_i sin d_i) carries wheel i's lateral force onto
+//         (vx, vy, r), so n_i^T v is w_i, the lateral velocity in the wheel's own frame that its
+//         slip alpha_i = -atan2(w_i, u_i) is measured in; and S_i = -F_yi / w_i (dyn4_ph_secant)
+//         is the tire's secant through its root w_i = 0, >= 0 at any slip because a Pacejka force
+//         (C < 2) always opposes its slip. R_v = sum_i c'_i c_i c_i^T, the dampers. So R is
+//         positive semi-definite sliding or not, at any steering angle.
+//   G     columns T_i = (cos d_i, sin d_i, x_i sin d_i - y_i cos d_i, 0, h sin d_i, -h cos d_i) on
+//         the twist: wheel i's drive or brake force (within its grip) along the wheel, at its
+//         contact patch h below the centre of gravity. y_i is that patch's speed along the wheel,
+//         roll and pitch included, and y^T u the power the forces deliver. Steering is not an
+//         input: the wheels' angles d_i only turn n_i and T_i, so they do no work.
+//   f_lever  (0, h sum_i F_yi cos d_i, h sum_i F_yi sin d_i) on (p_z, p_phi, p_th): the tires'
+//         lateral forces' moments on roll and pitch. The slips do not see the body's roll and
+//         pitch rates (a patch's lateral velocity has no h phid in it), so this coupling is
+//         one-way: neither skew nor dissipative. It is booked on its own line and vanishes with h.
+//   f_eps = 0. Each slip is measured in its wheel's frame and rooted at w_i = 0, so the secant
+//         carries the whole lateral force and nothing is left at the speed floor (dyn_bike's front
+//         slip, in the body's frame and rooted at the floored speed, leaves dyn_ph_floor).
+//   f_grade  with grade_force on (dyn4_ph_grade): dyn4_grade's (F_x, F_y, M_z) on p_h, zero
+//         otherwise. It is minus the gradient of H's springs in the pose g, through the ground
+//         under the wheels: with g in the state, T*SE(2)'s canonical structure puts it in J and the
+//         terrain's energy is in H (where the single track can only book its grade as a power).
+//         Booked on its own line, its power cancels the ground's:
+//         xi^T f_grade = -sum_i k_i l_i hg_i'.
+//
+// So dH/dt = -dH/dx^T R dH/dx + y^T u + xi^T f_lever + xi^T f_grade + sum_i k_i l_i hg_i': passive
+// with respect to the wheels' forces but for the lever, at every slip. The last term is the ground
+// lifting the springs as the wheels roll over it (none on flat ground); without grade_force it is
+// energy from outside, the vehicle climbing a hill for free, and with it the grade line cancels it.
+// The inputs are the actuators' outputs (the state's delta and a). dyn4_plant's step departs from
+// the vector field by its integrator (which holds the ground and the loads at the step's start)
+// and by its limiters (the speed clamp, the low-speed blend); dyn4_plant_books charges the
+// limiters and the ground's new heights their energy and leaves the integrator's error, second
+// order per step, as the residual. These are evaluations: dyn4_plant's arithmetic does not depend
+// on them.
+
+// A tire's secant stiffness through its root w = 0: -F / w, and D C B / u, its limit, at w = 0.
+// dyn_secant_w (the implicit step's) is the same but where |B alpha| < 1e-4, where it takes the
+// slope D C B u / (u^2 + w^2), within 1e-8 of this; the form takes the exact secant, so S w is
+// the whole force.
+template <class S> CVC_HD inline S dyn4_ph_secant(S F, S w, S B, S C, S D, S u) {
+  if (s_val(w) == 0.0)
+    return D * C * B / u;
+  return -F / w;
+}
+
+// Everything the form is built from, at a state: the wheels (dyn4_wheel_state) and dyn4_plant's
+// steps 3 and 4 at the state's own twist, delta and a.
+template <class S> struct dyn4_ph_parts {
+  dyn4_wheels<S> W; // offsets, static loads, springs, dampers, the ground under them, the loads
+  S cx;             // drag and rolling resistance on vx
+  S Fx[4];          // each wheel's drive or brake force: the inputs
+  S Fy[4];          // each tire's lateral force
+  S w[4], ui[4];    // each wheel's lateral velocity in its own frame, and its floored speed
+  S Sw[4];          // the secants (dyn4_ph_secant)
+  S N[4][6];        // each tire's lateral force on the twist (vx, vy, r, zd, phid, thd)
+  S T[4][6];        // each wheel's drive or brake force on the twist
+};
+
+template <class S, class G>
+CVC_HD inline void dyn4_ph_parts_at(const dyn4_params &p, const bike_veh &v, const G &ground,
+                                    const dyn4_state<S> &s, dyn4_ph_parts<S> &q) {
+  const S m = S(p.m), g = S(p.g), h = S(p.h), Cp = S(p.C), L = S(p.lf) + S(p.lr);
+  const S zero = S(0), one = S(1);
+  dyn4_wheel_state(p, v, ground, s, q.W);
+  const S eps2 = S(p.eps) * S(p.eps);
+  const S u0 = s_sqrt(s.vx * s.vx + eps2);
+  q.cx = S(p.drag) * u0 + S(p.c_rr) * m * g / u0;
+  const S F_drive = m * s.a;
+  const S share = S(s_val(s.a) >= 0.0 ? p.front_drive : p.front_brake);
+  const S td = s_tan(s.delta);
+  const S Bw[4] = {S(p.B_f), S(p.B_f), S(p.B_r), S(p.B_r)};
+  for (int i = 0; i < 4; ++i) {
+    const S xi = q.W.xi[i], yi = q.W.yi[i];
+    const S cap = q.W.mu[i] * q.W.Fz[i];
+    q.Fx[i] = dyn_sat(S(0.5) * F_drive * (i < 2 ? share : one - share), cap);
+    const S Dy = dyn_lateral_cap(q.Fx[i], cap);
+    const S dw = i < 2 ? dyn4_ackermann(L, yi, td) : zero;
+    const S cw = s_cos(dw), sw = s_sin(dw);
+    const S vxi = s.vx - s.r * yi, vyi = s.vy + s.r * xi;
+    q.w[i] = -vxi * sw + vyi * cw;
+    const S ul = vxi * cw + vyi * sw;
+    q.ui[i] = s_sqrt(ul * ul + eps2);
+    q.Fy[i] = dyn_lateral(-s_atan2(q.w[i], q.ui[i]), Bw[i], Cp, Dy);
+    q.Sw[i] = dyn4_ph_secant(q.Fy[i], q.w[i], Bw[i], Cp, Dy, q.ui[i]);
+    const S n[6] = {-sw, cw, xi * cw + yi * sw, zero, h * cw, h * sw};
+    const S t[6] = {cw, sw, xi * sw - yi * cw, zero, h * sw, -h * cw};
+    for (int k = 0; k < 6; ++k) {
+      q.N[i][k] = n[k];
+      q.T[i][k] = t[k];
+    }
+  }
+}
+
+// The energy H; see above.
+template <class S, class G>
+CVC_HD inline S dyn4_ph_hamiltonian(const dyn4_params &p, const bike_veh &v, const G &ground,
+                                    const dyn4_state<S> &s) {
+  dyn4_wheels<S> W;
+  dyn4_wheel_state(p, v, ground, s, W);
+  const S m = S(p.m);
+  S H = S(0.5) * (m * (s.vx * s.vx + s.vy * s.vy + s.zd * s.zd) + S(p.Iz) * s.r * s.r +
+                  S(p.Ix) * s.phid * s.phid + S(p.Iy) * s.thd * s.thd);
+  for (int i = 0; i < 4; ++i) {
+    const S l = W.Fz0[i] / W.k[i] + W.hg[i] - (s.z + W.yi[i] * s.phi - W.xi[i] * s.th);
+    H = H + S(0.5) * W.k[i] * l * l;
+  }
+  return H + m * S(p.g) * s.z;
+}
+
+// x = (q, p): the vertical displacement and the momenta M xi.
+template <class S>
+CVC_HD inline void dyn4_ph_coords(const dyn4_params &p, const dyn4_state<S> &s, S x[9]) {
+  const S m = S(p.m);
+  x[0] = s.z;
+  x[1] = s.phi;
+  x[2] = s.th;
+  x[3] = m * s.vx;
+  x[4] = m * s.vy;
+  x[5] = S(p.Iz) * s.r;
+  x[6] = m * s.zd;
+  x[7] = S(p.Ix) * s.phid;
+  x[8] = S(p.Iy) * s.thd;
+}
+
+// dH/dx = (dH/dq, xi): the springs' and gravity's force on q, negated, and the twist.
+template <class S, class G>
+CVC_HD inline void dyn4_ph_grad(const dyn4_params &p, const bike_veh &v, const G &ground,
+                                const dyn4_state<S> &s, S e[9]) {
+  dyn4_wheels<S> W;
+  dyn4_wheel_state(p, v, ground, s, W);
+  e[0] = S(p.m) * S(p.g);
+  e[1] = S(0);
+  e[2] = S(0);
+  for (int i = 0; i < 4; ++i) {
+    const S kl = W.k[i] * (W.Fz0[i] / W.k[i] + W.hg[i] - (s.z + W.yi[i] * s.phi - W.xi[i] * s.th));
+    e[0] = e[0] - kl;
+    e[1] = e[1] - kl * W.yi[i];
+    e[2] = e[2] + kl * W.xi[i];
+  }
+  e[3] = s.vx;
+  e[4] = s.vy;
+  e[5] = s.r;
+  e[6] = s.zd;
+  e[7] = s.phid;
+  e[8] = s.thd;
+}
+
+// J(p): canonical in the vertical, the coadjoint structure in the horizontal.
+template <class S> CVC_HD inline void dyn4_ph_J(const S x[9], S J[9][9]) {
+  for (int a = 0; a < 9; ++a)
+    for (int b = 0; b < 9; ++b)
+      J[a][b] = S(0);
+  S Jh[3][3];
+  dyn_ph_J(x + 3, Jh);
+  for (int a = 0; a < 3; ++a) {
+    J[a][6 + a] = S(1);
+    J[6 + a][a] = S(-1);
+    for (int b = 0; b < 3; ++b)
+      J[3 + a][3 + b] = Jh[a][b];
+  }
+}
+
+// R, the dissipation: positive semi-definite at every slip.
+template <class S, class G>
+CVC_HD inline void dyn4_ph_R(const dyn4_params &p, const bike_veh &v, const G &ground,
+                             const dyn4_state<S> &s, S R[9][9]) {
+  dyn4_ph_parts<S> q;
+  dyn4_ph_parts_at(p, v, ground, s, q);
+  for (int a = 0; a < 9; ++a)
+    for (int b = 0; b < 9; ++b)
+      R[a][b] = S(0);
+  for (int a = 0; a < 3; ++a)
+    for (int b = a; b < 3; ++b) {
+      S hor = S(0), ver = S(0);
+      for (int i = 0; i < 4; ++i) {
+        const S ci[3] = {S(1), q.W.yi[i], -q.W.xi[i]};
+        hor = hor + q.Sw[i] * (q.N[i][a] * q.N[i][b]);
+        ver = ver + q.W.c[i] * (ci[a] * ci[b]);
+      }
+      R[3 + a][3 + b] = hor;
+      R[3 + b][3 + a] = hor;
+      R[6 + a][6 + b] = ver;
+      R[6 + b][6 + a] = ver;
+    }
+  R[3][3] = R[3][3] + q.cx;
+}
+
+// G, the input map for u = (F_x1, ..., F_x4): each wheel's force along it, at its contact patch.
+template <class S, class G>
+CVC_HD inline void dyn4_ph_G(const dyn4_params &p, const bike_veh &v, const G &ground,
+                             const dyn4_state<S> &s, S Gm[9][4]) {
+  dyn4_ph_parts<S> q;
+  dyn4_ph_parts_at(p, v, ground, s, q);
+  for (int i = 0; i < 4; ++i)
+    for (int a = 0; a < 9; ++a)
+      Gm[a][i] = a < 3 ? S(0) : q.T[i][a - 3];
+}
+
+// u: the wheels' drive or brake forces, from the actuator's a, within their grip.
+template <class S, class G>
+CVC_HD inline void dyn4_ph_input(const dyn4_params &p, const bike_veh &v, const G &ground,
+                                 const dyn4_state<S> &s, S u[4]) {
+  dyn4_ph_parts<S> q;
+  dyn4_ph_parts_at(p, v, ground, s, q);
+  for (int i = 0; i < 4; ++i)
+    u[i] = q.Fx[i];
+}
+
+// f_lever: the tires' lateral forces' moments on roll and pitch, which their slips do not feel.
+template <class S, class G>
+CVC_HD inline void dyn4_ph_lever(const dyn4_params &p, const bike_veh &v, const G &ground,
+                                 const dyn4_state<S> &s, S f[9]) {
+  dyn4_ph_parts<S> q;
+  dyn4_ph_parts_at(p, v, ground, s, q);
+  for (int a = 0; a < 9; ++a)
+    f[a] = S(0);
+  for (int i = 0; i < 4; ++i)
+    for (int k = 3; k < 6; ++k)
+      f[3 + k] = f[3 + k] + q.Fy[i] * q.N[i][k];
+}
+
+// f_grade: with grade_force, gravity along the ground (dyn4_grade) on p_h; zero without.
+template <class S, class G>
+CVC_HD inline void dyn4_ph_grade(const dyn4_params &p, const bike_veh &v, const G &ground,
+                                 const dyn4_state<S> &s, S f[9]) {
+  for (int a = 0; a < 9; ++a)
+    f[a] = S(0);
+  if (!p.grade_force)
+    return;
+  dyn4_wheels<S> W;
+  dyn4_wheel_state(p, v, ground, s, W);
+  dyn4_grade(p, ground, s, W, f + 3);
+}
+
+// x' = (J - R) dH/dx + G u + f_lever + f_grade at the state: dyn4_plant's vector field.
+template <class S, class G>
+CVC_HD inline void dyn4_ph_rhs(const dyn4_params &p, const bike_veh &v, const G &ground,
+                               const dyn4_state<S> &s, S xdot[9]) {
+  S x[9], e[9], J[9][9], R[9][9], Gm[9][4], u[4], f[9], fg[9];
+  dyn4_ph_coords(p, s, x);
+  dyn4_ph_grad(p, v, ground, s, e);
+  dyn4_ph_J(x, J);
+  dyn4_ph_R(p, v, ground, s, R);
+  dyn4_ph_G(p, v, ground, s, Gm);
+  dyn4_ph_input(p, v, ground, s, u);
+  dyn4_ph_lever(p, v, ground, s, f);
+  dyn4_ph_grade(p, v, ground, s, fg);
+  for (int a = 0; a < 9; ++a) {
+    S acc = f[a] + fg[a];
+    for (int i = 0; i < 4; ++i)
+      acc = acc + Gm[a][i] * u[i];
+    for (int b = 0; b < 9; ++b)
+      acc = acc + (J[a][b] - R[a][b]) * e[b];
+    xdot[a] = acc;
+  }
+}
+
+// The power balance at a state, on the ground under it: dH/dt = supplied - dissipated + lever +
+// grade (+ the ground's, as the wheels move to new heights; dyn4_plant_books books it per step).
+template <class S> struct dyn4_ph_rates {
+  S dissipated; // dH/dx^T R dH/dx >= 0: the tires' slip, drag, rolling resistance, the dampers
+  S supplied;   // y^T u: the wheels' forces at their contact patches' speeds
+  S lever;      // xi^T f_lever: the tires' lateral forces on roll and pitch
+  S grade;      // xi^T f_grade: gravity along the ground (grade_force; 0 without it)
+};
+
+template <class S, class G>
+CVC_HD inline dyn4_ph_rates<S> dyn4_ph_rates_at(const dyn4_params &p, const bike_veh &v,
+                                                const G &ground, const dyn4_state<S> &s) {
+  S e[9], R[9][9], Gm[9][4], u[4], f[9], fg[9];
+  dyn4_ph_grad(p, v, ground, s, e);
+  dyn4_ph_R(p, v, ground, s, R);
+  dyn4_ph_G(p, v, ground, s, Gm);
+  dyn4_ph_input(p, v, ground, s, u);
+  dyn4_ph_lever(p, v, ground, s, f);
+  dyn4_ph_grade(p, v, ground, s, fg);
+  dyn4_ph_rates<S> out;
+  out.dissipated = S(0);
+  out.supplied = S(0);
+  out.lever = S(0);
+  out.grade = S(0);
+  for (int a = 0; a < 9; ++a) {
+    for (int b = 0; b < 9; ++b)
+      out.dissipated = out.dissipated + e[a] * R[a][b] * e[b];
+    for (int i = 0; i < 4; ++i)
+      out.supplied = out.supplied + e[a] * Gm[a][i] * u[i];
+    out.lever = out.lever + e[a] * f[a];
+    out.grade = out.grade + e[a] * fg[a];
+  }
+  return out;
+}
+
+// One step's energy books, in J: dH = supplied - dissipated + lever + grade + ground + limiter +
+// residual. The powers are the trapezoid between the step's start (with the inputs it applied,
+// the actuators' outputs) and the state it reached before its limiters, both on the ground the
+// step stood on (the start's pose: the pose enters H and the rates only through the ground).
+// limiter is the kinetic energy the speed clamp and the low-speed blend then added (< 0:
+// removed); ground is the springs' energy the new ground under the wheels added at the step's end
+// (none on flat ground; with grade_force, grade + ground is second order in hdt per step);
+// residual is the integrator's error, second order in hdt per step.
+template <class S> struct dyn4_ph_books {
+  S dH, dissipated, supplied, lever, grade, ground, limiter, residual;
+};
+
+// dyn4_plant's step with its books. The step is dyn4_plant's, to the last bit.
+template <class S, class G>
+CVC_HD inline void dyn4_plant_books(const dyn4_params &p, const bike_veh &v, const G &ground,
+                                    const dyn4_state<S> &s, S delta_cmd, S a_cmd, dyn4_state<S> &o,
+                                    dyn4_ph_books<S> &b) {
+  dyn_step_free<S> seen;
+  dyn4_plant<S>(p, v, ground, s, delta_cmd, a_cmd, o, &seen);
+  dyn4_state<S> s0 = s, f = o;
+  s0.delta = o.delta;
+  s0.a = o.a;
+  f.x = s.x;
+  f.y = s.y;
+  f.psi = s.psi;
+  dyn4_state<S> e = f;
+  e.vx = seen.vx;
+  e.vy = seen.vy;
+  e.r = seen.r;
+  const dyn4_ph_rates<S> r0 = dyn4_ph_rates_at(p, v, ground, s0),
+                         r1 = dyn4_ph_rates_at(p, v, ground, e);
+  const S half = S(0.5) * S(v.hdt);
+  b.dissipated = half * (r0.dissipated + r1.dissipated);
+  b.supplied = half * (r0.supplied + r1.supplied);
+  b.lever = half * (r0.lever + r1.lever);
+  b.grade = half * (r0.grade + r1.grade);
+  const S h0 = dyn4_ph_hamiltonian(p, v, ground, s), he = dyn4_ph_hamiltonian(p, v, ground, e),
+          hf = dyn4_ph_hamiltonian(p, v, ground, f), h1 = dyn4_ph_hamiltonian(p, v, ground, o);
+  b.dH = h1 - h0;
+  b.limiter = hf - he;
+  b.ground = h1 - hf;
+  b.residual = b.dH - (b.supplied - b.dissipated + b.lever + b.grade + b.ground + b.limiter);
 }
 
 // One step under the trained controller, and its backward: bike_control's commands from the

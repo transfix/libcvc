@@ -120,8 +120,11 @@ o2, th2, sp2, mc2, tel = gpu(telemetry=1)
 check(np.array_equal(o2, out[0]), "asking for telemetry does not change the drive")
 keys = {"alpha", "beta", "gamma", "lam_soft", "lam_hard", "mu", "mrisk", "v_risk", "ext_fx",
         "ext_fy", "steer", "curvature", "clearance", "binding", "potential", "u_goal", "u_barrier",
-        "u_soft", "u_hard", "u_terrain", "force_x", "force_y"}
+        "u_soft", "u_hard", "u_terrain", "force_x", "force_y", "potential_end", "projection_work",
+        "context_work"}
 check(set(tel) == keys, f"telemetry keys {sorted(set(tel) ^ keys)}")
+check(all(np.all(tel[k] == 0) for k in ("potential_end", "projection_work", "context_work")),
+      "the tick's books are a sim_world's: the bare drive step leaves them zero")
 check(all(v.shape == (N,) for v in tel.values()), "every telemetry array is (N,)")
 check(tel["binding"].dtype == np.uint8, "binding is uint8")
 check(np.array_equal(tel["lam_soft"], lam_soft), "a net with no lam head reports the fixed lam_soft")
