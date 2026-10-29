@@ -2885,6 +2885,25 @@ if(TARGET state_exec_bench)
   add_test(NAME state_exec_bench_smoke COMMAND state_exec_bench --smoke)
   set_property(DIRECTORY APPEND PROPERTY CVC_REGISTERED_TESTS state_exec_bench)
 endif()
+# The bench runner's own rules (tools/bench/test_state_exec_bench.py, standard library only):
+# compare's implicit defaults, --pair, the noise and change rules, and gate, which the state_exec
+# lock gates are decided by. Registered when a working Python 3 is found: find_program can return
+# a stub (Windows' app-execution alias), so the candidate is run once before it is trusted.
+if(Python3_EXECUTABLE)
+  set(_cvc_bench_python "${Python3_EXECUTABLE}")
+else()
+  find_program(CVC_BENCH_PYTHON NAMES python3 python)
+  set(_cvc_bench_python "${CVC_BENCH_PYTHON}")
+endif()
+if(_cvc_bench_python)
+  execute_process(COMMAND "${_cvc_bench_python}" -I -c "import sys; sys.exit(sys.version_info < (3, 8))"
+                  RESULT_VARIABLE _cvc_bench_python_rc OUTPUT_QUIET ERROR_QUIET)
+  if(_cvc_bench_python_rc EQUAL 0)
+    add_test(NAME state_exec_bench_tool_test
+             COMMAND "${_cvc_bench_python}" -I
+                     "${PROJECT_SOURCE_DIR}/tools/bench/test_state_exec_bench.py")
+  endif()
+endif()
 if(TARGET hdf5_test)
   cvc_discover_tests(hdf5_test)
 endif()

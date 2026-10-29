@@ -2667,6 +2667,30 @@ std::unique_ptr<cvc::app> make_app(bool with_compute_pool = false) {
   return app;
 }
 
+// The policy sweep key's values (docs/STATE_EXEC_BENCH.md): rr, priority, priority_rr.
+se::scheduling_policy policy_of(const std::string &name) {
+  if (name == "rr")
+    return se::scheduling_policy::round_robin;
+  if (name == "priority")
+    return se::scheduling_policy::priority;
+  if (name == "priority_rr")
+    return se::scheduling_policy::priority_rr;
+  throw std::invalid_argument("unknown policy '" + name + "' (rr, priority, priority_rr)");
+}
+
+// How a world's scheduler is built: its policy, and which lock manager it gets (`none` is the
+// scheduler as every existing suite builds it; the lock phases add `private` and `shared`).
+struct world_opts {
+  se::scheduling_policy policy = se::scheduling_policy::round_robin;
+  std::string locks = "none";
+  static world_opts of(const point_ctx &pc) {
+    world_opts o;
+    o.policy = policy_of(pc.s("policy", "rr"));
+    o.locks = pc.s("locks", "none");
+    return o;
+  }
+};
+
 struct world {
   cvc::app *app = nullptr;
   cvc::state *tree = nullptr;
@@ -2680,16 +2704,16 @@ struct world {
 
   // `exec` is "sync" or "async"; `a` gives the scheduler the app's tree as its watch root and the
   // intrinsics their root, as app::exec_scheduler() and pycvc's Exec do.
-  world(const std::string &exec, cvc::app *a) : app(a) {
+  world(const std::string &exec, cvc::app *a, const world_opts &o = {}) : app(a) {
     if (app)
       tree = &cvc::state::instance(*app);
     if (exec == "sync") {
-      sync = std::make_unique<se::scheduler>();
+      sync = std::make_unique<se::scheduler>(o.policy);
       if (tree)
         sync->set_watch_root(tree);
       ictx.sched = sync.get();
     } else {
-      async = std::make_unique<se::async_scheduler>();
+      async = std::make_unique<se::async_scheduler>(o.policy);
       // What app::exec_scheduler() and pycvc's Exec give theirs: scripts read inside the
       // process, deep data a slice per step.
       async->set_parser_defaults(se::async_scheduler::host_parser_defaults());
@@ -3565,6 +3589,26 @@ int current_cpu_efficiency() {
 // Scenarios
 // ---------------------------------------------------------------------------------------------
 
+// The policy and locks sweep keys (docs/STATE_EXEC_BENCH.md), on the scenarios that build their
+// world with world_opts::of: the scheduler's policy, and which lock manager it gets. Both run at
+// their default (rr, none) unless swept, e.g. --size policy=rr,priority_rr. A locks value this
+// build has no manager for is skipped, not mis-measured.
+void add_policy_and_locks(scenario &sc) {
+  for (sizes_t *s : {&sc.sizes, &sc.smoke}) {
+    s->push_back({"policy", {"rr"}});
+    s->push_back({"locks", {"none"}});
+  }
+  sc.accept = [prev = std::move(sc.accept)](const std::string &exec, const point_ctx &pc) {
+    const std::string locks = pc.s("locks", "none");
+    if (locks != "none") {
+      std::printf("  %-28s %-9s %-34s skipped: locks=%s needs the lock manager (phase L1/L3)\n",
+                  pc.sc.name.c_str(), exec.c_str(), params_text(pc.params).c_str(), locks.c_str());
+      return false;
+    }
+    return !prev || prev(exec, pc);
+  };
+}
+
 std::vector<scenario> make_scenarios() {
   std::vector<scenario> all;
   const std::vector<std::string> both_sched = {"sync", "async"};
@@ -3619,13 +3663,15 @@ std::vector<scenario> make_scenarios() {
     sc.smoke.push_back({"driver", {"spin"}});
     sc.async_only = {"driver"};
     sc.want_heap = true;
+    add_policy_and_locks(sc);
     const eval_prog *pp = &p;
     sc.run = [pp](point_ctx &pc) {
       const se::value_t ast = se::parse(pp->src(pc));
       const std::string expect = pp->expect(pc);
+      const world_opts wo = world_opts::of(pc);
       auto app = make_app();
       pc.reps([&](meter &m, rep_out &o) {
-        world w(pc.executor, app.get());
+        world w(pc.executor, app.get(), wo);
         o.iterations = pp->iters(pc);
         o.programs = 1;
         run_single(w, pc, m, o, ast, expect);
@@ -3666,12 +3712,14 @@ std::vector<scenario> make_scenarios() {
     sc.smoke = {
         {"n", {"50"}}, {"reap", {"1", "0"}}, {"env", {"extend", "own"}}, {"driver", {"spin"}}};
     sc.async_only = {"reap", "driver"};
+    add_policy_and_locks(sc);
     sc.run = [tiny_flood](point_ctx &pc) {
       std::vector<std::string> src, expect;
       tiny_flood(pc.i("n"), src, expect);
+      const world_opts wo = world_opts::of(pc);
       auto app = make_app();
       pc.reps([&](meter &m, rep_out &o) {
-        world w(pc.executor, app.get());
+        world w(pc.executor, app.get(), wo);
         auto f = run_flood(w, pc, m, o, src, expect, pc.s("env", "extend"), pc.i("reap", 1) != 0);
         o.latency_ns = std::move(f.latency);
         o.extra.i("processes_left", w.process_count());
@@ -4559,15 +4607,17 @@ std::vector<scenario> make_scenarios() {
     sc.sizes = {{"r", {"2000"}}, {"bystanders", {"0", "100", "1000"}}, {"driver", {"spin"}}};
     sc.smoke = {{"r", {"100"}}, {"bystanders", {"0", "10"}}, {"driver", {"spin"}}};
     sc.async_only = {"driver"};
+    add_policy_and_locks(sc);
     sc.run = [](point_ctx &pc) {
       const int64_t r = pc.i("r");
       const std::string a =
           loop_src(r, "", "(msg-send \"bench.ping\" \"p\") (msg-recv \"bench.pong\")", "i");
       const std::string b =
           loop_src(r, "", "(msg-recv \"bench.ping\") (msg-send \"bench.pong\" \"q\")", "i");
+      const world_opts wo = world_opts::of(pc);
       auto app = make_app();
       pc.reps([&](meter &m, rep_out &o) {
-        world w(pc.executor, app.get());
+        world w(pc.executor, app.get(), wo);
         const std::string why =
             park_bystanders(w, pc.i("bystanders"), parked_on_never, pc.cfg.timeout);
         if (!why.empty()) {
@@ -4589,14 +4639,16 @@ std::vector<scenario> make_scenarios() {
     sc.sizes = {{"m", {"20000"}}, {"driver", {"spin"}}};
     sc.smoke = {{"m", {"200"}}, {"driver", {"spin"}}};
     sc.async_only = {"driver"};
+    add_policy_and_locks(sc);
     sc.run = [](point_ctx &pc) {
       const int64_t mm = pc.i("m");
       const std::string prod = loop_src(mm, "", "(msg-send \"bench.q\" \"x\")", "i");
       const std::string cons = "(begin (set c 0) (while (< c " + istr(mm) +
                                ") (begin (msg-recv \"bench.q\") (set c (+ c 1)))) c)";
+      const world_opts wo = world_opts::of(pc);
       auto app = make_app();
       pc.reps([&](meter &m, rep_out &o) {
-        world w(pc.executor, app.get());
+        world w(pc.executor, app.get(), wo);
         if (w.sync)
           w.sync->max_pending_messages = 0;
         else
@@ -4618,6 +4670,7 @@ std::vector<scenario> make_scenarios() {
     sc.sizes = {{"k", {"10", "100"}}, {"m", {"200"}}, {"driver", {"spin"}}};
     sc.smoke = {{"k", {"4"}}, {"m", {"10"}}, {"driver", {"spin"}}};
     sc.async_only = {"driver"};
+    add_policy_and_locks(sc);
     sc.run = [](point_ctx &pc) {
       const int64_t k = pc.i("k"), mm = pc.i("m");
       const std::string recv = "(begin (set c 0) (while (< c " + istr(mm) +
@@ -4631,9 +4684,10 @@ std::vector<scenario> make_scenarios() {
       std::vector<std::string> src(k, recv), expect(k, istr(mm));
       src.push_back(send);
       expect.push_back(istr(mm));
+      const world_opts wo = world_opts::of(pc);
       auto app = make_app();
       pc.reps([&](meter &m, rep_out &o) {
-        world w(pc.executor, app.get());
+        world w(pc.executor, app.get(), wo);
         if (w.sync)
           w.sync->max_pending_messages = 0;
         else
@@ -4677,6 +4731,7 @@ std::vector<scenario> make_scenarios() {
     sc.sizes = {{"k", {"10", "100", "300"}}, {"m", {"20"}}, {"driver", {"spin"}}};
     sc.smoke = {{"k", {"4"}}, {"m", {"5"}}, {"driver", {"spin"}}};
     sc.async_only = {"driver"};
+    add_policy_and_locks(sc);
     sc.run = [](point_ctx &pc) {
       const int64_t k = pc.i("k"), mm = pc.i("m");
       std::vector<std::string> src, expect;
@@ -4692,9 +4747,10 @@ std::vector<scenario> make_scenarios() {
                     ") (begin (for ch chans (begin (msg-send ch \"x\") (set n (+ n 1)))) (set r "
                     "(+ r 1)))) n)");
       expect.push_back(istr(k * mm));
+      const world_opts wo = world_opts::of(pc);
       auto app = make_app();
       pc.reps([&](meter &m, rep_out &o) {
-        world w(pc.executor, app.get());
+        world w(pc.executor, app.get(), wo);
         if (w.sync)
           w.sync->max_pending_messages = 0;
         else
@@ -4716,13 +4772,15 @@ std::vector<scenario> make_scenarios() {
     sc.sizes = {{"t", {"1", "4"}}, {"r", {"4"}}, {"per", {"4000"}}, {"driver", {"spin"}}};
     sc.smoke = {{"t", {"1", "2"}}, {"r", {"2"}}, {"per", {"100"}}, {"driver", {"spin"}}};
     sc.spawns_threads = true;
+    add_policy_and_locks(sc);
     sc.run = [](point_ctx &pc) {
       const int64_t nt = pc.i("t"), r = std::max<int64_t>(1, pc.i("r"));
       const int64_t per = pc.i("per") / r * r; // a multiple of r: every receiver gets the same
       const int64_t each = nt * per / r;
+      const world_opts wo = world_opts::of(pc);
       auto app = make_app();
       pc.reps([&](meter &m, rep_out &o) {
-        world w(pc.executor, app.get());
+        world w(pc.executor, app.get(), wo);
         w.async->max_pending_messages = 0;
         std::vector<int64_t> lat;
         lat.reserve(std::size_t(nt * per));
