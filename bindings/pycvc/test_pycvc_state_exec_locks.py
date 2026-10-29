@@ -451,11 +451,13 @@ _SIBLING = "(begin (set i 0) (while (< i 300) (set i (+ i 1))) 1)"
 
 def _program(end):
     # started() gives the monitor the pid; a few sleeps, so calls land while run() pumps; then the
-    # program terminates, kills itself or raises.
+    # program terminates, kills itself or raises, or waits for a sibling to end (sibling-ended,
+    # which the test registers).
     body = {
         "terminate": "1",
         "kill": "(kill (self-pid))",
         "raise": '(raise (ValueError "pr08"))',
+        "sibling": "(begin (while (not (sibling-ended)) (sleep 0)) 1)",
     }[end]
     return f"(begin (started) (for i (range 5) (sleep 0)) {body})"
 
@@ -525,20 +527,30 @@ def test_pr08_stress_monitor_sets_and_gets_across_the_quiesce():
     def both(pid):
         return (ex.set_priority(pid, 5), ex.get_priority(pid))
 
+    ended = threading.Event()
+    box = {}
+
     def boom(_result):
+        ended.set()
         raise ValueError("pr08 on_complete")
 
     def sibling():
-        # It runs beside the program, a step each in turn, and ends after the program's (started):
-        # its on_complete raises then. (No env: builtins only.)
+        # It runs beside the program, a step each in turn, and the program waits for it to end
+        # (bounded): its on_complete raises then, in this run. A program that ended first left its
+        # sibling to end in a later run, as it did under TSan. (No env: builtins only.)
+        ended.clear()
+        box["deadline"] = time.monotonic() + WAIT
         opts = pycvc.execute_options()
         opts.on_complete = boom
         ex.scheduler().execute(_SIBLING, opts)
 
-    for path, setup in (("normal", None), ("catch", sibling)):
+    for path, end, setup in (("normal", "terminate", None), ("catch", "sibling", sibling)):
         app = pycvc.make_app()
         ex = pycvc.Exec(app)
-        during, after, errors = _monitored_runs(ex, "terminate", both, setup)
+        ex.register_fn(
+            "sibling-ended", lambda: ended.is_set() or time.monotonic() > box["deadline"]
+        )
+        during, after, errors = _monitored_runs(ex, end, both, setup)
         # Applied and read back; or reaped between the two calls; or reaped before both.
         allowed = [(True, _info(5)), (True, None), (False, None)]
         for out in during:
