@@ -8,6 +8,8 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
+#include "SdlWindow.h" // the onscreen window on SDL3, where cvcGL has SDL
+
 #include <algorithm>
 #include <cstdio>
 #include <cvc/gl/CameraController.h>
@@ -430,7 +432,28 @@ ViewportManager::ViewportManager(SceneGraph &mainScene, int width, int height, b
   // Keyboard focus lives at the main scene's prefix (viewport names are unique
   // across the manager). Matches the existing ".viewers.<name>" scheme.
   m_impl->activeStatePath = mainScene.getStatePrefix() + ".active_viewport";
-  m_impl->window = vtkSmartPointer<vtkRenderWindow>::New();
+  // An onscreen window is SDL3's where cvcGL has SDL (SdlWindow.h): SDL makes the window and its GL
+  // context and its events drive the interactor, the same on every platform. Offscreen, without
+  // SDL, with $CVCGL_SDL_WINDOW=0, or where SDL can open no window, VTK's own window.
+#ifdef CVC_ENABLE_SDL
+  if (!offscreen && sdl_window_enabled()) {
+    auto sdlWin = vtkSmartPointer<SdlGLRenderWindow>::New();
+    sdlWin->SetSize(width, height);
+    sdlWin->SetWindowName("cvcGL");
+    auto sdlIren = vtkSmartPointer<SdlRenderWindowInteractor>::New();
+    sdlIren->SetRenderWindow(sdlWin);
+    sdlIren->Initialize(); // makes the window and its GL context
+    if (sdlWin->sdlWindow() && sdlWin->GetInitialized()) {
+      m_impl->window = sdlWin;
+      m_impl->interactor = sdlIren;
+    } else {
+      std::fprintf(stderr, "cvcGL: SDL3 opened no window (%s); using VTK's window\n",
+                   sdlWin->lastError().c_str());
+    }
+  }
+#endif
+  if (!m_impl->window)
+    m_impl->window = vtkSmartPointer<vtkRenderWindow>::New();
   m_impl->window->SetOffScreenRendering(offscreen ? 1 : 0);
   m_impl->window->SetSize(width, height);
   m_impl->window->SetNumberOfLayers(1);
@@ -456,9 +479,12 @@ ViewportManager::ViewportManager(SceneGraph &mainScene, int width, int height, b
     // Initialize(), never Start(): Start() would take the event loop away from
     // the caller (see SceneRenderer). The interactor only delivers
     // resize/close/mouse events, drained on demand by processUIEvents().
-    m_impl->interactor = vtkSmartPointer<vtkRenderWindowInteractor>::New();
-    m_impl->interactor->SetRenderWindow(m_impl->window);
-    m_impl->interactor->Initialize();
+    // (An SDL window's interactor is made and initialized with it, above.)
+    if (!m_impl->interactor) {
+      m_impl->interactor = vtkSmartPointer<vtkRenderWindowInteractor>::New();
+      m_impl->interactor->SetRenderWindow(m_impl->window);
+      m_impl->interactor->Initialize();
+    }
     // The multi-viewport input router: one style on the one interactor, feeding
     // per-viewport cameras via route*(). Never SetDefaultRenderer on it (that
     // would pin routing to one renderer) and never attach() the per-viewport

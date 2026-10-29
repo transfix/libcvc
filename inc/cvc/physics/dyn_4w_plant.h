@@ -32,8 +32,9 @@
 // with each other and with anything else in it, a collision taking the world's pose and twist back
 // into the model (heave, roll and pitch stay the model's) and booking the energy that changed.
 //
-// Each tick runs dyn4_plant's substeps under the held command and books every step
-// (dyn4_plant_books):
+// Nav's acceleration goes through the Jolt plant's driver (dyn_driver.h; options.driver), as
+// dyn_bike_plant's does. Each tick runs dyn4_plant's substeps under the held command and books
+// every step (dyn4_plant_books):
 //   stored now = stored at attach + drive - brake - dissipated + lever + grade + ground + limiter
 //                + contact + residual
 // stored is H: the kinetic energy, the springs' and gravity's on the heave. dissipated is the
@@ -48,6 +49,7 @@
 #include <cvc/core/world_units.h>
 #include <cvc/nav/detail/dyn_4w.h>
 #include <cvc/nav/vehicle_plant.h>
+#include <cvc/physics/dyn_driver.h>
 #include <cvc/physics/nav_plant.h>
 #include <cvc/physics/vehicle.h>
 #include <cvc/physics/world.h>
@@ -69,11 +71,19 @@ struct dyn_4w_plant_options {
   double substep = 0.01;    // s: the longest step without a world (with one: its fixed_dt)
   double drive_lag = -1.0;  // s: the drive force's lag; < 0 the vehicle's own
   double gravity = 9.80665; // m/s^2
-  bool grade_force = true;  // gravity along the slope acts on the body (dyn4_params::grade_force)
+  // Nav's acceleration as the Jolt plant's driver takes it (dyn_driver.h), so nav drives this plant
+  // as it drives that one; false: as the model's drive force per unit mass, raw.
+  bool driver = true;
+  bool grade_force = true; // gravity along the slope acts on the body (dyn4_params::grade_force)
   // The world the chassis collide in (borrowed; null: no collisions), and its bodies the wheels
   // drive on (touching them is not a collision). attach() sets its contact reporting to all.
   world *physics = nullptr;
   std::vector<body_id> ground_bodies;
+  // The chassis box's friction against what it hits (combined by the world's rule: the product,
+  // by default, so 0.21 against a building's 0.7): a body panel scraping masonry or another body,
+  // not a tire's grip. At 1, the default material's, a vehicle pressed against a wall by its own
+  // tires grips it like a tire and crawls along it.
+  double chassis_friction = 0.3;
 };
 
 // One agent's energy, in J: over the last tick, or since attach().
@@ -165,6 +175,7 @@ private:
     double rear_x = 0.0;    // the rear axle, body x (m)
     double steer_cmd = 0.0; // rad
     double accel_cmd = 0.0; // m/s^2 along the heading
+    dyn_driver driver;      // how the vehicle takes accel_cmd (dyn_driver)
     double stored0 = 0.0;   // J
     int hits_tick = 0;
     long hits = 0;

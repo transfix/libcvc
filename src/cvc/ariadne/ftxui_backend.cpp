@@ -27,6 +27,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <climits>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -1685,7 +1686,40 @@ void FtxuiBackend::end_window() {
     if (it.win == f.id && it.id == m.focused)
       holds_focus = true;
   fx::Element body = f.items.empty() ? fx::emptyElement() : fx::vbox(std::move(f.items));
-  if (w.h > 0)
+  // §3.0.3b: a window with no size is as big as its content, held to its min: / max: and stopped at
+  // the screen's edge from where it is drawn. Content past the window's size, authored or not,
+  // scrolls: the body becomes a frame that keeps the focused widget in view, with a scroll bar.
+  body->ComputeRequirement();
+  // The window's size on one axis (0: the content's) for content needing `need` cells there,
+  // including the window's frame.
+  auto window_extent = [](int set, int need, int floor, int room, int lo, int hi) {
+    if (set > 0)
+      return std::max(floor, set);
+    hi = std::min(hi, std::max(floor, room));
+    return need > std::max(lo, hi) ? std::max({floor, lo, hi}) : 0;
+  };
+  const int min_w = f.size.min_w.is_set() ? m.extent_cols(f.size.min_w) : 0;
+  const int max_w = f.size.max_w.is_set() ? m.extent_cols(f.size.max_w) : INT_MAX;
+  const int min_h = f.size.min_h.is_set() ? m.extent_rows(f.size.min_h) : 0;
+  const int max_h = f.size.max_h.is_set() ? m.extent_rows(f.size.max_h) : INT_MAX;
+  int need_w = body->requirement().min_x + 2;
+  int need_h = body->requirement().min_y + 2;
+  int win_h = window_extent(w.h, need_h, 3, m.term_h - w.sy, min_h, max_h);
+  bool scroll_y = win_h && need_h > win_h;
+  need_w += scroll_y ? 1 : 0; // the vertical scroll bar's column
+  const int win_w = window_extent(w.w, need_w, 4, m.term_w - w.sx, min_w, max_w);
+  const bool scroll_x = win_w && need_w > win_w;
+  if (scroll_x && !scroll_y) { // the horizontal scroll bar's row
+    win_h = window_extent(w.h, ++need_h, 3, m.term_h - w.sy, min_h, max_h);
+    scroll_y = win_h && need_h > win_h;
+  }
+  if (scroll_y)
+    body = body | fx::vscroll_indicator;
+  if (scroll_x)
+    body = body | fx::hscroll_indicator;
+  if (scroll_x)
+    body = body | (win_h ? fx::frame : fx::xframe) | fx::flex;
+  else if (win_h)
     body = body | fx::yframe | fx::flex; // scrolls to keep the focused widget in view
   fx::Elements bar{fx::text(" " + f.title + " ") | (holds_focus ? fx::bold : fx::nothing),
                    fx::filler()};
@@ -1695,22 +1729,14 @@ void FtxuiBackend::end_window() {
   }
   fx::Element el =
       fx::window(fx::hbox(std::move(bar)), body, holds_focus ? fx::HEAVY : fx::ROUNDED);
-  if (w.w > 0)
-    el = el | fx::size(fx::WIDTH, fx::EQUAL, std::max(4, w.w));
-  else {
-    if (f.size.min_w.is_set())
-      el = el | fx::size(fx::WIDTH, fx::GREATER_THAN, m.extent_cols(f.size.min_w));
-    if (f.size.max_w.is_set())
-      el = el | fx::size(fx::WIDTH, fx::LESS_THAN, m.extent_cols(f.size.max_w));
-  }
-  if (w.h > 0)
-    el = el | fx::size(fx::HEIGHT, fx::EQUAL, std::max(3, w.h));
-  else {
-    if (f.size.min_h.is_set())
-      el = el | fx::size(fx::HEIGHT, fx::GREATER_THAN, m.extent_rows(f.size.min_h));
-    if (f.size.max_h.is_set())
-      el = el | fx::size(fx::HEIGHT, fx::LESS_THAN, m.extent_rows(f.size.max_h));
-  }
+  if (win_w)
+    el = el | fx::size(fx::WIDTH, fx::EQUAL, win_w);
+  else if (min_w)
+    el = el | fx::size(fx::WIDTH, fx::GREATER_THAN, min_w);
+  if (win_h)
+    el = el | fx::size(fx::HEIGHT, fx::EQUAL, win_h);
+  else if (min_h)
+    el = el | fx::size(fx::HEIGHT, fx::GREATER_THAN, min_h);
   el = el | fx::reflect(m.boxes["win|" + f.id]) | fx::clear_under;
   m.layers.push_back({w.z, place(isolated(std::move(el)), w.sx, w.sy)});
   m.walk.windows.push_back(f.id);

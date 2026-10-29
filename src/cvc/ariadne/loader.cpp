@@ -98,7 +98,8 @@ bool is_builtin_block(const std::string &k) {
   return k == "meta" || k == "menubar" || k == "windows" || k == "overlays" || k == "root" ||
          k == "children" || k == "scene" || k == "customs" || k == "init" || k == "on_tick" ||
          k == "on_key" || k == "on_pointer" || k == "on_signal" || k == "units" || k == "import" ||
-         k == "channels" || k == "lint" || k == "args" || k == "requires" || k == "keys";
+         k == "channels" || k == "lint" || k == "args" || k == "requires" || k == "keys" ||
+         k == "windows_menu";
 }
 } // namespace
 
@@ -143,6 +144,7 @@ const char *const kAriSchema = R"ARISCHEMA({
       "required": ["min_libcvc"]
     },
     "menubar":  {"type": "array", "items": {"$ref": "#/$defs/widget"}},
+    "windows_menu": {"type": ["boolean", "string"]},
     "keys": {
       "type": "object",
       "additionalProperties": {
@@ -303,9 +305,9 @@ namespace {
 // ORDER MATTERS: the short-form dispatch (widget_type) takes the FIRST of these present as a key,
 // so tf_editor precedes color — a tf_editor's own config may carry a `color:` node list.
 constexpr const char *kBuiltinWidgetTypes[] = {
-    "group",     "menubar",  "menu",       "menu_item",    "window",   "overlay",    "panel",
-    "text",      "checkbox", "slider_int", "slider_float", "combo",    "input_text", "input_int",
-    "tf_editor", "color",    "image",      "button",       "separator"};
+    "group",     "menubar",  "menu",       "menu_item",    "window",    "overlay",     "panel",
+    "text",      "checkbox", "slider_int", "slider_float", "combo",     "input_text",  "input_int",
+    "tf_editor", "color",    "image",      "button",       "separator", "windows_menu"};
 } // namespace
 
 bool is_builtin_widget_type(const std::string &type) {
@@ -504,6 +506,19 @@ std::string widget_type(const YAML::Node &n, std::string &label) {
   return std::string();
 }
 
+// A `windows_menu:` value (§5.9): false / no / off turns the menu off, true / empty keeps the
+// default title, anything else is the title.
+Widget windows_menu_setting(const std::string &v) {
+  std::string t;
+  for (char c : v)
+    t += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  if (t == "false" || t == "no" || t == "off")
+    return windows_menu(std::string(), false);
+  if (t == "true" || t == "yes" || t == "on")
+    return windows_menu();
+  return windows_menu(v);
+}
+
 void parse_pos(const YAML::Node &n, Widget &w) {
   const YAML::Node p = n["pos"];
   if (p && p.IsSequence() && p.size() >= 2) {
@@ -638,6 +653,8 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     const std::string s = n.Scalar();
     if (s == "separator")
       return separator();
+    if (s == "windows_menu")
+      return windows_menu();
     return text(s);
   }
   if (!n.IsMap()) {
@@ -667,6 +684,8 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
   }
   if (type == "menu")
     return menu(label, parse_seq(ctx, has(n, "items") ? n["items"] : n["children"]));
+  if (type == "windows_menu") // §5.9: `windows_menu: View` puts the built-in Windows menu here
+    return windows_menu_setting(label);
   if (type == "menu_item") {
     if (has(n, "bind"))
       return menu_toggle(label, str(n, "bind"), flag(n, "def"));
@@ -1370,6 +1389,10 @@ Widget parse_document(Ctx &ctx, const YAML::Node &doc) {
     if (r.IsDefined())
       for (Widget &w : parse_seq(ctx, r))
         roots.push_back(std::move(w));
+    // §5.9: `windows_menu: false` turns the built-in Windows menu off; a string renames it.
+    const YAML::Node wm = doc["windows_menu"];
+    if (wm.IsDefined() && wm.IsScalar())
+      roots.push_back(windows_menu_setting(wm.Scalar()));
   } else {
     ctx.warn("ari: document root is neither a map nor a sequence — nothing to load");
   }

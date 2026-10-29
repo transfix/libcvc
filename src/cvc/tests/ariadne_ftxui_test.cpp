@@ -477,6 +477,75 @@ TEST(AriadneFtxui, ATinyFrameDoesNotMoveWindowsForGood) {
   EXPECT_EQ(y, 10);
 }
 
+// §3.0.3b: a window with no size: is as big as its content, but stops at the screen's edge; past
+// that its body scrolls, with a scroll bar, and keeps the focused widget in view.
+TEST(AriadneFtxui, AWindowTallerThanTheScreenStopsAtItsEdgeAndScrolls) {
+  REQUIRE_FTXUI();
+  std::vector<Widget> items;
+  for (int i = 0; i < 30; ++i)
+    items.push_back(checkbox("Item " + std::to_string(100 + i), "item" + std::to_string(i)));
+  Term t(group({window("Long", items)}));
+  EXPECT_TRUE(t.shows("\xe2\x95\xb0")) << "its bottom edge (\"╰\") is on screen\n" << t.screen;
+  EXPECT_TRUE(t.shows("Item 100")) << t.screen;
+  EXPECT_FALSE(t.shows("Item 129")) << t.screen;
+  // An unfocused window has a light frame, so a heavy bar is the scroll bar.
+  EXPECT_TRUE(t.shows("\xe2\x94\x83") || t.shows("\xe2\x95\xbb")) << "a scroll bar\n" << t.screen;
+  for (int i = 0; i < 30; ++i)
+    t.key("Tab");
+  t.draw();
+  EXPECT_TRUE(t.shows("Item 129")) << "the focused widget scrolled into view\n" << t.screen;
+  EXPECT_FALSE(t.shows("Item 100")) << t.screen;
+}
+
+TEST(AriadneFtxui, AWindowNearTheBottomStopsAtTheEdgeToo) {
+  REQUIRE_FTXUI();
+  std::vector<Widget> items;
+  for (int i = 0; i < 10; ++i)
+    items.push_back(text("line " + std::to_string(i)));
+  Widget w = window("Low", items);
+  w.has_pos = true;
+  w.pos_x = 80;  // 10 columns
+  w.pos_y = 288; // 18 rows: 6 left on a 24-row screen
+  Term t(group({w}));
+  int x = 0, y = 0;
+  ASSERT_TRUE(find_cell(t.screen, "\xe2\x95\xb0", x, y)) << t.screen; // "╰"
+  EXPECT_EQ(y, 23) << "the window ends on the screen's last row\n" << t.screen;
+  EXPECT_TRUE(t.shows("line 0")) << t.screen;
+  EXPECT_FALSE(t.shows("line 9")) << t.screen;
+}
+
+TEST(AriadneFtxui, ContentWiderThanTheScreenScrollsSideways) {
+  REQUIRE_FTXUI();
+  const std::string wide(120, 'w');
+  Term t(group({window("Wide", {text("start " + wide + " end")})}));
+  int x = 0, y = 0;
+  ASSERT_TRUE(find_cell(t.screen, "\xe2\x95\xae", x, y)) << t.screen; // "╮", the top-right corner
+  EXPECT_LT(x, 80) << "the window's right edge is on screen\n" << t.screen;
+  EXPECT_TRUE(t.shows("start")) << t.screen;
+  EXPECT_FALSE(t.shows("end")) << t.screen;
+  // The bar is a light line along the body's last row, starting at the window's left edge ("│─").
+  EXPECT_TRUE(t.shows("\xe2\x94\x82\xe2\x94\x80")) << "a horizontal scroll bar\n" << t.screen;
+}
+
+TEST(AriadneFtxui, ASizedWindowScrollsOnlyWhenItsContentOverflows) {
+  REQUIRE_FTXUI();
+  Widget fits = window("Fits", {text("one"), text("two")});
+  fits.size.w = Extent{Unit::Px, 160}; // 20 columns
+  fits.size.h = Extent{Unit::Px, 96};  // 6 rows
+  Term a(group({fits}));
+  EXPECT_FALSE(a.shows("\xe2\x94\x83") || a.shows("\xe2\x95\xb9") || a.shows("\xe2\x95\xbb"))
+      << "no scroll bar when the content fits\n"
+      << a.screen;
+  Widget over = window(
+      "Over", {text("one"), text("two"), text("three"), text("four"), text("five"), text("six")});
+  over.size = fits.size;
+  Term b(group({over}));
+  EXPECT_TRUE(b.shows("\xe2\x94\x83") || b.shows("\xe2\x95\xb9") || b.shows("\xe2\x95\xbb"))
+      << "a scroll bar when it overflows\n"
+      << b.screen;
+  EXPECT_FALSE(b.shows("six")) << b.screen;
+}
+
 TEST(AriadneFtxui, CloseButtonClosesTheWindow) {
   REQUIRE_FTXUI();
   Widget w = window("Win", {text("body")});
@@ -488,6 +557,26 @@ TEST(AriadneFtxui, CloseButtonClosesTheWindow) {
   EXPECT_EQ(val(t.app, "tree.win.open"), "0");
   t.draw();
   EXPECT_FALSE(t.shows("body")) << t.screen;
+}
+
+// §5.9: a window closed with its [x] comes back from the built-in Windows menu.
+TEST(AriadneFtxui, AClosedWindowReopensFromTheWindowsMenu) {
+  REQUIRE_FTXUI();
+  Widget w = window("Panel", {text("body")});
+  w.id = "panel";
+  w.closable = true;
+  Term t(group({menubar({menu("File", {menu_action("Quit", "quit")})}), w}));
+  ASSERT_TRUE(t.shows("Windows")) << t.screen;
+  ASSERT_TRUE(t.click("[x]"));
+  EXPECT_EQ(val(t.app, "tree.panel.open"), "0");
+  t.draw();
+  EXPECT_FALSE(t.shows("body")) << t.screen;
+  ASSERT_TRUE(t.click("Windows"));
+  ASSERT_TRUE(t.shows("[ ] Panel")) << "unticked while closed\n" << t.screen;
+  ASSERT_TRUE(t.click("[ ] Panel"));
+  EXPECT_EQ(val(t.app, "tree.panel.open"), "1");
+  t.draw();
+  EXPECT_TRUE(t.shows("body")) << t.screen;
 }
 
 TEST(AriadneFtxui, FocusRaisesItsWindow) {
@@ -764,13 +853,19 @@ TEST(AriadneFtxuiHosted, KeepsWindowBodiesAndAMenuModel) {
   EXPECT_EQ(wins[0].content_h, 2);
 
   const auto menus = t.be.hosted_menus();
-  ASSERT_EQ(menus.size(), 1u);
+  ASSERT_EQ(menus.size(), 2u);
   EXPECT_EQ(menus[0].label, "File");
   ASSERT_EQ(menus[0].items.size(), 3u);
   EXPECT_TRUE(menus[0].items[0].toggle);
   EXPECT_FALSE(menus[0].items[0].checked);
   EXPECT_TRUE(menus[0].items[1].separator);
   EXPECT_EQ(menus[0].items[2].label, "Quit");
+  // §5.9: the built-in Windows menu reaches the host's menu bar too, ticked while "Win" is open.
+  EXPECT_EQ(menus[1].label, "Windows");
+  ASSERT_EQ(menus[1].items.size(), 1u);
+  EXPECT_EQ(menus[1].items[0].label, "Win");
+  EXPECT_TRUE(menus[1].items[0].toggle);
+  EXPECT_TRUE(menus[1].items[0].checked);
 
   const TermRows rows = t.be.render_window("w", 20, 4);
   ASSERT_EQ(rows.size(), 4u);

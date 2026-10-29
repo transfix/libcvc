@@ -107,10 +107,12 @@ std::unique_ptr<world> walled_world(double wall_x, body_id &ground) {
 
 } // namespace
 
-// The plant's ticks are dyn_plant's substeps under the held command, in SI, bit for bit; nav
-// reads the rear axle, the heading and the speed back through its frame.
+// The plant's ticks are dyn_plant's substeps under the held command (raw, without the driver), in
+// SI, bit for bit; nav reads the rear axle, the heading and the speed back through its frame.
 TEST(DynBikePlant, StepsAsTheDynamicPlantDoes) {
-  dyn_bike_plant plant({vehicle_desc::humvee()});
+  dyn_bike_plant_options raw;
+  raw.driver = false;
+  dyn_bike_plant plant({vehicle_desc::humvee()}, raw);
   cvc::nav::plant_state start;
   start.x = 1.5f;
   start.y = -0.5f;
@@ -186,11 +188,13 @@ TEST(DynBikePlant, TheBooksClose) {
   }
 }
 
-// Up a 5% ramp the vehicle loses g sin(slope) of acceleration against the same commands on flat
-// ground, the books gain the potential energy it climbed as their grade line, and they close.
+// Up a 5% ramp the raw model (without the driver) loses g sin(slope) of acceleration against the
+// same commands on flat ground, the books gain the potential energy it climbed as their grade
+// line, and they close.
 TEST(DynBikePlant, ClimbsTheGround) {
   const double slope = 0.05;
   dyn_bike_plant_options flat_o, ramp_o;
+  flat_o.driver = ramp_o.driver = false;
   ramp_o.plant = ramp(slope);
   dyn_bike_plant flat({vehicle_desc::humvee()}, flat_o), up({vehicle_desc::humvee()}, ramp_o);
   cvc::nav::plant_state start; // at the origin, heading east: uphill
@@ -217,6 +221,47 @@ TEST(DynBikePlant, ClimbsTheGround) {
   EXPECT_NEAR(identity_gap(up, 0), 0.0, 1e-9 * b.flow());
   EXPECT_EQ(flat.books(0).grade, 0.0);
   EXPECT_FALSE(up.collides());
+}
+
+// Nav's acceleration through the Jolt plant's driver (dyn_driver.h). At a standstill on a 10% ramp
+// with nothing asked the vehicle holds on its brakes, where the raw model rolls back down; a
+// command inside the deadband does not creep it along the flat; and up the ramp it reaches the
+// speed nav's acceleration makes (1 m/s^2: within the Humvee's 3 m/s^2 with the slope's 1 and its
+// resistances), where the raw model loses g sin(slope) of it.
+TEST(DynBikePlant, TheDriverHoldsAndClimbs) {
+  const double slope = 0.1, s = slope / std::sqrt(1.0 + slope * slope);
+  dyn_bike_plant_options held, raw;
+  held.plant = raw.plant = ramp(slope);
+  raw.driver = false;
+  const vehicle_desc d = vehicle_desc::humvee();
+  dyn_bike_plant parked({d}, held), rolls({d}, raw), flat({d}), climbs({d}, held),
+      climbs_raw({d}, raw);
+  cvc::nav::plant_state start; // at the origin, heading east: uphill
+  for (dyn_bike_plant *p : {&parked, &rolls, &flat, &climbs, &climbs_raw})
+    p->attach(1, &start, trained_frame(), 0.06);
+  const int ticks = 100; // 6 s
+  const double t = ticks * 0.06;
+  for (int k = 0; k < ticks; ++k) {
+    parked.command(0, 0.0f, 0.0f);
+    rolls.command(0, 0.0f, 0.0f);
+    flat.command(0, 0.0f, static_cast<float>(0.04 * kS));
+    climbs.command(0, 0.0f, static_cast<float>(1.0 * kS));
+    climbs_raw.command(0, 0.0f, static_cast<float>(1.0 * kS));
+    for (dyn_bike_plant *p : {&parked, &rolls, &flat, &climbs, &climbs_raw})
+      p->advance();
+  }
+  std::printf("  6 s on a 10%% ramp with nothing asked: held %.4f m, the raw model rolled %.2f m; "
+              "0.04 m/s^2 on the flat: %.4f m; 1 m/s^2 up the ramp: %.3f m/s (raw %.3f, nav's "
+              "%.1f)\n",
+              parked.body(0).x, rolls.body(0).x, flat.body(0).x, climbs.body(0).vx,
+              climbs_raw.body(0).vx, 1.0 * t);
+  EXPECT_LT(std::fabs(parked.body(0).x), 0.05);
+  EXPECT_LT(std::fabs(parked.body(0).vx), 0.01);
+  EXPECT_LT(rolls.body(0).x, -0.4 * 9.80665 * s * t * t / 2.0);
+  EXPECT_LT(std::fabs(flat.body(0).x), 0.01);
+  EXPECT_NEAR(climbs.body(0).vx, 1.0 * t, 0.03 * 1.0 * t);
+  EXPECT_LT(climbs_raw.body(0).vx, (1.0 - 0.8 * 9.80665 * s) * t);
+  EXPECT_NEAR(identity_gap(climbs, 0), 0.0, 1e-9 * climbs.books(0).flow());
 }
 
 // In a world, the chassis meets a wall across its road: it stops at the wall's face instead of
@@ -263,6 +308,44 @@ TEST(DynBikePlant, CollidesWithTheWorld) {
   EXPECT_LT(b.contact, 0.0);
   EXPECT_LT(std::fabs(walled.body(0).vx), 0.5);
   EXPECT_NEAR(identity_gap(walled, 0), 0.0, 1e-9 * b.flow());
+}
+
+// Alongside a wall, steering into it (as a route that cuts through the wall steers), held at
+// 3 m/s: at the default chassis_friction the box slides along the wall's face and the vehicle
+// drives on beside it; at a tire's grip (1) the wall holds it back to a crawl.
+TEST(DynBikePlant, SlidesAlongAWall) {
+  if (!plant_host::available())
+    GTEST_SKIP() << "no Jolt in this build";
+  const vehicle_desc d = vehicle_desc::humvee();
+  double along[2] = {0.0, 0.0};
+  const double frictions[2] = {dyn_bike_plant_options{}.chassis_friction, 1.0};
+  for (int f = 0; f < 2; ++f) {
+    body_id ground;
+    auto w = walled_world(30.0, ground);
+    dyn_bike_plant_options o;
+    o.physics = w.get();
+    o.ground_bodies = {ground};
+    o.chassis_friction = frictions[f];
+    dyn_bike_plant plant({d}, o);
+    cvc::nav::plant_state start; // heading north, its right side 5 cm off the wall's face
+    start.x = static_cast<float>((30.0 - d.half_extents.y - 0.05) * kS);
+    start.y = static_cast<float>(-18.0 * kS);
+    start.heading = 1.5708f;
+    plant.attach(1, &start, trained_frame(), 0.06);
+    for (int t = 0; t < 167; ++t) { // 10 s
+      const double v = plant.body(0).vx;
+      plant.command(0, -0.1f,
+                    static_cast<float>(std::max(-3.0, std::min(2.0, (3.0 - v) / 0.5)) * kS));
+      plant.advance();
+    }
+    EXPECT_GT(plant.collisions(0), 0);
+    along[f] = plant.body(0).y + 18.0;
+  }
+  std::printf("  alongside a wall, steering into it, held at 3 m/s for 10 s: %.1f m along it at "
+              "chassis_friction %.2f, %.1f m at 1\n",
+              along[0], frictions[0], along[1]);
+  EXPECT_GT(along[0], 20.0);
+  EXPECT_LT(along[1], 10.0);
 }
 
 // "dynamic" puts every agent on the Humvee's dynamic bicycle, which drives to its goal, in a

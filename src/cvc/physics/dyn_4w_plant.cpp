@@ -102,7 +102,7 @@ void dyn_4w_plant::attach(int n, const cvc::nav::plant_state *start,
   const double h = dt / _nsub;
   cvc::world_units::normalized_frame si;
   si.scale = 1.0;
-  _chassis->reset(_o.physics, _o.ground_bodies);
+  _chassis->reset(_o.physics, _o.ground_bodies, _o.chassis_friction);
   _agents.clear();
   _agents.reserve(static_cast<std::size_t>(n));
   _z0 = 0.0;
@@ -250,10 +250,21 @@ void dyn_4w_plant::advance() {
     a.hits_tick = 0;
   }
   const bool world = _chassis->on();
+  const double h = _dt / _nsub;
   for (int k = 0; k < _nsub; ++k) {
     for (std::size_t i = 0; i < n; ++i) {
       agent &a = _agents[i];
-      diff::dyn4_plant_books<double>(a.p, a.lim, ground, a.s, a.steer_cmd, a.accel_cmd, next[i],
+      // Nav's command as the Jolt plant's driver takes it (dyn_driver), against the slope along
+      // the heading under the centre of gravity when gravity acts on it.
+      const double c = std::cos(a.s.psi), sn = std::sin(a.s.psi);
+      const double grade = _o.grade_force
+                               ? dyn::grade_at(_o.plant, a.s.x + a.p.lr * c, a.s.y + a.p.lr * sn,
+                                               a.s.psi, static_cast<double>(a.p.lf + a.p.lr))
+                               : 0.0;
+      const double accel = _o.driver ? dyn::drive(a.driver, a.desc, a.accel_cmd, a.s.vx, grade,
+                                                  _o.gravity, a.p.tau_drive, h)
+                                     : a.accel_cmd;
+      diff::dyn4_plant_books<double>(a.p, a.lim, ground, a.s, a.steer_cmd, accel, next[i],
                                      books[i]);
       if (world) {
         // The box where this substep starts, moving as the model moved.
@@ -304,6 +315,7 @@ void dyn_4w_plant::advance() {
         ++a.hits_tick;
       }
       add(a.tick, d);
+      dyn::measured(a.driver, a.s.vx, o.vx, h);
       a.s = o;
     }
   }

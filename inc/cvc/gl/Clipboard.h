@@ -15,12 +15,16 @@ namespace gl {
 //     std::string s = cvc::gl::clipboard::get();
 //
 // ImGuiOverlay installs these into ImGui automatically, so Ctrl+C / Ctrl+V in an
-// InputText Just Work wherever the platform allows it. There is no platform
-// backend under us (VTK owns the window and exposes no clipboard API), so this
+// InputText Just Work wherever the platform allows it. There is no ImGui
+// platform backend under us (the window is cvcGL's, SDL's or VTK's), so this
 // is the layer that fills that gap.
 //
 // PLATFORM REALITY — this is not uniform, and pretending otherwise would be a
 // lie:
+//   * Under cvcGL's SDL3 window (the onscreen window on Windows, Linux and
+//     macOS when cvcGL has SDL3): SDL's clipboard, Wayland included. The
+//     platform notes below are for VTK's own window ($CVCGL_SDL_WINDOW=0, or a
+//     cvcGL without SDL3) and the browser.
 //   * Windows: Dear ImGui's core already ships a complete Win32 implementation
 //     (OpenClipboard/CF_UNICODETEXT), so we leave ImGui's default in place and
 //     these functions forward to it. Nothing to do, nothing to maintain.

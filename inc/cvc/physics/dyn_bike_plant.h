@@ -34,8 +34,13 @@
 // model, the energy that changed booked as the contact's. The substep is then the world's
 // fixed_dt, and nav's tick must be a whole number of them. Without a world nothing collides.
 //
-// Each tick runs dyn_plant's substeps under the held command (the bicycle angle, and the
-// acceleration along the heading), in SI, and books every step (dyn_plant_books):
+// The driver. Nav's acceleration is what the vehicle is to achieve, and the plant takes it as the
+// Jolt plant's driver does (dyn_driver.h): held on the brakes at a standstill, and the drive force
+// the model gets corrected for the slope and for what the last substep fell short by, within the
+// vehicle's max_accel and max_decel (options.driver; off, the command is the force, raw).
+//
+// Each tick runs dyn_plant's substeps under the held command (the bicycle angle, and the drive
+// force per unit mass the driver asks for), in SI, and books every step (dyn_plant_books):
 //   kinetic now = kinetic at attach + drive - brake - dissipated + floor + grade + limiter
 //                 + contact + residual
 // drive and brake are the axles' forces where they push and where they hold back, dissipated the
@@ -51,6 +56,7 @@
 #include <cvc/core/world_units.h>
 #include <cvc/nav/detail/dyn_bike.h>
 #include <cvc/nav/vehicle_plant.h>
+#include <cvc/physics/dyn_driver.h>
 #include <cvc/physics/nav_plant.h>
 #include <cvc/physics/vehicle.h>
 #include <cvc/physics/world.h>
@@ -73,10 +79,18 @@ struct dyn_bike_plant_options {
                             // ceil(dt / substep) (with a world: the world's fixed_dt)
   double drive_lag = -1.0;  // s: the drive force's lag; < 0 the vehicle's own (dyn_bike_si_of)
   double gravity = 9.80665; // m/s^2
+  // Nav's acceleration as the Jolt plant's driver takes it (dyn_driver.h), so nav drives this plant
+  // as it drives that one; false: as the model's drive force per unit mass, raw.
+  bool driver = true;
   // The world the chassis collide in (borrowed; null: no collisions), and its bodies the wheels
   // drive on (touching them is not a collision). attach() sets its contact reporting to all.
   world *physics = nullptr;
   std::vector<body_id> ground_bodies;
+  // The chassis box's friction against what it hits (combined by the world's rule: the product,
+  // by default, so 0.21 against a building's 0.7): a body panel scraping masonry or another body,
+  // not a tire's grip. At 1, the default material's, a vehicle pressed against a wall by its own
+  // tires grips it like a tire and crawls along it.
+  double chassis_friction = 0.3;
 };
 
 // One agent's energy, in J: over the last tick, or since attach().
@@ -159,6 +173,7 @@ private:
     double half_track = 0.0; // the widest axle's (m)
     double steer_cmd = 0.0;  // rad
     double accel_cmd = 0.0;  // m/s^2 along the heading
+    dyn_driver driver;       // how the vehicle takes accel_cmd (dyn_driver)
     double kinetic0 = 0.0;   // J
     int hits_tick = 0;
     long hits = 0;
