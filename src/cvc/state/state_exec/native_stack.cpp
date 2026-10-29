@@ -10,6 +10,9 @@
 #include <cstdint>
 #include <limits>
 
+#if defined(_MSC_VER)
+#include <intrin.h>
+#endif
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -28,6 +31,23 @@ namespace cvc::state_exec::detail {
 
 namespace {
 
+// An address on this thread's stack, in this function's frame. Not a local's address: under
+// AddressSanitizer's use-after-return check (on by default with gcc's and clang's runtimes on
+// Linux) a function's locals live in a "fake stack" the runtime allocates off the thread's stack,
+// so measuring from one said there was no stack left at all, and every native call threw. The
+// frame address and the return address's slot stay on the real stack.
+std::uintptr_t stack_here() {
+#if defined(_MSC_VER)
+  return reinterpret_cast<std::uintptr_t>(_AddressOfReturnAddress());
+#elif (defined(__GNUC__) || defined(__clang__)) && !defined(__EMSCRIPTEN__)
+  return reinterpret_cast<std::uintptr_t>(__builtin_frame_address(0));
+#else
+  // Emscripten: the stack whose end it reports is in linear memory, where a local's address is.
+  const char here = 0;
+  return reinterpret_cast<std::uintptr_t>(&here);
+#endif
+}
+
 // The lowest address of this thread's stack, or 0 when the platform does not say.
 std::uintptr_t stack_low() {
 #if defined(_WIN32)
@@ -35,8 +55,7 @@ std::uintptr_t stack_low() {
   // pages are inside it). VirtualQuery, unlike GetCurrentThreadStackLimits, is in every Windows
   // the build targets (_WIN32_WINNT is 0x0601).
   MEMORY_BASIC_INFORMATION info{};
-  const char here = 0;
-  if (VirtualQuery(&here, &info, sizeof info) == 0)
+  if (VirtualQuery(reinterpret_cast<const void *>(stack_here()), &info, sizeof info) == 0)
     return 0;
   return reinterpret_cast<std::uintptr_t>(info.AllocationBase);
 #elif defined(__EMSCRIPTEN__)
@@ -65,8 +84,7 @@ std::size_t native_stack_left() {
   thread_local const std::uintptr_t low = stack_low();
   if (low == 0)
     return std::numeric_limits<std::size_t>::max();
-  const char here = 0;
-  const auto sp = reinterpret_cast<std::uintptr_t>(&here);
+  const std::uintptr_t sp = stack_here();
   return sp > low ? static_cast<std::size_t>(sp - low) : 0;
 }
 

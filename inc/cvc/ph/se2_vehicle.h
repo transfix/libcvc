@@ -39,6 +39,22 @@
 // training flights. Only M^-1 D, M^-1 G and M^-1 grad V are identifiable, plus M's shape through
 // ad*_v p.
 //
+// Modulations (setup.modulation_dim, 0 by default). In LieSPHGP's form every logged input is a
+// port, steering included, so y^T u books power through the steering. A vehicle's steering does
+// no work on its body: it only turns the directions its tires push along (nav/detail/dyn_bike.h,
+// dyn_ph_G). With modulation_dim m > 0 the last m inputs (e.g. the road-wheel angle delta) are not
+// ports. They are read by D's and G's GPs beside the twist, and u is the first control_dim inputs:
+//
+// clang-format off
+//   D(v, delta) = spd(level + GP_D(v / twist_scale, delta)),   G(v, delta) = level + GP_G(v / twist_scale, delta)
+//   dp = ( ad*_v p - [R(psi)^T grad V; 0] - D(v, delta) v + G(v, delta) u ) dt,   y = G(v, delta)^T v
+// clang-format on
+//
+// so steering redirects energy through D and G and supplies none: with u = 0 nothing is supplied,
+// whatever delta is. The modulations are divided by their training RMS like the ports
+// (control_scale has one entry per input, ports first). modulation_dim 0 is LieSPHGP's form,
+// unchanged, and the only one with JAX goldens.
+//
 // One step of size h (Lie-IMEX: the damping implicit, everything else explicit; SO(2) is abelian,
 // so the heading stays a continuous angle). With e = M^-1 (ad*_v p - body + G u) and K = M^-1 D(v)
 // at each stage, and the twist increment eta = sqrt(h) Sigma z:
@@ -65,6 +81,7 @@
 #include <cstdint>
 #include <cvc/ph/mat3.h>
 #include <cvc/ph/rff.h>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -72,8 +89,9 @@
 namespace cvc {
 namespace ph {
 
-constexpr int kSe2MaxControls = 4;
-constexpr int kSe2State = 6; // x, y, psi, v_x, v_y, r
+constexpr int kSe2MaxControls = 4;    // inputs in all: ports and modulations
+constexpr int kSe2MaxModulations = 2; // of which modulations
+constexpr int kSe2State = 6;          // x, y, psi, v_x, v_y, r
 
 // A Gaussian-process subnetwork's trainable values.
 struct se2_gp {
@@ -124,19 +142,23 @@ struct se2_params {
 
 // The random features and the options that are not trained.
 struct se2_setup {
-  int control_dim = 2;
+  int control_dim = 2;    // the ports: the inputs G maps to forces
+  int modulation_dim = 0; // the inputs after them that only modulate D and G (see the top)
   int features = 64;
   double matern_nu = 2.5, matern_length = 1.0;
   bool v_gp = true;
   double v_length = 50.0; // V's GP reads (x, y) / v_length
-  rff D, G, V;            // inputs 3, 3, 2
+  rff D, G, V;            // inputs 3 + modulation_dim, 3 + modulation_dim, 2
 
   int g_outputs() const { return 3 * control_dim; }
+  int input_dim() const { return control_dim + modulation_dim; } // inputs per sample
+  int gp_inputs() const { return 3 + modulation_dim; }           // what D's and G's GPs read
 };
 
 // How a model is initialized (LieSPHGP's model.* keys; train.py's defaults for the Phase A fits).
 struct se2_init {
   int control_dim = 2;
+  int modulation_dim = 0; // > 0: the last inputs modulate D and G instead of being ports
   int features = 64;
   double matern_nu = 2.5, matern_length = 1.0;
   bool v_gp = true;
@@ -152,12 +174,13 @@ struct se2_init {
 };
 
 // A model: its features, parameters, the data statistics it reads its inputs with, and where it
-// came from. The file is JSON, format "cvc-ph-se2/1".
+// came from. The file is JSON, format "cvc-ph-se2/1", or "cvc-ph-se2/2" with modulations.
 struct se2_model {
   se2_setup setup;
   se2_params params;
   std::array<double, 3> twist_scale{1.0, 1.0, 1.0};
-  std::vector<double> control_scale; // the inputs are divided by these (their training RMS)
+  std::vector<double> control_scale; // the inputs are divided by these (their training RMS): one
+                                     // per input, the ports then the modulations
   double interval = 0.02;            // s between samples
   int substeps = 1;                  // Lie-IMEX steps per interval
   std::vector<std::pair<std::string, std::string>> provenance;
@@ -227,8 +250,8 @@ template <class T> struct se2_stage {
   vec3<T> q{};                              // ad*_v p - body + G u
   vec3<T> e{};                              // M^-1 q
   mat3<T> K{};                              // M^-1 D
-  vec3<T> z{};                              // v / twist_scale
-  std::vector<T> theta_D, theta_G, theta_V; // the features' angles
+  std::array<T, 3 + kSe2MaxModulations> z{}; // D's and G's GP input: v / twist_scale, modulations
+  std::vector<T> theta_D, theta_G, theta_V;  // the features' angles
 };
 
 template <class T> class se2_vehicle {
@@ -244,13 +267,28 @@ public:
   const se2_weights<T> &weights() const { return w_; }
   const std::array<T, 3> &twist_scale() const { return twist_scale_; }
   int control_dim() const { return w_.control_dim; }
+  int modulation_dim() const { return setup_->modulation_dim; }
+  int input_dim() const { return setup_->input_dim(); }
 
   const mat3<T> &inverse_mass() const { return minv_; }
 
-  // D's six levels at the twist (level + GP); theta receives the features' angles.
-  std::array<T, 6> dissipation_levels(const vec3<T> &v, vec3<T> &z, T *theta) const {
+  // The GP input of D and G: v / twist_scale, then the modulations (`mod`, modulation_dim of them,
+  // already scaled; may be null only when there are none).
+  using gp_input = std::array<T, 3 + kSe2MaxModulations>;
+  gp_input gp_input_at(const vec3<T> &v, const T *mod) const {
+    gp_input z{};
     for (int i = 0; i < 3; ++i)
       z[i] = v[i] / twist_scale_[i];
+    const int nm = setup_->modulation_dim;
+    if (nm > 0 && !mod)
+      throw std::invalid_argument("cvc::ph::se2_vehicle: this model reads modulations");
+    for (int k = 0; k < nm; ++k)
+      z[3 + k] = mod[k];
+    return z;
+  }
+
+  // D's six levels at a GP input (level + GP); theta receives the features' angles.
+  std::array<T, 6> dissipation_levels(const gp_input &z, T *theta) const {
     std::array<T, 6> gp{};
     setup_->D.gp(z.data(), w_.wD.data(), 6, gp.data(), theta);
     for (int i = 0; i < 6; ++i)
@@ -258,26 +296,24 @@ public:
     return gp;
   }
 
-  mat3<T> dissipation(const vec3<T> &v) const {
-    vec3<T> z;
+  // D(v), or D(v, mod) with modulations.
+  mat3<T> dissipation(const vec3<T> &v, const T *mod = nullptr) const {
     std::vector<T> theta(setup_->D.count);
-    const auto l = dissipation_levels(v, z, theta.data());
+    const auto l = dissipation_levels(gp_input_at(v, mod), theta.data());
     return spd_from_levels(l.data());
   }
 
-  // G(v), 3 x control_dim row-major, into out.
-  void control_matrix(const vec3<T> &z, T *out, T *theta) const {
+  // G at a GP input, 3 x control_dim row-major, into out.
+  void control_matrix(const gp_input &z, T *out, T *theta) const {
     const int n = setup_->g_outputs();
     setup_->G.gp(z.data(), w_.wG.data(), n, out, theta);
     for (int i = 0; i < n; ++i)
       out[i] += w_.g_level[i];
   }
-  void control_matrix_at(const vec3<T> &v, T *out) const {
-    vec3<T> z;
-    for (int i = 0; i < 3; ++i)
-      z[i] = v[i] / twist_scale_[i];
+  // G(v), or G(v, mod) with modulations.
+  void control_matrix_at(const vec3<T> &v, T *out, const T *mod = nullptr) const {
     std::vector<T> theta(setup_->G.count);
-    control_matrix(z, out, theta.data());
+    control_matrix(gp_input_at(v, mod), out, theta.data());
   }
 
   T potential(T x, T y) const {
@@ -335,11 +371,11 @@ public:
   }
 
   // y = G(v)^T v at the state's twist (control_dim outputs, into y): the output conjugate to the
-  // input, so y . u is the power G u supplies.
-  void output(const T *state, T *y) const {
+  // input, so y . u is the power G u supplies. With modulations, y = G(v, mod)^T v.
+  void output(const T *state, T *y, const T *mod = nullptr) const {
     const vec3<T> v{state[3], state[4], state[5]};
     std::array<T, 3 * kSe2MaxControls> G{};
-    control_matrix_at(v, G.data());
+    control_matrix_at(v, G.data(), mod);
     const int nu = w_.control_dim;
     for (int j = 0; j < nu; ++j) {
       T acc = T(0);
@@ -361,7 +397,8 @@ public:
     return T(0.5) * acc;
   }
 
-  // Every piece of the drift at (state, u); st's feature buffers are sized here.
+  // Every piece of the drift at (state, u); st's feature buffers are sized here. u holds every
+  // input of a sample: the control_dim ports, then the modulations.
   void stage(const T *state, const T *u, se2_stage<T> &st) const {
     using std::cos;
     using std::sin;
@@ -380,7 +417,8 @@ public:
     st.body = {st.c * st.grad_v[0] + st.s * st.grad_v[1],
                -st.s * st.grad_v[0] + st.c * st.grad_v[1]};
     st.coad = {st.p[1] * st.v[2], -st.p[0] * st.v[2], st.p[0] * st.v[1] - st.p[1] * st.v[0]};
-    st.d_levels = dissipation_levels(st.v, st.z, st.theta_D.data());
+    st.z = gp_input_at(st.v, u + nu);
+    st.d_levels = dissipation_levels(st.z, st.theta_D.data());
     st.D = spd_from_levels(st.d_levels.data());
     control_matrix(st.z, st.G.data(), st.theta_G.data());
     for (int i = 0; i < 3; ++i) {
@@ -405,9 +443,9 @@ public:
       out[3 + i] = st.e[i] - kv[i];
   }
 
-  // M^-1 D(v), the matrix the step treats implicitly.
-  mat3<T> effective_damping(const T *state) const {
-    return mul(minv_, dissipation({state[3], state[4], state[5]}));
+  // M^-1 D(v), the matrix the step treats implicitly (D(v, mod) with modulations).
+  mat3<T> effective_damping(const T *state, const T *mod = nullptr) const {
+    return mul(minv_, dissipation({state[3], state[4], state[5]}, mod));
   }
 
   // One Lie-IMEX step of size h from state (6) under u; increment (3, may be null) is the twist's
@@ -471,14 +509,14 @@ public:
     }
   }
 
-  // path[(t + 1) * 6 + ...] for t < steps from state; controls [steps x control_dim]; path[0..5] is
-  // the start.
+  // path[(t + 1) * 6 + ...] for t < steps from state; controls [steps x input_dim] (the ports,
+  // then the modulations); path[0..5] is the start.
   void rollout(const T *state, const T *controls, int steps, T interval, int substeps,
                T *path) const {
     for (int i = 0; i < 6; ++i)
       path[i] = state[i];
     for (int t = 0; t < steps; ++t)
-      interval_step(path + 6 * t, controls + static_cast<std::size_t>(t) * w_.control_dim, interval,
+      interval_step(path + 6 * t, controls + static_cast<std::size_t>(t) * input_dim(), interval,
                     substeps, nullptr, path + 6 * (t + 1));
   }
 

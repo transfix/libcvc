@@ -2158,7 +2158,11 @@ static int cmd_ph_train(int argc, char **argv) {
     ("help,h", "show help")
     ("runs", po::value<std::vector<std::string>>()->multitoken()->required(),
      "cvc-plant-log --out directories (flights.npy + meta.json)")
-    ("out,o", po::value<std::string>()->required(), "the fitted model (JSON, cvc-ph-se2/1)")
+    ("out,o", po::value<std::string>()->required(),
+     "the fitted model (JSON, cvc-ph-se2/1; /2 with --steer-modulates)")
+    ("steer-modulates",
+     "steering (the runs' last input) modulates D and G instead of being a port, so only the "
+     "drive supplies power; fit it to runs logged with --steer actual")
     ("test-seeds", po::value<std::vector<int>>()->multitoken()->default_value({101}, "101"),
      "seeds held out: monitored, never trained on")
     ("noise", po::value<double>()->default_value(0.05, "0.05"), "observation noise sigma added to x, y, psi, v")
@@ -2230,12 +2234,20 @@ static int cmd_ph_train(int argc, char **argv) {
   if (vm.count("init")) {
     // A model continues with its own scales: the inputs are divided by the RMS it was fit with.
     model = ph::se2_model::load(vm["init"].as<std::string>());
-    if (model.setup.control_dim != all.control_dim())
-      throw std::runtime_error("--init's model has " + std::to_string(model.setup.control_dim) +
+    if (model.setup.input_dim() != all.control_dim())
+      throw std::runtime_error("--init's model has " + std::to_string(model.setup.input_dim()) +
                                " inputs; the runs have " + std::to_string(all.control_dim()));
+    if ((model.setup.modulation_dim > 0) != (vm.count("steer-modulates") > 0))
+      throw std::runtime_error("--init's model and --steer-modulates disagree on the steering");
   } else {
     ph::se2_init init;
     init.control_dim = all.control_dim();
+    if (vm.count("steer-modulates")) {
+      if (all.control_dim() < 2)
+        throw std::runtime_error("--steer-modulates needs a drive and a steering input");
+      init.control_dim = all.control_dim() - 1;
+      init.modulation_dim = 1;
+    }
     init.features = vm["features"].as<int>();
     init.v_gp = !vm.count("no-v-gp");
     init.v_length = vm["v-length"].as<double>();
@@ -2311,6 +2323,7 @@ static int cmd_ph_train(int argc, char **argv) {
                       {"window_points", std::to_string(points)},
                       {"window_stride", std::to_string(stride)}};
   model.provenance.emplace_back("diverged_windows", std::to_string(dropped));
+  model.provenance.emplace_back("steering", model.setup.modulation_dim > 0 ? "modulation" : "port");
   model.save(vm["out"].as<std::string>());
   std::cout << "wrote " << vm["out"].as<std::string>() << " (" << dropped
             << " diverged training windows left out)\n";

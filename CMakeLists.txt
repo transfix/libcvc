@@ -12,7 +12,7 @@ endif()
 
 # First declare project with C and CXX to initialize CMake properly
 project(libcvc
-  VERSION 3.7.1
+  VERSION 3.7.2
   DESCRIPTION "Computational Visualization Center library from VolumeRover package"
   LANGUAGES C CXX
 )

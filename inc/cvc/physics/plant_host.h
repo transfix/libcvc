@@ -21,11 +21,15 @@
 // comma-separated list of presets: agent i drives the i-th, cycled. Without a Jolt backend in
 // the build, a preset falls back to the kinematic bicycle, and fallback() says so.
 //
-// "dynamic" puts the agents on the presets' dynamic single-track model instead
-// (dyn_bike_plant: tires, load transfer, actuator lag and its port-Hamiltonian energy books, no
-// physics world, no Jolt needed): "dynamic" alone is the Humvee's, "dynamic:<presets>" names
-// them ("dynamic:roboracer", "dynamic:humvee,roboracer"). It drives on the flat ground's grip,
-// options::ground_mu; the geometry is not collided with.
+// "dynamic" puts the agents on the presets' dynamic single-track model instead (dyn_bike_plant:
+// tires, load transfer, actuator lag and its port-Hamiltonian energy books), and "dynamic4w" on
+// the four-wheel model with suspension (dyn_4w_plant). "dynamic" or "dynamic4w" alone is the
+// Humvee's; "dynamic:<presets>" and "dynamic4w:<presets>" name them ("dynamic:roboracer",
+// "dynamic4w:humvee,roboracer"). They drive on options::plant.ground_height (else the flat
+// ground_z) with options::ground_mu's grip: the single track takes the slope along its heading,
+// the four wheels each the ground under it. With Jolt in the build their chassis are bodies in a
+// physics world built as below, so they collide with the geometry, with each other and with
+// anything added to physics(); without Jolt they drive the same ground and collide with nothing.
 //
 // The world is rebuilt on every switch. It holds a flat ground at options::ground_z, or, after
 // set_geometry, a cvc::world's static collide items (add_world_geometry). The navigator's
@@ -39,6 +43,7 @@
 #ifndef __CVC_PHYSICS_PLANT_HOST_H__
 #define __CVC_PHYSICS_PLANT_HOST_H__
 
+#include <cvc/physics/dyn_4w_plant.h>
 #include <cvc/physics/dyn_bike_plant.h>
 #include <cvc/physics/nav_plant.h>
 #include <cvc/physics/world.h>
@@ -79,8 +84,10 @@ public:
   // "dynamic:<preset>").
   static bool available();
   static std::vector<std::string> presets();
-  // Whether a name asks for the dynamic single-track plant ("dynamic" or "dynamic:...").
+  // Whether a name asks for the dynamic single-track plant ("dynamic" or "dynamic:..."), or the
+  // four-wheel one ("dynamic4w" or "dynamic4w:...").
   static bool is_dynamic(const std::string &vehicle);
+  static bool is_dynamic4w(const std::string &vehicle);
   // A preset by name (as in use()); unknown names throw cvc::physics_error.
   static vehicle_desc preset(const std::string &name);
   // Throws cvc::physics_error unless use() accepts `vehicle`: for checking a name up front.
@@ -99,9 +106,11 @@ public:
   const std::string &vehicle() const { return _asked; }   // what use() was last asked for
   const std::string &driving() const { return _driving; } // what the agents drive
   bool fallback() const { return _asked != _driving; }
-  nav_plant *plant() { return _plant.get(); }      // null on the bicycle and on the dynamic plant
-  world *physics() { return _world.get(); }        // null on the bicycle and on the dynamic plant
-  dyn_bike_plant *dynamic() { return _dyn.get(); } // null unless the agents drive "dynamic"
+  nav_plant *plant() { return _plant.get(); } // null on the bicycle and on the dynamic plants
+  // The physics world: null on the bicycle, and on the dynamic plants in a build without Jolt.
+  world *physics() { return _world.get(); }
+  dyn_bike_plant *dynamic() { return _dyn.get(); }  // null unless the agents drive "dynamic"
+  dyn_4w_plant *dynamic4w() { return _dyn4.get(); } // null unless they drive "dynamic4w"
   // Whichever plant the agents drive on (null on the bicycle).
   cvc::nav::vehicle_plant *active();
   const plant_host_options &options() const { return _o; }
@@ -115,12 +124,19 @@ public:
   void pull(cvc::app &ctx, const std::string &prefix, cvc::nav::sim_world &sim);
 
 private:
+  // A new world holding the geometry (or the flat ground), with `cfg`; `ground` gets the bodies
+  // that are the ground (the terrain, or the flat ground's box).
+  std::unique_ptr<world> build_world(const world_config &cfg, std::vector<body_id> &ground) const;
+  // Detach sim and drop every plant and the world.
+  void drop(cvc::nav::sim_world &sim);
+
   plant_host_options _o;
   const cvc::world::world_geometry *_geometry = nullptr;
   std::vector<int> _nav_materials;
   std::unique_ptr<world> _world;
   std::unique_ptr<nav_plant> _plant;
   std::unique_ptr<dyn_bike_plant> _dyn;
+  std::unique_ptr<dyn_4w_plant> _dyn4;
   std::string _asked = "kinematic", _driving = "kinematic";
   std::set<std::string> _described;
 };
