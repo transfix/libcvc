@@ -12,6 +12,7 @@
 
 #include "det_math.h"
 
+#include <algorithm>
 #include <cmath>
 #include <exception>
 #include <map>
@@ -72,6 +73,37 @@ double wrap(double a) {
   return a;
 }
 
+double drive(dyn_driver &driver, const vehicle_desc &d, double want, double vx, double grade,
+             double gravity, double drive_lag, double h) {
+  // vehicle.cpp's: the deadband and hold speed, the correction's gain and the trim's rate (1/s).
+  constexpr double kDeadband = 0.05, kHoldSpeed = 0.3, kGain = 0.5, kTrim = 2.0;
+  constexpr double kHoldTau = 0.1; // s: the shortest the hold eases the speed to zero over
+  if (std::fabs(want) <= kDeadband && std::fabs(vx) < kHoldSpeed) {
+    // Slow, with nothing asked: on the brakes, the grade included, damped critically behind the
+    // drive's lag.
+    driver.trim = 0.0;
+    const double a = -vx / std::max(kHoldTau, 4.0 * drive_lag) + gravity * grade;
+    return std::max(-d.max_decel, std::min(d.max_decel, a));
+  }
+  if ((want > 0.0) != (driver.trim_sign > 0.0)) {
+    driver.trim = 0.0;
+    driver.trim_sign = want > 0.0 ? 1.0 : -1.0;
+  }
+  const double e = want - driver.got;
+  const double u = want + gravity * grade + kGain * e + driver.trim;
+  // Forward the engine's, against the motion the brakes', backward the engine's in reverse.
+  const double hi = vx < -kHoldSpeed ? d.max_decel : d.max_accel;
+  const double lo = vx > kHoldSpeed ? -d.max_decel : -d.max_accel;
+  const double a = std::max(lo, std::min(hi, u));
+  if (!((a >= hi && e > 0.0) || (a <= lo && e < 0.0)))
+    driver.trim = std::max(-d.max_decel, std::min(d.max_accel, driver.trim + kTrim * e * h));
+  return a;
+}
+
+void measured(dyn_driver &driver, double vx0, double vx1, double h) {
+  driver.got = (vx1 - vx0) / h;
+}
+
 dyn_chassis::~dyn_chassis() { clear(); }
 
 void dyn_chassis::clear() {
@@ -86,12 +118,27 @@ void dyn_chassis::clear() {
   _touched.clear();
 }
 
-void dyn_chassis::reset(world *w, std::vector<body_id> ground) {
+void dyn_chassis::reset(world *w, std::vector<body_id> ground, double friction) {
   clear();
   _w = w;
   _ground.clear();
   for (const body_id b : ground)
     _ground.insert(b.value);
+  // The boxes' surface: the world's own of this friction if it has one (materials are never
+  // removed), else a new one.
+  _material = 0;
+  if (_w) {
+    bool found = false;
+    for (std::size_t i = 0; i < _w->material_count() && !found; ++i) {
+      const material m = _w->get_material(static_cast<material_id>(i));
+      if (m.name == "dyn chassis" && m.friction == static_cast<float>(friction)) {
+        _material = static_cast<material_id>(i);
+        found = true;
+      }
+    }
+    if (!found)
+      _material = _w->add_material({"dyn chassis", static_cast<float>(friction)});
+  }
   // A chassis pressed against a wall stays in contact: every step's contacts are needed.
   if (_w && _w->config().contacts != contact_reporting::all) {
     world_config c = _w->config();
@@ -114,6 +161,7 @@ int dyn_chassis::add(const vehicle_desc &d, const vec3 &position, const quat &ro
   b.linear_damping = 0.0;
   b.angular_damping = 0.0;
   b.allow_sleeping = false;
+  b.material = _material;
   _boxes.push_back(_w->add_body(b));
   _touched.push_back(0);
   return static_cast<int>(_boxes.size()) - 1;

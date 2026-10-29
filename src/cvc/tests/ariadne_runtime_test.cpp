@@ -191,8 +191,13 @@ struct MockBackend : Backend {
     rec("seed_grid_columns");
   }
   std::vector<float> grid_columns() const override { return grid_columns_ret; }
-  BoolEdit menu_item_toggle(const char *l, bool) override {
+  std::string click_toggle; // simulate the user clicking the menu item with this label
+  std::map<std::string, bool> toggle_shown; // label -> the tick it was drawn with
+  BoolEdit menu_item_toggle(const char *l, bool cur) override {
     rec(std::string("toggle:") + l);
+    toggle_shown[l] = cur;
+    if (click_toggle == l)
+      return {true, true, !cur};
     return {};
   }
   std::map<std::string, BoolEdit> checkbox_by_label; // per-label returns (else checkbox_ret)
@@ -3631,6 +3636,190 @@ TEST(AriadneRuntime, ClosableWindowClosesAndReopens) {
   EXPECT_TRUE(has("begin_window:Panel(closable)"));
 }
 
+// ── §5.9 the built-in Windows menu ──────────────────────────────────────────────────────────────
+namespace {
+std::ptrdiff_t log_index(const MockBackend &mb, const std::string &s) {
+  const auto it = std::find(mb.log.begin(), mb.log.end(), s);
+  return it == mb.log.end() ? -1 : it - mb.log.begin();
+}
+Widget window_with_id(const std::string &title, const std::string &id, bool closable) {
+  Widget w = window(title, {text("body")});
+  w.id = id;
+  w.closable = closable;
+  return w;
+}
+} // namespace
+
+TEST(AriadneRuntime, WindowsMenuReopensAClosedWindow) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  // The document's own menu, a closable window and one without a close button.
+  rt.set_root(group({menubar({menu("File", {menu_action("Quit", "quit")})}),
+                     window_with_id("Alpha", "a", true), window_with_id("Beta", "b", false)}));
+  rt.render();
+  // The Windows menu comes after the document's menus, with a ticked item per window.
+  ASSERT_GE(log_index(mb, "begin_menu:Windows"), 0);
+  EXPECT_LT(log_index(mb, "begin_menu:File"), log_index(mb, "begin_menu:Windows"));
+  EXPECT_TRUE(mb.toggle_shown["Alpha"]);
+  EXPECT_TRUE(mb.toggle_shown["Beta"]);
+
+  // Alpha's X closes it; its item loses the tick and the window is not drawn.
+  mb.close_windows = true;
+  rt.render();
+  mb.close_windows = false;
+  EXPECT_EQ(cvc::state::instance(app)("ui.demo.tree.a.open").value(), "0");
+  mb.log.clear();
+  rt.render();
+  EXPECT_FALSE(mb.saw("begin_window:Alpha(closable)"));
+  EXPECT_FALSE(mb.toggle_shown["Alpha"]);
+
+  // Clicking the item opens it again.
+  mb.click_toggle = "Alpha";
+  rt.render();
+  mb.click_toggle.clear();
+  EXPECT_EQ(cvc::state::instance(app)("ui.demo.tree.a.open").value(), "1");
+  mb.log.clear();
+  rt.render();
+  EXPECT_TRUE(mb.saw("begin_window:Alpha(closable)"));
+
+  // A window with no close button can be hidden and shown from the menu too.
+  mb.click_toggle = "Beta";
+  rt.render();
+  mb.click_toggle.clear();
+  mb.log.clear();
+  rt.render();
+  EXPECT_FALSE(mb.saw("begin_window:Beta"));
+  mb.click_toggle = "Beta";
+  rt.render();
+  mb.click_toggle.clear();
+  mb.log.clear();
+  rt.render();
+  EXPECT_TRUE(mb.saw("begin_window:Beta"));
+}
+
+TEST(AriadneRuntime, WindowsMenuLeavesOutWindowsTheDocumentAlreadyToggles) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  // A Settings menu of the document already opens Alpha (lsystem_forest's pattern).
+  rt.set_root(group({menubar({menu("Settings", {menu_toggle("Alpha", "tree.a.open", true)})}),
+                     window_with_id("Alpha", "a", true), window_with_id("Beta", "b", true)}));
+  rt.render();
+  ASSERT_TRUE(mb.saw("begin_menu:Windows"));
+  EXPECT_EQ(std::count(mb.log.begin(), mb.log.end(), "toggle:Alpha"), 1) << "not listed twice";
+  EXPECT_TRUE(mb.saw("toggle:Beta"));
+
+  // Every window already covered: no Windows menu at all.
+  MockBackend mb2;
+  Runtime rt2(app, "");
+  rt2.set_backend(&mb2);
+  rt2.set_root(group({menubar({menu("Settings", {menu_toggle("Alpha", "tree.a.open", true)})}),
+                      window_with_id("Alpha", "a", true)}));
+  rt2.render();
+  EXPECT_FALSE(mb2.saw("begin_menu:Windows"));
+}
+
+TEST(AriadneRuntime, WindowsMenuJoinsTheDocumentsOwnMenuOfThatName) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  // The document has a "Windows" menu of its own for some of its windows (fem_gallery's panels):
+  // the rest join it after a separator, rather than a second "Windows" menu in the bar.
+  rt.set_root(group({menubar({menu("File", {menu_action("Quit", "quit")}),
+                              menu("Windows", {menu_toggle("Alpha", "tree.a.open", true)})}),
+                     window_with_id("Alpha", "a", true), window_with_id("Beta", "b", true)}));
+  rt.render();
+  EXPECT_EQ(std::count(mb.log.begin(), mb.log.end(), "begin_menu:Windows"), 1);
+  EXPECT_EQ(std::count(mb.log.begin(), mb.log.end(), "toggle:Alpha"), 1);
+  const std::ptrdiff_t alpha = log_index(mb, "toggle:Alpha"), sep = log_index(mb, "separator"),
+                       beta = log_index(mb, "toggle:Beta");
+  ASSERT_GE(beta, 0);
+  EXPECT_LT(log_index(mb, "begin_menu:Windows"), alpha);
+  EXPECT_LT(alpha, sep);
+  EXPECT_LT(sep, beta);
+
+  // Its items still open a closed window.
+  cvc::state::instance(app)("tree.b.open").value(std::string("0"));
+  mb.click_toggle = "Beta";
+  rt.render();
+  mb.click_toggle.clear();
+  EXPECT_EQ(cvc::state::instance(app)("tree.b.open").value(), "1");
+
+  // A submenu of that name is not the bar's: the Windows menu stands in the bar on its own.
+  MockBackend mb2;
+  Runtime rt2(app, "");
+  rt2.set_backend(&mb2);
+  rt2.set_root(group({menubar({menu("Document", {menu("Windows", {menu_action("Quit", "quit")})})}),
+                      window_with_id("Beta", "b", true)}));
+  rt2.render();
+  EXPECT_EQ(std::count(mb2.log.begin(), mb2.log.end(), "begin_menu:Windows"), 2);
+  EXPECT_FALSE(mb2.saw("separator"));
+  EXPECT_LT(log_index(mb2, "menu_action:Quit"), log_index(mb2, "toggle:Beta"));
+}
+
+TEST(AriadneRuntime, WindowsMenuCanBePlacedOrTurnedOff) {
+  cvc::app app;
+  {
+    // Placed inside the document's View menu, under its own title, and not appended again.
+    MockBackend mb;
+    Runtime rt(app, "");
+    rt.set_backend(&mb);
+    rt.set_root(group(
+        {menubar({menu("View", {windows_menu("Panels")})}), window_with_id("Alpha", "a", true)}));
+    rt.render();
+    const std::ptrdiff_t view = log_index(mb, "begin_menu:View"),
+                         panels = log_index(mb, "begin_menu:Panels");
+    ASSERT_GE(view, 0);
+    ASSERT_GE(panels, 0);
+    EXPECT_LT(view, panels);
+    EXPECT_FALSE(mb.saw("begin_menu:Windows"));
+    EXPECT_TRUE(mb.saw("toggle:Alpha"));
+  }
+  {
+    // windows_menu: false (a setting outside the menubar): no menu.
+    MockBackend mb;
+    Runtime rt(app, "");
+    rt.set_backend(&mb);
+    rt.set_root(group({menubar({menu("File", {menu_action("Quit", "quit")})}),
+                       window_with_id("Alpha", "a", true), windows_menu("", false)}));
+    rt.render();
+    EXPECT_FALSE(mb.saw("begin_menu:Windows"));
+    EXPECT_FALSE(mb.saw("toggle:Alpha"));
+  }
+}
+
+TEST(AriadneRuntime, WindowsMenuWithoutADocumentMenubar) {
+  cvc::app app;
+  {
+    // A closable window but no menubar: one is added for the Windows menu, or the closed window
+    // could never come back.
+    MockBackend mb;
+    Runtime rt(app, "");
+    rt.set_backend(&mb);
+    rt.set_root(group({window_with_id("Alpha", "a", true)}));
+    rt.render();
+    EXPECT_TRUE(mb.saw("begin_menubar"));
+    EXPECT_TRUE(mb.saw("begin_menu:Windows"));
+    EXPECT_TRUE(mb.saw("toggle:Alpha"));
+  }
+  {
+    // Nothing can be closed: no menubar is added.
+    MockBackend mb;
+    Runtime rt(app, "");
+    rt.set_backend(&mb);
+    Widget repeated = window_with_id("Cam {i}", "cam_{i}", true);
+    repeated.repeat = "2"; // made per frame: not listed (the document opens these itself)
+    rt.set_root(group({window_with_id("Alpha", "a", false), repeated}));
+    rt.render();
+    EXPECT_FALSE(mb.saw("begin_menubar"));
+    EXPECT_FALSE(mb.saw("begin_menu:Windows"));
+  }
+}
+
 // ── Phase-2 PR6: cvc::ariadne::stream DSL surface (stream-open/stream-info/stream-close) ──
 namespace {
 struct StreamActionGuard {
@@ -4873,6 +5062,49 @@ TEST(AriadneAppRuntime, HostMenusBesideTheDocumentsOwn) {
   art.runtime().render();
   EXPECT_LT(menu_at(mb, "Sim"), menu_at(mb, "Settings")); // the host's own, after the document's
   EXPECT_FALSE(mb.saw("separator"));
+}
+
+// §5.9: a host's menus count as the document's for the Windows menu. arigl's Settings > Keys...
+// opens the Keys window, so the Windows menu, after the host's menus, lists only the document's.
+TEST(AriadneAppRuntime, TheWindowsMenuLeavesOutWhatTheHostsMenusOpen) {
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  cvc::app app;
+  MockBackend mb;
+  AppRuntime art(app, "ui.docs.d");
+  art.set_backend(mb);
+  art.set_host_menus({AppRuntime::document_menus(),
+                      menu("Settings", {menu_toggle("Keys...", "tree.ariadne_keys.open", false)})});
+  art.set_host_keys({});
+  art.load(write_doc("host_windows_menu.ari", "meta: {min_libcvc: 3.4.0}\n"
+                                              "windows:\n"
+                                              "  - window: Panel\n"
+                                              "    closable: true\n"
+                                              "    children:\n"
+                                              "      - text: body\n"));
+  art.runtime().render();
+  ASSERT_GE(menu_at(mb, "Windows"), 0);
+  EXPECT_LT(menu_at(mb, "Settings"), menu_at(mb, "Windows"));
+  EXPECT_EQ(std::count(mb.log.begin(), mb.log.end(), "begin_menubar"), 1); // one bar, the host's
+  EXPECT_TRUE(mb.saw("toggle:Panel"));
+  EXPECT_FALSE(mb.saw("toggle:Keys")) << "Settings > Keys... opens it";
+
+  // Without such a menu the Keys window is listed: the one way to open it.
+  cvc::app app2;
+  MockBackend mb2;
+  AppRuntime plain(app2, "ui.docs.d");
+  plain.set_backend(mb2);
+  plain.set_host_keys({});
+  plain.load(write_doc("host_windows_menu.ari", "meta: {min_libcvc: 3.4.0}\n"
+                                                "windows:\n"
+                                                "  - window: Panel\n"
+                                                "    closable: true\n"
+                                                "    children:\n"
+                                                "      - text: body\n"));
+  plain.runtime().render();
+  EXPECT_TRUE(mb2.saw("toggle:Panel"));
+  EXPECT_TRUE(mb2.saw("toggle:Keys"));
+  EXPECT_FALSE(mb2.saw("begin_window:Keys(closable)")) << "listed, but still closed";
 }
 
 // Every document a host mounts after set_host_keys gets a Keys window: closed until

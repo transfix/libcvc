@@ -31,9 +31,10 @@
 #include <vtkRendererCollection.h>
 #include <vtkSmartPointer.h>
 
-// X11 pointer warp for continuous (Quake) mouse-look. Guarded so non-X11 builds
-// degrade to cursor-delta look. VTK already links X11 on Linux.
-#if defined(__linux__)
+// VTK's own X11 window has no SetCursorPosition, so the pointer warp for continuous (Quake)
+// mouse-look under it goes through Xlib. cvcGL's SDL window, and VTK's Win32 and Cocoa windows,
+// warp through SetCursorPosition. VTK already links X11 on Linux.
+#if defined(__linux__) && __has_include(<X11/Xlib.h>)
 #define CVCGL_HAVE_X11 1
 #include <X11/Xlib.h>
 #endif
@@ -1164,23 +1165,28 @@ void CameraController::setPointerCapture(bool on) {
 bool CameraController::pointerCapture() const { return m_impl->pointerCapture; }
 
 void CameraController::recenterPointer() {
-#ifdef CVCGL_HAVE_X11
   Impl &s = *m_impl;
   if (!s.window)
     return;
-  auto *dpy = static_cast<Display *>(s.window->GetGenericDisplayId());
-  auto win = reinterpret_cast<Window>(s.window->GetGenericWindowId());
-  if (!dpy || !win)
-    return;
   int *size = s.window->GetSize();
-  int cx = size[0] / 2, cy = size[1] / 2;
-  XWarpPointer(dpy, None, win, 0, 0, 0, 0, cx, cy);
-  XFlush(dpy);
+  const int cx = size[0] / 2, cy = size[1] / 2; // VTK's coordinates: y up
+#ifdef CVCGL_HAVE_X11
+  auto *dpy = s.window->IsA("vtkXOpenGLRenderWindow")
+                  ? static_cast<Display *>(s.window->GetGenericDisplayId())
+                  : nullptr;
+  if (dpy) {
+    const auto win = reinterpret_cast<Window>(s.window->GetGenericWindowId());
+    if (!win)
+      return;
+    XWarpPointer(dpy, None, win, 0, 0, 0, 0, cx, size[1] - 1 - cy);
+    XFlush(dpy);
+  } else
+#endif
+    s.window->SetCursorPosition(cx, cy);
   // Tell VTK the pointer is now at centre so the next move delta is measured from
   // there rather than reporting a huge jump.
   if (s.interactor)
-    s.interactor->SetLastEventPosition(cx, size[1] - cy);
-#endif
+    s.interactor->SetLastEventPosition(cx, cy);
 }
 
 void CameraController::setKeyBinding(const std::string &action, const std::string &keySym) {

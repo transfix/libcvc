@@ -388,6 +388,50 @@ windows:
   EXPECT_EQ(bt->on, "go");
 }
 
+// §5.9: `windows_menu:` places the built-in Windows menu in a menubar (`- windows_menu: View`,
+// or the bare `- windows_menu`), and at the top level turns it off (false) or renames it.
+TEST(AriadneLoader, WindowsMenuPlacementAndSetting) {
+  SKIP_WITHOUT_YAML();
+  LoadResult placed = load_string(R"(
+meta: { name: T, min_libcvc: "3.4.0" }
+menubar:
+  - menu: View
+    items:
+      - windows_menu: Panels
+  - windows_menu
+windows:
+  - window: A
+)");
+  ASSERT_TRUE(placed.ok) << placed.error;
+  EXPECT_TRUE(placed.warnings.empty());
+  EXPECT_EQ(count(placed.root, Kind::WindowsMenu), 2);
+  const Widget *wm = find(placed.root, Kind::WindowsMenu);
+  ASSERT_NE(wm, nullptr);
+  EXPECT_EQ(wm->label, "Panels");
+  EXPECT_TRUE(wm->bdef);
+
+  LoadResult off = load_string(R"(
+meta: { name: T, min_libcvc: "3.4.0" }
+windows_menu: false
+windows:
+  - window: A
+)");
+  ASSERT_TRUE(off.ok) << off.error;
+  wm = find(off.root, Kind::WindowsMenu);
+  ASSERT_NE(wm, nullptr);
+  EXPECT_FALSE(wm->bdef);
+
+  LoadResult renamed = load_string(R"(
+meta: { name: T, min_libcvc: "3.4.0" }
+windows_menu: Panels
+)");
+  ASSERT_TRUE(renamed.ok) << renamed.error;
+  wm = find(renamed.root, Kind::WindowsMenu);
+  ASSERT_NE(wm, nullptr);
+  EXPECT_TRUE(wm->bdef);
+  EXPECT_EQ(wm->label, "Panels");
+}
+
 // Phase 0a: input_text / input_int parse — both the shorthand `input_text:` key and the generic
 // `type: input_text` form — carrying bind, the optional `on` (send-on-commit), `def`, and the int
 // range lo/hi. These are the conference app's chat / display-name / room-id fields.

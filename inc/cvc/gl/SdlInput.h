@@ -65,18 +65,20 @@ public:
   // True once init() succeeded (and this build has SDL).
   bool available() const;
 
-  // Take the keyboard (and pointer) of the VTK window a cvcGL host draws in. SDL only delivers keys
-  // to a window of its own, so on Windows this wraps the host's HWND, and in the browser listens on
-  // the page for the keys typed into VTK's canvas; the host's own input goes on as before. Where
-  // SDL cannot take VTK's window (X11, Wayland, macOS, a build without SDL, or with
-  // $CVC_SDLINPUT_VTK_KEYS=1), poll() returns VTK's own key events instead, named as SDL names
-  // them: the presses ImGuiOverlay leaves to the scene, every release, and no pointer.
-  // False until VTK has made its window and interactor: call again on a later frame.
+  // Take the keyboard (and pointer) of the window a cvcGL host draws in. cvcGL's onscreen window is
+  // SDL3's (SdlWindow.h, on Windows, Linux and macOS): its interactor hands every SDL event here as
+  // well as to VTK, so poll() returns the window's keys and pointer in SDL's names. In the browser
+  // (VTK's canvas) SDL listens on the page for the keys typed into the canvas. A window VTK made
+  // (no SDL, or $CVCGL_SDL_WINDOW=0) gives VTK's own key events, named as SDL names them: the
+  // presses ImGuiOverlay leaves to the scene, every release, and no pointer.
+  // False until the window and its interactor exist: call again on a later frame.
   bool attach(vtkRenderWindow *window);
   bool attached() const;
 
-  // Drain the SDL event queue, returning the translated keyboard/mouse events (other event types —
-  // quit, window, etc. — are left for the host to handle). Empty when not available.
+  // This frame's keyboard/mouse events, translated (other event types — quit, window, etc. — are
+  // left for the host to handle). Attached to cvcGL's SDL window, the ones its interactor handed
+  // over; to VTK's window, VTK's keys. Not attached, it drains SDL's queue itself, but only while
+  // no cvcGL SDL window is open (that queue is the window's then). Empty when not available.
   std::vector<InputEvent> poll();
 
   // Release the events subsystem (refcounted; safe to call more than once). Called by the dtor.
@@ -84,9 +86,11 @@ public:
 
 private:
   bool inited_ = false;
-  bool video_ = false;           // SDL_INIT_VIDEO, which attach() needs
-  void *window_ = nullptr;       // attach(): the SDL_Window wrapping the host's
-  std::vector<InputEvent> keys_; // the browser's keys (attach()'s event filter), or VTK's
+  bool video_ = false;           // SDL_INIT_VIDEO, which attach() needs in the browser
+  void *window_ = nullptr;       // attach() in the browser: SDL's hidden canvas window
+  std::vector<InputEvent> keys_; // the SDL window's events, the browser's keys, or VTK's
+  vtkRenderWindowInteractor *sdlWindowInteractor_ = nullptr; // attach() to cvcGL's SDL window:
+  int sdlSink_ = 0;                                          // its event sink
   vtkRenderWindowInteractor *vtkKeys_ = nullptr; // attach() without SDL's window: VTK's keys,
   vtkCallbackCommand *vtkKeyCb_ = nullptr;       // observed by this
   unsigned long vtkKeyTags_[2] = {0, 0};

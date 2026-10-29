@@ -4,6 +4,9 @@
 #
 # Every window here has a size:. One without fits its widgets (cvcgl_imgui_window_fit checks that,
 # with no GL); it can join this golden when windows.png is next made under llvmpipe.
+#
+# There is no menubar:, but the closable window gets one holding the built-in Windows menu
+# (docs/ARIADNE.md §5.9), and the pos: of every window is measured from below it.
 
 meta:
   name: golden windows

@@ -260,15 +260,16 @@ endif()
 
 vtk_module_autoinit(TARGETS cvcGL MODULES ${VTK_LIBRARIES})
 
-# X11 is used by CameraController for Quake-style pointer capture (warp the cursor
-# to centre each frame so mouse-look is continuous). Optional: without it, captured
-# look degrades to cursor-delta. Linux/X11 only.
+# X11 is used under VTK's own X11 window ($CVCGL_SDL_WINDOW=0, or a cvcGL without SDL3): by the
+# clipboard (X11 selections), and by CameraController for Quake-style pointer capture (warp the
+# cursor to centre each frame so mouse-look is continuous; VTK's X11 window has no
+# SetCursorPosition). Optional: without it, captured look degrades to cursor-delta. Linux/X11 only.
 #
 # cvcGL is a STATIC archive, so its PRIVATE link deps propagate to consumers through
 # the exported INTERFACE_LINK_LIBRARIES. find_package(X11)'s ${X11_LIBRARIES} are
 # ABSOLUTE builder paths (e.g. .../py/lib/libX11.so) — baking those into
 # cvcGLTargets.cmake breaks any downstream consumer (volrover3) on another machine
-# with "missing and no known rule to make it". cvcGL only calls Xlib (XWarpPointer/
+# with "missing and no known rule to make it". cvcGL only calls Xlib (selections, XWarpPointer,
 # XFlush), so link the X11::X11 imported TARGET (libX11 alone): the export carries the
 # relocatable name $<LINK_ONLY:X11::X11>, and cvcGLConfig.cmake's find_dependency(X11)
 # re-resolves it to the CONSUMER's own libX11 (the same FindX11 pass VTK's config
@@ -852,6 +853,11 @@ add_test(NAME cvcgl_imgui_table_columns COMMAND cvcgl_imgui_table_columns)
 add_executable(cvcgl_imgui_grid_slider test/cvcgl_imgui_grid_slider.cpp)
 target_link_libraries(cvcgl_imgui_grid_slider PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_grid_slider COMMAND cvcgl_imgui_grid_slider)
+# A window closed with its X comes back from the built-in Windows menu (§5.9), clicked through
+# ImGui's own input, and takes a place among the others again. No window, no GL.
+add_executable(cvcgl_imgui_windows_menu test/cvcgl_imgui_windows_menu.cpp)
+target_link_libraries(cvcgl_imgui_windows_menu PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_windows_menu COMMAND cvcgl_imgui_windows_menu)
 
 # The tf_editor transfer-function widget (ImGuiBackend::tf_editor) on a bare ImGui context, driven
 # by synthesized mouse input: drags, adds, deletes, the zoom strip, the context menu, commits.
@@ -1073,11 +1079,16 @@ add_executable(cvcgl_sdl_input test/cvcgl_sdl_input.cpp)
 target_link_libraries(cvcgl_sdl_input PRIVATE cvcGL)
 add_test(NAME cvcgl_sdl_input COMMAND cvcgl_sdl_input)
 
-# SdlInput::attach on a real VTK window: SDL wraps the HWND VTK made, so a key sent to it reaches
-# SDL (a document's on_key) and still VTK's interactor. Windows only; SKIPs (rc 0) elsewhere.
+# cvcGL's onscreen window on SDL3 (SdlWindow.h), on a real window: pushed SDL events reach VTK's
+# interactor as VTK events (keysyms, CharEvent, clicks y up) and SdlInput in SDL's names; a resize
+# sets VTK's size; VTK timers tick; two windows each get their own events; $CVCGL_SDL_WINDOW=0
+# falls back to VTK's window (whose keys SdlInput reads, checked on Windows). Without SDL, or where
+# SDL opens no window, it exits 77, which ctest reports as skipped (so a lane that should exercise
+# the window cannot pass it silently).
 add_executable(cvcgl_sdl_attach test/cvcgl_sdl_attach.cpp)
 target_link_libraries(cvcgl_sdl_attach PRIVATE cvcGL)
 add_test(NAME cvcgl_sdl_attach COMMAND cvcgl_sdl_attach)
+set_tests_properties(cvcgl_sdl_attach PROPERTIES SKIP_RETURN_CODE 77)
 
 # ── JavaScript tests (node) ──
 # The browser-side pieces cvcgl_wasm_app() links into a wasm app are plain JS, tested under node

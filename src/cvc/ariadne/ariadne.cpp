@@ -1075,6 +1075,29 @@ struct Runtime::Impl {
   void emit_container(const Widget &w); // lay children out per w.layout (§3.0.3b)
   void render();
 
+  // §5.9 the built-in Windows menu: a checkable item per window, bound to its tree.<id>.open, so
+  // a closed window can be opened again. Worked out once per tree (plan_windows_menu, when a new
+  // root is swapped in) and drawn at most once a frame.
+  struct WindowsMenuPlan {
+    bool on = true; // a `windows_menu: false` turns it off
+    std::string title = "Windows";
+    bool placed = false; // the document's menubar places it itself (a windows_menu entry)
+    bool has_menubar = false;
+    bool any_closable = false;
+    // The menubar already has a menu of this title (fem_gallery.ari's own "Windows"): the items go
+    // at the end of that one, after a separator, rather than in a second menu of the same name.
+    bool merged = false;
+    // The windows no menu item of the document already toggles: title, resolved open-state path.
+    std::vector<std::pair<std::string, std::string>> items;
+  };
+  WindowsMenuPlan windows_menu;
+  int menubar_depth = 0;           // > 0 while a menubar's items are being drawn
+  int menu_depth = 0;              // > 0 while a menu's items are being drawn
+  bool windows_menu_drawn = false; // this frame
+  void plan_windows_menu();
+  void emit_windows_menu(const std::string &title);
+  void emit_windows_menu_items();
+
   // §4 read-lane: is `w` shown this frame? True when it has no visible_when; otherwise
   // the predicate's result (fail-safe HIDDEN on a broken predicate).
   bool visible(const Widget &w);
@@ -1356,17 +1379,38 @@ void Runtime::Impl::emit_node(const Widget &w) {
   switch (w.kind) {
   case Kind::Menubar:
     if (b.begin_main_menu_bar()) {
+      ++menubar_depth;
       emit_children(w);
+      if (!windows_menu.placed) // §5.9: the Windows menu goes last unless the document placed it
+        emit_windows_menu(windows_menu.title);
+      --menubar_depth;
       b.end_main_menu_bar();
     }
     break;
 
-  case Kind::Menu:
+  case Kind::WindowsMenu: // §5.9: placed here; outside a menubar it is only the document's setting
+    if (menubar_depth > 0 && w.bdef)
+      emit_windows_menu(w.label.empty() ? windows_menu.title : w.label);
+    break;
+
+  case Kind::Menu: {
+    // §5.9: a menu straight in the bar with the Windows menu's title takes its items.
+    const bool merge = windows_menu.merged && menubar_depth > 0 && menu_depth == 0 &&
+                       w.label == windows_menu.title;
     if (b.begin_menu(label)) {
+      ++menu_depth;
       emit_children(w);
+      --menu_depth;
+      if (merge && windows_menu.on && !windows_menu.items.empty() && !windows_menu_drawn) {
+        b.separator();
+        emit_windows_menu_items();
+      }
       b.end_menu();
     }
+    if (merge)
+      windows_menu_drawn = true; // open or not, it stands for the Windows menu this frame
     break;
+  }
 
   case Kind::MenuItemToggle: {
     const std::string path = resolve(w.bind);
@@ -1387,17 +1431,15 @@ void Runtime::Impl::emit_node(const Widget &w) {
     // The stable identity is the id (defaults to the label); the backend keeps a
     // window's geometry keyed on it. Begin/End pair unconditionally.
     const std::string &id = w.id.empty() ? w.label : w.id;
-    // `closable:` — the window's open state lives at tree.<id>.open (default open). A closed window
-    // is not rendered at all; its close (X) button (p_open below) and a menu_toggle bound to the
-    // same key (e.g. a "Settings" menu) flip it.
-    bool open = true;
-    std::string open_path;
-    if (w.closable) {
-      open_path = resolve("tree." + id + ".open");
-      open = read_bool_or_seed(app, open_path, 1) != 0;
-      if (!open)
-        break; // closed -> skip the geometry seed + body entirely
-    }
+    // The window's open state lives at tree.<id>.open (default open). A closed window is not
+    // rendered at all. A `closable:` window's close (X) button (p_open below) flips it, as does a
+    // menu_toggle bound to the same key (the built-in Windows menu, §5.9, or the document's own).
+    // Only a closable window seeds the key: another is closed only when something set it to 0.
+    const std::string open_path = resolve("tree." + id + ".open");
+    bool open =
+        (w.closable ? read_bool_or_seed(app, open_path, 1) : read_bool_or(app, open_path, 1)) != 0;
+    if (!open)
+      break; // closed -> skip the geometry seed + body entirely
     // §11.4 two-way geometry edge: seed the window from a persisted tree.<id>.geometry (if any)
     // BEFORE opening it, then write the post-interaction geometry back AFTER — so the state node is
     // the authority next frame. The backend never touches cvc::state; it only seeds/reports.
@@ -1710,6 +1752,7 @@ void Runtime::Impl::render() {
     root = std::move(pending);
     pending = Widget{};
     has_pending = false;
+    plan_windows_menu(); // §5.9: which windows the built-in Windows menu lists
     // §12: tear down the OLD tree's parent-scope holes before the new tree re-wires its own, so a
     // fragment re-mounted at the same sub-prefix cannot inherit a grant the new manifest omits
     // (clearLink turns the hole back into a plain, sandboxed local node). Re-wiring happens as
@@ -1736,9 +1779,94 @@ void Runtime::Impl::render() {
   frame_instances = 0;       // §3: reset the per-frame repeat-expansion budget
   scope_stack.clear(); // §12: start every frame at the document scope (RAII keeps it balanced;
                        // this is belt-and-suspenders so one bad frame can't leak into the next)
+  windows_menu_drawn = false;
   backend->begin_frame();
+  // §5.9: a document with no menubar but a closable window gets a menubar holding just the
+  // Windows menu, so a window closed with its X can be opened again.
+  if (!windows_menu.has_menubar && windows_menu.any_closable && windows_menu.on &&
+      !windows_menu.items.empty() && backend->begin_main_menu_bar()) {
+    ++menubar_depth;
+    emit_windows_menu(windows_menu.title);
+    --menubar_depth;
+    backend->end_main_menu_bar();
+  }
   emit(root);
   backend->end_frame();
+}
+
+void Runtime::Impl::plan_windows_menu() {
+  WindowsMenuPlan p;
+  std::set<std::string> toggled;   // open-state paths a menu item of the document already toggles
+  std::set<std::string> bar_menus; // the titles of the menus straight in a menubar
+  std::vector<std::pair<std::string, std::string>> windows;
+  // Walk the tree with the scope each node resolves its binds in (a load: mount scopes its
+  // children, §12). A repeated widget is made per frame, so a repeated window is not listed.
+  std::function<void(const Widget &, const std::string &, bool)> walk =
+      [&](const Widget &w, const std::string &scope, bool in_menubar) {
+        if (!w.repeat.empty())
+          return;
+        const std::string inner = w.scope.empty() ? scope : resolve_bind(scope, w.scope);
+        switch (w.kind) {
+        case Kind::Menubar:
+          p.has_menubar = true;
+          in_menubar = true;
+          for (const Widget &c : w.children)
+            if (c.kind == Kind::Menu)
+              bar_menus.insert(c.label);
+          break;
+        case Kind::MenuItemToggle:
+          if (!w.bind.empty() && !is_expr(w.bind))
+            toggled.insert(resolve_bind(scope, w.bind));
+          break;
+        case Kind::WindowsMenu:
+          if (!w.bdef)
+            p.on = false;
+          else if (in_menubar)
+            p.placed = true;
+          if (!w.label.empty())
+            p.title = w.label;
+          break;
+        case Kind::Window: {
+          const std::string &id = w.id.empty() ? w.label : w.id;
+          windows.emplace_back(w.label.empty() ? id : w.label,
+                               resolve_bind(scope, "tree." + id + ".open"));
+          p.any_closable = p.any_closable || w.closable;
+          in_menubar = false;
+          break;
+        }
+        default:
+          break;
+        }
+        for (const Widget &c : w.children)
+          walk(c, inner, in_menubar);
+      };
+  walk(root, prefix, false);
+  for (auto &win : windows)
+    if (!toggled.count(win.second))
+      p.items.push_back(std::move(win));
+  p.merged = !p.placed && bar_menus.count(p.title) != 0;
+  windows_menu = std::move(p);
+}
+
+void Runtime::Impl::emit_windows_menu(const std::string &title) {
+  if (!windows_menu.on || windows_menu.items.empty() || windows_menu_drawn)
+    return;
+  windows_menu_drawn = true;
+  Backend &b = *backend;
+  if (!b.begin_menu(title.c_str()))
+    return;
+  emit_windows_menu_items();
+  b.end_menu();
+}
+
+void Runtime::Impl::emit_windows_menu_items() {
+  Backend &b = *backend;
+  for (const auto &item : windows_menu.items) {
+    const bool cur = read_bool_or_seed(app, item.second, 1) != 0;
+    const BoolEdit e = b.menu_item_toggle(item.first.c_str(), cur);
+    if (e.committed)
+      write<int>(app, item.second, e.value ? 1 : 0);
+  }
 }
 
 // --------------------------------------------------------------------------
