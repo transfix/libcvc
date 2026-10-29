@@ -619,6 +619,99 @@ state &state::value(const std::string &v, bool setValueType) {
   return *this;
 }
 
+// ------------------------------------------------------------------
+// state::compareAndSetValue, state::exchangeValue, state::updateValue
+// ------------------------------------------------------------------
+// Purpose:
+//   Atomic single-node updates: the compare (or the computation) and the assignment under one
+//   hold of the node's mutex (docs/STATE_EXEC_LOCKS.md, 4.4). See the header.
+std::string
+state::atomicUpdate(const std::function<bool(const std::string &old, std::string &out)> &next) {
+  boost::this_thread::interruption_point();
+
+  // The node a read through a transparent link sees (the DSL's state-get reads through any
+  // resolvable transparent link). value(v) writes a non-writable transparent link's own node; an
+  // atomic update refuses instead, so its compare and its write are always on the same node.
+  link_resolution pin; // holds a link's target, and its ancestors, alive while it is written
+  state *target = this;
+  {
+    link_mode mode_snapshot;
+    bool writable_snapshot;
+    bool is_link_snapshot;
+    {
+      boost::mutex::scoped_lock lock(_mutex);
+      is_link_snapshot = !_linkTarget.empty();
+      mode_snapshot = _linkMode;
+      writable_snapshot = _linkWritable;
+    }
+    if (is_link_snapshot && mode_snapshot == link_mode::transparent) {
+      if (!writable_snapshot)
+        throw read_only_error(
+            boost::str(boost::format("Cannot update through non-writable transparent link: %1%") %
+                       fullName()));
+      pin = resolveLink();
+      if (pin.kind != link_resolution_kind::resolved || pin.target == nullptr || pin.target == this)
+        throw read_only_error(boost::str(
+            boost::format("Cannot write through unresolvable transparent link: %1%") % fullName()));
+      target = pin.target;
+    }
+  }
+
+  std::string old;
+  bool changed = false;
+  {
+    boost::mutex::scoped_lock lock(target->_mutex);
+    if (target->_readOnly)
+      throw read_only_error(
+          boost::str(boost::format("Cannot modify read-only state: %1%") % target->fullName()));
+    old = target->_value;
+    std::string out;
+    if (next(old, out) && out != old) { // an exception from next leaves the node as it was
+      target->_value = std::move(out);
+      target->_lastMod = boost::posix_time::microsec_clock::universal_time();
+      target->_initialized = true;
+      target->_valueTypeName = std::string("std::string");
+      target->_valueCondition.notify_all();
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    target->valueChanged();
+    if (target->parent())
+      target->parent()->emitChildChanged(target->name());
+  }
+  return old;
+}
+
+bool state::compareAndSetValue(const std::string &expected, const std::string &desired) {
+  bool matched = false;
+  atomicUpdate([&](const std::string &old, std::string &out) {
+    matched = old == expected;
+    if (matched)
+      out = desired;
+    return matched;
+  });
+  return matched;
+}
+
+std::string state::exchangeValue(const std::string &desired) {
+  return atomicUpdate([&](const std::string &, std::string &out) {
+    out = desired;
+    return true;
+  });
+}
+
+std::string state::updateValue(const std::function<std::string(const std::string &)> &f) {
+  std::string result;
+  atomicUpdate([&](const std::string &old, std::string &out) {
+    out = f(old);
+    result = out;
+    return true;
+  });
+  return result;
+}
+
 // ------------
 // state::touch
 // ------------

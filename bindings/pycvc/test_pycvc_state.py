@@ -281,6 +281,30 @@ def test_state_class_shares_tree_with_free_functions():
     print("  ok: State class and free functions share the same state tree")
 
 
+def test_compare_and_set_value():
+    app = pycvc.make_app()
+    node = pycvc.State.instance(app).child("cas")
+    node.value("a")
+    assert node.compareAndSetValue("a", "b") is True
+    assert node.value() == "b"
+    assert node.compareAndSetValue("a", "c") is False
+    assert node.value() == "b"
+
+
+def test_exchange_value():
+    app = pycvc.make_app()
+    node = pycvc.State.instance(app).child("swap")
+    assert node.exchangeValue("one") == ""
+    assert node.exchangeValue("two") == "one"
+    assert node.value() == "two"
+
+
+def test_update_value_not_wrapped():
+    # Its std::function parameter has no Python form (pycvc.i ignores it).
+    app = pycvc.make_app()
+    assert not hasattr(pycvc.State.instance(app).child("u"), "updateValue")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:

@@ -40,6 +40,7 @@
 #include <cvc/core/exception.h>
 #include <cvc/core/namespace.h>
 #include <cvc/core/types.h>
+#include <functional>
 #include <map>
 #include <utility>
 #include <vector>
@@ -253,6 +254,24 @@ public:
   std::vector<std::string>
   values(bool unique = false); // shortcut for comma separated values in value()
   state &value(const std::string &v, bool setValueType = true);
+
+  // Atomic single-node updates (docs/STATE_API.md, "Value Operations"), behind the DSL's
+  // state-cas, state-swap and state-incr. Each compares or computes and assigns under one hold of
+  // the node's mutex. When the value changed, each then fires valueChanged and the parent's child
+  // signal, with no lock held; an unchanged value fires nothing. They write the node a read
+  // through a transparent link sees: a writable transparent link writes its target, as value(v)
+  // does. Unlike value(v), a transparent link that is not writable, or cannot be resolved, throws
+  // read_only_error rather than taking the write on the link node, and so does a read-only node. A
+  // changed value's type name becomes "std::string".
+  //
+  // Set the value to `desired` if it equals `expected`; true when it did (an equal `desired`
+  // succeeds without writing).
+  bool compareAndSetValue(const std::string &expected, const std::string &desired);
+  // Set the value to `desired`; returns the value it replaced.
+  std::string exchangeValue(const std::string &desired);
+  // Set the value to f(old value), and return that. An exception from f leaves the node unchanged
+  // and propagates. f runs under the node's mutex, so it must not touch the node.
+  std::string updateValue(const std::function<std::string(const std::string &)> &f);
 
   // Get value with optional callback that fires when value changes
   template <class T>
@@ -887,6 +906,11 @@ private:
   friend class state_subtree_cursor; // snapshots a node's value and children under its lock
 
   state(const state &);
+
+  // The three atomic updates' common body. `next(old, out)` runs under the written node's mutex
+  // and returns whether to store `out`. Returns the value the node held before.
+  std::string
+  atomicUpdate(const std::function<bool(const std::string &old, std::string &out)> &next);
 };
 
 // Template implementations for state_future
