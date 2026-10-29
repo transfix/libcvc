@@ -709,6 +709,7 @@ void nav_plant::measure(agent &a, const physics::vehicle_state &vs, bool tick) c
   }
   s.ltr = l_load + r_load > 0.0 ? (l_load - r_load) / (l_load + r_load) : 0.0;
   s.contacts = tick ? a.contacts_step : 0;
+  s.vehicle_contact = tick ? a.touched : -1;
   a.sample = s;
   a.psi = psi;
   a.vwx = v.x;

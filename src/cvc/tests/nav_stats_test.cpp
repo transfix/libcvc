@@ -13,6 +13,7 @@
 #include <array>
 #include <cmath>
 #include <cvc/nav/nav_stats.h>
+#include <cvc/nav/plant_ledger.h>
 #include <gtest/gtest.h>
 #include <string>
 #include <vector>
@@ -951,4 +952,138 @@ TEST(NavStats, PlantLedgerUntrackedLeavesTheJsonUnchanged) {
   EXPECT_EQ(sj.find("plant_runs"), std::string::npos);
   EXPECT_EQ(sj.find("rollover_rate"), std::string::npos);
   EXPECT_NE(sj.find("\"mean_binding_stopped_share\":0}"), std::string::npos) << sj;
+}
+
+// What a plant does not measure is not applicable (plant_sample::measured): vehicle 0's plant has
+// only the attitude (a single track on the ground), so its load transfer, wheels off the ground
+// and vehicle contact stay at their defaults whatever its samples say, the ledger says they do not
+// apply, and the JSON has them null. Vehicle 1's plant measures everything.
+TEST(NavStats, PlantLedgerNotApplicable) {
+  nav_stats_collector c;
+  const float start[4] = {0, 0, 0, 10};
+  const float goal[4] = {50, 0, 50, 10};
+  c.begin_episode(2, 0.5, start, goal, {}, "na", 1, "");
+  for (int k = 0; k < 4; ++k) {
+    plant_sample ps[2];
+    ps[0].measured = plant_sample::has_attitude;
+    ps[0].ltr = ps[1].ltr = 0.95;
+    ps[0].wheels = ps[1].wheels = 4;
+    ps[0].wheels_down = ps[1].wheels_down = 1;
+    ps[0].vehicle_contact = 1;
+    ps[1].vehicle_contact = 0;
+    ps[0].up_z = ps[1].up_z = 0.9;
+    nav_samplers smp;
+    smp.plant = ps;
+    const float pos[4] = {(float)(k + 1), 0, (float)(k + 1), 10};
+    const float head[2] = {0, 0}, spd[2] = {2, 2};
+    const int mode[2] = {0, 0};
+    const std::uint8_t rch[2] = {0, 0};
+    c.step(pos, head, spd, mode, rch, smp);
+  }
+  const episode_nav_stats e = c.finish();
+  const veh_nav_stats &v = e.per_vehicle[0], &u = e.per_vehicle[1];
+  EXPECT_EQ(v.plant_measured, plant_sample::has_attitude);
+  EXPECT_EQ(u.plant_measured, plant_sample::has_all);
+  EXPECT_EQ(e.plant_measured, plant_sample::has_attitude);
+  EXPECT_EQ(v.ltr_max, 0.0);
+  EXPECT_EQ(v.lift_s, 0.0);
+  EXPECT_EQ(v.wheels_up_s, 0.0);
+  EXPECT_EQ(v.vehicle_hits, 0);
+  EXPECT_GT(v.tilt_max_deg, 25.0); // acos(0.9): measured
+  EXPECT_DOUBLE_EQ(u.ltr_max, 0.95);
+  EXPECT_DOUBLE_EQ(u.lift_s, 2.0);
+  EXPECT_DOUBLE_EQ(u.wheels_up_s, 2.0);
+  EXPECT_EQ(u.vehicle_hits, 1);
+  std::vector<std::string> na_v, na_u;
+  for (const plant_ledger_item &it : plant_ledger_vehicle()) {
+    if (it.from != plant_ledger_item::source::plant)
+      continue;
+    if (!plant_ledger_applies(it, v))
+      na_v.push_back(it.key);
+    if (!plant_ledger_applies(it, u))
+      na_u.push_back(it.key);
+  }
+  EXPECT_EQ(na_v, (std::vector<std::string>{"ltr_max", "lift_s", "wheels_up_s", "vehicle_hits",
+                                            "vehicle_hit_s"}));
+  EXPECT_TRUE(na_u.empty());
+  // the episode: what every vehicle measured (no energy was fed)
+  for (const plant_ledger_item &it : plant_ledger_episode())
+    EXPECT_EQ(plant_ledger_applies(it, e), it.from == plant_ledger_item::source::plant &&
+                                               std::string(it.key) != "total_vehicle_hits")
+        << it.key;
+  const std::string j = e.to_json();
+  EXPECT_NE(j.find("\"ltr_max\":null,\"lift_s\":null,\"wheels_up_s\":null,"), std::string::npos)
+      << j;
+  EXPECT_NE(j.find("\"vehicle_hits\":null,\"vehicle_hit_s\":null}"), std::string::npos) << j;
+  EXPECT_NE(j.find("\"vehicle_hits\":1,\"vehicle_hit_s\":2}"), std::string::npos) << j;
+  EXPECT_NE(j.find("\"total_vehicle_hits\":null,"), std::string::npos) << j;
+}
+
+// Contact with the other vehicles (plant_sample::vehicle_contact): a hit begins on a tick touching
+// a vehicle it was not touching the tick before (a new one counts, a held one does not), and the
+// time touching adds up.
+TEST(NavStats, PlantLedgerVehicleHits) {
+  nav_stats_collector c;
+  const float start[2] = {0, 0}, goal[2] = {50, 0};
+  c.begin_episode(1, 0.25, start, goal, {}, "hits", 1, "");
+  const int touching[8] = {-1, 2, 2, -1, 2, 3, 3, -1};
+  for (int k = 0; k < 8; ++k) {
+    plant_sample ps;
+    ps.vehicle_contact = touching[k];
+    nav_samplers smp;
+    smp.plant = &ps;
+    const float pos[2] = {(float)(k + 1), 0};
+    const float head = 0, spd = 4;
+    const int mode = 0;
+    const std::uint8_t rch = 0;
+    c.step(pos, &head, &spd, &mode, &rch, smp);
+  }
+  const episode_nav_stats e = c.finish();
+  EXPECT_EQ(e.per_vehicle[0].vehicle_hits, 3); // ticks 1, 4 and 5
+  EXPECT_DOUBLE_EQ(e.per_vehicle[0].vehicle_hit_s, 5 * 0.25);
+  EXPECT_EQ(e.total_vehicle_hits, 3);
+  const nav_scorecard s = aggregate_nav({e});
+  EXPECT_DOUBLE_EQ(s.mean_vehicle_hits, 3.0);
+}
+
+// Every item of the ledger is in the JSON of a vehicle and an episode a plant fed (energy and
+// samples), under its key; a scorecard's mean of an item no run measured is not applicable.
+TEST(NavStats, PlantLedgerItemsAreAllInTheJson) {
+  nav_stats_collector c;
+  const float start[2] = {0, 0}, goal[2] = {50, 0};
+  c.begin_episode(1, 0.25, start, goal, {}, "all", 1, "");
+  for (int k = 0; k < 3; ++k) {
+    plant_sample ps;
+    const double energy = 100.0;
+    const int contacts = 1;
+    nav_samplers smp;
+    smp.plant = &ps;
+    smp.energy_step_J = &energy;
+    smp.static_contacts = &contacts;
+    const float pos[2] = {(float)(k + 1), 0};
+    const float head = 0, spd = 4;
+    const int mode = 0;
+    const std::uint8_t rch = 0;
+    c.step(pos, &head, &spd, &mode, &rch, smp);
+  }
+  const episode_nav_stats e = c.finish();
+  const std::string j = e.to_json();
+  for (const plant_ledger_item &it : plant_ledger_vehicle()) {
+    EXPECT_TRUE(plant_ledger_applies(it, e.per_vehicle[0])) << it.key;
+    EXPECT_NE(j.find(std::string(",\"") + it.key + "\":"), std::string::npos) << it.key;
+  }
+  for (const plant_ledger_item &it : plant_ledger_episode()) {
+    EXPECT_TRUE(plant_ledger_applies(it, e)) << it.key;
+    EXPECT_NE(j.find(std::string(",\"") + it.key + "\":"), std::string::npos) << it.key;
+  }
+  EXPECT_EQ(e.per_vehicle[0].building_contacts, 3);
+  EXPECT_DOUBLE_EQ(e.per_vehicle[0].energy_J, 300.0);
+  episode_nav_stats f = e;
+  f.per_vehicle[0].plant_measured = plant_sample::has_attitude;
+  const nav_scorecard s = aggregate_nav({f});
+  EXPECT_TRUE(std::isnan(s.mean_ltr_max));
+  EXPECT_TRUE(std::isnan(s.mean_vehicle_hits));
+  EXPECT_FALSE(std::isnan(s.mean_tilt_max_deg));
+  const std::string sj = s.to_json();
+  EXPECT_NE(sj.find("\"mean_ltr_max\":null,\"mean_lift_s\":null,"), std::string::npos) << sj;
 }

@@ -16,6 +16,7 @@
 #include <cmath>
 #include <exception>
 #include <map>
+#include <tuple>
 
 namespace cvc {
 namespace physics {
@@ -116,6 +117,9 @@ void dyn_chassis::clear() {
     }
   _boxes.clear();
   _touched.clear();
+  _other.clear();
+  _statics.clear();
+  _other_depth.clear();
 }
 
 void dyn_chassis::reset(world *w, std::vector<body_id> ground, double friction) {
@@ -164,6 +168,9 @@ int dyn_chassis::add(const vehicle_desc &d, const vec3 &position, const quat &ro
   b.material = _material;
   _boxes.push_back(_w->add_body(b));
   _touched.push_back(0);
+  _other.push_back(-1);
+  _statics.push_back(0);
+  _other_depth.push_back(0.0);
   return static_cast<int>(_boxes.size()) - 1;
 }
 
@@ -185,20 +192,63 @@ void dyn_chassis::step() {
   for (std::size_t i = 0; i < _boxes.size(); ++i) {
     of_box[_boxes[i].value] = i;
     _touched[i] = 0;
+    _other[i] = -1;
+    _statics[i] = 0;
+    _other_depth[i] = 0.0;
   }
+  std::map<std::uint32_t, bool> fixed; // a body without mass, as nav_plant counts static contacts
+  const auto is_fixed = [&](body_id b) {
+    const auto it = fixed.find(b.value);
+    if (it != fixed.end())
+      return it->second;
+    bool f = false;
+    try {
+      f = !(_w->get_body(b).mass > 0.0);
+    } catch (const std::exception &) {
+    }
+    fixed[b.value] = f;
+    return f;
+  };
   for (const contact_event &e : _w->contacts()) {
     if (e.type == contact_event::kind::removed)
       continue;
     const auto a = of_box.find(e.body_a.value), b = of_box.find(e.body_b.value);
-    if (a != of_box.end() && !_ground.count(e.body_b.value))
-      _touched[a->second] = 1;
-    if (b != of_box.end() && !_ground.count(e.body_a.value))
-      _touched[b->second] = 1;
+    for (const auto &[self, other, them] :
+         {std::tuple{a, b, e.body_b}, std::tuple{b, a, e.body_a}}) {
+      if (self == of_box.end() || _ground.count(them.value))
+        continue;
+      const std::size_t i = self->second;
+      _touched[i] = 1;
+      if (other != of_box.end()) { // another vehicle's box: the deepest
+        if (_other[i] < 0 || e.depth > _other_depth[i]) {
+          _other[i] = static_cast<int>(other->second);
+          _other_depth[i] = e.depth;
+        }
+      } else if (e.type == contact_event::kind::added && is_fixed(them)) {
+        ++_statics[i];
+      }
+    }
   }
 }
 
 body_state dyn_chassis::moved(int i) const {
   return _w->state(_boxes.at(static_cast<std::size_t>(i)));
+}
+
+void count_contacts(const dyn_chassis &c, int i, int &statics, int &touched, double &depth) {
+  statics += c.static_contacts(i);
+  const int o = c.touched_box(i);
+  if (o >= 0 && (touched < 0 || c.touched_box_depth(i) > depth)) {
+    touched = o;
+    depth = c.touched_box_depth(i);
+  }
+}
+
+void attitude_of(const quat &rotation, cvc::nav::plant_sample &s) {
+  const auto clamp1 = [](double v) { return std::max(-1.0, std::min(1.0, v)); };
+  s.grade = clamp1(rotate(rotation, {1.0, 0.0, 0.0}).z);
+  s.roll = clamp1(rotate(rotation, {0.0, 1.0, 0.0}).z);
+  s.up_z = clamp1(rotate(rotation, {0.0, 0.0, 1.0}).z);
 }
 
 } // namespace dyn

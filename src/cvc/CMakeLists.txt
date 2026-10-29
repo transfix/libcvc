@@ -147,6 +147,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/nav/vehicle_route.h
   ../../inc/cvc/nav/route_follower.h
   ../../inc/cvc/nav/plant_types.h
+  ../../inc/cvc/nav/plant_ledger.h
   ../../inc/cvc/nav/terrain.h
   ../../inc/cvc/nav/vehicle_plant.h
   ../../inc/cvc/ph/mat3.h
@@ -373,6 +374,7 @@ set(SOURCE_FILES
   nav/sim_world_binding.cpp
   nav/sim_thread.cpp
   nav/nav_stats.cpp
+  nav/plant_ledger.cpp
   ph/se2_data.cpp
   ph/se2_model.cpp
   ph/se2_train.cpp

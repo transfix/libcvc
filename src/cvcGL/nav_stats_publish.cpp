@@ -13,12 +13,14 @@
 #include <cstdio>
 #include <cvc/core/app.h>
 #include <cvc/gl/nav_stats_publish.h>
+#include <cvc/nav/plant_ledger.h>
 #include <cvc/nav/sim_world.h>
 #include <cvc/state/state.h>
 #include <cvc/volume/volume.h>
 #include <limits>
 #include <map>
 #include <string>
+#include <type_traits>
 
 namespace cvc {
 namespace gl {
@@ -78,14 +80,8 @@ const leaf_meta kMeta[] = {
     {"episode.mean_path_ratio", "1", "Mean path length over the straight-line distance."},
     {"episode.mean_turn_total_rad", "rad", "Mean total heading change per vehicle."},
     {"episode.total_fuel", "m/s", "The fleet's sum of |change of speed|: a fuel proxy, not fuel."},
-    {"episode.total_energy_J", "J", "The fleet's energy drawn from its sources (a physics plant)."},
-    {"episode.total_building_contacts", "",
-     "The fleet's contacts with static geometry (a physics plant)."},
     {"episode.total_infeasible_slope_steps", "",
      "The fleet's vehicle-ticks with a footprint on infeasible slope (a terrain)."},
-    {"episode.vehicles_rolled", "", "Vehicles that rolled over (a physics plant)."},
-    {"episode.first_roll_s", "s",
-     "When the first vehicle rolled over; < 0 = none (a physics plant)."},
     {"coverage.explored_frac", "1", "Belief cells ever seen."},
     {"coverage.visible_frac", "1", "Belief cells in view on the last frame."},
     {"coverage.believed_free_frac", "1", "Belief cells read as free."},
@@ -111,25 +107,9 @@ const leaf_meta kVehicle[] = {
     {"formation_parent", "", "The vehicle it holds station on; -1 = none (the anchor)."},
     {"slot_error_mean_m", "m", "Its mean distance from its formation slot."},
     {"formation_arrived", "", "1 when it ended in its formation slot."},
-    {"energy_J", "J", "The energy it drew from its source, net of regeneration (a physics plant)."},
-    {"energy_per_km", "J/km", "energy_J per kilometre of its path."},
-    {"building_contacts", "", "Contacts its body started with static geometry (a physics plant)."},
     {"infeasible_slope_steps", "",
      "Ticks its footprint touched slope steeper than it can climb or cross (a terrain)."},
-    {"rolled_over", "", "1 once it rolled over: tipped past 60 degrees for 1 s (a physics plant)."},
-    {"rolled_over_s", "s", "When it tipped over for good; < 0 = never (a physics plant)."},
-    {"tilt_max_deg", "deg", "The most its body tilted from upright (a physics plant)."},
-    {"ltr_max", "1",
-     "Its largest |lateral load transfer ratio|; 1 = a side lifts (a physics plant)."},
-    {"a_lat_max_g", "g", "Its largest |lateral acceleration| (a physics plant)."},
-    {"steer_sat_share", "1",
-     "Share of ticks nav steered at 95% of its lock or more (a physics plant)."},
 };
-
-bool plant_leaf(const std::string &k) {
-  return k == "rolled_over" || k == "rolled_over_s" || k == "tilt_max_deg" || k == "ltr_max" ||
-         k == "a_lat_max_g" || k == "steer_sat_share";
-}
 
 void describe_leaf(cvc::app &ctx, const std::string &path, const leaf_meta &m) {
   try {
@@ -152,23 +132,51 @@ void describe_leaves(cvc::app &ctx, const std::string &base, const leaf_meta (&t
       describe_leaf(ctx, base + "." + m.key, m);
 }
 
+// The plant ledger's items of a vehicle or the episode (cvc/nav/plant_ledger.h) under `base`:
+// those whose source was tracked, or all of them; kNavStatsNotApplicable where one does not apply.
+template <class R>
+void publish_ledger(cvc::gl::state_publisher &pub, const std::string &base, const R &r, bool all) {
+  using cvc::nav::plant_ledger_item;
+  constexpr bool veh = std::is_same_v<R, cvc::nav::veh_nav_stats>;
+  for (const plant_ledger_item &it :
+       veh ? cvc::nav::plant_ledger_vehicle() : cvc::nav::plant_ledger_episode()) {
+    const bool tracked =
+        it.from == plant_ledger_item::source::energy ? r.energy_tracked : r.plant_tracked;
+    if (!tracked && !all)
+      continue;
+    const std::string path = base + "." + it.key;
+    describe_leaf(pub.ctx(), path, {it.key, it.unit, it.comment});
+    if (!cvc::nav::plant_ledger_applies(it, r)) {
+      pub.publish(path, kNavStatsNotApplicable);
+      continue;
+    }
+    double x = 0.0;
+    if constexpr (veh)
+      x = it.veh(r);
+    else
+      x = it.ep(r);
+    if (it.type == plant_ledger_item::kind::flag)
+      pub.publish(path, b2s(x != 0.0));
+    else if (it.type == plant_ledger_item::kind::count)
+      pub.publish(path, i2s(static_cast<long long>(x)));
+    else
+      pub.publish(path, d2s(x));
+  }
+}
+
 } // namespace
 
 void publish_nav_stats(cvc::gl::state_publisher &pub, const std::string &scenePrefix,
                        const cvc::nav::episode_nav_stats &e, long tick,
                        const nav_stats_publish_params &p) {
   const std::string root = navStatsStatePath(scenePrefix);
-  // Describe the leaves this call writes (each once): the energy ones only when tracked, the
-  // coverage ones only when emitted.
+  // Describe the leaves this call writes (each once): the terrain one only when tracked, the
+  // coverage ones only when emitted (the plant ledger's describe themselves).
   {
-    const bool energy = e.energy_tracked, coverage = p.emit_coverage;
+    const bool coverage = p.emit_coverage;
     for (const leaf_meta &m : kMeta) {
       const std::string k = m.key;
-      if (!energy && (k == "episode.total_energy_J" || k == "episode.total_building_contacts"))
-        continue;
       if (!e.terrain_tracked && k == "episode.total_infeasible_slope_steps")
-        continue;
-      if (!e.plant_tracked && (k == "episode.vehicles_rolled" || k == "episode.first_roll_s"))
         continue;
       if (!coverage && k.compare(0, 9, "coverage.") == 0)
         continue;
@@ -198,16 +206,9 @@ void publish_nav_stats(cvc::gl::state_publisher &pub, const std::string &scenePr
   pub.publish(ep + ".mean_path_ratio", d2s(e.mean_path_ratio));
   pub.publish(ep + ".mean_turn_total_rad", d2s(e.mean_turn_total_rad));
   pub.publish(ep + ".total_fuel", d2s(e.total_fuel));
-  if (e.energy_tracked) { // a physics plant measured them (nav_stats.h energy_tracked)
-    pub.publish(ep + ".total_energy_J", d2s(e.total_energy_J));
-    pub.publish(ep + ".total_building_contacts", i2s(e.total_building_contacts));
-  }
   if (e.terrain_tracked) // a terrain was set (nav_stats.h terrain_tracked)
     pub.publish(ep + ".total_infeasible_slope_steps", i2s(e.total_infeasible_slope_steps));
-  if (e.plant_tracked) { // a physics plant fed the plant ledger (nav_stats.h plant_tracked)
-    pub.publish(ep + ".vehicles_rolled", i2s(e.vehicles_rolled));
-    pub.publish(ep + ".first_roll_s", d2s(e.first_roll_s));
-  }
+  publish_ledger(pub, ep, e, p.emit_plant_ledger); // a physics plant's (plant_ledger.h)
 
   // ── coverage (episode belief-coverage fractions) ──
   if (p.emit_coverage) {
@@ -259,12 +260,7 @@ void publish_nav_stats(cvc::gl::state_publisher &pub, const std::string &scenePr
     const std::string vp = root + ".veh." + std::to_string(v.veh_index);
     for (const leaf_meta &m : kVehicle) {
       const std::string k = m.key;
-      if (!v.energy_tracked &&
-          (k == "energy_J" || k == "energy_per_km" || k == "building_contacts"))
-        continue;
       if (!v.terrain_tracked && k == "infeasible_slope_steps")
-        continue;
-      if (!v.plant_tracked && plant_leaf(k))
         continue;
       describe_leaf(pub.ctx(), vp + "." + k, m);
     }
@@ -280,21 +276,9 @@ void publish_nav_stats(cvc::gl::state_publisher &pub, const std::string &scenePr
     pub.publish(vp + ".formation_parent", i2s(v.formation_parent));
     pub.publish(vp + ".slot_error_mean_m", d2s(v.slot_error_mean_m));
     pub.publish(vp + ".formation_arrived", b2s(v.formation_arrived));
-    if (v.energy_tracked) {
-      pub.publish(vp + ".energy_J", d2s(v.energy_J));
-      pub.publish(vp + ".energy_per_km", d2s(v.energy_per_km));
-      pub.publish(vp + ".building_contacts", i2s(v.building_contacts));
-    }
     if (v.terrain_tracked)
       pub.publish(vp + ".infeasible_slope_steps", i2s(v.infeasible_slope_steps));
-    if (v.plant_tracked) {
-      pub.publish(vp + ".rolled_over", b2s(v.rolled_over));
-      pub.publish(vp + ".rolled_over_s", d2s(v.rolled_over_s));
-      pub.publish(vp + ".tilt_max_deg", d2s(v.tilt_max_deg));
-      pub.publish(vp + ".ltr_max", d2s(v.ltr_max));
-      pub.publish(vp + ".a_lat_max_g", d2s(v.a_lat_max_g));
-      pub.publish(vp + ".steer_sat_share", d2s(v.steer_sat_share));
-    }
+    publish_ledger(pub, vp, v, p.emit_plant_ledger);
   }
 }
 

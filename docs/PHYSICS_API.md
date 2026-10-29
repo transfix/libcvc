@@ -613,6 +613,14 @@ and `first_roll_s`; the scorecard `rollover_rate`. Only on a plant: the kinemati
 unchanged. `planar_sample::roll` (the plant log) now has the sign its comment gives, + left side
 up (it was the right side's), so the two agree.
 
+The sample also carries `vehicle_contact` (`vehicle_contact_step`: the agent whose vehicle it
+touched over the tick), which nav_stats reduces to `vehicle_hits` and `vehicle_hit_s`. The dynamic
+plants (`dyn_bike_plant`, `dyn_4w_plant`) fill the same sample from their models and their chassis
+boxes' contacts, and say in `plant_sample::measured` what their models lack (the single track's
+load transfer, roll rate and wheels off the ground; both plants' contacts without a world). Those
+items are not applicable, and `cvc/nav/plant_ledger.h` lists every item with what it needs, so
+the JSON (null), `publish_nav_stats` ("n/a") and a screen show the whole ledger on any plant.
+
 Gates (`nav_plant_test`, Windows MSVC, the Humvee in nav's trained metric, 1 unit = 20 m):
 
 | Gate | Measured |
