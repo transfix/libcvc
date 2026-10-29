@@ -28,6 +28,7 @@
 #define __CVC_PHYSICS_DYN_WORLD_H__
 
 #include <cstdint>
+#include <cvc/physics/dyn_driver.h>
 #include <cvc/physics/nav_plant.h>
 #include <cvc/physics/world.h>
 #include <set>
@@ -50,6 +51,14 @@ vec3 rotate(const quat &q, const vec3 &v);
 double yaw_of(const quat &q);
 double wrap(double a); // into (-pi, pi]
 
+// The Jolt plant's driver (vehicle.cpp, drive()) for a dynamic model: a step's drive force per unit
+// mass, for nav's acceleration `want` along the heading at speed vx, on a slope whose sine along
+// the heading is `grade` (+ uphill), for a vehicle d whose drive lags drive_lag (s). Substep h (s).
+double drive(dyn_driver &driver, const vehicle_desc &d, double want, double vx, double grade,
+             double gravity, double drive_lag, double h);
+// After the substep (and any contact): the speed it reached, which is what the driver measures.
+void measured(dyn_driver &driver, double vx0, double vx1, double h);
+
 // The chassis boxes of one plant's vehicles in a physics world.
 class dyn_chassis {
 public:
@@ -59,9 +68,10 @@ public:
   dyn_chassis &operator=(const dyn_chassis &) = delete;
 
   // Drop the boxes, then work in `w` (null: no collisions), where `ground` are the bodies the
-  // wheels drive on: touching them is the tires', not a collision. Sets w's contact reporting to
+  // wheels drive on: touching them is the tires', not a collision, and the boxes' surface has this
+  // friction (combined with what they touch by the world's rule). Sets w's contact reporting to
   // every step's (contact_reporting::all), since a chassis pressed against a wall stays in contact.
-  void reset(world *w, std::vector<body_id> ground);
+  void reset(world *w, std::vector<body_id> ground, double friction);
   bool on() const { return _w != nullptr; }
   world *physics() const { return _w; }
 
@@ -81,6 +91,7 @@ public:
 private:
   void clear();
   world *_w = nullptr;
+  material_id _material = 0;
   std::vector<body_id> _boxes;
   std::set<std::uint32_t> _ground;
   std::vector<std::uint8_t> _touched;
