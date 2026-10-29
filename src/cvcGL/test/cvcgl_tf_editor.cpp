@@ -22,8 +22,10 @@
 // (committed every frame, or once on release with interactive_updates: false), pinned endpoints,
 // an outside write cancelling a drag, the zoom strip, double-click add, Delete, the context menu,
 // the colour picker's OK / Cancel, Reset, .vinay export / import, two independent editors,
-// drawing with every overlay published, and a mesher's interval shaded between its bars (read
-// back from the frame's draw list and logged text).
+// drawing with every overlay published, a mesher's interval shaded between its bars, and the
+// readout over empty canvas (the histogram bin lit, its count, spectrum and tree values) (read
+// back from the frame's draw list and logged text). Also tf::simplify_ramp, which thins a sampled
+// colormap to a few colour bars.
 //
 // Pointer targets come from the cvc::tf mapping the widget itself uses, over the canvas rect the
 // widget leaves as ImGui's last item (the zoom strip sits one item spacing above it). The pointer
@@ -938,6 +940,101 @@ void interval_band() {
   chk(vertices_of(band).count == 4, "...and back with them");
 }
 
+// Over empty canvas the bin under the pointer lights up at once; once the pointer settles a
+// readout gives the bin's count and share, the spectrum's values and the tree's components (each
+// while shown), and how to reach the menu. Over a handle, the handle's own tooltip shows instead.
+void hover_readout() {
+  Host h;
+  h.put("ui.tf_a", tf::to_string(kSeed));
+  std::vector<double> bins(10);
+  for (std::size_t i = 0; i < bins.size(); ++i)
+    bins[i] = static_cast<double>(i + 1); // 55 in all
+  h.put("ui.tf_a.range", tf::range_to_string(0.0, 100.0));
+  h.put("ui.tf_a.histogram", tf::histogram_to_string(bins));
+  h.root({editor("tf_a", "ed_a", {{"height", "200"}})});
+  const tf::layout l = h.layout();
+  const tf::view v;
+  const float y = l.canvas_y + 0.5f * l.canvas_h;
+  const ImU32 lit = ImGui::GetColorU32(ImVec4(1.f, 1.f, 1.f, 0.25f));
+  h.log_text = true;
+  // t = 0.35 is value 35: bin 4 of 10 (30 to 40), away from every bar and node.
+  h.move(tf::x_of(l, v, 0.35), y);
+  Quad q = vertices_of(lit);
+  chk(q.count == 4 && close_to(q.x0, tf::x_of(l, v, 0.3), 1.0) &&
+          close_to(q.x1, tf::x_of(l, v, 0.4), 1.0),
+      "the hovered bin lights up at once (x " + std::to_string(q.x0) + ".." + std::to_string(q.x1) +
+          ")");
+  chk(h.text.find("histogram bin") == std::string::npos,
+      "...but the readout waits for the pointer to settle");
+  for (int i = 0; i < 30; ++i)
+    h.frame();
+  chk(h.text.find("histogram bin 4 of 10: 30 to 40") != std::string::npos &&
+          h.text.find("count 4 (7.3%)") != std::string::npos &&
+          h.text.find("Right-click") != std::string::npos,
+      "the readout gives the bin, its count and share, and the menu");
+  chk(h.text.find("area") == std::string::npos && h.text.find("components") == std::string::npos,
+      "...and no spectrum or tree lines while they are off");
+
+  // The spectrum and tree, shown and published: their values at the pointer.
+  tf::spectrum_overlay sp;
+  for (int i = 0; i < 11; ++i) {
+    sp.area.push_back(10.0 * i);
+    sp.min_volume.push_back(i);
+    sp.max_volume.push_back(10.0 - i);
+    sp.gradient.push_back(1.0);
+  }
+  tf::tree_overlay tree;
+  tree.vertices = {{0.5f, 0.0}, {0.5f, 40.0}, {0.2f, 90.0}, {0.8f, 100.0}};
+  tree.edges = {{0, 1}, {1, 2}, {1, 3}};
+  h.put("ui.tf_a.contour_spectrum", tf::spectrum_to_string(sp));
+  h.put("ui.tf_a.contour_tree", tf::tree_to_string(tree));
+  h.put("ui.tree.ed_a.view.contour_spectrum", "1");
+  h.put("ui.tree.ed_a.view.contour_tree", "1");
+  h.move(tf::x_of(l, v, 0.55), y); // about 55 (whole pixels): arcs 40-90 and 40-100 span it
+  h.frame();
+  chk(h.text.find("area 5") != std::string::npos &&
+          h.text.find("max volume 4") != std::string::npos &&
+          h.text.find("components 2") != std::string::npos,
+      "with the spectrum and tree shown, the readout gives their values at the pointer");
+
+  // A handle under the pointer: its tooltip, not the readout, and no lit bin.
+  h.move(tf::x_of(l, v, 0.5), y);
+  for (int i = 0; i < 30; ++i)
+    h.frame();
+  chk(h.text.find("Colour node") != std::string::npos &&
+          h.text.find("histogram bin") == std::string::npos && vertices_of(lit).count == 0,
+      "over a colour bar its own tooltip shows instead");
+  // The histogram hidden: no bin, lit or read.
+  h.put("ui.tree.ed_a.view.histogram", "0");
+  h.move(tf::x_of(l, v, 0.35), y);
+  for (int i = 0; i < 30; ++i)
+    h.frame();
+  chk(vertices_of(lit).count == 0 && h.text.find("value 3") != std::string::npos &&
+          h.text.find("histogram bin") == std::string::npos,
+      "with the histogram hidden the readout gives the value alone");
+  h.log_text = false;
+}
+
+// tf::simplify_ramp: a sampled piecewise-linear ramp comes back as its knots; the cap holds.
+void simplify_ramp_fits() {
+  std::vector<tf::color_node> dense;
+  for (int i = 0; i <= 100; ++i) {
+    const double t = i / 100.0;
+    const float u = static_cast<float>(t < 0.3 ? t / 0.3 : (1.0 - t) / 0.7);
+    dense.push_back({t, u, 1.f - u, 0.5f});
+  }
+  const std::vector<tf::color_node> k = tf::simplify_ramp(dense, 1e-4f, 16);
+  chk(k.size() == 3 && k[0].at == 0.0 && close_to(k[1].at, 0.3, 1e-9) && k[2].at == 1.0,
+      "a sampled ramp with one interior knot thins to its three knots (" +
+          std::to_string(k.size()) + ")");
+  for (auto &n : dense)
+    n.g = static_cast<float>(std::sin(40.0 * n.at)); // nothing a few nodes can follow
+  chk(tf::simplify_ramp(dense, 0.f, 5).size() == 5 && tf::simplify_ramp(dense, 0.f, 0).size() == 2,
+      "the node cap holds (and is at least the two ends)");
+  const std::vector<tf::color_node> two(dense.begin(), dense.begin() + 2);
+  chk(tf::simplify_ramp(two, 0.1f, 9).size() == 2, "two nodes come back as they are");
+}
+
 #endif
 
 } // namespace
@@ -962,6 +1059,8 @@ int main() {
   hidden_label_ids();
   overlays_and_isocontours();
   interval_band();
+  hover_readout();
+  simplify_ramp_fits();
   std::printf("%s\n", failures ? "FAILED" : "PASSED");
   return failures ? 1 : 0;
 #endif

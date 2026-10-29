@@ -17,6 +17,7 @@
 #include <cvc/core/world_clock.h> // clock test: app.world_clock() drive via tick_scene
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/geometry_file_io.h>
+#include <cvc/geometry/mesh_ops.h> // field colours: the colormap a seeded ramp follows
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/LodGraphicsNode.h> // LOD test: RealizeOptions realizes mesh nodes as ladders
@@ -286,6 +287,40 @@ static void test_lab_sources(cvc::app &app) {
             total > 0.0,
         std::string(who) + ": field_colors holds a ramp; its range is the values' (" +
             val(T + ".range") + ") and a 128-bin histogram is published");
+    // Every colormap seeds a few colour bars an editor can grab (at most 12), within 0.02 (about
+    // 5/255) of the colormap everywhere where 12 suffice; turbo, the busiest, within 0.05. Viridis
+    // is the seed; the colormap key resets to the others.
+    std::vector<double> ts(256);
+    for (std::size_t i = 0; i < ts.size(); ++i)
+      ts[i] = double(i) / double(ts.size() - 1);
+    for (const char *name :
+         {"viridis", "magma", "plasma", "inferno", "turbo", "jet", "parula", "gray"}) {
+      cvc::colormap_kind kind = cvc::colormap_kind::VIRIDIS;
+      cvc::colormap_from_string(name, kind);
+      set(cm_key, name);
+      tick();
+      cvc::tf::model cm;
+      const std::vector<unsigned char> want = cvc::colormap_rgb(ts, kind, 0.0, 1.0);
+      float miss = cvc::tf::from_string(val(T), cm) && want.size() == 3 * ts.size() ? 0.f : 1.f;
+      for (std::size_t i = 0; i < ts.size() && miss < 1.f; ++i) {
+        float rgb[3];
+        cm.color_at(ts[i], rgb);
+        for (int c = 0; c < 3; ++c)
+          miss = std::max(miss, std::fabs(rgb[c] - want[3 * i + std::size_t(c)] / 255.f));
+      }
+      chk(cm.color.size() >= 2 && cm.color.size() <= 12 &&
+              (miss <= 0.0201f || (cm.color.size() == 12 && miss <= 0.05f)),
+          std::string(who) + ": the " + name + " ramp is " + std::to_string(cm.color.size()) +
+              " colour nodes, within " + std::to_string(miss) + " of the colormap");
+    }
+    set(cm_key, "viridis");
+    tick();
+    // The contour spectrum / tree are computed for volumes: asked for, the field says why not.
+    set(T + ".overlay_request", "contour_spectrum,contour_tree");
+    tick();
+    chk(val(T + ".overlay_status").find("unavailable: the contour spectrum and contour tree") == 0,
+        std::string(who) +
+            ": a contour spectrum / tree request is answered: " + val(T + ".overlay_status"));
     set(cm_key, "gray");
     tick();
     float c0[3] = {1.f, 1.f, 1.f}, c1[3] = {0.f, 0.f, 0.f};
@@ -309,6 +344,8 @@ static void test_lab_sources(cvc::app &app) {
     chk(node.hasScalarField() && approx(node.scalarRange().first, lo) &&
             approx(node.scalarRange().second, hi),
         std::string(who) + ": the colormap key resets the domain to auto");
+    chk(val(T + ".overlay_status").find("unavailable:") == 0,
+        std::string(who) + ": republishing the range and histogram keeps the note");
   };
   field_colors(cvc::ariadne::resolve_bind("lsrc", "graphics.root.children.mesh.field_colors"),
                mb + ".color.colormap", mb + ".color.min", mb + ".color.max", *mesh, "mesh_lab");

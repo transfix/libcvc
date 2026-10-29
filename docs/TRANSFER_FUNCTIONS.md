@@ -171,9 +171,19 @@ canvas shows), the **canvas**, and optionally the **contour information** table.
 | double-click empty canvas | add an opacity node there |
 | Delete / Backspace (hovered) | delete the selected node (not an endpoint) |
 | right-click | Add ▸ alpha / colour / isocontour · Edit colour… · Use ramp colour · Delete · Display ▸ layers · Presets ▸ · Opacity cubed · Reset · Import / Export .vinay… |
+| hover empty canvas | light the histogram bin under the pointer; once the pointer settles, a readout |
 
 Hovering a node shows its position, its data value and its colour / opacity; hovering an
 isocontour shows its isovalue, the spectrum values there and the number of connected components.
+Hovering empty canvas lights the histogram bin under the pointer at once and, once the pointer
+settles, shows a readout that follows it: the value, the bin's range, count and share of all
+values (while the histogram shows), the spectrum's values and the number of components there
+(while those layers show), and what a double-click and the right-click menu do. The menu's Add
+and Display items explain themselves on hover. Display ▸ Histogram / Contour spectrum / Contour
+tree turn the overlays on and off (section 5).
+
+In the browser the demo page keeps the browser's own context menu off the canvas
+(`examples/web/templates/demo.html.in`), so a right-click reaches the editor.
 
 ### Terminals and other backends
 
@@ -311,7 +321,12 @@ ramp is baked into the table every GeometryNode showing the values maps through
 The opacity curve and isocontours are not used, so the components' editors hide them
 (`show_opacity: false`, `show_isocontours: false`). The node publishes `field_colors.range` and a
 128-bin `field_colors.histogram` of the values beside it. The colormap key (`color.colormap`,
-`fe.view.colormap`) seeds the model and resets it to that colormap's ramp when it changes. See
+`fe.view.colormap`) seeds the model and resets it to that colormap's ramp when it changes: the
+colormap sampled finely and thinned by `cvc::tf::simplify_ramp` to the few colour nodes that
+follow it within 0.02 per channel, at most 12 (viridis takes 9, jet 6; turbo, the busiest, keeps 12
+and stays within 0.05), so the editor shows a handful of bars to grab and move rather than 33.
+The contour spectrum and contour tree are computed for volumes only: an editor that asks for them
+here gets `field_colors.overlay_status` = "unavailable: ... this field is on a mesh". See
 [ARIADNE.md](ARIADNE.md), "Field colours".
 
 **volslice: the TF is fixed in data units, the window is the LUT's span.** `VolSliceNode` samples
