@@ -19,6 +19,7 @@
 #include <cvc/state/state_exec/detail/lock_table.h>
 #include <cvc/state/state_exec/evaluator.h>
 #include <cvc/state/state_exec/exceptions.h>
+#include <cvc/state/state_exec/heap.h>
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/lock_manager.h>
 #include <cvc/state/state_exec/parser.h>
@@ -51,6 +52,18 @@ bool under_sanitizer() {
   const char *v = std::getenv("CVC_LOCKS_SANITIZER");
   return v && *v && std::string(v) != "0";
 }
+
+// A program's closure bound in the scope it captured (a defun, a lambda set at top level) and that
+// scope hold each other, and only the cycle collector frees them
+// (docs/STATE_EXEC_DEVELOPER_GUIDE.md, "Reference cycles"). These tests step the schedulers by
+// hand, so nothing collects; once every world is gone, one collection leaves LeakSanitizer only
+// real leaks to report.
+class collect_cycles_at_exit : public ::testing::Environment {
+public:
+  void TearDown() override { collect_cycles(); }
+};
+[[maybe_unused]] ::testing::Environment *const g_collect_cycles =
+    ::testing::AddGlobalTestEnvironment(new collect_cycles_at_exit);
 
 // One app and one scheduler of the given kind ("sync" or "async"), with one intrinsics context per
 // program. state-watch registers its handler on ctx->pid and takes the watch id from ctx->proc
@@ -1533,8 +1546,11 @@ std::size_t random_ops_regular() {
     return static_cast<std::size_t>(std::strtoull(v, nullptr, 10));
   if (under_sanitizer())
     return 1000;
+  // With every invariant checked after every step, a CI runner does about 25 operations a second
+  // on the default cache (the check walks the trie); 3000 fit its 240 s with room. The deep sizes
+  // are LocksStress's.
 #ifdef NDEBUG
-  return 10000;
+  return 3000;
 #else
   return 2000;
 #endif
@@ -3161,6 +3177,9 @@ struct home_world {
   fake_sched sched;
   std::unique_ptr<detail::lock_home> home; // goes before the processes (protocol 5.7)
   intrinsics_context ctx;                  // build_request reads its chroot and policy only
+  // The keys of the requests made: a request's keys are views into its KEY value (as a lock
+  // frame's are into the frame's), so the values live as long as the world.
+  std::deque<value_t> request_keys;
 
   explicit home_world(std::size_t cache_capacity = 0) : hooks(cache_capacity) {
     home = std::make_unique<detail::lock_home>(mgr, sched);
@@ -3186,7 +3205,7 @@ struct home_world {
         l.emplace_back(k);
       key = make_list(std::move(l));
     }
-    detail::build_request(req, *home, ctx, key, mode);
+    detail::build_request(req, *home, ctx, request_keys.emplace_back(std::move(key)), mode);
     return req;
   }
   detail::enter_result enter(process &p, const std::vector<std::string> &keys, lock_mode mode) {
