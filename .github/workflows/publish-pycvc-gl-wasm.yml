@@ -58,11 +58,25 @@ jobs:
         # present, PLUS pycvc-gl's own (python312 / numpy / vtk / vtk-python cvc.6).
         # cvcpkg build uses this prefix as CVC_DEPS_PREFIX (the hardened flow —
         # find_package(Boost) needs boost + its cmake config present).
+        #
+        # The deps the recipe declares for wasm are read from the recipe itself
+        # (`cvcpkg install-deps`), so this step cannot drift from it again. They used to
+        # be typed out here: #801 made imagemagick a wasm build dep and build-wasm.sh
+        # fail without it, the list never gained it, and the v3.7.1 and v3.7.2 tag runs
+        # died at configure ("found no ImageMagick in .../wasm-deps"). freetype, assimp
+        # and imgui are linked by the closure but not declared, so they stay named here.
+        #
+        # pipefail: the default shell is `bash -e`, so `cvcpkg install ... | tail -3`
+        # took its status from tail and a failed install passed.
         run: |
+          set -o pipefail
           mkdir -p "$WASM_DEPS"
-          for p in zlib bzip2 xz zstd libpng libjpeg-turbo tiff freetype libwebp \
-                   libxml2 lerc assimp imgui boost vtk python312 numpy-cp312 \
-                   vtk-python-cp312 pegtl; do
+          echo "=== install-deps pycvc-gl-cp312 ==="
+          cvcpkg install-deps cvcpkg/recipes/pycvc-gl-cp312 --prefix "$WASM_DEPS" \
+            --platform wasm --arch wasm32 --config release --link static \
+            --no-fallback-to-source \
+            || { echo "::error::failed to install pycvc-gl-cp312's wasm deps"; exit 1; }
+          for p in freetype assimp imgui; do
             echo "=== install $p ==="
             cvcpkg install "$p" --prefix "$WASM_DEPS" \
               --platform wasm --arch wasm32 --config release --link static \
@@ -121,8 +135,19 @@ jobs:
             || { echo "::error::bundle must carry only pycvc-gl-cp312's manifest"; exit 1; }
           grep -q '/_pycvc_gl\.a$' "$RUNNER_TEMP/members.txt" \
             || { echo "::error::bundle has no _pycvc_gl.a"; exit 1; }
-          grep -q '^share/pycvc-gl-wasm/pycvc_host\.wasm$' "$RUNNER_TEMP/members.txt" \
-            || echo "::warning::bundle has no pycvc_host.wasm (host link is non-fatal in build-wasm.sh)"
+          if grep -q '^share/pycvc-gl-wasm/pycvc_host\.wasm$' "$RUNNER_TEMP/members.txt"; then
+            # A host that ships must run. link-host.sh's own node smoke is non-fatal, and
+            # v3.7.2's first build packed a host node could not compile (two libxml2s).
+            node=$(command -v node || ls "$EMSDK_DIR"/node/*/bin/node | head -1)
+            "$node" "$WASM_DEPS/share/pycvc-gl-wasm/pycvc_host.js" > "$RUNNER_TEMP/host-smoke.txt" 2>&1 || true
+            tail -15 "$RUNNER_TEMP/host-smoke.txt"
+            for m in PYCVC_VTK_BRIDGE_OK PYCVC_WASM_OK; do
+              grep -qx "$m" "$RUNNER_TEMP/host-smoke.txt" \
+                || { echo "::error::the bundled pycvc_host does not run under node (no $m)"; exit 1; }
+            done
+          else
+            echo "::warning::bundle has no pycvc_host.wasm (host link is non-fatal in build-wasm.sh)"
+          fi
 
       - name: Upload pycvc_host.wasm
         if: always()
