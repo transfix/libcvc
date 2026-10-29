@@ -1388,10 +1388,14 @@ TEST_F(AppTest, ThreadPoolFloodPastPoolSizeCompletes) {
   ctx.setThreadPoolSize(original_size);
 }
 
-// Wait until the background pool has nothing queued or running (bounded).
+// Wait until the background pool has nothing queued or running (bounded). The two counts take the
+// pool's lock one at a time, so the queue is read first: a task leaves the queue and counts as
+// running under one lock, and stops counting once its body has returned. Read the other way round,
+// a task taken between the two reads was in neither, and the pool looked idle while it ran. (Exact
+// while no task submits another, as here.)
 static bool wait_pool_idle(app &a, int ms = 5000) {
   for (int i = 0; i < ms; i++) {
-    if (a.getActiveThreadCount() == 0 && a.getPendingThreadCount() == 0)
+    if (a.getPendingThreadCount() == 0 && a.getActiveThreadCount() == 0)
       return true;
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
