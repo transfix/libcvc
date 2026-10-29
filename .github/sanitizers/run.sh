@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Runs the suites of ci.yml's `sanitizers` jobs, from the repository root, after the build:
-#   - every executable named in SAN_CXX_TESTS, from build/bin, whole, one process each;
+#   - every executable named in SAN_CXX_TESTS, from build/bin, one process each, without its
+#     Stress suites (locks-deep.yml runs LocksStress and LocksModelStress; ci.yml's STRESS_REGEX
+#     keeps them off the PR lanes too, and under TSan LocksStress alone outlasts run_one's hour);
 #   - every pycvc script named in SAN_PY_TESTS, with the sanitizer runtime the build linked
 #     preloaded into the interpreter, which was not built with it, except those py_skip (below)
 #     names for the sanitizer.
@@ -75,7 +77,7 @@ run_one() { # name command...
 }
 
 for t in $SAN_CXX_TESTS; do
-  run_one "$t" "$bin/$t"
+  run_one "$t" "$bin/$t" --gtest_filter='-*Stress*'
 done
 
 # CPython frees little at exit, so the leak check is off under the interpreter (the C++ suites

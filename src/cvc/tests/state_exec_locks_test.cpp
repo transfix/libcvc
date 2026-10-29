@@ -1546,15 +1546,15 @@ namespace {
 std::size_t random_ops_regular() {
   if (const char *v = std::getenv("CVC_LOCKS_RANDOM_OPS"); v && *v)
     return static_cast<std::size_t>(std::strtoull(v, nullptr, 10));
-  // With every invariant checked after every step, a CI runner does about 25 operations a second
-  // on the default cache (the check walks the trie); 3000 fit its 240 s with room. The deep sizes
-  // are LocksStress's.
+  // Every invariant is checked after every step (the check walks the trie). On a CI runner 3000
+  // operations take 5-13 s in Release, and a Debug build is 25-50 times slower: 2000 took 150-240 s
+  // there, and past ctest's 300 s on a loaded runner. The deep sizes are LocksStress's.
   if (under_sanitizer())
     return 1000;
 #ifdef NDEBUG
   return 3000;
 #else
-  return 2000;
+  return 500;
 #endif
 }
 constexpr std::size_t kRandomOpsStress = 100000;
