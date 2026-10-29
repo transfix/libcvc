@@ -1394,7 +1394,8 @@ and the half-block version, never to blank.
 
 `AriRuntime` ([`AriRuntime.h`](../inc/cvc/gl/ariadne/AriRuntime.h)) collapses all of the
 above into one object, exposed through the `pycvc_gl` bindings. Python never sees SDL or
-VTK directly — cvcGL wraps SDL as the internal input backend and VTK owns the window:
+VTK directly — cvcGL's onscreen window is SDL's (VTK renders into it) and SDL is the internal
+input backend:
 
 ```python
 import pycvc, pycvc_gl
@@ -1541,14 +1542,16 @@ below (G17–G21 in the internal gap report) are tracked for reconciliation.
   memory (stb, ImageMagick `Blob`, assimp `ReadFileFromMemory`); exposing that is a
   planned follow-up.
 - **AriRuntime document-level `on_key` / `on_pointer` residents need a host to feed them.**
-  The `post_key` / `post_pointer` forwarding is wired, and `arigl` feeds it from SDL3:
-  `cvc::gl::SdlInput::attach` wraps the window VTK made (its HWND; in the browser, a hidden
-  canvas of SDL's own, listening for the keys typed into VTK's canvas on the page's window),
-  and VTK keeps every event it had. On X11, Wayland and macOS SDL does not take VTK's window
-  (on X11 its XInput2 selection would take VTK's clicks), so the documents get VTK's own key
-  events, renamed as SDL names them, and no pointer. arigl hands the document neither the keys
-  typed into an ImGui field nor the clicks on a window. A host on AriRuntime's stock loop that
-  does not attach an `SdlInput` gets no key or pointer residents
+  The `post_key` / `post_pointer` forwarding is wired, and `arigl` feeds it from SDL3. On
+  Windows, Linux (X11 and Wayland) and macOS cvcGL's onscreen window is SDL's: SDL makes the
+  window and its OpenGL context, VTK renders into it, and the window's interactor turns SDL's
+  events into VTK's (the camera and ImGui see them as before) and hands the same events to
+  `cvc::gl::SdlInput::attach`, keys and pointer alike. `$CVCGL_SDL_WINDOW=0` keeps VTK's own
+  window; the documents then get VTK's key events, renamed as SDL names them, and no pointer. In
+  the browser VTK's canvas is still the window, and SDL listens on the page for the keys typed
+  into it (a hidden canvas of SDL's own); SDL owning the canvas is the next step. arigl hands the
+  document neither the keys typed into an ImGui field nor the clicks on a window. A host on
+  AriRuntime's stock loop that does not attach an `SdlInput` gets no key or pointer residents
   ([`AriRuntime.h`](../inc/cvc/gl/ariadne/AriRuntime.h), [`SdlInput.h`](../inc/cvc/gl/SdlInput.h)).
 - **OS signals reach `on_signal` only where a host routes them.** `ari` and `arigl` do, in
   both of `arigl`'s modes (§9). `AriRuntime::post_signal` is the seam for other GL hosts;

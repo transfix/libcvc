@@ -1,14 +1,18 @@
 // Clipboard — system copy/paste for cvcGL (see the header for the platform
 // caveats, which are real and not uniform).
 //
-// There is no ImGui platform backend under us (VTK owns the window), so nothing
+// There is no ImGui platform backend under us (the window is cvcGL's), so nothing
 // supplies clipboard callbacks by default except on Windows, where Dear ImGui's
 // core already ships a complete Win32 implementation. This file fills the gap
-// everywhere else.
+// everywhere else: SDL's clipboard under cvcGL's SDL window, and the platform's
+// own under VTK's window.
 
 #include <cstdlib>
 #include <cvc/gl/Clipboard.h>
 #include <string>
+#if defined(CVC_ENABLE_SDL) && !defined(__EMSCRIPTEN__)
+#include <SDL3/SDL.h>
+#endif
 
 #if defined(__EMSCRIPTEN__)
 #include <emscripten.h>
@@ -215,7 +219,17 @@ namespace cvc {
 namespace gl {
 namespace clipboard {
 
+// Under cvcGL's SDL window (SdlWindow.h) SDL's video is up, and its clipboard is the one to use on
+// every desktop platform, Wayland included.
+#if defined(CVC_ENABLE_SDL) && !defined(__EMSCRIPTEN__)
+static bool sdl_clipboard() { return SDL_WasInit(SDL_INIT_VIDEO) != 0; }
+#endif
+
 bool set(const std::string &text) {
+#if defined(CVC_ENABLE_SDL) && !defined(__EMSCRIPTEN__)
+  if (sdl_clipboard())
+    return SDL_SetClipboardText(text.c_str());
+#endif
 #if defined(__EMSCRIPTEN__)
   cvcgl_clip_install();
   cvcgl_clip_write(text.c_str());
@@ -236,6 +250,14 @@ bool set(const std::string &text) {
 }
 
 std::string get() {
+#if defined(CVC_ENABLE_SDL) && !defined(__EMSCRIPTEN__)
+  if (sdl_clipboard()) {
+    char *t = SDL_GetClipboardText();
+    std::string s = t ? t : "";
+    SDL_free(t);
+    return s;
+  }
+#endif
 #if defined(__EMSCRIPTEN__)
   cvcgl_clip_install();
   char *p = cvcgl_clip_read();
