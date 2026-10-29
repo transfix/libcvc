@@ -11,6 +11,8 @@
 #include <vtkRenderWindow.h>
 #include <vtkRenderWindowInteractor.h>
 #ifdef CVC_ENABLE_SDL
+#include "SdlWindow.h" // cvcGL's onscreen window on SDL3, whose events this reads
+
 #include <SDL3/SDL.h>
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
@@ -108,12 +110,6 @@ void on_vtk_key(vtkObject *caller, unsigned long eid, void *keys, void *) {
   static_cast<std::vector<InputEvent> *>(keys)->push_back(std::move(ie));
 }
 
-// $CVC_SDLINPUT_VTK_KEYS set (and not "0"): VTK's keys even where SDL could take the window.
-bool vtk_keys_forced() {
-  const char *v = std::getenv("CVC_SDLINPUT_VTK_KEYS");
-  return v && *v && std::string(v) != "0";
-}
-
 } // namespace
 
 #ifdef CVC_ENABLE_SDL
@@ -127,6 +123,44 @@ InputEvent key_event(const SDL_Event &e) {
   ie.mods = static_cast<unsigned>(e.key.mod);
   ie.repeat = e.key.repeat;
   return ie;
+}
+
+// An SDL key or pointer event as an InputEvent; false for any other event.
+bool to_input(const SDL_Event &e, InputEvent &ie) {
+  switch (e.type) {
+  case SDL_EVENT_KEY_DOWN:
+  case SDL_EVENT_KEY_UP:
+    ie = key_event(e);
+    return true;
+  case SDL_EVENT_MOUSE_MOTION:
+    ie = InputEvent{};
+    ie.kind = InputEvent::Kind::MouseMove;
+    ie.x = e.motion.x;
+    ie.y = e.motion.y;
+    ie.dx = e.motion.xrel;
+    ie.dy = e.motion.yrel;
+    return true;
+  case SDL_EVENT_MOUSE_BUTTON_DOWN:
+  case SDL_EVENT_MOUSE_BUTTON_UP:
+    ie = InputEvent{};
+    ie.kind = (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN) ? InputEvent::Kind::MouseButtonDown
+                                                      : InputEvent::Kind::MouseButtonUp;
+    ie.x = e.button.x;
+    ie.y = e.button.y;
+    ie.button = e.button.button;
+    ie.clicks = e.button.clicks;
+    return true;
+  case SDL_EVENT_MOUSE_WHEEL:
+    ie = InputEvent{};
+    ie.kind = InputEvent::Kind::MouseWheel;
+    ie.x = e.wheel.mouse_x;
+    ie.y = e.wheel.mouse_y;
+    ie.dx = e.wheel.x;
+    ie.dy = e.wheel.y;
+    return true;
+  default:
+    return false; // quit, window, text, gamepad...: the host's (v1 = keyboard + mouse)
+  }
 }
 
 #ifdef __EMSCRIPTEN__
@@ -175,31 +209,33 @@ bool SdlInput::attach(vtkRenderWindow *host) {
     return true;
   if (!host)
     return false;
-#if defined(CVC_ENABLE_SDL) && (defined(_WIN32) || defined(__EMSCRIPTEN__))
-  if (vtk_keys_forced())
-    return attach_vtk_keys(host);
+#ifdef CVC_ENABLE_SDL
+  // cvcGL's own window is SDL's (SdlWindow.h): its interactor drains SDL's queue each frame and
+  // hands every event here too, so this never reads SDL's queue itself.
+  if (SdlGLRenderWindow::SafeDownCast(host)) {
+    auto *iren = SdlRenderWindowInteractor::SafeDownCast(host->GetInteractor());
+    if (!iren)
+      return false;
+    iren->Register(nullptr);
+    sdlWindowInteractor_ = iren;
+    sdlSink_ = iren->addSink([this](const SDL_Event &e) {
+      InputEvent ie;
+      if (to_input(e, ie))
+        keys_.push_back(std::move(ie));
+    });
+    return true;
+  }
+#endif
+#if defined(CVC_ENABLE_SDL) && defined(__EMSCRIPTEN__)
+  // The browser still draws in VTK's canvas: SDL listens on the page for the keys typed into it.
   if (!init())
     return false;
-#ifndef __EMSCRIPTEN__
-  void *native = host->GetGenericWindowId();
-  if (!native)
-    return false; // VTK makes its window at the first render: try again on a later frame
-#endif
   if (!video_) {
-    // SDL's video is here only to wrap the host's window, so it leaves the process as the host made
-    // it, unless the app said otherwise: the screen still sleeps, and the DPI awareness stays.
-    if (!SDL_GetHint(SDL_HINT_VIDEO_ALLOW_SCREENSAVER))
-      SDL_SetHint(SDL_HINT_VIDEO_ALLOW_SCREENSAVER, "1");
-    // SDL 3 still reads SDL_WINDOWS_DPI_AWARENESS, though SDL_hints.h no longer names it; with none
-    // of its values ("permonitorv2", ...) it leaves the process's awareness alone.
-    if (!SDL_GetHint("SDL_WINDOWS_DPI_AWARENESS"))
-      SDL_SetHint("SDL_WINDOWS_DPI_AWARENESS", "");
     if (!SDL_InitSubSystem(SDL_INIT_VIDEO))
       return false;
     video_ = true;
   }
   const SDL_PropertiesID props = SDL_CreateProperties();
-#if defined(__EMSCRIPTEN__)
   // SDL sizes the canvas its window is made on, and zeroes it when the window goes, which would
   // fight VTK over its canvas: so SDL's window is a hidden canvas of its own. Its keyboard stays
   // SDL's default, the browser window, where VTK's canvas's keys bubble up to: SDL first removes
@@ -218,21 +254,13 @@ bool SdlInput::attach(vtkRenderWindow *host) {
                         "#cvcgl-sdl-input");
   SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, 1);
   SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, 1);
-#else
-  // SDL subclasses the window's procedure and passes every message on to VTK's.
-  SDL_SetPointerProperty(props, SDL_PROP_WINDOW_CREATE_WIN32_HWND_POINTER, native);
-#endif
   window_ = SDL_CreateWindowWithProperties(props);
   SDL_DestroyProperties(props);
-#ifdef __EMSCRIPTEN__
   if (window_)
     SDL_SetEventFilter(keep_keys, &keys_);
-#endif
   return window_ != nullptr;
 #else
-  // No SDL window over VTK's here. On X11 SDL would select XInput2 pointer events on it from its
-  // own display connection, and the server then sends the clicks to SDL instead of VTK; on Wayland
-  // SDL makes a window of its own; on macOS VTK hands out an NSView where SDL wraps an NSWindow.
+  // A window VTK made (offscreen-capable builds, $CVCGL_SDL_WINDOW=0, or no SDL): its own keys.
   return attach_vtk_keys(host);
 #endif
 }
@@ -254,10 +282,16 @@ bool SdlInput::attach_vtk_keys(vtkRenderWindow *host) {
   return true;
 }
 
-bool SdlInput::attached() const { return window_ != nullptr || vtkKeys_ != nullptr; }
+bool SdlInput::attached() const {
+  return window_ != nullptr || vtkKeys_ != nullptr || sdlWindowInteractor_ != nullptr;
+}
 
 std::vector<InputEvent> SdlInput::poll() {
   std::vector<InputEvent> out;
+  if (sdlWindowInteractor_) { // the window's interactor drained SDL's queue and handed them over
+    out.swap(keys_);
+    return out;
+  }
 #ifdef CVC_ENABLE_SDL
   if (inited_)
     SDL_PumpEvents(); // the browser's keys reach keys_ through keep_keys as they are pumped
@@ -288,56 +322,31 @@ std::vector<InputEvent> SdlInput::poll() {
     out.swap(keys);
   }
 #ifdef CVC_ENABLE_SDL
-  if (!inited_)
+  // SDL's queue is a cvcGL window's while one is open (its interactor drains it): attach() to the
+  // window for its events. Only without one are the queue's events this source's own.
+  if (!inited_ || SdlGLRenderWindow::openWindows() > 0)
     return out;
   SDL_Event e;
   while (SDL_PollEvent(&e)) {
-    switch (e.type) {
-    case SDL_EVENT_KEY_DOWN:
-    case SDL_EVENT_KEY_UP:
-      out.push_back(key_event(e));
-      break;
-    case SDL_EVENT_MOUSE_MOTION: {
-      InputEvent ie;
-      ie.kind = InputEvent::Kind::MouseMove;
-      ie.x = e.motion.x;
-      ie.y = e.motion.y;
-      ie.dx = e.motion.xrel;
-      ie.dy = e.motion.yrel;
-      out.push_back(ie);
-      break;
-    }
-    case SDL_EVENT_MOUSE_BUTTON_DOWN:
-    case SDL_EVENT_MOUSE_BUTTON_UP: {
-      InputEvent ie;
-      ie.kind = (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN) ? InputEvent::Kind::MouseButtonDown
-                                                        : InputEvent::Kind::MouseButtonUp;
-      ie.x = e.button.x;
-      ie.y = e.button.y;
-      ie.button = e.button.button;
-      ie.clicks = e.button.clicks;
-      out.push_back(ie);
-      break;
-    }
-    case SDL_EVENT_MOUSE_WHEEL: {
-      InputEvent ie;
-      ie.kind = InputEvent::Kind::MouseWheel;
-      ie.x = e.wheel.mouse_x;
-      ie.y = e.wheel.mouse_y;
-      ie.dx = e.wheel.x;
-      ie.dy = e.wheel.y;
-      out.push_back(ie);
-      break;
-    }
-    default:
-      break; // quit / window / text / gamepad-etc. — the host owns those (v1 = keyboard + mouse)
-    }
+    InputEvent ie;
+    if (to_input(e, ie))
+      out.push_back(std::move(ie));
   }
 #endif
   return out;
 }
 
 void SdlInput::shutdown() {
+  keys_.clear(); // what the detached source still held
+#ifdef CVC_ENABLE_SDL
+  if (sdlWindowInteractor_) {
+    auto *iren = static_cast<SdlRenderWindowInteractor *>(sdlWindowInteractor_);
+    iren->removeSink(sdlSink_);
+    iren->UnRegister(nullptr);
+    sdlWindowInteractor_ = nullptr;
+    sdlSink_ = 0;
+  }
+#endif
   if (vtkKeys_) {
     for (const unsigned long tag : vtkKeyTags_)
       vtkKeys_->RemoveObserver(tag);
@@ -352,7 +361,6 @@ void SdlInput::shutdown() {
 #ifdef __EMSCRIPTEN__
     SDL_SetEventFilter(nullptr, nullptr);
 #endif
-    // A wrapped window is the host's: SDL gives its window procedure back and leaves it standing.
     SDL_DestroyWindow(static_cast<SDL_Window *>(window_));
     window_ = nullptr;
   }
