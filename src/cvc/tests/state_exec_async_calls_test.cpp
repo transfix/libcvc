@@ -991,8 +991,8 @@ TEST(AsyncCalls, AS33_TheCountersSurviveASnapshot) {
 // ===========================================================================
 
 // Whether the compiler optimized this build, which is what the default rate is set for. Not
-// NDEBUG: the mesher defines it for every build type. Nor a sanitizer's build, whose steps cost
-// several times more.
+// NDEBUG, which a Debug build can define too (the mesher's did, for all of src/cvc). Nor a
+// sanitizer's build, whose steps cost several times more.
 #if defined(__has_feature)
 #if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
 #define CVC_TEST_SANITIZED 1

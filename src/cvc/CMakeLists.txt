@@ -704,12 +704,15 @@ source_group("Header Files" FILES ${INCLUDE_FILES})
 # Mesher support
 if(CVC_ENABLE_MESHER)
   # TODO: Address duplicate volmagick code (noted 1/9/2014)
+  # libcontour's definitions (its contour.pro) stay on the whole directory: Contour3d's layout
+  # depends on USEDICT, and utility/algorithm.cpp includes it through Mesher/mesher.h. Its NDEBUG,
+  # which it set in every configuration, goes on the mesher's sources only (below): on the
+  # directory it switched off assert() in all of src/cvc and its tests, Debug builds included.
   add_compile_definitions(
     CVC_ENABLE_MESHER
     _BOOL
     SP2
     USEDICT
-    NDEBUG
   )
   list(APPEND CVC_INCLUDE_DIRS
     geometry/cvc-mesher
@@ -795,8 +798,7 @@ if(CVC_ENABLE_MESHER)
       geometry/cvc-mesher/LBIE/LBIEMesherRenderable.h
       geometry/cvc-mesher/Mesher/mesher.h
   )
-  set(SOURCE_FILES
-      ${SOURCE_FILES}
+  set(MESHER_SOURCE_FILES
       geometry/cvc-mesher/contour/squeue.cpp
       geometry/cvc-mesher/contour/rangesweep.cpp
       geometry/cvc-mesher/contour/dirseeds.cpp
@@ -808,7 +810,6 @@ if(CVC_ENABLE_MESHER)
       geometry/cvc-mesher/contour/edgehash.cpp
       geometry/cvc-mesher/contour/regprop2.cpp
       geometry/cvc-mesher/contour/spectrumtest.cpp
-      geometry/cvc-mesher/contour_spectrum_libcontour.cpp # cvc::compute_contour_spectrum_libcontour
       geometry/cvc-mesher/contour/ipqueue.cpp
       geometry/cvc-mesher/contour/seedcells.cpp
       geometry/cvc-mesher/contour/conplot3d.cpp
@@ -861,6 +862,12 @@ if(CVC_ENABLE_MESHER)
       geometry/cvc-mesher/LBIE/octree.cpp
       #geometry/cvc-mesher/Mesher/main.cpp
       geometry/cvc-mesher/Mesher/mesher.cpp
+  )
+  set_property(SOURCE ${MESHER_SOURCE_FILES} APPEND PROPERTY COMPILE_DEFINITIONS NDEBUG)
+  set(SOURCE_FILES
+      ${SOURCE_FILES}
+      ${MESHER_SOURCE_FILES}
+      geometry/cvc-mesher/contour_spectrum_libcontour.cpp # cvc::compute_contour_spectrum_libcontour
   )
 endif(CVC_ENABLE_MESHER)
 
