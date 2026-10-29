@@ -46,6 +46,7 @@
 
 namespace cvc {
 class voxels;
+struct contour_mesh; // cvc/volume/contour_mesh.h
 
 CVC_DEF_EXCEPTION(contour_tree_error);
 
@@ -238,6 +239,53 @@ public:
 
 private:
   contour_tree_simplifier();
+  struct impl;
+  std::unique_ptr<impl> _impl;
+};
+
+// --- on a simplicial mesh (cvc/volume/contour_mesh.h) -----------------------------------------
+//
+// The contour tree of a piecewise-linear field on a mesh: the same algorithm over the graph of the
+// elements' edges (the tetrahedra's when the mesh has any, else the triangles') instead of the
+// grid's stencil, with vertices ordered by (value, point index). A node's `voxel` is its point
+// index and dims is {points, 1, 1}. A point no element uses is left out, and so is a point with a
+// NaN value, with its edges (the field is not defined there). On a grid's own
+// tetrahedra (each cube split into 6 along the (+1,+1,-1) diagonal, points numbered as voxels) it
+// builds exactly compute_contour_tree's tree. A mesh in several pieces gets a tree per piece.
+//
+// The level sets of a field on a domain that is not simply connected (a surface with holes, a
+// solid with a tunnel) form a Reeb graph with loops, which no tree holds. Where the merge finds
+// no leaf it takes the highest remaining vertex as one, so the result is still a tree, but its
+// component counts are only approximate across such a loop.
+//
+// max_dim and quantize_u8 do not apply; progress does. Throws contour_tree_error for a missing
+// mesh, a value count other than the point count, an element naming a point that does not exist,
+// 2^32 or more points, a mesh with neither tetrahedra nor triangles, no edge left without a NaN
+// end, or on cancel. Infinite values order as on a grid. A field constant over the used points
+// yields one node and no arcs.
+contour_tree compute_contour_tree(const contour_mesh &mesh, const contour_tree_options &opt = {});
+
+// compute_contour_tree on a mesh, a slice at a time, like contour_tree_builder (the same phase
+// names). A unit is an element counted or listed, a point checked, a vertex moved by one pass of
+// the sort (a bottom-up merge sort, so it can stop anywhere), a vertex swept plus one per
+// neighbour it looks at, a leaf merged (a forced one also scans the remaining vertices once), and
+// one per vertex, arc or hop of the reduction. A step may run past its budget by one vertex's
+// neighbours. The builder holds the shared mesh until it is done; destroying it mid-way cancels.
+class mesh_contour_tree_builder {
+public:
+  explicit mesh_contour_tree_builder(std::shared_ptr<const contour_mesh> mesh,
+                                     const contour_tree_options &opt = {});
+  ~mesh_contour_tree_builder();
+  mesh_contour_tree_builder(mesh_contour_tree_builder &&) noexcept;
+  mesh_contour_tree_builder &operator=(mesh_contour_tree_builder &&) noexcept;
+
+  bool step(std::size_t budget);
+  bool done() const;
+  double progress() const;
+  const char *phase() const;
+  contour_tree take();
+
+private:
   struct impl;
   std::unique_ptr<impl> _impl;
 };

@@ -16,8 +16,10 @@
 #include <cmath>
 #include <cstddef>
 #include <cstring>
+#include <cvc/geometry/geometry.h>
 #include <cvc/state/state.h>
 #include <cvc/tf/overlays.h>
+#include <cvc/volume/contour_mesh.h>
 #include <cvc/volume/contour_spectrum.h>
 #include <cvc/volume/contour_tree.h>
 #include <cvc/volume/volume.h>
@@ -426,6 +428,8 @@ struct overlay_job::impl {
   std::optional<volume> vol;
   data_type type = Undefined;
   uint64 n = 0;
+  // Or a field on a mesh: its values stand in for the voxels (one double each).
+  std::shared_ptr<const contour_mesh> mesh;
 
   std::atomic<bool> cancel_flag{false};
   std::size_t piece = kBuilderPiece; // step_builder's piece (unbounded when running to the end)
@@ -448,12 +452,15 @@ struct overlay_job::impl {
 
   std::optional<contour_spectrum_builder> spectrum;
   std::optional<contour_tree_builder> tree;
+  std::optional<mesh_contour_spectrum_builder> mspectrum;
+  std::optional<mesh_contour_tree_builder> mtree;
   std::optional<contour_tree_simplifier> simplifier;
   contour_tree built;
 
   // progress(): each phase weighted by its expected cost, in voxel-scan units
   double w_range = 0.0, w_hist = 0.0, w_spec = 0.0, w_tree = 0.0, w_total = 0.0;
   double w_done = 0.0; // the weight of the phases behind us
+  bool from_mesh = false; // made on a mesh (kept after the mesh is let go of)
   mutable double last_progress = 0.0;
 
   const volume &cvol() const { return *vol; } // const access: the non-const operator* would COW
@@ -483,10 +490,37 @@ struct overlay_job::impl {
     w_total = w_range + w_hist + w_spec + w_tree;
   }
 
+  impl(std::shared_ptr<const contour_mesh> field, unsigned b, const overlay_options &o)
+      : bits(b & overlay_all), opt(o), mesh(std::move(field)), from_mesh(true) {
+    if (!mesh || !mesh->mesh || mesh->values.empty()) {
+      note_unavailable(ov.status, "the mesh has no values");
+      mesh.reset();
+      return;
+    }
+    type = Double;
+    n = mesh->values.size();
+    st = stage::range;
+    // A value scanned is ~1 unit; a tetrahedron integrated ~40 plus its samples (a triangle ~20),
+    // a vertex of the tree ~20 (its sort, sweeps and merge).
+    const geometry &g = *mesh->mesh;
+    const double elements = !g.const_tets().empty() ? 40.0 * double(g.const_tets().size())
+                                                    : 20.0 * double(g.const_tris().size());
+    w_range = opt.has_range ? 1.0 : static_cast<double>(n);
+    w_hist = (bits & overlay_histogram) ? static_cast<double>(n) : 0.0;
+    w_spec = (bits & overlay_contour_spectrum) ? elements : 0.0;
+    w_tree = (bits & overlay_contour_tree) ? 20.0 * static_cast<double>(n) : 0.0;
+    w_total = w_range + w_hist + w_spec + w_tree;
+  }
+
+  const double *values() const { return mesh ? mesh->values.data() : nullptr; }
+
   // Let go of everything that holds voxels or working memory.
   void release() {
     spectrum.reset();
     tree.reset();
+    mspectrum.reset();
+    mtree.reset();
+    mesh.reset();
     simplifier.reset();
     built = contour_tree();
     bins = std::vector<double>();
@@ -555,6 +589,18 @@ struct overlay_job::impl {
   std::size_t do_range(std::size_t left) {
     if (!range_started) {
       range_started = true;
+      if (opt.has_range) {
+        lo = std::min(opt.range_lo, opt.range_hi);
+        hi = std::max(opt.range_lo, opt.range_hi);
+        return end_range(left);
+      }
+      if (from_mesh) { // the finite values' extrema, a slice at a time
+        dlo = HUGE_VAL;
+        dhi = -HUGE_VAL;
+        range_scans = true;
+        pos = 0;
+        return left;
+      }
       // vol.min()/vol.max() on a shallow copy: the set values when both were set on `vol` (the copy
       // takes them only then), else what calcMinMax would compute -- a scan of every voxel, which
       // runs here a slice at a time instead of in one call.
@@ -579,6 +625,22 @@ struct overlay_job::impl {
       range_scans = true;
       pos = 0;
     }
+    if (from_mesh) {
+      const uint64 chunk = std::min<uint64>(left, n - pos);
+      const double *v = values();
+      for (uint64 i = pos; i < pos + chunk; ++i)
+        if (std::isfinite(v[i])) {
+          dlo = std::min(dlo, v[i]);
+          dhi = std::max(dhi, v[i]);
+        }
+      pos += chunk;
+      left -= static_cast<std::size_t>(chunk);
+      if (pos < n)
+        return left;
+      lo = dlo;
+      hi = dhi;
+      return end_range(left);
+    }
     const unsigned char *raw = *cvol();
     const uint64 chunk = std::min<uint64>(left, n - pos);
     if (type == UInt64)
@@ -602,7 +664,8 @@ struct overlay_job::impl {
 
   std::size_t end_range(std::size_t left) {
     if (!std::isfinite(lo) || !std::isfinite(hi)) {
-      note_unavailable(ov.status, "the volume's value range is not finite");
+      note_unavailable(ov.status, from_mesh ? "the field has no finite value"
+                                            : "the volume's value range is not finite");
       finish();
       return left;
     }
@@ -621,7 +684,7 @@ struct overlay_job::impl {
         bins[bins.size() / 2] = static_cast<double>(n);
         return end_histogram(left);
       }
-      if (!*cvol()) {
+      if (!from_mesh && !*cvol()) {
         bins.clear();
         note_unavailable(ov.status, "histogram: no voxel data");
         next_after(stage::histogram);
@@ -630,7 +693,10 @@ struct overlay_job::impl {
       pos = 0;
     }
     const uint64 chunk = std::min<uint64>(left, n - pos);
-    with_typed(type, *cvol(), [&](auto p) { bin_values(p, pos, pos + chunk, lo, hi, bins); });
+    if (from_mesh)
+      bin_values(values(), pos, pos + chunk, lo, hi, bins);
+    else
+      with_typed(type, *cvol(), [&](auto p) { bin_values(p, pos, pos + chunk, lo, hi, bins); });
     pos += chunk;
     left -= static_cast<std::size_t>(chunk);
     return pos < n ? left : end_histogram(left);
@@ -644,6 +710,8 @@ struct overlay_job::impl {
   }
 
   std::size_t do_spectrum(std::size_t left) {
+    if (from_mesh)
+      return do_mesh_spectrum(left);
     try {
       if (!spectrum) {
         contour_spectrum_options so;
@@ -677,6 +745,39 @@ struct overlay_job::impl {
     }
   }
 
+  std::size_t do_mesh_spectrum(std::size_t left) {
+    try {
+      if (!mspectrum) {
+        contour_spectrum_options so;
+        so.samples = static_cast<std::size_t>(std::max(opt.spectrum_samples, 2));
+        so.has_domain = true; // aligned with the range and histogram, as on a volume
+        so.domain_min = lo;
+        so.domain_max = hi;
+        mspectrum.emplace(mesh, so);
+        if (!(bits & overlay_contour_tree))
+          mesh.reset(); // the builder holds it
+      }
+      const uint64 before = mspectrum->work_done();
+      if (!mspectrum->step(left))
+        return 0;
+      const uint64 used = mspectrum->work_done() - before;
+      contour_spectrum cs = mspectrum->take();
+      mspectrum.reset();
+      ov.spectrum.area = std::move(cs.surface_area);
+      ov.spectrum.min_volume = std::move(cs.min_volume);
+      ov.spectrum.max_volume = std::move(cs.max_volume);
+      ov.spectrum.gradient = std::move(cs.gradient);
+      next_after(stage::spectrum);
+      return used >= left ? 0 : left - static_cast<std::size_t>(used);
+    } catch (const std::exception &e) {
+      mspectrum.reset();
+      ov.spectrum = spectrum_overlay();
+      note_unavailable(ov.status, "contour spectrum: " + reason(e));
+      next_after(stage::spectrum);
+      return 0;
+    }
+  }
+
   // Step a tree builder or simplifier with up to `left` units (`left` keeps what is not used), in
   // pieces of at most `piece` units, stopping after the piece in which its phase changes: a
   // vertex swept costs a few hundred times a key sorted, so a budget sized for one phase must not
@@ -698,6 +799,7 @@ struct overlay_job::impl {
 
   void tree_failed(const std::exception &e) {
     tree.reset();
+    mtree.reset();
     simplifier.reset();
     built = contour_tree();
     ov.tree = tree_overlay();
@@ -708,16 +810,27 @@ struct overlay_job::impl {
   std::size_t do_tree(std::size_t left) {
     try {
       if (st == stage::tree_build) {
-        if (!tree) {
-          contour_tree_options to;
-          to.max_dim = max_dim;
-          tree.emplace(cvol(), to);
-          vol.reset(); // the builder has its own copy
+        if (from_mesh) {
+          if (!mtree) {
+            mtree.emplace(mesh, contour_tree_options());
+            mesh.reset(); // the builder holds it
+          }
+          if (!step_builder(*mtree, left))
+            return left;
+          built = mtree->take();
+          mtree.reset();
+        } else {
+          if (!tree) {
+            contour_tree_options to;
+            to.max_dim = max_dim;
+            tree.emplace(cvol(), to);
+            vol.reset(); // the builder has its own copy
+          }
+          if (!step_builder(*tree, left))
+            return left;
+          built = tree->take();
+          tree.reset();
         }
-        if (!step_builder(*tree, left))
-          return left;
-        built = tree->take();
-        tree.reset();
         const std::size_t cap = static_cast<std::size_t>(std::max(opt.tree_max_nodes, 0));
         if (cap > 0 && built.nodes.size() > cap) {
           simplifier.emplace(contour_tree_simplifier::to_nodes(std::move(built), cap));
@@ -738,7 +851,8 @@ struct overlay_job::impl {
       }
       // tree_layout: one-shot, O(nodes) of the (simplified) tree
       if (built.empty()) {
-        note_unavailable(ov.status, "contour tree: the volume is constant");
+        note_unavailable(ov.status, from_mesh ? "contour tree: the field is constant"
+                                              : "contour tree: the volume is constant");
       } else {
         const std::vector<float> xs = layout_contour_tree(built);
         tree_overlay t;
@@ -806,8 +920,13 @@ struct overlay_job::impl {
     case stage::histogram:
       return kPhaseHistogram;
     case stage::spectrum:
+      if (from_mesh)
+        return full_phase(kSpectrumPhases, mspectrum ? mspectrum->phase() : "integrating",
+                          kPhaseSpectrum);
       return full_phase(kSpectrumPhases, spectrum ? spectrum->phase() : "domain", kPhaseSpectrum);
     case stage::tree_build:
+      if (from_mesh)
+        return full_phase(kTreePhases, mtree ? mtree->phase() : "preparing", kPhaseTree);
       return full_phase(kTreePhases, tree ? tree->phase() : "preparing", kPhaseTree);
     case stage::tree_simplify:
       return kPhaseSimplify;
@@ -827,9 +946,9 @@ struct overlay_job::impl {
     case stage::histogram:
       return hist_started && n > 0 ? static_cast<double>(pos) / static_cast<double>(n) : 0.0;
     case stage::spectrum:
-      return spectrum ? spectrum->progress() : 0.0;
+      return spectrum ? spectrum->progress() : mspectrum ? mspectrum->progress() : 0.0;
     case stage::tree_build:
-      return tree ? 0.9 * tree->progress() : 0.0;
+      return tree ? 0.9 * tree->progress() : mtree ? 0.9 * mtree->progress() : 0.0;
     case stage::tree_simplify:
       return 0.9 + 0.1 * (simplifier ? simplifier->progress() : 0.0);
     case stage::tree_layout:
@@ -861,6 +980,12 @@ struct overlay_job::impl {
 
 overlay_job::overlay_job(const volume &vol, unsigned bits, const overlay_options &opt)
     : _impl(new impl(vol, bits, opt)) {
+  g_jobs.fetch_add(1, std::memory_order_relaxed);
+}
+
+overlay_job::overlay_job(std::shared_ptr<const contour_mesh> mesh, unsigned bits,
+                         const overlay_options &opt)
+    : _impl(new impl(std::move(mesh), bits, opt)) {
   g_jobs.fetch_add(1, std::memory_order_relaxed);
 }
 
@@ -936,6 +1061,25 @@ overlays overlay_job::take() {
 overlays compute_overlays(const volume &vol, unsigned bits, const overlay_options &opt) {
   try {
     overlay_job job(vol, bits, opt);
+    job.step(0);
+    return job.take();
+  } catch (const std::exception &e) {
+    overlays ov;
+    note_unavailable(ov.status, reason(e));
+    return ov;
+  } catch (...) {
+    overlays ov;
+    note_unavailable(ov.status, "an unknown error");
+    return ov;
+  }
+}
+
+overlays compute_overlays(const contour_mesh &mesh, unsigned bits, const overlay_options &opt) {
+  try {
+    // Borrowed for the call: an aliasing pointer that owns nothing.
+    overlay_job job(
+        std::shared_ptr<const contour_mesh>(std::shared_ptr<const contour_mesh>(), &mesh), bits,
+        opt);
     job.step(0);
     return job.take();
   } catch (const std::exception &e) {

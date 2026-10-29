@@ -904,9 +904,9 @@ void context_menu(session &s, tf::model &m, tf::view &v, bool &model_edit, bool 
         "how many values fall in each bin of the data range; hover the canvas for a bin's count",
         "bin heights as log(1 + count), so sparse bins still show",
         "the level sets' area (red), min volume (green), max volume (blue) and gradient (yellow)\n"
-        "across the data range; computed for volumes",
+        "across the data range (on a surface: the contours' length and the areas)",
         "how the level sets split and merge across the data range; hover the canvas for the\n"
-        "components at a value; computed for volumes",
+        "components at a value",
         "a table of each isocontour's isovalue, spectrum values and components"};
     for (std::size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) {
       if (ImGui::MenuItem(names[i], nullptr, toggles[i]))

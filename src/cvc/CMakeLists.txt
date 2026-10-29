@@ -136,6 +136,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/model/model.h
   ../../inc/cvc/model/model_file_io.h
   ../../inc/cvc/volume/volume_ops.h
+  ../../inc/cvc/volume/contour_mesh.h
   ../../inc/cvc/volume/contour_tree.h
   ../../inc/cvc/volume/contour_spectrum.h
   ../../inc/cvc/tf/model.h
@@ -342,6 +343,7 @@ set(SOURCE_FILES
   volume/volume_ops.cpp
   volume/contour_tree.cpp
   volume/contour_spectrum.cpp
+  volume/mesh_contour_tree.cpp
   tf/model.cpp
   tf/vinay.cpp
   tf/overlays.cpp

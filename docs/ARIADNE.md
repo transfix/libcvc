@@ -635,7 +635,11 @@ explicit domain in the model is the range the values are coloured over (in fe_la
 `view.fixed_range`). Beside it the node publishes `field_colors.range` (the colours' span under
 an `auto` domain) and `field_colors.histogram` (128 bins of the values over it; fe_lab's is the
 whole solution in the field view, the shown elements' size or quality in the elements view): the
-editor's axis and histogram.
+editor's axis and histogram. When an editor shows the contour spectrum or contour tree, the node
+computes them on the values' own mesh (fe_lab's tetrahedra, mesh_lab's surface) in an overlay task
+on the state_exec scheduler and publishes `field_colors.contour_spectrum` / `.contour_tree`; fe_lab's
+elements view has neither (one value per element), which `field_colors.overlay_status` says. See
+[`TRANSFER_FUNCTIONS.md`](TRANSFER_FUNCTIONS.md) §5-6.
 
 `curvature` switches a non-curvature `color.mode` to `mean` (or recomputes the one shown).
 A geodesic solver is cached per mesh version, so moving the source is two
