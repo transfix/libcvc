@@ -206,7 +206,11 @@ TEST_F(TfOverlayTasks, CooperativeTaskSlicesAcrossFramesAndMatchesCompute) {
   ASSERT_GE(log.notes.size(), 3u);
   bool saw_spectrum = false, saw_tree = false;
   for (const std::string &n : log.notes) {
-    EXPECT_NE(n.find('%'), std::string::npos) << n;
+    // Laying out the contour tree is one step, so its note has no percentage (as
+    // TfOverlaysVolume.JobSlicesEveryPhaseAndReportsProgress expects), and a frame only sometimes
+    // catches it.
+    if (n.rfind("contour tree: laying out", 0) != 0)
+      EXPECT_NE(n.find('%'), std::string::npos) << n;
     saw_spectrum = saw_spectrum || n.find("contour spectrum") != std::string::npos;
     saw_tree = saw_tree || n.find("contour tree") != std::string::npos;
   }
