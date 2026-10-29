@@ -248,16 +248,13 @@ counts, both copied and replayed:
 | `l2` | 121, 120 | 2,587, 3,624 | 42,075, 63,798 |
 | `noinh1` | 121, 120 | 2,323, 3,360 | 33,297, 55,020 |
 
-**`explore.py` under-counts `l2`.** It deduplicates states on `hash(World.key())`, and in CPython
-`hash(-1) == hash(-2)`, so two states that differ only in a priority of -1 against -2 collide, and
-the one found second is never explored. `l2`'s `set-priority` values include both: `explore.py`
-reports 113, 2,383 and 37,647 states at bounds 1-3 (29,573 for `noinh1` at 3), and fewer
-transitions past bound 1, since it never expands the states it skipped. The counts above are
-`explore.py`'s with states deduplicated on `World.key()` itself, which match the port exactly; set
-`explore.hash = lambda k: k` before calling `explore.explore` to reproduce them. Of the
-other configurations only `priority` (`set-priority` over -2..2) can give a process -1 in one state
-and -2 in another that is otherwise the same, so it may have skipped states too;
-`explore_scripts.py` deduplicates the same way. The other counts above are the same either way.
+**`explore.py` used to under-count `l2`.** It deduplicated states on `hash(World.key())`, and in
+CPython `hash(-1) == hash(-2)`, so two states that differed only in a priority of -1 against -2
+collided, and the one found second was never explored: 113, 2,383 and 37,647 states at bounds
+1-3 for `l2`, and 18,929 instead of 20,610 for `priority` at 3. Both explorers now deduplicate on
+`explore.state_id`, a 128-bit digest of the key's `repr` (the keys themselves would multiply the
+bound-5 runs' memory), and give the counts above, which match the port exactly; `priority` at 3
+finds no violation in the states it used to skip. The other counts above are the same either way.
 
 At bound 4, `l1` with `world.py`'s cache has 324,347 states and 586,802 transitions in both. With
 the implementation's pinned cache the counts differ (`l1` at bound 3: 26,744 states and `l1x`
