@@ -2403,6 +2403,31 @@ TEST_F(CvcCliTest, PhTrainContinuesAModelWithItsOwnScales) {
   EXPECT_EQ(back.twist_scale, m.twist_scale);
 }
 
+// --steer-modulates fits steering as a modulation of D and G: one port (the drive), one
+// modulation, a cvc-ph-se2/2 file. Continuing that model without the flag is refused.
+TEST_F(CvcCliTest, PhTrainFitsSteeringAsAModulation) {
+  const fs::path run = fs::path(test_dir) / "run";
+  write_plant_log_run(run);
+  const std::string out = path("modulated.json");
+  const std::string common =
+      " --steps 10 --window-points 21 --window-stride 20 --features 8 --threads 1";
+  auto r = cvc("ph-train --runs \"" + run.string() + "\" --out \"" + out + "\" --steer-modulates" +
+               common);
+  ASSERT_EQ(0, r.exit_code) << r.output;
+  const cvc::ph::se2_model m = cvc::ph::se2_model::load(out);
+  EXPECT_EQ(m.setup.control_dim, 1);
+  EXPECT_EQ(m.setup.modulation_dim, 1);
+  EXPECT_EQ(m.control_scale.size(), 2u);
+  bool modulation = false;
+  for (const auto &kv : m.provenance)
+    modulation |= kv.first == "steering" && kv.second == "modulation";
+  EXPECT_TRUE(modulation);
+  auto again = cvc("ph-train --runs \"" + run.string() + "\" --out \"" + path("again.json") +
+                   "\" --init \"" + out + "\"" + common);
+  EXPECT_NE(0, again.exit_code);
+  EXPECT_FALSE(fs::exists(path("again.json")));
+}
+
 TEST_F(CvcCliTest, PhTrainRefusesADirectoryThatIsNotAPlantLog) {
   fs::create_directories(path("empty"));
   auto r = cvc("ph-train --runs \"" + path("empty") + "\" --out \"" + path("m.json") + "\"");

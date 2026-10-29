@@ -41,6 +41,7 @@ struct dyn4_si {
   double damper_front = 0.0; // N s/m per corner; 0 = critical
   double damper_rear = 0.0;
   double min_wheel_load = 0.02; // the load floor's width, of m g
+  bool grade_force = false;     // gravity along the ground acts on the body (opt-in)
 };
 
 inline diff::dyn4_params dyn4_params_of(const dyn4_si &si, const world_units::normalized_frame &f,
@@ -77,6 +78,7 @@ inline diff::dyn4_params dyn4_params_of(const dyn4_si &si, const world_units::no
   p.c_f = static_cast<float>(si.damper_front);
   p.c_r = static_cast<float>(si.damper_rear);
   p.fz_min = static_cast<float>(si.min_wheel_load);
+  p.grade_force = si.grade_force ? 1 : 0;
   return p;
 }
 

@@ -1928,8 +1928,10 @@ def _typed_node(sg, name):
 // NameError the moment a viewport was added. (See the %pythonappend note above.)
 // The MANAGER keeps the added scene: it holds it by pointer for its whole life. On
 // the returned Viewport proxy, the scene died with that proxy, under the manager.
+// A tuple, not a list: the collector can empty a list and free the scenes under the
+// manager; a tuple it never clears (see pycvc._keepalive).
 %pythonappend cvc::gl::ViewportManager::addSceneViewport %{
-    self.__dict__.setdefault("_pycvc_scenes", []).append(pycvc._keepalive(scene))
+    self._pycvc_scenes = self.__dict__.get("_pycvc_scenes", ()) + (pycvc._keepalive(scene),)
     if val is not None:
         val._pycvc_keepalive = self
 %}
