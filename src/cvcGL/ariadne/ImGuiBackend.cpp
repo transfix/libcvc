@@ -667,13 +667,13 @@ ariadne::BoolEdit ImGuiBackend::checkbox(const char *label, bool current) {
 }
 
 #ifdef CVC_ENABLE_IMGUI
-// Keep a slider/int widget's TRAILING label from clipping in a narrow window. ImGui lays a labeled
-// widget out as [frame of CalcItemWidth()][ItemInnerSpacing][label]; the default item width (~65%
-// of the content region) leaves only the remainder for the label, so a long label ("Bake interval
-// (frames)") runs past the right edge of a slim panel. When that would happen, shrink JUST the next
-// item so [frame][spacing][label] fits the content region — floored so the frame stays grabbable.
-// When the label already fits at the default width (a roomy panel / short label), ImGui's default
-// is left untouched, so this never narrows a slider that was fine.
+// Keep a slider / input / combo / colour widget's TRAILING label from clipping in a narrow window.
+// ImGui lays a labeled widget out as [frame of CalcItemWidth()][ItemInnerSpacing][label]; the
+// default item width (~65% of the content region) leaves only the remainder for the label, so a
+// long label ("Bake interval (frames)") runs past the right edge of a slim panel. When that would
+// happen, shrink JUST the next item so [frame][spacing][label] fits the content region — floored so
+// the frame stays grabbable. When the label already fits at the default width (a roomy panel /
+// short label), ImGui's default is left untouched, so this never narrows a slider that was fine.
 //
 // In a table cell the widget always fills the cell instead. The default (~65% of the cell) feeds
 // back into an auto-width column, which ImGui re-fits to its content each frame: the column shrank
@@ -737,6 +737,7 @@ ariadne::IndexEdit ImGuiBackend::combo(const char *label, int current_index,
 #ifdef CVC_ENABLE_IMGUI
   const int idx =
       (current_index >= 0 && current_index < static_cast<int>(options.size())) ? current_index : 0;
+  reserve_label_width(label);
   if (ImGui::BeginCombo(label, options[idx].c_str())) {
     for (std::size_t i = 0; i < options.size(); ++i) {
       const bool sel = (static_cast<int>(i) == idx);
@@ -788,6 +789,7 @@ ariadne::ColorEdit ImGuiBackend::color(const char *label, const float rgb[3]) {
   e.rgb[2] = rgb[2];
 #ifdef CVC_ENABLE_IMGUI
   e.drawn = true;
+  reserve_label_width(label);
   // ColorEdit3 edits e.rgb in place and returns true on any change this frame. Commit immediately
   // (like a discrete widget) — the core writes each change, so the picker reads its own value back
   // next frame with no per-widget edit cache (a colour edit is infrequent, not a continuous drag).

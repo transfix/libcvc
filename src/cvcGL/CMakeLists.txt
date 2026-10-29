@@ -852,6 +852,11 @@ add_test(NAME cvcgl_imgui_table_columns COMMAND cvcgl_imgui_table_columns)
 add_executable(cvcgl_imgui_grid_slider test/cvcgl_imgui_grid_slider.cpp)
 target_link_libraries(cvcgl_imgui_grid_slider PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_grid_slider COMMAND cvcgl_imgui_grid_slider)
+# A window closed with its X comes back from the built-in Windows menu (§5.9), clicked through
+# ImGui's own input, and takes a place among the others again. No window, no GL.
+add_executable(cvcgl_imgui_windows_menu test/cvcgl_imgui_windows_menu.cpp)
+target_link_libraries(cvcgl_imgui_windows_menu PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_windows_menu COMMAND cvcgl_imgui_windows_menu)
 
 # The tf_editor transfer-function widget (ImGuiBackend::tf_editor) on a bare ImGui context, driven
 # by synthesized mouse input: drags, adds, deletes, the zoom strip, the context menu, commits.
