@@ -6,7 +6,10 @@ on:
   pull_request:
     branches: [ main, master, develop, 'perf/**' ]
   push:
-    branches: [ main, master ]
+    # ci/full/**: a branch pushed there gets master's push run, heavy suites included, which
+    # pull_request runs skip. For proving a change to those suites, or to how they run, before
+    # it merges.
+    branches: [ main, master, 'ci/full/**' ]
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+*'
 
@@ -979,17 +982,22 @@ jobs:
           echo "Line coverage ${pct}% meets the ${COVERAGE_MIN}% gate."
 
   # ──────────────────────────── macOS packaging ────────────────────────────
-  # ── pycvc, built and tested on every PR ──
+  # ── pycvc and pycvc_gl, built and tested on every PR ──
   # The libcvc recipe builds with CVC_BUILD_PYCVC=OFF (the C++ SDK carries no
   # Python, numpy or SWIG), and the pycvc-cp3XX recipes are built only by
   # publish-cvcpkg.yml at release time, with no test step. So until this job,
   # the bindings were compiled by no PR and the test_pycvc_*.py scripts that
   # bindings/pycvc/CMakeLists.txt registers with ctest ran nowhere in CI: a
   # binding that no longer compiled, or a Python value that drifted from C++,
-  # first showed at release (or never). One interpreter column (cp312), the core
-  # module (no cvcGL/VTK), Release. Everything comes from cvcpkg: the libcvc
-  # deps closure (Jolt included), and python312 + numpy-cp312 + swig, the
-  # pycvc-cp312 recipe's own build deps.
+  # first showed at release (or never). One interpreter column (cp312), Release.
+  # Everything comes from cvcpkg: the libcvc deps closure (Jolt included), and
+  # python312 + numpy-cp312 + swig, the pycvc-cp312 recipe's own build deps.
+  #
+  # It builds cvcGL and the pycvc_gl module too, and runs the pycvc_gl tests on
+  # Mesa's llvmpipe under Xvfb. Before that, no CI job built pycvc_gl at all:
+  # those tests ran only in local Windows builds. The module is built without the
+  # VTK-Python bridge (CVC_PYCVCGL_VTK_BRIDGE=OFF), so pycvc_vtk skips its
+  # vtkmodules round trip.
   pycvc-linux:
     runs-on: ubuntu-latest
     name: pycvc-linux / cp312
@@ -1021,6 +1029,20 @@ jobs:
           "$py_prefix/bin/swig" -version | head -3
           echo "PY_PREFIX=$py_prefix" >> "$GITHUB_ENV"
 
+      # cvcGL needs VTK, and xorgproto for the FindX11 that its find_package(VTK)
+      # re-runs; imgui makes ImGuiOverlay real rather than an inert stub. See the
+      # VTK step in package-linux.
+      - name: Install VTK and imgui for cvcGL (cvcpkg)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${{ steps.libcvc-deps.outputs.path }}" ]; then
+            deps="${{ steps.libcvc-deps.outputs.path }}"
+          else
+            deps="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
+          fi
+          cvcpkg install vtk xorgproto imgui --prefix "$deps" --config release --link shared
+
       - name: Configure
         shell: bash
         run: |
@@ -1040,29 +1062,90 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_PREFIX_PATH="$deps;$PY_PREFIX" \
             -DCVC_BUILD_TESTS=ON \
-            -DCVC_BUILD_CVCGL=OFF \
+            -DCVC_BUILD_CVCGL=ON \
             -DCVC_ENABLE_CUDA=OFF \
             -DCVC_BUILD_PYCVC=ON \
-            -DCVC_BUILD_PYCVC_GL=OFF \
+            -DCVC_BUILD_PYCVC_GL=ON \
+            -DCVC_PYCVCGL_VTK_BRIDGE=OFF \
             -DPython3_EXECUTABLE="$PY_PREFIX/bin/python3.12" \
             -DSWIG_EXECUTABLE="$PY_PREFIX/bin/swig"
 
-      # The module, and the C++ reference test_pycvc_physics.py compares against
-      # (physics_parity_test, which ctest hands it in CVC_PHYSICS_PARITY_EXE).
+      # The modules, the pycvc_gl package layout its tests import from, and the
+      # C++ reference test_pycvc_physics.py compares against (physics_parity_test,
+      # which ctest hands it in CVC_PHYSICS_PARITY_EXE).
       - name: Build
-        run: cmake --build build --parallel --target pycvc physics_parity_test
+        run: cmake --build build --parallel --target pycvc pycvc_gl pycvc_gl_pkg physics_parity_test
+
+      # ── a software GL for the pycvc_gl tests ──
+      # cvcpkg's mesa (llvmpipe) and xvfb, as in package-linux: libGLX.so.0 from
+      # the vtk bundle's libglvnd finds libGLX_mesa.so.0, and Xvfb finds its swrast
+      # driver and XKB data relative to itself. Installed after the build, so
+      # mesa's llvm20 runtime cannot reach the configure or link.
+      #
+      # GLX under Xvfb, not EGL with no X server: VTK would render through EGL,
+      # but ImGui's GL loader resolves through GLX and cannot reach an EGL context
+      # (src/cvcGL/ImGuiOverlay.cpp), so ImGuiOverlay, AriRuntime and the HUD
+      # would go untested.
+      #
+      # Without LD_LIBRARY_PATH: mesa's closure rewrites libraries the deps prefix
+      # already has (zlib), and cvcpkg's own Python must not have them loaded from
+      # there while it does. With them loaded, the install died of SIGBUS halfway
+      # through libz.so.1 and left it truncated.
+      #
+      # The pycvc_gl tests skip their render parts without a GL context, and a
+      # broken GL here would turn the job into a quiet run of skips.
+      # CVC_REQUIRE_RENDER=1 makes each of them fail instead.
+      - name: Software OpenGL for the pycvc_gl tests (cvcpkg)
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -u LD_LIBRARY_PATH cvcpkg install xvfb mesa --prefix "$DEPS_PREFIX" --config release --link shared
+          log="$RUNNER_TEMP/xvfb.log"
+          "$DEPS_PREFIX/bin/Xvfb" :99 -screen 0 1280x1024x24 >"$log" 2>&1 &
+          for _ in $(seq 1 50); do
+            [ -e /tmp/.X11-unix/X99 ] && break
+            sleep 0.2
+          done
+          if [ ! -e /tmp/.X11-unix/X99 ]; then
+            echo "::error::cvcpkg's Xvfb did not come up on :99"
+            cat "$log"
+            exit 1
+          fi
+          {
+            echo "DISPLAY=:99"
+            echo "LIBGL_ALWAYS_SOFTWARE=1"
+            echo "GALLIUM_DRIVER=llvmpipe"
+            echo "CVC_REQUIRE_RENDER=1"
+          } >> "$GITHUB_ENV"
 
       - name: Run the pycvc tests
         shell: bash
         run: |
           set -euo pipefail
           n=$(ctest --test-dir build -N -R '^pycvc_' | grep -c 'Test *#[0-9]*: pycvc_' || true)
-          echo "pycvc tests registered with ctest: $n"
-          if [ "$n" -eq 0 ]; then
-            echo "::error::pycvc was built but no pycvc_* test reached CTestTestfile.cmake."
+          n_gl=$(ctest --test-dir build -N -R '^pycvc_gl_' | grep -c 'Test *#[0-9]*: pycvc_gl_' || true)
+          echo "pycvc tests registered with ctest: $n ($n_gl pycvc_gl_*)"
+          if [ "$n" -eq 0 ] || [ "$n_gl" -eq 0 ]; then
+            echo "::error::pycvc and pycvc_gl were built, but their tests did not all reach CTestTestfile.cmake."
             exit 1
           fi
-          ctest --test-dir build -R '^pycvc_' --output-on-failure --timeout 1200
+          # A crash dumps the Python stack (a segfaulting test prints nothing else:
+          # its buffered stdout dies with it).
+          PYTHONFAULTHANDLER=1 ctest --test-dir build -R '^pycvc_' --output-on-failure --timeout 1200
+
+      # --output-on-failure hides a passing test's output, and with it whatever it
+      # skipped. Print every skip line from LastTest.log, so what is left skipping
+      # (a build option this job leaves off, such as the VTK-Python bridge) shows.
+      - name: What the pycvc tests skipped
+        if: always()
+        shell: bash
+        run: |
+          log=build/Testing/Temporary/LastTest.log
+          [ -f "$log" ] || { echo "no $log"; exit 0; }
+          awk '/^[0-9]+\/[0-9]+ Testing: / { t = $3 }
+               /^[0-9]+\/[0-9]+ Test: / { t = $3 }
+               tolower($0) ~ /^ *(\[skip\]|skip[: ])/ { print t ": " $0; n++ }
+               END { if (!n) print "no skips" }' "$log"
 
   # ── Sanitizers: TSan, and ASan with UBSan, over the threaded state_exec suites ──
   # No lane ran a race detector or an address checker, and the state_exec lock work
@@ -1086,8 +1169,12 @@ jobs:
         include:
           - name: tsan
             flags: -fsanitize=thread
+          # No vptr check: it references the typeinfo of every polymorphic class it checks.
+          # Jolt is built without RTTI, as are the two libcvc files that subclass its classes
+          # (src/cvc/CMakeLists.txt), so that typeinfo exists nowhere and libcvc.so fails to
+          # link ("undefined reference to `typeinfo for JPH::GroupFilter'").
           - name: asan-ubsan
-            flags: -fsanitize=address,undefined -fno-sanitize-recover=undefined
+            flags: -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-sanitize=vptr
     concurrency:
       group: ci-${{ github.ref }}-sanitizers-${{ matrix.name }}
       cancel-in-progress: true
@@ -1778,9 +1865,24 @@ jobs:
           # See linux ctest step for rationale.
           $stressRegex = '(Stress|Convergence|Benchmark|Performance|BunnySDF_IsoRoundtrip|QualityImproveAllMethods|Integration)'
           if ('${{ github.event_name }}' -eq 'push') {
+            # The rest in parallel, then the heavy suites SERIALLY, as on Linux and macOS. Run
+            # all at once, the Jolt convergence suites and the large-tree benchmarks held the
+            # 4-vCPU runner for hours (some to the 3600 s timeout, three times), and the tests
+            # beside them starved. Master 83b60200 failed 21-25 of the 48 StateTransportGrpc
+            # tests per gRPC lane (connect_to_peer missing its 2 s deadline), RoomRelay and
+            # StreamBridge loopbacks, and cvcgl_lod_cache's threaded teardown (906 ms against
+            # one 120 ms build). PR runs, which skip the heavy suites, pass all of them. Both
+            # passes run even if the first fails, so one push reports both.
+            ctest --test-dir build --build-config ${{ matrix.build_type }} `
+                  --output-on-failure --parallel --repeat until-pass:3 --timeout 3600 `
+                  -E "$stressRegex"
+            $rest = $LASTEXITCODE
             $env:CVC_DISTRIBUTED_STATE_BENCH = '1'
             ctest --test-dir build --build-config ${{ matrix.build_type }} `
-                  --output-on-failure --parallel --repeat until-pass:3 --timeout 3600
+                  --output-on-failure --parallel 1 --repeat until-pass:3 --timeout 3600 `
+                  -R "$stressRegex"
+            $heavy = $LASTEXITCODE
+            if ($rest -ne 0 -or $heavy -ne 0) { exit 1 }
           } else {
             ctest --test-dir build --build-config ${{ matrix.build_type }} `
                   --output-on-failure --parallel --repeat until-pass:3 --timeout 300 `

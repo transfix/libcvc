@@ -33,16 +33,18 @@
 //      resistance and grade, then corrected after step 4 with the lateral forces the implicit
 //      step applied: vx1 = vx + hdt (FX / m + r1 vy1), clamped to [sp_min, vmax] like the
 //      kinematic plant.
-//   4. Lateral and yaw. Slip angles with the new speed, smooth through zero speed:
-//      alpha_f = sgn(vx1) delta - atan2(vy + lf r, u), alpha_r = -atan2(vy - lr r, u),
-//      u = sqrt(vx1^2 + eps^2), sgn(vx1) = vx1 / u (vx1 the predicted speed). Pacejka lateral
-//      forces D sin(C atan(B alpha)), D the grip left, infinitely smooth with a sign-correct
-//      slope past the peak.
+//   4. Lateral and yaw. Slip angles in each wheel's frame with the new speed, smooth through zero
+//      speed, as dyn_4w's: alpha = -atan2(w, u_w), w the axle's sideways velocity in its wheel's
+//      frame and u_w its forward speed there, floored (sqrt(. ^2 + eps^2)). The front wheel is
+//      turned by delta: w_f = cos(delta) (vy + lf r) - sin(delta) vx1, u_wf from
+//      cos(delta) vx1 + sin(delta) (vy + lf r); the rear's is w_r = vy - lr r, u_wr from vx1 (vx1
+//      the predicted speed). Pacejka lateral forces D sin(C atan(B alpha)), D the grip left,
+//      infinitely smooth with a sign-correct slope past the peak.
 //      (vy, r) advance by implicit Euler, solved with `iters` steps from the current state, J
-//      the Jacobian of (vy', r') in (vy, r) with each tire as its secant through its root in
-//      lateral velocity (dyn_secant_w): stiff tires stay stable at nav's 0.06 s step and reach
-//      the kinematic bicycle, and a sliding tire pulls its slip toward zero rather than past it,
-//      even at a crawl with the wheel at full lock.
+//      the Jacobian of (vy', r') in (vy, r) with each tire as its secant through its root, zero
+//      sideways velocity in its wheel's frame (dyn_secant_w): stiff tires stay stable at nav's
+//      0.06 s step and reach the kinematic bicycle, and a sliding tire pulls its slip toward zero
+//      rather than past it, even at a crawl with the wheel at full lock.
 //   5. Low speed. A sigmoid in |vx1| around v_blend blends (vy, r) toward the kinematic
 //      bicycle's, r = vx1 tan(delta) / L and vy = lr r, where slip angles mean nothing.
 //   6. Pose. psi1 = psi + hdt r1; the rear axle moves with (vx1, vy1 - lr r1) at psi1, so in the
@@ -288,27 +290,30 @@ CVC_HD inline void dyn_plant(const dyn_bike_params &p, const bike_veh &v, const 
   // 4. Lateral and yaw: implicit Euler for (vy, r) with the predicted speed, solved by `iters`
   // Newton-like steps from the current state, each linearizing the tires by their secants through
   // their roots at its iterate: (I - hdt J) d = x0 + hdt f(x) - x.
-  const S u = s_sqrt(vx_p * vx_p + eps2), sg = vx_p / u;
+  const S u = s_sqrt(vx_p * vx_p + eps2);
   const S Bf = S(p.B_f), Br = S(p.B_r);
-  const S w0f =
-      u * s_tan(sg * delta1); // the front's lateral velocity at zero slip; the rear's is 0
   S vy1 = s.vy, r1 = s.r, Fyf_step = S(0);
   const int iters = p.iters > 0 ? p.iters : 1;
   for (int it = 0; it < iters; ++it) {
-    const S wf = vy1 + lf * r1, wr = vy1 - lr * r1;
-    const S af = sg * delta1 - s_atan2(wf, u), ar = -s_atan2(wr, u);
+    // Each axle's velocity in its wheel's frame: the front's sideways wf and forward speed uf
+    // (floored), the rear's sideways wr. Each tire's root is wf or wr = 0.
+    const S vf = vy1 + lf * r1;
+    const S wf = -vx_p * sd + vf * cd, wr = vy1 - lr * r1;
+    const S uf = s_sqrt((vx_p * cd + vf * sd) * (vx_p * cd + vf * sd) + eps2);
+    const S af = -s_atan2(wf, uf), ar = -s_atan2(wr, u);
     const S Fyf = dyn_lateral(af, Bf, Cp, Dyf), Fyr = dyn_lateral(ar, Br, Cp, Dyr);
     const S FY = Fxf * sd + Fyf * cd + Fyr;
     const S MZ = lf * (Fxf * sd + Fyf * cd) - lr * Fyr;
     const S f_vy = FY / m - r1 * vx_p, f_r = MZ / Iz;
-    const S Sf_t = dyn_secant_w(Fyf, af, wf, w0f, Bf, Cp, Dyf, u);
+    const S Sf_t = dyn_secant_w(Fyf, af, wf, S(0), Bf, Cp, Dyf, uf);
     const S Sr = dyn_secant_w(Fyr, ar, wr, S(0), Br, Cp, Dyr, u);
-    const S Sf = Sf_t * cd;
-    // dFyf/d(vy, r) = -Sf_t (1, lf); dFyr/d(vy, r) = -Sr (1, -lr).
-    const S J11 = (-Sf - Sr) / m;
-    const S J12 = (-Sf * lf + Sr * lr) / m - vx_p;
-    const S J21 = (-Sf * lf + Sr * lr) / Iz;
-    const S J22 = (-Sf * lf * lf - Sr * lr * lr) / Iz;
+    // dwf/d(vy, r) = cos(delta) (1, lf), so dFyf/d(vy, r) = -Sf (1, lf), and on the body's y,
+    // d(Fyf cos delta)/d(vy, r) = -Sfy (1, lf); dFyr/d(vy, r) = -Sr (1, -lr).
+    const S Sf = Sf_t * cd, Sfy = Sf * cd;
+    const S J11 = (-Sfy - Sr) / m;
+    const S J12 = (-Sfy * lf + Sr * lr) / m - vx_p;
+    const S J21 = (-Sfy * lf + Sr * lr) / Iz;
+    const S J22 = (-Sfy * lf * lf - Sr * lr * lr) / Iz;
     const S A11 = one - hdt * J11, A12 = -hdt * J12, A21 = -hdt * J21, A22 = one - hdt * J22;
     S det = A11 * A22 - A12 * A21;
     if (s_val(det) < s_val(S(0.05)))
@@ -318,7 +323,7 @@ CVC_HD inline void dyn_plant(const dyn_bike_params &p, const bike_veh &v, const 
     vy1 = vy1 + dvy;
     r1 = r1 + dr;
     // The front force this linearization applies.
-    Fyf_step = Fyf - Sf_t * (dvy + lf * dr);
+    Fyf_step = Fyf - Sf * (dvy + lf * dr);
   }
 
   // 3, corrected: the speed with the front lateral force the implicit step applied.
@@ -392,36 +397,35 @@ CVC_HD inline void dyn_plant_vjp(const dyn_bike_params &p, const bike_veh &v, co
 //         It gives the + r vy in vx' and - r vx in vy' (and, with equal masses, nothing in r').
 //         Skew, so it moves no energy; a Lie-Poisson structure, so Jacobi holds (unlike the
 //         kinematic bicycle, whose no-slip constraint is not integrable).
-//   R     D_x e_x e_x^T + (S_f / cos delta) n_f n_f^T + S_r n_r n_r^T. D_x = drag u + c_rr m g / u
-//         is drag and rolling resistance, opposing vx (u = sqrt(vx^2 + eps^2), as the plant
-//         smooths them). n_f = (-sin delta, cos delta, lf cos delta) and n_r = (0, 1, -lr) carry
-//         each tire's lateral force onto (vx, vy, r) (so n^T v is its contact patch's sideways
-//         velocity in the wheel's frame), and S_f, S_r are the tires' secant stiffnesses through
-//         their roots (dyn_secant_w), >= 0 at any slip because a Pacejka force (C < 2) always
-//         opposes its slip. So R is positive semi-definite sliding or not, for |delta| < pi / 2.
+//   R     D_x e_x e_x^T + S_f n_f n_f^T + S_r n_r n_r^T. D_x = drag u + c_rr m g / u is drag and
+//         rolling resistance, opposing vx (u = sqrt(vx^2 + eps^2), as the plant smooths them).
+//         n_f = (-sin delta, cos delta, lf cos delta) and n_r = (0, 1, -lr) carry each tire's
+//         lateral force onto (vx, vy, r), and n^T v is its contact patch's sideways velocity in
+//         its wheel's frame, the slip's w. S_f, S_r are the tires' secant stiffnesses through
+//         their roots at w = 0 (dyn_secant_w), >= 0 at any slip because a Pacejka force (C < 2)
+//         always opposes its slip. So R is positive semi-definite sliding or not, at any delta.
 //   G     [t_f, t_r], t_f = (cos delta, sin delta, lf sin delta), t_r = (1, 0, 0): each axle's
 //         drive or brake force (within its grip) along its wheel. y^T u is the power those forces
 //         deliver at the wheels' ground speed. Steering is not an input: delta only turns n_f and
 //         t_f, so it does no work on the body.
-//   f_eps n_f (F_yf + (S_f / cos delta) n_f^T v) + n_r (F_yr + S_r n_r^T v): what the secants
-//         leave of the tires' forces. The front force's root is at the plant's floored speed,
-//         vy + lf r = u tan(sg delta) with sg = vx / u, not where n_f^T v = 0 (vy + lf r =
-//         vx tan delta); f_eps is the difference, S_f (u tan(sg delta) - vx tan delta) n_f, plus
-//         the secants' own rounding at zero slip. It vanishes as eps / |vx| -> 0 and is booked on
-//         its own line.
+//   f_eps n_f (F_yf + S_f n_f^T v) + n_r (F_yr + S_r n_r^T v): what the secants leave of the
+//         tires' forces. Each slip is its wheel's frame's, rooted where n^T v = 0, so this is only
+//         the secants' rounding (at zero slip, where dyn_secant_w takes the slope): round-off. The
+//         speed floor eps enters the slips' forward speeds alone, which the force's sign does not
+//         read. It is booked on its own line all the same.
 //   grade gravity along the heading, booked as the power - m g grade vx (the plant has no side
 //         slope, so H carries no potential).
 //
-// So dH/dt = -v^T R v + y^T u + v^T f_eps - m g grade vx: passive with respect to the axle forces,
-// at every slip. The inputs are the actuators' outputs (the state's delta and a): their lags are
-// outside the body. dyn_plant's step departs from the vector field by its integrator (implicit
-// Euler on (vy, r), a predicted then corrected vx) and by its limiters (the speed clamp, the
-// low-speed blend toward the kinematic bicycle); dyn_plant_books charges each step's limiters
-// their kinetic energy and leaves the integrator's error, second order per step, as the residual.
-// Past a tire's peak its force falls as slip grows and the tangent (dyn_ph_tangent_D), the
-// linearization's damping, loses definiteness: the motion can be locally unstable there, but the
-// secant R, the energy's, stays positive semi-definite. These are evaluations: dyn_plant's
-// arithmetic does not depend on them.
+// So dH/dt = -v^T R v + y^T u + v^T f_eps - m g grade vx, with v^T f_eps at round-off: passive
+// with respect to the axle forces, at every slip. The inputs are the actuators' outputs (the
+// state's delta and a): their lags are outside the body. dyn_plant's step departs from the vector
+// field by its integrator (implicit Euler on (vy, r), a predicted then corrected vx) and by its
+// limiters (the speed clamp, the low-speed blend toward the kinematic bicycle); dyn_plant_books
+// charges each step's limiters their kinetic energy and leaves the integrator's error, second order
+// per step, as the residual. Past a tire's peak its force falls as slip grows and the tangent
+// (dyn_ph_tangent_D), the linearization's damping, loses definiteness: the motion can be locally
+// unstable there, but the secant R, the energy's, stays positive semi-definite. These are
+// evaluations: dyn_plant's arithmetic does not depend on them.
 
 // The kinetic energy 1/2 v^T M v.
 template <class S>
@@ -480,11 +484,12 @@ CVC_HD inline void dyn_ph_grip(const dyn_bike_params &p, const dyn_state<S> &s, 
 
 // Everything the form is built from, at a state.
 template <class S> struct dyn_ph_parts {
-  S u, sg;        // the slips' floored speed sqrt(vx^2 + eps^2), and sg = vx / u
+  S u, sg;        // the floored speed sqrt(vx^2 + eps^2) (the rear slip's), and sg = vx / u
+  S uf;           // the front wheel's floored forward speed, in its frame
   S Fxf, Fxr;     // the axles' drive or brake forces: the inputs
   S Fyf, Fyr;     // the tires' lateral forces
-  S wf, wr, w0f;  // the axles' lateral velocities, and the front force's root
-  S Sf, Sr;       // the secant stiffnesses (dyn_secant_w)
+  S wf, wr;       // the axles' sideways velocities in their wheels' frames: n_f^T v, n_r^T v
+  S Sf, Sr;       // the secant stiffnesses through wf, wr = 0 (dyn_secant_w)
   S Dx;           // drag and rolling resistance on vx
   S cd;           // cos delta
   S nf[3], nr[3]; // each tire's lateral force on (vx, vy, r)
@@ -501,13 +506,14 @@ CVC_HD inline void dyn_ph_parts_at(const dyn_bike_params &p, const dyn_state<S> 
   q.sg = s.vx / q.u;
   const S cd = s_cos(s.delta), sd = s_sin(s.delta);
   q.cd = cd;
-  q.wf = s.vy + lf * s.r;
+  const S vf = s.vy + lf * s.r;
+  q.wf = -s.vx * sd + vf * cd;
   q.wr = s.vy - lr * s.r;
-  q.w0f = q.u * s_tan(q.sg * s.delta);
-  const S af = q.sg * s.delta - s_atan2(q.wf, q.u), ar = -s_atan2(q.wr, q.u);
+  q.uf = s_sqrt((s.vx * cd + vf * sd) * (s.vx * cd + vf * sd) + S(p.eps) * S(p.eps));
+  const S af = -s_atan2(q.wf, q.uf), ar = -s_atan2(q.wr, q.u);
   q.Fyf = dyn_lateral(af, Bf, Cp, Dyf);
   q.Fyr = dyn_lateral(ar, Br, Cp, Dyr);
-  q.Sf = dyn_secant_w(q.Fyf, af, q.wf, q.w0f, Bf, Cp, Dyf, q.u);
+  q.Sf = dyn_secant_w(q.Fyf, af, q.wf, z, Bf, Cp, Dyf, q.uf);
   q.Sr = dyn_secant_w(q.Fyr, ar, q.wr, z, Br, Cp, Dyr, q.u);
   q.Dx = S(p.drag) * q.u + S(p.c_rr) * S(p.m) * S(p.g) / q.u;
   q.nf[0] = -sd;
@@ -529,10 +535,9 @@ template <class S>
 CVC_HD inline void dyn_ph_R(const dyn_bike_params &p, const dyn_state<S> &s, S R[3][3]) {
   dyn_ph_parts<S> q;
   dyn_ph_parts_at(p, s, q);
-  const S kf = q.Sf / q.cd;
   for (int i = 0; i < 3; ++i)
     for (int j = i; j < 3; ++j) {
-      R[i][j] = kf * (q.nf[i] * q.nf[j]) + q.Sr * (q.nr[i] * q.nr[j]);
+      R[i][j] = q.Sf * (q.nf[i] * q.nf[j]) + q.Sr * (q.nr[i] * q.nr[j]);
       R[j][i] = R[i][j];
     }
   R[0][0] = R[0][0] + q.Dx;
@@ -556,7 +561,8 @@ CVC_HD inline void dyn_ph_input(const dyn_bike_params &p, const dyn_state<S> &s,
   dyn_ph_axles(p, s, u[0], u[1], Dyf, Dyr);
 }
 
-// f_eps, what the secant dissipation leaves of the tires' lateral forces: the speed floor's.
+// f_eps, what the secant dissipation leaves of the tires' lateral forces: round-off, with both
+// slips in their wheels' frames.
 template <class S>
 CVC_HD inline void dyn_ph_floor(const dyn_bike_params &p, const dyn_state<S> &s, S f[3]) {
   dyn_ph_parts<S> q;
@@ -567,7 +573,7 @@ CVC_HD inline void dyn_ph_floor(const dyn_bike_params &p, const dyn_state<S> &s,
     nfv = nfv + q.nf[i] * v[i];
     nrv = nrv + q.nr[i] * v[i];
   }
-  const S ef = q.Fyf + q.Sf / q.cd * nfv, er = q.Fyr + q.Sr * nrv;
+  const S ef = q.Fyf + q.Sf * nfv, er = q.Fyr + q.Sr * nrv;
   for (int i = 0; i < 3; ++i)
     f[i] = q.nf[i] * ef + q.nr[i] * er;
 }
@@ -596,7 +602,7 @@ CVC_HD inline void dyn_ph_rhs(const dyn_bike_params &p, const dyn_state<S> &s, S
 template <class S> struct dyn_ph_rates {
   S dissipated; // v^T R v >= 0: the tires' slip, drag and rolling resistance
   S supplied;   // y^T u, y = G^T v: the axles' forces at their wheels' ground speed
-  S floor;      // v^T f_eps: the slips' speed floor
+  S floor;      // v^T f_eps: what the secants leave, round-off
   S grade;      // - m g grade vx: gravity along the heading
 };
 
@@ -660,25 +666,32 @@ CVC_HD inline void dyn_plant_books(const dyn_bike_params &p, const bike_veh &v,
 
 // The tangent dissipation of dyn_plant's Pacejka tires at the state: Dt = -d(Q_y, Q_r)/d(vy, r)
 // with Q the tires' lateral force and yaw moment, = k_f a a^T + k_r b b^T where k is each tire's
-// dF/dalpha times its slip's sensitivity to its lateral velocity (and the front's cos delta).
-// With a and b independent, Dt is positive semi-definite exactly when both k are >= 0, i.e. both
-// tires are below their peak; kf and kr are returned with it. alpha_f and alpha_r are the slips.
+// dF/dalpha times its slip's sensitivity to (vy, r) along a or b (the front's turned by delta, and
+// its force with it). With a and b independent, Dt is positive semi-definite exactly when both k
+// are >= 0, i.e. both tires are below their peak (the front's slip sensitivity stays positive
+// while its sideways velocity is under about cot delta times its forward speed); kf and kr are
+// returned with it. alpha_f and alpha_r are the slips (dyn_plant's, in the wheels' frames).
 template <class S>
 CVC_HD inline void dyn_ph_tangent_D(const dyn_bike_params &p, const dyn_state<S> &s, S Dt[2][2],
                                     S &kf, S &kr, S &alpha_f, S &alpha_r) {
   S Dyf, Dyr;
   dyn_ph_grip(p, s, Dyf, Dyr);
   const S lf = S(p.lf), lr = S(p.lr), C = S(p.C), Bf = S(p.B_f), Br = S(p.B_r);
-  const S u = s_sqrt(s.vx * s.vx + S(p.eps) * S(p.eps)), sg = s.vx / u;
-  const S wf = s.vy + lf * s.r, wr = s.vy - lr * s.r;
-  alpha_f = sg * s.delta - s_atan2(wf, u);
+  const S eps2 = S(p.eps) * S(p.eps), u = s_sqrt(s.vx * s.vx + eps2);
+  const S cd = s_cos(s.delta), sd = s_sin(s.delta), vf = s.vy + lf * s.r;
+  const S wf = -s.vx * sd + vf * cd, wr = s.vy - lr * s.r;
+  const S uf = s_sqrt((s.vx * cd + vf * sd) * (s.vx * cd + vf * sd) + eps2);
+  alpha_f = -s_atan2(wf, uf);
   alpha_r = -s_atan2(wr, u);
   // dF/dalpha of D sin(C atan(B alpha)).
   const S bf = Bf * alpha_f, br = Br * alpha_r;
   const S dFf = Dyf * C * Bf * s_cos(C * s_atan(bf)) / (S(1) + bf * bf);
   const S dFr = Dyr * C * Br * s_cos(C * s_atan(br)) / (S(1) + br * br);
-  // dalpha/dw = -u / (u^2 + w^2); the front force reaches (vy, r) through cos delta.
-  kf = dFf * s_cos(s.delta) * u / (u * u + wf * wf);
+  // The rear's slip moves with its w alone: dalpha/dw = -u / (u^2 + w^2). The front's w and its
+  // forward speed lon (floored to uf) both move with (vy, r) along (1, lf), as cos delta and sin
+  // delta, and its force reaches them through cos delta.
+  const S lon = s.vx * cd + vf * sd;
+  kf = dFf * cd * (cd * uf - sd * wf * lon / uf) / (uf * uf + wf * wf);
   kr = dFr * u / (u * u + wr * wr);
   Dt[0][0] = kf + kr;
   Dt[0][1] = kf * lf - kr * lr;

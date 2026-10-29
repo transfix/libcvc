@@ -231,6 +231,8 @@ def test_make_view_params_from_a_live_camera():
         view.setCamera(0.0, -50.0, 10.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 30.0, 0.1, 1e4)
         view.render()
     except Exception as e:  # noqa: BLE001 -- no offscreen GL context here
+        if os.environ.get("CVC_REQUIRE_RENDER", "0") not in ("", "0"):
+            raise AssertionError("no offscreen GL under CVC_REQUIRE_RENDER") from e
         print("  skip: make_view_params (no offscreen GL: %s)" % e)
         return
     v = view.make_view_params(base)

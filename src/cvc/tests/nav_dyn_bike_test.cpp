@@ -689,8 +689,9 @@ TEST(DynBike, Golden) {
 // H = 1/2 p^T M^-1 p, p' = (J - R) v + G u + f_eps - m g grade e_x, u = (F_xf, F_xr), with R the
 // tires' secants, drag and rolling resistance. These gates hold dyn_plant to that form at every
 // slip, sliding included, book its steps, and report where the tires' tangent stops being
-// positive semi-definite past the Pacejka peak while the secant does not. dyn_plant's arithmetic
-// is unchanged (DynBike.Golden still pins it).
+// positive semi-definite past the Pacejka peak while the secant does not. Both slips are in their
+// wheels' frames, rooted at zero sideways velocity there, so f_eps is round-off. DynBike.Golden
+// pins dyn_plant's arithmetic.
 
 namespace {
 
@@ -759,7 +760,7 @@ TEST(DynBikePH, TheStructureIsPortHamiltonianAtEverySlip) {
       EXPECT_NEAR(vJv, 0.0, 1e-9 * (1.0 + pm[0] * pm[0]));
       // The coefficients of R's three outer products are nonnegative: it is PSD.
       EXPECT_GT(q.Dx, 0.0);
-      EXPECT_GE(q.Sf / q.cd, 0.0) << "front secant at vx " << s.vx << ", vy " << s.vy;
+      EXPECT_GE(q.Sf, 0.0) << "front secant at vx " << s.vx << ", vy " << s.vy;
       EXPECT_GE(q.Sr, 0.0) << "rear secant at vx " << s.vx << ", vy " << s.vy;
       for (int t = 0; t < 4; ++t) {
         const double w[3] = {u(rng), u(rng), u(rng)};
@@ -894,10 +895,11 @@ TEST(DynBikePH, StepBooksCloseToSecondOrder) {
   }
 }
 
-// f_eps is the speed floor's: it shrinks with the floor and is gone without it.
-TEST(DynBikePH, TheFloorTermVanishesWithTheFloor) {
+// f_eps is what the secants leave of the tires' forces. Each slip is in its wheel's frame with its
+// secant through its root there, so that is round-off at any speed floor: the floor reaches only
+// the slips' forward speeds, which the forces' signs do not read.
+TEST(DynBikePH, TheFloorTermIsRoundOff) {
   dyn_bike_params p = humvee();
-  double prev = 1e300;
   for (const double eps : {0.5, 0.05, 0.005, 1e-9}) {
     p.eps = static_cast<float>(eps);
     std::mt19937 rng(7);
@@ -909,10 +911,41 @@ TEST(DynBikePH, TheFloorTermVanishesWithTheFloor) {
     }
     std::printf("  speed floor %.0e m/s: worst |floor power| / (dissipated + |supplied|) = %.2e\n",
                 eps, worst);
-    EXPECT_LT(worst, prev);
-    prev = worst;
+    EXPECT_LT(worst, 1e-12) << "speed floor " << eps;
   }
-  EXPECT_LT(prev, 1e-7);
+}
+
+// dyn_ph_tangent_D is the tires' derivative: -d(Q_y, Q_r)/d(vy, r) by central differences of the
+// lateral force and yaw moment (dyn_ph_parts_at's), at every slip, forward and reversing.
+TEST(DynBikePH, TheTangentIsTheTiresDerivative) {
+  const dyn_bike_params p = humvee();
+  const auto Q = [&](const dyn_state<double> &s, double &Qy, double &Qr) {
+    diff::dyn_ph_parts<double> q;
+    diff::dyn_ph_parts_at(p, s, q);
+    Qy = q.Fyf * q.cd + q.Fyr;
+    Qr = p.lf * q.Fyf * q.cd - p.lr * q.Fyr;
+  };
+  std::mt19937 rng(11);
+  double worst = 0.0;
+  for (int k = 0; k < 300; ++k) {
+    const dyn_state<double> s = sliding_state(rng);
+    double Dt[2][2], kf, kr, af, ar;
+    diff::dyn_ph_tangent_D(p, s, Dt, kf, kr, af, ar);
+    const double h = 1e-6, scale = std::fabs(Dt[0][0]) + std::fabs(Dt[1][1]) + 1.0;
+    for (int j = 0; j < 2; ++j) {
+      dyn_state<double> sp = s, sm = s;
+      (j ? sp.r : sp.vy) += h;
+      (j ? sm.r : sm.vy) -= h;
+      double yp, rp, ym, rm;
+      Q(sp, yp, rp);
+      Q(sm, ym, rm);
+      const double fd[2] = {-(yp - ym) / (2.0 * h), -(rp - rm) / (2.0 * h)};
+      for (int i = 0; i < 2; ++i)
+        worst = std::max(worst, std::fabs(fd[i] - Dt[i][j]) / scale);
+    }
+  }
+  std::printf("  tangent vs central differences: worst %.2e of its scale\n", worst);
+  EXPECT_LT(worst, 1e-6);
 }
 
 // The report: the tires' tangent (dyn_ph_tangent_D), the linearization's damping, along steer
@@ -949,7 +982,7 @@ TEST(DynBikePH, TheSecantStaysPSDWhereTheTangentDoesNot) {
       lam_min[b] = std::min(lam_min[b], lmin / (p.m / 1.0));
       diff::dyn_ph_parts<double> q;
       diff::dyn_ph_parts_at(p, s, q);
-      secant_negative += q.Sf / q.cd < 0.0 || q.Sr < 0.0;
+      secant_negative += q.Sf < 0.0 || q.Sr < 0.0;
     };
     for (const double v : {8.0, 12.0, 16.0, 20.0}) {
       // A steady ramp of the steer to the lock, the speed held by the throttle: past the limit.
@@ -1034,8 +1067,8 @@ TEST(DynBikePH, Golden) {
       {"pulling away", {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0}, 0.1, 2.0, 0.0, false},
       {"stopping at the clamp", {0.0, 0.0, 0.0, 0.3, 0.0, 0.05, 0.2, -6.0}, 0.2, -6.0, 0.0, false},
   };
-  const char *const part_keys[] = {"u",  "sg",  "Fxf", "Fxr", "Fyf", "Fyr", "wf",
-                                   "wr", "w0f", "Sf",  "Sr",  "Dx",  "cd"};
+  const char *const part_keys[] = {"u",  "sg", "uf", "Fxf", "Fxr", "Fyf", "Fyr",
+                                   "wf", "wr", "Sf", "Sr",  "Dx",  "cd"};
   const char *const rate_keys[] = {"dissipated", "supplied", "floor", "grade"};
   const char *const free_keys[] = {"vx", "vy", "r"};
   const char *const book_keys[] = {"dH",    "dissipated", "supplied", "floor",
@@ -1113,8 +1146,8 @@ TEST(DynBikePH, Golden) {
       s[k] = gc.s[k];
     diff::dyn_ph_parts<double> q;
     diff::dyn_ph_parts_at(p, s, q);
-    const double parts[] = {q.u,  q.sg,  q.Fxf, q.Fxr, q.Fyf, q.Fyr, q.wf,
-                            q.wr, q.w0f, q.Sf,  q.Sr,  q.Dx,  q.cd};
+    const double parts[] = {q.u,  q.sg, q.uf, q.Fxf, q.Fxr, q.Fyf, q.Fyr,
+                            q.wf, q.wr, q.Sf, q.Sr,  q.Dx,  q.cd};
     const diff::dyn_ph_rates<double> rt = diff::dyn_ph_rates_at(p, s, gc.grade);
     const double rates[] = {rt.dissipated, rt.supplied, rt.floor, rt.grade};
     dyn_state<double> o, o_books;

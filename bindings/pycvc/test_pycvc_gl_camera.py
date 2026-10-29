@@ -6,6 +6,9 @@ pycvc.state_set/get. Uses make_app() (an independently-owned cvc::app) — no
 singleton crosses the boundary.
 """
 
+import os
+import sys
+
 import pycvc
 import pycvc_gl
 
@@ -93,7 +96,10 @@ try:
     pycvc.state_set(app, "scene.viewers.left.camera.track.target", "hero")
     check("track params drive from state", vcam.trackTarget() == "hero")
 except Exception as e:  # noqa: BLE001 — offscreen GL may be unavailable
-    print("  [SKIP] SceneRenderer path (offscreen GL unavailable): %s" % e)
+    if os.environ.get("CVC_REQUIRE_RENDER", "0") not in ("", "0"):
+        check("offscreen GL available (CVC_REQUIRE_RENDER): %s" % e, False)
+    else:
+        print("  [SKIP] SceneRenderer path (offscreen GL unavailable): %s" % e)
 
 print("G. camera Phase A: pushed Track feed + per-viewport FoV + widen (headless)")
 # No SceneRenderer/vtkCamera needed: Track computes its pose from state, and
@@ -184,12 +190,4 @@ check(
 )
 
 print("\n%s (%d failures)" % ("ALL PASS" if fails == 0 else "FAILED", fails))
-
-# cvcGL's static GL/state teardown races at interpreter exit (a known, harmless
-# boost::lock_error that fires AFTER results are printed). Exit hard with the real
-# status so the process code reflects the test, not the teardown race.
-import os
-import sys
-
-sys.stdout.flush()
-os._exit(1 if fails else 0)
+sys.exit(1 if fails else 0)

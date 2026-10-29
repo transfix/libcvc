@@ -19,6 +19,10 @@
 // Analytic checks need no golden: the energy balance dH/dt = -v.D(v)v + v.G(v)u of the drift (the
 // coadjoint and potential terms do no work), the hand-written linear-tire bicycle the model reduces
 // to with its GPs off, and the step's second order.
+//
+// Steering: in LieSPHGP's form (the golden) the steering input is a port and supplies power on its
+// own; with modulation_dim 1 it modulates D and G instead, supplies nothing, and still steers. The
+// modulated model's balance, file (cvc-ph-se2/2) and step order are checked as the reference's are.
 
 #include <algorithm>
 #include <boost/property_tree/json_parser.hpp>
@@ -320,13 +324,9 @@ TEST(PhSe2, ReducesToTheLinearTireBicycle) {
   EXPECT_NEAR(f[5], ar, 1e-9);
 }
 
-// Lie-IMEX is second order: against a fine RK4 of the same drift over one 0.02 s interval, the
-// error falls about 4x per halving of the step.
-TEST(PhSe2, StepIsSecondOrder) {
-  const se2_model model = bicycle_model();
-  const se2_vehicle<double> veh(model.setup, se2_draw<double>(model), model.twist_scale);
-  const double s[6] = {3.0, -2.0, 0.4, 10.0, 0.3, 0.2};
-  const double u[2] = {0.5, 0.05};
+// Lie-IMEX's error over one 0.02 s interval at 8, 16, 32 and 64 substeps, against a fine RK4 of
+// the same drift from state s under the inputs u.
+std::vector<double> step_errors(const se2_vehicle<double> &veh, const double *s, const double *u) {
   const auto rk4 = [&](const double *x0, double h, int n, double *out) {
     double x[6];
     std::copy(x0, x0 + 6, x);
@@ -347,8 +347,6 @@ TEST(PhSe2, StepIsSecondOrder) {
     }
     std::copy(x, x + 6, out);
   };
-  // The bicycle's lateral modes are fast (~ -100 /s), so the comparison starts at 8 substeps,
-  // where every step is inside the asymptotic range.
   double ref[6];
   rk4(s, 0.02 / 4000, 4000, ref);
   std::vector<double> err;
@@ -360,9 +358,173 @@ TEST(PhSe2, StepIsSecondOrder) {
       e = std::max(e, std::fabs(out[i] - ref[i]));
     err.push_back(e);
   }
+  return err;
+}
+
+// Lie-IMEX is second order: against a fine RK4 of the same drift over one 0.02 s interval, the
+// error falls about 4x per halving of the step.
+TEST(PhSe2, StepIsSecondOrder) {
+  const se2_model model = bicycle_model();
+  const se2_vehicle<double> veh(model.setup, se2_draw<double>(model), model.twist_scale);
+  const double s[6] = {3.0, -2.0, 0.4, 10.0, 0.3, 0.2};
+  const double u[2] = {0.5, 0.05};
+  // The bicycle's lateral modes are fast (~ -100 /s), so the comparison starts at 8 substeps,
+  // where every step is inside the asymptotic range.
+  const std::vector<double> err = step_errors(veh, s, u);
   for (std::size_t i = 1; i < err.size(); ++i) {
     const double ratio = err[i - 1] / err[i];
     std::printf("  substeps x2: error %.3e -> %.3e (x%.2f)\n", err[i - 1], err[i], ratio);
+    EXPECT_GT(ratio, 3.5);
+    EXPECT_LT(ratio, 4.5);
+  }
+}
+
+// ── steering: a port in LieSPHGP's form, a modulation with modulation_dim 1 ─────────────────────
+
+// In LieSPHGP's form every input is a port, so the steering input supplies power y_steer u_steer
+// of either sign, with no drive at all: the model can gain kinetic energy from steering alone. On
+// the golden fit, at its 16 states (drive, steering).
+TEST(PhSe2, TheReferenceFormBooksSteeringAsPower) {
+  const se2_model &m = golden_model();
+  ASSERT_EQ(m.setup.modulation_dim, 0);
+  const se2_vehicle<double> veh(m.setup, se2_draw<double>(m), m.twist_scale);
+  int gains = 0, losses = 0;
+  double steer_abs = 0.0, all_abs = 0.0;
+  for (const auto &kv : golden().get_child("forward")) {
+    const auto s = numbers(kv.second, "state");
+    double y[2];
+    veh.output(s.data(), y);
+    const double drive = y[0] * s[6], steer = y[1] * s[7];
+    steer_abs += std::fabs(steer);
+    all_abs += std::fabs(drive) + std::fabs(steer);
+    // With the drive input at zero, what the stage supplies is the steering's alone.
+    const double steer_only[2] = {0.0, s[7]};
+    se2_stage<double> st;
+    veh.stage(s.data(), steer_only, st);
+    double supplied = 0.0;
+    for (int i = 0; i < 3; ++i)
+      supplied += st.v[i] * st.G[2 * i + 1] * s[7];
+    EXPECT_NEAR(supplied, steer, 1e-12 * (1.0 + std::fabs(steer)));
+    gains += steer > 0.0;
+    losses += steer < 0.0;
+  }
+  std::printf("  steering's share of |y.u| at the golden states %.3f; it supplies energy at %d of "
+              "16 and removes it at %d\n",
+              steer_abs / all_abs, gains, losses);
+  EXPECT_GT(steer_abs, 0.0);
+}
+
+// A model with one port (the drive) and one modulation (the road-wheel angle), every GP on.
+se2_model modulated_model(std::uint64_t seed) {
+  se2_init init;
+  init.control_dim = 1;
+  init.modulation_dim = 1;
+  init.features = 16;
+  init.initial_randomness = 0.3;
+  init.initial_control_gp_mean_scale = 1.0;
+  se2_model m = se2_model::initialize(init, seed, {6.0, 0.5, 0.3}, {1.0, 0.1}, 0.02);
+  std::mt19937 rng(static_cast<unsigned>(seed) + 1);
+  std::normal_distribution<double> z(0.0, 0.3);
+  for (se2_gp *g : {&m.params.D, &m.params.G, &m.params.V})
+    for (auto &x : g->mean)
+      x = z(rng);
+  m.setup.v_length = 5.0;
+  return m;
+}
+
+// With steering a modulation, dH/dt = -v.D(v, delta)v + y.u with y = G(v, delta)^T v: the supply
+// is the drive's power alone. With the drive at zero nothing is supplied whatever the steering,
+// which still changes the motion (through D and G). D(v, delta) stays positive definite.
+TEST(PhSe2, ModulatedSteeringSuppliesNoPower) {
+  const se2_model m = modulated_model(21);
+  ASSERT_EQ(m.setup.D.input, 4);
+  ASSERT_EQ(m.setup.G.input, 4);
+  const se2_vehicle<double> veh(m.setup, se2_draw<double>(m), m.twist_scale);
+  std::mt19937 rng(22);
+  std::uniform_real_distribution<double> u(-1.0, 1.0);
+  double least_change = 1e300;
+  for (int k = 0; k < 200; ++k) {
+    const double s[6] = {3.0 * u(rng),       3.0 * u(rng), u(rng),
+                         6.0 + 3.0 * u(rng), 0.5 * u(rng), 0.4 * u(rng)};
+    const double in[2] = {u(rng), 2.0 * u(rng)}; // the drive, then the (scaled) steering
+    double f[6];
+    veh.vector_field(s, in, f);
+    se2_stage<double> st;
+    veh.stage(s, in, st);
+    const double dH = st.grad_v[0] * f[0] + st.grad_v[1] * f[1] + st.p[0] * f[3] + st.p[1] * f[4] +
+                      st.p[2] * f[5];
+    const vec3<double> dv = matvec(st.D, st.v);
+    double supplied = 0.0, dissipated = 0.0;
+    for (int i = 0; i < 3; ++i) {
+      dissipated += st.v[i] * dv[i];
+      supplied += st.v[i] * st.G[i] * in[0];
+    }
+    EXPECT_GT(dissipated, 0.0);
+    EXPECT_NEAR(dH, supplied - dissipated, 1e-11 * (1.0 + std::fabs(supplied) + dissipated));
+    double y[1];
+    veh.output(s, y, in + 1);
+    EXPECT_NEAR(y[0] * in[0], supplied, 1e-12 * (1.0 + std::fabs(supplied)));
+    // No drive, no supply, whatever the steering.
+    const double coast[2] = {0.0, in[1]};
+    se2_stage<double> st0;
+    veh.stage(s, coast, st0);
+    double supplied0 = 0.0;
+    for (int i = 0; i < 3; ++i)
+      supplied0 += st0.v[i] * st0.G[i] * coast[0];
+    EXPECT_EQ(supplied0, 0.0);
+    // The steering still changes the motion.
+    const double turned[2] = {in[0], in[1] + 0.5};
+    double f1[6];
+    veh.vector_field(s, turned, f1);
+    double change = 0.0;
+    for (int i = 3; i < 6; ++i)
+      change = std::max(change, std::fabs(f1[i] - f[i]));
+    least_change = std::min(least_change, change);
+  }
+  std::printf("  steering as a modulation: the least change of the twist's rate a 0.5 steer step "
+              "makes over 200 states %.3e\n",
+              least_change);
+  EXPECT_GT(least_change, 1e-6);
+  // A modulated model needs its modulations wherever it reads D or G.
+  const double s[6] = {0.0, 0.0, 0.0, 5.0, 0.0, 0.0};
+  double y[1];
+  EXPECT_THROW(veh.output(s, y), std::invalid_argument);
+  EXPECT_THROW(veh.effective_damping(s), std::invalid_argument);
+}
+
+// A modulated model is written as cvc-ph-se2/2 and survives its file exactly; one without
+// modulations is still cvc-ph-se2/1.
+TEST(PhSe2, ModulatedModelRoundTripsExactly) {
+  se2_model m = modulated_model(23);
+  m.provenance = {{"source", "ph_se2_test"}};
+  const std::string js = m.to_json();
+  EXPECT_NE(js.find("\"format\":\"cvc-ph-se2/2\""), std::string::npos);
+  EXPECT_NE(js.find("\"modulation_dim\":1"), std::string::npos);
+  const se2_model back = se2_model::from_json(js);
+  EXPECT_EQ(back.setup.control_dim, 1);
+  EXPECT_EQ(back.setup.modulation_dim, 1);
+  EXPECT_EQ(back.setup.D.frequency, m.setup.D.frequency);
+  EXPECT_EQ(back.setup.G.frequency, m.setup.G.frequency);
+  EXPECT_EQ(back.control_scale, m.control_scale);
+  EXPECT_EQ(back.to_json(), js);
+  EXPECT_NE(golden_model().to_json().find("\"format\":\"cvc-ph-se2/1\""), std::string::npos);
+  // A /1 reader's view of a /2 file: the modulation key is required.
+  std::string broken = js;
+  broken.replace(broken.find("\"modulation_dim\":1,"), 19, "");
+  EXPECT_THROW(se2_model::from_json(broken), std::exception);
+}
+
+// The modulated step is second order as well.
+TEST(PhSe2, ModulatedStepIsSecondOrder) {
+  const se2_model model = modulated_model(24);
+  const se2_vehicle<double> veh(model.setup, se2_draw<double>(model), model.twist_scale);
+  const double s[6] = {1.0, -1.0, 0.3, 7.0, 0.2, 0.1};
+  const double in[2] = {0.4, 0.8};
+  const std::vector<double> err = step_errors(veh, s, in);
+  for (std::size_t i = 1; i < err.size(); ++i) {
+    const double ratio = err[i - 1] / err[i];
+    std::printf("  modulated, substeps x2: error %.3e -> %.3e (x%.2f)\n", err[i - 1], err[i],
+                ratio);
     EXPECT_GT(ratio, 3.5);
     EXPECT_LT(ratio, 4.5);
   }

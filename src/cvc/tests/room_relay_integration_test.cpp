@@ -865,12 +865,21 @@ bool settled(test_relay &r, const std::vector<test_client *> &cs) {
   return true;
 }
 
-// Connect and join every client, then run the room until it settles.
+// Connect and join every client, then run the room until it settles. A room that starts with its
+// clients starts their replicas' clocks with the relay's (whose clock starts on its first step's
+// server_pump), as clients up when their server starts. Started at each client's first frame
+// instead, after that step -- the joins make it slow, 0.4 to 0.6 s in a Debug gRPC build -- a
+// replica ran 50 to 70 ticks behind the relay: its first sample, stamped during the step, was
+// within max_skew_ticks, so holon::apply_authoritative left it there until a fresh sample showed
+// the whole lag and re-aligned it.
 void bring_up(test_relay &r, const std::vector<test_client *> &cs) {
   for (test_client *c : cs) {
     ASSERT_TRUE(c->connect(r)) << c->pid << " could not reach the relay";
     c->join();
   }
+  if (r.steps == 0)
+    for (test_client *c : cs)
+      c->h.advance();
   ASSERT_TRUE(run_room(r, cs, 8.0, {}, [&] { return settled(r, cs); })) << "the room never settled";
 }
 
@@ -1065,7 +1074,8 @@ TEST(RoomRelayLoopbackTest, OuterPeerGetsPushesNotLiveFrames) {
 // to it. On the step the pair turns inner the relay pushes C's whole pose stamped with its CURRENT
 // tick, ahead of that step's live writes: within two steps B's tree has C exactly as the relay
 // does, with a tick at least that fresh, and B's replica never re-aligns its clock (a stale tick
-// would make it seek, and rubber-band its own avatar).
+// would make it seek, and rubber-band its own avatar). B's clock runs in step with the relay's
+// (bring_up), so a heartbeat-old tick is well past max_skew_ticks from it.
 TEST(RoomRelayLoopbackTest, StillOuterPeerReentryNoRealignNoFreeze) {
   relay_options o;
   o.aoi = ra::hall_aoi_params();
@@ -1078,8 +1088,9 @@ TEST(RoomRelayLoopbackTest, StillOuterPeerReentryNoRealignNoFreeze) {
   r.place_on_join = {{"B", {14.0, 10.0}}, {"C", {32.0, 10.0}}};
   ASSERT_NO_FATAL_FAILURE(bring_up(r, cs));
   ASSERT_EQ(r.tier("B", "C"), ra::aoi_tier::outer);
-  run_room(r, cs, 0.5); // the replicas' clocks settle on the relay's first samples
+  run_room(r, cs, 0.5);
   const std::uint64_t realigns = B.h.clock_realigns();
+  const auto lag = static_cast<long long>(r.server.tick()) - static_cast<long long>(B.h.tick());
 
   r.walk("B", 4.0, 0.0); // the veto's cap
   bool entered = false;
@@ -1121,7 +1132,9 @@ TEST(RoomRelayLoopbackTest, StillOuterPeerReentryNoRealignNoFreeze) {
   EXPECT_GT(B.tap.pushed_ticks("C"), pushed_before) << "the entry pose came as a push";
 
   run_room(r, cs, 0.5); // inner now: live writes
-  EXPECT_EQ(B.h.clock_realigns(), realigns) << "a pushed tick never re-aligns the replica";
+  EXPECT_EQ(B.h.clock_realigns(), realigns)
+      << "a pushed tick never re-aligns the replica (B's clock was " << lag
+      << " ticks behind the relay's before the walk)";
   EXPECT_TRUE(B.h.pose_known("C"));
   cvc::physics::body_state rs;
   std::uint64_t rt = 0;

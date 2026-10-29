@@ -394,6 +394,11 @@ The validation curves (32 seeds), from the untrained policy's 0.494:
   - `tail = 3` searches only the output layer's bias, which shifts the coefficient basin.
 - **The tests.** `NavPlantConvergence.EsFinetuneOnJoltReach` (`P8B_ES_*` override it), with
   `CoefficientLeverageOnJoltReach` and `BasinGridOnJoltReach` alongside.
+  - It and `EsEnergyAtHeldReachOnJolt` (below) are experiments: they run only with
+    `CVC_NAV_ES_EXPERIMENTS=1`. On a hosted CI runner, run alone, the fine-tune took over an
+    hour on Linux and 50 minutes on macOS, and the energy run 40 and 30. Their one check,
+    best >= start, holds by construction. `NavPlant.EsFinetuneOnPlantMechanics` checks the
+    mechanics in every build.
 
 How much the policy moves Jolt reach (32 validation seeds; `CoefficientLeverageOnJoltReach`):
 
