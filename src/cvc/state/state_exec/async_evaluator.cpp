@@ -11,6 +11,7 @@
 #include <cvc/state/state_exec/async_evaluator.h>
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/data_job.h>
+#include <cvc/state/state_exec/heap.h> // track_captured_env
 #include <cvc/state/state_exec/parser.h>
 #include <thread>
 
@@ -348,6 +349,9 @@ task<value_t> async_evaluator::do_lambda(const std::vector<value_t> &args, envir
   cls->variadic = variadic;
   cls->body = std::move(body);
   cls->env_snapshot = env;
+  // Bound back into env (a defun, a method, a lambda set there), it is a cycle that only the
+  // collector frees, as in the stackless evaluator.
+  track_captured_env(env);
   co_return value_t{std::move(cls)};
 }
 
