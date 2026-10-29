@@ -341,7 +341,9 @@ void hide_field(GeometryNode &node, bool single_color) {
 // document or a combo still picks a colormap, and an edit in the editor stands until the next one.
 // An explicit domain in the model is the range the field is coloured over. Beside the key the node
 // publishes .range (what the colours span under an `auto` domain) and .histogram (the shown values
-// over it): the editor's axis and histogram.
+// over it): the editor's axis and histogram. The contour spectrum and contour tree are computed
+// from a volume (tf_binding), and this field lives on a mesh: an editor that asks for either
+// (.overlay_request) is told so in .overlay_status rather than left waiting.
 struct FieldColors {
   std::string key;           // <node>.field_colors
   std::string colormap_seen; // the colormap key's value as last followed
@@ -349,30 +351,57 @@ struct FieldColors {
   cvc::tf::model model;      // ... parsed (the last one that parsed)
   std::vector<float> table;  // its colour ramp, baked: model.resolution RGB entries
   std::string published;     // what .range / .histogram were last published from
+  std::string status;        // the .overlay_status this field last wrote
 };
 
 constexpr int kFieldColorBins = 128;
 
-// A named colormap as a transfer function: its ramp sampled at 33 nodes, opaque.
+// A named colormap as a transfer function, opaque: its ramp sampled finely, then thinned to the
+// few colour nodes that follow it within kColormapTolerance (at most kColormapNodes), so the
+// Colours editor shows a handful of bars to grab and move rather than one per sample. Viridis
+// takes 9 and jet 6; turbo, the busiest, keeps 12 and stays within 0.05.
+constexpr float kColormapTolerance = 0.02f; // per channel, about 5 of 255
+constexpr int kColormapNodes = 12;
 cvc::tf::model colormap_model(cvc::colormap_kind k) {
-  constexpr int kNodes = 33;
-  std::vector<double> t(kNodes);
-  for (int i = 0; i < kNodes; ++i)
-    t[std::size_t(i)] = double(i) / double(kNodes - 1);
+  constexpr int kSamples = 256;
+  std::vector<double> t(kSamples);
+  for (int i = 0; i < kSamples; ++i)
+    t[std::size_t(i)] = double(i) / double(kSamples - 1);
   const std::vector<unsigned char> rgb = cvc::colormap_rgb(t, k, 0.0, 1.0);
-  cvc::tf::model m;
+  std::vector<cvc::tf::color_node> dense;
   if (rgb.size() == 3 * t.size())
     for (std::size_t i = 0; i < t.size(); ++i)
-      m.color.push_back({t[i], rgb[3 * i] / 255.f, rgb[3 * i + 1] / 255.f, rgb[3 * i + 2] / 255.f});
+      dense.push_back({t[i], rgb[3 * i] / 255.f, rgb[3 * i + 1] / 255.f, rgb[3 * i + 2] / 255.f});
+  cvc::tf::model m;
+  m.color = cvc::tf::simplify_ramp(dense, kColormapTolerance, kColormapNodes);
   m.alpha = {{0.0, 1.f}, {1.0, 1.f}};
   m.normalize();
   return m;
 }
 
+// .overlay_status for what the editors have asked for: why the volume-only layers are missing.
+std::string field_colors_status(cvc::app &a, const FieldColors &fc) {
+  const unsigned want =
+      cvc::tf::overlay_bits_from_csv(ari::read_or<std::string>(a, fc.key + ".overlay_request", ""));
+  const bool spectrum = (want & cvc::tf::overlay_contour_spectrum) != 0;
+  const bool tree = (want & cvc::tf::overlay_contour_tree) != 0;
+  if (!spectrum && !tree)
+    return "";
+  std::string what = "contour tree is";
+  if (spectrum)
+    what = tree ? "contour spectrum and contour tree are" : "contour spectrum is";
+  return "unavailable: the " + what + " computed for volumes, and this field is on a mesh";
+}
+
 // Follow the colormap key (a change resets the model to that colormap's ramp) and the model (a
 // change re-bakes the table). True when the table or the model's domain changed; a model that does
-// not parse keeps the last good colours.
+// not parse keeps the last good colours. Also answers the editors' overlay requests.
 bool follow_field_colors(cvc::app &a, FieldColors &fc, const std::string &colormap_key) {
+  const std::string status = field_colors_status(a, fc);
+  if (status != fc.status) {
+    fc.status = status;
+    ari::write<std::string>(a, fc.key + ".overlay_status", status);
+  }
   const std::string cm = ari::read_or<std::string>(a, colormap_key, "viridis");
   if (cm != fc.colormap_seen) {
     fc.colormap_seen = cm;
@@ -437,6 +466,7 @@ void publish_field_colors(cvc::app &a, FieldColors &fc, const std::vector<double
     return;
   fc.published = p;
   cvc::tf::overlays ov;
+  ov.status = fc.status; // publish_overlays always writes it
   ov.has_range = true;
   ov.range_lo = lo;
   ov.range_hi = hi;
