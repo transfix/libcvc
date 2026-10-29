@@ -135,8 +135,19 @@ jobs:
             || { echo "::error::bundle must carry only pycvc-gl-cp312's manifest"; exit 1; }
           grep -q '/_pycvc_gl\.a$' "$RUNNER_TEMP/members.txt" \
             || { echo "::error::bundle has no _pycvc_gl.a"; exit 1; }
-          grep -q '^share/pycvc-gl-wasm/pycvc_host\.wasm$' "$RUNNER_TEMP/members.txt" \
-            || echo "::warning::bundle has no pycvc_host.wasm (host link is non-fatal in build-wasm.sh)"
+          if grep -q '^share/pycvc-gl-wasm/pycvc_host\.wasm$' "$RUNNER_TEMP/members.txt"; then
+            # A host that ships must run. link-host.sh's own node smoke is non-fatal, and
+            # v3.7.2's first build packed a host node could not compile (two libxml2s).
+            node=$(command -v node || ls "$EMSDK_DIR"/node/*/bin/node | head -1)
+            "$node" "$WASM_DEPS/share/pycvc-gl-wasm/pycvc_host.js" > "$RUNNER_TEMP/host-smoke.txt" 2>&1 || true
+            tail -15 "$RUNNER_TEMP/host-smoke.txt"
+            for m in PYCVC_VTK_BRIDGE_OK PYCVC_WASM_OK; do
+              grep -qx "$m" "$RUNNER_TEMP/host-smoke.txt" \
+                || { echo "::error::the bundled pycvc_host does not run under node (no $m)"; exit 1; }
+            done
+          else
+            echo "::warning::bundle has no pycvc_host.wasm (host link is non-fatal in build-wasm.sh)"
+          fi
 
       - name: Upload pycvc_host.wasm
         if: always()

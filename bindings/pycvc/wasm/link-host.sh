@@ -81,6 +81,21 @@ fi
 
 printf "Module.preRun=Module.preRun||[];Module.preRun.push(function(){ENV.PYTHONHOME='/py';%sENV.PYTHONDONTWRITEBYTECODE='1';});\n" "$VTK_PYPATH" > "$OUT/pre.js"
 
+# Every deps archive goes into the group except VTK's bundled libxml2. VTK mangles only
+# libxml2's public API (vtklibxml2_xml*); 65 internals (__xmlRaiseError, xmlBuf*,
+# xmlDict*, ...) keep their plain names. Once ImageMagick pulls cvcpkg's libxml2 in, its
+# references to those internals resolve to VTK's copy, which sorts first, and under
+# --allow-multiple-definition both copies link. The newer libxml2's __xmlRaiseError
+# returns int and 2.12's callers expect void, so the module does not compile ("expected
+# 0 elements on the stack for fallthru"). Nothing here needs VTK's copy: its one user,
+# vtkXMLTreeReader, is not in the vtk-python build. If one is added, the log will show
+# vtklibxml2_* as undefined symbols.
+DEP_LIBS=()
+for a in "$DEPS"/lib/*.a; do
+    case "$(basename "$a")" in libvtklibxml2-*.a) continue ;; esac
+    DEP_LIBS+=("$a")
+done
+
 # TODO(cvcGL wasm app contract, docs/CVCGL_WASM.md): this host is node-only today, so it links
 # neither of cvcGL's browser-side speedups. When it gets a browser page, that link must add
 #   --pre-js "$INST/share/cvcGL/wasm/webgl_state_shadow.js"   (the WebGL state shim), and
@@ -94,7 +109,7 @@ printf "Module.preRun=Module.preRun||[];Module.preRun.push(function(){ENV.PYTHON
     -Wl,--whole-archive "$PXA" "$GLA" -Wl,--no-whole-archive \
     ${VTK_WHOLE[@]+"${VTK_WHOLE[@]}"} \
     "${NPYOBJS[@]}" \
-    -Wl,--start-group "$INST"/lib/libcvc.a "$INST"/lib/libcvcGL.a "$DEPS"/lib/*.a -Wl,--end-group \
+    -Wl,--start-group "$INST"/lib/libcvc.a "$INST"/lib/libcvcGL.a "${DEP_LIBS[@]}" -Wl,--end-group \
     -sALLOW_MEMORY_GROWTH=1 -sEXIT_RUNTIME=1 -sSTACK_SIZE=8mb -sERROR_ON_UNDEFINED_SYMBOLS=0 \
     --embed-file "${PYSTD}@/py/lib/python3.12" \
     --embed-file "$(dirname "$PXA")/pycvc.py@/py/lib/python3.12/site-packages/pycvc.py" \
