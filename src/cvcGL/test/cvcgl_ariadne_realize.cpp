@@ -14,6 +14,7 @@
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/value.h>
 #include <cvc/core/app.h>
+#include <cvc/core/async_lane.h> // field colours: pump the scheduler their overlay tasks run on
 #include <cvc/core/world_clock.h> // clock test: app.world_clock() drive via tick_scene
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/geometry_file_io.h>
@@ -315,12 +316,25 @@ static void test_lab_sources(cvc::app &app) {
     }
     set(cm_key, "viridis");
     tick();
-    // The contour spectrum / tree are computed for volumes: asked for, the field says why not.
+    // The contour spectrum and tree an editor asks for: an overlay task on the field's own mesh,
+    // over the published range, publishes them beside it (the scheduler pumped as a host's frames
+    // would pump it).
     set(T + ".overlay_request", "contour_spectrum,contour_tree");
-    tick();
-    chk(val(T + ".overlay_status").find("unavailable: the contour spectrum and contour tree") == 0,
-        std::string(who) +
-            ": a contour spectrum / tree request is answered: " + val(T + ".overlay_status"));
+    cvc::tf::spectrum_overlay sp;
+    cvc::tf::tree_overlay tr;
+    for (int f = 0; f < 4000 && (sp.empty() || tr.empty()); ++f) {
+      tick();
+      cvc::pump_exec_frame(app.exec_scheduler());
+      cvc::tf::spectrum_from_string(val(T + ".contour_spectrum"), sp);
+      cvc::tf::tree_from_string(val(T + ".contour_tree"), tr);
+    }
+    const double peak = sp.empty() ? 0.0 : *std::max_element(sp.area.begin(), sp.area.end());
+    chk(sp.size() == 256 && peak > 0.0 && tr.vertices.size() >= 2 &&
+            val(T + ".overlay_status").empty(),
+        std::string(who) + ": a contour spectrum / tree request is computed on the field's mesh (" +
+            std::to_string(sp.size()) + " samples, peak area " + std::to_string(peak) + ", " +
+            std::to_string(tr.vertices.size()) + " tree nodes, status '" +
+            val(T + ".overlay_status") + "')");
     set(cm_key, "gray");
     tick();
     float c0[3] = {1.f, 1.f, 1.f}, c1[3] = {0.f, 0.f, 0.f};
@@ -344,8 +358,8 @@ static void test_lab_sources(cvc::app &app) {
     chk(node.hasScalarField() && approx(node.scalarRange().first, lo) &&
             approx(node.scalarRange().second, hi),
         std::string(who) + ": the colormap key resets the domain to auto");
-    chk(val(T + ".overlay_status").find("unavailable:") == 0,
-        std::string(who) + ": republishing the range and histogram keeps the note");
+    chk(!val(T + ".contour_spectrum").empty() && !val(T + ".contour_tree").empty(),
+        std::string(who) + ": recolouring the same values keeps their spectrum and tree");
   };
   field_colors(cvc::ariadne::resolve_bind("lsrc", "graphics.root.children.mesh.field_colors"),
                mb + ".color.colormap", mb + ".color.min", mb + ".color.max", *mesh, "mesh_lab");

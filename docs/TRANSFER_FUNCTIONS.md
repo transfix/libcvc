@@ -223,6 +223,25 @@ contour spectrum and tree are computed only after some widget shows them (it app
 `cvc::tf::compute_overlays(vol, bits, options)` computes all three (the spectrum and tree on a
 thumbnail, `options.max_dim`, default 128 per axis), and `publish_overlays(state, ov)` writes them.
 
+**On a mesh.** The same layers exist for a scalar field on a simplicial mesh
+([`contour_mesh.h`](../inc/cvc/volume/contour_mesh.h): one value per point, linear over each
+tetrahedron, or each triangle of a surface), through `compute_overlays(mesh, bits, options)`, an
+`overlay_job` on a `std::shared_ptr<const contour_mesh>` and the matching `schedule_overlays`:
+
+- the spectrum (`mesh_contour_spectrum_builder`) integrates each tetrahedron with the grid's
+  per-tetrahedron integrals and that tetrahedron's exact gradient. On a surface each triangle's
+  integrals are exact, and the functions become the contours' length (drawn as "area") and the
+  area below and above them (as the two "volumes");
+- the tree (`mesh_contour_tree_builder`) runs the same join / split / merge over the graph of the
+  elements' edges. On a grid's own tetrahedra it builds exactly the grid builder's tree (the tests
+  check this on random data). A mesh in several pieces gets a tree per piece. On a domain that is
+  not simply connected (a surface with holes, a torus) the level sets can form loops, which no tree
+  holds, so the result is still a tree but its component counts are only approximate there.
+
+`overlay_options::has_range` / `range_lo` / `range_hi` compute the layers over a given range
+instead of the data's own, for a producer that publishes its own range and histogram (the field
+colours below).
+
 ### Where the work runs: the state_exec scheduler, not a thread
 
 A contour tree or spectrum of a 128³ thumbnail takes seconds, and single-threaded wasm cannot start
@@ -325,9 +344,18 @@ The opacity curve and isocontours are not used, so the components' editors hide 
 colormap sampled finely and thinned by `cvc::tf::simplify_ramp` to the few colour nodes that
 follow it within 0.02 per channel, at most 12 (viridis takes 9, jet 6; turbo, the busiest, keeps 12
 and stays within 0.05), so the editor shows a handful of bars to grab and move rather than 33.
-The contour spectrum and contour tree are computed for volumes only: an editor that asks for them
-here gets `field_colors.overlay_status` = "unavailable: ... this field is on a mesh". See
-[ARIADNE.md](ARIADNE.md), "Field colours".
+An editor that shows the contour spectrum or contour tree (Display ▸ in its menu) gets them for
+the shown values on their mesh (fe_lab's tetrahedral mesh for the solution, mesh_lab's surface for
+a curvature, a geodesic distance or a vibration mode). An overlay task on the app's state_exec
+scheduler computes them over `field_colors.range`, so they line up with the histogram, and
+publishes them beside the key. The tree is built on the values clamped to that range and simplified
+to 200 nodes. Its components inside the range are the field's own, since a piecewise-linear field's
+level-set components depend only on which vertices lie above, and the extrema beyond the range (a
+curvature's spikes past its 2-98 % range) no longer crowd it. The spectrum takes the values as they
+are. New values (a new solve, another colour mode, a new mesh) stop the
+running tasks and clear the two layers, and the editors' standing request starts them again. fe_lab's
+elements view colours each element with one value, which has neither, so there
+`field_colors.overlay_status` says so. See [ARIADNE.md](ARIADNE.md), "Field colours".
 
 **volslice: the TF is fixed in data units, the window is the LUT's span.** `VolSliceNode` samples
 the raw-unit tables over its window (else the data range), so the model's `auto` domain is the
