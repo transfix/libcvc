@@ -828,8 +828,10 @@ void hook_before_terminate_end(process &p) {
   // frames would have left it.
   intrinsics_context ctx;
   g_hook.home->begin_request();
+  // The request views its key's text, so the key outlives it.
+  const value_t key(std::string("leak"));
   detail::home_request req;
-  detail::build_request(req, *g_hook.home, ctx, value_t(std::string("leak")), lock_mode::exclusive);
+  detail::build_request(req, *g_hook.home, ctx, key, lock_mode::exclusive);
   g_hook.home->try_enter(p, req, "");
 }
 
@@ -1544,11 +1546,11 @@ namespace {
 std::size_t random_ops_regular() {
   if (const char *v = std::getenv("CVC_LOCKS_RANDOM_OPS"); v && *v)
     return static_cast<std::size_t>(std::strtoull(v, nullptr, 10));
-  if (under_sanitizer())
-    return 1000;
   // With every invariant checked after every step, a CI runner does about 25 operations a second
   // on the default cache (the check walks the trie); 3000 fit its 240 s with room. The deep sizes
   // are LocksStress's.
+  if (under_sanitizer())
+    return 1000;
 #ifdef NDEBUG
   return 3000;
 #else
