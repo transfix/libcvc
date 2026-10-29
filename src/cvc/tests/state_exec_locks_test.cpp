@@ -1548,10 +1548,12 @@ std::size_t random_ops_regular() {
     return static_cast<std::size_t>(std::strtoull(v, nullptr, 10));
   // Every invariant is checked after every step (the check walks the trie). On a CI runner 3000
   // operations take 5-13 s in Release, and a Debug build is 25-50 times slower: 2000 took 150-240 s
-  // there, and past ctest's 300 s on a loaded runner. The deep sizes are LocksStress's.
+  // there, and past ctest's 300 s on a loaded runner. The deep sizes are LocksStress's. By the
+  // optimizer, not NDEBUG, which a Debug build can define too: CVC_ENABLE_MESHER's did, and the
+  // Debug package lanes ran 3000 at 12 a second.
   if (under_sanitizer())
     return 1000;
-#ifdef NDEBUG
+#if defined(__OPTIMIZE__) || (defined(_MSC_VER) && !defined(_DEBUG))
   return 3000;
 #else
   return 500;
