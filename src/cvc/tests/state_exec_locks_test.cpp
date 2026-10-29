@@ -10,6 +10,7 @@
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/state/state_exec/builtins.h>
+#include <cvc/state/state_exec/heap.h>
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/process.h>
 #include <cvc/state/state_exec/scheduler.h>
@@ -31,6 +32,18 @@ bool under_sanitizer() {
   const char *v = std::getenv("CVC_LOCKS_SANITIZER");
   return v && *v && std::string(v) != "0";
 }
+
+// A program's closure bound in the scope it captured (a defun, a lambda set at top level) and that
+// scope hold each other, and only the cycle collector frees them
+// (docs/STATE_EXEC_DEVELOPER_GUIDE.md, "Reference cycles"). These tests step the schedulers by
+// hand, so nothing collects; once every world is gone, one collection leaves LeakSanitizer only
+// real leaks to report.
+class collect_cycles_at_exit : public ::testing::Environment {
+public:
+  void TearDown() override { collect_cycles(); }
+};
+[[maybe_unused]] ::testing::Environment *const g_collect_cycles =
+    ::testing::AddGlobalTestEnvironment(new collect_cycles_at_exit);
 
 // One app and one scheduler of the given kind ("sync" or "async"), with one intrinsics context per
 // program. state-watch registers its handler on ctx->pid and takes the watch id from ctx->proc
