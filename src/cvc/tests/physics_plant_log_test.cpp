@@ -757,10 +757,25 @@ TEST(PlantLogPower, LogsTheEnergyEachTickDrew) {
   }
 }
 
+// Whether the vehicle touched another one during RUN, or took an impact (a horizontal acceleration
+// past kImpactG, more than its tires give). The planar power model has no collisions and no wheel
+// spin (docs/NAV_TRAINING.md), and a city vehicle that another hits can stall against it with its
+// wheels spinning: energy that no term of the model's state sees.
+namespace {
+bool hit_another_vehicle(const std::vector<planar_sample> &run) {
+  for (std::size_t t = 1; t < run.size(); ++t)
+    if (run[t].vehicle_contact >= 0 || std::hypot(run[t].a_lat, run[t].a_lon) > kImpactG * kG)
+      return true;
+  return false;
+}
+} // namespace
+
 // The P8c calibration on Jolt. For each vehicle, the power model is fitted to the ledger of four
 // seeds of both scenes, swerve and city, and gives the energy of two held-out seeds. (Fitted on
 // one scene's two seeds, the swerve's held-out totals missed by 12% (Humvee) and 22% (RoboRacer):
-// a seed drives all its agents at one speed, so two seeds cannot tell idle from speed.)
+// a seed drives all its agents at one speed, so two seeds cannot tell idle from speed.) It is
+// judged on the held-out runs it prices, those that hit no other vehicle, which must be most of
+// them; the others are reported. Which runs collide depends on the platform's floating point.
 TEST(PlantLogPowerConvergence, FitsTheLedgerAndPredictsHeldOutSeeds) {
   REQUIRE_JOLT();
   const cvc::nav::coef_mlp net = cvc::nav::coef_mlp::default_biased();
@@ -785,24 +800,38 @@ TEST(PlantLogPowerConvergence, FitsTheLedgerAndPredictsHeldOutSeeds) {
       ++sc;
     }
     const power_fit f = fit_power(fit_runs, dt, d);
-    std::vector<std::vector<planar_sample>> all_held = held[0];
-    all_held.insert(all_held.end(), held[1].begin(), held[1].end());
-    const power_fit h = evaluate_power(all_held, dt, d, f.si);
-    const power_fit hs = evaluate_power(held[0], dt, d, f.si),
-                    hc = evaluate_power(held[1], dt, d, f.si);
+    std::vector<std::vector<std::vector<planar_sample>>> priced(2); // by scene
+    std::vector<std::vector<planar_sample>> hit;
+    for (int s = 0; s < 2; ++s)
+      for (const auto &run : held[s])
+        (hit_another_vehicle(run) ? hit : priced[s]).push_back(run);
+    std::vector<std::vector<planar_sample>> all_priced = priced[0];
+    all_priced.insert(all_priced.end(), priced[1].begin(), priced[1].end());
+    const std::size_t n_held = held[0].size() + held[1].size();
+    const power_fit h = evaluate_power(all_priced, dt, d, f.si);
+    const power_fit hs = evaluate_power(priced[0], dt, d, f.si),
+                    hc = evaluate_power(priced[1], dt, d, f.si);
     std::printf("[power-fit] %s: k_pos %.3f k_neg %.3f p_idle %.1f W c_v %.2f W/(m/s) c_v3 %.4f "
                 "W/(m/s)^3 c_lat %.4f s^2/m | fit r2 %.3f worst run %.1f%% | held-out r2 %.3f "
                 "total %+.2f%% (swerve "
-                "%+.2f%%, city %+.2f%%) worst run %.1f%% (%zu runs)\n",
+                "%+.2f%%, city %+.2f%%) worst run %.1f%% (%zu of %zu runs; %zu hit another "
+                "vehicle)\n",
                 veh, f.si.k_pos, f.si.k_neg, f.si.p_idle, f.si.c_v, f.si.c_v3, f.si.c_lat, f.r2,
                 100.0 * f.worst_run_error, h.r2, 100.0 * h.total_error, 100.0 * hs.total_error,
-                100.0 * hc.total_error, 100.0 * h.worst_run_error, h.runs.size());
+                100.0 * hc.total_error, 100.0 * h.worst_run_error, h.runs.size(), n_held,
+                hit.size());
+    if (!hit.empty())
+      for (const power_run &r : evaluate_power(hit, dt, d, f.si).runs)
+        std::printf("  hit another vehicle: %.0f s %.0f m measured %.4g J model %.4g J (%+.1f%%)\n",
+                    r.seconds, r.distance_m, r.measured_J, r.model_J,
+                    100.0 * (r.model_J - r.measured_J) / r.measured_J);
     if (std::getenv("CVC_POWER_FIT_RUNS"))
       for (const power_run &r : h.runs)
         std::printf("  held run: %.0f s %.0f m (%.2f m/s) measured %.4g J model %.4g J (%+.1f%%)\n",
                     r.seconds, r.distance_m, r.distance_m / std::max(r.seconds, 1e-9), r.measured_J,
                     r.model_J, 100.0 * (r.model_J - r.measured_J) / r.measured_J);
     EXPECT_GT(f.si.k_pos, 0.0) << veh;
+    EXPECT_GE(4 * all_priced.size(), 3 * n_held) << veh << ": most held-out runs hit no vehicle";
     EXPECT_GT(h.r2, 0.8) << veh;
     EXPECT_LT(std::fabs(h.total_error), 0.10) << veh;
   }
