@@ -108,10 +108,12 @@ double nose_ahead_of_rear_axle(const vehicle_desc &d) {
 
 } // namespace
 
-// The plant's ticks are dyn4_plant's substeps under the held command, in SI, on its ground
-// sampler, bit for bit; it starts at rest on the ground.
+// The plant's ticks are dyn4_plant's substeps under the held command (raw, without the driver),
+// in SI, on its ground sampler, bit for bit; it starts at rest on the ground.
 TEST(Dyn4wPlant, StepsAsTheFourWheelPlantDoes) {
-  dyn_4w_plant plant({vehicle_desc::humvee()});
+  dyn_4w_plant_options raw;
+  raw.driver = false;
+  dyn_4w_plant plant({vehicle_desc::humvee()}, raw);
   cvc::nav::plant_state start;
   start.x = 1.5f;
   start.y = -0.5f;
@@ -177,6 +179,7 @@ TEST(Dyn4wPlant, TheBooksClose) {
 TEST(Dyn4wPlant, ClimbsTheGround) {
   const double slope = 0.05;
   dyn_4w_plant_options flat_o, ramp_o, free_o;
+  flat_o.driver = ramp_o.driver = free_o.driver = false; // the model's own response
   ramp_o.plant = free_o.plant = ramp(slope);
   free_o.grade_force = false;
   dyn_4w_plant flat({vehicle_desc::humvee()}, flat_o), up({vehicle_desc::humvee()}, ramp_o),
@@ -208,6 +211,38 @@ TEST(Dyn4wPlant, ClimbsTheGround) {
   EXPECT_LT(b.grade, 0.0);
   EXPECT_NEAR(identity_gap(up, 0), 0.0, 1e-9 * b.flow());
   EXPECT_LT(std::fabs(b.residual) / b.flow(), 5e-3);
+}
+
+// The driver on four wheels (dyn_driver.h): parked on a 10% ramp with nothing asked it holds on
+// its brakes where the raw model rolls back down, and up the ramp it comes within 8% of the speed
+// nav's acceleration (1 m/s^2) makes: the dampers' share of a climb (ClimbsTheGround) is not in the
+// feed-forward, and the trim learns it over a few seconds.
+TEST(Dyn4wPlant, TheDriverHoldsAndClimbs) {
+  const double slope = 0.1, s = slope / std::sqrt(1.0 + slope * slope);
+  dyn_4w_plant_options held, raw;
+  held.plant = raw.plant = ramp(slope);
+  raw.driver = false;
+  const vehicle_desc d = vehicle_desc::humvee();
+  dyn_4w_plant parked({d}, held), rolls({d}, raw), climbs({d}, held);
+  cvc::nav::plant_state start; // heading east: uphill
+  for (dyn_4w_plant *p : {&parked, &rolls, &climbs})
+    p->attach(1, &start, trained_frame(), 0.06);
+  const int ticks = 100; // 6 s
+  const double t = ticks * 0.06;
+  for (int k = 0; k < ticks; ++k) {
+    parked.command(0, 0.0f, 0.0f);
+    rolls.command(0, 0.0f, 0.0f);
+    climbs.command(0, 0.0f, static_cast<float>(1.0 * kS));
+    for (dyn_4w_plant *p : {&parked, &rolls, &climbs})
+      p->advance();
+  }
+  std::printf("  6 s on a 10%% ramp on four wheels: held %.4f m, the raw model rolled %.2f m; "
+              "1 m/s^2 up it: %.3f m/s (nav's %.1f)\n",
+              parked.body(0).x, rolls.body(0).x, climbs.body(0).vx, 1.0 * t);
+  EXPECT_LT(std::fabs(parked.body(0).x), 0.05);
+  EXPECT_LT(rolls.body(0).x, -0.4 * kG * s * t * t / 2.0);
+  EXPECT_NEAR(climbs.body(0).vx, 1.0 * t, 0.08 * 1.0 * t);
+  EXPECT_NEAR(identity_gap(climbs, 0), 0.0, 1e-9 * climbs.books(0).flow());
 }
 
 // In a world the chassis stops at a wall's face, where without one it drives through.
