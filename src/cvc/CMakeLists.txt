@@ -1384,9 +1384,9 @@ endif()
 # are thin adapters over it, so they work identically on both targets. All three TUs are always
 # compiled; the inactive backend #ifdefs to empty, so exactly one make_default_backend() links.
 list(APPEND SOURCE_FILES net/http_client.cpp net/http_client_curl.cpp net/http_client_fetch.cpp
-  net/net_policy.cpp net/credentials.cpp)
+  net/net_policy.cpp net/credentials.cpp net/ws_client.cpp)
 list(APPEND INCLUDE_FILES ../../inc/cvc/net/http_client.h ../../inc/cvc/net/net_policy.h
-  ../../inc/cvc/net/credentials.h)
+  ../../inc/cvc/net/credentials.h ../../inc/cvc/net/ws_client.h)
 
 # Ariadne — the context-agnostic UI/scene DSL core (cvc::ariadne). Pure libcvc:
 # the retained Widget tree, the Runtime + reconcile boundary, and direct
@@ -1571,6 +1571,9 @@ if(EMSCRIPTEN)
   # EXECUTABLE that links it must add -sFETCH=1 and EITHER -sASYNCIFY (main thread, the demo gallery)
   # OR -pthread (off the main thread). Link flags do not propagate out of this static archive; the
   # executable sets them (see examples/CMakeLists.txt).
+  # The WebSocket client (net/ws_client.cpp) uses the browser's WebSocket through Emscripten's
+  # library; unlike the fetch flags this one rides along to every executable that links cvc.
+  target_link_options(cvc INTERFACE "-lwebsocket.js")
   message(STATUS "cvc::net: Emscripten-fetch HTTP backend ENABLED "
                  "(link exes with -sFETCH=1 + -sASYNCIFY or -pthread)")
 else()
