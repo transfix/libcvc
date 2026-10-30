@@ -79,10 +79,12 @@ volume sdf(app &ctx, const geometry &geom,
 // sdf() a slice at a time, for a caller that must not block (fe_lab's load task, stepped on the
 // app's scheduler). SDF_V2 runs its distance transform's stages -- rasterizing the triangles into
 // cells, marking the voxels near the surface, the three 1-D passes, the near and the far
-// distances -- in budgets of units (a cell a triangle touches, a voxel); the result is sdf()'s.
-// SDF_V1 and SDF_IGL run in one step. The geometry is shared, so the stepper may outlive its
-// caller's. step(budget) returns true once the volume is ready for take(); it throws where sdf()
-// would, and after a throw every later step rethrows.
+// distances -- in budgets of units (a cell a triangle touches, a voxel), each step ending where
+// its stage does. SDF_IGL builds its AABB tree and its winding-number hierarchy (a step each),
+// then queries the grid's nodes a range at a time (a unit a node). Either way the result is
+// sdf()'s, bit for bit. SDF_V1 runs in one step. The geometry is shared, so the stepper may
+// outlive its caller's. step(budget) returns true once the volume is ready for take(); it throws
+// where sdf() would, and after a throw every later step rethrows.
 class sdf_stepper {
 public:
   sdf_stepper(app &ctx, std::shared_ptr<const geometry> geom, const dimension &dim,
@@ -93,7 +95,9 @@ public:
   bool step(std::size_t budget);
   bool done() const;
   double progress() const;
-  const char *phase() const; // the distance transform's ("cells", ..., "far distances"), "done"
+  // the distance transform's ("cells", ..., "far distances"), SDF_IGL's ("tree", "winding",
+  // "distances"), then "done"
+  const char *phase() const;
   volume take();
 
 private:

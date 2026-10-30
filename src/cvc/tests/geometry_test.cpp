@@ -12,6 +12,7 @@
 #include <cvc/core/exception.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/geometry_file_io.h>
+#include <cvc/geometry/mesh_ops.h>
 #include <cvc/utility/algorithm.h>
 #include <cvc/volume/volmagick.h>
 #include <fstream>
@@ -1508,6 +1509,51 @@ TEST_F(AlgorithmTest, SDFV2Basic) {
 
 // sdf_stepper: the same volume as sdf(SDF_V2), stepped in small budgets, with and without the
 // expanded grid v2 needs for a box tighter than 1.1x the mesh (resampled back).
+// SDF_IGL a range of nodes at a time: sdf()'s volume bit for bit, whatever the budget.
+TEST_F(AlgorithmTest, SDFIglSteppedMatchesOneShot) {
+  if (!mesh_ops_available())
+    GTEST_SKIP() << "a build without CVC_ENABLE_LIBIGL";
+  auto cube = std::make_shared<geometry>();
+  const double c[8][3] = {{-1, -1, -1}, {1, -1, -1}, {1, 1, -1}, {-1, 1, -1},
+                          {-1, -1, 1},  {1, -1, 1},  {1, 1, 1},  {-1, 1, 1}};
+  for (const auto &p : c)
+    cube->points().push_back({{p[0], p[1], p[2]}});
+  const int tris[12][3] = {{0, 2, 1}, {0, 3, 2}, {4, 5, 6}, {4, 6, 7}, {0, 1, 5}, {0, 5, 4},
+                           {2, 3, 7}, {2, 7, 6}, {0, 3, 7}, {0, 7, 4}, {1, 2, 6}, {1, 6, 5}};
+  for (const auto &t : tris)
+    cube->tris().push_back({{cvc::index_t(t[0]), cvc::index_t(t[1]), cvc::index_t(t[2])}});
+  const dimension dim(17, 13, 15);
+  for (const bounding_box &bbox :
+       {bounding_box(-2.0, -1.5, -1.7, 2.0, 1.5, 1.7), bounding_box(0, 0, 0, 0, 0, 0)})
+    for (const bool flip : {false, true})
+      for (const std::size_t budget : {std::size_t(0), std::size_t(1), std::size_t(97)}) {
+        const volume ref = sdf(ctx, *cube, dim, bbox, SDF_IGL, flip);
+        sdf_stepper s(ctx, cube, dim, bbox, SDF_IGL, flip);
+        double last = 0.0;
+        std::string phases;
+        while (!s.step(budget)) {
+          EXPECT_GE(s.progress(), last) << s.phase();
+          last = s.progress();
+          if (phases.find(s.phase()) == std::string::npos)
+            phases += std::string(s.phase()) + ";";
+        }
+        EXPECT_EQ(s.progress(), 1.0);
+        EXPECT_STREQ(s.phase(), "done");
+        EXPECT_NE(phases.find("distances"), std::string::npos) << phases;
+        const volume got = s.take();
+        ASSERT_EQ(got.XDim(), ref.XDim());
+        ASSERT_EQ(got.ZDim(), ref.ZDim());
+        EXPECT_EQ(got.boundingBox().minx, ref.boundingBox().minx);
+        EXPECT_EQ(got.boundingBox().maxz, ref.boundingBox().maxz);
+        EXPECT_EQ(got.desc(), ref.desc());
+        const uint64 n = ref.XDim() * ref.YDim() * ref.ZDim();
+        uint64 differ = 0;
+        for (uint64 i = 0; i < n; ++i)
+          differ += got(i) != ref(i) ? 1 : 0;
+        EXPECT_EQ(differ, 0u) << "flip " << flip << ", budget " << budget;
+      }
+}
+
 TEST_F(AlgorithmTest, SDFV2SteppedMatchesOneShot) {
   auto cube = std::make_shared<geometry>();
   const double c[8][3] = {{-1, -1, -1}, {1, -1, -1}, {1, 1, -1}, {-1, 1, -1},

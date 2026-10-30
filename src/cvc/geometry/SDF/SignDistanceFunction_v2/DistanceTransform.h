@@ -64,8 +64,10 @@ public:
 
 	// A slice at a time: made with `deferred`, the constructor does none of init()'s work, and
 	// step(budget) does init() and then transform() in about `budget` units (a cell a triangle
-	// touches, a voxel, a voxel of a 1-D line), returning true once the distances are done. The
-	// loops are the same as init()'s and transform()'s, so the result is too.
+	// touches, a voxel, a voxel of a 1-D line, a triangle a near voxel tests), returning true once
+	// the distances are done. A bounded step ends where its stage does, so the caller can size the
+	// next to the next stage's costs. The loops are the same as init()'s and transform()'s, so the
+	// result is too.
 	struct deferred_t {};
 	DistanceTransform(cvc::app& ctx, FaceVertSet3D& fvs, int dim[3], const float center[3],
 					  float Distance, float sx, float sy, float sz, deferred_t);
@@ -96,6 +98,9 @@ public:
 
 	//////////////////////////////////////////////////////////////////////////
 	float computeNearDistance(int ix, int iy, int iz, Point3f& pnt);
+	// The triangles of the cells around voxel (ix, iy, iz), counted with repeats: about the work
+	// computeNearDistance() does for it.
+	std::size_t nearCellTriangles(int ix, int iy, int iz) const;
 
 	//////////////////////////////////////////////////////////////////////////
 	double distance2Triangle(const Point3f& pnt, int nt, Point3f& ne);

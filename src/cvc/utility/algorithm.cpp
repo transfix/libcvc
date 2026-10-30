@@ -847,6 +847,51 @@ struct sdf_stepper::impl {
   std::unique_ptr<FaceVertSet3D> fvs;
   std::unique_ptr<DistanceTransform> dt;
   std::optional<volume> out;
+  // SDF_IGL: sdf_igl's locator (its winding-number hierarchy built a step after its tree), the
+  // grid, and the next node to query.
+  std::optional<mesh_locator> locator;
+  bool winding = false;
+  std::optional<volume> grid;
+  uint64 node = 0;
+
+  // sdf()'s SDF_IGL (sdf_igl) a range of nodes at a time: the same query points, each node's
+  // distance its own, so the same volume.
+  void igl_step(std::size_t budget) {
+    if (!locator) {
+      // sdf()'s rule: an unset (all-zero) box means the geometry's extents.
+      const bool unset = bbox.minx == 0 && bbox.miny == 0 && bbox.minz == 0 && bbox.maxx == 0 &&
+                         bbox.maxy == 0 && bbox.maxz == 0;
+      locator.emplace(*geom);
+      grid.emplace(*ctx, dim, Float, unset ? geom->extents() : bbox);
+      return;
+    }
+    volume &cv = *grid;
+    if (!winding) { // the hierarchy is built on first use: a query of the first node
+      locator->winding_number(geometry::points_t(1, {{cv.XMin(), cv.YMin(), cv.ZMin()}}));
+      winding = true;
+      return;
+    }
+    const uint64 nx = cv.XDim(), ny = cv.YDim(), n = nx * ny * cv.ZDim();
+    const uint64 count = budget == 0 ? n - node : std::min<uint64>(budget, n - node);
+    geometry::points_t q(static_cast<std::size_t>(count));
+    for (uint64 o = 0; o < count; ++o) {
+      const uint64 id = node + o, i = id % nx, j = (id / nx) % ny, k = id / (nx * ny);
+      q[o] = {{cv.XMin() + double(i) * cv.XSpan(), cv.YMin() + double(j) * cv.YSpan(),
+               cv.ZMin() + double(k) * cv.ZSpan()}};
+    }
+    const std::vector<double> d = locator->signed_distance(q);
+    float *values = reinterpret_cast<float *>(*cv);
+    for (uint64 o = 0; o < count; ++o)
+      values[node + o] = float(flip ? -d[o] : d[o]);
+    node += count;
+    if (node < n)
+      return;
+    cv.desc("Signed Distance Function - libigl (exact distance, winding-number sign)");
+    out.emplace(cv);
+    grid.reset();
+    locator.reset();
+    ready = true;
+  }
 
   // sdf()'s SDF_V2 setup: the grid's box (expanded to the 1.1 scale v2 needs, the result resampled
   // back), then sdf_library_v2's surface and scale factors, the transform deferred.
@@ -929,6 +974,10 @@ bool sdf_stepper::step(std::size_t budget) {
   if (s.ready)
     return true;
   try {
+    if (s.algorithm == SDF_IGL) {
+      s.igl_step(budget);
+      return s.ready;
+    }
     if (s.algorithm != SDF_V2) {
       s.out.emplace(sdf(*s.ctx, *s.geom, s.dim, s.bbox, s.algorithm, s.flip));
       s.ready = true;
@@ -941,6 +990,8 @@ bool sdf_stepper::step(std::size_t budget) {
   } catch (...) {
     s.error = std::current_exception();
     s.dt.reset();
+    s.locator.reset();
+    s.grid.reset();
     throw;
   }
   return s.ready;
@@ -949,15 +1000,25 @@ bool sdf_stepper::step(std::size_t budget) {
 bool sdf_stepper::done() const { return _impl->ready || _impl->error; }
 
 double sdf_stepper::progress() const {
-  if (_impl->ready)
+  const impl &s = *_impl;
+  if (s.ready)
     return 1.0;
-  return _impl->dt ? _impl->dt->progress() : 0.0;
+  if (s.algorithm == SDF_IGL) {
+    if (!s.grid)
+      return 0.0;
+    const double n = double(s.grid->XDim() * s.grid->YDim() * s.grid->ZDim());
+    return (s.winding ? 0.1 : 0.05) + 0.9 * double(s.node) / std::max(1.0, n);
+  }
+  return s.dt ? s.dt->progress() : 0.0;
 }
 
 const char *sdf_stepper::phase() const {
-  if (_impl->ready || _impl->error)
+  const impl &s = *_impl;
+  if (s.ready || s.error)
     return "done";
-  return _impl->dt ? _impl->dt->phase() : "cells";
+  if (s.algorithm == SDF_IGL)
+    return !s.locator ? "tree" : s.winding ? "distances" : "winding";
+  return s.dt ? s.dt->phase() : "cells";
 }
 
 volume sdf_stepper::take() {

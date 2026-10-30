@@ -198,7 +198,7 @@ bool DistanceTransform::advance(std::size_t budget, int until) {
 					p_Data->vert2index(nv, i, j, k);
 					float d = computeNearDistance(i, j, k, _closest[nv]);
 					p_Data->setValue(nv, d);
-					spend(20);
+					spend(1 + nearCellTriangles(i, j, k));
 				} else {
 					spend(1);
 				}
@@ -247,7 +247,10 @@ bool DistanceTransform::advance(std::size_t budget, int until) {
 }
 
 bool DistanceTransform::step(std::size_t budget) {
-	return advance(budget == 0 ? static_cast<std::size_t>(-1) : budget, DT_DONE);
+	if (budget == 0)
+		return advance(static_cast<std::size_t>(-1), DT_DONE);
+	advance(budget, std::min(_stage + 1, int(DT_DONE))); // to the end of this stage at most
+	return _stage >= DT_DONE;
 }
 
 double DistanceTransform::progress() const {
@@ -452,6 +455,19 @@ void DistanceTransform::transform()
 		advance(static_cast<std::size_t>(-1), until);
 		_ctx.threadProgress(note[until - DT_Y]);
 	}
+}
+
+std::size_t DistanceTransform::nearCellTriangles(int ix, int iy, int iz) const
+{
+	int dim[3];
+	p_Data->getDim(dim);
+	std::size_t n = 0;
+	for(int ck = iz - 1; ck <= iz; ck++)
+		for(int cj = iy - 1; cj <= iy; cj++)
+			for(int ci = ix - 1; ci <= ix; ci++)
+				if(ci >= 0 && ci < dim[0]-1 && cj >= 0 && cj < dim[1]-1 && ck >= 0 && ck < dim[2]-1)
+					n += static_cast<std::size_t>(p_Cells[p_Data->index2cell(ci, cj, ck)].triList.length());
+	return n;
 }
 
 float DistanceTransform::computeNearDistance(int ix, int iy, int iz, Point3f& nearPnt)
