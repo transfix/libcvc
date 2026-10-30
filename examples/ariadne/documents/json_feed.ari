@@ -11,7 +11,7 @@
 #
 #   ari examples/ariadne/documents/json_feed.ari
 #
-# docs/ARIADNE.md §10.3 has the verbs.
+# docs/ARIADNE.md §10.4 has the verbs.
 
 meta:
   name: JSON feed

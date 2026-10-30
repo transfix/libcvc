@@ -843,7 +843,7 @@ nil. It checks the whole document before it sets anything, so a malformed docume
 nothing. Its errors name the line, as in `state-from-json: line 3: expected ':'`.
 
 `state-set-tree` writes a value as the subtree at its path, so Ariadne's binds and `repeat:` can
-show it (docs/ARIADNE.md §10.3):
+show it (docs/ARIADNE.md §10.4):
 
 - A dict's keys and a list's indices (`0`, `1`, ...) name child nodes. A scalar is a node's
   value as `state-set` writes it (`true`/`false`, digits, the string itself; nil is the empty

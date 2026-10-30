@@ -86,7 +86,7 @@ Reactive slots — `visible_when`, `enabled_when` / `disabled_when`, computed `b
   *readers* only (`kAllowed`, [`ariadne.cpp:417`](../src/cvc/ariadne/ariadne.cpp)), plus
   `(has? "name")`, which asks what the host provides
   ([§5.7](#57-requires-and-has--what-a-document-needs-from-its-host)). `json-parse` and
-  `json-encode` are on it ([§10.3](#103-json-replies)); `str-concat` is not, so a computed
+  `json-encode` are on it ([§10.4](#104-json-replies)); `str-concat` is not, so a computed
   label joins its parts with `string.join`.
 - The special-form gate admits only `if / begin / let / while / for / lambda / defun /
   set / return / quote / yield / break` (`kAllowedForms`,
@@ -1649,7 +1649,7 @@ A host of its own turns the network on with `AppRuntime::enable_net(NetHostConfi
 destroyed. `register_net_intrinsics(app)` alone still registers unchecked verbs with no
 credentials, for an embedding program that vouches for its documents.
 
-### 10.3 JSON replies
+### 10.4 JSON replies
 
 A REST reply's body is text. Three verbs turn it into widgets
 ([STATE_EXEC_DEVELOPER_GUIDE.md](STATE_EXEC_DEVELOPER_GUIDE.md) §2, "JSON", has the details):
@@ -1676,6 +1676,8 @@ windows:
             bind: feed.items.{i}.text         # each element's field
 ```
 
+The request needs the host to allow its origin ([§10.3](#103-the-hosts-network-the-allowlist-and-credentials),
+`ari --net-allow https://example.org`).
 [`examples/ariadne/documents/json_feed.ari`](../examples/ariadne/documents/json_feed.ari) does
 this with a JSON string in place of the request, so it runs anywhere, `ari` included. Its last
 post has accented letters, CJK and an emoji: in both terminal backends a wide glyph takes two
