@@ -471,6 +471,10 @@ Printing is not part of the grammar. `to_string` round-trip (escaping strings, s
 
 ## Not in the grammar
 
+`with-lock` (docs/STATE_EXEC_LOCKS.md) needs nothing here: it is recognized by the value its name
+is bound to, not by the grammar, and its options (`:shared`, `:timeout`, `:as`, ...) are plain
+symbols that start with `:`.
+
 These were considered and left out. Each would need its own decision:
 
 - block comments (`#| … |#`) and datum comments (`#;`);

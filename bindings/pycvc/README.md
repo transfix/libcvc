@@ -319,7 +319,8 @@ pycvc.encode_evaluator_state(root.child("snap"), st)     # snapshot, decode_... 
 ctx = pycvc.intrinsics_context()            # state-get, msg-send, spawn, ... over a tree
 ctx.sched, ctx.root = sched, root
 env = pycvc.builtins.make_default_environment()
-pycvc.register_intrinsics(env, ctx)         # each function keeps ctx alive
+pycvc.register_intrinsics(env, ctx)         # each function (and with-lock) keeps ctx alive
+ctx.lock_default_timeout = 1.0              # with-lock with no :timeout gives up after 1 s
 ```
 
 Contract tests: `test_pycvc_exec.py`, `test_pycvc_state_exec.py`,
