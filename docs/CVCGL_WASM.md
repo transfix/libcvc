@@ -636,11 +636,10 @@ All three give the files the page used to pin by SRI hash on jsDelivr. The galle
 with the page: `build-pages.py` copies what `<page>.page-files` lists.
 
 **The tvision page.** `ari_tvision.html` is the same page on the tvision desktop. It needs
-cvcpkg's tvision with its browser console (the `tvision` recipe's wasm column, cvc.4). The
-recipe is merged but the column is not on the catalog yet. Built from the recipe into the deps
-prefix, it gives the arigl-web package its `ari_tvision` page. The headless test then runs the
-document set there too. The gallery adds the page the same way once the bundle is published.
-Natively, `ari run --backend tvision` runs the same documents.
+cvcpkg's tvision with its browser console (`tvision` cvc.4, wasm column, on the catalog since
+2026-10-30). The arigl-web package depends on it, so its wasm column has the page, and the
+headless test runs the document set there too. The gallery adds the page whenever its deps
+prefix has tvision. Natively, `ari run --backend tvision` runs the same documents.
 
 **Testing.**
 

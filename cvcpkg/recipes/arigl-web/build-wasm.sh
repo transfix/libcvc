@@ -92,8 +92,8 @@ TARGETS=(arigl)
 ARI_PAGES=()
 if [[ "$ARI" == "ON" ]]; then
   ARI_PAGES=(ari)
-  # tvision with its browser console (cvcpkg tvision cvc.4 on, the wasm column) is optional, as in
-  # the gallery: without it the package has no ari_tvision page.
+  # tvision with its browser console (cvcpkg tvision cvc.4 on, the wasm column; a declared dep)
+  # adds the tvision desktop's page; a deps prefix without it builds the package without the page.
   if grep -q '^CVC_ARIADNE_TVISION_ENABLED:INTERNAL=ON' "$CVC_BUILD_DIR/CMakeCache.txt"; then
     ARI_PAGES+=(ari_tvision)
   else
