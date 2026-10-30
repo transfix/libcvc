@@ -844,7 +844,7 @@ validates the block but not the arguments, and declared arguments take their def
 **Who can see them.** Only the outermost document takes arguments. A `load:`-mounted
 module's own `args:` is ignored with a warning. Programs are chrooted to their own
 subtree (§7), so a module sees neither `argv` nor `args` unless its parent grants a
-read-only hole (§7.4). A hole links one node:
+read-only hole (§7.4). A hole grants a node and everything under it:
 - `link: {args: {to: args, mode: ro}}` hands the module the dict,
   `(get-attr (state-data-get "args") "room")`;
 - `link: {room: {to: args.room, mode: ro}}` hands it one argument, `(state-get "room")`.
@@ -1161,11 +1161,32 @@ A mounted module is sandboxed to its sub-prefix. Access to the parent's state is
   writable ([`loader.cpp:1038`](../src/cvc/ariadne/loader.cpp)); anything else is
   read-only. A hole whose name starts with `/` is rejected.
 
-At reconcile, `wire_holes` ([`ariadne.cpp:931`](../src/cvc/ariadne/ariadne.cpp)) plants a
+At reconcile, `wire_holes` ([`ariadne.cpp`](../src/cvc/ariadne/ariadne.cpp)) plants a
 transparent link at `resolve_bind(sub_prefix, name)` pointing to
 `resolve_bind(parent_prefix, target)`, with writability set from the mode. Reads see
-through the link; a read-only hole keeps writes local to the module. Holes are re-planted
-every reconcile, so a re-mount can never inherit a stale grant. A fragment may declare
+through the link; a read-only hole keeps writes local to the module. Holes are torn down
+(`clearLink`) and re-planted every reconcile, so a re-mount can never inherit a stale grant.
+
+A hole grants the target's whole subtree, not only the node it names. With
+`link: {tree: search.res}`, the module's `bind: tree.packages.0.name`,
+`(state-get "tree.packages.0.name")`, `(state-children "tree.packages")` and
+`(state-data-get "tree.meta")` all reach the parent's `search.res.…`, including keys the
+parent writes after the mount. Paths are resolved by `cvc::state::findThroughLinks` (reads)
+and `childThroughLinks` (writes) ([`state.h`](../inc/cvc/state/state.h)), which follow a
+transparent link on every hop of the path; Ariadne binds (`bind.h`) and the state_exec
+`state-*` natives use them. The mode covers the whole subtree:
+
+- `rw`: a write under the hole (`state-set`, `state-data-set`, `state-from-json`, the
+  atomics, a widget commit) lands on the target's descendant, created when absent.
+- `ro`: a write under the hole lands on the hole's own local child and never touches the
+  target. Reads keep seeing the target, so the local copy is shadowed. The atomics
+  (`state-cas`, `state-swap`, `state-incr`) refuse instead (`read_only_error`), since their
+  write would not land on the node a read sees.
+
+Default-deny still holds. Paths have no parent step, so a hole reaches only its target and
+what is under it; a transparent link the parent keeps inside that subtree is followed (it is
+part of what the parent granted), an opaque one is not. `state-delete`, the expiry natives
+and `state-watch` still act on the physical path and do not reach through a hole. A fragment may declare
 the holes it expects with `needs:`; an ungranted expectation warns and the fragment falls
 back to a local (fail-safe) binding. A per-mount `init:` runs once at the sub-prefix
 **after** the holes are wired.

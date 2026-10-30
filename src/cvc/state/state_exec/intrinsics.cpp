@@ -137,23 +137,21 @@ void require_sched(const intrinsics_context *ctx, const char *name) {
 // ---------------------------------------------------------------------------
 
 namespace {
-// Follow a TRANSPARENT link to its terminal target for a READ. This is the sanctioned
-// cross-subtree channel (roadmap §7.8.3): a chrooted program cannot NAME anything outside its
-// subtree, but the host may plant a transparent link node inside it whose target lies elsewhere
-// (a "named hole"), and a read of that node should see THROUGH to the target — matching what a
-// write already does (state::value(v) routes through a writable transparent link). A non-link, an
-// opaque link, or a broken / cyclic / budget-exhausted transparent link stays put (the same
-// fallback resolvedValue() documents), so this only changes behaviour for a resolvable
-// transparent link — where pass-through is the whole point. Path traversal itself still does NOT
-// descend through a link (findDescendant stops at the link node), so this reaches the target's
-// value/children/data, not a deeper path spelled through the link.
-cvc::state *read_through_link(cvc::state *node) {
-  if (node && node->isLink() && node->linkMode() == cvc::state::link_mode::transparent) {
-    const cvc::state::link_resolution lr = node->resolveLink();
-    if (lr.kind == cvc::state::link_resolution_kind::resolved && lr.target)
-      return lr.target;
-  }
-  return node;
+// The node a READ of `path` sees. A transparent link is the sanctioned cross-subtree channel
+// (roadmap §7.8.3): a chrooted program cannot NAME anything outside its subtree, but the host may
+// plant a transparent link node inside it whose target lies elsewhere (a "named hole"). A read
+// sees through it on every hop, so "hole" reads the target and "hole.a" the target's child "a",
+// matching what a write does (state::childThroughLinks + value(v) route through a writable link).
+// A non-link, an opaque link, or a broken / cyclic / budget-exhausted transparent link stays put
+// (the same fallback resolvedValue() documents). nullptr when a segment is absent.
+cvc::state *read_node(intrinsics_context *ctx, const std::string &path) {
+  return ctx->root->findThroughLinks(path);
+}
+
+// The node a WRITE of `path` lands on, made when absent: through a writable transparent link on
+// the target, through a read-only one on the link node's own (local) children.
+cvc::state &write_node(cvc::state *root, const std::string &path) {
+  return root->childThroughLinks(path);
 }
 } // namespace
 
@@ -161,10 +159,10 @@ value_t intrinsic_state_get(intrinsics_context *ctx, std::span<const value_t> ar
   expect_exact(args, 1, "state-get");
   require_root(ctx, "state-get");
   auto &path = as_string(args[0], "state-get");
-  auto *node = ctx->root->findDescendant(path);
+  auto *node = read_node(ctx, path);
   if (!node)
     return nil_value;
-  return value_t(read_through_link(node)->value());
+  return value_t(node->value());
 }
 
 value_t intrinsic_state_set(intrinsics_context *ctx, std::span<const value_t> args) {
@@ -179,20 +177,20 @@ value_t intrinsic_state_set(intrinsics_context *ctx, std::span<const value_t> ar
     // ("Deep data on the executor"); the node is written once the whole string is ready.
     cvc::state *root = ctx->root;
     return run_data_job(make_print_job(args[1]), [root, path = path](value_t printed) {
-      (*root)(path).value(std::get<std::string>(printed.v));
+      write_node(root, path).value(std::get<std::string>(printed.v));
       return nil_value;
     });
   }
-  // operator() creates child nodes as needed
-  (*ctx->root)(path).value(coerce_state_string(args[1]));
+  // childThroughLinks creates child nodes as needed
+  write_node(ctx->root, path).value(coerce_state_string(args[1]));
   return nil_value;
 }
 
-// The node an atomic native writes: `path` under the chroot, made when absent.
+// The node an atomic native writes: `path` under the chroot, made when absent. It must be the node
+// a read sees, so a path through a read-only transparent link is refused (read_only_error) rather
+// than taking the write on the link's own children.
 cvc::state &atomic_node(intrinsics_context *ctx, const std::string &path) {
-  if (cvc::state *node = ctx->root->findDescendant(path))
-    return *node;
-  return (*ctx->root)(path);
+  return ctx->root->childThroughLinks(path, /*refuse_read_only=*/true);
 }
 
 // (state-cas path expected new): #t when the value equalled `expected` and is now `new` (an equal
@@ -204,13 +202,9 @@ value_t intrinsic_state_cas(intrinsics_context *ctx, std::span<const value_t> ar
   const auto &path = as_string(args[0], "state-cas");
   const std::string expected = atomic_scalar(args[1], "state-cas");
   const std::string desired = atomic_scalar(args[2], "state-cas");
-  cvc::state *node = ctx->root->findDescendant(path);
-  if (!node) {
-    if (!expected.empty())
-      return value_t(false);
-    node = &(*ctx->root)(path);
-  }
-  return value_t(node->compareAndSetValue(expected, desired));
+  if (!read_node(ctx, path) && !expected.empty())
+    return value_t(false);
+  return value_t(atomic_node(ctx, path).compareAndSetValue(expected, desired));
 }
 
 // (state-swap path new): the value it replaced, nil when the node was absent or "".
@@ -271,10 +265,10 @@ value_t intrinsic_state_children(intrinsics_context *ctx, std::span<const value_
   expect_exact(args, 1, "state-children");
   require_root(ctx, "state-children");
   auto &path = as_string(args[0], "state-children");
-  auto *node = ctx->root->findDescendant(path);
+  auto *node = read_node(ctx, path);
   if (!node)
     return make_list();
-  auto names = read_through_link(node)->children();
+  auto names = node->children();
   std::vector<value_t> result;
   result.reserve(names.size());
   for (auto &n : names)
@@ -286,7 +280,7 @@ value_t intrinsic_state_exists(intrinsics_context *ctx, std::span<const value_t>
   expect_exact(args, 1, "state-exists");
   require_root(ctx, "state-exists");
   auto &path = as_string(args[0], "state-exists");
-  return value_t(ctx->root->findDescendant(path) != nullptr);
+  return value_t(read_node(ctx, path) != nullptr);
 }
 
 value_t intrinsic_state_delete(intrinsics_context *ctx, std::span<const value_t> args) {
@@ -306,10 +300,10 @@ value_t intrinsic_state_data_get(intrinsics_context *ctx, std::span<const value_
   expect_exact(args, 1, "state-data-get");
   require_root(ctx, "state-data-get");
   auto &path = as_string(args[0], "state-data-get");
-  auto *node = ctx->root->findDescendant(path);
+  auto *node = read_node(ctx, path);
   if (!node)
     return nil_value;
-  auto d = read_through_link(node)->data();
+  auto d = node->data();
   if (d.empty())
     return nil_value;
   // If the payload is a DSL value_t (the shape state-data-set stores), return a DEEP COPY
@@ -353,9 +347,9 @@ value_t intrinsic_state_data_set(intrinsics_context *ctx, std::span<const value_
   // back as `bytes` here (state-data-get, above). Every other value_t is stored as-is, so
   // structured data (lists/dicts/scalars/text strings) round-trips via the value_t path.
   if (const bytes_value *b = std::get_if<bytes_value>(&args[1].v))
-    (*ctx->root)(path).data(boost::any(b->data));
+    write_node(ctx->root, path).data(boost::any(b->data));
   else
-    (*ctx->root)(path).data(boost::any(args[1]));
+    write_node(ctx->root, path).data(boost::any(args[1]));
   return nil_value;
 }
 
@@ -454,10 +448,10 @@ value_t intrinsic_state_json(intrinsics_context *ctx, std::span<const value_t> a
   expect_exact(args, 1, "state-json");
   require_root(ctx, "state-json");
   auto &path = as_string(args[0], "state-json");
-  cvc::state *node = ctx->root->findDescendant(path);
+  cvc::state *node = read_node(ctx, path);
   if (!node)
     return nil_value;
-  return run_data_job(std::make_unique<state_json_job>(*read_through_link(node)));
+  return run_data_job(std::make_unique<state_json_job>(*node));
 }
 
 value_t intrinsic_state_from_json(intrinsics_context *ctx, std::span<const value_t> args) {
@@ -465,7 +459,7 @@ value_t intrinsic_state_from_json(intrinsics_context *ctx, std::span<const value
   require_root(ctx, "state-from-json");
   auto &path = as_string(args[0], "state-from-json");
   auto &doc = as_string(args[1], "state-from-json");
-  cvc::state *node = write_through_link(&(*ctx->root)(path));
+  cvc::state *node = write_through_link(&write_node(ctx->root, path));
   return run_data_job(std::make_unique<state_from_json_job>(*node, doc));
 }
 

@@ -157,6 +157,82 @@ TEST_F(StateTreeIntrinsicsTest, TransparentLinkReadsThroughData) {
   EXPECT_EQ(std::get<std::string>(d.v), "dv");
 }
 
+// A hole on an interior node (an Ariadne `link:` on a subtree): a program chrooted to "mod" reads
+// the target's descendants through it, writes them through a writable one, and keeps its writes
+// local under a read-only one. Nothing outside the target's subtree becomes reachable.
+TEST_F(StateTreeIntrinsicsTest, AHoleExposesTheTargetsDescendantsToReads) {
+  cvc::state &root = cvc::state::instance(app_ctx);
+  root("parent.res.packages.0.name").value(std::string("zstd"));
+  root("parent.res.packages.1.name").value(std::string("lz4"));
+  root("parent.secret").value(std::string("no"));
+  root("mod.tree").linkTo("parent.res", cvc::state::link_mode::transparent);
+  ictx.root = &root("mod");
+  call("state-data-set", {std::string("tree.meta"), value_t(int64_t(3))}); // read-only: local
+  root("parent.res.meta").data(boost::any(value_t(int64_t(4))));
+  EXPECT_EQ(std::get<std::string>(call("state-get", {std::string("tree.packages.0.name")}).v),
+            "zstd");
+  auto ch = call("state-children", {std::string("tree.packages")});
+  auto *lst = std::get_if<list_ptr>(&ch.v);
+  ASSERT_NE(lst, nullptr);
+  ASSERT_NE(*lst, nullptr);
+  // The target's whole subtree by full name (state::children): packages.0, .0.name, .1, .1.name.
+  ASSERT_EQ((*lst)->size(), 4u);
+  EXPECT_EQ(std::get<std::string>((*lst)->at(3).v), "parent.res.packages.1.name");
+  EXPECT_TRUE(std::get<bool>(call("state-exists", {std::string("tree.packages.1.name")}).v));
+  EXPECT_FALSE(std::get<bool>(call("state-exists", {std::string("tree.packages.2")}).v));
+  auto d = call("state-data-get", {std::string("tree.meta")});
+  ASSERT_TRUE(std::holds_alternative<int64_t>(d.v));
+  EXPECT_EQ(std::get<int64_t>(d.v), 4); // the target's, not the local write
+  auto j = call("state-json", {std::string("tree.packages.1")});
+  ASSERT_TRUE(std::holds_alternative<std::string>(j.v));
+  EXPECT_NE(std::get<std::string>(j.v).find("lz4"), std::string::npos);
+  // Default-deny: the parent outside the hole's target is still out of reach.
+  EXPECT_TRUE(call("state-get", {std::string("parent.secret")}).is_nil());
+  EXPECT_TRUE(call("state-get", {std::string("tree.secret")}).is_nil());
+}
+
+TEST_F(StateTreeIntrinsicsTest, AWritableHoleTakesDescendantWritesOnTheTarget) {
+  cvc::state &root = cvc::state::instance(app_ctx);
+  root("parent.res.a").value(std::string("1"));
+  root("mod.tree").linkTo("parent.res", cvc::state::link_mode::transparent).setLinkWritable(true);
+  ictx.root = &root("mod");
+  call("state-set", {std::string("tree.a"), std::string("2")});
+  call("state-set", {std::string("tree.new.leaf"), std::string("x")});
+  call("state-data-set", {std::string("tree.d"), value_t(std::string("dv"))});
+  call("state-incr", {std::string("tree.n")});
+  EXPECT_TRUE(std::get<bool>(
+      call("state-cas", {std::string("tree.a"), std::string("2"), std::string("3")}).v));
+  EXPECT_EQ(root("parent.res.a").value(), "3");
+  EXPECT_EQ(root("parent.res.new.leaf").value(), "x");
+  EXPECT_EQ(root("parent.res.n").value(), "1");
+  EXPECT_FALSE(root("parent.res.d").data().empty());
+  EXPECT_TRUE(root("mod.tree").children().empty()); // nothing landed on the hole
+}
+
+TEST_F(StateTreeIntrinsicsTest, AReadOnlyHoleKeepsDescendantWritesLocal) {
+  cvc::state &root = cvc::state::instance(app_ctx);
+  root("parent.res.a").value(std::string("1"));
+  root("mod.tree").linkTo("parent.res", cvc::state::link_mode::transparent); // read-only
+  ictx.root = &root("mod");
+  call("state-set", {std::string("tree.a"), std::string("2")});
+  call("state-set", {std::string("tree.new"), std::string("x")});
+  call("state-data-set", {std::string("tree.d"), value_t(std::string("dv"))});
+  call("state-from-json", {std::string("tree.j"), std::string("{\"k\": \"v\"}")});
+  EXPECT_EQ(root("parent.res.a").value(), "1");
+  EXPECT_EQ(root.findDescendant("parent.res.new"), nullptr);
+  EXPECT_EQ(root.findDescendant("parent.res.d"), nullptr);
+  EXPECT_EQ(root.findDescendant("parent.res.j"), nullptr);
+  EXPECT_EQ(root.findDescendant("mod.tree.a")->value(), "2"); // the hole's own child
+  // A read still sees the target.
+  EXPECT_EQ(std::get<std::string>(call("state-get", {std::string("tree.a")}).v), "1");
+  // The atomics refuse: their write would not land on the node a read sees.
+  EXPECT_ANY_THROW(call("state-incr", {std::string("tree.n")}));
+  EXPECT_ANY_THROW(call("state-cas", {std::string("tree.a"), std::string("1"), std::string("5")}));
+  EXPECT_ANY_THROW(call("state-swap", {std::string("tree.a"), std::string("5")}));
+  EXPECT_EQ(root("parent.res.a").value(), "1");
+  EXPECT_EQ(root.findDescendant("parent.res.n"), nullptr);
+}
+
 TEST_F(StateTreeIntrinsicsTest, StateDelete) {
   call("state-set", {std::string("del.target"), std::string("bye")});
   EXPECT_TRUE(std::get<bool>(call("state-exists", {std::string("del.target")}).v));

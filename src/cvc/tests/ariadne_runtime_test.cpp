@@ -1708,6 +1708,108 @@ TEST(AriadneMountScope, RepeatedMountLinkTargetsAreIndexed) {
   EXPECT_TRUE(mb.saw("slider_int:Slot=20")); // instance 1 -> fleet.1
 }
 
+// A hole on an interior node hands the module the whole subtree under it: a parsed reply
+// (search.res.packages.{i}.*) the parent fills, read through binds, expressions and children
+// counts. A read-only hole, the cypkg view's shape.
+namespace {
+Widget subtree_view_mount(bool writable) {
+  Widget name = text_bound("Name {i}", "tree.packages.{i}.name");
+  name.repeat = "(int (state-get \"tree.count\"))";
+  Widget ver = text_bound("Ver", "(state-get \"tree.packages.0.version\")");
+  Widget lvl = slider_int("Level", "tree.level", 0, 100, 0);
+  Widget mount;
+  mount.kind = Kind::Group;
+  mount.scope = "includes.view";
+  mount.links.push_back(LinkHole{"tree", "search.res", writable});
+  mount.children = {name, ver, lvl};
+  return mount;
+}
+} // namespace
+
+TEST(AriadneMountScope, LinkHoleExposesTheTargetsSubtree) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  cvc::state &root = cvc::state::instance(app);
+  root("ui.demo.search.res.packages.0.name").value(std::string("zstd"));
+  root("ui.demo.search.res.packages.0.version").value(std::string("1.5"));
+  root("ui.demo.search.res.packages.1.name").value(std::string("lz4"));
+  root("ui.demo.search.res.count").value(2);
+  root("ui.demo.search.res.level").value(7);
+  rt.set_root(group({subtree_view_mount(false)}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("text_value:Name 0=zstd"));
+  EXPECT_TRUE(mb.saw("text_value:Name 1=lz4"));
+  EXPECT_FALSE(mb.saw("text_value:Name 2=")); // exactly the target's children
+  EXPECT_TRUE(mb.saw("text_value:Ver=1.5"));
+  EXPECT_TRUE(mb.saw("slider_int:Level=7"));
+  // A new reply the parent writes later shows through on the next frame.
+  root("ui.demo.search.res.packages.2.name").value(std::string("brotli"));
+  root("ui.demo.search.res.count").value(3);
+  mb.log.clear();
+  rt.render();
+  EXPECT_TRUE(mb.saw("text_value:Name 2=brotli"));
+  // The reads planted nothing under the hole.
+  EXPECT_TRUE(root("ui.demo.includes.view.tree").children().empty());
+}
+
+TEST(AriadneMountScope, ReadOnlySubtreeHoleKeepsWritesLocal) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  cvc::state &root = cvc::state::instance(app);
+  root("ui.demo.search.res.level").value(3);
+  rt.set_root(group({subtree_view_mount(false)}));
+  rt.render();
+  mb.slider_int_ret.committed = true;
+  mb.slider_int_ret.value = 8;
+  rt.render();
+  EXPECT_EQ(root("ui.demo.search.res.level").value(), "3"); // parent untouched
+  ASSERT_NE(root.findDescendant("ui.demo.includes.view.tree.level"), nullptr);
+  EXPECT_EQ(root.findDescendant("ui.demo.includes.view.tree.level")->value(), "8"); // local
+}
+
+TEST(AriadneMountScope, WritableSubtreeHoleWritesTheParent) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  cvc::state &root = cvc::state::instance(app);
+  root("ui.demo.search.res.level").value(3);
+  rt.set_root(group({subtree_view_mount(true)}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("slider_int:Level=3"));
+  mb.slider_int_ret.committed = true;
+  mb.slider_int_ret.value = 8;
+  rt.render();
+  EXPECT_EQ(root("ui.demo.search.res.level").value(), "8");
+  EXPECT_TRUE(root("ui.demo.includes.view.tree").children().empty());
+}
+
+TEST(AriadneMountScope, ReconcileTearsDownASubtreeHole) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  cvc::state &root = cvc::state::instance(app);
+  root("ui.demo.search.res.packages.0.name").value(std::string("zstd"));
+  root("ui.demo.search.res.count").value(1);
+  rt.set_root(group({subtree_view_mount(false)}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("text_value:Name 0=zstd"));
+  // The same module re-mounted without the grant: nothing under the old target is reachable.
+  Widget again = subtree_view_mount(false);
+  again.links.clear();
+  rt.set_root(group({again}));
+  mb.log.clear();
+  rt.render();
+  EXPECT_FALSE(mb.saw("text_value:Name 0=zstd"));
+  EXPECT_FALSE(mb.saw("text_value:Ver=1.5"));
+  EXPECT_EQ(root("ui.demo.search.res.packages.0.name").value(), "zstd");
+}
+
 TEST(AriadneMountScope, MountInitSeedsAtSubPrefix) {
   if (!have_yaml())
     GTEST_SKIP() << "needs yaml";

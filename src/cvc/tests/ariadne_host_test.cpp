@@ -461,6 +461,66 @@ TEST(AriadneDocArgs, AModuleSeesThemOnlyThroughAReadOnlyGrant) {
   EXPECT_EQ(val(app, "ui.docs.p.includes.denied.seen_argv"), "no");
 }
 
+// A hole on an interior node grants the subtree under it: a module's programs read the parent's
+// parsed reply through it, write it only through a read-write grant, and reach nothing else.
+TEST(AriadneLinkHoles, ASubtreeGrantReachesItsDescendantsOnly) {
+  REQUIRE_YAML();
+  const fs::path dir = test_dir("subtree");
+  const fs::path frag = write(
+      dir, "view.ari",
+      "init: |\n"
+      "  (state-set \"first\" (state-get \"tree.packages.0.name\"))\n"
+      "  (state-set \"count\" (length (state-children \"tree.packages\")))\n"
+      "  (state-set \"meta\" (if (state-exists \"tree.meta\")\n"
+      "                        (get-attr (state-data-get \"tree.meta\") \"total\") \"none\"))\n"
+      "  (state-set \"peek\" (if (state-exists \"search.secret\") \"leak\" \"none\"))\n"
+      "  (state-set \"tree.packages.0.seen\" \"yes\")\n"
+      "root:\n  - text: view\n");
+  const fs::path doc = write(dir, "parent.ari",
+                             "meta: {min_libcvc: 3.4.0}\n"
+                             "init: |\n"
+                             "  (state-set \"search.res.packages.0.name\" \"zstd\")\n"
+                             "  (state-set \"search.res.packages.1.name\" \"lz4\")\n"
+                             "  (state-data-set \"search.res.meta\" (dict \"total\" 2))\n"
+                             "  (state-set \"search.secret\" \"s3cret\")\n"
+                             "root:\n"
+                             "  - load: " +
+                                 frag.string() +
+                                 "\n"
+                                 "    as: ro\n"
+                                 "    link:\n"
+                                 "      tree: {to: search.res, mode: ro}\n"
+                                 "  - load: " +
+                                 frag.string() +
+                                 "\n"
+                                 "    as: rw\n"
+                                 "    link:\n"
+                                 "      tree: search.res\n"
+                                 "  - load: " +
+                                 frag.string() +
+                                 "\n"
+                                 "    as: denied\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.p");
+  art.set_backend(be);
+  art.load(doc.string());
+  art.runtime().render(); // the reconcile mounts the modules, wires the holes, runs their init:
+  for (const char *as : {"ro", "rw"}) {
+    const std::string at = std::string("ui.docs.p.includes.") + as + ".";
+    EXPECT_EQ(val(app, at + "first"), "zstd") << as;
+    EXPECT_EQ(val(app, at + "count"), "4") << as; // packages.0, .0.name, .1, .1.name
+    EXPECT_EQ(val(app, at + "meta"), "2") << as;
+    EXPECT_EQ(val(app, at + "peek"), "none") << as; // the parent outside the target stays out
+  }
+  // Only the read-write grant wrote the parent; the read-only one's write stayed in the module.
+  EXPECT_EQ(val(app, "ui.docs.p.search.res.packages.0.seen"), "yes");
+  EXPECT_EQ(val(app, "ui.docs.p.includes.ro.tree.packages.0.seen"), "yes");
+  EXPECT_EQ(val(app, "ui.docs.p.includes.rw.tree.packages.0.seen"), "");
+  EXPECT_EQ(val(app, "ui.docs.p.includes.denied.first"), "");
+  EXPECT_EQ(val(app, "ui.docs.p.includes.denied.count"), "0");
+}
+
 // ── host verbs and init: diagnostics ────────────────────────────────────────────────────────────
 
 TEST(AriadneHostVerbs, EveryRegisteredVerbIsBound) {
