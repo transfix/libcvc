@@ -687,8 +687,9 @@ background pool where there are. Each stage steps (the SDF of an `sdf` source, a
 source's resample to `dim`, the LBIE meshing with its own resample to (2^n+1)^3, the boundary and
 the smooth surface the field shows on, the solve's assembly, factorization and solves; the
 elements view's cut-away and the field view's cut too), so the page stays live and `progress` /
-`phase` move while a job runs. Only reading a file, and a few whole-mesh passes (orienting the
-tetrahedra, their boundary, quality), are one step each. Something must pump the scheduler: every
+`phase` move while a job runs. The mesh's boundary and a solve's boundary vertices step too
+(`cvc::tet_boundary_stepper`). Only reading a file and a few whole-mesh passes (orienting the
+tetrahedra, their quality, libigl's search trees, a solve's AMD ordering) are one step each. Something must pump the scheduler: every
 Ariadne Runtime does. `CVC_SLICED_THREADING=cooperative` in the environment runs every such task
 cooperatively on a native build, the way a single-threaded wasm page runs them.
 
