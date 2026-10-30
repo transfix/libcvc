@@ -224,6 +224,11 @@ public:
   ContentView *content = nullptr;
   std::string id;
   std::string shown_title;
+  // A window the document did not size fits its content on every walk, as in the FTXUI loop
+  // (ARIADNE.md §5.8), in the axes it did not size, until the user resizes it: fitted is the size
+  // the host last gave it, so a size that differs is the user's.
+  bool fit_w = false, fit_h = false;
+  TPoint fitted{0, 0};
 
 private:
   Host &host_;
@@ -359,16 +364,38 @@ struct Host {
     for (const FtxuiBackend::HostedWindow &hw : be.hosted_windows()) {
       seen[hw.id] = true;
       auto it = windows.find(hw.id);
+      // The outer size for a body of the given natural size, on this desktop.
+      const auto fit_w = [&](int content) {
+        return std::max(16, std::min(content + 2, desk->size.x));
+      };
+      const auto fit_h = [&](int content) {
+        return std::max(4, std::min(content + 2, desk->size.y));
+      };
       if (it == windows.end()) {
-        const int w = hw.w > 0 ? hw.w : hw.content_w + 2;
-        const int h = hw.h > 0 ? hw.h : hw.content_h + 2;
-        TRect r(hw.x, hw.y, hw.x + std::max(16, std::min(w, desk->size.x)),
-                hw.y + std::max(4, std::min(h, desk->size.y)));
+        const int w = hw.w > 0 ? std::max(16, std::min(hw.w, desk->size.x)) : fit_w(hw.content_w);
+        const int h = hw.h > 0 ? std::max(4, std::min(hw.h, desk->size.y)) : fit_h(hw.content_h);
+        TRect r(hw.x, hw.y, hw.x + w, hw.y + h);
         auto *win = new ContentWindow(r, *this, hw.id, hw.title, hw.closable);
         win->shown_title = hw.title;
+        win->fit_w = hw.w <= 0;
+        win->fit_h = hw.h <= 0;
+        win->fitted = win->size;
         desk->insert(win);
         it = windows.emplace(hw.id, win).first;
-      } else if (it->second->shown_title != hw.title) {
+      } else if (ContentWindow *win = it->second; win->fit_w || win->fit_h) {
+        if (win->size != win->fitted) { // the user resized it: theirs from now on
+          win->fit_w = win->fit_h = false;
+        } else {
+          const TPoint want{win->fit_w ? fit_w(hw.content_w) : win->size.x,
+                            win->fit_h ? fit_h(hw.content_h) : win->size.y};
+          if (want != win->size) {
+            TRect r(win->origin.x, win->origin.y, win->origin.x + want.x, win->origin.y + want.y);
+            win->locate(r);
+          }
+          win->fitted = win->size;
+        }
+      }
+      if (it->second->shown_title != hw.title) {
         ContentWindow *win = it->second;
         delete[] const_cast<char *>(win->title);
         win->title = newStr(hw.title);

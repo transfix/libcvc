@@ -135,7 +135,9 @@ frame only.
 
 ### 2.2 The action / drain lane
 
-Fire-once handlers (`on:` on a button, a menu item's program) and the resident
+Fire-once handlers (`on:` on a button, a menu item's program, or a bound widget's `on:`, run
+after each committed write: a checkbox or menu tick, a combo or radio pick, a slider's drag end
+or key step, a text field's Enter, a colour edit) and the resident
 handlers (`on_tick` / `on_key` / `on_pointer`) run in the action lane, on the
 **app-wide scheduler** (`app.exec_scheduler()`), **off** the render walk, inside
 `Runtime::drain()` ([`ariadne.cpp:1642`](../src/cvc/ariadne/ariadne.cpp)).
@@ -306,10 +308,11 @@ Three backends ship:
   pressed item, open menu or combo, in-progress text and slider edits, window placement).
   So the whole tree is interactive:
   - **keyboard** — Tab / Shift-Tab (or Up / Down) move focus; Enter / Space activate;
-    Left / Right step a slider or cycle a combo; text fields edit in place; Esc reverts an
-    edit or closes a popup; F10 opens the menu bar.
-  - **mouse** — click to focus or activate, drag a slider, drag a window by its title
-    bar, click `[x]` to close it, click a menu title to open it.
+    Left / Right step a slider or cycle a combo or radio; text fields edit in place; Esc
+    reverts an edit or closes a popup; F10 opens the menu bar. An `autofocus:` widget has focus
+    when it appears (§5.10).
+  - **mouse** — click to focus or activate, pick a radio's option, drag a slider, drag a
+    window by its title bar, click `[x]` to close it, click a menu title to open it.
   - **windows** (`caps.windows = true`) — free, z-ordered, raised on focus, placed from
     `pos:`/`size:` or the persisted `tree.<id>.geometry`; a drag persists back (§11.4). A
     window stops at the screen's edge and scrolls what does not fit (§5.8).
@@ -558,6 +561,21 @@ windows:
 init: (begin (state-set "demo.n" 10) (state-set "demo.frames" 0))
 on_tick: (state-set "demo.frames" (+ (int (state-get "demo.frames")) 1))
 ```
+
+A choice of a few values is a `combo:` (a drop-down) or a `radio:` (every option shown, stacked;
+`radio_row:` side by side). Both take `options:` (a list, or a computed expression), an
+optional parallel `values:` (the key then stores `values[i]`, not the label), `def:` and an
+optional `on:` run after each pick:
+
+```yaml
+      - radio_row: Samples
+        bind: volren.supersample
+        options: [Off, 2x, 4x]
+        values: [0, 2, 4]
+        on: (state-set "demo.dirty" 1)
+```
+
+A backend with no radio buttons draws a radio as a combo.
 
 ### 5.4 `scene:` sources and custom node types
 
@@ -963,11 +981,18 @@ How each backend does it:
   widgets each frame, its labeled widgets at the width ImGui gives an auto-resizing window's items
   (16 font sizes), and a row-split pane as wide as its own widgets. A window with a size gets a
   horizontal scroll bar as well as ImGui's vertical one, and a long label shrinks its slider,
-  input, combo or colour widget rather than run past the window's edge.
+  input, combo or colour widget rather than run past the window's edge. A
+  `layout: {kind: horizontal}` row with no `col_widths` puts its cells side by side on one line,
+  each at its natural width, as the terminal backends do. One with `col_widths` is an ImGui table
+  with a column per entry. `borders` and `resizable` need that table, so a row using them needs
+  `col_widths` as well; without it the table has one column.
 - **The terminal backends** lay a window with no size out at its content's size every frame,
   and cascade new windows instead of flowing them. A window that would run off the screen stops at
   the screen's edge, and a window whose content is larger than it is (or than its `size:`) gets a
   scroll bar. Its body scrolls to keep the focused widget in view; there is no wheel scrolling.
+  On the tvision desktop, tvision's frame holds the window, and the host refits that frame to the
+  content in each axis the document did not size, until the user resizes the window with the
+  frame's own corner; from then on it keeps the user's size.
 
 ### 5.9 Closing and reopening windows: the Windows menu
 
@@ -1009,6 +1034,31 @@ the backend's ordinary menu functions), so the ImGui menu bar, the FTXUI menu ba
 host's menu bar all show it, and its items toggle the same state the close buttons write. The open
 state lives in the document's state tree like the geometry (§11.4): it holds for the run and
 across a reload, but not across runs.
+
+### 5.10 Forms: `autofocus:` and `password:`
+
+```yaml
+windows:
+  - window: Sign in
+    visible_when: (= (state-get "auth.state") "out")
+    children:
+      - { input_text: User, bind: auth.user, autofocus: true }
+      - { input_text: Password, bind: auth.pass, password: true }
+      - { button: Sign in, on: auth.submit }
+```
+
+- **`autofocus: true`** on any widget gives keyboard focus to it, or to the first focusable
+  widget inside it, when it appears: on the first frame it is drawn, and again each time it comes
+  back after a frame without it (its window reopened, its `visible_when` true again, a `repeat:`
+  instance added). It does not hold focus: the user tabs or clicks away as usual. With several in
+  one frame, the last one drawn wins. The FTXUI and tvision backends move their focus to it; ImGui
+  sets keyboard focus to the next widget (`SetKeyboardFocusHere`), so on an `input_text` it
+  starts typing there. A field without it is focused only when the user moves to it.
+- **`password: true`** on an `input_text` masks it on screen: ImGui draws its password field (a
+  mask, and no copy or cut of the text), and the terminal backends show a `•` per character. It
+  is masking only. The text is the bound state key's value like any field's, so it is as readable
+  to scripts, `state://`, replication and the persisted tree as any other key; a document keeps a
+  secret out of shared state by clearing the key once it has used it.
 
 ## 6. Composition: include / import / load
 
@@ -1103,9 +1153,11 @@ resolver ([`inc/cvc/ariadne/uri.h`](../inc/cvc/ariadne/uri.h)):
   `arigl --net-allow ...`, §10.3), or by a host calling `register_http_uri_handler()` (or the
   cached variant). It is *not* registered by default — see the caveats (§11).
 - **`cvc://<relpath>`** — a location-independent component path, searched along
-  `$CVC_ARIADNE_PATH` → host-supplied extra dirs → the install datadir
-  `<prefix>/share/libcvc/ariadne` → cwd (`register_cvc_uri_handler`). Use this for
-  shipped components so a document does not hard-code install paths.
+  `$CVC_ARIADNE_PATH` → host-supplied extra dirs → `share/libcvc/ariadne` beside the file
+  holding libcvc (`<lib>/..` or `<bin>/..`, so a relocated install such as a cvcpkg prefix
+  finds its own library) → the compiled-in install datadir `<prefix>/share/libcvc/ariadne`
+  → cwd (`register_cvc_uri_handler`). Use this for shipped components so a document does
+  not hard-code install paths.
 
 The `canonical` field is the identity used for cycle-guarding and for resolving
 relative bases in nested composition.
@@ -1217,7 +1269,11 @@ Widgets and scene binds use the same rule, which is why a widget `bind:` and a s
 
 **Grid sizes (§11.4).** A grid the user can resize keeps its sizes under its id, the way a
 window keeps `tree.<id>.geometry`: a row split's pane heights in `tree.<id>.tracks`, a
-resizable table's column widths in `tree.<id>.columns`. Both are comma-separated px, one
+resizable table's column widths in `tree.<id>.columns`. A grid's id is its `id:`, else its
+`label:`, else one the walk makes from where the grid sits in the document (`~0_2_1`, the child
+index at each level), so two unnamed grids in one window never share a backend table or a key.
+That id moves when the document's structure above the grid changes, so give a grid whose sizes
+should outlast such an edit an `id:`. Both are comma-separated px, one
 entry per track. The walk seeds the backend from the key before the grid opens (each
 backend applies it once, so a live drag wins) and writes back what the backend reports after
 it closes; the write is skipped when nothing changed. A `0` entry means "not set": that
@@ -1587,7 +1643,44 @@ charged to the action's caps (§2.2). `register_async_verb(name, done_channel, f
 the result to `done_channel`, for documents that wait with `(msg-recv "done_channel")`. `AriRuntime` also exposes `step`, `run`, `on`, `post_key`, `post_pointer`,
 and `reload_if_changed`.
 
-### 9.4 From Python (DSL only, via `pycvc.Exec`)
+### 9.4 A document set, installed or served
+
+An app written as `.ari` documents ships them as a directory: `main.ari` and the files it
+imports, relative to itself (`import: lib/feed.ari`, `load: ../shared/panel.ari`), plus any
+`cvc://components/...` it takes from the shipped library (§6.5). The same directory runs in
+both hosts without changes.
+
+**Installed** (`share/<app>/`, from the app's cvcpkg recipe, which depends on the `arigl`
+or `ari` package): `arigl run <prefix>/share/<app>/main.ari`, or in the terminal
+`ari run <prefix>/share/<app>/main.ari` (FTXUI, or `--backend tvision`), from any working
+directory. Both runtimes load through the same loader. Every relative reference resolves
+against the directory of the file that makes it, and `cvc://` finds the component library
+beside the libcvc in the same prefix (§6.4). A launcher only has to pass the path and its
+flags. `ctest -R '(ari|arigl)_docset'` checks this with
+[`src/cvc/tests/data/ariadne_docset`](../src/cvc/tests/data/ariadne_docset/app/main.ari).
+
+**Served** (any site path, e.g. `/apps/<app>/`): put the `arigl-web` package's files (the
+stock browser host) beside the documents and open `/apps/<app>/?src=main.ari`. The package's
+`ari.html` runs the same documents in ari's terminal backend, in an xterm.js terminal:
+`/apps/<app>/ari.html?src=main.ari`. Either runtime fetches the document and, before the app
+starts, every file it names by a relative path
+(`import:`, `load:`, `vinay:`, and the files those name), writing each at its URL path in
+the browser's file system. Then it runs the local copy, so relative references resolve as
+they do on disk ([`web_document.h`](../inc/cvc/ariadne/web_document.h),
+[`doc_fetch.h`](../inc/cvc/ariadne/doc_fetch.h)). By default the
+document must be on the page's own origin. The page's `ariadne.config.json` names the
+document, any other origins it may come from, the host flags (the network flags `--net` and `--net-allow`, ...), and
+the extra data files to fetch; both pages read the same file. The URL can only add document
+arguments. A failed load shows what the runtime printed: an error page in arigl-web, the
+terminal itself in `ari.html`. [CVCGL_WASM.md](CVCGL_WASM.md#arigl-web-the-stock-browser-host)
+has the details, the sizes, and what wasm-mt needs.
+
+A path the document hands a scene source or a data reader (`source: { file: ... }`) is
+relative to the working directory, not to the document. The browser shell runs in the
+document's directory. Natively the working directory is the caller's, so a launcher for
+such a document `cd`s to its directory first.
+
+### 9.5 From Python (DSL only, via `pycvc.Exec`)
 
 If you only need to run `state_exec` programs against an app's tree (no widgets, no
 scene), `pycvc.Exec` ([`bindings/pycvc/pycvc_exec.h`](../bindings/pycvc/pycvc_exec.h))
@@ -1961,8 +2054,9 @@ ImGui overlay compiled as inert stubs.
 
 **Gaps the goldens step around (2026-10-19):**
 
-- `layout: {kind: horizontal}` is ignored on a window body, and the embedded schema rejects the
-  `size: {hint, min, max}` map and `"50%"` strings that the loader accepts.
+- The embedded schema rejects the `size: {hint, min, max}` map and `"50%"` strings that the
+  loader accepts. (A `layout: {kind: horizontal}` row with no `col_widths` drew as one column in
+  ImGui until 2026-10-30; it now draws its cells side by side, §5.8.)
 
 ---
 
