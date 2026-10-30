@@ -31,6 +31,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cvc/core/app.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/state/state.h>
@@ -234,10 +235,21 @@ TEST(MeshContourTree, RandomFieldsOnLoopyDomainsStillGiveTrees) {
     const auto g = wrapped(9, 7, torus);
     for (unsigned seed = 1; seed <= 40; ++seed) {
       std::mt19937 rng(seed);
-      std::uniform_int_distribution<int> q(0, seed % 2 ? 5 : 1000);
+      // Not std::uniform_int_distribution, whose mapping each standard library picks for itself
+      // (macOS's libc++ drew fields the others never did, one of which broke the merge): libc++'s
+      // mapping, the low bits of a draw, redrawn while out of range, so every platform tests the
+      // same fields.
+      const std::uint32_t hi = seed % 2 ? 5 : 1000, mask = seed % 2 ? 7 : 1023;
+      const auto q = [&] {
+        std::uint32_t x;
+        do
+          x = std::uint32_t(rng()) & mask;
+        while (x > hi);
+        return x;
+      };
       std::vector<double> v;
       for (std::size_t i = 0; i < g->const_points().size(); ++i)
-        v.push_back(double(q(rng)));
+        v.push_back(double(q()));
       const auto mesh = field(g, v);
       const std::string what =
           std::string(torus ? "torus" : "annulus") + " seed " + std::to_string(seed);
