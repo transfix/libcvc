@@ -326,6 +326,13 @@ public:
                                    double hi, const char *fmt) = 0;
   virtual IndexEdit combo(const char *label, int current_index,
                           const std::vector<std::string> &options) = 0;
+  // Kind::Radio: the same choice with every option shown, side by side when `row`. A backend
+  // with no radio buttons draws it as a combo.
+  virtual IndexEdit radio(const char *label, int current_index,
+                          const std::vector<std::string> &options, bool row) {
+    (void)row;
+    return combo(label, current_index, options);
+  }
   // A single-line text field bound to a string state key (Kind::InputText; Kind::InputInt reuses it
   // with the core coercing to/from an int). `key` is the stable per-widget id (the resolved state
   // path), like the sliders, so the backend can hold the in-progress text across frames; `current`

@@ -1623,7 +1623,8 @@ void Runtime::Impl::emit_node(const Widget &w) {
     break;
   }
 
-  case Kind::Combo: {
+  case Kind::Combo:
+  case Kind::Radio: {
     // §4 read-lane: options are either a static list or a computed expression re-evaluated
     // each frame. A local holds the computed list so its lifetime spans the emit.
     std::vector<std::string> computed;
@@ -1646,7 +1647,8 @@ void Runtime::Impl::emit_node(const Widget &w) {
         idx = static_cast<int>(i);
         break;
       }
-    const IndexEdit e = b.combo(label, idx, opts); // always DISPLAY the labels
+    const IndexEdit e = w.kind == Kind::Radio ? b.radio(label, idx, opts, w.radio_row)
+                                              : b.combo(label, idx, opts); // DISPLAY the labels
     if (e.changed && e.index >= 0 && e.index < static_cast<int>(store.size())) {
       write<std::string>(app, path, store[e.index]); // store the mapped value (or the text)
       if (!w.on.empty())

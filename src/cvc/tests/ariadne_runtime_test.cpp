@@ -2625,6 +2625,29 @@ TEST(AriadneRuntime, BoundWidgetsFireOnOnCommit) {
   EXPECT_EQ(cvc::state::instance(app)("grid").value(), "1");
 }
 
+// A radio stores what a combo stores and fires its on: the same way. MockBackend has no radio of
+// its own, so this also checks Backend::radio's fallback: the radio is drawn as a combo.
+TEST(AriadneRuntime, RadioFallsBackToAComboAndWritesTheMappedValue) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  int fired = 0;
+  rt.on("ss.changed", [&] { ++fired; });
+  Widget r = radio("Samples", "ss", {"Off", "2x", "4x"}, "4", /*row*/ true);
+  r.values = {"0", "2", "4"};
+  r.on = "ss.changed";
+  rt.set_root(group({r}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("combo:Samples=2")); // seeded "4", shown at index 2
+  EXPECT_EQ(cvc::state::instance(app)("ss").value(), "4");
+  mb.combo_ret = IndexEdit{/*changed*/ true, /*committed*/ true, /*index*/ 1};
+  rt.render();
+  EXPECT_EQ(cvc::state::instance(app)("ss").value(), "2");
+  rt.drain();
+  EXPECT_EQ(fired, 1);
+}
+
 // §G7: a color widget reads its "r,g,b" key into the backend's picker and writes the edited colour
 // back as "r,g,b" on commit. A backend with no colour widget (drawn:false) falls back to text.
 TEST(AriadneRuntime, ColorWidgetReadsAndWritesCsv) {
