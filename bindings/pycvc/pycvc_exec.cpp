@@ -387,6 +387,10 @@ struct Exec::ExecImpl {
   async_scheduler sched;
   intrinsics_context ictx;
   process_ptr host_proc;
+  // The builtins, the intrinsics and the registered functions; `env` extends it with the
+  // programs' top-level definitions, which persist across run(). A spawned child extends `natives`
+  // too, so it calls the registered functions but not the parent's definitions (td 4.15).
+  environment_ptr natives;
   environment_ptr env;
   // The async host of this Exec's async functions (docs/STATE_EXEC_EXCEPTIONS.md 3): kernels run
   // on the app's background task pool and post back to `sched`. After `sched`, so it goes first;
@@ -428,8 +432,14 @@ Exec::Exec(const std::shared_ptr<cvc::app> &app) : impl_(std::make_shared<ExecIm
   impl_->ictx.cluster_id = "local";
   impl_->ictx.node_id = "local";
 
-  impl_->env = builtins::make_default_environment();
-  register_intrinsics(impl_->env, &impl_->ictx);
+  impl_->natives = builtins::make_default_environment();
+  register_intrinsics(impl_->natives, &impl_->ictx);
+  impl_->env = environment::extend(impl_->natives);
+  // On one scheduler the intrinsics act for the running process, so the Exec's own context serves
+  // its children; they keep its owner and extend its natives.
+  impl_->ictx.spawn_context = [natives = impl_->natives](const intrinsics_context &) {
+    return spawn_setup{environment::extend(natives), nullptr};
+  };
   impl_->host = std::make_unique<cvc::state_exec::async_host>(impl_->sched, app.get());
 }
 
@@ -461,7 +471,7 @@ Exec::~Exec() {
 }
 
 void Exec::register_fn(const std::string &name, PyObject *callable) {
-  builtins::register_fn(impl_->env, name,
+  builtins::register_fn(impl_->natives, name,
                         python_native_fn("pycvc.Exec.register_fn", name, callable));
 }
 
@@ -471,7 +481,7 @@ void Exec::register_async_fn(const std::string &name, PyObject *callable, bool w
   // the value or raises the callable's exception at the call (a PythonError). (name-async ...)
   // returns a future.
   cvc::state_exec::register_async_fn(
-      impl_->env, *impl_->host, name,
+      impl_->natives, *impl_->host, name,
       python_async_marshal("pycvc.Exec.register_async_fn", name, callable, with_call));
 }
 
@@ -524,7 +534,7 @@ void Exec::register_async_coro(const std::string &name, PyObject *coro_fn) {
     return result;
   };
   for (const bool future : {false, true})
-    builtins::register_fn(impl_->env, future ? name + "-async" : name,
+    builtins::register_fn(impl_->natives, future ? name + "-async" : name,
                           [start, future](std::span<const value_t> args) -> value_t {
                             value_t argv =
                                 make_list(std::vector<value_t>(args.begin(), args.end()));

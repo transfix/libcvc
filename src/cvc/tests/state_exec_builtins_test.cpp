@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/generator.h>
 #include <cvc/state/state_exec/types.h>
@@ -92,6 +93,26 @@ TEST_F(BuiltinsTest, StrConcat) {
 }
 
 TEST_F(BuiltinsTest, Str) { EXPECT_EQ(std::get<std::string>(call("str", {int64_t{42}}).v), "42"); }
+
+TEST_F(BuiltinsTest, StrWritesAFloatInItsShortestRoundTripForm) {
+  // A float prints as the shortest text that reads back as it, not six significant digits:
+  // (str 1234567.5) was "1.23457e+06".
+  const auto str = [&](value_t v) { return std::get<std::string>(call("str", {v}).v); };
+  EXPECT_EQ(str(1234567.5), "1234567.5");
+  EXPECT_EQ(str(0.1 + 0.2), "0.30000000000000004");
+  EXPECT_EQ(str(0.1), "0.1");
+  EXPECT_EQ(str(1e21), "1e+21");
+  // A whole float prints as an integer's digits, as before and as state-set stores it.
+  EXPECT_EQ(str(2.0), "2");
+  EXPECT_EQ(str(-0.0), "-0");
+  for (const double d : {1.0 / 3, 6.02214076e23, 5e-324, 123456789.123, -2.5e-8})
+    EXPECT_EQ(std::strtod(str(d).c_str(), nullptr), d) << d;
+  // A list's floats, and a float str-concat joins.
+  EXPECT_EQ(str(make_list({value_t{1234567.5}, value_t{0.1 + 0.2}})),
+            "(1234567.5 0.30000000000000004)");
+  EXPECT_EQ(std::get<std::string>(call("str-concat", {std::string("SCRIP "), 1234567.5}).v),
+            "SCRIP 1234567.5");
+}
 
 // ─── Type Conversion ───────────────────────────────────────────────────────
 

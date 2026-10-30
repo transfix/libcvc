@@ -84,6 +84,8 @@ public:
                                          double lo, double hi, const char *fmt) override;
   cvc::ariadne::IndexEdit combo(const char *label, int current_index,
                                 const std::vector<std::string> &options) override;
+  cvc::ariadne::IndexEdit radio(const char *label, int current_index,
+                                const std::vector<std::string> &options, bool row) override;
   cvc::ariadne::StringEdit input_text(const char *label, const char *key,
                                       const std::string &current) override;
   cvc::ariadne::ColorEdit color(const char *label, const float rgb[3]) override; // §G7 RGB picker

@@ -427,7 +427,7 @@ operations, automating pipelines, and extending CVC at runtime.
 # Arithmetic
 cvc exec -e '(+ 1 2 3)'          # → 6
 cvc exec -e '(* 7 6)'            # → 42
-cvc exec -e '(/ 355 113.0)'      # → 3.14159...
+cvc exec -e '(/ 355 113.0)'      # → 3.1415929203539825
 
 # Variables and functions
 cvc exec -e '(let ((x 10) (y 20)) (+ x y))'   # → 30

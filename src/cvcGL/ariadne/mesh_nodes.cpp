@@ -1836,7 +1836,7 @@ public:
   std::string status() const override { return _job->running; }
 
 private:
-  enum class stage { start, sdf, load_volume, mesh, solve, finish };
+  enum class stage { start, sdf, load_volume, mesh, solve_boundary, solve, finish };
 
   void set(const char *phase, double progress) {
     _phase = phase;
@@ -1862,6 +1862,9 @@ private:
       return;
     case stage::mesh:
       mesh_step(budget);
+      return;
+    case stage::solve_boundary:
+      solve_boundary_step(budget);
       return;
     case stage::solve:
       solve_step(budget);
@@ -1993,9 +1996,17 @@ private:
       cvc::orient_tets(*_mesh);
       _after = after::boundary;
       return;
-    case after::boundary:
-      set("boundary", 0.83);
-      _surf = std::make_shared<cvc::geometry>(cvc::tet_boundary_surface(*_mesh));
+    case after::boundary: // tet_boundary_surface, stepped; the surface taken a step after
+      if (!_boundary)
+        _boundary = std::make_unique<cvc::tet_boundary_stepper>(_mesh);
+      if (!_boundary->done()) {
+        _boundary->step(budget);
+        set(_boundary->phase(), 0.81 + 0.05 * _boundary->progress()); // its stages' costs differ
+        return;
+      }
+      set("boundary", 0.86);
+      _surf = std::make_shared<cvc::geometry>(_boundary->surface());
+      _boundary.reset();
       _after = after::quality;
       return;
     case after::quality:
@@ -2153,8 +2164,29 @@ private:
       _st = stage::solve;
       return;
     }
+    if (_p.problem != "heat" && _p.problem != "poisson")
+      throw std::runtime_error("unknown problem '" + _p.problem + "' (poisson | heat | modes)");
+    // fem::boundary_vertices on the VOLUME domain, stepped (tet_boundary_stepper::vertices()).
+    if (_tm->num_points() == 0)
+      throw std::runtime_error("fem: the mesh has no points");
+    if (_tm->const_tets().empty())
+      throw std::runtime_error("fem: the mesh has no tets");
+    _boundary = std::make_unique<cvc::tet_boundary_stepper>(_tm);
+    set("boundary", 0.0);
+    _st = stage::solve_boundary;
+  }
+
+  void solve_boundary_step(std::size_t budget) {
+    if (!_boundary->done()) {
+      _boundary->step(budget);
+      set(_boundary->phase(), 0.03 * _boundary->progress()); // its stages' costs differ
+      return;
+    }
+    set("boundary", 0.03);
+    const std::vector<cvc::index_t> bnd = _boundary->vertices();
+    _boundary.reset();
+    const cvc::fem::domain vol = cvc::fem::domain::VOLUME;
     const cvc::geometry::points_t &P = _tm->const_points();
-    const std::vector<cvc::index_t> bnd = cvc::fem::boundary_vertices(*_tm, vol);
     if (_p.problem == "heat") {
       // A hot floor: boundary vertices in the lowest 5% of the height held at 1, the rest of the
       // boundary insulated, the body starting at 0.
@@ -2179,8 +2211,6 @@ private:
       bc.vertices = bnd;
       bc.values.push_back(0.0);
       _solver = cvc::fem::stepped_solve::poisson(_tm, {_p.f}, std::move(bc), vol);
-    } else {
-      throw std::runtime_error("unknown problem '" + _p.problem + "' (poisson | heat | modes)");
     }
     _st = stage::solve;
   }
@@ -2233,6 +2263,7 @@ private:
   void fail(const std::string &why) {
     _sdf.reset();
     _resize.reset();
+    _boundary.reset();
     _solver.reset();
 #ifdef CVC_ENABLE_MESHER
     _mesher.reset();
@@ -2302,6 +2333,8 @@ private:
   cvc::mesh_locator _locator;
   std::shared_ptr<Transfer> _transfer;
 #endif
+  // the mesh's boundary (a mesh's surface, a solve's boundary vertices)
+  std::unique_ptr<cvc::tet_boundary_stepper> _boundary;
   // solve
   std::unique_ptr<cvc::fem::stepped_solve> _solver;
   int _steps = 0, _every = 1, _shown = 0;

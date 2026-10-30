@@ -3653,6 +3653,17 @@ std::string lock_forever(const std::string &body) {
   return "(begin (set i 0) (while (< i 1000000000) (begin " + body + " (set i (+ i 1)))) i)";
 }
 
+// `s` as a DSL string literal.
+std::string dsl_string(const std::string &s) {
+  std::string out = "\"";
+  for (const char c : s) {
+    if (c == '"' || c == '\\')
+      out += '\\';
+    out += c;
+  }
+  return out + "\"";
+}
+
 // The fastest run of each side of a lock_with_and_without.
 struct lock_timing {
   int64_t best_base = INT64_MAX, best_with = INT64_MAX;
@@ -5755,18 +5766,28 @@ std::vector<scenario> make_scenarios() {
     sc.name = "lock.handoff";
     sc.what = "p processes looping for ever on one key, a (sleep 0) in the body; per x p handoffs "
               "timed after a warm-up: handoffs per second, each grant's wait from its request, "
-              "and the spread of grants between processes (fairness_spread, most minus fewest)";
+              "and the spread of grants between processes (fairness_spread, most minus fewest); "
+              "workers=spawn: one host-submitted parent spawns them, each with a context of its "
+              "own (the spawn context)";
     sc.executors = both_sched;
-    sc.sizes = {{"p", {"2", "8", "64"}}, {"per", {"200"}}, {"driver", {"spin"}}};
-    sc.smoke = {{"p", {"2", "8"}}, {"per", {"10"}}, {"driver", {"spin"}}};
+    sc.sizes = {{"p", {"2", "8", "64"}},
+                {"per", {"200"}},
+                {"workers", {"host", "spawn"}},
+                {"driver", {"spin"}}};
+    sc.smoke = {
+        {"p", {"2", "8"}}, {"per", {"10"}}, {"workers", {"host", "spawn"}}, {"driver", {"spin"}}};
     sc.async_only = {"driver"};
     sc.run = [](point_ctx &pc) {
       const int64_t p = std::max<int64_t>(1, pc.i("p")), per = std::max<int64_t>(1, pc.i("per"));
+      const bool spawned = pc.s("workers", "host") == "spawn";
+      std::vector<std::string> srcs;
       std::vector<se::value_t> progs;
-      for (int64_t j = 0; j < p; ++j)
-        progs.push_back(se::parse(lock_forever("(bench-req " + istr(j) +
-                                               ") (with-lock \"bench.h\" (bench-got " + istr(j) +
-                                               ") (sleep 0))")));
+      for (int64_t j = 0; j < p; ++j) {
+        srcs.push_back(lock_forever("(bench-req " + istr(j) +
+                                    ") (with-lock \"bench.h\" (bench-got " + istr(j) +
+                                    ") (sleep 0))"));
+        progs.push_back(se::parse(srcs.back()));
+      }
       auto app = make_app();
       pc.reps([&](meter &m, rep_out &o) {
         // What the natives record: each process's last request time and its grants, and the
@@ -5793,11 +5814,33 @@ std::vector<scenario> make_scenarios() {
             waits.push_back(now_ns() - req_ns[j]);
           return se::value_t(int64_t(0));
         });
-        const std::vector<int> pids = submit_all(w, progs);
+        // workers=spawn: the world's context makes each child a context of its own over the
+        // world's environment (which has the bench natives); the workers are every process but
+        // the parent, which ends once it has spawned them.
+        std::vector<int> pids;
+        int parent = -1;
+        if (spawned) {
+          w.ictx.spawn_context = se::make_spawn_context(w.env);
+          std::string src = "(list";
+          for (const std::string &s : srcs)
+            src += " (spawn " + dsl_string(s) + ")";
+          se::execute_options opts;
+          opts.env = w.process_env("extend");
+          parent = w.submit(src + ")", opts);
+        } else {
+          pids = submit_all(w, progs);
+        }
         drive_cfg d = driver_of(pc);
         d.sleepers = true;    // (sleep 0) and the lock waits park everyone at times
         d.slice_steps = 1000; // done() is read between slices: keep the overshoot small
         std::string why = drive(w, d, [&] { return total >= 2 * p; }, [] {});
+        if (spawned) {
+          for (const se::process_info &pi : w.base().list_processes())
+            if (pi.pid != parent)
+              pids.push_back(pi.pid);
+          if (int64_t(pids.size()) != p && why.empty())
+            why = "the parent spawned " + std::to_string(pids.size()) + " of " + istr(p);
+        }
         if (!why.empty()) {
           o.fail("warm-up: " + why);
           check_alive_and_kill(w, o, pids);

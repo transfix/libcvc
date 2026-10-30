@@ -266,6 +266,12 @@ the same `state_exec.defaults.parser.*` and `state_exec.defaults.data.*` keys
 override both. A syntax error raises `pycvc.parse_error`, a `RuntimeError` with
 `.line` and `.col`.
 
+A program's top-level definitions persist from one `run()` to the next. A child it
+spawns (`(spawn "...")`) sees the intrinsics and every function registered with
+`register_fn`, `register_async_fn` or `register_async_coro`, but not the parent's
+definitions. Registered functions live in a scope under the programs' own, so a
+program that rebinds a registered name shadows it.
+
 The rest of state_exec is the C++ API under the C++ names
 (`docs/PYCVC_STATE_EXEC_PARITY.md` lists what is wrapped and what comes next):
 
