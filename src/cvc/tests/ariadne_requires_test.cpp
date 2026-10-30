@@ -177,6 +177,19 @@ TEST(AriadneRequires, TheTerminalBackendIsATerminal) {
   EXPECT_TRUE(be.capabilities().bitmap); // Auto image mode resolves to kitty pixels
 }
 
+// A widget the terminal backend draws itself (arigl --terminal's stream_view) is one a document
+// can require. register_widget works in the no-FTXUI stub too.
+TEST(AriadneRequires, ATerminalBackendWidgetIsAKnownType) {
+  cvc::app app;
+  Runtime rt(app, "ui.req");
+  FtxuiBackend be;
+  rt.set_backend(&be);
+  EXPECT_FALSE(rt.has("req-test-term-widget"));
+  be.register_widget("req-test-term-widget",
+                     [](const std::string &, const Widget &) { return CustomEdit{}; });
+  EXPECT_TRUE(rt.has("req-test-term-widget"));
+}
+
 // ---- AppRuntime::load preflight
 // ------------------------------------------------------------------
 

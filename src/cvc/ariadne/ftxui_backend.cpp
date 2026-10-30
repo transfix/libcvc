@@ -3085,9 +3085,12 @@ void FtxuiBackend::route(Runtime &rt, const TermEvent &ev,
 // ─────────
 
 void FtxuiBackend::register_widget(std::string custom_type, CustomDrawFn draw) {
-  if (draw)
+  if (draw) {
+    // As ImGuiBackend::register_widget does: the loader then knows the type, and has_widget_type()
+    // (so requires: and (has? ...)) reports it present.
+    register_known_widget_type(custom_type);
     customWidgets_[std::move(custom_type)] = std::move(draw);
-  else
+  } else
     customWidgets_.erase(custom_type);
 }
 
