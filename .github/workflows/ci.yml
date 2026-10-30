@@ -472,6 +472,30 @@ jobs:
             echo "::error::a token reached the wasm ari's output"; exit 1
           fi
 
+      - name: Frames go on while a request is out (L4)
+        # The single-threaded build's requests are started, not sent in place: the browser's
+        # fetch answers from the event loop while the frame loop goes on. tests/l4_frames.ari
+        # counts the frames that ran while tests/net_probe_server.py's /v1/slow took its second;
+        # a request that blocked the frame loop would leave that near 0.
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
+          python3 src/ari/tests/net_probe_server.py > probe-port.txt &
+          server=$!
+          trap 'kill $server' EXIT
+          for _ in $(seq 50); do [ -s probe-port.txt ] && break; sleep 0.1; done
+          base="http://127.0.0.1:$(cat probe-port.txt)"
+          timeout 120 "$node" --require ./src/ari/tests/xhr-shim.cjs build-wasm/bin/ari.js \
+            snapshot --net-allow "$base" --width 100 --height 9 /tests/l4_frames.ari \
+            --base "$base" 2>&1 | tee l4.txt
+          grep -qF "status: 200" l4.txt \
+            || { echo "::error::the slow request did not come back"; exit 1; }
+          frames=$(sed -n 's/.*frames while out: \([0-9][0-9]*\).*/\1/p' l4.txt | head -1)
+          if [ -z "$frames" ] || [ "$frames" -lt 20 ]; then
+            echo "::error::only '${frames}' frames ran while the request was out (L4)"; exit 1
+          fi
+          echo "frames while the request was out: $frames"
+
       - name: Round-trip images through ImageMagick under node
         # The link above only proves the codec libraries resolve. This proves Magick works at run
         # time: its coders are registered (an empty registry once failed every read and write

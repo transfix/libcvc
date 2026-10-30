@@ -41,6 +41,10 @@ std::map<std::string, UriStoreHandler> &uri_store_registry() { // §13.10 write 
   static std::map<std::string, UriStoreHandler> r;
   return r;
 }
+std::map<std::string, UriAsyncHandler> &uri_async_registry() { // non-blocking forms (L4)
+  static std::map<std::string, UriAsyncHandler> r;
+  return r;
+}
 
 std::string to_lower(std::string s) {
   std::transform(s.begin(), s.end(), s.begin(),
@@ -269,11 +273,25 @@ void register_uri_handler(const std::string &scheme, UriHandler handler) {
     return;
   std::lock_guard<std::mutex> lock(uri_mutex());
   uri_registry()[to_lower(scheme)] = std::move(handler);
+  uri_async_registry().erase(to_lower(scheme)); // the old handler's non-blocking form
 }
 
 void unregister_uri_handler(const std::string &scheme) {
   std::lock_guard<std::mutex> lock(uri_mutex());
   uri_registry().erase(to_lower(scheme));
+  uri_async_registry().erase(to_lower(scheme));
+}
+
+void register_uri_async_handler(const std::string &scheme, UriAsyncHandler handler) {
+  if (scheme.empty() || !handler)
+    return;
+  std::lock_guard<std::mutex> lock(uri_mutex());
+  uri_async_registry()[to_lower(scheme)] = std::move(handler);
+}
+
+bool has_uri_async_handler(const std::string &scheme) {
+  std::lock_guard<std::mutex> lock(uri_mutex());
+  return uri_async_registry().count(to_lower(scheme)) != 0;
 }
 
 bool has_uri_handler(const std::string &scheme) {
@@ -392,6 +410,48 @@ UriResult resolve(const std::string &uri, const std::string &base) {
     return {false, std::string(), std::string(),
             "ari: URI resolution failed for '" + uri + "' (unknown error)"};
   }
+}
+
+std::function<void()> resolve_async(const std::string &uri, const std::string &base, UriDone done) {
+  // resolve()'s contract on the result: an error for a throwing handler, a non-empty canonical.
+  const auto finish = [uri](UriDone &done, UriResult r) {
+    if (r.ok && r.canonical.empty())
+      r.canonical = uri;
+    if (done)
+      done(std::move(r));
+  };
+  UriAsyncHandler h;
+  Uri u;
+  try {
+    u = parse_uri(uri);
+    std::lock_guard<std::mutex> lock(uri_mutex());
+    const auto it = uri_async_registry().find(u.scheme);
+    if (it != uri_async_registry().end())
+      h = it->second;
+  } catch (...) {
+  }
+  if (!h) {
+    finish(done, resolve(uri, base));
+    return {};
+  }
+  // Only the first answer counts: a handler that answers and then throws, or throws after
+  // starting, still answers once.
+  auto pending = std::make_shared<UriDone>(std::move(done));
+  try {
+    return h(u, base, [pending, finish](UriResult r) {
+      if (UriDone d = std::exchange(*pending, nullptr))
+        finish(d, std::move(r));
+    });
+  } catch (const std::exception &e) {
+    if (UriDone d = std::exchange(*pending, nullptr))
+      finish(d, {false, std::string(), std::string(),
+                 "ari: URI resolution failed for '" + uri + "': " + e.what()});
+  } catch (...) {
+    if (UriDone d = std::exchange(*pending, nullptr))
+      finish(d, {false, std::string(), std::string(),
+                 "ari: URI resolution failed for '" + uri + "' (unknown error)"});
+  }
+  return {};
 }
 
 // --- §13.10 the write side ---------------------------------------------------------------------

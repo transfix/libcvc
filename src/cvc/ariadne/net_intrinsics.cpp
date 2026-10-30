@@ -358,24 +358,36 @@ Outcome reply_error(const std::string &url, const std::string &message) {
   return o;
 }
 
-// One request: the credentials `auth` names are put in as it is sent (the Authorization header,
-// form and header values), and the ones it captures are taken out of the reply, so none reaches a
-// value_t.
-Outcome perform(cvc::net::HttpRequest req, const RequestAuth &auth, const NetAccess &access) {
+// One request with its credentials put in (prepare), or the reply it fails with before it is made.
+// `sent` holds the tokens put in, to blank any echo of them in the reply.
+struct Prepared {
+  cvc::net::HttpRequest req;
   std::optional<cvc::net::Origin> origin;
+  std::vector<std::string> sent;
+  std::optional<Outcome> failed;
+};
+
+// The request as sent: the credentials `auth` names put in (the Authorization header, form and
+// header values). Nothing is put in when the request fails here.
+Prepared prepare(cvc::net::HttpRequest req, const RequestAuth &auth, const NetAccess &access) {
+  Prepared p;
   if (auth.any()) {
     std::string why;
-    origin = cvc::net::parse_origin(req.url, &why);
-    if (!origin)
-      return reply_error(req.url, "http: " + why);
+    p.origin = cvc::net::parse_origin(req.url, &why);
+    if (!p.origin) {
+      p.failed = reply_error(req.url, "http: " + why);
+      return p;
+    }
     req.follow_redirects = false; // a credential never follows a redirect to another resource
-    if (access.policy && !access.policy->allows(*origin))
-      return reply_error(req.url,
-                         "http: refused: " + origin->str() + " is not an origin this host allows");
+    if (access.policy && !access.policy->allows(*p.origin)) {
+      p.failed = reply_error(req.url, "http: refused: " + p.origin->str() +
+                                          " is not an origin this host allows");
+      return p;
+    }
   }
-  std::vector<std::string> sent; // the tokens put in, to blank any echo of them
+  std::vector<std::string> &sent = p.sent;
   const auto token_for = [&](const std::string &name) -> std::optional<std::string> {
-    std::optional<std::string> token = access.credentials->token_for(name, *origin);
+    std::optional<std::string> token = access.credentials->token_for(name, *p.origin);
     if (token)
       sent.push_back(*token);
     return token;
@@ -383,22 +395,27 @@ Outcome perform(cvc::net::HttpRequest req, const RequestAuth &auth, const NetAcc
   const auto no_credential = [&](const std::string &name) {
     for (std::string &t : sent)
       wipe(t);
+    sent.clear();
     for (std::string &h : req.headers)
       wipe(h);
     wipe(req.body);
-    return reply_error(req.url, "http: no credential '" + name + "' for " + origin->str() +
-                                    " (sign in first)");
+    p.failed = reply_error(req.url, "http: no credential '" + name + "' for " + p.origin->str() +
+                                        " (sign in first)");
   };
   if (!auth.use.empty()) {
     const std::optional<std::string> token = token_for(auth.use);
-    if (!token)
-      return no_credential(auth.use);
+    if (!token) {
+      no_credential(auth.use);
+      return p;
+    }
     req.headers.push_back("Authorization: Bearer " + *token);
   }
   for (const CredentialValue &v : auth.values) {
     const std::optional<std::string> token = token_for(v.name);
-    if (!token)
-      return no_credential(v.name);
+    if (!token) {
+      no_credential(v.name);
+      return p;
+    }
     if (v.form) {
       const std::string encoded = se::percent_encode(*token);
       if (encoded != *token)
@@ -411,12 +428,19 @@ Outcome perform(cvc::net::HttpRequest req, const RequestAuth &auth, const NetAcc
           h.replace(at, v.placeholder.size(), *token);
     }
   }
-  cvc::net::HttpResponse r =
-      access.policy ? cvc::net::send(req, *access.policy) : cvc::net::send(req);
-  for (std::string &h : req.headers)
+  p.req = std::move(req);
+  return p;
+}
+
+// The reply `r` to the prepared request `p`: the request's copies of its credentials blanked, any
+// echo of them in the reply too, and the ones `auth` captures taken out of it, so none reaches a
+// value_t.
+Outcome complete(Prepared &p, cvc::net::HttpResponse r, const RequestAuth &auth,
+                 const NetAccess &access) {
+  for (std::string &h : p.req.headers)
     wipe(h);
-  wipe(req.body);
-  for (std::string &t : sent) {
+  wipe(p.req.body);
+  for (std::string &t : p.sent) {
     scrub(r, t);
     wipe(t);
   }
@@ -438,7 +462,7 @@ Outcome perform(cvc::net::HttpRequest req, const RequestAuth &auth, const NetAcc
     captured = problems.empty();
     for (auto &[c, token] : taken) {
       std::string why;
-      if (!access.credentials->capture(c->name, *origin, token, &why))
+      if (!access.credentials->capture(c->name, *p.origin, token, &why))
         captured = false;
       if (!why.empty())
         problems.push_back(c->name + ": " + why);
@@ -446,12 +470,22 @@ Outcome perform(cvc::net::HttpRequest req, const RequestAuth &auth, const NetAcc
     }
     if (!problems.empty()) {
       std::string joined;
-      for (const std::string &p : problems)
-        joined += (joined.empty() ? "" : "; ") + p;
+      for (const std::string &pr : problems)
+        joined += (joined.empty() ? "" : "; ") + pr;
       r.error = "capture_auth: " + joined;
     }
   }
   return Outcome{std::move(r), captured};
+}
+
+// One request, sent in place (blocking): prepare, send, complete.
+Outcome perform(cvc::net::HttpRequest req, const RequestAuth &auth, const NetAccess &access) {
+  Prepared p = prepare(std::move(req), auth, access);
+  if (p.failed)
+    return std::move(*p.failed);
+  cvc::net::HttpResponse r =
+      access.policy ? cvc::net::send(p.req, *access.policy) : cvc::net::send(p.req);
+  return complete(p, std::move(r), auth, access);
 }
 
 // The kernel of a fully-built request: it runs on the app's background task pool (OFF the
@@ -470,6 +504,55 @@ se::async_kernel http_kernel(cvc::net::HttpRequest req, RequestAuth auth, NetAcc
       return marshal_error(req.url, "http: unknown error");
     }
   };
+}
+
+// Settle a started call with its reply and post it, unless the call was cancelled first: then its
+// host may be gone (async_start's contract).
+void settle_started(se::async_host &host, const std::shared_ptr<se::async_call> &call,
+                    se::value_t value) {
+  if (!call->cancel_requested() && call->settle(std::move(value), nullptr))
+    host.finish(call);
+}
+
+// The same request started rather than sent (L4): where the transport starts requests without
+// blocking (the browser's fetch in a build without threads, cvc::net::http_starts_async), the
+// calling program parks on it and the frame loop goes on; the browser's event loop delivers the
+// reply, which is completed and marshalled there and posted to the scheduler. A killed or timed-out
+// call aborts the fetch. Elsewhere the kernel runs as before.
+se::async_work http_work(cvc::net::HttpRequest req, RequestAuth auth, NetAccess access,
+                         se::async_host &host) {
+  se::async_work work;
+  const bool starts = cvc::net::http_starts_async();
+  work.kernel = http_kernel(starts ? req : std::move(req), auth, access);
+  if (!starts)
+    return work;
+  work.start = [req = std::move(req), auth = std::move(auth), access = std::move(access),
+                &host](const std::shared_ptr<se::async_call> &call) {
+    auto p = std::make_shared<Prepared>(prepare(req, auth, access));
+    if (p->failed) {
+      settle_started(host, call, marshal_response(p->failed->reply, p->failed->captured));
+      return;
+    }
+    const std::string url = p->req.url;
+    cvc::net::HttpDone done = [p, auth, access, url, call, &host](cvc::net::HttpResponse r) {
+      try {
+        const Outcome out = complete(*p, std::move(r), auth, access);
+        settle_started(host, call, marshal_response(out.reply, out.captured));
+      } catch (const std::exception &e) {
+        settle_started(host, call, marshal_error(url, std::string("http: ") + e.what()));
+      } catch (...) {
+        settle_started(host, call, marshal_error(url, "http: unknown error"));
+      }
+    };
+    std::shared_ptr<cvc::net::HttpTransfer> transfer =
+        cvc::net::start(p->req, access.policy, std::move(done));
+    if (transfer)
+      call->on_cancel([weak = std::weak_ptr<cvc::net::HttpTransfer>(transfer)] {
+        if (std::shared_ptr<cvc::net::HttpTransfer> t = weak.lock())
+          t->abort();
+      });
+  };
+  return work;
 }
 
 bool is_live(const NetAccess &access) { return !access.live || access.live->load(); }
@@ -534,15 +617,7 @@ se::value_t marshal_uri_result(const UriResult &r) {
 // resolve() as a kernel on the app's background task pool (OFF the scheduler thread), returning
 // the marshalled dict, for arbitrary URIs. resolve() is app-free and has its own barrier, so it is
 // safe there. A failure is a reply with ok #f, as for the http verbs.
-se::async_kernel uri_fetch_kernel(std::span<const se::value_t> args) {
-  std::string uri;
-  if (!args.empty())
-    if (const std::string *u = std::get_if<std::string>(&args[0].v))
-      uri = *u;
-  std::string base; // optional second arg: the base for a relative URI
-  if (args.size() > 1)
-    if (const std::string *b = std::get_if<std::string>(&args[1].v))
-      base = *b;
+se::async_kernel uri_fetch_kernel(const std::string &uri, const std::string &base) {
   return [uri, base](se::async_call &) -> se::value_t {
     try {
       return marshal_uri_result(resolve(uri, base));
@@ -554,6 +629,32 @@ se::async_kernel uri_fetch_kernel(std::span<const se::value_t> args) {
       return marshal_uri_result(er);
     }
   };
+}
+
+// (fetch URI [BASE])'s work: the kernel above, or, for a URI whose scheme resolves without
+// blocking (an http(s) URI, resolve_async) where the transport starts requests that way, a start
+// that parks the program on the resolve while the frame loop goes on (http_work's L4).
+se::async_work uri_fetch_work(std::span<const se::value_t> args, se::async_host &host) {
+  std::string uri;
+  if (!args.empty())
+    if (const std::string *u = std::get_if<std::string>(&args[0].v))
+      uri = *u;
+  std::string base; // optional second arg: the base for a relative URI
+  if (args.size() > 1)
+    if (const std::string *b = std::get_if<std::string>(&args[1].v))
+      base = *b;
+  se::async_work work;
+  work.kernel = uri_fetch_kernel(uri, base);
+  if (!cvc::net::http_starts_async() || !has_uri_async_handler(parse_uri(uri).scheme))
+    return work;
+  work.start = [uri, base, &host](const std::shared_ptr<se::async_call> &call) {
+    std::function<void()> stop = resolve_async(uri, base, [call, &host](UriResult r) {
+      settle_started(host, call, marshal_uri_result(r));
+    });
+    if (stop)
+      call->on_cancel(std::move(stop));
+  };
+  return work;
 }
 
 // The credential verbs and (net-allowed? URL), plain functions on the scheduler thread.
@@ -643,11 +744,11 @@ void register_net_intrinsics(cvc::app &app, NetAccess access) {
       // (query/headers/auth/capture_auth). The future form fans out N fetches.
       se::register_async_fn(
           env, host, "http-get",
-          [access](std::span<const se::value_t> args) -> se::async_kernel {
+          [access, &host](std::span<const se::value_t> args) -> se::async_work {
             RequestAuth auth;
             cvc::net::HttpRequest req = build_get_request(args, auth);
             check_request("http-get", req, auth, access);
-            return http_kernel(std::move(req), std::move(auth), access);
+            return http_work(std::move(req), std::move(auth), access, host);
           },
           io);
 
@@ -656,11 +757,11 @@ void register_net_intrinsics(cvc::app &app, NetAccess access) {
       // apply_http_options). It resumes with the same reply dict as (http-get).
       se::register_async_fn(
           env, host, "http-request",
-          [access](std::span<const se::value_t> args) -> se::async_kernel {
+          [access, &host](std::span<const se::value_t> args) -> se::async_work {
             RequestAuth auth;
             cvc::net::HttpRequest req = build_method_request(args, auth);
             check_request("http-request", req, auth, access);
-            return http_kernel(std::move(req), std::move(auth), access);
+            return http_work(std::move(req), std::move(auth), access, host);
           },
           io);
     }
@@ -671,7 +772,7 @@ void register_net_intrinsics(cvc::app &app, NetAccess access) {
     // through the registered handler, which carries the host's policy (enable_net).
     se::register_async_fn(
         env, host, "fetch",
-        [](std::span<const se::value_t> args) { return uri_fetch_kernel(args); }, io);
+        [&host](std::span<const se::value_t> args) { return uri_fetch_work(args, host); }, io);
 
     register_net_verbs(env, access);
   });
