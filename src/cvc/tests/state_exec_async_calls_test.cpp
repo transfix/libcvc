@@ -831,6 +831,48 @@ TEST(AsyncCalls, AS21_AS29_ASleepingCallIsChargedItsRunTimeButNoCpu) {
   });
 }
 
+// An I/O call (async_options::io, the network verbs): its wall time and CPU are the host's, so it
+// is charged its one step, and a budget that a plain call of the same work runs out of holds.
+TEST(AsyncCalls, AnIoCallIsChargedItsOneStep) {
+  for_engines(kSchedulers, [](unsigned e) {
+    world w(e);
+    async_options io;
+    io.io = true;
+    register_async_fn(
+        w.env, *w.host, "io-busy",
+        [&w](std::span<const value_t> a) -> async_kernel {
+          const int64_t ms = int_arg(a, 0, 50);
+          return [&w, ms](async_call &call) -> value_t {
+            spin(&call, ms, w.p);
+            return value_t(ms);
+          };
+        },
+        io);
+    register_async_fn(
+        w.env, *w.host, "io-nap",
+        [](std::span<const value_t> a) -> async_kernel {
+          const int64_t ms = int_arg(a, 0, 50);
+          return [ms](async_call &) -> value_t {
+            std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+            return value_t(ms);
+          };
+        },
+        io);
+    execute_options opts;
+    opts.max_steps = 1000; // (busy 50) runs out of these (AS-20)
+    opts.max_time = 0.1;   // and (slow-op 1 200) out of this
+    const int pid = w.run_to_end(w.submit("(+ (io-busy 50) (io-nap 200))", opts));
+    const process_info i = w.info(pid);
+    EXPECT_EQ(i.status, process_status::terminated) << i.exit_error.value_or("");
+    ASSERT_TRUE(w.result(pid));
+    EXPECT_EQ(show(*w.result(pid)), "250");
+    EXPECT_EQ(i.async_calls, 2u);
+    EXPECT_EQ(i.async_steps, 2u); // one step each
+    EXPECT_EQ(i.async_time, 0.0);
+    EXPECT_EQ(i.async_cpu_time, 0.0);
+  });
+}
+
 TEST(AsyncCalls, AS22_AFanOutsCpuTimeIsCharged) {
   if (std::thread::hardware_concurrency() < 4)
     GTEST_SKIP() << "needs 4 cores";

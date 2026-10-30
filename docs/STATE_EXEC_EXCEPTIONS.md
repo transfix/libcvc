@@ -492,6 +492,14 @@ limits what that process can make the app do for it.
   - The steps are a new `step_kind::async`: they count in `step_count`, and so against
     `max_steps`, next to the eval, read and data steps.
 
+**I/O calls.** A function registered with `async_options::io` (the Ariadne network verbs) is
+charged its one step and nothing else: no run time and no CPU time. Its kernel waits on
+something outside the program (a network round trip) and its CPU is the host's transport (a
+TLS handshake, the CA store), as a system call's is. Charged like a computing kernel, one HTTPS
+request (100-300 ms, about 16 ms of CPU) would overrun an Ariadne action's default budget of
+5000 steps and 0.1 s many times over. The function's own bounds (a transport's timeouts and
+size cap, `async_options::timeout`) limit it instead. Off by default.
+
 **Measuring it.**
 - **The thread CPU clock:** CPU time comes from `thread_cpu_seconds()`.
   - On Linux and macOS it reads `CLOCK_THREAD_CPUTIME_ID`.
