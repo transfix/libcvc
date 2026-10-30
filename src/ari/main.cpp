@@ -91,11 +91,12 @@ int usage(int code) {
                "and (has? ...) see, and how many functions programs can call (--functions lists\n"
                "them; --json prints it all as JSON).\n"
                "\n"
-               "The network is off unless --net, --net-allow, --net-policy or --credential-store\n"
-               "turns it on, for run, snapshot and check alike and with either backend. Then the\n"
-               "document may reach only the origins allowed, and sign-in tokens stay with ari: a\n"
-               "request names one (auth:), it never sees it. With it on, snapshot waits after\n"
-               "its frames for the document's requests to come back (at most 10 s).\n",
+               "The network is off unless --net, --net-allow, --net-policy, --credential-store\n"
+               "or --credential-env turns it on, for run, snapshot and check alike and with\n"
+               "either backend. Then the document may reach only the origins allowed, and\n"
+               "sign-in tokens stay with ari: a request names one (auth:, a credential value),\n"
+               "it never sees it. With it on, snapshot waits after its frames for the\n"
+               "document's requests to come back (at most 10 s).\n",
                cvc::ariadne::host_flags_help().c_str());
   return code;
 }

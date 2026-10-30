@@ -170,10 +170,10 @@ int usage(int code) {
                "and puts the document's own menus under Document; a .ari demo picked from Demos\n"
                "replaces the document in this window.\n"
                "\n"
-               "The network is off unless --net, --net-allow, --net-policy or --credential-store\n"
-               "turns it on. Then the document may reach only the origins allowed (in a browser,\n"
-               "the page's own origin too), and sign-in tokens stay with arigl: a request names\n"
-               "one (auth:), it never sees it.\n",
+               "The network is off unless --net, --net-allow, --net-policy, --credential-store\n"
+               "or --credential-env turns it on. Then the document may reach only the origins\n"
+               "allowed (in a browser, the page's own origin too), and sign-in tokens stay with\n"
+               "arigl: a request names one (auth:, a credential value), it never sees it.\n",
                ari::host_flags_help().c_str());
   return code;
 }
