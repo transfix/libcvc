@@ -628,7 +628,10 @@ the first of these places:
 1. `CVC_XTERM_DIR`, a directory holding `xterm.js`, `xterm.css`, `addon-fit.js` and
    `addon-webgl.js`;
 2. the deps prefix: cvcpkg's `xterm-js`, `xterm-js-addon-fit` and `xterm-js-addon-webgl`
-   packages install them in `share/xterm.js/` (cy-pca/cvcpkg#503);
+   packages install them in `share/xterm.js/`. They are noarch, so they are installed beside a
+   wasm prefix's deps rather than listed in its recipes (a wasm resolve is static, and no static
+   request matches a noarch bundle yet):
+   `cvcpkg install xterm-js xterm-js-addon-fit xterm-js-addon-webgl --platform any --prefix <deps>`;
 3. a download of the same npm packages from registry.npmjs.org, pinned by SHA-256, once per
    build tree.
 

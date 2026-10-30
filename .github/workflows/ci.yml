@@ -530,11 +530,14 @@ jobs:
           test -f "$RUNNER_TEMP/emsdk/emsdk_env.sh"
           echo "CVC_EMSDK_DIR=$RUNNER_TEMP/emsdk" >> "$GITHUB_ENV"
 
-      - name: Install the recipe's wasm deps
+      - name: Install the recipe's wasm deps, and xterm.js for ari's pages
         if: steps.paths.outputs.run == 'true'
         run: |
           cvcpkg install-deps cvcpkg/recipes/arigl-web --prefix "$WASM_DEPS" \
             --platform wasm --arch wasm32 --config release --link static --no-fallback-to-source
+          # Noarch, so not resolvable from the recipe's (static) wasm deps: the recipe says why.
+          cvcpkg install xterm-js xterm-js-addon-fit xterm-js-addon-webgl --prefix "$WASM_DEPS" \
+            --platform any --config release --link shared --no-fallback-to-source
 
       - name: Build arigl-web (wasm, single-threaded) with the recipe's script
         if: steps.paths.outputs.run == 'true'
@@ -543,6 +546,9 @@ jobs:
           CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-arigl-web" CVC_DEPS_PREFIX="$WASM_DEPS" \
           CVC_PLATFORM=wasm bash cvcpkg/recipes/arigl-web/build-wasm.sh
           ls -la stage-arigl-web/share/arigl-web
+          grep -q "ari: xterm.js for the browser page from $WASM_DEPS/share/xterm.js" \
+            build-arigl-web/configure.log \
+            || { echo "::error::ari's page did not take xterm.js from the prefix's xterm-js packages"; exit 1; }
 
       - name: Load a document set in headless Chrome
         if: steps.paths.outputs.run == 'true'

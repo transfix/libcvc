@@ -52,13 +52,17 @@ depends:
     - name: sdl3
     # The terminal backends, for the ari pages (single-threaded package): FTXUI for ari.html, and
     # tvision with its browser console (cvc.4 on, the wasm column) for ari_tvision.html, which
-    # build-wasm.sh adds whenever the deps prefix has it. xterm-js, xterm-js-addon-fit and
-    # xterm-js-addon-webgl, which the pages serve beside them, are not listed yet: they are not
-    # on the catalog, and until then the build downloads the same pinned npm packages. List them
-    # here once they are published.
+    # build-wasm.sh adds whenever the deps prefix has it.
     - name: ftxui
     - name: tvision
       platforms: [wasm]
+    # xterm.js and its fit and WebGL addons (cvcpkg's xterm-js, xterm-js-addon-fit and
+    # xterm-js-addon-webgl, noarch, share/xterm.js/), which the ari pages serve beside them, are not
+    # listed: a wasm resolve is static, and cvcpkg (2.5.8) matches no static request to their noarch
+    # shared bundles. Install them into the deps prefix beside this list:
+    #   cvcpkg install xterm-js xterm-js-addon-fit xterm-js-addon-webgl --platform any --prefix <deps>
+    # src/ari/CMakeLists.txt takes them from there; without them it downloads the same pinned npm
+    # packages.
     # cvcGL's conference video (mjpeg).
     - name: libjpeg-turbo
     # Scene sources: meshes through assimp (.glb), and cvc's mesh_ops / fem (header-only).
