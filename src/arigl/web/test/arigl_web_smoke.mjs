@@ -1,7 +1,9 @@
 // arigl_web_smoke.mjs — arigl-web in a real (headless) Chrome: the shell loads a document set from
-// its own origin, and refuses one from another origin or one that is not there.
+// its own origin, and refuses one from another origin or one that is not there. When the package
+// has ari's terminal page (ari.html), the same document set must load there too, its text on the
+// xterm.js screen.
 //
-//   node arigl_web_smoke.mjs --web <share/arigl-web> --docset <src/arigl/tests/docset> \
+//   node arigl_web_smoke.mjs --web <share/arigl-web> --docset <src/cvc/tests/data/ariadne_docset> \
 //        --chrome <chrome or chromium> [--shots DIR] [--keep]
 //
 // --shots writes each case's page as DIR/<n>.png.
@@ -12,10 +14,12 @@
 //   /apps/app/main.ari  the docset's app/, which imports lib/panel.ari and ../shared/note.ari
 //   /apps/shared/       the docset's shared/
 //
-// with an ordinary site's headers: no COOP/COEP (the single-threaded build needs none) and a
-// strict Content-Security-Policy (no inline code, no eval), so a pass also says the page runs
-// under one. Chrome is driven over the DevTools protocol; each case reads window.ariglWeb (the
-// page's state and everything arigl printed). Exit status 0 when every case passes.
+// with an ordinary site's headers: no COOP/COEP (the single-threaded build needs none) and, for
+// arigl-web's page, a strict Content-Security-Policy (no inline code, no eval), so a pass also
+// says the page runs under one. ari.html is served without it: it has inline scripts and loads
+// xterm.js from jsDelivr, so its cases need the network. Chrome is driven over the DevTools
+// protocol; each case reads window.ariadneWeb (the page's state, everything the runtime printed,
+// and ari's terminal text). Exit status 0 when every case passes.
 
 import {spawn} from 'node:child_process';
 import fs from 'node:fs';
@@ -59,8 +63,10 @@ const server = http.createServer((req, res) => {
     res.end('not found');
     return;
   }
-  res.writeHead(200, {'Content-Type': TYPES[path.extname(f)] || 'application/octet-stream',
-                      'Content-Security-Policy': CSP, 'Cache-Control': 'no-cache'});
+  const headers = {'Content-Type': TYPES[path.extname(f)] || 'application/octet-stream',
+                   'Cache-Control': 'no-cache'};
+  if (!/^ari(_tvision)?\.html$/.test(path.basename(f))) headers['Content-Security-Policy'] = CSP;
+  res.writeHead(200, headers);
   fs.createReadStream(f).pipe(res);
 });
 await new Promise(r => server.listen(0, '127.0.0.1', r));
@@ -117,16 +123,21 @@ async function openPage(url) {
   return {evaluate, screenshot, close};
 }
 
-// Wait for the page to leave 'loading'; the state and arigl's output.
-async function settle(page) {
+// Wait until the case's check passes, or the page has left 'loading' and a few seconds more have
+// gone by (ari draws after it reports running); the state, the runtime's output, the terminal text.
+async function settle(page, check) {
   const until = Date.now() + TIMEOUT_MS;
+  let settledAt = 0;
   for (;;) {
     const s = await page.evaluate(
-        'JSON.stringify(window.ariglWeb ? {state: ariglWeb.state, log: ariglWeb.log,' +
+        'JSON.stringify(window.ariadneWeb ? {state: ariadneWeb.state, log: ariadneWeb.log,' +
+        ' text: ariadneWeb.text ? ariadneWeb.text() : "",' +
         ' status: document.getElementById("status").textContent} : null)');
     const v = s ? JSON.parse(s) : null;
-    if (v && v.state !== 'loading') return v;
-    if (Date.now() > until) return v || {state: 'timeout', log: [], status: ''};
+    if (v && check(v)) return v;
+    if (v && v.state !== 'loading' && !settledAt) settledAt = Date.now();
+    if ((settledAt && Date.now() > settledAt + 15000) || Date.now() > until)
+      return v || {state: 'timeout', log: [], text: '', status: ''};
     await new Promise(r => setTimeout(r, 500));
   }
 }
@@ -157,10 +168,33 @@ const cases = [
   },
 ];
 
+// ari's terminal page, when the package has it: the same set in the FTXUI backend.
+if (fs.existsSync(path.join(WEB, 'ari.html'))) {
+  const shows = v => /from lib\/panel\.ari/.test(v.text) && /from shared\/note\.ari/.test(v.text);
+  cases.push(
+    {
+      name: 'ari: a same-origin document set loads and draws in the terminal',
+      url: `${ORIGIN}/apps/app/ari.html?src=main.ari`,
+      check: v => v.state === 'running' && shows(v) && /Agents/.test(v.text) &&
+                  !v.log.some(l => /could not be resolved|unknown unit/.test(l)),
+    },
+    {
+      name: 'ari: the default document is main.ari',
+      url: `${ORIGIN}/apps/app/ari.html`,
+      check: v => v.state === 'running' && shows(v),
+    },
+    {
+      name: 'ari: a cross-origin src is refused, and the terminal says why',
+      url: `${ORIGIN}/apps/app/ari.html?src=` +
+           encodeURIComponent(`http://localhost:${PORT}/apps/app/main.ari`),
+      check: v => v.state === 'failed' && /not this page's origin/.test(v.text),
+    });
+}
+
 let failures = 0;
 for (const c of cases) {
   const page = await openPage(c.url);
-  const v = await settle(page);
+  const v = await settle(page, c.check);
   const ok = !!(v && c.check(v));
   if (!ok) failures++;
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${c.name}  [${v ? v.state : 'no state'}]`);
@@ -172,6 +206,7 @@ for (const c of cases) {
   if (!ok && v) {
     console.log('  status: ' + v.status);
     for (const l of v.log.slice(-25)) console.log('  | ' + l);
+    if (v.text) for (const l of v.text.split('\n').filter(x => x.trim()).slice(-25)) console.log('  > ' + l);
   }
   await page.close();
 }

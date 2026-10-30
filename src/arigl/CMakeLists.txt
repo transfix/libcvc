@@ -27,7 +27,7 @@ endif()
 # What the host itself draws with, beyond what cvcGL links: VTK's window/interactor and image IO.
 find_package(VTK REQUIRED COMPONENTS RenderingUI IOImage)
 
-add_executable(arigl main.cpp gallery.cpp web_document.cpp)
+add_executable(arigl main.cpp gallery.cpp)
 target_link_libraries(arigl PRIVATE cvc::cvcGL ${VTK_LIBRARIES})
 vtk_module_autoinit(TARGETS arigl MODULES ${VTK_LIBRARIES})
 # Installed bin/arigl finds libcvc, cvcGL and their dependencies in ../lib.
@@ -66,11 +66,12 @@ if(NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
   add_test(NAME arigl_check COMMAND arigl check "${_arigl_examples}/hello.ari")
   # A document set as an app installs one (share/<app>/main.ari), run from another working
   # directory: its relative imports, out of its own directory and its parent's, resolve against
-  # the importing file's directory. tests/docset is also what the browser shell's check loads.
+  # the importing file's directory. The same set is what ari's test and the browser shell's check
+  # load (src/cvc/tests/data/ariadne_docset).
   add_test(NAME arigl_docset
            COMMAND arigl snapshot --terminal --width 90 --height 12 --component-path
                    "${CMAKE_CURRENT_SOURCE_DIR}/../cvc/ariadne"
-                   "${CMAKE_CURRENT_SOURCE_DIR}/tests/docset/app/main.ari"
+                   "${CMAKE_CURRENT_SOURCE_DIR}/../cvc/tests/data/ariadne_docset/app/main.ari"
            WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
   set_tests_properties(arigl_docset PROPERTIES
                        PASS_REGULAR_EXPRESSION "from shared/note.ari"
@@ -98,7 +99,7 @@ if(EMSCRIPTEN)
   set(CVC_ARIGL_WASM_DOC "${CMAKE_CURRENT_SOURCE_DIR}/../../examples/ariadne/documents/conference_roster.ari"
       CACHE FILEPATH "The .ari document cyprty, arigl's browser build, embeds")
   get_filename_component(_arigl_doc_name "${CVC_ARIGL_WASM_DOC}" NAME)
-  add_executable(cyprty EXCLUDE_FROM_ALL main.cpp gallery.cpp web_document.cpp)
+  add_executable(cyprty EXCLUDE_FROM_ALL main.cpp gallery.cpp)
   target_link_libraries(cyprty PRIVATE cvc::cvcGL ${VTK_LIBRARIES})
   vtk_module_autoinit(TARGETS cyprty MODULES ${VTK_LIBRARIES})
   # The same link options as the gallery demos (examples/CMakeLists.txt): each keeps its own loop
@@ -187,7 +188,7 @@ if(EMSCRIPTEN)
     # visible here.)
     find_package(ftxui CONFIG QUIET)
     if(TARGET ftxui::screen)
-      add_executable(arigl_term EXCLUDE_FROM_ALL main.cpp gallery.cpp web_document.cpp)
+      add_executable(arigl_term EXCLUDE_FROM_ALL main.cpp gallery.cpp)
       target_link_libraries(arigl_term PRIVATE cvc::cvcGL ${VTK_LIBRARIES})
       vtk_module_autoinit(TARGETS arigl_term MODULES ${VTK_LIBRARIES})
       target_compile_definitions(arigl_term PRIVATE CVC_ARIGL_WASM_TERMINAL=1)
@@ -215,8 +216,9 @@ if(EMSCRIPTEN)
     # arigl-web: the stock browser host (cvcpkg/recipes/arigl-web). It carries no documents of its
     # own: its page, web/arigl-web.{html,js,css} (the html shipped as index.html), runs the one
     # ?src= names, which arigl fetches with the files it imports into MEMFS at their URL paths
-    # (web_document.h). Only the component library is built in, embedded where an install keeps
-    # it (<prefix>/share/libcvc/ariadne), so cvc://components/... resolves with no download.
+    # (cvc/ariadne/web_document.h). Only the component library is built in, embedded where an
+    # install keeps it (<prefix>/share/libcvc/ariadne), so cvc://components/... resolves with no
+    # download.
     target_link_options(arigl PRIVATE
       "--embed-file=${_arigl_components}@/usr/share/libcvc/ariadne/components"
       ${_arigl_wasm_link})

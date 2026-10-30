@@ -6,7 +6,7 @@ recipe:
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
-  description: "arigl-web — the stock browser host for Ariadne (.ari) documents: arigl built to WebAssembly, in share/arigl-web/ (index.html with arigl-web.js and arigl-web.css, arigl.js, arigl.wasm). It carries no documents of its own. Serve those files from a directory beside your .ari files and open it on ?src=main.ari: the page fetches the document and every file it imports, relative to its URL, before it starts, from the page's own origin unless its arigl.config.json allows another; the config also gives arigl its host flags. The single-threaded build (wasm) needs no special headers; the threaded one (wasm-mt) needs a cross-origin-isolated page (COOP/COEP)."
+  description: "arigl-web — the stock browser host for Ariadne (.ari) documents: arigl built to WebAssembly, in share/arigl-web/ (index.html with arigl-web.js and arigl-web.css, arigl.js, arigl.wasm), and in the single-threaded package the terminal runner's page too (ari.html, ari.js, ari.wasm: the same documents in an xterm.js terminal). It carries no documents of its own. Serve those files from a directory beside your .ari files and open it on ?src=main.ari: the page fetches the document and every file it imports, relative to its URL, before it starts, from the page's own origin unless its ariadne.config.json allows another; the config also gives arigl its host flags. The single-threaded build (wasm) needs no special headers; the threaded one (wasm-mt) needs a cross-origin-isolated page (COOP/COEP)."
   homepage: https://github.com/transfix/libcvc
   # BSD-3-Clause: the module links cvcGL statically, which carries code derived from VTK 9.5.0.
   # The notices are in THIRD_PARTY_NOTICES.md, shipped beside the page.
@@ -50,6 +50,10 @@ depends:
     # SdlInput seam); build-wasm.sh fails the build without either.
     - name: imgui
     - name: sdl3
+    # The terminal backend, for the ari page (single-threaded package). tvision, for its
+    # ari_tvision page, is not listed: its wasm column is not on the catalog yet, and build-wasm.sh
+    # adds the page whenever the deps prefix has it.
+    - name: ftxui
     # cvcGL's conference video (mjpeg).
     - name: libjpeg-turbo
     # Scene sources: meshes through assimp (.glb), and cvc's mesh_ops / fem (header-only).

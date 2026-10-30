@@ -1,8 +1,8 @@
 // arigl-web.js — the arigl-web page's loader (arigl-web.html, which documents the config): read
 // the config, resolve ?src= against the page, then start arigl.js on arigl.wasm with the command
 // line `arigl run <config flags> <src URL> <document args>`. arigl fetches the document and the
-// files it imports (src/arigl/web_document.h) and calls back: Module.ariglRunning when the
-// document is loaded, Module.ariglExit(status) when it stops. A failure shows the error screen
+// files it imports (cvc/ariadne/web_document.h) and calls back: Module.ariadneRunning when the
+// document is loaded, Module.ariadneExit(status) when it stops. A failure shows the error screen
 // with everything arigl printed.
 (function () {
   'use strict';
@@ -18,7 +18,7 @@
   let failed = false;
   let srcShown = '';
   // For a test or a console: loading, running, ended or failed, and what arigl printed.
-  const state = window.ariglWeb = {state: 'loading', log: stderrTail, src: ''};
+  const state = window.ariadneWeb = {state: 'loading', log: stderrTail, src: ''};
 
   function status(text) { statusEl.textContent = text; }
 
@@ -37,19 +37,19 @@
   }
 
   async function loadConfig() {
-    if (window.ARIGL_CONFIG) return window.ARIGL_CONFIG;
+    if (window.ARIADNE_CONFIG) return window.ARIADNE_CONFIG;
     let r;
     try {
-      r = await fetch('arigl.config.json', {cache: 'no-cache', credentials: 'same-origin'});
+      r = await fetch('ariadne.config.json', {cache: 'no-cache', credentials: 'same-origin'});
     } catch (e) {
       return {};
     }
     if (r.status === 404) return {};
-    if (!r.ok) throw new Error('arigl.config.json: HTTP ' + r.status);
+    if (!r.ok) throw new Error('ariadne.config.json: HTTP ' + r.status);
     try {
       return await r.json();
     } catch (e) {
-      throw new Error('arigl.config.json is not JSON: ' + e.message);
+      throw new Error('ariadne.config.json is not JSON: ' + e.message);
     }
   }
 
@@ -107,8 +107,8 @@
     const flags = list(config.flags, 'flags').map(f => f.split('{origin}').join(location.origin));
     const args = list(config.args, 'args').concat(params.getAll('arg'));
     const env = Object.assign({}, config.env || {});
-    env.CVC_ARIGL_SRC_ORIGINS = list(config.src_origins, 'src_origins').join(' ');
-    env.CVC_ARIGL_PRELOAD = list(config.preload, 'preload').join('\n');
+    env.CVC_ARIADNE_SRC_ORIGINS = list(config.src_origins, 'src_origins').join(' ');
+    env.CVC_ARIADNE_PRELOAD = list(config.preload, 'preload').join('\n');
 
     const Module = {
       canvas,
@@ -122,15 +122,15 @@
       setStatus: t => { if (t && !failed) status(t); },
       preRun: [() => { for (const [k, v] of Object.entries(env)) ENV[k] = String(v); }],
       onRuntimeInitialized() { status('Loading ' + srcUrl.pathname + '…'); },
-      // The document is loaded (web_document.h): take the loading screen down.
-      ariglRunning() {
+      // The document is loaded (cvc/ariadne/web_document.h): take the loading screen down.
+      ariadneRunning() {
         if (failed) return;
         state.state = 'running';
         overlay.classList.add('hidden');
         canvas.focus();
       },
       // arigl stopped: status 0 is the document quitting, anything else an error.
-      ariglExit(code) {
+      ariadneExit(code) {
         if (code !== 0) {
           fail('Could not run ' + srcUrl.pathname);
           return;

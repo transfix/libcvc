@@ -1439,22 +1439,28 @@ imports, relative to itself (`import: lib/feed.ari`, `load: ../shared/panel.ari`
 both hosts without changes.
 
 **Installed** (`share/<app>/`, from the app's cvcpkg recipe, which depends on the `arigl`
-or `ari` package): `arigl run <prefix>/share/<app>/main.ari` from any working directory.
-Every relative reference resolves against the directory of the file that makes it, and
-`cvc://` finds the component library beside the libcvc in the same prefix (§6.4). A
-launcher only has to pass the path and its flags. `ctest -R arigl_docset` checks this with
-[`src/arigl/tests/docset`](../src/arigl/tests/docset/app/main.ari).
+or `ari` package): `arigl run <prefix>/share/<app>/main.ari`, or in the terminal
+`ari run <prefix>/share/<app>/main.ari` (FTXUI, or `--backend tvision`), from any working
+directory. Both runtimes load through the same loader. Every relative reference resolves
+against the directory of the file that makes it, and `cvc://` finds the component library
+beside the libcvc in the same prefix (§6.4). A launcher only has to pass the path and its
+flags. `ctest -R '(ari|arigl)_docset'` checks this with
+[`src/cvc/tests/data/ariadne_docset`](../src/cvc/tests/data/ariadne_docset/app/main.ari).
 
 **Served** (any site path, e.g. `/apps/<app>/`): put the `arigl-web` package's files (the
-stock browser host) beside the documents and open `/apps/<app>/?src=main.ari`. arigl
-fetches the document and, before the app starts, every file it names by a relative path
+stock browser host) beside the documents and open `/apps/<app>/?src=main.ari`. The package's
+`ari.html` runs the same documents in ari's terminal backend, in an xterm.js terminal:
+`/apps/<app>/ari.html?src=main.ari`. Either runtime fetches the document and, before the app
+starts, every file it names by a relative path
 (`import:`, `load:`, `vinay:`, and the files those name), writing each at its URL path in
 the browser's file system. Then it runs the local copy, so relative references resolve as
-they do on disk ([`doc_fetch.h`](../inc/cvc/ariadne/doc_fetch.h)). By default the
-document must be on the page's own origin. The page's `arigl.config.json` names the
+they do on disk ([`web_document.h`](../inc/cvc/ariadne/web_document.h),
+[`doc_fetch.h`](../inc/cvc/ariadne/doc_fetch.h)). By default the
+document must be on the page's own origin. The page's `ariadne.config.json` names the
 document, any other origins it may come from, the host flags (the network flags `--net` and `--net-allow`, ...), and
-the extra data files to fetch. The URL can only add document arguments. A failed load
-shows an error page with what arigl printed. [CVCGL_WASM.md](CVCGL_WASM.md#arigl-web-the-stock-browser-host)
+the extra data files to fetch; both pages read the same file. The URL can only add document
+arguments. A failed load shows what the runtime printed: an error page in arigl-web, the
+terminal itself in `ari.html`. [CVCGL_WASM.md](CVCGL_WASM.md#arigl-web-the-stock-browser-host)
 has the details, the sizes, and what wasm-mt needs.
 
 A path the document hands a scene source or a data reader (`source: { file: ... }`) is

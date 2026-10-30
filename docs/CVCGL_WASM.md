@@ -445,9 +445,13 @@ Check in both Firefox and Chromium:
 
 `arigl-web` (`cvcpkg/recipes/arigl-web`) is `arigl` built to wasm for running anyone's
 `.ari` documents. It carries none of its own. Its page loads a document by URL, and
-it can be served from any path of an ordinary site. A wasm build of the repo with
-`CVC_BUILD_EXAMPLES=OFF` builds it as the `arigl` target (`src/arigl/CMakeLists.txt`). With
-the examples on, the same target is the gallery's arigl instead, with the documents preloaded.
+it can be served from any path of an ordinary site. The single-threaded package also has
+`ari`'s terminal page, which runs the same documents in the FTXUI backend in an xterm.js
+terminal, loaded the same way (see [The terminal page](#the-terminal-page-arihtml)).
+
+A wasm build of the repo with `CVC_BUILD_EXAMPLES=OFF` builds the shell as the `arigl` target
+(`src/arigl/CMakeLists.txt`). With the examples on, the same target is the gallery's arigl
+instead, with the documents preloaded.
 
 The package is `share/arigl-web/`:
 
@@ -455,23 +459,25 @@ The package is `share/arigl-web/`:
 |---|---|
 | `index.html`, `arigl-web.js`, `arigl-web.css` | the page (`src/arigl/web/arigl-web.*`): config, `?src=`, loading and error screens |
 | `arigl.js`, `arigl.wasm` | the module; the component library is embedded at `/usr/share/libcvc/ariadne/components` |
+| `ari.html`, `ari.js`, `ari.wasm` | the terminal page (`src/ari/web/ari.html`) and `ari` built to wasm; single-threaded package only |
 | `THIRD_PARTY_NOTICES.md`, `LICENSE` | VTK-derived code in cvcGL is BSD-3-Clause |
 
 Serve those files in a directory beside the documents, e.g. for an app at `/apps/nicotina/`:
 
 ```
 /apps/nicotina/index.html  arigl-web.js  arigl-web.css  arigl.js  arigl.wasm
+/apps/nicotina/ari.html    ari.js        ari.wasm                     (the terminal page)
 /apps/nicotina/main.ari    lib/feed.ari  ...             (the app's own documents)
-/apps/nicotina/arigl.config.json                         (optional)
+/apps/nicotina/ariadne.config.json                         (optional)
 ```
 
 and open `/apps/nicotina/` (the default document is `main.ari`) or
-`/apps/nicotina/?src=main.ari`. Any static server works for the single-threaded build,
+`/apps/nicotina/?src=main.ari`, and for the terminal client `/apps/nicotina/ari.html`. Any static server works for the single-threaded build,
 `python3 -m http.server` included.
 
 **How a document loads.** The page resolves `src` against its own URL and runs
 `arigl run <flags> <absolute src URL> <document args>`. Before the load, arigl
-(`src/arigl/web_document.cpp`, over [`doc_fetch.h`](../inc/cvc/ariadne/doc_fetch.h)) does
+([`web_document.h`](../inc/cvc/ariadne/web_document.h), over [`doc_fetch.h`](../inc/cvc/ariadne/doc_fetch.h)) does
 the following:
 
 1. It checks that the document is on the page's origin, or on one the config lists.
@@ -492,8 +498,8 @@ missing document is an error. A name built from a unit's arguments (`load: "{pan
 cannot be known ahead, so it is a warning: list such files, and data files a scene reads,
 in the config's `preload`.
 
-**The config** is `arigl.config.json` beside the page (a 404 means the defaults), or
-`window.ARIGL_CONFIG` set by a script ahead of `arigl-web.js`:
+**The config** is `ariadne.config.json` beside the page (a 404 means the defaults), or
+`window.ARIADNE_CONFIG` set by a script ahead of `arigl-web.js`. `ari.html` reads the same file:
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -514,8 +520,8 @@ untrusted files from it (user uploads, say) should pin the document with
 **Errors.** A failed load replaces the loading screen with an error page: one line on what
 went wrong, then everything arigl printed (`arigl: could not fetch .../main.ari: HTTP 404`,
 `... not this page's origin ...`, a YAML error, an unknown host flag). A document that quits
-shows that it has ended. The page reads `Module.ariglRunning()` and `Module.ariglExit(status)`,
-which arigl calls, and keeps its state in `window.ariglWeb` (`state` is `loading`,
+shows that it has ended. The page reads `Module.ariadneRunning()` and `Module.ariadneExit(status)`,
+which arigl calls, and keeps its state in `window.ariadneWeb` (`state` is `loading`,
 `running`, `ended` or `failed`, and `log` holds arigl's output) for tests and the console.
 
 **Content-Security-Policy.** Nothing in the page is inline, and nothing in the module
@@ -535,15 +541,19 @@ needs threads. It needs no headers and can live at an ordinary site path.
 **Size.** Measured on 3.7.4, single-threaded, emsdk 5.0.7, `-O3`. The recipe's script prints
 the first row on every build.
 
-| Build | `arigl.wasm` raw | gzip -9 | brotli -q 11 |
+| Module | raw | gzip -9 | brotli -q 11 |
 |---|---|---|---|
-| arigl-web as packaged (the gallery's features) | 49.0 MB | 13.8 MB | 9.5 MB |
-| `CVC_ARIGL_WEB_LEAN=1`: no ImageMagick, assimp, mesher, SDF or libigl | 33.7 MB | 9.0 MB | 6.1 MB |
-| as packaged, linked without Asyncify (it cannot run; for scale) | 31.8 MB | 9.9 MB | 7.3 MB |
+| `arigl.wasm` as packaged (the gallery's features) | 49.0 MB | 13.8 MB | 9.5 MB |
+| `arigl.wasm`, `CVC_ARIGL_WEB_LEAN=1`: no ImageMagick, assimp, mesher, SDF or libigl | 33.7 MB | 9.0 MB | 6.1 MB |
+| `arigl.wasm` as packaged, linked without Asyncify (it cannot run; for scale) | 31.8 MB | 9.9 MB | 7.3 MB |
+| `ari.wasm` as packaged | 21.7 MB | 7.1 MB | 5.1 MB |
+| `ari.wasm`, `CVC_ARIGL_WEB_LEAN=1` | 7.7 MB | 2.8 MB | 2.1 MB |
 
-`arigl.js` is 325 KB raw, 68 KB gzip and 59 KB brotli. The page's three files come to under
-10 KB. The deployed gallery's `arigl.wasm` (the same program with the examples) is 48.9 MB,
-and the `ari` page's `ari.wasm` (libcvc with ImageMagick, no GL) is 21.6 MB.
+`arigl.js` is 325 KB raw, 68 KB gzip and 59 KB brotli. `ari.js` is 109 KB, 26 KB and 23 KB.
+`ari.html` is 12 KB, and xterm.js comes from jsDelivr. The arigl page's three files come to
+under 10 KB. The deployed gallery's `arigl.wasm` (the same program with the examples) is
+48.9 MB, and its `ari.wasm` is 21.6 MB. ari is libcvc alone (no VTK, no cvcGL), and the lean
+features take two thirds of it.
 
 Where the code goes: 43.3 MB of function bodies plus 5.5 MB of data segments. The bodies are
 attributed by name, from a link with `--profiling-funcs`. A library's templates that another
@@ -567,37 +577,65 @@ library instantiates count under libc++.
 
 Three things stand out:
 
-- **VTK is the largest single part, but not most of it.** It is a third of the code. The
-  optional features the gallery needs (ImageMagick, assimp, the codecs behind them, the
-  mesher) are about as large again. `CVC_ARIGL_WEB_LEAN=1` drops those features, which saves
-  15.3 MB raw and 3.4 MB brotli. The lean build passes the same headless test.
+- **VTK is the largest single part of the packaged module, and most of the lean one.** In the
+  packaged module it is a third of the code. The optional features the gallery needs
+  (ImageMagick, assimp, the codecs behind them, the mesher) are about as large again.
+  `CVC_ARIGL_WEB_LEAN=1` drops those features, which saves 15.3 MB raw and 3.4 MB brotli.
+  Without them, the lean `ari.wasm` (libcvc alone) is 7.7 MB of the lean `arigl.wasm`'s
+  33.7 MB, so VTK and cvcGL are about three quarters of the lean shell. The lean builds pass
+  the same headless test.
 - **Asyncify costs about 40% of the code.** The code is 26.1 MB without it and 43.3 MB with it.
   arigl's loop yields with `emscripten_sleep`, and a document's fetch and the document-set load
   block. Because any indirect call might reach one of those, nearly every function gets
   instrumented.
-- **An ImGui-only host would roughly halve the lean shell.** Such a host draws Ariadne's widgets
-  with Dear ImGui straight on WebGL2, with no VTK render window and no cvcGL scene graph. It
-  would keep the following: cvc::ariadne, state_exec, the parts of the cvc core its registries
-  reach, ImGui with its WebGL backend, SDL3 (or Emscripten's HTML5 input), yaml-cpp, boost,
-  libc++ and libc. VTK and the cvcGL scene layer are about 16 MB of the lean module. On the
-  lean feature set such a host would be about 16-18 MB raw, ~4.5 MB gzip and ~3 MB brotli.
-  That is half the lean shell and a third of the packaged one, and `ari.wasm` (21.6 MB with
-  ImageMagick) is an upper bound for it. It would run no `scene:`, and a document that needs
-  one says so with `requires:` (ARIADNE.md §5.7). These are estimates from the table, not a
-  build. Dropping Asyncify on top would cut about another third, as it does the packaged
-  module (49.0 MB to 31.8 MB). The frame loop would use `emscripten_set_main_loop`, and the two blocking
-  waits would move to JSPI where the browser has it, or to a worker on wasm-mt.
+- **An ImGui-only host would be about a quarter of the lean shell.** Such a host draws
+  Ariadne's widgets with Dear ImGui straight on WebGL2, with no VTK render window and no cvcGL
+  scene graph. It is the lean `ari` with ImGui in place of FTXUI: cvc::ariadne, state_exec,
+  the parts of the cvc core its registries reach, ImGui with its WebGL backend, SDL3 (or
+  Emscripten's HTML5 input), yaml-cpp, boost, libc++ and libc. The lean `ari.wasm` measures
+  that core at 7.7 MB. ImGui, SDL3 and the widget backend add about 1.5 MB with Asyncify (the
+  table's figures). So such a host would be about 9-10 MB raw and ~2.5 MB brotli. That is a
+  quarter of the lean shell (33.7 MB, 6.1 MB brotli) and a fifth of the packaged one. It would
+  run no `scene:`, and a document that needs one says so with `requires:` (ARIADNE.md §5.7).
+  This is an estimate from the two measured builds, not a build. Dropping Asyncify on top
+  would cut about another third, as it does the packaged module (49.0 MB to 31.8 MB). The frame
+  loop would use `emscripten_set_main_loop`, and the two blocking waits would move to JSPI
+  where the browser has it, or to a worker on wasm-mt.
+
+### The terminal page (`ari.html`)
+
+`ari`'s browser page is `ari` built to single-threaded wasm behind an xterm.js terminal
+(`src/ari/web/ari.html`). It runs a document in the FTXUI backend, the same backend as
+`ari run` in a native terminal. In the gallery it runs its baked document
+(`terminal_tour.ari`). Given `?src=`, or a config naming a document, it runs that one
+instead, loaded exactly as arigl-web loads one. The page passes `ari run <flags> <src URL>`,
+and `ari` fetches the document set into MEMFS through the same libcvc code
+(`cvc/ariadne/web_document.h`). It honours the same config (`ariadne.config.json`) and the
+same-origin rule. A build with `-DCVC_ARI_WASM_DEFAULT_SRC=main.ari`, which the arigl-web
+package uses, makes `main.ari` the default when the URL names none. A failed load prints what
+`ari` said into the terminal.
+
+It differs from arigl-web's page in two ways:
+
+- **No strict CSP yet.** It has inline scripts and loads xterm.js from jsDelivr
+  (SRI-pinned), so its policy needs `script-src 'self' 'unsafe-inline'
+  https://cdn.jsdelivr.net 'wasm-unsafe-eval'` and the matching `style-src`. Vendoring xterm.js
+  and moving the script to a file would lift that.
+- **No tvision page in the package.** The tvision desktop page (`ari_tvision.html`) needs
+  cvcpkg's tvision with its browser console, whose wasm column is not on the catalog. The
+  gallery has no such page either. The recipe adds the page when the deps prefix has it.
+  Natively, `ari run --backend tvision` runs the same documents.
 
 **Testing.**
 
 | What | How |
 |---|---|
 | URL parsing, reference resolution (and that it agrees with the file scheme), the origin rule, the fetch walk | `ariadne_doc_fetch_test` (ctest) |
-| a document set run from another directory; a URL refused natively | `ctest -R 'arigl_(docset\|url_document)'` |
-| the shell in a real browser: a same-origin set loads and runs, a cross-origin or missing `src` shows the error page, all under a strict CSP with no COOP/COEP | `node src/arigl/web/test/arigl_web_smoke.mjs --web <share/arigl-web> --docset src/arigl/tests/docset --chrome <chrome>` (CI: the `arigl-web` job, which builds with the recipe's script) |
+| a document set run from another directory, by `arigl` and by `ari`; a URL refused natively | `ctest -R '(ari\|arigl)_(docset\|url_document)'` |
+| both pages in a real browser: a same-origin set loads and runs (in `ari.html`, its text on the terminal), a cross-origin or missing `src` shows the error; arigl-web's page under a strict CSP, both with no COOP/COEP | `node src/arigl/web/test/arigl_web_smoke.mjs --web <share/arigl-web> --docset src/cvc/tests/data/ariadne_docset --chrome <chrome>` (CI: the `arigl-web` job, which builds with the recipe's script) |
 
 By hand: serve a directory holding the five files, `app/` and `shared/` from
-`src/arigl/tests/docset` (the shell files inside `app/`), with `python3 -m http.server`,
+`src/cvc/tests/data/ariadne_docset` (the shell files inside `app/`), with `python3 -m http.server`,
 and open `http://localhost:8000/app/`. The *Document set* window shows a line from
 `lib/panel.ari` and one from `shared/note.ari`, beside the component library's *Display*.
 

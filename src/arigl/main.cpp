@@ -25,7 +25,7 @@
 //   arigl check    [flags] doc.ari
 //
 // In the browser shell (arigl-web, web/arigl-web.html) doc.ari is a URL: arigl fetches it and the
-// files it imports first (web_document.h).
+// files it imports first (cvc/ariadne/web_document.h).
 //
 // By default the document runs in a real window with a GL context: its widgets are ImGui over the
 // VTK scene. With --terminal it runs in the terminal instead: the widgets go through libcvc's
@@ -67,6 +67,7 @@
 #include <cvc/ariadne/loader.h> // run_init — seed conf.room / conf.self before the first tick
 #include <cvc/ariadne/stream/stream_view.h>
 #include <cvc/ariadne/tvision_backend.h>
+#include <cvc/ariadne/web_document.h> // arigl-web: a document named by URL
 #include <cvc/core/app.h>
 #include <random> // std::random_device — the conference node id's per-launch suffix
 #include <sstream> // arigl info: the GL report, line by line
@@ -116,7 +117,6 @@
 #include <emscripten.h>             // emscripten_sleep — yield the asyncify loop to the browser
 #endif
 #include "gallery.h" // the Demos menu over $CVC_ARIGL_GALLERY
-#include "web_document.h" // arigl-web: a document named by URL
 
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/ImGuiOverlay.h>
@@ -1612,7 +1612,7 @@ int run_window(const ari::HostOptions &o) {
   if (const int status = load_document(rt, o); status >= 0)
     return status;
   note_misplaced(rt.app_runtime(), o);
-  arigl::report_running(); // the browser shell takes its loading screen down
+  ari::report_running(); // the browser shell takes its loading screen down
   // The rich scene panels (scene_panel / stage_lighting_panel / scene_menu), for a document that
   // uses them rather than the declarative components, and Settings' scene_settings. They need the
   // realized lighting rig, so a document loaded later registers them again.
@@ -1917,8 +1917,8 @@ int arigl_main(int argc, char **argv) {
   }
   // arigl-web, the browser shell, names its document by URL: fetch it into MEMFS first.
   ari::HostOptions staged = o;
-  if (arigl::is_url_document(staged.doc))
-    if (const int status = arigl::stage_url_document(staged); status >= 0)
+  if (ari::is_url_document(staged.doc))
+    if (const int status = ari::stage_url_document(staged, "arigl"); status >= 0)
       return status;
 #ifdef CVC_ARIGL_COMPONENT_DIR
   staged.component_paths.push_back(CVC_ARIGL_COMPONENT_DIR); // arigl-web's embedded library
@@ -1930,6 +1930,6 @@ int arigl_main(int argc, char **argv) {
 
 int main(int argc, char **argv) {
   const int status = arigl_main(argc, argv);
-  arigl::report_exit(status); // the browser shell shows its error page, or that the document ended
+  cvc::ariadne::report_exit(status); // the browser shell's error page, or that the document ended
   return status;
 }

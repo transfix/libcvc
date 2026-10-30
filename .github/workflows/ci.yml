@@ -449,15 +449,17 @@ jobs:
             build-wasm/bin/ari.js
             build-wasm/bin/ari.wasm
 
-  # arigl-web, the stock browser host (cvcpkg/recipes/arigl-web): arigl built to single-threaded
-  # wasm with no documents of its own, by the recipe's own script (which prints the .wasm/.js
-  # sizes, raw, gzip and brotli). Then a headless Chrome loads it the way a site serves it, from an
-  # ordinary path with no COOP/COEP and a strict Content-Security-Policy: a document set from the
-  # page's origin must load and run, and a cross-origin or missing src must show the error page
-  # (src/arigl/web/test/arigl_web_smoke.mjs). Only when the shell, its document loader, its recipe
-  # or this file changed: it builds libcvc and cvcGL for wasm.
+  # arigl-web, the stock browser host (cvcpkg/recipes/arigl-web): arigl, and ari's terminal page,
+  # built to single-threaded wasm with no documents of their own, by the recipe's own script (which
+  # prints the .wasm/.js sizes, raw, gzip and brotli). Then a headless Chrome loads both pages the
+  # way a site serves them, from an ordinary path with no COOP/COEP (arigl-web's under a strict
+  # Content-Security-Policy): a document set from the page's origin must load and run (on ari's
+  # terminal, its text must show), and a cross-origin or missing src must show the error
+  # (src/arigl/web/test/arigl_web_smoke.mjs; ari's page loads xterm.js from jsDelivr). Only when
+  # the pages, their document loader, the recipe or this file changed: it builds libcvc and cvcGL
+  # for wasm.
   arigl-web:
-    name: arigl-web shell (wasm, headless Chrome)
+    name: arigl-web shell + ari page (wasm, headless Chrome)
     runs-on: ubuntu-24.04
     timeout-minutes: 150
     concurrency:
@@ -484,8 +486,10 @@ jobs:
           run=true
           if [ -n "$base" ] && [ "$base" != "0000000000000000000000000000000000000000" ] \
              && git cat-file -e "${base}^{commit}" 2>/dev/null; then
-            if ! git diff --name-only "$base" HEAD -- src/arigl inc/cvc/ariadne/doc_fetch.h \
-                   src/cvc/ariadne/doc_fetch.cpp src/cvcGL/wasm cvcpkg/recipes/arigl-web \
+            if ! git diff --name-only "$base" HEAD -- src/arigl src/ari \
+                   inc/cvc/ariadne/doc_fetch.h src/cvc/ariadne/doc_fetch.cpp \
+                   inc/cvc/ariadne/web_document.h src/cvc/ariadne/web_document.cpp \
+                   src/cvc/tests/data/ariadne_docset src/cvcGL/wasm cvcpkg/recipes/arigl-web \
                    .github/workflows/ci.yml | grep -q .; then
               run=false
             fi
@@ -527,7 +531,7 @@ jobs:
           chrome=$(command -v google-chrome || command -v google-chrome-stable || command -v chromium)
           "$chrome" --version
           "$node" src/arigl/web/test/arigl_web_smoke.mjs --web stage-arigl-web/share/arigl-web \
-            --docset src/arigl/tests/docset --chrome "$chrome"
+            --docset src/cvc/tests/data/ariadne_docset --chrome "$chrome"
 
       - name: Upload the arigl-web shell
         if: steps.paths.outputs.run == 'true'

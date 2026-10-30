@@ -2,11 +2,14 @@
 # cvcpkg/recipes/arigl-web/build-wasm.sh — arigl-web, the stock browser host for Ariadne (.ari)
 # documents, packaged under share/arigl-web/: index.html (src/arigl/web/arigl-web.html) with its
 # arigl-web.js and arigl-web.css, arigl.js and arigl.wasm, and the third-party notices the
-# module's VTK-derived code needs.
+# module's VTK-derived code needs. The single-threaded package also has the terminal runner's page,
+# ari.html with ari.js and ari.wasm (src/ari/web/ari.html, xterm.js): the same documents in the
+# FTXUI terminal backend, loaded the same way (?src=, default main.ari, the same page config). With
+# tvision's browser console in the deps prefix it adds ari_tvision.html, the tvision desktop.
 #
 # arigl built to wasm with no documents of its own, only the component library embedded: a page
 # serving these files opens one by URL (?src=), and arigl fetches it and the files it imports
-# (src/arigl/web_document.h). There is no single-threaded wasm libcvc bundle to link, so the
+# (cvc/ariadne/web_document.h). There is no single-threaded wasm libcvc bundle to link, so the
 # trimmed cvc core + cvcGL closure compiles from the repo root, as libcvc-examples-web's does,
 # with the examples off: that is what makes src/arigl build the shell rather than the gallery's
 # arigl. Deps come static from CVC_DEPS_PREFIX; emsdk from the builder via CVC_EMSDK_DIR.
@@ -29,9 +32,10 @@ set -euo pipefail
 : "${CVC_EMSDK_DIR:?CVC_EMSDK_DIR must point to the activated emsdk bundle}"
 : "${CVC_PLATFORM:?CVC_PLATFORM must be wasm or wasm-mt}"
 
+# ari's pages are single-threaded only, as in the gallery.
 case "$CVC_PLATFORM" in
-  wasm) PTHREADS=OFF ;;
-  wasm-mt) PTHREADS=ON ;;
+  wasm) PTHREADS=OFF; ARI=ON ;;
+  wasm-mt) PTHREADS=ON; ARI=OFF ;;
   *) echo "arigl-web: CVC_PLATFORM is wasm or wasm-mt, not '${CVC_PLATFORM}'" >&2; exit 1 ;;
 esac
 FULL=ON
@@ -48,7 +52,8 @@ emcmake cmake -G Ninja -S "$CVC_SOURCE_DIR" -B "$CVC_BUILD_DIR" \
     -DCVC_ENABLE_CUDA=OFF \
     -DCVC_BUILD_TESTS=OFF \
     -DCVC_BUILD_CLI=OFF \
-    -DCVC_BUILD_ARI=OFF \
+    -DCVC_BUILD_ARI="$ARI" \
+    -DCVC_ARI_WASM_DEFAULT_SRC=main.ari \
     -DCVC_BUILD_ARIGL=ON \
     -DCVC_ENABLE_OPENMP=OFF \
     -DDISABLE_CGAL=ON \
@@ -68,7 +73,9 @@ emcmake cmake -G Ninja -S "$CVC_SOURCE_DIR" -B "$CVC_BUILD_DIR" \
 
 # A configure that misses one of these turns it off and carries on, and the shell would ship
 # unable to load a document (yaml-cpp), with inert widgets (imgui) or without keys (sdl3).
+# Nor without the terminal backend, for ari's page.
 for want in "Ariadne: .ari YAML loader ENABLED" \
+            "Ariadne: FTXUI terminal backend ENABLED" \
             "cvcGL: Dear ImGui overlay ENABLED" \
             "cvcGL: SDL3 input/peripheral seam ENABLED"; do
   grep -qF "$want" "$CVC_BUILD_DIR/configure.log" \
@@ -80,13 +87,29 @@ if [[ "$FULL" == "ON" ]] \
   exit 1
 fi
 
-cmake --build "$CVC_BUILD_DIR" --target arigl -j "${CVC_JOBS:-$(nproc)}"
+TARGETS=(arigl)
+ARI_PAGES=()
+if [[ "$ARI" == "ON" ]]; then
+  ARI_PAGES=(ari)
+  # tvision with its browser console (cvcpkg tvision cvc.4 on, the wasm column) is optional, as in
+  # the gallery: without it the package has no ari_tvision page.
+  if grep -q '^CVC_ARIADNE_TVISION_ENABLED:INTERNAL=ON' "$CVC_BUILD_DIR/CMakeCache.txt"; then
+    ARI_PAGES+=(ari_tvision)
+  else
+    echo "arigl-web: no tvision with a browser console in $CVC_DEPS_PREFIX; no ari_tvision page"
+  fi
+  TARGETS+=("${ARI_PAGES[@]}")
+fi
+cmake --build "$CVC_BUILD_DIR" --target "${TARGETS[@]}" -j "${CVC_JOBS:-$(nproc)}"
 
 BIN="$CVC_BUILD_DIR/bin"
 WEB="$CVC_INSTALL_DIR/share/arigl-web"
 install -d "$WEB"
 install -m 644 "$BIN/arigl.js" "$BIN/arigl.wasm" "$BIN/arigl-web.js" "$BIN/arigl-web.css" "$WEB/"
 install -m 644 "$BIN/arigl-web.html" "$WEB/index.html"
+for p in ${ARI_PAGES[@]+"${ARI_PAGES[@]}"}; do
+  install -m 644 "$BIN/$p.html" "$BIN/$p.js" "$BIN/$p.wasm" "$WEB/"
+done
 # The module embeds third-party code (VTK-derived code in cvcGL, BSD-3-Clause; stb, sdf / mtxlib
 # and the DTU .vtk reader in the cvc core) whose notices a binary redistribution must reproduce.
 install -m 644 "$CVC_SOURCE_DIR/THIRD_PARTY_NOTICES.md" "$CVC_SOURCE_DIR/LICENSE" "$WEB/"
@@ -106,7 +129,9 @@ brotli_size() {
   fi
 }
 echo "arigl-web ($CVC_PLATFORM) sizes, bytes: raw / gzip -9 / brotli -q 11"
-for f in arigl.wasm arigl.js index.html arigl-web.js arigl-web.css; do
+FILES=(arigl.wasm arigl.js index.html arigl-web.js arigl-web.css)
+for p in ${ARI_PAGES[@]+"${ARI_PAGES[@]}"}; do FILES+=("$p.wasm" "$p.js" "$p.html"); done
+for f in "${FILES[@]}"; do
   printf '  %-13s %10s %10s %10s\n' "$f" "$(wc -c < "$WEB/$f")" \
     "$(gzip -9 -c "$WEB/$f" | wc -c)" "$(brotli_size "$WEB/$f")"
 done
