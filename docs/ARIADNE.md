@@ -1528,8 +1528,9 @@ In an Ariadne document's action lane, the network verbs are (from
   `METHOD` verb), and the scheme-agnostic `fetch` / `fetch-async`.
 - Options are a dict: `query`, `headers`, `body`, and `form` (form is url-encoded with a
   default `Content-Type`). Query values are url-encoded for you; there are `url-encode` /
-  `url-decode` core builtins if you need them directly. Two more, `auth` and `capture_auth`,
-  use the host's credentials (§10.3).
+  `url-decode` core builtins if you need them directly. `auth`, `capture_auth` and credential
+  values (`(dict "credential" NAME)` in a form or headers dict) use the host's credentials
+  (§10.3).
 - The reply is a dict with every key present:
 
   | key | what |
@@ -1562,7 +1563,7 @@ In an Ariadne document's action lane, the network verbs are (from
 ### 10.3 The host's network: the allowlist and credentials
 
 A document reaches the network only when its host turns it on. `ari` and `arigl` take the same
-four flags before the document path ([`host_cli.h`](../inc/cvc/ariadne/host_cli.h)), with the
+flags before the document path ([`host_cli.h`](../inc/cvc/ariadne/host_cli.h)), with the
 same meaning in every mode: `ari` with either terminal backend (FTXUI, or `--backend tvision`),
 `arigl` in a window, `arigl --terminal`, and both in a browser. So a launcher script gives a
 document the network without any code of its own, and the same document runs in a terminal
@@ -1574,10 +1575,13 @@ ari run --backend tvision --net-allow https://tx.wtf --credential-store nicotina
 arigl run --net-allow https://tx.wtf --credential-store nicotina share/nicotina/main.ari
 ```
 
-The flags hold for `run`, `snapshot`, `check` and `info` alike. With the network on,
-`ari snapshot` waits after its frames until the document's requests have come back (at most
-10 s) before it prints the frame, so CI can render a document that signs in against a local
-test server; it prints the programs' warnings after the frame, as `arigl snapshot` does.
+The flags hold for `run`, `snapshot`, `check` and `info` alike. With the network on, `ari
+snapshot` and `arigl snapshot` (in a window or with `--terminal`) keep running after their
+frames until the document is idle, no request in flight and no program step waiting (a program
+parsing one reply before it sends the next is not idle), for three steps running, at most 10 s.
+So one frame shows what a document that signs in and fetches brought back, and CI can render it
+against a local test server. `ari snapshot` prints the programs' warnings after the frame, as
+`arigl snapshot` does.
 
 | flag | what |
 |---|---|
@@ -1585,6 +1589,7 @@ test server; it prints the programs' warnings after the frame, as `arigl snapsho
 | `--net-allow ORIGIN` | allow requests to `ORIGIN`, `scheme://host[:port]` (repeatable; implies `--net`) |
 | `--net-policy FILE` | read `allow` and `credential` lines from `FILE` (repeatable; implies `--net`) |
 | `--credential-store S` | keep credentials across runs in `S` (implies `--net`; not in a browser) |
+| `--credential-env N=V` | credential `N` is the token in environment variable `V`, for this run (repeatable; a policy `credential` line must bind `N`; not in a browser) |
 
 Without them a document has no `http-get` or `http-request`, and an `http(s)://` URI does not
 resolve. With them the host ([`net_host.h`](../inc/cvc/ariadne/net_host.h), `enable_net`):
@@ -1612,8 +1617,25 @@ resolve. With them the host ([`net_host.h`](../inc/cvc/ariadne/net_host.h), `ena
     "token")))` has the host take the JSON string at `field` (object keys joined by `.`;
     `token` by default) from a 2xx reply, keep it as credential `txwtf`, and put
     `"[redacted]"` in its place in the body, every other byte as it was. `captured` says
-    whether it was kept.
-  - A request with either option does not follow redirects.
+    whether it was kept. `capture_auth` also takes a list of such dicts, one credential each,
+    for a reply that carries several tokens (an access and a refresh token). Each is blanked
+    wherever the reply carries it. A dict with `"optional" #t` names a field the reply may lack:
+    a refresh reply need not rotate the refresh token.
+  - A **credential value**, `(dict "credential" NAME)`, as a value in the `form` or `headers`
+    dict, has the host put credential `NAME`'s token there as the request is sent: percent-encoded
+    in a form, as is in a header (`X-Api-Key`, say). It goes only to an origin the credential is
+    bound to, like `auth`, and echoes are blanked. A `query` refuses one, since URLs are logged.
+    So a document refreshes its session (RFC 6749 section 6) without seeing either token:
+
+    ```lisp
+    (http-request "POST" "https://registry.example/v1/auth/token"
+      (dict "form" (dict "grant_type" "refresh_token"
+                         "refresh_token" (dict "credential" "svc.refresh"))
+            "capture_auth" (list (dict "name" "svc" "field" "access_token")
+                                 (dict "name" "svc.refresh" "field" "refresh_token"
+                                       "optional" #t))))
+    ```
+  - A request with any of these options does not follow redirects.
   - `(net-auth-has? NAME [URL])` asks whether the host has the credential (for URL's origin),
     `(net-auth-forget NAME)` drops it (from the file too) and `(net-auth-clear)` drops them
     all. `(net-allowed? URL)` asks whether a request to URL may be made.
@@ -1622,6 +1644,13 @@ resolve. With them the host ([`net_host.h`](../inc/cvc/ariadne/net_host.h), `ena
     16 to 4096 characters, so it can never split a header line.
   - So a token reaches neither the document's variables nor the state tree (which a state
     transport replicates), and no error message or log line quotes one.
+- **takes tokens it was handed with `--credential-env NAME=VAR`** (an API token, a CI secret):
+  the token in environment variable `VAR` becomes credential `NAME` for this run. A policy
+  `credential NAME ORIGIN...` line must bind it, so the launcher, not the document, decides where
+  it may go. It is held in memory, ahead of any token the store file has for `NAME`, and never
+  written; a capture of `NAME` replaces it. An unset or empty variable supplies nothing, so a
+  launcher can always pass the flag; a value that is no bearer token stops the host (the error
+  never quotes it). A browser has no environment, so it refuses the flag.
 - **keeps credentials across runs with `--credential-store`.** A plain name (`nicotina`) is a
   file of that name in the user's config directory: `$XDG_CONFIG_HOME/cvc/credentials` or
   `~/.config/cvc/credentials`, `%LOCALAPPDATA%\cvc\credentials` on Windows. Anything else

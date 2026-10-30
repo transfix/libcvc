@@ -367,6 +367,7 @@ jobs:
           if [ -n "$base" ] && [ "$base" != "0000000000000000000000000000000000000000" ] \
              && git cat-file -e "${base}^{commit}" 2>/dev/null; then
             if ! git diff --name-only "$base" HEAD -- src/cvc/ariadne inc/cvc/ariadne src/cvc/tools \
+                   src/cvc/net inc/cvc/net \
                    src/ari examples/ariadne/terminal CMakeLists.txt src/cvc/CMakeLists.txt CMake \
                    src/cvc/image inc/cvc/image src/cvc/tests/image_magick_roundtrip.cpp \
                    src/cvc/state inc/cvc/state src/cvc/tests/state_exec_wasm_smoke.cpp \
@@ -419,6 +420,7 @@ jobs:
             -DCVC_FFT_PROVIDER=none -DCVC_ENABLE_ASSIMP=OFF -DCVC_ENABLE_MESHER=OFF \
             -DCVC_BUILD_CVCGL=OFF -DCVC_BUILD_EXAMPLES=OFF -DCVC_WASM_PTHREADS=OFF \
             -DCVC_BUILD_IMAGE_MAGICK_ROUNDTRIP=ON -DCVC_BUILD_STATE_EXEC_WASM_SMOKE=ON \
+            -DCVC_ARI_WASM_TEST_DOCS=ON \
             | tee configure.log
           # CMAKE_PREFIX_PATH lets pkg-config see MagickCore.pc, so the stock FindImageMagick
           # tier makes the targets, the one whose static codec closure the ari link needs
@@ -443,6 +445,32 @@ jobs:
             grep -qF "$want" snapshot.txt \
               || { echo "::error::the wasm ari snapshot is missing '$want'"; exit 1; }
           done
+
+      - name: Make requests from the wasm ari under node
+        # The page's network path: the fetch backend (node's fetch behind an XMLHttpRequest shim)
+        # under the single-threaded build's inline verbs. tests/net_probe.ari signs in (two tokens
+        # from one reply), refreshes with a form credential and fetches with the refreshed token
+        # against tests/net_probe_server.py, and is refused another origin. No token may reach the
+        # output.
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
+          python3 src/ari/tests/net_probe_server.py > probe-port.txt &
+          server=$!
+          trap 'kill $server' EXIT
+          for _ in $(seq 50); do [ -s probe-port.txt ] && break; sleep 0.1; done
+          base="http://127.0.0.1:$(cat probe-port.txt)"
+          timeout 120 "$node" --require ./src/ari/tests/xhr-shim.cjs build-wasm/bin/ari.js \
+            snapshot --net-allow "$base" --width 140 --height 14 /tests/net_probe.ari \
+            --base "$base" 2>&1 | tee probe.txt
+          for want in "device: true" "refresh: true" "me: 200" \
+                      "https://evil.example is not an origin this host allows" '[redacted]'; do
+            grep -qF "$want" probe.txt \
+              || { echo "::error::the wasm ari's network check is missing '$want'"; exit 1; }
+          done
+          if grep -qE 'cvc(ses|ref)_' probe.txt; then
+            echo "::error::a token reached the wasm ari's output"; exit 1
+          fi
 
       - name: Round-trip images through ImageMagick under node
         # The link above only proves the codec libraries resolve. This proves Magick works at run

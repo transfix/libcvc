@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cctype>
 #include <cstdint>
+#include <cstdio>
 #include <cvc/ariadne/ariadne.h> // register_action_intrinsics
 #include <cvc/ariadne/net_intrinsics.h>
 #include <cvc/ariadne/uri.h> // resolve() — the generic (fetch uri) async resolver
@@ -19,6 +20,7 @@
 #include <cvc/state/state_exec/builtins.h>   // percent_encode — the query string
 #include <cvc/state/state_exec/types.h>      // value_t, make_dict/make_list/make_bytes
 #include <optional>
+#include <random>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -95,16 +97,82 @@ std::string field_to_string(const se::value_t &v) {
   return se::to_string(v);
 }
 
+// One field capture_auth keeps from a reply.
+struct Capture {
+  std::string name;            // the credential it becomes
+  std::string field = "token"; // object keys joined by '.'
+  bool optional = false;       // a reply without it is no error (a refresh need not rotate it)
+};
+
+// A credential a form or header value names, (dict "credential" NAME). The option is encoded with
+// `placeholder` in its place; the host puts the token there as the request is sent.
+struct CredentialValue {
+  std::string placeholder;
+  std::string name;
+  bool form = false; // percent-encoded into a form body (else raw, into a header line)
+};
+
+// The credential options of one request (net_intrinsics.h): which credentials to send, as the
+// Authorization header (auth) or as form and header values, and which to keep from the reply.
+// Names only; the tokens stay in the CredentialStore.
+struct RequestAuth {
+  std::string use;                     // auth: NAME ("" = none)
+  std::vector<Capture> captures;       // capture_auth
+  std::vector<CredentialValue> values; // (dict "credential" NAME) values
+  bool any() const { return !use.empty() || !captures.empty() || !values.empty(); }
+};
+
+std::string credential_name(const se::value_t &v, const char *option) {
+  const std::string *s = std::get_if<std::string>(&v.v);
+  if (!s || !cvc::net::CredentialStore::valid_name(*s))
+    throw std::runtime_error(std::string("http request '") + option +
+                             "' option must name a credential (1-64 of A-Z a-z 0-9 . _ -)");
+  return *s;
+}
+
+// The name a credential value, (dict "credential" NAME), names; null when `v` is not one.
+const std::string *credential_value(const se::value_t &v) {
+  const se::dict_ptr *d = std::get_if<se::dict_ptr>(&v.v);
+  if (!d || (*d)->size() != 1 || (*d)->front().first != "credential")
+    return nullptr;
+  const std::string *name = std::get_if<std::string>(&(*d)->front().second.v);
+  if (!name || !cvc::net::CredentialStore::valid_name(*name))
+    throw std::runtime_error(
+        "http request: a credential value is (dict \"credential\" NAME), NAME 1-64 of A-Z a-z 0-9 "
+        ". _ -");
+  return name;
+}
+
+// A placeholder for credential `name` in this request: letters and digits only (so percent-encoding
+// leaves it alone), and random, so no other byte of the request can be mistaken for it.
+std::string placeholder(RequestAuth &auth, const std::string &name, bool form) {
+  static thread_local std::mt19937_64 rng{std::random_device{}()};
+  char buf[40];
+  std::snprintf(buf, sizeof buf, "CVCCREDENTIAL%016llx%016llx",
+                static_cast<unsigned long long>(rng()), static_cast<unsigned long long>(rng()));
+  auth.values.push_back({buf, name, form});
+  return buf;
+}
+
 // Percent-encode an ordered dict into "k1=v1&k2=v2" (keys AND values encoded). Shared by the query
-// string and the application/x-www-form-urlencoded body; dict order is preserved.
-std::string encode_form_pairs(const se::dict_ptr &d) {
+// string and the application/x-www-form-urlencoded body; dict order is preserved. A credential
+// value becomes a placeholder in a form; a query refuses one (a token does not belong in a URL,
+// which servers and proxies log).
+std::string encode_form_pairs(const se::dict_ptr &d, RequestAuth &auth, bool form) {
   std::string out;
   for (const auto &kv : *d) {
     if (!out.empty())
       out.push_back('&');
     out += se::percent_encode(kv.first);
     out.push_back('=');
-    out += se::percent_encode(field_to_string(kv.second));
+    if (const std::string *name = credential_value(kv.second)) {
+      if (!form)
+        throw std::runtime_error("http request: a credential may not go in the query (a URL is "
+                                 "logged); send it in a form or a header");
+      out += placeholder(auth, *name, true);
+    } else {
+      out += se::percent_encode(field_to_string(kv.second));
+    }
   }
   return out;
 }
@@ -124,12 +192,16 @@ std::string url_with_query(std::string url, const std::string &qs) {
 }
 
 // Collect request headers from a "headers" option: a dict ({Name value} -> "Name: value" lines,
-// values stringified) OR a list of verbatim "Name: value" strings (the escape hatch for a repeated
-// header name or byte-exact control). Anything else contributes nothing.
-void collect_headers(const se::value_t &v, std::vector<std::string> &out) {
+// values stringified, a credential value as a placeholder) OR a list of verbatim "Name: value"
+// strings (the escape hatch for a repeated header name or byte-exact control). Anything else
+// contributes nothing.
+void collect_headers(const se::value_t &v, std::vector<std::string> &out, RequestAuth &auth) {
   if (const se::dict_ptr *d = std::get_if<se::dict_ptr>(&v.v)) {
-    for (const auto &kv : **d)
-      out.push_back(kv.first + ": " + field_to_string(kv.second));
+    for (const auto &kv : **d) {
+      const std::string *name = credential_value(kv.second);
+      out.push_back(kv.first + ": " +
+                    (name ? placeholder(auth, *name, false) : field_to_string(kv.second)));
+    }
   } else if (const se::list_ptr *lp = std::get_if<se::list_ptr>(&v.v)) {
     for (const se::value_t &e : **lp)
       if (const std::string *h = std::get_if<std::string>(&e.v))
@@ -159,47 +231,57 @@ bool has_content_type(const std::vector<std::string> &headers) {
   return false;
 }
 
-// The credential options of one request (net_intrinsics.h): which credential to send, and which
-// to keep from the reply. Names only; the tokens stay in the CredentialStore.
-struct RequestAuth {
-  std::string use;                     // auth: NAME ("" = none)
-  std::string capture;                 // capture_auth: name ("" = none)
-  std::string capture_field = "token"; // capture_auth: field
-};
-
-std::string credential_name(const se::value_t &v, const char *option) {
-  const std::string *s = std::get_if<std::string>(&v.v);
-  if (!s || !cvc::net::CredentialStore::valid_name(*s))
-    throw std::runtime_error(std::string("http request '") + option +
-                             "' option must name a credential (1-64 of A-Z a-z 0-9 . _ -)");
-  return *s;
-}
-
-void parse_capture(const se::value_t &v, RequestAuth &auth) {
+Capture parse_one_capture(const se::value_t &v) {
   const se::dict_ptr *d = std::get_if<se::dict_ptr>(&v.v);
   if (!d)
-    throw std::runtime_error("http request 'capture_auth' option must be a dict of name and field");
+    throw std::runtime_error(
+        "http request 'capture_auth' option must be a dict of name, field and optional, or a "
+        "list of them");
+  Capture c;
   for (const auto &kv : **d) {
     if (kv.first == "name") {
-      auth.capture = credential_name(kv.second, "capture_auth");
+      c.name = credential_name(kv.second, "capture_auth");
     } else if (kv.first == "field") {
       const std::string *f = std::get_if<std::string>(&kv.second.v);
       if (!f || f->empty())
         throw std::runtime_error("http request 'capture_auth' field must be a non-empty string");
-      auth.capture_field = *f;
+      c.field = *f;
+    } else if (kv.first == "optional") {
+      const bool *b = std::get_if<bool>(&kv.second.v);
+      if (!b)
+        throw std::runtime_error("http request 'capture_auth' optional must be #t or #f");
+      c.optional = *b;
     }
   }
-  if (auth.capture.empty())
+  if (c.name.empty())
     throw std::runtime_error("http request 'capture_auth' option needs a name");
+  return c;
+}
+
+// capture_auth: one {name field optional} dict, or a list of them (one credential each).
+void parse_capture(const se::value_t &v, RequestAuth &auth) {
+  if (const se::list_ptr *lp = std::get_if<se::list_ptr>(&v.v)) {
+    for (const se::value_t &e : **lp)
+      auth.captures.push_back(parse_one_capture(e));
+    if (auth.captures.empty())
+      throw std::runtime_error("http request 'capture_auth' list is empty");
+  } else {
+    auth.captures.push_back(parse_one_capture(v));
+  }
+  for (std::size_t i = 0; i < auth.captures.size(); ++i)
+    for (std::size_t j = i + 1; j < auth.captures.size(); ++j)
+      if (auth.captures[i].name == auth.captures[j].name)
+        throw std::runtime_error("http request 'capture_auth' names credential '" +
+                                 auth.captures[i].name + "' twice");
 }
 
 // Apply an options dict onto `req`: "query" (dict -> percent-encoded query string appended to the
 // URL), "headers" (dict or list), "body" (string or bytes -> raw body), "form" (dict ->
 // x-www-form-urlencoded body + a default Content-Type unless the caller set one). Unknown keys are
-// ignored (forward-compatible: json/timeout/... may come later); "auth" and "capture_auth" go to
-// `auth`. A misuse (options not a dict, a
-// wrong value type, or both "body" and "form") throws a clear error; the verb runs on the scheduler
-// thread, so this surfaces as an ordinary DSL evaluation error, not a hang.
+// ignored (forward-compatible: json/timeout/... may come later); "auth", "capture_auth" and
+// credential values go to `auth`. A misuse (options not a dict, a wrong value type, or both "body"
+// and "form") throws a clear error; the verb runs on the scheduler thread, so this surfaces as an
+// ordinary DSL evaluation error, not a hang.
 void apply_http_options(cvc::net::HttpRequest &req, const se::value_t &opts, RequestAuth &auth) {
   const se::dict_ptr *dp = std::get_if<se::dict_ptr>(&opts.v);
   if (!dp)
@@ -220,12 +302,12 @@ void apply_http_options(cvc::net::HttpRequest &req, const se::value_t &opts, Req
       parse_capture(kv.second, auth);
   }
   if (headers)
-    collect_headers(*headers, req.headers);
+    collect_headers(*headers, req.headers, auth);
   if (query) {
     const se::dict_ptr *qd = std::get_if<se::dict_ptr>(&query->v);
     if (!qd)
       throw std::runtime_error("http request 'query' option must be a dict");
-    req.url = url_with_query(std::move(req.url), encode_form_pairs(*qd));
+    req.url = url_with_query(std::move(req.url), encode_form_pairs(*qd, auth, false));
   }
   if (body && form)
     throw std::runtime_error("http request options: 'body' and 'form' are mutually exclusive");
@@ -241,7 +323,7 @@ void apply_http_options(cvc::net::HttpRequest &req, const se::value_t &opts, Req
     const se::dict_ptr *fd = std::get_if<se::dict_ptr>(&form->v);
     if (!fd)
       throw std::runtime_error("http request 'form' option must be a dict");
-    req.body = encode_form_pairs(*fd);
+    req.body = encode_form_pairs(*fd, auth, true);
     if (!has_content_type(req.headers))
       req.headers.push_back("Content-Type: application/x-www-form-urlencoded");
   }
@@ -276,49 +358,97 @@ Outcome reply_error(const std::string &url, const std::string &message) {
   return o;
 }
 
-// One request: the credential `auth` names is added as it is sent and the one it captures is taken
-// out of the reply, so neither reaches a value_t.
+// One request: the credentials `auth` names are put in as it is sent (the Authorization header,
+// form and header values), and the ones it captures are taken out of the reply, so none reaches a
+// value_t.
 Outcome perform(cvc::net::HttpRequest req, const RequestAuth &auth, const NetAccess &access) {
   std::optional<cvc::net::Origin> origin;
-  if (!auth.use.empty() || !auth.capture.empty()) {
+  if (auth.any()) {
     std::string why;
     origin = cvc::net::parse_origin(req.url, &why);
     if (!origin)
       return reply_error(req.url, "http: " + why);
     req.follow_redirects = false; // a credential never follows a redirect to another resource
-  }
-  std::string sent; // the token added, to blank any echo of it
-  if (!auth.use.empty()) {
     if (access.policy && !access.policy->allows(*origin))
       return reply_error(req.url,
                          "http: refused: " + origin->str() + " is not an origin this host allows");
-    std::optional<std::string> token = access.credentials->token_for(auth.use, *origin);
+  }
+  std::vector<std::string> sent; // the tokens put in, to blank any echo of them
+  const auto token_for = [&](const std::string &name) -> std::optional<std::string> {
+    std::optional<std::string> token = access.credentials->token_for(name, *origin);
+    if (token)
+      sent.push_back(*token);
+    return token;
+  };
+  const auto no_credential = [&](const std::string &name) {
+    for (std::string &t : sent)
+      wipe(t);
+    for (std::string &h : req.headers)
+      wipe(h);
+    wipe(req.body);
+    return reply_error(req.url, "http: no credential '" + name + "' for " + origin->str() +
+                                    " (sign in first)");
+  };
+  if (!auth.use.empty()) {
+    const std::optional<std::string> token = token_for(auth.use);
     if (!token)
-      return reply_error(req.url, "http: no credential '" + auth.use + "' for " + origin->str() +
-                                      " (sign in first)");
-    sent = std::move(*token);
-    req.headers.push_back("Authorization: Bearer " + sent);
+      return no_credential(auth.use);
+    req.headers.push_back("Authorization: Bearer " + *token);
+  }
+  for (const CredentialValue &v : auth.values) {
+    const std::optional<std::string> token = token_for(v.name);
+    if (!token)
+      return no_credential(v.name);
+    if (v.form) {
+      const std::string encoded = se::percent_encode(*token);
+      if (encoded != *token)
+        sent.push_back(encoded); // a reply may echo the form's spelling of it
+      if (const std::size_t at = req.body.find(v.placeholder); at != std::string::npos)
+        req.body.replace(at, v.placeholder.size(), encoded);
+    } else {
+      for (std::string &h : req.headers)
+        if (const std::size_t at = h.find(v.placeholder); at != std::string::npos)
+          h.replace(at, v.placeholder.size(), *token);
+    }
   }
   cvc::net::HttpResponse r =
       access.policy ? cvc::net::send(req, *access.policy) : cvc::net::send(req);
   for (std::string &h : req.headers)
     wipe(h);
-  if (!sent.empty()) {
-    scrub(r, sent);
-    wipe(sent);
+  wipe(req.body);
+  for (std::string &t : sent) {
+    scrub(r, t);
+    wipe(t);
   }
   bool captured = false;
-  if (!auth.capture.empty() && r.ok && r.status >= 200 && r.status < 300) {
-    std::string token;
-    if (!cvc::net::take_json_string(r.body, auth.capture_field, token)) {
-      r.error = "capture_auth: the reply has no JSON string at '" + auth.capture_field + "'";
-    } else {
-      scrub(r, token); // any other copy, whether or not it is kept
+  if (!auth.captures.empty() && r.ok && r.status >= 200 && r.status < 300) {
+    // Take every field first, so each token is blanked wherever the reply carries it, whichever
+    // capture it belongs to, before any is kept.
+    std::vector<std::pair<const Capture *, std::string>> taken;
+    std::vector<std::string> problems;
+    for (const Capture &c : auth.captures) {
+      std::string token;
+      if (cvc::net::take_json_string(r.body, c.field, token))
+        taken.emplace_back(&c, std::move(token));
+      else if (!c.optional)
+        problems.push_back("the reply has no JSON string at '" + c.field + "'");
+    }
+    for (const auto &t : taken)
+      scrub(r, t.second);
+    captured = problems.empty();
+    for (auto &[c, token] : taken) {
       std::string why;
-      captured = access.credentials->capture(auth.capture, *origin, token, &why);
+      if (!access.credentials->capture(c->name, *origin, token, &why))
+        captured = false;
       if (!why.empty())
-        r.error = "capture_auth: " + why;
+        problems.push_back(c->name + ": " + why);
       wipe(token);
+    }
+    if (!problems.empty()) {
+      std::string joined;
+      for (const std::string &p : problems)
+        joined += (joined.empty() ? "" : "; ") + p;
+      r.error = "capture_auth: " + joined;
     }
   }
   return Outcome{std::move(r), captured};
@@ -350,10 +480,10 @@ void check_request(const char *verb, const cvc::net::HttpRequest &req, const Req
                    const NetAccess &access) {
   if (!is_live(access))
     throw std::runtime_error(std::string(verb) + ": the host has turned the network off");
-  if ((!auth.use.empty() || !auth.capture.empty()) && !access.credentials)
+  if (auth.any() && !access.credentials)
     throw std::runtime_error(std::string(verb) +
-                             ": this host keeps no credentials, so it takes no auth or "
-                             "capture_auth option");
+                             ": this host keeps no credentials, so it takes no auth, "
+                             "capture_auth or credential value");
   if (!auth.use.empty())
     for (const std::string &h : req.headers)
       if (const std::size_t colon = h.find(':'); colon != std::string::npos) {

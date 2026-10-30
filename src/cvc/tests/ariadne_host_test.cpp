@@ -190,6 +190,24 @@ TEST(AriadneHostCli, NetworkFlagsTurnItOnAndCheckTheirOrigins) {
   EXPECT_NE(parse_host_args(5, guess).error.find("unknown option '--net-al'"), std::string::npos)
       << "no guessing at an abbreviated flag: " << parse_host_args(5, guess).error;
   EXPECT_NE(host_flags_help().find("--net-allow ORIGIN"), std::string::npos);
+
+  const char *env[] = {
+      "ari",    "run",  "--credential-env", "cvcpkg=CVCPKG_TOKEN", "--credential-env",
+      "ci=X_1", "d.ari"};
+  o = parse_host_args(7, env);
+  ASSERT_TRUE(o.error.empty()) << o.error;
+  EXPECT_TRUE(o.net.enabled) << "--credential-env implies --net";
+  ASSERT_EQ(o.net.credential_env.size(), 2u);
+  EXPECT_EQ(o.net.credential_env[0],
+            (std::pair<std::string, std::string>{"cvcpkg", "CVCPKG_TOKEN"}));
+  EXPECT_EQ(o.net.credential_env[1].second, "X_1");
+  for (const char *bad :
+       {"CVCPKG_TOKEN", "cvcpkg=", "=CVCPKG_TOKEN", "bad name=V", "c=1X", "c=X-Y"}) {
+    const char *argv[] = {"ari", "run", "--credential-env", bad, "d.ari"};
+    EXPECT_NE(parse_host_args(5, argv).error.find("--credential-env is NAME=VAR"),
+              std::string::npos)
+        << bad;
+  }
 }
 
 // ── parsing a document's arguments ──────────────────────────────────────────────────────────────

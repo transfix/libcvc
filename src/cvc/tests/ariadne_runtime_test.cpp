@@ -3872,6 +3872,253 @@ TEST(AriadneNetHost, CredentialOptionsNeedAHostThatKeepsCredentials) {
   EXPECT_EQ(fake->calls.load(), 0) << "a misused request is never sent";
 }
 
+// ---------------------------------------------------------------------------
+// Several credentials from one reply, credentials as form and header values, and tokens a host
+// was handed (--credential-env): a registry shaped like cvcpkg's device sign-in and its RFC 6749
+// section 6 refresh.
+// ---------------------------------------------------------------------------
+namespace {
+
+const std::string kAccess1 = "cvcses_Zmlyc3QtYWNjZXNzLXRva2VuLWZvci10ZXN0cw";
+const std::string kRefresh = "cvcref_cmVmcmVzaC10b2tlbg/with+slash"; // '/' and '+' get encoded
+const std::string kAccess2 = "cvcses_c2Vjb25kLWFjY2Vzcy10b2tlbi1mb3ItdGVzdHM";
+const std::string kApiToken = "cvctok_YW4tYXBpLXRva2VuLWZyb20tdGhlLWVudmlyb25tZW50";
+
+std::string form_value(const std::string &body, const std::string &key) {
+  std::string out;
+  const std::string prefix = key + "=";
+  std::size_t at = 0;
+  while (at <= body.size()) {
+    const std::size_t end = std::min(body.find('&', at), body.size());
+    if (body.compare(at, prefix.size(), prefix) == 0) {
+      for (std::size_t i = at + prefix.size(); i < end; ++i) {
+        if (body[i] == '%' && i + 2 < end + 1) {
+          out.push_back(static_cast<char>(std::stoi(body.substr(i + 1, 2), nullptr, 16)));
+          i += 2;
+        } else {
+          out.push_back(body[i] == '+' ? ' ' : body[i]);
+        }
+      }
+      return out;
+    }
+    at = end + 1;
+  }
+  return out;
+}
+
+// /v1/auth/device/token answers both tokens; /v1/auth/token refreshes (a new access token, the same
+// refresh token kept: the reply has no refresh_token); /v1/me wants the current access token, or
+// the API token; /echo-form hands back the form it was sent.
+LocalHttpServer::Reply registry(const LocalHttpServer::Request &req) {
+  const LocalHttpServer::Reply json401{401, {}, "{}"};
+  if (req.target == "/v1/auth/device/token")
+    return {200,
+            {"Content-Type: application/json"},
+            "{\"access_token\": \"" + kAccess1 + "\", \"refresh_token\": \"" + kRefresh +
+                "\", \"expires_in\": 43200, \"refresh_expires_in\": 2592000}"};
+  if (req.target == "/v1/auth/token") {
+    if (form_value(req.body, "grant_type") != "refresh_token" ||
+        form_value(req.body, "refresh_token") != kRefresh)
+      return json401;
+    return {200,
+            {"Content-Type: application/json"},
+            "{\"access_token\": \"" + kAccess2 + "\", \"expires_in\": 43200}"};
+  }
+  if (req.target == "/v1/me") {
+    const std::string a = req.header("Authorization");
+    if (a == "Bearer " + kAccess2 || a == "Bearer " + kApiToken ||
+        req.header("X-Api-Key") == kApiToken)
+      return {200, {"Content-Type: application/json"}, "{\"user\": \"joe\"}"};
+    return json401;
+  }
+  if (req.target == "/echo-form")
+    return {200, {}, "form was " + req.body};
+  return {404, {}, ""};
+}
+
+const char *kDeviceCapture =
+    "(list (dict \"name\" \"cvcpkg\" \"field\" \"access_token\")"
+    "      (dict \"name\" \"cvcpkg.refresh\" \"field\" \"refresh_token\"))";
+
+bool no_token_in(const std::string &text) {
+  for (const std::string *t : {&kAccess1, &kRefresh, &kAccess2, &kApiToken})
+    if (text.find(*t) != std::string::npos)
+      return false;
+  return true;
+}
+
+void set_env(const char *name, const char *value) {
+#if defined(_WIN32)
+  _putenv_s(name, value ? value : "");
+#else
+  if (value)
+    ::setenv(name, value, 1);
+  else
+    ::unsetenv(name);
+#endif
+}
+
+} // namespace
+
+TEST(AriadneNetHost, OneReplyGivesTwoCredentialsAndARefreshShowsNeither) {
+  if (!cvc::net::have_http_backend())
+    GTEST_SKIP() << "libcvc built without an HTTP backend";
+  LocalHttpServer reg(registry);
+  cvc::app app;
+  NetHostGuard guard;
+  ASSERT_EQ(enable_net(app, allow({reg.origin()})), "");
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  ASSERT_TRUE(run_program(
+      app, rt, mb,
+      std::string("(begin") + "  (set d (http-request \"POST\" \"" +
+          reg.url("/v1/auth/device/token") + "\" (dict \"form\" (dict \"device_code\" \"dc\")" +
+          " \"capture_auth\" " + kDeviceCapture + ")))" +
+          "  (state-set \"d.captured\" (get-attr d \"captured\"))" +
+          "  (state-data-set \"d.reply\" d)" + "  (set r (http-request \"POST\" \"" +
+          reg.url("/v1/auth/token") +
+          "\" (dict \"form\" (dict \"grant_type\" \"refresh_token\""
+          "                  \"refresh_token\" (dict \"credential\" \"cvcpkg.refresh\"))"
+          "         \"capture_auth\" (list (dict \"name\" \"cvcpkg\" \"field\" \"access_token\")"
+          "                               (dict \"name\" \"cvcpkg.refresh\" \"field\" "
+          "\"refresh_token\" \"optional\" #t)))))" +
+          "  (state-set \"r.status\" (get-attr r \"status\"))" +
+          "  (state-set \"r.captured\" (get-attr r \"captured\"))" +
+          "  (state-set \"r.error\" (get-attr r \"error\"))" + "  (state-data-set \"r.reply\" r)" +
+          "  (set me (http-get \"" + reg.url("/v1/me") + "\" (dict \"auth\" \"cvcpkg\")))" +
+          "  (state-set \"me.status\" (get-attr me \"status\"))" +
+          "  (set e (http-request \"POST\" \"" + reg.url("/echo-form") +
+          "\" (dict \"form\" (dict \"t\" (dict \"credential\" \"cvcpkg.refresh\")))))" +
+          "  (state-data-set \"e.body\" (get-attr e \"body\"))" + "  (state-set \"done\" 1))",
+      "done"));
+  EXPECT_EQ(sval(app, "d.captured"), "true");
+  EXPECT_EQ(sval(app, "r.status"), "200");
+  EXPECT_EQ(sval(app, "r.captured"), "true") << sval(app, "r.error");
+  EXPECT_EQ(sval(app, "r.error"), "") << "an optional field the reply lacks is no error";
+  EXPECT_EQ(sval(app, "me.status"), "200") << "the refreshed access token was sent";
+  EXPECT_EQ(node_data_string(app, "e.body"), "form was t=[redacted]")
+      << "an echo of the form's (percent-encoded) spelling is blanked";
+  const std::string state = whole_state(app);
+  EXPECT_TRUE(no_token_in(state)) << "a token reached the state tree:\n" << state;
+  int refreshes = 0;
+  for (const LocalHttpServer::Request &req : reg.requests())
+    if (req.target == "/v1/auth/token") {
+      ++refreshes;
+      EXPECT_EQ(form_value(req.body, "refresh_token"), kRefresh) << req.body;
+      EXPECT_NE(req.body.find("%2F"), std::string::npos) << "percent-encoded: " << req.body;
+    }
+  EXPECT_EQ(refreshes, 1);
+}
+
+TEST(AriadneNetHost, CredentialValuesGoOnlyToBoundOriginsAndNeverInAUrl) {
+  if (!cvc::net::have_http_backend())
+    GTEST_SKIP() << "libcvc built without an HTTP backend";
+  LocalHttpServer reg(registry), other(registry);
+  cvc::app app;
+  NetHostGuard guard;
+  ASSERT_EQ(enable_net(app, allow({reg.origin(), other.origin()})), "");
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  ASSERT_TRUE(run_program(
+      app, rt, mb,
+      std::string("(begin") + "  (http-request \"POST\" \"" + reg.url("/v1/auth/device/token") +
+          "\" (dict \"capture_auth\" " + kDeviceCapture + "))" +
+          "  (set o (http-request \"POST\" \"" + other.url("/echo-form") +
+          "\" (dict \"form\" (dict \"t\" (dict \"credential\" \"cvcpkg.refresh\")))))" +
+          "  (state-set \"o.error\" (get-attr o \"error\"))" +
+          "  (state-set \"q\" (try (http-get \"" + reg.url("/v1/me") +
+          "\" (dict \"query\" (dict \"t\" (dict \"credential\" \"cvcpkg\"))))"
+          "                      (catch (e) (get-attr e \"message\"))))" +
+          "  (state-set \"dup\" (try (http-get \"" + reg.url("/v1/me") +
+          "\" (dict \"capture_auth\" (list (dict \"name\" \"a\") (dict \"name\" \"a\"))))"
+          "                        (catch (e) (get-attr e \"message\"))))" +
+          "  (state-set \"done\" 1))",
+      "done"));
+  EXPECT_NE(sval(app, "o.error").find("no credential 'cvcpkg.refresh' for " + other.origin()),
+            std::string::npos)
+      << sval(app, "o.error");
+  EXPECT_TRUE(other.requests().empty()) << "nothing was sent to the unbound origin";
+  EXPECT_NE(sval(app, "q").find("may not go in the query"), std::string::npos) << sval(app, "q");
+  EXPECT_NE(sval(app, "dup").find("names credential 'a' twice"), std::string::npos)
+      << sval(app, "dup");
+  EXPECT_TRUE(no_token_in(whole_state(app)));
+}
+
+TEST(AriadneNetHost, AnEnvironmentTokenNeedsABindingAndIsNeverWritten) {
+  if (!cvc::net::have_http_backend())
+    GTEST_SKIP() << "libcvc built without an HTTP backend";
+  LocalHttpServer reg(registry);
+  const std::filesystem::path dir =
+      std::filesystem::temp_directory_path() / ("ariadne_net_env_" + std::to_string(reg.port()));
+  std::filesystem::remove_all(dir);
+  std::filesystem::create_directories(dir);
+  const std::filesystem::path policy = dir / "net.policy";
+  std::ofstream(policy) << "allow " << reg.origin() << "\ncredential cvcpkg " << reg.origin()
+                        << "\n";
+  NetHostConfig config;
+  config.enabled = true;
+  config.policy_files = {policy.string()};
+  config.credential_store = (dir / "credentials").string();
+  config.credential_env = {{"cvcpkg", "CVC_ARIADNE_TEST_TOKEN"}};
+
+  set_env("CVC_ARIADNE_TEST_TOKEN", kApiToken.c_str());
+  {
+    cvc::app app;
+    NetHostGuard guard;
+    ASSERT_EQ(enable_net(app, config), "");
+    EXPECT_EQ(net_host_status().env_credentials, (std::vector<std::string>{"cvcpkg"}));
+    Runtime rt(app, "");
+    MockBackend mb;
+    rt.set_backend(&mb);
+    ASSERT_TRUE(run_program(
+        app, rt, mb,
+        "(begin (state-set \"has\" (net-auth-has? \"cvcpkg\" \"" + reg.url("/") +
+            "\"))"
+            "  (state-set \"bearer\" (get-attr (http-get \"" +
+            reg.url("/v1/me") +
+            "\" (dict \"auth\" \"cvcpkg\")) \"status\"))"
+            "  (state-set \"header\" (get-attr (http-get \"" +
+            reg.url("/v1/me") +
+            "\" (dict \"headers\" (dict \"X-Api-Key\" (dict \"credential\" \"cvcpkg\")))) "
+            "\"status\"))"
+            "  (http-request \"POST\" \"" +
+            reg.url("/v1/auth/device/token") +
+            "\" (dict \"capture_auth\" (dict \"name\" \"other\" \"field\" \"refresh_token\")))"
+            "  (state-set \"done\" 1))",
+        "done"));
+    EXPECT_EQ(sval(app, "has"), "true");
+    EXPECT_EQ(sval(app, "bearer"), "200");
+    EXPECT_EQ(sval(app, "header"), "200") << "a credential as a header value";
+    EXPECT_TRUE(no_token_in(whole_state(app)));
+  }
+  { // the capture of "other" wrote the file; the environment's token is not in it
+    std::ifstream in(dir / "credentials");
+    const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    EXPECT_NE(text.find("other "), std::string::npos) << text;
+    EXPECT_EQ(text.find(kApiToken), std::string::npos) << text;
+  }
+  {
+    cvc::app app;
+    NetHostGuard guard;
+    NetHostConfig unbound = config;
+    unbound.credential_env = {{"elsewhere", "CVC_ARIADNE_TEST_TOKEN"}};
+    const std::string why = enable_net(app, unbound);
+    EXPECT_NE(why.find("bind elsewhere with a 'credential elsewhere ORIGIN...' line"),
+              std::string::npos)
+        << why;
+    set_env("CVC_ARIADNE_TEST_TOKEN", "not a token");
+    const std::string bad = enable_net(app, config);
+    EXPECT_NE(bad.find("CVC_ARIADNE_TEST_TOKEN holds no usable token"), std::string::npos) << bad;
+    EXPECT_EQ(bad.find("not a token"), std::string::npos) << "the error must not quote it";
+    set_env("CVC_ARIADNE_TEST_TOKEN", nullptr);
+    EXPECT_EQ(enable_net(app, config), "") << "an unset variable supplies nothing";
+    EXPECT_TRUE(net_host_status().env_credentials.empty());
+  }
+  std::filesystem::remove_all(dir);
+}
+
 // launch_pool_task generalizes beyond HTTP: a NON-network "heavy" kernel offloaded to the compute
 // pool and awaited by a DSL action — the exact shape a volume/geometry intrinsic follows. Registers
 // a transparent (pool-double n) and a future (pool-double-async n) via the SAME action-intrinsics
