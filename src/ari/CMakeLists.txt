@@ -77,6 +77,16 @@ if(CVC_BUILD_TESTS AND NOT EMSCRIPTEN AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL 
   gtest_discover_tests(ari_net_test PROPERTIES ENVIRONMENT "ARI_BINARY=$<TARGET_FILE:ari>")
 endif()
 
+# A spinner turns by the host's frame clock while the document's program is parked: `ari snapshot`
+# frame 1 against frame 3, then `ari run` in tmux under each terminal backend this ari has
+# (tests/spinner_test.sh). Where bash is; without tmux only the snapshots are checked.
+if(CVC_BUILD_TESTS AND NOT EMSCRIPTEN AND NOT WIN32 AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
+  add_test(NAME ari_spinner
+    COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/spinner_test.sh" $<TARGET_FILE:ari>
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/spinner.ari")
+  set_tests_properties(ari_spinner PROPERTIES TIMEOUT 60)
+endif()
+
 if(EMSCRIPTEN)
   # The browser build: ari.js/ari.wasm plus ari.html, an xterm.js page wired to the module's
   # stdin/stdout, which is all FTXUI's Emscripten screen talks to. Opened on ?src= (or with a page

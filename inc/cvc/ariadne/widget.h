@@ -48,6 +48,7 @@ enum class Kind {
   WindowsMenu,    // the built-in Windows menu (reopen a closed window): placed here in a menubar,
                   // or, outside one, the document's setting for it (bdef false: no such menu)
   Radio,          // bound enum-as-text state, every option shown (a combo's fields; radio_row)
+  Spinner,        // an activity indicator: a glyph the host turns by its frame clock, and a label
 };
 
 // ---------------------------------------------------------------------------
@@ -193,6 +194,8 @@ struct Widget {
   // `password: true` on an input_text: the backend shows a mask, not the text. The value is still
   // in state, as any input_text's is.
   bool password = false;
+  // Kind::Spinner `glyphs: ascii`: turn | / - \ rather than braille dots (a console without them).
+  bool ascii_glyphs = false;
 
   // §3/§4 dynamic repetition: when non-empty, this widget is a TEMPLATE emitted `repeat`
   // times, where `repeat` is a count expression re-evaluated each frame (capped, fail-safe
@@ -386,6 +389,19 @@ inline Widget progress(std::string label, std::string bind, double lo = 0.0, dou
   w.lo = lo;
   w.hi = hi;
   w.overlay = std::move(overlay);
+  return w;
+}
+
+// An activity indicator (Kind::Spinner): the host turns its glyph by the host's frame clock, not by
+// any state, so it moves while the document's programs are parked (on a request, say). `label` is
+// shown beside it; a non-empty `bind` (a state path, or a computed expression) gives the label
+// instead. Show it while something is under way with visible_when.
+inline Widget spinner(std::string label, std::string bind = "", bool ascii_glyphs = false) {
+  Widget w;
+  w.kind = Kind::Spinner;
+  w.label = std::move(label);
+  w.bind = std::move(bind);
+  w.ascii_glyphs = ascii_glyphs;
   return w;
 }
 

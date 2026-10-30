@@ -413,6 +413,23 @@ TEST(AriadneFtxui, PasswordFieldShowsAMask) {
   EXPECT_FALSE(t.shows("s3cret")) << "masked when not focused too:\n" << t.screen;
 }
 
+// A spinner in a terminal: braille dots turned by the frame clock, the label after them; ASCII
+// with glyphs: ascii. (The tvision host draws the same widgets; tests/spinner_test.sh runs both
+// under tmux.)
+TEST(AriadneFtxui, SpinnerTurnsByTheFrameClock) {
+  REQUIRE_FTXUI();
+  Term t(group({spinner("Loading"), spinner("Plain", "", /*ascii*/ true)}));
+  t.rt.set_frame_clock(0.0);
+  t.draw();
+  // U+280B, U+2819 as UTF-8 bytes (this target has no /utf-8 on MSVC).
+  EXPECT_TRUE(t.shows("\xE2\xA0\x8B Loading")) << t.screen;
+  EXPECT_TRUE(t.shows("| Plain")) << t.screen;
+  t.rt.set_frame_clock(0.1);
+  t.draw();
+  EXPECT_TRUE(t.shows("\xE2\xA0\x99 Loading")) << t.screen;
+  EXPECT_TRUE(t.shows("/ Plain")) << t.screen;
+}
+
 TEST(AriadneFtxui, TextFieldEditsAtTheCursor) {
   REQUIRE_FTXUI();
   Term t(group({input_text("Name", "name")}));

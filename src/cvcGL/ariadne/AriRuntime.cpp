@@ -288,6 +288,10 @@ void AriRuntime::frame(double dt_seconds) {
     inputPump_(); // the host's own input, delivered this frame
   cam_->update(dt_seconds);
   static_cast<GlSceneAdapter *>(scene_.get())->set_tick_dt(fixedClock_ ? dt_seconds : -1.0);
+  if (fixedClock_) { // the UI's frame clock (a spinner) advances by dt too
+    app_rt_.runtime().set_frame_clock(fixedSeconds_);
+    fixedSeconds_ += dt_seconds;
+  }
   app_rt_.drain(); // queued Ariadne actions + scheduler slice + (via the adapter) scene sync/tick
 }
 

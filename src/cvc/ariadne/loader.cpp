@@ -308,10 +308,10 @@ namespace {
 // so tf_editor precedes color — a tf_editor's own config may carry a `color:` node list — and
 // progress precedes overlay, a progress bar's text.
 constexpr const char *kBuiltinWidgetTypes[] = {
-    "group",   "menubar", "menu",      "menu_item",  "window",      "progress",
-    "overlay", "panel",   "text",      "checkbox",   "slider_int",  "slider_float",
-    "combo",   "radio",   "radio_row", "input_text", "input_int",   "tf_editor",
-    "color",   "image",   "button",    "separator",  "windows_menu"};
+    "group",   "menubar", "menu",      "menu_item",  "window",       "progress",
+    "overlay", "panel",   "text",      "checkbox",   "slider_int",   "slider_float",
+    "combo",   "radio",   "radio_row", "input_text", "input_int",    "tf_editor",
+    "color",   "image",   "button",    "separator",  "windows_menu", "spinner"};
 } // namespace
 
 bool is_builtin_widget_type(const std::string &type) {
@@ -659,6 +659,8 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
       return separator();
     if (s == "windows_menu")
       return windows_menu();
+    if (s == "spinner")
+      return spinner("");
     return text(s);
   }
   if (!n.IsMap()) {
@@ -721,6 +723,16 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     if (col && col.IsSequence() && col.size() >= 3)
       w = with_text_color(w, col[0].as<float>(1.0f), col[1].as<float>(1.0f),
                           col[2].as<float>(1.0f));
+    return w;
+  }
+  if (type == "spinner") { // an activity indicator the host turns by its frame clock
+    Widget w = spinner(label, str(n, "bind"));
+    const std::string glyphs = str(n, "glyphs", "braille");
+    if (glyphs == "ascii")
+      w.ascii_glyphs = true;
+    else if (glyphs != "braille")
+      ctx.warn("ari: spinner '" + label + "': glyphs '" + glyphs +
+               "' is not braille or ascii — braille");
     return w;
   }
   if (type == "progress") { // a read-only bar: bind's number over [lo, hi]

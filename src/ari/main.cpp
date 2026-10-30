@@ -318,7 +318,11 @@ int main(int argc, char **argv) {
     }
     std::string frame;
     const int width = std::max(10, o.width ? o.width : 100);
+    // The frames are drawn back to back, so the frame clock (a spinner's) reads frame / fps, as if
+    // `ari run` had drawn them: reproducible, and it moves from one frame to the next.
+    const double fps = o.fps > 0 ? o.fps : 20.0;
     for (int f = 0; f < std::max(1, o.frames); ++f) {
+      rt.runtime().set_frame_clock(f / fps);
       rt.drain();
       frame = backend->render_to_string(rt.runtime(), width, o.height, o.ansi);
     }
