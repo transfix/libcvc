@@ -2313,8 +2313,9 @@ StringEdit FtxuiBackend::input_text(const char *label, const char *key, const st
     if (!masked)
       return s;
     std::string out;
+    // U+2022 as UTF-8 bytes: MSVC encodes a \u literal in the code page unless built with /utf-8.
     for (std::size_t p = 0; p < s.size(); p = utf8_next(s, p))
-      out += "\u2022";
+      out += "\xe2\x80\xa2";
     return out;
   };
   fx::Elements row{fx::text(std::string(label) + ": [")};

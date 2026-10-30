@@ -346,7 +346,10 @@ TEST(AriadneFtxui, PasswordFieldShowsAMask) {
   t.type("s3cret");
   t.draw();
   EXPECT_FALSE(t.shows("s3cret")) << t.screen;
-  EXPECT_TRUE(t.shows("\u2022\u2022\u2022\u2022\u2022\u2022")) << t.screen;
+  // Six U+2022 as UTF-8 bytes: MSVC encodes a "\u2022" literal in the code page (this target has no
+  // /utf-8), so the screen's UTF-8 would never match it.
+  EXPECT_TRUE(t.shows("\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2"))
+      << t.screen;
   t.key("Return");
   t.draw();
   EXPECT_EQ(val(t.app, "pw"), "s3cret");
