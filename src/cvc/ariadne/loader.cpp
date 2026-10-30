@@ -196,6 +196,8 @@ const char *const kAriSchema = R"ARISCHEMA({
         "def": {"type": ["number", "boolean", "string"]},
         "fmt": {"type": "string"},
         "commit": {"enum": ["live", "release"]},
+        "autofocus": {"$ref": "#/$defs/flag"},
+        "password": {"$ref": "#/$defs/flag"},
         "options": {"type": ["array", "string"], "items": {"type": "string"}},
         "pos": {"type": "array", "items": {"type": "number"}},
         "size": {"type": ["array", "number"], "items": {"type": "number"}},
@@ -433,7 +435,7 @@ inline bool known_widget_key(const std::string &k) {
          k == "on_click" || k == "on_hover" || k == "on_drag" || k == "on_drag_start" ||
          k == "on_drag_end" || k == "children" || k == "items" || k == "id" ||
          k == "visible_when" || k == "enabled_when" || k == "disabled_when" || k == "tooltip" ||
-         k == "repeat";
+         k == "repeat" || k == "autofocus";
 }
 
 // keys: (keys.h) -- each entry a rebindable action: its label, its default key(s), its on:.
@@ -804,7 +806,9 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     const std::string bind = str(n, "bind");
     check_bind(ctx, "input_text", label, bind);
     // on: is optional (send-on-commit), so unlike button we do not warn when it is absent.
-    return input_text(label, bind, action(n), str(n, "default", str(n, "def")));
+    Widget w = input_text(label, bind, action(n), str(n, "default", str(n, "def")));
+    w.password = flag(n, "password", false); // shown masked
+    return w;
   }
   if (type == "input_int") {
     const std::string bind = str(n, "bind");
@@ -946,6 +950,8 @@ Widget parse_widget(Ctx &ctx, const YAML::Node &n) {
       w.disabled_when = str(n, "disabled_when");
     if (has(n, "tooltip"))
       w.tooltip = str(n, "tooltip"); // literal, or a computed expr (starts with '(')
+    if (has(n, "autofocus"))
+      w.autofocus = flag(n, "autofocus", false);
     if (has(n, "repeat"))
       w.repeat = str(n, "repeat"); // §3: a count expression -> emit this template N times
     if (has(n, "on_click"))

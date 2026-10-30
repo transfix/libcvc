@@ -187,6 +187,13 @@ struct Widget {
   // expression re-evaluated each frame. Empty = no tooltip.
   std::string tooltip;
 
+  // `autofocus: true`: the widget takes keyboard focus each time it appears (a form's first field,
+  // so a person can just type). If it cannot take focus, the next one that can does.
+  bool autofocus = false;
+  // `password: true` on an input_text: the backend shows a mask, not the text. The value is still
+  // in state, as any input_text's is.
+  bool password = false;
+
   // §3/§4 dynamic repetition: when non-empty, this widget is a TEMPLATE emitted `repeat`
   // times, where `repeat` is a count expression re-evaluated each frame (capped, fail-safe
   // 0). Each instance gets its own backend id and has the `{i}` token (the 0-based index)

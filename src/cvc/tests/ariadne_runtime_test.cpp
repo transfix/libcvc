@@ -99,8 +99,10 @@ struct MockBackend : Backend {
     return true;
   }
   void end_window() override { rec("end_window"); }
-  bool begin_grid(const Layout &L, const char *) override {
+  std::vector<std::string> grid_ids; // the id the core gave each begin_grid, in walk order
+  bool begin_grid(const Layout &L, const char *id) override {
     rec(std::string("begin_grid:cols=") + std::to_string(L.col_widths.size()));
+    grid_ids.push_back(id ? id : "");
     return true;
   }
   void grid_next_cell() override { rec("next_cell"); }
@@ -227,10 +229,18 @@ struct MockBackend : Backend {
   }
   StringEdit string_ret{};     // programmable return for the next input_text()
   std::string last_input_text; // the `current` text the core handed input_text() (read side)
-  StringEdit input_text(const char *l, const char *, const std::string &current) override {
+  bool last_input_masked = false; // the `masked` flag the core handed input_text()
+  StringEdit input_text(const char *l, const char *, const std::string &current,
+                        bool masked) override {
     last_input_text = current;
+    last_input_masked = masked;
     rec(std::string("input_text:") + l + "=" + current);
     return string_ret;
+  }
+  int focus_requests = 0; // focus_next_widget() calls (autofocus:)
+  void focus_next_widget() override {
+    ++focus_requests;
+    rec("focus_next");
   }
   ColorEdit color_ret{};           // programmable return for the next color()
   float last_color[3] = {0, 0, 0}; // the rgb the core handed color() (read side)
@@ -5804,6 +5814,7 @@ struct LogSceneAdapter : SceneAdapter {
     log.push_back("realize");
   }
   void clear() override { log.push_back("clear"); }
+  void no_scene() override { log.push_back("no_scene"); }
   void sync_visibility(cvc::app &) override {}
   void tick() override {}
 };
@@ -6175,7 +6186,95 @@ TEST(AriadneAppRuntime, EachLoadClearsTheLastScene) {
   art.load(with_scene);
   art.load(with_scene);
   art.load(write_doc("clear_scene_b.ari", "meta: {min_libcvc: 3.4.0}\nroot:\n  - text: x\n"));
-  EXPECT_EQ(scene.log, (std::vector<std::string>{"clear", "realize", "clear", "realize", "clear"}));
+  // A document without a scene is told so (a GL host hides its default grid, axes and bounds box).
+  EXPECT_EQ(scene.log, (std::vector<std::string>{"clear", "realize", "clear", "realize", "clear",
+                                                 "no_scene"}));
+}
+
+// Widgets a person meets first (nicotina's sign-in form): two unnamed rows in one window are two
+// grids, an autofocus: field takes focus when it appears, and a password: field reaches the
+// backend masked.
+TEST(AriadneRuntime, UnnamedGridsInOneWindowGetDistinctIds) {
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  LoadResult lr = load_string("windows:\n"
+                              "  - window: W\n"
+                              "    children:\n"
+                              "      - type: group\n"
+                              "        layout: {kind: horizontal}\n"
+                              "        children: [{text: a}, {text: b}]\n"
+                              "      - type: group\n"
+                              "        layout: {kind: horizontal}\n"
+                              "        children: [{text: c}]\n"
+                              "      - type: group\n"
+                              "        id: named\n"
+                              "        layout: {kind: grid, col_widths: [auto, auto]}\n"
+                              "        children: [{text: d}]\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  ASSERT_EQ(mb.grid_ids.size(), 3u);
+  EXPECT_FALSE(mb.grid_ids[0].empty());
+  EXPECT_EQ(mb.grid_ids[0].find('.'), std::string::npos); // one segment of tree.<id>.tracks
+  EXPECT_NE(mb.grid_ids[0], mb.grid_ids[1]); // were both "", one ImGui table for two rows
+  EXPECT_EQ(mb.grid_ids[2], "named");        // an id: still names its grid
+  const std::vector<std::string> first = mb.grid_ids;
+  mb.grid_ids.clear();
+  rt.render();
+  EXPECT_EQ(mb.grid_ids, first); // stable from frame to frame (a table keeps its widths by it)
+}
+
+TEST(AriadneRuntime, AutofocusTakesFocusWhenTheWidgetAppears) {
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  LoadResult lr = load_string("windows:\n"
+                              "  - window: Sign in\n"
+                              "    children:\n"
+                              "      - input_text: Name\n"
+                              "        bind: form.name\n"
+                              "        autofocus: true\n"
+                              "        visible_when: '(= (state-get \"form.show\") \"1\")'\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  cvc::state::instance(app)("ui.demo.form.show").value(std::string("1"));
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  EXPECT_EQ(mb.focus_requests, 1);
+  rt.render();
+  EXPECT_EQ(mb.focus_requests, 1) << "focus is taken when it appears, not on every frame";
+  cvc::state::instance(app)("ui.demo.form.show").value(std::string("0"));
+  rt.render();
+  cvc::state::instance(app)("ui.demo.form.show").value(std::string("1"));
+  rt.render();
+  EXPECT_EQ(mb.focus_requests, 2) << "shown again, it takes focus again";
+}
+
+TEST(AriadneRuntime, PasswordFieldReachesTheBackendMasked) {
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  LoadResult lr = load_string("meta: {min_libcvc: 3.4.0}\n"
+                              "root:\n"
+                              "  - input_text: User\n"
+                              "    bind: u\n"
+                              "  - input_text: Password\n"
+                              "    bind: p\n"
+                              "    password: true\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  EXPECT_TRUE(lr.warnings.empty()) << (lr.warnings.empty() ? "" : lr.warnings.front());
+  rt.set_root(std::move(lr.root));
+  rt.render(); // the last input_text drawn is the password
+  EXPECT_TRUE(mb.last_input_masked);
 }
 
 // ===========================================================================

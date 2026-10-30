@@ -299,7 +299,8 @@ Three backends ship:
   So the whole tree is interactive:
   - **keyboard** — Tab / Shift-Tab (or Up / Down) move focus; Enter / Space activate;
     Left / Right step a slider or cycle a combo or radio; text fields edit in place; Esc
-    reverts an edit or closes a popup; F10 opens the menu bar.
+    reverts an edit or closes a popup; F10 opens the menu bar. An `autofocus:` widget has focus
+    when it appears (§5.10).
   - **mouse** — click to focus or activate, pick a radio's option, drag a slider, drag a
     window by its title bar, click `[x]` to close it, click a menu title to open it.
   - **windows** (`caps.windows = true`) — free, z-ordered, raised on focus, placed from
@@ -968,11 +969,18 @@ How each backend does it:
   widgets each frame, its labeled widgets at the width ImGui gives an auto-resizing window's items
   (16 font sizes), and a row-split pane as wide as its own widgets. A window with a size gets a
   horizontal scroll bar as well as ImGui's vertical one, and a long label shrinks its slider,
-  input, combo or colour widget rather than run past the window's edge.
+  input, combo or colour widget rather than run past the window's edge. A
+  `layout: {kind: horizontal}` row with no `col_widths` puts its cells side by side on one line,
+  each at its natural width, as the terminal backends do. One with `col_widths` is an ImGui table
+  with a column per entry. `borders` and `resizable` need that table, so a row using them needs
+  `col_widths` as well; without it the table has one column.
 - **The terminal backends** lay a window with no size out at its content's size every frame,
   and cascade new windows instead of flowing them. A window that would run off the screen stops at
   the screen's edge, and a window whose content is larger than it is (or than its `size:`) gets a
   scroll bar. Its body scrolls to keep the focused widget in view; there is no wheel scrolling.
+  On the tvision desktop, tvision's frame holds the window, and the host refits that frame to the
+  content in each axis the document did not size, until the user resizes the window with the
+  frame's own corner; from then on it keeps the user's size.
 
 ### 5.9 Closing and reopening windows: the Windows menu
 
@@ -1014,6 +1022,31 @@ the backend's ordinary menu functions), so the ImGui menu bar, the FTXUI menu ba
 host's menu bar all show it, and its items toggle the same state the close buttons write. The open
 state lives in the document's state tree like the geometry (§11.4): it holds for the run and
 across a reload, but not across runs.
+
+### 5.10 Forms: `autofocus:` and `password:`
+
+```yaml
+windows:
+  - window: Sign in
+    visible_when: (= (state-get "auth.state") "out")
+    children:
+      - { input_text: User, bind: auth.user, autofocus: true }
+      - { input_text: Password, bind: auth.pass, password: true }
+      - { button: Sign in, on: auth.submit }
+```
+
+- **`autofocus: true`** on any widget gives keyboard focus to it, or to the first focusable
+  widget inside it, when it appears: on the first frame it is drawn, and again each time it comes
+  back after a frame without it (its window reopened, its `visible_when` true again, a `repeat:`
+  instance added). It does not hold focus: the user tabs or clicks away as usual. With several in
+  one frame, the last one drawn wins. The FTXUI and tvision backends move their focus to it; ImGui
+  sets keyboard focus to the next widget (`SetKeyboardFocusHere`), so on an `input_text` it
+  starts typing there. A field without it is focused only when the user moves to it.
+- **`password: true`** on an `input_text` masks it on screen: ImGui draws its password field (a
+  mask, and no copy or cut of the text), and the terminal backends show a `•` per character. It
+  is masking only. The text is the bound state key's value like any field's, so it is as readable
+  to scripts, `state://`, replication and the persisted tree as any other key; a document keeps a
+  secret out of shared state by clearing the key once it has used it.
 
 ## 6. Composition: include / import / load
 
@@ -1146,7 +1179,11 @@ Widgets and scene binds use the same rule, which is why a widget `bind:` and a s
 
 **Grid sizes (§11.4).** A grid the user can resize keeps its sizes under its id, the way a
 window keeps `tree.<id>.geometry`: a row split's pane heights in `tree.<id>.tracks`, a
-resizable table's column widths in `tree.<id>.columns`. Both are comma-separated px, one
+resizable table's column widths in `tree.<id>.columns`. A grid's id is its `id:`, else its
+`label:`, else one the walk makes from where the grid sits in the document (`~0_2_1`, the child
+index at each level), so two unnamed grids in one window never share a backend table or a key.
+That id moves when the document's structure above the grid changes, so give a grid whose sizes
+should outlast such an edit an `id:`. Both are comma-separated px, one
 entry per track. The walk seeds the backend from the key before the grid opens (each
 backend applies it once, so a live drag wins) and writes back what the backend reports after
 it closes; the write is skipped when nothing changed. A `0` entry means "not set": that
@@ -1879,8 +1916,9 @@ ImGui overlay compiled as inert stubs.
 
 **Gaps the goldens step around (2026-10-19):**
 
-- `layout: {kind: horizontal}` is ignored on a window body, and the embedded schema rejects the
-  `size: {hint, min, max}` map and `"50%"` strings that the loader accepts.
+- The embedded schema rejects the `size: {hint, min, max}` map and `"50%"` strings that the
+  loader accepts. (A `layout: {kind: horizontal}` row with no `col_widths` drew as one column in
+  ImGui until 2026-10-30; it now draws its cells side by side, §5.8.)
 
 ---
 

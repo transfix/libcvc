@@ -921,6 +921,13 @@ struct Runtime::Impl {
   std::vector<std::string> reactive_warnings;
   std::set<std::string> reactive_warned;
   int frame_instances = 0; // §3: repeat instances emitted this frame (bounds many repeats)
+  // Where the walk is in the tree, as child indices from the root: names an unnamed grid
+  // (emit_container), so two in one window never share a backend id.
+  std::vector<std::size_t> emit_path;
+  // `autofocus:` widgets drawn last frame and this one, by tree position (and repeat index): one
+  // takes focus when it appears, not on every frame it stays.
+  std::set<std::string> autofocus_shown, autofocus_now;
+  void autofocus(const Widget &inst, int i);
   // §3: last successful repeat-count per expression. A reactive repeat-count eval fail-safes to 0
   // on a transient per-frame budget exhaustion (reactive eval is slow in wasm, and video decode can
   // eat the frame); collapsing a repeated list — the conference roster, the per-peer camera windows
@@ -1241,8 +1248,11 @@ int Runtime::Impl::eval_count(const std::string &expr) {
 }
 
 void Runtime::Impl::emit_children(const Widget &w) {
-  for (const Widget &c : w.children)
-    emit(c);
+  for (std::size_t k = 0; k < w.children.size(); ++k) {
+    emit_path.push_back(k);
+    emit(w.children[k]);
+    emit_path.pop_back();
+  }
 }
 
 // Lay a container's children out per its layout (§3.0.3b): a Grid/Horizontal
@@ -1307,7 +1317,16 @@ void Runtime::Impl::emit_container(const Widget &w) {
   } guard{scope_stack, scoped};
 
   if (w.layout.kind == LayoutKind::Grid || w.layout.kind == LayoutKind::Horizontal) {
-    const std::string &id = w.id.empty() ? w.label : w.id;
+    // The grid's identity: its id:, else its label, else where it sits in the tree. Backends key
+    // their per-grid state by it (ImGui its table, whose column widths it keeps), and so does the
+    // persisted tree.<id>, so two unnamed grids in one window must not share it. The generated id
+    // is one state-path segment ("~0_2_1"), so tree.<id>.tracks stays one key.
+    std::string id = !w.id.empty() ? w.id : w.label;
+    if (id.empty()) {
+      id = "~";
+      for (std::size_t i = 0; i < emit_path.size(); ++i)
+        id += (i ? "_" : "") + std::to_string(emit_path[i]);
+    }
     // §11.4 two-way track edge: a resizable row-split grid persists its dragged pane sizes to
     // tree.<id>.tracks, and a resizable table its column widths to tree.<id>.columns. Seed the
     // backend from the persisted sizes before opening (apply-once on the backend side), then write
@@ -1335,7 +1354,9 @@ void Runtime::Impl::emit_container(const Widget &w) {
         b.seed_grid_columns(seed);
     }
     if (b.begin_grid(w.layout, id.c_str())) {
-      for (const Widget &c : w.children) {
+      for (std::size_t k = 0; k < w.children.size(); ++k) {
+        const Widget &c = w.children[k];
+        emit_path.push_back(k);
         // Expand a `repeat` child into per-instance cells; a plain child is one instance.
         // Decide visibility BEFORE advancing the cell, so a hidden child/instance consumes
         // no cell (otherwise it would leave an empty cell and shift the following siblings).
@@ -1345,10 +1366,12 @@ void Runtime::Impl::emit_container(const Widget &w) {
           b.grid_next_cell();
           if (i >= 0)
             b.push_id(std::to_string(i).c_str());
+          autofocus(inst, i);
           emit_node(inst);
           if (i >= 0)
             b.pop_id();
         });
+        emit_path.pop_back();
       }
       b.end_grid();
       if (split) {
@@ -1391,12 +1414,27 @@ void Runtime::Impl::each_instance(const Widget &w,
   }
 }
 
+void Runtime::Impl::autofocus(const Widget &inst, int i) {
+  if (!inst.autofocus)
+    return;
+  std::string key;
+  for (const std::size_t k : emit_path)
+    key += std::to_string(k) + ".";
+  if (i >= 0)
+    key += "#" + std::to_string(i);
+  if (!autofocus_shown.count(key))
+    backend->focus_next_widget();
+  autofocus_now.insert(std::move(key));
+}
+
 void Runtime::Impl::emit(const Widget &w) {
   each_instance(w, [this](const Widget &inst, int i) {
     if (i >= 0)
       backend->push_id(std::to_string(i).c_str()); // per-instance identity
-    if (visible(inst))                             // §4: a falsy visible_when hides it + subtree
+    if (visible(inst)) {                           // §4: a falsy visible_when hides it + subtree
+      autofocus(inst, i);
       emit_node(inst);
+    }
     if (i >= 0)
       backend->pop_id();
   });
@@ -1660,7 +1698,7 @@ void Runtime::Impl::emit_node(const Widget &w) {
   case Kind::InputText: {
     const std::string path = resolve(w.bind);
     const std::string cur = read_or_seed<std::string>(app, path, w.sdef);
-    const StringEdit e = b.input_text(label, path.c_str(), cur);
+    const StringEdit e = b.input_text(label, path.c_str(), cur, w.password);
     if (e.committed) {
       write<std::string>(app, path, e.value);
       if (!w.on.empty()) // send-on-commit (e.g. a chat box's Enter) — fire AFTER the write so the
@@ -1672,7 +1710,7 @@ void Runtime::Impl::emit_node(const Widget &w) {
   case Kind::InputInt: {
     const std::string path = resolve(w.bind);
     const int cur = read_or_seed<int>(app, path, w.idef);
-    const StringEdit e = b.input_text(label, path.c_str(), std::to_string(cur));
+    const StringEdit e = b.input_text(label, path.c_str(), std::to_string(cur), false);
     if (e.committed) {
       int next = cur; // fail-safe: a non-numeric entry keeps the current value
       try {
@@ -1843,6 +1881,7 @@ void Runtime::Impl::render() {
   if (reactive)
     reactive->begin_frame(); // §4: reset the per-frame reactive eval budget
   frame_instances = 0;       // §3: reset the per-frame repeat-expansion budget
+  emit_path.clear();
   scope_stack.clear(); // §12: start every frame at the document scope (RAII keeps it balanced;
                        // this is belt-and-suspenders so one bad frame can't leak into the next)
   windows_menu_drawn = false;
@@ -1858,6 +1897,8 @@ void Runtime::Impl::render() {
   }
   emit(root);
   backend->end_frame();
+  autofocus_shown.swap(autofocus_now);
+  autofocus_now.clear();
 }
 
 void Runtime::Impl::plan_windows_menu() {
