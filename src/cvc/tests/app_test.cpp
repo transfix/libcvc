@@ -1089,6 +1089,20 @@ TEST_F(AppTest, ThreadPoolActiveCount) {
   ctx.setThreadPoolSize(original_size);
 }
 
+// Wait until the background pool has nothing queued or running (bounded). The two counts take the
+// pool's lock one at a time, so the queue is read first: a task leaves the queue and counts as
+// running under one lock, and stops counting once its body has returned. Read the other way round,
+// a task taken between the two reads was in neither, and the pool looked idle while it ran. (Exact
+// while no task submits another, as here.)
+static bool wait_pool_idle(app &a, int ms = 5000) {
+  for (int i = 0; i < ms; i++) {
+    if (a.getPendingThreadCount() == 0 && a.getActiveThreadCount() == 0)
+      return true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  return false;
+}
+
 TEST_F(AppTest, ThreadPoolInterruption) {
   std::atomic<bool> task_started(false);
   std::atomic<bool> task_interrupted(false);
@@ -1110,8 +1124,10 @@ TEST_F(AppTest, ThreadPoolInterruption) {
       },
       PRIORITY_NORMAL, true);
 
-  // Give task time to start
-  boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
+  // Wait for the task to start (bounded). It used to get a fixed 50 ms, which a loaded machine
+  // overran: the task had not started in 5-21 of 30 runs here with a build running.
+  for (int i = 0; i < 5000 && !task_started.load(); i++)
+    boost::this_thread::sleep_for(boost::chrono::milliseconds(1));
   EXPECT_TRUE(task_started.load());
 
   // Interrupt the thread
@@ -1235,8 +1251,8 @@ TEST_F(AppTest, ThreadPoolStateConsistency) {
         PRIORITY_NORMAL, true);
   }
 
-  // Wait for all tasks to complete
-  boost::this_thread::sleep_for(boost::chrono::milliseconds(200));
+  // Wait for all tasks to complete (bounded; a fixed 200 ms was overrun on a loaded machine)
+  ASSERT_TRUE(wait_pool_idle(ctx));
 
   // Should have completed 4 tasks (task 2 threw exception)
   EXPECT_EQ(completed.load(), 4);
@@ -1386,20 +1402,6 @@ TEST_F(AppTest, ThreadPoolFloodPastPoolSizeCompletes) {
   EXPECT_EQ(ctx.getActiveThreadCount(), 0u);
   EXPECT_EQ(ctx.getPendingThreadCount(), 0u);
   ctx.setThreadPoolSize(original_size);
-}
-
-// Wait until the background pool has nothing queued or running (bounded). The two counts take the
-// pool's lock one at a time, so the queue is read first: a task leaves the queue and counts as
-// running under one lock, and stops counting once its body has returned. Read the other way round,
-// a task taken between the two reads was in neither, and the pool looked idle while it ran. (Exact
-// while no task submits another, as here.)
-static bool wait_pool_idle(app &a, int ms = 5000) {
-  for (int i = 0; i < ms; i++) {
-    if (a.getPendingThreadCount() == 0 && a.getActiveThreadCount() == 0)
-      return true;
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
-  return false;
 }
 
 // Anonymous tasks run on persistent workers: never more OS threads than the pool's size, the
