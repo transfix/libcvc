@@ -5537,7 +5537,7 @@ void Octree::smoothing_joeliu_volume(geoframe& geofrm, int sign) {
 		av0 = geofrm.triangles[4*minAspIndx][0];
 		av1 = geofrm.triangles[4*minAspIndx][1];
 		av2 = geofrm.triangles[4*minAspIndx][2];
-		av3 = geofrm.triangles[4*minAspIndx+1][3];
+		av3 = geofrm.triangles[4*minAspIndx+1][2]; // the 4th vertex, as for v3 ([3] read past the row)
 		//		fprintf(output, "%d %d %d %d ", av0, av1, av2, av3);
 		//		fprintf(output, "%d %d %d %d\n", geofrm.bound_sign[av0], geofrm.bound_sign[av1], geofrm.bound_sign[av2], 
 		//				geofrm.bound_sign[av3]);
