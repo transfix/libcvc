@@ -19,7 +19,7 @@ else()
   # In-tree: re-import the Boost targets cvc links PUBLIC so its transitive link
   # evaluates in this directory scope (src/arisrv/CMakeLists.txt explains why).
   if(NOT TARGET Boost::filesystem)
-    find_package(Boost REQUIRED COMPONENTS thread date_time regex filesystem
+    find_package(Boost REQUIRED COMPONENTS thread date_time regex filesystem program_options
                  OPTIONAL_COMPONENTS system chrono)
   endif()
 endif()
@@ -30,7 +30,8 @@ add_executable(cvc-cli main.cpp)
 # Link against the libcvc library (brings in Boost::filesystem, etc.)
 target_link_libraries(cvc-cli PRIVATE cvc::cvc)
 
-# We also need Boost::program_options which is not part of the library
+# Boost::program_options, which cvc::cvc links too (its hosts' command line); named here because
+# main.cpp uses it directly.
 find_package(Boost REQUIRED COMPONENTS program_options)
 target_link_libraries(cvc-cli PRIVATE Boost::program_options)
 

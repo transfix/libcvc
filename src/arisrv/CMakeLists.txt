@@ -27,7 +27,7 @@ else()
   # idempotent and resolves to the same deps prefix. (gRPC/protobuf are PRIVATE on cvc, so the
   # relay never needs them re-imported.)
   if(NOT TARGET Boost::filesystem)
-    find_package(Boost REQUIRED COMPONENTS thread date_time regex filesystem
+    find_package(Boost REQUIRED COMPONENTS thread date_time regex filesystem program_options
                  OPTIONAL_COMPONENTS system chrono)
   endif()
 endif()

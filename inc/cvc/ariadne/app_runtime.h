@@ -18,6 +18,7 @@
 
 #include <cstdint>
 #include <cvc/ariadne/ariadne.h>       // cvc::ariadne::Runtime, Widget, run_init, ...
+#include <cvc/ariadne/net_host.h>      // NetHostConfig
 #include <cvc/ariadne/scene_adapter.h> // cvc::ariadne::SceneAdapter (optional)
 #include <functional>
 #include <map>
@@ -97,6 +98,11 @@ public:
   void register_async_verb(const std::string &name, const std::string &done_channel,
                            std::function<std::string()> work);
 
+  // Let the document use the network, as a host's --net flags say (net_host.h: the allowlist, the
+  // credential store, the http verbs and http(s) URIs). Returns "" or what is wrong, and then
+  // nothing is turned on. Off unless called; this AppRuntime turns it off again when it dies.
+  std::string enable_net(const NetHostConfig &config);
+
   // The document's own command line: everything after its path (doc_args.h). load() publishes
   // it as the read-only <prefix>.argv before init: runs and, when the document declares an args:
   // block, parses it into <prefix>.args.<name>. `invocation` starts the usage text (e.g. "ari run
@@ -154,6 +160,7 @@ private:
   std::map<std::string, std::int64_t> stamps_;
   bool quit_ = false;
   bool intrinsicsRegistered_ = false;
+  bool netEnabled_ = false; // enable_net turned the network on: the destructor turns it off
   // The host verbs, shared with the program-lane provider so a verb registered after the first
   // is still bound when the next program env is built. Emptied by the destructor: the provider
   // lives on in the process-wide registry, and must not reach this AppRuntime's handlers after it.

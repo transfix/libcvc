@@ -16,6 +16,8 @@
 #include <cvc/ariadne/uri.h>
 #include <cvc/ariadne/uri_http.h>
 #include <cvc/net/http_client.h>
+#include <cvc/net/net_policy.h>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -100,8 +102,13 @@ UriResult map_http_fetch_result(const std::string &raw_url, bool follow,
   return {true, r.body, r.canonical_url, std::string()};
 }
 
+cvc::net::HttpResponse send_http(const cvc::net::HttpRequest &req,
+                                 const cvc::net::NetPolicy *policy) {
+  return policy ? cvc::net::send(req, *policy) : cvc::net::send(req);
+}
+
 StoreResult http_store_uncached(const Uri &u, const std::string &content,
-                                const std::string & /*base*/) {
+                                const std::string & /*base*/, const cvc::net::NetPolicy *policy) {
   const HttpRequestOptions opts = consult_http_provider(u.raw, /*for_write=*/true);
   const std::string method = opts.method.empty() ? std::string("PUT") : opts.method;
 
@@ -120,7 +127,7 @@ StoreResult http_store_uncached(const Uri &u, const std::string &content,
     header_lines.push_back(kDefaultStoreContentType);
   req.headers = std::move(header_lines);
 
-  const cvc::net::HttpResponse r = cvc::net::send(req);
+  const cvc::net::HttpResponse r = send_http(req, policy);
   if (!r.ok)
     return {false, std::string(), "ari: http " + method + " to '" + u.raw + "' failed: " + r.error};
   if (r.status >= 400)
@@ -140,7 +147,8 @@ StoreResult http_store_uncached(const Uri &u, const std::string &content,
 
 namespace {
 
-UriResult http_fetch(const Uri &u, const std::string & /*base*/) {
+UriResult http_fetch(const Uri &u, const std::string & /*base*/,
+                     const cvc::net::NetPolicy *policy = nullptr) {
   const HttpRequestOptions opts = detail::consult_http_provider(u.raw, /*for_write=*/false);
   cvc::net::HttpRequest req;
   req.url = u.raw;
@@ -154,7 +162,7 @@ UriResult http_fetch(const Uri &u, const std::string & /*base*/) {
   // A method override on a read is a bodyless custom verb (default stays GET).
   if (!opts.method.empty() && opts.method != "GET")
     req.method = opts.method;
-  return detail::map_http_fetch_result(u.raw, follow, cvc::net::send(req));
+  return detail::map_http_fetch_result(u.raw, follow, detail::send_http(req, policy));
 }
 
 StoreResult http_store(const Uri &u, const std::string &content, const std::string &base) {
@@ -172,10 +180,30 @@ void register_http_uri_handler() {
   if (!cvc::net::have_http_backend())
     return; // no transport compiled — leave the scheme unresolved (as the old libcurl-less stub
             // did)
-  register_uri_handler("http", http_fetch);
-  register_uri_handler("https", http_fetch);
+  const auto fetch = [](const Uri &u, const std::string &base) { return http_fetch(u, base); };
+  register_uri_handler("http", fetch);
+  register_uri_handler("https", fetch);
   register_uri_store_handler("http", http_store);
   register_uri_store_handler("https", http_store);
+}
+
+void register_http_uri_handler(std::shared_ptr<const cvc::net::NetPolicy> policy) {
+  if (!policy) {
+    register_http_uri_handler();
+    return;
+  }
+  if (!cvc::net::have_http_backend())
+    return;
+  const auto fetch = [policy](const Uri &u, const std::string &base) {
+    return http_fetch(u, base, policy.get());
+  };
+  const auto store = [policy](const Uri &u, const std::string &content, const std::string &base) {
+    return detail::http_store_uncached(u, content, base, policy.get());
+  };
+  register_uri_handler("http", fetch);
+  register_uri_handler("https", fetch);
+  register_uri_store_handler("http", store);
+  register_uri_store_handler("https", store);
 }
 
 bool have_http_uri_handler() { return cvc::net::have_http_backend(); }

@@ -44,8 +44,16 @@
 // a picture for the document's `image:` widgets with `src: NAME`. With --ansi and --graphics kitty
 // or sixel, snapshot also prints the images, after clearing the screen, at the terminal's cell size
 // in pixels (--cell-size WxH where it can't be asked).
+//
+// The network is off unless a flag turns it on, for run, snapshot and check alike and with either
+// backend: --net, --net-allow ORIGIN (repeatable),
+// --net-policy FILE and --credential-store NAME|PATH (net_host.h; docs/ARIADNE.md §10.3). Then the
+// document's programs get the http verbs, every request checked against the allowed origins, and
+// the host keeps any credential they sign in with, out of the document's reach. With it on,
+// snapshot waits after its frames until the document's requests have come back (at most 10 s).
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/ariadne/app_runtime.h>
@@ -58,9 +66,11 @@
 #include <cvc/ariadne/tvision_backend.h>
 #include <cvc/core/app.h>
 #include <cvc/image/image.h>
+#include <cvc/state/state_exec/async_host.h> // in_flight: snapshot waits for requests
 #include <exception>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -79,7 +89,13 @@ int usage(int code) {
                "info prints what this host provides: the terminal (size, colours, kitty / Sixel\n"
                "graphics), what libcvc was built with, the capabilities a document's requires:\n"
                "and (has? ...) see, and how many functions programs can call (--functions lists\n"
-               "them; --json prints it all as JSON).\n",
+               "them; --json prints it all as JSON).\n"
+               "\n"
+               "The network is off unless --net, --net-allow, --net-policy or --credential-store\n"
+               "turns it on, for run, snapshot and check alike and with either backend. Then the\n"
+               "document may reach only the origins allowed, and sign-in tokens stay with ari: a\n"
+               "request names one (auth:), it never sees it. With it on, snapshot waits after\n"
+               "its frames for the document's requests to come back (at most 10 s).\n",
                cvc::ariadne::host_flags_help().c_str());
   return code;
 }
@@ -98,6 +114,21 @@ cvc::ariadne::FtxuiBackend::Options::ImageColor image_mode(const std::string &s)
   if (s == "mono")
     return Mode::Mono;
   return Mode::Auto;
+}
+
+// snapshot with the network on: drain until no async call (a request) has been in flight for a few
+// drains running, so a document that signs in and then fetches is captured with both replies; at
+// most kSettleSeconds, for a document that never stops asking.
+constexpr double kSettleSeconds = 10.0;
+
+void settle_async_calls(cvc::app &app, cvc::ariadne::AppRuntime &rt) {
+  using clock = std::chrono::steady_clock;
+  const auto deadline = clock::now() + std::chrono::duration<double>(kSettleSeconds);
+  for (int idle = 0; idle < 3 && clock::now() < deadline;) {
+    rt.drain();
+    idle = app.exec_async_host().in_flight() == 0 ? idle + 1 : 0;
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
 }
 
 bool has_flag(const cvc::ariadne::HostOptions &o, const char *flag) {
@@ -139,6 +170,10 @@ int print_info(const cvc::ariadne::HostOptions &o) {
   ari::register_stream_view_widget(*backend, app);
   ari::AppRuntime rt(app, o.prefix.empty() ? "ui.docs.ari" : o.prefix);
   rt.set_backend(*backend);
+  if (const std::string error = rt.enable_net(o.net); !error.empty()) {
+    std::fprintf(stderr, "ari: %s\n", error.c_str());
+    return 2;
+  }
   rt.register_verb("quit", [] {}); // every document gets (quit)
   ari::HostInfo term;
   ari::describe_terminal(term);
@@ -241,6 +276,10 @@ int main(int argc, char **argv) {
   ari::register_stream_view_widget(*backend, app);
   ari::AppRuntime rt(app, o.prefix.empty() ? "ui.docs.ari" : o.prefix);
   rt.set_backend(*backend);
+  if (const std::string error = rt.enable_net(o.net); !error.empty()) {
+    std::fprintf(stderr, "ari: %s\n", error.c_str());
+    return 2;
+  }
   for (const std::string &d : o.component_paths)
     rt.add_component_path(d);
   rt.on("quit", [&] { rt.request_close(); });
@@ -291,10 +330,14 @@ int main(int argc, char **argv) {
       backend->set_terminal_graphics(g);
     }
     std::string frame;
+    const int width = std::max(10, o.width ? o.width : 100);
     for (int f = 0; f < std::max(1, o.frames); ++f) {
       rt.drain();
-      frame = backend->render_to_string(rt.runtime(), std::max(10, o.width ? o.width : 100),
-                                        o.height, o.ansi);
+      frame = backend->render_to_string(rt.runtime(), width, o.height, o.ansi);
+    }
+    if (o.net.enabled) { // the frame shows what the document's requests brought back
+      settle_async_calls(app, rt);
+      frame = backend->render_to_string(rt.runtime(), width, o.height, o.ansi);
     }
     if (pixels) { // Sixel draws at screen positions, so the frame starts at the top-left
       const int rows = static_cast<int>(std::count(frame.begin(), frame.end(), '\n')) + 1;
@@ -302,6 +345,8 @@ int main(int argc, char **argv) {
               std::to_string(rows + 1) + ";1H";
     }
     std::fputs(frame.c_str(), stdout);
+    for (const std::string &w : rt.take_warnings()) // what the programs complained about
+      std::fprintf(stderr, "ari: warning: %s\n", w.c_str());
     return 0;
   }
 

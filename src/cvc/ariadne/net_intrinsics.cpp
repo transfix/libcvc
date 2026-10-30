@@ -1,17 +1,24 @@
 // Ariadne — async HTTP host intrinsics for the state_exec program lanes (roadmap §13.8). See
 // net_intrinsics.h. The (http-get*) verbs are gated on a compiled cvc::net backend
-// (cvc::net::have_http_backend()).
+// (cvc::net::have_http_backend()). A credential's token lives only in C++ here: it is added to the
+// request on the worker that sends it and taken out of the reply there, so no value_t (and so no
+// program variable, state node or log line) ever holds one.
 
+#include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cstdint>
 #include <cvc/ariadne/ariadne.h> // register_action_intrinsics
 #include <cvc/ariadne/net_intrinsics.h>
 #include <cvc/ariadne/uri.h> // resolve() — the generic (fetch uri) async resolver
 #include <cvc/core/app.h>
+#include <cvc/net/credentials.h>
 #include <cvc/net/http_client.h>
+#include <cvc/net/net_policy.h>
 #include <cvc/state/state_exec/async_host.h> // register_async_fn — the verbs are async functions
 #include <cvc/state/state_exec/builtins.h>   // percent_encode — the query string
 #include <cvc/state/state_exec/types.h>      // value_t, make_dict/make_list/make_bytes
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -28,17 +35,35 @@ namespace {
 // Marshal a cvc::net::HttpResponse into the DSL reply dict. EVERY key is populated on every path
 // (get-attr throws on a missing key), so an error response is a well-formed dict too. The body is
 // `bytes` (opaque octets, the sanctioned home for an HTTP body — the state_exec bytes track).
-se::value_t marshal_response(const cvc::net::HttpResponse &r) {
+se::value_t marshal_response(const cvc::net::HttpResponse &r, bool captured = false) {
   std::vector<se::value_t> headers;
   headers.reserve(r.headers.size());
-  for (const std::string &h : r.headers)
+  std::vector<std::pair<std::string, se::value_t>> map; // lowercased name -> value, repeats joined
+  for (const std::string &h : r.headers) {
     headers.push_back(se::value_t(h));
+    const std::size_t colon = h.find(':');
+    if (colon == std::string::npos)
+      continue;
+    std::string name = h.substr(0, colon);
+    std::transform(name.begin(), name.end(), name.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    const std::string value = cvc::net::response_header({h}, name);
+    auto it =
+        std::find_if(map.begin(), map.end(), [&](const auto &kv) { return kv.first == name; });
+    if (it == map.end())
+      map.emplace_back(std::move(name), se::value_t(value));
+    else
+      it->second = se::value_t(std::get<std::string>(it->second.v) + ", " + value);
+  }
   return se::make_dict({
       {"ok", se::value_t(r.ok)},
       {"status", se::value_t(static_cast<int64_t>(r.status))},
       {"body", se::make_bytes(r.body)},
       {"url", se::value_t(r.canonical_url)},
       {"headers", se::make_list(std::move(headers))},
+      {"header_map", se::make_dict(std::move(map))},
+      {"content_type", se::value_t(cvc::net::response_header(r.headers, "Content-Type"))},
+      {"captured", se::value_t(captured)},
       {"error", se::value_t(r.error)},
   });
 }
@@ -134,13 +159,48 @@ bool has_content_type(const std::vector<std::string> &headers) {
   return false;
 }
 
+// The credential options of one request (net_intrinsics.h): which credential to send, and which
+// to keep from the reply. Names only; the tokens stay in the CredentialStore.
+struct RequestAuth {
+  std::string use;                     // auth: NAME ("" = none)
+  std::string capture;                 // capture_auth: name ("" = none)
+  std::string capture_field = "token"; // capture_auth: field
+};
+
+std::string credential_name(const se::value_t &v, const char *option) {
+  const std::string *s = std::get_if<std::string>(&v.v);
+  if (!s || !cvc::net::CredentialStore::valid_name(*s))
+    throw std::runtime_error(std::string("http request '") + option +
+                             "' option must name a credential (1-64 of A-Z a-z 0-9 . _ -)");
+  return *s;
+}
+
+void parse_capture(const se::value_t &v, RequestAuth &auth) {
+  const se::dict_ptr *d = std::get_if<se::dict_ptr>(&v.v);
+  if (!d)
+    throw std::runtime_error("http request 'capture_auth' option must be a dict of name and field");
+  for (const auto &kv : **d) {
+    if (kv.first == "name") {
+      auth.capture = credential_name(kv.second, "capture_auth");
+    } else if (kv.first == "field") {
+      const std::string *f = std::get_if<std::string>(&kv.second.v);
+      if (!f || f->empty())
+        throw std::runtime_error("http request 'capture_auth' field must be a non-empty string");
+      auth.capture_field = *f;
+    }
+  }
+  if (auth.capture.empty())
+    throw std::runtime_error("http request 'capture_auth' option needs a name");
+}
+
 // Apply an options dict onto `req`: "query" (dict -> percent-encoded query string appended to the
 // URL), "headers" (dict or list), "body" (string or bytes -> raw body), "form" (dict ->
 // x-www-form-urlencoded body + a default Content-Type unless the caller set one). Unknown keys are
-// ignored (forward-compatible: json/timeout/... may come later). A misuse (options not a dict, a
+// ignored (forward-compatible: json/timeout/... may come later); "auth" and "capture_auth" go to
+// `auth`. A misuse (options not a dict, a
 // wrong value type, or both "body" and "form") throws a clear error; the verb runs on the scheduler
 // thread, so this surfaces as an ordinary DSL evaluation error, not a hang.
-void apply_http_options(cvc::net::HttpRequest &req, const se::value_t &opts) {
+void apply_http_options(cvc::net::HttpRequest &req, const se::value_t &opts, RequestAuth &auth) {
   const se::dict_ptr *dp = std::get_if<se::dict_ptr>(&opts.v);
   if (!dp)
     throw std::runtime_error("http request options must be a dict");
@@ -154,6 +214,10 @@ void apply_http_options(cvc::net::HttpRequest &req, const se::value_t &opts) {
       body = &kv.second;
     else if (kv.first == "form")
       form = &kv.second;
+    else if (kv.first == "auth")
+      auth.use = credential_name(kv.second, "auth");
+    else if (kv.first == "capture_auth")
+      parse_capture(kv.second, auth);
   }
   if (headers)
     collect_headers(*headers, req.headers);
@@ -183,14 +247,93 @@ void apply_http_options(cvc::net::HttpRequest &req, const se::value_t &opts) {
   }
 }
 
+// Blank `secret` wherever the reply carries it.
+void scrub(cvc::net::HttpResponse &r, const std::string &secret) {
+  cvc::net::redact(r.body, secret);
+  for (std::string &h : r.headers)
+    cvc::net::redact(h, secret);
+  cvc::net::redact(r.canonical_url, secret);
+  cvc::net::redact(r.error, secret);
+}
+
+void wipe(std::string &secret) {
+  std::fill(secret.begin(), secret.end(), '\0');
+  secret.clear();
+}
+
+// What one request came back with, before it is a value_t.
+struct Outcome {
+  cvc::net::HttpResponse reply;
+  bool captured = false;
+};
+
+Outcome reply_error(const std::string &url, const std::string &message) {
+  Outcome o;
+  o.reply.ok = false;
+  o.reply.status = 0;
+  o.reply.canonical_url = url;
+  o.reply.error = message;
+  return o;
+}
+
+// One request: the credential `auth` names is added as it is sent and the one it captures is taken
+// out of the reply, so neither reaches a value_t.
+Outcome perform(cvc::net::HttpRequest req, const RequestAuth &auth, const NetAccess &access) {
+  std::optional<cvc::net::Origin> origin;
+  if (!auth.use.empty() || !auth.capture.empty()) {
+    std::string why;
+    origin = cvc::net::parse_origin(req.url, &why);
+    if (!origin)
+      return reply_error(req.url, "http: " + why);
+    req.follow_redirects = false; // a credential never follows a redirect to another resource
+  }
+  std::string sent; // the token added, to blank any echo of it
+  if (!auth.use.empty()) {
+    if (access.policy && !access.policy->allows(*origin))
+      return reply_error(req.url,
+                         "http: refused: " + origin->str() + " is not an origin this host allows");
+    std::optional<std::string> token = access.credentials->token_for(auth.use, *origin);
+    if (!token)
+      return reply_error(req.url, "http: no credential '" + auth.use + "' for " + origin->str() +
+                                      " (sign in first)");
+    sent = std::move(*token);
+    req.headers.push_back("Authorization: Bearer " + sent);
+  }
+  cvc::net::HttpResponse r =
+      access.policy ? cvc::net::send(req, *access.policy) : cvc::net::send(req);
+  for (std::string &h : req.headers)
+    wipe(h);
+  if (!sent.empty()) {
+    scrub(r, sent);
+    wipe(sent);
+  }
+  bool captured = false;
+  if (!auth.capture.empty() && r.ok && r.status >= 200 && r.status < 300) {
+    std::string token;
+    if (!cvc::net::take_json_string(r.body, auth.capture_field, token)) {
+      r.error = "capture_auth: the reply has no JSON string at '" + auth.capture_field + "'";
+    } else {
+      scrub(r, token); // any other copy, whether or not it is kept
+      std::string why;
+      captured = access.credentials->capture(auth.capture, *origin, token, &why);
+      if (!why.empty())
+        r.error = "capture_auth: " + why;
+      wipe(token);
+    }
+  }
+  return Outcome{std::move(r), captured};
+}
+
 // The kernel of a fully-built request: it runs on the app's background task pool (OFF the
 // scheduler thread) and returns the marshalled response dict. A failure to send is a reply with
 // ok #f too, as the verbs document: only an HTTP reply's own failure is data, but these verbs have
 // always described a failed send that way, and a program checks `ok` either way.
-se::async_kernel http_kernel(cvc::net::HttpRequest req) {
-  return [req = std::move(req)](se::async_call &) -> se::value_t {
+se::async_kernel http_kernel(cvc::net::HttpRequest req, RequestAuth auth, NetAccess access) {
+  return [req = std::move(req), auth = std::move(auth),
+          access = std::move(access)](se::async_call &) -> se::value_t {
     try {
-      return marshal_response(cvc::net::send(req));
+      const Outcome out = perform(req, auth, access);
+      return marshal_response(out.reply, out.captured);
     } catch (const std::exception &e) {
       return marshal_error(req.url, std::string("http: ") + e.what());
     } catch (...) {
@@ -199,26 +342,50 @@ se::async_kernel http_kernel(cvc::net::HttpRequest req) {
   };
 }
 
-// (http-get URL [OPTS]) — a GET; OPTS is an options dict (query/headers — see apply_http_options).
-cvc::net::HttpRequest build_get_request(std::span<const se::value_t> args) {
+bool is_live(const NetAccess &access) { return !access.live || access.live->load(); }
+
+// Checks made where the verb is called (the scheduler thread), so a misuse is an ordinary DSL
+// error: the network turned off, or a credential option the host cannot honour.
+void check_request(const char *verb, const cvc::net::HttpRequest &req, const RequestAuth &auth,
+                   const NetAccess &access) {
+  if (!is_live(access))
+    throw std::runtime_error(std::string(verb) + ": the host has turned the network off");
+  if ((!auth.use.empty() || !auth.capture.empty()) && !access.credentials)
+    throw std::runtime_error(std::string(verb) +
+                             ": this host keeps no credentials, so it takes no auth or "
+                             "capture_auth option");
+  if (!auth.use.empty())
+    for (const std::string &h : req.headers)
+      if (const std::size_t colon = h.find(':'); colon != std::string::npos) {
+        std::string name = h.substr(0, colon);
+        std::transform(name.begin(), name.end(), name.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (name == "authorization")
+          throw std::runtime_error(std::string(verb) +
+                                   ": 'auth' and an Authorization header are exclusive");
+      }
+}
+
+// (http-get URL [OPTS]) — a GET; OPTS is an options dict (query/headers/auth/capture_auth — see
+// apply_http_options).
+cvc::net::HttpRequest build_get_request(std::span<const se::value_t> args, RequestAuth &auth) {
   cvc::net::HttpRequest req;
   req.method = "GET";
   req.url = arg_string(args, 0);
   if (args.size() > 1)
-    apply_http_options(req, args[1]);
+    apply_http_options(req, args[1], auth);
   return req;
 }
 
 // (http-request METHOD URL [OPTS]) — any method (GET/PUT/POST/PATCH/DELETE/…). OPTS is an options
-// dict: query/headers/body/form (see apply_http_options), so a POST/PUT carries a body + headers,
-// e.g. (http-request "POST" url (dict "headers" (dict "Authorization" (str-concat "Bearer " tok))
-// "form" (dict "grip" 1 "risk" 2))).
-cvc::net::HttpRequest build_method_request(std::span<const se::value_t> args) {
+// dict: query/headers/body/form/auth/capture_auth (see apply_http_options), so a POST carries a
+// body + headers, e.g. (http-request "POST" url (dict "auth" "txwtf" "form" (dict "grip" 1))).
+cvc::net::HttpRequest build_method_request(std::span<const se::value_t> args, RequestAuth &auth) {
   cvc::net::HttpRequest req;
   req.method = arg_string(args, 0);
   req.url = arg_string(args, 1);
   if (args.size() > 2)
-    apply_http_options(req, args[2]);
+    apply_http_options(req, args[2], auth);
   return req;
 }
 
@@ -259,9 +426,61 @@ se::async_kernel uri_fetch_kernel(std::span<const se::value_t> args) {
   };
 }
 
+// The credential verbs and (net-allowed? URL), plain functions on the scheduler thread.
+void register_net_verbs(const std::shared_ptr<se::environment> &env, const NetAccess &access) {
+  const auto live = [access](const char *verb) {
+    if (!is_live(access))
+      throw std::runtime_error(std::string(verb) + ": the host has turned the network off");
+  };
+  // (net-allowed? URL): whether a request to URL may be made here.
+  se::builtins::register_fn(env, "net-allowed?",
+                            [access, live](std::span<const se::value_t> args) -> se::value_t {
+                              live("net-allowed?");
+                              const std::string url = arg_string(args, 0);
+                              if (access.policy)
+                                return se::value_t(access.policy->allows_url(url));
+                              return se::value_t(cvc::net::parse_origin(url).has_value());
+                            });
+  if (!access.credentials)
+    return;
+  const std::shared_ptr<cvc::net::CredentialStore> store = access.credentials;
+  // (net-auth-has? NAME [URL]): whether the host has credential NAME (for URL's origin).
+  se::builtins::register_fn(
+      env, "net-auth-has?", [store, live](std::span<const se::value_t> args) -> se::value_t {
+        live("net-auth-has?");
+        const std::string name = arg_string(args, 0);
+        if (args.size() < 2)
+          return se::value_t(store->has(name));
+        const std::optional<cvc::net::Origin> o = cvc::net::parse_origin(arg_string(args, 1));
+        return se::value_t(o && store->has(name, *o));
+      });
+  // (net-auth-forget NAME): drop credential NAME, from the host's file too. #t if there was one.
+  se::builtins::register_fn(env, "net-auth-forget",
+                            [store, live](std::span<const se::value_t> args) -> se::value_t {
+                              live("net-auth-forget");
+                              std::string error;
+                              const bool dropped = store->forget(arg_string(args, 0), &error);
+                              if (!error.empty())
+                                throw std::runtime_error("net-auth-forget: " + error);
+                              return se::value_t(dropped);
+                            });
+  // (net-auth-clear): drop every credential.
+  se::builtins::register_fn(env, "net-auth-clear",
+                            [store, live](std::span<const se::value_t>) -> se::value_t {
+                              live("net-auth-clear");
+                              std::string error;
+                              store->clear(&error);
+                              if (!error.empty())
+                                throw std::runtime_error("net-auth-clear: " + error);
+                              return se::value_t(true);
+                            });
+}
+
 } // namespace
 
-void register_net_intrinsics(cvc::app &app) {
+void register_net_intrinsics(cvc::app &app) { register_net_intrinsics(app, NetAccess{}); }
+
+void register_net_intrinsics(cvc::app &app, NetAccess access) {
   // Warm the lazy per-app singletons on THIS thread before any background worker touches them, so a
   // worker never races their first construction (the nav_compute discipline).
   app.computePool();
@@ -272,8 +491,17 @@ void register_net_intrinsics(cvc::app &app) {
   const bool have_http = cvc::net::have_http_backend();
 
   se::async_host &host = app.exec_async_host();
-  register_action_intrinsics([&host, have_http](std::shared_ptr<se::environment> env,
-                                                se::intrinsics_context &) {
+  // I/O calls (async_options::io): a request's network wait and its transport's CPU (one HTTPS
+  // request: a 100-300 ms round trip and about 16 ms of CPU for the TLS handshake and the CA
+  // store, 130,000 steps) are the host's, not the program's. Charged as other calls are, no
+  // action could make one within its default budget of 5000 steps and 0.1 s. The transport's own
+  // timeouts and size cap bound a request instead.
+  se::async_options io;
+  io.io = true;
+  register_action_intrinsics([&host, have_http, access, io](std::shared_ptr<se::environment> env,
+                                                            se::intrinsics_context &) {
+    if (!is_live(access))
+      return; // the host turned the network off: later programs do not get the verbs
     // Async functions on the app's exec scheduler (docs/STATE_EXEC_EXCEPTIONS.md 3): each verb
     // parks the calling process while its kernel runs on the app's background task pool and
     // resumes it with the reply dict, at any depth (the whole program included); its "-async"
@@ -282,28 +510,40 @@ void register_net_intrinsics(cvc::app &app) {
     // cancelled.
     if (have_http) {
       // (http-get URL [OPTS]) / (http-get-async URL [OPTS]) — a GET; OPTS is the options dict
-      // (query/headers). The future form is the low-level primitive for fanning out N fetches.
-      se::register_async_fn(env, host, "http-get",
-                            [](std::span<const se::value_t> args) -> se::async_kernel {
-                              return http_kernel(build_get_request(args));
-                            });
+      // (query/headers/auth/capture_auth). The future form fans out N fetches.
+      se::register_async_fn(
+          env, host, "http-get",
+          [access](std::span<const se::value_t> args) -> se::async_kernel {
+            RequestAuth auth;
+            cvc::net::HttpRequest req = build_get_request(args, auth);
+            check_request("http-get", req, auth, access);
+            return http_kernel(std::move(req), std::move(auth), access);
+          },
+          io);
 
       // (http-request METHOD URL [OPTS]) / (http-request-async ...) — the GENERAL verb: any
-      // method (GET/PUT/POST/PATCH/DELETE/…) with an options dict OPTS carrying
-      // query/headers/body/form (see apply_http_options — a bearer token is
-      // (dict "headers" (dict "Authorization" …)); a form body is (dict "form" (dict …))). It
-      // resumes with the same {ok status body(bytes) url headers error} dict as (http-get).
-      se::register_async_fn(env, host, "http-request",
-                            [](std::span<const se::value_t> args) -> se::async_kernel {
-                              return http_kernel(build_method_request(args));
-                            });
+      // method with an options dict OPTS carrying query/headers/body/form/auth/capture_auth (see
+      // apply_http_options). It resumes with the same reply dict as (http-get).
+      se::register_async_fn(
+          env, host, "http-request",
+          [access](std::span<const se::value_t> args) -> se::async_kernel {
+            RequestAuth auth;
+            cvc::net::HttpRequest req = build_method_request(args, auth);
+            check_request("http-request", req, auth, access);
+            return http_kernel(std::move(req), std::move(auth), access);
+          },
+          io);
     }
 
     // (fetch URI [BASE]) / (fetch-async URI [BASE]) — the GENERIC async resolver over ANY
     // registered scheme (file/state/cvc/http), so an ari program async-loads any URI without
-    // blocking the scheduler thread. Reply dict: { ok body(bytes) url error }.
-    se::register_async_fn(env, host, "fetch",
-                          [](std::span<const se::value_t> args) { return uri_fetch_kernel(args); });
+    // blocking the scheduler thread. Reply dict: { ok body(bytes) url error }. An http(s) URI goes
+    // through the registered handler, which carries the host's policy (enable_net).
+    se::register_async_fn(
+        env, host, "fetch",
+        [](std::span<const se::value_t> args) { return uri_fetch_kernel(args); }, io);
+
+    register_net_verbs(env, access);
   });
 }
 

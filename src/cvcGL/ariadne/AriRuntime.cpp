@@ -235,6 +235,10 @@ AriRuntime::~AriRuntime() {
 
 void AriRuntime::add_component_path(const std::string &dir) { app_rt_.add_component_path(dir); }
 
+std::string AriRuntime::enable_net(const cvc::ariadne::NetHostConfig &config) {
+  return app_rt_.enable_net(config);
+}
+
 void AriRuntime::on(const std::string &event, std::function<void()> handler) {
   app_rt_.on(event, std::move(handler));
 }

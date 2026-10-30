@@ -48,6 +48,10 @@
 // the menu bar is arigl's, the same for every document: Demos, Document (the document's own menus)
 // and Settings. A demo picked from Demos that is a .ari document replaces the running one in the
 // same window; any other opens on its own (its page in the browser, its program natively).
+//
+// The network is off unless a flag turns it on, in both modes and in the browser: --net,
+// --net-allow ORIGIN, --net-policy FILE and --credential-store NAME|PATH (net_host.h;
+// docs/ARIADNE.md §10.3). In a browser --net alone lets the document reach the page's own origin.
 
 #include <algorithm>
 #include <cctype> // std::isalnum / std::isdigit — sanitize the conference node id
@@ -164,7 +168,12 @@ int usage(int code) {
                "\n"
                "With CVC_ARIGL_GALLERY naming a catalog of demos (JSON), run adds a Demos menu\n"
                "and puts the document's own menus under Document; a .ari demo picked from Demos\n"
-               "replaces the document in this window.\n",
+               "replaces the document in this window.\n"
+               "\n"
+               "The network is off unless --net, --net-allow, --net-policy or --credential-store\n"
+               "turns it on. Then the document may reach only the origins allowed (in a browser,\n"
+               "the page's own origin too), and sign-in tokens stay with arigl: a request names\n"
+               "one (auth:), it never sees it.\n",
                ari::host_flags_help().c_str());
   return code;
 }
@@ -1549,6 +1558,10 @@ int run_window(const ari::HostOptions &o) {
   ui.setVisible(true);
 
   gla::AriRuntime rt(view, cam, ui);
+  if (const std::string error = rt.enable_net(o.net); !error.empty()) {
+    std::fprintf(stderr, "arigl: %s\n", error.c_str());
+    return 2;
+  }
   gla::register_gl_basics(app);
   gla::register_streaming(app);
   gla::register_window_widgets(rt.backend(), app);
@@ -1761,6 +1774,10 @@ int run_terminal(const ari::HostOptions &o) {
   CheckedTerminalScene scene(app, *backend, /*supersample=*/2, prefix);
   ari::AppRuntime rt(app, prefix, &scene);
   rt.set_backend(*backend);
+  if (const std::string error = rt.enable_net(o.net); !error.empty()) {
+    std::fprintf(stderr, "arigl: %s\n", error.c_str());
+    return 2;
+  }
   gla::register_gl_basics(app);
   gla::register_streaming(app);
   for (const std::string &d : o.component_paths)
