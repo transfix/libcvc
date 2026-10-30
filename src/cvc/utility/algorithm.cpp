@@ -871,8 +871,12 @@ struct sdf_stepper::impl {
       winding = true;
       return;
     }
+    // A node's signed distance costs some tens of microseconds (its tree descent and winding
+    // number): kUnitsPerNode units of budget, so a unit costs about what the runner's do.
+    constexpr uint64 kUnitsPerNode = 32;
     const uint64 nx = cv.XDim(), ny = cv.YDim(), n = nx * ny * cv.ZDim();
-    const uint64 count = budget == 0 ? n - node : std::min<uint64>(budget, n - node);
+    const uint64 count =
+        budget == 0 ? n - node : std::clamp<uint64>(budget / kUnitsPerNode, 1, n - node);
     geometry::points_t q(static_cast<std::size_t>(count));
     for (uint64 o = 0; o < count; ++o) {
       const uint64 id = node + o, i = id % nx, j = (id / nx) % ny, k = id / (nx * ny);

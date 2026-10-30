@@ -722,6 +722,36 @@ Programs can manage other processes using DSL intrinsics:
 (scheduler-stats)  ;; => {total: N, running: N, ...}
 ```
 
+**What a spawned child sees.** A child always keeps its parent's `owner`, so a host that reaps
+a document's processes with `kill_owner` reaps its children too. Its environment depends on the
+host (docs/STATE_EXEC_THREADED.md 4.15):
+
+- With no spawn context, the child gets the bare builtins: no intrinsics, so `(state-get ...)`
+  in the child is a `NameError`. This is what a context built by hand gets unless it sets one.
+- With a spawn context (`intrinsics_context::spawn_context`), the callback gives the child its
+  environment and a context of its own. The child's process keeps that context alive until the
+  process is reaped. Ariadne's actions, residents and init scripts, pycvc's `Exec` and
+  `make_spawn_context` all install one.
+
+A C++ host that registers the plain intrinsics installs the ready-made callback:
+
+```cpp
+intrinsics_context ictx;  // sched, root (apply_chroot), uid, channels, lock fields, ...
+ictx.spawn_context = make_spawn_context();  // or make_spawn_context(base, after_register)
+register_intrinsics(env, &ictx);
+```
+
+Each child then gets a context copying the parent's:
+
+- scheduler, root and chroot, and tracker;
+- identity, channel policy and document;
+- lock fields (`lock_wait_allowed`, `lock_default_timeout`);
+- the callback itself, so grandchildren get one too.
+
+The child's environment is `environment::extend(base)` with the intrinsics registered in it,
+then `after_register(env, ctx)`, the host's own bindings. A null `base` is one default
+environment, shared by the callback's children.
+
 ---
 
 ## 5. The State Tree
@@ -781,8 +811,10 @@ register_intrinsics(env, &ictx);
 ;; Check existence
 (state-exists "myapp.config.timeout")  ;; => true
 
-;; List children of a node
-(state-children "myapp.config")  ;; => ("timeout")
+;; List every node under a node, by its full path: descendants too, in pre-order
+(state-children "myapp.config")   ;; => ("myapp.config.timeout")
+(state-set "myapp.users.ann.role" "admin")
+(state-children "myapp.users")    ;; => ("myapp.users.ann" "myapp.users.ann.role")
 
 ;; Delete a node
 (state-delete "myapp.old-data")
@@ -796,6 +828,16 @@ register_intrinsics(env, &ictx);
 (state-json "myapp.config")   ;; => "{\n    \"timeout\": \"30\"\n}\n"
 (state-from-json "myapp.copy" (state-json "myapp.config"))
 ```
+
+A node holds text, so `state-set` turns any other value into text. A string is stored as it is.
+An int is stored as its digits (`10` as `"10"`). A float is stored as the shortest text that
+reads back as the same number: `1234567.5` as `"1234567.5"`, `0.1` as `"0.1"`, `1e21` as
+`"1e+21"`, `(+ 0.1 0.2)` as `"0.30000000000000004"`. Of the fixed and scientific forms the
+shorter is stored, so `100000.0` is `"1e+05"`. `true` and `false` are stored as `"true"` and
+`"false"`, and `nil` as `""`. A list or dict is stored as it prints; a structured value
+belongs on the data channel (`state-data-set`). Pass a number itself rather than `(str n)`:
+`str` prints a float with six significant digits, so `(state-set "x" (str 1234567.5))` stores
+`"1.23457e+06"`.
 
 `state-json` returns nil for a missing node and reads through a transparent link, as
 `state-get` does. `state-from-json` writes through a writable transparent link, as `state-set`
@@ -2242,8 +2284,8 @@ block.  To carry state across iterations, use `set`:
 ### 12.5 All State Values Are Strings
 
 The state tree stores everything as `std::string`.  `state-set`
-converts its argument with `str`, and `state-get` always returns a
-string.  Convert explicitly for numeric work:
+turns a non-string argument into text (§5), and `state-get` always
+returns a string.  Convert explicitly for numeric work:
 
 ```lisp
 (state-set "counter" (str 42))

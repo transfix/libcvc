@@ -56,17 +56,30 @@ inline cvc::state &read_effective(cvc::state &s) {
   return s;
 }
 
+// The node a read of the absolute bind `path` sees, or nullptr when it has none yet. A hole is
+// seen through on every hop, so a bind under it (`tree.a` with `link: {tree: s}`) reads the
+// target's descendant `s.a` (cvc::state::findThroughLinks). Creates nothing.
+inline cvc::state *read_node(cvc::app &ctx, const std::string &path) {
+  return cvc::state::instance(ctx).findThroughLinks(path);
+}
+
+// The node a write (or seed) of the absolute bind `path` lands on, made when absent: under a
+// read-write hole the target's descendant, under a read-only hole the hole's own local child, so
+// the target is never scribbled (cvc::state::childThroughLinks).
+inline cvc::state &write_node(cvc::app &ctx, const std::string &path) {
+  return cvc::state::instance(ctx).childThroughLinks(path);
+}
+
 // Read a state value, seeding it with `def` when the path has no value yet. Never
 // throws into a render frame (unreadable/unconvertible -> `def`).
 template <typename T> T read_or_seed(cvc::app &ctx, const std::string &path, const T &def) {
   try {
-    cvc::state &s = cvc::state::instance(ctx)(path);
-    cvc::state &eff = read_effective(s); // read through a transparent-link hole to its target
-    if (eff.value().empty()) {
-      s.value(def); // seed via the ORIGINAL node: writable hole -> target, else local/own
+    cvc::state *eff = read_node(ctx, path); // read through a transparent-link hole to its target
+    if (!eff || eff->value().empty()) {
+      write_node(ctx, path).value(def); // seed the write node: writable hole -> target, else local
       return def;
     }
-    return eff.value<T>();
+    return eff->value<T>();
   } catch (const std::exception &) {
     return def;
   }
@@ -78,10 +91,10 @@ template <typename T> T read_or_seed(cvc::app &ctx, const std::string &path, con
 // its own `def:`): a follower must not pre-empt the owner's default. Never throws.
 template <typename T> T read_or(cvc::app &ctx, const std::string &path, const T &def) {
   try {
-    cvc::state &eff = read_effective(cvc::state::instance(ctx)(path));
-    if (eff.value().empty())
+    cvc::state *eff = read_node(ctx, path);
+    if (!eff || eff->value().empty())
       return def;
-    return eff.value<T>();
+    return eff->value<T>();
   } catch (const std::exception &) {
     return def;
   }
@@ -114,11 +127,11 @@ inline int to_bool_int(const std::string &s, int def) {
 // program/init: writes. Never throws into a frame.
 inline int read_bool_or_seed(cvc::app &ctx, const std::string &path, int def) {
   try {
-    cvc::state &s = cvc::state::instance(ctx)(path);
-    cvc::state &eff = read_effective(s);
-    const std::string v = eff.value();
+    cvc::state *eff = read_node(ctx, path);
+    const std::string v = eff ? eff->value() : std::string();
     if (v.empty()) {
-      s.value(def); // seed via the ORIGINAL node (writable-hole aware, like read_or_seed)
+      write_node(ctx, path).value(
+          def); // seed the write node (writable-hole aware, as read_or_seed)
       return def;
     }
     return to_bool_int(v, def);
@@ -131,8 +144,8 @@ inline int read_bool_or_seed(cvc::app &ctx, const std::string &path, int def) {
 // `visible:` follower), tolerant of "true"/"false". Never throws.
 inline int read_bool_or(cvc::app &ctx, const std::string &path, int def) {
   try {
-    cvc::state &eff = read_effective(cvc::state::instance(ctx)(path));
-    const std::string v = eff.value();
+    cvc::state *eff = read_node(ctx, path);
+    const std::string v = eff ? eff->value() : std::string();
     if (v.empty())
       return def;
     return to_bool_int(v, def);
@@ -155,7 +168,7 @@ inline int read_bool_or(cvc::app &ctx, const std::string &path, int def) {
 // (non-link) node — this only upgrades the recorded type, never the representation.
 template <typename T> void write(cvc::app &ctx, const std::string &path, const T &v) {
   try {
-    cvc::state::instance(ctx)(path).value(v);
+    write_node(ctx, path).value(v);
   } catch (const std::exception &) {
   }
 }

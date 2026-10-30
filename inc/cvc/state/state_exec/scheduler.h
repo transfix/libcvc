@@ -155,7 +155,15 @@ public:
   /// Fork a running/ready process.  Returns child PID or -1 on failure.
   int fork(int pid);
 
-  bool set_priority(int pid, int priority);
+  bool set_priority(int pid, int priority) override;
+  std::optional<priority_info> get_priority(int pid) const override;
+  priority_change set_priority_checked(int caller_pid, int pid, int priority) override;
+  std::optional<priority_info> get_priority_as(int caller_pid, int pid) const override;
+  bool set_priority_floor(int pid, int floor) override;
+  void note_priority_clamped() override;
+  /// Thread-safe: `cmd` for process `pid`, applied between steps (unknown pids are ignored when
+  /// it is applied). True once queued.
+  bool post_control(int pid, control_cmd cmd);
   bool set_max_steps(int pid, uint64_t max_steps);
   bool set_max_time(int pid, double seconds);
   bool set_max_memory(int pid, uint64_t bytes);
@@ -185,7 +193,7 @@ public:
 
   // --- Accessors ---
 
-  scheduling_policy policy() const { return policy_; }
+  scheduling_policy policy() const override { return policy_; }
   const memory_tracker &mem_tracker() const { return mem_tracker_; }
   int process_count() const { return static_cast<int>(procs_.size()); }
 

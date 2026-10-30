@@ -1,0 +1,45 @@
+# The wasm ari's network check (ci.yml, "ari terminal backend (wasm, node)"): run with
+#   ari snapshot --net-allow BASE /tests/net_probe.ari --base BASE
+# against net_probe_server.py. It signs in (two tokens from one reply), refreshes with the refresh
+# token as a form credential, fetches with the refreshed token, and is refused another origin. The
+# document never holds a token.
+meta:
+  name: Ariadne net probe
+  min_libcvc: 3.7.4
+requires: [net, net.auth]
+args:
+  base: {type: string, help: The server's origin}
+windows:
+  - window: Net probe
+    children:
+      - text: "device"
+        bind: (state-get "probe.device")
+      - text: "refresh"
+        bind: (state-get "probe.refresh")
+      - text: "me"
+        bind: (state-get "probe.me")
+      - text: "evil"
+        bind: (state-get "probe.evil")
+      - text: "body"
+        bind: (state-get "probe.body")
+init: (state-set "probe.started" "")
+on_tick: |
+  (if (= (state-get "probe.started") "")
+    (begin
+      (state-set "probe.started" "1")
+      (set base (state-get "args.base"))
+      (set d (http-request "POST" (str-concat base "/v1/auth/device/token")
+               (dict "capture_auth" (list (dict "name" "probe" "field" "access_token")
+                                          (dict "name" "probe.refresh" "field" "refresh_token")))))
+      (state-set "probe.device" (get-attr d "captured"))
+      (state-set "probe.body" (str (get-attr d "body")))
+      (set r (http-request "POST" (str-concat base "/v1/auth/token")
+               (dict "form" (dict "grant_type" "refresh_token"
+                                  "refresh_token" (dict "credential" "probe.refresh"))
+                     "capture_auth" (list (dict "name" "probe" "field" "access_token")
+                                          (dict "name" "probe.refresh" "field" "refresh_token"
+                                                "optional" #t)))))
+      (state-set "probe.refresh" (get-attr r "captured"))
+      (state-set "probe.me" (get-attr (http-get (str-concat base "/v1/me") (dict "auth" "probe"))
+                                      "status"))
+      (state-set "probe.evil" (get-attr (http-get "https://evil.example/") "error"))))
