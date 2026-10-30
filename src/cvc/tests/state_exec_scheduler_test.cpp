@@ -31,6 +31,7 @@
 #include <cvc/state/state_exec/process_table.h>
 #include <cvc/state/state_exec/scheduler.h>
 #include <cvc/state/state_exec/stackless_evaluator.h>
+#include <deque>
 #include <gtest/gtest.h>
 #include <iterator>
 #include <limits>
@@ -1443,6 +1444,137 @@ TEST(ProcessTableTest, ATimedWaitThatRunsOutBecomesReady) {
   EXPECT_TRUE(table.check());
 }
 
+// Lock waits (docs/STATE_EXEC_LOCKS.md 8.7): a lock waiter is counted, its deadline is a timer,
+// and an expired deadline is handed to the lock home rather than readying the process.
+namespace {
+process_ptr lock_waiter(int pid, std::optional<std::chrono::steady_clock::time_point> deadline) {
+  auto p = make_process();
+  p->pid = pid;
+  p->status = process_status::waiting;
+  p->lock_waiting = true;
+  p->lock_deadline = deadline;
+  return p;
+}
+} // namespace
+
+TEST(ProcessTableTest, LockDeadlineIsClearedAndNotRepushed) {
+  detail::process_table table;
+  const auto t0 = std::chrono::steady_clock::now();
+  table.insert(lock_waiter(1, t0 + std::chrono::milliseconds(5)));
+  EXPECT_EQ(table.lock_waiting_count(), 1u);
+  EXPECT_EQ(table.timed_count(), 1u);
+  EXPECT_EQ(table.next_timer(), t0 + std::chrono::milliseconds(5));
+  std::vector<process *> expired;
+  EXPECT_EQ(table.wake_due(t0, &expired), 0u);
+  EXPECT_TRUE(expired.empty());
+  EXPECT_EQ(table.wake_due(t0 + std::chrono::milliseconds(5), &expired), 1u);
+  ASSERT_EQ(expired.size(), 1u);
+  const process &p = *table.find(1);
+  EXPECT_EQ(expired[0], &p);
+  // Still waiting for its home to time it out; the spent deadline left the heap for good.
+  EXPECT_EQ(p.status, process_status::waiting);
+  EXPECT_TRUE(p.lock_waiting);
+  EXPECT_FALSE(p.lock_deadline.has_value());
+  EXPECT_FALSE(p.lock_expired_pending);
+  EXPECT_EQ(table.timed_count(), 0u);
+  EXPECT_FALSE(table.next_timer().has_value());
+  EXPECT_EQ(table.wake_due(t0 + std::chrono::seconds(10), &expired), 0u);
+  EXPECT_EQ(expired.size(), 1u);
+  EXPECT_EQ(table.lock_waiting_count(), 1u);
+  EXPECT_EQ(table.runnable_count(), 0u);
+  EXPECT_TRUE(table.check());
+}
+
+TEST(ProcessTableTest, LockExpiryWithoutVectorIsFlaggedAndCounted) {
+  detail::process_table table;
+  const auto t0 = std::chrono::steady_clock::now();
+  table.insert(lock_waiter(1, t0));
+  table.insert(lock_waiter(2, std::nullopt)); // no timeout: never expires
+  EXPECT_EQ(table.lock_waiting_count(), 2u);
+  EXPECT_EQ(table.timed_count(), 1u);
+  EXPECT_EQ(table.wake_due(t0), 1u);
+  EXPECT_TRUE(table.find(1)->lock_expired_pending);
+  EXPECT_FALSE(table.find(2)->lock_expired_pending);
+  EXPECT_EQ(table.lock_expired_count(), 1u);
+  EXPECT_TRUE(table.check());
+  // A flagged waiter that ends leaves the count.
+  table.set_status(*table.find(1), process_status::killed);
+  EXPECT_EQ(table.lock_expired_count(), 0u);
+  EXPECT_EQ(table.lock_waiting_count(), 1u);
+  EXPECT_TRUE(table.check());
+}
+
+TEST(ProcessTableTest, TakeLockExpiredCollectsFlagged) {
+  detail::process_table table;
+  const auto t0 = std::chrono::steady_clock::now();
+  table.insert(lock_waiter(1, t0));
+  table.insert(lock_waiter(2, t0 + std::chrono::milliseconds(1)));
+  table.insert(lock_waiter(3, t0 + std::chrono::seconds(60)));
+  EXPECT_EQ(table.wake_due(t0 + std::chrono::milliseconds(1)), 2u);
+  EXPECT_EQ(table.lock_expired_count(), 2u);
+  std::vector<process *> out;
+  table.take_lock_expired(out);
+  ASSERT_EQ(out.size(), 2u);
+  std::vector<int> pids{out[0]->pid, out[1]->pid};
+  std::sort(pids.begin(), pids.end());
+  EXPECT_EQ(pids, (std::vector<int>{1, 2}));
+  for (const process *p : out)
+    EXPECT_FALSE(p->lock_expired_pending);
+  EXPECT_EQ(table.lock_expired_count(), 0u);
+  EXPECT_EQ(table.timed_count(), 1u); // pid 3's deadline is still ahead
+  EXPECT_TRUE(table.check());
+}
+
+TEST(ProcessTableTest, WakeDueCountsUnchangedWithoutLockWaiters) {
+  // With no lock waiter the vector is never touched and the counts are the timers' alone.
+  detail::process_table table;
+  const auto t0 = std::chrono::steady_clock::now();
+  for (int i = 1; i <= 3; ++i) {
+    auto p = make_process();
+    p->pid = i;
+    p->status = process_status::waiting;
+    p->wake_time = t0 + std::chrono::milliseconds(i);
+    table.insert(std::move(p));
+  }
+  std::vector<process *> expired;
+  EXPECT_EQ(table.wake_due(t0 + std::chrono::milliseconds(2), &expired), 2u);
+  EXPECT_TRUE(expired.empty());
+  EXPECT_EQ(table.lock_waiting_count(), 0u);
+  EXPECT_EQ(table.lock_expired_count(), 0u);
+  EXPECT_TRUE(table.check());
+}
+
+TEST(ProcessTableTest, CheckSeesLockWaiters) {
+  detail::process_table table;
+  const auto t0 = std::chrono::steady_clock::now();
+  table.insert(lock_waiter(1, t0 + std::chrono::seconds(1)));
+  EXPECT_TRUE(table.check());
+  // A lock field changed without update(): the table no longer agrees.
+  process &p = *table.find(1);
+  p.lock_waiting = false;
+  EXPECT_FALSE(table.check());
+  table.update(p);
+  EXPECT_TRUE(table.check());
+  EXPECT_EQ(table.lock_waiting_count(), 0u);
+  EXPECT_EQ(table.timed_count(), 0u); // no lock wait, no lock deadline timer
+  // A flag on a process that is not a lock waiter is refused by check().
+  p.lock_expired_pending = true;
+  table.update(p);
+  EXPECT_FALSE(table.check());
+  p.lock_expired_pending = false;
+  table.update(p);
+  EXPECT_TRUE(table.check());
+  // A lock waiter is not runnable, and resumes the run queue when readied.
+  p.lock_waiting = true;
+  table.update(p);
+  EXPECT_EQ(table.runnable_count(), 0u);
+  p.lock_waiting = false;
+  p.lock_deadline.reset();
+  table.set_status(p, process_status::ready);
+  EXPECT_EQ(table.runnable_count(), 1u);
+  EXPECT_TRUE(table.check());
+}
+
 TEST(ProcessTableTest, EndedProcessesLeaveEveryIndexButStayReadable) {
   detail::process_table table;
   for (int pid = 1; pid <= 1000; ++pid) {
@@ -2526,3 +2658,125 @@ TEST(WakeupPriorityTest, APriorityChangedDuringAPreciseWaitStands) {
   EXPECT_EQ(GetThreadPriority(GetCurrentThread()), THREAD_PRIORITY_BELOW_NORMAL);
 }
 #endif
+
+// ===========================================================================
+// Lock waiters and the schedulers' own run loops (docs/STATE_EXEC_LOCKS.md 6.1, 8.7; locks plan
+// L1 risks: has_runnable on the sync scheduler)
+// ===========================================================================
+
+namespace {
+
+// Programs with one intrinsics context each, on one scheduler.
+struct lock_run_world {
+  cvc::app app;
+  cvc::state &tree;
+  std::deque<intrinsics_context> contexts;
+  explicit lock_run_world() : tree(cvc::state::instance(app)) {}
+  int submit(scheduler_base &sched, const std::string &script) {
+    intrinsics_context &ctx = contexts.emplace_back();
+    ctx.sched = &sched;
+    ctx.root = &tree;
+    ctx.proc = make_process();
+    environment_ptr env = builtins::make_default_environment();
+    register_intrinsics(env, &ctx);
+    execute_options opts;
+    opts.env = env;
+    return sched.execute(script, opts);
+  }
+};
+
+std::string waiting_on(scheduler_base &sched, int pid) {
+  const auto i = sched.get_process_info(pid);
+  return i && i->waiting_on ? *i->waiting_on : std::string();
+}
+
+} // namespace
+
+// The sync scheduler counts lock waiters among what may still run (a host loop that steps while
+// has_runnable() keeps servicing their deadlines); async_scheduler, whose drain services them,
+// counts them as it counts message waiters: not.
+TEST(SchedulerLocks, HasRunnableCountsLockWaitersOnTheSyncScheduler) {
+  {
+    lock_run_world w;
+    scheduler sched;
+    const int h = w.submit(sched, R"((with-lock "k" (msg-recv "go")))");
+    const int q = w.submit(sched, R"((with-lock "k" 1))");
+    for (int i = 0;
+         i < 1000 && (waiting_on(sched, q) != "lock /k" || waiting_on(sched, h) != "msg go"); ++i)
+      sched.step();
+    ASSERT_EQ(waiting_on(sched, q), "lock /k");
+    ASSERT_EQ(waiting_on(sched, h), "msg go");
+    EXPECT_TRUE(sched.has_runnable());
+    EXPECT_TRUE(sched.check_tables());
+  }
+  {
+    lock_run_world w;
+    async_scheduler sched;
+    const int h = w.submit(sched, R"((with-lock "k" (msg-recv "go")))");
+    const int q = w.submit(sched, R"((with-lock "k" 1))");
+    for (int i = 0;
+         i < 1000 && (waiting_on(sched, q) != "lock /k" || waiting_on(sched, h) != "msg go"); ++i)
+      sched.sync_step();
+    ASSERT_EQ(waiting_on(sched, q), "lock /k");
+    ASSERT_EQ(waiting_on(sched, h), "msg go");
+    EXPECT_FALSE(sched.has_runnable());
+    EXPECT_TRUE(sched.check_tables());
+  }
+}
+
+// A run bounded by steps, left with only a lock waiter whose holder waits for a message and no
+// timer set, returns at once (design 6.1), the waiter still waiting.
+TEST(SchedulerLocks, BoundedRunReturnsWithOnlyLockWaiters) {
+  lock_run_world w;
+  scheduler sched;
+  const int h = w.submit(sched, R"((with-lock "k" (msg-recv "go")))");
+  const int q = w.submit(sched, R"((with-lock "k" 1))");
+  const auto t0 = std::chrono::steady_clock::now();
+  sched.run(100000);
+  const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  std::printf("a bounded run left with a lock waiter returned after %.3f s\n", took);
+  EXPECT_LT(took, 10.0);
+  EXPECT_EQ(waiting_on(sched, q), "lock /k");
+  sched.deliver_to_receivers("go", value_t(std::string("go")));
+  sched.run(100000);
+  EXPECT_TRUE(is_finished(sched.get_process_info(h)->status));
+  ASSERT_TRUE(is_finished(sched.get_process_info(q)->status));
+  EXPECT_EQ(std::get<int64_t>(sched.get_result(q)->v), 1);
+  EXPECT_TRUE(sched.check_tables());
+}
+
+// run() with a holder that sleeps: it waits for the sleeper's timer, then the release grants the
+// waiter, and run() returns with both done.
+TEST(SchedulerLocks, RunWaitsForTheHolderThenGrants) {
+  lock_run_world w;
+  scheduler sched;
+  const int h = w.submit(sched, R"((with-lock "k" (sleep 0.2)))");
+  const int q = w.submit(sched, R"((with-lock "k" 7))");
+  sched.run(std::nullopt, 20.0);
+  ASSERT_TRUE(is_finished(sched.get_process_info(h)->status));
+  ASSERT_TRUE(is_finished(sched.get_process_info(q)->status));
+  EXPECT_EQ(std::get<int64_t>(sched.get_result(q)->v), 7);
+  EXPECT_TRUE(sched.check_tables());
+}
+
+// A run whose steps would last longer than the waiter's deadline waits for the deadline (a timer
+// of the process table) and times the wait out; the run then returns, its holder still waiting
+// for a message.
+TEST(SchedulerLocks, RunServicesALockDeadline) {
+  lock_run_world w;
+  scheduler sched;
+  const int h = w.submit(sched, R"((with-lock "k" (msg-recv "go")))");
+  const int q =
+      w.submit(sched, R"((try (with-lock "k" :timeout 0.2 1) (catch (TimeoutError e) "timeout")))");
+  const auto t0 = std::chrono::steady_clock::now();
+  sched.run(uint64_t(1) << 40, 20.0);
+  const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  std::printf("the run timed the lock wait out and returned after %.3f s\n", took);
+  ASSERT_TRUE(is_finished(sched.get_process_info(q)->status));
+  EXPECT_EQ(std::get<std::string>(sched.get_result(q)->v), "timeout");
+  EXPECT_GE(took, 0.2);
+  EXPECT_LT(took, 20.0);
+  EXPECT_FALSE(is_finished(sched.get_process_info(h)->status));
+  EXPECT_TRUE(sched.check_tables());
+  sched.kill(h);
+}

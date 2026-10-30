@@ -850,6 +850,46 @@ model from_coupled_points(const std::vector<double> &value_rgba, double lo, doub
   return from_tables(ct, ot, lo, hi);
 }
 
+std::vector<color_node> simplify_ramp(const std::vector<color_node> &dense, float tolerance,
+                                      int max_nodes) {
+  const std::size_t n = dense.size();
+  if (n <= 2)
+    return dense;
+  // Both ramps are piecewise linear and the thinned one's nodes are input nodes, so the largest
+  // miss is at an input node: measuring there is exact.
+  std::vector<char> keep(n, 0);
+  keep.front() = keep.back() = 1;
+  for (int kept = 2; kept < std::max(max_nodes, 2); ++kept) {
+    float worst = tolerance;
+    std::size_t at = n;
+    for (std::size_t a = 0, b = 1; b < n; ++b) {
+      if (!keep[b])
+        continue;
+      const color_node &p = dense[a], &q = dense[b];
+      const double span = q.at - p.at;
+      for (std::size_t i = a + 1; i < b; ++i) {
+        const float u = span > 0.0 ? static_cast<float>((dense[i].at - p.at) / span) : 0.f;
+        const float miss = std::max({std::fabs(p.r + (q.r - p.r) * u - dense[i].r),
+                                     std::fabs(p.g + (q.g - p.g) * u - dense[i].g),
+                                     std::fabs(p.b + (q.b - p.b) * u - dense[i].b)});
+        if (miss > worst) {
+          worst = miss;
+          at = i;
+        }
+      }
+      a = b;
+    }
+    if (at == n)
+      break;
+    keep[at] = 1;
+  }
+  std::vector<color_node> out;
+  for (std::size_t i = 0; i < n; ++i)
+    if (keep[i])
+      out.push_back(dense[i]);
+  return out;
+}
+
 std::string format_csv(const std::vector<double> &v) {
   std::string s;
   s.reserve(v.size() * 24);

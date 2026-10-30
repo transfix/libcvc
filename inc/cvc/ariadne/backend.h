@@ -269,6 +269,16 @@ public:
     text_value(label, value);
   }
   virtual void separator() = 0;
+  // A read-only progress bar at `fraction` (0..1) with `overlay` drawn over it (empty: the
+  // percent). By default a text value, "[########------------] 40%", so every backend has one.
+  virtual void progress_bar(const char *label, float fraction, const std::string &overlay) {
+    const float f = fraction > 0.f ? (fraction < 1.f ? fraction : 1.f) : 0.f;
+    const int filled = static_cast<int>(f * 20.f + 0.5f);
+    std::string bar = "[" + std::string(std::size_t(filled), '#') +
+                      std::string(std::size_t(20 - filled), '-') + "] ";
+    bar += overlay.empty() ? std::to_string(static_cast<int>(f * 100.f + 0.5f)) + "%" : overlay;
+    text_value(label, bar);
+  }
   virtual bool button(const char *label) = 0;           // returns clicked
   virtual bool menu_item_action(const char *label) = 0; // returns clicked
 
@@ -316,6 +326,13 @@ public:
                                    double hi, const char *fmt) = 0;
   virtual IndexEdit combo(const char *label, int current_index,
                           const std::vector<std::string> &options) = 0;
+  // Kind::Radio: the same choice with every option shown, side by side when `row`. A backend
+  // with no radio buttons draws it as a combo.
+  virtual IndexEdit radio(const char *label, int current_index,
+                          const std::vector<std::string> &options, bool row) {
+    (void)row;
+    return combo(label, current_index, options);
+  }
   // A single-line text field bound to a string state key (Kind::InputText; Kind::InputInt reuses it
   // with the core coercing to/from an int). `key` is the stable per-widget id (the resolved state
   // path), like the sliders, so the backend can hold the in-progress text across frames; `current`

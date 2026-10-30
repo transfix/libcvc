@@ -579,6 +579,22 @@ void ImGuiBackend::text_value_colored(const char *label, const std::string &valu
   ui::TextLineColored(line.c_str(), rgb[0], rgb[1], rgb[2]);
 }
 void ImGuiBackend::separator() { ui::Separator(); }
+void ImGuiBackend::progress_bar(const char *label, float fraction, const std::string &overlay) {
+#ifdef CVC_ENABLE_IMGUI
+  // The bar fills the line but leaves the label's width, as the sliders do; the label (up to any
+  // "##") follows it.
+  const char *end = label ? ImGui::FindRenderedTextEnd(label) : label;
+  const bool labelled = label && end != label;
+  const float width = labelled ? ImGui::CalcItemWidth() : -FLT_MIN;
+  ImGui::ProgressBar(fraction, ImVec2(width, 0.f), overlay.empty() ? nullptr : overlay.c_str());
+  if (labelled) {
+    ImGui::SameLine(0.f, ImGui::GetStyle().ItemInnerSpacing.x);
+    ImGui::TextUnformatted(label, end);
+  }
+#else
+  Backend::progress_bar(label, fraction, overlay);
+#endif
+}
 bool ImGuiBackend::button(const char *label) { return ui::Button(label); }
 bool ImGuiBackend::menu_item_action(const char *label) { return ui::MenuItemClicked(label); }
 // §4.6 widget on_click: was the last-submitted item clicked (left button, released over it)? Works
@@ -753,6 +769,40 @@ ariadne::IndexEdit ImGuiBackend::combo(const char *label, int current_index,
   }
 #else
   (void)label;
+#endif
+  return e;
+}
+
+// The caption first (the part before any "##" id suffix), then one radio button per option, on
+// the caption's line for a row. Each option's id is scoped by the label, so two radios may share
+// option names.
+ariadne::IndexEdit ImGuiBackend::radio(const char *label, int current_index,
+                                       const std::vector<std::string> &options, bool row) {
+  ariadne::IndexEdit e;
+  e.index = current_index;
+  if (options.empty())
+    return e;
+#ifdef CVC_ENABLE_IMGUI
+  const char *hash = std::strstr(label, "##");
+  const std::string caption = hash ? std::string(label, hash) : std::string(label);
+  ImGui::PushID(label);
+  if (!caption.empty())
+    ImGui::TextUnformatted(caption.c_str());
+  for (std::size_t i = 0; i < options.size(); ++i) {
+    if (row && (i > 0 || !caption.empty()))
+      ImGui::SameLine();
+    ImGui::PushID(static_cast<int>(i));
+    if (ImGui::RadioButton(options[i].c_str(), static_cast<int>(i) == current_index)) {
+      e.index = static_cast<int>(i); // discrete: commit on pick
+      e.changed = true;
+      e.committed = true;
+    }
+    ImGui::PopID();
+  }
+  ImGui::PopID();
+#else
+  (void)label;
+  (void)row;
 #endif
   return e;
 }

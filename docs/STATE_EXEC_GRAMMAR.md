@@ -466,10 +466,16 @@ strings. Every row is a case in `state_exec_grammar_test`.
 | `r"a\nb"`, `br"…"` | the symbol `r` or `br`, then a string | raw string, raw bytes | P4 |
 | `r#"say "hi""#` | a symbol `r#`, strings and symbols | raw string `say "hi"` | P4 |
 
-Printing is not part of the grammar. `to_string` round-trip (escaping strings, shortest floats,
-`+inf.0`) is phase P5.
+Printing is not part of the grammar. `to_string` writes a float in its shortest round-trip form
+(`std::to_chars`): `0.30000000000000004`, `1e+21`, a whole float as an integer's digits (`2`),
+and the specials as `inf`, `-inf` and `nan`. The rest of the round trip (escaping strings,
+`+inf.0`, a whole float that reads back as a float) is phase P5.
 
 ## Not in the grammar
+
+`with-lock` (docs/STATE_EXEC_LOCKS.md) needs nothing here: it is recognized by the value its name
+is bound to, not by the grammar, and its options (`:shared`, `:timeout`, `:as`, ...) are plain
+symbols that start with `:`.
 
 These were considered and left out. Each would need its own decision:
 

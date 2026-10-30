@@ -52,7 +52,9 @@ approach agreed for closing the gap, and the plan.
    GIL around Python callbacks, an asyncio loop for coroutines, and compute-pool offload. It uses
    the same value conversion as everything else. `Exec.run` raises `pycvc.parse_error` for a
    syntax error whether the script was parsed at submit or read inside the process.
-   `Exec.scheduler()` returns its `async_scheduler`, which keeps the `Exec` alive.
+   `Exec.scheduler()` returns its `async_scheduler`, which keeps the `Exec` alive. Its registered
+   functions and the intrinsics live in a natives scope that the programs' environment extends;
+   a spawned child extends the natives too, so it calls the registered functions (td 4.15).
 6. **Enums are `enum.IntEnum` classes** with the C++ names and values:
    `pycvc.process_status.killed` is `process_status::killed`. An enum argument must be a member
    of its enum, so a plain int stays a value: `to_string(process_status)` and `to_string(value_t)`
@@ -79,7 +81,10 @@ approach agreed for closing the gap, and the plan.
     caller to keep `ctx` valid for as long as `env` is used. In Python, every function it adds
     holds the context, and the context holds the scheduler and channel policy assigned to it.
     The context's `root` is a tree node, which lives as long as its app, so keep the app alive
-    as in C++.
+    as in C++. The `with-lock` form it binds (docs/STATE_EXEC_LOCKS.md) is not a function but a
+    lock form object; pycvc's copy keeps the context alive too. The context's
+    `lock_wait_allowed` (False: a busy request never waits) and `lock_default_timeout` (a
+    float, or None: wait as long as it takes) set its lock rules.
 
 ## Inventory
 

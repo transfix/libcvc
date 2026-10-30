@@ -86,6 +86,11 @@ struct async_options {
   /// sees cancelled(), and its result is dropped.
   std::optional<double> timeout;
   bool future_variant = true; ///< also register "<name>-async", which returns a future
+  /// An I/O call: the kernel waits on something outside the program (a network transfer), and
+  /// its wall time and CPU are the host's, as a system call's are, so the call is charged its
+  /// one step and no run time or CPU (docs/STATE_EXEC_EXCEPTIONS.md 3.8). Its own timeout, not
+  /// the process's budget, bounds it. Off by default.
+  bool io = false;
 };
 
 /// One call of an async function: the kernel's handle, and what the host and the scheduler keep
@@ -166,10 +171,11 @@ public:
   charges charged;
 
   /// The kernel's run time so far: from when it started on its executor thread to when it
-  /// ended (or `now`), less what it spent waiting (add_wait). 0 while queued.
+  /// ended (or `now`), less what it spent waiting (add_wait). 0 while queued, and for an I/O
+  /// call.
   double run_seconds(clock::time_point now) const;
   /// The CPU time recorded so far: the kernel thread's, as of its last meter (or its end), and
-  /// its fan-out chunks'.
+  /// its fan-out chunks'. 0 for an I/O call.
   double cpu_seconds() const;
   /// Run time since the kernel thread's CPU time was last recorded: a kernel that never calls
   /// cancelled() is charged that as CPU time until it ends (docs/STATE_EXEC_EXCEPTIONS.md 3.8).
@@ -178,6 +184,8 @@ public:
   uint64_t alloc_bytes() const { return alloc_bytes_.load(std::memory_order_acquire); }
   /// Whether the kernel has ended (its run time and CPU time are final).
   bool kernel_ended() const { return end_ns_.load(std::memory_order_acquire) != 0; }
+  /// An I/O call (async_options::io): its run time and CPU time read 0.
+  bool io() const { return io_; }
 
 private:
   friend class async_host;
@@ -207,6 +215,7 @@ private:
   scheduler_base *sched_ = nullptr;        // where progress goes (inline: on this thread)
   async_scheduler *async_sched_ = nullptr; // threaded: where the completion is posted
   std::optional<double> timeout_;
+  bool io_ = false; // async_options::io
   clock::time_point created_ = clock::now();
   std::optional<std::size_t> alloc_limit_; // the calling step's (eval_alloc_limit())
   chunk_context chunks_;

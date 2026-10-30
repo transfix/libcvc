@@ -179,7 +179,7 @@ blocker cannot occur until several threads step one group.
 | B24 | `computePool().parallel_for` runs one fan-out at a time | `thread_pool.cpp:170` | fixed by `perf/async` |
 | B25 | Refcount traffic on shared read-only objects (a shared AST, the global class dicts) bounces cache lines | `stackless_evaluator.cpp:912`; `exceptions.cpp:158` | Stage 1 (measured) |
 | B26 | `math.random` is `thread_local`; `print` lines from several threads interleave | `stdlib.cpp:1279`; `builtins.cpp:688-707` | Stage 1 |
-| B27 | Spawned children get the bare base env, with no intrinsics, no chroot and no owner, so they cannot `msg-send`, touch the tree or report a result | `intrinsics.cpp:420-431` -> `stackless_evaluator.cpp:53, 66`; `builtins.cpp:855-938`; intrinsics come only from `register_intrinsics` (`intrinsics.cpp:1062`) | Stage 1; its single-scheduler part in the locks track's L1b |
+| B27 | Spawned children get the bare base env, with no intrinsics, no chroot and no owner, so they cannot `msg-send`, touch the tree or report a result | `intrinsics.cpp:420-431` -> `stackless_evaluator.cpp:53, 66`; `builtins.cpp:855-938`; intrinsics come only from `register_intrinsics` (`intrinsics.cpp:1062`) | Stage 1; its single-scheduler part landed with the locks track's L1b |
 | B28 | `(fork)` forks `ctx->pid`, which hosts leave at -1 or 0, not the running process; a forked child does not inherit `owner` | `intrinsics.cpp:437`; `ariadne.cpp:1645-1660`; `pycvc_exec.cpp:416`; `async_scheduler.cpp:957-976` | Stage 0, or the locks track's L1 if that lands first (a bug today) |
 | B29 | With several documents Ariadne pumps the shared scheduler once per document per frame, so `wake_awaiting` runs D times a frame and "an await crosses exactly one frame" does not hold | `ariadne.cpp:2021-2023`, `1694-1697` | Stage 1 |
 | B30 | Host posting and async-function sites are bound to the app scheduler and host, not to the scheduler that runs the program | `app_runtime.cpp:96-101`; `net_intrinsics.cpp:268-276`; `stream/stream.cpp:132-148, 238`; `ariadne.cpp:1843, 1967` | Stage 1 |
@@ -1560,8 +1560,8 @@ the judges' corrections. It is recorded here so the earlier stages do not close 
 | B24 | `perf/async` | 2.4 |
 | B25 | Per-process parsing; a shared AST copied at submit; class dicts frozen and measured (`mt.groups` raise/catch); per-group copies if contention shows (Q2) | 4.3, 6; Stage 1 |
 | B26 | Random stream per group; line-atomic `print` | 4.10, 4.11; Stage 1 |
-| B27 | Spawn context with a default; Ariadne's and pycvc's callbacks | 4.15; Stage 1 (its single-scheduler part first, in the locks track's L1b, whose exit includes IS-1 and IS-2 on one scheduler; Stage 1 re-runs them in groups) |
-| B28 | `(fork)` forks `current_pid()`; the child keeps `owner` | 4.15; Stage 0, or the locks track's L1 if that lands first |
+| B27 | Spawn context with a default; Ariadne's and pycvc's callbacks | 4.15; Stage 1 (its single-scheduler part landed with the locks track's L1b, which passes IS-1 and IS-2 on one scheduler; Stage 1 re-runs them in groups) |
+| B28 | `(fork)` forks `current_pid()`; the child keeps `owner` | 4.15; landed with the locks track's L1 |
 | B29 | `drain_begin` / `exec_pump_frame` / `drain_end` | 4.12; Stage 1 |
 | B30 | `ictx.host` and `ictx.sched` at every posting and async-function site | 4.9; Stage 1 |
 | B31 | Movable processes resolve their scheduler, host and tracker through `exec_group::current()` | 4.15; Stage 3 |

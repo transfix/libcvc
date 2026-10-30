@@ -1249,8 +1249,21 @@ cvc::state_exec::async_scheduler &app::exec_scheduler() {
     // Deep-data work a slice per step too (host_data_defaults); state_exec.defaults.data.*
     // overrides it.
     _execScheduler->set_data_defaults(cvc::state_exec::async_scheduler::host_data_defaults());
+    // Its with-lock table is the app's (docs/STATE_EXEC_LOCKS.md 8.4: an eager home).
+    _execScheduler->set_lock_manager(lock_manager_locked());
   }
   return *_execScheduler;
+}
+
+std::shared_ptr<cvc::state_exec::lock_manager> app::lock_manager_locked() {
+  if (!_lockManager)
+    _lockManager = std::make_shared<cvc::state_exec::lock_manager>();
+  return _lockManager;
+}
+
+std::shared_ptr<cvc::state_exec::lock_manager> app::lock_manager() {
+  boost::mutex::scoped_lock lock(_execSchedulerMutex);
+  return lock_manager_locked();
 }
 
 cvc::state_exec::async_host &app::exec_async_host() {

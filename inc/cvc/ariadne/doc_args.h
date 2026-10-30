@@ -13,9 +13,10 @@
 //
 // A program reads them with (state-data-get "argv") and (state-get "args.room"). Programs are
 // chrooted to their own subtree, so a load:-mounted module sees neither unless its parent grants
-// a read-only hole. A hole links one node: `link: {args: {to: args, mode: ro}}` hands the module
-// the dict, (get-attr (state-data-get "args") "room"); `link: {room: {to: args.room, mode: ro}}`
-// hands it one argument, (state-get "room").
+// a read-only hole, which grants a node and its subtree: `link: {args: {to: args, mode: ro}}`
+// hands the module the dict, (get-attr (state-data-get "args") "room") or (state-get
+// "args.room"); `link: {room: {to: args.room, mode: ro}}` hands it one argument, (state-get
+// "room").
 //
 // With an `args:` block the runtime parses argv against it: `--name value`, `--name=value`,
 // `--flag` / `--no-flag` for a bool, declared positionals in order, `--` ends the options. An

@@ -173,6 +173,21 @@ void expect_case(const program_case &c) {
 
 } // namespace
 
+// The lock classes (docs/STATE_EXEC_LOCKS.md 4.1): DeadlockError is a LockError, which is a
+// RuntimeError; PermissionError is not a RuntimeError.
+TEST(BuiltinClasses, LockClasses) {
+  EXPECT_EQ(class_chain(exception_class("DeadlockError")),
+            (std::vector<std::string>{"DeadlockError", "LockError", "RuntimeError", "Exception"}));
+  EXPECT_EQ(class_chain(exception_class("PermissionError")),
+            (std::vector<std::string>{"PermissionError", "Exception"}));
+  expect_case(
+      {"lock-classes", R"((try (raise (DeadlockError "x")) (catch (LockError e) 1)))", "1"});
+  expect_case({"permission-is-not-runtime",
+               R"((try (try (raise (PermissionError "x")) (catch (RuntimeError e) 1))
+                       (catch (PermissionError e) 2)))",
+               "2"});
+}
+
 // ===========================================================================
 // 6.1 Raising and catching (EX)
 // ===========================================================================

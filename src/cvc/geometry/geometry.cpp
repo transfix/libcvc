@@ -170,22 +170,33 @@ geometry &geometry::merge(const geometry &geom) {
   using namespace std;
 
   // The merged faces are [our tris, its tris, our quads, its quads]. If either
-  // side carries face materials, rebuild them in that order before the face
-  // arrays grow; a side without them contributes material 0.
-  const bool merge_materials = has_face_materials() || geom.has_face_materials();
-  face_materials_t merged_materials;
+  // side carries face materials, ours grow into that order in place before the
+  // face arrays do: its tris' go in after our tris' (moving only our quads'), its
+  // quads' at the end, and a side without them contributes material 0. In place,
+  // not rebuilt, so folding many meshes into one (model::merged) stays linear:
+  // rebuilding the whole array on every merge took 56 s over austin_south's 11272
+  // building meshes.
+  const bool ours = has_face_materials(), theirs = geom.has_face_materials();
+  const bool merge_materials = ours || theirs;
   if (merge_materials) {
     const uint64_t at = num_tris(), aq = num_quads();
     const uint64_t bt = geom.num_tris(), bq = geom.num_quads();
-    merged_materials.reserve(at + aq + bt + bq);
-    for (uint64_t i = 0; i < at; ++i)
-      merged_materials.push_back(face_material(i));
-    for (uint64_t i = 0; i < bt; ++i)
-      merged_materials.push_back(geom.face_material(i));
-    for (uint64_t i = 0; i < aq; ++i)
-      merged_materials.push_back(face_material(at + i));
-    for (uint64_t i = 0; i < bq; ++i)
-      merged_materials.push_back(geom.face_material(bt + i));
+    face_materials_t self; // a self-merge: its materials are ours, which grow below
+    const face_materials_t *src = theirs ? &geom.const_face_materials() : nullptr;
+    if (src && &geom == this) {
+      self = *src;
+      src = &self;
+    }
+    face_materials_t &fm = face_materials();
+    if (!ours)
+      fm.assign(at + aq, 0);
+    if (src) {
+      fm.insert(fm.begin() + at, src->begin(), src->begin() + bt);
+      fm.insert(fm.end(), src->begin() + bt, src->end());
+    } else {
+      fm.insert(fm.begin() + at, bt, face_material_t(0));
+      fm.insert(fm.end(), bq, face_material_t(0));
+    }
   }
 
   // append vertex info
@@ -235,9 +246,7 @@ geometry &geometry::merge(const geometry &geom) {
     }
   }
 
-  if (merge_materials)
-    face_materials().swap(merged_materials);
-  else if (!_face_materials->empty())
+  if (!merge_materials && !_face_materials->empty())
     face_materials().clear(); // stale on our side and absent on theirs: drop, never misalign
 
   return *this;

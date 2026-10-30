@@ -45,6 +45,9 @@ public:
 
   // --- setup (call BEFORE load()) ---
   void add_component_path(const std::string &dir);
+  // Let the document use the network, as a host's --net flags say (AppRuntime::enable_net).
+  // "" or what is wrong.
+  std::string enable_net(const cvc::ariadne::NetHostConfig &config);
   void on(const std::string &event, std::function<void()> handler);
   void register_verb(const std::string &name, std::function<void()> fn);
   // An async function: (name) parks the program while `work` runs on the app's background task

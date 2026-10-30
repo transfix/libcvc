@@ -148,32 +148,232 @@ Octree::~Octree()
 	//free(vtx_idx_arr_refine);
 }
 
+namespace
+{
+  // Octree::step()'s operations, and the stages of setVolume().
+  enum oct_op { OCT_NONE, OCT_SET_VOLUME, OCT_COLLAPSE, OCT_COMPUTE_QEF, OCT_TRAVERSE_QEF,
+		OCT_MESH_EXTRACT, OCT_QUALITY_IMPROVE, OCT_RELEASE };
+  enum { SV_LOAD, SV_ALLOC, SV_VOXELS, SV_OCTREE, SV_SPLINE, SV_DONE };
+}
+
+void Octree::begin_op(int op)
+{
+  _st.op = op;
+  _st.stage = 0;
+  _st.pos = _st.sub = _st.seen = 0;
+}
+
+// step() to the end of the operation.
+void Octree::run_steps()
+{
+  while(_st.op != OCT_NONE)
+    {
+      std::size_t budget = std::size_t(-1);
+      step(budget);
+    }
+}
+
+bool Octree::step(std::size_t& budget)
+{
+  bool done = true;
+  switch(_st.op)
+    {
+    case OCT_SET_VOLUME: done = step_set_volume(budget); break;
+    case OCT_COLLAPSE: done = step_collapse(budget); break;
+    case OCT_COMPUTE_QEF: done = step_compute_qef(budget); break;
+    case OCT_TRAVERSE_QEF: done = step_traverse_qef(budget); break;
+    case OCT_MESH_EXTRACT: done = step_mesh_extract(budget); break;
+    case OCT_QUALITY_IMPROVE: done = step_quality_improve(budget); break;
+    case OCT_RELEASE: done = step_release(budget); break;
+    default: break;
+    }
+  if(done)
+    _st.op = OCT_NONE;
+  return done;
+}
+
+void Octree::begin_release()
+{
+  begin_op(OCT_RELEASE);
+}
+
+// The QEFs freed 16 a unit, then the arrays one at a time (64 units each), then step()'s scratch.
+bool Octree::step_release(std::size_t& budget)
+{
+  while(budget > 0)
+    {
+      if(_st.sub < 2)
+	{
+	  std::vector<boost::shared_array<double> >& q = _st.sub == 0 ? qef_array : qef_array_in;
+	  const std::size_t end = std::min(q.size(), _st.pos + 16);
+	  for(std::size_t i = _st.pos; i < end; i++)
+	    q[i].reset();
+	  _st.pos = end;
+	  spend(budget, 1);
+	  if(_st.pos >= q.size())
+	    {
+	      _st.pos = 0;
+	      _st.sub++;
+	    }
+	  continue;
+	}
+      switch(_st.sub++)
+	{
+	case 2: std::vector<octcell>().swap(oct_array); break;
+	case 3: std::vector<int>().swap(cut_array); break;
+	case 4: std::vector<boost::shared_array<double> >().swap(qef_array); break;
+	case 5: std::vector<boost::shared_array<double> >().swap(qef_array_in); break;
+	case 6: std::vector<int>().swap(vtx_idx_arr); break;
+	case 7: std::vector<int>().swap(vtx_idx_arr_in); break;
+	case 8: std::vector<int>().swap(grid_idx_arr); break;
+	case 9: std::vector<int>().swap(vtx_idx_arr_refine); break;
+	case 10: std::vector<float>().swap(orig_vol); break;
+	case 11: std::vector<char>().swap(ebit); break;
+	case 12: std::vector<char>().swap(vbit); break;
+	case 13: std::vector<float>().swap(BSplineCoeff); break;
+	case 14: std::vector<MinMax>().swap(minmax); break;
+	default:
+	  _st.q = cell_levels();
+	  _st.flow = flow_state();
+	  _st.un = untangle_state();
+	  return true;
+	}
+      spend(budget, 64);
+    }
+  return false;
+}
+
 //void Octree::setVolume(SimpleVolumeData * volData)
 void Octree::setVolume(const VolMagick::Volume& volData)
 {
-  VolMagick::Volume volumeData(volData);
-  volumeData.voxelType(VolMagick::Float); //I think this library wants a float*
-  loadData(volumeData);
-  
-  int i;
-  for (i=0;i<=oct_depth;i++) {
-    level_res[i]=(1<<i);
-  }
-  construct_octree();
-  vol_min=minmax[0].min;
-  vol_max=minmax[0].max;
-  
-  // Initialize BSpline coefficients for BSPLINE_INTERPOLATION normal type
-  // This must be done here (not in mesh_extract) because getVertGrad() may be called
-  // during polygonize() which happens before mesh_extract()
-  if(flag_normal == 2) {  // BSPLINE_INTERPOLATION
-    BSplineCoeff.resize(dim[0]*dim[1]*dim[2]);
-    LBIE::TransImg2Spline(&(orig_vol[0]), &(BSplineCoeff[0]), dim[0], dim[1], dim[2]);
-  }
+  begin_set_volume(volData);
+  run_steps();
+}
+
+void Octree::begin_set_volume(const VolMagick::Volume& volData)
+{
+  begin_op(OCT_SET_VOLUME);
+  _st.vol.reset(new VolMagick::Volume(volData));
+}
+
+// setVolume() a slice at a time: the copy's conversion to float (one piece), loadData() --
+// initMem()'s arrays, then the voxels, 16 a unit -- the octree's cells (construct_octree(), a unit
+// per voxel compute_error() reads), and the B-spline coefficients if the normals need them.
+bool Octree::step_set_volume(std::size_t& budget)
+{
+  while(budget > 0)
+    switch(_st.stage)
+      {
+      case SV_LOAD:
+	{
+	  VolMagick::Volume& volumeData = *_st.vol;
+	  const bool convert = volumeData.voxelType() != VolMagick::Float;
+	  volumeData.voxelType(VolMagick::Float); //I think this library wants a float*
+	  load_header(volumeData);
+	  spend(budget, convert ? std::size_t(volumeData.XDim()*volumeData.YDim()*volumeData.ZDim())/16 + 1 : 1);
+	  _st.stage = SV_ALLOC;
+	}
+	break;
+      case SV_ALLOC:
+	if(init_mem_step(budget))
+	  {
+	    _st.stage = SV_VOXELS;
+	    _st.pos = 0;
+	  }
+	break;
+      case SV_VOXELS:
+	{
+	  const std::size_t n = std::size_t(dim[0]*dim[1]*dim[2]);
+	  const VolMagick::Volume& volumeData = *_st.vol;
+	  if(!interior_flag)
+	    {
+	      load_exterior(volumeData);
+	      spend(budget, n/16 + 1);
+	      _st.pos = n;
+	    }
+	  else
+	    {
+	      const std::size_t end = budget >= (n - _st.pos + 15)/16 ? n : _st.pos + budget*16;
+	      for(std::size_t i = _st.pos; i < end; i++)
+		orig_vol[i] = -volumeData(i);
+	      spend(budget, (end - _st.pos + 15)/16);
+	      _st.pos = end;
+	    }
+	  if(_st.pos >= n)
+	    {
+	      _st.vol.reset();
+	      for (int i=0;i<=oct_depth;i++) {
+		level_res[i]=(1<<i);
+	      }
+	      _st.stage = SV_OCTREE;
+	      _st.pos = 0;
+	    }
+	}
+	break;
+      case SV_OCTREE:
+	// error computation on each cell of octree, from the volume data in memory
+	while(budget > 0 && _st.pos < std::size_t(octcell_num))
+	  {
+	    const int oc_idx = int(_st.pos++);
+	    const int level = get_level(oc_idx);
+	    float min, max;
+	    compute_error(oc_idx,level,min,max);
+	    minmax[oc_idx].min=min;
+	    minmax[oc_idx].max=max;
+	    const std::size_t side = std::size_t((dim[0]-1)/(1<<level)) + 1;
+	    spend(budget, side*side*side);
+	  }
+	if(_st.pos >= std::size_t(octcell_num))
+	  {
+	    vol_min=minmax[0].min;
+	    vol_max=minmax[0].max;
+	    _st.stage = SV_SPLINE;
+	    _st.pos = _st.sub = 0;
+	  }
+	break;
+      case SV_SPLINE:
+	// Initialize BSpline coefficients for BSPLINE_INTERPOLATION normal type
+	// This must be done here (not in mesh_extract) because getVertGrad() may be called
+	// during polygonize() which happens before mesh_extract()
+	if(flag_normal != 2 || spline_step(budget))
+	  _st.stage = SV_DONE;
+	break;
+      default:
+	return true;
+      }
+  return _st.stage == SV_DONE;
+}
+
+// TransImg2Spline(orig_vol, BSplineCoeff) after BSplineCoeff's resize, a line at a time (a unit
+// per voxel of the line): true once done.
+bool Octree::spline_step(std::size_t& budget)
+{
+  const std::size_t n = std::size_t(dim[0]*dim[1]*dim[2]);
+  if(_st.sub == 0)
+    {
+      if(BSplineCoeff.size() > n)
+	BSplineCoeff.resize(n);
+      if(!grow_some(BSplineCoeff, n, 0.0f, budget))
+	return false;
+      _st.sub = 1;
+      _st.pos = 0;
+    }
+  const std::size_t lines = TransImg2SplineLines(dim[0], dim[1], dim[2]);
+  while(budget > 0 && _st.pos < lines)
+    {
+      TransImg2SplineLine(&(orig_vol[0]), &(BSplineCoeff[0]), dim[0], dim[1], dim[2], _st.pos++, _st.line);
+      spend(budget, _st.line.size());
+    }
+  if(_st.pos < lines)
+    return false;
+  _st.line = std::vector<float>();
+  return true;
 }
 
 //void Octree::loadData(SimpleVolumeData *volumeData, float* vol)
-void Octree::loadData(const VolMagick::Volume& volumeData/*, float* vol*/)
+// loadData()'s start, before the voxels: the volume's extents and dimensions, and initMem()'s
+// sizes (init_mem_step() fills its arrays).
+void Octree::load_header(const VolMagick::Volume& volumeData/*, float* vol*/)
 {
   leaf_num=0;
   prop_flag = 0;
@@ -188,12 +388,12 @@ void Octree::loadData(const VolMagick::Volume& volumeData/*, float* vol*/)
   spans[0] = volumeData.XSpan();
   spans[1] = volumeData.YSpan();
   spans[2] = volumeData.ZSpan();
-	
+
   dim[0] = volumeData.XDim();
   dim[1] = volumeData.YDim();
   dim[2] = volumeData.ZDim();
 
-  //printf("dim:%d %d %d\n",dim[0],dim[1],dim[2]);	
+  //printf("dim:%d %d %d\n",dim[0],dim[1],dim[2]);
 
   orig[0] = 0.0f;	orig[1] = 0.0f;	orig[2] = 0.0f;
   span[0] = spans[0]; span[1] = spans[1]; span[2] = spans[2];
@@ -206,7 +406,7 @@ void Octree::loadData(const VolMagick::Volume& volumeData/*, float* vol*/)
       nverts = dim[0] * dim[1] * dim[2];
       ncells = (dim[0] -1)*(dim[1] -1)*(dim[2] -1);
 
-      initMem();
+      init_mem_begin();
     }
   else
     {
@@ -220,23 +420,14 @@ void Octree::loadData(const VolMagick::Volume& volumeData/*, float* vol*/)
       nverts = dim[0] * dim[1] * dim[2];
       ncells = (dim[0] -1)*(dim[1] -1)*(dim[2] -1);
 
-      initMem();
+      init_mem_begin();
     }
+}
 
+// loadData()'s voxels when interior_flag is off (one piece).
+void Octree::load_exterior(const VolMagick::Volume& volumeData)
+{
   int i, j, k;
-  //interior_flag =0;
-  if(interior_flag)
-    {	
-#ifdef _OPENMP
-      #pragma omp parallel for schedule(static)
-#endif
-      for(i = 0; i < dim[0]*dim[1]*dim[2]; i++) {
-	//vol[i] = -tmp[i];//volumeData->getValueAt(0,i); //tmp[i];
-	orig_vol[i] = -volumeData(i);
-      }
-    }
-  else
-    {
 
       int incr = (dim[0]-olddim[0])/2;
       float center = (dim[1] - 1.0f)/2.0f;
@@ -244,15 +435,12 @@ void Octree::loadData(const VolMagick::Volume& volumeData/*, float* vol*/)
       float r0, r;
       int index,index0;
       r0 = center - 0.001f;
-#ifdef _OPENMP
-      #pragma omp parallel for private(j,i,index,index0,r) schedule(dynamic)
-#endif
       for(k = 0; k < dim[2]; k++)
 	for(j = 0; j < dim[1]; j++)
 	  for(i = 0; i < dim[0]; i++) {
 	    index0 = (k-incr)*olddim[0]*olddim[1]+(j-incr)*olddim[0]+(i-incr);
 	    index = k*dim[0]*dim[1] + j*dim[0] + i;
-				
+
 
 	    if(i > incr && i < olddim[0]+incr &&
 	       j > incr && j < olddim[1]+incr &&
@@ -270,13 +458,12 @@ void Octree::loadData(const VolMagick::Volume& volumeData/*, float* vol*/)
 	      if((r>r0) || ((r0-r) < -orig_vol[index]))	orig_vol[index] = r - r0;
 	    }
 	  }
-    }
 }
 
 /*void Octree::Octree_loadObj(const char* obj_fname)
 {
 	vol_fp=fopen(obj_fname,"rb");
-	
+
 	if (vol_fp==NULL) {
 		printf("wrong name : %s\n",obj_fname);
 		return;
@@ -285,29 +472,25 @@ void Octree::loadData(const VolMagick::Volume& volumeData/*, float* vol*/)
 
 void Octree::initMem()
 {
+  init_mem_begin();
+  std::size_t budget = std::size_t(-1);
+  init_mem_step(budget);
+}
+
+// initMem()'s start: its arrays emptied and the octree's sizes.
+void Octree::init_mem_begin()
+{
   /* pre-initialize */
-  //oct_array = NULL;
   oct_array.clear();
-  //minmax = NULL;
   minmax.clear();
-  //  cut_array = NULL;
   cut_array.clear();
-  //orig_vol = NULL;
   orig_vol.clear();
-  //ebit = NULL;
   ebit.clear();
-  //vbit = NULL;
   vbit.clear();
-  //vtx_idx_arr = NULL;
   vtx_idx_arr.clear();
-  //grid_idx_arr = NULL;
   grid_idx_arr.clear();
-  //vtx_idx_arr_in = NULL;
   vtx_idx_arr_in.clear();
-  //vtx_idx_arr_refine = NULL;
   vtx_idx_arr_refine.clear();
-  //qef_array = NULL;
-  //qef_array_in = NULL;
   qef_array.clear();
   qef_array_in.clear();
 
@@ -315,66 +498,38 @@ void Octree::initMem()
   oct_depth   = get_depth(dim[0]);
   octcell_num = get_octcell_num(oct_depth);
   cell_num    = (dim[0]-1)*(dim[1]-1)*(dim[2]-1);
+  _st.grow = 0;
+}
 
-  /* initialize arrays */
-  if(octcell_num > 0)
+// initMem()'s arrays, filled a slice at a time (64 elements a unit): true once they all are.
+bool Octree::init_mem_step(std::size_t& budget)
+{
+  const std::size_t oc = octcell_num > 0 ? std::size_t(octcell_num) : 0;
+  const std::size_t cells = cell_num > 0 ? 2*std::size_t(cell_num) : 0;
+  const std::size_t voxels = dim[0]*dim[1]*dim[2] > 0 ? std::size_t(dim[0]*dim[1]*dim[2]) : 0;
+  while(budget > 0)
     {
-      //oct_array   = (octcell*)malloc(sizeof(octcell)*octcell_num);
-      //memset(oct_array,0,sizeof(octcell)*octcell_num);
-      oct_array.resize(octcell_num);
-      //minmax = (MinMax*)malloc(sizeof(MinMax)*octcell_num);
-      minmax.resize(octcell_num*2); //why does construct_octree use octcell_num*2 ??
-      //memset(minmax,0,sizeof(MinMax)*octcell_num);
-
-      //ebit = (char*)malloc(sizeof(char)*octcell_num*4/8);
-      ebit.resize(octcell_num*4/8);
-      //vbit = (char*)malloc(sizeof(char)*octcell_num*4/8);
-      vbit.resize(octcell_num*4/8);
-
-      //vtx_idx_arr = (int*)malloc(sizeof(int)*octcell_num);
-      vtx_idx_arr.resize(octcell_num);
-      //vtx_idx_arr_in = (int*)malloc(sizeof(int)*octcell_num);
-      vtx_idx_arr_in.resize(octcell_num);
-      //vtx_idx_arr_refine = (int*)malloc(sizeof(int)*octcell_num);
-      vtx_idx_arr_refine.resize(octcell_num);
-
-      // for(int k=0;k<octcell_num;k++)
-// 	{
-// 	  vtx_idx_arr[k]=-1;
-// 	  vtx_idx_arr_in[k]=-1;
-// 	  vtx_idx_arr_refine[k]=-1;
-// 	}
-
-      std::fill(vtx_idx_arr.begin(),vtx_idx_arr.end(),-1);
-      std::fill(vtx_idx_arr_in.begin(),vtx_idx_arr_in.end(),-1);
-      std::fill(vtx_idx_arr_refine.begin(),vtx_idx_arr_refine.end(),-1);
-
-      //qef_array	= (double**) malloc (sizeof(double*) * octcell_num);
-      //qef_array_in = (double**) malloc (sizeof(double*) * octcell_num);
-      qef_array.resize(octcell_num);
-      qef_array_in.resize(octcell_num);
-      //assert(qef_array!=NULL);
-      //assert(qef_array_in!=NULL);
-      //memset(qef_array,0,octcell_num*sizeof(double*));
-      //memset(qef_array_in,0,octcell_num*sizeof(double*));
-
-      //memset(ebit,0,octcell_num*4/8*sizeof(char));
-      //memset(vbit,0,octcell_num*4/8*sizeof(char));
+      bool full = true;
+      switch(_st.grow)
+	{
+	case 0: full = grow_some(oct_array, oc, octcell(), budget); break;
+	case 1: full = grow_some(minmax, 2*oc, MinMax(), budget); break; //why does construct_octree use octcell_num*2 ??
+	case 2: full = grow_some(ebit, oc*4/8, char(0), budget); break;
+	case 3: full = grow_some(vbit, oc*4/8, char(0), budget); break;
+	case 4: full = grow_some(vtx_idx_arr, oc, -1, budget); break;
+	case 5: full = grow_some(vtx_idx_arr_in, oc, -1, budget); break;
+	case 6: full = grow_some(vtx_idx_arr_refine, oc, -1, budget); break;
+	case 7: full = grow_some(qef_array, oc, boost::shared_array<double>(), budget); break;
+	case 8: full = grow_some(qef_array_in, oc, boost::shared_array<double>(), budget); break;
+	case 9: full = grow_some(cut_array, cells, 0, budget); break;
+	case 10: full = grow_some(orig_vol, voxels, 0.0f, budget); break;
+	case 11: full = grow_some(grid_idx_arr, voxels, -1, budget); break;
+	default: return true;
+	}
+      if(full)
+	_st.grow++;
     }
-  if(cell_num > 0)
-    {
-      //cut_array   = (int*)malloc(sizeof(int)*2*cell_num);
-      cut_array.resize(2*cell_num);
-    }
-  if(dim[0]*dim[1]*dim[2] > 0)
-    {
-      //orig_vol    = (float*)malloc(sizeof(float)*dim[0]*dim[1]*dim[2]);
-      orig_vol.resize(dim[0]*dim[1]*dim[2]);
-      //grid_idx_arr = (int*)malloc(sizeof(int)*dim[0]*dim[1]*dim[2]);
-      grid_idx_arr.resize(dim[0]*dim[1]*dim[2]);
-      //for(int k=0;k<dim[0]*dim[1]*dim[2];k++) grid_idx_arr[k]=-1;
-      std::fill(grid_idx_arr.begin(),grid_idx_arr.end(),-1);
-    }
+  return _st.grow > 11;
 }
 
 
@@ -460,80 +615,127 @@ void Octree::initMem()
 }
 */
 
-// error computation on each cell of octree
-void Octree::construct_octree()
-{
-int oc_idx=0;
-int level;
-float min , max;
-
-// Always compute min/max values from volume data in memory
-// No file I/O - removed legacy .err file caching
-while (oc_idx < octcell_num) {
-level=get_level(oc_idx);
-compute_error(oc_idx,level,min,max);
-minmax[oc_idx].min=min;
-minmax[oc_idx].max=max;
-oc_idx++;
-}
-}
-
 // A sample exactly at the isovalue is on neither side of it, and the extraction does not agree
 // with itself about it: is_skipcell() says a cell that only touches the isosurface at such a sample
 // is not crossed, so the cell is never refined and has no QEF point, while is_intersect() makes
 // the sample's edges cross, so the cell still gets a vertex, at its centre, voxels off the surface.
 // That happens wherever integer data meets an integer isovalue (a CT at 45), or a sphere passes
 // through grid points. The isovalue moves off the samples, towards the inside (orig < iso), so
-// they count as outside.
-static float isovalue_off_samples(const std::vector<float>& vol, float iso, float vmin, float vmax)
+// they count as outside: while the value is one of the samples, the next one down. This is that
+// search a slice at a time, 16 voxels a unit; true once iso_val is off the samples.
+bool Octree::off_samples_step(std::size_t& budget)
 {
-	if(std::find(vol.begin(), vol.end(), iso) == vol.end()) return iso;
-	float eps = 1e-6f * std::max(vmax - vmin, std::fabs(iso));
-	if(!(eps > 0.0f)) eps = 1e-30f;
-	float moved = iso - eps;
-	while(std::find(vol.begin(), vol.end(), moved) != vol.end()) moved -= eps;
-	return moved;
+	const std::size_t n = orig_vol.size();
+	while (budget > 0) {
+		const std::size_t end = budget >= (n - _st.pos + 15)/16 ? n : _st.pos + budget*16;
+		const std::size_t at = std::find(orig_vol.begin() + _st.pos, orig_vol.begin() + end, _st.target) - orig_vol.begin();
+		spend(budget, (at - _st.pos)/16 + 1);
+		_st.seen += at - _st.pos;
+		if (at < end) {
+			if (_st.first) {
+				float eps = 1e-6f * std::max(vol_max - vol_min, std::fabs(iso_val));
+				if(!(eps > 0.0f)) eps = 1e-30f;
+				_st.eps = eps;
+				_st.target = iso_val - eps;
+				_st.first = false;
+			}
+			else _st.target -= _st.eps;
+			_st.pos = 0;
+		}
+		else if (end == n) {
+			iso_val = _st.target;
+			return true;
+		}
+		else _st.pos = end;
+	}
+	return false;
+}
+
+// The next cell of the breadth-first traversal in q: 1 with the cell in oc_id; 0 after queueing
+// the children of one of the cells the last level refined (q.refined), which make the next level;
+// -1 once a level refined none.
+int Octree::next_cell(cell_levels& q, int& oc_id)
+{
+	if (q.at < q.level.size()) {
+		oc_id = q.level[q.at++];
+		return 1;
+	}
+	if (q.expanded < q.refined.size()) {
+		const int c = q.refined[q.expanded++];
+		const int level = get_level(c);
+		for (int i=0; i<8; i++)
+			q.next.push_back(child(c,level,i));
+		return 0;
+	}
+	if (q.next.empty())
+		return -1;
+	q.level.swap(q.next);
+	q.next.clear();
+	q.refined.clear();
+	q.at = q.expanded = 0;
+	oc_id = q.level[q.at++];
+	return 1;
+}
+
+namespace
+{
+  enum { CO_SAMPLES, CO_CELLS, CO_DONE };
 }
 
 void Octree::collapse()
 {
-	CellQueue prev_queue, cur_queue;
-	int i, oc_id, level;
+	begin_collapse();
+	run_steps();
+}
 
-	iso_val = isovalue_off_samples(orig_vol, iso_val, vol_min, vol_max);
+void Octree::begin_collapse()
+{
+	begin_op(OCT_COLLAPSE);
+	_st.target = iso_val;
+	_st.first = true;
+}
 
-	oc_id=0;
+// collapse(): the isovalue moved off the samples, then the cells, breadth first, a unit each.
+bool Octree::step_collapse(std::size_t& budget)
+{
+	int oc_id, level, r;
 
-	prev_queue.Add(oc_id);
-	while (!prev_queue.Empty()) {
-		
-		//int leaf_idx=leaf_num;
-		while (prev_queue.Get(oc_id) >= 0)  {
+	while (budget > 0)
+		switch (_st.stage) {
+		case CO_SAMPLES:
+			if (off_samples_step(budget)) {
+				_st.stage = CO_CELLS;
+				_st.q.start(0);
+				_st.seen = 0;
+			}
+			break;
+		case CO_CELLS:
+			r = next_cell(_st.q, oc_id);
+			if (r < 0) {
+				_st.stage = CO_DONE;
+				break;
+			}
+			spend(budget, 1);
+			if (r == 0) break;
+			_st.seen++;
 			level=get_level(oc_id);
-			
-			//octcell2xyz(oc_id,x,y,z,level);
-			
+
 //			if (is_skipcell(oc_id) || level==oct_depth) {
 			if (is_skipcell(oc_id) || level==oct_depth || minmax[oc_id].max < iso_val) {
 
 				//cut_array[leaf_num++]=oc_id;
 				oct_array[oc_id].refine_flag=0;
 
-			} 
+			}
 			else {
 				oct_array[oc_id].refine_flag=1;
-				cur_queue.Add(oc_id);
+				_st.q.refined.push_back(oc_id);
 			}
+			break;
+		default:
+			return true;
 		}
-		
-		while (cur_queue.Get(oc_id)>=0) {
-			level=get_level(oc_id);
-			for (i=0; i<8; i++)
-				prev_queue.Add(child(oc_id,level,i));
-		}
-		
-	}
-	//return leaf_idx;
+	return _st.stage == CO_DONE;
 }
 
 void Octree::collapse_interval()
@@ -777,14 +979,48 @@ static double qef_axis_residual(double w, double wp, double wp2)
 
 void Octree::compute_qef()
 {
+	begin_compute_qef();
+	run_steps();
+}
+
+void Octree::begin_compute_qef()
+{
+	begin_op(OCT_COMPUTE_QEF);
+	_st.level = oct_depth;
+	_st.pos = level_id[oct_depth];
+}
+
+// compute_qef(): the finest level's cells, then the levels above, finest first; a cell is a unit,
+// or 16 when it has a QEF to work out.
+bool Octree::step_compute_qef(std::size_t& budget)
+{
+	while (budget > 0) {
+		if (_st.level < 0)
+			return true;
+		if (_st.pos >= std::size_t(level_id[_st.level+1])) {
+			_st.level--;
+			if (_st.level >= 0)
+				_st.pos = level_id[_st.level];
+			continue;
+		}
+		const int oc_id = int(_st.pos++);
+		_st.seen++;
+		const bool qef = _st.level == oct_depth ? qef_leaf(oc_id) : qef_parent(oc_id, _st.level);
+		spend(budget, qef ? 16 : 1);
+	}
+	return _st.level < 0;
+}
+
+// compute_qef() on a cell of the finest level: true if the surface crosses it (it has a QEF).
+bool Octree::qef_leaf(int oc_id)
+{
 	float norm[12][3], p[12][3];
 	double sigma_ni_2[3], sigma_ni_2_pi[3], sigma_ni_2_pi_2[3], qef;
-	double temp_sigma_ni_2[3], temp_sigma_ni_2_pi[3], temp_sigma_ni_2_pi_2[3],solution[3];
-	int child_idx, intersect_num;
-	int oc_id, level, i, x,y,z;
-	
-	for (oc_id=level_id[oct_depth];oc_id<level_id[oct_depth+1];oc_id++) {
-		if (is_skipcell(oc_id)) continue;
+	double solution[3];
+	int intersect_num;
+	int level, i, x,y,z;
+
+		if (is_skipcell(oc_id)) return false;
 		level=get_level(oc_id);
 		octcell2xyz(oc_id,x,y,z,level);
 
@@ -823,21 +1059,28 @@ void Octree::compute_qef()
 			qef += qef_axis_residual(sigma_ni_2[i], sigma_ni_2_pi[i], sigma_ni_2_pi_2[i]);
 
 		put_qef(oc_id, sigma_ni_2, sigma_ni_2_pi, sigma_ni_2_pi_2, solution, qef);
-	}
+	return true;
+}
 
-	int l;
-	for (l=oct_depth-1;l>=0;l--) {
-		for (oc_id=level_id[l];oc_id<level_id[l+1];oc_id++) {
+// compute_qef() on a cell of level l above the finest, from its children's QEFs: true if it was
+// refined (it has a QEF).
+bool Octree::qef_parent(int oc_id, int l)
+{
+	double sigma_ni_2[3], sigma_ni_2_pi[3], sigma_ni_2_pi_2[3], qef;
+	double temp_sigma_ni_2[3], temp_sigma_ni_2_pi[3], temp_sigma_ni_2_pi_2[3],solution[3];
+	int child_idx;
+	int level, i;
+
 			level=l;
 
-			if (oct_array[oc_id].refine_flag==0) continue;
+			if (oct_array[oc_id].refine_flag==0) return false;
 
 			clear (temp_sigma_ni_2,temp_sigma_ni_2_pi,temp_sigma_ni_2_pi_2);
 			clear (sigma_ni_2,sigma_ni_2_pi,sigma_ni_2_pi_2);
 			clear (solution);
 
 			qef=0;
-			
+
 			//child(oc_id,level,cid);
 			int k;
 			for (k=0;k<8;k++) {
@@ -855,13 +1098,10 @@ void Octree::compute_qef()
 			for (i=0;i<3;i++)
 				solution[i] = sigma_ni_2_pi[i] / sigma_ni_2[i];
 			qef=0;
-			for (i=0;i<3;i++) 
+			for (i=0;i<3;i++)
 				qef += qef_axis_residual(sigma_ni_2[i], sigma_ni_2_pi[i], sigma_ni_2_pi_2[i]);
 			put_qef(oc_id,sigma_ni_2, sigma_ni_2_pi, sigma_ni_2_pi_2, solution, qef);
-
-		}
-	}
-	
+	return true;
 }
 
 void Octree::compute_qef_interval()
@@ -1916,51 +2156,91 @@ float Octree::get_err_grad(int oc_id)
 	}
 }*/
 
+namespace
+{
+  enum { TQ_PASS, TQ_CLEAR, TQ_CELLS, TQ_DONE };
+}
+
 void Octree::traverse_qef(float err_tol)
 {
-	CellQueue prev_queue,cur_queue;
-	int i,oc_id,level, start_level, end_level;
+	begin_traverse_qef(err_tol);
+	run_steps();
+}
+
+void Octree::begin_traverse_qef(float err_tol)
+{
+	begin_op(OCT_TRAVERSE_QEF);
+	_st.err_tol = err_tol;
+	_st.pass = 0;
+	_st.boundary_level = oct_depth;
+}
+
+// Tetrahedra: every cell the surface crosses ends at one level. Where two such cells of different
+// sizes meet, tetrahedralize() covers each piece of their shared face twice, once from each
+// cell's QEF point, and those two tets overlap unless the segment between the points happens to
+// pass through that piece (it always does for cell centres, so the interior can be adaptive). A
+// sphere's adaptive tet mesh covered 5% of its inside twice. The first pass finds the finest
+// level the error tolerance wants anywhere on the surface; the second refines the whole surface
+// to it. (r < 60 kept refinement inside a sphere of 60 voxels around the centre, which only
+// suited the volume the code was first written for; the tetrahedra leave it out.)
+// Hexahedra stay on oct_depth-2 (see traverse_qef_cell()). Quadrilaterals refine like a surface,
+// and polygonize_quad's split_quads turns the triangles at their level changes back into quads.
+// A pass clears the refine flags (64 cells a unit) and goes through the cells breadth first, a
+// unit each.
+bool Octree::step_traverse_qef(std::size_t& budget)
+{
+	const bool tetra = (flag_type == 1);
+	int oc_id, r;
+
+	while (budget > 0)
+		switch (_st.stage) {
+		case TQ_PASS:
+			_st.finest_boundary = oct_depth-2;
+			leaf_num=0;
+			_st.pos = 0;
+			_st.stage = TQ_CLEAR;
+			break;
+		case TQ_CLEAR:
+			//memset(oct_array,0,sizeof(octcell)*octcell_num);
+			if (fill_some(oct_array, _st.pos, octcell(), budget)) {
+				_st.q.start(0);
+				_st.seen = 0;
+				_st.stage = TQ_CELLS;
+			}
+			break;
+		case TQ_CELLS:
+			r = next_cell(_st.q, oc_id);
+			if (r < 0) {
+				_st.boundary_level = _st.finest_boundary;
+				_st.stage = ++_st.pass < (tetra ? 2 : 1) ? TQ_PASS : TQ_DONE;
+				break;
+			}
+			spend(budget, 1);
+			if (r == 0) break;
+			_st.seen++;
+			if (traverse_qef_cell(oc_id, _st.err_tol, _st.pass, _st.boundary_level, _st.finest_boundary))
+				_st.q.refined.push_back(oc_id);
+			break;
+		default:
+			return true;
+		}
+	return _st.stage == TQ_DONE;
+}
+
+// traverse_qef() on one cell in pass `pass`: true to refine it (its refine_flag set), false for a
+// leaf (added to cut_array) or a cell outside the surface.
+bool Octree::traverse_qef_cell(int oc_id, float err_tol, int pass, int boundary_level, int& finest_boundary)
+{
+	int level;
 	int x, y, z, tx, ty, tz, cell_size;
 	float r, r_min, temp, center;
 
 	center = (dim[0]-1.0f)/2.0f;
 
-	start_level = oct_depth - 3;	// - 3
-	end_level = oct_depth;
-	if(flag_type == 2) {
-		start_level = oct_depth - 3;//3
-		end_level = start_level + 1;
-	}
-	if(flag_type == 3) {
-		start_level = oct_depth - 3;//3
-		end_level = start_level + 1;
-	}
-
-	// Tetrahedra: every cell the surface crosses ends at one level. Where two such cells of different
-	// sizes meet, tetrahedralize() covers each piece of their shared face twice, once from each
-	// cell's QEF point, and those two tets overlap unless the segment between the points happens to
-	// pass through that piece (it always does for cell centres, so the interior can be adaptive). A
-	// sphere's adaptive tet mesh covered 5% of its inside twice. The first pass finds the finest
-	// level the error tolerance wants anywhere on the surface; the second refines the whole surface
-	// to it. (r < 60 kept refinement inside a sphere of 60 voxels around the centre, which only
-	// suited the volume the code was first written for; the tetrahedra leave it out.)
-	// Hexahedra stay on oct_depth-2 (see below). Quadrilaterals refine like a surface, and
-	// polygonize_quad's split_quads turns the triangles at their level changes back into quads.
 	const bool tetra = (flag_type == 1), hexa = (flag_type == 3);
-	int boundary_level = oct_depth;
-	for(int pass = 0; pass < (tetra ? 2 : 1); pass++) {
-	int finest_boundary = oct_depth-2;
-	oc_id=0;
-	leaf_num=0;
-	//memset(oct_array,0,sizeof(octcell)*octcell_num);
-	std::fill(oct_array.begin(),oct_array.end(),octcell());
-	prev_queue.Add(oc_id);
-	while (!prev_queue.Empty()) {
-		
-		//leaf_idx=leaf_num;
-		while (prev_queue.Get(oc_id) >= 0)  {
+
 			level=get_level(oc_id);
-			
+
 			octcell2xyz(oc_id,x,y,z,level);
 			cell_size = (dim[0]-1)/(1<<level);
 			tx = x*cell_size;		ty = y*cell_size;		tz = z*cell_size;
@@ -1979,7 +2259,7 @@ void Octree::traverse_qef(float err_tol)
 			temp = (float) sqrt((tx-center)*(tx-center) + (ty-center)*(ty-center) + (tz-center)*(tz-center));
 			if(temp > r) r = temp;
 			if(temp < r_min) r_min = temp;
-			
+
 			tx = x*cell_size;		ty = y*cell_size;		tz = (z+1)*cell_size;
 			temp = (float) sqrt((tx-center)*(tx-center) + (ty-center)*(ty-center) + (tz-center)*(tz-center));
 			if(temp > r) r = temp;
@@ -2005,18 +2285,18 @@ void Octree::traverse_qef(float err_tol)
 			// more refined edges and faces than its 18 refine_edge slots got vertex 0 from AddRefine_*.
 			//if (is_skipcell(oc_id)) {
 			if(minmax[oc_id].min > iso_val) {
-				continue;
+				return false;
 			//} else if (level <= 4 ||(get_err_grad(oc_id) > err_tol && level != oct_depth)) { // heart_0
 			//} else if (level <= start_level || (get_err_grad(oc_id) > err_tol && level < end_level)) {    // head
-				
-				
+
+
 			} else if (tetra ?
 				(level < oct_depth-2 || (is_skipcell(oc_id) == 0 && (pass == 0 ?
 					get_err(oc_id) > err_tol && level < oct_depth : level < boundary_level))) :
 				(level < oct_depth-2 || (is_skipcell(oc_id) == 0 && level < oct_depth-2) ||
 				(!hexa && get_err(oc_id) > err_tol && r < 60.0f && level < oct_depth)) ){
 
-			//} else if (level <= 3) {  //4 
+			//} else if (level <= 3) {  //4
 
 			//} else if (level <= oct_depth-4 || (level <= oct_depth-3 && is_skipcell(oc_id) == 0)
 			//	||(get_err_grad(oc_id) > err_tol && level != oct_depth)) {
@@ -2027,23 +2307,13 @@ void Octree::traverse_qef(float err_tol)
 			//	|| (level <= oct_depth-2 && is_skipcell(oc_id) == 0 && r < (dim[0]-1)/4.0*1.515)
 			//	||(get_err_grad(oc_id) > err_tol && level < oct_depth && r < 16*1.8)) { // 14.3
 
-				cur_queue.Add(oc_id);
 				oct_array[oc_id].refine_flag=1;
+				return true;
 			} else {
 				cut_array[leaf_num++]=oc_id;
 				if(is_skipcell(oc_id) == 0 && level > finest_boundary) finest_boundary = level;
+				return false;
 			}
-		}
-		
-		while (cur_queue.Get(oc_id) >= 0) {
-			level=get_level(oc_id);
-			for (i=0; i<8; i++)
-				prev_queue.Add(child(oc_id,level,i));
-		}
-		
-	}
-	boundary_level = finest_boundary;
-	}
 }
 
 
@@ -2473,10 +2743,7 @@ void Octree::polygonize(geoframe& geofrm) {
 	// get a list of leaf cells satisfying the error tolerance.
 	// for each cell, get the centroid vertex
 
-	int x, y, z, valid_leaf, cell_size, level;
-	int vtx_num, intersect_id, i, j;
-	unsigned int vtx[4];
-	float val[8];
+	int i, j;
 
 	in_out = 0;
 	int k;
@@ -2484,25 +2751,42 @@ void Octree::polygonize(geoframe& geofrm) {
 
 	printf("leafnum:%d\n",leaf_num);
 	for (i = 0; i < leaf_num; i++ ) {
-		valid_leaf = cut_array[i] ;
-		level = get_level(valid_leaf) ;
-		cell_size = (dim[0]-1)/(1<<level);
-		octcell2xyz(valid_leaf, x, y, z, level);
-		getCellValues(valid_leaf, level, val);
-
-		for (j = 0 ; j < 12 ; j++ ) {
-			if (is_eflag_on(x,y,z,level,j)) continue;
-			intersect_id = is_intersect(val , j);
-
-			if (intersect_id == 1 || intersect_id == -1) {
-				if (is_min_edge(valid_leaf , j , vtx , vtx_num , intersect_id , geofrm)) {
-					eflag_on(x , y , z , level , j);
-					geofrm.Add_2_Tri(vtx);
-				}
-			}
-		}
+		leaf_begin(_st.leaf, i);
+		for (j = 0 ; j < 12 ; j++ )
+			polygonize_edge(j, geofrm);
 	}
 
+}
+
+// The leaf cut_array[i]: its cell's level, size, corner and values.
+void Octree::leaf_begin(leaf_cell& leaf, int i)
+{
+	leaf.valid_leaf = cut_array[i] ;
+	leaf.level = get_level(leaf.valid_leaf) ;
+	leaf.cell_size = (dim[0]-1)/(1<<leaf.level);
+	octcell2xyz(leaf.valid_leaf, leaf.x, leaf.y, leaf.z, leaf.level);
+	getCellValues(leaf.valid_leaf, leaf.level, leaf.val);
+}
+
+// polygonize() on edge j of the leaf leaf_begin() took into _st.leaf: true if the surface crosses
+// the edge.
+bool Octree::polygonize_edge(int j, geoframe& geofrm) {
+
+	leaf_cell& l = _st.leaf;
+	int vtx_num, intersect_id;
+	unsigned int vtx[4];
+
+		if (is_eflag_on(l.x,l.y,l.z,l.level,j)) return false;
+		intersect_id = is_intersect(l.val , j);
+
+		if (intersect_id == 1 || intersect_id == -1) {
+			if (is_min_edge(l.valid_leaf , j , vtx , vtx_num , intersect_id , geofrm)) {
+				eflag_on(l.x , l.y , l.z , l.level , j);
+				geofrm.Add_2_Tri(vtx);
+			}
+			return true;
+		}
+		return false;
 }
 
 void Octree::polygonize_interval(geoframe& geofrm) {
@@ -2844,84 +3128,230 @@ void Octree::func_val(geoframe& geofrm) {
 	free(temp);
 }
 */
+namespace
+{
+  enum { ME_CLEAR, ME_EFLAGS, ME_VFLAGS, ME_SPLINE, ME_START, ME_VTX, ME_GRID, ME_LEAVES, ME_HEXA,
+	 ME_UNTANGLE, ME_DONE };
+}
+
 void Octree::mesh_extract(geoframe& geofrm, float err_tol)
 {
-	geofrm.Clear();
-	eflag_clear();
-	vflag_clear();
+	begin_mesh_extract(geofrm, err_tol);
+	run_steps();
+}
 
-	//flag_type = 1;
-	in_out = 0;
-	flag_extend = 1;
-	int func = 1;
+void Octree::begin_mesh_extract(geoframe& geofrm, float err_tol)
+{
+	begin_op(OCT_MESH_EXTRACT);
+	_st.g = &geofrm;
+	_st.err_tol = err_tol;
+}
 
-	//BSplineCoeff = (float*)malloc(sizeof(float)*dim[0]*dim[1]*dim[2]);
-	BSplineCoeff.resize(dim[0]*dim[1]*dim[2]);
-	LBIE::TransImg2Spline(&(orig_vol[0]), &(BSplineCoeff[0]), dim[0], dim[1], dim[2]);
+// mesh_extract(): the mesh and the edge and vertex flags cleared (64 flags a unit), the B-spline
+// coefficients if the normals read them, then the mesh: an isosurface (polygonize()) or tetrahedra
+// (tetrahedralize()) a leaf's edge at a time, after their vertex tables are cleared; hexahedra
+// (hexahedralize()) a leaf's vertex at a time; the quad and interval meshes in one piece.
+bool Octree::step_mesh_extract(std::size_t& budget)
+{
+	geoframe& geofrm = *_st.g;
 
+	while (budget > 0)
+		switch (_st.stage) {
+		case ME_CLEAR:
+			geofrm.Clear();
+			//flag_type = 1;
+			in_out = 0;
+			flag_extend = 1;
+			spend(budget, 1);
+			_st.pos = 0;
+			_st.stage = ME_EFLAGS;
+			break;
+		case ME_EFLAGS:
+			if (fill_some(ebit, _st.pos, char(0), budget)) {
+				_st.pos = 0;
+				_st.stage = ME_VFLAGS;
+			}
+			break;
+		case ME_VFLAGS:
+			if (fill_some(vbit, _st.pos, char(0), budget)) {
+				_st.pos = _st.sub = 0;
+				_st.stage = ME_SPLINE;
+			}
+			break;
+		case ME_SPLINE:
+			// getVertGrad() reads BSplineCoeff only for BSPLINE_INTERPOLATION normals (setVolume()
+			// made it then, from the same samples); the other normals need none.
+			if (flag_normal == 0 || flag_normal == 1 || spline_step(budget))
+				_st.stage = ME_START;
+			break;
+		case ME_START:
+			_st.pos = _st.sub = 0;
+			switch (flag_type) {
+			case 0:							// isosurface
+				in_out = 0;
+				_st.stage = ME_VTX;
+				break;
+			case 1:							// tetra mesh
+				_st.stage = ME_VTX;
+				break;
+			case 2:							// quad mesh
+				polygonize_quad(geofrm, _st.err_tol);
+				_st.stage = ME_DONE;
+				break;
+			case 3:							//hexa_mesh
+				extract_hexa_begin(_st.hx, geofrm, _st.err_tol);
+				_st.stage = ME_HEXA;
+				break;
+			case 4:							// interval
+				polygonize_interval(geofrm);
+				_st.stage = ME_DONE;
+				break;
+			case 5:							// interval volume
+				tetrahedralize_interval(geofrm);
+				_st.stage = ME_DONE;
+				break;
+			default:
+				_st.stage = ME_DONE;
+				break;
+			}
+			// DISABLED: func_val requires external prop_fname which is never initialized
+			// if(func)	func_val(geofrm);
+			spend(budget, 1);
+			break;
+		case ME_VTX:
+			if (fill_some(vtx_idx_arr, _st.pos, -1, budget)) {
+				_st.pos = 0;
+				if (flag_type == 1)
+					_st.stage = ME_GRID;
+				else {
+					printf("leafnum:%d\n",leaf_num);
+					_st.stage = ME_LEAVES;
+				}
+			}
+			break;
+		case ME_GRID:
+			if (fill_some(grid_idx_arr, _st.pos, -1, budget)) {
+				_st.pos = 0;
+				_st.stage = ME_LEAVES;
+			}
+			break;
+		case ME_LEAVES:
+			while (budget > 0 && _st.pos < std::size_t(leaf_num)) {
+				if (_st.sub == 0)
+					leaf_begin(_st.leaf, int(_st.pos));
+				const bool crossed = flag_type == 1 ? tetrahedralize_edge(int(_st.sub), geofrm) :
+					polygonize_edge(int(_st.sub), geofrm);
+				spend(budget, crossed ? 8 : 1);
+				if (++_st.sub == 12) {
+					_st.sub = 0;
+					_st.pos++;
+				}
+			}
+			if (_st.pos >= std::size_t(leaf_num))
+				_st.stage = ME_DONE;
+			break;
+		case ME_HEXA:
+			if (extract_hexa_step(_st.hx, budget)) {
+				untangle_begin(geofrm, _st.err_tol);
+				_st.stage = ME_UNTANGLE;
+			}
+			break;
+		case ME_UNTANGLE:
+			if (untangle_step(geofrm, budget))
+				_st.stage = ME_DONE;
+			break;
+		default:
+			return true;
+		}
+	return _st.stage == ME_DONE;
+}
 
-	switch (flag_type) {
-	case 0:							// isosurface
-		polygonize(geofrm);
-		// DISABLED: func_val requires external prop_fname which is never initialized
-		// if(func)	func_val(geofrm);
-		break;
+namespace
+{
+  // quality_improve()'s geometric flow on flag_type's mesh
+  enum { FLOW_NONE, FLOW_TRI, FLOW_TET, FLOW_QUAD, FLOW_HEX };
 
-	case 1:							// tetra mesh
-		tetrahedralize(geofrm);
-		// DISABLED: func_val requires external prop_fname which is never initialized
-		// if(func)	func_val(geofrm);
-		break;
-
-	case 2:							// quad mesh
-		polygonize_quad(geofrm, err_tol);
-		// DISABLED: func_val requires external prop_fname which is never initialized
-		// if(func)	func_val(geofrm);
-		break;
-
-	case 3:							//hexa_mesh
-		hexahedralize(geofrm, err_tol);
-		// DISABLED: func_val requires external prop_fname which is never initialized
-		// if(func)	func_val(geofrm);
-		break;
-
-	case 4:							// interval
-		polygonize_interval(geofrm);
-		// DISABLED: func_val requires external prop_fname which is never initialized
-		// if(func)	func_val(geofrm);
-		break;
-
-	case 5:							// interval volume
-		tetrahedralize_interval(geofrm);
-		// DISABLED: func_val requires external prop_fname which is never initialized
-		// if(func)	func_val(geofrm);
-		break;
-	}
+  int flow_kind(int flag_type)
+  {
+    switch (flag_type) {
+    case 0: case 4: return FLOW_TRI;
+    case 1: case 5: return FLOW_TET;
+    case 2: return FLOW_QUAD;
+    case 3: return FLOW_HEX;
+    default: return FLOW_NONE;
+    }
+  }
 }
 
 void Octree::quality_improve(geoframe& geofrm, int improve_method, bool on_grid)
 {
+	begin_quality_improve(geofrm, improve_method, on_grid);
+	run_steps();
+}
+
+void Octree::begin_quality_improve(geoframe& geofrm, int improve_method, bool on_grid)
+{
+	begin_op(OCT_QUALITY_IMPROVE);
+	_st.g = &geofrm;
+	_st.method = improve_method;
+	_st.on_grid = on_grid;
 	switch (improve_method) {
 	        case 0:
 			break;
 		case 1:
-			geometric_flow(geofrm);
+			flow_begin(geofrm, flow_kind(flag_type));
 			break;
 		case 2:
-			edge_contraction(geofrm);
+			_st.ec.index = 0;
+			_st.ec.new_edge_ratio = 65.0f;	    // the current maximum
 			break;
 		case 3:
-			smoothing_joeliu_volume(geofrm,0);
+			joeliu_begin(geofrm,0);
 			break;
 		case 4:
-			smoothing_joeliu_volume(geofrm,1);
+			joeliu_begin(geofrm,1);
 			break;
 		case 5:
-			optimization(geofrm, on_grid);
+			optimization_begin(geofrm, on_grid);
 			break;
 		default:
 			break;
 	}
+}
+
+// quality_improve(): geometric flow a vertex at a time (flow_step()); edge contraction, Joe-Liu,
+// minimal volume and optimization a round at a time, the round's cost counted in its vertices and
+// elements.
+bool Octree::step_quality_improve(std::size_t& budget)
+{
+	geoframe& geofrm = *_st.g;
+	const std::size_t round = std::size_t(geofrm.numverts) + std::size_t(geofrm.numtris)/4 +
+		std::size_t(geofrm.numquads)/6 + 1;
+
+	while (budget > 0) {
+		bool done = true;
+		switch (_st.method) {
+		case 1:
+			return flow_step(budget);
+		case 2:
+			done = edge_contraction_round(geofrm);
+			break;
+		case 3:
+		case 4:
+			done = joeliu_step(geofrm);
+			break;
+		case 5:
+			done = optimization_step(geofrm);
+			break;
+		default:
+			break;
+		}
+		_st.sub++;
+		if (done)
+			return true;
+		spend(budget, round);
+	}
+	return false;
 }
 
 int Octree::is_intersect(float* val, int e_id)
@@ -3821,98 +4251,52 @@ void Octree::geometric_flow(geoframe& geofrm) {
 
 }
 
+namespace
+{
+  enum { FL_TABLE, FL_ELEMS, FL_ROUNDS, FL_DONE };
+  const int flow_rounds = 100;
+}
+
 // quality improvement with geometric flow -- tri mesh
 void Octree::geometric_flow_tri(geoframe& geofrm) {
+	flow_begin(geofrm, FLOW_TRI);
+	std::size_t budget = std::size_t(-1);
+	while(!flow_step(budget)) budget = std::size_t(-1);
+}
 
-	int i, j, k, v0, v1, v2, itri, index, maxIndex;
-	float mv0[3], mv1[3], mv2[3], p[3], sum_0, sum_1[3], delta_t, area, t;
-	int **neighbor;
-	//	FILE *output;
+// quality improvement with geometric flow -- tet mesh (see flow_tet_vertex())
+void Octree::geometric_flow_tet(geoframe& geofrm) {
+	flow_begin(geofrm, FLOW_TET);
+	std::size_t budget = std::size_t(-1);
+	while(!flow_step(budget)) budget = std::size_t(-1);
+}
 
-	//	output = fopen("qimprove_temp", "w");
+// quality improvement with geometric flow -- quad mesh
+void Octree::geometric_flow_quad(geoframe& geofrm) {
+	flow_begin(geofrm, FLOW_QUAD);
+	std::size_t budget = std::size_t(-1);
+	while(!flow_step(budget)) budget = std::size_t(-1);
+}
 
-	//	fprintf(output, "geometric flow tri\n");
+// quality improvement with geometric flow -- hex mesh
+void Octree::geometric_flow_hex(geoframe& geofrm) {
+	flow_begin(geofrm, FLOW_HEX);
+	std::size_t budget = std::size_t(-1);
+	while(!flow_step(budget)) budget = std::size_t(-1);
+}
 
-	delta_t = 0.01f;
-	maxIndex = 100;
-
-	neighbor = 0;
-	neighbor = new int*[geofrm.numverts];
-
-	for(i = 0; i < geofrm.numverts; i++)	neighbor[i] = 0;
-	for(i = 0; i < geofrm.numverts; i++)	neighbor[i] = new int[10];
-	for(i = 0; i < geofrm.numverts; i++) {
-		for (j = 0; j < 10; j++)	neighbor[i][j] = -1;
-	}
-
-	for (i = 0; i < geofrm.numtris; i++) {
-		v0 = geofrm.triangles[i][0];
-		v1 = geofrm.triangles[i][1];
-		v2 = geofrm.triangles[i][2];
-
-		for(j = 0; j < 10; j++) {
-			if(neighbor[v0][j] == -1) {neighbor[v0][j] = i;	break;}
-		}
-		for(j = 0; j < 10; j++) {
-			if(neighbor[v1][j] == -1) {neighbor[v1][j] = i;	break;}
-		}
-		for(j = 0; j < 10; j++) {
-			if(neighbor[v2][j] == -1) {neighbor[v2][j] = i;	break;}
-		}
-	}
-
-	//	fprintf(output, "%d %d\n", geofrm.numverts, geofrm.numtris);
-	for(index = 0; index < maxIndex; index++) {
-
-	  //		fprintf(output, "%d ", index);
-	  //		if(index % 20 == 0 && index > 0) fprintf(output, "\n");
-
-		for(i = 0; i < geofrm.numverts; i++) {
-
-			// calculate the mass center p[3]
-			sum_0 = 0.0f;
-			for(j = 0; j < 3; j++) {p[j] = 0.0f; sum_1[j] = 0.0f;}
-			for(j = 0; j < 10; j++) {
-				itri = neighbor[i][j];
-				if(itri == -1) break;
-				v0 = geofrm.triangles[itri][0];	v1 = geofrm.triangles[itri][1];
-				v2 = geofrm.triangles[itri][2];	
-
-				for(k = 0; k < 3; k++) {
-					mv0[k] = geofrm.verts[v0][k];	mv1[k] = geofrm.verts[v1][k];
-					mv2[k] = geofrm.verts[v2][k];	
-				}
-
-				area = area_tri(mv0, mv1, mv2);
-				sum_0 += area;
-				for(k = 0; k < 3; k++) {
-					p[k] += (mv0[k] + mv1[k] + mv2[k])*area/3.0f;
-				}
-
-			}
-			for(j = 0; j < 3; j++) p[j] /= sum_0;
-
-			// calculate the new position in tangent direction
-			// xi+1 = xi + delta_t*((m-xi) - (n, m-xi)n))
-			t = 0.0f;
-			for(j = 0; j < 3; j++) {
-				p[j] -= geofrm.verts[i][j];
-				t += p[j]*geofrm.normals[i][j];
-			}
-			//fprintf(output, "\n%f %f %f\n", geofrm.verts[i][0], geofrm.verts[i][1], geofrm.verts[i][2]);
-			for(j = 0; j < 3; j++) {
-				geofrm.verts[i][j] += delta_t*p[j];								// mass center
-				//geofrm.verts[i][j] += delta_t*(p[j] - t*geofrm.normals[i][j]);		// tangent movement
-			}
-			//fprintf(output, "%f %f %f\n", geofrm.verts[i][0], geofrm.verts[i][1], geofrm.verts[i][2]);
-		}
-
-	} // end of index loop
-
-	for(i = 0; i < geofrm.numverts; i++)	delete [] neighbor[i];
-	delete [] neighbor;
-
-	//	fclose(output);
+void Octree::flow_begin(geoframe& geofrm, int kind) {
+	flow_state& f = _st.flow;
+	f.kind = kind;
+	f.stage = FL_TABLE;
+	f.pos = 0;
+	f.index = 0;
+	f.g = &geofrm;
+	f.width = kind == FLOW_HEX ? 50 : 10;
+	f.nb.clear();
+	f.tets.clear();
+	f.tet_cos.clear();
+	f.tet_vol.clear();
 }
 
 // The cosine of the smallest dihedral angle of the tet p0 p1 p2 p3 (the largest cosine, 1 for a
@@ -3954,6 +4338,159 @@ static float tet_worst_dihedral_cos(const float* p0, const float* p1, const floa
 	return worst;
 }
 
+// geometric_flow_*() a slice at a time: the table of the elements around each vertex (cleared 64
+// entries a unit, then filled an element a unit), then 100 rounds that move each vertex in turn,
+// a unit per vertex (and per few of the tetrahedra or hexahedra around it); true once done.
+bool Octree::flow_step(std::size_t& budget) {
+	flow_state& f = _st.flow;
+	geoframe& geofrm = *f.g;
+	const int nv = geofrm.numverts;
+	int i, j, c, nc, v[8];
+
+	while (budget > 0)
+		switch (f.stage) {
+		case FL_TABLE:
+			if (f.kind == FLOW_NONE)
+				f.stage = FL_DONE;
+			else if (f.kind == FLOW_TET ? grow_some(f.tets, std::size_t(nv), std::vector<int>(), budget) :
+				 grow_some(f.nb, std::size_t(nv)*f.width, -1, budget)) {
+				f.stage = FL_ELEMS;
+				f.pos = 0;
+			}
+			break;
+		case FL_ELEMS: {
+			const int ne = f.kind == FLOW_TRI ? geofrm.numtris : f.kind == FLOW_TET ? geofrm.numtris/4 :
+				f.kind == FLOW_QUAD ? geofrm.numquads : geofrm.numquads/6;
+			while (budget > 0 && f.pos < std::size_t(ne)) {
+				i = int(f.pos++);
+				nc = 0;
+				switch (f.kind) {
+				case FLOW_TRI:
+					v[0] = geofrm.triangles[i][0];
+					v[1] = geofrm.triangles[i][1];
+					v[2] = geofrm.triangles[i][2];
+					nc = 3;
+					break;
+				case FLOW_QUAD:
+					v[0] = geofrm.quads[i][0];
+					v[1] = geofrm.quads[i][1];
+					v[2] = geofrm.quads[i][2];
+					v[3] = geofrm.quads[i][3];
+					nc = 4;
+					break;
+				case FLOW_HEX:
+					v[0] = geofrm.quads[6*i][0];		v[1] = geofrm.quads[6*i][1];
+					v[2] = geofrm.quads[6*i][2];		v[3] = geofrm.quads[6*i][3];
+					v[4] = geofrm.quads[6*i+1][1];	v[5] = geofrm.quads[6*i+1][0];
+					v[6] = geofrm.quads[6*i+1][3];	v[7] = geofrm.quads[6*i+1][2];
+					nc = 8;
+					break;
+				case FLOW_TET: {
+					// the tets around each vertex, and each tet's tet_worst_dihedral_cos and volume,
+					// kept up to date as its corners move
+					v[0] = geofrm.triangles[4*i][0];	v[1] = geofrm.triangles[4*i][1];
+					v[2] = geofrm.triangles[4*i][2];	v[3] = geofrm.triangles[4*i+1][2];
+					for(j = 0; j < 4; j++) f.tets[v[j]].push_back(i);
+					float volume;
+					f.tet_cos.push_back(tet_worst_dihedral_cos(&geofrm.verts[v[0]][0], &geofrm.verts[v[1]][0],
+										   &geofrm.verts[v[2]][0], &geofrm.verts[v[3]][0], volume));
+					f.tet_vol.push_back(volume);
+					break;
+				}
+				}
+				// the first `width` elements around each vertex
+				for(c = 0; c < nc; c++)
+					for(j = 0; j < f.width; j++) {
+						if(f.nb[v[c]*f.width + j] == -1) {f.nb[v[c]*f.width + j] = i;	break;}
+					}
+				spend(budget, 1);
+			}
+			if (f.pos >= std::size_t(ne)) {
+				f.stage = FL_ROUNDS;
+				f.pos = 0;
+				f.index = 0;
+			}
+			break;
+		}
+		case FL_ROUNDS:
+			while (budget > 0 && f.index < flow_rounds) {
+				i = int(f.pos++);
+				if (i < nv) {
+					std::size_t units = 1;
+					switch (f.kind) {
+					case FLOW_TRI: flow_tri_vertex(geofrm, i); break;
+					case FLOW_TET: flow_tet_vertex(geofrm, i); units += f.tets[i].size()/4; break;
+					case FLOW_QUAD: flow_quad_vertex(geofrm, i); break;
+					case FLOW_HEX: flow_hex_vertex(geofrm, i); units += 2; break;
+					}
+					spend(budget, units);
+				}
+				if (f.pos >= std::size_t(nv)) {
+					f.pos = 0;
+					f.index++;
+				}
+			}
+			if (f.index >= flow_rounds) {
+				f.nb = std::vector<int>();
+				f.tets = std::vector< std::vector<int> >();
+				f.tet_cos = f.tet_vol = f.moved_cos = f.moved_vol = std::vector<float>();
+				f.stage = FL_DONE;
+			}
+			break;
+		default:
+			return true;
+		}
+	return f.stage == FL_DONE;
+}
+
+// geometric_flow_tri() on vertex i: a step towards the area-weighted centre of its triangles.
+void Octree::flow_tri_vertex(geoframe& geofrm, int i) {
+
+	flow_state& f = _st.flow;
+	int j, k, v0, v1, v2, itri;
+	float mv0[3], mv1[3], mv2[3], p[3], sum_0, sum_1[3], delta_t, area, t;
+
+	delta_t = 0.01f;
+
+
+			// calculate the mass center p[3]
+			sum_0 = 0.0f;
+			for(j = 0; j < 3; j++) {p[j] = 0.0f; sum_1[j] = 0.0f;}
+			for(j = 0; j < 10; j++) {
+				itri = f.nb[i*10 + j];
+				if(itri == -1) break;
+				v0 = geofrm.triangles[itri][0];	v1 = geofrm.triangles[itri][1];
+				v2 = geofrm.triangles[itri][2];	
+
+				for(k = 0; k < 3; k++) {
+					mv0[k] = geofrm.verts[v0][k];	mv1[k] = geofrm.verts[v1][k];
+					mv2[k] = geofrm.verts[v2][k];	
+				}
+
+				area = area_tri(mv0, mv1, mv2);
+				sum_0 += area;
+				for(k = 0; k < 3; k++) {
+					p[k] += (mv0[k] + mv1[k] + mv2[k])*area/3.0f;
+				}
+
+			}
+			for(j = 0; j < 3; j++) p[j] /= sum_0;
+
+			// calculate the new position in tangent direction
+			// xi+1 = xi + delta_t*((m-xi) - (n, m-xi)n))
+			t = 0.0f;
+			for(j = 0; j < 3; j++) {
+				p[j] -= geofrm.verts[i][j];
+				t += p[j]*geofrm.normals[i][j];
+			}
+			//fprintf(output, "\n%f %f %f\n", geofrm.verts[i][0], geofrm.verts[i][1], geofrm.verts[i][2]);
+			for(j = 0; j < 3; j++) {
+				geofrm.verts[i][j] += delta_t*p[j];								// mass center
+				//geofrm.verts[i][j] += delta_t*(p[j] - t*geofrm.normals[i][j]);		// tangent movement
+			}
+			//fprintf(output, "%f %f %f\n", geofrm.verts[i][0], geofrm.verts[i][1], geofrm.verts[i][2]);
+}
+
 // quality improvement with geometric flow -- tet mesh
 //
 // Each of 100 rounds moves every vertex a step towards the volume-weighted centre of its tets, or,
@@ -3969,48 +4506,30 @@ static float tet_worst_dihedral_cos(const float* p0, const float* p1, const floa
 // A move is now taken only if every tet around the vertex keeps a positive volume and none has a
 // smaller dihedral angle than the worst of them had, so a pass never makes the mesh's worst tet
 // worse.
-void Octree::geometric_flow_tet(geoframe& geofrm) {
+void Octree::flow_tet_vertex(geoframe& geofrm, int i) {
 
-	int i, j, k, v[4], itet, index, maxIndex, nb;
+	flow_state& f = _st.flow;
+	std::vector<float>& tet_cos = f.tet_cos, & tet_vol = f.tet_vol;
+	std::vector<float>& moved_cos = f.moved_cos, & moved_vol = f.moved_vol;
+	int j, k, v[4], itet, nb;
 	float p[3], n[3], volume, sum_0, delta_t, area, t, len;
 	float old_pos[3], new_pos[3];
 
 	delta_t = 0.01f;
-	maxIndex = 100;
-
-	// the tets around each vertex
-	std::vector< std::vector<int> > neighbor(geofrm.numverts);
-	for (i = 0; i < geofrm.numtris/4; i++) {
-		v[0] = geofrm.triangles[4*i][0];	v[1] = geofrm.triangles[4*i][1];
-		v[2] = geofrm.triangles[4*i][2];	v[3] = geofrm.triangles[4*i+1][2];
-		for(j = 0; j < 4; j++) neighbor[v[j]].push_back(i);
-	}
 
 	// face k of a tet is opposite corner k
 	static const int face[4][3] = {{1, 2, 3}, {0, 3, 2}, {0, 1, 3}, {0, 2, 1}};
 
-	// each tet's tet_worst_dihedral_cos and volume, kept up to date as its corners move
-	std::vector<float> tet_cos(geofrm.numtris/4), tet_vol(geofrm.numtris/4), moved_cos, moved_vol;
-	for (i = 0; i < geofrm.numtris/4; i++) {
-		v[0] = geofrm.triangles[4*i][0];	v[1] = geofrm.triangles[4*i][1];
-		v[2] = geofrm.triangles[4*i][2];	v[3] = geofrm.triangles[4*i+1][2];
-		tet_cos[i] = tet_worst_dihedral_cos(&geofrm.verts[v[0]][0], &geofrm.verts[v[1]][0],
-						    &geofrm.verts[v[2]][0], &geofrm.verts[v[3]][0], tet_vol[i]);
-	}
 
-	for(index = 0; index < maxIndex; index++) {
-
-		for(i = 0; i < geofrm.numverts; i++) {
-
-			if(neighbor[i].empty()) continue;
+			if(f.tets[i].empty()) return;
 			sum_0 = 0.0f;
 			for(j = 0; j < 3; j++) p[j] = 0.0f;
 
 			if(geofrm.bound_sign[i] == 1) {					// boundary vertex
 
 				// the area-weighted centre of the boundary faces around it
-				for(nb = 0; nb < (int)neighbor[i].size(); nb++) {
-					itet = neighbor[i][nb];
+				for(nb = 0; nb < (int)f.tets[i].size(); nb++) {
+					itet = f.tets[i][nb];
 					v[0] = geofrm.triangles[4*itet][0];	v[1] = geofrm.triangles[4*itet][1];
 					v[2] = geofrm.triangles[4*itet][2];	v[3] = geofrm.triangles[4*itet+1][2];
 					for(k = 0; k < 4; k++) {
@@ -4023,7 +4542,7 @@ void Octree::geometric_flow_tet(geoframe& geofrm) {
 							p[j] += (geofrm.verts[a][j] + geofrm.verts[b][j] + geofrm.verts[c][j])*area/3.0f;
 					}
 				}
-				if(!(sum_0 > 0.0f)) continue;
+				if(!(sum_0 > 0.0f)) return;
 
 				// xi+1 = xi + delta_t*((m-xi) - (n, m-xi)n)), with n the unit normal
 				len = 0.0f;
@@ -4032,7 +4551,7 @@ void Octree::geometric_flow_tet(geoframe& geofrm) {
 					len += n[j]*n[j];
 				}
 				len = (float) sqrt(len);
-				if(!(len > 0.0f)) continue;
+				if(!(len > 0.0f)) return;
 				t = 0.0f;
 				for(j = 0; j < 3; j++) {
 					n[j] /= len;
@@ -4046,8 +4565,8 @@ void Octree::geometric_flow_tet(geoframe& geofrm) {
 			else {									// interior vertex
 
 				// the volume-weighted centre of its tets
-				for(nb = 0; nb < (int)neighbor[i].size(); nb++) {
-					itet = neighbor[i][nb];
+				for(nb = 0; nb < (int)f.tets[i].size(); nb++) {
+					itet = f.tets[i][nb];
 					v[0] = geofrm.triangles[4*itet][0];	v[1] = geofrm.triangles[4*itet][1];
 					v[2] = geofrm.triangles[4*itet][2];	v[3] = geofrm.triangles[4*itet+1][2];
 					volume = tet_vol[itet];
@@ -4057,7 +4576,7 @@ void Octree::geometric_flow_tet(geoframe& geofrm) {
 						p[k] += (geofrm.verts[v[0]][k] + geofrm.verts[v[1]][k] +
 							 geofrm.verts[v[2]][k] + geofrm.verts[v[3]][k])*volume/4.0f;
 				}
-				if(sum_0 < 0.00001f) continue;
+				if(sum_0 < 0.00001f) return;
 				for(j = 0; j < 3; j++)
 					new_pos[j] = geofrm.verts[i][j] + delta_t*(p[j]/sum_0 - geofrm.verts[i][j]);	// volume center
 
@@ -4065,8 +4584,8 @@ void Octree::geometric_flow_tet(geoframe& geofrm) {
 
 			// take the move only if no tet around the vertex folds or gets worse than the worst of them
 			float worst_before = -1.0f;
-			for(nb = 0; nb < (int)neighbor[i].size(); nb++)
-				if(tet_cos[neighbor[i][nb]] > worst_before) worst_before = tet_cos[neighbor[i][nb]];
+			for(nb = 0; nb < (int)f.tets[i].size(); nb++)
+				if(tet_cos[f.tets[i][nb]] > worst_before) worst_before = tet_cos[f.tets[i][nb]];
 			bool keep = true;
 			moved_cos.clear();
 			moved_vol.clear();
@@ -4074,8 +4593,8 @@ void Octree::geometric_flow_tet(geoframe& geofrm) {
 				old_pos[j] = geofrm.verts[i][j];
 				geofrm.verts[i][j] = new_pos[j];
 			}
-			for(nb = 0; nb < (int)neighbor[i].size() && keep; nb++) {
-				itet = neighbor[i][nb];
+			for(nb = 0; nb < (int)f.tets[i].size() && keep; nb++) {
+				itet = f.tets[i][nb];
 				v[0] = geofrm.triangles[4*itet][0];	v[1] = geofrm.triangles[4*itet][1];
 				v[2] = geofrm.triangles[4*itet][2];	v[3] = geofrm.triangles[4*itet+1][2];
 				moved_cos.push_back(tet_worst_dihedral_cos(&geofrm.verts[v[0]][0], &geofrm.verts[v[1]][0],
@@ -4085,76 +4604,32 @@ void Octree::geometric_flow_tet(geoframe& geofrm) {
 			}
 			if(!keep) {
 				for(j = 0; j < 3; j++) geofrm.verts[i][j] = old_pos[j];
-				continue;
+				return;
 			}
-			for(nb = 0; nb < (int)neighbor[i].size(); nb++) {
-				tet_cos[neighbor[i][nb]] = moved_cos[nb];
-				tet_vol[neighbor[i][nb]] = moved_vol[nb];
+			for(nb = 0; nb < (int)f.tets[i].size(); nb++) {
+				tet_cos[f.tets[i][nb]] = moved_cos[nb];
+				tet_vol[f.tets[i][nb]] = moved_vol[nb];
 			}
 
-		} // end of i loop
-
-	} // end of index loop
 }
 
-// quality improvement with geometric flow -- quad mesh
-void Octree::geometric_flow_quad(geoframe& geofrm) {
+// geometric_flow_quad() on vertex i: a step towards the area-weighted centre of its quads.
+void Octree::flow_quad_vertex(geoframe& geofrm, int i) {
 
-	int i, j, k, v0, v1, v2, v3;
-	int iquad, index, maxIndex, **neighbor;
+	flow_state& f = _st.flow;
+	int j, k, v0, v1, v2, v3;
+	int iquad;
 	float mv0[3], mv1[3], mv2[3], mv3[3], p[3];
 	float sum_0, sum_1[3], delta_t, area, t;
-	//	FILE *output;
-
-	//	output = fopen("qimprove_temp", "w");
-
-	//	fprintf(output, "geometric flow quad\n");
 
 	delta_t = 0.01f;
-	maxIndex = 100;
 
-	neighbor = 0;
-	neighbor = new int*[geofrm.numverts];
-
-	for(i = 0; i < geofrm.numverts; i++)	neighbor[i] = 0;
-	for(i = 0; i < geofrm.numverts; i++)	neighbor[i] = new int[10];
-	for(i = 0; i < geofrm.numverts; i++) {
-		for (j = 0; j < 10; j++)	neighbor[i][j] = -1;
-	}
-
-	for (i = 0; i < geofrm.numquads; i++) {
-		v0 = geofrm.quads[i][0];
-		v1 = geofrm.quads[i][1];
-		v2 = geofrm.quads[i][2];
-		v3 = geofrm.quads[i][3];
-
-		for(j = 0; j < 10; j++) {
-			if(neighbor[v0][j] == -1) {neighbor[v0][j] = i;	break;}
-		}
-		for(j = 0; j < 10; j++) {
-			if(neighbor[v1][j] == -1) {neighbor[v1][j] = i;	break;}
-		}
-		for(j = 0; j < 10; j++) {
-			if(neighbor[v2][j] == -1) {neighbor[v2][j] = i;	break;}
-		}
-		for(j = 0; j < 10; j++) {
-			if(neighbor[v3][j] == -1) {neighbor[v3][j] = i;	break;}
-		}
-	}
-
-	//	fprintf(output, "%d %d\n", geofrm.numverts, geofrm.numquads);
-	for(index = 0; index < maxIndex; index++) {
-
-	  //		fprintf(output, "%d ", index);
-	  //		if(index % 20 == 0 && index > 0) fprintf(output, "\n");
-
-		for(i = 0; i < geofrm.numverts; i++) {
 
 			// calculate the mass center p[3]
 			sum_0 = 0.0f;
 			for(j = 0; j < 3; j++) {p[j] = 0.0f; sum_1[j] = 0.0f;}
 			for(j = 0; j < 10; j++) {
-				iquad = neighbor[i][j];
+				iquad = f.nb[i*10 + j];
 				if(iquad == -1) break;
 				v0 = geofrm.quads[iquad][0];	v1 = geofrm.quads[iquad][1];
 				v2 = geofrm.quads[iquad][2];	v3 = geofrm.quads[iquad][3];
@@ -4184,81 +4659,22 @@ void Octree::geometric_flow_quad(geoframe& geofrm) {
 				geofrm.verts[i][j] += delta_t*p[j];								// mass center
 				//geofrm.verts[i][j] += delta_t*(p[j] - t*geofrm.normals[i][j]);		// tangent movement
 			}
-		}
-
-	} // end of index loop
-
-	for(i = 0; i < geofrm.numverts; i++)	delete [] neighbor[i];
-	delete [] neighbor;
-
-	//	fclose(output);
 }
 
-// quality improvement with geometric flow -- hex mesh
-void Octree::geometric_flow_hex(geoframe& geofrm) {
+// geometric_flow_hex() on vertex i: on the boundary, a step towards the area-weighted centre of
+// its boundary faces in the tangent plane; inside, towards the volume-weighted centre of its
+// hexahedra.
+void Octree::flow_hex_vertex(geoframe& geofrm, int i) {
 
-	int i, j, k, v0, v1, v2, v3, v4, v5, v6, v7, **neighbor;
-	int ihex, index, maxIndex, bool_0, bool_1, bool_2, bool_3, bool_4, bool_5;
+	flow_state& f = _st.flow;
+	int j, k, v0, v1, v2, v3, v4, v5, v6, v7;
+	int ihex, bool_0, bool_1, bool_2, bool_3, bool_4, bool_5;
 	float mv0[3], mv1[3], mv2[3], mv3[3], p[3];
 	float mv4[3], mv5[3], mv6[3], mv7[3], volume;
 	float sum_0, delta_t, area, t;
-	//FILE *output;
-
-	//output = fopen("qimprove_temp", "w");
-
-	//fprintf(output, "geometric flow hex\n");
 
 	delta_t = 0.01f;
-	maxIndex = 100;
 
-	neighbor = 0;
-	neighbor = new int*[geofrm.numverts];
-
-	for(i = 0; i < geofrm.numverts; i++)	neighbor[i] = 0;
-	for(i = 0; i < geofrm.numverts; i++)	neighbor[i] = new int[50];
-	for(i = 0; i < geofrm.numverts; i++) {
-		for (j = 0; j < 50; j++)	neighbor[i][j] = -1;
-	}
-
-	for (i = 0; i < geofrm.numquads/6; i++) {
-		v0 = geofrm.quads[6*i][0];		v1 = geofrm.quads[6*i][1];
-		v2 = geofrm.quads[6*i][2];		v3 = geofrm.quads[6*i][3];
-		v4 = geofrm.quads[6*i+1][1];	v5 = geofrm.quads[6*i+1][0];
-		v6 = geofrm.quads[6*i+1][3];	v7 = geofrm.quads[6*i+1][2];
-
-		for(j = 0; j < 50; j++) {
-			if(neighbor[v0][j] == -1) {neighbor[v0][j] = i;	break;}
-		}
-		for(j = 0; j < 50; j++) {
-			if(neighbor[v1][j] == -1) {neighbor[v1][j] = i;	break;}
-		}
-		for(j = 0; j < 50; j++) {
-			if(neighbor[v2][j] == -1) {neighbor[v2][j] = i;	break;}
-		}
-		for(j = 0; j < 50; j++) {
-			if(neighbor[v3][j] == -1) {neighbor[v3][j] = i;	break;}
-		}
-		for(j = 0; j < 50; j++) {
-			if(neighbor[v4][j] == -1) {neighbor[v4][j] = i;	break;}
-		}
-		for(j = 0; j < 50; j++) {
-			if(neighbor[v5][j] == -1) {neighbor[v5][j] = i;	break;}
-		}
-		for(j = 0; j < 50; j++) {
-			if(neighbor[v6][j] == -1) {neighbor[v6][j] = i;	break;}
-		}
-		for(j = 0; j < 50; j++) {
-			if(neighbor[v7][j] == -1) {neighbor[v7][j] = i;	break;}
-		}
-	}
-
-	//fprintf(output, "%d %d\n", geofrm.numverts, geofrm.numquads/6);
-	for(index = 0; index < maxIndex; index++) {
-
-	  //fprintf(output, "%d ", index);
-	  //		if(index % 20 == 0 && index > 0) fprintf(output, "\n");
-
-		for(i = 0; i < geofrm.numverts; i++) {
 
 			if(geofrm.bound_sign[i] == 1) {					// boundary vertex
 
@@ -4266,7 +4682,7 @@ void Octree::geometric_flow_hex(geoframe& geofrm) {
 				sum_0 = 0.0f;
 				for(j = 0; j < 3; j++) p[j] = 0.0f;
 				for(j = 0; j < 50; j++) {
-					ihex = neighbor[i][j];
+					ihex = f.nb[i*50 + j];
 					if(ihex == -1) break;
 					v0 = geofrm.quads[6*ihex][0];		v1 = geofrm.quads[6*ihex][1];
 					v2 = geofrm.quads[6*ihex][2];		v3 = geofrm.quads[6*ihex][3];
@@ -4350,7 +4766,7 @@ void Octree::geometric_flow_hex(geoframe& geofrm) {
 				}
 				
 				for(j = 0; j < 3; j++) p[j] /= sum_0;
-				if(sum_0 == 0.0f) {printf("s%d ", i); continue;}
+				if(sum_0 == 0.0f) {printf("s%d ", i); return;}
 
 				// calculate the new position in tangent direction
 				// xi+1 = xi + delta_t*((m-xi) - (n, m-xi)n))
@@ -4371,7 +4787,7 @@ void Octree::geometric_flow_hex(geoframe& geofrm) {
 				sum_0 = 0.0f;
 				for(j = 0; j < 3; j++) p[j] = 0.0f;
 				for(j = 0; j < 50; j++) {
-					ihex = neighbor[i][j];
+					ihex = f.nb[i*50 + j];
 					if(ihex == -1) break;
 					v0 = geofrm.quads[6*ihex][0];		v1 = geofrm.quads[6*ihex][1];
 					v2 = geofrm.quads[6*ihex][2];		v3 = geofrm.quads[6*ihex][3];
@@ -4393,7 +4809,7 @@ void Octree::geometric_flow_hex(geoframe& geofrm) {
 				}
 
 				//if(sum_0 < 0.00001f || sum_0 > 10000.0f) {fprintf(output, "v%d %f\n", i, sum_0); continue;}
-				if(sum_0 < 0.00001f) continue;
+				if(sum_0 < 0.00001f) return;
 				for(j = 0; j < 3; j++) p[j] /= sum_0;
 				for(j = 0; j < 3; j++) {
 					geofrm.verts[i][j] += delta_t*(p[j] - geofrm.verts[i][j]);					// volume center
@@ -4401,14 +4817,6 @@ void Octree::geometric_flow_hex(geoframe& geofrm) {
 
 			}
 
-		} // end of i loop
-
-	} // end of index loop
-
-	for(i = 0; i < geofrm.numverts; i++)	delete [] neighbor[i];
-	delete [] neighbor;
-
-	//fclose(output);
 }
 
 // calculate normal at v0
@@ -4556,16 +4964,25 @@ float Octree::volume_hex(float v0[3], float v1[3], float v2[3], float v3[3], flo
 }
 
 void Octree::edge_contraction(geoframe& geofrm) {
+	_st.ec.index = 0;
+	_st.ec.new_edge_ratio = 65.0f;	    // the current maximum
+	while (!edge_contraction_round(geofrm));
+}
+
+// edge_contraction() a round at a time: true once there are no more.
+bool Octree::edge_contraction_round(geoframe& geofrm) {
 
 	int nv, ntet, new_nv, new_ntet, i, j, v0, v1, v2, v3;
 	int *bound_sign, id_min, vv0, vv1, vv2, vv3, b_sign;
-	int my_bool, index, maxIndex, **rep, nrep;
+	int my_bool, maxIndex, **rep, nrep;
+	int& index = _st.ec.index;
 	int my_list[70], nlist, r_vert, bool_r, a_vert;
 	int sum0, sum1, sum2, sum3, sum4, sum5, sum6, sum7;
 	int sum8, sum9, sum10, sum11, sum12, sum13, sum14, sum15;
 	float **vtx, **normal, vx, vy, vz, nx, ny, nz, sum_0, sum_1, sum_2;
 	float mv0[3], mv1[3], mv2[3], mv3[3];
-	double edge_ratio, new_edge_ratio, s;
+	double edge_ratio, s;
+	double& new_edge_ratio = _st.ec.new_edge_ratio;
 	double e[6], e_min, e_max, aspect, aspect_min, aspect_max;
 
 	// Temporary vectors for building refined mesh within each iteration
@@ -4575,11 +4992,9 @@ void Octree::edge_contraction(geoframe& geofrm) {
 	maxIndex = 20;
 
 	edge_ratio = 15.0f;				// the final target (e.g., 8.5)
-	new_edge_ratio = 65.0f;	    // the current maximum
 	bool_r = 0; r_vert = 108637;	// remove vertex 0/1
 	a_vert = -1;					// average all neighbor's coord. -1  59157
 
-	for (index = 0; index < maxIndex; index++) {
 
 	nv = geofrm.numverts;
 	ntet = geofrm.numtris / 4;
@@ -4604,9 +5019,6 @@ void Octree::edge_contraction(geoframe& geofrm) {
 	}
 
 	// Load data from geoframe
-#ifdef _OPENMP
-	#pragma omp parallel for schedule(static)
-#endif
 	for (i = 0; i < nv; i++) {
 		vtx[i][0] = geofrm.verts[i][0];
 		vtx[i][1] = geofrm.verts[i][1];
@@ -4947,32 +5359,58 @@ delete [] vtx;
 for(i = 0; i < nv; i++)	delete [] normal[i];
 delete [] normal;
 
-if(nrep == 0) break;
+if(nrep == 0) return true;
 else new_edge_ratio = aspect_max - 1.0e-6;
-if(new_edge_ratio < edge_ratio) break;
+if(new_edge_ratio < edge_ratio) return true;
 
-}	// end loop index
+return ++index >= maxIndex;	// end loop index
 
-}// sign == 0 -- improve the Joe-Liu parameter
+}
+
+// sign == 0 -- improve the Joe-Liu parameter
 // sign == 1 -- improve the minimal volume
 void Octree::smoothing_joeliu_volume(geoframe& geofrm, int sign) {
+	joeliu_begin(geofrm, sign);
+	while (!joeliu_step(geofrm));
+}
 
+void Octree::joeliu_begin(geoframe& geofrm, int sign) {
+	_st.jl = joeliu_state();
+	_st.jl.sign = sign;
+}
+
+// smoothing_joeliu_volume() a stage at a time: the tets' qualities and the first vertex to move,
+// each of the first 20 rounds, the qualities again, each of the last rounds; true once done.
+bool Octree::joeliu_step(geoframe& geofrm) {
+
+	joeliu_state& jl = _st.jl;
+	const int sign = jl.sign;
 	int maxIndex = 20;
 
-	int nv, ntet, i, j, v0, v1, v2, v3;
-	int my_bool, index;
-	int my_list[200], nlist, a_vert, id_min;
+	int nv, i, j, v0, v1, v2, v3;
+	int my_bool;
+	int my_list[200], nlist, id_min;
 	int sum0, sum1, sum2, sum3, sum4, sum5, sum6, sum7;
 	int sum8, sum9, sum10, sum11, sum12, sum13, sum14, sum15;
 	float sum_0, sum_1, sum_2, mv0[3], mv1[3], mv2[3], mv3[3];
-	double e[6], sum_e, e_min, e_max, *aspectArr;
-	double aspect_min, aspect_max, s, biggest_aspect_min = 0.0;
-	int optRunNum;
+	double e[6], sum_e, e_min, e_max, *aspectArr = jl.aspectArr.empty() ? 0 : &jl.aspectArr[0];
+	double s;
+	int& ntet = jl.ntet;
+	int& index = jl.index;
+	int& a_vert = jl.a_vert;
+	int& minAspIndx = jl.minAspIndx;
+	int& optRunNum = jl.optRunNum;
+	double& aspect_min = jl.aspect_min;
+	double& aspect_max = jl.aspect_max;
+	double& biggest_aspect_min = jl.biggest_aspect_min;
+	int av0, av1, av2, av3, randomInt;
 
 	//	FILE *output;
 
 	//	output = fopen("qimprove_temp", "w");
 
+	switch (jl.stage) {
+	case 0:
 	nv = geofrm.numverts;
 	ntet = geofrm.numtris/4;
 
@@ -4985,9 +5423,10 @@ void Octree::smoothing_joeliu_volume(geoframe& geofrm, int sign) {
 	// is left uninitialized and geofrm.triangles[4*minAspIndx] reads out of
 	// bounds and crashes.
 	if(ntet == 0)
-		return;
+		return true;
 
-	aspectArr = new double[ntet];
+	jl.aspectArr.assign(ntet, 0.0);
+	aspectArr = &jl.aspectArr[0];
 
 	sum0 = 0;	sum1 = 0;	sum2 = 0;	sum3 = 0;
 	sum4 = 0;	sum5 = 0;	sum6 = 0;	sum7 = 0;
@@ -5061,7 +5500,6 @@ void Octree::smoothing_joeliu_volume(geoframe& geofrm, int sign) {
 	//fprintf(output, "%d %d %d %f\n", sum0, sum1, sum0+sum1, (float)sum1/(float)(sum0+sum1));
 
 	srand( (unsigned)time( NULL ) );
-	int minAspIndx;
 	for(i = 0; i < ntet; i++) 
 	{
 		if(i == 0) {
@@ -5077,7 +5515,6 @@ void Octree::smoothing_joeliu_volume(geoframe& geofrm, int sign) {
 			aspect_max = aspectArr[i];
 	}
 	a_vert = -1;
-	int av0, av1, av2, av3;
 	av0 = geofrm.triangles[4*minAspIndx][0];
 	av1 = geofrm.triangles[4*minAspIndx][1];
 	av2 = geofrm.triangles[4*minAspIndx][2];
@@ -5086,7 +5523,7 @@ void Octree::smoothing_joeliu_volume(geoframe& geofrm, int sign) {
 	//	fprintf(output, "%d %d %d %d\n", geofrm.bound_sign[av0], geofrm.bound_sign[av1], geofrm.bound_sign[av2], 
 	//				geofrm.bound_sign[av3]);
 
-	int randomInt = rand();
+	randomInt = rand();
 	if(randomInt % 4 == 0) 
 	{
 		if(geofrm.bound_sign[av0] == 0 ) {a_vert = av0;}
@@ -5122,7 +5559,12 @@ void Octree::smoothing_joeliu_volume(geoframe& geofrm, int sign) {
 	//a_vert =  av2;
 //	fprintf(output, "aspect_min, aspect_max, a_vert = %e %e %d\n", aspect_min, aspect_max, a_vert);
 
-	for(index = 0; index < maxIndex; index++)
+		jl.stage = 1;
+		index = 0;
+		return false;
+
+	case 1:
+	if(index < maxIndex)
 	{
 	  //		fprintf(output, "Loop %d\n", index);
 
@@ -5298,6 +5740,8 @@ void Octree::smoothing_joeliu_volume(geoframe& geofrm, int sign) {
 			biggest_aspect_min = aspect_min;
 			optRunNum = index;
 		}
+		index++;
+		return false;
 	}
 
 //loop 2
@@ -5403,10 +5847,13 @@ void Octree::smoothing_joeliu_volume(geoframe& geofrm, int sign) {
 	}
 //	fprintf(output, "aspect_min, aspect_max, a_vert = %e %e %d\n", aspect_min, aspect_max, a_vert);
 
-	for(index = 0; index < maxIndex; index++)
+		jl.stage = 2;
+		index = 0;
+		return false;
+
+	case 2:
+	if(index < maxIndex && !(aspect_min > biggest_aspect_min * 0.999))
 	{
-		if(aspect_min > biggest_aspect_min * 0.999)
-			break;
 		//		fprintf(output, "Loop %d\n", index);
 
 		for (i = 0; i < 200; i++) {
@@ -5537,7 +5984,7 @@ void Octree::smoothing_joeliu_volume(geoframe& geofrm, int sign) {
 		av0 = geofrm.triangles[4*minAspIndx][0];
 		av1 = geofrm.triangles[4*minAspIndx][1];
 		av2 = geofrm.triangles[4*minAspIndx][2];
-		av3 = geofrm.triangles[4*minAspIndx+1][3];
+		av3 = geofrm.triangles[4*minAspIndx+1][2]; // the 4th vertex, as for v3 ([3] read past the row)
 		//		fprintf(output, "%d %d %d %d ", av0, av1, av2, av3);
 		//		fprintf(output, "%d %d %d %d\n", geofrm.bound_sign[av0], geofrm.bound_sign[av1], geofrm.bound_sign[av2], 
 		//				geofrm.bound_sign[av3]);
@@ -5576,27 +6023,52 @@ void Octree::smoothing_joeliu_volume(geoframe& geofrm, int sign) {
 			else {a_vert = av3;}//-1
 		}
 		//		fprintf(output, "aspect_min, aspect_max, a_vert = %e %e %d\n", aspect_min, aspect_max, a_vert);
+		index++;
+		return false;
+	}
+	break;
 	}
 
-	delete [] aspectArr;
-
-//	fclose(output);
+	jl.aspectArr = std::vector<double>();
+	return true;
 }
 
 void Octree::optimization(geoframe& geofrm, bool on_grid) {
+	optimization_begin(geofrm, on_grid);
+	while (!optimization_step(geofrm));
+}
+
+void Octree::optimization_begin(geoframe& geofrm, bool on_grid) {
+	optimization_state& o = _st.opt;
+	o.stage = 0;
+	o.on_grid = on_grid;
+	o.minAspIndx = o.hexaIndx = 0;
+}
+
+// optimization() a round at a time: the corners' qualities, then each round's move of the worst
+// corner's vertex and the qualities after it; true once done.
+bool Octree::optimization_step(geoframe& geofrm) {
+
+	optimization_state& o = _st.opt;
+	const bool on_grid = o.on_grid;
 
 	int i, j, v0, v1, v2, v3, v4, v5, v6, v7;
 	// minAspIndx/hexaIndx are only assigned inside the per-hex quality loop and
-	// only when a worst-element condition triggers; initialize them so they are
-	// never read uninitialized (e.g. a mesh whose hexes are all well-shaped).
-	int index, maxIndex, minAspIndx = 0, hexaIndx = 0, a_vert;
+	// only when a worst-element condition triggers; optimization_begin() sets them to 0
+	// so they are never read uninitialized (e.g. a mesh whose hexes are all well-shaped).
+	int maxIndex = 20;
+	int& index = o.index;
+	int& minAspIndx = o.minAspIndx;
+	int& hexaIndx = o.hexaIndx;
+	int& a_vert = o.a_vert;
 	//int my_list[200], nlist;
 	int sum0, sum1, sum2, sum3, sum4, sum5, sum6, sum7, sum8, temp_i, temp_j;
 	float grad[3];
-	float mv0[3], mv1[3], mv2[3], mv3[3], mv4[3], mv5[3], mv6[3], mv7[3], cond_max1;
+	float mv0[3], mv1[3], mv2[3], mv3[3], mv4[3], mv5[3], mv6[3], mv7[3];
+	float& cond_max1 = o.cond_max1;
 	float mmv0[3], mmv1[3], mmv2[3], mmv3[3];
 	float jacobian, oddy, condition, jaco_min, jaco_max, oddy_min, oddy_max, cond_min, cond_max;
-	float *jacobianArr, *conditionArr, *oddyArr;
+	float *jacobianArr = o.jacobianArr.data(), *conditionArr = o.conditionArr.data(), *oddyArr = o.oddyArr.data();
 	// Corner j of hexahedron i (v0..v7 below; v4..v7 lie over v0..v3) is vertex
 	// quads[6*i + corner_row[j]][corner_col[j]]. The vertex to move used to be read as
 	// quads[6*i+1][j-4] for j >= 4, which is v5, v4, v7, v6 (the wrong one), and the per-vertex
@@ -5607,7 +6079,8 @@ void Octree::optimization(geoframe& geofrm, bool on_grid) {
 	static const int corner_edge[8][3] = {{3, 1, 4}, {0, 2, 5}, {1, 3, 6}, {2, 0, 7},
 	                                      {5, 7, 0}, {6, 4, 1}, {7, 5, 2}, {4, 6, 3}};
 	// The hexahedra with a corner at a_vert, all of which move with it.
-	std::vector<int> around;
+	std::vector<int>& around = o.around;
+	double& orientation = o.orientation;
 	// testHexa's Jacobian is the square root of the Gram determinant, so it is never negative and
 	// an inverted corner looks as good as its mirror image; and in float the Gram determinant of a
 	// nearly flat corner is noise. The line search moved vertices into inversions (one pass inverted
@@ -5637,20 +6110,6 @@ void Octree::optimization(geoframe& geofrm, bool on_grid) {
 			for(int d = 0; d < 3; d++) p[c][d] = pos && int(v) == a_vert ? pos[d] : geofrm.verts[v][d];
 		}
 	};
-	double orientation = 1.0;
-	{
-		long positive = 0, negative = 0;
-		float p[8][3];
-		for(i = 0; i < geofrm.numquads/6; i++) {
-			hexa_points(i, nullptr, p);
-			for(int c = 0; c < 8; c++) {
-				const double det = corner_det(p, c);
-				if(det > 0.0) positive++;
-				else if(det < 0.0) negative++;
-			}
-		}
-		if(negative > positive) orientation = -1.0;
-	}
 	// The largest condition number of the corners of the hexahedra around a_vert, with a_vert at
 	// pos: testHexa's 1/Jacobian, from corner_det, and +inf for an inverted or flat corner.
 	auto worst_around = [&](const float* pos) {
@@ -5677,9 +6136,25 @@ void Octree::optimization(geoframe& geofrm, bool on_grid) {
 		return det;
 	};
 
-	//	FILE *output;
+	std::vector<char>& stuck = o.stuck;
+	float pick = -1.0f, temp = 0.0f, temp0 = 0.0f, temp1 = 0.0f;
+	int num = 0;
 
-	maxIndex = 20;
+	if (o.stage == 0) {
+	orientation = 1.0;
+	{
+		long positive = 0, negative = 0;
+		float p[8][3];
+		for(i = 0; i < geofrm.numquads/6; i++) {
+			hexa_points(i, nullptr, p);
+			for(int c = 0; c < 8; c++) {
+				const double det = corner_det(p, c);
+				if(det > 0.0) positive++;
+				else if(det < 0.0) negative++;
+			}
+		}
+		if(negative > positive) orientation = -1.0;
+	}
 
 	// Optimization-based improvement operates on hexahedra, which this mesher
 	// stores as groups of six quad rows (numquads/6 hexes). When there are no
@@ -5688,14 +6163,14 @@ void Octree::optimization(geoframe& geofrm, bool on_grid) {
 	// before the loops below: otherwise minAspIndx/hexaIndx stay unset and
 	// geofrm.quads[6*hexaIndx][minAspIndx] reads out of bounds and crashes.
 	if(geofrm.numquads/6 == 0)
-		return;
+		return true;
 
-	conditionArr=0;
-	conditionArr = new float[geofrm.numverts];
-	jacobianArr=0;
-	jacobianArr = new float[geofrm.numverts];
-	oddyArr=0;
-	oddyArr = new float[geofrm.numverts];
+	o.conditionArr.assign(geofrm.numverts, 0.0f);
+	conditionArr = o.conditionArr.data();
+	o.jacobianArr.assign(geofrm.numverts, 0.0f);
+	jacobianArr = o.jacobianArr.data();
+	o.oddyArr.assign(geofrm.numverts, 0.0f);
+	oddyArr = o.oddyArr.data();
 	for(i = 0; i < geofrm.numverts; i++)	{
 		conditionArr[i] = 1.0f;
 		jacobianArr[i] = 1.0f;
@@ -5713,12 +6188,12 @@ void Octree::optimization(geoframe& geofrm, bool on_grid) {
 	cond_min = 1000.0f;		cond_max = -1000.0f;
 	// The corner to improve: the worst one whose vertex is not stuck (its last move found nothing
 	// better), so that one corner that cannot be improved does not end the whole pass.
-	std::vector<char> stuck(geofrm.numverts, 0);
-	float pick = -1.0f;
-	float temp = 0.0f;
-	float temp0 = 0.0f;
-	float temp1 = 0.0f;
-	int num = 0;
+	o.stuck.assign(geofrm.numverts, 0);
+	pick = -1.0f;
+	temp = 0.0f;
+	temp0 = 0.0f;
+	temp1 = 0.0f;
+	num = 0;
 	// Cannot parallelize: race conditions on min/max vars, minAspIndx, hexaIndx, and array writes
 	for(i = 0; i < geofrm.numquads/6; i++) {
 		v0 = geofrm.quads[6*i][0];		v1 = geofrm.quads[6*i][1];
@@ -5803,7 +6278,12 @@ void Octree::optimization(geoframe& geofrm, bool on_grid) {
 	//cond_min, temp0/num, cond_max, oddy_min, temp1/num, oddy_max, a_vert);
 
 	cond_max1 = cond_max + 1.0f;
-	for(index = 0; index < maxIndex; index++)
+	o.stage = 1;
+	index = 0;
+	return false;
+	}
+
+	if(index < maxIndex)
 	{
 		printf("Loop %d\n", index);
 /*
@@ -5964,9 +6444,6 @@ void Octree::optimization(geoframe& geofrm, bool on_grid) {
 
 		//		fprintf(output, "average %d %f %f %f %f\n", a_vert, geofrm.verts[a_vert][0], geofrm.verts[a_vert][1], geofrm.verts[a_vert][2], step);
 
-#ifdef _OPENMP
-		#pragma omp parallel for schedule(static)
-#endif
 		for(i = 0; i < geofrm.numverts ; i++) {conditionArr[i] = 1.0f;	jacobianArr[i] = 1.0f;	oddyArr[i] = 0.0f;}
 		jaco_min = 1.0f;		jaco_max = -1.0f;
 		oddy_min = 1000.0f;		oddy_max = -1000.0f;
@@ -6030,14 +6507,16 @@ void Octree::optimization(geoframe& geofrm, bool on_grid) {
 		}
 		
 		a_vert = geofrm.quads[6*hexaIndx + corner_row[minAspIndx]][corner_col[minAspIndx]];
-		if(pick < 0.0f) break;
+		if(pick < 0.0f) {index = maxIndex; return false;}
 
 		//		fprintf(output, "min, max, a_vert = %f %f %f %f %f %f %d %d\n", jaco_min, jaco_max, 
 		//				oddy_min, oddy_max, cond_min, cond_max, a_vert, geofrm.bound_sign[a_vert]);
 
-		if(fabs(cond_max1 - cond_max) < 1.0e-4 && cond_min > 0.0f && cond_max < 10.0f) break;
+		if(fabs(cond_max1 - cond_max) < 1.0e-4 && cond_min > 0.0f && cond_max < 10.0f) {index = maxIndex; return false;}
 		//if(cond_max < 216.94f) break;
 		cond_max1 = cond_max;
+		index++;
+		return false;
 	}
 
 	sum0 = 0;	sum1 = 0;	sum2 = 0;	sum3 = 0;
@@ -6062,11 +6541,12 @@ void Octree::optimization(geoframe& geofrm, bool on_grid) {
 	//	fprintf(output, "jacob oddy cond = (%f, %f, %f) (%f, %f, %f) (%f, %f, %f)\n", jaco_max, temp/num, jaco_min, 
 	//			cond_min, temp0/num, cond_max, oddy_min, temp1/num, oddy_max);
 
-	delete [] conditionArr;
-	delete [] jacobianArr;
-	delete [] oddyArr;
+	o.conditionArr = o.jacobianArr = o.oddyArr = std::vector<float>();
+	o.stuck = std::vector<char>();
+	o.around = std::vector<int>();
 
 	//	fclose(output);
+	return true;
 }
 
 // calculate Jacobian, Condition_no and Oddy metric for a hexa
@@ -6854,6 +7334,127 @@ void Octree::assign_refine_sign_quad(geoframe& geofrm, float err_tol) {
 
 	}			// end while
 
+}
+
+
+namespace
+{
+  // a/b in [0,1] (1 when there is nothing to do)
+  double frac(double a, double b)
+  {
+    return b > 0.0 ? std::min(1.0, a/b) : 1.0;
+  }
+}
+
+const char* Octree::step_phase() const
+{
+  switch(_st.op)
+    {
+    case OCT_SET_VOLUME:
+      return _st.stage == SV_OCTREE ? "octree" : _st.stage == SV_SPLINE ? "spline" : "loading";
+    case OCT_COLLAPSE:
+      return "collapse";
+    case OCT_COMPUTE_QEF:
+      return "qef";
+    case OCT_TRAVERSE_QEF:
+      return "traverse";
+    case OCT_MESH_EXTRACT:
+      switch(_st.stage)
+	{
+	case ME_SPLINE: return "spline";
+	case ME_HEXA: return "hexahedra";
+	case ME_UNTANGLE: return "untangling";
+	default: return "extracting";
+	}
+    case OCT_QUALITY_IMPROVE:
+      return "improving";
+    case OCT_RELEASE:
+      return "output";
+    default:
+      return "done";
+    }
+}
+
+double Octree::step_progress() const
+{
+  const double cells = octcell_num;
+  switch(_st.op)
+    {
+    case OCT_SET_VOLUME:
+      switch(_st.stage)
+	{
+	case SV_LOAD: return 0.0;
+	case SV_ALLOC: return 0.1*_st.grow/12.0;
+	case SV_VOXELS: return 0.1 + 0.1*frac(_st.pos, double(dim[0])*dim[1]*dim[2]);
+	case SV_OCTREE:
+	  {
+	    // a level of cells reads about every voxel
+	    if(_st.pos >= std::size_t(octcell_num)) return 0.9;
+	    const int level = const_cast<Octree*>(this)->get_level(int(_st.pos));
+	    return 0.2 + 0.7*(level + frac(_st.pos - level_id[level], double(level_id[level+1] - level_id[level])))/(oct_depth + 1);
+	  }
+	case SV_SPLINE:
+	  return 0.9 + 0.1*(_st.sub ? frac(_st.pos, double(TransImg2SplineLines(dim[0], dim[1], dim[2]))) : 0.0);
+	default: return 1.0;
+	}
+    case OCT_COLLAPSE:
+      return _st.stage == CO_SAMPLES ? 0.2*frac(_st.seen, double(orig_vol.size())) :
+	_st.stage == CO_CELLS ? 0.2 + 0.8*frac(_st.seen, cells) : 1.0;
+    case OCT_COMPUTE_QEF:
+      return frac(_st.seen, cells);
+    case OCT_TRAVERSE_QEF:
+      {
+	const double passes = flag_type == 1 ? 2.0 : 1.0;
+	double f = 0.0;
+	if(_st.stage == TQ_CLEAR) f = 0.1*frac(_st.pos, double(oct_array.size()));
+	else if(_st.stage == TQ_CELLS) f = 0.1 + 0.9*frac(_st.seen, cells);
+	else if(_st.stage == TQ_DONE) return 1.0;
+	return std::min(1.0, (_st.pass + f)/passes);
+      }
+    case OCT_MESH_EXTRACT:
+      switch(_st.stage)
+	{
+	case ME_CLEAR: return 0.0;
+	case ME_EFLAGS: return 0.05*frac(_st.pos, double(ebit.size()));
+	case ME_VFLAGS: return 0.05 + 0.05*frac(_st.pos, double(vbit.size()));
+	case ME_SPLINE:
+	  return 0.1 + 0.1*(_st.sub ? frac(_st.pos, double(TransImg2SplineLines(dim[0], dim[1], dim[2]))) : 0.0);
+	case ME_START: return 0.2;
+	case ME_VTX: return 0.2 + 0.05*frac(_st.pos, double(vtx_idx_arr.size()));
+	case ME_GRID: return 0.25 + 0.05*frac(_st.pos, double(grid_idx_arr.size()));
+	case ME_LEAVES: return 0.3 + 0.7*frac(double(_st.pos)*12 + double(_st.sub), 12.0*leaf_num);
+	case ME_HEXA: return 0.3 + 0.4*hexa_progress(_st.hx);
+	case ME_UNTANGLE: return 0.7 + 0.3*untangle_progress();
+	default: return 1.0;
+	}
+    case OCT_QUALITY_IMPROVE:
+      switch(_st.method)
+	{
+	case 1:
+	  {
+	    const flow_state& f = _st.flow;
+	    const double nv = f.g ? f.g->numverts : 0;
+	    switch(f.stage)
+	      {
+	      case FL_TABLE: return 0.0;
+	      case FL_ELEMS: return 0.05;
+	      case FL_ROUNDS: return 0.05 + 0.95*frac(f.index*nv + double(f.pos), flow_rounds*nv);
+	      default: return 1.0;
+	      }
+	  }
+	case 2: return frac(_st.ec.index, 20.0);
+	case 3:
+	case 4:
+	  return _st.jl.stage == 0 ? 0.0 : _st.jl.stage == 1 ? 0.05 + 0.45*frac(_st.jl.index, 20.0) :
+	    0.5 + 0.5*frac(_st.jl.index, 20.0);
+	case 5: return _st.opt.stage == 0 ? 0.0 : 0.05 + 0.95*frac(_st.opt.index, 20.0);
+	default: return 1.0;
+	}
+    case OCT_RELEASE:
+      return std::min(1.0, _st.sub/16.0);
+    default:
+      return 1.0;
+    }
 }
 
 }

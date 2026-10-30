@@ -13,7 +13,8 @@
  * - a timer heap of the sleepers' wake_time and the timed waits' recv_deadline;
  * - the processes waiting for a message, by channel (recv_path);
  * - the processes parked until the next frame (awaiting_frame), and those with state watches;
- * - counts of the sleepers and receivers (the sync scheduler's has_runnable()).
+ * - counts of the sleepers and receivers (the sync scheduler's has_runnable()), and of the lock
+ *   waiters (docs/STATE_EXEC_LOCKS.md 8.7), whose lock deadlines are timers too.
  *
  * The scheduler changes a process's status, priority and wait fields itself, then calls update()
  * (set_status() for a status change), which brings the indexes in line with the fields. An ended
@@ -104,8 +105,13 @@ public:
   /// Waiting with a wake_time / waiting with a recv_path.
   std::size_t sleeping_count() const { return sleeping_; }
   std::size_t receiving_count() const { return receiving_; }
-  /// Live processes with a deadline: sleepers and timed waits.
+  /// Live processes with a deadline: sleepers, timed waits and lock waits with a timeout.
   std::size_t timed_count() const { return timed_; }
+  /// Waiting with lock_waiting (a with-lock request's ticket).
+  std::size_t lock_waiting_count() const { return lock_waiting_; }
+  /// Live processes whose lock deadline passed with no vector to collect them (wake_due's
+  /// lock_expired_pending).
+  std::size_t lock_expired_count() const { return lock_expired_; }
   /// Waiting for the next frame (awaiting_frame).
   std::size_t awaiting_count() const { return awaiting_.size(); }
   /// Live processes with state watches.
@@ -118,8 +124,14 @@ public:
   /// Whether some timer may be due at `now` (a lower bound: an entry may be stale).
   bool timer_due(clock::time_point now) const { return !heap_.empty() && heap_.front().at <= now; }
   /// Wake what is due at `now`: a sleeper becomes ready, a timed wait expires
-  /// (expire_await: its call raises TimeoutError) and becomes ready. Returns how many woke.
-  std::size_t wake_due(clock::time_point now);
+  /// (expire_await: its call raises TimeoutError) and becomes ready. A lock wait whose deadline
+  /// passed loses its deadline and stays waiting: it is appended to `lock_expired` for the lock
+  /// home to time out (lock_home::wait_expired), or, with no vector, flagged
+  /// (lock_expired_pending) for take_lock_expired. Returns how many woke or expired.
+  std::size_t wake_due(clock::time_point now, std::vector<process *> *lock_expired = nullptr);
+  /// Append every live flagged lock expiry to `out` and clear the flags (O(n); call it only while
+  /// lock_expired_count() is not zero).
+  void take_lock_expired(std::vector<process *> &out);
 
   // --- Waiters ---
 
@@ -162,6 +174,8 @@ private:
   void free_bucket(std::uint32_t b);
   void push_timer(clock::time_point at, int pid);
   bool timer_live(const timer_entry &t) const;
+  /// The run-queue level a process is counted in (phase L2 switches to effective_priority()).
+  int level_key(const process &p) const { return by_priority_ ? p.priority : 0; }
 
   bool by_priority_;
   map_type map_;
@@ -177,6 +191,8 @@ private:
   std::size_t sleeping_ = 0;
   std::size_t receiving_ = 0;
   std::size_t timed_ = 0;
+  std::size_t lock_waiting_ = 0;
+  std::size_t lock_expired_ = 0;
 
   std::vector<timer_entry> heap_; // min-heap on `at`; entries go stale, checked when popped
 

@@ -126,6 +126,9 @@ The full syntax (literals, escapes, Unicode rules) is specified in
 | `defclass` | `(defclass Name ...)` | OOP class definition |
 | `root` | `(root)` | Returns the root expression |
 
+`with-lock` is not a special form: it is the lock form the intrinsics bind, recognized by what
+its name is bound to ([Locks](#locks-with-lock)).
+
 Extra arguments are an error, not ignored: `(if c a b d)`, `(return a b)`, `(yield a b)` and
 `(break a b)` throw, naming the form. Until 2026-10 `while` and `for` ran only their first body
 form and `if` dropped forms after its else branch, silently; scripts that wrapped a loop body in
@@ -649,6 +652,11 @@ auto results = sched.run();
 // Both parent and child complete independently
 ```
 
+From the DSL, `(fork)` forks the process running it: it returns the child's pid in the parent and
+0 in the child, and the child has the parent's owner, so a host reaping the owner's processes
+(`kill_owner`) reaps it too. Inside `with-lock` it raises `LockError` (the child would run in a
+section it doesn't hold).
+
 ### Signals
 
 ```cpp
@@ -698,6 +706,36 @@ Programs can manage other processes using DSL intrinsics:
 (node-id)       ;; => "node-A"
 (scheduler-stats)  ;; => {total: N, running: N, ...}
 ```
+
+**What a spawned child sees.** A child always keeps its parent's `owner`, so a host that reaps
+a document's processes with `kill_owner` reaps its children too. Its environment depends on the
+host (docs/STATE_EXEC_THREADED.md 4.15):
+
+- With no spawn context, the child gets the bare builtins: no intrinsics, so `(state-get ...)`
+  in the child is a `NameError`. This is what a context built by hand gets unless it sets one.
+- With a spawn context (`intrinsics_context::spawn_context`), the callback gives the child its
+  environment and a context of its own. The child's process keeps that context alive until the
+  process is reaped. Ariadne's actions, residents and init scripts, pycvc's `Exec` and
+  `make_spawn_context` all install one.
+
+A C++ host that registers the plain intrinsics installs the ready-made callback:
+
+```cpp
+intrinsics_context ictx;  // sched, root (apply_chroot), uid, channels, lock fields, ...
+ictx.spawn_context = make_spawn_context();  // or make_spawn_context(base, after_register)
+register_intrinsics(env, &ictx);
+```
+
+Each child then gets a context copying the parent's:
+
+- scheduler, root and chroot, and tracker;
+- identity, channel policy and document;
+- lock fields (`lock_wait_allowed`, `lock_default_timeout`);
+- the callback itself, so grandchildren get one too.
+
+The child's environment is `environment::extend(base)` with the intrinsics registered in it,
+then `after_register(env, ctx)`, the host's own bindings. A null `base` is one default
+environment, shared by the callback's children.
 
 ---
 
@@ -758,8 +796,10 @@ register_intrinsics(env, &ictx);
 ;; Check existence
 (state-exists "myapp.config.timeout")  ;; => true
 
-;; List children of a node
-(state-children "myapp.config")  ;; => ("timeout")
+;; List every node under a node, by its full path: descendants too, in pre-order
+(state-children "myapp.config")   ;; => ("myapp.config.timeout")
+(state-set "myapp.users.ann.role" "admin")
+(state-children "myapp.users")    ;; => ("myapp.users.ann" "myapp.users.ann.role")
 
 ;; Delete a node
 (state-delete "myapp.old-data")
@@ -773,6 +813,15 @@ register_intrinsics(env, &ictx);
 (state-json "myapp.config")   ;; => "{\n    \"timeout\": \"30\"\n}\n"
 (state-from-json "myapp.copy" (state-json "myapp.config"))
 ```
+
+A node holds text, so `state-set` turns any other value into text. A string is stored as it is.
+An int is stored as its digits (`10` as `"10"`). A float is stored as the shortest text that
+reads back as the same number: `1234567.5` as `"1234567.5"`, `0.1` as `"0.1"`, `1e21` as
+`"1e+21"`, `(+ 0.1 0.2)` as `"0.30000000000000004"`. Of the fixed and scientific forms the
+shorter is stored, so `100000.0` is `"1e+05"`. `true` and `false` are stored as `"true"` and
+`"false"`, and `nil` as `""`. A list or dict is stored as it prints; a structured value
+belongs on the data channel (`state-data-set`). `str` and `str-concat` write a float the same
+way, so `(state-set "x" (str 1234567.5))` also stores `"1234567.5"`.
 
 `state-json` returns nil for a missing node and reads through a transparent link, as
 `state-get` does. `state-from-json` writes through a writable transparent link, as `state-set`
@@ -1248,6 +1297,85 @@ registers with `register_async_fn` through `register_action_intrinsics`, as
 the nav_compute example does.
 
 ---
+
+### Locks (`with-lock`)
+
+`with-lock` runs a section of a program holding a named lock on part of the state tree, so that
+several programs that read and write the same nodes don't interleave. The design is
+[`STATE_EXEC_LOCKS.md`](STATE_EXEC_LOCKS.md); the exact protocol is
+[`STATE_EXEC_LOCKS_PROTOCOL.md`](STATE_EXEC_LOCKS_PROTOCOL.md). Locks are **advisory**: they keep
+out other `with-lock` sections, not plain `state-set`s. One node changed alone needs no lock:
+`state-incr`, `state-cas` and `state-swap` are atomic ([State Tree Operations](#state-tree-operations-dsl)).
+
+```lisp
+(with-lock "inventory"                       ; X on <chroot>.inventory and everything below it
+  (state-set "inventory.apples" (- (int (state-get "inventory.apples")) 1)))
+
+(with-lock "inventory" :shared (report))     ; readers share
+(with-lock (list "accounts.a" "accounts.b") :timeout 0.5 :as g (transfer))  ; both, or neither
+(with-lock "cache" :if-available :else (state-get "cache.v") (refresh))      ; never waits
+```
+
+**The form.** `(with-lock KEY option... body...)`, the value of the last body form (nil with no
+body). Options come right after `KEY`, in any order:
+
+| Option | Meaning |
+|---|---|
+| `:exclusive` (the default) / `:shared` | the mode: exclusive excludes every other section on an overlapping key; shared sections share, and exclude only exclusive ones |
+| `:timeout SECONDS` | give up after this long (`TimeoutError`); 0 never waits; without it, the context's default (none: wait as long as it takes) |
+| `:if-available` | never wait: if the lock is busy, run `:else` instead (nil without one), holding nothing |
+| `:else FORM` | with `:if-available` only |
+| `:as NAME` | binds NAME in the body to `{key mode generation abandoned}` (nil in `:else`) |
+
+An unknown option, an option given twice (the mode counts once), `:else` without `:if-available`,
+an option with no form after it, and `:as` without a symbol are `ValueError`s, raised before
+anything is evaluated or locked. `with-lock` is a soft form: it is whatever the name is bound to,
+so a program's own `defun`, `defmacro` or `set` of the name replaces it.
+
+**Keys.** A key is a state-tree path, relative to the program's chroot like `state-get`'s:
+segments are split on `.` and trimmed, and empty ones are dropped (`" a..b "` is `a.b`). An
+empty key, or one with `#`, is a `ValueError`. A key with a leading `/` is app-global, allowed
+exactly where a `/` channel is: when the program's channel policy enforces, only a key equal to
+or under a declared global, else `PermissionError`. `KEY` may be a list: every key at once, or
+none (keys under one another collapse to the outer one). Two keys conflict on segment boundaries:
+`a.b` overlaps `a` and `a.b.c`, not `a.bc`.
+
+**Waiting.** Requests are granted in arrival order among those that conflict; non-conflicting
+ones pass freely. A section nested in one the program already holds is granted at once when the
+outer one covers it (same key or an ancestor, and a mode that allows it), counted, not locked
+again. A nested request that would need an upgrade (exclusive under the program's own shared
+hold) raises `LockError` with `reason` `"upgrade"`. A program waits only where its process can
+park: in a nested evaluator, a generator, or under Ariadne's reactive lane a busy request raises
+`LockError` (`"cannot wait here"`, `"generator"`); a context that forbids lock waits (Ariadne's
+`init:` lane) treats every busy request as `:timeout 0`. Signal and watch handlers may not take a
+lock the program they interrupted holds, or one that conflicts with it (`"handler"`).
+
+**Release.** A section's lock is released when the body ends, however it ends: a value, a
+`return`, a `break`, or an exception (before an outer `finally` runs). A kill, a budget running
+out, or an uncaught exception ending the process release its locks too; the next exclusive
+section on such a key sees `abandoned: #t` through `:as`, once.
+
+**Deadlocks** are detected exactly: the request that would close a cycle of waiting programs
+raises `DeadlockError` at once, its `cycle` a list of `{pid key}` (a pid only for a process of
+the same scheduler and owner). A `try` around the `with-lock` can catch it and retry.
+
+**Reads.** `(locks-held)` lists the program's own holds, outermost first:
+`{key mode count generation}`. `(lock-query [prefix])` lists every lock under the prefix (the
+program's chroot by default): `{held: [{key mode pids count generation abandoned}], waiting:
+[{key mode pid}]}`, showing pids only for processes of the same scheduler and owner.
+`(inspect pid)` adds `locks_held` and `waiting_on` (`"lock k"`, `"msg channel"`, `"sleep"`).
+
+**Fork and snapshots.** `(fork)` inside a section raises `LockError` (`"fork"`). A snapshot of a
+process that holds a lock is refused, naming its keys; a waiter can be snapshotted, and restored
+it asks again, at the back of the queue, with what was left of its timeout. A restore whose
+environment has no `with-lock` lock form raises `LockError` (`"restore"`) in the restored
+program.
+
+**Hosts.** Each scheduler has its own lock manager, made when a program first locks, unless the
+host gives it one with `set_lock_manager`. The app's `exec_scheduler()` uses the app's manager
+(`app::lock_manager()`). Ariadne's actions give up after `ariadne.exec.lock_timeout` seconds (1.0)
+when they name no `:timeout`. pycvc's `register_intrinsics` keeps the lock form's context alive,
+and `intrinsics_context.lock_wait_allowed` / `lock_default_timeout` set the context's rules.
 
 ## 7. Resource Limits & Policies
 
@@ -2140,8 +2268,8 @@ block.  To carry state across iterations, use `set`:
 ### 12.5 All State Values Are Strings
 
 The state tree stores everything as `std::string`.  `state-set`
-converts its argument with `str`, and `state-get` always returns a
-string.  Convert explicitly for numeric work:
+turns a non-string argument into text (§5), and `state-get` always
+returns a string.  Convert explicitly for numeric work:
 
 ```lisp
 (state-set "counter" (str 42))

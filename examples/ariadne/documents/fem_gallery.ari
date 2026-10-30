@@ -138,8 +138,10 @@ windows:
         bind: gallery.status
       - text: "last run (ms)"
         bind: gallery.work_ms
-      - text: "progress %"
+      - progress: progress
         bind: graphics.root.children.domain.fe.progress
+        hi: 100
+        overlay: graphics.root.children.domain.fe.phase
         visible_when: (= (state-get "gallery.node") "domain")
       - button: "< Previous"
         on: (state-set "gallery.index" (% (+ (int (state-get "gallery.index")) (- (int (state-get "gallery.count")) 1)) (int (state-get "gallery.count"))))

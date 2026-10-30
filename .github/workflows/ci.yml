@@ -31,6 +31,19 @@ env:
 #    workflow in a permanent cold-cache state.
 #
 # (Defined per-job below.)
+#
+# Workflow level, pushes only (master, tags, ci/full/**): one run per ref at
+# a time, and a newer push replaces that ref's run still waiting to start.
+# cancel-in-progress stays false, so a running run finishes and its package
+# jobs seed their caches. Merges land faster than a 20-job run clears the
+# account's shared runners, so without this every intermediate master
+# commit's run queued behind the last (2026-10-30: seven full runs at once,
+# with every other repo's jobs waiting behind them). Pull requests get a group
+# of their own per run (github.run_id), so they behave as before: their cheap
+# jobs cancel per job, their heavy jobs finish.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && format('run-{0}', github.run_id) || format('push-{0}', github.ref) }}
+  cancel-in-progress: false
 
 # ───────────────────────────────────────────────────────────────────
 # Per-PR / per-commit artifact set
@@ -354,8 +367,10 @@ jobs:
           if [ -n "$base" ] && [ "$base" != "0000000000000000000000000000000000000000" ] \
              && git cat-file -e "${base}^{commit}" 2>/dev/null; then
             if ! git diff --name-only "$base" HEAD -- src/cvc/ariadne inc/cvc/ariadne src/cvc/tools \
+                   src/cvc/net inc/cvc/net \
                    src/ari examples/ariadne/terminal CMakeLists.txt src/cvc/CMakeLists.txt CMake \
                    src/cvc/image inc/cvc/image src/cvc/tests/image_magick_roundtrip.cpp \
+                   src/cvc/state inc/cvc/state src/cvc/tests/state_exec_wasm_smoke.cpp \
                    cvcpkg/recipes/libcvc \
                    .github/workflows/ci.yml | grep -q .; then
               run=false
@@ -404,7 +419,8 @@ jobs:
             -DCVC_USING_IMOD_MRC=OFF -DCVC_ENABLE_IMAGEMAGICK=ON -DCVC_ENABLE_FFTW=OFF \
             -DCVC_FFT_PROVIDER=none -DCVC_ENABLE_ASSIMP=OFF -DCVC_ENABLE_MESHER=OFF \
             -DCVC_BUILD_CVCGL=OFF -DCVC_BUILD_EXAMPLES=OFF -DCVC_WASM_PTHREADS=OFF \
-            -DCVC_BUILD_IMAGE_MAGICK_ROUNDTRIP=ON \
+            -DCVC_BUILD_IMAGE_MAGICK_ROUNDTRIP=ON -DCVC_BUILD_STATE_EXEC_WASM_SMOKE=ON \
+            -DCVC_ARI_WASM_TEST_DOCS=ON \
             | tee configure.log
           # CMAKE_PREFIX_PATH lets pkg-config see MagickCore.pc, so the stock FindImageMagick
           # tier makes the targets, the one whose static codec closure the ari link needs
@@ -415,7 +431,8 @@ jobs:
             || { echo "::error::the wasm configure did not find yaml-cpp (the .ari loader is a stub)"; exit 1; }
           grep -q "Ariadne: FTXUI terminal backend ENABLED" configure.log \
             || { echo "::error::the wasm configure did not find ftxui (the terminal backend is a stub)"; exit 1; }
-          cmake --build build-wasm --target ari image_magick_roundtrip_test -j"$(nproc)"
+          cmake --build build-wasm --target ari image_magick_roundtrip_test state_exec_wasm_smoke \
+            -j"$(nproc)"
           ls -la build-wasm/bin/ari.html build-wasm/bin/ari.js build-wasm/bin/ari.wasm
 
       - name: Render the baked tour under node
@@ -429,6 +446,32 @@ jobs:
               || { echo "::error::the wasm ari snapshot is missing '$want'"; exit 1; }
           done
 
+      - name: Make requests from the wasm ari under node
+        # The page's network path: the fetch backend (node's fetch behind an XMLHttpRequest shim)
+        # under the single-threaded build's inline verbs. tests/net_probe.ari signs in (two tokens
+        # from one reply), refreshes with a form credential and fetches with the refreshed token
+        # against tests/net_probe_server.py, and is refused another origin. No token may reach the
+        # output.
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
+          python3 src/ari/tests/net_probe_server.py > probe-port.txt &
+          server=$!
+          trap 'kill $server' EXIT
+          for _ in $(seq 50); do [ -s probe-port.txt ] && break; sleep 0.1; done
+          base="http://127.0.0.1:$(cat probe-port.txt)"
+          timeout 120 "$node" --require ./src/ari/tests/xhr-shim.cjs build-wasm/bin/ari.js \
+            snapshot --net-allow "$base" --width 140 --height 14 /tests/net_probe.ari \
+            --base "$base" 2>&1 | tee probe.txt
+          for want in "device: true" "refresh: true" "me: 200" \
+                      "https://evil.example is not an origin this host allows" '[redacted]'; do
+            grep -qF "$want" probe.txt \
+              || { echo "::error::the wasm ari's network check is missing '$want'"; exit 1; }
+          done
+          if grep -qE 'cvc(ses|ref)_' probe.txt; then
+            echo "::error::a token reached the wasm ari's output"; exit 1
+          fi
+
       - name: Round-trip images through ImageMagick under node
         # The link above only proves the codec libraries resolve. This proves Magick works at run
         # time: its coders are registered (an empty registry once failed every read and write
@@ -438,6 +481,21 @@ jobs:
         run: |
           node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
           "$node" build-wasm/bin/image_magick_roundtrip_test.js
+
+      - name: with-lock without threads under node
+        # The state_exec locks on a build with no pthreads (CVC_WASM_PTHREADS=OFF): a section, a
+        # waiter granted once its holder lets go, an empty lock-query, on both schedulers.
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
+          set +e
+          "$node" build-wasm/bin/state_exec_wasm_smoke.js | tee smoke.txt
+          status=${PIPESTATUS[0]}
+          set -e
+          if [ "$status" -ne 0 ] || ! grep -qx "STATE_EXEC_WASM_OK" smoke.txt; then
+            echo "::error::state_exec_wasm_smoke failed (exit $status)"
+            exit 1
+          fi
 
       - name: Upload the ari web page
         if: steps.paths.outputs.run == 'true'
@@ -1190,7 +1248,7 @@ jobs:
       SAN_CXX_TESTS: >-
         state_exec_scheduler_test state_exec_async_test state_exec_integration_test
         state_exec_coordinator_test ariadne_runtime_test thread_pool_test async_lane_test
-        state_exec_locks_test
+        state_exec_locks_test state_exec_locks_model_test
       # pycvc test scripts (bindings/pycvc/<name>).
       SAN_PY_TESTS: >-
         test_pycvc_exec.py test_pycvc_exec_async.py test_pycvc_exec_coro.py

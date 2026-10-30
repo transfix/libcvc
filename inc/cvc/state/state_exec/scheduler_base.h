@@ -66,6 +66,14 @@ struct execute_options {
   std::unordered_map<std::string, value_t> signal_handlers;
   std::function<void(value_t)> on_complete;
   environment_ptr env;
+  /// What the process holds for its life (a spawned child's intrinsics context, td 4.15): freed
+  /// with the process object, after its frames.
+  std::shared_ptr<void> keep_alive;
+  /// The priority floor (docs/STATE_EXEC_LOCKS.md 7.2): how far the process may raise its own
+  /// priority. Unset: the submit priority. Given by a host, it clamps under every policy.
+  std::optional<int> priority_floor;
+  /// The spawning process (the DSL's spawn), or -1.
+  int parent_pid = -1;
 };
 
 /// Snapshot of a single process for query purposes.
@@ -112,6 +120,15 @@ struct process_info {
   std::optional<std::string> exit_error;
   /// A failed process's exception (docs/STATE_EXEC_EXCEPTIONS.md 2.6).
   std::optional<value_t> exit_exception;
+  /// Its holds (docs/STATE_EXEC_LOCKS.md 5.10), and what it waits for while waiting: "lock
+  /// /<absolute key>" (the request's first key; inspect shows it relative to the caller), "msg
+  /// <channel>", "sleep" or "frame" (gap G-17).
+  std::size_t locks_held = 0;
+  std::optional<std::string> waiting_on;
+  /// The priority the scheduler picks by (the base, or better while it holds a lock a better
+  /// process waits for, under a priority policy), and the floor (docs/STATE_EXEC_LOCKS.md 7.2).
+  int effective_priority = 0;
+  int priority_floor = 0;
 };
 
 /// Fill `info`'s budget-by-kind fields from a process's evaluation stats.
@@ -144,7 +161,42 @@ struct scheduler_stats {
   int killed = 0;
   int failed = 0;
   uint64_t total_steps = 0;
+  /// Spawns whose priority was clamped to the spawner's floor (docs/STATE_EXEC_LOCKS.md 7.2).
+  uint64_t priority_clamped = 0;
 };
+
+/// A process's priorities as get-priority reports them (docs/STATE_EXEC_LOCKS.md 7.1, 7.4).
+struct priority_info {
+  int base = 0;
+  int effective = 0;
+  int floor = 0;
+  scheduling_policy policy = scheduling_policy::round_robin;
+};
+
+/// What a checked priority change came to: applied; unknown (a pid the caller may not see, 7.2);
+/// or refused (better than the caller may set).
+enum class priority_change { applied, unknown, refused };
+
+class scheduler_base;
+
+/// A command posted to a scheduler from another thread, applied between its steps (td Stage 0's
+/// post_control; gap G-20). L2 has set_priority, and a query (pycvc's between-steps reads); Stage
+/// 0 adds kill, pause, resume and signal.
+struct control_cmd {
+  enum class kind { set_priority, query };
+  kind what = kind::set_priority;
+  int value = 0;
+  std::function<void(scheduler_base &)> query;
+};
+
+/// state_exec.policy under `root` (round_robin, priority, priority_rr), else `fallback`; an
+/// unknown value is `fallback` too, and sets *unknown when given.
+scheduling_policy policy_from_state(cvc::state &root, scheduling_policy fallback,
+                                    bool *unknown = nullptr);
+
+namespace detail {
+class lock_home;
+} // namespace detail
 
 /// Abstract scheduler — the surface the DSL intrinsics call through
 /// `intrinsics_context.sched`.  Implemented by both `scheduler` (sync) and
@@ -208,6 +260,50 @@ public:
   /// The steps a CPU millisecond of `proc`'s async calls is charged: its own
   /// async_steps_per_cpu_ms, else the tree's (async_steps_per_cpu_ms_from_state), read now.
   virtual double async_steps_per_cpu_ms(const process &proc) = 0;
+
+  // --- Locks (with-lock: docs/STATE_EXEC_LOCKS.md) ---
+
+  /// The scheduler's lock home, made on first use, with a private manager when the host gave it
+  /// none (design 8.4); null from a scheduler without lock support. Only a with-lock that
+  /// reaches the manager, and lock-query, ask for it: a path a non-locking program can reach
+  /// reads process::locks instead, so such a program never makes a home.
+  virtual detail::lock_home *locks() { return nullptr; }
+  /// Whether the process table's indexes agree with its processes (O(n); for tests: gap G-38).
+  virtual bool check_tables() const { return true; }
+
+  // --- Priorities (docs/STATE_EXEC_LOCKS.md 7.4) ---
+
+  /// A host's change of a process's base priority, unchecked. False for an unknown pid.
+  virtual bool set_priority(int pid, int priority) {
+    (void)pid;
+    (void)priority;
+    return false;
+  }
+  virtual std::optional<priority_info> get_priority(int pid) const {
+    (void)pid;
+    return std::nullopt;
+  }
+  /// The DSL's set-priority: `caller_pid` changes `pid`'s base as design 7.2 allows.
+  virtual priority_change set_priority_checked(int caller_pid, int pid, int priority) {
+    (void)caller_pid;
+    (void)pid;
+    (void)priority;
+    return priority_change::unknown;
+  }
+  /// The DSL's get-priority: nullopt for a pid the caller may not see.
+  virtual std::optional<priority_info> get_priority_as(int caller_pid, int pid) const {
+    (void)caller_pid;
+    (void)pid;
+    return std::nullopt;
+  }
+  virtual bool set_priority_floor(int pid, int floor) {
+    (void)pid;
+    (void)floor;
+    return false;
+  }
+  virtual scheduling_policy policy() const { return scheduling_policy::round_robin; }
+  /// A spawn's priority was clamped to the spawner's floor: count it (gap G-40).
+  virtual void note_priority_clamped() {}
 };
 
 /// limits.async_steps_per_cpu_ms when nothing sets it: what the steps cost, a step being about

@@ -266,6 +266,12 @@ the same `state_exec.defaults.parser.*` and `state_exec.defaults.data.*` keys
 override both. A syntax error raises `pycvc.parse_error`, a `RuntimeError` with
 `.line` and `.col`.
 
+A program's top-level definitions persist from one `run()` to the next. A child it
+spawns (`(spawn "...")`) sees the intrinsics and every function registered with
+`register_fn`, `register_async_fn` or `register_async_coro`, but not the parent's
+definitions. Registered functions live in a scope under the programs' own, so a
+program that rebinds a registered name shadows it.
+
 The rest of state_exec is the C++ API under the C++ names
 (`docs/PYCVC_STATE_EXEC_PARITY.md` lists what is wrapped and what comes next):
 
@@ -319,7 +325,8 @@ pycvc.encode_evaluator_state(root.child("snap"), st)     # snapshot, decode_... 
 ctx = pycvc.intrinsics_context()            # state-get, msg-send, spawn, ... over a tree
 ctx.sched, ctx.root = sched, root
 env = pycvc.builtins.make_default_environment()
-pycvc.register_intrinsics(env, ctx)         # each function keeps ctx alive
+pycvc.register_intrinsics(env, ctx)         # each function (and with-lock) keeps ctx alive
+ctx.lock_default_timeout = 1.0              # with-lock with no :timeout gives up after 1 s
 ```
 
 Contract tests: `test_pycvc_exec.py`, `test_pycvc_state_exec.py`,

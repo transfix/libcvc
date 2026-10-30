@@ -141,6 +141,75 @@ TEST(AriadneHostCli, ExtraFlagsEqualsFormsAndErrors) {
   EXPECT_TRUE(parse_host_args(2, a6).help);
 }
 
+TEST(AriadneHostCli, NetworkFlagsTurnItOnAndCheckTheirOrigins) {
+  const char *none[] = {"ari", "run", "d.ari"};
+  EXPECT_FALSE(parse_host_args(3, none).net.enabled) << "off by default";
+
+  const char *flags[] = {"ari",
+                         "run",
+                         "--net-allow",
+                         "https://tx.wtf",
+                         "--net-allow=http://127.0.0.1:8080",
+                         "--net-policy",
+                         "nicotina.policy",
+                         "--credential-store",
+                         "nicotina",
+                         "main.ari",
+                         "--net-allow",
+                         "https://evil.example"};
+  HostOptions o = parse_host_args(12, flags);
+  ASSERT_TRUE(o.error.empty()) << o.error;
+  EXPECT_TRUE(o.net.enabled);
+  EXPECT_EQ(o.net.allow, (std::vector<std::string>{"https://tx.wtf", "http://127.0.0.1:8080"}));
+  EXPECT_EQ(o.net.policy_files, (std::vector<std::string>{"nicotina.policy"}));
+  EXPECT_EQ(o.net.credential_store, "nicotina");
+  EXPECT_EQ(o.doc, "main.ari");
+  EXPECT_EQ(o.doc_args, (std::vector<std::string>{"--net-allow", "https://evil.example"}))
+      << "after the document they are the document's";
+  EXPECT_NE(misplaced_flag_note("ari", o.doc_args).find("'--net-allow'"), std::string::npos);
+
+  const char *bare[] = {"arigl", "run", "--net", "d.ari"};
+  o = parse_host_args(4, bare);
+  EXPECT_TRUE(o.net.enabled);
+  EXPECT_TRUE(o.net.allow.empty());
+  const char *store_only[] = {"ari", "run", "--credential-store", "/tmp/c", "d.ari"};
+  EXPECT_TRUE(parse_host_args(5, store_only).net.enabled) << "a credential store implies --net";
+
+  const char *url[] = {"ari", "run", "--net-allow", "https://tx.wtf/api", "d.ari"};
+  EXPECT_NE(parse_host_args(5, url).error.find("--net-allow: 'https://tx.wtf/api' is a URL"),
+            std::string::npos);
+  const char *creds[] = {"ari", "run", "--net-allow", "https://me:pw@tx.wtf", "d.ari"};
+  EXPECT_NE(parse_host_args(5, creds).error.find("user info"), std::string::npos);
+  const char *missing[] = {"ari", "run", "--net-allow"};
+  EXPECT_NE(parse_host_args(3, missing).error.find("--net-allow needs a value"), std::string::npos)
+      << parse_host_args(3, missing).error;
+  const char *valued[] = {"ari", "run", "--net=yes", "d.ari"};
+  EXPECT_NE(parse_host_args(4, valued).error.find("--net takes no value"), std::string::npos)
+      << parse_host_args(4, valued).error;
+  const char *guess[] = {"ari", "run", "--net-al", "https://tx.wtf", "d.ari"};
+  EXPECT_NE(parse_host_args(5, guess).error.find("unknown option '--net-al'"), std::string::npos)
+      << "no guessing at an abbreviated flag: " << parse_host_args(5, guess).error;
+  EXPECT_NE(host_flags_help().find("--net-allow ORIGIN"), std::string::npos);
+
+  const char *env[] = {
+      "ari",    "run",  "--credential-env", "cvcpkg=CVCPKG_TOKEN", "--credential-env",
+      "ci=X_1", "d.ari"};
+  o = parse_host_args(7, env);
+  ASSERT_TRUE(o.error.empty()) << o.error;
+  EXPECT_TRUE(o.net.enabled) << "--credential-env implies --net";
+  ASSERT_EQ(o.net.credential_env.size(), 2u);
+  EXPECT_EQ(o.net.credential_env[0],
+            (std::pair<std::string, std::string>{"cvcpkg", "CVCPKG_TOKEN"}));
+  EXPECT_EQ(o.net.credential_env[1].second, "X_1");
+  for (const char *bad :
+       {"CVCPKG_TOKEN", "cvcpkg=", "=CVCPKG_TOKEN", "bad name=V", "c=1X", "c=X-Y"}) {
+    const char *argv[] = {"ari", "run", "--credential-env", bad, "d.ari"};
+    EXPECT_NE(parse_host_args(5, argv).error.find("--credential-env is NAME=VAR"),
+              std::string::npos)
+        << bad;
+  }
+}
+
 // ── parsing a document's arguments ──────────────────────────────────────────────────────────────
 
 TEST(AriadneHostCli, GraphicsImageAndCellSizeFlags) {
@@ -408,6 +477,66 @@ TEST(AriadneDocArgs, AModuleSeesThemOnlyThroughAReadOnlyGrant) {
   EXPECT_EQ(val(app, "ui.docs.p.includes.denied.seen"), "none");
   EXPECT_EQ(val(app, "ui.docs.p.includes.granted.seen_argv"), "no"); // granted args, not argv
   EXPECT_EQ(val(app, "ui.docs.p.includes.denied.seen_argv"), "no");
+}
+
+// A hole on an interior node grants the subtree under it: a module's programs read the parent's
+// parsed reply through it, write it only through a read-write grant, and reach nothing else.
+TEST(AriadneLinkHoles, ASubtreeGrantReachesItsDescendantsOnly) {
+  REQUIRE_YAML();
+  const fs::path dir = test_dir("subtree");
+  const fs::path frag = write(
+      dir, "view.ari",
+      "init: |\n"
+      "  (state-set \"first\" (state-get \"tree.packages.0.name\"))\n"
+      "  (state-set \"count\" (length (state-children \"tree.packages\")))\n"
+      "  (state-set \"meta\" (if (state-exists \"tree.meta\")\n"
+      "                        (get-attr (state-data-get \"tree.meta\") \"total\") \"none\"))\n"
+      "  (state-set \"peek\" (if (state-exists \"search.secret\") \"leak\" \"none\"))\n"
+      "  (state-set \"tree.packages.0.seen\" \"yes\")\n"
+      "root:\n  - text: view\n");
+  const fs::path doc = write(dir, "parent.ari",
+                             "meta: {min_libcvc: 3.4.0}\n"
+                             "init: |\n"
+                             "  (state-set \"search.res.packages.0.name\" \"zstd\")\n"
+                             "  (state-set \"search.res.packages.1.name\" \"lz4\")\n"
+                             "  (state-data-set \"search.res.meta\" (dict \"total\" 2))\n"
+                             "  (state-set \"search.secret\" \"s3cret\")\n"
+                             "root:\n"
+                             "  - load: " +
+                                 frag.string() +
+                                 "\n"
+                                 "    as: ro\n"
+                                 "    link:\n"
+                                 "      tree: {to: search.res, mode: ro}\n"
+                                 "  - load: " +
+                                 frag.string() +
+                                 "\n"
+                                 "    as: rw\n"
+                                 "    link:\n"
+                                 "      tree: search.res\n"
+                                 "  - load: " +
+                                 frag.string() +
+                                 "\n"
+                                 "    as: denied\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.p");
+  art.set_backend(be);
+  art.load(doc.string());
+  art.runtime().render(); // the reconcile mounts the modules, wires the holes, runs their init:
+  for (const char *as : {"ro", "rw"}) {
+    const std::string at = std::string("ui.docs.p.includes.") + as + ".";
+    EXPECT_EQ(val(app, at + "first"), "zstd") << as;
+    EXPECT_EQ(val(app, at + "count"), "4") << as; // packages.0, .0.name, .1, .1.name
+    EXPECT_EQ(val(app, at + "meta"), "2") << as;
+    EXPECT_EQ(val(app, at + "peek"), "none") << as; // the parent outside the target stays out
+  }
+  // Only the read-write grant wrote the parent; the read-only one's write stayed in the module.
+  EXPECT_EQ(val(app, "ui.docs.p.search.res.packages.0.seen"), "yes");
+  EXPECT_EQ(val(app, "ui.docs.p.includes.ro.tree.packages.0.seen"), "yes");
+  EXPECT_EQ(val(app, "ui.docs.p.includes.rw.tree.packages.0.seen"), "");
+  EXPECT_EQ(val(app, "ui.docs.p.includes.denied.first"), "");
+  EXPECT_EQ(val(app, "ui.docs.p.includes.denied.count"), "0");
 }
 
 // ── host verbs and init: diagnostics ────────────────────────────────────────────────────────────

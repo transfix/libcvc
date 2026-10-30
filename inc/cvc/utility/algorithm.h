@@ -33,6 +33,7 @@
 #include <cvc/core/types.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/volume/volmagick.h>
+#include <memory>
 
 // Forward declaration to avoid circular dependency
 #ifdef CVC_ENABLE_MESHER
@@ -74,6 +75,35 @@ volume sdf(app &ctx, const geometry &geom,
              Flip normals to invert inside/outside (true = flip, false = no flip)
            */
            bool flipNormals = false);
+
+// sdf() a slice at a time, for a caller that must not block (fe_lab's load task, stepped on the
+// app's scheduler). SDF_V2 runs its distance transform's stages -- rasterizing the triangles into
+// cells, marking the voxels near the surface, the three 1-D passes, the near and the far
+// distances -- in budgets of units (a cell a triangle touches, a voxel), each step ending where
+// its stage does. SDF_IGL builds its AABB tree and its winding-number hierarchy (a step each),
+// then queries the grid's nodes a range at a time (32 units a node). Either way the result is
+// sdf()'s, bit for bit. SDF_V1 runs in one step. The geometry is shared, so the stepper may
+// outlive its caller's. step(budget) returns true once the volume is ready for take(); it throws
+// where sdf() would, and after a throw every later step rethrows.
+class sdf_stepper {
+public:
+  sdf_stepper(app &ctx, std::shared_ptr<const geometry> geom, const dimension &dim,
+              const bounding_box &bbox, sdf_algorithm algorithm = SDF_V2, bool flipNormals = false);
+  ~sdf_stepper();
+  sdf_stepper(const sdf_stepper &) = delete;
+  sdf_stepper &operator=(const sdf_stepper &) = delete;
+  bool step(std::size_t budget);
+  bool done() const;
+  double progress() const;
+  // the distance transform's ("cells", ..., "far distances"), SDF_IGL's ("tree", "winding",
+  // "distances"), then "done"
+  const char *phase() const;
+  volume take();
+
+private:
+  struct impl;
+  std::unique_ptr<impl> _impl;
+};
 #endif // CVC_ENABLE_SDF
 
 #ifdef CVC_ENABLE_MESHER
@@ -148,6 +178,77 @@ geometry tetrahedralize2(const volume &vol, double isovalue_outer, double isoval
                          extraction_method method = DUALLIB,
                          improvement_method improve_method = NO_IMPROVE,
                          normal_type normals = BSPLINE_CONVOLUTION, int improve_iterations = 0);
+
+// --------------
+// mesher_stepper
+// --------------
+// Purpose:
+//   iso(), tetrahedralize(), hexahedralize() and tetrahedralize2() a slice at a time, for a caller
+//   that must not block (fe_lab's meshing task, stepped on the app's scheduler). Make one with the
+//   function's own arguments and defaults -- mesher_stepper::iso(...), ::tetrahedralize(...),
+//   ::hexahedralize(...), either ::tetrahedralize2(...) -- step(budget) until it returns true, and
+//   take() the geometry the function returns: the same points and elements in the same order,
+//   however the work is sliced (the function runs the same steps to the end).
+//   A step does about `budget` units -- a voxel, an octree cell, a leaf's edge, a vertex of a
+//   smoothing round, 64 entries of an array being cleared -- and runs past it by at most one
+//   bounded piece (a cell, a leaf, a hexahedron's templates); budget 0 runs to the end. A few
+//   steps allocate, grow (std::vector growth while the mesh is built) or free one volume- or
+//   mesh-sized array, under a millisecond each at 65^3. Coarser pieces: resampling a volume whose
+//   dimensions are not (2^n+1)^3 (tens of ms at 65^3: give it 2^n+1 samples a side to avoid it)
+//   and converting one that is not float to float, interpolating the property volume,
+//   FASTCONTOURING and LIBISOCONTOUR extraction, and a whole round of the EDGE_CONTRACT, JOE_LIU,
+//   MINIMAL_VOL and OPTIMIZATION improvements. phase() names the kind of unit the next step spends,
+//   a static string whose cost per unit changes where it does ("preparing", "loading", "octree",
+//   "spline", "collapse", "qef", "traverse", "extracting", "hexahedra", "untangling", "improving",
+//   "properties", "output"; "done"); progress() is monotone in [0,1], 1 once done. step() throws
+//   where the function would, and every step after that rethrows it. The volumes are held by
+//   copy-on-write copies, so the caller's may go away. A moved-from stepper may only be destroyed
+//   or assigned to.
+// ---- Change History ----
+// 10/29/2026 -- Joe R. -- Creation.
+class mesher_stepper {
+public:
+  static mesher_stepper iso(const volume &vol, double isovalue, extraction_method method = DUALLIB,
+                            int improve_iterations = 0, normal_type normals = BSPLINE_CONVOLUTION,
+                            boost::optional<const volume &> propertyVol = boost::none);
+  static mesher_stepper tetrahedralize(const volume &vol, double isovalue,
+                                       extraction_method method = DUALLIB,
+                                       improvement_method improve_method = NO_IMPROVE,
+                                       normal_type normals = BSPLINE_CONVOLUTION,
+                                       int improve_iterations = 0,
+                                       boost::optional<const volume &> propertyVol = boost::none);
+  static mesher_stepper hexahedralize(const volume &vol, double isovalue,
+                                      extraction_method method = DUALLIB,
+                                      improvement_method improve_method = NO_IMPROVE,
+                                      normal_type normals = BSPLINE_CONVOLUTION,
+                                      int improve_iterations = 0,
+                                      boost::optional<const volume &> propertyVol = boost::none);
+  static mesher_stepper tetrahedralize2(const volume &vol, double isovalue,
+                                        extraction_method method = DUALLIB,
+                                        improvement_method improve_method = NO_IMPROVE,
+                                        normal_type normals = BSPLINE_CONVOLUTION,
+                                        int improve_iterations = 0);
+  static mesher_stepper tetrahedralize2(const volume &vol, double isovalue_outer,
+                                        double isovalue_inner, extraction_method method = DUALLIB,
+                                        improvement_method improve_method = NO_IMPROVE,
+                                        normal_type normals = BSPLINE_CONVOLUTION,
+                                        int improve_iterations = 0);
+  mesher_stepper(mesher_stepper &&) noexcept;
+  mesher_stepper &operator=(mesher_stepper &&) noexcept;
+  ~mesher_stepper();
+  mesher_stepper(const mesher_stepper &) = delete;
+  mesher_stepper &operator=(const mesher_stepper &) = delete;
+  bool step(std::size_t budget);
+  bool done() const;
+  double progress() const;
+  const char *phase() const;
+  geometry take();
+
+private:
+  struct impl;
+  explicit mesher_stepper(std::unique_ptr<impl> i);
+  std::unique_ptr<impl> _impl;
+};
 #endif // CVC_ENABLE_MESHER
 
 #if 0

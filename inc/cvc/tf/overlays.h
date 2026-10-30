@@ -9,7 +9,8 @@
 */
 
 // cvc::tf overlays — the data layers the `tf_editor` widget draws under its curves: a histogram,
-// the contour spectrum and the contour tree of the volume a transfer function is applied to.
+// the contour spectrum and the contour tree of the volume (or the field on a mesh) a transfer
+// function is applied to.
 //
 // They are supplied FROM OUTSIDE the widget (roadmap CVCGL-UI-DSL §10.3; ColorTable2's own TODO):
 // whoever owns the volume computes them — the cvcGL scene realizer for a scene volume node, or an
@@ -42,6 +43,7 @@
 namespace cvc {
 class state;
 class volume;
+struct contour_mesh; // cvc/volume/contour_mesh.h
 namespace tf {
 
 // The contour spectrum (Bajaj, Pascucci & Schikore 1997): signature functions of the isovalue,
@@ -121,6 +123,12 @@ struct overlay_options {
   // out (0 = unsimplified): a noisy volume has a node per local extremum, far more than a widget
   // can draw or a state string should carry.
   int tree_max_nodes = 1500;
+  // The range the layers are computed over, in place of the data's own [min, max]: for a producer
+  // that publishes its own range and histogram (a FEM node's colour range, say), so the spectrum's
+  // samples line up with them. The range phase then costs nothing, and the range comes back as
+  // given (a reversed one swapped).
+  bool has_range = false;
+  double range_lo = 0.0, range_hi = 1.0;
 };
 
 // Compute the requested overlays (bits) of `vol`'s first variable over [vol.min(), vol.max()].
@@ -132,6 +140,14 @@ struct overlay_options {
 // histogram are written; the caller must not mutate the voxels meanwhile). It runs an overlay_job
 // (below) to completion.
 overlays compute_overlays(const volume &vol, unsigned bits = overlay_all,
+                          const overlay_options &opt = {});
+
+// The same for a scalar field on a mesh (cvc/volume/contour_mesh.h: one value per point, linear
+// over each tetrahedron, or each triangle of a surface): the range of the finite values, their
+// histogram, and the mesh contour spectrum and contour tree (cvc::compute_contour_spectrum and
+// cvc::compute_contour_tree on a contour_mesh; max_dim does not apply). On a surface the spectrum's
+// area is the contours' length and its volumes are areas.
+overlays compute_overlays(const contour_mesh &mesh, unsigned bits = overlay_all,
                           const overlay_options &opt = {});
 
 // compute_overlays, a slice at a time: what an overlay task steps on the app's state_exec scheduler
@@ -162,10 +178,17 @@ overlays compute_overlays(const volume &vol, unsigned bits = overlay_all,
 // the cancel() on. A cancelled job's status() is "cancelled". The job keeps a shallow copy of the
 // volume until the last builder has its own (do not write the voxels meanwhile). It may move
 // between threads between steps; the other members are for the thread that steps it.
+//
+// A job on a mesh runs the same phases over its values (the range: one unit per value scanned;
+// the histogram: one per value) and the mesh builders (cvc::mesh_contour_spectrum_builder and
+// cvc::mesh_contour_tree_builder, their units, with the same phase names). It keeps the shared
+// mesh until the last builder has it.
 class overlay_job {
 public:
   explicit overlay_job(const volume &vol, unsigned bits = overlay_all,
                        const overlay_options &opt = {});
+  overlay_job(std::shared_ptr<const contour_mesh> mesh, unsigned bits = overlay_all,
+              const overlay_options &opt = {});
   ~overlay_job();
   overlay_job(const overlay_job &) = delete;
   overlay_job &operator=(const overlay_job &) = delete;

@@ -79,6 +79,9 @@ public:
   // ask "was an HTTP backend compiled in?" without special-casing the null build. See
   // have_http_backend.
   virtual bool is_real() const { return true; }
+  // Whether the transport follows redirects itself whatever follow_redirects says (the browser's
+  // fetch). A policy-checked send cannot see those hops; see send(req, policy).
+  virtual bool follows_redirects_itself() const { return false; }
 };
 
 // Send `req` through the process-global client (the compiled backend, or one a host injected via
@@ -86,6 +89,22 @@ public:
 // set_http_client cannot pull it out from under an in-flight call. This is the primary entry — the
 // http URI handler and the cache both call it.
 HttpResponse send(const HttpRequest &req);
+
+class NetPolicy; // net_policy.h
+
+// send(), checked against `policy`: a request whose URL's origin the policy does not allow is not
+// made, and the reply says so (ok false, status 0, `error` naming the origin). Redirects are
+// followed here rather than by the transport, each hop checked the same way: a hop to an origin
+// the policy does not allow ends the request with that error, and a hop to another origin drops
+// the Authorization, Cookie and Proxy-Authorization headers. 303, and 301/302 after a POST, turn
+// into a bodyless GET, as browsers do; 307/308 keep the method and body. In a browser
+// (follows_redirects_itself) the browser follows them and only the first URL is checked; CORS and
+// the browser's own rule of dropping Authorization on a cross-origin hop bound the rest.
+HttpResponse send(const HttpRequest &req, const NetPolicy &policy);
+
+// The value of the first response-header line named `name` (case-insensitive), trimmed; "" when
+// there is none.
+std::string response_header(const std::vector<std::string> &lines, const std::string &name);
 
 // Replace the process-global client — the seam a HOST or a TEST uses to inject a fake transport
 // (canned responses, request capture) with no live network. Pass nullptr to restore the compiled

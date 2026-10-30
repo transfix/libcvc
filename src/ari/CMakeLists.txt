@@ -19,7 +19,7 @@ else()
   # In-tree: re-import the Boost targets cvc links PUBLIC so its transitive link evaluates in
   # this directory scope (src/arisrv/CMakeLists.txt explains why).
   if(NOT TARGET Boost::filesystem)
-    find_package(Boost REQUIRED COMPONENTS thread date_time regex filesystem
+    find_package(Boost REQUIRED COMPONENTS thread date_time regex filesystem program_options
                  OPTIONAL_COMPONENTS system chrono)
   endif()
 endif()
@@ -34,6 +34,27 @@ endif()
 include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcInstallRpath.cmake")
 cvc_set_install_rpath(ari bin)
 install(TARGETS ari RUNTIME DESTINATION bin COMPONENT ari)
+
+# The network flags end to end (ari_net_test.cpp): the built ari, run as a launcher would, against
+# localhost servers. In-tree only, beside the GTest of the libcvc build, and not in a browser build.
+if(CVC_BUILD_TESTS AND NOT EMSCRIPTEN AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
+  add_executable(ari_net_test ari_net_test.cpp)
+  target_link_libraries(ari_net_test PRIVATE cvc GTest::gtest GTest::gtest_main)
+  add_dependencies(ari_net_test ari)
+  # As src/cvc-cli/CMakeLists.txt does (its note explains): GoogleTest in this directory's scope,
+  # discovery at test time on macOS and with a generous timeout on Windows.
+  include(GoogleTest)
+  if(APPLE)
+    macro(gtest_discover_tests)
+      _gtest_discover_tests(${ARGV} DISCOVERY_MODE PRE_TEST DISCOVERY_TIMEOUT 120)
+    endmacro()
+  elseif(WIN32)
+    macro(gtest_discover_tests)
+      _gtest_discover_tests(${ARGV} DISCOVERY_TIMEOUT 120)
+    endmacro()
+  endif()
+  gtest_discover_tests(ari_net_test PROPERTIES ENVIRONMENT "ARI_BINARY=$<TARGET_FILE:ari>")
+endif()
 
 if(EMSCRIPTEN)
   # The browser build: ari.js/ari.wasm plus ari.html, an xterm.js page wired to the module's
@@ -76,6 +97,15 @@ if(EMSCRIPTEN)
   ari_wasm_page(ari "ari"
     "Tab / Enter / arrows · mouse · F10 menu · Ctrl-C asks, twice quits"
     -sEXPORTED_FUNCTIONS=_main,_ftxui_on_resize)
+  # CI's network check (ci.yml, "ari terminal backend (wasm, node)") runs tests/net_probe.ari
+  # against tests/net_probe_server.py under node: the probe goes into MEMFS at /tests. Off by
+  # default, so the published page does not carry it.
+  option(CVC_ARI_WASM_TEST_DOCS "Embed src/ari/tests at /tests in the wasm ari (CI)" OFF)
+  if(CVC_ARI_WASM_TEST_DOCS)
+    target_link_options(ari PRIVATE "--embed-file=${CMAKE_CURRENT_SOURCE_DIR}/tests@/tests")
+    set_property(TARGET ari APPEND PROPERTY LINK_DEPENDS
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/net_probe.ari")
+  endif()
   # ari_tvision: the same runner and document on the tvision desktop (movable, overlapping
   # windows, a menu bar and a status line), when libcvc has the tvision backend: on wasm that is
   # cvcpkg's tvision with its browser console (src/cvc/CMakeLists.txt). Out of ALL like the gallery

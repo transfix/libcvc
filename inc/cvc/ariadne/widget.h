@@ -33,6 +33,7 @@ enum class Kind {
   Window,         // a floating window (title bar / move / resize / collapse)
   Text,           // static caption OR a read-only view of a state path
   Separator,      // a horizontal rule
+  Progress,       // a read-only bar: the number at a state path, over [lo, hi]
   Checkbox,       // bound bool state
   SliderInt,      // bound int state, [ilo, ihi]
   SliderFloat,    // bound double state, [lo, hi]
@@ -46,6 +47,7 @@ enum class Kind {
   Custom,         // a registered custom widget type (custom_type + props); §extensibility
   WindowsMenu,    // the built-in Windows menu (reopen a closed window): placed here in a menubar,
                   // or, outside one, the document's setting for it (bdef false: no such menu)
+  Radio,          // bound enum-as-text state, every option shown (a combo's fields; radio_row)
 };
 
 // ---------------------------------------------------------------------------
@@ -132,7 +134,10 @@ struct Widget {
   std::string id;    // stable widget id suffix; defaults to `label`
   std::string label; // display text / window title / menu name
   std::string bind;  // cvc::state path for bound widgets
-  std::string on;    // event name for action widgets (Button / MenuItemAction)
+  // The event (a name or a '(' program) an action widget (Button / MenuItemAction) raises; on a
+  // bound widget (checkbox, sliders, combo, input_text/int, color, tf_editor, a bound menu_item),
+  // raised after each committed write, so the handler sees the new value in state.
+  std::string on;
   // §4.6 widget-level pointer handlers: each a two-shape value (an event name OR a program starting
   // with '(') fired for THIS widget — enqueued in the walk when the backend reports the matching
   // per-item pointer state, like Button's `on`. Any widget kind may carry any of them.
@@ -198,8 +203,9 @@ struct Widget {
   // drag. `commit: release` (true here) writes once, when the drag ends: for a key whose change is
   // too costly to redo every frame.
   bool commit_on_release = false;
-  std::string sdef; // Combo default (an option label, or — with `values` — a value)
-  std::vector<std::string> options; // Combo options (the DISPLAYED labels)
+  std::string sdef; // Combo / Radio default (an option label, or — with `values` — a value)
+  std::vector<std::string> options; // Combo / Radio options (the DISPLAYED labels)
+  bool radio_row = false;           // Radio: the options side by side (`radio_row:`), else stacked
   // §4 Combo value mapping: a parallel list the same length as `options`, so the bound key holds
   // `values[i]` (e.g. an int) while the combo shows `options[i]`. Empty = the key holds the option
   // TEXT (the default). Ignored when `options_expr` computes the options (no parallel values).
@@ -234,6 +240,10 @@ struct Widget {
   // aspect).
   std::string src;
   double img_size = 256.0;
+
+  // Kind::Progress: the bar is the number at `bind` placed in [lo, hi] (clamped); `overlay` is a
+  // state path (or a computed expression) whose text is drawn over the bar, else the percent.
+  std::string overlay;
 
   // §12 module mount (load:): when non-empty, this widget is a MOUNT POINT — a relative
   // state-path segment (e.g. "includes.stats") appended to the enclosing scope, so its whole
@@ -360,6 +370,18 @@ inline Widget separator() {
   return w;
 }
 
+inline Widget progress(std::string label, std::string bind, double lo = 0.0, double hi = 1.0,
+                       std::string overlay = "") {
+  Widget w;
+  w.kind = Kind::Progress;
+  w.label = std::move(label);
+  w.bind = std::move(bind);
+  w.lo = lo;
+  w.hi = hi;
+  w.overlay = std::move(overlay);
+  return w;
+}
+
 inline Widget checkbox(std::string label, std::string bind, bool def = false) {
   Widget w;
   w.kind = Kind::Checkbox;
@@ -401,6 +423,16 @@ inline Widget combo(std::string label, std::string bind, std::vector<std::string
   w.bind = std::move(bind);
   w.options = std::move(options);
   w.sdef = std::move(def);
+  return w;
+}
+
+// A combo with every option shown as a radio button, stacked or (`row`) side by side. It stores
+// what a combo stores (the option text, or with `values` the mapped value).
+inline Widget radio(std::string label, std::string bind, std::vector<std::string> options,
+                    std::string def = std::string(), bool row = false) {
+  Widget w = combo(std::move(label), std::move(bind), std::move(options), std::move(def));
+  w.kind = Kind::Radio;
+  w.radio_row = row;
   return w;
 }
 

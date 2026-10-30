@@ -4,8 +4,10 @@
 #include <atomic>
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/data_job.h>
+#include <cvc/state/state_exec/detail/lock_home.h>
 #include <cvc/state/state_exec/evaluator.h>
 #include <cvc/state/state_exec/exceptions.h>
+#include <cvc/state/state_exec/heap.h> // track_captured_env
 #include <cvc/state/state_exec/parser.h>
 #include <thread>
 
@@ -340,6 +342,9 @@ value_t evaluator::eval_form(const value_t &expr, const environment_ptr &env) {
   auto *func_val = env->lookup(name);
   if (!func_val)
     throw dsl_error("NameError", "unknown function: " + name);
+  // with-lock waits and releases through a scheduler's process (docs/STATE_EXEC_LOCKS.md 5.5).
+  if (detail::lock_ops_of(*func_val))
+    throw dsl_error("TypeError", "with-lock needs a scheduler");
 
   // Evaluate arguments
   spare_values evaled_values(spare_vectors_, args.size());
@@ -464,6 +469,9 @@ value_t evaluator::do_lambda(const std::vector<value_t> &args, const environment
   cls->variadic = variadic;
   cls->body = std::move(body);
   cls->env_snapshot = env;
+  // Bound back into env (a defun, a method, a lambda set there), it is a cycle that only the
+  // collector frees, as in the stackless evaluator.
+  track_captured_env(env);
   return value_t{std::move(cls)};
 }
 

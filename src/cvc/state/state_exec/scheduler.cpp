@@ -18,6 +18,55 @@ scheduler::scheduler(scheduling_policy policy)
     : policy_(policy), evaluator_(builtins::make_default_environment()),
       procs_(policy != scheduling_policy::round_robin) {}
 
+scheduler::~scheduler() { home_.reset(); }
+
+void scheduler::set_lock_manager(std::shared_ptr<lock_manager> mgr) {
+  if (home_)
+    for (const auto &[pid, p] : procs_.all())
+      if (p->locks && (!p->locks->holds.empty() || p->locks->ticket))
+        throw std::logic_error("set_lock_manager: process " + std::to_string(pid) +
+                               " holds or waits for a lock");
+  home_.reset();
+  home_ = std::make_unique<detail::lock_home>(std::move(mgr), lock_ops_);
+}
+
+detail::lock_home *scheduler::locks() {
+  if (!home_)
+    home_ = std::make_unique<detail::lock_home>(std::make_shared<lock_manager>(), lock_ops_);
+  return home_.get();
+}
+
+bool scheduler::lock_ops_impl::park_lock(process &p) {
+  if (p.status != process_status::ready && p.status != process_status::running)
+    return false;
+  if (p.status == process_status::running) // close the running slice, as receive_message does
+    p.accumulated_time +=
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - p.last_run_start).count();
+  s.procs_.set_status(p, process_status::waiting); // a lock waiter; its deadline a timer
+  return true;
+}
+
+void scheduler::lock_ops_impl::ready_lock_waiter(process &p) {
+  s.procs_.set_status(p, process_status::ready);
+}
+
+void scheduler::lock_ops_impl::relevel(process &p) { s.procs_.update(p); }
+
+std::size_t scheduler::lock_ops_impl::lock_expired_count() const {
+  return s.procs_.lock_expired_count();
+}
+
+void scheduler::lock_ops_impl::take_lock_expired(std::vector<process *> &out) {
+  s.procs_.take_lock_expired(out);
+}
+
+process *scheduler::lock_ops_impl::find_process(int pid) { return s.procs_.find(pid); }
+
+void scheduler::lock_ops_impl::for_each_process(const std::function<void(process &)> &fn) {
+  for (const auto &[pid, p] : s.procs_.all())
+    fn(*p);
+}
+
 const process_ptr &scheduler::no_process() {
   static const process_ptr none;
   return none;
@@ -119,6 +168,26 @@ static std::optional<double> read_rate_setting(cvc::state *root, const std::stri
   return digits ? std::optional<double>(whole) : std::nullopt;
 }
 
+scheduling_policy policy_from_state(cvc::state &root, scheduling_policy fallback, bool *unknown) {
+  if (unknown)
+    *unknown = false;
+  const cvc::state *node = root.findDescendant("state_exec.policy");
+  if (!node)
+    return fallback;
+  const std::string v = const_cast<cvc::state *>(node)->value();
+  if (v.empty())
+    return fallback;
+  if (v == "round_robin")
+    return scheduling_policy::round_robin;
+  if (v == "priority")
+    return scheduling_policy::priority;
+  if (v == "priority_rr")
+    return scheduling_policy::priority_rr;
+  if (unknown)
+    *unknown = true;
+  return fallback;
+}
+
 double async_steps_per_cpu_ms_from_state(cvc::state &root, const std::string &scheduler_id) {
   constexpr const char *suffix = ".limits.async_steps_per_cpu_ms";
   if (!scheduler_id.empty())
@@ -195,6 +264,12 @@ int scheduler::execute(const std::string &script, const execute_options &opts) {
   proc.gid = opts.gid;
   proc.root_path = opts.root_path;
   proc.owner = opts.owner;
+  // The floor (design 7.2): a host's, explicit, or the submit priority; and what the process
+  // keeps alive (a spawned child's context, td 4.15).
+  proc.priority_floor = opts.priority_floor.value_or(opts.priority);
+  proc.priority_floor_explicit = opts.priority_floor.has_value();
+  proc.parent_pid = opts.parent_pid;
+  proc.keep_alive = opts.keep_alive;
   proc.max_steps = opts.max_steps;
   proc.max_time = opts.max_time;
   proc.max_memory = opts.max_memory;
@@ -227,6 +302,12 @@ int scheduler::execute(const value_t &expr, const execute_options &opts) {
   proc.gid = opts.gid;
   proc.root_path = opts.root_path;
   proc.owner = opts.owner;
+  // The floor (design 7.2): a host's, explicit, or the submit priority; and what the process
+  // keeps alive (a spawned child's context, td 4.15).
+  proc.priority_floor = opts.priority_floor.value_or(opts.priority);
+  proc.priority_floor_explicit = opts.priority_floor.has_value();
+  proc.parent_pid = opts.parent_pid;
+  proc.keep_alive = opts.keep_alive;
   proc.max_steps = opts.max_steps;
   proc.max_time = opts.max_time;
   proc.max_memory = opts.max_memory;
@@ -444,11 +525,16 @@ int scheduler::step() {
 
 int scheduler::step_once() {
   detail::check_not_in_async_kernel("scheduler::step");
-  // Wake sleeping processes (and timed waits) whose deadline has passed.
+  // Wake sleeping processes (and timed waits) whose deadline has passed; time out the lock waits
+  // whose deadline passed (a program with no timer pays nothing for them).
   if (procs_.timed_count() > 0) {
     const clock::time_point now = now_for_step();
-    if (procs_.timer_due(now) && procs_.wake_due(now) > 0)
+    if (procs_.timer_due(now) && procs_.wake_due(now, &lock_expired_) > 0) {
       chain_valid_ = false; // the wakes are no step's time
+      if (!lock_expired_.empty() && home_)
+        home_->wait_expired(lock_expired_);
+      lock_expired_.clear();
+    }
   }
 
   // Check for value changes on watched state paths.
@@ -564,8 +650,10 @@ void scheduler::stop() { stop_requested_ = true; }
 
 bool scheduler::has_runnable() const {
   // Ready or running, or waiting with a wake_time (a sleeper becomes runnable at its deadline),
-  // or waiting for a message (it becomes runnable when one arrives).
-  return procs_.runnable_count() > 0 || procs_.sleeping_count() > 0 || procs_.receiving_count() > 0;
+  // or waiting for a message (it becomes runnable when one arrives), or for a lock (when it is
+  // granted or its deadline passes; design 8.7).
+  return procs_.runnable_count() > 0 || procs_.sleeping_count() > 0 ||
+         procs_.receiving_count() > 0 || procs_.lock_waiting_count() > 0;
 }
 
 void scheduler::queue_watch_event(int pid, process::watch_event evt) {
@@ -797,6 +885,12 @@ void scheduler::check_limits(process &proc, clock::time_point now) {
 
 void scheduler::terminate_process(process &proc, value_t result) {
   procs_.set_status(proc, process_status::terminated);
+  // Its locks go before on_complete runs (design 5.6); a hold left now is a leak, counted.
+  if (const detail::lock_test_hooks *hooks = detail::lock_test_hooks_get();
+      hooks && hooks->before_terminate_end)
+    hooks->before_terminate_end(proc);
+  if (proc.locks && home_)
+    home_->process_ended(proc, false);
   proc.exit_code = std::move(result);
   proc.state.stats.mark_complete();
   if (proc.on_complete) {
@@ -807,6 +901,8 @@ void scheduler::terminate_process(process &proc, value_t result) {
 
 void scheduler::kill_process(process &proc, const std::string &reason) {
   procs_.set_status(proc, process_status::killed);
+  if (proc.locks && home_)
+    home_->process_ended(proc, true); // a kill or a budget: the sections it was in are abandoned
   proc.exit_error = reason;
   proc.state.stats.mark_complete();
   release_if_idle(proc);
@@ -814,6 +910,8 @@ void scheduler::kill_process(process &proc, const std::string &reason) {
 
 void scheduler::fail_process(process &proc, value_t exc, std::exception_ptr original) {
   procs_.set_status(proc, process_status::failed);
+  if (proc.locks && home_)
+    home_->process_ended(proc, true);
   proc.exit_error = exception_summary(exc);
   proc.exit_exception = std::move(exc);
   proc.exit_original = std::move(original);
@@ -970,6 +1068,18 @@ bool scheduler::kill(int pid) {
 }
 
 int scheduler::restore(process_ptr proc) {
+  // A stack that holds a lock (a lock_body with its hold, or a lock_enter woken with a grant)
+  // can't be restored: no snapshot makes one, and its hold is no restored process's (protocol
+  // 5.11; LW-12).
+  for (const eval_frame &f : proc->state.stack) {
+    const bool body = f.phase == eval_phase::lock_body;
+    const bool enter = f.phase == eval_phase::lock_enter;
+    if (!(body || enter) || f.extra_vals.size() < 7)
+      continue;
+    const std::size_t slot = body ? 6 : 3; // lock_frame_slot::hold / wait_or_outcome
+    if (std::holds_alternative<int64_t>(f.extra_vals[slot].v))
+      throw std::invalid_argument("restore: the process's stack holds a lock");
+  }
   const int pid = next_pid_++;
   proc->pid = pid;
   if (!is_finished(proc->status))
@@ -978,6 +1088,12 @@ int scheduler::restore(process_ptr proc) {
   proc->recv_path.reset();
   proc->recv_deadline.reset();
   proc->awaiting_frame = false;
+  // A restored process is a new one: no lock of the one it was made from comes with it.
+  proc->locks.reset();
+  proc->lock_waiting = false;
+  proc->lock_deadline.reset();
+  proc->lock_expired_pending = false;
+  proc->inherited_priority = INT_MAX;
   proc->create_time = std::chrono::steady_clock::now();
   procs_.insert(std::move(proc));
   return pid;
@@ -1009,6 +1125,9 @@ int scheduler::fork(int pid) {
   // child without it is whole, unless the measurement runs on top of such work.
   if (waits_on_data_work(parent.state))
     return -1;
+  // A holder can't fork: the child would run inside sections it doesn't hold (design 5.11).
+  if (parent.locks && !parent.locks->holds.empty())
+    return -1;
 
   int child_pid = next_pid_++;
   auto child = make_process();
@@ -1019,6 +1138,7 @@ int scheduler::fork(int pid) {
   child->uid = parent.uid;
   child->gid = parent.gid;
   child->root_path = parent.root_path;
+  child->owner = parent.owner; // td B28: a host reaps the child with its parent (kill_owner)
   child->max_steps = parent.max_steps;
   child->max_time = parent.max_time;
   child->max_memory = parent.max_memory;
@@ -1029,6 +1149,7 @@ int scheduler::fork(int pid) {
   child->signal_handlers = parent.signal_handlers;
   child->create_time = std::chrono::steady_clock::now();
   child->parent_pid = pid;
+  child->keep_alive = parent.keep_alive; // it shares the parent's context (td 4.15)
 
   // Deep copy evaluator state
   child->state.root_expr = parent.state.root_expr;
@@ -1044,6 +1165,21 @@ int scheduler::fork(int pid) {
     child_env->outer = parent.state.global_env->outer;
   }
   child->state.global_env = child_env;
+  detail::fork_scopes(child->state, parent.state.global_env, child_env);
+  // Forked from inside its own step (the DSL's (fork), td B28): the top frame is the call that
+  // applies fork, which the parent finishes with the child's pid. The child's copy is finished
+  // here with 0, as hand_up finishes a call, so the child goes on after the call instead of
+  // calling fork again.
+  if (pid == current_pid() && !child->state.stack.empty()) {
+    std::vector<eval_frame> &stack = child->state.stack;
+    stack.pop_back();
+    if (!stack.empty()) {
+      stack.back().results.push_back(value_t(static_cast<int64_t>(0)));
+    } else {
+      child->state.result = value_t(static_cast<int64_t>(0));
+      child->state.done = true;
+    }
+  }
   child->state.stats.start();
 
   // Child result = 0, parent result = child_pid
@@ -1065,8 +1201,41 @@ bool scheduler::set_priority(int pid, int priority) {
     return false;
   it->second->priority = priority;
   procs_.update(*it->second); // its run-queue level, under the priority policies
+  if (it->second->locks && home_)
+    home_->set_base(*it->second); // the manager's mirror of the base (protocol 5.8, I8)
   return true;
 }
+
+// ---------------------------------------------------------------------------
+// Priorities (docs/STATE_EXEC_LOCKS.md 7.4): declared now, built in phase L2
+// ---------------------------------------------------------------------------
+
+std::optional<priority_info> scheduler::get_priority(int pid) const {
+  const process *p = procs_.find(pid);
+  if (!p)
+    return std::nullopt;
+  return priority_info{p->priority,
+                       policy_ == scheduling_policy::round_robin ? p->priority
+                                                                 : p->effective_priority(),
+                       p->priority_floor.value_or(p->priority), policy_};
+}
+
+priority_change scheduler::set_priority_checked(int, int, int) { return priority_change::unknown; }
+
+std::optional<priority_info> scheduler::get_priority_as(int, int) const { return std::nullopt; }
+
+bool scheduler::set_priority_floor(int pid, int floor) {
+  process *p = procs_.find(pid);
+  if (!p)
+    return false;
+  p->priority_floor = floor;
+  p->priority_floor_explicit = true;
+  return true;
+}
+
+void scheduler::note_priority_clamped() {}
+
+bool scheduler::post_control(int, control_cmd) { return false; }
 
 bool scheduler::set_max_steps(int pid, uint64_t max_steps) {
   auto it = procs_.all().find(pid);
@@ -1137,6 +1306,17 @@ process_info scheduler::make_info(const process &proc) const {
   info.parent_pid = proc.parent_pid;
   info.exit_error = proc.exit_error;
   info.exit_exception = proc.exit_exception;
+  info.locks_held = proc.locks ? proc.locks->holds.size() : 0;
+  if (proc.status == process_status::waiting) {
+    if (proc.lock_waiting)
+      info.waiting_on = "lock /" + detail::lock_home::waiting_key(proc);
+    else if (proc.recv_path)
+      info.waiting_on = "msg " + *proc.recv_path;
+    else if (proc.wake_time)
+      info.waiting_on = std::string("sleep");
+    else if (proc.awaiting_frame)
+      info.waiting_on = std::string("frame");
+  }
   return info;
 }
 

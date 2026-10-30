@@ -11,7 +11,9 @@
 #define CVC_STATE_EXEC_SCHEDULER_H
 
 #include <chrono>
+#include <cvc/state/state_exec/detail/lock_home.h>
 #include <cvc/state/state_exec/heap.h>
+#include <cvc/state/state_exec/lock_manager.h>
 #include <cvc/state/state_exec/memory_tracker.h>
 #include <cvc/state/state_exec/process.h>
 #include <cvc/state/state_exec/process_table.h>
@@ -46,6 +48,16 @@ namespace cvc::state_exec {
 class scheduler : public scheduler_base {
 public:
   explicit scheduler(scheduling_policy policy = scheduling_policy::round_robin);
+  /// Destroys the lock home first (protocol 5.7), before any other member goes.
+  ~scheduler() override;
+
+  // --- Locks (docs/STATE_EXEC_LOCKS.md) ---
+
+  /// Use `mgr` for this scheduler's locks: the home is made and attached now. Throws
+  /// std::logic_error when a process of this scheduler holds or waits for a lock.
+  void set_lock_manager(std::shared_ptr<lock_manager> mgr);
+  detail::lock_home *locks() override;
+  bool check_tables() const override { return procs_.check(); }
 
   // --- Process submission ---
 
@@ -143,7 +155,15 @@ public:
   /// Fork a running/ready process.  Returns child PID or -1 on failure.
   int fork(int pid);
 
-  bool set_priority(int pid, int priority);
+  bool set_priority(int pid, int priority) override;
+  std::optional<priority_info> get_priority(int pid) const override;
+  priority_change set_priority_checked(int caller_pid, int pid, int priority) override;
+  std::optional<priority_info> get_priority_as(int caller_pid, int pid) const override;
+  bool set_priority_floor(int pid, int floor) override;
+  void note_priority_clamped() override;
+  /// Thread-safe: `cmd` for process `pid`, applied between steps (unknown pids are ignored when
+  /// it is applied). True once queued.
+  bool post_control(int pid, control_cmd cmd);
   bool set_max_steps(int pid, uint64_t max_steps);
   bool set_max_time(int pid, double seconds);
   bool set_max_memory(int pid, uint64_t bytes);
@@ -173,7 +193,7 @@ public:
 
   // --- Accessors ---
 
-  scheduling_policy policy() const { return policy_; }
+  scheduling_policy policy() const override { return policy_; }
   const memory_tracker &mem_tracker() const { return mem_tracker_; }
   int process_count() const { return static_cast<int>(procs_.size()); }
 
@@ -355,6 +375,23 @@ private:
 
   /// Build process_info from a process.
   process_info make_info(const process &proc) const;
+
+  /// What this scheduler gives its lock home (design 8.4).
+  struct lock_ops_impl final : detail::lock_sched_ops {
+    explicit lock_ops_impl(scheduler &sched) : s(sched) {}
+    scheduler &s;
+    bool park_lock(process &p) override;
+    void ready_lock_waiter(process &p) override;
+    void relevel(process &p) override;
+    std::size_t lock_expired_count() const override;
+    void take_lock_expired(std::vector<process *> &out) override;
+    process *find_process(int pid) override;
+    void for_each_process(const std::function<void(process &)> &fn) override;
+  };
+  lock_ops_impl lock_ops_{*this};
+  /// Made by locks() or set_lock_manager(); null until a with-lock needs it.
+  std::unique_ptr<detail::lock_home> home_;
+  std::vector<process *> lock_expired_; // reused by step_once's lock expiries
 };
 
 /// limits.max_alloc_bytes from the state tree under `root`:

@@ -169,6 +169,7 @@ void plant_log::record() {
     const vehicle_desc &d = _plant.desc(i);
     s.drive = std::min(std::max(s.accel_cmd, -d.max_decel), d.max_accel);
     s.contacts = _plant.static_contacts_step(i);
+    s.vehicle_contact = _plant.vehicle_contact_step(i);
     s.energy = _plant.energy_step(i);
     const double tire = _plant.physics_world().vehicle_state(_plant.vehicle(i)).energy.tire;
     s.tire = tire - _tire[i];

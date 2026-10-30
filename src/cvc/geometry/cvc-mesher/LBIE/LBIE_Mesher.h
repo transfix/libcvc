@@ -1,8 +1,12 @@
 #ifndef __LIBLBIE_H__
 #define __LIBLBIE_H__
 
+#include <cstddef>
 #include <iostream>
+#include <memory>
+#include <vector>
 #include <VolMagickCompat.h>
+#include <cvc/volume/resize_stepper.h>
 
 #include "octree.h"
 #include "LBIE_geoframe.h"
@@ -140,12 +144,22 @@ namespace LBIE
    //quality improve mesh
    geoframe& qualityImprove(unsigned int iterations = 1);
 
+   //extractMesh(vol) and qualityImprove(iterations) a slice at a time: begin_extract_mesh(vol) or
+   //begin_quality_improve(iterations), then step(budget) until it returns true, budget being in the
+   //octree's units (see Octree::begin_set_volume()). The one-shot calls run the same steps to the
+   //end. step_phase() names the kind of unit the next step spends, step_progress() how far the
+   //operation has got, in [0,1].
+   void begin_extract_mesh(const VolMagick::Volume& vol);
+   void begin_quality_improve(unsigned int iterations);
+   void begin_release(); //the octree's arrays freed, once the mesh is all that is wanted
+   bool step(std::size_t& budget);
+   const char* step_phase() const;
+   double step_progress() const;
+
    //interpolate property values from a volume to mesh vertices
    void interpolateProperties(const VolMagick::Volume& propertyVol);
 
   protected:
-   void set_octree_volume(const VolMagick::Volume& vol);
-   void do_duallib_extract();
    void do_fastcontouring_extract();
    void do_libisocontour_extract();
 
@@ -166,6 +180,24 @@ namespace LBIE
    FastContouring::ContourExtractor _contourExtractor; //fast contour extractor for single tri meshes
    bool _octree_volume_updated; //flag for updating volume in octree before duallib mesh extraction
    bool _mesh_from_octree; //_geoframe is a duallib mesh: _octree's grid mapped to world coordinates
+
+   //step()'s operation: extractMesh()'s or qualityImprove()'s stage and what they kept on the stack
+   struct step_state {
+     int op = 0, stage = 0, next = 0;
+     std::size_t pos = 0;
+     bool started = false; //the stage's octree operation is under way
+     double lo = 0.0, hi = 0.0; //TETRA2's layer
+     std::shared_ptr<VolMagick::Volume> vol; //the volume becoming the layer, or the octree's
+     std::shared_ptr<cvc::resize_stepper> resize; //the octree's volume, resampled to (2^n+1)^3
+     unsigned int iterations = 0, pass = 0;
+     double origin[3] = {0.0, 0.0, 0.0}, cell[3] = {1.0, 1.0, 1.0};
+     bool on_grid = false, mapped = false;
+     std::vector<geoframe::float_3> world, grid;
+   } _st;
+   void begin_extract();
+   void run_steps();
+   bool step_extract(std::size_t& budget);
+   bool step_improve(std::size_t& budget);
  };
 
 }
