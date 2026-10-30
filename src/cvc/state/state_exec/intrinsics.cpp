@@ -436,8 +436,8 @@ private:
 //
 // (state-set-tree path value) writes a value of dicts, lists and scalars (what json-parse makes)
 // as the subtree at `path`, so binds and `repeat:` can show it. A dict's keys and a list's indices
-// name children; a scalar is a node's value, as state-set writes it but for a float, which keeps
-// all its digits. A list's node holds its length, so `repeat: (state-get "feed.items")` repeats
+// name children; a scalar is a node's value, as state-set writes it (a float in its shortest
+// round-trip form). A list's node holds its length, so `repeat: (state-get "feed.items")` repeats
 // a widget per element and `feed.items.{i}.text` reads each; a dict's node holds "". The subtree
 // is replaced: a child the value doesn't name is removed, with its subtree, and a node whose text
 // is unchanged isn't written. The value is checked whole before anything is written, so one that

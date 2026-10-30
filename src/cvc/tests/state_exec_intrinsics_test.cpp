@@ -465,7 +465,7 @@ TEST_F(StateTreeIntrinsicsTest, StateSetTreeWritesDictsListsAndScalars) {
                    {"empty", make_list()}})});
   EXPECT_EQ(root("t.s").value(), "text");
   EXPECT_EQ(root("t.i").value(), "-3");
-  EXPECT_EQ(root("t.f").value(), "0.30000000000000004"); // every digit, unlike state-set
+  EXPECT_EQ(root("t.f").value(), "0.30000000000000004"); // every digit, as state-set writes it
   EXPECT_EQ(root("t.big").value(), "1234567.5");
   EXPECT_EQ(root("t.yes").value(), "true");
   EXPECT_EQ(root("t.no").value(), "false");

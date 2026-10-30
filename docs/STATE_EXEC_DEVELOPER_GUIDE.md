@@ -887,9 +887,8 @@ nothing. Its errors name the line, as in `state-from-json: line 3: expected ':'`
 show it (docs/ARIADNE.md §10.4):
 
 - A dict's keys and a list's indices (`0`, `1`, ...) name child nodes. A scalar is a node's
-  value as `state-set` writes it (`true`/`false`, digits, the string itself; nil is the empty
-  string), except that a float keeps every digit (`0.30000000000000004`), as `state-incr`
-  writes one.
+  value as `state-set` writes it: `true`/`false`, digits, a float in its shortest round-trip
+  form (`0.30000000000000004`), the string itself, and the empty string for nil.
 - A list's node holds its length, so `repeat: (state-get "feed.items")` repeats a widget per
   element. A dict's node holds the empty string.
 - It replaces the subtree: a child the value doesn't name is removed with its subtree (the
