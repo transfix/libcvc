@@ -1,0 +1,39 @@
+# scenarios.py scenario_lk21, its homes merged into one home of prio false
+config inheritance=1 coalesce=0 one_home=1 mutations=-
+attach_home 0 -> 0 |
+try_acquire 0 1 o 0 X a - - -> granted 1 1 0 |
+query - 0 o -> held a/X/1/1/1/0 waiting |
+try_acquire 0 2 o 0 S a - - -> busy |
+block 0 2 o 0 S a - - -> 1 queued |
+query - 0 o -> held a/X/1/1/1/0 waiting a/S/2 |
+try_acquire 0 3 o 0 S a - - -> busy |
+block 0 3 o 0 S a - - -> 2 queued |
+query - 0 o -> held a/X/1/1/1/0 waiting a/S/2 a/S/3 |
+try_acquire 0 4 o 0 X a - - -> busy |
+block 0 4 o 0 X a - - -> 3 queued |
+query - 0 o -> held a/X/1/1/1/0 waiting a/S/2 a/S/3 a/X/4 |
+try_acquire 0 5 o 0 S a - - -> busy |
+block 0 5 o 0 S a - - -> 4 queued |
+query - 0 o -> held a/X/1/1/1/0 waiting a/S/2 a/S/3 a/X/4 a/S/5 |
+release 0 1 1 -> ok | wake(0,2,1) wake(0,3,2)
+resume 0 2 1 -> granted 2 1 0 |
+resume 0 3 2 -> granted 3 1 0 |
+query - 0 o -> held a/S/2,3/2/-/0 waiting a/X/4 a/S/5 |
+start_body 0 2 2 -> ok |
+query - 0 o -> held a/S/2,3/2/-/0 waiting a/X/4 a/S/5 |
+release 0 2 2 -> ok |
+query - 0 o -> held a/S/3/1/-/0 waiting a/X/4 a/S/5 |
+start_body 0 3 3 -> ok |
+query - 0 o -> held a/S/3/1/-/0 waiting a/X/4 a/S/5 |
+release 0 3 3 -> ok | wake(0,4,3)
+resume 0 4 3 -> granted 4 2 0 |
+query - 0 o -> held a/X/4/1/2/0 waiting a/S/5 |
+start_body 0 4 4 -> ok |
+query - 0 o -> held a/X/4/1/2/0 waiting a/S/5 |
+release 0 4 4 -> ok | wake(0,5,4)
+resume 0 5 4 -> granted 5 2 0 |
+query - 0 o -> held a/S/5/1/-/0 waiting |
+start_body 0 5 5 -> ok |
+query - 0 o -> held a/S/5/1/-/0 waiting |
+release 0 5 5 -> ok |
+query - 0 o -> held waiting |

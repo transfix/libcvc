@@ -11,7 +11,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/state/state.h>
+#include <cvc/state/state_exec/detail/lock_home.h>
 #include <cvc/state/state_exec/parser.h>
+#include <cvc/state/state_exec/process.h>
 #include <cvc/state/state_exec/state_value_codec.h>
 #include <cvc/state/state_list.h>
 #include <iterator>
@@ -283,8 +285,9 @@ private:
       env_ref(entry("__outer__"), env->outer);
     frame f{kind::scope};
     for (const auto &[name, val] : env->bindings)
-      // Native functions can't be serialized; a restore registers the builtins again.
-      if (!std::holds_alternative<native_fn>(val.v))
+      // Native functions can't be serialized; a restore registers the builtins again. Nor can the
+      // lock form (a lock_ops: its context is the scheduler's), which rebind_natives binds again.
+      if (!std::holds_alternative<native_fn>(val.v) && !detail::lock_ops_of(val))
         f.bindings.emplace_back(name, &val);
     std::sort(f.bindings.begin(), f.bindings.end(),
               [](const auto &a, const auto &b) { return a.first < b.first; });
@@ -601,6 +604,13 @@ value_t decode_value(cvc::state &root) { return value_reader(root).read(root); }
 namespace {
 
 void encode_leaf(cvc::state &node, const value_t &val) {
+  // A lock wait's handle is written as nil (gap G-1): a restored waiter waits afresh, and never
+  // shares the original's wait.
+  if (const auto *obj = std::get_if<data_object_ptr>(&val.v);
+      obj && *obj && (*obj)->type_name == detail::kLockWaitType) {
+    set_type(node, "nil");
+    return;
+  }
   std::visit(
       [&](auto &&arg) {
         using T = std::decay_t<decltype(arg)>;
@@ -640,9 +650,10 @@ void encode_leaf(cvc::state &node, const value_t &val) {
           if (arg) {
             node("__data_type__").value(arg->type_name);
             // The payload is boost::any — store it via state::data(). A handle to an async call
-            // is the one exception: the call can't resume after a restore (3.9), so its handle
-            // decodes empty.
-            if (arg->type_name != detail::kAwaitableType)
+            // is one exception: the call can't resume after a restore (3.9), so its handle
+            // decodes empty. The lock form is the other: its payload is a scheduler's context,
+            // and it decodes as nil.
+            if (arg->type_name != detail::kAwaitableType && arg->type_name != detail::kLockOpsType)
               node.data(arg->payload);
           }
         } else if constexpr (std::is_same_v<T, bytes_value>) {
@@ -684,6 +695,8 @@ value_t decode_leaf(cvc::state &node, const std::string &type) {
     auto dobj = std::make_shared<data_object>();
     if (has_child(node, "__data_type__"))
       dobj->type_name = node("__data_type__").value();
+    if (dobj->type_name == detail::kLockOpsType)
+      return nil_value; // the restoring context's with-lock is bound again (rebind_natives)
     dobj->payload = node.data();
     return value_t(std::move(dobj));
   }
@@ -756,6 +769,10 @@ std::string phase_to_string(eval_phase p) {
     return "raise_value";
   case eval_phase::await_call:
     return "await_call";
+  case eval_phase::lock_enter:
+    return "lock_enter";
+  case eval_phase::lock_body:
+    return "lock_body";
   }
   return "init";
 }
@@ -805,6 +822,10 @@ eval_phase string_to_phase(const std::string &s) {
     return eval_phase::raise_value;
   if (s == "await_call")
     return eval_phase::await_call;
+  if (s == "lock_enter")
+    return eval_phase::lock_enter;
+  if (s == "lock_body")
+    return eval_phase::lock_body;
   return eval_phase::init;
 }
 
@@ -898,7 +919,25 @@ eval_frame decode_frame(cvc::state &node) {
 // encode_evaluator_state
 // ---------------------------------------------------------------------------
 
+namespace {
+// One value of one frame written in place of what the frame holds: a parked lock waiter's wait
+// child's TIMEOUT, written as what is left of it (encode_process).
+struct frame_patch {
+  std::size_t frame = 0;
+  value_t timeout;
+};
+
+void encode_state_impl(cvc::state &node, const evaluator_state &es,
+                       const std::optional<frame_patch> &patch);
+} // namespace
+
 void encode_evaluator_state(cvc::state &node, const evaluator_state &es) {
+  encode_state_impl(node, es, std::nullopt);
+}
+
+namespace {
+void encode_state_impl(cvc::state &node, const evaluator_state &es,
+                       const std::optional<frame_patch> &patch) {
   set_type(node, "evaluator_state");
 
   // Root expression
@@ -930,6 +969,10 @@ void encode_evaluator_state(cvc::state &node, const evaluator_state &es) {
       if (i + 1 == keep && trims && es.stack[i].results.size() > frame_args) {
         eval_frame waiting = es.stack[i];
         waiting.results.resize(frame_args);
+        encode_frame(sl.push_back(), waiting);
+      } else if (patch && patch->frame == i) {
+        eval_frame waiting = es.stack[i];
+        waiting.extra_lists[0][2] = patch->timeout;
         encode_frame(sl.push_back(), waiting);
       } else {
         encode_frame(sl.push_back(), es.stack[i]);
@@ -973,6 +1016,7 @@ void encode_evaluator_state(cvc::state &node, const evaluator_state &es) {
   // Stats snapshot
   node("step_count").value(std::to_string(es.stats.get_step_count()));
 }
+} // namespace
 
 // ---------------------------------------------------------------------------
 // decode_evaluator_state
@@ -1094,9 +1138,19 @@ void rebind_natives(evaluator_state &st, const environment_ptr &natives) {
       outermost = outermost->outer.get();
     if (!outermost || outermost == natives.get() || !done.insert(outermost).second)
       return;
-    for (const auto &[name, v] : natives->bindings)
-      if (std::holds_alternative<native_fn>(v.v) && !outermost->bindings.count(name))
+    for (const auto &[name, v] : natives->bindings) {
+      if (std::holds_alternative<native_fn>(v.v) && !outermost->bindings.count(name)) {
         outermost->bindings.emplace(name, v);
+      } else if (detail::lock_ops_of(v)) {
+        // The lock form: bound where the name is unbound, or bound to nil or to another lock
+        // form (a decoded or stale one), as the natives are; a program's own with-lock stays.
+        const auto it = outermost->bindings.find(name);
+        if (it == outermost->bindings.end())
+          outermost->bindings.emplace(name, v);
+        else if (it->second.is_nil() || detail::lock_ops_of(it->second))
+          it->second = v;
+      }
+    }
     outermost->outer = natives->outer;
   };
   rebind(st.global_env);
@@ -1107,8 +1161,25 @@ void rebind_natives(evaluator_state &st, const environment_ptr &natives) {
 }
 
 void encode_process(cvc::state &node, const process &proc) {
+  // A holder is refused (design 5.8; gap G-16): its sections can't be carried to a restore. A
+  // waiter holds nothing; restored, it queues afresh.
+  if (detail::lock_home::holds_locks(proc))
+    throw std::runtime_error("snapshot: process " + std::to_string(proc.pid) +
+                             " holds locks: " + detail::lock_home::describe_holds(proc));
   set_type(node, "process");
-  encode_evaluator_state(node("state"), proc.state);
+  // A parked lock waiter's wait child keeps TIMEOUT as given; the snapshot writes what is left
+  // of it, so a restore doesn't start the wait's time over (protocol 5.11).
+  std::optional<frame_patch> patch;
+  const std::vector<eval_frame> &stack = proc.state.stack;
+  if (proc.lock_waiting && proc.lock_deadline && !stack.empty() &&
+      stack.back().phase == eval_phase::await_call && stack.back().extra_lists.size() == 1 &&
+      stack.back().extra_lists[0].size() == 3) {
+    const double left =
+        std::chrono::duration<double>(*proc.lock_deadline - std::chrono::steady_clock::now())
+            .count();
+    patch = frame_patch{stack.size() - 1, value_t(left > 0.0 ? left : 0.0)};
+  }
+  encode_state_impl(node("state"), proc.state, patch);
   node("name").value(proc.name);
   node("status").value(std::string(to_string(proc.status)));
   node("priority").value(std::to_string(proc.priority));

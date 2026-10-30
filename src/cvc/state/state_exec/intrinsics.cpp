@@ -11,6 +11,7 @@
 #include <cvc/state/state_exec/async_host.h> // async calls' futures, for await/await-all
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/data_job.h>
+#include <cvc/state/state_exec/detail/lock_home.h>
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/memory_tracker.h>
 #include <cvc/state/state_exec/parser.h> // detail::read_number_text, for state-incr
@@ -542,7 +543,19 @@ value_t intrinsic_spawn(intrinsics_context *ctx, std::span<const value_t> args) 
 value_t intrinsic_fork(intrinsics_context *ctx, std::span<const value_t> args) {
   expect_exact(args, 0, "fork");
   require_sched(ctx, "fork");
-  int child = ctx->sched->fork(ctx->pid);
+  // The running process forks (td B28): its context's pid only when no step runs (a host's
+  // context, as pycvc's and Ariadne's, has a placeholder pid).
+  int pid = ctx->sched->current_pid();
+  if (pid < 0)
+    pid = ctx->pid;
+  // Inside with-lock the child would run in sections it doesn't hold (design 5.11). The mirror is
+  // read directly: asking for the home would make one for a scheduler that never locked.
+  if (const process_ptr &p = ctx->sched->current_process(); p && detail::lock_home::holds_locks(*p))
+    throw dsl_error("LockError", "fork: not inside with-lock", "dsl",
+                    {{"reason", value_t(std::string("fork"))}});
+  int child = ctx->sched->fork(pid);
+  if (child >= 0 && ctx->on_child)
+    ctx->on_child(child);
   return value_t(static_cast<int64_t>(child));
 }
 
@@ -804,6 +817,15 @@ value_t intrinsic_inspect(intrinsics_context *ctx, std::span<const value_t> args
     entries.emplace_back("exit_error", value_t(*info->exit_error));
   if (info->exit_exception)
     entries.emplace_back("exception", *info->exit_exception);
+  entries.emplace_back("locks_held", value_t(static_cast<int64_t>(info->locks_held)));
+  if (info->waiting_on) {
+    // A lock key as this program would write it (gap G-17).
+    const std::string_view lock_prefix = "lock /";
+    std::string on = *info->waiting_on;
+    if (on.rfind(lock_prefix, 0) == 0)
+      on = "lock " + detail::lock_home::show(on.substr(lock_prefix.size()), ctx->root_path);
+    entries.emplace_back("waiting_on", value_t(std::move(on)));
+  }
   return make_dict(std::move(entries));
 }
 
@@ -1233,6 +1255,9 @@ void register_intrinsics(environment_ptr env, intrinsics_context *ctx) {
   reg("msg-send", intrinsic_msg_send);
   reg("msg-recv", intrinsic_msg_recv);
   reg("msg-pending", intrinsic_msg_pending);
+
+  // Locks: with-lock, locks-held, lock-query, %lock-wait (docs/STATE_EXEC_LOCKS.md)
+  detail::register_lock_intrinsics(env, ctx);
 }
 
 namespace detail {
