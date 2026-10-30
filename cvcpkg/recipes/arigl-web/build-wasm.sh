@@ -3,9 +3,10 @@
 # documents, packaged under share/arigl-web/: index.html (src/arigl/web/arigl-web.html) with its
 # arigl-web.js and arigl-web.css, arigl.js and arigl.wasm, and the third-party notices the
 # module's VTK-derived code needs. The single-threaded package also has the terminal runner's page,
-# ari.html with ari.js and ari.wasm (src/ari/web/ari.html, xterm.js): the same documents in the
-# FTXUI terminal backend, loaded the same way (?src=, default main.ari, the same page config). With
-# tvision's browser console in the deps prefix it adds ari_tvision.html, the tvision desktop.
+# ari.html with ari.js and ari.wasm, its ari-web.js and ari-web.css, and xterm/ (src/ari/web): the
+# same documents in the FTXUI terminal backend, loaded the same way (?src=, default main.ari, the
+# same page config). With tvision's browser console in the deps prefix it adds ari_tvision.html,
+# the tvision desktop.
 #
 # arigl built to wasm with no documents of its own, only the component library embedded: a page
 # serving these files opens one by URL (?src=), and arigl fetches it and the files it imports
@@ -110,6 +111,12 @@ install -m 644 "$BIN/arigl-web.html" "$WEB/index.html"
 for p in ${ARI_PAGES[@]+"${ARI_PAGES[@]}"}; do
   install -m 644 "$BIN/$p.html" "$BIN/$p.js" "$BIN/$p.wasm" "$WEB/"
 done
+if [[ ${#ARI_PAGES[@]} -gt 0 ]]; then
+  # The pages' loader and style sheet, and xterm.js with its addons and licenses (no CDN).
+  install -m 644 "$BIN/ari-web.js" "$BIN/ari-web.css" "$WEB/"
+  install -d "$WEB/xterm"
+  install -m 644 "$BIN"/xterm/* "$WEB/xterm/"
+fi
 # The module embeds third-party code (VTK-derived code in cvcGL, BSD-3-Clause; stb, sdf / mtxlib
 # and the DTU .vtk reader in the cvc core) whose notices a binary redistribution must reproduce.
 install -m 644 "$CVC_SOURCE_DIR/THIRD_PARTY_NOTICES.md" "$CVC_SOURCE_DIR/LICENSE" "$WEB/"

@@ -52,7 +52,10 @@ depends:
     - name: sdl3
     # The terminal backend, for the ari page (single-threaded package). tvision, for its
     # ari_tvision page, is not listed: its wasm column is not on the catalog yet, and build-wasm.sh
-    # adds the page whenever the deps prefix has it.
+    # adds the page whenever the deps prefix has it. Nor are xterm-js, xterm-js-addon-fit and
+    # xterm-js-addon-webgl (cy-pca/cvcpkg#503), which the ari pages serve beside them: the build
+    # takes them from the prefix when they are there, else downloads the same pinned npm packages.
+    # List all four here once they are on the catalog.
     - name: ftxui
     # cvcGL's conference video (mjpeg).
     - name: libjpeg-turbo

@@ -459,14 +459,14 @@ The package is `share/arigl-web/`:
 |---|---|
 | `index.html`, `arigl-web.js`, `arigl-web.css` | the page (`src/arigl/web/arigl-web.*`): config, `?src=`, loading and error screens |
 | `arigl.js`, `arigl.wasm` | the module; the component library is embedded at `/usr/share/libcvc/ariadne/components` |
-| `ari.html`, `ari.js`, `ari.wasm` | the terminal page (`src/ari/web/ari.html`) and `ari` built to wasm; single-threaded package only |
+| `ari.html`, `ari.js`, `ari.wasm`, `ari-web.js`, `ari-web.css`, `xterm/` | the terminal page (`src/ari/web`), `ari` built to wasm, and xterm.js with its licences; single-threaded package only (plus `ari_tvision.*` with tvision's wasm bundle) |
 | `THIRD_PARTY_NOTICES.md`, `LICENSE` | VTK-derived code in cvcGL is BSD-3-Clause |
 
 Serve those files in a directory beside the documents, e.g. for an app at `/apps/nicotina/`:
 
 ```
 /apps/nicotina/index.html  arigl-web.js  arigl-web.css  arigl.js  arigl.wasm
-/apps/nicotina/ari.html    ari.js        ari.wasm                     (the terminal page)
+/apps/nicotina/ari.html    ari.js        ari.wasm  ari-web.js  ari-web.css  xterm/   (the terminal page)
 /apps/nicotina/main.ari    lib/feed.ari  ...             (the app's own documents)
 /apps/nicotina/ariadne.config.json                         (optional)
 ```
@@ -550,9 +550,9 @@ the first row on every build.
 | `ari.wasm`, `CVC_ARIGL_WEB_LEAN=1` | 7.7 MB | 2.8 MB | 2.1 MB |
 
 `arigl.js` is 325 KB raw, 68 KB gzip and 59 KB brotli. `ari.js` is 109 KB, 26 KB and 23 KB.
-`ari.html` is 12 KB, and xterm.js comes from jsDelivr. The arigl page's three files come to
-under 10 KB. The deployed gallery's `arigl.wasm` (the same program with the examples) is
-48.9 MB, and its `ari.wasm` is 21.6 MB. ari is libcvc alone (no VTK, no cvcGL), and the lean
+The terminal page's own files and `xterm/` (with its licences) come to 411 KB raw. The arigl
+page's three files come to under 10 KB. The deployed gallery's `arigl.wasm` (the same program
+with the examples) is 48.9 MB, and its `ari.wasm` is 21.6 MB. ari is libcvc alone (no VTK, no cvcGL), and the lean
 features take two thirds of it.
 
 Where the code goes: 43.3 MB of function bodies plus 5.5 MB of data segments. The bodies are
@@ -615,16 +615,32 @@ same-origin rule. A build with `-DCVC_ARI_WASM_DEFAULT_SRC=main.ari`, which the 
 package uses, makes `main.ari` the default when the URL names none. A failed load prints what
 `ari` said into the terminal.
 
-It differs from arigl-web's page in two ways:
+The page has no inline code and loads nothing from another origin. Its loader and style sheet
+are `ari-web.js` and `ari-web.css`, and xterm.js is served beside it in `xterm/`, so it runs under
+the same strict policy as arigl-web's: `script-src 'self' 'wasm-unsafe-eval'; style-src 'self'`.
+The WebGL renderer addon is loaded before the terminal opens, so xterm.js never builds its DOM
+renderer, which injects `<style>` elements. A browser without WebGL2 falls back to that renderer,
+and there the page also needs `style-src 'unsafe-inline'`.
 
-- **No strict CSP yet.** It has inline scripts and loads xterm.js from jsDelivr
-  (SRI-pinned), so its policy needs `script-src 'self' 'unsafe-inline'
-  https://cdn.jsdelivr.net 'wasm-unsafe-eval'` and the matching `style-src`. Vendoring xterm.js
-  and moving the script to a file would lift that.
-- **No tvision page in the package.** The tvision desktop page (`ari_tvision.html`) needs
-  cvcpkg's tvision with its browser console, whose wasm column is not on the catalog. The
-  gallery has no such page either. The recipe adds the page when the deps prefix has it.
-  Natively, `ari run --backend tvision` runs the same documents.
+The build finds xterm.js 5.5.0, addon-fit 0.10.0 and addon-webgl 0.18.0 (with their licences) in
+the first of these places:
+
+1. `CVC_XTERM_DIR`, a directory holding `xterm.js`, `xterm.css`, `addon-fit.js` and
+   `addon-webgl.js`;
+2. the deps prefix: cvcpkg's `xterm-js`, `xterm-js-addon-fit` and `xterm-js-addon-webgl`
+   packages install them in `share/xterm.js/` (cy-pca/cvcpkg#503);
+3. a download of the same npm packages from registry.npmjs.org, pinned by SHA-256, once per
+   build tree.
+
+All three give the files the page used to pin by SRI hash on jsDelivr. The gallery copies them
+with the page: `build-pages.py` copies what `<page>.page-files` lists.
+
+**The tvision page.** `ari_tvision.html` is the same page on the tvision desktop. It needs
+cvcpkg's tvision with its browser console (the `tvision` recipe's wasm column, cvc.4). The
+recipe is merged but the column is not on the catalog yet. Built from the recipe into the deps
+prefix, it gives the arigl-web package its `ari_tvision` page. The headless test then runs the
+document set there too. The gallery adds the page the same way once the bundle is published.
+Natively, `ari run --backend tvision` runs the same documents.
 
 **Testing.**
 

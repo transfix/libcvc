@@ -2,50 +2,33 @@
 <!--
   ari.html — run an Ariadne (.ari) document in the browser: the ari runner built for wasm behind
   an xterm.js terminal. The build writes this page next to each browser build of ari
-  (src/ari/CMakeLists.txt, ari_wasm_page, which fills in the module, label and document name):
-  ari.html for FTXUI's Emscripten screen, ari_tvision.html for the tvision desktop (tvision's
-  browser console, from cvcpkg's wasm tvision). Serve that directory over http.
+  (src/ari/CMakeLists.txt, ari_wasm_page, which fills in the module, label, document name and
+  default): ari.html for FTXUI's Emscripten screen, ari_tvision.html for the tvision desktop
+  (tvision's browser console, from cvcpkg's wasm tvision). Beside it: ari-web.js (the loader,
+  which documents the wiring), ari-web.css, and xterm/ (xterm.js and its fit and WebGL addons,
+  the pinned npm packages, with their licenses). Serve that directory over http.
 
   The document: with ?src=<url> (resolved against this page), or a page config naming one, ari
   runs that document: it fetches it and the files it imports before the load, from this page's
   origin unless the config allows another (cvc/ariadne/web_document.h). The config is arigl-web's:
-  ariadne.config.json beside this page (optional), or window.ARIADNE_CONFIG; docs/CVCGL_WASM.md
-  ("arigl-web") lists its keys. Otherwise ari runs the document baked into the build.
-  Everything ari prints to stderr is shown in the terminal when it exits with an error.
+  ariadne.config.json beside this page (optional); docs/CVCGL_WASM.md ("arigl-web") lists its
+  keys. Otherwise ari runs the page's default, or the document baked into the build. Everything ari
+  prints to stderr is shown in the terminal when it exits with an error.
 
-  The wiring is the module's stdio, which is all either backend talks to:
-    stdin  <- every byte xterm.js produces: keys, and SGR mouse reports once the program turns
-              them on
-    stdout -> xterm.js. Both end each frame with a NUL (Emscripten has no flush hook), so bytes
-              are buffered and written to the terminal per frame, or at the next animation frame.
-    resize -> _ftxui_on_resize(cols, rows), FTXUI's hook for the terminal size, and
-              _tvision_set_screen_size(cols, rows), tvision's, whichever the module exports.
+  Nothing is inline and nothing loads from another origin, so the page runs under a
+  Content-Security-Policy of script-src 'self' 'wasm-unsafe-eval'; style-src 'self' (in a browser
+  without WebGL2, xterm.js's DOM renderer also needs style-src 'unsafe-inline').
 -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>@ARI_WASM_LABEL@ terminal</title>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css"
-      integrity="sha384-8Xk9wy/gzEDUKrXtrmCFa2bBuK3BpjpDuL/p0SeKQX19Khl/M+lHOgD/CyYf7efP"
-      crossorigin="anonymous">
-<style>
-  :root { --bg: #0f1115; --fg: #c9ced6; --dim: #7d8590; --accent: #d4a373; }
-  html, body { height: 100%; margin: 0; background: var(--bg); color: var(--fg);
-               font: 13px/1.4 system-ui, sans-serif; }
-  body { display: flex; flex-direction: column; }
-  header { display: flex; gap: 16px; align-items: baseline; flex-wrap: wrap;
-           padding: 6px 12px; border-bottom: 1px solid #1f242c; }
-  header b { color: var(--accent); font-weight: 600; }
-  header .hint { color: var(--dim); }
-  header #status { margin-left: auto; color: var(--dim); }
-  header a { color: var(--accent); }
-  header button { font: inherit; color: var(--fg); background: #1f242c; border: 1px solid #2d333b;
-                  border-radius: 4px; padding: 1px 8px; cursor: pointer; }
-  #term { flex: 1; min-height: 0; padding: 4px 0 0 6px; }
-</style>
+<link rel="stylesheet" href="xterm/xterm.css">
+<link rel="stylesheet" href="ari-web.css">
 </head>
-<body>
+<body data-module="@ARI_WASM_MODULE@" data-label="@ARI_WASM_LABEL@"
+      data-default-src="@ARI_WASM_DEFAULT_SRC@">
 <header>
   <span><b>@ARI_WASM_LABEL@</b> <span id="doc">@ARI_WASM_DOC_NAME@</span></span>
   <span class="hint">@ARI_WASM_HINT@</span>
@@ -53,204 +36,9 @@
   <span id="status">loading…</span>
 </header>
 <div id="term"></div>
-
-<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js"
-        integrity="sha384-M169f14mRZOXm3hD/v2Ti0ThIT/RnAQagXA9nlE15yHAtrW19gdePJh/HaTzUOe/"
-        crossorigin="anonymous"></script>
-<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js"
-        integrity="sha384-iF+jqbuti4XlB64clWgFWYEscb+UnSRv3VgVikGYZu+otNFnSHr7y7NcKfBnGizn"
-        crossorigin="anonymous"></script>
-<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-webgl@0.18.0/lib/addon-webgl.js"
-        integrity="sha384-AkzdQDeATxpW8V7I2EPcwg17qAoLQMjEFHb//1QaAAIyIlbDAHGKno5+huH7RKxq"
-        crossorigin="anonymous"></script>
-<script>
-  const statusEl = document.getElementById('status');
-  // In the wasm demo gallery this page is <demo>/index.html (build-pages.py), so link back to it.
-  // Served on its own it is @ARI_WASM_MODULE@.html, with no gallery above it.
-  if (location.pathname.endsWith('/')) document.getElementById('gallery').hidden = false;
-  const setStatus = (text) => { statusEl.textContent = text; };
-
-  const term = new Terminal({
-    fontFamily: '"DejaVu Sans Mono", Menlo, Consolas, "Liberation Mono", monospace',
-    fontSize: 14,
-    scrollback: 0,
-    macOptionIsMeta: true,
-    theme: { background: '#0f1115' },
-  });
-  const fit = new FitAddon.FitAddon();
-  term.loadAddon(fit);
-  const termEl = document.getElementById('term');
-  term.open(termEl);
-  // The WebGL renderer draws box-drawing glyphs itself (seamless window borders) and keeps up
-  // with full-screen redraws; without WebGL xterm.js stays on its DOM renderer.
-  try {
-    const webgl = new WebglAddon.WebglAddon();
-    webgl.onContextLoss(() => webgl.dispose());
-    term.loadAddon(webgl);
-  } catch (e) {
-    console.warn('ari: WebGL renderer unavailable, using the DOM renderer:', e);
-  }
-  term.focus();
-
-  // stdin: what xterm.js produces, as bytes (UTF-8 for text; onBinary carries raw bytes, e.g.
-  // X10 mouse reports past column 95).
-  const stdin = [];
-  const utf8 = new TextEncoder();
-  term.onData((s) => { for (const b of utf8.encode(s)) stdin.push(b); });
-  term.onBinary((s) => { for (let i = 0; i < s.length; ++i) stdin.push(s.charCodeAt(i) & 0xff); });
-
-  // stdout: one terminal write per frame (the program ends each frame with a NUL). Anything
-  // written without one goes out at the next animation frame.
-  let frame = [];
-  const flush = () => {
-    if (frame.length) {
-      term.write(new Uint8Array(frame));
-      frame = [];
-    }
-  };
-  const flushLater = () => {
-    flush();
-    requestAnimationFrame(flushLater);
-  };
-  requestAnimationFrame(flushLater);
-  let errLine = [];
-  // What ari printed to stderr, shown in the terminal when it exits with an error; and, for a test
-  // or the console, the page's state (loading, running, ended or failed) and the terminal's text.
-  const errLog = [];
-  const state = window.ariadneWeb = {
-    state: 'loading', log: errLog, src: '',
-    text: () => {
-      const b = term.buffer.active, out = [];
-      for (let i = 0; i < b.length; ++i) out.push(b.getLine(i).translateToString(true));
-      return out.join('\n');
-    },
-  };
-  const showErrors = (headline) => {
-    flush();
-    term.write('\r\n\x1b[31m' + headline + '\x1b[0m\r\n');
-    for (const l of errLog) term.write('\x1b[2m' + l.replace(/\n/g, '\r\n') + '\x1b[0m\r\n');
-  };
-
-  let started = false;
-  const resize = () => {
-    const dims = fit.proposeDimensions();
-    if (!dims || !dims.cols || !dims.rows) return; // hidden or not laid out
-    if (dims.cols !== term.cols || dims.rows !== term.rows) term.resize(dims.cols, dims.rows);
-    if (!started) return;
-    if (Module._ftxui_on_resize) Module._ftxui_on_resize(term.cols, term.rows);
-    if (Module._tvision_set_screen_size) Module._tvision_set_screen_size(term.cols, term.rows);
-  };
-
-  var Module = {
-    arguments: [], // none: the baked document; start() sets them for a document by URL
-    stdin: () => (stdin.length ? stdin.shift() : null),
-    stdout: (c) => { if (c === 0) flush(); else frame.push(c); },
-    stderr: (c) => {
-      if (c === 10) {
-        const line = new TextDecoder().decode(new Uint8Array(errLine));
-        console.warn(line);
-        errLog.push(line);
-        if (errLog.length > 200) errLog.shift();
-        errLine = [];
-      } else {
-        errLine.push(c);
-      }
-    },
-    onRuntimeInitialized() {
-      // Runs before main: FTXUI and tvision size their screens from this.
-      started = true;
-      resize();
-      new ResizeObserver(resize).observe(termEl);
-      setStatus('running');
-    },
-    // The document is loaded (cvc/ariadne/web_document.h).
-    ariadneRunning() { state.state = 'running'; },
-    onExit(code) {
-      state.state = code === 0 ? 'ended' : 'failed';
-      if (code !== 0 && errLog.length) showErrors('@ARI_WASM_LABEL@ could not run ' + (state.src || 'its document') + ':');
-      flush();
-      term.write('\r\n\x1b[2m[@ARI_WASM_LABEL@ exited with status ' + code + ']\x1b[0m\r\n');
-      statusEl.innerHTML = '';
-      const again = document.createElement('button');
-      again.textContent = 'run again';
-      again.onclick = () => location.reload();
-      statusEl.append('exited ', again);
-    },
-    onAbort(what) {
-      state.state = 'failed';
-      flush();
-      setStatus('aborted: ' + what);
-    },
-  };
-</script>
-<script>
-  // Start the program only once the terminal has its real size. xterm.css and the font must be in
-  // before fit can measure a cell; otherwise the first frames are drawn at a bogus size.
-  //
-  // Both files are fetched revalidated (cache: 'no-cache'), so a redeploy never pairs a cached
-  // @ARI_WASM_MODULE@.js with a new @ARI_WASM_MODULE@.wasm. The wasm goes to the runtime directly (Module.wasmBinary) and the
-  // glue runs inline. A document by URL is fetched by ari itself, once it runs.
-  //
-  // The document: ?src= (unless the config pins its own), the config's src, or this build's default
-  // (@ARI_WASM_DEFAULT_SRC@ — empty where the baked document is the default).
-  const DEFAULT_SRC = '@ARI_WASM_DEFAULT_SRC@';
-  const loadConfig = async () => {
-    if (window.ARIADNE_CONFIG) return window.ARIADNE_CONFIG;
-    let r;
-    try {
-      r = await fetch('ariadne.config.json', {cache: 'no-cache', credentials: 'same-origin'});
-    } catch (e) {
-      return {};
-    }
-    if (r.status === 404) return {};
-    if (!r.ok) throw new Error('ariadne.config.json: HTTP ' + r.status);
-    return r.json();
-  };
-  const list = (v, name) => {
-    if (v === undefined || v === null) return [];
-    if (!Array.isArray(v) || v.some((x) => typeof x !== 'string'))
-      throw new Error('config "' + name + '" must be a list of strings');
-    return v;
-  };
-  const configure = async () => {
-    const config = await loadConfig();
-    const params = new URLSearchParams(location.search);
-    const src = (config.src_param !== false && params.get('src')) || config.src || DEFAULT_SRC;
-    if (!src) return; // the baked document
-    const url = new URL(src, location.href);
-    url.hash = '';
-    state.src = url.href;
-    document.getElementById('doc').textContent = url.pathname;
-    if (config.title) document.title = String(config.title);
-    const flags = list(config.flags, 'flags').map((f) => f.split('{origin}').join(location.origin));
-    Module.arguments = ['run'].concat(flags, [url.href], list(config.args, 'args'),
-                                      params.getAll('arg'));
-    const env = Object.assign({}, config.env || {});
-    env.CVC_ARIADNE_SRC_ORIGINS = list(config.src_origins, 'src_origins').join(' ');
-    env.CVC_ARIADNE_PRELOAD = list(config.preload, 'preload').join('\n');
-    Module.preRun = [() => { for (const [k, v] of Object.entries(env)) ENV[k] = String(v); }];
-  };
-  const start = async () => {
-    fit.fit();
-    const get = async (name) => {
-      const r = await fetch(name, {cache: 'no-cache'});
-      if (!r.ok) throw new Error('HTTP ' + r.status + ' fetching ' + name);
-      return r;
-    };
-    try {
-      await configure();
-      setStatus('loading @ARI_WASM_MODULE@.wasm…');
-      Module.wasmBinary = new Uint8Array(await (await get('@ARI_WASM_MODULE@.wasm')).arrayBuffer());
-      const script = document.createElement('script');
-      script.textContent = await (await get('@ARI_WASM_MODULE@.js')).text();
-      document.body.append(script);
-    } catch (e) {
-      state.state = 'failed';
-      setStatus('load failed: ' + ((e && e.message) || e));
-      term.write('\x1b[31m' + ((e && e.message) || e) + '\x1b[0m\r\n');
-    }
-  };
-  window.addEventListener('load', () => document.fonts.ready.then(start));
-</script>
+<script src="xterm/xterm.js"></script>
+<script src="xterm/addon-fit.js"></script>
+<script src="xterm/addon-webgl.js"></script>
+<script src="ari-web.js"></script>
 </body>
 </html>

@@ -448,6 +448,9 @@ jobs:
             build-wasm/bin/ari.html
             build-wasm/bin/ari.js
             build-wasm/bin/ari.wasm
+            build-wasm/bin/ari-web.js
+            build-wasm/bin/ari-web.css
+            build-wasm/bin/xterm/
 
   # arigl-web, the stock browser host (cvcpkg/recipes/arigl-web): arigl, and ari's terminal page,
   # built to single-threaded wasm with no documents of their own, by the recipe's own script (which

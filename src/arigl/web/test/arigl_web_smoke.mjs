@@ -1,7 +1,7 @@
 // arigl_web_smoke.mjs — arigl-web in a real (headless) Chrome: the shell loads a document set from
 // its own origin, and refuses one from another origin or one that is not there. When the package
-// has ari's terminal page (ari.html), the same document set must load there too, its text on the
-// xterm.js screen.
+// has ari's terminal pages (ari.html, ari_tvision.html), the same document set must load there too,
+// its text on the xterm.js screen.
 //
 //   node arigl_web_smoke.mjs --web <share/arigl-web> --docset <src/cvc/tests/data/ariadne_docset> \
 //        --chrome <chrome or chromium> [--shots DIR] [--keep]
@@ -14,12 +14,11 @@
 //   /apps/app/main.ari  the docset's app/, which imports lib/panel.ari and ../shared/note.ari
 //   /apps/shared/       the docset's shared/
 //
-// with an ordinary site's headers: no COOP/COEP (the single-threaded build needs none) and, for
-// arigl-web's page, a strict Content-Security-Policy (no inline code, no eval), so a pass also
-// says the page runs under one. ari.html is served without it: it has inline scripts and loads
-// xterm.js from jsDelivr, so its cases need the network. Chrome is driven over the DevTools
-// protocol; each case reads window.ariadneWeb (the page's state, everything the runtime printed,
-// and ari's terminal text). Exit status 0 when every case passes.
+// with an ordinary site's headers: no COOP/COEP (the single-threaded build needs none) and a strict
+// Content-Security-Policy (no inline code or style, no eval, nothing from another origin), so a
+// pass also says both pages run under one. Chrome is driven over the DevTools protocol; each case
+// reads window.ariadneWeb (the page's state, everything the runtime printed, and ari's terminal
+// text) and fails on any CSP violation the page reports. Exit status 0 when every case passes.
 
 import {spawn} from 'node:child_process';
 import fs from 'node:fs';
@@ -65,7 +64,7 @@ const server = http.createServer((req, res) => {
   }
   const headers = {'Content-Type': TYPES[path.extname(f)] || 'application/octet-stream',
                    'Cache-Control': 'no-cache'};
-  if (!/^ari(_tvision)?\.html$/.test(path.basename(f))) headers['Content-Security-Policy'] = CSP;
+  headers['Content-Security-Policy'] = CSP;
   res.writeHead(200, headers);
   fs.createReadStream(f).pipe(res);
 });
@@ -91,10 +90,11 @@ const devtools = await new Promise((resolve, reject) => {
   chrome.on('exit', c => reject(new Error(`Chrome exited (${c}):\n` + err)));
 });
 
-// One tab per case, driven through its own DevTools socket.
+// One tab per case, driven through its own DevTools socket. It opens blank, gets a listener that
+// records the page's CSP violations (injected by DevTools, so the policy does not apply to it),
+// then goes to the case's URL.
 async function openPage(url) {
-  const r = await fetch(`http://${devtools.host}/json/new?${encodeURIComponent(url)}`,
-                        {method: 'PUT'});
+  const r = await fetch(`http://${devtools.host}/json/new?about:blank`, {method: 'PUT'});
   const target = await r.json();
   const ws = new WebSocket(target.webSocketDebuggerUrl);
   await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
@@ -112,6 +112,11 @@ async function openPage(url) {
     const m = await send('Runtime.evaluate', {expression: expr, returnByValue: true});
     return m.result && m.result.result ? m.result.result.value : undefined;
   };
+  await send('Page.enable');
+  await send('Page.addScriptToEvaluateOnNewDocument', {
+    source: 'window.__csp = []; document.addEventListener("securitypolicyviolation", ' +
+            'e => window.__csp.push(e.effectiveDirective + " " + (e.blockedURI || "inline")));'});
+  await send('Page.navigate', {url});
   const close = async () => {
     ws.close();
     await fetch(`http://${devtools.host}/json/close/${target.id}`).catch(() => {});
@@ -131,13 +136,13 @@ async function settle(page, check) {
   for (;;) {
     const s = await page.evaluate(
         'JSON.stringify(window.ariadneWeb ? {state: ariadneWeb.state, log: ariadneWeb.log,' +
-        ' text: ariadneWeb.text ? ariadneWeb.text() : "",' +
+        ' text: ariadneWeb.text ? ariadneWeb.text() : "", csp: window.__csp || [],' +
         ' status: document.getElementById("status").textContent} : null)');
     const v = s ? JSON.parse(s) : null;
     if (v && check(v)) return v;
     if (v && v.state !== 'loading' && !settledAt) settledAt = Date.now();
     if ((settledAt && Date.now() > settledAt + 15000) || Date.now() > until)
-      return v || {state: 'timeout', log: [], text: '', status: ''};
+      return v || {state: 'timeout', log: [], text: '', status: '', csp: []};
     await new Promise(r => setTimeout(r, 500));
   }
 }
@@ -190,12 +195,21 @@ if (fs.existsSync(path.join(WEB, 'ari.html'))) {
       check: v => v.state === 'failed' && /not this page's origin/.test(v.text),
     });
 }
+// The tvision desktop's page, when the package has it (cvcpkg's tvision wasm in the deps).
+if (fs.existsSync(path.join(WEB, 'ari_tvision.html'))) {
+  cases.push({
+    name: 'ari_tvision: the same set on the tvision desktop',
+    url: `${ORIGIN}/apps/app/ari_tvision.html?src=main.ari`,
+    check: v => v.state === 'running' && /from lib\/panel\.ari/.test(v.text) &&
+                /from shared\/note\.ari/.test(v.text),
+  });
+}
 
 let failures = 0;
 for (const c of cases) {
   const page = await openPage(c.url);
   const v = await settle(page, c.check);
-  const ok = !!(v && c.check(v));
+  const ok = !!(v && c.check(v) && v.csp.length === 0);
   if (!ok) failures++;
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${c.name}  [${v ? v.state : 'no state'}]`);
   if (SHOTS) {
@@ -205,6 +219,7 @@ for (const c of cases) {
   }
   if (!ok && v) {
     console.log('  status: ' + v.status);
+    for (const x of v.csp) console.log('  CSP violation: ' + x);
     for (const l of v.log.slice(-25)) console.log('  | ' + l);
     if (v.text) for (const l of v.text.split('\n').filter(x => x.trim()).slice(-25)) console.log('  > ' + l);
   }
