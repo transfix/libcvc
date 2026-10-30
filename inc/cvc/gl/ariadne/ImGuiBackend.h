@@ -84,8 +84,11 @@ public:
                                          double lo, double hi, const char *fmt) override;
   cvc::ariadne::IndexEdit combo(const char *label, int current_index,
                                 const std::vector<std::string> &options) override;
+  cvc::ariadne::IndexEdit radio(const char *label, int current_index,
+                                const std::vector<std::string> &options, bool row) override;
+  void focus_next_widget() override;
   cvc::ariadne::StringEdit input_text(const char *label, const char *key,
-                                      const std::string &current) override;
+                                      const std::string &current, bool masked) override;
   cvc::ariadne::ColorEdit color(const char *label, const float rgb[3]) override; // §G7 RGB picker
   // §10 transfer-function editor: the ColorTable2 port drawn with the ImGui draw list (zoom strip,
   // colour ramp, opacity curve, isocontour bars, histogram / contour spectrum / contour tree
@@ -141,6 +144,7 @@ private:
   // stack so nested grids compose. No ImGui types here (backend-header-clean).
   struct GridState {
     bool split = false;     // split-pane mode vs table mode
+    bool flow = false;      // a horizontal row with no col_widths: cells side by side
     bool resizable = false; // table mode: draggable columns, whose widths persist (§11.4)
     int cols = 1;
     int cell = 0;              // cells emitted so far

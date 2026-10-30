@@ -371,9 +371,12 @@ struct stepped_solve::impl {
     es.active.assign(es.nv, 0);
     mdiag.assign(es.nv, 0.0);
     if (what == kind::poisson) {
-      if (f.size() == 1)
-        f.assign(es.nv, double(f[0])); // a copy: assign may free f's buffer before it reads
-      else if (f.size() != es.nv)
+      if (f.size() == 1) {
+        // A copy: assign(n, t) may not take t from the vector itself. libc++ frees the old
+        // buffer before it reads t, so f[0] would be read from freed memory.
+        const double value = f[0];
+        f.assign(es.nv, value);
+      } else if (f.size() != es.nv)
         throw mesh_ops_error("fem::solve_poisson: f needs one value, or one per point");
     }
     if (what == kind::heat) {
