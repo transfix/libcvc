@@ -1938,7 +1938,9 @@ each environment.
 
 The shared scope is frozen. `set`, `defun` and `environment::set_existing()` never write into
 it: a program that rebinds a stdlib name shadows it in its own scope, and other programs keep
-the real function.
+the real function. To share DSL functions between programs, an Ariadne document declares them in a
+`functions:` block, which its runtime runs ahead of each of its programs and can grant to the
+modules it loads (docs/ARIADNE.md §6.6).
 
 ```lisp
 (set string.length 42)

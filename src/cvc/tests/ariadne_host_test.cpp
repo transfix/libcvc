@@ -792,3 +792,105 @@ TEST(AriadneHostVerbs, AFailingInitIsAWarning) {
   ASSERT_FALSE(warns.empty());
   EXPECT_NE(warns.front().find("init:"), std::string::npos) << warns.front();
 }
+
+// ── §6.6 functions: a document's, and the ones a mount grants its module ─────────────────────────
+
+namespace {
+// Press the only button on screen (Tab to it, Enter).
+void press_only_button(AppRuntime &art, FtxuiBackend &be) {
+  be.render_to_string(art.runtime(), 80, 24);
+  be.feed(art.runtime(), TermEvent::key_event("Tab"));
+  be.render_to_string(art.runtime(), 80, 24);
+  be.feed(art.runtime(), TermEvent::key_event("Return"));
+}
+} // namespace
+
+TEST(AriadneFunctions, EveryLaneOfTheDocumentCallsItsFunctions) {
+  REQUIRE_YAML();
+  const fs::path doc = write(test_dir("fn_lanes"), "f.ari",
+                             "meta: {min_libcvc: 3.4.0}\n"
+                             "functions: |\n"
+                             "  (defun tag (s) (str-concat \"<\" s \">\"))\n"
+                             "  (defun mark (key s) (state-set key (tag s)))\n"
+                             "init: (mark \"t.init\" \"init\")\n"
+                             "on_tick: (mark \"t.tick\" \"tick\")\n"
+                             "root:\n"
+                             "  - button: Go\n"
+                             "    on: (mark \"t.click\" \"click\")\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.fl");
+  art.set_backend(be);
+  const std::vector<std::string> warnings = art.load(doc.string());
+  EXPECT_TRUE(warnings.empty()) << warnings.front(); // the preflight knows tag and mark
+  EXPECT_EQ(val(app, "ui.docs.fl.t.init"), "<init>");
+  ASSERT_TRUE(drain_until(art, [&] { return val(app, "ui.docs.fl.t.tick") == "<tick>"; }));
+  press_only_button(art, be);
+  ASSERT_TRUE(drain_until(art, [&] { return val(app, "ui.docs.fl.t.click") == "<click>"; }));
+  std::string how = "pending";
+  art.runtime().run_program("(assert (= (tag \"t\") \"<t>\"))",
+                            [&](const std::string &h) { how = h; });
+  ASSERT_TRUE(drain_until(art, [&] { return how != "pending"; }));
+  EXPECT_EQ(how, "");
+  EXPECT_TRUE(art.take_warnings().empty());
+}
+
+// A granted function runs in the module: its writes land in the module's own subtree (code is
+// granted, not the parent's state), and a module granted nothing cannot call it.
+TEST(AriadneFunctions, AModuleCallsWhatItsMountGrants) {
+  REQUIRE_YAML();
+  const fs::path dir = test_dir("fn_grant");
+  write(dir, "mod.ari",
+        "init: (record \"init\")\n"
+        "root:\n"
+        "  - button: Go\n"
+        "    on: (record \"click\")\n");
+  const fs::path doc = write(dir, "p.ari",
+                             "meta: {min_libcvc: 3.4.0}\n"
+                             "functions: |\n"
+                             "  (defun stamp (s) (str-concat s \"!\"))\n"
+                             "  (defun record (s) (state-set \"out\" (stamp s)))\n"
+                             "root:\n"
+                             "  - load: mod.ari\n"
+                             "    as: m\n"
+                             "    functions: [record]\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.fg");
+  art.set_backend(be);
+  const std::vector<std::string> warnings = art.load(doc.string());
+  EXPECT_TRUE(warnings.empty()) << warnings.front();
+  be.render_to_string(art.runtime(), 80, 24); // mounts the module, runs its init:
+  EXPECT_EQ(val(app, "ui.docs.fg.includes.m.out"), "init!");
+  EXPECT_EQ(val(app, "ui.docs.fg.out"), ""); // not the parent's
+  press_only_button(art, be);
+  ASSERT_TRUE(drain_until(art, [&] { return val(app, "ui.docs.fg.includes.m.out") == "click!"; }));
+  EXPECT_TRUE(art.take_warnings().empty());
+}
+
+TEST(AriadneFunctions, AModuleGrantedNothingCannotCall) {
+  REQUIRE_YAML();
+  const fs::path dir = test_dir("fn_deny");
+  write(dir, "mod.ari", "root:\n  - button: Go\n    on: (record \"click\")\n");
+  const fs::path doc = write(dir, "p.ari",
+                             "meta: {min_libcvc: 3.4.0}\n"
+                             "functions: |\n  (defun record (s) (state-set \"out\" s))\n"
+                             "root:\n  - load: mod.ari\n    as: m\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.fd");
+  art.set_backend(be);
+  bool told = false; // the preflight names the program in the module
+  for (const std::string &w : art.load(doc.string()))
+    told = told || w.find("widget 'Go' calls (record ...)") != std::string::npos;
+  EXPECT_TRUE(told);
+  press_only_button(art, be);
+  std::vector<std::string> warnings;
+  ASSERT_TRUE(drain_until(art, [&] {
+    for (std::string &w : art.take_warnings())
+      warnings.push_back(std::move(w));
+    return !warnings.empty();
+  }));
+  EXPECT_NE(warnings.front().find("NameError"), std::string::npos) << warnings.front();
+  EXPECT_EQ(val(app, "ui.docs.fd.includes.m.out"), "");
+}

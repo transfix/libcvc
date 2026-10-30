@@ -309,15 +309,39 @@ std::string describe_requirement(const std::string &name) {
   return name;
 }
 
-// Every program in a loaded document, with where it sits, for the free-head scan.
-void collect_programs(const Widget &w, std::vector<std::pair<std::string, std::string>> &out) {
+// A program for the free-head scan: where it sits, its text, and the functions its scope defines
+// (§6.6), which it may call.
+struct ScannedProgram {
+  std::string where;
+  std::string script;
+  const FunctionScope *functions = nullptr;
+};
+
+// Every program in a loaded document, with where it sits, for the free-head scan. A function
+// scope's own bodies are scanned too, once, as "functions:" (a mount's, "functions: of mount ...").
+void collect_programs(const Widget &w, const FunctionScope *functions,
+                      std::vector<ScannedProgram> &out) {
+  if (w.functions) {
+    functions = w.functions.get();
+    if (!functions->prelude.empty())
+      out.push_back(
+          {w.scope.empty() ? std::string("functions:") : "functions: of mount '" + w.scope + "'",
+           functions->prelude, functions});
+    if (!w.init_script.empty())
+      out.push_back({"init: of mount '" + w.scope + "'", w.init_script, functions});
+  }
   const std::string where = "widget '" + (w.id.empty() ? w.label : w.id) + "'";
   for (const std::string *p :
        {&w.on, &w.on_click, &w.on_hover, &w.on_drag, &w.on_drag_start, &w.on_drag_end})
     if (!p->empty())
-      out.emplace_back(where, *p);
+      out.push_back({where, *p, functions});
   for (const Widget &c : w.children)
-    collect_programs(c, out);
+    collect_programs(c, functions, out);
+}
+
+bool defines(const FunctionScope *functions, const std::string &name) {
+  return functions && std::any_of(functions->defs.begin(), functions->defs.end(),
+                                  [&](const FunctionDef &f) { return f.name == name; });
 }
 
 // The load-time preflight. requires: entries the host lacks fail the load (all named in one
@@ -344,7 +368,8 @@ void check_host_requirements(const Runtime &rt, LoadResult &lr) {
     throw std::runtime_error("this host does not provide what the document requires: " + list);
   }
 
-  std::vector<std::pair<std::string, std::string>> programs;
+  std::vector<ScannedProgram> programs;
+  const FunctionScope *own = lr.root.functions.get(); // the document's: every top-level lane's
   const std::pair<const char *, const std::string *> lanes[] = {
       {"init:", &lr.init_script},
       {"on_tick:", &lr.on_tick_script},
@@ -353,14 +378,14 @@ void check_host_requirements(const Runtime &rt, LoadResult &lr) {
       {"on_signal:", &lr.on_signal_script}};
   for (const auto &[where, script] : lanes)
     if (!script->empty())
-      programs.emplace_back(where, *script);
+      programs.push_back({where, *script, own});
   for (const auto &[name, script] : lr.tests)
-    programs.emplace_back("test '" + name + "'", script);
-  collect_programs(lr.root, programs);
+    programs.push_back({"test '" + name + "'", script, own});
+  collect_programs(lr.root, nullptr, programs);
   std::map<std::string, std::vector<std::string>> unprovided; // name -> where it is called
-  for (const auto &[where, script] : programs)
+  for (const auto &[where, script, functions] : programs)
     for (const std::string &name : free_heads(script))
-      if (!declared.count(name) && !rt.has_function(name)) {
+      if (!declared.count(name) && !defines(functions, name) && !rt.has_function(name)) {
         std::vector<std::string> &at = unprovided[name];
         if (at.empty() || at.back() != where)
           at.push_back(where);
@@ -431,8 +456,11 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
   seed_keys(lr.keys, new_document);
 
   std::vector<std::string> initErrors;
-  run_init(app_, prefix_, lr.init_script, &initErrors, // §init: seeds win over widget defaults
-           [this](const std::string &n) { return rt_.has(n); });
+  // §init: seeds win over widget defaults. It runs with the document's functions (§6.6).
+  const std::string init = lr.init_script.empty() || !lr.root.functions
+                               ? lr.init_script
+                               : lr.root.functions->prelude + lr.init_script;
+  run_init(app_, prefix_, init, &initErrors, [this](const std::string &n) { return rt_.has(n); });
   for (std::string &e : initErrors) // a failed init: is not fatal, but it must not be silent
     lr.warnings.push_back(std::move(e));
   rt_.set_tick_program(lr.on_tick_script);          // empty = no resident (safe)
