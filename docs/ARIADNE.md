@@ -191,8 +191,8 @@ process, wrapped by the runtime as `(while t (let ((event (msg-recv "chan"))) bo
 Residents have no total budget (they run for the life of the document), but each *step* is
 time-capped, so that one runaway step cannot hang the host's drain. The cap is the tree setting
 `ariadne.limits.resident_max_step_time`, in seconds (`0` = no cap). It is read as each resident
-starts, and a missing or unparsable value keeps the default. The default is `0.05 s`, or `0.25 s`
-in a wasm build. The deadline is checked inside long builtin loops (`collect`, a generator, a big
+starts, and a missing or unparsable value keeps the default. The default is `0.05 s`, or `1 s` in a
+wasm build. The deadline is checked inside long builtin loops (`collect`, a generator, a big
 `state-data-get`), not by a plain body. It is a `se::time_budget`: its first half is charged on the
 steady clock, and its second half on the thread's CPU clock, with each gap between two checks
 counted up to a sixteenth of that half. So a native step that the OS deschedules must still run for

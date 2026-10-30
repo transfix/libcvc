@@ -372,10 +372,11 @@ double action_max_time(cvc::state &root) {
 // the host's drain. It is a se::time_budget, so time the OS deschedules the thread for counts
 // only for its first half; but single-threaded wasm has no thread CPU clock (thread_cpu_seconds
 // is the steady clock there), so on a loaded machine a step that checks often is charged for its
-// waits too, up to a sixteenth of the half per check, and the default there is higher.
+// waits too, up to a sixteenth of the half per check, and the default there is higher (cypkg's
+// browser test, single-threaded, load 10-33: 1 run of 9 lost a module tick at 0.05 s, none at 2).
 double resident_max_step_time(cvc::state &root) {
 #ifdef __EMSCRIPTEN__
-  constexpr double kDefault = 0.25;
+  constexpr double kDefault = 1.0;
 #else
   constexpr double kDefault = 0.05;
 #endif
