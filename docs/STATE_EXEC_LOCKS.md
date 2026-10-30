@@ -1,8 +1,10 @@
 # state_exec: locks on the state tree, and process priority changes
 
 Status: design, 2026-10-27. L0 (the atomic natives, section 4.4), L1 (`with-lock` on one
-scheduler) and L1b (the spawn context on one scheduler) are built; L2 and L3 follow, and L4
-onward are design only.
+scheduler) and L1b (the spawn context on one scheduler) are built. L2 (priorities and
+inheritance) is implemented in transfix/libcvc#868; its scheduler-level PI tests and two bench
+scenarios follow in a later PR, and its A/B gates are not run yet (section 12). L3 follows, and
+L4 onward are design only.
 Tracked in the `state-exec-perf` workstream,
 beside the threaded design ([`docs/STATE_EXEC_THREADED.md`](STATE_EXEC_THREADED.md)), which this
 document extends. The exact lock protocol is
@@ -1369,6 +1371,14 @@ the "hardened on one machine, single or multiple threads" milestone: host-submit
 spawned programs all lock there. L4 follows the threaded stages, and L7 comes last. Nothing before
 Stage M needs `locks_lost`: before L7 no held section can be snapshotted, so restore refuses one.
 
+**Where the phases stand.** L0, L1 and L1b are built (transfix/libcvc#860, #862, #865). L2 is
+implemented in transfix/libcvc#868: `set-priority` and `get-priority`, the floors and the spawn
+clamp, inheritance (homes attach with their scheduler's policy, and the run queue keys on
+`effective_priority()` through `level_key`), `state_exec.policy`, the thread classes,
+`post_control`, and pycvc's priority API. Its scheduler-level PI tests (PI-1..PI-5, PI-8, PI-9,
+PI-11) and the `prio.set` and `lock.inherit` bench scenarios follow in a later PR, and none of its
+A/B gates (11.2) has been run yet, so L2's exit is not met. L3 onward are not built.
+
 ## 13. The test list
 
 Unless a case says otherwise, cases run on both schedulers, on Windows (MSVC) and Linux (gcc).
@@ -1514,7 +1524,7 @@ Each case runs with the process queued, and granted but not yet resumed.
 | PI-2 | a chain of 3 | the boost propagates |
 | PI-3 | the waiter times out; is killed | the boost withdrawn at once |
 | PI-4 | `set-priority` on a boosted holder | the base changes; the effective priority stays at the boost |
-| PI-5 | a snapshot and `inspect` of a boosted holder | the base, never the boost |
+| PI-5 | a snapshot and `inspect` of a boosted holder; a snapshot of a waiter boosted through another waiter's edge | `inspect`: `priority` the base, the boost only in `effective_priority`; the holder's snapshot refused (5.8); the waiter's writes its base, and restored it queues afresh at the base |
 | PI-7 | (L3) a relevel post for a holder on another home arrives after it released | re-reads the manager; the holder at its base |
 | PI-8 | W (-10) waits for H1, which waits for H2; W times out | H1 and H2 both back to their base |
 | PI-9 | `priority_rr`: H (10) holds X `a.b`; V (10) queues X `a`; W (-10) queues S `a.c`; medium spinners | H and V boosted to -10 through W's waiter edge; V granted within H's section, W within V's |

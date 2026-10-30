@@ -139,6 +139,12 @@ handlers (`on_tick` / `on_key` / `on_pointer`) run in the action lane, on the
 **app-wide scheduler** (`app.exec_scheduler()`), **off** the render walk, inside
 `Runtime::drain()` ([`ariadne.cpp:1642`](../src/cvc/ariadne/ariadne.cpp)).
 
+That scheduler's policy is the app tree's `state_exec.policy` (`round_robin`, `priority` or
+`priority_rr`), read once, when `app.exec_scheduler()` is first built, and fixed from then on; an
+unknown value is logged and `round_robin` used. Ariadne sets none, so its default stays
+`round_robin`: a program's `set-priority` is stored and reported but changes no pick (developer
+guide, "Priorities").
+
 A fire-once handler is *submitted* (`submit_action`,
 [`ariadne.cpp:1375`](../src/cvc/ariadne/ariadne.cpp)) with the full default environment
 plus host intrinsics, its writes chrooted to the action's mount prefix (§7), under
