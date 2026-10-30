@@ -138,6 +138,10 @@ struct LoadResult {
   std::string on_key_script;
   std::string on_pointer_script;
   std::string on_signal_script;
+  // The `tests:` block (docs/ARIADNE.md "Testing a document"): name -> program, in document
+  // order. Only `ari test` runs them, one at a time on the action lane, after init: and the first
+  // frame; every other host ignores them.
+  std::vector<std::pair<std::string, std::string>> tests;
   // The document's `keys:` block (keys.h): its rebindable key actions, in document order. The host
   // hands them to AppRuntime, which binds them (Runtime::set_key_bindings) and lists them in the
   // Keys window.

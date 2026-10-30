@@ -683,6 +683,25 @@ value_t builtin_error(std::span<const value_t> args) {
                                      args.size() > 1 ? args[1] : nil_value, "dsl"));
 }
 
+// (assert cond [message [data]]): nil when cond is truthy, else raises an AssertionError. The
+// message is "assertion failed", or "assertion failed: <message>"; the exception's traceback ends
+// at the (assert ...) form, so an uncaught one reports the condition that failed.
+value_t builtin_assert(std::span<const value_t> args) {
+  if (args.empty() || args.size() > 3)
+    throw dsl_error("TypeError",
+                    "assert: expected a condition, an optional message and data, got " +
+                        std::to_string(args.size()) + " args");
+  if (args[0].is_truthy())
+    return nil_value;
+  std::string message = "assertion failed";
+  if (args.size() > 1)
+    message +=
+        ": " + (std::holds_alternative<std::string>(args[1].v) ? std::get<std::string>(args[1].v)
+                                                               : to_string(args[1]));
+  throw dsl_exception(make_exception(exception_class("AssertionError"), message,
+                                     args.size() > 2 ? args[2] : nil_value, "dsl"));
+}
+
 // ---------------------------------------------------------------------------
 // I/O
 // ---------------------------------------------------------------------------
@@ -913,6 +932,7 @@ environment_ptr builtins::make_default_environment() {
   // Exceptions: the built-in classes, and (error message [data])
   register_exception_classes(env);
   register_fn(env, "error", builtin_error);
+  register_fn(env, "assert", builtin_assert);
 
   // Generators
   register_fn(env, "generator", builtin_generator);

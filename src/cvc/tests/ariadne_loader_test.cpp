@@ -2398,6 +2398,50 @@ windows: [ { window: W, children: [] } ]
   EXPECT_NE(r.init_script.find("state-set"), std::string::npos);
 }
 
+// tests: (`ari test`): name -> program, captured in document order and never run by the loader.
+TEST(AriadneTests, BlockCapturedInOrder) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+root: [ { text: hi } ]
+tests:
+  zeta: (assert true)
+  alpha: |
+    (assert (= 1 1))
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.tests.size(), 2u);
+  EXPECT_EQ(r.tests[0].first, "zeta");
+  EXPECT_EQ(r.tests[0].second, "(assert true)");
+  EXPECT_EQ(r.tests[1].first, "alpha");
+  EXPECT_NE(r.tests[1].second.find("(assert (= 1 1))"), std::string::npos);
+  for (const std::string &w : r.warnings)
+    EXPECT_EQ(w.find("tests:"), std::string::npos) << w;
+}
+
+TEST(AriadneTests, BadShapesWarn) {
+  SKIP_WITHOUT_YAML();
+  LoadResult seq = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+tests: [ (assert true) ]
+)");
+  ASSERT_TRUE(seq.ok) << seq.error;
+  EXPECT_TRUE(seq.tests.empty());
+  EXPECT_TRUE(has_warning(seq, "tests: must be a MAP"));
+  LoadResult entry = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+tests:
+  good: (assert true)
+  nested: { not: a program }
+  empty: ""
+)");
+  ASSERT_TRUE(entry.ok) << entry.error;
+  ASSERT_EQ(entry.tests.size(), 1u);
+  EXPECT_EQ(entry.tests[0].first, "good");
+  EXPECT_TRUE(has_warning(entry, "tests: 'nested' must be a non-empty scalar"));
+  EXPECT_TRUE(has_warning(entry, "tests: 'empty' must be a non-empty scalar"));
+}
+
 TEST(AriadneInit, NonScalarInitWarns) {
   SKIP_WITHOUT_YAML();
   LoadResult r = load_string(R"(
