@@ -86,8 +86,8 @@ Reactive slots — `visible_when`, `enabled_when` / `disabled_when`, computed `b
   *readers* only (`kAllowed`, [`ariadne.cpp:417`](../src/cvc/ariadne/ariadne.cpp)), plus
   `(has? "name")`, which asks what the host provides
   ([§5.7](#57-requires-and-has--what-a-document-needs-from-its-host)).
-- The special-form gate admits only `if / begin / let / while / for / lambda / defun /
-  set / return / quote / yield / break` (`kAllowedForms`,
+- The special-form gate admits only `if / begin / and / or / let / while / for / lambda /
+  defun / set / return / quote / yield / break` (`kAllowedForms`,
   [`ariadne.cpp:433`](../src/cvc/ariadne/ariadne.cpp)).
 
 Nothing that writes state, schedules, watches, sends messages, or does I/O is

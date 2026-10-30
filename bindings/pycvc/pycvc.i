@@ -2605,7 +2605,9 @@ PYCVC_STATE_EXEC_ENUM(cvc::state_exec::resource_policy::mode, pycvc_enum_resourc
          {"raise_value", static_cast<int>(eval_phase::raise_value)},
          {"await_call", static_cast<int>(eval_phase::await_call)},
          {"lock_enter", static_cast<int>(eval_phase::lock_enter)},
-         {"lock_body", static_cast<int>(eval_phase::lock_body)}});
+         {"lock_body", static_cast<int>(eval_phase::lock_body)},
+         {"and_next", static_cast<int>(eval_phase::and_next)},
+         {"or_next", static_cast<int>(eval_phase::or_next)}});
     if (pycvc_enum_eval_phase != NULL)
       PyDict_SetItemString(d, "eval_phase", pycvc_enum_eval_phase);
     using cvc::state_exec::step_kind;
