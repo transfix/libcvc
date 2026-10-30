@@ -9,6 +9,7 @@
 #include <cvc/ariadne/bind.h>     // resolve_bind / read_or_seed / write
 #include <cvc/ariadne/doc_args.h> // the document's command line
 #include <cvc/ariadne/loader.h>   // load_file / LoadResult / ChannelDecl / sources_changed
+#include <cvc/ariadne/oidc_host.h>
 #include <cvc/ariadne/requires.h> // requires:, free_heads (what a document needs from its host)
 #include <cvc/ariadne/uri.h>      // register_cvc_uri_handler
 #include <cvc/core/app.h>
@@ -44,7 +45,8 @@ AppRuntime::~AppRuntime() {
 }
 
 bool AppRuntime::idle() const {
-  return app_.exec_async_host().in_flight() == 0 && !app_.exec_scheduler().has_runnable();
+  return app_.exec_async_host().in_flight() == 0 && !app_.exec_scheduler().has_runnable() &&
+         !oidc_busy();
 }
 
 void AppRuntime::settle(const std::function<void()> &step, double max_seconds) {

@@ -7,12 +7,14 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cvc/ariadne/ariadne.h> // register_action_intrinsics
 #include <cvc/ariadne/net_intrinsics.h>
 #include <cvc/ariadne/uri.h> // resolve() — the generic (fetch uri) async resolver
 #include <cvc/core/app.h>
+#include <cvc/net/browser.h>
 #include <cvc/net/credentials.h>
 #include <cvc/net/http_client.h>
 #include <cvc/net/net_policy.h>
@@ -358,21 +360,11 @@ Outcome reply_error(const std::string &url, const std::string &message) {
   return o;
 }
 
-// One request: the credentials `auth` names are put in as it is sent (the Authorization header,
-// form and header values), and the ones it captures are taken out of the reply, so none reaches a
-// value_t.
-Outcome perform(cvc::net::HttpRequest req, const RequestAuth &auth, const NetAccess &access) {
-  std::optional<cvc::net::Origin> origin;
-  if (auth.any()) {
-    std::string why;
-    origin = cvc::net::parse_origin(req.url, &why);
-    if (!origin)
-      return reply_error(req.url, "http: " + why);
-    req.follow_redirects = false; // a credential never follows a redirect to another resource
-    if (access.policy && !access.policy->allows(*origin))
-      return reply_error(req.url,
-                         "http: refused: " + origin->str() + " is not an origin this host allows");
-  }
+// One send of `req` with the credentials `auth` names put in as it goes (the Authorization header,
+// form and header values), every one of them blanked out of the reply. `used` is the auth: token
+// sent (for a renewal to compare); false, with `out` the error, when a credential is missing.
+bool send_once(cvc::net::HttpRequest req, const RequestAuth &auth, const NetAccess &access,
+               const cvc::net::Origin *origin, cvc::net::HttpResponse &out, std::string &used) {
   std::vector<std::string> sent; // the tokens put in, to blank any echo of them
   const auto token_for = [&](const std::string &name) -> std::optional<std::string> {
     std::optional<std::string> token = access.credentials->token_for(name, *origin);
@@ -386,13 +378,16 @@ Outcome perform(cvc::net::HttpRequest req, const RequestAuth &auth, const NetAcc
     for (std::string &h : req.headers)
       wipe(h);
     wipe(req.body);
-    return reply_error(req.url, "http: no credential '" + name + "' for " + origin->str() +
-                                    " (sign in first)");
+    out = reply_error(req.url, "http: no credential '" + name + "' for " + origin->str() +
+                                   " (sign in first)")
+              .reply;
+    return false;
   };
   if (!auth.use.empty()) {
     const std::optional<std::string> token = token_for(auth.use);
     if (!token)
       return no_credential(auth.use);
+    used = *token;
     req.headers.push_back("Authorization: Bearer " + *token);
   }
   for (const CredentialValue &v : auth.values) {
@@ -411,15 +406,50 @@ Outcome perform(cvc::net::HttpRequest req, const RequestAuth &auth, const NetAcc
           h.replace(at, v.placeholder.size(), *token);
     }
   }
-  cvc::net::HttpResponse r =
-      access.policy ? cvc::net::send(req, *access.policy) : cvc::net::send(req);
+  out = access.policy ? cvc::net::send(req, *access.policy) : cvc::net::send(req);
   for (std::string &h : req.headers)
     wipe(h);
   wipe(req.body);
   for (std::string &t : sent) {
-    scrub(r, t);
+    scrub(out, t);
     wipe(t);
   }
+  return true;
+}
+
+// One request: the credentials `auth` names are put in as it is sent, and the ones it captures are
+// taken out of the reply, so none reaches a value_t. A credential the host can renew (an OAuth
+// access token, cvc::net::CredentialRenewer) is renewed first when it is about to expire, and once
+// more after a 401, and the request sent again.
+Outcome perform(cvc::net::HttpRequest req, const RequestAuth &auth, const NetAccess &access) {
+  std::optional<cvc::net::Origin> origin;
+  if (auth.any()) {
+    std::string why;
+    origin = cvc::net::parse_origin(req.url, &why);
+    if (!origin)
+      return reply_error(req.url, "http: " + why);
+    req.follow_redirects = false; // a credential never follows a redirect to another resource
+    if (access.policy && !access.policy->allows(*origin))
+      return reply_error(req.url,
+                         "http: refused: " + origin->str() + " is not an origin this host allows");
+  }
+  std::shared_ptr<cvc::net::CredentialRenewer> renewer;
+  if (!auth.use.empty()) {
+    renewer = access.credentials->renewer(auth.use);
+    if (renewer && renewer->expiring())
+      renewer->renew(std::string()); // a failure leaves the old token, which may still do
+  }
+  cvc::net::HttpResponse r;
+  std::string used;
+  if (!send_once(req, auth, access, origin ? &*origin : nullptr, r, used))
+    return Outcome{std::move(r), false};
+  if (renewer && r.ok && r.status == 401 && renewer->renew(used).empty()) {
+    wipe(used);
+    if (!send_once(req, auth, access, &*origin, r, used))
+      return Outcome{std::move(r), false};
+  }
+  wipe(used);
+  wipe(req.body);
   bool captured = false;
   if (!auth.captures.empty() && r.ok && r.status >= 200 && r.status < 300) {
     // Take every field first, so each token is blanked wherever the reply carries it, whichever
@@ -571,6 +601,37 @@ void register_net_verbs(const std::shared_ptr<se::environment> &env, const NetAc
                                 return se::value_t(access.policy->allows_url(url));
                               return se::value_t(cvc::net::parse_origin(url).has_value());
                             });
+  // (open-url URL): open URL in the user's web browser (cvc/net/browser.h). Only an http(s) URL
+  // whose origin the host allows: a page opened in a browser carries what its URL says, so the
+  // allowlist bounds it as it does a request. #t when a browser was asked to open it; #f when there
+  // is none here (over SSH, no display, --no-browser), and the host shows the URL instead. One a
+  // second at most, so a loop cannot flood the desktop with tabs.
+  se::builtins::register_fn(
+      env, "open-url", [access, live](std::span<const se::value_t> args) -> se::value_t {
+        live("open-url");
+        const std::string url = arg_string(args, 0);
+        std::string why;
+        if (access.policy ? !access.policy->allows_url(url, &why)
+                          : !cvc::net::parse_origin(url, &why))
+          throw std::runtime_error("open-url: refused: " + why);
+        static std::atomic<std::int64_t> last_ms{0};
+        const std::int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::steady_clock::now().time_since_epoch())
+                                     .count();
+        std::int64_t prev = last_ms.load();
+        if (prev != 0 && now - prev < 1000)
+          throw std::runtime_error("open-url: one URL a second at most");
+        last_ms.store(now);
+        switch (cvc::net::open_url(url, &why)) {
+        case cvc::net::OpenUrlResult::opened:
+          return se::value_t(true);
+        case cvc::net::OpenUrlResult::no_browser:
+          cvc::net::url_notice(url);
+          return se::value_t(false);
+        default:
+          throw std::runtime_error(why);
+        }
+      });
   if (!access.credentials)
     return;
   const std::shared_ptr<cvc::net::CredentialStore> store = access.credentials;

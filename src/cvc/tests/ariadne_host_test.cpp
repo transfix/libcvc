@@ -210,6 +210,41 @@ TEST(AriadneHostCli, NetworkFlagsTurnItOnAndCheckTheirOrigins) {
   }
 }
 
+TEST(AriadneHostCli, SignInFlags) {
+  const char *a[] = {"ari",
+                     "run",
+                     "--oidc-issuer",
+                     "https://id.example/realms/demo",
+                     "--oidc-client",
+                     "https://accounts.example=123=abc.apps",
+                     "--oidc-redirect-uri=https://app.example/ari.html",
+                     "--no-browser",
+                     "d.ari",
+                     "--no-browser"};
+  HostOptions o = parse_host_args(10, a);
+  ASSERT_TRUE(o.error.empty()) << o.error;
+  EXPECT_TRUE(o.net.enabled) << "naming an issuer implies --net";
+  ASSERT_EQ(o.net.oidc.issuers.size(), 1u);
+  EXPECT_EQ(o.net.oidc.issuers[0], "https://id.example/realms/demo");
+  ASSERT_EQ(o.net.oidc.clients.size(), 1u);
+  EXPECT_EQ(o.net.oidc.clients[0].first, "https://accounts.example");
+  EXPECT_EQ(o.net.oidc.clients[0].second, "123=abc.apps") << "the issuer ends at the first '='";
+  EXPECT_EQ(o.net.oidc.redirect_uri, "https://app.example/ari.html");
+  EXPECT_TRUE(o.net.oidc.no_browser);
+  ASSERT_EQ(o.doc_args.size(), 1u) << "after the document, --no-browser is the document's";
+  EXPECT_NE(host_flags_help().find("--oidc-issuer ISSUER"), std::string::npos);
+  for (const char *bad : {"http://id.example", "https://id.example/?q=1", "id.example"}) {
+    const char *argv[] = {"ari", "run", "--oidc-issuer", bad, "d.ari"};
+    EXPECT_NE(parse_host_args(5, argv).error.find("--oidc-issuer"), std::string::npos) << bad;
+  }
+  for (const char *bad : {"https://id.example", "https://id.example=", "=client", "http://x=y"}) {
+    const char *argv[] = {"ari", "run", "--oidc-client", bad, "d.ari"};
+    EXPECT_NE(parse_host_args(5, argv).error.find("--oidc-client is ISSUER=CLIENT_ID"),
+              std::string::npos)
+        << bad;
+  }
+}
+
 // ── parsing a document's arguments ──────────────────────────────────────────────────────────────
 
 TEST(AriadneHostCli, GraphicsImageAndCellSizeFlags) {

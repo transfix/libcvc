@@ -20,7 +20,8 @@
 #include <cvc/ariadne/bind.h>
 #include <cvc/ariadne/input.h> // §4.6 InputEvent — Runtime::post_input feeds on_key/on_pointer
 #include <cvc/ariadne/loader.h> // is_builtin_widget_type (has?)
-#include <cvc/ariadne/net_host.h> // net_host_status (the net capability tokens)
+#include <cvc/ariadne/net_host.h>  // net_host_status (the net capability tokens)
+#include <cvc/ariadne/oidc_host.h> // pump_oidc
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_scheduler.h> // §4.7 app-wide action scheduler (exec_scheduler)
@@ -871,6 +872,11 @@ struct Runtime::Impl {
     f.net = net.enabled;
     f.net_auth = net.auth;
     f.net_auth_persist = net.persist;
+    f.oidc = net.oidc;
+    f.oidc_loopback = net.oidc && net.oidc_flows.loopback;
+    f.oidc_device = net.oidc && net.oidc_flows.device;
+    f.oidc_redirect = net.oidc && net.oidc_flows.redirect;
+    f.browser = net.enabled && net.browser;
     return f;
   }
   bool has(const std::string &name) const {
@@ -2484,6 +2490,9 @@ void Runtime::Impl::run_key_bindings() {
 void Runtime::render() { m_->render(); }
 
 void Runtime::drain() {
+  // A sign-in in progress (oidc_host.h) takes its step first: a reply, a browser's redirect, a
+  // device poll that is due. It writes its status to the state tree on this thread.
+  pump_oidc();
   // Run the queued action events on the host thread, then clear. Never called
   // from inside render() (the deferred intent-buffer discipline, §7.2/§4.7). The keys pressed since
   // the last drain queue theirs first.

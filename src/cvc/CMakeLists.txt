@@ -1387,6 +1387,13 @@ list(APPEND SOURCE_FILES net/http_client.cpp net/http_client_curl.cpp net/http_c
   net/net_policy.cpp net/credentials.cpp)
 list(APPEND INCLUDE_FILES ../../inc/cvc/net/http_client.h ../../inc/cvc/net/net_policy.h
   ../../inc/cvc/net/credentials.h)
+# OAuth 2.0 / OpenID Connect sign-in (docs/ARIADNE.md §10.4): the protocol pieces, the loopback
+# redirect listener (native), the user's browser and a browser page's own URL and sessionStorage,
+# and the Ariadne host that runs the flows for documents.
+list(APPEND SOURCE_FILES net/json_lite.cpp net/oidc.cpp net/loopback_redirect.cpp net/browser.cpp
+  ariadne/oidc_host.cpp)
+list(APPEND INCLUDE_FILES ../../inc/cvc/net/oidc.h ../../inc/cvc/net/loopback_redirect.h
+  ../../inc/cvc/net/browser.h ../../inc/cvc/ariadne/oidc_host.h)
 
 # Ariadne — the context-agnostic UI/scene DSL core (cvc::ariadne). Pure libcvc:
 # the retained Widget tree, the Runtime + reconcile boundary, and direct

@@ -19,9 +19,14 @@
 //   allow https://tx.wtf                         # requests may go to this origin
 //   allow http://127.0.0.1:8080
 //   credential txwtf https://tx.wtf https://api.tx.wtf   # where credential txwtf may be sent
+//   oidc https://id.example/realms/demo          # documents may sign in with this issuer only
+//   oidc https://accounts.example https://oauth2.example   # ... whose endpoints are also there
+//   oidc-client https://id.example/realms/demo nicotina    # the client the launcher registered
 //
 // Every origin a credential line names must also be allowed (by the file or by the host's own
-// flags); the host checks that when it puts the policy together.
+// flags); the host checks that when it puts the policy together. An oidc or oidc-client line
+// allows the issuer's origin and the origins it lists, and pins sign-in (cvc/ariadne/oidc_host.h):
+// once a policy names any issuer, documents may sign in with those only.
 
 #include <map>
 #include <optional>
@@ -50,6 +55,13 @@ std::optional<Origin> parse_origin(const std::string &url, std::string *error = 
 // A path is refused, so nobody reads an allow line as allowing only part of a site.
 std::optional<Origin> parse_origin_spec(const std::string &spec, std::string *error = nullptr);
 
+// An OpenID Connect issuer the host lets documents sign in with (docs/ARIADNE.md §10.4).
+struct OidcIssuer {
+  std::string issuer;                   // exactly as the provider writes it
+  std::vector<Origin> endpoint_origins; // origins besides the issuer's its endpoints may be at
+  std::string client_id;                // the launcher's client for it ("" = the document's)
+};
+
 class NetPolicy {
 public:
   // Allow requests to `o` (adding one twice is harmless).
@@ -67,9 +79,21 @@ public:
     return bindings_;
   }
 
+  // Documents may sign in with `issuer` (an issuer URL, oidc::check_issuer), whose endpoints may
+  // also be at `endpoint_origins`. Allows the issuer's origin and those. Naming any issuer pins
+  // sign-in to the issuers named. "" or why `issuer` cannot be one.
+  std::string add_oidc_issuer(const std::string &issuer,
+                              const std::vector<Origin> &endpoint_origins = {});
+  // The client the launcher registered with `issuer` (adds the issuer as add_oidc_issuer does).
+  std::string set_oidc_client(const std::string &issuer, const std::string &client_id);
+  const std::vector<OidcIssuer> &oidc_issuers() const { return oidc_; }
+  // The issuer's entry, or null when the policy names it not.
+  const OidcIssuer *oidc_issuer(const std::string &issuer) const;
+
 private:
   std::vector<Origin> allowed_;
   std::map<std::string, std::vector<Origin>> bindings_;
+  std::vector<OidcIssuer> oidc_;
 };
 
 // Add a policy file's directives (format above) to `into`. False, with `error` naming the line, on
