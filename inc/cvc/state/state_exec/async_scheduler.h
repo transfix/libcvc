@@ -12,6 +12,8 @@
 #include <atomic>
 #include <chrono>
 #include <cvc/state/state_exec/async_stackless_evaluator.h>
+#include <cvc/state/state_exec/detail/lock_home.h>
+#include <cvc/state/state_exec/lock_manager.h>
 #include <cvc/state/state_exec/memory_tracker.h>
 #include <cvc/state/state_exec/process.h>
 #include <cvc/state/state_exec/process_table.h>
@@ -48,6 +50,16 @@ class async_call;
 class async_scheduler : public scheduler_base {
 public:
   explicit async_scheduler(scheduling_policy policy = scheduling_policy::round_robin);
+  /// Destroys the lock home first (protocol 5.7), before any other member goes.
+  ~async_scheduler() override;
+
+  // --- Locks (docs/STATE_EXEC_LOCKS.md) ---
+
+  /// Use `mgr` for this scheduler's locks: the home is made and attached now. Throws
+  /// std::logic_error when a process of this scheduler holds or waits for a lock.
+  void set_lock_manager(std::shared_ptr<lock_manager> mgr);
+  detail::lock_home *locks() override;
+  bool check_tables() const override { return procs_.check(); }
 
   // --- Process submission ---
 
@@ -298,6 +310,19 @@ public:
 private:
   friend class async_call; // async_call::outcome() finishes a call before the program sees it
 
+  /// What this scheduler gives its lock home (design 8.4).
+  struct lock_ops_impl final : detail::lock_sched_ops {
+    explicit lock_ops_impl(async_scheduler &sched) : s(sched) {}
+    async_scheduler &s;
+    bool park_lock(process &p) override;
+    void ready_lock_waiter(process &p) override;
+    void relevel(process &p) override;
+    std::size_t lock_expired_count() const override;
+    void take_lock_expired(std::vector<process *> &out) override;
+    process *find_process(int pid) override;
+    void for_each_process(const std::function<void(process &)> &fn) override;
+  };
+
   scheduling_policy policy_;
   std::string id_;
   double published_rate_ = -1.0; // the effective.async_steps_per_cpu_ms last published
@@ -322,6 +347,11 @@ private:
 
   /// Every process by pid (finished ones until reaped), its run queue, timers and waiters.
   detail::process_table procs_;
+
+  lock_ops_impl lock_ops_{*this};
+  /// Made by locks() or set_lock_manager(); null until a with-lock needs it.
+  std::unique_ptr<detail::lock_home> home_;
+  std::vector<process *> lock_expired_; // reused by drain's lock expiries
 
   /// A steady_clock reading the next step may start from (see scheduler.h).
   using clock = std::chrono::steady_clock;

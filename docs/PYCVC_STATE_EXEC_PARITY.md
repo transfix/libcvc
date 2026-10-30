@@ -79,7 +79,10 @@ approach agreed for closing the gap, and the plan.
     caller to keep `ctx` valid for as long as `env` is used. In Python, every function it adds
     holds the context, and the context holds the scheduler and channel policy assigned to it.
     The context's `root` is a tree node, which lives as long as its app, so keep the app alive
-    as in C++.
+    as in C++. The `with-lock` form it binds (docs/STATE_EXEC_LOCKS.md) is not a function but a
+    lock form object; pycvc's copy keeps the context alive too. The context's
+    `lock_wait_allowed` (False: a busy request never waits) and `lock_default_timeout` (a
+    float, or None: wait as long as it takes) set its lock rules.
 
 ## Inventory
 

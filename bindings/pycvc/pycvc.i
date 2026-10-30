@@ -1497,6 +1497,7 @@ class AsyncStateObserver(state_observer):
 #include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/data_job.h>
+#include <cvc/state/state_exec/detail/lock_home.h>
 #include <cvc/state/state_exec/evaluator.h>
 #include <cvc/state/state_exec/heap.h>
 #include <cvc/state/state_exec/intrinsics.h>
@@ -2602,7 +2603,9 @@ PYCVC_STATE_EXEC_ENUM(cvc::state_exec::resource_policy::mode, pycvc_enum_resourc
          {"try_handler", static_cast<int>(eval_phase::try_handler)},
          {"try_finally", static_cast<int>(eval_phase::try_finally)},
          {"raise_value", static_cast<int>(eval_phase::raise_value)},
-         {"await_call", static_cast<int>(eval_phase::await_call)}});
+         {"await_call", static_cast<int>(eval_phase::await_call)},
+         {"lock_enter", static_cast<int>(eval_phase::lock_enter)},
+         {"lock_body", static_cast<int>(eval_phase::lock_body)}});
     if (pycvc_enum_eval_phase != NULL)
       PyDict_SetItemString(d, "eval_phase", pycvc_enum_eval_phase);
     using cvc::state_exec::step_kind;
@@ -3087,6 +3090,7 @@ PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::collect_cycles)
 %naturalvar cvc::state_exec::process::recv_path;
 %naturalvar cvc::state_exec::process::exit_error;
 %naturalvar cvc::state_exec::process_info::exit_error;
+%naturalvar cvc::state_exec::process_info::waiting_on;
 %naturalvar cvc::state_exec::process::signal_handlers;
 %naturalvar cvc::state_exec::process::pending_signals;
 %naturalvar cvc::state_exec::process::saved_stack;
@@ -3549,6 +3553,10 @@ struct process_info {
   unsigned long long async_steps;
   // Why it ended, if not normally: the kill reason, or a failed process's "Class: message".
   std::optional<std::string> exit_error;
+  // Its holds, and what it waits for: "lock /<key>", "msg <channel>", "sleep" or "frame"
+  // (docs/STATE_EXEC_LOCKS.md 5.10).
+  unsigned long long locks_held;
+  std::optional<std::string> waiting_on;
 };
 %extend process_info {
   // A failed process's exception (docs/STATE_EXEC_EXCEPTIONS.md 2.6), or None.
@@ -3979,7 +3987,33 @@ struct intrinsics_context {
   std::string node_id;
   std::string root_path;
   const channel_policy *channels;
+  // with-lock (docs/STATE_EXEC_LOCKS.md 5.5): False makes every busy request as :timeout 0.
+  bool lock_wait_allowed;
 };
+// lock_default_timeout: the timeout of a with-lock that names none, a float, or None (wait as
+// long as it takes).
+%extend intrinsics_context {
+  PyObject *_lock_default_timeout_get() const {
+    if (!$self->lock_default_timeout)
+      Py_RETURN_NONE;
+    return PyFloat_FromDouble(*$self->lock_default_timeout);
+  }
+  void _lock_default_timeout_set(PyObject *seconds) {
+    if (seconds == Py_None) {
+      $self->lock_default_timeout.reset();
+      return;
+    }
+    const double v = PyFloat_AsDouble(seconds);
+    if (v == -1.0 && PyErr_Occurred()) {
+      PyErr_Clear();
+      throw std::invalid_argument("intrinsics_context.lock_default_timeout: a number or None");
+    }
+    $self->lock_default_timeout = v;
+  }
+  %pythoncode %{
+    lock_default_timeout = property(_lock_default_timeout_get, _lock_default_timeout_set)
+  %}
+}
 %extend intrinsics_context {
   %pythoncode %{
     def _get_sched(self):
@@ -4187,6 +4221,14 @@ void register_intrinsics_keeping(cvc::state_exec::environment_ptr env,
   for (auto &[name, v] : scratch->bindings) {
     const auto *fn = std::get_if<native_fn>(&v.v);
     if (fn == nullptr) {
+      // The lock form: a copy that keeps the context and its Python owner too (LK-23). It stays
+      // a lock_ops object, so the evaluator and a restored wait still find it (gap G-41).
+      if (detail::lock_ops_of(v)) {
+        auto held = std::make_shared<
+            std::pair<std::shared_ptr<intrinsics_context>, std::shared_ptr<PyObject>>>(ctx, keep);
+        env->set(name, detail::make_lock_ops(ctx.get(), std::move(held)));
+        continue;
+      }
       env->set(name, v);
       continue;
     }

@@ -112,6 +112,11 @@ struct process_info {
   std::optional<std::string> exit_error;
   /// A failed process's exception (docs/STATE_EXEC_EXCEPTIONS.md 2.6).
   std::optional<value_t> exit_exception;
+  /// Its holds (docs/STATE_EXEC_LOCKS.md 5.10), and what it waits for while waiting: "lock
+  /// /<absolute key>" (the request's first key; inspect shows it relative to the caller), "msg
+  /// <channel>", "sleep" or "frame" (gap G-17).
+  std::size_t locks_held = 0;
+  std::optional<std::string> waiting_on;
 };
 
 /// Fill `info`'s budget-by-kind fields from a process's evaluation stats.
@@ -145,6 +150,10 @@ struct scheduler_stats {
   int failed = 0;
   uint64_t total_steps = 0;
 };
+
+namespace detail {
+class lock_home;
+} // namespace detail
 
 /// Abstract scheduler — the surface the DSL intrinsics call through
 /// `intrinsics_context.sched`.  Implemented by both `scheduler` (sync) and
@@ -208,6 +217,16 @@ public:
   /// The steps a CPU millisecond of `proc`'s async calls is charged: its own
   /// async_steps_per_cpu_ms, else the tree's (async_steps_per_cpu_ms_from_state), read now.
   virtual double async_steps_per_cpu_ms(const process &proc) = 0;
+
+  // --- Locks (with-lock: docs/STATE_EXEC_LOCKS.md) ---
+
+  /// The scheduler's lock home, made on first use, with a private manager when the host gave it
+  /// none (design 8.4); null from a scheduler without lock support. Only a with-lock that
+  /// reaches the manager, and lock-query, ask for it: a path a non-locking program can reach
+  /// reads process::locks instead, so such a program never makes a home.
+  virtual detail::lock_home *locks() { return nullptr; }
+  /// Whether the process table's indexes agree with its processes (O(n); for tests: gap G-38).
+  virtual bool check_tables() const { return true; }
 };
 
 /// limits.async_steps_per_cpu_ms when nothing sets it: what the steps cost, a step being about

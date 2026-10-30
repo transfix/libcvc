@@ -3,6 +3,8 @@
 // the deferred action drain, cvc::state read/seed/commit, bind-path resolution, and
 // the §3.0.3b grid dispatch.
 
+#include "local_http_server.h" // localhost origins for the net host tests
+
 #include <algorithm>
 #include <atomic> // item 2: the nav-step worker's arrived-count accumulator
 #include <boost/any.hpp>
@@ -15,6 +17,7 @@
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/backend.h>
 #include <cvc/ariadne/loader.h>            // §12 end-to-end load: mount through the real Runtime
+#include <cvc/ariadne/net_host.h>          // enable_net: the host's allowlist and credentials
 #include <cvc/ariadne/net_intrinsics.h>    // §13.8 async (http-get-async) intrinsic test
 #include <cvc/ariadne/stream_intrinsics.h> // Phase-2 PR6 (stream-open/stream-info/stream-close)
 #include <cvc/ariadne/uri.h>               // §13.8 (fetch uri): register a custom scheme handler
@@ -29,6 +32,7 @@
 #include <cvc/state/state_exec/builtins.h>        // host-intrinsic seam test: register_fn
 #include <cvc/state/state_exec/heap.h>            // collect_cycles / tracked_objects
 #include <cvc/state/state_exec/intrinsics.h>      // intrinsics_context.root_path (pool-task test)
+#include <cvc/state/state_exec/lock_manager.h>    // the app lock manager (Locks.*)
 #include <cvc/state/state_exec/types.h>           // value_t
 #include <cvc/tf/model.h>                         // §10 tf_editor: the model the widget edits
 #include <cvc/tf/overlays.h>                      // §10 tf_editor: the layers published beside it
@@ -291,6 +295,25 @@ TEST(AriadneRuntime, EmitsWindowAndWidgetsInOrder) {
   EXPECT_TRUE(mb.saw("end_frame"));
 }
 
+// progress: the bound number over [lo, hi], clamped, with the overlay's text; a backend with no
+// bar of its own (the mock) gets the default text bar.
+TEST(AriadneRuntime, ProgressDrawsTheBoundFraction) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  cvc::state::instance(app)("job.progress").value("40");
+  cvc::state::instance(app)("job.phase").value("factoring 40%");
+  cvc::state::instance(app)("job.over").value("250");
+  rt.set_root(group({window("W", {progress("Work", "job.progress", 0.0, 100.0, "job.phase"),
+                                  progress("Plain", "job.progress", 0.0, 100.0),
+                                  progress("Over", "job.over", 0.0, 100.0)})}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("text_value:Work=[########------------] factoring 40%"));
+  EXPECT_TRUE(mb.saw("text_value:Plain=[########------------] 40%"));
+  EXPECT_TRUE(mb.saw("text_value:Over=[####################] 100%")) << "clamped to hi";
+}
+
 TEST(AriadneRuntime, ColoredTextEmitsTintedLeaf) {
   cvc::app app;
   Runtime rt(app, "");
@@ -495,6 +518,38 @@ TEST(AriadneAction, ProgramActionCapturesDeliveredValueFromMsgRecv) {
   rt.render();
   rt.drain(); // wakes + resumes; the delivered value flows into state-set
   EXPECT_EQ(cvc::state::instance(app)("async.value").value(), "delivered");
+}
+
+// An action's (fork) child shares the action's intrinsics context, so the context outlives the
+// action while the child runs: the action ends in its first drain, the child sleeps past it and
+// then writes through the context. Once the child ends it is reaped, and the context with it.
+TEST(AriadneAction, ForkedChildOutlivesTheAction) {
+  cvc::app app;
+  cvc::state &root = cvc::state::instance(app);
+  Runtime rt(app, "doc");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({button("Go", "(begin (set c (fork)) (if (= c 0) (begin (sleep 0.05) "
+                                  "(state-set \"x\" \"1\")) (state-set \"child\" (str c))))")}));
+  mb.button_click = true;
+  rt.render();
+  rt.drain(); // the action forks and ends; its child sleeps
+  mb.button_click = false;
+  ASSERT_FALSE(root("doc.child").value().empty());
+  const int child = std::stoi(root("doc.child").value());
+  EXPECT_TRUE(root("doc.x").value().empty());
+  for (int frame = 0; frame < 500 && root("doc.x").value().empty(); ++frame) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    rt.render();
+    rt.drain();
+  }
+  EXPECT_EQ(root("doc.x").value(), "1");
+  for (int frame = 0; frame < 50 && app.exec_scheduler().get_process_info(child); ++frame) {
+    rt.render();
+    rt.drain();
+  }
+  EXPECT_FALSE(app.exec_scheduler().get_process_info(child).has_value());
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
 }
 
 // item 2 — the compute-pool async story, headless (no ImGui/GL): a HOST INTRINSIC launches an
@@ -3398,6 +3453,425 @@ TEST(AriadneNetIntrinsics, HttpRequestAsyncPutWithBytesBodyAwaited) {
   EXPECT_TRUE(headers_contain(fake->last_headers, "Authorization: Bearer tok"));
 }
 
+// ---------------------------------------------------------------------------
+// The host's network (net_host.h; docs/ARIADNE.md §10.3): enable_net's allowlist and credential
+// store, through the verbs, against localhost servers. Each server is its own origin (its port).
+// ---------------------------------------------------------------------------
+namespace {
+
+using cvc_test::LocalHttpServer;
+
+const std::string kNetToken = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJqb2UifQ.dGVzdC1zaWduYXR1cmU";
+
+// Turn the host's network off and drop the providers, so one test never leaks into another.
+struct NetHostGuard {
+  ~NetHostGuard() {
+    disable_net();
+    clear_action_intrinsics();
+  }
+};
+
+// txwtf's shape: POST /user/login answers {user, expires, token, session_uuid}; GET /user/me wants
+// the bearer token; /echo hands back whatever Authorization it was sent, in a header and the body.
+LocalHttpServer::Reply txwtf(const LocalHttpServer::Request &req) {
+  if (req.target == "/user/login" && req.method == "POST")
+    return {200,
+            {"Content-Type: application/json"},
+            "{\"user\": {\"name\": \"joe\"}, \"expires\": 1730000000, \"token\": \"" + kNetToken +
+                "\", \"session_uuid\": \"s-1\"}"};
+  if (req.target == "/user/me")
+    return req.header("Authorization") == "Bearer " + kNetToken
+               ? LocalHttpServer::Reply{200,
+                                        {"Content-Type: application/json"},
+                                        "{\"name\": \"joe\"}"}
+               : LocalHttpServer::Reply{401, {}, "{}"};
+  if (req.target == "/echo")
+    return {
+        200, {"X-Echo: " + req.header("Authorization")}, "you sent " + req.header("Authorization")};
+  if (req.target == "/slow") { // longer than an action's default 0.1 s
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    return {200, {}, "slow"};
+  }
+  return {404, {}, ""};
+}
+
+// Click a button that runs `program` and pump until the state node `done` has a value.
+bool run_program(cvc::app &app, Runtime &rt, MockBackend &mb, const std::string &program,
+                 const char *done) {
+  rt.set_root(group({button("Go", program)}));
+  mb.button_click = true;
+  rt.render();
+  rt.drain();
+  mb.button_click = false;
+  const bool ok = pump_until(rt, [&] { return !cvc::state::instance(app)(done).value().empty(); });
+  if (!ok) // why the program stopped (a budget, an error) is in the warnings
+    for (const std::string &w : rt.take_reactive_warnings())
+      std::fprintf(stderr, "run_program: %s\n", w.c_str());
+  return ok;
+}
+
+std::string sval(cvc::app &app, const char *path) {
+  return cvc::state::instance(app)(path).value();
+}
+
+// Every value and every data payload in the app's state tree, as text.
+std::string whole_state(cvc::app &app) {
+  namespace se = cvc::state_exec;
+  cvc::state &root = cvc::state::instance(app);
+  std::string all;
+  for (const std::string &name : root.children()) {
+    cvc::state &n = root(name);
+    all += name + "=" + n.value() + "\n";
+    const boost::any d = n.data();
+    if (const std::string *s = boost::any_cast<std::string>(&d))
+      all += *s + "\n";
+    else if (const se::value_t *v = boost::any_cast<se::value_t>(&d))
+      all += (std::get_if<se::bytes_value>(&v->v) ? std::get<se::bytes_value>(v->v).data
+                                                  : se::to_string(*v)) +
+             "\n";
+  }
+  return all;
+}
+
+NetHostConfig allow(std::initializer_list<std::string> origins) {
+  NetHostConfig c;
+  c.enabled = true;
+  c.allow = origins;
+  return c;
+}
+
+std::string login_program(const LocalHttpServer &api) {
+  return "(begin"
+         "  (set r (http-request \"POST\" \"" +
+         api.url("/user/login") +
+         "\" (dict \"form\" (dict \"username\" \"joe\" \"password\" \"pw\")"
+         "        \"capture_auth\" (dict \"name\" \"txwtf\" \"field\" \"token\"))))"
+         "  (state-set \"login.captured\" (get-attr r \"captured\"))"
+         "  (state-set \"login.status\" (get-attr r \"status\"))"
+         "  (state-set \"login.ctype\" (get-attr r \"content_type\"))"
+         "  (state-set \"login.ctype2\" (get-attr (get-attr r \"header_map\") \"content-type\"))"
+         "  (state-data-set \"login.body\" (get-attr r \"body\"))"
+         "  (state-data-set \"login.reply\" r)"
+         "  (state-set \"login.done\" 1))";
+}
+
+} // namespace
+
+TEST(AriadneNetHost, CaptureKeepsTheTokenOutOfTheDocumentAndAuthSendsIt) {
+  if (!cvc::net::have_http_backend())
+    GTEST_SKIP() << "libcvc built without an HTTP backend";
+  LocalHttpServer api(txwtf);
+  cvc::app app;
+  NetHostGuard guard;
+  ASSERT_EQ(enable_net(app, allow({api.origin()})), "");
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+
+  ASSERT_TRUE(run_program(app, rt, mb, login_program(api), "login.done"));
+  EXPECT_EQ(sval(app, "login.status"), "200");
+  EXPECT_EQ(sval(app, "login.captured"), "true");
+  EXPECT_EQ(sval(app, "login.ctype"), "application/json");
+  EXPECT_EQ(sval(app, "login.ctype2"), "application/json");
+  const std::string body = node_data_string(app, "login.body");
+  EXPECT_NE(body.find("\"token\": \"[redacted]\""), std::string::npos) << body;
+  EXPECT_NE(body.find("\"session_uuid\": \"s-1\""), std::string::npos) << "the rest is kept";
+
+  ASSERT_TRUE(run_program(app, rt, mb,
+                          "(begin (set me (http-get \"" + api.url("/user/me") +
+                              "\" (dict \"auth\" \"txwtf\")))"
+                              "  (state-set \"me.status\" (get-attr me \"status\"))"
+                              "  (state-data-set \"me.reply\" me)"
+                              "  (state-set \"me.done\" 1))",
+                          "me.done"));
+  EXPECT_EQ(sval(app, "me.status"), "200");
+
+  const std::vector<LocalHttpServer::Request> seen = api.requests();
+  ASSERT_EQ(seen.size(), 2u);
+  EXPECT_EQ(seen[0].header("Authorization"), "") << "the sign-in carried none";
+  EXPECT_EQ(seen[1].header("Authorization"), "Bearer " + kNetToken) << "the host added it";
+  const std::string state = whole_state(app);
+  EXPECT_EQ(state.find(kNetToken), std::string::npos) << "the token reached the state tree:\n"
+                                                      << state;
+  EXPECT_NE(state.find("[redacted]"), std::string::npos) << "the reply itself was stored";
+}
+
+// An action's default budget is 5000 steps and 0.1 s. A request's network wait and its transport's
+// CPU are not the action's: a 300 ms reply, and the first request of the process (libcurl's
+// start-up), still complete under the defaults.
+TEST(AriadneNetHost, ANetworkWaitIsNotTheActionsBudget) {
+  if (!cvc::net::have_http_backend())
+    GTEST_SKIP() << "libcvc built without an HTTP backend";
+  LocalHttpServer api(txwtf);
+  cvc::app app;
+  NetHostGuard guard;
+  ASSERT_EQ(enable_net(app, allow({api.origin()})), "");
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  ASSERT_TRUE(run_program(app, rt, mb,
+                          "(begin (set r (http-get \"" + api.url("/slow") +
+                              "\")) (state-set \"slow.status\" (get-attr r \"status\")))",
+                          "slow.status"));
+  EXPECT_EQ(sval(app, "slow.status"), "200");
+}
+
+TEST(AriadneNetHost, AuthGoesOnlyToAnOriginTheCredentialIsBoundTo) {
+  if (!cvc::net::have_http_backend())
+    GTEST_SKIP() << "libcvc built without an HTTP backend";
+  LocalHttpServer api(txwtf), other(txwtf), outside(txwtf);
+  cvc::app app;
+  NetHostGuard guard;
+  ASSERT_EQ(enable_net(app, allow({api.origin(), other.origin()})), "");
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  ASSERT_TRUE(run_program(app, rt, mb, login_program(api), "login.done"));
+  ASSERT_EQ(sval(app, "login.captured"), "true");
+
+  ASSERT_TRUE(run_program(
+      app, rt, mb,
+      "(begin"
+      "  (set a (http-get \"" +
+          other.url("/echo") +
+          "\" (dict \"auth\" \"txwtf\")))"
+          "  (state-set \"other.ok\" (get-attr a \"ok\"))"
+          "  (state-set \"other.error\" (get-attr a \"error\"))"
+          "  (set b (http-get \"" +
+          outside.url("/echo") +
+          "\"))"
+          "  (state-set \"outside.ok\" (get-attr b \"ok\"))"
+          "  (state-set \"outside.error\" (get-attr b \"error\"))"
+          "  (set c (http-get \"" +
+          api.url("/echo") +
+          "\" (dict \"auth\" \"txwtf\")))"
+          "  (state-data-set \"echo.body\" (get-attr c \"body\"))"
+          "  (state-set \"echo.header\" (get-attr (get-attr c \"header_map\") \"x-echo\"))"
+          "  (state-set \"done\" 1))",
+      "done"));
+  EXPECT_EQ(sval(app, "other.ok"), "false");
+  EXPECT_NE(sval(app, "other.error").find("no credential 'txwtf' for " + other.origin()),
+            std::string::npos)
+      << sval(app, "other.error");
+  EXPECT_TRUE(other.requests().empty()) << "nothing was sent to the unbound origin";
+  EXPECT_EQ(sval(app, "outside.ok"), "false");
+  EXPECT_NE(
+      sval(app, "outside.error").find(outside.origin() + " is not an origin this host allows"),
+      std::string::npos)
+      << sval(app, "outside.error");
+  EXPECT_TRUE(outside.requests().empty());
+  // An endpoint that echoes the header: the reply's copies are blanked.
+  EXPECT_EQ(node_data_string(app, "echo.body"), "you sent Bearer [redacted]");
+  EXPECT_EQ(sval(app, "echo.header"), "Bearer [redacted]");
+  EXPECT_EQ(whole_state(app).find(kNetToken), std::string::npos);
+}
+
+TEST(AriadneNetHost, ForgetAndClearVerbs) {
+  if (!cvc::net::have_http_backend())
+    GTEST_SKIP() << "libcvc built without an HTTP backend";
+  LocalHttpServer api(txwtf);
+  cvc::app app;
+  NetHostGuard guard;
+  ASSERT_EQ(enable_net(app, allow({api.origin()})), "");
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  ASSERT_TRUE(run_program(app, rt, mb, login_program(api), "login.done"));
+
+  ASSERT_TRUE(run_program(
+      app, rt, mb,
+      "(begin"
+      "  (state-set \"has.any\" (net-auth-has? \"txwtf\"))"
+      "  (state-set \"has.api\" (net-auth-has? \"txwtf\" \"" +
+          api.url("/x") +
+          "\"))"
+          "  (state-set \"has.elsewhere\" (net-auth-has? \"txwtf\" \"https://elsewhere.example/\"))"
+          "  (state-set \"allowed.api\" (net-allowed? \"" +
+          api.url("/x") +
+          "\"))"
+          "  (state-set \"allowed.elsewhere\" (net-allowed? \"https://elsewhere.example/\"))"
+          "  (state-set \"forget.first\" (net-auth-forget \"txwtf\"))"
+          "  (state-set \"forget.again\" (net-auth-forget \"txwtf\"))"
+          "  (state-set \"has.after\" (net-auth-has? \"txwtf\"))"
+          "  (set me (http-get \"" +
+          api.url("/user/me") +
+          "\" (dict \"auth\" \"txwtf\")))"
+          "  (state-set \"me.error\" (get-attr me \"error\"))"
+          "  (state-set \"done\" 1))",
+      "done"));
+  EXPECT_EQ(sval(app, "has.any"), "true");
+  EXPECT_EQ(sval(app, "has.api"), "true");
+  EXPECT_EQ(sval(app, "has.elsewhere"), "false");
+  EXPECT_EQ(sval(app, "allowed.api"), "true");
+  EXPECT_EQ(sval(app, "allowed.elsewhere"), "false");
+  EXPECT_EQ(sval(app, "forget.first"), "true");
+  EXPECT_EQ(sval(app, "forget.again"), "false");
+  EXPECT_EQ(sval(app, "has.after"), "false");
+  EXPECT_NE(sval(app, "me.error").find("sign in first"), std::string::npos)
+      << sval(app, "me.error");
+  EXPECT_EQ(api.requests().size(), 1u) << "no request without the credential";
+
+  cvc::state::instance(app)("login.done").value(std::string());
+  ASSERT_TRUE(run_program(app, rt, mb, login_program(api), "login.done"));
+  ASSERT_TRUE(run_program(app, rt, mb,
+                          "(begin (state-set \"clear\" (net-auth-clear))"
+                          "  (state-set \"cleared.has\" (net-auth-has? \"txwtf\")) (state-set "
+                          "\"done2\" 1))",
+                          "done2"));
+  EXPECT_EQ(sval(app, "clear"), "true");
+  EXPECT_EQ(sval(app, "cleared.has"), "false");
+}
+
+TEST(AriadneNetHost, APersistedCredentialSurvivesARestart) {
+  if (!cvc::net::have_http_backend())
+    GTEST_SKIP() << "libcvc built without an HTTP backend";
+  LocalHttpServer api(txwtf);
+  const std::filesystem::path dir =
+      std::filesystem::temp_directory_path() / ("ariadne_net_host_" + std::to_string(api.port()));
+  std::filesystem::remove_all(dir);
+  const std::filesystem::path file = dir / "credentials";
+  NetHostConfig config = allow({api.origin()});
+  config.credential_store = file.string();
+  {
+    cvc::app app;
+    NetHostGuard guard;
+    ASSERT_EQ(enable_net(app, config), "");
+    EXPECT_TRUE(net_host_status().persist);
+    Runtime rt(app, "");
+    MockBackend mb;
+    rt.set_backend(&mb);
+    ASSERT_TRUE(run_program(app, rt, mb, login_program(api), "login.done"));
+    ASSERT_EQ(sval(app, "login.captured"), "true");
+    EXPECT_EQ(whole_state(app).find(kNetToken), std::string::npos);
+  }
+  ASSERT_TRUE(std::filesystem::exists(file));
+#if !defined(_WIN32)
+  EXPECT_EQ(std::filesystem::status(file).permissions() & std::filesystem::perms::all,
+            std::filesystem::perms::owner_read | std::filesystem::perms::owner_write);
+#endif
+  {
+    std::ifstream in(file);
+    const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    EXPECT_NE(text.find("txwtf " + api.origin() + " " + kNetToken), std::string::npos) << text;
+  }
+  { // the next run signs in from the file, the document never seeing the token
+    cvc::app app;
+    NetHostGuard guard;
+    ASSERT_EQ(enable_net(app, config), "");
+    Runtime rt(app, "");
+    MockBackend mb;
+    rt.set_backend(&mb);
+    ASSERT_TRUE(run_program(app, rt, mb,
+                            "(begin (state-set \"has\" (net-auth-has? \"txwtf\"))"
+                            "  (set me (http-get \"" +
+                                api.url("/user/me") +
+                                "\" (dict \"auth\" \"txwtf\")))"
+                                "  (state-set \"me.status\" (get-attr me \"status\"))"
+                                "  (state-set \"done\" 1))",
+                            "done"));
+    EXPECT_EQ(sval(app, "has"), "true");
+    EXPECT_EQ(sval(app, "me.status"), "200");
+  }
+  std::filesystem::remove_all(dir);
+}
+
+TEST(AriadneNetHost, CapabilityTokensAndRequiresFollowTheHost) {
+  cvc::app app;
+  NetHostGuard guard;
+  Runtime rt(app, "");
+  EXPECT_FALSE(rt.has("net"));
+  EXPECT_FALSE(rt.has("net.auth"));
+  EXPECT_EQ(enable_net(app, NetHostConfig{}), "") << "not enabled: nothing to do";
+  EXPECT_FALSE(rt.has("net"));
+  ASSERT_EQ(enable_net(app, allow({"https://tx.wtf"})), "");
+  EXPECT_TRUE(rt.has("net"));
+  EXPECT_TRUE(rt.has("net.auth"));
+  EXPECT_FALSE(rt.has("net.auth.persist"));
+  EXPECT_TRUE(rt.has("net-auth-forget"));
+  if (cvc::net::have_http_backend())
+    EXPECT_TRUE(rt.has("http-request"));
+  EXPECT_EQ(net_host_status().allowed, (std::vector<std::string>{"https://tx.wtf"}));
+  disable_net();
+  EXPECT_FALSE(rt.has("net"));
+
+  if (!AppRuntime::have_yaml())
+    return;
+  const std::filesystem::path doc =
+      std::filesystem::temp_directory_path() / "ariadne_net_requires.ari";
+  std::ofstream(doc) << "requires: [net, net.auth]\n"
+                        "windows:\n"
+                        "  - window: W\n"
+                        "    children:\n"
+                        "      - text: hi\n";
+  {
+    AppRuntime off(app, "ui.net_off");
+    try {
+      off.load(doc.string());
+      ADD_FAILURE() << "a document that requires net loaded without it";
+    } catch (const std::runtime_error &e) {
+      EXPECT_NE(std::string(e.what()).find("net"), std::string::npos) << e.what();
+    }
+  }
+  {
+    AppRuntime on(app, "ui.net_on");
+    ASSERT_EQ(on.enable_net(allow({"https://tx.wtf"})), "");
+    EXPECT_NO_THROW(on.load(doc.string()));
+  }
+  EXPECT_FALSE(net_host_status().enabled) << "the AppRuntime turned it off as it died";
+  std::filesystem::remove(doc);
+}
+
+TEST(AriadneNetHost, EnableNetRefusesABadConfigAndTurnsNothingOn) {
+  cvc::app app;
+  NetHostGuard guard;
+  EXPECT_NE(enable_net(app, allow({"https://tx.wtf/api"})).find("not an origin"),
+            std::string::npos);
+  NetHostConfig missing;
+  missing.enabled = true;
+  missing.policy_files = {"/nonexistent/net.policy"};
+  EXPECT_NE(enable_net(app, missing).find("--net-policy"), std::string::npos);
+  const std::filesystem::path policy =
+      std::filesystem::temp_directory_path() / "ariadne_net_unallowed.policy";
+  std::ofstream(policy) << "allow https://tx.wtf\ncredential txwtf https://api.tx.wtf\n";
+  NetHostConfig unallowed;
+  unallowed.enabled = true;
+  unallowed.policy_files = {policy.string()};
+  const std::string why = enable_net(app, unallowed);
+  EXPECT_NE(why.find("bound to https://api.tx.wtf, which is not allowed"), std::string::npos)
+      << why;
+  EXPECT_FALSE(net_host_status().enabled);
+  std::filesystem::remove(policy);
+}
+
+TEST(AriadneNetHost, CredentialOptionsNeedAHostThatKeepsCredentials) {
+  if (!cvc::net::have_http_backend())
+    GTEST_SKIP() << "libcvc built without an HTTP backend";
+  cvc::app app;
+  NetIntrinsicsGuard guard;
+  auto *fake = new CannedHttpClient(http_ok(200, "{}"));
+  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(fake));
+  register_net_intrinsics(app); // unchecked, no credential store
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  ASSERT_TRUE(
+      run_program(app, rt, mb,
+                  "(begin"
+                  "  (state-set \"e1\" (try (http-get \"http://ex/x\" (dict \"auth\" \"txwtf\"))"
+                  "                        (catch (e) (get-attr e \"message\"))))"
+                  "  (state-set \"e2\" (try (http-get \"http://ex/x\" (dict \"auth\" \"bad name\"))"
+                  "                        (catch (e) (get-attr e \"message\"))))"
+                  "  (state-set \"e3\" (try (http-get \"http://ex/x\" (dict \"capture_auth\" (dict "
+                  "\"field\" \"t\")))"
+                  "                        (catch (e) (get-attr e \"message\"))))"
+                  "  (state-set \"done\" 1))",
+                  "done"));
+  EXPECT_NE(sval(app, "e1").find("keeps no credentials"), std::string::npos) << sval(app, "e1");
+  EXPECT_NE(sval(app, "e2").find("must name a credential"), std::string::npos) << sval(app, "e2");
+  EXPECT_NE(sval(app, "e3").find("needs a name"), std::string::npos) << sval(app, "e3");
+  EXPECT_EQ(fake->calls.load(), 0) << "a misused request is never sent";
+}
+
 // launch_pool_task generalizes beyond HTTP: a NON-network "heavy" kernel offloaded to the compute
 // pool and awaited by a DSL action — the exact shape a volume/geometry intrinsic follows. Registers
 // a transparent (pool-double n) and a future (pool-double-async n) via the SAME action-intrinsics
@@ -5261,4 +5735,208 @@ TEST(AriadneAppRuntime, EachLoadClearsTheLastScene) {
   art.load(with_scene);
   art.load(write_doc("clear_scene_b.ari", "meta: {min_libcvc: 3.4.0}\nroot:\n  - text: x\n"));
   EXPECT_EQ(scene.log, (std::vector<std::string>{"clear", "realize", "clear", "realize", "clear"}));
+}
+
+// ===========================================================================
+// with-lock under Ariadne (docs/STATE_EXEC_LOCKS.md 5.3, 5.5, 5.8; locks plan L1.12): documents,
+// actions and residents lock on the app's lock manager through the app scheduler. Every manager
+// operation checks the manager's invariants (CVC_STATE_EXEC_CHECK=1, set below before any manager
+// exists; gap G-38).
+// ===========================================================================
+
+namespace {
+
+void set_env_var_for_locks(const char *name, const char *value) {
+#ifdef _WIN32
+  _putenv_s(name, value);
+#else
+  setenv(name, value, 1);
+#endif
+}
+
+// The library reads CVC_STATE_EXEC_CHECK once, when the first lock manager is made.
+[[maybe_unused]] const bool g_lock_self_check = [] {
+  set_env_var_for_locks("CVC_STATE_EXEC_CHECK", "1");
+  return true;
+}();
+
+namespace se = cvc::state_exec;
+
+// An unchrooted program on the app scheduler, with an intrinsics context of its own.
+struct HostProgram {
+  cvc::app &app;
+  se::intrinsics_context ictx;
+  se::environment_ptr env;
+  int pid = -1;
+  HostProgram(cvc::app &a, const std::string &script) : app(a) {
+    se::async_scheduler &sched = app.exec_scheduler();
+    ictx.sched = &sched;
+    ictx.root = &cvc::state::instance(app);
+    ictx.proc = se::make_process();
+    ictx.proc->status = se::process_status::ready;
+    env = se::builtins::make_default_environment();
+    se::register_intrinsics(env, &ictx);
+    se::execute_options opts;
+    opts.env = env;
+    opts.owner = "host";
+    pid = sched.execute(script, opts);
+  }
+  ~HostProgram() { app.exec_scheduler().kill(pid); } // before ictx goes
+  std::optional<se::process_info> info() const {
+    return app.exec_scheduler().get_process_info(pid);
+  }
+};
+
+// What the app scheduler's lock waiters wait on ("lock /<absolute key>").
+std::vector<std::string> lock_waits(cvc::app &app) {
+  std::vector<std::string> out;
+  for (const se::process_info &i : app.exec_scheduler().list_processes())
+    if (!se::is_finished(i.status) && i.waiting_on && i.waiting_on->rfind("lock ", 0) == 0)
+      out.push_back(*i.waiting_on);
+  return out;
+}
+
+// The keys held on the app's lock manager (absolute).
+std::vector<std::string> held_keys(cvc::app &app) {
+  std::vector<std::string> out;
+  for (const se::lock_info &i : app.lock_manager()->query("", nullptr, "").held)
+    out.push_back(i.key);
+  return out;
+}
+
+// Posts to a program's channel, as its chroot names it.
+void post_to(cvc::app &app, const std::string &root, const std::string &channel) {
+  app.exec_scheduler().post_message(se::resolve_channel_key(root, channel),
+                                    se::value_t(std::string("go")));
+}
+
+// Every button reports one click at this render: its action is queued once.
+void click_once(Runtime &rt, MockBackend &mb) {
+  mb.button_click = true;
+  rt.render();
+  mb.button_click = false;
+}
+
+std::string node_value(cvc::app &app, const std::string &path) {
+  return cvc::state::instance(app)(path).value();
+}
+
+using strings = std::vector<std::string>;
+
+} // namespace
+
+// LK-34: a document's section holds X x (absolute docs.A.x); an unchrooted program on the same
+// scheduler asks for X docs: it waits for the section, then excludes the document's locks until
+// it releases.
+TEST(Locks, LK34_UnchrootedOuterLock) {
+  cvc::app app;
+  Runtime rt(app, "docs.A");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  cvc::state::instance(app)("ariadne.exec.lock_timeout").value(std::string("30"));
+  rt.set_root(group({button("Go", "(begin (state-incr \"tries\")"
+                                  " (with-lock \"x\" (begin (state-incr \"inside\")"
+                                  " (msg-recv \"rel\"))))")}));
+  click_once(rt, mb);
+  ASSERT_TRUE(pump_until(rt, [&] { return held_keys(app) == strings{"docs.A.x"}; }));
+  HostProgram outer(app, "(with-lock \"docs\" (begin (state-set \"outer\" \"in\")"
+                         " (msg-recv \"outer.rel\") (state-set \"outer\" \"out\")))");
+  ASSERT_TRUE(pump_until(rt, [&] {
+    const auto i = outer.info();
+    return i && i->waiting_on == std::optional<std::string>("lock /docs");
+  }));
+  EXPECT_EQ(node_value(app, "outer"), "");
+  // The section ends: the outer lock is granted, and the document's next section waits for it.
+  post_to(app, "docs.A", "rel");
+  ASSERT_TRUE(pump_until(rt, [&] { return node_value(app, "outer") == "in"; }));
+  EXPECT_EQ(held_keys(app), strings{"docs"});
+  click_once(rt, mb);
+  ASSERT_TRUE(pump_until(rt, [&] {
+    return node_value(app, "docs.A.tries") == "2" && lock_waits(app) == strings{"lock /docs.A.x"};
+  }));
+  for (int i = 0; i < 20; ++i) {
+    rt.render();
+    rt.drain();
+  }
+  EXPECT_EQ(node_value(app, "docs.A.inside"), "1"); // excluded
+  post_to(app, "", "outer.rel");
+  ASSERT_TRUE(pump_until(rt, [&] { return node_value(app, "docs.A.inside") == "2"; }));
+  EXPECT_EQ(node_value(app, "outer"), "out");
+  EXPECT_EQ(held_keys(app), strings{"docs.A.x"});
+  post_to(app, "docs.A", "rel");
+  ASSERT_TRUE(pump_until(rt, [&] { return held_keys(app).empty(); }));
+  EXPECT_NO_THROW(app.lock_manager()->check());
+}
+
+// LW-1, Ariadne's part: the reactive lane binds no with-lock: a predicate using it is a NameError,
+// reported, and the widget is hidden.
+TEST(Locks, LW01_ReactiveLaneHasNoWithLock) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  Widget w = text("shown");
+  w.visible_when = "(with-lock \"k\" #t)";
+  rt.set_root(group({w}));
+  rt.render();
+  EXPECT_FALSE(mb.saw("text_line:shown"));
+  const auto warns = rt.take_reactive_warnings();
+  ASSERT_FALSE(warns.empty());
+  EXPECT_NE(warns[0].find("NameError"), std::string::npos) << warns[0];
+  EXPECT_NE(warns[0].find("with-lock"), std::string::npos) << warns[0];
+  EXPECT_TRUE(held_keys(app).empty());
+}
+
+// LW-6, Ariadne's part: an action's fork inside with-lock is refused (LockError "fork"), and no
+// child is made.
+TEST(Locks, LW06_ActionFork) {
+  cvc::app app;
+  Runtime rt(app, "ui.f");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({button("Fork", "(state-set \"r\" (with-lock \"k\" (try (fork)"
+                                    " (catch (LockError e) (get-attr e \"reason\")))))")}));
+  click_once(rt, mb);
+  ASSERT_TRUE(pump_until(rt, [&] { return node_value(app, "ui.f.r") != ""; }));
+  EXPECT_EQ(node_value(app, "ui.f.r"), "fork");
+  EXPECT_TRUE(held_keys(app).empty());
+  for (const se::process_info &i : app.exec_scheduler().list_processes())
+    EXPECT_EQ(i.name.find("-fork"), std::string::npos) << i.name;
+  // Outside with-lock an action's (fork) forks the running process, and the child keeps the
+  // action's owner and context: AriadneAction.ForkedChildOutlivesTheAction.
+}
+
+// LW-9, the L1 part: an action waits for a resident's lock and is granted on release; with the
+// action's default timeout (ariadne.exec.lock_timeout, 1 s) the outcome is TimeoutError, no
+// earlier than 1 s.
+TEST(Locks, LW09_ActionsWaitResidents) {
+  cvc::app app;
+  Runtime rt(app, "ui.doc");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  // The resident takes k at each tick and keeps it until the host posts res.rel.
+  rt.set_tick_program("(with-lock \"k\" (begin (state-incr \"res.in\") (msg-recv \"res.rel\")))");
+  ASSERT_TRUE(pump_until(rt, [&] { return held_keys(app) == strings{"ui.doc.k"}; }));
+  rt.set_root(group({button("Go", "(with-lock \"k\" (state-set \"act\" \"granted\"))")}));
+  click_once(rt, mb);
+  ASSERT_TRUE(pump_until(rt, [&] { return lock_waits(app) == strings{"lock /ui.doc.k"}; }));
+  post_to(app, "ui.doc", "res.rel");
+  ASSERT_TRUE(pump_until(rt, [&] { return node_value(app, "ui.doc.act") == "granted"; }));
+  // The resident takes k again; an action with the default timeout waits, then times out.
+  ASSERT_TRUE(pump_until(rt, [&] {
+    return node_value(app, "ui.doc.res.in") == "2" && held_keys(app) == strings{"ui.doc.k"};
+  }));
+  rt.set_root(
+      group({button("Try", "(try (with-lock \"k\" (state-set \"act2\" \"granted\"))"
+                           " (catch (TimeoutError e) (state-set \"act2\" \"timeout\")))")}));
+  const auto t0 = std::chrono::steady_clock::now();
+  click_once(rt, mb);
+  ASSERT_TRUE(pump_until(rt, [&] { return node_value(app, "ui.doc.act2") != ""; }, 10000));
+  const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  std::printf("LW-9: the action's default lock timeout ended its wait after %.3f s\n", took);
+  EXPECT_EQ(node_value(app, "ui.doc.act2"), "timeout");
+  EXPECT_GE(took, 1.0);
+  EXPECT_LT(took, 10.0);
+  post_to(app, "ui.doc", "res.rel");
+  EXPECT_NO_THROW(app.lock_manager()->check());
 }

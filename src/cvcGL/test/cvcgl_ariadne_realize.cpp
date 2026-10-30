@@ -34,6 +34,7 @@
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/image/image.h>
 #include <cvc/state/state.h> // clock test: read/write the bound sim.* keys
+#include <cvc/state/state_exec/async_scheduler.h> // fe_lab: its jobs are scheduler processes
 #include <cvc/tf/model.h>    // mesh_lab / fe_lab field colours
 #include <cvc/tf/overlays.h>
 #include <cvc/volume/volume.h>
@@ -185,7 +186,10 @@ static void test_lab_sources(cvc::app &app) {
     }
   };
   auto set = [&](const std::string &path, const std::string &v) { st(path).value(v); };
-  auto tick = [&]() { cvc::gl::ariadne::tick_scene(realized, view.renderer()); };
+  auto tick = [&]() {
+    cvc::gl::ariadne::tick_scene(realized, view.renderer());
+    cvc::pump_exec_frame(app.exec_scheduler()); // fe_lab / mesh_lab jobs run as scheduler tasks
+  };
   auto settle = [&](const std::string &base) {
     for (int i = 0; i < 12000; ++i) {
       tick();
@@ -1845,6 +1849,7 @@ int main() {
     auto settle = [&](const std::string &base) {
       for (int i = 0; i < 12000; ++i) {
         cvc::gl::ariadne::tick_scene(realized, view.renderer());
+        cvc::pump_exec_frame(app.exec_scheduler()); // fe_lab / mesh_lab jobs run as scheduler tasks
         if (val(base + ".request").empty() && val(base + ".busy") == "0")
           return true;
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -1913,7 +1918,11 @@ int main() {
         const double hmax = num(fb + ".field.max");
         chk(hmax >= 1.0 - 1e-9 && hmax <= 1.05, "heat: the hot floor is held at 1");
 
-        auto tick = [&]() { cvc::gl::ariadne::tick_scene(realized, view.renderer()); };
+        auto tick = [&]() {
+          cvc::gl::ariadne::tick_scene(realized, view.renderer());
+          cvc::pump_exec_frame(
+              app.exec_scheduler()); // fe_lab / mesh_lab jobs run as scheduler tasks
+        };
         auto starts = [&](const std::string &path, const std::string &prefix) {
           return val(path).compare(0, prefix.size(), prefix) == 0;
         };
@@ -1934,6 +1943,13 @@ int main() {
         tick(); // launches it; the job is applied on a later tick at the earliest
         chk(val(fb + ".busy") == "1" && val(fb + ".stoppable") == "0",
             "a running Poisson solve is not stoppable (fe.stoppable 0)");
+        {
+          bool listed = false;
+          for (const auto &pi : app.exec_scheduler().list_processes())
+            listed = listed || pi.name.rfind("fe_lab/", 0) == 0;
+          chk(listed,
+              "the solve runs as a sliced task on the app's scheduler (an fe_lab/ process)");
+        }
         st(fb + ".request").value(std::string("stop"));
         tick();
         chk(val(fb + ".request").empty() &&

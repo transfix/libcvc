@@ -728,6 +728,7 @@ value_t builtin_generator(std::span<const value_t> args) {
   // A body of its own: (root) in the generator returns it, and a program may change it.
   gen->state = gen->evaluator.create_state(
       cls.body.size() == 1 ? cls.body[0] : detail::begin_of(cls.body), env);
+  gen->state.in_generator = true; // with-lock refuses here (docs/STATE_EXEC_LOCKS.md 5.3)
   gen->state.stats.start();
   track_captured_env(env); // bound back where the closure can reach, it is a cycle
 

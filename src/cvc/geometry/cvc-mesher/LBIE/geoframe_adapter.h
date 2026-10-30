@@ -18,6 +18,7 @@ Designed for future CUDA unified memory support.
 #define __GEOFRAME_ADAPTER_H__
 
 #include "LBIE_geoframe.h"
+#include <cstddef>
 #include <cvc/geometry/geometry.h>
 
 namespace LBIE
@@ -94,6 +95,24 @@ inline geoframe_adapter make_adapter(cvc::geometry& geom) {
 
 // Convert geoframe to geometry (requires copy since geoframe owns data)
 cvc::geometry to_geometry(const geoframe& gf);
+
+// to_geometry() a slice at a time: step(budget) converts about 16*budget vertices or elements,
+// attribute by attribute as to_geometry() does, taking the units it spends out of budget, and
+// returns true once the geometry is whole. The geoframe must outlive the stepper unchanged.
+class to_geometry_stepper
+{
+public:
+  explicit to_geometry_stepper(const geoframe& gf) : _gf(&gf) {}
+  bool step(std::size_t& budget);
+  double progress() const;
+  cvc::geometry& geometry() { return _geom; }
+
+private:
+  const geoframe* _gf;
+  cvc::geometry _geom;
+  int _stage = 0;
+  std::size_t _pos = 0;
+};
 
 // Convert geometry to geoframe (requires copy)
 geoframe to_geoframe(const cvc::geometry& geom);

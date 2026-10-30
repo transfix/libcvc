@@ -269,6 +269,16 @@ public:
     text_value(label, value);
   }
   virtual void separator() = 0;
+  // A read-only progress bar at `fraction` (0..1) with `overlay` drawn over it (empty: the
+  // percent). By default a text value, "[########------------] 40%", so every backend has one.
+  virtual void progress_bar(const char *label, float fraction, const std::string &overlay) {
+    const float f = fraction > 0.f ? (fraction < 1.f ? fraction : 1.f) : 0.f;
+    const int filled = static_cast<int>(f * 20.f + 0.5f);
+    std::string bar = "[" + std::string(std::size_t(filled), '#') +
+                      std::string(std::size_t(20 - filled), '-') + "] ";
+    bar += overlay.empty() ? std::to_string(static_cast<int>(f * 100.f + 0.5f)) + "%" : overlay;
+    text_value(label, bar);
+  }
   virtual bool button(const char *label) = 0;           // returns clicked
   virtual bool menu_item_action(const char *label) = 0; // returns clicked
 
