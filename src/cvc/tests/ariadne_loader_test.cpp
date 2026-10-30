@@ -435,6 +435,36 @@ windows_menu: Panels
 // Phase 0a: input_text / input_int parse — both the shorthand `input_text:` key and the generic
 // `type: input_text` form — carrying bind, the optional `on` (send-on-commit), `def`, and the int
 // range lo/hi. These are the conference app's chat / display-name / room-id fields.
+// progress: a read-only bar over [lo, hi] (default 0..1) with an optional overlay path; the
+// default backend draws it as a text bar.
+TEST(AriadneLoader, ProgressWidget) {
+  const std::string doc = R"(
+meta: { name: T, min_libcvc: 3.4.0 }
+windows:
+  - window: W
+    children:
+      - progress: Work
+        bind: job.progress
+        hi: 100
+        overlay: job.phase
+      - progress: Fraction
+        bind: job.fraction
+)";
+  LoadResult r = load_string(doc);
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(count(r.root, Kind::Progress), 2);
+  const Widget *work = find(r.root, Kind::Progress, "Work");
+  ASSERT_NE(work, nullptr);
+  EXPECT_EQ(work->bind, "job.progress");
+  EXPECT_EQ(work->lo, 0.0);
+  EXPECT_EQ(work->hi, 100.0);
+  EXPECT_EQ(work->overlay, "job.phase");
+  const Widget *fraction = find(r.root, Kind::Progress, "Fraction");
+  ASSERT_NE(fraction, nullptr);
+  EXPECT_EQ(fraction->hi, 1.0);
+  EXPECT_TRUE(fraction->overlay.empty());
+}
+
 TEST(AriadneLoader, InputTextAndInputInt) {
   SKIP_WITHOUT_YAML();
   const char *doc = R"(
