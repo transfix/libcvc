@@ -18,6 +18,7 @@ and what it promises in return. Reference for `cvcgl_wasm_app()`
 - [Measuring: glsync and serve.py](#measuring-glsync-and-servepy)
 - [Testing](#testing)
 - [Checking an app in a browser](#checking-an-app-in-a-browser)
+- [arigl-web: the stock browser host](#arigl-web-the-stock-browser-host)
 - [Related](#related)
 
 ## Overview
@@ -88,7 +89,8 @@ is arigl's browser build, `cyprty` (`src/arigl/CMakeLists.txt`). So is `arigl` i
 in the gallery: it is the gallery's Ariadne app, built with every document in
 `examples/ariadne/documents`, the component library and `examples/data` in its file
 system. Each `.ari` demo is `arigl/?doc=<name>`, and its Demos menu switches documents in
-place (ARIADNE.md §9).
+place (ARIADNE.md §9). A wasm build without the examples makes `arigl` the stock browser
+host instead, with no documents of its own ([arigl-web](#arigl-web-the-stock-browser-host)).
 
 ## cvcgl_wasm_app()
 
@@ -438,6 +440,166 @@ Check in both Firefox and Chromium:
    must print the `cvcGL: ERROR:` line instead and never trap.
 4. **Memory with mimalloc** (wasm-mt). Run for a few minutes at the app's
    `MAXIMUM_MEMORY` and watch for growth failures.
+
+## arigl-web: the stock browser host
+
+`arigl-web` (`cvcpkg/recipes/arigl-web`) is `arigl` built to wasm for running anyone's
+`.ari` documents. It carries none of its own. Its page loads a document by URL, and
+it can be served from any path of an ordinary site. A wasm build of the repo with
+`CVC_BUILD_EXAMPLES=OFF` builds it as the `arigl` target (`src/arigl/CMakeLists.txt`). With
+the examples on, the same target is the gallery's arigl instead, with the documents preloaded.
+
+The package is `share/arigl-web/`:
+
+| File | What |
+|---|---|
+| `index.html`, `arigl-web.js`, `arigl-web.css` | the page (`src/arigl/web/arigl-web.*`): config, `?src=`, loading and error screens |
+| `arigl.js`, `arigl.wasm` | the module; the component library is embedded at `/usr/share/libcvc/ariadne/components` |
+| `THIRD_PARTY_NOTICES.md`, `LICENSE` | VTK-derived code in cvcGL is BSD-3-Clause |
+
+Serve those files in a directory beside the documents, e.g. for an app at `/apps/nicotina/`:
+
+```
+/apps/nicotina/index.html  arigl-web.js  arigl-web.css  arigl.js  arigl.wasm
+/apps/nicotina/main.ari    lib/feed.ari  ...             (the app's own documents)
+/apps/nicotina/arigl.config.json                         (optional)
+```
+
+and open `/apps/nicotina/` (the default document is `main.ari`) or
+`/apps/nicotina/?src=main.ari`. Any static server works for the single-threaded build,
+`python3 -m http.server` included.
+
+**How a document loads.** The page resolves `src` against its own URL and runs
+`arigl run <flags> <absolute src URL> <document args>`. Before the load, arigl
+(`src/arigl/web_document.cpp`, over [`doc_fetch.h`](../inc/cvc/ariadne/doc_fetch.h)) does
+the following:
+
+1. It checks that the document is on the page's origin, or on one the config lists.
+2. It fetches the document with the page's `fetch()`.
+3. It reads the files the document names: its `import:` entries and every `load:` and
+   `vinay:`.
+4. It fetches each one named by a relative or absolute path, against the URL of the file
+   that names it, and then the files those name.
+5. It writes every fetched file at its URL path in MEMFS (`https://tx.wtf/apps/nicotina/lib/feed.ari`
+   lands at `/apps/nicotina/lib/feed.ari`), changes to the document's directory, and loads
+   the local copy.
+
+So a relative reference resolves exactly as it would on disk, and the loader knows nothing
+about URLs. References with a scheme are not fetched: `cvc://` is the embedded component
+library, and `https://`/`state://` go through the loader's URI handlers, under whatever
+network policy the host flags set. A missing import is a warning, as it is natively. A
+missing document is an error. A name built from a unit's arguments (`load: "{panel}.ari"`)
+cannot be known ahead, so it is a warning: list such files, and data files a scene reads,
+in the config's `preload`.
+
+**The config** is `arigl.config.json` beside the page (a 404 means the defaults), or
+`window.ARIGL_CONFIG` set by a script ahead of `arigl-web.js`:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `title` | `arigl` | the page title |
+| `src` | `main.ari` | the document when the URL names none |
+| `src_param` | `true` | `false` ignores `?src=` and always runs `src` |
+| `src_origins` | `[]` | other origins `src` may name (`"*"` for any); their server must allow CORS |
+| `flags` | `[]` | arigl's host flags, before the document, e.g. the network flags: `["--net"]` lets the document reach the page's origin, `["--net-allow", "https://api.example"]` another; `{origin}` in a flag becomes the page's origin |
+| `args` | `[]` | the document's arguments (§5.6 of ARIADNE.md); the URL adds more with `?arg=` |
+| `preload` | `[]` | more files to fetch with the document, relative to it |
+| `env` | `{}` | the module's environment (e.g. `CVC_ARIADNE_RELAY`) |
+
+Host flags come only from the config, never from the URL, so a link cannot widen what the
+page lets a document do. The page's origin is always allowed, and a site that also serves
+untrusted files from it (user uploads, say) should pin the document with
+`"src_param": false`.
+
+**Errors.** A failed load replaces the loading screen with an error page: one line on what
+went wrong, then everything arigl printed (`arigl: could not fetch .../main.ari: HTTP 404`,
+`... not this page's origin ...`, a YAML error, an unknown host flag). A document that quits
+shows that it has ended. The page reads `Module.ariglRunning()` and `Module.ariglExit(status)`,
+which arigl calls, and keeps its state in `window.ariglWeb` (`state` is `loading`,
+`running`, `ended` or `failed`, and `log` holds arigl's output) for tests and the console.
+
+**Content-Security-Policy.** Nothing in the page is inline, and nothing in the module
+evals: cvcGL's touch probe used `emscripten_run_script_int` and is now an `EM_JS`. The
+smallest policy it runs under is
+`script-src 'self' 'wasm-unsafe-eval'; style-src 'self'` (and `connect-src` covering the
+document's origin).
+
+**wasm-mt.** The recipe's other column, `--platform wasm-mt`, links `-pthread` with
+mimalloc and a 4-worker pool. A threaded page needs `SharedArrayBuffer`, which needs cross-origin
+isolation. Its `index.html` must be served with `Cross-Origin-Opener-Policy: same-origin`
+and `Cross-Origin-Embedder-Policy: require-corp`. Every subresource must then be same-origin
+or carry `Cross-Origin-Resource-Policy`/CORS, which also covers a document from another
+origin and anything a document fetches. Use the single-threaded build unless a document
+needs threads. It needs no headers and can live at an ordinary site path.
+
+**Size.** Measured on 3.7.4, single-threaded, emsdk 5.0.7, `-O3`. The recipe's script prints
+the first row on every build.
+
+| Build | `arigl.wasm` raw | gzip -9 | brotli -q 11 |
+|---|---|---|---|
+| arigl-web as packaged (the gallery's features) | 49.0 MB | 13.8 MB | 9.5 MB |
+| `CVC_ARIGL_WEB_LEAN=1`: no ImageMagick, assimp, mesher, SDF or libigl | 33.7 MB | 9.0 MB | 6.1 MB |
+| as packaged, linked without Asyncify (it cannot run; for scale) | 31.8 MB | 9.9 MB | 7.3 MB |
+
+`arigl.js` is 325 KB raw, 68 KB gzip and 59 KB brotli. The page's three files come to under
+10 KB. The deployed gallery's `arigl.wasm` (the same program with the examples) is 48.9 MB,
+and the `ari` page's `ari.wasm` (libcvc with ImageMagick, no GL) is 21.6 MB.
+
+Where the code goes: 43.3 MB of function bodies plus 5.5 MB of data segments. The bodies are
+attributed by name, from a link with `--profiling-funcs`. A library's templates that another
+library instantiates count under libc++.
+
+| Code | with Asyncify | without |
+|---|---|---|
+| VTK | 14.9 MB (34%) | 8.1 MB (31%) |
+| ImageMagick | 5.3 MB | 3.3 MB |
+| assimp | 4.8 MB | 3.0 MB |
+| image and compression codecs | 2.7 MB | 1.9 MB |
+| libc++ | 2.9 MB | 1.6 MB |
+| the cvc core outside Ariadne (geometry, volume, LBIE, SDF, ...) | 3.3 MB | 2.4 MB |
+| cvcGL | 1.8 MB | 1.1 MB |
+| cvc::ariadne | 1.4 MB | 0.9 MB |
+| cvc::state and state_exec | 1.2 MB | 0.6 MB |
+| libc and the Emscripten runtime | 1.8 MB | 1.1 MB |
+| libigl / Eigen | 0.7 MB | 0.6 MB |
+| SDL3, Dear ImGui, boost, yaml-cpp, ftxui | 2.1 MB | 1.3 MB |
+| total | 43.3 MB | 26.1 MB |
+
+Three things stand out:
+
+- **VTK is the largest single part, but not most of it.** It is a third of the code. The
+  optional features the gallery needs (ImageMagick, assimp, the codecs behind them, the
+  mesher) are about as large again. `CVC_ARIGL_WEB_LEAN=1` drops those features, which saves
+  15.3 MB raw and 3.4 MB brotli. The lean build passes the same headless test.
+- **Asyncify costs about 40% of the code.** The code is 26.1 MB without it and 43.3 MB with it.
+  arigl's loop yields with `emscripten_sleep`, and a document's fetch and the document-set load
+  block. Because any indirect call might reach one of those, nearly every function gets
+  instrumented.
+- **An ImGui-only host would roughly halve the lean shell.** Such a host draws Ariadne's widgets
+  with Dear ImGui straight on WebGL2, with no VTK render window and no cvcGL scene graph. It
+  would keep the following: cvc::ariadne, state_exec, the parts of the cvc core its registries
+  reach, ImGui with its WebGL backend, SDL3 (or Emscripten's HTML5 input), yaml-cpp, boost,
+  libc++ and libc. VTK and the cvcGL scene layer are about 16 MB of the lean module. On the
+  lean feature set such a host would be about 16-18 MB raw, ~4.5 MB gzip and ~3 MB brotli.
+  That is half the lean shell and a third of the packaged one, and `ari.wasm` (21.6 MB with
+  ImageMagick) is an upper bound for it. It would run no `scene:`, and a document that needs
+  one says so with `requires:` (ARIADNE.md §5.7). These are estimates from the table, not a
+  build. Dropping Asyncify on top would cut about another third, as it does the packaged
+  module (49.0 MB to 31.8 MB). The frame loop would use `emscripten_set_main_loop`, and the two blocking
+  waits would move to JSPI where the browser has it, or to a worker on wasm-mt.
+
+**Testing.**
+
+| What | How |
+|---|---|
+| URL parsing, reference resolution (and that it agrees with the file scheme), the origin rule, the fetch walk | `ariadne_doc_fetch_test` (ctest) |
+| a document set run from another directory; a URL refused natively | `ctest -R 'arigl_(docset\|url_document)'` |
+| the shell in a real browser: a same-origin set loads and runs, a cross-origin or missing `src` shows the error page, all under a strict CSP with no COOP/COEP | `node src/arigl/web/test/arigl_web_smoke.mjs --web <share/arigl-web> --docset src/arigl/tests/docset --chrome <chrome>` (CI: the `arigl-web` job, which builds with the recipe's script) |
+
+By hand: serve a directory holding the five files, `app/` and `shared/` from
+`src/arigl/tests/docset` (the shell files inside `app/`), with `python3 -m http.server`,
+and open `http://localhost:8000/app/`. The *Document set* window shows a line from
+`lib/panel.ari` and one from `shared/note.ari`, beside the component library's *Display*.
 
 ## Related
 

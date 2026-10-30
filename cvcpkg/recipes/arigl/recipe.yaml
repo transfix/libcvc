@@ -1,0 +1,73 @@
+schema_version: 1
+recipe:
+  name: arigl
+  upstream_version: "3.7.4"
+  cvc_revision: 1
+  maintainer: "cvcpkg group"
+  maintainer_email: "info@cvcpkg.org"
+  maintainer_url: "https://cvcpkg.org"
+  description: "arigl — run an Ariadne (.ari) UI document with a 3D scene. `arigl run doc.ari` opens a window: the document's widgets in Dear ImGui over its VTK scene. `--terminal` runs it in the terminal instead, the scene rendered offscreen and drawn behind the widgets; `arigl snapshot` renders a frame to a PNG (or as text), `arigl check` loads a document and reports its warnings, `arigl info` says what the host provides. The GL sibling of `ari`. A document set installed under share/<app>/ runs from anywhere: each import resolves against its file's directory, and cvc://components from the libcvc beside arigl."
+  homepage: https://github.com/transfix/libcvc
+  license: LGPL-2.1-only
+  tags: [ui, graphics, gl, vtk, imgui, cli, tools]
+
+# `arigl` is its OWN package, separate from the libcvc and cvcgl SDKs (like ari and cvc-cli), so
+# the tool lands deliberately in a user's PATH (`cvcpkg install arigl`) and an app that ships .ari
+# documents can depend on it as its host. It builds src/arigl standalone against the installed
+# libcvc and cvcGL SDKs (find_package(cvc CONFIG), find_package(cvcGL CONFIG)) plus the VTK
+# modules it draws its window with, and installs just bin/arigl; neither SDK is rebuilt.
+#
+# The .ari loader, the Ariadne runtime and the terminal backends are libcvc's (cvc::ariadne); the
+# ImGui-over-VTK backend and the scene are cvcGL's. arigl is built against the libcvc of its own
+# tree (it uses libcvc API newer than the last release, e.g. cvc/ariadne/doc_fetch.h), so publish
+# it with that libcvc, as ari is.
+#
+# Platforms: wherever cvcgl is: linux and windows. macOS joins when VTK and cvcgl have macOS
+# bundles; build.sh already sets nothing Linux-only.
+#
+# Its browser twin is arigl-web (cvcpkg/recipes/arigl-web): the same program built to wasm, with
+# a page that runs a document by URL.
+
+source:
+  # Co-located with the libcvc source tree; build.sh points cmake at src/arigl.
+  # `../../..` is the libcvc repo root.
+  type: vendored
+  path: ../../..
+
+patches: []
+
+depends:
+  build:
+    - name: libcvc
+    - name: cvcgl
+    # arigl itself links VTK's RenderingUI and IOImage modules (its window and --png), beyond
+    # what cvcGL links.
+    - name: vtk
+    # cvcGL's export links imgui and SDL3::SDL3 (cvcgl's runtime deps).
+    - name: imgui
+    - name: sdl3
+  runtime:
+    - name: libcvc
+    - name: cvcgl
+    - name: vtk
+    - name: imgui
+    - name: sdl3
+  host_tools:
+    - cmake
+    - ninja
+
+build:
+  matrix:
+    - platform: linux
+      script: build.sh
+    - platform: windows
+      script: build.ps1
+
+package:
+  # Just the `arigl` executable (bin/arigl, bin/arigl.exe on Windows). No cmake package config —
+  # arigl is an application.
+  files:
+    - bin/arigl*
+
+abi:
+  cxx_std: 20

@@ -1,0 +1,91 @@
+schema_version: 1
+recipe:
+  name: arigl-web
+  upstream_version: "3.7.4"
+  cvc_revision: 1
+  maintainer: "cvcpkg group"
+  maintainer_email: "info@cvcpkg.org"
+  maintainer_url: "https://cvcpkg.org"
+  description: "arigl-web — the stock browser host for Ariadne (.ari) documents: arigl built to WebAssembly, in share/arigl-web/ (index.html with arigl-web.js and arigl-web.css, arigl.js, arigl.wasm). It carries no documents of its own. Serve those files from a directory beside your .ari files and open it on ?src=main.ari: the page fetches the document and every file it imports, relative to its URL, before it starts, from the page's own origin unless its arigl.config.json allows another; the config also gives arigl its host flags. The single-threaded build (wasm) needs no special headers; the threaded one (wasm-mt) needs a cross-origin-isolated page (COOP/COEP)."
+  homepage: https://github.com/transfix/libcvc
+  # BSD-3-Clause: the module links cvcGL statically, which carries code derived from VTK 9.5.0.
+  # The notices are in THIRD_PARTY_NOTICES.md, shipped beside the page.
+  license: "LGPL-2.1-only AND BSD-3-Clause"
+  tags: [ui, wasm, web, graphics, vtk, imgui]
+
+# The browser twin of the arigl package: the same program (src/arigl), built by build-wasm.sh with
+# the examples off, which makes src/arigl/CMakeLists.txt build the shell (no preloaded documents,
+# the component library embedded) instead of the gallery's arigl. There is no single-threaded wasm
+# libcvc bundle to link, so the trimmed cvc core + cvcGL closure compiles from the repo root, as
+# libcvc-examples-web's does.
+#
+# A site serves it next to its own documents, e.g. for an app at /apps/<app>/:
+#   cvcpkg install arigl-web --platform wasm --arch wasm32 --link static --prefix ./deps
+#   cp ./deps/share/arigl-web/{index.html,arigl-web.js,arigl-web.css,arigl.js,arigl.wasm} \
+#      <site>/apps/<app>/
+#   cp <app>/*.ari <site>/apps/<app>/                     # main.ari is the default document
+# Another recipe can depend on it and install the same files beside its own .ari files.
+
+source:
+  # Co-located with the libcvc source tree (`../../..` is the repo root).
+  type: vendored
+  path: ../../..
+
+patches: []
+
+depends:
+  build:
+    # Static deps for the Emscripten cross-build, flavor-matched (wasm vs wasm-mt): Emscripten
+    # forbids mixing -pthread and non-pthread objects. vtk must be the rendering-enabled wasm
+    # bundle (9.5.0+cvc.3 or later).
+    - name: vtk
+    - name: boost
+    - name: zstd
+    - name: zlib
+    # cvc's build-only state_exec grammar engine (header-only).
+    - name: pegtl
+    # The .ari loader: without it the shell loads nothing (build-wasm.sh fails the build).
+    - name: yaml-cpp
+    # Widgets (cvcGL's ImGuiOverlay is inert stubs without it) and keyboard / mouse (cvcGL's
+    # SdlInput seam); build-wasm.sh fails the build without either.
+    - name: imgui
+    - name: sdl3
+    # cvcGL's conference video (mjpeg).
+    - name: libjpeg-turbo
+    # Scene sources: meshes through assimp (.glb), and cvc's mesh_ops / fem (header-only).
+    - name: assimp
+    - name: eigen
+    - name: libigl
+    # cvc's image I/O (ImageMagick), static, plus every codec library the static MagickCore and
+    # libtiff link. `cvcpkg install` lays bundles down flat (a bundle's own deps are not pulled
+    # in), so the closure is listed here, as in libcvc-examples-web.
+    - name: imagemagick
+    - name: tiff
+    - name: libpng
+    - name: libwebp
+    - name: lerc
+    - name: xz
+    - name: bzip2
+    - name: libxml2
+    - name: freetype
+  host_tools:
+    - cmake
+    - ninja
+
+build:
+  matrix:
+    # Single-threaded: served from any path of an ordinary site.
+    - platform: wasm
+      host_platform: linux
+      script: build-wasm.sh
+    # Threaded: SharedArrayBuffer, so the page must be served cross-origin isolated.
+    - platform: wasm-mt
+      host_platform: linux
+      script: build-wasm.sh
+
+package:
+  files:
+    - share/arigl-web/
+
+abi:
+  cxx_std: 17

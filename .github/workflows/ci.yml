@@ -449,6 +449,93 @@ jobs:
             build-wasm/bin/ari.js
             build-wasm/bin/ari.wasm
 
+  # arigl-web, the stock browser host (cvcpkg/recipes/arigl-web): arigl built to single-threaded
+  # wasm with no documents of its own, by the recipe's own script (which prints the .wasm/.js
+  # sizes, raw, gzip and brotli). Then a headless Chrome loads it the way a site serves it, from an
+  # ordinary path with no COOP/COEP and a strict Content-Security-Policy: a document set from the
+  # page's origin must load and run, and a cross-origin or missing src must show the error page
+  # (src/arigl/web/test/arigl_web_smoke.mjs). Only when the shell, its document loader, its recipe
+  # or this file changed: it builds libcvc and cvcGL for wasm.
+  arigl-web:
+    name: arigl-web shell (wasm, headless Chrome)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    concurrency:
+      group: ci-${{ github.ref }}-arigl-web
+      cancel-in-progress: true
+    defaults:
+      run:
+        shell: bash
+    env:
+      WASM_DEPS: ${{ github.workspace }}/wasm-deps
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Did the shell change?
+        id: paths
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          run=true
+          if [ -n "$base" ] && [ "$base" != "0000000000000000000000000000000000000000" ] \
+             && git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            if ! git diff --name-only "$base" HEAD -- src/arigl inc/cvc/ariadne/doc_fetch.h \
+                   src/cvc/ariadne/doc_fetch.cpp src/cvcGL/wasm cvcpkg/recipes/arigl-web \
+                   .github/workflows/ci.yml | grep -q .; then
+              run=false
+            fi
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "arigl-web changed: $run"
+
+      - name: Install cvcpkg, cmake/ninja and the Emscripten SDK from the catalog
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          curl -fsSL https://cvcpkg.org/install.sh | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          cvcpkg install cmake ninja --prefix "$RUNNER_TEMP/tools" --config release --link shared
+          echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
+          cvcpkg install emsdk --platform linux --prefix "$RUNNER_TEMP/emsdk" \
+            --config release --link shared --no-fallback-to-source
+          test -f "$RUNNER_TEMP/emsdk/emsdk_env.sh"
+          echo "CVC_EMSDK_DIR=$RUNNER_TEMP/emsdk" >> "$GITHUB_ENV"
+
+      - name: Install the recipe's wasm deps
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          cvcpkg install-deps cvcpkg/recipes/arigl-web --prefix "$WASM_DEPS" \
+            --platform wasm --arch wasm32 --config release --link static --no-fallback-to-source
+
+      - name: Build arigl-web (wasm, single-threaded) with the recipe's script
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          CVC_SOURCE_DIR="$GITHUB_WORKSPACE" CVC_BUILD_DIR="$GITHUB_WORKSPACE/build-arigl-web" \
+          CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-arigl-web" CVC_DEPS_PREFIX="$WASM_DEPS" \
+          CVC_PLATFORM=wasm bash cvcpkg/recipes/arigl-web/build-wasm.sh
+          ls -la stage-arigl-web/share/arigl-web
+
+      - name: Load a document set in headless Chrome
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
+          chrome=$(command -v google-chrome || command -v google-chrome-stable || command -v chromium)
+          "$chrome" --version
+          "$node" src/arigl/web/test/arigl_web_smoke.mjs --web stage-arigl-web/share/arigl-web \
+            --docset src/arigl/tests/docset --chrome "$chrome"
+
+      - name: Upload the arigl-web shell
+        if: steps.paths.outputs.run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: arigl-web
+          path: stage-arigl-web/share/arigl-web
+
   # ──────────────────────────── Linux packaging ────────────────────────────
   #
   # Mirrors release.yml's linux job exactly, but injects -<sha> into
