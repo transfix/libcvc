@@ -39,7 +39,8 @@ void Octree::extract_hexa_begin(hexa_extract_state& hx, geoframe& geofrm, float 
 // assign_refine_sign_hexa() it was: vtx_idx_arr_refine cleared, a first pass over the leaves'
 // vertices, then passes until one marks nothing more, each followed by vflag_clear(); then the
 // hexahedra. The arrays are cleared 64 entries a unit, and the leaves' vertices taken a unit each,
-// or 16 for one that does something (hexa_vertex()); true once done.
+// 16 for one the refining passes look at and 256 for one that makes hexahedra (hexa_vertex()'s
+// templates); true once done.
 bool Octree::extract_hexa_step(hexa_extract_state& hx, std::size_t& budget) {
 
 	while (budget > 0)
@@ -64,7 +65,7 @@ bool Octree::extract_hexa_step(hexa_extract_state& hx, std::size_t& budget) {
 				if (hx.j == 0)
 					leaf_begin(hx.leaf, int(hx.pos));
 				const bool vertex = hexa_vertex(hx, hx.j, hx.stage == HX_FIRST ? 0 : hx.stage == HX_PASS ? 1 : 2);
-				spend(budget, vertex ? 16 : 1);
+				spend(budget, !vertex ? 1 : hx.stage == HX_LEAVES ? 256 : 16);
 				if (++hx.j == 8) {
 					hx.j = 0;
 					hx.pos++;

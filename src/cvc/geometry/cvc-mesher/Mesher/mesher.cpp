@@ -35,6 +35,29 @@ namespace LBIE
       cout << "normal_type: " << normaltype << endl;
       cout << "dual: " << (dual_contouring ? "true" : "false") << endl;
     }
+
+    // Frees g's array k (0, 1, ...): false once there are no more.
+    bool free_geoframe_array(geoframe& g, int k)
+    {
+      switch(k)
+	{
+	case 0: std::vector<geoframe::float_3>().swap(g.verts); return true;
+	case 1: std::vector<geoframe::float_3>().swap(g.normals); return true;
+	case 2: std::vector<geoframe::float_3>().swap(g.color); return true;
+	case 3: std::vector<geoframe::float_2>().swap(g.curvatures); return true;
+	case 4: std::vector<geoframe::float_1>().swap(g.funcs); return true;
+	case 5: std::vector<geoframe::uint_3>().swap(g.triangles); return true;
+	case 6: std::vector<geoframe::uint_4>().swap(g.quads); return true;
+	case 7: std::vector<unsigned int>().swap(g.bound_sign); return true;
+	case 8: std::vector<unsigned int>().swap(g.bound_tri); return true;
+	case 9: std::vector<int>().swap(g.vtx_idx_arr_extend); return true;
+	case 10: std::vector<unsigned int>().swap(g.vtxnew_sign); return true;
+	case 11: std::vector<geoframe::uint_18>().swap(g.bound_edge); return true;
+	case 12: std::vector<geoframe::int_18>().swap(g.refine_edge); return true;
+	case 13: std::vector<geoframe::uint_18>().swap(g.refine_edgevtx); return true;
+	default: return false;
+	}
+    }
   }
 
   // ------------
@@ -74,7 +97,7 @@ namespace LBIE
     : _vol(vol), _isovalue(isovalue), _isovalue_in(isovalue_in), _err(err), _err_in(err_in),
       _geom_type(-1), _meshtype(meshtype), _improve(improve_method), _normals(normaltype),
       _extract(extract_method), _iterations(improve_iterations), _dual(dual_contouring),
-      _geometry(geometry), _stage(MS_SETUP)
+      _geometry(geometry), _stage(MS_SETUP), _release(0)
   {
     if(propertyVol)
       _prop = propertyVol.get();
@@ -89,7 +112,7 @@ namespace LBIE
     : _vol(vol), _isovalue(isovalue), _isovalue_in(isovalue_in), _err(err), _err_in(err_in),
       _geom_type(int(geom_type)), _meshtype(geoframe::SINGLE), _improve(improve_method),
       _normals(normaltype), _extract(extract_method), _iterations(improve_iterations),
-      _dual(dual_contouring), _geometry(true), _stage(MS_SETUP)
+      _dual(dual_contouring), _geometry(true), _stage(MS_SETUP), _release(0)
   {
     if(propertyVol)
       _prop = propertyVol.get();
@@ -98,8 +121,8 @@ namespace LBIE
   mesh_stepper::~mesh_stepper() {}
 
   // do_mesh()'s Mesher, extractMesh() and qualityImprove() (Mesher::step()), the property volume's
-  // interpolation in one piece, to_geometry() (to_geometry_stepper), and the Mesher let go of a
-  // slice at a time.
+  // interpolation in one piece, to_geometry() (to_geometry_stepper), and the Mesher let go of an
+  // array at a time.
   bool mesh_stepper::step(std::size_t budget)
   {
     if(budget == 0)
@@ -181,11 +204,23 @@ namespace LBIE
 	      _out = _convert->geometry();
 	      _convert.reset();
 	      _mesher->begin_release();
+	      _release = 0;
 	      _stage = MS_RELEASE;
 	    }
 	  break;
 	case MS_RELEASE:
-	  if(_mesher->step(budget))
+	  // the octree's arrays, then the mesh's, one at a time
+	  if(_release == 0)
+	    {
+	      if(_mesher->step(budget))
+		_release = 1;
+	    }
+	  else if(free_geoframe_array(_mesher->mesh(), _release - 1))
+	    {
+	      _release++;
+	      budget = budget > 64 ? budget - 64 : 0;
+	    }
+	  else
 	    {
 	      _mesher.reset();
 	      _stage = MS_DONE;

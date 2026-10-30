@@ -149,7 +149,7 @@ namespace LBIE
     Mesher::ExtractionMethod _extract;
     int _iterations;
     bool _dual, _geometry;
-    int _stage;
+    int _stage, _release;
     std::unique_ptr<Mesher> _mesher;
     std::unique_ptr<to_geometry_stepper> _convert;
     cvc::geometry _out;

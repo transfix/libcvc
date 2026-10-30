@@ -187,13 +187,15 @@ geometry tetrahedralize2(const volume &vol, double isovalue_outer, double isoval
 //   however the work is sliced (the function runs the same steps to the end).
 //   A step does about `budget` units -- a voxel, an octree cell, a leaf's edge, a vertex of a
 //   smoothing round, 64 entries of an array being cleared -- and runs past it by at most one
-//   bounded piece (a cell, a leaf, a hexahedron's templates); budget 0 runs to the end. Coarser
-//   pieces: resampling a volume whose dimensions are not (2^n+1)^3 and converting one that is not
-//   float to float (one piece each), interpolating the property volume, FASTCONTOURING and
-//   LIBISOCONTOUR extraction, and a whole round of the EDGE_CONTRACT, JOE_LIU, MINIMAL_VOL and
-//   OPTIMIZATION improvements. phase() names the kind of unit the next step spends, a static
-//   string whose cost per unit changes where it does ("preparing", "loading", "octree", "spline",
-//   "collapse", "qef", "traverse", "extracting", "hexahedra", "untangling", "improving",
+//   bounded piece (a cell, a leaf, a hexahedron's templates); budget 0 runs to the end. A few
+//   steps allocate, grow (std::vector growth while the mesh is built) or free one volume- or
+//   mesh-sized array, under a millisecond each at 65^3. Coarser pieces: resampling a volume whose
+//   dimensions are not (2^n+1)^3 (tens of ms at 65^3: give it 2^n+1 samples a side to avoid it)
+//   and converting one that is not float to float, interpolating the property volume,
+//   FASTCONTOURING and LIBISOCONTOUR extraction, and a whole round of the EDGE_CONTRACT, JOE_LIU,
+//   MINIMAL_VOL and OPTIMIZATION improvements. phase() names the kind of unit the next step spends,
+//   a static string whose cost per unit changes where it does ("preparing", "loading", "octree",
+//   "spline", "collapse", "qef", "traverse", "extracting", "hexahedra", "untangling", "improving",
 //   "properties", "output"; "done"); progress() is monotone in [0,1], 1 once done. step() throws
 //   where the function would, and every step after that rethrows it. The volumes are held by
 //   copy-on-write copies, so the caller's may go away. A moved-from stepper may only be destroyed

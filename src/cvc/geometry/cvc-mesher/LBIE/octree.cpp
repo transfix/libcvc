@@ -197,7 +197,7 @@ void Octree::begin_release()
   begin_op(OCT_RELEASE);
 }
 
-// The QEFs freed 16 a unit, then the arrays and step()'s scratch.
+// The QEFs freed 16 a unit, then the arrays one at a time (64 units each), then step()'s scratch.
 bool Octree::step_release(std::size_t& budget)
 {
   while(budget > 0)
@@ -217,23 +217,28 @@ bool Octree::step_release(std::size_t& budget)
 	    }
 	  continue;
 	}
-      std::vector<octcell>().swap(oct_array);
-      std::vector<int>().swap(cut_array);
-      std::vector<boost::shared_array<double> >().swap(qef_array);
-      std::vector<boost::shared_array<double> >().swap(qef_array_in);
-      std::vector<int>().swap(vtx_idx_arr);
-      std::vector<int>().swap(vtx_idx_arr_in);
-      std::vector<int>().swap(grid_idx_arr);
-      std::vector<int>().swap(vtx_idx_arr_refine);
-      std::vector<float>().swap(orig_vol);
-      std::vector<char>().swap(ebit);
-      std::vector<char>().swap(vbit);
-      std::vector<float>().swap(BSplineCoeff);
-      std::vector<MinMax>().swap(minmax);
-      _st.q = cell_levels();
-      _st.flow = flow_state();
-      _st.un = untangle_state();
-      return true;
+      switch(_st.sub++)
+	{
+	case 2: std::vector<octcell>().swap(oct_array); break;
+	case 3: std::vector<int>().swap(cut_array); break;
+	case 4: std::vector<boost::shared_array<double> >().swap(qef_array); break;
+	case 5: std::vector<boost::shared_array<double> >().swap(qef_array_in); break;
+	case 6: std::vector<int>().swap(vtx_idx_arr); break;
+	case 7: std::vector<int>().swap(vtx_idx_arr_in); break;
+	case 8: std::vector<int>().swap(grid_idx_arr); break;
+	case 9: std::vector<int>().swap(vtx_idx_arr_refine); break;
+	case 10: std::vector<float>().swap(orig_vol); break;
+	case 11: std::vector<char>().swap(ebit); break;
+	case 12: std::vector<char>().swap(vbit); break;
+	case 13: std::vector<float>().swap(BSplineCoeff); break;
+	case 14: std::vector<MinMax>().swap(minmax); break;
+	default:
+	  _st.q = cell_levels();
+	  _st.flow = flow_state();
+	  _st.un = untangle_state();
+	  return true;
+	}
+      spend(budget, 64);
     }
   return false;
 }
@@ -7446,7 +7451,7 @@ double Octree::step_progress() const
 	default: return 1.0;
 	}
     case OCT_RELEASE:
-      return 0.5*_st.sub/2.0;
+      return std::min(1.0, _st.sub/16.0);
     default:
       return 1.0;
     }

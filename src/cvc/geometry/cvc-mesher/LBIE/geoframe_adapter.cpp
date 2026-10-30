@@ -394,6 +394,8 @@ bool to_geometry_stepper::step(std::size_t& budget)
     case TG_POINTS: {
       // Copy vertex data
       auto& points = _geom.points();
+      if (_pos == 0)
+        points.reserve(nv);
       const std::size_t end = share(nv, units);
       for (std::size_t i = _pos; i < end; ++i) {
         cvc::geometry::point_t p;
@@ -416,6 +418,8 @@ bool to_geometry_stepper::step(std::size_t& budget)
         break;
       }
       auto& normals = _geom.normals();
+      if (_pos == 0)
+        normals.reserve(nv);
       const std::size_t end = share(nv, units);
       for (std::size_t i = _pos; i < end; ++i) {
         cvc::geometry::normals_t::value_type n{};
@@ -438,6 +442,8 @@ bool to_geometry_stepper::step(std::size_t& budget)
         break;
       }
       auto& colors = _geom.colors();
+      if (_pos == 0)
+        colors.reserve(nv);
       const std::size_t end = share(nv, units);
       for (std::size_t i = _pos; i < end; ++i) {
         cvc::geometry::colors_t::value_type c{};
@@ -460,6 +466,8 @@ bool to_geometry_stepper::step(std::size_t& budget)
         break;
       }
       auto& curvatures = _geom.curvatures();
+      if (_pos == 0)
+        curvatures.reserve(nv);
       const std::size_t end = share(nv, units);
       for (std::size_t i = _pos; i < end; ++i) {
         cvc::geometry::curvatures_t::value_type c{};
@@ -482,6 +490,8 @@ bool to_geometry_stepper::step(std::size_t& budget)
         break;
       }
       auto& functions = _geom.functions();
+      if (_pos == 0)
+        functions.reserve(nv);
       const std::size_t end = share(nv, units);
       for (std::size_t i = _pos; i < end; ++i) {
         functions.push_back(i < gf.funcs.size() ? cvc::geometry::function_t(gf.funcs[i][0])
@@ -538,6 +548,8 @@ bool to_geometry_stepper::step(std::size_t& budget)
         // Copy quads
         const std::size_t n = gf.numquads > 0 ? std::size_t(gf.numquads) : 0;
         auto& quads = _geom.quads();
+        if (_pos == 0)
+          quads.reserve(n);
         const std::size_t end = share(n, units);
         for (std::size_t i = _pos; i < end; ++i) {
           cvc::geometry::quad_t q;
@@ -556,6 +568,8 @@ bool to_geometry_stepper::step(std::size_t& budget)
         // Copy triangles
         const std::size_t n = gf.numtris > 0 ? std::size_t(gf.numtris) : 0;
         auto& tris = _geom.tris();
+        if (_pos == 0)
+          tris.reserve(n);
         const std::size_t end = share(n, units);
         for (std::size_t i = _pos; i < end; ++i) {
           cvc::geometry::tri_t t;
