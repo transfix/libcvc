@@ -34,6 +34,8 @@
 #ifndef CVC_GEOMETRY_IGL_DETAIL_H
 #define CVC_GEOMETRY_IGL_DETAIL_H
 
+#include "../sliced_ldlt.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -178,6 +180,23 @@ void solve_quadratic(const quadratic_system &s, const dvec &f, const dvec &Y, dv
 // active vertices) does not converge.
 void eigenmodes(const dvec &V, const ivec &E, int simplex_size, const mask &active, int k,
                 dvec &values, std::vector<dvec> &vectors);
+
+// ---- what fem.cpp's stepped_solve needs of Eigen (igl_fem.cpp) ------------------------------
+
+// The AMD fill-reducing ordering Eigen::SimplicialLDLT would use for the symmetric matrix A:
+// perm[k] is the row / column of A placed k-th.
+void amd_ordering(const sliced_detail::csc &A, ivec &perm);
+// laplacian_eigenmodes' small problem (at most 400 active vertices): the dense eigensolve of
+// K x = l M x, M = diag(m). U holds the k vectors, each of n values.
+void dense_modes(const sliced_detail::csc &K, const dvec &m, int k, dvec &S, std::vector<dvec> &U);
+// laplacian_eigenmodes' subspace iteration, split around its solves: subspace_start seeds the
+// n x p block X (column-major) as it does; after Y = C^-1 M X (the caller's solves, column-major),
+// subspace_update M-orthonormalises Y, solves the Rayleigh-Ritz problem on K and sets X = Y times
+// its eigenvectors, theta to its values, and returns true once the wanted k have converged (the
+// same test; prev holds the last k).
+void subspace_start(int n, int p, dvec &X, std::uint64_t &seed);
+bool subspace_update(const sliced_detail::csc &K, const dvec &m, int k, double lmax, int p, dvec &Y,
+                     dvec &X, dvec &theta, dvec &prev, std::uint64_t &seed);
 
 // Heat-method geodesics over the cot_safe triangles, one factorisation per
 // connected component. A component with no interior vertex (an isolated

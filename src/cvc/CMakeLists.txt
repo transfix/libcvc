@@ -128,6 +128,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/core/app.h
   ../../inc/cvc/core/async_task.h
   ../../inc/cvc/core/async_lane.h
+  ../../inc/cvc/core/sliced_task.h
   ../../inc/cvc/core/process.h
   ../../inc/cvc/core/text.h
   ../../inc/cvc/core/thread_pool.h
@@ -220,6 +221,7 @@ set(SOURCE_FILES
   core/app.cpp
   core/async_task.cpp
   core/async_lane.cpp
+  core/sliced_task.cpp
   core/process.cpp
   core/text.cpp
   core/thread_pool.cpp
@@ -232,6 +234,7 @@ set(SOURCE_FILES
   geometry/simplify.cpp
   geometry/mesh_ops.cpp
   geometry/fem.cpp
+  geometry/sliced_ldlt.cpp
   geometry/geometry_file_io.cpp
   image/image.cpp
   image/magick_io.cpp
