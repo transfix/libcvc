@@ -58,13 +58,7 @@ public:
     // re-run the binding action after the reload to re-establish them.
     verb_bindings_.clear();
     SceneGraph &sg = view_->scene();
-    if (!viewSaved_) { // the view as the host set it up, for clear() to go back to
-      if (vtkRenderer *r = view_->renderer())
-        r->GetBackground(background_);
-      shadows_ = sg.shadowsEnabled();
-      chrome_ = sg.diagnosticChromeVisible();
-      viewSaved_ = true;
-    }
+    save_view(sg);
     realized_ = realize_scene(sg, scene, prefix, warns);
     haveScene_ = true;
     for (const ari::SceneLight &l : scene.lights)
@@ -96,6 +90,10 @@ public:
   // physics world with its bodies). The view goes back to how the host set it up.
   void clear() override {
     verb_bindings_.clear();
+    if (chromeHidden_) { // no_scene() hid the host's chrome: the next document starts with it again
+      view_->scene().setDiagnosticChromeVisible(chrome_);
+      chromeHidden_ = false;
+    }
     if (!haveScene_)
       return;
     SceneGraph &sg = view_->scene();
@@ -112,6 +110,16 @@ public:
     if (sg.shadowsEnabled() != shadows_)
       sg.setShadowsEnabled(shadows_);
     sg.setDiagnosticChromeVisible(chrome_);
+  }
+
+  // A document without a scene (an app's forms) is its widgets alone: no grid, axes or bounds box
+  // behind them. A later document's scene sets its own (scene.chrome, on by default); Settings can
+  // still turn them on.
+  void no_scene() override {
+    SceneGraph &sg = view_->scene();
+    save_view(sg);
+    sg.setDiagnosticChromeVisible(false);
+    chromeHidden_ = true;
   }
 
   const RealizedScene *realized() const { return haveScene_ ? &realized_ : nullptr; }
@@ -174,11 +182,23 @@ public:
   }
 
 private:
+  // The view as the host set it up, once, for clear() to go back to.
+  void save_view(SceneGraph &sg) {
+    if (viewSaved_)
+      return;
+    if (vtkRenderer *r = view_->renderer())
+      r->GetBackground(background_);
+    shadows_ = sg.shadowsEnabled();
+    chrome_ = sg.diagnosticChromeVisible();
+    viewSaved_ = true;
+  }
+
   SceneRenderer *view_;
   CameraController *cam_;
   RealizedScene
       realized_; // owns StageLighting rigs; outlives the render loop (adapter outlives use)
   bool haveScene_ = false;
+  bool chromeHidden_ = false; // no_scene() hid the chrome; clear() puts the host's back
   double tick_dt_ = -1.0;
   std::vector<std::string> lights_; // the realized free (non-rig) lights, which clear() removes
   // The view before the first realize(): what clear() restores.

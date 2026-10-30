@@ -252,6 +252,9 @@ public:
   // immediately after a widget's primitive. Non-pure NO-OP default so a backend with no
   // tooltip concept still compiles; ImGuiBackend maps it to a hover-gated ImGui::SetTooltip.
   virtual void set_tooltip(const char *text) {}
+  // `autofocus:`: the next widget drawn takes keyboard focus (if it cannot, the next one that can).
+  // The core calls it once when such a widget appears. Default: no keyboard focus to move.
+  virtual void focus_next_widget() {}
 
   // ---- leaves -------------------------------------------------------------
   virtual void text_line(const char *text) = 0;                             // literal caption
@@ -326,13 +329,22 @@ public:
                                    double hi, const char *fmt) = 0;
   virtual IndexEdit combo(const char *label, int current_index,
                           const std::vector<std::string> &options) = 0;
+  // Kind::Radio: the same choice with every option shown, side by side when `row`. A backend
+  // with no radio buttons draws it as a combo.
+  virtual IndexEdit radio(const char *label, int current_index,
+                          const std::vector<std::string> &options, bool row) {
+    (void)row;
+    return combo(label, current_index, options);
+  }
   // A single-line text field bound to a string state key (Kind::InputText; Kind::InputInt reuses it
   // with the core coercing to/from an int). `key` is the stable per-widget id (the resolved state
   // path), like the sliders, so the backend can hold the in-progress text across frames; `current`
   // is the value in state at frame start. Returns {changed, committed, value}, where committed is
   // the write edge (Enter or focus-leave). A backend with no text entry still implements it — a
-  // terminal renders the field read-only and reports no edit.
-  virtual StringEdit input_text(const char *label, const char *key, const std::string &current) = 0;
+  // terminal renders the field read-only and reports no edit. `masked` (`password: true`) shows a
+  // mask in place of the text, never the text itself.
+  virtual StringEdit input_text(const char *label, const char *key, const std::string &current,
+                                bool masked) = 0;
 
   // Draw a host-published image named `name` at display `width` px (height from the image's
   // aspect). A read-only viewer of a buffer the host set via a backend-specific publish API (e.g.

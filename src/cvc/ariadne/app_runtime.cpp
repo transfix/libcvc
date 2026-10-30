@@ -511,6 +511,8 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
       lr.warnings.push_back("AppRuntime.load: '" + path +
                             "' declares a scene but no SceneAdapter is set; scene ignored");
     }
+  } else if (scene_) {
+    scene_->no_scene();
   }
 
   if (new_document && !docPath_.empty())

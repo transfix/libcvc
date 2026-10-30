@@ -48,6 +48,7 @@ enum class Kind {
   Custom,         // a registered custom widget type (custom_type + props); §extensibility
   WindowsMenu,    // the built-in Windows menu (reopen a closed window): placed here in a menubar,
                   // or, outside one, the document's setting for it (bdef false: no such menu)
+  Radio,          // bound enum-as-text state, every option shown (a combo's fields; radio_row)
 };
 
 // ---------------------------------------------------------------------------
@@ -159,7 +160,10 @@ struct Widget {
   std::string id;    // stable widget id suffix; defaults to `label`
   std::string label; // display text / window title / menu name
   std::string bind;  // cvc::state path for bound widgets
-  std::string on;    // event name for action widgets (Button / MenuItemAction)
+  // The event (a name or a '(' program) an action widget (Button / MenuItemAction) raises; on a
+  // bound widget (checkbox, sliders, combo, input_text/int, color, tf_editor, a bound menu_item),
+  // raised after each committed write, so the handler sees the new value in state.
+  std::string on;
   // §4.6 widget-level pointer handlers: each a two-shape value (an event name OR a program starting
   // with '(') fired for THIS widget — enqueued in the walk when the backend reports the matching
   // per-item pointer state, like Button's `on`. Any widget kind may carry any of them.
@@ -209,6 +213,13 @@ struct Widget {
   // expression re-evaluated each frame. Empty = no tooltip.
   std::string tooltip;
 
+  // `autofocus: true`: the widget takes keyboard focus each time it appears (a form's first field,
+  // so a person can just type). If it cannot take focus, the next one that can does.
+  bool autofocus = false;
+  // `password: true` on an input_text: the backend shows a mask, not the text. The value is still
+  // in state, as any input_text's is.
+  bool password = false;
+
   // §3/§4 dynamic repetition: when non-empty, this widget is a TEMPLATE emitted `repeat`
   // times, where `repeat` is a count expression re-evaluated each frame (capped, fail-safe
   // 0). Each instance gets its own backend id and has the `{i}` token (the 0-based index)
@@ -225,8 +236,9 @@ struct Widget {
   // drag. `commit: release` (true here) writes once, when the drag ends: for a key whose change is
   // too costly to redo every frame.
   bool commit_on_release = false;
-  std::string sdef; // Combo default (an option label, or — with `values` — a value)
-  std::vector<std::string> options; // Combo options (the DISPLAYED labels)
+  std::string sdef; // Combo / Radio default (an option label, or — with `values` — a value)
+  std::vector<std::string> options; // Combo / Radio options (the DISPLAYED labels)
+  bool radio_row = false;           // Radio: the options side by side (`radio_row:`), else stacked
   // §4 Combo value mapping: a parallel list the same length as `options`, so the bound key holds
   // `values[i]` (e.g. an int) while the combo shows `options[i]`. Empty = the key holds the option
   // TEXT (the default). Ignored when `options_expr` computes the options (no parallel values).
@@ -449,6 +461,16 @@ inline Widget combo(std::string label, std::string bind, std::vector<std::string
   w.bind = std::move(bind);
   w.options = std::move(options);
   w.sdef = std::move(def);
+  return w;
+}
+
+// A combo with every option shown as a radio button, stacked or (`row`) side by side. It stores
+// what a combo stores (the option text, or with `values` the mapped value).
+inline Widget radio(std::string label, std::string bind, std::vector<std::string> options,
+                    std::string def = std::string(), bool row = false) {
+  Widget w = combo(std::move(label), std::move(bind), std::move(options), std::move(def));
+  w.kind = Kind::Radio;
+  w.radio_row = row;
   return w;
 }
 

@@ -99,8 +99,10 @@ struct MockBackend : Backend {
     return true;
   }
   void end_window() override { rec("end_window"); }
-  bool begin_grid(const Layout &L, const char *) override {
+  std::vector<std::string> grid_ids; // the id the core gave each begin_grid, in walk order
+  bool begin_grid(const Layout &L, const char *id) override {
     rec(std::string("begin_grid:cols=") + std::to_string(L.col_widths.size()));
+    grid_ids.push_back(id ? id : "");
     return true;
   }
   void grid_next_cell() override { rec("next_cell"); }
@@ -227,10 +229,18 @@ struct MockBackend : Backend {
   }
   StringEdit string_ret{};     // programmable return for the next input_text()
   std::string last_input_text; // the `current` text the core handed input_text() (read side)
-  StringEdit input_text(const char *l, const char *, const std::string &current) override {
+  bool last_input_masked = false; // the `masked` flag the core handed input_text()
+  StringEdit input_text(const char *l, const char *, const std::string &current,
+                        bool masked) override {
     last_input_text = current;
+    last_input_masked = masked;
     rec(std::string("input_text:") + l + "=" + current);
     return string_ret;
+  }
+  int focus_requests = 0; // focus_next_widget() calls (autofocus:)
+  void focus_next_widget() override {
+    ++focus_requests;
+    rec("focus_next");
   }
   ColorEdit color_ret{};           // programmable return for the next color()
   float last_color[3] = {0, 0, 0}; // the rgb the core handed color() (read side)
@@ -2554,6 +2564,98 @@ TEST(AriadneRuntime, ComboValueMappingReadsAndWrites) {
   mb.combo_ret = IndexEdit{/*changed*/ true, /*committed*/ true, /*index*/ 1};
   rt.render();
   EXPECT_EQ(cvc::state::instance(app)("ss").value(), "2"); // stored the value, not "2x"
+}
+
+// A combo's `on:` runs after a pick's write, off the walk like a Button's — a program on: through
+// state_exec at drain. Before, the combo wrote its key and dropped the on:.
+TEST(AriadneRuntime, ComboPickFiresOnAfterTheWrite) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  Widget c = combo("Mode", "mode", {"a", "b"});
+  c.on = "(state-set \"x\" (state-get \"mode\"))"; // sees the value just written
+  rt.set_root(group({c}));
+  rt.render();
+  rt.drain();
+  EXPECT_FALSE(cvc::state::instance(app)("x").initialized()) << "no pick, no fire";
+  mb.combo_ret = IndexEdit{/*changed*/ true, /*committed*/ true, /*index*/ 1};
+  rt.render();
+  EXPECT_EQ(cvc::state::instance(app)("mode").value(), "b");
+  EXPECT_FALSE(cvc::state::instance(app)("x").initialized()) << "queued, not run in the walk";
+  rt.drain();
+  EXPECT_EQ(cvc::state::instance(app)("x").value(), "b");
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+}
+
+// The other bound widgets fire their `on:` on the commit edge too: a checkbox / colour / bound
+// menu_item on each committed write; a slider once per commit (drag end, key step), not on every
+// live frame of a drag, though it writes on each of those.
+TEST(AriadneRuntime, BoundWidgetsFireOnOnCommit) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  std::map<std::string, int> fired;
+  for (const char *ev : {"cb", "si", "sf", "col", "mt"})
+    rt.on(ev, [&fired, ev] { ++fired[ev]; });
+  Widget cb = checkbox("Wire", "wire");
+  cb.on = "cb";
+  Widget si = slider_int("N", "n", 0, 10, 3);
+  si.on = "si";
+  Widget sf = slider_float("Speed", "speed", 0.0, 2.0, 1.0);
+  sf.on = "sf";
+  Widget col = color_widget("Tint", "tint");
+  col.on = "col";
+  Widget mt = menu_toggle("Grid", "grid");
+  mt.on = "mt";
+  rt.set_root(group({group({menubar({menu("View", {mt})})}), cb, si, sf, col}));
+
+  // A live drag frame: the sliders write but do not fire.
+  mb.slider_int_ret = IntEdit{/*changed*/ true, /*committed*/ false, 7};
+  mb.slider_double_ret["speed"] = DoubleEdit{true, false, 1.5};
+  rt.render();
+  rt.drain();
+  EXPECT_EQ(cvc::state::instance(app)("n").value(), "7");
+  EXPECT_TRUE(fired.empty());
+
+  // The commit edge: each widget writes, then its on: runs at drain.
+  mb.checkbox_ret = BoolEdit{true, true, true};
+  mb.slider_int_ret = IntEdit{true, true, 8};
+  mb.slider_double_ret["speed"] = DoubleEdit{true, true, 1.75};
+  mb.color_ret = ColorEdit{/*drawn*/ true, true, true, {1, 0, 0}};
+  mb.click_toggle = "Grid";
+  rt.render();
+  EXPECT_TRUE(fired.empty()) << "queued, not run in the walk";
+  rt.drain();
+  for (const char *ev : {"cb", "si", "sf", "col", "mt"})
+    EXPECT_EQ(fired[ev], 1) << ev;
+  EXPECT_EQ(cvc::state::instance(app)("wire").value(), "1");
+  EXPECT_EQ(cvc::state::instance(app)("n").value(), "8");
+  EXPECT_EQ(cvc::state::instance(app)("grid").value(), "1");
+}
+
+// A radio stores what a combo stores and fires its on: the same way. MockBackend has no radio of
+// its own, so this also checks Backend::radio's fallback: the radio is drawn as a combo.
+TEST(AriadneRuntime, RadioFallsBackToAComboAndWritesTheMappedValue) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  int fired = 0;
+  rt.on("ss.changed", [&] { ++fired; });
+  Widget r = radio("Samples", "ss", {"Off", "2x", "4x"}, "4", /*row*/ true);
+  r.values = {"0", "2", "4"};
+  r.on = "ss.changed";
+  rt.set_root(group({r}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("combo:Samples=2")); // seeded "4", shown at index 2
+  EXPECT_EQ(cvc::state::instance(app)("ss").value(), "4");
+  mb.combo_ret = IndexEdit{/*changed*/ true, /*committed*/ true, /*index*/ 1};
+  rt.render();
+  EXPECT_EQ(cvc::state::instance(app)("ss").value(), "2");
+  rt.drain();
+  EXPECT_EQ(fired, 1);
 }
 
 // §G7: a color widget reads its "r,g,b" key into the backend's picker and writes the edited colour
@@ -5712,6 +5814,7 @@ struct LogSceneAdapter : SceneAdapter {
     log.push_back("realize");
   }
   void clear() override { log.push_back("clear"); }
+  void no_scene() override { log.push_back("no_scene"); }
   void sync_visibility(cvc::app &) override {}
   void tick() override {}
 };
@@ -6083,7 +6186,95 @@ TEST(AriadneAppRuntime, EachLoadClearsTheLastScene) {
   art.load(with_scene);
   art.load(with_scene);
   art.load(write_doc("clear_scene_b.ari", "meta: {min_libcvc: 3.4.0}\nroot:\n  - text: x\n"));
-  EXPECT_EQ(scene.log, (std::vector<std::string>{"clear", "realize", "clear", "realize", "clear"}));
+  // A document without a scene is told so (a GL host hides its default grid, axes and bounds box).
+  EXPECT_EQ(scene.log, (std::vector<std::string>{"clear", "realize", "clear", "realize", "clear",
+                                                 "no_scene"}));
+}
+
+// Widgets a person meets first (nicotina's sign-in form): two unnamed rows in one window are two
+// grids, an autofocus: field takes focus when it appears, and a password: field reaches the
+// backend masked.
+TEST(AriadneRuntime, UnnamedGridsInOneWindowGetDistinctIds) {
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  LoadResult lr = load_string("windows:\n"
+                              "  - window: W\n"
+                              "    children:\n"
+                              "      - type: group\n"
+                              "        layout: {kind: horizontal}\n"
+                              "        children: [{text: a}, {text: b}]\n"
+                              "      - type: group\n"
+                              "        layout: {kind: horizontal}\n"
+                              "        children: [{text: c}]\n"
+                              "      - type: group\n"
+                              "        id: named\n"
+                              "        layout: {kind: grid, col_widths: [auto, auto]}\n"
+                              "        children: [{text: d}]\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  ASSERT_EQ(mb.grid_ids.size(), 3u);
+  EXPECT_FALSE(mb.grid_ids[0].empty());
+  EXPECT_EQ(mb.grid_ids[0].find('.'), std::string::npos); // one segment of tree.<id>.tracks
+  EXPECT_NE(mb.grid_ids[0], mb.grid_ids[1]); // were both "", one ImGui table for two rows
+  EXPECT_EQ(mb.grid_ids[2], "named");        // an id: still names its grid
+  const std::vector<std::string> first = mb.grid_ids;
+  mb.grid_ids.clear();
+  rt.render();
+  EXPECT_EQ(mb.grid_ids, first); // stable from frame to frame (a table keeps its widths by it)
+}
+
+TEST(AriadneRuntime, AutofocusTakesFocusWhenTheWidgetAppears) {
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  LoadResult lr = load_string("windows:\n"
+                              "  - window: Sign in\n"
+                              "    children:\n"
+                              "      - input_text: Name\n"
+                              "        bind: form.name\n"
+                              "        autofocus: true\n"
+                              "        visible_when: '(= (state-get \"form.show\") \"1\")'\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  cvc::state::instance(app)("ui.demo.form.show").value(std::string("1"));
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  EXPECT_EQ(mb.focus_requests, 1);
+  rt.render();
+  EXPECT_EQ(mb.focus_requests, 1) << "focus is taken when it appears, not on every frame";
+  cvc::state::instance(app)("ui.demo.form.show").value(std::string("0"));
+  rt.render();
+  cvc::state::instance(app)("ui.demo.form.show").value(std::string("1"));
+  rt.render();
+  EXPECT_EQ(mb.focus_requests, 2) << "shown again, it takes focus again";
+}
+
+TEST(AriadneRuntime, PasswordFieldReachesTheBackendMasked) {
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  LoadResult lr = load_string("meta: {min_libcvc: 3.4.0}\n"
+                              "root:\n"
+                              "  - input_text: User\n"
+                              "    bind: u\n"
+                              "  - input_text: Password\n"
+                              "    bind: p\n"
+                              "    password: true\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  EXPECT_TRUE(lr.warnings.empty()) << (lr.warnings.empty() ? "" : lr.warnings.front());
+  rt.set_root(std::move(lr.root));
+  rt.render(); // the last input_text drawn is the password
+  EXPECT_TRUE(mb.last_input_masked);
 }
 
 // ===========================================================================

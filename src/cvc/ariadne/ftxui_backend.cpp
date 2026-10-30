@@ -564,6 +564,7 @@ struct FtxuiBackend::Impl {
   };
 
   std::string focused;
+  bool focus_next = false; // autofocus: the next focusable leaf of this walk takes focus
   std::string hovered;
   std::string active; // the item the left button went down on, until it comes up
   std::string open_menu;
@@ -716,6 +717,10 @@ struct FtxuiBackend::Impl {
     it.win = wins.empty() ? std::string() : wins.back();
     it.menu = cur_menu;
     it.focusable = focusable && !is_disabled();
+    if (it.focusable && focus_next && cur_menu.empty()) {
+      focus_next = false;
+      set_focus(id); // autofocus: (focus_next_widget)
+    }
     if (it.focusable) {
       if (!cur_menu.empty())
         walk.menu_items[cur_menu].push_back(id);
@@ -1376,6 +1381,7 @@ struct FtxuiBackend::Impl {
 
   // The menu-and-focus bookkeeping a finished walk settles.
   void settle() {
+    focus_next = false; // an autofocus with nothing focusable after it lapses with its walk
     if (menu_close_req) {
       close_menu();
       menu_close_req = false;
@@ -2229,8 +2235,61 @@ IndexEdit FtxuiBackend::combo(const char *label, int current_index,
   return e;
 }
 
-StringEdit FtxuiBackend::input_text(const char *label, const char *key,
-                                    const std::string &current) {
+// One focusable leaf: the caption, then "(*) a  ( ) b" side by side (row) or stacked under it.
+// A click on an option picks it; Left / Right pick the previous / next option and Space / Enter
+// the next, wrapping, like a combo's Left / Right.
+IndexEdit FtxuiBackend::radio(const char *label, int current_index,
+                              const std::vector<std::string> &options, bool row) {
+  Impl &m = *m_;
+  const std::string id = m.uid(std::string("ra|") + label);
+  const int n = static_cast<int>(options.size());
+  const auto opt_box = [&](int i) -> fx::Box & { return m.boxes[id + "#" + std::to_string(i)]; };
+  IndexEdit e;
+  const int cur = n == 0 ? -1 : std::clamp(current_index, 0, n - 1);
+  int shown = cur;
+  if (n > 0 && !m.is_disabled()) {
+    int pick = -1;
+    if (m.pressed(id)) {
+      for (int i = 0; i < n; ++i)
+        if (inside(opt_box(i), m.ptr_x, m.ptr_y))
+          pick = i;
+    } else if (m.key(id, "Left")) {
+      pick = (cur - 1 + n) % n;
+    } else if (m.key(id, "Right") || m.key(id, "Space") || m.key(id, "Return")) {
+      pick = (cur + 1) % n;
+    }
+    if (pick >= 0) {
+      e = {true, true, pick};
+      shown = pick;
+    }
+  }
+  const bool f = m.has_focus(id);
+  fx::Elements opts;
+  for (int i = 0; i < n; ++i) {
+    fx::Element o = fx::text((i == shown ? "(*) " : "( ) ") + options[static_cast<std::size_t>(i)]);
+    if (f && i == shown)
+      o = o | fx::inverted;
+    o = o | fx::reflect(opt_box(i));
+    if (row) {
+      opts.push_back(fx::text(i == 0 ? "" : "  "));
+      opts.push_back(o);
+    } else {
+      opts.push_back(fx::hbox({fx::text("  "), o}));
+    }
+  }
+  fx::Element caption = fx::text(std::string(label) + ":" + (row ? " " : ""));
+  if (f && n == 0)
+    caption = caption | fx::inverted;
+  m.leaf(id, true,
+         row ? fx::hbox({caption, fx::hbox(std::move(opts))})
+             : fx::vbox({caption, fx::vbox(std::move(opts))}));
+  return e;
+}
+
+void FtxuiBackend::focus_next_widget() { m_->focus_next = true; }
+
+StringEdit FtxuiBackend::input_text(const char *label, const char *key, const std::string &current,
+                                    bool masked) {
   Impl &m = *m_;
   const std::string id = m.uid(std::string("in|") + (key ? key : label));
   StringEdit e;
@@ -2299,17 +2358,28 @@ StringEdit FtxuiBackend::input_text(const char *label, const char *key,
     e.value = it->second.text;
     e.changed = e.value != current;
   }
-  // "label: [text]", with the cursor drawn as an inverted cell while focused.
+  // "label: [text]", with the cursor drawn as an inverted cell while focused. A password field
+  // draws one mark per character in place of the text.
+  const auto shown = [masked](const std::string &s) {
+    if (!masked)
+      return s;
+    std::string out;
+    // U+2022 as UTF-8 bytes: MSVC encodes a \u literal in the code page unless built with /utf-8.
+    for (std::size_t p = 0; p < s.size(); p = utf8_next(s, p))
+      out += "\xe2\x80\xa2";
+    return out;
+  };
   fx::Elements row{fx::text(std::string(label) + ": [")};
   if (m.has_focus(id)) {
     const std::string &t = it != m.edits.end() ? it->second.text : e.value;
     const std::size_t c = it != m.edits.end() ? it->second.cursor : t.size();
     const std::size_t c2 = utf8_next(t, c);
-    row.push_back(fx::text(t.substr(0, c)));
-    row.push_back(fx::text(c < t.size() ? t.substr(c, c2 - c) : std::string(" ")) | fx::inverted);
-    row.push_back(fx::text(c2 < t.size() ? t.substr(c2) : std::string()));
+    row.push_back(fx::text(shown(t.substr(0, c))));
+    row.push_back(fx::text(c < t.size() ? shown(t.substr(c, c2 - c)) : std::string(" ")) |
+                  fx::inverted);
+    row.push_back(fx::text(c2 < t.size() ? shown(t.substr(c2)) : std::string()));
   } else {
-    row.push_back(fx::text(e.value));
+    row.push_back(fx::text(shown(e.value)));
   }
   row.push_back(fx::text("]"));
   m.leaf(id, true, fx::hbox(std::move(row)));
@@ -2966,7 +3036,13 @@ DoubleEdit FtxuiBackend::slider_double(const char *, const char *, double, doubl
   return {};
 }
 IndexEdit FtxuiBackend::combo(const char *, int, const std::vector<std::string> &) { return {}; }
-StringEdit FtxuiBackend::input_text(const char *, const char *, const std::string &) { return {}; }
+IndexEdit FtxuiBackend::radio(const char *, int, const std::vector<std::string> &, bool) {
+  return {};
+}
+StringEdit FtxuiBackend::input_text(const char *, const char *, const std::string &, bool) {
+  return {};
+}
+void FtxuiBackend::focus_next_widget() {}
 bool FtxuiBackend::draw_image(const char *, float) { return false; }
 ColorEdit FtxuiBackend::color(const char *, const float[3]) { return {}; }
 void FtxuiBackend::set_image(const std::string &, const cvc::image &) {}

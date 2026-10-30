@@ -253,9 +253,10 @@ namespace detail {
 /// The shortest text that reads back as `d`, in std::to_chars(char*, char*, double)'s exact form:
 /// the shortest round-trip digits (the closest such string when two have the same length), written
 /// fixed or scientific (`e`, a sign, at least two exponent digits), whichever is shorter, fixed on
-/// a tie. state-incr stores floats with std::to_chars where the library has it; libc++ builds
-/// without floating to_chars (older macOS targets, Emscripten) use this, so a node's text is the
-/// same on every platform. Built everywhere, so every platform's tests check it against to_chars.
+/// a tie. format_number_shortest (types.h) uses std::to_chars where the library has it; libc++
+/// builds without floating to_chars (older macOS targets, Emscripten) use this, so a node's text
+/// and a printed float are the same on every platform. Built everywhere, so every platform's tests
+/// check it against to_chars.
 std::string format_number_shortest_fallback(double d);
 } // namespace detail
 
