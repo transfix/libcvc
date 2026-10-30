@@ -50,10 +50,13 @@
 #include <boost/any.hpp>
 #include <boost/scoped_array.hpp>
 #include <cstring>
+#include <exception>
 #include <iostream>
 #include <limits>
 #include <map>
+#include <memory>
 #include <numeric>
+#include <optional>
 
 namespace {
 // Whether p lies in the axis-aligned box of `v`. Not by adding up one bounding_box per point: a
@@ -757,6 +760,146 @@ volume sdf(app &ctx, const geometry &geom, const dimension &dim, const bounding_
   }
 
   return vol;
+}
+
+// -----------
+// sdf_stepper
+// -----------
+// Purpose:
+//   sdf() a slice at a time (see algorithm.h).
+// ---- Change History ----
+// 10/29/2026 -- Joe R. -- Creation.
+struct sdf_stepper::impl {
+  app *ctx = nullptr;
+  std::shared_ptr<const geometry> geom;
+  dimension dim;
+  bounding_box bbox, grid_bbox;
+  sdf_algorithm algorithm = SDF_V2;
+  bool flip = false, expand = false, ready = false;
+  std::exception_ptr error;
+  // SDF_V2: the surface the transform reads (its arrays must outlive it) and the transform.
+  std::vector<Point3f> verts;
+  std::vector<TriId3i> tris;
+  std::unique_ptr<FaceVertSet3D> fvs;
+  std::unique_ptr<DistanceTransform> dt;
+  std::optional<volume> out;
+
+  // sdf()'s SDF_V2 setup: the grid's box (expanded to the 1.1 scale v2 needs, the result resampled
+  // back), then sdf_library_v2's surface and scale factors, the transform deferred.
+  void begin() {
+    const point_t geom_min = geom->min_point(), geom_max = geom->max_point();
+    double max_ext = 0;
+    for (int i = 0; i < 3; i++)
+      max_ext = std::max(max_ext, geom_max[i] - geom_min[i]);
+    grid_bbox = bbox;
+    for (int i = 0; i < 3; i++) {
+      const double center = (bbox[i] + bbox[i + 3]) / 2.0, half = (bbox[i + 3] - bbox[i]) / 2.0;
+      if (2.0 * half / max_ext < 1.1) {
+        expand = true;
+        const double new_half = 1.1 * max_ext / 2.0;
+        grid_bbox[i] = center - new_half;
+        grid_bbox[i + 3] = center + new_half;
+      }
+    }
+    verts.reserve(geom->num_points());
+    for (const point_t &p : geom->const_points())
+      verts.push_back(Point3f(p[0], p[1], p[2]));
+    tris.reserve(geom->num_tris());
+    for (const auto &t : geom->const_tris())
+      tris.push_back(TriId3i(t[0], t[1], t[2]));
+    fvs = std::make_unique<FaceVertSet3D>(int(verts.size()), int(tris.size()), verts.data(),
+                                          tris.data(), nullptr);
+    fvs->computeTriNormals();
+    if (flip)
+      fvs->flipTriNormals();
+    const BoundingBox geom_box = fvs->getExtent();
+    float fmax_ext = 0;
+    for (int i = 0; i < 3; i++)
+      fmax_ext = std::max(fmax_ext, geom_box.upper[i] - geom_box.lower[i]);
+    float center[3], scale[3];
+    for (int i = 0; i < 3; i++) {
+      center[i] = float((grid_bbox[i] + grid_bbox[i + 3]) / 2.0f);
+      scale[i] = 2.0f * float((grid_bbox[i + 3] - grid_bbox[i]) / 2.0f) / fmax_ext;
+    }
+    int dims[3] = {int(dim.xdim), int(dim.ydim), int(dim.zdim)};
+    dt = std::make_unique<DistanceTransform>(*ctx, *fvs, dims, center, 0.5f, scale[0], scale[1],
+                                             scale[2], DistanceTransform::deferred_t());
+  }
+
+  void finish() {
+    const Reg3Data<float> &result = dt->getReg3Data();
+    volume cv(*ctx, dim, Float, grid_bbox);
+    if (result.getNVerts() != int(dim.xdim * dim.ydim * dim.zdim))
+      throw sign_distance_function_error("SDF v2: dimension mismatch");
+    std::memcpy(reinterpret_cast<float *>(*cv), result.getData(),
+                std::size_t(result.getNVerts()) * sizeof(float));
+    dt.reset();
+    fvs.reset();
+    verts = std::vector<Point3f>();
+    tris = std::vector<TriId3i>();
+    if (expand)
+      cv.resize(bbox);
+    cv.desc("Signed Distance Function - DistanceTransform v2");
+    out.emplace(cv);
+    ready = true;
+  }
+};
+
+sdf_stepper::sdf_stepper(app &ctx, std::shared_ptr<const geometry> geom, const dimension &dim,
+                         const bounding_box &bbox, sdf_algorithm algorithm, bool flipNormals)
+    : _impl(std::make_unique<impl>()) {
+  _impl->ctx = &ctx;
+  _impl->geom = std::move(geom);
+  _impl->dim = dim;
+  _impl->bbox = bbox;
+  _impl->algorithm = algorithm;
+  _impl->flip = flipNormals;
+}
+
+sdf_stepper::~sdf_stepper() = default;
+
+bool sdf_stepper::step(std::size_t budget) {
+  impl &s = *_impl;
+  if (s.error)
+    std::rethrow_exception(s.error);
+  if (s.ready)
+    return true;
+  try {
+    if (s.algorithm != SDF_V2) {
+      s.out.emplace(sdf(*s.ctx, *s.geom, s.dim, s.bbox, s.algorithm, s.flip));
+      s.ready = true;
+      return true;
+    }
+    if (!s.dt)
+      s.begin();
+    if (s.dt->step(budget))
+      s.finish();
+  } catch (...) {
+    s.error = std::current_exception();
+    s.dt.reset();
+    throw;
+  }
+  return s.ready;
+}
+
+bool sdf_stepper::done() const { return _impl->ready || _impl->error; }
+
+double sdf_stepper::progress() const {
+  if (_impl->ready)
+    return 1.0;
+  return _impl->dt ? _impl->dt->progress() : 0.0;
+}
+
+const char *sdf_stepper::phase() const {
+  if (_impl->ready || _impl->error)
+    return "done";
+  return _impl->dt ? _impl->dt->phase() : "cells";
+}
+
+volume sdf_stepper::take() {
+  if (!_impl->ready)
+    throw sign_distance_function_error("sdf_stepper: the volume is not ready");
+  return *_impl->out;
 }
 #endif // CVC_ENABLE_SDF
 

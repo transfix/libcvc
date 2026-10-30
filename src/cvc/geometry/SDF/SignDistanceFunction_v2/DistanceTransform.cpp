@@ -47,81 +47,276 @@
 
 const float DistanceTransform::MAX_FLOAT = (float)1.0e12;
 
+namespace {
+enum dt_stage { DT_CELLS, DT_NEAR_INIT, DT_X, DT_Y, DT_Z, DT_NEAR, DT_UPDATE, DT_DONE };
+}
+
 void DistanceTransform::init() {
-	int i, j, k;
-	float orig[3], span[3];
+	_stage = DT_CELLS;
+	_pos = 0;
+	advance(static_cast<std::size_t>(-1), DT_X);
+}
+
+bool DistanceTransform::advance(std::size_t budget, int until) {
 	int dim[3];
+	float orig[3], span[3];
+	p_Data->getDim(dim);
 	p_Data->getOrig(orig);
 	p_Data->getSpan(span);
-	p_Data->getDim(dim);
+	const std::size_t nverts = static_cast<std::size_t>(p_Data->getNVerts());
+	const auto spend = [&budget](std::size_t units) {
+		budget = units >= budget ? 0 : budget - units;
+	};
+	while (budget > 0 && _stage < until) {
+		switch (_stage) {
+		case DT_CELLS: {
+			// build up the triangle list for cells
+			if (_pos == 0 && !p_Cells)
+				p_Cells = new Cell[p_Data->getNCells()];
+			if (_pos >= static_cast<std::size_t>(p_Surf->triCount())) {
+				_stage = DT_NEAR_INIT;
+				_pos = 0;
+				break;
+			}
+			const int nt = static_cast<int>(_pos++);
+			int i, j, k;
+			Point3f v0, v1, v2;
+			p_Surf->getTriVerts(nt,v0,v1,v2);
+			float lower[3], upper[3];
+			for(j = 0; j < 3; j++) {
+				lower[j] = v0[j];
+				upper[j] = v0[j];
+			}
+			for(j = 0; j < 3; j++) {
+				if(v1[j] < lower[j]) lower[j] = v1[j];
+				else if(v1[j] > upper[j]) upper[j] = v1[j];
+				if(v2[j] < lower[j]) lower[j] = v2[j];
+				else if(v2[j] > upper[j]) upper[j] = v2[j];
+			}
 
-	p_Cells = new Cell[p_Data->getNCells()];
-	// build up the triangle list for cells
-	for(int nt = 0; nt < p_Surf->triCount(); nt++) {
-		Point3f v0, v1, v2;
-		p_Surf->getTriVerts(nt,v0,v1,v2);
-		float lower[3], upper[3];
-		for(j = 0; j < 3; j++) {
-			lower[j] = v0[j];
-			upper[j] = v0[j];
-		}
-		for(j = 0; j < 3; j++) {
-			if(v1[j] < lower[j]) lower[j] = v1[j];
-			else if(v1[j] > upper[j]) upper[j] = v1[j];
-			if(v2[j] < lower[j]) lower[j] = v2[j];
-			else if(v2[j] > upper[j]) upper[j] = v2[j];
-		}
-	
-		int minId[3], maxId[3];
-		for(j = 0; j < 3; j++) {
-			minId[j] = (int)floor((lower[j]-orig[j]) / span[j]);
-			maxId[j] = (int)floor((upper[j]-orig[j]) / span[j]);
-		}
-		for(k = minId[2]; k <= maxId[2]; k++) {
-			for(j = minId[1]; j <= maxId[1]; j++) {
-			for (i = minId[0]; i <= maxId[0]; i++) {
-				int nc = p_Data->index2cell(i, j, k);
-				if (nc < 0) continue;  // Skip out-of-bounds cells
-				assert(nc < p_Data->getNCells());
-				Vector3f norm;
-				p_Surf->getTriNormal(nt, norm);
-				if(intersectCell(v0, norm, i, j, k)) {
-					Point3f lower, upper;
-					lower[0] = orig[0] + i*span[0];
-					lower[1] = orig[1] + j*span[1];
-					lower[2] = orig[2] + k*span[2];
-					upper[0] = lower[0] + span[0];
-					upper[1] = lower[1] + span[1];
-					upper[2] = lower[2] + span[2];
-					if (TriangleCubeIntersection(nt, lower, upper)) {
-						p_Cells[nc].triList.insert(nt);
-					}			
+			int minId[3], maxId[3];
+			for(j = 0; j < 3; j++) {
+				minId[j] = (int)floor((lower[j]-orig[j]) / span[j]);
+				maxId[j] = (int)floor((upper[j]-orig[j]) / span[j]);
+			}
+			std::size_t units = 1;
+			for(k = minId[2]; k <= maxId[2]; k++) {
+				for(j = minId[1]; j <= maxId[1]; j++) {
+				for (i = minId[0]; i <= maxId[0]; i++) {
+					++units;
+					int nc = p_Data->index2cell(i, j, k);
+					if (nc < 0) continue;  // Skip out-of-bounds cells
+					assert(nc < p_Data->getNCells());
+					Vector3f norm;
+					p_Surf->getTriNormal(nt, norm);
+					if(intersectCell(v0, norm, i, j, k)) {
+						Point3f lower, upper;
+						lower[0] = orig[0] + i*span[0];
+						lower[1] = orig[1] + j*span[1];
+						lower[2] = orig[2] + k*span[2];
+						upper[0] = lower[0] + span[0];
+						upper[1] = lower[1] + span[1];
+						upper[2] = lower[2] + span[2];
+						if (TriangleCubeIntersection(nt, lower, upper)) {
+							p_Cells[nc].triList.insert(nt);
+						}
+					}
+				}
 				}
 			}
+			spend(units);
+			break;
+		}
+		case DT_NEAR_INIT: {
+			// Initialize the distance function of points near the surface to 0
+			const std::size_t end = budget >= nverts - _pos ? nverts : _pos + budget;
+			for (std::size_t nv = _pos; nv < end; ++nv) {
+				int i, j, k;
+				p_Data->vert2index(static_cast<int>(nv), i, j, k);
+				p_Data->setValue(static_cast<int>(nv), nearSurface(i, j, k) ? 0 : MAX_FLOAT);
 			}
-		}	
-	}
-
-	// Initialize the distance function of points near the surface to 0
-	for (k = 0; k < dim[2]; k++) {
-		for(j = 0; j < dim[1]; j++) {
-			for(i = 0; i < dim[0]; i++) {
-				int nv = p_Data->index2vert(i, j, k);
-				if(nearSurface(i, j, k)) {
-					p_Data->setValue(nv, 0);
+			spend(end - _pos);
+			_pos = end;
+			if (_pos == nverts) {
+				p_Data->init();
+				printf("distance min: %f, max = %f\n", p_Data->getFuncMin(), p_Data->getFuncMax());
+				_stage = DT_X;
+				_pos = 0;
+			}
+			break;
+		}
+		case DT_X:
+		case DT_Y:
+		case DT_Z: {
+			// 1D distance transform along x, then y, then z: one line at a time.
+			const int axis = _stage - DT_X;
+			if (_pos == 0) {
+				if (axis == 0) {
+					_parent.resize(nverts);
+					for (std::size_t i = 0; i < nverts; i++)
+						_parent[i] = static_cast<int>(i);
+				}
+				_f.assign(static_cast<std::size_t>(dim[axis]), 0.f);
+				_d.assign(static_cast<std::size_t>(dim[axis]), 0.f);
+				_p.assign(static_cast<std::size_t>(dim[axis]), 0);
+			}
+			const int a1 = axis == 0 ? 1 : 0, a2 = axis == 2 ? 1 : 2; // the other two axes
+			const std::size_t lines = static_cast<std::size_t>(dim[a1]) * dim[a2];
+			if (_pos >= lines) {
+				_stage++;
+				_pos = 0;
+				break;
+			}
+			// Lines in the order transform() took them: x by (k, j), y by (k, i), z by (j, i).
+			const int outer = static_cast<int>(_pos / dim[a1]), inner = static_cast<int>(_pos % dim[a1]);
+			int idx[3] = {0, 0, 0};
+			idx[a2] = outer;
+			idx[a1] = inner;
+			const int index = p_Data->index2vert(idx[0], idx[1], idx[2]);
+			const int stride = axis == 0 ? 1 : axis == 1 ? dim[0] : dim[0]*dim[1];
+			for (int t = 0; t < dim[axis]; t++) {
+				_f[t] = p_Data->getValue(index + t*stride);
+				_p[t] = _parent[index + t*stride];
+			}
+			transform1D(dim[axis], _f.data(), _d.data(), _p.data(), span[axis]);
+			for (int t = 0; t < dim[axis]; t++) {
+				p_Data->setValue(index + t*stride, _d[t]);
+				_parent[index + t*stride] = _p[t];
+			}
+			_pos++;
+			spend(static_cast<std::size_t>(dim[axis]));
+			break;
+		}
+		case DT_NEAR: {
+			// Compute the distance functions for points near the surface
+			if (_pos == 0)
+				_closest.assign(nverts, Point3f());
+			while (budget > 0 && _pos < nverts) {
+				const int nv = static_cast<int>(_pos++);
+				if (_parent[nv] == nv) {
+					int i, j, k;
+					p_Data->vert2index(nv, i, j, k);
+					float d = computeNearDistance(i, j, k, _closest[nv]);
+					p_Data->setValue(nv, d);
+					spend(20);
 				} else {
-					p_Data->setValue(nv, MAX_FLOAT);
+					spend(1);
 				}
 			}
+			if (_pos == nverts) {
+				_stage = DT_UPDATE;
+				_pos = 0;
+			}
+			break;
+		}
+		case DT_UPDATE: {
+			// update the distances for other points
+			const std::size_t end = budget >= nverts - _pos ? nverts : _pos + budget;
+			for (std::size_t n = _pos; n < end; ++n) {
+				const int nv = static_cast<int>(n);
+				if (_parent[nv] != nv) {
+					int i, j, k;
+					p_Data->vert2index(nv, i, j, k);
+					Point3f p(orig[0]+i*span[0], orig[1]+j*span[1], orig[2]+k*span[2]);
+					float d = pointDistance(p, _closest[_parent[nv]]);
+					assert(_parent[_parent[nv]] == _parent[nv]);
+					if(p_Data->getValue(_parent[nv]) < 0) {
+						d = -d;
+					}
+					p_Data->setValue(nv, d);
+				}
+			}
+			spend(end - _pos);
+			_pos = end;
+			if (_pos == nverts) {
+				_closest = std::vector<Point3f>();
+				_parent = std::vector<int>();
+				_f = _d = std::vector<float>();
+				_p = std::vector<int>();
+				p_Data->init();
+				printf("min dist = %f , max dist = %f\n", p_Data->getFuncMin(), p_Data->getFuncMax());
+				_stage = DT_DONE;
+			}
+			break;
+		}
+		default:
+			return true;
 		}
 	}
-	p_Data->init();
-	printf("distance min: %f, max = %f\n", p_Data->getFuncMin(), p_Data->getFuncMax());
+	return _stage >= until;
+}
+
+bool DistanceTransform::step(std::size_t budget) {
+	return advance(budget == 0 ? static_cast<std::size_t>(-1) : budget, DT_DONE);
+}
+
+double DistanceTransform::progress() const {
+	// Shares as transform()'s progress notes put them, init ahead of them.
+	static const double start[] = {0.0, 0.10, 0.15, 0.40, 0.65, 0.78, 0.92, 1.0};
+	if (_stage >= DT_DONE)
+		return 1.0;
+	double total = 1.0;
+	switch (_stage) {
+	case DT_CELLS:
+		total = std::max(1, p_Surf->triCount());
+		break;
+	case DT_X:
+	case DT_Y:
+	case DT_Z: {
+		int dim[3];
+		p_Data->getDim(dim);
+		const int axis = _stage - DT_X;
+		total = double(dim[axis == 0 ? 1 : 0]) * double(dim[axis == 2 ? 1 : 2]);
+		break;
+	}
+	default:
+		total = std::max(1, p_Data->getNVerts());
+		break;
+	}
+	const double f = std::min(1.0, double(_pos) / total);
+	return start[_stage] + (start[_stage + 1] - start[_stage]) * f;
+}
+
+const char* DistanceTransform::phase() const {
+	static const char* const names[] = {"cells", "near surface", "x lines", "y lines", "z lines",
+										"near distances", "far distances", "done"};
+	return names[std::min(_stage, int(DT_DONE))];
+}
+
+void DistanceTransform::setGrid(int dim[3], const float center[3], float sx, float sy, float sz) {
+	float factor[3];
+	factor[0] = sx; factor[1] = sy; factor[2] = sz;
+	BoundingBox bbox = p_Surf->getExtent();
+	float ext[3], orig[3], span[3];
+	float max_ext = 0;
+	for(int i = 0; i < 3; i++) {
+		ext[i] = bbox.upper[i] - bbox.lower[i];
+		if(ext[i] > max_ext) max_ext = ext[i];
+	}
+	printf("scaling factors: %f %f %f\n", factor[0], factor[1], factor[2]);
+	for(int i = 0; i < 3; i++) {
+		orig[i] = center[i] - factor[i]*max_ext / 2;
+		span[i] = factor[i]*max_ext / (dim[i] - 1);
+	}
+	p_Data->setOrig(orig);
+	p_Data->setSpan(span);
+}
+
+DistanceTransform::DistanceTransform(cvc::app& ctx, FaceVertSet3D& fvs, int dim[3],
+									 const float user_center[3], float, float sx, float sy,
+									 float sz, deferred_t)
+	: _ctx(ctx), p_Cells(NULL)
+{
+	p_Data = new Reg3Data<float> (dim, NULL);
+	p_Surf = &fvs;
+	setGrid(dim, user_center, sx, sy, sz);
+	_stage = DT_CELLS;
+	_pos = 0;
 }
 
 DistanceTransform::DistanceTransform(cvc::app& ctx, FaceVertSet3D& fvs, int dim[3], float dist,
 									 float sx, float sy, float sz)
-	: _ctx(ctx)
+	: _ctx(ctx), p_Cells(NULL)
 {
 	float factor[3];
 	factor[0] = sx; factor[1] = sy; factor[2] = sz;
@@ -182,7 +377,7 @@ DistanceTransform::DistanceTransform(cvc::app& ctx, FaceVertSet3D& fvs, int dim[
 // Constructor with user-specified center (allows arbitrary bounding boxes)
 DistanceTransform::DistanceTransform(cvc::app& ctx, FaceVertSet3D& fvs, int dim[3], const float user_center[3], 
                                      float dist, float sx, float sy, float sz)
-	: _ctx(ctx)
+	: _ctx(ctx), p_Cells(NULL)
 {
 	float factor[3];
 	factor[0] = sx; factor[1] = sy; factor[2] = sz;
@@ -232,7 +427,7 @@ DistanceTransform::DistanceTransform(cvc::app& ctx, FaceVertSet3D& fvs, int dim[
 }
 
 DistanceTransform::DistanceTransform(cvc::app& ctx, FaceVertSet3D &fvs, const Reg3Data<float>& reg3)
-	: _ctx(ctx)
+	: _ctx(ctx), p_Cells(NULL)
 {
 	p_Data = new Reg3Data<float>(reg3);
 	p_Surf = &fvs;
@@ -251,198 +446,12 @@ DistanceTransform::~DistanceTransform(void)
 
 void DistanceTransform::transform()
 {
-	int nverts = p_Data->getNVerts();
-	int *parent = new int[nverts];
-	int i, j, k;
-	for(i = 0; i < nverts; i++) {
-		parent[i] = i;
-	}
-
-	int dim[3];
-	float orig[3], span[3];
-	p_Data->getDim(dim);
-	p_Data->getSpan(span);
-	p_Data->getOrig(orig);
-
 	_ctx.threadProgress(0.02);  // Starting
-
-	// 1D distance transform along x (0-30% of work)
-
-	float *f = new float[dim[0]];
-	float *d = new float[dim[0]];
-	int *p = new int[dim[0]];
-	int total_x_iterations = dim[2] * dim[1];
-	int x_iteration = 0;
-	for (k = 0; k < dim[2]; k++) {
-		for(j = 0; j < dim[1]; j++) {	
-			int index = p_Data->index2vert(0, j, k);
-			for(i = 0; i < dim[0]; i++) {
-				f[i] = p_Data->getValue(index+i);
-				p[i] = parent[index+i];
-			}
-			transform1D(dim[0], f, d, p, span[0]);
-			for(i = 0; i < dim[0]; i++) {
-				p_Data->setValue(index+i, d[i]);
-				parent[index+i] = p[i];
-			}
-			
-			// Update progress every 5% of X iterations
-			if (++x_iteration % std::max(1, total_x_iterations / 20) == 0) {
-							_ctx.threadProgress(0.02 + 0.28 * (float(x_iteration) / float(total_x_iterations)));
-			}
-		}
+	static const double note[] = {0.30, 0.60, 0.75, 0.90, 1.0};
+	for (int until = DT_Y; until <= DT_DONE; until++) {
+		advance(static_cast<std::size_t>(-1), until);
+		_ctx.threadProgress(note[until - DT_Y]);
 	}
-
-	delete[] f;
-	delete[] d;
-	delete[] p;
-
-	_ctx.threadProgress(0.30);  // X transform complete
-
-	f = new float[dim[1]];
-	d = new float[dim[1]];
-	p = new int[dim[1]];
-	// 1D distance transform along y (30-60% of work)
-	int total_y_iterations = dim[2] * dim[0];
-	int y_iteration = 0;
-	for(k = 0; k < dim[2]; k++) {
-		for(i = 0; i < dim[0]; i++) {
-			int index = p_Data->index2vert(i, 0, k);
-			for(j = 0; j < dim[1]; j++) {
-				f[j] = p_Data->getValue(index+dim[0]*j);
-				p[j] = parent[index+dim[0]*j];
-			}
-			transform1D(dim[1], f, d, p, span[1]);
-			for(j = 0; j < dim[1]; j++){
-				p_Data->setValue(index+dim[0]*j, d[j]);
-				parent[index+dim[0]*j] = p[j];
-			}
-			
-			// Update progress every 5% of Y iterations
-			if (++y_iteration % std::max(1, total_y_iterations / 20) == 0) {
-							_ctx.threadProgress(0.30 + 0.30 * (float(y_iteration) / float(total_y_iterations)));
-			}
-		}
-	}
-
-	delete[] f;
-	delete[] d;
-	delete[] p;
-	
-	_ctx.threadProgress(0.60);  // Y transform complete
-	
-	f = new float[dim[2]];
-	d = new float[dim[2]];
-	p = new int[dim[2]];
-	
-	// 1D distance transform along z (60-75% of work)
-	int total_z_iterations = dim[1] * dim[0];
-	int z_iteration = 0;
-	for(j = 0; j < dim[1]; j++) {
-		for (i = 0; i < dim[0]; i++) {
-			int index = p_Data->index2vert(i, j, 0);
-			for(k = 0; k < dim[2]; k++) {
-				f[k] = p_Data->getValue(index+k*dim[0]*dim[1]);
-				p[k] = parent[index+k*dim[0]*dim[1]];
-			}
-			transform1D(dim[2], f, d, p, span[2]);
-			for(k = 0; k < dim[2]; k++) {
-				p_Data->setValue(index+k*dim[0]*dim[1], d[k]);
-				parent[index+k*dim[0]*dim[1]] = p[k];
-			}
-			
-			// Update progress every 5% of Z iterations
-			if (++z_iteration % std::max(1, total_z_iterations / 20) == 0) {
-							_ctx.threadProgress(0.60 + 0.15 * (float(z_iteration) / float(total_z_iterations)));
-			}
-		}
-	}
-	delete[] f;
-	delete[] d;
-	delete[] p;
-
-	_ctx.threadProgress(0.75);  // Z transform complete
-
-//	for(i = 0; i < nverts; i++) {
-//		if (i%1000 == 1) {
-//			
-//			int ix, iy, iz;
-//			p_Data->vert2index(parent[i], ix, iy, iz);
-//			int px, py, pz;
-//			p_Data->vert2index(i, px, py, pz);
-//			float d = (px-ix)*(px-ix)*span[0]*span[0] +
-//					  (py-iy)*(py-iy)*span[1]*span[1] +
-//					  (pz-iz)*(pz-iz)*span[2]*span[2];
-//			printf("vert : %d, val = %f, dis = %f\n", i, p_Data->getValue(i), d);
-//			printf("ix: %d, iy: %d, iz: %d\n", ix, iy, iz);
-//			assert(nearSurface(ix, iy, iz));
-//		}
-// 	}
-
-	Point3f *closest = new Point3f[nverts];
-	// Compute the distance functions for points near the surface (75-90% of work)
-	int total_near_iterations = dim[2];
-	for (k = 0; k < dim[2]; k++) {
-		for(j = 0; j < dim[1]; j++) {
-			for (i = 0; i < dim[0]; i++) {
-				int nv = p_Data->index2vert(i, j, k);
-				//if (nearSurface(i, j, k)) {
-				if(parent[nv] == nv) {	
-					float d = computeNearDistance(i, j, k, closest[nv]);
-					p_Data->setValue(nv, d);
-				}
-			}
-		}
-		
-		// Update progress every k slice
-		if (k % std::max(1, total_near_iterations / 15) == 0) {
-					_ctx.threadProgress(0.75 + 0.15 * (float(k) / float(total_near_iterations)));
-		}
-	}
-
-	_ctx.threadProgress(0.90);  // Near distance computation complete
-
-	// update the distances for other points (90-100% of work)
-	int total_update_iterations = dim[2];
-	for (k = 0; k < dim[2]; k++) {
-		for(j = 0; j < dim[1]; j++) {
-			for (i = 0; i < dim[0]; i++) {
-				int nv = p_Data->index2vert(i, j, k);
-				if (parent[nv] != nv) {
-					Point3f p(orig[0]+i*span[0], orig[1]+j*span[1], orig[2]+k*span[2]);
-					float d = pointDistance(p, closest[parent[nv]]);
-					assert(parent[parent[nv]] == parent[nv]);
-					if(p_Data->getValue(parent[nv]) < 0) {
-						d = -d;
-					}
-//#ifdef _DEBUG
-//					if(p_Data->isBoundary(nv) && d < 0) {
-//						int pid = parent[nv];
-//						int ix, iy, iz;
-//						float distn = p_Data->getValue(pid);
-//						printf("WARNING: wrongly classified point %d, close to (%f %f %f), dist=%f\n", pid, 
-//								closest[pid][0], closest[pid][1], closest[pid][2], distn);
-//						p_Data->vert2index(pid, ix, iy, iz);
-//						float d = computeNearDistance(ix, iy, iz, closest[pid]);
-//					}
-//#endif
-					p_Data->setValue(nv, d);
-				}
-			}
-		}
-		
-		// Update progress every k slice
-		if (k % std::max(1, total_update_iterations / 10) == 0) {
-					_ctx.threadProgress(0.90 + 0.10 * (float(k) / float(total_update_iterations)));
-		}
-	}
-	delete[] closest;
-
-	p_Data->init();
-	printf("min dist = %f , max dist = %f\n", p_Data->getFuncMin(), p_Data->getFuncMax());
-	delete[] parent;
-	
-	_ctx.threadProgress(1.0);  // Complete
 }
 
 float DistanceTransform::computeNearDistance(int ix, int iy, int iz, Point3f& nearPnt)
@@ -856,7 +865,12 @@ void DistanceTransform::transform1D(int n, float f[], float d[], int parent[], f
 		if(f[i] < min) min = f[i];
 		d[i] = f[i];
 	}
-	if(min >= MAX_FLOAT) return;		// every number is max, no need to transform.
+	if(min >= MAX_FLOAT) {		// every number is max, no need to transform.
+		delete[] temp;
+		delete[] v;
+		delete[] z;
+		return;
+	}
 
 	for(i = 0; i < n; i++) {
 		if(f[i] < MAX_FLOAT) f[i] = f[i] / s2 ;

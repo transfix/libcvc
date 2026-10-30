@@ -33,6 +33,7 @@
 #include <cvc/core/types.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/volume/volmagick.h>
+#include <memory>
 
 // Forward declaration to avoid circular dependency
 #ifdef CVC_ENABLE_MESHER
@@ -74,6 +75,31 @@ volume sdf(app &ctx, const geometry &geom,
              Flip normals to invert inside/outside (true = flip, false = no flip)
            */
            bool flipNormals = false);
+
+// sdf() a slice at a time, for a caller that must not block (fe_lab's load task, stepped on the
+// app's scheduler). SDF_V2 runs its distance transform's stages -- rasterizing the triangles into
+// cells, marking the voxels near the surface, the three 1-D passes, the near and the far
+// distances -- in budgets of units (a cell a triangle touches, a voxel); the result is sdf()'s.
+// SDF_V1 and SDF_IGL run in one step. The geometry is shared, so the stepper may outlive its
+// caller's. step(budget) returns true once the volume is ready for take(); it throws where sdf()
+// would, and after a throw every later step rethrows.
+class sdf_stepper {
+public:
+  sdf_stepper(app &ctx, std::shared_ptr<const geometry> geom, const dimension &dim,
+              const bounding_box &bbox, sdf_algorithm algorithm = SDF_V2, bool flipNormals = false);
+  ~sdf_stepper();
+  sdf_stepper(const sdf_stepper &) = delete;
+  sdf_stepper &operator=(const sdf_stepper &) = delete;
+  bool step(std::size_t budget);
+  bool done() const;
+  double progress() const;
+  const char *phase() const; // the distance transform's ("cells", ..., "far distances"), "done"
+  volume take();
+
+private:
+  struct impl;
+  std::unique_ptr<impl> _impl;
+};
 #endif // CVC_ENABLE_SDF
 
 #ifdef CVC_ENABLE_MESHER

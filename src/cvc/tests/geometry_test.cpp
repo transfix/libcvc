@@ -18,6 +18,8 @@
 #include <gtest/gtest.h>
 #include <iomanip>
 #include <limits>
+#include <memory>
+#include <string>
 #include <vector>
 #if !defined(_WIN32)
 #include <sys/resource.h>
@@ -1502,6 +1504,49 @@ TEST_F(AlgorithmTest, SDFV2Basic) {
 
   EXPECT_TRUE(has_negative) << "SDF v2 should have negative values inside";
   EXPECT_TRUE(has_positive) << "SDF v2 should have positive values outside";
+}
+
+// sdf_stepper: the same volume as sdf(SDF_V2), stepped in small budgets, with and without the
+// expanded grid v2 needs for a box tighter than 1.1x the mesh (resampled back).
+TEST_F(AlgorithmTest, SDFV2SteppedMatchesOneShot) {
+  auto cube = std::make_shared<geometry>();
+  const double c[8][3] = {{-1, -1, -1}, {1, -1, -1}, {1, 1, -1}, {-1, 1, -1},
+                          {-1, -1, 1},  {1, -1, 1},  {1, 1, 1},  {-1, 1, 1}};
+  for (const auto &p : c)
+    cube->points().push_back({{p[0], p[1], p[2]}});
+  const int tris[12][3] = {{0, 2, 1}, {0, 3, 2}, {4, 5, 6}, {4, 6, 7}, {0, 1, 5}, {0, 5, 4},
+                           {2, 3, 7}, {2, 7, 6}, {0, 3, 7}, {0, 7, 4}, {1, 2, 6}, {1, 6, 5}};
+  for (const auto &t : tris)
+    cube->tris().push_back({{cvc::index_t(t[0]), cvc::index_t(t[1]), cvc::index_t(t[2])}});
+  const dimension dim(24, 24, 24);
+  for (const bounding_box &bbox : {bounding_box(-2.0, -2.0, -2.0, 2.0, 2.0, 2.0),
+                                   bounding_box(-1.05, -1.05, -1.05, 1.05, 1.05, 1.05)}) {
+    const volume ref = sdf(ctx, *cube, dim, bbox, SDF_V2);
+    sdf_stepper s(ctx, cube, dim, bbox, SDF_V2);
+    int steps = 0;
+    double last = 0.0;
+    std::string phases;
+    while (!s.step(97)) {
+      ++steps;
+      EXPECT_GE(s.progress(), last) << s.phase();
+      last = s.progress();
+      if (phases.find(s.phase()) == std::string::npos)
+        phases += std::string(s.phase()) + ";";
+    }
+    EXPECT_GT(steps, 100);
+    EXPECT_EQ(s.progress(), 1.0);
+    EXPECT_NE(phases.find("x lines"), std::string::npos) << phases;
+    EXPECT_NE(phases.find("near distances"), std::string::npos) << phases;
+    const volume got = s.take();
+    ASSERT_EQ(got.XDim(), ref.XDim());
+    EXPECT_EQ(got.boundingBox().minx, ref.boundingBox().minx);
+    EXPECT_EQ(got.desc(), ref.desc());
+    const uint64 n = ref.XDim() * ref.YDim() * ref.ZDim();
+    uint64 differ = 0;
+    for (uint64 i = 0; i < n; ++i)
+      differ += got(i) != ref(i) ? 1 : 0;
+    EXPECT_EQ(differ, 0u) << "bbox minx " << bbox.minx;
+  }
 }
 
 TEST_F(AlgorithmTest, SDFV1vsV2Comparison) {
