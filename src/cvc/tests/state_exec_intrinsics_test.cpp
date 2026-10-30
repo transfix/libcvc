@@ -4,6 +4,7 @@
 #include <boost/any.hpp>
 #include <boost/thread/thread.hpp>
 #include <cmath>
+#include <cstdlib>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/builtins.h>
@@ -105,6 +106,22 @@ TEST_F(StateTreeIntrinsicsTest, StateChildren) {
   auto *lst = std::get_if<list_ptr>(&result.v);
   ASSERT_NE(lst, nullptr);
   EXPECT_GE((*lst)->size(), 2u);
+}
+
+TEST_F(StateTreeIntrinsicsTest, StateChildrenListsEveryDescendantByFullPath) {
+  // The developer guide's example: every node under the node, in pre-order, by full path.
+  call("state-set", {std::string("myapp.config.timeout"), std::string("30")});
+  call("state-set", {std::string("myapp.users.ann.role"), std::string("admin")});
+  const auto names = [&](const char *path) {
+    const value_t got = call("state-children", {std::string(path)});
+    std::vector<std::string> out;
+    for (const value_t &v : *std::get<list_ptr>(got.v))
+      out.push_back(std::get<std::string>(v.v));
+    return out;
+  };
+  EXPECT_EQ(names("myapp.config"), std::vector<std::string>{"myapp.config.timeout"});
+  EXPECT_EQ(names("myapp.users"),
+            (std::vector<std::string>{"myapp.users.ann", "myapp.users.ann.role"}));
 }
 
 TEST_F(StateTreeIntrinsicsTest, StateChildrenNonexistent) {
@@ -265,6 +282,28 @@ TEST_F(StateTreeIntrinsicsTest, StateSetCoercesScalarsToString) {
   // a string is stored raw — NOT to_string's quoted form
   call("state-set", {std::string("c.str"), std::string("hi")});
   EXPECT_EQ(std::get<std::string>(call("state-get", {std::string("c.str")}).v), "hi");
+}
+
+TEST_F(StateTreeIntrinsicsTest, StateSetStoresAFloatInItsShortestRoundTripForm) {
+  // A float stores the shortest text that reads back as it, as state-incr's sums do, not six
+  // significant digits: a balance of 1234567.5 is "1234567.5", not "1.23457e+06".
+  const auto stored = [&](const char *name, double d) {
+    call(name, {std::string("f"), value_t{d}});
+    return std::get<std::string>(call("state-get", {std::string("f")}).v);
+  };
+  EXPECT_EQ(stored("state-set", 1234567.5), "1234567.5");
+  EXPECT_EQ(stored("state-set", 0.1), "0.1");
+  EXPECT_EQ(stored("state-set", 1e21), "1e+21");
+  EXPECT_EQ(stored("state-set", -2.5), "-2.5");
+  // Of the fixed and scientific texts the shorter is written, so 100000.0 is "1e+05" (six
+  // digits wrote "100000"), as state-incr writes it.
+  EXPECT_EQ(stored("state-set", 1e5), "1e+05");
+  // 0.1 + 0.2 is not 0.3: six digits stored "0.3", which reads back as a different number.
+  EXPECT_EQ(stored("state-set", 0.1 + 0.2), "0.30000000000000004");
+  for (const double d : {0.1 + 0.2, 1.0 / 3, 6.02214076e23, 5e-324, 123456789.123})
+    EXPECT_EQ(std::strtod(stored("state-set", d).c_str(), nullptr), d) << d;
+  // state-swap and state-cas store a float as state-set does.
+  EXPECT_EQ(stored("state-swap", 1234567.5), "1234567.5");
 }
 
 TEST_F(StateTreeIntrinsicsTest, StateDataGetNonexistent) {
