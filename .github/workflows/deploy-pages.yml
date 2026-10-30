@@ -109,6 +109,12 @@ jobs:
             --prefix "$CVC_WASM_DEPS" \
             --platform any --config release --link shared \
             --no-fallback-to-source || echo "  (scene/weights bundles absent — wasm demo falls back to synthetic + default_biased)"
+          # xterm.js for the ari pages, served beside them (src/ari/CMakeLists.txt); without it the
+          # configure downloads the same pinned npm packages.
+          cvcpkg install xterm-js xterm-js-addon-fit xterm-js-addon-webgl \
+            --prefix "$CVC_WASM_DEPS" \
+            --platform any --config release --link shared \
+            --no-fallback-to-source || echo "  (xterm-js packages absent — the configure downloads xterm.js)"
 
       - name: Build the gallery (libcvc-examples-web, single-threaded)
         # Non-pthread: matches the single-threaded wasm dep bundles + does not

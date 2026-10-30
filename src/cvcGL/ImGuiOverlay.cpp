@@ -25,6 +25,14 @@
 #include <backends/imgui_impl_opengl3.h>
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
+// Not emscripten_run_script_int: that is an eval, which a page with a Content-Security-Policy
+// without 'unsafe-eval' refuses (arigl-web may be served under one).
+// clang-format off: a JavaScript body
+EM_JS(int, cvcgl_is_touch_device, (), {
+  return ('ontouchstart' in globalThis ||
+          (typeof navigator !== 'undefined' && navigator.maxTouchPoints > 0)) ? 1 : 0;
+});
+// clang-format on
 #endif
 #include <cstdio>
 #include <cstdlib>
@@ -248,8 +256,7 @@ ImGuiKey vtkKeySymToImGuiKey(const char *sym) {
 // with a mouse would be obnoxious. Callers can always override with setUiScale.
 bool detectTouchDevice() {
 #ifdef __EMSCRIPTEN__
-  return emscripten_run_script_int("(('ontouchstart' in window) || "
-                                   "(navigator.maxTouchPoints > 0)) ? 1 : 0") != 0;
+  return cvcgl_is_touch_device() != 0;
 #else
   return false;
 #endif

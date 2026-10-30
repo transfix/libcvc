@@ -33,6 +33,15 @@ using namespace cvc;
 // Can be enabled with --enable-stress-tests command line flag
 bool enable_stress_tests = false;
 
+// The bunny's SDF that the mesher tests mesh is kBunnySdfSamples wide. At 32 they take 6-7 s in a
+// Release build and 70-290 s in the Debug package lanes, past ctest's 300 s on a loaded runner, so
+// unoptimized builds use 16. By the optimizer, not NDEBUG, which a Debug build can define.
+#if defined(__OPTIMIZE__) || (defined(_MSC_VER) && !defined(_DEBUG))
+constexpr unsigned int kBunnySdfSamples = 32;
+#else
+constexpr unsigned int kBunnySdfSamples = 16;
+#endif
+
 class GeometryTest : public ::testing::Test {
 protected:
   void SetUp() override {
@@ -938,8 +947,8 @@ TEST_F(GeometryTest, QualityImproveTetrahedralMesh) {
   // First create an SDF from the bunny
   std::cout << "Creating SDF from bunny mesh..." << std::endl;
   // At 64^3 the bunny is ~290k tets, and four GEO_FLOW passes over them timed out (300 s) in a
-  // Debug CI build.
-  dimension sdf_dim(32, 32, 32);
+  // Debug CI build, and 32^3 did on a loaded runner (kBunnySdfSamples).
+  dimension sdf_dim(kBunnySdfSamples, kBunnySdfSamples, kBunnySdfSamples);
   volume sdf_vol = sdf(ctx, bunny, sdf_dim, bunny.extents(), SDF_V2);
 
   // Extract a tetrahedral mesh from the SDF
@@ -1595,11 +1604,12 @@ TEST_F(AlgorithmTest, SDFV2SteppedMatchesOneShot) {
   }
 }
 
-// mesher_stepper: the bunny's SDF (32^3 samples, which the mesher resamples to 33^3) meshed a
-// slice at a time gives the one-shot meshers' meshes.
+// mesher_stepper: the bunny's SDF (kBunnySdfSamples wide, which the mesher resamples to 2^n+1)
+// meshed a slice at a time gives the one-shot meshers' meshes.
 TEST_F(AlgorithmTest, MesherSteppedMatchesOneShotOnTheBunny) {
   const geometry bunny = read_geometry("test.bunny");
-  const volume vol = sdf(ctx, bunny, dimension(32, 32, 32), bunny.extents(), SDF_V2);
+  const dimension dim(kBunnySdfSamples, kBunnySdfSamples, kBunnySdfSamples);
+  const volume vol = sdf(ctx, bunny, dim, bunny.extents(), SDF_V2);
   const auto check = [](const geometry &ref, mesher_stepper s, const char *what) {
     int steps = 0;
     double last = 0.0;
