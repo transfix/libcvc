@@ -21,6 +21,9 @@
 //   --graphics MODE       how images draw in a terminal: auto, kitty, sixel, color or mono
 //   --image NAME=FILE     publish the picture in FILE under NAME, for image: widgets (repeatable)
 //   --cell-size WxH       snapshot: a terminal cell's size in pixels, where it can't be asked
+//
+// boost::program_options reads them: --flag VALUE and --flag=VALUE both work, and an unknown flag
+// or one missing its value is an error.
 #pragma once
 
 #include <string>
