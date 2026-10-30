@@ -476,6 +476,26 @@ jobs:
           "$py" -m pip install 'httpx>=0.24'
           "$py" -c 'import httpx; print("cvcpkg publish extra ok: httpx", httpx.__version__)'
 
+      # The macos-15-intel image has Homebrew's jpeg-turbo (3.2.0, for its Java and PHP tools)
+      # linked into /usr/local/include, which Apple clang searches, and libcvc compiled
+      # media_rungs.cpp against that turbojpeg.h ahead of the deps prefix's. 3.2 makes tj3Init a
+      # macro for tj3InitVersion, which the prefix's 3.1.0 libturbojpeg lacks, so every Intel row
+      # failed to link from 3.7.1 on ("_tj3InitVersion" undefined). Unlinked, the prefix's header
+      # is found (checked on this image, diagnostic run 41007705020). arm64's Homebrew is
+      # /opt/homebrew, which clang does not search.
+      - name: Keep Homebrew's turbojpeg.h out of the build (macOS Intel)
+        if: matrix.target.platform == 'macos' && matrix.target.arch == 'x86_64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if brew list --versions jpeg-turbo >/dev/null 2>&1; then
+            brew unlink jpeg-turbo
+          fi
+          if [ -e /usr/local/include/turbojpeg.h ]; then
+            echo "::error::/usr/local/include/turbojpeg.h is still there: it would shadow the deps prefix's"
+            exit 1
+          fi
+
       - name: Configure (Linux/macOS)
         if: matrix.target.platform != 'windows'
         shell: bash
