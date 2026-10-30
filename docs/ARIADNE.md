@@ -134,7 +134,9 @@ frame only.
 
 ### 2.2 The action / drain lane
 
-Fire-once handlers (`on:` on a button, a menu item's program) and the resident
+Fire-once handlers (`on:` on a button, a menu item's program, or a bound widget's `on:`, run
+after each committed write: a checkbox or menu tick, a combo or radio pick, a slider's drag end
+or key step, a text field's Enter, a colour edit) and the resident
 handlers (`on_tick` / `on_key` / `on_pointer`) run in the action lane, on the
 **app-wide scheduler** (`app.exec_scheduler()`), **off** the render walk, inside
 `Runtime::drain()` ([`ariadne.cpp:1642`](../src/cvc/ariadne/ariadne.cpp)).
@@ -296,10 +298,10 @@ Three backends ship:
   pressed item, open menu or combo, in-progress text and slider edits, window placement).
   So the whole tree is interactive:
   - **keyboard** — Tab / Shift-Tab (or Up / Down) move focus; Enter / Space activate;
-    Left / Right step a slider or cycle a combo; text fields edit in place; Esc reverts an
-    edit or closes a popup; F10 opens the menu bar.
-  - **mouse** — click to focus or activate, drag a slider, drag a window by its title
-    bar, click `[x]` to close it, click a menu title to open it.
+    Left / Right step a slider or cycle a combo or radio; text fields edit in place; Esc
+    reverts an edit or closes a popup; F10 opens the menu bar.
+  - **mouse** — click to focus or activate, pick a radio's option, drag a slider, drag a
+    window by its title bar, click `[x]` to close it, click a menu title to open it.
   - **windows** (`caps.windows = true`) — free, z-ordered, raised on focus, placed from
     `pos:`/`size:` or the persisted `tree.<id>.geometry`; a drag persists back (§11.4). A
     window stops at the screen's edge and scrolls what does not fit (§5.8).
@@ -546,6 +548,21 @@ windows:
 init: (begin (state-set "demo.n" 10) (state-set "demo.frames" 0))
 on_tick: (state-set "demo.frames" (+ (int (state-get "demo.frames")) 1))
 ```
+
+A choice of a few values is a `combo:` (a drop-down) or a `radio:` (every option shown, stacked;
+`radio_row:` side by side). Both take `options:` (a list, or a computed expression), an
+optional parallel `values:` (the key then stores `values[i]`, not the label), `def:` and an
+optional `on:` run after each pick:
+
+```yaml
+      - radio_row: Samples
+        bind: volren.supersample
+        options: [Off, 2x, 4x]
+        values: [0, 2, 4]
+        on: (state-set "demo.dirty" 1)
+```
+
+A backend with no radio buttons draws a radio as a combo.
 
 ### 5.4 `scene:` sources and custom node types
 

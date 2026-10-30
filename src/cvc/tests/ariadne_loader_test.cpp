@@ -567,6 +567,53 @@ windows:
   EXPECT_EQ(find(r.root, Kind::Color)->on, "tint.changed");
 }
 
+// radio: and radio_row: take a combo's keys (options, values, def, on) and build Kind::Radio,
+// stacked or side by side.
+TEST(AriadneLoader, RadioAndRadioRow) {
+  SKIP_WITHOUT_YAML();
+  const char *doc = R"(
+meta: { name: T, min_libcvc: "3.4.0" }
+windows:
+  - window: W
+    children:
+      - radio: Shading
+        bind: view.shading
+        options: [Flat, Smooth]
+        def: Smooth
+        on: shading.changed
+      - radio_row: Samples
+        bind: view.ss
+        options: [Off, 2x, 4x]
+        values: [0, 2, 4]
+      - type: radio
+        label: Empty
+        bind: view.e
+)";
+  LoadResult r = load_string(doc);
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(count(r.root, Kind::Radio), 3);
+  EXPECT_EQ(count(r.root, Kind::Combo), 0);
+
+  const Widget *sh = find(r.root, Kind::Radio, "Shading");
+  ASSERT_NE(sh, nullptr);
+  EXPECT_FALSE(sh->radio_row);
+  EXPECT_EQ(sh->bind, "view.shading");
+  ASSERT_EQ(sh->options.size(), 2u);
+  EXPECT_EQ(sh->options[1], "Smooth");
+  EXPECT_EQ(sh->sdef, "Smooth");
+  EXPECT_EQ(sh->on, "shading.changed");
+
+  const Widget *ss = find(r.root, Kind::Radio, "Samples");
+  ASSERT_NE(ss, nullptr);
+  EXPECT_TRUE(ss->radio_row);
+  ASSERT_EQ(ss->values.size(), 3u);
+  EXPECT_EQ(ss->values[2], "4");
+
+  ASSERT_EQ(r.warnings.size(), 1u);
+  EXPECT_NE(r.warnings[0].find("radio 'Empty' has no options:"), std::string::npos)
+      << r.warnings[0];
+}
+
 // keys: -- each entry a rebindable action with its label, its default key(s) and its on:.
 TEST(AriadneLoader, KeysBlock) {
   SKIP_WITHOUT_YAML();
