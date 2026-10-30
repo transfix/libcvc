@@ -248,7 +248,7 @@ Two more constraints on the widget set:
 
 **Leaf widgets (21).** `text` (formatted / caption / disabled header), `separator`
 (+ `separator_text`), `checkbox`, `slider_int`, `slider_float`, `drag_float`,
-`input_int`, `input_text` *(⚠️ not yet implemented as of 2026-10-10 — keyboard event plumbing landed native + wasm, but no `InputText` widget in the backend)*, `combo` (enum-as-text), `radio_row`, `button`, `small_button`,
+`input_int`, `input_text` *(⚠️ not yet implemented as of 2026-10-10 — keyboard event plumbing landed native + wasm, but no `InputText` widget in the backend)*, `combo` (enum-as-text), `radio` / `radio_row` (a combo's keys, every option shown; landed), `button`, `small_button`,
 `menu_item` (toggle / fire-once / radio), `collapsing_header`, `tree_node`,
 `color_edit3`, `invisible_button` *(C++ escape)*, `custom_drawlist` *(C++ escape)*.
 Plus three **modifiers that are attributes, not children**: `tooltip`, `same_line`,
@@ -636,7 +636,10 @@ menubar:
 ```
 
 `menu_item` + `bind:` = a tick bound two-way to a state bool. `menu_item` + `on:` =
-a deferred action (§4). `group:` makes a mutually-exclusive radio set.
+a deferred action (§4). `group:` makes a mutually-exclusive radio set. A bound widget
+(`menu_item` + `bind:`, `checkbox`, `slider_*`, `combo`, `radio`, `input_*`, `color`, `tf_editor`) may
+carry an `on:` too: it runs after each committed write (a pick, a toggle, a slider's drag end or
+key step), so the handler reads the new value from state.
 
 ### 3.3 Windows and placement policy
 

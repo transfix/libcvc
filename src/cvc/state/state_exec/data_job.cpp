@@ -16,7 +16,6 @@
 #include <cvc/state/state_exec/generator.h>
 #include <cvc/state/state_exec/scheduler.h> // the settings' key prefixes
 #include <optional>
-#include <sstream>
 #include <stdexcept>
 #include <unordered_set>
 #include <utility>
@@ -116,11 +115,9 @@ private:
             out_ += arg ? "#t" : "#f";
           else if constexpr (std::is_same_v<T, int64_t>)
             out_ += std::to_string(arg);
-          else if constexpr (std::is_same_v<T, double>) {
-            std::ostringstream oss;
-            oss << arg;
-            out_ += oss.str();
-          } else if constexpr (std::is_same_v<T, std::string>) {
+          else if constexpr (std::is_same_v<T, double>)
+            out_ += format_number_shortest(arg);
+          else if constexpr (std::is_same_v<T, std::string>) {
             out_ += '"';
             out_ += arg;
             out_ += '"';

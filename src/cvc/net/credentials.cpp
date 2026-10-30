@@ -471,7 +471,8 @@ bool CredentialStore::save_locked(std::string *error) const {
 #else
   std::string text = kFileHeader;
   for (const Entry &e : entries_)
-    text += e.name + " " + e.from.str() + " " + e.token + "\n";
+    if (e.kept)
+      text += e.name + " " + e.from.str() + " " + e.token + "\n";
   return write_private_file(fs::path(path_), text, error);
 #endif
 }
@@ -526,6 +527,23 @@ bool CredentialStore::capture(const std::string &name, const Origin &from, const
   std::string werr;
   if (!save_locked(&werr) && error)
     *error = werr;
+  return true;
+}
+
+bool CredentialStore::provide(const std::string &name, const std::string &token,
+                              std::string *error) {
+  if (!valid_name(name))
+    return fail(error, "'" + name + "' is not a credential name (1-64 of A-Z a-z 0-9 . _ -)");
+  if (!valid_token(token))
+    return fail(error, "the value is not a bearer token (16-4096 of A-Z a-z 0-9 - . _ ~ + /)");
+  std::lock_guard<std::mutex> lock(mutex_);
+  const auto bound = std::find_if(bindings_.begin(), bindings_.end(),
+                                  [&](const auto &b) { return b.first == name; });
+  if (bound == bindings_.end() || bound->second.empty())
+    return fail(error, "credential '" + name + "' is bound to no origin");
+  // The file's token for it stays on file: this one is ahead of it, for this run.
+  std::erase_if(entries_, [&](const Entry &e) { return e.name == name && !e.kept; });
+  entries_.push_back({name, bound->second.front(), token, false});
   return true;
 }
 
