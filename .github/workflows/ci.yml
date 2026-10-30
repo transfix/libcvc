@@ -31,6 +31,19 @@ env:
 #    workflow in a permanent cold-cache state.
 #
 # (Defined per-job below.)
+#
+# Workflow level, pushes only (master, tags, ci/full/**): one run per ref at
+# a time, and a newer push replaces that ref's run still waiting to start.
+# cancel-in-progress stays false, so a running run finishes and its package
+# jobs seed their caches. Merges land faster than a 20-job run clears the
+# account's shared runners, so without this every intermediate master
+# commit's run queued behind the last (2026-10-30: seven full runs at once,
+# with every other repo's jobs waiting behind them). Pull requests get a group
+# of their own per run (github.run_id), so they behave as before: their cheap
+# jobs cancel per job, their heavy jobs finish.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && format('run-{0}', github.run_id) || format('push-{0}', github.ref) }}
+  cancel-in-progress: false
 
 # ───────────────────────────────────────────────────────────────────
 # Per-PR / per-commit artifact set
