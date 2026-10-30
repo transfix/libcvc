@@ -263,3 +263,130 @@ TEST(StateLink, RootSelfLinkIsCycle) {
   EXPECT_EQ(r.kind, kind_t::cycle_detected);
   EXPECT_EQ(r.target, nullptr);
 }
+
+// findThroughLinks / childThroughLinks: a path spelled THROUGH a transparent link on an interior
+// node reaches the target's descendants (an Ariadne `link:` hole on a subtree).
+
+TEST(StateLinkPath, FindDescendantStopsAtTheLinkNode) {
+  cvc::app a;
+  auto &root = state::instance(a);
+  root("s.a").value(std::string("1"));
+  root("hole").linkTo("s", state::link_mode::transparent);
+  // The physical walk sees only the link node's own (absent) child.
+  EXPECT_EQ(root.findDescendant("hole.a"), nullptr);
+}
+
+TEST(StateLinkPath, FindThroughLinksReachesTheTargetsDescendants) {
+  cvc::app a;
+  auto &root = state::instance(a);
+  root("s.a").value(std::string("1"));
+  root("s.b.c").value(std::string("2"));
+  root("hole").linkTo("s", state::link_mode::transparent);
+  EXPECT_EQ(root.findThroughLinks("hole.a"), &root("s.a"));
+  EXPECT_EQ(root.findThroughLinks("hole.b.c"), &root("s.b.c"));
+  // The last hop is followed too: the hole itself reads as its target.
+  EXPECT_EQ(root.findThroughLinks("hole"), &root("s"));
+  EXPECT_EQ(root.findThroughLinks("hole.missing"), nullptr);
+  // A read creates nothing, under the hole or the target.
+  EXPECT_TRUE(root("hole").children().empty());
+  EXPECT_EQ(root.findDescendant("s.missing"), nullptr);
+}
+
+TEST(StateLinkPath, FindThroughLinksIgnoresTheLinksOwnChildren) {
+  cvc::app a;
+  auto &root = state::instance(a);
+  root("s.a").value(std::string("target"));
+  root("hole.a").value(std::string("local"));
+  root("hole").linkTo("s", state::link_mode::transparent);
+  EXPECT_EQ(root.findThroughLinks("hole.a")->value(), "target");
+}
+
+TEST(StateLinkPath, OpaqueLinksAreNotFollowed) {
+  cvc::app a;
+  auto &root = state::instance(a);
+  root("s.a").value(std::string("target"));
+  root("hole.a").value(std::string("own"));
+  root("hole").linkTo("s", state::link_mode::opaque);
+  EXPECT_EQ(root.findThroughLinks("hole.a")->value(), "own");
+  EXPECT_EQ(root.findThroughLinks("hole"), &root("hole"));
+}
+
+TEST(StateLinkPath, ABrokenLinkIsWalkedAsAPlainNode) {
+  cvc::app a;
+  auto &root = state::instance(a);
+  root("hole.a").value(std::string("own"));
+  root("hole").linkTo("no.such.node", state::link_mode::transparent);
+  EXPECT_EQ(root.findThroughLinks("hole.a")->value(), "own");
+}
+
+TEST(StateLinkPath, ChainsAndLinksInsideTheTargetAreFollowed) {
+  cvc::app a;
+  auto &root = state::instance(a);
+  root("c.x").value(std::string("deep"));
+  root("b").linkTo("c", state::link_mode::transparent);
+  root("hole").linkTo("b", state::link_mode::transparent);
+  EXPECT_EQ(root.findThroughLinks("hole.x")->value(), "deep");
+  // A transparent link inside the granted subtree is part of what it grants.
+  root("s.inner").linkTo("c", state::link_mode::transparent);
+  root("h2").linkTo("s", state::link_mode::transparent);
+  EXPECT_EQ(root.findThroughLinks("h2.inner.x")->value(), "deep");
+}
+
+TEST(StateLinkPath, ACycleIsWalkedAsAPlainNode) {
+  cvc::app a;
+  auto &root = state::instance(a);
+  root("p").linkTo("q", state::link_mode::transparent);
+  root("q").linkTo("p", state::link_mode::transparent);
+  root("p.a").value(std::string("own"));
+  EXPECT_EQ(root.findThroughLinks("p.a")->value(), "own");
+}
+
+TEST(StateLinkPath, AWritableLinkTakesDescendantWritesOnTheTarget) {
+  cvc::app a;
+  auto &root = state::instance(a);
+  root("s.a").value(std::string("1"));
+  root("hole").linkTo("s", state::link_mode::transparent).setLinkWritable(true);
+  EXPECT_EQ(&root.childThroughLinks("hole.a"), &root("s.a"));
+  root.childThroughLinks("hole.new.leaf").value(std::string("x"));
+  ASSERT_NE(root.findDescendant("s.new.leaf"), nullptr);
+  EXPECT_EQ(root.findDescendant("s.new.leaf")->value(), "x");
+  EXPECT_TRUE(root("hole").children().empty()); // nothing landed on the hole
+}
+
+TEST(StateLinkPath, AReadOnlyLinkKeepsDescendantWritesLocal) {
+  cvc::app a;
+  auto &root = state::instance(a);
+  root("s.a").value(std::string("1"));
+  root("hole").linkTo("s", state::link_mode::transparent);
+  root.childThroughLinks("hole.a").value(std::string("2"));
+  root.childThroughLinks("hole.new").value(std::string("x"));
+  EXPECT_EQ(root("s.a").value(), "1");
+  EXPECT_EQ(root.findDescendant("s.new"), nullptr);
+  EXPECT_EQ(root.findDescendant("hole.a")->value(), "2"); // the hole's own child
+  // Reads still see the target.
+  EXPECT_EQ(root.findThroughLinks("hole.a")->value(), "1");
+  // Refusing instead: nothing is written anywhere.
+  EXPECT_THROW(root.childThroughLinks("hole.b", true), std::exception);
+  EXPECT_EQ(root.findDescendant("hole.b"), nullptr);
+  EXPECT_EQ(root.findDescendant("s.b"), nullptr);
+}
+
+TEST(StateLinkPath, AnUnresolvableWritableLinkRefusesDescendantWrites) {
+  cvc::app a;
+  auto &root = state::instance(a);
+  root("hole").linkTo("no.such.node", state::link_mode::transparent).setLinkWritable(true);
+  EXPECT_THROW(root.childThroughLinks("hole.a"), std::exception);
+  EXPECT_EQ(root.findDescendant("hole.a"), nullptr);
+  EXPECT_EQ(root.findDescendant("no.such.node"), nullptr);
+}
+
+TEST(StateLinkPath, TheLastHopIsNotFollowedForAWrite) {
+  cvc::app a;
+  auto &root = state::instance(a);
+  root("s").value(std::string("1"));
+  root("hole").linkTo("s", state::link_mode::transparent);
+  // value(v) decides for the link node itself: a read-only one keeps the write.
+  EXPECT_EQ(&root.childThroughLinks("hole"), &root("hole"));
+  root.childThroughLinks("hole").value(std::string("2"));
+  EXPECT_EQ(root("s").value(), "1");
+}

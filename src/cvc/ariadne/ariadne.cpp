@@ -55,11 +55,12 @@ namespace {
 // They are used unqualified below (same cvc::ariadne namespace).
 
 // Read a state value as a plain string with no seeding (read-only Text view). Follows a
-// transparent-link hole to its target (§12), so a bound Text in a mounted module shows the
-// granted parent value, matching every other read path.
+// transparent-link hole to its target (§12), on every hop, so a bound Text in a mounted module
+// shows the granted parent value (or a value under it), matching every other read path.
 std::string read_string(cvc::app &ctx, const std::string &path) {
   try {
-    return read_effective(cvc::state::instance(ctx)(path)).value();
+    cvc::state *n = read_node(ctx, path);
+    return n ? n->value() : std::string();
   } catch (const std::exception &) {
     return "<unset>";
   }
