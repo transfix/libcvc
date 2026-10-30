@@ -545,15 +545,17 @@ LBIE::geoframe convert(const cvc::geometry &geo) {
   return ret_geom;
 }
 
-// ----------
-// cvc_mesher
-// ----------
+// -----------------
+// mesh_stepper_for
+// -----------------
 // Purpose:
-//   Interface between the old LBIE meshing API and the new one.
+//   The LBIE meshing an argument map asks for (cvc_mesher's defaults for what it leaves out), a
+//   slice at a time.
 // ---- Change History ----
-// 01/10/2014 -- Joe R. -- Creation.
+// 01/10/2014 -- Joe R. -- Creation (as cvc_mesher).
+// 10/29/2026 -- Joe R. -- Makes an LBIE::mesh_stepper, which cvc_mesher runs to the end.
 typedef std::map<std::string, boost::any> Arguments;
-cvc::geometry cvc_mesher(const cvc::volume &vol, Arguments argv) {
+std::unique_ptr<LBIE::mesh_stepper> mesh_stepper_for(const cvc::volume &vol, Arguments argv) {
   using namespace std;
   using namespace cvc;
 
@@ -639,9 +641,71 @@ cvc::geometry cvc_mesher(const cvc::volume &vol, Arguments argv) {
   }
 
   // Week 4: Use new geometry-based API (no conversion needed)
-  return LBIE::do_mesh_geometry(vol, isovalue, isovalue_in, err, err_in, geom_type,
-                                improvement_method_enum, normaltype_lbie, extraction_method_enum,
-                                improve_iterations, dual_contouring, false, propertyVol);
+  return std::make_unique<LBIE::mesh_stepper>(
+      vol, isovalue, isovalue_in, err, err_in, geom_type, improvement_method_enum, normaltype_lbie,
+      extraction_method_enum, improve_iterations, dual_contouring, propertyVol);
+}
+
+// ----------
+// cvc_mesher
+// ----------
+// Purpose:
+//   Interface between the old LBIE meshing API and the new one.
+// ---- Change History ----
+// 01/10/2014 -- Joe R. -- Creation.
+// 10/29/2026 -- Joe R. -- Runs mesh_stepper_for's stepper to the end.
+cvc::geometry cvc_mesher(const cvc::volume &vol, Arguments argv) {
+  std::unique_ptr<LBIE::mesh_stepper> stepper = mesh_stepper_for(vol, std::move(argv));
+  stepper->step(0);
+  return stepper->take_geometry();
+}
+
+// The argument maps iso(), tetrahedralize(), hexahedralize() and tetrahedralize2() mesh with, and
+// mesher_stepper too.
+Arguments iso_args(double isovalue, cvc::extraction_method method, int improve_iterations,
+                   cvc::normal_type normals, boost::optional<const cvc::volume &> propertyVol) {
+  Arguments args;
+  args["isovalue"] = float(isovalue);
+  args["improve_iterations"] = improve_iterations;
+  args["extraction_method_enum"] = static_cast<LBIE::Mesher::ExtractionMethod>(method);
+  args["normaltype_enum"] = normals;
+  if (propertyVol) {
+    args["propertyVol"] = propertyVol.get();
+  }
+  return args;
+}
+
+// tetrahedralize() (TETRA) and hexahedralize() (HEXA)
+Arguments volume_mesh_args(LBIE::geoframe::GEOTYPE meshtype, double isovalue,
+                           cvc::extraction_method method, cvc::improvement_method improve_method,
+                           cvc::normal_type normals, int improve_iterations,
+                           boost::optional<const cvc::volume &> propertyVol) {
+  Arguments args;
+  args["isovalue"] = float(isovalue);
+  args["improve_iterations"] = improve_iterations;
+  args["extraction_method_enum"] = static_cast<LBIE::Mesher::ExtractionMethod>(method);
+  args["improvement_method_enum"] = static_cast<LBIE::Mesher::ImproveMethod>(improve_method);
+  args["meshtype_enum"] = meshtype;
+  args["normaltype_enum"] = normals;
+  if (propertyVol) {
+    args["propertyVol"] = propertyVol.get();
+  }
+  return args;
+}
+
+// tetrahedralize2(): the layer between isovalue and isovalue_in (TETRA2)
+Arguments tetrahedralize2_args(float isovalue, float isovalue_in, cvc::extraction_method method,
+                               cvc::improvement_method improve_method, cvc::normal_type normals,
+                               int improve_iterations) {
+  Arguments args;
+  args["isovalue"] = isovalue;
+  args["isovalue_in"] = isovalue_in;
+  args["improve_iterations"] = improve_iterations;
+  args["extraction_method_enum"] = static_cast<LBIE::Mesher::ExtractionMethod>(method);
+  args["improvement_method_enum"] = static_cast<LBIE::Mesher::ImproveMethod>(improve_method);
+  args["meshtype_enum"] = LBIE::geoframe::TETRA2;
+  args["normaltype_enum"] = normals;
+  return args;
 }
 
 // ----------
@@ -917,16 +981,7 @@ volume sdf_stepper::take() {
 // 12/28/2025 -- Joe R. -- Adding normal_type parameter.
 geometry iso(const volume &vol, double isovalue, extraction_method method, int improve_iterations,
              normal_type normals, boost::optional<const volume &> propertyVol) {
-  Arguments args;
-  args["isovalue"] = float(isovalue);
-  args["improve_iterations"] = improve_iterations;
-  args["extraction_method_enum"] = static_cast<LBIE::Mesher::ExtractionMethod>(method);
-  args["normaltype_enum"] = normals;
-  if (propertyVol) {
-    args["propertyVol"] = propertyVol.get();
-  }
-
-  return cvc_mesher(vol, args);
+  return cvc_mesher(vol, iso_args(isovalue, method, improve_iterations, normals, propertyVol));
 }
 
 // ------------
@@ -942,18 +997,8 @@ geometry iso(const volume &vol, double isovalue, extraction_method method, int i
 geometry tetrahedralize(const volume &vol, double isovalue, extraction_method method,
                         improvement_method improve_method, normal_type normals,
                         int improve_iterations, boost::optional<const volume &> propertyVol) {
-  Arguments args;
-  args["isovalue"] = float(isovalue);
-  args["improve_iterations"] = improve_iterations;
-  args["extraction_method_enum"] = static_cast<LBIE::Mesher::ExtractionMethod>(method);
-  args["improvement_method_enum"] = static_cast<LBIE::Mesher::ImproveMethod>(improve_method);
-  args["meshtype_enum"] = LBIE::geoframe::TETRA;
-  args["normaltype_enum"] = normals;
-  if (propertyVol) {
-    args["propertyVol"] = propertyVol.get();
-  }
-
-  return cvc_mesher(vol, args);
+  return cvc_mesher(vol, volume_mesh_args(LBIE::geoframe::TETRA, isovalue, method, improve_method,
+                                          normals, improve_iterations, propertyVol));
 }
 
 // --------------
@@ -968,18 +1013,8 @@ geometry tetrahedralize(const volume &vol, double isovalue, extraction_method me
 geometry hexahedralize(const volume &vol, double isovalue, extraction_method method,
                        improvement_method improve_method, normal_type normals,
                        int improve_iterations, boost::optional<const volume &> propertyVol) {
-  Arguments args;
-  args["isovalue"] = float(isovalue);
-  args["improve_iterations"] = improve_iterations;
-  args["extraction_method_enum"] = static_cast<LBIE::Mesher::ExtractionMethod>(method);
-  args["improvement_method_enum"] = static_cast<LBIE::Mesher::ImproveMethod>(improve_method);
-  args["meshtype_enum"] = LBIE::geoframe::HEXA;
-  args["normaltype_enum"] = normals;
-  if (propertyVol) {
-    args["propertyVol"] = propertyVol.get();
-  }
-
-  return cvc_mesher(vol, args);
+  return cvc_mesher(vol, volume_mesh_args(LBIE::geoframe::HEXA, isovalue, method, improve_method,
+                                          normals, improve_iterations, propertyVol));
 }
 
 // ---------------
@@ -996,16 +1031,8 @@ geometry hexahedralize(const volume &vol, double isovalue, extraction_method met
 geometry tetrahedralize2(const volume &vol, double isovalue, extraction_method method,
                          improvement_method improve_method, normal_type normals,
                          int improve_iterations) {
-  Arguments args;
-  args["isovalue"] = float(isovalue);
-  args["isovalue_in"] = std::numeric_limits<float>::max();
-  args["improve_iterations"] = improve_iterations;
-  args["extraction_method_enum"] = static_cast<LBIE::Mesher::ExtractionMethod>(method);
-  args["improvement_method_enum"] = static_cast<LBIE::Mesher::ImproveMethod>(improve_method);
-  args["meshtype_enum"] = LBIE::geoframe::TETRA2;
-  args["normaltype_enum"] = normals;
-
-  return cvc_mesher(vol, args);
+  return cvc_mesher(vol, tetrahedralize2_args(float(isovalue), std::numeric_limits<float>::max(),
+                                              method, improve_method, normals, improve_iterations));
 }
 
 // The layer between the two isovalues, given in either order.
@@ -1015,16 +1042,117 @@ geometry tetrahedralize2(const volume &vol, double isovalue, extraction_method m
 geometry tetrahedralize2(const volume &vol, double isovalue_outer, double isovalue_inner,
                          extraction_method method, improvement_method improve_method,
                          normal_type normals, int improve_iterations) {
-  Arguments args;
-  args["isovalue"] = float(isovalue_outer);
-  args["isovalue_in"] = float(isovalue_inner); // Set the inner isovalue for interval meshing
-  args["improve_iterations"] = improve_iterations;
-  args["extraction_method_enum"] = static_cast<LBIE::Mesher::ExtractionMethod>(method);
-  args["improvement_method_enum"] = static_cast<LBIE::Mesher::ImproveMethod>(improve_method);
-  args["meshtype_enum"] = LBIE::geoframe::TETRA2;
-  args["normaltype_enum"] = normals;
+  return cvc_mesher(vol, tetrahedralize2_args(float(isovalue_outer), float(isovalue_inner), method,
+                                              improve_method, normals, improve_iterations));
+}
 
-  return cvc_mesher(vol, args);
+// --------------
+// mesher_stepper
+// --------------
+// Purpose:
+//   iso(), tetrahedralize(), hexahedralize() and tetrahedralize2() a slice at a time (see
+//   algorithm.h): their argument maps, meshed by mesh_stepper_for's LBIE::mesh_stepper.
+// ---- Change History ----
+// 10/29/2026 -- Joe R. -- Creation.
+struct mesher_stepper::impl {
+  std::unique_ptr<LBIE::mesh_stepper> s;
+  std::exception_ptr error;
+  bool ready = false;
+  geometry out;
+};
+
+mesher_stepper::mesher_stepper(std::unique_ptr<impl> i) : _impl(std::move(i)) {}
+mesher_stepper::mesher_stepper(mesher_stepper &&) noexcept = default;
+mesher_stepper &mesher_stepper::operator=(mesher_stepper &&) noexcept = default;
+mesher_stepper::~mesher_stepper() = default;
+
+mesher_stepper mesher_stepper::iso(const volume &vol, double isovalue, extraction_method method,
+                                   int improve_iterations, normal_type normals,
+                                   boost::optional<const volume &> propertyVol) {
+  auto i = std::make_unique<impl>();
+  i->s =
+      mesh_stepper_for(vol, iso_args(isovalue, method, improve_iterations, normals, propertyVol));
+  return mesher_stepper(std::move(i));
+}
+
+mesher_stepper mesher_stepper::tetrahedralize(const volume &vol, double isovalue,
+                                              extraction_method method,
+                                              improvement_method improve_method,
+                                              normal_type normals, int improve_iterations,
+                                              boost::optional<const volume &> propertyVol) {
+  auto i = std::make_unique<impl>();
+  i->s = mesh_stepper_for(vol,
+                          volume_mesh_args(LBIE::geoframe::TETRA, isovalue, method, improve_method,
+                                           normals, improve_iterations, propertyVol));
+  return mesher_stepper(std::move(i));
+}
+
+mesher_stepper mesher_stepper::hexahedralize(const volume &vol, double isovalue,
+                                             extraction_method method,
+                                             improvement_method improve_method, normal_type normals,
+                                             int improve_iterations,
+                                             boost::optional<const volume &> propertyVol) {
+  auto i = std::make_unique<impl>();
+  i->s =
+      mesh_stepper_for(vol, volume_mesh_args(LBIE::geoframe::HEXA, isovalue, method, improve_method,
+                                             normals, improve_iterations, propertyVol));
+  return mesher_stepper(std::move(i));
+}
+
+mesher_stepper mesher_stepper::tetrahedralize2(const volume &vol, double isovalue,
+                                               extraction_method method,
+                                               improvement_method improve_method,
+                                               normal_type normals, int improve_iterations) {
+  auto i = std::make_unique<impl>();
+  i->s = mesh_stepper_for(vol, tetrahedralize2_args(float(isovalue),
+                                                    std::numeric_limits<float>::max(), method,
+                                                    improve_method, normals, improve_iterations));
+  return mesher_stepper(std::move(i));
+}
+
+mesher_stepper mesher_stepper::tetrahedralize2(const volume &vol, double isovalue_outer,
+                                               double isovalue_inner, extraction_method method,
+                                               improvement_method improve_method,
+                                               normal_type normals, int improve_iterations) {
+  auto i = std::make_unique<impl>();
+  i->s = mesh_stepper_for(vol,
+                          tetrahedralize2_args(float(isovalue_outer), float(isovalue_inner), method,
+                                               improve_method, normals, improve_iterations));
+  return mesher_stepper(std::move(i));
+}
+
+bool mesher_stepper::step(std::size_t budget) {
+  impl &s = *_impl;
+  if (s.error)
+    std::rethrow_exception(s.error);
+  if (s.ready)
+    return true;
+  try {
+    if (s.s->step(budget)) {
+      s.out = s.s->take_geometry();
+      s.s.reset();
+      s.ready = true;
+    }
+  } catch (...) {
+    s.error = std::current_exception();
+    s.s.reset();
+    throw;
+  }
+  return s.ready;
+}
+
+bool mesher_stepper::done() const { return _impl->ready || _impl->error; }
+
+double mesher_stepper::progress() const { return done() ? 1.0 : _impl->s->progress(); }
+
+const char *mesher_stepper::phase() const { return done() ? "done" : _impl->s->phase(); }
+
+geometry mesher_stepper::take() {
+  if (_impl->error)
+    std::rethrow_exception(_impl->error);
+  if (!_impl->ready)
+    throw cvc_mesher_error("mesher_stepper: the geometry is not ready");
+  return _impl->out;
 }
 
 // ---------------

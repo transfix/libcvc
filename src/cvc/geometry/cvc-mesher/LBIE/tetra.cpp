@@ -14,31 +14,39 @@ namespace LBIE
 
 void Octree::tetrahedralize(geoframe& geofrm) {
 
-	int x, y, z, tx, ty, tz, valid_leaf, cell_size, level, i, j, k;
-	int vtx_num, intersect_id, my_vtx[4], con_id[4];
-	unsigned int vtx[4], my_vertex, my_vertex_1;
-	float val[8];
+	int i, j, k;
 
 	for (k = 0; k < octcell_num; k++) vtx_idx_arr[k] = -1;
 	for (k = 0; k < dim[0]*dim[1]*dim[2]; k++) grid_idx_arr[k] = -1;
 
 	for (i = 0; i < leaf_num; i++ ) {
+		leaf_begin(_st.leaf, i);
+		for (j = 0 ; j < 12 ; j++ )
+			tetrahedralize_edge(j, geofrm);
 
-		valid_leaf = cut_array[i] ;
-		level = get_level(valid_leaf) ;
-		cell_size = (dim[0]-1)/(1<<level);
-		octcell2xyz(valid_leaf, x, y, z, level);
-		getCellValues(valid_leaf, level, val);
+		// a boundary cell (val of four vertices of one face < isovalue) would get add_tetra_face(),
+		// and an interior cell add_tetra_cube_adaptive(); both are left out
+	}
+}
 
-		//if(z*cell_size < 62 || z*cell_size > 64)
-		//	continue;
+// tetrahedralize() on edge j of the leaf leaf_begin() took into _st.leaf: true if the edge has
+// work (the surface crosses it, or both its ends are inside a cell on the boundary).
+bool Octree::tetrahedralize_edge(int j, geoframe& geofrm) {
 
-		for (j = 0 ; j < 12 ; j++ ) {
+	const leaf_cell& l = _st.leaf;
+	const int x = l.x, y = l.y, z = l.z, valid_leaf = l.valid_leaf, cell_size = l.cell_size, level = l.level;
+	float val[8];
+	int tx, ty, tz;
+	int vtx_num, intersect_id, my_vtx[4], con_id[4];
+	unsigned int vtx[4], my_vertex, my_vertex_1;
+
+	for (int c = 0; c < 8; c++) val[c] = l.val[c];
+
 
 			//if(z*cell_size == 62 && j < 4) continue;
 			//if(z*cell_size == 64 && (j > 3 && j < 8)) continue;
 
-			if (is_eflag_on(x,y,z,level,j)) continue;
+			if (is_eflag_on(x,y,z,level,j)) return false;
 			intersect_id = is_intersect(val, j);
 
 			// intersection edge
@@ -62,6 +70,7 @@ void Octree::tetrahedralize(geoframe& geofrm) {
 					geofrm.Add_2_Tetra(vtx, my_vertex);
 					//geofrm.Extend_Tetra(vtx);
 				}
+				return true;
 			}	
 			// boundary cell edge whose two end points' values < isovalue 
 			//else if((intersect_id == 2 || intersect_id == -2) && (! is_skipcell(valid_leaf))) {
@@ -72,7 +81,7 @@ void Octree::tetrahedralize(geoframe& geofrm) {
 					if( (my_vtx[0] == my_vtx[1] || my_vtx[0] == -1 || my_vtx[1] == -1) && 
 						(my_vtx[1] == my_vtx[2] || my_vtx[1] == -1 || my_vtx[2] == -1) && 
 						(my_vtx[2] == my_vtx[3] || my_vtx[2] == -1 || my_vtx[3] == -1) && 
-						(my_vtx[3] == my_vtx[0] || my_vtx[3] == -1 || my_vtx[0] == -1) )	continue;
+						(my_vtx[3] == my_vtx[0] || my_vtx[3] == -1 || my_vtx[0] == -1) )	return true;
 
 					get_min_vertex(j, 1, x, y, z, tx, ty, tz);
 					my_vertex = grid_idx_arr[(tz*dim[0]*dim[0]+ty*dim[0]+tx)*cell_size];
@@ -107,22 +116,10 @@ void Octree::tetrahedralize(geoframe& geofrm) {
 					if(my_vtx[3] != -1 && my_vtx[0] != -1 && my_vtx[3] != my_vtx[0])
 						geofrm.AddTetra(my_vtx[3], my_vtx[0], my_vertex, my_vertex_1);
 				}
+				return true;
 			}
 			else
-				continue;
-		}
-
-		// boundary cell -- val(four vertice of one face) < isovalue
-		if(minmax[valid_leaf].max >= iso_val && minmax[valid_leaf].min <= iso_val) {
-			//add_tetra_face(valid_leaf, level, geofrm);
-		}
-
-		// interior cell
-		if(minmax[valid_leaf].max < iso_val) {
-			//add_tetra_cube_adaptive(valid_leaf, level, geofrm);
-		}
-
-	}
+				return false;
 }
 
 void Octree::tetrahedralize_interval(geoframe& geofrm) {

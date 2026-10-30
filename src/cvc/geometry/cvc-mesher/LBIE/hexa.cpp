@@ -22,45 +22,104 @@ void Octree::hexahedralize(geoframe& geofrm, float err_tol) {
 
 void Octree::extract_hexa(geoframe& geofrm, float err_tol) {
 
-	int x, y, z, valid_leaf, cell_size, level;
-	int oc_id[8], edge_id[6], i, j, k, flag_method;
-	unsigned int vtx[8];
-	float val[8];
+	hexa_extract_state hx;
+	extract_hexa_begin(hx, geofrm, err_tol);
+	std::size_t budget = std::size_t(-1);
+	while(!extract_hexa_step(hx, budget)) budget = std::size_t(-1);
+}
 
-	for(i = 0; i < octcell_num; i++) vtx_idx_arr[i] = -1;
+void Octree::extract_hexa_begin(hexa_extract_state& hx, geoframe& geofrm, float err_tol) {
 
-	flag_method = 2;	// 0 - uniform;	1 - Method 1;	2 - Method 2.
-	if(flag_method == 2) assign_refine_sign_hexa(geofrm, err_tol);
+	hx = hexa_extract_state();
+	hx.g = &geofrm;
+	hx.err_tol = err_tol;
+}
 
-	for(i = 0; i < leaf_num; i++ ) {
+// extract_hexa() a slice at a time: vtx_idx_arr cleared, then (flag_method 2) the
+// assign_refine_sign_hexa() it was: vtx_idx_arr_refine cleared, a first pass over the leaves'
+// vertices, then passes until one marks nothing more, each followed by vflag_clear(); then the
+// hexahedra. The arrays are cleared 64 entries a unit, and the leaves' vertices taken a unit each,
+// or 16 for one that does something (hexa_vertex()); true once done.
+bool Octree::extract_hexa_step(hexa_extract_state& hx, std::size_t& budget) {
 
-		valid_leaf = cut_array[i] ;
-		level = get_level(valid_leaf) ;
-		cell_size = (dim[0]-1)/(1<<level);
-		octcell2xyz(valid_leaf, x, y, z, level);
-		getCellValues(valid_leaf, level, val);
-
-		//interior vertex at a uniform starting level
-		for (j = 0; j < 8; j++ ) {
-			if (is_vflag_on(x, y, z, level, j)) continue;
-			if( minmax[valid_leaf].min <= iso_val && (val[j] < iso_val) ) {
-				if(is_min_vertex(valid_leaf, j, vtx, geofrm)) {
-					vflag_on(x, y, z, level, j);
-					find_oc_id_hexa(x, y, z, level, j, oc_id);
-					for(k = 0; k < 6; k++) edge_id[k] = 0;
-					find_edge_id_hexa(x, y, z, cell_size, j, edge_id);
-
-					if(flag_method == 0) add_hexa(geofrm, vtx);					// uniform hexa
-					else if(flag_method == 1)	
-						hexa_adaptive_1(geofrm, oc_id, edge_id, err_tol, vtx);	// method 1
-					else 
-						hexa_adaptive_2(geofrm, oc_id, edge_id, err_tol, vtx);	// method 2
+	while (budget > 0)
+		switch (hx.stage) {
+		case HX_VTX:
+			if (fill_some(vtx_idx_arr, hx.pos, -1, budget)) {
+				hx.pos = 0;
+				hx.stage = HX_REFINE_CLEAR;
+			}
+			break;
+		case HX_REFINE_CLEAR:
+			if (fill_some(vtx_idx_arr_refine, hx.pos, -1, budget)) {
+				hx.pos = 0;
+				hx.j = 0;
+				hx.stage = HX_FIRST;
+			}
+			break;
+		case HX_FIRST:
+		case HX_PASS:
+		case HX_LEAVES:
+			while (budget > 0 && hx.pos < std::size_t(leaf_num)) {
+				if (hx.j == 0)
+					leaf_begin(hx.leaf, int(hx.pos));
+				const bool vertex = hexa_vertex(hx, hx.j, hx.stage == HX_FIRST ? 0 : hx.stage == HX_PASS ? 1 : 2);
+				spend(budget, vertex ? 16 : 1);
+				if (++hx.j == 8) {
+					hx.j = 0;
+					hx.pos++;
 				}
 			}
+			if (hx.pos >= std::size_t(leaf_num)) {
+				hx.pos = 0;
+				hx.stage = hx.stage == HX_FIRST ? HX_FIRST_VFLAGS : hx.stage == HX_PASS ? HX_PASS_VFLAGS : HX_DONE;
+			}
+			break;
+		case HX_FIRST_VFLAGS:
+		case HX_PASS_VFLAGS:
+			// vflag_clear()
+			if (fill_some(vbit, hx.pos, char(0), budget)) {
+				if (hx.stage == HX_FIRST_VFLAGS)
+					hx.refine_sign = 1;
+				else
+					hx.passes++;
+				hx.pos = 0;
+				hx.stage = HX_PASS_START;
+			}
+			break;
+		case HX_PASS_START:
+			if (hx.refine_sign == 1) {
+				hx.refine_sign = 0;
+				hx.stage = HX_PASS;
+			}
+			else
+				hx.stage = HX_LEAVES;
+			hx.pos = 0;
+			hx.j = 0;
+			break;
+		default:
+			return true;
 		}
+	return hx.stage == HX_DONE;
+}
 
+double Octree::hexa_progress(const hexa_extract_state& hx) const {
+
+	const double at = leaf_num > 0 ? std::min(1.0, (8.0*hx.pos + hx.j)/(8.0*leaf_num)) : 1.0;
+	// the refining passes take 0.25..0.5: the first a half of that, the next a quarter, ...
+	double pass = 0.25;
+	for (std::size_t i = 0; i < hx.passes && i < 60; i++) pass *= 0.5;
+	switch (hx.stage) {
+	case HX_VTX: return 0.0;
+	case HX_REFINE_CLEAR: return 0.02;
+	case HX_FIRST: return 0.05 + 0.2*at;
+	case HX_FIRST_VFLAGS: return 0.25;
+	case HX_PASS_START: return 0.5 - pass;
+	case HX_PASS: return 0.5 - pass + 0.5*pass*at;
+	case HX_PASS_VFLAGS: return 0.5 - 0.5*pass;
+	case HX_LEAVES: return 0.5 + 0.5*at;
+	default: return 1.0;
 	}
-
 }
 
 namespace {
@@ -119,157 +178,390 @@ double hexa_min_scaled_jacobian(const float (&p)[8][3])
 // keeps to the surface.
 void Octree::untangle_snapped(geoframe& geofrm, float err_tol)
 {
+	untangle_begin(geofrm, err_tol);
+	std::size_t budget = std::size_t(-1);
+	while (!untangle_step(geofrm, budget)) budget = std::size_t(-1);
+}
+
+void Octree::untangle_begin(geoframe& geofrm, float err_tol)
+{
+	untangle_state& u = _st.un;
+	u.stage = UN_CORNERS;
+	u.nh = int(geofrm.quads.size())/6;
+	u.nv = geofrm.numverts;
+	u.h = u.round = u.pass = 0;
+	u.pos = 0;
+	u.corner.clear();
+	u.moved_back.clear();
+	u.pending.clear();
+	u.still.clear();
+	u.first.clear();
+	u.around.clear();
+	u.next.clear();
+	u.floor.clear();
+	u.along.clear();
+	u.snapped.clear();
+	u.stale.clear();
+	u.hx = hexa_extract_state();
+	u.hx.err_tol = err_tol;
+}
+
+// The quality of hexahedron h (hexa_min_scaled_jacobian()).
+double Octree::hexa_quality(const geoframe& geofrm, int h)
+{
+	const untangle_state& u = _st.un;
+	float p[8][3];
+	for (int k = 0; k < 8; k++)
+		for (int i = 0; i < 3; i++) p[k][i] = geofrm.verts[u.corner[8*size_t(h) + k]][i];
+	return hexa_min_scaled_jacobian(p);
+}
+
+// Whether every hexahedron around v is at least min_quality, or at least as good as floor
+// (each one's quality before v moved) where that is lower.
+bool Octree::hexa_fits(const geoframe& geofrm, unsigned int v)
+{
+	const untangle_state& u = _st.un;
+	for (int i = u.first[v]; i < u.first[v + 1]; i++)
+		if (hexa_quality(geofrm, u.around[i]) < u.floor[i - u.first[v]]) return false;
+	return true;
+}
+
+// Vertex v at t from its unsnapped place (0) to its snapped one (1).
+void Octree::hexa_place(geoframe& geofrm, unsigned int v, double t)
+{
+	untangle_state& u = _st.un;
+	const geoframe::float_3 &off = u.unsnapped.verts[v], &on = u.snapped[v];
+	for (int i = 0; i < 3; i++) geofrm.verts[v][i] = t == 1.0 ? on[i] : float(off[i] + t*(on[i] - off[i]));
+	u.along[v] = t;
+}
+
+// The vertices of the hexahedra around v are stale: they may try again.
+void Octree::hexa_touch(unsigned int v)
+{
+	untangle_state& u = _st.un;
+	for (int i = u.first[v]; i < u.first[v + 1]; i++)
+		for (int k = 0; k < 8; k++) u.stale[u.corner[8*size_t(u.around[i]) + k]] = 1;
+}
+
+// get_vtx_new snaps a hexahedral vertex onto the surface by walking it as far as a cell along its
+// normal, and the templates place their vertices between snapped corners. That can take a vertex
+// past other corners of its hexahedra and invert them: 12 of a sphere's 189 hexahedra, 11% of the
+// vh4 CT's. Snapping moves vertices and nothing else, so extracting again without it, with every
+// vertex at its cell's centre (min_vtx_hexa), gives the same vertices and hexahedra with none
+// inverted. The vertices of inverted or flat hexahedra go back toward that reference place until
+// none is left; then each goes toward its snapped place again, as far as it can without taking a
+// hexahedron around it below min_quality, or below where that one already was. Elsewhere the mesh
+// keeps to the surface.
+// A slice at a time: the hexahedra's corners and the first bad one, a unit a hexahedron; the mesh
+// extracted again unsnapped (extract_hexa_step()); the hexahedra around each vertex (a unit a
+// hexahedron, or 64 vertices); the rounds that move the corners of bad hexahedra back, a unit a
+// hexahedron; the passes that move vertices short of the surface out again, a unit a vertex.
+// True once done.
+bool Octree::untangle_step(geoframe& geofrm, std::size_t& budget)
+{
 	const double min_quality = 0.1;
-	const int nh = int(geofrm.quads.size())/6;
-	const int nv = geofrm.numverts;
-	if (nh == 0) return;
+	untangle_state& u = _st.un;
+	const int nh = u.nh;
+	const int nv = u.nv;
+	std::vector<unsigned int>& corner = u.corner;
+	std::vector<double>& along = u.along;
+	const std::vector<geoframe::float_3>& snapped = u.snapped;
+	const geoframe& unsnapped = u.unsnapped;
+	int h;
 
-	// add_hexa stored corners 0 3 7 4 as hexahedron h's first quad and 2 1 5 6 as its second.
-	std::vector<unsigned int> corner(8*size_t(nh));
-	for (int h = 0; h < nh; h++) {
-		const geoframe::uint_4 &a = geofrm.quads[6*h], &b = geofrm.quads[6*h + 1];
-		unsigned int *c = &corner[8*size_t(h)];
-		c[0] = a[0];	c[3] = a[1];	c[7] = a[2];	c[4] = a[3];
-		c[2] = b[0];	c[1] = b[1];	c[5] = b[2];	c[6] = b[3];
-	}
-	auto quality = [&](int h) {
-		float p[8][3];
-		for (int k = 0; k < 8; k++)
-			for (int i = 0; i < 3; i++) p[k][i] = geofrm.verts[corner[8*size_t(h) + k]][i];
-		return hexa_min_scaled_jacobian(p);
-	};
-	int h = 0;
-	while (h < nh && quality(h) > 0.0) h++;
-	if (h == nh) return;
-
-	geoframe unsnapped;
-	vflag_clear();
-	snap_to_surface = false;
-	extract_hexa(unsnapped, err_tol);
-	snap_to_surface = true;
-	if (unsnapped.numverts != nv || unsnapped.quads != geofrm.quads) return;
-
-	std::vector<int> first(nv + 1, 0), around(8*size_t(nh));
-	for (size_t i = 0; i < corner.size(); i++) first[corner[i] + 1]++;
-	for (int v = 0; v < nv; v++) first[v + 1] += first[v];
-	{
-		std::vector<int> next(first.begin(), first.end() - 1);
-		for (size_t i = 0; i < corner.size(); i++) around[next[corner[i]]++] = int(i/8);
-	}
-	// Whether every hexahedron around v is at least min_quality, or at least as good as floor
-	// (each one's quality before v moved) where that is lower.
-	std::vector<double> floor;
-	auto fits = [&](unsigned int v) {
-		for (int i = first[v]; i < first[v + 1]; i++)
-			if (quality(around[i]) < floor[i - first[v]]) return false;
-		return true;
-	};
-
-	// along[v]: how far vertex v sits from its unsnapped place (0) to its snapped one (1).
-	const std::vector<geoframe::float_3> snapped = geofrm.verts;
-	std::vector<double> along(nv, 1.0);
-	std::vector<unsigned int> moved_back;
-	auto place = [&](unsigned int v, double t) {
-		const geoframe::float_3 &off = unsnapped.verts[v], &on = snapped[v];
-		for (int i = 0; i < 3; i++) geofrm.verts[v][i] = t == 1.0 ? on[i] : float(off[i] + t*(on[i] - off[i]));
-		along[v] = t;
-	};
-
-	// The corners of an inverted or flat hexahedron go back together, only as far as it takes to
-	// mend it; whatever that inverts in turn goes back the same way. (Sending every corner straight
-	// to the reference spread to a third of the vh4 CT's vertices, and took a sphere's boundary 40
-	// times as far off the surface.) After 64 rounds the rest go all the way.
-	bool again = true;
-	for (int round = 0; round < 64 && again; round++) {
-		again = false;
-		for (h = 0; h < nh; h++) {
-			if (quality(h) > 0.0) continue;
-			unsigned int m[8];
-			double was[8];
-			int nm = 0;
-			for (int k = 0; k < 8; k++) {
-				const unsigned int v = corner[8*size_t(h) + k];
-				if (along[v] == 0.0 || snapped[v] == unsnapped.verts[v]) continue;
-				if (along[v] == 1.0) moved_back.push_back(v);
-				m[nm] = v;
-				was[nm++] = along[v];
+	while (budget > 0)
+		switch (u.stage) {
+		case UN_CORNERS:
+			if (nh == 0) {
+				u.stage = UN_DONE;
+				break;
 			}
-			if (nm == 0) continue;
-			double lo = 0.0, hi = 1.0;
-			for (int it = 0; it < 6; it++) {
-				const double mid = 0.5*(lo + hi);
-				for (int i = 0; i < nm; i++) place(m[i], was[i]*mid);
-				if (quality(h) > 0.0) lo = mid;
-				else hi = mid;
+			// add_hexa stored corners 0 3 7 4 as hexahedron h's first quad and 2 1 5 6 as its second.
+			while (budget > 0 && u.h < nh) {
+				h = u.h++;
+				const geoframe::uint_4 &a = geofrm.quads[6*h], &b = geofrm.quads[6*h + 1];
+				corner.resize(8*size_t(h) + 8);
+				unsigned int *c = &corner[8*size_t(h)];
+				c[0] = a[0];	c[3] = a[1];	c[7] = a[2];	c[4] = a[3];
+				c[2] = b[0];	c[1] = b[1];	c[5] = b[2];	c[6] = b[3];
+				spend(budget, 1);
 			}
-			for (int i = 0; i < nm; i++) place(m[i], was[i]*lo);
-			again = true;
+			if (u.h >= nh) {
+				u.h = 0;
+				u.stage = UN_SCAN;
+			}
+			break;
+		case UN_SCAN:
+			while (budget > 0 && u.h < nh && hexa_quality(geofrm, u.h) > 0.0) {
+				u.h++;
+				spend(budget, 1);
+			}
+			if (u.h == nh)
+				u.stage = UN_DONE;
+			else if (budget > 0) {
+				// hexahedron u.h is inverted or flat
+				u.unsnapped = geoframe();
+				u.pos = 0;
+				u.stage = UN_CLEAR;
+			}
+			break;
+		case UN_CLEAR:
+			// vflag_clear()
+			if (fill_some(vbit, u.pos, char(0), budget)) {
+				snap_to_surface = false;
+				extract_hexa_begin(u.hx, u.unsnapped, u.hx.err_tol);
+				u.stage = UN_UNSNAPPED;
+			}
+			break;
+		case UN_UNSNAPPED:
+			if (extract_hexa_step(u.hx, budget)) {
+				snap_to_surface = true;
+				spend(budget, std::size_t(nh)/16 + 1);
+				if (unsnapped.numverts != nv || unsnapped.quads != geofrm.quads) {
+					u.stage = UN_DONE;
+					break;
+				}
+				u.stage = UN_FIRST;
+			}
+			break;
+		case UN_FIRST:
+			// first(nv + 1, 0), around(8*nh)
+			if (grow_some(u.first, std::size_t(nv) + 1, 0, budget) && grow_some(u.around, 8*std::size_t(nh), 0, budget)) {
+				u.h = 0;
+				u.stage = UN_COUNT;
+			}
+			break;
+		case UN_COUNT:
+			// for (size_t i = 0; i < corner.size(); i++) first[corner[i] + 1]++;
+			while (budget > 0 && u.h < nh) {
+				for (int k = 0; k < 8; k++) u.first[corner[8*size_t(u.h) + k] + 1]++;
+				u.h++;
+				spend(budget, 1);
+			}
+			if (u.h >= nh) {
+				u.pos = 0;
+				u.stage = UN_PREFIX;
+			}
+			break;
+		case UN_PREFIX:
+			// for (int v = 0; v < nv; v++) first[v + 1] += first[v];
+			while (budget > 0 && u.pos < std::size_t(nv)) {
+				const std::size_t end = std::min(std::size_t(nv), u.pos + 64);
+				for (std::size_t v = u.pos; v < end; v++) u.first[v + 1] += u.first[v];
+				u.pos = end;
+				spend(budget, 1);
+			}
+			if (u.pos >= std::size_t(nv)) {
+				u.next.clear();
+				u.stage = UN_NEXT;
+			}
+			break;
+		case UN_NEXT:
+			// std::vector<int> next(first.begin(), first.end() - 1);
+			while (budget > 0 && u.next.size() < std::size_t(nv)) {
+				const std::size_t from = u.next.size(), end = std::min(std::size_t(nv), from + 64);
+				u.next.insert(u.next.end(), u.first.begin() + from, u.first.begin() + end);
+				spend(budget, 1);
+			}
+			if (u.next.size() >= std::size_t(nv)) {
+				u.h = 0;
+				u.stage = UN_AROUND;
+			}
+			break;
+		case UN_AROUND:
+			// for (size_t i = 0; i < corner.size(); i++) around[next[corner[i]]++] = int(i/8);
+			while (budget > 0 && u.h < nh) {
+				for (int k = 0; k < 8; k++) {
+					const size_t i = 8*size_t(u.h) + k;
+					u.around[u.next[corner[i]]++] = int(i/8);
+				}
+				u.h++;
+				spend(budget, 1);
+			}
+			if (u.h >= nh) {
+				u.next = std::vector<int>();
+				u.stage = UN_SNAPPED;
+			}
+			break;
+		case UN_SNAPPED:
+			// along[v]: how far vertex v sits from its unsnapped place (0) to its snapped one (1).
+			// snapped = geofrm.verts, along(nv, 1.0)
+			while (budget > 0 && u.snapped.size() < geofrm.verts.size()) {
+				const std::size_t from = u.snapped.size(), end = std::min(geofrm.verts.size(), from + 64);
+				u.snapped.insert(u.snapped.end(), geofrm.verts.begin() + from, geofrm.verts.begin() + end);
+				spend(budget, 1);
+			}
+			if (u.snapped.size() >= geofrm.verts.size() && grow_some(u.along, std::size_t(nv), 1.0, budget)) {
+				u.moved_back.clear();
+				// The corners of an inverted or flat hexahedron go back together, only as far as it
+				// takes to mend it; whatever that inverts in turn goes back the same way. (Sending
+				// every corner straight to the reference spread to a third of the vh4 CT's vertices,
+				// and took a sphere's boundary 40 times as far off the surface.) After 64 rounds the
+				// rest go all the way.
+				u.again = true;
+				u.round = 0;
+				u.h = -1;
+				u.stage = UN_ROUNDS;
+			}
+			break;
+		case UN_ROUNDS:
+			if (u.h < 0) {
+				if (!(u.round < 64 && u.again)) {
+					u.again = true;
+					u.h = -1;
+					u.stage = UN_FIX;
+					break;
+				}
+				u.again = false;
+				u.h = 0;
+			}
+			while (budget > 0 && u.h < nh) {
+				h = u.h++;
+				spend(budget, 1);
+				if (hexa_quality(geofrm, h) > 0.0) continue;
+				unsigned int m[8];
+				double was[8];
+				int nm = 0;
+				for (int k = 0; k < 8; k++) {
+					const unsigned int v = corner[8*size_t(h) + k];
+					if (along[v] == 0.0 || snapped[v] == unsnapped.verts[v]) continue;
+					if (along[v] == 1.0) u.moved_back.push_back(v);
+					m[nm] = v;
+					was[nm++] = along[v];
+				}
+				if (nm == 0) continue;
+				double lo = 0.0, hi = 1.0;
+				for (int it = 0; it < 6; it++) {
+					const double mid = 0.5*(lo + hi);
+					for (int i = 0; i < nm; i++) hexa_place(geofrm, m[i], was[i]*mid);
+					if (hexa_quality(geofrm, h) > 0.0) lo = mid;
+					else hi = mid;
+				}
+				for (int i = 0; i < nm; i++) hexa_place(geofrm, m[i], was[i]*lo);
+				u.again = true;
+				spend(budget, 8);
+			}
+			if (u.h >= nh) {
+				u.round++;
+				u.h = -1;
+			}
+			break;
+		case UN_FIX:
+			if (u.h < 0) {
+				if (!u.again) {
+					u.stage = UN_STALE;
+					break;
+				}
+				u.again = false;
+				u.h = 0;
+			}
+			while (budget > 0 && u.h < nh) {
+				h = u.h++;
+				spend(budget, 1);
+				if (hexa_quality(geofrm, h) > 0.0) continue;
+				for (int k = 0; k < 8; k++) {
+					const unsigned int v = corner[8*size_t(h) + k];
+					if (along[v] == 0.0 || snapped[v] == unsnapped.verts[v]) continue;
+					if (along[v] == 1.0) u.moved_back.push_back(v);
+					hexa_place(geofrm, v, 0.0);
+					u.again = true;
+				}
+			}
+			if (u.h >= nh)
+				u.h = -1;
+			break;
+		case UN_STALE:
+			// A vertex short of the surface tries again only once a vertex of a hexahedron around it
+			// has moved since its last try (stale[v]): pending = moved_back, stale(nv, 1).
+			if (grow_some(u.stale, std::size_t(nv), char(1), budget)) {
+				u.pending.swap(u.moved_back);
+				u.still.clear();
+				u.pass = 0;
+				u.pos = std::size_t(-1);
+				u.stage = UN_PASS;
+			}
+			break;
+		case UN_PASS:
+			if (u.pos == std::size_t(-1)) {
+				if (!(u.pass < 12 && !u.pending.empty())) {
+					u.stage = UN_DONE;
+					break;
+				}
+				u.advanced = false;
+				u.still.clear();
+				u.pos = 0;
+			}
+			while (budget > 0 && u.pos < u.pending.size()) {
+				const unsigned int v = u.pending[u.pos++];
+				spend(budget, 1);
+				if (!u.stale[v]) {
+					u.still.push_back(v);
+					continue;
+				}
+				u.stale[v] = 0;
+				spend(budget, 8);
+				const double from = along[v];
+				const geoframe::float_3 here = geofrm.verts[v];
+				u.floor.clear();
+				for (int i = u.first[v]; i < u.first[v + 1]; i++)
+					u.floor.push_back(std::min(min_quality, hexa_quality(geofrm, u.around[i])));
+				hexa_place(geofrm, v, 1.0);
+				if (hexa_fits(geofrm, v)) {
+					hexa_touch(v);
+					u.advanced = true;
+					continue;
+				}
+				double lo = from, hi = 1.0;
+				for (int it = 0; it < 6; it++) {
+					const double mid = 0.5*(lo + hi);
+					hexa_place(geofrm, v, mid);
+					if (hexa_fits(geofrm, v)) lo = mid;
+					else hi = mid;
+				}
+				if (lo > from) {
+					hexa_place(geofrm, v, lo);
+					hexa_touch(v);
+					u.advanced = true;
+				} else {
+					// Exactly where it was: rebuilt from along[v] it can land a rounding error away,
+					// and next to a nearly coincident neighbour that was enough to flatten a hexahedron.
+					geofrm.verts[v] = here;
+					along[v] = from;
+				}
+				u.still.push_back(v);
+			}
+			if (u.pos >= u.pending.size()) {
+				u.pending.swap(u.still);
+				if (!u.advanced) {
+					u.stage = UN_DONE;
+					break;
+				}
+				u.pass++;
+				u.pos = std::size_t(-1);
+			}
+			break;
+		default:
+			return true;
 		}
-	}
-	for (again = true; again; ) {
-		again = false;
-		for (h = 0; h < nh; h++) {
-			if (quality(h) > 0.0) continue;
-			for (int k = 0; k < 8; k++) {
-				const unsigned int v = corner[8*size_t(h) + k];
-				if (along[v] == 0.0 || snapped[v] == unsnapped.verts[v]) continue;
-				if (along[v] == 1.0) moved_back.push_back(v);
-				place(v, 0.0);
-				again = true;
-			}
-		}
-	}
+	return u.stage == UN_DONE;
+}
 
-	// A vertex short of the surface tries again only once a vertex of a hexahedron around it has
-	// moved since its last try (stale[v]).
-	std::vector<unsigned int> pending(moved_back), still;
-	std::vector<char> stale(nv, 1);
-	auto touch = [&](unsigned int v) {
-		for (int i = first[v]; i < first[v + 1]; i++)
-			for (int k = 0; k < 8; k++) stale[corner[8*size_t(around[i]) + k]] = 1;
-	};
-	for (int pass = 0; pass < 12 && !pending.empty(); pass++) {
-		bool advanced = false;
-		still.clear();
-		for (size_t m = 0; m < pending.size(); m++) {
-			const unsigned int v = pending[m];
-			if (!stale[v]) {
-				still.push_back(v);
-				continue;
-			}
-			stale[v] = 0;
-			const double from = along[v];
-			const geoframe::float_3 here = geofrm.verts[v];
-			floor.clear();
-			for (int i = first[v]; i < first[v + 1]; i++)
-				floor.push_back(std::min(min_quality, quality(around[i])));
-			place(v, 1.0);
-			if (fits(v)) {
-				touch(v);
-				advanced = true;
-				continue;
-			}
-			double lo = from, hi = 1.0;
-			for (int it = 0; it < 6; it++) {
-				const double mid = 0.5*(lo + hi);
-				place(v, mid);
-				if (fits(v)) lo = mid;
-				else hi = mid;
-			}
-			if (lo > from) {
-				place(v, lo);
-				touch(v);
-				advanced = true;
-			} else {
-				// Exactly where it was: rebuilt from along[v] it can land a rounding error away,
-				// and next to a nearly coincident neighbour that was enough to flatten a hexahedron.
-				geofrm.verts[v] = here;
-				along[v] = from;
-			}
-			still.push_back(v);
-		}
-		pending.swap(still);
-		if (!advanced) break;
+double Octree::untangle_progress() const
+{
+	const untangle_state& u = _st.un;
+	const double nh = u.nh > 0 ? u.nh : 1;
+	switch (u.stage) {
+	case UN_CORNERS: return 0.05*std::min(1.0, u.h/nh);
+	case UN_SCAN: return 0.05 + 0.05*std::min(1.0, u.h/nh);
+	case UN_CLEAR: return 0.1;
+	case UN_UNSNAPPED: return 0.1 + 0.5*hexa_progress(u.hx);
+	case UN_FIRST: case UN_COUNT: case UN_PREFIX: case UN_NEXT: case UN_AROUND: case UN_SNAPPED:
+		return 0.6 + 0.01*(u.stage - UN_FIRST);
+	case UN_ROUNDS: return 0.66 + 0.14*std::min(1.0, u.round/64.0);
+	case UN_FIX: return 0.8;
+	case UN_STALE: return 0.85;
+	case UN_PASS: return 0.85 + 0.15*std::min(1.0, u.pass/12.0);
+	default: return 1.0;
 	}
 }
 
@@ -1317,26 +1609,26 @@ void Octree::find_edge_id_hexa(int x, int y, int z, int cell_size, int j, int* e
 	}
 }
 
-void Octree::assign_refine_sign_hexa(geoframe& geofrm, float err_tol) {
+// extract_hexa() on vertex j of the leaf leaf_begin() took into hx.leaf, when the vertex is one
+// (inside the surface, and the first of the leaf's cells to come to it): pass 0 and 1 are
+// assign_refine_sign_hexa()'s first pass, which marks for refining the cells around it whose
+// error is over err_tol, and its later passes, which mark more until the marked cells of each
+// hexahedron make one of the templates (setting hx.refine_sign when they mark one); pass 2 makes
+// its hexahedra. True if it is such a vertex.
+bool Octree::hexa_vertex(hexa_extract_state& hx, int j, int pass) {
 
-	int x, y, z, valid_leaf, cell_size, level, my_bool_2, my_bool_4, num_id_face;
-	int oc_id[8], edge_id[6], i, j, k, m, num_id, refine_sign, vv[4];
+	const leaf_cell& l = hx.leaf;
+	const int x = l.x, y = l.y, z = l.z, valid_leaf = l.valid_leaf, cell_size = l.cell_size, level = l.level;
+	const float* val = l.val;
+	geoframe& geofrm = *hx.g;
+	const float err_tol = hx.err_tol;
+	int& refine_sign = hx.refine_sign;
+	int oc_id[8], edge_id[6], k, m, num_id, vv[4], my_bool_2, my_bool_4, num_id_face;
 	unsigned int vtx[8];
-	float val[8];
-
-	for(i = 0; i < octcell_num; i++) vtx_idx_arr_refine[i] = -1;
-
-	for(i = 0; i < leaf_num; i++) {
-
-		valid_leaf = cut_array[i] ;
-		level = get_level(valid_leaf) ;
-		cell_size = (dim[0]-1)/(1<<level);
-		octcell2xyz(valid_leaf, x, y, z, level);
-		getCellValues(valid_leaf, level, val);
+	const int flag_method = 2;	// 0 - uniform;	1 - Method 1;	2 - Method 2.
 
 		//interior vertex at a uniform starting level
-		for (j = 0; j < 8; j++ ) {
-			if (is_vflag_on(x, y, z, level, j)) continue;
+			if (is_vflag_on(x, y, z, level, j)) return false;
 			if( minmax[valid_leaf].min <= iso_val && (val[j] < iso_val) ) {
 				if(is_min_vertex(valid_leaf, j, vtx, geofrm)) {
 					vflag_on(x, y, z, level, j);
@@ -1344,6 +1636,16 @@ void Octree::assign_refine_sign_hexa(geoframe& geofrm, float err_tol) {
 					for(k = 0; k < 6; k++) edge_id[k] = 0;
 					find_edge_id_hexa(x, y, z, cell_size, j, edge_id);
 
+					if(pass == 2) {
+						if(flag_method == 0) add_hexa(geofrm, vtx);					// uniform hexa
+						else if(flag_method == 1)
+							hexa_adaptive_1(geofrm, oc_id, edge_id, err_tol, vtx);	// method 1
+						else
+							hexa_adaptive_2(geofrm, oc_id, edge_id, err_tol, vtx);	// method 2
+						return true;
+					}
+
+					if(pass == 0) {
 					num_id = 0;
 					for(k = 0; k < 8; k++) {
 						if(get_err_grad(oc_id[k]) > err_tol) {
@@ -1358,36 +1660,8 @@ void Octree::assign_refine_sign_hexa(geoframe& geofrm, float err_tol) {
 							if(get_err_grad(oc_id[k]) > err_tol) vtx_idx_arr_refine[oc_id[k]] = 1;
 						}
 					}
-				}
-			}
-		}	// end j
-
-	}		// end i
-
-	vflag_clear();
-
-	refine_sign = 1;
-
-	while(refine_sign == 1) {
-
-		refine_sign = 0;
-
-		for (i = 0; i < leaf_num; i++ ) {
-			valid_leaf = cut_array[i] ;
-			level = get_level(valid_leaf) ;
-			cell_size = (dim[0]-1)/(1<<level);
-			octcell2xyz(valid_leaf, x, y, z, level);
-			getCellValues(valid_leaf, level, val);
-
-			//interior vertex at a uniform starting level
-			for (j = 0; j < 8; j++ ) {
-				if (is_vflag_on(x, y, z, level, j)) continue;
-				if( minmax[valid_leaf].min <= iso_val && (val[j] < iso_val) ) {
-					if(is_min_vertex(valid_leaf, j, vtx, geofrm)) {
-						vflag_on(x, y, z, level, j);
-						find_oc_id_hexa(x, y, z, level, j, oc_id);
-						for(k = 0; k < 6; k++) edge_id[k] = 0;
-						find_edge_id_hexa(x, y, z, cell_size, j, edge_id);
+						return true;
+					}
 
 						num_id = 0;
 						for(k = 0; k < 8; k++) {if(vtx_idx_arr_refine[oc_id[k]] == 1) num_id++;}
@@ -1418,7 +1692,7 @@ void Octree::assign_refine_sign_hexa(geoframe& geofrm, float err_tol) {
 									(vtx_idx_arr_refine[oc_id[2]] == 1 && vtx_idx_arr_refine[oc_id[3]] == 1 &&
 									 vtx_idx_arr_refine[oc_id[6]] == 1 && vtx_idx_arr_refine[oc_id[7]] == 1);
 
-						if(num_id<2 || (num_id==2 && my_bool_2) || (num_id==4 && my_bool_4) || num_id==8) continue;
+						if(num_id<2 || (num_id==2 && my_bool_2) || (num_id==4 && my_bool_4) || num_id==8) return true;
 						else if(num_id == 2) {
 							for(k = 0; k < 6; k++) {
 								if(k == 0) {vv[0] = 0;	vv[1] = 1;	vv[2] = 2;	vv[3] = 3;}	// up
@@ -1480,17 +1754,10 @@ void Octree::assign_refine_sign_hexa(geoframe& geofrm, float err_tol) {
 							}
 
 						}	// end if(num_id)
-					}
+					return true;
 				}
-
-			}	// end j
-
-		}		// end i
-
-		vflag_clear();
-
-	}			// end while
-
+			}
+	return false;
 }
 
 void Octree::find_oc_id(int x, int y, int z, int level, int j, int intersect_id, int* oc_id) {

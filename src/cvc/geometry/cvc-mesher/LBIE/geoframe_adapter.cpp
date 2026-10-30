@@ -16,6 +16,7 @@ Week 5 Plan (True Zero-Copy):
 ******************************************************************************/
 
 #include "geoframe_adapter.h"
+#include <algorithm>
 #include <stdexcept>
 
 namespace LBIE
@@ -371,114 +372,240 @@ void geoframe_adapter::reset()
 
 // Helper functions
 
+namespace {
+enum { TG_POINTS, TG_NORMALS, TG_COLORS, TG_CURVATURES, TG_FUNCS, TG_ELEMENTS, TG_DONE };
+} // namespace
+
+bool to_geometry_stepper::step(std::size_t& budget)
+{
+  const geoframe& gf = *_gf;
+  const std::size_t nv = gf.numverts > 0 ? std::size_t(gf.numverts) : 0;
+  // The end of this call's share of the stage's n items, 16 a unit, and its units.
+  const auto share = [&](std::size_t n, std::size_t& units) {
+    const std::size_t left = n > _pos ? n - _pos : 0;
+    const std::size_t take = budget >= (left + 15) / 16 ? left : budget * 16;
+    units = (take + 15) / 16;
+    return _pos + take;
+  };
+  std::size_t units = 0;
+
+  while (budget > 0) {
+    switch (_stage) {
+    case TG_POINTS: {
+      // Copy vertex data
+      auto& points = _geom.points();
+      const std::size_t end = share(nv, units);
+      for (std::size_t i = _pos; i < end; ++i) {
+        cvc::geometry::point_t p;
+        for (int j = 0; j < 3; ++j) {
+          p[j] = gf.verts[i][j];
+        }
+        points.push_back(p);
+      }
+      _pos = end;
+      if (_pos >= nv) {
+        _stage = TG_NORMALS;
+        _pos = 0;
+      }
+      break;
+    }
+    case TG_NORMALS: {
+      // Copy normals
+      if (gf.normals.empty()) {
+        _stage = TG_COLORS;
+        break;
+      }
+      auto& normals = _geom.normals();
+      const std::size_t end = share(nv, units);
+      for (std::size_t i = _pos; i < end; ++i) {
+        cvc::geometry::normals_t::value_type n{};
+        for (int j = 0; j < 3 && i < gf.normals.size(); ++j) {
+          n[j] = gf.normals[i][j];
+        }
+        normals.push_back(n);
+      }
+      _pos = end;
+      if (_pos >= nv) {
+        _stage = TG_COLORS;
+        _pos = 0;
+      }
+      break;
+    }
+    case TG_COLORS: {
+      // Copy colors
+      if (gf.color.empty()) {
+        _stage = TG_CURVATURES;
+        break;
+      }
+      auto& colors = _geom.colors();
+      const std::size_t end = share(nv, units);
+      for (std::size_t i = _pos; i < end; ++i) {
+        cvc::geometry::colors_t::value_type c{};
+        for (int j = 0; j < 3 && i < gf.color.size(); ++j) {
+          c[j] = gf.color[i][j];
+        }
+        colors.push_back(c);
+      }
+      _pos = end;
+      if (_pos >= nv) {
+        _stage = TG_CURVATURES;
+        _pos = 0;
+      }
+      break;
+    }
+    case TG_CURVATURES: {
+      // Copy curvatures
+      if (gf.curvatures.empty()) {
+        _stage = TG_FUNCS;
+        break;
+      }
+      auto& curvatures = _geom.curvatures();
+      const std::size_t end = share(nv, units);
+      for (std::size_t i = _pos; i < end; ++i) {
+        cvc::geometry::curvatures_t::value_type c{};
+        for (int j = 0; j < 2 && i < gf.curvatures.size(); ++j) {
+          c[j] = gf.curvatures[i][j];
+        }
+        curvatures.push_back(c);
+      }
+      _pos = end;
+      if (_pos >= nv) {
+        _stage = TG_FUNCS;
+        _pos = 0;
+      }
+      break;
+    }
+    case TG_FUNCS: {
+      // Copy functions
+      if (gf.funcs.empty()) {
+        _stage = TG_ELEMENTS;
+        break;
+      }
+      auto& functions = _geom.functions();
+      const std::size_t end = share(nv, units);
+      for (std::size_t i = _pos; i < end; ++i) {
+        functions.push_back(i < gf.funcs.size() ? cvc::geometry::function_t(gf.funcs[i][0])
+                                                : cvc::geometry::function_t());
+      }
+      _pos = end;
+      if (_pos >= nv) {
+        _stage = TG_ELEMENTS;
+        _pos = 0;
+      }
+      break;
+    }
+    case TG_ELEMENTS: {
+      // Decode element data based on mesh_type
+      if (gf.mesh_type == geoframe::TETRA || gf.mesh_type == geoframe::TETRA2) {
+        // Decode triangles to tets
+        const int num_tets = gf.numtris / 4;
+        const std::size_t n = num_tets > 0 ? std::size_t(num_tets) : 0;
+        auto& tets = _geom.tets();
+        if (_pos == 0)
+          tets.reserve(n);
+        const std::size_t end = share(n, units);
+        for (std::size_t i = _pos; i < end; ++i) {
+          cvc::geometry::tet_t tet;
+          tet[0] = gf.triangles[i*4 + 0][0];
+          tet[1] = gf.triangles[i*4 + 0][1];
+          tet[2] = gf.triangles[i*4 + 0][2];
+          tet[3] = gf.triangles[i*4 + 1][2];
+          tets.push_back(tet);
+        }
+        _pos = end;
+        if (_pos >= n) {
+          _geom.set_geometry_type(cvc::geometry::VOLUME_TET);
+          _stage = TG_DONE;
+        }
+      }
+      else if (gf.mesh_type == geoframe::HEXA) {
+        // Decode quads to hexs
+        const int num_hexs = gf.numquads / 6;
+        const std::size_t n = num_hexs > 0 ? std::size_t(num_hexs) : 0;
+        auto& hexs = _geom.hexs();
+        if (_pos == 0)
+          hexs.reserve(n);
+        const std::size_t end = share(n, units);
+        for (std::size_t i = _pos; i < end; ++i)
+          hexs.push_back(decode_hex(gf.quads, i));
+        _pos = end;
+        if (_pos >= n) {
+          _geom.set_geometry_type(cvc::geometry::VOLUME_HEX);
+          _stage = TG_DONE;
+        }
+      }
+      else if (gf.mesh_type == geoframe::QUAD) {
+        // Copy quads
+        const std::size_t n = gf.numquads > 0 ? std::size_t(gf.numquads) : 0;
+        auto& quads = _geom.quads();
+        const std::size_t end = share(n, units);
+        for (std::size_t i = _pos; i < end; ++i) {
+          cvc::geometry::quad_t q;
+          for (int j = 0; j < 4; ++j) {
+            q[j] = gf.quads[i][j];
+          }
+          quads.push_back(q);
+        }
+        _pos = end;
+        if (_pos >= n) {
+          _geom.set_geometry_type(cvc::geometry::SURFACE_QUAD);
+          _stage = TG_DONE;
+        }
+      }
+      else {
+        // Copy triangles
+        const std::size_t n = gf.numtris > 0 ? std::size_t(gf.numtris) : 0;
+        auto& tris = _geom.tris();
+        const std::size_t end = share(n, units);
+        for (std::size_t i = _pos; i < end; ++i) {
+          cvc::geometry::tri_t t;
+          for (int j = 0; j < 3; ++j) {
+            t[j] = gf.triangles[i][j];
+          }
+          tris.push_back(t);
+        }
+        _pos = end;
+        if (_pos >= n) {
+          _geom.set_geometry_type(cvc::geometry::SURFACE_TRI);
+          _stage = TG_DONE;
+        }
+      }
+      break;
+    }
+    default:
+      return true;
+    }
+    budget = units >= budget ? 0 : budget - units;
+    units = 0;
+  }
+  return _stage == TG_DONE;
+}
+
+double to_geometry_stepper::progress() const
+{
+  static const double start[] = {0.0, 0.3, 0.45, 0.5, 0.55, 0.6, 1.0};
+  if (_stage >= TG_DONE)
+    return 1.0;
+  std::size_t n = _gf->numverts > 0 ? std::size_t(_gf->numverts) : 0;
+  if (_stage == TG_ELEMENTS) {
+    const geoframe& gf = *_gf;
+    const int e = gf.mesh_type == geoframe::TETRA || gf.mesh_type == geoframe::TETRA2 ? gf.numtris / 4
+                  : gf.mesh_type == geoframe::HEXA                                    ? gf.numquads / 6
+                  : gf.mesh_type == geoframe::QUAD                                    ? gf.numquads
+                                                                                      : gf.numtris;
+    n = e > 0 ? std::size_t(e) : 0;
+  }
+  const double f = n > 0 ? std::min(1.0, double(_pos) / double(n)) : 1.0;
+  return start[_stage] + (start[_stage + 1] - start[_stage]) * f;
+}
+
 cvc::geometry to_geometry(const geoframe& gf)
 {
-  cvc::geometry geom;
-  
-  // Copy vertex data
-  auto& points = geom.points();
-  points.resize(gf.numverts);
-  for (int i = 0; i < gf.numverts; ++i) {
-    for (int j = 0; j < 3; ++j) {
-      points[i][j] = gf.verts[i][j];
-    }
-  }
-  
-  // Copy normals
-  if (!gf.normals.empty()) {
-    auto& normals = geom.normals();
-    normals.resize(gf.numverts);
-    for (int i = 0; i < gf.numverts && i < static_cast<int>(gf.normals.size()); ++i) {
-      for (int j = 0; j < 3; ++j) {
-        normals[i][j] = gf.normals[i][j];
-      }
-    }
-  }
-  
-  // Copy colors
-  if (!gf.color.empty()) {
-    auto& colors = geom.colors();
-    colors.resize(gf.numverts);
-    for (int i = 0; i < gf.numverts && i < static_cast<int>(gf.color.size()); ++i) {
-      for (int j = 0; j < 3; ++j) {
-        colors[i][j] = gf.color[i][j];
-      }
-    }
-  }
-  
-  // Copy curvatures
-  if (!gf.curvatures.empty()) {
-    auto& curvatures = geom.curvatures();
-    curvatures.resize(gf.numverts);
-    for (int i = 0; i < gf.numverts && i < static_cast<int>(gf.curvatures.size()); ++i) {
-      for (int j = 0; j < 2; ++j) {
-        curvatures[i][j] = gf.curvatures[i][j];
-      }
-    }
-  }
-  
-  // Copy functions
-  if (!gf.funcs.empty()) {
-    auto& functions = geom.functions();
-    functions.resize(gf.numverts);
-    for (int i = 0; i < gf.numverts && i < static_cast<int>(gf.funcs.size()); ++i) {
-      functions[i] = gf.funcs[i][0];
-    }
-  }
-  
-  // Decode element data based on mesh_type
-  if (gf.mesh_type == geoframe::TETRA || gf.mesh_type == geoframe::TETRA2) {
-    // Decode triangles to tets
-    int num_tets = gf.numtris / 4;
-    auto& tets = geom.tets();
-    tets.reserve(num_tets);
-    
-    for (int i = 0; i < num_tets; ++i) {
-      cvc::geometry::tet_t tet;
-      tet[0] = gf.triangles[i*4 + 0][0];
-      tet[1] = gf.triangles[i*4 + 0][1];
-      tet[2] = gf.triangles[i*4 + 0][2];
-      tet[3] = gf.triangles[i*4 + 1][2];
-      tets.push_back(tet);
-    }
-    
-    geom.set_geometry_type(cvc::geometry::VOLUME_TET);
-  }
-  else if (gf.mesh_type == geoframe::HEXA) {
-    // Decode quads to hexs
-    int num_hexs = gf.numquads / 6;
-    auto& hexs = geom.hexs();
-    hexs.reserve(num_hexs);
-    
-    for (int i = 0; i < num_hexs; ++i)
-      hexs.push_back(decode_hex(gf.quads, i));
-    
-    geom.set_geometry_type(cvc::geometry::VOLUME_HEX);
-  }
-  else if (gf.mesh_type == geoframe::QUAD) {
-    // Copy quads
-    auto& quads = geom.quads();
-    quads.resize(gf.numquads);
-    for (int i = 0; i < gf.numquads; ++i) {
-      for (int j = 0; j < 4; ++j) {
-        quads[i][j] = gf.quads[i][j];
-      }
-    }
-    geom.set_geometry_type(cvc::geometry::SURFACE_QUAD);
-  }
-  else {
-    // Copy triangles
-    auto& tris = geom.tris();
-    tris.resize(gf.numtris);
-    for (int i = 0; i < gf.numtris; ++i) {
-      for (int j = 0; j < 3; ++j) {
-        tris[i][j] = gf.triangles[i][j];
-      }
-    }
-    geom.set_geometry_type(cvc::geometry::SURFACE_TRI);
-  }
-  
-  return geom;
+  to_geometry_stepper s(gf);
+  std::size_t budget = std::size_t(-1);
+  while (!s.step(budget))
+    budget = std::size_t(-1);
+  return s.geometry();
 }
 
 geoframe to_geoframe(const cvc::geometry& geom)

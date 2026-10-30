@@ -1549,6 +1549,36 @@ TEST_F(AlgorithmTest, SDFV2SteppedMatchesOneShot) {
   }
 }
 
+// mesher_stepper: the bunny's SDF (32^3 samples, which the mesher resamples to 33^3) meshed a
+// slice at a time gives the one-shot meshers' meshes.
+TEST_F(AlgorithmTest, MesherSteppedMatchesOneShotOnTheBunny) {
+  const geometry bunny = read_geometry("test.bunny");
+  const volume vol = sdf(ctx, bunny, dimension(32, 32, 32), bunny.extents(), SDF_V2);
+  const auto check = [](const geometry &ref, mesher_stepper s, const char *what) {
+    int steps = 0;
+    double last = 0.0;
+    while (!s.step(97)) {
+      ++steps;
+      EXPECT_GE(s.progress(), last) << what << ": " << s.phase();
+      last = s.progress();
+    }
+    EXPECT_GT(steps, 100) << what;
+    EXPECT_EQ(s.progress(), 1.0) << what;
+    const geometry got = s.take();
+    ASSERT_EQ(got.num_points(), ref.num_points()) << what;
+    EXPECT_GT(got.num_points(), 0u) << what;
+    EXPECT_TRUE(got.const_points() == ref.const_points()) << what;
+    EXPECT_TRUE(got.const_tets() == ref.const_tets()) << what;
+    EXPECT_TRUE(got.const_tris() == ref.const_tris()) << what;
+  };
+  check(tetrahedralize(vol, 0.0), mesher_stepper::tetrahedralize(vol, 0.0), "tetrahedralize");
+  check(
+      tetrahedralize2(vol, 0.03, -0.03, DUALLIB, GEO_FLOW, BSPLINE_CONVOLUTION, 1),
+      mesher_stepper::tetrahedralize2(vol, 0.03, -0.03, DUALLIB, GEO_FLOW, BSPLINE_CONVOLUTION, 1),
+      "tetrahedralize2's layer, geometric flow");
+  check(iso(vol, 0.0), mesher_stepper::iso(vol, 0.0), "iso");
+}
+
 TEST_F(AlgorithmTest, SDFV1vsV2Comparison) {
   // Create a simple pyramid geometry
   geometry pyramid;
