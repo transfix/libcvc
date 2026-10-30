@@ -689,8 +689,11 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
   if (type == "windows_menu") // §5.9: `windows_menu: View` puts the built-in Windows menu here
     return windows_menu_setting(label);
   if (type == "menu_item") {
-    if (has(n, "bind"))
-      return menu_toggle(label, str(n, "bind"), flag(n, "def"));
+    if (has(n, "bind")) {
+      Widget w = menu_toggle(label, str(n, "bind"), flag(n, "def"));
+      w.on = action(n); // optional: fired after each toggle's write
+      return w;
+    }
     const std::string on = action(n);
     if (on.empty())
       ctx.warn("ari: menu_item '" + label + "' has neither bind: nor on: — it does nothing");
@@ -729,7 +732,9 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
   if (type == "checkbox") {
     const std::string bind = str(n, "bind");
     check_bind(ctx, "checkbox", label, bind);
-    return checkbox(label, bind, flag(n, "def"));
+    Widget w = checkbox(label, bind, flag(n, "def"));
+    w.on = action(n); // optional: fired after each committed write, like input_text's
+    return w;
   }
   if (type == "slider_int") {
     const std::string bind = str(n, "bind");
@@ -739,6 +744,7 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
       ctx.warn("ari: slider_int '" + label + "' has lo >= hi");
     Widget w = slider_int(label, bind, lo, hi, static_cast<int>(num(n, "def", 0)));
     w.commit_on_release = commit_on_release(ctx, n, label);
+    w.on = action(n); // fired on the commit edge (drag end / key step), not every drag frame
     return w;
   }
   if (type == "slider_float") {
@@ -749,6 +755,7 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
       ctx.warn("ari: slider_float '" + label + "' has lo >= hi");
     Widget w = slider_float(label, bind, lo, hi, num(n, "def", 0.0), str(n, "fmt", "%.3f"));
     w.commit_on_release = commit_on_release(ctx, n, label);
+    w.on = action(n);
     return w;
   }
   if (type == "combo") {
@@ -777,6 +784,7 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
           values.push_back(e.Scalar());
     Widget w = combo(label, bind, std::move(opts), str(n, "default", str(n, "def")));
     w.options_expr = opts_expr;
+    w.on = action(n); // optional: fired after each pick's write
     if (!values.empty() && !opts_expr.empty())
       ctx.warn("ari: combo '" + label +
                "' has both computed options: and values: — values ignored");
@@ -832,7 +840,9 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
   if (type == "color") { // §G7 an RGB picker bound to an "r,g,b" key
     const std::string bind = str(n, "bind");
     check_bind(ctx, "color", label, bind);
-    return color_widget(label, bind, str(n, "default", str(n, "def")));
+    Widget w = color_widget(label, bind, str(n, "default", str(n, "def")));
+    w.on = action(n);
+    return w;
   }
   if (type == "image") { // a host-published image viewer (a live raster)
     Widget w = image_widget(label, str(n, "src"), num(n, "size", 256.0));

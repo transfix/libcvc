@@ -636,7 +636,10 @@ menubar:
 ```
 
 `menu_item` + `bind:` = a tick bound two-way to a state bool. `menu_item` + `on:` =
-a deferred action (§4). `group:` makes a mutually-exclusive radio set.
+a deferred action (§4). `group:` makes a mutually-exclusive radio set. A bound widget
+(`menu_item` + `bind:`, `checkbox`, `slider_*`, `combo`, `input_*`, `color`, `tf_editor`) may
+carry an `on:` too: it runs after each committed write (a pick, a toggle, a slider's drag end or
+key step), so the handler reads the new value from state.
 
 ### 3.3 Windows and placement policy
 

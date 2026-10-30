@@ -1422,8 +1422,11 @@ void Runtime::Impl::emit_node(const Widget &w) {
     const bool cur =
         read_bool_or_seed(app, path, w.bdef ? 1 : 0) != 0; // tolerant of "true"/"false"
     const BoolEdit e = b.menu_item_toggle(label, cur);
-    if (e.committed)
+    if (e.committed) {
       write<int>(app, path, e.value ? 1 : 0);
+      if (!w.on.empty())
+        enqueue(w.on);
+    }
     break;
   }
 
@@ -1561,8 +1564,11 @@ void Runtime::Impl::emit_node(const Widget &w) {
     const bool cur =
         read_bool_or_seed(app, path, w.bdef ? 1 : 0) != 0; // tolerant of "true"/"false"
     const BoolEdit e = b.checkbox(label, cur);
-    if (e.committed)
+    if (e.committed) {
       write<int>(app, path, e.value ? 1 : 0);
+      if (!w.on.empty()) // fire AFTER the write so the handler sees the new value in state
+        enqueue(w.on);
+    }
     break;
   }
 
@@ -1572,6 +1578,8 @@ void Runtime::Impl::emit_node(const Widget &w) {
     const IntEdit e = b.slider_int(label, path.c_str(), cur, w.ilo, w.ihi);
     if (e.committed || (e.changed && !w.commit_on_release)) // live while dragged, by default
       write<int>(app, path, e.value);
+    if (e.committed && !w.on.empty()) // on: fires once per commit (drag end / key step), not
+      enqueue(w.on);                  // every live frame of a drag
     break;
   }
 
@@ -1581,6 +1589,8 @@ void Runtime::Impl::emit_node(const Widget &w) {
     const DoubleEdit e = b.slider_double(label, path.c_str(), cur, w.lo, w.hi, w.fmt.c_str());
     if (e.committed || (e.changed && !w.commit_on_release))
       write<double>(app, path, e.value);
+    if (e.committed && !w.on.empty())
+      enqueue(w.on);
     break;
   }
 
@@ -1608,8 +1618,11 @@ void Runtime::Impl::emit_node(const Widget &w) {
         break;
       }
     const IndexEdit e = b.combo(label, idx, opts); // always DISPLAY the labels
-    if (e.changed && e.index >= 0 && e.index < static_cast<int>(store.size()))
+    if (e.changed && e.index >= 0 && e.index < static_cast<int>(store.size())) {
       write<std::string>(app, path, store[e.index]); // store the mapped value (or the text)
+      if (!w.on.empty())
+        enqueue(w.on);
+    }
     break;
   }
 
@@ -1659,8 +1672,11 @@ void Runtime::Impl::emit_node(const Widget &w) {
       b.text_value(label, cur); // a backend with no colour widget -> show the "r,g,b" value
       break;
     }
-    if (e.committed)
+    if (e.committed) {
       write<std::string>(app, path, format_rgb3(e.rgb)); // store "r,g,b"
+      if (!w.on.empty())
+        enqueue(w.on);
+    }
     break;
   }
 
