@@ -1,8 +1,9 @@
 /// @file state_exec_priority_test.cpp
 /// @brief Process priorities (docs/STATE_EXEC_LOCKS.md 7, 13.6; locks plan L2): set-priority and
 ///        get-priority, the floors and their permissions, spawn's priority and parent, the run
-///        queue keyed on the effective priority. PR-1..PR-4, PR-6 and PR-7 run on both
-///        schedulers (PR-10); the permission rules and the level key have unit cases of their own.
+///        queue keyed on the effective priority, and priority inheritance under locks (PI-1..PI-5,
+///        PI-8, PI-9, PI-11). PR-1..PR-4, PR-6, PR-7 and the PI cases run on both schedulers
+///        (PR-10); the permission rules and the level key have unit cases of their own.
 
 #include <chrono>
 #include <climits>
@@ -23,6 +24,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -40,6 +42,7 @@ struct prio_world {
   std::unique_ptr<scheduler> sync;
   std::unique_ptr<async_scheduler> async;
   std::deque<intrinsics_context> contexts; // stable addresses: the natives point at them
+  std::map<int, environment_ptr> envs;     // each program's natives, for a restore
 
   prio_world(const std::string &kind, scheduling_policy policy) : tree(cvc::state::instance(app)) {
     if (kind == "sync")
@@ -84,6 +87,7 @@ struct prio_world {
     const int pid = base().execute(script, opts);
     ctx.pid = pid;
     ctx.proc->pid = pid;
+    envs[pid] = env;
     return pid;
   }
   int submit(const std::string &script) { return submit(script, as{}); }
@@ -114,6 +118,28 @@ struct prio_world {
   }
   bool finished(int pid) { return is_finished(info(pid).status); }
   bool parked(int pid) { return info(pid).status == process_status::waiting; }
+  int effective(int pid) { return info(pid).effective_priority; }
+  // Parked in a lock wait, or parked inside a section (on a channel, holding a lock).
+  bool lock_waiting(int pid) {
+    const process_info i = info(pid);
+    return i.status == process_status::waiting && i.waiting_on &&
+           i.waiting_on->rfind("lock ", 0) == 0;
+  }
+  bool inside(int pid) {
+    const process_info i = info(pid);
+    return i.status == process_status::waiting && i.locks_held > 0 &&
+           !(i.waiting_on && i.waiting_on->rfind("lock ", 0) == 0);
+  }
+  // Wakes the programs waiting on `channel`, as a host does.
+  void deliver(const std::string &channel) {
+    base().deliver_to_receivers(channel, value_t(std::string("go")));
+  }
+  bool snapshot(int pid, cvc::state &node) {
+    return sync ? sync->snapshot(pid, node) : async->snapshot(pid, node);
+  }
+  int restore(cvc::state &node, const environment_ptr &natives) {
+    return sync ? sync->restore(node, natives) : async->restore(node, natives);
+  }
 
   value_t result(int pid) {
     const auto i = base().get_process_info(pid);
@@ -146,6 +172,11 @@ int64_t as_int(const value_t &v) {
   const auto *i = std::get_if<int64_t>(&v.v);
   EXPECT_NE(i, nullptr) << "expected an int, got " << to_string(v);
   return i ? *i : 0;
+}
+
+// A loop of `n` iterations that never waits: the PI cases' medium-priority spinner.
+std::string spin(int n) {
+  return "(begin (set i 0) (while (< i " + std::to_string(n) + ") (set i (+ i 1))) \"spun\")";
 }
 
 // get-priority's dict for these values.
@@ -521,6 +552,268 @@ TEST_P(Priority, ForkCopiesTheFloor) {
     EXPECT_EQ(w->info(spawned).parent_pid, pid);
   }
   EXPECT_EQ(w->base().get_stats().priority_clamped, 2u);
+}
+
+// ===========================================================================
+// Priority inheritance (design 6.2; 13.6 PI), under priority_rr on both schedulers. A process
+// runs at the best of its base and the bases of the processes it blocks, directly or through
+// other waiters, and every value follows the wait-for graph at once.
+// ===========================================================================
+
+// PI-1: a low holder, a high waiter and a medium loop. The waiter boosts the holder to its own
+// priority, so the holder's section runs ahead of the loop and the waiter is granted at its end.
+// Without the boost the loop, strictly better than the holder, would run to its end first (the
+// Pathfinder case). Released, the holder is back at its base.
+TEST_P(Priority, PI01_LowHolderHighWaiterMediumLoop) {
+  prio_world &pw = world(scheduling_policy::priority_rr);
+  const int h = pw.submit("(begin (with-lock \"k\" (begin (msg-recv \"h.go\") " + spin(2000) +
+                              ")) (msg-recv \"h.after\"))",
+                          {.priority = 10});
+  ASSERT_TRUE(pw.step_until([&] { return pw.inside(h); }));
+  const int wt = pw.submit(R"((with-lock "k" "granted"))", {.priority = -10});
+  ASSERT_TRUE(pw.step_until([&] { return pw.lock_waiting(wt); }));
+  EXPECT_EQ(pw.effective(h), -10);
+  EXPECT_EQ(pw.info(h).priority, 10);
+  EXPECT_EQ(to_string(pw.run("(get-priority " + std::to_string(h) + ")")),
+            prio_dict(10, -10, 10, "priority_rr"));
+  EXPECT_TRUE(pw.base().check_tables());
+
+  const int m = pw.submit(spin(20000), {.priority = 0});
+  pw.deliver("h.go");
+  ASSERT_TRUE(pw.step_until([&] { return pw.finished(wt); }));
+  EXPECT_EQ(to_string(pw.result(wt)), "\"granted\"");
+  EXPECT_FALSE(pw.finished(m)) << "the medium loop ran ahead of the boosted holder";
+  std::printf("PI-1 %s: the medium loop had stepped %llu times when the waiter ended\n",
+              GetParam().c_str(), static_cast<unsigned long long>(pw.info(m).step_count));
+  ASSERT_TRUE(pw.step_until([&] { return pw.parked(h); }));
+  EXPECT_EQ(pw.effective(h), 10);
+  EXPECT_TRUE(pw.base().check_tables());
+  ASSERT_TRUE(pw.step_until([&] { return pw.finished(m); }));
+  pw.deliver("h.after");
+  ASSERT_TRUE(pw.step_until([&] { return pw.finished(h); }));
+}
+
+// PI-2: a chain of three. W (-10) waits for B's "a"; B (5) holds "a" and waits for C's "b"; C
+// (10) holds "b". The boost goes down both edges, and comes off each holder as it stops blocking.
+TEST_P(Priority, PI02_ChainOfThree) {
+  prio_world &pw = world(scheduling_policy::priority_rr);
+  const int c = pw.submit(R"((begin (with-lock "b" (msg-recv "c.go")) (msg-recv "c.after")))",
+                          {.priority = 10});
+  ASSERT_TRUE(pw.step_until([&] { return pw.inside(c); }));
+  const int b =
+      pw.submit(R"((begin (with-lock "a" (with-lock "b" (msg-recv "b.go"))) (msg-recv "b.after")))",
+                {.priority = 5});
+  ASSERT_TRUE(pw.step_until([&] { return pw.lock_waiting(b); }));
+  EXPECT_EQ(pw.effective(c), 5); // B lends its base
+  const int wt = pw.submit(R"((with-lock "a" 1))", {.priority = -10});
+  ASSERT_TRUE(pw.step_until([&] { return pw.lock_waiting(wt); }));
+  EXPECT_EQ(pw.effective(b), -10);
+  EXPECT_EQ(pw.effective(c), -10); // two edges from W
+  EXPECT_EQ(pw.effective(wt), -10);
+  EXPECT_TRUE(pw.base().check_tables());
+
+  // C releases "b": B is granted it and parks inside, still blocking W; C blocks no one.
+  pw.deliver("c.go");
+  ASSERT_TRUE(pw.step_until([&] { return pw.inside(b) && pw.parked(c) && !pw.inside(c); }));
+  EXPECT_EQ(pw.effective(c), 10);
+  EXPECT_EQ(pw.effective(b), -10);
+  // B releases both: W is granted and ends; B is back at its base.
+  pw.deliver("b.go");
+  ASSERT_TRUE(pw.step_until([&] { return pw.finished(wt); }));
+  ASSERT_TRUE(pw.step_until([&] { return pw.parked(b) && !pw.inside(b); }));
+  EXPECT_EQ(pw.effective(b), 5);
+  EXPECT_TRUE(pw.base().check_tables());
+  pw.deliver("b.after");
+  pw.deliver("c.after");
+  ASSERT_TRUE(pw.step_until([&] { return pw.finished(b) && pw.finished(c); }));
+}
+
+// PI-3: the boost is withdrawn at once when the waiter times out, and when it is killed: the
+// holder's effective priority is its base before anything else steps.
+TEST_P(Priority, PI03_BoostWithdrawnOnTimeoutAndKill) {
+  prio_world &pw = world(scheduling_policy::priority_rr);
+  const int h = pw.submit(R"((with-lock "k" (msg-recv "h.go")))", {.priority = 10});
+  ASSERT_TRUE(pw.step_until([&] { return pw.inside(h); }));
+
+  const int t =
+      pw.submit(R"((try (with-lock "k" :timeout 0.3 1) (catch (TimeoutError e) "timed out")))",
+                {.priority = -10});
+  ASSERT_TRUE(pw.step_until([&] { return pw.lock_waiting(t); }));
+  EXPECT_EQ(pw.effective(h), -10);
+  ASSERT_TRUE(pw.step_until([&] { return !pw.lock_waiting(t); }));
+  EXPECT_EQ(pw.effective(h), 10) << "the timeout left the boost";
+  EXPECT_TRUE(pw.base().check_tables());
+  ASSERT_TRUE(pw.step_until([&] { return pw.finished(t); }));
+  EXPECT_EQ(to_string(pw.result(t)), "\"timed out\"");
+
+  const int k = pw.submit(R"((with-lock "k" 1))", {.priority = -10});
+  ASSERT_TRUE(pw.step_until([&] { return pw.lock_waiting(k); }));
+  EXPECT_EQ(pw.effective(h), -10);
+  ASSERT_TRUE(pw.base().kill(k));
+  EXPECT_EQ(pw.effective(h), 10) << "the kill left the boost";
+  EXPECT_TRUE(pw.base().check_tables());
+  pw.deliver("h.go");
+  ASSERT_TRUE(pw.step_until([&] { return pw.finished(h); }));
+}
+
+// PI-4: set-priority on a boosted holder changes its base, and the holder keeps running at the
+// boost while it blocks the better waiter. A base better than the boost is what it runs at.
+TEST_P(Priority, PI04_SetPriorityOnBoostedHolder) {
+  prio_world &pw = world(scheduling_policy::priority_rr);
+  const int h = pw.submit(R"((begin (with-lock "k" (msg-recv "h.go")) (msg-recv "h.after")))",
+                          {.priority = 10});
+  ASSERT_TRUE(pw.step_until([&] { return pw.inside(h); }));
+  const int wt = pw.submit(R"((with-lock "k" 1))", {.priority = -10});
+  ASSERT_TRUE(pw.step_until([&] { return pw.lock_waiting(wt); }));
+  const std::string hp = std::to_string(h);
+  EXPECT_EQ(to_string(pw.run("(list (set-priority " + hp + " 15) (get-priority " + hp + "))")),
+            "(#t " + prio_dict(15, -10, 10, "priority_rr") + ")");
+  EXPECT_EQ(pw.info(h).priority, 15);
+  EXPECT_EQ(pw.effective(h), -10);
+  // The host's unchecked call past the boost, and back.
+  EXPECT_TRUE(pw.base().set_priority(h, -15));
+  EXPECT_EQ(pw.effective(h), -15);
+  EXPECT_TRUE(pw.base().set_priority(h, 12));
+  EXPECT_EQ(pw.effective(h), -10);
+  EXPECT_TRUE(pw.base().check_tables());
+  pw.deliver("h.go");
+  ASSERT_TRUE(pw.step_until([&] { return pw.finished(wt) && pw.parked(h) && !pw.inside(h); }));
+  EXPECT_EQ(pw.effective(h), 12);
+  pw.deliver("h.after");
+  ASSERT_TRUE(pw.step_until([&] { return pw.finished(h); }));
+}
+
+// PI-5 (gap G-37): inspect shows a boosted holder's base as its priority and the boost apart; its
+// snapshot is refused, as any holder's (L1.10). A waiter boosted through another waiter's edge,
+// holding nothing, snapshots its base, and restored it queues afresh at the base.
+TEST_P(Priority, PI05_SnapshotAndInspectShowBase) {
+  prio_world &pw = world(scheduling_policy::priority_rr);
+  // PI-9's set-up: H holds X a.b; V queues X a; W queues S a.c behind V.
+  const int h = pw.submit(R"((with-lock "a.b" (msg-recv "h.go")))", {.priority = 10});
+  ASSERT_TRUE(pw.step_until([&] { return pw.inside(h); }));
+  const int v = pw.submit(R"((with-lock "a" (msg-recv "v.go")))", {.priority = 10});
+  ASSERT_TRUE(pw.step_until([&] { return pw.lock_waiting(v); }));
+  const int wt = pw.submit(R"((with-lock "a.c" :shared 1))", {.priority = -10});
+  ASSERT_TRUE(pw.step_until([&] { return pw.lock_waiting(wt); }));
+  EXPECT_EQ(pw.effective(h), -10);
+  EXPECT_EQ(pw.effective(v), -10);
+
+  const std::string hp = std::to_string(h);
+  const auto seen =
+      as_list(pw.run("(list (get-attr (inspect " + hp + ") \"priority\") (get-attr (inspect " + hp +
+                     ") \"effective_priority\"))"));
+  ASSERT_EQ(seen.size(), 2u);
+  EXPECT_EQ(as_int(seen[0]), 10);
+  EXPECT_EQ(as_int(seen[1]), -10);
+
+  try {
+    pw.snapshot(h, pw.tree("snap.h"));
+    ADD_FAILURE() << "a boosted holder was snapshotted";
+  } catch (const std::runtime_error &e) {
+    const std::string what = e.what();
+    EXPECT_NE(what.find("a.b"), std::string::npos) << what;
+  }
+
+  cvc::state &node = pw.tree("snap.v");
+  ASSERT_TRUE(pw.snapshot(v, node));
+  const int r = pw.restore(node, pw.envs.at(v));
+  ASSERT_TRUE(pw.step_until([&] { return pw.lock_waiting(r); }));
+  EXPECT_EQ(pw.info(r).priority, 10);
+  EXPECT_EQ(pw.effective(r), 10) << "the restored waiter carried the boost";
+  EXPECT_EQ(pw.effective(v), -10);
+  EXPECT_TRUE(pw.base().check_tables());
+  ASSERT_TRUE(pw.base().kill(r));
+  pw.deliver("h.go");
+  ASSERT_TRUE(pw.step_until([&] { return pw.inside(v); }));
+  pw.deliver("v.go");
+  ASSERT_TRUE(pw.step_until([&] { return pw.finished(h) && pw.finished(v) && pw.finished(wt); }));
+}
+
+// PI-8: W (-10) waits for H1, which waits for H2; W times out. The withdrawal goes down the whole
+// chain: H1 is back at its base (7) and H2 at what H1 still lends it (7), not its own base nor W's.
+TEST_P(Priority, PI08_ChainWithdrawnWhole) {
+  prio_world &pw = world(scheduling_policy::priority_rr);
+  const int h2 = pw.submit(R"((with-lock "b" (msg-recv "h2.go")))", {.priority = 10});
+  ASSERT_TRUE(pw.step_until([&] { return pw.inside(h2); }));
+  const int h1 = pw.submit(R"((with-lock "a" (with-lock "b" 1)))", {.priority = 7});
+  ASSERT_TRUE(pw.step_until([&] { return pw.lock_waiting(h1); }));
+  EXPECT_EQ(pw.effective(h2), 7);
+  const int t =
+      pw.submit(R"((try (with-lock "a" :timeout 0.3 1) (catch (TimeoutError e) "timed out")))",
+                {.priority = -10});
+  ASSERT_TRUE(pw.step_until([&] { return pw.lock_waiting(t); }));
+  EXPECT_EQ(pw.effective(h1), -10);
+  EXPECT_EQ(pw.effective(h2), -10);
+  ASSERT_TRUE(pw.step_until([&] { return !pw.lock_waiting(t); }));
+  EXPECT_EQ(pw.effective(h1), 7);
+  EXPECT_EQ(pw.effective(h2), 7);
+  EXPECT_TRUE(pw.base().check_tables());
+  pw.deliver("h2.go");
+  ASSERT_TRUE(pw.step_until([&] { return pw.finished(h1) && pw.finished(h2) && pw.finished(t); }));
+  EXPECT_EQ(to_string(pw.result(t)), "\"timed out\"");
+}
+
+// PI-9: the boost through a waiter's edge. H (10) holds X a.b; V (10) queues X a; W (-10) queues
+// S a.c, behind V. W blocks on V's request, which blocks on H's hold, so both run at -10 ahead of
+// a medium spinner: V is granted at the end of H's section, and W at the end of V's.
+TEST_P(Priority, PI09_BoostThroughWaiterEdge) {
+  prio_world &pw = world(scheduling_policy::priority_rr);
+  const int h = pw.submit("(with-lock \"a.b\" (begin (msg-recv \"h.go\") " + spin(1000) + "))",
+                          {.priority = 10});
+  ASSERT_TRUE(pw.step_until([&] { return pw.inside(h); }));
+  const int v = pw.submit("(with-lock \"a\" (begin (msg-recv \"v.go\") " + spin(1000) + "))",
+                          {.priority = 10});
+  ASSERT_TRUE(pw.step_until([&] { return pw.lock_waiting(v); }));
+  const int wt = pw.submit(R"((with-lock "a.c" :shared "granted"))", {.priority = -10});
+  ASSERT_TRUE(pw.step_until([&] { return pw.lock_waiting(wt); }));
+  EXPECT_EQ(pw.effective(h), -10);
+  EXPECT_EQ(pw.effective(v), -10);
+  EXPECT_TRUE(pw.base().check_tables());
+
+  const int m = pw.submit(spin(20000), {.priority = 0});
+  pw.deliver("h.go");
+  ASSERT_TRUE(pw.step_until([&] { return pw.inside(v); }));
+  EXPECT_FALSE(pw.finished(m)) << "the spinner ran ahead of the boosted holder";
+  EXPECT_TRUE(pw.finished(h));
+  EXPECT_EQ(pw.effective(v), -10); // it holds a now, and W still waits for it
+  pw.deliver("v.go");
+  ASSERT_TRUE(pw.step_until([&] { return pw.finished(wt); }));
+  EXPECT_EQ(to_string(pw.result(wt)), "\"granted\"");
+  EXPECT_FALSE(pw.finished(m)) << "the spinner ran ahead of the boosted waiter";
+  std::printf("PI-9 %s: the spinner had stepped %llu times when W ended\n", GetParam().c_str(),
+              static_cast<unsigned long long>(pw.info(m).step_count));
+  ASSERT_TRUE(pw.step_until([&] { return pw.finished(v) && pw.finished(m); }));
+}
+
+// PI-11: two holders boosted by one waiter, and both withdrawn. P (5) holds X a.b and R (5) holds
+// S a.c; P queues for X a (behind R's hold); W (-10) queues X a and then times out.
+TEST_P(Priority, PI11_MultiHolderBoostAndWithdraw) {
+  prio_world &pw = world(scheduling_policy::priority_rr);
+  const int p =
+      pw.submit(R"((with-lock "a.b" (begin (msg-recv "p.go") (with-lock "a" (msg-recv "p.in")))))",
+                {.priority = 5});
+  ASSERT_TRUE(pw.step_until([&] { return pw.inside(p); }));
+  const int r = pw.submit(R"((with-lock "a.c" :shared (msg-recv "r.go")))", {.priority = 5});
+  ASSERT_TRUE(pw.step_until([&] { return pw.inside(r); }));
+  pw.deliver("p.go");
+  ASSERT_TRUE(pw.step_until([&] { return pw.lock_waiting(p); }));
+  const int t =
+      pw.submit(R"((try (with-lock "a" :timeout 0.3 1) (catch (TimeoutError e) "timed out")))",
+                {.priority = -10});
+  ASSERT_TRUE(pw.step_until([&] { return pw.lock_waiting(t); }));
+  EXPECT_EQ(pw.effective(p), -10);
+  EXPECT_EQ(pw.effective(r), -10);
+  EXPECT_TRUE(pw.base().check_tables());
+  ASSERT_TRUE(pw.step_until([&] { return !pw.lock_waiting(t); }));
+  EXPECT_EQ(pw.effective(p), 5);
+  EXPECT_EQ(pw.effective(r), 5);
+  EXPECT_TRUE(pw.base().check_tables());
+  ASSERT_TRUE(pw.step_until([&] { return pw.finished(t); }));
+  EXPECT_EQ(to_string(pw.result(t)), "\"timed out\"");
+  pw.deliver("r.go");
+  ASSERT_TRUE(pw.step_until([&] { return pw.inside(p) && pw.finished(r); }));
+  pw.deliver("p.in");
+  ASSERT_TRUE(pw.step_until([&] { return pw.finished(p); }));
 }
 
 // ===========================================================================
