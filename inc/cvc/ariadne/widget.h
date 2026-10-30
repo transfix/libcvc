@@ -285,6 +285,12 @@ struct Widget {
   // wrapper; empty otherwise.
   std::string init_script;
 
+  // §12 load: the mounted fragment's own on_tick: body. The Runtime runs it as one resident per
+  // mount, chrooted to the sub-prefix with the mount's functions, woken once per drain like the
+  // document's: from the mount's first frame (after its init:) until a reconcile drops it. Only on
+  // a mount wrapper; empty otherwise.
+  std::string tick_script;
+
   // §6.6 functions: set on the document's root and on every mount wrapper, null elsewhere. The
   // programs started inside this subtree (on: actions, the mount's init:) run with these
   // functions defined, and no others: a mount gets an empty scope unless it grants some.

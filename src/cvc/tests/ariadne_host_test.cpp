@@ -894,3 +894,165 @@ TEST(AriadneFunctions, AModuleGrantedNothingCannotCall) {
   EXPECT_NE(warnings.front().find("NameError"), std::string::npos) << warnings.front();
   EXPECT_EQ(val(app, "ui.docs.fd.includes.m.out"), "");
 }
+
+// ── §12 a module's on_tick: ──────────────────────────────────────────────────────────────────────
+
+namespace {
+// A module counting its ticks in its own `n`, seeded by its init:, and stamping each with a
+// function its mount grants.
+const char *kTickModule = "init: (state-set \"n\" 0)\n"
+                          "on_tick: |\n"
+                          "  (state-set \"n\" (+ 1 (int (state-get \"n\"))))\n"
+                          "  (record \"tick\")\n"
+                          "root:\n  - text: counter\n";
+
+int count_of(cvc::app &app, const std::string &path) {
+  const std::string v = val(app, path);
+  return v.empty() ? -1 : std::stoi(v);
+}
+} // namespace
+
+// Its on_tick: runs every drain from its first frame, after its init:, chrooted to the mount with
+// the functions the mount granted; the document's own runs beside it.
+TEST(AriadneModuleTick, RunsAtTheMountWithItsFunctions) {
+  REQUIRE_YAML();
+  const fs::path dir = test_dir("mod_tick");
+  write(dir, "mod.ari", kTickModule);
+  const fs::path doc = write(dir, "p.ari",
+                             "meta: {min_libcvc: 3.4.0}\n"
+                             "functions: |\n"
+                             "  (defun record (s) (state-set \"out\" (str-concat s \"!\")))\n"
+                             "on_tick: (state-set \"own\" \"parent\")\n"
+                             "root:\n"
+                             "  - load: mod.ari\n"
+                             "    as: m\n"
+                             "    functions: [record]\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.mt");
+  art.set_backend(be);
+  const std::vector<std::string> warnings = art.load(doc.string());
+  EXPECT_TRUE(warnings.empty()) << warnings.front(); // the preflight knows record in the module
+  be.render_to_string(art.runtime(), 80, 24);        // mounts the module: init:, then its tick
+  ASSERT_TRUE(drain_until(art, [&] { return count_of(app, "ui.docs.mt.includes.m.n") >= 3; }));
+  EXPECT_EQ(val(app, "ui.docs.mt.includes.m.out"), "tick!");
+  EXPECT_EQ(val(app, "ui.docs.mt.n"), ""); // the parent's subtree is out of its reach
+  EXPECT_EQ(val(app, "ui.docs.mt.out"), "");
+  ASSERT_TRUE(drain_until(art, [&] { return val(app, "ui.docs.mt.own") == "parent"; }));
+  EXPECT_TRUE(art.take_warnings().empty());
+}
+
+// A failing module tick is reported under its mount, once.
+TEST(AriadneModuleTick, AFailureNamesTheMount) {
+  REQUIRE_YAML();
+  const fs::path dir = test_dir("mod_tick_fail");
+  write(dir, "mod.ari", "on_tick: (raise (ValueError \"boom\"))\nroot:\n  - text: m\n");
+  const fs::path doc = write(dir, "p.ari",
+                             "meta: {min_libcvc: 3.4.0}\n"
+                             "root:\n  - load: mod.ari\n    as: bad\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.mf");
+  art.set_backend(be);
+  art.load(doc.string());
+  be.render_to_string(art.runtime(), 80, 24);
+  std::vector<std::string> warnings;
+  ASSERT_TRUE(drain_until(art, [&] {
+    for (std::string &w : art.take_warnings())
+      warnings.push_back(std::move(w));
+    return !warnings.empty();
+  }));
+  EXPECT_NE(warnings.front().find("on_tick: of mount 'ui.docs.mf.includes.bad' resident"),
+            std::string::npos)
+      << warnings.front();
+  EXPECT_NE(warnings.front().find("boom"), std::string::npos) << warnings.front();
+}
+
+// A reconcile that drops the mount stops its tick; one that keeps it (a reload of the same
+// document) leaves it running.
+TEST(AriadneModuleTick, StopsWhenAReconcileDropsTheMount) {
+  REQUIRE_YAML();
+  const fs::path dir = test_dir("mod_tick_drop");
+  write(dir, "mod.ari", kTickModule);
+  const fs::path doc = write(dir, "p.ari",
+                             "meta: {min_libcvc: 3.4.0}\n"
+                             "functions: |\n  (defun record (s) s)\n"
+                             "root:\n  - load: mod.ari\n    as: m\n    functions: [record]\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.md");
+  art.set_backend(be);
+  art.load(doc.string());
+  be.render_to_string(art.runtime(), 80, 24);
+  const std::string n = "ui.docs.md.includes.m.n";
+  ASSERT_TRUE(drain_until(art, [&] { return count_of(app, n) >= 2; }));
+
+  art.load(doc.string()); // the same tree again: the module keeps ticking
+  be.render_to_string(art.runtime(), 80, 24);
+  const int before = count_of(app, n);
+  ASSERT_TRUE(drain_until(art, [&] { return count_of(app, n) >= before + 2; }));
+
+  art.set_root(group({text("gone")}));
+  be.render_to_string(art.runtime(), 80, 24); // the reconcile drops the mount
+  art.drain();                                // anything already woken finishes
+  const int stopped = count_of(app, n);
+  for (int i = 0; i < 20; ++i) {
+    art.drain();
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+  EXPECT_EQ(count_of(app, n), stopped);
+  EXPECT_TRUE(art.take_warnings().empty());
+}
+
+// A repeated mount ticks once per instance, each in its own subtree; an instance the count drops
+// stops.
+TEST(AriadneModuleTick, ARepeatedMountTicksPerInstance) {
+  REQUIRE_YAML();
+  const fs::path dir = test_dir("mod_tick_repeat");
+  write(dir, "mod.ari", kTickModule);
+  const fs::path doc = write(dir, "p.ari",
+                             "meta: {min_libcvc: 3.4.0}\n"
+                             "functions: |\n  (defun record (s) s)\n"
+                             "init: (state-set \"count\" 2)\n"
+                             "root:\n"
+                             "  - load: mod.ari\n"
+                             "    as: m\n"
+                             "    functions: [record]\n"
+                             "    repeat: (int (state-get \"count\"))\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.mr");
+  art.set_backend(be);
+  const std::vector<std::string> warnings = art.load(doc.string());
+  EXPECT_TRUE(warnings.empty()) << warnings.front();
+  be.render_to_string(art.runtime(), 80, 24);
+  const std::string n0 = "ui.docs.mr.includes.m.0.n", n1 = "ui.docs.mr.includes.m.1.n";
+  ASSERT_TRUE(drain_until(art, [&] { return count_of(app, n0) >= 2 && count_of(app, n1) >= 2; }));
+
+  cvc::state::instance(app)("ui.docs.mr.count").value(1);
+  be.render_to_string(art.runtime(), 80, 24); // instance 1 is no longer made
+  art.drain();
+  const int stopped = count_of(app, n1), kept = count_of(app, n0);
+  for (int i = 0; i < 20; ++i) {
+    art.drain();
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+  EXPECT_EQ(count_of(app, n1), stopped);
+  EXPECT_GT(count_of(app, n0), kept);
+}
+
+// The input lanes stay the outermost document's: a module's are ignored, and the load says so.
+TEST(AriadneModuleTick, AModulesInputLanesAreIgnoredWithAWarning) {
+  REQUIRE_YAML();
+  const fs::path dir = test_dir("mod_lanes");
+  write(dir, "mod.ari",
+        "on_key: (state-set \"k\" 1)\non_signal: (state-set \"s\" 1)\nroot:\n  - text: m\n");
+  LoadResult lr = load_file(
+      write(dir, "p.ari", "meta: {min_libcvc: 3.4.0}\nroot:\n  - load: mod.ari\n").string());
+  ASSERT_TRUE(lr.ok) << lr.error;
+  int told = 0;
+  for (const std::string &w : lr.warnings)
+    told += w.find("the fragment's on_key: is ignored") != std::string::npos ||
+            w.find("the fragment's on_signal: is ignored") != std::string::npos;
+  EXPECT_EQ(told, 2);
+}

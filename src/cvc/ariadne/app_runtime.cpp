@@ -329,6 +329,8 @@ void collect_programs(const Widget &w, const FunctionScope *functions,
            functions->prelude, functions});
     if (!w.init_script.empty())
       out.push_back({"init: of mount '" + w.scope + "'", w.init_script, functions});
+    if (!w.tick_script.empty())
+      out.push_back({"on_tick: of mount '" + w.scope + "'", w.tick_script, functions});
   }
   const std::string where = "widget '" + (w.id.empty() ? w.label : w.id) + "'";
   for (const std::string *p :

@@ -182,6 +182,13 @@ is wall-capped at `kResidentStepSeconds = 0.05`
 ([`ariadne.cpp:1497`](../src/cvc/ariadne/ariadne.cpp)). On teardown they are reaped as a
 group via their owner tag.
 
+A `load:`ed module's own `on_tick:` is a tick resident too, one per mount (§6.3): chrooted to the
+mount's sub-prefix, with the mount's functions (§6.6), on the channel
+`<owner>#tick@<sub-prefix>`, and woken with the document's each drain. It starts the first frame
+the mount is drawn, right after the module's `init:`, so a module in a tab that is not open starts
+when the tab opens. From then on it runs whether or not the mount is drawn, until a reconcile
+drops the mount (§7.4) or the document goes. A module has no input lanes of its own (§6.3).
+
 ### 2.4 Errors in actions and residents
 
 Handlers raise and catch exceptions like any state_exec program, with `try`/`catch`/`finally`,
@@ -200,8 +207,8 @@ drain sweep warns once per message, through the warnings `take_reactive_warnings
 | a resident, by a kill | `ari: <lane> resident [<channel>] stopped: <reason>` |
 
 `<where>` is the innermost line of the exception's traceback. `<program>` is the action's text on
-one line, cut at 80 characters, and `<lane>` is `on_tick:`, `on_key:`, `on_pointer:` or
-`on_signal:`. An `init:` program that fails
+one line, cut at 80 characters, and `<lane>` is `on_tick:`, `on_key:`, `on_pointer:`,
+`on_signal:`, or `on_tick: of mount '<sub-prefix>'` for a module's tick. An `init:` program that fails
 reports `failed: Class: message (at <where>)` to its caller.
 
 **Keeping a resident alive.** A resident is one process for the life of the document. An
@@ -1059,6 +1066,19 @@ disambiguated `_2` / `_3`. A mounted module is sandboxed to its own state sub-pr
 (§7) and reaches the parent only through explicitly granted `link:` holes, and calls only the
 functions its mount grants (§6.6).
 
+A module's own programs are its `init:`, its `on_tick:` and its widgets' actions. The loader
+captures `init:` and `on_tick:` onto the mount wrapper (`Widget::init_script`,
+`Widget::tick_script`), and the runtime runs both at the sub-prefix with the mount's functions:
+`init:` once, `on_tick:` as the mount's own tick resident (§2.3). So a module can own a loop, a
+request poller say, and be tested on its own with `ari test` (§13).
+
+`on_key:`, `on_pointer:` and `on_signal:` stay the outermost document's. A fragment that declares
+one loads with a warning, and the handler is ignored. Raw input and signals belong to the
+document, not to whatever it mounts: a module that saw every key could read what is typed into
+the parent's fields, and two modules could not both decide what Ctrl-C does. A module reacts to its
+own widgets. When it needs more, the parent handles the event and passes on what the module needs
+through a `link:` hole, which the module's `on_tick:` can read.
+
 ### 6.4 The URI resolver
 
 All external references (`import:`, `load:`, scene `source:`, `fetch`) go through one
@@ -1236,7 +1256,13 @@ through the link; a read-only hole keeps writes local to the module. Holes are r
 every reconcile, so a re-mount can never inherit a stale grant. A fragment may declare
 the holes it expects with `needs:`; an ungranted expectation warns and the fragment falls
 back to a local (fail-safe) binding. A per-mount `init:` runs once at the sub-prefix
-**after** the holes are wired, with the module's functions (§6.6). A module's functions come
+**after** the holes are wired, with the module's functions (§6.6). The mount's `on_tick:`
+resident starts right after it (§2.3). A reconcile keeps that resident running when the new tree
+has the same mount at the same sub-prefix with the same program (its body and its functions), as
+a reload of an unchanged document does, and stops it otherwise. A repeated mount's resident runs
+per instance and restarts at a reconcile. An instance stops when its outermost `repeat:` count
+drops below it (a nested repeat's count is not watched: its instances stop at the next
+reconcile). A module's functions come
 only from its own `functions:` and the mount's `functions:` grant, never from its parent
 implicitly.
 

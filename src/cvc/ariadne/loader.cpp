@@ -1464,6 +1464,21 @@ Widget expand_load(Ctx &ctx, const YAML::Node &n) {
       ctx.warn("ari: load '" + uri +
                "': the fragment's init: must be a scalar state_exec script string — ignored");
   }
+  // Its on_tick: too, which the Runtime runs as the mount's own tick resident. The document-level
+  // input lanes stay the document's: a module reacts to its own widgets, and the parent passes on
+  // what else it needs through a link: hole (docs/ARIADNE.md §6.3).
+  if (frag.IsMap() && frag["on_tick"]) {
+    if (frag["on_tick"].IsScalar())
+      wrapper.tick_script = frag["on_tick"].Scalar();
+    else
+      ctx.warn("ari: load '" + uri +
+               "': the fragment's on_tick: must be a scalar state_exec script string — ignored");
+  }
+  for (const char *lane : {"on_key", "on_pointer", "on_signal"})
+    if (frag.IsMap() && frag[lane])
+      ctx.warn("ari: load '" + uri + "': the fragment's " + lane +
+               ": is ignored — only the outermost document receives input and signals; pass "
+               "what the module needs through a link: hole");
   // Only the outermost document takes arguments (doc_args.h); a module reaches them through a hole.
   if (frag.IsMap() && frag["args"])
     ctx.warn("ari: load '" + uri +
@@ -2785,9 +2800,11 @@ void refs_from_script(const std::string &script, std::vector<std::string> &out) 
   } catch (...) {
   }
 }
-// Recurse the widget tree collecting each widget's action-program (`on:`) channel refs.
+// Recurse the widget tree collecting each widget's action-program (`on:`) channel refs, and each
+// mount's on_tick:.
 void refs_from_widget(const Widget &w, std::vector<std::string> &out) {
   refs_from_script(w.on, out);
+  refs_from_script(w.tick_script, out);
   for (const Widget &c : w.children)
     refs_from_widget(c, out);
 }
