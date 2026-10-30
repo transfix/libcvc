@@ -208,6 +208,26 @@ TEST(AriNet, SnapshotSignsInFetchesAndIsRefusedElsewhere) {
   EXPECT_EQ(bearer, 2) << "each run's /user/me carried the host's token";
 }
 
+// A program that works between two requests (a reply parsed, a loop) has no request in flight then,
+// but it is not idle: a one-frame snapshot still waits for the second reply.
+TEST(AriNet, SnapshotWaitsThroughWorkBetweenRequests) {
+  REQUIRE_ARI();
+  LocalHttpServer api(txwtf);
+  TempDir dir;
+  const fs::path doc = dir.write(
+      "busy.ari", document("net", {"first", "second"},
+                           "(state-set \"t.first\" (get-attr (http-get \"" + api.url("/user/me") +
+                               "\") \"status\"))"
+                               " (set i 0) (while (< i 30000) (set i (+ i 1)))"
+                               " (state-set \"t.second\" (get-attr (http-get \"" +
+                               api.url("/user/me") + "\") \"status\"))"));
+  const AriRun r = ari("snapshot --net-allow " + api.origin() + " " + quoted(doc));
+  EXPECT_EQ(r.status, 0) << r.output;
+  EXPECT_NE(r.output.find("first: 401"), std::string::npos) << r.output;
+  EXPECT_NE(r.output.find("second: 401"), std::string::npos) << r.output;
+  EXPECT_EQ(api.requests().size(), 2u);
+}
+
 TEST(AriNet, ACredentialStoreCarriesTheSignInToTheNextRun) {
   REQUIRE_ARI();
   LocalHttpServer api(txwtf);

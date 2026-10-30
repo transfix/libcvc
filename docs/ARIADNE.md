@@ -1574,10 +1574,13 @@ ari run --backend tvision --net-allow https://tx.wtf --credential-store nicotina
 arigl run --net-allow https://tx.wtf --credential-store nicotina share/nicotina/main.ari
 ```
 
-The flags hold for `run`, `snapshot`, `check` and `info` alike. With the network on,
-`ari snapshot` waits after its frames until the document's requests have come back (at most
-10 s) before it prints the frame, so CI can render a document that signs in against a local
-test server; it prints the programs' warnings after the frame, as `arigl snapshot` does.
+The flags hold for `run`, `snapshot`, `check` and `info` alike. With the network on, `ari
+snapshot` and `arigl snapshot` (in a window or with `--terminal`) keep running after their
+frames until the document is idle, no request in flight and no program step waiting (a program
+parsing one reply before it sends the next is not idle), for three steps running, at most 10 s.
+So one frame shows what a document that signs in and fetches brought back, and CI can render it
+against a local test server. `ari snapshot` prints the programs' warnings after the frame, as
+`arigl snapshot` does.
 
 | flag | what |
 |---|---|

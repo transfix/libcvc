@@ -50,10 +50,10 @@
 // --net-policy FILE and --credential-store NAME|PATH (net_host.h; docs/ARIADNE.md §10.3). Then the
 // document's programs get the http verbs, every request checked against the allowed origins, and
 // the host keeps any credential they sign in with, out of the document's reach. With it on,
-// snapshot waits after its frames until the document's requests have come back (at most 10 s).
+// snapshot waits after its frames until the document is idle, its requests back and its programs
+// done (AppRuntime::settle, at most 10 s).
 
 #include <algorithm>
-#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/ariadne/app_runtime.h>
@@ -66,11 +66,9 @@
 #include <cvc/ariadne/tvision_backend.h>
 #include <cvc/core/app.h>
 #include <cvc/image/image.h>
-#include <cvc/state/state_exec/async_host.h> // in_flight: snapshot waits for requests
 #include <exception>
 #include <memory>
 #include <string>
-#include <thread>
 #include <vector>
 
 namespace {
@@ -95,8 +93,8 @@ int usage(int code) {
                "or --credential-env turns it on, for run, snapshot and check alike and with\n"
                "either backend. Then the document may reach only the origins allowed, and\n"
                "sign-in tokens stay with ari: a request names one (auth:, a credential value),\n"
-               "it never sees it. With it on, snapshot waits after its frames for the\n"
-               "document's requests to come back (at most 10 s).\n",
+               "it never sees it. With it on, snapshot waits after its frames until the\n"
+               "document's requests are back and its programs idle (at most 10 s).\n",
                cvc::ariadne::host_flags_help().c_str());
   return code;
 }
@@ -115,21 +113,6 @@ cvc::ariadne::FtxuiBackend::Options::ImageColor image_mode(const std::string &s)
   if (s == "mono")
     return Mode::Mono;
   return Mode::Auto;
-}
-
-// snapshot with the network on: drain until no async call (a request) has been in flight for a few
-// drains running, so a document that signs in and then fetches is captured with both replies; at
-// most kSettleSeconds, for a document that never stops asking.
-constexpr double kSettleSeconds = 10.0;
-
-void settle_async_calls(cvc::app &app, cvc::ariadne::AppRuntime &rt) {
-  using clock = std::chrono::steady_clock;
-  const auto deadline = clock::now() + std::chrono::duration<double>(kSettleSeconds);
-  for (int idle = 0; idle < 3 && clock::now() < deadline;) {
-    rt.drain();
-    idle = app.exec_async_host().in_flight() == 0 ? idle + 1 : 0;
-    std::this_thread::sleep_for(std::chrono::milliseconds(2));
-  }
 }
 
 bool has_flag(const cvc::ariadne::HostOptions &o, const char *flag) {
@@ -337,7 +320,7 @@ int main(int argc, char **argv) {
       frame = backend->render_to_string(rt.runtime(), width, o.height, o.ansi);
     }
     if (o.net.enabled) { // the frame shows what the document's requests brought back
-      settle_async_calls(app, rt);
+      rt.settle([&] { rt.drain(); });
       frame = backend->render_to_string(rt.runtime(), width, o.height, o.ansi);
     }
     if (pixels) { // Sixel draws at screen positions, so the frame starts at the top-left
