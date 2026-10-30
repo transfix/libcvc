@@ -432,6 +432,8 @@ std::string action(const YAML::Node &n) {
 Widget parse_widget(Ctx &ctx, const YAML::Node &n);
 Widget expand_include(Ctx &ctx, const YAML::Node &n);   // §12 include: expand a units: template
 Widget expand_load(Ctx &ctx, const YAML::Node &n);      // §12 load: mount an isolated fragment
+std::vector<HostRequirement> parse_requires(Ctx &ctx, const YAML::Node &n,
+                                            const std::string &where = ""); // §7.6
 Widget parse_document(Ctx &ctx, const YAML::Node &doc); // §12 load: parses a mounted fragment
 Value to_value(const YAML::Node &n); // defined below; used by the Kind::Custom fallback
 
@@ -1495,6 +1497,9 @@ Widget expand_load(Ctx &ctx, const YAML::Node &n) {
       ctx.warn("ari: load '" + uri +
                "': the fragment's on_tick: must be a scalar state_exec script string — ignored");
   }
+  // §7.6 and its requires:, which AppRuntime checks against the host like the document's.
+  if (frag.IsMap())
+    wrapper.requirements = parse_requires(ctx, frag["requires"], "load '" + uri + "': ");
   for (const char *lane : {"on_key", "on_pointer", "on_signal"})
     if (frag.IsMap() && frag[lane])
       ctx.warn("ari: load '" + uri + "': the fragment's " + lane +
@@ -2706,14 +2711,17 @@ LintConfig parse_lint(Ctx &ctx, const YAML::Node &l) {
   return cfg;
 }
 
-// The top-level `requires:` (§7.6): a sequence of names, or {name, optional} maps. The loader only
-// parses it; AppRuntime::load checks it against the host.
-std::vector<HostRequirement> parse_requires(Ctx &ctx, const YAML::Node &n) {
+// A document's or a module's `requires:` (§7.6): a sequence of names, or {name, optional} maps.
+// The loader only parses it; AppRuntime::load checks it against the host. `where` starts each
+// warning ("load 'x.ari': " for a module's).
+std::vector<HostRequirement> parse_requires(Ctx &ctx, const YAML::Node &n,
+                                            const std::string &where) {
   std::vector<HostRequirement> out;
   if (!n)
     return out;
   if (!n.IsSequence()) {
-    ctx.warn("ari: requires: must be a SEQUENCE of names or {name, optional} entries — it is not, "
+    ctx.warn("ari: " + where +
+             "requires: must be a SEQUENCE of names or {name, optional} entries — it is not, "
              "so nothing it lists is checked");
     return out;
   }
@@ -2726,7 +2734,7 @@ std::vector<HostRequirement> parse_requires(Ctx &ctx, const YAML::Node &n) {
       req.optional = flag(e, "optional", false);
     }
     if (req.name.empty()) {
-      ctx.warn("ari: requires: entry with no name — ignored");
+      ctx.warn("ari: " + where + "requires: entry with no name — ignored");
       continue;
     }
     out.push_back(std::move(req));

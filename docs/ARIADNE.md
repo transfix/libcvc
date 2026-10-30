@@ -937,7 +937,10 @@ listed there is not warned about again. `ari check doc.ari` shows both.
 
 A document that can run without something asks for it at run time with `(has? "name")`,
 which answers the same question for a token, a function or a widget type. It works in
-programs and in reactive expressions:
+programs and in reactive expressions. The load-time scan does not follow the guard: a call
+behind `(has? "name")` still warns, until `requires:` lists the name as `optional: true`. So
+the two go together: the entry says the document can do without it, and the guard is how it
+does.
 
 ```yaml
 windows:
@@ -951,6 +954,17 @@ windows:
 
 A host can ask the same thing in C++: `Runtime::has`, `has_function`, `program_names` and
 `host_facts`.
+
+A `load:`ed module (§6.3) may have its own `requires:`, kept on its mount wrapper
+(`Widget::requirements`), and `AppRuntime::load` checks it with the document's:
+
+- A required entry the host lacks fails the whole load. The error names the module:
+  `... requires: room-join (module 'includes.call')`.
+- A missing optional entry warns, also naming the module.
+- An entry covers the calls of the programs in that module and the modules it mounts. The
+  document's own entries cover every program, its modules' included. A module's entries never
+  cover its parent's calls: what a module needs is its own business, and a parent that calls the
+  same verb lists it too.
 
 ### 5.8 Window size, placement and scrolling
 
@@ -1126,7 +1140,8 @@ disambiguated `_2` / `_3`. A mounted module is sandboxed to its own state sub-pr
 (§7) and reaches the parent only through explicitly granted `link:` holes, and calls only the
 functions its mount grants (§6.6).
 
-A module's own programs are its `init:`, its `on_tick:` and its widgets' actions. The loader
+A module's own programs are its `init:`, its `on_tick:` and its widgets' actions. What they need
+from the host goes in the module's own `requires:` (§5.7). The loader
 captures `init:` and `on_tick:` onto the mount wrapper (`Widget::init_script`,
 `Widget::tick_script`), and the runtime runs both at the sub-prefix with the mount's functions:
 `init:` once, `on_tick:` as the mount's own tick resident (§2.3). So a module can own a loop, a
