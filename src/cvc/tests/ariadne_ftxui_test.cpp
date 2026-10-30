@@ -1656,7 +1656,8 @@ TEST(AriadneTvision, JsonFeedDocumentFillsItsHostedWindow) {
     GTEST_SKIP() << "libcvc built without yaml-cpp";
   // The tvision desktop draws the frame and has the shared layout draw the body (render_window),
   // the cells it blits. That layout needs no terminal, so it is checked here with or without
-  // tvision in the build; the desktop itself needs a real terminal.
+  // tvision in the build. The desktop itself needs a terminal: ari_run_json_feed_tvision runs it
+  // in tmux (src/ari/tests/run_in_tmux_test.sh).
   cvc::app app;
   TvisionBackend be;
   AppRuntime art(app, "ui.docs.feed");

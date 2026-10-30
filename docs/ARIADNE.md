@@ -1546,8 +1546,11 @@ windows:
 [`examples/ariadne/documents/json_feed.ari`](../examples/ariadne/documents/json_feed.ari) does
 this with a JSON string in place of the request, so it runs anywhere, `ari` included. Its last
 post has accented letters, CJK and an emoji: in both terminal backends a wide glyph takes two
-columns and the window's edge stays straight (`ariadne_ftxui_test`'s `JsonFeed*` and
-`WideGlyphs*` tests; until this, `ari snapshot`'s plain text put a space after each). All
+columns and the window's edge stays straight. `ari_run_json_feed_ftxui` and
+`ari_run_json_feed_tvision` check that on a real terminal: they run `ari run` in a tmux pane
+(Linux, where tmux is installed) and compare the window's rows. `ariadne_ftxui_test`'s
+`JsonFeed*` and `WideGlyphs*` tests check `ari snapshot` and the tvision backend's hosted layout;
+until they did, `ari snapshot`'s plain text put a space after each wide glyph. All
 three are data jobs: a large reply is parsed and written a slice per step, so it doesn't stall
 a frame. `json-parse` and `json-encode` are pure, so reactive expressions may use them too.
 
