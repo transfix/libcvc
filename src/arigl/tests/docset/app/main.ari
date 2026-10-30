@@ -1,0 +1,17 @@
+# A document set laid out as an app installs one (share/<app>/main.ari) or a site serves one
+# (/apps/<app>/main.ari): main.ari imports from its own directory, from its parent's, and from the
+# component library. arigl's tests run it from another working directory (ctest arigl_docset), and
+# the browser shell's check loads it by URL (docs/CVCGL_WASM.md, "arigl-web").
+
+meta:
+  name: arigl document set
+  min_libcvc: 3.7.4
+
+import:
+  - lib/panel.ari
+  - ../shared/note.ari
+  - cvc://components/display_toggles.ari
+
+windows:
+  - include: panel
+  - include: display_toggles

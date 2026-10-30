@@ -1,0 +1,9 @@
+# Imported by ../main.ari, relative to it.
+units:
+  panel:
+    window: Document set
+    id: docset_panel
+    pos: [320, 32]
+    children:
+      - text: from lib/panel.ari
+      - include: note

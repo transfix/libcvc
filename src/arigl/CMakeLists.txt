@@ -27,7 +27,7 @@ endif()
 # What the host itself draws with, beyond what cvcGL links: VTK's window/interactor and image IO.
 find_package(VTK REQUIRED COMPONENTS RenderingUI IOImage)
 
-add_executable(arigl main.cpp gallery.cpp)
+add_executable(arigl main.cpp gallery.cpp web_document.cpp)
 target_link_libraries(arigl PRIVATE cvc::cvcGL ${VTK_LIBRARIES})
 vtk_module_autoinit(TARGETS arigl MODULES ${VTK_LIBRARIES})
 # Installed bin/arigl finds libcvc, cvcGL and their dependencies in ../lib.
@@ -64,9 +64,24 @@ if(NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
            COMMAND arigl snapshot --frames 2 --png "${CMAKE_CURRENT_BINARY_DIR}/arigl_window.png"
                    "${_arigl_examples}/hello.ari")
   add_test(NAME arigl_check COMMAND arigl check "${_arigl_examples}/hello.ari")
+  # A document set as an app installs one (share/<app>/main.ari), run from another working
+  # directory: its relative imports, out of its own directory and its parent's, resolve against
+  # the importing file's directory. tests/docset is also what the browser shell's check loads.
+  add_test(NAME arigl_docset
+           COMMAND arigl snapshot --terminal --width 90 --height 12 --component-path
+                   "${CMAKE_CURRENT_SOURCE_DIR}/../cvc/ariadne"
+                   "${CMAKE_CURRENT_SOURCE_DIR}/tests/docset/app/main.ari"
+           WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+  set_tests_properties(arigl_docset PROPERTIES
+                       PASS_REGULAR_EXPRESSION "from shared/note.ari"
+                       FAIL_REGULAR_EXPRESSION "could not be resolved;unknown unit")
+  # A URL names a document for the browser shell; natively arigl says so.
+  add_test(NAME arigl_url_document COMMAND arigl check https://example.invalid/app/main.ari)
+  set_tests_properties(arigl_url_document PROPERTIES
+                       PASS_REGULAR_EXPRESSION "arigl runs a document from a path")
   set_tests_properties(
     arigl_terminal_snapshot arigl_document_args arigl_rejects_bad_document_args
-    arigl_terminal_stream_view arigl_window_snapshot arigl_check
+    arigl_terminal_stream_view arigl_window_snapshot arigl_check arigl_docset arigl_url_document
     PROPERTIES RESOURCE_LOCK cvcgl_gl_context
                SKIP_REGULAR_EXPRESSION "built without FTXUI;built without yaml-cpp")
 endif()
@@ -83,7 +98,7 @@ if(EMSCRIPTEN)
   set(CVC_ARIGL_WASM_DOC "${CMAKE_CURRENT_SOURCE_DIR}/../../examples/ariadne/documents/conference_roster.ari"
       CACHE FILEPATH "The .ari document cyprty, arigl's browser build, embeds")
   get_filename_component(_arigl_doc_name "${CVC_ARIGL_WASM_DOC}" NAME)
-  add_executable(cyprty EXCLUDE_FROM_ALL main.cpp gallery.cpp)
+  add_executable(cyprty EXCLUDE_FROM_ALL main.cpp gallery.cpp web_document.cpp)
   target_link_libraries(cyprty PRIVATE cvc::cvcGL ${VTK_LIBRARIES})
   vtk_module_autoinit(TARGETS cyprty MODULES ${VTK_LIBRARIES})
   # The same link options as the gallery demos (examples/CMakeLists.txt): each keeps its own loop
@@ -118,19 +133,9 @@ if(EMSCRIPTEN)
     add_dependencies(wasm-extra-demos cyprty)
   endif()
 
-  # arigl itself, in the examples' browser gallery (examples/web), is the gallery's Ariadne app:
-  # every .ari demo there is arigl opened on its document (<gallery>/arigl/?doc=<name>), and its
-  # Demos menu switches between them in place. So the documents, the component library and their
-  # data go into its file system, under the paths examples/web/demos.json's "arigl" boot entry and
-  # build-pages.py's gallery.json name, and it joins the gallery's wasm-demos. A wasm build without
-  # the examples leaves arigl as it is.
-  set(_arigl_examples "${CMAKE_CURRENT_SOURCE_DIR}/../../examples")
-  if(TARGET wasm-demos AND EXISTS "${_arigl_examples}/ariadne/documents")
-    target_link_options(arigl PRIVATE
-      # One arigl.data package beside it (build-pages.py ships it): Emscripten won't mix
-      # --preload-file with --embed-file, and the datasets are too big to embed in the module.
-      "--preload-file=${_arigl_examples}/ariadne/documents@/ariadne/documents"
-      "--preload-file=${CMAKE_CURRENT_SOURCE_DIR}/../cvc/ariadne/components@/components"
+  # arigl itself in a browser, linked as the gallery demos are: it keeps its own loop and yields
+  # with emscripten_sleep (Asyncify), the heap grows, and cvc::net fetches with -sFETCH.
+  set(_arigl_wasm_link
       -sASYNCIFY=1
       -sASYNCIFY_STACK_SIZE=131072
       -sALLOW_MEMORY_GROWTH=1
@@ -138,15 +143,34 @@ if(EMSCRIPTEN)
       -sSTACK_SIZE=2097152
       -sEXIT_RUNTIME=0
       -sFETCH=1)
+  if(CVC_WASM_PTHREADS)
+    list(APPEND _arigl_wasm_link -sPTHREAD_POOL_SIZE=4)
+  endif()
+  set(_arigl_components "${CMAKE_CURRENT_SOURCE_DIR}/../cvc/ariadne/components")
+  file(GLOB _arigl_component_files CONFIGURE_DEPENDS "${_arigl_components}/*.ari")
+
+  # In the examples' browser gallery (examples/web), arigl is the gallery's Ariadne app: every
+  # .ari demo there is arigl opened on its document (<gallery>/arigl/?doc=<name>), and its Demos
+  # menu switches between them in place. So the documents, the component library and their data
+  # go into its file system, under the paths examples/web/demos.json's "arigl" boot entry and
+  # build-pages.py's gallery.json name, and it joins the gallery's wasm-demos.
+  #
+  # A wasm build without the examples makes arigl-web instead (the next branch): the stock
+  # browser host for anyone's documents.
+  set(_arigl_examples "${CMAKE_CURRENT_SOURCE_DIR}/../../examples")
+  if(TARGET wasm-demos AND EXISTS "${_arigl_examples}/ariadne/documents")
+    target_link_options(arigl PRIVATE
+      # One arigl.data package beside it (build-pages.py ships it): Emscripten won't mix
+      # --preload-file with --embed-file, and the datasets are too big to embed in the module.
+      "--preload-file=${_arigl_examples}/ariadne/documents@/ariadne/documents"
+      "--preload-file=${_arigl_components}@/components"
+      ${_arigl_wasm_link})
     if(EXISTS "${_arigl_examples}/data") # the FEM gallery's datasets
       target_link_options(arigl PRIVATE "--preload-file=${_arigl_examples}/data@/data")
     endif()
-    if(CVC_WASM_PTHREADS)
-      target_link_options(arigl PRIVATE -sPTHREAD_POOL_SIZE=4)
-    endif()
     # Re-embed when a document or component changes.
     file(GLOB _arigl_embedded CONFIGURE_DEPENDS "${_arigl_examples}/ariadne/documents/*.ari"
-         "${CMAKE_CURRENT_SOURCE_DIR}/../cvc/ariadne/components/*.ari")
+         "${_arigl_components}/*.ari")
     set_property(TARGET arigl APPEND PROPERTY LINK_DEPENDS ${_arigl_embedded})
     if(COMMAND cvcgl_wasm_app)
       cvcgl_wasm_app(arigl)
@@ -163,7 +187,7 @@ if(EMSCRIPTEN)
     # visible here.)
     find_package(ftxui CONFIG QUIET)
     if(TARGET ftxui::screen)
-      add_executable(arigl_term EXCLUDE_FROM_ALL main.cpp gallery.cpp)
+      add_executable(arigl_term EXCLUDE_FROM_ALL main.cpp gallery.cpp web_document.cpp)
       target_link_libraries(arigl_term PRIVATE cvc::cvcGL ${VTK_LIBRARIES})
       vtk_module_autoinit(TARGETS arigl_term MODULES ${VTK_LIBRARIES})
       target_compile_definitions(arigl_term PRIVATE CVC_ARIGL_WASM_TERMINAL=1)
@@ -187,5 +211,24 @@ if(EMSCRIPTEN)
       file(GENERATE OUTPUT "$<TARGET_FILE_DIR:arigl_term>/arigl_term.html"
            INPUT "${CMAKE_CURRENT_SOURCE_DIR}/web/arigl_term.html")
     endif()
+  else()
+    # arigl-web: the stock browser host (cvcpkg/recipes/arigl-web). It carries no documents of its
+    # own: its page, web/arigl-web.{html,js,css} (the html shipped as index.html), runs the one
+    # ?src= names, which arigl fetches with the files it imports into MEMFS at their URL paths
+    # (web_document.h). Only the component library is built in, embedded where an install keeps
+    # it (<prefix>/share/libcvc/ariadne), so cvc://components/... resolves with no download.
+    target_link_options(arigl PRIVATE
+      "--embed-file=${_arigl_components}@/usr/share/libcvc/ariadne/components"
+      ${_arigl_wasm_link})
+    target_compile_definitions(arigl PRIVATE
+                               CVC_ARIGL_COMPONENT_DIR="/usr/share/libcvc/ariadne")
+    set_property(TARGET arigl APPEND PROPERTY LINK_DEPENDS ${_arigl_component_files})
+    if(COMMAND cvcgl_wasm_app)
+      cvcgl_wasm_app(arigl)
+    endif()
+    foreach(_f arigl-web.html arigl-web.js arigl-web.css)
+      file(GENERATE OUTPUT "$<TARGET_FILE_DIR:arigl>/${_f}"
+           INPUT "${CMAKE_CURRENT_SOURCE_DIR}/web/${_f}")
+    endforeach()
   endif()
 endif()
