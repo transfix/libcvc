@@ -10,6 +10,7 @@
 #include <boost/program_options.hpp>
 #include <charconv>
 #include <cvc/ariadne/host_cli.h>
+#include <cvc/net/net_policy.h>
 
 namespace cvc {
 namespace ariadne {
@@ -18,10 +19,12 @@ namespace {
 
 namespace po = boost::program_options;
 
-constexpr const char *kValueFlags[] = {"--prefix",   "--component-path", "--backend",  "--fps",
-                                       "--width",    "--height",         "--frames",   "--png",
-                                       "--graphics", "--image",          "--cell-size"};
-constexpr const char *kBoolFlags[] = {"--no-mouse", "--ansi"};
+constexpr const char *kValueFlags[] = {
+    "--prefix",     "--component-path",  "--backend",   "--fps",
+    "--width",      "--height",          "--frames",    "--png",
+    "--graphics",   "--image",           "--cell-size", "--net-allow",
+    "--net-policy", "--credential-store"};
+constexpr const char *kBoolFlags[] = {"--no-mouse", "--ansi", "--net"};
 
 bool is_general_flag(const std::string &a) {
   const std::string name = a.substr(0, a.find('='));
@@ -83,6 +86,8 @@ bool apply(const po::option &opt, HostOptions &o) {
     o.mouse = false;
   } else if (a == "--ansi") {
     o.ansi = true;
+  } else if (a == "--net") {
+    o.net.enabled = true;
   } else if (!is_general_flag(a)) {
     o.extra_flags.push_back(a); // one of the runtime's own
   } else if (a == "--fps" || a == "--width" || a == "--height" || a == "--frames") {
@@ -124,6 +129,24 @@ bool apply(const po::option &opt, HostOptions &o) {
     }
     o.cell_w = w;
     o.cell_h = h;
+  } else if (a == "--net-allow") {
+    std::string why;
+    if (!cvc::net::parse_origin_spec(value, &why)) {
+      o.error = "--net-allow: " + why;
+      return false;
+    }
+    o.net.allow.push_back(value);
+    o.net.enabled = true;
+  } else if (a == "--net-policy") {
+    o.net.policy_files.push_back(value);
+    o.net.enabled = true;
+  } else if (a == "--credential-store") {
+    if (value.empty()) {
+      o.error = "--credential-store needs a name or a path";
+      return false;
+    }
+    o.net.credential_store = value;
+    o.net.enabled = true;
   }
   return true;
 }
@@ -199,7 +222,13 @@ std::string host_flags_help() {
          "  --png FILE             snapshot: also write a PNG\n"
          "  --graphics MODE        images in a terminal: auto, kitty, sixel, iterm, color or mono\n"
          "  --image NAME=FILE      publish FILE's picture as NAME, for image: widgets\n"
-         "  --cell-size WxH        snapshot: a terminal cell's size in pixels\n";
+         "  --cell-size WxH        snapshot: a terminal cell's size in pixels\n"
+         "  --net                  let the document use the network (off by default); in a\n"
+         "                         browser it may reach the page's own origin\n"
+         "  --net-allow ORIGIN     ... and reach ORIGIN, scheme://host[:port] (repeatable)\n"
+         "  --net-policy FILE      ... with the allow and credential lines in FILE (repeatable)\n"
+         "  --credential-store S   keep sign-in credentials across runs in S: a name in the\n"
+         "                         user's config dir, or a path (not in a browser)\n";
 }
 
 std::string misplaced_flag_note(const std::string &runtime,

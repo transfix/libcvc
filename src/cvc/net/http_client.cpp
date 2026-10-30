@@ -5,7 +5,10 @@
 
 #include "http_backends.h"
 
+#include <algorithm>
+#include <cctype>
 #include <cvc/net/http_client.h>
+#include <cvc/net/net_policy.h>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -75,28 +78,148 @@ bool method_is_valid(const std::string &m) {
   return true;
 }
 
-} // namespace
-
 // The dispatcher NORMALIZES every request before it reaches a backend, so the curl (native) and
 // fetch (wasm) transports see one identical, well-formed request — the "same code on both targets"
 // contract this facade promises. Without this the two diverge: an empty method becomes GET on fetch
 // but POST-with-body on curl; a GET/HEAD body is sent by curl but dropped by XHR; a >31-char verb
-// is truncated only on wasm. We settle all three here, once, rather than in each backend.
-HttpResponse send(const HttpRequest &in) {
-  HttpRequest req = in; // a working copy we may normalize
+// is truncated only on wasm. We settle all three here, once, rather than in each backend. False
+// (with `err` the reply) for a method no backend may send.
+bool normalize(HttpRequest &req, HttpResponse &err) {
   if (req.method.empty())
     req.method = "GET"; // the documented default, made explicit so both backends agree
   if (!method_is_valid(req.method)) {
-    HttpResponse r;
-    r.ok = false;
-    r.status = 0;
-    r.canonical_url = req.url;
-    r.error = "cvc::net: invalid HTTP method";
-    return r;
+    err.ok = false;
+    err.status = 0;
+    err.canonical_url = req.url;
+    err.error = "cvc::net: invalid HTTP method";
+    return false;
   }
   if (method_forbids_body(req.method))
     req.body.clear(); // GET/HEAD carry no body on either transport
+  return true;
+}
+
+HttpResponse refused(const std::string &url, const std::string &why) {
+  HttpResponse r;
+  r.ok = false;
+  r.status = 0;
+  r.canonical_url = url;
+  r.error = "cvc::net: refused: " + why;
+  return r;
+}
+
+bool redirect_status(long status) {
+  return status == 301 || status == 302 || status == 303 || status == 307 || status == 308;
+}
+
+// Whether the "Name: value" line `line` is a `name` header (case-insensitive).
+bool header_named(const std::string &line, const char *name) {
+  const std::size_t colon = line.find(':');
+  return colon != std::string::npos && method_ieq(line.substr(0, colon), name);
+}
+
+// `ref` (a Location value) resolved against the http(s) URL `base` (RFC 3986 section 5.2, without
+// dot-segment removal, which only the server reads).
+std::string resolve_reference(const std::string &base, const std::string &ref) {
+  const std::size_t colon = ref.find(':');
+  if (colon != std::string::npos && colon > 0 && ref.find_first_of("/?#") > colon) {
+    bool scheme = std::isalpha(static_cast<unsigned char>(ref[0])) != 0;
+    for (std::size_t i = 1; i < colon && scheme; ++i) {
+      const char c = ref[i];
+      scheme = std::isalnum(static_cast<unsigned char>(c)) || c == '+' || c == '-' || c == '.';
+    }
+    if (scheme)
+      return ref; // absolute
+  }
+  const std::size_t sep = base.find("://");
+  if (ref.rfind("//", 0) == 0)
+    return base.substr(0, sep + 1) + ref; // network-path reference
+  const std::size_t path_at = std::min(base.find_first_of("/?#", sep + 3), base.size());
+  const std::string origin = base.substr(0, path_at);
+  std::string path = base.substr(path_at);
+  path.resize(std::min(path.find('#'), path.size()));
+  if (ref.empty())
+    return origin + path;
+  if (ref[0] == '#')
+    return origin + path + ref;
+  path.resize(std::min(path.find('?'), path.size()));
+  if (ref[0] == '?')
+    return origin + (path.empty() ? "/" : path) + ref;
+  if (ref[0] == '/')
+    return origin + ref;
+  if (path.empty())
+    path = "/";
+  return origin + path.substr(0, path.rfind('/') + 1) + ref;
+}
+
+} // namespace
+
+HttpResponse send(const HttpRequest &in) {
+  HttpRequest req = in; // a working copy we may normalize
+  HttpResponse err;
+  if (!normalize(req, err))
+    return err;
   return current_client()->send(req);
+}
+
+HttpResponse send(const HttpRequest &in, const NetPolicy &policy) {
+  HttpRequest req = in;
+  HttpResponse err;
+  if (!normalize(req, err))
+    return err;
+  std::string why;
+  if (!policy.allows_url(req.url, &why))
+    return refused(req.url, why);
+  const std::shared_ptr<HttpClient> client = current_client();
+  if (client->follows_redirects_itself())
+    return client->send(req);
+  const bool follow = req.follow_redirects;
+  req.follow_redirects = false; // every hop comes back here to be checked
+  for (long hops = 0;; ++hops) {
+    HttpResponse r = client->send(req);
+    if (!follow || !r.ok || !redirect_status(r.status))
+      return r;
+    const std::string location = response_header(r.headers, "Location");
+    if (location.empty())
+      return r;
+    if (hops >= req.max_redirects) {
+      r.ok = false;
+      r.error = "cvc::net: more than " + std::to_string(req.max_redirects) + " redirects";
+      return r;
+    }
+    const std::string next = resolve_reference(req.url, location);
+    if (!policy.allows_url(next, &why))
+      return refused(next, "a redirect from " + req.url + ": " + why);
+    if (parse_origin(next) != parse_origin(req.url))
+      std::erase_if(req.headers, [](const std::string &h) {
+        return header_named(h, "Authorization") || header_named(h, "Cookie") ||
+               header_named(h, "Proxy-Authorization");
+      });
+    const bool to_get = (r.status == 303 && !method_ieq(req.method, "HEAD")) ||
+                        ((r.status == 301 || r.status == 302) && method_ieq(req.method, "POST"));
+    if (to_get) {
+      req.method = "GET";
+      req.body.clear();
+      std::erase_if(req.headers, [](const std::string &h) {
+        return header_named(h, "Content-Type") || header_named(h, "Content-Length");
+      });
+    }
+    req.url = next;
+  }
+}
+
+std::string response_header(const std::vector<std::string> &lines, const std::string &name) {
+  for (const std::string &line : lines) {
+    const std::size_t colon = line.find(':');
+    if (colon == std::string::npos || !method_ieq(line.substr(0, colon), name.c_str()))
+      continue;
+    const std::size_t b = line.find_first_not_of(" \t", colon + 1);
+    if (b == std::string::npos)
+      return std::string();
+    const std::size_t e = line.find_last_not_of(" \t\r");
+    return line.substr(b, e - b + 1);
+  }
+  return std::string();
 }
 
 void set_http_client(std::unique_ptr<HttpClient> client) {

@@ -1364,14 +1364,16 @@ endif()
 # (libcurl native / Emscripten fetch wasm). Ariadne's http(s):// URI handler and the §13.9 HTTP cache
 # are thin adapters over it, so they work identically on both targets. All three TUs are always
 # compiled; the inactive backend #ifdefs to empty, so exactly one make_default_backend() links.
-list(APPEND SOURCE_FILES net/http_client.cpp net/http_client_curl.cpp net/http_client_fetch.cpp)
-list(APPEND INCLUDE_FILES ../../inc/cvc/net/http_client.h)
+list(APPEND SOURCE_FILES net/http_client.cpp net/http_client_curl.cpp net/http_client_fetch.cpp
+  net/net_policy.cpp net/credentials.cpp)
+list(APPEND INCLUDE_FILES ../../inc/cvc/net/http_client.h ../../inc/cvc/net/net_policy.h
+  ../../inc/cvc/net/credentials.h)
 
 # Ariadne — the context-agnostic UI/scene DSL core (cvc::ariadne). Pure libcvc:
 # the retained Widget tree, the Runtime + reconcile boundary, and direct
 # cvc::state binding, walking a pluggable Backend. It touches NO VTK/ImGui/GL —
 # the ImGui-over-VTK backend lives in cvcGL (src/cvcGL/ariadne). Roadmap §16.1.
-list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/conference/room_write_gate.cpp ariadne/conference/room_rungs.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/keys.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/requires.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp ariadne/tf_editor_emit.cpp)
+list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/net_host.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/conference/room_write_gate.cpp ariadne/conference/room_rungs.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/keys.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/requires.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp ariadne/tf_editor_emit.cpp)
 list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/widget.h
   ../../inc/cvc/ariadne/backend.h
@@ -1393,6 +1395,7 @@ list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/uri_http.h
   ../../inc/cvc/ariadne/uri_http_cache.h
   ../../inc/cvc/ariadne/net_intrinsics.h
+  ../../inc/cvc/ariadne/net_host.h
   ../../inc/cvc/ariadne/stream_intrinsics.h
   ../../inc/cvc/ariadne/conference/room_intrinsics.h
   ../../inc/cvc/ariadne/conference/room_media_intrinsics.h

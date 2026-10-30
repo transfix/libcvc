@@ -21,11 +21,16 @@
 //   --graphics MODE       how images draw in a terminal: auto, kitty, sixel, color or mono
 //   --image NAME=FILE     publish the picture in FILE under NAME, for image: widgets (repeatable)
 //   --cell-size WxH       snapshot: a terminal cell's size in pixels, where it can't be asked
+//   --net                 let the document use the network (net_host.h); off by default
+//   --net-allow ORIGIN    ... and reach ORIGIN (repeatable; implies --net)
+//   --net-policy FILE     ... with FILE's allow and credential lines (repeatable; implies --net)
+//   --credential-store S  keep credentials across runs in S, a name or a path (implies --net)
 //
 // boost::program_options reads them: --flag VALUE and --flag=VALUE both work, and an unknown flag
 // or one missing its value is an error.
 #pragma once
 
+#include <cvc/ariadne/net_host.h> // NetHostConfig
 #include <string>
 #include <utility>
 #include <vector>
@@ -48,6 +53,7 @@ struct HostOptions {
   std::string graphics; // empty = auto (FtxuiBackend::Options::ImageColor)
   std::vector<std::pair<std::string, std::string>> images; // --image NAME=FILE, in order
   int cell_w = 0, cell_h = 0;                              // --cell-size; 0 = ask the terminal
+  NetHostConfig net;                    // --net, --net-allow, --net-policy, --credential-store
   std::vector<std::string> extra_flags; // the runtime's own flags that were given
   bool help = false;                    // -h / --help, or `help` as the command
   std::string error;                    // a usage error: print it with the usage and exit 2

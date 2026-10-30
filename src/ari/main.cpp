@@ -44,6 +44,11 @@
 // a picture for the document's `image:` widgets with `src: NAME`. With --ansi and --graphics kitty
 // or sixel, snapshot also prints the images, after clearing the screen, at the terminal's cell size
 // in pixels (--cell-size WxH where it can't be asked).
+//
+// The network is off unless a flag turns it on: --net, --net-allow ORIGIN (repeatable),
+// --net-policy FILE and --credential-store NAME|PATH (net_host.h; docs/ARIADNE.md §10.3). Then the
+// document's programs get the http verbs, every request checked against the allowed origins, and
+// the host keeps any credential they sign in with, out of the document's reach.
 
 #include <algorithm>
 #include <cstdio>
@@ -79,7 +84,11 @@ int usage(int code) {
                "info prints what this host provides: the terminal (size, colours, kitty / Sixel\n"
                "graphics), what libcvc was built with, the capabilities a document's requires:\n"
                "and (has? ...) see, and how many functions programs can call (--functions lists\n"
-               "them; --json prints it all as JSON).\n",
+               "them; --json prints it all as JSON).\n"
+               "\n"
+               "The network is off unless --net, --net-allow, --net-policy or --credential-store\n"
+               "turns it on. Then the document may reach only the origins allowed, and sign-in\n"
+               "tokens stay with ari: a request names one (auth:), it never sees it.\n",
                cvc::ariadne::host_flags_help().c_str());
   return code;
 }
@@ -139,6 +148,10 @@ int print_info(const cvc::ariadne::HostOptions &o) {
   ari::register_stream_view_widget(*backend, app);
   ari::AppRuntime rt(app, o.prefix.empty() ? "ui.docs.ari" : o.prefix);
   rt.set_backend(*backend);
+  if (const std::string error = rt.enable_net(o.net); !error.empty()) {
+    std::fprintf(stderr, "ari: %s\n", error.c_str());
+    return 2;
+  }
   rt.register_verb("quit", [] {}); // every document gets (quit)
   ari::HostInfo term;
   ari::describe_terminal(term);
@@ -241,6 +254,10 @@ int main(int argc, char **argv) {
   ari::register_stream_view_widget(*backend, app);
   ari::AppRuntime rt(app, o.prefix.empty() ? "ui.docs.ari" : o.prefix);
   rt.set_backend(*backend);
+  if (const std::string error = rt.enable_net(o.net); !error.empty()) {
+    std::fprintf(stderr, "ari: %s\n", error.c_str());
+    return 2;
+  }
   for (const std::string &d : o.component_paths)
     rt.add_component_path(d);
   rt.on("quit", [&] { rt.request_close(); });

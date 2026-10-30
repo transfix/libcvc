@@ -1036,8 +1036,9 @@ resolver ([`inc/cvc/ariadne/uri.h`](../inc/cvc/ariadne/uri.h)):
 - **`file://`** — built-in, app-free.
 - **`state://…?value | ?data | ?children`** — reads from the `cvc::state` tree
   ([`uri_state.cpp`](../src/cvc/ariadne/uri_state.cpp)).
-- **`http(s)://`** — **opt-in**: a host must call `register_http_uri_handler()` (or the
-  cached variant, §10). It is *not* registered by default — see the caveats (§11).
+- **`http(s)://`** — **opt-in**: registered when the host turns the network on (`ari` /
+  `arigl --net-allow ...`, §10.3), or by a host calling `register_http_uri_handler()` (or the
+  cached variant). It is *not* registered by default — see the caveats (§11).
 - **`cvc://<relpath>`** — a location-independent component path, searched along
   `$CVC_ARIADNE_PATH` → host-supplied extra dirs → the install datadir
   `<prefix>/share/libcvc/ariadne` → cwd (`register_cvc_uri_handler`). Use this for
@@ -1499,20 +1500,115 @@ In an Ariadne document's action lane, the network verbs are (from
   `METHOD` verb), and the scheme-agnostic `fetch` / `fetch-async`.
 - Options are a dict: `query`, `headers`, `body`, and `form` (form is url-encoded with a
   default `Content-Type`). Query values are url-encoded for you; there are `url-encode` /
-  `url-decode` core builtins if you need them directly.
-- The reply is a dict: `{ok, status, body, url, headers, error}` (`body` is raw bytes).
+  `url-decode` core builtins if you need them directly. Two more, `auth` and `capture_auth`,
+  use the host's credentials (§10.3).
+- The reply is a dict with every key present:
+
+  | key | what |
+  |---|---|
+  | `ok` | the transport worked (a reply came back), whatever its status |
+  | `status` | the HTTP status, `0` when no reply came |
+  | `body` | the body, as bytes |
+  | `url` | the URL the reply came from |
+  | `headers` | the reply's header lines (`"Name: value"`), in order |
+  | `header_map` | the same as a dict, lowercased name → value (repeats joined with `", "`) |
+  | `content_type` | the `Content-Type` header, `""` when there is none |
+  | `captured` | whether `capture_auth` kept a credential from this reply |
+  | `error` | why the request failed, or why `capture_auth` kept nothing; `""` otherwise |
+
 - They are async functions on the app's exec scheduler (`app::exec_async_host()`,
   [STATE_EXEC_EXCEPTIONS.md](STATE_EXEC_EXCEPTIONS.md) section 3): the request runs on the
   app's background task pool and the calling program parks at the call, at any depth, so the
   action lane never blocks the frame. The `-async` verbs return a future you `await`
   (optionally with a timeout in seconds) or pass to `await-all`.
-- A failed send is still a reply with `ok` `#f` and `error` set, not an exception. A call is
-  charged to its program's `max_time` while it waits, and a killed or reaped program's call is
-  cancelled.
+- A failed send is still a reply with `ok` `#f` and `error` set, not an exception; so is a
+  request the host's policy refuses. A killed or reaped program's call is cancelled.
+- They are I/O calls (`async_options::io`, STATE_EXEC_EXCEPTIONS.md 3.8): a call is charged
+  one step, not the request's wall time or the transport's CPU. One HTTPS request takes a
+  100-300 ms round trip and about 16 ms of CPU (the TLS handshake and the CA store, some
+  130,000 steps), while an action's default budget is 5000 steps and 0.1 s
+  (`ariadne.limits.*`, §2), so charged like other calls no action could make one. The
+  transport's own timeouts (10 s to connect, 30 s in all) and its 64 MiB reply cap bound a
+  request instead.
 
-See [`ariadne-async-await-arc`] in the roadmap for how `await` threads through the drain
-lane. **Note (§11):** these verbs are currently registered only in the Ariadne action
-lane, and no default host registers an `http(s)://` URI handler — see the caveats.
+### 10.3 The host's network: the allowlist and credentials
+
+A document reaches the network only when its host turns it on. `ari` and `arigl` take four
+flags before the document path ([`host_cli.h`](../inc/cvc/ariadne/host_cli.h)), so a launcher
+script gives a document the network without any code of its own:
+
+```sh
+arigl run --net-allow https://tx.wtf --credential-store nicotina share/nicotina/main.ari
+```
+
+| flag | what |
+|---|---|
+| `--net` | turn the network on (off by default); in a browser the page's own origin is allowed |
+| `--net-allow ORIGIN` | allow requests to `ORIGIN`, `scheme://host[:port]` (repeatable; implies `--net`) |
+| `--net-policy FILE` | read `allow` and `credential` lines from `FILE` (repeatable; implies `--net`) |
+| `--credential-store S` | keep credentials across runs in `S` (implies `--net`; not in a browser) |
+
+Without them a document has no `http-get` or `http-request`, and an `http(s)://` URI does not
+resolve. With them the host ([`net_host.h`](../inc/cvc/ariadne/net_host.h), `enable_net`):
+
+- **checks every request against the allowlist.** An origin is a scheme, a host and a port.
+  A request whose URL's origin is not on the list is not made: the reply has `ok` `#f` and an
+  `error` naming the origin. Redirects are followed by the host, not the transport, and each
+  hop is checked the same way; a hop to another origin drops `Authorization`, `Cookie` and
+  `Proxy-Authorization`. URLs are parsed strictly: only `http` and `https`, no user info, no
+  backslash, space or control byte, and an ASCII host (punycode for an international name).
+  In a browser the browser follows redirects, so only the first URL is checked there; CORS
+  and the browser's own rule of dropping `Authorization` on a cross-origin hop bound the
+  rest.
+- **registers the verbs and the `http(s)://` URI handler** with that allowlist, so
+  `import:` of an https URL and `(fetch "https://...")` are checked too.
+- **keeps a credential store** ([`credentials.h`](../inc/cvc/net/credentials.h)) of bearer
+  tokens by name. A document never holds one:
+  - `(http-get url (dict "auth" "txwtf"))` has the host add `Authorization: Bearer <token>`
+    for credential `txwtf` as the request is sent, if the credential is bound to the URL's
+    origin. Otherwise the request is not sent and the reply's `error` says
+    `no credential 'txwtf' for <origin> (sign in first)`. Any copy of the token the reply
+    echoes is replaced with `[redacted]`. `auth` and an `Authorization` header together are
+    an error.
+  - `(http-request "POST" url (dict "form" ... "capture_auth" (dict "name" "txwtf" "field"
+    "token")))` has the host take the JSON string at `field` (object keys joined by `.`;
+    `token` by default) from a 2xx reply, keep it as credential `txwtf`, and put
+    `"[redacted]"` in its place in the body, every other byte as it was. `captured` says
+    whether it was kept.
+  - A request with either option does not follow redirects.
+  - `(net-auth-has? NAME [URL])` asks whether the host has the credential (for URL's origin),
+    `(net-auth-forget NAME)` drops it (from the file too) and `(net-auth-clear)` drops them
+    all. `(net-allowed? URL)` asks whether a request to URL may be made.
+  - A credential is bound to the origin it was captured from, unless the policy binds its
+    name to a list of origins (below). A token is a bearer token as RFC 6750 writes one,
+    16 to 4096 characters, so it can never split a header line.
+  - So a token reaches neither the document's variables nor the state tree (which a state
+    transport replicates), and no error message or log line quotes one.
+- **keeps credentials across runs with `--credential-store`.** A plain name (`nicotina`) is a
+  file of that name in the user's config directory: `$XDG_CONFIG_HOME/cvc/credentials` or
+  `~/.config/cvc/credentials`, `%LOCALAPPDATA%\cvc\credentials` on Windows. Anything else
+  is a path. The file holds one `<name> <origin> <token>` line each, written owner-only (0600
+  in a 0700 directory) and replaced whole on each change; the host refuses to read one that
+  another user owns or that others can read. In a browser credentials live in memory only.
+
+A policy file holds one directive a line, `#` starting a comment:
+
+```text
+allow https://tx.wtf
+allow https://media.tx.wtf
+credential txwtf https://tx.wtf https://api.tx.wtf   # where credential txwtf may go
+```
+
+Every origin a `credential` line names must also be allowed. A document says it needs the
+network with the capability tokens `net` (the host turned it on), `net.auth` (it keeps
+credentials) and `net.auth.persist` (it keeps them across runs), in `requires:` or with
+`(has? "net")` (§5.7). `ari info` and `arigl info` show the allowlist and where credentials
+are kept.
+
+A host of its own turns the network on with `AppRuntime::enable_net(NetHostConfig)` or
+`AriRuntime::enable_net`, before `load()`; the runtime turns it off again when it is
+destroyed. `register_net_intrinsics(app)` alone still registers unchecked verbs with no
+credentials, for an embedding program that vouches for its documents.
 
 ---
 
@@ -1521,25 +1617,23 @@ lane, and no default host registers an `http(s)://` URI handler — see the cave
 State plainly so authors are not misled. Each item cites the code; the roadmap items
 below (G17–G21 in the internal gap report) are tracked for reconciliation.
 
-- **`http(s)://` is opt-in and no default host registers a handler.**
-  `register_http_uri_handler` ([`uri_http.cpp`](../src/cvc/ariadne/uri_http.cpp)) and the
-  cached variant are called only by unit tests today. Until a host installs one,
-  `import:` / `load:` over http and `fetch("http://…")` fail with an unknown-scheme error.
-  `AriRuntime` registers `cvc://` but not http — treat the http handler as a host
-  responsibility.
+- **`http(s)://` resolves only where the host turned the network on** (§10.3). `ari` and
+  `arigl` register the handler, checked against their allowlist, when given `--net` or its
+  kin; otherwise `import:` / `load:` over http and `fetch("http://…")` fail with an
+  unknown-scheme error.
 - **The §13.9 HTTP cache is implemented and unit-tested but wired into nothing**
   (`register_cached_http_uri_handler`,
-  [`uri_http_cache.cpp`](../src/cvc/ariadne/uri_http_cache.cpp)). Even once installed, the
-  primary `http-get*` verbs go straight to `cvc::net::send` and bypass it; only
-  `fetch`/`fetch-async` route through the resolver where the cache lives.
-- **The network verbs are not reachable from `pycvc.Exec` or `AriRuntime`.** They live in
-  the Ariadne Runtime action lane only; neither the Exec env nor `AriRuntime` calls
-  `register_net_intrinsics`. A pycvc author registers a `register_async_fn` HTTP wrapper
-  instead.
+  [`uri_http_cache.cpp`](../src/cvc/ariadne/uri_http_cache.cpp)), and it does not check a
+  `NetPolicy`. Even once installed, the primary `http-get*` verbs go straight to
+  `cvc::net::send` and bypass it; only `fetch`/`fetch-async` route through the resolver where
+  the cache lives.
+- **The network verbs are not reachable from `pycvc.Exec`.** They live in the Ariadne
+  Runtime action lane; `AriRuntime` and `AppRuntime` reach them through `enable_net`. A pycvc
+  author registers a `register_async_fn` HTTP wrapper instead.
 - **`fetch` / `source:` / `import:` cannot see `Content-Type`.** `UriResult` is
   `{ok, content, canonical, error}` ([`uri.h`](../inc/cvc/ariadne/uri.h)); the cache
-  stores the content type but the resolver path drops it. Only the direct `http-get` /
-  `http-request` verbs expose headers, and only as an unparsed list.
+  stores the content type but the resolver path drops it. The `http-get` / `http-request`
+  verbs give `content_type` and `header_map` (§10.2).
 - **Assets still load by filename** — there are no in-memory / bytes-blob read overloads
   yet, so a scene `source:` over a non-`file` scheme spills to a temp file via
   `resolve_to_file`, and a remote `source:` blocks the first frame synchronously
