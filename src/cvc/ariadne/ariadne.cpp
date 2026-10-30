@@ -366,6 +366,28 @@ double action_max_time(cvc::state &root) {
   return end == v.c_str() + v.size() && std::isfinite(seconds) && seconds >= 0.0 ? seconds
                                                                                  : kDefault;
 }
+
+// §13.8 a resident's per-step time cap: the tree setting ariadne.limits.resident_max_step_time
+// (seconds; 0 = none), read as each resident starts. The cap keeps one runaway step from hanging
+// the host's drain. It is a se::time_budget, so time the OS deschedules the thread for counts
+// only for its first half; but single-threaded wasm has no thread CPU clock (thread_cpu_seconds
+// is the steady clock there), so on a loaded machine a step that checks often is charged for its
+// waits too, up to a sixteenth of the half per check, and the default there is higher.
+double resident_max_step_time(cvc::state &root) {
+#ifdef __EMSCRIPTEN__
+  constexpr double kDefault = 0.25;
+#else
+  constexpr double kDefault = 0.05;
+#endif
+  cvc::state *node = root.findDescendant("ariadne.limits.resident_max_step_time");
+  if (!node)
+    return kDefault;
+  const std::string v = node->value();
+  char *end = nullptr;
+  const double seconds = v.empty() ? -1.0 : std::strtod(v.c_str(), &end);
+  return end == v.c_str() + v.size() && std::isfinite(seconds) && seconds >= 0.0 ? seconds
+                                                                                 : kDefault;
+}
 } // namespace
 
 namespace {
@@ -1023,9 +1045,31 @@ struct Runtime::Impl {
   std::string key_script_;     // §4.6 document-level on_key body (keyboard events, via post_input)
   std::string pointer_script_; // §4.6 document-level on_pointer body (mouse events, via post_input)
   std::string signal_script_;  // document-level on_signal body (signals, via post_signal)
-  std::shared_ptr<ActionContext> tick_resident_, key_resident_, pointer_resident_, signal_resident_;
-  int tick_resident_pid_ = -1, key_resident_pid_ = -1, pointer_resident_pid_ = -1,
-      signal_resident_pid_ = -1;
+  // A resident's process and context, and how it has been restarted. A resident that is killed
+  // (its per-step cap, a syntax error read inside it) or fails (an exception it didn't catch) is
+  // reported once per reason, then restarted on a later drain: at once the first time, then after
+  // 1, 2, 4 ... up to kRestartMaxDelay drains while it keeps stopping within kQuickStop drains of
+  // starting. After kMaxQuickStops such stops in a row it is given up, with a warning, until its
+  // program is set again.
+  struct Resident {
+    std::shared_ptr<ActionContext> ctx;
+    int pid = -1;
+    std::uint64_t started = 0;  // the drain it last started on
+    int quick_stops = 0;        // stops soon after starting, in a row
+    std::uint64_t retry_at = 0; // not restarted before this drain
+    bool given_up = false;
+  };
+  static constexpr std::uint64_t kQuickStop = 100;
+  static constexpr int kMaxQuickStops = 8;
+  static constexpr std::uint64_t kRestartMaxDelay = 64;
+  std::uint64_t drains_ = 0; // drain() calls so far: the restart clock
+  Resident tick_resident_, key_resident_, pointer_resident_, signal_resident_;
+  // Stop a resident now (a new program, a dropped mount) and forget its restart history.
+  void stop_resident(Resident &r);
+  // A resident that was killed or failed: report it, reap it, and schedule its restart (or give
+  // it up). A no-op for one that is running or parked.
+  void retire_if_stopped(cvc::state_exec::async_scheduler &sched, Resident &r,
+                         const std::string &lane, const std::string &channel);
   std::string tick_channel() const { return owner_ + "#tick"; }
   std::string key_channel() const { return owner_ + "#key"; }
   std::string pointer_channel() const { return owner_ + "#pointer"; }
@@ -1035,12 +1079,11 @@ struct Runtime::Impl {
   // (while t (let ((event (msg-recv "<channel>"))) <body>)): msg-recv parks the process between
   // deliveries and binds each delivered value as `event`, so an on_key/on_pointer body reads
   // (get-attr event "key") etc. (on:tick's body simply ignores `event`).
-  void ensure_resident(const std::string &channel, const std::string &body,
-                       std::shared_ptr<ActionContext> &ctx_slot, int &pid_slot);
+  // Not before its restart drain, nor once it has been given up.
+  void ensure_resident(const std::string &channel, const std::string &body, Resident &r);
   // The same, chrooted to `chroot` with `functions` (a FunctionScope prelude) defined first: a
-  // mount's tick resident. The four-argument form is the document's (prefix, doc_functions).
-  void ensure_resident(const std::string &channel, const std::string &body,
-                       std::shared_ptr<ActionContext> &ctx_slot, int &pid_slot,
+  // mount's tick resident. The three-argument form is the document's (prefix, doc_functions).
+  void ensure_resident(const std::string &channel, const std::string &body, Resident &r,
                        const std::string &chroot, const std::string &functions);
   void ensure_tick_resident();   // submit the tick resident (woken by the coalesced post_tick)
   void post_tick();              // wake the tick resident once this drain
@@ -1115,10 +1158,10 @@ struct Runtime::Impl {
   // (drop_mount_ticks) or the Runtime goes (kill_owner: it carries owner_). A repeated mount's
   // instance also stops when its repeat's count drops below it (sweep_repeated_ticks).
   struct MountTick {
-    std::string program; // prelude + body: what a reconcile compares to keep it running
+    std::string body;      // the on_tick: body
+    std::string functions; // and the mount's prelude, defined before its loop
     std::string channel;
-    std::shared_ptr<ActionContext> ctx;
-    int pid = -1;
+    Resident resident;
     const Widget *repeat = nullptr; // the outermost repeat: template it was emitted under, if any
     int instance = -1;              // and that repeat's instance index
   };
@@ -1128,7 +1171,6 @@ struct Runtime::Impl {
   const Widget *emitting_repeat_ = nullptr;
   int emitting_instance_ = -1;
   void ensure_mount_tick(const std::string &sub_prefix, const Widget &w);
-  void stop_mount_tick(MountTick &t);
   // On a reconcile: stop every mount tick the new tree does not have at the same sub-prefix with
   // the same program (a repeated mount's restart at their next frame).
   void drop_mount_ticks();
@@ -2231,39 +2273,64 @@ void Runtime::Impl::pump_and_sweep_actions(cvc::state_exec::async_scheduler &sch
   // Spawned children, and what they and the residents fork: a finished one's process would keep
   // its context (an environment with every intrinsic) for the app's life.
   std::erase_if(spawned_children_, [&](int pid) { return reap_ended(pid, "spawned program"); });
-  // A resident never finishes on its own, so one that was killed (a syntax error in its body,
-  // read inside the process; its per-step cap) or failed (an exception it didn't catch) is
-  // reported, once per reason.
-  const auto report_killed_resident = [&](int pid, const std::string &lane,
-                                          const std::string &channel) {
-    if (pid < 0)
-      return;
-    auto info = sched.get_process_info(pid);
-    if (info && info->status == se::process_status::killed)
-      warn_once("ari: " + lane + " resident [" + channel +
-                "] stopped: " + sched.get_exit_error(pid).value_or("killed"));
-    else if (info && info->status == se::process_status::failed)
-      warn_once("ari: " + lane + " resident [" + channel +
-                "] failed: " + failure_report(info->exit_exception, info->exit_error));
-  };
-  report_killed_resident(tick_resident_pid_, "on_tick:", tick_channel());
-  report_killed_resident(key_resident_pid_, "on_key:", key_channel());
-  report_killed_resident(pointer_resident_pid_, "on_pointer:", pointer_channel());
-  report_killed_resident(signal_resident_pid_, "on_signal:", signal_channel());
-  for (const auto &[sub_prefix, t] : mount_ticks_)
-    report_killed_resident(t.pid, "on_tick: of mount '" + sub_prefix + "'", t.channel);
+  // A resident never finishes on its own, so one that was killed or failed is reported and
+  // restarted (retire_if_stopped).
+  retire_if_stopped(sched, tick_resident_, "on_tick:", tick_channel());
+  retire_if_stopped(sched, key_resident_, "on_key:", key_channel());
+  retire_if_stopped(sched, pointer_resident_, "on_pointer:", pointer_channel());
+  retire_if_stopped(sched, signal_resident_, "on_signal:", signal_channel());
+  for (auto &[sub_prefix, t] : mount_ticks_)
+    retire_if_stopped(sched, t.resident, "on_tick: of mount '" + sub_prefix + "'", t.channel);
+}
+
+void Runtime::Impl::retire_if_stopped(cvc::state_exec::async_scheduler &sched, Resident &r,
+                                      const std::string &lane, const std::string &channel) {
+  namespace se = cvc::state_exec;
+  if (r.pid < 0)
+    return;
+  const auto info = sched.get_process_info(r.pid);
+  if (!info || !se::is_finished(info->status))
+    return;
+  if (info->status == se::process_status::killed)
+    warn_once("ari: " + lane + " resident [" + channel +
+              "] stopped: " + sched.get_exit_error(r.pid).value_or("killed"));
+  else if (info->status == se::process_status::failed)
+    warn_once("ari: " + lane + " resident [" + channel +
+              "] failed: " + failure_report(info->exit_exception, info->exit_error));
+  sched.reap(r.pid);
+  r.pid = -1;
+  r.ctx.reset(); // a child it forked keeps the context alive itself (process::keep_alive)
+  r.quick_stops = drains_ - r.started < kQuickStop ? r.quick_stops + 1 : 1;
+  if (r.quick_stops > kMaxQuickStops) {
+    r.given_up = true;
+    warn_once("ari: " + lane + " resident [" + channel + "] stopped " +
+              std::to_string(kMaxQuickStops) +
+              " times in a row soon after starting: not restarted "
+              "again");
+    return;
+  }
+  // At once after its first stop, then 1, 2, 4 ... drains later.
+  const std::uint64_t delay =
+      r.quick_stops <= 1 ? 0 : std::min(kRestartMaxDelay, std::uint64_t{1} << (r.quick_stops - 2));
+  r.retry_at = drains_ + delay;
+}
+
+void Runtime::Impl::stop_resident(Resident &r) {
+  if (r.pid >= 0)
+    app.exec_scheduler().kill(r.pid);
+  r = Resident{};
 }
 
 void Runtime::Impl::ensure_resident(const std::string &channel, const std::string &body,
-                                    std::shared_ptr<ActionContext> &ctx_slot, int &pid_slot) {
-  ensure_resident(channel, body, ctx_slot, pid_slot, prefix, doc_functions);
+                                    Resident &r) {
+  ensure_resident(channel, body, r, prefix, doc_functions);
 }
 
 void Runtime::Impl::ensure_resident(const std::string &channel, const std::string &body,
-                                    std::shared_ptr<ActionContext> &ctx_slot, int &pid_slot,
-                                    const std::string &chroot, const std::string &functions) {
-  if (body.empty() || pid_slot >= 0)
-    return; // nothing to run, or already submitted (residents submit ONCE, not per frame)
+                                    Resident &r, const std::string &chroot,
+                                    const std::string &functions) {
+  if (body.empty() || r.pid >= 0 || r.given_up || drains_ < r.retry_at)
+    return; // nothing to run, already running (residents submit ONCE), or not restarted yet
   namespace se = cvc::state_exec;
   try {
     auto &sched = app.exec_scheduler();
@@ -2294,22 +2361,28 @@ void Runtime::Impl::ensure_resident(const std::string &channel, const std::strin
     // deadline (fresh each step) so a single step that loops in-place (a runaway native builtin)
     // can't HANG the host's per-frame drain — it is aborted + the resident killed. A healthy
     // on:tick/on_key body is far under this, and a per-node DSL loop is bounded by the pump's own
-    // per-drain cap; this only bites an in-STEP loop the pump can't interrupt.
-    constexpr double kResidentStepSeconds = 0.05;
-    opts.max_step_time = kResidentStepSeconds;
-    pid_slot = sched.execute(wrapped, opts);
-    ctx_slot = std::move(ac);
+    // per-drain cap; this only bites an in-STEP loop the pump can't interrupt. One it kills is
+    // restarted (retire_if_stopped).
+    opts.max_step_time = resident_max_step_time(cvc::state::instance(app));
+    r.pid = sched.execute(wrapped, opts);
+    r.ctx = std::move(ac);
+    r.started = drains_;
   } catch (const std::exception &e) {
+    r.given_up = true; // its text is what failed: starting it again would fail the same way
     warn_once("ari: resident failed to start [" + channel + "]: " + e.what());
   }
 }
 
 void Runtime::Impl::ensure_tick_resident() {
-  ensure_resident(tick_channel(), tick_script_, tick_resident_, tick_resident_pid_);
+  ensure_resident(tick_channel(), tick_script_, tick_resident_);
+  // A mount's starts as the mount is first drawn (ensure_mount_tick); this restarts a stopped one,
+  // drawn or not.
+  for (auto &[sub_prefix, t] : mount_ticks_)
+    ensure_resident(t.channel, t.body, t.resident, sub_prefix, t.functions);
 }
 
 void Runtime::Impl::post_tick() {
-  if (tick_resident_pid_ < 0 && mount_ticks_.empty())
+  if (tick_resident_.pid < 0 && mount_ticks_.empty())
     return; // no tick resident registered
   // Wake each tick resident for one activation this frame. Post only when nothing is queued on its
   // channel, so a resident that can't keep up doesn't accrue a backlog of ticks (coalesce).
@@ -2318,30 +2391,23 @@ void Runtime::Impl::post_tick() {
     if (sched.pending_message_count(channel) == 0)
       sched.post_message(channel, cvc::state_exec::value_t(std::string("tick")));
   };
-  if (tick_resident_pid_ >= 0)
+  if (tick_resident_.pid >= 0)
     wake(tick_channel());
   for (const auto &[sub_prefix, t] : mount_ticks_)
-    if (t.pid >= 0)
+    if (t.resident.pid >= 0)
       wake(t.channel);
 }
 
 void Runtime::Impl::ensure_mount_tick(const std::string &sub_prefix, const Widget &w) {
   MountTick &t = mount_ticks_[sub_prefix];
-  if (t.pid >= 0 || !t.channel.empty())
-    return; // running (or failed to start, already warned): once per mount, not per frame
-  const std::string &functions = w.functions ? w.functions->prelude : std::string();
-  t.program = functions + w.tick_script;
+  if (!t.channel.empty())
+    return; // started once per mount, not per frame (ensure_tick_resident restarts it)
+  t.body = w.tick_script;
+  t.functions = w.functions ? w.functions->prelude : std::string();
   t.channel = owner_ + "#tick@" + sub_prefix;
   t.repeat = emitting_repeat_;
   t.instance = emitting_instance_;
-  ensure_resident(t.channel, w.tick_script, t.ctx, t.pid, sub_prefix, functions);
-}
-
-void Runtime::Impl::stop_mount_tick(MountTick &t) {
-  if (t.pid >= 0)
-    app.exec_scheduler().kill(t.pid);
-  t.ctx.reset();
-  t.pid = -1;
+  ensure_resident(t.channel, t.body, t.resident, sub_prefix, t.functions);
 }
 
 void Runtime::Impl::drop_mount_ticks() {
@@ -2366,8 +2432,9 @@ void Runtime::Impl::drop_mount_ticks() {
   walk(root, prefix);
   for (auto it = mount_ticks_.begin(); it != mount_ticks_.end();) {
     const auto k = kept.find(it->first);
-    if (it->second.repeat || k == kept.end() || k->second != it->second.program) {
-      stop_mount_tick(it->second);
+    if (it->second.repeat || k == kept.end() ||
+        k->second != it->second.functions + it->second.body) {
+      stop_resident(it->second.resident);
       it = mount_ticks_.erase(it);
     } else {
       ++it;
@@ -2378,7 +2445,7 @@ void Runtime::Impl::drop_mount_ticks() {
 void Runtime::Impl::sweep_repeated_ticks(const Widget *tmpl, int count) {
   for (auto it = mount_ticks_.begin(); it != mount_ticks_.end();) {
     if (it->second.repeat == tmpl && it->second.instance >= count) {
-      stop_mount_tick(it->second);
+      stop_resident(it->second.resident);
       it = mount_ticks_.erase(it);
     } else {
       ++it;
@@ -2387,8 +2454,8 @@ void Runtime::Impl::sweep_repeated_ticks(const Widget *tmpl, int count) {
 }
 
 void Runtime::Impl::ensure_input_residents() {
-  ensure_resident(key_channel(), key_script_, key_resident_, key_resident_pid_);
-  ensure_resident(pointer_channel(), pointer_script_, pointer_resident_, pointer_resident_pid_);
+  ensure_resident(key_channel(), key_script_, key_resident_);
+  ensure_resident(pointer_channel(), pointer_script_, pointer_resident_);
 }
 
 void Runtime::Impl::deliver_input(const InputEvent &ev) {
@@ -2396,7 +2463,7 @@ void Runtime::Impl::deliver_input(const InputEvent &ev) {
   // Keyboard events feed the on_key resident, mouse events the on_pointer resident. Drop the event
   // if that handler is not registered (no point queueing events nothing will drain).
   const bool keyboard = ev.is_keyboard();
-  if ((keyboard ? key_resident_pid_ : pointer_resident_pid_) < 0)
+  if ((keyboard ? key_resident_ : pointer_resident_).pid < 0)
     return;
   // A dict with EVERY field always populated: get-attr throws on a missing key, so an on_* body can
   // read any field of any event kind (unused fields are 0/""). These names are the .ari event
@@ -2491,38 +2558,22 @@ void Runtime::on(std::string event, std::function<void()> handler) {
 
 void Runtime::set_tick_program(std::string script) {
   // Replacing the program kills any running resident so the new body starts fresh next drain.
-  if (m_->tick_resident_pid_ >= 0) {
-    m_->app.exec_scheduler().kill(m_->tick_resident_pid_);
-    m_->tick_resident_.reset();
-    m_->tick_resident_pid_ = -1;
-  }
+  m_->stop_resident(m_->tick_resident_);
   m_->tick_script_ = std::move(script);
 }
 
 void Runtime::set_key_program(std::string script) {
-  if (m_->key_resident_pid_ >= 0) {
-    m_->app.exec_scheduler().kill(m_->key_resident_pid_);
-    m_->key_resident_.reset();
-    m_->key_resident_pid_ = -1;
-  }
+  m_->stop_resident(m_->key_resident_);
   m_->key_script_ = std::move(script);
 }
 
 void Runtime::set_pointer_program(std::string script) {
-  if (m_->pointer_resident_pid_ >= 0) {
-    m_->app.exec_scheduler().kill(m_->pointer_resident_pid_);
-    m_->pointer_resident_.reset();
-    m_->pointer_resident_pid_ = -1;
-  }
+  m_->stop_resident(m_->pointer_resident_);
   m_->pointer_script_ = std::move(script);
 }
 
 void Runtime::set_signal_program(std::string script) {
-  if (m_->signal_resident_pid_ >= 0) {
-    m_->app.exec_scheduler().kill(m_->signal_resident_pid_);
-    m_->signal_resident_.reset();
-    m_->signal_resident_pid_ = -1;
-  }
+  m_->stop_resident(m_->signal_resident_);
   m_->signal_script_ = std::move(script);
 }
 
@@ -2531,9 +2582,11 @@ bool Runtime::has_signal_program() const { return !m_->signal_script_.empty(); }
 bool Runtime::post_signal(const std::string &signal, const std::string &source) {
   if (m_->signal_script_.empty())
     return false; // no handler: the host applies the signal's default action
-  m_->ensure_resident(m_->signal_channel(), m_->signal_script_, m_->signal_resident_,
-                      m_->signal_resident_pid_);
-  if (m_->signal_resident_pid_ < 0)
+  // A stopped handler waiting out its restart delay is started now: the signal is for it.
+  if (m_->signal_resident_.pid < 0)
+    m_->signal_resident_.retry_at = 0;
+  m_->ensure_resident(m_->signal_channel(), m_->signal_script_, m_->signal_resident_);
+  if (m_->signal_resident_.pid < 0)
     return false; // it failed to start (already warned): fall back to the default too
   namespace se = cvc::state_exec;
   std::vector<std::pair<std::string, se::value_t>> f;
@@ -2639,6 +2692,7 @@ void Runtime::run_program(std::string script, std::function<void(const std::stri
 }
 
 void Runtime::drain() {
+  ++m_->drains_; // the residents' restart clock
   // Run the queued action events on the host thread, then clear. Never called
   // from inside render() (the deferred intent-buffer discipline, §7.2/§4.7). The keys pressed since
   // the last drain queue theirs first.
