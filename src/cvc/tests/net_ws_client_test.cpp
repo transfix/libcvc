@@ -74,9 +74,10 @@ TEST(NetWsClient, EchoesTextAndSendsHeaders) {
   ASSERT_TRUE(e);
   EXPECT_EQ(e->kind, WsEvent::Kind::Text);
   EXPECT_EQ(e->data, "");
-  ASSERT_EQ(server.handshakes().size(), 1u);
+  const auto handshakes = server.handshakes();
+  ASSERT_EQ(handshakes.size(), 1u);
   bool saw = false;
-  for (const std::string &h : server.handshakes()[0])
+  for (const std::string &h : handshakes[0])
     saw = saw || h == "X-Test: yes";
   EXPECT_TRUE(saw);
   c->close();
@@ -112,7 +113,8 @@ TEST(NetWsClient, ReassemblesFragmentsAndKeepsBinary) {
 TEST(NetWsClient, PeerCloseCarriesItsCode) {
   REQUIRE_WS_BACKEND();
   LocalWsServer server([](LocalWsServer::Stream &ws) {
-    ws.close(boost::beast::websocket::close_reason(4004, "no live updates"));
+    ws.close(boost::beast::websocket::close_reason(
+        static_cast<boost::beast::websocket::close_code>(4004), "no live updates"));
     boost::beast::flat_buffer buf;
     boost::system::error_code ec;
     ws.read(buf, ec); // until the client's reply
