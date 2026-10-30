@@ -210,8 +210,16 @@ struct process {
   /// The lock deadline passed while nothing collected it (process_table::wake_due with no
   /// vector): the next lock_home::wait_expired takes it.
   bool lock_expired_pending = false;
-  /// The priority a priority policy schedules by (design 8.2; the floor is phase L2's).
+  /// The priority a priority policy schedules by (design 8.2).
   int effective_priority() const { return std::min(priority, inherited_priority); }
+  /// How far the process may raise its own priority (design 7.2): set at submit (the submit
+  /// priority, or a host's); unset only on a process no scheduler submitted, where it reads as
+  /// `priority` (gap G-18). Explicit: a host gave it, and it clamps under every policy.
+  std::optional<int> priority_floor;
+  bool priority_floor_explicit = false;
+  /// What the process holds for its life (a spawned child's intrinsics context, td 4.15):
+  /// freed with the process object, not by release_state(), since frames point into it.
+  std::shared_ptr<void> keep_alive;
 
   /// Elapsed running time (only while status == running).
   double elapsed_time() const;

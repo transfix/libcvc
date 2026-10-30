@@ -94,18 +94,27 @@ Nothing that writes state, schedules, watches, sends messages, or does I/O is
 reachable. That includes the atomic updates `state-incr`, `state-cas` and `state-swap`: they
 write, so they are not on the allowlist (actions may use them). Nor is `with-lock`
 (docs/STATE_EXEC_LOCKS.md): a reactive slot that names it fails safe like any other
-off-allowlist symbol.
-
-**Locks in the other lanes.** An action may use `with-lock`. One that names no `:timeout` gives up
-after `ariadne.exec.lock_timeout` seconds (default 1.0, a tree setting beside the
-`ariadne.limits.action_max_*` keys, read at each submission): a document never hangs on another's
-lock. The `init:` lane never waits for a lock: a busy request there is as `:timeout 0`
-(`TimeoutError`, or `:else` with `:if-available`). An action's `(fork)` forks the action's
-process, and the child is reaped with the document. An off-allowlist symbol does not error loudly — it **fails safe**: the slot
+off-allowlist symbol. An off-allowlist symbol does not error loudly — it **fails safe**: the slot
 degrades to hidden / disabled / empty / last-good value and the frame records a
 one-shot warning (`take_reactive_warnings`,
 [`ariadne.cpp:1682`](../src/cvc/ariadne/ariadne.cpp)). state_exec is always built (there is
 no build option to drop it), so the engine is always present.
+
+**Locks in the other lanes.** An action may use `with-lock`. One that names no `:timeout` gives up
+after `ariadne.exec.lock_timeout` seconds (default 1.0, a tree setting beside the
+`ariadne.limits.action_max_*` keys, read at each submission): a document never hangs on another's
+lock. A resident's request has no such default: it waits as long as it takes. The `init:` lane
+never waits for a lock: a busy request there is as `:timeout 0` (`TimeoutError`, or `:else` with
+`:if-available`). An action's `(fork)` forks the action's process, and the child is reaped with
+the document.
+
+**Spawned children.** A child an action or a resident `spawn`s runs in the document's scope, as
+its parent does: the intrinsics, the host's program-lane intrinsics and `(has? ...)`; its writes
+and channel keys under its parent's prefix; the document's channel policy and resources; and its
+parent's lock default, so an action's child gives up after `ariadne.exec.lock_timeout` too. It
+keeps the document's owner, so it is reaped with the document. A child an `init:` script spawns
+runs under the script's prefix with the same intrinsics and never waits for a lock either: it is
+stepped on the host thread with the script, so a busy request is as `:timeout 0` there too.
 
 **The read lane never parks.** It is bounded three ways
 ([`ariadne.cpp:603`](../src/cvc/ariadne/ariadne.cpp)):

@@ -128,6 +128,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/state/state_exec/lock_manager.h
   ../../inc/cvc/state/state_exec/detail/lock_table.h
   ../../inc/cvc/state/state_exec/detail/lock_home.h
+  ../../inc/cvc/state/state_exec/detail/priority.h
   ../../inc/cvc/core/app.h
   ../../inc/cvc/core/async_task.h
   ../../inc/cvc/core/async_lane.h
