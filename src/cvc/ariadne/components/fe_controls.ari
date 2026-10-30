@@ -51,8 +51,12 @@ units:
       - text: "hexes"
         bind: graphics.root.children.domain.fe.stats.hexes
         visible_when: (!= (state-get "graphics.root.children.domain.fe.stats.hexes") "0")
-      - text: "progress %"
+      # The running job's progress: loading, meshing and solving step on the app's scheduler, so the
+      # bar moves while they run (on single-threaded wasm too); the overlay names the stage.
+      - progress: progress
         bind: graphics.root.children.domain.fe.progress
+        hi: 100
+        overlay: graphics.root.children.domain.fe.phase
       - separator
       - text: "0. Source"
       - combo: Source

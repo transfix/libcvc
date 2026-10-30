@@ -168,25 +168,25 @@ bool aligned_normals(const geometry &g) {
 
 // The per-vertex field S of a tet mesh at iso as a triangle surface, carrying
 // the tet mesh's aligned functions()/colors() through the interpolation weights.
-geometry level_set(const geometry &tetmesh, const std::vector<double> &S, double iso) {
+geometry level_set_of(const std::vector<double> &V, const std::vector<int> &T,
+                      const std::vector<double> &S, double iso, const functions_t &fn,
+                      const colors_t &cl, std::size_t n) {
   std::vector<double> SV, val;
   std::vector<int> SF, row, col;
-  igl_detail::marching_tets(positions(tetmesh), tetrahedra(tetmesh), S, iso, SV, SF, row, col, val);
+  igl_detail::marching_tets(V, T, S, iso, SV, SF, row, col, val);
   geometry out;
   unpack(SV, out.points());
-  tris_t &T = out.tris();
-  T.resize(SF.size() / 3);
-  for (std::size_t f = 0; f < T.size(); ++f)
-    T[f] = {{index_t(SF[3 * f]), index_t(SF[3 * f + 1]), index_t(SF[3 * f + 2])}};
-  const std::size_t n = tetmesh.num_points(), m = SV.size() / 3;
-  const functions_t &fn = tetmesh.const_functions();
+  tris_t &F = out.tris();
+  F.resize(SF.size() / 3);
+  for (std::size_t f = 0; f < F.size(); ++f)
+    F[f] = {{index_t(SF[3 * f]), index_t(SF[3 * f + 1]), index_t(SF[3 * f + 2])}};
+  const std::size_t m = SV.size() / 3;
   if (fn.size() == n && n > 0) {
     functions_t &ofn = out.functions();
     ofn.assign(m, 0.0);
     for (std::size_t k = 0; k < val.size(); ++k)
       ofn[std::size_t(row[k])] += val[k] * fn[std::size_t(col[k])];
   }
-  const colors_t &cl = tetmesh.const_colors();
   if (cl.size() == n && n > 0) {
     colors_t &ocl = out.colors();
     ocl.assign(m, color_t{{0, 0, 0}});
@@ -196,6 +196,11 @@ geometry level_set(const geometry &tetmesh, const std::vector<double> &S, double
   }
   out.set_geometry_type(geometry::SURFACE_TRI);
   return out;
+}
+
+geometry level_set(const geometry &tetmesh, const std::vector<double> &S, double iso) {
+  return level_set_of(positions(tetmesh), tetrahedra(tetmesh), S, iso, tetmesh.const_functions(),
+                      tetmesh.const_colors(), tetmesh.num_points());
 }
 
 // Keep the entries of the surviving vertices (newidx != -1), in order; clear an
@@ -727,6 +732,31 @@ geometry slice_tets(const geometry &tetmesh, const geometry::vector_t &normal, d
   return guarded([&] { return level_set(tetmesh, S, 0.0); });
 }
 
+tet_slicer::tet_slicer(const geometry &tetmesh, const geometry::vector_t &normal, double offset) {
+  if (!(normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2] > 0))
+    throw mesh_ops_error("slice_tets: zero normal");
+  const points_t &P = tetmesh.const_points();
+  _field.resize(P.size());
+  for (std::size_t i = 0; i < P.size(); ++i)
+    _field[i] = normal[0] * P[i][0] + normal[1] * P[i][1] + normal[2] * P[i][2] - offset;
+  _positions = positions(tetmesh);
+  _tets = tetrahedra(tetmesh);
+  if (tetmesh.const_functions().size() == P.size())
+    _functions = tetmesh.const_functions();
+  if (tetmesh.const_colors().size() == P.size())
+    _colors = tetmesh.const_colors();
+}
+
+geometry tet_slicer::piece(std::size_t first, std::size_t count) const {
+  const std::size_t n = size();
+  first = std::min(first, n);
+  count = std::min(count, n - first);
+  const std::vector<int> T(_tets.begin() + std::ptrdiff_t(4 * first),
+                           _tets.begin() + std::ptrdiff_t(4 * (first + count)));
+  return guarded(
+      [&] { return level_set_of(_positions, T, _field, 0.0, _functions, _colors, _field.size()); });
+}
+
 #else // !CVC_ENABLE_LIBIGL
 
 namespace {
@@ -780,6 +810,8 @@ std::size_t orient_tets(geometry &) { unavailable(); }
 geometry tet_boundary_surface(const geometry &) { unavailable(); }
 geometry tet_isosurface(const geometry &, const std::vector<double> &, double) { unavailable(); }
 geometry slice_tets(const geometry &, const geometry::vector_t &, double) { unavailable(); }
+tet_slicer::tet_slicer(const geometry &, const geometry::vector_t &, double) { unavailable(); }
+geometry tet_slicer::piece(std::size_t, std::size_t) const { unavailable(); }
 
 #endif // CVC_ENABLE_LIBIGL
 

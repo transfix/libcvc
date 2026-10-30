@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/data_job.h>
+#include <cvc/state/state_exec/detail/lock_home.h>
 #include <cvc/state/state_exec/evaluator.h>
 #include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/parser.h>
@@ -340,6 +341,9 @@ value_t evaluator::eval_form(const value_t &expr, const environment_ptr &env) {
   auto *func_val = env->lookup(name);
   if (!func_val)
     throw dsl_error("NameError", "unknown function: " + name);
+  // with-lock waits and releases through a scheduler's process (docs/STATE_EXEC_LOCKS.md 5.5).
+  if (detail::lock_ops_of(*func_val))
+    throw dsl_error("TypeError", "with-lock needs a scheduler");
 
   // Evaluate arguments
   spare_values evaled_values(spare_vectors_, args.size());

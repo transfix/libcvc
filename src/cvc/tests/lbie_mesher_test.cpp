@@ -34,8 +34,10 @@
 #include <boost/optional.hpp>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <geoframe_adapter.h>
+#include <limits>
 #include <map>
 #include <ostream>
 #include <string>
@@ -1870,4 +1872,323 @@ TEST_F(LbieMesherTest, HexUtilityFunctions) {
   trig.tris().push_back({{0, 1, 2}});
   geometry tri_surf = extract_surface(trig);
   EXPECT_EQ(tri_surf.num_tris(), 1u);
+}
+
+// ---------------------------------------------------------------------------
+// cvc::mesher_stepper: the meshers a slice at a time
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// A torus' distance field on [-1,1]^3 at n^3 samples, positive inside the tube.
+volume make_torus_volume(app &ctx, unsigned int n) {
+  volume v(ctx, dimension(n, n, n), Float, bounding_box(-1, -1, -1, 1, 1, 1));
+  const double dx = 2.0 / double(n - 1);
+  for (unsigned int k = 0; k < n; ++k)
+    for (unsigned int j = 0; j < n; ++j)
+      for (unsigned int i = 0; i < n; ++i) {
+        const double x = -1 + i * dx, y = -1 + j * dx, z = -1 + k * dx;
+        const double q = std::sqrt(x * x + y * y) - 0.55;
+        v(i, j, k, 0.25 - std::sqrt(q * q + z * z));
+      }
+  return v;
+}
+
+template <class V> bool same_bits(const V &a, const V &b) {
+  return a.size() == b.size() &&
+         (a.empty() || std::memcmp(a.data(), b.data(), a.size() * sizeof(a[0])) == 0);
+}
+
+// a and b are the same mesh: the same points, normals, colors, values and elements, in the same
+// order, bit for bit.
+void expect_same_geometry(const geometry &a, const geometry &b, const std::string &what) {
+  EXPECT_EQ(a.get_geometry_type(), b.get_geometry_type()) << what;
+  EXPECT_EQ(a.num_points(), b.num_points()) << what;
+  EXPECT_TRUE(same_bits(a.const_points(), b.const_points())) << what << ": points";
+  EXPECT_TRUE(same_bits(a.const_normals(), b.const_normals())) << what << ": normals";
+  EXPECT_TRUE(same_bits(a.const_colors(), b.const_colors())) << what << ": colors";
+  EXPECT_TRUE(same_bits(a.const_curvatures(), b.const_curvatures())) << what << ": curvatures";
+  EXPECT_TRUE(same_bits(a.const_functions(), b.const_functions())) << what << ": functions";
+  EXPECT_TRUE(a.const_boundary() == b.const_boundary()) << what << ": boundary";
+  EXPECT_TRUE(same_bits(a.const_tris(), b.const_tris())) << what << ": tris";
+  EXPECT_TRUE(same_bits(a.const_quads(), b.const_quads())) << what << ": quads";
+  EXPECT_TRUE(same_bits(a.const_tets(), b.const_tets())) << what << ": tets";
+  EXPECT_TRUE(same_bits(a.const_hexs(), b.const_hexs())) << what << ": hexs";
+}
+
+// Steps s in budgets of `budget` until it is done: progress stays in [0,1], never goes back, and
+// is 1 at the end. Returns the steps it took; `phases` gets the phases it went through.
+int run_stepper(mesher_stepper &s, std::size_t budget, std::vector<std::string> &phases) {
+  int steps = 1;
+  double last = 0.0;
+  bool monotone = true, bounded = true;
+  EXPECT_FALSE(s.done());
+  while (!s.step(budget)) {
+    ++steps;
+    const double p = s.progress();
+    monotone = monotone && p >= last;
+    bounded = bounded && p >= 0.0 && p <= 1.0;
+    last = p;
+    if (phases.empty() || phases.back() != s.phase())
+      phases.push_back(s.phase());
+    if (steps > 10000000) {
+      ADD_FAILURE() << "the stepper never finished";
+      break;
+    }
+  }
+  EXPECT_TRUE(monotone) << "progress went back";
+  EXPECT_TRUE(bounded) << "progress left [0,1]";
+  EXPECT_TRUE(s.done());
+  EXPECT_EQ(s.progress(), 1.0);
+  EXPECT_STREQ(s.phase(), "done");
+  EXPECT_TRUE(s.step(budget)) << "a finished stepper stays finished";
+  return steps;
+}
+
+bool saw(const std::vector<std::string> &phases, const std::string &phase) {
+  return std::find(phases.begin(), phases.end(), phase) != phases.end();
+}
+
+// The stepper make() returns, run to the end at once (budget 0) and a slice at a time (a budget of
+// 97 units), gives the mesh one_shot() returns. Returns the sliced run's phases.
+// (min_steps: the sliced run takes more steps than this.)
+template <class OneShot, class Make>
+std::vector<std::string> expect_stepped_matches(OneShot one_shot, Make make,
+                                                const std::string &what, int min_steps = 100) {
+  const geometry ref = one_shot();
+  std::vector<std::string> phases;
+  for (const std::size_t budget : {std::size_t(0), std::size_t(97)}) {
+    mesher_stepper s = make();
+    EXPECT_EQ(s.progress(), 0.0) << what;
+    std::vector<std::string> ph;
+    const int steps = run_stepper(s, budget, ph);
+    if (budget == 0)
+      EXPECT_EQ(steps, 1) << what;
+    else {
+      EXPECT_GT(steps, min_steps) << what;
+      phases = ph;
+    }
+    expect_same_geometry(ref, s.take(), what + (budget ? ", sliced" : ", whole"));
+  }
+  return phases;
+}
+
+std::string describe(const char *name, improvement_method m, int iterations) {
+  return std::string(name) + ", improvement " + std::to_string(int(m)) + " x" +
+         std::to_string(iterations);
+}
+
+} // namespace
+
+// tetrahedralize() a slice at a time gives tetrahedralize()'s mesh, the same points and tets in
+// the same order, without improvement and with geometric flow, on a volume of (2^n+1)^3 samples
+// and on one the mesher resamples.
+TEST_F(LbieMesherTest, SteppedTetrahedralizeMatchesOneShot) {
+  const volume sphere = make_sphere_volume(ctx, 33, 0.6);
+  const volume torus = make_torus_volume(ctx, 30);
+  for (const volume *v : {&sphere, &torus})
+    for (const auto &im : {std::make_pair(NO_IMPROVE, 0), std::make_pair(GEO_FLOW, 1)}) {
+      const std::string what = describe(v == &sphere ? "sphere" : "torus", im.first, im.second);
+      const std::vector<std::string> phases = expect_stepped_matches(
+          [&] {
+            return tetrahedralize(*v, 0.0, DUALLIB, im.first, BSPLINE_CONVOLUTION, im.second);
+          },
+          [&] {
+            return mesher_stepper::tetrahedralize(*v, 0.0, DUALLIB, im.first, BSPLINE_CONVOLUTION,
+                                                  im.second);
+          },
+          what);
+      for (const char *ph :
+           {"loading", "octree", "collapse", "qef", "traverse", "extracting", "output"})
+        EXPECT_TRUE(saw(phases, ph)) << what << ": no " << ph;
+      EXPECT_EQ(saw(phases, "improving"), im.first == GEO_FLOW) << what;
+    }
+}
+
+// tetrahedralize2()'s layer between two isovalues (fe_lab's interval mesh) and its solid above
+// one isovalue, a slice at a time.
+TEST_F(LbieMesherTest, SteppedTetrahedralize2MatchesOneShot) {
+  const volume sphere = make_sphere_volume(ctx, 33, 0.6);
+  for (const auto &im : {std::make_pair(NO_IMPROVE, 0), std::make_pair(GEO_FLOW, 1)}) {
+    const std::vector<std::string> phases = expect_stepped_matches(
+        [&] {
+          return tetrahedralize2(sphere, -0.1, 0.1, DUALLIB, im.first, BSPLINE_CONVOLUTION,
+                                 im.second);
+        },
+        [&] {
+          return mesher_stepper::tetrahedralize2(sphere, -0.1, 0.1, DUALLIB, im.first,
+                                                 BSPLINE_CONVOLUTION, im.second);
+        },
+        describe("layer", im.first, im.second));
+    EXPECT_TRUE(saw(phases, "preparing")) << "the layer is made a voxel at a time";
+    expect_stepped_matches(
+        [&] {
+          return tetrahedralize2(sphere, 0.0, DUALLIB, im.first, BSPLINE_CONVOLUTION, im.second);
+        },
+        [&] {
+          return mesher_stepper::tetrahedralize2(sphere, 0.0, DUALLIB, im.first,
+                                                 BSPLINE_CONVOLUTION, im.second);
+        },
+        describe("solid", im.first, im.second));
+  }
+}
+
+// iso() a slice at a time. iso() leaves the improvement method at geometric flow, so its mesh has
+// had the extraction's pass of it even with no iterations; the stepper's has too.
+TEST_F(LbieMesherTest, SteppedIsoMatchesOneShot) {
+  const volume sphere = make_sphere_volume(ctx, 33, 0.6);
+  const volume torus = make_torus_volume(ctx, 30);
+  const volume prop = make_sphere_volume(ctx, 21, 0.3);
+  for (const volume *v : {&sphere, &torus}) {
+    const std::string name = v == &sphere ? "sphere" : "torus";
+    for (const int iterations : {0, 1}) {
+      const std::vector<std::string> phases =
+          expect_stepped_matches([&] { return iso(*v, 0.0, DUALLIB, iterations); },
+                                 [&] { return mesher_stepper::iso(*v, 0.0, DUALLIB, iterations); },
+                                 name + " x" + std::to_string(iterations));
+      EXPECT_TRUE(saw(phases, "improving")) << name;
+    }
+    for (const normal_type normals : {CENTRAL_DIFFERENCE, BSPLINE_INTERPOLATION}) {
+      const std::vector<std::string> phases =
+          expect_stepped_matches([&] { return iso(*v, 0.0, DUALLIB, 0, normals); },
+                                 [&] { return mesher_stepper::iso(*v, 0.0, DUALLIB, 0, normals); },
+                                 name + ", normals " + std::to_string(int(normals)));
+      EXPECT_EQ(saw(phases, "spline"), normals == BSPLINE_INTERPOLATION) << name;
+    }
+    expect_stepped_matches(
+        [&] { return iso(*v, 0.0, DUALLIB, 0, BSPLINE_CONVOLUTION, prop); },
+        [&] { return mesher_stepper::iso(*v, 0.0, DUALLIB, 0, BSPLINE_CONVOLUTION, prop); },
+        name + ", property volume");
+    // fast contouring extracts in one piece; the conversion is sliced
+    expect_stepped_matches([&] { return iso(*v, 0.0, FASTCONTOURING); },
+                           [&] { return mesher_stepper::iso(*v, 0.0, FASTCONTOURING); },
+                           name + ", fast contouring", 3);
+  }
+}
+
+// hexahedralize() a slice at a time, with the improvements hexahedra take. Snapping to the surface
+// inverts some of this sphere's hexahedra, so untangle_snapped extracts the mesh a second time and
+// moves vertices back.
+TEST_F(LbieMesherTest, SteppedHexahedralizeMatchesOneShot) {
+  const volume sphere = make_sphere_volume(ctx, 17, 0.6);
+  for (const auto &im : {std::make_pair(NO_IMPROVE, 0), std::make_pair(GEO_FLOW, 1),
+                         std::make_pair(OPTIMIZATION, 1)}) {
+    const std::string what = describe("sphere", im.first, im.second);
+    const std::vector<std::string> phases = expect_stepped_matches(
+        [&] {
+          return hexahedralize(sphere, 0.0, DUALLIB, im.first, BSPLINE_CONVOLUTION, im.second);
+        },
+        [&] {
+          return mesher_stepper::hexahedralize(sphere, 0.0, DUALLIB, im.first, BSPLINE_CONVOLUTION,
+                                               im.second);
+        },
+        what);
+    EXPECT_TRUE(saw(phases, "hexahedra")) << what;
+    EXPECT_TRUE(saw(phases, "untangling")) << what;
+  }
+}
+
+// Edge contraction, a round at a time.
+TEST_F(LbieMesherTest, SteppedEdgeContractionMatchesOneShot) {
+  const volume sphere = make_sphere_volume(ctx, 17, 0.5);
+  expect_stepped_matches(
+      [&] { return tetrahedralize(sphere, 0.0, DUALLIB, EDGE_CONTRACT, BSPLINE_CONVOLUTION, 1); },
+      [&] {
+        return mesher_stepper::tetrahedralize(sphere, 0.0, DUALLIB, EDGE_CONTRACT,
+                                              BSPLINE_CONVOLUTION, 1);
+      },
+      "edge contraction");
+}
+
+// Joe-Liu and minimal-volume smoothing pick vertices with rand() seeded from the clock, so their
+// meshes are not reproducible; stepped, they still finish with the one-shot's vertices and tets.
+TEST_F(LbieMesherTest, SteppedJoeLiuAndMinimalVolumeFinish) {
+  const volume sphere = make_sphere_volume(ctx, 17, 0.5);
+  for (const improvement_method m : {JOE_LIU, MINIMAL_VOL}) {
+    const geometry ref = tetrahedralize(sphere, 0.0, DUALLIB, m, BSPLINE_CONVOLUTION, 1);
+    mesher_stepper s =
+        mesher_stepper::tetrahedralize(sphere, 0.0, DUALLIB, m, BSPLINE_CONVOLUTION, 1);
+    std::vector<std::string> phases;
+    run_stepper(s, 97, phases);
+    const geometry got = s.take();
+    EXPECT_EQ(got.num_points(), ref.num_points()) << m;
+    EXPECT_EQ(got.num_tets(), ref.num_tets()) << m;
+    EXPECT_TRUE(saw(phases, "improving")) << m;
+  }
+}
+
+// An isovalue the volume never reaches meshes nothing, stepped or not.
+TEST_F(LbieMesherTest, SteppedMesherOfAnUncutVolumeMatchesOneShot) {
+  const volume sphere = make_sphere_volume(ctx, 17, 0.6); // values in [-1.13, 0.6]
+  for (const double isovalue : {5.0, -5.0}) {
+    const std::string what = "isovalue " + std::to_string(isovalue);
+    expect_stepped_matches([&] { return iso(sphere, isovalue); },
+                           [&] { return mesher_stepper::iso(sphere, isovalue); }, what);
+    expect_stepped_matches([&] { return tetrahedralize(sphere, isovalue); },
+                           [&] { return mesher_stepper::tetrahedralize(sphere, isovalue); }, what);
+    expect_stepped_matches(
+        [&] { return tetrahedralize2(sphere, isovalue, isovalue + 0.5); },
+        [&] { return mesher_stepper::tetrahedralize2(sphere, isovalue, isovalue + 0.5); }, what);
+  }
+}
+
+// Where the one-shot throws, the stepper throws the same, and so does every step after it. A NaN
+// sample makes fast contouring put a vertex at NaN, and the property volume cannot be sampled
+// there.
+TEST_F(LbieMesherTest, SteppedMesherRethrowsWhatTheOneShotThrows) {
+  volume v = make_sphere_volume(ctx, 17, 0.6);
+  for (unsigned int i = 0; i < 17; ++i)
+    v(i, 8, 8, std::numeric_limits<double>::quiet_NaN());
+  const volume prop = make_sphere_volume(ctx, 9, 0.3);
+  std::string expected;
+  try {
+    iso(v, 0.0, FASTCONTOURING, 0, BSPLINE_CONVOLUTION, prop);
+  } catch (const std::exception &e) {
+    expected = e.what();
+  }
+  ASSERT_FALSE(expected.empty()) << "the one-shot meshed this volume without throwing";
+
+  mesher_stepper s = mesher_stepper::iso(v, 0.0, FASTCONTOURING, 0, BSPLINE_CONVOLUTION, prop);
+  std::string first;
+  int steps = 0;
+  try {
+    while (!s.step(7) && ++steps < 1000000) {
+    }
+  } catch (const std::exception &e) {
+    first = e.what();
+  }
+  EXPECT_EQ(first, expected);
+  EXPECT_TRUE(s.done());
+  EXPECT_EQ(s.progress(), 1.0);
+  EXPECT_STREQ(s.phase(), "done");
+  for (int again = 0; again < 2; ++again) {
+    std::string later;
+    try {
+      s.step(7);
+    } catch (const std::exception &e) {
+      later = e.what();
+    }
+    EXPECT_EQ(later, expected) << "step " << again << " after the throw";
+  }
+  std::string taken;
+  try {
+    s.take();
+  } catch (const std::exception &e) {
+    taken = e.what();
+  }
+  EXPECT_EQ(taken, expected);
+}
+
+// A stepper moved part way through carries on where it was; take() before the end throws.
+TEST_F(LbieMesherTest, MovedMesherStepperCarriesOn) {
+  const volume sphere = make_sphere_volume(ctx, 17, 0.6);
+  const geometry ref = tetrahedralize2(sphere, -0.1, 0.1);
+  mesher_stepper a = mesher_stepper::tetrahedralize2(sphere, -0.1, 0.1);
+  for (int i = 0; i < 20; ++i)
+    ASSERT_FALSE(a.step(97));
+  EXPECT_THROW(a.take(), std::exception);
+  mesher_stepper b = std::move(a);
+  std::vector<std::string> phases;
+  run_stepper(b, 97, phases);
+  expect_same_geometry(ref, b.take(), "moved");
 }

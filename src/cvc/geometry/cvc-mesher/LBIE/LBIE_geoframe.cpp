@@ -257,13 +257,20 @@ void geoframe::calculatenormals()
 
 void geoframe::calculateExtents()
 {
+  calculateExtents(0, numverts);
+}
+
+void geoframe::calculateExtents(int from, int to)
+{
   int c;
+  if (from == 0) {
   max_x=0.f, min_x=0.f;
   max_y=0.f, min_y=0.f;
   max_z=0.f, min_z=0.f;
+  }
   float value;
 
-  for (c=0; c<numverts; c++) {
+  for (c=from; c<to; c++) {
     if (c==0) {
       max_x = min_x = verts[c][0];
       max_y = min_y = verts[c][1];
@@ -284,11 +291,13 @@ void geoframe::calculateExtents()
     }
   }
 
+  if (to >= numverts) {
     biggestDim = (max_y-min_y>max_x-min_x?max_y-min_y:max_x-min_x);
     biggestDim = (max_z-min_z>biggestDim?max_z-min_z:biggestDim);
     centerx = (max_x+min_x)/2.0;
     centery = (max_y+min_y)/2.0;
     centerz = (max_z+min_z)/2.0;
+  }
 }
 
 /*void geoframe::display()

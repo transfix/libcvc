@@ -1561,7 +1561,7 @@ the judges' corrections. It is recorded here so the earlier stages do not close 
 | B25 | Per-process parsing; a shared AST copied at submit; class dicts frozen and measured (`mt.groups` raise/catch); per-group copies if contention shows (Q2) | 4.3, 6; Stage 1 |
 | B26 | Random stream per group; line-atomic `print` | 4.10, 4.11; Stage 1 |
 | B27 | Spawn context with a default; Ariadne's and pycvc's callbacks | 4.15; Stage 1 (its single-scheduler part first, in the locks track's L1b, whose exit includes IS-1 and IS-2 on one scheduler; Stage 1 re-runs them in groups) |
-| B28 | `(fork)` forks `current_pid()`; the child keeps `owner` | 4.15; Stage 0, or the locks track's L1 if that lands first |
+| B28 | `(fork)` forks `current_pid()`; the child keeps `owner` | 4.15; landed with the locks track's L1 |
 | B29 | `drain_begin` / `exec_pump_frame` / `drain_end` | 4.12; Stage 1 |
 | B30 | `ictx.host` and `ictx.sched` at every posting and async-function site | 4.9; Stage 1 |
 | B31 | Movable processes resolve their scheduler, host and tracker through `exec_group::current()` | 4.15; Stage 3 |

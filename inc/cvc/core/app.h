@@ -118,6 +118,7 @@ class state;
 namespace state_exec {
 class async_scheduler;
 class async_host;
+class lock_manager;
 } // namespace state_exec
 
 class app {
@@ -577,6 +578,12 @@ public:
   // those first, and their calls raise RuntimeError.)
   cvc::state_exec::async_host &exec_async_host();
 
+  // The app's lock manager (docs/STATE_EXEC_LOCKS.md 8.3): the with-lock table that
+  // exec_scheduler()'s processes share. Made on first use; exec_scheduler() attaches its home to
+  // it when it is built. Phase L1: single mode, so only exec_scheduler() uses it (another
+  // scheduler keeps a private manager of its own).
+  std::shared_ptr<cvc::state_exec::lock_manager> lock_manager();
+
   // Used to easily manage saving/restoring thread info as we
   // traverse a threads stack.
   //
@@ -952,6 +959,10 @@ protected:
   boost::mutex _execSchedulerMutex;
   // exec_async_host(): declared after the scheduler it posts to, so it goes first.
   std::unique_ptr<cvc::state_exec::async_host> _execAsyncHost;
+  // lock_manager(); guarded by _execSchedulerMutex. Its homes hold it too.
+  std::shared_ptr<cvc::state_exec::lock_manager> _lockManager;
+  // lock_manager() with _execSchedulerMutex held (a boost::mutex: not recursive).
+  std::shared_ptr<cvc::state_exec::lock_manager> lock_manager_locked();
 
   // Interrupt and join this app's tracked threads (two-phase, per-thread
   // timeout). Call it (or wait()) from main() before exit if you spawned work;
