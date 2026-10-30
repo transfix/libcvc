@@ -1533,13 +1533,23 @@ In an Ariadne document's action lane, the network verbs are (from
 
 ### 10.3 The host's network: the allowlist and credentials
 
-A document reaches the network only when its host turns it on. `ari` and `arigl` take four
-flags before the document path ([`host_cli.h`](../inc/cvc/ariadne/host_cli.h)), so a launcher
-script gives a document the network without any code of its own:
+A document reaches the network only when its host turns it on. `ari` and `arigl` take the same
+four flags before the document path ([`host_cli.h`](../inc/cvc/ariadne/host_cli.h)), with the
+same meaning in every mode: `ari` with either terminal backend (FTXUI, or `--backend tvision`),
+`arigl` in a window, `arigl --terminal`, and both in a browser. So a launcher script gives a
+document the network without any code of its own, and the same document runs in a terminal
+(over SSH too: the credential store is then the remote user's) or a window:
 
 ```sh
+ari run --net-allow https://tx.wtf --credential-store nicotina share/nicotina/main.ari
+ari run --backend tvision --net-allow https://tx.wtf --credential-store nicotina share/nicotina/main.ari
 arigl run --net-allow https://tx.wtf --credential-store nicotina share/nicotina/main.ari
 ```
+
+The flags hold for `run`, `snapshot`, `check` and `info` alike. With the network on,
+`ari snapshot` waits after its frames until the document's requests have come back (at most
+10 s) before it prints the frame, so CI can render a document that signs in against a local
+test server; it prints the programs' warnings after the frame, as `arigl snapshot` does.
 
 | flag | what |
 |---|---|
