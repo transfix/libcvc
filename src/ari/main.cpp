@@ -70,6 +70,7 @@
 #include <cvc/ariadne/host_signals.h>
 #include <cvc/ariadne/stream/stream_view.h>
 #include <cvc/ariadne/tvision_backend.h>
+#include <cvc/ariadne/web_document.h> // the browser page's document, named by URL
 #include <cvc/core/app.h>
 #include <cvc/image/image.h>
 #include <exception>
@@ -368,26 +369,23 @@ int run_tests(const cvc::ariadne::HostOptions &o) {
 int main(int argc, char **argv) {
   namespace ari = cvc::ariadne;
 #ifdef CVC_ARIADNE_WASM_DOC
-  // The browser build (ari.html over xterm.js) has no command line. Run the document baked into
-  // MEMFS, with the embedded component library at /components so cvc://components/*.ari resolves
-  // (see the EMSCRIPTEN block in src/ari/CMakeLists.txt).
-#ifdef CVC_ARI_WASM_BACKEND // ari_tvision: the same document on the tvision desktop
-  const char *baked[] = {"ari",
-                         "run",
-                         "--backend",
-                         CVC_ARI_WASM_BACKEND,
-                         "--component-path",
-                         "/",
-                         CVC_ARIADNE_WASM_DOC};
-#else
-  const char *baked[] = {"ari", "run", "--component-path", "/", CVC_ARIADNE_WASM_DOC};
-#endif
+  // The browser build (ari.html over xterm.js). Opened on ?src=, the page passes a command line
+  // naming the document by URL; without one, run the document baked into MEMFS (see the
+  // EMSCRIPTEN block in src/ari/CMakeLists.txt).
+  const char *baked[] = {"ari", "run", CVC_ARIADNE_WASM_DOC};
   if (argc < 2) {
     argc = static_cast<int>(sizeof baked / sizeof *baked);
     argv = const_cast<char **>(baked);
   }
 #endif
-  const ari::HostOptions o = ari::parse_host_args(argc, argv, {"--json", "--functions", "--tap"});
+  ari::HostOptions o = ari::parse_host_args(argc, argv, {"--json", "--functions", "--tap"});
+#ifdef CVC_ARI_WASM_BACKEND // ari_tvision: its documents run on the tvision desktop
+  if (o.backend.empty())
+    o.backend = CVC_ARI_WASM_BACKEND;
+#endif
+#ifdef CVC_ARI_COMPONENT_DIR // the browser build's embedded component library
+  o.component_paths.push_back(CVC_ARI_COMPONENT_DIR);
+#endif
   if (o.help)
     return usage(0);
   if (!o.error.empty()) {
@@ -422,6 +420,10 @@ int main(int argc, char **argv) {
     std::fprintf(stderr, "ari: libcvc was built without yaml-cpp, so it cannot load a .ari\n");
     return 1;
   }
+  // The browser page names its document by URL (?src=): fetch it into MEMFS first.
+  if (ari::is_url_document(o.doc))
+    if (const int status = ari::stage_url_document(o, "ari"); status >= 0)
+      return status;
   if (cmd != "check" && !ari::FtxuiBackend::available()) {
     std::fprintf(stderr, "ari: libcvc was built without FTXUI (no terminal backend)\n");
     return 1;
@@ -492,6 +494,7 @@ int main(int argc, char **argv) {
   }
   if (cmd == "check")
     return rt.exit_code(); // an init: that called (quit code)
+  ari::report_running(); // the browser page: the document is loaded
 
   if (cmd == "snapshot") {
     using Mode = ari::FtxuiBackend::Options::ImageColor;

@@ -858,6 +858,11 @@ add_test(NAME cvcgl_imgui_grid_slider COMMAND cvcgl_imgui_grid_slider)
 add_executable(cvcgl_imgui_windows_menu test/cvcgl_imgui_windows_menu.cpp)
 target_link_libraries(cvcgl_imgui_windows_menu PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_windows_menu COMMAND cvcgl_imgui_windows_menu)
+# A radio stacks its options and a radio_row lines them up; a click through ImGui's own input
+# stores the option (or its mapped value) and runs the on:. No window, no GL.
+add_executable(cvcgl_imgui_radio test/cvcgl_imgui_radio.cpp)
+target_link_libraries(cvcgl_imgui_radio PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_radio COMMAND cvcgl_imgui_radio)
 
 # The tf_editor transfer-function widget (ImGuiBackend::tf_editor) on a bare ImGui context, driven
 # by synthesized mouse input: drags, adds, deletes, the zoom strip, the context menu, commits.

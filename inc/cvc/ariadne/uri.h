@@ -79,8 +79,10 @@ bool has_uri_handler(const std::string &scheme);
 // resolves `<relpath>` against a search list, first hit wins:
 //   1. each directory in the `CVC_ARIADNE_PATH` environment variable (`:`-separated on POSIX),
 //   2. `extra_search_dirs` (in order) — e.g. a pycvc package's bundled components dir,
-//   3. the compiled-in install data dir (`<prefix>/share/libcvc/ariadne`, if this build set it),
-//   4. the process's current working directory.
+//   3. `share/libcvc/ariadne` beside the file holding libcvc (`<lib or bin>/..`), so a relocated
+//      install finds its own component library,
+//   4. the compiled-in install data dir (`<prefix>/share/libcvc/ariadne`, if this build set it),
+//   5. the process's current working directory.
 // A hit resolves through the built-in `file` reader (so the canonical id is the found file's
 // absolute path and a component's OWN relative imports resolve against its directory). App-free and
 // process-global; a host calls this once at setup. So a document writes

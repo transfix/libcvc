@@ -24,6 +24,9 @@
 //   arigl snapshot [flags] doc.ari [document args...]
 //   arigl check    [flags] doc.ari
 //
+// In the browser shell (arigl-web, web/arigl-web.html) doc.ari is a URL: arigl fetches it and the
+// files it imports first (cvc/ariadne/web_document.h).
+//
 // By default the document runs in a real window with a GL context: its widgets are ImGui over the
 // VTK scene. With --terminal it runs in the terminal instead: the widgets go through libcvc's
 // terminal backends (FTXUI, or --backend tvision) and the scene is rendered offscreen and drawn
@@ -71,6 +74,7 @@
 #include <cvc/ariadne/loader.h> // run_init — seed conf.room / conf.self before the first tick
 #include <cvc/ariadne/stream/stream_view.h>
 #include <cvc/ariadne/tvision_backend.h>
+#include <cvc/ariadne/web_document.h> // arigl-web: a document named by URL
 #include <cvc/core/app.h>
 #include <random> // std::random_device — the conference node id's per-launch suffix
 #include <sstream> // arigl info: the GL report, line by line
@@ -1625,6 +1629,7 @@ int run_window(const ari::HostOptions &o) {
   if (const int status = load_document(rt, o); status >= 0)
     return status;
   note_misplaced(rt.app_runtime(), o);
+  ari::report_running(); // the browser shell takes its loading screen down
   // The rich scene panels (scene_panel / stage_lighting_panel / scene_menu), for a document that
   // uses them rather than the declarative components, and Settings' scene_settings. They need the
   // realized lighting rig, so a document loaded later registers them again.
@@ -1896,9 +1901,7 @@ int run_terminal(const ari::HostOptions &o) {
   return rt.exit_code();
 }
 
-} // namespace
-
-int main(int argc, char **argv) {
+int arigl_main(int argc, char **argv) {
 #ifdef CVC_ARIGL_WASM_TERMINAL
   // arigl_term, the browser terminal (web/arigl_term.html): the page passes the command line, and
   // opened without one it runs terminal_scene. Always in the terminal: its canvas is the scene's.
@@ -1944,5 +1947,21 @@ int main(int argc, char **argv) {
     std::fprintf(stderr, "arigl: libcvc was built without yaml-cpp, so it cannot load a .ari\n");
     return 1;
   }
-  return terminal ? run_terminal(o) : run_window(o);
+  // arigl-web, the browser shell, names its document by URL: fetch it into MEMFS first.
+  ari::HostOptions staged = o;
+  if (ari::is_url_document(staged.doc))
+    if (const int status = ari::stage_url_document(staged, "arigl"); status >= 0)
+      return status;
+#ifdef CVC_ARIGL_COMPONENT_DIR
+  staged.component_paths.push_back(CVC_ARIGL_COMPONENT_DIR); // arigl-web's embedded library
+#endif
+  return terminal ? run_terminal(staged) : run_window(staged);
+}
+
+} // namespace
+
+int main(int argc, char **argv) {
+  const int status = arigl_main(argc, argv);
+  cvc::ariadne::report_exit(status); // the browser shell's error page, or that the document ended
+  return status;
 }

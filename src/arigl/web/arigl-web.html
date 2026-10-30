@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<!-- arigl-web — the stock browser host for Ariadne (.ari) documents: arigl built to WebAssembly,
+     shipped as index.html beside arigl-web.js, arigl-web.css, arigl.js and arigl.wasm
+     (cvcpkg/recipes/arigl-web). It carries no document of its own. Serve those files in a
+     directory with your .ari files and open
+
+       <dir>/?src=main.ari            (src is resolved against this page; main.ari is the default)
+
+     arigl fetches the document and every file it imports relative to it before the app starts.
+     The document must be on this page's origin unless the config allows another.
+
+     The page's config: ariadne.config.json beside this page (optional; a 404 means the defaults),
+     or window.ARIADNE_CONFIG, set by a script ahead of arigl-web.js:
+
+       {
+         "title":       "nicotina",            the page title (default: arigl)
+         "src":         "main.ari",            the document when the URL names none
+         "src_param":   true,                  false: ignore ?src= and always run "src"
+         "src_origins": ["https://cdn.example"],  other origins src may name ("*": any)
+         "flags":       ["--net"],             arigl's host flags, before the document, e.g.
+                                               --net (this origin) or --net-allow ORIGIN;
+                                               {origin} in one becomes this page's origin
+         "args":        [],                    the document's arguments; {origin} here too,
+                                               e.g. ["--instance", "{origin}"]
+         "preload":     ["img/logo.png"],      more files to fetch with it, relative to it
+         "env":         {"NAME": "value"}      the module's environment
+       }
+
+     Host flags come only from the config, never from the URL, so a link cannot widen what the
+     page lets a document do. The URL may add document arguments: ?arg=--room&arg=lobby.
+     Nothing is inline and nothing evals, so the page runs under a Content-Security-Policy of
+     script-src 'self' 'wasm-unsafe-eval'; style-src 'self'.
+     VTK's wasm interactor binds the canvas by the CSS selector "#canvas": keep the id. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>arigl</title>
+<link rel="stylesheet" href="arigl-web.css">
+</head>
+<body>
+<canvas id="canvas" tabindex="0"></canvas>
+<div id="overlay">
+  <div class="spinner"></div>
+  <div id="status">Loading&hellip;</div>
+  <pre id="details"></pre>
+</div>
+<script src="arigl-web.js"></script>
+</body>
+</html>

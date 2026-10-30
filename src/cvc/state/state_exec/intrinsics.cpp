@@ -75,19 +75,6 @@ double as_number(const value_t &v, const char *name) {
   throw std::runtime_error(std::string(name) + ": expected number, got " + v.type_name());
 }
 
-// The shortest text that reads back as `d` (the floats state-set, state-incr and the atomic
-// natives store): std::to_chars where the library has it for floating point, else the same text
-// built by hand.
-std::string format_number_shortest(double d) {
-#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L
-  char buf[32];
-  const auto r = std::to_chars(buf, buf + sizeof(buf), d);
-  return std::string(buf, r.ptr);
-#else
-  return detail::format_number_shortest_fallback(d);
-#endif
-}
-
 // Coerce any DSL value to the string form the (string-typed) state tree stores. A string
 // stores raw (NOT to_string's quoted form); scalars store their natural lexical form
 // (10, 1.5, true/false — not to_string's #t/#f); a float stores the shortest text that reads
@@ -1382,6 +1369,16 @@ std::string format_number_shortest_fallback(double d) {
 }
 
 } // namespace detail
+
+std::string format_number_shortest(double d) {
+#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L
+  char buf[32];
+  const auto r = std::to_chars(buf, buf + sizeof(buf), d);
+  return std::string(buf, r.ptr);
+#else
+  return detail::format_number_shortest_fallback(d);
+#endif
+}
 
 void apply_chroot(intrinsics_context &ctx, cvc::state &tree_root, const std::string &root_path) {
   if (root_path.empty()) {

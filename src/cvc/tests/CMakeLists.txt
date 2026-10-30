@@ -6,6 +6,7 @@ add_executable(app_test app_test.cpp)
 add_executable(thread_pool_test thread_pool_test.cpp)
 add_executable(text_test text_test.cpp)
 add_executable(ariadne_loader_test ariadne_loader_test.cpp)
+add_executable(ariadne_doc_fetch_test ariadne_doc_fetch_test.cpp)
 add_executable(ariadne_scene_tf_test ariadne_scene_tf_test.cpp)
 add_executable(ariadne_runtime_test ariadne_runtime_test.cpp)
 add_executable(ariadne_bind_test ariadne_bind_test.cpp)
@@ -299,6 +300,7 @@ set(TEST_TARGETS
   thread_pool_test
   text_test
   ariadne_loader_test
+  ariadne_doc_fetch_test
   ariadne_scene_tf_test
   ariadne_runtime_test
   ariadne_bind_test
@@ -620,6 +622,13 @@ target_link_libraries(text_test
 )
 
 target_link_libraries(ariadne_loader_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(ariadne_doc_fetch_test
   PRIVATE
     cvc
     GTest::gtest
@@ -2514,6 +2523,7 @@ cvc_discover_tests(app_test)
 cvc_discover_tests(thread_pool_test)
 cvc_discover_tests(text_test)
 cvc_discover_tests(ariadne_loader_test)
+cvc_discover_tests(ariadne_doc_fetch_test)
 cvc_discover_tests(ariadne_scene_tf_test)
 cvc_discover_tests(ariadne_runtime_test)
 cvc_discover_tests(ariadne_ftxui_test)
