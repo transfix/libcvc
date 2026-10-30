@@ -5,7 +5,9 @@
 */
 
 #include <cmath>
+#include <cstring>
 #include <cvc/core/app.h>
+#include <cvc/volume/resize_stepper.h>
 #include <cvc/volume/volume.h>
 #include <gtest/gtest.h>
 
@@ -522,6 +524,53 @@ TEST_F(VolumeTest, SubvolumeInterpolationAccuracy) {
   // Corner value should be interpolated correctly
   // At (2.5, 2.5, 2.5) the linear value should be 7.5
   EXPECT_NEAR(vol(0, 0, 0), 7.5, 0.5);
+}
+
+// resize_stepper: resize(dimension) a range of output voxels at a time, bit for bit, whatever the
+// budget, for up- and downsampling, a non-cubic grid and several voxel types; a target equal to the
+// source's dimensions is the source, and one within 2x2x2 is resize()'s own.
+TEST_F(VolumeTest, ResizeStepperMatchesResize) {
+  const dimension src_dim(13, 9, 11);
+  const bounding_box box(-1.0, -0.5, -2.0, 1.0, 0.5, 2.0);
+  for (const data_type t : {UChar, UShort, Float, Double, Int}) {
+    volume v(ctx, src_dim, t, box);
+    v.desc("source");
+    for (uint64 k = 0; k < src_dim[2]; ++k)
+      for (uint64 j = 0; j < src_dim[1]; ++j)
+        for (uint64 i = 0; i < src_dim[0]; ++i)
+          v(i, j, k,
+            100.0 + 60.0 * std::sin(0.7 * double(i)) * std::cos(0.5 * double(j)) + 3.3 * double(k));
+    for (const dimension &target : {dimension(17, 17, 17), dimension(7, 5, 6), dimension(33, 9, 20),
+                                    dimension(13, 9, 11), dimension(2, 1, 2)}) {
+      volume expect(v);
+      expect.resize(target);
+      for (const std::size_t budget : {std::size_t(0), std::size_t(1), std::size_t(97)}) {
+        resize_stepper r(v, target);
+        double last = r.progress();
+        int steps = 0;
+        while (!r.step(budget)) {
+          ASSERT_GE(r.progress(), last);
+          last = r.progress();
+          ASSERT_LT(++steps, 1 << 20);
+        }
+        EXPECT_TRUE(r.done());
+        EXPECT_EQ(r.progress(), 1.0);
+        const volume got = r.take();
+        const std::string what = std::string(v.voxelTypeStr()) + " to " +
+                                 std::to_string(target[0]) + "x" + std::to_string(target[1]) + "x" +
+                                 std::to_string(target[2]) + ", budget " + std::to_string(budget);
+        ASSERT_TRUE(got.voxel_dimensions() == expect.voxel_dimensions()) << what;
+        EXPECT_EQ(got.voxelType(), t) << what;
+        EXPECT_TRUE(got.boundingBox() == box) << what;
+        EXPECT_EQ(got.desc(), "source") << what;
+        const std::size_t bytes =
+            std::size_t(target[0] * target[1] * target[2]) * std::size_t(got.voxelSize());
+        EXPECT_EQ(std::memcmp(*got, *expect, bytes), 0) << what;
+      }
+    }
+  }
+  EXPECT_THROW(resize_stepper(volume(ctx, src_dim, Float, box), dimension(0, 0, 0)),
+               null_dimension);
 }
 
 int main(int argc, char **argv) {

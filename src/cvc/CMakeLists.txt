@@ -125,9 +125,13 @@ set(INCLUDE_FILES
   ../../inc/cvc/state/state_exec/exec_coordinator.h
   ../../inc/cvc/state/state_exec/generator.h
   ../../inc/cvc/state/state_exec/utf8.h
+  ../../inc/cvc/state/state_exec/lock_manager.h
+  ../../inc/cvc/state/state_exec/detail/lock_table.h
+  ../../inc/cvc/state/state_exec/detail/lock_home.h
   ../../inc/cvc/core/app.h
   ../../inc/cvc/core/async_task.h
   ../../inc/cvc/core/async_lane.h
+  ../../inc/cvc/core/sliced_task.h
   ../../inc/cvc/core/process.h
   ../../inc/cvc/core/text.h
   ../../inc/cvc/core/thread_pool.h
@@ -139,6 +143,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/volume/contour_mesh.h
   ../../inc/cvc/volume/contour_tree.h
   ../../inc/cvc/volume/contour_spectrum.h
+  ../../inc/cvc/volume/resize_stepper.h
   ../../inc/cvc/tf/model.h
   ../../inc/cvc/tf/vinay.h
   ../../inc/cvc/tf/overlays.h
@@ -220,6 +225,7 @@ set(SOURCE_FILES
   core/app.cpp
   core/async_task.cpp
   core/async_lane.cpp
+  core/sliced_task.cpp
   core/process.cpp
   core/text.cpp
   core/thread_pool.cpp
@@ -232,6 +238,7 @@ set(SOURCE_FILES
   geometry/simplify.cpp
   geometry/mesh_ops.cpp
   geometry/fem.cpp
+  geometry/sliced_ldlt.cpp
   geometry/geometry_file_io.cpp
   image/image.cpp
   image/magick_io.cpp
@@ -275,6 +282,9 @@ set(SOURCE_FILES
   state/state_exec/resource_policy.cpp
   state/state_exec/stdlib.cpp
   state/state_exec/exec_coordinator.cpp
+  state/state_exec/lock_manager.cpp
+  state/state_exec/lock_home.cpp
+  state/state_exec/lock_intrinsics.cpp
   core/world_clock.cpp
   core/world_clock_binding.cpp
   core/clock_driver.cpp
@@ -343,6 +353,7 @@ set(SOURCE_FILES
   volume/volume_ops.cpp
   volume/contour_tree.cpp
   volume/contour_spectrum.cpp
+  volume/resize_stepper.cpp
   volume/mesh_contour_tree.cpp
   tf/model.cpp
   tf/vinay.cpp
@@ -2509,6 +2520,18 @@ endif()
 # magick_image_io claims, and TIFF / WEBP round trips that only Magick can do. A plain main()
 # for the same reason as physics_replay_test; node runs it (`node
 # image_magick_roundtrip_test.js`, ci.yml's ari-wasm job). Natively, image_test covers this.
+# state_exec_wasm_smoke: with-lock where there are no threads (locks plan L1.12), a plain main()
+# that prints STATE_EXEC_WASM_OK; node runs it in ci.yml's ari-wasm job (no pthreads).
+option(CVC_BUILD_STATE_EXEC_WASM_SMOKE "Build state_exec_wasm_smoke (with-lock without threads)" OFF)
+if(CVC_BUILD_STATE_EXEC_WASM_SMOKE)
+  add_executable(state_exec_wasm_smoke tests/state_exec_wasm_smoke.cpp)
+  target_link_libraries(state_exec_wasm_smoke PRIVATE cvc)
+  target_compile_features(state_exec_wasm_smoke PRIVATE cxx_std_20)
+  if(EMSCRIPTEN)
+    target_link_options(state_exec_wasm_smoke PRIVATE -sEXIT_RUNTIME=1 -sALLOW_MEMORY_GROWTH=1
+      -sSTACK_SIZE=2mb)
+  endif()
+endif()
 option(CVC_BUILD_IMAGE_MAGICK_ROUNDTRIP "Build image_magick_roundtrip_test (the wasm ImageMagick run-time gate)" OFF)
 if(CVC_BUILD_IMAGE_MAGICK_ROUNDTRIP)
   add_executable(image_magick_roundtrip_test tests/image_magick_roundtrip.cpp)

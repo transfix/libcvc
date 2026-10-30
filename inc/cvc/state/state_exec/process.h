@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <climits>
 #include <cstdint>
 #include <cvc/state/state_exec/stackless_evaluator.h>
 #include <cvc/state/state_exec/types.h>
@@ -47,6 +48,10 @@ const char *to_string(process_status s);
 
 /// Parse process_status from string.  Returns ready on unknown input.
 process_status parse_process_status(const std::string &s);
+
+namespace detail {
+struct process_locks; // detail/lock_home.h: a process's mirror of its holds, and its ticket
+} // namespace detail
 
 /// A managed process in the scheduler.
 struct process {
@@ -189,8 +194,24 @@ struct process {
     bool sleeping = false;            // counted among the sleepers (waiting with a wake_time)
     bool timer = false;               // a timer entry for timer_at is live
     std::chrono::steady_clock::time_point timer_at{};
+    bool lock_waiting = false; // counted among the lock waiters (waiting with lock_waiting)
+    bool lock_expired = false; // counted among the flagged lock expiries (lock_expired_pending)
   };
   table_entry table;
+
+  // Locks (docs/STATE_EXEC_LOCKS.md; protocol 2.2): a home's private state for this process, kept
+  // by its scheduler's lock home. `locks` stays null until the process first takes a lock or
+  // waits for one, so a program that never locks pays nothing for it.
+  std::shared_ptr<detail::process_locks> locks;
+  bool lock_waiting = false; // parked on a with-lock request (its ticket is in locks)
+  /// The lock wait's deadline, in the process table's timer heap while lock_waiting.
+  std::optional<std::chrono::steady_clock::time_point> lock_deadline;
+  int inherited_priority = INT_MAX; // the inherited priority; written only by a relevel (L2)
+  /// The lock deadline passed while nothing collected it (process_table::wake_due with no
+  /// vector): the next lock_home::wait_expired takes it.
+  bool lock_expired_pending = false;
+  /// The priority a priority policy schedules by (design 8.2; the floor is phase L2's).
+  int effective_priority() const { return std::min(priority, inherited_priority); }
 
   /// Elapsed running time (only while status == running).
   double elapsed_time() const;
@@ -242,6 +263,16 @@ using process_ptr = std::shared_ptr<process>;
 
 /// Create a new managed process.
 inline process_ptr make_process() { return std::make_shared<process>(); }
+
+namespace detail {
+/// A forked child's scopes (td B28). Every scope the child's copied frames run in, from the
+/// innermost up to the parent's global scope, is copied once (its bindings, and its outer
+/// remapped to the copies), the global scope's copy being `child_global`, and the frames run in
+/// the copies: a set in the child never lands in the parent's scopes. The scopes above the
+/// global (the builtins), and any scope not under it, stay shared, as values (closures) do.
+void fork_scopes(evaluator_state &child, const environment_ptr &parent_global,
+                 const environment_ptr &child_global);
+} // namespace detail
 
 } // namespace cvc::state_exec
 

@@ -1,0 +1,6 @@
+# scenarios.py scenario_one_home_refusal, its homes merged into one home of prio false
+config inheritance=1 coalesce=0 one_home=1 mutations=-
+attach_home 0 -> 0 |
+try_acquire 0 1 o 0 X a - - -> granted 1 1 0 |
+query - 0 o -> held a/X/1/1/1/0 waiting |
+attach_home 0 -> refused |

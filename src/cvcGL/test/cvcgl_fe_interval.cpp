@@ -50,6 +50,7 @@
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/value.h>
 #include <cvc/core/app.h>
+#include <cvc/core/async_lane.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/mesh_ops.h>
 #include <cvc/gl/GraphicsNode.h>
@@ -663,6 +664,7 @@ int main() {
       const auto tick = [&] {
         for (const auto &t : r.custom_ticks)
           t(nullptr);
+        cvc::pump_exec_frame(app.exec_scheduler()); // fe_lab / mesh_lab jobs run as scheduler tasks
       };
       // Tick until the request was taken and its job applied; bounded at ~2 minutes.
       const auto settle = [&] {
@@ -794,6 +796,7 @@ int main() {
         for (int i = 0; i < 12000; ++i) {
           for (const auto &t : mr.custom_ticks)
             t(nullptr);
+          cvc::pump_exec_frame(app.exec_scheduler()); // the mesh is a sliced task on it
           const bool busy = val(app, mb + ".busy") == "1";
           jobs += busy && !was_busy ? 1 : 0;
           was_busy = busy;

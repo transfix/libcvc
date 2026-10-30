@@ -1,6 +1,7 @@
 # state_exec: locks on the state tree, and process priority changes
 
-Status: design, 2026-10-27. L0 (the atomic natives, section 4.4) is built; nothing else here is yet.
+Status: design, 2026-10-27. L0 (the atomic natives, section 4.4) and L1 (`with-lock` on one
+scheduler) are built; L1b, L2 and L3 follow, and L4 onward are design only.
 Tracked in the `state-exec-perf` workstream,
 beside the threaded design ([`docs/STATE_EXEC_THREADED.md`](STATE_EXEC_THREADED.md)), which this
 document extends. The exact lock protocol is
