@@ -45,8 +45,9 @@ const TYPES = {'.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css
                '.wasm': 'application/wasm', '.json': 'application/json', '.ari': 'text/plain'};
 
 // URL path -> file: /apps/app/<shell file> from WEB, the rest of /apps/ from DOCSET. /apps/cfg/ is
-// the same app with a page config (CONFIG) that passes the page's origin as a document argument.
-const CONFIG = JSON.stringify({args: ['--instance', '{origin}']});
+// the same app with a page config (CONFIG) as an app like nicotina's would have: the network on for
+// the page's own origin (--net), and that origin as a document argument.
+const CONFIG = JSON.stringify({flags: ['--net'], args: ['--instance', '{origin}']});
 function fileFor(urlPath) {
   const p = decodeURIComponent(urlPath);
   if (!p.startsWith('/apps/') || p.includes('..')) return null;
@@ -198,7 +199,7 @@ if (fs.existsSync(path.join(WEB, 'ari.html'))) {
       check: v => v.state === 'running' && shows(v),
     },
     {
-      name: 'ari: {origin} in a config argument is the page\'s origin',
+      name: 'ari: a config\'s --net and {origin} in its arguments',
       url: `${ORIGIN}/apps/cfg/ari.html`,
       check: v => v.state === 'running' && shows(v) && v.text.includes(`instance: ${ORIGIN}`),
     },
