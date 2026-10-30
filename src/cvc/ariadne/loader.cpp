@@ -2784,7 +2784,7 @@ LoadResult load_node(const YAML::Node &doc, const std::string &base_dir = std::s
       ctx.warn("ari: on_signal: must be a scalar state_exec script string — ignored");
     r.keys = parse_keys(ctx, doc["keys"]);
     // tests: a map of name -> program that `ari test` runs (the loader only captures them).
-    if (const YAML::Node ts = doc["tests"]) {
+    if (const YAML::Node ts = doc["tests"]; ts && !ts.IsNull()) { // `tests:` alone: none
       if (!ts.IsMap())
         ctx.warn("ari: tests: must be a MAP of test name -> state_exec program — ignored");
       else

@@ -2428,6 +2428,10 @@ tests: [ (assert true) ]
   ASSERT_TRUE(seq.ok) << seq.error;
   EXPECT_TRUE(seq.tests.empty());
   EXPECT_TRUE(has_warning(seq, "tests: must be a MAP"));
+  LoadResult empty = load_string("meta: { min_libcvc: \"0.0.0\" }\ntests:\n");
+  ASSERT_TRUE(empty.ok) << empty.error;
+  EXPECT_TRUE(empty.tests.empty());
+  EXPECT_FALSE(has_warning(empty, "tests:")); // an empty block is no tests, not a mistake
   LoadResult entry = load_string(R"(
 meta: { min_libcvc: "0.0.0" }
 tests:
