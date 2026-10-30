@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
+#include <limits>
 #include <vector>
 
 #include "LBIE_Mesher.h"
@@ -80,7 +81,7 @@ namespace LBIE
     // Mesher::step()'s operations, and their stages: extractMesh()'s (with do_duallib_extract()'s
     // and set_octree_volume()'s) and qualityImprove()'s.
     enum { MOP_NONE, MOP_EXTRACT, MOP_IMPROVE, MOP_RELEASE };
-    enum { MX_BEGIN, MX_DUAL, MX_LAYER_BEGIN, MX_LAYER, MX_RESAMPLE, MX_SETVOL, MX_LAYER_SET,
+    enum { MX_BEGIN, MX_DUAL, MX_LAYER_BEGIN, MX_LAYER, MX_RESAMPLE, MX_RESIZE, MX_SETVOL, MX_LAYER_SET,
 	   MX_COLLAPSE, MX_QEF, MX_TRAVERSE, MX_EXTRACT, MX_IMPROVE, MX_WORLD, MX_EXTENTS, MX_DONE };
     enum { MQ_BEGIN, MQ_MAP, MQ_PASS, MQ_UNMAP, MQ_DONE };
 
@@ -136,7 +137,8 @@ namespace LBIE
   }
 
   // extractMesh() a slice at a time. DUALLIB is do_duallib_extract(): the volume (TETRA2's layer
-  // a voxel at a time, 4 a unit) resampled to (2^n+1)^3 in one piece and set into the octree
+  // a voxel at a time, 4 a unit) resampled to (2^n+1)^3 (cvc::resize_stepper, 4 voxels a unit)
+  // and set into the octree
   // (Octree::begin_set_volume()), then the octree's collapse, QEFs, traversal, extraction and
   // first quality improvement, then the vertices mapped to world coordinates and the mesh's
   // extents (64 vertices a unit). FASTCONTOURING and LIBISOCONTOUR extract in one piece.
@@ -232,26 +234,43 @@ namespace LBIE
 	case MX_RESAMPLE:
 	  {
 	    // set_octree_volume()
-	    VolMagick::Volume localvol(*s.vol);
-	    s.vol.reset();
-
 	    cerr << "LBIE::Mesher::set_octree_volume(): set volume: ";
-	    //LBIE requires volumes with dimension (2^n+1)^3
-	    unsigned int dim[3] = { static_cast<unsigned int>(localvol.XDim()), static_cast<unsigned int>(localvol.YDim()), static_cast<unsigned int>(localvol.ZDim()) };
+	    //LBIE requires volumes with dimension (2^n+1)^3: any other is resized (resize()'s
+	    //voxels, a range at a time) first
+	    const VolMagick::Volume& vol = *s.vol;
+	    unsigned int dim[3] = { static_cast<unsigned int>(vol.XDim()), static_cast<unsigned int>(vol.YDim()), static_cast<unsigned int>(vol.ZDim()) };
 	    unsigned int maxdim = *std::max_element(dim,dim+3);
-	    std::size_t units = 1;
 	    if((dim[0] != dim[1]) ||
 	       (dim[0] != dim[2]) ||
 	       upToPowerOfTwo(maxdim-1) != (maxdim-1))
 	      {
-		localvol.resize(VolMagick::Dimension(upToPowerOfTwo(maxdim)+1,
-						     upToPowerOfTwo(maxdim)+1,
-						     upToPowerOfTwo(maxdim)+1));
-		units += std::size_t(localvol.XDim()*localvol.YDim()*localvol.ZDim())/4;
+		s.resize = std::make_shared<cvc::resize_stepper>(vol, VolMagick::Dimension(upToPowerOfTwo(maxdim)+1,
+										   upToPowerOfTwo(maxdim)+1,
+										   upToPowerOfTwo(maxdim)+1));
+		s.stage = MX_RESIZE;
 	      }
-	    _octree.begin_set_volume(localvol);
-	    s.stage = MX_SETVOL;
-	    spend(budget, units);
+	    else
+	      {
+		_octree.begin_set_volume(vol);
+		s.stage = MX_SETVOL;
+	      }
+	    s.vol.reset();
+	    spend(budget, 1);
+	  }
+	  break;
+
+	case MX_RESIZE:
+	  {
+	    // 4 voxels a unit; a bounded step that finishes it ends there, an unbounded one (run to
+	    // the end) carries on
+	    const bool unbounded = budget >= std::numeric_limits<std::size_t>::max()/4;
+	    if(s.resize->step(unbounded ? 0 : budget*4))
+	      {
+		_octree.begin_set_volume(s.resize->take());
+		s.resize.reset();
+		s.stage = MX_SETVOL;
+	      }
+	    spend(budget, unbounded ? 1 : budget);
 	  }
 	  break;
 
@@ -705,6 +724,8 @@ namespace LBIE
 	{
 	case MX_BEGIN: case MX_DUAL: case MX_LAYER_BEGIN: case MX_LAYER: case MX_RESAMPLE:
 	  return "preparing";
+	case MX_RESIZE:
+	  return "resampling";
 	case MX_SETVOL:
 	  return _octree.step_phase();
 	case MX_LAYER_SET: case MX_COLLAPSE:
@@ -740,6 +761,7 @@ namespace LBIE
 	case MX_BEGIN: case MX_DUAL: case MX_LAYER_BEGIN: return 0.0;
 	case MX_LAYER: return 0.04*frac(double(_st.pos), _st.vol ? double(_st.vol->XDim()*_st.vol->YDim()*_st.vol->ZDim()) : 0.0);
 	case MX_RESAMPLE: return 0.04;
+	case MX_RESIZE: return 0.04 + 0.01*(_st.resize ? _st.resize->progress() : 1.0);
 	case MX_SETVOL: return 0.05 + 0.2*_octree.step_progress();
 	case MX_LAYER_SET: return 0.25;
 	case MX_COLLAPSE: return 0.25 + 0.1*oct;

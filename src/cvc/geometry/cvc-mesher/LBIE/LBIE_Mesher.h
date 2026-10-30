@@ -6,6 +6,7 @@
 #include <memory>
 #include <vector>
 #include <VolMagickCompat.h>
+#include <cvc/volume/resize_stepper.h>
 
 #include "octree.h"
 #include "LBIE_geoframe.h"
@@ -187,6 +188,7 @@ namespace LBIE
      bool started = false; //the stage's octree operation is under way
      double lo = 0.0, hi = 0.0; //TETRA2's layer
      std::shared_ptr<VolMagick::Volume> vol; //the volume becoming the layer, or the octree's
+     std::shared_ptr<cvc::resize_stepper> resize; //the octree's volume, resampled to (2^n+1)^3
      unsigned int iterations = 0, pass = 0;
      double origin[3] = {0.0, 0.0, 0.0}, cell[3] = {1.0, 1.0, 1.0};
      bool on_grid = false, mapped = false;
