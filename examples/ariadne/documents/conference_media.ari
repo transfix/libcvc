@@ -19,6 +19,13 @@ meta:
   author: cvc
   min_libcvc: 3.4.0
 
+requires:
+  - stream_view
+  - stream-open                    # the capture -> stream -> play verbs on_tick calls
+  - stream-capture-camera
+  - stream-capture-audio
+  - stream-play-audio
+
 menubar:
   - menu: Sim
     items:

@@ -18,6 +18,9 @@ meta:
   author: cvc
   min_libcvc: 3.4.0
 
+requires:
+  - gl.scene                       # a scene renderer realizes the scene: block (arigl; not ari)
+
 # Reusable control components (shared across the ported demos): the lighting rig, camera
 # navigation and the shadow/chrome scene toggles — all declarative, no host C++ panels.
 import:
