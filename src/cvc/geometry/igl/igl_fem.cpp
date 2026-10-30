@@ -24,6 +24,7 @@
 #include "igl_eigen.h"
 
 #include <Eigen/Eigenvalues>
+#include <Eigen/OrderingMethods>
 #include <Eigen/SparseCholesky>
 #include <algorithm>
 #include <cmath>
@@ -305,6 +306,71 @@ void eigenmodes(const dvec &Vp, const ivec &Ep, int simplex_size, const mask &ac
     for (int j = 0; j < na; ++j)
       vectors[std::size_t(i)][std::size_t(global[std::size_t(j)])] = sign * U(j, i);
   }
+}
+
+// ---- stepped solves ------------------------------------------------------------
+
+namespace {
+
+Eigen::Map<const Eigen::SparseMatrix<double, Eigen::ColMajor, int>>
+as_eigen(const sliced_detail::csc &A) {
+  return Eigen::Map<const Eigen::SparseMatrix<double, Eigen::ColMajor, int>>(
+      A.n, A.n, Eigen::Index(A.x.size()), A.p.data(), A.i.data(), A.x.data());
+}
+
+} // namespace
+
+void amd_ordering(const sliced_detail::csc &A, ivec &perm) {
+  // SimplicialCholeskyBase::ordering: the AMD ordering of the full symmetric pattern, whose
+  // indices are the inverse permutation it then applies -- the order in which A's rows are taken.
+  const Eigen::SparseMatrix<double, Eigen::ColMajor, int> C = as_eigen(A);
+  Eigen::PermutationMatrix<Eigen::Dynamic, Eigen::Dynamic, int> P;
+  Eigen::AMDOrdering<int> amd;
+  amd(C, P);
+  perm.assign(P.indices().data(), P.indices().data() + P.indices().size());
+}
+
+void dense_modes(const sliced_detail::csc &K, const dvec &m, int k, dvec &S, std::vector<dvec> &U) {
+  const SpMat Ks = as_eigen(K);
+  const Eigen::VectorXd mv = Eigen::Map<const Eigen::VectorXd>(m.data(), Eigen::Index(m.size()));
+  Eigen::VectorXd s;
+  Eigen::MatrixXd u;
+  dense_modes(Ks, mv, k, s, u);
+  S.assign(s.data(), s.data() + s.size());
+  U.assign(std::size_t(u.cols()), dvec());
+  for (Eigen::Index j = 0; j < u.cols(); ++j)
+    U[std::size_t(j)].assign(u.col(j).data(), u.col(j).data() + u.rows());
+}
+
+void subspace_start(int n, int p, dvec &X, std::uint64_t &seed) {
+  X.assign(std::size_t(n) * std::size_t(p), 0.0);
+  for (int j = 0; j < p; ++j)
+    for (int i = 0; i < n; ++i)
+      X[std::size_t(j) * std::size_t(n) + std::size_t(i)] = hash_unit(seed++);
+}
+
+bool subspace_update(const sliced_detail::csc &K, const dvec &m, int k, double lmax, int p, dvec &Y,
+                     dvec &X, dvec &theta, dvec &prev, std::uint64_t &seed) {
+  const int n = K.n;
+  const SpMat Ks = as_eigen(K);
+  const Eigen::VectorXd mv = Eigen::Map<const Eigen::VectorXd>(m.data(), n);
+  Eigen::MatrixXd Ym = Eigen::Map<Eigen::MatrixXd>(Y.data(), n, p);
+  m_orthonormalize(Ym, mv, seed);
+  const Eigen::MatrixXd R = Ym.transpose() * (Ks * Ym);
+  Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(0.5 * (R + R.transpose()));
+  if (es.info() != Eigen::Success || !es.eigenvalues().allFinite())
+    throw failure("laplacian_eigenmodes: Rayleigh-Ritz eigensolver failed");
+  const Eigen::VectorXd t = es.eigenvalues();
+  const Eigen::MatrixXd Xm = Ym * es.eigenvectors();
+  X.assign(Xm.data(), Xm.data() + Xm.size());
+  theta.assign(t.data(), t.data() + t.size());
+  if (prev.empty())
+    prev.assign(std::size_t(k), std::numeric_limits<double>::infinity());
+  double change = 0.0;
+  for (int i = 0; i < k; ++i)
+    change = std::max(change, std::abs(theta[std::size_t(i)] - prev[std::size_t(i)]));
+  prev.assign(theta.begin(), theta.begin() + k);
+  return change <= 1e-12 * std::abs(theta[std::size_t(k) - 1]) + 1e-13 * lmax;
 }
 
 // ---- heat-method geodesics ----------------------------------------------------

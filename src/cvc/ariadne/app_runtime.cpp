@@ -37,6 +37,17 @@ AppRuntime::AppRuntime(cvc::app &app, std::string prefix, SceneAdapter *scene)
 AppRuntime::~AppRuntime() {
   verbs_->sync.clear(); // the provider outlives us in the registry: it must bind nothing of ours
   verbs_->async.clear();
+  if (netEnabled_)
+    disable_net(); // its provider holds app_ by reference
+}
+
+std::string AppRuntime::enable_net(const NetHostConfig &config) {
+  std::string error = cvc::ariadne::enable_net(app_, config);
+  if (error.empty() && config.enabled) {
+    netEnabled_ = true;
+    rt_.refresh_program_names(); // has? sees the http verbs
+  }
+  return error;
 }
 
 void AppRuntime::set_backend(Backend &backend) { rt_.set_backend(&backend); }

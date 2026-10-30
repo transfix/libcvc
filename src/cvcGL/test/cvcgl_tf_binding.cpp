@@ -34,7 +34,8 @@
 //
 // No rendering: the bindings' ticks are run directly (tick_scene would also tick the renderers,
 // which need a GL context), and nothing pumps app.exec_scheduler() but pump() and
-// wait_overlays(). Plain main, returns non-zero on failure (NDEBUG is defined, so no assert()).
+// wait_overlays() (fe_lab's loads, scheduler tasks too, are pumped while the test waits for them).
+// Plain main, returns non-zero on failure (NDEBUG is defined, so no assert()).
 
 #include <algorithm>
 #include <boost/signals2.hpp>
@@ -1490,6 +1491,7 @@ int main() {
       const auto load = [&] {
         for (int i = 0; i < 6000; ++i) {
           tick(sr);
+          pump(app); // the load is a sliced task on the scheduler
           if (val(app, fb + ".busy") == "0" && val(app, fb + ".request").empty() &&
               val(app, fb + ".status").compare(0, 7, "loading") != 0)
             return val(app, fb + ".status").compare(0, 6, "loaded") == 0;

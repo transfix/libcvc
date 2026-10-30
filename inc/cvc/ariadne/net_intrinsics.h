@@ -1,41 +1,76 @@
 #ifndef CVC_ARIADNE_NET_INTRINSICS_H
 #define CVC_ARIADNE_NET_INTRINSICS_H
 
-// Ariadne — async HTTP host intrinsics for the state_exec program lanes (roadmap §13.8). Registers
-// an `(http-get-async URL [HEADERS])` verb that fetches over cvc::net OFF the scheduler thread and,
-// on completion, posts the response to a UNIQUE reply channel the verb RETURNS. A program awaits it
-// with the existing `(msg-recv <chan>)`, which resumes with a dict:
+// Ariadne — HTTP verbs for the state_exec program lanes (roadmap §13.8; docs/ARIADNE.md §10.2).
 //
-//   (get-attr (msg-recv (http-get-async "https://host/x")) "body")
-//     ; => dict { ok  status  body(bytes)  url  headers(list)  error }
+//   (http-get URL [OPTS])            a GET
+//   (http-request METHOD URL [OPTS]) any method
+//   (fetch URI [BASE])               any registered scheme (file/state/cvc/http)
 //
-// WHY two-step (verb + msg-recv) and not a transparent `(http-get url)` that returns the body: a
-// host verb is a native_fn(std::span<value_t>) with NO intrinsics_context at call time, so it
-// cannot read the calling process's pid or self-park; only a core intrinsic (like msg-recv) can. So
-// the verb SUBMITS and returns the channel, and msg-recv (a core intrinsic) does the parking +
-// value-threading — the exact nav_compute pattern. A transparent single-verb await needs a new
-// evaluator hook (a future item).
+// Each is an async function: the call parks the program while the request runs on the app's
+// background task pool and resumes it with the reply; its "-async" form returns a future for
+// (await f). The http verbs' reply is a dict with every key present:
 //
-// THREADING: the fetch runs on app.computePool() (a background worker), so the scheduler/host
-// thread is never blocked; the worker touches only the one thread-safe seam,
-// exec_scheduler().post_message. The verb ALWAYS posts a dict (an error dict on a transport/arg
-// failure), so a parked (msg-recv) never hangs forever.
+//   ok            the transport worked (a reply came back), whatever its status
+//   status        the HTTP status (0 when no reply came)
+//   body          the body, as bytes
+//   url           the URL the reply came from
+//   headers       the reply's header lines ("Name: value"), in order
+//   header_map    the same as a dict: lowercased name -> value (repeats joined with ", ")
+//   content_type  the Content-Type header ("" when there is none)
+//   captured      whether capture_auth: kept a credential from this reply
+//   error         why the request failed, or why capture_auth: kept nothing ("" otherwise)
 //
-// LANES + LIMITS: use it only in a program `on:`/`on:tick`/`on_key`/`on_pointer` lane — NOT in
-// `init:` (no per-frame pump, so a park never resumes) and NOT in the reactive read lane
-// (visible_when/computed, default-deny). NATIVE ONLY for now: the background-worker model assumes
-// native threads (wasm needs the §13.8 async-fetch path). A no-op without a compiled cvc::net
-// backend.
+// OPTS is a dict: query (dict, appended to the URL), headers (dict, or a list of "Name: value"
+// lines), body (string or bytes) or form (dict, sent x-www-form-urlencoded), and two that only a
+// host with a credential store (NetAccess::credentials) takes:
+//
+//   auth          "NAME": the host adds "Authorization: Bearer <token>" for credential NAME as the
+//                 request is sent, if NAME is bound to the URL's origin. The program never holds
+//                 the token, and any copy of it the reply echoes is blanked.
+//   capture_auth  (dict "name" NAME ["field" "token"]): from a 2xx JSON reply, the host keeps the
+//                 string at FIELD (object keys joined by '.') as credential NAME, captured from
+//                 the URL's origin, and the reply's body has "[redacted]" in its place.
+//
+// A request with either does not follow redirects. With a credential store, programs also get
+// (net-auth-has? NAME [URL]), (net-auth-forget NAME) and (net-auth-clear); every program gets
+// (net-allowed? URL).
+//
+// Use the verbs in a program lane (on:, on_tick:, on_key:, on_pointer:): not in init:, where
+// nothing resumes a parked call, nor in the reactive read lane, which forbids parking. The http
+// verbs are absent without a compiled cvc::net backend; fetch is always there.
+
+#include <atomic>
+#include <memory>
 
 namespace cvc {
 class app;
+namespace net {
+class NetPolicy;       // cvc/net/net_policy.h
+class CredentialStore; // cvc/net/credentials.h
+} // namespace net
 namespace ariadne {
 
-// Register the async net intrinsics against `app` (used for the compute pool + the scheduler
-// ingress the completion posts to). Appends to the process-global action-intrinsic providers, so
-// call it once at setup, before load_*; tear down with cvc::ariadne::clear_action_intrinsics()
-// before `app` dies (the provider captures `app` by reference). A no-op if this build lacks
-// state_exec or an HTTP backend.
+// What the verbs may reach and which credentials they may use.
+struct NetAccess {
+  // The origins requests may go to, redirects included (cvc::net::send(req, policy)). Null checks
+  // nothing: the embedding program vouches for its documents.
+  std::shared_ptr<const cvc::net::NetPolicy> policy;
+  // The host's credentials. Null: a request with auth: or capture_auth: fails, and the net-auth
+  // verbs are not there.
+  std::shared_ptr<cvc::net::CredentialStore> credentials;
+  // Turns the verbs off when cleared (disable_net): programs built afterwards do not get them,
+  // and a call to one bound earlier raises an error. Null: always on.
+  std::shared_ptr<const std::atomic<bool>> live;
+};
+
+// Register the verbs against `app` (its background task pool and exec scheduler). Appends to the
+// process-global action-intrinsic providers, so call it once at setup, before load_*; tear down
+// with cvc::ariadne::clear_action_intrinsics() (or clear `access.live`) before `app` dies, since
+// the provider holds `app` by reference. A host that hands documents the network uses
+// enable_net (net_host.h), which builds the NetAccess from its flags.
+void register_net_intrinsics(cvc::app &app, NetAccess access);
+// register_net_intrinsics(app, {}): unchecked, and no credentials.
 void register_net_intrinsics(cvc::app &app);
 
 } // namespace ariadne

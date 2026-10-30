@@ -465,7 +465,20 @@ struct mesh_contour_tree_builder::impl {
     --jup_n[j];
     jup_x[j] ^= x;
     const u32 p = sup[x];
-    if (kids) {
+    if (kids && p == kNone && kids->size() > 1) {
+      // x tops its split tree too. Moved up to nothing, its kids would each be a root, and the
+      // split tree a forest whose lower leaves have no split neighbour. Hang the others from the
+      // highest kid (`kids` is in sweep order) instead: one tree, as cutting the loop at x allows.
+      const u32 r = kids->back();
+      u32 xs = 0;
+      sup[r] = kNone;
+      for (std::size_t i = 0; i + 1 < kids->size(); ++i) {
+        sup[(*kids)[i]] = r;
+        xs ^= (*kids)[i];
+      }
+      sdn_n[r] += u32(kids->size()) - 1;
+      sdn_x[r] ^= xs;
+    } else if (kids) {
       u32 xs = 0;
       for (const u32 d : *kids) {
         sup[d] = p;

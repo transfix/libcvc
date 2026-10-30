@@ -196,7 +196,7 @@ bool async_call::settle_timeout() {
 
 double async_call::run_seconds(clock::time_point now) const {
   const int64_t start = start_ns_.load(std::memory_order_acquire);
-  if (start == 0)
+  if (start == 0 || io_)
     return 0.0;
   const int64_t end = end_ns_.load(std::memory_order_acquire);
   const int64_t ran =
@@ -205,12 +205,14 @@ double async_call::run_seconds(clock::time_point now) const {
 }
 
 double async_call::cpu_seconds() const {
+  if (io_)
+    return 0.0;
   return 1e-9 * double(cpu_ns_.load(std::memory_order_acquire) +
                        fanout_cpu_ns_.load(std::memory_order_acquire));
 }
 
 double async_call::unmetered_seconds(clock::time_point now) const {
-  if (start_ns_.load(std::memory_order_acquire) == 0 || kernel_ended())
+  if (io_ || start_ns_.load(std::memory_order_acquire) == 0 || kernel_ended())
     return 0.0;
   const int64_t since = steady_ns(now) - metered_ns_.load(std::memory_order_acquire);
   return since > 0 ? 1e-9 * double(since) : 0.0;
@@ -456,6 +458,7 @@ value_t async_host::call(const std::string &name, async_kernel kernel, const asy
   process *proc = sched_ && sched_->current_process() ? sched_->current_process().get() : nullptr;
   auto call = std::make_shared<async_call>(name, proc ? proc->pid : -1);
   call->timeout_ = opts.timeout;
+  call->io_ = opts.io;
   call->alloc_limit_ = eval_alloc_limit(); // the calling step's
   call->sched_ = sched_;
   if (proc) {

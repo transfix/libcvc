@@ -33,7 +33,7 @@ else()
   # this directory scope, and in the cvcGL added below it (src/arisrv/CMakeLists.txt
   # explains why).
   if(NOT TARGET Boost::filesystem)
-    find_package(Boost REQUIRED COMPONENTS thread date_time regex filesystem
+    find_package(Boost REQUIRED COMPONENTS thread date_time regex filesystem program_options
                  OPTIONAL_COMPONENTS system chrono)
   endif()
 endif()

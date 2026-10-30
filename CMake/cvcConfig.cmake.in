@@ -3,7 +3,7 @@
 include(CMakeFindDependencyMacro)
 
 # Required dependencies
-find_dependency(Boost COMPONENTS thread date_time regex filesystem system chrono)
+find_dependency(Boost COMPONENTS thread date_time regex filesystem program_options system chrono)
 
 # ---------------------------------------------------------------------------
 # Optional dependencies — only required if libcvc was built with them.

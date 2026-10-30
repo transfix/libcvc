@@ -33,6 +33,7 @@ enum class Kind {
   Window,         // a floating window (title bar / move / resize / collapse)
   Text,           // static caption OR a read-only view of a state path
   Separator,      // a horizontal rule
+  Progress,       // a read-only bar: the number at a state path, over [lo, hi]
   Checkbox,       // bound bool state
   SliderInt,      // bound int state, [ilo, ihi]
   SliderFloat,    // bound double state, [lo, hi]
@@ -235,6 +236,10 @@ struct Widget {
   std::string src;
   double img_size = 256.0;
 
+  // Kind::Progress: the bar is the number at `bind` placed in [lo, hi] (clamped); `overlay` is a
+  // state path (or a computed expression) whose text is drawn over the bar, else the percent.
+  std::string overlay;
+
   // §12 module mount (load:): when non-empty, this widget is a MOUNT POINT — a relative
   // state-path segment (e.g. "includes.stats") appended to the enclosing scope, so its whole
   // SUBTREE resolves binds and evaluates reactive/read-lane expressions against that deeper
@@ -357,6 +362,18 @@ inline Widget with_text_color(Widget w, float r, float g, float b) {
 inline Widget separator() {
   Widget w;
   w.kind = Kind::Separator;
+  return w;
+}
+
+inline Widget progress(std::string label, std::string bind, double lo = 0.0, double hi = 1.0,
+                       std::string overlay = "") {
+  Widget w;
+  w.kind = Kind::Progress;
+  w.label = std::move(label);
+  w.bind = std::move(bind);
+  w.lo = lo;
+  w.hi = hi;
+  w.overlay = std::move(overlay);
   return w;
 }
 

@@ -4,6 +4,8 @@
 #include <string.h>
 #include <iostream>
 #include "normalspline.h"
+#include <cstddef>
+#include <vector>
 #define DBL_EPSILON 1.0e-10
 
 namespace LBIE
@@ -143,77 +145,69 @@ float	InitialCausalCoefficient
 } /* end InitialCausalCoefficient */
 
 
-void TransImg2Spline (float* InImage, float* OutImg, int Width,	int	Height, int SliceNum)
+// The lines TransImg2Spline converts, in its order: slice by slice, the slice's Height lines along x
+// and then its Width lines along y; then the Width*Height lines along z, x by x.
+std::size_t TransImg2SplineLines(int Width, int Height, int SliceNum)
+{
+	return std::size_t(SliceNum)*std::size_t(Height + Width) + std::size_t(Width)*std::size_t(Height);
+}
 
-{ 
-	float	*Line1, *Line2, *Line3;
+// Convert line n of TransImg2SplineLines() in place in OutImg (the x lines read InImage); `line`
+// is scratch.
+void TransImg2SplineLine(float* InImage, float* OutImg, int Width, int Height, int SliceNum,
+			 std::size_t n, std::vector<float>& line)
+{
 	float	Pole[2];
 	int	NbPoles;
 	int	x, y;
 	int i,j,k,index;
-	int SplineDegree;
 
-	SplineDegree=3;
-	
 	NbPoles = 1;
 	Pole[0] = (float) sqrt(3.0) - 2.0f;
-			
-	/* convert the image samples into interpolation coefficients */
 
-   	/* in-place separable process, along x */
-
-	Line1 = (float *)calloc(Width,sizeof(float));
-	if (Line1 == NULL) {
-//	  cout<<"error in allocating memory"<<endl;
-		return;
-	}
-        Line2 = (float *)calloc(Height,sizeof(float));
-	if (Line2 == NULL) {
-	 // cout<<"error in allocating memory"<<endl;
-		return;
-	}
-        Line3 = (float *)calloc(SliceNum,sizeof(float));
-	if (Line3 == NULL) {
-	 // cout<<"error in allocating memory"<<endl;
-		return;
-	}
-
-
-	for(k=0;k<SliceNum;k++)
-	{
-         
-		for (y = 0; y < Height; y++) {
+	const std::size_t xy = std::size_t(SliceNum)*std::size_t(Height + Width);
+	if (n < xy) {
+		k = int(n/std::size_t(Height + Width));
+		const int r = int(n%std::size_t(Height + Width));
+		if (r < Height) {
+			/* in-place separable process, along x */
+			y = r;
+			line.resize(Width);
 			index=k*Width*Height+y*Width;
-			for(i=0;i<Width;i++) Line1[i]=InImage[index+i];
-			ConvertToInterpolationCoefficients(Line1, Width, Pole, NbPoles, (float)DBL_EPSILON);
-            for(i=0;i<Width;i++) OutImg[index+i]=Line1[i];
+			for(i=0;i<Width;i++) line[i]=InImage[index+i];
+			ConvertToInterpolationCoefficients(line.data(), Width, Pole, NbPoles, (float)DBL_EPSILON);
+			for(i=0;i<Width;i++) OutImg[index+i]=line[i];
 		}
-			
-		/* in-place separable process, along y */
-		for (x = 0; x < Width; x++) {
+		else {
+			/* in-place separable process, along y */
+			x = r - Height;
+			line.resize(Height);
 			index=k*Width*Height+x;
-			for(j=0;j<Height;j++) Line2[j]=OutImg[index+j*Width];
-			ConvertToInterpolationCoefficients(Line2, Height, Pole, NbPoles, (float)DBL_EPSILON);
-			for(j=0;j<Height;j++) OutImg[index+j*Width]=Line2[j];
+			for(j=0;j<Height;j++) line[j]=OutImg[index+j*Width];
+			ConvertToInterpolationCoefficients(line.data(), Height, Pole, NbPoles, (float)DBL_EPSILON);
+			for(j=0;j<Height;j++) OutImg[index+j*Width]=line[j];
 		}
-	
-	} //end of k loop
-
-	// cout<<"finishing x and y loop "<<endl;
+		return;
+	}
 
 	/* in-place separable process, along z */
+	x = int((n - xy)/std::size_t(Height));
+	y = int((n - xy)%std::size_t(Height));
+	line.resize(SliceNum);
+	index=y*Width+x;
+	for(k=0;k<SliceNum;k++) line[k]=OutImg[index+k*Width*Height];
+	ConvertToInterpolationCoefficients(line.data(), SliceNum, Pole, NbPoles, (float)DBL_EPSILON);
+	for(k=0;k<SliceNum;k++) OutImg[index+k*Width*Height]=line[k];
+}
 
-	for(x=0;x<Width;x++)
-		for(y=0;y<Height;y++)
-		{
-			index=y*Width+x;
-			for(k=0;k<SliceNum;k++) Line3[k]=OutImg[index+k*Width*Height];
-			ConvertToInterpolationCoefficients(Line3, SliceNum, Pole, NbPoles, (float)DBL_EPSILON);
-			for(k=0;k<SliceNum;k++) OutImg[index+k*Width*Height]=Line3[k];
-		}
+void TransImg2Spline (float* InImage, float* OutImg, int Width,	int	Height, int SliceNum)
 
-	// cout<<"finishing z loop"<<endl;
-	return ;
+{ 
+	/* convert the image samples into interpolation coefficients, a line at a time */
+	std::vector<float> line;
+	const std::size_t lines = TransImg2SplineLines(Width, Height, SliceNum);
+	for (std::size_t n = 0; n < lines; n++)
+		TransImg2SplineLine(InImage, OutImg, Width, Height, SliceNum, n, line);
 } 
 
 

@@ -19,7 +19,7 @@ else()
   # In-tree: re-import the Boost targets cvc links PUBLIC so its transitive link evaluates in
   # this directory scope (src/arisrv/CMakeLists.txt explains why).
   if(NOT TARGET Boost::filesystem)
-    find_package(Boost REQUIRED COMPONENTS thread date_time regex filesystem
+    find_package(Boost REQUIRED COMPONENTS thread date_time regex filesystem program_options
                  OPTIONAL_COMPONENTS system chrono)
   endif()
 endif()
@@ -54,6 +54,27 @@ if(NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR AND NOT EMSCRIPTEN)
                        PASS_REGULAR_EXPRESSION "ari runs a document from a path")
   set_tests_properties(ari_docset ari_url_document PROPERTIES
                        SKIP_REGULAR_EXPRESSION "built without FTXUI;built without yaml-cpp")
+endif()
+
+# The network flags end to end (ari_net_test.cpp): the built ari, run as a launcher would, against
+# localhost servers. In-tree only, beside the GTest of the libcvc build, and not in a browser build.
+if(CVC_BUILD_TESTS AND NOT EMSCRIPTEN AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
+  add_executable(ari_net_test ari_net_test.cpp)
+  target_link_libraries(ari_net_test PRIVATE cvc GTest::gtest GTest::gtest_main)
+  add_dependencies(ari_net_test ari)
+  # As src/cvc-cli/CMakeLists.txt does (its note explains): GoogleTest in this directory's scope,
+  # discovery at test time on macOS and with a generous timeout on Windows.
+  include(GoogleTest)
+  if(APPLE)
+    macro(gtest_discover_tests)
+      _gtest_discover_tests(${ARGV} DISCOVERY_MODE PRE_TEST DISCOVERY_TIMEOUT 120)
+    endmacro()
+  elseif(WIN32)
+    macro(gtest_discover_tests)
+      _gtest_discover_tests(${ARGV} DISCOVERY_TIMEOUT 120)
+    endmacro()
+  endif()
+  gtest_discover_tests(ari_net_test PROPERTIES ENVIRONMENT "ARI_BINARY=$<TARGET_FILE:ari>")
 endif()
 
 if(EMSCRIPTEN)
