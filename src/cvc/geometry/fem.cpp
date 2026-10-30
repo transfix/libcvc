@@ -372,7 +372,7 @@ struct stepped_solve::impl {
     mdiag.assign(es.nv, 0.0);
     if (what == kind::poisson) {
       if (f.size() == 1)
-        f.assign(es.nv, f[0]);
+        f.assign(es.nv, double(f[0])); // a copy: assign may free f's buffer before it reads
       else if (f.size() != es.nv)
         throw mesh_ops_error("fem::solve_poisson: f needs one value, or one per point");
     }
