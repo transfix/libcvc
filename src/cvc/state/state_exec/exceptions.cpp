@@ -62,7 +62,8 @@ const builtin_classes &classes() {
         {"IndexError", "Exception"},     {"ArithmeticError", "Exception"},
         {"MemoryError", "Exception"},    {"ParseError", "Exception"},
         {"TimeoutError", "Exception"},   {"NativeError", "RuntimeError"},
-        {"PythonError", "RuntimeError"},
+        {"PythonError", "RuntimeError"}, {"LockError", "RuntimeError"},
+        {"DeadlockError", "LockError"},  {"PermissionError", "Exception"},
     };
     for (const auto &[name, parent] : hierarchy) {
       auto cls = std::make_shared<std::vector<std::pair<std::string, value_t>>>();

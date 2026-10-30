@@ -29,6 +29,7 @@
 #include <cvc/state/state_exec/builtins.h>        // host-intrinsic seam test: register_fn
 #include <cvc/state/state_exec/heap.h>            // collect_cycles / tracked_objects
 #include <cvc/state/state_exec/intrinsics.h>      // intrinsics_context.root_path (pool-task test)
+#include <cvc/state/state_exec/lock_manager.h>    // the app lock manager (Locks.*)
 #include <cvc/state/state_exec/types.h>           // value_t
 #include <cvc/tf/model.h>                         // §10 tf_editor: the model the widget edits
 #include <cvc/tf/overlays.h>                      // §10 tf_editor: the layers published beside it
@@ -495,6 +496,38 @@ TEST(AriadneAction, ProgramActionCapturesDeliveredValueFromMsgRecv) {
   rt.render();
   rt.drain(); // wakes + resumes; the delivered value flows into state-set
   EXPECT_EQ(cvc::state::instance(app)("async.value").value(), "delivered");
+}
+
+// An action's (fork) child shares the action's intrinsics context, so the context outlives the
+// action while the child runs: the action ends in its first drain, the child sleeps past it and
+// then writes through the context. Once the child ends it is reaped, and the context with it.
+TEST(AriadneAction, ForkedChildOutlivesTheAction) {
+  cvc::app app;
+  cvc::state &root = cvc::state::instance(app);
+  Runtime rt(app, "doc");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({button("Go", "(begin (set c (fork)) (if (= c 0) (begin (sleep 0.05) "
+                                  "(state-set \"x\" \"1\")) (state-set \"child\" (str c))))")}));
+  mb.button_click = true;
+  rt.render();
+  rt.drain(); // the action forks and ends; its child sleeps
+  mb.button_click = false;
+  ASSERT_FALSE(root("doc.child").value().empty());
+  const int child = std::stoi(root("doc.child").value());
+  EXPECT_TRUE(root("doc.x").value().empty());
+  for (int frame = 0; frame < 500 && root("doc.x").value().empty(); ++frame) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    rt.render();
+    rt.drain();
+  }
+  EXPECT_EQ(root("doc.x").value(), "1");
+  for (int frame = 0; frame < 50 && app.exec_scheduler().get_process_info(child); ++frame) {
+    rt.render();
+    rt.drain();
+  }
+  EXPECT_FALSE(app.exec_scheduler().get_process_info(child).has_value());
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
 }
 
 // item 2 — the compute-pool async story, headless (no ImGui/GL): a HOST INTRINSIC launches an
@@ -5261,4 +5294,208 @@ TEST(AriadneAppRuntime, EachLoadClearsTheLastScene) {
   art.load(with_scene);
   art.load(write_doc("clear_scene_b.ari", "meta: {min_libcvc: 3.4.0}\nroot:\n  - text: x\n"));
   EXPECT_EQ(scene.log, (std::vector<std::string>{"clear", "realize", "clear", "realize", "clear"}));
+}
+
+// ===========================================================================
+// with-lock under Ariadne (docs/STATE_EXEC_LOCKS.md 5.3, 5.5, 5.8; locks plan L1.12): documents,
+// actions and residents lock on the app's lock manager through the app scheduler. Every manager
+// operation checks the manager's invariants (CVC_STATE_EXEC_CHECK=1, set below before any manager
+// exists; gap G-38).
+// ===========================================================================
+
+namespace {
+
+void set_env_var_for_locks(const char *name, const char *value) {
+#ifdef _WIN32
+  _putenv_s(name, value);
+#else
+  setenv(name, value, 1);
+#endif
+}
+
+// The library reads CVC_STATE_EXEC_CHECK once, when the first lock manager is made.
+[[maybe_unused]] const bool g_lock_self_check = [] {
+  set_env_var_for_locks("CVC_STATE_EXEC_CHECK", "1");
+  return true;
+}();
+
+namespace se = cvc::state_exec;
+
+// An unchrooted program on the app scheduler, with an intrinsics context of its own.
+struct HostProgram {
+  cvc::app &app;
+  se::intrinsics_context ictx;
+  se::environment_ptr env;
+  int pid = -1;
+  HostProgram(cvc::app &a, const std::string &script) : app(a) {
+    se::async_scheduler &sched = app.exec_scheduler();
+    ictx.sched = &sched;
+    ictx.root = &cvc::state::instance(app);
+    ictx.proc = se::make_process();
+    ictx.proc->status = se::process_status::ready;
+    env = se::builtins::make_default_environment();
+    se::register_intrinsics(env, &ictx);
+    se::execute_options opts;
+    opts.env = env;
+    opts.owner = "host";
+    pid = sched.execute(script, opts);
+  }
+  ~HostProgram() { app.exec_scheduler().kill(pid); } // before ictx goes
+  std::optional<se::process_info> info() const {
+    return app.exec_scheduler().get_process_info(pid);
+  }
+};
+
+// What the app scheduler's lock waiters wait on ("lock /<absolute key>").
+std::vector<std::string> lock_waits(cvc::app &app) {
+  std::vector<std::string> out;
+  for (const se::process_info &i : app.exec_scheduler().list_processes())
+    if (!se::is_finished(i.status) && i.waiting_on && i.waiting_on->rfind("lock ", 0) == 0)
+      out.push_back(*i.waiting_on);
+  return out;
+}
+
+// The keys held on the app's lock manager (absolute).
+std::vector<std::string> held_keys(cvc::app &app) {
+  std::vector<std::string> out;
+  for (const se::lock_info &i : app.lock_manager()->query("", nullptr, "").held)
+    out.push_back(i.key);
+  return out;
+}
+
+// Posts to a program's channel, as its chroot names it.
+void post_to(cvc::app &app, const std::string &root, const std::string &channel) {
+  app.exec_scheduler().post_message(se::resolve_channel_key(root, channel),
+                                    se::value_t(std::string("go")));
+}
+
+// Every button reports one click at this render: its action is queued once.
+void click_once(Runtime &rt, MockBackend &mb) {
+  mb.button_click = true;
+  rt.render();
+  mb.button_click = false;
+}
+
+std::string node_value(cvc::app &app, const std::string &path) {
+  return cvc::state::instance(app)(path).value();
+}
+
+using strings = std::vector<std::string>;
+
+} // namespace
+
+// LK-34: a document's section holds X x (absolute docs.A.x); an unchrooted program on the same
+// scheduler asks for X docs: it waits for the section, then excludes the document's locks until
+// it releases.
+TEST(Locks, LK34_UnchrootedOuterLock) {
+  cvc::app app;
+  Runtime rt(app, "docs.A");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  cvc::state::instance(app)("ariadne.exec.lock_timeout").value(std::string("30"));
+  rt.set_root(group({button("Go", "(begin (state-incr \"tries\")"
+                                  " (with-lock \"x\" (begin (state-incr \"inside\")"
+                                  " (msg-recv \"rel\"))))")}));
+  click_once(rt, mb);
+  ASSERT_TRUE(pump_until(rt, [&] { return held_keys(app) == strings{"docs.A.x"}; }));
+  HostProgram outer(app, "(with-lock \"docs\" (begin (state-set \"outer\" \"in\")"
+                         " (msg-recv \"outer.rel\") (state-set \"outer\" \"out\")))");
+  ASSERT_TRUE(pump_until(rt, [&] {
+    const auto i = outer.info();
+    return i && i->waiting_on == std::optional<std::string>("lock /docs");
+  }));
+  EXPECT_EQ(node_value(app, "outer"), "");
+  // The section ends: the outer lock is granted, and the document's next section waits for it.
+  post_to(app, "docs.A", "rel");
+  ASSERT_TRUE(pump_until(rt, [&] { return node_value(app, "outer") == "in"; }));
+  EXPECT_EQ(held_keys(app), strings{"docs"});
+  click_once(rt, mb);
+  ASSERT_TRUE(pump_until(rt, [&] {
+    return node_value(app, "docs.A.tries") == "2" && lock_waits(app) == strings{"lock /docs.A.x"};
+  }));
+  for (int i = 0; i < 20; ++i) {
+    rt.render();
+    rt.drain();
+  }
+  EXPECT_EQ(node_value(app, "docs.A.inside"), "1"); // excluded
+  post_to(app, "", "outer.rel");
+  ASSERT_TRUE(pump_until(rt, [&] { return node_value(app, "docs.A.inside") == "2"; }));
+  EXPECT_EQ(node_value(app, "outer"), "out");
+  EXPECT_EQ(held_keys(app), strings{"docs.A.x"});
+  post_to(app, "docs.A", "rel");
+  ASSERT_TRUE(pump_until(rt, [&] { return held_keys(app).empty(); }));
+  EXPECT_NO_THROW(app.lock_manager()->check());
+}
+
+// LW-1, Ariadne's part: the reactive lane binds no with-lock: a predicate using it is a NameError,
+// reported, and the widget is hidden.
+TEST(Locks, LW01_ReactiveLaneHasNoWithLock) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  Widget w = text("shown");
+  w.visible_when = "(with-lock \"k\" #t)";
+  rt.set_root(group({w}));
+  rt.render();
+  EXPECT_FALSE(mb.saw("text_line:shown"));
+  const auto warns = rt.take_reactive_warnings();
+  ASSERT_FALSE(warns.empty());
+  EXPECT_NE(warns[0].find("NameError"), std::string::npos) << warns[0];
+  EXPECT_NE(warns[0].find("with-lock"), std::string::npos) << warns[0];
+  EXPECT_TRUE(held_keys(app).empty());
+}
+
+// LW-6, Ariadne's part: an action's fork inside with-lock is refused (LockError "fork"), and no
+// child is made.
+TEST(Locks, LW06_ActionFork) {
+  cvc::app app;
+  Runtime rt(app, "ui.f");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({button("Fork", "(state-set \"r\" (with-lock \"k\" (try (fork)"
+                                    " (catch (LockError e) (get-attr e \"reason\")))))")}));
+  click_once(rt, mb);
+  ASSERT_TRUE(pump_until(rt, [&] { return node_value(app, "ui.f.r") != ""; }));
+  EXPECT_EQ(node_value(app, "ui.f.r"), "fork");
+  EXPECT_TRUE(held_keys(app).empty());
+  for (const se::process_info &i : app.exec_scheduler().list_processes())
+    EXPECT_EQ(i.name.find("-fork"), std::string::npos) << i.name;
+  // Outside with-lock an action's (fork) forks the running process, and the child keeps the
+  // action's owner and context: AriadneAction.ForkedChildOutlivesTheAction.
+}
+
+// LW-9, the L1 part: an action waits for a resident's lock and is granted on release; with the
+// action's default timeout (ariadne.exec.lock_timeout, 1 s) the outcome is TimeoutError, no
+// earlier than 1 s.
+TEST(Locks, LW09_ActionsWaitResidents) {
+  cvc::app app;
+  Runtime rt(app, "ui.doc");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  // The resident takes k at each tick and keeps it until the host posts res.rel.
+  rt.set_tick_program("(with-lock \"k\" (begin (state-incr \"res.in\") (msg-recv \"res.rel\")))");
+  ASSERT_TRUE(pump_until(rt, [&] { return held_keys(app) == strings{"ui.doc.k"}; }));
+  rt.set_root(group({button("Go", "(with-lock \"k\" (state-set \"act\" \"granted\"))")}));
+  click_once(rt, mb);
+  ASSERT_TRUE(pump_until(rt, [&] { return lock_waits(app) == strings{"lock /ui.doc.k"}; }));
+  post_to(app, "ui.doc", "res.rel");
+  ASSERT_TRUE(pump_until(rt, [&] { return node_value(app, "ui.doc.act") == "granted"; }));
+  // The resident takes k again; an action with the default timeout waits, then times out.
+  ASSERT_TRUE(pump_until(rt, [&] {
+    return node_value(app, "ui.doc.res.in") == "2" && held_keys(app) == strings{"ui.doc.k"};
+  }));
+  rt.set_root(
+      group({button("Try", "(try (with-lock \"k\" (state-set \"act2\" \"granted\"))"
+                           " (catch (TimeoutError e) (state-set \"act2\" \"timeout\")))")}));
+  const auto t0 = std::chrono::steady_clock::now();
+  click_once(rt, mb);
+  ASSERT_TRUE(pump_until(rt, [&] { return node_value(app, "ui.doc.act2") != ""; }, 10000));
+  const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  std::printf("LW-9: the action's default lock timeout ended its wait after %.3f s\n", took);
+  EXPECT_EQ(node_value(app, "ui.doc.act2"), "timeout");
+  EXPECT_GE(took, 1.0);
+  EXPECT_LT(took, 10.0);
+  post_to(app, "ui.doc", "res.rel");
+  EXPECT_NO_THROW(app.lock_manager()->check());
 }

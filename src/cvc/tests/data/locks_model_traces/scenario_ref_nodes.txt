@@ -1,0 +1,7 @@
+# scenarios.py scenario_ref_nodes, its homes merged into one home of prio false
+config inheritance=1 coalesce=0 one_home=1 mutations=-
+attach_home 0 -> 0 |
+ref_nodes 0 a.b -> ok |
+unref_nodes 0 a.b -> ok |
+ref_nodes 2 a -> refused |
+unref_nodes 0 a -> refused |

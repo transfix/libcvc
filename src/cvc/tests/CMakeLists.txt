@@ -86,6 +86,10 @@ add_executable(state_exec_async_test state_exec_async_test.cpp)
 add_executable(async_lane_test async_lane_test.cpp)
 add_executable(state_exec_scheduler_test state_exec_scheduler_test.cpp)
 add_executable(state_exec_locks_test state_exec_locks_test.cpp)
+# The lock manager's table: its directed cases (state_exec_lock_table_test.cpp) and the model check
+# (state_exec_locks_model_test.cpp), one executable with two authors (locks plan L1.2, L1.3).
+add_executable(state_exec_locks_model_test state_exec_locks_model_test.cpp
+                                           state_exec_lock_table_test.cpp)
 add_executable(state_exec_intrinsics_test state_exec_intrinsics_test.cpp)
 add_executable(state_exec_coordinator_test state_exec_coordinator_test.cpp)
 add_executable(state_exec_bench_test state_exec_bench_test.cpp)
@@ -512,6 +516,7 @@ list(APPEND TEST_TARGETS
   async_lane_test
   state_exec_scheduler_test
   state_exec_locks_test
+  state_exec_locks_model_test
   state_exec_intrinsics_test
   state_exec_coordinator_test
   state_exec_bench_test
@@ -1708,6 +1713,13 @@ target_link_libraries(state_exec_locks_test
     GTest::gtest_main
 )
 
+target_link_libraries(state_exec_locks_model_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(state_exec_intrinsics_test
   PRIVATE
     cvc
@@ -2303,6 +2315,7 @@ target_compile_features(state_exec_async_test PRIVATE cxx_std_20)
 target_compile_features(async_lane_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_scheduler_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_locks_test PRIVATE cxx_std_20)
+target_compile_features(state_exec_locks_model_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_intrinsics_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_coordinator_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_bench_test PRIVATE cxx_std_20)
@@ -2803,6 +2816,7 @@ cvc_discover_tests(state_exec_async_test)
 cvc_discover_tests(async_lane_test)
 cvc_discover_tests(state_exec_scheduler_test)
 cvc_discover_tests(state_exec_locks_test)
+cvc_discover_tests(state_exec_locks_model_test)
 cvc_discover_tests(state_exec_intrinsics_test)
 cvc_discover_tests(state_exec_coordinator_test)
 cvc_discover_tests(state_exec_bench_test)
@@ -2934,6 +2948,23 @@ if(_cvc_bench_python)
              COMMAND "${_cvc_bench_python}" -I
                      "${PROJECT_SOURCE_DIR}/tools/bench/test_state_exec_bench.py")
   endif()
+endif()
+# The deterministic bench gates (state_exec_bench_gates.cmake): 0 steps and 0 allocations per
+# uncontended lock, and pinned steps_total for two sched.single.* programs, read from short runs
+# with the runner's `gate`. Same Python rule as the tool test. Release and RelWithDebInfo only:
+# MSVC's Debug STL allocates for its iterator debugging, so the allocation count is a Release
+# number; on a single-config generator the build type decides, on a multi-config one ctest's -C.
+get_property(_cvc_bench_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+if(TARGET state_exec_bench AND _cvc_bench_python AND _cvc_bench_python_rc EQUAL 0
+   AND (_cvc_bench_multi_config OR CMAKE_BUILD_TYPE MATCHES "^(Release|RelWithDebInfo)$"))
+  add_test(NAME state_exec_bench_gates
+           COMMAND "${CMAKE_COMMAND}"
+                   "-DBENCH=$<TARGET_FILE:state_exec_bench>"
+                   "-DPYTHON=${_cvc_bench_python}"
+                   "-DRUNNER=${PROJECT_SOURCE_DIR}/tools/bench/state_exec_bench.py"
+                   "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/state_exec_bench_gates"
+                   -P "${CMAKE_CURRENT_SOURCE_DIR}/state_exec_bench_gates.cmake"
+           CONFIGURATIONS Release RelWithDebInfo)
 endif()
 if(TARGET hdf5_test)
   cvc_discover_tests(hdf5_test)

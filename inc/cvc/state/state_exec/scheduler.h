@@ -11,7 +11,9 @@
 #define CVC_STATE_EXEC_SCHEDULER_H
 
 #include <chrono>
+#include <cvc/state/state_exec/detail/lock_home.h>
 #include <cvc/state/state_exec/heap.h>
+#include <cvc/state/state_exec/lock_manager.h>
 #include <cvc/state/state_exec/memory_tracker.h>
 #include <cvc/state/state_exec/process.h>
 #include <cvc/state/state_exec/process_table.h>
@@ -46,6 +48,16 @@ namespace cvc::state_exec {
 class scheduler : public scheduler_base {
 public:
   explicit scheduler(scheduling_policy policy = scheduling_policy::round_robin);
+  /// Destroys the lock home first (protocol 5.7), before any other member goes.
+  ~scheduler() override;
+
+  // --- Locks (docs/STATE_EXEC_LOCKS.md) ---
+
+  /// Use `mgr` for this scheduler's locks: the home is made and attached now. Throws
+  /// std::logic_error when a process of this scheduler holds or waits for a lock.
+  void set_lock_manager(std::shared_ptr<lock_manager> mgr);
+  detail::lock_home *locks() override;
+  bool check_tables() const override { return procs_.check(); }
 
   // --- Process submission ---
 
@@ -355,6 +367,23 @@ private:
 
   /// Build process_info from a process.
   process_info make_info(const process &proc) const;
+
+  /// What this scheduler gives its lock home (design 8.4).
+  struct lock_ops_impl final : detail::lock_sched_ops {
+    explicit lock_ops_impl(scheduler &sched) : s(sched) {}
+    scheduler &s;
+    bool park_lock(process &p) override;
+    void ready_lock_waiter(process &p) override;
+    void relevel(process &p) override;
+    std::size_t lock_expired_count() const override;
+    void take_lock_expired(std::vector<process *> &out) override;
+    process *find_process(int pid) override;
+    void for_each_process(const std::function<void(process &)> &fn) override;
+  };
+  lock_ops_impl lock_ops_{*this};
+  /// Made by locks() or set_lock_manager(); null until a with-lock needs it.
+  std::unique_ptr<detail::lock_home> home_;
+  std::vector<process *> lock_expired_; // reused by step_once's lock expiries
 };
 
 /// limits.max_alloc_bytes from the state tree under `root`:
