@@ -104,6 +104,21 @@ TEST(AriadneHostCli, RuntimeFlagsComeBeforeTheDocumentAndTheRestIsItsOwn) {
   EXPECT_NE(misplaced_flag_note("ari", o.doc_args).find("'--fps'"), std::string::npos);
 }
 
+TEST(AriadneHostCli, SettleIsSecondsAboveZero) {
+  const char *ok[] = {"ari", "snapshot", "--settle", "2.5", "d.ari"};
+  const HostOptions o = parse_host_args(5, ok);
+  EXPECT_TRUE(o.error.empty()) << o.error;
+  EXPECT_DOUBLE_EQ(o.settle, 2.5);
+  const char *none[] = {"ari", "snapshot", "d.ari"};
+  EXPECT_DOUBLE_EQ(parse_host_args(3, none).settle, 0.0); // the default: kDefaultSettleSeconds
+  for (const char *bad : {"0", "-1", "soon", "2s"}) {
+    const char *argv[] = {"ari", "snapshot", "--settle", bad, "d.ari"};
+    EXPECT_NE(parse_host_args(5, argv).error.find("--settle needs a number of seconds"),
+              std::string::npos)
+        << bad;
+  }
+}
+
 TEST(AriadneHostCli, InfoTakesNoDocument) {
   const char *info[] = {"ari", "info", "--json"};
   const HostOptions o = parse_host_args(3, info, {"--json"});
