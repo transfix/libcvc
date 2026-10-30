@@ -310,6 +310,69 @@ TEST(DynBikePlant, CollidesWithTheWorld) {
   EXPECT_NEAR(identity_gap(walled, 0), 0.0, 1e-9 * b.flow());
 }
 
+// For nav's plant ledger the plant tells its collisions apart: agent 0 drives into the wall (static
+// contacts, no other vehicle), agents 1 and 2 drive head on into each other away from it (each
+// touches the other, no static contact). Its samples carry them and the ground's attitude, and
+// leave out what a single track has not got.
+TEST(DynBikePlant, TellsTheBuildingsFromTheOtherVehicles) {
+  if (!plant_host::available())
+    GTEST_SKIP() << "no Jolt in this build";
+  using cvc::nav::plant_sample;
+  body_id ground;
+  auto w = walled_world(30.0, ground);
+  dyn_bike_plant_options o;
+  o.physics = w.get();
+  o.ground_bodies = {ground};
+  dyn_bike_plant plant({vehicle_desc::humvee()}, o);
+  cvc::nav::plant_state start[3];
+  start[1].x = static_cast<float>(60 * kS);
+  start[1].y = start[2].y = static_cast<float>(60 * kS);
+  start[2].x = static_cast<float>(90 * kS);
+  start[2].heading = 3.14159265f;
+  plant.attach(3, start, trained_frame(), 0.06);
+  EXPECT_EQ(plant.sample(1).vehicle_contact, -1);
+  int statics[3] = {0, 0, 0}, sampled[3] = {0, 0, 0}, touched[3] = {0, 0, 0};
+  bool partner = true;
+  for (int t = 0; t < 200; ++t) {
+    for (int i = 0; i < 3; ++i)
+      plant.command(i, 0.0f, static_cast<float>(2.0 * kS));
+    plant.advance();
+    for (int i = 0; i < 3; ++i) {
+      const plant_sample s = plant.sample(i);
+      statics[i] += plant.static_contacts_step(i);
+      sampled[i] += s.contacts;
+      EXPECT_EQ(s.vehicle_contact, plant.vehicle_contact_step(i));
+      if (s.vehicle_contact >= 0) {
+        ++touched[i];
+        partner = partner && s.vehicle_contact == (i == 1 ? 2 : 1);
+      }
+    }
+  }
+  std::printf("  static contacts begun %d %d %d; ticks touching a vehicle %d %d %d\n", statics[0],
+              statics[1], statics[2], touched[0], touched[1], touched[2]);
+  EXPECT_GT(statics[0], 0);
+  EXPECT_EQ(statics[1] + statics[2], 0);
+  EXPECT_EQ(touched[0], 0);
+  EXPECT_GT(touched[1], 0);
+  EXPECT_GT(touched[2], 0);
+  EXPECT_TRUE(partner) << "each touched the other";
+  for (int i = 0; i < 3; ++i)
+    EXPECT_EQ(sampled[i], statics[i]);
+  const plant_sample s = plant.sample(0);
+  EXPECT_EQ(s.measured, plant_sample::has_attitude | plant_sample::has_contacts |
+                            plant_sample::has_vehicle_contact);
+  EXPECT_NEAR(s.up_z, 1.0, 1e-12) << "on flat ground";
+  // Without a world it measures no contacts; on a ramp its attitude is the ground's.
+  dyn_bike_plant_options ramp_o;
+  ramp_o.plant = ramp(0.1);
+  dyn_bike_plant alone({vehicle_desc::humvee()}, ramp_o);
+  alone.attach(1, start, trained_frame(), 0.06);
+  alone.advance();
+  EXPECT_EQ(alone.sample(0).measured, plant_sample::has_attitude);
+  EXPECT_NEAR(alone.sample(0).grade, 0.1 / std::sqrt(1.01), 1e-9) << "nose up the ramp";
+  EXPECT_NEAR(alone.sample(0).roll, 0.0, 1e-9);
+}
+
 // Alongside a wall, steering into it (as a route that cuts through the wall steers), held at
 // 3 m/s: at the default chassis_friction the box slides along the wall's face and the vehicle
 // drives on beside it; at a tire's grip (1) the wall holds it back to a crawl.

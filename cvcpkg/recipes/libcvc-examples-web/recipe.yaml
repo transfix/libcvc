@@ -1,7 +1,7 @@
 schema_version: 1
 recipe:
   name: libcvc-examples-web
-  upstream_version: "3.7.3"
+  upstream_version: "3.7.4"
   # Replaces cvcgl-examples' wasm-mt column (last published 3.7.0+cvc.1), which carried
   # only the four nav/terrain demos; this carries the whole gallery.
   # Bumped 1 -> 2: the gallery now links ImageMagick (CVC_ENABLE_IMAGEMAGICK=ON, was OFF

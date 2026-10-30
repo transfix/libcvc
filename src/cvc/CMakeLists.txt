@@ -141,6 +141,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/model/model.h
   ../../inc/cvc/model/model_file_io.h
   ../../inc/cvc/volume/volume_ops.h
+  ../../inc/cvc/volume/contour_mesh.h
   ../../inc/cvc/volume/contour_tree.h
   ../../inc/cvc/volume/contour_spectrum.h
   ../../inc/cvc/tf/model.h
@@ -152,6 +153,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/nav/vehicle_route.h
   ../../inc/cvc/nav/route_follower.h
   ../../inc/cvc/nav/plant_types.h
+  ../../inc/cvc/nav/plant_ledger.h
   ../../inc/cvc/nav/terrain.h
   ../../inc/cvc/nav/vehicle_plant.h
   ../../inc/cvc/ph/mat3.h
@@ -351,6 +353,7 @@ set(SOURCE_FILES
   volume/volume_ops.cpp
   volume/contour_tree.cpp
   volume/contour_spectrum.cpp
+  volume/mesh_contour_tree.cpp
   tf/model.cpp
   tf/vinay.cpp
   tf/overlays.cpp
@@ -383,6 +386,7 @@ set(SOURCE_FILES
   nav/sim_world_binding.cpp
   nav/sim_thread.cpp
   nav/nav_stats.cpp
+  nav/plant_ledger.cpp
   ph/se2_data.cpp
   ph/se2_model.cpp
   ph/se2_train.cpp

@@ -25,7 +25,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cvc/nav/nav_stats.h>
+#include <cvc/nav/plant_ledger.h>
 #include <sstream>
+#include <type_traits>
 #include <utility>
 
 namespace cvc {
@@ -59,6 +61,32 @@ void num_sentinel(std::ostringstream &o, double v) {
     o << "null";
   else
     num(o, v);
+}
+// The plant ledger's items from one source (plant_ledger.h), in its order: null where an item is
+// not applicable.
+template <class R>
+void ledger_json(std::ostringstream &o, const R &r, plant_ledger_item::source from) {
+  constexpr bool veh = std::is_same_v<R, veh_nav_stats>;
+  for (const plant_ledger_item &it : veh ? plant_ledger_vehicle() : plant_ledger_episode()) {
+    if (it.from != from)
+      continue;
+    o << ",\"" << it.key << "\":";
+    if (!plant_ledger_applies(it, r)) {
+      o << "null";
+      continue;
+    }
+    double x = 0.0;
+    if constexpr (veh)
+      x = it.veh(r);
+    else
+      x = it.ep(r);
+    if (it.type == plant_ledger_item::kind::flag)
+      o << (x != 0.0 ? "true" : "false");
+    else if (it.type == plant_ledger_item::kind::count)
+      o << static_cast<long long>(x);
+    else
+      num(o, x);
+  }
 }
 } // namespace
 
@@ -98,6 +126,7 @@ void nav_stats_collector::begin_episode(int n, double dt_s, const float *start_p
   tipped_n_.assign(n_, 0);
   steer_sat_n_.assign(n_, 0);
   brake_n_.assign(n_, 0);
+  touching_.assign(n_, -1);
   for (int i = 0; i < n_; ++i) {
     auto &v = ep_.per_vehicle[i];
     v.veh_index = i;
@@ -211,27 +240,44 @@ void nav_stats_collector::step(const float *pos, const float *head, const float 
     }
     if (smp.plant) { // the plant ledger: a physics plant's measurement of the vehicle (SI)
       const plant_sample &ps = smp.plant[i];
+      // What every sample so far measured; an item from a field that is not stays at its default.
+      v.plant_measured = v.plant_tracked ? v.plant_measured & ps.measured : ps.measured;
       v.plant_tracked = true;
       ++v.plant_steps;
-      const auto clamp1 = [](double a) { return std::max(-1.0, std::min(1.0, a)); };
-      const double tilt = std::acos(clamp1(ps.up_z)) * kDeg;
-      v.tilt_max_deg = std::max(v.tilt_max_deg, tilt);
-      v.roll_max_deg = std::max(v.roll_max_deg, std::asin(std::fabs(clamp1(ps.roll))) * kDeg);
-      v.pitch_max_deg = std::max(v.pitch_max_deg, std::asin(std::fabs(clamp1(ps.grade))) * kDeg);
-      if (tilt > p_.tilt_deg)
-        v.tilt_s += dt_;
-      // Rolled over: tipped past roll_up_z for roll_hold_s on end (latched). The run of tipped
-      // ticks is counted in ticks, so the hold is met on the same tick however a sum would round.
-      tipped_n_[i] = ps.up_z < p_.roll_up_z ? tipped_n_[i] + 1 : 0;
-      if (!v.rolled_over && tipped_n_[i] > 0 && tipped_n_[i] * dt_ >= p_.roll_hold_s - 1e-9) {
-        v.rolled_over = true;
-        v.rolled_over_s = (step_i_ + 2 - tipped_n_[i]) * dt_; // the run's first tick's end
+      const std::uint32_t has = v.plant_measured;
+      if (has & plant_sample::has_attitude) {
+        const auto clamp1 = [](double a) { return std::max(-1.0, std::min(1.0, a)); };
+        const double tilt = std::acos(clamp1(ps.up_z)) * kDeg;
+        v.tilt_max_deg = std::max(v.tilt_max_deg, tilt);
+        v.roll_max_deg = std::max(v.roll_max_deg, std::asin(std::fabs(clamp1(ps.roll))) * kDeg);
+        v.pitch_max_deg = std::max(v.pitch_max_deg, std::asin(std::fabs(clamp1(ps.grade))) * kDeg);
+        if (tilt > p_.tilt_deg)
+          v.tilt_s += dt_;
+        // Rolled over: tipped past roll_up_z for roll_hold_s on end (latched). The run of tipped
+        // ticks is counted in ticks, so the hold is met on the same tick however a sum would
+        // round.
+        tipped_n_[i] = ps.up_z < p_.roll_up_z ? tipped_n_[i] + 1 : 0;
+        if (!v.rolled_over && tipped_n_[i] > 0 && tipped_n_[i] * dt_ >= p_.roll_hold_s - 1e-9) {
+          v.rolled_over = true;
+          v.rolled_over_s = (step_i_ + 2 - tipped_n_[i]) * dt_; // the run's first tick's end
+        }
       }
-      v.ltr_max = std::max(v.ltr_max, std::fabs(ps.ltr));
-      if (std::fabs(ps.ltr) > p_.lift_ltr)
-        v.lift_s += dt_;
-      if (ps.wheels - ps.wheels_down >= 2)
+      if (has & plant_sample::has_ltr) {
+        v.ltr_max = std::max(v.ltr_max, std::fabs(ps.ltr));
+        if (std::fabs(ps.ltr) > p_.lift_ltr)
+          v.lift_s += dt_;
+      }
+      if ((has & plant_sample::has_wheels_down) && ps.wheels - ps.wheels_down >= 2)
         v.wheels_up_s += dt_;
+      if (has & plant_sample::has_vehicle_contact) {
+        // A contact begins on a tick it touches a vehicle it was not touching the tick before.
+        if (ps.vehicle_contact >= 0) {
+          if (ps.vehicle_contact != touching_[i])
+            ++v.vehicle_hits;
+          v.vehicle_hit_s += dt_;
+        }
+        touching_[i] = ps.vehicle_contact;
+      }
       v.a_lat_max_g = std::max(v.a_lat_max_g, std::fabs(ps.a_lat) / kG);
       v.steer_cmd_abs_mean += std::fabs(ps.steer_cmd); // a sum until finish()
       if (ps.max_steer > 0.0 && std::fabs(ps.steer_cmd) >= p_.steer_sat * ps.max_steer)
@@ -390,7 +436,10 @@ episode_nav_stats nav_stats_collector::finish() const {
       v.accel_cmd_mean /= pn;
       v.steer_sat_share = steer_sat_n_[i] / pn;
       v.brake_share = brake_n_[i] / pn;
+      ep.plant_measured =
+          ep.plant_tracked ? ep.plant_measured & v.plant_measured : v.plant_measured;
       ep.plant_tracked = true;
+      ep.total_vehicle_hits += v.vehicle_hits;
       if (v.rolled_over) {
         ++ep.vehicles_rolled;
         if (ep.first_roll_s < 0 || v.rolled_over_s < ep.first_roll_s)
@@ -449,17 +498,12 @@ std::string episode_nav_stats::to_json() const {
   num(o, mean_turn_total_rad);
   o << ",\"total_fuel\":";
   num(o, total_fuel);
-  if (energy_tracked) {
-    o << ",\"total_energy_J\":";
-    num(o, total_energy_J);
-    o << ",\"total_building_contacts\":" << total_building_contacts;
-  }
+  if (energy_tracked)
+    ledger_json(o, *this, plant_ledger_item::source::energy);
   if (terrain_tracked)
     o << ",\"total_infeasible_slope_steps\":" << total_infeasible_slope_steps;
-  if (plant_tracked) {
-    o << ",\"vehicles_rolled\":" << vehicles_rolled << ",\"first_roll_s\":";
-    num(o, first_roll_s);
-  }
+  if (plant_tracked)
+    ledger_json(o, *this, plant_ledger_item::source::plant);
   o << ",\"coverage\":{\"explored_frac\":";
   num(o, coverage.explored_frac);
   o << ",\"visible_frac\":";
@@ -550,37 +594,12 @@ std::string episode_nav_stats::to_json() const {
     o << ",\"curvature_abs_max\":";
     num(o, v.curvature_abs_max);
     o << ",\"binding_stopped_steps\":" << v.binding_stopped_steps;
-    if (v.energy_tracked) {
-      o << ",\"energy_J\":";
-      num(o, v.energy_J);
-      o << ",\"energy_per_km\":";
-      num(o, v.energy_per_km);
-      o << ",\"building_contacts\":" << v.building_contacts;
-    }
+    if (v.energy_tracked)
+      ledger_json(o, v, plant_ledger_item::source::energy);
     if (v.terrain_tracked)
       o << ",\"infeasible_slope_steps\":" << v.infeasible_slope_steps;
-    if (v.plant_tracked) {
-      o << ",\"plant_steps\":" << v.plant_steps
-        << ",\"rolled_over\":" << (v.rolled_over ? "true" : "false") << ",\"rolled_over_s\":";
-      num(o, v.rolled_over_s);
-      const std::pair<const char *, double> leaves[] = {
-          {"tilt_max_deg", v.tilt_max_deg},
-          {"roll_max_deg", v.roll_max_deg},
-          {"pitch_max_deg", v.pitch_max_deg},
-          {"tilt_s", v.tilt_s},
-          {"ltr_max", v.ltr_max},
-          {"lift_s", v.lift_s},
-          {"wheels_up_s", v.wheels_up_s},
-          {"a_lat_max_g", v.a_lat_max_g},
-          {"steer_cmd_abs_mean", v.steer_cmd_abs_mean},
-          {"steer_sat_share", v.steer_sat_share},
-          {"accel_cmd_mean", v.accel_cmd_mean},
-          {"brake_share", v.brake_share}};
-      for (const auto &l : leaves) {
-        o << ",\"" << l.first << "\":";
-        num(o, l.second);
-      }
-    }
+    if (v.plant_tracked)
+      ledger_json(o, v, plant_ledger_item::source::plant);
     o << '}';
   }
   o << "]}";
@@ -646,16 +665,22 @@ nav_scorecard aggregate_nav(const std::vector<episode_nav_stats> &episodes,
   int drive_runs = 0;
   double al_sum = 0, be_sum = 0, ga_sum = 0, dmu_sum = 0, dmrisk_sum = 0, dext_sum = 0;
   double ls_sum = 0, lh_sum = 0, curv_sum = 0, pin_sum = 0;
-  // the plant ledger (over the runs and episodes a plant fed)
+  // the plant ledger (over the runs and episodes a plant fed; an item over those that measured
+  // what it is reduced from: _att their attitude, _ltr their load transfer, _hit vehicle contact)
   int plant_runs = 0, rolled_runs = 0, plant_eps = 0, rolled_eps = 0;
+  int runs_att = 0, runs_ltr = 0, runs_hit = 0, eps_att = 0;
   double tilt_sum = 0, ltr_sum = 0, lift_sum = 0, alat_sum = 0, sat_sum = 0, brake_sum = 0;
+  double hits_sum = 0;
   for (const auto &e : episodes) {
     if (e.success)
       ++succ;
     if (e.plant_tracked) {
       ++plant_eps;
-      if (e.vehicles_rolled > 0)
-        ++rolled_eps;
+      if (e.plant_measured & plant_sample::has_attitude) {
+        ++eps_att;
+        if (e.vehicles_rolled > 0)
+          ++rolled_eps;
+      }
     }
     cov_sum.explored_frac += e.coverage.explored_frac;
     cov_sum.visible_frac += e.coverage.visible_frac;
@@ -725,11 +750,21 @@ nav_scorecard aggregate_nav(const std::vector<episode_nav_stats> &episodes,
       }
       if (v.plant_tracked) {
         ++plant_runs;
-        if (v.rolled_over)
-          ++rolled_runs;
-        tilt_sum += v.tilt_max_deg;
-        ltr_sum += v.ltr_max;
-        lift_sum += v.lift_s;
+        if (v.plant_measured & plant_sample::has_attitude) {
+          ++runs_att;
+          if (v.rolled_over)
+            ++rolled_runs;
+          tilt_sum += v.tilt_max_deg;
+        }
+        if (v.plant_measured & plant_sample::has_ltr) {
+          ++runs_ltr;
+          ltr_sum += v.ltr_max;
+          lift_sum += v.lift_s;
+        }
+        if (v.plant_measured & plant_sample::has_vehicle_contact) {
+          ++runs_hit;
+          hits_sum += v.vehicle_hits;
+        }
         alat_sum += v.a_lat_max_g;
         sat_sum += v.steer_sat_share;
         brake_sum += v.brake_share;
@@ -795,14 +830,17 @@ nav_scorecard aggregate_nav(const std::vector<episode_nav_stats> &episodes,
   }
   s.plant_runs = plant_runs;
   if (plant_runs > 0) {
-    s.rollover_rate = static_cast<double>(rolled_runs) / plant_runs;
-    s.episode_rollover_rate = plant_eps > 0 ? static_cast<double>(rolled_eps) / plant_eps : 0;
-    s.mean_tilt_max_deg = tilt_sum / plant_runs;
-    s.mean_ltr_max = ltr_sum / plant_runs;
-    s.mean_lift_s = lift_sum / plant_runs;
+    // over the runs (episodes) that measured it; NaN, not applicable, over none
+    const auto over = [](double sum, int n) { return n > 0 ? sum / n : std::nan(""); };
+    s.rollover_rate = over(rolled_runs, runs_att);
+    s.episode_rollover_rate = over(rolled_eps, eps_att);
+    s.mean_tilt_max_deg = over(tilt_sum, runs_att);
+    s.mean_ltr_max = over(ltr_sum, runs_ltr);
+    s.mean_lift_s = over(lift_sum, runs_ltr);
     s.mean_a_lat_max_g = alat_sum / plant_runs;
     s.mean_steer_sat_share = sat_sum / plant_runs;
     s.mean_brake_share = brake_sum / plant_runs;
+    s.mean_vehicle_hits = over(hits_sum, runs_hit);
   }
   return s;
 }
@@ -886,7 +924,8 @@ std::string nav_scorecard::to_json() const {
         {"mean_lift_s", mean_lift_s},
         {"mean_a_lat_max_g", mean_a_lat_max_g},
         {"mean_steer_sat_share", mean_steer_sat_share},
-        {"mean_brake_share", mean_brake_share}};
+        {"mean_brake_share", mean_brake_share},
+        {"mean_vehicle_hits", mean_vehicle_hits}};
     for (const auto &l : leaves) {
       o << ",\"" << l.first << "\":";
       num(o, l.second);

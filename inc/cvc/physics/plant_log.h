@@ -69,6 +69,9 @@ struct planar_sample {
   double vmax = 0.0;  // the top speed nav plans this vehicle with (m/s)
   double a_lat = 0.0, a_lon = 0.0; // the centre of mass's acceleration over that tick, body axes
   int contacts = 0;                // static contacts during that tick
+  // The agent whose vehicle it touched during that tick (the deepest, begun or persisting:
+  // nav_plant::vehicle_contact_step); -1 none, and at start()
+  int vehicle_contact = -1;
   int wheels = 0, wheels_down = 0; // the vehicle's wheels, and how many touch the ground
   bool grounded = true;            // at most one wheel off the ground (a planar body)
   // J the vehicle drew over that tick (nav_plant::energy_step: from its fuel or battery, net of

@@ -28,6 +28,9 @@
 // canvas (the zoom window), a data-unit axis line, the spectrum legend, the overlay status and the
 // per-isocontour information table. The canvas is left as ImGui's last item when the call returns,
 // so a document's tooltip / on_click / on_drag handlers attach to it rather than to the table.
+// Hovering a handle shows its values; hovering empty canvas lights the histogram bin under the
+// pointer and, once the pointer settles, shows a readout (the bin's count, the spectrum's values,
+// the tree's components) with what a double-click and the right-click menu do.
 
 #include <algorithm>
 #include <cmath>
@@ -74,6 +77,8 @@ struct session {
   // so sweeping across the canvas does not flash one per bar it crosses.
   tf::handle hot;
   double hot_since = 0.0;
+  // Since when the pointer has been over empty canvas (-1: it is not), for the readout tooltip.
+  double empty_since = -1.0;
   // The colour popup: its target (a colour node by index, an isocontour by id) and the edit.
   bool open_color = false;
   tf::handle color_target;
@@ -378,6 +383,31 @@ void draw_histogram(ImDrawList *dl, const tf::layout &l, const tf::view &v,
   }
 }
 
+// The histogram bin holding data value `value` (bins uniform over [rlo, rhi], the last one closed)
+// and its share of every counted value; index -1 when the value is outside the bins.
+struct Bin {
+  int index = -1;
+  double from = 0.0, to = 0.0, count = 0.0, share = 0.0;
+};
+Bin bin_at(const std::vector<double> &bins, double rlo, double rhi, double value) {
+  Bin b;
+  const std::size_t n = bins.size();
+  if (n == 0 || !(rhi > rlo) || !(value >= rlo && value <= rhi))
+    return b;
+  const double step = (rhi - rlo) / static_cast<double>(n);
+  const std::size_t i = std::min(n - 1, static_cast<std::size_t>((value - rlo) / step));
+  double total = 0.0;
+  for (double c : bins)
+    if (std::isfinite(c) && c > 0.0)
+      total += c;
+  b.index = static_cast<int>(i);
+  b.from = rlo + step * static_cast<double>(i);
+  b.to = i + 1 == n ? rhi : rlo + step * static_cast<double>(i + 1);
+  b.count = std::isfinite(bins[i]) ? bins[i] : 0.0;
+  b.share = total > 0.0 ? b.count / total : 0.0;
+  return b;
+}
+
 // The contour tree: each arc from (value, layout x) to (value, layout x), the value along the TF
 // axis and the layout down the canvas inside ColorTable2's 10% inset. Black over a light halo so it
 // reads over both ends of a ramp; every halo first, so no halo paints over an earlier arc.
@@ -537,7 +567,8 @@ void draw_strip(ImDrawList *dl, const tf::layout &l, const tf::view &v, const tf
 // first: opacity nodes, isocontour bars, colour bars), so what the pointer grabs is what is on top.
 void draw_canvas(ImDrawList *dl, const tf::layout &l, const tf::view &v, const tf::model &m,
                  const tf::overlays &ov, double lo, double hi, double rlo, double rhi,
-                 const tf::handle &hot, const tf::handle &selected, const Interval &ivl) {
+                 const tf::handle &hot, const tf::handle &selected, const Interval &ivl,
+                 const Bin &hover_bin) {
   const ImVec2 a(l.canvas_x, l.canvas_y), b(l.canvas_x + l.canvas_w, l.canvas_y + l.canvas_h);
   dl->PushClipRect(a, b, true);
   if (v.show_color)
@@ -547,6 +578,17 @@ void draw_canvas(ImDrawList *dl, const tf::layout &l, const tf::view &v, const t
     dl->AddRectFilled(a, b, col(0.5f, 0.5f, 0.5f));
   if (v.show_histogram && !ov.histogram.empty())
     draw_histogram(dl, l, v, ov.histogram, rlo, rhi, lo, hi);
+  // The bin under the pointer (the readout's), lit across the canvas height; at least a pixel
+  // wide, since a fine histogram's bins can be narrower.
+  if (hover_bin.index >= 0) {
+    const float x0 =
+        std::clamp(tf::x_of(l, v, tf::to_normalized(hover_bin.from, lo, hi)), a.x - 1.f, b.x + 1.f);
+    const float x1 =
+        std::clamp(tf::x_of(l, v, tf::to_normalized(hover_bin.to, lo, hi)), a.x - 1.f, b.x + 1.f);
+    dl->AddRectFilled(ImVec2(std::min(x0, x1), a.y),
+                      ImVec2(std::max(std::max(x0, x1), std::min(x0, x1) + 1.f), b.y),
+                      col(1.f, 1.f, 1.f, 0.25f));
+  }
   // The meshed interval: the band between its two bars, a translucent magenta (the bars' colour)
   // over the ramp and histogram, under the curves; through the zoom window, hidden with the bars.
   if (v.show_isocontours && ivl.valid()) {
@@ -753,7 +795,43 @@ void tooltip(const tf::model &m, const tf::handle &h, const tf::view &v, const t
   ImGui::EndTooltip();
 }
 
+// Over empty canvas: what lies under the pointer at normalized `t` -- the histogram bin and its
+// count, the contour spectrum's values and the contour tree's components, each while shown and
+// published -- and where the rest is.
+void readout(const tf::model &m, const tf::view &v, const tf::overlays &ov, double lo, double hi,
+             double t, const Bin &bin) {
+  ImGui::BeginTooltip();
+  ImGui::Text("value %s", num(tf::to_data(t, lo, hi)).c_str());
+  if (bin.index >= 0) {
+    ImGui::Text("histogram bin %d of %d: %s to %s", bin.index + 1,
+                static_cast<int>(ov.histogram.size()), num(bin.from).c_str(), num(bin.to).c_str());
+    ImGui::Text("count %s (%.1f%%)", num(bin.count).c_str(), 100.0 * bin.share);
+  }
+  tf::isocontour probe;
+  probe.at = t;
+  const tf::isocontour_info info = tf::describe(m, probe, lo, hi, &ov);
+  if (v.show_contour_spectrum && std::isfinite(info.area)) {
+    ImGui::Text("area %s", num(info.area).c_str());
+    ImGui::Text("min volume %s", num_or_dash(info.min_volume).c_str());
+    ImGui::Text("max volume %s", num_or_dash(info.max_volume).c_str());
+    ImGui::Text("gradient %s", num_or_dash(info.gradient).c_str());
+  }
+  if (v.show_contour_tree && info.components >= 0)
+    ImGui::Text("components %d", info.components);
+  if (v.show_opacity)
+    ImGui::TextDisabled("Double-click: add an opacity node here");
+  ImGui::TextDisabled("Right-click: Add, Display (histogram, contour spectrum, contour tree),");
+  ImGui::TextDisabled("Presets");
+  ImGui::EndTooltip();
+}
+
 // ---- popups ---------------------------------------------------------------------------------
+
+// The item just submitted explains itself while hovered.
+void tip(const char *text) {
+  if (ImGui::IsItemHovered())
+    ImGui::SetTooltip("%s", text);
+}
 
 // The right-click menu. Model edits land in `m` (the caller commits them at once), view toggles
 // in `v`.
@@ -762,7 +840,9 @@ void context_menu(session &s, tf::model &m, tf::view &v, bool &model_edit, bool 
   if (ImGui::BeginMenu("Add")) {
     // A node inserted ahead of the selected one shifts its index: keep the selection on it.
     const bool want_alpha = ImGui::MenuItem("Alpha node");
+    tip("an opacity node where you right-clicked");
     const bool want_color = ImGui::MenuItem("Colour node");
+    tip("a colour bar where you right-clicked, in the ramp's colour there");
     if (want_alpha || want_color) {
       const tf::model before = m;
       if (want_alpha ? tf::add_alpha(m, s.menu_t, s.menu_a) : tf::add_color(m, s.menu_t)) {
@@ -780,6 +860,7 @@ void context_menu(session &s, tf::model &m, tf::view &v, bool &model_edit, bool 
         s.selected = resolve(m, iso);
       }
     }
+    tip("an isocontour (isosurface) bar where you right-clicked");
     ImGui::EndMenu();
   }
   const bool colourable = h.kind == tf::part::color || h.kind == tf::part::isocontour;
@@ -816,9 +897,22 @@ void context_menu(session &s, tf::model &m, tf::view &v, bool &model_edit, bool 
     const char *const names[] = {"Transfer function", "Opacity function",    "Isocontours",
                                  "Histogram",         "Log scale histogram", "Contour spectrum",
                                  "Contour tree",      "Contour information"};
-    for (std::size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i)
+    const char *const tips[] = {
+        "the colour ramp and its colour bars",
+        "the opacity curve and its nodes",
+        "the isocontour bars",
+        "how many values fall in each bin of the data range; hover the canvas for a bin's count",
+        "bin heights as log(1 + count), so sparse bins still show",
+        "the level sets' area (red), min volume (green), max volume (blue) and gradient (yellow)\n"
+        "across the data range (on a surface: the contours' length and the areas)",
+        "how the level sets split and merge across the data range; hover the canvas for the\n"
+        "components at a value",
+        "a table of each isocontour's isovalue, spectrum values and components"};
+    for (std::size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) {
       if (ImGui::MenuItem(names[i], nullptr, toggles[i]))
         view_edit = true;
+      tip(tips[i]);
+    }
     ImGui::EndMenu();
   }
   if (ImGui::BeginMenu("Presets")) {
@@ -1130,15 +1224,28 @@ cvc::ariadne::TfEdit ImGuiBackend::tf_editor(const char *label, const char *key,
   if (hot.kind != s.hot.kind || hot.index != s.hot.index)
     s.hot_since = now;
   s.hot = hot;
+  // Over empty canvas the histogram bin under the pointer lights up at once, and the readout
+  // tooltip follows the pointer once it has settled there.
+  const bool over_empty = canvas.hovered && !s.gesture.active() && !hot.valid();
+  if (!over_empty)
+    s.empty_since = -1.0;
+  else if (s.empty_since < 0.0)
+    s.empty_since = now;
+  const double pointer_t = clamp01(tf::t_of(l, v, mouse.x));
+  const Bin hover_bin = over_empty && v.show_histogram
+                            ? bin_at(ov.histogram, rlo, rhi, tf::to_data(pointer_t, lo, hi))
+                            : Bin{};
 
   // The meshed interval on the model as drawn (a bar dragged this frame takes the band with it).
   const Interval ivl = find_interval(m, in.interval_a, in.interval_b);
   ImDrawList *dl = ImGui::GetWindowDrawList();
   draw_strip(dl, l, v, m, hot);
-  draw_canvas(dl, l, v, m, ov, lo, hi, rlo, rhi, hot, s.selected, ivl);
+  draw_canvas(dl, l, v, m, ov, lo, hi, rlo, rhi, hot, s.selected, ivl, hover_bin);
   // While dragging, the tooltip is the live readout; on hover it waits for the pointer to settle.
   if (hot.valid() && (s.gesture.active() || now - s.hot_since >= ImGui::GetStyle().HoverDelayShort))
     tooltip(m, hot, v, ov, lo, hi, ivl);
+  else if (over_empty && now - s.empty_since >= ImGui::GetStyle().HoverDelayNormal)
+    readout(m, v, ov, lo, hi, pointer_t, hover_bin);
 
   draw_axis(dl, l, v, lo, hi, canvas.hovered && !s.gesture.active(), mouse);
   if (v.show_contour_spectrum && !ov.spectrum.empty())

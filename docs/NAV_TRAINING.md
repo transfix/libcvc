@@ -654,12 +654,21 @@ cfg.power = cvc::nav::dyn_power_params_of(f.si, desc.mass, frame);
   (`residual.json`'s "power"). `samples.csv` gains an `energy` column.
 
 **Measured** (`PlantLogPowerConvergence`, Windows): each vehicle fitted on four seeds of both
-scenes, 30 s each, and judged on two held-out seeds:
+scenes, 30 s each, and judged on the runs of two held-out seeds that hit no other vehicle (22 of
+24 for each):
 
 | Vehicle | Held-out tick r² | Total energy | Swerve | City | Worst run |
 |---|--:|--:|--:|--:|--:|
-| Humvee | 0.83 | +1.4% | +9.0% | -1.2% | 13% |
-| RoboRacer | 0.91 | -1.4% | +17.7% | -3.5% | 35% |
+| Humvee | 0.90 | +1.3% | +8.7% | -1.6% | 13% |
+| RoboRacer | 0.97 | +1.9% | +17.7% | -0.2% | 28% |
+
+- A run that hit another vehicle (`planar_sample::vehicle_contact`, or an impact past `kImpactG`)
+  is reported apart. After the hit, the RoboRacer's two stalled with their wheels spinning, and
+  the model missed them by -35% and -8%: it has no collisions and no wheel spin, so no term of its
+  state sees that energy. The Humvee's two cost what the model gives (-0.4%, +0.3%).
+- Which runs collide depends on the platform's floating point. Judged on all 24 runs, the
+  RoboRacer's held-out r² was 0.91 on Windows and 0.60 on Linux, where two more of its city runs
+  missed by about +31%.
 
 - Fitted on one scene's two seeds, the swerve's held-out totals missed by 12% (Humvee) and 22%
   (RoboRacer). A seed drives all its agents at one speed, so two seeds cannot tell idle from speed.

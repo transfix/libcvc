@@ -14,9 +14,11 @@
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/value.h>
 #include <cvc/core/app.h>
+#include <cvc/core/async_lane.h> // field colours: pump the scheduler their overlay tasks run on
 #include <cvc/core/world_clock.h> // clock test: app.world_clock() drive via tick_scene
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/geometry_file_io.h>
+#include <cvc/geometry/mesh_ops.h> // field colours: the colormap a seeded ramp follows
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/LodGraphicsNode.h> // LOD test: RealizeOptions realizes mesh nodes as ladders
@@ -286,6 +288,53 @@ static void test_lab_sources(cvc::app &app) {
             total > 0.0,
         std::string(who) + ": field_colors holds a ramp; its range is the values' (" +
             val(T + ".range") + ") and a 128-bin histogram is published");
+    // Every colormap seeds a few colour bars an editor can grab (at most 12), within 0.02 (about
+    // 5/255) of the colormap everywhere where 12 suffice; turbo, the busiest, within 0.05. Viridis
+    // is the seed; the colormap key resets to the others.
+    std::vector<double> ts(256);
+    for (std::size_t i = 0; i < ts.size(); ++i)
+      ts[i] = double(i) / double(ts.size() - 1);
+    for (const char *name :
+         {"viridis", "magma", "plasma", "inferno", "turbo", "jet", "parula", "gray"}) {
+      cvc::colormap_kind kind = cvc::colormap_kind::VIRIDIS;
+      cvc::colormap_from_string(name, kind);
+      set(cm_key, name);
+      tick();
+      cvc::tf::model cm;
+      const std::vector<unsigned char> want = cvc::colormap_rgb(ts, kind, 0.0, 1.0);
+      float miss = cvc::tf::from_string(val(T), cm) && want.size() == 3 * ts.size() ? 0.f : 1.f;
+      for (std::size_t i = 0; i < ts.size() && miss < 1.f; ++i) {
+        float rgb[3];
+        cm.color_at(ts[i], rgb);
+        for (int c = 0; c < 3; ++c)
+          miss = std::max(miss, std::fabs(rgb[c] - want[3 * i + std::size_t(c)] / 255.f));
+      }
+      chk(cm.color.size() >= 2 && cm.color.size() <= 12 &&
+              (miss <= 0.0201f || (cm.color.size() == 12 && miss <= 0.05f)),
+          std::string(who) + ": the " + name + " ramp is " + std::to_string(cm.color.size()) +
+              " colour nodes, within " + std::to_string(miss) + " of the colormap");
+    }
+    set(cm_key, "viridis");
+    tick();
+    // The contour spectrum and tree an editor asks for: an overlay task on the field's own mesh,
+    // over the published range, publishes them beside it (the scheduler pumped as a host's frames
+    // would pump it).
+    set(T + ".overlay_request", "contour_spectrum,contour_tree");
+    cvc::tf::spectrum_overlay sp;
+    cvc::tf::tree_overlay tr;
+    for (int f = 0; f < 4000 && (sp.empty() || tr.empty()); ++f) {
+      tick();
+      cvc::pump_exec_frame(app.exec_scheduler());
+      cvc::tf::spectrum_from_string(val(T + ".contour_spectrum"), sp);
+      cvc::tf::tree_from_string(val(T + ".contour_tree"), tr);
+    }
+    const double peak = sp.empty() ? 0.0 : *std::max_element(sp.area.begin(), sp.area.end());
+    chk(sp.size() == 256 && peak > 0.0 && tr.vertices.size() >= 2 &&
+            val(T + ".overlay_status").empty(),
+        std::string(who) + ": a contour spectrum / tree request is computed on the field's mesh (" +
+            std::to_string(sp.size()) + " samples, peak area " + std::to_string(peak) + ", " +
+            std::to_string(tr.vertices.size()) + " tree nodes, status '" +
+            val(T + ".overlay_status") + "')");
     set(cm_key, "gray");
     tick();
     float c0[3] = {1.f, 1.f, 1.f}, c1[3] = {0.f, 0.f, 0.f};
@@ -309,6 +358,8 @@ static void test_lab_sources(cvc::app &app) {
     chk(node.hasScalarField() && approx(node.scalarRange().first, lo) &&
             approx(node.scalarRange().second, hi),
         std::string(who) + ": the colormap key resets the domain to auto");
+    chk(!val(T + ".contour_spectrum").empty() && !val(T + ".contour_tree").empty(),
+        std::string(who) + ": recolouring the same values keeps their spectrum and tree");
   };
   field_colors(cvc::ariadne::resolve_bind("lsrc", "graphics.root.children.mesh.field_colors"),
                mb + ".color.colormap", mb + ".color.min", mb + ".color.max", *mesh, "mesh_lab");
