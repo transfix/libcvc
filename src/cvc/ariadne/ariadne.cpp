@@ -838,6 +838,7 @@ struct Runtime::Impl {
   // probe env built exactly like an action's, then cached; the cache is rebuilt when a provider is
   // registered (the registry's generation moves) or refresh_program_names() drops it.
   bool scene_capable = false;
+  bool scene_shaders = false;
   mutable std::mutex names_mutex;
   mutable bool names_valid = false;
   mutable std::uint64_t names_generation = 0;
@@ -855,6 +856,7 @@ struct Runtime::Impl {
     if (backend)
       f.caps = backend->capabilities();
     f.scene = scene_capable;
+    f.scene_shaders = scene_capable && scene_shaders;
     const NetHostStatus net = net_host_status();
     f.net = net.enabled;
     f.net_auth = net.auth;
@@ -2205,6 +2207,7 @@ std::vector<std::string> Runtime::program_names() const {
 }
 
 void Runtime::set_scene_capable(bool on) { m_->scene_capable = on; }
+void Runtime::set_scene_shaders(bool on) { m_->scene_shaders = on; }
 
 HostFacts Runtime::host_facts() const { return m_->facts(); }
 

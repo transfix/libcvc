@@ -112,7 +112,7 @@ ariadne::Capabilities ImGuiBackend::capabilities() const {
   c.mouse = true;
   c.keyboard = true;
   c.color = true;
-  c.glsl = true;       // cvcGL can render scene-node shaders / a shader_canvas
+  c.glsl = true;       // the UI can draw GLSL (a shader_canvas; the scene's are the adapter's)
   c.view_embed = true; // render-to-texture views (roadmap §9.6)
   c.owns_loop = false; // guest mode: VTK's render pass drives Runtime::render()
   c.bitmap = true;     // image widgets draw as GL textures

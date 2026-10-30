@@ -874,14 +874,23 @@ entry warns. An entry is one of:
 
   | token | holds when |
   |---|---|
-  | `gl.scene` | a scene adapter realizes `scene:` (arigl, the cvcGL hosts) |
-  | `gl.shaders` | GLSL runs (scene `shaders:`, `shader_canvas`) |
+  | `gl.scene` | a scene adapter realizes `scene:` (arigl in a window or `--terminal`, the cvcGL hosts) |
+  | `gl.scene.shaders` | the scene runs the document's GLSL (a node's `shader:` block); arigl in a window or `--terminal` |
+  | `gl.ui.shaders` | the UI draws GLSL itself (`shader_canvas`): a GL window, never a terminal |
+  | `gl.shaders` | both `gl.scene.shaders` and `gl.ui.shaders` |
   | `gl.view` | a live render view can sit in a widget |
   | `ui.windows`, `ui.menubar`, `ui.color` | movable windows; a menu bar; coloured styling |
   | `input.mouse`, `input.keyboard` | pointer input; key and text input |
   | `raster.bitmap` | images show in real pixels (a GL window, or a kitty or Sixel terminal) |
   | `term`, `term.kitty`, `term.sixel` | a text terminal; one that speaks kitty graphics; one that draws Sixel |
 
+  GLSL runs in two places, and they are separate facts. The scene's shaders run in the
+  scene adapter's renderer (`SceneAdapter::runs_shaders`), the UI's in the backend
+  (`Capabilities::glsl`). `arigl --terminal` has the first without the second: it renders
+  the scene offscreen through GL and draws the UI as text cells. So a document whose only
+  GLSL is in `shader:` blocks requires `gl.scene.shaders` and runs there. One with a
+  `shader_canvas` requires `gl.ui.shaders`, or lists it as optional and checks
+  `(has? "gl.ui.shaders")`. `gl.shaders` asks for both, so it fails on `--terminal`.
 - a **function** a program can call: a builtin, a stdlib function, a state intrinsic or a
   host verb (`Runtime::has_function`);
 - a **widget type**, built in (`slider_int`, `button`, …) or registered

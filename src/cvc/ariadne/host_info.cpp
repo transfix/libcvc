@@ -217,7 +217,7 @@ std::string format_host_info(const HostInfo &info, bool json, bool functions) {
     for (const CapabilityToken &t : capability_tokens())
       if (name == t.name)
         meaning = t.meaning;
-    std::string pad(name.size() < 16 ? 16 - name.size() : 1, ' ');
+    std::string pad(name.size() < 18 ? 18 - name.size() : 1, ' ');
     o << "  " << name << pad << (holds ? "yes" : "no ") << "  " << meaning << "\n";
   }
   o << "\nfunctions programs can call: " << info.functions.size();

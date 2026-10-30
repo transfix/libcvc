@@ -32,6 +32,7 @@ AppRuntime::AppRuntime(cvc::app &app, std::string prefix, SceneAdapter *scene)
     : app_(app), prefix_(std::move(prefix)), scene_(scene), rt_(app, prefix_),
       verbs_(std::make_shared<Verbs>()) {
   rt_.set_scene_capable(scene_ != nullptr); // the gl.scene capability (requires:, has?)
+  rt_.set_scene_shaders(scene_ && scene_->runs_shaders()); // gl.scene.shaders
 }
 
 AppRuntime::~AppRuntime() {
