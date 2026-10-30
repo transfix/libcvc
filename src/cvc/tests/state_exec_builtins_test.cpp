@@ -438,6 +438,7 @@ TEST_F(BuiltinsTest, UrlEncodeDecodeRoundTripsBytes) {
 class JsonBuiltinsTest : public BuiltinsTest {
 protected:
   value_t parse(const std::string &text) { return call("json-parse", {text}); }
+  std::string text_of(const std::string &json) { return std::get<std::string>(parse(json).v); }
   std::string encode(const value_t &v) { return std::get<std::string>(call("json-encode", {v}).v); }
   std::string encode(const value_t &v, const value_t &indent) {
     return std::get<std::string>(call("json-encode", {v, indent}).v);
@@ -535,17 +536,22 @@ TEST_F(JsonBuiltinsTest, ARepeatedKeyKeepsItsPlaceAndTakesTheLastValue) {
   EXPECT_EQ(std::get<int64_t>(d[38].second.v), 38);
 }
 
+// The JSON texts are named constants: MSVC's preprocessor misreads a raw string with \" in it
+// inside a macro's arguments (C2017).
 TEST_F(JsonBuiltinsTest, StringEscapesAndUnicode) {
-  EXPECT_EQ(std::get<std::string>(parse(R"("\"\\\/\b\f\n\r\t")").v), "\"\\/\b\f\n\r\t");
-  EXPECT_EQ(std::get<std::string>(parse(R"("\u0041\u00e9\u20AC\ud83d\ude00")").v),
-            "A\xC3\xA9\xE2\x82\xAC\xF0\x9F\x98\x80");
+  const std::string simple = R"("\"\\\/\b\f\n\r\t")";
+  const std::string unicode = R"("\u0041\u00e9\u20AC\ud83d\ude00")";
+  const std::string nul = R"("\u0000")";
+  const std::string key = R"({"\u00e9t\u00e9": 1})";
+  EXPECT_EQ(text_of(simple), "\"\\/\b\f\n\r\t");
+  EXPECT_EQ(text_of(unicode), "A\xC3\xA9\xE2\x82\xAC\xF0\x9F\x98\x80");
   // Raw UTF-8 passes through as it is.
-  EXPECT_EQ(std::get<std::string>(parse("\"\xC3\xA9\xE2\x82\xAC\xF0\x9F\x98\x80\"").v),
+  EXPECT_EQ(text_of("\"\xC3\xA9\xE2\x82\xAC\xF0\x9F\x98\x80\""),
             "\xC3\xA9\xE2\x82\xAC\xF0\x9F\x98\x80");
-  EXPECT_EQ(std::get<std::string>(parse(R"("\u0000")").v), std::string(1, '\0'));
+  EXPECT_EQ(text_of(nul), std::string(1, '\0'));
   // Keys are strings like any other.
-  EXPECT_TRUE(values_equal(parse(R"({"\u00e9t\u00e9": 1})"),
-                           make_dict({{"\xC3\xA9t\xC3\xA9", value_t{int64_t{1}}}})));
+  const value_t keyed = parse(key);
+  EXPECT_TRUE(values_equal(keyed, make_dict({{"\xC3\xA9t\xC3\xA9", value_t{int64_t{1}}}})));
 }
 
 TEST_F(JsonBuiltinsTest, InvalidUtf8AndLoneSurrogatesBecomeTheReplacementCharacter) {
@@ -555,11 +561,13 @@ TEST_F(JsonBuiltinsTest, InvalidUtf8AndLoneSurrogatesBecomeTheReplacementCharact
                                       .v),
             "a" + fffd + "b");
   EXPECT_EQ(std::get<std::string>(parse("\"\xE2\x82\"").v), fffd + fffd); // truncated: a byte each
-  EXPECT_EQ(std::get<std::string>(parse(R"("\ud83d")").v), fffd);         // a truncated emoji
-  EXPECT_EQ(std::get<std::string>(parse(R"("\ud83dx")").v), fffd + "x");
-  EXPECT_EQ(std::get<std::string>(parse(R"("\ude00")").v), fffd);
-  EXPECT_EQ(std::get<std::string>(parse(R"("\ud83d\u0041")").v), fffd + "A");
-  EXPECT_EQ(std::get<std::string>(parse(R"("\ud83d\ud83d\ude00")").v), fffd + "\xF0\x9F\x98\x80");
+  const std::string high = R"("\ud83d")", high_then_x = R"("\ud83dx")", low = R"("\ude00")",
+                    high_then_a = R"("\ud83d\u0041")", high_then_pair = R"("\ud83d\ud83d\ude00")";
+  EXPECT_EQ(text_of(high), fffd); // a truncated emoji
+  EXPECT_EQ(text_of(high_then_x), fffd + "x");
+  EXPECT_EQ(text_of(low), fffd);
+  EXPECT_EQ(text_of(high_then_a), fffd + "A");
+  EXPECT_EQ(text_of(high_then_pair), fffd + "\xF0\x9F\x98\x80");
 }
 
 TEST_F(JsonBuiltinsTest, MalformedTextIsAValueErrorWithItsLineAndColumn) {
@@ -634,8 +642,9 @@ TEST_F(JsonBuiltinsTest, EncodesCompactlyInDictOrder) {
                                {"n", nil_value},
                                {"a", make_list({value_t{int64_t{1}}, make_list(), make_dict()})},
                                {"b", make_dict({{"k", value_t{std::string("v")}}})}});
-  EXPECT_EQ(encode(v), R"({"s":"x\"y","i":-7,"f":1.5,"whole":2.0,"t":true,"F":false,"n":null,)"
-                       R"("a":[1,[],{}],"b":{"k":"v"}})");
+  const std::string want = R"({"s":"x\"y","i":-7,"f":1.5,"whole":2.0,"t":true,"F":false,"n":null,)"
+                           R"("a":[1,[],{}],"b":{"k":"v"}})";
+  EXPECT_EQ(encode(v), want);
   EXPECT_EQ(encode(nil_value), "null");
   EXPECT_EQ(encode(value_t{std::string("")}), "\"\"");
 }
@@ -661,12 +670,13 @@ TEST_F(JsonBuiltinsTest, EncodesIndented) {
 }
 
 TEST_F(JsonBuiltinsTest, EncodesStringsWithTheEscapesJsonNeeds) {
-  EXPECT_EQ(encode(value_t{std::string("q\" b\\ s/ \b\f\n\r\t\x01\x1f\x7f")}),
-            R"("q\" b\\ s/ \b\f\n\r\t\u0001\u001f)"
-            "\x7f\"");
+  const std::string escaped = R"("q\" b\\ s/ \b\f\n\r\t\u0001\u001f)"
+                              "\x7f\"";
+  EXPECT_EQ(encode(value_t{std::string("q\" b\\ s/ \b\f\n\r\t\x01\x1f\x7f")}), escaped);
   EXPECT_EQ(encode(value_t{std::string("\xC3\xA9\xF0\x9F\x98\x80")}),
             "\"\xC3\xA9\xF0\x9F\x98\x80\"");
-  EXPECT_EQ(encode(value_t{std::string(1, '\0')}), R"("\u0000")");
+  const std::string nul = R"("\u0000")";
+  EXPECT_EQ(encode(value_t{std::string(1, '\0')}), nul);
 }
 
 TEST_F(JsonBuiltinsTest, FloatsEncodeInTheirShortestRoundTripForm) {
