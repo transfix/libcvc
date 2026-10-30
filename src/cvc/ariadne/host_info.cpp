@@ -114,6 +114,7 @@ HostInfo gather_host_info(const Runtime &rt, const std::string &runtime) {
   info.net = net.enabled;
   info.net_allowed = net.allowed;
   info.credential_store = net.credential_store;
+  info.env_credentials = net.env_credentials;
   const HostFacts facts = rt.host_facts();
   info.graphics.kitty = facts.caps.kitty;
   info.graphics.sixel = facts.caps.sixel;
@@ -149,7 +150,10 @@ std::string format_host_info(const HostInfo &info, bool json, bool functions) {
     for (std::size_t i = 0; i < info.net_allowed.size(); ++i)
       o << (i ? ", " : "") << json_string(info.net_allowed[i]);
     o << "], \"credential_store\": " << json_string(info.credential_store)
-      << "},\n  \"capabilities\": {";
+      << ", \"env_credentials\": [";
+    for (std::size_t i = 0; i < info.env_credentials.size(); ++i)
+      o << (i ? ", " : "") << json_string(info.env_credentials[i]);
+    o << "]},\n  \"capabilities\": {";
     for (std::size_t i = 0; i < info.capabilities.size(); ++i)
       o << (i ? ", " : "") << json_string(info.capabilities[i].first) << ": "
         << (info.capabilities[i].second ? "true" : "false");
@@ -210,6 +214,8 @@ std::string format_host_info(const HostInfo &info, bool json, bool functions) {
       o << "  allow           " << origin << "\n";
     o << "  credentials     "
       << (info.credential_store.empty() ? std::string("in memory") : info.credential_store) << "\n";
+    for (const std::string &name : info.env_credentials)
+      o << "  from the env    " << name << "\n";
   }
   o << "\ncapabilities (requires: / has?)\n";
   for (const auto &[name, holds] : info.capabilities) {

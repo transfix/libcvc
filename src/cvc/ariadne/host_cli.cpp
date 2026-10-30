@@ -8,8 +8,10 @@
 
 #include <algorithm>
 #include <boost/program_options.hpp>
+#include <cctype>
 #include <charconv>
 #include <cvc/ariadne/host_cli.h>
+#include <cvc/net/credentials.h>
 #include <cvc/net/net_policy.h>
 
 namespace cvc {
@@ -19,11 +21,14 @@ namespace {
 
 namespace po = boost::program_options;
 
-constexpr const char *kValueFlags[] = {
-    "--prefix",     "--component-path",  "--backend",   "--fps",
-    "--width",      "--height",          "--frames",    "--png",
-    "--graphics",   "--image",           "--cell-size", "--net-allow",
-    "--net-policy", "--credential-store"};
+constexpr const char *kValueFlags[] = {"--prefix",        "--component-path",
+                                       "--backend",       "--fps",
+                                       "--width",         "--height",
+                                       "--frames",        "--png",
+                                       "--graphics",      "--image",
+                                       "--cell-size",     "--net-allow",
+                                       "--net-policy",    "--credential-store",
+                                       "--credential-env"};
 constexpr const char *kBoolFlags[] = {"--no-mouse", "--ansi", "--net"};
 
 bool is_general_flag(const std::string &a) {
@@ -147,6 +152,22 @@ bool apply(const po::option &opt, HostOptions &o) {
     }
     o.net.credential_store = value;
     o.net.enabled = true;
+  } else if (a == "--credential-env") {
+    const std::size_t eq = value.find('=');
+    const std::string name = value.substr(0, eq == std::string::npos ? 0 : eq);
+    const std::string var = eq == std::string::npos ? std::string() : value.substr(eq + 1);
+    const bool var_ok = !var.empty() && !std::isdigit(static_cast<unsigned char>(var[0])) &&
+                        std::all_of(var.begin(), var.end(), [](char c) {
+                          return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+                        });
+    if (!cvc::net::CredentialStore::valid_name(name) || !var_ok) {
+      o.error = "--credential-env is NAME=VAR (a credential name and an environment variable), "
+                "not '" +
+                value + "'";
+      return false;
+    }
+    o.net.credential_env.emplace_back(name, var);
+    o.net.enabled = true;
   }
   return true;
 }
@@ -228,7 +249,10 @@ std::string host_flags_help() {
          "  --net-allow ORIGIN     ... and reach ORIGIN, scheme://host[:port] (repeatable)\n"
          "  --net-policy FILE      ... with the allow and credential lines in FILE (repeatable)\n"
          "  --credential-store S   keep sign-in credentials across runs in S: a name in the\n"
-         "                         user's config dir, or a path (not in a browser)\n";
+         "                         user's config dir, or a path (not in a browser)\n"
+         "  --credential-env N=V   credential N is the token in environment variable V, for\n"
+         "                         this run only (a policy credential line binds N; not in a\n"
+         "                         browser; unset V supplies nothing)\n";
 }
 
 std::string misplaced_flag_note(const std::string &runtime,

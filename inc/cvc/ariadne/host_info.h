@@ -41,6 +41,7 @@ struct HostInfo {
   bool net = false;
   std::vector<std::string> net_allowed; // the origins requests may reach
   std::string credential_store;         // where credentials are kept ("" = in memory)
+  std::vector<std::string> env_credentials; // names --credential-env supplied a token for
 
   std::vector<std::pair<std::string, bool>> capabilities; // every token, and whether it holds
   std::vector<std::string> functions;                     // what programs can call, sorted

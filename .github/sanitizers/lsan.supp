@@ -7,19 +7,6 @@
 # leak:<pattern>, one per line, where <pattern> matches a function, file or module name in the
 # leak's allocation stack.
 
-# Reference cycles that state_exec leaves for its cycle collector, which these tests never run
-# before they exit. A closure bound in the scope it captured (each defun, or a lambda set in the
-# global environment a fixture makes) holds that scope, which holds it. Only collect_cycles()
-# (heap.h) frees such a cycle, and docs/STATE_EXEC_DEVELOPER_GUIDE.md ("Reference cycles") makes
-# that the host's job between steps. The schedulers collect once enough is tracked, or a second
-# after a process ends, and these short tests finish first; the async evaluator tests run
-# evaluators with no scheduler and never collect. Every leak LSan printed for them (76,848 bytes
-# in state_exec_async_test, 151,995 in state_exec_integration_test) is indirect: each leaked block
-# is pointed to by another leaked one, which is what cycles look like. These entries would also
-# hide a real leak in these fixtures; a collect_cycles() when the run ends (in a gtest global
-# environment's TearDown) would let LSan check them instead.
-leak:AsyncEvaluatorTest
-leak:AsyncCrossEvaluatorTest_
-leak:ProducerConsumerTest
-leak:E2EIntegrationTest
-leak:MigrationIntegrationTest_MigrateProcessBetweenNodes_Test
+# No entries. state_exec's reference cycles, which only collect_cycles() (heap.h) frees, are
+# collected at the end of each test binary that leaves them (a gtest global environment), so
+# LeakSanitizer sees them freed rather than needing a suppression.
