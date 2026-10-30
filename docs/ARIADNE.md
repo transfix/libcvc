@@ -1544,7 +1544,10 @@ windows:
 ```
 
 [`examples/ariadne/documents/json_feed.ari`](../examples/ariadne/documents/json_feed.ari) does
-this with a JSON string in place of the request, so it runs anywhere, `ari` included. All
+this with a JSON string in place of the request, so it runs anywhere, `ari` included. Its last
+post has accented letters, CJK and an emoji: in both terminal backends a wide glyph takes two
+columns and the window's edge stays straight (`ariadne_ftxui_test`'s `JsonFeed*` and
+`WideGlyphs*` tests; until this, `ari snapshot`'s plain text put a space after each). All
 three are data jobs: a large reply is parsed and written a slice per step, so it doesn't stall
 a frame. `json-parse` and `json-encode` are pure, so reactive expressions may use them too.
 

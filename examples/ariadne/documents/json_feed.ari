@@ -5,7 +5,9 @@
 # array's indices become child nodes, and a scalar becomes a node's value. An array's node holds
 # its length, so `repeat: (state-get "feed.items")` makes a row per post, and
 # feed.items.{i}.<key> binds each post's fields. json-encode goes the other way, for a request
-# body. GL-free, so it runs in a terminal too:
+# body. The last post is written with JSON \u escapes (the DSL string's \\ passes them on to
+# json-parse): accented letters take one terminal column each, and the CJK characters and the
+# emoji two. GL-free, so it runs in a terminal too:
 #
 #   ari examples/ariadne/documents/json_feed.ari
 #
@@ -27,7 +29,8 @@ init: |
     \"items\": [
       {\"id\": 101, \"author\": \"ada\", \"text\": \"hello from the fediverse\", \"likes\": 3},
       {\"id\": 102, \"author\": \"grace\", \"text\": \"coffee at 9?\", \"likes\": 12},
-      {\"id\": 103, \"author\": \"linus\", \"text\": \"JSON in, widgets out\", \"likes\": 0}
+      {\"id\": 103, \"author\": \"linus\", \"text\": \"JSON in, widgets out\", \"likes\": 0},
+      {\"id\": 104, \"author\": \"zo\\u00eb\", \"text\": \"caf\\u00e9 \\u65e5\\u672c \\ud83c\\udf89\", \"likes\": 7}
     ]
   }"))
 
