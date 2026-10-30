@@ -148,6 +148,7 @@ form and `if` dropped forms after its else branch, silently; scripts that wrappe
 **I/O:** `print`
 **Generator:** `generator`, `next`, `range`, `collect`, `gen-done?`
 **OOP:** `send` (method dispatch), `apply`
+**Hashing and secure randomness:** `sha256`, `sha256-hex`, `random-token` (below)
 **Stdlib:** `string.*`, `bytes.*`, `math.*`, `collections.*`, always loaded ([§11](#11-standard-library))
 
 `apply`, `send` and `collections.map`/`filter`/`reduce` call a native function or a DSL
@@ -159,6 +160,38 @@ function alike. A DSL function runs as the program's own frames on the same eval
 (set o (dict "__class__" (dict "inc" (lambda (self x) (+ x 1)))))
 (send o "inc" 41)                                ;; => 42
 ```
+
+#### Hashing and Secure Randomness
+
+```lisp
+(sha256-hex "abc")      ;; => "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+(sha256 "abc")          ;; => the same digest as 32 bytes
+(random-token 32)       ;; => 43 characters of unpadded base64url, e.g. "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+(random-token 16 "hex") ;; => 32 lowercase hex digits
+```
+
+- `(sha256 x)` and `(sha256-hex x)` hash a string's UTF-8 bytes or a bytes value's octets, and
+  return the SHA-256 digest as 32 bytes or as 64 lowercase hex digits. Any other argument is a
+  `TypeError`. They are libcvc's own SHA-256 (`cvc::sha256_hex`, `state_blob_store.h`), so they
+  need no crypto library, and they hash the whole input in one step.
+- `(random-token nbytes [encoding])` returns `nbytes` (1..256, `kRandomTokenMaxBytes`) from the
+  operating system's CSPRNG as text: unpadded base64url (RFC 4648 §5, the default, with the
+  alphabet `A-Z a-z 0-9 - _`) or `"hex"`. The bytes come from `getentropy` on Linux, macOS and
+  other POSIX systems, `crypto.getRandomValues` under Emscripten (its `getentropy`), and
+  `rand_s` on Windows. A count outside 1..256 or an unknown encoding is a `ValueError`, and a
+  non-integer count a `TypeError`. `math.random` is not a CSPRNG; use `random-token` for
+  secrets, nonces and verifiers.
+- A device-pairing or PKCE flow draws a secret verifier, sends only its hash first, and proves
+  it holds the verifier later:
+
+  ```lisp
+  (set verifier (random-token 32))
+  (set verifier-hash (sha256-hex verifier)) ;; sent when pairing starts; verifier when it ends
+  ```
+
+- None of the three is in Ariadne's read lane (`bind:`, `visible_when:`). Its environment is an
+  allowlist, and `random-token` would make a predicate nondeterministic. The `init:` and action
+  lanes have all three.
 
 #### Type Conversion
 
