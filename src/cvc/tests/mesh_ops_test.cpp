@@ -39,11 +39,13 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cvc/geometry/fem.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/mesh_ops.h>
 #include <gtest/gtest.h>
 #include <limits>
 #include <map>
+#include <memory>
 #include <numeric>
 #include <thread>
 #include <utility>
@@ -989,6 +991,65 @@ TEST(MeshOps, TetBoundarySurfaceIsOutward) {
       dot += nrm[c] * ((a[c] + c1[c] + c2[c]) / 3 - 0.5);
     EXPECT_GT(dot, 0.0);
   }
+}
+
+// tet_boundary_stepper: tet_boundary_surface triangle for triangle, and fem::boundary_vertices,
+// whatever the budget -- on a cube with flipped tets and per-vertex arrays, and on tets that
+// share a face three ways, leave a hole, or include a flat one.
+TEST(MeshOps, TetBoundaryStepperMatchesTetBoundarySurface) {
+  std::vector<geometry> meshes;
+  {
+    geometry cube = cube_tets(4);
+    for (std::size_t i = 0; i < cube.num_tets(); i += 3)
+      std::swap(cube.tets()[i][2], cube.tets()[i][3]);
+    for (const auto &p : cube.const_points()) {
+      cube.functions().push_back(p[0] + p[1]);
+      cube.colors().push_back({{p[0], p[1], p[2]}});
+    }
+    meshes.push_back(cube);
+  }
+  {
+    geometry odd = cube_tets(3);
+    odd.tets().erase(odd.tets().begin() + 20, odd.tets().begin() + 27); // a hole
+    odd.tets().push_back(odd.tets()[5]);                                // a face three tets share
+    geometry::tet_t flat = odd.tets()[9];
+    flat[3] = flat[2];
+    odd.tets().push_back(flat); // no volume
+    meshes.push_back(odd);
+  }
+  for (std::size_t m = 0; m < meshes.size(); ++m) {
+    const auto mesh = std::make_shared<const geometry>(meshes[m]);
+    const geometry ref = cvc::tet_boundary_surface(*mesh);
+    const std::vector<cvc::index_t> ref_v =
+        cvc::fem::boundary_vertices(*mesh, cvc::fem::domain::VOLUME);
+    for (const std::size_t budget :
+         {std::size_t(0), std::size_t(1), std::size_t(7), std::size_t(97)}) {
+      cvc::tet_boundary_stepper s(mesh);
+      double last = 0.0;
+      std::string phases;
+      while (!s.step(budget)) {
+        EXPECT_GE(s.progress(), last) << s.phase();
+        last = s.progress();
+        if (phases.find(s.phase()) == std::string::npos)
+          phases += std::string(s.phase()) + ";";
+      }
+      EXPECT_EQ(s.progress(), 1.0);
+      EXPECT_STREQ(s.phase(), "done");
+      if (budget == 1)
+        EXPECT_EQ(phases, "orienting;faces;boundary;sorting;") << "mesh " << m;
+      const geometry got = s.surface();
+      ASSERT_EQ(got.num_tris(), ref.num_tris()) << "mesh " << m << ", budget " << budget;
+      for (std::size_t t = 0; t < ref.num_tris(); ++t)
+        ASSERT_EQ(got.const_tris()[t], ref.const_tris()[t]) << "mesh " << m << ", tri " << t;
+      EXPECT_EQ(got.const_points(), ref.const_points());
+      EXPECT_EQ(got.const_functions(), ref.const_functions());
+      EXPECT_EQ(got.const_colors().size(), ref.const_colors().size());
+      EXPECT_EQ(got.get_geometry_type(), geometry::SURFACE_TRI);
+      EXPECT_EQ(s.vertices(), ref_v) << "mesh " << m << ", budget " << budget;
+    }
+  }
+  cvc::tet_boundary_stepper unready(std::make_shared<const geometry>(cube_tets(1)));
+  EXPECT_THROW(unready.surface(), cvc::mesh_ops_error);
 }
 
 TEST(MeshOps, SliceTetsCrossSection) {

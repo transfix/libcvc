@@ -484,6 +484,49 @@ TEST(NetCredentials, PersistsOwnerOnlyAndRoundTrips) {
   EXPECT_FALSE(empty.has("txwtf"));
 }
 
+// --credential-env's tokens: bound names only, ahead of the file's token for the run, never
+// written, and replaced by a capture.
+TEST(NetCredentials, AProvidedTokenIsHeldForTheRunAndNeverWritten) {
+  TempDir dir;
+  const fs::path file = dir.path / "creds";
+  const Origin api = origin("https://api.example"), other = origin("https://other.example");
+  const std::string from_file = "ZnJvbS10aGUtZmlsZS10b2tlbg";
+  const std::string from_env = "Y3Z0b2tfZnJvbS10aGUtZW52aXJvbm1lbnQ";
+  {
+    CredentialStore store(file.string());
+    store.bind("cvcpkg", {api});
+    ASSERT_TRUE(store.capture("cvcpkg", api, from_file));
+  }
+  CredentialStore store(file.string());
+  std::string why;
+  EXPECT_FALSE(store.provide("unbound", from_env, &why));
+  EXPECT_NE(why.find("bound to no origin"), std::string::npos) << why;
+  store.bind("cvcpkg", {api});
+  ASSERT_TRUE(store.load(&why)) << why;
+  EXPECT_FALSE(store.provide("cvcpkg", "short", &why));
+  EXPECT_EQ(why.find("short"), std::string::npos) << "the error must not quote it";
+  ASSERT_TRUE(store.provide("cvcpkg", from_env, &why)) << why;
+  EXPECT_EQ(store.token_for("cvcpkg", api), from_env) << "ahead of the file's";
+  EXPECT_FALSE(store.token_for("cvcpkg", other));
+
+  // Another credential's capture rewrites the file: the file's token stays, the provided one is
+  // not written.
+  ASSERT_TRUE(store.capture("misc", other, "bWlzYy1jYXB0dXJlZC10b2tlbg"));
+  std::string text = read_file(file);
+  EXPECT_NE(text.find(from_file), std::string::npos) << text;
+  EXPECT_EQ(text.find(from_env), std::string::npos) << text;
+
+  // A capture of the name replaces both; forget drops it.
+  const std::string captured = "Y2FwdHVyZWQtYWZ0ZXItdGhlLWVudg";
+  ASSERT_TRUE(store.capture("cvcpkg", api, captured));
+  EXPECT_EQ(store.token_for("cvcpkg", api), captured);
+  text = read_file(file);
+  EXPECT_NE(text.find(captured), std::string::npos);
+  EXPECT_EQ(text.find(from_file), std::string::npos);
+  EXPECT_TRUE(store.forget("cvcpkg"));
+  EXPECT_FALSE(store.has("cvcpkg"));
+}
+
 #if !defined(_WIN32)
 TEST(NetCredentials, RefusesAFileOthersCanRead) {
   TempDir dir;

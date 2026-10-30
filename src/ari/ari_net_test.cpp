@@ -141,6 +141,26 @@ TEST(AriNet, SnapshotSignsInFetchesAndIsRefusedElsewhere) {
   EXPECT_EQ(bearer, 2) << "each run's /user/me carried the host's token";
 }
 
+// A program that works between two requests (a reply parsed, a loop) has no request in flight then,
+// but it is not idle: a one-frame snapshot still waits for the second reply.
+TEST(AriNet, SnapshotWaitsThroughWorkBetweenRequests) {
+  REQUIRE_ARI();
+  LocalHttpServer api(txwtf);
+  TempDir dir;
+  const fs::path doc = dir.write(
+      "busy.ari", document("net", {"first", "second"},
+                           "(state-set \"t.first\" (get-attr (http-get \"" + api.url("/user/me") +
+                               "\") \"status\"))"
+                               " (set i 0) (while (< i 30000) (set i (+ i 1)))"
+                               " (state-set \"t.second\" (get-attr (http-get \"" +
+                               api.url("/user/me") + "\") \"status\"))"));
+  const AriRun r = ari("snapshot --net-allow " + api.origin() + " " + quoted(doc));
+  EXPECT_EQ(r.status, 0) << r.output;
+  EXPECT_NE(r.output.find("first: 401"), std::string::npos) << r.output;
+  EXPECT_NE(r.output.find("second: 401"), std::string::npos) << r.output;
+  EXPECT_EQ(api.requests().size(), 2u);
+}
+
 TEST(AriNet, ACredentialStoreCarriesTheSignInToTheNextRun) {
   REQUIRE_ARI();
   LocalHttpServer api(txwtf);
@@ -256,6 +276,130 @@ TEST(AriNet, NoErrorPathPrintsTheToken) {
     EXPECT_EQ(run.output.find(kToken), std::string::npos)
         << what << ": the token reached the terminal:\n"
         << run.output;
+}
+
+// cvcpkg's sign-in: a device-token reply carries an access and a refresh token; a refresh is a form
+// POST naming the refresh token; an API token can come from the environment. None reaches output.
+namespace {
+
+const std::string kAccess = "cvcses_YXJpLWFjY2Vzcy10b2tlbi1mb3ItdGVzdHM";
+const std::string kRefresh = "cvcref_YXJpLXJlZnJlc2gtdG9rZW4tZm9yLXRlc3Rz";
+const std::string kFresh = "cvcses_YXJpLXJlZnJlc2hlZC1hY2Nlc3MtdG9rZW4";
+const std::string kApiToken = "cvctok_YXJpLWFwaS10b2tlbi1mcm9tLXRoZS1lbnY";
+
+LocalHttpServer::Reply registry(const LocalHttpServer::Request &req) {
+  if (req.target == "/v1/auth/device/token")
+    return {200,
+            {"Content-Type: application/json"},
+            "{\"access_token\": \"" + kAccess + "\", \"refresh_token\": \"" + kRefresh +
+                "\", \"expires_in\": 43200}"};
+  if (req.target == "/v1/auth/token")
+    return req.body == "grant_type=refresh_token&refresh_token=" + kRefresh
+               ? LocalHttpServer::Reply{200,
+                                        {"Content-Type: application/json"},
+                                        "{\"access_token\": \"" + kFresh + "\"}"}
+               : LocalHttpServer::Reply{401, {}, "{}"};
+  if (req.target == "/v1/me") {
+    const std::string a = req.header("Authorization");
+    return a == "Bearer " + kFresh || a == "Bearer " + kApiToken
+               ? LocalHttpServer::Reply{200, {}, "{}"}
+               : LocalHttpServer::Reply{401, {}, "{}"};
+  }
+  return {404, {}, ""};
+}
+
+bool carries_a_token(const std::string &out) {
+  for (const std::string *t : {&kAccess, &kRefresh, &kFresh, &kApiToken})
+    if (out.find(*t) != std::string::npos)
+      return true;
+  return false;
+}
+
+void set_env(const char *name, const char *value) {
+#if defined(_WIN32)
+  _putenv_s(name, value ? value : "");
+#else
+  if (value)
+    ::setenv(name, value, 1);
+  else
+    ::unsetenv(name);
+#endif
+}
+
+} // namespace
+
+TEST(AriNet, ADeviceSignInRefreshesWithoutTheDocumentSeeingEitherToken) {
+  REQUIRE_ARI();
+  LocalHttpServer reg(registry);
+  TempDir dir;
+  const fs::path doc =
+      dir.write("device.ari",
+                document("net.auth", {"device", "refresh", "me", "body"},
+                         "(set d (http-request \"POST\" \"" + reg.url("/v1/auth/device/token") +
+                             "\" (dict \"capture_auth\" (list (dict \"name\" \"cvcpkg\" \"field\" "
+                             "\"access_token\") (dict \"name\" \"cvcpkg.refresh\" \"field\" "
+                             "\"refresh_token\")))))"
+                             " (state-set \"t.device\" (get-attr d \"captured\"))"
+                             " (state-set \"t.body\" (str (get-attr d \"body\")))"
+                             " (set r (http-request \"POST\" \"" +
+                             reg.url("/v1/auth/token") +
+                             "\" (dict \"form\" (dict \"grant_type\" \"refresh_token\" "
+                             "\"refresh_token\" (dict \"credential\" \"cvcpkg.refresh\")) "
+                             "\"capture_auth\" (dict \"name\" \"cvcpkg\" \"field\" "
+                             "\"access_token\"))))"
+                             " (state-set \"t.refresh\" (get-attr r \"captured\"))"
+                             " (state-set \"t.me\" (get-attr (http-get \"" +
+                             reg.url("/v1/me") + "\" (dict \"auth\" \"cvcpkg\")) \"status\"))"));
+  const AriRun r =
+      ari("snapshot --net-allow " + reg.origin() + " --width 200 --height 12 " + quoted(doc));
+  EXPECT_EQ(r.status, 0) << r.output;
+  EXPECT_NE(r.output.find("device: true"), std::string::npos) << r.output;
+  EXPECT_NE(r.output.find("refresh: true"), std::string::npos) << r.output;
+  EXPECT_NE(r.output.find("me: 200"), std::string::npos) << r.output;
+  EXPECT_NE(r.output.find("\\\"refresh_token\\\": \\\"[redacted]\\\""), std::string::npos)
+      << r.output;
+  EXPECT_FALSE(carries_a_token(r.output)) << r.output;
+}
+
+TEST(AriNet, AnEnvironmentTokenSignsInAndIsNeverPrinted) {
+  REQUIRE_ARI();
+  LocalHttpServer reg(registry);
+  TempDir dir;
+  const fs::path policy = dir.write(
+      "cvcpkg.policy", "allow " + reg.origin() + "\ncredential cvcpkg " + reg.origin() + "\n");
+  const fs::path doc = dir.write(
+      "env.ari", document("net.auth", {"has", "me"},
+                          "(state-set \"t.has\" (net-auth-has? \"cvcpkg\"))"
+                          " (state-set \"t.me\" (get-attr (http-get \"" +
+                              reg.url("/v1/me") + "\" (dict \"auth\" \"cvcpkg\")) \"status\"))"));
+  const std::string flags =
+      "--net-policy " + quoted(policy) + " --credential-env cvcpkg=CVC_ARI_TEST_TOKEN ";
+  set_env("CVC_ARI_TEST_TOKEN", kApiToken.c_str());
+  AriRun r = ari("snapshot " + flags + quoted(doc));
+  EXPECT_NE(r.output.find("has: true"), std::string::npos) << r.output;
+  EXPECT_NE(r.output.find("me: 200"), std::string::npos) << r.output;
+  EXPECT_FALSE(carries_a_token(r.output)) << r.output;
+  const AriRun info = ari("info " + flags);
+  EXPECT_NE(info.output.find("from the env    cvcpkg"), std::string::npos) << info.output;
+  EXPECT_FALSE(carries_a_token(info.output));
+
+  set_env("CVC_ARI_TEST_TOKEN", "zz9 plural z alpha");
+  r = ari("check " + flags + quoted(doc));
+  EXPECT_EQ(r.status, 2) << r.output;
+  EXPECT_NE(r.output.find("CVC_ARI_TEST_TOKEN holds no usable token"), std::string::npos)
+      << r.output;
+  EXPECT_EQ(r.output.find("zz9 plural"), std::string::npos) << r.output;
+
+  set_env("CVC_ARI_TEST_TOKEN", nullptr);
+  r = ari("snapshot " + flags + quoted(doc));
+  EXPECT_EQ(r.status, 0) << "an unset variable supplies nothing: " << r.output;
+  EXPECT_NE(r.output.find("has: false"), std::string::npos) << r.output;
+
+  r = ari("check --net --credential-env cvcpkg=CVC_ARI_TEST_TOKEN " + quoted(doc));
+  EXPECT_EQ(r.status, 2) << r.output;
+  EXPECT_NE(r.output.find("bind cvcpkg with a 'credential cvcpkg ORIGIN...' line"),
+            std::string::npos)
+      << r.output;
 }
 
 TEST(AriNet, BadFlagsExitTwo) {

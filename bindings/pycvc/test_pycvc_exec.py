@@ -400,6 +400,21 @@ def test_exec_functions_survive_cycle_collection():
     assert ex.run("(twice 21)") == "42"
 
 
+def test_is02_spawned_child_calls_registered_function():
+    # IS-2 (docs/STATE_EXEC_THREADED.md 8.5): a spawned child sees the Exec's registered functions
+    # (and its intrinsics); the parent's top-level definitions persist into the next run().
+    app = pycvc.make_app()
+    ex = pycvc.Exec(app)
+    seen = []
+    ex.register_fn("note", lambda x: seen.append(x) or x)
+    ex.run("(defun twice (x) (* 2 x))")
+    out = ex.run('(begin (spawn "(begin (note 21) (state-set \\"is02\\" \\"child\\"))") '
+                 "(sleep 0.05) (twice 21))")
+    assert out == "42", out
+    assert seen == [21], seen
+    assert ex.run('(state-get "is02")') == "child"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:

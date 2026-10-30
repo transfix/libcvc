@@ -95,18 +95,27 @@ Nothing that writes state, schedules, watches, sends messages, or does I/O is
 reachable. That includes the atomic updates `state-incr`, `state-cas` and `state-swap`: they
 write, so they are not on the allowlist (actions may use them). Nor is `with-lock`
 (docs/STATE_EXEC_LOCKS.md): a reactive slot that names it fails safe like any other
-off-allowlist symbol.
-
-**Locks in the other lanes.** An action may use `with-lock`. One that names no `:timeout` gives up
-after `ariadne.exec.lock_timeout` seconds (default 1.0, a tree setting beside the
-`ariadne.limits.action_max_*` keys, read at each submission): a document never hangs on another's
-lock. The `init:` lane never waits for a lock: a busy request there is as `:timeout 0`
-(`TimeoutError`, or `:else` with `:if-available`). An action's `(fork)` forks the action's
-process, and the child is reaped with the document. An off-allowlist symbol does not error loudly — it **fails safe**: the slot
+off-allowlist symbol. An off-allowlist symbol does not error loudly — it **fails safe**: the slot
 degrades to hidden / disabled / empty / last-good value and the frame records a
 one-shot warning (`take_reactive_warnings`,
 [`ariadne.cpp:1682`](../src/cvc/ariadne/ariadne.cpp)). state_exec is always built (there is
 no build option to drop it), so the engine is always present.
+
+**Locks in the other lanes.** An action may use `with-lock`. One that names no `:timeout` gives up
+after `ariadne.exec.lock_timeout` seconds (default 1.0, a tree setting beside the
+`ariadne.limits.action_max_*` keys, read at each submission): a document never hangs on another's
+lock. A resident's request has no such default: it waits as long as it takes. The `init:` lane
+never waits for a lock: a busy request there is as `:timeout 0` (`TimeoutError`, or `:else` with
+`:if-available`). An action's `(fork)` forks the action's process, and the child is reaped with
+the document.
+
+**Spawned children.** A child an action or a resident `spawn`s runs in the document's scope, as
+its parent does: the intrinsics, the host's program-lane intrinsics and `(has? ...)`; its writes
+and channel keys under its parent's prefix; the document's channel policy and resources; and its
+parent's lock default, so an action's child gives up after `ariadne.exec.lock_timeout` too. It
+keeps the document's owner, so it is reaped with the document. A child an `init:` script spawns
+runs under the script's prefix with the same intrinsics and never waits for a lock either: it is
+stepped on the host thread with the script, so a busy request is as `:timeout 0` there too.
 
 **The read lane never parks.** It is bounded three ways
 ([`ariadne.cpp:603`](../src/cvc/ariadne/ariadne.cpp)):
@@ -692,8 +701,9 @@ background pool where there are. Each stage steps (the SDF of an `sdf` source, a
 source's resample to `dim`, the LBIE meshing with its own resample to (2^n+1)^3, the boundary and
 the smooth surface the field shows on, the solve's assembly, factorization and solves; the
 elements view's cut-away and the field view's cut too), so the page stays live and `progress` /
-`phase` move while a job runs. Only reading a file, and a few whole-mesh passes (orienting the
-tetrahedra, their boundary, quality), are one step each. Something must pump the scheduler: every
+`phase` move while a job runs. The mesh's boundary and a solve's boundary vertices step too
+(`cvc::tet_boundary_stepper`). Only reading a file and a few whole-mesh passes (orienting the
+tetrahedra, their quality, libigl's search trees, a solve's AMD ordering) are one step each. Something must pump the scheduler: every
 Ariadne Runtime does. `CVC_SLICED_THREADING=cooperative` in the environment runs every such task
 cooperatively on a native build, the way a single-threaded wasm page runs them.
 
@@ -849,7 +859,7 @@ validates the block but not the arguments, and declared arguments take their def
 **Who can see them.** Only the outermost document takes arguments. A `load:`-mounted
 module's own `args:` is ignored with a warning. Programs are chrooted to their own
 subtree (§7), so a module sees neither `argv` nor `args` unless its parent grants a
-read-only hole (§7.4). A hole links one node:
+read-only hole (§7.4). A hole grants a node and everything under it:
 - `link: {args: {to: args, mode: ro}}` hands the module the dict,
   `(get-attr (state-data-get "args") "room")`;
 - `link: {room: {to: args.room, mode: ro}}` hands it one argument, `(state-get "room")`.
@@ -1229,11 +1239,32 @@ A mounted module is sandboxed to its sub-prefix. Access to the parent's state is
   writable ([`loader.cpp:1038`](../src/cvc/ariadne/loader.cpp)); anything else is
   read-only. A hole whose name starts with `/` is rejected.
 
-At reconcile, `wire_holes` ([`ariadne.cpp:931`](../src/cvc/ariadne/ariadne.cpp)) plants a
+At reconcile, `wire_holes` ([`ariadne.cpp`](../src/cvc/ariadne/ariadne.cpp)) plants a
 transparent link at `resolve_bind(sub_prefix, name)` pointing to
 `resolve_bind(parent_prefix, target)`, with writability set from the mode. Reads see
-through the link; a read-only hole keeps writes local to the module. Holes are re-planted
-every reconcile, so a re-mount can never inherit a stale grant. A fragment may declare
+through the link; a read-only hole keeps writes local to the module. Holes are torn down
+(`clearLink`) and re-planted every reconcile, so a re-mount can never inherit a stale grant.
+
+A hole grants the target's whole subtree, not only the node it names. With
+`link: {tree: search.res}`, the module's `bind: tree.packages.0.name`,
+`(state-get "tree.packages.0.name")`, `(state-children "tree.packages")` and
+`(state-data-get "tree.meta")` all reach the parent's `search.res.…`, including keys the
+parent writes after the mount. Paths are resolved by `cvc::state::findThroughLinks` (reads)
+and `childThroughLinks` (writes) ([`state.h`](../inc/cvc/state/state.h)), which follow a
+transparent link on every hop of the path; Ariadne binds (`bind.h`) and the state_exec
+`state-*` natives use them. The mode covers the whole subtree:
+
+- `rw`: a write under the hole (`state-set`, `state-data-set`, `state-from-json`, the
+  atomics, a widget commit) lands on the target's descendant, created when absent.
+- `ro`: a write under the hole lands on the hole's own local child and never touches the
+  target. Reads keep seeing the target, so the local copy is shadowed. The atomics
+  (`state-cas`, `state-swap`, `state-incr`) refuse instead (`read_only_error`), since their
+  write would not land on the node a read sees.
+
+Default-deny still holds. Paths have no parent step, so a hole reaches only its target and
+what is under it; a transparent link the parent keeps inside that subtree is followed (it is
+part of what the parent granted), an opaque one is not. `state-delete`, the expiry natives
+and `state-watch` still act on the physical path and do not reach through a hole. A fragment may declare
 the holes it expects with `needs:`; an ungranted expectation warns and the fragment falls
 back to a local (fail-safe) binding. A per-mount `init:` runs once at the sub-prefix
 **after** the holes are wired, with the module's functions (§6.6). A module's functions come
@@ -1600,8 +1631,9 @@ In an Ariadne document's action lane, the network verbs are (from
   `METHOD` verb), and the scheme-agnostic `fetch` / `fetch-async`.
 - Options are a dict: `query`, `headers`, `body`, and `form` (form is url-encoded with a
   default `Content-Type`). Query values are url-encoded for you; there are `url-encode` /
-  `url-decode` core builtins if you need them directly. Two more, `auth` and `capture_auth`,
-  use the host's credentials (§10.3).
+  `url-decode` core builtins if you need them directly. `auth`, `capture_auth` and credential
+  values (`(dict "credential" NAME)` in a form or headers dict) use the host's credentials
+  (§10.3).
 - The reply is a dict with every key present:
 
   | key | what |
@@ -1634,7 +1666,7 @@ In an Ariadne document's action lane, the network verbs are (from
 ### 10.3 The host's network: the allowlist and credentials
 
 A document reaches the network only when its host turns it on. `ari` and `arigl` take the same
-four flags before the document path ([`host_cli.h`](../inc/cvc/ariadne/host_cli.h)), with the
+flags before the document path ([`host_cli.h`](../inc/cvc/ariadne/host_cli.h)), with the
 same meaning in every mode: `ari` with either terminal backend (FTXUI, or `--backend tvision`),
 `arigl` in a window, `arigl --terminal`, and both in a browser. So a launcher script gives a
 document the network without any code of its own, and the same document runs in a terminal
@@ -1646,10 +1678,13 @@ ari run --backend tvision --net-allow https://tx.wtf --credential-store nicotina
 arigl run --net-allow https://tx.wtf --credential-store nicotina share/nicotina/main.ari
 ```
 
-The flags hold for `run`, `snapshot`, `check` and `info` alike. With the network on,
-`ari snapshot` waits after its frames until the document's requests have come back (at most
-10 s) before it prints the frame, so CI can render a document that signs in against a local
-test server; it prints the programs' warnings after the frame, as `arigl snapshot` does.
+The flags hold for `run`, `snapshot`, `check` and `info` alike. With the network on, `ari
+snapshot` and `arigl snapshot` (in a window or with `--terminal`) keep running after their
+frames until the document is idle, no request in flight and no program step waiting (a program
+parsing one reply before it sends the next is not idle), for three steps running, at most 10 s.
+So one frame shows what a document that signs in and fetches brought back, and CI can render it
+against a local test server. `ari snapshot` prints the programs' warnings after the frame, as
+`arigl snapshot` does.
 
 | flag | what |
 |---|---|
@@ -1657,6 +1692,7 @@ test server; it prints the programs' warnings after the frame, as `arigl snapsho
 | `--net-allow ORIGIN` | allow requests to `ORIGIN`, `scheme://host[:port]` (repeatable; implies `--net`) |
 | `--net-policy FILE` | read `allow` and `credential` lines from `FILE` (repeatable; implies `--net`) |
 | `--credential-store S` | keep credentials across runs in `S` (implies `--net`; not in a browser) |
+| `--credential-env N=V` | credential `N` is the token in environment variable `V`, for this run (repeatable; a policy `credential` line must bind `N`; not in a browser) |
 
 Without them a document has no `http-get` or `http-request`, and an `http(s)://` URI does not
 resolve. With them the host ([`net_host.h`](../inc/cvc/ariadne/net_host.h), `enable_net`):
@@ -1684,8 +1720,25 @@ resolve. With them the host ([`net_host.h`](../inc/cvc/ariadne/net_host.h), `ena
     "token")))` has the host take the JSON string at `field` (object keys joined by `.`;
     `token` by default) from a 2xx reply, keep it as credential `txwtf`, and put
     `"[redacted]"` in its place in the body, every other byte as it was. `captured` says
-    whether it was kept.
-  - A request with either option does not follow redirects.
+    whether it was kept. `capture_auth` also takes a list of such dicts, one credential each,
+    for a reply that carries several tokens (an access and a refresh token). Each is blanked
+    wherever the reply carries it. A dict with `"optional" #t` names a field the reply may lack:
+    a refresh reply need not rotate the refresh token.
+  - A **credential value**, `(dict "credential" NAME)`, as a value in the `form` or `headers`
+    dict, has the host put credential `NAME`'s token there as the request is sent: percent-encoded
+    in a form, as is in a header (`X-Api-Key`, say). It goes only to an origin the credential is
+    bound to, like `auth`, and echoes are blanked. A `query` refuses one, since URLs are logged.
+    So a document refreshes its session (RFC 6749 section 6) without seeing either token:
+
+    ```lisp
+    (http-request "POST" "https://registry.example/v1/auth/token"
+      (dict "form" (dict "grant_type" "refresh_token"
+                         "refresh_token" (dict "credential" "svc.refresh"))
+            "capture_auth" (list (dict "name" "svc" "field" "access_token")
+                                 (dict "name" "svc.refresh" "field" "refresh_token"
+                                       "optional" #t))))
+    ```
+  - A request with any of these options does not follow redirects.
   - `(net-auth-has? NAME [URL])` asks whether the host has the credential (for URL's origin),
     `(net-auth-forget NAME)` drops it (from the file too) and `(net-auth-clear)` drops them
     all. `(net-allowed? URL)` asks whether a request to URL may be made.
@@ -1694,6 +1747,13 @@ resolve. With them the host ([`net_host.h`](../inc/cvc/ariadne/net_host.h), `ena
     16 to 4096 characters, so it can never split a header line.
   - So a token reaches neither the document's variables nor the state tree (which a state
     transport replicates), and no error message or log line quotes one.
+- **takes tokens it was handed with `--credential-env NAME=VAR`** (an API token, a CI secret):
+  the token in environment variable `VAR` becomes credential `NAME` for this run. A policy
+  `credential NAME ORIGIN...` line must bind it, so the launcher, not the document, decides where
+  it may go. It is held in memory, ahead of any token the store file has for `NAME`, and never
+  written; a capture of `NAME` replaces it. An unset or empty variable supplies nothing, so a
+  launcher can always pass the flag; a value that is no bearer token stops the host (the error
+  never quotes it). A browser has no environment, so it refuses the flag.
 - **keeps credentials across runs with `--credential-store`.** A plain name (`nicotina`) is a
   file of that name in the user's config directory: `$XDG_CONFIG_HOME/cvc/credentials` or
   `~/.config/cvc/credentials`, `%LOCALAPPDATA%\cvc\credentials` on Windows. Anything else

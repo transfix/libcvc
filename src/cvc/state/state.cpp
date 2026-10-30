@@ -1475,6 +1475,102 @@ state::state_ptr state::findDescendantShared(const std::string &path,
   return cur;
 }
 
+state *state::findThroughLinks(const std::string &path, std::size_t hop_budget) {
+  using namespace boost::algorithm;
+  // Each hop is held as a state_ptr, as in operator(): a target reached through a link is pinned
+  // by the resolution, so a concurrent sweep cannot free it mid-walk.
+  state *cur = this;
+  state_ptr held;
+  // Continue at a resolvable transparent link's terminal; anything else stays put.
+  auto through = [&]() {
+    {
+      boost::mutex::scoped_lock lock(cur->_mutex);
+      if (cur->_linkTarget.empty() || cur->_linkMode != link_mode::transparent)
+        return;
+    }
+    link_resolution r = cur->resolveLink(hop_budget);
+    if (r.kind == link_resolution_kind::resolved && r.target_owned) {
+      held = r.target_owned;
+      cur = held.get();
+    }
+  };
+  std::vector<std::string> keys;
+  split(keys, normalize_state_path(path), is_any_of(SEPARATOR));
+  through();
+  for (auto &k : keys) {
+    trim(k);
+    if (k.empty())
+      continue;
+    state_ptr next;
+    {
+      boost::mutex::scoped_lock lock(cur->_mutex);
+      auto it = cur->_children.find(k);
+      if (it == cur->_children.end() || !it->second)
+        return nullptr;
+      next = it->second;
+    }
+    held = std::move(next);
+    cur = held.get();
+    through();
+  }
+  return cur;
+}
+
+state &state::childThroughLinks(const std::string &path, bool refuse_read_only,
+                                std::size_t hop_budget) {
+  using namespace boost::algorithm;
+
+  boost::this_thread::interruption_point();
+
+  std::vector<std::string> keys;
+  split(keys, path, is_any_of(SEPARATOR));
+  state *cur = this;
+  state_ptr held;
+  for (std::string &key : keys) {
+    trim(key);
+    if (key.empty())
+      continue;
+    boost::this_thread::interruption_point();
+    // Descending into `cur`: a writable transparent link sends the walk to its target, a read-only
+    // one keeps it on the link node's own children (or refuses). A link node exists, so nothing
+    // was created on the way to one that is refused.
+    bool transparent, writable;
+    {
+      boost::mutex::scoped_lock lock(cur->_mutex);
+      transparent = !cur->_linkTarget.empty() && cur->_linkMode == link_mode::transparent;
+      writable = cur->_linkWritable;
+    }
+    if (transparent && writable) {
+      link_resolution r = cur->resolveLink(hop_budget);
+      if (r.kind != link_resolution_kind::resolved || !r.target_owned || r.target == cur)
+        throw read_only_error(
+            boost::str(boost::format("Cannot write through unresolvable transparent link: %1%") %
+                       cur->fullName()));
+      held = r.target_owned;
+      cur = held.get();
+    } else if (transparent && refuse_read_only) {
+      throw read_only_error(boost::str(
+          boost::format("Cannot write through read-only transparent link: %1%") % cur->fullName()));
+    }
+    state_ptr child;
+    {
+      boost::mutex::scoped_lock lock(cur->_mutex);
+      auto it = cur->_children.find(key);
+      if (it != cur->_children.end() && it->second) {
+        child = it->second;
+      } else {
+        child.reset(new state(cur->_ctx, key, cur));
+        cur->_children[key] = child;
+        cur->_lastMod = boost::posix_time::microsec_clock::universal_time();
+        cur->_initialized = true;
+      }
+    }
+    held = std::move(child);
+    cur = held.get();
+  }
+  return *cur;
+}
+
 // static
 std::string state::normalize_path(const std::string &path) { return normalize_state_path(path); }
 
