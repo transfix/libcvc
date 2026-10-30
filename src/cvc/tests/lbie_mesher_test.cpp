@@ -1880,6 +1880,16 @@ TEST_F(LbieMesherTest, HexUtilityFunctions) {
 
 namespace {
 
+// The stepped tests' volumes are kSteppedSamples wide (2^n+1, which the mesher takes as it is).
+// Each case meshes its volume three times: at 33 samples SteppedTetrahedralize2MatchesOneShot took
+// 9 s in a Release build and 130-230 s in the Debug package lanes, past ctest's 300 s on a loaded
+// runner. Unoptimized builds mesh 17. By the optimizer, not NDEBUG, which a Debug build can define.
+#if defined(__OPTIMIZE__) || (defined(_MSC_VER) && !defined(_DEBUG))
+constexpr unsigned int kSteppedSamples = 33;
+#else
+constexpr unsigned int kSteppedSamples = 17;
+#endif
+
 // A torus' distance field on [-1,1]^3 at n^3 samples, positive inside the tube.
 volume make_torus_volume(app &ctx, unsigned int n) {
   volume v(ctx, dimension(n, n, n), Float, bounding_box(-1, -1, -1, 1, 1, 1));
@@ -1984,8 +1994,8 @@ std::string describe(const char *name, improvement_method m, int iterations) {
 // the same order, without improvement and with geometric flow, on a volume of (2^n+1)^3 samples
 // and on one the mesher resamples.
 TEST_F(LbieMesherTest, SteppedTetrahedralizeMatchesOneShot) {
-  const volume sphere = make_sphere_volume(ctx, 33, 0.6);
-  const volume torus = make_torus_volume(ctx, 30);
+  const volume sphere = make_sphere_volume(ctx, kSteppedSamples, 0.6);
+  const volume torus = make_torus_volume(ctx, kSteppedSamples - 3);
   for (const volume *v : {&sphere, &torus})
     for (const auto &im : {std::make_pair(NO_IMPROVE, 0), std::make_pair(GEO_FLOW, 1)}) {
       const std::string what = describe(v == &sphere ? "sphere" : "torus", im.first, im.second);
@@ -2008,7 +2018,7 @@ TEST_F(LbieMesherTest, SteppedTetrahedralizeMatchesOneShot) {
 // tetrahedralize2()'s layer between two isovalues (fe_lab's interval mesh) and its solid above
 // one isovalue, a slice at a time.
 TEST_F(LbieMesherTest, SteppedTetrahedralize2MatchesOneShot) {
-  const volume sphere = make_sphere_volume(ctx, 33, 0.6);
+  const volume sphere = make_sphere_volume(ctx, kSteppedSamples, 0.6);
   for (const auto &im : {std::make_pair(NO_IMPROVE, 0), std::make_pair(GEO_FLOW, 1)}) {
     const std::vector<std::string> phases = expect_stepped_matches(
         [&] {
@@ -2036,8 +2046,8 @@ TEST_F(LbieMesherTest, SteppedTetrahedralize2MatchesOneShot) {
 // iso() a slice at a time. iso() leaves the improvement method at geometric flow, so its mesh has
 // had the extraction's pass of it even with no iterations; the stepper's has too.
 TEST_F(LbieMesherTest, SteppedIsoMatchesOneShot) {
-  const volume sphere = make_sphere_volume(ctx, 33, 0.6);
-  const volume torus = make_torus_volume(ctx, 30);
+  const volume sphere = make_sphere_volume(ctx, kSteppedSamples, 0.6);
+  const volume torus = make_torus_volume(ctx, kSteppedSamples - 3);
   const volume prop = make_sphere_volume(ctx, 21, 0.3);
   for (const volume *v : {&sphere, &torus}) {
     const std::string name = v == &sphere ? "sphere" : "torus";

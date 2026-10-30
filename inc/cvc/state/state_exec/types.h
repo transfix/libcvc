@@ -311,6 +311,12 @@ inline const value_t false_value{false};
 /// it nor overflows the stack.
 std::string to_string(const value_t &val);
 
+/// The shortest text that reads back as `d`: std::to_chars's form where the library has it for
+/// floating point, else detail::format_number_shortest_fallback's identical text. How to_string
+/// prints a float, and how state-set and state-incr store one: 1234567.5 as "1234567.5", 0.1 + 0.2
+/// as "0.30000000000000004", a whole float as an integer's digits (2.0 as "2").
+std::string format_number_shortest(double d);
+
 /// Check structural equality of two values. Memoized on pointer-pairs, so a shared or
 /// cyclic structure is compared in time proportional to its PHYSICAL size (distinct node
 /// pairs), never its exponential logical unfolding. Iterative, so any depth compares; it polls

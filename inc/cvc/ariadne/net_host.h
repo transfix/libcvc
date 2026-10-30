@@ -10,7 +10,8 @@
 //   - builds the allowlist: the --net-allow origins, the policy files' allow lines and, in a
 //     browser, the page's own origin. Every request, and every redirect it follows, must go to one;
 //   - builds the host's credential store (cvc/net/credentials.h): in memory, or in the
-//     --credential-store file natively, its names bound as the policy files' credential lines say;
+//     --credential-store file natively, its names bound as the policy files' credential lines say,
+//     holding for this run the tokens --credential-env reads from the environment;
 //   - registers the http verbs (net_intrinsics.h) and the http(s) URI handler (uri_http.h) with
 //     both, so (http-get ...), (http-request ...), (fetch "https://...") and an import: of an
 //     https URL are all checked;
@@ -20,6 +21,7 @@
 // The registrations are process-wide, like the action-intrinsic providers they add to.
 
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace cvc {
@@ -32,13 +34,19 @@ struct NetHostConfig {
   std::vector<std::string> allow;        // --net-allow ORIGIN, in order
   std::vector<std::string> policy_files; // --net-policy FILE, in order
   std::string credential_store;          // --credential-store SPEC ("" = in memory)
+  // --credential-env NAME=VAR, in order: credential NAME is the token in environment variable VAR
+  // (a policy credential line binds NAME); held for the run, never written.
+  std::vector<std::pair<std::string, std::string>> credential_env;
 };
 
 // Turn the network on for documents run in `app`, as `config` says. Call once at setup, before
 // load(); a config that is not enabled does nothing. Returns "" or what is wrong (an origin that
 // does not parse, an unreadable policy or credential file, a credential bound to an origin not
-// allowed, a credential store in a browser); nothing is turned on then. `app` must outlive the
-// network being on: call disable_net() before it dies.
+// allowed, a credential store or --credential-env in a browser, a --credential-env name no policy
+// line binds or whose variable holds no bearer token); nothing is turned on then. A
+// --credential-env variable that is unset or empty supplies nothing and is no error, so a launcher
+// can always pass the flag. `app` must outlive the network being on: call disable_net() before it
+// dies.
 std::string enable_net(cvc::app &app, const NetHostConfig &config);
 
 // Turn it off again: programs built afterwards get no http verbs, a call to one bound earlier
@@ -53,6 +61,7 @@ struct NetHostStatus {
   bool persist = false;             // it keeps credentials in a file (net.auth.persist)
   std::vector<std::string> allowed; // the allowlist, as origins
   std::string credential_store;     // the file, or ""
+  std::vector<std::string> env_credentials; // names --credential-env supplied a token for
 };
 NetHostStatus net_host_status();
 

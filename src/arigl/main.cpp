@@ -55,6 +55,8 @@
 // The network is off unless a flag turns it on, in both modes and in the browser: --net,
 // --net-allow ORIGIN, --net-policy FILE and --credential-store NAME|PATH (net_host.h;
 // docs/ARIADNE.md §10.3). In a browser --net alone lets the document reach the page's own origin.
+// With it on, snapshot (in a window or with --terminal) waits after its frames until the
+// document's requests have come back and its programs are idle (at most 10 s).
 
 #include <algorithm>
 #include <cctype> // std::isalnum / std::isdigit — sanitize the conference node id
@@ -174,10 +176,12 @@ int usage(int code) {
                "and puts the document's own menus under Document; a .ari demo picked from Demos\n"
                "replaces the document in this window.\n"
                "\n"
-               "The network is off unless --net, --net-allow, --net-policy or --credential-store\n"
-               "turns it on. Then the document may reach only the origins allowed (in a browser,\n"
-               "the page's own origin too), and sign-in tokens stay with arigl: a request names\n"
-               "one (auth:), it never sees it.\n",
+               "The network is off unless --net, --net-allow, --net-policy, --credential-store\n"
+               "or --credential-env turns it on. Then the document may reach only the origins\n"
+               "allowed (in a browser, the page's own origin too), and sign-in tokens stay with\n"
+               "arigl: a request names one (auth:, a credential value), it never sees it.\n"
+               "With it on, snapshot waits after its frames until the document's requests are\n"
+               "back and its programs idle (at most 10 s).\n",
                ari::host_flags_help().c_str());
   return code;
 }
@@ -1666,11 +1670,19 @@ int run_window(const ari::HostOptions &o) {
       conf.pump(); // publish this frame's room-tree + media to the relay (run mode does this via
                    // the input pump, set below; a snapshot of a live conference must pump too)
       rt.frame(1.0 / 30.0);
-      if (f + 1 == frames)
+      if (f + 1 == frames && !o.net.enabled)
         view.writePNG(o.png.c_str()); // renders and writes the last frame
       else
         rt.render();
       std::this_thread::sleep_until(start + period);
+    }
+    if (o.net.enabled) { // the frame shows what the document's requests brought back
+      rt.app_runtime().settle([&] {
+        rt.frame(1.0 / 30.0);
+        rt.render();
+      });
+      rt.frame(1.0 / 30.0);
+      view.writePNG(o.png.c_str());
     }
     print_warnings(rt.take_warnings());
     return 0;
@@ -1854,6 +1866,10 @@ int run_terminal(const ari::HostOptions &o) {
       rt.drain(); // services and renders the scene, publishing the frame
       frame = backend->render_to_string(rt.runtime(), width, height, o.ansi);
       std::this_thread::sleep_until(start + period);
+    }
+    if (o.net.enabled) { // the frame shows what the document's requests brought back
+      rt.settle([&] { rt.drain(); });
+      frame = backend->render_to_string(rt.runtime(), width, height, o.ansi);
     }
     if (pixels) { // Sixel draws at screen positions, so the frame starts at the top-left
       const int rows = static_cast<int>(std::count(frame.begin(), frame.end(), '\n')) + 1;
