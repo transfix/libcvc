@@ -521,6 +521,8 @@ public:
         // state-json writes its document as sliced data steps, under the allocation limit)
         "state-get", "state-exists", "state-children", "state-data-get", "state-json",
         "state-root-path", "state-has-expiry", "state-is-expired",
+        // JSON text to values and back: pure, sliced data steps under the allocation limit
+        "json-parse", "json-encode",
         // the stdlib: the pure, bounded functions (a scalar, or a result no bigger than its
         // argument), and the materializers, which do their work as sliced data steps (each
         // eval slices, see data_step_nodes_) under the per-call allocation limit. A function

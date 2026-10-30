@@ -1539,6 +1539,30 @@ TEST(AriadneFtxui, TerminalTourDocumentRuns) {
   clear_action_intrinsics(); // register_verb's provider is process-wide: drop it with this test
 }
 
+TEST(AriadneFtxui, JsonFeedDocumentRepeatsOverAParsedArray) {
+  REQUIRE_FTXUI();
+  if (!AppRuntime::have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  namespace fs = std::filesystem;
+  const fs::path doc = fs::path(CVC_EXAMPLES_DIR) / "ariadne" / "documents" / "json_feed.ari";
+  ASSERT_TRUE(fs::exists(doc)) << "example not found at " << doc.string();
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.feed");
+  art.set_backend(be);
+  const std::vector<std::string> warns = art.load(doc.string());
+  EXPECT_TRUE(warns.empty()) << warns.front();
+  art.drain();
+  const std::string s = be.render_to_string(art.runtime(), 100, 30);
+  // init: parsed the JSON and wrote it with state-set-tree; repeat: made a row per element.
+  for (const char *want :
+       {"feed: tx.wtf/public", "posts: 3", "ada: hello from the fediverse", "grace: coffee at 9?",
+        "linus: JSON in, widgets out", "likes: 12", "body: {\"post\":101,\"like\":true}"})
+    EXPECT_NE(s.find(want), std::string::npos) << want << "\n" << s;
+  EXPECT_EQ(val(app, "ui.docs.feed.feed.items"), "3");
+  EXPECT_EQ(val(app, "ui.docs.feed.feed.items.2.author"), "linus");
+}
+
 // ---- §10 tf_editor: the editor the core composes on a terminal --------------------------------
 
 namespace {

@@ -1,0 +1,57 @@
+# json_feed.ari — a JSON array rendered with repeat:, no network needed.
+#
+# init: parses a JSON reply with json-parse (a string literal here; the body of a REST reply in a
+# real client) and writes it into the state tree with state-set-tree: an object's keys and an
+# array's indices become child nodes, and a scalar becomes a node's value. An array's node holds
+# its length, so `repeat: (state-get "feed.items")` makes a row per post, and
+# feed.items.{i}.<key> binds each post's fields. json-encode goes the other way, for a request
+# body. GL-free, so it runs in a terminal too:
+#
+#   ari examples/ariadne/documents/json_feed.ari
+#
+# docs/ARIADNE.md §10.3 has the verbs.
+
+meta:
+  name: JSON feed
+  author: cvc
+  min_libcvc: 3.7.4
+
+requires:
+  - json-parse
+  - json-encode
+  - state-set-tree
+
+init: |
+  (state-set-tree "feed" (json-parse "{
+    \"title\": \"tx.wtf/public\",
+    \"items\": [
+      {\"id\": 101, \"author\": \"ada\", \"text\": \"hello from the fediverse\", \"likes\": 3},
+      {\"id\": 102, \"author\": \"grace\", \"text\": \"coffee at 9?\", \"likes\": 12},
+      {\"id\": 103, \"author\": \"linus\", \"text\": \"JSON in, widgets out\", \"likes\": 0}
+    ]
+  }"))
+
+windows:
+  - window: Feed
+    id: feed
+    pos: [2, 2]
+    children:
+      - text: "feed"
+        bind: feed.title
+      - text: "posts"
+        bind: feed.items
+      - separator
+      # One row per element of feed.items; {i} is the row's index.
+      - type: group
+        repeat: (state-get "feed.items")
+        children:
+          # A computed bind runs on the reactive lane, which has string.join but not str-concat.
+          # Quoted for YAML, which would read the ": " as a key.
+          - text: ""
+            bind: '(string.join (list (state-get "feed.items.{i}.author") (state-get "feed.items.{i}.text")) ": ")'
+          - text: "  likes"
+            bind: feed.items.{i}.likes
+      - separator
+      # What liking the first post would send.
+      - text: "body"
+        bind: (json-encode (dict "post" (int (state-get "feed.items.0.id")) "like" true))

@@ -872,6 +872,8 @@ environment_ptr builtins::make_default_environment() {
   register_fn(env, "str", builtin_str);
   register_fn(env, "url-encode", builtin_url_encode);
   register_fn(env, "url-decode", builtin_url_decode);
+  register_fn(env, "json-parse", builtin_json_parse);
+  register_fn(env, "json-encode", builtin_json_encode);
   register_fn(env, "int", builtin_int);
   register_fn(env, "float", builtin_float);
   register_fn(env, "is-int", builtin_is_int);

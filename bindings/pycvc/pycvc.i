@@ -4052,6 +4052,12 @@ std::unique_ptr<data_job> make_copy_job(value_t v);
 std::unique_ptr<data_job> make_substitute_job(value_t tmpl,
                                               const std::unordered_map<std::string, value_t> &subst);
 std::unique_ptr<data_job> make_heap_share_job(const process &proc);
+// json-parse and json-encode as jobs: a malformed text raises pycvc.dsl_error (a ValueError, with
+// the line and column in its message), as in the DSL.
+const size_t kJsonMaxDepth = 512;
+const size_t kJsonMaxIndent = 10;
+std::unique_ptr<data_job> make_json_parse_job(std::string text);
+std::unique_ptr<data_job> make_json_encode_job(value_t v, size_t indent = 0);
 value_t run_to_completion(data_job &job);
 void count_data_nodes(size_t nodes);
 

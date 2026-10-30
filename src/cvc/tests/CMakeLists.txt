@@ -639,7 +639,7 @@ target_link_libraries(ariadne_ftxui_test
     GTest::gtest
     GTest::gtest_main
 )
-# Two tests load the GL-free terminal documents from the repo's examples/ tree.
+# Three tests load GL-free documents from the repo's examples/ tree.
 target_compile_definitions(ariadne_ftxui_test PRIVATE
   CVC_EXAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../../examples")
 

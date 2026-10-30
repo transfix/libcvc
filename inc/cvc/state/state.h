@@ -440,6 +440,8 @@ public:
   // The full names of every node under this one (its descendants, in pre-order: each child, then
   // its own descendants, children in name order), those matching `re` when it is not empty.
   std::vector<std::string> children(const std::string &re = std::string());
+  // The names of this node's own children (not their descendants), in name order.
+  std::vector<std::string> childNames();
   size_t numChildren();
 
   // Fired on a node when something under it changes, with that thing's path relative to the

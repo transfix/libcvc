@@ -85,7 +85,9 @@ Reactive slots — `visible_when`, `enabled_when` / `disabled_when`, computed `b
 - The value allowlist admits arithmetic, coercion, logic, and side-effect-free state
   *readers* only (`kAllowed`, [`ariadne.cpp:417`](../src/cvc/ariadne/ariadne.cpp)), plus
   `(has? "name")`, which asks what the host provides
-  ([§5.7](#57-requires-and-has--what-a-document-needs-from-its-host)).
+  ([§5.7](#57-requires-and-has--what-a-document-needs-from-its-host)). `json-parse` and
+  `json-encode` are on it ([§10.3](#103-json-replies)); `str-concat` is not, so a computed
+  label joins its parts with `string.join`.
 - The special-form gate admits only `if / begin / let / while / for / lambda / defun /
   set / return / quote / yield / break` (`kAllowedForms`,
   [`ariadne.cpp:433`](../src/cvc/ariadne/ariadne.cpp)).
@@ -1513,6 +1515,38 @@ In an Ariadne document's action lane, the network verbs are (from
 See [`ariadne-async-await-arc`] in the roadmap for how `await` threads through the drain
 lane. **Note (§11):** these verbs are currently registered only in the Ariadne action
 lane, and no default host registers an `http(s)://` URI handler — see the caveats.
+
+### 10.3 JSON replies
+
+A REST reply's body is text. Three verbs turn it into widgets
+([STATE_EXEC_DEVELOPER_GUIDE.md](STATE_EXEC_DEVELOPER_GUIDE.md) §2, "JSON", has the details):
+
+- `(json-parse text)` reads JSON into values: an object is a dict in document order, an array
+  a list, a number without a fraction or exponent an int, `null` nil. Malformed text raises a
+  `ValueError` with `line` and `col`, which a `try` can catch.
+- `(json-encode value [indent])` writes values as JSON, for a request body.
+- `(state-set-tree path value)` writes a parsed value as the subtree at `path`: a dict's keys
+  and a list's indices name child nodes, and a scalar is a node's value. A list's node holds
+  its length, so `repeat:` can count it. It replaces the subtree, removing what the value
+  doesn't name, and it checks the whole value before it writes anything.
+
+```yaml
+init: |
+  (state-set-tree "feed" (json-parse (get-attr (http-get "https://example.org/feed") "body")))
+windows:
+  - window: Feed
+    children:
+      - type: group
+        repeat: (state-get "feed.items")     # the list's length
+        children:
+          - text: ""
+            bind: feed.items.{i}.text         # each element's field
+```
+
+[`examples/ariadne/documents/json_feed.ari`](../examples/ariadne/documents/json_feed.ari) does
+this with a JSON string in place of the request, so it runs anywhere, `ari` included. All
+three are data jobs: a large reply is parsed and written a slice per step, so it doesn't stall
+a frame. `json-parse` and `json-encode` are pure, so reactive expressions may use them too.
 
 ---
 
