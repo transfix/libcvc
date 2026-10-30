@@ -22,17 +22,26 @@
 //   error         why the request failed, or why capture_auth: kept nothing ("" otherwise)
 //
 // OPTS is a dict: query (dict, appended to the URL), headers (dict, or a list of "Name: value"
-// lines), body (string or bytes) or form (dict, sent x-www-form-urlencoded), and two that only a
-// host with a credential store (NetAccess::credentials) takes:
+// lines), body (string or bytes) or form (dict, sent x-www-form-urlencoded). A host with a
+// credential store (NetAccess::credentials) also takes:
 //
 //   auth          "NAME": the host adds "Authorization: Bearer <token>" for credential NAME as the
 //                 request is sent, if NAME is bound to the URL's origin. The program never holds
 //                 the token, and any copy of it the reply echoes is blanked.
-//   capture_auth  (dict "name" NAME ["field" "token"]): from a 2xx JSON reply, the host keeps the
-//                 string at FIELD (object keys joined by '.') as credential NAME, captured from
-//                 the URL's origin, and the reply's body has "[redacted]" in its place.
+//   capture_auth  (dict "name" NAME ["field" "token"] ["optional" #f]), or a list of them: from a
+//                 2xx JSON reply, the host keeps the string at each FIELD (object keys joined by
+//                 '.') as credential NAME, captured from the URL's origin, and the reply's body has
+//                 "[redacted]" in each one's place. A missing optional field is no error (a
+//                 refresh reply need not rotate the refresh token).
+//   a credential value, (dict "credential" NAME), as a form or headers dict value: the host puts
+//                 credential NAME's token there as the request is sent (percent-encoded in a
+//                 form), on the same terms as auth, and blanks echoes of it. A query refuses one:
+//                 a URL is logged. So an RFC 6749 section 6 refresh,
+//                 (http-request "POST" url (dict "form" (dict "grant_type" "refresh_token"
+//                   "refresh_token" (dict "credential" "svc.refresh")) "capture_auth" (list ...))),
+//                 never shows the program either token.
 //
-// A request with either does not follow redirects. With a credential store, programs also get
+// A request with any of them does not follow redirects. With a credential store, programs also get
 // (net-auth-has? NAME [URL]), (net-auth-forget NAME) and (net-auth-clear); every program gets
 // (net-allowed? URL).
 //

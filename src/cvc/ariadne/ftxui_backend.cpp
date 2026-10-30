@@ -2230,6 +2230,57 @@ IndexEdit FtxuiBackend::combo(const char *label, int current_index,
   return e;
 }
 
+// One focusable leaf: the caption, then "(*) a  ( ) b" side by side (row) or stacked under it.
+// A click on an option picks it; Left / Right pick the previous / next option and Space / Enter
+// the next, wrapping, like a combo's Left / Right.
+IndexEdit FtxuiBackend::radio(const char *label, int current_index,
+                              const std::vector<std::string> &options, bool row) {
+  Impl &m = *m_;
+  const std::string id = m.uid(std::string("ra|") + label);
+  const int n = static_cast<int>(options.size());
+  const auto opt_box = [&](int i) -> fx::Box & { return m.boxes[id + "#" + std::to_string(i)]; };
+  IndexEdit e;
+  const int cur = n == 0 ? -1 : std::clamp(current_index, 0, n - 1);
+  int shown = cur;
+  if (n > 0 && !m.is_disabled()) {
+    int pick = -1;
+    if (m.pressed(id)) {
+      for (int i = 0; i < n; ++i)
+        if (inside(opt_box(i), m.ptr_x, m.ptr_y))
+          pick = i;
+    } else if (m.key(id, "Left")) {
+      pick = (cur - 1 + n) % n;
+    } else if (m.key(id, "Right") || m.key(id, "Space") || m.key(id, "Return")) {
+      pick = (cur + 1) % n;
+    }
+    if (pick >= 0) {
+      e = {true, true, pick};
+      shown = pick;
+    }
+  }
+  const bool f = m.has_focus(id);
+  fx::Elements opts;
+  for (int i = 0; i < n; ++i) {
+    fx::Element o = fx::text((i == shown ? "(*) " : "( ) ") + options[static_cast<std::size_t>(i)]);
+    if (f && i == shown)
+      o = o | fx::inverted;
+    o = o | fx::reflect(opt_box(i));
+    if (row) {
+      opts.push_back(fx::text(i == 0 ? "" : "  "));
+      opts.push_back(o);
+    } else {
+      opts.push_back(fx::hbox({fx::text("  "), o}));
+    }
+  }
+  fx::Element caption = fx::text(std::string(label) + ":" + (row ? " " : ""));
+  if (f && n == 0)
+    caption = caption | fx::inverted;
+  m.leaf(id, true,
+         row ? fx::hbox({caption, fx::hbox(std::move(opts))})
+             : fx::vbox({caption, fx::vbox(std::move(opts))}));
+  return e;
+}
+
 StringEdit FtxuiBackend::input_text(const char *label, const char *key,
                                     const std::string &current) {
   Impl &m = *m_;
@@ -2976,6 +3027,9 @@ DoubleEdit FtxuiBackend::slider_double(const char *, const char *, double, doubl
   return {};
 }
 IndexEdit FtxuiBackend::combo(const char *, int, const std::vector<std::string> &) { return {}; }
+IndexEdit FtxuiBackend::radio(const char *, int, const std::vector<std::string> &, bool) {
+  return {};
+}
 StringEdit FtxuiBackend::input_text(const char *, const char *, const std::string &) { return {}; }
 bool FtxuiBackend::draw_image(const char *, float) { return false; }
 ColorEdit FtxuiBackend::color(const char *, const float[3]) { return {}; }

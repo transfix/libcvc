@@ -138,6 +138,18 @@ private:
   std::unordered_map<std::string, entry> slots_;
 };
 
+struct intrinsics_context;
+
+/// A spawned child's environment and the context its intrinsics use, which the child's process
+/// keeps alive (td 4.15).
+struct spawn_setup {
+  environment_ptr env;
+  std::shared_ptr<void> context;
+  /// Called with the child's pid once it is submitted: a host that reaps its finished children
+  /// (their processes keep `context` alive) records them here. Optional.
+  std::function<void(int pid)> spawned;
+};
+
 struct intrinsics_context {
   scheduler_base *sched = nullptr;   // Non-owning; outlives context (sync or async scheduler)
   cvc::state *root = nullptr;        // Non-owning; app-scoped lifetime
@@ -165,6 +177,10 @@ struct intrinsics_context {
   std::optional<double> lock_default_timeout;
   bool lock_wait_allowed = true;
 
+  /// How a child spawned from this context is set up (td 4.15): its environment and context. Unset:
+  /// the child gets the bare builtins, as before.
+  std::function<spawn_setup(const intrinsics_context &parent)> spawn_context;
+
   /// Called with the pid of each child the running program forks, once it exists. A forked child
   /// shares this context (its natives point at it), so a host that frees the context when its
   /// process ends (Ariadne's actions) keeps it while the children live. Unset: nothing is called.
@@ -177,6 +193,15 @@ struct intrinsics_context {
 /// that uses the returned environment.  Typically, the scheduler creates one
 /// context per process and injects intrinsics before execution begins.
 void register_intrinsics(environment_ptr env, intrinsics_context *ctx);
+
+/// The spawn_context callback for a host that registers the plain intrinsics: each child gets a
+/// context copying the parent's (scheduler, root, chroot, identity, channel policy, document, lock
+/// fields and this callback, so grandchildren get one too) and `environment::extend(base)` with
+/// the intrinsics registered over it, then `after_register` (the host's own bindings). A null
+/// `base` is one default environment, made with the callback and shared by its children.
+std::function<spawn_setup(const intrinsics_context &)> make_spawn_context(
+    environment_ptr base = nullptr,
+    std::function<void(const environment_ptr &, intrinsics_context &)> after_register = {});
 
 /// Resolve `root_path` against `tree_root` and apply chroot to `ctx`.
 ///
@@ -228,9 +253,10 @@ namespace detail {
 /// The shortest text that reads back as `d`, in std::to_chars(char*, char*, double)'s exact form:
 /// the shortest round-trip digits (the closest such string when two have the same length), written
 /// fixed or scientific (`e`, a sign, at least two exponent digits), whichever is shorter, fixed on
-/// a tie. state-incr stores floats with std::to_chars where the library has it; libc++ builds
-/// without floating to_chars (older macOS targets, Emscripten) use this, so a node's text is the
-/// same on every platform. Built everywhere, so every platform's tests check it against to_chars.
+/// a tie. format_number_shortest (types.h) uses std::to_chars where the library has it; libc++
+/// builds without floating to_chars (older macOS targets, Emscripten) use this, so a node's text
+/// and a printed float are the same on every platform. Built everywhere, so every platform's tests
+/// check it against to_chars.
 std::string format_number_shortest_fallback(double d);
 } // namespace detail
 

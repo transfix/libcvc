@@ -243,10 +243,9 @@ void write_view(cvc::app &app, const ViewKeys &k, const cvc::tf::view &v) {
 // --- overlay sources ------------------------------------------------------------------------
 
 // Where the keys beside a model live. A load: mount reaches a parent's model through a link hole,
-// which links that ONE node: keys under the hole are its own local children, not the target's
-// (findDescendant does not follow links), so the overlays are read beside the hole's TARGET. The
-// overlay request is written there only through a writable (rw) hole — a read-only grant keeps it
-// local, like any other write through it.
+// so the overlays are read beside the hole's TARGET (by its absolute path, the same keys a bind
+// spelled through the hole reaches). The overlay request is written there only through a writable
+// (rw) hole — a read-only grant keeps it local, like any other write through it.
 struct OverlayBase {
   std::string read, write;
 };

@@ -4,8 +4,10 @@
 #include <boost/any.hpp>
 #include <boost/thread/thread.hpp>
 #include <cmath>
+#include <cstdlib>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
+#include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/data_job.h>
 #include <cvc/state/state_exec/evaluator.h>
@@ -109,6 +111,22 @@ TEST_F(StateTreeIntrinsicsTest, StateChildren) {
   EXPECT_GE((*lst)->size(), 2u);
 }
 
+TEST_F(StateTreeIntrinsicsTest, StateChildrenListsEveryDescendantByFullPath) {
+  // The developer guide's example: every node under the node, in pre-order, by full path.
+  call("state-set", {std::string("myapp.config.timeout"), std::string("30")});
+  call("state-set", {std::string("myapp.users.ann.role"), std::string("admin")});
+  const auto names = [&](const char *path) {
+    const value_t got = call("state-children", {std::string(path)});
+    std::vector<std::string> out;
+    for (const value_t &v : *std::get<list_ptr>(got.v))
+      out.push_back(std::get<std::string>(v.v));
+    return out;
+  };
+  EXPECT_EQ(names("myapp.config"), std::vector<std::string>{"myapp.config.timeout"});
+  EXPECT_EQ(names("myapp.users"),
+            (std::vector<std::string>{"myapp.users.ann", "myapp.users.ann.role"}));
+}
+
 TEST_F(StateTreeIntrinsicsTest, StateChildrenNonexistent) {
   auto result = call("state-children", {std::string("no.such.path")});
   auto *lst = std::get_if<list_ptr>(&result.v);
@@ -157,6 +175,82 @@ TEST_F(StateTreeIntrinsicsTest, TransparentLinkReadsThroughData) {
   auto d = call("state-data-get", {std::string("dhole")});
   ASSERT_TRUE(std::holds_alternative<std::string>(d.v));
   EXPECT_EQ(std::get<std::string>(d.v), "dv");
+}
+
+// A hole on an interior node (an Ariadne `link:` on a subtree): a program chrooted to "mod" reads
+// the target's descendants through it, writes them through a writable one, and keeps its writes
+// local under a read-only one. Nothing outside the target's subtree becomes reachable.
+TEST_F(StateTreeIntrinsicsTest, AHoleExposesTheTargetsDescendantsToReads) {
+  cvc::state &root = cvc::state::instance(app_ctx);
+  root("parent.res.packages.0.name").value(std::string("zstd"));
+  root("parent.res.packages.1.name").value(std::string("lz4"));
+  root("parent.secret").value(std::string("no"));
+  root("mod.tree").linkTo("parent.res", cvc::state::link_mode::transparent);
+  ictx.root = &root("mod");
+  call("state-data-set", {std::string("tree.meta"), value_t(int64_t(3))}); // read-only: local
+  root("parent.res.meta").data(boost::any(value_t(int64_t(4))));
+  EXPECT_EQ(std::get<std::string>(call("state-get", {std::string("tree.packages.0.name")}).v),
+            "zstd");
+  auto ch = call("state-children", {std::string("tree.packages")});
+  auto *lst = std::get_if<list_ptr>(&ch.v);
+  ASSERT_NE(lst, nullptr);
+  ASSERT_NE(*lst, nullptr);
+  // The target's whole subtree by full name (state::children): packages.0, .0.name, .1, .1.name.
+  ASSERT_EQ((*lst)->size(), 4u);
+  EXPECT_EQ(std::get<std::string>((*lst)->at(3).v), "parent.res.packages.1.name");
+  EXPECT_TRUE(std::get<bool>(call("state-exists", {std::string("tree.packages.1.name")}).v));
+  EXPECT_FALSE(std::get<bool>(call("state-exists", {std::string("tree.packages.2")}).v));
+  auto d = call("state-data-get", {std::string("tree.meta")});
+  ASSERT_TRUE(std::holds_alternative<int64_t>(d.v));
+  EXPECT_EQ(std::get<int64_t>(d.v), 4); // the target's, not the local write
+  auto j = call("state-json", {std::string("tree.packages.1")});
+  ASSERT_TRUE(std::holds_alternative<std::string>(j.v));
+  EXPECT_NE(std::get<std::string>(j.v).find("lz4"), std::string::npos);
+  // Default-deny: the parent outside the hole's target is still out of reach.
+  EXPECT_TRUE(call("state-get", {std::string("parent.secret")}).is_nil());
+  EXPECT_TRUE(call("state-get", {std::string("tree.secret")}).is_nil());
+}
+
+TEST_F(StateTreeIntrinsicsTest, AWritableHoleTakesDescendantWritesOnTheTarget) {
+  cvc::state &root = cvc::state::instance(app_ctx);
+  root("parent.res.a").value(std::string("1"));
+  root("mod.tree").linkTo("parent.res", cvc::state::link_mode::transparent).setLinkWritable(true);
+  ictx.root = &root("mod");
+  call("state-set", {std::string("tree.a"), std::string("2")});
+  call("state-set", {std::string("tree.new.leaf"), std::string("x")});
+  call("state-data-set", {std::string("tree.d"), value_t(std::string("dv"))});
+  call("state-incr", {std::string("tree.n")});
+  EXPECT_TRUE(std::get<bool>(
+      call("state-cas", {std::string("tree.a"), std::string("2"), std::string("3")}).v));
+  EXPECT_EQ(root("parent.res.a").value(), "3");
+  EXPECT_EQ(root("parent.res.new.leaf").value(), "x");
+  EXPECT_EQ(root("parent.res.n").value(), "1");
+  EXPECT_FALSE(root("parent.res.d").data().empty());
+  EXPECT_TRUE(root("mod.tree").children().empty()); // nothing landed on the hole
+}
+
+TEST_F(StateTreeIntrinsicsTest, AReadOnlyHoleKeepsDescendantWritesLocal) {
+  cvc::state &root = cvc::state::instance(app_ctx);
+  root("parent.res.a").value(std::string("1"));
+  root("mod.tree").linkTo("parent.res", cvc::state::link_mode::transparent); // read-only
+  ictx.root = &root("mod");
+  call("state-set", {std::string("tree.a"), std::string("2")});
+  call("state-set", {std::string("tree.new"), std::string("x")});
+  call("state-data-set", {std::string("tree.d"), value_t(std::string("dv"))});
+  call("state-from-json", {std::string("tree.j"), std::string("{\"k\": \"v\"}")});
+  EXPECT_EQ(root("parent.res.a").value(), "1");
+  EXPECT_EQ(root.findDescendant("parent.res.new"), nullptr);
+  EXPECT_EQ(root.findDescendant("parent.res.d"), nullptr);
+  EXPECT_EQ(root.findDescendant("parent.res.j"), nullptr);
+  EXPECT_EQ(root.findDescendant("mod.tree.a")->value(), "2"); // the hole's own child
+  // A read still sees the target.
+  EXPECT_EQ(std::get<std::string>(call("state-get", {std::string("tree.a")}).v), "1");
+  // The atomics refuse: their write would not land on the node a read sees.
+  EXPECT_ANY_THROW(call("state-incr", {std::string("tree.n")}));
+  EXPECT_ANY_THROW(call("state-cas", {std::string("tree.a"), std::string("1"), std::string("5")}));
+  EXPECT_ANY_THROW(call("state-swap", {std::string("tree.a"), std::string("5")}));
+  EXPECT_EQ(root("parent.res.a").value(), "1");
+  EXPECT_EQ(root.findDescendant("parent.res.n"), nullptr);
 }
 
 TEST_F(StateTreeIntrinsicsTest, StateDelete) {
@@ -267,6 +361,31 @@ TEST_F(StateTreeIntrinsicsTest, StateSetCoercesScalarsToString) {
   // a string is stored raw — NOT to_string's quoted form
   call("state-set", {std::string("c.str"), std::string("hi")});
   EXPECT_EQ(std::get<std::string>(call("state-get", {std::string("c.str")}).v), "hi");
+}
+
+TEST_F(StateTreeIntrinsicsTest, StateSetStoresAFloatInItsShortestRoundTripForm) {
+  // A float stores the shortest text that reads back as it, as state-incr's sums do, not six
+  // significant digits: a balance of 1234567.5 is "1234567.5", not "1.23457e+06".
+  const auto stored = [&](const char *name, double d) {
+    call(name, {std::string("f"), value_t{d}});
+    return std::get<std::string>(call("state-get", {std::string("f")}).v);
+  };
+  EXPECT_EQ(stored("state-set", 1234567.5), "1234567.5");
+  EXPECT_EQ(stored("state-set", 0.1), "0.1");
+  EXPECT_EQ(stored("state-set", 1e21), "1e+21");
+  EXPECT_EQ(stored("state-set", -2.5), "-2.5");
+  // Of the fixed and scientific texts the shorter is written, so 100000.0 is "1e+05" (six
+  // digits wrote "100000"), as state-incr writes it.
+  EXPECT_EQ(stored("state-set", 1e5), "1e+05");
+  // 0.1 + 0.2 is not 0.3: six digits stored "0.3", which reads back as a different number.
+  EXPECT_EQ(stored("state-set", 0.1 + 0.2), "0.30000000000000004");
+  for (const double d : {0.1 + 0.2, 1.0 / 3, 6.02214076e23, 5e-324, 123456789.123})
+    EXPECT_EQ(std::strtod(stored("state-set", d).c_str(), nullptr), d) << d;
+  // state-swap and state-cas store a float as state-set does.
+  EXPECT_EQ(stored("state-swap", 1234567.5), "1234567.5");
+  // str prints a float as state-set stores it, so (state-set k (str d)) stores the same text.
+  for (const double d : {1234567.5, 0.1 + 0.2, 2.0, 1e5, 1e21})
+    EXPECT_EQ(std::get<std::string>(call("str", {value_t{d}}).v), stored("state-set", d)) << d;
 }
 
 TEST_F(StateTreeIntrinsicsTest, StateDataGetNonexistent) {
@@ -1791,4 +1910,161 @@ TEST(ChannelScopeKey, HashChannelsAreRuntimeGlobalExempt) {
   // The runtime's own owner#tick / #key / #pointer channels contain '#' and are never scoped, so
   // the input/tick residents keep working unchanged under any prefix.
   EXPECT_EQ(resolve_channel_key("ui.docs.a", "ari#7:ui.docs.a#tick"), "ari#7:ui.docs.a#tick");
+}
+
+// ===========================================================================
+// SpawnContext — what a spawned child sees (td 4.15; locks plan L1b.1)
+// ===========================================================================
+
+// A host context chrooted at "doc" on a synchronous scheduler. Each test sets the context's fields
+// (its spawn_context among them), then run() registers the intrinsics and runs a parent and its
+// children to the end.
+class SpawnContext : public ::testing::Test {
+protected:
+  cvc::app app_ctx;
+  cvc::state &tree = cvc::state::instance(app_ctx);
+  scheduler sched;
+  memory_tracker tracker;
+  intrinsics_context ictx;
+  environment_ptr env;
+
+  void SetUp() override {
+    sched.set_watch_root(&tree);
+    ictx.sched = &sched;
+    ictx.tracker = &tracker;
+    ictx.proc = make_process();
+    ictx.uid = "parent";
+    apply_chroot(ictx, tree, "doc");
+  }
+
+  // The parent's pid; its result is its last child's pid.
+  int run(const std::string &script, execute_options opts = {}) {
+    env = builtins::make_default_environment();
+    register_intrinsics(env, &ictx);
+    opts.env = env;
+    const int pid = sched.execute(script, opts);
+    sched.run(std::nullopt, 10.0);
+    return pid;
+  }
+
+  int child_of(int parent) {
+    const std::optional<value_t> r = sched.get_result(parent);
+    EXPECT_TRUE(r.has_value()) << sched.get_exit_error(parent).value_or("no result");
+    const auto *pid = r ? std::get_if<int64_t>(&r->v) : nullptr;
+    EXPECT_NE(pid, nullptr);
+    return pid ? static_cast<int>(*pid) : -1;
+  }
+
+  // `inner`, noting each child context it makes.
+  std::function<spawn_setup(const intrinsics_context &)>
+  watching(std::function<spawn_setup(const intrinsics_context &)> inner,
+           std::vector<std::weak_ptr<void>> &made) {
+    return [inner = std::move(inner), &made](const intrinsics_context &parent) {
+      spawn_setup s = inner(parent);
+      made.push_back(s.context);
+      return s;
+    };
+  }
+};
+
+TEST_F(SpawnContext, NoCallbackKeepsTheBareEnv) {
+  const int child = child_of(run(R"S((spawn "(state-get \"x\")"))S"));
+  const std::string err = sched.get_exit_error(child).value_or("");
+  EXPECT_NE(err.find("NameError"), std::string::npos) << err;
+}
+
+TEST_F(SpawnContext, DefaultGivesIntrinsicsAndChroot) {
+  ictx.spawn_context = make_spawn_context();
+  const int child =
+      child_of(run(R"S((spawn "(begin (state-set \"x\" \"1\") (msg-send \"c\" \"hi\") 7)"))S"));
+  ASSERT_TRUE(sched.get_result(child).has_value()) << sched.get_exit_error(child).value_or("");
+  EXPECT_EQ(std::get<int64_t>(sched.get_result(child)->v), 7);
+  EXPECT_EQ(tree("doc.x").value(), "1");
+  EXPECT_EQ(tree.findDescendant("x"), nullptr);
+  // The parent's channel key: chroot-scoped, as the parent's own msg-recv would wait on.
+  EXPECT_EQ(sched.pending_message_count(resolve_channel_key("doc", "c")), 1u);
+}
+
+TEST_F(SpawnContext, ChildKeepsOwner) {
+  // On the async scheduler, whose kill_owner a host reaps a document with. No callback: the owner
+  // is the parent's either way.
+  async_scheduler async;
+  ictx.sched = &async;
+  env = builtins::make_default_environment();
+  register_intrinsics(env, &ictx);
+  execute_options opts;
+  opts.env = env;
+  opts.owner = "doc-1";
+  const int parent = async.execute(std::string(R"S((spawn "(while t (sleep 0))"))S"), opts);
+  for (int i = 0; i < 1000 && !is_finished(async.get_process_info(parent)->status); ++i) {
+    async.drain_ingress();
+    async.sync_step();
+  }
+  const std::optional<value_t> r = async.get_result(parent);
+  ASSERT_TRUE(r.has_value());
+  const int child = static_cast<int>(std::get<int64_t>(r->v));
+  ASSERT_FALSE(is_finished(async.get_process_info(child)->status));
+  EXPECT_GE(async.kill_owner("doc-1"), 1);
+  EXPECT_EQ(async.get_process_info(child)->status, process_status::killed);
+}
+
+TEST_F(SpawnContext, ContextLivesWithTheProcess) {
+  std::vector<std::weak_ptr<void>> made;
+  ictx.spawn_context = watching(make_spawn_context(), made);
+  const int child = child_of(run(R"S((spawn "(+ 1 2)"))S"));
+  ASSERT_EQ(made.size(), 1u);
+  ASSERT_TRUE(is_finished(sched.get_process_info(child)->status));
+  EXPECT_FALSE(made[0].expired()); // finished, not reaped: the process object keeps it
+  ASSERT_TRUE(sched.reap(child));
+  EXPECT_TRUE(made[0].expired());
+}
+
+TEST_F(SpawnContext, GrandchildrenGetOne) {
+  ictx.spawn_context = make_spawn_context();
+  run(R"S((spawn "(spawn \"(state-set \\\"g\\\" \\\"1\\\")\")"))S");
+  EXPECT_EQ(tree("doc.g").value(), "1");
+}
+
+TEST_F(SpawnContext, CopiesLockFields) {
+  ictx.lock_wait_allowed = false;
+  ictx.lock_default_timeout = 0.0;
+  ictx.cluster_id = "c1";
+  std::vector<std::weak_ptr<void>> made;
+  ictx.spawn_context = watching(make_spawn_context(), made);
+  const int child = child_of(run(R"S((spawn "(+ 1 2)"))S"));
+  ASSERT_EQ(made.size(), 1u);
+  const auto c = std::static_pointer_cast<intrinsics_context>(made[0].lock());
+  ASSERT_NE(c, nullptr);
+  EXPECT_FALSE(c->lock_wait_allowed);
+  ASSERT_TRUE(c->lock_default_timeout.has_value());
+  EXPECT_EQ(*c->lock_default_timeout, 0.0);
+  EXPECT_EQ(c->sched, &sched);
+  EXPECT_EQ(c->root, ictx.root);
+  EXPECT_EQ(c->root_path, "doc");
+  EXPECT_EQ(c->uid, "parent");
+  EXPECT_EQ(c->cluster_id, "c1");
+  EXPECT_TRUE(static_cast<bool>(c->spawn_context));
+  EXPECT_NE(c->proc, nullptr);
+  EXPECT_NE(c->proc, ictx.proc);
+  (void)child;
+}
+
+TEST_F(SpawnContext, AfterRegisterRuns) {
+  ictx.spawn_context =
+      make_spawn_context(nullptr, [](const environment_ptr &e, intrinsics_context &c) {
+        EXPECT_EQ(c.root_path, "doc");
+        builtins::register_fn(e, "host-thing",
+                              [](std::span<const value_t>) { return value_t(int64_t{5}); });
+        // After the intrinsics, so it overrides one.
+        builtins::register_fn(
+            e, "state-get", [](std::span<const value_t>) { return value_t(std::string("host")); });
+      });
+  const int child = child_of(run(R"S((spawn "(list (host-thing) (state-get \"x\"))"))S"));
+  const std::optional<value_t> r = sched.get_result(child);
+  ASSERT_TRUE(r.has_value()) << sched.get_exit_error(child).value_or("");
+  const auto *l = std::get_if<list_ptr>(&r->v);
+  ASSERT_NE(l, nullptr);
+  ASSERT_EQ((*l)->size(), 2u);
+  EXPECT_EQ(std::get<int64_t>((**l)[0].v), 5);
+  EXPECT_EQ(std::get<std::string>((**l)[1].v), "host");
 }

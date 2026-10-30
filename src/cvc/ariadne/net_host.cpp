@@ -1,6 +1,7 @@
 // Ariadne — a host turning the network on for its documents. See inc/cvc/ariadne/net_host.h.
 
 #include <atomic>
+#include <cstdlib>
 #include <cvc/ariadne/net_host.h>
 #include <cvc/ariadne/net_intrinsics.h>
 #include <cvc/ariadne/uri.h>
@@ -77,6 +78,23 @@ std::string enable_net(cvc::app &app, const NetHostConfig &config) {
     store->bind(name, origins);
   if (!store->load(&why))
     return "--credential-store: " + why;
+  std::vector<std::string> from_env;
+  for (const auto &[name, var] : config.credential_env) {
+    const std::string flag = "--credential-env " + name + "=" + var;
+#ifdef __EMSCRIPTEN__
+    return flag + ": a browser has no environment to read a token from";
+#else
+    if (!policy->credential_bindings().count(name))
+      return flag + ": bind " + name + " with a 'credential " + name +
+             " ORIGIN...' line in a --net-policy file";
+    const char *value = std::getenv(var.c_str());
+    if (!value || !*value)
+      continue; // nothing supplied: the document signs in its own way
+    if (!store->provide(name, value, &why))
+      return flag + ": " + var + " holds no usable token: " + why;
+    from_env.push_back(name);
+#endif
+  }
 
   auto live = std::make_shared<std::atomic<bool>>(true);
   NetHostStatus status;
@@ -84,6 +102,7 @@ std::string enable_net(cvc::app &app, const NetHostConfig &config) {
   status.auth = true;
   status.persist = store->persistent();
   status.credential_store = path;
+  status.env_credentials = std::move(from_env);
   for (const cvc::net::Origin &o : policy->allowed())
     status.allowed.push_back(o.str());
 

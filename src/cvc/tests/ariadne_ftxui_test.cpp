@@ -280,6 +280,63 @@ TEST(AriadneFtxui, ComboPopupPicksAnOption) {
   EXPECT_EQ(val(t.app, "mode"), "gamma");
 }
 
+// The cypkg tmux finding: a combo's on: never ran. Right picks the next option; the on: program
+// runs on drain, after the write.
+TEST(AriadneFtxui, ComboPickRunsItsOn) {
+  REQUIRE_FTXUI();
+  Widget c = combo("Mode", "mode", {"alpha", "beta", "gamma"});
+  c.on = "(state-set \"x\" \"1\")";
+  Term t(group({c}));
+  t.key("Tab");
+  t.key("Right");
+  EXPECT_EQ(val(t.app, "mode"), "beta");
+  t.rt.drain();
+  EXPECT_EQ(val(t.app, "x"), "1");
+}
+
+// A radio shows every option. Left / Right (and Space / Enter) pick, a click on an option picks
+// it, and each pick runs the on:.
+TEST(AriadneFtxui, RadioPicksByKeyAndByClick) {
+  REQUIRE_FTXUI();
+  Widget r = radio("Mode", "mode", {"alpha", "beta", "gamma"});
+  r.on = "(state-set \"x\" (state-get \"mode\"))";
+  Term t(group({r}));
+  EXPECT_TRUE(t.shows("Mode:")) << t.screen;
+  EXPECT_TRUE(t.shows("(*) alpha")) << t.screen;
+  EXPECT_TRUE(t.shows("( ) beta")) << t.screen;
+  int ax = 0, ay = 0, bx = 0, by = 0;
+  ASSERT_TRUE(find_cell(t.screen, "alpha", ax, ay));
+  ASSERT_TRUE(find_cell(t.screen, "beta", bx, by));
+  EXPECT_EQ(by, ay + 1) << "stacked\n" << t.screen;
+
+  t.key("Tab");
+  t.key("Right");
+  EXPECT_EQ(val(t.app, "mode"), "beta");
+  t.rt.drain();
+  EXPECT_EQ(val(t.app, "x"), "beta");
+  t.key("Left");
+  t.key("Left"); // wraps
+  EXPECT_EQ(val(t.app, "mode"), "gamma");
+  t.key("Space");
+  EXPECT_EQ(val(t.app, "mode"), "alpha");
+
+  t.draw();
+  ASSERT_TRUE(t.click("( ) gamma"));
+  EXPECT_EQ(val(t.app, "mode"), "gamma");
+  t.rt.drain();
+  EXPECT_EQ(val(t.app, "x"), "gamma");
+  ASSERT_TRUE(t.click("Mode:")); // the caption focuses, picks nothing
+  EXPECT_EQ(val(t.app, "mode"), "gamma");
+}
+
+TEST(AriadneFtxui, RadioRowPutsTheOptionsOnOneLine) {
+  REQUIRE_FTXUI();
+  Term t(group({radio("Mode", "mode", {"alpha", "beta"}, "beta", /*row*/ true)}));
+  EXPECT_TRUE(t.shows("Mode: ( ) alpha  (*) beta")) << t.screen;
+  ASSERT_TRUE(t.click("( ) alpha", 4));
+  EXPECT_EQ(val(t.app, "mode"), "alpha");
+}
+
 TEST(AriadneFtxui, ComboPopupByMouse) {
   REQUIRE_FTXUI();
   Term t(group({combo("Mode", "mode", {"alpha", "beta", "gamma"})}));
