@@ -256,6 +256,11 @@ slider's on every `changed` too, so whatever it drives follows the drag. A slide
 `commit: release` writes once, when the drag ends, for a key whose change is too costly to
 redo every frame (the forest controls' structural sliders, which regrow the whole forest).
 
+A `progress:` widget is read-only: a bar showing the number at `bind` placed in [`lo`, `hi`]
+(default 0..1; fe_controls uses `hi: 100` for `fe.progress`), with the text at `overlay` (a
+state path or a computed expression) drawn over it, else the percent. ImGui draws a progress bar;
+a backend with none gets a text value (`[########------------] 40%`).
+
 A backend advertises `Capabilities{windows, menubar, mouse, keyboard, color, glsl,
 view_embed, owns_loop, terminal, bitmap, kitty, sixel}`
 ([`backend.h`](../inc/cvc/ariadne/backend.h)). A document's `requires:` and `(has? ...)`
@@ -675,12 +680,25 @@ tetrahedra with `cvc::fem`. It has two views:
   dihedral angle in degrees, a hexahedron's scaled Jacobian). The child `<id>_edges` outlines
   each exposed face, and `<id>_ghost` draws the whole outer surface at `view.ghost` opacity.
 
+Loading, meshing and solving run as sliced tasks on the app's state_exec scheduler
+([`cvc/core/sliced_task.h`](../inc/cvc/core/sliced_task.h)): a few milliseconds a frame on the
+scheduler thread where there are no threads (single-threaded wasm), in chunks on the app's
+background pool where there are. Each stage steps (the SDF of an `sdf` source, a `volume`
+source's resample to `dim`, the LBIE meshing with its own resample to (2^n+1)^3, the boundary and
+the smooth surface the field shows on, the solve's assembly, factorization and solves; the
+elements view's cut-away and the field view's cut too), so the page stays live and `progress` /
+`phase` move while a job runs. Only reading a file, and a few whole-mesh passes (orienting the
+tetrahedra, their boundary, quality), are one step each. Something must pump the scheduler: every
+Ariadne Runtime does. `CVC_SLICED_THREADING=cooperative` in the environment runs every such task
+cooperatively on a native build, the way a single-threaded wasm page runs them.
+
 Keys under `<node>.fe.*`:
 
 | key | meaning | seeded from prop |
 |---|---|---|
 | `request` | `load`, `reload`, `mesh`, `solve`, `stop` (`stop` interrupts a heat solve; any other job runs to the end and the status says so); several separated by spaces run in order | `auto_mesh: true` seeds `mesh` |
 | `busy`, `status`, `progress` (0-100), `stats.vertices`, `field.min`, `field.max` | published | — |
+| `phase` | published while a job runs: its stage and percent (`x lines 40%`, `factoring 62%`), `""` when idle; fe_controls' progress bar shows it | — |
 | `stats.tets`, `stats.hexes` | published: the element count (the other is 0) | — |
 | `stats.quality_min`, `stats.quality_mean` | published: minimum dihedral angle (tetrahedra, degrees) or scaled Jacobian (hexahedra) | — |
 | `stats.work_ms` | published: the wall time of the last run of commands, from the first to idle | — |

@@ -322,6 +322,24 @@ geometry tet_isosurface(const geometry &tetmesh, const std::vector<double> &fiel
 // GPU clip planes are unavailable (WebGL).
 geometry slice_tets(const geometry &tetmesh, const geometry::vector_t &normal, double offset);
 
+// slice_tets in pieces, for a caller that must not block (fe_lab's cut, stepped on the scheduler):
+// the plane's field over the points is computed once, then piece(first, count) cuts tetrahedra
+// [first, first + count) only, carrying functions() and colors() as slice_tets does. The pieces
+// together are slice_tets' cut; each has its own copies of the vertices it shares with another.
+// Holds a copy of the positions and elements, not the mesh. Throws mesh_ops_error for a zero
+// normal, mesh_ops_unavailable without CVC_ENABLE_LIBIGL.
+class tet_slicer {
+public:
+  tet_slicer(const geometry &tetmesh, const geometry::vector_t &normal, double offset);
+  std::size_t size() const { return _tets.size() / 4; }
+  geometry piece(std::size_t first, std::size_t count) const;
+
+private:
+  std::vector<double> _positions, _field, _functions;
+  std::vector<int> _tets;
+  geometry::colors_t _colors;
+};
+
 // --------------------------------------------------------------------------
 // Scalar field -> colour (always available, with or without libigl)
 // --------------------------------------------------------------------------

@@ -1537,6 +1537,20 @@ void Runtime::Impl::emit_node(const Widget &w) {
     b.separator();
     break;
 
+  case Kind::Progress: {
+    // Read-only: the number (a state path or a computed expression) placed in [lo, hi].
+    const std::string v = is_expr(w.bind) ? eval_text(w.bind) : read_string(app, resolve(w.bind));
+
+    const double x = v.empty() ? w.lo : std::strtod(v.c_str(), nullptr);
+    const double span = w.hi - w.lo;
+    const double f = span > 0.0 && std::isfinite(x) ? (x - w.lo) / span : 0.0;
+    std::string overlay;
+    if (!w.overlay.empty())
+      overlay = is_expr(w.overlay) ? eval_text(w.overlay) : read_string(app, resolve(w.overlay));
+    b.progress_bar(label, static_cast<float>(f < 0.0 ? 0.0 : (f > 1.0 ? 1.0 : f)), overlay);
+    break;
+  }
+
   case Kind::Checkbox: {
     const std::string path = resolve(w.bind);
     const bool cur =

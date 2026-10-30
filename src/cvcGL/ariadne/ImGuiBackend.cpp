@@ -579,6 +579,22 @@ void ImGuiBackend::text_value_colored(const char *label, const std::string &valu
   ui::TextLineColored(line.c_str(), rgb[0], rgb[1], rgb[2]);
 }
 void ImGuiBackend::separator() { ui::Separator(); }
+void ImGuiBackend::progress_bar(const char *label, float fraction, const std::string &overlay) {
+#ifdef CVC_ENABLE_IMGUI
+  // The bar fills the line but leaves the label's width, as the sliders do; the label (up to any
+  // "##") follows it.
+  const char *end = label ? ImGui::FindRenderedTextEnd(label) : label;
+  const bool labelled = label && end != label;
+  const float width = labelled ? ImGui::CalcItemWidth() : -FLT_MIN;
+  ImGui::ProgressBar(fraction, ImVec2(width, 0.f), overlay.empty() ? nullptr : overlay.c_str());
+  if (labelled) {
+    ImGui::SameLine(0.f, ImGui::GetStyle().ItemInnerSpacing.x);
+    ImGui::TextUnformatted(label, end);
+  }
+#else
+  Backend::progress_bar(label, fraction, overlay);
+#endif
+}
 bool ImGuiBackend::button(const char *label) { return ui::Button(label); }
 bool ImGuiBackend::menu_item_action(const char *label) { return ui::MenuItemClicked(label); }
 // §4.6 widget on_click: was the last-submitted item clicked (left button, released over it)? Works

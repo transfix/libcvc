@@ -40,6 +40,7 @@
 #include <cvc/geometry/mesh_ops.h>
 #include <gtest/gtest.h>
 #include <map>
+#include <memory>
 #include <utility>
 #include <vector>
 
@@ -554,4 +555,122 @@ TEST(Fem, ArgumentChecks) {
   half.vertices = {0};
   half.values = {1.0};
   EXPECT_THROW(fem::solve_laplace(two, half), cvc::mesh_ops_error);
+}
+
+// --- stepped solves ------------------------------------------------------------------------------
+//
+// fem::stepped_solve gives the one-shot results (the same assembly, an LDL^T over the same AMD
+// ordering), however it is stepped, with a monotone progress.
+
+namespace {
+
+// Step `s` to the end in `budget` units; the number of steps it took.
+int run_out(fem::stepped_solve &s, std::size_t budget) {
+  int steps = 0;
+  double last = 0.0;
+  while (!s.step(budget)) {
+    ++steps;
+    EXPECT_GE(s.progress(), last) << s.phase();
+    last = s.progress();
+  }
+  EXPECT_EQ(s.progress(), 1.0);
+  EXPECT_STREQ(s.phase(), "done");
+  return steps;
+}
+
+double max_rel_diff(const std::vector<double> &a, const std::vector<double> &b) {
+  double scale = 1e-300, d = 0.0;
+  for (std::size_t i = 0; i < a.size() && i < b.size(); ++i) {
+    scale = std::max(scale, std::abs(b[i]));
+    d = std::max(d, std::abs(a[i] - b[i]));
+  }
+  return a.size() == b.size() ? d / scale : HUGE_VAL;
+}
+
+} // namespace
+
+TEST(Fem, SteppedPoissonMatchesTheOneShotSolve) {
+  auto cube = std::make_shared<geometry>(cube_tets(5));
+  for (std::size_t i = 0; i < cube->num_tets(); i += 3)
+    std::swap(cube->tets()[i][0], cube->tets()[i][1]); // orientation must not matter
+  const fem::dirichlet bc = boundary_condition(*cube, smooth_field);
+  std::vector<double> f;
+  for (const auto &p : cube->const_points())
+    f.push_back(smooth_field(p));
+  const std::vector<double> ref = fem::solve_poisson(*cube, f, bc);
+  for (const std::size_t budget : {std::size_t(0), std::size_t(7), std::size_t(500)}) {
+    auto s = fem::stepped_solve::poisson(cube, f, bc);
+    const int steps = run_out(*s, budget);
+    if (budget == 7)
+      EXPECT_GT(steps, 200) << "a small budget takes many steps";
+    EXPECT_LT(max_rel_diff(s->field(), ref), 1e-10) << "budget " << budget;
+  }
+  auto constant = fem::stepped_solve::poisson(cube, {-6.0}, boundary_condition(*cube, quadratic));
+  run_out(*constant, 64);
+  EXPECT_LT(max_rel_diff(constant->field(),
+                         fem::solve_poisson(*cube, {-6.0}, boundary_condition(*cube, quadratic))),
+            1e-10)
+      << "a single source value";
+}
+
+TEST(Fem, SteppedHeatMatchesTheOneShotSolveAndStops) {
+  auto cube = std::make_shared<geometry>(cube_tets(4));
+  std::vector<double> u0;
+  for (const auto &p : cube->const_points())
+    u0.push_back(quadratic(p));
+  fem::heat_params p;
+  p.dt = 0.01;
+  p.steps = 12;
+  const fem::dirichlet bc = boundary_condition(*cube, linear);
+  const std::vector<double> ref = fem::solve_heat(*cube, u0, p, bc);
+  auto s = fem::stepped_solve::heat(cube, u0, p, bc);
+  run_out(*s, 40);
+  EXPECT_EQ(s->steps_done(), 12);
+  EXPECT_LT(max_rel_diff(s->field(), ref), 1e-10);
+
+  // stop() ends it after the step in progress: the one-shot solve stopped at that step agrees.
+  auto t = fem::stepped_solve::heat(cube, u0, p, bc);
+  while (!t->step(40))
+    if (t->steps_done() >= 3)
+      t->stop();
+  const int at = t->steps_done();
+  EXPECT_GE(at, 3);
+  EXPECT_LT(at, 12);
+  const std::vector<double> stopped =
+      fem::solve_heat(*cube, u0, p, bc, fem::domain::AUTO,
+                      [at](int step, const std::vector<double> &) { return step < at; });
+  EXPECT_LT(max_rel_diff(t->field(), stopped), 1e-10);
+}
+
+TEST(Fem, SteppedModesMatchTheOneShotSolve) {
+  // 162 vertices: the dense path; 2562: the subspace iteration.
+  for (int levels : {2, 4}) {
+    auto s = std::make_shared<geometry>(icosphere(levels, 1.5));
+    const fem::eigen_result ref = fem::laplacian_eigenmodes(*s, 5);
+    auto m = fem::stepped_solve::modes(s, 5);
+    run_out(*m, 2000);
+    const fem::eigen_result got = m->take_modes();
+    ASSERT_EQ(got.values.size(), ref.values.size()) << levels;
+    ASSERT_EQ(got.vectors.size(), ref.vectors.size()) << levels;
+    EXPECT_LT(max_rel_diff(got.values, ref.values), 1e-9) << levels;
+    // The zero mode is the constant; the others are each fixed up to sign the same way, but a
+    // repeated eigenvalue's vectors are only defined up to a rotation within its space.
+    EXPECT_LT(max_rel_diff(got.vectors[0], ref.vectors[0]), 1e-6) << levels;
+  }
+}
+
+TEST(Fem, SteppedSolvesThrowWhereTheOneShotSolvesDo) {
+  auto cube = std::make_shared<geometry>(cube_tets(2));
+  EXPECT_THROW(fem::stepped_solve::poisson(cube, {1.0}, fem::dirichlet()), cvc::mesh_ops_error);
+  geometry two = cube_tets(2);
+  geometry other = cube_tets(2, 1.0, {{5.0, 0.0, 0.0}});
+  append(two, other);
+  auto pair = std::make_shared<geometry>(two);
+  fem::dirichlet half;
+  half.vertices = {0};
+  half.values = {1.0};
+  auto s = fem::stepped_solve::poisson(pair, {0.0}, half);
+  EXPECT_THROW(run_out(*s, 100), cvc::mesh_ops_error) << "an unanchored part";
+  EXPECT_THROW(s->step(100), cvc::mesh_ops_error) << "and again on every later step";
+  EXPECT_TRUE(s->done());
 }

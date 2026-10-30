@@ -53,6 +53,8 @@
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/mesh_ops.h>
 #include <functional>
+#include <memory>
+#include <string>
 #include <vector>
 
 namespace cvc {
@@ -136,6 +138,57 @@ struct eigen_result {
   std::vector<std::vector<double>> vectors;
 };
 eigen_result laplacian_eigenmodes(const geometry &mesh, int k, domain d = domain::AUTO);
+
+// --- solves a slice at a time -------------------------------------------------------------------
+//
+// solve_poisson, solve_heat and laplacian_eigenmodes as resumable jobs, for a caller that must not
+// block: fe_lab steps one on the app's scheduler (cvc/core/sliced_task.h), a few milliseconds a
+// frame where there are no threads. Every phase is a loop that stops at its budget: selecting the
+// elements, assembling K and M (in chunks of elements, with the same libigl formulas), building the
+// sparse matrix, eliminating the Dirichlet vertices, the factorization (a sparse LDL^T over the AMD
+// ordering Eigen's SimplicialLDLT uses, a column at a time; the ordering itself is one step of a
+// few milliseconds) and each solve. So the results agree with the one-shot functions to rounding.
+//
+// step(budget) does about `budget` units (each about a multiply-add or an element's assembly, at
+// most ~1 us) and returns true once done; budget 0 runs to the end. It throws mesh_ops_error where
+// the one-shot function would (bad input, a singular system, an eigensolve that does not
+// converge); after a throw every later step rethrows it. phase() names the work next: "preparing",
+// "assembling", "building", "constraining", "ordering", "factoring", "solving", "stepping" (heat)
+// or "iterating" (modes), then "done". The mesh is shared, so the job may outlive its caller's.
+class stepped_solve {
+public:
+  // solve_poisson: f is per vertex or a single value.
+  static std::unique_ptr<stepped_solve> poisson(std::shared_ptr<const geometry> mesh,
+                                                std::vector<double> f, dirichlet bc,
+                                                domain d = domain::AUTO);
+  // solve_heat. The field after each step is field(); stop() ends it after the current step.
+  static std::unique_ptr<stepped_solve> heat(std::shared_ptr<const geometry> mesh,
+                                             std::vector<double> u0, heat_params p, dirichlet bc,
+                                             domain d = domain::AUTO);
+  // laplacian_eigenmodes.
+  static std::unique_ptr<stepped_solve> modes(std::shared_ptr<const geometry> mesh, int k,
+                                              domain d = domain::AUTO);
+
+  ~stepped_solve();
+  stepped_solve(const stepped_solve &) = delete;
+  stepped_solve &operator=(const stepped_solve &) = delete;
+
+  bool step(std::size_t budget);
+  bool done() const;
+  double progress() const; // in [0,1], monotone; 1 once done
+  const char *phase() const;
+  void stop();            // heat: end after the current step (its field is the result)
+  int steps_done() const; // heat: backward-Euler steps taken
+  // The result once done: the solution, or heat's field after its last step (also while it runs,
+  // after each step). modes: the eigenpairs.
+  const std::vector<double> &field() const;
+  eigen_result take_modes();
+
+private:
+  stepped_solve();
+  struct impl;
+  std::unique_ptr<impl> _impl;
+};
 
 } // namespace fem
 } // namespace cvc

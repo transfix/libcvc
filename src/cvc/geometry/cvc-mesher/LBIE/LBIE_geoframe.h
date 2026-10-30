@@ -2626,6 +2626,9 @@ public:
 	void calculatenormals();
 	void calculateTriangleNormal(float* norm, unsigned int c);
 	void calculateExtents();
+	// calculateExtents() over vertices [from, to): the call from 0 starts it, the one that reaches
+	// numverts finishes it.
+	void calculateExtents(int from, int to);
 
 	void calculateAspectRatio();
 

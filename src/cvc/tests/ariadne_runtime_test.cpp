@@ -292,6 +292,25 @@ TEST(AriadneRuntime, EmitsWindowAndWidgetsInOrder) {
   EXPECT_TRUE(mb.saw("end_frame"));
 }
 
+// progress: the bound number over [lo, hi], clamped, with the overlay's text; a backend with no
+// bar of its own (the mock) gets the default text bar.
+TEST(AriadneRuntime, ProgressDrawsTheBoundFraction) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  cvc::state::instance(app)("job.progress").value("40");
+  cvc::state::instance(app)("job.phase").value("factoring 40%");
+  cvc::state::instance(app)("job.over").value("250");
+  rt.set_root(group({window("W", {progress("Work", "job.progress", 0.0, 100.0, "job.phase"),
+                                  progress("Plain", "job.progress", 0.0, 100.0),
+                                  progress("Over", "job.over", 0.0, 100.0)})}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("text_value:Work=[########------------] factoring 40%"));
+  EXPECT_TRUE(mb.saw("text_value:Plain=[########------------] 40%"));
+  EXPECT_TRUE(mb.saw("text_value:Over=[####################] 100%")) << "clamped to hi";
+}
+
 TEST(AriadneRuntime, ColoredTextEmitsTintedLeaf) {
   cvc::app app;
   Runtime rt(app, "");

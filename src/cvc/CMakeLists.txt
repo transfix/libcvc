@@ -131,6 +131,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/core/app.h
   ../../inc/cvc/core/async_task.h
   ../../inc/cvc/core/async_lane.h
+  ../../inc/cvc/core/sliced_task.h
   ../../inc/cvc/core/process.h
   ../../inc/cvc/core/text.h
   ../../inc/cvc/core/thread_pool.h
@@ -142,6 +143,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/volume/contour_mesh.h
   ../../inc/cvc/volume/contour_tree.h
   ../../inc/cvc/volume/contour_spectrum.h
+  ../../inc/cvc/volume/resize_stepper.h
   ../../inc/cvc/tf/model.h
   ../../inc/cvc/tf/vinay.h
   ../../inc/cvc/tf/overlays.h
@@ -223,6 +225,7 @@ set(SOURCE_FILES
   core/app.cpp
   core/async_task.cpp
   core/async_lane.cpp
+  core/sliced_task.cpp
   core/process.cpp
   core/text.cpp
   core/thread_pool.cpp
@@ -235,6 +238,7 @@ set(SOURCE_FILES
   geometry/simplify.cpp
   geometry/mesh_ops.cpp
   geometry/fem.cpp
+  geometry/sliced_ldlt.cpp
   geometry/geometry_file_io.cpp
   image/image.cpp
   image/magick_io.cpp
@@ -349,6 +353,7 @@ set(SOURCE_FILES
   volume/volume_ops.cpp
   volume/contour_tree.cpp
   volume/contour_spectrum.cpp
+  volume/resize_stepper.cpp
   volume/mesh_contour_tree.cpp
   tf/model.cpp
   tf/vinay.cpp
