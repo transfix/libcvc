@@ -52,6 +52,7 @@ struct HostOptions {
   double timeout = 0;                    // --timeout SECONDS (ari test); 0 = the default
   bool ansi = false;
   std::string png;
+  std::string log;      // --log FILE: the run's warnings, appended as they happen (host_warnings.h)
   std::string graphics; // empty = auto (FtxuiBackend::Options::ImageColor)
   std::vector<std::pair<std::string, std::string>> images; // --image NAME=FILE, in order
   int cell_w = 0, cell_h = 0;                              // --cell-size; 0 = ask the terminal

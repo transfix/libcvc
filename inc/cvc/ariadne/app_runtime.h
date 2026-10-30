@@ -167,6 +167,11 @@ public:
 
   // --- diagnostics / capabilities ---
   std::vector<std::string> take_warnings(); // reactive read-lane diagnostics since the last call
+  // Hear each runtime warning as it is produced, while the document runs: a program that failed,
+  // a resident (on_tick:, on_key: ...) stopped or given up, a broken expression. drain() calls
+  // `listener` once per new warning, on the drain's thread; take_warnings() still returns every
+  // one, so a host can both report them live and summarize them at exit. Null stops it.
+  void set_warning_listener(std::function<void(const std::string &)> listener);
   bool reload_if_changed();                 // §12.5 hot reload if a watched source changed
   static bool have_yaml();                  // can load a YAML .ari?
 
@@ -194,6 +199,8 @@ private:
   };
   std::shared_ptr<Verbs> verbs_;
   std::vector<std::string> pendingWarnings_; // read-lane diagnostics drain() collected
+  std::function<void(const std::string &)> warningListener_; // set_warning_listener
+  void collect_warnings(); // the Runtime's new warnings -> pendingWarnings_, each to the listener
   std::vector<Widget> hostMenus_;            // set_host_menus: put in every mounted tree
   std::vector<KeyBinding> hostKeys_;         // set_host_keys: bound, and listed, in every one
   bool keysWindow_ = false;                  // set_host_keys was called: always a Keys window

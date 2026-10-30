@@ -71,6 +71,7 @@
 #include <cvc/ariadne/host_cli.h>
 #include <cvc/ariadne/host_info.h>
 #include <cvc/ariadne/host_signals.h>
+#include <cvc/ariadne/host_warnings.h>
 #include <cvc/ariadne/loader.h> // run_init — seed conf.room / conf.self before the first tick
 #include <cvc/ariadne/stream/stream_view.h>
 #include <cvc/ariadne/tvision_backend.h>
@@ -1688,6 +1689,15 @@ int run_window(const ari::HostOptions &o) {
     return rt.app_runtime().exit_code();
   }
 
+  // The frame loop prints each warning as it comes (print_warnings below); they also go to
+  // --log FILE and to the browser page (host_warnings.h).
+  ari::LiveWarnings live("arigl", o.log, /*stderr_when_not_a_terminal=*/false);
+  if (!live.error().empty()) {
+    std::fprintf(stderr, "arigl: %s\n", live.error().c_str());
+    return 2;
+  }
+  rt.app_runtime().set_warning_listener([&live](const std::string &w) { live(w); });
+
   // Input the VTK interactor does not carry: touch navigation, SDL's keys and pointer (the
   // documents' on_key / on_pointer), and the OS signals trapped below. Fed before the drain, so
   // the document sees them this frame.
@@ -1882,6 +1892,14 @@ int run_terminal(const ari::HostOptions &o) {
     return rt.exit_code();
   }
 
+  // Warnings as they happen, as ari's (host_warnings.h): the screen's bottom line, --log FILE, and
+  // stderr when it is not the terminal.
+  ari::LiveWarnings live("arigl", o.log, /*stderr_when_not_a_terminal=*/true);
+  if (!live.error().empty()) {
+    std::fprintf(stderr, "arigl: %s\n", live.error().c_str());
+    return 2;
+  }
+  rt.set_warning_listener([&live](const std::string &w) { live(w); });
   ari::FtxuiBackend::RunOptions run;
   if (o.fps > 0)
     run.fps = o.fps;
@@ -1890,12 +1908,13 @@ int run_terminal(const ari::HostOptions &o) {
   run.on_stop = ari::restore_signal_traps;
   run.take_signal = ari::take_trapped_signal;
   run.background_input = [&](const ari::TermEvent &e) { return scene.handle_input(e); };
+  run.notice = [&live] { return live.notice(); }; // the latest warning, for a few seconds
   ari::FtxuiBackend::RunExit how;
   if (tvision)
     how = static_cast<ari::TvisionBackend &>(*backend).run(rt, run);
   else
     how = backend->run(rt, run);
-  print_warnings(rt.take_warnings());
+  live.summarize(rt.take_warnings());
   if (how.from_os) // an OS signal the document didn't handle: report it the way a shell expects
     return 128 + ari::signal_number(how.signal);
   return rt.exit_code();

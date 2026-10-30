@@ -22,14 +22,23 @@ namespace {
 
 namespace po = boost::program_options;
 
-constexpr const char *kValueFlags[] = {"--prefix",         "--component-path",
-                                       "--backend",        "--fps",
-                                       "--width",          "--height",
-                                       "--frames",         "--png",
-                                       "--graphics",       "--image",
-                                       "--cell-size",      "--net-allow",
-                                       "--net-policy",     "--credential-store",
-                                       "--credential-env", "--timeout"};
+constexpr const char *kValueFlags[] = {"--prefix",
+                                       "--component-path",
+                                       "--backend",
+                                       "--fps",
+                                       "--width",
+                                       "--height",
+                                       "--frames",
+                                       "--png",
+                                       "--graphics",
+                                       "--image",
+                                       "--cell-size",
+                                       "--net-allow",
+                                       "--net-policy",
+                                       "--credential-store",
+                                       "--credential-env",
+                                       "--timeout",
+                                       "--log"};
 constexpr const char *kBoolFlags[] = {"--no-mouse", "--ansi", "--net"};
 
 bool is_general_flag(const std::string &a) {
@@ -119,6 +128,8 @@ bool apply(const po::option &opt, HostOptions &o) {
     o.backend = value;
   } else if (a == "--png") {
     o.png = value;
+  } else if (a == "--log") {
+    o.log = value;
   } else if (a == "--graphics") {
     if (value != "auto" && value != "kitty" && value != "sixel" && value != "iterm" &&
         value != "color" && value != "mono") {
@@ -252,6 +263,8 @@ std::string host_flags_help() {
          "  --timeout S            test: fail a document still running after S seconds\n"
          "  --ansi                 snapshot: keep colour escapes\n"
          "  --png FILE             snapshot: also write a PNG\n"
+         "  --log FILE             run: append each warning to FILE as it happens (or set\n"
+         "                         ARIADNE_LOG=FILE)\n"
          "  --graphics MODE        images in a terminal: auto, kitty, sixel, iterm, color or mono\n"
          "  --image NAME=FILE      publish FILE's picture as NAME, for image: widgets\n"
          "  --cell-size WxH        snapshot: a terminal cell's size in pixels\n"

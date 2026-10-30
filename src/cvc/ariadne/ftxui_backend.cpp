@@ -2854,7 +2854,13 @@ FtxuiBackend::run_loop(Runtime &rt, const RunOptions &opts, const std::function<
     m.shown = m.last; // FTXUI lays this frame out next, which fills the boxes
     m.gfx_shown = m.gfx_last;
     m.drew = true;
-    return m.root;
+    const std::string notice = opts.notice ? opts.notice() : std::string();
+    if (notice.empty())
+      return m.root;
+    // Wrapped, so a narrow terminal still shows what failed.
+    fx::Element bar = fx::paragraph(notice) | fx::bold | fx::color(fx::Color::Black) |
+                      fx::bgcolor(fx::Color::Yellow);
+    return fx::dbox({m.root, fx::vbox({fx::filler(), std::move(bar)})});
   });
   fx::Component app = fx::CatchEvent(renderer, [&](fx::Event e) {
     if (e == fx::Event::CtrlC || e.input() == "\x1c") {

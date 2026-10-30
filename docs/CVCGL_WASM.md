@@ -520,9 +520,11 @@ untrusted files from it (user uploads, say) should pin the document with
 **Errors.** A failed load replaces the loading screen with an error page: one line on what
 went wrong, then everything arigl printed (`arigl: could not fetch .../main.ari: HTTP 404`,
 `... not this page's origin ...`, a YAML error, an unknown host flag). A document that quits
-shows that it has ended. The page reads `Module.ariadneRunning()` and `Module.ariadneExit(status)`,
-which arigl calls, and keeps its state in `window.ariadneWeb` (`state` is `loading`,
-`running`, `ended` or `failed`, and `log` holds arigl's output) for tests and the console.
+shows that it has ended. A warning while the document runs (a program that failed, an
+`on_tick:` that stopped) shows in the canvas's corner for 8 s (ARIADNE.md §2.4). The page reads
+`Module.ariadneRunning()`, `Module.ariadneWarning(text)` and `Module.ariadneExit(status)`, which
+arigl calls, and keeps its state in `window.ariadneWeb` (`state` is `loading`, `running`, `ended`
+or `failed`, `log` holds arigl's output, and `warnings` the warnings) for tests and the console.
 
 **Content-Security-Policy.** Nothing in the page is inline, and nothing in the module
 evals: cvcGL's touch probe used `emscripten_run_script_int` and is now an `EM_JS`. The
