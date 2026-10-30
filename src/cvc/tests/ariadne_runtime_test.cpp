@@ -2556,6 +2556,75 @@ TEST(AriadneRuntime, ComboValueMappingReadsAndWrites) {
   EXPECT_EQ(cvc::state::instance(app)("ss").value(), "2"); // stored the value, not "2x"
 }
 
+// A combo's `on:` runs after a pick's write, off the walk like a Button's — a program on: through
+// state_exec at drain. Before, the combo wrote its key and dropped the on:.
+TEST(AriadneRuntime, ComboPickFiresOnAfterTheWrite) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  Widget c = combo("Mode", "mode", {"a", "b"});
+  c.on = "(state-set \"x\" (state-get \"mode\"))"; // sees the value just written
+  rt.set_root(group({c}));
+  rt.render();
+  rt.drain();
+  EXPECT_FALSE(cvc::state::instance(app)("x").initialized()) << "no pick, no fire";
+  mb.combo_ret = IndexEdit{/*changed*/ true, /*committed*/ true, /*index*/ 1};
+  rt.render();
+  EXPECT_EQ(cvc::state::instance(app)("mode").value(), "b");
+  EXPECT_FALSE(cvc::state::instance(app)("x").initialized()) << "queued, not run in the walk";
+  rt.drain();
+  EXPECT_EQ(cvc::state::instance(app)("x").value(), "b");
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+}
+
+// The other bound widgets fire their `on:` on the commit edge too: a checkbox / colour / bound
+// menu_item on each committed write; a slider once per commit (drag end, key step), not on every
+// live frame of a drag, though it writes on each of those.
+TEST(AriadneRuntime, BoundWidgetsFireOnOnCommit) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  std::map<std::string, int> fired;
+  for (const char *ev : {"cb", "si", "sf", "col", "mt"})
+    rt.on(ev, [&fired, ev] { ++fired[ev]; });
+  Widget cb = checkbox("Wire", "wire");
+  cb.on = "cb";
+  Widget si = slider_int("N", "n", 0, 10, 3);
+  si.on = "si";
+  Widget sf = slider_float("Speed", "speed", 0.0, 2.0, 1.0);
+  sf.on = "sf";
+  Widget col = color_widget("Tint", "tint");
+  col.on = "col";
+  Widget mt = menu_toggle("Grid", "grid");
+  mt.on = "mt";
+  rt.set_root(group({group({menubar({menu("View", {mt})})}), cb, si, sf, col}));
+
+  // A live drag frame: the sliders write but do not fire.
+  mb.slider_int_ret = IntEdit{/*changed*/ true, /*committed*/ false, 7};
+  mb.slider_double_ret["speed"] = DoubleEdit{true, false, 1.5};
+  rt.render();
+  rt.drain();
+  EXPECT_EQ(cvc::state::instance(app)("n").value(), "7");
+  EXPECT_TRUE(fired.empty());
+
+  // The commit edge: each widget writes, then its on: runs at drain.
+  mb.checkbox_ret = BoolEdit{true, true, true};
+  mb.slider_int_ret = IntEdit{true, true, 8};
+  mb.slider_double_ret["speed"] = DoubleEdit{true, true, 1.75};
+  mb.color_ret = ColorEdit{/*drawn*/ true, true, true, {1, 0, 0}};
+  mb.click_toggle = "Grid";
+  rt.render();
+  EXPECT_TRUE(fired.empty()) << "queued, not run in the walk";
+  rt.drain();
+  for (const char *ev : {"cb", "si", "sf", "col", "mt"})
+    EXPECT_EQ(fired[ev], 1) << ev;
+  EXPECT_EQ(cvc::state::instance(app)("wire").value(), "1");
+  EXPECT_EQ(cvc::state::instance(app)("n").value(), "8");
+  EXPECT_EQ(cvc::state::instance(app)("grid").value(), "1");
+}
+
 // §G7: a color widget reads its "r,g,b" key into the backend's picker and writes the edited colour
 // back as "r,g,b" on commit. A backend with no colour widget (drawn:false) falls back to text.
 TEST(AriadneRuntime, ColorWidgetReadsAndWritesCsv) {

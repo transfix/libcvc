@@ -133,7 +133,10 @@ struct Widget {
   std::string id;    // stable widget id suffix; defaults to `label`
   std::string label; // display text / window title / menu name
   std::string bind;  // cvc::state path for bound widgets
-  std::string on;    // event name for action widgets (Button / MenuItemAction)
+  // The event (a name or a '(' program) an action widget (Button / MenuItemAction) raises; on a
+  // bound widget (checkbox, sliders, combo, input_text/int, color, tf_editor, a bound menu_item),
+  // raised after each committed write, so the handler sees the new value in state.
+  std::string on;
   // §4.6 widget-level pointer handlers: each a two-shape value (an event name OR a program starting
   // with '(') fired for THIS widget — enqueued in the walk when the backend reports the matching
   // per-item pointer state, like Button's `on`. Any widget kind may carry any of them.
