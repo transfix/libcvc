@@ -4936,6 +4936,19 @@ TEST(AriadneComponents, ShippedExamplesDeclareWhatTheyNeed) {
       ASSERT_NE(it, r.requirements.end()) << name << " has a scene: but does not require gl.scene";
       EXPECT_FALSE(it->optional) << name << " lists gl.scene as optional";
     }
+    // A shader: block runs only where the scene runs the document's GLSL; the example says
+    // whether it can do without (optional) or not.
+    const std::function<bool(const std::vector<SceneNode> &)> shaded =
+        [&](const std::vector<SceneNode> &nodes) {
+          return std::any_of(nodes.begin(), nodes.end(), [&](const SceneNode &n) {
+            return n.shader.present || shaded(n.children);
+          });
+        };
+    if (shaded(r.scene.nodes))
+      EXPECT_TRUE(
+          std::any_of(r.requirements.begin(), r.requirements.end(),
+                      [](const HostRequirement &q) { return q.name == "gl.scene.shaders"; }))
+          << name << " has a shader: block but does not list gl.scene.shaders";
   }
   EXPECT_GE(seen, 18); // the examples under examples/ariadne
 }

@@ -931,10 +931,18 @@ quoted data and names the program binds itself. It cannot see a name built at ru
 handed to `apply`, so it only warns; `requires:` is the authoritative list, and a name
 listed there is not warned about again. `ari check doc.ari` shows both.
 
+A `shader:` block is an implicit `gl.scene.shaders` the same way. When the host has a scene
+but its renderer does not run the document's GLSL, the load warns once, naming the shaded
+nodes; they draw unshaded. Listing `gl.scene.shaders` makes that an error, or (optional)
+one "optional requirement" warning instead. A host with no scene at all already warns that
+the scene is ignored, so it adds nothing. (`shader_canvas` would be an implicit
+`gl.ui.shaders`, once that widget exists.)
+
 Every document under `examples/ariadne/` declares a `requires:` block, and
 `AriadneComponents.ShippedExamplesDeclareWhatTheyNeed` keeps it so. A document with a
 `scene:` lists `gl.scene`, so `ari` refuses it with one error where it used to drop the scene
-with a warning. Write `requires:` the same way in a new example: list what the document cannot
+with a warning. One with a `shader:` block also lists `gl.scene.shaders` (`lsystem_forest.ari`,
+as optional: its bump and bark presets are detail). Write `requires:` the same way in a new example: list what the document cannot
 work without, and mark the rest `optional: true` (as `terminal_images.ari` does for
 `raster.bitmap`, since half-block cells still show the picture).
 

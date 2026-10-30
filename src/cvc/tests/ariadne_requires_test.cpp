@@ -259,9 +259,11 @@ TEST(AriadneRequires, AnOptionalRequirementOnlyWarns) {
   EXPECT_TRUE(any_contains(warns, "optional requirement gl.shaders")) << warns.size();
 }
 
-// A scene adapter that realizes nothing and says its renderer runs shaders, as cvcGL's do.
+// A scene adapter that realizes nothing and says its renderer runs shaders, as cvcGL's do (or,
+// with shaders = false, that it does not, as an adapter that leaves runs_shaders alone).
 struct ShaderSceneAdapter : SceneAdapter {
-  bool runs_shaders() const override { return true; }
+  bool shaders = true;
+  bool runs_shaders() const override { return shaders; }
   void realize(const Scene &, const std::string &, std::vector<std::string> *) override {}
   void sync_visibility(cvc::app &) override {}
   void tick() override {}
@@ -294,6 +296,52 @@ TEST(AriadneRequires, ATerminalHostWithAGlSceneRunsSceneShadersOnly) {
       EXPECT_NE(std::string(e.what()).find(token), std::string::npos) << e.what();
     }
   }
+}
+
+// A shader: block is an implicit gl.scene.shaders: a scene that does not run the document's GLSL
+// warns at load, naming the nodes, unless the document listed the token itself.
+TEST(AriadneRequires, AShaderBlockOnASceneWithoutShadersWarns) {
+  REQUIRE_YAML();
+  const std::string scene = "scene:\n"
+                            "  nodes:\n"
+                            "    - node: ground\n"
+                            "      type: geometry\n"
+                            "      source: { plane: { size: 10 } }\n"
+                            "      shader: terrain_bump\n"
+                            "      children:\n"
+                            "        - node: bark\n"
+                            "          type: geometry\n"
+                            "          source: { plane: { size: 3 } }\n"
+                            "          shader: { preset: bark }\n"
+                            "    - node: plain\n"
+                            "      type: geometry\n"
+                            "      source: { plane: { size: 3 } }\n";
+  const char *warning = "does not run the document's GLSL";
+  cvc::app app;
+  ShaderSceneAdapter plain;
+  plain.shaders = false;
+  AppRuntime art(app, "ui.req", &plain);
+  std::vector<std::string> warns = art.load(write_doc("shaded", scene).string());
+  EXPECT_TRUE(any_contains(warns, "scene nodes 'ground', 'bark' have shader: blocks"))
+      << (warns.empty() ? "" : warns[0]);
+  EXPECT_FALSE(any_contains(warns, "'plain'"));
+
+  // Listed as optional, the requires: warning says it once; listed as required, the load fails.
+  warns = art.load(
+      write_doc("shaded_opt", "requires: [{name: gl.scene.shaders, optional: true}]\n" + scene)
+          .string());
+  EXPECT_FALSE(any_contains(warns, warning));
+  EXPECT_TRUE(any_contains(warns, "optional requirement gl.scene.shaders"));
+  EXPECT_THROW(art.load(write_doc("shaded_req", "requires: [gl.scene.shaders]\n" + scene).string()),
+               std::runtime_error);
+
+  // A scene that runs shaders, and a host with no scene at all (load says the scene is ignored),
+  // have nothing to add.
+  ShaderSceneAdapter gl;
+  AppRuntime art_gl(app, "ui.req2", &gl);
+  EXPECT_FALSE(any_contains(art_gl.load(write_doc("shaded_gl", scene).string()), warning));
+  AppRuntime art_none(app, "ui.req3");
+  EXPECT_FALSE(any_contains(art_none.load(write_doc("shaded_none", scene).string()), warning));
 }
 
 TEST(AriadneRequires, ACallTheHostLacksWarnsAtLoad) {
