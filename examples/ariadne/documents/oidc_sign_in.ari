@@ -1,0 +1,114 @@
+# oidc_sign_in.ari — sign in to any OpenID Connect provider and show who you are
+# (docs/ARIADNE.md §10.4).
+#
+# The host runs the whole sign-in and keeps every token. This document only names the provider and
+# its public client, says which credential to keep the sign-in under (me), and shows the progress
+# and the signed-in user's non-secret claims that the host writes under oidc.me. A request then
+# sends the access token with (dict "auth" "me"), as the Call API button does.
+#
+#   ari run --oidc-issuer https://id.example/realms/demo oidc_sign_in.ari \
+#       --issuer https://id.example/realms/demo --client my-public-client
+#   ari run --backend tvision ...       # the same, on the tvision desktop
+#   arigl run ...                       # in a window
+#   ari run --credential-store demo ... # keep the sign-in across runs
+#
+# With a desktop it opens the system browser and takes the redirect back on 127.0.0.1 (register
+# http://127.0.0.1/callback, any port, with the provider). Over SSH, or with --no-browser, it shows
+# a code to enter on another device (the provider must support RFC 8628). In a browser page
+# (arigl-web, ari.html) it sends the page to the provider and back (register the page's URL, and
+# let the page's origin call the token endpoint: CORS).
+
+meta:
+  name: OpenID Connect sign-in
+  min_libcvc: 3.7.5
+
+requires: [oidc]
+
+args:
+  issuer: {type: string, help: "The provider's issuer URL, exactly as its discovery document writes it"}
+  client: {type: string, default: "", help: "A public client registered with it (or the launcher's --oidc-client)"}
+  scopes: {type: string, default: "openid profile email", help: The scopes to ask for}
+  flow: {type: string, default: auto, help: "auto, loopback, device or redirect"}
+  api: {type: string, default: "", help: A URL to GET with the access token (the Call API button)}
+
+# Pick up a sign-in kept from an earlier run (--credential-store) without opening anything.
+init: (state-set "demo.started" "")
+on_tick: |
+  (if (= (state-get "demo.started") "")
+    (begin (state-set "demo.started" "1")
+           (oidc-sign-in (dict "issuer" (state-get "args.issuer") "client_id" (state-get "args.client")
+                              "scopes" (state-get "args.scopes") "flow" (state-get "args.flow")
+                              "credential" "me" "interactive" #f))))
+
+windows:
+  - window: Sign in
+    id: sign_in
+    pos: [16, 16]
+    children:
+      - text: "issuer"
+        bind: args.issuer
+      - text: "status"
+        bind: oidc.me.phase
+      - separator
+
+      # The device flow: a code to enter at a URL, on any device with a browser.
+      - text: "On any device, visit the address below and enter the code."
+        visible_when: (= (state-get "oidc.me.phase") "device_code_shown")
+      - text: "visit"
+        bind: oidc.me.verification_uri
+        visible_when: (= (state-get "oidc.me.phase") "device_code_shown")
+      - text: "code"
+        bind: oidc.me.user_code
+        visible_when: (= (state-get "oidc.me.phase") "device_code_shown")
+      - button: Open the verification page here
+        visible_when: (and (= (state-get "oidc.me.phase") "device_code_shown") (has? "browser"))
+        on: (open-url (state-get "oidc.me.verification_uri_complete"))
+
+      # The loopback flow: the browser opened (or, with none here, the address to open).
+      - text: "Finish signing in in your browser."
+        visible_when: (= (state-get "oidc.me.phase") "waiting_for_browser")
+      - text: "open"
+        bind: oidc.me.browser_url
+        visible_when: (and (= (state-get "oidc.me.phase") "waiting_for_browser") (= (state-get "oidc.me.browser_opened") "false"))
+
+      # Signed in: the claims the host lets the document see.
+      - text: "name"
+        bind: oidc.me.claims.name
+        visible_when: (= (state-get "oidc.me.phase") "signed_in")
+      - text: "user"
+        bind: oidc.me.claims.preferred_username
+        visible_when: (= (state-get "oidc.me.phase") "signed_in")
+      - text: "email"
+        bind: oidc.me.claims.email
+        visible_when: (= (state-get "oidc.me.phase") "signed_in")
+      - text: "subject"
+        bind: oidc.me.claims.sub
+        visible_when: (= (state-get "oidc.me.phase") "signed_in")
+      - text: "api"
+        bind: demo.api
+        visible_when: (= (state-get "oidc.me.phase") "signed_in")
+
+      - text: "error"
+        bind: oidc.me.error_description
+        visible_when: (or (= (state-get "oidc.me.phase") "error") (= (state-get "oidc.me.error") "session_expired"))
+      - separator
+      - button: Sign in
+        visible_when: (not (= (state-get "oidc.me.phase") "signed_in"))
+        on: |
+          (oidc-sign-in (dict "issuer" (state-get "args.issuer") "client_id" (state-get "args.client")
+            "scopes" (state-get "args.scopes") "flow" (state-get "args.flow")
+            "credential" "me" "interactive" #t))
+      - button: Cancel
+        visible_when: (or (= (state-get "oidc.me.phase") "device_code_shown") (= (state-get "oidc.me.phase") "waiting_for_browser"))
+        on: (oidc-cancel "me")
+      - button: Call API
+        visible_when: (and (= (state-get "oidc.me.phase") "signed_in") (not (= (state-get "args.api") "")))
+        on: |
+          (begin
+            (set r (http-get (state-get "args.api") (dict "auth" "me")))
+            (state-set "demo.api" (if (get-attr r "ok") (get-attr r "status") (get-attr r "error"))))
+      - button: Sign out
+        visible_when: (= (state-get "oidc.me.phase") "signed_in")
+        on: (oidc-sign-out "me")
+      - button: Quit
+        on: (quit)

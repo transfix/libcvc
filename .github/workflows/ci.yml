@@ -472,6 +472,16 @@ jobs:
             echo "::error::a token reached the wasm ari's output"; exit 1
           fi
 
+      - name: Sign in from the wasm ari under node
+        # The browser pages' sign-in (docs/ARIADNE.md 10.4) against tests/stub_oidc_provider.py:
+        # the redirect flow there and back (page-shim.cjs stands in for the page's location,
+        # sessionStorage and history), the code exchange, the address bar cleaned, a request with
+        # the credential; and the device code. No token may reach the output.
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
+          bash src/ari/tests/oidc_wasm_node_test.sh "$node" "$PWD/build-wasm/bin/ari.js"
+
       - name: Round-trip images through ImageMagick under node
         # The link above only proves the codec libraries resolve. This proves Magick works at run
         # time: its coders are registered (an empty registry once failed every read and write

@@ -1,0 +1,47 @@
+# The sign-in tests' document (docs/ARIADNE.md §10.4): on its first tick it signs in with the
+# issuer it is given, waits for the host's message that the sign-in ended, then calls the API with
+# the credential, and shows what a person would see. The flow is the host's choice (a browser, a
+# device code, a browser page). Used by oidc_hosts_test.sh (ari and arigl in tmux) and, embedded at
+# /tests, by the wasm ari's check under node (ci.yml).
+meta:
+  name: OIDC probe
+  min_libcvc: 3.7.5
+requires: [oidc]
+args:
+  issuer: {type: string, help: The issuer to sign in with}
+  client: {type: string, default: ariadne-test-client, help: The client id}
+  api: {type: string, default: "", help: A URL to GET with the credential once signed in}
+  flow: {type: string, default: auto, help: "auto, loopback, device or redirect"}
+windows:
+  - window: OIDC probe
+    children:
+      - text: "phase"
+        bind: oidc.me.phase
+      - text: "flow"
+        bind: oidc.me.flow
+      - text: "code"
+        bind: oidc.me.user_code
+      - text: "visit"
+        bind: oidc.me.verification_uri
+      - text: "name"
+        bind: oidc.me.claims.name
+      - text: "email"
+        bind: oidc.me.claims.email
+      - text: "error"
+        bind: oidc.me.error_description
+      - text: "done"
+        bind: t.done
+      - text: "api"
+        bind: t.api
+init: (state-set "t.started" "")
+on_tick: |
+  (if (= (state-get "t.started") "")
+    (begin
+      (state-set "t.started" "1")
+      (oidc-sign-in (dict "issuer" (state-get "args.issuer") "client_id" (state-get "args.client")
+                          "scopes" "openid profile email" "credential" "me"
+                          "flow" (state-get "args.flow")))
+      (set done (msg-recv "oidc#me"))
+      (state-set "t.done" (get-attr done "phase"))
+      (if (and (get-attr done "signed_in") (not (= (state-get "args.api") "")))
+        (state-set "t.api" (get-attr (http-get (state-get "args.api") (dict "auth" "me")) "status")))))
