@@ -20,6 +20,7 @@
 #include <cvc/ariadne/bind.h>
 #include <cvc/ariadne/input.h> // §4.6 InputEvent — Runtime::post_input feeds on_key/on_pointer
 #include <cvc/ariadne/loader.h> // is_builtin_widget_type (has?)
+#include <cvc/ariadne/net_host.h> // net_host_status (the net capability tokens)
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_scheduler.h> // §4.7 app-wide action scheduler (exec_scheduler)
@@ -865,6 +866,10 @@ struct Runtime::Impl {
     if (backend)
       f.caps = backend->capabilities();
     f.scene = scene_capable;
+    const NetHostStatus net = net_host_status();
+    f.net = net.enabled;
+    f.net_auth = net.auth;
+    f.net_auth_persist = net.persist;
     return f;
   }
   bool has(const std::string &name) const {
@@ -1564,6 +1569,20 @@ void Runtime::Impl::emit_node(const Widget &w) {
   case Kind::Separator:
     b.separator();
     break;
+
+  case Kind::Progress: {
+    // Read-only: the number (a state path or a computed expression) placed in [lo, hi].
+    const std::string v = is_expr(w.bind) ? eval_text(w.bind) : read_string(app, resolve(w.bind));
+
+    const double x = v.empty() ? w.lo : std::strtod(v.c_str(), nullptr);
+    const double span = w.hi - w.lo;
+    const double f = span > 0.0 && std::isfinite(x) ? (x - w.lo) / span : 0.0;
+    std::string overlay;
+    if (!w.overlay.empty())
+      overlay = is_expr(w.overlay) ? eval_text(w.overlay) : read_string(app, resolve(w.overlay));
+    b.progress_bar(label, static_cast<float>(f < 0.0 ? 0.0 : (f > 1.0 ? 1.0 : f)), overlay);
+    break;
+  }
 
   case Kind::Checkbox: {
     const std::string path = resolve(w.bind);

@@ -322,6 +322,57 @@ geometry tet_isosurface(const geometry &tetmesh, const std::vector<double> &fiel
 // GPU clip planes are unavailable (WebGL).
 geometry slice_tets(const geometry &tetmesh, const geometry::vector_t &normal, double offset);
 
+// slice_tets in pieces, for a caller that must not block (fe_lab's cut, stepped on the scheduler):
+// the plane's field over the points is computed once, then piece(first, count) cuts tetrahedra
+// [first, first + count) only, carrying functions() and colors() as slice_tets does. The pieces
+// together are slice_tets' cut; each has its own copies of the vertices it shares with another.
+// Holds a copy of the positions and elements, not the mesh. Throws mesh_ops_error for a zero
+// normal, mesh_ops_unavailable without CVC_ENABLE_LIBIGL.
+class tet_slicer {
+public:
+  tet_slicer(const geometry &tetmesh, const geometry::vector_t &normal, double offset);
+  std::size_t size() const { return _tets.size() / 4; }
+  geometry piece(std::size_t first, std::size_t count) const;
+
+private:
+  std::vector<double> _positions, _field, _functions;
+  std::vector<int> _tets;
+  geometry::colors_t _colors;
+};
+
+// tet_boundary_surface a range of tetrahedra at a time, for a caller that must not block
+// (fe_lab's mesh and solve, stepped on the scheduler): the tets oriented (tet_volumes' sign, as
+// there), their faces counted, then the faces only one tet has, in igl::boundary_facets' order
+// (ascending by their sorted corners, each wound as its tet makes it). surface() is
+// tet_boundary_surface's result, triangle for triangle; vertices() the boundary's vertices in
+// ascending order, fem::boundary_vertices' on the VOLUME domain. A unit of budget is a tet (or a
+// face gathered); a step ends where its stage does, and step(0) runs to the end. The mesh is
+// shared, not copied, and must not change while the stepper holds it. Throws
+// mesh_ops_unavailable without CVC_ENABLE_LIBIGL.
+class tet_boundary_stepper {
+public:
+  explicit tet_boundary_stepper(std::shared_ptr<const geometry> tetmesh);
+  tet_boundary_stepper(tet_boundary_stepper &&) noexcept;
+  tet_boundary_stepper &operator=(tet_boundary_stepper &&) noexcept;
+  ~tet_boundary_stepper();
+  tet_boundary_stepper(const tet_boundary_stepper &) = delete;
+  tet_boundary_stepper &operator=(const tet_boundary_stepper &) = delete;
+
+  // True once the boundary is known.
+  bool step(std::size_t budget);
+  bool done() const;
+  double progress() const;
+  // "preparing", "orienting", "faces", "boundary", "sorting", then "done"
+  const char *phase() const;
+  // Once done: the surface, and the vertices on it.
+  geometry surface() const;
+  std::vector<index_t> vertices() const;
+
+private:
+  struct impl;
+  std::unique_ptr<impl> _impl;
+};
+
 // --------------------------------------------------------------------------
 // Scalar field -> colour (always available, with or without libigl)
 // --------------------------------------------------------------------------

@@ -40,6 +40,8 @@ constexpr unsigned short kReadyStateDone = 4;
 
 class FetchHttpClient : public HttpClient {
 public:
+  // XHR follows redirects itself (see KNOWN DIVERGENCE below).
+  bool follows_redirects_itself() const override { return true; }
   HttpResponse send(const HttpRequest &req) override {
     HttpResponse resp;
     resp.canonical_url = req.url; // browser fetch exposes no effective URL; best-effort

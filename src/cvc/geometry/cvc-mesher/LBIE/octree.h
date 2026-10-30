@@ -7,6 +7,8 @@
 #include"contour3d.h"
 #include"e_face.h"
 #include"LBIE_geoframe.h"
+#include"octree_step.h"
+#include<cstddef>
 #include<VolMagickCompat.h>
 #include<boost/shared_array.hpp>
 #include<boost/array.hpp>
@@ -208,7 +210,6 @@ private :
 	void e_face_initialization();
 
 	float compute_error(int oc_idx,int level,float& min, float& max);
-	void construct_octree();
 
 	int child(int oc_id, int level, int i);
 
@@ -315,6 +316,54 @@ private :
 	void clear (double* a, double* b, double* c);
 	void clear (double* a);
 
+	// step()'s operation (octree_step.h) and the pieces of the one-shot calls it runs a unit at a
+	// time.
+	octree_step_state _st;
+	void begin_op(int op);
+	void run_steps();
+	bool step_set_volume(std::size_t& budget);
+	bool step_collapse(std::size_t& budget);
+	bool step_compute_qef(std::size_t& budget);
+	bool step_traverse_qef(std::size_t& budget);
+	bool step_mesh_extract(std::size_t& budget);
+	bool step_quality_improve(std::size_t& budget);
+	bool step_release(std::size_t& budget);
+	void load_header(const VolMagick::Volume& volumeData);
+	void load_exterior(const VolMagick::Volume& volumeData);
+	void init_mem_begin();
+	bool init_mem_step(std::size_t& budget);
+	bool spline_step(std::size_t& budget);
+	bool off_samples_step(std::size_t& budget);
+	int next_cell(cell_levels& q, int& oc_id);
+	bool qef_leaf(int oc_id);
+	bool qef_parent(int oc_id, int l);
+	bool traverse_qef_cell(int oc_id, float err_tol, int pass, int boundary_level, int& finest_boundary);
+	void leaf_begin(leaf_cell& leaf, int i);
+	bool polygonize_edge(int j, geoframe& geofrm);
+	bool tetrahedralize_edge(int j, geoframe& geofrm);
+	void extract_hexa_begin(hexa_extract_state& hx, geoframe& geofrm, float err_tol);
+	bool extract_hexa_step(hexa_extract_state& hx, std::size_t& budget);
+	bool hexa_vertex(hexa_extract_state& hx, int j, int pass);
+	double hexa_progress(const hexa_extract_state& hx) const;
+	double untangle_progress() const;
+	void untangle_begin(geoframe& geofrm, float err_tol);
+	bool untangle_step(geoframe& geofrm, std::size_t& budget);
+	double hexa_quality(const geoframe& geofrm, int h);
+	bool hexa_fits(const geoframe& geofrm, unsigned int v);
+	void hexa_place(geoframe& geofrm, unsigned int v, double t);
+	void hexa_touch(unsigned int v);
+	void flow_begin(geoframe& geofrm, int kind);
+	bool flow_step(std::size_t& budget);
+	void flow_tri_vertex(geoframe& geofrm, int i);
+	void flow_tet_vertex(geoframe& geofrm, int i);
+	void flow_quad_vertex(geoframe& geofrm, int i);
+	void flow_hex_vertex(geoframe& geofrm, int i);
+	bool edge_contraction_round(geoframe& geofrm);
+	void joeliu_begin(geoframe& geofrm, int sign);
+	bool joeliu_step(geoframe& geofrm);
+	void optimization_begin(geoframe& geofrm, bool on_grid);
+	bool optimization_step(geoframe& geofrm);
+
 public :
 	Octree();  
 	// construction of octree from the given volume
@@ -389,8 +438,29 @@ public :
 	//void setVolume(SimpleVolumeData * volData);
 	void setVolume(const VolMagick::Volume& volData);
 
- private:
-	void loadData(const VolMagick::Volume& volumeData);
+	// A slice at a time. begin_*() starts the operation of the same name (begin_set_volume() is
+	// setVolume()), and step(budget) carries it on for about `budget` units -- a voxel, an octree
+	// cell, a leaf's edge, a vertex of a smoothing round, 64 elements of an array being filled --
+	// taking them out of `budget`; it returns true once the operation is done. A step may run past
+	// its budget by one bounded piece: a cell (the root's error reads every voxel), a leaf, a
+	// hexahedron's templates, a round of the smoothings that are not done a vertex at a time (edge
+	// contraction, Joe-Liu, minimal volume, optimization), the volume's conversion to float. The
+	// one-shot calls run the same steps to the end, so the result is the same however the work is
+	// sliced. step_phase()
+	// names the kind of unit the next step spends (a static string; its cost changes where the
+	// name does), step_progress() how far the operation has got, in [0,1].
+	void begin_set_volume(const VolMagick::Volume& volData);
+	void begin_collapse();
+	void begin_compute_qef();
+	void begin_traverse_qef(float err_tol);
+	void begin_mesh_extract(geoframe& geofrm, float err_tol);
+	void begin_quality_improve(geoframe& geofrm, int improvemethod, bool on_grid = false);
+	// The octree's arrays freed (for a stepper whose last step should not free them all at once:
+	// a QEF is an allocation of its own).
+	void begin_release();
+	bool step(std::size_t& budget);
+	const char* step_phase() const;
+	double step_progress() const;
 
  public:
 	bool isInterior() {return interior_flag;}
@@ -417,7 +487,6 @@ public :
 	void getGrad(float v0[3], float v1[3], float v2[3], float v3[3], float& condition_no, float* grad);
 
 	void assign_refine_sign_quad(geoframe& geofrm, float err_tol);
-	void assign_refine_sign_hexa(geoframe& geofrm, float err_tol);
 
 };
 

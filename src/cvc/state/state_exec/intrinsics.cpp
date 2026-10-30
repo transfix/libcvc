@@ -20,7 +20,6 @@
 #include <cvc/state/state_exec/scheduler.h>
 #include <cvc/state/state_json.h>
 #include <limits>
-#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -77,9 +76,23 @@ double as_number(const value_t &v, const char *name) {
   throw std::runtime_error(std::string(name) + ": expected number, got " + v.type_name());
 }
 
+// The shortest text that reads back as `d` (the floats state-set, state-incr and the atomic
+// natives store): std::to_chars where the library has it for floating point, else the same text
+// built by hand.
+std::string format_number_shortest(double d) {
+#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L
+  char buf[32];
+  const auto r = std::to_chars(buf, buf + sizeof(buf), d);
+  return std::string(buf, r.ptr);
+#else
+  return detail::format_number_shortest_fallback(d);
+#endif
+}
+
 // Coerce any DSL value to the string form the (string-typed) state tree stores. A string
 // stores raw (NOT to_string's quoted form); scalars store their natural lexical form
-// (10, 1.5, true/false — not to_string's #t/#f); nil empties the node. Compound values
+// (10, 1.5, true/false — not to_string's #t/#f); a float stores the shortest text that reads
+// back as it (1234567.5, not 1.23457e+06); nil empties the node. Compound values
 // (list/dict) fall back to the readable to_string() — a structured payload should use
 // state-data-set instead. This lets (state-set "n" 10) store "10" instead of throwing on
 // a non-string value.
@@ -88,11 +101,8 @@ std::string coerce_state_string(const value_t &v) {
     return *s;
   if (auto *i = std::get_if<int64_t>(&v.v))
     return std::to_string(*i);
-  if (auto *d = std::get_if<double>(&v.v)) {
-    std::ostringstream oss;
-    oss << *d;
-    return oss.str();
-  }
+  if (auto *d = std::get_if<double>(&v.v))
+    return format_number_shortest(*d);
   if (auto *b = std::get_if<bool>(&v.v))
     return *b ? "true" : "false";
   if (v.is_nil())
@@ -109,18 +119,6 @@ std::string atomic_scalar(const value_t &v, const char *name) {
   if (is_compound(v))
     throw dsl_error("TypeError", std::string(name) + ": expected a scalar, got " + v.type_name());
   return coerce_state_string(v);
-}
-
-// The shortest text that reads back as `d` (state-incr's floats): std::to_chars where the library
-// has it for floating point, else the same text built by hand.
-std::string format_number_shortest(double d) {
-#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L
-  char buf[32];
-  const auto r = std::to_chars(buf, buf + sizeof(buf), d);
-  return std::string(buf, r.ptr);
-#else
-  return detail::format_number_shortest_fallback(d);
-#endif
 }
 
 void require_root(const intrinsics_context *ctx, const char *name) {

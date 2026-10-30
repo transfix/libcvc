@@ -303,11 +303,13 @@ namespace {
 // The widget types the loader builds itself (each is a .ari key: `slider_int: Speed`). Anything
 // else is a custom type, drawn by register_widget_type / a backend-native widget.
 // ORDER MATTERS: the short-form dispatch (widget_type) takes the FIRST of these present as a key,
-// so tf_editor precedes color — a tf_editor's own config may carry a `color:` node list.
+// so tf_editor precedes color — a tf_editor's own config may carry a `color:` node list — and
+// progress precedes overlay, a progress bar's text.
 constexpr const char *kBuiltinWidgetTypes[] = {
-    "group",     "menubar",  "menu",       "menu_item",    "window",    "overlay",     "panel",
-    "text",      "checkbox", "slider_int", "slider_float", "combo",     "input_text",  "input_int",
-    "tf_editor", "color",    "image",      "button",       "separator", "windows_menu"};
+    "group",   "menubar",    "menu",        "menu_item", "window",     "progress",
+    "overlay", "panel",      "text",        "checkbox",  "slider_int", "slider_float",
+    "combo",   "input_text", "input_int",   "tf_editor", "color",      "image",
+    "button",  "separator",  "windows_menu"};
 } // namespace
 
 bool is_builtin_widget_type(const std::string &type) {
@@ -715,6 +717,14 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
       w = with_text_color(w, col[0].as<float>(1.0f), col[1].as<float>(1.0f),
                           col[2].as<float>(1.0f));
     return w;
+  }
+  if (type == "progress") { // a read-only bar: bind's number over [lo, hi]
+    const std::string bind = str(n, "bind");
+    check_bind(ctx, "progress", label, bind);
+    const double lo = num(n, "lo", 0.0), hi = num(n, "hi", 1.0);
+    if (lo >= hi)
+      ctx.warn("ari: progress '" + label + "' has lo >= hi");
+    return progress(label, bind, lo, hi, str(n, "overlay"));
   }
   if (type == "checkbox") {
     const std::string bind = str(n, "bind");

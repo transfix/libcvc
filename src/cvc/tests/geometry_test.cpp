@@ -12,12 +12,15 @@
 #include <cvc/core/exception.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/geometry_file_io.h>
+#include <cvc/geometry/mesh_ops.h>
 #include <cvc/utility/algorithm.h>
 #include <cvc/volume/volmagick.h>
 #include <fstream>
 #include <gtest/gtest.h>
 #include <iomanip>
 #include <limits>
+#include <memory>
+#include <string>
 #include <vector>
 #if !defined(_WIN32)
 #include <sys/resource.h>
@@ -1502,6 +1505,124 @@ TEST_F(AlgorithmTest, SDFV2Basic) {
 
   EXPECT_TRUE(has_negative) << "SDF v2 should have negative values inside";
   EXPECT_TRUE(has_positive) << "SDF v2 should have positive values outside";
+}
+
+// sdf_stepper: the same volume as sdf(SDF_V2), stepped in small budgets, with and without the
+// expanded grid v2 needs for a box tighter than 1.1x the mesh (resampled back).
+// SDF_IGL a range of nodes at a time: sdf()'s volume bit for bit, whatever the budget.
+TEST_F(AlgorithmTest, SDFIglSteppedMatchesOneShot) {
+  if (!mesh_ops_available())
+    GTEST_SKIP() << "a build without CVC_ENABLE_LIBIGL";
+  auto cube = std::make_shared<geometry>();
+  const double c[8][3] = {{-1, -1, -1}, {1, -1, -1}, {1, 1, -1}, {-1, 1, -1},
+                          {-1, -1, 1},  {1, -1, 1},  {1, 1, 1},  {-1, 1, 1}};
+  for (const auto &p : c)
+    cube->points().push_back({{p[0], p[1], p[2]}});
+  const int tris[12][3] = {{0, 2, 1}, {0, 3, 2}, {4, 5, 6}, {4, 6, 7}, {0, 1, 5}, {0, 5, 4},
+                           {2, 3, 7}, {2, 7, 6}, {0, 3, 7}, {0, 7, 4}, {1, 2, 6}, {1, 6, 5}};
+  for (const auto &t : tris)
+    cube->tris().push_back({{cvc::index_t(t[0]), cvc::index_t(t[1]), cvc::index_t(t[2])}});
+  const dimension dim(17, 13, 15);
+  for (const bounding_box &bbox :
+       {bounding_box(-2.0, -1.5, -1.7, 2.0, 1.5, 1.7), bounding_box(0, 0, 0, 0, 0, 0)})
+    for (const bool flip : {false, true})
+      for (const std::size_t budget : {std::size_t(0), std::size_t(1), std::size_t(97)}) {
+        const volume ref = sdf(ctx, *cube, dim, bbox, SDF_IGL, flip);
+        sdf_stepper s(ctx, cube, dim, bbox, SDF_IGL, flip);
+        double last = 0.0;
+        std::string phases;
+        while (!s.step(budget)) {
+          EXPECT_GE(s.progress(), last) << s.phase();
+          last = s.progress();
+          if (phases.find(s.phase()) == std::string::npos)
+            phases += std::string(s.phase()) + ";";
+        }
+        EXPECT_EQ(s.progress(), 1.0);
+        EXPECT_STREQ(s.phase(), "done");
+        EXPECT_NE(phases.find("distances"), std::string::npos) << phases;
+        const volume got = s.take();
+        ASSERT_EQ(got.XDim(), ref.XDim());
+        ASSERT_EQ(got.ZDim(), ref.ZDim());
+        EXPECT_EQ(got.boundingBox().minx, ref.boundingBox().minx);
+        EXPECT_EQ(got.boundingBox().maxz, ref.boundingBox().maxz);
+        EXPECT_EQ(got.desc(), ref.desc());
+        const uint64 n = ref.XDim() * ref.YDim() * ref.ZDim();
+        uint64 differ = 0;
+        for (uint64 i = 0; i < n; ++i)
+          differ += got(i) != ref(i) ? 1 : 0;
+        EXPECT_EQ(differ, 0u) << "flip " << flip << ", budget " << budget;
+      }
+}
+
+TEST_F(AlgorithmTest, SDFV2SteppedMatchesOneShot) {
+  auto cube = std::make_shared<geometry>();
+  const double c[8][3] = {{-1, -1, -1}, {1, -1, -1}, {1, 1, -1}, {-1, 1, -1},
+                          {-1, -1, 1},  {1, -1, 1},  {1, 1, 1},  {-1, 1, 1}};
+  for (const auto &p : c)
+    cube->points().push_back({{p[0], p[1], p[2]}});
+  const int tris[12][3] = {{0, 2, 1}, {0, 3, 2}, {4, 5, 6}, {4, 6, 7}, {0, 1, 5}, {0, 5, 4},
+                           {2, 3, 7}, {2, 7, 6}, {0, 3, 7}, {0, 7, 4}, {1, 2, 6}, {1, 6, 5}};
+  for (const auto &t : tris)
+    cube->tris().push_back({{cvc::index_t(t[0]), cvc::index_t(t[1]), cvc::index_t(t[2])}});
+  const dimension dim(24, 24, 24);
+  for (const bounding_box &bbox : {bounding_box(-2.0, -2.0, -2.0, 2.0, 2.0, 2.0),
+                                   bounding_box(-1.05, -1.05, -1.05, 1.05, 1.05, 1.05)}) {
+    const volume ref = sdf(ctx, *cube, dim, bbox, SDF_V2);
+    sdf_stepper s(ctx, cube, dim, bbox, SDF_V2);
+    int steps = 0;
+    double last = 0.0;
+    std::string phases;
+    while (!s.step(97)) {
+      ++steps;
+      EXPECT_GE(s.progress(), last) << s.phase();
+      last = s.progress();
+      if (phases.find(s.phase()) == std::string::npos)
+        phases += std::string(s.phase()) + ";";
+    }
+    EXPECT_GT(steps, 100);
+    EXPECT_EQ(s.progress(), 1.0);
+    EXPECT_NE(phases.find("x lines"), std::string::npos) << phases;
+    EXPECT_NE(phases.find("near distances"), std::string::npos) << phases;
+    const volume got = s.take();
+    ASSERT_EQ(got.XDim(), ref.XDim());
+    EXPECT_EQ(got.boundingBox().minx, ref.boundingBox().minx);
+    EXPECT_EQ(got.desc(), ref.desc());
+    const uint64 n = ref.XDim() * ref.YDim() * ref.ZDim();
+    uint64 differ = 0;
+    for (uint64 i = 0; i < n; ++i)
+      differ += got(i) != ref(i) ? 1 : 0;
+    EXPECT_EQ(differ, 0u) << "bbox minx " << bbox.minx;
+  }
+}
+
+// mesher_stepper: the bunny's SDF (32^3 samples, which the mesher resamples to 33^3) meshed a
+// slice at a time gives the one-shot meshers' meshes.
+TEST_F(AlgorithmTest, MesherSteppedMatchesOneShotOnTheBunny) {
+  const geometry bunny = read_geometry("test.bunny");
+  const volume vol = sdf(ctx, bunny, dimension(32, 32, 32), bunny.extents(), SDF_V2);
+  const auto check = [](const geometry &ref, mesher_stepper s, const char *what) {
+    int steps = 0;
+    double last = 0.0;
+    while (!s.step(97)) {
+      ++steps;
+      EXPECT_GE(s.progress(), last) << what << ": " << s.phase();
+      last = s.progress();
+    }
+    EXPECT_GT(steps, 100) << what;
+    EXPECT_EQ(s.progress(), 1.0) << what;
+    const geometry got = s.take();
+    ASSERT_EQ(got.num_points(), ref.num_points()) << what;
+    EXPECT_GT(got.num_points(), 0u) << what;
+    EXPECT_TRUE(got.const_points() == ref.const_points()) << what;
+    EXPECT_TRUE(got.const_tets() == ref.const_tets()) << what;
+    EXPECT_TRUE(got.const_tris() == ref.const_tris()) << what;
+  };
+  check(tetrahedralize(vol, 0.0), mesher_stepper::tetrahedralize(vol, 0.0), "tetrahedralize");
+  check(
+      tetrahedralize2(vol, 0.03, -0.03, DUALLIB, GEO_FLOW, BSPLINE_CONVOLUTION, 1),
+      mesher_stepper::tetrahedralize2(vol, 0.03, -0.03, DUALLIB, GEO_FLOW, BSPLINE_CONVOLUTION, 1),
+      "tetrahedralize2's layer, geometric flow");
+  check(iso(vol, 0.0), mesher_stepper::iso(vol, 0.0), "iso");
 }
 
 TEST_F(AlgorithmTest, SDFV1vsV2Comparison) {

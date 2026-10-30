@@ -10,6 +10,7 @@
 #include <cvc/ariadne/uri.h>
 #include <cvc/ariadne/uri_http.h>
 #include <cvc/net/http_client.h>
+#include <cvc/net/net_policy.h>
 #include <string>
 #include <vector>
 
@@ -41,7 +42,12 @@ UriResult map_http_fetch_result(const std::string &raw_url, bool follow,
 // consulting the provider for method + auth headers, defaulting a neutral Content-Type, never
 // following a redirect. This is the plain http_store body; the cache's write wrapper delegates here
 // and then invalidates the entry.
-StoreResult http_store_uncached(const Uri &u, const std::string &content, const std::string &base);
+StoreResult http_store_uncached(const Uri &u, const std::string &content, const std::string &base,
+                                const cvc::net::NetPolicy *policy = nullptr);
+
+// cvc::net::send, checked against `policy` when there is one.
+cvc::net::HttpResponse send_http(const cvc::net::HttpRequest &req,
+                                 const cvc::net::NetPolicy *policy);
 
 } // namespace detail
 } // namespace ariadne

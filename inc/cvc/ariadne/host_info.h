@@ -35,6 +35,13 @@ struct HostInfo {
   bool yaml = false, json_schema = false, ftxui = false, tvision = false;
   bool gl = false;     // a GL renderer is available to this runtime (the runtime sets it)
   std::string gl_info; // what it is: vendor, renderer and version (the runtime sets it)
+  bool http = false;   // an HTTP backend (cvc::net: libcurl, or the browser's fetch)
+
+  // The network the host gave its documents (net_host.h).
+  bool net = false;
+  std::vector<std::string> net_allowed; // the origins requests may reach
+  std::string credential_store;         // where credentials are kept ("" = in memory)
+  std::vector<std::string> env_credentials; // names --credential-env supplied a token for
 
   std::vector<std::pair<std::string, bool>> capabilities; // every token, and whether it holds
   std::vector<std::string> functions;                     // what programs can call, sorted

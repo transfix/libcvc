@@ -50,10 +50,13 @@
 #include <boost/any.hpp>
 #include <boost/scoped_array.hpp>
 #include <cstring>
+#include <exception>
 #include <iostream>
 #include <limits>
 #include <map>
+#include <memory>
 #include <numeric>
+#include <optional>
 
 namespace {
 // Whether p lies in the axis-aligned box of `v`. Not by adding up one bounding_box per point: a
@@ -542,15 +545,17 @@ LBIE::geoframe convert(const cvc::geometry &geo) {
   return ret_geom;
 }
 
-// ----------
-// cvc_mesher
-// ----------
+// -----------------
+// mesh_stepper_for
+// -----------------
 // Purpose:
-//   Interface between the old LBIE meshing API and the new one.
+//   The LBIE meshing an argument map asks for (cvc_mesher's defaults for what it leaves out), a
+//   slice at a time.
 // ---- Change History ----
-// 01/10/2014 -- Joe R. -- Creation.
+// 01/10/2014 -- Joe R. -- Creation (as cvc_mesher).
+// 10/29/2026 -- Joe R. -- Makes an LBIE::mesh_stepper, which cvc_mesher runs to the end.
 typedef std::map<std::string, boost::any> Arguments;
-cvc::geometry cvc_mesher(const cvc::volume &vol, Arguments argv) {
+std::unique_ptr<LBIE::mesh_stepper> mesh_stepper_for(const cvc::volume &vol, Arguments argv) {
   using namespace std;
   using namespace cvc;
 
@@ -636,9 +641,71 @@ cvc::geometry cvc_mesher(const cvc::volume &vol, Arguments argv) {
   }
 
   // Week 4: Use new geometry-based API (no conversion needed)
-  return LBIE::do_mesh_geometry(vol, isovalue, isovalue_in, err, err_in, geom_type,
-                                improvement_method_enum, normaltype_lbie, extraction_method_enum,
-                                improve_iterations, dual_contouring, false, propertyVol);
+  return std::make_unique<LBIE::mesh_stepper>(
+      vol, isovalue, isovalue_in, err, err_in, geom_type, improvement_method_enum, normaltype_lbie,
+      extraction_method_enum, improve_iterations, dual_contouring, propertyVol);
+}
+
+// ----------
+// cvc_mesher
+// ----------
+// Purpose:
+//   Interface between the old LBIE meshing API and the new one.
+// ---- Change History ----
+// 01/10/2014 -- Joe R. -- Creation.
+// 10/29/2026 -- Joe R. -- Runs mesh_stepper_for's stepper to the end.
+cvc::geometry cvc_mesher(const cvc::volume &vol, Arguments argv) {
+  std::unique_ptr<LBIE::mesh_stepper> stepper = mesh_stepper_for(vol, std::move(argv));
+  stepper->step(0);
+  return stepper->take_geometry();
+}
+
+// The argument maps iso(), tetrahedralize(), hexahedralize() and tetrahedralize2() mesh with, and
+// mesher_stepper too.
+Arguments iso_args(double isovalue, cvc::extraction_method method, int improve_iterations,
+                   cvc::normal_type normals, boost::optional<const cvc::volume &> propertyVol) {
+  Arguments args;
+  args["isovalue"] = float(isovalue);
+  args["improve_iterations"] = improve_iterations;
+  args["extraction_method_enum"] = static_cast<LBIE::Mesher::ExtractionMethod>(method);
+  args["normaltype_enum"] = normals;
+  if (propertyVol) {
+    args["propertyVol"] = propertyVol.get();
+  }
+  return args;
+}
+
+// tetrahedralize() (TETRA) and hexahedralize() (HEXA)
+Arguments volume_mesh_args(LBIE::geoframe::GEOTYPE meshtype, double isovalue,
+                           cvc::extraction_method method, cvc::improvement_method improve_method,
+                           cvc::normal_type normals, int improve_iterations,
+                           boost::optional<const cvc::volume &> propertyVol) {
+  Arguments args;
+  args["isovalue"] = float(isovalue);
+  args["improve_iterations"] = improve_iterations;
+  args["extraction_method_enum"] = static_cast<LBIE::Mesher::ExtractionMethod>(method);
+  args["improvement_method_enum"] = static_cast<LBIE::Mesher::ImproveMethod>(improve_method);
+  args["meshtype_enum"] = meshtype;
+  args["normaltype_enum"] = normals;
+  if (propertyVol) {
+    args["propertyVol"] = propertyVol.get();
+  }
+  return args;
+}
+
+// tetrahedralize2(): the layer between isovalue and isovalue_in (TETRA2)
+Arguments tetrahedralize2_args(float isovalue, float isovalue_in, cvc::extraction_method method,
+                               cvc::improvement_method improve_method, cvc::normal_type normals,
+                               int improve_iterations) {
+  Arguments args;
+  args["isovalue"] = isovalue;
+  args["isovalue_in"] = isovalue_in;
+  args["improve_iterations"] = improve_iterations;
+  args["extraction_method_enum"] = static_cast<LBIE::Mesher::ExtractionMethod>(method);
+  args["improvement_method_enum"] = static_cast<LBIE::Mesher::ImproveMethod>(improve_method);
+  args["meshtype_enum"] = LBIE::geoframe::TETRA2;
+  args["normaltype_enum"] = normals;
+  return args;
 }
 
 // ----------
@@ -758,6 +825,211 @@ volume sdf(app &ctx, const geometry &geom, const dimension &dim, const bounding_
 
   return vol;
 }
+
+// -----------
+// sdf_stepper
+// -----------
+// Purpose:
+//   sdf() a slice at a time (see algorithm.h).
+// ---- Change History ----
+// 10/29/2026 -- Joe R. -- Creation.
+struct sdf_stepper::impl {
+  app *ctx = nullptr;
+  std::shared_ptr<const geometry> geom;
+  dimension dim;
+  bounding_box bbox, grid_bbox;
+  sdf_algorithm algorithm = SDF_V2;
+  bool flip = false, expand = false, ready = false;
+  std::exception_ptr error;
+  // SDF_V2: the surface the transform reads (its arrays must outlive it) and the transform.
+  std::vector<Point3f> verts;
+  std::vector<TriId3i> tris;
+  std::unique_ptr<FaceVertSet3D> fvs;
+  std::unique_ptr<DistanceTransform> dt;
+  std::optional<volume> out;
+  // SDF_IGL: sdf_igl's locator (its winding-number hierarchy built a step after its tree), the
+  // grid, and the next node to query.
+  std::optional<mesh_locator> locator;
+  bool winding = false;
+  std::optional<volume> grid;
+  uint64 node = 0;
+
+  // sdf()'s SDF_IGL (sdf_igl) a range of nodes at a time: the same query points, each node's
+  // distance its own, so the same volume.
+  void igl_step(std::size_t budget) {
+    if (!locator) {
+      // sdf()'s rule: an unset (all-zero) box means the geometry's extents.
+      const bool unset = bbox.minx == 0 && bbox.miny == 0 && bbox.minz == 0 && bbox.maxx == 0 &&
+                         bbox.maxy == 0 && bbox.maxz == 0;
+      locator.emplace(*geom);
+      grid.emplace(*ctx, dim, Float, unset ? geom->extents() : bbox);
+      return;
+    }
+    volume &cv = *grid;
+    if (!winding) { // the hierarchy is built on first use: a query of the first node
+      locator->winding_number(geometry::points_t(1, {{cv.XMin(), cv.YMin(), cv.ZMin()}}));
+      winding = true;
+      return;
+    }
+    // A node's signed distance costs some tens of microseconds (its tree descent and winding
+    // number): kUnitsPerNode units of budget, so a unit costs about what the runner's do.
+    constexpr uint64 kUnitsPerNode = 32;
+    const uint64 nx = cv.XDim(), ny = cv.YDim(), n = nx * ny * cv.ZDim();
+    const uint64 count =
+        budget == 0 ? n - node : std::clamp<uint64>(budget / kUnitsPerNode, 1, n - node);
+    geometry::points_t q(static_cast<std::size_t>(count));
+    for (uint64 o = 0; o < count; ++o) {
+      const uint64 id = node + o, i = id % nx, j = (id / nx) % ny, k = id / (nx * ny);
+      q[o] = {{cv.XMin() + double(i) * cv.XSpan(), cv.YMin() + double(j) * cv.YSpan(),
+               cv.ZMin() + double(k) * cv.ZSpan()}};
+    }
+    const std::vector<double> d = locator->signed_distance(q);
+    float *values = reinterpret_cast<float *>(*cv);
+    for (uint64 o = 0; o < count; ++o)
+      values[node + o] = float(flip ? -d[o] : d[o]);
+    node += count;
+    if (node < n)
+      return;
+    cv.desc("Signed Distance Function - libigl (exact distance, winding-number sign)");
+    out.emplace(cv);
+    grid.reset();
+    locator.reset();
+    ready = true;
+  }
+
+  // sdf()'s SDF_V2 setup: the grid's box (expanded to the 1.1 scale v2 needs, the result resampled
+  // back), then sdf_library_v2's surface and scale factors, the transform deferred.
+  void begin() {
+    const point_t geom_min = geom->min_point(), geom_max = geom->max_point();
+    double max_ext = 0;
+    for (int i = 0; i < 3; i++)
+      max_ext = std::max(max_ext, geom_max[i] - geom_min[i]);
+    grid_bbox = bbox;
+    for (int i = 0; i < 3; i++) {
+      const double center = (bbox[i] + bbox[i + 3]) / 2.0, half = (bbox[i + 3] - bbox[i]) / 2.0;
+      if (2.0 * half / max_ext < 1.1) {
+        expand = true;
+        const double new_half = 1.1 * max_ext / 2.0;
+        grid_bbox[i] = center - new_half;
+        grid_bbox[i + 3] = center + new_half;
+      }
+    }
+    verts.reserve(geom->num_points());
+    for (const point_t &p : geom->const_points())
+      verts.push_back(Point3f(p[0], p[1], p[2]));
+    tris.reserve(geom->num_tris());
+    for (const auto &t : geom->const_tris())
+      tris.push_back(TriId3i(t[0], t[1], t[2]));
+    fvs = std::make_unique<FaceVertSet3D>(int(verts.size()), int(tris.size()), verts.data(),
+                                          tris.data(), nullptr);
+    fvs->computeTriNormals();
+    if (flip)
+      fvs->flipTriNormals();
+    const BoundingBox geom_box = fvs->getExtent();
+    float fmax_ext = 0;
+    for (int i = 0; i < 3; i++)
+      fmax_ext = std::max(fmax_ext, geom_box.upper[i] - geom_box.lower[i]);
+    float center[3], scale[3];
+    for (int i = 0; i < 3; i++) {
+      center[i] = float((grid_bbox[i] + grid_bbox[i + 3]) / 2.0f);
+      scale[i] = 2.0f * float((grid_bbox[i + 3] - grid_bbox[i]) / 2.0f) / fmax_ext;
+    }
+    int dims[3] = {int(dim.xdim), int(dim.ydim), int(dim.zdim)};
+    dt = std::make_unique<DistanceTransform>(*ctx, *fvs, dims, center, 0.5f, scale[0], scale[1],
+                                             scale[2], DistanceTransform::deferred_t());
+  }
+
+  void finish() {
+    const Reg3Data<float> &result = dt->getReg3Data();
+    volume cv(*ctx, dim, Float, grid_bbox);
+    if (result.getNVerts() != int(dim.xdim * dim.ydim * dim.zdim))
+      throw sign_distance_function_error("SDF v2: dimension mismatch");
+    std::memcpy(reinterpret_cast<float *>(*cv), result.getData(),
+                std::size_t(result.getNVerts()) * sizeof(float));
+    dt.reset();
+    fvs.reset();
+    verts = std::vector<Point3f>();
+    tris = std::vector<TriId3i>();
+    if (expand)
+      cv.resize(bbox);
+    cv.desc("Signed Distance Function - DistanceTransform v2");
+    out.emplace(cv);
+    ready = true;
+  }
+};
+
+sdf_stepper::sdf_stepper(app &ctx, std::shared_ptr<const geometry> geom, const dimension &dim,
+                         const bounding_box &bbox, sdf_algorithm algorithm, bool flipNormals)
+    : _impl(std::make_unique<impl>()) {
+  _impl->ctx = &ctx;
+  _impl->geom = std::move(geom);
+  _impl->dim = dim;
+  _impl->bbox = bbox;
+  _impl->algorithm = algorithm;
+  _impl->flip = flipNormals;
+}
+
+sdf_stepper::~sdf_stepper() = default;
+
+bool sdf_stepper::step(std::size_t budget) {
+  impl &s = *_impl;
+  if (s.error)
+    std::rethrow_exception(s.error);
+  if (s.ready)
+    return true;
+  try {
+    if (s.algorithm == SDF_IGL) {
+      s.igl_step(budget);
+      return s.ready;
+    }
+    if (s.algorithm != SDF_V2) {
+      s.out.emplace(sdf(*s.ctx, *s.geom, s.dim, s.bbox, s.algorithm, s.flip));
+      s.ready = true;
+      return true;
+    }
+    if (!s.dt)
+      s.begin();
+    if (s.dt->step(budget))
+      s.finish();
+  } catch (...) {
+    s.error = std::current_exception();
+    s.dt.reset();
+    s.locator.reset();
+    s.grid.reset();
+    throw;
+  }
+  return s.ready;
+}
+
+bool sdf_stepper::done() const { return _impl->ready || _impl->error; }
+
+double sdf_stepper::progress() const {
+  const impl &s = *_impl;
+  if (s.ready)
+    return 1.0;
+  if (s.algorithm == SDF_IGL) {
+    if (!s.grid)
+      return 0.0;
+    const double n = double(s.grid->XDim() * s.grid->YDim() * s.grid->ZDim());
+    return (s.winding ? 0.1 : 0.05) + 0.9 * double(s.node) / std::max(1.0, n);
+  }
+  return s.dt ? s.dt->progress() : 0.0;
+}
+
+const char *sdf_stepper::phase() const {
+  const impl &s = *_impl;
+  if (s.ready || s.error)
+    return "done";
+  if (s.algorithm == SDF_IGL)
+    return !s.locator ? "tree" : s.winding ? "distances" : "winding";
+  return s.dt ? s.dt->phase() : "cells";
+}
+
+volume sdf_stepper::take() {
+  if (!_impl->ready)
+    throw sign_distance_function_error("sdf_stepper: the volume is not ready");
+  return *_impl->out;
+}
 #endif // CVC_ENABLE_SDF
 
 #ifdef CVC_ENABLE_MESHER
@@ -774,16 +1046,7 @@ volume sdf(app &ctx, const geometry &geom, const dimension &dim, const bounding_
 // 12/28/2025 -- Joe R. -- Adding normal_type parameter.
 geometry iso(const volume &vol, double isovalue, extraction_method method, int improve_iterations,
              normal_type normals, boost::optional<const volume &> propertyVol) {
-  Arguments args;
-  args["isovalue"] = float(isovalue);
-  args["improve_iterations"] = improve_iterations;
-  args["extraction_method_enum"] = static_cast<LBIE::Mesher::ExtractionMethod>(method);
-  args["normaltype_enum"] = normals;
-  if (propertyVol) {
-    args["propertyVol"] = propertyVol.get();
-  }
-
-  return cvc_mesher(vol, args);
+  return cvc_mesher(vol, iso_args(isovalue, method, improve_iterations, normals, propertyVol));
 }
 
 // ------------
@@ -799,18 +1062,8 @@ geometry iso(const volume &vol, double isovalue, extraction_method method, int i
 geometry tetrahedralize(const volume &vol, double isovalue, extraction_method method,
                         improvement_method improve_method, normal_type normals,
                         int improve_iterations, boost::optional<const volume &> propertyVol) {
-  Arguments args;
-  args["isovalue"] = float(isovalue);
-  args["improve_iterations"] = improve_iterations;
-  args["extraction_method_enum"] = static_cast<LBIE::Mesher::ExtractionMethod>(method);
-  args["improvement_method_enum"] = static_cast<LBIE::Mesher::ImproveMethod>(improve_method);
-  args["meshtype_enum"] = LBIE::geoframe::TETRA;
-  args["normaltype_enum"] = normals;
-  if (propertyVol) {
-    args["propertyVol"] = propertyVol.get();
-  }
-
-  return cvc_mesher(vol, args);
+  return cvc_mesher(vol, volume_mesh_args(LBIE::geoframe::TETRA, isovalue, method, improve_method,
+                                          normals, improve_iterations, propertyVol));
 }
 
 // --------------
@@ -825,18 +1078,8 @@ geometry tetrahedralize(const volume &vol, double isovalue, extraction_method me
 geometry hexahedralize(const volume &vol, double isovalue, extraction_method method,
                        improvement_method improve_method, normal_type normals,
                        int improve_iterations, boost::optional<const volume &> propertyVol) {
-  Arguments args;
-  args["isovalue"] = float(isovalue);
-  args["improve_iterations"] = improve_iterations;
-  args["extraction_method_enum"] = static_cast<LBIE::Mesher::ExtractionMethod>(method);
-  args["improvement_method_enum"] = static_cast<LBIE::Mesher::ImproveMethod>(improve_method);
-  args["meshtype_enum"] = LBIE::geoframe::HEXA;
-  args["normaltype_enum"] = normals;
-  if (propertyVol) {
-    args["propertyVol"] = propertyVol.get();
-  }
-
-  return cvc_mesher(vol, args);
+  return cvc_mesher(vol, volume_mesh_args(LBIE::geoframe::HEXA, isovalue, method, improve_method,
+                                          normals, improve_iterations, propertyVol));
 }
 
 // ---------------
@@ -853,16 +1096,8 @@ geometry hexahedralize(const volume &vol, double isovalue, extraction_method met
 geometry tetrahedralize2(const volume &vol, double isovalue, extraction_method method,
                          improvement_method improve_method, normal_type normals,
                          int improve_iterations) {
-  Arguments args;
-  args["isovalue"] = float(isovalue);
-  args["isovalue_in"] = std::numeric_limits<float>::max();
-  args["improve_iterations"] = improve_iterations;
-  args["extraction_method_enum"] = static_cast<LBIE::Mesher::ExtractionMethod>(method);
-  args["improvement_method_enum"] = static_cast<LBIE::Mesher::ImproveMethod>(improve_method);
-  args["meshtype_enum"] = LBIE::geoframe::TETRA2;
-  args["normaltype_enum"] = normals;
-
-  return cvc_mesher(vol, args);
+  return cvc_mesher(vol, tetrahedralize2_args(float(isovalue), std::numeric_limits<float>::max(),
+                                              method, improve_method, normals, improve_iterations));
 }
 
 // The layer between the two isovalues, given in either order.
@@ -872,16 +1107,117 @@ geometry tetrahedralize2(const volume &vol, double isovalue, extraction_method m
 geometry tetrahedralize2(const volume &vol, double isovalue_outer, double isovalue_inner,
                          extraction_method method, improvement_method improve_method,
                          normal_type normals, int improve_iterations) {
-  Arguments args;
-  args["isovalue"] = float(isovalue_outer);
-  args["isovalue_in"] = float(isovalue_inner); // Set the inner isovalue for interval meshing
-  args["improve_iterations"] = improve_iterations;
-  args["extraction_method_enum"] = static_cast<LBIE::Mesher::ExtractionMethod>(method);
-  args["improvement_method_enum"] = static_cast<LBIE::Mesher::ImproveMethod>(improve_method);
-  args["meshtype_enum"] = LBIE::geoframe::TETRA2;
-  args["normaltype_enum"] = normals;
+  return cvc_mesher(vol, tetrahedralize2_args(float(isovalue_outer), float(isovalue_inner), method,
+                                              improve_method, normals, improve_iterations));
+}
 
-  return cvc_mesher(vol, args);
+// --------------
+// mesher_stepper
+// --------------
+// Purpose:
+//   iso(), tetrahedralize(), hexahedralize() and tetrahedralize2() a slice at a time (see
+//   algorithm.h): their argument maps, meshed by mesh_stepper_for's LBIE::mesh_stepper.
+// ---- Change History ----
+// 10/29/2026 -- Joe R. -- Creation.
+struct mesher_stepper::impl {
+  std::unique_ptr<LBIE::mesh_stepper> s;
+  std::exception_ptr error;
+  bool ready = false;
+  geometry out;
+};
+
+mesher_stepper::mesher_stepper(std::unique_ptr<impl> i) : _impl(std::move(i)) {}
+mesher_stepper::mesher_stepper(mesher_stepper &&) noexcept = default;
+mesher_stepper &mesher_stepper::operator=(mesher_stepper &&) noexcept = default;
+mesher_stepper::~mesher_stepper() = default;
+
+mesher_stepper mesher_stepper::iso(const volume &vol, double isovalue, extraction_method method,
+                                   int improve_iterations, normal_type normals,
+                                   boost::optional<const volume &> propertyVol) {
+  auto i = std::make_unique<impl>();
+  i->s =
+      mesh_stepper_for(vol, iso_args(isovalue, method, improve_iterations, normals, propertyVol));
+  return mesher_stepper(std::move(i));
+}
+
+mesher_stepper mesher_stepper::tetrahedralize(const volume &vol, double isovalue,
+                                              extraction_method method,
+                                              improvement_method improve_method,
+                                              normal_type normals, int improve_iterations,
+                                              boost::optional<const volume &> propertyVol) {
+  auto i = std::make_unique<impl>();
+  i->s = mesh_stepper_for(vol,
+                          volume_mesh_args(LBIE::geoframe::TETRA, isovalue, method, improve_method,
+                                           normals, improve_iterations, propertyVol));
+  return mesher_stepper(std::move(i));
+}
+
+mesher_stepper mesher_stepper::hexahedralize(const volume &vol, double isovalue,
+                                             extraction_method method,
+                                             improvement_method improve_method, normal_type normals,
+                                             int improve_iterations,
+                                             boost::optional<const volume &> propertyVol) {
+  auto i = std::make_unique<impl>();
+  i->s =
+      mesh_stepper_for(vol, volume_mesh_args(LBIE::geoframe::HEXA, isovalue, method, improve_method,
+                                             normals, improve_iterations, propertyVol));
+  return mesher_stepper(std::move(i));
+}
+
+mesher_stepper mesher_stepper::tetrahedralize2(const volume &vol, double isovalue,
+                                               extraction_method method,
+                                               improvement_method improve_method,
+                                               normal_type normals, int improve_iterations) {
+  auto i = std::make_unique<impl>();
+  i->s = mesh_stepper_for(vol, tetrahedralize2_args(float(isovalue),
+                                                    std::numeric_limits<float>::max(), method,
+                                                    improve_method, normals, improve_iterations));
+  return mesher_stepper(std::move(i));
+}
+
+mesher_stepper mesher_stepper::tetrahedralize2(const volume &vol, double isovalue_outer,
+                                               double isovalue_inner, extraction_method method,
+                                               improvement_method improve_method,
+                                               normal_type normals, int improve_iterations) {
+  auto i = std::make_unique<impl>();
+  i->s = mesh_stepper_for(vol,
+                          tetrahedralize2_args(float(isovalue_outer), float(isovalue_inner), method,
+                                               improve_method, normals, improve_iterations));
+  return mesher_stepper(std::move(i));
+}
+
+bool mesher_stepper::step(std::size_t budget) {
+  impl &s = *_impl;
+  if (s.error)
+    std::rethrow_exception(s.error);
+  if (s.ready)
+    return true;
+  try {
+    if (s.s->step(budget)) {
+      s.out = s.s->take_geometry();
+      s.s.reset();
+      s.ready = true;
+    }
+  } catch (...) {
+    s.error = std::current_exception();
+    s.s.reset();
+    throw;
+  }
+  return s.ready;
+}
+
+bool mesher_stepper::done() const { return _impl->ready || _impl->error; }
+
+double mesher_stepper::progress() const { return done() ? 1.0 : _impl->s->progress(); }
+
+const char *mesher_stepper::phase() const { return done() ? "done" : _impl->s->phase(); }
+
+geometry mesher_stepper::take() {
+  if (_impl->error)
+    std::rethrow_exception(_impl->error);
+  if (!_impl->ready)
+    throw cvc_mesher_error("mesher_stepper: the geometry is not ready");
+  return _impl->out;
 }
 
 // ---------------

@@ -141,6 +141,75 @@ TEST(AriadneHostCli, ExtraFlagsEqualsFormsAndErrors) {
   EXPECT_TRUE(parse_host_args(2, a6).help);
 }
 
+TEST(AriadneHostCli, NetworkFlagsTurnItOnAndCheckTheirOrigins) {
+  const char *none[] = {"ari", "run", "d.ari"};
+  EXPECT_FALSE(parse_host_args(3, none).net.enabled) << "off by default";
+
+  const char *flags[] = {"ari",
+                         "run",
+                         "--net-allow",
+                         "https://tx.wtf",
+                         "--net-allow=http://127.0.0.1:8080",
+                         "--net-policy",
+                         "nicotina.policy",
+                         "--credential-store",
+                         "nicotina",
+                         "main.ari",
+                         "--net-allow",
+                         "https://evil.example"};
+  HostOptions o = parse_host_args(12, flags);
+  ASSERT_TRUE(o.error.empty()) << o.error;
+  EXPECT_TRUE(o.net.enabled);
+  EXPECT_EQ(o.net.allow, (std::vector<std::string>{"https://tx.wtf", "http://127.0.0.1:8080"}));
+  EXPECT_EQ(o.net.policy_files, (std::vector<std::string>{"nicotina.policy"}));
+  EXPECT_EQ(o.net.credential_store, "nicotina");
+  EXPECT_EQ(o.doc, "main.ari");
+  EXPECT_EQ(o.doc_args, (std::vector<std::string>{"--net-allow", "https://evil.example"}))
+      << "after the document they are the document's";
+  EXPECT_NE(misplaced_flag_note("ari", o.doc_args).find("'--net-allow'"), std::string::npos);
+
+  const char *bare[] = {"arigl", "run", "--net", "d.ari"};
+  o = parse_host_args(4, bare);
+  EXPECT_TRUE(o.net.enabled);
+  EXPECT_TRUE(o.net.allow.empty());
+  const char *store_only[] = {"ari", "run", "--credential-store", "/tmp/c", "d.ari"};
+  EXPECT_TRUE(parse_host_args(5, store_only).net.enabled) << "a credential store implies --net";
+
+  const char *url[] = {"ari", "run", "--net-allow", "https://tx.wtf/api", "d.ari"};
+  EXPECT_NE(parse_host_args(5, url).error.find("--net-allow: 'https://tx.wtf/api' is a URL"),
+            std::string::npos);
+  const char *creds[] = {"ari", "run", "--net-allow", "https://me:pw@tx.wtf", "d.ari"};
+  EXPECT_NE(parse_host_args(5, creds).error.find("user info"), std::string::npos);
+  const char *missing[] = {"ari", "run", "--net-allow"};
+  EXPECT_NE(parse_host_args(3, missing).error.find("--net-allow needs a value"), std::string::npos)
+      << parse_host_args(3, missing).error;
+  const char *valued[] = {"ari", "run", "--net=yes", "d.ari"};
+  EXPECT_NE(parse_host_args(4, valued).error.find("--net takes no value"), std::string::npos)
+      << parse_host_args(4, valued).error;
+  const char *guess[] = {"ari", "run", "--net-al", "https://tx.wtf", "d.ari"};
+  EXPECT_NE(parse_host_args(5, guess).error.find("unknown option '--net-al'"), std::string::npos)
+      << "no guessing at an abbreviated flag: " << parse_host_args(5, guess).error;
+  EXPECT_NE(host_flags_help().find("--net-allow ORIGIN"), std::string::npos);
+
+  const char *env[] = {
+      "ari",    "run",  "--credential-env", "cvcpkg=CVCPKG_TOKEN", "--credential-env",
+      "ci=X_1", "d.ari"};
+  o = parse_host_args(7, env);
+  ASSERT_TRUE(o.error.empty()) << o.error;
+  EXPECT_TRUE(o.net.enabled) << "--credential-env implies --net";
+  ASSERT_EQ(o.net.credential_env.size(), 2u);
+  EXPECT_EQ(o.net.credential_env[0],
+            (std::pair<std::string, std::string>{"cvcpkg", "CVCPKG_TOKEN"}));
+  EXPECT_EQ(o.net.credential_env[1].second, "X_1");
+  for (const char *bad :
+       {"CVCPKG_TOKEN", "cvcpkg=", "=CVCPKG_TOKEN", "bad name=V", "c=1X", "c=X-Y"}) {
+    const char *argv[] = {"ari", "run", "--credential-env", bad, "d.ari"};
+    EXPECT_NE(parse_host_args(5, argv).error.find("--credential-env is NAME=VAR"),
+              std::string::npos)
+        << bad;
+  }
+}
+
 // ── parsing a document's arguments ──────────────────────────────────────────────────────────────
 
 TEST(AriadneHostCli, GraphicsImageAndCellSizeFlags) {

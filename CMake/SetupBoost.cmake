@@ -21,6 +21,7 @@ function(SetupBoost TargetName)
     date_time 
     regex 
     filesystem
+    program_options
     OPTIONAL_COMPONENTS
     system
     chrono
@@ -37,7 +38,8 @@ function(SetupBoost TargetName)
     # toolchain (e.g. libcvc-deps under a parent project's build tree)
     # does not leak a build-dir path into the installed cvc target's
     # INTERFACE_INCLUDE_DIRECTORIES.
-    set(_boost_targets Boost::thread Boost::date_time Boost::regex Boost::filesystem)
+    set(_boost_targets Boost::thread Boost::date_time Boost::regex Boost::filesystem
+      Boost::program_options)
     foreach(_bt IN ITEMS Boost::system Boost::chrono)
       if(TARGET ${_bt})
         list(APPEND _boost_targets ${_bt})

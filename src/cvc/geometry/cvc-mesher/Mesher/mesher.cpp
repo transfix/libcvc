@@ -15,73 +15,297 @@ namespace LBIE
 {
   VOLMAGICK_DEF_EXCEPTION(cvc_mesher_exception);
 
+  namespace
+  {
+    enum { MS_SETUP, MS_EXTRACT, MS_IMPROVE_BEGIN, MS_IMPROVE, MS_PROPERTY, MS_FINISH, MS_CONVERT,
+	   MS_RELEASE, MS_DONE };
+
+    void print_mesh_params(float isovalue, float isovalue_in, float err, float err_in,
+			   geoframe::GEOTYPE meshtype, Mesher::ImproveMethod improve_method,
+			   Mesher::NormalType normaltype, int improve_iterations, bool dual_contouring)
+    {
+      using namespace std;
+      cout << "isovalue: " << isovalue << endl;
+      cout << "inner_isovalue: " << isovalue_in << endl;
+      cout << "error: " << err << endl;
+      cout << "inner_error: " << err_in << endl;
+      cout << "mesh_type: " << static_cast<int>(meshtype) << endl;
+      cout << "improvement_method: " << static_cast<int>(improve_method) << endl;
+      cout << "iterations: " << improve_iterations << endl;
+      cout << "normal_type: " << normaltype << endl;
+      cout << "dual: " << (dual_contouring ? "true" : "false") << endl;
+    }
+
+    // Frees g's array k (0, 1, ...): false once there are no more.
+    bool free_geoframe_array(geoframe& g, int k)
+    {
+      switch(k)
+	{
+	case 0: std::vector<geoframe::float_3>().swap(g.verts); return true;
+	case 1: std::vector<geoframe::float_3>().swap(g.normals); return true;
+	case 2: std::vector<geoframe::float_3>().swap(g.color); return true;
+	case 3: std::vector<geoframe::float_2>().swap(g.curvatures); return true;
+	case 4: std::vector<geoframe::float_1>().swap(g.funcs); return true;
+	case 5: std::vector<geoframe::uint_3>().swap(g.triangles); return true;
+	case 6: std::vector<geoframe::uint_4>().swap(g.quads); return true;
+	case 7: std::vector<unsigned int>().swap(g.bound_sign); return true;
+	case 8: std::vector<unsigned int>().swap(g.bound_tri); return true;
+	case 9: std::vector<int>().swap(g.vtx_idx_arr_extend); return true;
+	case 10: std::vector<unsigned int>().swap(g.vtxnew_sign); return true;
+	case 11: std::vector<geoframe::uint_18>().swap(g.bound_edge); return true;
+	case 12: std::vector<geoframe::int_18>().swap(g.refine_edge); return true;
+	case 13: std::vector<geoframe::uint_18>().swap(g.refine_edgevtx); return true;
+	default: return false;
+	}
+    }
+  }
+
+  // ------------
+  // mesh_type_for
+  // ------------
+  // Purpose:
+  //   The geoframe mesh type do_mesh_geometry() makes for a geometry type.
+  // ---- Change History ----
+  // 10/29/2026 -- Joe R. -- Out of do_mesh_geometry, for mesh_stepper.
+  geoframe::GEOTYPE mesh_type_for(cvc::geometry::geometry_type geom_type, bool dual_contouring)
+  {
+    switch(geom_type) {
+      case cvc::geometry::SURFACE_TRI:  return geoframe::SINGLE;
+      case cvc::geometry::SURFACE_QUAD: return geoframe::QUAD;
+      // cvc::tetrahedralize2 asks for the layer between two isovalues as dual_contouring tets:
+      // TETRA2, not TETRA's solid on one side of the first isovalue
+      case cvc::geometry::VOLUME_TET:   return dual_contouring ? geoframe::TETRA2 : geoframe::TETRA;
+      case cvc::geometry::VOLUME_HEX:   return geoframe::HEXA;
+      case cvc::geometry::MIXED:        return geoframe::SINGLE;
+      default: throw cvc_mesher_exception("invalid geometry type");
+    }
+  }
+
+  // ------------
+  // mesh_stepper
+  // ------------
+  // Purpose:
+  //   do_mesh() and do_mesh_geometry() a slice at a time (see mesher.h).
+  // ---- Change History ----
+  // 10/29/2026 -- Joe R. -- Creation.
+  mesh_stepper::mesh_stepper(const VolMagick::Volume& vol,
+			     float isovalue, float isovalue_in, float err, float err_in,
+			     geoframe::GEOTYPE meshtype, Mesher::ImproveMethod improve_method,
+			     Mesher::NormalType normaltype, Mesher::ExtractionMethod extract_method,
+			     int improve_iterations, bool dual_contouring,
+			     boost::optional<const VolMagick::Volume&> propertyVol, bool geometry)
+    : _vol(vol), _isovalue(isovalue), _isovalue_in(isovalue_in), _err(err), _err_in(err_in),
+      _geom_type(-1), _meshtype(meshtype), _improve(improve_method), _normals(normaltype),
+      _extract(extract_method), _iterations(improve_iterations), _dual(dual_contouring),
+      _geometry(geometry), _stage(MS_SETUP), _release(0)
+  {
+    if(propertyVol)
+      _prop = propertyVol.get();
+  }
+
+  mesh_stepper::mesh_stepper(const VolMagick::Volume& vol,
+			     float isovalue, float isovalue_in, float err, float err_in,
+			     cvc::geometry::geometry_type geom_type, Mesher::ImproveMethod improve_method,
+			     Mesher::NormalType normaltype, Mesher::ExtractionMethod extract_method,
+			     int improve_iterations, bool dual_contouring,
+			     boost::optional<const VolMagick::Volume&> propertyVol)
+    : _vol(vol), _isovalue(isovalue), _isovalue_in(isovalue_in), _err(err), _err_in(err_in),
+      _geom_type(int(geom_type)), _meshtype(geoframe::SINGLE), _improve(improve_method),
+      _normals(normaltype), _extract(extract_method), _iterations(improve_iterations),
+      _dual(dual_contouring), _geometry(true), _stage(MS_SETUP), _release(0)
+  {
+    if(propertyVol)
+      _prop = propertyVol.get();
+  }
+
+  mesh_stepper::~mesh_stepper() {}
+
+  // do_mesh()'s Mesher, extractMesh() and qualityImprove() (Mesher::step()), the property volume's
+  // interpolation in one piece, to_geometry() (to_geometry_stepper), and the Mesher let go of an
+  // array at a time.
+  bool mesh_stepper::step(std::size_t budget)
+  {
+    if(budget == 0)
+      budget = std::size_t(-1);
+    while(budget > 0)
+      switch(_stage)
+	{
+	case MS_SETUP:
+	  {
+	    if(_geom_type >= 0)
+	      _meshtype = mesh_type_for(cvc::geometry::geometry_type(_geom_type), _dual);
+	    _mesher.reset(new Mesher(_vol.ctx()));
+	    Mesher& mesher = *_mesher;
+
+	    mesher.isovalue(_isovalue);
+	    mesher.isovalue_in(_isovalue_in);
+	    mesher.err(_err);
+	    mesher.err_in(_err_in);
+
+	    // meshtype is already an enum, convert to Mesher::MeshType
+	    Mesher::MeshType mt;
+	    switch(_meshtype) {
+	      case geoframe::SINGLE: mt = Mesher::SINGLE; break;
+	      case geoframe::TETRA:  mt = Mesher::TETRA; break;
+	      case geoframe::QUAD:   mt = Mesher::QUAD; break;
+	      case geoframe::HEXA:   mt = Mesher::HEXA; break;
+	      case geoframe::DOUBLE: mt = Mesher::DOUBLE; break;
+	      case geoframe::TETRA2: mt = Mesher::TETRA2; break;
+	      default: throw cvc_mesher_exception("invalid mesh type");
+	    }
+	    mesher.meshType(mt);
+
+	    // extract_method, improve_method, and normaltype are now enums, use them directly
+	    mesher.extractionMethod(_extract);
+	    mesher.improveMethod(_improve);
+	    mesher.normalType(_normals);
+	    mesher.dual(_dual);
+	    mesher.begin_extract_mesh(_vol); //sets the internal geoframe to the extracted mesh
+	    _stage = MS_EXTRACT;
+	    budget--;
+	  }
+	  break;
+	case MS_EXTRACT:
+	  if(_mesher->step(budget))
+	    _stage = MS_IMPROVE_BEGIN;
+	  break;
+	case MS_IMPROVE_BEGIN:
+	  _mesher->begin_quality_improve(_iterations);
+	  _stage = MS_IMPROVE;
+	  break;
+	case MS_IMPROVE:
+	  if(_mesher->step(budget))
+	    _stage = MS_PROPERTY;
+	  break;
+	case MS_PROPERTY:
+	  // If property volume provided, interpolate property values to mesh vertices
+	  if(_prop)
+	    {
+	      _mesher->interpolateProperties(_prop.get());
+	      const std::size_t units = std::size_t(_mesher->mesh().numverts)/16 + 1;
+	      budget = units >= budget ? 0 : budget - units;
+	    }
+	  _stage = MS_FINISH;
+	  break;
+	case MS_FINISH:
+	  // BUGFIX: Ensure mesh_type is preserved (sometimes gets cleared)
+	  _mesher->mesh().mesh_type = _meshtype;
+	  if(_geometry)
+	    {
+	      _convert.reset(new to_geometry_stepper(_mesher->mesh()));
+	      _stage = MS_CONVERT;
+	    }
+	  else
+	    _stage = MS_DONE;
+	  break;
+	case MS_CONVERT:
+	  if(_convert->step(budget))
+	    {
+	      _out = _convert->geometry();
+	      _convert.reset();
+	      _mesher->begin_release();
+	      _release = 0;
+	      _stage = MS_RELEASE;
+	    }
+	  break;
+	case MS_RELEASE:
+	  // the octree's arrays, then the mesh's, one at a time
+	  if(_release == 0)
+	    {
+	      if(_mesher->step(budget))
+		_release = 1;
+	    }
+	  else if(free_geoframe_array(_mesher->mesh(), _release - 1))
+	    {
+	      _release++;
+	      budget = budget > 64 ? budget - 64 : 0;
+	    }
+	  else
+	    {
+	      _mesher.reset();
+	      _stage = MS_DONE;
+	    }
+	  break;
+	default:
+	  return true;
+	}
+    return _stage == MS_DONE;
+  }
+
+  bool mesh_stepper::done() const { return _stage == MS_DONE; }
+
+  double mesh_stepper::progress() const
+  {
+    switch(_stage)
+      {
+      case MS_SETUP: return 0.0;
+      case MS_EXTRACT: return 0.8*_mesher->step_progress();
+      case MS_IMPROVE_BEGIN: return 0.8;
+      case MS_IMPROVE: return 0.8 + 0.15*_mesher->step_progress();
+      case MS_PROPERTY: return 0.95;
+      case MS_FINISH: return 0.96;
+      case MS_CONVERT: return 0.96 + 0.03*_convert->progress();
+      case MS_RELEASE: return 0.99 + 0.01*_mesher->step_progress();
+      default: return 1.0;
+      }
+  }
+
+  const char* mesh_stepper::phase() const
+  {
+    switch(_stage)
+      {
+      case MS_SETUP: return "preparing";
+      case MS_EXTRACT:
+      case MS_IMPROVE: return _mesher->step_phase();
+      case MS_IMPROVE_BEGIN: return "improving";
+      case MS_PROPERTY: return "properties";
+      case MS_FINISH:
+      case MS_CONVERT:
+      case MS_RELEASE: return "output";
+      default: return "done";
+      }
+  }
+
+  cvc::geometry mesh_stepper::take_geometry()
+  {
+    if(_stage != MS_DONE || !_geometry)
+      throw cvc_mesher_exception("mesh_stepper: the geometry is not ready");
+    return _out;
+  }
+
+  geoframe mesh_stepper::take_geoframe()
+  {
+    if(_stage != MS_DONE || !_mesher)
+      throw cvc_mesher_exception("mesh_stepper: the mesh is not ready");
+    geoframe result = _mesher->mesh();
+    return result;
+  }
+
   // -------
   // do_mesh
   // -------
-  // Purpose: 
+  // Purpose:
   //   Main entry point into LBIE meshing.
   // ---- Change History ----
   // 01/11/2014 -- Joe R. -- Creation.
   // 12/26/2025 -- Joe R. -- Changed improve_method from string to enum.
+  // 10/29/2026 -- Joe R. -- Runs a mesh_stepper to the end.
   geoframe do_mesh(const VolMagick::Volume& vol,
 		   float isovalue, float isovalue_in, float err, float err_in,
-		   geoframe::GEOTYPE meshtype, Mesher::ImproveMethod improve_method, Mesher::NormalType normaltype, 
+		   geoframe::GEOTYPE meshtype, Mesher::ImproveMethod improve_method, Mesher::NormalType normaltype,
 		   Mesher::ExtractionMethod extract_method, int improve_iterations, bool dual_contouring,
 		   bool verbose,
 		   boost::optional<const VolMagick::Volume&> propertyVol)
   {
-    using namespace std;
-
-    Mesher mesher(vol.ctx());
-
     if(verbose)
-      {
-	cout << "isovalue: " << isovalue << endl;
-	cout << "inner_isovalue: " << isovalue_in << endl;
-	cout << "error: " << err << endl;
-	cout << "inner_error: " << err_in << endl;
-	cout << "mesh_type: " << static_cast<int>(meshtype) << endl;
-	cout << "improvement_method: " << static_cast<int>(improve_method) << endl;
-	cout << "iterations: " << improve_iterations << endl;
-	cout << "normal_type: " << normaltype << endl;
-	cout << "dual: " << (dual_contouring ? "true" : "false") << endl;
-      }
+      print_mesh_params(isovalue, isovalue_in, err, err_in, meshtype, improve_method, normaltype,
+			improve_iterations, dual_contouring);
 
-    mesher.isovalue(isovalue);
-    mesher.isovalue_in(isovalue_in);
-    mesher.err(err);
-    mesher.err_in(err_in);
-      
-    // meshtype is already an enum, convert to Mesher::MeshType
-    Mesher::MeshType mt;
-    switch(meshtype) {
-      case geoframe::SINGLE: mt = Mesher::SINGLE; break;
-      case geoframe::TETRA:  mt = Mesher::TETRA; break;
-      case geoframe::QUAD:   mt = Mesher::QUAD; break;
-      case geoframe::HEXA:   mt = Mesher::HEXA; break;
-      case geoframe::DOUBLE: mt = Mesher::DOUBLE; break;
-      case geoframe::TETRA2: mt = Mesher::TETRA2; break;
-      default: throw cvc_mesher_exception("invalid mesh type");
-    }
-    mesher.meshType(mt);
-
-    // extract_method, improve_method, and normaltype are now enums, use them directly
-    mesher.extractionMethod(extract_method);
-    mesher.improveMethod(improve_method);
-    mesher.normalType(normaltype);
-    mesher.dual(dual_contouring);
-    mesher.extractMesh(vol); //sets the internal geoframe to the extracted mesh
-    mesher.qualityImprove(improve_iterations);
-    
-    // If property volume provided, interpolate property values to mesh vertices
-    if(propertyVol) {
-      mesher.interpolateProperties(propertyVol.get());
-    }
-    
-    geoframe result = mesher.mesh();
-    // BUGFIX: Ensure mesh_type is preserved (sometimes gets cleared)
-    result.mesh_type = meshtype;
-    return result;
+    mesh_stepper stepper(vol, isovalue, isovalue_in, err, err_in, meshtype, improve_method,
+			 normaltype, extract_method, improve_iterations, dual_contouring, propertyVol,
+			 false);
+    stepper.step(0);
+    return stepper.take_geoframe();
   }
 
   // ---------------
@@ -138,27 +362,14 @@ namespace LBIE
       bool verbose,
       boost::optional<const VolMagick::Volume&> propertyVol)
   {
-    // Convert geometry_type to geoframe::GEOTYPE
-    geoframe::GEOTYPE meshtype;
-    switch(geom_type) {
-      case cvc::geometry::SURFACE_TRI:  meshtype = geoframe::SINGLE; break;
-      case cvc::geometry::SURFACE_QUAD: meshtype = geoframe::QUAD; break;
-      // cvc::tetrahedralize2 asks for the layer between two isovalues as dual_contouring tets:
-      // TETRA2, not TETRA's solid on one side of the first isovalue
-      case cvc::geometry::VOLUME_TET:   meshtype = dual_contouring ? geoframe::TETRA2 : geoframe::TETRA; break;
-      case cvc::geometry::VOLUME_HEX:   meshtype = geoframe::HEXA; break;
-      case cvc::geometry::MIXED:        meshtype = geoframe::SINGLE; break;
-      default: throw cvc_mesher_exception("invalid geometry type");
-    }
-    
-    // Call existing geoframe-based implementation
-    geoframe result = do_mesh(vol, isovalue, isovalue_in, err, err_in,
-                              meshtype, improve_method, normaltype,
-                              extract_method, improve_iterations,
-                              dual_contouring, verbose, propertyVol);
-    
-    // Convert result to geometry
-    return to_geometry(result);
+    if(verbose)
+      print_mesh_params(isovalue, isovalue_in, err, err_in, mesh_type_for(geom_type, dual_contouring),
+			improve_method, normaltype, improve_iterations, dual_contouring);
+
+    mesh_stepper stepper(vol, isovalue, isovalue_in, err, err_in, geom_type, improve_method,
+			 normaltype, extract_method, improve_iterations, dual_contouring, propertyVol);
+    stepper.step(0);
+    return stepper.take_geometry();
   }
 
   // ------------------------

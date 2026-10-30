@@ -14,10 +14,14 @@
 // HttpRequestOptions / set_http_options_provider below.
 
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
 namespace cvc {
+namespace net {
+class NetPolicy; // cvc/net/net_policy.h
+} // namespace net
 namespace ariadne {
 
 // Per-request HTTP options a HOST supplies out-of-band. Deliberately NOT sourced from the .ari
@@ -68,6 +72,11 @@ void set_http_options_provider(HttpOptionsProvider provider);
 // or does not call this). Tear down with unregister_uri_handler / unregister_uri_store_handler on
 // "http"/"https".
 void register_http_uri_handler();
+// The same handlers with every read and write checked against `policy` (cvc::net::send(req,
+// policy)): a URL whose origin it does not allow fails to resolve or store, and so does a redirect
+// to one. Null is the unchecked register_http_uri_handler(). What a host that turned the network
+// on registers (net_host.h).
+void register_http_uri_handler(std::shared_ptr<const cvc::net::NetPolicy> policy);
 
 // Whether this build has the libcurl-backed http handler compiled in (CVC_ARIADNE_HAVE_HTTP).
 bool have_http_uri_handler();

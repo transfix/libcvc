@@ -42,6 +42,7 @@
 #include <cvc/ariadne/value.h>
 #include <cvc/core/app.h>
 #include <cvc/core/async_lane.h>
+#include <cvc/core/sliced_task.h> // fe_lab's loads, meshing and solves, stepped on the scheduler
 #include <cvc/geometry/fem.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/geometry_file_io.h>
@@ -59,6 +60,7 @@
 #include <cvc/tf/overlays.h>         // ... and the range / histogram its editor shows
 #include <cvc/utility/algorithm.h>   // cvc::tetrahedralize (CVC_ENABLE_MESHER), element quality
 #include <cvc/volume/contour_mesh.h> // ... computed on the field's mesh
+#include <cvc/volume/resize_stepper.h> // a volume source resampled a range at a time
 #include <cvc/volume/volume.h>
 #include <exception>
 #include <filesystem>
@@ -138,14 +140,19 @@ std::string fe_mesh_signature(cvc::app &app, const std::string &fe_base) {
 //     [0.5, 3.5] -- since LBIE counts a sample on its isovalue as outside.
 // LBIE reads the samples and the bounds as floats, so the helper compares them in float: "on a
 // bound" means equal to it in float.
-cvc::geometry tetrahedralize_interval(const cvc::volume &vol, double a, double b, int improve,
-                                      int improve_iterations) {
+namespace {
+std::string interval_name(double a, double b) {
+  return "the interval [" + fmt_value(std::min(a, b)) + ", " + fmt_value(std::max(a, b)) + "]";
+}
+
+// The two bounds tetrahedralize_interval passes to the mesher, by the rules above; it throws,
+// saying why, when there is no shell. fe_lab's stepped mesh passes the same two.
+std::pair<double, double> interval_mesher_bounds(const cvc::volume &vol, double a, double b) {
   const double lo = std::min(a, b), hi = std::max(a, b);
-  const std::string what = "the interval [" + fmt_value(lo) + ", " + fmt_value(hi) + "]";
+  const std::string what = interval_name(a, b);
   const float flo = static_cast<float>(lo), fhi = static_cast<float>(hi);
   if (!(fhi > flo)) // equal bounds (in float), or a NaN
     throw std::runtime_error("no tets: " + what + " is empty (the two isovalues are equal)");
-#ifdef CVC_ENABLE_MESHER
   // Which bounds the data passes, whether samples sit exactly on them, the nearest finite value
   // beyond each, and how many samples lie in the interval.
   bool below = false, above = false, on_lo = false, on_hi = false;
@@ -200,15 +207,23 @@ cvc::geometry tetrahedralize_interval(const cvc::volume &vol, double a, double b
   } else if (!below) {
     L = 2.0 * double(vmin) - H;
   }
-  cvc::geometry tm =
-      cvc::tetrahedralize2(vol, L, H, cvc::DUALLIB, static_cast<cvc::improvement_method>(improve),
-                           cvc::BSPLINE_CONVOLUTION, improve_iterations);
+  return {L, H};
+}
+} // namespace
+
+cvc::geometry tetrahedralize_interval(const cvc::volume &vol, double a, double b, int improve,
+                                      int improve_iterations) {
+  const std::pair<double, double> LH = interval_mesher_bounds(vol, a, b);
+#ifdef CVC_ENABLE_MESHER
+  cvc::geometry tm = cvc::tetrahedralize2(vol, LH.first, LH.second, cvc::DUALLIB,
+                                          static_cast<cvc::improvement_method>(improve),
+                                          cvc::BSPLINE_CONVOLUTION, improve_iterations);
   if (tm.const_tets().empty())
-    throw std::runtime_error("no tets: the mesher found nothing in " + what +
+    throw std::runtime_error("no tets: the mesher found nothing in " + interval_name(a, b) +
                              " (a shell thinner than a voxel?)");
   return tm;
 #else
-  (void)vol;
+  (void)LH;
   (void)improve;
   (void)improve_iterations;
   throw std::runtime_error("mesher unavailable");
@@ -1327,34 +1342,57 @@ struct Cutaway {
 // its corners so it carries its element's value as a flat colour, wound outward so it lights from
 // outside; `edges` outlines every exposed face (no quad diagonals). With `values` false every
 // value is 0: the element mesh's outer boundary as a plain surface.
-Cutaway cut_away(const cvc::geometry &m, int axis, double at, double side, bool quality,
-                 bool values) {
-  static const int kTetFaces[4][4] = {{1, 2, 3, 0}, {0, 3, 2, 0}, {0, 1, 3, 0}, {0, 2, 1, 0}};
-  static const int kHexFaces[6][4] = {{0, 1, 2, 3}, {4, 5, 6, 7}, {0, 1, 5, 4},
-                                      {1, 2, 6, 5}, {2, 3, 7, 6}, {3, 0, 4, 7}};
-  const auto &X = m.const_points();
-  const bool hex = !m.const_hexs().empty();
-  const std::size_t n = hex ? m.const_hexs().size() : m.const_tets().size();
-  const int nc = hex ? 8 : 4, nf = hex ? 6 : 4, fv = hex ? 4 : 3;
-  const auto corner = [&](std::size_t e, int k) {
-    return hex ? m.const_hexs()[e][k] : m.const_tets()[e][k];
-  };
-  const auto face_corner = [&](std::size_t e, int f, int i) {
-    return corner(e, hex ? kHexFaces[f][i] : kTetFaces[f][i]);
-  };
-
-  std::vector<cvc::point_t> centre(n);
-  std::vector<char> keep(n);
-  for (std::size_t e = 0; e < n; ++e) {
-    cvc::point_t c{{0, 0, 0}};
-    for (int k = 0; k < nc; ++k)
-      for (int j = 0; j < 3; ++j)
-        c[j] += X[corner(e, k)][j] / nc;
-    centre[e] = c;
-    keep[e] = axis < 0 || side * (c[axis] - at) >= 0;
+//
+// A slice at a time (fe_lab's cut, stepped on the scheduler): three passes over the elements --
+// their centres and sides, the count of each kept face, the exposed faces -- each stopping at its
+// budget of elements.
+class CutawayStepper {
+public:
+  CutawayStepper(std::shared_ptr<const cvc::geometry> mesh, int axis, double at, double side,
+                 bool quality, bool values)
+      : _m(std::move(mesh)), _axis(axis), _at(at), _side(side), _quality(quality), _values(values) {
+    _hex = !_m->const_hexs().empty();
+    _n = _hex ? _m->const_hexs().size() : _m->const_tets().size();
+    _nc = _hex ? 8 : 4;
+    _nf = _hex ? 6 : 4;
+    _fv = _hex ? 4 : 3;
   }
 
-  // A face is exposed when exactly one kept element has it.
+  // True once the cut is made. A unit is an element of a pass.
+  bool step(std::size_t budget) {
+    while (budget > 0 && _pass < 3) {
+      const std::size_t end = budget >= _n - _e ? _n : _e + budget;
+      for (std::size_t e = _e; e < end; ++e) {
+        if (_pass == 0)
+          centre(e);
+        else if (_pass == 1)
+          count(e);
+        else
+          emit(e);
+      }
+      budget -= end - _e;
+      _e = end;
+      if (_e < _n)
+        return false;
+      if (_pass == 0)
+        _count.reserve(_n * std::size_t(_nf));
+      ++_pass;
+      _e = 0;
+      if (_pass == 3)
+        finish();
+    }
+    return _pass == 3;
+  }
+  double progress() const {
+    return std::min(1.0, (_pass + double(_e) / std::max<double>(1.0, double(_n))) / 3.0);
+  }
+  const char *phase() const {
+    static const char *const names[] = {"centres", "faces", "emitting", "done"};
+    return names[std::min(_pass, 3)];
+  }
+  Cutaway take() { return std::move(_cw); }
+
+private:
   using key_t = std::array<cvc::index_t, 4>;
   struct key_hash {
     std::size_t operator()(const key_t &k) const {
@@ -1364,65 +1402,107 @@ Cutaway cut_away(const cvc::geometry &m, int axis, double at, double side, bool 
       return h;
     }
   };
-  const auto key = [&](std::size_t e, int f) {
+
+  cvc::index_t corner(std::size_t e, int k) const {
+    return _hex ? _m->const_hexs()[e][std::size_t(k)] : _m->const_tets()[e][std::size_t(k)];
+  }
+  cvc::index_t face_corner(std::size_t e, int f, int i) const {
+    static const int kTetFaces[4][4] = {{1, 2, 3, 0}, {0, 3, 2, 0}, {0, 1, 3, 0}, {0, 2, 1, 0}};
+    static const int kHexFaces[6][4] = {{0, 1, 2, 3}, {4, 5, 6, 7}, {0, 1, 5, 4},
+                                        {1, 2, 6, 5}, {2, 3, 7, 6}, {3, 0, 4, 7}};
+    return corner(e, _hex ? kHexFaces[f][i] : kTetFaces[f][i]);
+  }
+  key_t key(std::size_t e, int f) const {
     key_t k;
     k.fill(std::numeric_limits<cvc::index_t>::max());
-    for (int i = 0; i < fv; ++i)
-      k[i] = face_corner(e, f, i);
-    std::sort(k.begin(), k.begin() + fv);
+    for (int i = 0; i < _fv; ++i)
+      k[std::size_t(i)] = face_corner(e, f, i);
+    std::sort(k.begin(), k.begin() + _fv);
     return k;
-  };
-  std::unordered_map<key_t, int, key_hash> count;
-  count.reserve(n * nf);
-  for (std::size_t e = 0; e < n; ++e)
-    if (keep[e])
-      for (int f = 0; f < nf; ++f)
-        ++count[key(e, f)];
+  }
 
-  Cutaway cw;
-  auto &P = cw.faces.points();
-  for (std::size_t e = 0; e < n; ++e) {
-    if (!keep[e])
-      continue;
-    const double value = values ? element_value(m, e, hex, quality) : 0.0;
-    for (int f = 0; f < nf; ++f) {
-      if (count[key(e, f)] != 1)
+  void centre(std::size_t e) {
+    if (e == 0) {
+      _centre.resize(_n);
+      _keep.resize(_n);
+    }
+    const auto &X = _m->const_points();
+    cvc::point_t c{{0, 0, 0}};
+    for (int k = 0; k < _nc; ++k)
+      for (int j = 0; j < 3; ++j)
+        c[j] += X[corner(e, k)][j] / _nc;
+    _centre[e] = c;
+    _keep[e] = _axis < 0 || _side * (c[std::size_t(_axis)] - _at) >= 0;
+  }
+
+  // A face is exposed when exactly one kept element has it.
+  void count(std::size_t e) {
+    if (_keep[e])
+      for (int f = 0; f < _nf; ++f)
+        ++_count[key(e, f)];
+  }
+
+  void emit(std::size_t e) {
+    if (!_keep[e])
+      return;
+    const auto &X = _m->const_points();
+    auto &P = _cw.faces.points();
+    const double value = _values ? element_value(*_m, e, _hex, _quality) : 0.0;
+    for (int f = 0; f < _nf; ++f) {
+      if (_count[key(e, f)] != 1)
         continue;
       cvc::point_t p[4];
-      for (int i = 0; i < fv; ++i)
+      for (int i = 0; i < _fv; ++i)
         p[i] = X[face_corner(e, f, i)];
       // Wind it outward (away from its element's centre). The normal of the winding p0 p1 p2
       // (p3): (p1 - p0) x (p2 - p0), or for a quad its diagonals' (p2 - p0) x (p3 - p1).
       double u[3], w[3];
       for (int j = 0; j < 3; ++j) {
-        u[j] = fv == 4 ? p[2][j] - p[0][j] : p[1][j] - p[0][j];
-        w[j] = fv == 4 ? p[3][j] - p[1][j] : p[2][j] - p[0][j];
+        u[j] = _fv == 4 ? p[2][j] - p[0][j] : p[1][j] - p[0][j];
+        w[j] = _fv == 4 ? p[3][j] - p[1][j] : p[2][j] - p[0][j];
       }
       const double nrm[3] = {u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2],
                              u[0] * w[1] - u[1] * w[0]};
       double outward = 0;
       for (int j = 0; j < 3; ++j)
-        outward += nrm[j] * (p[0][j] - centre[e][j]);
+        outward += nrm[j] * (p[0][j] - _centre[e][j]);
       if (outward < 0)
-        std::reverse(p, p + fv);
+        std::reverse(p, p + _fv);
       const auto base = static_cast<cvc::index_t>(P.size());
-      for (int i = 0; i < fv; ++i) {
+      for (int i = 0; i < _fv; ++i) {
         P.push_back(p[i]);
-        cw.values.push_back(value);
-        cw.edges.lines().push_back({{base + static_cast<cvc::index_t>(i),
-                                     base + static_cast<cvc::index_t>((i + 1) % fv)}});
+        _cw.values.push_back(value);
+        _cw.edges.lines().push_back({{base + static_cast<cvc::index_t>(i),
+                                      base + static_cast<cvc::index_t>((i + 1) % _fv)}});
       }
-      cw.faces.tris().push_back({{base, base + 1, base + 2}});
-      if (fv == 4)
-        cw.faces.tris().push_back({{base, base + 2, base + 3}});
+      _cw.faces.tris().push_back({{base, base + 1, base + 2}});
+      if (_fv == 4)
+        _cw.faces.tris().push_back({{base, base + 2, base + 3}});
     }
   }
-  cw.edges.points() = P;
-  const std::pair<double, double> r = finite_range(cw.values);
-  cw.lo = r.first;
-  cw.hi = r.second;
-  return cw;
-}
+
+  void finish() {
+    _cw.edges.points() = _cw.faces.points();
+    const std::pair<double, double> r = finite_range(_cw.values);
+    _cw.lo = r.first;
+    _cw.hi = r.second;
+    _centre = std::vector<cvc::point_t>();
+    _keep = std::vector<char>();
+    _count = std::unordered_map<key_t, int, key_hash>();
+  }
+
+  std::shared_ptr<const cvc::geometry> _m;
+  int _axis;
+  double _at, _side;
+  bool _quality, _values, _hex = false;
+  std::size_t _n = 0;
+  int _nc = 4, _nf = 4, _fv = 3, _pass = 0;
+  std::size_t _e = 0;
+  std::vector<cvc::point_t> _centre;
+  std::vector<char> _keep;
+  std::unordered_map<key_t, int, key_hash> _count;
+  Cutaway _cw;
+};
 
 // --- fe_lab: the field on the input surface ------------------------------------------------------
 
@@ -1434,28 +1514,26 @@ struct Transfer {
   std::vector<std::array<double, 3>> weight;
 };
 
-std::shared_ptr<const Transfer> make_transfer(const cvc::geometry &boundary,
-                                              const cvc::geometry &surface) {
-  const cvc::closest_point_result cp = cvc::closest_points(boundary, surface.const_points());
+// The entries [first, first + cp.face.size()) of a transfer sized for the whole surface, from
+// those vertices' closest points on the boundary (a mesh_locator's, a range at a time).
+void fill_transfer(Transfer &t, const cvc::geometry &boundary, const cvc::closest_point_result &cp,
+                   std::size_t first) {
   const auto &P = boundary.const_points();
-  auto t = std::make_shared<Transfer>();
-  const std::size_t n = surface.const_points().size();
-  t->corner.resize(n);
-  t->weight.resize(n);
-  for (std::size_t i = 0; i < n; ++i) {
-    std::array<cvc::index_t, 3> &c = t->corner[i];
-    std::array<double, 3> &w = t->weight[i];
+  for (std::size_t j = 0; j < cp.face.size(); ++j) {
+    const std::size_t i = first + j;
+    std::array<cvc::index_t, 3> &c = t.corner[i];
+    std::array<double, 3> &w = t.weight[i];
     c = {{0, 0, 0}};
     w = {{0.0, 0.0, 0.0}};
-    if (cp.face[i] < 0)
+    if (cp.face[j] < 0)
       continue;
-    const auto &tri = boundary.const_tris()[static_cast<std::size_t>(cp.face[i])];
+    const auto &tri = boundary.const_tris()[static_cast<std::size_t>(cp.face[j])];
     c = {{tri[0], tri[1], tri[2]}};
     double e0[3], e1[3], e2[3];
     for (int k = 0; k < 3; ++k) {
       e0[k] = P[tri[1]][k] - P[tri[0]][k];
       e1[k] = P[tri[2]][k] - P[tri[0]][k];
-      e2[k] = cp.points[i][k] - P[tri[0]][k];
+      e2[k] = cp.points[j][k] - P[tri[0]][k];
     }
     const auto dot = [](const double *a, const double *b) {
       return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
@@ -1469,7 +1547,6 @@ std::shared_ptr<const Transfer> make_transfer(const cvc::geometry &boundary,
     const double b1 = (d11 * d20 - d01 * d21) / den, b2 = (d00 * d21 - d01 * d20) / den;
     w = {{1.0 - b1 - b2, b1, b2}};
   }
-  return t;
 }
 
 std::vector<double> apply_transfer(const Transfer &t, const std::vector<double> &f) {
@@ -1518,6 +1595,7 @@ struct FeJob {
   std::atomic<bool> done{false};
   std::atomic<bool> cancel{false};
   std::atomic<int> progress{0}; // percent
+  std::atomic<const char *> phase{nullptr}; // what its task is doing (a static string), or null
   std::shared_ptr<const FeLoaded> loaded;
   std::shared_ptr<const cvc::geometry> tetmesh, surface;
   bool hex = false;
@@ -1547,7 +1625,7 @@ struct CutJob {
 };
 
 struct FeKeys {
-  std::string request, busy, stoppable, status, progress, tets, hexes, nv, quality_min,
+  std::string request, busy, stoppable, status, progress, phase, tets, hexes, nv, quality_min,
       quality_mean, field_min, field_max, work_ms, last_mesh;
   std::string source_type, source_file, source_dim, source_algorithm, source_up, source_flip,
       source_height, auto_mesh, auto_solve;
@@ -1592,16 +1670,19 @@ struct FeLabRT {
   std::uint64_t cut_mesh_version = 0, cut_serial = 0;
   double opacity = -1.0, ghost_opacity = -1.0;
   std::shared_ptr<FeJob> job;
+  int task = -1;                      // the job's sliced task (cvc/core/sliced_task.h)
+  int cut_task = -1, slice_task = -1; // the view jobs'
   std::shared_ptr<SliceJob> slice_job;
   std::shared_ptr<CutJob> cut_job;
   WorkTimer work;
-  std::unique_ptr<cvc::async_lane> lane;       // loads, meshing, solves
-  std::unique_ptr<cvc::async_lane> slice_lane; // cuts, so they follow a long solve
 
   explicit FeLabRT(cvc::app &a) : app(&a), volume(a) {}
   ~FeLabRT() {
     if (job)
       job->cancel = true;
+    for (const int pid : {task, cut_task, slice_task})
+      if (pid >= 0)
+        cvc::cancel_sliced_job(*app, pid);
   }
 };
 
@@ -1613,9 +1694,41 @@ cvc::sdf_algorithm sdf_algorithm_named(const std::string &name) {
   return cvc::SDF_V2;
 }
 
+// A volume source's file, read (load_fe_source resamples it to dim^3 after, when dim > 0). Throws
+// on failure.
+cvc::volume read_fe_volume(cvc::app &app, const SourceSpec &s) {
+  if (s.file.empty())
+    throw std::runtime_error("source.file is empty");
+  const ari::ResolvedFile f = resolve_source_path(s.file, s.base_dir);
+  if (!f.ok)
+    throw std::runtime_error(f.error);
+  return cvc::volume(app, f.path);
+}
+
+// A volume source, loaded: its volume, where its elements go (fitted as they are made), and the
+// box shown until the first mesh.
+std::shared_ptr<FeLoaded> loaded_fe_volume(const SourceSpec &s,
+                                           std::shared_ptr<const cvc::volume> v) {
+  auto L = std::make_shared<FeLoaded>();
+  L->place = fit_box(v->boundingBox(), s.up, s.flip, s.height);
+  L->status = "loaded: " + s.file + " (" + std::to_string(v->XDim()) + "x" +
+              std::to_string(v->YDim()) + "x" + std::to_string(v->ZDim()) + ")";
+  L->volume = std::move(v);
+  L->placeholder = box_lines(L->volume->boundingBox());
+  L->place.apply(L->placeholder);
+  L->sig = s.sig();
+  return L;
+}
+
 // Read a source into a volume: the SDF of a mesh (fitted first), or a volume file (resampled when
 // dim > 0, fitted as its elements are made). Throws on failure.
 std::shared_ptr<FeLoaded> load_fe_source(cvc::app &app, const SourceSpec &s) {
+  if (s.type == "volume") {
+    auto v = std::make_shared<cvc::volume>(read_fe_volume(app, s));
+    if (s.dim > 0)
+      v->resize(cvc::dimension(s.dim, s.dim, s.dim));
+    return loaded_fe_volume(s, v);
+  }
   auto L = std::make_shared<FeLoaded>();
   if (s.type == "sdf") {
     // The SDF is taken in the mesh's own units (turned z-up), and fit: moves the elements after
@@ -1634,19 +1747,6 @@ std::shared_ptr<FeLoaded> load_fe_source(cvc::app &app, const SourceSpec &s) {
     L->place.apply(*shown);
     L->input = shown;
     L->status = "loaded: the " + std::to_string(d) + "^3 SDF of " + s.file;
-  } else if (s.type == "volume") {
-    if (s.file.empty())
-      throw std::runtime_error("source.file is empty");
-    const ari::ResolvedFile f = resolve_source_path(s.file, s.base_dir);
-    if (!f.ok)
-      throw std::runtime_error(f.error);
-    auto v = std::make_shared<cvc::volume>(app, f.path);
-    if (s.dim > 0)
-      v->resize(cvc::dimension(s.dim, s.dim, s.dim));
-    L->place = fit_box(v->boundingBox(), s.up, s.flip, s.height);
-    L->status = "loaded: " + s.file + " (" + std::to_string(v->XDim()) + "x" +
-                std::to_string(v->YDim()) + "x" + std::to_string(v->ZDim()) + ")";
-    L->volume = v;
   } else {
     throw std::runtime_error("unknown source.type '" + s.type + "' (sdf | volume)");
   }
@@ -1694,176 +1794,551 @@ cvc::volume negated(const cvc::volume &v) {
 }
 #endif
 
-void run_fe_mesh(FeJob &job, const cvc::volume &vol, const FeParams &p) {
-#ifdef CVC_ENABLE_MESHER
-  if (p.hex && p.interval)
-    throw std::runtime_error("interval meshing makes tetrahedra (mesh.elements: tet)");
-  // LBIE meshes {v > isovalue}. For the inside of an SDF (negative inside) mesh -v above
-  // -isovalue, so mesh.isovalue stays in the volume's own units either way. An interval is meshed
-  // in the volume's own units whatever mesh.inside says.
-  const cvc::volume v = p.inside_below && !p.interval ? negated(vol) : vol;
-  const double a = p.inside_below ? -p.isovalue : p.isovalue;
-  const auto improve = static_cast<cvc::improvement_method>(p.improve);
-  auto tm = std::make_shared<cvc::geometry>();
-  std::string where;
-  if (p.interval) {
-    // The shell between the two isovalues (it throws, saying why, when there is none).
-    *tm = tetrahedralize_interval(vol, p.isovalue, p.isovalue2, p.improve, p.improve_iterations);
-    where = " in [" + fmt_value(std::min(p.isovalue, p.isovalue2)) + ", " +
-            fmt_value(std::max(p.isovalue, p.isovalue2)) + "]";
-  } else if (p.hex) {
-    *tm = cvc::hexahedralize(v, a, cvc::DUALLIB, improve, cvc::BSPLINE_CONVOLUTION,
-                             p.improve_iterations);
-  } else {
-    *tm = cvc::tetrahedralize(v, a, cvc::DUALLIB, improve, cvc::BSPLINE_CONVOLUTION,
-                              p.improve_iterations);
+// --- fe_lab's jobs on the app's scheduler --------------------------------------------------------
+//
+// A load, mesh or solve runs as a sliced task (cvc/core/sliced_task.h): a few milliseconds a frame
+// on the scheduler thread where there are no threads (single-threaded wasm), in chunks on the app's
+// background pool where there are, so the page never stalls on a job. Each stage steps: the SDF of
+// an SDF source (cvc::sdf_stepper), the meshing (cvc::mesher_stepper, then the boundary, quality
+// and smooth surface a step or a range at a time), the solves (cvc::fem::stepped_solve). The task
+// writes only the FeJob it was given -- its results, progress and phase -- which the node takes in
+// once `done` is set, as it took a lane job's. Only a heat solve stops early (its field so far is
+// the result); the node's `stop` asks for that through job.cancel.
+class FeTask : public cvc::sliced_job {
+public:
+  FeTask(std::shared_ptr<FeJob> job, cvc::app *app, cvc::volume vol,
+         std::shared_ptr<const cvc::geometry> tm, std::shared_ptr<const cvc::geometry> surface,
+         FeParams p)
+      : _job(std::move(job)), _app(app), _vol(std::move(vol)), _tm(std::move(tm)),
+        _surface(std::move(surface)), _p(std::move(p)) {}
+
+  bool step(std::size_t budget) override {
+    if (done())
+      return true;
+    if (!_started) {
+      _started = true;
+      _t0 = std::chrono::steady_clock::now();
+    }
+    try {
+      run(budget == 0 ? std::numeric_limits<std::size_t>::max() : budget);
+    } catch (const std::exception &e) {
+      fail(std::string("error: ") + e.what());
+    } catch (...) {
+      fail("error: unknown exception");
+    }
+    return done();
   }
-  const std::size_t n = p.hex ? tm->const_hexs().size() : tm->const_tets().size();
-  if (n == 0)
-    throw std::runtime_error(p.hex ? "no hexes: the isovalue does not cut the volume"
-                                   : "no tets: the isovalue does not cut the volume");
-  p.place.apply(*tm);
-  std::shared_ptr<cvc::geometry> surf;
-  cvc::quality_stats q{};
-  if (p.hex) {
-    surf = std::make_shared<cvc::geometry>(cut_away(*tm, -1, 0.0, 1.0, false, false).faces);
-    q = cvc::compute_hex_quality_stats(tm->const_hexs(), tm->const_points(),
-                                       cvc::HEX_SCALED_JACOBIAN);
-  } else {
-    cvc::orient_tets(*tm);
-    surf = std::make_shared<cvc::geometry>(cvc::tet_boundary_surface(*tm));
-    q = cvc::compute_tet_quality_stats(tm->const_tets(), tm->const_points(), cvc::TET_MIN_ANGLE);
-    // The field shows more smoothly on the surface the elements approximate than on their own
-    // boundary: an SDF source's mesh, or a volume's isosurface. Not for an interval mesh, whose
-    // inner boundary is on neither.
-    if (!p.interval) {
-      std::shared_ptr<const cvc::geometry> smooth = p.input;
-      if (!smooth) {
-        auto g = std::make_shared<cvc::geometry>(cvc::iso(v, a, cvc::DUALLIB));
-        p.place.apply(*g);
-        g->normals().clear();
-        cvc::compute_vertex_normals(*g);
-        if (tri_count(*g) > 0)
-          smooth = g;
-      }
-      if (smooth) {
-        job.transfer = make_transfer(*surf, *smooth);
-        job.smooth = smooth;
-      }
+  bool done() const override { return _finished || _cancelled.load(); }
+  void cancel() override { _cancelled = true; }
+  bool cancelled() const override { return _cancelled.load(); }
+  const char *phase() const override { return _phase; }
+  double progress() const override { return _progress; }
+  std::string status() const override { return _job->running; }
+
+private:
+  enum class stage { start, sdf, load_volume, mesh, solve_boundary, solve, finish };
+
+  void set(const char *phase, double progress) {
+    _phase = phase;
+    _progress = std::max(_progress, std::min(progress, 0.999));
+    _job->phase.store(phase, std::memory_order_relaxed);
+    _job->progress = static_cast<int>(100.0 * _progress);
+  }
+
+  void run(std::size_t budget) {
+    switch (_st) {
+    case stage::start:
+      begin();
+      return;
+    case stage::sdf: {
+      const bool ready = _sdf->step(budget);
+      set(_sdf->phase(), 0.05 + 0.9 * _sdf->progress());
+      if (ready)
+        finish_sdf();
+      return;
+    }
+    case stage::load_volume:
+      load_volume_step(budget);
+      return;
+    case stage::mesh:
+      mesh_step(budget);
+      return;
+    case stage::solve_boundary:
+      solve_boundary_step(budget);
+      return;
+    case stage::solve:
+      solve_step(budget);
+      return;
+    case stage::finish:
+      return;
     }
   }
-  // The normals come from the faces' windings: LBIE's gradient normals point the wrong way on -v,
-  // and an interval's boundary has two sheets, each wound outward from the shell (the inner
-  // sheet's normals face the cavity), where g = min(v - lo, hi - v) has a crease.
-  cvc::compute_vertex_normals(*surf);
-  job.status = "meshed: " + std::to_string(n) + (p.hex ? " hexes" : " tets") + where;
-  job.tetmesh = tm;
-  job.surface = surf;
-  job.hex = p.hex;
-  job.quality_min = q.min;
-  job.quality_mean = q.mean;
-  job.mesh_sig = p.mesh_sig;
-#else
-  (void)vol;
-  (void)p;
-  job.status = "mesher unavailable";
-#endif
-}
 
-void run_fe_solve(FeJob &job, const cvc::geometry &tm, const FeParams &p) {
-  const cvc::fem::domain vol = cvc::fem::domain::VOLUME;
-  const cvc::geometry::points_t &P = tm.const_points();
-  if (p.problem == "modes") {
-    // Free-vibration (Neumann) modes of the solid; mode 0 is the constant.
-    std::shared_ptr<const cvc::fem::eigen_result> e = p.eigen;
-    if (!e || static_cast<int>(e->vectors.size()) <= p.mode)
-      e = std::make_shared<cvc::fem::eigen_result>(
-          cvc::fem::laplacian_eigenmodes(tm, std::max(p.mode + 1, kMinVolumeModes), vol));
-    job.eigen = e;
-    if (static_cast<int>(e->vectors.size()) <= p.mode)
+  void begin() {
+    if (_job->cancel) {
+      _job->status = "cancelled";
+      finish();
+      return;
+    }
+    if (_job->op == "load") {
+      if (_p.source.type == "sdf") {
+#ifdef CVC_ENABLE_SDF
+        set("reading", 0.0);
+        // load_fe_source's SDF source, its SDF stepped: the mesh in its own units (turned z-up),
+        // on sdf_volume_of_mesh's grid (the extents padded 10%, cubic).
+        SourceSpec turned = _p.source;
+        turned.height = 0.0;
+        auto raw = std::make_shared<cvc::geometry>(load_source_mesh(turned));
+        _raw = raw;
+        _dim = _p.source.dim > 0 ? _p.source.dim : 64;
+        const cvc::bounding_box e = raw->extents();
+        const double half = 0.55 * std::max({e.maxx - e.minx, e.maxy - e.miny, e.maxz - e.minz});
+        const double cx = 0.5 * (e.minx + e.maxx), cy = 0.5 * (e.miny + e.maxy),
+                     cz = 0.5 * (e.minz + e.maxz);
+        _sdf = std::make_unique<cvc::sdf_stepper>(
+            *_app, raw, cvc::dimension(_dim, _dim, _dim),
+            cvc::bounding_box(cx - half, cy - half, cz - half, cx + half, cy + half, cz + half),
+            sdf_algorithm_named(_p.source.algorithm));
+        set("sdf", 0.05);
+        _st = stage::sdf;
+#else
+        throw std::runtime_error("source: { sdf } needs a CVC_ENABLE_SDF build");
+#endif
+      } else {
+        set("reading", 0.0);
+        _st = stage::load_volume;
+      }
+      return;
+    }
+    if (_job->op == "mesh") {
+      begin_mesh();
+      return;
+    }
+    begin_solve();
+  }
+
+  // The mesh: LBIE's elements of {v > isovalue} (cvc::mesher_stepper), placed; their boundary
+  // (outward for a tet mesh), quality, and the smooth surface the field shows on with the transfer
+  // onto it. Each is a step, a range of a step's budget, or stepped itself.
+  void begin_mesh() {
+#ifdef CVC_ENABLE_MESHER
+    if (_p.hex && _p.interval)
+      throw std::runtime_error("interval meshing makes tetrahedra (mesh.elements: tet)");
+    // LBIE meshes {v > isovalue}. For the inside of an SDF (negative inside) mesh -v above
+    // -isovalue, so mesh.isovalue stays in the volume's own units either way. An interval is
+    // meshed in the volume's own units whatever mesh.inside says.
+    set("preparing", 0.0);
+    if (_p.inside_below && !_p.interval)
+      _vol = negated(_vol);
+    _iso = _p.inside_below ? -_p.isovalue : _p.isovalue;
+    const auto improve = static_cast<cvc::improvement_method>(_p.improve);
+    if (_p.interval) {
+      // The shell between the two isovalues: tetrahedralize_interval's bounds (it throws, saying
+      // why, when there is none).
+      const std::pair<double, double> b = interval_mesher_bounds(_vol, _p.isovalue, _p.isovalue2);
+      _mesher = std::make_unique<cvc::mesher_stepper>(
+          cvc::mesher_stepper::tetrahedralize2(_vol, b.first, b.second, cvc::DUALLIB, improve,
+                                               cvc::BSPLINE_CONVOLUTION, _p.improve_iterations));
+      _where = " in [" + fmt_value(std::min(_p.isovalue, _p.isovalue2)) + ", " +
+               fmt_value(std::max(_p.isovalue, _p.isovalue2)) + "]";
+    } else if (_p.hex) {
+      _mesher = std::make_unique<cvc::mesher_stepper>(cvc::mesher_stepper::hexahedralize(
+          _vol, _iso, cvc::DUALLIB, improve, cvc::BSPLINE_CONVOLUTION, _p.improve_iterations));
+    } else {
+      _mesher = std::make_unique<cvc::mesher_stepper>(cvc::mesher_stepper::tetrahedralize(
+          _vol, _iso, cvc::DUALLIB, improve, cvc::BSPLINE_CONVOLUTION, _p.improve_iterations));
+    }
+    _st = stage::mesh;
+#else
+    _job->status = "mesher unavailable";
+    finish();
+#endif
+  }
+
+#ifdef CVC_ENABLE_MESHER
+  enum class after{hex_boundary, orient, boundary, quality, isosurface, locate, transfer, normals};
+
+  void mesh_step(std::size_t budget) {
+    if (_mesher) {
+      const bool meshed = _mesher->step(budget);
+      set(_mesher->phase(), 0.8 * _mesher->progress());
+      if (!meshed)
+        return;
+      _mesh = std::make_shared<cvc::geometry>(_mesher->take());
+      _mesher.reset();
+      _elements = _p.hex ? _mesh->const_hexs().size() : _mesh->const_tets().size();
+      if (_elements == 0)
+        throw std::runtime_error(_p.interval
+                                     ? "no tets: the mesher found nothing in " +
+                                           interval_name(_p.isovalue, _p.isovalue2) +
+                                           " (a shell thinner than a voxel?)"
+                                     : (_p.hex ? "no hexes: the isovalue does not cut the volume"
+                                               : "no tets: the isovalue does not cut the volume"));
+      _p.place.apply(*_mesh);
+      if (_p.hex)
+        _cut = std::make_unique<CutawayStepper>(_mesh, -1, 0.0, 1.0, false, false);
+      _after = _p.hex ? after::hex_boundary : after::orient;
+      return;
+    }
+    switch (_after) {
+    case after::hex_boundary: { // its outer faces: a cut-away that keeps every element
+      const bool cut = _cut->step(budget);
+      set("boundary", 0.8 + 0.06 * _cut->progress());
+      if (!cut)
+        return;
+      _surf = std::make_shared<cvc::geometry>(_cut->take().faces);
+      _cut.reset();
+      _after = after::quality;
+      return;
+    }
+    case after::orient:
+      set("orienting", 0.8);
+      cvc::orient_tets(*_mesh);
+      _after = after::boundary;
+      return;
+    case after::boundary: // tet_boundary_surface, stepped; the surface taken a step after
+      if (!_boundary)
+        _boundary = std::make_unique<cvc::tet_boundary_stepper>(_mesh);
+      if (!_boundary->done()) {
+        _boundary->step(budget);
+        set(_boundary->phase(), 0.81 + 0.05 * _boundary->progress()); // its stages' costs differ
+        return;
+      }
+      set("boundary", 0.86);
+      _surf = std::make_shared<cvc::geometry>(_boundary->surface());
+      _boundary.reset();
+      _after = after::quality;
+      return;
+    case after::quality:
+      set("quality", 0.86);
+      _quality = _p.hex ? cvc::compute_hex_quality_stats(_mesh->const_hexs(), _mesh->const_points(),
+                                                         cvc::HEX_SCALED_JACOBIAN)
+                        : cvc::compute_tet_quality_stats(_mesh->const_tets(), _mesh->const_points(),
+                                                         cvc::TET_MIN_ANGLE);
+      // The field shows more smoothly on the surface the elements approximate than on their own
+      // boundary: an SDF source's mesh, or a volume's isosurface. Not for an interval mesh, whose
+      // inner boundary is on neither, nor hexahedra.
+      if (_p.hex || _p.interval) {
+        _after = after::normals;
+      } else if (_p.input) {
+        _smooth = _p.input;
+        _after = after::locate;
+      } else {
+        _isosurface = std::make_unique<cvc::mesher_stepper>(
+            cvc::mesher_stepper::iso(_vol, _iso, cvc::DUALLIB));
+        _after = after::isosurface;
+        set("isosurface", 0.86);
+      }
+      return;
+    case after::isosurface:
+      mesh_isosurface(budget);
+      return;
+    case after::locate: {
+      set("locating", 0.92);
+      _locator.build(*_surf);
+      auto t = std::make_shared<Transfer>();
+      t->corner.resize(_smooth->const_points().size());
+      t->weight.resize(_smooth->const_points().size());
+      _transfer = t;
+      _next = 0;
+      _after = after::transfer;
+      return;
+    }
+    case after::transfer: {
+      // The smooth surface's vertices a range at a time: each one's closest boundary triangle.
+      const auto &Q = _smooth->const_points();
+      const std::size_t count = std::min(std::max<std::size_t>(1, budget), Q.size() - _next);
+      const cvc::geometry::points_t range(Q.begin() + std::ptrdiff_t(_next),
+                                          Q.begin() + std::ptrdiff_t(_next + count));
+      fill_transfer(*_transfer, *_surf, _locator.closest_points(range), _next);
+      _next += count;
+      set("transferring", 0.92 + 0.06 * double(_next) / std::max<double>(1.0, double(Q.size())));
+      if (_next < Q.size())
+        return;
+      _job->transfer = _transfer;
+      _job->smooth = _smooth;
+      _after = after::normals;
+      return;
+    }
+    case after::normals:
+      // The normals come from the faces' windings: LBIE's gradient normals point the wrong way on
+      // -v, and an interval's boundary has two sheets, each wound outward from the shell (the
+      // inner sheet's normals face the cavity), where g = min(v - lo, hi - v) has a crease.
+      set("normals", 0.98);
+      cvc::compute_vertex_normals(*_surf);
+      _job->status =
+          "meshed: " + std::to_string(_elements) + (_p.hex ? " hexes" : " tets") + _where;
+      _job->tetmesh = _mesh;
+      _job->surface = _surf;
+      _job->hex = _p.hex;
+      _job->quality_min = _quality.min;
+      _job->quality_mean = _quality.mean;
+      _job->mesh_sig = _p.mesh_sig;
+      _mesh.reset();
+      _surf.reset();
+      finish();
+      return;
+    }
+  }
+
+  // A volume source's isosurface, for the field to show on.
+  void mesh_isosurface(std::size_t budget) {
+    if (_isosurface->step(budget)) {
+      auto g = std::make_shared<cvc::geometry>(_isosurface->take());
+      _isosurface.reset();
+      _p.place.apply(*g);
+      g->normals().clear();
+      cvc::compute_vertex_normals(*g);
+      if (tri_count(*g) > 0) {
+        _smooth = g;
+        _after = after::locate;
+      } else {
+        _after = after::normals;
+      }
+    }
+    set("isosurface", 0.86 + 0.06 * (_isosurface ? _isosurface->progress() : 1.0));
+  }
+#else
+  void mesh_step(std::size_t) {}
+#endif
+
+  // load_fe_source's volume file: read in one step, then resampled to source.dim^3 when asked
+  // (cvc::resize_stepper, resize()'s voxels a range at a time).
+  void load_volume_step(std::size_t budget) {
+    if (!_resize) {
+      cvc::volume v = read_fe_volume(*_app, _p.source);
+      const int d = _p.source.dim;
+      if (d <= 0) {
+        finish_volume(std::make_shared<const cvc::volume>(v));
+        return;
+      }
+      _resize = std::make_unique<cvc::resize_stepper>(v, cvc::dimension(d, d, d));
+      set("resampling", 0.3);
+      return;
+    }
+    const bool ready = _resize->step(budget);
+    set("resampling", 0.3 + 0.7 * _resize->progress());
+    if (!ready)
+      return;
+    auto v = std::make_shared<const cvc::volume>(_resize->take());
+    _resize.reset();
+    finish_volume(std::move(v));
+  }
+
+  void finish_volume(std::shared_ptr<const cvc::volume> v) {
+    _job->loaded = loaded_fe_volume(_p.source, std::move(v));
+    _job->status = _job->loaded->status;
+    finish();
+  }
+
+  void finish_sdf() {
+    auto L = std::make_shared<FeLoaded>();
+    L->volume = std::make_shared<cvc::volume>(_sdf->take());
+    _sdf.reset();
+    L->place = fit_points(_raw->const_points(), _p.source.height);
+    auto shown = std::make_shared<cvc::geometry>();
+    shown->copy(*_raw, true);
+    L->place.apply(*shown);
+    L->input = shown;
+    L->status = "loaded: the " + std::to_string(_dim) + "^3 SDF of " + _p.source.file;
+    L->placeholder = box_lines(L->volume->boundingBox());
+    L->place.apply(L->placeholder);
+    L->sig = _p.source.sig();
+    _raw.reset();
+    _job->status = L->status;
+    _job->loaded = L;
+    finish();
+  }
+
+  // A solve's set-up (boundary conditions, the cached modes) in one step; the solve then steps.
+  void begin_solve() {
+    set("preparing", 0.0);
+    const cvc::fem::domain vol = cvc::fem::domain::VOLUME;
+    if (_p.problem == "modes") {
+      std::shared_ptr<const cvc::fem::eigen_result> e = _p.eigen;
+      if (e && static_cast<int>(e->vectors.size()) > _p.mode) {
+        finish_modes(e);
+        return;
+      }
+      _solver = cvc::fem::stepped_solve::modes(_tm, std::max(_p.mode + 1, kMinVolumeModes), vol);
+      _st = stage::solve;
+      return;
+    }
+    if (_p.problem != "heat" && _p.problem != "poisson")
+      throw std::runtime_error("unknown problem '" + _p.problem + "' (poisson | heat | modes)");
+    // fem::boundary_vertices on the VOLUME domain, stepped (tet_boundary_stepper::vertices()).
+    if (_tm->num_points() == 0)
+      throw std::runtime_error("fem: the mesh has no points");
+    if (_tm->const_tets().empty())
+      throw std::runtime_error("fem: the mesh has no tets");
+    _boundary = std::make_unique<cvc::tet_boundary_stepper>(_tm);
+    set("boundary", 0.0);
+    _st = stage::solve_boundary;
+  }
+
+  void solve_boundary_step(std::size_t budget) {
+    if (!_boundary->done()) {
+      _boundary->step(budget);
+      set(_boundary->phase(), 0.03 * _boundary->progress()); // its stages' costs differ
+      return;
+    }
+    set("boundary", 0.03);
+    const std::vector<cvc::index_t> bnd = _boundary->vertices();
+    _boundary.reset();
+    const cvc::fem::domain vol = cvc::fem::domain::VOLUME;
+    const cvc::geometry::points_t &P = _tm->const_points();
+    if (_p.problem == "heat") {
+      // A hot floor: boundary vertices in the lowest 5% of the height held at 1, the rest of the
+      // boundary insulated, the body starting at 0.
+      double zlo = std::numeric_limits<double>::infinity(), zhi = -zlo;
+      for (cvc::index_t v : bnd) {
+        zlo = std::min(zlo, P[v][2]);
+        zhi = std::max(zhi, P[v][2]);
+      }
+      cvc::fem::dirichlet bc;
+      for (cvc::index_t v : bnd)
+        if (P[v][2] <= zlo + 0.05 * (zhi - zlo))
+          bc.vertices.push_back(v);
+      bc.values.push_back(1.0);
+      if (bc.vertices.empty())
+        throw std::runtime_error("no boundary vertices to heat");
+      _steps = std::max(1, _p.heat.steps);
+      _every = std::max(1, _steps / 20);
+      _solver = cvc::fem::stepped_solve::heat(_tm, std::vector<double>(P.size(), 0.0), _p.heat,
+                                              std::move(bc), vol);
+    } else if (_p.problem == "poisson") {
+      cvc::fem::dirichlet bc;
+      bc.vertices = bnd;
+      bc.values.push_back(0.0);
+      _solver = cvc::fem::stepped_solve::poisson(_tm, {_p.f}, std::move(bc), vol);
+    }
+    _st = stage::solve;
+  }
+
+  void solve_step(std::size_t budget) {
+    if (_p.problem == "heat" && _job->cancel)
+      _solver->stop(); // the field after the step in progress is the result
+    const bool solved = _solver->step(budget);
+    set(_solver->phase(), _solver->progress());
+    if (_p.problem == "heat") {
+      // An intermediate field every 5% of the steps, for the node to show while it runs.
+      const int s = _solver->steps_done();
+      if (s != _shown && s % _every == 0 && s < _steps) {
+        _shown = s;
+        std::lock_guard<std::mutex> lock(_job->snap_mtx);
+        _job->snapshot = _solver->field();
+        _job->fresh = true;
+      }
+    }
+    if (!solved)
+      return;
+    if (_p.problem == "modes") {
+      finish_modes(std::make_shared<cvc::fem::eigen_result>(_solver->take_modes()));
+      return;
+    }
+    _job->field = _solver->field();
+    if (_p.problem == "heat") {
+      const int last = _solver->steps_done();
+      _job->status = last < _steps ? "heat: stopped at step " + std::to_string(last)
+                                   : "heat: " + std::to_string(_steps) + " steps";
+    } else {
+      _job->status = "poisson: solved";
+    }
+    _solver.reset();
+    finish();
+  }
+
+  void finish_modes(std::shared_ptr<const cvc::fem::eigen_result> e) {
+    _solver.reset();
+    _job->eigen = e;
+    if (static_cast<int>(e->vectors.size()) <= _p.mode)
       throw std::runtime_error("the eigensolver returned only " +
                                std::to_string(e->vectors.size()) + " modes");
-    job.field = e->vectors[static_cast<std::size_t>(p.mode)];
-    job.status = "modes: mode " + std::to_string(p.mode) + ", eigenvalue " +
-                 fmt_g(e->values[static_cast<std::size_t>(p.mode)]);
-    return;
+    _job->field = e->vectors[static_cast<std::size_t>(_p.mode)];
+    _job->status = "modes: mode " + std::to_string(_p.mode) + ", eigenvalue " +
+                   fmt_g(e->values[static_cast<std::size_t>(_p.mode)]);
+    finish();
   }
-  const std::vector<cvc::index_t> bnd = cvc::fem::boundary_vertices(tm, vol);
-  if (p.problem == "heat") {
-    // A hot floor: boundary vertices in the lowest 5% of the height held at 1, the rest of the
-    // boundary insulated, the body starting at 0.
-    double zlo = std::numeric_limits<double>::infinity(), zhi = -zlo;
-    for (cvc::index_t v : bnd) {
-      zlo = std::min(zlo, P[v][2]);
-      zhi = std::max(zhi, P[v][2]);
-    }
-    cvc::fem::dirichlet bc;
-    for (cvc::index_t v : bnd)
-      if (P[v][2] <= zlo + 0.05 * (zhi - zlo))
-        bc.vertices.push_back(v);
-    bc.values.push_back(1.0);
-    if (bc.vertices.empty())
-      throw std::runtime_error("no boundary vertices to heat");
-    const int steps = std::max(1, p.heat.steps);
-    const int every = std::max(1, steps / 20);
-    int last = 0;
-    const cvc::fem::heat_progress progress = [&job, &last, steps,
-                                              every](int s, const std::vector<double> &u) {
-      last = s;
-      job.progress = static_cast<int>(100.0 * s / steps);
-      if (s % every == 0 && s < steps) {
-        std::lock_guard<std::mutex> lock(job.snap_mtx);
-        job.snapshot = u;
-        job.fresh = true;
-      }
-      return !job.cancel.load();
-    };
-    job.field =
-        cvc::fem::solve_heat(tm, std::vector<double>(P.size(), 0.0), p.heat, bc, vol, progress);
-    job.status = job.cancel ? "heat: stopped at step " + std::to_string(last)
-                            : "heat: " + std::to_string(steps) + " steps";
-  } else if (p.problem == "poisson") {
-    cvc::fem::dirichlet bc;
-    bc.vertices = bnd;
-    bc.values.push_back(0.0);
-    job.field = cvc::fem::solve_poisson(tm, {p.f}, bc, vol);
-    job.status = "poisson: solved";
-  } else {
-    throw std::runtime_error("unknown problem '" + p.problem + "' (poisson | heat | modes)");
-  }
-}
 
-void run_fe_job(FeJob &job, cvc::app *app, const cvc::volume &vol,
-                std::shared_ptr<const cvc::geometry> tm, const FeParams &p) {
-  const auto t0 = std::chrono::steady_clock::now();
-  try {
-    if (job.cancel) {
-      job.status = "cancelled";
-    } else if (job.op == "load") {
-      std::shared_ptr<FeLoaded> L = load_fe_source(*app, p.source);
-      job.status = L->status;
-      job.loaded = L;
-    } else if (job.op == "mesh") {
-      run_fe_mesh(job, vol, p);
-    } else {
-      run_fe_solve(job, *tm, p);
-    }
-    if (!job.cancel)
-      job.status += " (" + fmt_ms(ms_since(t0)) + " ms)";
-  } catch (const std::exception &e) {
-    job.loaded.reset();
-    job.tetmesh.reset();
-    job.field.clear();
-    job.status = std::string("error: ") + e.what();
-  } catch (...) {
-    job.loaded.reset();
-    job.tetmesh.reset();
-    job.field.clear();
-    job.status = "error: unknown exception";
+  void fail(const std::string &why) {
+    _sdf.reset();
+    _resize.reset();
+    _boundary.reset();
+    _solver.reset();
+#ifdef CVC_ENABLE_MESHER
+    _mesher.reset();
+    _isosurface.reset();
+    _cut.reset();
+    _mesh.reset();
+    _surf.reset();
+#endif
+    _job->loaded.reset();
+    _job->tetmesh.reset();
+    _job->field.clear();
+    _job->status = why;
+    _failed = true;
+    finish();
   }
-  job.progress = 100;
-  job.done.store(true, std::memory_order_release);
-}
+
+  void finish() {
+    if (!_failed && !_job->cancel)
+      _job->status += " (" + fmt_ms(ms_since(_t0)) + " ms)";
+    _st = stage::finish;
+    _phase = "done";
+    _progress = 1.0;
+    _job->phase.store(nullptr, std::memory_order_relaxed);
+    _job->progress = 100;
+    _finished = true;
+    _job->done.store(true, std::memory_order_release);
+  }
+
+  std::shared_ptr<FeJob> _job;
+  cvc::app *_app;
+  cvc::volume _vol;
+  std::shared_ptr<const cvc::geometry> _tm, _surface;
+  FeParams _p;
+  stage _st = stage::start;
+  bool _started = false, _finished = false, _failed = false;
+  std::atomic<bool> _cancelled{false};
+  const char *_phase = "starting";
+  double _progress = 0.0;
+  std::chrono::steady_clock::time_point _t0;
+  // load
+  std::shared_ptr<const cvc::geometry> _raw;
+  int _dim = 64;
+  std::unique_ptr<cvc::resize_stepper> _resize;
+#ifdef CVC_ENABLE_SDF
+  std::unique_ptr<cvc::sdf_stepper> _sdf;
+#else
+  struct no_sdf {
+    bool step(std::size_t) { return true; }
+    double progress() const { return 1.0; }
+    const char *phase() const { return "done"; }
+    cvc::volume take() { throw std::runtime_error("no SDF"); }
+  };
+  std::unique_ptr<no_sdf> _sdf;
+#endif
+#ifdef CVC_ENABLE_MESHER
+  // mesh
+  std::unique_ptr<cvc::mesher_stepper> _mesher;     // the elements
+  std::unique_ptr<cvc::mesher_stepper> _isosurface; // a volume source's, for the field to show on
+  double _iso = 0.0;                                // the isovalue LBIE meshes above
+  std::string _where;
+  after _after = after::orient;
+  std::shared_ptr<cvc::geometry> _mesh, _surf;
+  std::size_t _elements = 0, _next = 0;
+  std::unique_ptr<CutawayStepper> _cut;
+  cvc::quality_stats _quality{};
+  std::shared_ptr<const cvc::geometry> _smooth;
+  cvc::mesh_locator _locator;
+  std::shared_ptr<Transfer> _transfer;
+#endif
+  // the mesh's boundary (a mesh's surface, a solve's boundary vertices)
+  std::unique_ptr<cvc::tet_boundary_stepper> _boundary;
+  // solve
+  std::unique_ptr<cvc::fem::stepped_solve> _solver;
+  int _steps = 0, _every = 1, _shown = 0;
+};
 
 SourceSpec fe_source_from_keys(const FeLabRT &rt) {
   cvc::app &a = *rt.app;
@@ -1941,11 +2416,16 @@ void launch_fe_job(FeLabRT &rt, const std::string &op) {
   ari::write<std::string>(a, rt.k.status, job->running);
   if (op == "mesh") // whoever asked: the transfer-function binding's debounced remesh compares it
     ari::write<std::string>(a, rt.k.last_mesh, bounds_signature(b));
-  const cvc::volume vol = rt.volume;
-  std::shared_ptr<const cvc::geometry> tm = rt.tetmesh;
-  cvc::app *app = rt.app;
-  if (!rt.lane->submit([job, app, vol, tm, p]() { run_fe_job(*job, app, vol, tm, p); })) {
-    job->status = "error: the fe_lab lane is stopped";
+  ari::write<std::string>(a, rt.k.phase, "");
+  cvc::sliced_task_options o;
+  o.kind = "fe_lab";
+  o.subject = op + " " + rt.k.request.substr(0, rt.k.request.rfind('.'));
+  o.owner = "fe_lab:" + rt.k.request;
+  std::string why;
+  rt.task = cvc::schedule_sliced_job(
+      a, std::make_shared<FeTask>(job, rt.app, rt.volume, rt.tetmesh, rt.surface, p), o, &why);
+  if (rt.task < 0) {
+    job->status = "error: the job could not start: " + why;
     job->done.store(true, std::memory_order_release);
   }
 }
@@ -2125,30 +2605,131 @@ void apply_fe_job(FeLabRT &rt, FeJob &j) {
   }
 }
 
-void run_slice_job(SliceJob &job, const cvc::geometry &tm, const std::vector<double> &field,
-                   const cvc::geometry::vector_t &normal, double offset) {
-  try {
-    cvc::geometry t(tm);
-    t.functions() = field; // interpolated onto the cut (an empty field clears it)
-    auto s = std::make_shared<cvc::geometry>(cvc::slice_tets(t, normal, offset));
-    cvc::compute_vertex_normals(*s);
-    job.slice = s;
-  } catch (...) {
-    job.slice.reset();
-  }
-  job.done.store(true, std::memory_order_release);
-}
+// The elements view's cut-away (a CutawayStepper) or the field view's cut (tet_slicer over ranges
+// of tetrahedra, the field carried onto it), as a sliced task like the node's jobs: a few
+// milliseconds a frame where there are no threads. It writes only its job, which the node takes in
+// once `done` is set.
+class ViewTask : public cvc::sliced_job {
+public:
+  ViewTask(std::shared_ptr<CutJob> job, std::shared_ptr<const cvc::geometry> tm, int axis,
+           double at, double side, bool quality)
+      : _cut(std::move(job)),
+        _stepper(std::make_unique<CutawayStepper>(std::move(tm), axis, at, side, quality, true)) {}
+  ViewTask(std::shared_ptr<SliceJob> job, std::shared_ptr<const cvc::geometry> tm,
+           std::vector<double> field, const cvc::geometry::vector_t &normal, double offset)
+      : _slice(std::move(job)), _tm(std::move(tm)), _field(std::move(field)), _normal(normal),
+        _offset(offset) {}
 
-void run_cut_job(CutJob &job, const cvc::geometry &tm, int axis, double at, double side,
-                 bool quality) {
-  try {
-    auto c = std::make_shared<Cutaway>(cut_away(tm, axis, at, side, quality, true));
-    cvc::compute_vertex_normals(c->faces); // every face has its own corners: flat shading
-    job.cut = c;
-  } catch (...) {
-    job.cut.reset();
+  bool step(std::size_t budget) override {
+    if (done())
+      return true;
+    try {
+      if (_cut)
+        cut_step(budget);
+      else
+        slice_step(budget);
+    } catch (...) {
+      if (_cut)
+        _cut->cut.reset();
+      else
+        _slice->slice.reset();
+      finish();
+    }
+    return done();
   }
-  job.done.store(true, std::memory_order_release);
+  bool done() const override { return _finished || _cancelled.load(); }
+  void cancel() override { _cancelled = true; }
+  bool cancelled() const override { return _cancelled.load(); }
+  const char *phase() const override {
+    return _stepper ? _stepper->phase() : (_slicer ? "slicing" : "preparing");
+  }
+  double progress() const override {
+    if (_finished)
+      return 1.0;
+    if (_stepper)
+      return _stepper->progress();
+    return _slicer ? double(_next) / std::max<double>(1.0, double(_slicer->size())) : 0.0;
+  }
+  std::string status() const override { return _cut ? "cutting away" : "slicing"; }
+
+private:
+  static constexpr std::size_t kTetsPerUnit = 4; // a tetrahedron cut costs a few elements' work
+
+  void cut_step(std::size_t budget) {
+    if (!_stepper->step(budget))
+      return;
+    auto c = std::make_shared<Cutaway>(_stepper->take());
+    _stepper.reset();
+    cvc::compute_vertex_normals(c->faces); // every face has its own corners: flat shading
+    _cut->cut = c;
+    finish();
+  }
+
+  void slice_step(std::size_t budget) {
+    if (!_slicer) {
+      cvc::geometry t(*_tm);
+      t.functions() = _field; // interpolated onto the cut (an empty field clears it)
+      _slicer = std::make_unique<cvc::tet_slicer>(t, _normal, _offset);
+      _tm.reset();
+      _field = std::vector<double>();
+      _out = std::make_shared<cvc::geometry>();
+      _out->set_geometry_type(cvc::geometry::SURFACE_TRI);
+      return;
+    }
+    const std::size_t n = _slicer->size();
+    const std::size_t count = std::max<std::size_t>(1, budget / kTetsPerUnit);
+    const cvc::geometry piece = _slicer->piece(_next, std::min(count, n - _next));
+    _next += std::min(count, n - _next);
+    const auto base = static_cast<cvc::index_t>(_out->const_points().size());
+    auto &P = _out->points();
+    P.insert(P.end(), piece.const_points().begin(), piece.const_points().end());
+    auto &F = _out->functions();
+    F.insert(F.end(), piece.const_functions().begin(), piece.const_functions().end());
+    for (const auto &t : piece.const_tris())
+      _out->tris().push_back({{t[0] + base, t[1] + base, t[2] + base}});
+    if (_next < n)
+      return;
+    if (_out->const_functions().size() != _out->const_points().size())
+      _out->functions().clear();
+    cvc::compute_vertex_normals(*_out);
+    _slicer.reset();
+    _slice->slice = _out;
+    finish();
+  }
+
+  void finish() {
+    _finished = true;
+    if (_cut)
+      _cut->done.store(true, std::memory_order_release);
+    else
+      _slice->done.store(true, std::memory_order_release);
+  }
+
+  std::shared_ptr<CutJob> _cut;
+  std::shared_ptr<SliceJob> _slice;
+  std::unique_ptr<CutawayStepper> _stepper;
+  std::shared_ptr<const cvc::geometry> _tm;
+  std::vector<double> _field;
+  cvc::geometry::vector_t _normal{{0.0, 0.0, 0.0}};
+  double _offset = 0.0;
+  std::unique_ptr<cvc::tet_slicer> _slicer;
+  std::shared_ptr<cvc::geometry> _out;
+  std::size_t _next = 0;
+  bool _finished = false;
+  std::atomic<bool> _cancelled{false};
+};
+
+// Start a view job's task; when it cannot start, the job is done with nothing in it.
+int schedule_view_task(FeLabRT &rt, std::shared_ptr<ViewTask> task, const char *what,
+                       const std::function<void()> &give_up) {
+  cvc::sliced_task_options o;
+  o.kind = "fe_lab";
+  o.subject = std::string(what) + " " + rt.k.request.substr(0, rt.k.request.rfind('.'));
+  o.owner = "fe_lab:" + rt.k.request;
+  const int pid = cvc::schedule_sliced_job(*rt.app, std::move(task), o);
+  if (pid < 0)
+    give_up();
+  return pid;
 }
 
 // Keep the node, its cut and their colours in step with the view keys and the latest field.
@@ -2311,12 +2892,10 @@ void follow_fe_view(FeLabRT &rt, GeometryNode &node, GeometryNode *slice, Geomet
       auto cj = std::make_shared<CutJob>();
       cj->mesh_version = rt.mesh_version;
       rt.cut_job = cj;
-      std::shared_ptr<const cvc::geometry> tm = rt.tetmesh;
       const int cut_axis = show_slice ? axis : -1;
-      if (!rt.slice_lane->submit([cj, tm, cut_axis, at, side, quality]() {
-            run_cut_job(*cj, *tm, cut_axis, at, side, quality);
-          }))
-        cj->done.store(true, std::memory_order_release);
+      rt.cut_task = schedule_view_task(
+          rt, std::make_shared<ViewTask>(cj, rt.tetmesh, cut_axis, at, side, quality), "cut",
+          [cj] { cj->done.store(true, std::memory_order_release); });
     }
   }
 
@@ -2360,11 +2939,11 @@ void follow_fe_view(FeLabRT &rt, GeometryNode &node, GeometryNode *slice, Geomet
   auto sj = std::make_shared<SliceJob>();
   sj->colored = rt.field.size() == rt.tetmesh->const_points().size();
   rt.slice_job = sj;
-  std::shared_ptr<const cvc::geometry> tm = rt.tetmesh;
-  const std::vector<double> field = sj->colored ? rt.field : std::vector<double>();
-  if (!rt.slice_lane->submit(
-          [sj, tm, field, normal, at]() { run_slice_job(*sj, *tm, field, normal, at); }))
-    sj->done.store(true, std::memory_order_release);
+  rt.slice_task = schedule_view_task(
+      rt,
+      std::make_shared<ViewTask>(sj, rt.tetmesh, sj->colored ? rt.field : std::vector<double>(),
+                                 normal, at),
+      "slice", [sj] { sj->done.store(true, std::memory_order_release); });
 }
 
 // One command from the request key, with no job running. Starts at most one job.
@@ -2414,8 +2993,6 @@ void tick_fe_lab(FeLabRT &rt) {
   std::shared_ptr<GeometryNode> edges = rt.edges_node.lock();
   std::shared_ptr<GeometryNode> ghost = rt.ghost_node.lock();
   cvc::app &a = *rt.app;
-  pump(*rt.lane);
-  pump(*rt.slice_lane);
 
   if (rt.job) {
     FeJob &j = *rt.job;
@@ -2444,8 +3021,14 @@ void tick_fe_lab(FeLabRT &rt) {
         set_field(rt, std::move(snap));
     }
     ari::write<int>(a, rt.k.progress, j.progress.load());
+    const char *phase = j.phase.load(std::memory_order_relaxed);
+    ari::write<std::string>(
+        a, rt.k.phase,
+        phase ? std::string(phase) + " " + std::to_string(j.progress.load()) + "%" : std::string());
     if (j.done.load(std::memory_order_acquire)) {
       std::shared_ptr<FeJob> done = std::move(rt.job);
+      rt.task = -1;
+      ari::write<std::string>(a, rt.k.phase, "");
       apply_fe_job(rt, *done);
     }
   } else if (rt.load_pending) {
@@ -2516,8 +3099,6 @@ std::shared_ptr<GraphicsNode> realize_fe_lab(SceneGraph &sg, const ari::SceneNod
     rt->place = loaded->place;
     rt->placeholder = loaded->placeholder;
     rt->source_version = 1;
-    rt->lane = std::make_unique<cvc::async_lane>("fe_lab." + n.id);
-    rt->slice_lane = std::make_unique<cvc::async_lane>("fe_lab." + n.id + ".slice");
   } catch (const std::exception &e) {
     warn(e.what());
     return nullptr;
@@ -2563,6 +3144,7 @@ std::shared_ptr<GraphicsNode> realize_fe_lab(SceneGraph &sg, const ari::SceneNod
   k.stoppable = ari::resolve_bind(base, "stoppable");
   k.status = ari::resolve_bind(base, "status");
   k.progress = ari::resolve_bind(base, "progress");
+  k.phase = ari::resolve_bind(base, "phase");
   k.tets = ari::resolve_bind(base, "stats.tets");
   k.hexes = ari::resolve_bind(base, "stats.hexes");
   k.nv = ari::resolve_bind(base, "stats.vertices");
@@ -2639,6 +3221,7 @@ std::shared_ptr<GraphicsNode> realize_fe_lab(SceneGraph &sg, const ari::SceneNod
   ari::write<int>(a, k.busy, 0);
   ari::write<int>(a, k.stoppable, 0);
   ari::write<int>(a, k.progress, 0);
+  ari::write<std::string>(a, k.phase, "");
   publish_fe_stats(*rt, 0.0, 0.0);
   ari::write<std::string>(
       a, k.status, rt->load_pending ? "loading " + spec.file + "..." : std::string("volume ready"));

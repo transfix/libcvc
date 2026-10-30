@@ -20,7 +20,7 @@ else()
   # In-tree: re-import the Boost targets cvc links PUBLIC (through cvcGL) so its transitive link
   # evaluates in this directory scope (src/arisrv/CMakeLists.txt explains why).
   if(NOT TARGET Boost::filesystem)
-    find_package(Boost REQUIRED COMPONENTS thread date_time regex filesystem
+    find_package(Boost REQUIRED COMPONENTS thread date_time regex filesystem program_options
                  OPTIONAL_COMPONENTS system chrono)
   endif()
 endif()
