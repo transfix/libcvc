@@ -12,9 +12,10 @@
 #include <emscripten/emscripten.h>
 
 // The page's origin, malloc'd (the caller frees it). `location` exists on the main thread and in
-// workers alike (WorkerLocation). The same string-return pattern as cvcGL's clipboard.
+// workers alike (WorkerLocation). The same string-return pattern as cvcGL's clipboard. Only ==
+// here: clang-format and the preprocessor both read the body as C++, and split !== into "!= =".
 EM_JS(char *, cvc_net_page_origin, (), {
-  var o = (typeof location != = "undefined" && location.origin) ? location.origin : "";
+  var o = (typeof location == "object" && location && location.origin) ? location.origin : "";
   var n = lengthBytesUTF8(o) + 1;
   var p = _malloc(n);
   stringToUTF8(o, p, n);
