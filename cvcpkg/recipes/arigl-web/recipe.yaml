@@ -1,7 +1,7 @@
 schema_version: 1
 recipe:
   name: arigl-web
-  upstream_version: "3.7.4"
+  upstream_version: "3.7.5"
   cvc_revision: 1
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"

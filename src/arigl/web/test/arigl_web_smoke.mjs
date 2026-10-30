@@ -241,8 +241,34 @@ for (const c of cases) {
   await page.close();
 }
 
-chrome.kill();
+// Close Chrome over its browser DevTools socket, which stops every process it started. A SIGTERM
+// to the main process alone leaves its helpers writing the profile after it has exited, so
+// removing the profile failed with ENOTEMPTY (in CI, and here). A profile left behind in a temp
+// directory never fails the run.
+async function closeChrome() {
+  if (chrome.exitCode !== null || chrome.signalCode !== null) return;
+  const exited = new Promise(r => chrome.once('exit', () => r('exited')));
+  const after = ms => new Promise(r => setTimeout(() => r('timeout'), ms));
+  try {
+    const ws = new WebSocket(devtools.href);
+    await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
+    ws.send(JSON.stringify({id: 1, method: 'Browser.close'}));
+  } catch (e) {
+    chrome.kill();
+  }
+  if (await Promise.race([exited, after(10000)]) === 'timeout') {
+    chrome.kill('SIGKILL');
+    await Promise.race([exited, after(5000)]);
+  }
+}
+await closeChrome();
 server.close();
-if (!argv.includes('--keep')) fs.rmSync(profile, {recursive: true, force: true});
+if (!argv.includes('--keep')) {
+  try {
+    fs.rmSync(profile, {recursive: true, force: true, maxRetries: 5, retryDelay: 200});
+  } catch (e) {
+    console.warn(`could not remove ${profile}: ${e.message}`);
+  }
+}
 console.log(failures ? `${failures} of ${cases.length} failed` : `all ${cases.length} passed`);
 process.exit(failures ? 1 : 0);

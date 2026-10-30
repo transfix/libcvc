@@ -126,15 +126,24 @@ TEST(AriadneDocFetch, ResolutionAgreesWithTheFileScheme) {
   const fs::path root = fs::temp_directory_path() / "ariadne_doc_fetch_agree";
   fs::remove_all(root);
   const std::string base = "/apps/nicotina/main.ari";
-  for (const std::string ref :
-       {"lib/feed.ari", "./profile.ari", "../shared/theme.ari", "lib/../lib/./again.ari",
-        "with space.ari", "pct%20name.ari", "q.ari?v=2"}) {
+  std::vector<std::string> refs = {"lib/feed.ari",        "./profile.ari",
+                                   "../shared/theme.ari", "lib/../lib/./again.ari",
+                                   "with space.ari",      "pct%20name.ari"};
+#ifndef _WIN32
+  // Windows file names cannot hold a '?', and only the browser build (MEMFS) writes fetched files.
+  refs.push_back("q.ari?v=2");
+#endif
+  for (const std::string &ref : refs) {
     SCOPED_TRACE(ref);
     std::string path;
     ASSERT_TRUE(resolve_doc_ref(base, ref, path));
     const fs::path file = root.string() + path;
     fs::create_directories(file.parent_path());
-    std::ofstream(file) << "units: {}\n";
+    {
+      std::ofstream out(file);
+      out << "units: {}\n";
+      ASSERT_TRUE(out.good()) << file;
+    }
     const UriResult r = resolve(ref, (root / "apps" / "nicotina").string());
     ASSERT_TRUE(r.ok) << r.error;
     EXPECT_EQ(fs::path(r.canonical), fs::weakly_canonical(file));
