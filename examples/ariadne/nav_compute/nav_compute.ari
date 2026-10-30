@@ -21,6 +21,9 @@ meta:
   author: cvc
   min_libcvc: 3.4.0
 
+requires:
+  - nav-step                       # the async verb the nav_compute host registers
+
 init: |
   (begin
     (state-set "nav.status" "idle")

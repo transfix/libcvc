@@ -4,6 +4,7 @@
 // Parsing tests are skipped when the build has no yaml-cpp (the loader is then a
 // stub); the version/schema surface is tested unconditionally.
 
+#include <algorithm>
 #include <boost/asio.hpp> // a localhost server for the http handler test
 #include <cctype>
 #include <chrono>
@@ -4905,4 +4906,36 @@ TEST(AriadneComponents, TransferFunctionDemoLoadsClean) {
   ASSERT_EQ(r.scene.nodes.size(), 3u);
   EXPECT_TRUE(r.scene.nodes[0].has_volren);
   EXPECT_TRUE(r.scene.nodes[1].has_volslice);
+}
+
+// Every shipped example says what it needs from its host (requires:, roadmap §7.6), so a runner
+// that lacks it refuses the load with one clear error instead of failing in the middle of a run.
+// A document with a scene: needs a scene renderer, which arigl has and ari does not.
+TEST(AriadneComponents, ShippedExamplesDeclareWhatTheyNeed) {
+  SKIP_WITHOUT_YAML();
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::path(__FILE__).parent_path().parent_path().parent_path().parent_path() /
+                       "examples" / "ariadne";
+  if (!fs::exists(dir))
+    GTEST_SKIP() << "examples not found at " << dir.string();
+  if (!register_source_components())
+    GTEST_SKIP() << "component sources not found";
+  SchemeGuard g{"cvc"};
+  int seen = 0;
+  for (const fs::directory_entry &e : fs::recursive_directory_iterator(dir)) {
+    if (!e.is_regular_file() || e.path().extension() != ".ari")
+      continue;
+    const std::string name = e.path().lexically_relative(dir).generic_string();
+    LoadResult r = load_file(e.path().string());
+    ASSERT_TRUE(r.ok) << name << ": " << r.error;
+    ++seen;
+    EXPECT_FALSE(r.requirements.empty()) << name << " has no requires: block";
+    if (r.scene.any()) {
+      const auto it = std::find_if(r.requirements.begin(), r.requirements.end(),
+                                   [](const HostRequirement &q) { return q.name == "gl.scene"; });
+      ASSERT_NE(it, r.requirements.end()) << name << " has a scene: but does not require gl.scene";
+      EXPECT_FALSE(it->optional) << name << " lists gl.scene as optional";
+    }
+  }
+  EXPECT_GE(seen, 18); // the examples under examples/ariadne
 }

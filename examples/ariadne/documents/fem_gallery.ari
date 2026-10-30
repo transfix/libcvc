@@ -37,6 +37,9 @@ meta:
   description: Twenty finite-element and mesh-processing results, computed live one at a time
   min_libcvc: 3.4.0
 
+requires:
+  - gl.scene                       # a scene renderer realizes the scene: block (arigl; not ari)
+
 customs:
   - node: mesh_lab
     required: true
