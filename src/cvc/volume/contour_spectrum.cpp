@@ -39,11 +39,14 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cvc/geometry/geometry.h>
+#include <cvc/volume/contour_mesh.h>
 #include <cvc/volume/contour_spectrum.h>
 #include <cvc/volume/volume.h>
 #include <exception>
 #include <limits>
 #include <optional>
+#include <string>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -247,6 +250,50 @@ std::size_t integrate_tet(accumulator &acc, const vec3 *x, const double *f, cons
     acc.vol[b] += factor * (cum2 + area2 * (s - s * s + s * s * s / 3.0) * (v4 - v3));
   }
   acc.vol_tail[b] += tet_volume;
+  return b - first;
+}
+
+// One triangle of a surface, where the isovalues cut segments rather than surfaces: the segment's
+// length (into area), the area below each sample (into vol) and |grad f|^2 times the length (into
+// grad), all exact, since f is linear on the triangle. `x` and `f` are its corners and values;
+// `weight` is |grad f|^2 on the scale `f` is on. Returns the number of samples it updated.
+std::size_t integrate_tri(accumulator &acc, const vec3 *x, const double *f, double weight,
+                          double tri_area) {
+  int o[3] = {0, 1, 2};
+  double v[3] = {f[0], f[1], f[2]};
+  const auto exchange = [&](int a, int b) {
+    if (v[b] < v[a]) {
+      std::swap(v[a], v[b]);
+      std::swap(o[a], o[b]);
+    }
+  };
+  exchange(0, 1);
+  exchange(1, 2);
+  exchange(0, 1);
+  const vec3 &x1 = x[o[0]], &x2 = x[o[1]], &x3 = x[o[2]];
+  const double v1 = v[0], v2 = v[1], v3 = v[2];
+  // The longest cut: through x2 at v2, ending on edge 1-3. Every other cut is a scaled copy of it.
+  const double mid = v3 > v1 ? length(x2 - mix(x1, x3, (v2 - v1) / (v3 - v1))) : 0.0;
+  // A sample range below is empty when its ends coincide, so no division is by zero.
+  const double *fx = acc.fx.data();
+  const std::size_t n = acc.n;
+  const std::size_t first = acc.first_at_or_above(v1);
+  std::size_t b = first;
+  for (; b < n && fx[b] < v2; ++b) {
+    const double d = fx[b] - v1;
+    const double len = mid * d / (v2 - v1);
+    acc.area[b] += len;
+    acc.grad[b] += weight * len;
+    acc.vol[b] += tri_area * d * d / ((v2 - v1) * (v3 - v1));
+  }
+  for (; b < n && fx[b] < v3; ++b) {
+    const double d = v3 - fx[b];
+    const double len = mid * d / (v3 - v2);
+    acc.area[b] += len;
+    acc.grad[b] += weight * len;
+    acc.vol[b] += tri_area * (1.0 - d * d / ((v3 - v1) * (v3 - v2)));
+  }
+  acc.vol_tail[b] += tri_area;
   return b - first;
 }
 
@@ -998,6 +1045,375 @@ contour_spectrum contour_spectrum_builder::take() {
 
 contour_spectrum compute_contour_spectrum(const volume &vol, const contour_spectrum_options &opt) {
   contour_spectrum_builder builder(vol, opt);
+  const std::size_t budget = opt.progress ? kOneShotBudget : 0;
+  while (!builder.step(budget)) {
+  }
+  return builder.take();
+}
+
+// --- on a simplicial mesh ------------------------------------------------------------------------
+
+namespace {
+
+constexpr uint64 kTetUnits = 40; // one tetrahedron's fixed part (a grid cell is five of them)
+constexpr uint64 kTriUnits = 20; // one triangle's
+
+contour_spectrum_error mesh_error(const std::string &what) {
+  return contour_spectrum_error("compute_contour_spectrum (mesh): " + what);
+}
+
+} // namespace
+
+struct mesh_contour_spectrum_builder::impl {
+  enum class stage { start, domain, integrate, finish, done, failed };
+
+  std::shared_ptr<const contour_mesh> mesh;
+  contour_spectrum_options opt;
+  stage st = stage::start;
+  std::exception_ptr error;
+  double failed_progress = 0.0;
+  uint64 work = 0, left = 0;
+
+  bool solid = false; // tetrahedra (else triangles)
+  std::size_t npts = 0, nelem = 0;
+  std::size_t pos = 0; // the domain scan's value, the integration's element
+  extrema_state ext;
+  double dmin = 0.0, dmax = 0.0, inv = 0.0, grad_scale = 0.0;
+  bool degenerate = false;
+  std::optional<accumulator> acc;
+  double total = 0.0; // the finite elements' volume (or area)
+  std::size_t fin_pos = 0;
+  double tail = 0.0;
+  contour_spectrum cs;
+  bool taken = false;
+
+  impl(std::shared_ptr<const contour_mesh> m, const contour_spectrum_options &o)
+      : mesh(std::move(m)), opt(o) {}
+
+  void spend(uint64 units) {
+    work += units;
+    left = units >= left ? 0 : left - units;
+  }
+
+  const geometry &geom() const { return *mesh->mesh; }
+
+  void begin() {
+    if (!mesh || !mesh->mesh)
+      throw mesh_error("no mesh");
+    if (opt.samples < 2)
+      throw mesh_error("at least 2 samples are needed");
+    npts = geom().const_points().size();
+    if (mesh->values.size() != npts)
+      throw mesh_error("the mesh has " + std::to_string(npts) + " points but " +
+                       std::to_string(mesh->values.size()) + " values");
+    solid = !geom().const_tets().empty();
+    nelem = solid ? geom().const_tets().size() : geom().const_tris().size();
+    if (nelem == 0)
+      throw mesh_error("the mesh has neither tetrahedra nor triangles");
+    if (opt.has_domain) {
+      dmin = std::min(opt.domain_min, opt.domain_max);
+      dmax = std::max(opt.domain_min, opt.domain_max);
+      plan();
+    } else {
+      st = stage::domain;
+    }
+  }
+
+  void scan() {
+    const std::size_t chunk = static_cast<std::size_t>(std::min<uint64>(left, npts - pos));
+    const double *v = mesh->values.data();
+    for (std::size_t i = pos; i < pos + chunk; ++i) {
+      if (!std::isfinite(v[i]))
+        continue;
+      if (!ext.any) {
+        ext.lo = ext.hi = v[i];
+        ext.any = true;
+      } else if (v[i] < ext.lo) {
+        ext.lo = v[i];
+      } else if (v[i] > ext.hi) {
+        ext.hi = v[i];
+      }
+    }
+    pos += chunk;
+    spend(chunk * kScanUnits);
+    if (pos == npts) {
+      if (!ext.any)
+        throw mesh_error("no value is finite");
+      dmin = ext.lo;
+      dmax = ext.hi;
+      plan();
+    }
+  }
+
+  // As the grid's: the values go onto [0, kScale] over the domain, which sort_verts' separation
+  // assumes; the gradient comes back to data units by grad_scale.
+  void plan() {
+    if (!std::isfinite(dmin) || !std::isfinite(dmax))
+      throw mesh_error("the isovalue domain is not finite");
+    const double range = dmax - dmin;
+    grad_scale = (range / kScale) * (range / kScale);
+    if (!std::isfinite(range) || !std::isfinite(grad_scale))
+      throw mesh_error("the isovalue domain is too wide to scale (wider than 255 * "
+                       "sqrt(DBL_MAX), ~3.4e156)");
+    inv = kScale / range;
+    degenerate = !(range > 0.0) || !std::isfinite(inv);
+    if (degenerate)
+      inv = 0.0;
+    acc.emplace(opt.samples);
+    acc->mid_weight = opt.libcontour_area ? 1.0 : 2.0;
+    spend(kSampleUnits * opt.samples);
+    pos = 0;
+    st = stage::integrate;
+  }
+
+  // One element's corners and values (mapped onto the integration scale), or false when one of
+  // its values is not finite.
+  template <std::size_t N, class Element> bool corners(const Element &e, vec3 *x, double *f) const {
+    const geometry::points_t &P = geom().const_points();
+    for (std::size_t c = 0; c < N; ++c) {
+      const auto i = e[c];
+      if (i >= npts)
+        throw mesh_error("an element names point " + std::to_string(i) + " of " +
+                         std::to_string(npts));
+      const double v = mesh->values[static_cast<std::size_t>(i)];
+      if (!std::isfinite(v))
+        return false;
+      x[c] = {P[i][0], P[i][1], P[i][2]};
+      f[c] = (v - dmin) * inv;
+    }
+    return true;
+  }
+
+  void integrate() {
+    accumulator &a = *acc;
+    while (left > 0 && pos < nelem) {
+      const std::size_t e = pos++;
+      if (solid) {
+        vec3 x[4];
+        double f[4];
+        if (!corners<4>(geom().const_tets()[e], x, f)) {
+          spend(kSkippedCellUnits);
+          continue;
+        }
+        const vec3 e1 = x[1] - x[0], e2 = x[2] - x[0], e3 = x[3] - x[0];
+        const vec3 c23 = cross(e2, e3), c31 = cross(e3, e1), c12 = cross(e1, e2);
+        const double det = dot(e1, c23);
+        const double volume = std::fabs(det) / 6.0;
+        total += volume;
+        if (degenerate || !(volume > 0.0)) {
+          spend(kTetUnits);
+          continue;
+        }
+        // f's exact gradient: the one vector g with g . e_i = f_i - f_0.
+        const double d1 = f[1] - f[0], d2 = f[2] - f[0], d3 = f[3] - f[0];
+        const vec3 g = (1.0 / det) * vec3{d1 * c23.x + d2 * c31.x + d3 * c12.x,
+                                          d1 * c23.y + d2 * c31.y + d3 * c12.y,
+                                          d1 * c23.z + d2 * c31.z + d3 * c12.z};
+        static constexpr int kWhole[4] = {0, 1, 2, 3};
+        const std::size_t updates = integrate_tet(a, x, f, kWhole, dot(g, g), volume);
+        spend(kTetUnits + kUpdateUnits * static_cast<uint64>(updates));
+      } else {
+        vec3 x[3];
+        double f[3];
+        if (!corners<3>(geom().const_tris()[e], x, f)) {
+          spend(kSkippedCellUnits);
+          continue;
+        }
+        const vec3 e1 = x[1] - x[0], e2 = x[2] - x[0];
+        const vec3 nrm = cross(e1, e2);
+        const double nn = dot(nrm, nrm);
+        const double area = 0.5 * std::sqrt(nn);
+        total += area;
+        if (degenerate || !(nn > 0.0)) {
+          spend(kTriUnits);
+          continue;
+        }
+        // The in-plane gradient: g . e1 = f1 - f0, g . e2 = f2 - f0, g . n = 0.
+        const vec3 u = cross(e2, nrm), w = cross(nrm, e1);
+        const double d1 = f[1] - f[0], d2 = f[2] - f[0];
+        const vec3 g =
+            (1.0 / nn) * vec3{d1 * u.x + d2 * w.x, d1 * u.y + d2 * w.y, d1 * u.z + d2 * w.z};
+        const std::size_t updates = integrate_tri(a, x, f, dot(g, g), area);
+        spend(kTriUnits + kUpdateUnits * static_cast<uint64>(updates));
+      }
+    }
+    if (pos == nelem)
+      st = stage::finish;
+  }
+
+  void finish() {
+    const std::size_t n = opt.samples;
+    if (fin_pos == 0 && cs.isovalue.empty()) {
+      if (!std::isfinite(total))
+        throw overflow_error();
+      cs.domain_min = dmin;
+      cs.domain_max = dmax;
+      cs.total_volume = total;
+      for (std::vector<double> *f :
+           {&cs.isovalue, &cs.surface_area, &cs.min_volume, &cs.max_volume, &cs.gradient})
+        f->reserve(n);
+    }
+    while (left > 0 && fin_pos < n) {
+      const std::size_t b = fin_pos++;
+      cs.isovalue.push_back(b + 1 == n
+                                ? dmax
+                                : dmin + (static_cast<double>(b) / static_cast<double>(n - 1)) *
+                                             (dmax - dmin));
+      if (degenerate) {
+        cs.surface_area.push_back(0.0);
+        cs.min_volume.push_back(0.0);
+        cs.max_volume.push_back(0.0);
+        cs.gradient.push_back(0.0);
+      } else {
+        tail += acc->vol_tail[b];
+        const double area = acc->area[b], min_volume = acc->vol[b] + tail;
+        const double gradient = acc->grad[b] * grad_scale;
+        if (!std::isfinite(area) || !std::isfinite(min_volume) || !std::isfinite(gradient))
+          throw overflow_error();
+        cs.surface_area.push_back(area);
+        cs.min_volume.push_back(min_volume);
+        cs.max_volume.push_back(std::max(0.0, total - min_volume));
+        cs.gradient.push_back(gradient);
+      }
+      spend(kSampleUnits);
+    }
+    if (fin_pos == n) {
+      acc.reset();
+      mesh.reset();
+      st = stage::done;
+    }
+  }
+
+  void run(uint64 budget) {
+    left = budget;
+    if (st == stage::start)
+      begin();
+    while (left > 0 && st != stage::done) {
+      switch (st) {
+      case stage::domain:
+        scan();
+        break;
+      case stage::integrate:
+        integrate();
+        break;
+      case stage::finish:
+        finish();
+        break;
+      default:
+        return;
+      }
+    }
+  }
+
+  double progress() const {
+    switch (st) {
+    case stage::start:
+      return 0.0;
+    case stage::done:
+      return 1.0;
+    case stage::failed:
+      return failed_progress;
+    default:
+      break;
+    }
+    // Weighted by each phase's fixed units (the sample updates are not known in advance).
+    const double wd = opt.has_domain ? 0.0 : static_cast<double>(npts);
+    const double wi =
+        static_cast<double>(nelem) * static_cast<double>(solid ? kTetUnits : kTriUnits);
+    const double wf = static_cast<double>(opt.samples);
+    const double fd = st == stage::domain && npts > 0 ? double(pos) / double(npts) : 1.0;
+    const double fi = st == stage::domain      ? 0.0
+                      : st == stage::integrate ? (nelem > 0 ? double(pos) / double(nelem) : 1.0)
+                                               : 1.0;
+    const double ff = st == stage::finish ? double(fin_pos) / wf : 0.0;
+    const double p = (wd * fd + wi * fi + wf * ff) / (wd + wi + wf);
+    return std::min(1.0, std::max(0.0, p));
+  }
+
+  void fail(std::exception_ptr e) {
+    failed_progress = progress();
+    error = std::move(e);
+    st = stage::failed;
+    mesh.reset();
+    acc.reset();
+    cs = contour_spectrum();
+  }
+};
+
+mesh_contour_spectrum_builder::mesh_contour_spectrum_builder(
+    std::shared_ptr<const contour_mesh> mesh, const contour_spectrum_options &opt)
+    : _impl(std::make_unique<impl>(std::move(mesh), opt)) {}
+
+mesh_contour_spectrum_builder::~mesh_contour_spectrum_builder() = default;
+mesh_contour_spectrum_builder::mesh_contour_spectrum_builder(
+    mesh_contour_spectrum_builder &&) noexcept = default;
+mesh_contour_spectrum_builder &
+mesh_contour_spectrum_builder::operator=(mesh_contour_spectrum_builder &&) noexcept = default;
+
+bool mesh_contour_spectrum_builder::step(std::size_t budget) {
+  if (!_impl)
+    throw contour_spectrum_error("mesh_contour_spectrum_builder: a moved-from builder has no work");
+  impl &s = *_impl;
+  if (s.st == impl::stage::failed)
+    std::rethrow_exception(s.error);
+  if (s.st == impl::stage::done)
+    return true;
+  try {
+    s.run(budget == 0 ? kUnlimited : static_cast<uint64>(budget));
+    if (s.opt.progress && !s.opt.progress(s.progress()))
+      throw mesh_error("cancelled");
+  } catch (...) {
+    s.fail(std::current_exception());
+    throw;
+  }
+  return s.st == impl::stage::done;
+}
+
+bool mesh_contour_spectrum_builder::done() const {
+  return !_impl || _impl->st == impl::stage::done || _impl->st == impl::stage::failed;
+}
+
+double mesh_contour_spectrum_builder::progress() const { return _impl ? _impl->progress() : 1.0; }
+
+const char *mesh_contour_spectrum_builder::phase() const {
+  if (!_impl)
+    return "done";
+  switch (_impl->st) {
+  case impl::stage::start:
+  case impl::stage::domain:
+    return _impl->opt.has_domain ? "integrating" : "domain";
+  case impl::stage::integrate:
+  case impl::stage::finish:
+    return "integrating";
+  case impl::stage::done:
+  case impl::stage::failed:
+    break;
+  }
+  return "done";
+}
+
+uint64 mesh_contour_spectrum_builder::work_done() const { return _impl ? _impl->work : 0; }
+
+contour_spectrum mesh_contour_spectrum_builder::take() {
+  if (!_impl)
+    throw contour_spectrum_error(
+        "mesh_contour_spectrum_builder: a moved-from builder has no spectrum");
+  impl &s = *_impl;
+  if (s.st == impl::stage::failed)
+    std::rethrow_exception(s.error);
+  if (s.st != impl::stage::done || s.taken)
+    throw contour_spectrum_error(s.taken
+                                     ? "mesh_contour_spectrum_builder: the spectrum was taken"
+                                     : "mesh_contour_spectrum_builder: the spectrum is not ready");
+  s.taken = true;
+  return std::move(s.cs);
+}
+
+contour_spectrum compute_contour_spectrum(const contour_mesh &mesh,
+                                          const contour_spectrum_options &opt) {
+  // Borrowed for the call: an aliasing pointer that owns nothing.
+  mesh_contour_spectrum_builder builder(
+      std::shared_ptr<const contour_mesh>(std::shared_ptr<const contour_mesh>(), &mesh), opt);
   const std::size_t budget = opt.progress ? kOneShotBudget : 0;
   while (!builder.step(budget)) {
   }

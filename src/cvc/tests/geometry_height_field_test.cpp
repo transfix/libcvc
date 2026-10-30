@@ -141,6 +141,32 @@ TEST(GeometryFaceMaterials, MergeKeepsTheMergedFaceOrder) {
   EXPECT_TRUE(c.face_materials().empty()) << "no materials on either side: still none";
 }
 
+TEST(GeometryFaceMaterials, AFoldOfManyMergesKeepsEveryFacesMaterial) {
+  // As model::merged folds a file's meshes into one: some with materials, some
+  // without, some with a quad. The result holds every triangle's material in
+  // merge order, then every quad's.
+  geometry out;
+  geometry::face_materials_t want_tris, want_quads;
+  for (int i = 0; i < 300; ++i) {
+    geometry g = tris_and_quad(false);
+    if (i % 2)
+      g.quads().clear();
+    const bool with = i % 3 != 1;
+    if (with) {
+      g.face_materials().clear();
+      for (std::size_t f = 0; f < g.num_faces(); ++f)
+        g.face_materials().push_back(static_cast<cvc::face_material_t>(1 + (i * 7 + f) % 50));
+    }
+    for (std::size_t f = 0; f < g.num_faces(); ++f)
+      (f < g.num_tris() ? want_tris : want_quads).push_back(with ? g.face_material(f) : 0);
+    out.merge(g);
+  }
+  geometry::face_materials_t want = want_tris;
+  want.insert(want.end(), want_quads.begin(), want_quads.end());
+  ASSERT_TRUE(out.has_face_materials());
+  EXPECT_EQ(out.face_materials(), want);
+}
+
 TEST(GeometryFaceMaterials, TriSurfaceGivesASplitQuadsMaterialToBothHalves) {
   geometry g = tris_and_quad(true);
   geometry s = g.tri_surface();

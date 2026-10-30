@@ -122,7 +122,12 @@ public:
   void advance() override;
   int reference_substeps() const override { return _nsub; }
   double energy_step(int i) const override;
+  // As dyn_bike_plant's.
+  int static_contacts_step(int i) const override;
   bool tracks_energy() const override { return true; }
+  // Agent i's last tick as nav's plant ledger takes it: the body's attitude, roll rate, load
+  // transfer and wheels on the ground are the model's (a wheel is off it while its spring is
+  // unloaded), and with a world its contacts with the buildings and the other vehicles.
   cvc::nav::plant_sample sample(int i) const override;
   bool tracks_samples() const override { return true; }
   cvc::nav::plant_modulation modulation() const override { return _o.plant.modulation; }
@@ -153,6 +158,8 @@ public:
   body_id chassis(int i) const;
   int collisions_tick(int i) const { return _agents.at(i).hits_tick; }
   long collisions(int i) const { return _agents.at(i).hits; }
+  // As dyn_bike_plant's.
+  int vehicle_contact_step(int i) const { return _agents.at(i).touched; }
 
   const dyn_4w_plant_options &options() const { return _o; }
 
@@ -179,6 +186,9 @@ private:
     double stored0 = 0.0;   // J
     int hits_tick = 0;
     long hits = 0;
+    int statics_tick = 0;     // contacts begun with static geometry over the last tick
+    int touched = -1;         // the agent it touched deepest over the last tick; -1 none
+    double touch_depth = 0.0; // m
     dyn_4w_books tick, total;
     cvc::nav::plant_sample sample;
   };

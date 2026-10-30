@@ -83,6 +83,12 @@ public:
   // The world's step, then which boxes touched something that is not the ground.
   void step();
   bool touched(int i) const { return _touched.at(static_cast<std::size_t>(i)) != 0; }
+  // Of that, for the plant ledger: the other box that box i touched deepest in the step (its
+  // index; -1 none) and how deep (m), and the contacts it began with static geometry (a body
+  // without mass that is not the ground: a building, a wall).
+  int touched_box(int i) const { return _other.at(static_cast<std::size_t>(i)); }
+  double touched_box_depth(int i) const { return _other_depth.at(static_cast<std::size_t>(i)); }
+  int static_contacts(int i) const { return _statics.at(static_cast<std::size_t>(i)); }
   // Box i where the world's step left it.
   body_state moved(int i) const;
   body_id box(int i) const { return _boxes.at(static_cast<std::size_t>(i)); }
@@ -95,7 +101,17 @@ private:
   std::vector<body_id> _boxes;
   std::set<std::uint32_t> _ground;
   std::vector<std::uint8_t> _touched;
+  std::vector<int> _other, _statics;
+  std::vector<double> _other_depth;
 };
+
+// Box i's contacts in c's last step, added to a tick's: the contacts it began with static
+// geometry, and the other box it touched deepest (index and depth; -1 none).
+void count_contacts(const dyn_chassis &c, int i, int &statics, int &touched, double &depth);
+
+// A body at `rotation` as the plant ledger takes its attitude (plant_sample's grade, roll and
+// up_z: its forward, left and up axes' world z), as nav_plant measures it.
+void attitude_of(const quat &rotation, cvc::nav::plant_sample &s);
 
 } // namespace dyn
 } // namespace physics

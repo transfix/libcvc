@@ -224,6 +224,7 @@ add_executable(procedural_geometry_test procedural_geometry_test.cpp)
 add_executable(volume_ops_test volume_ops_test.cpp)
 add_executable(contour_tree_test contour_tree_test.cpp)
 add_executable(contour_spectrum_test contour_spectrum_test.cpp)
+add_executable(mesh_contour_test mesh_contour_test.cpp)
 add_executable(tf_model_test tf_model_test.cpp)
 add_executable(tf_editor_test tf_editor_test.cpp)
 add_executable(tf_overlays_test tf_overlays_test.cpp)
@@ -410,6 +411,7 @@ set(TEST_TARGETS
   volume_ops_test
   contour_tree_test
   contour_spectrum_test
+  mesh_contour_test
   tf_model_test
   tf_editor_test
   tf_overlays_test
@@ -912,6 +914,13 @@ target_link_libraries(contour_tree_test
 )
 
 target_link_libraries(contour_spectrum_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(mesh_contour_test
   PRIVATE
     cvc
     GTest::gtest
@@ -2529,6 +2538,7 @@ endif()
 cvc_discover_tests(volume_ops_test)
 cvc_discover_tests(contour_tree_test)
 cvc_discover_tests(contour_spectrum_test)
+cvc_discover_tests(mesh_contour_test)
 cvc_discover_tests(tf_model_test)
 cvc_discover_tests(tf_editor_test)
 cvc_discover_tests(tf_overlays_test)

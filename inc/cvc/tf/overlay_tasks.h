@@ -120,6 +120,11 @@ struct overlay_task_options {
 // tf_path returns -1 and writes nothing).
 int schedule_overlays(cvc::app &app, const std::string &tf_path, const cvc::volume &vol,
                       unsigned bits, const overlay_task_options &opt = {});
+// The same for a scalar field on a mesh (an overlay_job on a contour_mesh): the task holds the
+// shared mesh until its job lets go of it.
+int schedule_overlays(cvc::app &app, const std::string &tf_path,
+                      std::shared_ptr<const contour_mesh> mesh, unsigned bits,
+                      const overlay_task_options &opt = {});
 
 // Stop a task started by schedule_overlays and reap its process: it publishes nothing more (its
 // last progress note stays in overlay_status: a producer that gives up for good clears it), the

@@ -91,7 +91,8 @@ Opt-in and default-off, so a plain `sim_world` run is byte-unchanged. Exposed to
 ## The plant ledger — what a physics plant's vehicles did
 
 A `sim_world` driving a physics plant that measures its vehicles (`vehicle_plant::tracks_samples()`;
-`cvc::physics::nav_plant` on Jolt) hands the collector each vehicle's `plant_sample`
+`cvc::physics::nav_plant` on Jolt, `dyn_bike_plant` and `dyn_4w_plant`) hands the collector each
+vehicle's `plant_sample`
 (`cvc/nav/plant_types.h`) every tick through `nav_samplers::plant` (`sim_world::plant_samples()`).
 A sample is SI, in the physics world's frame: the centre of mass's velocity along the heading and
 to its left (`vx`, `vy`), the yaw rate `r`, the steering it has and its lock (`steer`,
@@ -100,9 +101,21 @@ sines (`grade` + nose up, `roll` + left side up) and `up_z` (the body's up axis'
 upright, 0 on its side), the acceleration over the tick in the heading's frame (`a_lat`, `a_lon`),
 the roll rate about the body's forward axis, the lateral load transfer ratio `ltr` (left - right
 over left + right of the wheels' loads, a wheel's side from its contact point along the body's
-left axis), `wheels` / `wheels_down` and the tick's static `contacts`. Where it overlaps
-`cvc::physics::planar_sample` (the plant log) the fields have its names and meaning, and the Jolt
-plant computes both alike.
+left axis), `wheels` / `wheels_down`, the tick's static `contacts`, and `vehicle_contact`, the
+agent whose vehicle its body touched over the tick (the deepest contact's; -1 none). Where it
+overlaps `cvc::physics::planar_sample` (the plant log) the fields have its names and meaning, and
+the Jolt plant computes both alike.
+
+`plant_sample::measured` says which fields the plant's model has (`has_attitude`,
+`has_roll_rate`, `has_ltr`, `has_wheels_down`, `has_contacts`, `has_vehicle_contact`); the rest
+every plant measures. The Jolt plant measures them all. `dyn_4w_plant` has them all from its
+model: the attitude and roll rate of its body, the load transfer of its four wheels' loads, and a
+wheel off the ground while its spring is unloaded. `dyn_bike_plant`, a single track on the ground,
+has the ground's attitude under it but no load transfer, roll rate or wheels off the ground. Both
+dynamic plants count their contacts only in a physics world (`plant_host` gives them one with
+Jolt): the contacts their chassis box begins with static geometry (a body without mass that is not
+the ground) as `contacts` and `static_contacts_step`, and the other chassis box it touched deepest
+as `vehicle_contact` and `vehicle_contact_step`.
 
 `veh_nav_stats` reduces it (`plant_tracked`, `plant_steps`): **`rolled_over`** latches once the
 vehicle stays tipped past `nav_stats_params::roll_up_z` (0.5: 60 degrees) for `roll_hold_s` (1 s),
@@ -110,12 +123,26 @@ and `rolled_over_s` is the end of the tick it went over; `tilt_max_deg` / `roll_
 `pitch_max_deg`; `tilt_s` (time past `tilt_deg`, 20 degrees); `ltr_max` and `lift_s` (time with
 |ltr| past `lift_ltr`, 0.9: a side's wheels about to lift); `wheels_up_s` (two or more wheels off
 the ground); `a_lat_max_g`; `steer_cmd_abs_mean` and `steer_sat_share` (ticks steered at
-`steer_sat`, 95%, of the lock or more); `accel_cmd_mean` and `brake_share` (ticks it asked to slow).
-The episode carries `vehicles_rolled` and `first_roll_s`, and the scorecard, over the runs a plant
+`steer_sat`, 95%, of the lock or more); `accel_cmd_mean` and `brake_share` (ticks it asked to slow);
+`vehicle_hits` (the contacts its body began with another vehicle's: a tick touching a vehicle it
+was not touching the tick before) and `vehicle_hit_s` (the time touching one). These are the
+plant's collisions; `veh_contacts` stays nav's distance proxy (ticks within `min_gap`).
+`plant_measured` is the `measured` bits of all its samples. The episode carries `vehicles_rolled`,
+`first_roll_s`, `total_vehicle_hits` and `plant_measured`, and the scorecard, over the runs a plant
 fed (`plant_runs`), `rollover_rate`, `episode_rollover_rate` and the runs' means
 (`mean_tilt_max_deg`, `mean_ltr_max`, `mean_lift_s`, `mean_a_lat_max_g`, `mean_steer_sat_share`,
-`mean_brake_share`). cvcGL's `publish_nav_stats` writes `episode.{vehicles_rolled, first_roll_s}`
-and `veh.<i>.{rolled_over, rolled_over_s, tilt_max_deg, ltr_max, a_lat_max_g, steer_sat_share}`.
+`mean_brake_share`, `mean_vehicle_hits`), each over the runs that measured it.
+
+**Not applicable.** `cvc/nav/plant_ledger.h` lists the ledger's items, each vehicle's
+(`plant_ledger_vehicle()`: `energy_J`, `energy_per_km`, `building_contacts` and the samples'
+items above) and the episode's (`plant_ledger_episode()`), with its key, unit, meaning and the
+`measured` bits it is reduced from. `plant_ledger_applies(item, record)` says whether it has a
+value: its plant fed it and measures those fields. An item that does not apply stays at its
+default in the record, is `null` in the JSON (and in the scorecard, a mean no run measured), and
+a screen shows it as not applicable rather than as a zero. cvcGL's `publish_nav_stats` writes
+every item, `episode.<key>` and `veh.<i>.<key>`, with `kNavStatsNotApplicable` ("n/a") where it
+does not apply; with `nav_stats_publish_params::emit_plant_ledger` it writes them on the kinematic
+plant too, all n/a, so a reader shows the whole ledger whatever the plant.
 
 All of it, and its JSON, appears only when a plant fed it: the kinematic arm's record and
 scorecard are byte-unchanged. The grl-snam Python twin drives the kinematic plant, so it has

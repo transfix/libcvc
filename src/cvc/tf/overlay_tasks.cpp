@@ -126,6 +126,8 @@ bool run_for(overlay_job &job, double ms, pacer &p) {
 // cancelled task's chunk keeps them alive until it stops.
 struct job_box {
   job_box(const volume &vol, unsigned bits, const overlay_options &opt) : job(vol, bits, opt) {}
+  job_box(std::shared_ptr<const contour_mesh> mesh, unsigned bits, const overlay_options &opt)
+      : job(std::move(mesh), bits, opt) {}
   overlay_job job;
   pacer pace;
 };
@@ -414,8 +416,11 @@ bool threads_available() {
 #endif
 }
 
-int schedule_overlays(cvc::app &app, const std::string &tf_path, const cvc::volume &vol,
-                      unsigned bits, const overlay_task_options &opt) {
+namespace {
+
+template <class Source>
+int schedule_task(cvc::app &app, const std::string &tf_path, Source &&source, unsigned bits,
+                  const overlay_task_options &opt) {
   if (tf_path.empty())
     return -1; // nowhere to publish (or to say why)
   auto rec = std::make_shared<task_record>();
@@ -432,7 +437,7 @@ int schedule_overlays(cvc::app &app, const std::string &tf_path, const cvc::volu
     rec->opt.chunk_ms = positive_or(opt.chunk_ms, 250.0, 0.05);
     rec->threaded = opt.threading != overlay_threading::cooperative && threads_available();
     rec->registry = reg;
-    rec->box = std::make_shared<job_box>(vol, bits, opt.overlays);
+    rec->box = std::make_shared<job_box>(std::forward<Source>(source), bits, opt.overlays);
 
     cvc::state &root = cvc::state::instance(app);
     rec->ictx.sched = &sched;
@@ -489,6 +494,19 @@ int schedule_overlays(cvc::app &app, const std::string &tf_path, const cvc::volu
     write_status(*rec, "unavailable: an unknown error");
   }
   return -1;
+}
+
+} // namespace
+
+int schedule_overlays(cvc::app &app, const std::string &tf_path, const cvc::volume &vol,
+                      unsigned bits, const overlay_task_options &opt) {
+  return schedule_task(app, tf_path, vol, bits, opt);
+}
+
+int schedule_overlays(cvc::app &app, const std::string &tf_path,
+                      std::shared_ptr<const contour_mesh> mesh, unsigned bits,
+                      const overlay_task_options &opt) {
+  return schedule_task(app, tf_path, std::move(mesh), bits, opt);
 }
 
 void cancel_overlays(cvc::app &app, int pid) {

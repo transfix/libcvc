@@ -54,9 +54,11 @@
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/gl/ariadne/tf_binding.h> // the isovalue as an editable transfer-function isocontour
 #include <cvc/state/state.h>
-#include <cvc/tf/model.h>          // field colours: a transfer function's colour ramp
-#include <cvc/tf/overlays.h>       // ... and the range / histogram its editor shows
-#include <cvc/utility/algorithm.h> // cvc::tetrahedralize (CVC_ENABLE_MESHER), element quality
+#include <cvc/tf/model.h>            // field colours: a transfer function's colour ramp
+#include <cvc/tf/overlay_tasks.h>    // ... the spectrum / tree an editor asks for, on the scheduler
+#include <cvc/tf/overlays.h>         // ... and the range / histogram its editor shows
+#include <cvc/utility/algorithm.h>   // cvc::tetrahedralize (CVC_ENABLE_MESHER), element quality
+#include <cvc/volume/contour_mesh.h> // ... computed on the field's mesh
 #include <cvc/volume/volume.h>
 #include <exception>
 #include <filesystem>
@@ -342,37 +344,117 @@ void hide_field(GeometryNode &node, bool single_color) {
 // An explicit domain in the model is the range the field is coloured over. Beside the key the node
 // publishes .range (what the colours span under an `auto` domain) and .histogram (the shown values
 // over it): the editor's axis and histogram.
+//
+// The contour spectrum and contour tree an editor asks for (.overlay_request) are computed on the
+// shown values' mesh (one value per point, linear over each tetrahedron, or each triangle of a
+// surface) over that same range, by an overlay task on the app's state_exec scheduler
+// (cvc/tf/overlay_tasks.h: sliced across frames where there are no threads, on the background pool
+// where there are), which publishes them beside the key. New values stop the tasks and clear those
+// layers, and the editors' standing request starts them again on the new values. Values that are
+// not one per mesh point (fe_lab's elements view) have neither, and .overlay_status says why.
 struct FieldColors {
+  cvc::app *app = nullptr;
   std::string key;           // <node>.field_colors
   std::string colormap_seen; // the colormap key's value as last followed
   std::string model_seen;    // the model string last taken in
   cvc::tf::model model;      // ... parsed (the last one that parsed)
   std::vector<float> table;  // its colour ramp, baked: model.resolution RGB entries
   std::string published;     // what .range / .histogram were last published from
+  // The shown values on their mesh, what the spectrum is computed on over [lo, hi], and the same
+  // clamped to [lo, hi], the tree's: null before the first values, or when they cannot be
+  // (why_not says why).
+  std::shared_ptr<const cvc::contour_mesh> field, clamped;
+  std::string why_not;
+  double lo = 0.0, hi = 0.0;
+  unsigned started = 0;   // the layers started (or reported unavailable) on the current values
+  std::vector<int> tasks; // their overlay tasks' pids
+
+  FieldColors() = default;
+  FieldColors(const FieldColors &) = delete;
+  FieldColors &operator=(const FieldColors &) = delete;
+  ~FieldColors() { stop_tasks(); }
+
+  void stop_tasks() {
+    if (app)
+      for (const int pid : tasks)
+        cvc::tf::cancel_overlays(*app, pid);
+    tasks.clear();
+  }
 };
 
 constexpr int kFieldColorBins = 128;
+constexpr unsigned kMeshLayers = cvc::tf::overlay_contour_spectrum | cvc::tf::overlay_contour_tree;
+// The contour tree's node budget: what an editor a few hundred pixels wide can show apart (a
+// volume's is 1500; a curvature on a scanned surface has thousands of small extrema).
+constexpr int kFieldTreeNodes = 200;
 
-// A named colormap as a transfer function: its ramp sampled at 33 nodes, opaque.
+// A named colormap as a transfer function, opaque: its ramp sampled finely, then thinned to the
+// few colour nodes that follow it within kColormapTolerance (at most kColormapNodes), so the
+// Colours editor shows a handful of bars to grab and move rather than one per sample. Viridis
+// takes 9 and jet 6; turbo, the busiest, keeps 12 and stays within 0.05.
+constexpr float kColormapTolerance = 0.02f; // per channel, about 5 of 255
+constexpr int kColormapNodes = 12;
 cvc::tf::model colormap_model(cvc::colormap_kind k) {
-  constexpr int kNodes = 33;
-  std::vector<double> t(kNodes);
-  for (int i = 0; i < kNodes; ++i)
-    t[std::size_t(i)] = double(i) / double(kNodes - 1);
+  constexpr int kSamples = 256;
+  std::vector<double> t(kSamples);
+  for (int i = 0; i < kSamples; ++i)
+    t[std::size_t(i)] = double(i) / double(kSamples - 1);
   const std::vector<unsigned char> rgb = cvc::colormap_rgb(t, k, 0.0, 1.0);
-  cvc::tf::model m;
+  std::vector<cvc::tf::color_node> dense;
   if (rgb.size() == 3 * t.size())
     for (std::size_t i = 0; i < t.size(); ++i)
-      m.color.push_back({t[i], rgb[3 * i] / 255.f, rgb[3 * i + 1] / 255.f, rgb[3 * i + 2] / 255.f});
+      dense.push_back({t[i], rgb[3 * i] / 255.f, rgb[3 * i + 1] / 255.f, rgb[3 * i + 2] / 255.f});
+  cvc::tf::model m;
+  m.color = cvc::tf::simplify_ramp(dense, kColormapTolerance, kColormapNodes);
   m.alpha = {{0.0, 1.f}, {1.0, 1.f}};
   m.normalize();
   return m;
 }
 
+// Start what the editors ask for that the current values do not have yet: an overlay task per
+// missing layer on the values' mesh, over the published range, or, with no mesh to compute them
+// on, the reason in .overlay_status. The tree's task takes the values clamped to that range: a
+// piecewise-linear field's level sets inside it keep their components (which vertices lie above
+// an isovalue is all that decides them), and the extrema past it (a curvature's spikes beyond its
+// 2-98% range) do not crowd the tree. The spectrum's takes them as they are: clamping would move
+// the level sets inside the elements that straddle the range's ends.
+void follow_overlay_requests(cvc::app &a, FieldColors &fc) {
+  const unsigned want = cvc::tf::overlay_bits_from_csv(
+                            ari::read_or<std::string>(a, fc.key + ".overlay_request", "")) &
+                        kMeshLayers;
+  const unsigned missing = want & ~fc.started;
+  if (!missing || fc.published.empty())
+    return; // nothing new asked for, or no values yet
+  fc.started |= missing;
+  if (!fc.field) {
+    ari::write<std::string>(a, fc.key + ".overlay_status", "unavailable: " + fc.why_not);
+    return;
+  }
+  cvc::tf::overlay_task_options opt;
+  opt.overlays.has_range = true;
+  opt.overlays.range_lo = fc.lo;
+  opt.overlays.range_hi = fc.hi;
+  opt.overlays.tree_max_nodes = kFieldTreeNodes;
+  opt.owner = "field_colors:" + fc.key;
+  fc.tasks.erase(std::remove_if(fc.tasks.begin(), fc.tasks.end(),
+                                [&](int pid) { return !cvc::tf::overlays_running(a, pid); }),
+                 fc.tasks.end());
+  for (const unsigned layer :
+       {unsigned(cvc::tf::overlay_contour_spectrum), unsigned(cvc::tf::overlay_contour_tree)}) {
+    if (!(missing & layer))
+      continue;
+    const auto &on = layer == cvc::tf::overlay_contour_tree ? fc.clamped : fc.field;
+    const int pid = cvc::tf::schedule_overlays(a, fc.key, on, layer, opt);
+    if (pid > 0)
+      fc.tasks.push_back(pid);
+  }
+}
+
 // Follow the colormap key (a change resets the model to that colormap's ramp) and the model (a
 // change re-bakes the table). True when the table or the model's domain changed; a model that does
-// not parse keeps the last good colours.
+// not parse keeps the last good colours. Also starts what the editors' overlay requests ask for.
 bool follow_field_colors(cvc::app &a, FieldColors &fc, const std::string &colormap_key) {
+  follow_overlay_requests(a, fc);
   const std::string cm = ari::read_or<std::string>(a, colormap_key, "viridis");
   if (cm != fc.colormap_seen) {
     fc.colormap_seen = cm;
@@ -402,6 +484,7 @@ bool follow_field_colors(cvc::app &a, FieldColors &fc, const std::string &colorm
 // restored session, a hot reload's predecessor -- stands) and take it in.
 void init_field_colors(cvc::app &a, FieldColors &fc, const std::string &key,
                        const std::string &colormap_key) {
+  fc.app = &a;
   fc.key = key;
   fc.colormap_seen = ari::read_or<std::string>(a, colormap_key, "viridis");
   if (ari::read_or<std::string>(a, key, "").empty())
@@ -425,9 +508,12 @@ std::string field_colors_sig(const FieldColors &fc) {
 
 // Publish .range = [lo, hi] (the colours' span under an `auto` domain) and .histogram (`values`
 // over it, kFieldColorBins bins) beside the key, unless they were last published from the same
-// range and `sig` (what names the values).
+// range and `sig` (what names the values). `mesh` is the mesh `values` hold one value per point
+// of, which the contour spectrum and tree are computed on; null when there is none, `why_not`
+// saying why. New values stop the old ones' tasks and clear their layers.
 void publish_field_colors(cvc::app &a, FieldColors &fc, const std::vector<double> &values,
-                          double lo, double hi, const std::string &sig) {
+                          double lo, double hi, const std::string &sig,
+                          std::shared_ptr<const cvc::geometry> mesh, const char *why_not = "") {
   if (!std::isfinite(lo) || !std::isfinite(hi))
     return;
   if (hi < lo)
@@ -436,7 +522,34 @@ void publish_field_colors(cvc::app &a, FieldColors &fc, const std::vector<double
   if (p == fc.published)
     return;
   fc.published = p;
-  cvc::tf::overlays ov;
+  fc.stop_tasks();
+  if (fc.started) {
+    try {
+      cvc::tf::clear_overlays(cvc::state::instance(a)(fc.key), kMeshLayers);
+    } catch (const std::exception &) {
+    }
+  }
+  fc.started = 0;
+  fc.lo = lo;
+  fc.hi = hi;
+  fc.field.reset();
+  fc.clamped.reset();
+  fc.why_not = why_not;
+  if (mesh && mesh->const_points().size() == values.size()) {
+    auto f = std::make_shared<cvc::contour_mesh>();
+    f->mesh = mesh;
+    f->values = values;
+    fc.field = std::move(f);
+    auto c = std::make_shared<cvc::contour_mesh>();
+    c->mesh = std::move(mesh);
+    c->values.reserve(values.size());
+    for (const double v : values)
+      c->values.push_back(v < lo ? lo : (v > hi ? hi : v)); // NaN stays NaN
+    fc.clamped = std::move(c);
+  } else if (fc.why_not.empty()) {
+    fc.why_not = "the values are not one per point of a mesh";
+  }
+  cvc::tf::overlays ov; // its empty status clears an earlier note (publish_overlays writes it)
   ov.has_range = true;
   ov.range_lo = lo;
   ov.range_hi = hi;
@@ -454,6 +567,7 @@ void publish_field_colors(cvc::app &a, FieldColors &fc, const std::vector<double
     cvc::tf::publish_overlays(cvc::state::instance(a)(fc.key), ov);
   } catch (const std::exception &) {
   }
+  follow_overlay_requests(a, fc);
 }
 
 // Show or hide a child of a node. The document can bind only the node's own visibility, so a
@@ -957,7 +1071,7 @@ void apply_mesh_job(MeshLabRT &rt, GeometryNode &node, MeshJob &j) {
       show_field(node, j.field, colormap_or_viridis(rt.colormap), r.first, r.second);
       ari::write<double>(a, rt.k.color_min, r.first);
       ari::write<double>(a, rt.k.color_max, r.second);
-      publish_field_colors(a, rt.fc, j.field, j.lo, j.hi, rt.field_sig);
+      publish_field_colors(a, rt.fc, j.field, j.lo, j.hi, rt.field_sig, rt.current);
     }
   } else if (j.op == "load") {
     if (j.geom) {
@@ -2121,7 +2235,9 @@ void follow_fe_view(FeLabRT &rt, GeometryNode &node, GeometryNode *slice, Geomet
       show_field(node, rt.cut->values, cm, r.first, r.second);
       const std::pair<double, double> ar = auto_range(rt.cut->lo, rt.cut->hi);
       publish_field_colors(a, rt.fc, rt.cut->values, ar.first, ar.second,
-                           "e|" + std::to_string(rt.cut_serial));
+                           "e|" + std::to_string(rt.cut_serial), nullptr,
+                           "the elements view colours each element with one value (the field "
+                           "view has them)");
     }
   } else if (rt.surface && show_surface) {
     const std::string csig =
@@ -2144,7 +2260,7 @@ void follow_fe_view(FeLabRT &rt, GeometryNode &node, GeometryNode *slice, Geomet
         // The editor's histogram: the whole solution (the cut shows its inside too).
         const std::pair<double, double> ar = auto_range(rt.field_lo, rt.field_hi);
         publish_field_colors(a, rt.fc, rt.field, ar.first, ar.second,
-                             "f|" + std::to_string(rt.field_version));
+                             "f|" + std::to_string(rt.field_version), rt.tetmesh);
       } else {
         hide_field(node, rt.single_color);
       }
