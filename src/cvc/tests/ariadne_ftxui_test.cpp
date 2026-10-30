@@ -319,6 +319,40 @@ TEST(AriadneFtxui, TextFieldCommitsOnEnterAndOnBlur) {
   EXPECT_EQ(val(t.app, "name"), "hi!");
 }
 
+// autofocus: a person can type into the field as soon as it is drawn, no Tab first; moving focus
+// away keeps it away (focus is taken when the field appears, not every frame).
+TEST(AriadneFtxui, AutofocusFieldTakesTheFirstKeys) {
+  REQUIRE_FTXUI();
+  Widget name = input_text("Name", "name");
+  name.autofocus = true;
+  Term t(group({checkbox("X", "x"), name}));
+  EXPECT_TRUE(t.type("hi"));
+  t.key("Return");
+  EXPECT_EQ(val(t.app, "name"), "hi");
+  t.key("Tab"); // to the checkbox (the walk's first focusable)
+  t.draw();
+  t.type("z");
+  t.key("Return");
+  EXPECT_EQ(val(t.app, "name"), "hi") << "the field did not take focus back";
+}
+
+// password: the field draws a mark per character, never the text; the text still commits.
+TEST(AriadneFtxui, PasswordFieldShowsAMask) {
+  REQUIRE_FTXUI();
+  Widget pw = input_text("Password", "pw");
+  pw.password = true;
+  Term t(group({pw}));
+  t.key("Tab");
+  t.type("s3cret");
+  t.draw();
+  EXPECT_FALSE(t.shows("s3cret")) << t.screen;
+  EXPECT_TRUE(t.shows("\u2022\u2022\u2022\u2022\u2022\u2022")) << t.screen;
+  t.key("Return");
+  t.draw();
+  EXPECT_EQ(val(t.app, "pw"), "s3cret");
+  EXPECT_FALSE(t.shows("s3cret")) << "masked when not focused too:\n" << t.screen;
+}
+
 TEST(AriadneFtxui, TextFieldEditsAtTheCursor) {
   REQUIRE_FTXUI();
   Term t(group({input_text("Name", "name")}));

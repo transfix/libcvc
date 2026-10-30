@@ -177,7 +177,9 @@ public:
                            const char *fmt) override;
   IndexEdit combo(const char *label, int current_index,
                   const std::vector<std::string> &options) override;
-  StringEdit input_text(const char *label, const char *key, const std::string &current) override;
+  StringEdit input_text(const char *label, const char *key, const std::string &current,
+                        bool masked) override;
+  void focus_next_widget() override;
   bool draw_image(const char *name, float width) override;
   ColorEdit color(const char *label, const float rgb[3]) override;
 
