@@ -508,7 +508,7 @@ in the config's `preload`.
 | `src_param` | `true` | `false` ignores `?src=` and always runs `src` |
 | `src_origins` | `[]` | other origins `src` may name (`"*"` for any); their server must allow CORS |
 | `flags` | `[]` | arigl's host flags, before the document, e.g. the network flags: `["--net"]` lets the document reach the page's origin, `["--net-allow", "https://api.example"]` another; `{origin}` in a flag becomes the page's origin. A `--net-policy` file must be in MEMFS: list it in `preload` and pass its URL path. `--credential-store` is refused in a browser |
-| `args` | `[]` | the document's arguments (§5.6 of ARIADNE.md); the URL adds more with `?arg=` |
+| `args` | `[]` | the document's arguments (§5.6 of ARIADNE.md); `{origin}` in one becomes the page's origin, e.g. `["--instance", "{origin}"]` for an app that talks to the server it is served from. The URL adds more with `?arg=`, taken as given |
 | `preload` | `[]` | more files to fetch with the document, relative to it |
 | `env` | `{}` | the module's environment (e.g. `CVC_ARIADNE_RELAY`) |
 

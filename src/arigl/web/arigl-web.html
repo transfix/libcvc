@@ -20,7 +20,8 @@
          "flags":       ["--net"],             arigl's host flags, before the document, e.g.
                                                --net (this origin) or --net-allow ORIGIN;
                                                {origin} in one becomes this page's origin
-         "args":        [],                    the document's arguments
+         "args":        [],                    the document's arguments; {origin} here too,
+                                               e.g. ["--instance", "{origin}"]
          "preload":     ["img/logo.png"],      more files to fetch with it, relative to it
          "env":         {"NAME": "value"}      the module's environment
        }

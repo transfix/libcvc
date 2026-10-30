@@ -44,11 +44,15 @@ const CSP = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src
 const TYPES = {'.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css',
                '.wasm': 'application/wasm', '.json': 'application/json', '.ari': 'text/plain'};
 
-// URL path -> file: /apps/app/<shell file> from WEB, the rest of /apps/ from DOCSET.
+// URL path -> file: /apps/app/<shell file> from WEB, the rest of /apps/ from DOCSET. /apps/cfg/ is
+// the same app with a page config (CONFIG) that passes the page's origin as a document argument.
+const CONFIG = JSON.stringify({args: ['--instance', '{origin}']});
 function fileFor(urlPath) {
   const p = decodeURIComponent(urlPath);
   if (!p.startsWith('/apps/') || p.includes('..')) return null;
-  const rest = p.slice('/apps/'.length);
+  let rest = p.slice('/apps/'.length);
+  if (rest === 'cfg/ariadne.config.json') return {json: CONFIG};
+  if (rest.startsWith('cfg/')) rest = 'app/' + rest.slice(4);
   if (rest === 'app/' || rest === 'app/index.html') return path.join(WEB, 'index.html');
   const shell = rest.startsWith('app/') ? path.join(WEB, rest.slice(4)) : null;
   if (shell && fs.existsSync(shell) && fs.statSync(shell).isFile()) return shell;
@@ -57,6 +61,11 @@ function fileFor(urlPath) {
 
 const server = http.createServer((req, res) => {
   const f = fileFor(new URL(req.url, 'http://x').pathname);
+  if (f && f.json) {
+    res.writeHead(200, {'Content-Type': 'application/json', 'Cache-Control': 'no-cache'});
+    res.end(f.json);
+    return;
+  }
   if (!f || !fs.existsSync(f) || !fs.statSync(f).isFile()) {
     res.writeHead(404, {'Content-Type': 'text/plain'});
     res.end('not found');
@@ -187,6 +196,11 @@ if (fs.existsSync(path.join(WEB, 'ari.html'))) {
       name: 'ari: the default document is main.ari',
       url: `${ORIGIN}/apps/app/ari.html`,
       check: v => v.state === 'running' && shows(v),
+    },
+    {
+      name: 'ari: {origin} in a config argument is the page\'s origin',
+      url: `${ORIGIN}/apps/cfg/ari.html`,
+      check: v => v.state === 'running' && shows(v) && v.text.includes(`instance: ${ORIGIN}`),
     },
     {
       name: 'ari: a cross-origin src is refused, and the terminal says why',

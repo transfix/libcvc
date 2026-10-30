@@ -7,3 +7,5 @@ units:
     children:
       - text: from lib/panel.ari
       - include: note
+      - text: instance
+        bind: docset.instance

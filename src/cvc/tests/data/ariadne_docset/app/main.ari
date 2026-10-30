@@ -7,6 +7,14 @@ meta:
   name: arigl document set
   min_libcvc: 3.7.4
 
+# The server an app talks to, which in a browser is the page's own origin: the shell's config
+# passes `--instance {origin}` (src/arigl/web/test/arigl_web_smoke.mjs checks it).
+args:
+  instance: {type: string, default: "(none)", help: The server this app talks to}
+
+init: |
+  (state-set "docset.instance" (state-get "args.instance"))
+
 import:
   - lib/panel.ari
   - ../shared/note.ari

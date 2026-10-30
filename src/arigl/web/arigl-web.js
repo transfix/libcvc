@@ -104,8 +104,11 @@
     }
     srcUrl.hash = '';
     srcShown = state.src = srcUrl.href;
-    const flags = list(config.flags, 'flags').map(f => f.split('{origin}').join(location.origin));
-    const args = list(config.args, 'args').concat(params.getAll('arg'));
+    // {origin} in a flag or a config argument is this page's origin (e.g. an app's own server,
+    // --instance {origin}). Not in the URL's ?arg=: those are taken as given.
+    const here = s => s.split('{origin}').join(location.origin);
+    const flags = list(config.flags, 'flags').map(here);
+    const args = list(config.args, 'args').map(here).concat(params.getAll('arg'));
     const env = Object.assign({}, config.env || {});
     env.CVC_ARIADNE_SRC_ORIGINS = list(config.src_origins, 'src_origins').join(' ');
     env.CVC_ARIADNE_PRELOAD = list(config.preload, 'preload').join('\n');
