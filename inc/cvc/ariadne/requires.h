@@ -27,7 +27,10 @@ namespace ariadne {
 // What the host can do, beyond its backend's Capabilities.
 struct HostFacts {
   Capabilities caps;
-  bool scene = false; // a scene adapter realizes `scene:` blocks (a GL host)
+  bool scene = false;            // a scene adapter realizes `scene:` blocks (a GL host)
+  bool net = false;              // the host turned the network on (net_host.h)
+  bool net_auth = false;         // ... with a credential store
+  bool net_auth_persist = false; // ... that keeps credentials across runs
 };
 
 // One capability token and what it means.

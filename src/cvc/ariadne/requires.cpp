@@ -42,6 +42,13 @@ const std::vector<TokenRule> &rules() {
        [](const HostFacts &f) { return f.caps.kitty; }},
       {{"term.sixel", "the terminal draws DEC Sixel"},
        [](const HostFacts &f) { return f.caps.sixel; }},
+      {{"net", "the host turned the network on: http-get, http-request and http(s) URIs reach "
+               "the origins it allows"},
+       [](const HostFacts &f) { return f.net; }},
+      {{"net.auth", "the host keeps credentials for requests (auth:, capture_auth:)"},
+       [](const HostFacts &f) { return f.net_auth; }},
+      {{"net.auth.persist", "the host keeps credentials across runs"},
+       [](const HostFacts &f) { return f.net_auth_persist; }},
   };
   return kRules;
 }

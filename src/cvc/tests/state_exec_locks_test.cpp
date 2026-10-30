@@ -3620,3 +3620,87 @@ TEST_P(Locks, LW07d_RestoredWaitObeysTheRestoringContext) {
   ASSERT_TRUE(w.step_until([&] { return w.all_finished({h, q}); }));
   EXPECT_TRUE(w.mgr->table().empty());
 }
+
+// ===========================================================================
+// Locks under the spawn context (locks plan L1b; td 4.15)
+// ===========================================================================
+
+namespace {
+class LocksSpawn : public ::testing::TestWithParam<std::string> {
+protected:
+  locks_world w{GetParam()};
+
+  // Submit `script` as a parent chrooted at `chroot` whose context installs make_spawn_context.
+  int submit_chrooted(const std::string &script, const std::string &chroot) {
+    intrinsics_context &ctx = w.contexts.emplace_back();
+    ctx.sched = &w.base();
+    ctx.proc = make_process();
+    ctx.uid = "test";
+    apply_chroot(ctx, w.tree, chroot);
+    ctx.spawn_context = make_spawn_context();
+    environment_ptr env = builtins::make_default_environment();
+    register_intrinsics(env, &ctx);
+    execute_options opts;
+    opts.env = env;
+    const int pid = w.base().execute(script, opts);
+    ctx.pid = pid;
+    ctx.proc->pid = pid;
+    return pid;
+  }
+};
+INSTANTIATE_TEST_SUITE_P(Schedulers, LocksSpawn, ::testing::Values("sync", "async"),
+                         [](const auto &info) { return info.param; });
+
+// `s` as a DSL string literal.
+std::string dsl_quote(const std::string &s) {
+  std::string out = "\"";
+  for (const char c : s) {
+    if (c == '"' || c == '\\')
+      out += '\\';
+    out += c;
+  }
+  return out + "\"";
+}
+} // namespace
+
+TEST_P(LocksSpawn, LK24_SpawnedChildrenLockUnderTheParentsChroot) {
+  // k children of a parent chrooted at doc, each `per` sections of an atomic increment and a
+  // read-modify-write that sleeps in the middle, so the children interleave inside the lock.
+  const int k = 8;
+  const int per = under_sanitizer() ? 200 : 1000;
+  const std::string child = "(begin (set i 0) (while (< i " + std::to_string(per) +
+                            R"S() (begin (with-lock "q" (begin (state-incr "q.n")
+                                 (set v (if (state-exists "q.m") (int (state-get "q.m")) 0))
+                                 (sleep 0)
+                                 (state-set "q.m" (str (+ v 1)))))
+                               (set i (+ i 1)))) i))S";
+  std::string parent = "(list";
+  for (int i = 0; i < k; ++i)
+    parent += " (spawn " + dsl_quote(child) + ")";
+  parent += ")";
+  const int pid = submit_chrooted(parent, "doc");
+  ASSERT_TRUE(w.step_until([&] { return w.finished(pid); }));
+  const auto pids = as_list(w.result(pid));
+  ASSERT_EQ(pids.size(), static_cast<std::size_t>(k));
+  const auto t0 = std::chrono::steady_clock::now();
+  ASSERT_TRUE(w.step_until(
+      [&] {
+        for (const value_t &c : pids)
+          if (!w.finished(static_cast<int>(as_int(c))))
+            return false;
+        return true;
+      },
+      120.0));
+  ASSERT_NE(w.base().locks(), nullptr);
+  const lock_stats st = w.base().locks()->manager().stats();
+  std::printf("LK-24 %s: %d x %d sections in %.3f s, %llu waits\n", GetParam().c_str(), k, per,
+              std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(),
+              static_cast<unsigned long long>(st.waits));
+  EXPECT_GT(st.waits, 0u); // the children did meet inside the lock
+  for (const value_t &c : pids)
+    EXPECT_EQ(as_int(w.result(static_cast<int>(as_int(c)))), per);
+  const std::string total = std::to_string(k * per);
+  EXPECT_EQ(w.node("doc.q.n"), total);
+  EXPECT_EQ(w.node("doc.q.m"), total);
+  EXPECT_EQ(w.tree.findDescendant("q"), nullptr);
+}

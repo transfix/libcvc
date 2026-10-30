@@ -6,8 +6,10 @@
 #include <cvc/ariadne/ftxui_backend.h>
 #include <cvc/ariadne/host_info.h>
 #include <cvc/ariadne/loader.h>
+#include <cvc/ariadne/net_host.h>
 #include <cvc/ariadne/requires.h>
 #include <cvc/ariadne/tvision_backend.h>
+#include <cvc/net/http_client.h>
 #include <sstream>
 
 #if defined(_WIN32)
@@ -107,6 +109,12 @@ HostInfo gather_host_info(const Runtime &rt, const std::string &runtime) {
   info.json_schema = have_jsonschema();
   info.ftxui = FtxuiBackend::available();
   info.tvision = TvisionBackend::available();
+  info.http = cvc::net::have_http_backend();
+  const NetHostStatus net = net_host_status();
+  info.net = net.enabled;
+  info.net_allowed = net.allowed;
+  info.credential_store = net.credential_store;
+  info.env_credentials = net.env_credentials;
   const HostFacts facts = rt.host_facts();
   info.graphics.kitty = facts.caps.kitty;
   info.graphics.sixel = facts.caps.sixel;
@@ -136,7 +144,16 @@ std::string format_host_info(const HostInfo &info, bool json, bool functions) {
       << ", \"ftxui\": " << (info.ftxui ? "true" : "false")
       << ", \"tvision\": " << (info.tvision ? "true" : "false")
       << ", \"gl\": " << (info.gl ? "true" : "false")
-      << ", \"gl_info\": " << json_string(info.gl_info) << "},\n  \"capabilities\": {";
+      << ", \"gl_info\": " << json_string(info.gl_info)
+      << ", \"http\": " << (info.http ? "true" : "false")
+      << "},\n  \"network\": {\"on\": " << (info.net ? "true" : "false") << ", \"allow\": [";
+    for (std::size_t i = 0; i < info.net_allowed.size(); ++i)
+      o << (i ? ", " : "") << json_string(info.net_allowed[i]);
+    o << "], \"credential_store\": " << json_string(info.credential_store)
+      << ", \"env_credentials\": [";
+    for (std::size_t i = 0; i < info.env_credentials.size(); ++i)
+      o << (i ? ", " : "") << json_string(info.env_credentials[i]);
+    o << "]},\n  \"capabilities\": {";
     for (std::size_t i = 0; i < info.capabilities.size(); ++i)
       o << (i ? ", " : "") << json_string(info.capabilities[i].first) << ": "
         << (info.capabilities[i].second ? "true" : "false");
@@ -185,6 +202,20 @@ std::string format_host_info(const HostInfo &info, bool json, bool functions) {
     std::istringstream lines(info.gl_info);
     for (std::string line; std::getline(lines, line);)
       o << "    " << line << "\n";
+  }
+  o << "  HTTP (cvc::net)               " << yes(info.http) << "\n";
+  o << "\nnetwork\n";
+  if (!info.net) {
+    o << "  off (--net, --net-allow ORIGIN or --net-policy FILE turn it on)\n";
+  } else {
+    if (info.net_allowed.empty())
+      o << "  on, but no origin is allowed\n";
+    for (const std::string &origin : info.net_allowed)
+      o << "  allow           " << origin << "\n";
+    o << "  credentials     "
+      << (info.credential_store.empty() ? std::string("in memory") : info.credential_store) << "\n";
+    for (const std::string &name : info.env_credentials)
+      o << "  from the env    " << name << "\n";
   }
   o << "\ncapabilities (requires: / has?)\n";
   for (const auto &[name, holds] : info.capabilities) {

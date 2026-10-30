@@ -509,6 +509,64 @@ windows:
   EXPECT_TRUE(room->on.empty()); // on: is optional for input_text (no warning, unlike button)
 }
 
+// Every bound widget keeps its optional `on:` (a combo's used to be dropped, so a pick changed
+// the key but never ran the program). Each fires after its committed write (see the runtime).
+TEST(AriadneLoader, BoundWidgetsKeepTheirOn) {
+  SKIP_WITHOUT_YAML();
+  const char *doc = R"(
+meta: { name: T, min_libcvc: "3.4.0" }
+menubar:
+  - menu: View
+    items:
+      - menu_item: Grid
+        bind: view.grid
+        on: (state-set "g" "1")
+windows:
+  - window: W
+    children:
+      - combo: Mode
+        bind: mode
+        options: [a, b]
+        on: (state-set "x" "1")
+      - checkbox: Wire
+        bind: wire
+        on: wire.changed
+      - slider_int: N
+        bind: n
+        on: n.changed
+      - slider_float: Speed
+        bind: speed
+        on: speed.changed
+      - color: Tint
+        bind: tint
+        on: tint.changed
+      - combo: Plain
+        bind: plain
+        options: [a, b]
+)";
+  LoadResult r = load_string(doc);
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(r.warnings.empty()) << r.warnings.front();
+  const Widget *mode = find(r.root, Kind::Combo, "Mode");
+  ASSERT_NE(mode, nullptr);
+  EXPECT_EQ(mode->on, "(state-set \"x\" \"1\")");
+  const Widget *plain = find(r.root, Kind::Combo, "Plain");
+  ASSERT_NE(plain, nullptr);
+  EXPECT_TRUE(plain->on.empty()); // on: stays optional
+  const Widget *grid = find(r.root, Kind::MenuItemToggle);
+  ASSERT_NE(grid, nullptr);
+  EXPECT_EQ(grid->bind, "view.grid");
+  EXPECT_EQ(grid->on, "(state-set \"g\" \"1\")");
+  ASSERT_NE(find(r.root, Kind::Checkbox), nullptr);
+  EXPECT_EQ(find(r.root, Kind::Checkbox)->on, "wire.changed");
+  ASSERT_NE(find(r.root, Kind::SliderInt), nullptr);
+  EXPECT_EQ(find(r.root, Kind::SliderInt)->on, "n.changed");
+  ASSERT_NE(find(r.root, Kind::SliderFloat), nullptr);
+  EXPECT_EQ(find(r.root, Kind::SliderFloat)->on, "speed.changed");
+  ASSERT_NE(find(r.root, Kind::Color), nullptr);
+  EXPECT_EQ(find(r.root, Kind::Color)->on, "tint.changed");
+}
+
 // keys: -- each entry a rebindable action with its label, its default key(s) and its on:.
 TEST(AriadneLoader, KeysBlock) {
   SKIP_WITHOUT_YAML();

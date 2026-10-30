@@ -280,6 +280,20 @@ TEST(AriadneFtxui, ComboPopupPicksAnOption) {
   EXPECT_EQ(val(t.app, "mode"), "gamma");
 }
 
+// The cypkg tmux finding: a combo's on: never ran. Right picks the next option; the on: program
+// runs on drain, after the write.
+TEST(AriadneFtxui, ComboPickRunsItsOn) {
+  REQUIRE_FTXUI();
+  Widget c = combo("Mode", "mode", {"alpha", "beta", "gamma"});
+  c.on = "(state-set \"x\" \"1\")";
+  Term t(group({c}));
+  t.key("Tab");
+  t.key("Right");
+  EXPECT_EQ(val(t.app, "mode"), "beta");
+  t.rt.drain();
+  EXPECT_EQ(val(t.app, "x"), "1");
+}
+
 TEST(AriadneFtxui, ComboPopupByMouse) {
   REQUIRE_FTXUI();
   Term t(group({combo("Mode", "mode", {"alpha", "beta", "gamma"})}));
