@@ -3,6 +3,7 @@
 // per-convoy formation aggregate the ImGui panel / DSL will read
 // (docs/roadmap/NAV-STATS-INTRINSIC-ROADMAP.md, Track 3b-1).
 #undef NDEBUG
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstdint>
@@ -11,7 +12,9 @@
 #include <cvc/gl/nav_stats_publish.h>
 #include <cvc/gl/state_publisher.h>
 #include <cvc/nav/coef_mlp.h>
+#include <cvc/nav/plant_ledger.h>
 #include <cvc/nav/sim_world.h>
+#include <cvc/physics/plant_host.h>
 #include <cvc/state/state.h>
 #include <cvc/volume/volume.h>
 #include <string>
@@ -159,6 +162,31 @@ int main() {
      "fleet first roll");
   ck(st("plt.nav_stats.veh.0.tilt_max_deg").property("unit") == "deg", "tilt unit");
   ck(!st("plt.nav_stats.veh.0.ltr_max").comment().empty(), "ltr_max has a comment");
+  // every item of the ledger, each with its value or n/a where the plant does not measure it
+  ck(std::fabs(st("plt.nav_stats.veh.0.roll_max_deg").value<double>()) < 1e-9, "veh0 roll");
+  ck(st("plt.nav_stats.veh.0.vehicle_hits").value<int>() == 0, "veh0 vehicle hits");
+  ck(st("plt.nav_stats.episode.total_vehicle_hits").value<int>() == 0, "fleet vehicle hits");
+  cvc::nav::episode_nav_stats na = pl;
+  na.per_vehicle[0].plant_measured = cvc::nav::plant_sample::has_attitude;
+  cvc::gl::publish_nav_stats(pub, "pna", na, 1);
+  pub.flush();
+  ck(st("pna.nav_stats.veh.0.ltr_max").value() == cvc::gl::kNavStatsNotApplicable, "ltr n/a");
+  ck(st("pna.nav_stats.veh.0.vehicle_hit_s").value() == cvc::gl::kNavStatsNotApplicable,
+     "vehicle_hit_s n/a");
+  ck(st("pna.nav_stats.veh.0.tilt_max_deg").value<double>() == 91.0, "tilt still measured");
+  ck(!st("pna.nav_stats.veh.0.ltr_max").comment().empty(), "an n/a leaf has its comment");
+  // emit_plant_ledger: the whole ledger without a plant, every item n/a
+  cvc::gl::nav_stats_publish_params all;
+  all.emit_plant_ledger = true;
+  cvc::gl::publish_nav_stats(pub, "kin", e, 1, all);
+  pub.flush();
+  for (const cvc::nav::plant_ledger_item &it : cvc::nav::plant_ledger_vehicle())
+    ck(st(std::string("kin.nav_stats.veh.1.") + it.key).value() == cvc::gl::kNavStatsNotApplicable,
+       "kinematic: a vehicle's item is n/a");
+  for (const cvc::nav::plant_ledger_item &it : cvc::nav::plant_ledger_episode())
+    ck(st(std::string("kin.nav_stats.episode.") + it.key).value() ==
+           cvc::gl::kNavStatsNotApplicable,
+       "kinematic: an episode item is n/a");
 
   // per_vehicle_every stride: over 3 vehicles, stride 2 publishes veh 0 and 2, skips 1 (fresh
   // prefix).
@@ -340,6 +368,78 @@ int main() {
     for (int k = 0; k < 10; ++k)
       tick_and_publish("obstacle", k, k == 0 || k == 5);
     ck(republishes == 4, "exactly four re-publishes: ever_seen, threshold, mark, expiry");
+  }
+
+  // ── every plant publishes every ledger leaf: three agents on each plant plant_host offers, a
+  // sim_world's own nav_stats, published with emit_plant_ledger. Each leaf has a value, or n/a
+  // exactly where its plant does not measure it: everything on the bicycle, the load transfer and
+  // wheels off the ground on the single track, and the contacts on a dynamic plant without a
+  // world to collide in (a build without Jolt, where a Jolt preset falls back to the bicycle).
+  {
+    constexpr double kS = 0.05;
+    constexpr int R = 101, C = 101;
+    const std::vector<std::uint8_t> occ(static_cast<std::size_t>(R) * C, 0);
+    cvc::nav::sim_world::config c;
+    c.rows = R;
+    c.cols = C;
+    c.min_x = c.min_y = -100.0;
+    c.max_x = c.max_y = 100.0;
+    c.scale = kS;
+    c.veh.rr = 0.15f;
+    c.veh.d_hat = 0.35f;
+    c.veh.dt = 0.06f;
+    c.veh.nsub = 6;
+    c.freeze_sense = true;
+    c.reach_tol = static_cast<float>(4.0 * kS);
+    const float o[6] = {-3.0f, -1.5f, -3.0f, 0.0f, -3.0f, 1.5f};
+    const float g[6] = {3.0f, -1.5f, 3.0f, 0.0f, 3.0f, 1.5f};
+    const float col[9] = {1, 1, 1, 1, 1, 1, 1, 1, 1};
+    const bool jolt = cvc::physics::plant_host::available();
+    const std::vector<std::string> contacts = {"building_contacts", "vehicle_hits", "vehicle_hit_s",
+                                               "total_building_contacts", "total_vehicle_hits"};
+    const std::vector<std::string> loads = {"ltr_max", "lift_s", "wheels_up_s"};
+    struct expect {
+      const char *plant;
+      bool none; // nothing applies (the bicycle)
+      std::vector<std::string> na;
+    };
+    const expect plants[] = {{"kinematic", true, {}},
+                             {"humvee", !jolt, {}},
+                             {"dynamic", false, loads},
+                             {"dynamic4w", false, {}}};
+    for (const expect &x : plants) {
+      cvc::nav::sim_world sim(c, occ.data(), occ.data(), cvc::nav::coef_mlp::default_biased(), o, g,
+                              col, 3);
+      cvc::physics::plant_host host;
+      host.use(sim, x.plant);
+      sim.begin_nav_stats();
+      for (int t = 0; t < 30; ++t)
+        sim.step();
+      const std::string pre = std::string("plants_") + x.plant;
+      cvc::gl::publish_nav_stats(pub, pre, sim.nav_stats(), 30, all);
+      pub.flush();
+      std::vector<std::string> na = x.na;
+      if (!jolt && x.plant != std::string("kinematic"))
+        na.insert(na.end(), contacts.begin(), contacts.end());
+      const auto check = [&](const std::string &path, const char *key) {
+        char what[160];
+        const bool want_na =
+            x.none || std::find(na.begin(), na.end(), std::string(key)) != na.end();
+        std::snprintf(what, sizeof what, "%s: %s is %s", x.plant, path.c_str(),
+                      want_na ? "n/a" : "a value");
+        ck(st(path).initialized() &&
+               (st(path).value() == cvc::gl::kNavStatsNotApplicable) == want_na,
+           what);
+      };
+      for (int i = 0; i < 3; ++i)
+        for (const cvc::nav::plant_ledger_item &it : cvc::nav::plant_ledger_vehicle())
+          check(pre + ".nav_stats.veh." + std::to_string(i) + "." + it.key, it.key);
+      for (const cvc::nav::plant_ledger_item &it : cvc::nav::plant_ledger_episode())
+        check(pre + ".nav_stats.episode." + it.key, it.key);
+      if (!x.none)
+        ck(st(pre + ".nav_stats.veh.0.plant_steps").value<int>() == 30, "fed every tick");
+      host.use(sim, "kinematic"); // off the host's world before it goes
+    }
   }
 
   std::printf(failures ? "cvcgl_nav_stats_publish: %d FAILURES\n" : "cvcgl_nav_stats_publish: OK\n",

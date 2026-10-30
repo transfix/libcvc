@@ -39,20 +39,25 @@ struct nav_stats_publish_params {
   bool emit_coverage = true;  // publish the episode .coverage.* belief-coverage fractions
   bool emit_formation = true; // publish the per-convoy .formation.<id>.* holding aggregates
   bool complete = false; // stamp meta.complete = 1 (final/aggregate dump at the episode boundary)
+  // Write every plant ledger item even where no plant fed it (the kinematic plant), as
+  // kNavStatsNotApplicable, so a reader shows the whole ledger whatever the plant.
+  bool emit_plant_ledger = false;
 };
+
+// A plant ledger leaf's value where the item does not apply to its plant (cvc/nav/plant_ledger.h).
+inline constexpr const char *kNavStatsNotApplicable = "n/a";
 
 // Publish one base episode record into <prefix>.nav_stats.* through the scene's state_publisher
 // (value lane, coalesced, drained by its off-render worker). finish() is idempotent (a live running
 // snapshot), so call this every tick with the current snapshot; the publisher coalesces to the last
 // value per path. `tick` stamps meta.tick. Sentinel doubles (min_sep_m / min_clearance_m == 1e30)
 // are published as-is; a reader treats >= 1e29 as "unmeasured" (the value lane has no null).
-// With a physics plant that measures energy (energy_tracked), the episode also gets
-// .episode.{total_energy_J, total_building_contacts} and each vehicle .veh.<i>.{energy_J,
-// energy_per_km, building_contacts}; without one those leaves are not written. Likewise with a
-// terrain (terrain_tracked): .episode.total_infeasible_slope_steps and each vehicle
-// .veh.<i>.infeasible_slope_steps. And with a physics plant that feeds the plant ledger
-// (plant_tracked): .episode.{vehicles_rolled, first_roll_s} and each vehicle .veh.<i>.{rolled_over,
-// rolled_over_s, tilt_max_deg, ltr_max, a_lat_max_g, steer_sat_share}.
+// With a terrain (terrain_tracked) the episode also gets .episode.total_infeasible_slope_steps and
+// each vehicle .veh.<i>.infeasible_slope_steps. With a physics plant, the plant ledger
+// (cvc/nav/plant_ledger.h): each of its items .episode.<key> and .veh.<i>.<key>, the energy ones
+// when the plant measures energy (energy_tracked), the rest when it fed the ledger
+// (plant_tracked), every one with emit_plant_ledger; an item its plant does not measure is
+// kNavStatsNotApplicable. Without a plant (and without emit_plant_ledger) none is written.
 void publish_nav_stats(cvc::gl::state_publisher &pub, const std::string &scenePrefix,
                        const cvc::nav::episode_nav_stats &e, long tick,
                        const nav_stats_publish_params &p = {});

@@ -45,6 +45,7 @@
 
 namespace cvc {
 class volume;
+struct contour_mesh; // cvc/volume/contour_mesh.h
 
 CVC_DEF_EXCEPTION(contour_spectrum_error);
 
@@ -177,6 +178,55 @@ public:
   static uint64 max_overrun(std::size_t samples);
   // The spectrum, once step() has returned true (moved out: call once; a second call, or a call
   // before it is ready, throws contour_spectrum_error, and after a failure it rethrows that).
+  contour_spectrum take();
+
+private:
+  struct impl;
+  std::unique_ptr<impl> _impl;
+};
+
+// --- on a simplicial mesh (cvc/volume/contour_mesh.h) -----------------------------------------
+//
+// The same four functions of a piecewise-linear field on a mesh, in the mesh's own units and data
+// units (no [0, 255] map is needed: each element's integral is exact or the grid's own):
+//   on tetrahedra (a solid)   the isosurface area, the volume below and above the isovalue, and the
+//                             integral of |grad f|^2 over the isosurface, with each tetrahedron's
+//                             exact gradient (data units per mesh unit; the grid version takes a
+//                             cell-average difference per voxel). The area and volume are the grid
+//                             version's per-tetrahedron integrals (libcontour_area applies);
+//   on triangles (a surface)  the isocontour's length (in surface_area), the area below and above
+//                             it (in min_volume / max_volume) and the integral of |grad f|^2 along
+//                             it, all exact.
+// total_volume is the solid's volume or the surface's area. An element with a non-finite value is
+// skipped and left out of it. The domain defaults to the finite values' extrema; samples, the
+// domain, progress and libcontour_area apply as on a grid; world_units and max_dim do not.
+//
+// Throws contour_spectrum_error for a mesh with neither tetrahedra nor triangles, a value count
+// other than the point count, an element naming a point that does not exist, fewer than 2
+// samples, a non-finite domain or no finite value under the default one, a function past the
+// double range, or on cancel. A degenerate domain gives all-zero functions with total_volume set.
+contour_spectrum compute_contour_spectrum(const contour_mesh &mesh,
+                                          const contour_spectrum_options &opt = {});
+
+// compute_contour_spectrum on a mesh, a slice at a time, like contour_spectrum_builder (an overlay
+// task steps it on the state_exec scheduler). Phases: "domain" (1 unit per value scanned, only
+// when the domain is not given), "integrating" (40 units per tetrahedron or 20 per triangle, plus
+// 2 per isovalue sample it updates; then 1 per sample of the final pass), then "done". A step does
+// at most one element past its budget. The builder holds the shared mesh until it is done.
+// progress(), phase(), work_done(), take() and the failure rules are contour_spectrum_builder's.
+class mesh_contour_spectrum_builder {
+public:
+  explicit mesh_contour_spectrum_builder(std::shared_ptr<const contour_mesh> mesh,
+                                         const contour_spectrum_options &opt = {});
+  ~mesh_contour_spectrum_builder();
+  mesh_contour_spectrum_builder(mesh_contour_spectrum_builder &&) noexcept;
+  mesh_contour_spectrum_builder &operator=(mesh_contour_spectrum_builder &&) noexcept;
+
+  bool step(std::size_t budget);
+  bool done() const;
+  double progress() const;
+  const char *phase() const;
+  uint64 work_done() const;
   contour_spectrum take();
 
 private:

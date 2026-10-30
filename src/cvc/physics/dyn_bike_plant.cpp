@@ -224,6 +224,9 @@ void dyn_bike_plant::advance() {
     psi0[i] = a.s.psi;
     a.tick = dyn_bike_books{};
     a.hits_tick = 0;
+    a.statics_tick = 0;
+    a.touched = -1;
+    a.touch_depth = 0.0;
   }
   const bool world = _chassis->on();
   const double h = _dt / _nsub;
@@ -283,6 +286,8 @@ void dyn_bike_plant::advance() {
         o.vy = -s1 * vgx + c1 * vgy;
         d.contact = diff::dyn_ph_hamiltonian(a.p, o) - before;
         ++a.hits_tick;
+        dyn::count_contacts(*_chassis, static_cast<int>(i), a.statics_tick, a.touched,
+                            a.touch_depth);
       }
       add(a.tick, d);
       dyn::measured(a.driver, a.s.vx, o.vx, h);
@@ -301,6 +306,10 @@ void dyn_bike_plant::advance() {
 
 double dyn_bike_plant::energy_step(int i) const {
   return _agents.at(static_cast<std::size_t>(i)).tick.drive;
+}
+
+int dyn_bike_plant::static_contacts_step(int i) const {
+  return _agents.at(static_cast<std::size_t>(i)).statics_tick;
 }
 
 cvc::nav::plant_sample dyn_bike_plant::sample(int i) const {
@@ -328,7 +337,20 @@ void dyn_bike_plant::measure(agent &a, double vx0, double vy0, double psi0, bool
     s.a_lat = (-dvx * sm + dvy * cm) / _dt;
     s.a_lon = (dvx * cm + dvy * sm) / _dt;
   }
+  // The body's attitude, the ground's under it (the chassis box's in the world).
+  vec3 position;
+  quat rotation;
+  chassis_pose(a, a.s, position, rotation);
+  dyn::attitude_of(rotation, s);
   s.wheels = s.wheels_down = 2 * static_cast<int>(a.desc.axles.size());
+  s.contacts = tick ? a.statics_tick : 0;
+  s.vehicle_contact = tick ? a.touched : -1;
+  // A single track on the ground: no left and right loads, no roll rate, no wheel off it; and
+  // contacts only in a world.
+  s.measured = cvc::nav::plant_sample::has_attitude;
+  if (_chassis->on())
+    s.measured |=
+        cvc::nav::plant_sample::has_contacts | cvc::nav::plant_sample::has_vehicle_contact;
   a.sample = s;
 }
 

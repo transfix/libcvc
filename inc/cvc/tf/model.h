@@ -213,6 +213,13 @@ model from_tables(const std::vector<double> &color_table, const std::vector<doub
                   double lo, double hi);
 model from_coupled_points(const std::vector<double> &value_rgba, double lo, double hi);
 
+// A dense colour ramp (sorted by `at`, e.g. a colormap sampled finely) thinned to few nodes: the
+// two ends, then repeatedly the input node the thinned ramp misses by most, until it follows every
+// input node within `tolerance` (per channel) or holds `max_nodes` (at least 2). An editor then
+// shows a handful of colour bars to grab rather than one per sample.
+std::vector<color_node> simplify_ramp(const std::vector<color_node> &dense, float tolerance,
+                                      int max_nodes);
+
 // "a,b,c" <-> doubles, the flat-CSV encoding the renderer keys use. parse_csv returns false (and
 // leaves `out` cleared) on any malformed token.
 // format_csv writes %.17g in the classic locale (a non-finite value as 0); parse_csv takes ""

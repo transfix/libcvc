@@ -280,6 +280,72 @@ TEST(Dyn4wPlant, CollidesWithTheWorld) {
   EXPECT_NEAR(identity_gap(walled, 0), 0.0, 1e-9 * b.flow());
 }
 
+// For nav's plant ledger the plant tells its collisions apart (agent 0 into the wall, agents 1 and
+// 2 head on into each other away from it), and measures the body as its model has it: upright at
+// rest with its four wheels down and no load transfer, and in a left turn the load on its right
+// wheels.
+TEST(Dyn4wPlant, TellsTheBuildingsFromTheOtherVehicles) {
+  if (!plant_host::available())
+    GTEST_SKIP() << "no Jolt in this build";
+  using cvc::nav::plant_sample;
+  body_id ground;
+  auto w = walled_world(30.0, ground);
+  dyn_4w_plant_options o;
+  o.physics = w.get();
+  o.ground_bodies = {ground};
+  dyn_4w_plant plant({vehicle_desc::humvee()}, o);
+  cvc::nav::plant_state start[3];
+  start[1].x = static_cast<float>(60 * kS);
+  start[1].y = start[2].y = static_cast<float>(60 * kS);
+  start[2].x = static_cast<float>(90 * kS);
+  start[2].heading = 3.14159265f;
+  plant.attach(3, start, trained_frame(), 0.06);
+  EXPECT_EQ(plant.sample(0).measured, plant_sample::has_all);
+  EXPECT_NEAR(plant.sample(0).up_z, 1.0, 1e-9);
+  EXPECT_EQ(plant.sample(0).wheels_down, 4);
+  EXPECT_NEAR(plant.sample(0).ltr, 0.0, 1e-9);
+  int statics[3] = {0, 0, 0}, touched[3] = {0, 0, 0};
+  bool partner = true;
+  for (int t = 0; t < 200; ++t) {
+    for (int i = 0; i < 3; ++i)
+      plant.command(i, 0.0f, static_cast<float>(2.0 * kS));
+    plant.advance();
+    for (int i = 0; i < 3; ++i) {
+      const plant_sample s = plant.sample(i);
+      statics[i] += plant.static_contacts_step(i);
+      EXPECT_EQ(s.contacts, plant.static_contacts_step(i));
+      EXPECT_EQ(s.vehicle_contact, plant.vehicle_contact_step(i));
+      if (s.vehicle_contact >= 0) {
+        ++touched[i];
+        partner = partner && s.vehicle_contact == (i == 1 ? 2 : 1);
+      }
+    }
+  }
+  std::printf("  static contacts begun %d %d %d; ticks touching a vehicle %d %d %d\n", statics[0],
+              statics[1], statics[2], touched[0], touched[1], touched[2]);
+  EXPECT_GT(statics[0], 0);
+  EXPECT_EQ(statics[1] + statics[2], 0);
+  EXPECT_EQ(touched[0], 0);
+  EXPECT_GT(touched[1], 0);
+  EXPECT_GT(touched[2], 0);
+  EXPECT_TRUE(partner) << "each touched the other";
+  // Without a world: no contacts measured. A left turn at speed loads the right wheels.
+  dyn_4w_plant alone({vehicle_desc::humvee()});
+  alone.attach(1, start, trained_frame(), 0.06);
+  double ltr = 0.0;
+  for (int t = 0; t < 150; ++t) {
+    alone.command(0, t < 80 ? 0.0f : 0.15f, t < 80 ? static_cast<float>(2.0 * kS) : 0.0f);
+    alone.advance();
+    ltr = std::min(ltr, alone.sample(0).ltr);
+  }
+  std::printf("  turning left at %.1f m/s: ltr %.3f, roll %.4f\n", alone.body(0).vx, ltr,
+              alone.sample(0).roll);
+  EXPECT_EQ(alone.sample(0).measured, plant_sample::has_all & ~(plant_sample::has_contacts |
+                                                                plant_sample::has_vehicle_contact));
+  EXPECT_LT(ltr, -0.05);
+  EXPECT_EQ(alone.sample(0).wheels_down, 4);
+}
+
 // "dynamic4w" puts every agent on the Humvee's four-wheel model, which drives to its goal;
 // "dynamic4w:<presets>" cycles presets; an unknown one throws and changes nothing.
 TEST(Dyn4wPlant, PlantHostPutsTheAgentsOnItByName) {

@@ -90,8 +90,22 @@ struct drift_sample {
 // world's frame (metres, radians, seconds), not nav's normalized frame. Where it overlaps
 // cvc::physics::planar_sample (physics/plant_log.h) a field has its name and meaning, and the
 // Jolt plant computes both alike: vx, vy, r, steer, grade, roll, steer_cmd, accel_cmd, a_lat,
-// a_lon, contacts, wheels, wheels_down.
+// a_lon, contacts, vehicle_contact, wheels, wheels_down.
+//
+// `measured` says which of the fields a plant's model has: a plant without one (the dynamic
+// single track has no left and right wheels, so no ltr) clears its bit, leaves the field at its
+// default, and nav_stats reports the ledger items reduced from it as not applicable. The fields
+// without a bit (velocities, steering, commands, accelerations, wheels) every plant measures.
 struct plant_sample {
+  enum : std::uint32_t {
+    has_attitude = 1u << 0,        // grade, roll, up_z
+    has_roll_rate = 1u << 1,       // roll_rate
+    has_ltr = 1u << 2,             // ltr
+    has_wheels_down = 1u << 3,     // wheels_down
+    has_contacts = 1u << 4,        // contacts
+    has_vehicle_contact = 1u << 5, // vehicle_contact
+    has_all = (1u << 6) - 1u,
+  };
   double vx = 0.0, vy = 0.0; // the centre of mass's velocity along the heading and to its left
   double r = 0.0;            // yaw rate (rad/s, + left)
   double steer = 0.0;        // the bicycle angle the vehicle has (rad, + left)
@@ -109,6 +123,10 @@ struct plant_sample {
   int wheels = 0;            // the vehicle's wheels
   int wheels_down = 0;       // how many touch the ground
   int contacts = 0;          // contacts its body started with static geometry over the tick
+  // The agent whose vehicle its body touched over the tick (begun or persisting; the deepest
+  // contact's); -1 none, and at attach()
+  int vehicle_contact = -1;
+  std::uint32_t measured = has_all; // the has_ bits of the fields this plant measures
 };
 
 // nav's kinematic bicycle, integrated as the fused drive integrates it (drive.cpp's

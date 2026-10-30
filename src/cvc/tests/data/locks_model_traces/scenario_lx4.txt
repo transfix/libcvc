@@ -1,0 +1,13 @@
+# scenarios.py scenario_lx4, its homes merged into one home of prio false
+config inheritance=1 coalesce=0 one_home=1 mutations=-
+attach_home 0 -> 0 |
+try_acquire 0 1 o 0 X k - - -> granted 1 1 0 |
+query - 0 o -> held k/X/1/1/1/0 waiting |
+try_acquire 0 2 o 0 X k - - -> busy |
+block 0 2 o 0 X k - - -> 1 queued |
+query - 0 o -> held k/X/1/1/1/0 waiting k/X/2 |
+release 0 1 1 -> ok | wake(0,2,1)
+resume 0 2 1 -> granted 2 2 0 |
+query - 0 o -> held k/X/2/1/2/0 waiting |
+release 0 2 2 -> ok |
+query - 0 o -> held waiting |
