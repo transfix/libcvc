@@ -541,6 +541,32 @@ TEST(AriadneLinkHoles, ASubtreeGrantReachesItsDescendantsOnly) {
 
 // ── host verbs and init: diagnostics ────────────────────────────────────────────────────────────
 
+// A load:ed module's init: has (has? ...) for the same host, as the document's init: and every
+// action do, so it can guard an optional host function the documented way.
+TEST(AriadneHostVerbs, AModulesInitAsksHas) {
+  REQUIRE_YAML();
+  const fs::path dir = test_dir("mount_has");
+  write(dir, "mod.ari",
+        "init: |\n"
+        "  (state-set \"verb\" (if (has? \"module-probe-verb\") \"yes\" \"no\"))\n"
+        "  (state-set \"absent\" (if (has? \"no-such-verb\") \"yes\" \"no\"))\n"
+        "root: [ { text: m } ]\n");
+  const fs::path doc = write(dir, "p.ari",
+                             "meta: {min_libcvc: 3.4.0}\n"
+                             "root:\n  - load: mod.ari\n    as: m\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.mh");
+  art.set_backend(be);
+  art.register_verb("module-probe-verb", [] {});
+  art.load(doc.string());
+  art.runtime().render(); // mounts the module and runs its init:
+  EXPECT_EQ(val(app, "ui.docs.mh.includes.m.verb"), "yes");
+  EXPECT_EQ(val(app, "ui.docs.mh.includes.m.absent"), "no");
+  const std::vector<std::string> warnings = art.take_warnings();
+  EXPECT_TRUE(warnings.empty()) << warnings.front();
+}
+
 TEST(AriadneHostVerbs, EveryRegisteredVerbIsBound) {
   REQUIRE_YAML();
   const fs::path doc = write(test_dir("verbs"), "v.ari",

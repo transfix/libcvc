@@ -1283,7 +1283,8 @@ void Runtime::Impl::wire_holes(const std::string &parent_prefix, const std::stri
 
 void Runtime::Impl::run_mount_init(const std::string &sub_prefix, const std::string &script) {
   std::vector<std::string> errs;
-  run_init(app, sub_prefix, script, &errs);
+  // (has? ...) as in the document's own init: and every action: a module's host is the same host.
+  run_init(app, sub_prefix, script, &errs, [this](const std::string &n) { return has(n); });
   for (const std::string &e : errs)
     warn_once("ari: mount init at '" + sub_prefix + "': " + e);
 }

@@ -925,7 +925,8 @@ listed there is not warned about again. `ari check doc.ari` shows both.
 
 A document that can run without something asks for it at run time with `(has? "name")`,
 which answers the same question for a token, a function or a widget type. It works in
-programs and in reactive expressions:
+programs and in reactive expressions, a `load:`ed module's included (its `init:` too: a module's
+host is the document's host):
 
 ```yaml
 windows:
@@ -1253,7 +1254,7 @@ part of what the parent granted), an opaque one is not. `state-delete`, the expi
 and `state-watch` still act on the physical path and do not reach through a hole. A fragment may declare
 the holes it expects with `needs:`; an ungranted expectation warns and the fragment falls
 back to a local (fail-safe) binding. A per-mount `init:` runs once at the sub-prefix
-**after** the holes are wired.
+**after** the holes are wired, with `(has? ...)` as the document's own `init:` has it.
 
 ---
 
