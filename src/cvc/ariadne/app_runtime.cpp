@@ -3,6 +3,7 @@
 // scene, if any, is delegated to a SceneAdapter, so this file pulls in no renderer.
 
 #include <algorithm>
+#include <chrono>
 #include <cvc/ariadne/app_runtime.h>
 #include <cvc/ariadne/backend.h>  // cvc::ariadne::Backend (set_backend)
 #include <cvc/ariadne/bind.h>     // resolve_bind / read_or_seed / write
@@ -24,6 +25,7 @@
 #include <set>
 #include <span>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 
 namespace cvc {
@@ -41,6 +43,20 @@ AppRuntime::~AppRuntime() {
   verbs_->quit = nullptr;
   if (netEnabled_)
     disable_net(); // its provider holds app_ by reference
+}
+
+bool AppRuntime::idle() const {
+  return app_.exec_async_host().in_flight() == 0 && !app_.exec_scheduler().has_runnable();
+}
+
+void AppRuntime::settle(const std::function<void()> &step, double max_seconds) {
+  using clock = std::chrono::steady_clock;
+  const auto deadline = clock::now() + std::chrono::duration<double>(max_seconds);
+  for (int quiet = 0; quiet < 3 && clock::now() < deadline;) {
+    step();
+    quiet = idle() ? quiet + 1 : 0;
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
 }
 
 std::string AppRuntime::enable_net(const NetHostConfig &config) {

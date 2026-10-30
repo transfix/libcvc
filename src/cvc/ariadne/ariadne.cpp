@@ -56,11 +56,12 @@ namespace {
 // They are used unqualified below (same cvc::ariadne namespace).
 
 // Read a state value as a plain string with no seeding (read-only Text view). Follows a
-// transparent-link hole to its target (§12), so a bound Text in a mounted module shows the
-// granted parent value, matching every other read path.
+// transparent-link hole to its target (§12), on every hop, so a bound Text in a mounted module
+// shows the granted parent value (or a value under it), matching every other read path.
 std::string read_string(cvc::app &ctx, const std::string &path) {
   try {
-    return read_effective(cvc::state::instance(ctx)(path)).value();
+    cvc::state *n = read_node(ctx, path);
+    return n ? n->value() : std::string();
   } catch (const std::exception &) {
     return "<unset>";
   }
@@ -435,6 +436,17 @@ std::string run_scoped_program(cvc::app &app, const std::string &prefix, const s
     // :timeout 0 (TimeoutError, or :else with :if-available).
     ictx.lock_wait_allowed = false;
     ictx.lock_default_timeout = 0.0;
+    // A child the script spawns copies both (so it never waits either), the chroot and this
+    // scheduler, and gets the intrinsics, the host's providers and has? (docs/STATE_EXEC_LOCKS.md
+    // 5.5). This scope's sched.run steps it, and its context goes with the scheduler. No Impl
+    // here, so no document: the library's callback, not Runtime::Impl::make_action_context.
+    ictx.spawn_context = se::make_spawn_context(
+        nullptr, [has](const se::environment_ptr &e, se::intrinsics_context &c) {
+          for (const ActionIntrinsicProvider &p : action_intrinsics_snapshot())
+            if (p)
+              p(e, c);
+          bind_has(e, has);
+        });
     se::apply_chroot(ictx, root, prefix); // scope writes under the document/mount prefix
     auto env = se::builtins::make_default_environment();
     se::register_intrinsics(env, &ictx);
@@ -957,7 +969,9 @@ struct Runtime::Impl {
   // pointer, so — unlike the load-time init: lane's one-scope run — an action that
   // suspends (await/sleep/msg-recv) needs its context kept alive across frames until the
   // process terminates or is reaped. Field order matters for teardown: ictx (which points
-  // into tracker/proc) is declared last so it destructs first.
+  // into tracker/proc) is declared last so it destructs first. Shared, so one type serves its
+  // three owners: live_actions_ (an action's), the resident slots (a resident's) and a spawned
+  // child's process (process::keep_alive, the child's own).
   struct ActionContext {
     cvc::state_exec::memory_tracker tracker;
     cvc::state_exec::process_ptr proc;
@@ -968,8 +982,23 @@ struct Runtime::Impl {
     std::function<void(const std::string &)> done; // run_program: how its own process ended
     std::string script;                            // the program's text, to say which one failed
   };
-  std::unordered_map<int, std::unique_ptr<ActionContext>> live_actions_;
+  std::unordered_map<int, std::shared_ptr<ActionContext>> live_actions_;
+  // Pids of the children actions and residents spawned (spawn_child), reaped once they finish.
+  std::vector<int> spawned_children_;
   bool used_scheduler_ = false; // did we ever submit to the app scheduler? (gate teardown reap)
+
+  // The context an action, a resident or a child of one runs in: the app scheduler, a placeholder
+  // proc, writes chrooted to `scope_prefix`, the document's channel policy and resource scope, the
+  // intrinsics, the host's action intrinsic providers and has?, and the with-lock default (nullopt:
+  // a request with no :timeout waits as long as it takes).
+  std::shared_ptr<ActionContext> make_action_context(const std::string &scope_prefix,
+                                                     std::optional<double> lock_default_timeout);
+  // The spawn_context of an action's or a resident's context (docs/STATE_EXEC_THREADED.md 4.15): a
+  // child runs in a context of its own, made like theirs, under its parent's chroot and with its
+  // parent's lock fields, so a child of an action gives up after the action's default. The
+  // child's process keeps it alive, and the child keeps the document's owner (intrinsic_spawn),
+  // so ~Impl's kill_owner reaps it.
+  cvc::state_exec::spawn_setup spawn_child(const cvc::state_exec::intrinsics_context &parent);
 
   // Submit a program `on:` as a process on the app-wide scheduler (owner-tagged, chrooted
   // to `prefix`), keeping its ActionContext alive in live_actions_. Returns immediately.
@@ -994,7 +1023,7 @@ struct Runtime::Impl {
   std::string key_script_;     // §4.6 document-level on_key body (keyboard events, via post_input)
   std::string pointer_script_; // §4.6 document-level on_pointer body (mouse events, via post_input)
   std::string signal_script_;  // document-level on_signal body (signals, via post_signal)
-  std::unique_ptr<ActionContext> tick_resident_, key_resident_, pointer_resident_, signal_resident_;
+  std::shared_ptr<ActionContext> tick_resident_, key_resident_, pointer_resident_, signal_resident_;
   int tick_resident_pid_ = -1, key_resident_pid_ = -1, pointer_resident_pid_ = -1,
       signal_resident_pid_ = -1;
   std::string tick_channel() const { return owner_ + "#tick"; }
@@ -1007,11 +1036,11 @@ struct Runtime::Impl {
   // deliveries and binds each delivered value as `event`, so an on_key/on_pointer body reads
   // (get-attr event "key") etc. (on:tick's body simply ignores `event`).
   void ensure_resident(const std::string &channel, const std::string &body,
-                       std::unique_ptr<ActionContext> &ctx_slot, int &pid_slot);
+                       std::shared_ptr<ActionContext> &ctx_slot, int &pid_slot);
   // The same, chrooted to `chroot` with `functions` (a FunctionScope prelude) defined first: a
   // mount's tick resident. The four-argument form is the document's (prefix, doc_functions).
   void ensure_resident(const std::string &channel, const std::string &body,
-                       std::unique_ptr<ActionContext> &ctx_slot, int &pid_slot,
+                       std::shared_ptr<ActionContext> &ctx_slot, int &pid_slot,
                        const std::string &chroot, const std::string &functions);
   void ensure_tick_resident();   // submit the tick resident (woken by the coalesced post_tick)
   void post_tick();              // wake the tick resident once this drain
@@ -1088,7 +1117,7 @@ struct Runtime::Impl {
   struct MountTick {
     std::string program; // prelude + body: what a reconcile compares to keep it running
     std::string channel;
-    std::unique_ptr<ActionContext> ctx;
+    std::shared_ptr<ActionContext> ctx;
     int pid = -1;
     const Widget *repeat = nullptr; // the outermost repeat: template it was emitted under, if any
     int instance = -1;              // and that repeat's instance index
@@ -2004,10 +2033,59 @@ Runtime::Impl::~Impl() {
   // on the app scheduler/state, not this Runtime's owner_-tagged process lanes.
   doc_scope_.clear();
   // Reap this document's whole process group so a parked (await/sleep/msg-recv) action never
-  // lingers on the shared app scheduler after its Runtime is gone. Only touch the scheduler if
+  // lingers on the shared app scheduler after its Runtime is gone; the children its actions and
+  // residents spawned carry the same owner, so they go too. Only touch the scheduler if
   // we ever used it (exec_scheduler() lazily builds it — don't force it at teardown otherwise).
-  if (used_scheduler_)
-    app.exec_scheduler().kill_owner(owner_);
+  if (used_scheduler_) {
+    auto &sched = app.exec_scheduler();
+    sched.kill_owner(owner_);
+    // A child's process holds its context, which points into this Runtime: erase them now.
+    for (const int pid : spawned_children_)
+      sched.reap(pid);
+    for (const auto &[pid, ac] : live_actions_)
+      for (const int child : ac->children)
+        sched.reap(child);
+  }
+}
+
+std::shared_ptr<Runtime::Impl::ActionContext>
+Runtime::Impl::make_action_context(const std::string &scope_prefix,
+                                   std::optional<double> lock_default_timeout) {
+  namespace se = cvc::state_exec;
+  auto &sched = app.exec_scheduler();
+  used_scheduler_ = true;
+  auto ac = std::make_shared<ActionContext>();
+  ac->proc = se::make_process(); // placeholder for ictx.proc; the RUNNING process is the
+  ac->proc->status = se::process_status::ready; // scheduler's own, reached via current_process()
+  ac->ictx.sched = &sched;
+  ac->ictx.tracker = &ac->tracker;
+  ac->ictx.proc = ac->proc;
+  // Confine writes to the document/mount subtree.
+  se::apply_chroot(ac->ictx, cvc::state::instance(app), scope_prefix);
+  ac->ictx.channels = &channel_policy_; // §12 channel enforcement (no-op unless strict)
+  ac->ictx.document = &doc_scope_;      // per-document owner for (stream-open) & friends
+  ac->ictx.lock_default_timeout = lock_default_timeout; // with-lock with no :timeout
+  ac->env = se::builtins::make_default_environment();
+  se::register_intrinsics(ac->env, &ac->ictx);
+  // Host program-lane intrinsics (nav verbs, …), AFTER the standard ones (add or override).
+  for (const ActionIntrinsicProvider &p : action_intrinsics_snapshot())
+    if (p)
+      p(ac->env, ac->ictx);
+  bind_has(ac->env, [this](const std::string &n) { return has(n); });
+  return ac;
+}
+
+cvc::state_exec::spawn_setup
+Runtime::Impl::spawn_child(const cvc::state_exec::intrinsics_context &parent) {
+  std::shared_ptr<ActionContext> ac =
+      make_action_context(parent.root_path, parent.lock_default_timeout);
+  ac->ictx.lock_wait_allowed = parent.lock_wait_allowed;
+  ac->ictx.spawn_context = parent.spawn_context; // grandchildren get one too
+  // A child it forks shares `ac`, which the fork's process keeps alive too (process::keep_alive).
+  ac->ictx.on_child = [this](int pid) { spawned_children_.push_back(pid); };
+  // Recorded so the drain reaps it once it finishes: its process keeps `ac` alive.
+  return cvc::state_exec::spawn_setup{ac->env, ac,
+                                      [this](int pid) { spawned_children_.push_back(pid); }};
 }
 
 void Runtime::Impl::submit_action(const QueuedAction &action) {
@@ -2021,26 +2099,14 @@ void Runtime::Impl::submit_action(const QueuedAction &action) {
   // writes chrooted to the action's mount prefix.
   try {
     auto &sched = app.exec_scheduler();
-    used_scheduler_ = true;
-    auto ac = std::make_unique<ActionContext>();
-    ac->proc = se::make_process(); // placeholder for ictx.proc; the RUNNING process is the
-    ac->proc->status = se::process_status::ready; // scheduler's own, reached via current_process()
     cvc::state &root = cvc::state::instance(app);
     const uint64_t max_bytes = action_max_memory(root);
-    ac->ictx.sched = &sched;
-    ac->ictx.tracker = &ac->tracker;
-    ac->ictx.proc = ac->proc;
-    se::apply_chroot(ac->ictx, root, action_prefix); // confine writes to the document/mount subtree
-    ac->ictx.channels = &channel_policy_; // §12 channel enforcement (no-op unless strict)
-    ac->ictx.document = &doc_scope_;      // per-document owner for (stream-open) & friends
-    ac->ictx.lock_default_timeout = action_lock_timeout(root); // with-lock with no :timeout
-    ac->env = se::builtins::make_default_environment();
-    se::register_intrinsics(ac->env, &ac->ictx);
-    // Host program-lane intrinsics (nav verbs, …), AFTER the standard ones (add or override).
-    for (const ActionIntrinsicProvider &p : action_intrinsics_snapshot())
-      if (p)
-        p(ac->env, ac->ictx);
-    bind_has(ac->env, [this](const std::string &n) { return has(n); });
+    std::shared_ptr<ActionContext> ac =
+        make_action_context(action_prefix, action_lock_timeout(root));
+    // A child it spawns runs in the document's scope with the action's lock default.
+    ac->ictx.spawn_context = [this](const se::intrinsics_context &parent) {
+      return spawn_child(parent);
+    };
     // §4.6 event scope: a widget pointer handler runs with an `event` dict of the item's local
     // pointer coords, so the program can read (get-attr event "x"/"y"/"dx"/"dy"/"button").
     if (action.has_event) {
@@ -2120,10 +2186,10 @@ void Runtime::Impl::pump_and_sweep_actions(cvc::state_exec::async_scheduler &sch
   static constexpr uint64_t kPumpMaxSteps = 200000;
   static constexpr double kPumpMaxSeconds = 0.1;
   sched.sync_run(kPumpMaxSteps, kPumpMaxSeconds);
-  // Sweep: drop finished actions, report a killed or failed one, keep a still-parked one for a
-  // later frame.
-  // A finished process is reaped (nothing reads its result); a killed or failed one is reported.
-  const auto reap_ended = [&](int pid, const char *what, const std::string &script,
+  // Sweep: a finished process is reaped (nothing reads its result), a killed or failed one is
+  // reported, and a still-parked one is kept for a later frame. A run_program one's caller is told
+  // how it ended instead.
+  const auto reap_ended = [&](int pid, const char *what, const std::string &script = std::string(),
                               const std::function<void(const std::string &)> &done = {}) {
     const auto info = sched.get_process_info(pid);
     if (info && !se::is_finished(info->status))
@@ -2162,6 +2228,9 @@ void Runtime::Impl::pump_and_sweep_actions(cvc::state_exec::async_scheduler &sch
     else
       ++it;
   }
+  // Spawned children, and what they and the residents fork: a finished one's process would keep
+  // its context (an environment with every intrinsic) for the app's life.
+  std::erase_if(spawned_children_, [&](int pid) { return reap_ended(pid, "spawned program"); });
   // A resident never finishes on its own, so one that was killed (a syntax error in its body,
   // read inside the process; its per-step cap) or failed (an exception it didn't catch) is
   // reported, once per reason.
@@ -2186,35 +2255,28 @@ void Runtime::Impl::pump_and_sweep_actions(cvc::state_exec::async_scheduler &sch
 }
 
 void Runtime::Impl::ensure_resident(const std::string &channel, const std::string &body,
-                                    std::unique_ptr<ActionContext> &ctx_slot, int &pid_slot) {
+                                    std::shared_ptr<ActionContext> &ctx_slot, int &pid_slot) {
   ensure_resident(channel, body, ctx_slot, pid_slot, prefix, doc_functions);
 }
 
 void Runtime::Impl::ensure_resident(const std::string &channel, const std::string &body,
-                                    std::unique_ptr<ActionContext> &ctx_slot, int &pid_slot,
+                                    std::shared_ptr<ActionContext> &ctx_slot, int &pid_slot,
                                     const std::string &chroot, const std::string &functions) {
   if (body.empty() || pid_slot >= 0)
     return; // nothing to run, or already submitted (residents submit ONCE, not per frame)
   namespace se = cvc::state_exec;
   try {
     auto &sched = app.exec_scheduler();
-    used_scheduler_ = true;
-    auto ac = std::make_unique<ActionContext>();
-    ac->proc = se::make_process();
-    ac->proc->status = se::process_status::ready;
-    cvc::state &root = cvc::state::instance(app);
-    ac->ictx.sched = &sched;
-    ac->ictx.tracker = &ac->tracker;
-    ac->ictx.proc = ac->proc;
-    se::apply_chroot(ac->ictx, root, chroot); // resident writes confined to its document/mount
-    ac->ictx.channels = &channel_policy_;     // §12 channel enforcement (no-op unless strict)
-    ac->ictx.document = &doc_scope_;          // per-document owner for (stream-open) & friends
-    ac->env = se::builtins::make_default_environment();
-    se::register_intrinsics(ac->env, &ac->ictx);
-    for (const ActionIntrinsicProvider &p : action_intrinsics_snapshot())
-      if (p)
-        p(ac->env, ac->ictx);
-    bind_has(ac->env, [this](const std::string &n) { return has(n); });
+    // Resident writes confined to its document or mount. A resident has no with-lock default
+    // (docs/STATE_EXEC_LOCKS.md 14.2 Q1): a request with no :timeout waits as long as it takes.
+    std::shared_ptr<ActionContext> ac = make_action_context(chroot, std::nullopt);
+    // A child it spawns runs in the resident's scope (its document's or its mount's); one it forks
+    // shares the resident's context, which lives until the Runtime does. Both are reaped once they
+    // end.
+    ac->ictx.spawn_context = [this](const se::intrinsics_context &parent) {
+      return spawn_child(parent);
+    };
+    ac->ictx.on_child = [this](int pid) { spawned_children_.push_back(pid); };
     // Park-then-run loop on `channel`: msg-recv parks the process between deliveries and BINDS each
     // delivered value as `event`, so an on_key/on_pointer body reads (get-attr event "key");
     // on:tick simply ignores `event`. The body runs once per delivery, then loops back to park. No

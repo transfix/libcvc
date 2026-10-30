@@ -817,6 +817,11 @@ more (the drive checks between slices of 1000 steps, so a few more may land). Ex
   is two of the process's steps after `bench-req`, so a wait also holds the turns of the other
   runnable processes in between.
 
+`workers` is `host` (the bench submits the p processes) or `spawn`: the world's context installs
+`make_spawn_context` and one host-submitted parent spawns the p workers. Each child then runs with
+a context and an environment of its own (`docs/STATE_EXEC_DEVELOPER_GUIDE.md`, "What a spawned
+child sees"), so the two settings compare the lock path under the spawn context with the host's.
+
 Every process must still be running at the end; then they are killed. Gate: `gate RUN --scenario
 lock.handoff --metric extra.fairness_spread --max 1` (the queue hands the lock round in order).
 

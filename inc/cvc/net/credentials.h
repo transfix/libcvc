@@ -60,6 +60,13 @@ public:
   bool capture(const std::string &name, const Origin &from, const std::string &token,
                std::string *error = nullptr);
 
+  // Hold `token` as credential `name` for this run only, never written to the file: a token the
+  // host was handed (--credential-env). `name` must be bound (bind()); the token goes to its bound
+  // origins, ahead of one the file holds for it, until a capture replaces it or it is forgotten.
+  // False, and nothing held, when the name or the token is malformed or the name is not bound;
+  // `error` says why (never quoting the token).
+  bool provide(const std::string &name, const std::string &token, std::string *error = nullptr);
+
   // The token credential `name` sends to `to`, if it has one there.
   std::optional<std::string> token_for(const std::string &name, const Origin &to) const;
   bool has(const std::string &name) const;
@@ -90,6 +97,7 @@ private:
     std::string name;
     Origin from;
     std::string token;
+    bool kept = true; // written to the file (false: provided, this run only)
   };
   bool save_locked(std::string *error) const;
   bool sends_to(const std::string &name, const Entry &e, const Origin &to) const;

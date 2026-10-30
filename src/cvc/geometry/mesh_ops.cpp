@@ -25,11 +25,14 @@
 // the colour maps throws mesh_ops_unavailable.
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <climits>
 #include <cmath>
 #include <cvc/geometry/mesh_ops.h>
+#include <functional>
 #include <limits>
+#include <unordered_map>
 
 #ifdef CVC_ENABLE_LIBIGL
 #include "igl/igl_bridge.h"
@@ -757,6 +760,224 @@ geometry tet_slicer::piece(std::size_t first, std::size_t count) const {
       [&] { return level_set_of(_positions, T, _field, 0.0, _functions, _colors, _field.size()); });
 }
 
+struct tet_boundary_stepper::impl {
+  enum class stage { prepare, orient, faces, gather, sort, done };
+  using face_key = std::array<int, 3>; // a face's corners, ascending
+  struct key_hash {
+    std::size_t operator()(const face_key &k) const {
+      std::size_t h = 0;
+      for (int v : k)
+        h = h * 1000003u ^ std::hash<int>{}(v);
+      return h;
+    }
+  };
+  struct seen {
+    int count = 0;
+    std::size_t row = 0; // igl::boundary_facets' row of the face: 4 * tet + face
+  };
+  using face_map = std::unordered_map<face_key, seen, key_hash>;
+
+  std::shared_ptr<const geometry> mesh;
+  stage st = stage::prepare;
+  std::vector<double> V;
+  std::vector<int> T; // tetrahedra(mesh), each tet oriented as tet_boundary_surface orients it
+  std::size_t n = 0, pos = 0, distinct = 0;
+  face_map faces;
+  face_map::iterator at;
+  std::vector<std::pair<face_key, std::size_t>> once; // the boundary: key, row
+  std::vector<int> B;                                 // its faces, 3 corners each
+
+  // Row `row` of igl::boundary_facets' face list: tet row / 4's face row % 4, wound as there.
+  std::array<int, 3> face(std::size_t row) const {
+    const int *t = &T[4 * (row / 4)];
+    switch (row % 4) {
+    case 0:
+      return {{t[2], t[3], t[1]}};
+    case 1:
+      return {{t[3], t[2], t[0]}};
+    case 2:
+      return {{t[1], t[3], t[0]}};
+    default:
+      return {{t[2], t[1], t[0]}};
+    }
+  }
+
+  // A bounded step (`bounded`) ends where its stage does, so the caller can size the next to
+  // the next stage's costs.
+  void run(std::size_t budget, bool bounded) {
+    const stage from = st;
+    while (budget > 0 && st != stage::done && !(bounded && st != from)) {
+      switch (st) {
+      case stage::prepare:
+        V = positions(*mesh);
+        T = tetrahedra(*mesh);
+        n = T.size() / 4;
+        faces.reserve(2 * n + 16);
+        pos = 0;
+        st = stage::orient;
+        break;
+      case stage::orient: {
+        // tet_volumes' sign over a range of tets: each tet's volume is its own.
+        const std::size_t end = std::min(n, pos + budget);
+        const std::vector<int> range(T.begin() + std::ptrdiff_t(4 * pos),
+                                     T.begin() + std::ptrdiff_t(4 * end));
+        std::vector<double> vol;
+        igl_detail::tet_volumes(V, range, vol);
+        for (std::size_t i = pos; i < end; ++i)
+          if (vol[i - pos] < 0)
+            std::swap(T[4 * i + 2], T[4 * i + 3]);
+        budget -= end - pos;
+        pos = end;
+        if (pos == n) {
+          V = std::vector<double>();
+          st = stage::faces;
+          pos = 0;
+        }
+        break;
+      }
+      case stage::faces: {
+        const std::size_t end = std::min(n, pos + budget);
+        for (std::size_t i = pos; i < end; ++i)
+          for (std::size_t f = 0; f < 4; ++f) {
+            const std::array<int, 3> c = face(4 * i + f);
+            face_key k = c;
+            std::sort(k.begin(), k.end());
+            seen &s = faces[k];
+            if (s.count++ == 0)
+              s.row = 4 * i + f;
+          }
+        budget -= end - pos;
+        pos = end;
+        if (pos == n) {
+          distinct = faces.size();
+          at = faces.begin();
+          st = stage::gather;
+        }
+        break;
+      }
+      case stage::gather: {
+        // The faces one tet has, the map let go of as it goes; then igl::boundary_facets' order.
+        for (; budget > 0 && at != faces.end(); --budget) {
+          if (at->second.count == 1)
+            once.emplace_back(at->first, at->second.row);
+          at = faces.erase(at);
+        }
+        if (at == faces.end())
+          st = stage::sort;
+        break;
+      }
+      case stage::sort: {
+        std::sort(once.begin(), once.end());
+        B.reserve(3 * once.size());
+        for (const auto &o : once) {
+          const std::array<int, 3> c = face(o.second);
+          B.insert(B.end(), c.begin(), c.end());
+        }
+        once = std::vector<std::pair<face_key, std::size_t>>();
+        T = std::vector<int>();
+        st = stage::done;
+        break;
+      }
+      case stage::done:
+        break;
+      }
+    }
+  }
+};
+
+tet_boundary_stepper::tet_boundary_stepper(std::shared_ptr<const geometry> tetmesh)
+    : _impl(std::make_unique<impl>()) {
+  if (!tetmesh)
+    throw mesh_ops_error("tet_boundary_stepper: no mesh");
+  _impl->mesh = std::move(tetmesh);
+}
+
+tet_boundary_stepper::tet_boundary_stepper(tet_boundary_stepper &&) noexcept = default;
+tet_boundary_stepper &tet_boundary_stepper::operator=(tet_boundary_stepper &&) noexcept = default;
+tet_boundary_stepper::~tet_boundary_stepper() = default;
+
+bool tet_boundary_stepper::step(std::size_t budget) {
+  guarded([&] {
+    _impl->run(budget == 0 ? std::numeric_limits<std::size_t>::max() : budget, budget != 0);
+  });
+  return done();
+}
+
+bool tet_boundary_stepper::done() const { return _impl->st == impl::stage::done; }
+
+double tet_boundary_stepper::progress() const {
+  const impl &m = *_impl;
+  const double n = std::max<double>(1.0, double(m.n));
+  switch (m.st) {
+  case impl::stage::prepare:
+    return 0.0;
+  case impl::stage::orient:
+    return 0.05 + 0.25 * double(m.pos) / n;
+  case impl::stage::faces:
+    return 0.3 + 0.5 * double(m.pos) / n;
+  case impl::stage::gather:
+    return 0.8 + 0.15 * (1.0 - double(m.faces.size()) / std::max<double>(1.0, double(m.distinct)));
+  case impl::stage::sort:
+    return 0.95;
+  case impl::stage::done:
+    break;
+  }
+  return 1.0;
+}
+
+const char *tet_boundary_stepper::phase() const {
+  switch (_impl->st) {
+  case impl::stage::prepare:
+    return "preparing";
+  case impl::stage::orient:
+    return "orienting";
+  case impl::stage::faces:
+    return "faces";
+  case impl::stage::gather:
+    return "boundary";
+  case impl::stage::sort:
+    return "sorting";
+  case impl::stage::done:
+    break;
+  }
+  return "done";
+}
+
+geometry tet_boundary_stepper::surface() const {
+  if (!done())
+    throw mesh_ops_error("tet_boundary_stepper: the boundary is not ready");
+  const geometry &tetmesh = *_impl->mesh;
+  const std::vector<int> &B = _impl->B;
+  geometry out; // as tet_boundary_surface makes it
+  const std::size_t n = tetmesh.num_points();
+  out.points() = tetmesh.const_points();
+  if (tetmesh.const_colors().size() == n)
+    out.colors() = tetmesh.const_colors();
+  if (tetmesh.const_functions().size() == n)
+    out.functions() = tetmesh.const_functions();
+  if (tetmesh.const_normals().size() == n)
+    out.normals() = tetmesh.const_normals();
+  tris_t &F = out.tris();
+  F.resize(B.size() / 3);
+  for (std::size_t f = 0; f < F.size(); ++f)
+    F[f] = {{index_t(B[3 * f]), index_t(B[3 * f + 1]), index_t(B[3 * f + 2])}};
+  out.set_geometry_type(geometry::SURFACE_TRI);
+  return out;
+}
+
+std::vector<index_t> tet_boundary_stepper::vertices() const {
+  if (!done())
+    throw mesh_ops_error("tet_boundary_stepper: the boundary is not ready");
+  std::vector<char> on(_impl->mesh->num_points(), 0);
+  for (int v : _impl->B)
+    on[std::size_t(v)] = 1;
+  std::vector<index_t> out;
+  for (std::size_t v = 0; v < on.size(); ++v)
+    if (on[v])
+      out.push_back(index_t(v));
+  return out;
+}
+
 #else // !CVC_ENABLE_LIBIGL
 
 namespace {
@@ -812,6 +1033,17 @@ geometry tet_isosurface(const geometry &, const std::vector<double> &, double) {
 geometry slice_tets(const geometry &, const geometry::vector_t &, double) { unavailable(); }
 tet_slicer::tet_slicer(const geometry &, const geometry::vector_t &, double) { unavailable(); }
 geometry tet_slicer::piece(std::size_t, std::size_t) const { unavailable(); }
+struct tet_boundary_stepper::impl {};
+tet_boundary_stepper::tet_boundary_stepper(std::shared_ptr<const geometry>) { unavailable(); }
+tet_boundary_stepper::tet_boundary_stepper(tet_boundary_stepper &&) noexcept = default;
+tet_boundary_stepper &tet_boundary_stepper::operator=(tet_boundary_stepper &&) noexcept = default;
+tet_boundary_stepper::~tet_boundary_stepper() = default;
+bool tet_boundary_stepper::step(std::size_t) { unavailable(); }
+bool tet_boundary_stepper::done() const { return true; }
+double tet_boundary_stepper::progress() const { return 1.0; }
+const char *tet_boundary_stepper::phase() const { return "done"; }
+geometry tet_boundary_stepper::surface() const { unavailable(); }
+std::vector<index_t> tet_boundary_stepper::vertices() const { unavailable(); }
 
 #endif // CVC_ENABLE_LIBIGL
 

@@ -1691,7 +1691,26 @@ std::string path() const;
 
 // Get all children
 std::vector<state> children();
+
+// Walk a path that may pass through transparent links (below)
+state *findThroughLinks(const std::string &path, std::size_t hop_budget = 64);
+state &childThroughLinks(const std::string &path, bool refuse_read_only = false,
+                         std::size_t hop_budget = 64);
 ```
+
+`findDescendant` and `operator()` walk physical children, so with `hole` linked to `s`,
+`root.findDescendant("hole.a")` is the link node's own child, not `s.a`. The two walks above
+follow a transparent link on every hop of the path, which is how an Ariadne `link:` hole grants a
+subtree (ARIADNE.md §7.4). Opaque links are never followed.
+
+- `findThroughLinks` is the read view and creates nothing. Each hop that lands on a resolvable
+  transparent link continues at its target, the last hop included. A broken or cyclic link is
+  walked as the plain node it is. Returns `nullptr` when a segment is absent.
+- `childThroughLinks` is the write view and creates what is missing, like `operator()`. A
+  writable transparent link continues at its target (`read_only_error` when it can't be
+  resolved). A read-only one continues at the link node's own children, so the write stays
+  local, or throws `read_only_error` with `refuse_read_only`. The last hop is not followed:
+  `value(v)` and `data(d)` decide for a link node themselves.
 
 ### Futures Methods
 
