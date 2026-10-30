@@ -383,9 +383,8 @@ together, or a section that spans a park: `with-lock`. A queue between programs:
   `state.cpp:1083-1088`). Other values are compared after `coerce_state_string`
   (`intrinsics.cpp:140-159`); a compound `expected` or `new` raises `TypeError`.
 - **`state-incr`.** An absent or empty node counts as 0. An int plus an int delta (default 1) stays
-  an int; otherwise the result is a float in the shortest round-trip form (`std::to_chars`), not
-  `coerce_state_string`'s 6 digits (`intrinsics.cpp:83-86`), so 1000000 plus 0.5 stores
-  `1000000.5`. A non-number raises `ValueError` and leaves the node unchanged.
+  an int; otherwise the result is a float in the shortest round-trip form (`std::to_chars`), the
+  form `state-set` stores and `to_string` prints, so 1000000 plus 0.5 stores `1000000.5`. A non-number raises `ValueError` and leaves the node unchanged.
 - **Signals.** A write that changes the value fires watches and `valueChanged` once. A
   compare-and-set or swap whose new value equals the old one succeeds without writing or firing.
 - **Cost.** One native call each, like `state-set`, with one mutex hold instead of two.

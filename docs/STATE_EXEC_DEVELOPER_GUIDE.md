@@ -782,9 +782,8 @@ reads back as the same number: `1234567.5` as `"1234567.5"`, `0.1` as `"0.1"`, `
 `"1e+21"`, `(+ 0.1 0.2)` as `"0.30000000000000004"`. Of the fixed and scientific forms the
 shorter is stored, so `100000.0` is `"1e+05"`. `true` and `false` are stored as `"true"` and
 `"false"`, and `nil` as `""`. A list or dict is stored as it prints; a structured value
-belongs on the data channel (`state-data-set`). Pass a number itself rather than `(str n)`:
-`str` prints a float with six significant digits, so `(state-set "x" (str 1234567.5))` stores
-`"1.23457e+06"`.
+belongs on the data channel (`state-data-set`). `str` and `str-concat` write a float the same
+way, so `(state-set "x" (str 1234567.5))` also stores `"1234567.5"`.
 
 `state-json` returns nil for a missing node and reads through a transparent link, as
 `state-get` does. `state-from-json` writes through a writable transparent link, as `state-set`

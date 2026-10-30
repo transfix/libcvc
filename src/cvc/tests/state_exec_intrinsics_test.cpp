@@ -304,6 +304,9 @@ TEST_F(StateTreeIntrinsicsTest, StateSetStoresAFloatInItsShortestRoundTripForm) 
     EXPECT_EQ(std::strtod(stored("state-set", d).c_str(), nullptr), d) << d;
   // state-swap and state-cas store a float as state-set does.
   EXPECT_EQ(stored("state-swap", 1234567.5), "1234567.5");
+  // str prints a float as state-set stores it, so (state-set k (str d)) stores the same text.
+  for (const double d : {1234567.5, 0.1 + 0.2, 2.0, 1e5, 1e21})
+    EXPECT_EQ(std::get<std::string>(call("str", {value_t{d}}).v), stored("state-set", d)) << d;
 }
 
 TEST_F(StateTreeIntrinsicsTest, StateDataGetNonexistent) {
