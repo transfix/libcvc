@@ -90,7 +90,10 @@ public:
 };
 
 enum class sliced_threading {
-  automatic,   // threaded where threads exist (native, wasm-mt), else cooperative
+  // threaded where threads exist (native, wasm-mt), else cooperative; cooperative everywhere
+  // with CVC_SLICED_THREADING=cooperative in the environment (a native build run the way
+  // single-threaded wasm runs)
+  automatic,
   cooperative, // always sliced on the scheduler thread
   threaded     // always on the background pool (cooperative where no threads exist or start)
 };

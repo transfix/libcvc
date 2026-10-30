@@ -25,6 +25,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cvc/core/app.h>
 #include <cvc/core/sliced_task.h>
 #include <cvc/state/state.h>
@@ -71,6 +72,16 @@ constexpr std::size_t kMaxChunk = std::size_t(1) << 24;
 // vertex swept in a contour tree's join or split tree, ~0.3-0.6 us, is the dearest the overlay
 // jobs have).
 constexpr double kWorstUnitUs = 1.0;
+
+// CVC_SLICED_THREADING=cooperative in the environment (read once): `automatic` tasks run
+// cooperatively, so a native build runs its jobs the way a single-threaded wasm page does.
+bool automatic_is_cooperative() {
+  static const bool forced = [] {
+    const char *v = std::getenv("CVC_SLICED_THREADING");
+    return v != nullptr && std::string(v) == "cooperative";
+  }();
+  return forced;
+}
 
 double ms_between(steady::time_point a, steady::time_point b) {
   return std::chrono::duration<double, std::milli>(b - a).count();
@@ -423,7 +434,10 @@ int schedule_sliced_job(cvc::app &app, std::shared_ptr<sliced_job> job,
     rec->opt = opt;
     rec->opt.slice_ms = positive_or(opt.slice_ms, 4.0, 0.05);
     rec->opt.chunk_ms = positive_or(opt.chunk_ms, 250.0, 0.05);
-    rec->threaded = opt.threading != sliced_threading::cooperative && threads_available();
+    rec->threaded =
+        (opt.threading == sliced_threading::threaded ||
+         (opt.threading == sliced_threading::automatic && !automatic_is_cooperative())) &&
+        threads_available();
     rec->registry = reg;
     rec->box = std::make_shared<job_box>(std::move(job));
 
