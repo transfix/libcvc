@@ -1127,9 +1127,11 @@ resolver ([`inc/cvc/ariadne/uri.h`](../inc/cvc/ariadne/uri.h)):
   `arigl --net-allow ...`, §10.3), or by a host calling `register_http_uri_handler()` (or the
   cached variant). It is *not* registered by default — see the caveats (§11).
 - **`cvc://<relpath>`** — a location-independent component path, searched along
-  `$CVC_ARIADNE_PATH` → host-supplied extra dirs → the install datadir
-  `<prefix>/share/libcvc/ariadne` → cwd (`register_cvc_uri_handler`). Use this for
-  shipped components so a document does not hard-code install paths.
+  `$CVC_ARIADNE_PATH` → host-supplied extra dirs → `share/libcvc/ariadne` beside the file
+  holding libcvc (`<lib>/..` or `<bin>/..`, so a relocated install such as a cvcpkg prefix
+  finds its own library) → the compiled-in install datadir `<prefix>/share/libcvc/ariadne`
+  → cwd (`register_cvc_uri_handler`). Use this for shipped components so a document does
+  not hard-code install paths.
 
 The `canonical` field is the identity used for cycle-guarding and for resolving
 relative bases in nested composition.
@@ -1542,7 +1544,44 @@ charged to the action's caps (§2.2). `register_async_verb(name, done_channel, f
 the result to `done_channel`, for documents that wait with `(msg-recv "done_channel")`. `AriRuntime` also exposes `step`, `run`, `on`, `post_key`, `post_pointer`,
 and `reload_if_changed`.
 
-### 9.4 From Python (DSL only, via `pycvc.Exec`)
+### 9.4 A document set, installed or served
+
+An app written as `.ari` documents ships them as a directory: `main.ari` and the files it
+imports, relative to itself (`import: lib/feed.ari`, `load: ../shared/panel.ari`), plus any
+`cvc://components/...` it takes from the shipped library (§6.5). The same directory runs in
+both hosts without changes.
+
+**Installed** (`share/<app>/`, from the app's cvcpkg recipe, which depends on the `arigl`
+or `ari` package): `arigl run <prefix>/share/<app>/main.ari`, or in the terminal
+`ari run <prefix>/share/<app>/main.ari` (FTXUI, or `--backend tvision`), from any working
+directory. Both runtimes load through the same loader. Every relative reference resolves
+against the directory of the file that makes it, and `cvc://` finds the component library
+beside the libcvc in the same prefix (§6.4). A launcher only has to pass the path and its
+flags. `ctest -R '(ari|arigl)_docset'` checks this with
+[`src/cvc/tests/data/ariadne_docset`](../src/cvc/tests/data/ariadne_docset/app/main.ari).
+
+**Served** (any site path, e.g. `/apps/<app>/`): put the `arigl-web` package's files (the
+stock browser host) beside the documents and open `/apps/<app>/?src=main.ari`. The package's
+`ari.html` runs the same documents in ari's terminal backend, in an xterm.js terminal:
+`/apps/<app>/ari.html?src=main.ari`. Either runtime fetches the document and, before the app
+starts, every file it names by a relative path
+(`import:`, `load:`, `vinay:`, and the files those name), writing each at its URL path in
+the browser's file system. Then it runs the local copy, so relative references resolve as
+they do on disk ([`web_document.h`](../inc/cvc/ariadne/web_document.h),
+[`doc_fetch.h`](../inc/cvc/ariadne/doc_fetch.h)). By default the
+document must be on the page's own origin. The page's `ariadne.config.json` names the
+document, any other origins it may come from, the host flags (the network flags `--net` and `--net-allow`, ...), and
+the extra data files to fetch; both pages read the same file. The URL can only add document
+arguments. A failed load shows what the runtime printed: an error page in arigl-web, the
+terminal itself in `ari.html`. [CVCGL_WASM.md](CVCGL_WASM.md#arigl-web-the-stock-browser-host)
+has the details, the sizes, and what wasm-mt needs.
+
+A path the document hands a scene source or a data reader (`source: { file: ... }`) is
+relative to the working directory, not to the document. The browser shell runs in the
+document's directory. Natively the working directory is the caller's, so a launcher for
+such a document `cd`s to its directory first.
+
+### 9.5 From Python (DSL only, via `pycvc.Exec`)
 
 If you only need to run `state_exec` programs against an app's tree (no widgets, no
 scene), `pycvc.Exec` ([`bindings/pycvc/pycvc_exec.h`](../bindings/pycvc/pycvc_exec.h))
