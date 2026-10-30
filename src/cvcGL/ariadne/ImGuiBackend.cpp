@@ -796,6 +796,40 @@ ariadne::IndexEdit ImGuiBackend::combo(const char *label, int current_index,
   return e;
 }
 
+// The caption first (the part before any "##" id suffix), then one radio button per option, on
+// the caption's line for a row. Each option's id is scoped by the label, so two radios may share
+// option names.
+ariadne::IndexEdit ImGuiBackend::radio(const char *label, int current_index,
+                                       const std::vector<std::string> &options, bool row) {
+  ariadne::IndexEdit e;
+  e.index = current_index;
+  if (options.empty())
+    return e;
+#ifdef CVC_ENABLE_IMGUI
+  const char *hash = std::strstr(label, "##");
+  const std::string caption = hash ? std::string(label, hash) : std::string(label);
+  ImGui::PushID(label);
+  if (!caption.empty())
+    ImGui::TextUnformatted(caption.c_str());
+  for (std::size_t i = 0; i < options.size(); ++i) {
+    if (row && (i > 0 || !caption.empty()))
+      ImGui::SameLine();
+    ImGui::PushID(static_cast<int>(i));
+    if (ImGui::RadioButton(options[i].c_str(), static_cast<int>(i) == current_index)) {
+      e.index = static_cast<int>(i); // discrete: commit on pick
+      e.changed = true;
+      e.committed = true;
+    }
+    ImGui::PopID();
+  }
+  ImGui::PopID();
+#else
+  (void)label;
+  (void)row;
+#endif
+  return e;
+}
+
 void ImGuiBackend::focus_next_widget() {
 #ifdef CVC_ENABLE_IMGUI
   ImGui::SetKeyboardFocusHere(); // the next widget submitted

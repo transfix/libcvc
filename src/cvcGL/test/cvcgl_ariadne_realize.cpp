@@ -1970,6 +1970,14 @@ int main() {
         tick();
         chk(val(fb + ".busy") == "1" && val(fb + ".stoppable") == "1",
             "a running heat solve is stoppable (fe.stoppable 1)");
+        // Stop it once it is under way. A stop that reaches the job while it still waits for the
+        // lane cancels it before its first step ('cancelled'), which proves nothing about the
+        // clamp; a loaded macOS runner did that. 1% of 1e6 steps is a few seconds, while a solve
+        // wrapped to one step would be done (busy 0) instead.
+        for (int i = 0; i < 12000 && val(fb + ".busy") == "1" && num(fb + ".progress") < 1.0; ++i) {
+          tick();
+          std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
         st(fb + ".request").value(std::string("stop"));
         tick();
         const bool heat_stopped = settle(fb) && starts(fb + ".status", "heat: stopped at step") &&

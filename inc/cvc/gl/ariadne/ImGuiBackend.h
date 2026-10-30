@@ -84,6 +84,8 @@ public:
                                          double lo, double hi, const char *fmt) override;
   cvc::ariadne::IndexEdit combo(const char *label, int current_index,
                                 const std::vector<std::string> &options) override;
+  cvc::ariadne::IndexEdit radio(const char *label, int current_index,
+                                const std::vector<std::string> &options, bool row) override;
   void focus_next_widget() override;
   cvc::ariadne::StringEdit input_text(const char *label, const char *key,
                                       const std::string &current, bool masked) override;
