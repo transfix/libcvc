@@ -710,6 +710,47 @@ hosts that use them. After P3:
 - An action's step and time caps are the tree settings `ariadne.limits.action_max_steps` (5000)
   and `ariadne.limits.action_max_time` (0.1 s), read on every submission, `0` = no limit.
 
+### 3.12 Work that runs by itself
+
+Some work needs no executor thread: a browser's fetch runs in the page's event loop and reports
+through a callback. In a build without threads that matters: there the background pool's jobs
+run on the scheduler's own thread, so a kernel that waits (a request spinning on
+`emscripten_sleep`) holds the frame loop for the whole wait. An async function whose work can
+run by itself returns an `async_work` from its marshal step instead of a kernel:
+
+```cpp
+// Begins the work on the scheduler's thread, in the calling step, and returns; never blocks.
+using async_start = std::function<void(const std::shared_ptr<async_call> &call)>;
+struct async_work {
+  async_kernel kernel; // the same work in one blocking call
+  async_start start;   // or null
+};
+void register_async_fn(environment_ptr env, async_host &host, const std::string &name,
+                       async_work_marshal marshal, async_options opts = {});
+```
+
+- Where a threaded call could park (a step of the parking scheduler, at a point that can park,
+  or a `-async` form), `async_host::call(name, work, opts, future)` makes an external call
+  (`begin_external`'s kind) with the registration's timeout and charging, parks the process on it
+  (or returns its future), and runs `start`. Everywhere else the kernel runs as any kernel does
+  (inline on the sync scheduler or a bare evaluator); a work with no kernel raises
+  `RuntimeError` there.
+- The work ends the call once, from whatever thread its completion runs on:
+  `call->settle(value, error)` then `host.finish(call)`. A `start` that throws ends the call with
+  its exception.
+- The call waits like any other: transparent, `(await f)`, `(await f seconds)` (a slice that times
+  out leaves the work going), `await-all`.
+- Cancellation (3.6) reaches it through `async_call::on_cancel(stop)`: a kill or reap, the
+  registration's timeout and the host's shutdown run `stop` on the cancelling thread, once (at
+  once, for a call already cancelled). After that the work must not settle or post the call: its
+  host may be gone. The host counts these calls in the scheduler's `async_calls_in_flight()`, not
+  in its own `in_flight()` (no kernel of its runs).
+- An I/O work's call (`async_options::io`) is charged its one step, as a kernel's is.
+
+Ariadne's network verbs use it for the browser's fetch in a build without threads
+(docs/ARIADNE.md 10.2). The tests are the `AStartedCall...`, `...StartedCall` cases in
+`state_exec_async_calls_test.cpp` and `AriadneNetL4` in `ariadne_runtime_test.cpp`.
+
 ## 4. Phases
 
 | Phase | Content | Done when |
