@@ -57,7 +57,7 @@
 // document's programs get the http verbs, every request checked against the allowed origins, and
 // the host keeps any credential they sign in with, out of the document's reach. With it on,
 // snapshot waits after its frames until the document is idle, its requests back and its programs
-// done (AppRuntime::settle, at most 10 s).
+// done (AppRuntime::settle, at most --settle seconds, 10 by default).
 
 #include <algorithm>
 #include <cstdio>
@@ -111,7 +111,8 @@ int usage(int code) {
                "either backend. Then the document may reach only the origins allowed, and\n"
                "sign-in tokens stay with ari: a request names one (auth:, a credential value),\n"
                "it never sees it. With it on, snapshot waits after its frames until the\n"
-               "document's requests are back and its programs idle (at most 10 s).\n",
+               "document's requests are back and its programs idle (at most --settle S\n"
+               "seconds, 10 by default).\n",
                cvc::ariadne::host_flags_help().c_str());
   return code;
 }
@@ -310,7 +311,7 @@ TestOutcome run_test_document(const cvc::ariadne::HostOptions &o, const std::str
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
   if (by_frames && o.net.enabled) { // as snapshot: what the document asked for comes back first
-    rt.settle([&] { rt.drain(); });
+    rt.settle([&] { rt.drain(); }, o.settle > 0 ? o.settle : ari::kDefaultSettleSeconds);
     for (const std::string &w : rt.take_warnings())
       fail(trim_ari(w));
   }
@@ -518,7 +519,7 @@ int main(int argc, char **argv) {
         break;
     }
     if (o.net.enabled && !rt.should_close()) { // the frame shows what the requests brought back
-      rt.settle([&] { rt.drain(); });
+      rt.settle([&] { rt.drain(); }, o.settle > 0 ? o.settle : ari::kDefaultSettleSeconds);
       frame = backend->render_to_string(rt.runtime(), width, o.height, o.ansi);
     }
     if (pixels) { // Sixel draws at screen positions, so the frame starts at the top-left

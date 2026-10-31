@@ -1868,7 +1868,8 @@ arigl run --net-allow https://tx.wtf --credential-store nicotina share/nicotina/
 The flags hold for `run`, `snapshot`, `check` and `info` alike. With the network on, `ari
 snapshot` and `arigl snapshot` (in a window or with `--terminal`) keep running after their
 frames until the document is idle, no request in flight and no program step waiting (a program
-parsing one reply before it sends the next is not idle), for three steps running, at most 10 s.
+parsing one reply before it sends the next is not idle), for three steps running, at most 10 s
+(`--settle S` sets another limit, for a slow server or a slow build).
 So one frame shows what a document that signs in and fetches brought back, and CI can render it
 against a local test server. `ari snapshot` prints the programs' warnings after the frame, as
 `arigl snapshot` does.
@@ -2300,7 +2301,8 @@ A document **fails** when:
 The network is as `snapshot`'s (§10.3): off unless `--net`, `--net-allow`, `--net-policy` or
 `--credential-store` turns it on. A test that makes a request waits for its reply as any program
 does. A document run for `--frames N` with the network on waits after its frames, as `snapshot`
-does, until its requests have come back (at most 10 s), and a warning in that time fails it too.
+does, until its requests have come back (at most 10 s, or `--settle S`), and a warning in that
+time fails it too.
 `--prefix`, `--component-path` and `--image` work as for `snapshot`. A document has no command
 line of its own under `ari test`: an `args:` block's arguments take their defaults. Flags go
 before the first document.
