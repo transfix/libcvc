@@ -2,8 +2,9 @@
 // the config, resolve ?src= against the page, then start arigl.js on arigl.wasm with the command
 // line `arigl run <config flags> <src URL> <document args>`. arigl fetches the document and the
 // files it imports (cvc/ariadne/web_document.h) and calls back: Module.ariadneRunning when the
-// document is loaded, Module.ariadneExit(status) when it stops. A failure shows the error screen
-// with everything arigl printed.
+// document is loaded, Module.ariadneWarning(text) for each warning while it runs (shown in the
+// corner for a few seconds; a click dismisses it), Module.ariadneExit(status) when it stops. A
+// failure shows the error screen with everything arigl printed.
 (function () {
   'use strict';
   const overlay = document.getElementById('overlay');
@@ -17,8 +18,13 @@
   const stderrTail = []; // what arigl said, for the error page
   let failed = false;
   let srcShown = '';
-  // For a test or a console: loading, running, ended or failed, and what arigl printed.
-  const state = window.ariadneWeb = {state: 'loading', log: stderrTail, src: ''};
+  // For a test or a console: loading, running, ended or failed, what arigl printed, and the
+  // warnings while the document ran.
+  const warnings = [];
+  const state = window.ariadneWeb = {state: 'loading', log: stderrTail, src: '', warnings};
+  const warningEl = document.getElementById('warning');
+  let warningTimer = 0;
+  warningEl.addEventListener('click', () => { warningEl.hidden = true; });
 
   function status(text) { statusEl.textContent = text; }
 
@@ -131,6 +137,17 @@
         state.state = 'running';
         overlay.classList.add('hidden');
         canvas.focus();
+      },
+      // A warning while it runs (a program that stopped, say): the latest, for a few seconds. arigl
+      // prints it to stderr as well, so it is in the console and ariadneWeb.log.
+      ariadneWarning(text) {
+        warnings.push(text);
+        if (warnings.length > 200) warnings.shift();
+        const n = warnings.length;
+        warningEl.textContent = text + (n > 1 ? '  (' + n + ' warnings)' : '');
+        warningEl.hidden = false;
+        clearTimeout(warningTimer);
+        warningTimer = setTimeout(() => { warningEl.hidden = true; }, 8000);
       },
       // arigl stopped: status 0 is the document quitting, anything else an error.
       ariadneExit(code) {

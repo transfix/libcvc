@@ -23,16 +23,27 @@ namespace {
 
 namespace po = boost::program_options;
 
-constexpr const char *kValueFlags[] = {"--prefix",         "--component-path",
-                                       "--backend",        "--fps",
-                                       "--width",          "--height",
-                                       "--frames",         "--png",
-                                       "--graphics",       "--image",
-                                       "--cell-size",      "--net-allow",
-                                       "--net-policy",     "--credential-store",
-                                       "--credential-env", "--settle",
-                                       "--timeout",        "--oidc-issuer",
-                                       "--oidc-client",    "--oidc-redirect-uri"};
+constexpr const char *kValueFlags[] = {"--prefix",
+                                       "--component-path",
+                                       "--backend",
+                                       "--fps",
+                                       "--width",
+                                       "--height",
+                                       "--frames",
+                                       "--png",
+                                       "--graphics",
+                                       "--image",
+                                       "--cell-size",
+                                       "--net-allow",
+                                       "--net-policy",
+                                       "--credential-store",
+                                       "--credential-env",
+                                       "--settle",
+                                       "--timeout",
+                                       "--log",
+                                       "--oidc-issuer",
+                                       "--oidc-client",
+                                       "--oidc-redirect-uri"};
 constexpr const char *kBoolFlags[] = {"--no-mouse", "--ansi", "--net", "--no-browser"};
 
 bool is_general_flag(const std::string &a) {
@@ -132,6 +143,8 @@ bool apply(const po::option &opt, HostOptions &o) {
     o.backend = value;
   } else if (a == "--png") {
     o.png = value;
+  } else if (a == "--log") {
+    o.log = value;
   } else if (a == "--graphics") {
     if (value != "auto" && value != "kitty" && value != "sixel" && value != "iterm" &&
         value != "color" && value != "mono") {
@@ -292,6 +305,8 @@ std::string host_flags_help() {
          "  --timeout S            test: fail a document still running after S seconds\n"
          "  --ansi                 snapshot: keep colour escapes\n"
          "  --png FILE             snapshot: also write a PNG\n"
+         "  --log FILE             run: append each warning to FILE as it happens (or set\n"
+         "                         ARIADNE_LOG=FILE)\n"
          "  --settle S             snapshot: with the network on, wait at most S seconds\n"
          "                         for the document to go idle (default 10)\n"
          "  --graphics MODE        images in a terminal: auto, kitty, sixel, iterm, color or mono\n"

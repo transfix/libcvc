@@ -1,7 +1,8 @@
 // arigl_web_smoke.mjs — arigl-web in a real (headless) Chrome: the shell loads a document set from
 // its own origin, and refuses one from another origin or one that is not there. When the package
 // has ari's terminal pages (ari.html, ari_tvision.html), the same document set must load there too,
-// its text on the xterm.js screen.
+// its text on the xterm.js screen. A document whose program fails while it runs must reach each
+// page's warning hook (Module.ariadneWarning) and show there.
 //
 //   node arigl_web_smoke.mjs --web <share/arigl-web> --docset <src/cvc/tests/data/ariadne_docset> \
 //        --chrome <chrome or chromium> [--shots DIR] [--keep]
@@ -147,12 +148,15 @@ async function settle(page, check) {
     const s = await page.evaluate(
         'JSON.stringify(window.ariadneWeb ? {state: ariadneWeb.state, log: ariadneWeb.log,' +
         ' text: ariadneWeb.text ? ariadneWeb.text() : "", csp: window.__csp || [],' +
+        ' warnings: ariadneWeb.warnings || [],' +
+        ' warning: (w => w && !w.hidden ? w.textContent : "")(' +
+        '    document.getElementById("warning")),' +
         ' status: document.getElementById("status").textContent} : null)');
     const v = s ? JSON.parse(s) : null;
     if (v && check(v)) return v;
     if (v && v.state !== 'loading' && !settledAt) settledAt = Date.now();
     if ((settledAt && Date.now() > settledAt + 15000) || Date.now() > until)
-      return v || {state: 'timeout', log: [], text: '', status: '', csp: []};
+      return v || {state: 'timeout', log: [], text: '', status: '', csp: [], warnings: []};
     await new Promise(r => setTimeout(r, 500));
   }
 }
@@ -174,6 +178,13 @@ const cases = [
     // localhost and 127.0.0.1 are different origins on the same server.
     url: `${ORIGIN}/apps/app/?src=${encodeURIComponent(`http://localhost:${PORT}/apps/app/main.ari`)}`,
     check: v => v.state === 'failed' && v.log.some(l => /not this page's origin/.test(l)),
+  },
+  {
+    name: 'a warning while the document runs shows on the page',
+    url: `${ORIGIN}/apps/app/?src=warns.ari`,
+    check: v => v.state === 'running' &&
+                v.warnings.some(w => /on_tick: resident .* failed: ValueError: live/.test(w)) &&
+                /ValueError: live in the page/.test(v.warning),
   },
   {
     name: 'a missing document shows the error page',
@@ -202,6 +213,15 @@ if (fs.existsSync(path.join(WEB, 'ari.html'))) {
       name: 'ari: a config\'s --net and {origin} in its arguments',
       url: `${ORIGIN}/apps/cfg/ari.html`,
       check: v => v.state === 'running' && shows(v) && v.text.includes(`instance: ${ORIGIN}`),
+    },
+    {
+      name: 'ari: a warning while the document runs, in the header, stderr and the terminal',
+      url: `${ORIGIN}/apps/app/ari.html?src=warns.ari`,
+      check: v => v.state === 'running' &&
+                  v.warnings.some(w => /failed: ValueError: live in the page/.test(w)) &&
+                  /^warning: on_tick: resident/.test(v.status) &&
+                  v.log.some(l => /^ari: warning: on_tick: resident .* live in the page/.test(l)) &&
+                  /ari: warning: on_tick: resident/.test(v.text),
     },
     {
       name: 'ari: a cross-origin src is refused, and the terminal says why',

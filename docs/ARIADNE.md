@@ -255,6 +255,32 @@ one line, cut at 80 characters, and `<lane>` is `on_tick:`, `on_key:`, `on_point
 `on_signal:`, or `on_tick: of mount '<sub-prefix>'` for a module's tick. An `init:` program that fails
 reports `failed: Class: message (at <where>)` to its caller.
 
+**Where a host shows them, while the document runs.** Each warning reaches the host as it is
+produced, not only when the document exits. `AppRuntime::set_warning_listener` hears each one at the
+drain that collects it, and `take_warnings()` still returns them all for a summary at exit. The
+stock hosts hand them to a `LiveWarnings` ([`host_warnings.h`](../inc/cvc/ariadne/host_warnings.h)),
+which sends each one to:
+
+| Where | When |
+|---|---|
+| the bottom of the screen, wrapped, for 8 s, with how many there have been so far | `ari run` and `arigl run --terminal` with the FTXUI backend, or the status line on the tvision desktop |
+| a log file, one line each, with the time: `2026-10-30 18:31:02 ari: warning: on_tick: resident [...] stopped: ...` | `--log FILE`, or the environment variable `ARIADNE_LOG=FILE`. Appended, and flushed per line. |
+| stderr, as `ari: warning: ...` | when stderr is not the terminal: `ari run doc.ari 2>warnings.txt`, a pipe, or the browser page. On a terminal, a full-screen UI owns it, so they wait for the exit. |
+| the browser page: `Module.ariadneWarning(text)` ([`web_document.h`](../inc/cvc/ariadne/web_document.h)) | ari.html shows the latest in its header. arigl-web shows it in the canvas's corner for 8 s. Both keep them in `window.ariadneWeb.warnings`. |
+
+When `ari run` exits it lists every warning of the run on stderr. When they already went to stderr
+as they came, it prints only how many there were. arigl's window prints each one to stderr at the
+frame it comes, as it always has. A message is reported once per run (`warn_once`). So a resident
+that stops the same way each time shows one `stopped:` warning, and then the give-up warning if it
+gets that far. `snapshot`, `check` and `test` print their warnings when they finish, as before.
+
+To watch the warnings of a running document from another terminal:
+
+```sh
+ari run --log /tmp/ari.log app.ari     # or: ARIADNE_LOG=/tmp/ari.log ari run app.ari
+tail -f /tmp/ari.log                   # in another terminal
+```
+
 **Keeping a resident running.** An exception a resident doesn't catch ends its process. The
 runtime restarts it (§2.3), but the activation that raised is lost, and so is any request it had
 in flight. One that raises every time is given up after 8 quick restarts. Catch inside the body to
@@ -1601,7 +1627,8 @@ ari test     [flags] doc.ari...                   # headless test run (§13)
 ```
 
 Its flags (`--backend ftxui|tvision`, `--prefix P`, `--fps N`, `--no-mouse`,
-`--component-path DIR`, and the snapshot ones) go **before** the document. They are the
+`--component-path DIR`, `--log FILE` for the run's warnings as they happen (§2.4), and the snapshot
+ones) go **before** the document. They are the
 general flags every runtime shares, parsed by
 [`host_cli.h`](../inc/cvc/ariadne/host_cli.h). Whatever follows the document is the
 document's (§5.6): `ari run doc.ari --help` prints the document's own usage. A general
