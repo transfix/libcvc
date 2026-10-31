@@ -196,10 +196,35 @@ process, wrapped by the runtime as `(while t (let ((event (msg-recv "chan"))) bo
   `event` = `{kind: "signal", signal: "SIGINT", source: "terminal"}`. Signal names are
   POSIX: a terminal's Ctrl-C is `SIGINT`, Ctrl-\ is `SIGQUIT`.
 
-Residents have no total budget (they run for the life of the document), but each *step*
-is wall-capped at `kResidentStepSeconds = 0.05`
-([`ariadne.cpp:1497`](../src/cvc/ariadne/ariadne.cpp)). On teardown they are reaped as a
-group via their owner tag.
+Residents have no total budget (they run for the life of the document), but each *step* is
+time-capped, so that one runaway step cannot hang the host's drain. The cap is the tree setting
+`ariadne.limits.resident_max_step_time`, in seconds (`0` = no cap). It is read as each resident
+starts, and a missing or unparsable value keeps the default. The default is `0.05 s`, or `1 s` in a
+wasm build. The deadline is checked inside long builtin loops (`collect`, a generator, a big
+`state-data-get`), not by a plain body. It is a `se::time_budget`: its first half is charged on the
+steady clock, and its second half on the thread's CPU clock, with each gap between two checks
+counted up to a sixteenth of that half. So a native step that the OS deschedules must still run for
+half the cap itself before it is killed. Single-threaded wasm has no thread CPU clock: there,
+`thread_cpu_seconds` is the steady clock, so on a loaded machine a step that checks often (a big
+`collect`, decoding a large reply) is charged for its waits too, up to a sixteenth of the half per
+check. That is why its default is higher. On teardown, residents are reaped as a group by their owner tag.
+
+**A resident that stops is restarted.** A killed one (its step cap, or a syntax error read inside
+it) or a failed one (an exception it didn't catch) is reported once per message (§2.4). Then it
+is started again on a later drain, with a fresh loop; what it wrote to state stays:
+
+- the first time, at once;
+- while it keeps stopping within 100 drains of starting, after 1, 2, 4 … up to 64 drains;
+- after 8 such stops in a row, never again, with the warning `ari: <lane> resident [<channel>]
+  stopped 8 times in a row soon after starting: not restarted again`. Setting its program again,
+  which a reload does, starts it afresh.
+
+This holds for every lane: `on_tick`, each module's `on_tick` (whether or not the mount is
+drawn), `on_key`, `on_pointer` and `on_signal`. A dead input handler would leave the document
+deaf to keys. A dead signal handler would swallow every Ctrl-C, since declaring one takes the
+signal over (§5.3). A signal that arrives while its handler waits out a restart delay starts it
+at once. A key or pointer event that arrives in that wait is dropped, as it is for a document
+with no handler.
 
 A `load:`ed module's own `on_tick:` is a tick resident too, one per mount (§6.3): chrooted to the
 mount's sub-prefix, with the mount's functions (§6.6), on the channel
@@ -230,9 +255,10 @@ one line, cut at 80 characters, and `<lane>` is `on_tick:`, `on_key:`, `on_point
 `on_signal:`, or `on_tick: of mount '<sub-prefix>'` for a module's tick. An `init:` program that fails
 reports `failed: Class: message (at <where>)` to its caller.
 
-**Keeping a resident alive.** A resident is one process for the life of the document. An
-exception it doesn't catch ends it, and its channel goes unserved from then on. Catch inside the
-body to keep it running:
+**Keeping a resident running.** An exception a resident doesn't catch ends its process. The
+runtime restarts it (§2.3), but the activation that raised is lost, and so is any request it had
+in flight. One that raises every time is given up after 8 quick restarts. Catch inside the body to
+keep it running:
 
 ```yaml
 on_key: |
