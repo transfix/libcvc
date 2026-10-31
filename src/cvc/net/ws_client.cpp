@@ -230,8 +230,9 @@ private:
       if (message.empty())
         binary = (meta->flags & CURLWS_BINARY) != 0;
       if (message.size() + n > max_bytes_) {
-        queue_.push({WsEvent::Kind::Error, "ws: a message is longer than the limit", 0});
+        // Closed before the event is queued: whoever reads the error then sees open() false.
         close(1009);
+        queue_.push({WsEvent::Kind::Error, "ws: a message is longer than the limit", 0});
         return;
       }
       message.append(buf, n);
