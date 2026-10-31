@@ -8,8 +8,9 @@
  * (detail::lock_home, one per scheduler), which runs the home actions of protocol section 5; the
  * manager itself is the table of protocol sections 2-4 (detail::lock_table).
  *
- * Phase L1: single mode only (one thread calls the manager), one home per manager. Shared mode,
- * ports and several homes are phase L3's; inheritance is phase L2's.
+ * Phases L1 and L2: single mode only (one thread calls the manager), one home per manager, and
+ * priority inheritance (protocol 3.3) among the processes of a home whose scheduler uses a
+ * priority policy. Shared mode, ports and several homes are phase L3's.
  */
 #ifndef CVC_STATE_EXEC_LOCK_MANAGER_H
 #define CVC_STATE_EXEC_LOCK_MANAGER_H
@@ -70,8 +71,8 @@ struct lock_stats {
   std::uint64_t ends = 0;               // end calls that found a record
   std::size_t trie_nodes = 0;           // trie nodes now, the root included
   std::size_t cache_refs = 0;           // key-cache references now, over every home
-  std::uint64_t relevels = 0;           // relevel notifications emitted (phase L2)
-  std::uint64_t relevels_coalesced = 0; // relevels coalesced away (phase L2)
+  std::uint64_t relevels = 0;           // relevel notifications emitted (from phase L2)
+  std::uint64_t relevels_coalesced = 0; // relevels coalesced away (from phase L2)
   std::uint64_t posts = 0;              // posts that landed in a port (phase L3)
   std::uint64_t posts_dropped = 0;      // posts refused by a closed port (phase L3)
   std::uint64_t posts_discarded = 0;    // posts accepted, then discarded at the close (phase L3)

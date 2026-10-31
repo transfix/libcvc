@@ -268,6 +268,53 @@ def test_bicycle_integrator():
               f"20 steps {l0:.4f} -> {last:.4f}")
 
 
+def test_jolt_integrator():
+    """The loss taken through the Jolt Humvee (material_integrator::jolt): Jolt moves the
+    vehicles among each agent's discs, the four-wheel pH model calibrated to Jolt's ledger gives
+    the gradient."""
+    if not hasattr(pycvc, "nav_material_trainer_set_jolt"):
+        print("  (no nav_material_trainer_set_jolt -- skipping the Jolt integrator)")
+        return
+    with tempfile.TemporaryDirectory() as d:
+        init = os.path.join(d, "init.cvcnm")
+        _write_random_cvcnm(init, patch_size=16, seed=7)
+        h = pycvc.nav_material_trainer_create(init)
+        batch = _synthetic_batch()
+        batch["H"] = np.full(16, 30, np.int32)  # 3 s, under way toward the goals
+        to_goal = batch["goal"] - batch["o0"]
+        batch["v0"] = (0.3 * to_goal / np.linalg.norm(to_goal, axis=1, keepdims=True)).astype(np.float32)
+        args = _packed(batch)
+        point_mass = pycvc.nav_material_trainer_loss(h, *args, float("nan"), 0)
+        try:
+            # The Humvee at the synthetic batch's scale, its limits as the bicycle test's.
+            cal = pycvc.nav_material_trainer_set_jolt(h, 1, "humvee", 0.3, 0.1, 0.6, 2.0, 1.5, 0.8, 1.5, 1)
+        except Exception as e:
+            if "without Jolt" in str(e):
+                print("  (this pycvc was built without Jolt -- skipping the Jolt integrator)")
+                return
+            raise
+        assert pycvc.nav_material_trainer_integrator(h) == "jolt"
+        assert 0.25 <= cal["drive_gain"] <= 4.0 and cal["price_drive"] > 0.0, cal
+        jolt = pycvc.nav_material_trainer_loss(h, *args, float("nan"), 0)
+        assert np.isfinite(jolt) and jolt != point_mass, "Jolt did not change the loss"
+        assert pycvc.nav_material_trainer_loss(h, *args, float("nan"), 0) == jolt, "Jolt did not repeat"
+        l0 = pycvc.nav_material_trainer_step(h, *args, 1e-3, 0)
+        last = l0
+        for _ in range(10):
+            last = pycvc.nav_material_trainer_step(h, *args, 1e-3, 0)
+        assert np.isfinite(last) and last < l0, f"training on Jolt did not descend ({l0} -> {last})"
+        try:
+            pycvc.nav_material_trainer_set_jolt(h, 1, "tank")
+        except Exception:
+            pass
+        else:
+            raise AssertionError("an unknown vehicle was accepted")
+        pycvc.nav_material_trainer_set_jolt(h, 0)
+        assert pycvc.nav_material_trainer_integrator(h) == "surrogate"
+        print(f"  Jolt integrator: drive gain {cal['drive_gain']:.3f}, lag {cal['tau_drive']:.3f} s, "
+              f"point-mass loss {point_mass:.4f}, Jolt {jolt:.4f}, 10 steps {l0:.4f} -> {last:.4f}")
+
+
 def _takes_ext(fn, *args):
     """Whether a binding takes the trailing external-force args (material_ext): a pycvc without
     them raises TypeError on the extra argument."""
@@ -484,6 +531,7 @@ if __name__ == "__main__":
     test_forward_only_loss_does_not_train()
     test_sampled_multi_start_args()
     test_bicycle_integrator()
+    test_jolt_integrator()
     test_external_force()
     test_belief_net_and_the_training_gate()
     test_belief_patch_crop_matches_numpy()

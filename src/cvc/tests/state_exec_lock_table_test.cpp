@@ -31,10 +31,11 @@ struct world {
   detail::home_id h = 0;
   detail::lock_notes notes; // the last operation's
 
-  explicit world(std::uint32_t mutations = 0, bool self_check = true)
+  /// `prio`: the home applies priorities (a scheduler with a priority policy, phase L2).
+  explicit world(std::uint32_t mutations = 0, bool self_check = true, bool prio = false)
       : t(options(mutations, self_check)) {
     detail::lock_notes n;
-    h = t.attach_home(false, nullptr, nullptr, n);
+    h = t.attach_home(prio, nullptr, nullptr, n);
     EXPECT_TRUE(n.empty());
     checked();
   }
@@ -64,16 +65,17 @@ struct world {
   }
 
   std::optional<detail::grant> try_acquire(int p, lock_mode m, keys_t keys,
-                                           std::string_view owner = "o") {
+                                           std::string_view owner = "o", int base = 0) {
     auto r = request(m, keys);
-    auto g = t.try_acquire(pid(p), {owner, 0}, r, {});
+    auto g = t.try_acquire(pid(p), {owner, base}, r, {});
     checked();
     return g;
   }
 
   /// A try_acquire that must be granted: the hold's id.
-  std::uint64_t acquire(int p, lock_mode m, keys_t keys, std::string_view owner = "o") {
-    auto g = try_acquire(p, m, keys, owner);
+  std::uint64_t acquire(int p, lock_mode m, keys_t keys, std::string_view owner = "o",
+                        int base = 0) {
+    auto g = try_acquire(p, m, keys, owner, base);
     EXPECT_TRUE(g.has_value()) << "pid " << p;
     return g ? g->hold : 0;
   }
@@ -88,11 +90,36 @@ struct world {
   }
 
   /// A busy request that queues, as %lock-wait does after a busy try_acquire: its ticket.
-  std::uint64_t wait(int p, lock_mode m, keys_t keys, std::string_view owner = "o") {
-    EXPECT_FALSE(try_acquire(p, m, keys, owner).has_value()) << "pid " << p;
-    auto b = block(p, m, keys, owner);
+  std::uint64_t wait(int p, lock_mode m, keys_t keys, std::string_view owner = "o", int base = 0) {
+    EXPECT_FALSE(try_acquire(p, m, keys, owner, base).has_value()) << "pid " << p;
+    auto b = block(p, m, keys, owner, base);
     EXPECT_EQ(b.state, ticket_state::queued) << "pid " << p;
     return b.tid;
+  }
+
+  void set_base(int p, int base) {
+    notes.clear();
+    t.set_base(pid(p), base, notes);
+    checked();
+  }
+
+  /// A record's inherited priority, read as a check reads it (no side effect).
+  int inh(int p) const {
+    auto r = t.rec_of(pid(p));
+    return r ? r->inh : detail::lock_inf;
+  }
+
+  /// The last operation's notifications as text: wake(PID,TID) and relevel(PID), in order.
+  std::vector<std::string> posts() const {
+    std::vector<std::string> v;
+    for (const auto &n : notes) {
+      EXPECT_EQ(n.home, h);
+      v.push_back(n.post.what == detail::lock_post::kind::wake
+                      ? "wake(" + std::to_string(n.post.pid) + "," + std::to_string(n.post.tid) +
+                            ")"
+                      : "relevel(" + std::to_string(n.post.pid) + ")");
+    }
+    return v;
   }
 
   detail::lock_outcome resume(int p, std::uint64_t tid) {
@@ -197,20 +224,176 @@ TEST(LockTable, AttachHomeOneHomeBeforeL3) {
   EXPECT_EQ(t.attach_home(false, nullptr, nullptr, n), 1u); // ids are never reused
   EXPECT_TRUE(n.empty());
   EXPECT_NE(t.canonical().find("homes\nH1 prio=0\nrecs\n"), std::string::npos);
-  // Inheritance is phase L2's: a priority home is refused while it would lend.
+  // prio is taken as given (phase L2), with inheritance on or off; one_home off takes more homes.
   lock_table::options o = world::options(0, true);
   o.one_home = false;
   lock_table t2(o);
-  EXPECT_THROW(t2.attach_home(true, nullptr, nullptr, n), std::logic_error);
-  EXPECT_EQ(t2.attach_home(false, nullptr, nullptr, n), 0u);
-  EXPECT_EQ(t2.attach_home(false, nullptr, nullptr, n), 1u); // one_home off
+  EXPECT_EQ(t2.attach_home(true, nullptr, nullptr, n), 0u);
+  EXPECT_EQ(t2.attach_home(false, nullptr, nullptr, n), 1u);
+  EXPECT_TRUE(n.empty());
+  EXPECT_NE(t2.canonical().find("homes\nH0 prio=1\nH1 prio=0\nrecs\n"), std::string::npos);
   t2.check();
-  // With inheritance off nothing lends, so prio is stored as given.
   o.inheritance = false;
   lock_table t3(o);
   EXPECT_EQ(t3.attach_home(true, nullptr, nullptr, n), 0u);
   EXPECT_NE(t3.canonical().find("H0 prio=1"), std::string::npos);
   t3.check();
+}
+
+// -- 3.3, 4.3, 4.12, 4.13: inheritance (phase L2) ------------------------------------------------
+
+TEST(LockTable, InheritanceBoostsTheHolderAndWithdrawsIt) {
+  // PI-1's shape: a better waiter boosts the holder; its timeout withdraws the boost
+  world w(0, true, true);
+  w.acquire(1, X, {"a"}, "o", 5);
+  const std::uint64_t t2 = w.wait(2, X, {"a"}, "o", -5);
+  EXPECT_EQ(w.posts(), (std::vector<std::string>{"relevel(1)"})); // the waiter's own is unchanged
+  EXPECT_EQ(w.inh(1), -5);
+  EXPECT_EQ(w.inh(2), detail::lock_inf);
+  EXPECT_EQ(w.t.read_inh(w.pid(1)), -5); // the apply (5.9), which clears the coalescing flag
+  EXPECT_EQ(w.cancel(2, t2), ticket_state::cancelled);
+  EXPECT_EQ(w.posts(), (std::vector<std::string>{"relevel(1)"}));
+  EXPECT_EQ(w.inh(1), detail::lock_inf);
+  EXPECT_EQ(w.t.stats().relevels, 2u);
+  EXPECT_EQ(w.t.stats().relevels_coalesced, 0u);
+  EXPECT_EQ(w.resume(2, t2).what, detail::lock_outcome::kind::timeout);
+  EXPECT_EQ(w.t.read_inh(w.pid(2)), detail::lock_inf); // no record: INF
+}
+
+TEST(LockTable, InheritanceCoalescesUntilTheApply) {
+  // 4.3: at most one relevel per record is pending; read_inh clears the flag (G-39)
+  world w(0, true, true);
+  w.acquire(1, X, {"a"}, "o", 5);
+  const std::uint64_t t2 = w.wait(2, X, {"a"}, "o", -5);
+  EXPECT_EQ(w.posts(), (std::vector<std::string>{"relevel(1)"}));
+  w.cancel(2, t2); // not applied yet: coalesced
+  EXPECT_TRUE(w.posts().empty());
+  EXPECT_EQ(w.t.stats().relevels_coalesced, 1u);
+  EXPECT_EQ(w.t.read_inh(w.pid(1)), detail::lock_inf); // the pending one reads the current value
+  w.resume(2, t2);
+  w.wait(2, X, {"a"}, "o", -5);
+  EXPECT_EQ(w.posts(), (std::vector<std::string>{"relevel(1)"})); // the flag was cleared
+  EXPECT_EQ(w.t.stats().relevels, 2u);
+}
+
+TEST(LockTable, InheritanceSetBase) {
+  // 4.12: a waiter's base change re-levels the holder it boosts; the holder's own base changes
+  // nothing it inherits (PI-4)
+  world w(0, true, true);
+  w.acquire(1, X, {"a"}, "o", 5);
+  w.wait(2, X, {"a"}, "o", 0);
+  EXPECT_EQ(w.inh(1), 0);
+  w.t.read_inh(w.pid(1));
+  w.set_base(2, -3);
+  EXPECT_EQ(w.posts(), (std::vector<std::string>{"relevel(1)"}));
+  EXPECT_EQ(w.inh(1), -3);
+  EXPECT_EQ(w.t.rec_of(w.pid(2))->base, -3);
+  w.t.read_inh(w.pid(1));
+  w.set_base(1, 7);
+  EXPECT_TRUE(w.posts().empty());
+  EXPECT_EQ(w.inh(1), -3);
+  w.set_base(3, -9); // no record: nothing
+  EXPECT_TRUE(w.posts().empty());
+  EXPECT_FALSE(w.t.rec_of(w.pid(3)).has_value());
+}
+
+TEST(LockTable, InheritanceThroughAWaiterEdgeAndAfterTheWakes) {
+  // PI-9's shape: W queues behind V's earlier ticket, V behind H's hold; H's release grants V,
+  // whose wake comes before the relevels, which are in pid order
+  world w(0, true, true);
+  const std::uint64_t h = w.acquire(1, X, {"a.b"}, "o", 10);
+  const std::uint64_t tv = w.wait(2, X, {"a"}, "o", 10);
+  w.t.read_inh(w.pid(1));
+  w.wait(3, S, {"a.c"}, "o", -10);
+  EXPECT_EQ(w.posts(), (std::vector<std::string>{"relevel(1)", "relevel(2)"}));
+  EXPECT_EQ(w.inh(1), -10);
+  EXPECT_EQ(w.inh(2), -10);
+  w.t.read_inh(w.pid(1));
+  w.t.read_inh(w.pid(2));
+  w.release(1, h);
+  EXPECT_EQ(w.posts(),
+            (std::vector<std::string>{"wake(2," + std::to_string(tv) + ")", "relevel(1)"}));
+  EXPECT_EQ(w.inh(2), -10); // W now waits on V's hold
+  EXPECT_FALSE(w.t.rec_of(w.pid(1)).has_value());
+}
+
+TEST(LockTable, InheritanceChainCappedAt8Edges) {
+  // anc8 (3.2, 3.3): p1 (-5) boosts p2..p9 through 1..8 edges, not p10 (9); p10 inherits 3 from
+  // p2..p9; p1's end withdraws its share down the whole chain at once (PI-8)
+  world w(0, true, true);
+  for (int i = 10; i >= 1; --i)
+    w.acquire(i, X, {"k" + std::to_string(i)}, "o", i == 1 ? -5 : 3);
+  for (int i = 9; i >= 1; --i) {
+    const std::string k = "k" + std::to_string(i + 1);
+    w.wait(i, X, {std::string_view(k)}, "o", i == 1 ? -5 : 3);
+  }
+  for (int i = 2; i <= 9; ++i)
+    EXPECT_EQ(w.inh(i), -5) << "p" << i;
+  EXPECT_EQ(w.inh(10), 3);
+  EXPECT_EQ(w.inh(1), detail::lock_inf);
+  for (int i = 1; i <= 10; ++i)
+    w.t.read_inh(w.pid(i));
+  w.end(1, true);
+  std::vector<std::string> want{"relevel(2)", "relevel(3)", "relevel(4)", "relevel(5)",
+                                "relevel(6)", "relevel(7)", "relevel(8)", "relevel(9)"};
+  EXPECT_EQ(w.posts(), want); // p10's stays 3
+  EXPECT_EQ(w.inh(2), detail::lock_inf);
+  for (int i = 3; i <= 10; ++i)
+    EXPECT_EQ(w.inh(i), 3) << "p" << i;
+}
+
+TEST(LockTable, InheritancePassesThroughARoundRobinProcess) {
+  // 3.3: a process on a round-robin home lends nothing but passes on what it inherits, and gets
+  // no relevel; when the last priority home detaches every inh goes back to INF, posting nothing
+  lock_table::options o = world::options(0, true);
+  o.one_home = false;
+  lock_table t(o);
+  detail::lock_notes n;
+  const detail::home_id hp = t.attach_home(true, nullptr, nullptr, n);
+  const detail::home_id hr = t.attach_home(false, nullptr, nullptr, n);
+  auto req = [](lock_mode m, std::string_view k) { return world::request(m, {k}); };
+  auto r1 = req(X, "a");
+  ASSERT_TRUE(t.try_acquire({hp, 1}, {"o", 5}, r1, {}));
+  auto r2 = req(X, "b");
+  ASSERT_TRUE(t.try_acquire({hr, 2}, {"o", 0}, r2, {}));
+  auto r3 = req(X, "a");
+  EXPECT_EQ(t.block({hr, 2}, {"o", 0}, r3, {}, n).state, ticket_state::queued);
+  EXPECT_TRUE(n.empty()); // the round-robin waiter lends nothing
+  auto r4 = req(X, "b");
+  n.clear();
+  EXPECT_EQ(t.block({hp, 3}, {"o", -7}, r4, {}, n).state, ticket_state::queued);
+  ASSERT_EQ(n.size(), 1u); // H (hp,1) through V (hr,2), and no relevel to the round-robin home
+  EXPECT_EQ(n[0].home, hp);
+  EXPECT_EQ(n[0].post.pid, 1);
+  EXPECT_EQ(t.rec_of({hp, 1})->inh, -7);
+  EXPECT_EQ(t.rec_of({hr, 2})->inh, -7);
+  t.check();
+  n.clear();
+  t.detach_home(hp, n); // ends (hp,1) and (hp,3): V is granted a, and lending becomes false
+  ASSERT_EQ(n.size(), 1u);
+  EXPECT_EQ(n[0].post.what, detail::lock_post::kind::wake);
+  EXPECT_EQ(t.rec_of({hr, 2})->inh, detail::lock_inf);
+  t.check();
+}
+
+TEST(LockTable, InheritanceOff) {
+  // options::inheritance false (the lock.inherit bench's off points): nothing lends
+  lock_table::options o = world::options(0, true);
+  o.inheritance = false;
+  lock_table t(o);
+  detail::lock_notes n;
+  const detail::home_id h = t.attach_home(true, nullptr, nullptr, n);
+  auto r1 = world::request(X, {"a"});
+  ASSERT_TRUE(t.try_acquire({h, 1}, {"o", 5}, r1, {}));
+  auto r2 = world::request(X, {"a"});
+  n.clear();
+  EXPECT_EQ(t.block({h, 2}, {"o", -5}, r2, {}, n).state, ticket_state::queued);
+  EXPECT_TRUE(n.empty());
+  t.set_base({h, 2}, -9, n);
+  EXPECT_TRUE(n.empty());
+  EXPECT_EQ(t.rec_of({h, 1})->inh, detail::lock_inf);
+  EXPECT_EQ(t.stats().relevels, 0u);
+  t.check();
 }
 
 // -- 4.5, 4.10: the fast path ---------------------------------------------------------------------
@@ -1128,4 +1311,53 @@ TEST(LockTable, MutationPlantDivergence) {
   const std::string a = normal.t.canonical(), b = planted.t.canonical();
   EXPECT_NE(a, b);
   EXPECT_EQ(a.substr(0, a.find("counters")), b.substr(0, b.find("counters")));
+}
+
+TEST(LockTable, MutationCancelSkipsRelevel) {
+  world w(lock_table::cancel_skips_relevel, false, true);
+  w.auto_check = false;
+  w.acquire(1, X, {"a"}, "o", 5);
+  const std::uint64_t t2 = w.wait(2, X, {"a"}, "o", -5);
+  w.cancel(2, t2);
+  EXPECT_TRUE(w.posts().empty());
+  EXPECT_EQ(w.inh(1), -5);            // PI-3's boost kept after its source timed out
+  EXPECT_EQ(violation_of(w.t), "I8"); // check()'s own search finds it
+}
+
+TEST(LockTable, MutationCoalesceNoClear) {
+  world w(lock_table::coalesce_no_clear, true, true);
+  w.acquire(1, X, {"a"}, "o", 5);
+  const std::uint64_t t2 = w.wait(2, X, {"a"}, "o", -5);
+  EXPECT_EQ(w.t.read_inh(w.pid(1)), -5); // the apply leaves the flag set
+  w.cancel(2, t2);
+  EXPECT_TRUE(w.posts().empty()); // so the withdrawal is coalesced away, for ever
+  EXPECT_EQ(w.t.stats().relevels_coalesced, 1u);
+  EXPECT_EQ(w.inh(1), detail::lock_inf); // the manager is right; a home's copy stays -5 (the
+                                         // model check's I8 quiescent clause finds it)
+}
+
+TEST(LockTable, MutationImplNoteAfterOnly) {
+  // Q holds X a; P (10) queues; W (-5) queues, then times out: W has no edge after the cancel,
+  // so a set A built from the graph after only misses P and Q, whose inh changes
+  world w(lock_table::impl_note_after_only, true, true);
+  w.acquire(1, X, {"a"}, "o", 0);
+  w.wait(2, X, {"a"}, "o", 10);
+  const std::uint64_t t3 = w.wait(3, X, {"a"}, "o", -5);
+  EXPECT_EQ(w.inh(2), -5);
+  try {
+    w.t.cancel(w.pid(3), t3, w.notes);
+    ADD_FAILURE() << "no violation";
+  } catch (const detail::lock_violation &v) {
+    EXPECT_EQ(v.invariant(), "impl-note") << v.what();
+  }
+  world normal(0, true, true);
+  normal.acquire(1, X, {"a"}, "o", 0);
+  normal.wait(2, X, {"a"}, "o", 10);
+  const std::uint64_t n3 = normal.wait(3, X, {"a"}, "o", -5);
+  normal.t.read_inh(normal.pid(1));
+  normal.t.read_inh(normal.pid(2));
+  normal.cancel(3, n3);
+  EXPECT_EQ(normal.posts(), (std::vector<std::string>{"relevel(1)", "relevel(2)"}));
+  EXPECT_EQ(normal.inh(1), 10);
+  EXPECT_EQ(normal.inh(2), detail::lock_inf);
 }

@@ -102,6 +102,8 @@ struct coordinator_stats {
   uint64_t heartbeats_sent = 0;
   uint64_t heartbeats_received = 0;
   uint64_t status_broadcasts = 0;
+  /// Submitted or migrated processes whose priority was clamped to resource_policy::priority_floor.
+  uint64_t priority_clamped = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -175,6 +177,11 @@ public:
   bool admin_pause(int pid, const std::string &node_id = {});
   bool admin_resume(int pid, const std::string &node_id = {});
   bool admin_kill(int pid, const std::string &node_id = {});
+  /// Set process `pid`'s base priority on `node_id` (empty: this node), unchecked, as a host does
+  /// (docs/STATE_EXEC_LOCKS.md 7.4). Locally it is posted to the scheduler (post_control) and
+  /// applied at its next step, so any thread may call it; remotely it is a control message. True
+  /// once posted or sent; false with no scheduler attached.
+  bool admin_set_priority(int pid, const std::string &node_id, int priority);
   bool admin_set_policy(const resource_policy &policy, const std::string &target_cluster = {});
   bool admin_handoff(const std::string &target_node_id);
 
@@ -216,6 +223,9 @@ private:
 
   // Submit helpers
   submit_result submit_local(const std::string &script, const execute_options &opts);
+  // resource_policy::priority_floor applied to `opts`: the floor, and a better priority clamped
+  // to it (counted in priority_clamped).
+  void apply_priority_floor(execute_options &opts);
   submit_result submit_local(const value_t &expr, const execute_options &opts);
   void send_submit_response(const std::string &reply_path, const submit_result &result);
 

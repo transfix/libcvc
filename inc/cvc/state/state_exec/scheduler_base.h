@@ -72,6 +72,10 @@ struct execute_options {
   /// The priority floor (docs/STATE_EXEC_LOCKS.md 7.2): how far the process may raise its own
   /// priority. Unset: the submit priority. Given by a host, it clamps under every policy.
   std::optional<int> priority_floor;
+  /// Whether a given priority_floor is a host's. False carries a floor that is not, with the
+  /// process it belongs to (a migration): the process may still come back to it, and it clamps
+  /// only as the submit priority's floor does.
+  bool priority_floor_explicit = true;
   /// The spawning process (the DSL's spawn), or -1.
   int parent_pid = -1;
 };
@@ -171,6 +175,7 @@ struct priority_info {
   int effective = 0;
   int floor = 0;
   scheduling_policy policy = scheduling_policy::round_robin;
+  bool floor_explicit = false; // the floor is a host's: it clamps the spawns under every policy
 };
 
 /// What a checked priority change came to: applied; unknown (a pid the caller may not see, 7.2);

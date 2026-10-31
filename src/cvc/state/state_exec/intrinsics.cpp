@@ -13,6 +13,7 @@
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/data_job.h>
 #include <cvc/state/state_exec/detail/lock_home.h>
+#include <cvc/state/state_exec/detail/priority.h>
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/memory_tracker.h>
 #include <cvc/state/state_exec/parser.h> // detail::read_number_text, for state-incr
@@ -706,10 +707,32 @@ value_t intrinsic_spawn(intrinsics_context *ctx, std::span<const value_t> args) 
     opts.priority = static_cast<int>(as_int(args[2], "spawn"));
   opts.uid = ctx->uid;
   // A child keeps its parent's owner (design 7.2; td 5 item 6), so a host's kill_owner reaps it.
-  if (const process_ptr &running = ctx->sched->current_process())
+  const process_ptr &running = ctx->sched->current_process();
+  if (running)
     opts.owner = running->owner;
   else if (ctx->proc)
     opts.owner = ctx->proc->owner;
+  // Its parent, and its priority and floor (design 7.2). A host's spawn, with no process
+  // stepping, is unchecked, as a host's calls are.
+  opts.parent_pid = ctx->sched->current_pid();
+  if (running) {
+    const scheduling_policy policy = ctx->sched->policy();
+    bool clamped = false;
+    opts.priority = detail::clamp_spawn_priority(*running, opts.priority, policy, &clamped);
+    if (clamped)
+      ctx->sched->note_priority_clamped();
+    // The child's floor is the parent's, or its granted priority when better, and a host's only
+    // when the parent's is (a host's floor binds the child too). It is given when the parent's is
+    // a host's, and else only where it differs from the granted priority under a priority policy,
+    // which clamps anyway: under round_robin with no host floor a spawn stays unchecked at every
+    // depth, as before, and a floor that is no host's stays so when the child moves (migration).
+    const int floor = std::min(detail::floor_of(*running), opts.priority);
+    if (running->priority_floor_explicit ||
+        (floor != opts.priority && policy != scheduling_policy::round_robin)) {
+      opts.priority_floor = floor;
+      opts.priority_floor_explicit = running->priority_floor_explicit;
+    }
+  }
   // The host's spawn context (td 4.15) gives the child an environment and a context of its own,
   // which the child's process keeps alive. Without one the child gets the bare builtins.
   std::function<void(int)> spawned;
@@ -1004,6 +1027,11 @@ value_t intrinsic_inspect(intrinsics_context *ctx, std::span<const value_t> args
   if (info->exit_exception)
     entries.emplace_back("exception", *info->exit_exception);
   entries.emplace_back("locks_held", value_t(static_cast<int64_t>(info->locks_held)));
+  // The priority it is picked by, a boost included, and its floor (design 7.1, 6.2): `priority`
+  // above stays the base.
+  entries.emplace_back("effective_priority",
+                       value_t(static_cast<int64_t>(info->effective_priority)));
+  entries.emplace_back("priority_floor", value_t(static_cast<int64_t>(info->priority_floor)));
   if (info->waiting_on) {
     // A lock key as this program would write it (gap G-17).
     const std::string_view lock_prefix = "lock /";
@@ -1443,7 +1471,8 @@ void register_intrinsics(environment_ptr env, intrinsics_context *ctx) {
   reg("msg-recv", intrinsic_msg_recv);
   reg("msg-pending", intrinsic_msg_pending);
 
-  // Locks: with-lock, locks-held, lock-query, %lock-wait (docs/STATE_EXEC_LOCKS.md)
+  // Locks: with-lock, locks-held, lock-query, %lock-wait; set-priority, get-priority
+  // (docs/STATE_EXEC_LOCKS.md)
   detail::register_lock_intrinsics(env, ctx);
 }
 

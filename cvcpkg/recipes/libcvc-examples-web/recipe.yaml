@@ -28,7 +28,11 @@ recipe:
 #   ./deps/bin/libcvc-examples-web
 
 source:
-  # Co-located with the libcvc source tree (`../../..` is the repo root).
+  # Co-located with the libcvc source tree.
+  # `path` is counted from cvcpkg/recipes/_vendored/, where `cvcpkg build`
+  # looks first, so `../../..` is the libcvc repo root (CVC_SOURCE_DIR).
+  # `cvcpkg recipe push` does not bundle it: counted from cvcpkg/, its
+  # fallback base, the same path points outside the repo.
   type: vendored
   path: ../../..
 

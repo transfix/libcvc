@@ -26,6 +26,7 @@
 #include <cvc/core/app.h>
 #include <cvc/core/async_task.h> // launch_pool_task generalization test
 #include <cvc/core/thread_pool.h> // item 2: full type for app.computePool().parallel_for
+#include <cvc/net/credentials.h>  // the ws-send test's CredentialStore
 #include <cvc/net/http_client.h>  // §13.8: swap the transport for a fake in the http-get test
 #include <cvc/net/net_policy.h>   // the ws-* verb tests' policy
 #include <cvc/net/ws_client.h>    // have_ws_backend()
@@ -46,6 +47,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <span>
 #include <string>
 #include <thread>
@@ -3262,6 +3264,21 @@ template <class Pred> bool pump_until(Runtime &rt, Pred pred, int budget_ms = 50
   return pred();
 }
 
+// The spinner (Kind::Spinner): its glyph comes from the host's frame clock, never from state.
+// The braille cycle as UTF-8 bytes (a \u literal is the code page's on MSVC without /utf-8).
+const char *const kSpin[] = {"\xE2\xA0\x8B", "\xE2\xA0\x99", "\xE2\xA0\xB9", "\xE2\xA0\xB8",
+                             "\xE2\xA0\xBC", "\xE2\xA0\xB4", "\xE2\xA0\xA6", "\xE2\xA0\xA7",
+                             "\xE2\xA0\x87", "\xE2\xA0\x8F"};
+
+// The text line the default spinner drew for `label`, or "" when it drew none.
+std::string spinner_line(const MockBackend &mb, const std::string &label) {
+  for (auto it = mb.log.rbegin(); it != mb.log.rend(); ++it)
+    if (it->rfind("text_line:", 0) == 0 && it->size() >= label.size() &&
+        it->compare(it->size() - label.size(), label.size(), label) == 0)
+      return it->substr(10);
+  return std::string();
+}
+
 // The nav_compute demo's verb: (nav-step) is an async function on the app's async host. The action
 // parks at the call while the kernel runs on the background task pool and fans out over the compute
 // pool, then resumes with the call's value. No channel, no msg-recv.
@@ -3298,6 +3315,87 @@ TEST(AriadneAction, NavStepAsAnAsyncFunctionReturnsItsResult) {
   clear_action_intrinsics();
   ASSERT_TRUE(resumed) << "the parked action never resumed";
   EXPECT_EQ(cvc::state::instance(app)("nav.result").value(), "86");
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+}
+
+TEST(AriadneSpinner, GlyphsCycleTenASecond) {
+  for (int i = 0; i < 10; ++i)
+    EXPECT_EQ(spinner_glyph(0.1 * i + 0.01, false), kSpin[i]) << i;
+  EXPECT_EQ(spinner_glyph(1.0, false), kSpin[0]) << "round again";
+  EXPECT_EQ(spinner_glyph(0.0, true), "|");
+  EXPECT_EQ(spinner_glyph(0.15, true), "/");
+  EXPECT_EQ(spinner_glyph(0.25, true), "-");
+  EXPECT_EQ(spinner_glyph(0.35, true), "\\");
+  EXPECT_EQ(spinner_glyph(-3.0, false), kSpin[0]);
+  EXPECT_EQ(spinner_glyph(std::nan(""), true), "|");
+  EXPECT_EQ(spinner_glyph(1e300, false), kSpin[0]);
+}
+
+TEST(AriadneSpinner, TurnsByTheFrameClock) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({spinner("Loading"), spinner("Plain", "", /*ascii*/ true)}));
+  rt.set_frame_clock(0.0);
+  rt.render();
+  EXPECT_EQ(spinner_line(mb, "Loading"), std::string(kSpin[0]) + " Loading");
+  EXPECT_EQ(spinner_line(mb, "Plain"), "| Plain");
+  EXPECT_EQ(rt.frame_clock(), 0.0);
+  rt.set_frame_clock(0.1);
+  rt.render();
+  EXPECT_EQ(spinner_line(mb, "Loading"), std::string(kSpin[1]) + " Loading");
+  EXPECT_EQ(spinner_line(mb, "Plain"), "/ Plain");
+
+  // Unpinned, the clock is the steady clock read at each render().
+  rt.set_frame_clock(std::nullopt);
+  rt.render();
+  const double t0 = rt.frame_clock();
+  const std::string before = spinner_line(mb, "Loading");
+  std::this_thread::sleep_for(std::chrono::milliseconds(150));
+  rt.render();
+  EXPECT_GE(rt.frame_clock() - t0, 0.15);
+  EXPECT_NE(spinner_line(mb, "Loading"), before) << "a step every 0.1 s";
+}
+
+TEST(AriadneSpinner, TurnsWhileTheDocumentsProgramIsParked) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({spinner("Waiting")}));
+  rt.set_tick_program("(begin (state-set \"parked\" \"yes\") (msg-recv \"nothing.comes\"))");
+  std::set<std::string> seen;
+  for (int f = 0; f < 10; ++f) {
+    rt.set_frame_clock(0.1 * f + 0.01);
+    rt.render();
+    rt.drain();
+    seen.insert(spinner_line(mb, "Waiting"));
+  }
+  EXPECT_EQ(cvc::state::instance(app)("parked").value(), "yes");
+  EXPECT_EQ(seen.size(), 10u) << "every frame a step on, the program parked throughout";
+}
+
+TEST(AriadneSpinner, DisabledStandsStillHiddenIsNotDrawnBindIsTheLabel) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  cvc::state::instance(app)("job.name").value("feed");
+  Widget off = spinner("Off");
+  off.enabled_when = "(= 1 2)";
+  Widget hidden = spinner("Hidden");
+  hidden.visible_when = "(= 1 2)";
+  rt.set_root(
+      group({off, hidden, spinner("", "job.name"),
+             spinner("", "(string.join (list \"Loading\" (state-get \"job.name\")) \" \")")}));
+  rt.set_frame_clock(0.35);
+  rt.render();
+  EXPECT_EQ(spinner_line(mb, "Off"), std::string(kSpin[0]) + " Off") << "disabled: no turning";
+  EXPECT_TRUE(mb.saw("begin_disabled"));
+  EXPECT_EQ(spinner_line(mb, "Hidden"), "");
+  EXPECT_TRUE(mb.saw("text_line:" + std::string(kSpin[3]) + " feed")) << "a state path";
+  EXPECT_TRUE(mb.saw("text_line:" + std::string(kSpin[3]) + " Loading feed")) << "computed";
   EXPECT_TRUE(rt.take_reactive_warnings().empty());
 }
 
@@ -3460,22 +3558,26 @@ TEST(AriadneNetIntrinsics, WsVerbsRoundTripThroughAPolicy) {
   Runtime rt(app, "");
   MockBackend mb;
   rt.set_backend(&mb);
-  rt.set_root(
-      group({button("Go", "(begin"
-                          "  (set r (ws-open \"" +
-                              server.url("/live") +
-                              "\" (dict \"timeout\" 5)))"
-                              "  (state-set \"r.ok\" (get-attr r \"ok\"))"
-                              "  (set h (get-attr r \"handle\"))"
-                              "  (state-set \"r.live\" (ws-open? h))"
-                              "  (ws-send h \"ping\")"
-                              "  (set e (ws-recv h 5))"
-                              "  (state-set \"r.type\" (get-attr e \"type\"))"
-                              "  (state-set \"r.data\" (get-attr e \"data\"))"
-                              "  (state-set \"r.poll\" (if (= (ws-poll h) nil) \"none\" \"some\"))"
-                              "  (state-set \"r.closed\" (ws-close h))"
-                              "  (state-set \"r.after\" (ws-open? h))"
-                              "  (state-set \"r.done\" \"1\"))")}));
+  std::string program =
+      "(begin (set r (ws-open \"" + server.url("/live") + "\" (dict \"timeout\" 5)))";
+  program += "  (state-set \"r.ok\" (get-attr r \"ok\"))"
+             "  (set h (get-attr r \"handle\"))"
+             "  (state-set \"r.live\" (ws-open? h))"
+             "  (ws-send h \"ping\")"
+             "  (set e (ws-recv h 5))"
+             "  (state-set \"r.type\" (get-attr e \"type\"))"
+             "  (state-set \"r.data\" (get-attr e \"data\"))"
+             "  (state-set \"r.poll\" (if (= (ws-poll h) nil) \"none\" \"some\"))"
+             "  (ws-send h (dict \"n\" 1 \"tags\" (list \"a\")))"
+             "  (set j (ws-recv h 5))"
+             "  (state-set \"r.json\" (get-attr j \"data\"))"
+             "  (set c (dict \"t\" (dict \"credential\" \"x\")))"
+             "  (state-set \"r.nocred\""
+             "    (try (ws-send h c) (catch (x) (get-attr x \"message\"))))"
+             "  (state-set \"r.closed\" (ws-close h))"
+             "  (state-set \"r.after\" (ws-open? h))"
+             "  (state-set \"r.done\" \"1\"))";
+  rt.set_root(group({button("Go", program)}));
   mb.button_click = true;
   rt.render();
   rt.drain();
@@ -3488,6 +3590,10 @@ TEST(AriadneNetIntrinsics, WsVerbsRoundTripThroughAPolicy) {
   EXPECT_EQ(cvc::state::instance(app)("r.type").value(), "text");
   EXPECT_EQ(cvc::state::instance(app)("r.data").value(), "ping");
   EXPECT_EQ(cvc::state::instance(app)("r.poll").value(), "none");
+  EXPECT_EQ(cvc::state::instance(app)("r.json").value(), "{\"n\":1,\"tags\":[\"a\"]}");
+  EXPECT_NE(cvc::state::instance(app)("r.nocred").value().find("keeps no credentials"),
+            std::string::npos)
+      << cvc::state::instance(app)("r.nocred").value();
   EXPECT_EQ(cvc::state::instance(app)("r.closed").value(), "true");
   EXPECT_EQ(cvc::state::instance(app)("r.after").value(), "false");
 }
@@ -4187,6 +4293,84 @@ TEST(AriadneNetHost, CredentialOptionsNeedAHostThatKeepsCredentials) {
   EXPECT_NE(sval(app, "e2").find("must name a credential"), std::string::npos) << sval(app, "e2");
   EXPECT_NE(sval(app, "e3").find("needs a name"), std::string::npos) << sval(app, "e3");
   EXPECT_EQ(fake->calls.load(), 0) << "a misused request is never sent";
+}
+
+// (ws-send H DICT) sends the dict as JSON with the host's token wherever it holds a credential
+// value, fetched for the connection's origin (its URL's http twin), so a document authenticates a
+// WebSocket in a message, as a browser's must, without holding the token. A server that echoes it
+// reaches the program blanked; a name with no token there is an error that sends nothing; no state
+// node, error or warning holds the token.
+TEST(AriadneNetHost, WsSendPutsInTheHostsTokenThatNoValueHolds) {
+  if (!cvc::net::have_ws_backend())
+    GTEST_SKIP() << "libcvc built without a WebSocket backend";
+  const std::string kWsToken = "cvcws_bGl2ZS1mZWVkLXRva2VuLWZvci10aGUtdGVzdHM";
+  std::mutex mutex;
+  std::vector<std::string> got; // the messages the server received
+  cvc_test::LocalWsServer server([&](cvc_test::LocalWsServer::Stream &ws) {
+    for (;;) {
+      boost::beast::flat_buffer buf;
+      ws.read(buf);
+      const std::string text = boost::beast::buffers_to_string(buf.data());
+      {
+        std::lock_guard<std::mutex> lock(mutex);
+        got.push_back(text);
+      }
+      const std::string echo = "echo " + text;
+      ws.text(true);
+      ws.write(boost::asio::buffer(echo));
+    }
+  });
+  const std::string origin = "http://127.0.0.1:" + std::to_string(server.port());
+  cvc::app app;
+  NetIntrinsicsGuard guard;
+  auto policy = std::make_shared<cvc::net::NetPolicy>();
+  std::string why;
+  ASSERT_TRUE(cvc::net::parse_net_policy("allow " + origin + "\n", *policy, &why)) << why;
+  auto store = std::make_shared<cvc::net::CredentialStore>();
+  store->bind("live", {*cvc::net::parse_origin(origin)});
+  ASSERT_TRUE(store->provide("live", kWsToken, &why)) << why;
+  NetAccess access;
+  access.policy = policy;
+  access.credentials = store;
+  register_net_intrinsics(app, access);
+
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  std::string program =
+      "(begin (set r (ws-open \"" + server.url("/v1/live/ws") + "\" (dict \"timeout\" 5)))";
+  program += "  (set hello (dict \"type\" \"hello\" \"token\" (dict \"credential\" \"live\")"
+             "                   \"also\" (list 1 (dict \"credential\" \"live\"))))"
+             "  (state-set \"opened\" (get-attr r \"ok\"))"
+             "  (set h (get-attr r \"handle\"))"
+             "  (state-set \"sent\" (ws-send h hello))"
+             "  (set e (ws-recv h 5))"
+             "  (state-set \"echo\" (get-attr e \"data\"))"
+             "  (state-set \"e1\" (try (ws-send h (dict \"token\" (dict \"credential\" \"other\")))"
+             "                        (catch (x) (get-attr x \"message\"))))"
+             "  (ws-send h \"bye\")"
+             "  (set e (ws-recv h 5))"
+             "  (state-set \"bye\" (get-attr e \"data\"))"
+             "  (ws-close h)"
+             "  (state-set \"done\" 1))";
+  ASSERT_TRUE(run_program(app, rt, mb, program, "done"));
+  EXPECT_EQ(sval(app, "opened"), "true");
+  EXPECT_EQ(sval(app, "sent"), "true");
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    ASSERT_EQ(got.size(), 2u) << "the failed send sent something";
+    EXPECT_EQ(got[0], "{\"type\":\"hello\",\"token\":\"" + kWsToken + "\",\"also\":[1,\"" +
+                          kWsToken + "\"]}");
+    EXPECT_EQ(got[1], "bye");
+  }
+  EXPECT_EQ(sval(app, "echo"),
+            "echo {\"type\":\"hello\",\"token\":\"[redacted]\",\"also\":[1,\"[redacted]\"]}");
+  EXPECT_NE(sval(app, "e1").find("no credential 'other' for " + origin), std::string::npos)
+      << sval(app, "e1");
+  EXPECT_EQ(sval(app, "bye"), "echo bye");
+  EXPECT_EQ(whole_state(app).find(kWsToken), std::string::npos) << whole_state(app);
+  for (const std::string &w : rt.take_reactive_warnings())
+    EXPECT_EQ(w.find(kWsToken), std::string::npos) << w;
 }
 
 // ---------------------------------------------------------------------------
