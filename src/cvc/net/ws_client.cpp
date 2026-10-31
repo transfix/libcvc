@@ -2,7 +2,9 @@
 // WebSocket under Emscripten. Exactly one backend is compiled, keyed on the same definitions as
 // the HTTP client (CVC_NET_HAVE_CURL / CVC_NET_HAVE_FETCH); with neither, ws_connect fails.
 
+#include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
@@ -44,6 +46,14 @@ std::string ws_http_equivalent(const std::string &url) {
   return url;
 }
 
+bool ws_valid_protocol(const std::string &p) {
+  static const char kTchar[] = "!#$%&'*+-.^_`|~";
+  return !p.empty() && std::all_of(p.begin(), p.end(), [](char c) {
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+           (c != '\0' && std::strchr(kTchar, c) != nullptr);
+  });
+}
+
 namespace {
 
 bool is_ws_url(const std::string &url) {
@@ -53,6 +63,46 @@ bool is_ws_url(const std::string &url) {
 void set_error(std::string *error, const std::string &message) {
   if (error)
     *error = message;
+}
+
+void wipe(std::string &secret) {
+  std::fill(secret.begin(), secret.end(), '\0');
+  secret.clear();
+}
+
+// The subprotocols joined with `sep`; it may hold a credential, so the caller wipes it.
+std::string joined_protocols(const WsOptions &opts, const char *sep) {
+  std::string out;
+  for (const std::string &p : opts.protocols)
+    out += (out.empty() ? "" : sep) + p;
+  return out;
+}
+
+// Whether every subprotocol is a token and none repeats. The error never quotes one: a
+// subprotocol may carry a credential.
+bool protocols_usable(const WsOptions &opts, std::string *why) {
+  for (std::size_t i = 0; i < opts.protocols.size(); ++i) {
+    if (!ws_valid_protocol(opts.protocols[i])) {
+      *why = "ws: subprotocol " + std::to_string(i + 1) +
+             " is not an HTTP token (letters, digits and !#$%&'*+-.^_`|~)";
+      return false;
+    }
+    for (std::size_t j = 0; j < i; ++j)
+      if (opts.protocols[j] == opts.protocols[i]) {
+        *why = "ws: subprotocol " + std::to_string(i + 1) + " repeats an earlier one";
+        return false;
+      }
+  }
+  for (const std::string &h : opts.headers) {
+    std::string name = h.substr(0, h.find(':'));
+    std::transform(name.begin(), name.end(), name.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (!opts.protocols.empty() && name == "sec-websocket-protocol") {
+      *why = "ws: subprotocols and a Sec-WebSocket-Protocol header are exclusive";
+      return false;
+    }
+  }
+  return true;
 }
 
 // The queue both backends fill and recv() drains.
@@ -540,13 +590,19 @@ std::function<void()> ws_start(const std::string &url, const WsOptions &opts, Ws
     return fail("ws: a WebSocket URL starts with ws:// or wss://: " + url);
   if (!opts.headers.empty())
     return fail("ws: a browser WebSocket can't send request headers (auth, headers)");
+  if (std::string why; !protocols_usable(opts, &why))
+    return fail(why);
   if (!emscripten_websocket_is_supported())
     return fail("ws: this browser has no WebSocket");
   EmscriptenWebSocketCreateAttributes attrs;
   emscripten_websocket_init_create_attributes(&attrs);
   attrs.url = url.c_str();
   attrs.createOnMainThread = EM_TRUE;
-  const EMSCRIPTEN_WEBSOCKET_T s = emscripten_websocket_new(&attrs);
+  std::string protocols = joined_protocols(opts, ","); // the JS side splits on ','
+  if (!protocols.empty())
+    attrs.protocols = protocols.c_str();
+  const EMSCRIPTEN_WEBSOCKET_T s = emscripten_websocket_new(&attrs); // copies the strings
+  wipe(protocols);
   if (s <= 0)
     return fail("ws: could not create the WebSocket");
   return std::make_shared<WebWsConnection>(s)->start_connect(opts.connect_timeout_secs,
@@ -577,10 +633,38 @@ bool have_ws_backend() {
 
 namespace {
 
+#if defined(CVC_NET_WS_CURL)
+// Whether the handshake's reply names exactly one of `offered` (Sec-WebSocket-Protocol).
+bool server_picked_one(CURL *h, const std::vector<std::string> &offered) {
+#if LIBCURL_VERSION_NUM >= 0x075400 // curl_easy_header: 7.84
+  struct curl_header *hdr = nullptr;
+  // The handshake's reply is a 101, which libcurl files under CURLH_1XX.
+  if (curl_easy_header(h, "Sec-WebSocket-Protocol", 0, CURLH_HEADER | CURLH_1XX, -1, &hdr) !=
+          CURLHE_OK ||
+      !hdr || !hdr->value)
+    return false;
+  std::string picked = hdr->value;
+  while (!picked.empty() && (picked.back() == ' ' || picked.back() == '\t'))
+    picked.pop_back();
+  const bool ok = std::find(offered.begin(), offered.end(), picked) != offered.end();
+  wipe(picked);
+  return ok;
+#else
+  (void)h;
+  (void)offered;
+  return true; // this libcurl can't read reply headers: trust the server, as before
+#endif
+}
+#endif
+
 std::shared_ptr<WsConnection> connect_compiled(const std::string &url, const WsOptions &opts,
                                                std::string *error) {
   if (!is_ws_url(url)) {
     set_error(error, "ws: a WebSocket URL starts with ws:// or wss://: " + url);
+    return nullptr;
+  }
+  if (std::string why; !protocols_usable(opts, &why)) {
+    set_error(error, why);
     return nullptr;
   }
 #if defined(CVC_NET_WS_CURL)
@@ -596,6 +680,11 @@ std::shared_ptr<WsConnection> connect_compiled(const std::string &url, const WsO
   struct curl_slist *headers = nullptr;
   for (const std::string &line : opts.headers)
     headers = curl_slist_append(headers, line.c_str());
+  if (!opts.protocols.empty()) {
+    std::string line = "Sec-WebSocket-Protocol: " + joined_protocols(opts, ", ");
+    headers = curl_slist_append(headers, line.c_str());
+    wipe(line);
+  }
   curl_easy_setopt(h, CURLOPT_URL, url.c_str());
   curl_easy_setopt(h, CURLOPT_CONNECT_ONLY, 2L); // 2: do the WebSocket handshake, then stop
   curl_easy_setopt(h, CURLOPT_PROTOCOLS_STR, "ws,wss");
@@ -615,6 +704,13 @@ std::shared_ptr<WsConnection> connect_compiled(const std::string &url, const WsO
     curl_easy_cleanup(h);
     return nullptr;
   }
+  if (!opts.protocols.empty() && !server_picked_one(h, opts.protocols)) {
+    // A browser fails the connect here too (RFC 6455 4.1); say nothing of what it sent back,
+    // which may be an offered credential.
+    set_error(error, "ws: connect failed: the server chose none of the subprotocols offered");
+    curl_easy_cleanup(h);
+    return nullptr;
+  }
   // The handshake is over; from here the reader thread's polls bound each wait instead.
   curl_easy_setopt(h, CURLOPT_TIMEOUT_MS, 0L);
   return std::make_shared<CurlWsConnection>(h, opts.max_message_bytes);
@@ -631,7 +727,11 @@ std::shared_ptr<WsConnection> connect_compiled(const std::string &url, const WsO
   emscripten_websocket_init_create_attributes(&attrs);
   attrs.url = url.c_str();
   attrs.createOnMainThread = EM_TRUE;
-  const EMSCRIPTEN_WEBSOCKET_T s = emscripten_websocket_new(&attrs);
+  std::string protocols = joined_protocols(opts, ","); // the JS side splits on ','
+  if (!protocols.empty())
+    attrs.protocols = protocols.c_str();
+  const EMSCRIPTEN_WEBSOCKET_T s = emscripten_websocket_new(&attrs); // copies the strings
+  wipe(protocols);
   if (s <= 0) {
     set_error(error, "ws: could not create the WebSocket");
     return nullptr;

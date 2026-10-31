@@ -4256,6 +4256,75 @@ TEST(AriadneNetHost, WsSendPutsInTheHostsTokenThatNoValueHolds) {
     EXPECT_EQ(w.find(kWsToken), std::string::npos) << w;
 }
 
+// (ws-open URL (dict "auth_protocol" ...)) offers the host's token as a subprotocol, the one
+// handshake credential a browser's WebSocket can carry: here base64url'd behind a prefix, beside
+// the subprotocol the server picks. A token with '/' can't go as it is, and the error says so
+// without it; an echo of the offered spelling comes back blanked; no state node holds either.
+TEST(AriadneNetHost, WsOpenOffersTheHostsTokenAsASubprotocol) {
+  if (!cvc::net::have_ws_backend())
+    GTEST_SKIP() << "libcvc built without a WebSocket backend";
+  const std::string kToken = "cvcws_bGl2ZS1mZWVk/dGVzdHM+cHJvdG8";
+  const std::string kOffered = "bearer.Y3Zjd3NfYkdsMlpTMW1aV1ZrL2RHVnpkSE0rY0hKdmRHOA";
+  cvc_test::LocalWsServer server(
+      [&](cvc_test::LocalWsServer::Stream &ws) {
+        const std::string text = "you offered " + kOffered;
+        ws.text(true);
+        ws.write(boost::asio::buffer(text));
+        boost::beast::flat_buffer buf;
+        ws.read(buf); // until the client goes
+      },
+      "events.v1");
+  const std::string origin = "http://127.0.0.1:" + std::to_string(server.port());
+  cvc::app app;
+  NetIntrinsicsGuard guard;
+  auto policy = std::make_shared<cvc::net::NetPolicy>();
+  std::string why;
+  ASSERT_TRUE(cvc::net::parse_net_policy("allow " + origin + "\n", *policy, &why)) << why;
+  auto store = std::make_shared<cvc::net::CredentialStore>();
+  store->bind("live", {*cvc::net::parse_origin(origin)});
+  ASSERT_TRUE(store->provide("live", kToken, &why)) << why;
+  NetAccess access;
+  access.policy = policy;
+  access.credentials = store;
+  register_net_intrinsics(app, access);
+
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  const std::string url = server.url("/ws/events");
+  std::string program = "(begin (set o (dict \"timeout\" 5 \"protocols\" (list \"events.v1\")"
+                        " \"auth_protocol\" (dict \"credential\" \"live\" \"prefix\" \"bearer.\""
+                        " \"encoding\" \"base64url\")))";
+  program += " (set r (ws-open \"" + url + "\" o))";
+  program += "  (state-set \"opened\" (get-attr r \"ok\"))"
+             "  (state-set \"error\" (get-attr r \"error\"))"
+             "  (set e (ws-recv (get-attr r \"handle\") 5))"
+             "  (state-set \"said\" (get-attr e \"data\"))"
+             "  (ws-close (get-attr r \"handle\"))"
+             "  (set raw (dict \"timeout\" 5 \"protocols\" (list \"events.v1\")"
+             "                 \"auth_protocol\" (dict \"credential\" \"live\")))";
+  program += " (set r2 (ws-open \"" + url + "\" raw))";
+  program += "  (state-set \"raw_ok\" (get-attr r2 \"ok\"))"
+             "  (state-set \"raw_error\" (get-attr r2 \"error\"))"
+             "  (state-set \"done\" 1))";
+  ASSERT_TRUE(run_program(app, rt, mb, program, "done"));
+  EXPECT_EQ(sval(app, "opened"), "true") << sval(app, "error");
+  {
+    const auto handshakes = server.handshakes();
+    ASSERT_EQ(handshakes.size(), 1u) << "the raw offer must not connect";
+    bool saw = false;
+    for (const std::string &h : handshakes[0])
+      saw = saw || h == "Sec-WebSocket-Protocol: events.v1, " + kOffered;
+    EXPECT_TRUE(saw);
+  }
+  EXPECT_EQ(sval(app, "said"), "you offered bearer.[redacted]");
+  EXPECT_EQ(sval(app, "raw_ok"), "false");
+  EXPECT_NE(sval(app, "raw_error").find("base64url"), std::string::npos) << sval(app, "raw_error");
+  const std::string all = whole_state(app);
+  EXPECT_EQ(all.find(kToken), std::string::npos) << all;
+  EXPECT_EQ(all.find(kOffered.substr(7)), std::string::npos) << all;
+}
+
 // ---------------------------------------------------------------------------
 // Several credentials from one reply, credentials as form and header values, and tokens a host
 // was handed (--credential-env): a registry shaped like cvcpkg's device sign-in and its RFC 6749

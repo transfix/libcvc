@@ -1891,9 +1891,30 @@ without either has no `ws-*` verbs, so a document asks `(has? "ws-open")` and po
   an error is the last message; `ws-open?` is `#f` from then on. Fragmented messages arrive
   whole; one longer than 16 MiB is an error and closes the connection.
 - `OPTS` takes `query`, `headers`, `auth` and credential values as the HTTP verbs do (§10.2,
-  §10.3), plus `timeout`, the seconds to connect (15). A browser's `WebSocket` can't send
-  request headers, so there `headers` and `auth` are refused; a server that wants a token takes
-  it in a message instead, which `ws-send` can carry without the document holding it (below).
+  §10.3), plus `timeout`, the seconds to connect (15), `protocols` and `auth_protocol` (below).
+  A browser's `WebSocket` can't send request headers, so there `headers` and `auth` are
+  refused; a server that wants a token takes it as a subprotocol (`auth_protocol`) or in a
+  message (`ws-send`), and either way the document never holds it.
+- `protocols` is a list of subprotocols to offer (`Sec-WebSocket-Protocol`), each an HTTP token
+  (letters, digits and ``!#$%&'*+-.^_`|~``). The server must pick one of those offered, or the
+  connect fails: browsers require that, and the native client checks it too.
+- `auth_protocol`, `(dict "credential" NAME ["prefix" P] ["encoding" "raw"|"base64url"])`,
+  offers the host's token for `NAME` as one more subprotocol, `P` followed by the token. This is
+  the one handshake credential a browser can send. A token holding `/` or `=` (token68 may)
+  can't be a subprotocol as it is, so use `"encoding" "base64url"` (unpadded, RFC 4648 §5),
+  as Kubernetes does:
+
+  ```lisp
+  (ws-open "wss://k8s.example/api/v1/watch"
+           (dict "protocols" (list "v4.channel.k8s.io")
+                 "auth_protocol" (dict "credential" "kube"
+                                       "prefix" "base64url.bearer.authorization.k8s.io."
+                                       "encoding" "base64url")))
+  ```
+
+  The server should pick the real subprotocol, not the credential one. The token is fetched
+  for the URL's origin, as for `auth`, and is never in the reply or an error. No credential
+  ever goes in the URL: a query refuses one.
 - `ws-send` sends a dict or a list as JSON, compact (`json-encode`'s rules: a value JSON lacks
   is an error). A credential value in it, `(dict "credential" NAME)` at any depth, is sent as
   the token the host keeps for `NAME`, a JSON string, so a document signs in to a live feed the
@@ -1911,7 +1932,8 @@ without either has no `ws-*` verbs, so a document asks `(has? "ws-open")` and po
   with no token there is an error and sends nothing; so is a credential value on a host that
   keeps no credentials. As with HTTP replies, a token a connection has sent (in its handshake
   or a message) is blanked to `[redacted]` in what `ws-recv` and `ws-poll` return, should the
-  server echo it. A string is sent as it is: a document can't put a token in one.
+  server echo it (in its raw spelling, or in base64url as an `auth_protocol` sends it). A string
+  is sent as it is: a document can't put a token in one.
 - The host's policy (§10.3) checks the URL as its `http(s)` twin: `--net-allow
   https://example.org` allows `wss://example.org/...`.
 - `ws-open` and `ws-recv` are async I/O calls like the HTTP verbs: the connect, or the wait,
