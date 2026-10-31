@@ -1,6 +1,7 @@
 // A localhost WebSocket server for tests (Boost.Beast): it binds an OS-assigned port on 127.0.0.1
 // and runs `session` on each connection after the handshake, with the upgrade request's headers.
-// The session owns the stream: it reads, writes and closes as the test needs.
+// The session owns the stream: it reads, writes and closes as the test needs. With `protocol`, the
+// handshake's reply picks that subprotocol (Sec-WebSocket-Protocol), whatever the client offered.
 #ifndef CVC_TESTS_LOCAL_WS_SERVER_H
 #define CVC_TESTS_LOCAL_WS_SERVER_H
 
@@ -23,8 +24,8 @@ public:
   using Stream = boost::beast::websocket::stream<boost::asio::ip::tcp::socket>;
   using Session = std::function<void(Stream &)>;
 
-  explicit LocalWsServer(Session session)
-      : session_(std::move(session)),
+  explicit LocalWsServer(Session session, std::string protocol = std::string())
+      : session_(std::move(session)), protocol_(std::move(protocol)),
         acceptor_(io_,
                   boost::asio::ip::tcp::endpoint(boost::asio::ip::make_address("127.0.0.1"), 0)) {
     port_ = acceptor_.local_endpoint().port();
@@ -76,6 +77,11 @@ private:
             handshakes_.push_back(std::move(headers));
           }
           Stream ws(std::move(s));
+          if (!protocol_.empty())
+            ws.set_option(boost::beast::websocket::stream_base::decorator(
+                [p = protocol_](boost::beast::websocket::response_type &res) {
+                  res.set(boost::beast::http::field::sec_websocket_protocol, p);
+                }));
           ws.accept(req);
           session_(ws);
         } catch (...) {
@@ -86,6 +92,7 @@ private:
   }
 
   Session session_;
+  std::string protocol_;
   boost::asio::io_context io_;
   boost::asio::ip::tcp::acceptor acceptor_;
   unsigned short port_ = 0;

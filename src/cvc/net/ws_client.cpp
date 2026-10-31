@@ -2,17 +2,22 @@
 // WebSocket under Emscripten. Exactly one backend is compiled, keyed on the same definitions as
 // the HTTP client (CVC_NET_HAVE_CURL / CVC_NET_HAVE_FETCH); with neither, ws_connect fails.
 
+#include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
 #include <cvc/net/ws_client.h>
 #include <deque>
+#include <functional>
+#include <memory>
 #include <mutex>
 #include <thread>
 
 #if defined(CVC_NET_HAVE_FETCH) && defined(__EMSCRIPTEN__)
 #include <emscripten/emscripten.h>
+#include <emscripten/eventloop.h> // emscripten_set_timeout: the non-blocking waits' timers
 #include <emscripten/websocket.h>
 #define CVC_NET_WS_WEB 1
 #elif defined(CVC_NET_HAVE_CURL)
@@ -41,6 +46,14 @@ std::string ws_http_equivalent(const std::string &url) {
   return url;
 }
 
+bool ws_valid_protocol(const std::string &p) {
+  static const char kTchar[] = "!#$%&'*+-.^_`|~";
+  return !p.empty() && std::all_of(p.begin(), p.end(), [](char c) {
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+           (c != '\0' && std::strchr(kTchar, c) != nullptr);
+  });
+}
+
 namespace {
 
 bool is_ws_url(const std::string &url) {
@@ -50,6 +63,46 @@ bool is_ws_url(const std::string &url) {
 void set_error(std::string *error, const std::string &message) {
   if (error)
     *error = message;
+}
+
+void wipe(std::string &secret) {
+  std::fill(secret.begin(), secret.end(), '\0');
+  secret.clear();
+}
+
+// The subprotocols joined with `sep`; it may hold a credential, so the caller wipes it.
+std::string joined_protocols(const WsOptions &opts, const char *sep) {
+  std::string out;
+  for (const std::string &p : opts.protocols)
+    out += (out.empty() ? "" : sep) + p;
+  return out;
+}
+
+// Whether every subprotocol is a token and none repeats. The error never quotes one: a
+// subprotocol may carry a credential.
+bool protocols_usable(const WsOptions &opts, std::string *why) {
+  for (std::size_t i = 0; i < opts.protocols.size(); ++i) {
+    if (!ws_valid_protocol(opts.protocols[i])) {
+      *why = "ws: subprotocol " + std::to_string(i + 1) +
+             " is not an HTTP token (letters, digits and !#$%&'*+-.^_`|~)";
+      return false;
+    }
+    for (std::size_t j = 0; j < i; ++j)
+      if (opts.protocols[j] == opts.protocols[i]) {
+        *why = "ws: subprotocol " + std::to_string(i + 1) + " repeats an earlier one";
+        return false;
+      }
+  }
+  for (const std::string &h : opts.headers) {
+    std::string name = h.substr(0, h.find(':'));
+    std::transform(name.begin(), name.end(), name.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (!opts.protocols.empty() && name == "sec-websocket-protocol") {
+      *why = "ws: subprotocols and a Sec-WebSocket-Protocol header are exclusive";
+      return false;
+    }
+  }
+  return true;
 }
 
 // The queue both backends fill and recv() drains.
@@ -256,7 +309,7 @@ private:
 
 #elif defined(CVC_NET_WS_WEB)
 
-class WebWsConnection : public WsConnection {
+class WebWsConnection : public WsConnection, public std::enable_shared_from_this<WebWsConnection> {
 public:
   explicit WebWsConnection(EMSCRIPTEN_WEBSOCKET_T s) : s_(s) {
     emscripten_websocket_set_onopen_callback(s_, this, on_open);
@@ -265,8 +318,44 @@ public:
     emscripten_websocket_set_onclose_callback(s_, this, on_close);
   }
   ~WebWsConnection() override {
+    clear_timer(connect_timer_);
+    clear_timer(wait_timer_);
     close(1001);
-    emscripten_websocket_delete(s_);
+    emscripten_websocket_delete(s_); // its callbacks are dropped: none runs after this
+  }
+
+  // ws_start's connect: `done` once the socket opens, fails or `secs` pass. The connection keeps
+  // itself alive until then (self_); the function returned abandons it.
+  std::function<void()> start_connect(double secs, WsConnected done) {
+    connect_done_ = std::move(done);
+    self_ = shared_from_this();
+    connect_timer_ = emscripten_set_timeout(on_connect_timeout, secs * 1000.0, this);
+    return [weak = std::weak_ptr<WebWsConnection>(shared_from_this())] {
+      if (std::shared_ptr<WebWsConnection> c = weak.lock())
+        c->abandon_connect();
+    };
+  }
+
+  // Not blocking (WsConnection::recv_async): a queued event now, else the next one the callbacks
+  // queue, else nullopt when the timer fires.
+  std::function<void()> recv_async(double timeout_secs, WsReceived done) override {
+    if (std::optional<WsEvent> e = queue_.pop()) {
+      done(std::move(e));
+      return {};
+    }
+    if (!(timeout_secs > 0)) {
+      done(std::nullopt);
+      return {};
+    }
+    clear_timer(wait_timer_);
+    waiter_ = std::move(done);
+    wait_timer_ = emscripten_set_timeout(on_wait_timeout, timeout_secs * 1000.0, this);
+    return [weak = std::weak_ptr<WebWsConnection>(shared_from_this())] {
+      if (std::shared_ptr<WebWsConnection> c = weak.lock()) {
+        c->clear_timer(c->wait_timer_);
+        c->waiter_ = nullptr;
+      }
+    };
   }
 
   // Wait for the open (or a failure) after ws_connect, yielding to the browser between checks.
@@ -307,14 +396,76 @@ public:
   void close(int code) override {
     if (!open_.exchange(false))
       return;
+    // A page may send only 1000 or 3000-4999 (WebSocket.close throws on any other code, 1001 and
+    // 1013 included): send 1000 for a code it can't.
+    if (code != 1000 && (code < 3000 || code > 4999))
+      code = 1000;
     emscripten_websocket_close(s_, static_cast<unsigned short>(code), "");
   }
 
   bool open() const override { return open_; }
 
 private:
+  void clear_timer(int &id) {
+    if (id)
+      emscripten_clear_timeout(id);
+    id = 0;
+  }
+  // A recv_async waiter takes what the callbacks just queued.
+  void deliver() {
+    if (!waiter_)
+      return;
+    std::optional<WsEvent> e = queue_.pop();
+    if (!e)
+      return;
+    clear_timer(wait_timer_);
+    WsReceived done = std::move(waiter_);
+    waiter_ = nullptr;
+    done(std::move(e));
+  }
+  // ws_start's connect is over: hand the connection (or the error) on, once.
+  void end_connect(bool ok, const std::string &error) {
+    clear_timer(connect_timer_);
+    WsConnected done = std::move(connect_done_);
+    connect_done_ = nullptr;
+    std::shared_ptr<WebWsConnection> keep = std::move(self_);
+    if (!ok)
+      close_socket();
+    if (done)
+      done(ok ? keep : nullptr, error);
+  }
+  void abandon_connect() {
+    clear_timer(connect_timer_);
+    connect_done_ = nullptr;
+    std::shared_ptr<WebWsConnection> keep = std::move(self_); // released as this returns
+    close_socket();
+  }
+  // Close the browser's socket whatever its state (one still connecting too), with the one code
+  // below 3000 a page may send.
+  void close_socket() {
+    open_ = false;
+    emscripten_websocket_close(s_, 1000, "");
+  }
+  static void on_connect_timeout(void *self) {
+    auto *c = static_cast<WebWsConnection *>(self);
+    c->connect_timer_ = 0;
+    if (c->connect_done_)
+      c->end_connect(false, "ws: the connection timed out");
+  }
+  static void on_wait_timeout(void *self) {
+    auto *c = static_cast<WebWsConnection *>(self);
+    c->wait_timer_ = 0;
+    if (WsReceived done = std::move(c->waiter_)) {
+      c->waiter_ = nullptr;
+      done(std::nullopt);
+    }
+  }
+
   static EM_BOOL on_open(int, const EmscriptenWebSocketOpenEvent *, void *self) {
-    static_cast<WebWsConnection *>(self)->open_ = true;
+    auto *c = static_cast<WebWsConnection *>(self);
+    c->open_ = true;
+    if (c->connect_done_)
+      c->end_connect(true, std::string());
     return EM_TRUE;
   }
   static EM_BOOL on_message(int, const EmscriptenWebSocketMessageEvent *e, void *self) {
@@ -327,20 +478,31 @@ private:
     else
       c->queue_.push({WsEvent::Kind::Binary,
                       std::string(reinterpret_cast<const char *>(e->data), e->numBytes), 0});
+    c->deliver();
     return EM_TRUE;
   }
   static EM_BOOL on_error(int, const EmscriptenWebSocketErrorEvent *, void *self) {
     auto *c = static_cast<WebWsConnection *>(self);
     if (!c->open_)
       c->failed_ = true;
+    if (c->connect_done_) { // ws_start's connect failed: no connection, no event
+      c->end_connect(false, "ws: the connection failed");
+      return EM_TRUE;
+    }
     c->queue_.push({WsEvent::Kind::Error, "ws: the connection failed", 0});
+    c->deliver();
     return EM_TRUE;
   }
   static EM_BOOL on_close(int, const EmscriptenWebSocketCloseEvent *e, void *self) {
     auto *c = static_cast<WebWsConnection *>(self);
     c->open_ = false;
     c->failed_ = true;
+    if (c->connect_done_) {
+      c->end_connect(false, "ws: the connection failed");
+      return EM_TRUE;
+    }
     c->queue_.push({WsEvent::Kind::Close, e->reason, e->code});
+    c->deliver();
     return EM_TRUE;
   }
 
@@ -348,11 +510,111 @@ private:
   std::atomic<bool> open_{false};
   std::atomic<bool> failed_{false};
   EventQueue queue_;
+  // Not blocking (single-threaded: the callbacks, the timers and the callers share one thread).
+  WsConnected connect_done_;              // ws_start's connect under way
+  std::shared_ptr<WebWsConnection> self_; // ... keeps the connection alive meanwhile
+  int connect_timer_ = 0;
+  WsReceived waiter_; // a recv_async waiting
+  int wait_timer_ = 0;
 };
 
 #endif
 
+// The connector set_ws_connector put in place, or null for the compiled backend.
+std::mutex &connector_mutex() {
+  static std::mutex m;
+  return m;
+}
+std::shared_ptr<WsConnector> &connector_cell() {
+  static std::shared_ptr<WsConnector> c;
+  return c;
+}
+std::shared_ptr<WsConnector> injected_connector() {
+  std::lock_guard<std::mutex> lock(connector_mutex());
+  return connector_cell();
+}
+
+std::shared_ptr<WsConnection> connect_compiled(const std::string &url, const WsOptions &opts,
+                                               std::string *error);
+
 } // namespace
+
+std::function<void()> WsConnection::recv_async(double timeout_secs, WsReceived done) {
+  std::optional<WsEvent> e = recv(timeout_secs);
+  if (done)
+    done(std::move(e));
+  return {};
+}
+
+std::function<void()> WsConnector::start(const std::string &url, const WsOptions &opts,
+                                         WsConnected done) {
+  std::string error;
+  std::shared_ptr<WsConnection> conn = connect(url, opts, &error);
+  if (done)
+    done(std::move(conn), std::move(error));
+  return {};
+}
+
+void set_ws_connector(std::shared_ptr<WsConnector> connector) {
+  std::lock_guard<std::mutex> lock(connector_mutex());
+  connector_cell() = std::move(connector);
+}
+
+bool ws_starts_async() {
+  if (std::shared_ptr<WsConnector> c = injected_connector())
+    return c->starts_async();
+#if defined(CVC_NET_WS_WEB) && !defined(__EMSCRIPTEN_PTHREADS__)
+  return true; // the page's main thread runs the frames: a wait must not hold it
+#else
+  return false;
+#endif
+}
+
+std::shared_ptr<WsConnection> ws_connect(const std::string &url, const WsOptions &opts,
+                                         std::string *error) {
+  if (std::shared_ptr<WsConnector> c = injected_connector())
+    return c->connect(url, opts, error);
+  return connect_compiled(url, opts, error);
+}
+
+std::function<void()> ws_start(const std::string &url, const WsOptions &opts, WsConnected done) {
+  if (std::shared_ptr<WsConnector> c = injected_connector())
+    return c->start(url, opts, std::move(done));
+#if defined(CVC_NET_WS_WEB) && !defined(__EMSCRIPTEN_PTHREADS__)
+  const auto fail = [&](const std::string &why) -> std::function<void()> {
+    if (done)
+      done(nullptr, why);
+    return {};
+  };
+  if (!is_ws_url(url))
+    return fail("ws: a WebSocket URL starts with ws:// or wss://: " + url);
+  if (!opts.headers.empty())
+    return fail("ws: a browser WebSocket can't send request headers (auth, headers)");
+  if (std::string why; !protocols_usable(opts, &why))
+    return fail(why);
+  if (!emscripten_websocket_is_supported())
+    return fail("ws: this browser has no WebSocket");
+  EmscriptenWebSocketCreateAttributes attrs;
+  emscripten_websocket_init_create_attributes(&attrs);
+  attrs.url = url.c_str();
+  attrs.createOnMainThread = EM_TRUE;
+  std::string protocols = joined_protocols(opts, ","); // the JS side splits on ','
+  if (!protocols.empty())
+    attrs.protocols = protocols.c_str();
+  const EMSCRIPTEN_WEBSOCKET_T s = emscripten_websocket_new(&attrs); // copies the strings
+  wipe(protocols);
+  if (s <= 0)
+    return fail("ws: could not create the WebSocket");
+  return std::make_shared<WebWsConnection>(s)->start_connect(opts.connect_timeout_secs,
+                                                             std::move(done));
+#else
+  std::string error;
+  std::shared_ptr<WsConnection> conn = connect_compiled(url, opts, &error);
+  if (done)
+    done(std::move(conn), std::move(error));
+  return {};
+#endif
+}
 
 bool have_ws_backend() {
 #if defined(CVC_NET_WS_CURL)
@@ -369,10 +631,40 @@ bool have_ws_backend() {
 #endif
 }
 
-std::shared_ptr<WsConnection> ws_connect(const std::string &url, const WsOptions &opts,
-                                         std::string *error) {
+namespace {
+
+#if defined(CVC_NET_WS_CURL)
+// Whether the handshake's reply names exactly one of `offered` (Sec-WebSocket-Protocol).
+bool server_picked_one(CURL *h, const std::vector<std::string> &offered) {
+#if LIBCURL_VERSION_NUM >= 0x075400 // curl_easy_header: 7.84
+  struct curl_header *hdr = nullptr;
+  // The handshake's reply is a 101, which libcurl files under CURLH_1XX.
+  if (curl_easy_header(h, "Sec-WebSocket-Protocol", 0, CURLH_HEADER | CURLH_1XX, -1, &hdr) !=
+          CURLHE_OK ||
+      !hdr || !hdr->value)
+    return false;
+  std::string picked = hdr->value;
+  while (!picked.empty() && (picked.back() == ' ' || picked.back() == '\t'))
+    picked.pop_back();
+  const bool ok = std::find(offered.begin(), offered.end(), picked) != offered.end();
+  wipe(picked);
+  return ok;
+#else
+  (void)h;
+  (void)offered;
+  return true; // this libcurl can't read reply headers: trust the server, as before
+#endif
+}
+#endif
+
+std::shared_ptr<WsConnection> connect_compiled(const std::string &url, const WsOptions &opts,
+                                               std::string *error) {
   if (!is_ws_url(url)) {
     set_error(error, "ws: a WebSocket URL starts with ws:// or wss://: " + url);
+    return nullptr;
+  }
+  if (std::string why; !protocols_usable(opts, &why)) {
+    set_error(error, why);
     return nullptr;
   }
 #if defined(CVC_NET_WS_CURL)
@@ -388,6 +680,11 @@ std::shared_ptr<WsConnection> ws_connect(const std::string &url, const WsOptions
   struct curl_slist *headers = nullptr;
   for (const std::string &line : opts.headers)
     headers = curl_slist_append(headers, line.c_str());
+  if (!opts.protocols.empty()) {
+    std::string line = "Sec-WebSocket-Protocol: " + joined_protocols(opts, ", ");
+    headers = curl_slist_append(headers, line.c_str());
+    wipe(line);
+  }
   curl_easy_setopt(h, CURLOPT_URL, url.c_str());
   curl_easy_setopt(h, CURLOPT_CONNECT_ONLY, 2L); // 2: do the WebSocket handshake, then stop
   curl_easy_setopt(h, CURLOPT_PROTOCOLS_STR, "ws,wss");
@@ -407,6 +704,13 @@ std::shared_ptr<WsConnection> ws_connect(const std::string &url, const WsOptions
     curl_easy_cleanup(h);
     return nullptr;
   }
+  if (!opts.protocols.empty() && !server_picked_one(h, opts.protocols)) {
+    // A browser fails the connect here too (RFC 6455 4.1); say nothing of what it sent back,
+    // which may be an offered credential.
+    set_error(error, "ws: connect failed: the server chose none of the subprotocols offered");
+    curl_easy_cleanup(h);
+    return nullptr;
+  }
   // The handshake is over; from here the reader thread's polls bound each wait instead.
   curl_easy_setopt(h, CURLOPT_TIMEOUT_MS, 0L);
   return std::make_shared<CurlWsConnection>(h, opts.max_message_bytes);
@@ -423,7 +727,11 @@ std::shared_ptr<WsConnection> ws_connect(const std::string &url, const WsOptions
   emscripten_websocket_init_create_attributes(&attrs);
   attrs.url = url.c_str();
   attrs.createOnMainThread = EM_TRUE;
-  const EMSCRIPTEN_WEBSOCKET_T s = emscripten_websocket_new(&attrs);
+  std::string protocols = joined_protocols(opts, ","); // the JS side splits on ','
+  if (!protocols.empty())
+    attrs.protocols = protocols.c_str();
+  const EMSCRIPTEN_WEBSOCKET_T s = emscripten_websocket_new(&attrs); // copies the strings
+  wipe(protocols);
   if (s <= 0) {
     set_error(error, "ws: could not create the WebSocket");
     return nullptr;
@@ -438,6 +746,8 @@ std::shared_ptr<WsConnection> ws_connect(const std::string &url, const WsOptions
   return nullptr;
 #endif
 }
+
+} // namespace
 
 } // namespace net
 } // namespace cvc

@@ -24,7 +24,7 @@
 #include <cvc/ariadne/uri.h>               // §13.8 (fetch uri): register a custom scheme handler
 #include <cvc/ariadne/widget.h>
 #include <cvc/core/app.h>
-#include <cvc/core/async_task.h> // launch_pool_task generalization test
+#include <cvc/core/async_task.h>  // launch_pool_task generalization test
 #include <cvc/core/thread_pool.h> // item 2: full type for app.computePool().parallel_for
 #include <cvc/net/credentials.h>  // the ws-send test's CredentialStore
 #include <cvc/net/http_client.h>  // §13.8: swap the transport for a fake in the http-get test
@@ -40,6 +40,7 @@
 #include <cvc/state/state_exec/types.h>           // value_t
 #include <cvc/tf/model.h>                         // §10 tf_editor: the model the widget edits
 #include <cvc/tf/overlays.h>                      // §10 tf_editor: the layers published beside it
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
@@ -4276,6 +4277,75 @@ TEST(AriadneNetHost, WsSendPutsInTheHostsTokenThatNoValueHolds) {
     EXPECT_EQ(w.find(kWsToken), std::string::npos) << w;
 }
 
+// (ws-open URL (dict "auth_protocol" ...)) offers the host's token as a subprotocol, the one
+// handshake credential a browser's WebSocket can carry: here base64url'd behind a prefix, beside
+// the subprotocol the server picks. A token with '/' can't go as it is, and the error says so
+// without it; an echo of the offered spelling comes back blanked; no state node holds either.
+TEST(AriadneNetHost, WsOpenOffersTheHostsTokenAsASubprotocol) {
+  if (!cvc::net::have_ws_backend())
+    GTEST_SKIP() << "libcvc built without a WebSocket backend";
+  const std::string kToken = "cvcws_bGl2ZS1mZWVk/dGVzdHM+cHJvdG8";
+  const std::string kOffered = "bearer.Y3Zjd3NfYkdsMlpTMW1aV1ZrL2RHVnpkSE0rY0hKdmRHOA";
+  cvc_test::LocalWsServer server(
+      [&](cvc_test::LocalWsServer::Stream &ws) {
+        const std::string text = "you offered " + kOffered;
+        ws.text(true);
+        ws.write(boost::asio::buffer(text));
+        boost::beast::flat_buffer buf;
+        ws.read(buf); // until the client goes
+      },
+      "events.v1");
+  const std::string origin = "http://127.0.0.1:" + std::to_string(server.port());
+  cvc::app app;
+  NetIntrinsicsGuard guard;
+  auto policy = std::make_shared<cvc::net::NetPolicy>();
+  std::string why;
+  ASSERT_TRUE(cvc::net::parse_net_policy("allow " + origin + "\n", *policy, &why)) << why;
+  auto store = std::make_shared<cvc::net::CredentialStore>();
+  store->bind("live", {*cvc::net::parse_origin(origin)});
+  ASSERT_TRUE(store->provide("live", kToken, &why)) << why;
+  NetAccess access;
+  access.policy = policy;
+  access.credentials = store;
+  register_net_intrinsics(app, access);
+
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  const std::string url = server.url("/ws/events");
+  std::string program = "(begin (set o (dict \"timeout\" 5 \"protocols\" (list \"events.v1\")"
+                        " \"auth_protocol\" (dict \"credential\" \"live\" \"prefix\" \"bearer.\""
+                        " \"encoding\" \"base64url\")))";
+  program += " (set r (ws-open \"" + url + "\" o))";
+  program += "  (state-set \"opened\" (get-attr r \"ok\"))"
+             "  (state-set \"error\" (get-attr r \"error\"))"
+             "  (set e (ws-recv (get-attr r \"handle\") 5))"
+             "  (state-set \"said\" (get-attr e \"data\"))"
+             "  (ws-close (get-attr r \"handle\"))"
+             "  (set raw (dict \"timeout\" 5 \"protocols\" (list \"events.v1\")"
+             "                 \"auth_protocol\" (dict \"credential\" \"live\")))";
+  program += " (set r2 (ws-open \"" + url + "\" raw))";
+  program += "  (state-set \"raw_ok\" (get-attr r2 \"ok\"))"
+             "  (state-set \"raw_error\" (get-attr r2 \"error\"))"
+             "  (state-set \"done\" 1))";
+  ASSERT_TRUE(run_program(app, rt, mb, program, "done"));
+  EXPECT_EQ(sval(app, "opened"), "true") << sval(app, "error");
+  {
+    const auto handshakes = server.handshakes();
+    ASSERT_EQ(handshakes.size(), 1u) << "the raw offer must not connect";
+    bool saw = false;
+    for (const std::string &h : handshakes[0])
+      saw = saw || h == "Sec-WebSocket-Protocol: events.v1, " + kOffered;
+    EXPECT_TRUE(saw);
+  }
+  EXPECT_EQ(sval(app, "said"), "you offered bearer.[redacted]");
+  EXPECT_EQ(sval(app, "raw_ok"), "false");
+  EXPECT_NE(sval(app, "raw_error").find("base64url"), std::string::npos) << sval(app, "raw_error");
+  const std::string all = whole_state(app);
+  EXPECT_EQ(all.find(kToken), std::string::npos) << all;
+  EXPECT_EQ(all.find(kOffered.substr(7)), std::string::npos) << all;
+}
+
 // ---------------------------------------------------------------------------
 // Several credentials from one reply, credentials as form and header values, and tokens a host
 // was handed (--credential-env): a registry shaped like cvcpkg's device sign-in and its RFC 6749
@@ -4521,6 +4591,449 @@ TEST(AriadneNetHost, AnEnvironmentTokenNeedsABindingAndIsNeverWritten) {
     EXPECT_TRUE(net_host_status().env_credentials.empty());
   }
   std::filesystem::remove_all(dir);
+}
+
+// ---------------------------------------------------------------------------
+// L4: a request the transport answers later (the browser's fetch in a build without threads,
+// cvc::net::HttpClient::starts_async). The program parks on it, frames go on, and the reply comes
+// back through the scheduler's ingress. Natively a deferred fake stands in for the browser: the
+// test answers between frames, as the page's event loop would, on the same thread.
+// ---------------------------------------------------------------------------
+namespace {
+
+class DeferredHttpClient : public cvc::net::HttpClient {
+public:
+  struct Transfer : cvc::net::HttpTransfer {
+    bool aborted = false;
+    void abort() override { aborted = true; }
+  };
+  struct Pending {
+    cvc::net::HttpRequest req;
+    cvc::net::HttpDone done;
+    std::shared_ptr<Transfer> transfer;
+  };
+  using Handler = std::function<cvc::net::HttpResponse(const cvc::net::HttpRequest &)>;
+
+  explicit DeferredHttpClient(Handler h) : handler_(std::move(h)) {}
+  std::vector<Pending> pending;
+  std::vector<cvc::net::HttpRequest> answered;
+  int sends = 0; // blocking sends: none on the started path
+
+  bool starts_async() const override { return true; }
+  std::shared_ptr<cvc::net::HttpTransfer> start(const cvc::net::HttpRequest &req,
+                                                cvc::net::HttpDone done) override {
+    auto t = std::make_shared<Transfer>();
+    pending.push_back({req, std::move(done), t});
+    return t;
+  }
+  cvc::net::HttpResponse send(const cvc::net::HttpRequest &req) override {
+    ++sends;
+    return handler_(req);
+  }
+  // Answer the oldest live request; false when none is left (an aborted one is dropped).
+  bool answer() {
+    while (!pending.empty()) {
+      Pending p = std::move(pending.front());
+      pending.erase(pending.begin());
+      if (p.transfer->aborted)
+        continue;
+      answered.push_back(p.req);
+      p.done(handler_(p.req));
+      return true;
+    }
+    return false;
+  }
+  std::size_t live() const {
+    return static_cast<std::size_t>(std::count_if(
+        pending.begin(), pending.end(), [](const auto &p) { return !p.transfer->aborted; }));
+  }
+
+private:
+  Handler handler_;
+};
+
+const std::string kL4Token = "l4-session-token-0123456789abcdef";
+
+// http://api.test: /login answers a token, /me wants it, /slow and /x answer plainly.
+cvc::net::HttpResponse l4_api(const cvc::net::HttpRequest &req) {
+  if (req.url == "http://api.test/login")
+    return http_ok(200, "{\"token\": \"" + kL4Token + "\", \"user\": \"joe\"}",
+                   {"Content-Type: application/json"}, req.url);
+  if (req.url == "http://api.test/me") {
+    const bool authed = std::find(req.headers.begin(), req.headers.end(),
+                                  "Authorization: Bearer " + kL4Token) != req.headers.end();
+    return http_ok(authed ? 200 : 401, authed ? "you are joe, " + kL4Token : "{}", {}, req.url);
+  }
+  return http_ok(200, "body of " + req.url, {}, req.url);
+}
+
+struct L4Guard {
+  ~L4Guard() {
+    disable_net();
+    clear_action_intrinsics();
+    cvc::net::set_http_client(nullptr);
+    cvc::net::set_ws_connector(nullptr);
+  }
+};
+
+// The WebSocket counterpart (ws-open / ws-recv): a connector whose connects the test opens, and
+// connections whose waits the test answers, between frames.
+class DeferredWsConnection : public cvc::net::WsConnection {
+public:
+  std::deque<cvc::net::WsEvent> queue;
+  cvc::net::WsReceived waiter;
+  bool wait_dropped = false;
+  std::vector<std::string> sent;
+  bool is_open = true;
+  int closed_code = 0;
+
+  std::optional<cvc::net::WsEvent> recv(double, const std::function<bool()> &) override {
+    if (queue.empty())
+      return std::nullopt;
+    cvc::net::WsEvent e = queue.front();
+    queue.pop_front();
+    return e;
+  }
+  std::function<void()> recv_async(double, cvc::net::WsReceived done) override {
+    if (!queue.empty()) {
+      done(recv(0, {}));
+      return {};
+    }
+    waiter = std::move(done);
+    return [this] {
+      waiter = nullptr;
+      wait_dropped = true;
+    };
+  }
+  // A message arrives: to a waiting recv_async, else to the queue.
+  void arrive(cvc::net::WsEvent e) {
+    if (cvc::net::WsReceived w = std::move(waiter)) {
+      waiter = nullptr;
+      w(std::move(e));
+      return;
+    }
+    queue.push_back(std::move(e));
+  }
+  bool send_text(const std::string &text, std::string *) override {
+    sent.push_back(text);
+    return is_open;
+  }
+  void close(int code) override {
+    is_open = false;
+    closed_code = code;
+  }
+  bool open() const override { return is_open; }
+};
+
+class DeferredWsConnector : public cvc::net::WsConnector {
+public:
+  struct Pending {
+    std::string url;
+    cvc::net::WsConnected done;
+    bool abandoned = false;
+  };
+  std::vector<std::shared_ptr<Pending>> pending;
+  int blocking_connects = 0;
+
+  bool starts_async() const override { return true; }
+  std::shared_ptr<cvc::net::WsConnection> connect(const std::string &, const cvc::net::WsOptions &,
+                                                  std::string *error) override {
+    ++blocking_connects;
+    if (error)
+      *error = "the blocking connect was used";
+    return nullptr;
+  }
+  std::function<void()> start(const std::string &url, const cvc::net::WsOptions &,
+                              cvc::net::WsConnected done) override {
+    auto p = std::make_shared<Pending>(Pending{url, std::move(done)});
+    pending.push_back(p);
+    return [p] {
+      p->abandoned = true;
+      p->done = nullptr;
+    };
+  }
+  // Open the oldest connect still wanted with `conn`.
+  bool open_next(std::shared_ptr<cvc::net::WsConnection> conn) {
+    for (auto &p : pending)
+      if (p->done) {
+        cvc::net::WsConnected done = std::move(p->done);
+        p->done = nullptr;
+        done(std::move(conn), std::string());
+        return true;
+      }
+    return false;
+  }
+};
+
+// Frames: render + drain, as a host's loop does each frame (no sleep: no frame waits).
+void frames(Runtime &rt, int n) {
+  for (int i = 0; i < n; ++i) {
+    rt.render();
+    rt.drain();
+  }
+}
+
+void click(Runtime &rt, MockBackend &mb, const std::string &program) {
+  rt.set_root(group({button("Go", program)}));
+  mb.button_click = true;
+  rt.render();
+  rt.drain();
+  mb.button_click = false;
+}
+
+} // namespace
+
+TEST(AriadneNetL4, AProgramParksOnARequestWhileFramesGoOn) {
+  cvc::app app;
+  L4Guard guard;
+  auto *net = new DeferredHttpClient(l4_api);
+  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(net));
+  ASSERT_EQ(enable_net(app, allow({"http://api.test"})), "");
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  cvc::state::instance(app)("ui.frames").value("0");
+  rt.set_tick_program("(state-set \"ui.frames\" (+ (int (state-get \"ui.frames\")) 1))");
+  click(rt, mb,
+        "(begin (state-set \"ui.busy\" 1)"
+        "  (set r (http-get \"http://api.test/slow\"))"
+        "  (state-set \"r.status\" (get-attr r \"status\"))"
+        "  (state-data-set \"r.body\" (get-attr r \"body\"))"
+        "  (state-set \"ui.busy\" 0))");
+  frames(rt, 30);
+  ASSERT_EQ(net->live(), 1u) << "the request is started, not sent";
+  EXPECT_EQ(net->sends, 0);
+  EXPECT_EQ(sval(app, "ui.busy"), "1");
+  EXPECT_EQ(sval(app, "r.status"), "") << "no reply yet";
+  EXPECT_GE(std::stoi(sval(app, "ui.frames")), 20) << "on_tick ran each frame meanwhile";
+  EXPECT_EQ(app.exec_scheduler().async_calls_in_flight(), 1u);
+
+  ASSERT_TRUE(net->answer());
+  ASSERT_TRUE(pump_until(rt, [&] { return !sval(app, "r.status").empty(); }));
+  EXPECT_EQ(sval(app, "r.status"), "200");
+  EXPECT_EQ(node_data_string(app, "r.body"), "body of http://api.test/slow");
+  EXPECT_EQ(sval(app, "ui.busy"), "0");
+  EXPECT_EQ(app.exec_scheduler().async_calls_in_flight(), 0u);
+}
+
+TEST(AriadneNetL4, AwaitSlicesRunWhileTheRequestIsOut) {
+  cvc::app app;
+  L4Guard guard;
+  auto *net = new DeferredHttpClient(l4_api);
+  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(net));
+  ASSERT_EQ(enable_net(app, allow({"http://api.test"})), "");
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  // cypkg's progress loop: await in 20 ms slices, drawing between them, until the reply is in.
+  click(rt, mb,
+        "(begin (set f (http-get-async \"http://api.test/x\")) (set slices 0) (set r 0)"
+        "  (while (= r 0)"
+        "    (set got (try (await f 0.02) (catch (TimeoutError e) 0)))"
+        "    (if (= got 0) (begin (set slices (+ slices 1)) (state-set \"ui.slices\" slices))"
+        "        (set r got)))"
+        "  (state-set \"r.status\" (get-attr r \"status\")))");
+  ASSERT_TRUE(pump_until(rt, [&] { return sval(app, "ui.slices") == "3"; }))
+      << "the slices must time out while the request is out";
+  ASSERT_TRUE(net->answer());
+  ASSERT_TRUE(pump_until(rt, [&] { return !sval(app, "r.status").empty(); }));
+  EXPECT_EQ(sval(app, "r.status"), "200");
+}
+
+TEST(AriadneNetL4, ATornDownDocumentAbortsItsRequest) {
+  cvc::app app;
+  L4Guard guard;
+  auto *net = new DeferredHttpClient(l4_api);
+  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(net));
+  ASSERT_EQ(enable_net(app, allow({"http://api.test"})), "");
+  {
+    Runtime rt(app, "");
+    MockBackend mb;
+    rt.set_backend(&mb);
+    click(rt, mb,
+          "(state-set \"r.status\" (get-attr (http-get \"http://api.test/x\") \"status\"))");
+    frames(rt, 3);
+    ASSERT_EQ(net->live(), 1u);
+  } // ~Runtime reaps its programs: the parked one's call is cancelled and its fetch aborted
+  EXPECT_EQ(net->live(), 0u) << "the fetch was aborted";
+  EXPECT_FALSE(net->answer()) << "an aborted fetch is never answered";
+  app.exec_scheduler().drain_ingress();
+  EXPECT_EQ(app.exec_scheduler().async_calls_in_flight(), 0u);
+  EXPECT_EQ(sval(app, "r.status"), "");
+}
+
+TEST(AriadneNetL4, CredentialsGoAndComeBackOnTheStartedPath) {
+  cvc::app app;
+  L4Guard guard;
+  auto *net = new DeferredHttpClient(l4_api);
+  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(net));
+  ASSERT_EQ(enable_net(app, allow({"http://api.test"})), "");
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  click(rt, mb,
+        "(begin (set r (http-request \"POST\" \"http://api.test/login\""
+        "    (dict \"form\" (dict \"user\" \"joe\")"
+        "          \"capture_auth\" (dict \"name\" \"api\" \"field\" \"token\"))))"
+        "  (state-set \"login.captured\" (get-attr r \"captured\"))"
+        "  (state-data-set \"login.body\" (get-attr r \"body\"))"
+        "  (set me (http-get \"http://api.test/me\" (dict \"auth\" \"api\")))"
+        "  (state-set \"me.status\" (get-attr me \"status\"))"
+        "  (state-data-set \"me.body\" (get-attr me \"body\"))"
+        "  (state-set \"done\" 1))");
+  for (int i = 0; i < 2; ++i) { // the sign-in, then the authenticated GET
+    ASSERT_TRUE(pump_until(rt, [&] { return net->live() == 1; })) << "request " << i;
+    ASSERT_TRUE(net->answer());
+  }
+  ASSERT_TRUE(pump_until(rt, [&] { return sval(app, "done") == "1"; }));
+  EXPECT_EQ(sval(app, "login.captured"), "true");
+  EXPECT_NE(node_data_string(app, "login.body").find("\"token\": \"[redacted]\""),
+            std::string::npos)
+      << node_data_string(app, "login.body");
+  EXPECT_EQ(sval(app, "me.status"), "200") << "the host added the captured token";
+  EXPECT_EQ(node_data_string(app, "me.body"), "you are joe, [redacted]") << "an echo is blanked";
+  ASSERT_EQ(net->answered.size(), 2u);
+  EXPECT_EQ(net->answered[1].headers.back(), "Authorization: Bearer " + kL4Token);
+  EXPECT_EQ(whole_state(app).find(kL4Token), std::string::npos);
+  EXPECT_EQ(net->sends, 0);
+}
+
+TEST(AriadneNetL4, APolicyRefusalAnswersWithoutARequest) {
+  cvc::app app;
+  L4Guard guard;
+  auto *net = new DeferredHttpClient(l4_api);
+  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(net));
+  ASSERT_EQ(enable_net(app, allow({"http://api.test"})), "");
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  click(
+      rt, mb,
+      "(begin (set r (http-get \"http://evil.test/x\"))"
+      "  (state-set \"r.ok\" (get-attr r \"ok\")) (state-set \"r.error\" (get-attr r \"error\")))");
+  ASSERT_TRUE(pump_until(rt, [&] { return !sval(app, "r.ok").empty(); }));
+  EXPECT_EQ(sval(app, "r.ok"), "false");
+  EXPECT_NE(sval(app, "r.error").find("http://evil.test is not an origin this host allows"),
+            std::string::npos)
+      << sval(app, "r.error");
+  EXPECT_TRUE(net->pending.empty());
+}
+
+TEST(AriadneNetL4, FetchOfAnHttpUriIsStartedToo) {
+  cvc::app app;
+  L4Guard guard;
+  auto *net = new DeferredHttpClient(l4_api);
+  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(net));
+  ASSERT_EQ(enable_net(app, allow({"http://api.test"})), "");
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  click(rt, mb,
+        "(begin (set r (fetch \"http://api.test/doc.json\"))"
+        "  (state-set \"r.ok\" (get-attr r \"ok\")) (state-data-set \"r.body\" (get-attr r "
+        "\"body\")))");
+  frames(rt, 5);
+  ASSERT_EQ(net->live(), 1u) << "(fetch) of an http URI starts the request";
+  EXPECT_EQ(sval(app, "r.ok"), "");
+  ASSERT_TRUE(net->answer());
+  ASSERT_TRUE(pump_until(rt, [&] { return !sval(app, "r.ok").empty(); }));
+  EXPECT_EQ(sval(app, "r.ok"), "true");
+  EXPECT_EQ(node_data_string(app, "r.body"), "body of http://api.test/doc.json");
+  EXPECT_EQ(net->sends, 0);
+
+  // A host's own handler for the scheme has no non-blocking form: its fetch runs it in place.
+  register_uri_handler("http", [](const Uri &u, const std::string &) {
+    return UriResult{true, "host's " + u.raw, u.raw, ""};
+  });
+  click(rt, mb,
+        "(begin (set r2 (fetch \"http://api.test/y\"))"
+        "  (state-data-set \"r2.body\" (get-attr r2 \"body\")))");
+  ASSERT_TRUE(pump_until(rt, [&] { return !node_data_string(app, "r2.body").empty(); }));
+  EXPECT_EQ(node_data_string(app, "r2.body"), "host's http://api.test/y");
+  EXPECT_TRUE(net->pending.empty());
+}
+
+// The WebSocket verbs in a build without threads: ws-open's connect and ws-recv's wait are started,
+// answered by the socket's callbacks; meanwhile frames go on (on_tick runs).
+TEST(AriadneNetL4, WebSocketOpenAndRecvAreStartedWhileFramesGoOn) {
+  cvc::app app;
+  L4Guard guard;
+  auto ws = std::make_shared<DeferredWsConnector>();
+  cvc::net::set_ws_connector(ws);
+  ASSERT_TRUE(cvc::net::ws_starts_async());
+  ASSERT_EQ(enable_net(app, allow({"http://api.test"})), "");
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  cvc::state::instance(app)("ui.frames").value("0");
+  rt.set_tick_program("(state-set \"ui.frames\" (+ (int (state-get \"ui.frames\")) 1))");
+  click(rt, mb,
+        "(begin (set r (ws-open \"ws://api.test/live\"))"
+        "  (state-set \"r.ok\" (get-attr r \"ok\"))"
+        "  (set h (get-attr r \"handle\"))"
+        "  (ws-send h \"hi\")"
+        "  (set e (ws-recv h 10))"
+        "  (state-set \"e.type\" (get-attr e \"type\"))"
+        "  (state-set \"e.data\" (get-attr e \"data\"))"
+        "  (state-set \"done\" \"1\"))");
+  frames(rt, 25);
+  ASSERT_EQ(ws->pending.size(), 1u) << "the connect is started";
+  EXPECT_EQ(ws->pending[0]->url, "ws://api.test/live");
+  EXPECT_EQ(sval(app, "r.ok"), "") << "not open yet";
+  EXPECT_GE(std::stoi(sval(app, "ui.frames")), 20) << "frames went on during the connect";
+
+  auto conn = std::make_shared<DeferredWsConnection>();
+  ASSERT_TRUE(ws->open_next(conn));
+  ASSERT_TRUE(pump_until(rt, [&] { return static_cast<bool>(conn->waiter); }))
+      << "ws-recv should be waiting on the connection";
+  EXPECT_EQ(sval(app, "r.ok"), "true");
+  ASSERT_EQ(conn->sent.size(), 1u);
+  EXPECT_EQ(conn->sent[0], "hi");
+  const int before = std::stoi(sval(app, "ui.frames"));
+  frames(rt, 25);
+  EXPECT_GE(std::stoi(sval(app, "ui.frames")) - before, 20) << "frames went on during the wait";
+  EXPECT_EQ(sval(app, "done"), "");
+
+  conn->arrive({cvc::net::WsEvent::Kind::Text, "hello", 0});
+  ASSERT_TRUE(pump_until(rt, [&] { return sval(app, "done") == "1"; }));
+  EXPECT_EQ(sval(app, "e.type"), "text");
+  EXPECT_EQ(sval(app, "e.data"), "hello");
+  EXPECT_EQ(ws->blocking_connects, 0);
+}
+
+TEST(AriadneNetL4, ATornDownDocumentAbandonsItsConnectAndItsWait) {
+  cvc::app app;
+  L4Guard guard;
+  auto ws = std::make_shared<DeferredWsConnector>();
+  cvc::net::set_ws_connector(ws);
+  ASSERT_EQ(enable_net(app, allow({"http://api.test"})), "");
+  { // parked on the connect
+    Runtime rt(app, "");
+    MockBackend mb;
+    rt.set_backend(&mb);
+    click(rt, mb, "(state-set \"r.ok\" (get-attr (ws-open \"ws://api.test/a\") \"ok\"))");
+    frames(rt, 3);
+    ASSERT_EQ(ws->pending.size(), 1u);
+  }
+  EXPECT_TRUE(ws->pending[0]->abandoned) << "the connect was abandoned";
+  auto conn = std::make_shared<DeferredWsConnection>();
+  EXPECT_FALSE(ws->open_next(conn)) << "nothing waits for it any more";
+
+  { // parked on a message
+    Runtime rt(app, "");
+    MockBackend mb;
+    rt.set_backend(&mb);
+    click(rt, mb,
+          "(begin (set h (get-attr (ws-open \"ws://api.test/b\") \"handle\"))"
+          "  (state-set \"b.e\" (str (ws-recv h 10))))");
+    frames(rt, 3);
+    ASSERT_TRUE(ws->open_next(conn));
+    ASSERT_TRUE(pump_until(rt, [&] { return static_cast<bool>(conn->waiter); }));
+  }
+  EXPECT_TRUE(conn->wait_dropped) << "the wait was dropped";
+  EXPECT_FALSE(conn->waiter);
+  app.exec_scheduler().drain_ingress();
+  EXPECT_EQ(app.exec_scheduler().async_calls_in_flight(), 0u);
 }
 
 // launch_pool_task generalizes beyond HTTP: a NON-network "heavy" kernel offloaded to the compute
