@@ -24,7 +24,7 @@
 #include <cvc/ariadne/uri.h>               // §13.8 (fetch uri): register a custom scheme handler
 #include <cvc/ariadne/widget.h>
 #include <cvc/core/app.h>
-#include <cvc/core/async_task.h>  // launch_pool_task generalization test
+#include <cvc/core/async_task.h> // launch_pool_task generalization test
 #include <cvc/core/thread_pool.h> // item 2: full type for app.computePool().parallel_for
 #include <cvc/net/http_client.h>  // §13.8: swap the transport for a fake in the http-get test
 #include <cvc/net/net_policy.h>   // the ws-* verb tests' policy
