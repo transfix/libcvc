@@ -395,6 +395,24 @@ std::string failure_report(const std::optional<cvc::state_exec::value_t> &exc,
   return report;
 }
 
+// " [program]": which program a warning is about, on one line and at most 80 characters.
+std::string program_tag(const std::string &script) {
+  std::string one;
+  bool space = false;
+  for (char c : script) {
+    const bool ws = c == ' ' || c == '\n' || c == '\t' || c == '\r';
+    if (ws && (space || one.empty()))
+      continue;
+    space = ws;
+    one += ws ? ' ' : c;
+  }
+  while (!one.empty() && one.back() == ' ')
+    one.pop_back();
+  if (one.size() > 80)
+    one = one.substr(0, 77) + "...";
+  return one.empty() ? std::string() : " [" + one + "]";
+}
+
 std::string run_scoped_program(cvc::app &app, const std::string &prefix, const std::string &script,
                                uint64_t max_steps, double max_seconds, uint64_t max_bytes,
                                const std::function<bool(const std::string &)> &has = {}) {
@@ -555,6 +573,8 @@ public:
         // state-json writes its document as sliced data steps, under the allocation limit)
         "state-get", "state-exists", "state-children", "state-data-get", "state-json",
         "state-root-path", "state-has-expiry", "state-is-expired",
+        // JSON text to values and back: pure, sliced data steps under the allocation limit
+        "json-parse", "json-encode",
         // the stdlib: the pure, bounded functions (a scalar, or a result no bigger than its
         // argument), and the materializers, which do their work as sliced data steps (each
         // eval slices, see data_step_nodes_) under the per-call allocation limit. A function
@@ -580,8 +600,8 @@ public:
     // set is shared across every ReactiveEngine.
     static const std::shared_ptr<const std::set<std::string>> kAllowedForms =
         std::make_shared<const std::set<std::string>>(
-            std::set<std::string>{"if", "begin", "let", "while", "for", "lambda", "defun", "set",
-                                  "return", "quote", "yield", "break"});
+            std::set<std::string>{"if", "begin", "and", "or", "let", "while", "for", "lambda",
+                                  "defun", "set", "return", "quote", "yield", "break"});
     ev_->restrict_special_forms(kAllowedForms);
     resolve_data_settings();
   }
@@ -911,6 +931,10 @@ struct Runtime::Impl {
     bool has_event = false;
     float ex = 0.0f, ey = 0.0f, edx = 0.0f, edy = 0.0f;
     int ebutton = 0;
+    // Runtime::run_program: told how the program ended instead of a warning.
+    std::function<void(const std::string &)> done;
+    // §6.6 the functions of the scope it was started in (a FunctionScope prelude), run first.
+    std::string functions;
   };
   std::vector<QueuedAction> queued_events;
 
@@ -963,6 +987,8 @@ struct Runtime::Impl {
     cvc::state_exec::intrinsics_context ictx;
     bool ended = false;        // the action's own process has ended and been reaped
     std::vector<int> children; // pids it forked that may still be running (they share ictx)
+    std::function<void(const std::string &)> done; // run_program: how its own process ended
+    std::string script;                            // the program's text, to say which one failed
   };
   std::unordered_map<int, std::shared_ptr<ActionContext>> live_actions_;
   // Pids of the children actions and residents spawned (spawn_child), reaped once they finish.
@@ -1053,6 +1079,14 @@ struct Runtime::Impl {
   const std::string &current_prefix() const {
     return scope_stack.empty() ? prefix : scope_stack.back();
   }
+  // §6.6 the function scopes the walk is inside (the root's, then each mount's), parallel to
+  // scope_stack, and the document's own (the root's, from set_root) for the programs no widget
+  // starts: residents, key bindings, run_program. A program runs its scope's prelude first.
+  std::vector<const FunctionScope *> fn_stack;
+  std::string doc_functions;
+  const std::string &current_functions() const {
+    return fn_stack.empty() ? doc_functions : fn_stack.back()->prelude;
+  }
 
   // §12 load: sub-prefixes whose parent-scope holes (link:) have been planted, so we wire each
   // mount's link nodes ONCE (idempotent, but findDescendant+linkTo per hole per frame is waste).
@@ -1096,14 +1130,18 @@ struct Runtime::Impl {
   }
 
   void enqueue(const std::string &event) {
-    if (!event.empty())
+    if (!event.empty()) {
       queued_events.push_back({event, current_prefix()}); // capture the mount scope for a program
+      queued_events.back().functions = current_functions(); // and its functions
+    }
   }
   // §4.6: enqueue a widget POINTER handler carrying its event data (a program gets an `event`
   // dict).
   void enqueue_event(const std::string &event, float x, float y, float dx, float dy, int button) {
-    if (!event.empty())
+    if (!event.empty()) {
       queued_events.push_back({event, current_prefix(), true, x, y, dx, dy, button});
+      queued_events.back().functions = current_functions();
+    }
   }
 
   void emit(const Widget &w);      // repeat + visibility gates (§4), then emit_node
@@ -1304,9 +1342,20 @@ void Runtime::Impl::emit_container(const Widget &w) {
     // Run the fragment's init: once (after its holes exist, so init may seed through them). Kept
     // in ran_inits, NOT cleared on reconcile — a one-shot seed, never re-run per frame/rebuild.
     if (!w.init_script.empty() && ran_inits.insert(sub_prefix).second)
-      run_mount_init(sub_prefix, w.init_script);
+      run_mount_init(sub_prefix, (w.functions ? w.functions->prelude : "") + w.init_script);
     scope_stack.push_back(sub_prefix);
   }
+  // §6.6 the root's and a mount's functions are the ones programs started in its subtree get.
+  if (w.functions)
+    fn_stack.push_back(w.functions.get());
+  struct FunctionsGuard {
+    std::vector<const FunctionScope *> &stack;
+    bool active;
+    ~FunctionsGuard() {
+      if (active)
+        stack.pop_back();
+    }
+  } functions_guard{fn_stack, static_cast<bool>(w.functions)};
   struct ScopeGuard {
     std::vector<std::string> &stack;
     bool active;
@@ -2076,17 +2125,23 @@ void Runtime::Impl::submit_action(const QueuedAction &action) {
     }
     // A child the action forks shares this context: recorded, so the context stays until it ends.
     ac->ictx.on_child = [raw = ac.get()](int pid) { raw->children.push_back(pid); };
+    ac->done = action.done;
+    ac->script = script;
     se::execute_options opts;
     opts.env = ac->env;
     opts.owner = owner_; // so ~Impl's kill_owner reaps exactly this document's processes
     opts.max_steps = action_max_steps(root);
     opts.max_time = action_max_time(root);
     opts.max_memory = max_bytes;
-    const int pid = sched.execute(script, opts); // throws se::parse_error on a syntax error
+    // §6.6 its scope's functions first. Throws se::parse_error on a syntax error.
+    const int pid = sched.execute(action.functions + script, opts);
     live_actions_[pid] = std::move(ac); // keep the context alive until the process (and the
                                         // children it forked) end
   } catch (const std::exception &e) {
-    warn_once(std::string("ari: on: action program failed: ") + e.what() + " [" + script + "]");
+    if (action.done)
+      action.done(std::string("failed: ") + e.what());
+    else
+      warn_once(std::string("ari: on: action program failed: ") + e.what() + " [" + script + "]");
   }
 }
 
@@ -2137,29 +2192,42 @@ void Runtime::Impl::pump_and_sweep_actions(cvc::state_exec::async_scheduler &sch
   static constexpr double kPumpMaxSeconds = 0.1;
   sched.sync_run(kPumpMaxSteps, kPumpMaxSeconds);
   // Sweep: a finished process is reaped (nothing reads its result), a killed or failed one is
-  // reported, and a still-parked one is kept for a later frame.
-  const auto reap_ended = [&](int pid, const char *what) {
+  // reported, and a still-parked one is kept for a later frame. A run_program one's caller is told
+  // how it ended instead.
+  const auto reap_ended = [&](int pid, const char *what, const std::string &script = std::string(),
+                              const std::function<void(const std::string &)> &done = {}) {
     const auto info = sched.get_process_info(pid);
     if (info && !se::is_finished(info->status))
       return false; // ready/running/waiting — still in flight (e.g. parked on await/msg-recv)
+    if (done) {     // run_program: its caller reports it
+      std::string how;
+      if (info && info->status == se::process_status::killed)
+        how = "did not complete: " + sched.get_exit_error(pid).value_or("killed");
+      else if (info && info->status == se::process_status::failed)
+        how = "failed: " + failure_report(info->exit_exception, info->exit_error);
+      sched.reap(pid);
+      done(how);
+      return true;
+    }
     if (info && info->status == se::process_status::killed)
       // The exit error says why: a syntax error (scripts are read inside the process), a runtime
       // error or a resource limit.
-      warn_once(std::string("ari: on: ") + what +
-                " did not complete: " + sched.get_exit_error(pid).value_or("killed"));
+      warn_once(std::string("ari: on: ") + what + " did not complete: " +
+                sched.get_exit_error(pid).value_or("killed") + program_tag(script));
     else if (info && info->status == se::process_status::failed)
       // An exception the program didn't catch: its class, message and where it was raised.
-      warn_once(std::string("ari: on: ") + what +
-                " failed: " + failure_report(info->exit_exception, info->exit_error));
+      warn_once(std::string("ari: on: ") + what + " failed: " +
+                failure_report(info->exit_exception, info->exit_error) + program_tag(script));
     sched.reap(pid);
     return true;
   };
   for (auto it = live_actions_.begin(); it != live_actions_.end();) {
     ActionContext &ac = *it->second;
     if (!ac.ended)
-      ac.ended = reap_ended(it->first, "action program");
+      ac.ended = reap_ended(it->first, "action program", ac.script, ac.done);
     // The children it forked share its context, so the context stays until they end too.
-    std::erase_if(ac.children, [&](int pid) { return reap_ended(pid, "forked program"); });
+    std::erase_if(ac.children,
+                  [&](int pid) { return reap_ended(pid, "forked program", ac.script); });
     if (ac.ended && ac.children.empty())
       it = live_actions_.erase(it);
     else
@@ -2171,21 +2239,21 @@ void Runtime::Impl::pump_and_sweep_actions(cvc::state_exec::async_scheduler &sch
   // A resident never finishes on its own, so one that was killed (a syntax error in its body,
   // read inside the process; its per-step cap) or failed (an exception it didn't catch) is
   // reported, once per reason.
-  const auto report_killed_resident = [&](int pid, const std::string &channel) {
+  const auto report_killed_resident = [&](int pid, const char *lane, const std::string &channel) {
     if (pid < 0)
       return;
     auto info = sched.get_process_info(pid);
     if (info && info->status == se::process_status::killed)
-      warn_once("ari: resident [" + channel +
+      warn_once(std::string("ari: ") + lane + " resident [" + channel +
                 "] stopped: " + sched.get_exit_error(pid).value_or("killed"));
     else if (info && info->status == se::process_status::failed)
-      warn_once("ari: resident [" + channel +
+      warn_once(std::string("ari: ") + lane + " resident [" + channel +
                 "] failed: " + failure_report(info->exit_exception, info->exit_error));
   };
-  report_killed_resident(tick_resident_pid_, tick_channel());
-  report_killed_resident(key_resident_pid_, key_channel());
-  report_killed_resident(pointer_resident_pid_, pointer_channel());
-  report_killed_resident(signal_resident_pid_, signal_channel());
+  report_killed_resident(tick_resident_pid_, "on_tick:", tick_channel());
+  report_killed_resident(key_resident_pid_, "on_key:", key_channel());
+  report_killed_resident(pointer_resident_pid_, "on_pointer:", pointer_channel());
+  report_killed_resident(signal_resident_pid_, "on_signal:", signal_channel());
 }
 
 void Runtime::Impl::ensure_resident(const std::string &channel, const std::string &body,
@@ -2209,8 +2277,9 @@ void Runtime::Impl::ensure_resident(const std::string &channel, const std::strin
     // on:tick simply ignores `event`. The body runs once per delivery, then loops back to park. No
     // total step cap (a resident loops forever; the per-frame pump budget bounds each activation,
     // and the msg-recv guarantees a park every iteration).
-    const std::string wrapped =
-        "(while t (let ((event (msg-recv \"" + channel + "\"))) " + body + "))";
+    const std::string wrapped = doc_functions + // §6.6 defined once, before the loop
+                                "(while t (let ((event (msg-recv \"" + channel + "\"))) " + body +
+                                "))";
     se::execute_options opts;
     opts.env = ac->env;
     opts.owner = owner_; // reaped by ~Impl's kill_owner(owner_) on teardown
@@ -2337,6 +2406,8 @@ void Runtime::refresh_program_names() {
 void Runtime::set_backend(Backend *backend) { m_->backend = backend; }
 
 void Runtime::set_root(Widget root) {
+  // Now, not at the swap: a resident submitted in the next drain() runs with these.
+  m_->doc_functions = root.functions ? root.functions->prelude : std::string();
   m_->pending = std::move(root);
   m_->has_pending = true;
 }
@@ -2464,8 +2535,10 @@ void Runtime::Impl::run_key_bindings() {
     for (const KeyBinding &b : key_bindings_)
       if (!b.on.empty() &&
           key_matches(read_or<std::string>(app, resolve_bind(prefix, key_binding_path(b)), ""),
-                      key))
+                      key)) {
         queued_events.push_back({b.on, prefix});
+        queued_events.back().functions = doc_functions;
+      }
   }
   // What the Keys window shows for each binding, written only when it changes.
   const std::string waiting =
@@ -2483,6 +2556,15 @@ void Runtime::Impl::run_key_bindings() {
 
 void Runtime::render() { m_->render(); }
 
+void Runtime::run_program(std::string script, std::function<void(const std::string &)> done) {
+  Impl::QueuedAction a;
+  a.event = std::move(script);
+  a.prefix = m_->prefix;
+  a.done = std::move(done);
+  a.functions = m_->doc_functions;
+  m_->queued_events.push_back(std::move(a));
+}
+
 void Runtime::drain() {
   // Run the queued action events on the host thread, then clear. Never called
   // from inside render() (the deferred intent-buffer discipline, §7.2/§4.7). The keys pressed since
@@ -2493,7 +2575,7 @@ void Runtime::drain() {
   for (const Impl::QueuedAction &a : events) {
     // A program action (`on:` starting with '(', like a computed `bind:`/`tooltip:`) runs through
     // state_exec — the north-star lane: a flag toggle or reset is pure .ari, no C++ handler.
-    if (is_expr(a.event)) { // a program on: (whitespace-tolerant, exactly like a computed bind:)
+    if (a.done || is_expr(a.event)) { // a program on: (whitespace-tolerant, like a computed bind:)
       // SUBMIT it to the app-wide scheduler (owner-tagged, chrooted to the action's mount prefix)
       // and return — no run-to-completion inside drain(). The per-frame pump below advances it; a
       // quick action still finishes this drain, while an (await …)/(msg-recv …)/(sleep …) parks

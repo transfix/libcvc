@@ -1904,6 +1904,17 @@ std::vector<std::string> state::children(const std::string &re) {
   return ret;
 }
 
+std::vector<std::string> state::childNames() {
+  boost::this_thread::interruption_point();
+  boost::mutex::scoped_lock lock(_mutex);
+  std::vector<std::string> names;
+  names.reserve(_children.size());
+  for (const child_map::value_type &kv : _children)
+    if (kv.second)
+      names.push_back(kv.first);
+  return names;
+}
+
 // ------------------
 // state::numChildren
 // ------------------
