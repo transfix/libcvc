@@ -2779,6 +2779,86 @@ windows:
   EXPECT_EQ(s->bind, "demo.speed");
 }
 
+// §6.1 slots: a unit's `- slot: NAME` items take the include site's widget lists, in place; an
+// unfilled slot is dropped, and args are not substituted into the include site's own widgets.
+TEST(AriadneModularity, SlotsTakeTheIncludeSitesWidgets) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+units:
+  framed:
+    args: { title: Untitled }
+    type: group
+    id: framed
+    children:
+      - text: "{title}"
+      - slot: body
+      - text: "--"
+      - slot: footer
+      - slot: unused
+windows:
+  - window: W
+    children:
+      - include: framed
+        args: { title: Hello }
+        slots:
+          body:
+            - text: "body one {title}"
+            - button: Two
+              on: (state-set "x" "{title}")
+          footer: { text: footer }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  for (const std::string &w : r.warnings)
+    EXPECT_EQ(w.find("unrecognized widget key"), std::string::npos) << w;
+  const Widget *win = find(r.root, Kind::Window);
+  ASSERT_TRUE(win && !win->children.empty());
+  const Widget *g = &win->children.front();
+  ASSERT_EQ(g->id, "framed");
+  ASSERT_EQ(g->children.size(), 5u); // title, two body widgets, "--", footer; unused dropped
+  EXPECT_EQ(g->children[0].label, "Hello");
+  EXPECT_EQ(g->children[1].label, "body one {title}"); // the include site's own text
+  EXPECT_EQ(g->children[2].kind, Kind::Button);
+  EXPECT_EQ(g->children[2].on, "(state-set \"x\" \"{title}\")");
+  EXPECT_EQ(g->children[3].label, "--");
+  EXPECT_EQ(g->children[4].label, "footer");
+}
+
+// §6.2: an optional import that is not there is no warning; a fallback unit stands in for it,
+// and yields to an import that defines the name.
+TEST(AriadneModularity, OptionalImportsAndFallbackUnits) {
+  SKIP_WITHOUT_YAML();
+  LoadResult missing = load_string(R"(
+import: [{uri: /nowhere/lib.ari, optional: true}]
+units:
+  card: {fallback: true, text: mine}
+windows:
+  - window: W
+    children:
+      - include: card
+)");
+  ASSERT_TRUE(missing.ok) << missing.error;
+  for (const std::string &w : missing.warnings)
+    EXPECT_EQ(w.find("could not be resolved"), std::string::npos) << w;
+  EXPECT_NE(find(missing.root, Kind::Text, "mine"), nullptr);
+
+  const std::filesystem::path lib = std::filesystem::temp_directory_path() / "ari_fallback_lib.ari";
+  std::ofstream(lib) << "units:\n  card: {text: theirs}\n";
+  LoadResult present = load_string("import: [{uri: " + lib.string() +
+                                   ", optional: true}]\n"
+                                   "units:\n  card: {fallback: true, text: mine}\n"
+                                   "windows:\n  - window: W\n    children:\n"
+                                   "      - include: card\n");
+  ASSERT_TRUE(present.ok) << present.error;
+  EXPECT_NE(find(present.root, Kind::Text, "theirs"), nullptr);
+  EXPECT_EQ(find(present.root, Kind::Text, "mine"), nullptr);
+  LoadResult required = load_string("import: /nowhere/lib.ari\nwindows: []\n");
+  bool warned = false;
+  for (const std::string &w : required.warnings)
+    warned = warned || w.find("could not be resolved") != std::string::npos;
+  EXPECT_TRUE(warned); // a plain import still says so
+  std::filesystem::remove(lib);
+}
+
 TEST(AriadneModularity, IncludeUnknownUnitWarns) {
   SKIP_WITHOUT_YAML();
   LoadResult r = load_string(R"(
@@ -3074,7 +3154,14 @@ TEST(AriadneComponents, ShippedComponentsLoadClean) {
     LoadResult r = load_string("meta: { min_libcvc: \"0.0.0\" }\nimport: cvc://components/" + file +
                                "\nwindows:\n  - include: " + unit + "\n");
     ASSERT_TRUE(r.ok) << r.error;
-    EXPECT_NE(find(r.root, Kind::Window), nullptr) << "unit '" << unit << "' is not a window";
+    // A window, or a widget to embed in a document's own window (card.ari's card).
+    const bool embeddable = index.find("file: " + file) != std::string::npos &&
+                            index.find("not a window: include it") != std::string::npos &&
+                            unit == "card";
+    EXPECT_TRUE(
+        find(r.root, Kind::Window) != nullptr ||
+        (embeddable && !r.root.children.empty() && r.root.children.front().kind == Kind::Group))
+        << "unit '" << unit << "' is not a window";
     for (const std::string &w : r.warnings) {
       EXPECT_EQ(w.find("unrecognized widget key"), std::string::npos) << w;
       EXPECT_EQ(w.find("has no bind"), std::string::npos) << w;
@@ -3085,7 +3172,7 @@ TEST(AriadneComponents, ShippedComponentsLoadClean) {
     EXPECT_NE(index.find("file: " + file), std::string::npos) << "INDEX.ari does not list " << file;
     ++checked;
   }
-  EXPECT_GE(checked, 14); // the 14 components shipped with transfer_function
+  EXPECT_GE(checked, 15); // the 14 components shipped with transfer_function, and card
   std::error_code ec;
   fs::remove_all(decoy, ec);
 }

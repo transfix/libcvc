@@ -242,6 +242,7 @@ set(SOURCE_FILES
   geometry/sliced_ldlt.cpp
   geometry/geometry_file_io.cpp
   image/image.cpp
+  image/image_decode.cpp
   image/magick_io.cpp
   image/stb_io.cpp
   model/model.cpp
@@ -1393,7 +1394,7 @@ list(APPEND INCLUDE_FILES ../../inc/cvc/net/http_client.h ../../inc/cvc/net/net_
 # the retained Widget tree, the Runtime + reconcile boundary, and direct
 # cvc::state binding, walking a pluggable Backend. It touches NO VTK/ImGui/GL —
 # the ImGui-over-VTK backend lives in cvcGL (src/cvcGL/ariadne). Roadmap §16.1.
-list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/net_host.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/conference/room_write_gate.cpp ariadne/conference/room_rungs.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/keys.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/requires.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp ariadne/tf_editor_emit.cpp)
+list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/net_host.cpp ariadne/media.cpp ariadne/media_player.cpp ariadne/media_browser.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/conference/room_write_gate.cpp ariadne/conference/room_rungs.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/keys.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/requires.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp ariadne/tf_editor_emit.cpp)
 # A document set fetched from a URL, and a runtime's browser page loading one (arigl-web, ari).
 list(APPEND SOURCE_FILES ariadne/doc_fetch.cpp ariadne/web_document.cpp)
 list(APPEND INCLUDE_FILES
@@ -1420,6 +1421,8 @@ list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/uri_http_cache.h
   ../../inc/cvc/ariadne/net_intrinsics.h
   ../../inc/cvc/ariadne/net_host.h
+  ../../inc/cvc/ariadne/media.h
+  ../../inc/cvc/ariadne/media_player.h
   ../../inc/cvc/ariadne/stream_intrinsics.h
   ../../inc/cvc/ariadne/conference/room_intrinsics.h
   ../../inc/cvc/ariadne/conference/room_media_intrinsics.h
@@ -1625,6 +1628,30 @@ if(_cvc_core_turbojpeg)
   message(STATUS "cvc::media: video rungs transcode with ${_cvc_core_turbojpeg}")
 else()
   message(STATUS "cvc::media: no libjpeg-turbo - video rungs only drop frames, never re-encode")
+endif()
+
+# WebP decoding from memory (image_decode.h: Ariadne's image: widget takes a URL). OPTIONAL: libwebp
+# (cvcpkg `libwebp`, BSD-3-Clause, already a libcvc dependency through libtiff and ImageMagick); the
+# decoder-only library where the prefix exports it, plus libwebpdemux for an animated WebP's first
+# frame. Without it a WebP decodes through ImageMagick where the build has that, else it is refused.
+find_package(WebP CONFIG QUIET)
+set(_cvc_webp "")
+if(TARGET WebP::webpdecoder)
+  set(_cvc_webp WebP::webpdecoder)
+elseif(TARGET WebP::webp)
+  set(_cvc_webp WebP::webp)
+endif()
+if(_cvc_webp)
+  target_link_libraries(cvc PRIVATE ${_cvc_webp})
+  target_compile_definitions(cvc PRIVATE CVC_HAVE_WEBP=1)
+  if(TARGET WebP::webpdemux)
+    target_link_libraries(cvc PRIVATE WebP::webpdemux)
+    target_compile_definitions(cvc PRIVATE CVC_HAVE_WEBP_DEMUX=1)
+  endif()
+  list(APPEND CVC_PRIVATE_LINK_PACKAGES WebP)
+  message(STATUS "cvc::image: WebP decoding with ${_cvc_webp}")
+else()
+  message(STATUS "cvc::image: no libwebp - WebP decodes only through ImageMagick, if at all")
 endif()
 
 # Opus mics (media_opus.h): a sender encodes its mic in Opus, and a relay decodes it to f32 for the

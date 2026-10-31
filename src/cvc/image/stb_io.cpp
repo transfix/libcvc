@@ -17,13 +17,15 @@
 // magick_image_io write path detects the missing encoder instead of silently
 // emitting a MIFF blob under the requested name (see magick_io.cpp).
 
-#include <cvc/image/image.h>
-
+#include <climits>
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
+#include <cvc/image/image.h>
 #include <memory>
 #include <stdexcept>
+#include <string>
+#include <vector>
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STB_IMAGE_STATIC
@@ -107,6 +109,61 @@ private:
 };
 
 } // namespace
+
+// For decode_image (image_decode.cpp): stb's implementation is in this translation unit only.
+namespace detail {
+
+bool stb_info_memory(const void *data, std::size_t size, int &w, int &h) {
+  int chan = 0;
+  return size <= static_cast<std::size_t>(INT_MAX) &&
+         stbi_info_from_memory(static_cast<const stbi_uc *>(data), static_cast<int>(size), &w, &h,
+                               &chan) != 0;
+}
+
+image stb_decode_memory(const void *data, std::size_t size, std::string *why) {
+  int w = 0, h = 0, chan = 0;
+  unsigned char *px = size <= static_cast<std::size_t>(INT_MAX)
+                          ? stbi_load_from_memory(static_cast<const stbi_uc *>(data),
+                                                  static_cast<int>(size), &w, &h, &chan, 4)
+                          : nullptr;
+  if (!px) {
+    if (why)
+      *why = stbi_failure_reason() ? stbi_failure_reason() : "corrupt image";
+    return image();
+  }
+  image out(w, h, image::pixel_format::RGBA, image::data_type::u8);
+  if (w > 0 && h > 0)
+    std::memcpy(out.data(), px, static_cast<std::size_t>(w) * h * 4);
+  stbi_image_free(px);
+  return out;
+}
+
+// Every frame of a GIF (stb composes each onto the canvas), with its delay in ms.
+bool stb_decode_gif_memory(const void *data, std::size_t size, std::vector<image> &frames,
+                           std::vector<int> &delays, std::string *why) {
+  int w = 0, h = 0, z = 0, comp = 0;
+  int *ds = nullptr;
+  unsigned char *px =
+      size <= static_cast<std::size_t>(INT_MAX)
+          ? stbi_load_gif_from_memory(static_cast<const stbi_uc *>(data), static_cast<int>(size),
+                                      &ds, &w, &h, &z, &comp, 4)
+          : nullptr;
+  if (!px) {
+    if (why)
+      *why = stbi_failure_reason() ? stbi_failure_reason() : "corrupt GIF";
+    return false;
+  }
+  const std::size_t one = static_cast<std::size_t>(w) * h * 4;
+  for (int i = 0; i < z; ++i) {
+    frames.emplace_back(w, h, image::pixel_format::RGBA, image::data_type::u8, px + one * i);
+    delays.push_back(ds ? ds[i] : 100);
+  }
+  stbi_image_free(px);
+  STBI_FREE(ds);
+  return true;
+}
+
+} // namespace detail
 
 // Called from register_default_image_handlers (defined in magick_io.cpp) —
 // registered BEFORE magick_image_io so image_file_io::for_read (first-wins)

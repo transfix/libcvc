@@ -67,6 +67,13 @@
 #include <cvc/ariadne/ftxui_backend.h>
 #include <cvc/ariadne/host_cli.h>
 #include <cvc/ariadne/host_info.h>
+#include <cvc/ariadne/media_player.h> // §5.13 the play policy (--media-play)
+#ifdef ARI_MEDIA
+#include <cvc/media/player.h> // ari-media: cvcMedia's FFmpeg + SDL3 player
+#endif
+#ifdef ARI_MEDIA
+#include <cvc/media/playback/audio_output.h> // ari-media: sound through SDL3's audio subsystem
+#endif
 #include <cvc/ariadne/host_signals.h>
 #include <cvc/ariadne/stream/stream_view.h>
 #include <cvc/ariadne/tvision_backend.h>
@@ -81,6 +88,13 @@
 #include <vector>
 
 namespace {
+
+// What `ari info` and the like call this runtime: ari-media is ari with cvcMedia's sound.
+#ifdef ARI_MEDIA
+constexpr const char *kRuntimeName = "ari-media";
+#else
+constexpr const char *kRuntimeName = "ari";
+#endif
 
 int usage(int code) {
   std::fprintf(code ? stderr : stdout,
@@ -182,8 +196,14 @@ int print_info(const cvc::ariadne::HostOptions &o) {
   const bool probed = term.tty && !tvision; // tvision draws half-blocks only
   if (probed)
     graphics = probe_terminal(*backend, o);
-  ari::HostInfo info = ari::gather_host_info(rt.runtime(), "ari");
+  ari::HostInfo info = ari::gather_host_info(rt.runtime(), kRuntimeName);
   info.backend = tvision ? "tvision" : "ftxui";
+#ifdef ARI_MEDIA
+  // ari-media: cvcMedia's SDL3 audio, its subsystem alone (no window, no display).
+  info.audio = cvc::media::playback::have_audio_output();
+  for (const std::string &dev : cvc::media::playback::list_audio_playback_devices())
+    info.audio_info += "device: " + dev + "\n";
+#endif
   if (probed) {
     info.graphics = graphics;
     info.probed = true;
@@ -309,7 +329,8 @@ TestOutcome run_test_document(const cvc::ariadne::HostOptions &o, const std::str
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
-  if (by_frames && o.net.enabled) { // as snapshot: what the document asked for comes back first
+  // As snapshot: what the document asked for comes back first, and its pictures.
+  if (by_frames && (o.net.enabled || rt.runtime().media_stale())) {
     rt.settle([&] { rt.drain(); });
     for (const std::string &w : rt.take_warnings())
       fail(trim_ari(w));
@@ -391,6 +412,19 @@ int main(int argc, char **argv) {
   if (!o.error.empty()) {
     std::fprintf(stderr, "ari: %s\n", o.error.c_str());
     return usage(2);
+  }
+  // §5.13 video: / audio:: the player (cvcMedia's FFmpeg + SDL3, where this host has it) and where
+  // it may play (--media-play; by default not over SSH, where the sound would play remotely).
+#ifdef ARI_MEDIA
+  cvc::media::register_ariadne_player();
+#endif
+#ifdef __EMSCRIPTEN__
+  cvc::ariadne::media::register_browser_player(); // ari.html: the page's <video> / <audio>
+#endif
+  if (!o.media_play.empty()) {
+    cvc::ariadne::media::PlayPolicy policy = cvc::ariadne::media::PlayPolicy::Auto;
+    cvc::ariadne::media::parse_play_policy(o.media_play, policy);
+    cvc::ariadne::media::set_play_policy(policy);
   }
   const std::string &cmd = o.command;
   if (cmd != "run" && cmd != "snapshot" && cmd != "check" && cmd != "info" && cmd != "test") {
@@ -517,10 +551,11 @@ int main(int argc, char **argv) {
       if (rt.should_close()) // (quit code): the frame it quit on
         break;
     }
-    if (o.net.enabled && !rt.should_close()) { // the frame shows what the requests brought back
-      rt.settle([&] { rt.drain(); });
-      frame = backend->render_to_string(rt.runtime(), width, o.height, o.ansi);
-    }
+    // The frame shows what the requests brought back, and the pictures it draws.
+    if ((o.net.enabled || rt.runtime().media_stale()) && !rt.should_close())
+      rt.settle_and_render(
+          [&] { rt.drain(); },
+          [&] { frame = backend->render_to_string(rt.runtime(), width, o.height, o.ansi); });
     if (pixels) { // Sixel draws at screen positions, so the frame starts at the top-left
       const int rows = static_cast<int>(std::count(frame.begin(), frame.end(), '\n')) + 1;
       frame = "\x1b[H\x1b[2J" + frame + backend->take_graphics() + "\x1b[" +
