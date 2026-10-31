@@ -23,6 +23,17 @@
 #include <cstdlib>  // mkstemps
 #include <unistd.h> // write, close, ssize_t
 #endif
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h> // GetModuleHandleExW, GetModuleFileNameW: the component library beside cvc.dll
+#elif !defined(__EMSCRIPTEN__)
+#include <dlfcn.h> // dladdr: the component library beside libcvc
+#endif
 
 namespace cvc {
 namespace ariadne {
@@ -39,6 +50,10 @@ std::map<std::string, UriHandler> &uri_registry() {
 }
 std::map<std::string, UriStoreHandler> &uri_store_registry() { // §13.10 write handlers
   static std::map<std::string, UriStoreHandler> r;
+  return r;
+}
+std::map<std::string, UriAsyncHandler> &uri_async_registry() { // non-blocking forms (L4)
+  static std::map<std::string, UriAsyncHandler> r;
   return r;
 }
 
@@ -269,11 +284,25 @@ void register_uri_handler(const std::string &scheme, UriHandler handler) {
     return;
   std::lock_guard<std::mutex> lock(uri_mutex());
   uri_registry()[to_lower(scheme)] = std::move(handler);
+  uri_async_registry().erase(to_lower(scheme)); // the old handler's non-blocking form
 }
 
 void unregister_uri_handler(const std::string &scheme) {
   std::lock_guard<std::mutex> lock(uri_mutex());
   uri_registry().erase(to_lower(scheme));
+  uri_async_registry().erase(to_lower(scheme));
+}
+
+void register_uri_async_handler(const std::string &scheme, UriAsyncHandler handler) {
+  if (scheme.empty() || !handler)
+    return;
+  std::lock_guard<std::mutex> lock(uri_mutex());
+  uri_async_registry()[to_lower(scheme)] = std::move(handler);
+}
+
+bool has_uri_async_handler(const std::string &scheme) {
+  std::lock_guard<std::mutex> lock(uri_mutex());
+  return uri_async_registry().count(to_lower(scheme)) != 0;
 }
 
 bool has_uri_handler(const std::string &scheme) {
@@ -311,12 +340,44 @@ std::vector<std::string> split_env_list(const char *v) {
     out.push_back(cur);
   return out;
 }
+
+// <the file holding libcvc>/../share/libcvc/ariadne: where a relocated install keeps the component
+// library. The compiled-in CVC_ARIADNE_DATA_DIR names the prefix libcvc was built into, which a
+// cvcpkg bundle unpacked anywhere else does not have. The file is libcvc's shared library (lib/ on
+// POSIX, bin/ on Windows), or the program that links it statically. Empty where it can't be found.
+std::string installed_data_dir() {
+  namespace fs = std::filesystem;
+  fs::path module;
+#if defined(_WIN32)
+  HMODULE h = nullptr;
+  if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                             GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                         reinterpret_cast<LPCWSTR>(&installed_data_dir), &h)) {
+    std::wstring buf(32768, L'\0');
+    const DWORD n = GetModuleFileNameW(h, buf.data(), static_cast<DWORD>(buf.size()));
+    if (n > 0 && n < buf.size())
+      module = fs::path(buf.substr(0, n));
+  }
+#elif !defined(__EMSCRIPTEN__)
+  Dl_info info;
+  if (dladdr(reinterpret_cast<const void *>(&installed_data_dir), &info) && info.dli_fname)
+    module = fs::path(info.dli_fname);
+#endif
+  if (module.empty())
+    return std::string();
+  std::error_code ec;
+  const fs::path dir =
+      fs::weakly_canonical(module.parent_path() / ".." / "share" / "libcvc" / "ariadne", ec);
+  return !ec && fs::is_directory(dir, ec) ? dir.string() : std::string();
+}
 } // namespace
 
 std::vector<std::string> cvc_uri_search_dirs(const std::vector<std::string> &extra_search_dirs) {
   std::vector<std::string> dirs = split_env_list(std::getenv("CVC_ARIADNE_PATH"));
   for (const std::string &d : extra_search_dirs)
     dirs.push_back(d);
+  if (const std::string installed = installed_data_dir(); !installed.empty())
+    dirs.push_back(installed); // beside libcvc, wherever the install was unpacked
 #ifdef CVC_ARIADNE_DATA_DIR
   dirs.push_back(
       CVC_ARIADNE_DATA_DIR); // the compiled-in install datadir (<prefix>/share/libcvc/ariadne)
@@ -392,6 +453,48 @@ UriResult resolve(const std::string &uri, const std::string &base) {
     return {false, std::string(), std::string(),
             "ari: URI resolution failed for '" + uri + "' (unknown error)"};
   }
+}
+
+std::function<void()> resolve_async(const std::string &uri, const std::string &base, UriDone done) {
+  // resolve()'s contract on the result: an error for a throwing handler, a non-empty canonical.
+  const auto finish = [uri](UriDone &done, UriResult r) {
+    if (r.ok && r.canonical.empty())
+      r.canonical = uri;
+    if (done)
+      done(std::move(r));
+  };
+  UriAsyncHandler h;
+  Uri u;
+  try {
+    u = parse_uri(uri);
+    std::lock_guard<std::mutex> lock(uri_mutex());
+    const auto it = uri_async_registry().find(u.scheme);
+    if (it != uri_async_registry().end())
+      h = it->second;
+  } catch (...) {
+  }
+  if (!h) {
+    finish(done, resolve(uri, base));
+    return {};
+  }
+  // Only the first answer counts: a handler that answers and then throws, or throws after
+  // starting, still answers once.
+  auto pending = std::make_shared<UriDone>(std::move(done));
+  try {
+    return h(u, base, [pending, finish](UriResult r) {
+      if (UriDone d = std::exchange(*pending, nullptr))
+        finish(d, std::move(r));
+    });
+  } catch (const std::exception &e) {
+    if (UriDone d = std::exchange(*pending, nullptr))
+      finish(d, {false, std::string(), std::string(),
+                 "ari: URI resolution failed for '" + uri + "': " + e.what()});
+  } catch (...) {
+    if (UriDone d = std::exchange(*pending, nullptr))
+      finish(d, {false, std::string(), std::string(),
+                 "ari: URI resolution failed for '" + uri + "' (unknown error)"});
+  }
+  return {};
 }
 
 // --- §13.10 the write side ---------------------------------------------------------------------

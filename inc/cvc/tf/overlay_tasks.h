@@ -42,9 +42,9 @@
 //                and returns the future of its reply; the process parks on it (it costs the
 //                scheduler nothing meanwhile) and the step after the last chunk returns #t.
 //                Chunking keeps the progress note live, and a cancel lands within one job step
-//                (~2 ms). The chunk touches only the job, never state, and reaches the scheduler
-//                only through post_message, its thread-safe ingress (and only while the task
-//                still waits for the reply). (app::compute_async runs each chunk on one of the
+//                (at most ~50 ms). The chunk touches only the job, never state, and reaches the
+//                scheduler only through post_message, its thread-safe ingress (and only while the
+//                task still waits for the reply). (app::compute_async runs each chunk on one of the
 //                app's background-pool workers, not on the compute pool, so this works whatever
 //                the size of the app's compute pool, even with no workers. If no thread can be
 //                started -- compute_async throws when the background pool has no worker and

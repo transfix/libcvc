@@ -1,0 +1,11 @@
+feed: tx.wtf/public           |
+posts: 4                      |
+ada: hello from the fediverse |
+  likes: 3                    |
+grace: coffee at 9?           |
+  likes: 12                   |
+linus: JSON in, widgets out   |
+  likes: 0                    |
+zoë: café 日本 🎉             |
+  likes: 7                    |
+body: {"post":101,"like":true}|

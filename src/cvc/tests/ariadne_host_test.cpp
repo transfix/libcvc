@@ -104,6 +104,21 @@ TEST(AriadneHostCli, RuntimeFlagsComeBeforeTheDocumentAndTheRestIsItsOwn) {
   EXPECT_NE(misplaced_flag_note("ari", o.doc_args).find("'--fps'"), std::string::npos);
 }
 
+TEST(AriadneHostCli, TimeoutIsSecondsAboveZero) {
+  const char *ok[] = {"ari", "test", "--timeout", "2.5", "a.ari", "b.ari"};
+  HostOptions o = parse_host_args(6, ok, {"--tap"});
+  EXPECT_TRUE(o.error.empty()) << o.error;
+  EXPECT_DOUBLE_EQ(o.timeout, 2.5);
+  EXPECT_EQ(o.doc, "a.ari");
+  EXPECT_EQ(o.doc_args, (std::vector<std::string>{"b.ari"})); // ari test reads them as documents
+  for (const char *bad : {"0", "-1", "soon", "2s"}) {
+    const char *argv[] = {"ari", "test", "--timeout", bad, "a.ari"};
+    EXPECT_NE(parse_host_args(5, argv).error.find("--timeout needs a number of seconds"),
+              std::string::npos)
+        << bad;
+  }
+}
+
 TEST(AriadneHostCli, InfoTakesNoDocument) {
   const char *info[] = {"ari", "info", "--json"};
   const HostOptions o = parse_host_args(3, info, {"--json"});
@@ -594,6 +609,187 @@ template <class Pred> bool drain_until(AppRuntime &art, Pred pred) {
   return pred();
 }
 
+// ── (quit [code]), run_program and tests: (ari test) ───────────────────────────────────────────
+
+// Mount a lone button with `on` as its on:, and press it.
+void press_button(AppRuntime &art, FtxuiBackend &be, const std::string &on) {
+  art.set_root(group({button("Go", on)}));
+  be.render_to_string(art.runtime(), 80, 24);
+  be.feed(art.runtime(), TermEvent::key_event("Tab"));
+  be.render_to_string(art.runtime(), 80, 24);
+  be.feed(art.runtime(), TermEvent::key_event("Return"));
+}
+
+// A document that runs `tick` on its first tick only.
+std::string once_on_tick(const std::string &tick) {
+  return "meta: {min_libcvc: 3.4.0}\n"
+         "root:\n  - text: hi\n"
+         "init: (state-set \"t.done\" \"\")\n"
+         "on_tick: |\n"
+         "  (if (= (state-get \"t.done\") \"\") (begin (state-set \"t.done\" \"1\") " +
+         tick + "))\n";
+}
+
+TEST(AriadneQuit, QuitSetsTheExitCodeAndTheFirstOneStands) {
+  REQUIRE_YAML();
+  const fs::path doc = write(test_dir("quit_code"), "q.ari", once_on_tick("(quit 3) (quit 4)"));
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.q");
+  art.set_backend(be);
+  art.register_quit();
+  EXPECT_TRUE(art.runtime().has_function("quit"));
+  art.load(doc.string());
+  EXPECT_EQ(art.exit_code(), 0);
+  ASSERT_TRUE(drain_until(art, [&] { return art.should_close(); }));
+  EXPECT_EQ(art.exit_code(), 3);
+  EXPECT_TRUE(art.take_warnings().empty());
+}
+
+TEST(AriadneQuit, QuitFromInitAndWithNoCode) {
+  REQUIRE_YAML();
+  const fs::path dir = test_dir("quit_init");
+  {
+    cvc::app app;
+    FtxuiBackend be;
+    AppRuntime art(app, "ui.docs.qi");
+    art.set_backend(be);
+    art.register_quit();
+    art.load(write(dir, "i.ari",
+                   "meta: {min_libcvc: 3.4.0}\nroot:\n  - text: hi\n"
+                   "init: (quit 7)\n")
+                 .string());
+    EXPECT_TRUE(art.should_close()); // init: runs in load()
+    EXPECT_EQ(art.exit_code(), 7);
+  }
+  {
+    cvc::app app;
+    FtxuiBackend be;
+    AppRuntime art(app, "ui.docs.qn");
+    art.set_backend(be);
+    art.register_quit();
+    art.load(write(dir, "n.ari", once_on_tick("(quit)")).string());
+    ASSERT_TRUE(drain_until(art, [&] { return art.should_close(); }));
+    EXPECT_EQ(art.exit_code(), 0);
+  }
+}
+
+TEST(AriadneQuit, ABadCodeRaisesAndNothingCloses) {
+  REQUIRE_YAML();
+  const fs::path dir = test_dir("quit_bad");
+  const std::pair<const char *, const char *> cases[] = {
+      {"(quit 256)", "ValueError: quit: the exit code is 0..255, not 256"},
+      {"(quit -1)", "ValueError: quit: the exit code is 0..255, not -1"},
+      {"(quit \"x\")", "TypeError: quit: the exit code is an integer"},
+      {"(quit 1 2)", "TypeError: quit: expected an optional exit code"},
+  };
+  for (const auto &[call, want] : cases) {
+    SCOPED_TRACE(call);
+    cvc::app app;
+    FtxuiBackend be;
+    AppRuntime art(app, "ui.docs.qb");
+    art.set_backend(be);
+    art.register_quit();
+    art.load(write(dir, "b.ari", once_on_tick(call)).string());
+    std::vector<std::string> warnings;
+    ASSERT_TRUE(drain_until(art, [&] {
+      for (std::string &w : art.take_warnings())
+        warnings.push_back(std::move(w));
+      return !warnings.empty();
+    }));
+    EXPECT_NE(warnings.front().find(want), std::string::npos) << warnings.front();
+    EXPECT_FALSE(art.should_close());
+  }
+}
+
+// `on: quit` (a menu item's event) still closes, with code 0.
+TEST(AriadneQuit, TheQuitEventCloses) {
+  REQUIRE_YAML();
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.qe");
+  art.set_backend(be);
+  art.register_quit();
+  press_button(art, be, "quit"); // a menu item's on: quit is the same event
+  art.drain();
+  EXPECT_TRUE(art.should_close());
+  EXPECT_EQ(art.exit_code(), 0);
+}
+
+// run_program reports how the program ended to its callback, and never as a warning.
+TEST(AriadneRunProgram, DoneSaysHowItEnded) {
+  REQUIRE_YAML();
+  const fs::path doc =
+      write(test_dir("run_program"), "r.ari", "meta: {min_libcvc: 3.4.0}\nroot:\n  - text: hi\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.rp");
+  art.set_backend(be);
+  art.load(doc.string());
+  art.drain();
+  std::vector<std::string> how;
+  const auto run = [&](const std::string &script) {
+    const std::size_t before = how.size();
+    art.runtime().run_program(script, [&](const std::string &h) { how.push_back(h); });
+    EXPECT_TRUE(drain_until(art, [&] { return how.size() > before; })) << script;
+  };
+  run("(state-set \"x\" 5)");
+  run("(assert (= (state-get \"x\") 6) \"x is six\")");
+  run("(sleep 0.01) (error \"late\")"); // parks first: it ends on a later drain
+  run("(this is not closed");
+  ASSERT_EQ(how.size(), 4u);
+  EXPECT_EQ(how[0], "");
+  EXPECT_EQ(val(app, "ui.docs.rp.x"), "5"); // chrooted to the document, as an on: is
+  EXPECT_NE(how[1].find("failed: AssertionError: assertion failed: x is six (at (assert"),
+            std::string::npos)
+      << how[1];
+  EXPECT_NE(how[2].find("failed: RuntimeError: late"), std::string::npos) << how[2];
+  EXPECT_FALSE(how[3].empty());
+  EXPECT_TRUE(art.take_warnings().empty());
+}
+
+// An on: action's failure names the program it came from.
+TEST(AriadneRunProgram, AnActionsFailureNamesItsProgram) {
+  REQUIRE_YAML();
+  const fs::path doc = write(test_dir("action_names"), "a.ari", once_on_tick("(set y 1)"));
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.an");
+  art.set_backend(be);
+  art.load(doc.string());
+  press_button(art, be, "(assert (= 1 2)\n  \"one is two\")");
+  std::vector<std::string> warnings;
+  ASSERT_TRUE(drain_until(art, [&] {
+    for (std::string &w : art.take_warnings())
+      warnings.push_back(std::move(w));
+    return !warnings.empty();
+  }));
+  EXPECT_NE(warnings.front().find("action program failed: AssertionError: assertion failed: one "
+                                  "is two"),
+            std::string::npos)
+      << warnings.front();
+  EXPECT_NE(warnings.front().find("[(assert (= 1 2) \"one is two\")]"), std::string::npos)
+      << warnings.front();
+}
+
+TEST(AriadneTests, AppRuntimeKeepsTheTestsBlock) {
+  REQUIRE_YAML();
+  const fs::path doc = write(test_dir("tests_block"), "t.ari",
+                             "meta: {min_libcvc: 3.4.0}\nroot:\n  - text: hi\n"
+                             "tests:\n  one: (assert true)\n  two: (nope)\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.tb");
+  art.set_backend(be);
+  const std::vector<std::string> warnings = art.load(doc.string());
+  ASSERT_EQ(art.tests().size(), 2u);
+  EXPECT_EQ(art.tests()[1].first, "two");
+  bool named = false; // the free-head preflight covers a test's program too
+  for (const std::string &w : warnings)
+    named = named || w.find("test 'two' calls (nope ...)") != std::string::npos;
+  EXPECT_TRUE(named);
+}
+
 // register_async_verb makes an async function (docs/STATE_EXEC_EXCEPTIONS.md 3): (name) parks the
 // program while the work runs on the app's background task pool, and returns its string.
 TEST(AriadneHostVerbs, AnAsyncVerbParksAndReturnsItsValue) {
@@ -673,4 +869,268 @@ TEST(AriadneHostVerbs, AFailingInitIsAWarning) {
   const std::vector<std::string> warns = art.load(doc.string());
   ASSERT_FALSE(warns.empty());
   EXPECT_NE(warns.front().find("init:"), std::string::npos) << warns.front();
+}
+
+// ── §6.6 functions: a document's, and the ones a mount grants its module ─────────────────────────
+
+namespace {
+// Press the only button on screen (Tab to it, Enter).
+void press_only_button(AppRuntime &art, FtxuiBackend &be) {
+  be.render_to_string(art.runtime(), 80, 24);
+  be.feed(art.runtime(), TermEvent::key_event("Tab"));
+  be.render_to_string(art.runtime(), 80, 24);
+  be.feed(art.runtime(), TermEvent::key_event("Return"));
+}
+} // namespace
+
+TEST(AriadneFunctions, EveryLaneOfTheDocumentCallsItsFunctions) {
+  REQUIRE_YAML();
+  const fs::path doc = write(test_dir("fn_lanes"), "f.ari",
+                             "meta: {min_libcvc: 3.4.0}\n"
+                             "functions: |\n"
+                             "  (defun tag (s) (str-concat \"<\" s \">\"))\n"
+                             "  (defun mark (key s) (state-set key (tag s)))\n"
+                             "init: (mark \"t.init\" \"init\")\n"
+                             "on_tick: (mark \"t.tick\" \"tick\")\n"
+                             "root:\n"
+                             "  - button: Go\n"
+                             "    on: (mark \"t.click\" \"click\")\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.fl");
+  art.set_backend(be);
+  const std::vector<std::string> warnings = art.load(doc.string());
+  EXPECT_TRUE(warnings.empty()) << warnings.front(); // the preflight knows tag and mark
+  EXPECT_EQ(val(app, "ui.docs.fl.t.init"), "<init>");
+  ASSERT_TRUE(drain_until(art, [&] { return val(app, "ui.docs.fl.t.tick") == "<tick>"; }));
+  press_only_button(art, be);
+  ASSERT_TRUE(drain_until(art, [&] { return val(app, "ui.docs.fl.t.click") == "<click>"; }));
+  std::string how = "pending";
+  art.runtime().run_program("(assert (= (tag \"t\") \"<t>\"))",
+                            [&](const std::string &h) { how = h; });
+  ASSERT_TRUE(drain_until(art, [&] { return how != "pending"; }));
+  EXPECT_EQ(how, "");
+  EXPECT_TRUE(art.take_warnings().empty());
+}
+
+// A granted function runs in the module: its writes land in the module's own subtree (code is
+// granted, not the parent's state), and a module granted nothing cannot call it.
+TEST(AriadneFunctions, AModuleCallsWhatItsMountGrants) {
+  REQUIRE_YAML();
+  const fs::path dir = test_dir("fn_grant");
+  write(dir, "mod.ari",
+        "init: (record \"init\")\n"
+        "root:\n"
+        "  - button: Go\n"
+        "    on: (record \"click\")\n");
+  const fs::path doc = write(dir, "p.ari",
+                             "meta: {min_libcvc: 3.4.0}\n"
+                             "functions: |\n"
+                             "  (defun stamp (s) (str-concat s \"!\"))\n"
+                             "  (defun record (s) (state-set \"out\" (stamp s)))\n"
+                             "root:\n"
+                             "  - load: mod.ari\n"
+                             "    as: m\n"
+                             "    functions: [record]\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.fg");
+  art.set_backend(be);
+  const std::vector<std::string> warnings = art.load(doc.string());
+  EXPECT_TRUE(warnings.empty()) << warnings.front();
+  be.render_to_string(art.runtime(), 80, 24); // mounts the module, runs its init:
+  EXPECT_EQ(val(app, "ui.docs.fg.includes.m.out"), "init!");
+  EXPECT_EQ(val(app, "ui.docs.fg.out"), ""); // not the parent's
+  press_only_button(art, be);
+  ASSERT_TRUE(drain_until(art, [&] { return val(app, "ui.docs.fg.includes.m.out") == "click!"; }));
+  EXPECT_TRUE(art.take_warnings().empty());
+}
+
+TEST(AriadneFunctions, AModuleGrantedNothingCannotCall) {
+  REQUIRE_YAML();
+  const fs::path dir = test_dir("fn_deny");
+  write(dir, "mod.ari", "root:\n  - button: Go\n    on: (record \"click\")\n");
+  const fs::path doc = write(dir, "p.ari",
+                             "meta: {min_libcvc: 3.4.0}\n"
+                             "functions: |\n  (defun record (s) (state-set \"out\" s))\n"
+                             "root:\n  - load: mod.ari\n    as: m\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.fd");
+  art.set_backend(be);
+  bool told = false; // the preflight names the program in the module
+  for (const std::string &w : art.load(doc.string()))
+    told = told || w.find("widget 'Go' calls (record ...)") != std::string::npos;
+  EXPECT_TRUE(told);
+  press_only_button(art, be);
+  std::vector<std::string> warnings;
+  ASSERT_TRUE(drain_until(art, [&] {
+    for (std::string &w : art.take_warnings())
+      warnings.push_back(std::move(w));
+    return !warnings.empty();
+  }));
+  EXPECT_NE(warnings.front().find("NameError"), std::string::npos) << warnings.front();
+  EXPECT_EQ(val(app, "ui.docs.fd.includes.m.out"), "");
+}
+
+// ── §12 a module's on_tick: ──────────────────────────────────────────────────────────────────────
+
+namespace {
+// A module counting its ticks in its own `n`, seeded by its init:, and stamping each with a
+// function its mount grants.
+const char *kTickModule = "init: (state-set \"n\" 0)\n"
+                          "on_tick: |\n"
+                          "  (state-set \"n\" (+ 1 (int (state-get \"n\"))))\n"
+                          "  (record \"tick\")\n"
+                          "root:\n  - text: counter\n";
+
+int count_of(cvc::app &app, const std::string &path) {
+  const std::string v = val(app, path);
+  return v.empty() ? -1 : std::stoi(v);
+}
+} // namespace
+
+// Its on_tick: runs every drain from its first frame, after its init:, chrooted to the mount with
+// the functions the mount granted; the document's own runs beside it.
+TEST(AriadneModuleTick, RunsAtTheMountWithItsFunctions) {
+  REQUIRE_YAML();
+  const fs::path dir = test_dir("mod_tick");
+  write(dir, "mod.ari", kTickModule);
+  const fs::path doc = write(dir, "p.ari",
+                             "meta: {min_libcvc: 3.4.0}\n"
+                             "functions: |\n"
+                             "  (defun record (s) (state-set \"out\" (str-concat s \"!\")))\n"
+                             "on_tick: (state-set \"own\" \"parent\")\n"
+                             "root:\n"
+                             "  - load: mod.ari\n"
+                             "    as: m\n"
+                             "    functions: [record]\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.mt");
+  art.set_backend(be);
+  const std::vector<std::string> warnings = art.load(doc.string());
+  EXPECT_TRUE(warnings.empty()) << warnings.front(); // the preflight knows record in the module
+  be.render_to_string(art.runtime(), 80, 24);        // mounts the module: init:, then its tick
+  ASSERT_TRUE(drain_until(art, [&] { return count_of(app, "ui.docs.mt.includes.m.n") >= 3; }));
+  EXPECT_EQ(val(app, "ui.docs.mt.includes.m.out"), "tick!");
+  EXPECT_EQ(val(app, "ui.docs.mt.n"), ""); // the parent's subtree is out of its reach
+  EXPECT_EQ(val(app, "ui.docs.mt.out"), "");
+  ASSERT_TRUE(drain_until(art, [&] { return val(app, "ui.docs.mt.own") == "parent"; }));
+  EXPECT_TRUE(art.take_warnings().empty());
+}
+
+// A failing module tick is reported under its mount, once.
+TEST(AriadneModuleTick, AFailureNamesTheMount) {
+  REQUIRE_YAML();
+  const fs::path dir = test_dir("mod_tick_fail");
+  write(dir, "mod.ari", "on_tick: (raise (ValueError \"boom\"))\nroot:\n  - text: m\n");
+  const fs::path doc = write(dir, "p.ari",
+                             "meta: {min_libcvc: 3.4.0}\n"
+                             "root:\n  - load: mod.ari\n    as: bad\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.mf");
+  art.set_backend(be);
+  art.load(doc.string());
+  be.render_to_string(art.runtime(), 80, 24);
+  std::vector<std::string> warnings;
+  ASSERT_TRUE(drain_until(art, [&] {
+    for (std::string &w : art.take_warnings())
+      warnings.push_back(std::move(w));
+    return !warnings.empty();
+  }));
+  EXPECT_NE(warnings.front().find("on_tick: of mount 'ui.docs.mf.includes.bad' resident"),
+            std::string::npos)
+      << warnings.front();
+  EXPECT_NE(warnings.front().find("boom"), std::string::npos) << warnings.front();
+}
+
+// A reconcile that drops the mount stops its tick; one that keeps it (a reload of the same
+// document) leaves it running.
+TEST(AriadneModuleTick, StopsWhenAReconcileDropsTheMount) {
+  REQUIRE_YAML();
+  const fs::path dir = test_dir("mod_tick_drop");
+  write(dir, "mod.ari", kTickModule);
+  const fs::path doc = write(dir, "p.ari",
+                             "meta: {min_libcvc: 3.4.0}\n"
+                             "functions: |\n  (defun record (s) s)\n"
+                             "root:\n  - load: mod.ari\n    as: m\n    functions: [record]\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.md");
+  art.set_backend(be);
+  art.load(doc.string());
+  be.render_to_string(art.runtime(), 80, 24);
+  const std::string n = "ui.docs.md.includes.m.n";
+  ASSERT_TRUE(drain_until(art, [&] { return count_of(app, n) >= 2; }));
+
+  art.load(doc.string()); // the same tree again: the module keeps ticking
+  be.render_to_string(art.runtime(), 80, 24);
+  const int before = count_of(app, n);
+  ASSERT_TRUE(drain_until(art, [&] { return count_of(app, n) >= before + 2; }));
+
+  art.set_root(group({text("gone")}));
+  be.render_to_string(art.runtime(), 80, 24); // the reconcile drops the mount
+  art.drain();                                // anything already woken finishes
+  const int stopped = count_of(app, n);
+  for (int i = 0; i < 20; ++i) {
+    art.drain();
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+  EXPECT_EQ(count_of(app, n), stopped);
+  EXPECT_TRUE(art.take_warnings().empty());
+}
+
+// A repeated mount ticks once per instance, each in its own subtree; an instance the count drops
+// stops.
+TEST(AriadneModuleTick, ARepeatedMountTicksPerInstance) {
+  REQUIRE_YAML();
+  const fs::path dir = test_dir("mod_tick_repeat");
+  write(dir, "mod.ari", kTickModule);
+  const fs::path doc = write(dir, "p.ari",
+                             "meta: {min_libcvc: 3.4.0}\n"
+                             "functions: |\n  (defun record (s) s)\n"
+                             "init: (state-set \"count\" 2)\n"
+                             "root:\n"
+                             "  - load: mod.ari\n"
+                             "    as: m\n"
+                             "    functions: [record]\n"
+                             "    repeat: (int (state-get \"count\"))\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.mr");
+  art.set_backend(be);
+  const std::vector<std::string> warnings = art.load(doc.string());
+  EXPECT_TRUE(warnings.empty()) << warnings.front();
+  be.render_to_string(art.runtime(), 80, 24);
+  const std::string n0 = "ui.docs.mr.includes.m.0.n", n1 = "ui.docs.mr.includes.m.1.n";
+  ASSERT_TRUE(drain_until(art, [&] { return count_of(app, n0) >= 2 && count_of(app, n1) >= 2; }));
+
+  cvc::state::instance(app)("ui.docs.mr.count").value(1);
+  be.render_to_string(art.runtime(), 80, 24); // instance 1 is no longer made
+  art.drain();
+  const int stopped = count_of(app, n1), kept = count_of(app, n0);
+  for (int i = 0; i < 20; ++i) {
+    art.drain();
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+  EXPECT_EQ(count_of(app, n1), stopped);
+  EXPECT_GT(count_of(app, n0), kept);
+}
+
+// The input lanes stay the outermost document's: a module's are ignored, and the load says so.
+TEST(AriadneModuleTick, AModulesInputLanesAreIgnoredWithAWarning) {
+  REQUIRE_YAML();
+  const fs::path dir = test_dir("mod_lanes");
+  write(dir, "mod.ari",
+        "on_key: (state-set \"k\" 1)\non_signal: (state-set \"s\" 1)\nroot:\n  - text: m\n");
+  LoadResult lr = load_file(
+      write(dir, "p.ari", "meta: {min_libcvc: 3.4.0}\nroot:\n  - load: mod.ari\n").string());
+  ASSERT_TRUE(lr.ok) << lr.error;
+  int told = 0;
+  for (const std::string &w : lr.warnings)
+    told += w.find("the fragment's on_key: is ignored") != std::string::npos ||
+            w.find("the fragment's on_signal: is ignored") != std::string::npos;
+  EXPECT_EQ(told, 2);
 }

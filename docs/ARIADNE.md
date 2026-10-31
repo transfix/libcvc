@@ -27,6 +27,7 @@ unfamiliar; every binding, computed field, and handler in an `.ari` document is 
 10. [Async and networking](#10-async-and-networking)
 11. [Caveats — what is not yet wired](#11-caveats--what-is-not-yet-wired)
 12. [Golden-image tests](#12-golden-image-tests)
+13. [Testing a document: `quit`, `assert` and `ari test`](#13-testing-a-document-quit-assert-and-ari-test)
 
 ---
 
@@ -85,9 +86,11 @@ Reactive slots — `visible_when`, `enabled_when` / `disabled_when`, computed `b
 - The value allowlist admits arithmetic, coercion, logic, and side-effect-free state
   *readers* only (`kAllowed`, [`ariadne.cpp:417`](../src/cvc/ariadne/ariadne.cpp)), plus
   `(has? "name")`, which asks what the host provides
-  ([§5.7](#57-requires-and-has--what-a-document-needs-from-its-host)).
+  ([§5.7](#57-requires-and-has--what-a-document-needs-from-its-host)). `json-parse` and
+  `json-encode` are on it ([§10.4](#104-json-replies)); `str-concat` is not, so a computed
+  label joins its parts with `string.join`.
 - The special-form gate admits only `if / begin / let / while / for / lambda / defun /
-  set / return / quote / yield / break` (`kAllowedForms`,
+  set / return / quote / yield / break / and / or` (`kAllowedForms`,
   [`ariadne.cpp:433`](../src/cvc/ariadne/ariadne.cpp)).
 
 Nothing that writes state, schedules, watches, sends messages, or does I/O is
@@ -192,6 +195,13 @@ is wall-capped at `kResidentStepSeconds = 0.05`
 ([`ariadne.cpp:1497`](../src/cvc/ariadne/ariadne.cpp)). On teardown they are reaped as a
 group via their owner tag.
 
+A `load:`ed module's own `on_tick:` is a tick resident too, one per mount (§6.3): chrooted to the
+mount's sub-prefix, with the mount's functions (§6.6), on the channel
+`<owner>#tick@<sub-prefix>`, and woken with the document's each drain. It starts the first frame
+the mount is drawn, right after the module's `init:`, so a module in a tab that is not open starts
+when the tab opens. From then on it runs whether or not the mount is drawn, until a reconcile
+drops the mount (§7.4) or the document goes. A module has no input lanes of its own (§6.3).
+
 ### 2.4 Errors in actions and residents
 
 Handlers raise and catch exceptions like any state_exec program, with `try`/`catch`/`finally`,
@@ -204,12 +214,14 @@ drain sweep warns once per message, through the warnings `take_reactive_warnings
 
 | What ended | Warning |
 |---|---|
-| an action, by an exception | `ari: on: action program failed: Class: message (at <where>)` |
-| a resident, by an exception | `ari: resident [<channel>] failed: Class: message (at <where>)` |
-| an action, by a kill (its step or time cap, a syntax error found while reading it) | `ari: on: action program did not complete: <reason>` |
-| a resident, by a kill | `ari: resident [<channel>] stopped: <reason>` |
+| an action, by an exception | `ari: on: action program failed: Class: message (at <where>) [<program>]` |
+| a resident, by an exception | `ari: <lane> resident [<channel>] failed: Class: message (at <where>)` |
+| an action, by a kill (its step or time cap, a syntax error found while reading it) | `ari: on: action program did not complete: <reason> [<program>]` |
+| a resident, by a kill | `ari: <lane> resident [<channel>] stopped: <reason>` |
 
-`<where>` is the innermost line of the exception's traceback. An `init:` program that fails
+`<where>` is the innermost line of the exception's traceback. `<program>` is the action's text on
+one line, cut at 80 characters, and `<lane>` is `on_tick:`, `on_key:`, `on_pointer:`,
+`on_signal:`, or `on_tick: of mount '<sub-prefix>'` for a module's tick. An `init:` program that fails
 reports `failed: Class: message (at <where>)` to its caller.
 
 **Keeping a resident alive.** A resident is one process for the life of the document. An
@@ -299,7 +311,8 @@ Three backends ship:
   So the whole tree is interactive:
   - **keyboard** — Tab / Shift-Tab (or Up / Down) move focus; Enter / Space activate;
     Left / Right step a slider or cycle a combo or radio; text fields edit in place; Esc
-    reverts an edit or closes a popup; F10 opens the menu bar.
+    reverts an edit or closes a popup; F10 opens the menu bar. An `autofocus:` widget has focus
+    when it appears (§5.10).
   - **mouse** — click to focus or activate, pick a radio's option, drag a slider, drag a
     window by its title bar, click `[x]` to close it, click a menu title to open it.
   - **windows** (`caps.windows = true`) — free, z-ordered, raised on focus, placed from
@@ -436,8 +449,10 @@ The built-in top-level keys (`is_builtin_block`,
 ```
 meta  menubar  windows  overlays  root (alias: children)  scene  customs  requires
 init  on_tick  on_key  on_pointer  on_signal  keys  units  import  channels  lint  args
-windows_menu
+windows_menu  tests  functions
 ```
+
+`tests:` is read only by `ari test` (§13).
 
 Any **other** top-level key is dispatched to a parser registered via
 `register_ari_block`, or — if none is registered — **silently ignored**. This is
@@ -975,11 +990,18 @@ How each backend does it:
   widgets each frame, its labeled widgets at the width ImGui gives an auto-resizing window's items
   (16 font sizes), and a row-split pane as wide as its own widgets. A window with a size gets a
   horizontal scroll bar as well as ImGui's vertical one, and a long label shrinks its slider,
-  input, combo or colour widget rather than run past the window's edge.
+  input, combo or colour widget rather than run past the window's edge. A
+  `layout: {kind: horizontal}` row with no `col_widths` puts its cells side by side on one line,
+  each at its natural width, as the terminal backends do. One with `col_widths` is an ImGui table
+  with a column per entry. `borders` and `resizable` need that table, so a row using them needs
+  `col_widths` as well; without it the table has one column.
 - **The terminal backends** lay a window with no size out at its content's size every frame,
   and cascade new windows instead of flowing them. A window that would run off the screen stops at
   the screen's edge, and a window whose content is larger than it is (or than its `size:`) gets a
   scroll bar. Its body scrolls to keep the focused widget in view; there is no wheel scrolling.
+  On the tvision desktop, tvision's frame holds the window, and the host refits that frame to the
+  content in each axis the document did not size, until the user resizes the window with the
+  frame's own corner; from then on it keeps the user's size.
 
 ### 5.9 Closing and reopening windows: the Windows menu
 
@@ -1021,6 +1043,31 @@ the backend's ordinary menu functions), so the ImGui menu bar, the FTXUI menu ba
 host's menu bar all show it, and its items toggle the same state the close buttons write. The open
 state lives in the document's state tree like the geometry (§11.4): it holds for the run and
 across a reload, but not across runs.
+
+### 5.10 Forms: `autofocus:` and `password:`
+
+```yaml
+windows:
+  - window: Sign in
+    visible_when: (= (state-get "auth.state") "out")
+    children:
+      - { input_text: User, bind: auth.user, autofocus: true }
+      - { input_text: Password, bind: auth.pass, password: true }
+      - { button: Sign in, on: auth.submit }
+```
+
+- **`autofocus: true`** on any widget gives keyboard focus to it, or to the first focusable
+  widget inside it, when it appears: on the first frame it is drawn, and again each time it comes
+  back after a frame without it (its window reopened, its `visible_when` true again, a `repeat:`
+  instance added). It does not hold focus: the user tabs or clicks away as usual. With several in
+  one frame, the last one drawn wins. The FTXUI and tvision backends move their focus to it; ImGui
+  sets keyboard focus to the next widget (`SetKeyboardFocusHere`), so on an `input_text` it
+  starts typing there. A field without it is focused only when the user moves to it.
+- **`password: true`** on an `input_text` masks it on screen: ImGui draws its password field (a
+  mask, and no copy or cut of the text), and the terminal backends show a `•` per character. It
+  is masking only. The text is the bound state key's value like any field's, so it is as readable
+  to scripts, `state://`, replication and the persisted tree as any other key; a document keeps a
+  secret out of shared state by clearing the key once it has used it.
 
 ## 6. Composition: include / import / load
 
@@ -1085,7 +1132,21 @@ based at its own directory. Guards: a resolved-URI cycle set, a per-chain depth 
 depth cap alone would miss. The mount id is the explicit `as:`, else it is derived from
 the URI basename, sanitized to a single state segment, with sibling duplicates
 disambiguated `_2` / `_3`. A mounted module is sandboxed to its own state sub-prefix
-(§7) and reaches the parent only through explicitly granted `link:` holes.
+(§7) and reaches the parent only through explicitly granted `link:` holes, and calls only the
+functions its mount grants (§6.6).
+
+A module's own programs are its `init:`, its `on_tick:` and its widgets' actions. The loader
+captures `init:` and `on_tick:` onto the mount wrapper (`Widget::init_script`,
+`Widget::tick_script`), and the runtime runs both at the sub-prefix with the mount's functions:
+`init:` once, `on_tick:` as the mount's own tick resident (§2.3). So a module can own a loop, a
+request poller say, and be tested on its own with `ari test` (§13).
+
+`on_key:`, `on_pointer:` and `on_signal:` stay the outermost document's. A fragment that declares
+one loads with a warning, and the handler is ignored. Raw input and signals belong to the
+document, not to whatever it mounts: a module that saw every key could read what is typed into
+the parent's fields, and two modules could not both decide what Ctrl-C does. A module reacts to its
+own widgets. When it needs more, the parent handles the event and passes on what the module needs
+through a `link:` hole, which the module's `on_tick:` can read.
 
 ### 6.4 The URI resolver
 
@@ -1101,9 +1162,11 @@ resolver ([`inc/cvc/ariadne/uri.h`](../inc/cvc/ariadne/uri.h)):
   `arigl --net-allow ...`, §10.3), or by a host calling `register_http_uri_handler()` (or the
   cached variant). It is *not* registered by default — see the caveats (§11).
 - **`cvc://<relpath>`** — a location-independent component path, searched along
-  `$CVC_ARIADNE_PATH` → host-supplied extra dirs → the install datadir
-  `<prefix>/share/libcvc/ariadne` → cwd (`register_cvc_uri_handler`). Use this for
-  shipped components so a document does not hard-code install paths.
+  `$CVC_ARIADNE_PATH` → host-supplied extra dirs → `share/libcvc/ariadne` beside the file
+  holding libcvc (`<lib>/..` or `<bin>/..`, so a relocated install such as a cvcpkg prefix
+  finds its own library) → the compiled-in install datadir `<prefix>/share/libcvc/ariadne`
+  → cwd (`register_cvc_uri_handler`). Use this for shipped components so a document does
+  not hard-code install paths.
 
 The `canonical` field is the identity used for cycle-guarding and for resolving
 relative bases in nested composition.
@@ -1135,6 +1198,68 @@ root, where the component path resolves:
 
 ---
 
+### 6.6 `functions:` — code a document shares with its programs and its modules
+
+`defun` inside a program defines a function for that program alone, and the stdlib scope is
+frozen. A document declares the functions all of its programs can call in a top-level
+`functions:` block, and grants some of them to the modules it `load:`s.
+
+```yaml
+functions: |
+  ; a scalar state_exec program of (defun name (params) body...) forms, nothing else
+  (defun semver-part (v i) (int (nth (string.split v ".") i)))
+  (defun semver-major (v) (semver-part v 0))
+  (defun fetch-text (url)
+    (set r (http-get url))
+    (bytes.decode (get-attr r "body")))
+init: (state-set "major" (str (semver-major "3.7.5")))
+root:
+  - button: Refresh
+    on: (state-set "latest" (fetch-text "https://example.org/version"))
+  - load: badge.ari
+    as: badge
+    link: {server: {to: args.server, mode: ro}}
+    functions: [semver-major]          # a list of names, one name, or "*" for all of them
+```
+
+- **Declaring.** The block is split into its top-level forms. Each must be
+  `(defun name (params) body...)`; anything else (a `set`, a bare atom, a form that does not
+  parse) is skipped with a warning. When a name is defined twice, the later definition stands,
+  with a warning.
+- **Who can call them.** Every program in the document's scope: `init:`, every `on:` action,
+  the residents (`on_tick:`, `on_key:`, `on_pointer:`, `on_signal:`), key bindings, `tests:`
+  (§13), and the functions themselves. The read lane (`bind:`, `visible_when:` and other reactive
+  expressions) has its own reduced environment and does not get them.
+- **`import:`.** A library's `functions:` merge into the importer's, as its `units:` do. When two
+  imports define the same name, the later one stands, with a warning. The document's own
+  definition replaces an imported one silently. A library of functions with an `ari test`
+  document that imports it is a unit test (§13).
+- **Granting.** A `load:` entry's `functions:` names the functions its module may call. They come
+  from the parent's scope: its own, its imports', and the ones its own mount granted, so a grant
+  can pass down nested mounts. A granted function brings along the parent's functions it calls,
+  transitively, and the module can call those too. A name the parent does not define is skipped
+  with a warning. A module whose mount grants nothing gets none: it is isolated by default, as
+  its state is.
+- **A module's own.** A loaded fragment may have its own `functions:` and `import:`s. They are
+  visible inside the module only, never to its parent. One that replaces a granted function of
+  the same name warns.
+- **Code, not authority.** A function runs in the program that calls it. In a module it is
+  chrooted to the module's sub-prefix (§7.3), so `(state-set "out" ...)` writes
+  `includes.<as>.out`, and it reaches the parent's state only through the module's `link:` holes.
+  Granting a function never grants state.
+- **How they run.** The functions are a prelude, their sources one per line, that the runtime
+  runs ahead of each program in the scope (`Widget::functions`, a `FunctionScope` on the root and
+  on every mount wrapper). Each program defines them in its own process at the start, at about one
+  step per function against the action's step budget (§7.4 limits), so no closure or environment
+  is shared between processes. A resident defines them once, before its loop.
+- **Checked at load.** The free-head preflight (§5.7) knows each scope's functions. A program that
+  calls a function its scope lacks, such as a module calling one its mount did not grant, gets
+  the same "this host does not provide" warning as a missing host verb. The function bodies are
+  checked too, as `functions:`.
+
+`LoadResult::functions` lists the document's functions, and `LoadResult::root.functions` holds the
+same as a `FunctionScope`. A mount's are on its wrapper widget.
+
 ## 7. State prefix and mount scoping
 
 ### 7.1 The one bind rule
@@ -1153,7 +1278,11 @@ Widgets and scene binds use the same rule, which is why a widget `bind:` and a s
 
 **Grid sizes (§11.4).** A grid the user can resize keeps its sizes under its id, the way a
 window keeps `tree.<id>.geometry`: a row split's pane heights in `tree.<id>.tracks`, a
-resizable table's column widths in `tree.<id>.columns`. Both are comma-separated px, one
+resizable table's column widths in `tree.<id>.columns`. A grid's id is its `id:`, else its
+`label:`, else one the walk makes from where the grid sits in the document (`~0_2_1`, the child
+index at each level), so two unnamed grids in one window never share a backend table or a key.
+That id moves when the document's structure above the grid changes, so give a grid whose sizes
+should outlast such an edit an `id:`. Both are comma-separated px, one
 entry per track. The walk seeds the backend from the key before the grid opens (each
 backend applies it once, so a live drag wins) and writes back what the backend reports after
 it closes; the write is skipped when nothing changed. A `0` entry means "not set": that
@@ -1223,7 +1352,15 @@ part of what the parent granted), an opaque one is not. `state-delete`, the expi
 and `state-watch` still act on the physical path and do not reach through a hole. A fragment may declare
 the holes it expects with `needs:`; an ungranted expectation warns and the fragment falls
 back to a local (fail-safe) binding. A per-mount `init:` runs once at the sub-prefix
-**after** the holes are wired.
+**after** the holes are wired, with the module's functions (§6.6). The mount's `on_tick:`
+resident starts right after it (§2.3). A reconcile keeps that resident running when the new tree
+has the same mount at the same sub-prefix with the same program (its body and its functions), as
+a reload of an unchanged document does, and stops it otherwise. A repeated mount's resident runs
+per instance and restarts at a reconcile. An instance stops when its outermost `repeat:` count
+drops below it (a nested repeat's count is not watched: its instances stop at the next
+reconcile). A module's functions come
+only from its own `functions:` and the mount's `functions:` grant, never from its parent
+implicitly.
 
 ---
 
@@ -1369,6 +1506,7 @@ the terminal with no GL, VTK, or ImGui:
 ari run      [flags] doc.ari [document args...]   # take over the terminal
 ari snapshot [flags] doc.ari [document args...]   # print a frame (--width W --height H --frames N --ansi)
 ari check    [flags] doc.ari                      # load + warnings
+ari test     [flags] doc.ari...                   # headless test run (§13)
 ```
 
 Its flags (`--backend ftxui|tvision`, `--prefix P`, `--fps N`, `--no-mouse`,
@@ -1387,17 +1525,19 @@ clearing the screen, at the terminal's cell size (`--cell-size WxH` where it can
 
 `ari` is its own cvcpkg package (`cvcpkg install ari`, linux for now), built from
 [`cvcpkg/recipes/ari`](../cvcpkg/recipes/ari/recipe.yaml) against the installed libcvc,
-like `cvc-cli`. It is a thin host over `AppRuntime` with no `SceneAdapter`; it routes
-`on: quit` and a `(quit)` verb to `request_close()`, and an OS signal the document does not
+like `cvc-cli`. It is a thin host over `AppRuntime` with no `SceneAdapter`. Its
+`register_quit()` routes `on: quit` and the `(quit [code])` verb to `request_close(code)`, and
+`run`, `snapshot` and `check` exit with `exit_code()` (§13). An OS signal the document does not
 handle ends it with exit status 128 + the signal number. Embedding the same thing:
 
 ```cpp
 cvc::ariadne::FtxuiBackend backend;          // outlives the AppRuntime
 cvc::ariadne::AppRuntime rt(app, prefix);    // no SceneAdapter: a scene: is dropped
 rt.set_backend(backend);
-rt.on("quit", [&] { rt.request_close(); });
+rt.register_quit();                          // on: quit and (quit [code])
 rt.load(path);
 backend.run(rt);  // owns the terminal; drains every iteration; returns on quit / Ctrl-C
+return rt.exit_code();
 ```
 
 To route OS signals as well, install your handlers in `RunOptions::on_start` (it runs after
@@ -1512,7 +1652,44 @@ charged to the action's caps (§2.2). `register_async_verb(name, done_channel, f
 the result to `done_channel`, for documents that wait with `(msg-recv "done_channel")`. `AriRuntime` also exposes `step`, `run`, `on`, `post_key`, `post_pointer`,
 and `reload_if_changed`.
 
-### 9.4 From Python (DSL only, via `pycvc.Exec`)
+### 9.4 A document set, installed or served
+
+An app written as `.ari` documents ships them as a directory: `main.ari` and the files it
+imports, relative to itself (`import: lib/feed.ari`, `load: ../shared/panel.ari`), plus any
+`cvc://components/...` it takes from the shipped library (§6.5). The same directory runs in
+both hosts without changes.
+
+**Installed** (`share/<app>/`, from the app's cvcpkg recipe, which depends on the `arigl`
+or `ari` package): `arigl run <prefix>/share/<app>/main.ari`, or in the terminal
+`ari run <prefix>/share/<app>/main.ari` (FTXUI, or `--backend tvision`), from any working
+directory. Both runtimes load through the same loader. Every relative reference resolves
+against the directory of the file that makes it, and `cvc://` finds the component library
+beside the libcvc in the same prefix (§6.4). A launcher only has to pass the path and its
+flags. `ctest -R '(ari|arigl)_docset'` checks this with
+[`src/cvc/tests/data/ariadne_docset`](../src/cvc/tests/data/ariadne_docset/app/main.ari).
+
+**Served** (any site path, e.g. `/apps/<app>/`): put the `arigl-web` package's files (the
+stock browser host) beside the documents and open `/apps/<app>/?src=main.ari`. The package's
+`ari.html` runs the same documents in ari's terminal backend, in an xterm.js terminal:
+`/apps/<app>/ari.html?src=main.ari`. Either runtime fetches the document and, before the app
+starts, every file it names by a relative path
+(`import:`, `load:`, `vinay:`, and the files those name), writing each at its URL path in
+the browser's file system. Then it runs the local copy, so relative references resolve as
+they do on disk ([`web_document.h`](../inc/cvc/ariadne/web_document.h),
+[`doc_fetch.h`](../inc/cvc/ariadne/doc_fetch.h)). By default the
+document must be on the page's own origin. The page's `ariadne.config.json` names the
+document, any other origins it may come from, the host flags (the network flags `--net` and `--net-allow`, ...), and
+the extra data files to fetch; both pages read the same file. The URL can only add document
+arguments. A failed load shows what the runtime printed: an error page in arigl-web, the
+terminal itself in `ari.html`. [CVCGL_WASM.md](CVCGL_WASM.md#arigl-web-the-stock-browser-host)
+has the details, the sizes, and what wasm-mt needs.
+
+A path the document hands a scene source or a data reader (`source: { file: ... }`) is
+relative to the working directory, not to the document. The browser shell runs in the
+document's directory. Natively the working directory is the caller's, so a launcher for
+such a document `cd`s to its directory first.
+
+### 9.5 From Python (DSL only, via `pycvc.Exec`)
 
 If you only need to run `state_exec` programs against an app's tree (no widgets, no
 scene), `pycvc.Exec` ([`bindings/pycvc/pycvc_exec.h`](../bindings/pycvc/pycvc_exec.h))
@@ -1613,6 +1790,28 @@ In an Ariadne document's action lane, the network verbs are (from
   (`ariadne.limits.*`, §2), so charged like other calls no action could make one. The
   transport's own timeouts (10 s to connect, 30 s in all) and its 64 MiB reply cap bound a
   request instead.
+- **In a browser build without threads** (the single-threaded wasm pages: `ari.html`, arigl's
+  page) there is no background pool to wait on: its jobs run on the page's main thread, between
+  frames. There the verbs start the request instead of sending it
+  (`cvc::net::HttpClient::start`, a browser fetch) and return to the frame loop at once. The
+  calling program parks as it does natively, frames keep drawing and taking input, and the
+  fetch's callback posts the reply to the scheduler, which resumes the program on a later
+  frame. So a spinner (or a document's own progress bar between `(await f 0.05)` slices)
+  animates while a request is out. The contract is the same as natively: the reply dict, the
+  host's policy, `auth` / `capture_auth` and credential values (the token goes in and comes out
+  in C++ as the reply arrives), a 30 s timeout (the reply's `error` says it timed out), the 64
+  MiB cap (enforced as the body arrives), and a killed or reaped program aborts its fetch.
+  `fetch` of an `http(s)` URI is started the same way, through the http handler's non-blocking
+  form (`register_uri_async_handler`, `resolve_async` in [`uri.h`](../inc/cvc/ariadne/uri.h)); a
+  host that registers its own `http` handler in its place gets the blocking call for it. Two
+  things still wait in place in that build: a call where the program can't park (a generator's
+  body, a recursive evaluator), which runs the request inline as natively; and the loads the
+  host makes itself, outside any program: an `https` `import:`/`load:` while the document loads,
+  and a scene's `source:` mesh or texture URL when the scene is realized
+  (`resolve_to_file`). Those use the blocking `cvc::net::send()`, which yields to the browser
+  under Asyncify but holds the frame that called it. (The browser pages fetch a document's
+  relative imports themselves before it loads.) In builds with threads (native, wasm-mt) the
+  request runs on the background pool as before.
 
 ### 10.3 The host's network: the allowlist and credentials
 
@@ -1731,7 +1930,81 @@ A host of its own turns the network on with `AppRuntime::enable_net(NetHostConfi
 destroyed. `register_net_intrinsics(app)` alone still registers unchecked verbs with no
 credentials, for an embedding program that vouches for its documents.
 
+### 10.4 JSON replies
+
+A REST reply's body is text. Three verbs turn it into widgets
+([STATE_EXEC_DEVELOPER_GUIDE.md](STATE_EXEC_DEVELOPER_GUIDE.md) §2, "JSON", has the details):
+
+- `(json-parse text)` reads JSON into values: an object is a dict in document order, an array
+  a list, a number without a fraction or exponent an int, `null` nil. Malformed text raises a
+  `ValueError` with `line` and `col`, which a `try` can catch.
+- `(json-encode value [indent])` writes values as JSON, for a request body.
+- `(state-set-tree path value)` writes a parsed value as the subtree at `path`: a dict's keys
+  and a list's indices name child nodes, and a scalar is a node's value. A list's node holds
+  its length, so `repeat:` can count it. It replaces the subtree, removing what the value
+  doesn't name, and it checks the whole value before it writes anything.
+
+```yaml
+init: |
+  (state-set-tree "feed" (json-parse (get-attr (http-get "https://example.org/feed") "body")))
+windows:
+  - window: Feed
+    children:
+      - type: group
+        repeat: (state-get "feed.items")     # the list's length
+        children:
+          - text: ""
+            bind: feed.items.{i}.text         # each element's field
+```
+
+The request needs the host to allow its origin ([§10.3](#103-the-hosts-network-the-allowlist-and-credentials),
+`ari --net-allow https://example.org`).
+[`examples/ariadne/documents/json_feed.ari`](../examples/ariadne/documents/json_feed.ari) does
+this with a JSON string in place of the request, so it runs anywhere, `ari` included. Its last
+post has accented letters, CJK and an emoji: in both terminal backends a wide glyph takes two
+columns and the window's edge stays straight. `ari_run_json_feed_ftxui` and
+`ari_run_json_feed_tvision` check that on a real terminal: they run `ari run` in a tmux pane
+(Linux, where tmux is installed) and compare the window's rows. `ariadne_ftxui_test`'s
+`JsonFeed*` and `WideGlyphs*` tests check `ari snapshot` and the tvision backend's hosted layout;
+until they did, `ari snapshot`'s plain text put a space after each wide glyph. All
+three are data jobs: a large reply is parsed and written a slice per step, so it doesn't stall
+a frame. `json-parse` and `json-encode` are pure, so reactive expressions may use them too.
+
 ---
+
+### 10.5 WebSockets
+
+The `ws-*` verbs keep a WebSocket client open across ticks, for a server that pushes changes
+(a live feed) instead of being polled. Natively they use libcurl's WebSocket support (built with
+`ws` and `wss`, as the deps' libcurl is); in the browser build, the browser's own `WebSocket`
+(link with `-lwebsocket.js`, which the `cvc` target adds for Emscripten executables). A host
+without either has no `ws-*` verbs, so a document asks `(has? "ws-open")` and polls otherwise.
+
+| verb | what |
+|---|---|
+| `(ws-open URL [OPTS])`, `ws-open-async` | connect to a `ws://` or `wss://` URL; reply `{ok handle url error}` |
+| `(ws-send H TEXT)` | send a text message; `#t`, or an error when `H` is closed |
+| `(ws-poll H)` | the next message already in, or `nil`; never waits |
+| `(ws-recv H [SECONDS])`, `ws-recv-async` | the next message, waiting up to `SECONDS` (30); `nil` when none came |
+| `(ws-open? H)` | whether `H` is still open |
+| `(ws-close H [CODE])` | close `H` (code 1000) and forget it; `#t` if it was open, never an error |
+
+- `H` is a handle string (`"ws:3"`), so a program can keep it in state and use it on later
+  ticks. A host keeps at most 64 open.
+- A message is a dict `{type data code}`: `type` is `"text"` (`data` a string, ready for
+  `json-parse`), `"binary"` (`data` bytes), `"close"` (`code` the peer's close code, 1005 when it
+  sent none and 1006 when the connection dropped; `data` its reason) or `"error"`. A close or
+  an error is the last message; `ws-open?` is `#f` from then on. Fragmented messages arrive
+  whole; one longer than 16 MiB is an error and closes the connection.
+- `OPTS` takes `query`, `headers`, `auth` and credential values as the HTTP verbs do (§10.2,
+  §10.3), plus `timeout`, the seconds to connect (15). A browser's `WebSocket` can't send
+  request headers, so there `headers` and `auth` are refused; a server that wants a token takes
+  it in a message instead.
+- The host's policy (§10.3) checks the URL as its `http(s)` twin: `--net-allow
+  https://example.org` allows `wss://example.org/...`.
+- `ws-open` and `ws-recv` are async I/O calls like the HTTP verbs: the connect, or the wait,
+  runs on the background pool and the program parks. `ws-poll` is the one to call from an
+  `on_tick` that also does other work: it takes what has arrived and returns.
 
 ## 11. Caveats — what is not yet wired
 
@@ -1886,8 +2159,9 @@ ImGui overlay compiled as inert stubs.
 
 **Gaps the goldens step around (2026-10-19):**
 
-- `layout: {kind: horizontal}` is ignored on a window body, and the embedded schema rejects the
-  `size: {hint, min, max}` map and `"50%"` strings that the loader accepts.
+- The embedded schema rejects the `size: {hint, min, max}` map and `"50%"` strings that the
+  loader accepts. (A `layout: {kind: horizontal}` row with no `col_widths` drew as one column in
+  ImGui until 2026-10-30; it now draws its cells side by side, §5.8.)
 
 ---
 
@@ -1895,3 +2169,107 @@ ImGui overlay compiled as inert stubs.
 [`STATE_EXEC_DEVELOPER_GUIDE.md`](STATE_EXEC_DEVELOPER_GUIDE.md),
 [`APP_API.md`](APP_API.md), and the normative spec
 [`roadmap/CVCGL-UI-DSL-ROADMAP.md`](roadmap/CVCGL-UI-DSL-ROADMAP.md).
+
+---
+
+## 13. Testing a document: `quit`, `assert` and `ari test`
+
+Three pieces let a document test itself, and a CI job run those tests with no terminal.
+
+**`(quit [code])`.** A host verb every stock host registers (`AppRuntime::register_quit()`:
+`ari`, `arigl` in a window and with `--terminal`). It asks the host to close, with `code` (an
+integer 0..255, default 0) as its exit status. `ari run`, `snapshot` and `check` and `arigl`'s
+commands exit with that code. The first request's code stands, a later `(quit)` does not change
+it, and the program that called it keeps running to its end. A code that is not an integer is a
+`TypeError`, and one outside 0..255 a `ValueError`; neither closes anything. A menu item's
+`on: quit` is the same request with code 0. `(quit 3)` in `init:` makes `ari check` exit 3,
+since `check` runs `init:`. `snapshot` stops at the frame in which the document quit.
+
+**`(assert cond [message [data]])`.** A state_exec builtin, in every lane that has the builtins
+(not the read lane's reduced environment). It returns nil when `cond` is truthy and otherwise
+raises an `AssertionError` (a subclass of `Exception`, not of `RuntimeError`) with the message
+`assertion failed` or `assertion failed: <message>`, and `data` as its data. `try` catches it
+like any exception. Uncaught, its report ends with the `(assert ...)` form that failed, from the
+exception's traceback:
+
+```
+AssertionError: assertion failed: one and one (at (assert (= (+ 1 1) 3) "one and one"))
+```
+
+**The `tests:` block.** A map of test name to program, run by `ari test` and ignored by every
+other host:
+
+```yaml
+meta: {min_libcvc: 3.7.5}
+init: |
+  (state-set "query" "zlib")
+root:
+  - text: (state-get "query")
+tests:
+  reads_init: |
+    (assert (= (state-get "query") "zlib") "init: ran first")
+  fetches: |                            # a test may wait: (await), (sleep), a request
+    (set r (http-get "http://127.0.0.1:8080/ping"))
+    (assert (= (get-attr r "status") 200) (get-attr r "error"))
+```
+
+Each test runs as an `on:` action program would, chrooted to the document's prefix, with the
+document's host verbs, functions (§6.6) and limits. The tests run one at a time, in document order, starting
+after `init:` and the first frame, and each starts once the one before has ended. A test fails
+when it raises an exception it doesn't catch, or is killed (a step or time cap, a syntax error).
+The rest still run. The loader's free-head check (§5.7) covers test programs too.
+
+**`ari test [flags] doc.ari...`.** Runs each document in turn, headless: a fresh app and state
+tree per document, laid out each frame by the FTXUI backend at `--width` x `--height` (100 x 30)
+as `snapshot` does, but never drawn. There is no input. A document runs until the first of:
+
+- it calls `(quit code)` (an `on: quit` cannot fire with no input);
+- its `tests:` have all ended;
+- `--frames N` frames have run (default: no limit);
+- `--timeout S` seconds have passed (default 30), which is a failure.
+
+A document with no `tests:` therefore ends with `(quit code)`, from `init:`, `on_tick:` or a
+program it starts, or runs a fixed number of frames with `--frames`.
+
+A document **fails** when:
+
+- its load fails, or warns (an unknown widget, no `meta.min_libcvc`, a failed `init:`, a free
+  head the host lacks, ...);
+- a program raises an exception nothing catches (an `assert` included) or is killed: an `on:`
+  action, a resident (`on_tick:`, ...), or a read-lane expression that fails. The run stops at
+  the first such warning;
+- a test fails;
+- it quits with a non-zero code, or quits before all its tests have ended;
+- it times out.
+
+The network is as `snapshot`'s (§10.3): off unless `--net`, `--net-allow`, `--net-policy` or
+`--credential-store` turns it on. A test that makes a request waits for its reply as any program
+does. A document run for `--frames N` with the network on waits after its frames, as `snapshot`
+does, until its requests have come back (at most 10 s), and a warning in that time fails it too.
+`--prefix`, `--component-path` and `--image` work as for `snapshot`. A document has no command
+line of its own under `ari test`: an `args:` block's arguments take their defaults. Flags go
+before the first document.
+
+The output is one line per document, then what failed, one line each, and a summary:
+
+```
+ok   tests/semver.ari (3 tests, 0.02 s)
+FAIL tests/search.ari (4 tests, 0.11 s)
+     test 'bad' failed: AssertionError: assertion failed: one and one (at (assert (= (+ 1 1) 3) "one and one"))
+     test 'raises' failed: RuntimeError: boom (at (error "boom"))
+FAIL tests/tick.ari (0.01 s)
+     on_tick: resident [ari#2:ui.docs.ari#tick] failed: AssertionError: assertion failed (at (assert (= 1 2)))
+ari test: 3 documents, 2 failed
+```
+
+Each failure line names its program: `test '<name>'`, `init:`, `on_tick:` (or another
+resident's lane), or for an `on:` action its text in brackets at the end (§2.4). `--tap` prints
+TAP version 13 instead: the plan, `ok N - doc # detail` or `not ok N - doc # detail`, and each
+failure as a `# ` line, with no summary. A document's own `(print ...)` output goes to stdout
+between the lines. `ari test` exits 0 when every document passed, 1 when any failed, and 2 on a
+usage error.
+
+Interactive behaviour, keys and both terminal backends are tested by driving `ari run` in tmux,
+as `src/ari/tests/run_in_tmux_test.sh` (transfix/libcvc#883) does. Scripted input for `snapshot` and `test`, and file
+descriptors as state channels, are on the agenda (transfix/libcvc#894).
+

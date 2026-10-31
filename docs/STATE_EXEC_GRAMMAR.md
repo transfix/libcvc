@@ -202,7 +202,7 @@ scheduler can parse a script the same way it evaluates one: a slice per step. Wi
   process, with the parse error as its exit error. The sync scheduler throws it from `step()` or
   `run()`. With step_tokens = 0, `execute()` throws it, as before. Ariadne reports a killed
   action or resident with its exit error ("ari: on: action program did not complete: …",
-  "ari: resident [...] stopped: …").
+  "ari: on_tick: resident [...] stopped: …").
 - **Signals and watch events** wait until the script is read, because their handlers run on the
   evaluation stack.
 - **Snapshots.** A process snapshotted while reading stores its source and parser settings. After
@@ -226,8 +226,9 @@ then `state_exec.defaults.data.step_nodes`, then the scheduler's built-in defaul
 A node is an element visited: a list element or a dict entry walked, or an element freed. With
 `step_nodes` = N:
 
-- **Native calls.** `=`, `!=`, `str`, `str-concat`, `print`, `state-data-get`, `state-json`,
-  `state-from-json` and `state-set` of a list or dict (printed into the node) hand their walk to
+- **Native calls.** `=`, `!=`, `str`, `str-concat`, `print`, `json-parse`, `json-encode`,
+  `state-data-get`, `state-json`, `state-from-json`, `state-set-tree` and `state-set` of a list
+  or dict (printed into the node) hand their walk to
   the evaluator (`run_data_job`). It does one slice inside the call's step; if the walk isn't
   done, the call's frame waits and the following steps are **data steps** that each run N more
   nodes. The step that finishes it completes the call. A walk under N nodes finishes in the

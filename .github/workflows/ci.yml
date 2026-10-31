@@ -472,6 +472,30 @@ jobs:
             echo "::error::a token reached the wasm ari's output"; exit 1
           fi
 
+      - name: Frames go on while a request is out (L4)
+        # The single-threaded build's requests are started, not sent in place: the browser's
+        # fetch answers from the event loop while the frame loop goes on. tests/l4_frames.ari
+        # counts the frames that ran while tests/net_probe_server.py's /v1/slow took its second;
+        # a request that blocked the frame loop would leave that near 0.
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
+          python3 src/ari/tests/net_probe_server.py > probe-port.txt &
+          server=$!
+          trap 'kill $server' EXIT
+          for _ in $(seq 50); do [ -s probe-port.txt ] && break; sleep 0.1; done
+          base="http://127.0.0.1:$(cat probe-port.txt)"
+          timeout 120 "$node" --require ./src/ari/tests/xhr-shim.cjs build-wasm/bin/ari.js \
+            snapshot --net-allow "$base" --width 100 --height 9 /tests/l4_frames.ari \
+            --base "$base" 2>&1 | tee l4.txt
+          grep -qF "status: 200" l4.txt \
+            || { echo "::error::the slow request did not come back"; exit 1; }
+          frames=$(sed -n 's/.*frames while out: \([0-9][0-9]*\).*/\1/p' l4.txt | head -1)
+          if [ -z "$frames" ] || [ "$frames" -lt 20 ]; then
+            echo "::error::only '${frames}' frames ran while the request was out (L4)"; exit 1
+          fi
+          echo "frames while the request was out: $frames"
+
       - name: Round-trip images through ImageMagick under node
         # The link above only proves the codec libraries resolve. This proves Magick works at run
         # time: its coders are registered (an empty registry once failed every read and write
@@ -506,6 +530,106 @@ jobs:
             build-wasm/bin/ari.html
             build-wasm/bin/ari.js
             build-wasm/bin/ari.wasm
+            build-wasm/bin/ari-web.js
+            build-wasm/bin/ari-web.css
+            build-wasm/bin/xterm/
+
+  # arigl-web, the stock browser host (cvcpkg/recipes/arigl-web): arigl, and ari's terminal page,
+  # built to single-threaded wasm with no documents of their own, by the recipe's own script (which
+  # prints the .wasm/.js sizes, raw, gzip and brotli). Then a headless Chrome loads both pages the
+  # way a site serves them, from an ordinary path with no COOP/COEP and under a strict
+  # Content-Security-Policy (any violation fails): a document set from the page's origin must load
+  # and run (on ari's terminal, its text must show), and a cross-origin or missing src must show
+  # the error (src/arigl/web/test/arigl_web_smoke.mjs). xterm.js for ari's page comes from the
+  # prefix's xterm-js packages when installed, else the pinned npm download. Only when the pages,
+  # their document loader, the recipe or this file changed: it builds libcvc and cvcGL for wasm.
+  arigl-web:
+    name: arigl-web shell + ari page (wasm, headless Chrome)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    concurrency:
+      group: ci-${{ github.ref }}-arigl-web
+      cancel-in-progress: true
+    defaults:
+      run:
+        shell: bash
+    env:
+      WASM_DEPS: ${{ github.workspace }}/wasm-deps
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Did the shell change?
+        id: paths
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          run=true
+          if [ -n "$base" ] && [ "$base" != "0000000000000000000000000000000000000000" ] \
+             && git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            if ! git diff --name-only "$base" HEAD -- src/arigl src/ari \
+                   inc/cvc/ariadne/doc_fetch.h src/cvc/ariadne/doc_fetch.cpp \
+                   inc/cvc/ariadne/web_document.h src/cvc/ariadne/web_document.cpp \
+                   src/cvc/tests/data/ariadne_docset src/cvcGL/wasm cvcpkg/recipes/arigl-web \
+                   .github/workflows/ci.yml | grep -q .; then
+              run=false
+            fi
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "arigl-web changed: $run"
+
+      - name: Install cvcpkg, cmake/ninja and the Emscripten SDK from the catalog
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          curl -fsSL https://cvcpkg.org/install.sh | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          cvcpkg install cmake ninja --prefix "$RUNNER_TEMP/tools" --config release --link shared
+          echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
+          cvcpkg install emsdk --platform linux --prefix "$RUNNER_TEMP/emsdk" \
+            --config release --link shared --no-fallback-to-source
+          test -f "$RUNNER_TEMP/emsdk/emsdk_env.sh"
+          echo "CVC_EMSDK_DIR=$RUNNER_TEMP/emsdk" >> "$GITHUB_ENV"
+
+      - name: Install the recipe's wasm deps, and xterm.js for ari's pages
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          cvcpkg install-deps cvcpkg/recipes/arigl-web --prefix "$WASM_DEPS" \
+            --platform wasm --arch wasm32 --config release --link static --no-fallback-to-source
+          # Noarch, so not resolvable from the recipe's (static) wasm deps: the recipe says why.
+          cvcpkg install xterm-js xterm-js-addon-fit xterm-js-addon-webgl --prefix "$WASM_DEPS" \
+            --platform any --config release --link shared --no-fallback-to-source
+
+      - name: Build arigl-web (wasm, single-threaded) with the recipe's script
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          CVC_SOURCE_DIR="$GITHUB_WORKSPACE" CVC_BUILD_DIR="$GITHUB_WORKSPACE/build-arigl-web" \
+          CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-arigl-web" CVC_DEPS_PREFIX="$WASM_DEPS" \
+          CVC_PLATFORM=wasm bash cvcpkg/recipes/arigl-web/build-wasm.sh
+          ls -la stage-arigl-web/share/arigl-web
+          grep -q "ari: xterm.js for the browser page from $WASM_DEPS/share/xterm.js" \
+            build-arigl-web/configure.log \
+            || { echo "::error::ari's page did not take xterm.js from the prefix's xterm-js packages"; exit 1; }
+
+      - name: Load a document set in headless Chrome
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
+          chrome=$(command -v google-chrome || command -v google-chrome-stable || command -v chromium)
+          "$chrome" --version
+          "$node" src/arigl/web/test/arigl_web_smoke.mjs --web stage-arigl-web/share/arigl-web \
+            --docset src/cvc/tests/data/ariadne_docset --chrome "$chrome"
+
+      - name: Upload the arigl-web shell
+        if: steps.paths.outputs.run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: arigl-web
+          path: stage-arigl-web/share/arigl-web
 
   # ──────────────────────────── Linux packaging ────────────────────────────
   #
@@ -688,6 +812,25 @@ jobs:
           # cvcgl_sdl_attach skips.
           cvcpkg install imgui sdl3 --prefix "$prefix" --config release --link shared
 
+      # tmux, for ari_run_json_feed_ftxui / _tvision (src/ari/CMakeLists.txt): each runs `ari run`
+      # in a 100x30 tmux pane and compares what that backend drew (tests/run_in_tmux_test.sh), the
+      # only check of the real tvision desktop. They are registered only when find_program finds
+      # tmux, and the script runs the tmux on PATH. The runner image has none, so it comes from
+      # cvcpkg, in a prefix of its own. Only tmux goes on PATH, as a link in an otherwise empty
+      # directory: the prefix's bin/ also holds ncurses' tput, clear and tic. bin/tmux finds the
+      # prefix's terminfo itself.
+      - name: Install tmux (cvcpkg)
+        if: matrix.kind == 'libcvc'
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmux_prefix="$RUNNER_TEMP/tmux"
+          cvcpkg install tmux --prefix "$tmux_prefix" --config release --link shared
+          mkdir -p "$RUNNER_TEMP/tmux-bin"
+          ln -sf "$tmux_prefix/bin/tmux" "$RUNNER_TEMP/tmux-bin/tmux"
+          "$RUNNER_TEMP/tmux-bin/tmux" -V
+          echo "$RUNNER_TEMP/tmux-bin" >> "$GITHUB_PATH"
+
       - name: Configure
         run: |
           # libcvc needs libiimod from the libcvc-deps bundle. Fall
@@ -853,6 +996,18 @@ jobs:
           if [ "$n_igl" -eq 0 ]; then
             echo "::error::CVC_ENABLE_LIBIGL resolved OFF: eigen/libigl are missing from the deps prefix."
             exit 1
+          fi
+          # And for the tmux tests of both terminal backends, wherever src/ari defines them: they
+          # register only when configure found tmux, and skip (77) when the script cannot run it.
+          # The configure step already made both backends required.
+          if grep -q 'ari_run_json_feed_' src/ari/CMakeLists.txt; then
+            command -v tmux >/dev/null || { echo "::error::no tmux on PATH: the ari_run_json_feed_* tests would skip"; exit 1; }
+            n_tmux=$(ctest --test-dir build -N 2>/dev/null | grep -c 'Test *#[0-9]*: ari_run_json_feed_' || true)
+            echo "ari_run_json_feed_* (tmux) tests registered with ctest: $n_tmux"
+            if [ "$n_tmux" -ne 2 ]; then
+              echo "::error::configure did not find tmux: ari_run_json_feed_ftxui/_tvision are not registered."
+              exit 1
+            fi
           fi
           # Heavy suites:
           #   Stress|Convergence|Benchmark            : long-running suites

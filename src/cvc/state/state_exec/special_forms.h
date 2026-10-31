@@ -31,6 +31,8 @@ enum class special_form : std::uint8_t {
   defclass,
   try_,
   raise,
+  and_, // (and a b ...): stops at the first falsy argument
+  or_,  // (or a b ...): stops at the first truthy argument
 };
 
 /// The special form `name` names, or special_form::none. A switch on the length and a letter or
@@ -42,10 +44,16 @@ inline special_form special_form_of(std::string_view name) {
   std::string_view spelled;
   switch (name.size()) {
   case 2:
-    candidate = sf::if_, spelled = "if";
+    if (name[0] == 'o')
+      candidate = sf::or_, spelled = "or";
+    else
+      candidate = sf::if_, spelled = "if";
     break;
   case 3:
     switch (name[0]) {
+    case 'a':
+      candidate = sf::and_, spelled = "and";
+      break;
     case 'f':
       candidate = sf::for_, spelled = "for";
       break;

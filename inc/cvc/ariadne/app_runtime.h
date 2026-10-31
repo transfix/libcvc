@@ -98,6 +98,12 @@ public:
   void register_async_verb(const std::string &name, const std::string &done_channel,
                            std::function<std::string()> work);
 
+  // The standard way out: `on: quit` (a menu item's event) and the verb (quit [code]) both
+  // request_close(code). code is an integer 0..255 (default 0); anything else raises in the
+  // calling program (TypeError, ValueError) and nothing closes. The first request's code is the
+  // one exit_code() keeps. The host returns exit_code() as its exit status.
+  void register_quit();
+
   // Let the document use the network, as a host's --net flags say (net_host.h: the allowlist, the
   // credential store, the http verbs and http(s) URIs). Returns "" or what is wrong, and then
   // nothing is turned on. Off unless called; this AppRuntime turns it off again when it dies.
@@ -122,6 +128,10 @@ public:
   // Whether the last load()ed document declares an args: block.
   bool has_args_block() const;
 
+  // The last load()ed document's tests: block, name -> program in document order (`ari test`
+  // runs each with runtime().run_program).
+  const std::vector<std::pair<std::string, std::string>> &tests() const;
+
   // Mount a programmatically-built widget tree instead of a file. Applied next frame.
   void set_root(Widget root);
 
@@ -134,6 +144,10 @@ public:
 
   bool should_close() const;
   void request_close();
+  // Close with an exit status: the first request's code stands (request_close() is code 0).
+  void request_close(int code);
+  // The status a (quit code) asked for; 0 until something asks to close.
+  int exit_code() const;
 
   // Whether the document is idle: no async call (a request) in flight and no program step waiting
   // to run (a resident still parsing a reply between two requests is not idle).
@@ -167,6 +181,7 @@ private:
   std::vector<std::string> sources_;
   std::map<std::string, std::int64_t> stamps_;
   bool quit_ = false;
+  int exitCode_ = 0; // the first close request's code
   bool intrinsicsRegistered_ = false;
   bool netEnabled_ = false; // enable_net turned the network on: the destructor turns it off
   // The host verbs, shared with the program-lane provider so a verb registered after the first
@@ -175,6 +190,7 @@ private:
   struct Verbs {
     std::vector<std::pair<std::string, std::function<void()>>> sync;
     std::vector<std::tuple<std::string, std::string, std::function<std::string()>>> async;
+    std::function<void(int)> quit; // register_quit: (quit [code])
   };
   std::shared_ptr<Verbs> verbs_;
   std::vector<std::string> pendingWarnings_; // read-lane diagnostics drain() collected
@@ -192,6 +208,7 @@ private:
   std::string invocation_;
   bool validateArgs_ = true;
   bool hasArgsBlock_ = false;
+  std::vector<std::pair<std::string, std::string>> tests_; // the document's tests: block
 };
 
 } // namespace ariadne

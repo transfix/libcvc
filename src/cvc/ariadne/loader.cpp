@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <cvc/ariadne/ariadne.h> // has_widget_type (custom-widget load-time check)
 #include <cvc/ariadne/loader.h>
+#include <cvc/ariadne/requires.h> // free_heads: a granted function brings the ones it calls
 #include <cvc/ariadne/uri.h> // §12/§13 import: resolve library URIs (file/state/http)
 #include <cvc/core/config.h> // CVC_VERSION_STRING (generated from project(VERSION))
 // §12 channel lint: parse a script (parser.h) and walk its value_t / symbol / list_ptr AST
@@ -99,7 +100,7 @@ bool is_builtin_block(const std::string &k) {
          k == "children" || k == "scene" || k == "customs" || k == "init" || k == "on_tick" ||
          k == "on_key" || k == "on_pointer" || k == "on_signal" || k == "units" || k == "import" ||
          k == "channels" || k == "lint" || k == "args" || k == "requires" || k == "keys" ||
-         k == "windows_menu";
+         k == "windows_menu" || k == "tests" || k == "functions";
 }
 } // namespace
 
@@ -196,6 +197,8 @@ const char *const kAriSchema = R"ARISCHEMA({
         "def": {"type": ["number", "boolean", "string"]},
         "fmt": {"type": "string"},
         "commit": {"enum": ["live", "release"]},
+        "autofocus": {"$ref": "#/$defs/flag"},
+        "password": {"$ref": "#/$defs/flag"},
         "options": {"type": ["array", "string"], "items": {"type": "string"}},
         "pos": {"type": "array", "items": {"type": "number"}},
         "size": {"type": ["array", "number"], "items": {"type": "number"}},
@@ -361,6 +364,12 @@ struct Ctx {
   // a host can seed the change-poll baseline with load-time values.
   std::shared_ptr<std::vector<std::string>> sources;
   std::shared_ptr<std::map<std::string, std::int64_t>> source_stamps;
+
+  // §6.6 functions: the functions this scope's programs can call, in definition order: imported,
+  // then the document's own; in a module, granted by its mount, then its own. `granted` names
+  // the ones its mount granted, so a module that redefines one is told.
+  std::vector<FunctionDef> functions;
+  std::set<std::string> granted;
 };
 
 // §12.5: record a resolved FILE canonical for hot-reload watching — skip a state/http canonical
@@ -433,7 +442,7 @@ inline bool known_widget_key(const std::string &k) {
          k == "on_click" || k == "on_hover" || k == "on_drag" || k == "on_drag_start" ||
          k == "on_drag_end" || k == "children" || k == "items" || k == "id" ||
          k == "visible_when" || k == "enabled_when" || k == "disabled_when" || k == "tooltip" ||
-         k == "repeat";
+         k == "repeat" || k == "autofocus";
 }
 
 // keys: (keys.h) -- each entry a rebindable action: its label, its default key(s), its on:.
@@ -804,7 +813,9 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     const std::string bind = str(n, "bind");
     check_bind(ctx, "input_text", label, bind);
     // on: is optional (send-on-commit), so unlike button we do not warn when it is absent.
-    return input_text(label, bind, action(n), str(n, "default", str(n, "def")));
+    Widget w = input_text(label, bind, action(n), str(n, "default", str(n, "def")));
+    w.password = flag(n, "password", false); // shown masked
+    return w;
   }
   if (type == "input_int") {
     const std::string bind = str(n, "bind");
@@ -946,6 +957,8 @@ Widget parse_widget(Ctx &ctx, const YAML::Node &n) {
       w.disabled_when = str(n, "disabled_when");
     if (has(n, "tooltip"))
       w.tooltip = str(n, "tooltip"); // literal, or a computed expr (starts with '(')
+    if (has(n, "autofocus"))
+      w.autofocus = flag(n, "autofocus", false);
     if (has(n, "repeat"))
       w.repeat = str(n, "repeat"); // §3: a count expression -> emit this template N times
     if (has(n, "on_click"))
@@ -994,6 +1007,177 @@ void merge_units(Ctx &ctx, const YAML::Node &unitsNode, bool warn_collision) {
 constexpr int kMaxImportDepth = 32;
 constexpr std::size_t kMaxImports = 4096;
 
+// ---- §6.6 functions: ------------------------------------------------------------------------
+
+namespace se = cvc::state_exec;
+
+// The top-level forms of a functions: program, as their source text: split where the paren depth
+// returns to 0, skipping strings ("...", with \ escapes) and ; comments. A top-level atom is a
+// piece of its own (and is rejected as not a defun); unbalanced text ends as one last piece.
+std::vector<std::string> split_forms(const std::string &text) {
+  std::vector<std::string> out;
+  int depth = 0;
+  std::size_t start = std::string::npos;
+  const auto space = [](char c) { return std::isspace(static_cast<unsigned char>(c)) != 0; };
+  for (std::size_t i = 0; i < text.size(); ++i) {
+    const char c = text[i];
+    if (c == ';') {
+      while (i + 1 < text.size() && text[i + 1] != '\n')
+        ++i;
+    } else if (c == '"') {
+      const std::size_t open = i;
+      for (++i; i < text.size() && text[i] != '"'; ++i)
+        if (text[i] == '\\')
+          ++i;
+      if (depth == 0)
+        out.push_back(text.substr(open, i - open + 1));
+    } else if (c == '(') {
+      if (depth++ == 0)
+        start = i;
+    } else if (c == ')') {
+      if (depth > 0 && --depth == 0) {
+        out.push_back(text.substr(start, i - start + 1));
+        start = std::string::npos;
+      }
+    } else if (depth == 0 && !space(c)) {
+      const std::size_t open = i;
+      while (i + 1 < text.size() && !space(text[i + 1]) && text[i + 1] != '(' &&
+             text[i + 1] != ')' && text[i + 1] != ';' && text[i + 1] != '"')
+        ++i;
+      out.push_back(text.substr(open, i - open + 1));
+    }
+  }
+  if (depth > 0 && start != std::string::npos)
+    out.push_back(text.substr(start));
+  return out;
+}
+
+// A form, on one line and at most 60 characters, for a warning.
+std::string clip_form(const std::string &form) {
+  std::string one;
+  for (char c : form)
+    if (!(std::isspace(static_cast<unsigned char>(c)) && (one.empty() || one.back() == ' ')))
+      one += std::isspace(static_cast<unsigned char>(c)) ? ' ' : c;
+  return one.size() > 60 ? one.substr(0, 57) + "..." : one;
+}
+
+// A functions: block's (defun name (params) body...) forms. Anything else is skipped with a
+// warning; `where` prefixes the warnings ("" for the document's own, "import '...': " and so on).
+std::vector<FunctionDef> parse_functions(Ctx &ctx, const YAML::Node &node,
+                                         const std::string &where) {
+  std::vector<FunctionDef> out;
+  if (!node)
+    return out;
+  if (!node.IsScalar()) {
+    ctx.warn("ari: " + where +
+             "functions: must be a scalar state_exec program of (defun ...) forms — ignored");
+    return out;
+  }
+  for (const std::string &form : split_forms(node.Scalar())) {
+    std::vector<se::value_t> parsed;
+    try {
+      parsed = se::parse_all(form);
+    } catch (const std::exception &e) {
+      ctx.warn("ari: " + where + "functions: a form does not parse (" + e.what() +
+               ") — skipped: " + clip_form(form));
+      continue;
+    }
+    const auto *l = parsed.size() == 1 ? std::get_if<se::list_ptr>(&parsed[0].v) : nullptr;
+    const bool shaped = l && *l && (*l)->size() >= 3;
+    const auto *head = shaped ? std::get_if<se::symbol>(&(**l)[0].v) : nullptr;
+    const auto *name = shaped ? std::get_if<se::symbol>(&(**l)[1].v) : nullptr;
+    if (!head || head->name != "defun" || !name || !std::get_if<se::list_ptr>(&(**l)[2].v)) {
+      ctx.warn("ari: " + where +
+               "functions: holds only (defun name (params) body...) forms — skipped: " +
+               clip_form(form));
+      continue;
+    }
+    const auto same = std::find_if(out.begin(), out.end(),
+                                   [&](const FunctionDef &f) { return f.name == name->name; });
+    if (same != out.end()) {
+      ctx.warn("ari: " + where + "functions: '" + name->name +
+               "' is defined twice — the later one stands");
+      out.erase(same);
+    }
+    out.push_back({name->name, form});
+  }
+  return out;
+}
+
+// Add `defs` to the scope's functions; one of the same name is replaced. `warn` says so for an
+// import that replaces another import's; a scope's own definition replaces an imported one
+// silently (the customization case), but replacing a granted one always warns.
+void add_functions(Ctx &ctx, std::vector<FunctionDef> defs, bool warn, const std::string &where) {
+  for (FunctionDef &d : defs) {
+    const auto it = std::find_if(ctx.functions.begin(), ctx.functions.end(),
+                                 [&](const FunctionDef &f) { return f.name == d.name; });
+    if (it == ctx.functions.end()) {
+      ctx.functions.push_back(std::move(d));
+      continue;
+    }
+    if (ctx.granted.erase(d.name))
+      ctx.warn("ari: " + where + "functions: '" + d.name +
+               "' replaces the function of that name its mount granted");
+    else if (warn)
+      ctx.warn("ari: " + where + "functions: '" + d.name +
+               "' is defined by two imports — the later one stands");
+    *it = std::move(d);
+  }
+}
+
+// A load: entry's functions: — the names it grants its module, out of the parent scope's own
+// (ctx.functions): a list, one name, or "*" for every one. A granted function brings along the
+// parent's functions it calls, transitively, so it works in the module; those are callable there
+// too. Returned in the parent's definition order.
+std::vector<FunctionDef> grant_functions(Ctx &ctx, const YAML::Node &grant,
+                                         const std::string &uri) {
+  if (!grant)
+    return {};
+  std::vector<std::string> names;
+  if (grant.IsScalar() && grant.Scalar() == "*") {
+    for (const FunctionDef &f : ctx.functions)
+      names.push_back(f.name);
+  } else if (grant.IsScalar()) {
+    names.push_back(grant.Scalar());
+  } else if (grant.IsSequence()) {
+    for (const auto &g : grant)
+      if (g.IsScalar())
+        names.push_back(g.Scalar());
+  } else {
+    ctx.warn("ari: load '" + uri +
+             "': functions: is a list of the document's function names, or \"*\" for all of "
+             "them — ignored");
+    return {};
+  }
+  const auto find = [&](const std::string &name) {
+    return std::find_if(ctx.functions.begin(), ctx.functions.end(),
+                        [&](const FunctionDef &f) { return f.name == name; });
+  };
+  std::set<std::string> take;
+  std::vector<std::string> todo;
+  for (const std::string &name : names) {
+    if (find(name) == ctx.functions.end())
+      ctx.warn("ari: load '" + uri + "': functions: grants '" + name +
+               "', which this document's functions: do not define — skipped");
+    else
+      todo.push_back(name);
+  }
+  while (!todo.empty()) {
+    const std::string name = std::move(todo.back());
+    todo.pop_back();
+    if (!take.insert(name).second)
+      continue;
+    for (const std::string &callee : free_heads(find(name)->source))
+      if (find(callee) != ctx.functions.end() && !take.count(callee))
+        todo.push_back(callee);
+  }
+  std::vector<FunctionDef> out;
+  for (const FunctionDef &f : ctx.functions)
+    if (take.count(f.name))
+      out.push_back(f);
+  return out;
+}
+
 void process_imports(Ctx &ctx, const YAML::Node &doc, const std::string &base_dir, int depth = 0) {
   if (!doc.IsMap())
     return;
@@ -1034,6 +1218,9 @@ void process_imports(Ctx &ctx, const YAML::Node &doc, const std::string &base_di
     const std::string sub_base = std::filesystem::path(res.canonical).parent_path().string();
     process_imports(ctx, sub, sub_base, depth + 1); // the library's own imports, based at its dir
     merge_units(ctx, sub["units"], /*warn=*/true);  // then its units (import-vs-import warns)
+    if (sub.IsMap()) // and its functions (§6.6), import-vs-import warning like units
+      add_functions(ctx, parse_functions(ctx, sub["functions"], "import '" + uri + "': "),
+                    /*warn=*/true, "import '" + uri + "': ");
   }
 }
 
@@ -1044,6 +1231,12 @@ void parse_units(Ctx &ctx, const YAML::Node &doc) {
   process_imports(ctx, doc, ctx.base_dir);
   if (doc.IsMap())
     merge_units(ctx, doc["units"], /*warn=*/false);
+}
+
+// §6.6: the document's (or fragment's) own functions:, after its imports' (own ones win).
+void parse_own_functions(Ctx &ctx, const YAML::Node &doc, const std::string &where) {
+  if (doc.IsMap())
+    add_functions(ctx, parse_functions(ctx, doc["functions"], where), /*warn=*/false, where);
 }
 
 // §12: substitute `{name}` arg tokens in a scalar in a SINGLE pass — a substituted value is
@@ -1253,7 +1446,12 @@ Widget expand_load(Ctx &ctx, const YAML::Node &n) {
   sub.mount_count = ctx.mount_count;
   sub.sources = ctx.sources; // §12.5 the fragment's own imports/mounts feed the same watch list
   sub.source_stamps = ctx.source_stamps;
+  // §6.6: the functions the mount grants come first, then the module's imports' and its own.
+  sub.functions = grant_functions(ctx, n["functions"], uri);
+  for (const FunctionDef &f : sub.functions)
+    sub.granted.insert(f.name);
   parse_units(sub, frag); // the fragment's OWN import:/units:
+  parse_own_functions(sub, frag, "load '" + uri + "': ");
   Widget frag_root = parse_document(sub, frag);
   for (const std::string &w : sub.warnings)
     ctx.warn(w);
@@ -1276,6 +1474,7 @@ Widget expand_load(Ctx &ctx, const YAML::Node &n) {
   // fields evaluate at the sub-prefix, while the parent's load:-block fields land on the wrapper.
   Widget wrapper = group({std::move(frag_root)});
   wrapper.scope = "includes." + as;
+  wrapper.functions = make_function_scope(std::move(sub.functions)); // only these, even if none
   // §12: carry the fragment's own init: so the Runtime can run it once at the sub-prefix (the
   // loader is state-free; it captures the script, the Runtime executes it). A non-scalar init: is
   // a malformed script — warn (matching the top-level document path), never silently drop it.
@@ -1286,6 +1485,21 @@ Widget expand_load(Ctx &ctx, const YAML::Node &n) {
       ctx.warn("ari: load '" + uri +
                "': the fragment's init: must be a scalar state_exec script string — ignored");
   }
+  // Its on_tick: too, which the Runtime runs as the mount's own tick resident. The document-level
+  // input lanes stay the document's: a module reacts to its own widgets, and the parent passes on
+  // what else it needs through a link: hole (docs/ARIADNE.md §6.3).
+  if (frag.IsMap() && frag["on_tick"]) {
+    if (frag["on_tick"].IsScalar())
+      wrapper.tick_script = frag["on_tick"].Scalar();
+    else
+      ctx.warn("ari: load '" + uri +
+               "': the fragment's on_tick: must be a scalar state_exec script string — ignored");
+  }
+  for (const char *lane : {"on_key", "on_pointer", "on_signal"})
+    if (frag.IsMap() && frag[lane])
+      ctx.warn("ari: load '" + uri + "': the fragment's " + lane +
+               ": is ignored — only the outermost document receives input and signals; pass "
+               "what the module needs through a link: hole");
   // Only the outermost document takes arguments (doc_args.h); a module reaches them through a hole.
   if (frag.IsMap() && frag["args"])
     ctx.warn("ari: load '" + uri +
@@ -2607,9 +2821,11 @@ void refs_from_script(const std::string &script, std::vector<std::string> &out) 
   } catch (...) {
   }
 }
-// Recurse the widget tree collecting each widget's action-program (`on:`) channel refs.
+// Recurse the widget tree collecting each widget's action-program (`on:`) channel refs, and each
+// mount's on_tick:.
 void refs_from_widget(const Widget &w, std::vector<std::string> &out) {
   refs_from_script(w.on, out);
+  refs_from_script(w.tick_script, out);
   for (const Widget &c : w.children)
     refs_from_widget(c, out);
 }
@@ -2636,6 +2852,10 @@ void lint_channels(Ctx &ctx, LoadResult &r) {
   refs_from_script(r.on_key_script, refs);
   refs_from_script(r.on_pointer_script, refs);
   refs_from_script(r.on_signal_script, refs);
+  for (const auto &t : r.tests)
+    refs_from_script(t.second, refs);
+  for (const FunctionDef &f : r.functions)
+    refs_from_script(f.source, refs);
   for (const KeyBinding &k : r.keys)
     refs_from_script(k.on, refs);
   refs_from_widget(r.root, refs);
@@ -2757,7 +2977,10 @@ LoadResult load_node(const YAML::Node &doc, const std::string &base_dir = std::s
 #endif
 
   parse_units(ctx, doc); // §12: collect units: templates BEFORE the body (so include: resolves)
+  parse_own_functions(ctx, doc, ""); // §6.6, BEFORE the body: a load: grants out of them
   r.root = parse_document(ctx, doc);
+  r.functions = ctx.functions;
+  r.root.functions = make_function_scope(ctx.functions);
   if (doc.IsMap()) {
     r.scene = parse_scene(ctx, doc["scene"]);    // §9: the scene graph, alongside the widgets
     stamp_base_dir(r.scene.nodes, ctx.base_dir); // relative paths in a node's keys resolve here
@@ -2796,6 +3019,20 @@ LoadResult load_node(const YAML::Node &doc, const std::string &base_dir = std::s
     else if (sg && !sg.IsScalar())
       ctx.warn("ari: on_signal: must be a scalar state_exec script string — ignored");
     r.keys = parse_keys(ctx, doc["keys"]);
+    // tests: a map of name -> program that `ari test` runs (the loader only captures them).
+    if (const YAML::Node ts = doc["tests"]; ts && !ts.IsNull()) { // `tests:` alone: none
+      if (!ts.IsMap())
+        ctx.warn("ari: tests: must be a MAP of test name -> state_exec program — ignored");
+      else
+        for (const auto &kv : ts) {
+          const std::string name = kv.first.IsScalar() ? kv.first.Scalar() : std::string();
+          if (name.empty() || !kv.second.IsScalar() || kv.second.Scalar().empty())
+            ctx.warn("ari: tests: '" + name +
+                     "' must be a non-empty scalar state_exec program — ignored");
+          else
+            r.tests.emplace_back(name, kv.second.Scalar());
+        }
+    }
   }
   // §12 channel lint (A): now that root + all scripts are populated, scan static msg-* refs
   // (only if the doc declared channels:). A strict violation fails the load (r.error set).
