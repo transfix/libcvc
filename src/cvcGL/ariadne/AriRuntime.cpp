@@ -50,6 +50,9 @@ public:
     return verify_scene_customs(loaded, errors);
   }
 
+  // A VTK renderer: a node's shader: block compiles here (gl.scene.shaders).
+  bool runs_shaders() const override { return true; }
+
   void realize(const ari::Scene &scene, const std::string &prefix,
                std::vector<std::string> *warns) override {
     // A reload rebuilds every node, so drop the imperative (gl-bind-stream) bindings now (render

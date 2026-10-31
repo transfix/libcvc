@@ -1415,7 +1415,8 @@ Capabilities FtxuiBackend::capabilities() const {
   c.mouse = true;
   c.keyboard = true;
   c.color = true;
-  c.glsl = false; // no GLSL on a terminal: a shader widget degrades (§16.3)
+  c.glsl = false; // the cells draw no GLSL: a shader widget degrades (§16.3); a GL scene adapter
+                  // behind them still runs the scene's (gl.scene.shaders)
   c.view_embed = false;
   c.owns_loop = true; // run() owns the terminal's event loop (§16.2)
   c.terminal = true;

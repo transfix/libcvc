@@ -133,7 +133,9 @@ struct WindowGeom {
 // What a surface can and cannot do. AppRuntime::load checks a document's
 // `requires:` against it (§16.3/§7.6, cvc/ariadne/requires.h, which maps the
 // capability tokens onto these fields), and (has? "...") reads it at run time —
-// e.g. a shader widget needs `glsl`, `free` layout needs `windows`. `owns_loop`
+// e.g. a shader widget needs `glsl`, `free` layout needs `windows`. A scene's
+// shaders are not the backend's: they run in the SceneAdapter's renderer
+// (SceneAdapter::runs_shaders, the gl.scene.shaders token). `owns_loop`
 // distinguishes a host-pumped backend (ImGui: the host render pass calls
 // Runtime::render()) from a framework-owned loop (FTXUI/tvision: the backend's
 // own loop drives it). This seam is locked in P0 even though only the ImGui
@@ -144,7 +146,7 @@ struct Capabilities {
   bool mouse = false;      // pointer input
   bool keyboard = false;   // key input / text entry
   bool color = false;      // color styling
-  bool glsl = false;       // can render GLSL (scene-node shaders / shader_canvas)
+  bool glsl = false;       // the UI draws GLSL itself (shader_canvas; gl.ui.shaders)
   bool view_embed = false; // can embed a live render-to-texture view
   bool owns_loop = false;  // the backend drives its own event loop
   bool terminal = false;   // draws in a text terminal

@@ -182,8 +182,11 @@ public:
   // Whether a scene adapter realizes this document's scene: (the gl.scene capability). AppRuntime
   // sets it from its SceneAdapter.
   void set_scene_capable(bool on);
+  // Whether that adapter's renderer runs the GLSL a document gives its scene (the gl.scene.shaders
+  // capability; SceneAdapter::runs_shaders). AppRuntime sets it with set_scene_capable().
+  void set_scene_shaders(bool on);
   // The facts the capability tokens read: the backend's Capabilities (all false without a
-  // backend) and set_scene_capable().
+  // backend), set_scene_capable() and set_scene_shaders().
   HostFacts host_facts() const;
   // What (has? "name") answers: a capability token that holds here, a function a program can
   // call (has_function), or a registered widget type. Programs and reactive expressions both have
