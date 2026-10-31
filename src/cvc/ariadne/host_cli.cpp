@@ -10,6 +10,7 @@
 #include <boost/program_options.hpp>
 #include <cctype>
 #include <charconv>
+#include <cstdlib> // strtod (--timeout)
 #include <cvc/ariadne/host_cli.h>
 #include <cvc/net/credentials.h>
 #include <cvc/net/net_policy.h>
@@ -29,8 +30,9 @@ constexpr const char *kValueFlags[] = {"--prefix",         "--component-path",
                                        "--graphics",       "--image",
                                        "--cell-size",      "--net-allow",
                                        "--net-policy",     "--credential-store",
-                                       "--credential-env", "--oidc-issuer",
-                                       "--oidc-client",    "--oidc-redirect-uri"};
+                                       "--credential-env", "--timeout",
+                                       "--oidc-issuer",    "--oidc-client",
+                                       "--oidc-redirect-uri"};
 constexpr const char *kBoolFlags[] = {"--no-mouse", "--ansi", "--net", "--no-browser"};
 
 bool is_general_flag(const std::string &a) {
@@ -106,6 +108,14 @@ bool apply(const po::option &opt, HostOptions &o) {
       return false;
     }
     (a == "--fps" ? o.fps : a == "--width" ? o.width : a == "--height" ? o.height : o.frames) = n;
+  } else if (a == "--timeout") {
+    char *end = nullptr;
+    const double t = std::strtod(value.c_str(), &end);
+    if (value.empty() || end != value.c_str() + value.size() || !(t > 0)) {
+      o.error = "--timeout needs a number of seconds above 0, not '" + value + "'";
+      return false;
+    }
+    o.timeout = t;
   } else if (a == "--prefix") {
     o.prefix = value;
   } else if (a == "--component-path") {
@@ -269,7 +279,9 @@ std::string host_flags_help() {
          "  --fps N                the interactive loop's frame rate\n"
          "  --no-mouse             no mouse input\n"
          "  --width W, --height H  snapshot size\n"
-         "  --frames N             snapshot: frames to run before the capture\n"
+         "  --frames N             snapshot: frames to run before the capture; test: stop\n"
+         "                         after N frames\n"
+         "  --timeout S            test: fail a document still running after S seconds\n"
          "  --ansi                 snapshot: keep colour escapes\n"
          "  --png FILE             snapshot: also write a PNG\n"
          "  --graphics MODE        images in a terminal: auto, kitty, sixel, iterm, color or mono\n"

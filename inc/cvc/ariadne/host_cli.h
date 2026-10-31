@@ -53,6 +53,7 @@ struct HostOptions {
   int fps = 0;         // 0 = the backend's default
   bool mouse = true;
   int width = 0, height = 0, frames = 0; // 0 = the runtime's default
+  double timeout = 0;                    // --timeout SECONDS (ari test); 0 = the default
   bool ansi = false;
   std::string png;
   std::string graphics; // empty = auto (FtxuiBackend::Options::ImageColor)

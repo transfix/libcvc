@@ -57,7 +57,7 @@ if(NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR AND NOT EMSCRIPTEN)
 endif()
 
 # The network flags end to end (ari_net_test.cpp): the built ari, run as a launcher would, against
-# localhost servers. In-tree only, beside the GTest of the libcvc build, and not in a browser build.
+# localhost servers (ari_run.h runs it). In-tree only, beside the GTest of the libcvc build, and not in a browser build.
 if(CVC_BUILD_TESTS AND NOT EMSCRIPTEN AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
   add_executable(ari_net_test ari_net_test.cpp)
   target_link_libraries(ari_net_test PRIVATE cvc GTest::gtest GTest::gtest_main)
@@ -77,6 +77,12 @@ if(CVC_BUILD_TESTS AND NOT EMSCRIPTEN AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL 
     endmacro()
   endif()
   gtest_discover_tests(ari_net_test PROPERTIES ENVIRONMENT "ARI_BINARY=$<TARGET_FILE:ari>")
+  # (quit code), assert and `ari test` end to end (ari_test_command_test.cpp).
+  add_executable(ari_test_command_test ari_test_command_test.cpp)
+  target_link_libraries(ari_test_command_test PRIVATE cvc GTest::gtest GTest::gtest_main)
+  add_dependencies(ari_test_command_test ari)
+  gtest_discover_tests(ari_test_command_test
+                       PROPERTIES ENVIRONMENT "ARI_BINARY=$<TARGET_FILE:ari>")
   # Sign-in in the hosts as a person runs them (tests/oidc_hosts_test.sh): ari (FTXUI, tvision) and
   # arigl --terminal in tmux, with a device code and through the loopback redirect, and arigl's
   # window snapshot where there is a display. No output may carry a token. Skipped (77) without

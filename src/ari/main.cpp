@@ -25,6 +25,7 @@
 //   ari run      [flags] doc.ari [document args...]
 //   ari snapshot [flags] doc.ari [document args...]
 //   ari check    [flags] doc.ari
+//   ari test     [flags] doc.ari...
 //
 // ari's own flags (host_cli.h) come BEFORE the document path; everything after it belongs to the
 // document (doc_args.h). The document reads it as the read-only list argv, or declares an args:
@@ -32,12 +33,17 @@
 // and an argument the block doesn't accept exits 2.
 //
 // run takes over the terminal until a "quit" action (a menu item with `on: quit`, or a program
-// calling (quit)) or Ctrl-C. A document with an on_signal: program gets Ctrl-C as SIGINT and
+// calling (quit [code])) or Ctrl-C. run, snapshot and check exit with the code a program passed
+// to (quit code) (0 without one). A document with an on_signal: program gets Ctrl-C as SIGINT and
 // decides for itself; three Ctrl-Cs within two seconds always quit. Signals sent to the process
 // (SIGTERM, SIGHUP, SIGINT, SIGQUIT, SIGUSR1/2) reach on_signal: too, with source "os"; one the
 // document doesn't handle ends the run with exit status 128 + the signal number.
 // snapshot drains N frames (default 1) and prints the last one as text — for CI, logs, and docs.
 // check loads the document and prints its warnings; it exits non-zero when the load fails.
+// test runs each document headless, with no terminal, until it calls (quit code), its tests:
+// block has run, --frames N frames, or --timeout (docs/ARIADNE.md "Testing a document"). A
+// document fails when it quits non-zero, a program raises an error nothing catches, its load
+// fails or warns, or it times out. One line per document (TAP with --tap); exit 1 when any failed.
 //
 // --graphics picks how images draw: auto (the default: Kitty, else Sixel, where the terminal has
 // them, else half-blocks), kitty, sixel, color (half-blocks) or mono. --image NAME=FILE publishes
@@ -71,6 +77,8 @@
 #include <exception>
 #include <memory>
 #include <string>
+#include <thread>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -78,6 +86,7 @@ namespace {
 int usage(int code) {
   std::fprintf(code ? stderr : stdout,
                "usage: ari run|snapshot|check [flags] doc.ari [document args...]\n"
+               "       ari test [flags] [--tap] [--timeout S] [--frames N] doc.ari...\n"
                "       ari info [--json] [--functions] [--backend B] [--graphics MODE]\n"
                "\n"
                "flags (before the document):\n"
@@ -90,6 +99,13 @@ int usage(int code) {
                "graphics), what libcvc was built with, the capabilities a document's requires:\n"
                "and (has? ...) see, and how many functions programs can call (--functions lists\n"
                "them; --json prints it all as JSON).\n"
+               "\n"
+               "test runs each document headless until it calls (quit code), its tests: block\n"
+               "has run, --frames N frames, or --timeout S seconds (default 30). A document\n"
+               "fails when it quits non-zero, a program raises an error nothing catches (an\n"
+               "assert, say), its load fails or warns, or it times out. One line per document,\n"
+               "with what failed and in which program; --tap prints TAP. Exits 1 if any failed.\n"
+               "run, snapshot and check exit with the code a document passed to (quit code).\n"
                "\n"
                "The network is off unless --net, --net-allow, --net-policy, --credential-store\n"
                "or --credential-env turns it on, for run, snapshot and check alike and with\n"
@@ -165,7 +181,7 @@ int print_info(const cvc::ariadne::HostOptions &o) {
     std::fprintf(stderr, "ari: %s\n", error.c_str());
     return 2;
   }
-  rt.register_verb("quit", [] {}); // every document gets (quit)
+  rt.register_quit(); // every document gets (quit [code])
   ari::HostInfo term;
   ari::describe_terminal(term);
   ari::TermGraphics graphics;
@@ -183,6 +199,177 @@ int print_info(const cvc::ariadne::HostOptions &o) {
   return 0;
 }
 
+// ── ari test ──────────────────────────────────────────────────────────────────────────────────
+
+constexpr double kTestTimeoutSeconds = 30.0;
+
+// How one document's test run went.
+struct TestOutcome {
+  std::vector<std::string> failures; // each: what failed, and in which program
+  std::size_t tests = 0;             // tests: cases that ran to an end
+  double seconds = 0;
+  bool passed() const { return failures.empty(); }
+};
+
+// A warning, without the "ari: " every runtime warning starts with.
+std::string trim_ari(std::string w) {
+  if (w.rfind("ari: ", 0) == 0)
+    w.erase(0, 5);
+  return w;
+}
+
+// Run one document headless: load it, then drain frames until it quits, its tests: have all run,
+// --frames N frames have run, or the timeout. Each frame is laid out (as snapshot does) so its
+// bound expressions run, but nothing is drawn.
+TestOutcome run_test_document(const cvc::ariadne::HostOptions &o, const std::string &path) {
+  namespace ari = cvc::ariadne;
+  using clock = std::chrono::steady_clock;
+  TestOutcome out;
+  const auto start = clock::now();
+  const double timeout = o.timeout > 0 ? o.timeout : kTestTimeoutSeconds;
+  const auto deadline = start + std::chrono::duration<double>(timeout);
+  const auto fail = [&](std::string why) { out.failures.push_back(std::move(why)); };
+  const auto finish = [&] {
+    out.seconds = std::chrono::duration<double>(clock::now() - start).count();
+    return out;
+  };
+
+  cvc::app app;
+  ari::FtxuiBackend backend{ari::FtxuiBackend::Options{}};
+  for (const auto &[name, file] : o.images) {
+    try {
+      backend.set_image(name, cvc::image::load(file));
+    } catch (const std::exception &e) {
+      fail("--image " + file + ": " + e.what());
+      return finish();
+    }
+  }
+  ari::register_stream_view_widget(backend, app);
+  ari::AppRuntime rt(app, o.prefix.empty() ? "ui.docs.ari" : o.prefix);
+  rt.set_backend(backend);
+  if (const std::string error = rt.enable_net(o.net); !error.empty()) {
+    fail(error);
+    return finish();
+  }
+  for (const std::string &d : o.component_paths)
+    rt.add_component_path(d);
+  rt.register_quit();
+  // No command line of its own: declared arguments take their defaults, as in a check.
+  rt.set_document_args({}, "ari test " + path, /*validate=*/false);
+  try {
+    for (const std::string &w : rt.load(path))
+      fail("load warning: " + trim_ari(w));
+  } catch (const std::exception &e) {
+    fail("load failed: " + trim_ari(e.what()));
+  }
+  if (!out.passed())
+    return finish();
+
+  const std::vector<std::pair<std::string, std::string>> &tests = rt.tests();
+  std::size_t next = 0; // the next tests: case to start
+  bool running = false; // one is running
+  bool ended = false;   // ... and has ended, with `how`
+  std::string how;      // "" = it finished normally
+  const int width = std::max(10, o.width ? o.width : 100);
+  const int height = o.height ? o.height : 30;
+  bool by_frames = false;
+  for (int frame = 0; !rt.should_close(); ++frame) {
+    if (o.frames > 0 && frame >= o.frames) {
+      by_frames = true;
+      break;
+    }
+    if (clock::now() >= deadline) {
+      char after[64];
+      std::snprintf(after, sizeof after, "timed out after %g s", timeout);
+      std::string what = after;
+      if (running)
+        what += " in test '" + tests[next - 1].first + "'";
+      else if (tests.empty())
+        what += " (a document with no tests: block ends with (quit code), or pass --frames N)";
+      fail(what);
+      break;
+    }
+    rt.drain();
+    backend.render_to_string(rt.runtime(), width, height, false);
+    bool warned = false; // a program nothing caught, a bad expression: the document stops
+    for (const std::string &w : rt.take_warnings()) {
+      fail(trim_ari(w));
+      warned = true;
+    }
+    if (warned)
+      break;
+    if (ended) {
+      if (!how.empty())
+        fail("test '" + tests[next - 1].first + "' " + how);
+      ++out.tests;
+      running = ended = false;
+    }
+    if (!running && next < tests.size()) { // after the first frame: init: has run, residents too
+      running = true;
+      rt.runtime().run_program(tests[next++].second, [&](const std::string &h) {
+        how = h;
+        ended = true;
+      });
+    } else if (!running && !tests.empty()) {
+      break; // every test has run
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  if (by_frames && o.net.enabled) { // as snapshot: what the document asked for comes back first
+    rt.settle([&] { rt.drain(); });
+    for (const std::string &w : rt.take_warnings())
+      fail(trim_ari(w));
+  }
+  if (rt.should_close()) {
+    if (rt.exit_code() != 0)
+      fail("(quit " + std::to_string(rt.exit_code()) + ")");
+    if (out.tests < tests.size())
+      fail("quit with " + std::to_string(tests.size() - out.tests) + " of " +
+           std::to_string(tests.size()) + " tests not finished");
+  }
+  return finish();
+}
+
+// `ari test`: each document in turn, one line each (or TAP), then a summary. 1 if any failed.
+int run_tests(const cvc::ariadne::HostOptions &o) {
+  std::vector<std::string> docs{o.doc};
+  docs.insert(docs.end(), o.doc_args.begin(), o.doc_args.end());
+  for (const std::string &d : docs)
+    if (!d.empty() && d[0] == '-') {
+      std::fprintf(stderr, "ari: test: '%s' comes after a document; flags go before them\n",
+                   d.c_str());
+      return 2;
+    }
+  const bool tap = has_flag(o, "--tap");
+  if (tap)
+    std::printf("TAP version 13\n1..%zu\n", docs.size());
+  std::size_t failed = 0;
+  for (std::size_t i = 0; i < docs.size(); ++i) {
+    const TestOutcome r = run_test_document(o, docs[i]);
+    failed += r.passed() ? 0 : 1;
+    char took[64];
+    std::snprintf(took, sizeof took, "%.2f s", r.seconds);
+    std::string detail = took;
+    if (r.tests)
+      detail = std::to_string(r.tests) + (r.tests == 1 ? " test, " : " tests, ") + detail;
+    if (tap) {
+      std::printf("%s %zu - %s # %s\n", r.passed() ? "ok" : "not ok", i + 1, docs[i].c_str(),
+                  detail.c_str());
+      for (const std::string &f : r.failures)
+        std::printf("# %s\n", f.c_str());
+    } else {
+      std::printf("%s %s (%s)\n", r.passed() ? "ok  " : "FAIL", docs[i].c_str(), detail.c_str());
+      for (const std::string &f : r.failures)
+        std::printf("     %s\n", f.c_str());
+    }
+    std::fflush(stdout);
+  }
+  if (!tap)
+    std::printf("ari test: %zu document%s, %zu failed\n", docs.size(), docs.size() == 1 ? "" : "s",
+                failed);
+  return failed ? 1 : 0;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -197,7 +384,7 @@ int main(int argc, char **argv) {
     argv = const_cast<char **>(baked);
   }
 #endif
-  ari::HostOptions o = ari::parse_host_args(argc, argv, {"--json", "--functions"});
+  ari::HostOptions o = ari::parse_host_args(argc, argv, {"--json", "--functions", "--tap"});
 #ifdef CVC_ARI_WASM_BACKEND // ari_tvision: its documents run on the tvision desktop
   if (o.backend.empty())
     o.backend = CVC_ARI_WASM_BACKEND;
@@ -212,7 +399,7 @@ int main(int argc, char **argv) {
     return usage(2);
   }
   const std::string &cmd = o.command;
-  if (cmd != "run" && cmd != "snapshot" && cmd != "check" && cmd != "info") {
+  if (cmd != "run" && cmd != "snapshot" && cmd != "check" && cmd != "info" && cmd != "test") {
     std::fprintf(stderr, "ari: unknown command '%s'\n", cmd.c_str());
     return usage(2);
   }
@@ -220,12 +407,17 @@ int main(int argc, char **argv) {
     std::fprintf(stderr, "ari: --backend is ftxui or tvision, not '%s'\n", o.backend.c_str());
     return 2;
   }
-  if (cmd == "info")
-    return print_info(o);
-  if (!o.extra_flags.empty()) {
-    std::fprintf(stderr, "ari: %s is for ari info\n", o.extra_flags.front().c_str());
+  for (const std::string &f : o.extra_flags)
+    if ((f == "--tap") != (cmd == "test")) {
+      std::fprintf(stderr, "ari: %s is for ari %s\n", f.c_str(), f == "--tap" ? "test" : "info");
+      return usage(2);
+    }
+  if (o.timeout > 0 && cmd != "test") {
+    std::fprintf(stderr, "ari: --timeout is for ari test\n");
     return usage(2);
   }
+  if (cmd == "info")
+    return print_info(o);
   if (!o.png.empty()) {
     std::fprintf(stderr, "ari: --png needs a renderer; arigl can write one\n");
     return 2;
@@ -242,6 +434,8 @@ int main(int argc, char **argv) {
     std::fprintf(stderr, "ari: libcvc was built without FTXUI (no terminal backend)\n");
     return 1;
   }
+  if (cmd == "test")
+    return run_tests(o);
   // snapshot / check always lay out with FTXUI; tvision only changes the interactive chrome.
   const bool tvision = o.backend == "tvision" && cmd == "run";
   if (tvision && !ari::TvisionBackend::available()) {
@@ -274,8 +468,7 @@ int main(int argc, char **argv) {
   }
   for (const std::string &d : o.component_paths)
     rt.add_component_path(d);
-  rt.on("quit", [&] { rt.request_close(); });
-  rt.register_verb("quit", [&] { rt.request_close(); }); // (quit), e.g. from an on_signal: program
+  rt.register_quit(); // on: quit and (quit [code]), e.g. from an on_signal: program
   rt.set_document_args(o.doc_args, "ari " + cmd + " " + o.doc, /*validate=*/cmd != "check");
   if (cmd == "run" && !tvision)
     probe_terminal(*backend, o); // before the load, so requires: / has? see the terminal
@@ -306,7 +499,7 @@ int main(int argc, char **argv) {
       std::fprintf(stderr, "%s\n", note.c_str());
   }
   if (cmd == "check")
-    return 0;
+    return rt.exit_code(); // an init: that called (quit code)
   ari::report_running(); // the browser page: the document is loaded
 
   if (cmd == "snapshot") {
@@ -327,8 +520,10 @@ int main(int argc, char **argv) {
     for (int f = 0; f < std::max(1, o.frames); ++f) {
       rt.drain();
       frame = backend->render_to_string(rt.runtime(), width, o.height, o.ansi);
+      if (rt.should_close()) // (quit code): the frame it quit on
+        break;
     }
-    if (o.net.enabled) { // the frame shows what the document's requests brought back
+    if (o.net.enabled && !rt.should_close()) { // the frame shows what the requests brought back
       rt.settle([&] { rt.drain(); });
       frame = backend->render_to_string(rt.runtime(), width, o.height, o.ansi);
     }
@@ -340,7 +535,7 @@ int main(int argc, char **argv) {
     std::fputs(frame.c_str(), stdout);
     for (const std::string &w : rt.take_warnings()) // what the programs complained about
       std::fprintf(stderr, "ari: warning: %s\n", w.c_str());
-    return 0;
+    return rt.exit_code();
   }
 
   ari::FtxuiBackend::RunOptions run;
@@ -364,5 +559,5 @@ int main(int argc, char **argv) {
     std::fprintf(stderr, "ari: warning: %s\n", w.c_str());
   if (how.from_os) // an OS signal the document didn't handle: report it the way a shell expects
     return 128 + ari::signal_number(how.signal);
-  return 0;
+  return rt.exit_code();
 }
