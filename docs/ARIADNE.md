@@ -1857,6 +1857,14 @@ without either has no `ws-*` verbs, so a document asks `(has? "ws-open")` and po
 - `ws-open` and `ws-recv` are async I/O calls like the HTTP verbs: the connect, or the wait,
   runs on the background pool and the program parks. `ws-poll` is the one to call from an
   `on_tick` that also does other work: it takes what has arrived and returns.
+- In a browser build without threads (`ari.html`, arigl's page) they are started instead, as the
+  HTTP verbs are (§10.2): `ws-open` creates the browser's `WebSocket` and returns to the frame
+  loop, and its open, error or `timeout` resumes the program; `ws-recv` waits on the socket's
+  next message from its callbacks, with a timer for `SECONDS`. Frames keep drawing meanwhile. A
+  killed or timed-out program abandons its connect (the socket is closed) or drops its wait
+  (`cvc::net::ws_start`, `WsConnection::recv_async` in
+  [`ws_client.h`](../inc/cvc/net/ws_client.h)). A page may close a socket only with code 1000
+  or 3000-4999, so there any other `CODE` is sent as 1000.
 
 ## 11. Caveats — what is not yet wired
 

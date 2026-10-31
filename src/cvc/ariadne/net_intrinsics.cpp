@@ -715,7 +715,8 @@ void register_net_verbs(const std::shared_ptr<se::environment> &env, const NetAc
 //
 // A connection is a handle string ("ws:N") in a process-global table, so a program can keep it in
 // state and use it from later ticks. (ws-open) connects on the background pool; the rest are plain
-// functions on the scheduler thread except (ws-recv), which waits on the pool.
+// functions on the scheduler thread except (ws-recv), which waits on the pool. In a browser build
+// without threads both are started instead, answered by the socket's callbacks (ws_open_work).
 
 constexpr std::size_t kMaxWsConnections = 64;
 
@@ -782,95 +783,161 @@ se::value_t ws_open_reply(bool ok, const std::string &handle, const std::string 
 // (ws-open URL [OPTS]): OPTS takes "headers", "auth", "query" as the http verbs do, and "timeout"
 // (seconds to connect). The origin check uses the http(s) twin of the URL, so --net-allow
 // https://h covers wss://h.
-se::async_kernel ws_open_kernel(std::span<const se::value_t> args, const NetAccess &access) {
+struct WsOpen {
+  cvc::net::HttpRequest req; // the URL and the handshake's header lines (placeholders unfilled)
   RequestAuth auth;
-  cvc::net::HttpRequest req;
-  req.url = arg_string(args, 0);
   double timeout = 15;
+  std::string http_url;
+};
+
+// The checks made where the verb is called (the scheduler thread), so a misuse is a DSL error.
+WsOpen build_ws_open(std::span<const se::value_t> args, const NetAccess &access) {
+  WsOpen o;
+  o.req.url = arg_string(args, 0);
   if (args.size() > 1) {
-    apply_http_options(req, args[1], auth);
-    if (!req.body.empty())
+    apply_http_options(o.req, args[1], o.auth);
+    if (!o.req.body.empty())
       throw std::runtime_error("ws-open: a WebSocket handshake has no body or form");
-    if (!auth.captures.empty())
+    if (!o.auth.captures.empty())
       throw std::runtime_error("ws-open: a WebSocket handshake captures no credential");
     if (const se::dict_ptr *dp = std::get_if<se::dict_ptr>(&args[1].v))
       for (const auto &kv : **dp)
         if (kv.first == "timeout") {
           const std::array<se::value_t, 1> one{kv.second};
-          timeout = number_arg(one, 0, -1);
-          if (!(timeout > 0))
+          o.timeout = number_arg(one, 0, -1);
+          if (!(o.timeout > 0))
             throw std::runtime_error("ws-open: 'timeout' must be a positive number of seconds");
         }
   }
-  check_request("ws-open", req, auth, access);
-  const std::string http_url = cvc::net::ws_http_equivalent(req.url);
-  if (http_url == req.url)
-    throw std::runtime_error("ws-open: a WebSocket URL starts with ws:// or wss://: " + req.url);
-  return [req = std::move(req), auth = std::move(auth), access, timeout,
-          http_url](se::async_call &) -> se::value_t {
+  check_request("ws-open", o.req, o.auth, access);
+  o.http_url = cvc::net::ws_http_equivalent(o.req.url);
+  if (o.http_url == o.req.url)
+    throw std::runtime_error("ws-open: a WebSocket URL starts with ws:// or wss://: " + o.req.url);
+  return o;
+}
+
+// A connect ready to make: the options with the credentials put in, and the tokens put in (to
+// blank any echo of them in an error), or the reply it fails with before connecting.
+struct WsPrepared {
+  cvc::net::WsOptions opts;
+  std::vector<std::string> sent;
+  std::optional<se::value_t> failed;
+};
+
+WsPrepared prepare_ws_open(const WsOpen &o, const NetAccess &access) {
+  WsPrepared p;
+  std::string why;
+  const std::optional<cvc::net::Origin> origin = cvc::net::parse_origin(o.http_url, &why);
+  if (!origin) {
+    p.failed = ws_open_reply(false, "", o.req.url, "ws-open: " + why);
+    return p;
+  }
+  if (access.policy && !access.policy->allows(*origin)) {
+    p.failed =
+        ws_open_reply(false, "", o.req.url,
+                      "ws-open: refused: " + origin->str() + " is not an origin this host allows");
+    return p;
+  }
+  p.opts.headers = o.req.headers;
+  p.opts.connect_timeout_secs = o.timeout;
+  const auto fail = [&](const std::string &message) {
+    for (std::string &h : p.opts.headers)
+      wipe(h);
+    for (std::string &t : p.sent)
+      wipe(t);
+    p.failed = ws_open_reply(false, "", o.req.url, message);
+  };
+  if (!o.auth.use.empty()) {
+    std::optional<std::string> token = access.credentials->token_for(o.auth.use, *origin);
+    if (!token) {
+      fail("ws-open: no credential '" + o.auth.use + "' for " + origin->str() + " (sign in first)");
+      return p;
+    }
+    p.opts.headers.push_back("Authorization: Bearer " + *token);
+    p.sent.push_back(std::move(*token));
+  }
+  for (const CredentialValue &v : o.auth.values) {
+    std::optional<std::string> token = access.credentials->token_for(v.name, *origin);
+    if (!token) {
+      fail("ws-open: no credential '" + v.name + "' for " + origin->str() + " (sign in first)");
+      return p;
+    }
+    for (std::string &h : p.opts.headers)
+      if (const std::size_t at = h.find(v.placeholder); at != std::string::npos)
+        h.replace(at, v.placeholder.size(), *token);
+    p.sent.push_back(std::move(*token));
+  }
+  return p;
+}
+
+// The reply once the connect is over: the credentials blanked, and the connection, if any, in the
+// handle table.
+se::value_t finish_ws_open(const WsOpen &o, WsPrepared &p,
+                           std::shared_ptr<cvc::net::WsConnection> conn, std::string error) {
+  for (std::string &h : p.opts.headers)
+    wipe(h);
+  for (std::string &t : p.sent) {
+    cvc::net::redact(error, t);
+    wipe(t);
+  }
+  if (!conn)
+    return ws_open_reply(false, "", o.req.url, error);
+  WsTable &t = ws_table();
+  std::lock_guard<std::mutex> lock(t.mutex);
+  if (t.open.size() >= kMaxWsConnections) {
+    conn->close(1013);
+    return ws_open_reply(false, "", o.req.url,
+                         "ws-open: too many open WebSockets (" + std::to_string(kMaxWsConnections) +
+                             "); close some first");
+  }
+  const std::string handle = "ws:" + std::to_string(t.next++);
+  t.open.emplace(handle, std::move(conn));
+  return ws_open_reply(true, handle, o.req.url, "");
+}
+
+// (ws-open)'s work: connect in a kernel (on the background pool), or, where the backend connects
+// without blocking (cvc::net::ws_starts_async: the browser without threads), start the connect
+// and let the socket's callbacks post the reply, so the frame loop goes on meanwhile (as
+// http_work does for HTTP). A killed or timed-out call abandons the connect.
+se::async_work ws_open_work(std::span<const se::value_t> args, const NetAccess &access,
+                            se::async_host &host) {
+  WsOpen o = build_ws_open(args, access);
+  se::async_work work;
+  work.kernel = [o, access](se::async_call &) -> se::value_t {
     try {
-      std::string why;
-      const std::optional<cvc::net::Origin> origin = cvc::net::parse_origin(http_url, &why);
-      if (!origin)
-        return ws_open_reply(false, "", req.url, "ws-open: " + why);
-      if (access.policy && !access.policy->allows(*origin))
-        return ws_open_reply(false, "", req.url,
-                             "ws-open: refused: " + origin->str() +
-                                 " is not an origin this host allows");
-      cvc::net::WsOptions opts;
-      opts.headers = req.headers;
-      opts.connect_timeout_secs = timeout;
-      std::vector<std::string> sent;
-      const auto fail = [&](const std::string &message) {
-        for (std::string &h : opts.headers)
-          wipe(h);
-        for (std::string &s : sent)
-          wipe(s);
-        return ws_open_reply(false, "", req.url, message);
-      };
-      if (!auth.use.empty()) {
-        std::optional<std::string> token = access.credentials->token_for(auth.use, *origin);
-        if (!token)
-          return fail("ws-open: no credential '" + auth.use + "' for " + origin->str() +
-                      " (sign in first)");
-        opts.headers.push_back("Authorization: Bearer " + *token);
-        sent.push_back(std::move(*token));
-      }
-      for (const CredentialValue &v : auth.values) {
-        std::optional<std::string> token = access.credentials->token_for(v.name, *origin);
-        if (!token)
-          return fail("ws-open: no credential '" + v.name + "' for " + origin->str() +
-                      " (sign in first)");
-        for (std::string &h : opts.headers)
-          if (const std::size_t at = h.find(v.placeholder); at != std::string::npos)
-            h.replace(at, v.placeholder.size(), *token);
-        sent.push_back(std::move(*token));
-      }
+      WsPrepared p = prepare_ws_open(o, access);
+      if (p.failed)
+        return std::move(*p.failed);
       std::string error;
-      std::shared_ptr<cvc::net::WsConnection> conn = cvc::net::ws_connect(req.url, opts, &error);
-      for (std::string &h : opts.headers)
-        wipe(h);
-      for (std::string &s : sent) {
-        cvc::net::redact(error, s);
-        wipe(s);
-      }
-      if (!conn)
-        return ws_open_reply(false, "", req.url, error);
-      WsTable &t = ws_table();
-      std::lock_guard<std::mutex> lock(t.mutex);
-      if (t.open.size() >= kMaxWsConnections) {
-        conn->close(1013);
-        return ws_open_reply(false, "", req.url,
-                             "ws-open: too many open WebSockets (" +
-                                 std::to_string(kMaxWsConnections) + "); close some first");
-      }
-      const std::string handle = "ws:" + std::to_string(t.next++);
-      t.open.emplace(handle, std::move(conn));
-      return ws_open_reply(true, handle, req.url, "");
+      std::shared_ptr<cvc::net::WsConnection> conn =
+          cvc::net::ws_connect(o.req.url, p.opts, &error);
+      return finish_ws_open(o, p, std::move(conn), std::move(error));
     } catch (const std::exception &e) {
-      return ws_open_reply(false, "", req.url, std::string("ws-open: ") + e.what());
+      return ws_open_reply(false, "", o.req.url, std::string("ws-open: ") + e.what());
     }
   };
+  if (!cvc::net::ws_starts_async())
+    return work;
+  work.start = [o = std::move(o), access, &host](const std::shared_ptr<se::async_call> &call) {
+    auto p = std::make_shared<WsPrepared>(prepare_ws_open(o, access));
+    if (p->failed) {
+      settle_started(host, call, std::move(*p->failed));
+      return;
+    }
+    std::function<void()> stop = cvc::net::ws_start(
+        o.req.url, p->opts,
+        [o, p, call, &host](std::shared_ptr<cvc::net::WsConnection> conn, std::string error) {
+          if (call->cancel_requested()) { // nobody waits for it now: don't keep it open
+            if (conn)
+              conn->close(1000);
+            return;
+          }
+          settle_started(host, call, finish_ws_open(o, *p, std::move(conn), std::move(error)));
+        });
+    if (stop)
+      call->on_cancel(std::move(stop));
+  };
+  return work;
 }
 
 void register_ws_verbs(const std::shared_ptr<se::environment> &env, se::async_host &host,
@@ -882,19 +949,35 @@ void register_ws_verbs(const std::shared_ptr<se::environment> &env, se::async_ho
   // (ws-open URL [OPTS]) / (ws-open-async ...): connect. Reply {ok handle url error}.
   se::register_async_fn(
       env, host, "ws-open",
-      [access](std::span<const se::value_t> args) { return ws_open_kernel(args, access); }, io);
+      [access, &host](std::span<const se::value_t> args) {
+        return ws_open_work(args, access, host);
+      },
+      io);
   // (ws-recv H [SECONDS]) / (ws-recv-async ...): the next event, waiting up to SECONDS (default
   // 30); nil when none came. Events: {type "text"|"binary"|"close"|"error", data, code}.
   se::register_async_fn(
       env, host, "ws-recv",
-      [live](std::span<const se::value_t> args) -> se::async_kernel {
+      [live, &host](std::span<const se::value_t> args) -> se::async_work {
         live("ws-recv");
         std::shared_ptr<cvc::net::WsConnection> conn = ws_lookup("ws-recv", args);
         const double secs = number_arg(args, 1, 30);
-        return [conn, secs](se::async_call &call) -> se::value_t {
+        se::async_work work;
+        work.kernel = [conn, secs](se::async_call &call) -> se::value_t {
           return marshal_ws_event(
               conn->recv(secs, [&call] { return call.cancel_requested(); }));
         };
+        // Without threads: wait for the socket's next message from its callbacks, not in a loop
+        // on the frame's thread (ws_open_work).
+        if (cvc::net::ws_starts_async())
+          work.start = [conn, secs, &host](const std::shared_ptr<se::async_call> &call) {
+            std::function<void()> stop =
+                conn->recv_async(secs, [call, &host](std::optional<cvc::net::WsEvent> e) {
+                  settle_started(host, call, marshal_ws_event(e));
+                });
+            if (stop)
+              call->on_cancel(std::move(stop));
+          };
+        return work;
       },
       io);
   // (ws-poll H): the next event already received, or nil; never waits. For on_tick loops.

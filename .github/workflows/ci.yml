@@ -496,6 +496,32 @@ jobs:
           fi
           echo "frames while the request was out: $frames"
 
+      - name: Frames go on while a WebSocket connects and waits (L4)
+        # ws-open and ws-recv are started in the single-threaded build too, answered by the
+        # browser WebSocket's callbacks (node 22 has one). tests/l4_ws.ari counts the frames that
+        # ran while tests/ws_probe_server.py took a second to answer the handshake and another to
+        # send its message; a connect or a wait that blocked the frame loop would leave them near 0.
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
+          python3 src/ari/tests/ws_probe_server.py > ws-port.txt &
+          server=$!
+          trap 'kill $server' EXIT
+          for _ in $(seq 50); do [ -s ws-port.txt ] && break; sleep 0.1; done
+          port=$(cat ws-port.txt)
+          timeout 120 "$node" build-wasm/bin/ari.js snapshot --net-allow "http://127.0.0.1:$port" \
+            --width 100 --height 10 /tests/l4_ws.ari --url "ws://127.0.0.1:$port/" 2>&1 \
+            | tee l4ws.txt
+          grep -qF "message: slow hello" l4ws.txt \
+            || { echo "::error::the WebSocket message did not come back"; exit 1; }
+          for what in connecting waiting; do
+            n=$(sed -n "s/.*frames while $what: \([0-9][0-9]*\).*/\1/p" l4ws.txt | head -1)
+            if [ -z "$n" ] || [ "$n" -lt 20 ]; then
+              echo "::error::only '${n}' frames ran while the WebSocket was $what (L4)"; exit 1
+            fi
+            echo "frames while the WebSocket was $what: $n"
+          done
+
       - name: Round-trip images through ImageMagick under node
         # The link above only proves the codec libraries resolve. This proves Magick works at run
         # time: its coders are registered (an empty registry once failed every read and write
