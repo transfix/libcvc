@@ -21,7 +21,7 @@
 typedef unsigned int	u_int;
 #endif
 
-extern int verbose;
+#include "contour_verbose.h"
 
 //----------------------------------------------------------------
 //

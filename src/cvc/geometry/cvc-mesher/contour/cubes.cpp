@@ -8,9 +8,10 @@
 // $Id: cubes.cpp,v 1.1.1.1 2006/10/11 21:25:51 transfix Exp $
 
 #include "contour.h"
+#include "cubes.h"	// extern: a const table is otherwise local to this file
 
 /* table of intersected edges (complete with holes) */
-u_char cubes[256][14] = {
+const u_char cubes[256][14] = {
    {0},
    {1, 0, 3, 8},
    {1, 9, 1, 0},
@@ -272,7 +273,7 @@ u_char cubes[256][14] = {
 
 
 /* table of adjacent faces to visit in contour propagation */
-u_char adjfaces[256][7] = {
+const u_char adjfaces[256][7] = {
    {0},
    {3, 0, 1, 5},
    {3, 3, 0, 5},
@@ -534,7 +535,7 @@ u_char adjfaces[256][7] = {
 
 
 /* table of cube vertices involved in triangulation */
-u_char cubeverts[256][9] = {
+const u_char cubeverts[256][9] = {
    {0},
    {4, 0, 1, 3, 4},
    {4, 1, 5, 2, 0},
@@ -796,7 +797,7 @@ u_char cubeverts[256][9] = {
 
 
 /* table of cube edges involved in triangulation */
-u_char cubeedges[256][13] = {
+const u_char cubeedges[256][13] = {
    {0},
    {3, 0, 3, 8},
    {3, 9, 1, 0},

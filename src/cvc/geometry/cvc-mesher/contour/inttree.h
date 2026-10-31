@@ -61,6 +61,7 @@ class IntTree : public CellSearch {
 
       static int mincmp(const void *, const void *);
       static int maxcmp(const void *, const void *);
+      void sortSeeds(u_int *seeds, u_int n, int by_max);
       static void travFun(u_int n, void *data);
 
    private:

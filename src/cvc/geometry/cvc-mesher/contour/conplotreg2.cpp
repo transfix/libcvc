@@ -20,8 +20,8 @@
 #include "segtree.h"
 #include "conplotreg2.h"
 
-extern int verbose;
-extern void (*errorHandler)(const char *, int);
+#include "contour_verbose.h"
+void errorHandler(const char *, int);
 
 using namespace std;
 
@@ -31,7 +31,7 @@ using namespace std;
 //
 //------------------------------------------------------------------------
 
-static int rect2d[16][5] = {
+static const int rect2d[16][5] = {
    {0},
    {1, 3, 0},
    {1, 0, 1},

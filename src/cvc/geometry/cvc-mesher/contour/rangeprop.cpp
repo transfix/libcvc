@@ -7,7 +7,7 @@
 
 #define DEBUGNo
 
-extern int verbose;
+#include "contour_verbose.h"
 
 void
 rangeProp::compSeeds(void)

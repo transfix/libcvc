@@ -108,9 +108,10 @@ contour_spectrum compute_contour_spectrum(const volume &vol,
 
 // The vendored libContour computation (Datareg3, 256 samples over the data's own extrema), for
 // parity checks. Available only in a CVC_ENABLE_MESHER build; otherwise it throws
-// contour_spectrum_error. Serialized internally (libContour is not re-entrant). The arrays are
-// libContour's own (float) results: isovalue is its sample positions and max_volume its "Max
-// Volume", min_volume.back() - min_volume (not total - min_volume); total_volume is the grid's.
+// contour_spectrum_error. Safe to call concurrently (libContour keeps no process-wide state). The
+// arrays are libContour's own (float) results: isovalue is its sample positions and max_volume its
+// "Max Volume", min_volume.back() - min_volume (not total - min_volume); total_volume is the
+// grid's.
 // Types other than uchar/ushort/float are converted to float first; a constant volume returns
 // zeros (libContour would divide by zero). Meant for finite data.
 bool contour_spectrum_libcontour_available();

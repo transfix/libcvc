@@ -100,7 +100,7 @@ public:
    Range& operator-=(const Range &);
 
    // intersection operator
-   Range& operator^(const Range &);
+   Range operator^(const Range &);
 
    // equivalence
    int operator==(const Range &) const;
