@@ -765,7 +765,7 @@ TEST(MediaBackground, TheLoaderReadsAMapOrAUrl) {
   EXPECT_EQ(grp.background.bind, "p.banner");
   EXPECT_EQ(grp.background.fit, ImageFit::Contain);
   EXPECT_EQ(grp.background.opacity, 1.0f); // clamped
-  EXPECT_EQ(grp.background.terminal, BackdropTerminal::None);
+  EXPECT_EQ(grp.background.terminal, BackdropTerminal::Off);
   EXPECT_EQ(grp.background.auth, "svc");
   bool warned = false;
   for (const std::string &w : lr.warnings)

@@ -983,7 +983,7 @@ void parse_background(Ctx &ctx, const YAML::Node &n, Widget &w) {
   if (term == "banner")
     bg.terminal = BackdropTerminal::Banner;
   else if (term == "none")
-    bg.terminal = BackdropTerminal::None;
+    bg.terminal = BackdropTerminal::Off;
   else if (term != "behind")
     ctx.warn("ari: background terminal: '" + term + "' is not behind, banner or none");
   bg.banner_rows = std::clamp(static_cast<int>(num(n, "banner_rows", 6.0)), 1, 60);
