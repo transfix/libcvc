@@ -1597,6 +1597,19 @@ for the document's `image:` widgets with `src: NAME` (an `image:` can also name 
 With `--ansi` and `--graphics kitty`, `sixel` or `iterm`, `snapshot` also prints the images, after
 clearing the screen, at the terminal's cell size (`--cell-size WxH` where it can't be asked).
 
+**`ari-media`** is the same program with sound: cvcMedia, libcvc's GL-free media library
+([`src/cvcMedia`](../src/cvcMedia/CMakeLists.txt)), is linked in. It brings up SDL3's audio
+subsystem alone, with no window, display or SDL video, and still no GL, VTK or ImGui, so it
+plays sound in a terminal; `ari-media info` lists the playback devices. The lean `ari` links
+libcvc only, with no SDL. `ari-media` is its own package
+([`cvcpkg/recipes/ari-media`](../cvcpkg/recipes/ari-media/recipe.yaml), depending on `sdl3`),
+a separate binary name, so the two never install the same file and a launcher can prefer
+`ari-media` where it is installed. In a libcvc build it is built with cvcGL or with
+`-DCVC_BUILD_ARI_MEDIA=ON`. cvcMedia holds the SDL3 audio output that used to be cvcGL's
+(`cvc::media::playback`; cvcGL links cvcMedia and keeps the `cvc::gl::playback` names), and
+the decoders for the `video:` and `audio:` widgets go there too
+([ARIADNE_MEDIA.md](roadmap/ARIADNE_MEDIA.md) §5).
+
 `ari` is its own cvcpkg package (`cvcpkg install ari`, linux for now), built from
 [`cvcpkg/recipes/ari`](../cvcpkg/recipes/ari/recipe.yaml) against the installed libcvc,
 like `cvc-cli`. It is a thin host over `AppRuntime` with no `SceneAdapter`. Its

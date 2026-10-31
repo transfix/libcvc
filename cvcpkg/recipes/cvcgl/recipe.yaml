@@ -174,6 +174,12 @@ package:
     - lib/cvcGL*
     - lib/cmake/cvcGL/
     - include/cvc/gl/
+    # cvcMedia, the GL-free media library cvcGL links (its SDL3 audio output, which moved out of
+    # cvcGL): src/cvcGL builds it beside itself and installs it as its own package.
+    - lib/libcvcMedia*
+    - lib/cvcMedia*
+    - lib/cmake/cvcMedia/
+    - include/cvc/media/playback/
     # The browser-side half of cvcGL: webgl_state_shadow.js, which cvcgl_wasm_app() (from
     # lib/cmake/cvcGL/cvcGLWasm.cmake) links into a wasm app as a --pre-js. Installed on every
     # platform so the layout is uniform; only Emscripten consumers use it.
@@ -182,6 +188,9 @@ package:
     - name: cvcGL
       targets:
         - cvc::cvcGL
+    - name: cvcMedia
+      targets:
+        - cvc::cvcMedia
 
 abi:
   cxx_std: 17
