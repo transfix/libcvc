@@ -1088,19 +1088,22 @@ void coef_trainer::train(const training_scene &scene, bool verbose,
   lr_scale_ = 1.0f;
   const int every = cfg_.checkpoint_every > 0 ? cfg_.checkpoint_every : 25;
   std::vector<float> best, best_m, best_u;
-  double best_fit = 0.0;
+  double best_fit = 0.0, start_fit = 0.0;
   const auto score = [&](int step) {
     const double f = fitness(to_coef_mlp(), step);
     checkpoints_.push_back({step, f});
     if (verbose)
       std::printf("  checkpoint at step %4d: fitness %.4f\n", step, f);
+    if (best.empty())
+      start_fit = f;
     if (best.empty() || f > best_fit) {
       best = p_;
       best_m = m_;
       best_u = u_;
       best_fit = f;
       selected_step_ = step;
-    } else if (cfg_.rollback_drop > 0.0f && f < best_fit - cfg_.rollback_drop) {
+    } else if (cfg_.rollback_drop > 0.0f && best_fit > start_fit + cfg_.rollback_drop &&
+               f < best_fit - cfg_.rollback_drop) {
       // Fallen past the margin: back to the best checkpoint, and on with smaller steps.
       p_ = best;
       m_ = best_m;

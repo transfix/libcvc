@@ -235,7 +235,11 @@ struct train_config {
   // scales the learning rate by rollback_lr_scale from there on. On the Jolt Humvee every run
   // climbs to its best reach within a few hundred steps and then falls back toward the seed,
   // the loss pulling past the policy reach likes (docs/NAV_TRAINING.md); going back and taking
-  // smaller steps keeps training at the peak instead of leaving it to selection. 0 = off.
+  // smaller steps keeps training at the peak instead of leaving it to selection. Armed only once
+  // the best is more than rollback_drop over the first checkpoint: before the climb validation
+  // wanders around the seed's level, and a rollback there (to the seed, at a smaller learning
+  // rate) kept w_coll 10 runs from ever making it (0.40 -> 0.36 at step 150; held out 41-43%
+  // against 70% without). 0 = off.
   float rollback_drop = 0.0f;
   float rollback_lr_scale = 0.5f;
 };

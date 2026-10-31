@@ -1352,6 +1352,27 @@ TEST(NavCoefTrain, RollbackReturnsToTheBestCheckpoint) {
   EXPECT_NE(back[3], plain[3]);
 }
 
+// Rollback waits for the climb: until the best is more than rollback_drop over the first
+// checkpoint, a fall past the margin is left alone (on the Jolt Humvee validation dips under
+// the seed's level before it jumps, and rolling back there kept the jump from ever coming).
+TEST(NavCoefTrain, RollbackIsArmedOnlyAfterTheRunClimbs) {
+  const training_scene sc = cvc::nav::city_scene(48);
+  train_config cfg = small_cfg();
+  cfg.steps = 25;
+  cfg.horizon = 8;
+  cfg.window = 4;
+  cfg.checkpoint_every = 5;
+  cfg.rollback_drop = 0.1f;
+  // 0.5 at the start; 0.3 at 5 (0.2 under, nothing gained yet); 0.55 at 10 (up 0.05: not
+  // armed); 0.4 at 15 (0.15 under the best, still not armed); 0.8 at 20 (armed); 0.6 at 25.
+  const double fit[6] = {0.5, 0.3, 0.55, 0.4, 0.8, 0.6};
+  coef_trainer tr(cfg, 1);
+  tr.train(sc, false, [&](const cvc::nav::coef_mlp &, int step) { return fit[step / 5]; });
+  ASSERT_EQ(tr.rollbacks().size(), 1u) << "only the fall after the climb rolls back";
+  EXPECT_EQ(tr.rollbacks()[0], 25);
+  EXPECT_EQ(tr.selected_step(), 20);
+}
+
 // coef_mlp::with_flat_weights is export_flat's inverse: the same weights give the same policy,
 // and a changed weight changes it. (The zeroth-order fine-tune perturbs this flat vector.)
 TEST(NavCoefMlp, WithFlatWeightsInvertsExportFlat) {
