@@ -611,7 +611,7 @@ void register_net_verbs(const std::shared_ptr<se::environment> &env, const NetAc
                             });
 }
 
-// --- WebSocket verbs (docs/ARIADNE.md §10.5) ------------------------------------------------------
+// --- WebSocket verbs (docs/ARIADNE.md §10.5) ---
 //
 // A connection is a handle string ("ws:N") in a process-global table, so a program can keep it in
 // state and use it from later ticks. (ws-open) connects on the background pool; the rest are plain
@@ -1001,8 +1001,8 @@ void register_net_intrinsics(cvc::app &app, NetAccess access) {
   se::async_options io;
   io.io = true;
   const bool have_ws = cvc::net::have_ws_backend();
-  register_action_intrinsics([&host, have_http, have_ws, access, io](std::shared_ptr<se::environment> env,
-                                                            se::intrinsics_context &) {
+  register_action_intrinsics([&host, have_http, have_ws, access,
+                              io](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
     if (!is_live(access))
       return; // the host turned the network off: later programs do not get the verbs
     // Async functions on the app's exec scheduler (docs/STATE_EXEC_EXCEPTIONS.md 3): each verb
