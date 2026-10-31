@@ -28,6 +28,7 @@
 #include <cvc/physics/nav_plant.h>
 #include <cvc/physics/vehicle.h>
 #include <gtest/gtest.h>
+#include <memory>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -960,6 +961,210 @@ TEST(NavCoefTrain, TrainThenSaveReloadIntegration) {
     for (int k = 0; k < 3; ++k)
       EXPECT_NEAR(a[k], b[k], 1e-5f) << "trained coefficient did not survive .cvcnav round-trip";
   }
+}
+
+// ── rollout_kind::jolt on the model itself (rollout_plant.h's dyn4_rollout_plant) ──
+// The Jolt rollout's trainer, checked where its forward is the model it differentiates: the
+// plant's states are dyn4_plant's own, so xi = 0 and the gradient must match finite differences
+// as the dynamic rollout's does. physics_jolt_rollout_test runs the same on Jolt.
+
+namespace {
+train_config jolt_model_cfg(train_config c) {
+  c.rollout = cvc::nav::rollout_kind::jolt;
+  c.dyn4 =
+      cvc::physics::nav_plant::dyn4_params_at(cvc::physics::vehicle_desc::roboracer(), c.veh_L);
+  c.plant = std::make_shared<cvc::nav::dyn4_rollout_plant>();
+  return c;
+}
+
+// The batch train() would reset the plant to: starts and goals from `seed`, aimed at the goals.
+void reset_batch(const training_scene &sc, const train_config &cfg, unsigned seed,
+                 std::vector<float> &o, std::vector<float> &goal) {
+  const int n = cfg.n;
+  o.resize(2 * n);
+  goal.resize(2 * n);
+  sc.sample_starts_goals(n, seed, o.data(), goal.data(), cfg.goal_min, cfg.goal_max,
+                         cvc::nav::start_clearance_of(cfg));
+  std::vector<float> psi(n);
+  for (int i = 0; i < n; ++i)
+    psi[i] = std::atan2(goal[2 * i + 1] - o[2 * i + 1], goal[2 * i] - o[2 * i]);
+  cvc::nav::rollout_batch b;
+  b.scene = &sc;
+  b.veh = cvc::nav::bike_veh_of(sc, cfg);
+  b.model = cfg.dyn4;
+  b.price = cfg.dyn4_price;
+  b.mu = cfg.ground_mu;
+  b.n = n;
+  b.o = o.data();
+  b.psi = psi.data();
+  cfg.plant->reset(b);
+}
+
+// The directional derivative along the unit gradient, by central differences on the plant
+// restored between the two sides, against |g|.
+double plant_dir_rel(coef_trainer &tr, const train_config &cfg, const training_scene &sc,
+                     const std::vector<float> &goal, int window, double *gnorm_out = nullptr) {
+  const int n = cfg.n, P = tr.num_params();
+  std::vector<float> dummy(2 * n, 0.0f), g;
+  const std::vector<std::uint8_t> start = cfg.plant->save();
+  tr.loss_and_grad(sc, dummy.data(), dummy.data(), goal.data(), n, window, &g);
+  double gnorm = 0.0;
+  for (int i = 0; i < P; ++i)
+    gnorm += static_cast<double>(g[i]) * g[i];
+  gnorm = std::sqrt(gnorm);
+  const std::vector<float> base = tr.params();
+  const float eps = 2e-3f;
+  std::vector<float> pp(P), pm(P);
+  for (int i = 0; i < P; ++i) {
+    const float u = static_cast<float>(g[i] / gnorm);
+    pp[i] = base[i] + eps * u;
+    pm[i] = base[i] - eps * u;
+  }
+  cfg.plant->restore(start);
+  tr.set_params(pp);
+  const double Lp =
+      tr.loss_and_grad(sc, dummy.data(), dummy.data(), goal.data(), n, window, nullptr);
+  cfg.plant->restore(start);
+  tr.set_params(pm);
+  const double Lm =
+      tr.loss_and_grad(sc, dummy.data(), dummy.data(), goal.data(), n, window, nullptr);
+  cfg.plant->restore(start);
+  tr.set_params(base);
+  if (gnorm_out)
+    *gnorm_out = gnorm;
+  const double dd = (Lp - Lm) / (2.0 * eps);
+  return std::fabs(dd - gnorm) / (std::fabs(dd) + gnorm + 1e-12);
+}
+} // namespace
+
+// Without a plant, with a model whose wheelbase is not the controller's, or with a plant of
+// another batch's size, the Jolt rollout refuses; with w_energy it needs the model's price.
+TEST(NavCoefTrain, JoltRolloutNeedsAPlantAndItsModel) {
+  const training_scene sc = cvc::nav::city_scene(48);
+  train_config cfg = jolt_model_cfg(small_cfg());
+  std::vector<float> o, goal, aux(2 * cfg.n, 0.0f);
+  reset_batch(sc, cfg, 7, o, goal);
+  {
+    train_config c = cfg;
+    c.plant.reset();
+    EXPECT_THROW(
+        coef_trainer(c, 1).loss_and_grad(sc, o.data(), aux.data(), goal.data(), c.n, 2, nullptr),
+        std::invalid_argument);
+  }
+  {
+    train_config c = cfg;
+    c.dyn4.lr *= 1.5f;
+    EXPECT_THROW(
+        coef_trainer(c, 1).loss_and_grad(sc, o.data(), aux.data(), goal.data(), c.n, 2, nullptr),
+        std::invalid_argument);
+  }
+  EXPECT_THROW(coef_trainer(cfg, 1).loss_and_grad(sc, o.data(), aux.data(), goal.data(), cfg.n - 1,
+                                                  2, nullptr),
+               std::invalid_argument);
+  {
+    train_config c = cfg;
+    c.w_energy = 1.0f;
+    EXPECT_THROW(
+        coef_trainer(c, 1).loss_and_grad(sc, o.data(), aux.data(), goal.data(), c.n, 2, nullptr),
+        std::invalid_argument);
+  }
+  EXPECT_NO_THROW(
+      coef_trainer(cfg, 1).loss_and_grad(sc, o.data(), aux.data(), goal.data(), cfg.n, 2, nullptr));
+}
+
+// On the model as its plant the Jolt rollout's gradient is the model's own: it matches central
+// differences, with and without the energy term (which, on the model, is dyn4_step_energy in
+// value and gradient). n is large for the reason DynamicGradcheckMatchesFiniteDifference gives.
+TEST(NavCoefTrain, JoltRolloutOnTheModelMatchesFiniteDifference) {
+  const training_scene sc = cvc::nav::city_scene(48);
+  train_config cfg = small_cfg();
+  cfg.n = 256;
+  cfg.window = 6;
+  cfg.horizon = 6;
+  cfg = jolt_model_cfg(cfg);
+  for (const float w_energy : {0.0f, 1.0f}) {
+    train_config c = cfg;
+    c.w_energy = w_energy;
+    c.dyn4_price.drive = 1.6f;
+    c.dyn4_price.idle =
+        0.05f * cvc::nav::dyn4_full_power({1.0f, 0.0f}, c.dyn4, cvc::nav::bike_veh_of(sc, c));
+    coef_trainer tr(c, 1);
+    std::vector<float> o, goal;
+    reset_batch(sc, c, 7, o, goal);
+    double gnorm = 0.0;
+    const double rel = plant_dir_rel(tr, c, sc, goal, c.window, &gnorm);
+    std::printf("[jolt-model-gradcheck] w_energy %.0f: |g|=%.4f dir_rel=%.3e\n", w_energy, gnorm,
+                rel);
+    EXPECT_GT(gnorm, 1e-6);
+    EXPECT_LT(rel, 5e-2) << "the Jolt rollout's backward disagrees with finite differences";
+  }
+}
+
+// The model's books calibrate to themselves: a plant that is the model with known changes (its
+// drive answering 0.8 of a command and making up all of its resistance, drag x2, rolling x0.5,
+// stiffer tires, softer dampers, a price) is recovered from the nominal model by calibrate_dyn4,
+// and its books close.
+TEST(NavCoefTrain, CalibrationRecoversAPerturbedModel) {
+  const training_scene sc = cvc::nav::city_scene(48);
+  // The Humvee (a geared drive keeps its drag and rolling resistance) at about 0.106 normalized
+  // units per metre, with a Humvee's acceleration and cornering.
+  train_config cfg = small_cfg();
+  cfg.veh_L = 0.35f;
+  cfg.veh_a_max = 0.3f;
+  cfg.veh_a_lat_max = 0.5f;
+  cfg = jolt_model_cfg(cfg);
+  cfg.dyn4 =
+      cvc::physics::nav_plant::dyn4_params_at(cvc::physics::vehicle_desc::humvee(), cfg.veh_L);
+  cfg.n = 24;
+  const cvc::nav::diff::bike_veh v = cvc::nav::bike_veh_of(sc, cfg);
+  const cvc::nav::diff::dyn4_params nominal = cfg.dyn4;
+  cvc::nav::dyn4_calibration truth;
+  truth.drive_gain = 0.8f;
+  truth.brake_gain = 1.2f;
+  truth.resist_comp = 1.0f;
+  truth.tire = 1.5;
+  truth.drag = 2.0;
+  truth.rolling = 0.5;
+  truth.c_f = 0.7f * nominal.c_f; // the dampers at 0.7
+  truth.c_r = 0.7f * nominal.c_r;
+  // The perturbed plant: train_config's model is what reset() hands the plant.
+  train_config plant_cfg = cfg;
+  plant_cfg.dyn4 = cvc::nav::calibrated(nominal, truth);
+  plant_cfg.dyn4_price.drive = 2.5f;
+  plant_cfg.dyn4_price.idle = 0.02f * cvc::nav::dyn4_full_power({1.0f, 0.0f}, nominal, v);
+  cvc::nav::dyn4_rollout_plant plant;
+  const std::vector<cvc::nav::dyn4_ledger_tick> fit =
+      cvc::nav::record_plant_ticks(sc, plant_cfg, plant, cfg.n, 150, 3);
+  const std::vector<cvc::nav::dyn4_ledger_tick> held =
+      cvc::nav::record_plant_ticks(sc, plant_cfg, plant, cfg.n, 150, 4);
+  const cvc::nav::dyn4_calibration cal = cvc::nav::calibrate_dyn4(nominal, v, cfg.ground_mu, fit);
+  const cvc::nav::dyn4_books after = cvc::nav::dyn4_books_of(nominal, v, cfg.ground_mu, cal, held);
+  std::printf("  drive %.3f brake %.3f comp %.3f lag %.3f s (%.3f) | tire %.3f drag %.3f rolling "
+              "%.3f damper %.3f | books tire %.3f lon %.2e | price %.3f %.4f (truth 2.5 %.4f)\n",
+              cal.drive_gain, cal.brake_gain, cal.resist_comp, cal.tau_drive, nominal.tau_drive,
+              cal.tire, cal.drag, cal.rolling, cal.damper, cal.tire_lat, cal.tire_lon,
+              cal.price.drive, cal.price.idle, plant_cfg.dyn4_price.idle);
+  std::printf("  held out (%llu ticks): before tire %+.3f drag %+.3f rolling %+.3f damper %+.3f "
+              "drawn %+.3f | after %+.3f %+.3f %+.3f %+.3f %+.3f, r2 %.4f, twist %.2e -> %.2e\n",
+              static_cast<unsigned long long>(after.ticks), cal.before.tire.error(),
+              cal.before.drag.error(), cal.before.rolling.error(), cal.before.damper.error(),
+              cal.before.drawn.error(), after.tire.error(), after.drag.error(),
+              after.rolling.error(), after.damper.error(), after.drawn.error(), after.drawn_r2,
+              cal.before.twist_rms, after.twist_rms);
+  EXPECT_NEAR(cal.drive_gain, 0.8, 0.02);
+  EXPECT_NEAR(cal.resist_comp, 1.0, 0.05);
+  EXPECT_NEAR(cal.drag, 2.0, 0.04);
+  EXPECT_NEAR(cal.rolling, 0.5, 0.01);
+  EXPECT_NEAR(cal.damper, 0.7, 0.02);
+  EXPECT_NEAR(cal.tire, 1.5, 0.08);
+  EXPECT_NEAR(cal.tau_drive, nominal.tau_drive, 0.01);
+  EXPECT_NEAR(cal.tire_lat, 1.0, 0.02) << "the model's own tire loss is the ledger's";
+  EXPECT_NEAR(cal.price.drive, 2.5, 0.05);
+  for (const cvc::nav::dyn4_line_totals *l :
+       {&after.tire, &after.drag, &after.rolling, &after.damper, &after.drawn})
+    EXPECT_LT(std::fabs(l->error()), 0.03) << "a held-out line does not close";
+  EXPECT_GT(after.drawn_r2, 0.99);
+  EXPECT_LT(after.twist_rms, 0.1 * cal.before.twist_rms) << "the dynamics are not recovered";
 }
 
 #ifdef CVC_ENABLE_CUDA

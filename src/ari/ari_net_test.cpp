@@ -142,7 +142,10 @@ TEST(AriNet, SnapshotSignsInFetchesAndIsRefusedElsewhere) {
 }
 
 // A program that works between two requests (a reply parsed, a loop) has no request in flight then,
-// but it is not idle: a one-frame snapshot still waits for the second reply.
+// but it is not idle: a one-frame snapshot still waits for the second reply. The loop has to
+// outlast three drains (each pumps the scheduler 0.1 s) to show that, about 0.5 s optimized; a
+// Debug coverage build on a busy runner takes many times that, so this run allows 120 s, not the 10
+// s default (a Debug coverage CI lane once took over 10 s and lost the second reply).
 TEST(AriNet, SnapshotWaitsThroughWorkBetweenRequests) {
   REQUIRE_ARI();
   LocalHttpServer api(txwtf);
@@ -154,7 +157,7 @@ TEST(AriNet, SnapshotWaitsThroughWorkBetweenRequests) {
                                " (set i 0) (while (< i 30000) (set i (+ i 1)))"
                                " (state-set \"t.second\" (get-attr (http-get \"" +
                                api.url("/user/me") + "\") \"status\"))"));
-  const AriRun r = ari("snapshot --net-allow " + api.origin() + " " + quoted(doc));
+  const AriRun r = ari("snapshot --settle 120 --net-allow " + api.origin() + " " + quoted(doc));
   EXPECT_EQ(r.status, 0) << r.output;
   EXPECT_NE(r.output.find("first: 401"), std::string::npos) << r.output;
   EXPECT_NE(r.output.find("second: 401"), std::string::npos) << r.output;

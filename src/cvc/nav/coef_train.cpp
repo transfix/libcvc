@@ -72,20 +72,182 @@ void validate_dynamic(const train_config &c) {
         "): cvc::physics::nav_plant::dyn_bike_params_at(desc, veh_L)");
 }
 
-// w_energy > 0 needs the dynamic rollout and a power model of the same vehicle.
+// rollout == jolt needs the simulation and a model whose wheelbase is the controller's.
+void validate_jolt(const train_config &c) {
+  if (!c.plant)
+    throw std::invalid_argument("cvc::nav::coef_trainer: rollout_kind::jolt needs "
+                                "train_config::plant, the vehicle simulation "
+                                "(cvc::physics::jolt_rollout)");
+  const diff::dyn4_params &p = c.dyn4;
+  const float wb = p.lf + p.lr;
+  if (!(p.m > 0.0f && p.Iz > 0.0f && p.Ix > 0.0f && p.Iy > 0.0f && p.g > 0.0f && p.lf > 0.0f &&
+        p.lr > 0.0f) ||
+      !(std::fabs(wb - c.veh_L) <= 1e-3f * c.veh_L) || !(c.ground_mu > 0.0f))
+    throw std::invalid_argument(
+        "cvc::nav::coef_trainer: rollout_kind::jolt needs train_config::dyn4, a vehicle whose "
+        "wheelbase lf + lr is veh_L (" +
+        std::to_string(c.veh_L) + "; got " + std::to_string(wb) +
+        "), and ground_mu > 0: cvc::physics::nav_plant::dyn4_params_at(desc, veh_L)");
+}
+
+// w_energy > 0 needs the dynamic rollout and a power model of the same vehicle, or the Jolt
+// rollout and its model's price.
 void validate_energy(const train_config &c) {
   if (!(std::isfinite(c.energy_ref) && c.energy_ref >= 0.0f))
     throw std::invalid_argument("cvc::nav::coef_trainer: energy_ref must be finite and >= 0");
   if (c.w_energy == 0.0f)
     return;
+  if (c.rollout == rollout_kind::jolt) {
+    if (!(c.dyn4_price.drive >= 0.0f && c.dyn4_price.idle >= 0.0f &&
+          c.dyn4_price.drive + c.dyn4_price.idle > 0.0f))
+      throw std::invalid_argument("cvc::nav::coef_trainer: w_energy on rollout_kind::jolt needs "
+                                  "train_config::dyn4_price, >= 0 and not zero: "
+                                  "cvc::nav::calibrate_dyn4(...).price");
+    return;
+  }
   if (c.rollout != rollout_kind::dynamic)
-    throw std::invalid_argument("cvc::nav::coef_trainer: w_energy needs rollout_kind::dynamic");
+    throw std::invalid_argument(
+        "cvc::nav::coef_trainer: w_energy needs rollout_kind::dynamic or jolt");
   if (!c.power.on() || !(std::fabs(c.power.m - c.dyn.m) <= 1e-4f * c.dyn.m))
     throw std::invalid_argument(
         "cvc::nav::coef_trainer: w_energy needs train_config::power, a power model of dyn's "
         "vehicle (its mass " +
         std::to_string(c.dyn.m) + "; got " + std::to_string(c.power.m) +
         "): cvc::nav::dyn_power_params_of(cvc::physics::fit_power(...).si, mass, frame)");
+}
+
+// The network as the window loss reads it: flat params, layer offsets, width, the basin's biases.
+struct net_view {
+  const float *p;
+  const int *off_w, *off_b;
+  int h;
+  const float *off_bias;
+};
+
+// One step's policy activations (the forward's cache for the backward): coef_feats at o_t and
+// the goal, the MLP's layers, and the coefficients.
+struct policy_step {
+  diff::sample cf; // coef_feats sample at o_t
+  float dx, dy, gd, inv, gdx, gdy;
+  float feat[5];
+  std::vector<float> z0, a0, z1, a1;
+  float raw[3], coef[3];
+  void size_for(int h) {
+    z0.resize(h);
+    a0.resize(h);
+    z1.resize(h);
+    a1.resize(h);
+  }
+};
+
+void policy_forward(const diff::field &F, const net_view &net, float ox, float oy, float gx,
+                    float gy, policy_step &S) {
+  const int h = net.h;
+  const float *p = net.p;
+  S.cf = diff::sample_fwd(F, ox, oy);
+  S.dx = gx - ox;
+  S.dy = gy - oy;
+  S.gd = std::sqrt(S.dx * S.dx + S.dy * S.dy);
+  S.inv = 1.0f / (S.gd + 1e-6f);
+  S.gdx = S.dx * S.inv;
+  S.gdy = S.dy * S.inv;
+  S.feat[0] = S.cf.phi;
+  S.feat[1] = S.gd;
+  S.feat[2] = S.gdx;
+  S.feat[3] = S.gdy;
+  S.feat[4] = S.gdx * S.cf.nx + S.gdy * S.cf.ny;
+  for (int o = 0; o < h; ++o) {
+    float acc = p[net.off_b[0] + o];
+    const float *w = &p[net.off_w[0] + static_cast<std::size_t>(o) * 5];
+    for (int i = 0; i < 5; ++i)
+      acc += w[i] * S.feat[i];
+    S.z0[o] = acc;
+    S.a0[o] = diff::siluf_(acc);
+  }
+  for (int o = 0; o < h; ++o) {
+    float acc = p[net.off_b[1] + o];
+    const float *w = &p[net.off_w[1] + static_cast<std::size_t>(o) * h];
+    for (int i = 0; i < h; ++i)
+      acc += w[i] * S.a0[i];
+    S.z1[o] = acc;
+    S.a1[o] = diff::siluf_(acc);
+  }
+  for (int o = 0; o < 3; ++o) {
+    float acc = p[net.off_b[2] + o];
+    const float *w = &p[net.off_w[2] + static_cast<std::size_t>(o) * h];
+    for (int i = 0; i < h; ++i)
+      acc += w[i] * S.a1[i];
+    S.raw[o] = acc;
+    S.coef[o] = diff::softplusf_(acc + net.off_bias[o]);
+  }
+}
+
+// The policy's backward from d(loss)/d(alpha, beta, gamma) at one step: into the params'
+// gradient gacc, and through coef_feats onto o_t, added to (god_x, god_y). e_prog_t is the priced
+// energy term's gradient on |o_t - goal|.
+void policy_backward(const net_view &net, const policy_step &S, float g_al, float g_be, float g_ga,
+                     float e_prog_t, float *gacc, float &god_x, float &god_y) {
+  const int h = net.h;
+  const float *p = net.p;
+  // MLP backward: (g_al,g_be,g_ga) -> gacc + grad feat
+  float graw[3];
+  graw[0] = g_al * diff::sigmoidf_(S.raw[0] + net.off_bias[0]);
+  graw[1] = g_be * diff::sigmoidf_(S.raw[1] + net.off_bias[1]);
+  graw[2] = g_ga * diff::sigmoidf_(S.raw[2] + net.off_bias[2]);
+  std::vector<float> ga1(h, 0.0f);
+  for (int o = 0; o < 3; ++o) {
+    const std::size_t wb = net.off_w[2] + static_cast<std::size_t>(o) * h;
+    for (int i = 0; i < h; ++i) {
+      gacc[wb + i] += graw[o] * S.a1[i];
+      ga1[i] += graw[o] * p[wb + i];
+    }
+    gacc[net.off_b[2] + o] += graw[o];
+  }
+  std::vector<float> gz1(h);
+  for (int i = 0; i < h; ++i)
+    gz1[i] = ga1[i] * diff::silu_grad_(S.z1[i]);
+  std::vector<float> ga0(h, 0.0f);
+  for (int o = 0; o < h; ++o) {
+    const std::size_t wb = net.off_w[1] + static_cast<std::size_t>(o) * h;
+    const float g = gz1[o];
+    for (int i = 0; i < h; ++i) {
+      gacc[wb + i] += g * S.a0[i];
+      ga0[i] += g * p[wb + i];
+    }
+    gacc[net.off_b[1] + o] += g;
+  }
+  float gfeat[5] = {0, 0, 0, 0, 0};
+  for (int o = 0; o < h; ++o) {
+    const std::size_t wb = net.off_w[0] + static_cast<std::size_t>(o) * 5;
+    const float g = ga0[o] * diff::silu_grad_(S.z0[o]);
+    for (int i = 0; i < 5; ++i) {
+      gacc[wb + i] += g * S.feat[i];
+      gfeat[i] += g * p[wb + i];
+    }
+    gacc[net.off_b[0] + o] += g;
+  }
+
+  // coef_feats backward: gfeat -> grad on o_t (added to the rollout's)
+  const float gphi_cf = gfeat[0];
+  const float ggd = gfeat[1];
+  const float ggdx = gfeat[2] + gfeat[4] * S.cf.nx;
+  const float ggdy = gfeat[3] + gfeat[4] * S.cf.ny;
+  const float gcfnx = gfeat[4] * S.gdx, gcfny = gfeat[4] * S.gdy;
+  const float gd_safe = S.gd > 1e-9f ? S.gd : 1e-9f;
+  const float inv2 = S.inv * S.inv;
+  // |o_t - goal| = gd feeds the policy (ggd) and the priced energy term's progress.
+  float g_dx = (ggd + e_prog_t) * S.dx / gd_safe;
+  float g_dy = (ggd + e_prog_t) * S.dy / gd_safe;
+  g_dx += ggdx * (S.inv - S.dx * S.dx * inv2 / gd_safe);
+  g_dy += ggdx * (-S.dx * S.dy * inv2 / gd_safe);
+  g_dy += ggdy * (S.inv - S.dy * S.dy * inv2 / gd_safe);
+  g_dx += ggdy * (-S.dx * S.dy * inv2 / gd_safe);
+  god_x += -g_dx;
+  god_y += -g_dy;
+  float cdox, cdoy;
+  diff::sample_bwd(S.cf, gphi_cf, gcfnx, gcfny, cdox, cdoy);
+  god_x += cdox;
+  god_y += cdoy;
 }
 
 diff::field to_diff_field(const field_stack &fs) {
@@ -102,7 +264,261 @@ diff::field to_diff_field(const field_stack &fs) {
   F.mxy = static_cast<float>(fs.mxy);
   return F;
 }
+
+// One window on train_config::plant (rollout == jolt; coef_trainer::loss_and_grad's contract).
+// The forward steps every agent together, since the simulation does; the backward is the dynamic
+// rollout's, agent by agent, with dyn4_bike_step_bwd at the states the simulation reached.
+double plant_window(const training_scene &scene, const train_config &cfg, const net_view &net,
+                    const float *goal, int n, int window, std::vector<float> *grad, float *o_out,
+                    float *v_out, float *potential, long *dropped) {
+  validate_jolt(cfg);
+  validate_energy(cfg);
+  rollout_plant &plant = *cfg.plant;
+  if (plant.size() != n)
+    throw std::invalid_argument("cvc::nav::coef_trainer: train_config::plant holds " +
+                                std::to_string(plant.size()) + " vehicles, the batch " +
+                                std::to_string(n) + " (reset it to the batch)");
+  const diff::field F = to_diff_field(scene.field());
+  const diff::bike_veh bv = bike_veh_of(scene, cfg);
+  const diff::flat_ground ground{cfg.ground_mu};
+  const float rr = scene.rr, d_hat = scene.d_hat, hdt = scene.dt;
+  // The energy term: the simulation's energy for the value, the model's price for the gradient.
+  const bool energy = cfg.w_energy != 0.0f;
+  const bool priced = energy && cfg.energy_ref > 0.0f;
+  const float e_ref = cfg.energy_ref;
+  float e_scale = 0.0f, x_width = 0.0f;
+  if (energy) {
+    const float full = dyn4_full_power(cfg.dyn4_price, cfg.dyn4, bv);
+    e_scale = cfg.w_energy / (static_cast<float>(window) * hdt * full);
+    x_width = 1e-2f * full * hdt; // the hinge's: 1% of a full-power step
+  }
+  const double inv_n = 1.0 / n;
+  const float coll_w = cfg.w_coll / static_cast<float>(window);
+  const float region_n = static_cast<float>(0.5 * (scene.max_x - scene.min_x) * scene.scale);
+  const float d_safe = cfg.d_safe > 0.0f ? cfg.d_safe : d_hat;
+  const float inv_d_safe = 1.0f / d_safe;
+  const auto at = [n](int t, int ag) { return static_cast<std::size_t>(t) * n + ag; };
+
+  std::vector<policy_step> st(static_cast<std::size_t>(n) * window);
+  for (policy_step &S : st)
+    S.size_for(net.h);
+  std::vector<diff::dyn4_state<float>> tape(static_cast<std::size_t>(window + 1) * n);
+  std::vector<float> drawn(static_cast<std::size_t>(n) * window, 0.0f);
+  std::vector<float> dcmd(n), acmd(n);
+  for (int ag = 0; ag < n; ++ag)
+    tape[at(0, ag)] = plant.state(ag);
+
+  // ── forward window: the simulation ──
+  double total_loss = 0.0;
+  for (int t = 0; t < window; ++t) {
+    for (int ag = 0; ag < n; ++ag) {
+      const diff::dyn4_state<float> &s = tape[at(t, ag)];
+      const float gx = goal[2 * ag], gy = goal[2 * ag + 1];
+      policy_step &S = st[static_cast<std::size_t>(ag) * window + t];
+      policy_forward(F, net, s.x, s.y, gx, gy, S);
+      const float al = S.coef[0], be = S.coef[1], ga = S.coef[2];
+      if (potential)
+        potential[static_cast<std::size_t>(ag) * window + t] =
+            diff::surr_potential(F, s.x, s.y, gx, gy, al, be, rr, d_hat).total();
+      diff::bike_control(F, s.x, s.y, s.psi, s.vx, gx, gy, al, be, ga, bv, dcmd[ag], acmd[ag]);
+      if (!std::isfinite(dcmd[ag]) || !std::isfinite(acmd[ag]))
+        throw std::runtime_error(
+            "cvc::nav::coef_trainer: rollout_kind::jolt: agent " + std::to_string(ag) + " step " +
+            std::to_string(t) + ": the controller's command is not finite (coefficients " +
+            std::to_string(al) + ", " + std::to_string(be) + ", " + std::to_string(ga) +
+            "; state x " + std::to_string(s.x) + " y " + std::to_string(s.y) + " psi " +
+            std::to_string(s.psi) + " vx " + std::to_string(s.vx) + ")");
+    }
+    plant.step(dcmd.data(), acmd.data());
+    for (int ag = 0; ag < n; ++ag) {
+      const diff::dyn4_state<float> s1 = plant.state(ag);
+      tape[at(t + 1, ag)] = s1;
+      const diff::sample cs = diff::sample_fwd(F, s1.x, s1.y);
+      const float pen = d_safe - (cs.phi - rr);
+      if (pen > 0.0f)
+        total_loss += static_cast<double>(coll_w) * pen * inv_d_safe * inv_n;
+      if (energy) {
+        const float E = static_cast<float>(plant.lines(ag).drawn);
+        drawn[static_cast<std::size_t>(ag) * window + t] = E;
+        if (priced) {
+          const float gx = goal[2 * ag], gy = goal[2 * ag + 1];
+          const float prog =
+              st[static_cast<std::size_t>(ag) * window + t].gd - std::hypot(s1.x - gx, s1.y - gy);
+          float dh;
+          total_loss += static_cast<double>(e_scale) *
+                        diff::power_softplus(E - e_ref * prog, x_width, dh) * inv_n;
+        } else
+          total_loss += static_cast<double>(e_scale) * E * inv_n;
+      }
+    }
+  }
+  for (int ag = 0; ag < n; ++ag) {
+    const diff::dyn4_state<float> &s = tape[at(window, ag)];
+    const float fdx = s.x - goal[2 * ag], fdy = s.y - goal[2 * ag + 1];
+    total_loss += static_cast<double>(std::sqrt(fdx * fdx + fdy * fdy) / region_n) * inv_n;
+    if (o_out) {
+      o_out[2 * ag] = s.x;
+      o_out[2 * ag + 1] = s.y;
+    }
+    if (v_out) {
+      v_out[2 * ag] = s.psi;
+      v_out[2 * ag + 1] = s.vx;
+    }
+  }
+  if (!grad)
+    return total_loss;
+
+  // ── backward window: the model at the simulation's states ──
+  // Each agent's gradient is summed on its own and left out when it is not finite: the model's
+  // reverse at a state far outside its domain (a vehicle the simulation rolled over) can be, and
+  // one such agent would otherwise turn every parameter into NaN.
+  grad->assign(static_cast<std::size_t>(net.off_b[2] + 3), 0.0f);
+  std::vector<float> gacc(grad->size(), 0.0f), gagent(grad->size());
+  for (int ag = 0; ag < n; ++ag) {
+    std::fill(gagent.begin(), gagent.end(), 0.0f);
+    const float gx = goal[2 * ag], gy = goal[2 * ag + 1];
+    diff::dyn4_state<float> g1; // d(loss)/d(state) at the step's end
+    for (int k = 0; k < diff::dyn4_state<float>::size; ++k)
+      g1[k] = 0.0f;
+    {
+      const diff::dyn4_state<float> &s = tape[at(window, ag)];
+      const float fdx = s.x - gx, fdy = s.y - gy;
+      const float Lgoal = std::sqrt(fdx * fdx + fdy * fdy);
+      if (Lgoal > 1e-9f) {
+        g1.x = static_cast<float>(inv_n) * fdx / (Lgoal * region_n);
+        g1.y = static_cast<float>(inv_n) * fdy / (Lgoal * region_n);
+      }
+    }
+    for (int t = window - 1; t >= 0; --t) {
+      const policy_step &S = st[static_cast<std::size_t>(ag) * window + t];
+      const diff::dyn4_state<float> &s0 = tape[at(t, ag)], &s1 = tape[at(t + 1, ag)];
+      const float al = S.coef[0], be = S.coef[1], ga = S.coef[2];
+      float e_prog_t = 0.0f;
+      const diff::sample cs = diff::sample_fwd(F, s1.x, s1.y);
+      if (d_safe - (cs.phi - rr) > 0.0f) {
+        float dox, doy;
+        diff::sample_bwd(cs, -static_cast<float>(coll_w) * inv_d_safe * static_cast<float>(inv_n),
+                         0.0f, 0.0f, dox, doy);
+        g1.x += dox;
+        g1.y += doy;
+      }
+      if (energy) {
+        float gE[diff::dyn4_state<float>::size];
+        dyn4_step_energy(cfg.dyn4, bv, cfg.ground_mu, cfg.dyn4_price, s1, gE);
+        float sc = e_scale * static_cast<float>(inv_n);
+        if (priced) {
+          const float ex = s1.x - gx, ey = s1.y - gy;
+          const float d1 = std::hypot(ex, ey);
+          float dh;
+          diff::power_softplus(
+              drawn[static_cast<std::size_t>(ag) * window + t] - e_ref * (S.gd - d1), x_width, dh);
+          sc *= dh;
+          const float gp = sc * e_ref; // d(loss) / d|o_{t+1} - g|
+          if (d1 > 1e-9f) {
+            g1.x += gp * ex / d1;
+            g1.y += gp * ey / d1;
+          }
+          e_prog_t = -gp;
+        }
+        for (int k = 0; k < diff::dyn4_state<float>::size; ++k)
+          g1[k] += sc * gE[k];
+      }
+      diff::dyn4_state<float> gs;
+      float g_al, g_be, g_ga;
+      diff::dyn4_bike_step_bwd(F, s0, gx, gy, al, be, ga, bv, cfg.dyn4, ground, g1, gs, g_al, g_be,
+                               g_ga);
+      float god_x = gs.x, god_y = gs.y;
+      policy_backward(net, S, g_al, g_be, g_ga, e_prog_t, gagent.data(), god_x, god_y);
+      gs.x = god_x;
+      gs.y = god_y;
+      g1 = gs;
+    }
+    if (std::all_of(gagent.begin(), gagent.end(), [](float x) { return std::isfinite(x); })) {
+      for (std::size_t i = 0; i < gacc.size(); ++i)
+        gacc[i] += gagent[i];
+    } else if (dropped)
+      ++*dropped;
+  }
+  *grad = gacc;
+  return total_loss;
+}
+
+// The batch train() and record_plant_ticks reset the plant to.
+rollout_batch batch_of(const training_scene &scene, const train_config &cfg, int n, const float *o,
+                       const float *psi) {
+  rollout_batch b;
+  b.scene = &scene;
+  b.veh = bike_veh_of(scene, cfg);
+  b.model = cfg.dyn4;
+  b.price = cfg.dyn4_price;
+  b.mu = cfg.ground_mu;
+  b.n = n;
+  b.o = o;
+  b.psi = psi;
+  return b;
+}
 } // namespace
+
+diff::bike_veh bike_veh_of(const training_scene &scene, const train_config &c) {
+  diff::bike_veh bv;
+  bv.rr = scene.rr;
+  bv.d_hat = scene.d_hat;
+  bv.vmax = scene.vmax;
+  bv.L = c.veh_L;
+  bv.delta_max = c.veh_delta_max;
+  bv.a_max = c.veh_a_max;
+  bv.a_lat_max = c.veh_a_lat_max;
+  bv.k_steer = c.veh_k_steer;
+  bv.hdt = scene.dt;
+  bv.allow_reverse = c.veh_allow_reverse ? 1 : 0;
+  return bv;
+}
+
+float start_clearance_of(const train_config &cfg) {
+  if (cfg.start_clearance > 0.0f || cfg.rollout != rollout_kind::jolt)
+    return cfg.start_clearance;
+  return 0.5f * cfg.veh_L;
+}
+
+std::vector<dyn4_ledger_tick> record_plant_ticks(const training_scene &scene,
+                                                 const train_config &cfg, rollout_plant &plant,
+                                                 int n, int steps, unsigned seed, float al,
+                                                 float be, float ga) {
+  if (n < 1 || steps < 0)
+    throw std::invalid_argument("cvc::nav::record_plant_ticks: needs n >= 1 and steps >= 0");
+  std::vector<float> o(2 * n), goal(2 * n), psi(n);
+  scene.sample_starts_goals(n, seed, o.data(), goal.data(), cfg.goal_min, cfg.goal_max,
+                            start_clearance_of(cfg));
+  for (int i = 0; i < n; ++i)
+    psi[i] = std::atan2(goal[2 * i + 1] - o[2 * i + 1], goal[2 * i] - o[2 * i]);
+  plant.reset(batch_of(scene, cfg, n, o.data(), psi.data()));
+  const diff::field F = to_diff_field(scene.field());
+  const diff::bike_veh bv = bike_veh_of(scene, cfg);
+  std::vector<dyn4_ledger_tick> ticks;
+  ticks.reserve(static_cast<std::size_t>(n) * steps);
+  std::vector<float> dcmd(n), acmd(n);
+  std::vector<diff::dyn4_state<float>> s0(n);
+  for (int t = 0; t < steps; ++t) {
+    for (int i = 0; i < n; ++i) {
+      s0[i] = plant.state(i);
+      diff::bike_control(F, s0[i].x, s0[i].y, s0[i].psi, s0[i].vx, goal[2 * i], goal[2 * i + 1], al,
+                         be, ga, bv, dcmd[i], acmd[i]);
+    }
+    plant.step(dcmd.data(), acmd.data());
+    for (int i = 0; i < n; ++i) {
+      dyn4_ledger_tick k;
+      k.s0 = s0[i];
+      k.s1 = plant.state(i);
+      k.delta_cmd = dcmd[i];
+      k.a_cmd = acmd[i];
+      k.lines = plant.lines(i);
+      k.agent = i;
+      k.first = t == 0;
+      ticks.push_back(k);
+    }
+  }
+  return ticks;
+}
 
 // ── training_scene ───────────────────────────────────────────────────────────
 
@@ -184,12 +600,31 @@ void training_scene::build() {
 }
 
 void training_scene::sample_starts_goals(int n, unsigned seed, float *o, float *goal,
-                                         float goal_min, float goal_max) const {
+                                         float goal_min, float goal_max, float clearance) const {
   if (!(goal_min >= 0.0f) || !(goal_max >= 0.0f) || (goal_max > 0.0f && goal_min > goal_max))
     throw std::invalid_argument("cvc::nav::training_scene::sample_starts_goals: needs 0 <= "
                                 "goal_min <= goal_max (goal_max 0 = anywhere)");
+  if (!(clearance >= 0.0f))
+    throw std::invalid_argument(
+        "cvc::nav::training_scene::sample_starts_goals: clearance must be >= 0");
   std::mt19937 rng(seed);
   std::uniform_int_distribution<int> pick(0, static_cast<int>(free_cells.size()) - 1);
+  // The cells a start may be on: any of the component's, or those with the clearance.
+  std::vector<int> clear;
+  if (clearance > 0.0f) {
+    for (const int c : free_cells)
+      if (field_data[static_cast<std::size_t>(c)] >= clearance)
+        clear.push_back(c);
+    if (clear.empty())
+      throw std::invalid_argument(
+          "cvc::nav::training_scene::sample_starts_goals: no free cell is " +
+          std::to_string(clearance) + " from an obstacle");
+  }
+  std::uniform_int_distribution<int> pick_clear(
+      0, clear.empty() ? 0 : static_cast<int>(clear.size()) - 1);
+  const auto pick_start = [&] {
+    return clear.empty() ? free_cells[pick(rng)] : clear[pick_clear(rng)];
+  };
   auto to_on = [&](int cell, float &onx, float &ony) {
     const int r = cell / cols, c = cell % cols;
     const double x = min_x + static_cast<double>(c) / (cols - 1) * (max_x - min_x);
@@ -199,7 +634,7 @@ void training_scene::sample_starts_goals(int n, unsigned seed, float *o, float *
   };
   if (!(goal_max > 0.0f)) {
     for (int i = 0; i < n; ++i) {
-      to_on(free_cells[pick(rng)], o[2 * i], o[2 * i + 1]);
+      to_on(pick_start(), o[2 * i], o[2 * i + 1]);
       to_on(free_cells[pick(rng)], goal[2 * i], goal[2 * i + 1]);
     }
     return;
@@ -217,7 +652,7 @@ void training_scene::sample_starts_goals(int n, unsigned seed, float *o, float *
   for (int i = 0; i < n; ++i) {
     int start = -1;
     for (int t = 0; t < kTries && ring.empty(); ++t) {
-      start = free_cells[pick(rng)];
+      start = pick_start();
       const int r0 = start / cols, c0 = start % cols;
       for (int r = std::max(0, r0 - wr); r <= std::min(rows - 1, r0 + wr); ++r)
         for (int c = std::max(0, c0 - wc); c <= std::min(cols - 1, c0 + wc); ++c) {
@@ -377,38 +812,23 @@ double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_i
     e_width = 1e-3f * full;
     x_width = 1e-2f * full * hdt; // the hinge's: 1% of a full-power step
   }
-  diff::bike_veh bv;
-  bv.rr = rr;
-  bv.d_hat = d_hat;
-  bv.vmax = vmax;
-  bv.L = cfg_.veh_L;
-  bv.delta_max = cfg_.veh_delta_max;
-  bv.a_max = cfg_.veh_a_max;
-  bv.a_lat_max = cfg_.veh_a_lat_max;
-  bv.k_steer = cfg_.veh_k_steer;
-  bv.hdt = hdt;
-  bv.allow_reverse = cfg_.veh_allow_reverse ? 1 : 0;
+  const diff::bike_veh bv = bike_veh_of(scene, cfg_);
   const float off_bias[3] = {std::log(std::expm1(bias_[0])), std::log(std::expm1(bias_[1])),
                              std::log(std::expm1(bias_[2]))};
+  const net_view net{p_.data(), off_w_, off_b_, h, off_bias};
+  if (cfg_.rollout == rollout_kind::jolt)
+    return plant_window(scene, cfg_, net, goal, n, window, grad, o_out, v_out, potential,
+                        &dropped_agents_);
   if (grad)
     grad->assign(p_.size(), 0.0f);
 
-  struct Step {
-    diff::sample cf; // coef_feats sample at o_t
-    float dx, dy, gd, inv, gdx, gdy;
-    float feat[5];
-    std::vector<float> z0, a0, z1, a1;
-    float raw[3], coef[3];
+  struct Step : policy_step {
     float ox, oy, auxx, auxy; // o_t, aux_t
     float ext[4];             // the dynamic rollout's (vy, r, delta, a)_t
   };
   std::vector<Step> st(window);
-  for (int L = 0; L < window; ++L) {
-    st[L].z0.resize(h);
-    st[L].a0.resize(h);
-    st[L].z1.resize(h);
-    st[L].a1.resize(h);
-  }
+  for (int L = 0; L < window; ++L)
+    st[L].size_for(h);
 
   double total_loss = 0.0;
   const double inv_n = 1.0 / n;
@@ -443,42 +863,7 @@ double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_i
       S.auxy = ay;
       for (int k = 0; k < 4; ++k)
         S.ext[k] = ext[k];
-      S.cf = diff::sample_fwd(F, ox, oy);
-      S.dx = gx - ox;
-      S.dy = gy - oy;
-      S.gd = std::sqrt(S.dx * S.dx + S.dy * S.dy);
-      S.inv = 1.0f / (S.gd + 1e-6f);
-      S.gdx = S.dx * S.inv;
-      S.gdy = S.dy * S.inv;
-      S.feat[0] = S.cf.phi;
-      S.feat[1] = S.gd;
-      S.feat[2] = S.gdx;
-      S.feat[3] = S.gdy;
-      S.feat[4] = S.gdx * S.cf.nx + S.gdy * S.cf.ny;
-      for (int o = 0; o < h; ++o) {
-        float acc = p_[off_b_[0] + o];
-        const float *w = &p_[off_w_[0] + static_cast<std::size_t>(o) * 5];
-        for (int i = 0; i < 5; ++i)
-          acc += w[i] * S.feat[i];
-        S.z0[o] = acc;
-        S.a0[o] = diff::siluf_(acc);
-      }
-      for (int o = 0; o < h; ++o) {
-        float acc = p_[off_b_[1] + o];
-        const float *w = &p_[off_w_[1] + static_cast<std::size_t>(o) * h];
-        for (int i = 0; i < h; ++i)
-          acc += w[i] * S.a0[i];
-        S.z1[o] = acc;
-        S.a1[o] = diff::siluf_(acc);
-      }
-      for (int o = 0; o < 3; ++o) {
-        float acc = p_[off_b_[2] + o];
-        const float *w = &p_[off_w_[2] + static_cast<std::size_t>(o) * h];
-        for (int i = 0; i < h; ++i)
-          acc += w[i] * S.a1[i];
-        S.raw[o] = acc;
-        S.coef[o] = diff::softplusf_(acc + off_bias[o]);
-      }
+      policy_forward(F, net, ox, oy, gx, gy, S);
       const float al = S.coef[0], be = S.coef[1], ga = S.coef[2];
       if (potential)
         potential[static_cast<std::size_t>(ag) * window + t] =
@@ -632,66 +1017,9 @@ double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_i
         diff::surr_step_bwd(F, S.ox, S.oy, S.auxx, S.auxy, gx, gy, al, be, ga, rr, d_hat, vmax, hdt,
                             go_x, go_y, gaux_x, gaux_y, gox, goy, gauxx, gauxy, g_al, g_be, g_ga);
 
-      // MLP backward: (g_al,g_be,g_ga) -> gacc + grad feat
-      float graw[3];
-      graw[0] = g_al * diff::sigmoidf_(S.raw[0] + off_bias[0]);
-      graw[1] = g_be * diff::sigmoidf_(S.raw[1] + off_bias[1]);
-      graw[2] = g_ga * diff::sigmoidf_(S.raw[2] + off_bias[2]);
-      std::vector<float> ga1(h, 0.0f);
-      for (int o = 0; o < 3; ++o) {
-        const std::size_t wb = off_w_[2] + static_cast<std::size_t>(o) * h;
-        for (int i = 0; i < h; ++i) {
-          gacc[wb + i] += graw[o] * S.a1[i];
-          ga1[i] += graw[o] * p_[wb + i];
-        }
-        gacc[off_b_[2] + o] += graw[o];
-      }
-      std::vector<float> gz1(h);
-      for (int i = 0; i < h; ++i)
-        gz1[i] = ga1[i] * diff::silu_grad_(S.z1[i]);
-      std::vector<float> ga0(h, 0.0f);
-      for (int o = 0; o < h; ++o) {
-        const std::size_t wb = off_w_[1] + static_cast<std::size_t>(o) * h;
-        const float g = gz1[o];
-        for (int i = 0; i < h; ++i) {
-          gacc[wb + i] += g * S.a0[i];
-          ga0[i] += g * p_[wb + i];
-        }
-        gacc[off_b_[1] + o] += g;
-      }
-      float gfeat[5] = {0, 0, 0, 0, 0};
-      for (int o = 0; o < h; ++o) {
-        const std::size_t wb = off_w_[0] + static_cast<std::size_t>(o) * 5;
-        const float g = ga0[o] * diff::silu_grad_(S.z0[o]);
-        for (int i = 0; i < 5; ++i) {
-          gacc[wb + i] += g * S.feat[i];
-          gfeat[i] += g * p_[wb + i];
-        }
-        gacc[off_b_[0] + o] += g;
-      }
-
-      // coef_feats backward: gfeat -> grad on o_t (add to the rollout's gox/goy)
+      // The policy's backward, and coef_feats' onto o_t (added to the rollout's gox/goy).
       float god_x = gox, god_y = goy;
-      const float gphi_cf = gfeat[0];
-      const float ggd = gfeat[1];
-      const float ggdx = gfeat[2] + gfeat[4] * S.cf.nx;
-      const float ggdy = gfeat[3] + gfeat[4] * S.cf.ny;
-      const float gcfnx = gfeat[4] * S.gdx, gcfny = gfeat[4] * S.gdy;
-      const float gd_safe = S.gd > 1e-9f ? S.gd : 1e-9f;
-      const float inv2 = S.inv * S.inv;
-      // |o_t - goal| = gd feeds the policy (ggd) and the priced energy term's progress.
-      float g_dx = (ggd + e_prog_t) * S.dx / gd_safe;
-      float g_dy = (ggd + e_prog_t) * S.dy / gd_safe;
-      g_dx += ggdx * (S.inv - S.dx * S.dx * inv2 / gd_safe);
-      g_dy += ggdx * (-S.dx * S.dy * inv2 / gd_safe);
-      g_dy += ggdy * (S.inv - S.dy * S.dy * inv2 / gd_safe);
-      g_dx += ggdy * (-S.dx * S.dy * inv2 / gd_safe);
-      god_x += -g_dx;
-      god_y += -g_dy;
-      float cdox, cdoy;
-      diff::sample_bwd(S.cf, gphi_cf, gcfnx, gcfny, cdox, cdoy);
-      god_x += cdox;
-      god_y += cdoy;
+      policy_backward(net, S, g_al, g_be, g_ga, e_prog_t, gacc.data(), god_x, god_y);
 
       go_x = god_x;
       go_y = god_y;
@@ -741,8 +1069,11 @@ void coef_trainer::train(const training_scene &scene, bool verbose,
   const int n = cfg_.n, horizon = cfg_.horizon, window = cfg_.window;
   const bool bike = cfg_.rollout == rollout_kind::bicycle;
   const bool dyn = cfg_.rollout == rollout_kind::dynamic;
+  const bool jolt = cfg_.rollout == rollout_kind::jolt;
   if (dyn)
     validate_dynamic(cfg_);
+  if (jolt)
+    validate_jolt(cfg_);
   // Total adam steps = outer steps * windows-per-horizon, so the cosine anneal spans the run.
   const int nwin = (horizon + window - 1) / window;
   adam_total_ = static_cast<long>(cfg_.steps) * nwin;
@@ -770,18 +1101,24 @@ void coef_trainer::train(const training_scene &scene, bool verbose,
     score(0);
   for (int step = 0; step < cfg_.steps; ++step) {
     scene.sample_starts_goals(n, cfg_.seed + static_cast<unsigned>(step), o.data(), goal.data(),
-                              cfg_.goal_min, cfg_.goal_max);
+                              cfg_.goal_min, cfg_.goal_max, start_clearance_of(cfg_));
     // Initial aux: surrogate v=0; bicycle and dynamic (th aimed at the goal, sp=0), the
     // dynamic vehicle at rest with its wheel straight.
     std::fill(x.begin(), x.end(), 0.0f);
     for (int i = 0; i < n; ++i) {
-      if (bike || dyn) {
+      if (bike || dyn || jolt) {
         aux[2 * i] = std::atan2(goal[2 * i + 1] - o[2 * i + 1], goal[2 * i] - o[2 * i]);
         aux[2 * i + 1] = 0.0f;
       } else {
         aux[2 * i] = 0.0f;
         aux[2 * i + 1] = 0.0f;
       }
+    }
+    if (jolt) { // the simulation's vehicles at rest on the batch's starts, aimed at their goals
+      std::vector<float> psi(n);
+      for (int i = 0; i < n; ++i)
+        psi[i] = aux[2 * i];
+      cfg_.plant->reset(batch_of(scene, cfg_, n, o.data(), psi.data()));
     }
     double last = 0.0;
     for (int w0 = 0; w0 < horizon; w0 += window) {

@@ -223,8 +223,10 @@ public:
     plant_divergence = 1u << 6,             // no protocol meaning: the first grant a release
                                             // makes is left out of the grants count, once (the
                                             // lockstep test's own check)
-    // Phase L2: cancel_skips_relevel ('no-relevel-cancel'), coalesce_no_clear
-    // ('coalesce-no-clear'), impl_note_after_only ('impl-note-after-only').
+    cancel_skips_relevel = 1u << 7,         // 'no-relevel-cancel': cancel skips relevel_all
+    coalesce_no_clear = 1u << 8,    // 'coalesce-no-clear': read_inh leaves relevel_pending set
+    impl_note_after_only = 1u << 9, // 'impl-note-after-only': 4.3's set A from the graph after
+                                    // the operation only
   };
 
   struct options {
@@ -243,9 +245,10 @@ public:
   const options &opts() const { return opts_; }
 
   // -- 4.4 ----------------------------------------------------------------------------------
-  /// Attach a home. `prio`: the home applies priorities (false in phase L1, whatever the policy).
-  /// `port` and `progress` are phase L3's (null before). Phase L1 refuses a second home
-  /// (std::logic_error; protocol 4.4).
+  /// Attach a home. `prio`: the home applies priorities (its scheduler uses priority or
+  /// priority_rr), taken as given; the first such home makes `lending` true and recomputes every
+  /// record's inherited priority (4.3). `port` and `progress` are phase L3's (null before).
+  /// Before phase L3 a second home is refused (std::logic_error; protocol 4.4).
   home_id attach_home(bool prio, std::shared_ptr<lock_port> port,
                       std::shared_ptr<std::atomic<std::int64_t>> progress, lock_notes &out);
 
@@ -271,12 +274,13 @@ public:
   /// A home is destroyed (protocol 4.11): its cache references dropped, every process of it ended
   /// with abandon, the home deleted.
   void detach_home(home_id h, lock_notes &out);
-  /// A priority change (protocol 4.12). Phase L1: the base only.
+  /// A priority change (protocol 4.12): the record's base, then every inherited priority it
+  /// reaches is recomputed (relevels in `out`).
   void set_base(lock_pid p, int base, lock_notes &out);
 
   // -- 4.13 -----------------------------------------------------------------------------------
   /// The record's inherited priority, lock_inf without one; clears the record's coalesced-relevel
-  /// flag (protocol 4.3, 5.9).
+  /// flag (protocol 4.3, 5.9). A relevel's apply calls it; a check reads rec_of's `inh` instead.
   int read_inh(lock_pid p);
   lock_query_result query(std::string_view abs_prefix, std::optional<home_id> viewer_home,
                           std::string_view viewer_owner) const;

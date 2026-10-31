@@ -871,6 +871,7 @@ struct Runtime::Impl {
   // probe env built exactly like an action's, then cached; the cache is rebuilt when a provider is
   // registered (the registry's generation moves) or refresh_program_names() drops it.
   bool scene_capable = false;
+  bool scene_shaders = false;
   mutable std::mutex names_mutex;
   mutable bool names_valid = false;
   mutable std::uint64_t names_generation = 0;
@@ -888,6 +889,7 @@ struct Runtime::Impl {
     if (backend)
       f.caps = backend->capabilities();
     f.scene = scene_capable;
+    f.scene_shaders = scene_capable && scene_shaders;
     const NetHostStatus net = net_host_status();
     f.net = net.enabled;
     f.net_auth = net.auth;
@@ -1075,6 +1077,11 @@ struct Runtime::Impl {
   // forget_layout(): applied at the next render. Each window's and grid's first frame after it
   // (by its tree.<id>.geometry / .tracks / .columns path) seeds only what the document authored.
   bool forget_layout_pending = false;
+  // The frame clock (Runtime::frame_clock): seconds since clock_epoch, read at each render(), or
+  // the host's pinned time (set_frame_clock).
+  std::chrono::steady_clock::time_point clock_epoch = std::chrono::steady_clock::now();
+  std::optional<double> pinned_clock;
+  double frame_t = 0.0;
   bool windows_forgotten = false;
   std::set<std::string> laid_out;
 
@@ -1716,6 +1723,16 @@ void Runtime::Impl::emit_node(const Widget &w) {
     b.separator();
     break;
 
+  case Kind::Spinner: {
+    // The host's frame clock turns it, whatever the document's programs are doing; disabled, it
+    // stands still. A bind (a state path, or a computed expression) is its label.
+    const std::string text = w.bind.empty()    ? w.label
+                             : is_expr(w.bind) ? eval_text(w.bind)
+                                               : read_string(app, resolve(w.bind));
+    b.spinner(text.c_str(), dis ? 0.0 : frame_t, w.ascii_glyphs);
+    break;
+  }
+
   case Kind::Progress: {
     // Read-only: the number (a state path or a computed expression) placed in [lo, hi].
     const std::string v = is_expr(w.bind) ? eval_text(w.bind) : read_string(app, resolve(w.bind));
@@ -1977,6 +1994,10 @@ void Runtime::Impl::render() {
     wired_mounts.clear();
     drop_mount_ticks(); // §12 the old tree's module ticks the new one does not keep
   }
+  frame_t =
+      pinned_clock
+          ? *pinned_clock
+          : std::chrono::duration<double>(std::chrono::steady_clock::now() - clock_epoch).count();
   if (forget_layout_pending) { // a new document: its windows are laid out afresh
     forget_layout_pending = false;
     laid_out.clear();
@@ -2527,6 +2548,7 @@ std::vector<std::string> Runtime::program_names() const {
 }
 
 void Runtime::set_scene_capable(bool on) { m_->scene_capable = on; }
+void Runtime::set_scene_shaders(bool on) { m_->scene_shaders = on; }
 
 HostFacts Runtime::host_facts() const { return m_->facts(); }
 
@@ -2689,6 +2711,9 @@ void Runtime::Impl::run_key_bindings() {
 }
 
 void Runtime::render() { m_->render(); }
+
+void Runtime::set_frame_clock(std::optional<double> seconds) { m_->pinned_clock = seconds; }
+double Runtime::frame_clock() const { return m_->frame_t; }
 
 void Runtime::run_program(std::string script, std::function<void(const std::string &)> done) {
   Impl::QueuedAction a;

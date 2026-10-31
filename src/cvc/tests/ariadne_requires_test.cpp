@@ -9,6 +9,7 @@
 #include <cvc/ariadne/ftxui_backend.h>
 #include <cvc/ariadne/host_info.h>
 #include <cvc/ariadne/requires.h>
+#include <cvc/ariadne/scene_adapter.h>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/builtins.h>
@@ -119,6 +120,31 @@ TEST(AriadneRequires, CapabilityTokensReadTheHostFacts) {
   EXPECT_FALSE(capability_holds("no.such.token", f));
 }
 
+// GLSL runs in the scene's renderer and in the UI, and the two are separate facts. arigl --terminal
+// is the case that splits them: an offscreen GL scene behind a text UI.
+TEST(AriadneRequires, SceneShadersAndUiShadersAreSeparateTokens) {
+  HostFacts terminal; // arigl --terminal: a GL scene adapter, a terminal backend
+  terminal.scene = true;
+  terminal.scene_shaders = true;
+  terminal.caps.terminal = true;
+  EXPECT_TRUE(capability_holds("gl.scene", terminal));
+  EXPECT_TRUE(capability_holds("gl.scene.shaders", terminal));
+  EXPECT_FALSE(capability_holds("gl.ui.shaders", terminal));
+  EXPECT_FALSE(capability_holds("gl.shaders", terminal)); // both, and the UI has none
+
+  HostFacts window = terminal; // arigl in a GL window
+  window.caps.terminal = false;
+  window.caps.glsl = true;
+  EXPECT_TRUE(capability_holds("gl.scene.shaders", window));
+  EXPECT_TRUE(capability_holds("gl.ui.shaders", window));
+  EXPECT_TRUE(capability_holds("gl.shaders", window));
+
+  HostFacts plain; // ari: no scene adapter, a terminal backend
+  plain.caps.terminal = true;
+  EXPECT_FALSE(capability_holds("gl.scene.shaders", plain));
+  EXPECT_FALSE(capability_holds("gl.ui.shaders", plain));
+}
+
 // ---- Runtime::has / has_function
 // -----------------------------------------------------------------
 
@@ -155,8 +181,12 @@ TEST(AriadneRequires, HasAnswersTokensFunctionsAndWidgetTypes) {
   EXPECT_TRUE(rt.has("term"));
   EXPECT_FALSE(rt.has("gl.shaders"));
   EXPECT_FALSE(rt.has("gl.scene"));
+  rt.set_scene_shaders(true);
+  EXPECT_FALSE(rt.has("gl.scene.shaders")); // no scene, so no scene shaders
   rt.set_scene_capable(true);
   EXPECT_TRUE(rt.has("gl.scene"));
+  EXPECT_TRUE(rt.has("gl.scene.shaders"));
+  EXPECT_FALSE(rt.has("gl.ui.shaders"));
   EXPECT_TRUE(rt.has("state-get"));
   EXPECT_TRUE(rt.has("slider_int")); // a built-in widget type
   EXPECT_FALSE(rt.has("no-such-thing"));
@@ -214,6 +244,43 @@ TEST(AriadneRequires, AnOptionalRequirementOnlyWarns) {
   std::vector<std::string> warns;
   ASSERT_NO_THROW(warns = art.load(doc.string()));
   EXPECT_TRUE(any_contains(warns, "optional requirement gl.shaders")) << warns.size();
+}
+
+// A scene adapter that realizes nothing and says its renderer runs shaders, as cvcGL's do.
+struct ShaderSceneAdapter : SceneAdapter {
+  bool runs_shaders() const override { return true; }
+  void realize(const Scene &, const std::string &, std::vector<std::string> *) override {}
+  void sync_visibility(cvc::app &) override {}
+  void tick() override {}
+};
+
+// arigl --terminal: the scene's shaders run, the UI's cannot. A document names which it needs.
+TEST(AriadneRequires, ATerminalHostWithAGlSceneRunsSceneShadersOnly) {
+  REQUIRE_YAML();
+  cvc::app app;
+  ShaderSceneAdapter scene;
+  AppRuntime art(app, "ui.req", &scene);
+  Capabilities c;
+  c.terminal = true;
+  CapsBackend be(c);
+  art.set_backend(be);
+  EXPECT_TRUE(art.runtime().has("gl.scene.shaders"));
+  EXPECT_FALSE(art.runtime().has("gl.ui.shaders"));
+
+  const std::string body = "windows:\n"
+                           "  - window: W\n"
+                           "    children:\n"
+                           "      - text: hi\n";
+  EXPECT_NO_THROW(
+      art.load(write_doc("scene_shaders", "requires: [gl.scene.shaders]\n" + body).string()));
+  for (const char *token : {"gl.ui.shaders", "gl.shaders"}) {
+    try {
+      art.load(write_doc("ui_shaders", std::string("requires: [") + token + "]\n" + body).string());
+      ADD_FAILURE() << token << ": the load should have failed";
+    } catch (const std::runtime_error &e) {
+      EXPECT_NE(std::string(e.what()).find(token), std::string::npos) << e.what();
+    }
+  }
 }
 
 TEST(AriadneRequires, ACallTheHostLacksWarnsAtLoad) {
@@ -299,8 +366,9 @@ TEST(AriadneRequires, TheHostReportListsCapabilitiesAndFunctions) {
 
   const std::string text = format_host_info(info, /*json=*/false, /*functions=*/false);
   EXPECT_NE(text.find("ari (libcvc "), std::string::npos) << text;
-  EXPECT_NE(text.find("term.kitty      yes"), std::string::npos) << text;
-  EXPECT_NE(text.find("gl.scene        no"), std::string::npos) << text;
+  EXPECT_NE(text.find("term.kitty        yes"), std::string::npos) << text;
+  EXPECT_NE(text.find("gl.scene          no"), std::string::npos) << text;
+  EXPECT_NE(text.find("gl.scene.shaders  no"), std::string::npos) << text;
   EXPECT_NE(text.find("functions programs can call: "), std::string::npos) << text;
   EXPECT_EQ(text.find("  state-get\n"), std::string::npos); // listed only with functions=true
   EXPECT_NE(format_host_info(info, false, true).find("  state-get\n"), std::string::npos);

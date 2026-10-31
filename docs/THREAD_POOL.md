@@ -224,6 +224,46 @@ namespace, so keys must be unique across both.
   concurrent CUDA operations and concurrent SDF computations; see the
   `voxels` and `geometry` test binaries for live examples.
 
+## Thread Classes
+
+`cvc/core/thread_class.h` asks the OS for less of the machine, for a thread
+or for the whole process (docs/STATE_EXEC_LOCKS.md 7.6). It is for hosts
+only: no DSL intrinsic reaches it. It never goes above normal and never
+uses a realtime class. Each call returns whether the OS took it; it never
+throws.
+
+```cpp
+#include <cvc/core/thread_class.h>
+
+cvc::set_current_thread_class(cvc::thread_class::background); // this thread
+cvc::set_process_class(cvc::thread_class::utility);           // the process, from any thread
+```
+
+| Platform   | `background` | `utility` | `normal` |
+|------------|--------------|-----------|----------|
+| Windows    | `THREAD_MODE_BACKGROUND_BEGIN`; process: `PROCESS_MODE_BACKGROUND_BEGIN` | `THREAD_PRIORITY_BELOW_NORMAL`; process: `BELOW_NORMAL_PRIORITY_CLASS` | background mode ended, `THREAD_PRIORITY_NORMAL`; process: `NORMAL_PRIORITY_CLASS` |
+| Linux      | nice 10 | nice 5 | nice 0 |
+| macOS      | `QOS_CLASS_BACKGROUND`; process: `PRIO_DARWIN_BG` (also throttles I/O) | `QOS_CLASS_UTILITY`; process: none (false) | `QOS_CLASS_DEFAULT`; process: `PRIO_DARWIN_BG` cleared |
+| Emscripten | false | false | false |
+
+- **Linux classes are per thread.** A thread's nice value is its own, and an
+  unprivileged thread can lower it but not raise it back (that needs
+  `CAP_SYS_NICE` or an `RLIMIT_NICE` that allows it), so going from
+  `background` back to `utility` or `normal` returns false. `set_process_class`
+  stores the class, sets every thread that exists now (the main thread
+  included, through `/proc/self/task`), and the library's worker loops apply
+  it as each worker starts: `cvc::thread_pool`'s workers, `cvc::async_lane`'s,
+  and the app pool's. Any other new thread inherits the nice value of the
+  thread that creates it, so a thread a host makes from a thread that was
+  never demoted keeps its own.
+- **macOS** `utility` and `background` also steer threads to the efficiency
+  cores.
+- **`state_exec.process_class`** (`background`, `utility` or `normal`) on the
+  app tree sets the process class when `app::exec_scheduler()` is first built,
+  on whatever thread builds it; the result, or an unknown value, is logged.
+  pycvc has `pycvc.set_thread_class(pycvc.thread_class.background)` for the
+  calling thread.
+
 ## See Also
 
 - [THREAD_POOL_API.md](THREAD_POOL_API.md) - complete API reference

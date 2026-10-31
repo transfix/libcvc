@@ -3,6 +3,7 @@
 // drag turns the camera. Runs offscreen like the other cvcGL GL tests; no terminal needed (the
 // backend renders to a string).
 #include <cstdio>
+#include <cvc/ariadne/app_runtime.h>
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/ftxui_backend.h>
 #include <cvc/ariadne/scene.h>
@@ -57,6 +58,16 @@ int main() {
   std::vector<std::string> warns;
   scene.realize(spec, "term", &warns);
   chk(warns.empty(), "the box scene realizes without warnings");
+  // The scene's shaders run offscreen, though the terminal draws none: what arigl --terminal
+  // answers to requires: and (has? ...).
+  {
+    ari::AppRuntime art(app, "term", &scene);
+    art.set_backend(backend);
+    chk(art.runtime().has("gl.scene") && art.runtime().has("gl.scene.shaders"),
+        "a terminal with a GL scene runs the scene's shaders (gl.scene.shaders)");
+    chk(!art.runtime().has("gl.ui.shaders") && !art.runtime().has("gl.shaders"),
+        "but not the UI's (gl.ui.shaders, so not gl.shaders)");
+  }
   // A document under another state root than the scene graph's is warned about: node state would
   // land where its panels never look.
   {
