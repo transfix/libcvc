@@ -1053,6 +1053,35 @@ TEST_F(CoordinatorTest, SerializeProcessInfo) {
   EXPECT_EQ(pi2.parent_pid, -1);
 }
 
+// The priority and lock fields cross the status broadcast too (ps_all() of a remote process),
+// and an entry from a node that sends none reads as unboosted, its floor its priority.
+TEST_F(CoordinatorTest, SerializeProcessInfoPriorityAndLocks) {
+  process_info pi{};
+  pi.pid = 7;
+  pi.priority = 10;
+  pi.effective_priority = -10;
+  pi.priority_floor = 3;
+  pi.locks_held = 2;
+  pi.waiting_on = "lock /a.b";
+  process_info pi2{};
+  ASSERT_TRUE(exec_coordinator::deserialize_process_info(
+      exec_coordinator::serialize_process_info(pi), pi2));
+  EXPECT_EQ(pi2.priority, 10);
+  EXPECT_EQ(pi2.effective_priority, -10);
+  EXPECT_EQ(pi2.priority_floor, 3);
+  EXPECT_EQ(pi2.locks_held, 2u);
+  ASSERT_TRUE(pi2.waiting_on.has_value());
+  EXPECT_EQ(*pi2.waiting_on, "lock /a.b");
+
+  process_info old{};
+  ASSERT_TRUE(exec_coordinator::deserialize_process_info(
+      R"({"pid": 8, "name": "old", "status": "ready", "priority": 10})", old));
+  EXPECT_EQ(old.effective_priority, 10);
+  EXPECT_EQ(old.priority_floor, 10);
+  EXPECT_EQ(old.locks_held, 0u);
+  EXPECT_FALSE(old.waiting_on.has_value());
+}
+
 TEST_F(CoordinatorTest, SerializeProcessList) {
   std::vector<process_info> procs;
   process_info p1{};
@@ -1377,6 +1406,7 @@ protected:
 
   int base_of(int pid) { return sched.get_priority(pid).value().base; }
   int floor_of(int pid) { return sched.get_priority(pid).value().floor; }
+  bool floor_explicit(int pid) { return sched.get_priority(pid).value().floor_explicit; }
 
   int pid_named(const std::string &name) {
     for (const process_info &pi : sched.list_processes())
@@ -1386,10 +1416,16 @@ protected:
   }
 
   // A migration request from node-B, as migrate() sends it: process_data is the metadata JSON.
-  void receive_migration(const std::string &name, int priority, int floor) {
-    const std::string data = "{\\\"name\\\":\\\"" + name +
-                             "\\\",\\\"priority\\\":" + std::to_string(priority) +
-                             ",\\\"priority_floor\\\":" + std::to_string(floor) + "}";
+  // Without `floor_explicit`, as a source older than the flag sends it.
+  void receive_migration(const std::string &name, int priority, int floor,
+                         std::optional<bool> floor_explicit = std::nullopt) {
+    std::string data = "{\\\"name\\\":\\\"" + name +
+                       "\\\",\\\"priority\\\":" + std::to_string(priority) +
+                       ",\\\"priority_floor\\\":" + std::to_string(floor);
+    if (floor_explicit)
+      data +=
+          std::string(",\\\"priority_floor_explicit\\\":") + (*floor_explicit ? "true" : "false");
+    data += "}";
     auto msg = state_message::make_text(
         "__state_exec.cluster-1.migrate.node-A",
         "{\"action\":\"migrate-request\",\"source_node\":\"node-B\",\"source_pid\":42,"
@@ -1504,6 +1540,29 @@ TEST_F(Priority, PR11_FloorInMetadata) {
       << sent[0].string_value;
   EXPECT_NE(sent[0].string_value.find("\\\"priority_floor\\\":2"), std::string::npos)
       << sent[0].string_value;
+  EXPECT_NE(sent[0].string_value.find("\\\"priority_floor_explicit\\\":true"), std::string::npos)
+      << sent[0].string_value;
+  // A floor no host gave goes as such: a process that lowered itself from 0 to 6.
+  const int own = submit_long();
+  ASSERT_TRUE(sched.set_priority(own, 6));
+  sent.clear();
+  ASSERT_TRUE(coord.migrate(own, "node-B").success);
+  ASSERT_EQ(sent.size(), 1u);
+  EXPECT_NE(sent[0].string_value.find("\\\"priority_floor\\\":0"), std::string::npos)
+      << sent[0].string_value;
+  EXPECT_NE(sent[0].string_value.find("\\\"priority_floor_explicit\\\":false"), std::string::npos)
+      << sent[0].string_value;
+
+  // The target with no floor of its own keeps whether a host gave the floor: one that none gave
+  // stays one the process may come back to without clamping its spawns under round_robin.
+  receive_migration("own", 6, 0, false);
+  EXPECT_EQ(base_of(pid_named("own")), 6);
+  EXPECT_EQ(floor_of(pid_named("own")), 0);
+  EXPECT_FALSE(floor_explicit(pid_named("own")));
+  receive_migration("hosts", 6, 0, true);
+  EXPECT_TRUE(floor_explicit(pid_named("hosts")));
+  receive_migration("older", 6, 0); // a source older than the flag sent a host's floor
+  EXPECT_TRUE(floor_explicit(pid_named("older")));
 
   // The target, with a floor of 3.
   resource_policy policy;

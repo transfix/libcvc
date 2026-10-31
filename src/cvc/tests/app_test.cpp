@@ -3687,3 +3687,36 @@ TEST(AppExecScheduler, PR05_PolicySetting) {
 #endif
   }
 }
+
+// The build reads the tree, whose reads are interruption points. A thread whose interruption is
+// pending (a pool worker at app shutdown) still builds the scheduler whole, with its settings,
+// and the interruption stays pending for the thread's next interruption point.
+TEST(AppExecScheduler, BuildsOnAnInterruptedThread) {
+  using cvc::state_exec::scheduling_policy;
+  app a;
+  cvc::state::instance(a)("state_exec.policy").value("priority_rr");
+  cvc::state::instance(a)("state_exec.process_class").value("normal");
+  std::atomic<bool> interrupted{false};
+  std::string outcome;
+  boost::thread t([&] {
+    while (!interrupted.load())
+      boost::this_thread::yield();
+    try {
+      outcome =
+          a.exec_scheduler().policy() == scheduling_policy::priority_rr ? "built" : "built wrong";
+    } catch (const boost::thread_interrupted &) {
+      outcome = "interrupted while building";
+      return;
+    }
+    try {
+      boost::this_thread::interruption_point();
+      outcome += ", interruption lost";
+    } catch (const boost::thread_interrupted &) {
+      outcome += ", interruption pending";
+    }
+  });
+  t.interrupt();
+  interrupted = true;
+  t.join();
+  EXPECT_EQ(outcome, "built, interruption pending");
+}

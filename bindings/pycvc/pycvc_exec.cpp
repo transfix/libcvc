@@ -534,10 +534,13 @@ struct Exec::ExecImpl {
 
   // The priority calls (docs/STATE_EXEC_LOCKS.md 7.4). control_mutex stands in for the pump
   // token: the scheduler is touched only by the thread of the active run() or, with none active,
-  // by a holder of the mutex. The GIL comes before the mutex: run() takes the mutex with the GIL
-  // held (at entry, for its quiesce and its reaps, in RunGuard); every other thread releases the
-  // GIL before it takes the mutex and takes the GIL back only once the mutex is unlocked
-  // (priority_call). So no thread ever waits for the GIL while it holds the mutex.
+  // by a holder of the mutex and the GIL (the GIL is what Python's own calls on the scheduler,
+  // Exec.scheduler()'s methods, hold). The GIL comes before the mutex: every thread takes the
+  // mutex with the GIL held (run() at entry, for its quiesce and its reaps, in RunGuard; a
+  // priority call), and no thread ever waits for the GIL while it holds the mutex. Nothing under
+  // the mutex builds or frees a Python object (reap() frees its process after the unlock), and a
+  // priority call that waits for run() releases the GIL under the mutex and takes it back only
+  // once the mutex is unlocked (priority_call).
   std::mutex control_mutex;
   std::condition_variable control_cv;
   // A run() is active: set before its first step, cleared by its quiesce. Not `running`, which
@@ -568,13 +571,16 @@ struct Exec::ExecImpl {
 
   // run()'s reap of its program (both exit paths), under control_mutex, so a thread acting
   // directly during the quiesce never touches the process table while the reap erases from it.
-  // The GIL is held, taken before the mutex; a Python object the reap frees (a python_ref) is
-  // released with it already held, so nothing takes the GIL under the mutex.
+  // The GIL is held, taken before the mutex. The process is freed after the unlock: its captured
+  // values may hold the last reference to a Python object (an exception's traceback, and the
+  // frames and locals in it), whose finalizer may release and retake the GIL, or call this Exec,
+  // and under the mutex either would deadlock.
   void reap(int pid) {
     if (test_quiesce_delay_ms > 0) // PR-8: a woken caller reaches its GIL while run() holds it
       std::this_thread::sleep_for(std::chrono::milliseconds(test_quiesce_delay_ms));
+    process_ptr gone; // freed when this returns: the GIL held, the mutex not
     std::lock_guard<std::mutex> lock(control_mutex);
-    sched.reap(pid);
+    sched.reap(pid, &gone);
   }
 
   // Steps (2)-(5) of a priority call: answer `q`, directly or by the active run().
@@ -582,32 +588,41 @@ struct Exec::ExecImpl {
 };
 
 void Exec::ExecImpl::priority_call(priority_query &q) {
-  // (2) Release the GIL, and only then take the control mutex. The GIL comes back when `nogil`
-  // ends, after the lock's scope, on every path (an exception included): never inside it.
-  gil_released nogil;
-  {
-    std::unique_lock<std::mutex> lock(control_mutex);
-    if (!accepting_queries || std::this_thread::get_id() == run_thread) {
-      // (3) No run() is active, or this is its thread (a registered function, coroutine or
-      // callback): act directly.
-      answer(sched, q);
-    } else {
-      // (3) A run() pumps on another thread: post the call for it to answer between steps, and
-      // wait with the GIL released. Its quiesce answers it too, if the run ends first.
-      auto pending = std::make_shared<priority_query>(q);
-      queries.push_back(pending);
-      control_cmd cmd;
-      cmd.what = control_cmd::kind::query;
-      cmd.query = [this](scheduler_base &) {
-        std::lock_guard<std::mutex> answering(control_mutex);
-        answer_queries();
-      };
-      sched.post_control(q.pid, std::move(cmd));
-      control_cv.wait(lock, [&] { return pending->done; });
-      q = *pending; // (4) the answer, copied out under the mutex
+  // (2) Take the control mutex with the GIL held, the order run() uses. Waiting for it so cannot
+  // deadlock: no holder of the mutex waits for the GIL. Holding both, a direct answer excludes
+  // run() and Python's own calls on the scheduler alike.
+  std::unique_lock<std::mutex> lock(control_mutex);
+  if (!accepting_queries || std::this_thread::get_id() == run_thread) {
+    // (3) No run() is active, or this is its thread (a registered function, coroutine or
+    // callback): act directly.
+    answer(sched, q);
+    return;
+  }
+  // (3) A run() pumps on another thread: post the call for it to answer between steps, and wait
+  // with the GIL released. Its quiesce answers it too, if the run ends first.
+  auto pending = std::make_shared<priority_query>(q);
+  queries.push_back(pending);
+  control_cmd cmd;
+  cmd.what = control_cmd::kind::query;
+  cmd.query = [this](scheduler_base &) {
+    std::lock_guard<std::mutex> answering(control_mutex);
+    answer_queries();
+  };
+  sched.post_control(q.pid, std::move(cmd));
+  // The GIL is released under the mutex (taking it there is what may never happen), and on every
+  // path, an exception included, the mutex is unlocked (4) before the GIL is taken back (5).
+  struct gil_released_until_unlocked {
+    std::unique_lock<std::mutex> &lock;
+    PyThreadState *ts = PyEval_SaveThread();
+    ~gil_released_until_unlocked() {
+      if (lock.owns_lock())
+        lock.unlock();
+      PyEval_RestoreThread(ts);
     }
-  } // (4) the mutex unlocked
-} // (5) only now the GIL is taken back (~gil_released)
+  } nogil{lock};
+  control_cv.wait(lock, [&] { return pending->done; });
+  q = *pending; // (4) the answer, copied out under the mutex
+}
 
 Exec::Exec(const std::shared_ptr<cvc::app> &app, PyObject *policy, double idle_timeout) {
   if (!app) // a RuntimeError, as it always was (a bad policy or idle_timeout is a ValueError)

@@ -95,7 +95,7 @@ int async_scheduler::execute(const std::string &script, const execute_options &o
   // The floor (design 7.2): a host's, explicit, or the submit priority; and what the process
   // keeps alive (a spawned child's context, td 4.15).
   proc.priority_floor = opts.priority_floor.value_or(opts.priority);
-  proc.priority_floor_explicit = opts.priority_floor.has_value();
+  proc.priority_floor_explicit = opts.priority_floor.has_value() && opts.priority_floor_explicit;
   proc.parent_pid = opts.parent_pid;
   proc.keep_alive = opts.keep_alive;
   proc.max_steps = opts.max_steps;
@@ -136,7 +136,7 @@ int async_scheduler::execute(const value_t &expr, const execute_options &opts) {
   // The floor (design 7.2): a host's, explicit, or the submit priority; and what the process
   // keeps alive (a spawned child's context, td 4.15).
   proc.priority_floor = opts.priority_floor.value_or(opts.priority);
-  proc.priority_floor_explicit = opts.priority_floor.has_value();
+  proc.priority_floor_explicit = opts.priority_floor.has_value() && opts.priority_floor_explicit;
   proc.parent_pid = opts.parent_pid;
   proc.keep_alive = opts.keep_alive;
   proc.max_steps = opts.max_steps;
@@ -1405,7 +1405,8 @@ std::optional<priority_info> async_scheduler::get_priority(int pid) const {
   const process *p = procs_.find(pid);
   if (!p)
     return std::nullopt;
-  return priority_info{p->priority, reported_effective(*p, policy_), detail::floor_of(*p), policy_};
+  return priority_info{p->priority, reported_effective(*p, policy_), detail::floor_of(*p), policy_,
+                       p->priority_floor_explicit};
 }
 
 priority_change async_scheduler::set_priority_checked(int caller_pid, int pid, int priority) {
@@ -1600,7 +1601,7 @@ void async_scheduler::raise_exit_exception(int pid) const {
   throw dsl_exception(*it->second->exit_exception, it->second->exit_original);
 }
 
-bool async_scheduler::reap(int pid) {
+bool async_scheduler::reap(int pid, process_ptr *released) {
   auto it = procs_.all().find(pid);
   if (it == procs_.all().end())
     return false;
@@ -1609,12 +1610,15 @@ bool async_scheduler::reap(int pid) {
     return false; // never drop a still-live (ready/running/waiting/paused) process
   cancel_async_calls(pid);
   // Its env, state, watch_handlers and captured values (including any Python holders) all live on
-  // the process object, so erasing it frees them. The process stepping now (its on_complete
-  // reaping it) is erased once its step is over.
-  if (pid == current_pid_)
+  // the process object, so erasing it frees them, or `released` takes them to free later. The
+  // process stepping now (its on_complete reaping it) is erased once its step is over.
+  if (pid == current_pid_) {
     reap_after_step_ = pid;
-  else
+  } else {
+    if (released)
+      *released = it->second;
     procs_.erase(pid);
+  }
   return true;
 }
 

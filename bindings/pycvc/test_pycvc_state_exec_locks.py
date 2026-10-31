@@ -13,6 +13,7 @@ pycvc.set_thread_class (PR-9, design 7.6). PR-8's stress cases run
 CVC_PYCVC_LOCKS_RUNS times each (500 by default).
 """
 
+import faulthandler
 import gc
 import math
 import os
@@ -434,6 +435,10 @@ def test_pr08_waiter_woken_before_reap():
         ex.register_fn("last", last)
         t0 = time.monotonic()
         assert ex.run("(last)") == "1"
+        # The interleaving was forced: run() spent the 0.3 s sleep and the 200 ms delay (a delay
+        # the library never read, as from another C runtime's environment, would force nothing).
+        ran = time.monotonic() - t0
+        assert ran >= 0.45, f"run() took {ran:.3f} s: was the quiesce delay applied?"
         # Nothing stepped after (last), so nothing drained the posted call: it was still waiting
         # when run() left its loop, and run()'s quiesce answered it.
         assert ex.scheduler().get_stats().total_steps == got["steps"] + 1
@@ -581,6 +586,92 @@ def test_pr08_catch_path_raises_the_on_complete_error():
     assert ex.scheduler().get_process_info(sibling).status == pycvc.process_status.terminated
     assert ex.get_priority(pid_box["pid"]) is None  # reaped
     assert ex.run("(+ 1 2)") == "3"  # and the Exec runs again
+
+
+def test_pr08_reap_frees_python_after_the_mutex():
+    # The process run() reaps can hold the last reference to a Python object: on the catch path,
+    # the exception the program failed with, whose traceback keeps the raising frame and its
+    # locals. Its finalizer here calls the Exec on the run() thread, then releases the GIL while
+    # another thread calls run(). Freed under the control mutex, the call relocks the mutex, and
+    # run() waits for the GIL the other thread holds while that thread waits for the mutex. A hang
+    # fails the case: faulthandler prints every thread's stack and exits.
+    app = pycvc.make_app()
+    ex = pycvc.Exec(app)
+    freed = threading.Event()
+    seen = {}
+
+    class Held:
+        def __del__(self):
+            seen["get_priority"] = ex.get_priority(seen["pid"])
+            freed.set()
+            time.sleep(0.3)  # the GIL released while the other thread calls run()
+
+    def boom():
+        seen["pid"] = ex.scheduler().current_pid()
+        held = Held()  # noqa: F841 - a local of the raising frame, kept by its traceback
+        raise ValueError("pr08 boom")
+
+    def sibling_done(_result):
+        raise ValueError("pr08 on_complete")
+
+    opts = pycvc.execute_options()
+    opts.on_complete = sibling_done
+    ex.scheduler().execute(_SIBLING, opts)
+    ex.register_fn("boom", boom)
+
+    def reenter():
+        if freed.wait(WAIT):
+            seen["reentry"] = str(_raises(RuntimeError, ex.run, "1"))
+
+    t = threading.Thread(target=reenter, name="pr08-reenter")
+    t.start()
+    faulthandler.dump_traceback_later(3 * WAIT, exit=True)
+    try:
+        e = _raises(RuntimeError, ex.run, "(boom)")
+    finally:
+        faulthandler.cancel_dump_traceback_later()
+    _join(t)
+    assert "pr08 on_complete" in str(e)  # the catch path: nothing but the process held it
+    assert freed.is_set()
+    assert seen["get_priority"] is None  # reaped by then
+    assert "re-entrant" in seen["reentry"]
+    assert ex.run("(+ 1 2)") == "3"
+
+
+def test_pr08_idle_calls_beside_scheduler_calls():
+    # With no run() active a call acts directly, holding the GIL and the control mutex, so it
+    # never touches the process table while this thread changes it through ex.scheduler(), which
+    # holds only the GIL. A call acting without the GIL is a race on the table: reported in C0's
+    # TSan job, a crash at worst elsewhere.
+    app = pycvc.make_app()
+    ex = pycvc.Exec(app, policy="priority_rr")
+    pid = ex.scheduler().execute("(sleep 100)")
+    stop = threading.Event()
+    calls = {"n": 0, "wrong": []}
+
+    def monitor():
+        while not stop.is_set():
+            applied = ex.set_priority(pid, 3)
+            info = ex.get_priority(pid)
+            if applied is not True or info is None or info["base"] != 3:
+                calls["wrong"].append((applied, info))
+            calls["n"] += 1
+
+    t = threading.Thread(target=monitor, name="pr08-idle-monitor")
+    t.start()
+    try:
+        n, until = 0, time.monotonic() + 0.5
+        while n < RUNS or time.monotonic() < until:
+            p = ex.scheduler().execute("(sleep 100)")
+            assert ex.scheduler().kill(p)
+            assert ex.scheduler().reap(p)
+            n += 1
+    finally:
+        stop.set()
+        _join(t)
+    print(f"  {calls['n']} calls beside {n} submits, kills and reaps")
+    assert calls["wrong"] == []
+    assert calls["n"] > 0
 
 
 def test_pr08_stress_kernel_calls_get_priority():

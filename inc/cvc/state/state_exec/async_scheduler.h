@@ -241,8 +241,12 @@ public:
   /// freeing its env/state/captured values. Returns false (no-op) for an unknown pid or a live one
   /// — never drops a runnable/waiting process. A one-shot driver (pycvc.Exec.run) reaps its pid
   /// after collecting the result so a long-lived scheduler does not accumulate dead processes.
-  /// Its async calls still in flight (futures it never awaited) are cancelled.
-  bool reap(int pid);
+  /// Its async calls still in flight (futures it never awaited) are cancelled. With `released`, the
+  /// erased process is handed out there instead of destroyed, so a caller that reaps under a lock
+  /// frees it, and whatever its captured values run as they go (a Python finalizer), after the
+  /// unlock (pycvc's Exec, docs/STATE_EXEC_LOCKS.md 7.4). A process reaped while it steps is erased
+  /// once its step is over, and `released` is left empty.
+  bool reap(int pid, process_ptr *released = nullptr);
   std::unordered_map<int, value_t> get_results() const;
   scheduler_stats get_stats() const override;
 

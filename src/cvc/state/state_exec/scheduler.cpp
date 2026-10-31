@@ -269,7 +269,7 @@ int scheduler::execute(const std::string &script, const execute_options &opts) {
   // The floor (design 7.2): a host's, explicit, or the submit priority; and what the process
   // keeps alive (a spawned child's context, td 4.15).
   proc.priority_floor = opts.priority_floor.value_or(opts.priority);
-  proc.priority_floor_explicit = opts.priority_floor.has_value();
+  proc.priority_floor_explicit = opts.priority_floor.has_value() && opts.priority_floor_explicit;
   proc.parent_pid = opts.parent_pid;
   proc.keep_alive = opts.keep_alive;
   proc.max_steps = opts.max_steps;
@@ -307,7 +307,7 @@ int scheduler::execute(const value_t &expr, const execute_options &opts) {
   // The floor (design 7.2): a host's, explicit, or the submit priority; and what the process
   // keeps alive (a spawned child's context, td 4.15).
   proc.priority_floor = opts.priority_floor.value_or(opts.priority);
-  proc.priority_floor_explicit = opts.priority_floor.has_value();
+  proc.priority_floor_explicit = opts.priority_floor.has_value() && opts.priority_floor_explicit;
   proc.parent_pid = opts.parent_pid;
   proc.keep_alive = opts.keep_alive;
   proc.max_steps = opts.max_steps;
@@ -1237,7 +1237,8 @@ std::optional<priority_info> scheduler::get_priority(int pid) const {
   const process *p = procs_.find(pid);
   if (!p)
     return std::nullopt;
-  return priority_info{p->priority, reported_effective(*p, policy_), detail::floor_of(*p), policy_};
+  return priority_info{p->priority, reported_effective(*p, policy_), detail::floor_of(*p), policy_,
+                       p->priority_floor_explicit};
 }
 
 priority_change scheduler::set_priority_checked(int caller_pid, int pid, int priority) {

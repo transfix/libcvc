@@ -1254,9 +1254,14 @@ cvc::state_exec::async_scheduler &app::exec_scheduler() {
   std::vector<std::pair<unsigned int, std::string>> notes;
   std::optional<thread_class> process_class;
   std::string process_class_name;
+  // The build reads the tree and logs, and both are interruption points: a thread whose
+  // interruption is pending (a pool worker at app shutdown) still builds the scheduler whole, its
+  // settings read, its class applied and its notes logged. Only a call that builds pays for it.
+  std::optional<boost::this_thread::disable_interruption> keep_interrupt_pending;
   {
     boost::mutex::scoped_lock lock(_execSchedulerMutex);
     if (!_execScheduler) {
+      keep_interrupt_pending.emplace();
       // The policy is fixed now (docs/STATE_EXEC_LOCKS.md 7.3): state_exec.policy, else
       // round_robin, today's. An unknown value is logged, and round_robin used.
       bool unknown = false;

@@ -658,6 +658,7 @@ void exec_coordinator::apply_priority_floor(execute_options &opts) {
   const int floor =
       std::max(*policy_.priority_floor, opts.priority_floor.value_or(*policy_.priority_floor));
   opts.priority_floor = floor;
+  opts.priority_floor_explicit = true;
   if (opts.priority < floor) {
     opts.priority = floor;
     std::lock_guard lk(stats_mu_);
@@ -842,10 +843,12 @@ std::string exec_coordinator::serialize_process_for_migration(int pid) {
   bool f = true;
   jkv(os, "name", pi->name, f);
   jkv(os, "priority", pi->priority, f);
-  // The floor goes with the base (docs/STATE_EXEC_LOCKS.md 7.2); the target applies its own
-  // policy's floor over it.
-  if (const std::optional<priority_info> prio = sched_->get_priority(pid))
+  // The floor goes with the base (docs/STATE_EXEC_LOCKS.md 7.2), and whether a host gave it; the
+  // target applies its own policy's floor over it.
+  if (const std::optional<priority_info> prio = sched_->get_priority(pid)) {
     jkv(os, "priority_floor", prio->floor, f);
+    jkv(os, "priority_floor_explicit", prio->floor_explicit, f);
+  }
   jkv(os, "uid", pi->uid, f);
   jkv(os, "gid", pi->gid, f);
   jkv(os, "max_memory", pi->max_memory, f);
@@ -888,8 +891,15 @@ int exec_coordinator::ingest_migrated_process(const std::string &data) {
   opts.name = name.empty() ? "migrated" : name;
   opts.priority = priority;
   int floor = 0;
-  if (xint(data, "priority_floor", floor))
-    opts.priority_floor = floor; // the source's (absent from a source older than the floor)
+  if (xint(data, "priority_floor", floor)) { // the source's (absent from one older than the floor)
+    opts.priority_floor = floor;
+    // A host's there stays a host's here; a floor no host gave (the submit priority's, or one the
+    // process lowered itself from) stays one the process may come back to and that clamps only
+    // as such a floor does. A source older than the flag sent a host's floor.
+    bool floor_explicit = true;
+    xbool(data, "priority_floor_explicit", floor_explicit);
+    opts.priority_floor_explicit = floor_explicit;
+  }
   // The target re-applies its own floor: no better base or floor than its policy allows (PR-11).
   apply_priority_floor(opts);
   opts.uid = uid;
@@ -1276,6 +1286,8 @@ std::string exec_coordinator::serialize_process_info(const process_info &pi) {
   jkv(os, "name", pi.name, f);
   jkv(os, "status", std::string(to_string(pi.status)), f);
   jkv(os, "priority", pi.priority, f);
+  jkv(os, "effective_priority", pi.effective_priority, f);
+  jkv(os, "priority_floor", pi.priority_floor, f);
   jkv(os, "uid", pi.uid, f);
   jkv(os, "gid", pi.gid, f);
   jkv(os, "step_count", pi.step_count, f);
@@ -1287,6 +1299,9 @@ std::string exec_coordinator::serialize_process_info(const process_info &pi) {
   jkv(os, "message_count", pi.message_count, f);
   jkv(os, "max_messages", pi.max_messages, f);
   jkv(os, "parent_pid", pi.parent_pid, f);
+  jkv(os, "locks_held", static_cast<uint64_t>(pi.locks_held), f);
+  if (pi.waiting_on)
+    jkv(os, "waiting_on", *pi.waiting_on, f);
   os << '}';
   return os.str();
 }
@@ -1300,6 +1315,11 @@ bool exec_coordinator::deserialize_process_info(const std::string &json, process
   if (xstr(json, "status", status_str))
     pi.status = parse_process_status(status_str);
   xint(json, "priority", pi.priority);
+  // A node from before priorities sends neither: no boost, and the floor reads as the priority.
+  pi.effective_priority = pi.priority;
+  pi.priority_floor = pi.priority;
+  xint(json, "effective_priority", pi.effective_priority);
+  xint(json, "priority_floor", pi.priority_floor);
   xstr(json, "uid", pi.uid);
   xstr(json, "gid", pi.gid);
   xu64(json, "step_count", pi.step_count);
@@ -1311,6 +1331,12 @@ bool exec_coordinator::deserialize_process_info(const std::string &json, process
   xu64(json, "message_count", pi.message_count);
   xu64(json, "max_messages", pi.max_messages);
   xint(json, "parent_pid", pi.parent_pid);
+  uint64_t held = 0;
+  if (xu64(json, "locks_held", held))
+    pi.locks_held = static_cast<std::size_t>(held);
+  std::string waiting;
+  if (xstr(json, "waiting_on", waiting))
+    pi.waiting_on = std::move(waiting);
   return true;
 }
 
