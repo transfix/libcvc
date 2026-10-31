@@ -270,7 +270,7 @@ diff::field to_diff_field(const field_stack &fs) {
 // rollout's, agent by agent, with dyn4_bike_step_bwd at the states the simulation reached.
 double plant_window(const training_scene &scene, const train_config &cfg, const net_view &net,
                     const float *goal, int n, int window, std::vector<float> *grad, float *o_out,
-                    float *v_out, float *potential) {
+                    float *v_out, float *potential, long *dropped) {
   validate_jolt(cfg);
   validate_energy(cfg);
   rollout_plant &plant = *cfg.plant;
@@ -321,6 +321,13 @@ double plant_window(const training_scene &scene, const train_config &cfg, const 
         potential[static_cast<std::size_t>(ag) * window + t] =
             diff::surr_potential(F, s.x, s.y, gx, gy, al, be, rr, d_hat).total();
       diff::bike_control(F, s.x, s.y, s.psi, s.vx, gx, gy, al, be, ga, bv, dcmd[ag], acmd[ag]);
+      if (!std::isfinite(dcmd[ag]) || !std::isfinite(acmd[ag]))
+        throw std::runtime_error(
+            "cvc::nav::coef_trainer: rollout_kind::jolt: agent " + std::to_string(ag) + " step " +
+            std::to_string(t) + ": the controller's command is not finite (coefficients " +
+            std::to_string(al) + ", " + std::to_string(be) + ", " + std::to_string(ga) +
+            "; state x " + std::to_string(s.x) + " y " + std::to_string(s.y) + " psi " +
+            std::to_string(s.psi) + " vx " + std::to_string(s.vx) + ")");
     }
     plant.step(dcmd.data(), acmd.data());
     for (int ag = 0; ag < n; ++ag) {
@@ -362,9 +369,13 @@ double plant_window(const training_scene &scene, const train_config &cfg, const 
     return total_loss;
 
   // ── backward window: the model at the simulation's states ──
+  // Each agent's gradient is summed on its own and left out when it is not finite: the model's
+  // reverse at a state far outside its domain (a vehicle the simulation rolled over) can be, and
+  // one such agent would otherwise turn every parameter into NaN.
   grad->assign(static_cast<std::size_t>(net.off_b[2] + 3), 0.0f);
-  std::vector<float> gacc(grad->size(), 0.0f);
+  std::vector<float> gacc(grad->size(), 0.0f), gagent(grad->size());
   for (int ag = 0; ag < n; ++ag) {
+    std::fill(gagent.begin(), gagent.end(), 0.0f);
     const float gx = goal[2 * ag], gy = goal[2 * ag + 1];
     diff::dyn4_state<float> g1; // d(loss)/d(state) at the step's end
     for (int k = 0; k < diff::dyn4_state<float>::size; ++k)
@@ -417,11 +428,16 @@ double plant_window(const training_scene &scene, const train_config &cfg, const 
       diff::dyn4_bike_step_bwd(F, s0, gx, gy, al, be, ga, bv, cfg.dyn4, ground, g1, gs, g_al, g_be,
                                g_ga);
       float god_x = gs.x, god_y = gs.y;
-      policy_backward(net, S, g_al, g_be, g_ga, e_prog_t, gacc.data(), god_x, god_y);
+      policy_backward(net, S, g_al, g_be, g_ga, e_prog_t, gagent.data(), god_x, god_y);
       gs.x = god_x;
       gs.y = god_y;
       g1 = gs;
     }
+    if (std::all_of(gagent.begin(), gagent.end(), [](float x) { return std::isfinite(x); })) {
+      for (std::size_t i = 0; i < gacc.size(); ++i)
+        gacc[i] += gagent[i];
+    } else if (dropped)
+      ++*dropped;
   }
   *grad = gacc;
   return total_loss;
@@ -801,7 +817,8 @@ double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_i
                              std::log(std::expm1(bias_[2]))};
   const net_view net{p_.data(), off_w_, off_b_, h, off_bias};
   if (cfg_.rollout == rollout_kind::jolt)
-    return plant_window(scene, cfg_, net, goal, n, window, grad, o_out, v_out, potential);
+    return plant_window(scene, cfg_, net, goal, n, window, grad, o_out, v_out, potential,
+                        &dropped_agents_);
   if (grad)
     grad->assign(p_.size(), 0.0f);
 

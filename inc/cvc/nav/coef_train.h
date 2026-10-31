@@ -258,6 +258,10 @@ public:
              const checkpoint_fitness &fitness = checkpoint_fitness());
   const std::vector<checkpoint_score> &checkpoints() const { return checkpoints_; }
   int selected_step() const { return selected_step_; }
+  // rollout == jolt: the agents whose gradient was not finite and was left out of a window's
+  // (the model's reverse at a state outside its domain, such as a vehicle the simulation rolled
+  // over), counted over this trainer's loss_and_grad calls.
+  long dropped_agents() const { return dropped_agents_; }
 
   // Bake the frozen inference policy: softplus(net + log(expm1(bias))), the same
   // topology and semantics a loaded .cvcnav has. Persist with its save().
@@ -308,6 +312,7 @@ private:
   long adam_total_ = 0; // total adam steps this train() run, for the cosine LR anneal (0 = off)
   std::vector<checkpoint_score> checkpoints_; // the last train()'s checkpoint scores
   int selected_step_ = -1;                    // and the one it ended on (-1 = no selection)
+  mutable long dropped_agents_ = 0;           // dropped_agents()
   // Per-layer flat offsets into p_ (w then b), plus (rows, cols).
   int off_w_[3] = {0, 0, 0}, off_b_[3] = {0, 0, 0};
   int lrows_[3] = {0, 0, 0}, lcols_[3] = {0, 0, 0};
