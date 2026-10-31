@@ -3439,28 +3439,29 @@ TEST(AriadneNetIntrinsics, WsVerbsRoundTripThroughAPolicy) {
   Runtime rt(app, "");
   MockBackend mb;
   rt.set_backend(&mb);
-  rt.set_root(group({button(
-      "Go", "(begin"
-            "  (set r (ws-open \"" + server.url("/live") + "\" (dict \"timeout\" 5)))"
-            "  (state-set \"r.ok\" (get-attr r \"ok\"))"
-            "  (set h (get-attr r \"handle\"))"
-            "  (state-set \"r.live\" (ws-open? h))"
-            "  (ws-send h \"ping\")"
-            "  (set e (ws-recv h 5))"
-            "  (state-set \"r.type\" (get-attr e \"type\"))"
-            "  (state-set \"r.data\" (get-attr e \"data\"))"
-            "  (state-set \"r.poll\" (if (= (ws-poll h) nil) \"none\" \"some\"))"
-            "  (state-set \"r.closed\" (ws-close h))"
-            "  (state-set \"r.after\" (ws-open? h))"
-            "  (state-set \"r.done\" \"1\"))")}));
+  rt.set_root(
+      group({button("Go", "(begin"
+                          "  (set r (ws-open \"" +
+                              server.url("/live") +
+                              "\" (dict \"timeout\" 5)))"
+                              "  (state-set \"r.ok\" (get-attr r \"ok\"))"
+                              "  (set h (get-attr r \"handle\"))"
+                              "  (state-set \"r.live\" (ws-open? h))"
+                              "  (ws-send h \"ping\")"
+                              "  (set e (ws-recv h 5))"
+                              "  (state-set \"r.type\" (get-attr e \"type\"))"
+                              "  (state-set \"r.data\" (get-attr e \"data\"))"
+                              "  (state-set \"r.poll\" (if (= (ws-poll h) nil) \"none\" \"some\"))"
+                              "  (state-set \"r.closed\" (ws-close h))"
+                              "  (state-set \"r.after\" (ws-open? h))"
+                              "  (state-set \"r.done\" \"1\"))")}));
   mb.button_click = true;
   rt.render();
   rt.drain();
   mb.button_click = false;
 
-  ASSERT_TRUE(pump_until(rt, [&] {
-    return !cvc::state::instance(app)("r.done").value().empty();
-  })) << "the ws verbs never finished";
+  ASSERT_TRUE(pump_until(rt, [&] { return !cvc::state::instance(app)("r.done").value().empty(); }))
+      << "the ws verbs never finished";
   EXPECT_EQ(cvc::state::instance(app)("r.ok").value(), "true");
   EXPECT_EQ(cvc::state::instance(app)("r.live").value(), "true");
   EXPECT_EQ(cvc::state::instance(app)("r.type").value(), "text");
@@ -3485,17 +3486,17 @@ TEST(AriadneNetIntrinsics, WsOpenRefusesAnOriginThePolicyDoesNotAllow) {
   MockBackend mb;
   rt.set_backend(&mb);
   rt.set_root(group({button("Go", "(begin"
-                                  "  (set r (ws-open \"" + server.url("/") + "\"))"
-                                  "  (state-set \"r.ok\" (get-attr r \"ok\"))"
-                                  "  (state-set \"r.error\" (get-attr r \"error\")))")}));
+                                  "  (set r (ws-open \"" +
+                                      server.url("/") +
+                                      "\"))"
+                                      "  (state-set \"r.ok\" (get-attr r \"ok\"))"
+                                      "  (state-set \"r.error\" (get-attr r \"error\")))")}));
   mb.button_click = true;
   rt.render();
   rt.drain();
   mb.button_click = false;
 
-  ASSERT_TRUE(pump_until(rt, [&] {
-    return !cvc::state::instance(app)("r.ok").value().empty();
-  }));
+  ASSERT_TRUE(pump_until(rt, [&] { return !cvc::state::instance(app)("r.ok").value().empty(); }));
   EXPECT_EQ(cvc::state::instance(app)("r.ok").value(), "false");
   EXPECT_NE(cvc::state::instance(app)("r.error").value().find("refused"), std::string::npos);
   EXPECT_TRUE(server.handshakes().empty());

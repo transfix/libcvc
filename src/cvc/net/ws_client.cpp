@@ -2,15 +2,14 @@
 // WebSocket under Emscripten. Exactly one backend is compiled, keyed on the same definitions as
 // the HTTP client (CVC_NET_HAVE_CURL / CVC_NET_HAVE_FETCH); with neither, ws_connect fails.
 
-#include <cvc/net/ws_client.h>
-
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
+#include <cvc/net/ws_client.h>
 #include <deque>
 #include <mutex>
 #include <thread>
-#include <atomic>
 
 #if defined(CVC_NET_HAVE_FETCH) && defined(__EMSCRIPTEN__)
 #include <emscripten/emscripten.h>
@@ -194,7 +193,7 @@ private:
   }
 
   void read_loop() {
-    std::string message;   // the message being assembled
+    std::string message; // the message being assembled
     bool binary = false;
     char buf[16384];
     while (!stop_) {
@@ -213,8 +212,8 @@ private:
         if (!stop_) {
           closed_by_peer_ = true;
           open_ = false;
-          queue_.push({WsEvent::Kind::Close, rc == CURLE_GOT_NOTHING ? "" : curl_easy_strerror(rc),
-                       1006});
+          queue_.push(
+              {WsEvent::Kind::Close, rc == CURLE_GOT_NOTHING ? "" : curl_easy_strerror(rc), 1006});
         }
         return;
       }
