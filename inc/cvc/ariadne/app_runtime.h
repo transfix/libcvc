@@ -149,13 +149,19 @@ public:
   // The status a (quit code) asked for; 0 until something asks to close.
   int exit_code() const;
 
-  // Whether the document is idle: no async call (a request) in flight and no program step waiting
-  // to run (a resident still parsing a reply between two requests is not idle).
+  // Whether the document is idle: no async call (a request) in flight, no program step waiting
+  // to run (a resident still parsing a reply between two requests is not idle) and no picture it
+  // draws still loading (§5.11).
   bool idle() const;
   // For a snapshot of a document that uses the network: run `step` (a drain, or a host's whole
   // frame) until the document has been idle for three steps running, or `max_seconds` pass, so
   // the frame shows what its requests brought back. ari and arigl call it when the network is on.
   void settle(const std::function<void()> &step, double max_seconds = 10.0);
+  // settle(), then draw a frame with `render`; while that frame drew a picture still loading (one
+  // whose URL a reply has just put in state, so no frame had asked for it yet), settle and draw
+  // again. All within `max_seconds`. A snapshot's last frame, with its requests and pictures in.
+  void settle_and_render(const std::function<void()> &step, const std::function<void()> &render,
+                         double max_seconds = 10.0);
 
   // --- input seam (document-level on_key/on_pointer residents) ---
   void post_key(bool down, const std::string &key, int mods = 0, bool repeat = false);

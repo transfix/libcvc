@@ -10,12 +10,14 @@
 // each frame the value moves and `committed` on release; the core writes each
 // change, or only the release for a `commit: release` slider.
 
+#include <algorithm>
 #include <cfloat>
 #include <cstring>
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/gl/ImGuiBinding.h> // cvc::gl::ui::*
 #include <cvc/gl/ImGuiOverlay.h>
 #include <cvc/gl/ariadne/ImGuiBackend.h>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -900,20 +902,32 @@ void ImGuiBackend::set_image(const std::string &name, const cvc::image &img) {
   p.dirty = true;
 }
 
-bool ImGuiBackend::draw_image(const char *name, float width) {
-#ifdef CVC_ENABLE_IMGUI
-  const auto it = m_images.find(name ? name : "");
+void ImGuiBackend::drop_image(const std::string &name) {
+  const auto it = m_images.find(name);
   if (it == m_images.end())
-    return false;
+    return;
+#ifdef CVC_ENABLE_IMGUI
+  if (it->second.tex != 0)
+    glDeleteTextures(1, &it->second.tex);
+#endif
+  m_images.erase(it);
+}
+
+unsigned int ImGuiBackend::image_texture(const std::string &name, int &W, int &H) {
+#ifdef CVC_ENABLE_IMGUI
+  const auto it = m_images.find(name);
+  if (it == m_images.end())
+    return 0;
   PublishedImage &p = it->second;
   if (p.img.width() <= 0 || p.img.height() <= 0)
-    return false;
+    return 0;
   // Upload as RGBA8. `const` so data() reads the shared buffer without a COW detach.
   const cvc::image rgba =
       (p.img.format() == cvc::image::pixel_format::RGBA)
           ? p.img
           : p.img.converted(cvc::image::pixel_format::RGBA, cvc::image::data_type::u8);
-  const int W = rgba.width(), H = rgba.height();
+  W = rgba.width();
+  H = rgba.height();
   if (p.tex == 0) {
     glGenTextures(1, &p.tex);
     glBindTexture(GL_TEXTURE_2D, p.tex);
@@ -929,13 +943,115 @@ bool ImGuiBackend::draw_image(const char *name, float width) {
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, W, H, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
     p.dirty = false;
   }
+  return p.tex;
+#else
+  (void)name;
+  W = H = 0;
+  return 0;
+#endif
+}
+
+bool ImGuiBackend::draw_image(const char *name, float width) {
+#ifdef CVC_ENABLE_IMGUI
+  int W = 0, H = 0;
+  const unsigned int tex = image_texture(name ? name : "", W, H);
+  if (tex == 0)
+    return false;
   const float h = width * static_cast<float>(H) / static_cast<float>(W);
-  ImGui::Image(static_cast<ImTextureID>(static_cast<std::intptr_t>(p.tex)), ImVec2(width, h));
+  ImGui::Image(static_cast<ImTextureID>(static_cast<std::intptr_t>(tex)), ImVec2(width, h));
   return true;
 #else
   (void)name;
   (void)width;
   return false;
+#endif
+}
+
+#ifdef CVC_ENABLE_IMGUI
+struct ImGuiBackend::BackdropFrame {
+  cvc::ariadne::Backdrop bd;
+  ImDrawList *dl = nullptr;
+  ImDrawListSplitter split;
+  ImVec2 start;
+  float avail_w = 0.0f, avail_h = 0.0f;
+};
+#else
+struct ImGuiBackend::BackdropFrame {};
+#endif
+
+void ImGuiBackend::begin_backdrop(const cvc::ariadne::Backdrop &bd) {
+#ifdef CVC_ENABLE_IMGUI
+  auto f = std::make_shared<BackdropFrame>();
+  f->bd = bd;
+  f->dl = ImGui::GetWindowDrawList();
+  f->start = ImGui::GetCursorScreenPos();
+  const ImVec2 avail = ImGui::GetContentRegionAvail();
+  f->avail_w = avail.x;
+  f->avail_h = avail.y;
+  // The content on channel 1, so the picture, drawn last on channel 0, ends up under it.
+  f->split.Split(f->dl, 2);
+  f->split.SetCurrentChannel(f->dl, 1);
+  ImGui::BeginGroup();
+  m_backdrops.push_back(std::move(f));
+#else
+  (void)bd;
+#endif
+}
+
+void ImGuiBackend::end_backdrop() {
+#ifdef CVC_ENABLE_IMGUI
+  if (m_backdrops.empty())
+    return;
+  std::shared_ptr<BackdropFrame> f = std::move(m_backdrops.back());
+  m_backdrops.pop_back();
+  const cvc::ariadne::Backdrop &bd = f->bd;
+  // A group's area: at least its authored size (px, or percent of the space it started in), and
+  // the full width available where it set none, as a banner is.
+  const auto extent = [](const cvc::ariadne::Extent &e, float avail) {
+    if (e.unit == cvc::ariadne::Unit::Px)
+      return e.value;
+    if (e.unit == cvc::ariadne::Unit::Percent)
+      return avail * e.value / 100.0f;
+    return 0.0f;
+  };
+  const float want_w = bd.size.w.is_set() ? extent(bd.size.w, f->avail_w) : f->avail_w;
+  const float want_h = extent(bd.size.h, f->avail_h);
+  const ImVec2 now = ImGui::GetCursorScreenPos();
+  if (!bd.window && want_h > now.y - f->start.y)
+    ImGui::Dummy(ImVec2(0.0f, want_h - (now.y - f->start.y)));
+  ImGui::EndGroup();
+  ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
+  if (bd.window) {
+    const ImRect inner = ImGui::GetCurrentWindow()->InnerRect;
+    mn = inner.Min;
+    mx = inner.Max;
+  } else {
+    mx.x = std::max(mx.x, mn.x + want_w);
+  }
+  f->split.SetCurrentChannel(f->dl, 0);
+  int W = 0, H = 0;
+  const unsigned int tex = bd.image.empty() ? 0 : image_texture(bd.image, W, H);
+  if (tex != 0 && mx.x > mn.x && mx.y > mn.y) {
+    const float rw = mx.x - mn.x, rh = mx.y - mn.y;
+    ImVec2 p0 = mn, p1 = mx, uv0(0.0f, 0.0f), uv1(1.0f, 1.0f);
+    if (bd.fit == cvc::ariadne::ImageFit::Cover) { // the middle of the picture, the area filled
+      const float k = std::max(rw / W, rh / H);
+      const float u = std::min(1.0f, rw / (W * k)), v = std::min(1.0f, rh / (H * k));
+      uv0 = ImVec2((1.0f - u) * 0.5f, (1.0f - v) * 0.5f);
+      uv1 = ImVec2(uv0.x + u, uv0.y + v);
+    } else if (bd.fit == cvc::ariadne::ImageFit::Contain) { // all of the picture, centred
+      const float k = std::min(rw / W, rh / H);
+      const ImVec2 size(W * k, H * k);
+      p0 = ImVec2(mn.x + (rw - size.x) * 0.5f, mn.y + (rh - size.y) * 0.5f);
+      p1 = ImVec2(p0.x + size.x, p0.y + size.y);
+    }
+    const int alpha = std::clamp(static_cast<int>(bd.opacity * 255.0f + 0.5f), 0, 255);
+    f->dl->PushClipRect(mn, mx, true);
+    f->dl->AddImage(static_cast<ImTextureID>(static_cast<std::intptr_t>(tex)), p0, p1, uv0, uv1,
+                    IM_COL32(255, 255, 255, alpha));
+    f->dl->PopClipRect();
+  }
+  f->split.Merge(f->dl);
 #endif
 }
 

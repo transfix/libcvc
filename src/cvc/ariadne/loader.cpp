@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <cvc/ariadne/ariadne.h> // has_widget_type (custom-widget load-time check)
 #include <cvc/ariadne/loader.h>
+#include <cvc/ariadne/media.h>    // §5.11 image: fit / shape / URI src
 #include <cvc/ariadne/requires.h> // free_heads: a granted function brings the ones it calls
 #include <cvc/ariadne/uri.h> // §12/§13 import: resolve library URIs (file/state/http)
 #include <cvc/core/config.h> // CVC_VERSION_STRING (generated from project(VERSION))
@@ -201,7 +202,13 @@ const char *const kAriSchema = R"ARISCHEMA({
         "password": {"$ref": "#/$defs/flag"},
         "options": {"type": ["array", "string"], "items": {"type": "string"}},
         "pos": {"type": "array", "items": {"type": "number"}},
-        "size": {"type": ["array", "number"], "items": {"type": "number"}},
+        "size": {"type": ["array", "number"], "items": {"type": ["number", "string"]}},
+        "src": {"type": "string"},
+        "auth": {"type": "string"},
+        "status": {"type": "string"},
+        "fit": {"enum": ["contain", "cover", "fill"]},
+        "shape": {"enum": ["rect", "circle"]},
+        "background": {"type": ["string", "object"]},
         "items": {"type": "array", "items": {"$ref": "#/$defs/widget"}},
         "children": {"type": "array", "items": {"$ref": "#/$defs/widget"}}
       },
@@ -860,9 +867,29 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     w.on = action(n);
     return w;
   }
-  if (type == "image") { // a host-published image viewer (a live raster)
-    Widget w = image_widget(label, str(n, "src"), num(n, "size", 256.0));
-    w.bind = str(n, "bind"); // optional: the image name comes from this key instead of src
+  if (type == "image") { // a host-published image, or a picture by URI (§5.11)
+    // size: W (a width; the height follows the picture) or [W, H] (a box the picture is fitted to).
+    const YAML::Node sz = n["size"];
+    double w_px = 256.0, h_px = 0.0;
+    if (sz && sz.IsSequence() && sz.size() >= 2) {
+      w_px = sz[0].as<double>(256.0);
+      h_px = sz[1].IsScalar() && sz[1].Scalar() != "auto" ? sz[1].as<double>(0.0) : 0.0;
+    } else if (sz && sz.IsScalar()) {
+      w_px = sz.as<double>(256.0);
+    }
+    Widget w = image_widget(label, str(n, "src"), w_px);
+    w.img_h = h_px;
+    w.bind = str(n, "bind"); // optional: the image name or URI comes from this key instead of src
+    w.media_auth = str(n, "auth");
+    w.media_status = str(n, "status");
+    if (has(n, "fit") && !media::parse_fit(str(n, "fit"), w.img_fit))
+      ctx.warn("ari: image '" + label + "': fit: '" + str(n, "fit") +
+               "' is not contain, cover or fill — using contain");
+    if (has(n, "shape") && !media::parse_shape(str(n, "shape"), w.img_shape))
+      ctx.warn("ari: image '" + label + "': shape: '" + str(n, "shape") +
+               "' is not rect or circle — using rect");
+    if (!w.media_auth.empty() && !w.src.empty() && w.src[0] != '(' && !media::is_uri(w.src))
+      ctx.warn("ari: image '" + label + "': auth: is for a picture by URL (src: https://...)");
     return w;
   }
   if (type == "button") {
@@ -935,6 +962,42 @@ bool any_descendant_repeats(const Widget &w) {
   return false;
 }
 
+// §5.12 background: on a window / overlay / group — a map (src | bind, auth, fit, opacity,
+// terminal, banner_rows, status), or a bare URI or image name for src.
+void parse_background(Ctx &ctx, const YAML::Node &n, Widget &w) {
+  if (w.kind != Kind::Window && w.kind != Kind::Group) {
+    ctx.warn("ari: background: is for a window, overlay or group — ignored");
+    return;
+  }
+  Background &bg = w.background;
+  if (n.IsScalar()) {
+    bg.src = n.Scalar();
+    return;
+  }
+  if (!n.IsMap()) {
+    ctx.warn("ari: background: must be a map (src, fit, opacity, ...) or a URL — ignored");
+    return;
+  }
+  bg.src = str(n, "src");
+  bg.bind = str(n, "bind");
+  bg.auth = str(n, "auth");
+  bg.status = str(n, "status");
+  if (has(n, "fit") && !media::parse_fit(str(n, "fit"), bg.fit))
+    ctx.warn("ari: background fit: '" + str(n, "fit") +
+             "' is not contain, cover or fill — using cover");
+  bg.opacity = static_cast<float>(std::clamp(num(n, "opacity", 1.0), 0.0, 1.0));
+  const std::string term = str(n, "terminal", "behind");
+  if (term == "banner")
+    bg.terminal = BackdropTerminal::Banner;
+  else if (term == "none")
+    bg.terminal = BackdropTerminal::Off;
+  else if (term != "behind")
+    ctx.warn("ari: background terminal: '" + term + "' is not behind, banner or none");
+  bg.banner_rows = std::clamp(static_cast<int>(num(n, "banner_rows", 6.0)), 1, 60);
+  if (!bg.any())
+    ctx.warn("ari: background: has neither src: nor bind: — nothing to draw");
+}
+
 Widget parse_widget(Ctx &ctx, const YAML::Node &n) {
   Widget w = parse_widget_impl(ctx, n);
   // Assign each common field only when the node actually carries it. For a plain widget the
@@ -961,6 +1024,8 @@ Widget parse_widget(Ctx &ctx, const YAML::Node &n) {
       w.autofocus = flag(n, "autofocus", false);
     if (has(n, "repeat"))
       w.repeat = str(n, "repeat"); // §3: a count expression -> emit this template N times
+    if (has(n, "background"))
+      parse_background(ctx, n["background"], w);
     if (has(n, "on_click"))
       w.on_click = str(n, "on_click"); // §4.6 widget-level click handler (any kind); like `on`
     if (has(n, "on_hover"))

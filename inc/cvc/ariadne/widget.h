@@ -51,6 +51,33 @@ enum class Kind {
   Radio,          // bound enum-as-text state, every option shown (a combo's fields; radio_row)
 };
 
+// How a Kind::Image fills its box (`fit:`) and the box's shape (`shape:`); media.h fits a picture
+// loaded by URI to them.
+enum class ImageFit {
+  Contain, // the whole image, aspect kept, transparent padding (the default)
+  Cover,   // the box filled, aspect kept, the centre cropped
+  Fill     // stretched to the box
+};
+enum class ImageShape { Rect, Circle };
+
+// A container's background picture (`background:` on a window, overlay or group, §5.12): drawn
+// behind its content. `src` is a URI (loaded as an image: picture is, §5.11) or a host-published
+// image name; `bind` a key or computed expression naming one instead. In a terminal, text can't sit
+// on pixels, so `terminal` says what to draw there: dimmed half-blocks behind the content, the
+// picture as a row of `banner_rows` above it, or nothing.
+enum class BackdropTerminal { Behind, Banner, Off }; // Off: `terminal: none`
+struct Background {
+  std::string src;
+  std::string bind;
+  std::string auth;   // the host credential an http(s) fetch sends
+  std::string status; // a state key kept loading|ready|failed (and <key>.error)
+  ImageFit fit = ImageFit::Cover;
+  float opacity = 1.0f; // 0..1
+  BackdropTerminal terminal = BackdropTerminal::Behind;
+  int banner_rows = 6;
+  bool any() const { return !src.empty() || !bind.empty(); }
+};
+
 // ---------------------------------------------------------------------------
 // Sizing & layout (roadmap §3.0.3 / §3.0.3b). A size or track value is one of:
 //   auto     — fit content
@@ -273,6 +300,20 @@ struct Widget {
   // aspect).
   std::string src;
   double img_size = 256.0;
+  // A picture by URI (§5.11, media.h): `src` (or bind's value) is an http(s)://, file://, cvc:// or
+  // state:// URI, loaded off the frame. `img_h` > 0 makes `size: [w, h]` a box the picture is
+  // fitted to (`img_fit`, `img_shape`); `media_auth` names the host credential an http(s) fetch
+  // sends
+  // (`auth:`); `media_status` is a state path the widget writes loading|ready|failed to, and the
+  // error to <path>.error (`status:`). `src` may also be a computed expression.
+  double img_h = 0.0;
+  ImageFit img_fit = ImageFit::Contain;
+  ImageShape img_shape = ImageShape::Rect;
+  std::string media_auth;
+  std::string media_status;
+
+  // §5.12 a Window / Group's background picture (any() false: none).
+  Background background;
 
   // Kind::Progress: the bar is the number at `bind` placed in [lo, hi] (clamped); `overlay` is a
   // state path (or a computed expression) whose text is drawn over the bar, else the percent.

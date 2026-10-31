@@ -114,6 +114,12 @@ public:
   // host loop; draw_image references it by the name a `- image:` widget's src/bind resolves to.
   void set_image(const std::string &name, const cvc::image &img) override;
   bool draw_image(const char *name, float width) override; // §raster viewer (ImGui::Image over GL)
+  // Free the texture and pixels published as `name` (Runtime::render calls it, GL current).
+  void drop_image(const std::string &name) override;
+  // §5.12 a container's background: the content between the two goes on a draw-list channel above
+  // the picture, which is drawn once the content's area is known (a window's inner area).
+  void begin_backdrop(const cvc::ariadne::Backdrop &bd) override;
+  void end_backdrop() override;
 
   // Convenience: install `rt`'s per-frame walk as `overlay`'s draw callback, so
   // VTK drives Runtime::render() once per rendered frame. Call after
@@ -210,6 +216,13 @@ private:
     bool dirty = true;    // needs (re-)upload
   };
   std::unordered_map<std::string, PublishedImage> m_images;
+  // The GL texture of the published image `name`, uploaded if it changed (its size in w, h); 0 when
+  // there is no such image. GL context current.
+  unsigned int image_texture(const std::string &name, int &w, int &h);
+
+  // §5.12 backdrops open in this frame, innermost last (a splitter each, so they nest).
+  struct BackdropFrame;
+  std::vector<std::shared_ptr<BackdropFrame>> m_backdrops;
 
   // Per-key in-progress InputText / InputInt text. Follows the value in state while no field is
   // active and holds the edit while one is — the string counterpart of cache_int/cache_float.

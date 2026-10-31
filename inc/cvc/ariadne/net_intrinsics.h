@@ -53,7 +53,9 @@
 // verbs are absent without a compiled cvc::net backend; fetch is always there.
 
 #include <atomic>
+#include <functional>
 #include <memory>
+#include <string>
 
 namespace cvc {
 class app;
@@ -84,6 +86,27 @@ struct NetAccess {
 void register_net_intrinsics(cvc::app &app, NetAccess access);
 // register_net_intrinsics(app, {}): unchecked, and no credentials.
 void register_net_intrinsics(cvc::app &app);
+
+// A GET the host makes for a document, not a program: an image: widget's picture (media.h). It
+// keeps the verbs' terms: `access.policy` checks the URL, and `auth` ("" = none) names a
+// credential the host puts in as the Authorization header, only for an origin the credential is
+// bound to, never following a redirect, with any echo of the token blanked. Blocking; thread-safe.
+// `ok` only for a 2xx reply; otherwise `error` says why ("http 404", the policy's refusal, "no
+// credential ..."), and never quotes a token.
+struct HostGet {
+  bool ok = false;
+  long status = 0;
+  std::string body;
+  std::string content_type;
+  std::string error;
+};
+HostGet host_get(const std::string &url, const std::string &auth, const NetAccess &access);
+
+// host_get without blocking where the transport starts requests (cvc::net::http_starts_async: a
+// browser build without threads): `done` gets the result later, from the browser's event loop on
+// this thread. Elsewhere it is host_get, and `done` is called before this returns.
+void host_get_start(const std::string &url, const std::string &auth, const NetAccess &access,
+                    std::function<void(HostGet)> done);
 
 } // namespace ariadne
 } // namespace cvc
