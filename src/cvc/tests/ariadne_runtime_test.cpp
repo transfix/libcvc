@@ -7585,7 +7585,8 @@ TEST(AriadneOidc, TheLaunchersClientIdWins) {
 // A browser page without threads (cvc::net::http_starts_async): a kept sign-in resumes and a 401 is
 // cured by a refresh, and nothing blocks a frame. The session's own requests (discovery, the
 // refresh) are started, and a request whose credential the server refuses renews it with a started
-// refresh (CredentialRenewer::renew_async) and is started again: the transport sees no blocking send.
+// refresh (CredentialRenewer::renew_async) and is started again: the transport sees no blocking
+// send.
 TEST(AriadneNetL4, AnOidcSessionRenewsWithoutBlockingAFrame) {
   namespace fs = std::filesystem;
   const fs::path dir = fs::temp_directory_path() / ("oidc-l4-" + cvc::net::oidc::random_token(6));
@@ -7597,8 +7598,7 @@ TEST(AriadneNetL4, AnOidcSessionRenewsWithoutBlockingAFrame) {
     std::ofstream(store) << "id https://op.test " << at1 << "\nid.refresh https://op.test " << rt1
                          << "\n";
   }
-  fs::permissions(store, fs::perms::owner_read | fs::perms::owner_write,
-                  fs::perm_options::replace);
+  fs::permissions(store, fs::perms::owner_read | fs::perms::owner_write, fs::perm_options::replace);
   int minted = 1;
   std::string access = at1, refresh = rt1;
   const auto op = [&](const cvc::net::HttpRequest &req) -> cvc::net::HttpResponse {
@@ -7620,9 +7620,9 @@ TEST(AriadneNetL4, AnOidcSessionRenewsWithoutBlockingAFrame) {
                      {"Content-Type: application/json"}, req.url);
     }
     if (req.url == "https://op.test/api/me") { // the third access token is the one it takes
-      const bool ok = minted >= 3 && std::find(req.headers.begin(), req.headers.end(),
-                                               "Authorization: Bearer " + access) !=
-                                         req.headers.end();
+      const bool ok =
+          minted >= 3 && std::find(req.headers.begin(), req.headers.end(),
+                                   "Authorization: Bearer " + access) != req.headers.end();
       return http_ok(ok ? 200 : 401, ok ? "{\"sub\":\"u\"}" : "{}", {}, req.url);
     }
     return http_ok(404, "", {}, req.url);
