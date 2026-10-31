@@ -2257,8 +2257,9 @@ void Runtime::Impl::emit_player(const Widget &w, const char *label) {
   // The controls, with the widgets every backend has: play / pause, a seek slider, the time, mute,
   // and "Open" (the user's browser) where it can't play here.
   const bool playing = p.state == media::PlayerState::Playing;
-  const bool usable =
-      pl && p.state != media::PlayerState::Loading && p.state != media::PlayerState::Failed;
+  // Play works while the player loads (it starts once it can), so it is the first stop for
+  // autofocus and Tab; only a player that failed, or none, can't take it.
+  const bool usable = pl && p.state != media::PlayerState::Failed;
   const bool elsewhere = p.state == media::PlayerState::Remote ||
                          p.state == media::PlayerState::Unsupported ||
                          p.state == media::PlayerState::Failed;
