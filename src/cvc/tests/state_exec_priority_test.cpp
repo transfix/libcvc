@@ -221,7 +221,10 @@ int64_t as_int(const value_t &v) {
   return i ? *i : 0;
 }
 
-// A loop of `n` iterations that never waits: the PI cases' medium-priority spinner.
+// A loop of `n` iterations that never waits: the PI cases' medium-priority spinner. A world step
+// is one process step and checks every invariant after it, so keep `n` small: priority_rr is
+// strict between levels, and a spinner of any length runs to its end before a worse process
+// steps.
 std::string spin(int n) {
   return "(begin (set i 0) (while (< i " + std::to_string(n) + ") (set i (+ i 1))) \"spun\")";
 }
@@ -632,7 +635,7 @@ TEST_P(Priority, ForkCopiesTheFloor) {
 // Pathfinder case). Released, the holder is back at its base.
 TEST_P(Priority, PI01_LowHolderHighWaiterMediumLoop) {
   prio_world &pw = world(scheduling_policy::priority_rr);
-  const int h = pw.submit("(begin (with-lock \"k\" (begin (msg-recv \"h.go\") " + spin(2000) +
+  const int h = pw.submit("(begin (with-lock \"k\" (begin (msg-recv \"h.go\") " + spin(200) +
                               ")) (msg-recv \"h.after\"))",
                           {.priority = 10});
   ASSERT_TRUE(pw.step_until([&] { return pw.inside(h); }));
@@ -644,17 +647,17 @@ TEST_P(Priority, PI01_LowHolderHighWaiterMediumLoop) {
             prio_dict(10, -10, 10, "priority_rr"));
   pw.check_all();
 
-  const int m = pw.submit(spin(20000), {.priority = 0});
+  const int m = pw.submit(spin(600), {.priority = 0});
   pw.deliver("h.go");
   ASSERT_TRUE(pw.step_until([&] { return pw.finished(wt); }));
   EXPECT_EQ(to_string(pw.result(wt)), "\"granted\"");
   EXPECT_FALSE(pw.finished(m)) << "the medium loop ran ahead of the boosted holder";
   std::printf("PI-1 %s: the medium loop had stepped %llu times when the waiter ended\n",
               GetParam().c_str(), static_cast<unsigned long long>(pw.info(m).step_count));
-  ASSERT_TRUE(pw.step_until([&] { return pw.parked(h); }));
+  // Released, the holder is back at its base, behind the loop.
   EXPECT_EQ(pw.effective(h), 10);
   pw.check_all();
-  ASSERT_TRUE(pw.step_until([&] { return pw.finished(m); }));
+  ASSERT_TRUE(pw.step_until([&] { return pw.finished(m) && pw.parked(h); }));
   pw.deliver("h.after");
   ASSERT_TRUE(pw.step_until([&] { return pw.finished(h); }));
 }
@@ -824,10 +827,10 @@ TEST_P(Priority, PI08_ChainWithdrawnWhole) {
 // a medium spinner: V is granted at the end of H's section, and W at the end of V's.
 TEST_P(Priority, PI09_BoostThroughWaiterEdge) {
   prio_world &pw = world(scheduling_policy::priority_rr);
-  const int h = pw.submit("(with-lock \"a.b\" (begin (msg-recv \"h.go\") " + spin(1000) + "))",
+  const int h = pw.submit("(with-lock \"a.b\" (begin (msg-recv \"h.go\") " + spin(200) + "))",
                           {.priority = 10});
   ASSERT_TRUE(pw.step_until([&] { return pw.inside(h); }));
-  const int v = pw.submit("(with-lock \"a\" (begin (msg-recv \"v.go\") " + spin(1000) + "))",
+  const int v = pw.submit("(with-lock \"a\" (begin (msg-recv \"v.go\") " + spin(200) + "))",
                           {.priority = 10});
   ASSERT_TRUE(pw.step_until([&] { return pw.lock_waiting(v); }));
   const int wt = pw.submit(R"((with-lock "a.c" :shared "granted"))", {.priority = -10});
@@ -836,7 +839,7 @@ TEST_P(Priority, PI09_BoostThroughWaiterEdge) {
   EXPECT_EQ(pw.effective(v), -10);
   pw.check_all();
 
-  const int m = pw.submit(spin(20000), {.priority = 0});
+  const int m = pw.submit(spin(600), {.priority = 0});
   pw.deliver("h.go");
   ASSERT_TRUE(pw.step_until([&] { return pw.inside(v); }));
   EXPECT_FALSE(pw.finished(m)) << "the spinner ran ahead of the boosted holder";
