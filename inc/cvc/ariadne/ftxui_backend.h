@@ -266,8 +266,12 @@ public:
   struct HostedWindow {
     std::string id, title;
     bool closable = false;
-    int x = 0, y = 0; // placement from the authored pos / persisted geometry (cells)
-    int w = 0, h = 0; // outer size when authored / persisted / host-set, else 0
+    int x = 0, y = 0; // placement from the authored pos / persisted geometry / the host (cells)
+    // Outer size per axis: the user's (user_sized), else the authored size, else 0 (fit the
+    // content). A size the host gave the window to fit its content is never reported back here,
+    // so a window that closes and opens again fits what it shows then.
+    int w = 0, h = 0;
+    bool user_sized = false;          // w x h is a size the user gave the window (or persisted)
     int content_w = 0, content_h = 0; // the body's natural size (cells)
   };
   struct HostedMenuItem {
@@ -295,7 +299,11 @@ public:
   void activate_menu_item(Runtime &rt, const std::string &item_id);
   void close_window(Runtime &rt, const std::string &id);
   // The host's current bounds for window `id` (cells), reported back as its geometry (§11.4).
-  void set_window_geometry(const std::string &id, int x, int y, int w, int h);
+  // The place is always the window's from now on. The size is only when `user_sized`: the user
+  // resized the window (its frame's corner, a keyboard resize, zoom), so it persists and holds
+  // when the window opens again. Otherwise w x h is the size the host gave it, which the next
+  // walk recomputes from the document and the content.
+  void set_window_geometry(const std::string &id, int x, int y, int w, int h, bool user_sized);
   // The host's screen size in cells, which percent sizes resolve against.
   void set_screen_size(int width, int height);
 

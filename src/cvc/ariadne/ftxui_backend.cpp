@@ -526,8 +526,8 @@ struct FtxuiBackend::Impl {
   struct Win {
     int x = 0, y = 0; // top-left cell, as placed (by the document, the persisted geometry, a drag)
     int sx = 0, sy = 0; // where it is drawn this frame: x / y kept on the current screen
-    int w = 0, h = 0;   // outer size in cells when `sized`
-    bool sized = false;
+    int w = 0, h = 0;   // outer size in cells: the authored size, or the user's when `sized`
+    bool sized = false; // w x h is the user's: persisted (seeded) or a host's user resize
     bool placed = false;
     bool seeded = false;
     long z = 0;
@@ -2594,6 +2594,7 @@ std::vector<FtxuiBackend::HostedWindow> FtxuiBackend::hosted_windows() const {
       hw.y = w->second.y;
       hw.w = w->second.w;
       hw.h = w->second.h;
+      hw.user_sized = w->second.sized;
     }
     if (b->second.body) {
       b->second.body->ComputeRequirement();
@@ -2673,13 +2674,18 @@ void FtxuiBackend::close_window(Runtime &rt, const std::string &id) {
   m.end_event();
 }
 
-void FtxuiBackend::set_window_geometry(const std::string &id, int x, int y, int w, int h) {
+void FtxuiBackend::set_window_geometry(const std::string &id, int x, int y, int w, int h,
+                                       bool user_sized) {
   Impl::Win &win = m_->windows[id];
   win.x = x;
   win.y = y;
-  win.w = w;
-  win.h = h;
-  win.placed = win.seeded = win.sized = true;
+  win.placed = win.seeded = true;
+  // A size the host computed to fit the content is not the window's: keeping it would hold the
+  // window at that size when it next opens, whatever it shows by then. The next walk takes the
+  // authored size again (begin_window), or none.
+  win.sized = user_sized;
+  win.w = user_sized ? w : 0;
+  win.h = user_sized ? h : 0;
 }
 
 void FtxuiBackend::set_screen_size(int width, int height) {
@@ -3085,7 +3091,7 @@ TermRows FtxuiBackend::render_window(const std::string &, int, int) { return {};
 bool FtxuiBackend::feed_window(Runtime &, const std::string &, const TermEvent &) { return false; }
 void FtxuiBackend::activate_menu_item(Runtime &, const std::string &) {}
 void FtxuiBackend::close_window(Runtime &, const std::string &) {}
-void FtxuiBackend::set_window_geometry(const std::string &, int, int, int, int) {}
+void FtxuiBackend::set_window_geometry(const std::string &, int, int, int, int, bool) {}
 void FtxuiBackend::set_screen_size(int, int) {}
 FtxuiBackend::RunExit FtxuiBackend::run_loop(Runtime &, const RunOptions &,
                                              const std::function<void()> &,

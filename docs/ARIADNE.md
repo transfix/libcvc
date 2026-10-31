@@ -398,8 +398,10 @@ Three backends ship:
   ([`inc/cvc/ariadne/tvision_backend.h`](../inc/cvc/ariadne/tvision_backend.h)) — the
   native-desktop terminal backend (roadmap §16.5 row 5). Turbo Vision owns the terminal
   and draws the chrome itself: movable, resizable, overlapping windows with close and
-  zoom boxes, a pull-down menu bar, a status line, and its own keys (F10, F6, Alt-X,
-  Ctrl-F5). The windows' *contents* are the FTXUI backend's: a `TvisionBackend` is an
+  zoom boxes, a pull-down menu bar, a status line, and its own keys (F10 for the menu bar, F6
+  for the next window, Alt-X to quit, Ctrl-F5 to move or resize the window from the keyboard:
+  the arrows move it, Shift and the arrows resize it, Return keeps it, Escape puts it back).
+  The windows' *contents* are the FTXUI backend's: a `TvisionBackend` is an
   `FtxuiBackend` in hosted mode (`Options::hosted`), which lays each window body out
   offscreen for tvision to draw and takes that window's input in its own cells. So both
   terminal backends share one widget engine, focus and commit rule, and the hosted mode
@@ -952,6 +954,9 @@ A window needs neither `pos:` nor `size:`. Its size:
 - A window with no `size:` fits its content every frame, so it grows and shrinks with what it
   shows. It stops at the edge of the view, measured from where it stands, and never goes below an
   authored `min:` or past a `max:`. Its persisted geometry places it but does not size it.
+- A window that closes and opens again in the same run (§5.9, or its `visible_when` turning true
+  again) is sized as on its first opening: by its `size:`, else by what it shows now, rows it
+  gained while closed included. Only a size the user gave it holds.
 
 Content that does not fit the window, whatever set its size, scrolls. A window gets a scroll bar
 on each axis where it needs one, and never clips its content or shrinks to a stub.
@@ -980,15 +985,24 @@ How each backend does it:
   and cascade new windows instead of flowing them. A window that would run off the screen stops at
   the screen's edge, and a window whose content is larger than it is (or than its `size:`) gets a
   scroll bar. Its body scrolls to keep the focused widget in view; there is no wheel scrolling.
-  On the tvision desktop, tvision's frame holds the window, and the host refits that frame to the
-  content in each axis the document did not size, until the user resizes the window with the
-  frame's own corner; from then on it keeps the user's size.
+  On the tvision desktop, tvision's frame holds the window, and the host sizes that frame on every
+  walk, in each axis: the document's size where it gave one, else the content's. That stops when
+  the user resizes the window (the frame's corner, Ctrl-F5 then Shift and the arrows, or the zoom
+  box): from then on it keeps the user's size, through a close and a reopen too. Nothing else
+  counts as the user's: not a size the host gave the window to fit it, nor tvision scaling the
+  windows when the terminal is resized, nor a move. Only the user's size is reported back to
+  `tree.<id>.geometry`; for any other window the host reports its place alone.
+  `ari_run_reopen_refit_ftxui` and `_tvision` check this in a tmux pane (Linux):
+  [`src/ari/tests/reopen_refit.ari`](../src/ari/tests/reopen_refit.ari)'s windows gain rows while
+  closed and must show them when they open again, and on tvision a window resized with Ctrl-F5
+  must come back at that size.
 
 ### 5.9 Closing and reopening windows: the Windows menu
 
 A window's open state is `tree.<id>.open` (default open; `<id>` is its `id:`, else its title). A
 window whose state is `0` is not drawn. A `closable: true` window has a close button that sets it
-to `0`.
+to `0`. One that opens again is sized as §5.8 says: by its `size:` or its content, unless the user
+resized it.
 
 Every document gets a **Windows** menu to open such a window again, with no menu items to write:
 

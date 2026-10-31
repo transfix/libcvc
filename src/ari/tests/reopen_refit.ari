@@ -1,0 +1,52 @@
+# reopen_refit.ari — windows that close and open again in one run, for reopen_refit_test.sh.
+#
+# A window the document did not size fits its content each time it opens, a second opening as
+# much as the first (ARIADNE.md §5.8), and a size the user gave it holds. Press o to sign out:
+# the sign-in form and the notes close, and while they are closed each gains a row. Press i: they
+# open again and must show it. "Sign in" has its width authored and its height left to fit, as
+# nicotina's sign-in form does; "Notes" has no size at all.
+
+meta:
+  name: Reopen refit
+  author: cvc
+
+init: (begin (state-set "ui.screen" "in") (state-set "ui.msg" ""))
+
+keys:
+  sign_out:
+    label: Sign out
+    key: [O]
+    on: (begin (state-set "ui.msg" "Signed out.") (state-set "ui.screen" "out"))
+  sign_in:
+    label: Sign in
+    key: [I]
+    on: (state-set "ui.screen" "in")
+
+windows:
+  # Open throughout, so a key has a window to go to while the others are closed.
+  - window: Keys
+    id: help
+    pos: [16, 320]
+    children:
+      - text: "o: sign out, i: sign in"
+  - window: Notes
+    id: notes
+    pos: [16, 224]
+    visible_when: (= (state-get "ui.screen") "in")
+    children:
+      - text: "Welcome."
+      - text: "Nothing new."
+      - text: "You signed out; sign in again."
+        visible_when: (!= (state-get "ui.msg") "")
+  # Last, so it is the window tvision selects when they open.
+  - window: Sign in
+    id: signin
+    pos: [16, 32]
+    size: [240, auto]
+    visible_when: (= (state-get "ui.screen") "in")
+    children:
+      - text: "Username: grace"
+      - text: "Password: ********"
+      - text: ""
+        bind: ui.msg
+        visible_when: (!= (state-get "ui.msg") "")
