@@ -85,7 +85,9 @@ Reactive slots — `visible_when`, `enabled_when` / `disabled_when`, computed `b
 - The value allowlist admits arithmetic, coercion, logic, and side-effect-free state
   *readers* only (`kAllowed`, [`ariadne.cpp:417`](../src/cvc/ariadne/ariadne.cpp)), plus
   `(has? "name")`, which asks what the host provides
-  ([§5.7](#57-requires-and-has--what-a-document-needs-from-its-host)).
+  ([§5.7](#57-requires-and-has--what-a-document-needs-from-its-host)). `json-parse` and
+  `json-encode` are on it ([§10.4](#104-json-replies)); `str-concat` is not, so a computed
+  label joins its parts with `string.join`.
 - The special-form gate admits only `if / begin / let / while / for / lambda / defun /
   set / return / quote / yield / break` (`kAllowedForms`,
   [`ariadne.cpp:433`](../src/cvc/ariadne/ariadne.cpp)).
@@ -1127,9 +1129,11 @@ resolver ([`inc/cvc/ariadne/uri.h`](../inc/cvc/ariadne/uri.h)):
   `arigl --net-allow ...`, §10.3), or by a host calling `register_http_uri_handler()` (or the
   cached variant). It is *not* registered by default — see the caveats (§11).
 - **`cvc://<relpath>`** — a location-independent component path, searched along
-  `$CVC_ARIADNE_PATH` → host-supplied extra dirs → the install datadir
-  `<prefix>/share/libcvc/ariadne` → cwd (`register_cvc_uri_handler`). Use this for
-  shipped components so a document does not hard-code install paths.
+  `$CVC_ARIADNE_PATH` → host-supplied extra dirs → `share/libcvc/ariadne` beside the file
+  holding libcvc (`<lib>/..` or `<bin>/..`, so a relocated install such as a cvcpkg prefix
+  finds its own library) → the compiled-in install datadir `<prefix>/share/libcvc/ariadne`
+  → cwd (`register_cvc_uri_handler`). Use this for shipped components so a document does
+  not hard-code install paths.
 
 The `canonical` field is the identity used for cycle-guarding and for resolving
 relative bases in nested composition.
@@ -1542,7 +1546,44 @@ charged to the action's caps (§2.2). `register_async_verb(name, done_channel, f
 the result to `done_channel`, for documents that wait with `(msg-recv "done_channel")`. `AriRuntime` also exposes `step`, `run`, `on`, `post_key`, `post_pointer`,
 and `reload_if_changed`.
 
-### 9.4 From Python (DSL only, via `pycvc.Exec`)
+### 9.4 A document set, installed or served
+
+An app written as `.ari` documents ships them as a directory: `main.ari` and the files it
+imports, relative to itself (`import: lib/feed.ari`, `load: ../shared/panel.ari`), plus any
+`cvc://components/...` it takes from the shipped library (§6.5). The same directory runs in
+both hosts without changes.
+
+**Installed** (`share/<app>/`, from the app's cvcpkg recipe, which depends on the `arigl`
+or `ari` package): `arigl run <prefix>/share/<app>/main.ari`, or in the terminal
+`ari run <prefix>/share/<app>/main.ari` (FTXUI, or `--backend tvision`), from any working
+directory. Both runtimes load through the same loader. Every relative reference resolves
+against the directory of the file that makes it, and `cvc://` finds the component library
+beside the libcvc in the same prefix (§6.4). A launcher only has to pass the path and its
+flags. `ctest -R '(ari|arigl)_docset'` checks this with
+[`src/cvc/tests/data/ariadne_docset`](../src/cvc/tests/data/ariadne_docset/app/main.ari).
+
+**Served** (any site path, e.g. `/apps/<app>/`): put the `arigl-web` package's files (the
+stock browser host) beside the documents and open `/apps/<app>/?src=main.ari`. The package's
+`ari.html` runs the same documents in ari's terminal backend, in an xterm.js terminal:
+`/apps/<app>/ari.html?src=main.ari`. Either runtime fetches the document and, before the app
+starts, every file it names by a relative path
+(`import:`, `load:`, `vinay:`, and the files those name), writing each at its URL path in
+the browser's file system. Then it runs the local copy, so relative references resolve as
+they do on disk ([`web_document.h`](../inc/cvc/ariadne/web_document.h),
+[`doc_fetch.h`](../inc/cvc/ariadne/doc_fetch.h)). By default the
+document must be on the page's own origin. The page's `ariadne.config.json` names the
+document, any other origins it may come from, the host flags (the network flags `--net` and `--net-allow`, ...), and
+the extra data files to fetch; both pages read the same file. The URL can only add document
+arguments. A failed load shows what the runtime printed: an error page in arigl-web, the
+terminal itself in `ari.html`. [CVCGL_WASM.md](CVCGL_WASM.md#arigl-web-the-stock-browser-host)
+has the details, the sizes, and what wasm-mt needs.
+
+A path the document hands a scene source or a data reader (`source: { file: ... }`) is
+relative to the working directory, not to the document. The browser shell runs in the
+document's directory. Natively the working directory is the caller's, so a launcher for
+such a document `cd`s to its directory first.
+
+### 9.5 From Python (DSL only, via `pycvc.Exec`)
 
 If you only need to run `state_exec` programs against an app's tree (no widgets, no
 scene), `pycvc.Exec` ([`bindings/pycvc/pycvc_exec.h`](../bindings/pycvc/pycvc_exec.h))
@@ -1760,6 +1801,46 @@ A host of its own turns the network on with `AppRuntime::enable_net(NetHostConfi
 `AriRuntime::enable_net`, before `load()`; the runtime turns it off again when it is
 destroyed. `register_net_intrinsics(app)` alone still registers unchecked verbs with no
 credentials, for an embedding program that vouches for its documents.
+
+### 10.4 JSON replies
+
+A REST reply's body is text. Three verbs turn it into widgets
+([STATE_EXEC_DEVELOPER_GUIDE.md](STATE_EXEC_DEVELOPER_GUIDE.md) §2, "JSON", has the details):
+
+- `(json-parse text)` reads JSON into values: an object is a dict in document order, an array
+  a list, a number without a fraction or exponent an int, `null` nil. Malformed text raises a
+  `ValueError` with `line` and `col`, which a `try` can catch.
+- `(json-encode value [indent])` writes values as JSON, for a request body.
+- `(state-set-tree path value)` writes a parsed value as the subtree at `path`: a dict's keys
+  and a list's indices name child nodes, and a scalar is a node's value. A list's node holds
+  its length, so `repeat:` can count it. It replaces the subtree, removing what the value
+  doesn't name, and it checks the whole value before it writes anything.
+
+```yaml
+init: |
+  (state-set-tree "feed" (json-parse (get-attr (http-get "https://example.org/feed") "body")))
+windows:
+  - window: Feed
+    children:
+      - type: group
+        repeat: (state-get "feed.items")     # the list's length
+        children:
+          - text: ""
+            bind: feed.items.{i}.text         # each element's field
+```
+
+The request needs the host to allow its origin ([§10.3](#103-the-hosts-network-the-allowlist-and-credentials),
+`ari --net-allow https://example.org`).
+[`examples/ariadne/documents/json_feed.ari`](../examples/ariadne/documents/json_feed.ari) does
+this with a JSON string in place of the request, so it runs anywhere, `ari` included. Its last
+post has accented letters, CJK and an emoji: in both terminal backends a wide glyph takes two
+columns and the window's edge stays straight. `ari_run_json_feed_ftxui` and
+`ari_run_json_feed_tvision` check that on a real terminal: they run `ari run` in a tmux pane
+(Linux, where tmux is installed) and compare the window's rows. `ariadne_ftxui_test`'s
+`JsonFeed*` and `WideGlyphs*` tests check `ari snapshot` and the tvision backend's hosted layout;
+until they did, `ari snapshot`'s plain text put a space after each wide glyph. All
+three are data jobs: a large reply is parsed and written a slice per step, so it doesn't stall
+a frame. `json-parse` and `json-encode` are pure, so reactive expressions may use them too.
 
 ---
 

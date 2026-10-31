@@ -23,6 +23,17 @@
 #include <cstdlib>  // mkstemps
 #include <unistd.h> // write, close, ssize_t
 #endif
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h> // GetModuleHandleExW, GetModuleFileNameW: the component library beside cvc.dll
+#elif !defined(__EMSCRIPTEN__)
+#include <dlfcn.h> // dladdr: the component library beside libcvc
+#endif
 
 namespace cvc {
 namespace ariadne {
@@ -311,12 +322,44 @@ std::vector<std::string> split_env_list(const char *v) {
     out.push_back(cur);
   return out;
 }
+
+// <the file holding libcvc>/../share/libcvc/ariadne: where a relocated install keeps the component
+// library. The compiled-in CVC_ARIADNE_DATA_DIR names the prefix libcvc was built into, which a
+// cvcpkg bundle unpacked anywhere else does not have. The file is libcvc's shared library (lib/ on
+// POSIX, bin/ on Windows), or the program that links it statically. Empty where it can't be found.
+std::string installed_data_dir() {
+  namespace fs = std::filesystem;
+  fs::path module;
+#if defined(_WIN32)
+  HMODULE h = nullptr;
+  if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                             GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                         reinterpret_cast<LPCWSTR>(&installed_data_dir), &h)) {
+    std::wstring buf(32768, L'\0');
+    const DWORD n = GetModuleFileNameW(h, buf.data(), static_cast<DWORD>(buf.size()));
+    if (n > 0 && n < buf.size())
+      module = fs::path(buf.substr(0, n));
+  }
+#elif !defined(__EMSCRIPTEN__)
+  Dl_info info;
+  if (dladdr(reinterpret_cast<const void *>(&installed_data_dir), &info) && info.dli_fname)
+    module = fs::path(info.dli_fname);
+#endif
+  if (module.empty())
+    return std::string();
+  std::error_code ec;
+  const fs::path dir =
+      fs::weakly_canonical(module.parent_path() / ".." / "share" / "libcvc" / "ariadne", ec);
+  return !ec && fs::is_directory(dir, ec) ? dir.string() : std::string();
+}
 } // namespace
 
 std::vector<std::string> cvc_uri_search_dirs(const std::vector<std::string> &extra_search_dirs) {
   std::vector<std::string> dirs = split_env_list(std::getenv("CVC_ARIADNE_PATH"));
   for (const std::string &d : extra_search_dirs)
     dirs.push_back(d);
+  if (const std::string installed = installed_data_dir(); !installed.empty())
+    dirs.push_back(installed); // beside libcvc, wherever the install was unpacked
 #ifdef CVC_ARIADNE_DATA_DIR
   dirs.push_back(
       CVC_ARIADNE_DATA_DIR); // the compiled-in install datadir (<prefix>/share/libcvc/ariadne)

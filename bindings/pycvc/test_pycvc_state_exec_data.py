@@ -48,6 +48,32 @@ def test_the_job_factories():
     pycvc.count_data_nodes(3)  # outside an evaluator step: nothing to count against
 
 
+def test_the_json_jobs():
+    run = pycvc.run_to_completion
+    v = run(pycvc.make_json_parse_job('{"a": [1, 2.5, "\\u00e9", null, true], "b": {}}'))
+    assert v == {"a": [1, 2.5, "é", None, True], "b": {}}
+    assert run(pycvc.make_json_encode_job(v)) == '{"a":[1,2.5,"é",null,true],"b":{}}'
+    assert run(pycvc.make_json_encode_job([1.0, {}], 2)) == "[\n  1.0,\n  {}\n]"
+    assert pycvc.kJsonMaxDepth == 512 and pycvc.kJsonMaxIndent == 10
+    job = pycvc.make_json_parse_job("[" * 3 + "]" * 3)
+    slices = 1
+    while not job.step(1):
+        slices += 1
+    assert slices >= 3 and job.result() == [[[]]]
+    e = _raises(pycvc.dsl_class("ValueError"), run, pycvc.make_json_parse_job("[1,"))
+    assert "json-parse: line 1, column 4: expected a value" in str(e)
+    e = _raises(pycvc.dsl_class("TypeError"), run, pycvc.make_json_encode_job(symbol("x")))
+    assert "has no JSON form" in str(e)
+
+
+def test_json_in_a_program():
+    ev = pycvc.stackless_evaluator(_builtins())
+    script = '(json-encode (get-attr (json-parse "{\\"k\\": [1, {\\"x\\": null}]}") "k"))'
+    assert ev.evaluate_script(script) == '[1,{"x":null}]'
+    caught = '(try (json-parse "{") (catch (ValueError e) (get-attr e "line")))'
+    assert ev.evaluate_script(caught) == 1
+
+
 def test_run_data_job_outside_an_evaluator_runs_it_whole():
     assert pycvc.run_data_job(pycvc.make_copy_job([1, 2])) == [1, 2]
     assert pycvc.run_data_job(pycvc.make_copy_job([1, 2]), len) == 2  # `then` maps the result

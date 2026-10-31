@@ -1,0 +1,14 @@
+/* ari-web.css — ari's browser pages (ari.html): a header line over an xterm.js terminal. */
+:root { --bg: #0f1115; --fg: #c9ced6; --dim: #7d8590; --accent: #d4a373; }
+html, body { height: 100%; margin: 0; background: var(--bg); color: var(--fg);
+             font: 13px/1.4 system-ui, sans-serif; }
+body { display: flex; flex-direction: column; }
+header { display: flex; gap: 16px; align-items: baseline; flex-wrap: wrap;
+         padding: 6px 12px; border-bottom: 1px solid #1f242c; }
+header b { color: var(--accent); font-weight: 600; }
+header .hint { color: var(--dim); }
+header #status { margin-left: auto; color: var(--dim); }
+header a { color: var(--accent); }
+header button { font: inherit; color: var(--fg); background: #1f242c; border: 1px solid #2d333b;
+                border-radius: 4px; padding: 1px 8px; cursor: pointer; }
+#term { flex: 1; min-height: 0; padding: 4px 0 0 6px; }
