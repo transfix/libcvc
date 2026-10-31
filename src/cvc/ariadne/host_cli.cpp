@@ -14,6 +14,7 @@
 #include <cvc/ariadne/host_cli.h>
 #include <cvc/net/credentials.h>
 #include <cvc/net/net_policy.h>
+#include <cvc/net/oidc.h>
 
 namespace cvc {
 namespace ariadne {
@@ -22,16 +23,28 @@ namespace {
 
 namespace po = boost::program_options;
 
-constexpr const char *kValueFlags[] = {"--prefix",         "--component-path",
-                                       "--backend",        "--fps",
-                                       "--width",          "--height",
-                                       "--frames",         "--png",
-                                       "--graphics",       "--image",
-                                       "--cell-size",      "--net-allow",
-                                       "--net-policy",     "--credential-store",
-                                       "--credential-env", "--settle",
-                                       "--timeout",        "--log"};
-constexpr const char *kBoolFlags[] = {"--no-mouse", "--ansi", "--net"};
+constexpr const char *kValueFlags[] = {"--prefix",
+                                       "--component-path",
+                                       "--backend",
+                                       "--fps",
+                                       "--width",
+                                       "--height",
+                                       "--frames",
+                                       "--png",
+                                       "--graphics",
+                                       "--image",
+                                       "--cell-size",
+                                       "--net-allow",
+                                       "--net-policy",
+                                       "--credential-store",
+                                       "--credential-env",
+                                       "--settle",
+                                       "--timeout",
+                                       "--log",
+                                       "--oidc-issuer",
+                                       "--oidc-client",
+                                       "--oidc-redirect-uri"};
+constexpr const char *kBoolFlags[] = {"--no-mouse", "--ansi", "--net", "--no-browser"};
 
 bool is_general_flag(const std::string &a) {
   const std::string name = a.substr(0, a.find('='));
@@ -95,6 +108,8 @@ bool apply(const po::option &opt, HostOptions &o) {
     o.ansi = true;
   } else if (a == "--net") {
     o.net.enabled = true;
+  } else if (a == "--no-browser") {
+    o.net.oidc.no_browser = true;
   } else if (!is_general_flag(a)) {
     o.extra_flags.push_back(a); // one of the runtime's own
   } else if (a == "--fps" || a == "--width" || a == "--height" || a == "--frames") {
@@ -188,6 +203,33 @@ bool apply(const po::option &opt, HostOptions &o) {
     }
     o.net.credential_env.emplace_back(name, var);
     o.net.enabled = true;
+  } else if (a == "--oidc-issuer") {
+    if (const std::string why = cvc::net::oidc::check_issuer(value); !why.empty()) {
+      o.error = "--oidc-issuer: " + why;
+      return false;
+    }
+    o.net.oidc.issuers.push_back(value);
+    o.net.enabled = true;
+  } else if (a == "--oidc-client") {
+    // ISSUER=CLIENT_ID: an issuer has no query, so its first '=' ends it.
+    const std::size_t eq = value.find('=');
+    const std::string issuer = value.substr(0, eq);
+    const std::string client = eq == std::string::npos ? std::string() : value.substr(eq + 1);
+    if (eq == std::string::npos || client.empty() ||
+        !cvc::net::oidc::check_issuer(issuer).empty()) {
+      o.error = "--oidc-client is ISSUER=CLIENT_ID (an issuer URL and the client's id), not '" +
+                value + "'";
+      return false;
+    }
+    o.net.oidc.clients.emplace_back(issuer, client);
+    o.net.enabled = true;
+  } else if (a == "--oidc-redirect-uri") {
+    std::string why;
+    if (!cvc::net::parse_origin(value, &why)) {
+      o.error = "--oidc-redirect-uri: " + why;
+      return false;
+    }
+    o.net.oidc.redirect_uri = value;
   }
   return true;
 }
@@ -278,7 +320,14 @@ std::string host_flags_help() {
          "                         user's config dir, or a path (not in a browser)\n"
          "  --credential-env N=V   credential N is the token in environment variable V, for\n"
          "                         this run only (a policy credential line binds N; not in a\n"
-         "                         browser; unset V supplies nothing)\n";
+         "                         browser; unset V supplies nothing)\n"
+         "  --oidc-issuer ISSUER   documents may sign in (oidc-sign-in) with ISSUER only; allows\n"
+         "                         its origin (repeatable)\n"
+         "  --oidc-client I=ID     sign in to issuer I as client ID, the launcher's registration\n"
+         "                         (repeatable; pins I like --oidc-issuer)\n"
+         "  --oidc-redirect-uri U  a browser page's redirect URI (default: the page's own URL)\n"
+         "  --no-browser           never open a browser: sign-in uses a device code, and\n"
+         "                         open-url shows the URL instead\n";
 }
 
 std::string misplaced_flag_note(const std::string &runtime,

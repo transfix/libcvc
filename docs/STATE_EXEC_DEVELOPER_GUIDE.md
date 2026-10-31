@@ -823,6 +823,16 @@ Programs can manage other processes using DSL intrinsics:
 (scheduler-stats)  ;; => {total: N, running: N, ...}
 ```
 
+**Which process they report on.** The resource readers (`time-elapsed`, `time-limit`,
+`step-count`, `memory-limit`, `message-count`, `message-limit` and the message-byte pair) and
+`state-watch` / `state-unwatch` speak for the process the scheduler is stepping, as `self-pid` and
+`budget-usage` do. Only with no step running (a bare evaluator, a unit-test context) do they use
+the context's own `proc` and `pid`. A host that runs many programs on one shared scheduler, such
+as Ariadne's action and resident lanes, gives each context a placeholder process. Before this
+rule those readers reported 0 there, so a loop bounded by `(time-elapsed)` never ended, and a
+watch was registered for pid 0 and never fired. `memory-usage` reads the context's tracker,
+which such a host keeps per program.
+
 **What a spawned child sees.** A child always keeps its parent's `owner`, so a host that reaps
 a document's processes with `kill_owner` reaps its children too. Its environment depends on the
 host (docs/STATE_EXEC_THREADED.md 4.15):

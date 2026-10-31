@@ -23,6 +23,8 @@
 
 #include <cstddef>
 #include <cvc/net/net_policy.h>
+#include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -33,6 +35,27 @@ namespace net {
 
 // What a redacted secret is replaced with, in a reply body and its headers.
 inline constexpr char kRedacted[] = "[redacted]";
+
+// A credential the host can renew: an OAuth 2.0 access token it holds a refresh token for
+// (cvc/ariadne/oidc_host.h). A request that sends the credential (auth:) asks it to renew first
+// when the token is about to expire, and once more, then sends again, when the server answers 401.
+class CredentialRenewer {
+public:
+  virtual ~CredentialRenewer() = default;
+  // Whether the token is about to expire.
+  virtual bool expiring() const = 0;
+  // Put a fresh token in the store. `rejected` is the token a server just refused, or "" before a
+  // send: when the store holds another token by then, a renewal raced this one, and nothing more
+  // is done. "" when the store now holds a token worth sending, else why not (never quoting one).
+  virtual std::string renew(const std::string &rejected) = 0;
+  // renew() for a caller that must not block: a browser page's frame loop, where requests are
+  // started rather than sent (cvc::net::http_starts_async). `done` gets what renew() would return,
+  // later, from the browser's event loop, on the thread that called this. By default it calls
+  // renew() in place.
+  virtual void renew_async(const std::string &rejected, std::function<void(std::string)> done) {
+    done(renew(rejected));
+  }
+};
 
 class CredentialStore {
 public:
@@ -76,10 +99,14 @@ public:
   // Credential names with a token, sorted.
   std::vector<std::string> names() const;
 
-  // Drop every token of `name` (true if there was one), or every token. With a file, it is
-  // rewritten; `error` reports a failed write.
+  // Drop every token of `name` (true if there was one), or every token, and any renewer of it. With
+  // a file, it is rewritten; `error` reports a failed write.
   bool forget(const std::string &name, std::string *error = nullptr);
   void clear(std::string *error = nullptr);
+
+  // The renewer of credential `name` (null: none), which a request sending it consults.
+  void set_renewer(const std::string &name, std::shared_ptr<CredentialRenewer> renewer);
+  std::shared_ptr<CredentialRenewer> renewer(const std::string &name) const;
 
   // A credential name: 1-64 of [A-Za-z0-9._-].
   static bool valid_name(const std::string &name);
@@ -106,6 +133,7 @@ private:
   mutable std::mutex mutex_;
   std::vector<Entry> entries_;
   std::vector<std::pair<std::string, std::vector<Origin>>> bindings_;
+  std::vector<std::pair<std::string, std::shared_ptr<CredentialRenewer>>> renewers_;
 };
 
 // The capture half of a sign-in: find the JSON string at `field` (object keys joined by '.', e.g.

@@ -242,6 +242,41 @@ TEST(AriadneHostCli, NetworkFlagsTurnItOnAndCheckTheirOrigins) {
   }
 }
 
+TEST(AriadneHostCli, SignInFlags) {
+  const char *a[] = {"ari",
+                     "run",
+                     "--oidc-issuer",
+                     "https://id.example/realms/demo",
+                     "--oidc-client",
+                     "https://accounts.example=123=abc.apps",
+                     "--oidc-redirect-uri=https://app.example/ari.html",
+                     "--no-browser",
+                     "d.ari",
+                     "--no-browser"};
+  HostOptions o = parse_host_args(10, a);
+  ASSERT_TRUE(o.error.empty()) << o.error;
+  EXPECT_TRUE(o.net.enabled) << "naming an issuer implies --net";
+  ASSERT_EQ(o.net.oidc.issuers.size(), 1u);
+  EXPECT_EQ(o.net.oidc.issuers[0], "https://id.example/realms/demo");
+  ASSERT_EQ(o.net.oidc.clients.size(), 1u);
+  EXPECT_EQ(o.net.oidc.clients[0].first, "https://accounts.example");
+  EXPECT_EQ(o.net.oidc.clients[0].second, "123=abc.apps") << "the issuer ends at the first '='";
+  EXPECT_EQ(o.net.oidc.redirect_uri, "https://app.example/ari.html");
+  EXPECT_TRUE(o.net.oidc.no_browser);
+  ASSERT_EQ(o.doc_args.size(), 1u) << "after the document, --no-browser is the document's";
+  EXPECT_NE(host_flags_help().find("--oidc-issuer ISSUER"), std::string::npos);
+  for (const char *bad : {"http://id.example", "https://id.example/?q=1", "id.example"}) {
+    const char *argv[] = {"ari", "run", "--oidc-issuer", bad, "d.ari"};
+    EXPECT_NE(parse_host_args(5, argv).error.find("--oidc-issuer"), std::string::npos) << bad;
+  }
+  for (const char *bad : {"https://id.example", "https://id.example=", "=client", "http://x=y"}) {
+    const char *argv[] = {"ari", "run", "--oidc-client", bad, "d.ari"};
+    EXPECT_NE(parse_host_args(5, argv).error.find("--oidc-client is ISSUER=CLIENT_ID"),
+              std::string::npos)
+        << bad;
+  }
+}
+
 // ── parsing a document's arguments ──────────────────────────────────────────────────────────────
 
 TEST(AriadneHostCli, GraphicsImageAndCellSizeFlags) {
@@ -572,6 +607,32 @@ TEST(AriadneLinkHoles, ASubtreeGrantReachesItsDescendantsOnly) {
 }
 
 // ── host verbs and init: diagnostics ────────────────────────────────────────────────────────────
+
+// A load:ed module's init: has (has? ...) for the same host, as the document's init: and every
+// action do, so it can guard an optional host function the documented way.
+TEST(AriadneHostVerbs, AModulesInitAsksHas) {
+  REQUIRE_YAML();
+  const fs::path dir = test_dir("mount_has");
+  write(dir, "mod.ari",
+        "init: |\n"
+        "  (state-set \"verb\" (if (has? \"module-probe-verb\") \"yes\" \"no\"))\n"
+        "  (state-set \"absent\" (if (has? \"no-such-verb\") \"yes\" \"no\"))\n"
+        "root: [ { text: m } ]\n");
+  const fs::path doc = write(dir, "p.ari",
+                             "meta: {min_libcvc: 3.4.0}\n"
+                             "root:\n  - load: mod.ari\n    as: m\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.mh");
+  art.set_backend(be);
+  art.register_verb("module-probe-verb", [] {});
+  art.load(doc.string());
+  art.runtime().render(); // mounts the module and runs its init:
+  EXPECT_EQ(val(app, "ui.docs.mh.includes.m.verb"), "yes");
+  EXPECT_EQ(val(app, "ui.docs.mh.includes.m.absent"), "no");
+  const std::vector<std::string> warnings = art.take_warnings();
+  EXPECT_TRUE(warnings.empty()) << warnings.front();
+}
 
 TEST(AriadneHostVerbs, EveryRegisteredVerbIsBound) {
   REQUIRE_YAML();
@@ -1412,4 +1473,87 @@ TEST(AriadneModuleRequires, ARequiredEntryTheHostLacksFailsTheLoad) {
               std::string::npos)
         << e.what();
   }
+}
+
+// ── the resource intrinsics report the running process ─────────────────────────────────────────
+
+// Ariadne's lanes run programs on the app's scheduler with a placeholder ictx.proc; (step-count),
+// (time-elapsed) and the limits read the process the scheduler is stepping, not the placeholder.
+TEST(AriadneResourceIntrinsics, AResidentSeesItsOwnProcess) {
+  REQUIRE_YAML();
+  const fs::path doc =
+      write(test_dir("resource_intrinsics"), "r.ari",
+            "meta: {min_libcvc: 3.4.0}\n"
+            "root:\n  - text: hi\n"
+            "init: (state-set \"t.done\" \"\")\n"
+            "on_tick: |\n"
+            "  (if (= (state-get \"t.done\") \"\")\n"
+            "    (begin\n"
+            "      (state-set \"t.done\" \"started\")\n"
+            "      (set t0 (time-elapsed))\n"
+            "      (set n 0)\n"
+            "      (while (and (< (- (time-elapsed) t0) 0.05) (< n 100000)) (set n (+ n 1)))\n"
+            "      (state-set \"t.steps\" (str (> (step-count) 0)))\n"
+            "      (state-set \"t.timed\" (str (>= (- (time-elapsed) t0) 0.05)))\n"
+            "      (state-set \"t.done\" \"yes\")))\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.ri");
+  art.set_backend(be);
+  art.load(doc.string());
+  // Before the fix (time-elapsed) read 0 here, so only the iteration cap ended the loop.
+  ASSERT_TRUE(drain_until(art, [&] { return val(app, "ui.docs.ri.t.done") == "yes"; }))
+      << val(app, "ui.docs.ri.t.done");
+  EXPECT_EQ(val(app, "ui.docs.ri.t.steps"), "#t");
+  EXPECT_EQ(val(app, "ui.docs.ri.t.timed"), "#t"); // the clock, not the cap, ended it
+  EXPECT_TRUE(art.take_warnings().empty());
+}
+
+TEST(AriadneResourceIntrinsics, AnActionSeesItsLimits) {
+  REQUIRE_YAML();
+  const fs::path doc = write(test_dir("resource_limits"), "a.ari",
+                             "meta: {min_libcvc: 3.4.0}\nroot:\n  - text: hi\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.rl");
+  art.set_backend(be);
+  art.load(doc.string());
+  art.drain();
+  // An action's caps (ariadne.limits: 5000 steps and 0.1 s by default) are its process's.
+  art.set_root(group({button("Go", "(state-set \"limits\" (str-concat (str (time-limit)) \" \" "
+                                   "(str (> (step-count) 0))))")}));
+  be.render_to_string(art.runtime(), 80, 24);
+  be.feed(art.runtime(), TermEvent::key_event("Tab"));
+  be.render_to_string(art.runtime(), 80, 24);
+  be.feed(art.runtime(), TermEvent::key_event("Return"));
+  ASSERT_TRUE(drain_until(art, [&] { return !val(app, "ui.docs.rl.limits").empty(); }));
+  const std::string limits = val(app, "ui.docs.rl.limits");
+  EXPECT_NE(limits.rfind("0 ", 0), 0u) << limits; // a time limit, not the placeholder's 0
+  EXPECT_NE(limits.find(" #t"), std::string::npos) << limits;
+}
+
+// A watch set from a resident fires there.
+TEST(AriadneResourceIntrinsics, AResidentsWatchFires) {
+  REQUIRE_YAML();
+  const fs::path doc = write(
+      test_dir("resident_watch"), "w.ari",
+      "meta: {min_libcvc: 3.4.0}\n"
+      "root:\n  - text: hi\n"
+      "init: (begin (state-set \"t.phase\" \"\") (state-set \"t.x\" \"0\"))\n"
+      "on_tick: |\n"
+      "  (if (= (state-get \"t.phase\") \"\")\n"
+      "    (begin (state-set \"t.phase\" \"watching\")\n"
+      "      (state-watch \"t.x\" (lambda (path value) (state-set \"t.seen\" (state-get path)))))\n"
+      "    (if (= (state-get \"t.phase\") \"watching\")\n"
+      "      (begin (state-set \"t.phase\" \"set\") (state-set \"t.x\" \"7\"))))\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.rw");
+  art.set_backend(be);
+  art.load(doc.string());
+  EXPECT_TRUE(drain_until(art, [&] { return val(app, "ui.docs.rw.t.seen") == "7"; }))
+      << "phase " << val(app, "ui.docs.rw.t.phase") << ", seen '" << val(app, "ui.docs.rw.t.seen")
+      << "'";
+  for (const std::string &w : art.take_warnings())
+    ADD_FAILURE() << w;
 }

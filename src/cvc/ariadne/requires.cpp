@@ -55,6 +55,16 @@ const std::vector<TokenRule> &rules() {
        [](const HostFacts &f) { return f.net_auth; }},
       {{"net.auth.persist", "the host keeps credentials across runs"},
        [](const HostFacts &f) { return f.net_auth_persist; }},
+      {{"oidc", "the host signs in with OAuth 2.0 / OpenID Connect providers (oidc-sign-in)"},
+       [](const HostFacts &f) { return f.oidc; }},
+      {{"oidc.loopback", "sign-in through the system browser and a loopback redirect (RFC 8252)"},
+       [](const HostFacts &f) { return f.oidc_loopback; }},
+      {{"oidc.device", "sign-in with a code entered on another device (RFC 8628)"},
+       [](const HostFacts &f) { return f.oidc_device; }},
+      {{"oidc.redirect", "sign-in by sending the browser page to the provider and back"},
+       [](const HostFacts &f) { return f.oidc_redirect; }},
+      {{"browser", "open-url opens the user's web browser here (not over SSH or --no-browser)"},
+       [](const HostFacts &f) { return f.browser; }},
   };
   return kRules;
 }
