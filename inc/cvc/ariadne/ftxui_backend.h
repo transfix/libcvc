@@ -160,6 +160,7 @@ public:
   void text_line_colored(const char *text, const float rgb[3]) override;
   void text_value_colored(const char *label, const std::string &value, const float rgb[3]) override;
   void separator() override;
+  bool unicode_glyphs() const override; // not on the Linux console, a dumb or a VT terminal
   bool button(const char *label) override;
   bool menu_item_action(const char *label) override;
 

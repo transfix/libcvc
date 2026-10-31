@@ -290,6 +290,33 @@ A `progress:` widget is read-only: a bar showing the number at `bind` placed in 
 state path or a computed expression) drawn over it, else the percent. ImGui draws a progress bar;
 a backend with none gets a text value (`[########------------] 40%`).
 
+A `spinner:` widget says something is under way when there is no amount to show (a request, a
+search). The host turns it by its own frame clock (`Runtime::frame_clock`), not by state, so it keeps
+moving while the document's programs are parked: a program waiting on `http-get` still has a
+turning spinner beside it, in every backend and in the single-threaded browser pages (§10.2).
+Show it while the work runs with `visible_when`:
+
+```yaml
+- spinner: Signing in...
+  visible_when: (= (state-get "ui.busy") "1")
+- spinner:                                # the label from state, or a computed expression
+  bind: (string.join (list "Loading" (state-get "feed.name")) " ")
+- spinner: Working
+  glyphs: ascii                           # | / - \ rather than braille dots
+```
+
+- The label is the widget's key, or `bind:` (a state path, or a computed expression, read-lane
+  rules: `string.join`, not `str-concat`) when it has one; a bare `- spinner` has none.
+- Disabled (`enabled_when` falsy, or `disabled_when` truthy), it stands still, greyed where the
+  backend greys.
+- The terminal backends (FTXUI, tvision) draw ten braille dots a second (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`), then
+  the label. `glyphs: ascii` turns `| / - \` instead, as they do by themselves on the Linux console
+  and on a `dumb` or `vt*` terminal, which have no braille (`Backend::unicode_glyphs`). ImGui draws
+  a turning arc, a text line high, one turn a second, so it needs no glyph from the font (the browser
+  build's is ASCII).
+- A snapshot reads frame `f` at `f / fps` (`ari snapshot`: `--fps`, default 20; arigl's fixed
+  clock: 1/30 s a frame), so `--frames 3` shows the spinner one step on from `--frames 1`.
+
 A backend advertises `Capabilities{windows, menubar, mouse, keyboard, color, glsl,
 view_embed, owns_loop, terminal, bitmap, kitty, sixel}`
 ([`backend.h`](../inc/cvc/ariadne/backend.h)). A document's `requires:` and `(has? ...)`

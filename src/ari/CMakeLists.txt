@@ -83,6 +83,16 @@ if(CVC_BUILD_TESTS AND NOT EMSCRIPTEN AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL 
                        PROPERTIES ENVIRONMENT "ARI_BINARY=$<TARGET_FILE:ari>")
 endif()
 
+# A spinner turns by the host's frame clock while the document's program is parked: `ari snapshot`
+# frame 1 against frame 3, then `ari run` in tmux under each terminal backend this ari has
+# (tests/spinner_test.sh). Where bash is; without tmux only the snapshots are checked.
+if(CVC_BUILD_TESTS AND NOT EMSCRIPTEN AND NOT WIN32 AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
+  add_test(NAME ari_spinner
+    COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/spinner_test.sh" $<TARGET_FILE:ari>
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/spinner.ari")
+  set_tests_properties(ari_spinner PROPERTIES TIMEOUT 60)
+endif()
+
 # A document as each terminal backend really draws it: `ari run` in a 100x30 tmux pane, the text
 # inside its window's borders compared with the rows expected (tests/run_in_tmux_test.sh). `ari
 # snapshot` always lays out with FTXUI, so this is what checks the tvision desktop itself, and the

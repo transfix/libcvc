@@ -567,6 +567,49 @@ windows:
   EXPECT_EQ(find(r.root, Kind::Color)->on, "tint.changed");
 }
 
+// spinner: an activity indicator; its key is the label, bind: a state-bound or computed label,
+// glyphs: braille (the default) or ascii; a bare `- spinner` has no label.
+TEST(AriadneLoader, Spinner) {
+  SKIP_WITHOUT_YAML();
+  const char *doc = R"(
+meta: { name: T, min_libcvc: "3.4.0" }
+windows:
+  - window: W
+    children:
+      - spinner: Loading
+        visible_when: (= (state-get "busy") "1")
+      - spinner: Plain
+        glyphs: ascii
+      - spinner: Named
+        bind: (state-get "job.name")
+      - spinner
+      - spinner: Odd
+        glyphs: emoji
+)";
+  LoadResult r = load_string(doc);
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(count(r.root, Kind::Spinner), 5);
+  const Widget *loading = find(r.root, Kind::Spinner, "Loading");
+  ASSERT_NE(loading, nullptr);
+  EXPECT_FALSE(loading->ascii_glyphs);
+  EXPECT_EQ(loading->visible_when, "(= (state-get \"busy\") \"1\")");
+  const Widget *plain = find(r.root, Kind::Spinner, "Plain");
+  ASSERT_NE(plain, nullptr);
+  EXPECT_TRUE(plain->ascii_glyphs);
+  const Widget *named = find(r.root, Kind::Spinner, "Named");
+  ASSERT_NE(named, nullptr);
+  EXPECT_EQ(named->bind, "(state-get \"job.name\")");
+  const Widget *win = find(r.root, Kind::Window);
+  ASSERT_NE(win, nullptr);
+  ASSERT_EQ(win->children.size(), 5u);
+  EXPECT_EQ(win->children[3].kind, Kind::Spinner) << "a bare spinner";
+  EXPECT_EQ(win->children[3].label, "");
+  ASSERT_EQ(r.warnings.size(), 1u);
+  EXPECT_NE(r.warnings[0].find("spinner 'Odd': glyphs 'emoji' is not braille or ascii"),
+            std::string::npos)
+      << r.warnings[0];
+}
+
 // radio: and radio_row: take a combo's keys (options, values, def, on) and build Kind::Radio,
 // stacked or side by side.
 TEST(AriadneLoader, RadioAndRadioRow) {

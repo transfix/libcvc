@@ -31,6 +31,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib> // getenv: TERM
 #include <cstring>
 #include <cvc/ariadne/app_runtime.h>
 #include <cvc/ariadne/ariadne.h>
@@ -3118,6 +3119,17 @@ void FtxuiBackend::route(Runtime &rt, const TermEvent &ev,
   }
   if (!feed(rt, ev) && !(background && background(ev)) && unhandled)
     unhandled(ev);
+}
+
+// A spinner's braille dots need a terminal that shows them: not the Linux console (its font has
+// none), a dumb terminal or a VT-series one. Read once; a browser's xterm.js sets no TERM.
+bool FtxuiBackend::unicode_glyphs() const {
+  static const bool unicode = [] {
+    const char *t = std::getenv("TERM");
+    const std::string term = t ? t : "";
+    return !(term == "linux" || term == "dumb" || term.rfind("vt", 0) == 0);
+  }();
+  return unicode;
 }
 
 // ── custom widgets: the same in both builds (a host's draw fn calls the primitives above)

@@ -47,6 +47,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <span>
 #include <string>
 #include <thread>
@@ -3263,6 +3264,21 @@ template <class Pred> bool pump_until(Runtime &rt, Pred pred, int budget_ms = 50
   return pred();
 }
 
+// The spinner (Kind::Spinner): its glyph comes from the host's frame clock, never from state.
+// The braille cycle as UTF-8 bytes (a \u literal is the code page's on MSVC without /utf-8).
+const char *const kSpin[] = {"\xE2\xA0\x8B", "\xE2\xA0\x99", "\xE2\xA0\xB9", "\xE2\xA0\xB8",
+                             "\xE2\xA0\xBC", "\xE2\xA0\xB4", "\xE2\xA0\xA6", "\xE2\xA0\xA7",
+                             "\xE2\xA0\x87", "\xE2\xA0\x8F"};
+
+// The text line the default spinner drew for `label`, or "" when it drew none.
+std::string spinner_line(const MockBackend &mb, const std::string &label) {
+  for (auto it = mb.log.rbegin(); it != mb.log.rend(); ++it)
+    if (it->rfind("text_line:", 0) == 0 && it->size() >= label.size() &&
+        it->compare(it->size() - label.size(), label.size(), label) == 0)
+      return it->substr(10);
+  return std::string();
+}
+
 // The nav_compute demo's verb: (nav-step) is an async function on the app's async host. The action
 // parks at the call while the kernel runs on the background task pool and fans out over the compute
 // pool, then resumes with the call's value. No channel, no msg-recv.
@@ -3299,6 +3315,87 @@ TEST(AriadneAction, NavStepAsAnAsyncFunctionReturnsItsResult) {
   clear_action_intrinsics();
   ASSERT_TRUE(resumed) << "the parked action never resumed";
   EXPECT_EQ(cvc::state::instance(app)("nav.result").value(), "86");
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+}
+
+TEST(AriadneSpinner, GlyphsCycleTenASecond) {
+  for (int i = 0; i < 10; ++i)
+    EXPECT_EQ(spinner_glyph(0.1 * i + 0.01, false), kSpin[i]) << i;
+  EXPECT_EQ(spinner_glyph(1.0, false), kSpin[0]) << "round again";
+  EXPECT_EQ(spinner_glyph(0.0, true), "|");
+  EXPECT_EQ(spinner_glyph(0.15, true), "/");
+  EXPECT_EQ(spinner_glyph(0.25, true), "-");
+  EXPECT_EQ(spinner_glyph(0.35, true), "\\");
+  EXPECT_EQ(spinner_glyph(-3.0, false), kSpin[0]);
+  EXPECT_EQ(spinner_glyph(std::nan(""), true), "|");
+  EXPECT_EQ(spinner_glyph(1e300, false), kSpin[0]);
+}
+
+TEST(AriadneSpinner, TurnsByTheFrameClock) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({spinner("Loading"), spinner("Plain", "", /*ascii*/ true)}));
+  rt.set_frame_clock(0.0);
+  rt.render();
+  EXPECT_EQ(spinner_line(mb, "Loading"), std::string(kSpin[0]) + " Loading");
+  EXPECT_EQ(spinner_line(mb, "Plain"), "| Plain");
+  EXPECT_EQ(rt.frame_clock(), 0.0);
+  rt.set_frame_clock(0.1);
+  rt.render();
+  EXPECT_EQ(spinner_line(mb, "Loading"), std::string(kSpin[1]) + " Loading");
+  EXPECT_EQ(spinner_line(mb, "Plain"), "/ Plain");
+
+  // Unpinned, the clock is the steady clock read at each render().
+  rt.set_frame_clock(std::nullopt);
+  rt.render();
+  const double t0 = rt.frame_clock();
+  const std::string before = spinner_line(mb, "Loading");
+  std::this_thread::sleep_for(std::chrono::milliseconds(150));
+  rt.render();
+  EXPECT_GE(rt.frame_clock() - t0, 0.15);
+  EXPECT_NE(spinner_line(mb, "Loading"), before) << "a step every 0.1 s";
+}
+
+TEST(AriadneSpinner, TurnsWhileTheDocumentsProgramIsParked) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({spinner("Waiting")}));
+  rt.set_tick_program("(begin (state-set \"parked\" \"yes\") (msg-recv \"nothing.comes\"))");
+  std::set<std::string> seen;
+  for (int f = 0; f < 10; ++f) {
+    rt.set_frame_clock(0.1 * f + 0.01);
+    rt.render();
+    rt.drain();
+    seen.insert(spinner_line(mb, "Waiting"));
+  }
+  EXPECT_EQ(cvc::state::instance(app)("parked").value(), "yes");
+  EXPECT_EQ(seen.size(), 10u) << "every frame a step on, the program parked throughout";
+}
+
+TEST(AriadneSpinner, DisabledStandsStillHiddenIsNotDrawnBindIsTheLabel) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  cvc::state::instance(app)("job.name").value("feed");
+  Widget off = spinner("Off");
+  off.enabled_when = "(= 1 2)";
+  Widget hidden = spinner("Hidden");
+  hidden.visible_when = "(= 1 2)";
+  rt.set_root(
+      group({off, hidden, spinner("", "job.name"),
+             spinner("", "(string.join (list \"Loading\" (state-get \"job.name\")) \" \")")}));
+  rt.set_frame_clock(0.35);
+  rt.render();
+  EXPECT_EQ(spinner_line(mb, "Off"), std::string(kSpin[0]) + " Off") << "disabled: no turning";
+  EXPECT_TRUE(mb.saw("begin_disabled"));
+  EXPECT_EQ(spinner_line(mb, "Hidden"), "");
+  EXPECT_TRUE(mb.saw("text_line:" + std::string(kSpin[3]) + " feed")) << "a state path";
+  EXPECT_TRUE(mb.saw("text_line:" + std::string(kSpin[3]) + " Loading feed")) << "computed";
   EXPECT_TRUE(rt.take_reactive_warnings().empty());
 }
 

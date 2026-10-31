@@ -863,6 +863,11 @@ add_test(NAME cvcgl_imgui_windows_menu COMMAND cvcgl_imgui_windows_menu)
 add_executable(cvcgl_imgui_radio test/cvcgl_imgui_radio.cpp)
 target_link_libraries(cvcgl_imgui_radio PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_radio COMMAND cvcgl_imgui_radio)
+# A spinner's arc turns with the frame clock and comes round after a second; disabled, it stands
+# still; visible_when hides it. No window, no GL.
+add_executable(cvcgl_imgui_spinner test/cvcgl_imgui_spinner.cpp)
+target_link_libraries(cvcgl_imgui_spinner PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_spinner COMMAND cvcgl_imgui_spinner)
 
 # The tf_editor transfer-function widget (ImGuiBackend::tf_editor) on a bare ImGui context, driven
 # by synthesized mouse input: drags, adds, deletes, the zoom strip, the context menu, commits.
