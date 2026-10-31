@@ -1213,8 +1213,24 @@ has loaded, or when it failed, nothing is drawn behind the content.
   - FFmpeg is cvcpkg's `ffmpeg-lgpl`, linked shared, so the LGPL's terms are kept.
   - The lean `ari`, or any build without FFmpeg, has no player. Its media widgets say
     `unsupported` and offer "Open".
-  - The browser pages play through the browser's own `<video>` and `<audio>`
-    ([ARIADNE_MEDIA.md](roadmap/ARIADNE_MEDIA.md) §4, M6).
+  - **The browser pages** (ari.html, arigl-web) play through the browser's own `<video>` and
+    `<audio>`. FFmpeg is never compiled to wasm.
+    - Each player is a hidden element. It plays the sound itself, and a video's new frames are
+      drawn into a canvas the size of the box and copied into the widget's picture. That is one
+      copy per frame shown, and it works the same in both pages, under windows and menus.
+    - The policy and credentials are decided in C++ before the element sees anything:
+      - an http(s) URL with no `auth:` is given to the element (it streams and seeks with range
+        requests), once the host allows its origin;
+      - one with `auth:` is fetched with the bearer token alone (no cookies, no redirect) into a
+        blob;
+      - `file://`, `cvc://` and `state://` sources are read from the page's files into a blob.
+        A page lists its media in the config's `preload` to have them there.
+    - A picture from another origin needs CORS to be read back. Without it the sound still
+      plays and the error says so.
+    - A browser plays sound only after the user has clicked or typed on the page. A muted
+      `autoplay` starts by itself.
+    - A site serving the pages under a Content-Security-Policy adds `media-src 'self' blob:`
+      (and the media's origin when it is another).
 - **Over SSH** the sound would come out of the remote machine's speakers. So in an SSH session
   (`SSH_CONNECTION`, `SSH_CLIENT` or `SSH_TTY` set), players say `remote` and nothing is opened.
   - "Open" runs `(open-url URL)` where the host has it, else it warns with the URL.

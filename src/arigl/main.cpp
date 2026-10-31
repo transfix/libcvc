@@ -1933,7 +1933,11 @@ int arigl_main(int argc, char **argv) {
   }
   // §5.13 video: / audio:: the player (cvcMedia's FFmpeg + SDL3, where this host has it) and where
   // it may play (--media-play; by default not over SSH, where the sound would play remotely).
+#ifdef __EMSCRIPTEN__
+  cvc::ariadne::media::register_browser_player(); // arigl-web: the page's <video> / <audio>
+#else
   cvc::media::register_ariadne_player();
+#endif
   if (!o.media_play.empty()) {
     cvc::ariadne::media::PlayPolicy policy = cvc::ariadne::media::PlayPolicy::Auto;
     cvc::ariadne::media::parse_play_policy(o.media_play, policy);

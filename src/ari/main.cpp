@@ -418,6 +418,9 @@ int main(int argc, char **argv) {
 #ifdef ARI_MEDIA
   cvc::media::register_ariadne_player();
 #endif
+#ifdef __EMSCRIPTEN__
+  cvc::ariadne::media::register_browser_player(); // ari.html: the page's <video> / <audio>
+#endif
   if (!o.media_play.empty()) {
     cvc::ariadne::media::PlayPolicy policy = cvc::ariadne::media::PlayPolicy::Auto;
     cvc::ariadne::media::parse_play_policy(o.media_play, policy);
