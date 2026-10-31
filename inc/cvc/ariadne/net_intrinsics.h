@@ -9,7 +9,10 @@
 //
 // Each is an async function: the call parks the program while the request runs on the app's
 // background task pool and resumes it with the reply; its "-async" form returns a future for
-// (await f). The http verbs' reply is a dict with every key present:
+// (await f). In a browser build without threads (cvc::net::http_starts_async) the request is
+// started instead, a browser fetch, and the fetch's callback posts the reply, so the frame loop
+// goes on meanwhile (state_exec's async_work, docs/STATE_EXEC_EXCEPTIONS.md 3.12). The http verbs'
+// reply is a dict with every key present:
 //
 //   ok            the transport worked (a reply came back), whatever its status
 //   status        the HTTP status (0 when no reply came)
@@ -50,6 +53,7 @@
 // verbs are absent without a compiled cvc::net backend; fetch is always there.
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -97,6 +101,12 @@ struct HostGet {
   std::string error;
 };
 HostGet host_get(const std::string &url, const std::string &auth, const NetAccess &access);
+
+// host_get without blocking where the transport starts requests (cvc::net::http_starts_async: a
+// browser build without threads): `done` gets the result later, from the browser's event loop on
+// this thread. Elsewhere it is host_get, and `done` is called before this returns.
+void host_get_start(const std::string &url, const std::string &auth, const NetAccess &access,
+                    std::function<void(HostGet)> done);
 
 } // namespace ariadne
 } // namespace cvc
