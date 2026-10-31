@@ -30,18 +30,19 @@
 #include <cvc/volume/contour_spectrum.h>
 #include <cvc/volume/volume.h>
 #include <datareg3.h>
+#include <libcontour_mutex.h>
 #include <memory>
 #include <mutex>
 #include <vector>
 
 namespace cvc {
-namespace {
 
-// libContour is not re-entrant (the `verbose` global, statics in Data::preprocessData).
 std::mutex &libcontour_mutex() {
   static std::mutex m;
   return m;
 }
+
+namespace {
 
 // Silences libContour's stdout chatter (`verbose` is 1 by default) for one computation.
 class quiet_libcontour {

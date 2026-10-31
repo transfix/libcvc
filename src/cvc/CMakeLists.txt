@@ -810,6 +810,7 @@ if(CVC_ENABLE_MESHER)
       geometry/cvc-mesher/LBIE/octree.h
       geometry/cvc-mesher/LBIE/LBIEMesherRenderable.h
       geometry/cvc-mesher/Mesher/mesher.h
+      geometry/cvc-mesher/libcontour_mutex.h
   )
   set(MESHER_SOURCE_FILES
       geometry/cvc-mesher/contour/squeue.cpp
